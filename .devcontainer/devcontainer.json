@@ -1,0 +1,22 @@
+{
+	"name": "project-vapor",
+	"build": {
+		"dockerfile": "Dockerfile"
+	},
+	"features": {
+		"ghcr.io/msclock/features/vcpkg:1": {}
+	},
+	"customizations": {
+		"vscode": {
+			"settings": {},
+			"extensions": [
+				"ms-vscode.cpptools",
+				"ms-vscode.cmake-tools",
+				"twxs.cmake"
+			]
+		}
+	},
+	"postCreateCommand": "if [ ! -d 'build' ]; then cmake -S . -B build -DUSE_GLOBAL_VCPKG=ON -DCMAKE_MAKE_PROGRAM=/usr/bin/make -DCMAKE_C_COMPILER=/usr/bin/gcc -DCMAKE_CXX_COMPILER=/usr/bin/g++; fi && cmake --build build",
+	"forwardPorts": [3000],
+	"remoteUser": "root"
+}
