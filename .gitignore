@@ -3,9 +3,9 @@ build/
 build*/
 *.spv
 
-.vs/
-.vscode/
-.vscode/settings.json
+.vs/*
+.vscode/*
+.idea/*
 
 .cache/
 .DS_Store
