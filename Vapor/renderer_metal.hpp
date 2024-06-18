@@ -16,6 +16,8 @@ public:
 
     virtual void draw();
 
+    void initTestTexture();
+
     void initTestPipeline();
 
 private:
@@ -26,4 +28,5 @@ private:
     MTL::ClearColor clearColor = MTL::ClearColor(0.0 / 255.0, 0.0 / 255.0, 0.0 / 255.0, 1.0);
 
     NS::SharedPtr<MTL::RenderPipelineState> testPipeline;
+    NS::SharedPtr<MTL::Texture> testTexture;
 };

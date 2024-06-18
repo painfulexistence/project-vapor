@@ -21,5 +21,5 @@ target_compile_features(main PRIVATE cxx_std_20)
 set_target_properties(main PROPERTIES CXX_EXTENSIONS OFF)
 target_link_libraries(main PRIVATE SDL2::SDL2 metal fmt::fmt)
 
-add_custom_target(copy_assets COMMAND ${CMAKE_COMMAND} -E copy_directory ${CMAKE_CURRENT_SOURCE_DIR}/shaders ${PROJECT_BINARY_DIR}/shaders)
+add_custom_target(copy_assets COMMAND ${CMAKE_COMMAND} -E copy_directory ${CMAKE_CURRENT_SOURCE_DIR}/assets ${PROJECT_BINARY_DIR}/assets)
 add_dependencies(main copy_assets)

@@ -4,6 +4,8 @@
 #include "renderer_metal.hpp"
 #include "fmt/core.h"
 #include "helper.hpp"
+#define STB_IMAGE_IMPLEMENTATION
+#include "stb/stb_image.h"
 
 Renderer_Metal::Renderer_Metal(SDL_Window* window) {
     renderer = SDL_CreateRenderer(window, -1, 0);
@@ -19,6 +21,7 @@ auto Renderer_Metal::init() -> void {
     queue = NS::TransferPtr(device->newCommandQueue());
 
     initTestPipeline();
+    // initTestTexture();
 }
 
 
@@ -36,6 +39,7 @@ auto Renderer_Metal::draw() -> void {
     auto encoder = buffer->renderCommandEncoder(pass.get());
 
     encoder->setRenderPipelineState(testPipeline.get());
+    // encoder->setFragmentTexture(testTexture.get(), 0);
     encoder->drawPrimitives(MTL::PrimitiveType::PrimitiveTypeTriangle, NS::UInteger(0), NS::UInteger(6));
 
     encoder->endEncoding();
@@ -47,7 +51,7 @@ auto Renderer_Metal::draw() -> void {
 }
 
 void Renderer_Metal::initTestPipeline() {
-    auto shaderSrc = readFile("shaders/triforce.metal");
+    auto shaderSrc = readFile("assets/shaders/triforce.metal");
 
     auto code = NS::String::string(shaderSrc.data(), NS::StringEncoding::UTF8StringEncoding);
     NS::Error* error = nullptr;
@@ -77,4 +81,30 @@ void Renderer_Metal::initTestPipeline() {
     vertexMain->release();
     fragmentMain->release();
     pipelineDesc->release();
+}
+
+void Renderer_Metal::initTestTexture() {
+    NS::Error* error = nullptr;
+
+    auto textureDesc = MTL::TextureDescriptor::alloc()->init();
+    textureDesc->setPixelFormat(MTL::PixelFormat::PixelFormatBGRA8Unorm_sRGB);
+    textureDesc->setTextureType(MTL::TextureType::TextureType2D);
+    textureDesc->setWidth(NS::UInteger(1024));
+    textureDesc->setHeight(NS::UInteger(1024));
+    textureDesc->setMipmapLevelCount(1);
+    textureDesc->setSampleCount(1);
+    textureDesc->setStorageMode(MTL::StorageMode::StorageModeManaged);
+    textureDesc->setUsage(MTL::ResourceUsageSample | MTL::ResourceUsageRead);
+
+    testTexture = NS::TransferPtr(device->newTexture(textureDesc));
+    int width, height, nChannels;
+    uint8_t* data = stbi_load("assets/textures/rick_roll.png", &width, &height, &nChannels, 0);
+    if (data) {
+        testTexture->replaceRegion(MTL::Region(0, 0, 0, width, height, 1), 0, data, width * nChannels);
+    } else {
+        fmt::print("Failed to load texture!\n");
+    }
+    stbi_image_free(data);
+
+    textureDesc->release();
 }
