@@ -16,9 +16,14 @@ public:
 
     virtual void draw();
 
+    void initTestPipeline();
+
 private:
     SDL_Renderer* renderer;
     CA::MetalLayer* swapchain;
     MTL::Device* device;
-    MTL::CommandQueue* queue;
+    NS::SharedPtr<MTL::CommandQueue> queue;
+    MTL::ClearColor clearColor = MTL::ClearColor(0.0 / 255.0, 0.0 / 255.0, 0.0 / 255.0, 1.0);
+
+    NS::SharedPtr<MTL::RenderPipelineState> testPipeline;
 };

@@ -8,7 +8,7 @@ int main(int argc, char* args[]) {
         return 1;
     }
     auto window = SDL_CreateWindow(
-      "MyApp", SDL_WINDOWPOS_UNDEFINED, SDL_WINDOWPOS_UNDEFINED, 800, 450, SDL_WINDOW_SHOWN | SDL_WINDOW_RESIZABLE
+      "MyApp", SDL_WINDOWPOS_UNDEFINED, SDL_WINDOWPOS_UNDEFINED, 800, 600, SDL_WINDOW_SHOWN | SDL_WINDOW_RESIZABLE
     );
 
     auto renderer = (Renderer*)new Renderer_Metal(window);
