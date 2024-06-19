@@ -94,15 +94,16 @@ void Renderer_Metal::initTestPipeline() {
 }
 
 void Renderer_Metal::initTestBuffer() {
-    glm::vec2 verts[6] = { glm::vec2(-0.5f, 0.5f), glm::vec2(-0.5f, -0.5f), glm::vec2(0.5f, 0.5f),
-                           glm::vec2(0.5f, 0.5f),  glm::vec2(-0.5f, -0.5f), glm::vec2(0.5f, -0.5f) };
-    glm::vec2 uvs[6] = { glm::vec2(0.0f, 0.0f), glm::vec2(0.0f, 1.0f), glm::vec2(1.0f, 0.0f),
-                         glm::vec2(1.0f, 0.0f), glm::vec2(0.0f, 1.0f), glm::vec2(1.0f, 1.0f) };
+    glm::vec3 verts[6] = { { -0.5f, 0.5f, 0.0f }, { -0.5f, -0.5f, 0.0f }, { 0.5f, 0.5f, 0.0 },
+                           { 0.5f, 0.5f, 0.0f },  { -0.5f, -0.5f, 0.0f }, { 0.5f, -0.5f, 0.0f } };
+    glm::vec2 uvs[6] = {
+        { 0.0f, 0.0f }, { 0.0f, 1.0f }, { 1.0f, 0.0f }, { 1.0f, 0.0f }, { 0.0f, 1.0f }, { 1.0f, 1.0f }
+    };
 
-    testPosBuffer = NS::TransferPtr(device->newBuffer(6 * sizeof(glm::vec2), MTL::ResourceStorageModeManaged));
+    testPosBuffer = NS::TransferPtr(device->newBuffer(6 * sizeof(glm::vec3), MTL::ResourceStorageModeManaged));
     testUVBuffer = NS::TransferPtr(device->newBuffer(6 * sizeof(glm::vec2), MTL::ResourceStorageModeManaged));
 
-    memcpy(testPosBuffer->contents(), verts, 6 * sizeof(glm::vec2));
+    memcpy(testPosBuffer->contents(), verts, 6 * sizeof(glm::vec3));
     memcpy(testUVBuffer->contents(), uvs, 6 * sizeof(glm::vec2));
 
     testPosBuffer->didModifyRange(NS::Range::Make(0, testPosBuffer->length()));
