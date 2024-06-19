@@ -16,6 +16,8 @@ public:
 
     virtual void draw();
 
+    void initTestBuffer();
+
     void initTestTexture();
 
     void initTestPipeline();
@@ -29,4 +31,6 @@ private:
 
     NS::SharedPtr<MTL::RenderPipelineState> testPipeline;
     NS::SharedPtr<MTL::Texture> testTexture;
+    NS::SharedPtr<MTL::Buffer> testPosBuffer;
+    NS::SharedPtr<MTL::Buffer> testUVBuffer;
 };

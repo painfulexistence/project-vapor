@@ -2,10 +2,17 @@
 #define MTL_PRIVATE_IMPLEMENTATION
 #define CA_PRIVATE_IMPLEMENTATION
 #include "renderer_metal.hpp"
+
 #include "fmt/core.h"
 #include "helper.hpp"
+
 #define STB_IMAGE_IMPLEMENTATION
 #include "stb/stb_image.h"
+
+#include "glm/gtc/type_ptr.hpp"
+#include "glm/vec2.hpp"
+#include "glm/vec3.hpp"
+#include "glm/vec4.hpp"
 
 Renderer_Metal::Renderer_Metal(SDL_Window* window) {
     renderer = SDL_CreateRenderer(window, -1, 0);
@@ -21,6 +28,7 @@ auto Renderer_Metal::init() -> void {
     queue = NS::TransferPtr(device->newCommandQueue());
 
     initTestPipeline();
+    // initTestBuffer();
     // initTestTexture();
 }
 
@@ -39,7 +47,9 @@ auto Renderer_Metal::draw() -> void {
     auto encoder = buffer->renderCommandEncoder(pass.get());
 
     encoder->setRenderPipelineState(testPipeline.get());
-    // encoder->setFragmentTexture(testTexture.get(), 0);
+    encoder->setFragmentTexture(testTexture.get(), 0);
+    encoder->setVertexBuffer(testPosBuffer.get(), 0, 0);
+    encoder->setVertexBuffer(testUVBuffer.get(), 0, 1);
     encoder->drawPrimitives(MTL::PrimitiveType::PrimitiveTypeTriangle, NS::UInteger(0), NS::UInteger(6));
 
     encoder->endEncoding();
@@ -51,7 +61,7 @@ auto Renderer_Metal::draw() -> void {
 }
 
 void Renderer_Metal::initTestPipeline() {
-    auto shaderSrc = readFile("assets/shaders/triforce.metal");
+    auto shaderSrc = readFile("assets/shaders/triforce_no_buf.metal");
 
     auto code = NS::String::string(shaderSrc.data(), NS::StringEncoding::UTF8StringEncoding);
     NS::Error* error = nullptr;
@@ -81,6 +91,22 @@ void Renderer_Metal::initTestPipeline() {
     vertexMain->release();
     fragmentMain->release();
     pipelineDesc->release();
+}
+
+void Renderer_Metal::initTestBuffer() {
+    glm::vec2 verts[6] = { glm::vec2(-0.5f, 0.5f), glm::vec2(-0.5f, -0.5f), glm::vec2(0.5f, 0.5f),
+                           glm::vec2(0.5f, 0.5f),  glm::vec2(-0.5f, -0.5f), glm::vec2(0.5f, -0.5f) };
+    glm::vec2 uvs[6] = { glm::vec2(0.0f, 0.0f), glm::vec2(0.0f, 1.0f), glm::vec2(1.0f, 0.0f),
+                         glm::vec2(1.0f, 0.0f), glm::vec2(0.0f, 1.0f), glm::vec2(1.0f, 1.0f) };
+
+    testPosBuffer = NS::TransferPtr(device->newBuffer(6 * sizeof(glm::vec2), MTL::ResourceStorageModeManaged));
+    testUVBuffer = NS::TransferPtr(device->newBuffer(6 * sizeof(glm::vec2), MTL::ResourceStorageModeManaged));
+
+    memcpy(testPosBuffer->contents(), verts, 6 * sizeof(glm::vec2));
+    memcpy(testUVBuffer->contents(), uvs, 6 * sizeof(glm::vec2));
+
+    testPosBuffer->didModifyRange(NS::Range::Make(0, testPosBuffer->length()));
+    testUVBuffer->didModifyRange(NS::Range::Make(0, testUVBuffer->length()));
 }
 
 void Renderer_Metal::initTestTexture() {

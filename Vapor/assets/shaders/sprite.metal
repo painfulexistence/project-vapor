@@ -6,27 +6,9 @@ struct VertexOut {
     float2 uv;
 };
 
-constant float2 positions[] = {
-    float2(-0.5f, 0.5f), // top-left
-    float2(-0.5f, -0.5f), // bottom-left
-    float2(0.5f, 0.5f), // top-right
-    float2(0.5f, 0.5f), // top-right
-    float2(-0.5f, -0.5f), // bottom-left
-    float2(0.5f, -0.5f) // bottom-right
-};
-
-constant float2 uvs[] = {
-    float2(0.0f, 0.0f),
-    float2(0.0f, 1.0f),
-    float2(1.0f, 0.0f),
-    float2(1.0f, 0.0f),
-    float2(0.0f, 1.0f),
-    float2(1.0f, 1.0f)
-};
-
-vertex VertexOut vertexMain(uint vertexID [[vertex_id]]) {
+vertex VertexOut vertexMain(uint vertexID [[vertex_id]], device const float2* positions [[buffer(0)]], device const float2* uvs [[buffer(1)]]) {
     VertexOut vert;
-    vert.position = float4(positions[vertexID], 0.0, 1.0);
+    vert.position = float4(positions[vertexID], 1.0);
     vert.uv = uvs[vertexID];
     return vert;
 }
