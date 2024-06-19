@@ -8,7 +8,7 @@ struct VertexOut {
 
 vertex VertexOut vertexMain(uint vertexID [[vertex_id]], device const float2* positions [[buffer(0)]], device const float2* uvs [[buffer(1)]]) {
     VertexOut vert;
-    vert.position = float4(positions[vertexID], 1.0);
+    vert.position = float4(positions[vertexID], 0.0, 1.0);
     vert.uv = uvs[vertexID];
     return vert;
 }
