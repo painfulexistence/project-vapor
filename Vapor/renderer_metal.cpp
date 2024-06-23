@@ -71,10 +71,10 @@ auto Renderer_Metal::draw() -> void {
     instance->color = glm::vec4(1.0f, 0.0f, 0.0f, 1.0f);
     testCubeInstanceBuffer->didModifyRange(NS::Range::Make(0, testCubeInstanceBuffer->length()));
 
+    glm::vec3 camPos = glm::vec3(0.0f, 0.0f, 3.0f);
     CameraData* camera = reinterpret_cast<CameraData*>(cameraDataBuffer->contents());
     camera->projectionMatrix = glm::perspective(45.f * (float)M_PI / 180.f, 1.333f, 0.03f, 500.0f);
-    camera->viewMatrix =
-      glm::lookAt(glm::vec3(0.0f, 0.0f, 3.0f), glm::vec3(0.0f, 0.0f, 0.0f), glm::vec3(0.0f, 1.0f, 0.0f));
+    camera->viewMatrix = glm::lookAt(camPos, glm::vec3(0.0f, 0.0f, 0.0f), glm::vec3(0.0f, 1.0f, 0.0f));
     cameraDataBuffer->didModifyRange(NS::Range::Make(0, cameraDataBuffer->length()));
 
     auto encoder = cmd->renderCommandEncoder(pass.get());
@@ -84,7 +84,8 @@ auto Renderer_Metal::draw() -> void {
     encoder->setVertexBuffer(testCubeVertexBuffer.get(), 0, 0);
     encoder->setVertexBuffer(cameraDataBuffer.get(), 0, 1);
     encoder->setVertexBuffer(testCubeInstanceBuffer.get(), 0, 2);
-    encoder->setFragmentBytes(&time, sizeof(float), 0);
+    encoder->setFragmentBytes(&camPos, sizeof(glm::vec3), 0);
+    encoder->setFragmentBytes(&time, sizeof(float), 1);
     encoder->setCullMode(MTL::CullModeNone);
     encoder->setDepthStencilState(depthStencilState.get());
     // encoder->drawPrimitives(MTL::PrimitiveType::PrimitiveTypeTriangle, NS::UInteger(0), NS::UInteger(6));
@@ -105,7 +106,7 @@ auto Renderer_Metal::draw() -> void {
 }
 
 void Renderer_Metal::initTestPipeline() {
-    auto shaderSrc = readFile("assets/shaders/cube.metal");
+    auto shaderSrc = readFile("assets/shaders/cube_blinn_phong.metal");
 
     auto code = NS::String::string(shaderSrc.data(), NS::StringEncoding::UTF8StringEncoding);
     NS::Error* error = nullptr;
@@ -370,35 +371,35 @@ void Renderer_Metal::initTestBuffer() {
 }
 
 void Renderer_Metal::initTestTexture() {
-    NS::Error* error = nullptr;
-
-    auto textureDesc = MTL::TextureDescriptor::alloc()->init();
-    textureDesc->setPixelFormat(MTL::PixelFormat::PixelFormatBGRA8Unorm_sRGB);
-    textureDesc->setTextureType(MTL::TextureType::TextureType2D);
-    textureDesc->setWidth(NS::UInteger(1024));
-    textureDesc->setHeight(NS::UInteger(1024));
-    textureDesc->setMipmapLevelCount(10);
-    textureDesc->setSampleCount(1);
-    textureDesc->setStorageMode(MTL::StorageMode::StorageModeManaged);
-    textureDesc->setUsage(MTL::ResourceUsageSample | MTL::ResourceUsageRead);
-
-    testTexture = NS::TransferPtr(device->newTexture(textureDesc));
-    int width, height, nChannels;
-    uint8_t* data = stbi_load("assets/textures/rick_roll.png", &width, &height, &nChannels, 0);
+    int width, height, numChannels;
+    uint8_t* data = stbi_load("assets/textures/american_walnut.png", &width, &height, &numChannels, 0);
     if (data) {
-        testTexture->replaceRegion(MTL::Region(0, 0, 0, width, height, 1), 0, data, width * nChannels);
+        NS::Error* error = nullptr;
+
+        auto textureDesc = MTL::TextureDescriptor::alloc()->init();
+        textureDesc->setPixelFormat(MTL::PixelFormat::PixelFormatBGRA8Unorm_sRGB);
+        textureDesc->setTextureType(MTL::TextureType::TextureType2D);
+        textureDesc->setWidth(NS::UInteger(width));
+        textureDesc->setHeight(NS::UInteger(height));
+        textureDesc->setMipmapLevelCount(10);
+        textureDesc->setSampleCount(1);
+        textureDesc->setStorageMode(MTL::StorageMode::StorageModeManaged);
+        textureDesc->setUsage(MTL::ResourceUsageSample | MTL::ResourceUsageRead);
+
+        testTexture = NS::TransferPtr(device->newTexture(textureDesc));
+        testTexture->replaceRegion(MTL::Region(0, 0, 0, width, height, 1), 0, data, width * numChannels);
+
+        textureDesc->release();
+
+        auto cmdBlit = queue->commandBuffer();
+
+        auto enc = cmdBlit->blitCommandEncoder();
+        enc->generateMipmaps(testTexture.get());
+        enc->endEncoding();
+
+        cmdBlit->commit();
     } else {
-        fmt::print("Failed to load texture!\n");
+        fmt::print("Failed to load image!\n");
     }
     stbi_image_free(data);
-
-    textureDesc->release();
-
-    auto cmdBlit = queue->commandBuffer();
-
-    auto enc = cmdBlit->blitCommandEncoder();
-    enc->generateMipmaps(testTexture.get());
-    enc->endEncoding();
-
-    cmdBlit->commit();
 }
