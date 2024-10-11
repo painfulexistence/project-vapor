@@ -22,8 +22,16 @@ int main(int argc, char* args[]) {
             case SDL_QUIT:
                 quit = true;
                 break;
-            case SDL_KEYDOWN:
+            case SDL_KEYDOWN: {
+                switch (e.key.keysym.scancode) {
+                case SDL_SCANCODE_ESCAPE:
+                    quit = true;
+                    break;
+                default:
+                    break;
+                }
                 break;
+            }
             default:
                 break;
             }
