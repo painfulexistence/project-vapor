@@ -41,7 +41,8 @@ auto Renderer_Metal::init() -> void {
 
     initTestPipeline();
     initTestBuffer();
-    initTestTexture();
+    testAlbedoTexture = createTexture(std::string("assets/textures/american_walnut_albedo.png"));
+    testNormalTexture = createTexture(std::string("assets/textures/american_walnut_normal.png"));
 
     MTL::DepthStencilDescriptor* depthStencilDesc = MTL::DepthStencilDescriptor::alloc()->init();
     depthStencilDesc->setDepthCompareFunction(MTL::CompareFunction::CompareFunctionLess);
@@ -80,7 +81,8 @@ auto Renderer_Metal::draw() -> void {
     auto encoder = cmd->renderCommandEncoder(pass.get());
 
     encoder->setRenderPipelineState(testPipeline.get());
-    encoder->setFragmentTexture(testTexture.get(), 0);
+    encoder->setFragmentTexture(testAlbedoTexture.get(), 0);
+    encoder->setFragmentTexture(testNormalTexture.get(), 1);
     encoder->setVertexBuffer(testCubeVertexBuffer.get(), 0, 0);
     encoder->setVertexBuffer(cameraDataBuffer.get(), 0, 1);
     encoder->setVertexBuffer(testCubeInstanceBuffer.get(), 0, 2);
@@ -139,6 +141,7 @@ void Renderer_Metal::initTestPipeline() {
 }
 
 void Renderer_Metal::initTestBuffer() {
+    // Triforce buffers
     glm::vec3 verts[6] = { { -0.5f, 0.5f, 0.0f }, { -0.5f, -0.5f, 0.0f }, { 0.5f, 0.5f, 0.0 },
                            { 0.5f, 0.5f, 0.0f },  { -0.5f, -0.5f, 0.0f }, { 0.5f, -0.5f, 0.0f } };
     glm::vec2 uvs[6] = {
@@ -154,6 +157,7 @@ void Renderer_Metal::initTestBuffer() {
     testPosBuffer->didModifyRange(NS::Range::Make(0, testPosBuffer->length()));
     testUVBuffer->didModifyRange(NS::Range::Make(0, testUVBuffer->length()));
 
+    // Cube buffers
     float cubeVerts[] = { // left
                           .5f,
                           .5f,
@@ -370,13 +374,13 @@ void Renderer_Metal::initTestBuffer() {
     testCubeInstanceBuffer = NS::TransferPtr(device->newBuffer(sizeof(InstanceData), MTL::ResourceStorageModeManaged));
 }
 
-void Renderer_Metal::initTestTexture() {
+NS::SharedPtr<MTL::Texture> Renderer_Metal::createTexture(const std::string& filename) {
     int width, height, numChannels;
-    uint8_t* data = stbi_load("assets/textures/american_walnut.png", &width, &height, &numChannels, 0);
+    uint8_t* data = stbi_load(filename.c_str(), &width, &height, &numChannels, 0);
     if (data) {
         NS::Error* error = nullptr;
 
-        auto textureDesc = MTL::TextureDescriptor::alloc()->init();
+        auto textureDesc = NS::TransferPtr(MTL::TextureDescriptor::alloc()->init());
         textureDesc->setPixelFormat(MTL::PixelFormat::PixelFormatBGRA8Unorm_sRGB);
         textureDesc->setTextureType(MTL::TextureType::TextureType2D);
         textureDesc->setWidth(NS::UInteger(width));
@@ -386,20 +390,22 @@ void Renderer_Metal::initTestTexture() {
         textureDesc->setStorageMode(MTL::StorageMode::StorageModeManaged);
         textureDesc->setUsage(MTL::ResourceUsageSample | MTL::ResourceUsageRead);
 
-        testTexture = NS::TransferPtr(device->newTexture(textureDesc));
-        testTexture->replaceRegion(MTL::Region(0, 0, 0, width, height, 1), 0, data, width * numChannels);
+        auto texture = NS::TransferPtr(device->newTexture(textureDesc.get()));
+        texture->replaceRegion(MTL::Region(0, 0, 0, width, height, 1), 0, data, width * numChannels);
 
-        textureDesc->release();
+        stbi_image_free(data);
 
-        auto cmdBlit = queue->commandBuffer();
+        auto cmdBlit = NS::TransferPtr(queue->commandBuffer());
 
-        auto enc = cmdBlit->blitCommandEncoder();
-        enc->generateMipmaps(testTexture.get());
+        auto enc = NS::TransferPtr(cmdBlit->blitCommandEncoder());
+        enc->generateMipmaps(texture.get());
         enc->endEncoding();
 
         cmdBlit->commit();
+
+        return texture;
     } else {
-        fmt::print("Failed to load image!\n");
+        throw std::runtime_error(fmt::format("Failed to load image at {}!\n", filename));
     }
     stbi_image_free(data);
 }

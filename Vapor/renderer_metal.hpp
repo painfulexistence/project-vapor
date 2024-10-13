@@ -5,6 +5,7 @@
 #include <Foundation/Foundation.hpp>
 #include <Metal/Metal.hpp>
 #include <QuartzCore/QuartzCore.hpp>
+#include <string>
 
 class Renderer_Metal final : Renderer {
 public:
@@ -18,7 +19,7 @@ public:
 
     void initTestBuffer();
 
-    void initTestTexture();
+    NS::SharedPtr<MTL::Texture> createTexture(const std::string& filename);
 
     void initTestPipeline();
 
@@ -31,7 +32,8 @@ private:
 
     NS::SharedPtr<MTL::DepthStencilState> depthStencilState;
     NS::SharedPtr<MTL::RenderPipelineState> testPipeline;
-    NS::SharedPtr<MTL::Texture> testTexture;
+    NS::SharedPtr<MTL::Texture> testAlbedoTexture;
+    NS::SharedPtr<MTL::Texture> testNormalTexture;
     NS::SharedPtr<MTL::Buffer> testPosBuffer;
     NS::SharedPtr<MTL::Buffer> testUVBuffer;
     NS::SharedPtr<MTL::Buffer> testCubeVertexBuffer;
