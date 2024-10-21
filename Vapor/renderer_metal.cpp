@@ -49,6 +49,16 @@ auto Renderer_Metal::init() -> void {
     depthStencilDesc->setDepthWriteEnabled(true);
     depthStencilState = NS::TransferPtr(device->newDepthStencilState(depthStencilDesc));
     depthStencilDesc->release();
+
+    MTL::TextureDescriptor* msaaTextureDesc = MTL::TextureDescriptor::alloc()->init();
+    msaaTextureDesc->setTextureType(MTL::TextureType2DMultisample);
+    msaaTextureDesc->setPixelFormat(MTL::PixelFormatBGRA8Unorm);
+    msaaTextureDesc->setWidth(swapchain->drawableSize().width);
+    msaaTextureDesc->setHeight(swapchain->drawableSize().height);
+    msaaTextureDesc->setSampleCount(sampleCount);
+    msaaTextureDesc->setUsage(MTL::TextureUsageRenderTarget);
+    msaaTexture = NS::TransferPtr(device->newTexture(msaaTextureDesc));
+    msaaTextureDesc->release();
 }
 
 
@@ -59,10 +69,12 @@ auto Renderer_Metal::draw() -> void {
 
     // Create default render pass
     auto pass = NS::TransferPtr(MTL::RenderPassDescriptor::renderPassDescriptor());
-    auto attachment = pass->colorAttachments()->object(0);
-    attachment->setClearColor(clearColor);
-    attachment->setLoadAction(MTL::LoadActionClear);
-    attachment->setTexture(surface->texture());
+    auto colorAttachment = pass->colorAttachments()->object(0);
+    colorAttachment->setTexture(msaaTexture.get());
+    colorAttachment->setClearColor(clearColor);
+    colorAttachment->setLoadAction(MTL::LoadActionClear);
+    colorAttachment->setStoreAction(MTL::StoreActionMultisampleResolve);
+    colorAttachment->setResolveTexture(surface->texture());
 
     auto cmd = queue->commandBuffer();
 
@@ -80,7 +92,7 @@ auto Renderer_Metal::draw() -> void {
 
     auto encoder = cmd->renderCommandEncoder(pass.get());
 
-    encoder->setRenderPipelineState(testPipeline.get());
+    encoder->setRenderPipelineState(testDrawPipeline.get());
     encoder->setFragmentTexture(testAlbedoTexture.get(), 0);
     encoder->setFragmentTexture(testNormalTexture.get(), 1);
     encoder->setVertexBuffer(testCubeVertexBuffer.get(), 0, 0);
@@ -130,8 +142,10 @@ void Renderer_Metal::initTestPipeline() {
     pipelineDesc->setVertexFunction(vertexMain);
     pipelineDesc->setFragmentFunction(fragmentMain);
     pipelineDesc->colorAttachments()->object(0)->setPixelFormat(MTL::PixelFormat::PixelFormatBGRA8Unorm_sRGB);
+    pipelineDesc->setDepthAttachmentPixelFormat(MTL::PixelFormatDepth32Float);
+    pipelineDesc->setSampleCount(sampleCount);
 
-    testPipeline = NS::TransferPtr(device->newRenderPipelineState(pipelineDesc, &error));
+    testDrawPipeline = NS::TransferPtr(device->newRenderPipelineState(pipelineDesc, &error));
 
     code->release();
     library->release();
