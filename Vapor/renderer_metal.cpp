@@ -2,6 +2,7 @@
 #define MTL_PRIVATE_IMPLEMENTATION
 #define CA_PRIVATE_IMPLEMENTATION
 #include "renderer_metal.hpp"
+#include "mesh.hpp"
 
 #include "fmt/core.h"
 #include "helper.hpp"
@@ -9,10 +10,14 @@
 #define STB_IMAGE_IMPLEMENTATION
 #include "stb/stb_image.h"
 
+#define TINYOBJLOADER_IMPLEMENTATION
+#include "tinyobjloader/tiny_obj_loader.h"
+
 #include "glm/vec2.hpp"
 #include "glm/vec3.hpp"
 #include "glm/vec4.hpp"
 #include <cstdint>
+#include <vector>
 #include <glm/ext/matrix_clip_space.hpp>
 #include <glm/ext/matrix_transform.hpp>
 
@@ -39,10 +44,12 @@ auto Renderer_Metal::init() -> void {
     device = swapchain->device();
     queue = NS::TransferPtr(device->newCommandQueue());
 
-    initTestPipeline();
-    initTestBuffer();
+    initTestPipelines();
+    testOBJMesh = loadMesh(std::string("assets/models/viking_room.obj"));
+    testOBJTexture = createTexture(std::string("assets/textures/viking_room.png"));
     testAlbedoTexture = createTexture(std::string("assets/textures/american_walnut_albedo.png"));
     testNormalTexture = createTexture(std::string("assets/textures/american_walnut_normal.png"));
+    initTestBuffers();
 
     MTL::DepthStencilDescriptor* depthStencilDesc = MTL::DepthStencilDescriptor::alloc()->init();
     depthStencilDesc->setDepthCompareFunction(MTL::CompareFunction::CompareFunctionLess);
@@ -79,12 +86,12 @@ auto Renderer_Metal::draw() -> void {
     auto cmd = queue->commandBuffer();
 
     float angle = time * 1.5f;
-    InstanceData* instance = reinterpret_cast<InstanceData*>(testCubeInstanceBuffer->contents());
-    instance->modelMatrix = glm::rotate(glm::identity<glm::mat4>(), angle, glm::vec3(0.0f, 1.0f, -1.0f));
+    InstanceData* instance = reinterpret_cast<InstanceData*>(testInstanceBuffer->contents());
+    instance->modelMatrix = glm::rotate(glm::rotate(glm::identity<glm::mat4>(), 3.0f * (float)M_PI / 2.0f, glm::vec3(1.0f, 0.0f, 0.0f)), angle, glm::vec3(0.0f, 0.0f, 1.0f));
     instance->color = glm::vec4(1.0f, 0.0f, 0.0f, 1.0f);
-    testCubeInstanceBuffer->didModifyRange(NS::Range::Make(0, testCubeInstanceBuffer->length()));
+    testInstanceBuffer->didModifyRange(NS::Range::Make(0, testInstanceBuffer->length()));
 
-    glm::vec3 camPos = glm::vec3(0.0f, 0.0f, 3.0f);
+    glm::vec3 camPos = glm::vec3(0.0f, 2.0f, 2.0f);
     CameraData* camera = reinterpret_cast<CameraData*>(cameraDataBuffer->contents());
     camera->projectionMatrix = glm::perspective(45.f * (float)M_PI / 180.f, 1.333f, 0.03f, 500.0f);
     camera->viewMatrix = glm::lookAt(camPos, glm::vec3(0.0f, 0.0f, 0.0f), glm::vec3(0.0f, 1.0f, 0.0f));
@@ -93,11 +100,11 @@ auto Renderer_Metal::draw() -> void {
     auto encoder = cmd->renderCommandEncoder(pass.get());
 
     encoder->setRenderPipelineState(testDrawPipeline.get());
-    encoder->setFragmentTexture(testAlbedoTexture.get(), 0);
+    encoder->setFragmentTexture(testOBJTexture.get(), 0);
     encoder->setFragmentTexture(testNormalTexture.get(), 1);
-    encoder->setVertexBuffer(testCubeVertexBuffer.get(), 0, 0);
+    encoder->setVertexBuffer(testVertexBuffer.get(), 0, 0);
     encoder->setVertexBuffer(cameraDataBuffer.get(), 0, 1);
-    encoder->setVertexBuffer(testCubeInstanceBuffer.get(), 0, 2);
+    encoder->setVertexBuffer(testInstanceBuffer.get(), 0, 2);
     encoder->setFragmentBytes(&camPos, sizeof(glm::vec3), 0);
     encoder->setFragmentBytes(&time, sizeof(float), 1);
     encoder->setCullMode(MTL::CullModeNone);
@@ -105,9 +112,9 @@ auto Renderer_Metal::draw() -> void {
     // encoder->drawPrimitives(MTL::PrimitiveType::PrimitiveTypeTriangle, NS::UInteger(0), NS::UInteger(6));
     encoder->drawIndexedPrimitives(
       MTL::PrimitiveType::PrimitiveTypeTriangle,
-      testCubeIndexBuffer->length() / sizeof(uint16_t),
+      testIndexBuffer->length() / sizeof(uint16_t),
       MTL::IndexTypeUInt16,
-      testCubeIndexBuffer.get(),
+      testIndexBuffer.get(),
       0
     );
 
@@ -119,59 +126,19 @@ auto Renderer_Metal::draw() -> void {
     surface->release();
 }
 
-void Renderer_Metal::initTestPipeline() {
-    auto shaderSrc = readFile("assets/shaders/cube_blinn_phong.metal");
-
-    auto code = NS::String::string(shaderSrc.data(), NS::StringEncoding::UTF8StringEncoding);
-    NS::Error* error = nullptr;
-    MTL::CompileOptions* options = nullptr;
-    MTL::Library* library = device->newLibrary(code, options, &error);
-    if (!library) {
-        fmt::print("Could not compile shader! Error: {}\n", error->localizedDescription()->utf8String());
-        return;
-    }
-    fmt::print("Shader compiled successfully. Shader: {}\n", code->cString(NS::StringEncoding::UTF8StringEncoding));
-
-    auto vertexFuncName = NS::String::string("vertexMain", NS::StringEncoding::UTF8StringEncoding);
-    auto vertexMain = library->newFunction(vertexFuncName);
-
-    auto fragmentFuncName = NS::String::string("fragmentMain", NS::StringEncoding::UTF8StringEncoding);
-    auto fragmentMain = library->newFunction(fragmentFuncName);
-
-    auto pipelineDesc = MTL::RenderPipelineDescriptor::alloc()->init();
-    pipelineDesc->setVertexFunction(vertexMain);
-    pipelineDesc->setFragmentFunction(fragmentMain);
-    pipelineDesc->colorAttachments()->object(0)->setPixelFormat(MTL::PixelFormat::PixelFormatBGRA8Unorm_sRGB);
-    pipelineDesc->setDepthAttachmentPixelFormat(MTL::PixelFormatDepth32Float);
-    pipelineDesc->setSampleCount(sampleCount);
-
-    testDrawPipeline = NS::TransferPtr(device->newRenderPipelineState(pipelineDesc, &error));
-
-    code->release();
-    library->release();
-    vertexMain->release();
-    fragmentMain->release();
-    pipelineDesc->release();
+void Renderer_Metal::initTestPipelines() {
+    testDrawPipeline = createPipeline("assets/shaders/cube_unshaded.metal");
 }
 
-void Renderer_Metal::initTestBuffer() {
-    // Triforce buffers
-    glm::vec3 verts[6] = { { -0.5f, 0.5f, 0.0f }, { -0.5f, -0.5f, 0.0f }, { 0.5f, 0.5f, 0.0 },
+void Renderer_Metal::initTestBuffers() {
+    // Triforce
+    glm::vec3 triforceVerts[6] = { { -0.5f, 0.5f, 0.0f }, { -0.5f, -0.5f, 0.0f }, { 0.5f, 0.5f, 0.0 },
                            { 0.5f, 0.5f, 0.0f },  { -0.5f, -0.5f, 0.0f }, { 0.5f, -0.5f, 0.0f } };
-    glm::vec2 uvs[6] = {
+    glm::vec2 triforceUvs[6] = {
         { 0.0f, 0.0f }, { 0.0f, 1.0f }, { 1.0f, 0.0f }, { 1.0f, 0.0f }, { 0.0f, 1.0f }, { 1.0f, 1.0f }
     };
 
-    testPosBuffer = NS::TransferPtr(device->newBuffer(6 * sizeof(glm::vec3), MTL::ResourceStorageModeManaged));
-    testUVBuffer = NS::TransferPtr(device->newBuffer(6 * sizeof(glm::vec2), MTL::ResourceStorageModeManaged));
-
-    memcpy(testPosBuffer->contents(), verts, 6 * sizeof(glm::vec3));
-    memcpy(testUVBuffer->contents(), uvs, 6 * sizeof(glm::vec2));
-
-    testPosBuffer->didModifyRange(NS::Range::Make(0, testPosBuffer->length()));
-    testUVBuffer->didModifyRange(NS::Range::Make(0, testUVBuffer->length()));
-
-    // Cube buffers
+    // Cube
     float cubeVerts[] = { // left
                           .5f,
                           .5f,
@@ -374,18 +341,48 @@ void Renderer_Metal::initTestBuffer() {
     uint16_t cubeTris[] = { 0,  2,  1,  1,  2,  3,  4,  5,  6,  6,  5,  7,  8,  9,  10, 10, 9,  11,
                             12, 14, 13, 13, 14, 15, 16, 17, 18, 18, 17, 19, 20, 22, 21, 21, 22, 23 };
 
-    testCubeVertexBuffer = NS::TransferPtr(device->newBuffer(192 * sizeof(float), MTL::ResourceStorageModeManaged));
-    testCubeIndexBuffer = NS::TransferPtr(device->newBuffer(36 * sizeof(uint16_t), MTL::ResourceStorageModeManaged));
-
-    memcpy(testCubeVertexBuffer->contents(), cubeVerts, 192 * sizeof(float));
-    memcpy(testCubeIndexBuffer->contents(), cubeTris, 36 * sizeof(uint16_t));
-
-    testCubeVertexBuffer->didModifyRange(NS::Range::Make(0, testCubeVertexBuffer->length()));
-    testCubeIndexBuffer->didModifyRange(NS::Range::Make(0, testCubeIndexBuffer->length()));
+    testVertexBuffer = createVertexBuffer(testOBJMesh->vertices);
+    testIndexBuffer = createIndexBuffer(testOBJMesh->indices);
 
     cameraDataBuffer = NS::TransferPtr(device->newBuffer(sizeof(CameraData), MTL::ResourceStorageModeManaged));
 
-    testCubeInstanceBuffer = NS::TransferPtr(device->newBuffer(sizeof(InstanceData), MTL::ResourceStorageModeManaged));
+    testInstanceBuffer = NS::TransferPtr(device->newBuffer(sizeof(InstanceData), MTL::ResourceStorageModeManaged));
+}
+
+NS::SharedPtr<MTL::RenderPipelineState> Renderer_Metal::createPipeline(const std::string& filename) {
+    auto shaderSrc = readFile(filename);
+
+    auto code = NS::String::string(shaderSrc.data(), NS::StringEncoding::UTF8StringEncoding);
+    NS::Error* error = nullptr;
+    MTL::CompileOptions* options = nullptr;
+    MTL::Library* library = device->newLibrary(code, options, &error);
+    if (!library) {
+        throw std::runtime_error(fmt::format("Could not compile shader! Error: {}\n", error->localizedDescription()->utf8String()));
+    }
+    fmt::print("Shader compiled successfully. Shader: {}\n", code->cString(NS::StringEncoding::UTF8StringEncoding));
+
+    auto vertexFuncName = NS::String::string("vertexMain", NS::StringEncoding::UTF8StringEncoding);
+    auto vertexMain = library->newFunction(vertexFuncName);
+
+    auto fragmentFuncName = NS::String::string("fragmentMain", NS::StringEncoding::UTF8StringEncoding);
+    auto fragmentMain = library->newFunction(fragmentFuncName);
+
+    auto pipelineDesc = MTL::RenderPipelineDescriptor::alloc()->init();
+    pipelineDesc->setVertexFunction(vertexMain);
+    pipelineDesc->setFragmentFunction(fragmentMain);
+    pipelineDesc->colorAttachments()->object(0)->setPixelFormat(MTL::PixelFormat::PixelFormatBGRA8Unorm_sRGB);
+    pipelineDesc->setDepthAttachmentPixelFormat(MTL::PixelFormatDepth32Float);
+    pipelineDesc->setSampleCount(sampleCount);
+
+    auto pipeline = NS::TransferPtr(device->newRenderPipelineState(pipelineDesc, &error));
+
+    code->release();
+    library->release();
+    vertexMain->release();
+    fragmentMain->release();
+    pipelineDesc->release();
+
+    return pipeline;
 }
 
 NS::SharedPtr<MTL::Texture> Renderer_Metal::createTexture(const std::string& filename) {
@@ -395,6 +392,20 @@ NS::SharedPtr<MTL::Texture> Renderer_Metal::createTexture(const std::string& fil
         NS::Error* error = nullptr;
 
         auto textureDesc = NS::TransferPtr(MTL::TextureDescriptor::alloc()->init());
+        switch (numChannels) {
+        case 1:
+            textureDesc->setPixelFormat(MTL::PixelFormat::PixelFormatR8Unorm_sRGB);
+            break;
+        case 3:
+            textureDesc->setPixelFormat(MTL::PixelFormat::PixelFormatBGRA8Unorm_sRGB);
+            break;
+        case 4:
+            textureDesc->setPixelFormat(MTL::PixelFormat::PixelFormatBGRA8Unorm_sRGB);
+            break;
+        default:
+            throw std::runtime_error(fmt::format("Unknown texture format at {}\n", filename));
+            break;
+        }
         textureDesc->setPixelFormat(MTL::PixelFormat::PixelFormatBGRA8Unorm_sRGB);
         textureDesc->setTextureType(MTL::TextureType::TextureType2D);
         textureDesc->setWidth(NS::UInteger(width));
@@ -405,7 +416,11 @@ NS::SharedPtr<MTL::Texture> Renderer_Metal::createTexture(const std::string& fil
         textureDesc->setUsage(MTL::ResourceUsageSample | MTL::ResourceUsageRead);
 
         auto texture = NS::TransferPtr(device->newTexture(textureDesc.get()));
-        texture->replaceRegion(MTL::Region(0, 0, 0, width, height, 1), 0, data, width * numChannels);
+        if (numChannels == 3) {
+            throw std::runtime_error(fmt::format("RGB texture not supported yet!\n"));
+        } else {
+            texture->replaceRegion(MTL::Region(0, 0, 0, width, height, 1), 0, data, width * numChannels);
+        }
 
         stbi_image_free(data);
 
@@ -422,4 +437,57 @@ NS::SharedPtr<MTL::Texture> Renderer_Metal::createTexture(const std::string& fil
         throw std::runtime_error(fmt::format("Failed to load image at {}!\n", filename));
     }
     stbi_image_free(data);
+}
+
+NS::SharedPtr<MTL::Buffer> Renderer_Metal::createVertexBuffer(std::vector<VertexData> vertices) {
+    NS::SharedPtr<MTL::Buffer> buffer = NS::TransferPtr(device->newBuffer(vertices.size() * sizeof(VertexData), MTL::ResourceStorageModeManaged));
+
+    memcpy(buffer->contents(), vertices.data(), vertices.size() * sizeof(VertexData));
+    buffer->didModifyRange(NS::Range::Make(0, buffer->length()));
+
+    return buffer;
+}
+
+NS::SharedPtr<MTL::Buffer> Renderer_Metal::createIndexBuffer(std::vector<uint16_t> indices) {
+    NS::SharedPtr<MTL::Buffer> buffer = NS::TransferPtr(device->newBuffer(indices.size() * sizeof(uint16_t), MTL::ResourceStorageModeManaged));
+
+    memcpy(buffer->contents(), indices.data(), indices.size() * sizeof(uint16_t));
+    buffer->didModifyRange(NS::Range::Make(0, buffer->length()));
+
+    return buffer;
+}
+
+Mesh* Renderer_Metal::loadMesh(const std::string& filename) {
+    std::vector<VertexData> vertices;
+    std::vector<uint16_t> indices;
+
+    tinyobj::attrib_t attrib;
+    std::vector<tinyobj::shape_t> shapes;
+    std::vector<tinyobj::material_t> materials;
+    std::string err;
+
+    if (!tinyobj::LoadObj(&attrib, &shapes, &materials, &err, filename.c_str())) {
+        throw std::runtime_error(fmt::format("Failed to load model: {}", err));
+    }
+
+    for (const auto& shape : shapes) {
+        for (const auto& index : shape.mesh.indices) {
+            VertexData vert = {};
+            vert.position = { attrib.vertices[3 * index.vertex_index + 0],
+                              attrib.vertices[3 * index.vertex_index + 1],
+                              attrib.vertices[3 * index.vertex_index + 2] };
+            vert.normal = { attrib.normals[3 * index.normal_index + 0],
+                            attrib.normals[3 * index.normal_index + 1],
+                            attrib.normals[3 * index.normal_index + 2] };
+            vert.uv = { attrib.texcoords[2 * index.texcoord_index + 0],
+                        1.0 - attrib.texcoords[2 * index.texcoord_index + 1] };
+            vertices.push_back(vert);
+            indices.push_back(indices.size());
+        }
+    }
+
+    auto mesh = new Mesh();
+    mesh->initialize({ vertices, indices });
+
+    return mesh;
 }

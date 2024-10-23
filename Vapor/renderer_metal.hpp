@@ -1,5 +1,6 @@
 #pragma once
 #include "renderer.hpp"
+#include "mesh.hpp"
 
 #include "SDL.h"
 #include <Foundation/Foundation.hpp>
@@ -17,11 +18,19 @@ public:
 
     virtual void draw();
 
-    void initTestBuffer();
+    void initTestPipelines();
+
+    void initTestBuffers();
+
+    NS::SharedPtr<MTL::RenderPipelineState> createPipeline(const std::string& filename);
 
     NS::SharedPtr<MTL::Texture> createTexture(const std::string& filename);
 
-    void initTestPipeline();
+    NS::SharedPtr<MTL::Buffer> createVertexBuffer(std::vector<VertexData> vertices);
+
+    NS::SharedPtr<MTL::Buffer> createIndexBuffer(std::vector<uint16_t> indices);
+
+    Mesh* loadMesh(const std::string& filename);
 
 private:
     SDL_Renderer* renderer;
@@ -33,13 +42,16 @@ private:
 
     NS::SharedPtr<MTL::DepthStencilState> depthStencilState;
     NS::SharedPtr<MTL::RenderPipelineState> testDrawPipeline;
+
+    Mesh* testOBJMesh;
+
     NS::SharedPtr<MTL::Texture> testAlbedoTexture;
     NS::SharedPtr<MTL::Texture> testNormalTexture;
-    NS::SharedPtr<MTL::Buffer> testPosBuffer;
-    NS::SharedPtr<MTL::Buffer> testUVBuffer;
-    NS::SharedPtr<MTL::Buffer> testCubeVertexBuffer;
-    NS::SharedPtr<MTL::Buffer> testCubeIndexBuffer;
-    NS::SharedPtr<MTL::Buffer> testCubeInstanceBuffer;
+    NS::SharedPtr<MTL::Texture> testOBJTexture;
+    NS::SharedPtr<MTL::Buffer> testVertexBuffer;
+    NS::SharedPtr<MTL::Buffer> testIndexBuffer;
+    NS::SharedPtr<MTL::Buffer> testInstanceBuffer;
+
     NS::SharedPtr<MTL::Buffer> cameraDataBuffer;
     NS::SharedPtr<MTL::Texture> msaaTexture;
 };

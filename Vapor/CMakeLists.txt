@@ -15,6 +15,7 @@ set(SOURCES
     main.cpp
     helper.cpp
     renderer_metal.cpp
+    mesh.cpp
 )
 
 add_executable(main ${SOURCES})
