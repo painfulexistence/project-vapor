@@ -57,6 +57,16 @@ auto Renderer_Metal::init() -> void {
     depthStencilState = NS::TransferPtr(device->newDepthStencilState(depthStencilDesc));
     depthStencilDesc->release();
 
+    MTL::TextureDescriptor* depthStencilTextureDesc = MTL::TextureDescriptor::alloc()->init();
+    depthStencilTextureDesc->setTextureType(MTL::TextureType2DMultisample);
+    depthStencilTextureDesc->setPixelFormat(MTL::PixelFormatDepth32Float);
+    depthStencilTextureDesc->setWidth(swapchain->drawableSize().width);
+    depthStencilTextureDesc->setHeight(swapchain->drawableSize().height);
+    depthStencilTextureDesc->setSampleCount(sampleCount);
+    depthStencilTextureDesc->setUsage(MTL::TextureUsageRenderTarget);
+    depthStencilTexture = NS::TransferPtr(device->newTexture(depthStencilTextureDesc));
+    depthStencilTextureDesc->release();
+
     MTL::TextureDescriptor* msaaTextureDesc = MTL::TextureDescriptor::alloc()->init();
     msaaTextureDesc->setTextureType(MTL::TextureType2DMultisample);
     msaaTextureDesc->setPixelFormat(MTL::PixelFormatBGRA8Unorm);
@@ -82,6 +92,8 @@ auto Renderer_Metal::draw() -> void {
     colorAttachment->setLoadAction(MTL::LoadActionClear);
     colorAttachment->setStoreAction(MTL::StoreActionMultisampleResolve);
     colorAttachment->setResolveTexture(surface->texture());
+    auto depthAttachment = pass->depthAttachment();
+    depthAttachment->setTexture(depthStencilTexture.get());
 
     auto cmd = queue->commandBuffer();
 

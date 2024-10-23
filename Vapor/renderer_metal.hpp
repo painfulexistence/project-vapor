@@ -53,5 +53,6 @@ private:
     NS::SharedPtr<MTL::Buffer> testInstanceBuffer;
 
     NS::SharedPtr<MTL::Buffer> cameraDataBuffer;
+    NS::SharedPtr<MTL::Texture> depthStencilTexture;
     NS::SharedPtr<MTL::Texture> msaaTexture;
 };
