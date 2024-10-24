@@ -98,10 +98,10 @@ auto Renderer_Metal::draw() -> void {
     auto cmd = queue->commandBuffer();
 
     float angle = time * 1.5f;
-    InstanceData* instance = reinterpret_cast<InstanceData*>(testInstanceBuffer->contents());
+    InstanceData* instance = reinterpret_cast<InstanceData*>(instanceDataBuffer->contents());
     instance->modelMatrix = glm::rotate(glm::rotate(glm::identity<glm::mat4>(), 3.0f * (float)M_PI / 2.0f, glm::vec3(1.0f, 0.0f, 0.0f)), angle, glm::vec3(0.0f, 0.0f, 1.0f));
     instance->color = glm::vec4(1.0f, 0.0f, 0.0f, 1.0f);
-    testInstanceBuffer->didModifyRange(NS::Range::Make(0, testInstanceBuffer->length()));
+    instanceDataBuffer->didModifyRange(NS::Range::Make(0, instanceDataBuffer->length()));
 
     glm::vec3 camPos = glm::vec3(0.0f, 2.0f, 2.0f);
     CameraData* camera = reinterpret_cast<CameraData*>(cameraDataBuffer->contents());
@@ -116,7 +116,7 @@ auto Renderer_Metal::draw() -> void {
     encoder->setFragmentTexture(testNormalTexture.get(), 1);
     encoder->setVertexBuffer(testVertexBuffer.get(), 0, 0);
     encoder->setVertexBuffer(cameraDataBuffer.get(), 0, 1);
-    encoder->setVertexBuffer(testInstanceBuffer.get(), 0, 2);
+    encoder->setVertexBuffer(instanceDataBuffer.get(), 0, 2);
     encoder->setFragmentBytes(&camPos, sizeof(glm::vec3), 0);
     encoder->setFragmentBytes(&time, sizeof(float), 1);
     encoder->setCullMode(MTL::CullModeNone);
@@ -139,7 +139,7 @@ auto Renderer_Metal::draw() -> void {
 }
 
 void Renderer_Metal::initTestPipelines() {
-    testDrawPipeline = createPipeline("assets/shaders/cube_unshaded.metal");
+    testDrawPipeline = createPipeline("assets/shaders/3d_unshaded.metal");
 }
 
 void Renderer_Metal::initTestBuffers() {
@@ -148,7 +148,7 @@ void Renderer_Metal::initTestBuffers() {
 
     cameraDataBuffer = NS::TransferPtr(device->newBuffer(sizeof(CameraData), MTL::ResourceStorageModeManaged));
 
-    testInstanceBuffer = NS::TransferPtr(device->newBuffer(sizeof(InstanceData), MTL::ResourceStorageModeManaged));
+    instanceDataBuffer = NS::TransferPtr(device->newBuffer(sizeof(InstanceData) * numMaxInstances, MTL::ResourceStorageModeManaged));
 }
 
 NS::SharedPtr<MTL::RenderPipelineState> Renderer_Metal::createPipeline(const std::string& filename) {

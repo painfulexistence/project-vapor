@@ -22,9 +22,9 @@ struct RasterizerData {
     float2 uv;
 };
 
-vertex RasterizerData vertexMain(uint vertexID [[vertex_id]], device const VertexData* in [[buffer(0)]], device const CameraData& camera [[buffer(1)]], device const InstanceData& instance [[buffer(2)]]) {
+vertex RasterizerData vertexMain(uint vertexID [[vertex_id]], uint instanceID [[instance_id]], device const VertexData* in [[buffer(0)]], device const CameraData& cameraData [[buffer(1)]], device const InstanceData* instanceData [[buffer(2)]]) {
     RasterizerData vert;
-    vert.position = camera.projectionMatrix * camera.viewMatrix * instance.modelMatrix * float4(in[vertexID].position, 1.0);
+    vert.position = cameraData.projectionMatrix * cameraData.viewMatrix * instanceData[instanceID].modelMatrix * float4(in[vertexID].position, 1.0);
     vert.uv = in[vertexID].uv;
     return vert;
 }

@@ -39,6 +39,7 @@ private:
     NS::SharedPtr<MTL::CommandQueue> queue;
     MTL::ClearColor clearColor = MTL::ClearColor(0.0 / 255.0, 0.0 / 255.0, 0.0 / 255.0, 1.0);
     NS::UInteger sampleCount = 4;
+    NS::UInteger numMaxInstances = 1024;
 
     NS::SharedPtr<MTL::DepthStencilState> depthStencilState;
     NS::SharedPtr<MTL::RenderPipelineState> testDrawPipeline;
@@ -50,8 +51,8 @@ private:
     NS::SharedPtr<MTL::Texture> testOBJTexture;
     NS::SharedPtr<MTL::Buffer> testVertexBuffer;
     NS::SharedPtr<MTL::Buffer> testIndexBuffer;
-    NS::SharedPtr<MTL::Buffer> testInstanceBuffer;
 
+    NS::SharedPtr<MTL::Buffer> instanceDataBuffer;
     NS::SharedPtr<MTL::Buffer> cameraDataBuffer;
     NS::SharedPtr<MTL::Texture> depthStencilTexture;
     NS::SharedPtr<MTL::Texture> msaaTexture;
