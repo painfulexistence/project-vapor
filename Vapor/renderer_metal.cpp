@@ -111,7 +111,7 @@ auto Renderer_Metal::draw() -> void {
     //     instance->modelMatrix = instances[i].modelMatrix;
     //     instance->color = instances[i].color;
     // }
-    instanceDataBuffer->didModifyRange(NS::Range::Make(0, instanceDataBuffer->length()));
+    instanceDataBuffer->didModifyRange(NS::Range::Make(0, instanceDataBuffer->length())); // TODO: avoid updating the entire instance data buffer every frame
 
     glm::vec3 camPos = glm::vec3(0.0f, 2.0f, 2.0f);
     CameraData* camera = reinterpret_cast<CameraData*>(cameraDataBuffer->contents());
