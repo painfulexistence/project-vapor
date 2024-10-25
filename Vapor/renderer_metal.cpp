@@ -48,6 +48,8 @@ auto Renderer_Metal::init() -> void {
     testMesh = MeshBuilder::buildCube(1.0); // loadMesh(std::string("assets/models/viking_room.obj"));
     testAlbedoTexture = createTexture(std::string("assets/textures/american_walnut_albedo.png")); // createTexture(std::string("assets/textures/viking_room.png"));
     testNormalTexture = createTexture(std::string("assets/textures/american_walnut_normal.png"));
+    testRoughnessTexture = createTexture(std::string("assets/textures/american_walnut_roughness.png"));
+
     initTestBuffers();
 
     MTL::DepthStencilDescriptor* depthStencilDesc = MTL::DepthStencilDescriptor::alloc()->init();
@@ -124,6 +126,9 @@ auto Renderer_Metal::draw() -> void {
     encoder->setRenderPipelineState(testDrawPipeline.get());
     encoder->setFragmentTexture(testAlbedoTexture.get(), 0);
     encoder->setFragmentTexture(testNormalTexture.get(), 1);
+    encoder->setFragmentTexture(testAOTexture.get(), 2);
+    encoder->setFragmentTexture(testRoughnessTexture.get(), 3);
+    encoder->setFragmentTexture(testMetallicTexture.get(), 4);
     encoder->setVertexBuffer(testVertexBuffer.get(), 0, 0);
     encoder->setVertexBuffer(cameraDataBuffer.get(), 0, 1);
     encoder->setVertexBuffer(instanceDataBuffer.get(), 0, 2);
@@ -149,7 +154,7 @@ auto Renderer_Metal::draw() -> void {
 }
 
 void Renderer_Metal::initTestPipelines() {
-    testDrawPipeline = createPipeline("assets/shaders/3d_blinn_phong_normal_mapped.metal");
+    testDrawPipeline = createPipeline("assets/shaders/3d_pbr_normal_mapped.metal");
 }
 
 void Renderer_Metal::initTestBuffers() {

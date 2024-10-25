@@ -48,6 +48,10 @@ private:
 
     NS::SharedPtr<MTL::Texture> testAlbedoTexture;
     NS::SharedPtr<MTL::Texture> testNormalTexture;
+    NS::SharedPtr<MTL::Texture> testAOTexture;
+    NS::SharedPtr<MTL::Texture> testRoughnessTexture;
+    NS::SharedPtr<MTL::Texture> testMetallicTexture;
+
     NS::SharedPtr<MTL::Buffer> testVertexBuffer;
     NS::SharedPtr<MTL::Buffer> testIndexBuffer;
 
