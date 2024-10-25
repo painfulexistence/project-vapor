@@ -45,9 +45,8 @@ auto Renderer_Metal::init() -> void {
     queue = NS::TransferPtr(device->newCommandQueue());
 
     initTestPipelines();
-    testOBJMesh = loadMesh(std::string("assets/models/viking_room.obj"));
-    testOBJTexture = createTexture(std::string("assets/textures/viking_room.png"));
-    testAlbedoTexture = createTexture(std::string("assets/textures/american_walnut_albedo.png"));
+    testMesh = MeshBuilder::buildCube(1.0); // loadMesh(std::string("assets/models/viking_room.obj"));
+    testAlbedoTexture = createTexture(std::string("assets/textures/american_walnut_albedo.png")); // createTexture(std::string("assets/textures/viking_room.png"));
     testNormalTexture = createTexture(std::string("assets/textures/american_walnut_normal.png"));
     initTestBuffers();
 
@@ -98,9 +97,20 @@ auto Renderer_Metal::draw() -> void {
     auto cmd = queue->commandBuffer();
 
     float angle = time * 1.5f;
+    // single instance
     InstanceData* instance = reinterpret_cast<InstanceData*>(instanceDataBuffer->contents());
     instance->modelMatrix = glm::rotate(glm::rotate(glm::identity<glm::mat4>(), 3.0f * (float)M_PI / 2.0f, glm::vec3(1.0f, 0.0f, 0.0f)), angle, glm::vec3(0.0f, 0.0f, 1.0f));
     instance->color = glm::vec4(1.0f, 0.0f, 0.0f, 1.0f);
+    // multiple instances
+    // std::vector<InstanceData> instances = {{
+    //     { glm::rotate(glm::identity<glm::mat4>(), angle, glm::vec3(1.0f, 0.0f, 1.0f)), glm::vec4(1.0f, 0.0f, 0.0f, 1.0f) },
+    //     { glm::rotate(glm::identity<glm::mat4>(), angle + 0.5f, glm::vec3(1.0f, 0.0f, 1.0f)), glm::vec4(0.0f, 1.0f, 0.0f, 1.0f) },
+    // }};
+    // for (size_t i = 0; i < instances.size(); ++i) {
+    //     InstanceData* instance = reinterpret_cast<InstanceData*>(instanceDataBuffer->contents()) + i;
+    //     instance->modelMatrix = instances[i].modelMatrix;
+    //     instance->color = instances[i].color;
+    // }
     instanceDataBuffer->didModifyRange(NS::Range::Make(0, instanceDataBuffer->length()));
 
     glm::vec3 camPos = glm::vec3(0.0f, 2.0f, 2.0f);
@@ -112,7 +122,7 @@ auto Renderer_Metal::draw() -> void {
     auto encoder = cmd->renderCommandEncoder(pass.get());
 
     encoder->setRenderPipelineState(testDrawPipeline.get());
-    encoder->setFragmentTexture(testOBJTexture.get(), 0);
+    encoder->setFragmentTexture(testAlbedoTexture.get(), 0);
     encoder->setFragmentTexture(testNormalTexture.get(), 1);
     encoder->setVertexBuffer(testVertexBuffer.get(), 0, 0);
     encoder->setVertexBuffer(cameraDataBuffer.get(), 0, 1);
@@ -139,12 +149,12 @@ auto Renderer_Metal::draw() -> void {
 }
 
 void Renderer_Metal::initTestPipelines() {
-    testDrawPipeline = createPipeline("assets/shaders/3d_unshaded.metal");
+    testDrawPipeline = createPipeline("assets/shaders/3d_blinn_phong_normal_mapped.metal");
 }
 
 void Renderer_Metal::initTestBuffers() {
-    testVertexBuffer = createVertexBuffer(testOBJMesh->vertices);
-    testIndexBuffer = createIndexBuffer(testOBJMesh->indices);
+    testVertexBuffer = createVertexBuffer(testMesh->vertices);
+    testIndexBuffer = createIndexBuffer(testMesh->indices);
 
     cameraDataBuffer = NS::TransferPtr(device->newBuffer(sizeof(CameraData), MTL::ResourceStorageModeManaged));
 

@@ -44,11 +44,10 @@ private:
     NS::SharedPtr<MTL::DepthStencilState> depthStencilState;
     NS::SharedPtr<MTL::RenderPipelineState> testDrawPipeline;
 
-    Mesh* testOBJMesh;
+    Mesh* testMesh;
 
     NS::SharedPtr<MTL::Texture> testAlbedoTexture;
     NS::SharedPtr<MTL::Texture> testNormalTexture;
-    NS::SharedPtr<MTL::Texture> testOBJTexture;
     NS::SharedPtr<MTL::Buffer> testVertexBuffer;
     NS::SharedPtr<MTL::Buffer> testIndexBuffer;
 

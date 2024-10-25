@@ -3,8 +3,10 @@ using namespace metal;
 
 struct VertexData {
     packed_float3 position;
+    packed_float2 uv;
     packed_float3 normal;
-    float2 uv;
+    packed_float3 tangent;
+    packed_float3 bitangent;
 };
 
 struct CameraData {
