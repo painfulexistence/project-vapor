@@ -205,56 +205,61 @@ NS::SharedPtr<MTL::RenderPipelineState> Renderer_Metal::createPipeline(const std
 
 NS::SharedPtr<MTL::Texture> Renderer_Metal::createTexture(const std::string& filename) {
     int width, height, numChannels;
-    uint8_t* data = stbi_load(filename.c_str(), &width, &height, &numChannels, 0);
-    if (data) {
-        NS::Error* error = nullptr;
-
-        auto textureDesc = NS::TransferPtr(MTL::TextureDescriptor::alloc()->init());
+    if (stbi_info(filename.c_str(), &width, &height, &numChannels)) {
+        int desiredChannels = 0;
+        MTL::PixelFormat pixelFormat = MTL::PixelFormat::PixelFormatBGRA8Unorm_sRGB;
         switch (numChannels) {
         case 1:
-            textureDesc->setPixelFormat(MTL::PixelFormat::PixelFormatR8Unorm_sRGB);
+            desiredChannels = 1;
+            pixelFormat = MTL::PixelFormat::PixelFormatR8Unorm_sRGB;
             break;
         case 3:
-            textureDesc->setPixelFormat(MTL::PixelFormat::PixelFormatBGRA8Unorm_sRGB);
+            desiredChannels = 4;
+            pixelFormat = MTL::PixelFormat::PixelFormatBGRA8Unorm_sRGB;
             break;
         case 4:
-            textureDesc->setPixelFormat(MTL::PixelFormat::PixelFormatBGRA8Unorm_sRGB);
+            desiredChannels = 4;
+            pixelFormat = MTL::PixelFormat::PixelFormatBGRA8Unorm_sRGB;
             break;
         default:
             throw std::runtime_error(fmt::format("Unknown texture format at {}\n", filename));
             break;
         }
-        textureDesc->setPixelFormat(MTL::PixelFormat::PixelFormatBGRA8Unorm_sRGB);
-        textureDesc->setTextureType(MTL::TextureType::TextureType2D);
-        textureDesc->setWidth(NS::UInteger(width));
-        textureDesc->setHeight(NS::UInteger(height));
-        textureDesc->setMipmapLevelCount(10);
-        textureDesc->setSampleCount(1);
-        textureDesc->setStorageMode(MTL::StorageMode::StorageModeManaged);
-        textureDesc->setUsage(MTL::ResourceUsageSample | MTL::ResourceUsageRead);
+        uint8_t* data = stbi_load(filename.c_str(), &width, &height, &numChannels, desiredChannels);
+        if (data) {
+            NS::Error* error = nullptr;
 
-        auto texture = NS::TransferPtr(device->newTexture(textureDesc.get()));
-        if (numChannels == 3) {
-            throw std::runtime_error(fmt::format("RGB texture not supported yet!\n"));
+            auto textureDesc = NS::TransferPtr(MTL::TextureDescriptor::alloc()->init());
+            textureDesc->setPixelFormat(pixelFormat);
+            textureDesc->setTextureType(MTL::TextureType::TextureType2D);
+            textureDesc->setWidth(NS::UInteger(width));
+            textureDesc->setHeight(NS::UInteger(height));
+            textureDesc->setMipmapLevelCount(10);
+            textureDesc->setSampleCount(1);
+            textureDesc->setStorageMode(MTL::StorageMode::StorageModeManaged);
+            textureDesc->setUsage(MTL::ResourceUsageSample | MTL::ResourceUsageRead);
+
+            auto texture = NS::TransferPtr(device->newTexture(textureDesc.get()));
+            texture->replaceRegion(MTL::Region(0, 0, 0, width, height, 1), 0, data, width * desiredChannels);
+
+            stbi_image_free(data);
+
+            auto cmdBlit = NS::TransferPtr(queue->commandBuffer());
+
+            auto enc = NS::TransferPtr(cmdBlit->blitCommandEncoder());
+            enc->generateMipmaps(texture.get());
+            enc->endEncoding();
+
+            cmdBlit->commit();
+
+            return texture;
         } else {
-            texture->replaceRegion(MTL::Region(0, 0, 0, width, height, 1), 0, data, width * numChannels);
+            throw std::runtime_error(fmt::format("Failed to load image at {}!\n", filename));
         }
-
         stbi_image_free(data);
-
-        auto cmdBlit = NS::TransferPtr(queue->commandBuffer());
-
-        auto enc = NS::TransferPtr(cmdBlit->blitCommandEncoder());
-        enc->generateMipmaps(texture.get());
-        enc->endEncoding();
-
-        cmdBlit->commit();
-
-        return texture;
     } else {
         throw std::runtime_error(fmt::format("Failed to load image at {}!\n", filename));
     }
-    stbi_image_free(data);
 }
 
 NS::SharedPtr<MTL::Buffer> Renderer_Metal::createVertexBuffer(std::vector<VertexData> vertices) {
