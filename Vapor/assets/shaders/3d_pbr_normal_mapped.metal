@@ -37,23 +37,14 @@ struct Surface {
 
 struct DirLight {
     float3 direction;
-    float3 ambient;
-    float3 diffuse;
-    float3 specular;
+    float3 color;
     float intensity;
-    int cast_shadow;
-    float4x4 ProjectionView;
 };
 
 struct PointLight {
     float3 position;
-    float3 attenuation;
-    float3 ambient;
-    float3 diffuse;
-    float3 specular;
+    float3 color;
     float intensity;
-    int cast_shadow;
-    float4x4 ProjectionViews[6];
 };
 
 struct LightData {
@@ -64,6 +55,16 @@ struct LightData {
 
 constexpr constant float PI = 3.1415927;
 constexpr constant float gamma = 2.2;
+constant DirLight mainLight = {
+    float3(0.0f, -1.0f, 0.0f),
+    float3(1.0f, 1.0f, 1.0f),
+    10.0f,
+};
+constant PointLight auxLight = {
+    float3(0.0f, -10.0f, 0.0f),
+    float3(1.0f, 0.0f, 0.0f),
+    100.0f,
+};
 
 float TrowbridgeReitzGGX(float nh, float r) {
     float r2 = r * r;
@@ -100,28 +101,21 @@ float3 CookTorranceBRDF(float3 norm, float3 lightDir, float3 viewDir, Surface su
     return diffuse + specular;
 }
 
-// float3 CalculateDirectionalLight(DirLight light, float3 norm, float3 viewDir, Surface surf, float3 frag_pos) {
-//     float3 lightDir = normalize(-light.direction);
+float3 CalculateDirectionalLight(DirLight light, float3 norm, float3 viewDir, Surface surf) {
+    float3 lightDir = normalize(-light.direction);
+    float3 radiance = light.color * light.intensity;
 
-//     float4 lightSpaceFragPos = light.ProjectionView * float4(frag_pos, 1.0);
-//     float3 lightSpaceFragCoords = lightSpaceFragPos.xyz / lightSpaceFragPos.w;
-//     float3 radiance = light.diffuse;
+    return CookTorranceBRDF(norm, lightDir, viewDir, surf) * radiance * clamp(dot(norm, lightDir), 0.0, 1.0);
+}
 
-//     return CookTorranceBRDF(norm, lightDir, viewDir, surf) * radiance * clamp(dot(norm, lightDir), 0.0, 1.0);
-// }
+float3 CalculatePointLight(PointLight light, float3 norm, float3 viewDir, Surface surf, float3 fragPos) {
+    float3 lightDir = normalize(light.position - fragPos);
+    float dist = distance(light.position, fragPos);
+    float attenuation = 1.0 / (dist * dist);
+    float3 radiance = attenuation * light.color * light.intensity;
 
-// float3 CalculatePointLight(PointLight light, float3 norm, float3 viewDir, Surface surf, float3 frag_pos) {
-//     float3 lightDir = normalize(light.position - frag_pos);
-
-//     float dist = distance(light.position, frag_pos);
-//     float attenuation = 1.0 / (dist * dist);
-//     float3 radiance = attenuation * light.diffuse;
-
-//     return CookTorranceBRDF(norm, lightDir, viewDir, surf) * radiance * clamp(dot(norm, lightDir), 0.0, 1.0);
-// }
-
-constant float3 lightDir = float3(0.0f, 1.0f, 0.0f); // needs to be normalized
-constant float lightPower = 5.0f;
+    return CookTorranceBRDF(norm, lightDir, viewDir, surf) * radiance * clamp(dot(norm, lightDir), 0.0, 1.0);
+}
 
 vertex RasterizerData vertexMain(uint vertexID [[vertex_id]], device const VertexData* in [[buffer(0)]], device const CameraData& camera [[buffer(1)]], device const InstanceData& instance [[buffer(2)]]) {
     RasterizerData vert;
@@ -146,7 +140,9 @@ fragment half4 fragmentMain(RasterizerData in [[stage_in]], texture2d<float, acc
     float3 norm = normalize(TBN * normalize(texNormal.sample(s, in.uv).bgr * 2.0 - 1.0));
     float3 viewDir = normalize(*camPos - in.worldPosition.xyz);
 
-    float3 result = CookTorranceBRDF(norm, lightDir, viewDir, surf) * float3(lightPower) * clamp(dot(norm, lightDir), 0.0, 1.0);
+    float3 result = float3(0.0);
+    result += CalculateDirectionalLight(mainLight, norm, viewDir, surf); // result += CookTorranceBRDF(norm, lightDir, viewDir, surf) * (mainLight.color * mainLight.intensity) * clamp(dot(norm, lightDir), 0.0, 1.0);
+    // result += CalculatePointLight(auxLight, norm, viewDir, surf, in.worldPosition.xyz);
     result += float3(0.2) * (1.0 - surf.ao) * surf.color;
 
     // result = pow(result, float3(1.0 / gamma));
