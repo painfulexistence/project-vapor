@@ -134,7 +134,8 @@ auto Renderer_Metal::draw() -> void {
     encoder->setVertexBuffer(instanceDataBuffer.get(), 0, 2);
     encoder->setFragmentBytes(&camPos, sizeof(glm::vec3), 0);
     encoder->setFragmentBytes(&time, sizeof(float), 1);
-    encoder->setCullMode(MTL::CullModeNone);
+    encoder->setCullMode(MTL::CullModeBack);
+    encoder->setFrontFacingWinding(MTL::Winding::WindingCounterClockwise);
     encoder->setDepthStencilState(depthStencilState.get());
     // encoder->drawPrimitives(MTL::PrimitiveType::PrimitiveTypeTriangle, NS::UInteger(0), NS::UInteger(6));
     encoder->drawIndexedPrimitives(
