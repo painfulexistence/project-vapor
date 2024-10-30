@@ -8,6 +8,7 @@ FetchContent_Declare(SDL2
 FetchContent_MakeAvailable(SDL2)
 find_package(fmt CONFIG REQUIRED)
 find_package(glm CONFIG REQUIRED)
+find_package(Vulkan REQUIRED)
 
 add_subdirectory(metal)
 
@@ -15,13 +16,14 @@ set(SOURCES
     main.cpp
     helper.cpp
     renderer_metal.cpp
+    renderer_vulkan.cpp
     mesh.cpp
 )
 
 add_executable(main ${SOURCES})
 target_compile_features(main PRIVATE cxx_std_20)
 set_target_properties(main PROPERTIES CXX_EXTENSIONS OFF)
-target_link_libraries(main PRIVATE SDL2::SDL2 metal fmt::fmt glm::glm)
+target_link_libraries(main PRIVATE SDL2::SDL2 metal fmt::fmt glm::glm Vulkan::Vulkan)
 
 add_custom_target(copy_assets COMMAND ${CMAKE_COMMAND} -E copy_directory ${CMAKE_CURRENT_SOURCE_DIR}/assets ${PROJECT_BINARY_DIR}/assets)
 add_dependencies(main copy_assets)

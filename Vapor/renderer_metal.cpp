@@ -33,6 +33,9 @@ struct InstanceData {
 
 Renderer_Metal::Renderer_Metal(SDL_Window* window) {
     renderer = SDL_CreateRenderer(window, -1, 0);
+    swapchain = (CA::MetalLayer*)SDL_RenderGetMetalLayer(renderer);
+    device = swapchain->device();
+    queue = NS::TransferPtr(device->newCommandQueue());
 }
 
 Renderer_Metal::~Renderer_Metal() {
@@ -40,10 +43,6 @@ Renderer_Metal::~Renderer_Metal() {
 }
 
 auto Renderer_Metal::init() -> void {
-    swapchain = (CA::MetalLayer*)SDL_RenderGetMetalLayer(renderer);
-    device = swapchain->device();
-    queue = NS::TransferPtr(device->newCommandQueue());
-
     initTestPipelines();
     testMesh = MeshBuilder::buildCube(1.0); // loadMesh(std::string("assets/models/viking_room.obj"));
     testAlbedoTexture = createTexture(std::string("assets/textures/american_walnut_albedo.png")); // createTexture(std::string("assets/textures/viking_room.png"));

@@ -1,6 +1,23 @@
 #include "SDL.h"
 #include "fmt/core.h"
 #include "renderer_metal.hpp"
+#include "renderer_vulkan.hpp"
+
+enum GraphicsBackend {
+    Metal,
+    Vulkan
+};
+
+Renderer* createRenderer(GraphicsBackend backend, SDL_Window* window) {
+    switch (backend) {
+    case Metal:
+        return (Renderer*)new Renderer_Metal(window);
+    case Vulkan:
+        return (Renderer*)new Renderer_Vulkan(window);
+    default:
+        return nullptr;
+    }
+}
 
 int main(int argc, char* args[]) {
     if (SDL_Init(SDL_INIT_VIDEO) < 0) {
@@ -8,10 +25,11 @@ int main(int argc, char* args[]) {
         return 1;
     }
     auto window = SDL_CreateWindow(
-      "MyApp", SDL_WINDOWPOS_UNDEFINED, SDL_WINDOWPOS_UNDEFINED, 800, 600, SDL_WINDOW_SHOWN | SDL_WINDOW_RESIZABLE
+      "MyApp", SDL_WINDOWPOS_UNDEFINED, SDL_WINDOWPOS_UNDEFINED, 800, 600,
+      SDL_WINDOW_SHOWN | SDL_WINDOW_RESIZABLE | SDL_WINDOW_VULKAN
     );
 
-    auto renderer = (Renderer*)new Renderer_Metal(window);
+    auto renderer = createRenderer(GraphicsBackend::Vulkan, window);
     renderer->init();
 
     bool quit = false;

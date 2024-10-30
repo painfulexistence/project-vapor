@@ -14,9 +14,9 @@ public:
 
     ~Renderer_Metal();
 
-    virtual void init();
+    virtual void init() override;
 
-    virtual void draw();
+    virtual void draw() override;
 
     void initTestPipelines();
 
