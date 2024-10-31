@@ -406,7 +406,13 @@ auto Renderer_Vulkan::draw() -> void {
         throw std::runtime_error("Failed to begin recording command buffer!");
     }
 
-    insertImageMemoryBarrier2(cmd, swapchainImages[swapchainImageIndex], VK_IMAGE_LAYOUT_UNDEFINED, VK_IMAGE_LAYOUT_ATTACHMENT_OPTIMAL, { VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1 });
+    insertImageMemoryBarrier(
+        cmd, swapchainImages[swapchainImageIndex],
+        0, VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT,
+	    VK_IMAGE_LAYOUT_UNDEFINED, VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL,
+		VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT, VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT,
+        { VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1 }
+    );
 
 	VkClearColorValue clearValue = { 0.0f, 0.0f, 0.2f, 0.0f };
     VkImageSubresourceRange subresourceRange = { VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1 };
@@ -431,7 +437,13 @@ auto Renderer_Vulkan::draw() -> void {
     // vkCmdDraw(cmd, 6, 1, 0, 0);
     vkCmdEndRendering(cmd);
 
-    insertImageMemoryBarrier2(cmd, swapchainImages[swapchainImageIndex], VK_IMAGE_LAYOUT_ATTACHMENT_OPTIMAL, VK_IMAGE_LAYOUT_PRESENT_SRC_KHR, { VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1 });
+    insertImageMemoryBarrier(
+        cmd, swapchainImages[swapchainImageIndex],
+		VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT, 0,
+		VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL, VK_IMAGE_LAYOUT_PRESENT_SRC_KHR,
+	    VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT, VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT,
+        { VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1 }
+    );
     if (vkEndCommandBuffer(cmd) != VK_SUCCESS) {
         throw std::runtime_error("Failed to end recording command buffer!");
     }
