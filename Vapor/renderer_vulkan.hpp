@@ -43,5 +43,7 @@ private:
     std::vector<VkSemaphore> renderFinishedSemaphores;
     std::vector<VkFence> renderFences;
 
+    VkPipeline testDrawPipeline;
+
     const int FRAMES_IN_FLIGHT = 3;
 };
