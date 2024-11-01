@@ -1,0 +1,47 @@
+#version 450
+
+layout(local_size_x = 16, local_size_y = 16, local_size_z = 1) in;
+layout(set = 1, binding = 0, rgba8) uniform writeonly image2D outImage;
+layout(set = 2, binding = 0) uniform UBO {
+    float time;
+};
+
+float random(vec2 st) {
+    return fract(sin(dot(st.xy, vec2(12.9898, 78.233))) * 43758.5453123);
+}
+
+void main() {
+    ivec2 coord = ivec2(gl_GlobalInvocationID.xy);
+    ivec2 size = imageSize(outImage);
+
+    if (coord.x >= size.x || coord.y >= size.y) {
+        return;
+    }
+
+    vec2 uv = vec2(coord) / vec2(size);
+
+    // Checkerboard pattern
+    float checkerSize = 0.1;
+    vec2 checkerCoord = floor(uv / checkerSize);
+    float checker = mod(checkerCoord.x + checkerCoord.y, 2.0);
+
+    // Concentric circles
+    vec2 center = vec2(0.5, 0.5);
+    float dist = distance(uv, center);
+    float circles = sin(dist * 50.0 + time) * 0.5 + 0.5;
+
+    // Noise
+    float noise = random(uv + vec2(time * 0.1, time * 0.1));
+
+    // Combine patterns
+    vec3 color = vec3(checker);
+
+    // Color variation
+    color.r += sin(time * 0.5) * 0.2;
+    color.g += cos(time * 0.7) * 0.2;
+    color.b += sin(time * 0.9) * 0.2;
+
+    color = clamp(color, 0.0, 1.0);
+
+    imageStore(outImage, coord, vec4(color, 1.0));
+}

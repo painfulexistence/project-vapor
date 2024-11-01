@@ -25,5 +25,22 @@ target_compile_features(main PRIVATE cxx_std_20)
 set_target_properties(main PROPERTIES CXX_EXTENSIONS OFF)
 target_link_libraries(main PRIVATE SDL2::SDL2 metal fmt::fmt glm::glm Vulkan::Vulkan)
 
-add_custom_target(copy_assets COMMAND ${CMAKE_COMMAND} -E copy_directory ${CMAKE_CURRENT_SOURCE_DIR}/assets ${PROJECT_BINARY_DIR}/assets)
+find_program(GLSL_VALIDATOR "glslangValidator" REQUIRED)
+file(GLOB_RECURSE SHADER_SOURCES CONFIGURE_DEPENDS
+	${CMAKE_CURRENT_SOURCE_DIR}/assets/shaders/*.vert
+	${CMAKE_CURRENT_SOURCE_DIR}/assets/shaders/*.frag
+	${CMAKE_CURRENT_SOURCE_DIR}/assets/shaders/*.comp
+)
+foreach(GLSL ${SHADER_SOURCES})
+	get_filename_component(SOURCE_NAME ${GLSL} NAME)
+	set(SPIRV ${CMAKE_CURRENT_SOURCE_DIR}/assets/shaders/${SOURCE_NAME}.spv)
+	add_custom_command(
+		OUTPUT ${SPIRV}
+		COMMAND ${GLSL_VALIDATOR} -V ${GLSL} -o ${SPIRV}
+		DEPENDS ${GLSL}
+	)
+	list(APPEND SPIRV_BINARY_FILES ${SPIRV})
+endforeach(GLSL)
+
+add_custom_target(copy_assets COMMAND ${CMAKE_COMMAND} -E copy_directory ${CMAKE_CURRENT_SOURCE_DIR}/assets ${PROJECT_BINARY_DIR}/assets DEPENDS ${SPIRV_BINARY_FILES})
 add_dependencies(main copy_assets)
