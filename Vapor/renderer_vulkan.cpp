@@ -301,27 +301,6 @@ Renderer_Vulkan::Renderer_Vulkan(SDL_Window* window) {
     swapchainImages.resize(swapchainImageCount);
     vkGetSwapchainImagesKHR(device, swapchain, &swapchainImageCount, swapchainImages.data());
 
-    swapchainImageViews.resize(swapchainImages.size());
-    for (size_t i = 0; i < swapchainImages.size(); i++) {
-        VkImageViewCreateInfo imageViewInfo{};
-        imageViewInfo.sType = VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO;
-        imageViewInfo.image = swapchainImages[i];
-        imageViewInfo.viewType = VK_IMAGE_VIEW_TYPE_2D;
-        imageViewInfo.format = swapchainImageFormat;
-        imageViewInfo.components.r = VK_COMPONENT_SWIZZLE_IDENTITY;
-        imageViewInfo.components.g = VK_COMPONENT_SWIZZLE_IDENTITY;
-        imageViewInfo.components.b = VK_COMPONENT_SWIZZLE_IDENTITY;
-        imageViewInfo.components.a = VK_COMPONENT_SWIZZLE_IDENTITY;
-        imageViewInfo.subresourceRange.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
-        imageViewInfo.subresourceRange.baseMipLevel = 0;
-        imageViewInfo.subresourceRange.levelCount = 1;
-        imageViewInfo.subresourceRange.baseArrayLayer = 0;
-        imageViewInfo.subresourceRange.layerCount = 1;
-        if (vkCreateImageView(device, &imageViewInfo, nullptr, &swapchainImageViews[i]) != VK_SUCCESS) {
-            throw std::runtime_error("Failed to create one of image views!");
-        }
-    }
-
     // Create command pools and command buffers
     VkCommandPoolCreateInfo poolInfo = {
         VK_STRUCTURE_TYPE_COMMAND_POOL_CREATE_INFO,
@@ -386,6 +365,85 @@ Renderer_Vulkan::~Renderer_Vulkan() {
 }
 
 auto Renderer_Vulkan::init() -> void {
+    // Create image views
+    swapchainImageViews.resize(swapchainImages.size());
+    for (size_t i = 0; i < swapchainImages.size(); i++) {
+        VkImageViewCreateInfo imageViewInfo{};
+        imageViewInfo.sType = VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO;
+        imageViewInfo.image = swapchainImages[i];
+        imageViewInfo.viewType = VK_IMAGE_VIEW_TYPE_2D;
+        imageViewInfo.format = swapchainImageFormat;
+        imageViewInfo.components.r = VK_COMPONENT_SWIZZLE_IDENTITY;
+        imageViewInfo.components.g = VK_COMPONENT_SWIZZLE_IDENTITY;
+        imageViewInfo.components.b = VK_COMPONENT_SWIZZLE_IDENTITY;
+        imageViewInfo.components.a = VK_COMPONENT_SWIZZLE_IDENTITY;
+        imageViewInfo.subresourceRange.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
+        imageViewInfo.subresourceRange.baseMipLevel = 0;
+        imageViewInfo.subresourceRange.levelCount = 1;
+        imageViewInfo.subresourceRange.baseArrayLayer = 0;
+        imageViewInfo.subresourceRange.layerCount = 1;
+        if (vkCreateImageView(device, &imageViewInfo, nullptr, &swapchainImageViews[i]) != VK_SUCCESS) {
+            throw std::runtime_error("Failed to create one of image views!");
+        }
+    }
+
+    if (!enableDynamicRendering) {
+        // Create render passes
+        VkAttachmentDescription colorAttachment = {};
+        colorAttachment.format = swapchainImageFormat;
+        colorAttachment.samples = VK_SAMPLE_COUNT_1_BIT;
+        colorAttachment.loadOp = VK_ATTACHMENT_LOAD_OP_CLEAR;
+        colorAttachment.storeOp = VK_ATTACHMENT_STORE_OP_STORE;
+        colorAttachment.initialLayout = VK_IMAGE_LAYOUT_UNDEFINED;
+        colorAttachment.finalLayout = VK_IMAGE_LAYOUT_PRESENT_SRC_KHR;
+
+        VkAttachmentReference colorAttachmentRef = {};
+        colorAttachmentRef.attachment = 0; // index in attachment descriptions array, also index in shader layout
+        colorAttachmentRef.layout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL;
+
+        VkSubpassDescription subpass = {};
+        subpass.pipelineBindPoint = VK_PIPELINE_BIND_POINT_GRAPHICS;
+        subpass.colorAttachmentCount = 1;
+        subpass.pColorAttachments = &colorAttachmentRef;
+
+        VkSubpassDependency dependency = {};
+        dependency.srcSubpass = VK_SUBPASS_EXTERNAL;
+        dependency.dstSubpass = 0;
+        dependency.srcStageMask = VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT;
+        dependency.srcAccessMask = 0;
+        dependency.dstStageMask = VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT;
+        dependency.dstAccessMask = VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT;
+
+        VkRenderPassCreateInfo renderPassInfo{};
+        renderPassInfo.sType = VK_STRUCTURE_TYPE_RENDER_PASS_CREATE_INFO;
+        renderPassInfo.attachmentCount = 1;
+        renderPassInfo.pAttachments = &colorAttachment;
+        renderPassInfo.subpassCount = 1;
+        renderPassInfo.pSubpasses = &subpass;
+        renderPassInfo.dependencyCount = 1;
+        renderPassInfo.pDependencies = &dependency;
+        if (vkCreateRenderPass(device, &renderPassInfo, nullptr, &renderPass) !=
+            VK_SUCCESS) {
+            throw std::runtime_error("Failed to create render pass!");
+        }
+
+        // Create framebuffers
+        framebuffers.resize(FRAMES_IN_FLIGHT);
+        for (size_t i = 0; i < FRAMES_IN_FLIGHT; i++) {
+            VkImageView attachments[] = { swapchainImageViews[i] };
+            VkFramebufferCreateInfo framebufferInfo = { VK_STRUCTURE_TYPE_FRAMEBUFFER_CREATE_INFO };
+            framebufferInfo.renderPass = renderPass;
+            framebufferInfo.attachmentCount = 1;
+            framebufferInfo.pAttachments = attachments;
+            framebufferInfo.width = swapchainExtent.width;
+            framebufferInfo.height = swapchainExtent.height;
+            framebufferInfo.layers = 1;
+            if (vkCreateFramebuffer(device, &framebufferInfo, nullptr, &framebuffers[i]) != VK_SUCCESS) {
+                throw std::runtime_error("Failed to create framebuffer!");
+            }
+        }
+    }
+
     testDrawPipeline = createPipeline("assets/shaders/3d_pbr_normal_mapped.metal"); // TODO: update this line
 }
 
@@ -406,44 +464,61 @@ auto Renderer_Vulkan::draw() -> void {
         throw std::runtime_error("Failed to begin recording command buffer!");
     }
 
-    insertImageMemoryBarrier(
-        cmd, swapchainImages[swapchainImageIndex],
-        0, VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT,
-	    VK_IMAGE_LAYOUT_UNDEFINED, VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL,
-		VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT, VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT,
-        { VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1 }
-    );
+    if (!enableDynamicRendering) {
+        VkRenderPassBeginInfo renderPassInfo{};
+        renderPassInfo.sType = VK_STRUCTURE_TYPE_RENDER_PASS_BEGIN_INFO;
+        renderPassInfo.renderPass = renderPass;
+        renderPassInfo.framebuffer = framebuffers[swapchainImageIndex];
+        renderPassInfo.renderArea = { 0, 0, swapchainExtent.width, swapchainExtent.height };
+        VkClearValue clearColor = { 0.0f, 0.0f, 0.0f, 1.0f };
+        renderPassInfo.clearValueCount = 1;
+        renderPassInfo.pClearValues = &clearColor;
 
-	VkClearColorValue clearValue = { 0.0f, 0.0f, 0.2f, 0.0f };
-    VkImageSubresourceRange subresourceRange = { VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1 };
-	vkCmdClearColorImage(cmd, swapchainImages[swapchainImageIndex], VK_IMAGE_LAYOUT_GENERAL, &clearValue, 1, &subresourceRange);
+        vkCmdBeginRenderPass(cmd, &renderPassInfo, VK_SUBPASS_CONTENTS_INLINE);
+        vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, testDrawPipeline);
+        vkCmdDraw(cmd, 12, 1, 0, 0);
+        vkCmdEndRenderPass(cmd);
+    } else {
+        insertImageMemoryBarrier(
+            cmd, swapchainImages[swapchainImageIndex],
+            0, VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT,
+            VK_IMAGE_LAYOUT_UNDEFINED, VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL,
+            VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT, VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT,
+            { VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1 }
+        );
 
-    VkRenderingAttachmentInfo colorAttachment = { VK_STRUCTURE_TYPE_RENDERING_ATTACHMENT_INFO };
-    colorAttachment.imageView = swapchainImageViews[swapchainImageIndex];
-    colorAttachment.imageLayout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL;
-    colorAttachment.resolveMode = VK_RESOLVE_MODE_NONE;
-    colorAttachment.loadOp = VK_ATTACHMENT_LOAD_OP_CLEAR;
-    colorAttachment.storeOp = VK_ATTACHMENT_STORE_OP_STORE;
-    colorAttachment.clearValue.color = { 0.0f, 0.0f, 0.2f, 0.0f };
+        VkClearColorValue clearValue = { 0.0f, 0.0f, 0.2f, 0.0f };
+        VkImageSubresourceRange subresourceRange = { VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1 };
+        vkCmdClearColorImage(cmd, swapchainImages[swapchainImageIndex], VK_IMAGE_LAYOUT_GENERAL, &clearValue, 1, &subresourceRange);
 
-    VkRenderingInfo renderingInfo = { VK_STRUCTURE_TYPE_RENDERING_INFO_KHR };
-    renderingInfo.renderArea = { 0, 0, swapchainExtent.width, swapchainExtent.height };
-    renderingInfo.layerCount = 1;
-    renderingInfo.colorAttachmentCount = 1;
-    renderingInfo.pColorAttachments = &colorAttachment;
+        VkRenderingAttachmentInfo colorAttachment = { VK_STRUCTURE_TYPE_RENDERING_ATTACHMENT_INFO };
+        colorAttachment.imageView = swapchainImageViews[swapchainImageIndex];
+        colorAttachment.imageLayout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL;
+        colorAttachment.resolveMode = VK_RESOLVE_MODE_NONE;
+        colorAttachment.loadOp = VK_ATTACHMENT_LOAD_OP_CLEAR;
+        colorAttachment.storeOp = VK_ATTACHMENT_STORE_OP_STORE;
+        colorAttachment.clearValue.color = { 0.0f, 0.0f, 0.2f, 0.0f };
 
-    vkCmdBeginRendering(cmd, &renderingInfo);
-    // vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, testDrawPipeline);
-    // vkCmdDraw(cmd, 6, 1, 0, 0);
-    vkCmdEndRendering(cmd);
+        VkRenderingInfo renderingInfo = { VK_STRUCTURE_TYPE_RENDERING_INFO_KHR };
+        renderingInfo.renderArea = { 0, 0, swapchainExtent.width, swapchainExtent.height };
+        renderingInfo.layerCount = 1;
+        renderingInfo.colorAttachmentCount = 1;
+        renderingInfo.pColorAttachments = &colorAttachment;
 
-    insertImageMemoryBarrier(
-        cmd, swapchainImages[swapchainImageIndex],
-		VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT, 0,
-		VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL, VK_IMAGE_LAYOUT_PRESENT_SRC_KHR,
-	    VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT, VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT,
-        { VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1 }
-    );
+        vkCmdBeginRendering(cmd, &renderingInfo);
+        // vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, testDrawPipeline);
+        // vkCmdDraw(cmd, 6, 1, 0, 0);
+        vkCmdEndRendering(cmd);
+
+        insertImageMemoryBarrier(
+            cmd, swapchainImages[swapchainImageIndex],
+            VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT, 0,
+            VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL, VK_IMAGE_LAYOUT_PRESENT_SRC_KHR,
+            VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT, VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT,
+            { VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1 }
+        );
+    }
+
     if (vkEndCommandBuffer(cmd) != VK_SUCCESS) {
         throw std::runtime_error("Failed to end recording command buffer!");
     }
@@ -599,7 +674,13 @@ VkPipeline Renderer_Vulkan::createPipeline(const std::string& filename) {
     pipelineInfo.pViewportState = &viewportStateInfo;
     pipelineInfo.pDepthStencilState = &depthStencilStateInfo;
     pipelineInfo.pDynamicState = &dynamicStateInfo;
-    pipelineInfo.pNext = &pipelineRenderingInfo;
+    if (!enableDynamicRendering) {
+        pipelineInfo.renderPass = renderPass;
+        pipelineInfo.subpass = 0;
+        pipelineInfo.pNext = nullptr;
+    } else {
+        pipelineInfo.pNext = &pipelineRenderingInfo;
+    }
 
     VkPipeline pipeline;
     if (vkCreateGraphicsPipelines(device, nullptr, 1, &pipelineInfo, nullptr, &pipeline) != VK_SUCCESS) {

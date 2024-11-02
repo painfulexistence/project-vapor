@@ -35,6 +35,7 @@ private:
 
     std::vector<VkImage> swapchainImages;
     std::vector<VkImageView> swapchainImageViews;
+    std::vector<VkFramebuffer> framebuffers;
     VkCommandPool commandPool;
     std::vector<VkCommandBuffer> commandBuffers;
 
@@ -44,6 +45,8 @@ private:
     std::vector<VkFence> renderFences;
 
     VkPipeline testDrawPipeline;
+    VkRenderPass renderPass;
 
     const int FRAMES_IN_FLIGHT = 3;
+    bool enableDynamicRendering = false;
 };
