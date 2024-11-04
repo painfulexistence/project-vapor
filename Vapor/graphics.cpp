@@ -1,4 +1,4 @@
-#include "mesh.hpp"
+#include "graphics.hpp"
 #include <utility>
 
 void Mesh::initialize(const MeshData& data) {

@@ -1,14 +1,8 @@
 #include "renderer_vulkan.hpp"
-#include "mesh.hpp"
+#include "graphics.hpp"
 
 #include "fmt/core.h"
 #include "helper.hpp"
-
-// #define STB_IMAGE_IMPLEMENTATION
-#include "stb/stb_image.h"
-
-// #define TINYOBJLOADER_IMPLEMENTATION
-#include "tinyobjloader/tiny_obj_loader.h"
 
 #include "glm/vec2.hpp"
 #include "glm/vec3.hpp"

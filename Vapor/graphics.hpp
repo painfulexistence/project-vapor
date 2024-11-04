@@ -8,6 +8,21 @@
 #include <glm/vec3.hpp>
 #include <glm/vec4.hpp>
 
+class Image {
+public:
+    Image(int width, int height, int channelCount, uint8_t* data){
+        this->width = width;
+        this->height = height;
+        this->channelCount = channelCount;
+        int numBytes = width * height * channelCount;
+        this->byteArray = std::vector<uint8_t>(data, data + numBytes);
+    };
+    int width;
+    int height;
+    int channelCount;
+    std::vector<uint8_t> byteArray;
+};
+
 struct VertexData {
     glm::vec3 position;
     glm::vec2 uv;

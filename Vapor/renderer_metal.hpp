@@ -1,6 +1,6 @@
 #pragma once
 #include "renderer.hpp"
-#include "mesh.hpp"
+#include "graphics.hpp"
 
 #include "SDL.h"
 #include <Foundation/Foundation.hpp>
@@ -20,8 +20,6 @@ public:
 
     void initTestPipelines();
 
-    void initTestBuffers();
-
     NS::SharedPtr<MTL::RenderPipelineState> createPipeline(const std::string& filename);
 
     NS::SharedPtr<MTL::Texture> createTexture(const std::string& filename);
@@ -29,8 +27,6 @@ public:
     NS::SharedPtr<MTL::Buffer> createVertexBuffer(std::vector<VertexData> vertices);
 
     NS::SharedPtr<MTL::Buffer> createIndexBuffer(std::vector<uint16_t> indices);
-
-    Mesh* loadMesh(const std::string& filename);
 
 private:
     SDL_Renderer* renderer;
@@ -43,8 +39,6 @@ private:
 
     NS::SharedPtr<MTL::DepthStencilState> depthStencilState;
     NS::SharedPtr<MTL::RenderPipelineState> testDrawPipeline;
-
-    Mesh* testMesh;
 
     NS::SharedPtr<MTL::Texture> testAlbedoTexture;
     NS::SharedPtr<MTL::Texture> testNormalTexture;

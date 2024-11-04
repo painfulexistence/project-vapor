@@ -2,16 +2,11 @@
 #define MTL_PRIVATE_IMPLEMENTATION
 #define CA_PRIVATE_IMPLEMENTATION
 #include "renderer_metal.hpp"
-#include "mesh.hpp"
+#include "graphics.hpp"
+#include "asset_manager.hpp"
 
 #include "fmt/core.h"
 #include "helper.hpp"
-
-#define STB_IMAGE_IMPLEMENTATION
-#include "stb/stb_image.h"
-
-#define TINYOBJLOADER_IMPLEMENTATION
-#include "tinyobjloader/tiny_obj_loader.h"
 
 #include "glm/vec2.hpp"
 #include "glm/vec3.hpp"
@@ -44,12 +39,18 @@ Renderer_Metal::~Renderer_Metal() {
 
 auto Renderer_Metal::init() -> void {
     initTestPipelines();
-    testMesh = MeshBuilder::buildCube(1.0); // loadMesh(std::string("assets/models/viking_room.obj"));
-    testAlbedoTexture = createTexture(std::string("assets/textures/american_walnut_albedo.png")); // createTexture(std::string("assets/textures/viking_room.png"));
-    testNormalTexture = createTexture(std::string("assets/textures/american_walnut_normal.png"));
-    testRoughnessTexture = createTexture(std::string("assets/textures/american_walnut_roughness.png"));
 
-    initTestBuffers();
+    // Create buffers
+    auto mesh = MeshBuilder::buildCube(1.0); // AssetManager::loadOBJ(std::string("assets/models/viking_room.obj"));
+    testVertexBuffer = createVertexBuffer(mesh->vertices);
+    testIndexBuffer = createIndexBuffer(mesh->indices);
+    cameraDataBuffer = NS::TransferPtr(device->newBuffer(sizeof(CameraData), MTL::ResourceStorageModeManaged));
+    instanceDataBuffer = NS::TransferPtr(device->newBuffer(sizeof(InstanceData) * numMaxInstances, MTL::ResourceStorageModeManaged));
+
+    // Create textures
+    testAlbedoTexture = createTexture(std::string("assets/textures/medieval_blocks_diff.jpg")); // createTexture(std::string("assets/textures/viking_room.png"));
+    testNormalTexture = createTexture(std::string("assets/textures/medieval_blocks_norm_dx.jpg"));
+    testRoughnessTexture = createTexture(std::string("assets/textures/medieval_blocks_rough.jpg"));
 
     MTL::DepthStencilDescriptor* depthStencilDesc = MTL::DepthStencilDescriptor::alloc()->init();
     depthStencilDesc->setDepthCompareFunction(MTL::CompareFunction::CompareFunctionLess);
@@ -157,15 +158,6 @@ void Renderer_Metal::initTestPipelines() {
     testDrawPipeline = createPipeline("assets/shaders/3d_pbr_normal_mapped.metal");
 }
 
-void Renderer_Metal::initTestBuffers() {
-    testVertexBuffer = createVertexBuffer(testMesh->vertices);
-    testIndexBuffer = createIndexBuffer(testMesh->indices);
-
-    cameraDataBuffer = NS::TransferPtr(device->newBuffer(sizeof(CameraData), MTL::ResourceStorageModeManaged));
-
-    instanceDataBuffer = NS::TransferPtr(device->newBuffer(sizeof(InstanceData) * numMaxInstances, MTL::ResourceStorageModeManaged));
-}
-
 NS::SharedPtr<MTL::RenderPipelineState> Renderer_Metal::createPipeline(const std::string& filename) {
     auto shaderSrc = readFile(filename);
 
@@ -203,61 +195,46 @@ NS::SharedPtr<MTL::RenderPipelineState> Renderer_Metal::createPipeline(const std
 }
 
 NS::SharedPtr<MTL::Texture> Renderer_Metal::createTexture(const std::string& filename) {
-    int width, height, numChannels;
-    if (stbi_info(filename.c_str(), &width, &height, &numChannels)) {
-        int desiredChannels = 0;
+    auto img = AssetManager::loadImage(filename);
+    if (img) {
         MTL::PixelFormat pixelFormat = MTL::PixelFormat::PixelFormatBGRA8Unorm_sRGB;
-        switch (numChannels) {
+        switch (img->channelCount) {
         case 1:
-            desiredChannels = 1;
             pixelFormat = MTL::PixelFormat::PixelFormatR8Unorm_sRGB;
             break;
         case 3:
-            desiredChannels = 4;
-            pixelFormat = MTL::PixelFormat::PixelFormatBGRA8Unorm_sRGB;
-            break;
         case 4:
-            desiredChannels = 4;
             pixelFormat = MTL::PixelFormat::PixelFormatBGRA8Unorm_sRGB;
             break;
         default:
             throw std::runtime_error(fmt::format("Unknown texture format at {}\n", filename));
             break;
         }
-        uint8_t* data = stbi_load(filename.c_str(), &width, &height, &numChannels, desiredChannels);
-        if (data) {
-            NS::Error* error = nullptr;
 
-            auto textureDesc = NS::TransferPtr(MTL::TextureDescriptor::alloc()->init());
-            textureDesc->setPixelFormat(pixelFormat);
-            textureDesc->setTextureType(MTL::TextureType::TextureType2D);
-            textureDesc->setWidth(NS::UInteger(width));
-            textureDesc->setHeight(NS::UInteger(height));
-            textureDesc->setMipmapLevelCount(10);
-            textureDesc->setSampleCount(1);
-            textureDesc->setStorageMode(MTL::StorageMode::StorageModeManaged);
-            textureDesc->setUsage(MTL::ResourceUsageSample | MTL::ResourceUsageRead);
+        auto textureDesc = NS::TransferPtr(MTL::TextureDescriptor::alloc()->init());
+        textureDesc->setPixelFormat(pixelFormat);
+        textureDesc->setTextureType(MTL::TextureType::TextureType2D);
+        textureDesc->setWidth(NS::UInteger(img->width));
+        textureDesc->setHeight(NS::UInteger(img->height));
+        textureDesc->setMipmapLevelCount(10);
+        textureDesc->setSampleCount(1);
+        textureDesc->setStorageMode(MTL::StorageMode::StorageModeManaged);
+        textureDesc->setUsage(MTL::ResourceUsageSample | MTL::ResourceUsageRead);
 
-            auto texture = NS::TransferPtr(device->newTexture(textureDesc.get()));
-            texture->replaceRegion(MTL::Region(0, 0, 0, width, height, 1), 0, data, width * desiredChannels);
+        auto texture = NS::TransferPtr(device->newTexture(textureDesc.get()));
+        texture->replaceRegion(MTL::Region(0, 0, 0, img->width, img->height, 1), 0, img->byteArray.data(), img->width * img->channelCount);
 
-            stbi_image_free(data);
+        auto cmdBlit = NS::TransferPtr(queue->commandBuffer());
 
-            auto cmdBlit = NS::TransferPtr(queue->commandBuffer());
+        auto enc = NS::TransferPtr(cmdBlit->blitCommandEncoder());
+        enc->generateMipmaps(texture.get());
+        enc->endEncoding();
 
-            auto enc = NS::TransferPtr(cmdBlit->blitCommandEncoder());
-            enc->generateMipmaps(texture.get());
-            enc->endEncoding();
+        cmdBlit->commit();
 
-            cmdBlit->commit();
-
-            return texture;
-        } else {
-            throw std::runtime_error(fmt::format("Failed to load image at {}!\n", filename));
-        }
-        stbi_image_free(data);
+        return texture;
     } else {
-        throw std::runtime_error(fmt::format("Failed to load image at {}!\n", filename));
+        throw std::runtime_error(fmt::format("Failed to create texture at {}!\n", filename));
     }
 }
 
@@ -277,39 +254,4 @@ NS::SharedPtr<MTL::Buffer> Renderer_Metal::createIndexBuffer(std::vector<uint16_
     buffer->didModifyRange(NS::Range::Make(0, buffer->length()));
 
     return buffer;
-}
-
-Mesh* Renderer_Metal::loadMesh(const std::string& filename) {
-    std::vector<VertexData> vertices;
-    std::vector<uint16_t> indices;
-
-    tinyobj::attrib_t attrib;
-    std::vector<tinyobj::shape_t> shapes;
-    std::vector<tinyobj::material_t> materials;
-    std::string err;
-
-    if (!tinyobj::LoadObj(&attrib, &shapes, &materials, &err, filename.c_str())) {
-        throw std::runtime_error(fmt::format("Failed to load model: {}", err));
-    }
-
-    for (const auto& shape : shapes) {
-        for (const auto& index : shape.mesh.indices) {
-            VertexData vert = {};
-            vert.position = { attrib.vertices[3 * index.vertex_index + 0],
-                              attrib.vertices[3 * index.vertex_index + 1],
-                              attrib.vertices[3 * index.vertex_index + 2] };
-            vert.normal = { attrib.normals[3 * index.normal_index + 0],
-                            attrib.normals[3 * index.normal_index + 1],
-                            attrib.normals[3 * index.normal_index + 2] };
-            vert.uv = { attrib.texcoords[2 * index.texcoord_index + 0],
-                        1.0 - attrib.texcoords[2 * index.texcoord_index + 1] };
-            vertices.push_back(vert);
-            indices.push_back(indices.size());
-        }
-    }
-
-    auto mesh = new Mesh();
-    mesh->initialize({ vertices, indices });
-
-    return mesh;
 }

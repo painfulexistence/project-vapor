@@ -17,7 +17,8 @@ set(SOURCES
     helper.cpp
     renderer_metal.cpp
     renderer_vulkan.cpp
-    mesh.cpp
+    graphics.cpp
+	asset_manager.cpp
 )
 
 add_executable(main ${SOURCES})

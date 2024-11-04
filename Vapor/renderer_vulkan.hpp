@@ -1,6 +1,6 @@
 #pragma once
 #include "renderer.hpp"
-#include "mesh.hpp"
+#include "graphics.hpp"
 
 #include "SDL.h"
 #include "SDL_vulkan.h"
