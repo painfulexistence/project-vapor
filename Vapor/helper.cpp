@@ -1,9 +1,10 @@
 #include <fstream>
 #include <stdexcept>
 #include <vector>
+#include "SDL_filesystem.h"
 
 std::vector<char> readFile(const std::string& filename) {
-    std::ifstream file(filename, std::ios::ate | std::ios::binary);
+    std::ifstream file((SDL_GetBasePath() + filename), std::ios::ate | std::ios::binary);
     if (!file.is_open()) {
         throw std::runtime_error("Failed to open file " + filename + "!");
     }

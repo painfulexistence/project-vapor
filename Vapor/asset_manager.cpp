@@ -2,7 +2,7 @@
 #include "graphics.hpp"
 
 #include "fmt/core.h"
-#include "helper.hpp"
+#include "SDL_filesystem.h"
 
 #define STB_IMAGE_IMPLEMENTATION
 #include "stb/stb_image.h"
@@ -11,9 +11,9 @@
 #include "tinyobjloader/tiny_obj_loader.h"
 
 
-std::shared_ptr<Image> AssetManager::loadImage(const std::string filename) {
+std::shared_ptr<Image> AssetManager::loadImage(const std::string& filename) {
     int width, height, numChannels;
-    if (!stbi_info(filename.c_str(), &width, &height, &numChannels)) {
+    if (!stbi_info((SDL_GetBasePath() + filename).c_str(), &width, &height, &numChannels)) {
         throw std::runtime_error(fmt::format("Failed to load image at {}!\n", filename));
     }
     int desiredChannels = 0;
@@ -51,7 +51,7 @@ std::shared_ptr<Mesh> AssetManager::loadOBJ(const std::string& filename) {
     std::vector<tinyobj::material_t> materials;
     std::string err;
 
-    if (!tinyobj::LoadObj(&attrib, &shapes, &materials, &err, filename.c_str())) {
+    if (!tinyobj::LoadObj(&attrib, &shapes, &materials, &err, (SDL_GetBasePath() + filename).c_str())) {
         throw std::runtime_error(fmt::format("Failed to load model: {}", err));
     }
 
