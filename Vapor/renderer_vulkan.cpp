@@ -11,6 +11,8 @@
 #include <glm/ext/matrix_clip_space.hpp>
 #include <glm/ext/matrix_transform.hpp>
 
+#define ENABLE_VALIDATION 1
+
 void insertImageMemoryBarrier(
     VkCommandBuffer cmd, VkImage image,
     VkAccessFlags srcAccessMask, VkAccessFlags dstAccessMask,
@@ -69,7 +71,9 @@ Renderer_Vulkan::Renderer_Vulkan(SDL_Window* window) {
     //     throw std::runtime_error("Requested validation layers not available!");
     // }
     const std::vector<const char*> validationLayers = {
+#if ENABLE_VALIDATION
         "VK_LAYER_KHRONOS_validation"
+#endif
     };
     std::vector<const char*> instanceExtensions = {
         VK_KHR_PORTABILITY_ENUMERATION_EXTENSION_NAME,
