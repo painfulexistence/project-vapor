@@ -1,5 +1,13 @@
 #pragma once
 
+enum class BufferUsage {
+    VERTEX,
+    INDEX,
+    UNIFORM,
+    COPY_SRC,
+    COPY_DST
+};
+
 class Renderer {
 public:
     ~Renderer(){};
