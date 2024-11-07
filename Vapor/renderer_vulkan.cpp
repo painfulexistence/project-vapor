@@ -1048,42 +1048,12 @@ VkImage Renderer_Vulkan::createTexture(const std::string& filename, VkDeviceMemo
 }
 
 VkBuffer Renderer_Vulkan::createVertexBuffer(std::vector<VertexData> vertices, VkDeviceMemory& bufferMemory) {
-    VkBufferCreateInfo bufferInfo{};
-    bufferInfo.sType = VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO;
-    bufferInfo.size = sizeof(VertexData) * vertices.size();
-    bufferInfo.usage = VK_BUFFER_USAGE_VERTEX_BUFFER_BIT;
-    bufferInfo.sharingMode = VK_SHARING_MODE_EXCLUSIVE;
-
-    VkBuffer buffer;
-    if (vkCreateBuffer(device, &bufferInfo, nullptr, &buffer) != VK_SUCCESS) {
-        throw std::runtime_error("Failed to create vertex buffer!");
-    }
-
-    VkMemoryRequirements memRequirements;
-    vkGetBufferMemoryRequirements(device, buffer, &memRequirements);
-
-    VkPhysicalDeviceMemoryProperties memProperties;
-    vkGetPhysicalDeviceMemoryProperties(physicalDevice, &memProperties);
-    int memTypeIdx = 0;
-    for (; memTypeIdx < memProperties.memoryTypeCount; memTypeIdx++) {
-        if ((memRequirements.memoryTypeBits & (1 << memTypeIdx)) && (memProperties.memoryTypes[memTypeIdx].propertyFlags & (VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT))) {
-            break;
-        }
-    }
-
-    VkMemoryAllocateInfo allocInfo = {};
-    allocInfo.sType = VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO;
-    allocInfo.allocationSize = memRequirements.size;
-    allocInfo.memoryTypeIndex = memTypeIdx;
-
-    if (vkAllocateMemory(device, &allocInfo, nullptr, &bufferMemory) != VK_SUCCESS) {
-        throw std::runtime_error("Failed to allocate vertex buffer memory!");
-    }
-    vkBindBufferMemory(device, buffer, bufferMemory, 0);
+    VkDeviceSize bufferSize = sizeof(VertexData) * vertices.size();
+    VkBuffer buffer = createBuffer(BufferUsage::VERTEX, bufferSize, bufferMemory);
 
     void* data;
-    vkMapMemory(device, bufferMemory, 0, (size_t)sizeof(VertexData) * vertices.size(), 0, &data);
-    memcpy(data, vertices.data(), (size_t)sizeof(VertexData) * vertices.size());
+    vkMapMemory(device, bufferMemory, 0, bufferSize, 0, &data);
+    memcpy(data, vertices.data(), bufferSize);
     vkUnmapMemory(device, bufferMemory);
 
     return buffer;
@@ -1095,7 +1065,7 @@ VkBuffer Renderer_Vulkan::createIndexBuffer(std::vector<uint16_t> indices, VkDev
 
     void* data;
     vkMapMemory(device, bufferMemory, 0, bufferSize, 0, &data);
-    memcpy(data, indices.data(), (size_t)sizeof(VertexData) * indices.size());
+    memcpy(data, indices.data(), bufferSize);
     vkUnmapMemory(device, bufferMemory);
 
     return buffer;
