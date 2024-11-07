@@ -40,6 +40,8 @@ public:
 
     VkShaderModule createShaderModule(const std::vector<char>&);
 
+    VkImage createRenderTarget(ImageUsage usage, VkDeviceMemory& memory, VkImageView& imageView, int sampleCount);
+
     VkImage createTexture(const std::string& filename, VkDeviceMemory& memory, VkImageView& imageView);
 
     VkBuffer createBuffer(BufferUsage usage, VkDeviceSize size, VkDeviceMemory& memory);
@@ -80,6 +82,10 @@ private:
     VkDescriptorSetLayout descriptorSetLayout;
     std::vector<VkDescriptorSet> descriptorSets;
 
+    VkImage colorImage;
+    VkDeviceMemory colorImageMemory;
+    VkImageView colorImageView;
+
     VkImage depthImage;
     VkDeviceMemory depthImageMemory;
     VkImageView depthImageView;
@@ -111,4 +117,5 @@ private:
 
     const int FRAMES_IN_FLIGHT = 3;
     bool enableDynamicRendering = false;
+    const int sampleCount = 4;
 };

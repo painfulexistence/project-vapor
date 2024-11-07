@@ -8,6 +8,13 @@ enum class BufferUsage {
     COPY_DST
 };
 
+enum class ImageUsage {
+    COLOR_MSAA,
+    COLOR,
+    DEPTH,
+    DEPTH_STENCIL
+};
+
 class Renderer {
 public:
     ~Renderer(){};
