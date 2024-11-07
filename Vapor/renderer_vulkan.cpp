@@ -827,8 +827,8 @@ VkPipeline Renderer_Vulkan::createPipeline(const std::string& filename) {
     // Rasterization state
     VkPipelineRasterizationStateCreateInfo rasterizationStateInfo = { VK_STRUCTURE_TYPE_PIPELINE_RASTERIZATION_STATE_CREATE_INFO };
     rasterizationStateInfo.polygonMode = VK_POLYGON_MODE_FILL;
-    rasterizationStateInfo.cullMode = VK_CULL_MODE_NONE;
-    rasterizationStateInfo.frontFace = VK_FRONT_FACE_COUNTER_CLOCKWISE;
+    rasterizationStateInfo.cullMode = VK_CULL_MODE_BACK_BIT;
+    rasterizationStateInfo.frontFace = VK_FRONT_FACE_CLOCKWISE;
     rasterizationStateInfo.depthClampEnable = VK_FALSE;
     rasterizationStateInfo.rasterizerDiscardEnable = VK_FALSE;
     rasterizationStateInfo.depthBiasEnable = VK_FALSE;
