@@ -745,7 +745,7 @@ VkShaderModule Renderer_Vulkan::createShaderModule(const std::vector<char>& code
 VkPipeline Renderer_Vulkan::createPipeline(const std::string& filename) {
     // Shader stages
     auto vertShaderCode = readFile(std::string("assets/shaders/MVP.vert.spv"));
-    auto fragShaderCode = readFile(std::string("assets/shaders/BlinnPhong.frag.spv"));
+    auto fragShaderCode = readFile(std::string("assets/shaders/PBR.frag.spv"));
     auto vertShaderModule = createShaderModule(vertShaderCode);
     auto fragShaderModule = createShaderModule(fragShaderCode);
 
