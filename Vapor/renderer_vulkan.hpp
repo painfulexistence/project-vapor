@@ -14,6 +14,11 @@ struct UniformBufferMVP {
     glm::mat4 proj;
 };
 
+struct SceneData {
+    glm::vec3 camPos;
+    float time;
+};
+
 struct Texture {
     VkImage image;
     VkImageView view;

@@ -641,7 +641,8 @@ auto Renderer_Vulkan::draw() -> void {
         .proj = glm::perspective(glm::radians(60.0f), swapchainExtent.width / (float)swapchainExtent.height, 0.03f, 500.0f)
     };
     memcpy(uniformBuffersMapped[currentFrame], &mvp, sizeof(UniformBufferMVP));
-    vkCmdDrawIndexed(cmd, 36, 1, 0, 0, 0);
+    SceneData sceneData = { camPos, time };
+    vkCmdPushConstants(cmd, pipelineLayout, VK_SHADER_STAGE_FRAGMENT_BIT, 0, sizeof(SceneData), &sceneData);
     vkCmdEndRenderPass(cmd);
 #else
     insertImageMemoryBarrier(
@@ -744,7 +745,7 @@ VkShaderModule Renderer_Vulkan::createShaderModule(const std::vector<char>& code
 VkPipeline Renderer_Vulkan::createPipeline(const std::string& filename) {
     // Shader stages
     auto vertShaderCode = readFile(std::string("assets/shaders/MVP.vert.spv"));
-    auto fragShaderCode = readFile(std::string("assets/shaders/TextureColor.frag.spv"));
+    auto fragShaderCode = readFile(std::string("assets/shaders/BlinnPhong.frag.spv"));
     auto vertShaderModule = createShaderModule(vertShaderCode);
     auto fragShaderModule = createShaderModule(fragShaderCode);
 
@@ -789,10 +790,16 @@ VkPipeline Renderer_Vulkan::createPipeline(const std::string& filename) {
         throw std::runtime_error("Failed to create descriptor set layout!");
     }
 
+    std::array<VkPushConstantRange, 1> pushConstantRanges = {{
+        { VK_SHADER_STAGE_FRAGMENT_BIT, 0, sizeof(SceneData) }
+    }};
+
     VkPipelineLayoutCreateInfo pipelineLayoutInfo = {};
     pipelineLayoutInfo.sType = VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO;
     pipelineLayoutInfo.setLayoutCount = 1;
     pipelineLayoutInfo.pSetLayouts = &descriptorSetLayout;
+    pipelineLayoutInfo.pushConstantRangeCount = pushConstantRanges.size();
+    pipelineLayoutInfo.pPushConstantRanges = pushConstantRanges.data();
     if (vkCreatePipelineLayout(device, &pipelineLayoutInfo, nullptr, &pipelineLayout) != VK_SUCCESS) {
         throw std::runtime_error("Failed to create pipeline layout!");
     }
