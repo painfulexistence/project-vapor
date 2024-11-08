@@ -531,8 +531,9 @@ auto Renderer_Vulkan::init() -> void {
     }
 
     // Create descriptor pool
-    std::array<VkDescriptorPoolSize, 2> poolSizes = {{
+    std::array<VkDescriptorPoolSize, 3> poolSizes = {{
         { VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER, static_cast<uint32_t>(FRAMES_IN_FLIGHT) },
+        { VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, static_cast<uint32_t>(FRAMES_IN_FLIGHT) },
         { VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, static_cast<uint32_t>(FRAMES_IN_FLIGHT) }
     }};
 
@@ -563,12 +564,17 @@ auto Renderer_Vulkan::init() -> void {
         bufferInfo.offset = 0;
         bufferInfo.range = sizeof(UniformBufferMVP);
 
-        VkDescriptorImageInfo imageInfo;
-        imageInfo.imageView = testAlbedoTextureView;
-        imageInfo.sampler = testSampler;
-        imageInfo.imageLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;;
+        VkDescriptorImageInfo albedoImageInfo;
+        albedoImageInfo.imageView = testAlbedoTextureView;
+        albedoImageInfo.sampler = testSampler;
+        albedoImageInfo.imageLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
 
-        std::array<VkWriteDescriptorSet, 2> writes = {{
+        VkDescriptorImageInfo normalImageInfo;
+        normalImageInfo.imageView = testNormalTextureView;
+        normalImageInfo.sampler = testSampler;
+        normalImageInfo.imageLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
+
+        std::array<VkWriteDescriptorSet, 3> writes = {{
             {
                 .sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET,
                 .dstSet = descriptorSets[i],
@@ -586,7 +592,17 @@ auto Renderer_Vulkan::init() -> void {
                 .dstArrayElement = 0,
                 .descriptorCount = 1,
                 .descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER,
-                .pImageInfo = &imageInfo,
+                .pImageInfo = &albedoImageInfo,
+                .pBufferInfo = nullptr,
+            },
+            {
+                .sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET,
+                .dstSet = descriptorSets[i],
+                .dstBinding = 2,
+                .dstArrayElement = 0,
+                .descriptorCount = 1,
+                .descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER,
+                .pImageInfo = &normalImageInfo,
                 .pBufferInfo = nullptr,
             }
         }};
@@ -744,8 +760,8 @@ VkShaderModule Renderer_Vulkan::createShaderModule(const std::vector<char>& code
 
 VkPipeline Renderer_Vulkan::createPipeline(const std::string& filename) {
     // Shader stages
-    auto vertShaderCode = readFile(std::string("assets/shaders/MVP.vert.spv"));
-    auto fragShaderCode = readFile(std::string("assets/shaders/PBR.frag.spv"));
+    auto vertShaderCode = readFile(std::string("assets/shaders/TBN.vert.spv"));
+    auto fragShaderCode = readFile(std::string("assets/shaders/PBRNormalMapped.frag.spv"));
     auto vertShaderModule = createShaderModule(vertShaderCode);
     auto fragShaderModule = createShaderModule(fragShaderCode);
 
@@ -773,14 +789,21 @@ VkPipeline Renderer_Vulkan::createPipeline(const std::string& filename) {
     uboBinding.stageFlags = VK_SHADER_STAGE_VERTEX_BIT;
     uboBinding.pImmutableSamplers = nullptr;
 
-    VkDescriptorSetLayoutBinding textureBinding = {};
-    textureBinding.binding = 1;
-    textureBinding.descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
-    textureBinding.descriptorCount = 1;
-    textureBinding.stageFlags = VK_SHADER_STAGE_FRAGMENT_BIT;
-    textureBinding.pImmutableSamplers = nullptr;
+    VkDescriptorSetLayoutBinding albedoTextureBinding = {};
+    albedoTextureBinding.binding = 1;
+    albedoTextureBinding.descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
+    albedoTextureBinding.descriptorCount = 1;
+    albedoTextureBinding.stageFlags = VK_SHADER_STAGE_FRAGMENT_BIT;
+    albedoTextureBinding.pImmutableSamplers = nullptr;
 
-    std::array<VkDescriptorSetLayoutBinding, 2> bindings = { uboBinding, textureBinding };
+    VkDescriptorSetLayoutBinding normalTextureBinding = {};
+    normalTextureBinding.binding = 2;
+    normalTextureBinding.descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
+    normalTextureBinding.descriptorCount = 1;
+    normalTextureBinding.stageFlags = VK_SHADER_STAGE_FRAGMENT_BIT;
+    normalTextureBinding.pImmutableSamplers = nullptr;
+
+    std::array<VkDescriptorSetLayoutBinding, 3> bindings = { uboBinding, albedoTextureBinding, normalTextureBinding };
 
     VkDescriptorSetLayoutCreateInfo setLayoutInfo = {};
     setLayoutInfo.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO;

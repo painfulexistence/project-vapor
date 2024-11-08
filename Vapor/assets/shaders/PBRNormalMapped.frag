@@ -1,8 +1,8 @@
 #version 450
 
-layout(location = 0) in vec2 tex_uv;
-layout(location = 1) in vec3 frag_pos;
-layout(location = 2) in vec3 frag_normal;
+layout(location = 0) in vec3 frag_pos;
+layout(location = 1) in vec2 tex_uv;
+layout(location = 2) in mat3 TBN;
 layout(location = 0) out vec4 Color;
 layout(push_constant) uniform PushConstantBlock {
     vec3 cam_pos;
@@ -29,6 +29,7 @@ struct DirLight {
 
 struct PointLight {
     vec3 position;
+    vec3 attenuation;
     vec3 color;
     float intensity;
 };
@@ -114,11 +115,12 @@ float SurfaceMetallic() {
 
 DirLight main_light = DirLight(vec3(0.0, 1.0, 0.0), vec3(1.0, 1.0, 1.0), 10.0);
 PointLight aux_lights[1] = {
-    PointLight(vec3(0.0, 1.0, 0.0), vec3(1.0, 0.0, 0.0), 0.2),
+    PointLight(vec3(0.0, 1.0, 0.0), vec3(0.5), vec3(1.0, 0.0, 0.0), 0.2),
 };
 
 void main() {
-    vec3 norm = normalize(frag_normal);
+    vec3 texNorm = texture(normal_map, tex_uv).rgb * 2.0 - 1.0;
+    vec3 norm = normalize(TBN * texNorm);
     vec3 viewDir = normalize(cam_pos - frag_pos);
 
     Surface surf = Surface(
