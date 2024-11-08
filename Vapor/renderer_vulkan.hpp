@@ -116,6 +116,5 @@ private:
     std::vector<void*> uniformBuffersMapped;
 
     const int FRAMES_IN_FLIGHT = 3;
-    bool enableDynamicRendering = false;
     const int sampleCount = 4;
 };
