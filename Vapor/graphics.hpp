@@ -48,7 +48,7 @@ public:
 
 class MeshBuilder {
 public:
-    static Mesh* buildTriforce() {
+    static std::shared_ptr<Mesh> buildTriforce() {
         // glm::vec3 verts[6] = {
         //     { -0.5f, 0.5f, 0.0f }, { -0.5f, -0.5f, 0.0f }, { 0.5f, 0.5f, 0.0 },
         //     { 0.5f, 0.5f, 0.0f },  { -0.5f, -0.5f, 0.0f }, { 0.5f, -0.5f, 0.0f }
@@ -66,13 +66,13 @@ public:
         };
         uint16_t indices[6] = { 0,  1,  2,  3,  4,  5 };
 
-        auto mesh = new Mesh();
+        auto mesh = std::make_shared<Mesh>();
         mesh->initialize(verts, 6, indices, 6);
 
         return mesh;
     };
 
-    static Mesh* buildCube(float size) {
+    static std::shared_ptr<Mesh> buildCube(float size) {
         // float verts[192] = { // left
         //                     .5f,
         //                     .5f,
@@ -355,24 +355,24 @@ public:
             20, 21, 22,
             22, 21, 23
         };
-        auto mesh = new Mesh();
+        auto mesh = std::make_shared<Mesh>();
         mesh->initialize(verts.data(), verts.size(), tris.data(), tris.size());
 
         return mesh;
     };
 
-    static Mesh* buildCapsule(float size) {
-        auto mesh = new Mesh();
+    static std::shared_ptr<Mesh> buildCapsule(float size) {
+        auto mesh = std::make_shared<Mesh>();
         return mesh;
     };
 
-    static Mesh* buildCone(float size) {
-        auto mesh = new Mesh();
+    static std::shared_ptr<Mesh> buildCone(float size) {
+        auto mesh = std::make_shared<Mesh>();
         return mesh;
     };
 
-    static Mesh* buildCylinder(float size) {
-        auto mesh = new Mesh();
+    static std::shared_ptr<Mesh> buildCylinder(float size) {
+        auto mesh = std::make_shared<Mesh>();
         return mesh;
     };
 
