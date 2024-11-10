@@ -31,7 +31,7 @@ std::shared_ptr<Image> AssetManager::loadImage(const std::string& filename) {
         throw std::runtime_error(fmt::format("Unknown texture format at {}\n", filename));
         break;
     }
-    uint8_t* data = stbi_load(filename.c_str(), &width, &height, &numChannels, desiredChannels);
+    uint8_t* data = stbi_load((SDL_GetBasePath() + filename).c_str(), &width, &height, &numChannels, desiredChannels);
     if (data) {
         auto image = std::make_shared<Image>(width, height, desiredChannels, data);
         stbi_image_free(data);
