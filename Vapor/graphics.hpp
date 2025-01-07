@@ -41,6 +41,7 @@ public:
     void initialize(const MeshData& data);
     void initialize(VertexData* vertexData, size_t vertexCount, uint16_t* indexData, size_t indexCount);
     void recalculateNormalsAndTangents();
+    void print();
 
     std::vector<VertexData> vertices;
     std::vector<uint16_t> indices;

@@ -1,9 +1,11 @@
 #include "graphics.hpp"
 #include <utility>
+#include <fmt/core.h>
 
 void Mesh::initialize(const MeshData& data) {
     vertices = std::move(data.vertices);
     indices = std::move(data.indices);
+    recalculateNormalsAndTangents();
 };
 
 void Mesh::initialize(VertexData* vertexData, size_t vertexCount, uint16_t* indexData, size_t indexCount){
@@ -40,4 +42,14 @@ void Mesh::recalculateNormalsAndTangents(){
         vertices[indices[i + 1]].bitangent = bitangent;
         vertices[indices[i + 2]].bitangent = bitangent;
     }
+    print();
 };
+
+void Mesh::print() {
+    for (size_t i = 0; i < vertices.size(); i++) {
+        fmt::print("Vertex {}: {} {} {}\n", i, vertices[i].position.x, vertices[i].position.y, vertices[i].position.z);
+        fmt::print("Normal {}: {} {} {}\n", i, vertices[i].normal.x, vertices[i].normal.y, vertices[i].normal.z);
+        fmt::print("Tangent {}: {} {} {}\n", i, vertices[i].tangent.x, vertices[i].tangent.y, vertices[i].tangent.z);
+        fmt::print("Bitangent {}: {} {} {}\n", i, vertices[i].bitangent.x, vertices[i].bitangent.y, vertices[i].bitangent.z);
+    }
+}
