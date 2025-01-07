@@ -9,7 +9,16 @@
 <p>The goal of this project is a quest for knowledge about modern 3D game engines. </p>
 <p>It's a deep dive into game engine architecture and current-gen rendering techniques (specifically, hybrid rendering techniques) and a solo journey to design and to implement various aspects of a 3D game engine. </p>
 <p>Aside from personal learning, I'd also like to share knowledge with those learning to make engines. </p>
-<br />
 
-## Blog
+### Blog
 [Arcane Realms](https://painfulexistence.substack.com/)
+
+### Features
+- PBR texturing with selectable graphics backends (Metal-cpp and Vulkan).
+
+### Platforms
+- Apple Silicon
+
+### Screenshots
+![demo1](.github/assets/Demo_OBJ.png)
+![demo2](.github/assets/Demo_PBR.png)
