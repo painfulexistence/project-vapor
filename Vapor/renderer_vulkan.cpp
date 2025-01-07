@@ -9,6 +9,7 @@
 #include "glm/vec3.hpp"
 #include "glm/vec4.hpp"
 #define GLM_FORCE_DEPTH_ZERO_TO_ONE
+#define GLM_FORCE_LEFT_HANDED
 #include "glm/ext/matrix_clip_space.hpp"
 #include "glm/ext/matrix_transform.hpp"
 #include <vector>
@@ -387,10 +388,10 @@ auto Renderer_Vulkan::init() -> void {
     }
 
     // Create multisampled image and view
-    colorImage = createRenderTarget(ImageUsage::COLOR_MSAA, colorImageMemory, colorImageView, sampleCount);
+    colorImage = createRenderTarget(GPUImageUsage::COLOR_MSAA, colorImageMemory, colorImageView, sampleCount);
 
     // Create depth image and view
-    depthImage = createRenderTarget(ImageUsage::DEPTH, depthImageMemory, depthImageView, sampleCount);
+    depthImage = createRenderTarget(GPUImageUsage::DEPTH, depthImageMemory, depthImageView, sampleCount);
 
 #if !(USE_DYNAMIC_RENDERING)
     // Create render passes
@@ -492,7 +493,7 @@ auto Renderer_Vulkan::init() -> void {
     uniformBuffersMemory.resize(FRAMES_IN_FLIGHT);
     uniformBuffersMapped.resize(FRAMES_IN_FLIGHT);
     for (size_t i = 0; i < FRAMES_IN_FLIGHT; i++) {
-        uniformBuffers[i] = createBufferMapped(BufferUsage::UNIFORM, bufferSize, uniformBuffersMemory[i], &uniformBuffersMapped[i]);
+        uniformBuffers[i] = createBufferMapped(GPUBufferUsage::UNIFORM, bufferSize, uniformBuffersMemory[i], &uniformBuffersMapped[i]);
     }
 
     // Create textures
@@ -942,27 +943,27 @@ VkPipeline Renderer_Vulkan::createPipeline(const std::string& filename) {
     return pipeline;
 }
 
-VkImage Renderer_Vulkan::createRenderTarget(ImageUsage usage, VkDeviceMemory& memory, VkImageView& imageView, int sampleCount) {
+VkImage Renderer_Vulkan::createRenderTarget(GPUImageUsage usage, VkDeviceMemory& memory, VkImageView& imageView, int sampleCount) {
     VkFormat format;
     VkImageUsageFlagBits usageFlag;
     VkImageAspectFlagBits aspectFlag;
     switch (usage) {
-    case ImageUsage::COLOR_MSAA:
+    case GPUImageUsage::COLOR_MSAA:
         format = swapchainImageFormat;
         usageFlag = (VkImageUsageFlagBits)(VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT);
         aspectFlag = VK_IMAGE_ASPECT_COLOR_BIT;
         break;
-    case ImageUsage::COLOR:
+    case GPUImageUsage::COLOR:
         format = swapchainImageFormat;
         usageFlag = (VkImageUsageFlagBits)(VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT);
         aspectFlag = VK_IMAGE_ASPECT_COLOR_BIT;
         break;
-    case ImageUsage::DEPTH:
+    case GPUImageUsage::DEPTH:
         format = VK_FORMAT_D32_SFLOAT;
         usageFlag = (VkImageUsageFlagBits)(VK_IMAGE_USAGE_DEPTH_STENCIL_ATTACHMENT_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT);
         aspectFlag = VK_IMAGE_ASPECT_DEPTH_BIT;
         break;
-    case ImageUsage::DEPTH_STENCIL:
+    case GPUImageUsage::DEPTH_STENCIL:
         format = VK_FORMAT_D32_SFLOAT_S8_UINT;
         usageFlag = (VkImageUsageFlagBits)(VK_IMAGE_USAGE_DEPTH_STENCIL_ATTACHMENT_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT);
         aspectFlag = (VkImageAspectFlagBits)(VK_IMAGE_ASPECT_DEPTH_BIT | VK_IMAGE_ASPECT_STENCIL_BIT);
@@ -1091,7 +1092,7 @@ VkImage Renderer_Vulkan::createTexture(const std::string& filename, VkDeviceMemo
 
         VkDeviceSize bufferSize = img->byteArray.size();
         VkDeviceMemory stagingBufferMemory;
-        VkBuffer stagingBuffer = createBuffer(BufferUsage::COPY_SRC, bufferSize, stagingBufferMemory);
+        VkBuffer stagingBuffer = createBuffer(GPUBufferUsage::COPY_SRC, bufferSize, stagingBufferMemory);
 
         void* data;
         vkMapMemory(device, stagingBufferMemory, 0, bufferSize, 0, &data);
@@ -1158,7 +1159,7 @@ VkImage Renderer_Vulkan::createTexture(const std::string& filename, VkDeviceMemo
 
 VkBuffer Renderer_Vulkan::createVertexBuffer(std::vector<VertexData> vertices, VkDeviceMemory& bufferMemory) {
     VkDeviceSize bufferSize = sizeof(VertexData) * vertices.size();
-    VkBuffer buffer = createBuffer(BufferUsage::VERTEX, bufferSize, bufferMemory);
+    VkBuffer buffer = createBuffer(GPUBufferUsage::VERTEX, bufferSize, bufferMemory);
 
     void* data;
     vkMapMemory(device, bufferMemory, 0, bufferSize, 0, &data);
@@ -1170,7 +1171,7 @@ VkBuffer Renderer_Vulkan::createVertexBuffer(std::vector<VertexData> vertices, V
 
 VkBuffer Renderer_Vulkan::createIndexBuffer(std::vector<uint16_t> indices, VkDeviceMemory& bufferMemory) {
     VkDeviceSize bufferSize = sizeof(uint16_t) * indices.size();
-    VkBuffer buffer = createBuffer(BufferUsage::INDEX, bufferSize, bufferMemory);
+    VkBuffer buffer = createBuffer(GPUBufferUsage::INDEX, bufferSize, bufferMemory);
 
     void* data;
     vkMapMemory(device, bufferMemory, 0, bufferSize, 0, &data);
@@ -1180,24 +1181,24 @@ VkBuffer Renderer_Vulkan::createIndexBuffer(std::vector<uint16_t> indices, VkDev
     return buffer;
 }
 
-VkBuffer Renderer_Vulkan::createBuffer(BufferUsage usage, VkDeviceSize size, VkDeviceMemory& memory) {
+VkBuffer Renderer_Vulkan::createBuffer(GPUBufferUsage usage, VkDeviceSize size, VkDeviceMemory& memory) {
     VkBufferCreateInfo bufferInfo{};
     bufferInfo.sType = VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO;
     bufferInfo.size = size;
     switch (usage) {
-        case BufferUsage::VERTEX:
+        case GPUBufferUsage::VERTEX:
             bufferInfo.usage = VK_BUFFER_USAGE_VERTEX_BUFFER_BIT;
             break;
-        case BufferUsage::INDEX:
+        case GPUBufferUsage::INDEX:
             bufferInfo.usage = VK_BUFFER_USAGE_INDEX_BUFFER_BIT;
             break;
-        case BufferUsage::UNIFORM:
+        case GPUBufferUsage::UNIFORM:
             bufferInfo.usage = VK_BUFFER_USAGE_UNIFORM_BUFFER_BIT;
             break;
-        case BufferUsage::COPY_SRC:
+        case GPUBufferUsage::COPY_SRC:
             bufferInfo.usage = VK_BUFFER_USAGE_TRANSFER_SRC_BIT;
             break;
-        case BufferUsage::COPY_DST:
+        case GPUBufferUsage::COPY_DST:
             bufferInfo.usage = VK_BUFFER_USAGE_TRANSFER_DST_BIT;
             break;
         default:
@@ -1235,7 +1236,7 @@ VkBuffer Renderer_Vulkan::createBuffer(BufferUsage usage, VkDeviceSize size, VkD
     return buffer;
 }
 
-VkBuffer Renderer_Vulkan::createBufferMapped(BufferUsage usage, VkDeviceSize size, VkDeviceMemory& memory, void** mappedDataPtr) {
+VkBuffer Renderer_Vulkan::createBufferMapped(GPUBufferUsage usage, VkDeviceSize size, VkDeviceMemory& memory, void** mappedDataPtr) {
     VkBuffer buffer = createBuffer(usage, size, memory);
 
     vkMapMemory(device, memory, 0, size, 0, mappedDataPtr); // NOTE: vkMapMemory might reassign the data pointer, so using pointer of pointer is necessary

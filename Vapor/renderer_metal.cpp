@@ -13,16 +13,18 @@
 #include "glm/vec4.hpp"
 #include <cstdint>
 #include <vector>
+#define GLM_FORCE_DEPTH_ZERO_TO_ONE
+#define GLM_FORCE_LEFT_HANDED
 #include <glm/ext/matrix_clip_space.hpp>
 #include <glm/ext/matrix_transform.hpp>
 
 struct CameraData {
-    glm::mat4 projectionMatrix;
-    glm::mat4 viewMatrix;
+    alignas(16) glm::mat4 projectionMatrix;
+    alignas(16) glm::mat4 viewMatrix;
 };
 
 struct InstanceData {
-    glm::mat4 modelMatrix;
+    alignas(16) glm::mat4 modelMatrix;
     glm::vec4 color;
 };
 
@@ -117,7 +119,7 @@ auto Renderer_Metal::draw() -> void {
 
     glm::vec3 camPos = glm::vec3(0.0f, 2.0f, 2.0f);
     CameraData* camera = reinterpret_cast<CameraData*>(cameraDataBuffer->contents());
-    camera->projectionMatrix = glm::perspective(45.f * (float)M_PI / 180.f, 1.333f, 0.03f, 500.0f);
+    camera->projectionMatrix = glm::perspective(glm::radians(45.f), 1.333f, 0.03f, 500.0f);
     camera->viewMatrix = glm::lookAt(camPos, glm::vec3(0.0f, 0.0f, 0.0f), glm::vec3(0.0f, 1.0f, 0.0f));
     cameraDataBuffer->didModifyRange(NS::Range::Make(0, cameraDataBuffer->length()));
 

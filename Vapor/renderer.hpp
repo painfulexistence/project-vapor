@@ -1,6 +1,7 @@
 #pragma once
+#include "graphics.hpp"
 
-enum class BufferUsage {
+enum class GPUBufferUsage {
     VERTEX,
     INDEX,
     UNIFORM,
@@ -8,7 +9,7 @@ enum class BufferUsage {
     COPY_DST
 };
 
-enum class ImageUsage {
+enum class GPUImageUsage {
     COLOR_MSAA,
     COLOR,
     DEPTH,

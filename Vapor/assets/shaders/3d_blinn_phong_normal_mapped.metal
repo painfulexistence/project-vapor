@@ -28,7 +28,7 @@ struct RasterizerData {
     float4 worldBitangent;
 };
 
-constant float3 lightDir = float3(1.0f, 0.0f, 0.0f); // needs to be normalized
+constant float3 lightDirection = float3(1.0f, 0.0f, 0.0f); // needs to be normalized
 constant float3 lightAmbient = float3(0.2f, 0.2f, 0.2f);
 constant float3 lightDiffuse = float3(1.0f, 1.0f, 1.0f);
 constant float3 lightSpecular = float3(0.0f, 0.0f, 0.0f);
@@ -46,7 +46,8 @@ vertex RasterizerData vertexMain(uint vertexID [[vertex_id]], device const Verte
     vert.worldTangent = instance.modelMatrix * float4(in[vertexID].tangent, 1.0);
     vert.worldBitangent = instance.modelMatrix * float4(in[vertexID].bitangent, 1.0);
     vert.position = camera.projectionMatrix * camera.viewMatrix * vert.worldPosition;
-    vert.uv = in[vertexID].uv;
+    vert.uv.x = in[vertexID].uv.x;
+    vert.uv.y = in[vertexID].uv.y;
     return vert;
 }
 
@@ -56,9 +57,10 @@ fragment half4 fragmentMain(RasterizerData in [[stage_in]], texture2d<float, acc
     float3x3 TBN = float3x3(float3(in.worldTangent), float3(in.worldBitangent), float3(in.worldNormal));
     float3 norm = normalize(TBN * normalize(texNormal.sample(s, in.uv).bgr * 2.0 - 1.0));
     float3 viewDir = normalize(*camPos - in.worldPosition.xyz);
-    float3 halfway = normalize(-lightDir + viewDir);
+    float3 lightDir = normalize(-lightDirection);
+    float3 halfway = normalize(lightDir + viewDir);
 
-    float diff = max(dot(norm, -lightDir), 0.0);
+    float diff = max(dot(norm, lightDir), 0.0);
     float3 surfColor = mix(surfDiffuse, albedo, 1.0f);
 
     float3 ambient = lightAmbient * surfAmbient;
