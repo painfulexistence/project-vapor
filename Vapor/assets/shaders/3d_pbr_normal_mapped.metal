@@ -61,9 +61,9 @@ constant DirLight mainLight = {
     10.0f,
 };
 constant PointLight auxLight = {
-    float3(0.0f, -10.0f, 0.0f),
+    float3(0.0f, 1.0f, 0.0f),
     float3(1.0f, 0.0f, 0.0f),
-    100.0f,
+    3.2f,
 };
 
 float TrowbridgeReitzGGX(float nh, float r) {
@@ -128,24 +128,27 @@ vertex RasterizerData vertexMain(uint vertexID [[vertex_id]], device const Verte
     return vert;
 }
 
-fragment half4 fragmentMain(RasterizerData in [[stage_in]], texture2d<float, access::sample> texAlbedo [[texture(0)]], texture2d<float, access::sample> texNormal [[texture(1)]], texture2d<float, access::sample> texAO [[texture(2)]], texture2d<float, access::sample> texRoughness [[texture(3)]], texture2d<float, access::sample> texMetallic [[texture(4)]], constant packed_float3* camPos [[buffer(0)]], constant float* time [[buffer(1)]]) {
+fragment float4 fragmentMain(RasterizerData in [[stage_in]], texture2d<float, access::sample> texAlbedo [[texture(0)]], texture2d<float, access::sample> texNormal [[texture(1)]], texture2d<float, access::sample> texAO [[texture(2)]], texture2d<float, access::sample> texRoughness [[texture(3)]], texture2d<float, access::sample> texMetallic [[texture(4)]], constant packed_float3* camPos [[buffer(0)]], constant float* time [[buffer(1)]]) {
     constexpr sampler s(address::repeat, filter::linear, mip_filter::linear);
     Surface surf;
-    surf.color = texAlbedo.sample(s, in.uv).bgr;
+    surf.color = pow(texAlbedo.sample(s, in.uv).bgr, float3(gamma));
     surf.ao = 0.1; // texAO.sample(s, in.uv).r;
     surf.roughness = 1.0; // texRoughness.sample(s, in.uv).r;
     surf.metallic = 0.0; // texMetallic.sample(s, in.uv).r;
 
-    float3x3 TBN = float3x3(float3(in.worldTangent), float3(in.worldBitangent), float3(in.worldNormal));
+    float3 N = normalize(float3(in.worldNormal));
+    float3 T = normalize(float3(in.worldTangent));
+    float3 B = normalize(float3(in.worldBitangent));
+    float3x3 TBN = float3x3(T, B, N);
     float3 norm = normalize(TBN * normalize(texNormal.sample(s, in.uv).bgr * 2.0 - 1.0));
     float3 viewDir = normalize(*camPos - in.worldPosition.xyz);
 
     float3 result = float3(0.0);
     result += CalculateDirectionalLight(mainLight, norm, viewDir, surf); // result += CookTorranceBRDF(norm, lightDir, viewDir, surf) * (mainLight.color * mainLight.intensity) * clamp(dot(norm, lightDir), 0.0, 1.0);
-    // result += CalculatePointLight(auxLight, norm, viewDir, surf, in.worldPosition.xyz);
+    result += CalculatePointLight(auxLight, norm, viewDir, surf, in.worldPosition.xyz);
     result += float3(0.2) * (1.0 - surf.ao) * surf.color;
 
-    // result = pow(result, float3(1.0 / gamma));
+    result = pow(result, float3(1.0 / gamma));
 
-    return half4(half3(result), 1.0);
+    return float4(result, 1.0);
 }

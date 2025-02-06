@@ -103,7 +103,7 @@ auto Renderer_Metal::draw() -> void {
     float angle = time * 1.5f;
     // single instance
     InstanceData* instance = reinterpret_cast<InstanceData*>(instanceDataBuffer->contents());
-    instance->modelMatrix = glm::rotate(glm::rotate(glm::identity<glm::mat4>(), 3.0f * (float)M_PI / 2.0f, glm::vec3(1.0f, 0.0f, 0.0f)), angle, glm::vec3(0.0f, 0.0f, 1.0f));
+    instance->modelMatrix = glm::rotate(glm::mat4(1.0f), angle, glm::vec3(0.0f, -1.0f, -1.0f)); // glm::rotate(glm::rotate(glm::mat4(1.0f), glm::radians(270.0f), glm::vec3(1.0f, 0.0f, 0.0f)), angle, glm::vec3(0.0f, 0.0f, 1.0f));
     instance->color = glm::vec4(1.0f, 0.0f, 0.0f, 1.0f);
     // multiple instances
     // std::vector<InstanceData> instances = {{
@@ -117,7 +117,7 @@ auto Renderer_Metal::draw() -> void {
     // }
     instanceDataBuffer->didModifyRange(NS::Range::Make(0, instanceDataBuffer->length())); // TODO: avoid updating the entire instance data buffer every frame
 
-    glm::vec3 camPos = glm::vec3(0.0f, 2.0f, 2.0f);
+    glm::vec3 camPos = glm::vec3(0.0f, 0.0f, 5.0f);
     CameraData* camera = reinterpret_cast<CameraData*>(cameraDataBuffer->contents());
     camera->projectionMatrix = glm::perspective(glm::radians(45.f), 1.333f, 0.03f, 500.0f);
     camera->viewMatrix = glm::lookAt(camPos, glm::vec3(0.0f, 0.0f, 0.0f), glm::vec3(0.0f, 1.0f, 0.0f));
@@ -199,14 +199,14 @@ NS::SharedPtr<MTL::RenderPipelineState> Renderer_Metal::createPipeline(const std
 NS::SharedPtr<MTL::Texture> Renderer_Metal::createTexture(const std::string& filename) {
     auto img = AssetManager::loadImage(filename);
     if (img) {
-        MTL::PixelFormat pixelFormat = MTL::PixelFormat::PixelFormatBGRA8Unorm_sRGB;
+        MTL::PixelFormat pixelFormat = MTL::PixelFormat::PixelFormatBGRA8Unorm;
         switch (img->channelCount) {
         case 1:
-            pixelFormat = MTL::PixelFormat::PixelFormatR8Unorm_sRGB;
+            pixelFormat = MTL::PixelFormat::PixelFormatR8Unorm;
             break;
         case 3:
         case 4:
-            pixelFormat = MTL::PixelFormat::PixelFormatBGRA8Unorm_sRGB;
+            pixelFormat = MTL::PixelFormat::PixelFormatBGRA8Unorm;
             break;
         default:
             throw std::runtime_error(fmt::format("Unknown texture format at {}\n", filename));

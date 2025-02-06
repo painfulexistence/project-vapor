@@ -29,7 +29,6 @@ struct DirLight {
 
 struct PointLight {
     vec3 position;
-    vec3 attenuation;
     vec3 color;
     float intensity;
 };
@@ -102,11 +101,11 @@ vec3 SurfaceColor() {
 }
 
 float SurfaceAO() {
-    return 0.0; // texture(ao_map, tex_uv).r;
+    return 0.1; // texture(ao_map, tex_uv).r;
 }
 
 float SurfaceRoughness() {
-    return 0.5; // texture(roughness_map, tex_uv).r;
+    return 1.0; // texture(roughness_map, tex_uv).r;
 }
 
 float SurfaceMetallic() {
@@ -114,8 +113,9 @@ float SurfaceMetallic() {
 }
 
 DirLight main_light = DirLight(vec3(0.0, 1.0, 0.0), vec3(1.0, 1.0, 1.0), 10.0);
-PointLight aux_lights[1] = {
-    PointLight(vec3(0.0, 1.0, 0.0), vec3(0.5), vec3(1.0, 0.0, 0.0), 0.2),
+PointLight aux_lights[] = {
+    PointLight(vec3(0.0, -1.0, 0.0), vec3(1.0, 0.0, 0.0), 3.2),
+    // PointLight(vec3(0.0, 1.0, 0.0), vec3(0.0, 1.0, 0.0), 5.2),
 };
 
 void main() {
@@ -136,7 +136,7 @@ void main() {
     // result += CalculatePointLight(aux_lights[1], norm, viewDir, surf);
     // result += CalculatePointLight(aux_lights[2], norm, viewDir, surf);
     // result += CalculatePointLight(aux_lights[3], norm, viewDir, surf);
-    // result += vec3(0.2) * (1.0 - surf.ao) * surf.color;
+    result += vec3(0.2) * (1.0 - surf.ao) * surf.color;
 
     result = pow(result, vec3(1.0 / gamma));
 
