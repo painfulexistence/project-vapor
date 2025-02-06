@@ -1,0 +1,17 @@
+{
+  "version": "0.2.0",
+  "configurations": [
+    {
+      "name": "Debug",
+      "type": "cppdbg",
+      "osx": {
+        "MIMode": "lldb",
+      },
+      "request": "launch",
+      "stopAtEntry": false,
+      "program": "${workspaceFolder}/build/Vapor/Debug/main",
+      "cwd": "${workspaceFolder}",
+      "args": [],
+    },
+  ],
+}
