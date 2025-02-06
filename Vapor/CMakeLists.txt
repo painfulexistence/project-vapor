@@ -6,6 +6,13 @@ FetchContent_Declare(SDL2
     GIT_TAG release-2.30.3
     GIT_PROGRESS TRUE)
 FetchContent_MakeAvailable(SDL2)
+option(ARGS_BUILD_EXAMPLE OFF)
+option(ARGS_BUILD_UNITTESTS OFF)
+FetchContent_Declare(args
+    GIT_REPOSITORY https://github.com/Taywee/args
+    GIT_TAG 6.4.6
+    GIT_PROGRESS TRUE)
+FetchContent_MakeAvailable(args)
 find_package(fmt CONFIG REQUIRED)
 find_package(glm CONFIG REQUIRED)
 find_package(Vulkan REQUIRED)
@@ -24,7 +31,7 @@ set(SOURCES
 add_executable(main ${SOURCES})
 target_compile_features(main PRIVATE cxx_std_20)
 set_target_properties(main PROPERTIES CXX_EXTENSIONS OFF)
-target_link_libraries(main PRIVATE SDL2::SDL2 metal fmt::fmt glm::glm Vulkan::Vulkan)
+target_link_libraries(main PRIVATE SDL2::SDL2 metal fmt::fmt glm::glm Vulkan::Vulkan args)
 
 find_program(GLSL_VALIDATOR "glslangValidator" REQUIRED)
 file(GLOB_RECURSE SHADER_SOURCES CONFIGURE_DEPENDS

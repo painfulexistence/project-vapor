@@ -13,5 +13,33 @@
       "cwd": "${workspaceFolder}",
       "args": [],
     },
+    {
+      "name": "Debug (Metal)",
+      "type": "cppdbg",
+      "osx": {
+        "MIMode": "lldb",
+      },
+      "request": "launch",
+      "stopAtEntry": false,
+      "program": "${workspaceFolder}/build/Vapor/Debug/main",
+      "cwd": "${workspaceFolder}",
+      "args": [
+        "--metal"
+      ],
+    },
+    {
+      "name": "Debug (Vulkan)",
+      "type": "cppdbg",
+      "osx": {
+        "MIMode": "lldb",
+      },
+      "request": "launch",
+      "stopAtEntry": false,
+      "program": "${workspaceFolder}/build/Vapor/Debug/main",
+      "cwd": "${workspaceFolder}",
+      "args": [
+        "--vulkan"
+      ],
+    },
   ],
 }
