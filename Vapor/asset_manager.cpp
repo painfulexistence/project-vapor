@@ -2,7 +2,7 @@
 #include "graphics.hpp"
 
 #include "fmt/core.h"
-#include "SDL_filesystem.h"
+#include "SDL3/SDL_filesystem.h"
 
 #define STB_IMAGE_IMPLEMENTATION
 #include "stb/stb_image.h"

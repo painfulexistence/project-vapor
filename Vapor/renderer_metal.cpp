@@ -29,8 +29,8 @@ struct InstanceData {
 };
 
 Renderer_Metal::Renderer_Metal(SDL_Window* window) {
-    renderer = SDL_CreateRenderer(window, -1, 0);
-    swapchain = (CA::MetalLayer*)SDL_RenderGetMetalLayer(renderer);
+    renderer = SDL_CreateRenderer(window, nullptr);
+    swapchain = (CA::MetalLayer*)SDL_GetRenderMetalLayer(renderer);
     device = swapchain->device();
     queue = NS::TransferPtr(device->newCommandQueue());
 }

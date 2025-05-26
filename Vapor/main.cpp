@@ -1,4 +1,4 @@
-#include "SDL.h"
+#include "SDL3/SDL.h"
 #include "fmt/core.h"
 #include "args.hxx"
 #include "renderer_metal.hpp"
@@ -42,16 +42,16 @@ int main(int argc, char* args[]) {
         }
     }
 
-    if (SDL_Init(SDL_INIT_VIDEO) < 0) {
+    if (!SDL_Init(SDL_INIT_VIDEO)) {
         fmt::print("SDL could not initialize! Error: {}\n", SDL_GetError());
         return 1;
     }
 
     const char* winTitle;
-    Uint32 winFlags = SDL_WINDOW_SHOWN | SDL_WINDOW_RESIZABLE;
+    Uint32 winFlags = SDL_WINDOW_RESIZABLE | SDL_WINDOW_HIGH_PIXEL_DENSITY;
     GraphicsBackend gfxBackend;
 #if defined(__APPLE__)
-    if (useVulkan || !useMetal) {
+    if (useVulkan) {
         winTitle = "Project Vapor (Vulkan)";
         winFlags |= SDL_WINDOW_VULKAN;
         gfxBackend = GraphicsBackend::Vulkan;
@@ -67,7 +67,7 @@ int main(int argc, char* args[]) {
 #endif
 
     auto window = SDL_CreateWindow(
-        winTitle, SDL_WINDOWPOS_UNDEFINED, SDL_WINDOWPOS_UNDEFINED, 800, 600, winFlags
+        winTitle, 800, 600, winFlags
     );
 
     auto renderer = createRenderer(gfxBackend, window);
@@ -78,17 +78,24 @@ int main(int argc, char* args[]) {
         SDL_Event e;
         while (SDL_PollEvent(&e) != 0) {
             switch (e.type) {
-            case SDL_QUIT:
+            case SDL_EVENT_QUIT:
                 quit = true;
                 break;
-            case SDL_KEYDOWN: {
-                switch (e.key.keysym.scancode) {
+            case SDL_EVENT_KEY_DOWN: {
+                switch (e.key.scancode) {
                 case SDL_SCANCODE_ESCAPE:
                     quit = true;
                     break;
                 default:
                     break;
                 }
+                break;
+            }
+            case SDL_EVENT_KEY_UP: {
+                break;
+            }
+            case SDL_EVENT_WINDOW_RESIZED: {
+                // renderer->resize(e.window.data1, e.window.data2);
                 break;
             }
             default:

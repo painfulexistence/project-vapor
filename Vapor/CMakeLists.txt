@@ -1,13 +1,16 @@
 set(BUILD_SHARED_LIBS OFF)
-option(SDL_TEST_LIBRARY OFF)
-FetchContent_Declare(SDL2
+set(SDL_SHARED OFF CACHE BOOL "" FORCE)
+set(SDL_STATIC ON CACHE BOOL "" FORCE)
+set(SDL_TESTS OFF CACHE BOOL "" FORCE)
+set(SDL_EXAMPLES OFF CACHE BOOL "" FORCE)
+set(SDL_TESTS_LIBRARY OFF CACHE BOOL "" FORCE)
+FetchContent_Declare(SDL3
     GIT_REPOSITORY https://github.com/libsdl-org/SDL.git
-    # TODO: Upgrade to SDL3 when it comes out
-    GIT_TAG release-2.30.3
+    GIT_TAG release-3.2.14
     GIT_PROGRESS TRUE)
-FetchContent_MakeAvailable(SDL2)
-option(ARGS_BUILD_EXAMPLE OFF)
-option(ARGS_BUILD_UNITTESTS OFF)
+FetchContent_MakeAvailable(SDL3)
+set(ARGS_BUILD_EXAMPLE OFF)
+set(ARGS_BUILD_UNITTESTS OFF)
 FetchContent_Declare(args
     GIT_REPOSITORY https://github.com/Taywee/args
     GIT_TAG 6.4.6
@@ -31,7 +34,7 @@ set(SOURCES
 add_executable(main ${SOURCES})
 target_compile_features(main PRIVATE cxx_std_20)
 set_target_properties(main PROPERTIES CXX_EXTENSIONS OFF)
-target_link_libraries(main PRIVATE SDL2::SDL2 metal fmt::fmt glm::glm Vulkan::Vulkan args)
+target_link_libraries(main PRIVATE SDL3::SDL3 metal fmt::fmt glm::glm Vulkan::Vulkan args)
 
 find_program(GLSL_VALIDATOR "glslangValidator" REQUIRED)
 file(GLOB_RECURSE SHADER_SOURCES CONFIGURE_DEPENDS

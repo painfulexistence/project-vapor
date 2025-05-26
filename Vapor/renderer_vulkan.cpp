@@ -85,13 +85,7 @@ Renderer_Vulkan::Renderer_Vulkan(SDL_Window* window) {
     };
 
     uint32_t instanceExtensionCount;
-    const char** instanceExtensionNames;
-    SDL_Vulkan_GetInstanceExtensions(window, &instanceExtensionCount, nullptr);
-    instanceExtensionNames = new const char* [instanceExtensionCount];
-    SDL_Vulkan_GetInstanceExtensions(window, &instanceExtensionCount, instanceExtensionNames);
-    for(uint32_t i = 0; i < instanceExtensionCount; i++) {
-        instanceExtensions.emplace_back(instanceExtensionNames[i]);
-    }
+    const char*const* instanceExtensionNames = SDL_Vulkan_GetInstanceExtensions(&instanceExtensionCount);
 
     const VkApplicationInfo appInfo = {
         VK_STRUCTURE_TYPE_APPLICATION_INFO,

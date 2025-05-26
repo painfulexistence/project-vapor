@@ -1,7 +1,7 @@
 #include <fstream>
 #include <stdexcept>
 #include <vector>
-#include "SDL_filesystem.h"
+#include "SDL3/SDL_filesystem.h"
 
 std::vector<char> readFile(const std::string& filename) {
     std::ifstream file((SDL_GetBasePath() + filename), std::ios::ate | std::ios::binary);

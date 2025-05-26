@@ -2,7 +2,7 @@
 #include "renderer.hpp"
 #include "graphics.hpp"
 
-#include "SDL.h"
+#include "SDL3/SDL.h"
 #include <Foundation/Foundation.hpp>
 #include <Metal/Metal.hpp>
 #include <QuartzCore/QuartzCore.hpp>
