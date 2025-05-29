@@ -86,6 +86,9 @@ Renderer_Vulkan::Renderer_Vulkan(SDL_Window* window) {
 
     uint32_t instanceExtensionCount;
     const char*const* instanceExtensionNames = SDL_Vulkan_GetInstanceExtensions(&instanceExtensionCount);
+    for(uint32_t i = 0; i < instanceExtensionCount; i++) {
+        instanceExtensions.emplace_back(instanceExtensionNames[i]);
+    }
 
     const VkApplicationInfo appInfo = {
         VK_STRUCTURE_TYPE_APPLICATION_INFO,
@@ -107,11 +110,11 @@ Renderer_Vulkan::Renderer_Vulkan(SDL_Window* window) {
         instanceExtensions.data(),
     };
     if (vkCreateInstance(&instanceInfo, nullptr, &instance) != VK_SUCCESS) {
-        throw std::runtime_error("Failed to create instance!");
+        throw std::runtime_error(fmt::format("Failed to create instance! {}", SDL_GetError()));
     }
 
-    if (SDL_Vulkan_CreateSurface(window, instance, &surface ) != SDL_TRUE) {
-        throw std::runtime_error("Failed to create surface!");
+    if (!SDL_Vulkan_CreateSurface(window, instance, nullptr, &surface)) {
+        throw std::runtime_error(fmt::format("Failed to create surface! {}", SDL_GetError()));
     }
 
         // Find a physical device
