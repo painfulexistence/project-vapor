@@ -68,9 +68,10 @@ constant PointLight auxLight = {
 
 float TrowbridgeReitzGGX(float nh, float r) {
     float r2 = r * r;
+    float a2 = r2 * r2;
     float nh2 = nh * nh;
-    float nhr2 = (nh2 * (r2 - 1.0) + 1.0) * (nh2 * (r2 - 1.0) + 1.0);
-    return r2 / (PI * nhr2);
+    float nhr2 = (nh2 * (a2 - 1.0) + 1.0) * (nh2 * (a2 - 1.0) + 1.0);
+    return a2 / (PI * nhr2);
 }
 
 float SmithsSchlickGGX(float nv, float nl, float r) {
@@ -80,19 +81,20 @@ float SmithsSchlickGGX(float nv, float nl, float r) {
     return ggx1 * ggx2;
 }
 
-float3 FresnelSchlick(float nh, float3 f0) {
-    return f0 + (1.0 - f0) * pow(1.0 - nh, 5.0);
+float3 FresnelSchlick(float vh, float3 f0) {
+    return f0 + (1.0 - f0) * pow(1.0 - vh, 5.0);
 }
 
 float3 CookTorranceBRDF(float3 norm, float3 lightDir, float3 viewDir, Surface surf) {
     float3 halfway = normalize(lightDir + viewDir);
-    float nv = clamp(dot(norm, viewDir), 0.0, 1.0);
-    float nl = clamp(dot(norm, lightDir), 0.0, 1.0);
-    float nh = clamp(dot(norm, halfway), 0.0, 1.0);
+    float nv = max(dot(norm, viewDir), 0.0);
+    float nl = max(dot(norm, lightDir), 0.0);
+    float nh = max(dot(norm, halfway), 0.0);
+    float vh = max(dot(viewDir, halfway), 0.0);
 
     float D = TrowbridgeReitzGGX(nh, surf.roughness + 0.01);
     float G = SmithsSchlickGGX(nv, nl, surf.roughness + 0.01);
-    float3 F = FresnelSchlick(nh, mix(float3(0.04), surf.color, surf.metallic));
+    float3 F = FresnelSchlick(vh, mix(float3(0.04), surf.color, surf.metallic));
 
     float3 specular = D * F * G / max(4.0 * nv * nl, 0.0001);
     float3 kd = (1.0 - surf.metallic) * (float3(1.0) - F);
@@ -132,7 +134,7 @@ fragment float4 fragmentMain(RasterizerData in [[stage_in]], texture2d<float, ac
     constexpr sampler s(address::repeat, filter::linear, mip_filter::linear);
     Surface surf;
     surf.color = pow(texAlbedo.sample(s, in.uv).bgr, float3(gamma));
-    surf.ao = 0.1; // texAO.sample(s, in.uv).r;
+    surf.ao = 0.9; // texAO.sample(s, in.uv).r;
     surf.roughness = 1.0; // texRoughness.sample(s, in.uv).r;
     surf.metallic = 0.0; // texMetallic.sample(s, in.uv).r;
 
@@ -146,7 +148,7 @@ fragment float4 fragmentMain(RasterizerData in [[stage_in]], texture2d<float, ac
     float3 result = float3(0.0);
     result += CalculateDirectionalLight(mainLight, norm, viewDir, surf); // result += CookTorranceBRDF(norm, lightDir, viewDir, surf) * (mainLight.color * mainLight.intensity) * clamp(dot(norm, lightDir), 0.0, 1.0);
     result += CalculatePointLight(auxLight, norm, viewDir, surf, in.worldPosition.xyz);
-    result += float3(0.2) * (1.0 - surf.ao) * surf.color;
+    result += float3(0.2) * surf.ao * surf.color;
 
     result = pow(result, float3(1.0 / gamma));
 

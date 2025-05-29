@@ -62,13 +62,14 @@ vec3 CalculatePointLight(PointLight light, vec3 norm, vec3 viewDir, Surface surf
 
 vec3 CookTorranceBRDF(vec3 norm, vec3 lightDir, vec3 viewDir, Surface surf) {
     vec3 halfway = normalize(lightDir + viewDir);
-    float nv = clamp(dot(norm, viewDir), 0.0, 1.0);
-    float nl = clamp(dot(norm, lightDir), 0.0, 1.0);
-    float nh = clamp(dot(norm, halfway), 0.0, 1.0);
+    float nv = max(dot(norm, viewDir), 0.0);
+    float nl = max(dot(norm, lightDir), 0.0);
+    float nh = max(dot(norm, halfway), 0.0);
+    float vh = max(dot(viewDir, halfway), 0.0);
 
     float D = TrowbridgeReitzGGX(nh, surf.roughness + 0.01);
     float G = SmithsSchlickGGX(nv, nl, surf.roughness + 0.01);
-    vec3 F = FresnelSchlick(nh, mix(vec3(0.04), surf.color, surf.metallic));
+    vec3 F = FresnelSchlick(vh, mix(vec3(0.04), surf.color, surf.metallic));
 
     vec3 specular = D * F * G / max(4.0 * nv * nl, 0.0001);
     vec3 kd = (1.0 - surf.metallic) * (vec3(1.0) - F);
@@ -79,9 +80,10 @@ vec3 CookTorranceBRDF(vec3 norm, vec3 lightDir, vec3 viewDir, Surface surf) {
 
 float TrowbridgeReitzGGX(float nh, float r) {
     float r2 = r * r;
+    float a2 = r2 * r2;
     float nh2 = nh * nh;
-    float nhr2 = (nh2 * (r2 - 1) + 1) * (nh2 * (r2 - 1) + 1);
-    return r2 / (PI * nhr2);
+    float nhr2 = (nh2 * (a2 - 1) + 1) * (nh2 * (a2 - 1) + 1);
+    return a2 / (PI * nhr2);
 }
 
 float SmithsSchlickGGX(float nv, float nl, float r) {
@@ -91,8 +93,8 @@ float SmithsSchlickGGX(float nv, float nl, float r) {
     return ggx1 * ggx2;
 }
 
-vec3 FresnelSchlick(float nh, vec3 f0) {
-    return f0 + (1.0 - f0) * pow(1.0 - nh, 5.0);
+vec3 FresnelSchlick(float vh, vec3 f0) {
+    return f0 + (1.0 - f0) * pow(1.0 - vh, 5.0);
 }
 
 vec3 SurfaceColor() {
@@ -136,7 +138,7 @@ void main() {
     // result += CalculatePointLight(aux_lights[1], norm, viewDir, surf);
     // result += CalculatePointLight(aux_lights[2], norm, viewDir, surf);
     // result += CalculatePointLight(aux_lights[3], norm, viewDir, surf);
-    result += vec3(0.2) * (1.0 - surf.ao) * surf.color;
+    result += vec3(0.2) * surf.ao * surf.color;
 
     result = pow(result, vec3(1.0 / gamma));
 
