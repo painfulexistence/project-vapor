@@ -31,7 +31,7 @@ struct Buffer {
     VkDeviceMemory memory;
 };
 
-class Renderer_Vulkan final : Renderer {
+class Renderer_Vulkan final : public Renderer {
 public:
     Renderer_Vulkan(SDL_Window* window);
 

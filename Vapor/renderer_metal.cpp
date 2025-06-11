@@ -18,6 +18,11 @@
 #include <glm/ext/matrix_clip_space.hpp>
 #include <glm/ext/matrix_transform.hpp>
 
+
+std::unique_ptr<Renderer> createRendererMetal(SDL_Window* window) {
+    return std::make_unique<Renderer_Metal>(window);
+}
+
 struct CameraData {
     alignas(16) glm::mat4 projectionMatrix;
     alignas(16) glm::mat4 viewMatrix;

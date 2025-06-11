@@ -1,5 +1,13 @@
 #pragma once
+#include <SDL3/SDL_video.h>
+#include <memory>
 #include "graphics.hpp"
+
+
+enum class GraphicsBackend {
+    Metal,
+    Vulkan
+};
 
 enum class GPUBufferUsage {
     VERTEX,
@@ -24,3 +32,17 @@ public:
 
     virtual void draw() = 0;
 };
+
+std::unique_ptr<Renderer> createRendererMetal(SDL_Window* window);
+std::unique_ptr<Renderer> createRendererVulkan(SDL_Window* window);
+
+inline std::unique_ptr<Renderer> createRenderer(GraphicsBackend backend, SDL_Window* window) {
+    switch (backend) {
+    case GraphicsBackend::Metal:
+        return createRendererMetal(window);
+    case GraphicsBackend::Vulkan:
+        return createRendererVulkan(window);
+    default:
+        return nullptr;
+    }
+}

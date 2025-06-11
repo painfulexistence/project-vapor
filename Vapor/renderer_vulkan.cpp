@@ -17,6 +17,11 @@
 #define ENABLE_VALIDATION 1
 #define USE_DYNAMIC_RENDERING 0
 
+
+std::unique_ptr<Renderer> createRendererVulkan(SDL_Window* window) {
+    return std::make_unique<Renderer_Vulkan>(window);
+}
+
 void insertImageMemoryBarrier(
     VkCommandBuffer cmd, VkImage image,
     VkAccessFlags srcAccessMask, VkAccessFlags dstAccessMask,

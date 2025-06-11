@@ -8,7 +8,7 @@
 #include <QuartzCore/QuartzCore.hpp>
 #include <string>
 
-class Renderer_Metal final : Renderer {
+class Renderer_Metal final : public Renderer { // Must be public or factory function won't work
 public:
     Renderer_Metal(SDL_Window* window);
 

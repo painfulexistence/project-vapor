@@ -1,24 +1,9 @@
-#include "SDL3/SDL.h"
-#include "fmt/core.h"
-#include "args.hxx"
-#include "renderer_metal.hpp"
-#include "renderer_vulkan.hpp"
+#include <SDL3/SDL.h>
+#include <fmt/core.h>
+#include <args.hxx>
+#include <iostream>
+#include "renderer.hpp"
 
-enum GraphicsBackend {
-    Metal,
-    Vulkan
-};
-
-Renderer* createRenderer(GraphicsBackend backend, SDL_Window* window) {
-    switch (backend) {
-    case Metal:
-        return (Renderer*)new Renderer_Metal(window);
-    case Vulkan:
-        return (Renderer*)new Renderer_Vulkan(window);
-    default:
-        return nullptr;
-    }
-}
 
 int main(int argc, char* args[]) {
     args::ArgumentParser parser { "This is Project Vapor." };
@@ -61,9 +46,9 @@ int main(int argc, char* args[]) {
         gfxBackend = GraphicsBackend::Metal;
     }
 #else
-    title = "Project Vapor (Vulkan)";
-    flags |= SDL_WINDOW_VULKAN;
-    backend = GraphicsBackend::Vulkan;
+    winTitle = "Project Vapor (Vulkan)";
+    winFlags |= SDL_WINDOW_VULKAN;
+    gfxBackend = GraphicsBackend::Vulkan;
 #endif
 
     auto window = SDL_CreateWindow(
