@@ -2,7 +2,8 @@
 
 layout(location = 0) in vec3 frag_pos;
 layout(location = 1) in vec2 tex_uv;
-layout(location = 2) in mat3 TBN;
+layout(location = 2) in vec3 T;
+layout(location = 3) in vec3 N;
 layout(location = 0) out vec4 Color;
 layout(push_constant) uniform PushConstantBlock {
     vec3 cam_pos;
@@ -13,12 +14,22 @@ layout(binding = 2) uniform sampler2D normal_map;
 // layout(binding = 3) uniform sampler2D ao_map;
 // layout(binding = 4) uniform sampler2D roughness_map;
 // layout(binding = 5) uniform sampler2D metallic_map;
+layout(binding = 10) uniform sampler2D env_map;
 
 struct Surface {
     vec3 color;
     float ao;
     float roughness;
     float metallic;
+    // vec3 emission;
+    float subsurface;
+    float specular;
+    float specular_tint;
+    float anisotropic;
+    float sheen;
+    float sheen_tint;
+    float clearcoat;
+    float clearcoat_gloss;
 };
 
 struct DirLight {
@@ -34,56 +45,56 @@ struct PointLight {
 };
 
 const float PI = 3.1415927;
-const float gamma = 2.2;
+const float GAMMA = 2.2;
+const float INV_GAMMA = 1.0 / GAMMA;
 
-vec3 CookTorranceBRDF(vec3 norm, vec3 lightDir, vec3 viewDir, Surface surf);
+vec3 CookTorranceBRDF(vec3 norm, vec3 tangent, vec3 lightDir, vec3 viewDir, Surface surf);
 
 float TrowbridgeReitzGGX(float nh, float r);
 
 float SmithsSchlickGGX(float nv, float nl, float r);
 
-vec3 FresnelSchlick(float nh, vec3 f0);
-
-vec3 SurfaceColor();
-
-vec3 CalculateDirectionalLight(DirLight light, vec3 norm, vec3 viewDir, Surface surf) {
+vec3 CalculateDirectionalLight(DirLight light, vec3 norm, vec3 tangent, vec3 viewDir, Surface surf) {
     vec3 lightDir = normalize(-light.direction);
     vec3 radiance = light.color * light.intensity;
-    return CookTorranceBRDF(norm, lightDir, viewDir, surf) * radiance * clamp(dot(norm, lightDir), 0.0, 1.0);
+    return CookTorranceBRDF(norm, tangent, lightDir, viewDir, surf) * radiance * max(dot(norm, lightDir), 0.0);
 }
 
-vec3 CalculatePointLight(PointLight light, vec3 norm, vec3 viewDir, Surface surf) {
+vec3 CalculatePointLight(PointLight light, vec3 norm, vec3 tangent, vec3 viewDir, Surface surf) {
     vec3 lightDir = normalize(light.position - frag_pos);
     float dist = distance(light.position, frag_pos);
     float attenuation = 1.0 / (dist * dist);
     vec3 radiance = attenuation * light.color * light.intensity;
-    return CookTorranceBRDF(norm, lightDir, viewDir, surf) * radiance * clamp(dot(norm, lightDir), 0.0, 1.0);
+    return CookTorranceBRDF(norm, tangent, lightDir, viewDir, surf) * radiance * max(dot(norm, lightDir), 0.0);
 }
 
-vec3 CookTorranceBRDF(vec3 norm, vec3 lightDir, vec3 viewDir, Surface surf) {
-    vec3 halfway = normalize(lightDir + viewDir);
-    float nv = max(dot(norm, viewDir), 0.0);
-    float nl = max(dot(norm, lightDir), 0.0);
-    float nh = max(dot(norm, halfway), 0.0);
-    float vh = max(dot(viewDir, halfway), 0.0);
+vec3 CalculateIBL(vec3 norm, vec3 viewDir, Surface surf) {
+    vec3 reflectDir = reflect(-viewDir, norm);
+    float theta = -acos(reflectDir.y);
+    float phi = atan(reflectDir.z, reflectDir.x);
+    vec2 uv = fract(vec2(phi, theta) / vec2(2.0 * PI, PI) + vec2(0.5, 0.0));
+    vec3 env = texture(env_map, uv).rgb;
+    return env * surf.color;
+}
 
-    float D = TrowbridgeReitzGGX(nh, surf.roughness + 0.01);
-    float G = SmithsSchlickGGX(nv, nl, surf.roughness + 0.01);
-    vec3 F = FresnelSchlick(vh, mix(vec3(0.04), surf.color, surf.metallic));
+float GTR1(float nh, float a) {
+    if (a >= 1.0) return 1.0 / PI;
+    float a2 = a * a;
+    float t = 1.0 + (a2 - 1.0) * nh * nh;
+    return (a2 - 1.0) / (PI * log(a2) * t);
+}
 
-    vec3 specular = D * F * G / max(4.0 * nv * nl, 0.0001);
-    vec3 kd = (1.0 - surf.metallic) * (vec3(1.0) - F);
-    vec3 diffuse = kd * surf.color / PI;
-
-    return diffuse + specular;
+float GTR2_aniso(float nh, float hx, float hy, float ax, float ay) {
+    float t = (hx * hx) / (ax * ax) + (hy * hy) / (ay * ay) + nh * nh;
+    return 1.0 / (PI * ax * ay * t * t);
 }
 
 float TrowbridgeReitzGGX(float nh, float r) {
-    float r2 = r * r;
-    float a2 = r2 * r2;
+    float a = r * r; // TODO: use r + 0.01?
+    float a2 = a * a;
     float nh2 = nh * nh;
-    float nhr2 = (nh2 * (a2 - 1) + 1) * (nh2 * (a2 - 1) + 1);
-    return a2 / (PI * nhr2);
+    float t2 = (nh2 * (a2 - 1.0) + 1.0) * (nh2 * (a2 - 1.0) + 1.0);
+    return a2 / (PI * t2);
 }
 
 float SmithsSchlickGGX(float nv, float nl, float r) {
@@ -93,25 +104,71 @@ float SmithsSchlickGGX(float nv, float nl, float r) {
     return ggx1 * ggx2;
 }
 
-vec3 FresnelSchlick(float vh, vec3 f0) {
-    return f0 + (1.0 - f0) * pow(1.0 - vh, 5.0);
+float SmithGGX(float u, float r) {
+    float a = r * r;
+    float b = u * u;
+    return 1.0 / (u + sqrt(a + b - a * b));
 }
 
-vec3 SurfaceColor() {
-    vec3 texColor = pow(texture(base_map, tex_uv).rgb, vec3(gamma));
-    return texColor;
+float SmithGGX_aniso(float u, float vx, float vy, float ax, float ay) {
+    float t = vx * vx * ax * ax + vy * vy * ay * ay + u * u;
+    return 1.0 / (u + sqrt(t));
 }
 
-float SurfaceAO() {
-    return 0.1; // texture(ao_map, tex_uv).r;
+float FresnelApprox(float u) {
+    return pow(1.0 + 0.0001 - u, 5.0);
 }
 
-float SurfaceRoughness() {
-    return 1.0; // texture(roughness_map, tex_uv).r;
+float luminance(vec3 color) {
+    return dot(color, vec3(0.3, 0.6, 0.1));
 }
 
-float SurfaceMetallic() {
-    return 0.0; // texture(metallic_map, tex_uv).r;
+vec3 CookTorranceBRDF(vec3 norm, vec3 tangent, vec3 lightDir, vec3 viewDir, Surface surf) {
+    vec3 halfway = normalize(lightDir + viewDir);
+    float nv = max(dot(norm, viewDir), 0.0);
+    float nl = max(dot(norm, lightDir), 0.0);
+    float nh = max(dot(norm, halfway), 0.0);
+    float vh = max(dot(viewDir, halfway), 0.0);
+    float lh = max(dot(lightDir, halfway), 0.0);
+    float lum = luminance(surf.color);
+    vec3 tint = lum > 0.0 ? surf.color / lum : vec3(1);
+    vec3 spec0 = mix(surf.specular * 0.08 * mix(vec3(1), tint, surf.specular_tint), surf.color, surf.metallic);
+    float fh = FresnelApprox(lh);
+    float fl = FresnelApprox(nl);
+    float fv = FresnelApprox(nv);
+    float fss90 = lh * lh * surf.roughness;
+    // diffuse
+    float fd90 = 0.5 + 2.0 * fss90;
+    float kd = mix(1.0, fd90, fl) * mix(1.0, fd90, fv);
+    // vec3 diffuse = kd * surf.color / PI;
+    // subsurface
+    float fss = mix(1.0, fss90, fl) * mix(1.0, fss90, fv);
+    float ss = 1.25 * (fss * (1.0 / (nl + nv + 0.0001) - 0.5) + 0.5);
+    // specular
+    float aspect = sqrt(1.0 - surf.anisotropic * .9);
+    float ax = max(.001, surf.roughness * surf.roughness / aspect);
+    float ay = max(.001, surf.roughness * surf.roughness * aspect);
+    vec3 x = tangent;
+    vec3 y = normalize(cross(norm, tangent)); //TODO: no recalculation
+    float hx = dot(halfway, x);
+    float hy = dot(halfway, y);
+    float lx = dot(lightDir, x);
+    float ly = dot(lightDir, y);
+    float vx = dot(viewDir, x);
+    float vy = dot(viewDir, y);
+    float D = GTR2_aniso(nh, hx, hy, ax, ay); // TrowbridgeReitzGGX(nh, surf.roughness);
+    float G = SmithGGX_aniso(nl, lx, ly, ax, ay) * SmithGGX_aniso(nv, vx, vy, ax, ay); // SmithsSchlickGGX(nv, nl, surf.roughness + 0.01) / max(4.0 * nv * nl, 0.0001);
+    vec3 F = mix(spec0, vec3(1.0), fh);
+    vec3 specular = D * G * F;
+    // sheen
+    vec3 sheen = fh * surf.sheen * mix(vec3(1), tint, surf.sheen_tint);
+    // clearcoat
+    float Dr = GTR1(nh, mix(.1, .001, surf.clearcoat_gloss));
+    float Fr = mix(.04, 1.0, fh);
+    float Gr = SmithGGX(nl, .25) * SmithGGX(nv, .25);
+    vec3 clearcoat = 0.25 * vec3(surf.clearcoat) * Dr * Fr * Gr;
+
+    return ((mix(kd, ss, surf.subsurface) * surf.color / PI + sheen) * (1.0 - surf.metallic) + specular + clearcoat) * nl;
 }
 
 DirLight main_light = DirLight(vec3(0.0, 1.0, 0.0), vec3(1.0, 1.0, 1.0), 10.0);
@@ -122,25 +179,37 @@ PointLight aux_lights[] = {
 
 void main() {
     vec3 texNorm = texture(normal_map, tex_uv).rgb * 2.0 - 1.0;
+    vec3 B = normalize(cross(N, T));
+    mat3 TBN = mat3(T, B, N);
     vec3 norm = normalize(TBN * texNorm);
+    vec3 tangent = normalize(T);
     vec3 viewDir = normalize(cam_pos - frag_pos);
 
-    Surface surf = Surface(
-        SurfaceColor(),
-        SurfaceAO(),
-        SurfaceRoughness(),
-        SurfaceMetallic()
-    );
+    Surface surf;
+    surf.color = pow(texture(base_map, tex_uv).rgb, vec3(GAMMA));
+    surf.ao = 0.9; // texture(ao_map, tex_uv).r;
+    surf.roughness = 1.0; // texture(roughness_map, tex_uv).r;
+    surf.metallic = 0.0; // texture(metallic_map, tex_uv).r;
+    // surf.emission = vec3(0.0);
+    surf.subsurface = 0.0;
+    surf.specular = 0.5;
+    surf.specular_tint = 0.0;
+    surf.anisotropic = 0.0;
+    surf.sheen = 0.0;
+    surf.sheen_tint = 0.5;
+    surf.clearcoat = 0.0;
+    surf.clearcoat_gloss = 1.0;
 
     vec3 result = vec3(0.0);
-    result += CalculateDirectionalLight(main_light, norm, viewDir, surf);
-    result += CalculatePointLight(aux_lights[0], norm, viewDir, surf);
+    result += CalculateDirectionalLight(main_light, norm, tangent, viewDir, surf);
+    result += CalculatePointLight(aux_lights[0], norm, tangent, viewDir, surf);
     // result += CalculatePointLight(aux_lights[1], norm, viewDir, surf);
     // result += CalculatePointLight(aux_lights[2], norm, viewDir, surf);
     // result += CalculatePointLight(aux_lights[3], norm, viewDir, surf);
     result += vec3(0.2) * surf.ao * surf.color;
+    // result += CalculateIBL(norm, viewDir, surf);
 
-    result = pow(result, vec3(1.0 / gamma));
+    result = pow(result, vec3(INV_GAMMA));
 
     Color = vec4(result, 1.0);
 }

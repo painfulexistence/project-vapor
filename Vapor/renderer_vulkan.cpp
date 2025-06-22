@@ -5,6 +5,7 @@
 #include "fmt/core.h"
 #include "helper.hpp"
 
+#include "SDL3/SDL_stdinc.h"
 #include "glm/vec2.hpp"
 #include "glm/vec3.hpp"
 #include "glm/vec4.hpp"
@@ -650,7 +651,7 @@ auto Renderer_Vulkan::draw() -> void {
     VkBuffer vertexBuffers[] = { testVertexBuffer };
     VkDeviceSize offsets[] = { 0 };
     vkCmdBindVertexBuffers(cmd, 0, 1, vertexBuffers, offsets);
-    vkCmdBindIndexBuffer(cmd, testIndexBuffer, 0, VkIndexType::VK_INDEX_TYPE_UINT16);
+    vkCmdBindIndexBuffer(cmd, testIndexBuffer, 0, VkIndexType::VK_INDEX_TYPE_UINT32);
     vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, pipelineLayout, 0, 1, &descriptorSets[currentFrame], 0, nullptr);
     glm::vec3  camPos = glm::vec3(0.0f, 0.0f, 5.0f);
     float angle = time * 0.5f;
@@ -1171,8 +1172,8 @@ VkBuffer Renderer_Vulkan::createVertexBuffer(std::vector<VertexData> vertices, V
     return buffer;
 }
 
-VkBuffer Renderer_Vulkan::createIndexBuffer(std::vector<uint16_t> indices, VkDeviceMemory& bufferMemory) {
-    VkDeviceSize bufferSize = sizeof(uint16_t) * indices.size();
+VkBuffer Renderer_Vulkan::createIndexBuffer(std::vector<Uint32> indices, VkDeviceMemory& bufferMemory) {
+    VkDeviceSize bufferSize = sizeof(Uint32) * indices.size();
     VkBuffer buffer = createBuffer(GPUBufferUsage::INDEX, bufferSize, bufferMemory);
 
     void* data;

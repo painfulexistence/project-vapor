@@ -24,9 +24,10 @@ public:
 
     NS::SharedPtr<MTL::Texture> createTexture(const std::string& filename);
 
-    NS::SharedPtr<MTL::Buffer> createVertexBuffer(std::vector<VertexData> vertices);
+    NS::SharedPtr<MTL::Buffer> createVertexBuffer(const std::vector<VertexData>& vertices);
+    NS::SharedPtr<MTL::Buffer> createIndexBuffer(const std::vector<Uint32>& indices);
+    NS::SharedPtr<MTL::Buffer> createStorageBuffer(const std::vector<VertexData>& vertices);
 
-    NS::SharedPtr<MTL::Buffer> createIndexBuffer(std::vector<uint16_t> indices);
 
 private:
     SDL_Renderer* renderer;

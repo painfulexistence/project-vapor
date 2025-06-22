@@ -8,6 +8,7 @@
 #include "fmt/core.h"
 #include "helper.hpp"
 
+#include "SDL3/SDL_stdinc.h"
 #include "glm/vec2.hpp"
 #include "glm/vec3.hpp"
 #include "glm/vec4.hpp"
@@ -146,11 +147,11 @@ auto Renderer_Metal::draw() -> void {
     encoder->setDepthStencilState(depthStencilState.get());
     // encoder->drawPrimitives(MTL::PrimitiveType::PrimitiveTypeTriangle, NS::UInteger(0), NS::UInteger(6));
     encoder->drawIndexedPrimitives(
-      MTL::PrimitiveType::PrimitiveTypeTriangle,
-      testIndexBuffer->length() / sizeof(uint16_t),
-      MTL::IndexTypeUInt16,
-      testIndexBuffer.get(),
-      0
+        MTL::PrimitiveType::PrimitiveTypeTriangle,
+        testIndexBuffer->length() / sizeof(Uint32),
+        MTL::IndexTypeUInt32,
+        testIndexBuffer.get(),
+        0
     );
 
     encoder->endEncoding();
@@ -245,7 +246,7 @@ NS::SharedPtr<MTL::Texture> Renderer_Metal::createTexture(const std::string& fil
     }
 }
 
-NS::SharedPtr<MTL::Buffer> Renderer_Metal::createVertexBuffer(std::vector<VertexData> vertices) {
+NS::SharedPtr<MTL::Buffer> Renderer_Metal::createVertexBuffer(const std::vector<VertexData>& vertices) {
     NS::SharedPtr<MTL::Buffer> buffer = NS::TransferPtr(device->newBuffer(vertices.size() * sizeof(VertexData), MTL::ResourceStorageModeManaged));
 
     memcpy(buffer->contents(), vertices.data(), vertices.size() * sizeof(VertexData));
@@ -254,10 +255,10 @@ NS::SharedPtr<MTL::Buffer> Renderer_Metal::createVertexBuffer(std::vector<Vertex
     return buffer;
 }
 
-NS::SharedPtr<MTL::Buffer> Renderer_Metal::createIndexBuffer(std::vector<uint16_t> indices) {
-    NS::SharedPtr<MTL::Buffer> buffer = NS::TransferPtr(device->newBuffer(indices.size() * sizeof(uint16_t), MTL::ResourceStorageModeManaged));
+NS::SharedPtr<MTL::Buffer> Renderer_Metal::createIndexBuffer(const std::vector<Uint32>& indices) {
+    NS::SharedPtr<MTL::Buffer> buffer = NS::TransferPtr(device->newBuffer(indices.size() * sizeof(Uint32), MTL::ResourceStorageModeManaged));
 
-    memcpy(buffer->contents(), indices.data(), indices.size() * sizeof(uint16_t));
+    memcpy(buffer->contents(), indices.data(), indices.size() * sizeof(Uint32));
     buffer->didModifyRange(NS::Range::Make(0, buffer->length()));
 
     return buffer;
