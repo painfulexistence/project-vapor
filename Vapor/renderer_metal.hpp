@@ -16,7 +16,7 @@ public:
 
     virtual void init() override;
 
-    virtual void draw() override;
+    virtual void draw(Scene& scene) override;
 
     void initTestPipelines();
 

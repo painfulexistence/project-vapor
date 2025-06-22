@@ -614,7 +614,7 @@ auto Renderer_Vulkan::init() -> void {
 	};
 }
 
-auto Renderer_Vulkan::draw() -> void {
+auto Renderer_Vulkan::draw(Scene& scene) -> void {
     vkWaitForFences(device, 1, &renderFences[currentFrame], VK_TRUE, UINT64_MAX);
     vkResetFences(device, 1, &renderFences[currentFrame]);
 

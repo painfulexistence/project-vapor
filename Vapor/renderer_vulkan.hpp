@@ -39,7 +39,7 @@ public:
 
     virtual void init() override;
 
-    virtual void draw() override;
+    virtual void draw(Scene& scene) override;
 
     VkPipeline createPipeline(const std::string& filename);
 
@@ -55,7 +55,7 @@ public:
 
     VkBuffer createVertexBuffer(std::vector<VertexData> vertices, VkDeviceMemory& bufferMemory);
 
-    VkBuffer createIndexBuffer(std::vector<uint16_t> indices, VkDeviceMemory& bufferMemory);
+    VkBuffer createIndexBuffer(std::vector<Uint32> indices, VkDeviceMemory& bufferMemory);
 
 private:
     VkInstance instance;

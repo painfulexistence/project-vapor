@@ -154,6 +154,31 @@ auto Renderer_Metal::draw() -> void {
         0
     );
 
+    for (const auto& node : scene.nodes) {
+        if (node->meshGroup) {
+            for (const auto& mesh : node->meshGroup->meshes) {
+                // encoder->setRenderPipelineState(getPipeline(mesh->material->pipeline));
+                // encoder->setVertexBuffer(getBuffer(mesh->vbos[0]), 0, 0);
+                if (mesh->indices.size() > 0) {
+                    // encoder->drawIndexedPrimitives(
+                    //     MTL::PrimitiveType::PrimitiveTypeTriangle,
+                    //     mesh->indices.size(),
+                    //     MTL::IndexTypeUInt32,
+                    //     getBuffer(mesh->ebo),
+                    //     0
+                    // );
+                } else {
+                    // encoder->drawPrimitives(
+                    //     MTL::PrimitiveType::PrimitiveTypeTriangle,
+                    //     0,
+                    //     mesh->positions.size(),
+                    //     1
+                    // );
+                }
+            }
+        }
+    }
+
     encoder->endEncoding();
 
     cmd->presentDrawable(surface);

@@ -44,7 +44,7 @@ std::shared_ptr<Image> AssetManager::loadImage(const std::string& filename) {
 
 std::shared_ptr<Mesh> AssetManager::loadOBJ(const std::string& filename) {
     std::vector<VertexData> vertices;
-    std::vector<uint16_t> indices;
+    std::vector<Uint32> indices;
 
     tinyobj::attrib_t attrib;
     std::vector<tinyobj::shape_t> shapes;

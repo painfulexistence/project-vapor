@@ -29,6 +29,7 @@ set(SOURCES
     renderer_vulkan.cpp
     graphics.cpp
 	asset_manager.cpp
+	scene.cpp
 )
 
 add_executable(main ${SOURCES})

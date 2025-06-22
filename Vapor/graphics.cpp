@@ -8,7 +8,7 @@ void Mesh::initialize(const MeshData& data) {
     recalculateNormalsAndTangents();
 };
 
-void Mesh::initialize(VertexData* vertexData, size_t vertexCount, uint16_t* indexData, size_t indexCount){
+void Mesh::initialize(VertexData* vertexData, size_t vertexCount, Uint32* indexData, size_t indexCount){
     vertices.resize(vertexCount);
     for (size_t i = 0; i < vertexCount; ++i) {
         vertices[i] = vertexData[i];

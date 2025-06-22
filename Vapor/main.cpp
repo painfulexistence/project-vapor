@@ -55,6 +55,8 @@ int main(int argc, char* args[]) {
         winTitle, 800, 600, winFlags
     );
 
+    Scene scene;
+
     auto renderer = createRenderer(gfxBackend, window);
     renderer->init();
 
@@ -79,6 +81,18 @@ int main(int argc, char* args[]) {
             case SDL_EVENT_KEY_UP: {
                 break;
             }
+            case SDL_EVENT_MOUSE_MOTION: {
+                break;
+            }
+            case SDL_EVENT_MOUSE_WHEEL: {
+                break;
+            }
+            case SDL_EVENT_MOUSE_BUTTON_DOWN: {
+                break;
+            }
+            case SDL_EVENT_MOUSE_BUTTON_UP: {
+                break;
+            }
             case SDL_EVENT_WINDOW_RESIZED: {
                 // renderer->resize(e.window.data1, e.window.data2);
                 break;
@@ -87,7 +101,7 @@ int main(int argc, char* args[]) {
                 break;
             }
         }
-        renderer->draw();
+        renderer->draw(scene);
     }
 
     SDL_DestroyWindow(window);

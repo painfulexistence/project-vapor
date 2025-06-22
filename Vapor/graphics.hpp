@@ -1,12 +1,34 @@
 #pragma once
-#include <cstddef>
-#include <vector>
-#include <array>
-
+#include <SDL3/SDL_stdinc.h>
 #include <glm/geometric.hpp>
 #include <glm/vec2.hpp>
 #include <glm/vec3.hpp>
 #include <glm/vec4.hpp>
+#include <cstddef>
+#include <vector>
+#include <array>
+
+enum class AlphaMode {
+    OPAQUE,
+    MASK,
+    BLEND,
+};
+
+enum class PrimitiveMode {
+    POINTS,
+    LINES,
+    LINE_STRIP,
+    TRIANGLES,
+    TRIANGLE_STRIP,
+};
+
+struct PipelineHandle {
+    Uint32 rid = 0;
+};
+
+struct BufferHandle {
+    Uint32 rid = 0;
+};
 
 class Image {
 public:
@@ -23,6 +45,26 @@ public:
     std::vector<uint8_t> byteArray;
 };
 
+struct Material {
+    std::string name;
+    AlphaMode alphaMode;
+    float alphaCutoff;
+    bool doubleSided;
+    glm::vec4 baseColorFactor;
+    float normalScale;
+    float metallicFactor;
+    float roughnessFactor;
+    float occlusionStrength;
+    glm::vec3 emissiveFactor;
+    std::shared_ptr<Image> albedoMap;
+    std::shared_ptr<Image> normalMap;
+    std::shared_ptr<Image> metallicRoughnessMap;
+    std::shared_ptr<Image> occlusionMap;
+    std::shared_ptr<Image> emissiveMap;
+    std::shared_ptr<Image> heightMap;
+    PipelineHandle pipeline;
+};
+
 struct VertexData {
     glm::vec3 position;
     glm::vec2 uv;
@@ -33,18 +75,30 @@ struct VertexData {
 
 struct MeshData {
     std::vector<VertexData> vertices;
-    std::vector<uint16_t> indices;
+    std::vector<Uint32> indices;
 };
 
-class Mesh {
-public:
+struct Mesh {
     void initialize(const MeshData& data);
-    void initialize(VertexData* vertexData, size_t vertexCount, uint16_t* indexData, size_t indexCount);
+    void initialize(VertexData* vertexData, size_t vertexCount, Uint32* indexData, size_t indexCount);
     void recalculateNormalsAndTangents();
     void print();
 
-    std::vector<VertexData> vertices;
-    std::vector<uint16_t> indices;
+    std::vector<BufferHandle> vbos;
+    BufferHandle ebo;
+    size_t bufferSize = 0;
+    size_t vertexCount = 0;
+    size_t indexCount = 0;
+    std::vector<VertexData> vertices; // interleaved vertex data
+    std::vector<glm::vec3> positions;
+    std::vector<glm::vec3> normals;
+    std::vector<glm::vec2> uv0s;
+    std::vector<glm::vec2> uv1s;
+    std::vector<glm::vec3> tangents;
+    std::vector<glm::vec4> colors;
+    std::vector<Uint32> indices;
+    std::shared_ptr<Material> material = nullptr;
+    PrimitiveMode primitiveMode;
 };
 
 class MeshBuilder {
@@ -65,7 +119,7 @@ public:
             { { -0.5f, -0.5f, 0.0f }, { 0.0f, 1.0f } },
             { { 0.5f, -0.5f, 0.0f }, { 1.0f, 1.0f } }
         };
-        uint16_t indices[6] = { 0,  1,  2,  3,  4,  5 };
+        Uint32 indices[6] = { 0,  1,  2,  3,  4,  5 };
 
         auto mesh = std::make_shared<Mesh>();
         mesh->initialize(verts, 6, indices, 6);
@@ -342,7 +396,7 @@ public:
             { { .5f * size, -.5f * size, -.5f * size }, { 1.0f, 0.0f }, { 0.0f, -1.0f, 0.0f } },
             { { -.5f * size, -.5f * size, -.5f * size }, { 0.0f, 0.0f }, { 0.0f, -1.0f, 0.0f } }
         }};
-        std::array<uint16_t, 36> tris = {
+        std::array<Uint32, 36> tris = {
             0, 1, 2,
             2, 1, 3,
             4, 5, 6,
