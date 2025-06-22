@@ -30,6 +30,7 @@ set(SOURCES
     graphics.cpp
 	asset_manager.cpp
 	scene.cpp
+	camera.cpp
 )
 
 add_executable(main ${SOURCES})

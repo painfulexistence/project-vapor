@@ -97,6 +97,21 @@ void Scene::UpdateNode(const std::shared_ptr<Node>& node, const glm::mat4& paren
     }
 }
 
+void Scene::AddMeshToNode(std::shared_ptr<Node> node, std::shared_ptr<Mesh> mesh) {
+    if (!node->meshGroup) {
+        node->meshGroup = std::make_shared<MeshGroup>();
+        node->meshGroup->name = node->name;
+    }
+    node->meshGroup->meshes.push_back(mesh);
+}
+
+// void Scene::AddLightToNode(std::shared_ptr<Node> node, std::shared_ptr<Light> light) {
+//     if (!node->light) {
+//         node->light = light;
+//     }
+// }
+
 // Usage example
 // auto scene = Scene();
 // auto entity = scene.CreateNode("Cube", glm::identity<glm::mat4>());
+// scene.AddMeshToNode(entity, MeshBuilder::buildCube(1.0f));

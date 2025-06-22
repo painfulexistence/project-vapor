@@ -30,19 +30,16 @@ struct BufferHandle {
     Uint32 rid = 0;
 };
 
-class Image {
-public:
-    Image(int width, int height, int channelCount, uint8_t* data){
-        this->width = width;
-        this->height = height;
-        this->channelCount = channelCount;
-        int numBytes = width * height * channelCount;
-        this->byteArray = std::vector<uint8_t>(data, data + numBytes);
-    };
-    int width;
-    int height;
-    int channelCount;
-    std::vector<uint8_t> byteArray;
+struct TextureHandle {
+    Uint32 rid = 0;
+};
+
+struct Image {
+    std::string uri;
+    Uint32 width;
+    Uint32 height;
+    Uint32 channelCount;
+    std::vector<Uint8> byteArray;
 };
 
 struct Material {

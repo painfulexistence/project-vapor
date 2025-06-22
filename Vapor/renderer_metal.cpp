@@ -87,8 +87,20 @@ auto Renderer_Metal::init() -> void {
     msaaTextureDesc->release();
 }
 
+auto Renderer_Metal::stage(Scene& scene) -> void {
+    // TODO: implement
+    for (auto& node : scene.nodes) {
+        if (!node->meshGroup) {
+            continue;
+        }
+        for (auto& mesh : node->meshGroup->meshes) {
+            mesh->vbos.push_back(createVertexBuffer(mesh->vertices)); // TODO: use single vbo for all meshes
+            mesh->ebo = createIndexBuffer(mesh->indices);
+        }
+    }
+}
 
-auto Renderer_Metal::draw() -> void {
+auto Renderer_Metal::draw(Scene& scene, Camera& camera) -> void {
     auto time = (float)SDL_GetTicks() / 1000.0f;
 
     auto surface = swapchain->nextDrawable();
@@ -123,57 +135,51 @@ auto Renderer_Metal::draw() -> void {
     // }
     instanceDataBuffer->didModifyRange(NS::Range::Make(0, instanceDataBuffer->length())); // TODO: avoid updating the entire instance data buffer every frame
 
-    glm::vec3 camPos = glm::vec3(0.0f, 0.0f, 5.0f);
-    CameraData* camera = reinterpret_cast<CameraData*>(cameraDataBuffer->contents());
-    camera->projectionMatrix = glm::perspective(glm::radians(45.f), 1.333f, 0.03f, 500.0f);
-    camera->viewMatrix = glm::lookAt(camPos, glm::vec3(0.0f, 0.0f, 0.0f), glm::vec3(0.0f, 1.0f, 0.0f));
+    glm::vec3 camPos = camera.GetEye();
+    CameraData* cameraData = reinterpret_cast<CameraData*>(cameraDataBuffer->contents());
+    cameraData->projectionMatrix = camera.GetProjMatrix();
+    cameraData->viewMatrix = camera.GetViewMatrix();
     cameraDataBuffer->didModifyRange(NS::Range::Make(0, cameraDataBuffer->length()));
 
     auto encoder = cmd->renderCommandEncoder(pass.get());
 
     encoder->setRenderPipelineState(testDrawPipeline.get());
-    encoder->setFragmentTexture(testAlbedoTexture.get(), 0);
-    encoder->setFragmentTexture(testNormalTexture.get(), 1);
-    encoder->setFragmentTexture(testAOTexture.get(), 2);
-    encoder->setFragmentTexture(testRoughnessTexture.get(), 3);
-    encoder->setFragmentTexture(testMetallicTexture.get(), 4);
-    encoder->setVertexBuffer(testVertexBuffer.get(), 0, 0);
-    encoder->setVertexBuffer(cameraDataBuffer.get(), 0, 1);
-    encoder->setVertexBuffer(instanceDataBuffer.get(), 0, 2);
-    encoder->setFragmentBytes(&camPos, sizeof(glm::vec3), 0);
-    encoder->setFragmentBytes(&time, sizeof(float), 1);
-    encoder->setCullMode(MTL::CullModeBack);
-    encoder->setFrontFacingWinding(MTL::Winding::WindingCounterClockwise);
-    encoder->setDepthStencilState(depthStencilState.get());
-    // encoder->drawPrimitives(MTL::PrimitiveType::PrimitiveTypeTriangle, NS::UInteger(0), NS::UInteger(6));
-    encoder->drawIndexedPrimitives(
-        MTL::PrimitiveType::PrimitiveTypeTriangle,
-        testIndexBuffer->length() / sizeof(Uint32),
-        MTL::IndexTypeUInt32,
-        testIndexBuffer.get(),
-        0
-    );
+    // encoder->useResource(testStorageBuffer.get(), MTL::ResourceUsageRead, MTL::RenderStageVertex | MTL::RenderStageFragment);
 
     for (const auto& node : scene.nodes) {
         if (node->meshGroup) {
             for (const auto& mesh : node->meshGroup->meshes) {
                 // encoder->setRenderPipelineState(getPipeline(mesh->material->pipeline));
-                // encoder->setVertexBuffer(getBuffer(mesh->vbos[0]), 0, 0);
+                encoder->setFragmentTexture(testAlbedoTexture.get(), 0);
+                encoder->setFragmentTexture(testNormalTexture.get(), 1);
+                encoder->setFragmentTexture(testAOTexture.get(), 2);
+                encoder->setFragmentTexture(testRoughnessTexture.get(), 3);
+                encoder->setFragmentTexture(testMetallicTexture.get(), 4);
+                encoder->setFragmentTexture(testDisplacementTexture.get(), 5);
+                encoder->setVertexBuffer(getBuffer(mesh->vbos[0]).get(), 0, 0);
+                encoder->setVertexBuffer(cameraDataBuffer.get(), 0, 1);
+                encoder->setVertexBuffer(instanceDataBuffer.get(), 0, 2);
+                encoder->setFragmentBytes(&camPos, sizeof(glm::vec3), 0);
+                encoder->setFragmentBytes(&time, sizeof(float), 1);
+                // encoder->setFragmentBuffer(testStorageBuffer.get(), 0, 2);
+                encoder->setCullMode(MTL::CullModeBack);
+                encoder->setFrontFacingWinding(MTL::Winding::WindingCounterClockwise);
+                encoder->setDepthStencilState(depthStencilState.get());
                 if (mesh->indices.size() > 0) {
-                    // encoder->drawIndexedPrimitives(
-                    //     MTL::PrimitiveType::PrimitiveTypeTriangle,
-                    //     mesh->indices.size(),
-                    //     MTL::IndexTypeUInt32,
-                    //     getBuffer(mesh->ebo),
-                    //     0
-                    // );
+                    encoder->drawIndexedPrimitives(
+                        MTL::PrimitiveType::PrimitiveTypeTriangle,
+                        mesh->indices.size(), // getBuffer(mesh->ebo)->length() / sizeof(Uint32)
+                        MTL::IndexTypeUInt32,
+                        getBuffer(mesh->ebo).get(),
+                        0
+                    );
                 } else {
-                    // encoder->drawPrimitives(
-                    //     MTL::PrimitiveType::PrimitiveTypeTriangle,
-                    //     0,
-                    //     mesh->positions.size(),
-                    //     1
-                    // );
+                    encoder->drawPrimitives(
+                        MTL::PrimitiveType::PrimitiveTypeTriangle,
+                        0,
+                        mesh->positions.size(),
+                        1
+                    );
                 }
             }
         }
@@ -271,20 +277,36 @@ NS::SharedPtr<MTL::Texture> Renderer_Metal::createTexture(const std::string& fil
     }
 }
 
-NS::SharedPtr<MTL::Buffer> Renderer_Metal::createVertexBuffer(const std::vector<VertexData>& vertices) {
+BufferHandle Renderer_Metal::createVertexBuffer(const std::vector<VertexData>& vertices) {
     NS::SharedPtr<MTL::Buffer> buffer = NS::TransferPtr(device->newBuffer(vertices.size() * sizeof(VertexData), MTL::ResourceStorageModeManaged));
 
     memcpy(buffer->contents(), vertices.data(), vertices.size() * sizeof(VertexData));
     buffer->didModifyRange(NS::Range::Make(0, buffer->length()));
 
-    return buffer;
+    buffers[nextBufferID] = buffer;
+
+    return BufferHandle { nextBufferID++ };
 }
 
-NS::SharedPtr<MTL::Buffer> Renderer_Metal::createIndexBuffer(const std::vector<Uint32>& indices) {
+BufferHandle Renderer_Metal::createIndexBuffer(const std::vector<Uint32>& indices) {
     NS::SharedPtr<MTL::Buffer> buffer = NS::TransferPtr(device->newBuffer(indices.size() * sizeof(Uint32), MTL::ResourceStorageModeManaged));
 
     memcpy(buffer->contents(), indices.data(), indices.size() * sizeof(Uint32));
     buffer->didModifyRange(NS::Range::Make(0, buffer->length()));
 
-    return buffer;
+    buffers[nextBufferID] = buffer;
+
+    return BufferHandle { nextBufferID++ };
+}
+
+NS::SharedPtr<MTL::Buffer> Renderer_Metal::getBuffer(BufferHandle handle) const {
+    return buffers.at(handle.rid);
+}
+
+NS::SharedPtr<MTL::Texture> Renderer_Metal::getTexture(TextureHandle handle) const {
+    return textures.at(handle.rid);
+}
+
+NS::SharedPtr<MTL::RenderPipelineState> Renderer_Metal::getPipeline(PipelineHandle handle) const {
+    return pipelines.at(handle.rid);
 }

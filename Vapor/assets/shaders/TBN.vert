@@ -10,10 +10,13 @@ layout(location = 1) out vec2 tex_uv;
 layout(location = 2) out vec3 T;
 layout(location = 3) out vec3 N;
 
-layout(binding = 0) uniform UBO {
-    mat4 model;
+layout(binding = 0) uniform CameraData {
     mat4 view;
     mat4 proj;
+    vec3 pos;
+};
+layout(binding = 1) uniform InstanceData {
+    mat4 model;
 };
 
 void main() {

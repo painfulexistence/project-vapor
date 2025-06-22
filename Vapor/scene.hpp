@@ -6,12 +6,11 @@
 #include <vector>
 #include <memory>
 
-#include "asset_manager.hpp"
 #include "graphics.hpp"
 
 struct MeshGroup {
     std::string name;
-    std::vector<std::unique_ptr<Mesh>> meshes;
+    std::vector<std::shared_ptr<Mesh>> meshes;
 };
 
 struct Node {
@@ -55,10 +54,13 @@ public:
     void Print();
     void Update(float dt);
 
-    std::shared_ptr<Node> CreateNode(const std::string& name, const glm::mat4& transform);
+    std::shared_ptr<Node> CreateNode(const std::string& name, const glm::mat4& transform = glm::identity<glm::mat4>());
     void AddNode(std::shared_ptr<Node> node);
     std::shared_ptr<Node> FindNode(const std::string& name);
     std::shared_ptr<Node> FindNodeInHierarchy(const std::string& name, const std::shared_ptr<Node>& node);
+
+    void AddMeshToNode(std::shared_ptr<Node> node, std::shared_ptr<Mesh> mesh);
+    // void AddLightToNode(std::shared_ptr<Node> node, std::shared_ptr<Light> light);
 
 private:
     void PrintNode(const std::shared_ptr<Node>& node);

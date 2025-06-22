@@ -1,21 +1,28 @@
 #pragma once
 #include "renderer.hpp"
-#include "graphics.hpp"
 
-#include "SDL3/SDL.h"
-#include "SDL3/SDL_vulkan.h"
+#include <SDL3/SDL_video.h>
+#include <SDL3/SDL_stdinc.h>
+#include <SDL3/SDL_vulkan.h>
 #include <vulkan/vulkan.h>
 #include <vulkan/vulkan_beta.h>
-#include "glm/mat4x4.hpp"
+#include <glm/mat4x4.hpp>
+#include <unordered_map>
 
-struct UniformBufferMVP {
-    glm::mat4 model;
+#include "graphics.hpp"
+
+
+struct CameraData {
     glm::mat4 view;
     glm::mat4 proj;
+    glm::vec3 pos;
+};
+
+struct InstanceData {
+    glm::mat4 model;
 };
 
 struct SceneData {
-    glm::vec3 camPos;
     float time;
 };
 
@@ -39,23 +46,33 @@ public:
 
     virtual void init() override;
 
-    virtual void draw(Scene& scene) override;
+    virtual void stage(Scene& scene) override;
+
+    virtual void draw(Scene& scene, Camera& camera) override;
 
     VkPipeline createPipeline(const std::string& filename);
 
-    VkShaderModule createShaderModule(const std::vector<char>&);
+    VkShaderModule createShaderModule(const std::string& code);
 
     VkImage createRenderTarget(GPUImageUsage usage, VkDeviceMemory& memory, VkImageView& imageView, int sampleCount);
 
     VkImage createTexture(const std::string& filename, VkDeviceMemory& memory, VkImageView& imageView);
 
-    VkBuffer createBuffer(GPUBufferUsage usage, VkDeviceSize size, VkDeviceMemory& memory);
+    BufferHandle createBuffer(GPUBufferUsage usage, VkDeviceSize size);
 
-    VkBuffer createBufferMapped(GPUBufferUsage usage, VkDeviceSize size, VkDeviceMemory& memory, void** mappedDataPtr);
+    BufferHandle createBufferMapped(GPUBufferUsage usage, VkDeviceSize size, void** mappedDataPtr);
 
-    VkBuffer createVertexBuffer(std::vector<VertexData> vertices, VkDeviceMemory& bufferMemory);
+    BufferHandle createVertexBuffer(std::vector<VertexData> vertices);
 
-    VkBuffer createIndexBuffer(std::vector<Uint32> indices, VkDeviceMemory& bufferMemory);
+    BufferHandle createIndexBuffer(std::vector<Uint32> indices);
+
+    VkBuffer getBuffer(BufferHandle handle) const;
+
+    VkDeviceMemory getBufferMemory(BufferHandle handle) const;
+
+    VkImage getTexture(TextureHandle handle) const;
+
+    VkPipeline getPipeline(PipelineHandle handle) const;
 
 private:
     VkInstance instance;
@@ -86,7 +103,6 @@ private:
     VkDescriptorPool descriptorPool;
     VkDescriptorSetLayout descriptorSetLayout;
     std::vector<VkDescriptorSet> descriptorSets;
-    std::shared_ptr<Mesh> testMesh;
 
     VkImage colorImage;
     VkDeviceMemory colorImageMemory;
@@ -113,14 +129,21 @@ private:
     VkImageView testMetallicTextureView;
     VkSampler testSampler;
 
-    VkBuffer testVertexBuffer;
-    VkBuffer testIndexBuffer;
-    VkDeviceMemory testVertexBufferMemory;
-    VkDeviceMemory testIndexBufferMemory;
-    std::vector<VkBuffer> uniformBuffers;
-    std::vector<VkDeviceMemory> uniformBuffersMemory;
-    std::vector<void*> uniformBuffersMapped;
+    std::vector<BufferHandle> cameraDataBuffers;
+    std::vector<void*> cameraDataBuffersMapped;
+    std::vector<BufferHandle> instanceDataBuffers;
+    std::vector<void*> instanceDataBuffersMapped;
 
     const int FRAMES_IN_FLIGHT = 3;
     const int sampleCount = 4;
+
+    Uint32 nextBufferID = 1;
+    Uint32 nextTextureID = 1;
+    Uint32 nextPipelineID = 1;
+    std::unordered_map<Uint32, VkBuffer> buffers;
+    std::unordered_map<Uint32, VkDeviceMemory> bufferMemories;
+    std::unordered_map<Uint32, VkImage> textures;
+    std::unordered_map<Uint32, VkDeviceMemory> textureMemories;
+    std::unordered_map<Uint32, VkImageView> textureViews;
+    std::unordered_map<Uint32, VkPipeline> pipelines;
 };

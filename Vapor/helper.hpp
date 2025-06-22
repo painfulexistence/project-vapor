@@ -1,4 +1,4 @@
 #pragma once
 #include <string>
 
-std::vector<char> readFile(const std::string& filename);
+std::string readFile(const std::string& filename);

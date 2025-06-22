@@ -3,6 +3,7 @@
 #include <memory>
 #include "graphics.hpp"
 #include "scene.hpp"
+#include "camera.hpp"
 
 enum class GraphicsBackend {
     Metal,
@@ -30,7 +31,9 @@ public:
 
     virtual void init() = 0;
 
-    virtual void draw(Scene& scene) = 0;
+    virtual void stage(Scene& scene) = 0;
+
+    virtual void draw(Scene& scene, Camera& camera) = 0;
 };
 
 std::unique_ptr<Renderer> createRendererMetal(SDL_Window* window);

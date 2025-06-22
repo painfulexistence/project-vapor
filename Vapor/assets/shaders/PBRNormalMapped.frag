@@ -5,15 +5,16 @@ layout(location = 1) in vec2 tex_uv;
 layout(location = 2) in vec3 T;
 layout(location = 3) in vec3 N;
 layout(location = 0) out vec4 Color;
-layout(push_constant) uniform PushConstantBlock {
-    vec3 cam_pos;
-    float time;
-};
-layout(binding = 1) uniform sampler2D base_map;
-layout(binding = 2) uniform sampler2D normal_map;
-// layout(binding = 3) uniform sampler2D ao_map;
-// layout(binding = 4) uniform sampler2D roughness_map;
-// layout(binding = 5) uniform sampler2D metallic_map;
+layout(binding = 0) uniform CameraData {
+    mat4 view;
+    mat4 proj;
+    vec3 pos;
+} cam;
+layout(binding = 2) uniform sampler2D base_map;
+layout(binding = 3) uniform sampler2D normal_map;
+// layout(binding = 4) uniform sampler2D ao_map;
+// layout(binding = 5) uniform sampler2D roughness_map;
+// layout(binding = 6) uniform sampler2D metallic_map;
 layout(binding = 10) uniform sampler2D env_map;
 
 struct Surface {
@@ -183,7 +184,7 @@ void main() {
     mat3 TBN = mat3(T, B, N);
     vec3 norm = normalize(TBN * texNorm);
     vec3 tangent = normalize(T);
-    vec3 viewDir = normalize(cam_pos - frag_pos);
+    vec3 viewDir = normalize(cam.pos - frag_pos);
 
     Surface surf;
     surf.color = pow(texture(base_map, tex_uv).rgb, vec3(GAMMA));
