@@ -199,8 +199,13 @@ fragment float4 fragmentMain(
     constant PointLight* pointLights [[buffer(3)]]
 ) {
     constexpr sampler s(address::repeat, filter::linear, mip_filter::linear);
+
+    float4 baseColor = texAlbedo.sample(s, in.uv);
+    if (baseColor.a < 0.5) {
+        discard_fragment();
+    }
     Surface surf;
-    surf.color = pow(texAlbedo.sample(s, in.uv).bgr, float3(GAMMA));
+    surf.color = pow(baseColor.bgr, float3(GAMMA));
     surf.ao = 1.0; // texOcclusion.sample(s, in.uv).r;
     surf.roughness = 1.0; // texRoughness.sample(s, in.uv).g;
     surf.metallic = 0.0; // texMetallic.sample(s, in.uv).b;

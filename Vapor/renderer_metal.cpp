@@ -274,6 +274,13 @@ NS::SharedPtr<MTL::RenderPipelineState> Renderer_Metal::createPipeline(const std
     pipelineDesc->setVertexFunction(vertexMain);
     pipelineDesc->setFragmentFunction(fragmentMain);
     pipelineDesc->colorAttachments()->object(0)->setPixelFormat(MTL::PixelFormat::PixelFormatBGRA8Unorm_sRGB);
+    // pipelineDesc->colorAttachments()->object(0)->setBlendingEnabled(true);
+    // pipelineDesc->colorAttachments()->object(0)->setAlphaBlendOperation(MTL::BlendOperation::BlendOperationAdd);
+    // pipelineDesc->colorAttachments()->object(0)->setRgbBlendOperation(MTL::BlendOperation::BlendOperationAdd);
+    // pipelineDesc->colorAttachments()->object(0)->setSourceRGBBlendFactor(MTL::BlendFactor::BlendFactorSourceAlpha);
+    // pipelineDesc->colorAttachments()->object(0)->setSourceAlphaBlendFactor(MTL::BlendFactor::BlendFactorSourceAlpha);
+    // pipelineDesc->colorAttachments()->object(0)->setDestinationRGBBlendFactor(MTL::BlendFactor::BlendFactorOneMinusSourceAlpha);
+    // pipelineDesc->colorAttachments()->object(0)->setDestinationAlphaBlendFactor(MTL::BlendFactor::BlendFactorOneMinusSourceAlpha);
     pipelineDesc->setDepthAttachmentPixelFormat(MTL::PixelFormatDepth32Float);
     pipelineDesc->setSampleCount(sampleCount);
 

@@ -184,6 +184,11 @@ vec3 CookTorranceBRDF(vec3 norm, vec3 tangent, vec3 lightDir, vec3 viewDir, Surf
 }
 
 void main() {
+    vec4 baseColor = texture(base_map, tex_uv);
+    if (baseColor.a < 0.5) {
+        discard;
+    }
+
     vec3 texNorm = texture(normal_map, tex_uv).rgb * 2.0 - 1.0;
     vec3 B = normalize(cross(N, T));
     mat3 TBN = mat3(T, B, N);
@@ -192,7 +197,7 @@ void main() {
     vec3 viewDir = normalize(cam.pos - frag_pos);
 
     Surface surf;
-    surf.color = pow(texture(base_map, tex_uv).rgb, vec3(GAMMA));
+    surf.color = pow(baseColor.rgb, vec3(GAMMA));
     surf.ao = 1.0; // texture(ao_map, tex_uv).r;
     surf.roughness = 1.0; // texture(roughness_map, tex_uv).r;
     surf.metallic = 0.0; // texture(metallic_map, tex_uv).r;
