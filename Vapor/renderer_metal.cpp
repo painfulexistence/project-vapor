@@ -134,7 +134,7 @@ auto Renderer_Metal::draw(std::shared_ptr<Scene> scene, Camera& camera) -> void 
     auto pass = NS::TransferPtr(MTL::RenderPassDescriptor::renderPassDescriptor());
     auto colorAttachment = pass->colorAttachments()->object(0);
     colorAttachment->setTexture(msaaTexture.get());
-    colorAttachment->setClearColor(clearColor);
+    colorAttachment->setClearColor(MTL::ClearColor(clearColor.r, clearColor.g, clearColor.b, clearColor.a));
     colorAttachment->setLoadAction(MTL::LoadActionClear);
     colorAttachment->setStoreAction(MTL::StoreActionMultisampleResolve);
     colorAttachment->setResolveTexture(surface->texture());

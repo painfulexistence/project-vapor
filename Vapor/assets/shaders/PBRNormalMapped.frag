@@ -208,8 +208,9 @@ void main() {
 
     vec3 result = vec3(0.0);
     result += CalculateDirectionalLight(directional_lights[0], norm, tangent, viewDir, surf);
-    result += CalculatePointLight(point_lights[0], norm, tangent, viewDir, surf);
-    result += CalculatePointLight(point_lights[1], norm, tangent, viewDir, surf);
+    for (int i = 0; i < 100; i++) {
+        result += CalculatePointLight(point_lights[i], norm, tangent, viewDir, surf);
+    }
     result += vec3(0.2) * surf.ao * surf.color;
     // result += CalculateIBL(norm, viewDir, surf);
 

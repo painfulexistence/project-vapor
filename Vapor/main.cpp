@@ -57,7 +57,7 @@ int main(int argc, char* args[]) {
 #endif
 
     auto window = SDL_CreateWindow(
-        winTitle, 800, 600, winFlags
+        winTitle, 600, 600, winFlags
     );
 
     RNG rng;
@@ -93,12 +93,14 @@ int main(int argc, char* args[]) {
 
     renderer->stage(scene);
 
+    int windowWidth, windowHeight;
+    SDL_GetWindowSize(window, &windowWidth, &windowHeight);
     Camera camera = Camera(
         glm::vec3(0.0f, 0.0f, 3.0f),
         glm::vec3(0.0f, 0.0f, 0.0f),
         glm::vec3(0.0f, 1.0f, 0.0f),
         glm::radians(60.0f),
-        800 / (float)600,
+        (float)windowWidth / (float)windowHeight,
         0.05f,
         500.0f
     );

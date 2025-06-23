@@ -223,8 +223,9 @@ fragment float4 fragmentMain(
 
     float3 result = float3(0.0);
     result += CalculateDirectionalLight(directionalLights[0], norm, T, B, viewDir, surf); // result += CookTorranceBRDF(norm, lightDir, viewDir, surf) * (mainLight.color * mainLight.intensity) * clamp(dot(norm, lightDir), 0.0, 1.0);
-    result += CalculatePointLight(pointLights[0], norm, T, B, viewDir, surf, in.worldPosition.xyz);
-    result += CalculatePointLight(pointLights[1], norm, T, B, viewDir, surf, in.worldPosition.xyz);
+    for (int i = 0; i < 100; i++) {
+        result += CalculatePointLight(pointLights[i], norm, T, B, viewDir, surf, in.worldPosition.xyz);
+    }
     result += float3(0.2) * surf.ao * surf.color;
 
     result = pow(result, float3(INV_GAMMA));

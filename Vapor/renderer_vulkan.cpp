@@ -830,9 +830,9 @@ auto Renderer_Vulkan::draw(std::shared_ptr<Scene> scene, Camera& camera) -> void
     renderPassInfo.framebuffer = framebuffers[swapchainImageIndex];
     renderPassInfo.renderArea = { 0, 0, swapchainExtent.width, swapchainExtent.height };
     std::array<VkClearValue, 3> clearValues;
-    clearValues[0].color = { 0.0f, 0.0f, 0.0f, 1.0f };
+    clearValues[0].color = { clearColor.r, clearColor.g, clearColor.b, clearColor.a };
     clearValues[1].depthStencil = { 1.0f, 0 };
-    clearValues[2].color = { 0.0f, 0.0f, 0.0f, 1.0f };
+    clearValues[2].color = { clearColor.r, clearColor.g, clearColor.b, clearColor.a };
     renderPassInfo.clearValueCount = clearValues.size();
     renderPassInfo.pClearValues = clearValues.data();
 

@@ -35,6 +35,9 @@ public:
     virtual void stage(std::shared_ptr<Scene> scene) = 0;
 
     virtual void draw(std::shared_ptr<Scene> scene, Camera& camera) = 0;
+
+protected:
+    glm::vec4 clearColor = glm::vec4(0.0f, 0.5f, 1.0f, 1.0f);
 };
 
 std::unique_ptr<Renderer> createRendererMetal(SDL_Window* window);

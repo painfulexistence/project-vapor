@@ -41,7 +41,6 @@ private:
     CA::MetalLayer* swapchain;
     MTL::Device* device;
     NS::SharedPtr<MTL::CommandQueue> queue;
-    MTL::ClearColor clearColor = MTL::ClearColor(0.0 / 255.0, 0.0 / 255.0, 0.0 / 255.0, 1.0);
     NS::UInteger sampleCount = 4;
     NS::UInteger numMaxInstances = 1; // TODO: change this to a bigger number
 
