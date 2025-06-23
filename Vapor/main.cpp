@@ -7,6 +7,7 @@
 #include "graphics.hpp"
 #include "asset_manager.hpp"
 #include "camera.hpp"
+#include "rng.hpp"
 
 
 int main(int argc, char* args[]) {
@@ -59,6 +60,8 @@ int main(int argc, char* args[]) {
         winTitle, 800, 600, winFlags
     );
 
+    RNG rng;
+
     auto renderer = createRenderer(gfxBackend, window);
     renderer->init();
 
@@ -80,16 +83,13 @@ int main(int argc, char* args[]) {
         .color = glm::vec3(1.0, 1.0, 1.0),
         .intensity = 10.0,
     });
-    scene->pointLights.push_back({
-        .position = glm::vec3(0.0, 1.0, 0.0),
-        .color = glm::vec3(1.0, 0.0, 0.0),
-        .intensity = 3.2,
-    });
-    scene->pointLights.push_back({
-        .position = glm::vec3(1.0, 1.0, 0.0),
-        .color = glm::vec3(0.0, 1.0, 0.0),
-        .intensity = 5.2,
-    });
+    for (int i = 0; i < 100; i++) {
+        scene->pointLights.push_back({
+            .position = glm::vec3(rng.RandomFloatInRange(-5.0f, 5.0f), rng.RandomFloatInRange(0.0f, 3.0f), rng.RandomFloatInRange(-5.0f, 5.0f)),
+            .color = glm::vec3(rng.RandomFloat(), rng.RandomFloat(), rng.RandomFloat()),
+            .intensity = 5.0f * rng.RandomFloat(),
+        });
+    }
 
     renderer->stage(scene);
 

@@ -63,6 +63,28 @@ struct Material {
     PipelineHandle pipeline;
 };
 
+struct DirectionalLight { // Note that alignas(16) is not enough to ensure 16-byte alignment
+    glm::vec3 direction;
+    float _pad1;
+    glm::vec3 color;
+    float _pad2;
+    float intensity;
+    float _pad3[3];
+    // bool castShadow;
+    // Uint8 _pad4[3];
+};
+
+struct PointLight { // Note that alignas(16) is not enough to ensure 16-byte alignment
+    glm::vec3 position;
+    float _pad1;
+    glm::vec3 color;
+    float _pad2;
+    float intensity;
+    float _pad3[3];
+    // bool castShadow;
+    // Uint8 _pad4[3];
+};
+
 struct VertexData {
     glm::vec3 position;
     glm::vec2 uv;
