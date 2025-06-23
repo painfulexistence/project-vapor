@@ -54,9 +54,12 @@ private:
     TextureHandle defaultEmissiveTexture;
     TextureHandle defaultDisplacementTexture;
 
-    NS::SharedPtr<MTL::Buffer> testStorageBuffer;
     NS::SharedPtr<MTL::Buffer> instanceDataBuffer;
     NS::SharedPtr<MTL::Buffer> cameraDataBuffer;
+    NS::SharedPtr<MTL::Buffer> testStorageBuffer;
+    NS::SharedPtr<MTL::Buffer> directionalLightBuffer;
+    NS::SharedPtr<MTL::Buffer> pointLightBuffer;
+
     NS::SharedPtr<MTL::Texture> depthStencilTexture;
     NS::SharedPtr<MTL::Texture> msaaTexture;
 

@@ -10,10 +10,11 @@ enum class GraphicsBackend {
     Vulkan
 };
 
-enum class GPUBufferUsage {
+enum class BufferUsage {
     VERTEX,
     INDEX,
     UNIFORM,
+    STORAGE,
     COPY_SRC,
     COPY_DST
 };

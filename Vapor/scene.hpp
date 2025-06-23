@@ -46,6 +46,8 @@ public:
     std::vector<std::shared_ptr<Image>> images;
     std::vector<std::shared_ptr<Material>> materials;
     std::vector<std::shared_ptr<Node>> nodes;
+    std::vector<DirectionalLight> directionalLights;
+    std::vector<PointLight> pointLights;
 
     Scene() = default;
     Scene(const std::string& name) : name(name) {};

@@ -5,17 +5,40 @@ layout(location = 1) in vec2 tex_uv;
 layout(location = 2) in vec3 T;
 layout(location = 3) in vec3 N;
 layout(location = 0) out vec4 Color;
-layout(set =0, binding = 0) uniform CameraData {
+
+layout(set = 0, binding = 0) uniform CameraData {
     mat4 view;
     mat4 proj;
     vec3 pos;
 } cam;
+struct DirLight {
+    vec3 direction;
+    float _pad1;
+    vec3 color;
+    float _pad2;
+    float intensity;
+    float _pad3[3];
+};
+struct PointLight {
+    vec3 position;
+    float _pad1;
+    vec3 color;
+    float _pad2;
+    float intensity;
+    float _pad3[3];
+};
+layout(std430, set = 0, binding = 2) readonly buffer DirLightBuffer {
+    DirLight directional_lights[];
+};
+layout(std430, set = 0, binding = 3) readonly buffer PointLightBuffer {
+    PointLight point_lights[];
+};
 layout(set = 1, binding = 0) uniform sampler2D base_map;
 layout(set = 1, binding = 1) uniform sampler2D normal_map;
 // layout(set = 1, binding = 2) uniform sampler2D metallic_roughness_map;
 // layout(set = 1, binding = 3) uniform sampler2D occlusion_map;
 // layout(set = 1, binding = 4) uniform sampler2D emission_map;
-layout(set = 1, binding = 10) uniform sampler2D env_map;
+// layout(set = 1, binding = 10) uniform sampler2D env_map;
 
 struct Surface {
     vec3 color;
@@ -31,18 +54,6 @@ struct Surface {
     float sheen_tint;
     float clearcoat;
     float clearcoat_gloss;
-};
-
-struct DirLight {
-    vec3 direction;
-    vec3 color;
-    float intensity;
-};
-
-struct PointLight {
-    vec3 position;
-    vec3 color;
-    float intensity;
 };
 
 const float PI = 3.1415927;
@@ -69,14 +80,14 @@ vec3 CalculatePointLight(PointLight light, vec3 norm, vec3 tangent, vec3 viewDir
     return CookTorranceBRDF(norm, tangent, lightDir, viewDir, surf) * radiance * max(dot(norm, lightDir), 0.0);
 }
 
-vec3 CalculateIBL(vec3 norm, vec3 viewDir, Surface surf) {
-    vec3 reflectDir = reflect(-viewDir, norm);
-    float theta = -acos(reflectDir.y);
-    float phi = atan(reflectDir.z, reflectDir.x);
-    vec2 uv = fract(vec2(phi, theta) / vec2(2.0 * PI, PI) + vec2(0.5, 0.0));
-    vec3 env = texture(env_map, uv).rgb;
-    return env * surf.color;
-}
+// vec3 CalculateIBL(vec3 norm, vec3 viewDir, Surface surf) {
+//     vec3 reflectDir = reflect(-viewDir, norm);
+//     float theta = -acos(reflectDir.y);
+//     float phi = atan(reflectDir.z, reflectDir.x);
+//     vec2 uv = fract(vec2(phi, theta) / vec2(2.0 * PI, PI) + vec2(0.5, 0.0));
+//     vec3 env = texture(env_map, uv).rgb;
+//     return env * surf.color;
+// }
 
 float GTR1(float nh, float a) {
     if (a >= 1.0) return 1.0 / PI;
@@ -172,12 +183,6 @@ vec3 CookTorranceBRDF(vec3 norm, vec3 tangent, vec3 lightDir, vec3 viewDir, Surf
     return ((mix(kd, ss, surf.subsurface) * surf.color / PI + sheen) * (1.0 - surf.metallic) + specular + clearcoat) * nl;
 }
 
-DirLight main_light = DirLight(vec3(0.0, 1.0, 0.0), vec3(1.0, 1.0, 1.0), 10.0);
-PointLight aux_lights[] = {
-    PointLight(vec3(0.0, -1.0, 0.0), vec3(1.0, 0.0, 0.0), 3.2),
-    // PointLight(vec3(0.0, 1.0, 0.0), vec3(0.0, 1.0, 0.0), 5.2),
-};
-
 void main() {
     vec3 texNorm = texture(normal_map, tex_uv).rgb * 2.0 - 1.0;
     vec3 B = normalize(cross(N, T));
@@ -202,11 +207,9 @@ void main() {
     surf.clearcoat_gloss = 1.0;
 
     vec3 result = vec3(0.0);
-    result += CalculateDirectionalLight(main_light, norm, tangent, viewDir, surf);
-    result += CalculatePointLight(aux_lights[0], norm, tangent, viewDir, surf);
-    // result += CalculatePointLight(aux_lights[1], norm, viewDir, surf);
-    // result += CalculatePointLight(aux_lights[2], norm, viewDir, surf);
-    // result += CalculatePointLight(aux_lights[3], norm, viewDir, surf);
+    result += CalculateDirectionalLight(directional_lights[0], norm, tangent, viewDir, surf);
+    result += CalculatePointLight(point_lights[0], norm, tangent, viewDir, surf);
+    result += CalculatePointLight(point_lights[1], norm, tangent, viewDir, surf);
     result += vec3(0.2) * surf.ao * surf.color;
     // result += CalculateIBL(norm, viewDir, surf);
 

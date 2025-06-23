@@ -47,33 +47,19 @@ struct DirLight {
     float3 direction;
     float3 color;
     float intensity;
+    float _pad[3];
 };
 
 struct PointLight {
     float3 position;
     float3 color;
     float intensity;
-};
-
-struct LightData {
-    DirLight main_light;
-    PointLight aux_lights[6];
-    int aux_light_count;
+    float _pad[3];
 };
 
 constexpr constant float PI = 3.1415927;
 constexpr constant float GAMMA = 2.2;
 constexpr constant float INV_GAMMA = 1.0 / GAMMA;
-constant DirLight mainLight = {
-    float3(0.0f, -1.0f, 0.0f),
-    float3(1.0f, 1.0f, 1.0f),
-    10.0f,
-};
-constant PointLight auxLight = {
-    float3(0.0f, 1.0f, 0.0f),
-    float3(1.0f, 0.0f, 0.0f),
-    3.2f,
-};
 
 float GTR1(float nh, float a) {
     if (a >= 1.0) return 1.0 / PI;
@@ -208,7 +194,9 @@ fragment float4 fragmentMain(
     texture2d<float, access::sample> texOcclusion [[texture(3)]],
     texture2d<float, access::sample> texEmissive [[texture(4)]],
     constant packed_float3* camPos [[buffer(0)]],
-    constant float* time [[buffer(1)]]
+    constant float* time [[buffer(1)]],
+    constant DirLight* directionalLights [[buffer(2)]],
+    constant PointLight* pointLights [[buffer(3)]]
 ) {
     constexpr sampler s(address::repeat, filter::linear, mip_filter::linear);
     Surface surf;
@@ -234,8 +222,9 @@ fragment float4 fragmentMain(
     float3 viewDir = normalize(*camPos - in.worldPosition.xyz);
 
     float3 result = float3(0.0);
-    result += CalculateDirectionalLight(mainLight, norm, T, B, viewDir, surf); // result += CookTorranceBRDF(norm, lightDir, viewDir, surf) * (mainLight.color * mainLight.intensity) * clamp(dot(norm, lightDir), 0.0, 1.0);
-    result += CalculatePointLight(auxLight, norm, T, B, viewDir, surf, in.worldPosition.xyz);
+    result += CalculateDirectionalLight(directionalLights[0], norm, T, B, viewDir, surf); // result += CookTorranceBRDF(norm, lightDir, viewDir, surf) * (mainLight.color * mainLight.intensity) * clamp(dot(norm, lightDir), 0.0, 1.0);
+    result += CalculatePointLight(pointLights[0], norm, T, B, viewDir, surf, in.worldPosition.xyz);
+    result += CalculatePointLight(pointLights[1], norm, T, B, viewDir, surf, in.worldPosition.xyz);
     result += float3(0.2) * surf.ao * surf.color;
 
     result = pow(result, float3(INV_GAMMA));

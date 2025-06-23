@@ -360,9 +360,10 @@ Renderer_Vulkan::~Renderer_Vulkan() {
     vkDestroyPipeline(device, testDrawPipeline, nullptr);
     vkDestroyPipelineLayout(device, pipelineLayout, nullptr);
     vkDestroyRenderPass(device, renderPass, nullptr);
-    vkDestroyDescriptorPool(device, descriptorPool, nullptr);
-    vkDestroyDescriptorSetLayout(device, uniformSetLayout, nullptr);
-    vkDestroyDescriptorSetLayout(device, textureSetLayout, nullptr);
+    vkDestroyDescriptorPool(device, frameDescriptorPool, nullptr);
+    vkDestroyDescriptorPool(device, instanceDescriptorPool, nullptr);
+    vkDestroyDescriptorSetLayout(device, set0Layout, nullptr);
+    vkDestroyDescriptorSetLayout(device, set1Layout, nullptr);
     vkDestroySampler(device, defaultSampler, nullptr);
     for (auto& texture : textures) {
         vkDestroyImageView(device, textureViews[texture.first], nullptr);
@@ -380,8 +381,8 @@ Renderer_Vulkan::~Renderer_Vulkan() {
         vkFreeMemory(device, bufferMemories[buffer.first], nullptr);
     }
 
-    vkFreeDescriptorSets(device, descriptorPool, textureSets.size(), textureSets.data());
-    vkFreeDescriptorSets(device, descriptorPool, uniformSets.size(), uniformSets.data());
+    vkFreeDescriptorSets(device, instanceDescriptorPool, sets1.size(), sets1.data());
+    vkFreeDescriptorSets(device, frameDescriptorPool, sets0.size(), sets0.data());
 
     for (size_t i = 0; i < FRAMES_IN_FLIGHT; i++) {
         vkDestroySemaphore(device, renderFinishedSemaphores[i], nullptr);
@@ -517,12 +518,12 @@ auto Renderer_Vulkan::init() -> void {
     cameraDataBuffers.resize(FRAMES_IN_FLIGHT);
     cameraDataBuffersMapped.resize(FRAMES_IN_FLIGHT);
     for (size_t i = 0; i < FRAMES_IN_FLIGHT; i++) {
-        cameraDataBuffers[i] = createBufferMapped(GPUBufferUsage::UNIFORM, sizeof(CameraData), &cameraDataBuffersMapped[i]);
+        cameraDataBuffers[i] = createBufferMapped(BufferUsage::UNIFORM, sizeof(CameraData), &cameraDataBuffersMapped[i]);
     }
     instanceDataBuffers.resize(FRAMES_IN_FLIGHT);
     instanceDataBuffersMapped.resize(FRAMES_IN_FLIGHT);
     for (size_t i = 0; i < FRAMES_IN_FLIGHT; i++) {
-        instanceDataBuffers[i] = createBufferMapped(GPUBufferUsage::UNIFORM, sizeof(InstanceData), &instanceDataBuffersMapped[i]);
+        instanceDataBuffers[i] = createBufferMapped(BufferUsage::UNIFORM, sizeof(InstanceData), &instanceDataBuffersMapped[i]);
     }
 
     // Create textures
@@ -563,8 +564,9 @@ auto Renderer_Vulkan::init() -> void {
     }
 
     // Create descriptor pool and sets
-    std::array<VkDescriptorPoolSize, 1> poolSizes = {{
-        { VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER, 2 * static_cast<uint32_t>(FRAMES_IN_FLIGHT) }
+    std::array<VkDescriptorPoolSize, 2> poolSizes = {{
+        { VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER, 2 * static_cast<uint32_t>(FRAMES_IN_FLIGHT) },
+        { VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, 2 * static_cast<uint32_t>(FRAMES_IN_FLIGHT) }
     }};
 
     VkDescriptorPoolCreateInfo poolInfo{};
@@ -572,22 +574,23 @@ auto Renderer_Vulkan::init() -> void {
     poolInfo.poolSizeCount = poolSizes.size();
     poolInfo.pPoolSizes = poolSizes.data();
     poolInfo.maxSets = static_cast<uint32_t>(FRAMES_IN_FLIGHT);
-    if (vkCreateDescriptorPool(device, &poolInfo, nullptr, &descriptorPool) != VK_SUCCESS) {
-        throw std::runtime_error("Failed to create uniform descriptor pool!");
+    if (vkCreateDescriptorPool(device, &poolInfo, nullptr, &frameDescriptorPool) != VK_SUCCESS) {
+        throw std::runtime_error("Failed to create frame descriptor pool!");
     }
 
-    std::vector<VkDescriptorSetLayout> uniformSetLayouts(FRAMES_IN_FLIGHT, uniformSetLayout);
-    VkDescriptorSetAllocateInfo uniformSetAllocInfo = {};
-    uniformSetAllocInfo.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO;
-    uniformSetAllocInfo.descriptorPool = descriptorPool;
-    uniformSetAllocInfo.descriptorSetCount = static_cast<uint32_t>(FRAMES_IN_FLIGHT);
-    uniformSetAllocInfo.pSetLayouts = uniformSetLayouts.data();
+    std::vector<VkDescriptorSetLayout> set0Layouts(FRAMES_IN_FLIGHT, set0Layout);
+    VkDescriptorSetAllocateInfo set0AllocInfo = {};
+    set0AllocInfo.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO;
+    set0AllocInfo.descriptorPool = frameDescriptorPool;
+    set0AllocInfo.descriptorSetCount = static_cast<uint32_t>(FRAMES_IN_FLIGHT);
+    set0AllocInfo.pSetLayouts = set0Layouts.data();
 
-    uniformSets.resize(FRAMES_IN_FLIGHT);
-    if (vkAllocateDescriptorSets(device, &uniformSetAllocInfo, uniformSets.data()) != VK_SUCCESS) {
-        throw std::runtime_error("Failed to allocate uniform descriptor sets!");
+    sets0.resize(FRAMES_IN_FLIGHT);
+    if (vkAllocateDescriptorSets(device, &set0AllocInfo, sets0.data()) != VK_SUCCESS) {
+        throw std::runtime_error("Failed to allocate set 0 descriptor sets!");
     }
 
+    // Write descriptor sets
     for (size_t i = 0; i < FRAMES_IN_FLIGHT; i++) {
         VkDescriptorBufferInfo cameraDataBufferInfo = {};
         cameraDataBufferInfo.buffer = getBuffer(cameraDataBuffers[i]);
@@ -602,7 +605,7 @@ auto Renderer_Vulkan::init() -> void {
         std::array<VkWriteDescriptorSet, 2> writes = {{ // must match descriptor set layout bindings
             {
                 .sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET,
-                .dstSet = uniformSets[i],
+                .dstSet = sets0[i],
                 .dstBinding = 0,
                 .dstArrayElement = 0,
                 .descriptorCount = 1,
@@ -612,7 +615,7 @@ auto Renderer_Vulkan::init() -> void {
             },
             {
                 .sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET,
-                .dstSet = uniformSets[i],
+                .dstSet = sets0[i],
                 .dstBinding = 1,
                 .dstArrayElement = 0,
                 .descriptorCount = 1,
@@ -643,6 +646,20 @@ auto Renderer_Vulkan::stage(std::shared_ptr<Scene> scene) -> void {
         stageNode(node);
     }
 
+    directionalLightBuffers.resize(FRAMES_IN_FLIGHT);
+    directionalLightBuffersMapped.resize(FRAMES_IN_FLIGHT);
+    for (size_t i = 0; i < FRAMES_IN_FLIGHT; i++) {
+        directionalLightBuffers[i] = createBufferMapped(BufferUsage::STORAGE, sizeof(DirectionalLight) * scene->directionalLights.size(), &directionalLightBuffersMapped[i]);
+        memcpy(directionalLightBuffersMapped[i], scene->directionalLights.data(), sizeof(DirectionalLight) * scene->directionalLights.size());
+    }
+
+    pointLightBuffers.resize(FRAMES_IN_FLIGHT);
+    pointLightBuffersMapped.resize(FRAMES_IN_FLIGHT);
+    for (size_t i = 0; i < FRAMES_IN_FLIGHT; i++) {
+        pointLightBuffers[i] = createBufferMapped(BufferUsage::STORAGE, sizeof(PointLight) * scene->pointLights.size(), &pointLightBuffersMapped[i]);
+        memcpy(pointLightBuffersMapped[i], scene->pointLights.data(), sizeof(PointLight) * scene->pointLights.size());
+    }
+
     // Textures
     for (auto& img : scene->images) {
         img->texture = createTexture(img);
@@ -666,19 +683,19 @@ auto Renderer_Vulkan::stage(std::shared_ptr<Scene> scene) -> void {
     poolInfo.poolSizeCount = poolSizes.size();
     poolInfo.pPoolSizes = poolSizes.data();
     poolInfo.maxSets = static_cast<uint32_t>(scene->materials.size());
-    if (vkCreateDescriptorPool(device, &poolInfo, nullptr, &descriptorPool) != VK_SUCCESS) {
-        throw std::runtime_error("Failed to create texture descriptor pool!");
+    if (vkCreateDescriptorPool(device, &poolInfo, nullptr, &instanceDescriptorPool) != VK_SUCCESS) {
+        throw std::runtime_error("Failed to create instance descriptor pool!");
     }
 
-    std::vector<VkDescriptorSetLayout> textureSetLayouts(scene->materials.size(), textureSetLayout);
+    std::vector<VkDescriptorSetLayout> textureSetLayouts(scene->materials.size(), set1Layout);
     VkDescriptorSetAllocateInfo textureSetAllocInfo = {};
     textureSetAllocInfo.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO;
-    textureSetAllocInfo.descriptorPool = descriptorPool;
+    textureSetAllocInfo.descriptorPool = instanceDescriptorPool;
     textureSetAllocInfo.descriptorSetCount = static_cast<uint32_t>(scene->materials.size());
     textureSetAllocInfo.pSetLayouts = textureSetLayouts.data();
 
-    textureSets.resize(scene->materials.size());
-    if (vkAllocateDescriptorSets(device, &textureSetAllocInfo, textureSets.data()) != VK_SUCCESS) {
+    sets1.resize(scene->materials.size());
+    if (vkAllocateDescriptorSets(device, &textureSetAllocInfo, sets1.data()) != VK_SUCCESS) {
         throw std::runtime_error("Failed to allocate texture descriptor sets!");
     }
 
@@ -716,7 +733,7 @@ auto Renderer_Vulkan::stage(std::shared_ptr<Scene> scene) -> void {
         std::array<VkWriteDescriptorSet, 2> writes = {{ // must match descriptor set layout bindings
             {
                 .sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET,
-                .dstSet = textureSets[i],
+                .dstSet = sets1[i],
                 .dstBinding = 0,
                 .dstArrayElement = 0,
                 .descriptorCount = 1,
@@ -726,7 +743,7 @@ auto Renderer_Vulkan::stage(std::shared_ptr<Scene> scene) -> void {
             },
             {
                 .sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET,
-                .dstSet = textureSets[i],
+                .dstSet = sets1[i],
                 .dstBinding = 1,
                 .dstArrayElement = 0,
                 .descriptorCount = 1,
@@ -737,7 +754,44 @@ auto Renderer_Vulkan::stage(std::shared_ptr<Scene> scene) -> void {
         }};
         vkUpdateDescriptorSets(device, writes.size(), writes.data(), 0, nullptr);
 
-        materialTextureSets[mat.get()] = textureSets[i];
+        materialTextureSets[mat.get()] = sets1[i];
+    }
+
+    for (size_t i = 0; i < FRAMES_IN_FLIGHT; i++) {
+        VkDescriptorBufferInfo directionalLightBufferInfo = {};
+        directionalLightBufferInfo.buffer = getBuffer(directionalLightBuffers[i]);
+        directionalLightBufferInfo.offset = 0;
+        directionalLightBufferInfo.range = sizeof(DirectionalLight) * scene->directionalLights.size();
+
+        VkDescriptorBufferInfo pointLightBufferInfo = {};
+        pointLightBufferInfo.buffer = getBuffer(pointLightBuffers[i]);
+
+        pointLightBufferInfo.offset = 0;
+        pointLightBufferInfo.range = sizeof(PointLight) * scene->pointLights.size();
+
+        std::array<VkWriteDescriptorSet, 2> writes = {{ // must match descriptor set layout bindings
+            {
+                .sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET,
+                .dstSet = sets0[i],
+                .dstBinding = 2,
+                .dstArrayElement = 0,
+                .descriptorCount = 1,
+                .descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,
+                .pImageInfo = nullptr,
+                .pBufferInfo = &directionalLightBufferInfo,
+            },
+            {
+                .sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET,
+                .dstSet = sets0[i],
+                .dstBinding = 3,
+                .dstArrayElement = 0,
+                .descriptorCount = 1,
+                .descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,
+                .pImageInfo = nullptr,
+                .pBufferInfo = &pointLightBufferInfo,
+            }
+        }};
+        vkUpdateDescriptorSets(device, writes.size(), writes.data(), 0, nullptr);
     }
 }
 
@@ -801,7 +855,7 @@ auto Renderer_Vulkan::draw(std::shared_ptr<Scene> scene, Camera& camera) -> void
                     VkDeviceSize offsets[] = { 0 };
                     vkCmdBindVertexBuffers(cmd, 0, 1, vertexBuffers, offsets);
                     vkCmdBindIndexBuffer(cmd, getBuffer(mesh->ebo), 0, VkIndexType::VK_INDEX_TYPE_UINT32);
-                    std::array<VkDescriptorSet, 2> descriptorSets = { uniformSets[currentFrame], materialTextureSets.at(mesh->material.get()) };
+                    std::array<VkDescriptorSet, 2> descriptorSets = { sets0[currentFrame], materialTextureSets.at(mesh->material.get()) };
                     vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, pipelineLayout, 0, descriptorSets.size(), descriptorSets.data(), 0, nullptr); // resources are set here
                     vkCmdPushConstants(cmd, pipelineLayout, VK_SHADER_STAGE_FRAGMENT_BIT, 0, sizeof(SceneData), &sceneData);
                     vkCmdDrawIndexed(cmd, mesh->indices.size(), 1, 0, 0, 0);
@@ -940,7 +994,7 @@ VkPipeline Renderer_Vulkan::createPipeline(const std::string& filename) {
     std::array<VkPipelineShaderStageCreateInfo, 2> shaderStages = { vertShaderStageInfo, fragShaderStageInfo };
 
     // Pipeline layout
-    std::array<VkDescriptorSetLayoutBinding, 2> uniformSetLayoutBindings = {{
+    std::array<VkDescriptorSetLayoutBinding, 4> set0LayoutBindings = {{
         {
             .binding = 0,
             .descriptorType = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER,
@@ -954,17 +1008,31 @@ VkPipeline Renderer_Vulkan::createPipeline(const std::string& filename) {
             .descriptorCount = 1,
             .stageFlags = VK_SHADER_STAGE_VERTEX_BIT,
             .pImmutableSamplers = nullptr
+        },
+        {
+            .binding = 2,
+            .descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,
+            .descriptorCount = 1,
+            .stageFlags = VK_SHADER_STAGE_FRAGMENT_BIT,
+            .pImmutableSamplers = nullptr
+        },
+        {
+            .binding = 3,
+            .descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,
+            .descriptorCount = 1,
+            .stageFlags = VK_SHADER_STAGE_FRAGMENT_BIT,
+            .pImmutableSamplers = nullptr
         }
     }};
-    VkDescriptorSetLayoutCreateInfo uniformSetLayoutInfo = {};
-    uniformSetLayoutInfo.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO;
-    uniformSetLayoutInfo.bindingCount = static_cast<uint32_t>(uniformSetLayoutBindings.size());
-    uniformSetLayoutInfo.pBindings = uniformSetLayoutBindings.data();
-    if (vkCreateDescriptorSetLayout(device, &uniformSetLayoutInfo, nullptr, &uniformSetLayout) != VK_SUCCESS) {
-        throw std::runtime_error("Failed to create descriptor set layout!");
+    VkDescriptorSetLayoutCreateInfo set0LayoutInfo = {};
+    set0LayoutInfo.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO;
+    set0LayoutInfo.bindingCount = static_cast<uint32_t>(set0LayoutBindings.size());
+    set0LayoutInfo.pBindings = set0LayoutBindings.data();
+    if (vkCreateDescriptorSetLayout(device, &set0LayoutInfo, nullptr, &set0Layout) != VK_SUCCESS) {
+        throw std::runtime_error("Failed to create set 0 layout!");
     }
 
-    std::array<VkDescriptorSetLayoutBinding, 2> textureSetLayoutBindings = {{
+    std::array<VkDescriptorSetLayoutBinding, 2> set1LayoutBindings = {{
         {
             .binding = 0,
             .descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER,
@@ -980,15 +1048,15 @@ VkPipeline Renderer_Vulkan::createPipeline(const std::string& filename) {
             .pImmutableSamplers = nullptr
         }
     }};
-    VkDescriptorSetLayoutCreateInfo textureSetLayoutInfo = {};
-    textureSetLayoutInfo.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO;
-    textureSetLayoutInfo.bindingCount = static_cast<uint32_t>(textureSetLayoutBindings.size());
-    textureSetLayoutInfo.pBindings = textureSetLayoutBindings.data();
-    if (vkCreateDescriptorSetLayout(device, &textureSetLayoutInfo, nullptr, &textureSetLayout) != VK_SUCCESS) {
-        throw std::runtime_error("Failed to create descriptor set layout!");
+    VkDescriptorSetLayoutCreateInfo set1LayoutInfo = {};
+    set1LayoutInfo.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO;
+    set1LayoutInfo.bindingCount = static_cast<uint32_t>(set1LayoutBindings.size());
+    set1LayoutInfo.pBindings = set1LayoutBindings.data();
+    if (vkCreateDescriptorSetLayout(device, &set1LayoutInfo, nullptr, &set1Layout) != VK_SUCCESS) {
+        throw std::runtime_error("Failed to create set 1 layout!");
     }
 
-    std::array<VkDescriptorSetLayout, 2> descriptorSetLayouts = { uniformSetLayout, textureSetLayout };
+    std::array<VkDescriptorSetLayout, 2> descriptorSetLayouts = { set0Layout, set1Layout };
 
     std::array<VkPushConstantRange, 1> pushConstantRanges = {{
         { VK_SHADER_STAGE_FRAGMENT_BIT, 0, sizeof(SceneData) }
@@ -1268,7 +1336,7 @@ TextureHandle Renderer_Vulkan::createTexture(std::shared_ptr<Image> img) {
         }
 
         VkDeviceSize bufferSize = img->byteArray.size();
-        auto stagingBufferHandle = createBuffer(GPUBufferUsage::COPY_SRC, bufferSize);
+        auto stagingBufferHandle = createBuffer(BufferUsage::COPY_SRC, bufferSize);
         VkBuffer stagingBuffer = getBuffer(stagingBufferHandle); // TODO: use internal pointer
         VkDeviceMemory stagingBufferMemory = getBufferMemory(stagingBufferHandle); // TODO: use internal pointer
 
@@ -1341,7 +1409,7 @@ TextureHandle Renderer_Vulkan::createTexture(std::shared_ptr<Image> img) {
 
 BufferHandle Renderer_Vulkan::createVertexBuffer(std::vector<VertexData> vertices) {
     VkDeviceSize bufferSize = sizeof(VertexData) * vertices.size();
-    auto bufferHandle = createBuffer(GPUBufferUsage::VERTEX, bufferSize);
+    auto bufferHandle = createBuffer(BufferUsage::VERTEX, bufferSize);
     VkDeviceMemory bufferMemory = getBufferMemory(bufferHandle); // TODO: use internal pointer
 
     void* data;
@@ -1354,7 +1422,7 @@ BufferHandle Renderer_Vulkan::createVertexBuffer(std::vector<VertexData> vertice
 
 BufferHandle Renderer_Vulkan::createIndexBuffer(std::vector<Uint32> indices) {
     VkDeviceSize bufferSize = sizeof(Uint32) * indices.size();
-    auto bufferHandle = createBuffer(GPUBufferUsage::INDEX, bufferSize);
+    auto bufferHandle = createBuffer(BufferUsage::INDEX, bufferSize);
     VkDeviceMemory bufferMemory = getBufferMemory(bufferHandle); // TODO: use internal pointer
 
     void* data;
@@ -1365,24 +1433,27 @@ BufferHandle Renderer_Vulkan::createIndexBuffer(std::vector<Uint32> indices) {
     return bufferHandle;
 }
 
-BufferHandle Renderer_Vulkan::createBuffer(GPUBufferUsage usage, VkDeviceSize size) {
+BufferHandle Renderer_Vulkan::createBuffer(BufferUsage usage, VkDeviceSize size) {
     VkBufferCreateInfo bufferInfo{};
     bufferInfo.sType = VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO;
     bufferInfo.size = size;
     switch (usage) {
-        case GPUBufferUsage::VERTEX:
+        case BufferUsage::VERTEX:
             bufferInfo.usage = VK_BUFFER_USAGE_VERTEX_BUFFER_BIT;
             break;
-        case GPUBufferUsage::INDEX:
+        case BufferUsage::INDEX:
             bufferInfo.usage = VK_BUFFER_USAGE_INDEX_BUFFER_BIT;
             break;
-        case GPUBufferUsage::UNIFORM:
+        case BufferUsage::UNIFORM:
             bufferInfo.usage = VK_BUFFER_USAGE_UNIFORM_BUFFER_BIT;
             break;
-        case GPUBufferUsage::COPY_SRC:
+        case BufferUsage::STORAGE:
+            bufferInfo.usage = VK_BUFFER_USAGE_STORAGE_BUFFER_BIT;
+            break;
+        case BufferUsage::COPY_SRC:
             bufferInfo.usage = VK_BUFFER_USAGE_TRANSFER_SRC_BIT;
             break;
-        case GPUBufferUsage::COPY_DST:
+        case BufferUsage::COPY_DST:
             bufferInfo.usage = VK_BUFFER_USAGE_TRANSFER_DST_BIT;
             break;
         default:
@@ -1424,7 +1495,7 @@ BufferHandle Renderer_Vulkan::createBuffer(GPUBufferUsage usage, VkDeviceSize si
     return BufferHandle { nextBufferID++ };
 }
 
-BufferHandle Renderer_Vulkan::createBufferMapped(GPUBufferUsage usage, VkDeviceSize size, void** mappedDataPtr) {
+BufferHandle Renderer_Vulkan::createBufferMapped(BufferUsage usage, VkDeviceSize size, void** mappedDataPtr) {
     auto bufferHandle = createBuffer(usage, size);
 
     VkDeviceMemory bufferMemory = getBufferMemory(bufferHandle); // TODO: use internal pointer

@@ -75,6 +75,21 @@ int main(int argc, char* args[]) {
     // scene->AddMeshToNode(entity, mesh);
     // scene->AddMeshToNode(entity, AssetManager::loadOBJ(std::string("assets/models/Sibenik/sibenik.obj"), std::string("assets/models/Sibenik/")));
     auto scene = AssetManager::loadGLTF(std::string("assets/models/Sponza/Sponza.gltf"));
+    scene->directionalLights.push_back({
+        .direction = glm::vec3(0.0, 1.0, 0.0),
+        .color = glm::vec3(1.0, 1.0, 1.0),
+        .intensity = 10.0,
+    });
+    scene->pointLights.push_back({
+        .position = glm::vec3(0.0, 1.0, 0.0),
+        .color = glm::vec3(1.0, 0.0, 0.0),
+        .intensity = 3.2,
+    });
+    scene->pointLights.push_back({
+        .position = glm::vec3(1.0, 1.0, 0.0),
+        .color = glm::vec3(0.0, 1.0, 0.0),
+        .intensity = 5.2,
+    });
 
     renderer->stage(scene);
 

@@ -49,7 +49,6 @@ auto Renderer_Metal::init() -> void {
     initTestPipelines();
 
     // Create buffers
-    
     cameraDataBuffer = NS::TransferPtr(device->newBuffer(sizeof(CameraData), MTL::ResourceStorageModeManaged));
     instanceDataBuffer = NS::TransferPtr(device->newBuffer(sizeof(InstanceData) * numMaxInstances, MTL::ResourceStorageModeManaged));
 
@@ -103,6 +102,14 @@ auto Renderer_Metal::stage(std::shared_ptr<Scene> scene) -> void {
     for (auto& node : scene->nodes) {
         stageNode(node);
     }
+
+    directionalLightBuffer = NS::TransferPtr(device->newBuffer(scene->directionalLights.size() * sizeof(DirectionalLight), MTL::ResourceStorageModeManaged));
+    memcpy(directionalLightBuffer->contents(), scene->directionalLights.data(), scene->directionalLights.size() * sizeof(DirectionalLight));
+    directionalLightBuffer->didModifyRange(NS::Range::Make(0, directionalLightBuffer->length()));
+
+    pointLightBuffer = NS::TransferPtr(device->newBuffer(scene->pointLights.size() * sizeof(PointLight), MTL::ResourceStorageModeManaged));
+    memcpy(pointLightBuffer->contents(), scene->pointLights.data(), scene->pointLights.size() * sizeof(PointLight));
+    pointLightBuffer->didModifyRange(NS::Range::Make(0, pointLightBuffer->length()));
 
     // Textures
     for (auto& img : scene->images) {
@@ -201,7 +208,8 @@ auto Renderer_Metal::draw(std::shared_ptr<Scene> scene, Camera& camera) -> void 
                     encoder->setVertexBuffer(instanceDataBuffer.get(), 0, 2);
                     encoder->setFragmentBytes(&camPos, sizeof(glm::vec3), 0);
                     encoder->setFragmentBytes(&time, sizeof(float), 1);
-                    // encoder->setFragmentBuffer(testStorageBuffer.get(), 0, 2);
+                    encoder->setFragmentBuffer(directionalLightBuffer.get(), 0, 2);
+                    encoder->setFragmentBuffer(pointLightBuffer.get(), 0, 3);
                     encoder->setCullMode(MTL::CullModeBack);
                     encoder->setFrontFacingWinding(MTL::Winding::WindingCounterClockwise);
                     encoder->setDepthStencilState(depthStencilState.get());

@@ -58,9 +58,9 @@ public:
 
     TextureHandle createTexture(std::shared_ptr<Image> img);
 
-    BufferHandle createBuffer(GPUBufferUsage usage, VkDeviceSize size);
+    BufferHandle createBuffer(BufferUsage usage, VkDeviceSize size);
 
-    BufferHandle createBufferMapped(GPUBufferUsage usage, VkDeviceSize size, void** mappedDataPtr);
+    BufferHandle createBufferMapped(BufferUsage usage, VkDeviceSize size, void** mappedDataPtr);
 
     BufferHandle createVertexBuffer(std::vector<VertexData> vertices);
 
@@ -101,11 +101,12 @@ private:
     VkPipelineLayout pipelineLayout;
     VkPipeline testDrawPipeline;
     VkRenderPass renderPass;
-    VkDescriptorPool descriptorPool;
-    VkDescriptorSetLayout uniformSetLayout;
-    VkDescriptorSetLayout textureSetLayout;
-    std::vector<VkDescriptorSet> uniformSets;
-    std::vector<VkDescriptorSet> textureSets;
+    VkDescriptorPool frameDescriptorPool;
+    VkDescriptorPool instanceDescriptorPool;
+    VkDescriptorSetLayout set0Layout;
+    VkDescriptorSetLayout set1Layout;
+    std::vector<VkDescriptorSet> sets0;
+    std::vector<VkDescriptorSet> sets1;
 
     VkImage colorImage;
     VkDeviceMemory colorImageMemory;
@@ -126,6 +127,10 @@ private:
     std::vector<void*> cameraDataBuffersMapped;
     std::vector<BufferHandle> instanceDataBuffers;
     std::vector<void*> instanceDataBuffersMapped;
+    std::vector<BufferHandle> directionalLightBuffers;
+    std::vector<void*> directionalLightBuffersMapped;
+    std::vector<BufferHandle> pointLightBuffers;
+    std::vector<void*> pointLightBuffersMapped;
 
     const int FRAMES_IN_FLIGHT = 3;
     const int sampleCount = 4;
