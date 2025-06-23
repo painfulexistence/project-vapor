@@ -17,7 +17,7 @@ struct DirLight {
     vec3 color;
     float _pad2;
     float intensity;
-    float _pad3[3];
+    // float _pad3[3];
 };
 struct PointLight {
     vec3 position;
@@ -25,7 +25,7 @@ struct PointLight {
     vec3 color;
     float _pad2;
     float intensity;
-    float _pad3[3];
+    // float _pad3[3];
 };
 layout(std430, set = 0, binding = 2) readonly buffer DirLightBuffer {
     DirLight directional_lights[];
