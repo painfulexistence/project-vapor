@@ -46,9 +46,9 @@ public:
 
     virtual void init() override;
 
-    virtual void stage(Scene& scene) override;
+    virtual void stage(std::shared_ptr<Scene> scene) override;
 
-    virtual void draw(Scene& scene, Camera& camera) override;
+    virtual void draw(std::shared_ptr<Scene> scene, Camera& camera) override;
 
     VkPipeline createPipeline(const std::string& filename);
 
@@ -56,7 +56,7 @@ public:
 
     VkImage createRenderTarget(GPUImageUsage usage, VkDeviceMemory& memory, VkImageView& imageView, int sampleCount);
 
-    VkImage createTexture(const std::string& filename, VkDeviceMemory& memory, VkImageView& imageView);
+    TextureHandle createTexture(std::shared_ptr<Image> img);
 
     BufferHandle createBuffer(GPUBufferUsage usage, VkDeviceSize size);
 
@@ -67,10 +67,11 @@ public:
     BufferHandle createIndexBuffer(std::vector<Uint32> indices);
 
     VkBuffer getBuffer(BufferHandle handle) const;
-
     VkDeviceMemory getBufferMemory(BufferHandle handle) const;
 
     VkImage getTexture(TextureHandle handle) const;
+    VkImageView getTextureView(TextureHandle handle) const;
+    VkDeviceMemory getTextureMemory(TextureHandle handle) const;
 
     VkPipeline getPipeline(PipelineHandle handle) const;
 
@@ -101,8 +102,10 @@ private:
     VkPipeline testDrawPipeline;
     VkRenderPass renderPass;
     VkDescriptorPool descriptorPool;
-    VkDescriptorSetLayout descriptorSetLayout;
-    std::vector<VkDescriptorSet> descriptorSets;
+    VkDescriptorSetLayout uniformSetLayout;
+    VkDescriptorSetLayout textureSetLayout;
+    std::vector<VkDescriptorSet> uniformSets;
+    std::vector<VkDescriptorSet> textureSets;
 
     VkImage colorImage;
     VkDeviceMemory colorImageMemory;
@@ -112,22 +115,12 @@ private:
     VkDeviceMemory depthImageMemory;
     VkImageView depthImageView;
 
-    VkImage testAlbedoTexture;
-    VkImage testNormalTexture;
-    VkImage testAOTexture;
-    VkImage testRoughnessTexture;
-    VkImage testMetallicTexture;
-    VkDeviceMemory testAlbedoTextureMemory;
-    VkDeviceMemory testNormalTextureMemory;
-    VkDeviceMemory testAOTextureMemory;
-    VkDeviceMemory testRoughnessTextureMemory;
-    VkDeviceMemory testMetallicTextureMemory;
-    VkImageView testAlbedoTextureView;
-    VkImageView testNormalTextureView;
-    VkImageView testAOTextureView;
-    VkImageView testRoughnessTextureView;
-    VkImageView testMetallicTextureView;
-    VkSampler testSampler;
+    TextureHandle defaultAlbedoTexture;
+    TextureHandle defaultNormalTexture;
+    TextureHandle defaultORMTexture;
+    TextureHandle defaultEmissiveTexture;
+    // TextureHandle defaultDisplacementTexture;
+    VkSampler defaultSampler;
 
     std::vector<BufferHandle> cameraDataBuffers;
     std::vector<void*> cameraDataBuffersMapped;
@@ -146,4 +139,5 @@ private:
     std::unordered_map<Uint32, VkDeviceMemory> textureMemories;
     std::unordered_map<Uint32, VkImageView> textureViews;
     std::unordered_map<Uint32, VkPipeline> pipelines;
+    std::unordered_map<Material*, VkDescriptorSet> materialTextureSets; // TODO: better key?
 };

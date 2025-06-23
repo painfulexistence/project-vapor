@@ -2,22 +2,22 @@
 #define MTL_PRIVATE_IMPLEMENTATION
 #define CA_PRIVATE_IMPLEMENTATION
 #include "renderer_metal.hpp"
-#include "graphics.hpp"
-#include "asset_manager.hpp"
 
-#include "fmt/core.h"
-#include "helper.hpp"
-
-#include "SDL3/SDL_stdinc.h"
-#include "glm/vec2.hpp"
-#include "glm/vec3.hpp"
-#include "glm/vec4.hpp"
-#include <cstdint>
-#include <vector>
+#include <fmt/core.h>
+#include <SDL3/SDL_stdinc.h>
+#include <glm/vec2.hpp>
+#include <glm/vec3.hpp>
+#include <glm/vec4.hpp>
 #define GLM_FORCE_DEPTH_ZERO_TO_ONE
 #define GLM_FORCE_LEFT_HANDED
 #include <glm/ext/matrix_clip_space.hpp>
 #include <glm/ext/matrix_transform.hpp>
+#include <vector>
+#include <functional>
+
+#include "graphics.hpp"
+#include "asset_manager.hpp"
+#include "helper.hpp"
 
 
 std::unique_ptr<Renderer> createRendererMetal(SDL_Window* window) {
@@ -49,16 +49,15 @@ auto Renderer_Metal::init() -> void {
     initTestPipelines();
 
     // Create buffers
-    auto mesh = MeshBuilder::buildCube(1.0); // AssetManager::loadOBJ(std::string("assets/models/viking_room.obj"));
-    testVertexBuffer = createVertexBuffer(mesh->vertices);
-    testIndexBuffer = createIndexBuffer(mesh->indices);
+    
     cameraDataBuffer = NS::TransferPtr(device->newBuffer(sizeof(CameraData), MTL::ResourceStorageModeManaged));
     instanceDataBuffer = NS::TransferPtr(device->newBuffer(sizeof(InstanceData) * numMaxInstances, MTL::ResourceStorageModeManaged));
 
     // Create textures
-    testAlbedoTexture = createTexture(std::string("assets/textures/medieval_blocks_diff.jpg")); // createTexture(std::string("assets/textures/viking_room.png"));
-    testNormalTexture = createTexture(std::string("assets/textures/medieval_blocks_norm_dx.jpg"));
-    testRoughnessTexture = createTexture(std::string("assets/textures/medieval_blocks_rough.jpg"));
+    defaultAlbedoTexture = createTexture(AssetManager::loadImage("assets/textures/default_albedo.png")); // createTexture(AssetManager::loadImage("assets/textures/viking_room.png"));
+    defaultNormalTexture = createTexture(AssetManager::loadImage("assets/textures/default_norm.png"));
+    defaultORMTexture = createTexture(AssetManager::loadImage("assets/textures/default_orm.png"));
+    defaultEmissiveTexture = createTexture(AssetManager::loadImage("assets/textures/default_emissive.png"));
 
     MTL::DepthStencilDescriptor* depthStencilDesc = MTL::DepthStencilDescriptor::alloc()->init();
     depthStencilDesc->setDepthCompareFunction(MTL::CompareFunction::CompareFunctionLess);
@@ -87,20 +86,39 @@ auto Renderer_Metal::init() -> void {
     msaaTextureDesc->release();
 }
 
-auto Renderer_Metal::stage(Scene& scene) -> void {
-    // TODO: implement
-    for (auto& node : scene.nodes) {
-        if (!node->meshGroup) {
-            continue;
-        }
-        for (auto& mesh : node->meshGroup->meshes) {
-            mesh->vbos.push_back(createVertexBuffer(mesh->vertices)); // TODO: use single vbo for all meshes
-            mesh->ebo = createIndexBuffer(mesh->indices);
-        }
+auto Renderer_Metal::stage(std::shared_ptr<Scene> scene) -> void {
+    // Buffers
+    const std::function<void(const std::shared_ptr<Node>&)> stageNode =
+        [&](const std::shared_ptr<Node>& node) {
+            if (node->meshGroup) {
+                for (auto& mesh : node->meshGroup->meshes) {
+                    mesh->vbos.push_back(createVertexBuffer(mesh->vertices)); // TODO: use single vbo for all meshes
+                    mesh->ebo = createIndexBuffer(mesh->indices);
+                }
+            }
+            for (const auto& child : node->children) {
+                stageNode(child);
+            }
+        };
+    for (auto& node : scene->nodes) {
+        stageNode(node);
+    }
+
+    // Textures
+    for (auto& img : scene->images) {
+        img->texture = createTexture(img);
+    }
+
+    // Pipelines
+    if (scene->materials.empty()) {
+        // TODO: create default material
+    }
+    for (auto& mat : scene->materials) {
+        // pipelines[mat->pipeline] = createPipeline();
     }
 }
 
-auto Renderer_Metal::draw(Scene& scene, Camera& camera) -> void {
+auto Renderer_Metal::draw(std::shared_ptr<Scene> scene, Camera& camera) -> void {
     auto time = (float)SDL_GetTicks() / 1000.0f;
 
     auto surface = swapchain->nextDrawable();
@@ -118,23 +136,6 @@ auto Renderer_Metal::draw(Scene& scene, Camera& camera) -> void {
 
     auto cmd = queue->commandBuffer();
 
-    float angle = time * 1.5f;
-    // single instance
-    InstanceData* instance = reinterpret_cast<InstanceData*>(instanceDataBuffer->contents());
-    instance->modelMatrix = glm::rotate(glm::mat4(1.0f), angle, glm::vec3(0.0f, -1.0f, -1.0f)); // glm::rotate(glm::rotate(glm::mat4(1.0f), glm::radians(270.0f), glm::vec3(1.0f, 0.0f, 0.0f)), angle, glm::vec3(0.0f, 0.0f, 1.0f));
-    instance->color = glm::vec4(1.0f, 0.0f, 0.0f, 1.0f);
-    // multiple instances
-    // std::vector<InstanceData> instances = {{
-    //     { glm::rotate(glm::identity<glm::mat4>(), angle, glm::vec3(1.0f, 0.0f, 1.0f)), glm::vec4(1.0f, 0.0f, 0.0f, 1.0f) },
-    //     { glm::rotate(glm::identity<glm::mat4>(), angle + 0.5f, glm::vec3(1.0f, 0.0f, 1.0f)), glm::vec4(0.0f, 1.0f, 0.0f, 1.0f) },
-    // }};
-    // for (size_t i = 0; i < instances.size(); ++i) {
-    //     InstanceData* instance = reinterpret_cast<InstanceData*>(instanceDataBuffer->contents()) + i;
-    //     instance->modelMatrix = instances[i].modelMatrix;
-    //     instance->color = instances[i].color;
-    // }
-    instanceDataBuffer->didModifyRange(NS::Range::Make(0, instanceDataBuffer->length())); // TODO: avoid updating the entire instance data buffer every frame
-
     glm::vec3 camPos = camera.GetEye();
     CameraData* cameraData = reinterpret_cast<CameraData*>(cameraDataBuffer->contents());
     cameraData->projectionMatrix = camera.GetProjMatrix();
@@ -146,43 +147,89 @@ auto Renderer_Metal::draw(Scene& scene, Camera& camera) -> void {
     encoder->setRenderPipelineState(testDrawPipeline.get());
     // encoder->useResource(testStorageBuffer.get(), MTL::ResourceUsageRead, MTL::RenderStageVertex | MTL::RenderStageFragment);
 
-    for (const auto& node : scene.nodes) {
-        if (node->meshGroup) {
-            for (const auto& mesh : node->meshGroup->meshes) {
-                // encoder->setRenderPipelineState(getPipeline(mesh->material->pipeline));
-                encoder->setFragmentTexture(testAlbedoTexture.get(), 0);
-                encoder->setFragmentTexture(testNormalTexture.get(), 1);
-                encoder->setFragmentTexture(testAOTexture.get(), 2);
-                encoder->setFragmentTexture(testRoughnessTexture.get(), 3);
-                encoder->setFragmentTexture(testMetallicTexture.get(), 4);
-                encoder->setFragmentTexture(testDisplacementTexture.get(), 5);
-                encoder->setVertexBuffer(getBuffer(mesh->vbos[0]).get(), 0, 0);
-                encoder->setVertexBuffer(cameraDataBuffer.get(), 0, 1);
-                encoder->setVertexBuffer(instanceDataBuffer.get(), 0, 2);
-                encoder->setFragmentBytes(&camPos, sizeof(glm::vec3), 0);
-                encoder->setFragmentBytes(&time, sizeof(float), 1);
-                // encoder->setFragmentBuffer(testStorageBuffer.get(), 0, 2);
-                encoder->setCullMode(MTL::CullModeBack);
-                encoder->setFrontFacingWinding(MTL::Winding::WindingCounterClockwise);
-                encoder->setDepthStencilState(depthStencilState.get());
-                if (mesh->indices.size() > 0) {
-                    encoder->drawIndexedPrimitives(
-                        MTL::PrimitiveType::PrimitiveTypeTriangle,
-                        mesh->indices.size(), // getBuffer(mesh->ebo)->length() / sizeof(Uint32)
-                        MTL::IndexTypeUInt32,
-                        getBuffer(mesh->ebo).get(),
+    const std::function<void(const std::shared_ptr<Node>&)> drawNode =
+        [&](const std::shared_ptr<Node>& node) {
+            if (node->meshGroup) {
+                // single instance
+                InstanceData* instance = reinterpret_cast<InstanceData*>(instanceDataBuffer->contents());
+                instance->modelMatrix = node->worldTransform;
+                instance->color = glm::vec4(1.0f, 0.0f, 0.0f, 1.0f);
+                // multiple instances
+                // std::vector<InstanceData> instances = {{
+                //     { glm::rotate(glm::identity<glm::mat4>(), angle, glm::vec3(1.0f, 0.0f, 1.0f)), glm::vec4(1.0f, 0.0f, 0.0f, 1.0f) },
+                //     { glm::rotate(glm::identity<glm::mat4>(), angle + 0.5f, glm::vec3(1.0f, 0.0f, 1.0f)), glm::vec4(0.0f, 1.0f, 0.0f, 1.0f) },
+                // }};
+                // for (size_t i = 0; i < instances.size(); ++i) {
+                //     InstanceData* instance = reinterpret_cast<InstanceData*>(instanceDataBuffer->contents()) + i;
+                //     instance->modelMatrix = instances[i].modelMatrix;
+                //     instance->color = instances[i].color;
+                // }
+                instanceDataBuffer->didModifyRange(NS::Range::Make(0, instanceDataBuffer->length())); // TODO: avoid updating the entire instance data buffer every frame
+
+                for (const auto& mesh : node->meshGroup->meshes) {
+                    if (!mesh->material) {
+                        fmt::print("No material found for mesh in mesh group {}\n", node->meshGroup->name);
+                        continue;
+                    }
+                    // encoder->setRenderPipelineState(getPipeline(mesh->material->pipeline));
+                    encoder->setFragmentTexture(
+                        getTexture(mesh->material->albedoMap ? mesh->material->albedoMap->texture : defaultAlbedoTexture).get(),
                         0
                     );
-                } else {
-                    encoder->drawPrimitives(
-                        MTL::PrimitiveType::PrimitiveTypeTriangle,
-                        0,
-                        mesh->positions.size(),
+                    encoder->setFragmentTexture(
+                        getTexture(mesh->material->normalMap ? mesh->material->normalMap->texture : defaultNormalTexture).get(),
                         1
                     );
+                    encoder->setFragmentTexture(
+                        getTexture(mesh->material->metallicRoughnessMap ? mesh->material->metallicRoughnessMap->texture : defaultORMTexture).get(),
+                        2
+                    );
+                    encoder->setFragmentTexture(
+                        getTexture(mesh->material->occlusionMap ? mesh->material->occlusionMap->texture : defaultORMTexture).get(),
+                        3
+                    );
+                    encoder->setFragmentTexture(
+                        getTexture(mesh->material->emissiveMap ? mesh->material->emissiveMap->texture : defaultEmissiveTexture).get(),
+                        4
+                    );
+                    // encoder->setFragmentTexture(
+                    //     getTexture(mesh->material->displacementMap ? mesh->material->displacementMap->texture : defaultDisplacementTexture).get(),
+                    //     5
+                    // );
+                    encoder->setVertexBuffer(getBuffer(mesh->vbos[0]).get(), 0, 0);
+                    encoder->setVertexBuffer(cameraDataBuffer.get(), 0, 1);
+                    encoder->setVertexBuffer(instanceDataBuffer.get(), 0, 2);
+                    encoder->setFragmentBytes(&camPos, sizeof(glm::vec3), 0);
+                    encoder->setFragmentBytes(&time, sizeof(float), 1);
+                    // encoder->setFragmentBuffer(testStorageBuffer.get(), 0, 2);
+                    encoder->setCullMode(MTL::CullModeBack);
+                    encoder->setFrontFacingWinding(MTL::Winding::WindingCounterClockwise);
+                    encoder->setDepthStencilState(depthStencilState.get());
+                    if (mesh->indices.size() > 0) {
+                        encoder->drawIndexedPrimitives(
+                            MTL::PrimitiveType::PrimitiveTypeTriangle,
+                            mesh->indices.size(), // getBuffer(mesh->ebo)->length() / sizeof(Uint32)
+                            MTL::IndexTypeUInt32,
+                            getBuffer(mesh->ebo).get(),
+                            0
+                        );
+                    } else {
+                        encoder->drawPrimitives(
+                            MTL::PrimitiveType::PrimitiveTypeTriangle,
+                            0,
+                            mesh->positions.size(),
+                            1
+                        );
+                    }
                 }
             }
-        }
+            for (const auto& child : node->children) {
+                drawNode(child);
+            }
+        };
+
+    for (const auto& node : scene->nodes) {
+        drawNode(node);
     }
 
     encoder->endEncoding();
@@ -233,10 +280,10 @@ NS::SharedPtr<MTL::RenderPipelineState> Renderer_Metal::createPipeline(const std
     return pipeline;
 }
 
-NS::SharedPtr<MTL::Texture> Renderer_Metal::createTexture(const std::string& filename) {
-    auto img = AssetManager::loadImage(filename);
+TextureHandle Renderer_Metal::createTexture(const std::shared_ptr<Image>& img) {
     if (img) {
         MTL::PixelFormat pixelFormat = MTL::PixelFormat::PixelFormatBGRA8Unorm;
+        int numLevels = static_cast<int>(std::floor(std::log2(std::max(img->width, img->height))) + 1);
         switch (img->channelCount) {
         case 1:
             pixelFormat = MTL::PixelFormat::PixelFormatR8Unorm;
@@ -246,7 +293,7 @@ NS::SharedPtr<MTL::Texture> Renderer_Metal::createTexture(const std::string& fil
             pixelFormat = MTL::PixelFormat::PixelFormatBGRA8Unorm;
             break;
         default:
-            throw std::runtime_error(fmt::format("Unknown texture format at {}\n", filename));
+            throw std::runtime_error(fmt::format("Unknown texture format at {}\n", img->uri));
             break;
         }
 
@@ -255,7 +302,7 @@ NS::SharedPtr<MTL::Texture> Renderer_Metal::createTexture(const std::string& fil
         textureDesc->setTextureType(MTL::TextureType::TextureType2D);
         textureDesc->setWidth(NS::UInteger(img->width));
         textureDesc->setHeight(NS::UInteger(img->height));
-        textureDesc->setMipmapLevelCount(10);
+        textureDesc->setMipmapLevelCount(numLevels);
         textureDesc->setSampleCount(1);
         textureDesc->setStorageMode(MTL::StorageMode::StorageModeManaged);
         textureDesc->setUsage(MTL::ResourceUsageSample | MTL::ResourceUsageRead);
@@ -271,9 +318,11 @@ NS::SharedPtr<MTL::Texture> Renderer_Metal::createTexture(const std::string& fil
 
         cmdBlit->commit();
 
-        return texture;
+        textures[nextTextureID] = texture;
+
+        return TextureHandle { nextTextureID++ };
     } else {
-        throw std::runtime_error(fmt::format("Failed to create texture at {}!\n", filename));
+        throw std::runtime_error(fmt::format("Failed to create texture at {}!\n", img->uri));
     }
 }
 

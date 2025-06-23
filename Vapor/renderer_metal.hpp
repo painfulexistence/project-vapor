@@ -18,15 +18,15 @@ public:
 
     virtual void init() override;
 
-    virtual void stage(Scene& scene) override;
+    virtual void stage(std::shared_ptr<Scene> scene) override;
 
-    virtual void draw(Scene& scene, Camera& camera) override;
+    virtual void draw(std::shared_ptr<Scene> scene, Camera& camera) override;
 
     void initTestPipelines();
 
     NS::SharedPtr<MTL::RenderPipelineState> createPipeline(const std::string& filename);
 
-    NS::SharedPtr<MTL::Texture> createTexture(const std::string& filename);
+    TextureHandle createTexture(const std::shared_ptr<Image>& img);
 
     BufferHandle createVertexBuffer(const std::vector<VertexData>& vertices);
     BufferHandle createIndexBuffer(const std::vector<Uint32>& indices);
@@ -48,15 +48,12 @@ private:
     NS::SharedPtr<MTL::DepthStencilState> depthStencilState;
     NS::SharedPtr<MTL::RenderPipelineState> testDrawPipeline;
 
-    NS::SharedPtr<MTL::Texture> testAlbedoTexture;
-    NS::SharedPtr<MTL::Texture> testNormalTexture;
-    NS::SharedPtr<MTL::Texture> testAOTexture;
-    NS::SharedPtr<MTL::Texture> testRoughnessTexture;
-    NS::SharedPtr<MTL::Texture> testMetallicTexture;
-    NS::SharedPtr<MTL::Texture> testDisplacementTexture;
+    TextureHandle defaultAlbedoTexture;
+    TextureHandle defaultNormalTexture;
+    TextureHandle defaultORMTexture;
+    TextureHandle defaultEmissiveTexture;
+    TextureHandle defaultDisplacementTexture;
 
-    NS::SharedPtr<MTL::Buffer> testVertexBuffer;
-    NS::SharedPtr<MTL::Buffer> testIndexBuffer;
     NS::SharedPtr<MTL::Buffer> testStorageBuffer;
     NS::SharedPtr<MTL::Buffer> instanceDataBuffer;
     NS::SharedPtr<MTL::Buffer> cameraDataBuffer;

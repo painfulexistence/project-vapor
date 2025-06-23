@@ -40,6 +40,7 @@ struct Image {
     Uint32 height;
     Uint32 channelCount;
     std::vector<Uint8> byteArray;
+    TextureHandle texture;
 };
 
 struct Material {
@@ -58,7 +59,7 @@ struct Material {
     std::shared_ptr<Image> metallicRoughnessMap;
     std::shared_ptr<Image> occlusionMap;
     std::shared_ptr<Image> emissiveMap;
-    std::shared_ptr<Image> heightMap;
+    std::shared_ptr<Image> displacementMap;
     PipelineHandle pipeline;
 };
 

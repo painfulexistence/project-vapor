@@ -204,19 +204,18 @@ fragment float4 fragmentMain(
     RasterizerData in [[stage_in]],
     texture2d<float, access::sample> texAlbedo [[texture(0)]],
     texture2d<float, access::sample> texNormal [[texture(1)]],
-    texture2d<float, access::sample> texAO [[texture(2)]],
-    texture2d<float, access::sample> texRoughness [[texture(3)]],
-    texture2d<float, access::sample> texMetallic [[texture(4)]],
-    texture2d<float, access::sample> texDisplacement [[texture(5)]],
+    texture2d<float, access::sample> texMetallicRoughness [[texture(2)]],
+    texture2d<float, access::sample> texOcclusion [[texture(3)]],
+    texture2d<float, access::sample> texEmissive [[texture(4)]],
     constant packed_float3* camPos [[buffer(0)]],
     constant float* time [[buffer(1)]]
 ) {
     constexpr sampler s(address::repeat, filter::linear, mip_filter::linear);
     Surface surf;
     surf.color = pow(texAlbedo.sample(s, in.uv).bgr, float3(GAMMA));
-    surf.ao = texAO.sample(s, in.uv).r;
-    surf.roughness = texRoughness.sample(s, in.uv).r;
-    surf.metallic = 0.0; // texMetallic.sample(s, in.uv).r;
+    surf.ao = 1.0; // texOcclusion.sample(s, in.uv).r;
+    surf.roughness = 1.0; // texRoughness.sample(s, in.uv).g;
+    surf.metallic = 0.0; // texMetallic.sample(s, in.uv).b;
     // surf.emission = float3(0.0);
     surf.subsurface = 0.0;
     surf.specular = 0.5;

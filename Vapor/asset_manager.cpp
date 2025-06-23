@@ -60,6 +60,7 @@ std::shared_ptr<Image> AssetManager::loadImage(const std::string& filename) {
     }
 }
 
+// TODO: use Scene instead of Mesh
 std::shared_ptr<Mesh> AssetManager::loadOBJ(const std::string& filename, const std::string& mtl_basedir) {
     std::vector<VertexData> vertices;
     std::vector<Uint32> indices;
@@ -73,8 +74,36 @@ std::shared_ptr<Mesh> AssetManager::loadOBJ(const std::string& filename, const s
         throw std::runtime_error(fmt::format("Failed to load model: {}", err));
     }
 
+    std::vector<std::shared_ptr<Material>> meshMaterials;
+    for (const auto& mat : materials) {
+        auto material = std::make_shared<Material>();
+        material->name = mat.name;
+        if (!mat.diffuse_texname.empty()) {
+            material->albedoMap = AssetManager::loadImage(mtl_basedir + mat.diffuse_texname);
+        }
+        if (!mat.bump_texname.empty()) {
+            material->normalMap = AssetManager::loadImage(mtl_basedir + mat.bump_texname);
+        }
+        if (!mat.metallic_texname.empty()) {
+            material->metallicRoughnessMap = AssetManager::loadImage(mtl_basedir + mat.metallic_texname);
+        }
+        if (!mat.ambient_texname.empty()) {
+            // material->occlusionMap = AssetManager::loadImage(mtl_basedir + mat.ambient_texname);
+        }
+        if (!mat.displacement_texname.empty()) {
+            material->displacementMap = AssetManager::loadImage(mtl_basedir + mat.displacement_texname);
+        }
+        meshMaterials.push_back(material);
+    }
+
     for (const auto& shape : shapes) {
-        for (const auto& index : shape.mesh.indices) {
+        for (size_t i = 0; i < shape.mesh.indices.size(); i++) {
+            auto index = shape.mesh.indices[i];
+            auto materialID = -1;
+            if (!shape.mesh.material_ids.empty()) {
+                materialID = shape.mesh.material_ids[i / 3];
+            }
+
             VertexData vert = {};
             vert.position = { attrib.vertices[3 * index.vertex_index + 0],
                               attrib.vertices[3 * index.vertex_index + 1],
@@ -95,11 +124,12 @@ std::shared_ptr<Mesh> AssetManager::loadOBJ(const std::string& filename, const s
 
     auto mesh = std::make_shared<Mesh>();
     mesh->initialize({ vertices, indices });
+    mesh->material = meshMaterials[0];
 
     return mesh;
 }
 std::shared_ptr<Scene> AssetManager::loadGLTF(const std::string& filename) {
-    std::string filePath = std::string(SDL_GetBasePath()) + "res/" + filename;
+    std::string filePath = std::string(SDL_GetBasePath()) + filename;
 
     tinygltf::Model model;
     tinygltf::TinyGLTF loader;
@@ -230,113 +260,83 @@ std::shared_ptr<Scene> AssetManager::loadGLTF(const std::string& filename) {
         for (const auto& primitive : srcMesh.primitives) {
             bool invalid = false;
             auto mesh = std::make_shared<Mesh>();
-            for (const auto& attr : primitive.attributes) {
-                const auto& accessor = model.accessors[attr.second];
+            bool hasPosition = primitive.attributes.contains("POSITION");
+            bool hasNormal = primitive.attributes.contains("NORMAL");
+            bool hasUV0 = primitive.attributes.contains("TEXCOORD_0");
+            bool hasUV1 = primitive.attributes.contains("TEXCOORD_1");
+            bool hasTangent = primitive.attributes.contains("TANGENT");
+            bool hasColor0 = primitive.attributes.contains("COLOR_0");
+            if (!hasPosition) {
+                fmt::print("No position attribute found for primitive\n");
+                continue;
+            }
+            mesh->vertexCount = model.accessors[primitive.attributes.at("POSITION")].count;
+            mesh->vertices.resize(mesh->vertexCount);
+            if (hasPosition) {
+                const auto& accessor = model.accessors[primitive.attributes.at("POSITION")];
                 const auto& bufferView = model.bufferViews[accessor.bufferView];
                 const auto& buffer = model.buffers[bufferView.buffer];
                 const float* data = reinterpret_cast<const float*>(&buffer.data[bufferView.byteOffset + accessor.byteOffset]);
-
-                if (attr.first == "POSITION") {
-                    mesh->positions.resize(accessor.count);
-                    for (size_t i = 0; i < accessor.count; i++) {
-                        mesh->positions[i] = glm::vec3(
-                            data[i * 3 + 0],
-                            data[i * 3 + 1],
-                            data[i * 3 + 2]
-                        );
-                    }
-                }
-                else if (attr.first == "NORMAL") {
-                    mesh->normals.resize(accessor.count);
-                    for (size_t i = 0; i < accessor.count; i++) {
-                        mesh->normals[i] = glm::vec3(
-                            data[i * 3 + 0],
-                            data[i * 3 + 1],
-                            data[i * 3 + 2]
-                        );
-                    }
-                } else if (attr.first == "TEXCOORD_0") {
-                    mesh->uv0s.resize(accessor.count);
-                    for (size_t i = 0; i < accessor.count; i++) {
-                        mesh->uv0s[i] = glm::vec2(
-                            data[i * 2 + 0],
-                            data[i * 2 + 1]
-                        );
-                    }
-                } else if (attr.first == "TEXCOORD_1") {
-                    mesh->uv1s.resize(accessor.count);
-                    for (size_t i = 0; i < accessor.count; i++) {
-                        mesh->uv1s[i] = glm::vec2(
-                            data[i * 2 + 0],
-                            data[i * 2 + 1]
-                        );
-                    }
-                } else if (attr.first == "TANGENT") {
-                    mesh->tangents.resize(accessor.count);
-                    for (size_t i = 0; i < accessor.count; i++) {
-                        mesh->tangents[i] = glm::vec3(
-                            data[i * 3 + 0],
-                            data[i * 3 + 1],
-                            data[i * 3 + 2]
-                        );
-                    }
-                } else if (attr.first == "COLOR_0") {
-                    mesh->colors.resize(accessor.count);
-                    for (size_t i = 0; i < accessor.count; i++) {
-                        mesh->colors[i] = glm::vec4(
-                            data[i * 4 + 0],
-                            data[i * 4 + 1],
-                            data[i * 4 + 2],
-                            data[i * 4 + 3]
-                        );
-                    }
+                for (size_t i = 0; i < mesh->vertexCount; i++) {
+                    mesh->vertices[i].position = glm::vec3(
+                        data[i * 3 + 0],
+                        data[i * 3 + 1],
+                        data[i * 3 + 2]
+                    );
                 }
             }
-            // std::vector<SDL_GPUVertexBufferDescription> vertexBufferDescs;
-            // std::vector<SDL_GPUVertexAttribute> vertexAttributes;
-            // Uint32 attrLocation = 0;
-            // const std::array<std::string, 3> attributeNames = { "POSITION", "NORMAL", "TEXCOORD_0" };
-            // for (const auto& attr : attributeNames) {
-            //     auto it = primitive.attributes.find(attr);
-            //     if (it != primitive.attributes.end()) {
-            //         const auto& accessor = model.accessors[it->second];
-            //         const auto& bufferView = model.bufferViews[accessor.bufferView];
-            //         const auto& buffer = model.buffers[bufferView.buffer];
-            //         const auto elmSize = GetBufferElementSize(accessor);
-            //         const auto elmFormat = GetBufferElementFormat(accessor);
-            //         if (elmFormat <= SDL_GPU_VERTEXELEMENTFORMAT_INVALID) {
-            //             SDL_Log("Invalid element format for attribute %s", attr.c_str());
-            //             invalid = true;
-            //             break;
-            //         }
-            //         const auto bufferSize = accessor.count * elmSize;
-            //         // TODO: check if the buffer is already created, if so, just reuse it and uodate specified bytes
-            //         // Currently, a new buffer is created for each attribute
-            //         auto vbo = CreateAndUploadBuffer(
-            //             buffer.data.data() + bufferView.byteOffset + accessor.byteOffset,
-            //             bufferSize
-            //         );
-            //         vertexBufferDescs.push_back(SDL_GPUVertexBufferDescription {
-            //             .slot = static_cast<Uint32>(mesh->vbos.size()),
-            //             .pitch = static_cast<Uint32>(bufferSize),
-            //             .input_rate = SDL_GPU_VERTEXINPUTRATE_VERTEX,
-            //             .instance_step_rate = 0,
-            //         });
-            //         vertexAttributes.push_back(SDL_GPUVertexAttribute {
-            //             .location = attrLocation++,
-            //             .buffer_slot = static_cast<Uint32>(mesh->vbos.size()),
-            //             .format = elmFormat,
-            //             .offset = 0
-            //         });
-            //         mesh->vbos.push_back(vbo);
-            //         // All attributes in a primitive must have the same number of vertices according to the glTF spec
-            //         mesh->vertexCount = accessor.count;
-            //     }
-            // }
-            // if (invalid) {
-            //     SDL_Log("Skipping a primitive due to invalid format");
-            //     continue;
-            // }
+            if (hasNormal) {
+                const auto& accessor = model.accessors[primitive.attributes.at("NORMAL")];
+                const auto& bufferView = model.bufferViews[accessor.bufferView];
+                const auto& buffer = model.buffers[bufferView.buffer];
+                const float* data = reinterpret_cast<const float*>(&buffer.data[bufferView.byteOffset + accessor.byteOffset]);
+                for (size_t i = 0; i < mesh->vertexCount; i++) {
+                    mesh->vertices[i].normal = glm::vec3(
+                        data[i * 3 + 0],
+                        data[i * 3 + 1],
+                        data[i * 3 + 2]
+                    );
+                }
+            }
+            if (hasUV0) {
+                const auto& accessor = model.accessors[primitive.attributes.at("TEXCOORD_0")];
+                const auto& bufferView = model.bufferViews[accessor.bufferView];
+                const auto& buffer = model.buffers[bufferView.buffer];
+                const float* data = reinterpret_cast<const float*>(&buffer.data[bufferView.byteOffset + accessor.byteOffset]);
+                for (size_t i = 0; i < mesh->vertexCount; i++) {
+                    mesh->vertices[i].uv = glm::vec2(
+                        data[i * 2 + 0],
+                        data[i * 2 + 1]
+                    );
+                }
+            }
+            if (hasTangent) {
+                const auto& accessor = model.accessors[primitive.attributes.at("TANGENT")];
+                const auto& bufferView = model.bufferViews[accessor.bufferView];
+                const auto& buffer = model.buffers[bufferView.buffer];
+                const float* data = reinterpret_cast<const float*>(&buffer.data[bufferView.byteOffset + accessor.byteOffset]);
+                for (size_t i = 0; i < mesh->vertexCount; i++) {
+                    mesh->vertices[i].tangent = glm::vec3(
+                        data[i * 3 + 0],
+                        data[i * 3 + 1],
+                        data[i * 3 + 2]
+                    );
+                }
+            }
+            if (hasColor0) {
+                // const auto& accessor = model.accessors[primitive.attributes.at("COLOR_0")];
+                // const auto& bufferView = model.bufferViews[accessor.bufferView];
+                // const auto& buffer = model.buffers[bufferView.buffer];
+                // const float* data = reinterpret_cast<const float*>(&buffer.data[bufferView.byteOffset + accessor.byteOffset]);
+                // for (size_t i = 0; i < mesh->vertexCount; i++) {
+                //     mesh->vertices[i].color = glm::vec4(
+                //         data[i * 4 + 0],
+                //         data[i * 4 + 1],
+                //         data[i * 4 + 2],
+                //         data[i * 4 + 3]
+                //     );
+                // }
+            }
             if (primitive.indices >= 0) {
                 const auto& accessor = model.accessors[primitive.indices];
                 const auto& bufferView = model.bufferViews[accessor.bufferView];

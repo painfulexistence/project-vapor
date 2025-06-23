@@ -5,17 +5,17 @@ layout(location = 1) in vec2 tex_uv;
 layout(location = 2) in vec3 T;
 layout(location = 3) in vec3 N;
 layout(location = 0) out vec4 Color;
-layout(binding = 0) uniform CameraData {
+layout(set =0, binding = 0) uniform CameraData {
     mat4 view;
     mat4 proj;
     vec3 pos;
 } cam;
-layout(binding = 2) uniform sampler2D base_map;
-layout(binding = 3) uniform sampler2D normal_map;
-// layout(binding = 4) uniform sampler2D ao_map;
-// layout(binding = 5) uniform sampler2D roughness_map;
-// layout(binding = 6) uniform sampler2D metallic_map;
-layout(binding = 10) uniform sampler2D env_map;
+layout(set = 1, binding = 0) uniform sampler2D base_map;
+layout(set = 1, binding = 1) uniform sampler2D normal_map;
+// layout(set = 1, binding = 2) uniform sampler2D metallic_roughness_map;
+// layout(set = 1, binding = 3) uniform sampler2D occlusion_map;
+// layout(set = 1, binding = 4) uniform sampler2D emission_map;
+layout(set = 1, binding = 10) uniform sampler2D env_map;
 
 struct Surface {
     vec3 color;
@@ -188,7 +188,7 @@ void main() {
 
     Surface surf;
     surf.color = pow(texture(base_map, tex_uv).rgb, vec3(GAMMA));
-    surf.ao = 0.9; // texture(ao_map, tex_uv).r;
+    surf.ao = 1.0; // texture(ao_map, tex_uv).r;
     surf.roughness = 1.0; // texture(roughness_map, tex_uv).r;
     surf.metallic = 0.0; // texture(metallic_map, tex_uv).r;
     // surf.emission = vec3(0.0);

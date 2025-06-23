@@ -31,9 +31,9 @@ public:
 
     virtual void init() = 0;
 
-    virtual void stage(Scene& scene) = 0;
+    virtual void stage(std::shared_ptr<Scene> scene) = 0;
 
-    virtual void draw(Scene& scene, Camera& camera) = 0;
+    virtual void draw(std::shared_ptr<Scene> scene, Camera& camera) = 0;
 };
 
 std::unique_ptr<Renderer> createRendererMetal(SDL_Window* window);

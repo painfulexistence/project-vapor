@@ -62,10 +62,19 @@ int main(int argc, char* args[]) {
     auto renderer = createRenderer(gfxBackend, window);
     renderer->init();
 
-    Scene scene;
-    auto entity = scene.CreateNode("Mesh 1");
-    scene.AddMeshToNode(entity, MeshBuilder::buildCube(1.0f));
-    // scene.AddMeshToNode(entity, AssetManager::loadOBJ(std::string("assets/models/Sibenik/sibenik.obj"), std::string("assets/models/Sibenik/")));
+    // auto scene = std::make_shared<Scene>();
+    // auto entity = scene->CreateNode("Mesh 1");
+    // auto mesh = MeshBuilder::buildCube(1.0f);
+    // mesh->material = std::make_shared<Material>(Material {
+    //     .albedoMap = AssetManager::loadImage(std::string("assets/textures/medieval_blocks_diff.png")),
+    //     .normalMap = AssetManager::loadImage(std::string("assets/textures/medieval_blocks_norm_dx.png")),
+    //     .metallicRoughnessMap = AssetManager::loadImage(std::string("assets/textures/medieval_blocks_rough.png")),
+    //     .occlusionMap = AssetManager::loadImage(std::string("assets/textures/medieval_blocks_ao.png")),
+    //     .displacementMap = AssetManager::loadImage(std::string("assets/textures/medieval_blocks_disp.png"))
+    // });
+    // scene->AddMeshToNode(entity, mesh);
+    // scene->AddMeshToNode(entity, AssetManager::loadOBJ(std::string("assets/models/Sibenik/sibenik.obj"), std::string("assets/models/Sibenik/")));
+    auto scene = AssetManager::loadGLTF(std::string("assets/models/Sponza/Sponza.gltf"));
 
     renderer->stage(scene);
 
@@ -165,7 +174,12 @@ int main(int argc, char* args[]) {
             camera.Roll(1.0f * deltaTime);
         }
 
-        scene.Update(deltaTime);
+        // float angle = time * 1.5f;
+        // entity->SetLocalTransform(
+        //     glm::rotate(glm::mat4(1.0f), angle, glm::vec3(0.0f, 1.0f, -1.0f)) // glm::rotate(glm::rotate(glm::mat4(1.0f), glm::radians(270.0f), glm::vec3(1.0f, 0.0f, 0.0f)), angle, glm::vec3(0.0f, 0.0f, 1.0f));
+        // );
+
+        scene->Update(deltaTime);
 
         renderer->draw(scene, camera);
 
