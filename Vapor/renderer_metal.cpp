@@ -24,19 +24,23 @@ std::unique_ptr<Renderer> createRendererMetal(SDL_Window* window) {
     return std::make_unique<Renderer_Metal>(window);
 }
 
-struct CameraData {
-    alignas(16) glm::mat4 projectionMatrix;
-    alignas(16) glm::mat4 viewMatrix;
+struct alignas(16) CameraData {
+    glm::mat4 proj;
+    glm::mat4 view;
+    glm::mat4 invProj;
+    float near;
+    float far;
 };
 
 struct InstanceData {
-    alignas(16) glm::mat4 modelMatrix;
+    alignas(16) glm::mat4 model;
     glm::vec4 color;
 };
 
 Renderer_Metal::Renderer_Metal(SDL_Window* window) {
     renderer = SDL_CreateRenderer(window, nullptr);
     swapchain = (CA::MetalLayer*)SDL_GetRenderMetalLayer(renderer);
+    // swapchain->setDisplaySyncEnabled(true);
     device = swapchain->device();
     queue = NS::TransferPtr(device->newCommandQueue());
 }
@@ -44,13 +48,39 @@ Renderer_Metal::Renderer_Metal(SDL_Window* window) {
 Renderer_Metal::~Renderer_Metal() {
     SDL_DestroyRenderer(renderer);
 }
+struct Particle {
+    glm::vec3 position = glm::vec3(1.0f);
+    glm::vec3 velocity = glm::vec3(1.0f);
+    glm::vec3 density = glm::vec3(1.0f);
+};
 
 auto Renderer_Metal::init() -> void {
-    initTestPipelines();
+    // Create pipelines
+    drawPipeline = createPipeline("assets/shaders/3d_pbr_normal_mapped.metal");
+    prePassPipeline = createPipeline("assets/shaders/3d_depth_only.metal");
+    postProcessPipeline = createPipeline("assets/shaders/3d_post_process.metal");
+    buildClustersPipeline = createComputePipeline("assets/shaders/3d_cluster_build.metal");
+    cullLightsPipeline = createComputePipeline("assets/shaders/3d_light_cull.metal");
 
     // Create buffers
-    cameraDataBuffer = NS::TransferPtr(device->newBuffer(sizeof(CameraData), MTL::ResourceStorageModeManaged));
-    instanceDataBuffer = NS::TransferPtr(device->newBuffer(sizeof(InstanceData) * numMaxInstances, MTL::ResourceStorageModeManaged));
+    cameraDataBuffers.resize(MAX_FRAMES_IN_FLIGHT);
+    for (auto& cameraDataBuffer : cameraDataBuffers) {
+        cameraDataBuffer = NS::TransferPtr(device->newBuffer(sizeof(CameraData), MTL::ResourceStorageModeManaged));
+    }
+    instanceDataBuffers.resize(MAX_FRAMES_IN_FLIGHT);
+    for (auto& instanceDataBuffer : instanceDataBuffers) {
+        instanceDataBuffer = NS::TransferPtr(device->newBuffer(sizeof(InstanceData) * numMaxInstances, MTL::ResourceStorageModeManaged));
+    }
+
+    std::vector<Particle> particles{1000};
+    testStorageBuffer = NS::TransferPtr(device->newBuffer(particles.size() * sizeof(Particle), MTL::ResourceStorageModeManaged));
+    memcpy(testStorageBuffer->contents(), particles.data(), particles.size() * sizeof(Particle));
+    testStorageBuffer->didModifyRange(NS::Range::Make(0, testStorageBuffer->length()));
+
+    clusterBuffers.resize(MAX_FRAMES_IN_FLIGHT);
+    for (auto& clusterBuffer : clusterBuffers) {
+        clusterBuffer = NS::TransferPtr(device->newBuffer(16 * 16 * 24 * sizeof(Cluster), MTL::ResourceStorageModeManaged));
+    }
 
     // Create textures
     defaultAlbedoTexture = createTexture(AssetManager::loadImage("assets/textures/default_albedo.png")); // createTexture(AssetManager::loadImage("assets/textures/viking_room.png"));
@@ -58,31 +88,40 @@ auto Renderer_Metal::init() -> void {
     defaultORMTexture = createTexture(AssetManager::loadImage("assets/textures/default_orm.png"));
     defaultEmissiveTexture = createTexture(AssetManager::loadImage("assets/textures/default_emissive.png"));
 
-    MTL::DepthStencilDescriptor* depthStencilDesc = MTL::DepthStencilDescriptor::alloc()->init();
-    depthStencilDesc->setDepthCompareFunction(MTL::CompareFunction::CompareFunctionLess);
-    depthStencilDesc->setDepthWriteEnabled(true);
-    depthStencilState = NS::TransferPtr(device->newDepthStencilState(depthStencilDesc));
-    depthStencilDesc->release();
-
     MTL::TextureDescriptor* depthStencilTextureDesc = MTL::TextureDescriptor::alloc()->init();
     depthStencilTextureDesc->setTextureType(MTL::TextureType2DMultisample);
     depthStencilTextureDesc->setPixelFormat(MTL::PixelFormatDepth32Float);
     depthStencilTextureDesc->setWidth(swapchain->drawableSize().width);
     depthStencilTextureDesc->setHeight(swapchain->drawableSize().height);
-    depthStencilTextureDesc->setSampleCount(sampleCount);
+    depthStencilTextureDesc->setSampleCount(NS::UInteger(MSAA_SAMPLE_COUNT));
     depthStencilTextureDesc->setUsage(MTL::TextureUsageRenderTarget);
-    depthStencilTexture = NS::TransferPtr(device->newTexture(depthStencilTextureDesc));
+    depthStencilRT_MS = NS::TransferPtr(device->newTexture(depthStencilTextureDesc));
+    depthStencilTextureDesc->setTextureType(MTL::TextureType2D);
+    depthStencilTextureDesc->setSampleCount(1);
+    depthStencilTextureDesc->setUsage(MTL::TextureUsageRenderTarget | MTL::TextureUsageShaderRead);
+    depthStencilRT = NS::TransferPtr(device->newTexture(depthStencilTextureDesc));
     depthStencilTextureDesc->release();
 
-    MTL::TextureDescriptor* msaaTextureDesc = MTL::TextureDescriptor::alloc()->init();
-    msaaTextureDesc->setTextureType(MTL::TextureType2DMultisample);
-    msaaTextureDesc->setPixelFormat(MTL::PixelFormatBGRA8Unorm);
-    msaaTextureDesc->setWidth(swapchain->drawableSize().width);
-    msaaTextureDesc->setHeight(swapchain->drawableSize().height);
-    msaaTextureDesc->setSampleCount(sampleCount);
-    msaaTextureDesc->setUsage(MTL::TextureUsageRenderTarget);
-    msaaTexture = NS::TransferPtr(device->newTexture(msaaTextureDesc));
-    msaaTextureDesc->release();
+    MTL::TextureDescriptor* colorTextureDesc = MTL::TextureDescriptor::alloc()->init();
+    colorTextureDesc->setTextureType(MTL::TextureType2DMultisample);
+    colorTextureDesc->setPixelFormat(MTL::PixelFormatBGRA8Unorm);
+    colorTextureDesc->setWidth(swapchain->drawableSize().width);
+    colorTextureDesc->setHeight(swapchain->drawableSize().height);
+    colorTextureDesc->setSampleCount(NS::UInteger(MSAA_SAMPLE_COUNT));
+    colorTextureDesc->setUsage(MTL::TextureUsageRenderTarget);
+    colorRT_MS = NS::TransferPtr(device->newTexture(colorTextureDesc));
+    colorTextureDesc->setTextureType(MTL::TextureType2D);
+    colorTextureDesc->setSampleCount(1);
+    colorTextureDesc->setUsage(MTL::TextureUsageRenderTarget | MTL::TextureUsageShaderRead);
+    colorRT = NS::TransferPtr(device->newTexture(colorTextureDesc));
+    colorTextureDesc->release();
+
+    // Create depth stencil states (for depth testing)
+    MTL::DepthStencilDescriptor* depthStencilDesc = MTL::DepthStencilDescriptor::alloc()->init();
+    depthStencilDesc->setDepthCompareFunction(MTL::CompareFunction::CompareFunctionLessEqual);
+    depthStencilDesc->setDepthWriteEnabled(true);
+    depthStencilState = NS::TransferPtr(device->newDepthStencilState(depthStencilDesc));
+    depthStencilDesc->release();
 }
 
 auto Renderer_Metal::stage(std::shared_ptr<Scene> scene) -> void {
@@ -126,40 +165,76 @@ auto Renderer_Metal::stage(std::shared_ptr<Scene> scene) -> void {
 }
 
 auto Renderer_Metal::draw(std::shared_ptr<Scene> scene, Camera& camera) -> void {
+    auto surface = swapchain->nextDrawable();
+    if (!surface) {
+        return;
+    }
+
+    // Prepare data
     auto time = (float)SDL_GetTicks() / 1000.0f;
 
-    auto surface = swapchain->nextDrawable();
+    float near = camera.near();
+    float far = camera.far();
+    glm::vec3 camPos = camera.GetEye();
+    glm::mat4 proj = camera.GetProjMatrix();
+    glm::mat4 view = camera.GetViewMatrix();
+    glm::mat4 invProj = glm::inverse(proj);
+    CameraData* cameraData = reinterpret_cast<CameraData*>(cameraDataBuffers[currentFrameInFlight]->contents());
+    cameraData->proj = proj;
+    cameraData->view = view;
+    cameraData->invProj = invProj;
+    cameraData->near = near;
+    cameraData->far = far;
+    cameraDataBuffers[currentFrameInFlight]->didModifyRange(NS::Range::Make(0, cameraDataBuffers[currentFrameInFlight]->length()));
 
-    // Create default render pass
-    auto pass = NS::TransferPtr(MTL::RenderPassDescriptor::renderPassDescriptor());
-    auto colorAttachment = pass->colorAttachments()->object(0);
-    colorAttachment->setTexture(msaaTexture.get());
-    colorAttachment->setClearColor(MTL::ClearColor(clearColor.r, clearColor.g, clearColor.b, clearColor.a));
-    colorAttachment->setLoadAction(MTL::LoadActionClear);
-    colorAttachment->setStoreAction(MTL::StoreActionMultisampleResolve);
-    colorAttachment->setResolveTexture(surface->texture());
-    auto depthAttachment = pass->depthAttachment();
-    depthAttachment->setTexture(depthStencilTexture.get());
+    auto drawableSize = swapchain->drawableSize();
+    glm::vec2 screenSize = glm::vec2(drawableSize.width, drawableSize.height);
+    glm::uvec3 gridSize = glm::uvec3(clusterGridSizeX, clusterGridSizeY, clusterGridSizeZ);
+    uint lightCount = scene->pointLights.size();
 
+    // Create render pass descriptors
+    auto prePass = NS::TransferPtr(MTL::RenderPassDescriptor::renderPassDescriptor());
+    auto prePassDepthRT = prePass->depthAttachment();
+    prePassDepthRT->setClearDepth(clearDepth);
+    prePassDepthRT->setLoadAction(MTL::LoadActionClear);
+    prePassDepthRT->setStoreAction(MTL::StoreActionStoreAndMultisampleResolve);
+    prePassDepthRT->setDepthResolveFilter(MTL::MultisampleDepthResolveFilter::MultisampleDepthResolveFilterMin);
+    prePassDepthRT->setTexture(depthStencilRT_MS.get());
+    prePassDepthRT->setResolveTexture(depthStencilRT.get());
+
+    auto renderPass = NS::TransferPtr(MTL::RenderPassDescriptor::renderPassDescriptor());
+    auto renderPassColorRT = renderPass->colorAttachments()->object(0);
+    renderPassColorRT->setClearColor(MTL::ClearColor(clearColor.r, clearColor.g, clearColor.b, clearColor.a));
+    renderPassColorRT->setLoadAction(MTL::LoadActionClear);
+    renderPassColorRT->setStoreAction(MTL::StoreActionMultisampleResolve);
+    renderPassColorRT->setTexture(colorRT_MS.get());
+    renderPassColorRT->setResolveTexture(colorRT.get());
+    auto renderPassDepthRT = renderPass->depthAttachment();
+    renderPassDepthRT->setLoadAction(MTL::LoadActionLoad);
+    renderPassDepthRT->setTexture(depthStencilRT_MS.get());
+
+    auto postPass = NS::TransferPtr(MTL::RenderPassDescriptor::renderPassDescriptor());
+    auto postPassColorRT = postPass->colorAttachments()->object(0);
+    postPassColorRT->setClearColor(MTL::ClearColor(clearColor.r, clearColor.g, clearColor.b, clearColor.a));
+    postPassColorRT->setLoadAction(MTL::LoadActionClear);
+    postPassColorRT->setStoreAction(MTL::StoreActionStore);
+    postPassColorRT->setTexture(surface->texture());
+
+    // Start rendering
     auto cmd = queue->commandBuffer();
 
-    glm::vec3 camPos = camera.GetEye();
-    CameraData* cameraData = reinterpret_cast<CameraData*>(cameraDataBuffer->contents());
-    cameraData->projectionMatrix = camera.GetProjMatrix();
-    cameraData->viewMatrix = camera.GetViewMatrix();
-    cameraDataBuffer->didModifyRange(NS::Range::Make(0, cameraDataBuffer->length()));
-
-    auto encoder = cmd->renderCommandEncoder(pass.get());
-
-    encoder->setRenderPipelineState(testDrawPipeline.get());
-    // encoder->useResource(testStorageBuffer.get(), MTL::ResourceUsageRead, MTL::RenderStageVertex | MTL::RenderStageFragment);
-
-    const std::function<void(const std::shared_ptr<Node>&)> drawNode =
+    // 1. pre-pass
+    auto prePassEncoder = cmd->renderCommandEncoder(prePass.get());
+    prePassEncoder->setRenderPipelineState(prePassPipeline.get());
+    prePassEncoder->setCullMode(MTL::CullModeBack);
+    prePassEncoder->setFrontFacingWinding(MTL::Winding::WindingCounterClockwise);
+    prePassEncoder->setDepthStencilState(depthStencilState.get());
+    const std::function<void(const std::shared_ptr<Node>&)> drawNodeDepth =
         [&](const std::shared_ptr<Node>& node) {
             if (node->meshGroup) {
                 // single instance
-                InstanceData* instance = reinterpret_cast<InstanceData*>(instanceDataBuffer->contents());
-                instance->modelMatrix = node->worldTransform;
+                InstanceData* instance = reinterpret_cast<InstanceData*>(instanceDataBuffers[currentFrameInFlight]->contents());
+                instance->model = node->worldTransform;
                 instance->color = glm::vec4(1.0f, 0.0f, 0.0f, 1.0f);
                 // multiple instances
                 // std::vector<InstanceData> instances = {{
@@ -167,11 +242,106 @@ auto Renderer_Metal::draw(std::shared_ptr<Scene> scene, Camera& camera) -> void 
                 //     { glm::rotate(glm::identity<glm::mat4>(), angle + 0.5f, glm::vec3(1.0f, 0.0f, 1.0f)), glm::vec4(0.0f, 1.0f, 0.0f, 1.0f) },
                 // }};
                 // for (size_t i = 0; i < instances.size(); ++i) {
-                //     InstanceData* instance = reinterpret_cast<InstanceData*>(instanceDataBuffer->contents()) + i;
-                //     instance->modelMatrix = instances[i].modelMatrix;
+                //     InstanceData* instance = reinterpret_cast<InstanceData*>(instanceDataBuffers[currentFrameInFlight]->contents()) + i;
+                //     instance->model = instances[i].model;
                 //     instance->color = instances[i].color;
                 // }
-                instanceDataBuffer->didModifyRange(NS::Range::Make(0, instanceDataBuffer->length())); // TODO: avoid updating the entire instance data buffer every frame
+                instanceDataBuffers[currentFrameInFlight]->didModifyRange(NS::Range::Make(0, instanceDataBuffers[currentFrameInFlight]->length())); // TODO: avoid updating the entire instance data buffer every frame
+
+                for (const auto& mesh : node->meshGroup->meshes) {
+                    if (!mesh->material) {
+                        fmt::print("No material found for mesh in mesh group {}\n", node->meshGroup->name);
+                        continue;
+                    }
+                    // prePassEncoder->setFragmentTexture(
+                    //     getTexture(mesh->material->displacementMap ? mesh->material->displacementMap->texture : defaultDisplacementTexture).get(),
+                    //     1
+                    // );
+                    prePassEncoder->setVertexBuffer(getBuffer(mesh->vbos[0]).get(), 0, 0);
+                    prePassEncoder->setVertexBuffer(cameraDataBuffers[currentFrameInFlight].get(), 0, 1);
+                    prePassEncoder->setVertexBuffer(instanceDataBuffers[currentFrameInFlight].get(), 0, 2);
+                    prePassEncoder->setFragmentTexture(
+                        getTexture(mesh->material->albedoMap ? mesh->material->albedoMap->texture : defaultAlbedoTexture).get(),
+                        0
+                    );
+                    if (mesh->indices.size() > 0) {
+                        prePassEncoder->drawIndexedPrimitives(
+                            MTL::PrimitiveType::PrimitiveTypeTriangle,
+                            mesh->indices.size(),
+                            MTL::IndexTypeUInt32,
+                            getBuffer(mesh->ebo).get(),
+                            0
+                        );
+                    } else {
+                        prePassEncoder->drawPrimitives(
+                            MTL::PrimitiveType::PrimitiveTypeTriangle,
+                            0,
+                            mesh->positions.size(),
+                            1
+                        );
+                    }
+                }
+            }
+            for (const auto& child : node->children) {
+                drawNodeDepth(child);
+            }
+        };
+    for (const auto& node : scene->nodes) {
+        drawNodeDepth(node);
+    }
+    prePassEncoder->endEncoding();
+
+    // 2. cluster building pass
+    auto clusterEncoder = cmd->computeCommandEncoder();
+    clusterEncoder->setComputePipelineState(buildClustersPipeline.get());
+    // clusterEncoder->useResource(clusterBuffer.get(), MTL::ResourceUsageWrite);
+    clusterEncoder->setBuffer(clusterBuffers[currentFrameInFlight].get(), 0, 0);
+    clusterEncoder->setBuffer(cameraDataBuffers[currentFrameInFlight].get(), 0, 1);
+    clusterEncoder->setBytes(&screenSize, sizeof(glm::vec2), 2);
+    clusterEncoder->setBytes(&gridSize, sizeof(glm::uvec3), 3);
+    clusterEncoder->dispatchThreadgroups(MTL::Size(clusterGridSizeX, clusterGridSizeY, clusterGridSizeZ), MTL::Size(1, 1, 1));
+    clusterEncoder->endEncoding();
+
+    // 3. light culling pass
+    auto cullingEncoder = cmd->computeCommandEncoder();
+    cullingEncoder->setComputePipelineState(cullLightsPipeline.get());
+    // cullingEncoder->useResource(clusterBuffer.get(), MTL::ResourceUsageWrite);
+    cullingEncoder->setBuffer(clusterBuffers[currentFrameInFlight].get(), 0, 0);
+    cullingEncoder->setBuffer(pointLightBuffer.get(), 0, 1);
+    cullingEncoder->setBuffer(cameraDataBuffers[currentFrameInFlight].get(), 0, 2);
+    cullingEncoder->setBytes(&lightCount, sizeof(uint), 3);
+    cullingEncoder->setBytes(&gridSize, sizeof(glm::uvec3), 4);
+    cullingEncoder->dispatchThreadgroups(MTL::Size(clusterGridSizeX, clusterGridSizeY, clusterGridSizeZ), MTL::Size(1, 1, 1));
+    cullingEncoder->endEncoding();
+
+    // 4. render pass
+    auto renderEncoder = cmd->renderCommandEncoder(renderPass.get());
+    renderEncoder->setRenderPipelineState(drawPipeline.get());
+    renderEncoder->setCullMode(MTL::CullModeBack);
+    renderEncoder->setFrontFacingWinding(MTL::Winding::WindingCounterClockwise);
+    renderEncoder->setDepthStencilState(depthStencilState.get());
+    // encoder->useResource(clusterBuffer.get(), MTL::ResourceUsageRead, MTL::RenderStageFragment);
+    // encoder->useResource(pointLightBuffer.get(), MTL::ResourceUsageRead, MTL::RenderStageFragment);
+    // encoder->useResource(testStorageBuffer.get(), MTL::ResourceUsageRead, MTL::RenderStageVertex | MTL::RenderStageFragment);
+
+    const std::function<void(const std::shared_ptr<Node>&)> drawNode =
+        [&](const std::shared_ptr<Node>& node) {
+            if (node->meshGroup) {
+                // single instance
+                InstanceData* instance = reinterpret_cast<InstanceData*>(instanceDataBuffers[currentFrameInFlight]->contents());
+                instance->model = node->worldTransform;
+                instance->color = glm::vec4(1.0f, 0.0f, 0.0f, 1.0f);
+                // multiple instances
+                // std::vector<InstanceData> instances = {{
+                //     { glm::rotate(glm::identity<glm::mat4>(), angle, glm::vec3(1.0f, 0.0f, 1.0f)), glm::vec4(1.0f, 0.0f, 0.0f, 1.0f) },
+                //     { glm::rotate(glm::identity<glm::mat4>(), angle + 0.5f, glm::vec3(1.0f, 0.0f, 1.0f)), glm::vec4(0.0f, 1.0f, 0.0f, 1.0f) },
+                // }};
+                // for (size_t i = 0; i < instances.size(); ++i) {
+                //     InstanceData* instance = reinterpret_cast<InstanceData*>(instanceDataBuffers[currentFrameInFlight]->contents()) + i;
+                //     instance->model = instances[i].model;
+                //     instance->color = instances[i].color;
+                // }
+                instanceDataBuffers[currentFrameInFlight]->didModifyRange(NS::Range::Make(0, instanceDataBuffers[currentFrameInFlight]->length())); // TODO: avoid updating the entire instance data buffer every frame
 
                 for (const auto& mesh : node->meshGroup->meshes) {
                     if (!mesh->material) {
@@ -179,23 +349,23 @@ auto Renderer_Metal::draw(std::shared_ptr<Scene> scene, Camera& camera) -> void 
                         continue;
                     }
                     // encoder->setRenderPipelineState(getPipeline(mesh->material->pipeline));
-                    encoder->setFragmentTexture(
+                    renderEncoder->setFragmentTexture(
                         getTexture(mesh->material->albedoMap ? mesh->material->albedoMap->texture : defaultAlbedoTexture).get(),
                         0
                     );
-                    encoder->setFragmentTexture(
+                    renderEncoder->setFragmentTexture(
                         getTexture(mesh->material->normalMap ? mesh->material->normalMap->texture : defaultNormalTexture).get(),
                         1
                     );
-                    encoder->setFragmentTexture(
+                    renderEncoder->setFragmentTexture(
                         getTexture(mesh->material->metallicRoughnessMap ? mesh->material->metallicRoughnessMap->texture : defaultORMTexture).get(),
                         2
                     );
-                    encoder->setFragmentTexture(
+                    renderEncoder->setFragmentTexture(
                         getTexture(mesh->material->occlusionMap ? mesh->material->occlusionMap->texture : defaultORMTexture).get(),
                         3
                     );
-                    encoder->setFragmentTexture(
+                    renderEncoder->setFragmentTexture(
                         getTexture(mesh->material->emissiveMap ? mesh->material->emissiveMap->texture : defaultEmissiveTexture).get(),
                         4
                     );
@@ -203,26 +373,27 @@ auto Renderer_Metal::draw(std::shared_ptr<Scene> scene, Camera& camera) -> void 
                     //     getTexture(mesh->material->displacementMap ? mesh->material->displacementMap->texture : defaultDisplacementTexture).get(),
                     //     5
                     // );
-                    encoder->setVertexBuffer(getBuffer(mesh->vbos[0]).get(), 0, 0);
-                    encoder->setVertexBuffer(cameraDataBuffer.get(), 0, 1);
-                    encoder->setVertexBuffer(instanceDataBuffer.get(), 0, 2);
-                    encoder->setFragmentBytes(&camPos, sizeof(glm::vec3), 0);
-                    encoder->setFragmentBytes(&time, sizeof(float), 1);
-                    encoder->setFragmentBuffer(directionalLightBuffer.get(), 0, 2);
-                    encoder->setFragmentBuffer(pointLightBuffer.get(), 0, 3);
-                    encoder->setCullMode(MTL::CullModeBack);
-                    encoder->setFrontFacingWinding(MTL::Winding::WindingCounterClockwise);
-                    encoder->setDepthStencilState(depthStencilState.get());
+                    renderEncoder->setVertexBuffer(getBuffer(mesh->vbos[0]).get(), 0, 0);
+                    renderEncoder->setVertexBuffer(cameraDataBuffers[currentFrameInFlight].get(), 0, 1);
+                    renderEncoder->setVertexBuffer(instanceDataBuffers[currentFrameInFlight].get(), 0, 2);
+                    renderEncoder->setFragmentBuffer(directionalLightBuffer.get(), 0, 0);
+                    renderEncoder->setFragmentBuffer(pointLightBuffer.get(), 0, 1);
+                    renderEncoder->setFragmentBuffer(clusterBuffers[currentFrameInFlight].get(), 0, 2);
+                    renderEncoder->setFragmentBuffer(cameraDataBuffers[currentFrameInFlight].get(), 0, 3);
+                    renderEncoder->setFragmentBytes(&camPos, sizeof(glm::vec3), 4);
+                    renderEncoder->setFragmentBytes(&screenSize, sizeof(glm::vec2), 5);
+                    renderEncoder->setFragmentBytes(&gridSize, sizeof(glm::uvec3), 6);
+                    renderEncoder->setFragmentBytes(&time, sizeof(float), 7);
                     if (mesh->indices.size() > 0) {
-                        encoder->drawIndexedPrimitives(
+                        renderEncoder->drawIndexedPrimitives(
                             MTL::PrimitiveType::PrimitiveTypeTriangle,
-                            mesh->indices.size(), // getBuffer(mesh->ebo)->length() / sizeof(Uint32)
+                            mesh->indices.size(),
                             MTL::IndexTypeUInt32,
                             getBuffer(mesh->ebo).get(),
                             0
                         );
                     } else {
-                        encoder->drawPrimitives(
+                        renderEncoder->drawPrimitives(
                             MTL::PrimitiveType::PrimitiveTypeTriangle,
                             0,
                             mesh->positions.size(),
@@ -235,22 +406,28 @@ auto Renderer_Metal::draw(std::shared_ptr<Scene> scene, Camera& camera) -> void 
                 drawNode(child);
             }
         };
-
     for (const auto& node : scene->nodes) {
         drawNode(node);
     }
+    renderEncoder->endEncoding();
 
-    encoder->endEncoding();
+    // 5. post-processing pass
+    auto postProcessEncoder = cmd->renderCommandEncoder(postPass.get());
+    postProcessEncoder->setRenderPipelineState(postProcessPipeline.get());
+    postProcessEncoder->setCullMode(MTL::CullModeBack);
+    postProcessEncoder->setFrontFacingWinding(MTL::Winding::WindingCounterClockwise);
+    postProcessEncoder->setFragmentTexture(colorRT.get(), 0);
+    postProcessEncoder->drawPrimitives(MTL::PrimitiveType::PrimitiveTypeTriangle, 0, 3, 1);
+    postProcessEncoder->endEncoding();
 
     cmd->presentDrawable(surface);
     cmd->commit();
 
     surface->release();
+
+    currentFrameInFlight = (currentFrameInFlight + 1) % MAX_FRAMES_IN_FLIGHT;
 }
 
-void Renderer_Metal::initTestPipelines() {
-    testDrawPipeline = createPipeline("assets/shaders/3d_pbr_normal_mapped.metal");
-}
 
 NS::SharedPtr<MTL::RenderPipelineState> Renderer_Metal::createPipeline(const std::string& filename) {
     auto shaderSrc = readFile(filename);
@@ -262,7 +439,7 @@ NS::SharedPtr<MTL::RenderPipelineState> Renderer_Metal::createPipeline(const std
     if (!library) {
         throw std::runtime_error(fmt::format("Could not compile shader! Error: {}\n", error->localizedDescription()->utf8String()));
     }
-    fmt::print("Shader compiled successfully. Shader: {}\n", code->cString(NS::StringEncoding::UTF8StringEncoding));
+    // fmt::print("Shader compiled successfully. Shader: {}\n", code->cString(NS::StringEncoding::UTF8StringEncoding));
 
     auto vertexFuncName = NS::String::string("vertexMain", NS::StringEncoding::UTF8StringEncoding);
     auto vertexMain = library->newFunction(vertexFuncName);
@@ -273,16 +450,17 @@ NS::SharedPtr<MTL::RenderPipelineState> Renderer_Metal::createPipeline(const std
     auto pipelineDesc = MTL::RenderPipelineDescriptor::alloc()->init();
     pipelineDesc->setVertexFunction(vertexMain);
     pipelineDesc->setFragmentFunction(fragmentMain);
-    pipelineDesc->colorAttachments()->object(0)->setPixelFormat(MTL::PixelFormat::PixelFormatBGRA8Unorm_sRGB);
-    // pipelineDesc->colorAttachments()->object(0)->setBlendingEnabled(true);
-    // pipelineDesc->colorAttachments()->object(0)->setAlphaBlendOperation(MTL::BlendOperation::BlendOperationAdd);
-    // pipelineDesc->colorAttachments()->object(0)->setRgbBlendOperation(MTL::BlendOperation::BlendOperationAdd);
-    // pipelineDesc->colorAttachments()->object(0)->setSourceRGBBlendFactor(MTL::BlendFactor::BlendFactorSourceAlpha);
-    // pipelineDesc->colorAttachments()->object(0)->setSourceAlphaBlendFactor(MTL::BlendFactor::BlendFactorSourceAlpha);
-    // pipelineDesc->colorAttachments()->object(0)->setDestinationRGBBlendFactor(MTL::BlendFactor::BlendFactorOneMinusSourceAlpha);
-    // pipelineDesc->colorAttachments()->object(0)->setDestinationAlphaBlendFactor(MTL::BlendFactor::BlendFactorOneMinusSourceAlpha);
+    auto colorAttachment = pipelineDesc->colorAttachments()->object(0);
+    colorAttachment->setPixelFormat(MTL::PixelFormat::PixelFormatBGRA8Unorm);
+    // colorAttachment->setBlendingEnabled(true);
+    // colorAttachment->setAlphaBlendOperation(MTL::BlendOperation::BlendOperationAdd);
+    // colorAttachment->setRgbBlendOperation(MTL::BlendOperation::BlendOperationAdd);
+    // colorAttachment->setSourceRGBBlendFactor(MTL::BlendFactor::BlendFactorSourceAlpha);
+    // colorAttachment->setSourceAlphaBlendFactor(MTL::BlendFactor::BlendFactorSourceAlpha);
+    // colorAttachment->setDestinationRGBBlendFactor(MTL::BlendFactor::BlendFactorOneMinusSourceAlpha);
+    // colorAttachment->setDestinationAlphaBlendFactor(MTL::BlendFactor::BlendFactorOneMinusSourceAlpha);
     pipelineDesc->setDepthAttachmentPixelFormat(MTL::PixelFormatDepth32Float);
-    pipelineDesc->setSampleCount(sampleCount);
+    pipelineDesc->setSampleCount(NS::UInteger(MSAA_SAMPLE_COUNT)); // TODO: make this configurable
 
     auto pipeline = NS::TransferPtr(device->newRenderPipelineState(pipelineDesc, &error));
 
@@ -291,6 +469,30 @@ NS::SharedPtr<MTL::RenderPipelineState> Renderer_Metal::createPipeline(const std
     vertexMain->release();
     fragmentMain->release();
     pipelineDesc->release();
+
+    return pipeline;
+}
+
+NS::SharedPtr<MTL::ComputePipelineState> Renderer_Metal::createComputePipeline(const std::string& filename) {
+    auto shaderSrc = readFile(filename);
+
+    auto code = NS::String::string(shaderSrc.data(), NS::StringEncoding::UTF8StringEncoding);
+    NS::Error* error = nullptr;
+    MTL::CompileOptions* options = nullptr;
+    MTL::Library* library = device->newLibrary(code, options, &error);
+    if (!library) {
+        throw std::runtime_error(fmt::format("Could not compile shader! Error: {}\n", error->localizedDescription()->utf8String()));
+    }
+    // fmt::print("Shader compiled successfully. Shader: {}\n", code->cString(NS::StringEncoding::UTF8StringEncoding));
+
+    auto computeFuncName = NS::String::string("computeMain", NS::StringEncoding::UTF8StringEncoding);
+    auto computeMain = library->newFunction(computeFuncName);
+
+    auto pipeline = NS::TransferPtr(device->newComputePipelineState(computeMain, &error));
+
+    code->release();
+    library->release();
+    computeMain->release();
 
     return pipeline;
 }

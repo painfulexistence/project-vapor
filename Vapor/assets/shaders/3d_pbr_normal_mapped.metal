@@ -1,6 +1,8 @@
 #include <metal_stdlib>
 using namespace metal;
 
+constant uint MAX_LIGHTS_PER_CLUSTER = 256;
+
 struct VertexData {
     packed_float3 position;
     packed_float2 uv;
@@ -10,13 +12,23 @@ struct VertexData {
 };
 
 struct CameraData {
-    float4x4 projectionMatrix;
-    float4x4 viewMatrix;
+    float4x4 proj;
+    float4x4 view;
+    float4x4 invProj;
+    float near;
+    float far;
 };
 
 struct InstanceData {
-    float4x4 modelMatrix;
+    float4x4 model;
     float4 color;
+};
+
+struct Cluster {
+    float4 min;
+    float4 max;
+    uint lightCount;
+    uint lightIndices[MAX_LIGHTS_PER_CLUSTER];
 };
 
 struct RasterizerData {
@@ -54,7 +66,8 @@ struct PointLight {
     float3 position;
     float3 color;
     float intensity;
-    // float _pad[3];
+    float radius;
+    // float _pad[2];
 };
 
 constexpr constant float PI = 3.1415927;
@@ -178,10 +191,10 @@ vertex RasterizerData vertexMain(
     device const InstanceData& instance [[buffer(2)]]
 ) {
     RasterizerData vert;
-    vert.worldPosition = instance.modelMatrix * float4(in[vertexID].position, 1.0);
-    vert.worldNormal = instance.modelMatrix * float4(in[vertexID].normal, 1.0);
-    vert.worldTangent = instance.modelMatrix * float4(in[vertexID].tangent, 1.0);
-    vert.position = camera.projectionMatrix * camera.viewMatrix * vert.worldPosition;
+    vert.worldPosition = instance.model * float4(in[vertexID].position, 1.0);
+    vert.worldNormal = instance.model * float4(in[vertexID].normal, 1.0);
+    vert.worldTangent = instance.model * float4(in[vertexID].tangent, 1.0);
+    vert.position = camera.proj * camera.view * vert.worldPosition;
     vert.uv = in[vertexID].uv;
     return vert;
 }
@@ -193,10 +206,14 @@ fragment float4 fragmentMain(
     texture2d<float, access::sample> texMetallicRoughness [[texture(2)]],
     texture2d<float, access::sample> texOcclusion [[texture(3)]],
     texture2d<float, access::sample> texEmissive [[texture(4)]],
-    constant packed_float3* camPos [[buffer(0)]],
-    constant float* time [[buffer(1)]],
-    constant DirLight* directionalLights [[buffer(2)]],
-    constant PointLight* pointLights [[buffer(3)]]
+    const device DirLight* directionalLights [[buffer(0)]],
+    const device PointLight* pointLights [[buffer(1)]],
+    const device Cluster* clusters [[buffer(2)]],
+    constant CameraData& camera [[buffer(3)]],
+    constant packed_float3* camPos [[buffer(4)]],
+    constant float2& screenSize [[buffer(5)]],
+    constant packed_uint3& gridSize [[buffer(6)]],
+    constant float& time [[buffer(7)]]
 ) {
     constexpr sampler s(address::repeat, filter::linear, mip_filter::linear);
 
@@ -228,12 +245,55 @@ fragment float4 fragmentMain(
 
     float3 result = float3(0.0);
     result += CalculateDirectionalLight(directionalLights[0], norm, T, B, viewDir, surf); // result += CookTorranceBRDF(norm, lightDir, viewDir, surf) * (mainLight.color * mainLight.intensity) * clamp(dot(norm, lightDir), 0.0, 1.0);
-    for (int i = 0; i < 100; i++) {
-        result += CalculatePointLight(pointLights[i], norm, T, B, viewDir, surf, in.worldPosition.xyz);
-    }
-    result += float3(0.2) * surf.ao * surf.color;
 
-    result = pow(result, float3(INV_GAMMA));
+    float2 tileSize = screenSize / float2(gridSize.xy);
+    float depthVS = (camera.view * in.worldPosition).z;
+    uint tileZ = uint((log(abs(depthVS) / camera.near) * gridSize.z) / log(camera.far / camera.near));
+    uint3 tile = uint3(in.position.x / tileSize.x, (screenSize.y - in.position.y) / tileSize.y, tileZ);
+    uint clusterIndex = tile.x + (tile.y * gridSize.x) + (tile.z * gridSize.x * gridSize.y);
+    Cluster cluster = clusters[clusterIndex];
+    uint lightCount = cluster.lightCount;
+
+    // Debug output - view space depth
+    // return float4((-depthVS - camera.near) / (camera.far - camera.near), 0.0, 0.0, 1.0);
+
+    // Debug output - tile indices
+    // return float4(tile.x / float(gridSize.x), tile.y / float(gridSize.y), 0.5, 1.0);
+    // return float4(tile.x / float(gridSize.x), tile.y / float(gridSize.y), 0.0, 1.0) * (tile.z / float(gridSize.z));
+
+    // Debug output - tile z
+    // return float4(tile.z / float(gridSize.z), 0.0, 0.0, 1.0);
+
+    // Debug output - cluster index
+    // return float4(clusterIndex / float(gridSize.x * gridSize.y * gridSize.z), 0.0, 0.0, 1.0);
+
+    // Debug output - cluster AABB
+    // return float4(
+    //     (cluster.min.x < cluster.max.x ? 1.0 : 0.0),
+    //     (cluster.min.y < cluster.max.y ? 1.0 : 0.0),
+    //     (cluster.min.z < cluster.max.z ? 1.0 : 0.0),
+    //     1.0
+    // );
+
+    // Debug output - light coverage
+    // for (uint i = 0; i < lightCount; i++) {
+    //     return float4(
+    //         cluster.lightIndices[i] == 0 ? 1.0 : 0.0,
+    //         cluster.lightIndices[i] == 1 ? 1.0 : 0.0,
+    //         cluster.lightIndices[i] == 2 ? 1.0 : 0.0,
+    //         1.0
+    //     );
+    // }
+
+    // Debug output - light count
+    // return float4(lightCount / 100.0, 0.0, 0.0, 1.0);
+
+    for (uint i = 0; i < lightCount; i++) {
+        uint lightIndex = cluster.lightIndices[i];
+        result += CalculatePointLight(pointLights[lightIndex], norm, T, B, viewDir, surf, in.worldPosition.xyz);
+    }
+
+    result += float3(0.2) * surf.ao * surf.color;
 
     return float4(result, 1.0);
 }

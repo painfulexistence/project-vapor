@@ -93,7 +93,6 @@ private:
     VkCommandPool commandPool;
     std::vector<VkCommandBuffer> commandBuffers;
 
-    int currentFrame = 0;
     std::vector<VkSemaphore> imageAvailableSemaphores;
     std::vector<VkSemaphore> renderFinishedSemaphores;
     std::vector<VkFence> renderFences;
@@ -131,9 +130,6 @@ private:
     std::vector<void*> directionalLightBuffersMapped;
     std::vector<BufferHandle> pointLightBuffers;
     std::vector<void*> pointLightBuffersMapped;
-
-    const int FRAMES_IN_FLIGHT = 3;
-    const int sampleCount = 4;
 
     Uint32 nextBufferID = 1;
     Uint32 nextTextureID = 1;

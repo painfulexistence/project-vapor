@@ -22,9 +22,8 @@ public:
 
     virtual void draw(std::shared_ptr<Scene> scene, Camera& camera) override;
 
-    void initTestPipelines();
-
     NS::SharedPtr<MTL::RenderPipelineState> createPipeline(const std::string& filename);
+    NS::SharedPtr<MTL::ComputePipelineState> createComputePipeline(const std::string& filename);
 
     TextureHandle createTexture(const std::shared_ptr<Image>& img);
 
@@ -41,11 +40,15 @@ private:
     CA::MetalLayer* swapchain;
     MTL::Device* device;
     NS::SharedPtr<MTL::CommandQueue> queue;
-    NS::UInteger sampleCount = 4;
     NS::UInteger numMaxInstances = 1; // TODO: change this to a bigger number
 
     NS::SharedPtr<MTL::DepthStencilState> depthStencilState;
-    NS::SharedPtr<MTL::RenderPipelineState> testDrawPipeline;
+    NS::SharedPtr<MTL::RenderPipelineState> prePassPipeline;
+    NS::SharedPtr<MTL::RenderPipelineState> drawPipeline;
+    NS::SharedPtr<MTL::RenderPipelineState> postProcessPipeline;
+
+    NS::SharedPtr<MTL::ComputePipelineState> buildClustersPipeline;
+    NS::SharedPtr<MTL::ComputePipelineState> cullLightsPipeline;
 
     TextureHandle defaultAlbedoTexture;
     TextureHandle defaultNormalTexture;
@@ -53,14 +56,17 @@ private:
     TextureHandle defaultEmissiveTexture;
     TextureHandle defaultDisplacementTexture;
 
-    NS::SharedPtr<MTL::Buffer> instanceDataBuffer;
-    NS::SharedPtr<MTL::Buffer> cameraDataBuffer;
+    std::vector<NS::SharedPtr<MTL::Buffer>> cameraDataBuffers;
+    std::vector<NS::SharedPtr<MTL::Buffer>> instanceDataBuffers;
     NS::SharedPtr<MTL::Buffer> testStorageBuffer;
     NS::SharedPtr<MTL::Buffer> directionalLightBuffer;
     NS::SharedPtr<MTL::Buffer> pointLightBuffer;
+    std::vector<NS::SharedPtr<MTL::Buffer>> clusterBuffers;
 
-    NS::SharedPtr<MTL::Texture> depthStencilTexture;
-    NS::SharedPtr<MTL::Texture> msaaTexture;
+    NS::SharedPtr<MTL::Texture> colorRT_MS;
+    NS::SharedPtr<MTL::Texture> colorRT;
+    NS::SharedPtr<MTL::Texture> depthStencilRT_MS;
+    NS::SharedPtr<MTL::Texture> depthStencilRT;
 
     Uint32 nextBufferID = 1;
     Uint32 nextTextureID = 1;

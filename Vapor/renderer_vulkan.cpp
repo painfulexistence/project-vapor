@@ -274,7 +274,7 @@ Renderer_Vulkan::Renderer_Vulkan(SDL_Window* window) {
             break;
         }
     }
-    uint32_t swapchainImageCount = std::max(capabilities.minImageCount, static_cast<uint32_t>(FRAMES_IN_FLIGHT));
+    uint32_t swapchainImageCount = std::max(capabilities.minImageCount, static_cast<uint32_t>(MAX_FRAMES_IN_FLIGHT));
     if (capabilities.maxImageCount > 0 && swapchainImageCount > capabilities.maxImageCount) { // Note: maxImageCount = 0 means no maximum
         swapchainImageCount = capabilities.maxImageCount;
     }
@@ -319,7 +319,7 @@ Renderer_Vulkan::Renderer_Vulkan(SDL_Window* window) {
     if (vkCreateCommandPool(device, &poolInfo, nullptr, &commandPool) != VK_SUCCESS) {
         throw std::runtime_error("failed to create command pool!");
     }
-    commandBuffers.resize(FRAMES_IN_FLIGHT);
+    commandBuffers.resize(MAX_FRAMES_IN_FLIGHT);
     VkCommandBufferAllocateInfo allocInfo = {};
     allocInfo.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO;
     allocInfo.commandPool = commandPool;
@@ -330,9 +330,9 @@ Renderer_Vulkan::Renderer_Vulkan(SDL_Window* window) {
     }
 
     // Create synchronization objects
-    imageAvailableSemaphores.resize(FRAMES_IN_FLIGHT);
-    renderFinishedSemaphores.resize(FRAMES_IN_FLIGHT);
-    renderFences.resize(FRAMES_IN_FLIGHT);
+    imageAvailableSemaphores.resize(MAX_FRAMES_IN_FLIGHT);
+    renderFinishedSemaphores.resize(MAX_FRAMES_IN_FLIGHT);
+    renderFences.resize(MAX_FRAMES_IN_FLIGHT);
 
     VkSemaphoreCreateInfo semaphoreInfo{};
     semaphoreInfo.sType = VK_STRUCTURE_TYPE_SEMAPHORE_CREATE_INFO;
@@ -341,7 +341,7 @@ Renderer_Vulkan::Renderer_Vulkan(SDL_Window* window) {
     fenceInfo.sType = VK_STRUCTURE_TYPE_FENCE_CREATE_INFO;
     fenceInfo.flags = VK_FENCE_CREATE_SIGNALED_BIT;
 
-    for (size_t i = 0; i < FRAMES_IN_FLIGHT; i++) {
+    for (size_t i = 0; i < MAX_FRAMES_IN_FLIGHT; i++) {
         if (vkCreateSemaphore(device, &semaphoreInfo, nullptr,
                             &imageAvailableSemaphores[i]) != VK_SUCCESS ||
             vkCreateSemaphore(device, &semaphoreInfo, nullptr,
@@ -384,7 +384,7 @@ Renderer_Vulkan::~Renderer_Vulkan() {
     vkFreeDescriptorSets(device, instanceDescriptorPool, sets1.size(), sets1.data());
     vkFreeDescriptorSets(device, frameDescriptorPool, sets0.size(), sets0.data());
 
-    for (size_t i = 0; i < FRAMES_IN_FLIGHT; i++) {
+    for (size_t i = 0; i < MAX_FRAMES_IN_FLIGHT; i++) {
         vkDestroySemaphore(device, renderFinishedSemaphores[i], nullptr);
         vkDestroySemaphore(device, imageAvailableSemaphores[i], nullptr);
         vkDestroyFence(device, renderFences[i], nullptr);
@@ -420,16 +420,16 @@ auto Renderer_Vulkan::init() -> void {
     }
 
     // Create multisampled image and view
-    colorImage = createRenderTarget(GPUImageUsage::COLOR_MSAA, colorImageMemory, colorImageView, sampleCount);
+    colorImage = createRenderTarget(GPUImageUsage::COLOR_MSAA, colorImageMemory, colorImageView, MSAA_SAMPLE_COUNT);
 
     // Create depth image and view
-    depthImage = createRenderTarget(GPUImageUsage::DEPTH, depthImageMemory, depthImageView, sampleCount);
+    depthImage = createRenderTarget(GPUImageUsage::DEPTH, depthImageMemory, depthImageView, MSAA_SAMPLE_COUNT);
 
 #if !(USE_DYNAMIC_RENDERING)
     // Create render passes
     VkAttachmentDescription colorAttachment = {};
     colorAttachment.format = swapchainImageFormat;
-    colorAttachment.samples = (VkSampleCountFlagBits)sampleCount;
+    colorAttachment.samples = (VkSampleCountFlagBits)MSAA_SAMPLE_COUNT;
     colorAttachment.loadOp = VK_ATTACHMENT_LOAD_OP_CLEAR;
     colorAttachment.storeOp = VK_ATTACHMENT_STORE_OP_STORE;
     colorAttachment.initialLayout = VK_IMAGE_LAYOUT_UNDEFINED;
@@ -441,7 +441,7 @@ auto Renderer_Vulkan::init() -> void {
 
     VkAttachmentDescription depthAttachment = {};
     depthAttachment.format = VK_FORMAT_D32_SFLOAT;
-    depthAttachment.samples = (VkSampleCountFlagBits)sampleCount;
+    depthAttachment.samples = (VkSampleCountFlagBits)MSAA_SAMPLE_COUNT;
     depthAttachment.loadOp = VK_ATTACHMENT_LOAD_OP_CLEAR;
     depthAttachment.storeOp = VK_ATTACHMENT_STORE_OP_DONT_CARE;
     depthAttachment.stencilLoadOp = VK_ATTACHMENT_LOAD_OP_DONT_CARE;
@@ -495,8 +495,8 @@ auto Renderer_Vulkan::init() -> void {
     }
 
     // Create framebuffers
-    framebuffers.resize(FRAMES_IN_FLIGHT);
-    for (size_t i = 0; i < FRAMES_IN_FLIGHT; i++) {
+    framebuffers.resize(MAX_FRAMES_IN_FLIGHT);
+    for (size_t i = 0; i < MAX_FRAMES_IN_FLIGHT; i++) {
         std::array<VkImageView, 3> attachments = { colorImageView, depthImageView, swapchainImageViews[i] };
         VkFramebufferCreateInfo framebufferInfo = { VK_STRUCTURE_TYPE_FRAMEBUFFER_CREATE_INFO };
         framebufferInfo.renderPass = renderPass;
@@ -515,14 +515,14 @@ auto Renderer_Vulkan::init() -> void {
     testDrawPipeline = createPipeline(std::string("assets/shaders/3d_pbr_normal_mapped.metal")); // TODO: update this line
 
     // Create uniform buffers
-    cameraDataBuffers.resize(FRAMES_IN_FLIGHT);
-    cameraDataBuffersMapped.resize(FRAMES_IN_FLIGHT);
-    for (size_t i = 0; i < FRAMES_IN_FLIGHT; i++) {
+    cameraDataBuffers.resize(MAX_FRAMES_IN_FLIGHT);
+    cameraDataBuffersMapped.resize(MAX_FRAMES_IN_FLIGHT);
+    for (size_t i = 0; i < MAX_FRAMES_IN_FLIGHT; i++) {
         cameraDataBuffers[i] = createBufferMapped(BufferUsage::UNIFORM, sizeof(CameraData), &cameraDataBuffersMapped[i]);
     }
-    instanceDataBuffers.resize(FRAMES_IN_FLIGHT);
-    instanceDataBuffersMapped.resize(FRAMES_IN_FLIGHT);
-    for (size_t i = 0; i < FRAMES_IN_FLIGHT; i++) {
+    instanceDataBuffers.resize(MAX_FRAMES_IN_FLIGHT);
+    instanceDataBuffersMapped.resize(MAX_FRAMES_IN_FLIGHT);
+    for (size_t i = 0; i < MAX_FRAMES_IN_FLIGHT; i++) {
         instanceDataBuffers[i] = createBufferMapped(BufferUsage::UNIFORM, sizeof(InstanceData), &instanceDataBuffersMapped[i]);
     }
 
@@ -565,33 +565,33 @@ auto Renderer_Vulkan::init() -> void {
 
     // Create descriptor pool and sets
     std::array<VkDescriptorPoolSize, 2> poolSizes = {{
-        { VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER, 2 * static_cast<uint32_t>(FRAMES_IN_FLIGHT) },
-        { VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, 2 * static_cast<uint32_t>(FRAMES_IN_FLIGHT) }
+        { VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER, 2 * static_cast<uint32_t>(MAX_FRAMES_IN_FLIGHT) },
+        { VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, 2 * static_cast<uint32_t>(MAX_FRAMES_IN_FLIGHT) }
     }};
 
     VkDescriptorPoolCreateInfo poolInfo{};
     poolInfo.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO;
     poolInfo.poolSizeCount = poolSizes.size();
     poolInfo.pPoolSizes = poolSizes.data();
-    poolInfo.maxSets = static_cast<uint32_t>(FRAMES_IN_FLIGHT);
+    poolInfo.maxSets = static_cast<uint32_t>(MAX_FRAMES_IN_FLIGHT);
     if (vkCreateDescriptorPool(device, &poolInfo, nullptr, &frameDescriptorPool) != VK_SUCCESS) {
         throw std::runtime_error("Failed to create frame descriptor pool!");
     }
 
-    std::vector<VkDescriptorSetLayout> set0Layouts(FRAMES_IN_FLIGHT, set0Layout);
+    std::vector<VkDescriptorSetLayout> set0Layouts(MAX_FRAMES_IN_FLIGHT, set0Layout);
     VkDescriptorSetAllocateInfo set0AllocInfo = {};
     set0AllocInfo.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO;
     set0AllocInfo.descriptorPool = frameDescriptorPool;
-    set0AllocInfo.descriptorSetCount = static_cast<uint32_t>(FRAMES_IN_FLIGHT);
+    set0AllocInfo.descriptorSetCount = static_cast<uint32_t>(MAX_FRAMES_IN_FLIGHT);
     set0AllocInfo.pSetLayouts = set0Layouts.data();
 
-    sets0.resize(FRAMES_IN_FLIGHT);
+    sets0.resize(MAX_FRAMES_IN_FLIGHT);
     if (vkAllocateDescriptorSets(device, &set0AllocInfo, sets0.data()) != VK_SUCCESS) {
         throw std::runtime_error("Failed to allocate set 0 descriptor sets!");
     }
 
     // Write descriptor sets
-    for (size_t i = 0; i < FRAMES_IN_FLIGHT; i++) {
+    for (size_t i = 0; i < MAX_FRAMES_IN_FLIGHT; i++) {
         VkDescriptorBufferInfo cameraDataBufferInfo = {};
         cameraDataBufferInfo.buffer = getBuffer(cameraDataBuffers[i]);
         cameraDataBufferInfo.offset = 0;
@@ -646,16 +646,16 @@ auto Renderer_Vulkan::stage(std::shared_ptr<Scene> scene) -> void {
         stageNode(node);
     }
 
-    directionalLightBuffers.resize(FRAMES_IN_FLIGHT);
-    directionalLightBuffersMapped.resize(FRAMES_IN_FLIGHT);
-    for (size_t i = 0; i < FRAMES_IN_FLIGHT; i++) {
+    directionalLightBuffers.resize(MAX_FRAMES_IN_FLIGHT);
+    directionalLightBuffersMapped.resize(MAX_FRAMES_IN_FLIGHT);
+    for (size_t i = 0; i < MAX_FRAMES_IN_FLIGHT; i++) {
         directionalLightBuffers[i] = createBufferMapped(BufferUsage::STORAGE, sizeof(DirectionalLight) * scene->directionalLights.size(), &directionalLightBuffersMapped[i]);
         memcpy(directionalLightBuffersMapped[i], scene->directionalLights.data(), sizeof(DirectionalLight) * scene->directionalLights.size());
     }
 
-    pointLightBuffers.resize(FRAMES_IN_FLIGHT);
-    pointLightBuffersMapped.resize(FRAMES_IN_FLIGHT);
-    for (size_t i = 0; i < FRAMES_IN_FLIGHT; i++) {
+    pointLightBuffers.resize(MAX_FRAMES_IN_FLIGHT);
+    pointLightBuffersMapped.resize(MAX_FRAMES_IN_FLIGHT);
+    for (size_t i = 0; i < MAX_FRAMES_IN_FLIGHT; i++) {
         pointLightBuffers[i] = createBufferMapped(BufferUsage::STORAGE, sizeof(PointLight) * scene->pointLights.size(), &pointLightBuffersMapped[i]);
         memcpy(pointLightBuffersMapped[i], scene->pointLights.data(), sizeof(PointLight) * scene->pointLights.size());
     }
@@ -757,7 +757,7 @@ auto Renderer_Vulkan::stage(std::shared_ptr<Scene> scene) -> void {
         materialTextureSets[mat.get()] = sets1[i];
     }
 
-    for (size_t i = 0; i < FRAMES_IN_FLIGHT; i++) {
+    for (size_t i = 0; i < MAX_FRAMES_IN_FLIGHT; i++) {
         VkDescriptorBufferInfo directionalLightBufferInfo = {};
         directionalLightBufferInfo.buffer = getBuffer(directionalLightBuffers[i]);
         directionalLightBufferInfo.offset = 0;
@@ -796,11 +796,11 @@ auto Renderer_Vulkan::stage(std::shared_ptr<Scene> scene) -> void {
 }
 
 auto Renderer_Vulkan::draw(std::shared_ptr<Scene> scene, Camera& camera) -> void {
-    vkWaitForFences(device, 1, &renderFences[currentFrame], VK_TRUE, UINT64_MAX);
-    vkResetFences(device, 1, &renderFences[currentFrame]);
+    vkWaitForFences(device, 1, &renderFences[currentFrameInFlight], VK_TRUE, UINT64_MAX);
+    vkResetFences(device, 1, &renderFences[currentFrameInFlight]);
 
     uint32_t swapchainImageIndex;
-    vkAcquireNextImageKHR(device, swapchain, UINT64_MAX, imageAvailableSemaphores[currentFrame], VK_NULL_HANDLE, &swapchainImageIndex);
+    vkAcquireNextImageKHR(device, swapchain, UINT64_MAX, imageAvailableSemaphores[currentFrameInFlight], VK_NULL_HANDLE, &swapchainImageIndex);
 
     float time = SDL_GetTicks() / 1000.0;
 
@@ -810,10 +810,10 @@ auto Renderer_Vulkan::draw(std::shared_ptr<Scene> scene, Camera& camera) -> void
         .proj = camera.GetProjMatrix(),
         .pos = camPos
     };
-    memcpy(cameraDataBuffersMapped[currentFrame], &cameraData, sizeof(CameraData));
+    memcpy(cameraDataBuffersMapped[currentFrameInFlight], &cameraData, sizeof(CameraData));
     SceneData sceneData = { time };
 
-    VkCommandBuffer cmd = commandBuffers[currentFrame];
+    VkCommandBuffer cmd = commandBuffers[currentFrameInFlight];
     vkResetCommandBuffer(cmd, 0);
     VkCommandBufferBeginInfo beginInfo = {};
     beginInfo.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO;
@@ -831,7 +831,7 @@ auto Renderer_Vulkan::draw(std::shared_ptr<Scene> scene, Camera& camera) -> void
     renderPassInfo.renderArea = { 0, 0, swapchainExtent.width, swapchainExtent.height };
     std::array<VkClearValue, 3> clearValues;
     clearValues[0].color = { clearColor.r, clearColor.g, clearColor.b, clearColor.a };
-    clearValues[1].depthStencil = { 1.0f, 0 };
+    clearValues[1].depthStencil = { static_cast<float>(clearDepth), 0 };
     clearValues[2].color = { clearColor.r, clearColor.g, clearColor.b, clearColor.a };
     renderPassInfo.clearValueCount = clearValues.size();
     renderPassInfo.pClearValues = clearValues.data();
@@ -844,7 +844,7 @@ auto Renderer_Vulkan::draw(std::shared_ptr<Scene> scene, Camera& camera) -> void
         [&](const std::shared_ptr<Node>& node) {
             if (node->meshGroup) {
                 InstanceData instanceData = { .model = node->worldTransform };
-                memcpy(instanceDataBuffersMapped[currentFrame], &instanceData, sizeof(InstanceData));
+                memcpy(instanceDataBuffersMapped[currentFrameInFlight], &instanceData, sizeof(InstanceData));
                 for (auto& mesh : node->meshGroup->meshes) {
                     if (!mesh->material) {
                         fmt::print("No material found for mesh in mesh group {}\n", node->meshGroup->name);
@@ -855,7 +855,7 @@ auto Renderer_Vulkan::draw(std::shared_ptr<Scene> scene, Camera& camera) -> void
                     VkDeviceSize offsets[] = { 0 };
                     vkCmdBindVertexBuffers(cmd, 0, 1, vertexBuffers, offsets);
                     vkCmdBindIndexBuffer(cmd, getBuffer(mesh->ebo), 0, VkIndexType::VK_INDEX_TYPE_UINT32);
-                    std::array<VkDescriptorSet, 2> descriptorSets = { sets0[currentFrame], materialTextureSets.at(mesh->material.get()) };
+                    std::array<VkDescriptorSet, 2> descriptorSets = { sets0[currentFrameInFlight], materialTextureSets.at(mesh->material.get()) };
                     vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, pipelineLayout, 0, descriptorSets.size(), descriptorSets.data(), 0, nullptr); // resources are set here
                     vkCmdPushConstants(cmd, pipelineLayout, VK_SHADER_STAGE_FRAGMENT_BIT, 0, sizeof(SceneData), &sceneData);
                     vkCmdDrawIndexed(cmd, mesh->indices.size(), 1, 0, 0, 0);
@@ -938,24 +938,24 @@ auto Renderer_Vulkan::draw(std::shared_ptr<Scene> scene, Camera& camera) -> void
     submitInfo.commandBufferCount = 1;
     submitInfo.pCommandBuffers = &cmd;
     submitInfo.waitSemaphoreCount = 1;
-    submitInfo.pWaitSemaphores = &imageAvailableSemaphores[currentFrame];
+    submitInfo.pWaitSemaphores = &imageAvailableSemaphores[currentFrameInFlight];
     submitInfo.signalSemaphoreCount = 1;
-    submitInfo.pSignalSemaphores = &renderFinishedSemaphores[currentFrame];
-    if (vkQueueSubmit(graphicsQueue, 1, &submitInfo, renderFences[currentFrame]) != VK_SUCCESS) {
+    submitInfo.pSignalSemaphores = &renderFinishedSemaphores[currentFrameInFlight];
+    if (vkQueueSubmit(graphicsQueue, 1, &submitInfo, renderFences[currentFrameInFlight]) != VK_SUCCESS) {
         throw std::runtime_error("Failed to submit draw command buffer!");
     }
 
     VkPresentInfoKHR presentInfo{};
     presentInfo.sType = VK_STRUCTURE_TYPE_PRESENT_INFO_KHR;
     presentInfo.waitSemaphoreCount = 1;
-    presentInfo.pWaitSemaphores = &renderFinishedSemaphores[currentFrame];
+    presentInfo.pWaitSemaphores = &renderFinishedSemaphores[currentFrameInFlight];
     presentInfo.swapchainCount = 1;
     presentInfo.pSwapchains = &swapchain;
     presentInfo.pImageIndices = &swapchainImageIndex;
     presentInfo.pResults = nullptr;
     vkQueuePresentKHR(presentQueue, &presentInfo);
 
-    currentFrame = (currentFrame + 1) % FRAMES_IN_FLIGHT;
+    currentFrameInFlight = (currentFrameInFlight + 1) % MAX_FRAMES_IN_FLIGHT;
 }
 
 VkShaderModule Renderer_Vulkan::createShaderModule(const std::string& code) {
@@ -1132,7 +1132,7 @@ VkPipeline Renderer_Vulkan::createPipeline(const std::string& filename) {
     // Multisample state
     VkPipelineMultisampleStateCreateInfo multisampleStateInfo = {};
     multisampleStateInfo.sType = VK_STRUCTURE_TYPE_PIPELINE_MULTISAMPLE_STATE_CREATE_INFO;
-    multisampleStateInfo.rasterizationSamples = (VkSampleCountFlagBits)sampleCount;
+    multisampleStateInfo.rasterizationSamples = (VkSampleCountFlagBits)MSAA_SAMPLE_COUNT;
 
     // Vertex input state
    std::array<VkVertexInputBindingDescription, 1> vertexBindingDescriptions = {{

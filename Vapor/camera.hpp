@@ -47,6 +47,9 @@ public:
 
     void UpdateAspectRatio(float aspect);
 
+    float near() const { return _near; }
+    float far() const { return _far; }
+
 private:
     glm::vec3 _eye;
     glm::vec3 _center;
