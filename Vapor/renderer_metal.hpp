@@ -49,6 +49,7 @@ private:
 
     NS::SharedPtr<MTL::ComputePipelineState> buildClustersPipeline;
     NS::SharedPtr<MTL::ComputePipelineState> cullLightsPipeline;
+    NS::SharedPtr<MTL::ComputePipelineState> tileCullingPipeline;
 
     TextureHandle defaultAlbedoTexture;
     TextureHandle defaultNormalTexture;

@@ -83,11 +83,12 @@ int main(int argc, char* args[]) {
         .color = glm::vec3(1.0, 1.0, 1.0),
         .intensity = 10.0,
     });
-    for (int i = 0; i < 100; i++) {
+    for (int i = 0; i < 256; i++) {
         scene->pointLights.push_back({
-            .position = glm::vec3(rng.RandomFloatInRange(-5.0f, 5.0f), rng.RandomFloatInRange(0.0f, 3.0f), rng.RandomFloatInRange(-5.0f, 5.0f)),
+            .position = glm::vec3(rng.RandomFloatInRange(-5.0f, 5.0f), rng.RandomFloatInRange(0.0f, 5.0f), rng.RandomFloatInRange(-5.0f, 5.0f)),
             .color = glm::vec3(rng.RandomFloat(), rng.RandomFloat(), rng.RandomFloat()),
-            .intensity = 5.0f * rng.RandomFloat(),
+            .intensity = 10.0f * rng.RandomFloat(),
+            .radius = 2.0f
         });
     }
 
@@ -195,6 +196,37 @@ int main(int argc, char* args[]) {
         // entity->SetLocalTransform(
         //     glm::rotate(glm::mat4(1.0f), angle, glm::vec3(0.0f, 1.0f, -1.0f)) // glm::rotate(glm::rotate(glm::mat4(1.0f), glm::radians(270.0f), glm::vec3(1.0f, 0.0f, 0.0f)), angle, glm::vec3(0.0f, 0.0f, 1.0f));
         // );
+        for (int i = 0; i < scene->pointLights.size(); i++) {
+            auto& l = scene->pointLights[i];
+            float speed = 0.5f;
+            switch (i % 4) {
+            case 0:  // circular motion
+                l.position.x = 3.0f * cos(time * speed + i * 0.1f);
+                l.position.z = 3.0f * sin(time * speed + i * 0.1f);
+                l.position.y = 1.5f + 0.5f * sin(time * speed * 0.5f + i * 0.2f);
+                break;
+
+            case 1:  // figure-8 motion
+                l.position.x = 4.0f * sin(time * speed * 0.7f + i * 0.15f);
+                l.position.z = 4.0f * sin(time * speed * 0.7f + i * 0.15f) * cos(time * speed * 0.7f + i * 0.15f);
+                l.position.y = 1.0f + 1.0f * cos(time * speed * 0.3f + i * 0.1f);
+                break;
+
+            case 2:  // linear motion
+                l.position.x = 4.0f * sin(time * speed * 0.6f + i * 0.12f);
+                l.position.z = 2.0f * cos(time * speed * 0.8f + i * 0.18f);
+                l.position.y = 0.5f + 2.0f * abs(sin(time * speed * 0.4f + i * 0.14f));
+                break;
+
+            case 3:  // spiral motion
+                float spiralRadius = 2.0f + 1.0f * sin(time * speed * 0.2f + i * 0.05f);
+                l.position.x = spiralRadius * cos(time * speed * 0.5f + i * 0.08f);
+                l.position.z = spiralRadius * sin(time * speed * 0.5f + i * 0.08f);
+                l.position.y = 0.5f + 2.5f * (1.0f - cos(time * speed * 0.3f + i * 0.06f));
+                break;
+            }
+            l.intensity = 3.0f + 2.0f * (0.5f + 0.5f * sin(time * 0.3f + i * 0.1f));
+        }
 
         scene->Update(deltaTime);
 

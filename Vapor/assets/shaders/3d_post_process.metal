@@ -23,9 +23,20 @@ vertex RasterizerData vertexMain(uint vertexID [[vertex_id]]) {
     return vert;
 }
 
+float3 aces(float3 x) {
+    float a = 2.51;
+    float b = 0.03;
+    float c = 2.43;
+    float d = 0.59;
+    float e = 0.14;
+    return clamp((x * (a * x + b)) / (x * (c * x + d) + e), 0.0, 1.0);
+}
+
 fragment float4 fragmentMain(RasterizerData in [[stage_in]], texture2d<float, access::sample> texScreen [[texture(0)]]) {
     constexpr sampler s(address::repeat, filter::linear, mip_filter::linear);
     float3 color = texScreen.sample(s, in.uv).rgb;
+
+    color = aces(color);
 
     color = pow(color, float3(INV_GAMMA));
 

@@ -18,8 +18,8 @@ struct PointLight {
 };
 
 struct CameraData {
-    float4x4 view;
     float4x4 proj;
+    float4x4 view;
     float4x4 invProj;
     float near;
     float far;

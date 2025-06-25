@@ -79,18 +79,18 @@ struct alignas(16) PointLight { // Note that alignas(16) is not enough to ensure
     float _pad1;
     glm::vec3 color;
     float _pad2;
-    float intensity;
-    float radius = 10.0f;
+    float intensity = 1.0f;
+    float radius = 0.5f;
     // float _pad3[2];
     // bool castShadow;
     // Uint8 _pad4[3];
 };
 
 struct alignas(16) Cluster {
-  glm::vec4 min;
-  glm::vec4 max;
-  Uint32 lightCount;
-  Uint32 lightIndices[256];
+    glm::vec4 min;
+    glm::vec4 max;
+    Uint32 lightCount;
+    Uint32 lightIndices[256];
 };
 
 struct VertexData {

@@ -61,6 +61,7 @@ auto Renderer_Metal::init() -> void {
     postProcessPipeline = createPipeline("assets/shaders/3d_post_process.metal");
     buildClustersPipeline = createComputePipeline("assets/shaders/3d_cluster_build.metal");
     cullLightsPipeline = createComputePipeline("assets/shaders/3d_light_cull.metal");
+    tileCullingPipeline = createComputePipeline("assets/shaders/3d_tile_light_cull.metal");
 
     // Create buffers
     cameraDataBuffers.resize(MAX_FRAMES_IN_FLIGHT);
@@ -79,7 +80,7 @@ auto Renderer_Metal::init() -> void {
 
     clusterBuffers.resize(MAX_FRAMES_IN_FLIGHT);
     for (auto& clusterBuffer : clusterBuffers) {
-        clusterBuffer = NS::TransferPtr(device->newBuffer(16 * 16 * 24 * sizeof(Cluster), MTL::ResourceStorageModeManaged));
+        clusterBuffer = NS::TransferPtr(device->newBuffer(clusterGridSizeX * clusterGridSizeY * clusterGridSizeZ * sizeof(Cluster), MTL::ResourceStorageModeManaged));
     }
 
     // Create textures
@@ -187,6 +188,15 @@ auto Renderer_Metal::draw(std::shared_ptr<Scene> scene, Camera& camera) -> void 
     cameraData->far = far;
     cameraDataBuffers[currentFrameInFlight]->didModifyRange(NS::Range::Make(0, cameraDataBuffers[currentFrameInFlight]->length()));
 
+    PointLight* pointLights = reinterpret_cast<PointLight*>(pointLightBuffer->contents());
+    for (size_t i = 0; i < scene->pointLights.size(); ++i) {
+        pointLights[i].position = scene->pointLights[i].position;
+        pointLights[i].color = scene->pointLights[i].color;
+        pointLights[i].intensity = scene->pointLights[i].intensity;
+        pointLights[i].radius = scene->pointLights[i].radius;
+    }
+    pointLightBuffer->didModifyRange(NS::Range::Make(0, pointLightBuffer->length()));
+
     auto drawableSize = swapchain->drawableSize();
     glm::vec2 screenSize = glm::vec2(drawableSize.width, drawableSize.height);
     glm::uvec3 gridSize = glm::uvec3(clusterGridSizeX, clusterGridSizeY, clusterGridSizeZ);
@@ -291,28 +301,41 @@ auto Renderer_Metal::draw(std::shared_ptr<Scene> scene, Camera& camera) -> void 
     }
     prePassEncoder->endEncoding();
 
-    // 2. cluster building pass
-    auto clusterEncoder = cmd->computeCommandEncoder();
-    clusterEncoder->setComputePipelineState(buildClustersPipeline.get());
-    // clusterEncoder->useResource(clusterBuffer.get(), MTL::ResourceUsageWrite);
-    clusterEncoder->setBuffer(clusterBuffers[currentFrameInFlight].get(), 0, 0);
-    clusterEncoder->setBuffer(cameraDataBuffers[currentFrameInFlight].get(), 0, 1);
-    clusterEncoder->setBytes(&screenSize, sizeof(glm::vec2), 2);
-    clusterEncoder->setBytes(&gridSize, sizeof(glm::uvec3), 3);
-    clusterEncoder->dispatchThreadgroups(MTL::Size(clusterGridSizeX, clusterGridSizeY, clusterGridSizeZ), MTL::Size(1, 1, 1));
-    clusterEncoder->endEncoding();
+    // // 2. cluster building pass
+    // auto clusterEncoder = cmd->computeCommandEncoder();
+    // clusterEncoder->setComputePipelineState(buildClustersPipeline.get());
+    // // clusterEncoder->useResource(clusterBuffer.get(), MTL::ResourceUsageWrite);
+    // clusterEncoder->setBuffer(clusterBuffers[currentFrameInFlight].get(), 0, 0);
+    // clusterEncoder->setBuffer(cameraDataBuffers[currentFrameInFlight].get(), 0, 1);
+    // clusterEncoder->setBytes(&screenSize, sizeof(glm::vec2), 2);
+    // clusterEncoder->setBytes(&gridSize, sizeof(glm::uvec3), 3);
+    // clusterEncoder->dispatchThreadgroups(MTL::Size(clusterGridSizeX, clusterGridSizeY, clusterGridSizeZ), MTL::Size(1, 1, 1));
+    // clusterEncoder->endEncoding();
 
-    // 3. light culling pass
-    auto cullingEncoder = cmd->computeCommandEncoder();
-    cullingEncoder->setComputePipelineState(cullLightsPipeline.get());
-    // cullingEncoder->useResource(clusterBuffer.get(), MTL::ResourceUsageWrite);
-    cullingEncoder->setBuffer(clusterBuffers[currentFrameInFlight].get(), 0, 0);
-    cullingEncoder->setBuffer(pointLightBuffer.get(), 0, 1);
-    cullingEncoder->setBuffer(cameraDataBuffers[currentFrameInFlight].get(), 0, 2);
-    cullingEncoder->setBytes(&lightCount, sizeof(uint), 3);
-    cullingEncoder->setBytes(&gridSize, sizeof(glm::uvec3), 4);
-    cullingEncoder->dispatchThreadgroups(MTL::Size(clusterGridSizeX, clusterGridSizeY, clusterGridSizeZ), MTL::Size(1, 1, 1));
-    cullingEncoder->endEncoding();
+    // // 3. light culling pass
+    // auto cullingEncoder = cmd->computeCommandEncoder();
+    // cullingEncoder->setComputePipelineState(cullLightsPipeline.get());
+    // // cullingEncoder->useResource(clusterBuffer.get(), MTL::ResourceUsageWrite);
+    // cullingEncoder->setBuffer(clusterBuffers[currentFrameInFlight].get(), 0, 0);
+    // cullingEncoder->setBuffer(pointLightBuffer.get(), 0, 1);
+    // cullingEncoder->setBuffer(cameraDataBuffers[currentFrameInFlight].get(), 0, 2);
+    // cullingEncoder->setBytes(&lightCount, sizeof(uint), 3);
+    // cullingEncoder->setBytes(&gridSize, sizeof(glm::uvec3), 4);
+    // cullingEncoder->dispatchThreadgroups(MTL::Size(clusterGridSizeX, clusterGridSizeY, clusterGridSizeZ), MTL::Size(1, 1, 1));
+    // cullingEncoder->endEncoding();
+
+    // 2 & 3. tile culling pass
+    auto tileCullingEncoder = cmd->computeCommandEncoder();
+    tileCullingEncoder->setComputePipelineState(tileCullingPipeline.get());
+    // tileCullingEncoder->useResource(clusterBuffer.get(), MTL::ResourceUsageWrite);
+    tileCullingEncoder->setBuffer(clusterBuffers[currentFrameInFlight].get(), 0, 0);
+    tileCullingEncoder->setBuffer(pointLightBuffer.get(), 0, 1);
+    tileCullingEncoder->setBuffer(cameraDataBuffers[currentFrameInFlight].get(), 0, 2);
+    tileCullingEncoder->setBytes(&lightCount, sizeof(uint), 3);
+    tileCullingEncoder->setBytes(&gridSize, sizeof(glm::uvec3), 4);
+    tileCullingEncoder->setBytes(&screenSize, sizeof(glm::vec2), 5);
+    tileCullingEncoder->dispatchThreadgroups(MTL::Size(clusterGridSizeX, clusterGridSizeY, 1), MTL::Size(1, 1, 1));
+    tileCullingEncoder->endEncoding();
 
     // 4. render pass
     auto renderEncoder = cmd->renderCommandEncoder(renderPass.get());

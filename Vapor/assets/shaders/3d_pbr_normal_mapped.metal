@@ -178,7 +178,7 @@ float3 CalculateDirectionalLight(DirLight light, float3 norm, float3 tangent, fl
 float3 CalculatePointLight(PointLight light, float3 norm, float3 tangent, float3 bitangent, float3 viewDir, Surface surf, float3 fragPos) {
     float3 lightDir = normalize(light.position - fragPos);
     float dist = distance(light.position, fragPos);
-    float attenuation = 1.0 / (dist * dist);
+    float attenuation = smoothstep(light.radius, 0.0, dist); // 1.0 / (dist * dist);
     float3 radiance = attenuation * light.color * light.intensity;
 
     return CookTorranceBRDF(norm, tangent, bitangent, lightDir, viewDir, surf) * radiance * clamp(dot(norm, lightDir), 0.0, 1.0);
@@ -246,50 +246,59 @@ fragment float4 fragmentMain(
     float3 result = float3(0.0);
     result += CalculateDirectionalLight(directionalLights[0], norm, T, B, viewDir, surf); // result += CookTorranceBRDF(norm, lightDir, viewDir, surf) * (mainLight.color * mainLight.intensity) * clamp(dot(norm, lightDir), 0.0, 1.0);
 
-    float2 tileSize = screenSize / float2(gridSize.xy);
-    float depthVS = (camera.view * in.worldPosition).z;
-    uint tileZ = uint((log(abs(depthVS) / camera.near) * gridSize.z) / log(camera.far / camera.near));
-    uint3 tile = uint3(in.position.x / tileSize.x, (screenSize.y - in.position.y) / tileSize.y, tileZ);
-    uint clusterIndex = tile.x + (tile.y * gridSize.x) + (tile.z * gridSize.x * gridSize.y);
-    Cluster cluster = clusters[clusterIndex];
-    uint lightCount = cluster.lightCount;
+    float2 screenUV = in.position.xy / screenSize;
+    uint tileX = uint(screenUV.x * float(gridSize.x));
+    uint tileY = uint((1.0 - screenUV.y) * float(gridSize.y));
+    // float depthVS = (camera.view * in.worldPosition).z;
+    // uint tileZ = uint((log(abs(depthVS) / camera.near) * gridSize.z) / log(camera.far / camera.near));
+    // uint clusterIndex = tileX + (tileY * gridSize.x) + (tileZ * gridSize.x * gridSize.y);
+    // Cluster cluster = clusters[clusterIndex];
+    // uint lightCount = cluster.lightCount;
 
-    // Debug output - view space depth
-    // return float4((-depthVS - camera.near) / (camera.far - camera.near), 0.0, 0.0, 1.0);
+    // // Debug output - view space depth
+    // // return float4((-depthVS - camera.near) / (camera.far - camera.near), 0.0, 0.0, 1.0);
 
-    // Debug output - tile indices
-    // return float4(tile.x / float(gridSize.x), tile.y / float(gridSize.y), 0.5, 1.0);
-    // return float4(tile.x / float(gridSize.x), tile.y / float(gridSize.y), 0.0, 1.0) * (tile.z / float(gridSize.z));
+    // // Debug output - tile indices
+    // // return float4(tileX / float(gridSize.x), tileY / float(gridSize.y), 0.5, 1.0);
+    // // return float4(tileX / float(gridSize.x), tileY / float(gridSize.y), 0.0, 1.0) * (tileZ / float(gridSize.z));
 
-    // Debug output - tile z
-    // return float4(tile.z / float(gridSize.z), 0.0, 0.0, 1.0);
+    // // Debug output - tile z
+    // // return float4(tileZ / float(gridSize.z), 0.0, 0.0, 1.0);
 
-    // Debug output - cluster index
-    // return float4(clusterIndex / float(gridSize.x * gridSize.y * gridSize.z), 0.0, 0.0, 1.0);
+    // // Debug output - cluster index
+    // // return float4(clusterIndex / float(gridSize.x * gridSize.y * gridSize.z), 0.0, 0.0, 1.0);
 
-    // Debug output - cluster AABB
-    // return float4(
-    //     (cluster.min.x < cluster.max.x ? 1.0 : 0.0),
-    //     (cluster.min.y < cluster.max.y ? 1.0 : 0.0),
-    //     (cluster.min.z < cluster.max.z ? 1.0 : 0.0),
-    //     1.0
-    // );
+    // // Debug output - cluster AABB
+    // // return float4(
+    // //     (cluster.min.x < cluster.max.x ? 1.0 : 0.0),
+    // //     (cluster.min.y < cluster.max.y ? 1.0 : 0.0),
+    // //     (cluster.min.z < cluster.max.z ? 1.0 : 0.0),
+    // //     1.0
+    // // );
 
-    // Debug output - light coverage
+    // // Debug output - light coverage
+    // // for (uint i = 0; i < lightCount; i++) {
+    // //     return float4(
+    // //         cluster.lightIndices[i] == 0 ? 1.0 : 0.0,
+    // //         cluster.lightIndices[i] == 1 ? 1.0 : 0.0,
+    // //         cluster.lightIndices[i] == 2 ? 1.0 : 0.0,
+    // //         1.0
+    // //     );
+    // // }
+
+    // // Debug output - light count
+    // // return float4(lightCount / 100.0, 0.0, 0.0, 1.0);
+
     // for (uint i = 0; i < lightCount; i++) {
-    //     return float4(
-    //         cluster.lightIndices[i] == 0 ? 1.0 : 0.0,
-    //         cluster.lightIndices[i] == 1 ? 1.0 : 0.0,
-    //         cluster.lightIndices[i] == 2 ? 1.0 : 0.0,
-    //         1.0
-    //     );
+    //     uint lightIndex = cluster.lightIndices[i];
+    //     result += CalculatePointLight(pointLights[lightIndex], norm, T, B, viewDir, surf, in.worldPosition.xyz);
     // }
 
-    // Debug output - light count
-    // return float4(lightCount / 100.0, 0.0, 0.0, 1.0);
-
+    uint tileIndex = tileX + tileY * gridSize.x;
+    Cluster tile = clusters[tileIndex];
+    uint lightCount = tile.lightCount;
     for (uint i = 0; i < lightCount; i++) {
-        uint lightIndex = cluster.lightIndices[i];
+        uint lightIndex = tile.lightIndices[i];
         result += CalculatePointLight(pointLights[lightIndex], norm, T, B, viewDir, surf, in.worldPosition.xyz);
     }
 
