@@ -34,6 +34,10 @@ struct TextureHandle {
     Uint32 rid = 0;
 };
 
+struct RenderTargetHandle {
+    Uint32 rid = 0;
+};
+
 struct Image {
     std::string uri;
     Uint32 width;

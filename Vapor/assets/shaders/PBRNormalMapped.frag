@@ -25,7 +25,8 @@ struct PointLight {
     vec3 color;
     float _pad2;
     float intensity;
-    // float _pad3[3];
+    float radius;
+    // float _pad3[2];
 };
 layout(std430, set = 0, binding = 2) readonly buffer DirLightBuffer {
     DirLight directional_lights[];
@@ -75,7 +76,7 @@ vec3 CalculateDirectionalLight(DirLight light, vec3 norm, vec3 tangent, vec3 vie
 vec3 CalculatePointLight(PointLight light, vec3 norm, vec3 tangent, vec3 viewDir, Surface surf) {
     vec3 lightDir = normalize(light.position - frag_pos);
     float dist = distance(light.position, frag_pos);
-    float attenuation = 1.0 / (dist * dist);
+    float attenuation = smoothstep(light.radius, 0.0, dist); // 1.0 / (dist * dist);
     vec3 radiance = attenuation * light.color * light.intensity;
     return CookTorranceBRDF(norm, tangent, lightDir, viewDir, surf) * radiance * max(dot(norm, lightDir), 0.0);
 }
@@ -218,8 +219,6 @@ void main() {
     }
     result += vec3(0.2) * surf.ao * surf.color;
     // result += CalculateIBL(norm, viewDir, surf);
-
-    result = pow(result, vec3(INV_GAMMA));
 
     Color = vec4(result, 1.0);
 }

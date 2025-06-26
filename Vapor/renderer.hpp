@@ -19,9 +19,11 @@ enum class BufferUsage {
     COPY_DST
 };
 
-enum class GPUImageUsage {
+enum class RenderTargetUsage {
     COLOR_MSAA,
     COLOR,
+    DEPTH_MSAA,
+    DEPTH_STENCIL_MSAA,
     DEPTH,
     DEPTH_STENCIL
 };

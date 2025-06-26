@@ -50,11 +50,16 @@ public:
 
     virtual void draw(std::shared_ptr<Scene> scene, Camera& camera) override;
 
-    VkPipeline createPipeline(const std::string& filename);
+    VkPipeline createPipeline(const std::string& filename1, const std::string& filename2);
+    VkPipeline createRenderPipeline(const std::string& vertShader, const std::string& fragShader);
+    VkPipeline createPrePassPipeline(const std::string& vertShader, const std::string& fragShader);
+    VkPipeline createPostProcessPipeline(const std::string& vertShader, const std::string& fragShader);
+
+    VkPipeline createComputePipeline(const std::string& filename);
 
     VkShaderModule createShaderModule(const std::string& code);
 
-    VkImage createRenderTarget(GPUImageUsage usage, VkDeviceMemory& memory, VkImageView& imageView, int sampleCount);
+    RenderTargetHandle createRenderTarget(RenderTargetUsage usage, VkFormat format);
 
     TextureHandle createTexture(std::shared_ptr<Image> img);
 
@@ -73,6 +78,10 @@ public:
     VkImageView getTextureView(TextureHandle handle) const;
     VkDeviceMemory getTextureMemory(TextureHandle handle) const;
 
+    VkImage getRenderTarget(RenderTargetHandle handle) const;
+    VkImageView getRenderTargetView(RenderTargetHandle handle) const;
+    VkDeviceMemory getRenderTargetMemory(RenderTargetHandle handle) const;
+
     VkPipeline getPipeline(PipelineHandle handle) const;
 
 private:
@@ -89,7 +98,7 @@ private:
 
     std::vector<VkImage> swapchainImages;
     std::vector<VkImageView> swapchainImageViews;
-    std::vector<VkFramebuffer> framebuffers;
+
     VkCommandPool commandPool;
     std::vector<VkCommandBuffer> commandBuffers;
 
@@ -97,23 +106,36 @@ private:
     std::vector<VkSemaphore> renderFinishedSemaphores;
     std::vector<VkFence> renderFences;
 
-    VkPipelineLayout pipelineLayout;
-    VkPipeline testDrawPipeline;
+    VkPipelineLayout renderPipelineLayout;
+    VkPipelineLayout prePassPipelineLayout;
+    VkPipelineLayout postProcessPipelineLayout;
+    VkPipeline renderPipeline;
+    VkPipeline prePassPipeline;
+    VkPipeline postProcessPipeline;
+
+    VkPipeline tileCullingPipeline;
+
+    VkRenderPass prePass;
     VkRenderPass renderPass;
-    VkDescriptorPool frameDescriptorPool;
-    VkDescriptorPool instanceDescriptorPool;
+    VkRenderPass postProcessPass;
+    std::vector<VkFramebuffer> prePassFramebuffers;
+    std::vector<VkFramebuffer> renderFramebuffers;
+    std::vector<VkFramebuffer> postProcessFramebuffers;
+
+    VkDescriptorPool set0DescriptorPool;
+    VkDescriptorPool set1DescriptorPool;
+    VkDescriptorPool set2DescriptorPool;
+    VkDescriptorSetLayout emptySetLayout; // required because VK_EXT_graphics_pipeline_library not supported
     VkDescriptorSetLayout set0Layout;
     VkDescriptorSetLayout set1Layout;
-    std::vector<VkDescriptorSet> sets0;
-    std::vector<VkDescriptorSet> sets1;
+    VkDescriptorSetLayout set2Layout;
+    std::vector<VkDescriptorSet> set0s; // global
+    std::vector<VkDescriptorSet> set1s; // 1 set per material
+    std::vector<VkDescriptorSet> set2s;
 
-    VkImage colorImage;
-    VkDeviceMemory colorImageMemory;
-    VkImageView colorImageView;
-
-    VkImage depthImage;
-    VkDeviceMemory depthImageMemory;
-    VkImageView depthImageView;
+    RenderTargetHandle msaaColorImage;
+    RenderTargetHandle msaaDepthImage;
+    RenderTargetHandle resolveColorImage;
 
     TextureHandle defaultAlbedoTexture;
     TextureHandle defaultNormalTexture;
@@ -132,13 +154,13 @@ private:
     std::vector<void*> pointLightBuffersMapped;
 
     Uint32 nextBufferID = 1;
-    Uint32 nextTextureID = 1;
+    Uint32 nextImageID = 1;
     Uint32 nextPipelineID = 1;
     std::unordered_map<Uint32, VkBuffer> buffers;
     std::unordered_map<Uint32, VkDeviceMemory> bufferMemories;
-    std::unordered_map<Uint32, VkImage> textures;
-    std::unordered_map<Uint32, VkDeviceMemory> textureMemories;
-    std::unordered_map<Uint32, VkImageView> textureViews;
+    std::unordered_map<Uint32, VkImage> images;
+    std::unordered_map<Uint32, VkDeviceMemory> imageMemories;
+    std::unordered_map<Uint32, VkImageView> imageViews;
     std::unordered_map<Uint32, VkPipeline> pipelines;
     std::unordered_map<Material*, VkDescriptorSet> materialTextureSets; // TODO: better key?
 };
