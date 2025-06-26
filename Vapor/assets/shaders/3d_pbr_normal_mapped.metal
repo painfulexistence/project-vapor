@@ -15,6 +15,7 @@ struct CameraData {
     float4x4 proj;
     float4x4 view;
     float4x4 invProj;
+    float4x4 invView;
     float near;
     float far;
 };
@@ -207,6 +208,7 @@ fragment float4 fragmentMain(
     texture2d<float, access::sample> texMetallicRoughness [[texture(2)]],
     texture2d<float, access::sample> texOcclusion [[texture(3)]],
     texture2d<float, access::sample> texEmissive [[texture(4)]],
+    texture2d<float, access::sample> texShadow [[texture(7)]],
     const device DirLight* directionalLights [[buffer(0)]],
     const device PointLight* pointLights [[buffer(1)]],
     const device Cluster* clusters [[buffer(2)]],

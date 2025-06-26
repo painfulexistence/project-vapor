@@ -41,7 +41,10 @@ float3 linearToSRGB(float3 color) {
     );
 }
 
-fragment float4 fragmentMain(RasterizerData in [[stage_in]], texture2d<float, access::sample> texScreen [[texture(0)]]) {
+fragment float4 fragmentMain(
+    RasterizerData in [[stage_in]],
+    texture2d<float, access::sample> texScreen [[texture(0)]]
+) {
     constexpr sampler s(address::repeat, filter::linear, mip_filter::linear);
     float3 color = texScreen.sample(s, in.uv).rgb;
 

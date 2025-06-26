@@ -51,6 +51,8 @@ auto Renderer_Metal::init() -> void {
     buildClustersPipeline = createComputePipeline("assets/shaders/3d_cluster_build.metal");
     cullLightsPipeline = createComputePipeline("assets/shaders/3d_light_cull.metal");
     tileCullingPipeline = createComputePipeline("assets/shaders/3d_tile_light_cull.metal");
+    normalResolvePipeline = createComputePipeline("assets/shaders/3d_normal_resolve.metal");
+    raytraceShadowPipeline = createComputePipeline("assets/shaders/3d_raytrace_shadow.metal");
 
     // Create buffers
     cameraDataBuffers.resize(MAX_FRAMES_IN_FLIGHT);
@@ -70,6 +72,18 @@ auto Renderer_Metal::init() -> void {
     clusterBuffers.resize(MAX_FRAMES_IN_FLIGHT);
     for (auto& clusterBuffer : clusterBuffers) {
         clusterBuffer = NS::TransferPtr(device->newBuffer(clusterGridSizeX * clusterGridSizeY * clusterGridSizeZ * sizeof(Cluster), MTL::ResourceStorageModeManaged));
+    }
+
+    accelInstanceBuffers.resize(MAX_FRAMES_IN_FLIGHT);
+    TLASScratchBuffers.resize(MAX_FRAMES_IN_FLIGHT);
+    TLASBuffers.resize(MAX_FRAMES_IN_FLIGHT);
+    for (size_t i = 0; i < MAX_FRAMES_IN_FLIGHT; i++) {
+        accelInstanceBuffers[i] = NS::TransferPtr(device->newBuffer(
+            MAX_INSTANCES * sizeof(MTL::AccelerationStructureInstanceDescriptor),
+            MTL::ResourceStorageModeManaged
+        ));
+        TLASScratchBuffers[i] = nullptr;
+        TLASBuffers[i] = nullptr;
     }
 
     // Create textures
@@ -106,6 +120,29 @@ auto Renderer_Metal::init() -> void {
     colorRT = NS::TransferPtr(device->newTexture(colorTextureDesc));
     colorTextureDesc->release();
 
+    MTL::TextureDescriptor* normalTextureDesc = MTL::TextureDescriptor::alloc()->init();
+    normalTextureDesc->setTextureType(MTL::TextureType2DMultisample);
+    normalTextureDesc->setPixelFormat(MTL::PixelFormatRGBA16Float); // HDR format
+    normalTextureDesc->setWidth(swapchain->drawableSize().width);
+    normalTextureDesc->setHeight(swapchain->drawableSize().height);
+    normalTextureDesc->setSampleCount(NS::UInteger(MSAA_SAMPLE_COUNT));
+    normalTextureDesc->setUsage(MTL::TextureUsageRenderTarget);
+    normalRT_MS = NS::TransferPtr(device->newTexture(normalTextureDesc));
+    normalTextureDesc->setTextureType(MTL::TextureType2D);
+    normalTextureDesc->setSampleCount(1);
+    normalTextureDesc->setUsage(MTL::TextureUsageShaderRead | MTL::TextureUsageShaderWrite);
+    normalRT = NS::TransferPtr(device->newTexture(normalTextureDesc));
+    normalTextureDesc->release();
+
+    MTL::TextureDescriptor* shadowTextureDesc = MTL::TextureDescriptor::alloc()->init();
+    shadowTextureDesc->setTextureType(MTL::TextureType2D);
+    shadowTextureDesc->setPixelFormat(MTL::PixelFormatRGBA8Unorm);
+    shadowTextureDesc->setWidth(swapchain->drawableSize().width);
+    shadowTextureDesc->setHeight(swapchain->drawableSize().height);
+    shadowTextureDesc->setUsage(MTL::TextureUsageShaderRead | MTL::TextureUsageShaderWrite);
+    shadowRT = NS::TransferPtr(device->newTexture(shadowTextureDesc));
+    shadowTextureDesc->release();
+
     // Create depth stencil states (for depth testing)
     MTL::DepthStencilDescriptor* depthStencilDesc = MTL::DepthStencilDescriptor::alloc()->init();
     depthStencilDesc->setDepthCompareFunction(MTL::CompareFunction::CompareFunctionLessEqual);
@@ -115,6 +152,8 @@ auto Renderer_Metal::init() -> void {
 }
 
 auto Renderer_Metal::stage(std::shared_ptr<Scene> scene) -> void {
+    auto cmd = queue->commandBuffer();
+
     // Buffers
     const std::function<void(const std::shared_ptr<Node>&)> stageNode =
         [&](const std::shared_ptr<Node>& node) {
@@ -122,6 +161,32 @@ auto Renderer_Metal::stage(std::shared_ptr<Scene> scene) -> void {
                 for (auto& mesh : node->meshGroup->meshes) {
                     mesh->vbos.push_back(createVertexBuffer(mesh->vertices)); // TODO: use single vbo for all meshes
                     mesh->ebo = createIndexBuffer(mesh->indices);
+
+                    auto geomDesc = NS::TransferPtr(MTL::AccelerationStructureTriangleGeometryDescriptor::alloc()->init());
+                    geomDesc->setVertexBuffer(getBuffer(mesh->vbos[0]).get());
+                    geomDesc->setVertexStride(sizeof(VertexData));
+                    geomDesc->setVertexFormat(MTL::AttributeFormatFloat3);
+                    geomDesc->setVertexBufferOffset(offsetof(VertexData, position));
+                    geomDesc->setIndexBuffer(getBuffer(mesh->ebo).get());
+                    geomDesc->setIndexType(MTL::IndexTypeUInt32);
+                    geomDesc->setIndexBufferOffset(0);
+                    geomDesc->setTriangleCount(mesh->indices.size() / 3);
+                    geomDesc->setOpaque(true);
+
+                    auto accelDesc = NS::TransferPtr(MTL::PrimitiveAccelerationStructureDescriptor::alloc()->init());
+                    const void* descriptors[] = { geomDesc.get() };
+                    NS::Array* geomArray = (NS::Array*)(CFArrayCreate(kCFAllocatorDefault, descriptors, 1, &kCFTypeArrayCallBacks));
+                    accelDesc->setGeometryDescriptors(geomArray);
+
+                    auto accelSizes = device->accelerationStructureSizes(accelDesc.get());
+                    auto accelStruct = NS::TransferPtr(device->newAccelerationStructure(accelSizes.accelerationStructureSize));
+                    auto scratchBuffer = NS::TransferPtr(device->newBuffer(accelSizes.buildScratchBufferSize, MTL::ResourceStorageModePrivate));
+
+                    auto encoder = cmd->accelerationStructureCommandEncoder();
+                    encoder->buildAccelerationStructure(accelStruct.get(), accelDesc.get(), scratchBuffer.get(), 0);
+                    encoder->endEncoding();
+
+                    mesh->blasIndex = nextBLASID++;
                 }
             }
             for (const auto& child : node->children) {
@@ -131,6 +196,8 @@ auto Renderer_Metal::stage(std::shared_ptr<Scene> scene) -> void {
     for (auto& node : scene->nodes) {
         stageNode(node);
     }
+
+    cmd->commit();
 
     directionalLightBuffer = NS::TransferPtr(device->newBuffer(scene->directionalLights.size() * sizeof(DirectionalLight), MTL::ResourceStorageModeManaged));
     memcpy(directionalLightBuffer->contents(), scene->directionalLights.data(), scene->directionalLights.size() * sizeof(DirectionalLight));
@@ -169,10 +236,12 @@ auto Renderer_Metal::draw(std::shared_ptr<Scene> scene, Camera& camera) -> void 
     glm::mat4 proj = camera.GetProjMatrix();
     glm::mat4 view = camera.GetViewMatrix();
     glm::mat4 invProj = glm::inverse(proj);
+    glm::mat4 invView = glm::inverse(view);
     CameraData* cameraData = reinterpret_cast<CameraData*>(cameraDataBuffers[currentFrameInFlight]->contents());
     cameraData->proj = proj;
     cameraData->view = view;
     cameraData->invProj = invProj;
+    cameraData->invView = invView;
     cameraData->near = near;
     cameraData->far = far;
     cameraDataBuffers[currentFrameInFlight]->didModifyRange(NS::Range::Make(0, cameraDataBuffers[currentFrameInFlight]->length()));
@@ -191,8 +260,50 @@ auto Renderer_Metal::draw(std::shared_ptr<Scene> scene, Camera& camera) -> void 
     glm::uvec3 gridSize = glm::uvec3(clusterGridSizeX, clusterGridSizeY, clusterGridSizeZ);
     uint lightCount = scene->pointLights.size();
 
+    accelInstances.clear();
+    for (const auto& node : scene->nodes) {
+        if (node->meshGroup) {
+            for (const auto& mesh : node->meshGroup->meshes) {
+                MTL::AccelerationStructureInstanceDescriptor accelInstanceDesc;
+                const glm::mat4& transform = node->worldTransform;
+                for (int i = 0; i < 3; ++i) {
+                    for (int j = 0; j < 4; ++j) {
+                        accelInstanceDesc.transformationMatrix.columns[i][j] = transform[i][j];
+                    }
+                }
+                accelInstanceDesc.accelerationStructureIndex = mesh->blasIndex;
+                accelInstanceDesc.mask = 0xFF;
+                accelInstances.push_back(accelInstanceDesc);
+            }
+        }
+    }
+
+    auto& currentInstanceBuffer = accelInstanceBuffers[currentFrameInFlight];
+    if (accelInstances.size() > MAX_INSTANCES) { // reallocate if needed
+        fmt::print("Warning: Instance count ({}) exceeds MAX_INSTANCES ({})\n", accelInstances.size(), MAX_INSTANCES);
+    }
+    memcpy(currentInstanceBuffer->contents(), accelInstances.data(),
+            accelInstances.size() * sizeof(MTL::AccelerationStructureInstanceDescriptor));
+    currentInstanceBuffer->didModifyRange(NS::Range::Make(0, currentInstanceBuffer->length()));
+
+    auto TLASDesc = NS::TransferPtr(MTL::InstanceAccelerationStructureDescriptor::alloc()->init());
+    TLASDesc->setInstanceCount(accelInstances.size());
+    TLASDesc->setInstanceDescriptorBuffer(currentInstanceBuffer.get());
+    auto TLASSizes = device->accelerationStructureSizes(TLASDesc.get());
+    if (!TLASScratchBuffers[currentFrameInFlight] || TLASScratchBuffers[currentFrameInFlight]->length() < TLASSizes.buildScratchBufferSize) {
+        TLASScratchBuffers[currentFrameInFlight] = NS::TransferPtr(device->newBuffer(TLASSizes.buildScratchBufferSize, MTL::ResourceStorageModePrivate));
+    }
+    if (!TLASBuffers[currentFrameInFlight] || TLASBuffers[currentFrameInFlight]->size() < TLASSizes.accelerationStructureSize) {
+        TLASBuffers[currentFrameInFlight] = NS::TransferPtr(device->newAccelerationStructure(TLASSizes.accelerationStructureSize));
+    }
+
     // Create render pass descriptors
     auto prePass = NS::TransferPtr(MTL::RenderPassDescriptor::renderPassDescriptor());
+    auto prePassNormalRT = prePass->colorAttachments()->object(0);
+    prePassNormalRT->setClearColor(MTL::ClearColor(0.0, 0.0, 1.0, 1.0)); // default up normal
+    prePassNormalRT->setLoadAction(MTL::LoadActionClear);
+    prePassNormalRT->setStoreAction(MTL::StoreActionStore);
+    prePassNormalRT->setTexture(normalRT_MS.get());
     auto prePassDepthRT = prePass->depthAttachment();
     prePassDepthRT->setClearDepth(clearDepth);
     prePassDepthRT->setLoadAction(MTL::LoadActionClear);
@@ -221,6 +332,11 @@ auto Renderer_Metal::draw(std::shared_ptr<Scene> scene, Camera& camera) -> void 
 
     // Start rendering
     auto cmd = queue->commandBuffer();
+
+    // 0. build TLAS
+    auto accelEncoder = cmd->accelerationStructureCommandEncoder();
+    accelEncoder->buildAccelerationStructure(TLASBuffers[currentFrameInFlight].get(), TLASDesc.get(), TLASScratchBuffers[currentFrameInFlight].get(), 0);
+    accelEncoder->endEncoding();
 
     // 1. pre-pass
     auto prePassEncoder = cmd->renderCommandEncoder(prePass.get());
@@ -290,6 +406,14 @@ auto Renderer_Metal::draw(std::shared_ptr<Scene> scene, Camera& camera) -> void 
     }
     prePassEncoder->endEncoding();
 
+    // 2. normal resolve pass
+    auto normalResolveEncoder = cmd->computeCommandEncoder();
+    normalResolveEncoder->setComputePipelineState(normalResolvePipeline.get());
+    normalResolveEncoder->setTexture(normalRT_MS.get(), 0);
+    normalResolveEncoder->setTexture(normalRT.get(), 1);
+    normalResolveEncoder->dispatchThreadgroups(MTL::Size(screenSize.x, screenSize.y, 1), MTL::Size(1, 1, 1));
+    normalResolveEncoder->endEncoding();
+
     // // 2. cluster building pass
     // auto clusterEncoder = cmd->computeCommandEncoder();
     // clusterEncoder->setComputePipelineState(buildClustersPipeline.get());
@@ -325,6 +449,20 @@ auto Renderer_Metal::draw(std::shared_ptr<Scene> scene, Camera& camera) -> void 
     tileCullingEncoder->setBytes(&screenSize, sizeof(glm::vec2), 5);
     tileCullingEncoder->dispatchThreadgroups(MTL::Size(clusterGridSizeX, clusterGridSizeY, 1), MTL::Size(1, 1, 1));
     tileCullingEncoder->endEncoding();
+
+    // 3. raytrace shadow pass
+    auto raytraceShadowEncoder = cmd->computeCommandEncoder();
+    raytraceShadowEncoder->setComputePipelineState(raytraceShadowPipeline.get());
+    raytraceShadowEncoder->setTexture(depthStencilRT.get(), 0);
+    raytraceShadowEncoder->setTexture(normalRT.get(), 1);
+    raytraceShadowEncoder->setTexture(shadowRT.get(), 2);
+    raytraceShadowEncoder->setBuffer(cameraDataBuffers[currentFrameInFlight].get(), 0, 0);
+    raytraceShadowEncoder->setBuffer(directionalLightBuffer.get(), 0, 1);
+    raytraceShadowEncoder->setBuffer(pointLightBuffer.get(), 0, 2);
+    raytraceShadowEncoder->setBytes(&screenSize, sizeof(glm::vec2), 3);
+    raytraceShadowEncoder->setAccelerationStructure(TLASBuffers[currentFrameInFlight].get(), 4);
+    raytraceShadowEncoder->dispatchThreadgroups(MTL::Size(screenSize.x, screenSize.y, 1), MTL::Size(1, 1, 1));
+    raytraceShadowEncoder->endEncoding();
 
     // 4. render pass
     auto renderEncoder = cmd->renderCommandEncoder(renderPass.get());
@@ -385,6 +523,10 @@ auto Renderer_Metal::draw(std::shared_ptr<Scene> scene, Camera& camera) -> void 
                     //     getTexture(mesh->material->displacementMap ? mesh->material->displacementMap->texture : defaultDisplacementTexture).get(),
                     //     5
                     // );
+                    renderEncoder->setFragmentTexture(
+                        shadowRT.get(),
+                        7
+                    );
                     renderEncoder->setVertexBuffer(getBuffer(mesh->vbos[0]).get(), 0, 0);
                     renderEncoder->setVertexBuffer(cameraDataBuffers[currentFrameInFlight].get(), 0, 1);
                     renderEncoder->setVertexBuffer(instanceDataBuffers[currentFrameInFlight].get(), 0, 2);

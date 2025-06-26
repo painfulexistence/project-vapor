@@ -50,6 +50,8 @@ private:
     NS::SharedPtr<MTL::ComputePipelineState> buildClustersPipeline;
     NS::SharedPtr<MTL::ComputePipelineState> cullLightsPipeline;
     NS::SharedPtr<MTL::ComputePipelineState> tileCullingPipeline;
+    NS::SharedPtr<MTL::ComputePipelineState> normalResolvePipeline;
+    NS::SharedPtr<MTL::ComputePipelineState> raytraceShadowPipeline;
 
     TextureHandle defaultAlbedoTexture;
     TextureHandle defaultNormalTexture;
@@ -63,15 +65,25 @@ private:
     NS::SharedPtr<MTL::Buffer> directionalLightBuffer;
     NS::SharedPtr<MTL::Buffer> pointLightBuffer;
     std::vector<NS::SharedPtr<MTL::Buffer>> clusterBuffers;
+    std::vector<NS::SharedPtr<MTL::Buffer>> accelInstanceBuffers;
+    std::vector<NS::SharedPtr<MTL::Buffer>> TLASScratchBuffers;
+    std::vector<NS::SharedPtr<MTL::AccelerationStructure>> TLASBuffers;
+
+    std::vector<MTL::AccelerationStructureInstanceDescriptor> accelInstances;
+    uint32_t currentInstanceCount = 0;
 
     NS::SharedPtr<MTL::Texture> colorRT_MS;
     NS::SharedPtr<MTL::Texture> colorRT;
     NS::SharedPtr<MTL::Texture> depthStencilRT_MS;
     NS::SharedPtr<MTL::Texture> depthStencilRT;
+    NS::SharedPtr<MTL::Texture> normalRT_MS;
+    NS::SharedPtr<MTL::Texture> normalRT;
+    NS::SharedPtr<MTL::Texture> shadowRT;
 
     Uint32 nextBufferID = 1;
     Uint32 nextTextureID = 1;
     Uint32 nextPipelineID = 1;
+    Uint32 nextBLASID = 0;
     std::unordered_map<Uint32, NS::SharedPtr<MTL::Buffer>> buffers;
     std::unordered_map<Uint32, NS::SharedPtr<MTL::Texture>> textures;
     std::unordered_map<Uint32, NS::SharedPtr<MTL::RenderPipelineState>> pipelines;

@@ -13,6 +13,7 @@ struct CameraData {
     float4x4 proj;
     float4x4 view;
     float4x4 invProj;
+    float4x4 invView;
     float near;
     float far;
 };
@@ -24,7 +25,11 @@ struct InstanceData {
 
 struct RasterizerData {
     float4 position [[position]];
+    float4 normal;
     float2 uv;
+    float4 worldPosition;
+    float4 worldNormal;
+    float4 worldTangent;
 };
 
 vertex RasterizerData vertexMain(
@@ -34,15 +39,18 @@ vertex RasterizerData vertexMain(
     device const InstanceData& instance [[buffer(2)]]
 ) {
     RasterizerData vert;
-    float4 worldPosition = instance.model * float4(in[vertexID].position, 1.0);
-    vert.position = camera.proj * camera.view * worldPosition;
+    vert.worldPosition = instance.model * float4(in[vertexID].position, 1.0);
+    vert.worldNormal = instance.model * float4(in[vertexID].normal, 1.0);
+    vert.worldTangent = instance.model * float4(in[vertexID].tangent, 1.0);
+    vert.position = camera.proj * camera.view * vert.worldPosition;
     vert.uv = in[vertexID].uv;
     return vert;
 }
 
-fragment void fragmentMain(
+fragment float4 fragmentMain(
     RasterizerData in [[stage_in]],
-    texture2d<float, access::sample> texAlbedo [[texture(0)]]
+    texture2d<float, access::sample> texAlbedo [[texture(0)]],
+    texture2d<float, access::sample> texNormal [[texture(1)]]
 ) {
     constexpr sampler s(address::repeat, filter::linear, mip_filter::linear);
 
@@ -50,4 +58,11 @@ fragment void fragmentMain(
     if (baseColor.a < 0.5) {
         discard_fragment();
     }
+
+    float3 N = normalize(float3(in.worldNormal));
+    float3 T = normalize(float3(in.worldTangent));
+    float3 B = normalize(cross(N, T));
+    float3x3 TBN = float3x3(T, B, N);
+    float3 norm = normalize(TBN * normalize(texNormal.sample(s, in.uv).bgr * 2.0 - 1.0));
+    return float4(norm, 1.0);
 }

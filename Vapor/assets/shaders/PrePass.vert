@@ -11,6 +11,7 @@ layout(binding = 0) uniform CameraData {
     mat4 proj;
     mat4 view;
     mat4 invProj;
+    mat4 invView;
     float near;
     float far;
 };

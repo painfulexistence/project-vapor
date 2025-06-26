@@ -99,6 +99,7 @@ struct alignas(16) CameraData {
     glm::mat4 proj;
     glm::mat4 view;
     glm::mat4 invProj;
+    glm::mat4 invView;
     float near;
     float far;
 };
@@ -156,6 +157,7 @@ struct Mesh {
     std::vector<Uint32> indices;
     std::shared_ptr<Material> material = nullptr;
     PrimitiveMode primitiveMode;
+    Uint32 blasIndex = UINT32_MAX;
 };
 
 class MeshBuilder {

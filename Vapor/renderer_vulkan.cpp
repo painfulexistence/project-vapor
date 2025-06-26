@@ -1200,10 +1200,12 @@ auto Renderer_Vulkan::draw(std::shared_ptr<Scene> scene, Camera& camera) -> void
     glm::mat4 view = camera.GetViewMatrix();
     glm::mat4 proj = camera.GetProjMatrix();
     glm::mat4 invProj = glm::inverse(proj);
+    glm::mat4 invView = glm::inverse(view);
     CameraData cameraData = {
         .proj = proj,
         .view = view,
         .invProj = invProj,
+        .invView = invView,
         .near = camera.near(),
         .far = camera.far()
     };

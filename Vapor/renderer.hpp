@@ -41,6 +41,7 @@ public:
 protected:
     const Uint32 MAX_FRAMES_IN_FLIGHT = 3;
     const Uint32 MSAA_SAMPLE_COUNT = 4;
+    const Uint32 MAX_INSTANCES = 1000;
     glm::vec4 clearColor = glm::vec4(0.0f, 0.5f, 1.0f, 1.0f);
     double clearDepth = 1.0;
     Uint32 clusterGridSizeX = 16;
