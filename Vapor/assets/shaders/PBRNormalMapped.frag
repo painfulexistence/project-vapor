@@ -95,7 +95,7 @@ vec3 CalculatePointLight(PointLight light, vec3 norm, vec3 tangent, vec3 bitange
     vec3 lightDir = normalize(light.position - frag_pos);
     float dist = distance(light.position, frag_pos);
     float attenuation = 1.0 / (dist * dist);
-    attenuation *= smoothstep(light.radius, light.radius * 0.8, dist);
+    attenuation *= 1.0 - smoothstep(light.radius * 0.8, light.radius, dist);
     vec3 radiance = attenuation * light.color * light.intensity;
     return CookTorranceBRDF(norm, tangent, bitangent, lightDir, viewDir, surf) * radiance * max(dot(norm, lightDir), 0.0);
 }
@@ -245,7 +245,7 @@ void main() {
         result += CalculatePointLight(point_lights[lightIndex], norm, tangent, bitangent, viewDir, surf);
     }
 
-    result += vec3(0.2) * surf.ao * surf.color;
+    result += vec3(0.05) * surf.ao * surf.color;
     // result += CalculateIBL(norm, viewDir, surf);
 
     Color = vec4(result, 1.0);
