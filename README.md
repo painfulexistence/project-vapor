@@ -10,14 +10,16 @@
 <p>It's a deep dive into game engine architecture and current-gen rendering techniques (specifically, hybrid rendering techniques) and a solo journey to design and to implement various aspects of a 3D game engine. </p>
 <p>Aside from personal learning, I'd also like to share knowledge with those learning to make engines. </p>
 
+<!--
 ### Blog
-[Arcane Realms](https://painfulexistence.substack.com/)
+[Arcane Realms](https://painfulexistence.substack.com/) -->
 
 ### Features
-- Selectable graphics backends (Metal-cpp and Vulkan)
+- Made with Metal-cpp and Vulkan
 - Disney PBR
-- GLTF loading
+- GLTF scene loading
 - Tiled forward rendering
+- Raytraced hard shadow (Metal only)
 
 ### Platforms
 - Apple Silicon

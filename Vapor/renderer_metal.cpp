@@ -247,6 +247,14 @@ auto Renderer_Metal::draw(std::shared_ptr<Scene> scene, Camera& camera) -> void 
     cameraData->far = far;
     cameraDataBuffers[currentFrameInFlight]->didModifyRange(NS::Range::Make(0, cameraDataBuffers[currentFrameInFlight]->length()));
 
+    DirectionalLight* dirLights = reinterpret_cast<DirectionalLight*>(directionalLightBuffer->contents());
+    for (size_t i = 0; i < scene->directionalLights.size(); ++i) {
+        dirLights[i].direction = scene->directionalLights[i].direction;
+        dirLights[i].color = scene->directionalLights[i].color;
+        dirLights[i].intensity = scene->directionalLights[i].intensity;
+    }
+    pointLightBuffer->didModifyRange(NS::Range::Make(0, directionalLightBuffer->length()));
+
     PointLight* pointLights = reinterpret_cast<PointLight*>(pointLightBuffer->contents());
     for (size_t i = 0; i < scene->pointLights.size(); ++i) {
         pointLights[i].position = scene->pointLights[i].position;
