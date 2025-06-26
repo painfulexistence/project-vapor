@@ -303,7 +303,7 @@ fragment float4 fragmentMain(
         result += CalculatePointLight(pointLights[lightIndex], norm, T, B, viewDir, surf, in.worldPosition.xyz);
     }
 
-    result += float3(0.2) * surf.ao * surf.color;
+    result += float3(0.05) * surf.ao * surf.color;
 
     return float4(result, 1.0);
 }

@@ -57,7 +57,7 @@ int main(int argc, char* args[]) {
 #endif
 
     auto window = SDL_CreateWindow(
-        winTitle, 600, 600, winFlags
+        winTitle, 800, 800, winFlags
     );
 
     RNG rng;
@@ -81,7 +81,7 @@ int main(int argc, char* args[]) {
     scene->directionalLights.push_back({
         .direction = glm::vec3(0.0, 1.0, 0.0),
         .color = glm::vec3(1.0, 1.0, 1.0),
-        .intensity = 10.0,
+        .intensity = 0.5,
     });
     for (int i = 0; i < 256; i++) {
         scene->pointLights.push_back({
