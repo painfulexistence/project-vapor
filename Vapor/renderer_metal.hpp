@@ -22,7 +22,7 @@ public:
 
     virtual void draw(std::shared_ptr<Scene> scene, Camera& camera) override;
 
-    NS::SharedPtr<MTL::RenderPipelineState> createPipeline(const std::string& filename);
+    NS::SharedPtr<MTL::RenderPipelineState> createPipeline(const std::string& filename, bool isHDR);
     NS::SharedPtr<MTL::ComputePipelineState> createComputePipeline(const std::string& filename);
 
     TextureHandle createTexture(const std::shared_ptr<Image>& img);

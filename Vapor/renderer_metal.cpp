@@ -41,6 +41,8 @@ Renderer_Metal::Renderer_Metal(SDL_Window* window) {
     renderer = SDL_CreateRenderer(window, nullptr);
     swapchain = (CA::MetalLayer*)SDL_GetRenderMetalLayer(renderer);
     // swapchain->setDisplaySyncEnabled(true);
+    swapchain->setPixelFormat(MTL::PixelFormatBGRA8Unorm_sRGB);
+    swapchain->setColorspace(CGColorSpaceCreateWithName(kCGColorSpaceSRGB));
     device = swapchain->device();
     queue = NS::TransferPtr(device->newCommandQueue());
 }
@@ -56,9 +58,9 @@ struct Particle {
 
 auto Renderer_Metal::init() -> void {
     // Create pipelines
-    drawPipeline = createPipeline("assets/shaders/3d_pbr_normal_mapped.metal");
-    prePassPipeline = createPipeline("assets/shaders/3d_depth_only.metal");
-    postProcessPipeline = createPipeline("assets/shaders/3d_post_process.metal");
+    drawPipeline = createPipeline("assets/shaders/3d_pbr_normal_mapped.metal", true);
+    prePassPipeline = createPipeline("assets/shaders/3d_depth_only.metal", true);
+    postProcessPipeline = createPipeline("assets/shaders/3d_post_process.metal", false);
     buildClustersPipeline = createComputePipeline("assets/shaders/3d_cluster_build.metal");
     cullLightsPipeline = createComputePipeline("assets/shaders/3d_light_cull.metal");
     tileCullingPipeline = createComputePipeline("assets/shaders/3d_tile_light_cull.metal");
@@ -105,7 +107,7 @@ auto Renderer_Metal::init() -> void {
 
     MTL::TextureDescriptor* colorTextureDesc = MTL::TextureDescriptor::alloc()->init();
     colorTextureDesc->setTextureType(MTL::TextureType2DMultisample);
-    colorTextureDesc->setPixelFormat(MTL::PixelFormatBGRA8Unorm);
+    colorTextureDesc->setPixelFormat(MTL::PixelFormatRGBA16Float); // HDR format
     colorTextureDesc->setWidth(swapchain->drawableSize().width);
     colorTextureDesc->setHeight(swapchain->drawableSize().height);
     colorTextureDesc->setSampleCount(NS::UInteger(MSAA_SAMPLE_COUNT));
@@ -452,7 +454,7 @@ auto Renderer_Metal::draw(std::shared_ptr<Scene> scene, Camera& camera) -> void 
 }
 
 
-NS::SharedPtr<MTL::RenderPipelineState> Renderer_Metal::createPipeline(const std::string& filename) {
+NS::SharedPtr<MTL::RenderPipelineState> Renderer_Metal::createPipeline(const std::string& filename, bool isHDR) {
     auto shaderSrc = readFile(filename);
 
     auto code = NS::String::string(shaderSrc.data(), NS::StringEncoding::UTF8StringEncoding);
@@ -474,7 +476,11 @@ NS::SharedPtr<MTL::RenderPipelineState> Renderer_Metal::createPipeline(const std
     pipelineDesc->setVertexFunction(vertexMain);
     pipelineDesc->setFragmentFunction(fragmentMain);
     auto colorAttachment = pipelineDesc->colorAttachments()->object(0);
-    colorAttachment->setPixelFormat(MTL::PixelFormat::PixelFormatBGRA8Unorm);
+    if (isHDR) {
+        colorAttachment->setPixelFormat(MTL::PixelFormat::PixelFormatRGBA16Float); // HDR format
+    } else {
+        colorAttachment->setPixelFormat(swapchain->pixelFormat());
+    }
     // colorAttachment->setBlendingEnabled(true);
     // colorAttachment->setAlphaBlendOperation(MTL::BlendOperation::BlendOperationAdd);
     // colorAttachment->setRgbBlendOperation(MTL::BlendOperation::BlendOperationAdd);
