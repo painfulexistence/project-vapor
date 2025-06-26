@@ -24,19 +24,6 @@ std::unique_ptr<Renderer> createRendererMetal(SDL_Window* window) {
     return std::make_unique<Renderer_Metal>(window);
 }
 
-struct alignas(16) CameraData {
-    glm::mat4 proj;
-    glm::mat4 view;
-    glm::mat4 invProj;
-    float near;
-    float far;
-};
-
-struct InstanceData {
-    alignas(16) glm::mat4 model;
-    glm::vec4 color;
-};
-
 Renderer_Metal::Renderer_Metal(SDL_Window* window) {
     renderer = SDL_CreateRenderer(window, nullptr);
     swapchain = (CA::MetalLayer*)SDL_GetRenderMetalLayer(renderer);

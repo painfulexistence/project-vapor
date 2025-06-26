@@ -1,0 +1,79 @@
+#version 450
+layout(local_size_x = 1, local_size_y = 1, local_size_z = 1) in;
+
+const uint MAX_LIGHTS_PER_TILE = 256; // Must match the definition in graphics.hpp
+
+struct Cluster {
+    vec4 min;
+    vec4 max;
+    uint lightCount;
+    uint lightIndices[MAX_LIGHTS_PER_TILE];
+};
+
+struct PointLight {
+    vec3 position;
+    vec3 color;
+    float intensity;
+    float radius;
+};
+
+layout(std140, set = 0, binding = 0) uniform CameraData {
+    mat4 proj;
+    mat4 view;
+    mat4 invProj;
+    float near;
+    float far;
+};
+layout(std430, set = 0, binding = 3) readonly buffer PointLightBuffer {
+    PointLight pointLights[];
+};
+layout(std140, set = 0, binding = 4) uniform LightCullData {
+    vec2 screenSize;
+    vec2 _pad1;
+    uvec3 gridSize;
+    uint lightCount;
+};
+layout(std430, set = 0, binding = 5) restrict buffer ClusterBuffer {
+    Cluster tiles[];
+};
+
+bool sphereTileIntersection(vec3 center, float radius, mat4 viewProj, vec2 tileMin, vec2 tileMax, vec2 screenSize) {
+    vec4 clipPos = viewProj * vec4(center, 1.0);
+    // if (clipPos.w <= 0.0) { // lights behind camera (but these lights can still affect the pixel if their radius is large enough)
+    //     return false;
+    // }
+    vec3 ndc = clipPos.xyz / clipPos.w;
+    vec2 screenUV = ndc.xy * 0.5 + 0.5;
+    // screenUV.y = 1.0 - screenUV.y;
+
+    vec2 centerSS = screenUV * screenSize;
+    float radiusSS = radius * 2.0 * min(screenSize.x, screenSize.y) / abs(clipPos.w * 2.0); // approximation
+    vec2 sphereMin = centerSS - radiusSS;
+    vec2 sphereMax = centerSS + radiusSS;
+
+    return !(sphereMax.x < tileMin.x || sphereMin.x > tileMax.x ||
+             sphereMax.y < tileMin.y || sphereMin.y > tileMax.y);
+}
+
+void main() {
+    uint tileIndex = gl_WorkGroupID.x + gl_WorkGroupID.y * gridSize.x;
+    Cluster tile = tiles[tileIndex];
+    tile.lightCount = 0; // reset counter every frame
+
+    // Calculate tile bounding box in screen space
+    // Tile(0, 0) is bottom-left
+    vec2 tileSize = screenSize / vec2(gridSize.xy);
+    vec2 tileMin = vec2(gl_WorkGroupID.xy) * tileSize;
+    vec2 tileMax = vec2(gl_WorkGroupID.xy + 1) * tileSize;
+
+    mat4 viewProj = proj * view;
+    for (uint i = 0; i < lightCount; i++) {
+        PointLight light = pointLights[i];
+        if (sphereTileIntersection(light.position, light.radius, proj * view, tileMin, tileMax, screenSize) && tile.lightCount < MAX_LIGHTS_PER_TILE) {
+            tile.lightIndices[tile.lightCount] = i;
+            tile.lightCount++;
+        }
+    }
+
+    tiles[tileIndex] = tile;
+}

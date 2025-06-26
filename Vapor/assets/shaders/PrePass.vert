@@ -8,12 +8,15 @@ layout(location = 3) in vec3 tangent;
 layout(location = 0) out vec2 tex_uv;
 
 layout(binding = 0) uniform CameraData {
-    mat4 view;
     mat4 proj;
-    vec3 pos;
+    mat4 view;
+    mat4 invProj;
+    float near;
+    float far;
 };
 layout(binding = 1) uniform InstanceData {
     mat4 model;
+    vec4 color;
 };
 
 void main() {

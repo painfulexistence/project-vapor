@@ -11,12 +11,15 @@ layout(location = 2) out vec3 T;
 layout(location = 3) out vec3 N;
 
 layout(binding = 0) uniform CameraData {
-    mat4 view;
     mat4 proj;
-    vec3 pos;
+    mat4 view;
+    mat4 invProj;
+    float near;
+    float far;
 };
 layout(binding = 1) uniform InstanceData {
     mat4 model;
+    vec4 color;
 };
 
 void main() {

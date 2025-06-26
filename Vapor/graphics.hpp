@@ -4,6 +4,7 @@
 #include <glm/vec2.hpp>
 #include <glm/vec3.hpp>
 #include <glm/vec4.hpp>
+#include <glm/mat4x4.hpp>
 #include <cstddef>
 #include <vector>
 #include <array>
@@ -90,11 +91,35 @@ struct alignas(16) PointLight { // Note that alignas(16) is not enough to ensure
     // Uint8 _pad4[3];
 };
 
+struct SceneData {
+    float time;
+};
+
+struct alignas(16) CameraData {
+    glm::mat4 proj;
+    glm::mat4 view;
+    glm::mat4 invProj;
+    float near;
+    float far;
+};
+
+struct alignas(16) InstanceData {
+    glm::mat4 model;
+    glm::vec4 color;
+};
+
 struct alignas(16) Cluster {
     glm::vec4 min;
     glm::vec4 max;
     Uint32 lightCount;
     Uint32 lightIndices[256];
+};
+
+struct alignas(16) LightCullData {
+    glm::vec2 screenSize;
+    glm::vec2 _pad1;
+    glm::uvec3 gridSize;
+    Uint32 lightCount;
 };
 
 struct VertexData {

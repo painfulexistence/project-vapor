@@ -6,11 +6,15 @@ layout(location = 2) in vec3 T;
 layout(location = 3) in vec3 N;
 layout(location = 0) out vec4 Color;
 
-layout(set = 0, binding = 0) uniform CameraData {
-    mat4 view;
-    mat4 proj;
-    vec3 pos;
-} cam;
+const uint MAX_LIGHTS_PER_TILE = 256; // Must match the definition in graphics.hpp
+
+struct Cluster {
+    vec4 min;
+    vec4 max;
+    uint lightCount;
+    uint lightIndices[MAX_LIGHTS_PER_TILE];
+};
+
 struct DirLight {
     vec3 direction;
     float _pad1;
@@ -19,6 +23,7 @@ struct DirLight {
     float intensity;
     // float _pad3[3];
 };
+
 struct PointLight {
     vec3 position;
     float _pad1;
@@ -28,11 +33,24 @@ struct PointLight {
     float radius;
     // float _pad3[2];
 };
+
+layout(push_constant) uniform PushConstants {
+    vec3 camPos;
+};
 layout(std430, set = 0, binding = 2) readonly buffer DirLightBuffer {
     DirLight directional_lights[];
 };
 layout(std430, set = 0, binding = 3) readonly buffer PointLightBuffer {
     PointLight point_lights[];
+};
+layout(std140, set = 0, binding = 4) uniform LightCullData {
+    vec2 screenSize;
+    vec2 _pad1;
+    uvec3 gridSize;
+    uint lightCount;
+};
+layout(std430, set = 0, binding = 5) readonly buffer ClusterBuffer {
+    Cluster clusters[];
 };
 layout(set = 1, binding = 0) uniform sampler2D base_map;
 layout(set = 1, binding = 1) uniform sampler2D normal_map;
@@ -61,24 +79,25 @@ const float PI = 3.1415927;
 const float GAMMA = 2.2;
 const float INV_GAMMA = 1.0 / GAMMA;
 
-vec3 CookTorranceBRDF(vec3 norm, vec3 tangent, vec3 lightDir, vec3 viewDir, Surface surf);
+vec3 CookTorranceBRDF(vec3 norm, vec3 tangent, vec3 bitangent, vec3 lightDir, vec3 viewDir, Surface surf);
 
 float TrowbridgeReitzGGX(float nh, float r);
 
 float SmithsSchlickGGX(float nv, float nl, float r);
 
-vec3 CalculateDirectionalLight(DirLight light, vec3 norm, vec3 tangent, vec3 viewDir, Surface surf) {
+vec3 CalculateDirectionalLight(DirLight light, vec3 norm, vec3 tangent, vec3 bitangent, vec3 viewDir, Surface surf) {
     vec3 lightDir = normalize(-light.direction);
     vec3 radiance = light.color * light.intensity;
-    return CookTorranceBRDF(norm, tangent, lightDir, viewDir, surf) * radiance * max(dot(norm, lightDir), 0.0);
+    return CookTorranceBRDF(norm, tangent, bitangent, lightDir, viewDir, surf) * radiance * max(dot(norm, lightDir), 0.0);
 }
 
-vec3 CalculatePointLight(PointLight light, vec3 norm, vec3 tangent, vec3 viewDir, Surface surf) {
+vec3 CalculatePointLight(PointLight light, vec3 norm, vec3 tangent, vec3 bitangent, vec3 viewDir, Surface surf) {
     vec3 lightDir = normalize(light.position - frag_pos);
     float dist = distance(light.position, frag_pos);
-    float attenuation = smoothstep(light.radius, 0.0, dist); // 1.0 / (dist * dist);
+    float attenuation = 1.0 / (dist * dist);
+    attenuation *= smoothstep(light.radius, light.radius * 0.8, dist);
     vec3 radiance = attenuation * light.color * light.intensity;
-    return CookTorranceBRDF(norm, tangent, lightDir, viewDir, surf) * radiance * max(dot(norm, lightDir), 0.0);
+    return CookTorranceBRDF(norm, tangent, bitangent, lightDir, viewDir, surf) * radiance * max(dot(norm, lightDir), 0.0);
 }
 
 // vec3 CalculateIBL(vec3 norm, vec3 viewDir, Surface surf) {
@@ -136,7 +155,7 @@ float luminance(vec3 color) {
     return dot(color, vec3(0.3, 0.6, 0.1));
 }
 
-vec3 CookTorranceBRDF(vec3 norm, vec3 tangent, vec3 lightDir, vec3 viewDir, Surface surf) {
+vec3 CookTorranceBRDF(vec3 norm, vec3 tangent, vec3 bitangent, vec3 lightDir, vec3 viewDir, Surface surf) {
     vec3 halfway = normalize(lightDir + viewDir);
     float nv = max(dot(norm, viewDir), 0.0);
     float nl = max(dot(norm, lightDir), 0.0);
@@ -162,7 +181,7 @@ vec3 CookTorranceBRDF(vec3 norm, vec3 tangent, vec3 lightDir, vec3 viewDir, Surf
     float ax = max(.001, surf.roughness * surf.roughness / aspect);
     float ay = max(.001, surf.roughness * surf.roughness * aspect);
     vec3 x = tangent;
-    vec3 y = normalize(cross(norm, tangent)); //TODO: no recalculation
+    vec3 y = bitangent; //TODO: no recalculation
     float hx = dot(halfway, x);
     float hy = dot(halfway, y);
     float lx = dot(lightDir, x);
@@ -195,7 +214,8 @@ void main() {
     mat3 TBN = mat3(T, B, N);
     vec3 norm = normalize(TBN * texNorm);
     vec3 tangent = normalize(T);
-    vec3 viewDir = normalize(cam.pos - frag_pos);
+    vec3 bitangent = normalize(cross(norm, tangent));
+    vec3 viewDir = normalize(camPos - frag_pos);
 
     Surface surf;
     surf.color = pow(baseColor.rgb, vec3(GAMMA));
@@ -213,10 +233,18 @@ void main() {
     surf.clearcoat_gloss = 1.0;
 
     vec3 result = vec3(0.0);
-    result += CalculateDirectionalLight(directional_lights[0], norm, tangent, viewDir, surf);
-    for (int i = 0; i < 100; i++) {
-        result += CalculatePointLight(point_lights[i], norm, tangent, viewDir, surf);
+    result += CalculateDirectionalLight(directional_lights[0], norm, tangent, bitangent, viewDir, surf);
+
+    vec2 screenUV = gl_FragCoord.xy / screenSize;
+    uint tileX = uint(screenUV.x * float(gridSize.x));
+    uint tileY = uint((1.0 - screenUV.y) * float(gridSize.y));
+    uint tileIndex = tileX + tileY * gridSize.x;
+    Cluster tile = clusters[tileIndex];
+    for (uint i = 0; i < tile.lightCount; i++) { // note that there is another light count variable
+        uint lightIndex = tile.lightIndices[i];
+        result += CalculatePointLight(point_lights[lightIndex], norm, tangent, bitangent, viewDir, surf);
     }
+
     result += vec3(0.2) * surf.ao * surf.color;
     // result += CalculateIBL(norm, viewDir, surf);
 

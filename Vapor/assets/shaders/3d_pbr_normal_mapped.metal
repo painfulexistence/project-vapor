@@ -178,7 +178,8 @@ float3 CalculateDirectionalLight(DirLight light, float3 norm, float3 tangent, fl
 float3 CalculatePointLight(PointLight light, float3 norm, float3 tangent, float3 bitangent, float3 viewDir, Surface surf, float3 fragPos) {
     float3 lightDir = normalize(light.position - fragPos);
     float dist = distance(light.position, fragPos);
-    float attenuation = smoothstep(light.radius, 0.0, dist); // 1.0 / (dist * dist);
+    float attenuation = 1.0 / (dist * dist);
+    attenuation *= 1.0 - smoothstep(light.radius * 0.8, light.radius, dist);
     float3 radiance = attenuation * light.color * light.intensity;
 
     return CookTorranceBRDF(norm, tangent, bitangent, lightDir, viewDir, surf) * radiance * clamp(dot(norm, lightDir), 0.0, 1.0);

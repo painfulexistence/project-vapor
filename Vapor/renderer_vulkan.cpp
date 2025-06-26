@@ -362,9 +362,11 @@ Renderer_Vulkan::~Renderer_Vulkan() {
     vkDestroyPipeline(device, renderPipeline, nullptr);
     vkDestroyPipeline(device, prePassPipeline, nullptr);
     vkDestroyPipeline(device, postProcessPipeline, nullptr);
+    vkDestroyPipeline(device, tileCullingPipeline, nullptr);
     vkDestroyPipelineLayout(device, renderPipelineLayout, nullptr);
     vkDestroyPipelineLayout(device, prePassPipelineLayout, nullptr);
     vkDestroyPipelineLayout(device, postProcessPipelineLayout, nullptr);
+    vkDestroyPipelineLayout(device, tileCullingPipelineLayout, nullptr);
     vkDestroyRenderPass(device, renderPass, nullptr);
     vkDestroyRenderPass(device, prePass, nullptr);
     vkDestroyRenderPass(device, postProcessPass, nullptr);
@@ -644,14 +646,16 @@ auto Renderer_Vulkan::init() -> void {
         throw std::runtime_error("Failed to create empty set layout!");
     }
 
-    std::array<VkDescriptorSetLayoutBinding, 4> set0LayoutBindings = {{
+    std::array<VkDescriptorSetLayoutBinding, 6> set0LayoutBindings = {{
+        // Camera data
         {
             .binding = 0,
             .descriptorType = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER,
             .descriptorCount = 1,
-            .stageFlags = VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT,
+            .stageFlags = VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_COMPUTE_BIT,
             .pImmutableSamplers = nullptr
         },
+        // Instance data
         {
             .binding = 1,
             .descriptorType = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER,
@@ -659,6 +663,7 @@ auto Renderer_Vulkan::init() -> void {
             .stageFlags = VK_SHADER_STAGE_VERTEX_BIT,
             .pImmutableSamplers = nullptr
         },
+        // Directional lights
         {
             .binding = 2,
             .descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,
@@ -666,13 +671,30 @@ auto Renderer_Vulkan::init() -> void {
             .stageFlags = VK_SHADER_STAGE_FRAGMENT_BIT,
             .pImmutableSamplers = nullptr
         },
+        // Point lights
         {
             .binding = 3,
             .descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,
             .descriptorCount = 1,
-            .stageFlags = VK_SHADER_STAGE_FRAGMENT_BIT,
+            .stageFlags = VK_SHADER_STAGE_FRAGMENT_BIT | VK_SHADER_STAGE_COMPUTE_BIT,
             .pImmutableSamplers = nullptr
-        }
+        },
+        // Light cull data
+        {
+            .binding = 4,
+            .descriptorType = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER,
+            .descriptorCount = 1,
+            .stageFlags = VK_SHADER_STAGE_COMPUTE_BIT | VK_SHADER_STAGE_FRAGMENT_BIT,
+            .pImmutableSamplers = nullptr
+        },
+        // Cluster data
+        {
+            .binding = 5,
+            .descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,
+            .descriptorCount = 1,
+            .stageFlags = VK_SHADER_STAGE_COMPUTE_BIT | VK_SHADER_STAGE_FRAGMENT_BIT,
+            .pImmutableSamplers = nullptr
+        },
     }};
     VkDescriptorSetLayoutCreateInfo set0LayoutDesc = {};
     set0LayoutDesc.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO;
@@ -683,6 +705,7 @@ auto Renderer_Vulkan::init() -> void {
     }
 
     std::array<VkDescriptorSetLayoutBinding, 2> set1LayoutBindings = {{
+        // Base map
         {
             .binding = 0,
             .descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER,
@@ -690,6 +713,7 @@ auto Renderer_Vulkan::init() -> void {
             .stageFlags = VK_SHADER_STAGE_FRAGMENT_BIT,
             .pImmutableSamplers = nullptr
         },
+        // Normal map
         {
             .binding = 1,
             .descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER,
@@ -726,7 +750,7 @@ auto Renderer_Vulkan::init() -> void {
     // Create pipeline layouts
     std::array<VkDescriptorSetLayout, 2> renderDescriptorSetLayouts = { set0Layout, set1Layout };
     std::array<VkPushConstantRange, 1> renderPushConstantRanges = {{
-        { VK_SHADER_STAGE_FRAGMENT_BIT, 0, sizeof(SceneData) }
+        { VK_SHADER_STAGE_FRAGMENT_BIT, 0, sizeof(glm::vec3) }
     }};
     VkPipelineLayoutCreateInfo renderPipelineLayoutInfo = {};
     renderPipelineLayoutInfo.sType = VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO;
@@ -760,6 +784,16 @@ auto Renderer_Vulkan::init() -> void {
         throw std::runtime_error("Failed to create post-process pipeline layout!");
     }
 
+    VkPipelineLayoutCreateInfo tileCullingPipelineLayoutInfo = {};
+    tileCullingPipelineLayoutInfo.sType = VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO;
+    tileCullingPipelineLayoutInfo.setLayoutCount = 1;
+    tileCullingPipelineLayoutInfo.pSetLayouts = &set0Layout;
+    tileCullingPipelineLayoutInfo.pushConstantRangeCount = 0;
+    tileCullingPipelineLayoutInfo.pPushConstantRanges = nullptr;
+    if (vkCreatePipelineLayout(device, &tileCullingPipelineLayoutInfo, nullptr, &tileCullingPipelineLayout) != VK_SUCCESS) {
+        throw std::runtime_error("Failed to create tile culling pipeline layout!");
+    }
+
     // Create pipelines
     renderPipeline = createRenderPipeline(
         std::string("assets/shaders/TBN.vert.spv"),
@@ -773,9 +807,10 @@ auto Renderer_Vulkan::init() -> void {
         std::string("assets/shaders/FullScreen.vert.spv"),
         std::string("assets/shaders/PostProcess.frag.spv")
     );
-    // tileCullingPipeline = createComputePipeline(
-    //     std::string("assets/shaders/3d_tile_light_cull.comp.spv")
-    // );
+    tileCullingPipeline = createComputePipeline(
+        std::string("assets/shaders/TileLightCull.comp.spv"),
+        tileCullingPipelineLayout
+    );
 
     // Create uniform buffers
     cameraDataBuffers.resize(MAX_FRAMES_IN_FLIGHT);
@@ -828,8 +863,8 @@ auto Renderer_Vulkan::init() -> void {
 
     // Create descriptor pool and sets
     std::array<VkDescriptorPoolSize, 2> set0PoolSizes = {{
-        { VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER, 2 * static_cast<uint32_t>(MAX_FRAMES_IN_FLIGHT) },
-        { VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, 2 * static_cast<uint32_t>(MAX_FRAMES_IN_FLIGHT) }
+        { VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER, 3 * static_cast<uint32_t>(MAX_FRAMES_IN_FLIGHT) },
+        { VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, 3 * static_cast<uint32_t>(MAX_FRAMES_IN_FLIGHT) }
     }};
 
     VkDescriptorPoolCreateInfo set0PoolDesc{};
@@ -966,6 +1001,25 @@ auto Renderer_Vulkan::stage(std::shared_ptr<Scene> scene) -> void {
         memcpy(pointLightBuffersMapped[i], scene->pointLights.data(), sizeof(PointLight) * scene->pointLights.size());
     }
 
+    LightCullData lightCullData = {};
+    lightCullData.screenSize = glm::vec2(swapchainExtent.width, swapchainExtent.height);
+    lightCullData.gridSize = glm::uvec3(clusterGridSizeX, clusterGridSizeY, clusterGridSizeZ);
+    lightCullData.lightCount = scene->pointLights.size();
+    lightCullDataBuffers.resize(MAX_FRAMES_IN_FLIGHT);
+    for (size_t i = 0; i < MAX_FRAMES_IN_FLIGHT; i++) {
+        lightCullDataBuffers[i] = createBuffer(BufferUsage::UNIFORM, sizeof(LightCullData));
+        VkDeviceMemory bufferMemory = getBufferMemory(lightCullDataBuffers[i]);
+        void* data;
+        vkMapMemory(device, bufferMemory, 0, sizeof(LightCullData), 0, &data);
+        memcpy(data, &lightCullData, sizeof(LightCullData));
+        vkUnmapMemory(device, bufferMemory);
+    }
+
+    clusterBuffers.resize(MAX_FRAMES_IN_FLIGHT);
+    for (size_t i = 0; i < MAX_FRAMES_IN_FLIGHT; i++) {
+        clusterBuffers[i] = createBuffer(BufferUsage::STORAGE, sizeof(Cluster) * clusterGridSizeX * clusterGridSizeY * clusterGridSizeZ);
+    }
+
     // Textures
     for (auto& img : scene->images) {
         img->texture = createTexture(img);
@@ -1071,11 +1125,20 @@ auto Renderer_Vulkan::stage(std::shared_ptr<Scene> scene) -> void {
 
         VkDescriptorBufferInfo pointLightBufferInfo = {};
         pointLightBufferInfo.buffer = getBuffer(pointLightBuffers[i]);
-
         pointLightBufferInfo.offset = 0;
         pointLightBufferInfo.range = sizeof(PointLight) * scene->pointLights.size();
 
-        std::array<VkWriteDescriptorSet, 2> writes = {{ // must match descriptor set layout bindings
+        VkDescriptorBufferInfo lightCullDataBufferInfo = {};
+        lightCullDataBufferInfo.buffer = getBuffer(lightCullDataBuffers[i]);
+        lightCullDataBufferInfo.offset = 0;
+        lightCullDataBufferInfo.range = sizeof(LightCullData);
+
+        VkDescriptorBufferInfo clusterBufferInfo = {};
+        clusterBufferInfo.buffer = getBuffer(clusterBuffers[i]);
+        clusterBufferInfo.offset = 0;
+        clusterBufferInfo.range = sizeof(Cluster) * clusterGridSizeX * clusterGridSizeY * clusterGridSizeZ;
+
+        std::array<VkWriteDescriptorSet, 4> writes = {{ // must match descriptor set layout bindings
             {
                 .sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET,
                 .dstSet = set0s[i],
@@ -1095,6 +1158,26 @@ auto Renderer_Vulkan::stage(std::shared_ptr<Scene> scene) -> void {
                 .descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,
                 .pImageInfo = nullptr,
                 .pBufferInfo = &pointLightBufferInfo,
+            },
+            {
+                .sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET,
+                .dstSet = set0s[i],
+                .dstBinding = 4,
+                .dstArrayElement = 0,
+                .descriptorCount = 1,
+                .descriptorType = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER,
+                .pImageInfo = nullptr,
+                .pBufferInfo = &lightCullDataBufferInfo,
+            },
+            {
+                .sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET,
+                .dstSet = set0s[i],
+                .dstBinding = 5,
+                .dstArrayElement = 0,
+                .descriptorCount = 1,
+                .descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,
+                .pImageInfo = nullptr,
+                .pBufferInfo = &clusterBufferInfo,
             }
         }};
         vkUpdateDescriptorSets(device, writes.size(), writes.data(), 0, nullptr);
@@ -1114,14 +1197,18 @@ auto Renderer_Vulkan::draw(std::shared_ptr<Scene> scene, Camera& camera) -> void
     float time = SDL_GetTicks() / 1000.0;
 
     glm::vec3  camPos = camera.GetEye();
+    glm::mat4 view = camera.GetViewMatrix();
+    glm::mat4 proj = camera.GetProjMatrix();
+    glm::mat4 invProj = glm::inverse(proj);
     CameraData cameraData = {
-        .view = camera.GetViewMatrix(),
-        .proj = camera.GetProjMatrix(),
-        .pos = camPos
+        .proj = proj,
+        .view = view,
+        .invProj = invProj,
+        .near = camera.near(),
+        .far = camera.far()
     };
     memcpy(cameraDataBuffersMapped[currentFrameInFlight], &cameraData, sizeof(CameraData));
     memcpy(pointLightBuffersMapped[currentFrameInFlight], scene->pointLights.data(), sizeof(PointLight) * scene->pointLights.size());
-    SceneData sceneData = { time };
 
     VkCommandBuffer cmd = commandBuffers[currentFrameInFlight];
     vkResetCommandBuffer(cmd, 0);
@@ -1199,6 +1286,10 @@ auto Renderer_Vulkan::draw(std::shared_ptr<Scene> scene, Camera& camera) -> void
 
     vkCmdEndRenderPass(cmd);
 
+    vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, tileCullingPipeline);
+    vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, tileCullingPipelineLayout, 0, 1, &set0s[currentFrameInFlight], 0, nullptr);
+    vkCmdDispatch(cmd, clusterGridSizeX, clusterGridSizeY, 1);
+
     vkCmdBeginRenderPass(cmd, &renderPassInfo, VK_SUBPASS_CONTENTS_INLINE);
     vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, renderPipeline);
 
@@ -1219,7 +1310,7 @@ auto Renderer_Vulkan::draw(std::shared_ptr<Scene> scene, Camera& camera) -> void
                     vkCmdBindIndexBuffer(cmd, getBuffer(mesh->ebo), 0, VkIndexType::VK_INDEX_TYPE_UINT32);
                     std::array<VkDescriptorSet, 2> descriptorSets = { set0s[currentFrameInFlight], materialTextureSets.at(mesh->material.get()) };
                     vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, renderPipelineLayout, 0, descriptorSets.size(), descriptorSets.data(), 0, nullptr); // resources are set here
-                    vkCmdPushConstants(cmd, renderPipelineLayout, VK_SHADER_STAGE_FRAGMENT_BIT, 0, sizeof(SceneData), &sceneData);
+                    vkCmdPushConstants(cmd, renderPipelineLayout, VK_SHADER_STAGE_FRAGMENT_BIT, 0, sizeof(glm::vec3), &camPos);
                     vkCmdDrawIndexed(cmd, mesh->indices.size(), 1, 0, 0, 0);
                 }
             }
@@ -1715,7 +1806,7 @@ VkPipeline Renderer_Vulkan::createPostProcessPipeline(const std::string& vertSha
     return pipeline;
 }
 
-VkPipeline Renderer_Vulkan::createComputePipeline(const std::string& filename) {
+VkPipeline Renderer_Vulkan::createComputePipeline(const std::string& filename, VkPipelineLayout layout) {
     auto shaderCode = readFile(filename);
     auto shaderModule = createShaderModule(shaderCode);
     VkPipelineShaderStageCreateInfo compShaderStageInfo{};
@@ -1728,7 +1819,7 @@ VkPipeline Renderer_Vulkan::createComputePipeline(const std::string& filename) {
 
     VkComputePipelineCreateInfo pipelineInfo = { VK_STRUCTURE_TYPE_COMPUTE_PIPELINE_CREATE_INFO };
     pipelineInfo.stage = compShaderStageInfo;
-    pipelineInfo.layout = renderPipelineLayout;
+    pipelineInfo.layout = layout;
 
     VkPipeline pipeline;
     if (vkCreateComputePipelines(device, nullptr, 1, &pipelineInfo, nullptr, &pipeline) != VK_SUCCESS) {

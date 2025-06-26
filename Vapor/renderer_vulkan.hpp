@@ -12,32 +12,6 @@
 #include "graphics.hpp"
 
 
-struct CameraData {
-    glm::mat4 view;
-    glm::mat4 proj;
-    glm::vec3 pos;
-};
-
-struct InstanceData {
-    glm::mat4 model;
-};
-
-struct SceneData {
-    float time;
-};
-
-struct Texture {
-    VkImage image;
-    VkImageView view;
-    VkSampler sampler;
-    VkDeviceMemory memory;
-};
-
-struct Buffer {
-    VkBuffer buffer;
-    VkDeviceMemory memory;
-};
-
 class Renderer_Vulkan final : public Renderer {
 public:
     Renderer_Vulkan(SDL_Window* window);
@@ -55,7 +29,7 @@ public:
     VkPipeline createPrePassPipeline(const std::string& vertShader, const std::string& fragShader);
     VkPipeline createPostProcessPipeline(const std::string& vertShader, const std::string& fragShader);
 
-    VkPipeline createComputePipeline(const std::string& filename);
+    VkPipeline createComputePipeline(const std::string& filename, VkPipelineLayout layout);
 
     VkShaderModule createShaderModule(const std::string& code);
 
@@ -113,6 +87,7 @@ private:
     VkPipeline prePassPipeline;
     VkPipeline postProcessPipeline;
 
+    VkPipelineLayout tileCullingPipelineLayout;
     VkPipeline tileCullingPipeline;
 
     VkRenderPass prePass;
@@ -152,6 +127,8 @@ private:
     std::vector<void*> directionalLightBuffersMapped;
     std::vector<BufferHandle> pointLightBuffers;
     std::vector<void*> pointLightBuffersMapped;
+    std::vector<BufferHandle> clusterBuffers;
+    std::vector<BufferHandle> lightCullDataBuffers;
 
     Uint32 nextBufferID = 1;
     Uint32 nextImageID = 1;

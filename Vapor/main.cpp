@@ -87,8 +87,8 @@ int main(int argc, char* args[]) {
         scene->pointLights.push_back({
             .position = glm::vec3(rng.RandomFloatInRange(-5.0f, 5.0f), rng.RandomFloatInRange(0.0f, 5.0f), rng.RandomFloatInRange(-5.0f, 5.0f)),
             .color = glm::vec3(rng.RandomFloat(), rng.RandomFloat(), rng.RandomFloat()),
-            .intensity = 10.0f * rng.RandomFloat(),
-            .radius = 2.0f
+            .intensity = 5.0f * rng.RandomFloat(),
+            .radius = 1.0f
         });
     }
 
