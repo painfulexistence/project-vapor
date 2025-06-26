@@ -22,7 +22,7 @@ public:
 
     virtual void draw(std::shared_ptr<Scene> scene, Camera& camera) override;
 
-    NS::SharedPtr<MTL::RenderPipelineState> createPipeline(const std::string& filename, bool isHDR);
+    NS::SharedPtr<MTL::RenderPipelineState> createPipeline(const std::string& filename, bool isHDR, bool isColorOnly, Uint32 sampleCount);
     NS::SharedPtr<MTL::ComputePipelineState> createComputePipeline(const std::string& filename);
 
     TextureHandle createTexture(const std::shared_ptr<Image>& img);
@@ -87,4 +87,5 @@ private:
     std::unordered_map<Uint32, NS::SharedPtr<MTL::Buffer>> buffers;
     std::unordered_map<Uint32, NS::SharedPtr<MTL::Texture>> textures;
     std::unordered_map<Uint32, NS::SharedPtr<MTL::RenderPipelineState>> pipelines;
+    std::vector<NS::SharedPtr<MTL::AccelerationStructure>> BLASs;
 };

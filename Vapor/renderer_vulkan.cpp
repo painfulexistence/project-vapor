@@ -1210,6 +1210,7 @@ auto Renderer_Vulkan::draw(std::shared_ptr<Scene> scene, Camera& camera) -> void
         .far = camera.far()
     };
     memcpy(cameraDataBuffersMapped[currentFrameInFlight], &cameraData, sizeof(CameraData));
+    memcpy(directionalLightBuffersMapped[currentFrameInFlight], scene->directionalLights.data(), sizeof(DirectionalLight) * scene->directionalLights.size());
     memcpy(pointLightBuffersMapped[currentFrameInFlight], scene->pointLights.data(), sizeof(PointLight) * scene->pointLights.size());
 
     VkCommandBuffer cmd = commandBuffers[currentFrameInFlight];

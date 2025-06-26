@@ -26,6 +26,18 @@
       "generator": "Ninja Multi-Config",
       "binaryDir": "${sourceDir}/build",
       "inherits": ["global-vcpkg"]
+    },
+    {
+      "name": "xcode-local-vcpkg",
+      "generator": "Xcode",
+      "binaryDir": "${sourceDir}/build-xcode",
+      "inherits": ["local-vcpkg"]
+    },
+    {
+      "name": "xcode-global-vcpkg",
+      "generator": "Xcode",
+      "binaryDir": "${sourceDir}/build-xcode",
+      "inherits": ["global-vcpkg"]
     }
   ]
 }

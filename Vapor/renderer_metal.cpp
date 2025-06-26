@@ -45,9 +45,9 @@ struct Particle {
 
 auto Renderer_Metal::init() -> void {
     // Create pipelines
-    drawPipeline = createPipeline("assets/shaders/3d_pbr_normal_mapped.metal", true);
-    prePassPipeline = createPipeline("assets/shaders/3d_depth_only.metal", true);
-    postProcessPipeline = createPipeline("assets/shaders/3d_post_process.metal", false);
+    drawPipeline = createPipeline("assets/shaders/3d_pbr_normal_mapped.metal", true, false, MSAA_SAMPLE_COUNT);
+    prePassPipeline = createPipeline("assets/shaders/3d_depth_only.metal", true, false, MSAA_SAMPLE_COUNT);
+    postProcessPipeline = createPipeline("assets/shaders/3d_post_process.metal", false, true, 1);
     buildClustersPipeline = createComputePipeline("assets/shaders/3d_cluster_build.metal");
     cullLightsPipeline = createComputePipeline("assets/shaders/3d_light_cull.metal");
     tileCullingPipeline = createComputePipeline("assets/shaders/3d_tile_light_cull.metal");
@@ -126,7 +126,7 @@ auto Renderer_Metal::init() -> void {
     normalTextureDesc->setWidth(swapchain->drawableSize().width);
     normalTextureDesc->setHeight(swapchain->drawableSize().height);
     normalTextureDesc->setSampleCount(NS::UInteger(MSAA_SAMPLE_COUNT));
-    normalTextureDesc->setUsage(MTL::TextureUsageRenderTarget);
+    normalTextureDesc->setUsage(MTL::TextureUsageRenderTarget | MTL::TextureUsageShaderRead);
     normalRT_MS = NS::TransferPtr(device->newTexture(normalTextureDesc));
     normalTextureDesc->setTextureType(MTL::TextureType2D);
     normalTextureDesc->setSampleCount(1);
@@ -174,8 +174,8 @@ auto Renderer_Metal::stage(std::shared_ptr<Scene> scene) -> void {
                     geomDesc->setOpaque(true);
 
                     auto accelDesc = NS::TransferPtr(MTL::PrimitiveAccelerationStructureDescriptor::alloc()->init());
-                    const void* descriptors[] = { geomDesc.get() };
-                    NS::Array* geomArray = (NS::Array*)(CFArrayCreate(kCFAllocatorDefault, descriptors, 1, &kCFTypeArrayCallBacks));
+                    NS::Object* descriptors[] = { geomDesc.get() };
+                    NS::Array* geomArray = NS::Array::array(descriptors, 1);
                     accelDesc->setGeometryDescriptors(geomArray);
 
                     auto accelSizes = device->accelerationStructureSizes(accelDesc.get());
@@ -186,6 +186,7 @@ auto Renderer_Metal::stage(std::shared_ptr<Scene> scene) -> void {
                     encoder->buildAccelerationStructure(accelStruct.get(), accelDesc.get(), scratchBuffer.get(), 0);
                     encoder->endEncoding();
 
+                    BLASs.push_back(accelStruct);
                     mesh->blasIndex = nextBLASID++;
                 }
             }
@@ -286,8 +287,14 @@ auto Renderer_Metal::draw(std::shared_ptr<Scene> scene, Camera& camera) -> void 
             accelInstances.size() * sizeof(MTL::AccelerationStructureInstanceDescriptor));
     currentInstanceBuffer->didModifyRange(NS::Range::Make(0, currentInstanceBuffer->length()));
 
+    std::vector<NS::Object*> blasObjects;
+    blasObjects.reserve(BLASs.size());
+    for (auto blas : BLASs) {
+        blasObjects.push_back(static_cast<NS::Object*>(blas.get()));
+    }
     auto TLASDesc = NS::TransferPtr(MTL::InstanceAccelerationStructureDescriptor::alloc()->init());
     TLASDesc->setInstanceCount(accelInstances.size());
+    TLASDesc->setInstancedAccelerationStructures(NS::Array::array(blasObjects.data(), blasObjects.size()));
     TLASDesc->setInstanceDescriptorBuffer(currentInstanceBuffer.get());
     auto TLASSizes = device->accelerationStructureSizes(TLASDesc.get());
     if (!TLASScratchBuffers[currentFrameInFlight] || TLASScratchBuffers[currentFrameInFlight]->length() < TLASSizes.buildScratchBufferSize) {
@@ -583,7 +590,7 @@ auto Renderer_Metal::draw(std::shared_ptr<Scene> scene, Camera& camera) -> void 
 }
 
 
-NS::SharedPtr<MTL::RenderPipelineState> Renderer_Metal::createPipeline(const std::string& filename, bool isHDR) {
+NS::SharedPtr<MTL::RenderPipelineState> Renderer_Metal::createPipeline(const std::string& filename, bool isHDR, bool isColorOnly, Uint32 sampleCount) {
     auto shaderSrc = readFile(filename);
 
     auto code = NS::String::string(shaderSrc.data(), NS::StringEncoding::UTF8StringEncoding);
@@ -617,8 +624,12 @@ NS::SharedPtr<MTL::RenderPipelineState> Renderer_Metal::createPipeline(const std
     // colorAttachment->setSourceAlphaBlendFactor(MTL::BlendFactor::BlendFactorSourceAlpha);
     // colorAttachment->setDestinationRGBBlendFactor(MTL::BlendFactor::BlendFactorOneMinusSourceAlpha);
     // colorAttachment->setDestinationAlphaBlendFactor(MTL::BlendFactor::BlendFactorOneMinusSourceAlpha);
-    pipelineDesc->setDepthAttachmentPixelFormat(MTL::PixelFormatDepth32Float);
-    pipelineDesc->setSampleCount(NS::UInteger(MSAA_SAMPLE_COUNT)); // TODO: make this configurable
+    if (!isColorOnly) {
+        pipelineDesc->setDepthAttachmentPixelFormat(MTL::PixelFormatDepth32Float);
+    } else {
+        pipelineDesc->setDepthAttachmentPixelFormat(MTL::PixelFormatInvalid);
+    }
+    pipelineDesc->setSampleCount(static_cast<NS::UInteger>(sampleCount));
 
     auto pipeline = NS::TransferPtr(device->newRenderPipelineState(pipelineDesc, &error));
 
@@ -685,13 +696,13 @@ TextureHandle Renderer_Metal::createTexture(const std::shared_ptr<Image>& img) {
         auto texture = NS::TransferPtr(device->newTexture(textureDesc.get()));
         texture->replaceRegion(MTL::Region(0, 0, 0, img->width, img->height, 1), 0, img->byteArray.data(), img->width * img->channelCount);
 
-        auto cmdBlit = NS::TransferPtr(queue->commandBuffer());
-
-        auto enc = NS::TransferPtr(cmdBlit->blitCommandEncoder());
-        enc->generateMipmaps(texture.get());
-        enc->endEncoding();
-
-        cmdBlit->commit();
+        if (numLevels > 1) {
+            auto cmdBlit = NS::TransferPtr(queue->commandBuffer());
+            auto enc = NS::TransferPtr(cmdBlit->blitCommandEncoder());
+            enc->generateMipmaps(texture.get());
+            enc->endEncoding();
+            cmdBlit->commit();
+        }
 
         textures[nextTextureID] = texture;
 

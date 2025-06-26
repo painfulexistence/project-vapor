@@ -246,10 +246,12 @@ fragment float4 fragmentMain(
     float3 norm = normalize(TBN * normalize(texNormal.sample(s, in.uv).bgr * 2.0 - 1.0));
     float3 viewDir = normalize(*camPos - in.worldPosition.xyz);
 
-    float3 result = float3(0.0);
-    result += CalculateDirectionalLight(directionalLights[0], norm, T, B, viewDir, surf); // result += CookTorranceBRDF(norm, lightDir, viewDir, surf) * (mainLight.color * mainLight.intensity) * clamp(dot(norm, lightDir), 0.0, 1.0);
-
     float2 screenUV = in.position.xy / screenSize;
+
+    float3 result = float3(0.0);
+    float shadowFactor = texShadow.sample(s, screenUV).r;
+    result += CalculateDirectionalLight(directionalLights[0], norm, T, B, viewDir, surf) * shadowFactor; // result += CookTorranceBRDF(norm, lightDir, viewDir, surf) * (mainLight.color * mainLight.intensity) * clamp(dot(norm, lightDir), 0.0, 1.0);
+
     uint tileX = uint(screenUV.x * float(gridSize.x));
     uint tileY = uint((1.0 - screenUV.y) * float(gridSize.y));
     // float depthVS = (camera.view * in.worldPosition).z;

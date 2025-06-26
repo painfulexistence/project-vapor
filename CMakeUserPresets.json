@@ -23,6 +23,18 @@
         "CMAKE_C_FLAGS_RELEASE": "-O3 -DNDEBUG",
         "CMAKE_CXX_FLAGS_RELEASE": "-O3 -DNDEBUG"
       }
+    },
+    {
+      "name": "dev-xcode",
+      "inherits": ["xcode-local-vcpkg"],
+      "cacheVariables": {
+        "CMAKE_EXPORT_COMPILE_COMMANDS": "ON",
+        "CMAKE_CXX_COMPILER_LAUNCHER": "ccache",
+        "CMAKE_BUILD_TYPE": "Debug",
+        "CMAKE_C_FLAGS_DEBUG": "-g",
+        "CMAKE_CXX_FLAGS_DEBUG": "-g",
+        "CMAKE_EXE_LINKER_FLAGS": "-fsanitize=address"
+      }
     }
   ],
   "buildPresets": [
@@ -35,6 +47,11 @@
       "name": "release",
       "configurePreset": "release",
       "configuration": "Release"
+    },
+    {
+      "name": "dev-xcode",
+      "configurePreset": "dev-xcode",
+      "configuration": "Debug"
     }
   ]
 }
