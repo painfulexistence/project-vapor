@@ -14,11 +14,13 @@
 [Arcane Realms](https://painfulexistence.substack.com/)
 
 ### Features
-- PBR texturing with selectable graphics backends (Metal-cpp and Vulkan).
+- Selectable graphics backends (Metal-cpp and Vulkan)
+- Disney PBR
+- GLTF loading
+- Tiled forward rendering
 
 ### Platforms
 - Apple Silicon
 
 ### Screenshots
-![demo1](.github/assets/Demo_OBJ.png)
-![demo2](.github/assets/Demo_PBR.png)
+![tiled forward demo](.github/assets/tiled-forward-demo.png)
