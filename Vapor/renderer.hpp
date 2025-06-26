@@ -49,6 +49,11 @@ protected:
     Uint32 clusterGridSizeZ = 24;
     Uint32 numClusters = clusterGridSizeX * clusterGridSizeY * clusterGridSizeZ;
     Uint32 currentFrameInFlight = 0;
+
+    int calculateMipmapLevelCount(Uint32 width, Uint32 height) const {
+        return static_cast<int>(std::floor(std::log2(std::max(width, height))) + 1);
+    }
+
 };
 
 std::unique_ptr<Renderer> createRendererMetal(SDL_Window* window);

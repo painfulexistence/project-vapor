@@ -83,12 +83,12 @@ int main(int argc, char* args[]) {
         .color = glm::vec3(1.0, 1.0, 1.0),
         .intensity = 10.0,
     });
-    for (int i = 0; i < 10; i++) {
+    for (int i = 0; i < 256; i++) {
         scene->pointLights.push_back({
             .position = glm::vec3(rng.RandomFloatInRange(-5.0f, 5.0f), rng.RandomFloatInRange(0.0f, 5.0f), rng.RandomFloatInRange(-5.0f, 5.0f)),
             .color = glm::vec3(rng.RandomFloat(), rng.RandomFloat(), rng.RandomFloat()),
             .intensity = 5.0f * rng.RandomFloat(),
-            .radius = 1.0f
+            .radius = 0.5f
         });
     }
 
@@ -196,9 +196,10 @@ int main(int argc, char* args[]) {
         // entity->SetLocalTransform(
         //     glm::rotate(glm::mat4(1.0f), angle, glm::vec3(0.0f, 1.0f, -1.0f)) // glm::rotate(glm::rotate(glm::mat4(1.0f), glm::radians(270.0f), glm::vec3(1.0f, 0.0f, 0.0f)), angle, glm::vec3(0.0f, 0.0f, 1.0f));
         // );
+        float speed = 0.5f;
+        scene->directionalLights[0].direction = glm::vec3(0.5, -1.0, 0.05 * sin(time * speed));
         for (int i = 0; i < scene->pointLights.size(); i++) {
             auto& l = scene->pointLights[i];
-            float speed = 0.5f;
             switch (i % 4) {
             case 0:  // circular motion
                 l.position.x = 3.0f * cos(time * speed + i * 0.1f);

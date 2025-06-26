@@ -1941,7 +1941,7 @@ TextureHandle Renderer_Vulkan::createTexture(std::shared_ptr<Image> img) {
     }
 
     VkFormat format = img->channelCount == 1 ? VK_FORMAT_R8_UNORM : VK_FORMAT_R8G8B8A8_UNORM;
-    int numLevels = static_cast<int>(std::floor(std::log2(std::max(img->width, img->height))) + 1);
+    int numLevels = calculateMipmapLevelCount(img->width, img->height);
     VkImageCreateInfo imageInfo = {};
     imageInfo.sType = VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO;
     imageInfo.imageType = VK_IMAGE_TYPE_2D;

@@ -139,6 +139,7 @@ auto Renderer_Metal::init() -> void {
     shadowTextureDesc->setPixelFormat(MTL::PixelFormatRGBA8Unorm);
     shadowTextureDesc->setWidth(swapchain->drawableSize().width);
     shadowTextureDesc->setHeight(swapchain->drawableSize().height);
+    shadowTextureDesc->setMipmapLevelCount(calculateMipmapLevelCount(swapchain->drawableSize().width, swapchain->drawableSize().height));
     shadowTextureDesc->setUsage(MTL::TextureUsageShaderRead | MTL::TextureUsageShaderWrite);
     shadowRT = NS::TransferPtr(device->newTexture(shadowTextureDesc));
     shadowTextureDesc->release();
@@ -479,6 +480,11 @@ auto Renderer_Metal::draw(std::shared_ptr<Scene> scene, Camera& camera) -> void 
     raytraceShadowEncoder->dispatchThreadgroups(MTL::Size(screenSize.x, screenSize.y, 1), MTL::Size(1, 1, 1));
     raytraceShadowEncoder->endEncoding();
 
+    // TODO: not sure if this is needed
+    auto mipmapEncoder = NS::TransferPtr(cmd->blitCommandEncoder());
+    mipmapEncoder->generateMipmaps(shadowRT.get());
+    mipmapEncoder->endEncoding();
+
     // 4. render pass
     auto renderEncoder = cmd->renderCommandEncoder(renderPass.get());
     renderEncoder->setRenderPipelineState(drawPipeline.get());
@@ -677,7 +683,6 @@ NS::SharedPtr<MTL::ComputePipelineState> Renderer_Metal::createComputePipeline(c
 TextureHandle Renderer_Metal::createTexture(const std::shared_ptr<Image>& img) {
     if (img) {
         MTL::PixelFormat pixelFormat = MTL::PixelFormat::PixelFormatBGRA8Unorm;
-        int numLevels = static_cast<int>(std::floor(std::log2(std::max(img->width, img->height))) + 1);
         switch (img->channelCount) {
         case 1:
             pixelFormat = MTL::PixelFormat::PixelFormatR8Unorm;
@@ -690,6 +695,7 @@ TextureHandle Renderer_Metal::createTexture(const std::shared_ptr<Image>& img) {
             throw std::runtime_error(fmt::format("Unknown texture format at {}\n", img->uri));
             break;
         }
+        int numLevels = calculateMipmapLevelCount(img->width, img->height);
 
         auto textureDesc = NS::TransferPtr(MTL::TextureDescriptor::alloc()->init());
         textureDesc->setPixelFormat(pixelFormat);
