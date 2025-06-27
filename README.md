@@ -6,23 +6,24 @@
 <br />
 <br />
 
-<p>The goal of this project is a quest for knowledge about modern 3D game engines. </p>
-<p>It's a deep dive into game engine architecture and current-gen rendering techniques (specifically, hybrid rendering techniques) and a solo journey to design and to implement various aspects of a 3D game engine. </p>
-<p>Aside from personal learning, I'd also like to share knowledge with those learning to make engines. </p>
+<p>A modern 3D renderer built from scratch with C++ and Metal/Vulkan. </p>
+<p>Project Vapor is my deep dive into game engine architecture and current-gen rendering techniques, specifically GPU-driven rendering and hybrid rendering. It's a solo journey where I design and to implement various aspects of a modern 3D game engine. </p>
+<p>Aside from personal learning, I'd also like to share knowledge with those learning to make engines! </p>
 
 <!--
 ### Blog
 [Arcane Realms](https://painfulexistence.substack.com/) -->
 
-### Features
+### Main Features
+#### Rendering
 - Made with Metal-cpp and Vulkan
-- Disney PBR
+- Physically-based rendering with Disney BRDF
 - GLTF scene loading
-- Tiled forward rendering
+- Tiled Forward rendering
 - Raytraced hard shadow (Metal only)
 
-### Platforms
-- Apple Silicon
-
 ### Screenshots
+#### Forward shading with tiled light culling
 ![tiled forward demo](.github/assets/tiled-forward-demo.png)
+#### Raytraced hard shadow
+![raytraced shadow demo](.github/assets/raytraced-shadow-demo.png)
