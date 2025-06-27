@@ -139,7 +139,8 @@ struct MeshData {
 struct Mesh {
     void initialize(const MeshData& data);
     void initialize(VertexData* vertexData, size_t vertexCount, Uint32* indexData, size_t indexCount);
-    void recalculateNormalsAndTangents();
+    void recalculateNormals();
+    void recalculateTangents();
     void print();
 
     std::vector<BufferHandle> vbos;
@@ -147,13 +148,13 @@ struct Mesh {
     size_t bufferSize = 0;
     size_t vertexCount = 0;
     size_t indexCount = 0;
+    bool hasPosition = false;
+    bool hasNormal = false;
+    bool hasTangent = false;
+    bool hasUV0 = false;
+    bool hasUV1 = false;
+    bool hasColor = false;
     std::vector<VertexData> vertices; // interleaved vertex data
-    std::vector<glm::vec3> positions;
-    std::vector<glm::vec3> normals;
-    std::vector<glm::vec2> uv0s;
-    std::vector<glm::vec2> uv1s;
-    std::vector<glm::vec3> tangents;
-    std::vector<glm::vec4> colors;
     std::vector<Uint32> indices;
     std::shared_ptr<Material> material = nullptr;
     PrimitiveMode primitiveMode;
@@ -181,6 +182,9 @@ public:
         Uint32 indices[6] = { 0,  1,  2,  3,  4,  5 };
 
         auto mesh = std::make_shared<Mesh>();
+        mesh->hasPosition = true;
+        mesh->hasUV0 = true;
+        mesh->primitiveMode = PrimitiveMode::TRIANGLES;
         mesh->initialize(verts, 6, indices, 6);
 
         return mesh;
@@ -470,6 +474,10 @@ public:
             22, 21, 23
         };
         auto mesh = std::make_shared<Mesh>();
+        mesh->hasPosition = true;
+        mesh->hasUV0 = true;
+        mesh->hasNormal = true;
+        mesh->primitiveMode = PrimitiveMode::TRIANGLES;
         mesh->initialize(verts.data(), verts.size(), tris.data(), tris.size());
 
         return mesh;

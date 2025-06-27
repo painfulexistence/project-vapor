@@ -260,19 +260,19 @@ std::shared_ptr<Scene> AssetManager::loadGLTF(const std::string& filename) {
         for (const auto& primitive : srcMesh.primitives) {
             bool invalid = false;
             auto mesh = std::make_shared<Mesh>();
-            bool hasPosition = primitive.attributes.contains("POSITION");
-            bool hasNormal = primitive.attributes.contains("NORMAL");
-            bool hasUV0 = primitive.attributes.contains("TEXCOORD_0");
-            bool hasUV1 = primitive.attributes.contains("TEXCOORD_1");
-            bool hasTangent = primitive.attributes.contains("TANGENT");
-            bool hasColor0 = primitive.attributes.contains("COLOR_0");
-            if (!hasPosition) {
+            mesh->hasPosition = primitive.attributes.contains("POSITION");
+            mesh->hasNormal = primitive.attributes.contains("NORMAL");
+            mesh->hasTangent = primitive.attributes.contains("TANGENT");
+            mesh->hasUV0 = primitive.attributes.contains("TEXCOORD_0");
+            mesh->hasUV1 = primitive.attributes.contains("TEXCOORD_1");
+            mesh->hasColor = primitive.attributes.contains("COLOR_0");
+            if (!mesh->hasPosition) {
                 fmt::print("No position attribute found for primitive\n");
                 continue;
             }
             mesh->vertexCount = model.accessors[primitive.attributes.at("POSITION")].count;
             mesh->vertices.resize(mesh->vertexCount);
-            if (hasPosition) {
+            if (mesh->hasPosition) {
                 const auto& accessor = model.accessors[primitive.attributes.at("POSITION")];
                 const auto& bufferView = model.bufferViews[accessor.bufferView];
                 const auto& buffer = model.buffers[bufferView.buffer];
@@ -285,7 +285,7 @@ std::shared_ptr<Scene> AssetManager::loadGLTF(const std::string& filename) {
                     );
                 }
             }
-            if (hasNormal) {
+            if (mesh->hasNormal) {
                 const auto& accessor = model.accessors[primitive.attributes.at("NORMAL")];
                 const auto& bufferView = model.bufferViews[accessor.bufferView];
                 const auto& buffer = model.buffers[bufferView.buffer];
@@ -298,19 +298,7 @@ std::shared_ptr<Scene> AssetManager::loadGLTF(const std::string& filename) {
                     );
                 }
             }
-            if (hasUV0) {
-                const auto& accessor = model.accessors[primitive.attributes.at("TEXCOORD_0")];
-                const auto& bufferView = model.bufferViews[accessor.bufferView];
-                const auto& buffer = model.buffers[bufferView.buffer];
-                const float* data = reinterpret_cast<const float*>(&buffer.data[bufferView.byteOffset + accessor.byteOffset]);
-                for (size_t i = 0; i < mesh->vertexCount; i++) {
-                    mesh->vertices[i].uv = glm::vec2(
-                        data[i * 2 + 0],
-                        data[i * 2 + 1]
-                    );
-                }
-            }
-            if (hasTangent) {
+            if (mesh->hasTangent) {
                 const auto& accessor = model.accessors[primitive.attributes.at("TANGENT")];
                 const auto& bufferView = model.bufferViews[accessor.bufferView];
                 const auto& buffer = model.buffers[bufferView.buffer];
@@ -323,7 +311,19 @@ std::shared_ptr<Scene> AssetManager::loadGLTF(const std::string& filename) {
                     );
                 }
             }
-            if (hasColor0) {
+            if (mesh->hasUV0) {
+                const auto& accessor = model.accessors[primitive.attributes.at("TEXCOORD_0")];
+                const auto& bufferView = model.bufferViews[accessor.bufferView];
+                const auto& buffer = model.buffers[bufferView.buffer];
+                const float* data = reinterpret_cast<const float*>(&buffer.data[bufferView.byteOffset + accessor.byteOffset]);
+                for (size_t i = 0; i < mesh->vertexCount; i++) {
+                    mesh->vertices[i].uv = glm::vec2(
+                        data[i * 2 + 0],
+                        data[i * 2 + 1]
+                    );
+                }
+            }
+            if (mesh->hasColor) {
                 // const auto& accessor = model.accessors[primitive.attributes.at("COLOR_0")];
                 // const auto& bufferView = model.bufferViews[accessor.bufferView];
                 // const auto& buffer = model.buffers[bufferView.buffer];
@@ -402,6 +402,17 @@ std::shared_ptr<Scene> AssetManager::loadGLTF(const std::string& filename) {
             default:
                 throw std::runtime_error("Unsupported primitive mode");
             }
+
+            // Fix missing attributes
+            if (!mesh->hasNormal) {
+                mesh->recalculateNormals();
+                mesh->hasNormal = true;
+            }
+            if (!mesh->hasTangent) {
+                mesh->recalculateTangents();
+                mesh->hasTangent = true;
+            }
+
             meshGroup->meshes.push_back(mesh);
         }
 

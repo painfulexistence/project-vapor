@@ -407,7 +407,7 @@ auto Renderer_Metal::draw(std::shared_ptr<Scene> scene, Camera& camera) -> void 
                         prePassEncoder->drawPrimitives(
                             MTL::PrimitiveType::PrimitiveTypeTriangle,
                             0,
-                            mesh->positions.size(),
+                            mesh->vertices.size(),
                             1
                         );
                     }
@@ -571,7 +571,7 @@ auto Renderer_Metal::draw(std::shared_ptr<Scene> scene, Camera& camera) -> void 
                         renderEncoder->drawPrimitives(
                             MTL::PrimitiveType::PrimitiveTypeTriangle,
                             0,
-                            mesh->positions.size(),
+                            mesh->vertices.size(),
                             1
                         );
                     }

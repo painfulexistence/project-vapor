@@ -17,23 +17,21 @@ void Scene::PrintNode(const std::shared_ptr<Node>& node) {
     if (node->meshGroup) {
         SDL_Log("meshes: %d", static_cast<int>(node->meshGroup->meshes.size()));
         for (const auto& mesh : node->meshGroup->meshes) {
-            SDL_Log("Vertex count: %zu", mesh->positions.size());
-            SDL_Log("Normal count: %zu", mesh->normals.size());
-            SDL_Log("UV count: %zu", mesh->uv0s.size());
+            SDL_Log("Vertex count: %zu", mesh->vertices.size());
             if (mesh->indices.size() > 0) {
                 SDL_Log("Index count: %zu", mesh->indices.size());
                 for (const Uint32& idx : mesh->indices) {
                     SDL_Log(
                         "(Vertex %u) Position: %f, %f, %f, UV: %f, %f, Normal: %f, %f, %f",
                         idx,
-                        mesh->positions[idx].x,
-                        mesh->positions[idx].y,
-                        mesh->positions[idx].z,
-                        mesh->uv0s[idx].x,
-                        mesh->uv0s[idx].y,
-                        mesh->normals[idx].x,
-                        mesh->normals[idx].y,
-                        mesh->normals[idx].z
+                        mesh->vertices[idx].position.x,
+                        mesh->vertices[idx].position.y,
+                        mesh->vertices[idx].position.z,
+                        mesh->vertices[idx].uv.x,
+                        mesh->vertices[idx].uv.y,
+                        mesh->vertices[idx].normal.x,
+                        mesh->vertices[idx].normal.y,
+                        mesh->vertices[idx].normal.z
                     );
                 }
             }

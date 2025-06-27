@@ -1,5 +1,6 @@
 #include <metal_stdlib>
 using namespace metal;
+#include "assets/shaders/3d_common.metal" // TODO: use more robust include path
 
 struct VertexData {
     packed_float3 position;
@@ -39,9 +40,14 @@ vertex RasterizerData vertexMain(
     device const InstanceData& instance [[buffer(2)]]
 ) {
     RasterizerData vert;
+    float3x3 normalMatrix = transpose(inverse(float3x3(
+        instance.model[0].xyz,
+        instance.model[1].xyz,
+        instance.model[2].xyz
+    )));
+    vert.worldNormal = float4(normalMatrix * float3(in[vertexID].normal), 0.0);
+    vert.worldTangent = float4(normalMatrix * float3(in[vertexID].tangent), 0.0);
     vert.worldPosition = instance.model * float4(in[vertexID].position, 1.0);
-    vert.worldNormal = instance.model * float4(in[vertexID].normal, 1.0);
-    vert.worldTangent = instance.model * float4(in[vertexID].tangent, 1.0);
     vert.position = camera.proj * camera.view * vert.worldPosition;
     vert.uv = in[vertexID].uv;
     return vert;
