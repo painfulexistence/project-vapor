@@ -53,6 +53,7 @@ auto Renderer_Metal::init() -> void {
     tileCullingPipeline = createComputePipeline("assets/shaders/3d_tile_light_cull.metal");
     normalResolvePipeline = createComputePipeline("assets/shaders/3d_normal_resolve.metal");
     raytraceShadowPipeline = createComputePipeline("assets/shaders/3d_raytrace_shadow.metal");
+    raytraceAOPipeline = createComputePipeline("assets/shaders/3d_ssao.metal");
 
     // Create buffers
     frameDataBuffers.resize(MAX_FRAMES_IN_FLIGHT);
@@ -147,6 +148,15 @@ auto Renderer_Metal::init() -> void {
     shadowTextureDesc->setUsage(MTL::TextureUsageShaderRead | MTL::TextureUsageShaderWrite);
     shadowRT = NS::TransferPtr(device->newTexture(shadowTextureDesc));
     shadowTextureDesc->release();
+
+    MTL::TextureDescriptor* aoTextureDesc = MTL::TextureDescriptor::alloc()->init();
+    aoTextureDesc->setTextureType(MTL::TextureType2D);
+    aoTextureDesc->setPixelFormat(MTL::PixelFormatR16Float);
+    aoTextureDesc->setWidth(swapchain->drawableSize().width);
+    aoTextureDesc->setHeight(swapchain->drawableSize().height);
+    aoTextureDesc->setUsage(MTL::TextureUsageShaderRead | MTL::TextureUsageShaderWrite);
+    aoRT = NS::TransferPtr(device->newTexture(aoTextureDesc));
+    aoTextureDesc->release();
 
     // Create depth stencil states (for depth testing)
     MTL::DepthStencilDescriptor* depthStencilDesc = MTL::DepthStencilDescriptor::alloc()->init();
@@ -491,6 +501,18 @@ auto Renderer_Metal::draw(std::shared_ptr<Scene> scene, Camera& camera) -> void 
     mipmapEncoder->generateMipmaps(shadowRT.get());
     mipmapEncoder->endEncoding();
 
+    // 3. raytrace AO pass
+    auto raytraceAOEncoder = cmd->computeCommandEncoder();
+    raytraceAOEncoder->setComputePipelineState(raytraceAOPipeline.get());
+    raytraceAOEncoder->setTexture(depthStencilRT.get(), 0);
+    raytraceAOEncoder->setTexture(normalRT.get(), 1);
+    raytraceAOEncoder->setTexture(aoRT.get(), 2);
+    raytraceAOEncoder->setBuffer(frameDataBuffers[currentFrameInFlight].get(), 0, 0);
+    raytraceAOEncoder->setBuffer(cameraDataBuffers[currentFrameInFlight].get(), 0, 1);
+    raytraceAOEncoder->setAccelerationStructure(TLASBuffers[currentFrameInFlight].get(), 2);
+    raytraceAOEncoder->dispatchThreadgroups(MTL::Size(screenSize.x, screenSize.y, 1), MTL::Size(1, 1, 1));
+    raytraceAOEncoder->endEncoding();
+
     // 4. render pass
     auto renderEncoder = cmd->renderCommandEncoder(renderPass.get());
     renderEncoder->setRenderPipelineState(drawPipeline.get());
@@ -583,6 +605,8 @@ auto Renderer_Metal::draw(std::shared_ptr<Scene> scene, Camera& camera) -> void 
     postProcessEncoder->setCullMode(MTL::CullModeBack);
     postProcessEncoder->setFrontFacingWinding(MTL::Winding::WindingCounterClockwise);
     postProcessEncoder->setFragmentTexture(colorRT.get(), 0);
+    postProcessEncoder->setFragmentTexture(aoRT.get(), 1);
+    postProcessEncoder->setFragmentTexture(normalRT.get(), 2);
     postProcessEncoder->drawPrimitives(MTL::PrimitiveType::PrimitiveTypeTriangle, 0, 3, 1);
     postProcessEncoder->endEncoding();
 

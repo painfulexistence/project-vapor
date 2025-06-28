@@ -59,6 +59,7 @@ private:
     NS::SharedPtr<MTL::ComputePipelineState> tileCullingPipeline;
     NS::SharedPtr<MTL::ComputePipelineState> normalResolvePipeline;
     NS::SharedPtr<MTL::ComputePipelineState> raytraceShadowPipeline;
+    NS::SharedPtr<MTL::ComputePipelineState> raytraceAOPipeline;
 
     TextureHandle defaultAlbedoTexture;
     TextureHandle defaultNormalTexture;
@@ -88,6 +89,7 @@ private:
     NS::SharedPtr<MTL::Texture> normalRT_MS;
     NS::SharedPtr<MTL::Texture> normalRT;
     NS::SharedPtr<MTL::Texture> shadowRT;
+    NS::SharedPtr<MTL::Texture> aoRT;
 
     Uint32 nextBufferID = 0;
     Uint32 nextTextureID = 0;
