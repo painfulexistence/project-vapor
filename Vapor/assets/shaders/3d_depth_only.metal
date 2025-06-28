@@ -2,28 +2,6 @@
 using namespace metal;
 #include "assets/shaders/3d_common.metal" // TODO: use more robust include path
 
-struct VertexData {
-    packed_float3 position;
-    packed_float2 uv;
-    packed_float3 normal;
-    packed_float3 tangent;
-    packed_float3 bitangent;
-};
-
-struct CameraData {
-    float4x4 proj;
-    float4x4 view;
-    float4x4 invProj;
-    float4x4 invView;
-    float near;
-    float far;
-};
-
-struct InstanceData {
-    float4x4 model;
-    float4 color;
-};
-
 struct RasterizerData {
     float4 position [[position]];
     float4 normal;
@@ -43,12 +21,13 @@ vertex RasterizerData vertexMain(
     RasterizerData vert;
     InstanceData instance = instances[instanceID];
     float3x3 normalMatrix = transpose(inverse(float3x3(
-        instance.model[0].xyz,
-        instance.model[1].xyz,
-        instance.model[2].xyz
+        normalize(instance.model[0].xyz),
+        normalize(instance.model[1].xyz),
+        normalize(instance.model[2].xyz)
     )));
+    // Caution: worldNormal and worldTangent are not normalized yet, and they can be affected by model scaling
     vert.worldNormal = float4(normalMatrix * float3(in[vertexID].normal), 0.0);
-    vert.worldTangent = float4(normalMatrix * float3(in[vertexID].tangent), 0.0);
+    vert.worldTangent = float4(normalMatrix * float3(in[vertexID].tangent), in[vertexID].tangent.w);
     vert.worldPosition = instance.model * float4(in[vertexID].position, 1.0);
     vert.position = camera.proj * camera.view * vert.worldPosition;
     vert.uv = in[vertexID].uv;
@@ -69,7 +48,8 @@ fragment float4 fragmentMain(
 
     float3 N = normalize(float3(in.worldNormal));
     float3 T = normalize(float3(in.worldTangent));
-    float3 B = normalize(cross(N, T));
+    T = normalize(T - dot(T, N) * N);
+    float3 B = normalize(cross(N, T) * in.worldTangent.w);
     float3x3 TBN = float3x3(T, B, N);
     float3 norm = normalize(TBN * normalize(texNormal.sample(s, in.uv).bgr * 2.0 - 1.0));
     return float4(norm, 1.0);

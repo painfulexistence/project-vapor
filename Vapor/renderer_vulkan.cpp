@@ -1464,12 +1464,12 @@ VkPipeline Renderer_Vulkan::createRenderPipeline(const std::string& vertShader, 
     std::array<VkVertexInputBindingDescription, 1> vertexBindingDescriptions = {{
         { 0, sizeof(VertexData), VK_VERTEX_INPUT_RATE_VERTEX }
     }};
-    std::array<VkVertexInputAttributeDescription, 5> vertexAttributeDescriptions = {{
+    std::array<VkVertexInputAttributeDescription, 4> vertexAttributeDescriptions = {{
         { 0, 0, VK_FORMAT_R32G32B32_SFLOAT, offsetof(VertexData, position) },
         { 1, 0, VK_FORMAT_R32G32_SFLOAT, offsetof(VertexData, uv) },
         { 2, 0, VK_FORMAT_R32G32B32_SFLOAT, offsetof(VertexData, normal) },
-        { 3, 0, VK_FORMAT_R32G32B32_SFLOAT, offsetof(VertexData, tangent) },
-        { 4, 0, VK_FORMAT_R32G32B32_SFLOAT, offsetof(VertexData, bitangent) }
+        { 3, 0, VK_FORMAT_R32G32B32A32_SFLOAT, offsetof(VertexData, tangent) },
+        // { 4, 0, VK_FORMAT_R32G32B32_SFLOAT, offsetof(VertexData, bitangent) }
     }};
 
     VkPipelineVertexInputStateCreateInfo vertexInputStateInfo = { VK_STRUCTURE_TYPE_PIPELINE_VERTEX_INPUT_STATE_CREATE_INFO };
@@ -1591,12 +1591,12 @@ VkPipeline Renderer_Vulkan::createPrePassPipeline(const std::string& vertShader,
     std::array<VkVertexInputBindingDescription, 1> vertexBindingDescriptions = {{
         { 0, sizeof(VertexData), VK_VERTEX_INPUT_RATE_VERTEX }
     }};
-    std::array<VkVertexInputAttributeDescription, 5> vertexAttributeDescriptions = {{
+    std::array<VkVertexInputAttributeDescription, 4> vertexAttributeDescriptions = {{
         { 0, 0, VK_FORMAT_R32G32B32_SFLOAT, offsetof(VertexData, position) },
         { 1, 0, VK_FORMAT_R32G32_SFLOAT, offsetof(VertexData, uv) },
         { 2, 0, VK_FORMAT_R32G32B32_SFLOAT, offsetof(VertexData, normal) },
-        { 3, 0, VK_FORMAT_R32G32B32_SFLOAT, offsetof(VertexData, tangent) },
-        { 4, 0, VK_FORMAT_R32G32B32_SFLOAT, offsetof(VertexData, bitangent) }
+        { 3, 0, VK_FORMAT_R32G32B32A32_SFLOAT, offsetof(VertexData, tangent) },
+        // { 4, 0, VK_FORMAT_R32G32B32_SFLOAT, offsetof(VertexData, bitangent) }
     }};
 
     VkPipelineVertexInputStateCreateInfo vertexInputStateInfo = { VK_STRUCTURE_TYPE_PIPELINE_VERTEX_INPUT_STATE_CREATE_INFO };

@@ -129,8 +129,8 @@ struct VertexData {
     glm::vec3 position;
     glm::vec2 uv;
     glm::vec3 normal;
-    glm::vec3 tangent;
-    glm::vec3 bitangent;
+    glm::vec4 tangent;
+    // glm::vec3 bitangent;
 };
 
 struct MeshData {

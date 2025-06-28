@@ -4,27 +4,6 @@ using namespace metal;
 
 constant uint MAX_LIGHTS_PER_CLUSTER = 256;
 
-struct VertexData {
-    packed_float3 position;
-    packed_float2 uv;
-    packed_float3 normal;
-    packed_float3 tangent;
-    packed_float3 bitangent;
-};
-
-struct CameraData {
-    float4x4 proj;
-    float4x4 view;
-    float4x4 invProj;
-    float4x4 invView;
-    float near;
-    float far;
-};
-
-struct InstanceData {
-    float4x4 model;
-    float4 color;
-};
 
 struct Cluster {
     float4 min;
@@ -71,10 +50,6 @@ struct PointLight {
     float radius;
     // float _pad[2];
 };
-
-constexpr constant float PI = 3.1415927;
-constexpr constant float GAMMA = 2.2;
-constexpr constant float INV_GAMMA = 1.0 / GAMMA;
 
 float GTR1(float nh, float a) {
     if (a >= 1.0) return 1.0 / PI;
@@ -201,6 +176,7 @@ vertex RasterizerData vertexMain(
         instance.model[1].xyz,
         instance.model[2].xyz
     )));
+    // Caution: worldNormal and worldTangent are not normalized yet, and they can be affected by model scaling
     vert.worldNormal = float4(normalMatrix * float3(in[vertexID].normal), 0.0);
     vert.worldTangent = float4(normalMatrix * float3(in[vertexID].tangent), 0.0);
     vert.worldPosition = instance.model * float4(in[vertexID].position, 1.0);
@@ -233,7 +209,7 @@ fragment float4 fragmentMain(
         discard_fragment();
     }
     Surface surf;
-    surf.color = pow(baseColor.bgr, float3(GAMMA));
+    surf.color = pow(baseColor.rgb, float3(GAMMA));
     surf.ao = 1.0; // texOcclusion.sample(s, in.uv).r;
     surf.roughness = 1.0; // texRoughness.sample(s, in.uv).g;
     surf.metallic = 0.0; // texMetallic.sample(s, in.uv).b;
@@ -249,9 +225,10 @@ fragment float4 fragmentMain(
 
     float3 N = normalize(float3(in.worldNormal));
     float3 T = normalize(float3(in.worldTangent));
-    float3 B = normalize(cross(N, T));
+    T = normalize(T - dot(T, N) * N);
+    float3 B = normalize(cross(N, T) * in.worldTangent.w);
     float3x3 TBN = float3x3(T, B, N);
-    float3 norm = normalize(TBN * normalize(texNormal.sample(s, in.uv).bgr * 2.0 - 1.0));
+    float3 norm = normalize(TBN * normalize(texNormal.sample(s, in.uv).rgb * 2.0 - 1.0));
     float3 viewDir = normalize(*camPos - in.worldPosition.xyz);
 
     float2 screenUV = in.position.xy / screenSize;

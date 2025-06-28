@@ -33,5 +33,5 @@ vertex RasterizerData vertexMain(uint vertexID [[vertex_id]], device const Verte
 
 fragment half4 fragmentMain(RasterizerData in [[stage_in]], texture2d<half, access::sample> tex [[texture(0)]], constant float* time [[buffer(0)]]) {
     constexpr sampler s(address::repeat, filter::linear, mip_filter::linear);
-    return half4(tex.sample(s, in.uv).bgr, 1.0);
+    return half4(tex.sample(s, in.uv).rgb, 1.0);
 }

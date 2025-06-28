@@ -17,7 +17,7 @@ kernel void computeMain(
             count++;
         }
     }
-    result = select(float3(0.0, 1.0, 0.0), normalize(result / float(count)), count > 0);
+    result = select(float3(0.0, 0.0, 0.0), normalize(result / float(count)), count > 0);
 
     resolvedTexture.write(float4(result, 1.0), tid);
 }

@@ -33,5 +33,5 @@ vertex VertexOut vertexMain(uint vertexID [[vertex_id]]) {
 
 fragment half4 fragmentMain(VertexOut in [[stage_in]], texture2d<half, access::sample> tex [[texture(0)]]) {
     constexpr sampler s(address::repeat, filter::linear);
-    return half4(tex.sample(s, in.uv).bgr, 1.0);
+    return half4(tex.sample(s, in.uv).rgb, 1.0);
 }

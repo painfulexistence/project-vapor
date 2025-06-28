@@ -304,10 +304,11 @@ std::shared_ptr<Scene> AssetManager::loadGLTF(const std::string& filename) {
                 const auto& buffer = model.buffers[bufferView.buffer];
                 const float* data = reinterpret_cast<const float*>(&buffer.data[bufferView.byteOffset + accessor.byteOffset]);
                 for (size_t i = 0; i < mesh->vertexCount; i++) {
-                    mesh->vertices[i].tangent = glm::vec3(
-                        data[i * 3 + 0],
-                        data[i * 3 + 1],
-                        data[i * 3 + 2]
+                    mesh->vertices[i].tangent = glm::vec4(
+                        data[i * 4 + 0],
+                        data[i * 4 + 1],
+                        data[i * 4 + 2],
+                        data[i * 4 + 3]
                     );
                 }
             }

@@ -53,9 +53,9 @@ vertex RasterizerData vertexMain(uint vertexID [[vertex_id]], device const Verte
 
 fragment half4 fragmentMain(RasterizerData in [[stage_in]], texture2d<float, access::sample> texAlbedo [[texture(0)]], texture2d<float, access::sample> texNormal [[texture(1)]], constant packed_float3* camPos [[buffer(0)]], constant float* time [[buffer(1)]]) {
     constexpr sampler s(address::repeat, filter::linear, mip_filter::linear);
-    float3 albedo = texAlbedo.sample(s, in.uv).bgr;
+    float3 albedo = texAlbedo.sample(s, in.uv).rgb;
     float3x3 TBN = float3x3(float3(in.worldTangent), float3(in.worldBitangent), float3(in.worldNormal));
-    float3 norm = normalize(TBN * normalize(texNormal.sample(s, in.uv).bgr * 2.0 - 1.0));
+    float3 norm = normalize(TBN * normalize(texNormal.sample(s, in.uv).rgb * 2.0 - 1.0));
     float3 viewDir = normalize(*camPos - in.worldPosition.xyz);
     float3 lightDir = normalize(-lightDirection);
     float3 halfway = normalize(lightDir + viewDir);

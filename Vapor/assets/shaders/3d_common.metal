@@ -5,6 +5,28 @@ constant float PI = 3.1415927;
 constant float GAMMA = 2.2;
 constant float INV_GAMMA = 1.0 / GAMMA;
 
+struct VertexData {
+    packed_float3 position;
+    packed_float2 uv;
+    packed_float3 normal;
+    float4 tangent;
+    // packed_float3 bitangent;
+};
+
+struct CameraData {
+    float4x4 proj;
+    float4x4 view;
+    float4x4 invProj;
+    float4x4 invView;
+    float near;
+    float far;
+};
+
+struct InstanceData {
+    float4x4 model;
+    float4 color;
+};
+
 float3x3 inverse(float3x3 const m) {
     float const A = m[1][1] * m[2][2] - m[2][1] * m[1][2];
     float const B = -(m[0][1] * m[2][2] - m[2][1] * m[0][2]);

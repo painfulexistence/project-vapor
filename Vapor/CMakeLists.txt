@@ -21,6 +21,7 @@ find_package(glm CONFIG REQUIRED)
 find_package(Vulkan REQUIRED)
 
 add_subdirectory(metal)
+add_subdirectory(MikkTSpace)
 
 set(SOURCES
     main.cpp
@@ -36,7 +37,7 @@ set(SOURCES
 add_executable(main ${SOURCES})
 target_compile_features(main PRIVATE cxx_std_20)
 set_target_properties(main PROPERTIES CXX_EXTENSIONS OFF)
-target_link_libraries(main PRIVATE SDL3::SDL3 metal fmt::fmt glm::glm Vulkan::Vulkan args)
+target_link_libraries(main PRIVATE SDL3::SDL3 metal fmt::fmt glm::glm Vulkan::Vulkan args mikktspace)
 
 find_program(GLSL_VALIDATOR "glslangValidator" REQUIRED)
 file(GLOB_RECURSE SHADER_SOURCES CONFIGURE_DEPENDS

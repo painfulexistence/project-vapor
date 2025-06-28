@@ -28,7 +28,7 @@ Renderer_Metal::Renderer_Metal(SDL_Window* window) {
     renderer = SDL_CreateRenderer(window, nullptr);
     swapchain = (CA::MetalLayer*)SDL_GetRenderMetalLayer(renderer);
     // swapchain->setDisplaySyncEnabled(true);
-    swapchain->setPixelFormat(MTL::PixelFormatBGRA8Unorm_sRGB);
+    swapchain->setPixelFormat(MTL::PixelFormatRGBA8Unorm_sRGB);
     swapchain->setColorspace(CGColorSpaceCreateWithName(kCGColorSpaceSRGB));
     device = swapchain->device();
     queue = NS::TransferPtr(device->newCommandQueue());
@@ -698,14 +698,14 @@ NS::SharedPtr<MTL::ComputePipelineState> Renderer_Metal::createComputePipeline(c
 
 TextureHandle Renderer_Metal::createTexture(const std::shared_ptr<Image>& img) {
     if (img) {
-        MTL::PixelFormat pixelFormat = MTL::PixelFormat::PixelFormatBGRA8Unorm;
+        MTL::PixelFormat pixelFormat = MTL::PixelFormat::PixelFormatRGBA8Unorm;
         switch (img->channelCount) {
         case 1:
             pixelFormat = MTL::PixelFormat::PixelFormatR8Unorm;
             break;
         case 3:
         case 4:
-            pixelFormat = MTL::PixelFormat::PixelFormatBGRA8Unorm;
+            pixelFormat = MTL::PixelFormat::PixelFormatRGBA8Unorm;
             break;
         default:
             throw std::runtime_error(fmt::format("Unknown texture format at {}\n", img->uri));
