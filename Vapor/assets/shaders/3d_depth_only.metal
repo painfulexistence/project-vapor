@@ -51,6 +51,8 @@ fragment float4 fragmentMain(
     T = normalize(T - dot(T, N) * N);
     float3 B = normalize(cross(N, T) * in.worldTangent.w);
     float3x3 TBN = float3x3(T, B, N);
-    float3 norm = normalize(TBN * normalize(texNormal.sample(s, in.uv).bgr * 2.0 - 1.0));
-    return float4(norm, 1.0);
+    float3 normal = texAlbedo.sample(s, in.uv).rgb * 2.0 - 1.0;
+    normal.y = 1.0 - normal.y;
+    float3 norm = normalize(TBN * normal);
+    return float4(normal, 1.0);
 }

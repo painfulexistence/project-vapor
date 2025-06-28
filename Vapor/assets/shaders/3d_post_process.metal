@@ -43,14 +43,21 @@ float3 linearToSRGB(float3 color) {
 
 fragment float4 fragmentMain(
     RasterizerData in [[stage_in]],
-    texture2d<float, access::sample> texScreen [[texture(0)]]
+    texture2d<float, access::sample> texScreen [[texture(0)]],
+    texture2d<float, access::sample> texAO [[texture(1)]],
+    texture2d<float, access::sample> texNormal [[texture(2)]]
 ) {
     constexpr sampler s(address::repeat, filter::linear, mip_filter::linear);
     float3 color = texScreen.sample(s, in.uv).rgb;
+    float ao = texAO.sample(s, in.uv).r;
 
     color = aces(color);
 
+    color *= 2.0;
+
     // color = linearToSRGB(color);  // Already handled by swapchain
 
-    return float4(color, 1.0);
+    return float4(float3(texNormal.sample(s, in.uv).rgb) * 0.5 + 0.5, 1.0);
+    return float4(float3(ao), 1.0);
+    // return float4(color, 1.0);
 }
