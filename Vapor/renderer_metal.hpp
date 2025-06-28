@@ -22,6 +22,13 @@ public:
 
     virtual void draw(std::shared_ptr<Scene> scene, Camera& camera) override;
 
+    virtual void setRenderPath(RenderPath path) override {
+        currentRenderPath = path;
+    }
+    virtual RenderPath getRenderPath() const override {
+        return currentRenderPath;
+    }
+
     NS::SharedPtr<MTL::RenderPipelineState> createPipeline(const std::string& filename, bool isHDR, bool isColorOnly, Uint32 sampleCount);
     NS::SharedPtr<MTL::ComputePipelineState> createComputePipeline(const std::string& filename);
 
@@ -59,6 +66,7 @@ private:
     TextureHandle defaultEmissiveTexture;
     TextureHandle defaultDisplacementTexture;
 
+    std::vector<NS::SharedPtr<MTL::Buffer>> frameDataBuffers;
     std::vector<NS::SharedPtr<MTL::Buffer>> cameraDataBuffers;
     std::vector<NS::SharedPtr<MTL::Buffer>> instanceDataBuffers;
     NS::SharedPtr<MTL::Buffer> testStorageBuffer;
@@ -69,6 +77,7 @@ private:
     std::vector<NS::SharedPtr<MTL::Buffer>> TLASScratchBuffers;
     std::vector<NS::SharedPtr<MTL::AccelerationStructure>> TLASBuffers;
 
+    std::vector<InstanceData> instances;
     std::vector<MTL::AccelerationStructureInstanceDescriptor> accelInstances;
     uint32_t currentInstanceCount = 0;
 
@@ -80,12 +89,14 @@ private:
     NS::SharedPtr<MTL::Texture> normalRT;
     NS::SharedPtr<MTL::Texture> shadowRT;
 
-    Uint32 nextBufferID = 1;
-    Uint32 nextTextureID = 1;
-    Uint32 nextPipelineID = 1;
-    Uint32 nextBLASID = 0;
+    Uint32 nextBufferID = 0;
+    Uint32 nextTextureID = 0;
+    Uint32 nextPipelineID = 0;
+    Uint32 nextInstanceID = 0;
     std::unordered_map<Uint32, NS::SharedPtr<MTL::Buffer>> buffers;
     std::unordered_map<Uint32, NS::SharedPtr<MTL::Texture>> textures;
     std::unordered_map<Uint32, NS::SharedPtr<MTL::RenderPipelineState>> pipelines;
     std::vector<NS::SharedPtr<MTL::AccelerationStructure>> BLASs;
+
+    RenderPath currentRenderPath = RenderPath::Forward;
 };

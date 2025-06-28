@@ -55,6 +55,10 @@ auto Renderer_Metal::init() -> void {
     raytraceShadowPipeline = createComputePipeline("assets/shaders/3d_raytrace_shadow.metal");
 
     // Create buffers
+    frameDataBuffers.resize(MAX_FRAMES_IN_FLIGHT);
+    for (auto& frameDataBuffer : frameDataBuffers) {
+        frameDataBuffer = NS::TransferPtr(device->newBuffer(sizeof(FrameData), MTL::ResourceStorageModeManaged));
+    }
     cameraDataBuffers.resize(MAX_FRAMES_IN_FLIGHT);
     for (auto& cameraDataBuffer : cameraDataBuffers) {
         cameraDataBuffer = NS::TransferPtr(device->newBuffer(sizeof(CameraData), MTL::ResourceStorageModeManaged));
@@ -176,8 +180,8 @@ auto Renderer_Metal::stage(std::shared_ptr<Scene> scene) -> void {
 
                     auto accelDesc = NS::TransferPtr(MTL::PrimitiveAccelerationStructureDescriptor::alloc()->init());
                     NS::Object* descriptors[] = { geomDesc.get() };
-                    NS::Array* geomArray = NS::Array::array(descriptors, 1);
-                    accelDesc->setGeometryDescriptors(geomArray);
+                    auto geomArray = NS::TransferPtr(NS::Array::array(descriptors, 1));
+                    accelDesc->setGeometryDescriptors(geomArray.get());
 
                     auto accelSizes = device->accelerationStructureSizes(accelDesc.get());
                     auto accelStruct = NS::TransferPtr(device->newAccelerationStructure(accelSizes.accelerationStructureSize));
@@ -188,7 +192,8 @@ auto Renderer_Metal::stage(std::shared_ptr<Scene> scene) -> void {
                     encoder->endEncoding();
 
                     BLASs.push_back(accelStruct);
-                    mesh->blasIndex = nextBLASID++;
+
+                    mesh->instanceID = nextInstanceID++;
                 }
             }
             for (const auto& child : node->children) {
@@ -232,6 +237,12 @@ auto Renderer_Metal::draw(std::shared_ptr<Scene> scene, Camera& camera) -> void 
     // Prepare data
     auto time = (float)SDL_GetTicks() / 1000.0f;
 
+    FrameData* frameData = reinterpret_cast<FrameData*>(frameDataBuffers[currentFrameInFlight]->contents());
+    frameData->frameNumber = frameNumber;
+    frameData->time = time;
+    frameData->deltaTime = 0.016f; // TODO:
+    frameDataBuffers[currentFrameInFlight]->didModifyRange(NS::Range::Make(0, frameDataBuffers[currentFrameInFlight]->length()));
+
     float near = camera.near();
     float far = camera.far();
     glm::vec3 camPos = camera.GetEye();
@@ -268,43 +279,52 @@ auto Renderer_Metal::draw(std::shared_ptr<Scene> scene, Camera& camera) -> void 
     auto drawableSize = swapchain->drawableSize();
     glm::vec2 screenSize = glm::vec2(drawableSize.width, drawableSize.height);
     glm::uvec3 gridSize = glm::uvec3(clusterGridSizeX, clusterGridSizeY, clusterGridSizeZ);
-    uint lightCount = scene->pointLights.size();
+    uint pointLightCount = scene->pointLights.size();
+    uint directionalLightCount = scene->directionalLights.size();
 
+    Uint32 instanceCount = 0;
+    instances.clear();
     accelInstances.clear();
     for (const auto& node : scene->nodes) {
         if (node->meshGroup) {
             for (const auto& mesh : node->meshGroup->meshes) {
-                MTL::AccelerationStructureInstanceDescriptor accelInstanceDesc;
                 const glm::mat4& transform = node->worldTransform;
+                instances.push_back({
+                    .model = transform,
+                    .color = glm::vec4(1.0f, 0.0f, 0.0f, 1.0f)
+                });
+                MTL::AccelerationStructureInstanceDescriptor accelInstanceDesc;
                 for (int i = 0; i < 3; ++i) {
                     for (int j = 0; j < 4; ++j) {
                         accelInstanceDesc.transformationMatrix.columns[i][j] = transform[i][j];
                     }
                 }
-                accelInstanceDesc.accelerationStructureIndex = mesh->blasIndex;
+                accelInstanceDesc.accelerationStructureIndex = mesh->instanceID;
                 accelInstanceDesc.mask = 0xFF;
                 accelInstances.push_back(accelInstanceDesc);
+                instanceCount++;
             }
         }
     }
-
-    auto& currentInstanceBuffer = accelInstanceBuffers[currentFrameInFlight];
-    if (accelInstances.size() > MAX_INSTANCES) { // reallocate if needed
-        fmt::print("Warning: Instance count ({}) exceeds MAX_INSTANCES ({})\n", accelInstances.size(), MAX_INSTANCES);
+    if (instanceCount > MAX_INSTANCES) { // TODO: reallocate when needed
+        fmt::print("Warning: Instance count ({}) exceeds MAX_INSTANCES ({})\n", instanceCount, MAX_INSTANCES);
     }
-    memcpy(currentInstanceBuffer->contents(), accelInstances.data(),
-            accelInstances.size() * sizeof(MTL::AccelerationStructureInstanceDescriptor));
-    currentInstanceBuffer->didModifyRange(NS::Range::Make(0, currentInstanceBuffer->length()));
+    // TODO: avoid updating the entire instance data buffer every frame
+    memcpy(instanceDataBuffers[currentFrameInFlight]->contents(), instances.data(), instances.size() * sizeof(InstanceData));
+    instanceDataBuffers[currentFrameInFlight]->didModifyRange(NS::Range::Make(0, instanceDataBuffers[currentFrameInFlight]->length()));
+    memcpy(accelInstanceBuffers[currentFrameInFlight]->contents(), accelInstances.data(), accelInstances.size() * sizeof(MTL::AccelerationStructureInstanceDescriptor));
+    accelInstanceBuffers[currentFrameInFlight]->didModifyRange(NS::Range::Make(0, accelInstanceBuffers[currentFrameInFlight]->length()));
 
-    std::vector<NS::Object*> blasObjects;
-    blasObjects.reserve(BLASs.size());
+    std::vector<NS::Object*> BLASObjects;
+    BLASObjects.reserve(BLASs.size());
     for (auto blas : BLASs) {
-        blasObjects.push_back(static_cast<NS::Object*>(blas.get()));
+        BLASObjects.push_back(static_cast<NS::Object*>(blas.get()));
     }
     auto TLASDesc = NS::TransferPtr(MTL::InstanceAccelerationStructureDescriptor::alloc()->init());
+    auto BLASArray = NS::TransferPtr(NS::Array::array(BLASObjects.data(), BLASObjects.size()));
     TLASDesc->setInstanceCount(accelInstances.size());
-    TLASDesc->setInstancedAccelerationStructures(NS::Array::array(blasObjects.data(), blasObjects.size()));
-    TLASDesc->setInstanceDescriptorBuffer(currentInstanceBuffer.get());
+    TLASDesc->setInstancedAccelerationStructures(BLASArray.get());
+    TLASDesc->setInstanceDescriptorBuffer(accelInstanceBuffers[currentFrameInFlight].get());
     auto TLASSizes = device->accelerationStructureSizes(TLASDesc.get());
     if (!TLASScratchBuffers[currentFrameInFlight] || TLASScratchBuffers[currentFrameInFlight]->length() < TLASSizes.buildScratchBufferSize) {
         TLASScratchBuffers[currentFrameInFlight] = NS::TransferPtr(device->newBuffer(TLASSizes.buildScratchBufferSize, MTL::ResourceStorageModePrivate));
@@ -360,25 +380,12 @@ auto Renderer_Metal::draw(std::shared_ptr<Scene> scene, Camera& camera) -> void 
     prePassEncoder->setCullMode(MTL::CullModeBack);
     prePassEncoder->setFrontFacingWinding(MTL::Winding::WindingCounterClockwise);
     prePassEncoder->setDepthStencilState(depthStencilState.get());
+
+    prePassEncoder->setVertexBuffer(cameraDataBuffers[currentFrameInFlight].get(), 0, 0);
+    prePassEncoder->setVertexBuffer(instanceDataBuffers[currentFrameInFlight].get(), 0, 1);
     const std::function<void(const std::shared_ptr<Node>&)> drawNodeDepth =
         [&](const std::shared_ptr<Node>& node) {
             if (node->meshGroup) {
-                // single instance
-                InstanceData* instance = reinterpret_cast<InstanceData*>(instanceDataBuffers[currentFrameInFlight]->contents());
-                instance->model = node->worldTransform;
-                instance->color = glm::vec4(1.0f, 0.0f, 0.0f, 1.0f);
-                // multiple instances
-                // std::vector<InstanceData> instances = {{
-                //     { glm::rotate(glm::identity<glm::mat4>(), angle, glm::vec3(1.0f, 0.0f, 1.0f)), glm::vec4(1.0f, 0.0f, 0.0f, 1.0f) },
-                //     { glm::rotate(glm::identity<glm::mat4>(), angle + 0.5f, glm::vec3(1.0f, 0.0f, 1.0f)), glm::vec4(0.0f, 1.0f, 0.0f, 1.0f) },
-                // }};
-                // for (size_t i = 0; i < instances.size(); ++i) {
-                //     InstanceData* instance = reinterpret_cast<InstanceData*>(instanceDataBuffers[currentFrameInFlight]->contents()) + i;
-                //     instance->model = instances[i].model;
-                //     instance->color = instances[i].color;
-                // }
-                instanceDataBuffers[currentFrameInFlight]->didModifyRange(NS::Range::Make(0, instanceDataBuffers[currentFrameInFlight]->length())); // TODO: avoid updating the entire instance data buffer every frame
-
                 for (const auto& mesh : node->meshGroup->meshes) {
                     if (!mesh->material) {
                         fmt::print("No material found for mesh in mesh group {}\n", node->meshGroup->name);
@@ -388,9 +395,8 @@ auto Renderer_Metal::draw(std::shared_ptr<Scene> scene, Camera& camera) -> void 
                     //     getTexture(mesh->material->displacementMap ? mesh->material->displacementMap->texture : defaultDisplacementTexture).get(),
                     //     1
                     // );
-                    prePassEncoder->setVertexBuffer(getBuffer(mesh->vbos[0]).get(), 0, 0);
-                    prePassEncoder->setVertexBuffer(cameraDataBuffers[currentFrameInFlight].get(), 0, 1);
-                    prePassEncoder->setVertexBuffer(instanceDataBuffers[currentFrameInFlight].get(), 0, 2);
+                    prePassEncoder->setVertexBuffer(getBuffer(mesh->vbos[0]).get(), 0, 2);
+                    prePassEncoder->setVertexBytes(&mesh->instanceID, sizeof(Uint32), 3);
                     prePassEncoder->setFragmentTexture(
                         getTexture(mesh->material->albedoMap ? mesh->material->albedoMap->texture : defaultAlbedoTexture).get(),
                         0
@@ -427,6 +433,7 @@ auto Renderer_Metal::draw(std::shared_ptr<Scene> scene, Camera& camera) -> void 
     normalResolveEncoder->setComputePipelineState(normalResolvePipeline.get());
     normalResolveEncoder->setTexture(normalRT_MS.get(), 0);
     normalResolveEncoder->setTexture(normalRT.get(), 1);
+    normalResolveEncoder->setBytes(&MSAA_SAMPLE_COUNT, sizeof(Uint32), 0);
     normalResolveEncoder->dispatchThreadgroups(MTL::Size(screenSize.x, screenSize.y, 1), MTL::Size(1, 1, 1));
     normalResolveEncoder->endEncoding();
 
@@ -460,7 +467,7 @@ auto Renderer_Metal::draw(std::shared_ptr<Scene> scene, Camera& camera) -> void 
     tileCullingEncoder->setBuffer(clusterBuffers[currentFrameInFlight].get(), 0, 0);
     tileCullingEncoder->setBuffer(pointLightBuffer.get(), 0, 1);
     tileCullingEncoder->setBuffer(cameraDataBuffers[currentFrameInFlight].get(), 0, 2);
-    tileCullingEncoder->setBytes(&lightCount, sizeof(uint), 3);
+    tileCullingEncoder->setBytes(&pointLightCount, sizeof(uint), 3);
     tileCullingEncoder->setBytes(&gridSize, sizeof(glm::uvec3), 4);
     tileCullingEncoder->setBytes(&screenSize, sizeof(glm::vec2), 5);
     tileCullingEncoder->dispatchThreadgroups(MTL::Size(clusterGridSizeX, clusterGridSizeY, 1), MTL::Size(1, 1, 1));
@@ -479,7 +486,6 @@ auto Renderer_Metal::draw(std::shared_ptr<Scene> scene, Camera& camera) -> void 
     raytraceShadowEncoder->setAccelerationStructure(TLASBuffers[currentFrameInFlight].get(), 4);
     raytraceShadowEncoder->dispatchThreadgroups(MTL::Size(screenSize.x, screenSize.y, 1), MTL::Size(1, 1, 1));
     raytraceShadowEncoder->endEncoding();
-
     // TODO: not sure if this is needed
     auto mipmapEncoder = NS::TransferPtr(cmd->blitCommandEncoder());
     mipmapEncoder->generateMipmaps(shadowRT.get());
@@ -495,25 +501,11 @@ auto Renderer_Metal::draw(std::shared_ptr<Scene> scene, Camera& camera) -> void 
     // encoder->useResource(pointLightBuffer.get(), MTL::ResourceUsageRead, MTL::RenderStageFragment);
     // encoder->useResource(testStorageBuffer.get(), MTL::ResourceUsageRead, MTL::RenderStageVertex | MTL::RenderStageFragment);
 
+    renderEncoder->setVertexBuffer(cameraDataBuffers[currentFrameInFlight].get(), 0, 0);
+    renderEncoder->setVertexBuffer(instanceDataBuffers[currentFrameInFlight].get(), 0, 1);
     const std::function<void(const std::shared_ptr<Node>&)> drawNode =
         [&](const std::shared_ptr<Node>& node) {
             if (node->meshGroup) {
-                // single instance
-                InstanceData* instance = reinterpret_cast<InstanceData*>(instanceDataBuffers[currentFrameInFlight]->contents());
-                instance->model = node->worldTransform;
-                instance->color = glm::vec4(1.0f, 0.0f, 0.0f, 1.0f);
-                // multiple instances
-                // std::vector<InstanceData> instances = {{
-                //     { glm::rotate(glm::identity<glm::mat4>(), angle, glm::vec3(1.0f, 0.0f, 1.0f)), glm::vec4(1.0f, 0.0f, 0.0f, 1.0f) },
-                //     { glm::rotate(glm::identity<glm::mat4>(), angle + 0.5f, glm::vec3(1.0f, 0.0f, 1.0f)), glm::vec4(0.0f, 1.0f, 0.0f, 1.0f) },
-                // }};
-                // for (size_t i = 0; i < instances.size(); ++i) {
-                //     InstanceData* instance = reinterpret_cast<InstanceData*>(instanceDataBuffers[currentFrameInFlight]->contents()) + i;
-                //     instance->model = instances[i].model;
-                //     instance->color = instances[i].color;
-                // }
-                instanceDataBuffers[currentFrameInFlight]->didModifyRange(NS::Range::Make(0, instanceDataBuffers[currentFrameInFlight]->length())); // TODO: avoid updating the entire instance data buffer every frame
-
                 for (const auto& mesh : node->meshGroup->meshes) {
                     if (!mesh->material) {
                         fmt::print("No material found for mesh in mesh group {}\n", node->meshGroup->name);
@@ -548,9 +540,8 @@ auto Renderer_Metal::draw(std::shared_ptr<Scene> scene, Camera& camera) -> void 
                         shadowRT.get(),
                         7
                     );
-                    renderEncoder->setVertexBuffer(getBuffer(mesh->vbos[0]).get(), 0, 0);
-                    renderEncoder->setVertexBuffer(cameraDataBuffers[currentFrameInFlight].get(), 0, 1);
-                    renderEncoder->setVertexBuffer(instanceDataBuffers[currentFrameInFlight].get(), 0, 2);
+                    renderEncoder->setVertexBuffer(getBuffer(mesh->vbos[0]).get(), 0, 2);
+                    renderEncoder->setVertexBytes(&mesh->instanceID, sizeof(Uint32), 3);
                     renderEncoder->setFragmentBuffer(directionalLightBuffer.get(), 0, 0);
                     renderEncoder->setFragmentBuffer(pointLightBuffer.get(), 0, 1);
                     renderEncoder->setFragmentBuffer(clusterBuffers[currentFrameInFlight].get(), 0, 2);
@@ -601,6 +592,7 @@ auto Renderer_Metal::draw(std::shared_ptr<Scene> scene, Camera& camera) -> void 
     surface->release();
 
     currentFrameInFlight = (currentFrameInFlight + 1) % MAX_FRAMES_IN_FLIGHT;
+    frameNumber++;
 }
 
 

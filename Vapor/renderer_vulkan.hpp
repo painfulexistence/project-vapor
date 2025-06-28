@@ -24,6 +24,13 @@ public:
 
     virtual void draw(std::shared_ptr<Scene> scene, Camera& camera) override;
 
+    virtual void setRenderPath(RenderPath path) override {
+        currentRenderPath = path;
+    }
+    virtual RenderPath getRenderPath() const override {
+        return currentRenderPath;
+    }
+
     VkPipeline createPipeline(const std::string& filename1, const std::string& filename2);
     VkPipeline createRenderPipeline(const std::string& vertShader, const std::string& fragShader);
     VkPipeline createPrePassPipeline(const std::string& vertShader, const std::string& fragShader);
@@ -130,9 +137,9 @@ private:
     std::vector<BufferHandle> clusterBuffers;
     std::vector<BufferHandle> lightCullDataBuffers;
 
-    Uint32 nextBufferID = 1;
-    Uint32 nextImageID = 1;
-    Uint32 nextPipelineID = 1;
+    Uint32 nextBufferID = 0;
+    Uint32 nextImageID = 0;
+    Uint32 nextPipelineID = 0;
     std::unordered_map<Uint32, VkBuffer> buffers;
     std::unordered_map<Uint32, VkDeviceMemory> bufferMemories;
     std::unordered_map<Uint32, VkImage> images;
@@ -140,4 +147,6 @@ private:
     std::unordered_map<Uint32, VkImageView> imageViews;
     std::unordered_map<Uint32, VkPipeline> pipelines;
     std::unordered_map<Material*, VkDescriptorSet> materialTextureSets; // TODO: better key?
+
+    RenderPath currentRenderPath = RenderPath::Forward;
 };

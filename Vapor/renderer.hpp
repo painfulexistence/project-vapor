@@ -10,6 +10,11 @@ enum class GraphicsBackend {
     Vulkan
 };
 
+enum class RenderPath {
+    Forward,
+    Deferred
+};
+
 enum class BufferUsage {
     VERTEX,
     INDEX,
@@ -38,6 +43,9 @@ public:
 
     virtual void draw(std::shared_ptr<Scene> scene, Camera& camera) = 0;
 
+    virtual void setRenderPath(RenderPath path) = 0;
+    virtual RenderPath getRenderPath() const = 0;
+
 protected:
     const Uint32 MAX_FRAMES_IN_FLIGHT = 3;
     const Uint32 MSAA_SAMPLE_COUNT = 4;
@@ -49,6 +57,7 @@ protected:
     Uint32 clusterGridSizeZ = 24;
     Uint32 numClusters = clusterGridSizeX * clusterGridSizeY * clusterGridSizeZ;
     Uint32 currentFrameInFlight = 0;
+    Uint32 frameNumber = 0;
 
     int calculateMipmapLevelCount(Uint32 width, Uint32 height) const {
         return static_cast<int>(std::floor(std::log2(std::max(width, height))) + 1);

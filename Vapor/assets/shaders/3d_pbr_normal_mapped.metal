@@ -189,11 +189,13 @@ float3 CalculatePointLight(PointLight light, float3 norm, float3 tangent, float3
 
 vertex RasterizerData vertexMain(
     uint vertexID [[vertex_id]],
-    device const VertexData* in [[buffer(0)]],
-    device const CameraData& camera [[buffer(1)]],
-    device const InstanceData& instance [[buffer(2)]]
+    constant CameraData& camera [[buffer(0)]],
+    constant InstanceData* instances [[buffer(1)]],
+    device const VertexData* in [[buffer(2)]],
+    constant uint& instanceID [[buffer(3)]]
 ) {
     RasterizerData vert;
+    InstanceData instance = instances[instanceID];
     float3x3 normalMatrix = transpose(inverse(float3x3(
         instance.model[0].xyz,
         instance.model[1].xyz,

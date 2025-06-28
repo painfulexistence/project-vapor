@@ -443,5 +443,7 @@ std::shared_ptr<Scene> AssetManager::loadGLTF(const std::string& filename) {
     for (int nodeIdx : srcScene.nodes) {
         scene->nodes.push_back(createNode(nodeIdx));
     }
+    scene->update(0.0f); // making sure world transform is updated
+
     return scene;
 }

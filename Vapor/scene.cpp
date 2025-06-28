@@ -3,15 +3,15 @@
 #include <SDL3/SDL_log.h>
 
 
-void Scene::Print() {
+void Scene::print() {
     SDL_Log("Scene %s", name.c_str());
     SDL_Log("--------------------------------");
     for (const auto& node : nodes) {
-        PrintNode(node);
+        printNode(node);
     }
 }
 
-void Scene::PrintNode(const std::shared_ptr<Node>& node) {
+void Scene::printNode(const std::shared_ptr<Node>& node) {
     SDL_Log("Node %s", node->name.c_str());
     SDL_Log("--------------------------------");
     if (node->meshGroup) {
@@ -39,11 +39,11 @@ void Scene::PrintNode(const std::shared_ptr<Node>& node) {
     }
     SDL_Log("--------------------------------");
     for (const auto& child : node->children) {
-        PrintNode(child);
+        printNode(child);
     }
 }
 
-std::shared_ptr<Node> Scene::CreateNode(const std::string& name, const glm::mat4& transform) {
+std::shared_ptr<Node> Scene::createNode(const std::string& name, const glm::mat4& transform) {
     auto node = std::make_shared<Node>();
     node->name = name;
     node->localTransform = transform;
@@ -51,13 +51,13 @@ std::shared_ptr<Node> Scene::CreateNode(const std::string& name, const glm::mat4
     return node;
 }
 
-void Scene::AddNode(std::shared_ptr<Node> node) {
+void Scene::addNode(std::shared_ptr<Node> node) {
     nodes.push_back(node);
 }
 
-std::shared_ptr<Node> Scene::FindNode(const std::string& name) {
+std::shared_ptr<Node> Scene::findNode(const std::string& name) {
     for (const auto& node : nodes) {
-        auto result = FindNodeInHierarchy(name, node);
+        auto result = findNodeInHierarchy(name, node);
         if (result) {
             return result;
         }
@@ -65,12 +65,12 @@ std::shared_ptr<Node> Scene::FindNode(const std::string& name) {
     return nullptr;
 }
 
-std::shared_ptr<Node> Scene::FindNodeInHierarchy(const std::string& name, const std::shared_ptr<Node>& node) {
+std::shared_ptr<Node> Scene::findNodeInHierarchy(const std::string& name, const std::shared_ptr<Node>& node) {
     if (node->name == name) {
         return node;
     }
     for (const auto& childNode : node->children) {
-        auto result = FindNodeInHierarchy(name, childNode);
+        auto result = findNodeInHierarchy(name, childNode);
         if (result) {
             return result;
         }
@@ -78,32 +78,50 @@ std::shared_ptr<Node> Scene::FindNodeInHierarchy(const std::string& name, const 
     return nullptr;
 }
 
-void Scene::Update(float dt) {
+void Scene::update(float dt) {
     const glm::mat4 rootTransform = glm::scale(glm::mat4(1.0f), glm::vec3(1.0f));
     for (const auto& node : nodes) {
-        UpdateNode(node, rootTransform);
+        updateNode(node, rootTransform);
     }
 }
 
-void Scene::UpdateNode(const std::shared_ptr<Node>& node, const glm::mat4& parentTransform) {
+void Scene::updateNode(const std::shared_ptr<Node>& node, const glm::mat4& parentTransform) {
     if (node->isTransformDirty) {
         node->worldTransform = parentTransform * node->localTransform;
         node->isTransformDirty = false;
     }
     for (const auto& child : node->children) {
-        UpdateNode(child, node->worldTransform);
+        updateNode(child, node->worldTransform);
     }
 }
 
-void Scene::AddMeshToNode(std::shared_ptr<Node> node, std::shared_ptr<Mesh> mesh) {
+void Scene::addMeshToNode(std::shared_ptr<Node> node, std::shared_ptr<Mesh> mesh) {
     if (!node->meshGroup) {
         node->meshGroup = std::make_shared<MeshGroup>();
         node->meshGroup->name = node->name;
     }
     node->meshGroup->meshes.push_back(mesh);
+    if (mesh->material) {
+        materials.push_back(mesh->material);
+        if (mesh->material->albedoMap) {
+            images.push_back(mesh->material->albedoMap);
+        }
+        if (mesh->material->normalMap) {
+            images.push_back(mesh->material->normalMap);
+        }
+        if (mesh->material->metallicRoughnessMap) {
+            images.push_back(mesh->material->metallicRoughnessMap);
+        }
+        if (mesh->material->occlusionMap) {
+            images.push_back(mesh->material->occlusionMap);
+        }
+        if (mesh->material->displacementMap) {
+            images.push_back(mesh->material->displacementMap);
+        }
+    }
 }
 
-// void Scene::AddLightToNode(std::shared_ptr<Node> node, std::shared_ptr<Light> light) {
+// void Scene::addLightToNode(std::shared_ptr<Node> node, std::shared_ptr<Light> light) {
 //     if (!node->light) {
 //         node->light = light;
 //     }
@@ -111,5 +129,5 @@ void Scene::AddMeshToNode(std::shared_ptr<Node> node, std::shared_ptr<Mesh> mesh
 
 // Usage example
 // auto scene = Scene();
-// auto entity = scene.CreateNode("Cube", glm::identity<glm::mat4>());
-// scene.AddMeshToNode(entity, MeshBuilder::buildCube(1.0f));
+// auto entity = scene.createNode("Cube", glm::identity<glm::mat4>());
+// scene.addMeshToNode(entity, MeshBuilder::buildCube(1.0f));

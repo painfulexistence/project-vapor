@@ -57,7 +57,7 @@ kernel void computeMain(
         return;
     }
 
-    float4 finalColor = float4(1.0, 0.0, 0.0, 1.0);
+    float4 finalColor = float4(1.0, 1.0, 1.0, 1.0); // default to white
     if (!is_null_instance_acceleration_structure(TLAS)) {
         float2 uv = float2(tid) / float2(w, h);
         uv.y = 1.0 - uv.y;

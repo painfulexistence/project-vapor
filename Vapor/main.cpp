@@ -1,11 +1,13 @@
 #include <SDL3/SDL.h>
 #include <fmt/core.h>
 #include <args.hxx>
+#include <glm/ext/vector_float3.hpp>
 #include <iostream>
 #include "scene.hpp"
 #include "renderer.hpp"
 #include "graphics.hpp"
 #include "asset_manager.hpp"
+#include "mesh_builder.hpp"
 #include "camera.hpp"
 #include "rng.hpp"
 
@@ -91,6 +93,19 @@ int main(int argc, char* args[]) {
             .radius = 0.5f
         });
     }
+    auto material = std::make_shared<Material>(Material {
+        .albedoMap = AssetManager::loadImage(std::string("assets/textures/medieval_blocks_diff.jpg")),
+        .normalMap = AssetManager::loadImage(std::string("assets/textures/medieval_blocks_norm_dx.jpg")),
+        .metallicRoughnessMap = AssetManager::loadImage(std::string("assets/textures/medieval_blocks_rough.jpg")),
+        .occlusionMap = AssetManager::loadImage(std::string("assets/textures/medieval_blocks_ao.jpg")),
+        .displacementMap = AssetManager::loadImage(std::string("assets/textures/medieval_blocks_disp.jpg"))
+    });
+    auto entity1 = scene->createNode("Mesh 1");
+    scene->addMeshToNode(entity1, MeshBuilder::buildCube(1.0f, material));
+    entity1->setPosition(glm::vec3(-2.0f, 0.5f, 0.0f));
+    auto entity2 = scene->createNode("Mesh 2");
+    scene->addMeshToNode(entity2, MeshBuilder::buildCube(1.0f, material));
+    entity2->setPosition(glm::vec3(2.0f, 0.5f, 0.0f));
 
     renderer->stage(scene);
 
@@ -192,10 +207,7 @@ int main(int argc, char* args[]) {
             camera.Roll(1.0f * deltaTime);
         }
 
-        // float angle = time * 1.5f;
-        // entity->SetLocalTransform(
-        //     glm::rotate(glm::mat4(1.0f), angle, glm::vec3(0.0f, 1.0f, -1.0f)) // glm::rotate(glm::rotate(glm::mat4(1.0f), glm::radians(270.0f), glm::vec3(1.0f, 0.0f, 0.0f)), angle, glm::vec3(0.0f, 0.0f, 1.0f));
-        // );
+        entity1->rotate(glm::vec3(0.0f, 1.0f, -1.0f), 1.5f * deltaTime);
         float speed = 0.5f;
         scene->directionalLights[0].direction = glm::vec3(0.5, -1.0, 0.05 * sin(time * speed));
         for (int i = 0; i < scene->pointLights.size(); i++) {
@@ -229,7 +241,7 @@ int main(int argc, char* args[]) {
             l.intensity = 3.0f + 2.0f * (0.5f + 0.5f * sin(time * 0.3f + i * 0.1f));
         }
 
-        scene->Update(deltaTime);
+        scene->update(deltaTime);
 
         renderer->draw(scene, camera);
 
