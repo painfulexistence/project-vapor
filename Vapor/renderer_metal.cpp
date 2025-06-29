@@ -66,7 +66,7 @@ auto Renderer_Metal::init() -> void {
     }
     instanceDataBuffers.resize(MAX_FRAMES_IN_FLIGHT);
     for (auto& instanceDataBuffer : instanceDataBuffers) {
-        instanceDataBuffer = NS::TransferPtr(device->newBuffer(sizeof(InstanceData) * numMaxInstances, MTL::ResourceStorageModeManaged));
+        instanceDataBuffer = NS::TransferPtr(device->newBuffer(sizeof(InstanceData) * MAX_INSTANCES, MTL::ResourceStorageModeManaged));
     }
 
     std::vector<Particle> particles{1000};
@@ -292,13 +292,12 @@ auto Renderer_Metal::draw(std::shared_ptr<Scene> scene, Camera& camera) -> void 
     uint pointLightCount = scene->pointLights.size();
     uint directionalLightCount = scene->directionalLights.size();
 
-    Uint32 instanceCount = 0;
     instances.clear();
     accelInstances.clear();
-    for (const auto& node : scene->nodes) {
+    const std::function<void(const std::shared_ptr<Node>&)> updateNode = [&](const std::shared_ptr<Node>& node) {
         if (node->meshGroup) {
+            const glm::mat4& transform = node->worldTransform;
             for (const auto& mesh : node->meshGroup->meshes) {
-                const glm::mat4& transform = node->worldTransform;
                 instances.push_back({
                     .model = transform,
                     .color = glm::vec4(1.0f, 0.0f, 0.0f, 1.0f)
@@ -312,12 +311,17 @@ auto Renderer_Metal::draw(std::shared_ptr<Scene> scene, Camera& camera) -> void 
                 accelInstanceDesc.accelerationStructureIndex = mesh->instanceID;
                 accelInstanceDesc.mask = 0xFF;
                 accelInstances.push_back(accelInstanceDesc);
-                instanceCount++;
             }
         }
+        for (const auto& child : node->children) {
+            updateNode(child);
+        }
+    };
+    for (const auto& node : scene->nodes) {
+        updateNode(node);
     }
-    if (instanceCount > MAX_INSTANCES) { // TODO: reallocate when needed
-        fmt::print("Warning: Instance count ({}) exceeds MAX_INSTANCES ({})\n", instanceCount, MAX_INSTANCES);
+    if (instances.size() > MAX_INSTANCES) { // TODO: reallocate when needed
+        fmt::print("Warning: Instance count ({}) exceeds MAX_INSTANCES ({})\n", instances.size(), MAX_INSTANCES);
     }
     // TODO: avoid updating the entire instance data buffer every frame
     memcpy(instanceDataBuffers[currentFrameInFlight]->contents(), instances.data(), instances.size() * sizeof(InstanceData));

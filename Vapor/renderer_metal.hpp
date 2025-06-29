@@ -47,7 +47,6 @@ private:
     CA::MetalLayer* swapchain;
     MTL::Device* device;
     NS::SharedPtr<MTL::CommandQueue> queue;
-    NS::UInteger numMaxInstances = 1; // TODO: change this to a bigger number
 
     NS::SharedPtr<MTL::DepthStencilState> depthStencilState;
     NS::SharedPtr<MTL::RenderPipelineState> prePassPipeline;
