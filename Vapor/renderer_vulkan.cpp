@@ -1554,8 +1554,7 @@ VkPipeline Renderer_Vulkan::createRenderPipeline(const std::string& vertShader, 
         { 0, 0, VK_FORMAT_R32G32B32_SFLOAT, offsetof(VertexData, position) },
         { 1, 0, VK_FORMAT_R32G32_SFLOAT, offsetof(VertexData, uv) },
         { 2, 0, VK_FORMAT_R32G32B32_SFLOAT, offsetof(VertexData, normal) },
-        { 3, 0, VK_FORMAT_R32G32B32A32_SFLOAT, offsetof(VertexData, tangent) },
-        // { 4, 0, VK_FORMAT_R32G32B32_SFLOAT, offsetof(VertexData, bitangent) }
+        { 3, 0, VK_FORMAT_R32G32B32A32_SFLOAT, offsetof(VertexData, tangent) }
     }};
 
     VkPipelineVertexInputStateCreateInfo vertexInputStateInfo = { VK_STRUCTURE_TYPE_PIPELINE_VERTEX_INPUT_STATE_CREATE_INFO };

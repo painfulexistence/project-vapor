@@ -79,7 +79,6 @@ private:
 
     std::vector<InstanceData> instances;
     std::vector<MTL::AccelerationStructureInstanceDescriptor> accelInstances;
-    uint32_t currentInstanceCount = 0;
 
     NS::SharedPtr<MTL::Texture> colorRT_MS;
     NS::SharedPtr<MTL::Texture> colorRT;

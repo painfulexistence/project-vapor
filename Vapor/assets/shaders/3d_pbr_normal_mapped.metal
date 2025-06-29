@@ -16,7 +16,7 @@ struct Surface {
     float ao;
     float roughness;
     float metallic;
-    // float3 emission;
+    float3 emission;
     float subsurface;
     float specular;
     float specular_tint;
