@@ -655,7 +655,7 @@ auto Renderer_Vulkan::init() -> void {
             .stageFlags = VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_COMPUTE_BIT,
             .pImmutableSamplers = nullptr
         },
-        // Instance data
+        // Instances data
         {
             .binding = 1,
             .descriptorType = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER,
@@ -704,7 +704,7 @@ auto Renderer_Vulkan::init() -> void {
         throw std::runtime_error("Failed to create set 0 layout!");
     }
 
-    std::array<VkDescriptorSetLayoutBinding, 2> set1LayoutBindings = {{
+    std::array<VkDescriptorSetLayoutBinding, 5> set1LayoutBindings = {{
         // Base map
         {
             .binding = 0,
@@ -716,6 +716,30 @@ auto Renderer_Vulkan::init() -> void {
         // Normal map
         {
             .binding = 1,
+            .descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER,
+            .descriptorCount = 1,
+            .stageFlags = VK_SHADER_STAGE_FRAGMENT_BIT,
+            .pImmutableSamplers = nullptr
+        },
+        // Metallic roughness map
+        {
+            .binding = 2,
+            .descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER,
+            .descriptorCount = 1,
+            .stageFlags = VK_SHADER_STAGE_FRAGMENT_BIT,
+            .pImmutableSamplers = nullptr
+        },
+        // Occlusion map
+        {
+            .binding = 3,
+            .descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER,
+            .descriptorCount = 1,
+            .stageFlags = VK_SHADER_STAGE_FRAGMENT_BIT,
+            .pImmutableSamplers = nullptr
+        },
+        // Emissive map
+        {
+            .binding = 4,
             .descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER,
             .descriptorCount = 1,
             .stageFlags = VK_SHADER_STAGE_FRAGMENT_BIT,
@@ -749,8 +773,9 @@ auto Renderer_Vulkan::init() -> void {
 
     // Create pipeline layouts
     std::array<VkDescriptorSetLayout, 2> renderDescriptorSetLayouts = { set0Layout, set1Layout };
-    std::array<VkPushConstantRange, 1> renderPushConstantRanges = {{
-        { VK_SHADER_STAGE_FRAGMENT_BIT, 0, sizeof(glm::vec3) }
+    std::array<VkPushConstantRange, 2> renderPushConstantRanges = {{
+        { VK_SHADER_STAGE_FRAGMENT_BIT, 0, sizeof(glm::vec3) },
+        { VK_SHADER_STAGE_VERTEX_BIT, sizeof(glm::vec3), sizeof(Uint32) }
     }};
     VkPipelineLayoutCreateInfo renderPipelineLayoutInfo = {};
     renderPipelineLayoutInfo.sType = VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO;
@@ -762,13 +787,16 @@ auto Renderer_Vulkan::init() -> void {
         throw std::runtime_error("Failed to create render pipeline layout!");
     }
 
+    std::array<VkPushConstantRange, 1> depthOnlyPushConstantRanges = {{
+        { VK_SHADER_STAGE_VERTEX_BIT, 0, sizeof(Uint32) }
+    }};
     std::array<VkDescriptorSetLayout, 2> depthOnlyDescriptorSetLayouts = { set0Layout, set1Layout };
     VkPipelineLayoutCreateInfo depthOnlyPipelineLayoutInfo = {};
     depthOnlyPipelineLayoutInfo.sType = VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO;
     depthOnlyPipelineLayoutInfo.setLayoutCount = static_cast<uint32_t>(depthOnlyDescriptorSetLayouts.size());
     depthOnlyPipelineLayoutInfo.pSetLayouts = depthOnlyDescriptorSetLayouts.data();
-    depthOnlyPipelineLayoutInfo.pushConstantRangeCount = 0;
-    depthOnlyPipelineLayoutInfo.pPushConstantRanges = nullptr;
+    depthOnlyPipelineLayoutInfo.pushConstantRangeCount = depthOnlyPushConstantRanges.size();
+    depthOnlyPipelineLayoutInfo.pPushConstantRanges = depthOnlyPushConstantRanges.data();
     if (vkCreatePipelineLayout(device, &depthOnlyPipelineLayoutInfo, nullptr, &prePassPipelineLayout) != VK_SUCCESS) {
         throw std::runtime_error("Failed to create depth-only pipeline layout!");
     }
@@ -821,7 +849,7 @@ auto Renderer_Vulkan::init() -> void {
     instanceDataBuffers.resize(MAX_FRAMES_IN_FLIGHT);
     instanceDataBuffersMapped.resize(MAX_FRAMES_IN_FLIGHT);
     for (size_t i = 0; i < MAX_FRAMES_IN_FLIGHT; i++) {
-        instanceDataBuffers[i] = createBufferMapped(BufferUsage::UNIFORM, sizeof(InstanceData), &instanceDataBuffersMapped[i]);
+        instanceDataBuffers[i] = createBufferMapped(BufferUsage::UNIFORM, sizeof(InstanceData) * MAX_INSTANCES, &instanceDataBuffersMapped[i]);
     }
 
     // Create textures
@@ -923,7 +951,7 @@ auto Renderer_Vulkan::init() -> void {
         VkDescriptorBufferInfo instanceBufferInfo = {};
         instanceBufferInfo.buffer = getBuffer(instanceDataBuffers[i]);
         instanceBufferInfo.offset = 0;
-        instanceBufferInfo.range = sizeof(InstanceData);
+        instanceBufferInfo.range = sizeof(InstanceData) * MAX_INSTANCES;
 
         std::array<VkWriteDescriptorSet, 2> writes = {{ // must match descriptor set layout bindings
             {
@@ -977,6 +1005,7 @@ auto Renderer_Vulkan::stage(std::shared_ptr<Scene> scene) -> void {
                 for (auto& mesh : node->meshGroup->meshes) {
                     mesh->vbos.push_back(createVertexBuffer(mesh->vertices)); // TODO: use single vbo for all meshes
                     mesh->ebo = createIndexBuffer(mesh->indices);
+                    mesh->instanceID = nextInstanceID++;
                 }
             }
             for (const auto& child : node->children) {
@@ -1035,7 +1064,7 @@ auto Renderer_Vulkan::stage(std::shared_ptr<Scene> scene) -> void {
 
     // Descriptor sets
     std::array<VkDescriptorPoolSize, 1> set1PoolSizes = {{
-        { VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, 2 * static_cast<uint32_t>(scene->materials.size()) }
+        { VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, 5 * static_cast<uint32_t>(scene->materials.size()) }
     }};
 
     VkDescriptorPoolCreateInfo set1PoolDesc{};
@@ -1090,7 +1119,14 @@ auto Renderer_Vulkan::stage(std::shared_ptr<Scene> scene) -> void {
         occlusionImageInfo.sampler = defaultSampler;
         occlusionImageInfo.imageLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
 
-        std::array<VkWriteDescriptorSet, 2> writes = {{ // must match descriptor set layout bindings
+        VkDescriptorImageInfo emissiveImageInfo;
+        emissiveImageInfo.imageView = getTextureView(
+            mat->emissiveMap ? mat->emissiveMap->texture : defaultEmissiveTexture
+        );
+        emissiveImageInfo.sampler = defaultSampler;
+        emissiveImageInfo.imageLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
+
+        std::array<VkWriteDescriptorSet, 5> writes = {{ // must match descriptor set layout bindings
             {
                 .sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET,
                 .dstSet = set1s[i],
@@ -1109,6 +1145,36 @@ auto Renderer_Vulkan::stage(std::shared_ptr<Scene> scene) -> void {
                 .descriptorCount = 1,
                 .descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER,
                 .pImageInfo = &normalImageInfo,
+                .pBufferInfo = nullptr,
+            },
+            {
+                .sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET,
+                .dstSet = set1s[i],
+                .dstBinding = 2,
+                .dstArrayElement = 0,
+                .descriptorCount = 1,
+                .descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER,
+                .pImageInfo = &metallicRoughnessImageInfo,
+                .pBufferInfo = nullptr,
+            },
+            {
+                .sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET,
+                .dstSet = set1s[i],
+                .dstBinding = 3,
+                .dstArrayElement = 0,
+                .descriptorCount = 1,
+                .descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER,
+                .pImageInfo = &occlusionImageInfo,
+                .pBufferInfo = nullptr,
+            },
+            {
+                .sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET,
+                .dstSet = set1s[i],
+                .dstBinding = 4,
+                .dstArrayElement = 0,
+                .descriptorCount = 1,
+                .descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER,
+                .pImageInfo = &emissiveImageInfo,
                 .pBufferInfo = nullptr,
             }
         }};
@@ -1213,6 +1279,26 @@ auto Renderer_Vulkan::draw(std::shared_ptr<Scene> scene, Camera& camera) -> void
     memcpy(directionalLightBuffersMapped[currentFrameInFlight], scene->directionalLights.data(), sizeof(DirectionalLight) * scene->directionalLights.size());
     memcpy(pointLightBuffersMapped[currentFrameInFlight], scene->pointLights.data(), sizeof(PointLight) * scene->pointLights.size());
 
+    instances.clear();
+    const std::function<void(const std::shared_ptr<Node>&)> updateNode = [&](const std::shared_ptr<Node>& node) {
+        if (node->meshGroup) {
+            const glm::mat4& transform = node->worldTransform;
+            for (auto& mesh : node->meshGroup->meshes) {
+                instances.push_back({ .model = transform });
+            }
+        }
+        for (const auto& child : node->children) {
+            updateNode(child);
+        }
+    };
+    for (const auto& node : scene->nodes) {
+        updateNode(node);
+    }
+    if (instances.size() > MAX_INSTANCES) { // TODO: reallocate when needed
+        fmt::print("Warning: Instance count ({}) exceeds MAX_INSTANCES ({})\n", instances.size(), MAX_INSTANCES);
+    }
+    memcpy(instanceDataBuffersMapped[currentFrameInFlight], instances.data(), sizeof(InstanceData) * instances.size());
+
     VkCommandBuffer cmd = commandBuffers[currentFrameInFlight];
     vkResetCommandBuffer(cmd, 0);
     VkCommandBufferBeginInfo beginInfo = {};
@@ -1262,8 +1348,6 @@ auto Renderer_Vulkan::draw(std::shared_ptr<Scene> scene, Camera& camera) -> void
     const std::function<void(const std::shared_ptr<Node>&)> drawNodeDepth =
         [&](const std::shared_ptr<Node>& node) {
             if (node->meshGroup) {
-                InstanceData instanceData = { .model = node->worldTransform };
-                memcpy(instanceDataBuffersMapped[currentFrameInFlight], &instanceData, sizeof(InstanceData));
                 for (auto& mesh : node->meshGroup->meshes) {
                     if (!mesh->material) {
                         fmt::print("No material found for mesh in mesh group {}\n", node->meshGroup->name);
@@ -1274,8 +1358,10 @@ auto Renderer_Vulkan::draw(std::shared_ptr<Scene> scene, Camera& camera) -> void
                     VkDeviceSize offsets[] = { 0 };
                     vkCmdBindVertexBuffers(cmd, 0, 1, vertexBuffers, offsets);
                     vkCmdBindIndexBuffer(cmd, getBuffer(mesh->ebo), 0, VkIndexType::VK_INDEX_TYPE_UINT32);
+                    // TODO: bind camera and instance data buffer outside the loop
                     std::array<VkDescriptorSet, 2> descriptorSets = { set0s[currentFrameInFlight], materialTextureSets.at(mesh->material.get()) };
                     vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, prePassPipelineLayout, 0, descriptorSets.size(), descriptorSets.data(), 0, nullptr); // resources are set here
+                    vkCmdPushConstants(cmd, prePassPipelineLayout, VK_SHADER_STAGE_VERTEX_BIT, 0, sizeof(Uint32), &mesh->instanceID);
                     vkCmdDrawIndexed(cmd, mesh->indices.size(), 1, 0, 0, 0);
                 }
             }
@@ -1299,8 +1385,6 @@ auto Renderer_Vulkan::draw(std::shared_ptr<Scene> scene, Camera& camera) -> void
     const std::function<void(const std::shared_ptr<Node>&)> drawNode =
         [&](const std::shared_ptr<Node>& node) {
             if (node->meshGroup) {
-                InstanceData instanceData = { .model = node->worldTransform };
-                memcpy(instanceDataBuffersMapped[currentFrameInFlight], &instanceData, sizeof(InstanceData));
                 for (auto& mesh : node->meshGroup->meshes) {
                     if (!mesh->material) {
                         fmt::print("No material found for mesh in mesh group {}\n", node->meshGroup->name);
@@ -1311,9 +1395,11 @@ auto Renderer_Vulkan::draw(std::shared_ptr<Scene> scene, Camera& camera) -> void
                     VkDeviceSize offsets[] = { 0 };
                     vkCmdBindVertexBuffers(cmd, 0, 1, vertexBuffers, offsets);
                     vkCmdBindIndexBuffer(cmd, getBuffer(mesh->ebo), 0, VkIndexType::VK_INDEX_TYPE_UINT32);
+                    // TODO: bind camera and instance data buffer outside the loop
                     std::array<VkDescriptorSet, 2> descriptorSets = { set0s[currentFrameInFlight], materialTextureSets.at(mesh->material.get()) };
                     vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, renderPipelineLayout, 0, descriptorSets.size(), descriptorSets.data(), 0, nullptr); // resources are set here
                     vkCmdPushConstants(cmd, renderPipelineLayout, VK_SHADER_STAGE_FRAGMENT_BIT, 0, sizeof(glm::vec3), &camPos);
+                    vkCmdPushConstants(cmd, renderPipelineLayout, VK_SHADER_STAGE_VERTEX_BIT, sizeof(glm::vec3), sizeof(Uint32), &mesh->instanceID);
                     vkCmdDrawIndexed(cmd, mesh->indices.size(), 1, 0, 0, 0);
                 }
             }

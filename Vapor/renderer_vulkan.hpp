@@ -137,9 +137,12 @@ private:
     std::vector<BufferHandle> clusterBuffers;
     std::vector<BufferHandle> lightCullDataBuffers;
 
+    std::vector<InstanceData> instances;
+
     Uint32 nextBufferID = 0;
     Uint32 nextImageID = 0;
     Uint32 nextPipelineID = 0;
+    Uint32 nextInstanceID = 0;
     std::unordered_map<Uint32, VkBuffer> buffers;
     std::unordered_map<Uint32, VkDeviceMemory> bufferMemories;
     std::unordered_map<Uint32, VkImage> images;

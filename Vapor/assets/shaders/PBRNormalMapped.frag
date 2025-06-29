@@ -2,8 +2,8 @@
 
 layout(location = 0) in vec3 frag_pos;
 layout(location = 1) in vec2 tex_uv;
-layout(location = 2) in vec3 T;
-layout(location = 3) in vec3 N;
+layout(location = 2) in vec3 world_normal;
+layout(location = 3) in vec4 world_tangent;
 layout(location = 0) out vec4 Color;
 
 const uint MAX_LIGHTS_PER_TILE = 256; // Must match the definition in graphics.hpp
@@ -54,17 +54,18 @@ layout(std430, set = 0, binding = 5) readonly buffer ClusterBuffer {
 };
 layout(set = 1, binding = 0) uniform sampler2D base_map;
 layout(set = 1, binding = 1) uniform sampler2D normal_map;
-// layout(set = 1, binding = 2) uniform sampler2D metallic_roughness_map;
-// layout(set = 1, binding = 3) uniform sampler2D occlusion_map;
-// layout(set = 1, binding = 4) uniform sampler2D emission_map;
+layout(set = 1, binding = 2) uniform sampler2D metallic_roughness_map;
+layout(set = 1, binding = 3) uniform sampler2D occlusion_map;
+layout(set = 1, binding = 4) uniform sampler2D emission_map;
 // layout(set = 1, binding = 10) uniform sampler2D env_map;
+// layout(set = 2, binding = 1) uniform sampler2D raytracedShadowMap;
 
 struct Surface {
     vec3 color;
     float ao;
     float roughness;
     float metallic;
-    // vec3 emission;
+    vec3 emission;
     float subsurface;
     float specular;
     float specular_tint;
@@ -96,6 +97,8 @@ vec3 CalculatePointLight(PointLight light, vec3 norm, vec3 tangent, vec3 bitange
     float dist = distance(light.position, frag_pos);
     float attenuation = 1.0 / (dist * dist);
     attenuation *= 1.0 - smoothstep(light.radius * 0.8, light.radius, dist);
+    // vec2 shadowCoord = gl_FragCoord.xy / textureSize(raytracedShadowMap, 0);
+    // float shadowFactor = texture(raytracedShadowMap, shadowCoord).r;
     vec3 radiance = attenuation * light.color * light.intensity;
     return CookTorranceBRDF(norm, tangent, bitangent, lightDir, viewDir, surf) * radiance * max(dot(norm, lightDir), 0.0);
 }
@@ -210,19 +213,23 @@ void main() {
     }
 
     vec3 texNorm = texture(normal_map, tex_uv).rgb * 2.0 - 1.0;
-    vec3 B = normalize(cross(N, T));
+    vec3 N = normalize(world_normal.xyz);
+    vec3 T = normalize(world_tangent.xyz);
+    T = normalize(T - dot(T, N) * N);
+    vec3 B = normalize(cross(N, T) * world_tangent.w);
     mat3 TBN = mat3(T, B, N);
     vec3 norm = normalize(TBN * texNorm);
-    vec3 tangent = normalize(T);
-    vec3 bitangent = normalize(cross(norm, tangent));
+    vec3 tangent = T;
+    vec3 bitangent = B;
     vec3 viewDir = normalize(camPos - frag_pos);
 
     Surface surf;
     surf.color = pow(baseColor.rgb, vec3(GAMMA));
-    surf.ao = 1.0; // texture(ao_map, tex_uv).r;
-    surf.roughness = 1.0; // texture(roughness_map, tex_uv).r;
-    surf.metallic = 0.0; // texture(metallic_map, tex_uv).r;
-    // surf.emission = vec3(0.0);
+    surf.ao = texture(occlusion_map, tex_uv).r;
+    vec2 roughnessMetallic = texture(metallic_roughness_map, tex_uv).gb;
+    surf.roughness = roughnessMetallic.x;
+    surf.metallic = roughnessMetallic.y;
+    surf.emission = texture(emission_map, tex_uv).rgb;
     surf.subsurface = 0.0;
     surf.specular = 0.5;
     surf.specular_tint = 0.0;
