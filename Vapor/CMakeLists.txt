@@ -9,16 +9,12 @@ FetchContent_Declare(SDL3
     GIT_TAG release-3.2.14
     GIT_PROGRESS TRUE)
 FetchContent_MakeAvailable(SDL3)
-set(ARGS_BUILD_EXAMPLE OFF)
-set(ARGS_BUILD_UNITTESTS OFF)
-FetchContent_Declare(args
-    GIT_REPOSITORY https://github.com/Taywee/args
-    GIT_TAG 6.4.6
-    GIT_PROGRESS TRUE)
-FetchContent_MakeAvailable(args)
+find_package(args CONFIG REQUIRED)
 find_package(fmt CONFIG REQUIRED)
 find_package(glm CONFIG REQUIRED)
 find_package(Vulkan REQUIRED)
+find_path(TINYGLTF_INCLUDE_DIRS "tiny_gltf.h")
+find_package(cereal CONFIG REQUIRED)
 
 add_subdirectory(metal)
 add_subdirectory(MikkTSpace)
@@ -32,12 +28,14 @@ set(SOURCES
 	asset_manager.cpp
 	scene.cpp
 	camera.cpp
+	asset_serializer.cpp
 )
 
 add_executable(main ${SOURCES})
 target_compile_features(main PRIVATE cxx_std_20)
 set_target_properties(main PROPERTIES CXX_EXTENSIONS OFF)
-target_link_libraries(main PRIVATE SDL3::SDL3 metal fmt::fmt glm::glm Vulkan::Vulkan args mikktspace)
+target_link_libraries(main PRIVATE SDL3::SDL3 metal fmt::fmt glm::glm Vulkan::Vulkan taywee::args mikktspace cereal::cereal)
+target_include_directories(main PRIVATE ${TINYGLTF_INCLUDE_DIRS})
 
 find_program(GLSL_VALIDATOR "glslangValidator" REQUIRED)
 file(GLOB_RECURSE SHADER_SOURCES CONFIGURE_DEPENDS

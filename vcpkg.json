@@ -4,6 +4,9 @@
     "license": "MIT",
     "dependencies": [
       "fmt",
-      "glm"
+      "glm",
+      "args",
+      "tinygltf",
+      "cereal"
     ]
 }
