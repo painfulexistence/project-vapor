@@ -5,6 +5,8 @@ constant float PI = 3.1415927;
 constant float GAMMA = 2.2;
 constant float INV_GAMMA = 1.0 / GAMMA;
 
+constant uint MAX_LIGHTS_PER_CLUSTER = 256;
+
 struct VertexData {
     packed_float3 position;
     packed_float2 uv;
@@ -25,6 +27,28 @@ struct CameraData {
 struct InstanceData {
     float4x4 model;
     float4 color;
+};
+
+struct DirLight {
+    float3 direction;
+    float3 color;
+    float intensity;
+    // float _pad[3];
+};
+
+struct PointLight {
+    float3 position;
+    float3 color;
+    float intensity;
+    float radius;
+    // float _pad[2];
+};
+
+struct Cluster {
+    float4 min;
+    float4 max;
+    uint lightCount;
+    uint lightIndices[MAX_LIGHTS_PER_CLUSTER];
 };
 
 float3x3 inverse(float3x3 const m) {
@@ -79,4 +103,13 @@ float3 sampleCosineWeightedHemisphere(float2 s, float3 normal) {
     float3 tangent = normalize(cross(axis, normal));
     float3 bitangent = cross(normal, tangent);
     return tangent * x + bitangent * y + normal * z;
+}
+
+float3 linearToSRGB(float3 color) {
+    // return pow(linear, float3(INV_GAMMA));
+    return mix(
+        color * 12.92,
+        1.055 * pow(color, float3(1.0 / 2.4)) - 0.055,
+        step(0.0031308, color)
+    );
 }

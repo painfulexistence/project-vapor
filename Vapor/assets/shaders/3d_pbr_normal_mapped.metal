@@ -2,15 +2,6 @@
 using namespace metal;
 #include "assets/shaders/3d_common.metal" // TODO: use more robust include path
 
-constant uint MAX_LIGHTS_PER_CLUSTER = 256;
-
-
-struct Cluster {
-    float4 min;
-    float4 max;
-    uint lightCount;
-    uint lightIndices[MAX_LIGHTS_PER_CLUSTER];
-};
 
 struct RasterizerData {
     float4 position [[position]];
@@ -34,21 +25,6 @@ struct Surface {
     float sheen_tint;
     float clearcoat;
     float clearcoat_gloss;
-};
-
-struct DirLight {
-    float3 direction;
-    float3 color;
-    float intensity;
-    // float _pad[3];
-};
-
-struct PointLight {
-    float3 position;
-    float3 color;
-    float intensity;
-    float radius;
-    // float _pad[2];
 };
 
 float GTR1(float nh, float a) {
@@ -210,10 +186,11 @@ fragment float4 fragmentMain(
     }
     Surface surf;
     surf.color = pow(baseColor.rgb, float3(GAMMA));
-    surf.ao = 1.0; // texOcclusion.sample(s, in.uv).r;
-    surf.roughness = 1.0; // texRoughness.sample(s, in.uv).g;
-    surf.metallic = 0.0; // texMetallic.sample(s, in.uv).b;
-    // surf.emission = float3(0.0);
+    surf.ao = texOcclusion.sample(s, in.uv).r;
+    float2 roughnessMetallic = texMetallicRoughness.sample(s, in.uv).gb;
+    surf.roughness = roughnessMetallic.x;
+    surf.metallic = roughnessMetallic.y;
+    surf.emission = texEmissive.sample(s, in.uv).rgb;
     surf.subsurface = 0.0;
     surf.specular = 0.5;
     surf.specular_tint = 0.0;

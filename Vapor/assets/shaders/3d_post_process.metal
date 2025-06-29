@@ -1,8 +1,6 @@
 #include <metal_stdlib>
 using namespace metal;
-
-constexpr constant float GAMMA = 2.2;
-constexpr constant float INV_GAMMA = 1.0 / GAMMA;
+#include "assets/shaders/3d_common.metal" // TODO: use more robust include path
 
 constant float2 ndcVerts[3] = {
     float2(-1.0, -1.0),
@@ -32,20 +30,10 @@ float3 aces(float3 x) {
     return clamp((x * (a * x + b)) / (x * (c * x + d) + e), 0.0, 1.0);
 }
 
-float3 linearToSRGB(float3 color) {
-    // return pow(linear, float3(INV_GAMMA));
-    return mix(
-        color * 12.92,
-        1.055 * pow(color, float3(1.0 / 2.4)) - 0.055,
-        step(0.0031308, color)
-    );
-}
-
 fragment float4 fragmentMain(
     RasterizerData in [[stage_in]],
     texture2d<float, access::sample> texScreen [[texture(0)]],
-    texture2d<float, access::sample> texAO [[texture(1)]],
-    texture2d<float, access::sample> texNormal [[texture(2)]]
+    texture2d<float, access::sample> texAO [[texture(1)]]
 ) {
     constexpr sampler s(address::repeat, filter::linear, mip_filter::linear);
     float3 color = texScreen.sample(s, in.uv).rgb;
@@ -57,7 +45,5 @@ fragment float4 fragmentMain(
 
     // color = linearToSRGB(color);  // Already handled by swapchain
 
-    return float4(float3(texNormal.sample(s, in.uv).rgb) * 0.5 + 0.5, 1.0);
-    return float4(float3(ao), 1.0);
-    // return float4(color, 1.0);
+    return float4(color, 1.0);
 }
