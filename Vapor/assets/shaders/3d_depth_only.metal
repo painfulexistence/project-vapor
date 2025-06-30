@@ -19,16 +19,14 @@ vertex RasterizerData vertexMain(
     constant uint& instanceID [[buffer(3)]]
 ) {
     RasterizerData vert;
-    InstanceData instance = instances[instanceID];
-    float3x3 normalMatrix = transpose(inverse(float3x3(
-        normalize(instance.model[0].xyz),
-        normalize(instance.model[1].xyz),
-        normalize(instance.model[2].xyz)
-    )));
+    uint actualVertexID = instances[instanceID].vertexOffset + vertexID;
+    float4x4 model = instances[instanceID].model;
+    float3x3 model33 = float3x3(model[0].xyz, model[1].xyz, model[2].xyz);
+    float3x3 normalMatrix = transpose(inverse(model33));
     // Caution: worldNormal and worldTangent are not normalized yet, and they can be affected by model scaling
-    vert.worldNormal = float4(normalMatrix * float3(in[vertexID].normal), 0.0);
-    vert.worldTangent = float4(normalMatrix * float3(in[vertexID].tangent), in[vertexID].tangent.w);
-    vert.worldPosition = instance.model * float4(in[vertexID].position, 1.0);
+    vert.worldNormal = float4(normalMatrix * float3(in[actualVertexID].normal.xyz), 0.0);
+    vert.worldTangent = float4(normalMatrix * in[actualVertexID].tangent.xyz, in[actualVertexID].tangent.w);
+    vert.worldPosition = model * float4(in[actualVertexID].position, 1.0);
     vert.position = camera.proj * camera.view * vert.worldPosition;
     vert.uv = in[vertexID].uv;
     return vert;
@@ -54,5 +52,5 @@ fragment float4 fragmentMain(
     float3 normal = texAlbedo.sample(s, in.uv).rgb * 2.0 - 1.0;
     normal.y = 1.0 - normal.y;
     float3 norm = normalize(TBN * normal);
-    return float4(normal, 1.0);
+    return float4(N, 1.0);
 }

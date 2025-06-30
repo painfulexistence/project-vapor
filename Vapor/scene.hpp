@@ -149,6 +149,12 @@ public:
     std::vector<DirectionalLight> directionalLights;
     std::vector<PointLight> pointLights;
 
+    // GPU-driven rendering
+    std::vector<VertexData> vertices;
+    std::vector<Uint32> indices;
+    BufferHandle vertexBuffer;
+    BufferHandle indexBuffer;
+
     Scene() = default;
     Scene(const std::string& name) : name(name) {};
     ~Scene() = default;

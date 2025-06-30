@@ -191,24 +191,27 @@ auto Renderer_Metal::stage(std::shared_ptr<Scene> scene) -> void {
     }
 
     // Buffers
+    scene->vertexBuffer = createVertexBuffer(scene->vertices);
+    scene->indexBuffer = createIndexBuffer(scene->indices);
+
     auto cmd = queue->commandBuffer();
 
     const std::function<void(const std::shared_ptr<Node>&)> stageNode =
         [&](const std::shared_ptr<Node>& node) {
             if (node->meshGroup) {
                 for (auto& mesh : node->meshGroup->meshes) {
-                    mesh->vbos.push_back(createVertexBuffer(mesh->vertices)); // TODO: use single vbo for all meshes
-                    mesh->ebo = createIndexBuffer(mesh->indices);
+                    // mesh->vbos.push_back(createVertexBuffer(mesh->vertices));
+                    // mesh->ebo = createIndexBuffer(mesh->indices);
 
                     auto geomDesc = NS::TransferPtr(MTL::AccelerationStructureTriangleGeometryDescriptor::alloc()->init());
-                    geomDesc->setVertexBuffer(getBuffer(mesh->vbos[0]).get());
+                    geomDesc->setVertexBuffer(getBuffer(scene->vertexBuffer).get());
                     geomDesc->setVertexStride(sizeof(VertexData));
                     geomDesc->setVertexFormat(MTL::AttributeFormatFloat3);
-                    geomDesc->setVertexBufferOffset(offsetof(VertexData, position));
-                    geomDesc->setIndexBuffer(getBuffer(mesh->ebo).get());
+                    geomDesc->setVertexBufferOffset(mesh->vertexOffset * sizeof(VertexData) + offsetof(VertexData, position));
+                    geomDesc->setIndexBuffer(getBuffer(scene->indexBuffer).get());
                     geomDesc->setIndexType(MTL::IndexTypeUInt32);
-                    geomDesc->setIndexBufferOffset(0);
-                    geomDesc->setTriangleCount(mesh->indices.size() / 3);
+                    geomDesc->setIndexBufferOffset(mesh->indexOffset * sizeof(Uint32));
+                    geomDesc->setTriangleCount(mesh->indexCount / 3);
                     geomDesc->setOpaque(true);
 
                     auto accelDesc = NS::TransferPtr(MTL::PrimitiveAccelerationStructureDescriptor::alloc()->init());
@@ -409,6 +412,7 @@ auto Renderer_Metal::draw(std::shared_ptr<Scene> scene, Camera& camera) -> void 
 
     prePassEncoder->setVertexBuffer(cameraDataBuffers[currentFrameInFlight].get(), 0, 0);
     prePassEncoder->setVertexBuffer(instanceDataBuffers[currentFrameInFlight].get(), 0, 1);
+    prePassEncoder->setVertexBuffer(getBuffer(scene->vertexBuffer).get(), 0, 2);
     const std::function<void(const std::shared_ptr<Node>&)> drawNodeDepth =
         [&](const std::shared_ptr<Node>& node) {
             if (node->meshGroup) {
@@ -421,28 +425,19 @@ auto Renderer_Metal::draw(std::shared_ptr<Scene> scene, Camera& camera) -> void 
                     //     getTexture(mesh->material->displacementMap ? mesh->material->displacementMap->texture : defaultDisplacementTexture).get(),
                     //     1
                     // );
-                    prePassEncoder->setVertexBuffer(getBuffer(mesh->vbos[0]).get(), 0, 2);
+                    // prePassEncoder->setVertexBuffer(getBuffer(mesh->vbos[0]).get(), 0, 2);
                     prePassEncoder->setVertexBytes(&mesh->instanceID, sizeof(Uint32), 3);
                     prePassEncoder->setFragmentTexture(
                         getTexture(mesh->material->albedoMap ? mesh->material->albedoMap->texture : defaultAlbedoTexture).get(),
                         0
                     );
-                    if (mesh->indices.size() > 0) {
-                        prePassEncoder->drawIndexedPrimitives(
-                            MTL::PrimitiveType::PrimitiveTypeTriangle,
-                            mesh->indices.size(),
-                            MTL::IndexTypeUInt32,
-                            getBuffer(mesh->ebo).get(),
-                            0
-                        );
-                    } else {
-                        prePassEncoder->drawPrimitives(
-                            MTL::PrimitiveType::PrimitiveTypeTriangle,
-                            0,
-                            mesh->vertices.size(),
-                            1
-                        );
-                    }
+                    prePassEncoder->drawIndexedPrimitives(
+                        MTL::PrimitiveType::PrimitiveTypeTriangle,
+                        mesh->indexCount,// mesh->indices.size(),
+                        MTL::IndexTypeUInt32,
+                        getBuffer(scene->indexBuffer).get(), // getBuffer(mesh->ebo).get(),
+                        mesh->indexOffset * sizeof(Uint32) // 0
+                    );
                 }
             }
             for (const auto& child : node->children) {
@@ -541,6 +536,7 @@ auto Renderer_Metal::draw(std::shared_ptr<Scene> scene, Camera& camera) -> void 
 
     renderEncoder->setVertexBuffer(cameraDataBuffers[currentFrameInFlight].get(), 0, 0);
     renderEncoder->setVertexBuffer(instanceDataBuffers[currentFrameInFlight].get(), 0, 1);
+    renderEncoder->setVertexBuffer(getBuffer(scene->vertexBuffer).get(), 0, 2);
     const std::function<void(const std::shared_ptr<Node>&)> drawNode =
         [&](const std::shared_ptr<Node>& node) {
             if (node->meshGroup) {
@@ -578,7 +574,7 @@ auto Renderer_Metal::draw(std::shared_ptr<Scene> scene, Camera& camera) -> void 
                         shadowRT.get(),
                         7
                     );
-                    renderEncoder->setVertexBuffer(getBuffer(mesh->vbos[0]).get(), 0, 2);
+                    // renderEncoder->setVertexBuffer(getBuffer(mesh->vbos[0]).get(), 0, 2);
                     renderEncoder->setVertexBytes(&mesh->instanceID, sizeof(Uint32), 3);
                     renderEncoder->setFragmentBuffer(directionalLightBuffer.get(), 0, 0);
                     renderEncoder->setFragmentBuffer(pointLightBuffer.get(), 0, 1);
@@ -588,22 +584,13 @@ auto Renderer_Metal::draw(std::shared_ptr<Scene> scene, Camera& camera) -> void 
                     renderEncoder->setFragmentBytes(&screenSize, sizeof(glm::vec2), 5);
                     renderEncoder->setFragmentBytes(&gridSize, sizeof(glm::uvec3), 6);
                     renderEncoder->setFragmentBytes(&time, sizeof(float), 7);
-                    if (mesh->indices.size() > 0) {
-                        renderEncoder->drawIndexedPrimitives(
-                            MTL::PrimitiveType::PrimitiveTypeTriangle,
-                            mesh->indices.size(),
-                            MTL::IndexTypeUInt32,
-                            getBuffer(mesh->ebo).get(),
-                            0
-                        );
-                    } else {
-                        renderEncoder->drawPrimitives(
-                            MTL::PrimitiveType::PrimitiveTypeTriangle,
-                            0,
-                            mesh->vertices.size(),
-                            1
-                        );
-                    }
+                    renderEncoder->drawIndexedPrimitives(
+                        MTL::PrimitiveType::PrimitiveTypeTriangle,
+                        mesh->indexCount,// mesh->indices.size(),
+                        MTL::IndexTypeUInt32,
+                        getBuffer(scene->indexBuffer).get(), // getBuffer(mesh->ebo).get(),
+                        mesh->indexOffset * sizeof(Uint32) // 0
+                    );
                 }
             }
             for (const auto& child : node->children) {
@@ -657,6 +644,38 @@ NS::SharedPtr<MTL::RenderPipelineState> Renderer_Metal::createPipeline(const std
     auto pipelineDesc = MTL::RenderPipelineDescriptor::alloc()->init();
     pipelineDesc->setVertexFunction(vertexMain);
     pipelineDesc->setFragmentFunction(fragmentMain);
+
+    // auto vertexDesc = MTL::VertexDescriptor::alloc()->init();
+
+    // auto layout = vertexDesc->layouts()->object(0);
+    // layout->setStride(sizeof(VertexData));
+    // layout->setStepFunction(MTL::VertexStepFunctionPerVertex);
+    // layout->setStepRate(1);
+
+    // auto attributes = vertexDesc->attributes();
+
+    // auto posAttr = attributes->object(0);
+    // posAttr->setFormat(MTL::VertexFormatFloat3);
+    // posAttr->setOffset(offsetof(VertexData, position));
+    // posAttr->setBufferIndex(2);
+
+    // auto uvAttr = attributes->object(1);
+    // uvAttr->setFormat(MTL::VertexFormatFloat2);
+    // uvAttr->setOffset(offsetof(VertexData, uv));
+    // uvAttr->setBufferIndex(2);
+
+    // auto normalAttr = attributes->object(2);
+    // normalAttr->setFormat(MTL::VertexFormatFloat3);
+    // normalAttr->setOffset(offsetof(VertexData, normal));
+    // normalAttr->setBufferIndex(2);
+
+    // auto tangentAttr = attributes->object(3);
+    // tangentAttr->setFormat(MTL::VertexFormatFloat4);
+    // tangentAttr->setOffset(offsetof(VertexData, tangent));
+    // tangentAttr->setBufferIndex(2);
+
+    // pipelineDesc->setVertexDescriptor(vertexDesc);
+
     auto colorAttachment = pipelineDesc->colorAttachments()->object(0);
     if (isHDR) {
         colorAttachment->setPixelFormat(MTL::PixelFormat::PixelFormatRGBA16Float); // HDR format
@@ -678,11 +697,16 @@ NS::SharedPtr<MTL::RenderPipelineState> Renderer_Metal::createPipeline(const std
     pipelineDesc->setSampleCount(static_cast<NS::UInteger>(sampleCount));
 
     auto pipeline = NS::TransferPtr(device->newRenderPipelineState(pipelineDesc, &error));
+    if (!pipeline) {
+        std::string errorMsg = error ? error->localizedDescription()->utf8String() : "Unknown error";
+        throw std::runtime_error(fmt::format("Could not create pipeline! Error: {}\nShader: {}\n", errorMsg, filename));
+    }
 
     code->release();
     library->release();
     vertexMain->release();
     fragmentMain->release();
+    // vertexDesc->release();
     pipelineDesc->release();
 
     return pipeline;
@@ -759,10 +783,16 @@ TextureHandle Renderer_Metal::createTexture(const std::shared_ptr<Image>& img) {
 }
 
 BufferHandle Renderer_Metal::createVertexBuffer(const std::vector<VertexData>& vertices) {
-    NS::SharedPtr<MTL::Buffer> buffer = NS::TransferPtr(device->newBuffer(vertices.size() * sizeof(VertexData), MTL::ResourceStorageModeManaged));
+    auto stagingBuffer = NS::TransferPtr(device->newBuffer(vertices.size() * sizeof(VertexData), MTL::ResourceStorageModeShared));
+    memcpy(stagingBuffer->contents(), vertices.data(), vertices.size() * sizeof(VertexData));
 
-    memcpy(buffer->contents(), vertices.data(), vertices.size() * sizeof(VertexData));
-    buffer->didModifyRange(NS::Range::Make(0, buffer->length()));
+    auto buffer = NS::TransferPtr(device->newBuffer(vertices.size() * sizeof(VertexData), MTL::ResourceStorageModePrivate));
+
+    auto cmd = queue->commandBuffer();
+    auto blitEncoder = cmd->blitCommandEncoder();
+    blitEncoder->copyFromBuffer(stagingBuffer.get(), 0, buffer.get(), 0, vertices.size() * sizeof(VertexData));
+    blitEncoder->endEncoding();
+    cmd->commit();
 
     buffers[nextBufferID] = buffer;
 
@@ -770,10 +800,16 @@ BufferHandle Renderer_Metal::createVertexBuffer(const std::vector<VertexData>& v
 }
 
 BufferHandle Renderer_Metal::createIndexBuffer(const std::vector<Uint32>& indices) {
-    NS::SharedPtr<MTL::Buffer> buffer = NS::TransferPtr(device->newBuffer(indices.size() * sizeof(Uint32), MTL::ResourceStorageModeManaged));
+    auto stagingBuffer = NS::TransferPtr(device->newBuffer(indices.size() * sizeof(Uint32), MTL::ResourceStorageModeShared));
+    memcpy(stagingBuffer->contents(), indices.data(), indices.size() * sizeof(Uint32));
 
-    memcpy(buffer->contents(), indices.data(), indices.size() * sizeof(Uint32));
-    buffer->didModifyRange(NS::Range::Make(0, buffer->length()));
+    auto buffer = NS::TransferPtr(device->newBuffer(indices.size() * sizeof(Uint32), MTL::ResourceStorageModePrivate));
+
+    auto cmd = queue->commandBuffer();
+    auto blitEncoder = cmd->blitCommandEncoder();
+    blitEncoder->copyFromBuffer(stagingBuffer.get(), 0, buffer.get(), 0, indices.size() * sizeof(Uint32));
+    blitEncoder->endEncoding();
+    cmd->commit();
 
     buffers[nextBufferID] = buffer;
 

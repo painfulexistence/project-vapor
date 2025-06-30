@@ -1,10 +1,11 @@
 #include "scene.hpp"
 
 #include <SDL3/SDL_log.h>
-
+#include <functional>
 
 void Scene::print() {
     SDL_Log("Scene %s", name.c_str());
+    SDL_Log("Total vertices: %d, total indices: %d", vertices.size(), indices.size());
     SDL_Log("--------------------------------");
     for (const auto& node : nodes) {
         printNode(node);
@@ -17,24 +18,26 @@ void Scene::printNode(const std::shared_ptr<Node>& node) {
     if (node->meshGroup) {
         SDL_Log("meshes: %d", static_cast<int>(node->meshGroup->meshes.size()));
         for (const auto& mesh : node->meshGroup->meshes) {
-            SDL_Log("Vertex count: %zu", mesh->vertices.size());
-            if (mesh->indices.size() > 0) {
-                SDL_Log("Index count: %zu", mesh->indices.size());
-                for (const Uint32& idx : mesh->indices) {
-                    SDL_Log(
-                        "(Vertex %u) Position: %f, %f, %f, UV: %f, %f, Normal: %f, %f, %f",
-                        idx,
-                        mesh->vertices[idx].position.x,
-                        mesh->vertices[idx].position.y,
-                        mesh->vertices[idx].position.z,
-                        mesh->vertices[idx].uv.x,
-                        mesh->vertices[idx].uv.y,
-                        mesh->vertices[idx].normal.x,
-                        mesh->vertices[idx].normal.y,
-                        mesh->vertices[idx].normal.z
-                    );
-                }
-            }
+            SDL_Log("Mesh: vertexOffset=%d, indexOffset=%d, vertexCount=%d, indexCount=%d",
+                mesh->vertexOffset, mesh->indexOffset, mesh->vertexCount, mesh->indexCount);
+            // SDL_Log("Vertex count: %zu", mesh->vertices.size());
+            // if (mesh->indices.size() > 0) {
+            //     SDL_Log("Index count: %zu", mesh->indices.size());
+            //     for (const Uint32& idx : mesh->indices) {
+            //         SDL_Log(
+            //             "(Vertex %u) Position: %f, %f, %f, UV: %f, %f, Normal: %f, %f, %f",
+            //             idx,
+            //             mesh->vertices[idx].position.x,
+            //             mesh->vertices[idx].position.y,
+            //             mesh->vertices[idx].position.z,
+            //             mesh->vertices[idx].uv.x,
+            //             mesh->vertices[idx].uv.y,
+            //             mesh->vertices[idx].normal.x,
+            //             mesh->vertices[idx].normal.y,
+            //             mesh->vertices[idx].normal.z
+            //         );
+            //     }
+            // }
         }
     }
     SDL_Log("--------------------------------");
@@ -100,6 +103,15 @@ void Scene::addMeshToNode(std::shared_ptr<Node> node, std::shared_ptr<Mesh> mesh
         node->meshGroup = std::make_shared<MeshGroup>();
         node->meshGroup->name = node->name;
     }
+    mesh->vertexOffset = vertices.size();
+    mesh->indexOffset = indices.size();
+    mesh->vertexCount = mesh->vertices.size();
+    mesh->indexCount = mesh->indices.size();
+    vertices.insert(vertices.end(), mesh->vertices.begin(), mesh->vertices.end());
+    indices.insert(indices.end(), mesh->indices.begin(), mesh->indices.end());
+    // TODO: clean up
+    // mesh->vertices.clear();
+    // mesh->indices.clear();
     node->meshGroup->meshes.push_back(mesh);
     if (mesh->material) {
         materials.push_back(mesh->material);

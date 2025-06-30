@@ -11,8 +11,7 @@ struct VertexData {
     packed_float3 position;
     packed_float2 uv;
     packed_float3 normal;
-    float4 tangent;
-    // packed_float3 bitangent;
+    packed_float4 tangent;
 };
 
 struct CameraData {
@@ -27,6 +26,15 @@ struct CameraData {
 struct InstanceData {
     float4x4 model;
     float4 color;
+    uint vertexOffset;
+    uint indexOffset;
+    uint vertexCount;
+    uint indexCount;
+    uint materialID;
+    uint primitiveMode;
+    float3 boundingBoxMin;
+    float3 boundingBoxMax;
+    float4 boundingSphere; // x, y, z, radius
 };
 
 struct DirLight {
@@ -63,11 +71,15 @@ float3x3 inverse(float3x3 const m) {
     float const I = m[0][0] * m[1][1] - m[1][0] * m[0][1];
 
     float const det = m[0][0] * A + m[1][0] * B + m[2][0] * C;
-    float const invDet = 1.f / det;
+    if (abs(det) < 1e-6) {
+        return float3x3(1.0);
+    }
+    float const invDet = 1.0f / det;
+
     return invDet * float3x3{
-        float3(A, B, C),
-        float3(D, E, F),
-        float3(G, H, I)
+        float3(A, D, G),
+        float3(B, E, H),
+        float3(C, F, I)
     };
 }
 

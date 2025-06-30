@@ -21,6 +21,15 @@ layout(binding = 0) uniform CameraData {
 struct InstanceData {
     mat4 model;
     vec4 color;
+    uint vertexOffset;
+    uint indexOffset;
+    uint vertexCount;
+    uint indexCount;
+    uint materialID;
+    uint primitiveMode;
+    vec3 boundingBoxMin;
+    vec3 boundingBoxMax;
+    vec4 boundingSphere; // x, y, z, radius
 };
 layout(set = 0, binding = 1) uniform InstanceBuffer {
     InstanceData instances[1000];

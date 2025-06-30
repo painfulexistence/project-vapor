@@ -549,6 +549,7 @@ std::shared_ptr<Scene> AssetManager::loadGLTFOptimized(const std::string& filena
 
     std::shared_ptr<Scene> optimizedScene = std::make_shared<Scene>();
 
+    optimizedScene->name = originalScene->name;
     optimizedScene->materials = originalScene->materials;
     optimizedScene->images = originalScene->images;
     optimizedScene->directionalLights = originalScene->directionalLights;
@@ -556,61 +557,87 @@ std::shared_ptr<Scene> AssetManager::loadGLTFOptimized(const std::string& filena
 
     Uint32 totalVertexCount = 0;
     Uint32 totalIndexCount = 0;
-    Uint32 totalInstanceCount = 0;
-    std::function<void(const std::shared_ptr<Node>&)> countMeshes = [&](const std::shared_ptr<Node>& node) {
+    std::function<void(const std::shared_ptr<Node>&)> countNode = [&](const std::shared_ptr<Node>& node) {
         if (node->meshGroup) {
             for (const auto& mesh : node->meshGroup->meshes) {
                 totalVertexCount += mesh->vertices.size();
                 totalIndexCount += mesh->indices.size();
-                totalInstanceCount++;
             }
         }
         for (const auto& child : node->children) {
-            countMeshes(child);
+            countNode(child);
         }
     };
     for (const auto& node : originalScene->nodes) {
-        countMeshes(node);
+        countNode(node);
     }
-
     optimizedScene->vertices.reserve(totalVertexCount);
     optimizedScene->indices.reserve(totalIndexCount);
 
     Uint32 currentVertexOffset = 0;
     Uint32 currentIndexOffset = 0;
-    std::function<void(const std::shared_ptr<Node>&, const glm::mat4&)> processNode = [&](const std::shared_ptr<Node>& node, const glm::mat4& parentTransform) {
-        glm::mat4 worldTransform = parentTransform * node->localTransform;
-        if (node->meshGroup) {
-            for (const auto& mesh : node->meshGroup->meshes) {
-                mesh->vertexOffset = currentVertexOffset;
-                mesh->indexOffset = currentIndexOffset;
-                mesh->vertexCount = mesh->vertices.size();
-                mesh->indexCount = mesh->indices.size();
+    std::function<std::shared_ptr<Node>(const std::shared_ptr<Node>&)> processNode = [&](const std::shared_ptr<Node>& originalNode) -> std::shared_ptr<Node> {
+        auto newNode = std::make_shared<Node>();
+        newNode->name = originalNode->name;
+        newNode->localTransform = originalNode->localTransform;
+        if (originalNode->meshGroup) {
+            auto newMeshGroup = std::make_shared<MeshGroup>();
+            newMeshGroup->name = originalNode->meshGroup->name;
+
+            for (const auto& originalMesh : originalNode->meshGroup->meshes) {
+                auto newMesh = std::make_shared<Mesh>();
+                newMesh->hasPosition = originalMesh->hasPosition;
+                newMesh->hasNormal = originalMesh->hasNormal;
+                newMesh->hasTangent = originalMesh->hasTangent;
+                newMesh->hasUV0 = originalMesh->hasUV0;
+                newMesh->hasUV1 = originalMesh->hasUV1;
+                newMesh->hasColor = originalMesh->hasColor;
+                newMesh->material = originalMesh->material;
+                newMesh->primitiveMode = originalMesh->primitiveMode;
+                newMesh->boundingBoxMin = originalMesh->boundingBoxMin;
+                newMesh->boundingBoxMax = originalMesh->boundingBoxMax;
+                newMesh->boundingSphere = originalMesh->boundingSphere;
+                newMesh->vertexOffset = currentVertexOffset;
+                newMesh->indexOffset = currentIndexOffset;
+                newMesh->vertexCount = originalMesh->vertices.size();
+                newMesh->indexCount = originalMesh->indices.size();
+
                 optimizedScene->vertices.insert(
                     optimizedScene->vertices.end(),
-                    mesh->vertices.begin(),
-                    mesh->vertices.end()
+                    originalMesh->vertices.begin(),
+                    originalMesh->vertices.end()
                 );
-                for (Uint32 index : mesh->indices) {
-                    optimizedScene->indices.push_back(index + currentVertexOffset);
+                for (Uint32 index : originalMesh->indices) {
+                    optimizedScene->indices.push_back(index);
                 }
+                currentVertexOffset += originalMesh->vertices.size();
+                currentIndexOffset += originalMesh->indices.size();
+                newMeshGroup->meshes.push_back(newMesh);
 
-                currentVertexOffset += mesh->vertices.size();
-                currentIndexOffset += mesh->indices.size();
-                mesh->vertices.clear();
-                mesh->indices.clear();
+                fmt::print("Mesh: vertexOffset={}, indexOffset={}, vertexCount={}, indexCount={}\n",
+                    newMesh->vertexOffset, newMesh->indexOffset, newMesh->vertexCount, newMesh->indexCount);
+
+                // TODO: clean up
+                // originalMesh->vertices.clear();
+                // originalMesh->indices.clear();
             }
+            newNode->meshGroup = newMeshGroup;
         }
-        for (const auto& child : node->children) {
-            processNode(child, worldTransform);
+        for (const auto& originalChild : originalNode->children) {
+            auto newChild = processNode(originalChild);
+            newNode->children.push_back(newChild);
         }
+        return newNode;
     };
-    for (const auto& node : originalScene->nodes) {
-        processNode(node, glm::mat4(1.0f));
+    for (const auto& originalNode : originalScene->nodes) {
+        auto newNode = processNode(originalNode);
+        optimizedScene->nodes.push_back(newNode);
     }
 
     fmt::print("Optimized scene created: {} vertices, {} indices\n",
                optimizedScene->vertices.size(), optimizedScene->indices.size());
+
+    optimizedScene->update(0.0f); // making sure world transform is updated
 
     AssetSerializer::serializeScene(optimizedScene, scenePath.string());
 
