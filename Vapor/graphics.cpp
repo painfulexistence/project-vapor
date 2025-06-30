@@ -1,7 +1,8 @@
 #include "graphics.hpp"
-#include <utility>
 #include <fmt/core.h>
 #include "MikkTSpace/mikktspace.h"
+#include <cfloat>
+#include <utility>
 
 static int getNumFaces(const SMikkTSpaceContext* ctx) {
     auto mesh = static_cast<Mesh*>(ctx->m_pUserData);
@@ -48,7 +49,7 @@ void Mesh::initialize(const MeshData& data) {
     vertices = std::move(data.vertices);
     indices = std::move(data.indices);
     // recalculateNormals();
-    recalculateTangents();
+    calculateTangents();
 };
 
 void Mesh::initialize(VertexData* vertexData, size_t vertexCount, Uint32* indexData, size_t indexCount){
@@ -60,11 +61,11 @@ void Mesh::initialize(VertexData* vertexData, size_t vertexCount, Uint32* indexD
     for (size_t i = 0; i < indexCount; ++i) {
         indices[i] = indexData[i];
     }
-    // recalculateNormals();
-    recalculateTangents();
+    // calculateNormals();
+    calculateTangents();
 };
 
-void Mesh::recalculateNormals(){
+void Mesh::calculateNormals(){
     for (size_t i = 0; i < indices.size(); i += 3) {
         glm::vec3 edge1 = vertices[indices[i]].position - vertices[indices[i + 1]].position;
         glm::vec3 edge2 = vertices[indices[i + 2]].position - vertices[indices[i + 1]].position;
@@ -76,7 +77,7 @@ void Mesh::recalculateNormals(){
     }
 };
 
-void Mesh::recalculateTangents(){
+void Mesh::calculateTangents(){
     SMikkTSpaceInterface interface {
         .m_getNumFaces = getNumFaces,
         .m_getNumVerticesOfFace = getNumVerticesOfFace,
@@ -92,6 +93,21 @@ void Mesh::recalculateTangents(){
     if (!genTangSpaceDefault(&ctx)) {
         throw std::runtime_error("Mikktspace calculation failed");
     }
+}
+
+void Mesh::calculateLocalAABB(){
+    localAABBMin = glm::vec3(FLT_MAX);
+    localAABBMax = glm::vec3(-FLT_MAX);
+    for (const auto& vertex : vertices) {
+        localAABBMin = glm::min(localAABBMin, vertex.position);
+        localAABBMax = glm::max(localAABBMax, vertex.position);
+    }
+};
+
+glm::vec4 Mesh::getWorldBoundingSphere() const {
+    glm::vec3 center = (worldAABBMin + worldAABBMax) * 0.5f;
+    float radius = glm::length(worldAABBMax - center);
+    return glm::vec4(center, radius);
 }
 
 void Mesh::print() {

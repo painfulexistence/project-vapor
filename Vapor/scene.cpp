@@ -91,6 +91,32 @@ void Scene::update(float dt) {
 void Scene::updateNode(const std::shared_ptr<Node>& node, const glm::mat4& parentTransform) {
     if (node->isTransformDirty) {
         node->worldTransform = parentTransform * node->localTransform;
+        if (node->meshGroup) {
+            for (const auto& mesh : node->meshGroup->meshes) {
+                // update local AABB if geometry is new or changed
+                if (mesh->isGeometryDirty) {
+                    mesh->calculateLocalAABB();
+                    mesh->isGeometryDirty = false;
+                }
+                std::array<glm::vec3, 8> corners = {
+                    glm::vec3(mesh->localAABBMin.x, mesh->localAABBMin.y, mesh->localAABBMin.z),
+                    glm::vec3(mesh->localAABBMin.x, mesh->localAABBMin.y, mesh->localAABBMax.z),
+                    glm::vec3(mesh->localAABBMin.x, mesh->localAABBMax.y, mesh->localAABBMin.z),
+                    glm::vec3(mesh->localAABBMax.x, mesh->localAABBMin.y, mesh->localAABBMin.z),
+                    glm::vec3(mesh->localAABBMin.x, mesh->localAABBMax.y, mesh->localAABBMax.z),
+                    glm::vec3(mesh->localAABBMax.x, mesh->localAABBMin.y, mesh->localAABBMax.z),
+                    glm::vec3(mesh->localAABBMax.x, mesh->localAABBMax.y, mesh->localAABBMin.z),
+                    glm::vec3(mesh->localAABBMax.x, mesh->localAABBMax.y, mesh->localAABBMax.z)
+                };
+                mesh->worldAABBMin = glm::vec3(FLT_MAX);
+                mesh->worldAABBMax = glm::vec3(-FLT_MAX);
+                for (const auto& corner : corners) {
+                    glm::vec3 transformed = node->worldTransform * glm::vec4(corner, 1.0f);
+                    mesh->worldAABBMin = glm::min(mesh->worldAABBMin, transformed);
+                    mesh->worldAABBMax = glm::max(mesh->worldAABBMax, transformed);
+                }
+            }
+        }
         node->isTransformDirty = false;
     }
     for (const auto& child : node->children) {

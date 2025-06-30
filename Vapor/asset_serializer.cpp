@@ -327,9 +327,8 @@ void AssetSerializer::serializeMesh(cereal::BinaryOutputArchive& archive, const 
     archive(mesh->indexOffset);
     archive(mesh->vertexCount);
     archive(mesh->indexCount);
-    archive(mesh->boundingBoxMin);
-    archive(mesh->boundingBoxMax);
-    archive(mesh->boundingSphere);
+    archive(mesh->localAABBMin);
+    archive(mesh->localAABBMax);
 
     if (mesh->material) {
         auto it = materialIDs.find(mesh->material);
@@ -370,9 +369,8 @@ std::shared_ptr<Mesh> AssetSerializer::deserializeMesh(cereal::BinaryInputArchiv
     archive(mesh->indexOffset);
     archive(mesh->vertexCount);
     archive(mesh->indexCount);
-    archive(mesh->boundingBoxMin);
-    archive(mesh->boundingBoxMax);
-    archive(mesh->boundingSphere);
+    archive(mesh->localAABBMin);
+    archive(mesh->localAABBMax);
 
     bool hasMaterial;
     archive(hasMaterial);

@@ -355,19 +355,12 @@ std::shared_ptr<Scene> AssetManager::loadGLTF(const std::string& filename) {
                     );
                 }
                 if (accessor.minValues.size() > 0 && accessor.maxValues.size() > 0) {
-                    mesh->boundingBoxMin = glm::vec3(accessor.minValues[0], accessor.minValues[1], accessor.minValues[2]);
-                    mesh->boundingBoxMax = glm::vec3(accessor.maxValues[0], accessor.maxValues[1], accessor.maxValues[2]);
+                    mesh->localAABBMin = glm::vec3(accessor.minValues[0], accessor.minValues[1], accessor.minValues[2]);
+                    mesh->localAABBMax = glm::vec3(accessor.maxValues[0], accessor.maxValues[1], accessor.maxValues[2]);
                 } else {
-                    mesh->boundingBoxMin = glm::vec3(FLT_MAX);
-                    mesh->boundingBoxMax = glm::vec3(-FLT_MAX);
-                    for (const auto& vertex : mesh->vertices) {
-                        mesh->boundingBoxMin = glm::min(mesh->boundingBoxMin, vertex.position);
-                        mesh->boundingBoxMax = glm::max(mesh->boundingBoxMax, vertex.position);
-                    }
+                    mesh->calculateLocalAABB();
                 }
-                glm::vec3 center = (mesh->boundingBoxMin + mesh->boundingBoxMax) * 0.5f;
-                float radius = glm::length(mesh->boundingBoxMax - center);
-                mesh->boundingSphere = glm::vec4(center, radius);
+                mesh->isGeometryDirty = false;
             }
             if (mesh->hasNormal) {
                 const auto& accessor = model.accessors[primitive.attributes.at("NORMAL")];
@@ -490,11 +483,11 @@ std::shared_ptr<Scene> AssetManager::loadGLTF(const std::string& filename) {
 
             // Fix missing attributes
             if (!mesh->hasNormal) {
-                mesh->recalculateNormals();
+                mesh->calculateNormals();
                 mesh->hasNormal = true;
             }
             if (!mesh->hasTangent) {
-                mesh->recalculateTangents();
+                mesh->calculateTangents();
                 mesh->hasTangent = true;
             }
 
@@ -594,9 +587,8 @@ std::shared_ptr<Scene> AssetManager::loadGLTFOptimized(const std::string& filena
                 newMesh->hasColor = originalMesh->hasColor;
                 newMesh->material = originalMesh->material;
                 newMesh->primitiveMode = originalMesh->primitiveMode;
-                newMesh->boundingBoxMin = originalMesh->boundingBoxMin;
-                newMesh->boundingBoxMax = originalMesh->boundingBoxMax;
-                newMesh->boundingSphere = originalMesh->boundingSphere;
+                newMesh->localAABBMin = originalMesh->localAABBMin;
+                newMesh->localAABBMax = originalMesh->localAABBMax;
                 newMesh->vertexOffset = currentVertexOffset;
                 newMesh->indexOffset = currentIndexOffset;
                 newMesh->vertexCount = originalMesh->vertices.size();

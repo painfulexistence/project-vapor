@@ -261,9 +261,9 @@ auto Renderer_Metal::draw(std::shared_ptr<Scene> scene, Camera& camera) -> void 
 
     float near = camera.near();
     float far = camera.far();
-    glm::vec3 camPos = camera.GetEye();
-    glm::mat4 proj = camera.GetProjMatrix();
-    glm::mat4 view = camera.GetViewMatrix();
+    glm::vec3 camPos = camera.getEye();
+    glm::mat4 proj = camera.getProjMatrix();
+    glm::mat4 view = camera.getViewMatrix();
     glm::mat4 invProj = glm::inverse(proj);
     glm::mat4 invView = glm::inverse(view);
     CameraData* cameraData = reinterpret_cast<CameraData*>(cameraDataBuffers[currentFrameInFlight]->contents());
@@ -313,9 +313,8 @@ auto Renderer_Metal::draw(std::shared_ptr<Scene> scene, Camera& camera) -> void 
                     .indexCount = mesh->indexCount,
                     .materialID = mesh->materialID,
                     .primitiveMode = mesh->primitiveMode,
-                    .boundingBoxMin = mesh->boundingBoxMin,
-                    .boundingBoxMax = mesh->boundingBoxMax,
-                    .boundingSphere = mesh->boundingSphere
+                    .AABBMin = mesh->worldAABBMin,
+                    .AABBMax = mesh->worldAABBMax,
                 });
                 MTL::AccelerationStructureInstanceDescriptor accelInstanceDesc;
                 for (int i = 0; i < 4; ++i) {
@@ -419,6 +418,9 @@ auto Renderer_Metal::draw(std::shared_ptr<Scene> scene, Camera& camera) -> void 
                 for (const auto& mesh : node->meshGroup->meshes) {
                     if (!mesh->material) {
                         fmt::print("No material found for mesh in mesh group {}\n", node->meshGroup->name);
+                        continue;
+                    }
+                    if (!camera.isVisible(mesh->getWorldBoundingSphere())) {
                         continue;
                     }
                     // prePassEncoder->setFragmentTexture(
@@ -543,6 +545,9 @@ auto Renderer_Metal::draw(std::shared_ptr<Scene> scene, Camera& camera) -> void 
                 for (const auto& mesh : node->meshGroup->meshes) {
                     if (!mesh->material) {
                         fmt::print("No material found for mesh in mesh group {}\n", node->meshGroup->name);
+                        continue;
+                    }
+                    if (!camera.isVisible(mesh->getWorldBoundingSphere())) {
                         continue;
                     }
                     // encoder->setRenderPipelineState(getPipeline(mesh->material->pipeline));

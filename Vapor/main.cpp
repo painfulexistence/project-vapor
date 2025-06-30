@@ -171,40 +171,40 @@ int main(int argc, char* args[]) {
         time = currTime;
 
         if (keyboardState[SDL_SCANCODE_W]) {
-            camera.Dolly(1.0f * deltaTime);
+            camera.dolly(1.0f * deltaTime);
         }
         if (keyboardState[SDL_SCANCODE_S]) {
-            camera.Dolly(-1.0f * deltaTime);
+            camera.dolly(-1.0f * deltaTime);
         }
         if (keyboardState[SDL_SCANCODE_D]) {
-            camera.Truck(1.0f * deltaTime);
+            camera.truck(1.0f * deltaTime);
         }
         if (keyboardState[SDL_SCANCODE_A]) {
-            camera.Truck(-1.0f * deltaTime);
+            camera.truck(-1.0f * deltaTime);
         }
         if (keyboardState[SDL_SCANCODE_R]) {
-            camera.Pedestal(1.0f * deltaTime);
+            camera.pedestal(1.0f * deltaTime);
         }
         if (keyboardState[SDL_SCANCODE_F]) {
-            camera.Pedestal(-1.0f * deltaTime);
+            camera.pedestal(-1.0f * deltaTime);
         }
         if (keyboardState[SDL_SCANCODE_I]) {
-            camera.Tilt(1.0f * deltaTime);
+            camera.tilt(1.0f * deltaTime);
         }
         if (keyboardState[SDL_SCANCODE_K]) {
-            camera.Tilt(-1.0f * deltaTime);
+            camera.tilt(-1.0f * deltaTime);
         }
         if (keyboardState[SDL_SCANCODE_L]) {
-            camera.Pan(-1.0f * deltaTime);
+            camera.pan(-1.0f * deltaTime);
         }
         if (keyboardState[SDL_SCANCODE_J]) {
-            camera.Pan(1.0f * deltaTime);
+            camera.pan(1.0f * deltaTime);
         }
         if (keyboardState[SDL_SCANCODE_U]) {
-            camera.Roll(-1.0f * deltaTime);
+            camera.roll(-1.0f * deltaTime);
         }
         if (keyboardState[SDL_SCANCODE_O]) {
-            camera.Roll(1.0f * deltaTime);
+            camera.roll(1.0f * deltaTime);
         }
 
         entity1->rotate(glm::vec3(0.0f, 1.0f, -1.0f), 1.5f * deltaTime);

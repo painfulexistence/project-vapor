@@ -116,9 +116,9 @@ struct alignas(16) InstanceData {
     Uint32 materialID;
     PrimitiveMode primitiveMode;
     Uint32 _pad1[2];
-    glm::vec3 boundingBoxMin;
+    glm::vec3 AABBMin;
     float _pad2;
-    glm::vec3 boundingBoxMax;
+    glm::vec3 AABBMax;
     float _pad3;
     glm::vec4 boundingSphere; // x, y, z, radius
 };
@@ -153,8 +153,10 @@ struct MeshData {
 struct Mesh {
     void initialize(const MeshData& data);
     void initialize(VertexData* vertexData, size_t vertexCount, Uint32* indexData, size_t indexCount);
-    void recalculateNormals();
-    void recalculateTangents();
+    void calculateNormals();
+    void calculateTangents();
+    void calculateLocalAABB();
+    glm::vec4 getWorldBoundingSphere() const;
     void print();
 
     bool hasPosition = false;
@@ -167,15 +169,17 @@ struct Mesh {
     std::vector<Uint32> indices;
     std::shared_ptr<Material> material = nullptr;
     PrimitiveMode primitiveMode;
+    glm::vec3 localAABBMin;
+    glm::vec3 localAABBMax;
+    glm::vec3 worldAABBMin;
+    glm::vec3 worldAABBMax;
+    bool isGeometryDirty = true;
 
     // GPU-driven rendering
     Uint32 vertexOffset = 0;
     Uint32 indexOffset = 0;
     Uint32 vertexCount = 0;
     Uint32 indexCount = 0;
-    glm::vec3 boundingBoxMin;
-    glm::vec3 boundingBoxMax;
-    glm::vec4 boundingSphere; // x, y, z, radius
 
     // Runtime data
     std::vector<BufferHandle> vbos;

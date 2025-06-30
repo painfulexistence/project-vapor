@@ -1265,9 +1265,9 @@ auto Renderer_Vulkan::draw(std::shared_ptr<Scene> scene, Camera& camera) -> void
     // Prepare data
     float time = SDL_GetTicks() / 1000.0;
 
-    glm::vec3  camPos = camera.GetEye();
-    glm::mat4 view = camera.GetViewMatrix();
-    glm::mat4 proj = camera.GetProjMatrix();
+    glm::vec3  camPos = camera.getEye();
+    glm::mat4 view = camera.getViewMatrix();
+    glm::mat4 proj = camera.getProjMatrix();
     glm::mat4 invProj = glm::inverse(proj);
     glm::mat4 invView = glm::inverse(view);
     CameraData cameraData = {
@@ -1295,9 +1295,8 @@ auto Renderer_Vulkan::draw(std::shared_ptr<Scene> scene, Camera& camera) -> void
                     .indexCount = mesh->indexCount,
                     .materialID = mesh->materialID,
                     .primitiveMode = mesh->primitiveMode,
-                    .boundingBoxMin = mesh->boundingBoxMin,
-                    .boundingBoxMax = mesh->boundingBoxMax,
-                    .boundingSphere = mesh->boundingSphere
+                    .AABBMin = mesh->worldAABBMin,
+                    .AABBMax = mesh->worldAABBMax
                 });
             }
         }
