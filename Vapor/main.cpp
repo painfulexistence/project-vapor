@@ -64,8 +64,8 @@ int main(int argc, char* args[]) {
 
     RNG rng;
 
-    auto renderer = createRenderer(gfxBackend, window);
-    renderer->init();
+    auto renderer = createRenderer(gfxBackend);
+    renderer->init(window);
 
     // auto scene = std::make_shared<Scene>();
     // auto entity = scene->CreateNode("Mesh 1");
@@ -247,6 +247,7 @@ int main(int argc, char* args[]) {
 
         frameCount++;
     }
+    renderer->deinit();
 
     SDL_DestroyWindow(window);
     SDL_Quit();

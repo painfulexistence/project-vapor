@@ -20,11 +20,19 @@
 #include "helper.hpp"
 
 
-std::unique_ptr<Renderer> createRendererMetal(SDL_Window* window) {
-    return std::make_unique<Renderer_Metal>(window);
+std::unique_ptr<Renderer> createRendererMetal() {
+    return std::make_unique<Renderer_Metal>();
 }
 
-Renderer_Metal::Renderer_Metal(SDL_Window* window) {
+Renderer_Metal::Renderer_Metal() {
+
+}
+
+Renderer_Metal::~Renderer_Metal() {
+    deinit();
+}
+
+auto Renderer_Metal::init(SDL_Window* window) -> void {
     renderer = SDL_CreateRenderer(window, nullptr);
     swapchain = (CA::MetalLayer*)SDL_GetRenderMetalLayer(renderer);
     // swapchain->setDisplaySyncEnabled(true);
@@ -32,18 +40,22 @@ Renderer_Metal::Renderer_Metal(SDL_Window* window) {
     swapchain->setColorspace(CGColorSpaceCreateWithName(kCGColorSpaceSRGB));
     device = swapchain->device();
     queue = NS::TransferPtr(device->newCommandQueue());
+
+    isInitialized = true;
+
+    createResources();
 }
 
-Renderer_Metal::~Renderer_Metal() {
+auto Renderer_Metal::deinit() -> void {
+    if (!isInitialized) {
+        return;
+    }
     SDL_DestroyRenderer(renderer);
-}
-struct Particle {
-    glm::vec3 position = glm::vec3(1.0f);
-    glm::vec3 velocity = glm::vec3(1.0f);
-    glm::vec3 density = glm::vec3(1.0f);
-};
 
-auto Renderer_Metal::init() -> void {
+    isInitialized = false;
+}
+
+auto Renderer_Metal::createResources() -> void {
     // Create pipelines
     drawPipeline = createPipeline("assets/shaders/3d_pbr_normal_mapped.metal", true, false, MSAA_SAMPLE_COUNT);
     prePassPipeline = createPipeline("assets/shaders/3d_depth_only.metal", true, false, MSAA_SAMPLE_COUNT);

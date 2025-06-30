@@ -15,11 +15,13 @@
 
 class Renderer_Vulkan final : public Renderer {
 public:
-    Renderer_Vulkan(SDL_Window* window);
+    Renderer_Vulkan();
 
     ~Renderer_Vulkan();
 
-    virtual void init() override;
+    virtual void init(SDL_Window* window) override;
+
+    virtual void deinit() override;
 
     virtual void stage(std::shared_ptr<Scene> scene) override;
 
@@ -155,4 +157,6 @@ private:
     std::unordered_map<std::shared_ptr<Material>, Uint32> materialIDs;
 
     RenderPath currentRenderPath = RenderPath::Forward;
+
+    void createResources();
 };

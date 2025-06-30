@@ -58,6 +58,7 @@ protected:
     Uint32 numClusters = clusterGridSizeX * clusterGridSizeY * clusterGridSizeZ;
     Uint32 currentFrameInFlight = 0;
     Uint32 frameNumber = 0;
+    bool isInitialized = false;
 
     int calculateMipmapLevelCount(Uint32 width, Uint32 height) const {
         return static_cast<int>(std::floor(std::log2(std::max(width, height))) + 1);
@@ -65,15 +66,15 @@ protected:
 
 };
 
-std::unique_ptr<Renderer> createRendererMetal(SDL_Window* window);
-std::unique_ptr<Renderer> createRendererVulkan(SDL_Window* window);
+std::unique_ptr<Renderer> createRendererMetal();
+std::unique_ptr<Renderer> createRendererVulkan();
 
-inline std::unique_ptr<Renderer> createRenderer(GraphicsBackend backend, SDL_Window* window) {
+inline std::unique_ptr<Renderer> createRenderer(GraphicsBackend backend) {
     switch (backend) {
     case GraphicsBackend::Metal:
-        return createRendererMetal(window);
+        return createRendererMetal();
     case GraphicsBackend::Vulkan:
-        return createRendererVulkan(window);
+        return createRendererVulkan();
     default:
         return nullptr;
     }

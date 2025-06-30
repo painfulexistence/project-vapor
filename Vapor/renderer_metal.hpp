@@ -12,11 +12,13 @@
 
 class Renderer_Metal final : public Renderer { // Must be public or factory function won't work
 public:
-    Renderer_Metal(SDL_Window* window);
+    Renderer_Metal();
 
     ~Renderer_Metal();
 
-    virtual void init() override;
+    virtual void init(SDL_Window* window) override;
+
+    virtual void deinit() override;
 
     virtual void stage(std::shared_ptr<Scene> scene) override;
 
@@ -101,4 +103,6 @@ private:
     std::unordered_map<std::shared_ptr<Material>, Uint32> materialIDs;
 
     RenderPath currentRenderPath = RenderPath::Forward;
+
+    void createResources();
 };

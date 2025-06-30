@@ -20,8 +20,8 @@
 #define USE_DYNAMIC_RENDERING 0
 
 
-std::unique_ptr<Renderer> createRendererVulkan(SDL_Window* window) {
-    return std::make_unique<Renderer_Vulkan>(window);
+std::unique_ptr<Renderer> createRendererVulkan() {
+    return std::make_unique<Renderer_Vulkan>();
 }
 
 void insertImageMemoryBarrier(
@@ -74,7 +74,14 @@ void insertImageMemoryBarrier2(VkCommandBuffer cmd, VkImage image, VkImageLayout
     vkCmdPipelineBarrier2(cmd, &depInfo);
 }
 
-Renderer_Vulkan::Renderer_Vulkan(SDL_Window* window) {
+Renderer_Vulkan::Renderer_Vulkan() {
+}
+
+Renderer_Vulkan::~Renderer_Vulkan() {
+    deinit();
+}
+
+auto Renderer_Vulkan::init(SDL_Window* window) -> void {
     int windowWidth, windowHeight;
     SDL_GetWindowSize(window, &windowWidth, &windowHeight);
 
@@ -124,7 +131,7 @@ Renderer_Vulkan::Renderer_Vulkan(SDL_Window* window) {
         throw std::runtime_error(fmt::format("Failed to create surface! {}", SDL_GetError()));
     }
 
-        // Find a physical device
+    // Find a physical device
     uint32_t physicalDeviceCount;
     vkEnumeratePhysicalDevices(instance, &physicalDeviceCount, nullptr);
     if (physicalDeviceCount == 0) {
@@ -354,9 +361,13 @@ Renderer_Vulkan::Renderer_Vulkan(SDL_Window* window) {
             "Failed to create semaphores or fences for a frame!");
         }
     }
+    isInitialized = true;
 }
 
-Renderer_Vulkan::~Renderer_Vulkan() {
+auto Renderer_Vulkan::deinit() -> void {
+    if (!isInitialized) {
+        return;
+    }
     // TODO: clean up all resources
     vkDeviceWaitIdle(device);
     vkDestroyPipeline(device, renderPipeline, nullptr);
@@ -412,9 +423,11 @@ Renderer_Vulkan::~Renderer_Vulkan() {
     vkDestroyDevice(device, nullptr);
     vkDestroySurfaceKHR(instance, surface, nullptr);
     vkDestroyInstance(instance, nullptr);
+
+    isInitialized = false;
 }
 
-auto Renderer_Vulkan::init() -> void {
+auto Renderer_Vulkan::createResources() -> void {
     // Create swapchain image views
     swapchainImageViews.resize(swapchainImages.size());
     for (size_t i = 0; i < swapchainImages.size(); i++) {
