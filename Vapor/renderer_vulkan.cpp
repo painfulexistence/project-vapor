@@ -998,24 +998,7 @@ auto Renderer_Vulkan::init() -> void {
 }
 
 auto Renderer_Vulkan::stage(std::shared_ptr<Scene> scene) -> void {
-    // Buffers
-    const std::function<void(const std::shared_ptr<Node>&)> stageNode =
-        [&](const std::shared_ptr<Node>& node) {
-            if (node->meshGroup) {
-                for (auto& mesh : node->meshGroup->meshes) {
-                    mesh->vbos.push_back(createVertexBuffer(mesh->vertices)); // TODO: use single vbo for all meshes
-                    mesh->ebo = createIndexBuffer(mesh->indices);
-                    mesh->instanceID = nextInstanceID++;
-                }
-            }
-            for (const auto& child : node->children) {
-                stageNode(child);
-            }
-        };
-    for (auto& node : scene->nodes) {
-        stageNode(node);
-    }
-
+    // Lights
     directionalLightBuffers.resize(MAX_FRAMES_IN_FLIGHT);
     directionalLightBuffersMapped.resize(MAX_FRAMES_IN_FLIGHT);
     for (size_t i = 0; i < MAX_FRAMES_IN_FLIGHT; i++) {
@@ -1060,6 +1043,26 @@ auto Renderer_Vulkan::stage(std::shared_ptr<Scene> scene) -> void {
     }
     for (auto& mat : scene->materials) {
         // pipelines[mat->pipeline] = createPipeline();
+        materialIDs[mat] = nextMaterialID++;
+    }
+
+    // Buffers
+    const std::function<void(const std::shared_ptr<Node>&)> stageNode =
+        [&](const std::shared_ptr<Node>& node) {
+            if (node->meshGroup) {
+                for (auto& mesh : node->meshGroup->meshes) {
+                    mesh->vbos.push_back(createVertexBuffer(mesh->vertices)); // TODO: use single vbo for all meshes
+                    mesh->ebo = createIndexBuffer(mesh->indices);
+                    mesh->materialID = materialIDs.at(mesh->material);
+                    mesh->instanceID = nextInstanceID++;
+                }
+            }
+            for (const auto& child : node->children) {
+                stageNode(child);
+            }
+        };
+    for (auto& node : scene->nodes) {
+        stageNode(node);
     }
 
     // Descriptor sets
@@ -1180,7 +1183,7 @@ auto Renderer_Vulkan::stage(std::shared_ptr<Scene> scene) -> void {
         }};
         vkUpdateDescriptorSets(device, writes.size(), writes.data(), 0, nullptr);
 
-        materialTextureSets[mat.get()] = set1s[i];
+        materialTextureSets[mat] = set1s[i];
     }
 
     for (size_t i = 0; i < MAX_FRAMES_IN_FLIGHT; i++) {
@@ -1284,7 +1287,18 @@ auto Renderer_Vulkan::draw(std::shared_ptr<Scene> scene, Camera& camera) -> void
         if (node->meshGroup) {
             const glm::mat4& transform = node->worldTransform;
             for (auto& mesh : node->meshGroup->meshes) {
-                instances.push_back({ .model = transform });
+                instances.push_back({
+                    .model = transform,
+                    .vertexOffset = mesh->vertexOffset,
+                    .indexOffset = mesh->indexOffset,
+                    .vertexCount = mesh->vertexCount,
+                    .indexCount = mesh->indexCount,
+                    .materialID = mesh->materialID,
+                    .primitiveMode = mesh->primitiveMode,
+                    .boundingBoxMin = mesh->boundingBoxMin,
+                    .boundingBoxMax = mesh->boundingBoxMax,
+                    .boundingSphere = mesh->boundingSphere
+                });
             }
         }
         for (const auto& child : node->children) {
@@ -1359,7 +1373,7 @@ auto Renderer_Vulkan::draw(std::shared_ptr<Scene> scene, Camera& camera) -> void
                     vkCmdBindVertexBuffers(cmd, 0, 1, vertexBuffers, offsets);
                     vkCmdBindIndexBuffer(cmd, getBuffer(mesh->ebo), 0, VkIndexType::VK_INDEX_TYPE_UINT32);
                     // TODO: bind camera and instance data buffer outside the loop
-                    std::array<VkDescriptorSet, 2> descriptorSets = { set0s[currentFrameInFlight], materialTextureSets.at(mesh->material.get()) };
+                    std::array<VkDescriptorSet, 2> descriptorSets = { set0s[currentFrameInFlight], materialTextureSets.at(mesh->material) };
                     vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, prePassPipelineLayout, 0, descriptorSets.size(), descriptorSets.data(), 0, nullptr); // resources are set here
                     vkCmdPushConstants(cmd, prePassPipelineLayout, VK_SHADER_STAGE_VERTEX_BIT, 0, sizeof(Uint32), &mesh->instanceID);
                     vkCmdDrawIndexed(cmd, mesh->indices.size(), 1, 0, 0, 0);
@@ -1396,7 +1410,7 @@ auto Renderer_Vulkan::draw(std::shared_ptr<Scene> scene, Camera& camera) -> void
                     vkCmdBindVertexBuffers(cmd, 0, 1, vertexBuffers, offsets);
                     vkCmdBindIndexBuffer(cmd, getBuffer(mesh->ebo), 0, VkIndexType::VK_INDEX_TYPE_UINT32);
                     // TODO: bind camera and instance data buffer outside the loop
-                    std::array<VkDescriptorSet, 2> descriptorSets = { set0s[currentFrameInFlight], materialTextureSets.at(mesh->material.get()) };
+                    std::array<VkDescriptorSet, 2> descriptorSets = { set0s[currentFrameInFlight], materialTextureSets.at(mesh->material) };
                     vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, renderPipelineLayout, 0, descriptorSets.size(), descriptorSets.data(), 0, nullptr); // resources are set here
                     vkCmdPushConstants(cmd, renderPipelineLayout, VK_SHADER_STAGE_FRAGMENT_BIT, 0, sizeof(glm::vec3), &camPos);
                     vkCmdPushConstants(cmd, renderPipelineLayout, VK_SHADER_STAGE_VERTEX_BIT, sizeof(glm::vec3), sizeof(Uint32), &mesh->instanceID);

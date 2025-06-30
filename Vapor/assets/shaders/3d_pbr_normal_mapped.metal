@@ -146,16 +146,16 @@ vertex RasterizerData vertexMain(
     constant uint& instanceID [[buffer(3)]]
 ) {
     RasterizerData vert;
-    InstanceData instance = instances[instanceID];
+    float4x4 model = instances[instanceID].model;
     float3x3 normalMatrix = transpose(inverse(float3x3(
-        instance.model[0].xyz,
-        instance.model[1].xyz,
-        instance.model[2].xyz
+        model[0].xyz,
+        model[1].xyz,
+        model[2].xyz
     )));
     // Caution: worldNormal and worldTangent are not normalized yet, and they can be affected by model scaling
     vert.worldNormal = float4(normalMatrix * float3(in[vertexID].normal), 0.0);
-    vert.worldTangent = float4(normalMatrix * float3(in[vertexID].tangent), 0.0);
-    vert.worldPosition = instance.model * float4(in[vertexID].position, 1.0);
+    vert.worldTangent = float4(normalMatrix * in[vertexID].tangent.xyz, in[vertexID].tangent.w);
+    vert.worldPosition = model * float4(in[vertexID].position, 1.0);
     vert.position = camera.proj * camera.view * vert.worldPosition;
     vert.uv = in[vertexID].uv;
     return vert;

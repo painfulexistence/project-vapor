@@ -196,9 +196,8 @@ std::shared_ptr<Mesh> AssetManager::loadOBJ(const std::string& filename, const s
 // }
 std::shared_ptr<Scene> AssetManager::loadGLTF(const std::string& filename) {
     std::filesystem::path filePath(SDL_GetBasePath() + filename);
-
-    std::filesystem::path scenePath = filePath.replace_extension(".vscene");
-    if (std::filesystem::exists(scenePath)) {
+    std::filesystem::path scenePath(filePath); // make a copy
+    if (std::filesystem::exists(scenePath.replace_extension(".vscene"))) {
         return AssetSerializer::deserializeScene(scenePath.string());
     }
 
@@ -341,27 +340,41 @@ std::shared_ptr<Scene> AssetManager::loadGLTF(const std::string& filename) {
                 fmt::print("No position attribute found for primitive\n");
                 continue;
             }
-            mesh->vertexCount = model.accessors[primitive.attributes.at("POSITION")].count;
-            mesh->vertices.resize(mesh->vertexCount);
+            Uint32 vertexCount = model.accessors[primitive.attributes.at("POSITION")].count;
+            mesh->vertices.resize(vertexCount);
             if (mesh->hasPosition) {
                 const auto& accessor = model.accessors[primitive.attributes.at("POSITION")];
                 const auto& bufferView = model.bufferViews[accessor.bufferView];
                 const auto& buffer = model.buffers[bufferView.buffer];
                 const float* data = reinterpret_cast<const float*>(&buffer.data[bufferView.byteOffset + accessor.byteOffset]);
-                for (size_t i = 0; i < mesh->vertexCount; i++) {
+                for (size_t i = 0; i < vertexCount; i++) {
                     mesh->vertices[i].position = glm::vec3(
                         data[i * 3 + 0],
                         data[i * 3 + 1],
                         data[i * 3 + 2]
                     );
                 }
+                if (accessor.minValues.size() > 0 && accessor.maxValues.size() > 0) {
+                    mesh->boundingBoxMin = glm::vec3(accessor.minValues[0], accessor.minValues[1], accessor.minValues[2]);
+                    mesh->boundingBoxMax = glm::vec3(accessor.maxValues[0], accessor.maxValues[1], accessor.maxValues[2]);
+                } else {
+                    mesh->boundingBoxMin = glm::vec3(FLT_MAX);
+                    mesh->boundingBoxMax = glm::vec3(-FLT_MAX);
+                    for (const auto& vertex : mesh->vertices) {
+                        mesh->boundingBoxMin = glm::min(mesh->boundingBoxMin, vertex.position);
+                        mesh->boundingBoxMax = glm::max(mesh->boundingBoxMax, vertex.position);
+                    }
+                }
+                glm::vec3 center = (mesh->boundingBoxMin + mesh->boundingBoxMax) * 0.5f;
+                float radius = glm::length(mesh->boundingBoxMax - center);
+                mesh->boundingSphere = glm::vec4(center, radius);
             }
             if (mesh->hasNormal) {
                 const auto& accessor = model.accessors[primitive.attributes.at("NORMAL")];
                 const auto& bufferView = model.bufferViews[accessor.bufferView];
                 const auto& buffer = model.buffers[bufferView.buffer];
                 const float* data = reinterpret_cast<const float*>(&buffer.data[bufferView.byteOffset + accessor.byteOffset]);
-                for (size_t i = 0; i < mesh->vertexCount; i++) {
+                for (size_t i = 0; i < vertexCount; i++) {
                     mesh->vertices[i].normal = glm::vec3(
                         data[i * 3 + 0],
                         data[i * 3 + 1],
@@ -374,7 +387,7 @@ std::shared_ptr<Scene> AssetManager::loadGLTF(const std::string& filename) {
                 const auto& bufferView = model.bufferViews[accessor.bufferView];
                 const auto& buffer = model.buffers[bufferView.buffer];
                 const float* data = reinterpret_cast<const float*>(&buffer.data[bufferView.byteOffset + accessor.byteOffset]);
-                for (size_t i = 0; i < mesh->vertexCount; i++) {
+                for (size_t i = 0; i < vertexCount; i++) {
                     mesh->vertices[i].tangent = glm::vec4(
                         data[i * 4 + 0],
                         data[i * 4 + 1],
@@ -388,7 +401,7 @@ std::shared_ptr<Scene> AssetManager::loadGLTF(const std::string& filename) {
                 const auto& bufferView = model.bufferViews[accessor.bufferView];
                 const auto& buffer = model.buffers[bufferView.buffer];
                 const float* data = reinterpret_cast<const float*>(&buffer.data[bufferView.byteOffset + accessor.byteOffset]);
-                for (size_t i = 0; i < mesh->vertexCount; i++) {
+                for (size_t i = 0; i < vertexCount; i++) {
                     mesh->vertices[i].uv = glm::vec2(
                         data[i * 2 + 0],
                         data[i * 2 + 1]
@@ -400,7 +413,7 @@ std::shared_ptr<Scene> AssetManager::loadGLTF(const std::string& filename) {
                 // const auto& bufferView = model.bufferViews[accessor.bufferView];
                 // const auto& buffer = model.buffers[bufferView.buffer];
                 // const float* data = reinterpret_cast<const float*>(&buffer.data[bufferView.byteOffset + accessor.byteOffset]);
-                // for (size_t i = 0; i < mesh->vertexCount; i++) {
+                // for (size_t i = 0; i < vertexCount; i++) {
                 //     mesh->vertices[i].color = glm::vec4(
                 //         data[i * 4 + 0],
                 //         data[i * 4 + 1],
@@ -520,4 +533,86 @@ std::shared_ptr<Scene> AssetManager::loadGLTF(const std::string& filename) {
     AssetSerializer::serializeScene(scene, scenePath.string());
 
     return scene;
+}
+
+std::shared_ptr<Scene> AssetManager::loadGLTFOptimized(const std::string& filename) {
+    std::filesystem::path filePath(SDL_GetBasePath() + filename);
+    std::filesystem::path scenePath(filePath); // make a copy
+    if (std::filesystem::exists(scenePath.replace_extension(".vscene_optimized"))) {
+        return AssetSerializer::deserializeScene(scenePath.string());
+    }
+
+    auto originalScene = loadGLTF(filename);
+    if (!originalScene) {
+        throw std::runtime_error(fmt::format("Failed to load GLTF: {}", filename));
+    }
+
+    std::shared_ptr<Scene> optimizedScene = std::make_shared<Scene>();
+
+    optimizedScene->materials = originalScene->materials;
+    optimizedScene->images = originalScene->images;
+    optimizedScene->directionalLights = originalScene->directionalLights;
+    optimizedScene->pointLights = originalScene->pointLights;
+
+    Uint32 totalVertexCount = 0;
+    Uint32 totalIndexCount = 0;
+    Uint32 totalInstanceCount = 0;
+    std::function<void(const std::shared_ptr<Node>&)> countMeshes = [&](const std::shared_ptr<Node>& node) {
+        if (node->meshGroup) {
+            for (const auto& mesh : node->meshGroup->meshes) {
+                totalVertexCount += mesh->vertices.size();
+                totalIndexCount += mesh->indices.size();
+                totalInstanceCount++;
+            }
+        }
+        for (const auto& child : node->children) {
+            countMeshes(child);
+        }
+    };
+    for (const auto& node : originalScene->nodes) {
+        countMeshes(node);
+    }
+
+    optimizedScene->vertices.reserve(totalVertexCount);
+    optimizedScene->indices.reserve(totalIndexCount);
+
+    Uint32 currentVertexOffset = 0;
+    Uint32 currentIndexOffset = 0;
+    std::function<void(const std::shared_ptr<Node>&, const glm::mat4&)> processNode = [&](const std::shared_ptr<Node>& node, const glm::mat4& parentTransform) {
+        glm::mat4 worldTransform = parentTransform * node->localTransform;
+        if (node->meshGroup) {
+            for (const auto& mesh : node->meshGroup->meshes) {
+                mesh->vertexOffset = currentVertexOffset;
+                mesh->indexOffset = currentIndexOffset;
+                mesh->vertexCount = mesh->vertices.size();
+                mesh->indexCount = mesh->indices.size();
+                optimizedScene->vertices.insert(
+                    optimizedScene->vertices.end(),
+                    mesh->vertices.begin(),
+                    mesh->vertices.end()
+                );
+                for (Uint32 index : mesh->indices) {
+                    optimizedScene->indices.push_back(index + currentVertexOffset);
+                }
+
+                currentVertexOffset += mesh->vertices.size();
+                currentIndexOffset += mesh->indices.size();
+                mesh->vertices.clear();
+                mesh->indices.clear();
+            }
+        }
+        for (const auto& child : node->children) {
+            processNode(child, worldTransform);
+        }
+    };
+    for (const auto& node : originalScene->nodes) {
+        processNode(node, glm::mat4(1.0f));
+    }
+
+    fmt::print("Optimized scene created: {} vertices, {} indices\n",
+               optimizedScene->vertices.size(), optimizedScene->indices.size());
+
+    AssetSerializer::serializeScene(optimizedScene, scenePath.string());
+
+    return optimizedScene;
 }

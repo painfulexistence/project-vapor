@@ -17,6 +17,8 @@ void AssetSerializer::serializeScene(const std::shared_ptr<Scene>& scene, const 
 
     cereal::BinaryOutputArchive archive(file);
     // archive(scene.name);
+    archive(scene->vertices);
+    archive(scene->indices);
 
     std::unordered_map<std::shared_ptr<Image>, Uint32> imageIDs;
     Uint32 nextImageID = 0;
@@ -28,7 +30,6 @@ void AssetSerializer::serializeScene(const std::shared_ptr<Scene>& scene, const 
             imageIDs[image] = nextImageID++;
         }
     }
-    fmt::print("Image serialized\n");
 
     std::unordered_map<std::shared_ptr<Material>, Uint32> materialIDs;
     Uint32 nextMaterialID = 0;
@@ -40,7 +41,6 @@ void AssetSerializer::serializeScene(const std::shared_ptr<Scene>& scene, const 
             materialIDs[material] = nextMaterialID++;
         }
     }
-    fmt::print("Material serialized\n");
 
     archive(static_cast<Uint32>(scene->directionalLights.size()));
     for (const auto& light : scene->directionalLights) {
@@ -71,6 +71,8 @@ std::shared_ptr<Scene> AssetSerializer::deserializeScene(const std::string& path
     cereal::BinaryInputArchive archive(file);
     auto scene = std::make_shared<Scene>();
     // archive(scene->name);
+    archive(scene->vertices);
+    archive(scene->indices);
 
     Uint32 imageCount;
     archive(imageCount);
@@ -100,13 +102,6 @@ std::shared_ptr<Scene> AssetSerializer::deserializeScene(const std::string& path
         }
     }
 
-    Uint32 nodeCount;
-    archive(nodeCount);
-    scene->nodes.reserve(nodeCount);
-    for (Uint32 i = 0; i < nodeCount; ++i) {
-        scene->nodes.push_back(deserializeNode(archive, materials));
-    }
-
     Uint32 directionalLightCount;
     archive(directionalLightCount);
     scene->directionalLights.reserve(directionalLightCount);
@@ -123,6 +118,15 @@ std::shared_ptr<Scene> AssetSerializer::deserializeScene(const std::string& path
         scene->pointLights.push_back(light);
     }
 
+    Uint32 nodeCount;
+    archive(nodeCount);
+    scene->nodes.reserve(nodeCount);
+    for (Uint32 i = 0; i < nodeCount; ++i) {
+        scene->nodes.push_back(deserializeNode(archive, materials));
+    }
+
+    scene->update(0.0f); // making sure world transform is updated
+
     fmt::print("Scene deserialized from: {} in {} ms\n", path, SDL_GetTicks() - start);
     return scene;
 }
@@ -136,8 +140,6 @@ void AssetSerializer::serializeNode(cereal::BinaryOutputArchive& archive, const 
     archive(true);
     // archive(node->name);
     archive(node->localTransform);
-    archive(node->worldTransform);
-    archive(node->isTransformDirty);
     if (!node->meshGroup) {
         archive(false);
     } else {
@@ -164,8 +166,6 @@ std::shared_ptr<Node> AssetSerializer::deserializeNode(cereal::BinaryInputArchiv
     auto node = std::make_shared<Node>();
     // archive(node->name);
     archive(node->localTransform);
-    archive(node->worldTransform);
-    archive(node->isTransformDirty);
     bool hasMeshGroup;
     archive(hasMeshGroup);
     if (!hasMeshGroup) {
@@ -313,9 +313,6 @@ void AssetSerializer::serializeMesh(cereal::BinaryOutputArchive& archive, const 
         return;
     }
     archive(true);
-    archive(mesh->bufferSize);
-    archive(mesh->vertexCount);
-    archive(mesh->indexCount);
     archive(mesh->hasPosition);
     archive(mesh->hasNormal);
     archive(mesh->hasTangent);
@@ -325,6 +322,14 @@ void AssetSerializer::serializeMesh(cereal::BinaryOutputArchive& archive, const 
     archive(mesh->vertices);
     archive(mesh->indices);
     archive(static_cast<int>(mesh->primitiveMode));
+
+    archive(mesh->vertexOffset);
+    archive(mesh->indexOffset);
+    archive(mesh->vertexCount);
+    archive(mesh->indexCount);
+    archive(mesh->boundingBoxMin);
+    archive(mesh->boundingBoxMax);
+    archive(mesh->boundingSphere);
 
     if (mesh->material) {
         auto it = materialIDs.find(mesh->material);
@@ -348,9 +353,6 @@ std::shared_ptr<Mesh> AssetSerializer::deserializeMesh(cereal::BinaryInputArchiv
     }
     auto mesh = std::make_shared<Mesh>();
 
-    archive(mesh->bufferSize);
-    archive(mesh->vertexCount);
-    archive(mesh->indexCount);
     archive(mesh->hasPosition);
     archive(mesh->hasNormal);
     archive(mesh->hasTangent);
@@ -363,6 +365,14 @@ std::shared_ptr<Mesh> AssetSerializer::deserializeMesh(cereal::BinaryInputArchiv
     int primitiveModeInt;
     archive(primitiveModeInt);
     mesh->primitiveMode = static_cast<PrimitiveMode>(primitiveModeInt);
+
+    archive(mesh->vertexOffset);
+    archive(mesh->indexOffset);
+    archive(mesh->vertexCount);
+    archive(mesh->indexCount);
+    archive(mesh->boundingBoxMin);
+    archive(mesh->boundingBoxMax);
+    archive(mesh->boundingSphere);
 
     bool hasMaterial;
     archive(hasMaterial);

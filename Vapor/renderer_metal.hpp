@@ -93,10 +93,12 @@ private:
     Uint32 nextTextureID = 0;
     Uint32 nextPipelineID = 0;
     Uint32 nextInstanceID = 0;
+    Uint32 nextMaterialID = 0;
     std::unordered_map<Uint32, NS::SharedPtr<MTL::Buffer>> buffers;
     std::unordered_map<Uint32, NS::SharedPtr<MTL::Texture>> textures;
     std::unordered_map<Uint32, NS::SharedPtr<MTL::RenderPipelineState>> pipelines;
     std::vector<NS::SharedPtr<MTL::AccelerationStructure>> BLASs;
+    std::unordered_map<std::shared_ptr<Material>, Uint32> materialIDs;
 
     RenderPath currentRenderPath = RenderPath::Forward;
 };

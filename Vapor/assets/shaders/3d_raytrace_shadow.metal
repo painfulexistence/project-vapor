@@ -2,30 +2,8 @@
 #include <metal_raytracing>
 using namespace metal;
 using raytracing::instance_acceleration_structure;
+#include "assets/shaders/3d_common.metal" // TODO: use more robust include path
 
-struct CameraData {
-    float4x4 proj;
-    float4x4 view;
-    float4x4 invProj;
-    float4x4 invView;
-    float near;
-    float far;
-};
-
-struct DirLight {
-    float3 direction;
-    float3 color;
-    float intensity;
-    // float _pad[3];
-};
-
-struct PointLight {
-    float3 position;
-    float3 color;
-    float intensity;
-    float radius;
-    // float _pad[2];
-};
 
 struct Ray {
     float3 origin;
@@ -75,7 +53,7 @@ kernel void computeMain(
         r.origin = worldPos + worldNormal * 0.001;
         r.direction = normalize(-light.direction);
         r.min_distance = 0.1;
-        r.max_distance = FLT_MAX;
+        r.max_distance = 10000.0;
 
         raytracing::intersector<raytracing::instancing, raytracing::triangle_data> inter;
         inter.assume_geometry_type(raytracing::geometry_type::triangle);

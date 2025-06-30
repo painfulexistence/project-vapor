@@ -8,6 +8,7 @@
 #include <vulkan/vulkan_beta.h>
 #include <glm/mat4x4.hpp>
 #include <unordered_map>
+#include <memory>
 
 #include "graphics.hpp"
 
@@ -143,13 +144,15 @@ private:
     Uint32 nextImageID = 0;
     Uint32 nextPipelineID = 0;
     Uint32 nextInstanceID = 0;
+    Uint32 nextMaterialID = 0;
     std::unordered_map<Uint32, VkBuffer> buffers;
     std::unordered_map<Uint32, VkDeviceMemory> bufferMemories;
     std::unordered_map<Uint32, VkImage> images;
     std::unordered_map<Uint32, VkDeviceMemory> imageMemories;
     std::unordered_map<Uint32, VkImageView> imageViews;
     std::unordered_map<Uint32, VkPipeline> pipelines;
-    std::unordered_map<Material*, VkDescriptorSet> materialTextureSets; // TODO: better key?
+    std::unordered_map<std::shared_ptr<Material>, VkDescriptorSet> materialTextureSets;
+    std::unordered_map<std::shared_ptr<Material>, Uint32> materialIDs;
 
     RenderPath currentRenderPath = RenderPath::Forward;
 };

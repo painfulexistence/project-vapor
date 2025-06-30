@@ -109,6 +109,18 @@ struct alignas(16) CameraData {
 struct alignas(16) InstanceData {
     glm::mat4 model;
     glm::vec4 color;
+    Uint32 vertexOffset;
+    Uint32 indexOffset;
+    Uint32 vertexCount;
+    Uint32 indexCount;
+    Uint32 materialID;
+    PrimitiveMode primitiveMode;
+    Uint32 _pad1[2];
+    glm::vec3 boundingBoxMin;
+    float _pad2;
+    glm::vec3 boundingBoxMax;
+    float _pad3;
+    glm::vec4 boundingSphere; // x, y, z, radius
 };
 
 struct alignas(16) Cluster {
@@ -145,11 +157,6 @@ struct Mesh {
     void recalculateTangents();
     void print();
 
-    std::vector<BufferHandle> vbos;
-    BufferHandle ebo;
-    size_t bufferSize = 0;
-    size_t vertexCount = 0;
-    size_t indexCount = 0;
     bool hasPosition = false;
     bool hasNormal = false;
     bool hasTangent = false;
@@ -160,5 +167,19 @@ struct Mesh {
     std::vector<Uint32> indices;
     std::shared_ptr<Material> material = nullptr;
     PrimitiveMode primitiveMode;
+
+    // GPU-driven rendering
+    Uint32 vertexOffset = 0;
+    Uint32 indexOffset = 0;
+    Uint32 vertexCount = 0;
+    Uint32 indexCount = 0;
+    glm::vec3 boundingBoxMin;
+    glm::vec3 boundingBoxMax;
+    glm::vec4 boundingSphere; // x, y, z, radius
+
+    // Runtime data
+    std::vector<BufferHandle> vbos;
+    BufferHandle ebo;
     Uint32 instanceID = UINT32_MAX; // also used as blas index
+    Uint32 materialID = UINT32_MAX;
 };

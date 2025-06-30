@@ -167,9 +167,32 @@ auto Renderer_Metal::init() -> void {
 }
 
 auto Renderer_Metal::stage(std::shared_ptr<Scene> scene) -> void {
-    auto cmd = queue->commandBuffer();
+    // Lights
+    directionalLightBuffer = NS::TransferPtr(device->newBuffer(scene->directionalLights.size() * sizeof(DirectionalLight), MTL::ResourceStorageModeManaged));
+    memcpy(directionalLightBuffer->contents(), scene->directionalLights.data(), scene->directionalLights.size() * sizeof(DirectionalLight));
+    directionalLightBuffer->didModifyRange(NS::Range::Make(0, directionalLightBuffer->length()));
+
+    pointLightBuffer = NS::TransferPtr(device->newBuffer(scene->pointLights.size() * sizeof(PointLight), MTL::ResourceStorageModeManaged));
+    memcpy(pointLightBuffer->contents(), scene->pointLights.data(), scene->pointLights.size() * sizeof(PointLight));
+    pointLightBuffer->didModifyRange(NS::Range::Make(0, pointLightBuffer->length()));
+
+    // Textures
+    for (auto& img : scene->images) {
+        img->texture = createTexture(img);
+    }
+
+    // Pipelines
+    if (scene->materials.empty()) {
+        // TODO: create default material
+    }
+    for (auto& mat : scene->materials) {
+        // pipelines[mat->pipeline] = createPipeline();
+        materialIDs[mat] = nextMaterialID++;
+    }
 
     // Buffers
+    auto cmd = queue->commandBuffer();
+
     const std::function<void(const std::shared_ptr<Node>&)> stageNode =
         [&](const std::shared_ptr<Node>& node) {
             if (node->meshGroup) {
@@ -203,6 +226,7 @@ auto Renderer_Metal::stage(std::shared_ptr<Scene> scene) -> void {
 
                     BLASs.push_back(accelStruct);
 
+                    mesh->materialID = materialIDs[mesh->material];
                     mesh->instanceID = nextInstanceID++;
                 }
             }
@@ -215,27 +239,6 @@ auto Renderer_Metal::stage(std::shared_ptr<Scene> scene) -> void {
     }
 
     cmd->commit();
-
-    directionalLightBuffer = NS::TransferPtr(device->newBuffer(scene->directionalLights.size() * sizeof(DirectionalLight), MTL::ResourceStorageModeManaged));
-    memcpy(directionalLightBuffer->contents(), scene->directionalLights.data(), scene->directionalLights.size() * sizeof(DirectionalLight));
-    directionalLightBuffer->didModifyRange(NS::Range::Make(0, directionalLightBuffer->length()));
-
-    pointLightBuffer = NS::TransferPtr(device->newBuffer(scene->pointLights.size() * sizeof(PointLight), MTL::ResourceStorageModeManaged));
-    memcpy(pointLightBuffer->contents(), scene->pointLights.data(), scene->pointLights.size() * sizeof(PointLight));
-    pointLightBuffer->didModifyRange(NS::Range::Make(0, pointLightBuffer->length()));
-
-    // Textures
-    for (auto& img : scene->images) {
-        img->texture = createTexture(img);
-    }
-
-    // Pipelines
-    if (scene->materials.empty()) {
-        // TODO: create default material
-    }
-    for (auto& mat : scene->materials) {
-        // pipelines[mat->pipeline] = createPipeline();
-    }
 }
 
 auto Renderer_Metal::draw(std::shared_ptr<Scene> scene, Camera& camera) -> void {
@@ -300,7 +303,16 @@ auto Renderer_Metal::draw(std::shared_ptr<Scene> scene, Camera& camera) -> void 
             for (const auto& mesh : node->meshGroup->meshes) {
                 instances.push_back({
                     .model = transform,
-                    .color = glm::vec4(1.0f, 0.0f, 0.0f, 1.0f)
+                    .color = glm::vec4(1.0f, 0.0f, 0.0f, 1.0f),
+                    .vertexOffset = mesh->vertexOffset,
+                    .indexOffset = mesh->indexOffset,
+                    .vertexCount = mesh->vertexCount,
+                    .indexCount = mesh->indexCount,
+                    .materialID = mesh->materialID,
+                    .primitiveMode = mesh->primitiveMode,
+                    .boundingBoxMin = mesh->boundingBoxMin,
+                    .boundingBoxMax = mesh->boundingBoxMax,
+                    .boundingSphere = mesh->boundingSphere
                 });
                 MTL::AccelerationStructureInstanceDescriptor accelInstanceDesc;
                 for (int i = 0; i < 3; ++i) {
@@ -350,7 +362,7 @@ auto Renderer_Metal::draw(std::shared_ptr<Scene> scene, Camera& camera) -> void 
     // Create render pass descriptors
     auto prePass = NS::TransferPtr(MTL::RenderPassDescriptor::renderPassDescriptor());
     auto prePassNormalRT = prePass->colorAttachments()->object(0);
-    prePassNormalRT->setClearColor(MTL::ClearColor(0.0, 0.0, 1.0, 1.0)); // default up normal
+    prePassNormalRT->setClearColor(MTL::ClearColor(0.0, 0.0, 0.0, 1.0)); // default no normal
     prePassNormalRT->setLoadAction(MTL::LoadActionClear);
     prePassNormalRT->setStoreAction(MTL::StoreActionStore);
     prePassNormalRT->setTexture(normalRT_MS.get());

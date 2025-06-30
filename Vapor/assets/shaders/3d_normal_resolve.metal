@@ -12,7 +12,7 @@ kernel void computeMain(
     for (uint i = 0; i < sampleCount; ++i) {
         float3 norm = normalTexture.read(tid, i).rgb;
         float len = length(norm);
-        if (len > 0.9 && len < 1.1) {
+        if (len > 0.9 && len < 1.1) { // Caution: assumed normal is RGBA Float
             result += norm / len;
             count++;
         }
