@@ -315,8 +315,8 @@ auto Renderer_Metal::draw(std::shared_ptr<Scene> scene, Camera& camera) -> void 
                     .boundingSphere = mesh->boundingSphere
                 });
                 MTL::AccelerationStructureInstanceDescriptor accelInstanceDesc;
-                for (int i = 0; i < 3; ++i) {
-                    for (int j = 0; j < 4; ++j) {
+                for (int i = 0; i < 4; ++i) {
+                    for (int j = 0; j < 3; ++j) {
                         accelInstanceDesc.transformationMatrix.columns[i][j] = transform[i][j];
                     }
                 }
