@@ -692,7 +692,8 @@ auto Renderer_Metal::draw(std::shared_ptr<Scene> scene, Camera& camera) -> void 
                 if (!m) {
                     continue;
                 }
-                if (ImGui::TreeNode(fmt:: format("Mat ##", m->name).c_str())) {
+                ImGui::PushID(m.get());
+                if (ImGui::TreeNode(fmt:: format("Mat #{}", m->name).c_str())) {
                     // TODO: show error image if texture is not uploaded
                     if (m->albedoMap) {
                         ImGui::Image((ImTextureID)(intptr_t)getTexture(m->albedoMap->texture).get(), ImVec2(64, 64));
@@ -711,6 +712,7 @@ auto Renderer_Metal::draw(std::shared_ptr<Scene> scene, Camera& camera) -> void 
                     }
                     ImGui::TreePop();
                 }
+                ImGui::PopID();
             }
             ImGui::TreePop();
         }
@@ -755,6 +757,7 @@ auto Renderer_Metal::draw(std::shared_ptr<Scene> scene, Camera& camera) -> void 
                     node->setLocalScale(scale);
                 if (node->meshGroup) {
                     for (const auto& mesh : node->meshGroup->meshes) {
+                        ImGui::PushID(mesh.get());
                         if (ImGui::TreeNode(fmt:: format("Mesh").c_str())) {
                             ImGui::Text("Vertex count: %u", mesh->vertexCount);
                             ImGui::Text("Vertex offset: %u", mesh->vertexOffset);
@@ -762,6 +765,7 @@ auto Renderer_Metal::draw(std::shared_ptr<Scene> scene, Camera& camera) -> void 
                             ImGui::Text("Index offset: %u", mesh->indexOffset);
                             ImGui::TreePop();
                         }
+                        ImGui::PopID();
                     }
                 }
                 ImGui::PopID();
