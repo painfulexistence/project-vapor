@@ -29,13 +29,21 @@ set(SOURCES
 	scene.cpp
 	camera.cpp
 	asset_serializer.cpp
+    imgui/imgui.cpp
+    imgui/imgui_draw.cpp
+    imgui/imgui_tables.cpp
+    imgui/imgui_widgets.cpp
+    imgui/imgui_demo.cpp
+    imgui/backends/imgui_impl_sdl3.cpp
+    imgui/backends/imgui_impl_vulkan.cpp
+    imgui/backends/imgui_impl_metal.mm
 )
 
 add_executable(main ${SOURCES})
 target_compile_features(main PRIVATE cxx_std_20)
 set_target_properties(main PROPERTIES CXX_EXTENSIONS OFF)
 target_link_libraries(main PRIVATE SDL3::SDL3 metal fmt::fmt glm::glm Vulkan::Vulkan taywee::args mikktspace cereal::cereal)
-target_include_directories(main PRIVATE ${TINYGLTF_INCLUDE_DIRS})
+target_include_directories(main PRIVATE ${TINYGLTF_INCLUDE_DIRS} imgui)
 
 find_program(GLSL_VALIDATOR "glslangValidator" REQUIRED)
 file(GLOB_RECURSE SHADER_SOURCES CONFIGURE_DEPENDS

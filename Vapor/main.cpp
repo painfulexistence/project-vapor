@@ -2,7 +2,10 @@
 #include <fmt/core.h>
 #include <args.hxx>
 #include <glm/ext/vector_float3.hpp>
+#include "imgui.h"
+#include "backends/imgui_impl_sdl3.h"
 #include <iostream>
+
 #include "scene.hpp"
 #include "renderer.hpp"
 #include "graphics.hpp"
@@ -61,6 +64,10 @@ int main(int argc, char* args[]) {
     auto window = SDL_CreateWindow(
         winTitle, 800, 800, winFlags
     );
+    IMGUI_CHECKVERSION();
+    ImGui::CreateContext();
+    // ImGui::StyleColorsDark();
+    ImGui::GetIO().ConfigFlags |= ImGuiConfigFlags_DockingEnable;
 
     RNG rng;
 
@@ -130,6 +137,7 @@ int main(int argc, char* args[]) {
         prevKeyboardState = keyboardState;
         SDL_Event e;
         while (SDL_PollEvent(&e) != 0) {
+            ImGui_ImplSDL3_ProcessEvent(&e);
             switch (e.type) {
             case SDL_EVENT_QUIT:
                 quit = true;
@@ -248,6 +256,8 @@ int main(int argc, char* args[]) {
         frameCount++;
     }
     renderer->deinit();
+
+    ImGui::DestroyContext();
 
     SDL_DestroyWindow(window);
     SDL_Quit();

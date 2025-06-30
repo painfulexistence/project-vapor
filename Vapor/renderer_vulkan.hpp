@@ -75,6 +75,8 @@ private:
     VkDevice device;
     VkQueue graphicsQueue;
     VkQueue presentQueue;
+    Uint32 graphicsFamilyIdx;
+    Uint32 presentFamilyIdx;
 
     VkSwapchainKHR swapchain;
     VkFormat swapchainImageFormat;

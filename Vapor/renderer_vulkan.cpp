@@ -10,6 +10,8 @@
 #define GLM_FORCE_LEFT_HANDED
 #include <glm/ext/matrix_clip_space.hpp>
 #include <glm/ext/matrix_transform.hpp>
+#include "backends/imgui_impl_sdl3.h"
+#include "backends/imgui_impl_vulkan.h"
 #include <vector>
 #include <functional>
 
@@ -160,8 +162,8 @@ auto Renderer_Vulkan::init(SDL_Window* window) -> void {
     std::vector<VkQueueFamilyProperties> queueFamilies(queueFamilyCount);
     vkGetPhysicalDeviceQueueFamilyProperties(physicalDevice, &queueFamilyCount, queueFamilies.data());
 
-    uint32_t graphicsFamilyIdx = UINT32_MAX;
-    uint32_t presentFamilyIdx = UINT32_MAX;
+    graphicsFamilyIdx = UINT32_MAX;
+    presentFamilyIdx = UINT32_MAX;
     uint32_t i = 0;
     for (const auto& queueFamily : queueFamilies) {
         if (graphicsFamilyIdx == UINT32_MAX && queueFamily.queueCount > 0 && queueFamily.queueFlags & VK_QUEUE_GRAPHICS_BIT)
@@ -361,6 +363,27 @@ auto Renderer_Vulkan::init(SDL_Window* window) -> void {
             "Failed to create semaphores or fences for a frame!");
         }
     }
+
+    // ImGui init
+    ImGui_ImplSDL3_InitForVulkan(window);
+    ImGui_ImplVulkan_InitInfo initInfo = {
+        .ApiVersion = VK_API_VERSION_1_3,
+        .Instance = instance,
+        .PhysicalDevice = physicalDevice,
+        .Device = device,
+        .QueueFamily = graphicsFamilyIdx,
+        .Queue = graphicsQueue,
+        .MinImageCount = static_cast<Uint32>(swapchainImages.size()),
+        .ImageCount = static_cast<Uint32>(swapchainImages.size()),
+        .MSAASamples = (VkSampleCountFlagBits)MSAA_SAMPLE_COUNT,
+        .PipelineCache = VK_NULL_HANDLE,
+        .DescriptorPoolSize = 1000,
+        .UseDynamicRendering = true,
+        .Allocator = nullptr,
+        .CheckVkResultFn = nullptr,
+    };
+    ImGui_ImplVulkan_Init(&initInfo);
+
     isInitialized = true;
 }
 
@@ -368,6 +391,11 @@ auto Renderer_Vulkan::deinit() -> void {
     if (!isInitialized) {
         return;
     }
+
+    // ImGui deinit
+    ImGui_ImplVulkan_Shutdown();
+    ImGui_ImplSDL3_Shutdown();
+
     // TODO: clean up all resources
     vkDeviceWaitIdle(device);
     vkDestroyPipeline(device, renderPipeline, nullptr);

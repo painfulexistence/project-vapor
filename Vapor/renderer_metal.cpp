@@ -12,6 +12,9 @@
 #define GLM_FORCE_LEFT_HANDED
 #include <glm/ext/matrix_clip_space.hpp>
 #include <glm/ext/matrix_transform.hpp>
+#include <imgui.h>
+#include "backends/imgui_impl_sdl3.h"
+#include "backends/imgui_impl_metal.h"
 #include <vector>
 #include <functional>
 
@@ -41,6 +44,10 @@ auto Renderer_Metal::init(SDL_Window* window) -> void {
     device = swapchain->device();
     queue = NS::TransferPtr(device->newCommandQueue());
 
+    // ImGui init
+    ImGui_ImplSDL3_InitForMetal(window);
+    ImGui_ImplMetal_Init(device);
+
     isInitialized = true;
 
     createResources();
@@ -50,6 +57,11 @@ auto Renderer_Metal::deinit() -> void {
     if (!isInitialized) {
         return;
     }
+
+    // ImGui deinit
+    ImGui_ImplMetal_Shutdown();
+    ImGui_ImplSDL3_Shutdown();
+
     SDL_DestroyRenderer(renderer);
 
     isInitialized = false;
@@ -406,6 +418,12 @@ auto Renderer_Metal::draw(std::shared_ptr<Scene> scene, Camera& camera) -> void 
     postPassColorRT->setStoreAction(MTL::StoreActionStore);
     postPassColorRT->setTexture(surface->texture());
 
+    auto imguiPass = NS::TransferPtr(MTL::RenderPassDescriptor::renderPassDescriptor());
+    auto imguiPassColorRT = imguiPass->colorAttachments()->object(0);
+    imguiPassColorRT->setLoadAction(MTL::LoadActionLoad);
+    imguiPassColorRT->setStoreAction(MTL::StoreActionStore);
+    imguiPassColorRT->setTexture(surface->texture());
+
     // Start rendering
     auto cmd = queue->commandBuffer();
 
@@ -629,6 +647,139 @@ auto Renderer_Metal::draw(std::shared_ptr<Scene> scene, Camera& camera) -> void 
     postProcessEncoder->setFragmentTexture(normalRT.get(), 2);
     postProcessEncoder->drawPrimitives(MTL::PrimitiveType::PrimitiveTypeTriangle, 0, 3, 1);
     postProcessEncoder->endEncoding();
+
+    ImGui_ImplMetal_NewFrame(imguiPass.get());
+    ImGui_ImplSDL3_NewFrame();
+    ImGui::NewFrame();
+
+    // ImGui::DockSpaceOverViewport();
+
+    if (ImGui::CollapsingHeader("Graphics", ImGuiTreeNodeFlags_DefaultOpen)) {
+        // ImGui::Text("Frame rate: %.3f ms/frame (%.1f FPS)", 1000.0f * deltaTime, 1.0f / deltaTime);
+        ImGui::Text("Average frame rate: %.3f ms/frame (%.1f FPS)", 1000.0f / ImGui::GetIO().Framerate, ImGui::GetIO().Framerate);
+        ImGui::ColorEdit3("Clear color", (float*)&clearColor);
+
+        ImGui::Separator();
+
+        if (ImGui::TreeNode("RTs")) {
+            ImGui::Separator();
+            if (ImGui::TreeNode(fmt::format("Scene Color RT").c_str())) {
+                ImGui::Image((ImTextureID)(intptr_t)colorRT.get(), ImVec2(64, 64));
+                ImGui::TreePop();
+            }
+            if (ImGui::TreeNode(fmt::format("Scene Depth RT").c_str())) {
+                ImGui::Image((ImTextureID)(intptr_t)depthStencilRT.get(), ImVec2(64, 64));
+                ImGui::TreePop();
+            }
+            if (ImGui::TreeNode(fmt::format("Raytraced Shadow").c_str())) {
+                ImGui::Image((ImTextureID)(intptr_t)shadowRT.get(), ImVec2(64, 64));
+                ImGui::TreePop();
+            }
+            if (ImGui::TreeNode(fmt::format("Raytraced AO").c_str())) {
+                ImGui::Image((ImTextureID)(intptr_t)aoRT.get(), ImVec2(64, 64));
+                ImGui::TreePop();
+            }
+            if (ImGui::TreeNode(fmt::format("Scene Normal RT").c_str())) {
+                ImGui::Image((ImTextureID)(intptr_t)normalRT.get(), ImVec2(64, 64));
+                ImGui::TreePop();
+            }
+            ImGui::TreePop();
+        }
+
+        if (ImGui::TreeNode("Scene Materials")) {
+            ImGui::Separator();
+            for (auto m : scene->materials) {
+                if (!m) {
+                    continue;
+                }
+                if (ImGui::TreeNode(fmt:: format("Mat ##", m->name).c_str())) {
+                    // TODO: show error image if texture is not uploaded
+                    if (m->albedoMap) {
+                        ImGui::Image((ImTextureID)(intptr_t)getTexture(m->albedoMap->texture).get(), ImVec2(64, 64));
+                    }
+                    if (m->normalMap) {
+                        ImGui::Image((ImTextureID)(intptr_t)getTexture(m->normalMap->texture).get(), ImVec2(64, 64));
+                    }
+                    if (m->metallicRoughnessMap) {
+                        ImGui::Image((ImTextureID)(intptr_t)getTexture(m->metallicRoughnessMap->texture).get(), ImVec2(64, 64));
+                    }
+                    if (m->occlusionMap) {
+                        ImGui::Image((ImTextureID)(intptr_t)getTexture(m->occlusionMap->texture).get(), ImVec2(64, 64));
+                    }
+                    if (m->emissiveMap) {
+                        ImGui::Image((ImTextureID)(intptr_t)getTexture(m->emissiveMap->texture).get(), ImVec2(64, 64));
+                    }
+                    ImGui::TreePop();
+                }
+            }
+            ImGui::TreePop();
+        }
+
+        if (ImGui::TreeNode("Scene Lights")) {
+            ImGui::Separator();
+            for (auto& l : scene->directionalLights) {
+                ImGui::Text("Directional Light");
+                ImGui::PushID(&l);
+                ImGui::DragFloat3("Direction", (float*)&l.direction, 0.1f);
+                ImGui::ColorEdit3("Color", (float*)&l.color);
+                ImGui::DragFloat("Intensity", &l.intensity, 0.1f, 0.0001f);
+                ImGui::PopID();
+            }
+            for (auto& l : scene->pointLights) {
+                ImGui::Text("Point Light");
+                ImGui::PushID(&l);
+                ImGui::DragFloat3("Position", (float*)&l.position, 0.1f);
+                ImGui::ColorEdit3("Color", (float*)&l.color);
+                ImGui::DragFloat("Intensity", &l.intensity, 0.1f, 0.0001f);
+                ImGui::DragFloat("Radius", &l.radius, 0.1f, 0.0001f);
+                ImGui::PopID();
+            }
+            ImGui::TreePop();
+        }
+
+        if (ImGui::TreeNode("Scene Geometry")) {
+            ImGui::Separator();
+            ImGui::Text("Total vertices: %zu", scene->vertices.size());
+            ImGui::Text("Total indices: %zu", scene->indices.size());
+            const std::function<void(const std::shared_ptr<Node>&)> showNode = [&](const std::shared_ptr<Node>& node) {
+                ImGui::PushID(node.get());
+                ImGui::Text("Node #%s", node->name.c_str());
+                glm::vec3 pos = node->getLocalPosition();
+                glm::vec3 euler = node->getLocalEulerAngles();
+                glm::vec3 scale = node->getLocalScale();
+                if (ImGui::DragFloat3("Position", &pos.x, 0.1f))
+                    node->setLocalPosition(pos);
+                if (ImGui::DragFloat3("Rotation", &euler.x, 1.0f))
+                    node->setLocalEulerAngles(euler);
+                if (ImGui::DragFloat3("Scale", &scale.x, 0.1f, 0.0001f))
+                    node->setLocalScale(scale);
+                if (node->meshGroup) {
+                    for (const auto& mesh : node->meshGroup->meshes) {
+                        if (ImGui::TreeNode(fmt:: format("Mesh").c_str())) {
+                            ImGui::Text("Vertex count: %u", mesh->vertexCount);
+                            ImGui::Text("Vertex offset: %u", mesh->vertexOffset);
+                            ImGui::Text("Index count: %u", mesh->indexCount);
+                            ImGui::Text("Index offset: %u", mesh->indexOffset);
+                            ImGui::TreePop();
+                        }
+                    }
+                }
+                ImGui::PopID();
+                for (const auto& child : node->children) {
+                    showNode(child);
+                }
+            };
+            for (const auto& node : scene->nodes) {
+                showNode(node);
+            }
+            ImGui::TreePop();
+        }
+    }
+
+    ImGui::Render();
+    auto imguiEncoder = cmd->renderCommandEncoder(imguiPass.get());
+    ImGui_ImplMetal_RenderDrawData(ImGui::GetDrawData(), cmd, imguiEncoder);
+    imguiEncoder->endEncoding();
 
     cmd->presentDrawable(surface);
     cmd->commit();
