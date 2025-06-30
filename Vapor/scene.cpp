@@ -1,25 +1,30 @@
 #include "scene.hpp"
 
 #include <SDL3/SDL_log.h>
+#include <fmt/core.h>
 #include <functional>
 
 void Scene::print() {
-    SDL_Log("Scene %s", name.c_str());
-    SDL_Log("Total vertices: %d, total indices: %d", vertices.size(), indices.size());
-    SDL_Log("--------------------------------");
+    fmt::print("Scene {}\n", name);
+    fmt::print(" Total vertices: {}, total indices: {}\n", vertices.size(), indices.size());
+    fmt::print("--------------------------------\n");
     for (const auto& node : nodes) {
         printNode(node);
     }
 }
 
 void Scene::printNode(const std::shared_ptr<Node>& node) {
-    SDL_Log("Node %s", node->name.c_str());
-    SDL_Log("--------------------------------");
+    fmt::print("  Node {}\n", node->name);
+    fmt::print("--------------------------------\n");
     if (node->meshGroup) {
-        SDL_Log("meshes: %d", static_cast<int>(node->meshGroup->meshes.size()));
+        fmt::print("   Mesh group {} ({} meshes)\n", node->meshGroup->name, node->meshGroup->meshes.size());
         for (const auto& mesh : node->meshGroup->meshes) {
-            SDL_Log("Mesh: vertexOffset=%d, indexOffset=%d, vertexCount=%d, indexCount=%d",
+            fmt::print("    Mesh\n");
+            fmt::print("     vertexOffset={}, indexOffset={}, vertexCount={}, indexCount={}\n",
                 mesh->vertexOffset, mesh->indexOffset, mesh->vertexCount, mesh->indexCount);
+            fmt::print("     AABB: min=({}, {}, {}), max=({}, {}, {})\n",
+                mesh->worldAABBMin.x, mesh->worldAABBMin.y, mesh->worldAABBMin.z,
+                mesh->worldAABBMax.x, mesh->worldAABBMax.y, mesh->worldAABBMax.z);
             // SDL_Log("Vertex count: %zu", mesh->vertices.size());
             // if (mesh->indices.size() > 0) {
             //     SDL_Log("Index count: %zu", mesh->indices.size());
@@ -40,7 +45,7 @@ void Scene::printNode(const std::shared_ptr<Node>& node) {
             // }
         }
     }
-    SDL_Log("--------------------------------");
+    fmt::print("--------------------------------\n");
     for (const auto& child : node->children) {
         printNode(child);
     }

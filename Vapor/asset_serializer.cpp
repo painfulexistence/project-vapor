@@ -371,6 +371,7 @@ std::shared_ptr<Mesh> AssetSerializer::deserializeMesh(cereal::BinaryInputArchiv
     archive(mesh->indexCount);
     archive(mesh->localAABBMin);
     archive(mesh->localAABBMax);
+    mesh->isGeometryDirty = false; // prevent AABB updating
 
     bool hasMaterial;
     archive(hasMaterial);

@@ -593,6 +593,7 @@ std::shared_ptr<Scene> AssetManager::loadGLTFOptimized(const std::string& filena
                 newMesh->indexOffset = currentIndexOffset;
                 newMesh->vertexCount = originalMesh->vertices.size();
                 newMesh->indexCount = originalMesh->indices.size();
+                newMesh->isGeometryDirty = false; // prevent AABB updating
 
                 optimizedScene->vertices.insert(
                     optimizedScene->vertices.end(),

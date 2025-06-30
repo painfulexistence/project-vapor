@@ -1,8 +1,8 @@
 #include "graphics.hpp"
 #include <fmt/core.h>
 #include "MikkTSpace/mikktspace.h"
-#include <cfloat>
 #include <utility>
+#include <limits>
 
 static int getNumFaces(const SMikkTSpaceContext* ctx) {
     auto mesh = static_cast<Mesh*>(ctx->m_pUserData);
@@ -96,8 +96,8 @@ void Mesh::calculateTangents(){
 }
 
 void Mesh::calculateLocalAABB(){
-    localAABBMin = glm::vec3(FLT_MAX);
-    localAABBMax = glm::vec3(-FLT_MAX);
+    localAABBMin = glm::vec3(std::numeric_limits<float>::max());
+    localAABBMax = glm::vec3(-std::numeric_limits<float>::max());
     for (const auto& vertex : vertices) {
         localAABBMin = glm::min(localAABBMin, vertex.position);
         localAABBMax = glm::max(localAABBMax, vertex.position);
