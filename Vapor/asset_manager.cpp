@@ -125,7 +125,7 @@ std::shared_ptr<Mesh> AssetManager::loadOBJ(const std::string& filename, const s
     }
 
     auto mesh = std::make_shared<Mesh>();
-    mesh->initialize({ vertices, indices });
+    mesh->initialize(vertices, indices);
     mesh->material = meshMaterials[0];
 
     return mesh;
@@ -190,7 +190,7 @@ std::shared_ptr<Mesh> AssetManager::loadOBJ(const std::string& filename, const s
 //     }
 
 //     auto mesh = std::make_shared<Mesh>();
-//     mesh->initialize({ vertices, indices });
+//     mesh->initialize(vertices, indices);
 //     fmt::print("vertices size: {}, indices size: {}\n", vertices.size(), indices.size());
 //     return mesh;
 // }

@@ -45,9 +45,9 @@ static void setTSpaceBasic(const SMikkTSpaceContext* ctx, const float* tan, floa
     mesh->vertices[index].tangent = glm::vec4(tan[0], tan[1], tan[2], sign);
 }
 
-void Mesh::initialize(const MeshData& data) {
-    vertices = std::move(data.vertices);
-    indices = std::move(data.indices);
+void Mesh::initialize(const std::vector<VertexData>& vertices, const std::vector<Uint32>& indices) {
+    this->vertices = std::move(vertices);
+    this->indices = std::move(indices);
     // recalculateNormals();
     calculateTangents();
 };

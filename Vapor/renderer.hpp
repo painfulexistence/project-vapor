@@ -35,9 +35,9 @@ enum class RenderTargetUsage {
 
 class Renderer {
 public:
-    ~Renderer(){};
+    virtual void init(SDL_Window* window) = 0;
 
-    virtual void init() = 0;
+    virtual void deinit() = 0;
 
     virtual void stage(std::shared_ptr<Scene> scene) = 0;
 

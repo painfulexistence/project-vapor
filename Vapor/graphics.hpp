@@ -145,9 +145,10 @@ struct VertexData {
     // glm::vec3 bitangent;
 };
 
-struct MeshData {
-    std::vector<VertexData> vertices;
-    std::vector<Uint32> indices;
+struct Particle {
+    glm::vec3 position = glm::vec3(1.0f);
+    glm::vec3 velocity = glm::vec3(1.0f);
+    glm::vec3 density = glm::vec3(1.0f);
 };
 
 struct Mesh {

@@ -6,6 +6,8 @@
 
 void Scene::print() {
     fmt::print("Scene {}\n", name);
+    fmt::print(" Images: {}\n", images.size());
+    fmt::print(" Materials: {}\n", materials.size());
     fmt::print(" Total vertices: {}, total indices: {}\n", vertices.size(), indices.size());
     fmt::print("--------------------------------\n");
     for (const auto& node : nodes) {
