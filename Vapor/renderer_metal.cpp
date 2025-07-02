@@ -5,6 +5,7 @@
 
 #include <fmt/core.h>
 #include <SDL3/SDL_stdinc.h>
+#include <SDL3/SDL_timer.h>
 #include <glm/vec2.hpp>
 #include <glm/vec3.hpp>
 #include <glm/vec4.hpp>
@@ -297,6 +298,7 @@ auto Renderer_Metal::draw(std::shared_ptr<Scene> scene, Camera& camera) -> void 
     cameraData->invView = invView;
     cameraData->near = near;
     cameraData->far = far;
+    cameraData->position = camPos;
     cameraDataBuffers[currentFrameInFlight]->didModifyRange(NS::Range::Make(0, cameraDataBuffers[currentFrameInFlight]->length()));
 
     DirectionalLight* dirLights = reinterpret_cast<DirectionalLight*>(directionalLightBuffer->contents());
@@ -615,10 +617,9 @@ auto Renderer_Metal::draw(std::shared_ptr<Scene> scene, Camera& camera) -> void 
                     renderEncoder->setFragmentBuffer(pointLightBuffer.get(), 0, 1);
                     renderEncoder->setFragmentBuffer(clusterBuffers[currentFrameInFlight].get(), 0, 2);
                     renderEncoder->setFragmentBuffer(cameraDataBuffers[currentFrameInFlight].get(), 0, 3);
-                    renderEncoder->setFragmentBytes(&camPos, sizeof(glm::vec3), 4);
-                    renderEncoder->setFragmentBytes(&screenSize, sizeof(glm::vec2), 5);
-                    renderEncoder->setFragmentBytes(&gridSize, sizeof(glm::uvec3), 6);
-                    renderEncoder->setFragmentBytes(&time, sizeof(float), 7);
+                    renderEncoder->setFragmentBytes(&screenSize, sizeof(glm::vec2), 4);
+                    renderEncoder->setFragmentBytes(&gridSize, sizeof(glm::uvec3), 5);
+                    renderEncoder->setFragmentBytes(&time, sizeof(float), 6);
                     renderEncoder->drawIndexedPrimitives(
                         MTL::PrimitiveType::PrimitiveTypeTriangle,
                         mesh->indexCount,// mesh->indices.size(),

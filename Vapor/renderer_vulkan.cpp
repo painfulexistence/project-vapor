@@ -1317,7 +1317,8 @@ auto Renderer_Vulkan::draw(std::shared_ptr<Scene> scene, Camera& camera) -> void
         .invProj = invProj,
         .invView = invView,
         .near = camera.near(),
-        .far = camera.far()
+        .far = camera.far(),
+        .position = camPos,
     };
     memcpy(cameraDataBuffersMapped[currentFrameInFlight], &cameraData, sizeof(CameraData));
     memcpy(directionalLightBuffersMapped[currentFrameInFlight], scene->directionalLights.data(), sizeof(DirectionalLight) * scene->directionalLights.size());

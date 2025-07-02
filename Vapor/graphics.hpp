@@ -104,6 +104,9 @@ struct alignas(16) CameraData {
     glm::mat4 invView;
     float near;
     float far;
+    glm::vec3 position;
+    float _pad1;
+    glm::vec4 frustumPlanes[6];
 };
 
 struct alignas(16) InstanceData {
@@ -151,8 +154,16 @@ struct Particle {
     glm::vec3 density = glm::vec3(1.0f);
 };
 
+// struct alignas(16) DrawCommand {
+//     Uint32 indexCount;
+//     Uint32 instanceCount;
+//     Uint32 indexStart;
+//     Uint32 baseVertex;
+//     Uint32 baseInstance;
+// };
+
 struct Mesh {
-    void initialize(const MeshData& data);
+    void initialize(const std::vector<VertexData>& vertices, const std::vector<Uint32>& indices);
     void initialize(VertexData* vertexData, size_t vertexCount, Uint32* indexData, size_t indexCount);
     void calculateNormals();
     void calculateTangents();

@@ -47,10 +47,9 @@ fragment float4 fragmentMain(
     const device PointLight* pointLights [[buffer(1)]],
     const device Cluster* clusters [[buffer(2)]],
     constant CameraData& camera [[buffer(3)]],
-    constant packed_float3* camPos [[buffer(4)]],
-    constant float2& screenSize [[buffer(5)]],
-    constant packed_uint3& gridSize [[buffer(6)]],
-    constant float& time [[buffer(7)]]
+    constant float2& screenSize [[buffer(4)]],
+    constant packed_uint3& gridSize [[buffer(5)]],
+    constant float& time [[buffer(6)]]
 ) {
     constexpr sampler s(address::repeat, filter::linear, mip_filter::linear);
 
@@ -65,7 +64,7 @@ fragment float4 fragmentMain(
     float3 B = normalize(cross(N, T) * in.worldTangent.w);
     float3x3 TBN = float3x3(T, B, N);
     float3 norm = in.worldNormal.xyz; //normalize(TBN * normalize(texNormal.sample(s, in.uv).rgb * 2.0 - 1.0));
-    float3 viewDir = normalize(*camPos - in.worldPosition.xyz);
+    float3 viewDir = normalize(camera.position - in.worldPosition.xyz);
 
     float3 color = baseColor.rgb;
     color = color * 2.0 - 1.0;

@@ -1,3 +1,6 @@
+#ifndef COMMON_METAL
+#define COMMON_METAL
+
 #include <metal_stdlib>
 using namespace metal;
 
@@ -6,6 +9,14 @@ constant float GAMMA = 2.2;
 constant float INV_GAMMA = 1.0 / GAMMA;
 
 constant uint MAX_LIGHTS_PER_CLUSTER = 256;
+constant float MAX_CAMERA_DISTANCE = 1000.0f;
+
+constant uint FRUSTUM_LEFT = 0;
+constant uint FRUSTUM_RIGHT = 1;
+constant uint FRUSTUM_BOTTOM = 2;
+constant uint FRUSTUM_TOP = 3;
+constant uint FRUSTUM_NEAR = 4;
+constant uint FRUSTUM_FAR = 5;
 
 struct VertexData {
     packed_float3 position;
@@ -21,6 +32,8 @@ struct CameraData {
     float4x4 invView;
     float near;
     float far;
+    float3 position;
+    float4 frustumPlanes[6];
 };
 
 struct InstanceData {
@@ -32,8 +45,8 @@ struct InstanceData {
     uint indexCount;
     uint materialID;
     uint primitiveMode;
-    float3 boundingBoxMin;
-    float3 boundingBoxMax;
+    float3 AABBMin;
+    float3 AABBMax;
     float4 boundingSphere; // x, y, z, radius
 };
 
@@ -125,3 +138,5 @@ float3 linearToSRGB(float3 color) {
         step(0.0031308, color)
     );
 }
+
+#endif
