@@ -326,6 +326,7 @@ auto Renderer_Metal::draw(std::shared_ptr<Scene> scene, Camera& camera) -> void 
 
     instances.clear();
     accelInstances.clear();
+    instanceBatches.clear();
     const std::function<void(const std::shared_ptr<Node>&)> updateNode = [&](const std::shared_ptr<Node>& node) {
         if (node->meshGroup) {
             const glm::mat4& transform = node->worldTransform;
@@ -351,6 +352,11 @@ auto Renderer_Metal::draw(std::shared_ptr<Scene> scene, Camera& camera) -> void 
                 accelInstanceDesc.accelerationStructureIndex = mesh->instanceID;
                 accelInstanceDesc.mask = 0xFF;
                 accelInstances.push_back(accelInstanceDesc);
+                if (!mesh->material) {
+                    fmt::print("No material found for mesh in mesh group {}\n", node->meshGroup->name);
+                    continue;
+                }
+                instanceBatches[mesh->material].push_back(mesh);
             }
         }
         for (const auto& child : node->children) {
@@ -369,13 +375,17 @@ auto Renderer_Metal::draw(std::shared_ptr<Scene> scene, Camera& camera) -> void 
     memcpy(accelInstanceBuffers[currentFrameInFlight]->contents(), accelInstances.data(), accelInstances.size() * sizeof(MTL::AccelerationStructureInstanceDescriptor));
     accelInstanceBuffers[currentFrameInFlight]->didModifyRange(NS::Range::Make(0, accelInstanceBuffers[currentFrameInFlight]->length()));
 
-    std::vector<NS::Object*> BLASObjects;
-    BLASObjects.reserve(BLASs.size());
-    for (auto blas : BLASs) {
-        BLASObjects.push_back(static_cast<NS::Object*>(blas.get()));
+    if (scene->isGeometryDirty) {
+        std::vector<NS::Object*> BLASObjects;
+        BLASObjects.reserve(BLASs.size());
+        for (auto blas : BLASs) {
+            BLASObjects.push_back(static_cast<NS::Object*>(blas.get()));
+        }
+        BLASArray = NS::TransferPtr(NS::Array::array(BLASObjects.data(), BLASObjects.size()));
+        scene->isGeometryDirty = false;
     }
+
     auto TLASDesc = NS::TransferPtr(MTL::InstanceAccelerationStructureDescriptor::alloc()->init());
-    auto BLASArray = NS::TransferPtr(NS::Array::array(BLASObjects.data(), BLASObjects.size()));
     TLASDesc->setInstanceCount(accelInstances.size());
     TLASDesc->setInstancedAccelerationStructures(BLASArray.get());
     TLASDesc->setInstanceDescriptorBuffer(accelInstanceBuffers[currentFrameInFlight].get());
@@ -428,8 +438,10 @@ auto Renderer_Metal::draw(std::shared_ptr<Scene> scene, Camera& camera) -> void 
 
     // Start rendering
     auto cmd = queue->commandBuffer();
+    drawCount = 0;
 
     // 0. build TLAS
+    // TODO: only build TLAS if it's dirty
     auto accelEncoder = cmd->accelerationStructureCommandEncoder();
     accelEncoder->buildAccelerationStructure(TLASBuffers[currentFrameInFlight].get(), TLASDesc.get(), TLASScratchBuffers[currentFrameInFlight].get(), 0);
     accelEncoder->endEncoding();
@@ -444,42 +456,30 @@ auto Renderer_Metal::draw(std::shared_ptr<Scene> scene, Camera& camera) -> void 
     prePassEncoder->setVertexBuffer(cameraDataBuffers[currentFrameInFlight].get(), 0, 0);
     prePassEncoder->setVertexBuffer(instanceDataBuffers[currentFrameInFlight].get(), 0, 1);
     prePassEncoder->setVertexBuffer(getBuffer(scene->vertexBuffer).get(), 0, 2);
-    const std::function<void(const std::shared_ptr<Node>&)> drawNodeDepth =
-        [&](const std::shared_ptr<Node>& node) {
-            if (node->meshGroup) {
-                for (const auto& mesh : node->meshGroup->meshes) {
-                    if (!mesh->material) {
-                        fmt::print("No material found for mesh in mesh group {}\n", node->meshGroup->name);
-                        continue;
-                    }
-                    if (!camera.isVisible(mesh->getWorldBoundingSphere())) {
-                        continue;
-                    }
-                    // prePassEncoder->setFragmentTexture(
-                    //     getTexture(mesh->material->displacementMap ? mesh->material->displacementMap->texture : defaultDisplacementTexture).get(),
-                    //     1
-                    // );
-                    // prePassEncoder->setVertexBuffer(getBuffer(mesh->vbos[0]).get(), 0, 2);
-                    prePassEncoder->setVertexBytes(&mesh->instanceID, sizeof(Uint32), 3);
-                    prePassEncoder->setFragmentTexture(
-                        getTexture(mesh->material->albedoMap ? mesh->material->albedoMap->texture : defaultAlbedoTexture).get(),
-                        0
-                    );
-                    prePassEncoder->drawIndexedPrimitives(
-                        MTL::PrimitiveType::PrimitiveTypeTriangle,
-                        mesh->indexCount,// mesh->indices.size(),
-                        MTL::IndexTypeUInt32,
-                        getBuffer(scene->indexBuffer).get(), // getBuffer(mesh->ebo).get(),
-                        mesh->indexOffset * sizeof(Uint32) // 0
-                    );
-                }
+    for (const auto& [material, meshes] : instanceBatches) {
+        prePassEncoder->setFragmentTexture(
+            getTexture(material->albedoMap ? material->albedoMap->texture : defaultAlbedoTexture).get(),
+            0
+        );
+        // prePassEncoder->setFragmentTexture(
+        //     getTexture(material->displacementMap ? material->displacementMap->texture : defaultDisplacementTexture).get(),
+        //     1
+        // );
+        for (const auto& mesh : meshes) {
+            if (!camera.isVisible(mesh->getWorldBoundingSphere())) {
+                continue;
             }
-            for (const auto& child : node->children) {
-                drawNodeDepth(child);
-            }
-        };
-    for (const auto& node : scene->nodes) {
-        drawNodeDepth(node);
+            // prePassEncoder->setVertexBuffer(getBuffer(mesh->vbos[0]).get(), 0, 2);
+            prePassEncoder->setVertexBytes(&mesh->instanceID, sizeof(Uint32), 3);
+            prePassEncoder->drawIndexedPrimitives(
+                MTL::PrimitiveType::PrimitiveTypeTriangle,
+                mesh->indexCount,// mesh->indices.size(),
+                MTL::IndexTypeUInt32,
+                getBuffer(scene->indexBuffer).get(), // getBuffer(mesh->ebo).get(),
+                mesh->indexOffset * sizeof(Uint32) // 0
+            );
+            drawCount++;
+        }
     }
     prePassEncoder->endEncoding();
 
@@ -568,73 +568,65 @@ auto Renderer_Metal::draw(std::shared_ptr<Scene> scene, Camera& camera) -> void 
     // encoder->useResource(pointLightBuffer.get(), MTL::ResourceUsageRead, MTL::RenderStageFragment);
     // encoder->useResource(testStorageBuffer.get(), MTL::ResourceUsageRead, MTL::RenderStageVertex | MTL::RenderStageFragment);
 
+    currentInstanceCount = 0;
+    culledInstanceCount = 0;
     renderEncoder->setVertexBuffer(cameraDataBuffers[currentFrameInFlight].get(), 0, 0);
     renderEncoder->setVertexBuffer(instanceDataBuffers[currentFrameInFlight].get(), 0, 1);
     renderEncoder->setVertexBuffer(getBuffer(scene->vertexBuffer).get(), 0, 2);
-    const std::function<void(const std::shared_ptr<Node>&)> drawNode =
-        [&](const std::shared_ptr<Node>& node) {
-            if (node->meshGroup) {
-                for (const auto& mesh : node->meshGroup->meshes) {
-                    if (!mesh->material) {
-                        fmt::print("No material found for mesh in mesh group {}\n", node->meshGroup->name);
-                        continue;
-                    }
-                    if (!camera.isVisible(mesh->getWorldBoundingSphere())) {
-                        continue;
-                    }
-                    // encoder->setRenderPipelineState(getPipeline(mesh->material->pipeline));
-                    renderEncoder->setFragmentTexture(
-                        getTexture(mesh->material->albedoMap ? mesh->material->albedoMap->texture : defaultAlbedoTexture).get(),
-                        0
-                    );
-                    renderEncoder->setFragmentTexture(
-                        getTexture(mesh->material->normalMap ? mesh->material->normalMap->texture : defaultNormalTexture).get(),
-                        1
-                    );
-                    renderEncoder->setFragmentTexture(
-                        getTexture(mesh->material->metallicRoughnessMap ? mesh->material->metallicRoughnessMap->texture : defaultORMTexture).get(),
-                        2
-                    );
-                    renderEncoder->setFragmentTexture(
-                        getTexture(mesh->material->occlusionMap ? mesh->material->occlusionMap->texture : defaultORMTexture).get(),
-                        3
-                    );
-                    renderEncoder->setFragmentTexture(
-                        getTexture(mesh->material->emissiveMap ? mesh->material->emissiveMap->texture : defaultEmissiveTexture).get(),
-                        4
-                    );
-                    // encoder->setFragmentTexture(
-                    //     getTexture(mesh->material->displacementMap ? mesh->material->displacementMap->texture : defaultDisplacementTexture).get(),
-                    //     5
-                    // );
-                    renderEncoder->setFragmentTexture(
-                        shadowRT.get(),
-                        7
-                    );
-                    // renderEncoder->setVertexBuffer(getBuffer(mesh->vbos[0]).get(), 0, 2);
-                    renderEncoder->setVertexBytes(&mesh->instanceID, sizeof(Uint32), 3);
-                    renderEncoder->setFragmentBuffer(directionalLightBuffer.get(), 0, 0);
-                    renderEncoder->setFragmentBuffer(pointLightBuffer.get(), 0, 1);
-                    renderEncoder->setFragmentBuffer(clusterBuffers[currentFrameInFlight].get(), 0, 2);
-                    renderEncoder->setFragmentBuffer(cameraDataBuffers[currentFrameInFlight].get(), 0, 3);
-                    renderEncoder->setFragmentBytes(&screenSize, sizeof(glm::vec2), 4);
-                    renderEncoder->setFragmentBytes(&gridSize, sizeof(glm::uvec3), 5);
-                    renderEncoder->setFragmentBytes(&time, sizeof(float), 6);
-                    renderEncoder->drawIndexedPrimitives(
-                        MTL::PrimitiveType::PrimitiveTypeTriangle,
-                        mesh->indexCount,// mesh->indices.size(),
-                        MTL::IndexTypeUInt32,
-                        getBuffer(scene->indexBuffer).get(), // getBuffer(mesh->ebo).get(),
-                        mesh->indexOffset * sizeof(Uint32) // 0
-                    );
-                }
+    renderEncoder->setFragmentBuffer(directionalLightBuffer.get(), 0, 0);
+    renderEncoder->setFragmentBuffer(pointLightBuffer.get(), 0, 1);
+    renderEncoder->setFragmentBuffer(clusterBuffers[currentFrameInFlight].get(), 0, 2);
+    renderEncoder->setFragmentBuffer(cameraDataBuffers[currentFrameInFlight].get(), 0, 3);
+    renderEncoder->setFragmentBytes(&screenSize, sizeof(glm::vec2), 4);
+    renderEncoder->setFragmentBytes(&gridSize, sizeof(glm::uvec3), 5);
+    renderEncoder->setFragmentBytes(&time, sizeof(float), 6);
+    for (const auto& [material, meshes] : instanceBatches) {
+        // renderEncoder->setRenderPipelineState(getPipeline(material->pipeline).get());
+        renderEncoder->setFragmentTexture(
+            getTexture(material->albedoMap ? material->albedoMap->texture : defaultAlbedoTexture).get(),
+            0
+        );
+        renderEncoder->setFragmentTexture(
+            getTexture(material->normalMap ? material->normalMap->texture : defaultNormalTexture).get(),
+            1
+        );
+        renderEncoder->setFragmentTexture(
+            getTexture(material->metallicRoughnessMap ? material->metallicRoughnessMap->texture : defaultORMTexture).get(),
+            2
+        );
+        renderEncoder->setFragmentTexture(
+            getTexture(material->occlusionMap ? material->occlusionMap->texture : defaultORMTexture).get(),
+            3
+        );
+        renderEncoder->setFragmentTexture(
+            getTexture(material->emissiveMap ? material->emissiveMap->texture : defaultEmissiveTexture).get(),
+            4
+        );
+        // renderEncoder->setFragmentTexture(
+        //     getTexture(material->displacementMap ? material->displacementMap->texture : defaultDisplacementTexture).get(),
+        //     5
+        // );
+        renderEncoder->setFragmentTexture(
+            shadowRT.get(),
+            7
+        );
+        for (const auto& mesh : meshes) {
+            if (!camera.isVisible(mesh->getWorldBoundingSphere())) {
+                culledInstanceCount++;
+                continue;
             }
-            for (const auto& child : node->children) {
-                drawNode(child);
-            }
-        };
-    for (const auto& node : scene->nodes) {
-        drawNode(node);
+            currentInstanceCount++;
+            // renderEncoder->setVertexBuffer(getBuffer(mesh->vbos[0]).get(), 0, 2);
+            renderEncoder->setVertexBytes(&mesh->instanceID, sizeof(Uint32), 3);
+            renderEncoder->drawIndexedPrimitives(
+                MTL::PrimitiveType::PrimitiveTypeTriangle,
+                mesh->indexCount,// mesh->indices.size(),
+                MTL::IndexTypeUInt32,
+                getBuffer(scene->indexBuffer).get(), // getBuffer(mesh->ebo).get(),
+                mesh->indexOffset * sizeof(Uint32) // 0
+            );
+            drawCount++;
+        }
     }
     renderEncoder->endEncoding();
 

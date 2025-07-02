@@ -28,7 +28,7 @@ vertex RasterizerData vertexMain(
     vert.worldTangent = float4(normalMatrix * in[actualVertexID].tangent.xyz, in[actualVertexID].tangent.w);
     vert.worldPosition = model * float4(in[actualVertexID].position, 1.0);
     vert.position = camera.proj * camera.view * vert.worldPosition;
-    vert.uv = in[vertexID].uv;
+    vert.uv = float2(in[actualVertexID].uv);
     return vert;
 }
 

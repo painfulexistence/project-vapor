@@ -155,6 +155,8 @@ public:
     BufferHandle vertexBuffer;
     BufferHandle indexBuffer;
 
+    bool isGeometryDirty = true;
+
     Scene() = default;
     Scene(const std::string& name) : name(name) {};
     ~Scene() = default;

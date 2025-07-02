@@ -83,6 +83,7 @@ private:
 
     std::vector<InstanceData> instances;
     std::vector<MTL::AccelerationStructureInstanceDescriptor> accelInstances;
+    std::unordered_map<std::shared_ptr<Material>, std::vector<std::shared_ptr<Mesh>>> instanceBatches;
 
     NS::SharedPtr<MTL::Texture> colorRT_MS;
     NS::SharedPtr<MTL::Texture> colorRT;
@@ -102,9 +103,15 @@ private:
     std::unordered_map<Uint32, NS::SharedPtr<MTL::Texture>> textures;
     std::unordered_map<Uint32, NS::SharedPtr<MTL::RenderPipelineState>> pipelines;
     std::vector<NS::SharedPtr<MTL::AccelerationStructure>> BLASs;
+    NS::SharedPtr<NS::Array> BLASArray;
+
     std::unordered_map<std::shared_ptr<Material>, Uint32> materialIDs;
 
     RenderPath currentRenderPath = RenderPath::Forward;
+
+    Uint32 currentInstanceCount = 0;
+    Uint32 culledInstanceCount = 0;
+    Uint32 drawCount = 0;
 
     void createResources();
 };
