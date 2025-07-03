@@ -20,14 +20,14 @@
 
 int main(int argc, char* args[]) {
     args::ArgumentParser parser { "This is Project Vapor." };
-    args::Group windowGroup(parser, "Window:", args::Group::Validators::Xor);
+    args::Group windowGroup(parser, "Window:");
     args::ValueFlag<Uint32> width(windowGroup, "number", "Window width", {'w', "width"}, 1280);
     args::ValueFlag<Uint32> height(windowGroup, "number", "Window height", {'h', "height"}, 720);
-    args::Group graphicsGroup(parser, "Graphics:");
+    args::Group graphicsGroup(parser, "Graphics:", args::Group::Validators::Xor);
     args::Flag useMetal(graphicsGroup, "Metal", "Use Metal backend", {"metal"});
     args::Flag useVulkan(graphicsGroup, "Vulkan", "Use Vulkan backend", {"vulkan"});
     args::Group helpGroup(parser, "Help:");
-    args::HelpFlag help(helpGroup, "help", "Display help menu", {'h', "help"});
+    args::HelpFlag help(helpGroup, "help", "Display help menu", {"help"});
     if (argc > 1) {
         try {
             parser.ParseCLI(argc, args);
