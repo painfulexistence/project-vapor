@@ -3,6 +3,7 @@
 #include <args.hxx>
 #include <glm/ext/matrix_transform.hpp>
 #include <glm/ext/vector_float3.hpp>
+#include "SDL3/SDL_stdinc.h"
 #include "imgui.h"
 #include "backends/imgui_impl_sdl3.h"
 #include <iostream>
@@ -19,9 +20,14 @@
 
 int main(int argc, char* args[]) {
     args::ArgumentParser parser { "This is Project Vapor." };
-    args::Group group(parser, "Select a gfx backend:", args::Group::Validators::Xor);
-    args::Flag useMetal(group, "Metal", "Metal", {"metal"});
-    args::Flag useVulkan(group, "Vulkan", "Vulkan", {"vulkan"});
+    args::Group windowGroup(parser, "Window:", args::Group::Validators::Xor);
+    args::ValueFlag<Uint32> width(windowGroup, "number", "Window width", {'w', "width"}, 1280);
+    args::ValueFlag<Uint32> height(windowGroup, "number", "Window height", {'h', "height"}, 720);
+    args::Group graphicsGroup(parser, "Graphics:");
+    args::Flag useMetal(graphicsGroup, "Metal", "Use Metal backend", {"metal"});
+    args::Flag useVulkan(graphicsGroup, "Vulkan", "Use Vulkan backend", {"vulkan"});
+    args::Group helpGroup(parser, "Help:");
+    args::HelpFlag help(helpGroup, "help", "Display help menu", {'h', "help"});
     if (argc > 1) {
         try {
             parser.ParseCLI(argc, args);
@@ -64,7 +70,10 @@ int main(int argc, char* args[]) {
 #endif
 
     auto window = SDL_CreateWindow(
-        winTitle, 800, 800, winFlags
+        winTitle,
+        width.Get(),
+        height.Get(),
+        winFlags
     );
     IMGUI_CHECKVERSION();
     ImGui::CreateContext();
