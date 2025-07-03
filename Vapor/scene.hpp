@@ -10,6 +10,7 @@
 #include <memory>
 
 #include "graphics.hpp"
+#include "physics_3d.hpp"
 
 struct MeshGroup {
     std::string name;
@@ -22,6 +23,7 @@ struct Node {
     glm::mat4 localTransform = glm::identity<glm::mat4>();
     glm::mat4 worldTransform = glm::identity<glm::mat4>(); // calculated from localTransform and parent's worldTransform
     std::shared_ptr<MeshGroup> meshGroup = nullptr;
+    BodyHandle body;
     bool isTransformDirty = true;
 
     glm::vec3 getLocalPosition() const {

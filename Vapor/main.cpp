@@ -1,6 +1,7 @@
 #include <SDL3/SDL.h>
 #include <fmt/core.h>
 #include <args.hxx>
+#include <glm/ext/matrix_transform.hpp>
 #include <glm/ext/vector_float3.hpp>
 #include "imgui.h"
 #include "backends/imgui_impl_sdl3.h"
@@ -9,6 +10,7 @@
 #include "scene.hpp"
 #include "renderer.hpp"
 #include "graphics.hpp"
+#include "physics_3d.hpp"
 #include "asset_manager.hpp"
 #include "mesh_builder.hpp"
 #include "camera.hpp"
@@ -74,6 +76,9 @@ int main(int argc, char* args[]) {
     auto renderer = createRenderer(gfxBackend);
     renderer->init(window);
 
+    auto physics = std::make_unique<Physics3D>();
+    physics->init();
+
     // auto scene = std::make_shared<Scene>();
     // auto entity = scene->CreateNode("Mesh 1");
     // auto mesh = MeshBuilder::buildCube(1.0f);
@@ -92,7 +97,7 @@ int main(int argc, char* args[]) {
         .color = glm::vec3(1.0, 1.0, 1.0),
         .intensity = 10.0,
     });
-    for (int i = 0; i < 256; i++) {
+    for (int i = 0; i < 8; i++) {
         scene->pointLights.push_back({
             .position = glm::vec3(rng.RandomFloatInRange(-5.0f, 5.0f), rng.RandomFloatInRange(0.0f, 5.0f), rng.RandomFloatInRange(-5.0f, 5.0f)),
             .color = glm::vec3(rng.RandomFloat(), rng.RandomFloat(), rng.RandomFloat()),
@@ -107,12 +112,20 @@ int main(int argc, char* args[]) {
         .occlusionMap = AssetManager::loadImage(std::string("assets/textures/medieval_blocks_ao.jpg")),
         .displacementMap = AssetManager::loadImage(std::string("assets/textures/medieval_blocks_disp.jpg"))
     });
-    auto entity1 = scene->createNode("Mesh 1");
+    auto entity1 = scene->createNode("Cube 1");
     scene->addMeshToNode(entity1, MeshBuilder::buildCube(1.0f, material));
-    entity1->setPosition(glm::vec3(-2.0f, 0.5f, 0.0f));
-    auto entity2 = scene->createNode("Mesh 2");
+    entity1->setPosition(glm::vec3(-2.0f, 10.5f, 0.0f));
+    entity1->body = physics->createBoxBody(glm::vec3(.5f, .5f, .5f), glm::vec3(-2.0f, 0.5f, 0.0f), glm::identity<glm::quat>(), BodyMotionType::Dynamic);
+    physics->addBody(entity1->body, true);
+    auto entity2 = scene->createNode("Cube 2");
     scene->addMeshToNode(entity2, MeshBuilder::buildCube(1.0f, material));
     entity2->setPosition(glm::vec3(2.0f, 0.5f, 0.0f));
+    entity2->body = physics->createBoxBody(glm::vec3(.5f, .5f, .5f), glm::vec3(2.0f, 0.5f, 0.0f), glm::identity<glm::quat>(), BodyMotionType::Dynamic);
+    physics->addBody(entity2->body, true);
+    auto entity3 = scene->createNode("Floor");
+    entity3->setPosition(glm::vec3(0.0f, -0.5f, 0.0f));
+    entity3->body = physics->createBoxBody(glm::vec3(50.0f, .5f, 50.0f), glm::vec3(0.0f, -.5f, 0.0f), glm::identity<glm::quat>(), BodyMotionType::Static);
+    physics->addBody(entity3->body, false);
 
     renderer->stage(scene);
 
@@ -250,6 +263,8 @@ int main(int argc, char* args[]) {
         }
 
         scene->update(deltaTime);
+        physics->process(scene, deltaTime);
+        // scene->update(deltaTime);
 
         renderer->draw(scene, camera);
 
