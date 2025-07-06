@@ -62,7 +62,8 @@ struct Material {
     float emissiveStrength = 1.0f;
     std::shared_ptr<Image> albedoMap;
     std::shared_ptr<Image> normalMap;
-    std::shared_ptr<Image> metallicRoughnessMap;
+    std::shared_ptr<Image> metallicMap;
+    std::shared_ptr<Image> roughnessMap;
     std::shared_ptr<Image> occlusionMap;
     std::shared_ptr<Image> emissiveMap;
     std::shared_ptr<Image> displacementMap;

@@ -146,7 +146,7 @@ void Scene::addMeshToNode(std::shared_ptr<Node> node, std::shared_ptr<Mesh> mesh
     // mesh->vertices.clear();
     // mesh->indices.clear();
     node->meshGroup->meshes.push_back(mesh);
-    if (mesh->material) {
+    if (mesh->material) { // TODO: check if material & images are already in the scene
         materials.push_back(mesh->material);
         if (mesh->material->albedoMap) {
             images.push_back(mesh->material->albedoMap);
@@ -154,8 +154,11 @@ void Scene::addMeshToNode(std::shared_ptr<Node> node, std::shared_ptr<Mesh> mesh
         if (mesh->material->normalMap) {
             images.push_back(mesh->material->normalMap);
         }
-        if (mesh->material->metallicRoughnessMap) {
-            images.push_back(mesh->material->metallicRoughnessMap);
+        if (mesh->material->metallicMap) {
+            images.push_back(mesh->material->metallicMap);
+        }
+        if (mesh->material->roughnessMap) {
+            images.push_back(mesh->material->roughnessMap);
         }
         if (mesh->material->occlusionMap) {
             images.push_back(mesh->material->occlusionMap);

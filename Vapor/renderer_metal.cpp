@@ -617,20 +617,24 @@ auto Renderer_Metal::draw(std::shared_ptr<Scene> scene, Camera& camera) -> void 
             1
         );
         renderEncoder->setFragmentTexture(
-            getTexture(material->metallicRoughnessMap ? material->metallicRoughnessMap->texture : defaultORMTexture).get(),
+            getTexture(material->metallicMap ? material->metallicMap->texture : defaultORMTexture).get(),
             2
         );
         renderEncoder->setFragmentTexture(
-            getTexture(material->occlusionMap ? material->occlusionMap->texture : defaultORMTexture).get(),
+            getTexture(material->roughnessMap ? material->roughnessMap->texture : defaultORMTexture).get(),
             3
         );
         renderEncoder->setFragmentTexture(
-            getTexture(material->emissiveMap ? material->emissiveMap->texture : defaultEmissiveTexture).get(),
+            getTexture(material->occlusionMap ? material->occlusionMap->texture : defaultORMTexture).get(),
             4
+        );
+        renderEncoder->setFragmentTexture(
+            getTexture(material->emissiveMap ? material->emissiveMap->texture : defaultEmissiveTexture).get(),
+            5
         );
         // renderEncoder->setFragmentTexture(
         //     getTexture(material->displacementMap ? material->displacementMap->texture : defaultDisplacementTexture).get(),
-        //     5
+        //     6
         // );
         renderEncoder->setFragmentTexture(
             shadowRT.get(),
@@ -722,9 +726,13 @@ auto Renderer_Metal::draw(std::shared_ptr<Scene> scene, Camera& camera) -> void 
                         ImGui::Text("Normal Map");
                         ImGui::Image((ImTextureID)(intptr_t)getTexture(m->normalMap->texture).get(), ImVec2(64, 64));
                     }
-                    if (m->metallicRoughnessMap) {
-                        ImGui::Text("Metallic Roughness Map");
-                        ImGui::Image((ImTextureID)(intptr_t)getTexture(m->metallicRoughnessMap->texture).get(), ImVec2(64, 64));
+                    if (m->metallicMap) {
+                        ImGui::Text("Metallic Map");
+                        ImGui::Image((ImTextureID)(intptr_t)getTexture(m->metallicMap->texture).get(), ImVec2(64, 64));
+                    }
+                    if (m->roughnessMap) {
+                        ImGui::Text("Roughness Map");
+                        ImGui::Image((ImTextureID)(intptr_t)getTexture(m->roughnessMap->texture).get(), ImVec2(64, 64));
                     }
                     if (m->occlusionMap) {
                         ImGui::Text("Occlusion Map");

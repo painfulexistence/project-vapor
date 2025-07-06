@@ -88,18 +88,6 @@ int main(int argc, char* args[]) {
     auto physics = std::make_unique<Physics3D>();
     physics->init();
 
-    // auto scene = std::make_shared<Scene>();
-    // auto entity = scene->CreateNode("Mesh 1");
-    // auto mesh = MeshBuilder::buildCube(1.0f);
-    // mesh->material = std::make_shared<Material>(Material {
-    //     .albedoMap = AssetManager::loadImage(std::string("assets/textures/medieval_blocks_diff.png")),
-    //     .normalMap = AssetManager::loadImage(std::string("assets/textures/medieval_blocks_norm_dx.png")),
-    //     .metallicRoughnessMap = AssetManager::loadImage(std::string("assets/textures/medieval_blocks_rough.png")),
-    //     .occlusionMap = AssetManager::loadImage(std::string("assets/textures/medieval_blocks_ao.png")),
-    //     .displacementMap = AssetManager::loadImage(std::string("assets/textures/medieval_blocks_disp.png"))
-    // });
-    // scene->AddMeshToNode(entity, mesh);
-    // scene->AddMeshToNode(entity, AssetManager::loadOBJ(std::string("assets/models/Sibenik/sibenik.obj"), std::string("assets/models/Sibenik/")));
     auto scene = AssetManager::loadGLTFOptimized(std::string("assets/models/Sponza/Sponza.gltf"));
     scene->directionalLights.push_back({
         .direction = glm::vec3(0.5, -1.0, 0.0),
@@ -115,11 +103,9 @@ int main(int argc, char* args[]) {
         });
     }
     auto material = std::make_shared<Material>(Material {
-        .albedoMap = AssetManager::loadImage(std::string("assets/textures/medieval_blocks_diff.jpg")),
-        .normalMap = AssetManager::loadImage(std::string("assets/textures/medieval_blocks_norm_dx.jpg")),
-        .metallicRoughnessMap = AssetManager::loadImage(std::string("assets/textures/medieval_blocks_rough.jpg")),
-        .occlusionMap = AssetManager::loadImage(std::string("assets/textures/medieval_blocks_ao.jpg")),
-        .displacementMap = AssetManager::loadImage(std::string("assets/textures/medieval_blocks_disp.jpg"))
+        .albedoMap = AssetManager::loadImage(std::string("assets/textures/american_walnut_albedo.png")),
+        .normalMap = AssetManager::loadImage(std::string("assets/textures/american_walnut_normal.png")),
+        .roughnessMap = AssetManager::loadImage(std::string("assets/textures/american_walnut_roughness.png")),
     });
     auto entity1 = scene->createNode("Cube 1");
     scene->addMeshToNode(entity1, MeshBuilder::buildCube(1.0f, material));
@@ -135,6 +121,8 @@ int main(int argc, char* args[]) {
     entity3->setPosition(glm::vec3(0.0f, -0.5f, 0.0f));
     entity3->body = physics->createBoxBody(glm::vec3(50.0f, .5f, 50.0f), glm::vec3(0.0f, -.5f, 0.0f), glm::identity<glm::quat>(), BodyMotionType::Static);
     physics->addBody(entity3->body, false);
+    // auto entity4 = scene->createNode("Obj Model");
+    // scene->addMeshToNode(entity4, AssetManager::loadOBJ(std::string("assets/models/Sibenik/sibenik.obj"), std::string("assets/models/Sibenik/")));
 
     renderer->stage(scene);
 

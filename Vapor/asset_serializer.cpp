@@ -207,6 +207,15 @@ void AssetSerializer::serializeMaterial(cereal::BinaryOutputArchive& archive, co
     archive(material->roughnessFactor);
     archive(material->occlusionStrength);
     archive(material->emissiveFactor);
+    archive(material->emissiveStrength);
+    archive(material->subsurface);
+    archive(material->specular);
+    archive(material->specularTint);
+    archive(material->anisotropic);
+    archive(material->sheen);
+    archive(material->sheenTint);
+    archive(material->clearcoat);
+    archive(material->clearcoatGloss);
 
     auto serializeImageID = [&](const std::shared_ptr<Image>& image) {
         if (!image) {
@@ -223,7 +232,8 @@ void AssetSerializer::serializeMaterial(cereal::BinaryOutputArchive& archive, co
 
     serializeImageID(material->albedoMap);
     serializeImageID(material->normalMap);
-    serializeImageID(material->metallicRoughnessMap);
+    serializeImageID(material->metallicMap);
+    serializeImageID(material->roughnessMap);
     serializeImageID(material->occlusionMap);
     serializeImageID(material->emissiveMap);
     // serializeImageID(material->displacementMap);
@@ -251,6 +261,15 @@ std::shared_ptr<Material> AssetSerializer::deserializeMaterial(cereal::BinaryInp
     archive(material->roughnessFactor);
     archive(material->occlusionStrength);
     archive(material->emissiveFactor);
+    archive(material->emissiveStrength);
+    archive(material->subsurface);
+    archive(material->specular);
+    archive(material->specularTint);
+    archive(material->anisotropic);
+    archive(material->sheen);
+    archive(material->sheenTint);
+    archive(material->clearcoat);
+    archive(material->clearcoatGloss);
 
     auto deserializeImageID = [&]() -> std::shared_ptr<Image> {
         Uint32 imageID;
@@ -267,7 +286,8 @@ std::shared_ptr<Material> AssetSerializer::deserializeMaterial(cereal::BinaryInp
 
     material->albedoMap = deserializeImageID();
     material->normalMap = deserializeImageID();
-    material->metallicRoughnessMap = deserializeImageID();
+    material->metallicMap = deserializeImageID();
+    material->roughnessMap = deserializeImageID();
     material->occlusionMap = deserializeImageID();
     material->emissiveMap = deserializeImageID();
     // material->displacementMap = deserializeImageID();

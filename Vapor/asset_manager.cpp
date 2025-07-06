@@ -87,7 +87,10 @@ std::shared_ptr<Mesh> AssetManager::loadOBJ(const std::string& filename, const s
             material->normalMap = AssetManager::loadImage(mtl_basedir + mat.bump_texname);
         }
         if (!mat.metallic_texname.empty()) {
-            material->metallicRoughnessMap = AssetManager::loadImage(mtl_basedir + mat.metallic_texname);
+            material->metallicMap = AssetManager::loadImage(mtl_basedir + mat.metallic_texname);
+        }
+        if (!mat.roughness_texname.empty()) {
+            material->roughnessMap = AssetManager::loadImage(mtl_basedir + mat.roughness_texname);
         }
         if (!mat.ambient_texname.empty()) {
             // material->occlusionMap = AssetManager::loadImage(mtl_basedir + mat.ambient_texname);
@@ -293,7 +296,8 @@ std::shared_ptr<Scene> AssetManager::loadGLTF(const std::string& filename) {
         if (mat.pbrMetallicRoughness.metallicRoughnessTexture.index >= 0) {
             const auto& texture = model.textures[mat.pbrMetallicRoughness.metallicRoughnessTexture.index];
             if (texture.source >= 0) {
-                material->metallicRoughnessMap = images[texture.source];
+                material->metallicMap = images[texture.source];
+                material->roughnessMap = images[texture.source];
                 // material->uvs["metallicRoughness"] = mat.pbrMetallicRoughness.metallicRoughnessTexture.texCoord;
                 // material->samplers["metallicRoughness"] = texture.sampler;
             }

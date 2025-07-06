@@ -13,9 +13,10 @@ struct RasterizerData {
 vertex RasterizerData vertexMain(
     uint vertexID [[vertex_id]],
     constant CameraData& camera [[buffer(0)]],
-    constant InstanceData* instances [[buffer(1)]],
-    device const VertexData* in [[buffer(2)]],
-    constant uint& instanceID [[buffer(3)]]
+    constant MaterialData* materials [[buffer(1)]],
+    constant InstanceData* instances [[buffer(2)]],
+    device const VertexData* in [[buffer(3)]],
+    constant uint& instanceID [[buffer(4)]]
 ) {
     RasterizerData vert;
     uint actualVertexID = instances[instanceID].vertexOffset + vertexID;
@@ -39,9 +40,10 @@ fragment float4 fragmentMain(
     RasterizerData in [[stage_in]],
     texture2d<float, access::sample> texAlbedo [[texture(0)]],
     texture2d<float, access::sample> texNormal [[texture(1)]],
-    texture2d<float, access::sample> texMetallicRoughness [[texture(2)]],
-    texture2d<float, access::sample> texOcclusion [[texture(3)]],
-    texture2d<float, access::sample> texEmissive [[texture(4)]],
+    texture2d<float, access::sample> texMetallic [[texture(2)]],
+    texture2d<float, access::sample> texRoughness [[texture(3)]],
+    texture2d<float, access::sample> texOcclusion [[texture(4)]],
+    texture2d<float, access::sample> texEmissive [[texture(5)]],
     texture2d<float, access::sample> texShadow [[texture(7)]],
     const device DirLight* directionalLights [[buffer(0)]],
     const device PointLight* pointLights [[buffer(1)]],
