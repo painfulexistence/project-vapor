@@ -9,6 +9,7 @@ struct RasterizerData {
     float4 worldPosition;
     float4 worldNormal;
     float4 worldTangent;
+    MaterialData material;
 };
 
 struct Surface {
@@ -141,9 +142,10 @@ float3 CalculatePointLight(PointLight light, float3 norm, float3 tangent, float3
 vertex RasterizerData vertexMain(
     uint vertexID [[vertex_id]],
     constant CameraData& camera [[buffer(0)]],
-    constant InstanceData* instances [[buffer(1)]],
-    device const VertexData* in [[buffer(2)]],
-    constant uint& instanceID [[buffer(3)]]
+    constant MaterialData* materials [[buffer(1)]],
+    constant InstanceData* instances [[buffer(2)]],
+    device const VertexData* in [[buffer(3)]],
+    constant uint& instanceID [[buffer(4)]]
 ) {
     RasterizerData vert;
     uint actualVertexID = instances[instanceID].vertexOffset + vertexID;
@@ -159,6 +161,7 @@ vertex RasterizerData vertexMain(
     vert.worldPosition = model * float4(in[actualVertexID].position, 1.0);
     vert.position = camera.proj * camera.view * vert.worldPosition;
     vert.uv = in[actualVertexID].uv;
+    vert.material = materials[instances[instanceID].materialID];
     return vert;
 }
 
@@ -180,25 +183,26 @@ fragment float4 fragmentMain(
 ) {
     constexpr sampler s(address::repeat, filter::linear, mip_filter::linear);
 
+    MaterialData material = in.material;
     float4 baseColor = texAlbedo.sample(s, in.uv);
-    if (baseColor.a < 0.5) {
+    if (baseColor.a * material.baseColorFactor.a < 0.5) {
         discard_fragment();
     }
     Surface surf;
-    surf.color = pow(baseColor.rgb, float3(GAMMA));
-    surf.ao = texOcclusion.sample(s, in.uv).r;
+    surf.color = srgbToLinear(baseColor.rgb * material.baseColorFactor.rgb);
+    surf.ao = texOcclusion.sample(s, in.uv).r * material.occlusionStrength;
     float2 roughnessMetallic = texMetallicRoughness.sample(s, in.uv).gb;
-    surf.roughness = roughnessMetallic.x;
-    surf.metallic = roughnessMetallic.y;
-    surf.emission = texEmissive.sample(s, in.uv).rgb;
-    surf.subsurface = 0.0;
-    surf.specular = 0.5;
-    surf.specular_tint = 0.0;
-    surf.anisotropic = 0.0;
-    surf.sheen = 0.0;
-    surf.sheen_tint = 0.5;
-    surf.clearcoat = 0.0;
-    surf.clearcoat_gloss = 1.0;
+    surf.roughness = roughnessMetallic.x * material.roughnessFactor;
+    surf.metallic = roughnessMetallic.y * material.metallicFactor;
+    surf.emission = linearToSRGB(texEmissive.sample(s, in.uv).rgb * material.emissiveFactor) * material.emissiveStrength;
+    surf.subsurface = material.subsurface;
+    surf.specular = material.specular;
+    surf.specular_tint = material.specularTint;
+    surf.anisotropic = material.anisotropic;
+    surf.sheen = material.sheen;
+    surf.sheen_tint = material.sheenTint;
+    surf.clearcoat = material.clearcoat;
+    surf.clearcoat_gloss = material.clearcoatGloss;
 
     float3 N = normalize(float3(in.worldNormal));
     float3 T = normalize(float3(in.worldTangent));
@@ -270,6 +274,8 @@ fragment float4 fragmentMain(
     }
 
     result += float3(0.2) * surf.ao * surf.color;
+
+    result += surf.emission;
 
     return float4(result, 1.0);
 }

@@ -76,6 +76,7 @@ private:
     NS::SharedPtr<MTL::Buffer> testStorageBuffer;
     NS::SharedPtr<MTL::Buffer> directionalLightBuffer;
     NS::SharedPtr<MTL::Buffer> pointLightBuffer;
+    NS::SharedPtr<MTL::Buffer> materialDataBuffer;
     std::vector<NS::SharedPtr<MTL::Buffer>> clusterBuffers;
     std::vector<NS::SharedPtr<MTL::Buffer>> accelInstanceBuffers;
     std::vector<NS::SharedPtr<MTL::Buffer>> TLASScratchBuffers;

@@ -53,19 +53,47 @@ struct Material {
     AlphaMode alphaMode;
     float alphaCutoff;
     bool doubleSided;
-    glm::vec4 baseColorFactor;
-    float normalScale;
-    float metallicFactor;
-    float roughnessFactor;
-    float occlusionStrength;
-    glm::vec3 emissiveFactor;
+    glm::vec4 baseColorFactor = glm::vec4(1.0f);
+    float normalScale = 1.0f;
+    float metallicFactor = 1.0f;
+    float roughnessFactor = 1.0f;
+    float occlusionStrength = 1.0f;
+    glm::vec3 emissiveFactor = glm::vec3(0.0f);
+    float emissiveStrength = 1.0f;
     std::shared_ptr<Image> albedoMap;
     std::shared_ptr<Image> normalMap;
     std::shared_ptr<Image> metallicRoughnessMap;
     std::shared_ptr<Image> occlusionMap;
     std::shared_ptr<Image> emissiveMap;
     std::shared_ptr<Image> displacementMap;
+    float subsurface = 0.0f;
+    float specular = 0.5f;
+    float specularTint = 0.0f;
+    float anisotropic = 0.0f;
+    float sheen = 0.0f;
+    float sheenTint = 0.5f;
+    float clearcoat = 0.0f;
+    float clearcoatGloss = 1.0f;
     PipelineHandle pipeline;
+};
+
+struct alignas(16) MaterialData {
+    glm::vec4 baseColorFactor;
+    float normalScale;
+    float metallicFactor;
+    float roughnessFactor;
+    float occlusionStrength;
+    glm::vec3 emissiveFactor;
+    float _pad1;
+    float emissiveStrength;
+    float subsurface;
+    float specular;
+    float specularTint;
+    float anisotropic;
+    float sheen;
+    float sheenTint;
+    float clearcoat;
+    float clearcoatGloss;
 };
 
 struct alignas(16) DirectionalLight { // Note that alignas(16) is not enough to ensure 16-byte alignment

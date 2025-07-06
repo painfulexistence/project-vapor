@@ -9,14 +9,16 @@ struct RasterizerData {
     float4 worldPosition;
     float4 worldNormal;
     float4 worldTangent;
+    MaterialData material;
 };
 
 vertex RasterizerData vertexMain(
     uint vertexID [[vertex_id]],
     constant CameraData& camera [[buffer(0)]],
-    constant InstanceData* instances [[buffer(1)]],
-    device const VertexData* in [[buffer(2)]],
-    constant uint& instanceID [[buffer(3)]]
+    constant MaterialData* materials [[buffer(1)]],
+    constant InstanceData* instances [[buffer(2)]],
+    device const VertexData* in [[buffer(3)]],
+    constant uint& instanceID [[buffer(4)]]
 ) {
     RasterizerData vert;
     uint actualVertexID = instances[instanceID].vertexOffset + vertexID;
@@ -29,6 +31,7 @@ vertex RasterizerData vertexMain(
     vert.worldPosition = model * float4(in[actualVertexID].position, 1.0);
     vert.position = camera.proj * camera.view * vert.worldPosition;
     vert.uv = float2(in[actualVertexID].uv);
+    vert.material = materials[instances[instanceID].materialID];
     return vert;
 }
 
@@ -39,8 +42,9 @@ fragment float4 fragmentMain(
 ) {
     constexpr sampler s(address::repeat, filter::linear, mip_filter::linear);
 
+    MaterialData material = in.material;
     float4 baseColor = texAlbedo.sample(s, in.uv);
-    if (baseColor.a < 0.5) {
+    if (baseColor.a * material.baseColorFactor.a < 0.5) {
         discard_fragment();
     }
 

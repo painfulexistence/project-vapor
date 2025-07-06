@@ -50,6 +50,24 @@ struct InstanceData {
     float4 boundingSphere; // x, y, z, radius
 };
 
+struct MaterialData {
+    float4 baseColorFactor;
+    float normalScale;
+    float metallicFactor;
+    float roughnessFactor;
+    float occlusionStrength;
+    float3 emissiveFactor;
+    float emissiveStrength;
+    float subsurface;
+    float specular;
+    float specularTint;
+    float anisotropic;
+    float sheen;
+    float sheenTint;
+    float clearcoat;
+    float clearcoatGloss;
+};
+
 struct DirLight {
     float3 direction;
     float3 color;
@@ -136,6 +154,15 @@ float3 linearToSRGB(float3 color) {
         color * 12.92,
         1.055 * pow(color, float3(1.0 / 2.4)) - 0.055,
         step(0.0031308, color)
+    );
+}
+
+float3 srgbToLinear(float3 color) {
+    // return pow(color, float3(GAMMA));
+    return mix(
+        color / 12.92,
+        pow((color + 0.055) / 1.055, float3(2.4)),
+        step(0.04045, color)
     );
 }
 

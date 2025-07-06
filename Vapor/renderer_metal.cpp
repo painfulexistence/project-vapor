@@ -206,7 +206,7 @@ auto Renderer_Metal::stage(std::shared_ptr<Scene> scene) -> void {
         img->texture = createTexture(img);
     }
 
-    // Pipelines
+    // Pipelines & materials
     if (scene->materials.empty()) {
         // TODO: create default material
     }
@@ -214,6 +214,7 @@ auto Renderer_Metal::stage(std::shared_ptr<Scene> scene) -> void {
         // pipelines[mat->pipeline] = createPipeline();
         materialIDs[mat] = nextMaterialID++;
     }
+    materialDataBuffer = NS::TransferPtr(device->newBuffer(scene->materials.size() * sizeof(MaterialData), MTL::ResourceStorageModeManaged));
 
     // Buffers
     scene->vertexBuffer = createVertexBuffer(scene->vertices);
@@ -317,6 +318,29 @@ auto Renderer_Metal::draw(std::shared_ptr<Scene> scene, Camera& camera) -> void 
         pointLights[i].radius = scene->pointLights[i].radius;
     }
     pointLightBuffer->didModifyRange(NS::Range::Make(0, pointLightBuffer->length()));
+
+    MaterialData* materialData = reinterpret_cast<MaterialData*>(materialDataBuffer->contents());
+    for (size_t i = 0; i < scene->materials.size(); ++i) {
+        const auto& mat = scene->materials[i];
+        materialData[i] = MaterialData {
+            .baseColorFactor = mat->baseColorFactor,
+            .normalScale = mat->normalScale,
+            .metallicFactor = mat->metallicFactor,
+            .roughnessFactor = mat->roughnessFactor,
+            .occlusionStrength = mat->occlusionStrength,
+            .emissiveFactor = mat->emissiveFactor,
+            .emissiveStrength = mat->emissiveStrength,
+            .subsurface = mat->subsurface,
+            .specular = mat->specular,
+            .specularTint = mat->specularTint,
+            .anisotropic = mat->anisotropic,
+            .sheen = mat->sheen,
+            .sheenTint = mat->sheenTint,
+            .clearcoat = mat->clearcoat,
+            .clearcoatGloss = mat->clearcoatGloss,
+        };
+    }
+    materialDataBuffer->didModifyRange(NS::Range::Make(0, materialDataBuffer->length()));
 
     auto drawableSize = swapchain->drawableSize();
     glm::vec2 screenSize = glm::vec2(drawableSize.width, drawableSize.height);
@@ -454,8 +478,9 @@ auto Renderer_Metal::draw(std::shared_ptr<Scene> scene, Camera& camera) -> void 
     prePassEncoder->setDepthStencilState(depthStencilState.get());
 
     prePassEncoder->setVertexBuffer(cameraDataBuffers[currentFrameInFlight].get(), 0, 0);
-    prePassEncoder->setVertexBuffer(instanceDataBuffers[currentFrameInFlight].get(), 0, 1);
-    prePassEncoder->setVertexBuffer(getBuffer(scene->vertexBuffer).get(), 0, 2);
+    prePassEncoder->setVertexBuffer(materialDataBuffer.get(), 0, 1);
+    prePassEncoder->setVertexBuffer(instanceDataBuffers[currentFrameInFlight].get(), 0, 2);
+    prePassEncoder->setVertexBuffer(getBuffer(scene->vertexBuffer).get(), 0, 3);
     for (const auto& [material, meshes] : instanceBatches) {
         prePassEncoder->setFragmentTexture(
             getTexture(material->albedoMap ? material->albedoMap->texture : defaultAlbedoTexture).get(),
@@ -470,7 +495,7 @@ auto Renderer_Metal::draw(std::shared_ptr<Scene> scene, Camera& camera) -> void 
                 continue;
             }
             // prePassEncoder->setVertexBuffer(getBuffer(mesh->vbos[0]).get(), 0, 2);
-            prePassEncoder->setVertexBytes(&mesh->instanceID, sizeof(Uint32), 3);
+            prePassEncoder->setVertexBytes(&mesh->instanceID, sizeof(Uint32), 4);
             prePassEncoder->drawIndexedPrimitives(
                 MTL::PrimitiveType::PrimitiveTypeTriangle,
                 mesh->indexCount,// mesh->indices.size(),
@@ -571,8 +596,9 @@ auto Renderer_Metal::draw(std::shared_ptr<Scene> scene, Camera& camera) -> void 
     currentInstanceCount = 0;
     culledInstanceCount = 0;
     renderEncoder->setVertexBuffer(cameraDataBuffers[currentFrameInFlight].get(), 0, 0);
-    renderEncoder->setVertexBuffer(instanceDataBuffers[currentFrameInFlight].get(), 0, 1);
-    renderEncoder->setVertexBuffer(getBuffer(scene->vertexBuffer).get(), 0, 2);
+    renderEncoder->setVertexBuffer(materialDataBuffer.get(), 0, 1);
+    renderEncoder->setVertexBuffer(instanceDataBuffers[currentFrameInFlight].get(), 0, 2);
+    renderEncoder->setVertexBuffer(getBuffer(scene->vertexBuffer).get(), 0, 3);
     renderEncoder->setFragmentBuffer(directionalLightBuffer.get(), 0, 0);
     renderEncoder->setFragmentBuffer(pointLightBuffer.get(), 0, 1);
     renderEncoder->setFragmentBuffer(clusterBuffers[currentFrameInFlight].get(), 0, 2);
@@ -617,7 +643,7 @@ auto Renderer_Metal::draw(std::shared_ptr<Scene> scene, Camera& camera) -> void 
             }
             currentInstanceCount++;
             // renderEncoder->setVertexBuffer(getBuffer(mesh->vbos[0]).get(), 0, 2);
-            renderEncoder->setVertexBytes(&mesh->instanceID, sizeof(Uint32), 3);
+            renderEncoder->setVertexBytes(&mesh->instanceID, sizeof(Uint32), 4);
             renderEncoder->drawIndexedPrimitives(
                 MTL::PrimitiveType::PrimitiveTypeTriangle,
                 mesh->indexCount,// mesh->indices.size(),
@@ -689,20 +715,40 @@ auto Renderer_Metal::draw(std::shared_ptr<Scene> scene, Camera& camera) -> void 
                 if (ImGui::TreeNode(fmt:: format("Mat #{}", m->name).c_str())) {
                     // TODO: show error image if texture is not uploaded
                     if (m->albedoMap) {
+                        ImGui::Text("Albedo Map");
                         ImGui::Image((ImTextureID)(intptr_t)getTexture(m->albedoMap->texture).get(), ImVec2(64, 64));
                     }
                     if (m->normalMap) {
+                        ImGui::Text("Normal Map");
                         ImGui::Image((ImTextureID)(intptr_t)getTexture(m->normalMap->texture).get(), ImVec2(64, 64));
                     }
                     if (m->metallicRoughnessMap) {
+                        ImGui::Text("Metallic Roughness Map");
                         ImGui::Image((ImTextureID)(intptr_t)getTexture(m->metallicRoughnessMap->texture).get(), ImVec2(64, 64));
                     }
                     if (m->occlusionMap) {
+                        ImGui::Text("Occlusion Map");
                         ImGui::Image((ImTextureID)(intptr_t)getTexture(m->occlusionMap->texture).get(), ImVec2(64, 64));
                     }
                     if (m->emissiveMap) {
+                        ImGui::Text("Emissive Map");
                         ImGui::Image((ImTextureID)(intptr_t)getTexture(m->emissiveMap->texture).get(), ImVec2(64, 64));
                     }
+                    ImGui::ColorEdit4("Base Color Factor", (float*)&m->baseColorFactor);
+                    ImGui::DragFloat("Normal Scale", &m->normalScale, .05f, 0.0f, 5.0f);
+                    ImGui::DragFloat("Roughness Factor", &m->roughnessFactor, .05f, 0.0f, 5.0f);
+                    ImGui::DragFloat("Metallic Factor", &m->metallicFactor, .05f, 0.0f, 5.0f);
+                    ImGui::DragFloat("Occlusion Strength", &m->occlusionStrength, .05f, 0.0f, 5.0f);
+                    ImGui::ColorEdit3("Emissive Color Factor", (float*)&m->emissiveFactor);
+                    ImGui::DragFloat("Emissive Strength", &m->emissiveStrength, .05f, 0.0f, 5.0f);
+                    ImGui::DragFloat("Subsurface", &m->subsurface, .01f, 0.0f, 1.0f);
+                    ImGui::DragFloat("Specular", &m->specular, .01f, 0.0f, 1.0f);
+                    ImGui::DragFloat("Specular Tint", &m->specularTint, .01f, 0.0f, 1.0f);
+                    ImGui::DragFloat("Anisotropic", &m->anisotropic, .01f, 0.0f, 1.0f);
+                    ImGui::DragFloat("Sheen", &m->sheen, .01f, 0.0f, 1.0f);
+                    ImGui::DragFloat("Sheen Tint", &m->sheenTint, .01f, 0.0f, 1.0f);
+                    ImGui::DragFloat("Clearcoat", &m->clearcoat, .01f, 0.0f, 1.0f);
+                    ImGui::DragFloat("Clearcoat Gloss", &m->clearcoatGloss, .01f, 0.0f, 1.0f);
                     ImGui::TreePop();
                 }
                 ImGui::PopID();
