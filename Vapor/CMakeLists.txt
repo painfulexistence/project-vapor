@@ -23,9 +23,10 @@ add_subdirectory(MikkTSpace)
 set(SOURCES
     main.cpp
     helper.cpp
+    renderer.cpp
     renderer_metal.cpp
     renderer_vulkan.cpp
-    scene_renderer.cpp
+    rhi_vulkan.cpp
     graphics.cpp
 	asset_manager.cpp
 	scene.cpp

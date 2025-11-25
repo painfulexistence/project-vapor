@@ -1,81 +1,147 @@
 #pragma once
-#include <SDL3/SDL_video.h>
-#include <memory>
-#include "graphics.hpp"
-#include "scene.hpp"
+#include "rhi.hpp"
+#include "render_data.hpp"
 #include "camera.hpp"
+#include <vector>
+#include <memory>
 
-enum class GraphicsBackend {
-    Metal,
-    Vulkan
-};
-
-enum class RenderPath {
-    Forward,
-    Deferred
-};
-
-enum class BufferUsage {
-    VERTEX,
-    INDEX,
-    UNIFORM,
-    STORAGE,
-    COPY_SRC,
-    COPY_DST
-};
-
-enum class RenderTargetUsage {
-    COLOR_MSAA,
-    COLOR,
-    DEPTH_MSAA,
-    DEPTH_STENCIL_MSAA,
-    DEPTH,
-    DEPTH_STENCIL
-};
+// ============================================================================
+// Renderer - High-level renderer that uses RHI
+//
+// Responsibilities:
+// - Manage rendering resources (meshes, materials, textures)
+// - Collect drawables each frame
+// - Perform culling and sorting
+// - Execute draw calls via RHI
+// ============================================================================
 
 class Renderer {
 public:
-    virtual void init(SDL_Window* window) = 0;
+    Renderer() = default;
+    ~Renderer() = default;
 
-    virtual void deinit() = 0;
+    // ========================================================================
+    // Initialization
+    // ========================================================================
 
-    virtual void stage(std::shared_ptr<Scene> scene) = 0;
+    void initialize(RHI* rhi);
+    void shutdown();
 
-    virtual void draw(std::shared_ptr<Scene> scene, Camera& camera) = 0;
+    // ========================================================================
+    // Resource Registration (called during scene loading/staging)
+    // ========================================================================
 
-    virtual void setRenderPath(RenderPath path) = 0;
-    virtual RenderPath getRenderPath() const = 0;
+    // Register a mesh and return its ID
+    MeshId registerMesh(const std::vector<VertexData>& vertices,
+                        const std::vector<Uint32>& indices);
 
-protected:
-    const Uint32 MAX_FRAMES_IN_FLIGHT = 3;
-    const Uint32 MSAA_SAMPLE_COUNT = 4;
+    // Register a material and return its ID
+    MaterialId registerMaterial(const MaterialDataInput& materialData);
+
+    // Register a texture and return its ID
+    TextureId registerTexture(const std::shared_ptr<Image>& image);
+
+    // ========================================================================
+    // Frame Rendering
+    // ========================================================================
+
+    // Begin a frame with camera data
+    void beginFrame(const CameraRenderData& camera);
+
+    // Submit a drawable to be rendered this frame
+    void submitDrawable(const Drawable& drawable);
+
+    // Submit lights
+    void submitDirectionalLight(const DirectionalLightData& light);
+    void submitPointLight(const PointLightData& light);
+
+    // Execute rendering (culling, sorting, draw calls)
+    void render();
+
+    // End the frame
+    void endFrame();
+
+    // ========================================================================
+    // Getters
+    // ========================================================================
+
+    RHI* getRHI() const { return rhi; }
+
+private:
+    // ========================================================================
+    // Internal Rendering Steps
+    // ========================================================================
+
+    void performCulling();
+    void sortDrawables();
+    void updateBuffers();
+    void executeDrawCalls();
+    void createDefaultResources();
+    void createRenderPipeline();
+
+    // ========================================================================
+    // Internal Helpers
+    // ========================================================================
+
+    Frustum extractFrustum(const glm::mat4& viewProj);
+    TextureId getOrCreateTexture(const std::shared_ptr<Image>& image);
+    void bindMaterial(MaterialId materialId);
+
+    // ========================================================================
+    // RHI Reference
+    // ========================================================================
+
+    RHI* rhi = nullptr;
+
+    // ========================================================================
+    // Registered Resources
+    // ========================================================================
+
+    std::vector<RenderMesh> meshes;
+    std::vector<RenderMaterial> materials;
+    std::vector<RenderTexture> textures;
+
+    // Texture cache (path -> TextureId)
+    std::unordered_map<std::string, TextureId> textureCache;
+
+    // ========================================================================
+    // Per-Frame Data
+    // ========================================================================
+
+    CameraRenderData currentCamera;
+    std::vector<Drawable> frameDrawables;
+    std::vector<Uint32> visibleDrawables;  // Indices into frameDrawables
+    std::vector<DirectionalLightData> directionalLights;
+    std::vector<PointLightData> pointLights;
+
+    // ========================================================================
+    // GPU Resources
+    // ========================================================================
+
+    // Uniform buffers
+    BufferHandle cameraUniformBuffer;
+    BufferHandle materialUniformBuffer;
+    BufferHandle directionalLightBuffer;
+    BufferHandle pointLightBuffer;
+
+    // Default textures
+    TextureId defaultWhiteTexture = INVALID_TEXTURE_ID;
+    TextureId defaultNormalTexture = INVALID_TEXTURE_ID;
+    TextureId defaultBlackTexture = INVALID_TEXTURE_ID;
+
+    // Default sampler
+    SamplerHandle defaultSampler;
+
+    // Pipeline
+    PipelineHandle mainPipeline;
+    ShaderHandle vertexShader;
+    ShaderHandle fragmentShader;
+
+    // ========================================================================
+    // Configuration
+    // ========================================================================
+
     const Uint32 MAX_INSTANCES = 1000;
-    glm::vec4 clearColor = glm::vec4(0.0f, 0.5f, 1.0f, 1.0f);
-    double clearDepth = 1.0;
-    Uint32 clusterGridSizeX = 16;
-    Uint32 clusterGridSizeY = 16;
-    Uint32 clusterGridSizeZ = 24;
-    Uint32 numClusters = clusterGridSizeX * clusterGridSizeY * clusterGridSizeZ;
-    Uint32 currentFrameInFlight = 0;
-    Uint32 frameNumber = 0;
-    bool isInitialized = false;
-
-    int calculateMipmapLevelCount(Uint32 width, Uint32 height) const {
-        return static_cast<int>(std::floor(std::log2(std::max(width, height))) + 1);
-    }
-
+    Uint32 maxDirectionalLights = 4;
+    Uint32 maxPointLights = 256;
 };
-
-std::unique_ptr<Renderer> createRendererMetal();
-std::unique_ptr<Renderer> createRendererVulkan();
-
-inline std::unique_ptr<Renderer> createRenderer(GraphicsBackend backend) {
-    switch (backend) {
-    case GraphicsBackend::Metal:
-        return createRendererMetal();
-    case GraphicsBackend::Vulkan:
-        return createRendererVulkan();
-    default:
-        return nullptr;
-    }
-}

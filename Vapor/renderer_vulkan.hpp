@@ -1,5 +1,5 @@
 #pragma once
-#include "renderer.hpp"
+#include "renderer_legacy.hpp"
 
 #include <SDL3/SDL_video.h>
 #include <SDL3/SDL_stdinc.h>

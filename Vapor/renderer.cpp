@@ -1,4 +1,4 @@
-#include "scene_renderer.hpp"
+#include "renderer.hpp"
 #include <algorithm>
 #include <cstring>
 
@@ -6,7 +6,7 @@
 // Initialization
 // ============================================================================
 
-void SceneRenderer::initialize(RHI* rhiPtr) {
+void Renderer::initialize(RHI* rhiPtr) {
     rhi = rhiPtr;
 
     // Create uniform buffers
@@ -44,7 +44,7 @@ void SceneRenderer::initialize(RHI* rhiPtr) {
     pointLights.reserve(maxPointLights);
 }
 
-void SceneRenderer::shutdown() {
+void Renderer::shutdown() {
     if (rhi) {
         // Destroy buffers
         if (cameraUniformBuffer.isValid()) {
@@ -119,7 +119,7 @@ void SceneRenderer::shutdown() {
 // Resource Registration
 // ============================================================================
 
-MeshId SceneRenderer::registerMesh(const std::vector<VertexData>& vertices,
+MeshId Renderer::registerMesh(const std::vector<VertexData>& vertices,
                                     const std::vector<Uint32>& indices) {
     RenderMesh mesh;
 
@@ -147,7 +147,7 @@ MeshId SceneRenderer::registerMesh(const std::vector<VertexData>& vertices,
     return id;
 }
 
-MaterialId SceneRenderer::registerMaterial(const MaterialDataInput& materialData) {
+MaterialId Renderer::registerMaterial(const MaterialDataInput& materialData) {
     RenderMaterial material;
 
     // Copy material parameters
@@ -256,7 +256,7 @@ MaterialId SceneRenderer::registerMaterial(const MaterialDataInput& materialData
     return id;
 }
 
-TextureId SceneRenderer::registerTexture(const std::shared_ptr<Image>& image) {
+TextureId Renderer::registerTexture(const std::shared_ptr<Image>& image) {
     return getOrCreateTexture(image);
 }
 
@@ -264,7 +264,7 @@ TextureId SceneRenderer::registerTexture(const std::shared_ptr<Image>& image) {
 // Frame Rendering
 // ============================================================================
 
-void SceneRenderer::beginFrame(const CameraRenderData& camera) {
+void Renderer::beginFrame(const CameraRenderData& camera) {
     currentCamera = camera;
     frameDrawables.clear();
     visibleDrawables.clear();
@@ -272,30 +272,30 @@ void SceneRenderer::beginFrame(const CameraRenderData& camera) {
     pointLights.clear();
 }
 
-void SceneRenderer::submitDrawable(const Drawable& drawable) {
+void Renderer::submitDrawable(const Drawable& drawable) {
     frameDrawables.push_back(drawable);
 }
 
-void SceneRenderer::submitDirectionalLight(const DirectionalLightData& light) {
+void Renderer::submitDirectionalLight(const DirectionalLightData& light) {
     if (directionalLights.size() < maxDirectionalLights) {
         directionalLights.push_back(light);
     }
 }
 
-void SceneRenderer::submitPointLight(const PointLightData& light) {
+void Renderer::submitPointLight(const PointLightData& light) {
     if (pointLights.size() < maxPointLights) {
         pointLights.push_back(light);
     }
 }
 
-void SceneRenderer::render() {
+void Renderer::render() {
     performCulling();
     sortDrawables();
     updateBuffers();
     executeDrawCalls();
 }
 
-void SceneRenderer::endFrame() {
+void Renderer::endFrame() {
     // Nothing to do here for now
 }
 
@@ -303,7 +303,7 @@ void SceneRenderer::endFrame() {
 // Internal Rendering Steps
 // ============================================================================
 
-void SceneRenderer::performCulling() {
+void Renderer::performCulling() {
     Frustum frustum = extractFrustum(currentCamera.viewProj);
 
     for (Uint32 i = 0; i < frameDrawables.size(); ++i) {
@@ -314,7 +314,7 @@ void SceneRenderer::performCulling() {
     }
 }
 
-void SceneRenderer::sortDrawables() {
+void Renderer::sortDrawables() {
     // Sort by material to reduce state changes
     std::sort(visibleDrawables.begin(), visibleDrawables.end(),
         [this](Uint32 a, Uint32 b) {
@@ -322,7 +322,7 @@ void SceneRenderer::sortDrawables() {
         });
 }
 
-void SceneRenderer::updateBuffers() {
+void Renderer::updateBuffers() {
     // Update camera uniform buffer
     rhi->updateBuffer(cameraUniformBuffer, &currentCamera, 0, sizeof(CameraRenderData));
 
@@ -339,13 +339,13 @@ void SceneRenderer::updateBuffers() {
     }
 }
 
-void SceneRenderer::executeDrawCalls() {
+void Renderer::executeDrawCalls() {
     // For now, this is a placeholder that will be implemented
     // once we have the RHI_Vulkan implementation
     // TODO: Implement actual rendering
 }
 
-void SceneRenderer::createDefaultResources() {
+void Renderer::createDefaultResources() {
     // Create default sampler
     SamplerDesc samplerDesc;
     samplerDesc.minFilter = FilterMode::Linear;
@@ -430,7 +430,7 @@ void SceneRenderer::createDefaultResources() {
 // Internal Helpers
 // ============================================================================
 
-Frustum SceneRenderer::extractFrustum(const glm::mat4& viewProj) {
+Frustum Renderer::extractFrustum(const glm::mat4& viewProj) {
     Frustum frustum;
 
     // Left
@@ -490,7 +490,7 @@ Frustum SceneRenderer::extractFrustum(const glm::mat4& viewProj) {
     return frustum;
 }
 
-TextureId SceneRenderer::getOrCreateTexture(const std::shared_ptr<Image>& image) {
+TextureId Renderer::getOrCreateTexture(const std::shared_ptr<Image>& image) {
     if (!image || image->uri.empty()) {
         return defaultWhiteTexture;
     }
@@ -527,7 +527,7 @@ TextureId SceneRenderer::getOrCreateTexture(const std::shared_ptr<Image>& image)
     return id;
 }
 
-void SceneRenderer::bindMaterial(MaterialId materialId) {
+void Renderer::bindMaterial(MaterialId materialId) {
     if (materialId >= materials.size()) {
         return;
     }
