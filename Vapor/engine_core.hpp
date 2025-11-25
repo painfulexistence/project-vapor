@@ -2,7 +2,7 @@
 #define ENGINE_CORE_HPP
 
 #include "task_scheduler.hpp"
-#include "async_asset_loader.hpp"
+#include "resource_manager.hpp"
 #include "jolt_enki_job_system.hpp"
 #include <memory>
 
@@ -29,8 +29,8 @@ public:
     // Get the task scheduler
     TaskScheduler& getTaskScheduler() { return *m_taskScheduler; }
 
-    // Get the async asset loader
-    AsyncAssetLoader& getAssetLoader() { return *m_assetLoader; }
+    // Get the resource manager
+    ResourceManager& getResourceManager() { return *m_resourceManager; }
 
     // Get the Jolt job system
     JoltEnkiJobSystem* getJoltJobSystem() { return m_joltJobSystem.get(); }
@@ -51,7 +51,7 @@ private:
     static EngineCore* s_instance;
 
     std::unique_ptr<TaskScheduler> m_taskScheduler;
-    std::unique_ptr<AsyncAssetLoader> m_assetLoader;
+    std::unique_ptr<ResourceManager> m_resourceManager;
     std::unique_ptr<JoltEnkiJobSystem> m_joltJobSystem;
 
     bool m_initialized{false};

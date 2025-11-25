@@ -44,8 +44,8 @@ void EngineCore::init(uint32_t numThreads) {
     m_taskScheduler = std::make_unique<TaskScheduler>();
     m_taskScheduler->init(m_numThreads);
 
-    // Initialize async asset loader
-    m_assetLoader = std::make_unique<AsyncAssetLoader>(*m_taskScheduler);
+    // Initialize resource manager
+    m_resourceManager = std::make_unique<ResourceManager>(*m_taskScheduler);
 
     // Initialize Jolt job system with enkiTS
     m_joltJobSystem = std::make_unique<JoltEnkiJobSystem>(*m_taskScheduler, 2048);
@@ -67,7 +67,7 @@ void EngineCore::shutdown() {
 
     // Cleanup subsystems in reverse order
     m_joltJobSystem.reset();
-    m_assetLoader.reset();
+    m_resourceManager.reset();
     m_taskScheduler->shutdown();
     m_taskScheduler.reset();
 

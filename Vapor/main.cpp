@@ -12,7 +12,6 @@
 #include "renderer.hpp"
 #include "graphics.hpp"
 #include "physics_3d.hpp"
-#include "asset_manager.hpp"
 #include "mesh_builder.hpp"
 #include "camera.hpp"
 #include "rng.hpp"
@@ -95,10 +94,23 @@ int main(int argc, char* args[]) {
     auto physics = std::make_unique<Physics3D>();
     physics->init(engineCore->getJoltJobSystem());
 
-    // Load scene asynchronously (with fallback to synchronous for now)
-    fmt::print("Loading scene...\n");
-    auto scene = AssetManager::loadGLTFOptimized(std::string("assets/models/Sponza/Sponza.gltf"));
-    fmt::print("Scene loaded\n");
+    // Get resource manager
+    auto& resourceManager = engineCore->getResourceManager();
+
+    // Load scene asynchronously
+    fmt::print("Loading scene asynchronously...\n");
+    auto sceneResource = resourceManager.loadScene(
+        std::string("assets/models/Sponza/Sponza.gltf"),
+        true,  // optimized
+        Vapor::LoadMode::Async,
+        [](std::shared_ptr<Scene> loadedScene) {
+            fmt::print("Scene loaded with {} nodes\n", loadedScene->nodes.size());
+        }
+    );
+
+    // Wait for scene to be ready (blocking for now, but async in background)
+    auto scene = sceneResource->get();
+    fmt::print("Scene ready for rendering\n");
     scene->directionalLights.push_back({
         .direction = glm::vec3(0.5, -1.0, 0.0),
         .color = glm::vec3(1.0, 1.0, 1.0),
@@ -112,11 +124,30 @@ int main(int argc, char* args[]) {
             .radius = 0.5f
         });
     }
+    // Load textures asynchronously
+    fmt::print("Loading textures...\n");
+    auto albedoResource = resourceManager.loadImage(
+        std::string("assets/textures/american_walnut_albedo.png"),
+        Vapor::LoadMode::Async
+    );
+    auto normalResource = resourceManager.loadImage(
+        std::string("assets/textures/american_walnut_normal.png"),
+        Vapor::LoadMode::Async
+    );
+    auto roughnessResource = resourceManager.loadImage(
+        std::string("assets/textures/american_walnut_roughness.png"),
+        Vapor::LoadMode::Async
+    );
+
+    // Wait for all textures to load
+    resourceManager.waitForAll();
+
     auto material = std::make_shared<Material>(Material {
-        .albedoMap = AssetManager::loadImage(std::string("assets/textures/american_walnut_albedo.png")),
-        .normalMap = AssetManager::loadImage(std::string("assets/textures/american_walnut_normal.png")),
-        .roughnessMap = AssetManager::loadImage(std::string("assets/textures/american_walnut_roughness.png")),
+        .albedoMap = albedoResource->get(),
+        .normalMap = normalResource->get(),
+        .roughnessMap = roughnessResource->get(),
     });
+    fmt::print("Textures loaded\n");
     auto entity1 = scene->createNode("Cube 1");
     scene->addMeshToNode(entity1, MeshBuilder::buildCube(1.0f, material));
     entity1->setPosition(glm::vec3(-2.0f, 10.5f, 0.0f));

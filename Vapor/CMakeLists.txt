@@ -33,7 +33,7 @@ set(SOURCES
 	asset_serializer.cpp
 	physics_3d.cpp
 	task_scheduler.cpp
-	async_asset_loader.cpp
+	resource_manager.cpp
 	jolt_enki_job_system.cpp
 	engine_core.cpp
     imgui/imgui.cpp
