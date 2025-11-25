@@ -25,6 +25,7 @@ set(SOURCES
     helper.cpp
     renderer_metal.cpp
     renderer_vulkan.cpp
+    scene_renderer.cpp
     graphics.cpp
 	asset_manager.cpp
 	scene.cpp

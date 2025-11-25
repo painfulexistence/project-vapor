@@ -151,13 +151,8 @@ public:
     std::vector<DirectionalLight> directionalLights;
     std::vector<PointLight> pointLights;
 
-    // GPU-driven rendering
-    std::vector<VertexData> vertices;
-    std::vector<Uint32> indices;
-    BufferHandle vertexBuffer;
-    BufferHandle indexBuffer;
-
-    bool isGeometryDirty = true;
+    // Note: GPU-driven rendering data has been moved to Renderer layer
+    // Scene no longer holds GPU resources directly
 
     Scene() = default;
     Scene(const std::string& name) : name(name) {};

@@ -45,7 +45,9 @@ struct Image {
     Uint32 height;
     Uint32 channelCount;
     std::vector<Uint8> byteArray;
-    TextureHandle texture;
+
+    // Note: TextureHandle moved to Renderer layer
+    // Image now only holds CPU-side image data
 };
 
 struct Material {
@@ -75,7 +77,12 @@ struct Material {
     float sheenTint = 0.5f;
     float clearcoat = 0.0f;
     float clearcoatGloss = 1.0f;
-    PipelineHandle pipeline;
+
+    // Renderer-assigned ID (assigned during registration)
+    Uint32 rendererMaterialId = UINT32_MAX;
+
+    // Note: Pipeline and texture handles moved to Renderer layer
+    // Material now only holds CPU-side material parameters
 };
 
 struct alignas(16) MaterialData {
@@ -214,17 +221,10 @@ struct Mesh {
     glm::vec3 localAABBMax;
     glm::vec3 worldAABBMin;
     glm::vec3 worldAABBMax;
-    bool isGeometryDirty = true;
 
-    // GPU-driven rendering
-    Uint32 vertexOffset = 0;
-    Uint32 indexOffset = 0;
-    Uint32 vertexCount = 0;
-    Uint32 indexCount = 0;
+    // Renderer-assigned ID (assigned during registration)
+    Uint32 rendererMeshId = UINT32_MAX;
 
-    // Runtime data
-    std::vector<BufferHandle> vbos;
-    BufferHandle ebo;
-    Uint32 instanceID = UINT32_MAX; // also used as blas index
-    Uint32 materialID = UINT32_MAX;
+    // Note: GPU resources moved to Renderer layer
+    // Mesh now only holds CPU-side geometry data
 };
