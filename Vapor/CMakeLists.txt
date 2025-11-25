@@ -16,6 +16,7 @@ find_package(Vulkan REQUIRED)
 find_path(TINYGLTF_INCLUDE_DIRS "tiny_gltf.h")
 find_package(cereal CONFIG REQUIRED)
 find_package(unofficial-joltphysics CONFIG REQUIRED)
+find_package(enkits CONFIG REQUIRED)
 
 add_subdirectory(metal)
 add_subdirectory(MikkTSpace)
@@ -31,6 +32,10 @@ set(SOURCES
 	camera.cpp
 	asset_serializer.cpp
 	physics_3d.cpp
+	task_scheduler.cpp
+	async_asset_loader.cpp
+	jolt_enki_job_system.cpp
+	engine_core.cpp
     imgui/imgui.cpp
     imgui/imgui_draw.cpp
     imgui/imgui_tables.cpp
@@ -44,7 +49,7 @@ set(SOURCES
 add_executable(main ${SOURCES})
 target_compile_features(main PRIVATE cxx_std_20)
 set_target_properties(main PROPERTIES CXX_EXTENSIONS OFF)
-target_link_libraries(main PRIVATE SDL3::SDL3 metal fmt::fmt glm::glm Vulkan::Vulkan taywee::args mikktspace cereal::cereal unofficial::joltphysics::Jolt)
+target_link_libraries(main PRIVATE SDL3::SDL3 metal fmt::fmt glm::glm Vulkan::Vulkan taywee::args mikktspace cereal::cereal unofficial::joltphysics::Jolt enkits::enkits)
 target_include_directories(main PRIVATE ${TINYGLTF_INCLUDE_DIRS} imgui)
 
 find_program(GLSL_VALIDATOR "glslangValidator" REQUIRED)

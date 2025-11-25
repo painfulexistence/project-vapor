@@ -16,6 +16,7 @@
 #include "mesh_builder.hpp"
 #include "camera.hpp"
 #include "rng.hpp"
+#include "engine_core.hpp"
 
 
 int main(int argc, char* args[]) {
@@ -82,13 +83,22 @@ int main(int argc, char* args[]) {
 
     RNG rng;
 
+    // Initialize engine core with enkiTS task scheduler
+    auto engineCore = std::make_unique<Vapor::EngineCore>();
+    engineCore->init(); // Auto-detects thread count
+    fmt::print("Engine core initialized\n");
+
     auto renderer = createRenderer(gfxBackend);
     renderer->init(window);
 
+    // Initialize physics with enkiTS job system
     auto physics = std::make_unique<Physics3D>();
-    physics->init();
+    physics->init(engineCore->getJoltJobSystem());
 
+    // Load scene asynchronously (with fallback to synchronous for now)
+    fmt::print("Loading scene...\n");
     auto scene = AssetManager::loadGLTFOptimized(std::string("assets/models/Sponza/Sponza.gltf"));
+    fmt::print("Scene loaded\n");
     scene->directionalLights.push_back({
         .direction = glm::vec3(0.5, -1.0, 0.0),
         .color = glm::vec3(1.0, 1.0, 1.0),
@@ -259,6 +269,9 @@ int main(int argc, char* args[]) {
             l.intensity = 3.0f + 2.0f * (0.5f + 0.5f * sin(time * 0.3f + i * 0.1f));
         }
 
+        // Update engine core (handles async task completion)
+        engineCore->update(deltaTime);
+
         scene->update(deltaTime);
         physics->process(scene, deltaTime);
         // scene->update(deltaTime);
@@ -267,7 +280,11 @@ int main(int argc, char* args[]) {
 
         frameCount++;
     }
+
+    // Shutdown subsystems
     renderer->deinit();
+    physics->deinit();
+    engineCore->shutdown();
 
     ImGui::DestroyContext();
 

@@ -1,4 +1,5 @@
 #include "physics_3d.hpp"
+#include "jolt_enki_job_system.hpp"
 #include <Jolt/Jolt.h>
 #include <Jolt/Physics/EActivation.h>
 #include <Jolt/RegisterTypes.h>
@@ -174,7 +175,7 @@ Physics3D::~Physics3D() {
     deinit();
 }
 
-void Physics3D::init() {
+void Physics3D::init(Vapor::JoltEnkiJobSystem* externalJobSystem) {
     JPH::RegisterDefaultAllocator();
     JPH::Trace = TraceImpl;
 
@@ -182,7 +183,16 @@ void Physics3D::init() {
     JPH::RegisterTypes();
 
     tempAllocator = std::make_unique<JPH::TempAllocatorImpl>(10 * 1024 * 1024);
-    jobSystem = std::make_unique<JPH::JobSystemThreadPool>(JPH::cMaxPhysicsJobs, JPH::cMaxPhysicsBarriers, std::thread::hardware_concurrency() - 1);
+
+    // Use external enkiTS-based job system if provided, otherwise create fallback
+    if (externalJobSystem) {
+        jobSystem = externalJobSystem;
+        fmt::print("Physics3D: Using enkiTS job system\n");
+    } else {
+        // Fallback to Jolt's own thread pool (should not happen in normal use)
+        fmt::print("Physics3D: Warning - no enkiTS job system provided, physics will run synchronously\n");
+        jobSystem = nullptr;
+    }
 
     const uint cMaxBodies = 1024;
     const uint cNumBodyMutexes = 0;
@@ -222,7 +232,7 @@ void Physics3D::deinit() {
     bodies.clear();
 
     tempAllocator.reset();
-    jobSystem.reset();
+    jobSystem = nullptr; // Don't delete, it's managed by EngineCore
     physicsSystem.reset();
     bodyActivationListener.reset();
     contactListener.reset();
