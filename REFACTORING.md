@@ -46,36 +46,84 @@ This document describes the ongoing refactoring to separate the Renderer layer f
    - **Material**: Removed `pipeline`; added `rendererMaterialId`
    - **Image**: Removed `texture` GPU handle
 
-### 🚧 In Progress (Phase 2)
+### ✅ Completed (Phase 2)
 
-**Refactor Vulkan Backend to RHI_Vulkan**
+**Renamed SceneRenderer to Renderer and Created RHI_Vulkan Foundation**
 
-The current `Renderer_Vulkan` (2342 lines) mixes RHI-level code and high-level rendering logic. It needs to be split into:
+1. **Renamed SceneRenderer to Renderer**
+   - `scene_renderer.hpp/cpp` → `renderer.hpp/cpp`
+   - This is now the main high-level renderer interface
+   - Clearer naming: "Renderer" is the application-facing API
 
-- `RHI_Vulkan`: Implements the RHI interface
-- Use `SceneRenderer` for high-level rendering
+2. **Preserved Legacy Code**
+   - Old `renderer.hpp` → `renderer_legacy.hpp`
+   - Keeps backward compatibility with existing `Renderer_Vulkan`
+   - Will be removed once migration is complete
 
-**Key Tasks:**
+3. **Created RHI_Vulkan Implementation** (`rhi_vulkan.hpp/cpp`)
+   - ✅ Basic structure and resource handle management
+   - ✅ Buffer creation/update/destruction
+   - ✅ Texture creation/destruction
+   - ✅ Shader module management
+   - ✅ Sampler creation
+   - ✅ Memory type finding and allocation
+   - ✅ Format/mode conversion utilities
+   - ✅ Frame synchronization structure (fences, semaphores)
+   - ✅ Draw command recording (draw, drawIndexed)
+   - ⏳ Pipeline creation (stub implemented, needs full implementation)
+   - ⏳ Descriptor set management (TODO)
+   - ⏳ Render pass management (TODO)
+   - ⏳ Vulkan initialization (stubs with warnings)
+   - ⏳ Texture upload (needs staging buffers)
 
-1. Create `rhi_vulkan.hpp` and `rhi_vulkan.cpp`
-2. Move GPU resource management from `Renderer_Vulkan` to `RHI_Vulkan`
-3. Implement all RHI interface methods:
-   - `initialize()`, `shutdown()`
-   - `createBuffer()`, `createTexture()`, `createShader()`, etc.
-   - `beginFrame()`, `endFrame()`
-   - `beginRenderPass()`, `endRenderPass()`
-   - `bindPipeline()`, `bindVertexBuffer()`, `drawIndexed()`, etc.
-4. Update command buffer recording to use RHI commands
-5. Handle descriptor sets through RHI
-6. Maintain synchronization (fences, semaphores)
+4. **Updated Build System**
+   - CMakeLists.txt includes new files
+   - Proper compilation setup
 
-**Challenges:**
+### 🚧 In Progress (Phase 2 Continued)
 
-- Descriptor set management needs careful abstraction
-- Pipeline creation is complex (many states)
-- Command buffer recording patterns
-- Synchronization primitives
-- ImGui integration (currently uses Vulkan directly)
+**Complete RHI_Vulkan Implementation**
+
+**Remaining Tasks:**
+
+1. **Full Vulkan Initialization**
+   - Complete `createInstance()` - instance creation with validation layers
+   - Complete `createSurface()` - SDL window surface
+   - Complete `pickPhysicalDevice()` - select suitable GPU
+   - Complete `createLogicalDevice()` - create device with queues
+   - Complete `createSwapchain()` - swapchain creation and management
+   - Complete `createCommandPool()` and `createCommandBuffers()`
+
+2. **Pipeline Creation**
+   - Implement complete `createPipeline()` method
+   - Shader stage setup
+   - Vertex input state
+   - Rasterization, depth/stencil, blend states
+   - Pipeline layout with descriptor set layouts
+
+3. **Descriptor Set Management**
+   - Descriptor pool creation
+   - Descriptor set layouts
+   - Descriptor set allocation and updates
+   - Implement `setUniformBuffer()`, `setStorageBuffer()`, `setTexture()`
+
+4. **Render Pass Implementation**
+   - Complete `beginRenderPass()` with proper setup
+   - Framebuffer creation
+   - Clear value handling
+   - Multiple render targets support
+
+5. **Texture Upload**
+   - Staging buffer creation
+   - Command buffer for copy operations
+   - Image layout transitions
+   - Complete `updateTexture()` implementation
+
+6. **Integration Testing**
+   - Update main.cpp to use new Renderer + RHI_Vulkan
+   - Test basic triangle rendering
+   - Test scene loading and rendering
+   - Verify resource management
 
 ### 📋 Planned (Phase 3)
 
@@ -250,4 +298,4 @@ SceneRenderer::endFrame()
 ---
 
 **Last Updated**: 2025-01-25
-**Status**: Phase 1 Complete, Phase 2 In Progress
+**Status**: Phase 1 Complete, Phase 2 Foundation Complete (RHI_Vulkan basic structure), Phase 2 Implementation In Progress
