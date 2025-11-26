@@ -1,5 +1,6 @@
 #include "scene.hpp"
 #include "character_controller.hpp"
+#include "vehicle_controller.hpp"
 
 #include <SDL3/SDL_log.h>
 #include <fmt/core.h>
@@ -186,4 +187,8 @@ void Node::attachCharacterController(Physics3D* physics, const CharacterControll
 
     // Sync initial position from node to character controller
     characterController->warp(getWorldPosition());
+}
+
+void Node::attachVehicleController(Physics3D* physics, const VehicleSettings& settings) {
+    vehicleController = std::make_unique<VehicleController>(physics, settings, getWorldPosition(), getWorldRotation());
 }

@@ -14,6 +14,8 @@
 
 class CharacterController;
 struct CharacterControllerSettings;
+class VehicleController;
+struct VehicleSettings;
 
 struct MeshGroup {
     std::string name;
@@ -29,6 +31,7 @@ struct Node {
     BodyHandle body;
     TriggerHandle trigger;
     std::unique_ptr<CharacterController> characterController;
+    std::unique_ptr<VehicleController> vehicleController;
     bool isTransformDirty = true;
 
     // Virtual callbacks for physics events (can be overridden in subclasses)
@@ -155,6 +158,10 @@ struct Node {
     // Character controller management
     void attachCharacterController(Physics3D* physics, const CharacterControllerSettings& settings);
     CharacterController* getCharacterController() { return characterController.get(); }
+
+    // Vehicle controller management
+    void attachVehicleController(Physics3D* physics, const VehicleSettings& settings);
+    VehicleController* getVehicleController() { return vehicleController.get(); }
 };
 
 class Scene {

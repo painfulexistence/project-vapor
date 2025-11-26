@@ -1,5 +1,6 @@
 #include "physics_3d.hpp"
 #include "character_controller.hpp"
+#include "vehicle_controller.hpp"
 #include "jolt_enki_job_system.hpp"
 #include "task_scheduler.hpp"
 #include <Jolt/Jolt.h>
@@ -376,6 +377,19 @@ void Physics3D::process(const std::shared_ptr<Scene>& scene, float dt) {
             updateCharacterControllers(node);
         }
 
+        // Update vehicle controllers
+        std::function<void(const std::shared_ptr<Node>&)> updateVehicleControllers = [&](const std::shared_ptr<Node>& node) {
+            if (node->vehicleController) {
+                node->vehicleController->update(FIXED_TIME_STEP);
+            }
+            for (const auto& child : node->children) {
+                updateVehicleControllers(child);
+            }
+        };
+        for (auto& node : scene->nodes) {
+            updateVehicleControllers(node);
+        }
+
         timeAccum -= FIXED_TIME_STEP;
     }
 
@@ -413,6 +427,23 @@ void Physics3D::process(const std::shared_ptr<Scene>& scene, float dt) {
     };
     for (auto& node : scene->nodes) {
         syncCharacterControllers(node);
+    }
+
+    // Sync vehicle controller positions/rotations back to nodes
+    std::function<void(const std::shared_ptr<Node>&)> syncVehicleControllers = [&](const std::shared_ptr<Node>& node) {
+        if (node->vehicleController) {
+            glm::vec3 vehiclePos = node->vehicleController->getPosition();
+            glm::quat vehicleRot = node->vehicleController->getRotation();
+            node->setPosition(vehiclePos);
+            node->setLocalRotation(vehicleRot);
+            node->isTransformDirty = true;
+        }
+        for (const auto& child : node->children) {
+            syncVehicleControllers(child);
+        }
+    };
+    for (auto& node : scene->nodes) {
+        syncVehicleControllers(node);
     }
 
     // Process physics events (triggers and collisions)
