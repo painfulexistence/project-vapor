@@ -1,40 +1,21 @@
 #pragma once
-#include <SDL3/SDL_video.h>
-#include <memory>
+#include "camera.hpp"
 #include "graphics.hpp"
 #include "scene.hpp"
-#include "camera.hpp"
+#include <SDL3/SDL_video.h>
+#include <memory>
 
-enum class GraphicsBackend {
-    Metal,
-    Vulkan
-};
+enum class GraphicsBackend { Metal, Vulkan };
 
-enum class RenderPath {
-    Forward,
-    Deferred
-};
+enum class RenderPath { Forward, Deferred };
 
-enum class BufferUsage {
-    VERTEX,
-    INDEX,
-    UNIFORM,
-    STORAGE,
-    COPY_SRC,
-    COPY_DST
-};
+enum class BufferUsage { VERTEX, INDEX, UNIFORM, STORAGE, COPY_SRC, COPY_DST };
 
-enum class RenderTargetUsage {
-    COLOR_MSAA,
-    COLOR,
-    DEPTH_MSAA,
-    DEPTH_STENCIL_MSAA,
-    DEPTH,
-    DEPTH_STENCIL
-};
+enum class RenderTargetUsage { COLOR_MSAA, COLOR, DEPTH_MSAA, DEPTH_STENCIL_MSAA, DEPTH, DEPTH_STENCIL };
 
 class Renderer {
 public:
+    virtual ~Renderer() = default;
     virtual void init(SDL_Window* window) = 0;
 
     virtual void deinit() = 0;
@@ -63,7 +44,6 @@ protected:
     int calculateMipmapLevelCount(Uint32 width, Uint32 height) const {
         return static_cast<int>(std::floor(std::log2(std::max(width, height))) + 1);
     }
-
 };
 
 std::unique_ptr<Renderer> createRendererMetal();
