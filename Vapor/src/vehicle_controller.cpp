@@ -7,6 +7,7 @@
 #include <Jolt/Physics/Collision/Shape/BoxShape.h>
 #include <Jolt/Physics/Vehicle/WheeledVehicleController.h>
 #include <Jolt/Physics/Vehicle/VehicleConstraint.h>
+#include <Jolt/Physics/Vehicle/VehicleCollisionTester.h>
 
 // Template: Sedan configuration
 VehicleSettings VehicleSettings::createSedan() {
@@ -124,27 +125,35 @@ VehicleController::VehicleController(Physics3D* physics, const VehicleSettings& 
     // Create vehicle constraint
     JPH::VehicleConstraintSettings vehicleSettings;
 
-    // Configure wheels
+    // Configure wheels using WheelSettingsWV (Wheeled Vehicle)
     vehicleSettings.mWheels.resize(settings.wheels.size());
     for (size_t i = 0; i < settings.wheels.size(); ++i) {
         const auto& wheelSettings = settings.wheels[i];
-        auto& joltWheel = vehicleSettings.mWheels[i];
+        JPH::WheelSettingsWV* joltWheel = new JPH::WheelSettingsWV();
 
-        joltWheel.mPosition = JPH::Vec3(wheelSettings.position.x, wheelSettings.position.y, wheelSettings.position.z);
-        joltWheel.mSuspensionDirection = JPH::Vec3(wheelSettings.suspensionDirection.x, wheelSettings.suspensionDirection.y, wheelSettings.suspensionDirection.z);
-        joltWheel.mSteeringAxis = JPH::Vec3(wheelSettings.wheelUp.x, wheelSettings.wheelUp.y, wheelSettings.wheelUp.z);
-        joltWheel.mWheelForward = JPH::Vec3(wheelSettings.wheelForward.x, wheelSettings.wheelForward.y, wheelSettings.wheelForward.z);
-        joltWheel.mWheelUp = JPH::Vec3(wheelSettings.wheelUp.x, wheelSettings.wheelUp.y, wheelSettings.wheelUp.z);
+        // Base wheel properties
+        joltWheel->mPosition = JPH::Vec3(wheelSettings.position.x, wheelSettings.position.y, wheelSettings.position.z);
+        joltWheel->mSuspensionDirection = JPH::Vec3(wheelSettings.suspensionDirection.x, wheelSettings.suspensionDirection.y, wheelSettings.suspensionDirection.z);
+        joltWheel->mSteeringAxis = JPH::Vec3(wheelSettings.wheelUp.x, wheelSettings.wheelUp.y, wheelSettings.wheelUp.z);
+        joltWheel->mWheelForward = JPH::Vec3(wheelSettings.wheelForward.x, wheelSettings.wheelForward.y, wheelSettings.wheelForward.z);
+        joltWheel->mWheelUp = JPH::Vec3(wheelSettings.wheelUp.x, wheelSettings.wheelUp.y, wheelSettings.wheelUp.z);
 
-        joltWheel.mSuspensionMinLength = wheelSettings.suspensionMinLength;
-        joltWheel.mSuspensionMaxLength = wheelSettings.suspensionMaxLength;
-        joltWheel.mSuspensionPreloadLength = wheelSettings.suspensionPreloadLength;
-        joltWheel.mSuspensionFrequency = wheelSettings.suspensionFrequency;
-        joltWheel.mSuspensionDamping = wheelSettings.suspensionDamping;
+        joltWheel->mSuspensionMinLength = wheelSettings.suspensionMinLength;
+        joltWheel->mSuspensionMaxLength = wheelSettings.suspensionMaxLength;
+        joltWheel->mSuspensionPreloadLength = wheelSettings.suspensionPreloadLength;
+        joltWheel->mSuspensionFrequency = wheelSettings.suspensionFrequency;
+        joltWheel->mSuspensionDamping = wheelSettings.suspensionDamping;
 
-        joltWheel.mRadius = wheelSettings.wheelRadius;
-        joltWheel.mWidth = wheelSettings.wheelWidth;
-        joltWheel.mEnableTractionControl = wheelSettings.enableTraction;
+        joltWheel->mRadius = wheelSettings.wheelRadius;
+        joltWheel->mWidth = wheelSettings.wheelWidth;
+
+        // WheelSettingsWV specific properties
+        joltWheel->mInertia = 0.9f;  // Wheel rotational inertia
+        joltWheel->mAngularDamping = 0.2f;  // Wheel angular damping
+        joltWheel->mMaxSteerAngle = (i < 2) ? settings.maxSteeringAngle : 0.0f;  // Front wheels can steer
+        joltWheel->mMaxHandBrakeTorque = (i >= 2) ? settings.maxBrakeTorque * 0.5f : 0.0f;  // Rear wheels only
+
+        vehicleSettings.mWheels[i] = joltWheel;
     }
 
     // Create wheeled vehicle controller
