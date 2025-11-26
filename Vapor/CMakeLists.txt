@@ -1,41 +1,30 @@
-set(BUILD_SHARED_LIBS OFF)
-set(SDL_SHARED OFF CACHE BOOL "" FORCE)
-set(SDL_STATIC ON CACHE BOOL "" FORCE)
-set(SDL_TESTS OFF CACHE BOOL "" FORCE)
-set(SDL_EXAMPLES OFF CACHE BOOL "" FORCE)
-set(SDL_TESTS_LIBRARY OFF CACHE BOOL "" FORCE)
-FetchContent_Declare(SDL3
-    GIT_REPOSITORY https://github.com/libsdl-org/SDL.git
-    GIT_TAG release-3.2.14
-    GIT_PROGRESS TRUE)
-FetchContent_MakeAvailable(SDL3)
 find_package(args CONFIG REQUIRED)
 find_package(fmt CONFIG REQUIRED)
 find_package(glm CONFIG REQUIRED)
 find_package(Vulkan REQUIRED)
 find_path(TINYGLTF_INCLUDE_DIRS "tiny_gltf.h")
 find_package(cereal CONFIG REQUIRED)
-find_package(unofficial-joltphysics CONFIG REQUIRED)
+find_package(Jolt CONFIG REQUIRED)
 find_package(enkits CONFIG REQUIRED)
+find_package(SDL3 CONFIG REQUIRED)
 
 add_subdirectory(metal)
 add_subdirectory(MikkTSpace)
 
 set(SOURCES
-    main.cpp
-    helper.cpp
-    renderer_metal.cpp
-    renderer_vulkan.cpp
-    graphics.cpp
-	asset_manager.cpp
-	scene.cpp
-	camera.cpp
-	asset_serializer.cpp
-	physics_3d.cpp
-	task_scheduler.cpp
-	resource_manager.cpp
-	jolt_enki_job_system.cpp
-	engine_core.cpp
+    src/asset_manager.cpp
+    src/asset_serializer.cpp
+    src/camera.cpp
+    src/graphics.cpp
+    src/helper.cpp
+    src/physics_3d.cpp
+    src/renderer_metal.cpp
+    src/renderer_vulkan.cpp
+    src/scene.cpp
+    src/task_scheduler.cpp
+    src/resource_manager.cpp
+    src/jolt_enki_job_system.cpp
+    src/engine_core.cpp
     imgui/imgui.cpp
     imgui/imgui_draw.cpp
     imgui/imgui_tables.cpp
@@ -46,28 +35,46 @@ set(SOURCES
     imgui/backends/imgui_impl_metal.mm
 )
 
-add_executable(main ${SOURCES})
-target_compile_features(main PRIVATE cxx_std_20)
-set_target_properties(main PROPERTIES CXX_EXTENSIONS OFF)
-target_link_libraries(main PRIVATE SDL3::SDL3 metal fmt::fmt glm::glm Vulkan::Vulkan taywee::args mikktspace cereal::cereal unofficial::joltphysics::Jolt enkits::enkits)
-target_include_directories(main PRIVATE ${TINYGLTF_INCLUDE_DIRS} imgui)
+add_library(Vapor ${SOURCES})
+target_compile_features(Vapor PRIVATE cxx_std_20)
+set_target_properties(Vapor PROPERTIES CXX_EXTENSIONS OFF)
 
-find_program(GLSL_VALIDATOR "glslangValidator" REQUIRED)
-file(GLOB_RECURSE SHADER_SOURCES CONFIGURE_DEPENDS
-	${CMAKE_CURRENT_SOURCE_DIR}/assets/shaders/*.vert
-	${CMAKE_CURRENT_SOURCE_DIR}/assets/shaders/*.frag
-	${CMAKE_CURRENT_SOURCE_DIR}/assets/shaders/*.comp
+target_include_directories(Vapor PUBLIC
+    $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>
+    $<INSTALL_INTERFACE:include>
+    $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/imgui>
+    $<INSTALL_INTERFACE:${CMAKE_INSTALL_INCLUDEDIR}/imgui>
 )
-foreach(GLSL ${SHADER_SOURCES})
-	get_filename_component(SOURCE_NAME ${GLSL} NAME)
-	set(SPIRV ${CMAKE_CURRENT_SOURCE_DIR}/assets/shaders/${SOURCE_NAME}.spv)
-	add_custom_command(
-		OUTPUT ${SPIRV}
-		COMMAND ${GLSL_VALIDATOR} -V ${GLSL} -o ${SPIRV}
-		DEPENDS ${GLSL}
-	)
-	list(APPEND SPIRV_BINARY_FILES ${SPIRV})
-endforeach(GLSL)
+target_include_directories(Vapor PRIVATE
+    ${TINYGLTF_INCLUDE_DIRS}
+    imgui
+    ${CMAKE_CURRENT_SOURCE_DIR}/include/Vapor
+    ${CMAKE_CURRENT_SOURCE_DIR}
+)
 
-add_custom_target(copy_assets COMMAND ${CMAKE_COMMAND} -E copy_directory ${CMAKE_CURRENT_SOURCE_DIR}/assets $<TARGET_FILE_DIR:main>/assets DEPENDS ${SPIRV_BINARY_FILES})
-add_dependencies(main copy_assets)
+target_link_libraries(Vapor PUBLIC
+    fmt::fmt
+    glm::glm
+    cereal::cereal
+    SDL3::SDL3
+)
+target_link_libraries(Vapor PRIVATE
+    metal
+    Vulkan::Vulkan
+    taywee::args
+    mikktspace
+    Jolt::Jolt
+    enkits::enkits
+)
+
+
+install(TARGETS Vapor
+    LIBRARY DESTINATION ${CMAKE_INSTALL_LIBDIR}
+    ARCHIVE DESTINATION ${CMAKE_INSTALL_LIBDIR}
+    RUNTIME DESTINATION ${CMAKE_INSTALL_BINDIR}
+)
+
+install(DIRECTORY include/ DESTINATION ${CMAKE_INSTALL_INCLUDEDIR})
+install(DIRECTORY imgui/ DESTINATION ${CMAKE_INSTALL_INCLUDEDIR}/imgui
+    FILES_MATCHING PATTERN "*.h"
+)
