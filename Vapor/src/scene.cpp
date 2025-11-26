@@ -1,4 +1,5 @@
 #include "scene.hpp"
+#include "character_controller.hpp"
 
 #include <SDL3/SDL_log.h>
 #include <fmt/core.h>
@@ -179,3 +180,10 @@ void Scene::addMeshToNode(std::shared_ptr<Node> node, std::shared_ptr<Mesh> mesh
 // auto scene = Scene();
 // auto entity = scene.createNode("Cube", glm::identity<glm::mat4>());
 // scene.addMeshToNode(entity, MeshBuilder::buildCube(1.0f));
+
+void Node::attachCharacterController(Physics3D* physics, const CharacterControllerSettings& settings) {
+    characterController = std::make_unique<CharacterController>(physics, settings);
+
+    // Sync initial position from node to character controller
+    characterController->warp(getWorldPosition());
+}

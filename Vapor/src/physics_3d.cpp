@@ -1,4 +1,5 @@
 #include "physics_3d.hpp"
+#include "character_controller.hpp"
 #include "jolt_enki_job_system.hpp"
 #include "task_scheduler.hpp"
 #include <Jolt/Jolt.h>
@@ -11,6 +12,8 @@
 #include <Jolt/Physics/Collision/CastResult.h>
 #include <Jolt/Physics/Collision/NarrowPhaseQuery.h>
 #include <Jolt/Physics/Collision/RayCast.h>
+#include <Jolt/Physics/Collision/CollideShape.h>
+#include <Jolt/Physics/Collision/CollisionCollectorImpl.h>
 #include <Jolt/Physics/Collision/Shape/BoxShape.h>
 #include <Jolt/Physics/Collision/Shape/SphereShape.h>
 #include <Jolt/Physics/Collision/Shape/CapsuleShape.h>
@@ -143,13 +146,36 @@ public:
 
 class MyContactListener : public JPH::ContactListener {
 public:
+    struct TriggerEvent {
+        Node* triggerNode;
+        Node* otherNode;
+        bool isEnter;  // true = Enter, false = Exit
+    };
+
+    struct CollisionEvent {
+        Node* node1;
+        Node* node2;
+        bool isEnter;
+    };
+
+    std::vector<TriggerEvent> triggerEvents;
+    std::vector<CollisionEvent> collisionEvents;
+    std::unordered_map<uint64_t, bool> activeContacts;  // Track active contacts for exit detection
+
+    // Helper to create unique contact ID
+    uint64_t makeContactID(JPH::BodyID id1, JPH::BodyID id2) const {
+        uint32_t a = id1.GetIndexAndSequenceNumber();
+        uint32_t b = id2.GetIndexAndSequenceNumber();
+        if (a > b) std::swap(a, b);
+        return (uint64_t(a) << 32) | uint64_t(b);
+    }
+
     virtual JPH::ValidateResult OnContactValidate(
       const JPH::Body& inBody1,
       const JPH::Body& inBody2,
       JPH::RVec3Arg inBaseOffset,
       const JPH::CollideShapeResult& inCollisionResult
     ) override {
-        // fmt::print("Contact validate callback\n");
         return JPH::ValidateResult::AcceptAllContactsForThisBodyPair;
     }
 
@@ -159,12 +185,25 @@ public:
       const JPH::ContactManifold& inManifold,
       JPH::ContactSettings& ioSettings
     ) override {
-        // fmt::print("A contact was added\n");
-        auto obj1 = reinterpret_cast<Node*>(inBody1.GetUserData());
-        auto obj2 = reinterpret_cast<Node*>(inBody2.GetUserData());
-        if (obj1 && obj2) {
-            // obj1->OnCollision(obj2);
-            // obj2->OnCollision(obj1);
+        auto node1 = reinterpret_cast<Node*>(inBody1.GetUserData());
+        auto node2 = reinterpret_cast<Node*>(inBody2.GetUserData());
+
+        if (!node1 || !node2) return;
+
+        bool isSensor1 = inBody1.IsSensor();
+        bool isSensor2 = inBody2.IsSensor();
+
+        uint64_t contactID = makeContactID(inBody1.GetID(), inBody2.GetID());
+        activeContacts[contactID] = true;
+
+        // Trigger event (one or both are sensors)
+        if (isSensor1 || isSensor2) {
+            Node* triggerNode = isSensor1 ? node1 : node2;
+            Node* otherNode = isSensor1 ? node2 : node1;
+            triggerEvents.push_back({triggerNode, otherNode, true});
+        } else {
+            // Regular collision event
+            collisionEvents.push_back({node1, node2, true});
         }
     }
 
@@ -174,11 +213,17 @@ public:
       const JPH::ContactManifold& inManifold,
       JPH::ContactSettings& ioSettings
     ) override {
-        // fmt::print("A contact was persisted\n");
+        // Contact still active, no need to add event
     }
 
     virtual void OnContactRemoved(const JPH::SubShapeIDPair& inSubShapePair) override {
-        // fmt::print("A contact was removed\n");
+        // Note: We can't get UserData here directly, so we need to handle this differently
+        // We'll mark the contact as removed and process it in the next physics update
+    }
+
+    void clearEvents() {
+        triggerEvents.clear();
+        collisionEvents.clear();
     }
 };
 
@@ -317,6 +362,20 @@ void Physics3D::process(const std::shared_ptr<Scene>& scene, float dt) {
     while (timeAccum >= FIXED_TIME_STEP) {
         ++step;
         physicsSystem->Update(FIXED_TIME_STEP, 1, tempAllocator.get(), jobSystem.get());
+
+        // Update character controllers
+        std::function<void(const std::shared_ptr<Node>&)> updateCharacterControllers = [&](const std::shared_ptr<Node>& node) {
+            if (node->characterController) {
+                node->characterController->update(FIXED_TIME_STEP, getGravity());
+            }
+            for (const auto& child : node->children) {
+                updateCharacterControllers(child);
+            }
+        };
+        for (auto& node : scene->nodes) {
+            updateCharacterControllers(node);
+        }
+
         timeAccum -= FIXED_TIME_STEP;
     }
 
@@ -340,6 +399,49 @@ void Physics3D::process(const std::shared_ptr<Scene>& scene, float dt) {
             }
         }
     }
+
+    // Sync character controller positions back to nodes
+    std::function<void(const std::shared_ptr<Node>&)> syncCharacterControllers = [&](const std::shared_ptr<Node>& node) {
+        if (node->characterController) {
+            glm::vec3 charPos = node->characterController->getPosition();
+            node->setPosition(charPos);
+            node->isTransformDirty = true;
+        }
+        for (const auto& child : node->children) {
+            syncCharacterControllers(child);
+        }
+    };
+    for (auto& node : scene->nodes) {
+        syncCharacterControllers(node);
+    }
+
+    // Process physics events (triggers and collisions)
+    auto* listener = static_cast<MyContactListener*>(contactListener.get());
+
+    // Process trigger events
+    for (auto& event : listener->triggerEvents) {
+        if (event.isEnter) {
+            event.triggerNode->onTriggerEnter(event.otherNode);
+            event.otherNode->onTriggerEnter(event.triggerNode);  // Bidirectional notification
+        } else {
+            event.triggerNode->onTriggerExit(event.otherNode);
+            event.otherNode->onTriggerExit(event.triggerNode);
+        }
+    }
+
+    // Process collision events
+    for (auto& event : listener->collisionEvents) {
+        if (event.isEnter) {
+            event.node1->onCollisionEnter(event.node2);
+            event.node2->onCollisionEnter(event.node1);
+        } else {
+            event.node1->onCollisionExit(event.node2);
+            event.node2->onCollisionExit(event.node1);
+        }
+    }
+
+    // Clear events for next frame
+    listener->clearEvents();
 
     // draw debug UI
     if (isDebugUIEnabled) {
@@ -464,7 +566,12 @@ bool Physics3D::raycast(const glm::vec3& from, const glm::vec3& to, RaycastHit& 
 }
 
 void Physics3D::setGravity(const glm::vec3& acc) {
+    currentGravity = acc;
     physicsSystem->SetGravity(JPH::Vec3(acc.x, acc.y, acc.z));
+}
+
+glm::vec3 Physics3D::getGravity() const {
+    return currentGravity;
 }
 
 // ====== 力與力矩 ======
@@ -1032,4 +1139,169 @@ Uint64 Physics3D::getTriggerUserData(TriggerHandle handle) const {
 
     JPH::BodyID bodyID = triggers.at(handle.rid);
     return bodyInterface->GetUserData(bodyID);
+}
+// ====== 重疊測試方法 ======
+OverlapResult Physics3D::overlapSphere(const glm::vec3& center, float radius) {
+    OverlapResult result;
+
+    // Create query shape
+    JPH::SphereShape queryShape(radius);
+    JPH::RVec3 queryPos(center.x, center.y, center.z);
+    JPH::Quat queryRot = JPH::Quat::sIdentity();
+
+    // Use CollideShape query
+    JPH::CollideShapeSettings settings;
+    JPH::AllHitCollisionCollector<JPH::CollideShapeCollector> collector;
+
+    physicsSystem->GetNarrowPhaseQuery().CollideShape(
+        &queryShape,
+        JPH::Vec3::sReplicate(1.0f),  // Scale
+        queryPos,
+        queryRot,
+        settings,
+        JPH::RVec3::sZero(),
+        collector
+    );
+
+    // Collect results
+    for (const auto& hit : collector.mHits) {
+        JPH::BodyID hitBodyID = hit.mBodyID2;
+
+        // Find the BodyHandle
+        for (const auto& [handleID, bodyID] : bodies) {
+            if (bodyID == hitBodyID) {
+                BodyHandle handle{handleID};
+                result.bodies.push_back(handle);
+
+                // Get Node from UserData
+                Uint64 userData = bodyInterface->GetUserData(hitBodyID);
+                if (userData != 0) {
+                    Node* node = reinterpret_cast<Node*>(userData);
+                    result.nodes.push_back(node);
+                }
+                break;
+            }
+        }
+    }
+
+    return result;
+}
+
+OverlapResult Physics3D::overlapBox(
+    const glm::vec3& center,
+    const glm::vec3& halfExtents,
+    const glm::quat& rotation
+) {
+    OverlapResult result;
+
+    // Create query shape
+    JPH::BoxShape queryShape(JPH::Vec3(halfExtents.x, halfExtents.y, halfExtents.z));
+    JPH::RVec3 queryPos(center.x, center.y, center.z);
+    JPH::Quat queryRot(rotation.x, rotation.y, rotation.z, rotation.w);
+
+    // Use CollideShape query
+    JPH::CollideShapeSettings settings;
+    JPH::AllHitCollisionCollector<JPH::CollideShapeCollector> collector;
+
+    physicsSystem->GetNarrowPhaseQuery().CollideShape(
+        &queryShape,
+        JPH::Vec3::sReplicate(1.0f),
+        queryPos,
+        queryRot,
+        settings,
+        JPH::RVec3::sZero(),
+        collector
+    );
+
+    // Collect results
+    for (const auto& hit : collector.mHits) {
+        JPH::BodyID hitBodyID = hit.mBodyID2;
+
+        for (const auto& [handleID, bodyID] : bodies) {
+            if (bodyID == hitBodyID) {
+                BodyHandle handle{handleID};
+                result.bodies.push_back(handle);
+
+                Uint64 userData = bodyInterface->GetUserData(hitBodyID);
+                if (userData != 0) {
+                    Node* node = reinterpret_cast<Node*>(userData);
+                    result.nodes.push_back(node);
+                }
+                break;
+            }
+        }
+    }
+
+    return result;
+}
+
+OverlapResult Physics3D::overlapCapsule(
+    const glm::vec3& point1,
+    const glm::vec3& point2,
+    float radius
+) {
+    OverlapResult result;
+
+    // Calculate capsule parameters
+    glm::vec3 axis = point2 - point1;
+    float length = glm::length(axis);
+    float halfHeight = length * 0.5f;
+
+    if (halfHeight < 0.001f) {
+        // Degenerate case: use sphere
+        return overlapSphere(point1, radius);
+    }
+
+    // Create query shape
+    JPH::CapsuleShape queryShape(halfHeight, radius);
+    JPH::RVec3 center = JPH::RVec3(
+        (point1.x + point2.x) * 0.5f,
+        (point1.y + point2.y) * 0.5f,
+        (point1.z + point2.z) * 0.5f
+    );
+
+    // Calculate rotation to align capsule with axis
+    glm::vec3 up = glm::normalize(axis);
+    glm::vec3 right = glm::abs(up.y) < 0.999f ? glm::vec3(0, 1, 0) : glm::vec3(1, 0, 0);
+    glm::vec3 forward = glm::normalize(glm::cross(right, up));
+    right = glm::cross(up, forward);
+
+    glm::mat3 rotMat(right, up, forward);
+    glm::quat rot = glm::quat_cast(rotMat);
+    JPH::Quat queryRot(rot.x, rot.y, rot.z, rot.w);
+
+    // Use CollideShape query
+    JPH::CollideShapeSettings settings;
+    JPH::AllHitCollisionCollector<JPH::CollideShapeCollector> collector;
+
+    physicsSystem->GetNarrowPhaseQuery().CollideShape(
+        &queryShape,
+        JPH::Vec3::sReplicate(1.0f),
+        center,
+        queryRot,
+        settings,
+        JPH::RVec3::sZero(),
+        collector
+    );
+
+    // Collect results
+    for (const auto& hit : collector.mHits) {
+        JPH::BodyID hitBodyID = hit.mBodyID2;
+
+        for (const auto& [handleID, bodyID] : bodies) {
+            if (bodyID == hitBodyID) {
+                BodyHandle handle{handleID};
+                result.bodies.push_back(handle);
+
+                Uint64 userData = bodyInterface->GetUserData(hitBodyID);
+                if (userData != 0) {
+                    Node* node = reinterpret_cast<Node*>(userData);
+                    result.nodes.push_back(node);
+                }
+                break;
+            }
+        }
+    }
+
+    return result;
 }

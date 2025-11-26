@@ -12,6 +12,9 @@
 #include "graphics.hpp"
 #include "physics_3d.hpp"
 
+class CharacterController;
+struct CharacterControllerSettings;
+
 struct MeshGroup {
     std::string name;
     std::vector<std::shared_ptr<Mesh>> meshes;
@@ -24,7 +27,15 @@ struct Node {
     glm::mat4 worldTransform = glm::identity<glm::mat4>(); // calculated from localTransform and parent's worldTransform
     std::shared_ptr<MeshGroup> meshGroup = nullptr;
     BodyHandle body;
+    TriggerHandle trigger;
+    std::unique_ptr<CharacterController> characterController;
     bool isTransformDirty = true;
+
+    // Virtual callbacks for physics events (can be overridden in subclasses)
+    virtual void onTriggerEnter(Node* other) {}
+    virtual void onTriggerExit(Node* other) {}
+    virtual void onCollisionEnter(Node* other) {}
+    virtual void onCollisionExit(Node* other) {}
 
     glm::vec3 getLocalPosition() const {
         return glm::vec3(localTransform[3]);
@@ -140,6 +151,10 @@ struct Node {
         child->isTransformDirty = true;
         children.push_back(child);
     }
+
+    // Character controller management
+    void attachCharacterController(Physics3D* physics, const CharacterControllerSettings& settings);
+    CharacterController* getCharacterController() { return characterController.get(); }
 };
 
 class Scene {

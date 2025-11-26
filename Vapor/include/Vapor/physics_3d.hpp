@@ -64,6 +64,11 @@ struct TriggerHandle {
     }
 };
 
+struct OverlapResult {
+    std::vector<Node*> nodes;
+    std::vector<BodyHandle> bodies;
+};
+
 class Physics3D {
 private:
     static Physics3D* _instance;
@@ -95,6 +100,7 @@ public:
 
     bool raycast(const glm::vec3& from, const glm::vec3& to, RaycastHit& hit);
     void setGravity(const glm::vec3& acc);
+    glm::vec3 getGravity() const;
 
     // ====== Trigger 創建 ======
     TriggerHandle createBoxTrigger(const glm::vec3& halfSize, const glm::vec3& position, const glm::quat& rotation = glm::quat(1, 0, 0, 0));
@@ -106,6 +112,11 @@ public:
     // ====== Trigger UserData 管理 ======
     void setTriggerUserData(TriggerHandle trigger, Uint64 userData);
     Uint64 getTriggerUserData(TriggerHandle trigger) const;
+
+    // ====== 重疊測試 (Overlap Tests) ======
+    OverlapResult overlapSphere(const glm::vec3& center, float radius);
+    OverlapResult overlapBox(const glm::vec3& center, const glm::vec3& halfExtents, const glm::quat& rotation = glm::quat(1, 0, 0, 0));
+    OverlapResult overlapCapsule(const glm::vec3& point1, const glm::vec3& point2, float radius);
 
     // ====== 力與力矩 ======
     void applyForce(BodyHandle body, const glm::vec3& force, const glm::vec3& relativePos = glm::vec3(0.0f));
@@ -213,4 +224,5 @@ private:
     Uint32 step;
     bool isInitialized = false;
     bool isDebugUIEnabled = false;
+    glm::vec3 currentGravity = glm::vec3(0.0f, -9.81f, 0.0f);
 };
