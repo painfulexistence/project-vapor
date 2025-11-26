@@ -1,7 +1,7 @@
 #ifndef TASK_SCHEDULER_HPP
 #define TASK_SCHEDULER_HPP
 
-#include <TaskScheduler.h>
+#include <enkiTS/TaskScheduler.h>
 #include <memory>
 #include <functional>
 #include <atomic>

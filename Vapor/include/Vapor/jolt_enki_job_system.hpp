@@ -2,9 +2,8 @@
 #define JOLT_ENKI_JOB_SYSTEM_HPP
 
 #include <Jolt/Jolt.h>
-#include <Jolt/Core/JobSystem.h>
+#include <Jolt/Core/JobSystemWithBarrier.h>
 #include "task_scheduler.hpp"
-#include <vector>
 #include <atomic>
 
 namespace Vapor {
@@ -13,7 +12,7 @@ namespace Vapor {
  * Jolt Physics job system implementation using enkiTS
  * This allows Jolt to use the same task scheduler as resource loading and rendering
  */
-class JoltEnkiJobSystem : public JPH::JobSystem {
+class JoltEnkiJobSystem : public JPH::JobSystemWithBarrier {
 public:
     explicit JoltEnkiJobSystem(TaskScheduler& scheduler, uint32_t maxJobs = 2048);
     virtual ~JoltEnkiJobSystem();
@@ -26,6 +25,7 @@ public:
     virtual void QueueJob(JPH::JobSystem::Job* job) override;
     virtual void QueueJobs(JPH::JobSystem::Job** jobs, uint32_t numJobs) override;
     virtual void FreeJob(JPH::JobSystem::Job* job) override;
+    virtual void WaitForJobs(JPH::JobSystem::Barrier* barrier) override;
 
 private:
     TaskScheduler& m_scheduler;

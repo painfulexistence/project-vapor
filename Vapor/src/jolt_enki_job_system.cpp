@@ -5,7 +5,7 @@
 namespace Vapor {
 
 JoltEnkiJobSystem::JoltEnkiJobSystem(TaskScheduler& scheduler, uint32_t maxJobs)
-    : JPH::JobSystem(maxJobs)
+    : JPH::JobSystemWithBarrier(256)  // Initialize with max barriers
     , m_scheduler(scheduler)
     , m_maxJobs(maxJobs) {
 
@@ -31,10 +31,13 @@ JPH::JobHandle JoltEnkiJobSystem::CreateJob(const char* name, JPH::ColorArg colo
         std::this_thread::yield();
     }
 
-    // Allocate a new job
-    Job* job = AllocateJob();
-    job->m_JobFunction = jobFunction;
-    job->SetBarrier(nullptr);
+    // Create a new job using the protected Job constructor
+    Job* job = new Job(name, color, this, jobFunction, numDependencies);
+
+    // If no dependencies, queue it immediately
+    if (numDependencies == 0) {
+        QueueJob(job);
+    }
 
     m_numJobs++;
 
@@ -60,16 +63,26 @@ void JoltEnkiJobSystem::QueueJobs(JPH::JobSystem::Job** jobs, uint32_t numJobs) 
 void JoltEnkiJobSystem::FreeJob(JPH::JobSystem::Job* job) {
     if (job) {
         m_numJobs--;
-        JPH::JobSystem::FreeJob(job);
+        delete job;
     }
+}
+
+void JoltEnkiJobSystem::WaitForJobs(JPH::JobSystem::Barrier* barrier) {
+    // First, call the base class implementation to wait for the barrier
+    // This will wait for all Jolt jobs to complete (via semaphore)
+    JPH::JobSystemWithBarrier::WaitForJobs(barrier);
+
+    // After the barrier is done, ensure all enkiTS tasks are completed
+    // This is necessary because our Jolt jobs are executed by enkiTS tasks
+    m_scheduler.waitForAll();
 }
 
 void JoltEnkiJobSystem::JoltJobTask::ExecuteRange(enki::TaskSetPartition range, uint32_t threadnum) {
     // Execute the Jolt job function
+    // Execute() will handle job completion, barrier notification, etc.
+    // We should NOT call Release() here - JobHandle manages the reference count.
+    // When all JobHandles are destroyed, the job will be automatically freed.
     m_job->Execute();
-
-    // Release the job
-    m_job->Release();
 }
 
 } // namespace Vapor

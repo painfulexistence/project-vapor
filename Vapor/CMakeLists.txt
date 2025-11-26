@@ -5,7 +5,7 @@ find_package(Vulkan REQUIRED)
 find_path(TINYGLTF_INCLUDE_DIRS "tiny_gltf.h")
 find_package(cereal CONFIG REQUIRED)
 find_package(Jolt CONFIG REQUIRED)
-find_package(enkits CONFIG REQUIRED)
+find_package(enkiTS CONFIG REQUIRED)
 find_package(SDL3 CONFIG REQUIRED)
 
 add_subdirectory(metal)
@@ -64,7 +64,7 @@ target_link_libraries(Vapor PRIVATE
     taywee::args
     mikktspace
     Jolt::Jolt
-    enkits::enkits
+    enkiTS::enkiTS
 )
 
 

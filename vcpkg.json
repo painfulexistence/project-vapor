@@ -8,7 +8,12 @@
     "args",
     "tinygltf",
     "cereal",
-    "joltphysics",
+    {
+      "name": "joltphysics",
+      "features": [
+        "rtti"
+      ]
+    },
     "enkits",
     "sdl3",
     "vulkan",
