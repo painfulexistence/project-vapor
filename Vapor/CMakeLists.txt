@@ -1,36 +1,33 @@
-set(BUILD_SHARED_LIBS OFF)
-set(SDL_SHARED OFF CACHE BOOL "" FORCE)
-set(SDL_STATIC ON CACHE BOOL "" FORCE)
-set(SDL_TESTS OFF CACHE BOOL "" FORCE)
-set(SDL_EXAMPLES OFF CACHE BOOL "" FORCE)
-set(SDL_TESTS_LIBRARY OFF CACHE BOOL "" FORCE)
-FetchContent_Declare(SDL3
-    GIT_REPOSITORY https://github.com/libsdl-org/SDL.git
-    GIT_TAG release-3.2.14
-    GIT_PROGRESS TRUE)
-FetchContent_MakeAvailable(SDL3)
+# ===================================================================
+#           project-vapor/Vapor/CMakeLists.txt
+# ===================================================================
+
 find_package(args CONFIG REQUIRED)
 find_package(fmt CONFIG REQUIRED)
 find_package(glm CONFIG REQUIRED)
 find_package(Vulkan REQUIRED)
 find_path(TINYGLTF_INCLUDE_DIRS "tiny_gltf.h")
 find_package(cereal CONFIG REQUIRED)
-find_package(unofficial-joltphysics CONFIG REQUIRED)
+find_package(Jolt CONFIG REQUIRED)
+find_package(SDL3 CONFIG REQUIRED)
 
 add_subdirectory(metal)
 add_subdirectory(MikkTSpace)
 
-set(SOURCES
-    main.cpp
-    helper.cpp
-    renderer_metal.cpp
-    renderer_vulkan.cpp
-    graphics.cpp
-	asset_manager.cpp
-	scene.cpp
-	camera.cpp
-	asset_serializer.cpp
-	physics_3d.cpp
+# 1. 定義 "Vapor" 函式庫
+add_library(Vapor "") # 來源檔案稍後加入
+
+target_sources(Vapor PRIVATE
+    src/asset_manager.cpp
+    src/asset_serializer.cpp
+    src/camera.cpp
+    src/graphics.cpp
+    src/helper.cpp
+    src/physics_3d.cpp
+    src/renderer_metal.cpp
+    src/renderer_vulkan.cpp
+    src/scene.cpp
+    # IMGUI 來源檔案
     imgui/imgui.cpp
     imgui/imgui_draw.cpp
     imgui/imgui_tables.cpp
@@ -41,28 +38,44 @@ set(SOURCES
     imgui/backends/imgui_impl_metal.mm
 )
 
-add_executable(main ${SOURCES})
-target_compile_features(main PRIVATE cxx_std_20)
-set_target_properties(main PROPERTIES CXX_EXTENSIONS OFF)
-target_link_libraries(main PRIVATE SDL3::SDL3 metal fmt::fmt glm::glm Vulkan::Vulkan taywee::args mikktspace cereal::cereal unofficial::joltphysics::Jolt)
-target_include_directories(main PRIVATE ${TINYGLTF_INCLUDE_DIRS} imgui)
+target_compile_features(Vapor PRIVATE cxx_std_20)
+set_target_properties(Vapor PROPERTIES CXX_EXTENSIONS OFF)
 
-find_program(GLSL_VALIDATOR "glslangValidator" REQUIRED)
-file(GLOB_RECURSE SHADER_SOURCES CONFIGURE_DEPENDS
-	${CMAKE_CURRENT_SOURCE_DIR}/assets/shaders/*.vert
-	${CMAKE_CURRENT_SOURCE_DIR}/assets/shaders/*.frag
-	${CMAKE_CURRENT_SOURCE_DIR}/assets/shaders/*.comp
+# 2. 設定公開和私有的 Include 路徑
+target_include_directories(Vapor PUBLIC
+    # 當安裝後，告訴使用者 include 目錄在 <prefix>/include
+    $<INSTALL_INTERFACE:include>
+    # 在本地建置時，告訴使用者 include 目錄在目前的 "include" 資料夾
+    $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>
 )
-foreach(GLSL ${SHADER_SOURCES})
-	get_filename_component(SOURCE_NAME ${GLSL} NAME)
-	set(SPIRV ${CMAKE_CURRENT_SOURCE_DIR}/assets/shaders/${SOURCE_NAME}.spv)
-	add_custom_command(
-		OUTPUT ${SPIRV}
-		COMMAND ${GLSL_VALIDATOR} -V ${GLSL} -o ${SPIRV}
-		DEPENDS ${GLSL}
-	)
-	list(APPEND SPIRV_BINARY_FILES ${SPIRV})
-endforeach(GLSL)
+target_include_directories(Vapor PRIVATE
+    ${TINYGLTF_INCLUDE_DIRS}
+    imgui
+    "${CMAKE_CURRENT_SOURCE_DIR}/include/Vapor"
+    "${CMAKE_CURRENT_SOURCE_DIR}"
+)
 
-add_custom_target(copy_assets COMMAND ${CMAKE_COMMAND} -E copy_directory ${CMAKE_CURRENT_SOURCE_DIR}/assets $<TARGET_FILE_DIR:main>/assets DEPENDS ${SPIRV_BINARY_FILES})
-add_dependencies(main copy_assets)
+target_link_libraries(Vapor PUBLIC
+    fmt::fmt
+    glm::glm
+    cereal::cereal
+    SDL3::SDL3
+)
+target_link_libraries(Vapor PRIVATE 
+    metal 
+    Vulkan::Vulkan 
+    taywee::args 
+    mikktspace 
+    Jolt::Jolt
+)
+
+
+# 4. 安裝函式庫 (Skip EXPORT as per request)
+install(TARGETS Vapor 
+    LIBRARY DESTINATION ${CMAKE_INSTALL_LIBDIR}
+    ARCHIVE DESTINATION ${CMAKE_INSTALL_LIBDIR}
+    RUNTIME DESTINATION ${CMAKE_INSTALL_BINDIR}
+)
+
+# 5. 安裝公開標頭檔
+install(DIRECTORY include/ DESTINATION ${CMAKE_INSTALL_INCLUDEDIR})
