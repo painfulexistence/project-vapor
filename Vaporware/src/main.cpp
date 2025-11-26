@@ -8,14 +8,14 @@
 #include "backends/imgui_impl_sdl3.h"
 #include <iostream>
 
-#include "scene.hpp"
-#include "renderer.hpp"
-#include "graphics.hpp"
-#include "physics_3d.hpp"
-#include "asset_manager.hpp"
-#include "mesh_builder.hpp"
-#include "camera.hpp"
-#include "rng.hpp"
+#include "Vapor/scene.hpp"
+#include "Vapor/renderer.hpp"
+#include "Vapor/graphics.hpp"
+#include "Vapor/physics_3d.hpp"
+#include "Vapor/asset_manager.hpp"
+#include "Vapor/mesh_builder.hpp"
+#include "Vapor/camera.hpp"
+#include "Vapor/rng.hpp"
 
 
 int main(int argc, char* args[]) {

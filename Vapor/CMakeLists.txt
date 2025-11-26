@@ -1,7 +1,3 @@
-# ===================================================================
-#           project-vapor/Vapor/CMakeLists.txt
-# ===================================================================
-
 find_package(args CONFIG REQUIRED)
 find_package(fmt CONFIG REQUIRED)
 find_package(glm CONFIG REQUIRED)
@@ -14,10 +10,7 @@ find_package(SDL3 CONFIG REQUIRED)
 add_subdirectory(metal)
 add_subdirectory(MikkTSpace)
 
-# 1. 定義 "Vapor" 函式庫
-add_library(Vapor "") # 來源檔案稍後加入
-
-target_sources(Vapor PRIVATE
+set(SOURCES
     src/asset_manager.cpp
     src/asset_serializer.cpp
     src/camera.cpp
@@ -27,7 +20,6 @@ target_sources(Vapor PRIVATE
     src/renderer_metal.cpp
     src/renderer_vulkan.cpp
     src/scene.cpp
-    # IMGUI 來源檔案
     imgui/imgui.cpp
     imgui/imgui_draw.cpp
     imgui/imgui_tables.cpp
@@ -38,21 +30,21 @@ target_sources(Vapor PRIVATE
     imgui/backends/imgui_impl_metal.mm
 )
 
+add_library(Vapor ${SOURCES})
 target_compile_features(Vapor PRIVATE cxx_std_20)
 set_target_properties(Vapor PROPERTIES CXX_EXTENSIONS OFF)
 
-# 2. 設定公開和私有的 Include 路徑
 target_include_directories(Vapor PUBLIC
-    # 當安裝後，告訴使用者 include 目錄在 <prefix>/include
-    $<INSTALL_INTERFACE:include>
-    # 在本地建置時，告訴使用者 include 目錄在目前的 "include" 資料夾
     $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>
+    $<INSTALL_INTERFACE:include>
+    $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/imgui>
+    $<INSTALL_INTERFACE:${CMAKE_INSTALL_INCLUDEDIR}/imgui>
 )
 target_include_directories(Vapor PRIVATE
     ${TINYGLTF_INCLUDE_DIRS}
     imgui
-    "${CMAKE_CURRENT_SOURCE_DIR}/include/Vapor"
-    "${CMAKE_CURRENT_SOURCE_DIR}"
+    ${CMAKE_CURRENT_SOURCE_DIR}/include/Vapor
+    ${CMAKE_CURRENT_SOURCE_DIR}
 )
 
 target_link_libraries(Vapor PUBLIC
@@ -61,21 +53,22 @@ target_link_libraries(Vapor PUBLIC
     cereal::cereal
     SDL3::SDL3
 )
-target_link_libraries(Vapor PRIVATE 
-    metal 
-    Vulkan::Vulkan 
-    taywee::args 
-    mikktspace 
+target_link_libraries(Vapor PRIVATE
+    metal
+    Vulkan::Vulkan
+    taywee::args
+    mikktspace
     Jolt::Jolt
 )
 
 
-# 4. 安裝函式庫 (Skip EXPORT as per request)
-install(TARGETS Vapor 
+install(TARGETS Vapor
     LIBRARY DESTINATION ${CMAKE_INSTALL_LIBDIR}
     ARCHIVE DESTINATION ${CMAKE_INSTALL_LIBDIR}
     RUNTIME DESTINATION ${CMAKE_INSTALL_BINDIR}
 )
 
-# 5. 安裝公開標頭檔
 install(DIRECTORY include/ DESTINATION ${CMAKE_INSTALL_INCLUDEDIR})
+install(DIRECTORY imgui/ DESTINATION ${CMAKE_INSTALL_INCLUDEDIR}/imgui
+    FILES_MATCHING PATTERN "*.h"
+)
