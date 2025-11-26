@@ -1,4 +1,6 @@
 #include "physics_3d.hpp"
+#include "jolt_enki_job_system.hpp"
+#include "task_scheduler.hpp"
 #include <Jolt/Jolt.h>
 #include <Jolt/Core/Factory.h>
 #include <Jolt/Core/JobSystemThreadPool.h>
@@ -190,7 +192,7 @@ Physics3D::~Physics3D() {
     deinit();
 }
 
-void Physics3D::init() {
+void Physics3D::init(Vapor::TaskScheduler& taskScheduler) {
     JPH::RegisterDefaultAllocator();
     JPH::Trace = TraceImpl;
 
@@ -198,9 +200,12 @@ void Physics3D::init() {
     JPH::RegisterTypes();
 
     tempAllocator = std::make_unique<JPH::TempAllocatorImpl>(10 * 1024 * 1024);
-    jobSystem = std::make_unique<JPH::JobSystemThreadPool>(
-      JPH::cMaxPhysicsJobs, JPH::cMaxPhysicsBarriers, std::thread::hardware_concurrency() - 1
-    );
+
+    // Create JoltEnkiJobSystem using the provided task scheduler
+    jobSystem = std::make_unique<Vapor::JoltEnkiJobSystem>(taskScheduler, 2048);
+    // jobSystem = std::make_unique<JPH::JobSystemThreadPool>(
+    //   JPH::cMaxPhysicsJobs, JPH::cMaxPhysicsBarriers, std::thread::hardware_concurrency() - 1
+    // );
 
     const uint cMaxBodies = 1024;
     const uint cNumBodyMutexes = 0;
@@ -248,7 +253,7 @@ void Physics3D::deinit() {
     bodies.clear();
 
     tempAllocator.reset();
-    jobSystem.reset();
+    jobSystem.reset(); // Physics3D owns this
     physicsSystem.reset();
     bodyActivationListener.reset();
     contactListener.reset();

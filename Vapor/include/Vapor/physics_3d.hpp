@@ -9,7 +9,7 @@ class Scene;
 
 namespace JPH {
     class TempAllocatorImpl;
-    class JobSystemThreadPool;
+    class JobSystem;
     class PhysicsSystem;
     class BodyInterface;
     class BodyID;
@@ -18,6 +18,11 @@ namespace JPH {
     class BroadPhaseLayerInterface;
     class ObjectVsBroadPhaseLayerFilter;
     class ObjectLayerPairFilter;
+}
+
+namespace Vapor {
+    class JoltEnkiJobSystem;
+    class TaskScheduler;
 }
 
 class BPLayerInterfaceImpl;
@@ -63,7 +68,7 @@ public:
     Physics3D();
     ~Physics3D();
 
-    void init();
+    void init(Vapor::TaskScheduler& taskScheduler);
     void process(const std::shared_ptr<Scene>& scene, float dt);
     void drawImGui(float dt);
     void deinit();
@@ -87,7 +92,7 @@ private:
     constexpr static float FIXED_TIME_STEP = 1.0f / 60.0f;
 
     std::unique_ptr<JPH::TempAllocatorImpl> tempAllocator;
-    std::unique_ptr<JPH::JobSystemThreadPool> jobSystem;
+    std::unique_ptr<Vapor::JoltEnkiJobSystem> jobSystem; // Owned by Physics3D
     std::unique_ptr<JPH::PhysicsSystem> physicsSystem;
     std::unique_ptr<BPLayerInterfaceImpl> broad_phase_layer_interface;
     std::unique_ptr<ObjectVsBroadPhaseLayerFilterImpl> object_vs_broadphase_layer_filter;
