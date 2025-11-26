@@ -312,6 +312,45 @@ public:
     virtual Uint32 getSwapchainWidth() const = 0;
     virtual Uint32 getSwapchainHeight() const = 0;
     virtual PixelFormat getSwapchainFormat() const = 0;
+
+    // ========================================================================
+    // Backend Query Interface (for backend-specific operations)
+    // ========================================================================
+    // These methods allow accessing backend-specific objects when needed
+    // (e.g., for third-party library integration like ImGui)
+    // Returns nullptr for non-matching backends
+
+    virtual void* getBackendDevice() const { return nullptr; }
+    virtual void* getBackendPhysicalDevice() const { return nullptr; }
+    virtual void* getBackendInstance() const { return nullptr; }
+    virtual void* getBackendQueue() const { return nullptr; }
+    virtual void* getBackendCommandBuffer() const { return nullptr; }
+
+    // Type-safe template wrappers
+    template<typename T>
+    T* getBackendDeviceAs() const {
+        return static_cast<T*>(getBackendDevice());
+    }
+
+    template<typename T>
+    T* getBackendPhysicalDeviceAs() const {
+        return static_cast<T*>(getBackendPhysicalDevice());
+    }
+
+    template<typename T>
+    T* getBackendInstanceAs() const {
+        return static_cast<T*>(getBackendInstance());
+    }
+
+    template<typename T>
+    T* getBackendQueueAs() const {
+        return static_cast<T*>(getBackendQueue());
+    }
+
+    template<typename T>
+    T* getBackendCommandBufferAs() const {
+        return static_cast<T*>(getBackendCommandBuffer());
+    }
 };
 
 // ============================================================================

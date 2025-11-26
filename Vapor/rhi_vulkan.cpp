@@ -926,6 +926,30 @@ PixelFormat RHI_Vulkan::getSwapchainFormat() const {
 }
 
 // ============================================================================
+// Backend Query Interface
+// ============================================================================
+
+void* RHI_Vulkan::getBackendDevice() const {
+    return (void*)device;
+}
+
+void* RHI_Vulkan::getBackendPhysicalDevice() const {
+    return (void*)physicalDevice;
+}
+
+void* RHI_Vulkan::getBackendInstance() const {
+    return (void*)instance;
+}
+
+void* RHI_Vulkan::getBackendQueue() const {
+    return (void*)graphicsQueue;
+}
+
+void* RHI_Vulkan::getBackendCommandBuffer() const {
+    return (void*)currentCommandBuffer;
+}
+
+// ============================================================================
 // Internal Helpers - Initialization (Simplified stubs)
 // ============================================================================
 

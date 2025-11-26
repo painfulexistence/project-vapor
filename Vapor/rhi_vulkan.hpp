@@ -82,6 +82,16 @@ public:
     Uint32 getSwapchainHeight() const override;
     PixelFormat getSwapchainFormat() const override;
 
+    // ========================================================================
+    // Backend Query Interface
+    // ========================================================================
+
+    void* getBackendDevice() const override;
+    void* getBackendPhysicalDevice() const override;
+    void* getBackendInstance() const override;
+    void* getBackendQueue() const override;
+    void* getBackendCommandBuffer() const override;
+
 private:
     // ========================================================================
     // Vulkan Objects
