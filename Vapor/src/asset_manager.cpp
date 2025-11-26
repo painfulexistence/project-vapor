@@ -1,15 +1,15 @@
 #include "asset_manager.hpp"
 
-#include <fmt/core.h>
 #include <SDL3/SDL_filesystem.h>
 #include <SDL3/SDL_stdinc.h>
+#include <filesystem>
+#include <fmt/core.h>
 #include <glm/ext/matrix_float4x4.hpp>
 #include <glm/ext/matrix_transform.hpp>
 #include <glm/gtc/quaternion.hpp>
-#include <filesystem>
 
 #define STB_IMAGE_IMPLEMENTATION
-#include "stb/stb_image.h"
+#include <stb_image.h>
 
 #define STB_IMAGE_WRITE_IMPLEMENTATION
 #include "stb/stb_image_write.h"
@@ -47,13 +47,12 @@ std::shared_ptr<Image> AssetManager::loadImage(const std::string& filename) {
     }
     uint8_t* data = stbi_load((SDL_GetBasePath() + filename).c_str(), &width, &height, &numChannels, desiredChannels);
     if (data) {
-        auto image = std::make_shared<Image>(Image {
-            .uri = filename,
-            .width = static_cast<Uint32>(width),
-            .height = static_cast<Uint32>(height),
-            .channelCount = static_cast<Uint32>(desiredChannels),
-            .byteArray = std::vector<Uint8>(data, data + width * height * desiredChannels)
-        });
+        auto image = std::make_shared<Image>(Image{
+          .uri = filename,
+          .width = static_cast<Uint32>(width),
+          .height = static_cast<Uint32>(height),
+          .channelCount = static_cast<Uint32>(desiredChannels),
+          .byteArray = std::vector<Uint8>(data, data + width * height * desiredChannels) });
         stbi_image_free(data);
         return image;
     } else {
@@ -72,7 +71,14 @@ std::shared_ptr<Mesh> AssetManager::loadOBJ(const std::string& filename, const s
     std::vector<tinyobj::material_t> materials;
     std::string err;
 
-    if (!tinyobj::LoadObj(&attrib, &shapes, &materials, &err, (SDL_GetBasePath() + filename).c_str(), mtl_basedir.empty() ? nullptr : (SDL_GetBasePath() + mtl_basedir).c_str())) {
+    if (!tinyobj::LoadObj(
+          &attrib,
+          &shapes,
+          &materials,
+          &err,
+          (SDL_GetBasePath() + filename).c_str(),
+          mtl_basedir.empty() ? nullptr : (SDL_GetBasePath() + mtl_basedir).c_str()
+        )) {
         throw std::runtime_error(fmt::format("Failed to load model: {}", err));
     }
 
@@ -199,7 +205,7 @@ std::shared_ptr<Mesh> AssetManager::loadOBJ(const std::string& filename, const s
 // }
 std::shared_ptr<Scene> AssetManager::loadGLTF(const std::string& filename) {
     std::filesystem::path filePath(SDL_GetBasePath() + filename);
-    std::filesystem::path scenePath(filePath); // make a copy
+    std::filesystem::path scenePath(filePath);// make a copy
     if (std::filesystem::exists(scenePath.replace_extension(".vscene"))) {
         return AssetSerializer::deserializeScene(scenePath.string());
     }
@@ -228,40 +234,52 @@ std::shared_ptr<Scene> AssetManager::loadGLTF(const std::string& filename) {
 
     std::shared_ptr<Scene> scene = std::make_shared<Scene>();
 
-    const auto GetLocalMatrix = [](const tinygltf::Node &node) -> glm::mat4{
+    const auto GetLocalMatrix = [](const tinygltf::Node& node) -> glm::mat4 {
         if (!node.matrix.empty()) {
             return glm::mat4(
-                node.matrix[0], node.matrix[1], node.matrix[2], node.matrix[3],
-                node.matrix[4], node.matrix[5], node.matrix[6], node.matrix[7],
-                node.matrix[8], node.matrix[9], node.matrix[10], node.matrix[11],
-                node.matrix[12], node.matrix[13], node.matrix[14], node.matrix[15]
+              node.matrix[0],
+              node.matrix[1],
+              node.matrix[2],
+              node.matrix[3],
+              node.matrix[4],
+              node.matrix[5],
+              node.matrix[6],
+              node.matrix[7],
+              node.matrix[8],
+              node.matrix[9],
+              node.matrix[10],
+              node.matrix[11],
+              node.matrix[12],
+              node.matrix[13],
+              node.matrix[14],
+              node.matrix[15]
             );
         }
         const auto translation =
-            node.translation.empty()
+          node.translation.empty()
             ? glm::mat4(1.0f)
-            : glm::translate(glm::mat4(1.0f), glm::vec3(node.translation[0], node.translation[1], node.translation[2]));;
+            : glm::translate(glm::mat4(1.0f), glm::vec3(node.translation[0], node.translation[1], node.translation[2]));
+        ;
         const auto rotationQuat =
-            node.rotation.empty()
+          node.rotation.empty()
             ? glm::quat(1, 0, 0, 0)
-            : glm::quat(float(node.rotation[3]), float(node.rotation[0]), float(node.rotation[1]),float(node.rotation[2]));
+            : glm::quat(
+                float(node.rotation[3]), float(node.rotation[0]), float(node.rotation[1]), float(node.rotation[2])
+              );
         const auto TR = translation * glm::mat4_cast(rotationQuat);
-        return node.scale.empty()
-            ? TR
-            : glm::scale(TR, glm::vec3(node.scale[0], node.scale[1], node.scale[2]));
+        return node.scale.empty() ? TR : glm::scale(TR, glm::vec3(node.scale[0], node.scale[1], node.scale[2]));
     };
 
     // Load images
     std::vector<std::shared_ptr<Image>> images;
     images.reserve(model.images.size());
     for (const auto& img : model.images) {
-        images.push_back(std::make_shared<Image>(Image {
-            .uri = img.uri,
-            .width = static_cast<Uint32>(img.width),
-            .height = static_cast<Uint32>(img.height),
-            .channelCount = static_cast<Uint32>(img.component),
-            .byteArray = std::vector<Uint8>(img.image.begin(), img.image.end())
-        }));
+        images.push_back(std::make_shared<Image>(Image{ .uri = img.uri,
+                                                        .width = static_cast<Uint32>(img.width),
+                                                        .height = static_cast<Uint32>(img.height),
+                                                        .channelCount = static_cast<Uint32>(img.component),
+                                                        .byteArray =
+                                                          std::vector<Uint8>(img.image.begin(), img.image.end()) }));
     }
 
     // Load materials
@@ -279,7 +297,12 @@ std::shared_ptr<Scene> AssetManager::loadGLTF(const std::string& filename) {
         }
         material->alphaCutoff = mat.alphaCutoff;
         material->doubleSided = mat.doubleSided;
-        material->baseColorFactor = glm::vec4(mat.pbrMetallicRoughness.baseColorFactor[0], mat.pbrMetallicRoughness.baseColorFactor[1], mat.pbrMetallicRoughness.baseColorFactor[2], mat.pbrMetallicRoughness.baseColorFactor[3]);
+        material->baseColorFactor = glm::vec4(
+          mat.pbrMetallicRoughness.baseColorFactor[0],
+          mat.pbrMetallicRoughness.baseColorFactor[1],
+          mat.pbrMetallicRoughness.baseColorFactor[2],
+          mat.pbrMetallicRoughness.baseColorFactor[3]
+        );
         material->metallicFactor = mat.pbrMetallicRoughness.metallicFactor;
         material->roughnessFactor = mat.pbrMetallicRoughness.roughnessFactor;
         material->emissiveFactor = glm::vec3(mat.emissiveFactor[0], mat.emissiveFactor[1], mat.emissiveFactor[2]);
@@ -350,13 +373,10 @@ std::shared_ptr<Scene> AssetManager::loadGLTF(const std::string& filename) {
                 const auto& accessor = model.accessors[primitive.attributes.at("POSITION")];
                 const auto& bufferView = model.bufferViews[accessor.bufferView];
                 const auto& buffer = model.buffers[bufferView.buffer];
-                const float* data = reinterpret_cast<const float*>(&buffer.data[bufferView.byteOffset + accessor.byteOffset]);
+                const float* data =
+                  reinterpret_cast<const float*>(&buffer.data[bufferView.byteOffset + accessor.byteOffset]);
                 for (size_t i = 0; i < vertexCount; i++) {
-                    mesh->vertices[i].position = glm::vec3(
-                        data[i * 3 + 0],
-                        data[i * 3 + 1],
-                        data[i * 3 + 2]
-                    );
+                    mesh->vertices[i].position = glm::vec3(data[i * 3 + 0], data[i * 3 + 1], data[i * 3 + 2]);
                 }
                 if (accessor.minValues.size() > 0 && accessor.maxValues.size() > 0) {
                     mesh->localAABBMin = glm::vec3(accessor.minValues[0], accessor.minValues[1], accessor.minValues[2]);
@@ -370,47 +390,39 @@ std::shared_ptr<Scene> AssetManager::loadGLTF(const std::string& filename) {
                 const auto& accessor = model.accessors[primitive.attributes.at("NORMAL")];
                 const auto& bufferView = model.bufferViews[accessor.bufferView];
                 const auto& buffer = model.buffers[bufferView.buffer];
-                const float* data = reinterpret_cast<const float*>(&buffer.data[bufferView.byteOffset + accessor.byteOffset]);
+                const float* data =
+                  reinterpret_cast<const float*>(&buffer.data[bufferView.byteOffset + accessor.byteOffset]);
                 for (size_t i = 0; i < vertexCount; i++) {
-                    mesh->vertices[i].normal = glm::vec3(
-                        data[i * 3 + 0],
-                        data[i * 3 + 1],
-                        data[i * 3 + 2]
-                    );
+                    mesh->vertices[i].normal = glm::vec3(data[i * 3 + 0], data[i * 3 + 1], data[i * 3 + 2]);
                 }
             }
             if (mesh->hasTangent) {
                 const auto& accessor = model.accessors[primitive.attributes.at("TANGENT")];
                 const auto& bufferView = model.bufferViews[accessor.bufferView];
                 const auto& buffer = model.buffers[bufferView.buffer];
-                const float* data = reinterpret_cast<const float*>(&buffer.data[bufferView.byteOffset + accessor.byteOffset]);
+                const float* data =
+                  reinterpret_cast<const float*>(&buffer.data[bufferView.byteOffset + accessor.byteOffset]);
                 for (size_t i = 0; i < vertexCount; i++) {
-                    mesh->vertices[i].tangent = glm::vec4(
-                        data[i * 4 + 0],
-                        data[i * 4 + 1],
-                        data[i * 4 + 2],
-                        data[i * 4 + 3]
-                    );
+                    mesh->vertices[i].tangent =
+                      glm::vec4(data[i * 4 + 0], data[i * 4 + 1], data[i * 4 + 2], data[i * 4 + 3]);
                 }
             }
             if (mesh->hasUV0) {
                 const auto& accessor = model.accessors[primitive.attributes.at("TEXCOORD_0")];
                 const auto& bufferView = model.bufferViews[accessor.bufferView];
                 const auto& buffer = model.buffers[bufferView.buffer];
-                const float* data = reinterpret_cast<const float*>(&buffer.data[bufferView.byteOffset + accessor.byteOffset]);
+                const float* data =
+                  reinterpret_cast<const float*>(&buffer.data[bufferView.byteOffset + accessor.byteOffset]);
                 for (size_t i = 0; i < vertexCount; i++) {
-                    mesh->vertices[i].uv = glm::vec2(
-                        data[i * 2 + 0],
-                        data[i * 2 + 1]
-                    );
+                    mesh->vertices[i].uv = glm::vec2(data[i * 2 + 0], data[i * 2 + 1]);
                 }
             }
             if (mesh->hasColor) {
                 // const auto& accessor = model.accessors[primitive.attributes.at("COLOR_0")];
                 // const auto& bufferView = model.bufferViews[accessor.bufferView];
                 // const auto& buffer = model.buffers[bufferView.buffer];
-                // const float* data = reinterpret_cast<const float*>(&buffer.data[bufferView.byteOffset + accessor.byteOffset]);
-                // for (size_t i = 0; i < vertexCount; i++) {
+                // const float* data = reinterpret_cast<const float*>(&buffer.data[bufferView.byteOffset +
+                // accessor.byteOffset]); for (size_t i = 0; i < vertexCount; i++) {
                 //     mesh->vertices[i].color = glm::vec4(
                 //         data[i * 4 + 0],
                 //         data[i * 4 + 1],
@@ -428,27 +440,24 @@ std::shared_ptr<Scene> AssetManager::loadGLTF(const std::string& filename) {
 
                 switch (accessor.componentType) {
                 case TINYGLTF_COMPONENT_TYPE_UNSIGNED_SHORT: {
-                    const Uint16* data = reinterpret_cast<const Uint16*>(
-                        &buffer.data[bufferView.byteOffset + accessor.byteOffset]
-                    );
+                    const Uint16* data =
+                      reinterpret_cast<const Uint16*>(&buffer.data[bufferView.byteOffset + accessor.byteOffset]);
                     for (size_t i = 0; i < accessor.count; i++) {
                         mesh->indices[i] = static_cast<Uint32>(data[i]);
                     }
                     break;
                 }
                 case TINYGLTF_COMPONENT_TYPE_UNSIGNED_INT: {
-                    const Uint32* data = reinterpret_cast<const Uint32*>(
-                        &buffer.data[bufferView.byteOffset + accessor.byteOffset]
-                    );
+                    const Uint32* data =
+                      reinterpret_cast<const Uint32*>(&buffer.data[bufferView.byteOffset + accessor.byteOffset]);
                     for (size_t i = 0; i < accessor.count; i++) {
                         mesh->indices[i] = data[i];
                     }
                     break;
                 }
                 case TINYGLTF_COMPONENT_TYPE_UNSIGNED_BYTE: {
-                    const Uint8* data = reinterpret_cast<const Uint8*>(
-                        &buffer.data[bufferView.byteOffset + accessor.byteOffset]
-                    );
+                    const Uint8* data =
+                      reinterpret_cast<const Uint8*>(&buffer.data[bufferView.byteOffset + accessor.byteOffset]);
                     for (size_t i = 0; i < accessor.count; i++) {
                         mesh->indices[i] = static_cast<Uint32>(data[i]);
                     }
@@ -525,7 +534,7 @@ std::shared_ptr<Scene> AssetManager::loadGLTF(const std::string& filename) {
     for (int nodeIdx : srcScene.nodes) {
         scene->nodes.push_back(createNode(nodeIdx));
     }
-    scene->update(0.0f); // making sure world transform is updated
+    scene->update(0.0f);// making sure world transform is updated
 
     AssetSerializer::serializeScene(scene, scenePath.string());
 
@@ -534,7 +543,7 @@ std::shared_ptr<Scene> AssetManager::loadGLTF(const std::string& filename) {
 
 std::shared_ptr<Scene> AssetManager::loadGLTFOptimized(const std::string& filename) {
     std::filesystem::path filePath(SDL_GetBasePath() + filename);
-    std::filesystem::path scenePath(filePath); // make a copy
+    std::filesystem::path scenePath(filePath);// make a copy
     if (std::filesystem::exists(scenePath.replace_extension(".vscene_optimized"))) {
         return AssetSerializer::deserializeScene(scenePath.string());
     }
@@ -573,7 +582,8 @@ std::shared_ptr<Scene> AssetManager::loadGLTFOptimized(const std::string& filena
 
     Uint32 currentVertexOffset = 0;
     Uint32 currentIndexOffset = 0;
-    std::function<std::shared_ptr<Node>(const std::shared_ptr<Node>&)> processNode = [&](const std::shared_ptr<Node>& originalNode) -> std::shared_ptr<Node> {
+    std::function<std::shared_ptr<Node>(const std::shared_ptr<Node>&)> processNode =
+      [&](const std::shared_ptr<Node>& originalNode) -> std::shared_ptr<Node> {
         auto newNode = std::make_shared<Node>();
         newNode->name = originalNode->name;
         newNode->localTransform = originalNode->localTransform;
@@ -597,12 +607,10 @@ std::shared_ptr<Scene> AssetManager::loadGLTFOptimized(const std::string& filena
                 newMesh->indexOffset = currentIndexOffset;
                 newMesh->vertexCount = originalMesh->vertices.size();
                 newMesh->indexCount = originalMesh->indices.size();
-                newMesh->isGeometryDirty = false; // prevent AABB updating
+                newMesh->isGeometryDirty = false;// prevent AABB updating
 
                 optimizedScene->vertices.insert(
-                    optimizedScene->vertices.end(),
-                    originalMesh->vertices.begin(),
-                    originalMesh->vertices.end()
+                  optimizedScene->vertices.end(), originalMesh->vertices.begin(), originalMesh->vertices.end()
                 );
                 for (Uint32 index : originalMesh->indices) {
                     optimizedScene->indices.push_back(index);
@@ -611,8 +619,13 @@ std::shared_ptr<Scene> AssetManager::loadGLTFOptimized(const std::string& filena
                 currentIndexOffset += originalMesh->indices.size();
                 newMeshGroup->meshes.push_back(newMesh);
 
-                fmt::print("Mesh: vertexOffset={}, indexOffset={}, vertexCount={}, indexCount={}\n",
-                    newMesh->vertexOffset, newMesh->indexOffset, newMesh->vertexCount, newMesh->indexCount);
+                fmt::print(
+                  "Mesh: vertexOffset={}, indexOffset={}, vertexCount={}, indexCount={}\n",
+                  newMesh->vertexOffset,
+                  newMesh->indexOffset,
+                  newMesh->vertexCount,
+                  newMesh->indexCount
+                );
 
                 // TODO: clean up
                 // originalMesh->vertices.clear();
@@ -631,10 +644,13 @@ std::shared_ptr<Scene> AssetManager::loadGLTFOptimized(const std::string& filena
         optimizedScene->nodes.push_back(newNode);
     }
 
-    fmt::print("Optimized scene created: {} vertices, {} indices\n",
-               optimizedScene->vertices.size(), optimizedScene->indices.size());
+    fmt::print(
+      "Optimized scene created: {} vertices, {} indices\n",
+      optimizedScene->vertices.size(),
+      optimizedScene->indices.size()
+    );
 
-    optimizedScene->update(0.0f); // making sure world transform is updated
+    optimizedScene->update(0.0f);// making sure world transform is updated
 
     AssetSerializer::serializeScene(optimizedScene, scenePath.string());
 
