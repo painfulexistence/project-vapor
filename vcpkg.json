@@ -1,13 +1,21 @@
 {
-    "name": "project-vapor",
-    "version": "0.0.1",
-    "license": "MIT",
-    "dependencies": [
-      "fmt",
-      "glm",
-      "args",
-      "tinygltf",
-      "cereal",
-      "joltphysics"
-    ]
+  "name": "project-vapor",
+  "version": "0.0.1",
+  "license": "MIT",
+  "dependencies": [
+    "fmt",
+    "glm",
+    "args",
+    "tinygltf",
+    "cereal",
+    "joltphysics",
+    "sdl3",
+    "vulkan",
+    {
+      "name": "glslang",
+      "features": [
+        "tools"
+      ]
+    }
+  ]
 }
