@@ -48,7 +48,7 @@ This document describes the ongoing refactoring to separate the Renderer layer f
 
 ### ✅ Completed (Phase 2)
 
-**Renamed SceneRenderer to Renderer and Created RHI_Vulkan Foundation**
+**Renamed SceneRenderer to Renderer and Created Complete RHI Implementations**
 
 1. **Renamed SceneRenderer to Renderer**
    - `scene_renderer.hpp/cpp` → `renderer.hpp/cpp`
@@ -57,81 +57,56 @@ This document describes the ongoing refactoring to separate the Renderer layer f
 
 2. **Preserved Legacy Code**
    - Old `renderer.hpp` → `renderer_legacy.hpp`
-   - Keeps backward compatibility with existing `Renderer_Vulkan`
-   - Will be removed once migration is complete
+   - Keeps backward compatibility with existing `Renderer_Vulkan` and `Renderer_Metal`
+   - Old renderers (`renderer_vulkan.cpp`, `renderer_metal.cpp`) kept temporarily for reference
 
-3. **Created RHI_Vulkan Implementation** (`rhi_vulkan.hpp/cpp`)
-   - ✅ Basic structure and resource handle management
-   - ✅ Buffer creation/update/destruction
-   - ✅ Texture creation/destruction
-   - ✅ Shader module management
-   - ✅ Sampler creation
-   - ✅ Memory type finding and allocation
-   - ✅ Format/mode conversion utilities
-   - ✅ Frame synchronization structure (fences, semaphores)
+3. **Created Complete RHI_Vulkan Implementation** (`rhi_vulkan.hpp/cpp`)
+   - ✅ Full Vulkan initialization (instance, surface, device, swapchain)
+   - ✅ Logical device creation with queue family management
+   - ✅ Swapchain creation with surface format selection
+   - ✅ Command pool and command buffer allocation
+   - ✅ Buffer creation/update/destruction with memory management
+   - ✅ Texture creation/destruction with image views
+   - ✅ Texture upload with staging buffers and layout transitions
+   - ✅ Shader module management (SPIR-V)
+   - ✅ Sampler creation with all filter modes
+   - ✅ Complete pipeline creation with all states (vertex input, rasterization, depth/stencil, blend)
+   - ✅ Dynamic rendering support (VK_KHR_dynamic_rendering)
+   - ✅ Frame operations (beginFrame/endFrame with proper synchronization)
+   - ✅ Render pass implementation using vkCmdBeginRenderingKHR
    - ✅ Draw command recording (draw, drawIndexed)
-   - ⏳ Pipeline creation (stub implemented, needs full implementation)
-   - ⏳ Descriptor set management (TODO)
-   - ⏳ Render pass management (TODO)
-   - ⏳ Vulkan initialization (stubs with warnings)
-   - ⏳ Texture upload (needs staging buffers)
+   - ✅ Descriptor binding (uniforms, storage buffers, textures)
+   - ✅ Backend query interface for ImGui integration
 
-4. **Updated Build System**
-   - CMakeLists.txt includes new files
-   - Proper compilation setup
+4. **Created Complete RHI_Metal Implementation** (`rhi_metal.hpp/cpp`)
+   - ✅ Metal initialization via SDL MetalLayer
+   - ✅ Device and command queue creation
+   - ✅ Buffer creation/update/destruction with storage modes
+   - ✅ Texture creation/destruction
+   - ✅ Texture upload with replaceRegion
+   - ✅ Shader library and function management (Metal shading language)
+   - ✅ Sampler state creation
+   - ✅ Complete render pipeline creation with blend modes
+   - ✅ Frame operations (beginFrame/endFrame with drawable management)
+   - ✅ Render pass implementation with MTLRenderCommandEncoder
+   - ✅ Draw command recording
+   - ✅ Resource binding (vertex buffers, index buffers, uniforms, textures)
+   - ✅ Backend query interface for ImGui integration
+   - ✅ Format conversion helpers
 
-### 🚧 In Progress (Phase 2 Continued)
+5. **Backend-Specific Call Support**
+   - ✅ Added Backend Query Interface to RHI base class
+   - ✅ Implemented in both RHI_Vulkan and RHI_Metal
+   - ✅ Type-safe template wrappers for casting
+   - ✅ Documentation in `BACKEND_SPECIFIC_CALLS.md`
 
-**Complete RHI_Vulkan Implementation**
-
-**Remaining Tasks:**
-
-1. **Full Vulkan Initialization**
-   - Complete `createInstance()` - instance creation with validation layers
-   - Complete `createSurface()` - SDL window surface
-   - Complete `pickPhysicalDevice()` - select suitable GPU
-   - Complete `createLogicalDevice()` - create device with queues
-   - Complete `createSwapchain()` - swapchain creation and management
-   - Complete `createCommandPool()` and `createCommandBuffers()`
-
-2. **Pipeline Creation**
-   - Implement complete `createPipeline()` method
-   - Shader stage setup
-   - Vertex input state
-   - Rasterization, depth/stencil, blend states
-   - Pipeline layout with descriptor set layouts
-
-3. **Descriptor Set Management**
-   - Descriptor pool creation
-   - Descriptor set layouts
-   - Descriptor set allocation and updates
-   - Implement `setUniformBuffer()`, `setStorageBuffer()`, `setTexture()`
-
-4. **Render Pass Implementation**
-   - Complete `beginRenderPass()` with proper setup
-   - Framebuffer creation
-   - Clear value handling
-   - Multiple render targets support
-
-5. **Texture Upload**
-   - Staging buffer creation
-   - Command buffer for copy operations
-   - Image layout transitions
-   - Complete `updateTexture()` implementation
-
-6. **Integration Testing**
-   - Update main.cpp to use new Renderer + RHI_Vulkan
-   - Test basic triangle rendering
-   - Test scene loading and rendering
-   - Verify resource management
+6. **Updated Build System**
+   - ✅ CMakeLists.txt includes rhi_vulkan.cpp and rhi_metal.cpp
+   - ✅ Proper compilation setup for both backends
 
 ### 📋 Planned (Phase 3)
 
-1. **Refactor Metal Backend** (`renderer_metal.cpp` → `rhi_metal.cpp`)
-   - Similar process as Vulkan
-   - Implement RHI interface for Metal
-
-2. **Update Application Layer** (`main.cpp`, asset loading)
+1. **Update Application Layer** (`main.cpp`, asset loading)
    - Remove direct renderer usage
    - Use SceneRenderer for all rendering
    - Register scene resources with renderer
@@ -297,5 +272,5 @@ SceneRenderer::endFrame()
 
 ---
 
-**Last Updated**: 2025-01-25
-**Status**: Phase 1 Complete, Phase 2 Foundation Complete (RHI_Vulkan basic structure), Phase 2 Implementation In Progress
+**Last Updated**: 2025-11-26
+**Status**: Phase 1 ✅ Complete, Phase 2 ✅ Complete (Both RHI_Vulkan and RHI_Metal fully implemented), Phase 3 Ready to Begin
