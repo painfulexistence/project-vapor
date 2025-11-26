@@ -16,6 +16,7 @@
 #include "Vapor/mesh_builder.hpp"
 #include "Vapor/camera.hpp"
 #include "Vapor/rng.hpp"
+#include "Vapor/engine_core.hpp"
 
 
 int main(int argc, char* args[]) {
@@ -82,13 +83,35 @@ int main(int argc, char* args[]) {
 
     RNG rng;
 
+    // Initialize engine core with enkiTS task scheduler
+    auto engineCore = std::make_unique<Vapor::EngineCore>();
+    engineCore->init(); // Auto-detects thread count
+    fmt::print("Engine core initialized\n");
+
     auto renderer = createRenderer(gfxBackend);
     renderer->init(window);
 
+    // Initialize physics (Physics3D creates its own JoltEnkiJobSystem internally)
     auto physics = std::make_unique<Physics3D>();
-    physics->init();
+    physics->init(engineCore->getTaskScheduler());
 
-    auto scene = AssetManager::loadGLTFOptimized(std::string("assets/models/Sponza/Sponza.gltf"));
+    // Get resource manager
+    auto& resourceManager = engineCore->getResourceManager();
+
+    // Load scene asynchronously
+    fmt::print("Loading scene asynchronously...\n");
+    auto sceneResource = resourceManager.loadScene(
+        std::string("assets/models/Sponza/Sponza.gltf"),
+        true,  // optimized
+        Vapor::LoadMode::Async,
+        [](std::shared_ptr<Scene> loadedScene) {
+            fmt::print("Scene loaded with {} nodes\n", loadedScene->nodes.size());
+        }
+    );
+
+    // Wait for scene to be ready (blocking for now, but async in background)
+    auto scene = sceneResource->get();
+    fmt::print("Scene ready for rendering\n");
     scene->directionalLights.push_back({
         .direction = glm::vec3(0.5, -1.0, 0.0),
         .color = glm::vec3(1.0, 1.0, 1.0),
@@ -102,11 +125,30 @@ int main(int argc, char* args[]) {
             .radius = 0.5f
         });
     }
+    // Load textures asynchronously
+    fmt::print("Loading textures...\n");
+    auto albedoResource = resourceManager.loadImage(
+        std::string("assets/textures/american_walnut_albedo.png"),
+        Vapor::LoadMode::Async
+    );
+    auto normalResource = resourceManager.loadImage(
+        std::string("assets/textures/american_walnut_normal.png"),
+        Vapor::LoadMode::Async
+    );
+    auto roughnessResource = resourceManager.loadImage(
+        std::string("assets/textures/american_walnut_roughness.png"),
+        Vapor::LoadMode::Async
+    );
+
+    // Wait for all textures to load
+    resourceManager.waitForAll();
+
     auto material = std::make_shared<Material>(Material {
-        .albedoMap = AssetManager::loadImage(std::string("assets/textures/american_walnut_albedo.png")),
-        .normalMap = AssetManager::loadImage(std::string("assets/textures/american_walnut_normal.png")),
-        .roughnessMap = AssetManager::loadImage(std::string("assets/textures/american_walnut_roughness.png")),
+        .albedoMap = albedoResource->get(),
+        .normalMap = normalResource->get(),
+        .roughnessMap = roughnessResource->get(),
     });
+    fmt::print("Textures loaded\n");
     auto entity1 = scene->createNode("Cube 1");
     scene->addMeshToNode(entity1, MeshBuilder::buildCube(1.0f, material));
     entity1->setPosition(glm::vec3(-2.0f, 10.5f, 0.0f));
@@ -259,6 +301,9 @@ int main(int argc, char* args[]) {
             l.intensity = 3.0f + 2.0f * (0.5f + 0.5f * sin(time * 0.3f + i * 0.1f));
         }
 
+        // Update engine core (handles async task completion)
+        engineCore->update(deltaTime);
+
         scene->update(deltaTime);
         physics->process(scene, deltaTime);
         // scene->update(deltaTime);
@@ -267,7 +312,11 @@ int main(int argc, char* args[]) {
 
         frameCount++;
     }
+
+    // Shutdown subsystems
     renderer->deinit();
+    physics->deinit();
+    engineCore->shutdown();
 
     ImGui::DestroyContext();
 

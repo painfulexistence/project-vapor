@@ -5,6 +5,7 @@ find_package(Vulkan REQUIRED)
 find_path(TINYGLTF_INCLUDE_DIRS "tiny_gltf.h")
 find_package(cereal CONFIG REQUIRED)
 find_package(Jolt CONFIG REQUIRED)
+find_package(enkiTS CONFIG REQUIRED)
 find_package(SDL3 CONFIG REQUIRED)
 
 add_subdirectory(metal)
@@ -23,6 +24,10 @@ set(SOURCES
     src/rhi_vulkan.cpp
     src/rhi_metal.cpp
     src/scene.cpp
+    src/task_scheduler.cpp
+    src/resource_manager.cpp
+    src/jolt_enki_job_system.cpp
+    src/engine_core.cpp
     imgui/imgui.cpp
     imgui/imgui_draw.cpp
     imgui/imgui_tables.cpp
@@ -62,6 +67,7 @@ target_link_libraries(Vapor PRIVATE
     taywee::args
     mikktspace
     Jolt::Jolt
+    enkiTS::enkiTS
 )
 
 
