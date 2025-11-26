@@ -1,6 +1,7 @@
 #include "physics_3d.hpp"
 #include "character_controller.hpp"
 #include "vehicle_controller.hpp"
+#include "fluid_volume.hpp"
 #include "jolt_enki_job_system.hpp"
 #include "task_scheduler.hpp"
 #include <Jolt/Jolt.h>
@@ -355,6 +356,13 @@ void Physics3D::process(const std::shared_ptr<Scene>& scene, float dt) {
                     JPH::EActivation::DontActivate
                 );
             }
+        }
+    }
+
+    // Apply fluid forces before physics update
+    for (auto& fluidVolume : scene->fluidVolumes) {
+        if (fluidVolume) {
+            fluidVolume->applyForcesToBodies(dt);
         }
     }
 

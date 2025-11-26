@@ -1,6 +1,7 @@
 #include "scene.hpp"
 #include "character_controller.hpp"
 #include "vehicle_controller.hpp"
+#include "fluid_volume.hpp"
 
 #include <SDL3/SDL_log.h>
 #include <fmt/core.h>
@@ -191,4 +192,14 @@ void Node::attachCharacterController(Physics3D* physics, const CharacterControll
 
 void Node::attachVehicleController(Physics3D* physics, const VehicleSettings& settings) {
     vehicleController = std::make_unique<VehicleController>(physics, settings, getWorldPosition(), getWorldRotation());
+}
+
+std::shared_ptr<FluidVolume> Scene::createFluidVolume(Physics3D* physics, const FluidVolumeSettings& settings) {
+    auto fluidVolume = std::make_shared<FluidVolume>(physics, settings);
+    fluidVolumes.push_back(fluidVolume);
+    return fluidVolume;
+}
+
+void Scene::addFluidVolume(std::shared_ptr<FluidVolume> fluidVolume) {
+    fluidVolumes.push_back(fluidVolume);
 }

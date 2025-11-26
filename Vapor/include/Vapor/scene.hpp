@@ -16,6 +16,8 @@ class CharacterController;
 struct CharacterControllerSettings;
 class VehicleController;
 struct VehicleSettings;
+class FluidVolume;
+struct FluidVolumeSettings;
 
 struct MeshGroup {
     std::string name;
@@ -172,6 +174,7 @@ public:
     std::vector<std::shared_ptr<Node>> nodes;
     std::vector<DirectionalLight> directionalLights;
     std::vector<PointLight> pointLights;
+    std::vector<std::shared_ptr<FluidVolume>> fluidVolumes;
 
     // GPU-driven rendering
     std::vector<VertexData> vertices;
@@ -192,6 +195,10 @@ public:
     void addNode(std::shared_ptr<Node> node);
     std::shared_ptr<Node> findNode(const std::string& name);
     std::shared_ptr<Node> findNodeInHierarchy(const std::string& name, const std::shared_ptr<Node>& node);
+
+    // Fluid volume management
+    std::shared_ptr<FluidVolume> createFluidVolume(Physics3D* physics, const FluidVolumeSettings& settings);
+    void addFluidVolume(std::shared_ptr<FluidVolume> fluidVolume);
 
     void addMeshToNode(std::shared_ptr<Node> node, std::shared_ptr<Mesh> mesh);
     // void AddLightToNode(std::shared_ptr<Node> node, std::shared_ptr<Light> light);
