@@ -47,9 +47,6 @@ void EngineCore::init(uint32_t numThreads) {
     // Initialize resource manager
     m_resourceManager = std::make_unique<ResourceManager>(*m_taskScheduler);
 
-    // Initialize Jolt job system with enkiTS
-    m_joltJobSystem = std::make_unique<JoltEnkiJobSystem>(*m_taskScheduler, 2048);
-
     m_initialized = true;
 
     fmt::print("EngineCore initialized successfully\n");
@@ -63,10 +60,9 @@ void EngineCore::shutdown() {
     fmt::print("Shutting down EngineCore...\n");
 
     // Wait for all pending tasks
-    waitForAllTasks();
+    m_taskScheduler->waitForAll();
 
     // Cleanup subsystems in reverse order
-    m_joltJobSystem.reset();
     m_resourceManager.reset();
     m_taskScheduler->shutdown();
     m_taskScheduler.reset();
@@ -74,14 +70,6 @@ void EngineCore::shutdown() {
     m_initialized = false;
 
     fmt::print("EngineCore shutdown complete\n");
-}
-
-void EngineCore::waitForAllTasks() {
-    if (!m_initialized) {
-        return;
-    }
-
-    m_taskScheduler->waitForAll();
 }
 
 void EngineCore::update(float deltaTime) {

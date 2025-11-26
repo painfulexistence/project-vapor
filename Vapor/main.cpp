@@ -90,9 +90,9 @@ int main(int argc, char* args[]) {
     auto renderer = createRenderer(gfxBackend);
     renderer->init(window);
 
-    // Initialize physics with enkiTS job system
+    // Initialize physics (Physics3D creates its own JoltEnkiJobSystem internally)
     auto physics = std::make_unique<Physics3D>();
-    physics->init(engineCore->getJoltJobSystem());
+    physics->init(engineCore->getTaskScheduler());
 
     // Get resource manager
     auto& resourceManager = engineCore->getResourceManager();

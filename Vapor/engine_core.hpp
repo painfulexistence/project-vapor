@@ -3,17 +3,15 @@
 
 #include "task_scheduler.hpp"
 #include "resource_manager.hpp"
-#include "jolt_enki_job_system.hpp"
 #include <memory>
 
 namespace Vapor {
 
 /**
- * Central engine core that manages all subsystems
- * Provides unified task scheduling for:
- * - Resource loading
- * - Physics simulation (Jolt)
- * - Multi-threaded rendering (future)
+ * Central engine core that manages core subsystems
+ * Provides:
+ * - Unified task scheduling (TaskScheduler)
+ * - Resource management (ResourceManager)
  */
 class EngineCore {
 public:
@@ -32,12 +30,6 @@ public:
     // Get the resource manager
     ResourceManager& getResourceManager() { return *m_resourceManager; }
 
-    // Get the Jolt job system
-    JoltEnkiJobSystem* getJoltJobSystem() { return m_joltJobSystem.get(); }
-
-    // Wait for all pending tasks across all subsystems
-    void waitForAllTasks();
-
     // Update per-frame (for async task management)
     void update(float deltaTime);
 
@@ -52,7 +44,6 @@ private:
 
     std::unique_ptr<TaskScheduler> m_taskScheduler;
     std::unique_ptr<ResourceManager> m_resourceManager;
-    std::unique_ptr<JoltEnkiJobSystem> m_joltJobSystem;
 
     bool m_initialized{false};
     uint32_t m_numThreads{0};
