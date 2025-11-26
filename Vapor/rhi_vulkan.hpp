@@ -42,6 +42,14 @@ public:
     PipelineHandle createPipeline(const PipelineDesc& desc) override;
     void destroyPipeline(PipelineHandle handle) override;
 
+    ComputePipelineHandle createComputePipeline(const ComputePipelineDesc& desc) override;
+    void destroyComputePipeline(ComputePipelineHandle handle) override;
+
+    AccelStructHandle createAccelerationStructure(const AccelStructDesc& desc) override;
+    void destroyAccelerationStructure(AccelStructHandle handle) override;
+    void buildAccelerationStructure(AccelStructHandle handle) override;
+    void updateAccelerationStructure(AccelStructHandle handle, const std::vector<AccelStructInstance>& instances) override;
+
     // ========================================================================
     // Resource Updates
     // ========================================================================
@@ -73,6 +81,18 @@ public:
 
     void draw(Uint32 vertexCount, Uint32 instanceCount, Uint32 firstVertex, Uint32 firstInstance) override;
     void drawIndexed(Uint32 indexCount, Uint32 instanceCount, Uint32 firstIndex, int32_t vertexOffset, Uint32 firstInstance) override;
+
+    // ========================================================================
+    // Compute Commands
+    // ========================================================================
+
+    void beginComputePass() override;
+    void endComputePass() override;
+    void bindComputePipeline(ComputePipelineHandle pipeline) override;
+    void setComputeBuffer(Uint32 binding, BufferHandle buffer, size_t offset, size_t range) override;
+    void setComputeTexture(Uint32 binding, TextureHandle texture) override;
+    void setAccelerationStructure(Uint32 binding, AccelStructHandle accelStruct) override;
+    void dispatch(Uint32 groupCountX, Uint32 groupCountY, Uint32 groupCountZ) override;
 
     // ========================================================================
     // Utility
@@ -161,17 +181,34 @@ private:
         VkPipelineLayout layout;
     };
 
+    struct ComputePipelineResource {
+        VkPipeline pipeline;
+        VkPipelineLayout layout;
+    };
+
+    struct AccelStructResource {
+        // Vulkan ray tracing is not implemented yet
+        // Will use VK_KHR_acceleration_structure when needed
+        VkBuffer scratchBuffer;
+        VkDeviceMemory scratchMemory;
+        void* buildData;
+    };
+
     Uint32 nextBufferId = 1;
     Uint32 nextTextureId = 1;
     Uint32 nextShaderId = 1;
     Uint32 nextSamplerId = 1;
     Uint32 nextPipelineId = 1;
+    Uint32 nextComputePipelineId = 1;
+    Uint32 nextAccelStructId = 1;
 
     std::unordered_map<Uint32, BufferResource> buffers;
     std::unordered_map<Uint32, TextureResource> textures;
     std::unordered_map<Uint32, ShaderResource> shaders;
     std::unordered_map<Uint32, SamplerResource> samplers;
     std::unordered_map<Uint32, PipelineResource> pipelines;
+    std::unordered_map<Uint32, ComputePipelineResource> computePipelines;
+    std::unordered_map<Uint32, AccelStructResource> accelStructs;
 
     // ========================================================================
     // Internal Helpers

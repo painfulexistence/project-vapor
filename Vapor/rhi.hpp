@@ -49,6 +49,16 @@ struct RenderPassHandle {
     bool isValid() const { return id != UINT32_MAX; }
 };
 
+struct ComputePipelineHandle {
+    Uint32 id = UINT32_MAX;
+    bool isValid() const { return id != UINT32_MAX; }
+};
+
+struct AccelStructHandle {
+    Uint32 id = UINT32_MAX;
+    bool isValid() const { return id != UINT32_MAX; }
+};
+
 struct SamplerHandle {
     Uint32 id = UINT32_MAX;
     bool isValid() const { return id != UINT32_MAX; }
@@ -237,6 +247,48 @@ struct RenderPassDesc {
     bool loadDepth = false;
 };
 
+struct ComputePipelineDesc {
+    ShaderHandle computeShader;
+    // Thread group sizes (for validation/documentation)
+    Uint32 threadGroupSizeX = 1;
+    Uint32 threadGroupSizeY = 1;
+    Uint32 threadGroupSizeZ = 1;
+};
+
+enum class AccelStructType {
+    BottomLevel,  // BLAS - geometry level
+    TopLevel      // TLAS - instance level
+};
+
+struct AccelStructGeometry {
+    BufferHandle vertexBuffer;
+    Uint32 vertexCount;
+    Uint32 vertexStride;
+    BufferHandle indexBuffer;
+    Uint32 indexCount;
+    BufferHandle transformBuffer; // Optional transform matrix
+};
+
+struct AccelStructInstance {
+    AccelStructHandle blas;
+    glm::mat4 transform;
+    Uint32 instanceID;
+    Uint32 mask;
+};
+
+struct AccelStructDesc {
+    AccelStructType type;
+
+    // For BLAS
+    std::vector<AccelStructGeometry> geometries;
+
+    // For TLAS
+    std::vector<AccelStructInstance> instances;
+
+    bool allowUpdate = false;
+    bool preferFastBuild = false;
+};
+
 // ============================================================================
 // RHI Interface
 // ============================================================================
@@ -272,6 +324,14 @@ public:
     virtual PipelineHandle createPipeline(const PipelineDesc& desc) = 0;
     virtual void destroyPipeline(PipelineHandle handle) = 0;
 
+    virtual ComputePipelineHandle createComputePipeline(const ComputePipelineDesc& desc) = 0;
+    virtual void destroyComputePipeline(ComputePipelineHandle handle) = 0;
+
+    virtual AccelStructHandle createAccelerationStructure(const AccelStructDesc& desc) = 0;
+    virtual void destroyAccelerationStructure(AccelStructHandle handle) = 0;
+    virtual void buildAccelerationStructure(AccelStructHandle handle) = 0;
+    virtual void updateAccelerationStructure(AccelStructHandle handle, const std::vector<AccelStructInstance>& instances) = 0;
+
     // ========================================================================
     // Resource Updates
     // ========================================================================
@@ -304,6 +364,18 @@ public:
 
     virtual void draw(Uint32 vertexCount, Uint32 instanceCount = 1, Uint32 firstVertex = 0, Uint32 firstInstance = 0) = 0;
     virtual void drawIndexed(Uint32 indexCount, Uint32 instanceCount = 1, Uint32 firstIndex = 0, int32_t vertexOffset = 0, Uint32 firstInstance = 0) = 0;
+
+    // ========================================================================
+    // Compute Commands
+    // ========================================================================
+
+    virtual void beginComputePass() = 0;
+    virtual void endComputePass() = 0;
+    virtual void bindComputePipeline(ComputePipelineHandle pipeline) = 0;
+    virtual void setComputeBuffer(Uint32 binding, BufferHandle buffer, size_t offset = 0, size_t range = 0) = 0;
+    virtual void setComputeTexture(Uint32 binding, TextureHandle texture) = 0;
+    virtual void setAccelerationStructure(Uint32 binding, AccelStructHandle accelStruct) = 0;
+    virtual void dispatch(Uint32 groupCountX, Uint32 groupCountY = 1, Uint32 groupCountZ = 1) = 0;
 
     // ========================================================================
     // Utility

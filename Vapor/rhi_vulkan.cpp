@@ -1394,6 +1394,127 @@ VkImageUsageFlags RHI_Vulkan::convertTextureUsage(TextureUsage usage) {
 }
 
 // ============================================================================
+// Compute Pipeline
+// ============================================================================
+
+ComputePipelineHandle RHI_Vulkan::createComputePipeline(const ComputePipelineDesc& desc) {
+    auto it = shaders.find(desc.computeShader.id);
+    if (it == shaders.end()) {
+        throw std::runtime_error("Invalid compute shader handle");
+    }
+
+    VkComputePipelineCreateInfo pipelineInfo{};
+    pipelineInfo.sType = VK_STRUCTURE_TYPE_COMPUTE_PIPELINE_CREATE_INFO;
+    pipelineInfo.stage.sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO;
+    pipelineInfo.stage.stage = VK_SHADER_STAGE_COMPUTE_BIT;
+    pipelineInfo.stage.module = it->second.module;
+    pipelineInfo.stage.pName = "main";
+
+    // Create empty pipeline layout (TODO: add descriptor sets)
+    VkPipelineLayoutCreateInfo layoutInfo{};
+    layoutInfo.sType = VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO;
+
+    VkPipelineLayout layout;
+    if (vkCreatePipelineLayout(device, &layoutInfo, nullptr, &layout) != VK_SUCCESS) {
+        throw std::runtime_error("Failed to create compute pipeline layout");
+    }
+
+    pipelineInfo.layout = layout;
+
+    VkPipeline pipeline;
+    if (vkCreateComputePipelines(device, VK_NULL_HANDLE, 1, &pipelineInfo, nullptr, &pipeline) != VK_SUCCESS) {
+        vkDestroyPipelineLayout(device, layout, nullptr);
+        throw std::runtime_error("Failed to create compute pipeline");
+    }
+
+    Uint32 id = nextComputePipelineId++;
+    computePipelines[id] = {pipeline, layout};
+
+    return ComputePipelineHandle{id};
+}
+
+void RHI_Vulkan::destroyComputePipeline(ComputePipelineHandle handle) {
+    auto it = computePipelines.find(handle.id);
+    if (it != computePipelines.end()) {
+        if (it->second.pipeline != VK_NULL_HANDLE) {
+            vkDestroyPipeline(device, it->second.pipeline, nullptr);
+        }
+        if (it->second.layout != VK_NULL_HANDLE) {
+            vkDestroyPipelineLayout(device, it->second.layout, nullptr);
+        }
+        computePipelines.erase(it);
+    }
+}
+
+// ============================================================================
+// Acceleration Structures (Stub - requires VK_KHR_acceleration_structure)
+// ============================================================================
+
+AccelStructHandle RHI_Vulkan::createAccelerationStructure(const AccelStructDesc& desc) {
+    // Vulkan ray tracing not implemented yet
+    // This is a stub for API compatibility
+    fmt::print("Warning: Vulkan acceleration structures not yet implemented\n");
+
+    Uint32 id = nextAccelStructId++;
+    accelStructs[id] = {VK_NULL_HANDLE, VK_NULL_HANDLE, nullptr};
+
+    return AccelStructHandle{id};
+}
+
+void RHI_Vulkan::destroyAccelerationStructure(AccelStructHandle handle) {
+    accelStructs.erase(handle.id);
+}
+
+void RHI_Vulkan::buildAccelerationStructure(AccelStructHandle handle) {
+    // Stub
+}
+
+void RHI_Vulkan::updateAccelerationStructure(AccelStructHandle handle, const std::vector<AccelStructInstance>& instances) {
+    // Stub
+}
+
+// ============================================================================
+// Compute Commands
+// ============================================================================
+
+void RHI_Vulkan::beginComputePass() {
+    // In Vulkan, compute can use the same command buffer as graphics
+    // No special begin needed, just ensure we're not in a render pass
+}
+
+void RHI_Vulkan::endComputePass() {
+    // No special end needed
+}
+
+void RHI_Vulkan::bindComputePipeline(ComputePipelineHandle pipeline) {
+    auto it = computePipelines.find(pipeline.id);
+    if (it != computePipelines.end() && currentCommandBuffer) {
+        vkCmdBindPipeline(currentCommandBuffer, VK_PIPELINE_BIND_POINT_COMPUTE, it->second.pipeline);
+    }
+}
+
+void RHI_Vulkan::setComputeBuffer(Uint32 binding, BufferHandle buffer, size_t offset, size_t range) {
+    // TODO: Implement descriptor set binding for compute
+    // For now, this is a stub
+}
+
+void RHI_Vulkan::setComputeTexture(Uint32 binding, TextureHandle texture) {
+    // TODO: Implement descriptor set binding for compute
+    // For now, this is a stub
+}
+
+void RHI_Vulkan::setAccelerationStructure(Uint32 binding, AccelStructHandle accelStruct) {
+    // TODO: Implement acceleration structure binding
+    // For now, this is a stub
+}
+
+void RHI_Vulkan::dispatch(Uint32 groupCountX, Uint32 groupCountY, Uint32 groupCountZ) {
+    if (currentCommandBuffer) {
+        vkCmdDispatch(currentCommandBuffer, groupCountX, groupCountY, groupCountZ);
+    }
+}
+
+// ============================================================================
 // Factory Function
 // ============================================================================
 

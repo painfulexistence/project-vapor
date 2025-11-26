@@ -723,3 +723,184 @@ MTL::CullMode RHI_Metal::convertCullMode(CullMode mode) {
 MTL::Winding RHI_Metal::convertFrontFace(bool counterClockwise) {
     return counterClockwise ? MTL::WindingCounterClockwise : MTL::WindingClockwise;
 }
+
+// ============================================================================
+// Compute Pipeline
+// ============================================================================
+
+ComputePipelineHandle RHI_Metal::createComputePipeline(const ComputePipelineDesc& desc) {
+    auto it = shaders.find(desc.computeShader.id);
+    if (it == shaders.end()) {
+        throw std::runtime_error("Invalid compute shader handle");
+    }
+
+    NS::Error* error = nullptr;
+    auto pipeline = NS::TransferPtr(device->newComputePipelineState(it->second.function.get(), &error));
+
+    if (!pipeline || error) {
+        if (error) {
+            fmt::print("Compute pipeline creation error: {}\n", error->localizedDescription()->utf8String());
+        }
+        throw std::runtime_error("Failed to create compute pipeline");
+    }
+
+    Uint32 id = nextComputePipelineId++;
+    computePipelines[id] = {pipeline};
+
+    return ComputePipelineHandle{id};
+}
+
+void RHI_Metal::destroyComputePipeline(ComputePipelineHandle handle) {
+    computePipelines.erase(handle.id);
+}
+
+// ============================================================================
+// Acceleration Structures (Metal Ray Tracing)
+// ============================================================================
+
+AccelStructHandle RHI_Metal::createAccelerationStructure(const AccelStructDesc& desc) {
+    AccelStructResource resource;
+    resource.type = desc.type;
+    resource.geometries = desc.geometries;
+    resource.instances = desc.instances;
+
+    // Acceleration structure will be built in buildAccelerationStructure()
+    resource.accelStruct = nullptr;
+    resource.scratchBuffer = nullptr;
+
+    Uint32 id = nextAccelStructId++;
+    accelStructs[id] = resource;
+
+    return AccelStructHandle{id};
+}
+
+void RHI_Metal::destroyAccelerationStructure(AccelStructHandle handle) {
+    accelStructs.erase(handle.id);
+}
+
+void RHI_Metal::buildAccelerationStructure(AccelStructHandle handle) {
+    auto it = accelStructs.find(handle.id);
+    if (it == accelStructs.end()) {
+        return;
+    }
+
+    auto& resource = it->second;
+
+    if (resource.type == AccelStructType::BottomLevel) {
+        // Build BLAS from geometries
+        for (const auto& geom : resource.geometries) {
+            auto vertexBufIt = buffers.find(geom.vertexBuffer.id);
+            auto indexBufIt = buffers.find(geom.indexBuffer.id);
+            if (vertexBufIt == buffers.end() || indexBufIt == indexBufIt.end()) {
+                continue;
+            }
+
+            auto geomDesc = NS::TransferPtr(MTL::AccelerationStructureTriangleGeometryDescriptor::alloc()->init());
+            geomDesc->setVertexBuffer(vertexBufIt->second.buffer.get());
+            geomDesc->setVertexBufferOffset(0);
+            geomDesc->setVertexStride(geom.vertexStride);
+            geomDesc->setIndexBuffer(indexBufIt->second.buffer.get());
+            geomDesc->setIndexBufferOffset(0);
+            geomDesc->setIndexType(MTL::IndexTypeUInt32);
+            geomDesc->setTriangleCount(geom.indexCount / 3);
+
+            auto accelDesc = NS::TransferPtr(MTL::PrimitiveAccelerationStructureDescriptor::alloc()->init());
+            auto geomArray = NS::Array::array(static_cast<NS::Object*>(geomDesc.get()), 1);
+            accelDesc->setGeometryDescriptors(geomArray);
+
+            auto accelSizes = device->accelerationStructureSizes(accelDesc.get());
+            
+            resource.scratchBuffer = NS::TransferPtr(device->newBuffer(accelSizes.buildScratchBufferSize, MTL::ResourceStorageModePrivate));
+            resource.accelStruct = NS::TransferPtr(device->newAccelerationStructure(accelSizes.accelerationStructureSize));
+
+            // Need to build via command buffer
+            auto cmdBuffer = commandQueue->commandBuffer();
+            auto encoder = cmdBuffer->accelerationStructureCommandEncoder();
+            encoder->buildAccelerationStructure(resource.accelStruct.get(), accelDesc.get(), resource.scratchBuffer.get(), 0);
+            encoder->endEncoding();
+            cmdBuffer->commit();
+            cmdBuffer->waitUntilCompleted();
+        }
+    } else {
+        // Build TLAS from instances
+        // This will be implemented when needed
+        fmt::print("Warning: TLAS building not yet fully implemented\n");
+    }
+}
+
+void RHI_Metal::updateAccelerationStructure(AccelStructHandle handle, const std::vector<AccelStructInstance>& instances) {
+    auto it = accelStructs.find(handle.id);
+    if (it == accelStructs.end()) {
+        return;
+    }
+
+    auto& resource = it->second;
+    resource.instances = instances;
+
+    // Rebuild TLAS with new instances
+    if (resource.type == AccelStructType::TopLevel) {
+        buildAccelerationStructure(handle);
+    }
+}
+
+// ============================================================================
+// Compute Commands
+// ============================================================================
+
+void RHI_Metal::beginComputePass() {
+    // End any active render encoder
+    if (currentRenderEncoder) {
+        currentRenderEncoder->endEncoding();
+        currentRenderEncoder = nullptr;
+    }
+
+    // Create compute encoder
+    if (currentCommandBuffer && !currentComputeEncoder) {
+        currentComputeEncoder = currentCommandBuffer->computeCommandEncoder();
+    }
+}
+
+void RHI_Metal::endComputePass() {
+    if (currentComputeEncoder) {
+        currentComputeEncoder->endEncoding();
+        currentComputeEncoder = nullptr;
+    }
+}
+
+void RHI_Metal::bindComputePipeline(ComputePipelineHandle pipeline) {
+    currentComputePipeline = pipeline;
+
+    auto it = computePipelines.find(pipeline.id);
+    if (it != computePipelines.end() && currentComputeEncoder) {
+        currentComputeEncoder->setComputePipelineState(it->second.pipeline.get());
+    }
+}
+
+void RHI_Metal::setComputeBuffer(Uint32 binding, BufferHandle buffer, size_t offset, size_t range) {
+    auto it = buffers.find(buffer.id);
+    if (it != buffers.end() && currentComputeEncoder) {
+        currentComputeEncoder->setBuffer(it->second.buffer.get(), offset, binding);
+    }
+}
+
+void RHI_Metal::setComputeTexture(Uint32 binding, TextureHandle texture) {
+    auto it = textures.find(texture.id);
+    if (it != textures.end() && currentComputeEncoder) {
+        currentComputeEncoder->setTexture(it->second.texture.get(), binding);
+    }
+}
+
+void RHI_Metal::setAccelerationStructure(Uint32 binding, AccelStructHandle accelStruct) {
+    auto it = accelStructs.find(accelStruct.id);
+    if (it != accelStructs.end() && currentComputeEncoder && it->second.accelStruct) {
+        currentComputeEncoder->setAccelerationStructure(it->second.accelStruct.get(), binding);
+    }
+}
+
+void RHI_Metal::dispatch(Uint32 groupCountX, Uint32 groupCountY, Uint32 groupCountZ) {
+    if (currentComputeEncoder) {
+        MTL::Size threadgroups(groupCountX, groupCountY, groupCountZ);
+        MTL::Size threadsPerGroup(1, 1, 1); // Should be configured based on shader
+        currentComputeEncoder->dispatchThreadgroups(threadgroups, threadsPerGroup);
+    }
+}
