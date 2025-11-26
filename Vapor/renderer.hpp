@@ -2,6 +2,7 @@
 #include "rhi.hpp"
 #include "render_data.hpp"
 #include "camera.hpp"
+#include "graphics.hpp"
 #include <vector>
 #include <memory>
 
@@ -13,7 +14,16 @@
 // - Collect drawables each frame
 // - Perform culling and sorting
 // - Execute draw calls via RHI
+// - Multi-pass rendering (pre-pass, compute passes, main draw, post-process)
+// - Clustered lighting and ray tracing
 // ============================================================================
+
+// Render path selection
+enum class RenderPath {
+    Forward,    // Simple forward rendering
+    Deferred,   // Deferred rendering
+    Clustered   // Clustered forward/deferred with tiled light culling
+};
 
 class Renderer {
 public:
@@ -62,10 +72,22 @@ public:
     void endFrame();
 
     // ========================================================================
+    // Render Path Management
+    // ========================================================================
+
+    void setRenderPath(RenderPath path);
+    RenderPath getRenderPath() const { return currentRenderPath; }
+
+    // ========================================================================
     // Getters
     // ========================================================================
 
     RHI* getRHI() const { return rhi; }
+
+    // Stats
+    Uint32 getDrawCount() const { return drawCount; }
+    Uint32 getCurrentInstanceCount() const { return currentInstanceCount; }
+    Uint32 getCulledInstanceCount() const { return culledInstanceCount; }
 
 private:
     // ========================================================================
@@ -78,6 +100,20 @@ private:
     void executeDrawCalls();
     void createDefaultResources();
     void createRenderPipeline();
+    void createRenderTargets();
+    void createComputePipelines();
+
+    // Multi-pass rendering
+    void buildAccelerationStructures();
+    void updateFrameData();
+    void prePass();
+    void normalResolvePass();
+    void clusterBuildPass();
+    void lightCullingPass();
+    void raytraceShadowPass();
+    void raytraceAOPass();
+    void mainRenderPass();
+    void postProcessPass();
 
     // ========================================================================
     // Internal Helpers
@@ -123,6 +159,9 @@ private:
     BufferHandle materialUniformBuffer;
     BufferHandle directionalLightBuffer;
     BufferHandle pointLightBuffer;
+    BufferHandle frameDataBuffer;
+    BufferHandle instanceDataBuffer;
+    BufferHandle clusterBuffer;
 
     // Default textures
     TextureId defaultWhiteTexture = INVALID_TEXTURE_ID;
@@ -132,16 +171,67 @@ private:
     // Default sampler
     SamplerHandle defaultSampler;
 
-    // Pipeline
+    // Render targets
+    TextureHandle colorRT_MSAA;
+    TextureHandle colorRT;
+    TextureHandle depthStencilRT_MSAA;
+    TextureHandle depthStencilRT;
+    TextureHandle normalRT_MSAA;
+    TextureHandle normalRT;
+    TextureHandle shadowRT;
+    TextureHandle aoRT;
+
+    // Graphics pipelines
     PipelineHandle mainPipeline;
+    PipelineHandle prePassPipeline;
+    PipelineHandle postProcessPipeline;
     ShaderHandle vertexShader;
     ShaderHandle fragmentShader;
+    ShaderHandle prePassVertexShader;
+    ShaderHandle prePassFragmentShader;
+    ShaderHandle postProcessVertexShader;
+    ShaderHandle postProcessFragmentShader;
+
+    // Compute pipelines
+    ComputePipelineHandle buildClustersPipeline;
+    ComputePipelineHandle cullLightsPipeline;
+    ComputePipelineHandle tileCullingPipeline;
+    ComputePipelineHandle normalResolvePipeline;
+    ComputePipelineHandle raytraceShadowPipeline;
+    ComputePipelineHandle raytraceAOPipeline;
+
+    // Acceleration structures (for ray tracing)
+    std::vector<AccelStructHandle> BLASs;  // Bottom-level acceleration structures (one per mesh)
+    AccelStructHandle TLAS;                 // Top-level acceleration structure
 
     // ========================================================================
     // Configuration
     // ========================================================================
 
     const Uint32 MAX_INSTANCES = 1000;
+    const Uint32 MAX_FRAMES_IN_FLIGHT = 3;
+    const Uint32 MSAA_SAMPLE_COUNT = 4;
     Uint32 maxDirectionalLights = 4;
     Uint32 maxPointLights = 256;
+
+    // Clustering configuration
+    Uint32 clusterGridSizeX = 16;
+    Uint32 clusterGridSizeY = 16;
+    Uint32 clusterGridSizeZ = 24;
+
+    // Render state
+    RenderPath currentRenderPath = RenderPath::Forward;
+    glm::vec4 clearColor = glm::vec4(0.0f, 0.5f, 1.0f, 1.0f);
+    double clearDepth = 1.0;
+
+    // Frame state
+    Uint32 currentFrameInFlight = 0;
+    Uint32 frameNumber = 0;
+    float time = 0.0f;
+    float deltaTime = 0.016f;
+
+    // Stats
+    Uint32 drawCount = 0;
+    Uint32 currentInstanceCount = 0;
+    Uint32 culledInstanceCount = 0;
 };

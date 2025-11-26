@@ -104,13 +104,48 @@ This document describes the ongoing refactoring to separate the Renderer layer f
    - ✅ CMakeLists.txt includes rhi_vulkan.cpp and rhi_metal.cpp
    - ✅ Proper compilation setup for both backends
 
-### 📋 Planned (Phase 3)
+### ✅ Completed (Phase 3 - Part 1)
+
+**Expanded Renderer with Multi-Pass Rendering**
+
+1. **Extended Renderer Class** (`renderer.hpp`)
+   - ✅ Added RenderPath enum (Forward/Deferred/Clustered)
+   - ✅ Added all render targets (colorRT_MSAA, colorRT, depthStencilRT_MSAA, depthStencilRT, normalRT_MSAA, normalRT, shadowRT, aoRT)
+   - ✅ Added graphics pipelines (mainPipeline, prePassPipeline, postProcessPipeline)
+   - ✅ Added compute pipelines (buildClustersPipeline, cullLightsPipeline, tileCullingPipeline, normalResolvePipeline, raytraceShadowPipeline, raytraceAOPipeline)
+   - ✅ Added acceleration structures (BLASs, TLAS)
+   - ✅ Added frame data buffer, instance data buffer, cluster buffer
+   - ✅ Added clustering configuration (clusterGridSizeX/Y/Z)
+   - ✅ Added render state and frame state tracking
+   - ✅ Added stats tracking (drawCount, currentInstanceCount, culledInstanceCount)
+
+2. **Implemented Multi-Pass Rendering** (`renderer.cpp`)
+   - ✅ createRenderTargets() - Creates all MSAA and resolved render targets
+   - ✅ setRenderPath() - Switch between Forward/Deferred/Clustered rendering
+   - ✅ prePass() - Depth and normal pre-pass for early-Z and ray tracing
+   - ✅ normalResolvePass() - MSAA normal resolve compute shader
+   - ✅ clusterBuildPass() - Build light clusters (3D grid subdivision)
+   - ✅ lightCullingPass() - Cull lights against clusters (tiled culling)
+   - ✅ raytraceShadowPass() - Ray traced hard shadows using acceleration structures
+   - ✅ raytraceAOPass() - Ray traced ambient occlusion
+   - ✅ mainRenderPass() - Main PBR rendering with clustered lighting
+   - ✅ postProcessPass() - Tone mapping and post-processing
+   - ✅ Updated render() to execute multi-pass rendering based on RenderPath
+   - ✅ Updated initialize() to create all new buffers and render targets
+   - ✅ Updated shutdown() to clean up all new resources
+
+### 📋 Planned (Phase 3 - Part 2)
 
 1. **Update Application Layer** (`main.cpp`, asset loading)
    - Remove direct renderer usage
-   - Use SceneRenderer for all rendering
+   - Use Renderer for all rendering
    - Register scene resources with renderer
    - Submit drawables each frame
+
+2. **Shader Loading System**
+   - Load and compile shaders for all pipelines
+   - Implement shader hot-reloading
+   - Create shader variants for different features
 
 3. **Implement Material System**
    - Pipeline variant management
@@ -273,4 +308,4 @@ SceneRenderer::endFrame()
 ---
 
 **Last Updated**: 2025-11-26
-**Status**: Phase 1 ✅ Complete, Phase 2 ✅ Complete (Both RHI_Vulkan and RHI_Metal fully implemented), Phase 3 Ready to Begin
+**Status**: Phase 1 ✅ Complete, Phase 2 ✅ Complete (Both RHI_Vulkan and RHI_Metal fully implemented with compute and ray tracing), Phase 3 Part 1 ✅ Complete (Renderer expanded with multi-pass rendering support), Phase 3 Part 2 Ready to Begin
