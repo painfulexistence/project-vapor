@@ -47,6 +47,9 @@ void EngineCore::init(uint32_t numThreads) {
     // Initialize resource manager
     m_resourceManager = std::make_unique<ResourceManager>(*m_taskScheduler);
 
+    // Initialize action manager
+    m_actionManager = std::make_unique<ActionManager>();
+
     m_initialized = true;
 
     fmt::print("EngineCore initialized successfully\n");
@@ -63,6 +66,7 @@ void EngineCore::shutdown() {
     m_taskScheduler->waitForAll();
 
     // Cleanup subsystems in reverse order
+    m_actionManager.reset();
     m_resourceManager.reset();
     m_taskScheduler->shutdown();
     m_taskScheduler.reset();
@@ -76,6 +80,9 @@ void EngineCore::update(float deltaTime) {
     if (!m_initialized) {
         return;
     }
+
+    // Update action manager (time-based actions)
+    m_actionManager->update(deltaTime);
 
     // Future: Handle async task completion callbacks
     // Future: Manage render command buffer submission

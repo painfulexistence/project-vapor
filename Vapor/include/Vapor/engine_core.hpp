@@ -3,6 +3,7 @@
 
 #include "task_scheduler.hpp"
 #include "resource_manager.hpp"
+#include "action_manager.hpp"
 #include <memory>
 
 namespace Vapor {
@@ -12,6 +13,7 @@ namespace Vapor {
  * Provides:
  * - Unified task scheduling (TaskScheduler)
  * - Resource management (ResourceManager)
+ * - Action management (ActionManager)
  */
 class EngineCore {
 public:
@@ -30,7 +32,10 @@ public:
     // Get the resource manager
     ResourceManager& getResourceManager() { return *m_resourceManager; }
 
-    // Update per-frame (for async task management)
+    // Get the action manager
+    ActionManager& getActionManager() { return *m_actionManager; }
+
+    // Update per-frame (for async task management and action updates)
     void update(float deltaTime);
 
     // Check if engine is initialized
@@ -44,6 +49,7 @@ private:
 
     std::unique_ptr<TaskScheduler> m_taskScheduler;
     std::unique_ptr<ResourceManager> m_resourceManager;
+    std::unique_ptr<ActionManager> m_actionManager;
 
     bool m_initialized{false};
     uint32_t m_numThreads{0};
