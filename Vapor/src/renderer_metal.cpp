@@ -169,7 +169,8 @@ auto Renderer_Metal::createResources() -> void {
     shadowTextureDesc->setPixelFormat(MTL::PixelFormatRGBA8Unorm);
     shadowTextureDesc->setWidth(swapchain->drawableSize().width);
     shadowTextureDesc->setHeight(swapchain->drawableSize().height);
-    shadowTextureDesc->setMipmapLevelCount(calculateMipmapLevelCount(swapchain->drawableSize().width, swapchain->drawableSize().height));
+    int mipLevels = static_cast<int>(std::floor(std::log2(std::max(swapchain->drawableSize().width, swapchain->drawableSize().height))) + 1);
+    shadowTextureDesc->setMipmapLevelCount(mipLevels);
     shadowTextureDesc->setUsage(MTL::TextureUsageShaderRead | MTL::TextureUsageShaderWrite);
     shadowRT = NS::TransferPtr(device->newTexture(shadowTextureDesc));
     shadowTextureDesc->release();
@@ -202,8 +203,9 @@ auto Renderer_Metal::stage(std::shared_ptr<Scene> scene) -> void {
     pointLightBuffer->didModifyRange(NS::Range::Make(0, pointLightBuffer->length()));
 
     // Textures
+    // Note: Image no longer has texture field - store mapping instead
     for (auto& img : scene->images) {
-        img->texture = createTexture(img);
+        imageToTextureMap[img] = createTexture(img);
     }
 
     // Pipelines & materials
@@ -217,8 +219,40 @@ auto Renderer_Metal::stage(std::shared_ptr<Scene> scene) -> void {
     materialDataBuffer = NS::TransferPtr(device->newBuffer(scene->materials.size() * sizeof(MaterialData), MTL::ResourceStorageModeManaged));
 
     // Buffers
-    scene->vertexBuffer = createVertexBuffer(scene->vertices);
-    scene->indexBuffer = createIndexBuffer(scene->indices);
+    // Note: Scene no longer has vertices/indices - collect from meshes
+    std::vector<VertexData> allVertices;
+    std::vector<Uint32> allIndices;
+    Uint32 currentVertexOffset = 0;
+    Uint32 currentIndexOffset = 0;
+
+    const std::function<void(const std::shared_ptr<Node>&)> collectGeometry = [&](const std::shared_ptr<Node>& node) {
+        if (node->meshGroup) {
+            for (auto& mesh : node->meshGroup->meshes) {
+                MeshGPUResources& resources = meshGPUResources[mesh];
+                resources.vertexOffset = currentVertexOffset;
+                resources.indexOffset = currentIndexOffset;
+                resources.vertexCount = static_cast<Uint32>(mesh->vertices.size());
+                resources.indexCount = static_cast<Uint32>(mesh->indices.size());
+
+                allVertices.insert(allVertices.end(), mesh->vertices.begin(), mesh->vertices.end());
+                for (Uint32 index : mesh->indices) {
+                    allIndices.push_back(index + currentVertexOffset);
+                }
+
+                currentVertexOffset += resources.vertexCount;
+                currentIndexOffset += resources.indexCount;
+            }
+        }
+        for (const auto& child : node->children) {
+            collectGeometry(child);
+        }
+    };
+    for (const auto& node : scene->nodes) {
+        collectGeometry(node);
+    }
+
+    sceneVertexBuffer = createVertexBuffer(allVertices);
+    sceneIndexBuffer = createIndexBuffer(allIndices);
 
     auto cmd = queue->commandBuffer();
 
@@ -230,14 +264,15 @@ auto Renderer_Metal::stage(std::shared_ptr<Scene> scene) -> void {
                     // mesh->ebo = createIndexBuffer(mesh->indices);
 
                     auto geomDesc = NS::TransferPtr(MTL::AccelerationStructureTriangleGeometryDescriptor::alloc()->init());
-                    geomDesc->setVertexBuffer(getBuffer(scene->vertexBuffer).get());
+                    const MeshGPUResources& resources = meshGPUResources[mesh];
+                    geomDesc->setVertexBuffer(getBuffer(sceneVertexBuffer).get());
                     geomDesc->setVertexStride(sizeof(VertexData));
                     geomDesc->setVertexFormat(MTL::AttributeFormatFloat3);
-                    geomDesc->setVertexBufferOffset(mesh->vertexOffset * sizeof(VertexData) + offsetof(VertexData, position));
-                    geomDesc->setIndexBuffer(getBuffer(scene->indexBuffer).get());
+                    geomDesc->setVertexBufferOffset(resources.vertexOffset * sizeof(VertexData) + offsetof(VertexData, position));
+                    geomDesc->setIndexBuffer(getBuffer(sceneIndexBuffer).get());
                     geomDesc->setIndexType(MTL::IndexTypeUInt32);
-                    geomDesc->setIndexBufferOffset(mesh->indexOffset * sizeof(Uint32));
-                    geomDesc->setTriangleCount(mesh->indexCount / 3);
+                    geomDesc->setIndexBufferOffset(resources.indexOffset * sizeof(Uint32));
+                    geomDesc->setTriangleCount(resources.indexCount / 3);
                     geomDesc->setOpaque(true);
 
                     auto accelDesc = NS::TransferPtr(MTL::PrimitiveAccelerationStructureDescriptor::alloc()->init());
@@ -255,8 +290,8 @@ auto Renderer_Metal::stage(std::shared_ptr<Scene> scene) -> void {
 
                     BLASs.push_back(accelStruct);
 
-                    mesh->materialID = materialIDs[mesh->material];
-                    mesh->instanceID = nextInstanceID++;
+                    meshGPUResources[mesh].materialID = materialIDs[mesh->material];
+                    meshGPUResources[mesh].instanceID = nextInstanceID++;
                 }
             }
             for (const auto& child : node->children) {
@@ -355,14 +390,15 @@ auto Renderer_Metal::draw(std::shared_ptr<Scene> scene, Camera& camera) -> void 
         if (node->meshGroup) {
             const glm::mat4& transform = node->worldTransform;
             for (const auto& mesh : node->meshGroup->meshes) {
+                const MeshGPUResources& resources = meshGPUResources[mesh];
                 instances.push_back({
                     .model = transform,
                     .color = glm::vec4(1.0f, 0.0f, 0.0f, 1.0f),
-                    .vertexOffset = mesh->vertexOffset,
-                    .indexOffset = mesh->indexOffset,
-                    .vertexCount = mesh->vertexCount,
-                    .indexCount = mesh->indexCount,
-                    .materialID = mesh->materialID,
+                    .vertexOffset = resources.vertexOffset,
+                    .indexOffset = resources.indexOffset,
+                    .vertexCount = resources.vertexCount,
+                    .indexCount = resources.indexCount,
+                    .materialID = resources.materialID,
                     .primitiveMode = mesh->primitiveMode,
                     .AABBMin = mesh->worldAABBMin,
                     .AABBMax = mesh->worldAABBMax,
@@ -373,7 +409,7 @@ auto Renderer_Metal::draw(std::shared_ptr<Scene> scene, Camera& camera) -> void 
                         accelInstanceDesc.transformationMatrix.columns[i][j] = transform[i][j];
                     }
                 }
-                accelInstanceDesc.accelerationStructureIndex = mesh->instanceID;
+                accelInstanceDesc.accelerationStructureIndex = resources.instanceID;
                 accelInstanceDesc.mask = 0xFF;
                 accelInstances.push_back(accelInstanceDesc);
                 if (!mesh->material) {
@@ -399,15 +435,14 @@ auto Renderer_Metal::draw(std::shared_ptr<Scene> scene, Camera& camera) -> void 
     memcpy(accelInstanceBuffers[currentFrameInFlight]->contents(), accelInstances.data(), accelInstances.size() * sizeof(MTL::AccelerationStructureInstanceDescriptor));
     accelInstanceBuffers[currentFrameInFlight]->didModifyRange(NS::Range::Make(0, accelInstanceBuffers[currentFrameInFlight]->length()));
 
-    if (scene->isGeometryDirty) {
-        std::vector<NS::Object*> BLASObjects;
-        BLASObjects.reserve(BLASs.size());
-        for (auto blas : BLASs) {
-            BLASObjects.push_back(static_cast<NS::Object*>(blas.get()));
-        }
-        BLASArray = NS::TransferPtr(NS::Array::array(BLASObjects.data(), BLASObjects.size()));
-        scene->isGeometryDirty = false;
+    // Note: Scene no longer has isGeometryDirty - always rebuild BLAS array
+    // TODO: Add dirty tracking if needed
+    std::vector<NS::Object*> BLASObjects;
+    BLASObjects.reserve(BLASs.size());
+    for (auto blas : BLASs) {
+        BLASObjects.push_back(static_cast<NS::Object*>(blas.get()));
     }
+    BLASArray = NS::TransferPtr(NS::Array::array(BLASObjects.data(), BLASObjects.size()));
 
     auto TLASDesc = NS::TransferPtr(MTL::InstanceAccelerationStructureDescriptor::alloc()->init());
     TLASDesc->setInstanceCount(accelInstances.size());
@@ -480,10 +515,11 @@ auto Renderer_Metal::draw(std::shared_ptr<Scene> scene, Camera& camera) -> void 
     prePassEncoder->setVertexBuffer(cameraDataBuffers[currentFrameInFlight].get(), 0, 0);
     prePassEncoder->setVertexBuffer(materialDataBuffer.get(), 0, 1);
     prePassEncoder->setVertexBuffer(instanceDataBuffers[currentFrameInFlight].get(), 0, 2);
-    prePassEncoder->setVertexBuffer(getBuffer(scene->vertexBuffer).get(), 0, 3);
+    prePassEncoder->setVertexBuffer(getBuffer(sceneVertexBuffer).get(), 0, 3);
     for (const auto& [material, meshes] : instanceBatches) {
+        TextureHandle albedoTexture = material->albedoMap ? imageToTextureMap[material->albedoMap] : defaultAlbedoTexture;
         prePassEncoder->setFragmentTexture(
-            getTexture(material->albedoMap ? material->albedoMap->texture : defaultAlbedoTexture).get(),
+            getTexture(albedoTexture).get(),
             0
         );
         // prePassEncoder->setFragmentTexture(
@@ -495,13 +531,14 @@ auto Renderer_Metal::draw(std::shared_ptr<Scene> scene, Camera& camera) -> void 
                 continue;
             }
             // prePassEncoder->setVertexBuffer(getBuffer(mesh->vbos[0]).get(), 0, 2);
-            prePassEncoder->setVertexBytes(&mesh->instanceID, sizeof(Uint32), 4);
+            const MeshGPUResources& resources = meshGPUResources[mesh];
+            prePassEncoder->setVertexBytes(&resources.instanceID, sizeof(Uint32), 4);
             prePassEncoder->drawIndexedPrimitives(
                 MTL::PrimitiveType::PrimitiveTypeTriangle,
-                mesh->indexCount,// mesh->indices.size(),
+                resources.indexCount,// mesh->indices.size(),
                 MTL::IndexTypeUInt32,
-                getBuffer(scene->indexBuffer).get(), // getBuffer(mesh->ebo).get(),
-                mesh->indexOffset * sizeof(Uint32) // 0
+                getBuffer(sceneIndexBuffer).get(), // getBuffer(mesh->ebo).get(),
+                resources.indexOffset * sizeof(Uint32) // 0
             );
             drawCount++;
         }
@@ -598,7 +635,7 @@ auto Renderer_Metal::draw(std::shared_ptr<Scene> scene, Camera& camera) -> void 
     renderEncoder->setVertexBuffer(cameraDataBuffers[currentFrameInFlight].get(), 0, 0);
     renderEncoder->setVertexBuffer(materialDataBuffer.get(), 0, 1);
     renderEncoder->setVertexBuffer(instanceDataBuffers[currentFrameInFlight].get(), 0, 2);
-    renderEncoder->setVertexBuffer(getBuffer(scene->vertexBuffer).get(), 0, 3);
+    renderEncoder->setVertexBuffer(getBuffer(sceneVertexBuffer).get(), 0, 3);
     renderEncoder->setFragmentBuffer(directionalLightBuffer.get(), 0, 0);
     renderEncoder->setFragmentBuffer(pointLightBuffer.get(), 0, 1);
     renderEncoder->setFragmentBuffer(clusterBuffers[currentFrameInFlight].get(), 0, 2);
@@ -608,28 +645,34 @@ auto Renderer_Metal::draw(std::shared_ptr<Scene> scene, Camera& camera) -> void 
     renderEncoder->setFragmentBytes(&time, sizeof(float), 6);
     for (const auto& [material, meshes] : instanceBatches) {
         // renderEncoder->setRenderPipelineState(getPipeline(material->pipeline).get());
+        TextureHandle albedoTexture = material->albedoMap ? imageToTextureMap[material->albedoMap] : defaultAlbedoTexture;
+        TextureHandle normalTexture = material->normalMap ? imageToTextureMap[material->normalMap] : defaultNormalTexture;
         renderEncoder->setFragmentTexture(
-            getTexture(material->albedoMap ? material->albedoMap->texture : defaultAlbedoTexture).get(),
+            getTexture(albedoTexture).get(),
             0
         );
         renderEncoder->setFragmentTexture(
-            getTexture(material->normalMap ? material->normalMap->texture : defaultNormalTexture).get(),
+            getTexture(normalTexture).get(),
             1
         );
+        TextureHandle metallicTexture = material->metallicMap ? imageToTextureMap[material->metallicMap] : defaultORMTexture;
+        TextureHandle roughnessTexture = material->roughnessMap ? imageToTextureMap[material->roughnessMap] : defaultORMTexture;
+        TextureHandle occlusionTexture = material->occlusionMap ? imageToTextureMap[material->occlusionMap] : defaultORMTexture;
+        TextureHandle emissiveTexture = material->emissiveMap ? imageToTextureMap[material->emissiveMap] : defaultEmissiveTexture;
         renderEncoder->setFragmentTexture(
-            getTexture(material->metallicMap ? material->metallicMap->texture : defaultORMTexture).get(),
+            getTexture(metallicTexture).get(),
             2
         );
         renderEncoder->setFragmentTexture(
-            getTexture(material->roughnessMap ? material->roughnessMap->texture : defaultORMTexture).get(),
+            getTexture(roughnessTexture).get(),
             3
         );
         renderEncoder->setFragmentTexture(
-            getTexture(material->occlusionMap ? material->occlusionMap->texture : defaultORMTexture).get(),
+            getTexture(occlusionTexture).get(),
             4
         );
         renderEncoder->setFragmentTexture(
-            getTexture(material->emissiveMap ? material->emissiveMap->texture : defaultEmissiveTexture).get(),
+            getTexture(emissiveTexture).get(),
             5
         );
         // renderEncoder->setFragmentTexture(
@@ -647,13 +690,14 @@ auto Renderer_Metal::draw(std::shared_ptr<Scene> scene, Camera& camera) -> void 
             }
             currentInstanceCount++;
             // renderEncoder->setVertexBuffer(getBuffer(mesh->vbos[0]).get(), 0, 2);
-            renderEncoder->setVertexBytes(&mesh->instanceID, sizeof(Uint32), 4);
+            const MeshGPUResources& resources = meshGPUResources[mesh];
+            renderEncoder->setVertexBytes(&resources.instanceID, sizeof(Uint32), 4);
             renderEncoder->drawIndexedPrimitives(
                 MTL::PrimitiveType::PrimitiveTypeTriangle,
-                mesh->indexCount,// mesh->indices.size(),
+                resources.indexCount,// mesh->indices.size(),
                 MTL::IndexTypeUInt32,
-                getBuffer(scene->indexBuffer).get(), // getBuffer(mesh->ebo).get(),
-                mesh->indexOffset * sizeof(Uint32) // 0
+                getBuffer(sceneIndexBuffer).get(), // getBuffer(mesh->ebo).get(),
+                resources.indexOffset * sizeof(Uint32) // 0
             );
             drawCount++;
         }
@@ -720,27 +764,33 @@ auto Renderer_Metal::draw(std::shared_ptr<Scene> scene, Camera& camera) -> void 
                     // TODO: show error image if texture is not uploaded
                     if (m->albedoMap) {
                         ImGui::Text("Albedo Map");
-                        ImGui::Image((ImTextureID)(intptr_t)getTexture(m->albedoMap->texture).get(), ImVec2(64, 64));
+                        TextureHandle albedoTexture = imageToTextureMap[m->albedoMap];
+                        ImGui::Image((ImTextureID)(intptr_t)getTexture(albedoTexture).get(), ImVec2(64, 64));
                     }
                     if (m->normalMap) {
                         ImGui::Text("Normal Map");
-                        ImGui::Image((ImTextureID)(intptr_t)getTexture(m->normalMap->texture).get(), ImVec2(64, 64));
+                        TextureHandle normalTexture = imageToTextureMap[m->normalMap];
+                        ImGui::Image((ImTextureID)(intptr_t)getTexture(normalTexture).get(), ImVec2(64, 64));
                     }
                     if (m->metallicMap) {
                         ImGui::Text("Metallic Map");
-                        ImGui::Image((ImTextureID)(intptr_t)getTexture(m->metallicMap->texture).get(), ImVec2(64, 64));
+                        TextureHandle metallicTexture = imageToTextureMap[m->metallicMap];
+                        ImGui::Image((ImTextureID)(intptr_t)getTexture(metallicTexture).get(), ImVec2(64, 64));
                     }
                     if (m->roughnessMap) {
                         ImGui::Text("Roughness Map");
-                        ImGui::Image((ImTextureID)(intptr_t)getTexture(m->roughnessMap->texture).get(), ImVec2(64, 64));
+                        TextureHandle roughnessTexture = imageToTextureMap[m->roughnessMap];
+                        ImGui::Image((ImTextureID)(intptr_t)getTexture(roughnessTexture).get(), ImVec2(64, 64));
                     }
                     if (m->occlusionMap) {
                         ImGui::Text("Occlusion Map");
-                        ImGui::Image((ImTextureID)(intptr_t)getTexture(m->occlusionMap->texture).get(), ImVec2(64, 64));
+                        TextureHandle occlusionTexture = imageToTextureMap[m->occlusionMap];
+                        ImGui::Image((ImTextureID)(intptr_t)getTexture(occlusionTexture).get(), ImVec2(64, 64));
                     }
                     if (m->emissiveMap) {
                         ImGui::Text("Emissive Map");
-                        ImGui::Image((ImTextureID)(intptr_t)getTexture(m->emissiveMap->texture).get(), ImVec2(64, 64));
+                        TextureHandle emissiveTexture = imageToTextureMap[m->emissiveMap];
+                        ImGui::Image((ImTextureID)(intptr_t)getTexture(emissiveTexture).get(), ImVec2(64, 64));
                     }
                     ImGui::ColorEdit4("Base Color Factor", (float*)&m->baseColorFactor);
                     ImGui::DragFloat("Normal Scale", &m->normalScale, .05f, 0.0f, 5.0f);
@@ -788,8 +838,25 @@ auto Renderer_Metal::draw(std::shared_ptr<Scene> scene, Camera& camera) -> void 
 
         if (ImGui::TreeNode("Scene Geometry")) {
             ImGui::Separator();
-            ImGui::Text("Total vertices: %zu", scene->vertices.size());
-            ImGui::Text("Total indices: %zu", scene->indices.size());
+            // Note: Scene no longer has vertices/indices - calculate from meshes
+            size_t totalVertices = 0;
+            size_t totalIndices = 0;
+            const std::function<void(const std::shared_ptr<Node>&)> countGeometry = [&](const std::shared_ptr<Node>& node) {
+                if (node->meshGroup) {
+                    for (auto& mesh : node->meshGroup->meshes) {
+                        totalVertices += mesh->vertices.size();
+                        totalIndices += mesh->indices.size();
+                    }
+                }
+                for (const auto& child : node->children) {
+                    countGeometry(child);
+                }
+            };
+            for (const auto& node : scene->nodes) {
+                countGeometry(node);
+            }
+            ImGui::Text("Total vertices: %zu", totalVertices);
+            ImGui::Text("Total indices: %zu", totalIndices);
             const std::function<void(const std::shared_ptr<Node>&)> showNode = [&](const std::shared_ptr<Node>& node) {
                 ImGui::PushID(node.get());
                 ImGui::Text("Node #%s", node->name.c_str());
@@ -806,10 +873,11 @@ auto Renderer_Metal::draw(std::shared_ptr<Scene> scene, Camera& camera) -> void 
                     for (const auto& mesh : node->meshGroup->meshes) {
                         ImGui::PushID(mesh.get());
                         if (ImGui::TreeNode(fmt:: format("Mesh").c_str())) {
-                            ImGui::Text("Vertex count: %u", mesh->vertexCount);
-                            ImGui::Text("Vertex offset: %u", mesh->vertexOffset);
-                            ImGui::Text("Index count: %u", mesh->indexCount);
-                            ImGui::Text("Index offset: %u", mesh->indexOffset);
+                            const MeshGPUResources& resources = meshGPUResources[mesh];
+                            ImGui::Text("Vertex count: %u", resources.vertexCount);
+                            ImGui::Text("Vertex offset: %u", resources.vertexOffset);
+                            ImGui::Text("Index count: %u", resources.indexCount);
+                            ImGui::Text("Index offset: %u", resources.indexOffset);
                             ImGui::TreePop();
                         }
                         ImGui::PopID();
@@ -955,7 +1023,7 @@ NS::SharedPtr<MTL::ComputePipelineState> Renderer_Metal::createComputePipeline(c
     return pipeline;
 }
 
-TextureHandle Renderer_Metal::createTexture(const std::shared_ptr<Image>& img) {
+Renderer_Metal::TextureHandle Renderer_Metal::createTexture(const std::shared_ptr<Image>& img) {
     if (img) {
         MTL::PixelFormat pixelFormat = MTL::PixelFormat::PixelFormatRGBA8Unorm;
         switch (img->channelCount) {
@@ -995,13 +1063,13 @@ TextureHandle Renderer_Metal::createTexture(const std::shared_ptr<Image>& img) {
 
         textures[nextTextureID] = texture;
 
-        return TextureHandle { nextTextureID++ };
+        return Renderer_Metal::TextureHandle { nextTextureID++ };
     } else {
         throw std::runtime_error(fmt::format("Failed to create texture at {}!\n", img->uri));
     }
 }
 
-BufferHandle Renderer_Metal::createVertexBuffer(const std::vector<VertexData>& vertices) {
+Renderer_Metal::BufferHandle Renderer_Metal::createVertexBuffer(const std::vector<VertexData>& vertices) {
     auto stagingBuffer = NS::TransferPtr(device->newBuffer(vertices.size() * sizeof(VertexData), MTL::ResourceStorageModeShared));
     memcpy(stagingBuffer->contents(), vertices.data(), vertices.size() * sizeof(VertexData));
 
@@ -1015,10 +1083,10 @@ BufferHandle Renderer_Metal::createVertexBuffer(const std::vector<VertexData>& v
 
     buffers[nextBufferID] = buffer;
 
-    return BufferHandle { nextBufferID++ };
+    return Renderer_Metal::BufferHandle { nextBufferID++ };
 }
 
-BufferHandle Renderer_Metal::createIndexBuffer(const std::vector<Uint32>& indices) {
+Renderer_Metal::BufferHandle Renderer_Metal::createIndexBuffer(const std::vector<Uint32>& indices) {
     auto stagingBuffer = NS::TransferPtr(device->newBuffer(indices.size() * sizeof(Uint32), MTL::ResourceStorageModeShared));
     memcpy(stagingBuffer->contents(), indices.data(), indices.size() * sizeof(Uint32));
 
@@ -1032,17 +1100,17 @@ BufferHandle Renderer_Metal::createIndexBuffer(const std::vector<Uint32>& indice
 
     buffers[nextBufferID] = buffer;
 
-    return BufferHandle { nextBufferID++ };
+    return Renderer_Metal::BufferHandle { nextBufferID++ };
 }
 
 NS::SharedPtr<MTL::Buffer> Renderer_Metal::getBuffer(BufferHandle handle) const {
-    return buffers.at(handle.rid);
+    return buffers.at(handle.id);
 }
 
 NS::SharedPtr<MTL::Texture> Renderer_Metal::getTexture(TextureHandle handle) const {
-    return textures.at(handle.rid);
+    return textures.at(handle.id);
 }
 
 NS::SharedPtr<MTL::RenderPipelineState> Renderer_Metal::getPipeline(PipelineHandle handle) const {
-    return pipelines.at(handle.rid);
+    return pipelines.at(handle.id);
 }

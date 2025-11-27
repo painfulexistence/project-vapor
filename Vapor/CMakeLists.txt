@@ -18,8 +18,11 @@ set(SOURCES
     src/graphics.cpp
     src/helper.cpp
     src/physics_3d.cpp
-    src/renderer_metal.cpp
-    src/renderer_vulkan.cpp
+    # src/renderer_metal.cpp
+    # src/renderer_vulkan.cpp
+    src/renderer.cpp
+    src/rhi_vulkan.cpp
+    src/rhi_metal.cpp
     src/scene.cpp
     src/task_scheduler.cpp
     src/resource_manager.cpp
