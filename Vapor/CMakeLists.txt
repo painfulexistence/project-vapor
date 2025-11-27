@@ -25,6 +25,7 @@ set(SOURCES
     src/resource_manager.cpp
     src/jolt_enki_job_system.cpp
     src/engine_core.cpp
+    src/fsm.cpp
     imgui/imgui.cpp
     imgui/imgui_draw.cpp
     imgui/imgui_tables.cpp

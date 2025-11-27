@@ -17,6 +17,7 @@
 #include "Vapor/camera.hpp"
 #include "Vapor/rng.hpp"
 #include "Vapor/engine_core.hpp"
+#include "Vapor/fsm.hpp"
 
 
 int main(int argc, char* args[]) {
@@ -82,6 +83,105 @@ int main(int argc, char* args[]) {
     ImGui::GetIO().ConfigFlags |= ImGuiConfigFlags_DockingEnable;
 
     RNG rng;
+
+    // ========================================================================
+    // FSM Example: Simple Player State Machine
+    // ========================================================================
+
+    // Simple player struct for FSM example
+    struct Player {
+        glm::vec3 velocity{0.0f, 0.0f, 0.0f};
+        std::string currentAnimation;
+        bool isGrounded = true;
+    };
+
+    Player player;
+
+    // Create custom state actions
+    class SetVelocityAction : public Vapor::StateAction {
+    public:
+        SetVelocityAction(float x, float y, float z) : velocity(x, y, z) {}
+
+        void execute(Vapor::FSM* fsm, float dt = 0.0f) override {
+            auto* owner = fsm->getOwner<Player>();
+            if (owner) {
+                owner->velocity = velocity;
+            }
+        }
+    private:
+        glm::vec3 velocity;
+    };
+
+    class SetAnimationAction : public Vapor::StateAction {
+    public:
+        SetAnimationAction(const std::string& anim) : animation(anim) {}
+
+        void execute(Vapor::FSM* fsm, float dt = 0.0f) override {
+            auto* owner = fsm->getOwner<Player>();
+            if (owner) {
+                owner->currentAnimation = animation;
+            }
+        }
+    private:
+        std::string animation;
+    };
+
+    // Create FSM
+    auto playerFSM = std::make_unique<Vapor::FSM>();
+    playerFSM->setOwner(&player);
+
+    // Create states
+    auto idleState = std::make_shared<Vapor::State>("Idle");
+    idleState->addEnterAction(std::make_unique<SetVelocityAction>(0.0f, 0.0f, 0.0f));
+    idleState->addEnterAction(std::make_unique<SetAnimationAction>("idle"));
+    idleState->addEnterAction(std::make_unique<Vapor::PrintAction>("Player entered Idle state"));
+
+    auto runningState = std::make_shared<Vapor::State>("Running");
+    runningState->addEnterAction(std::make_unique<SetAnimationAction>("run"));
+    runningState->addEnterAction(std::make_unique<Vapor::PrintAction>("Player entered Running state"));
+    runningState->addUpdateAction(std::make_unique<Vapor::CallbackAction>(
+        [](Vapor::FSM* fsm, float dt) {
+            auto* owner = fsm->getOwner<Player>();
+            if (owner) {
+                owner->velocity.x = 5.0f * dt;  // Move forward
+            }
+        }
+    ));
+
+    auto jumpingState = std::make_shared<Vapor::State>("Jumping");
+    jumpingState->addEnterAction(std::make_unique<SetAnimationAction>("jump"));
+    jumpingState->addEnterAction(std::make_unique<Vapor::PrintAction>("Player entered Jumping state"));
+    jumpingState->addEnterAction(std::make_unique<Vapor::CallbackAction>(
+        [](Vapor::FSM* fsm, float dt) {
+            auto* owner = fsm->getOwner<Player>();
+            if (owner) {
+                owner->velocity.y = 10.0f;  // Jump impulse
+                owner->isGrounded = false;
+            }
+        }
+    ));
+
+    // Add states to FSM
+    playerFSM->addState(idleState);
+    playerFSM->addState(runningState);
+    playerFSM->addState(jumpingState);
+
+    // Define transitions
+    playerFSM->addTransition("Idle", "StartRunning", "Running");
+    playerFSM->addTransition("Idle", "Jump", "Jumping");
+    playerFSM->addTransition("Running", "StopRunning", "Idle");
+    playerFSM->addTransition("Running", "Jump", "Jumping");
+    playerFSM->addTransition("Jumping", "Land", "Idle");
+
+    // Set initial state
+    playerFSM->setState("Idle");
+
+    // Print state diagram
+    playerFSM->printStateDiagram();
+
+    fmt::print("\nFSM Example initialized. Use keys:\n");
+    fmt::print("  SPACE: Start/Stop running\n");
+    fmt::print("  X: Jump\n\n");
 
     // Initialize engine core with enkiTS task scheduler
     auto engineCore = std::make_unique<Vapor::EngineCore>();
@@ -199,6 +299,22 @@ int main(int argc, char* args[]) {
                     quit = true;
                 }
                 keyboardState[e.key.scancode] = true;
+
+                // FSM Example: Handle key presses
+                if (e.key.scancode == SDL_SCANCODE_SPACE && !prevKeyboardState[SDL_SCANCODE_SPACE]) {
+                    // Toggle between Idle and Running
+                    if (playerFSM->getCurrentStateName() == "Idle") {
+                        playerFSM->handleEvent(Vapor::FSMEvent("StartRunning"));
+                    } else if (playerFSM->getCurrentStateName() == "Running") {
+                        playerFSM->handleEvent(Vapor::FSMEvent("StopRunning"));
+                    }
+                }
+
+                if (e.key.scancode == SDL_SCANCODE_X && !prevKeyboardState[SDL_SCANCODE_X]) {
+                    // Jump (from Idle or Running)
+                    playerFSM->handleEvent(Vapor::FSMEvent("Jump"));
+                }
+
                 break;
             }
             case SDL_EVENT_KEY_UP: {
@@ -303,6 +419,29 @@ int main(int argc, char* args[]) {
 
         // Update engine core (handles async task completion)
         engineCore->update(deltaTime);
+
+        // Update FSM
+        playerFSM->update(deltaTime);
+
+        // FSM Example: Simple jump landing logic
+        if (playerFSM->getCurrentStateName() == "Jumping") {
+            player.velocity.y -= 9.8f * deltaTime;  // Apply gravity
+            if (player.velocity.y <= 0.0f && !player.isGrounded) {
+                player.isGrounded = true;
+                playerFSM->handleEvent(Vapor::FSMEvent("Land"));
+            }
+        }
+
+        // Debug: Print current state and velocity occasionally
+        static float debugTimer = 0.0f;
+        debugTimer += deltaTime;
+        if (debugTimer > 2.0f) {
+            debugTimer = 0.0f;
+            fmt::print("FSM State: {}, Velocity: ({:.2f}, {:.2f}, {:.2f}), Animation: {}\n",
+                      playerFSM->getCurrentStateName(),
+                      player.velocity.x, player.velocity.y, player.velocity.z,
+                      player.currentAnimation);
+        }
 
         scene->update(deltaTime);
         physics->process(scene, deltaTime);
