@@ -15,6 +15,7 @@ set(SOURCES
     src/asset_manager.cpp
     src/asset_serializer.cpp
     src/camera.cpp
+    src/camera_manager.cpp
     src/graphics.cpp
     src/helper.cpp
     src/physics_3d.cpp
