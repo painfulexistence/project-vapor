@@ -4,6 +4,7 @@
 #include "renderer_metal.hpp"
 
 #include <fmt/core.h>
+#include <tracy/Tracy.hpp>
 #include <SDL3/SDL_stdinc.h>
 #include <SDL3/SDL_timer.h>
 #include <glm/vec2.hpp>
@@ -37,6 +38,8 @@ Renderer_Metal::~Renderer_Metal() {
 }
 
 auto Renderer_Metal::init(SDL_Window* window) -> void {
+    ZoneScoped;
+
     renderer = SDL_CreateRenderer(window, nullptr);
     swapchain = (CA::MetalLayer*)SDL_GetRenderMetalLayer(renderer);
     // swapchain->setDisplaySyncEnabled(true);
@@ -192,6 +195,8 @@ auto Renderer_Metal::createResources() -> void {
 }
 
 auto Renderer_Metal::stage(std::shared_ptr<Scene> scene) -> void {
+    ZoneScoped;
+
     // Lights
     directionalLightBuffer = NS::TransferPtr(device->newBuffer(scene->directionalLights.size() * sizeof(DirectionalLight), MTL::ResourceStorageModeManaged));
     memcpy(directionalLightBuffer->contents(), scene->directionalLights.data(), scene->directionalLights.size() * sizeof(DirectionalLight));
@@ -271,6 +276,9 @@ auto Renderer_Metal::stage(std::shared_ptr<Scene> scene) -> void {
 }
 
 auto Renderer_Metal::draw(std::shared_ptr<Scene> scene, Camera& camera) -> void {
+    ZoneScoped;
+    FrameMark;
+
     auto surface = swapchain->nextDrawable();
     if (!surface) {
         return;

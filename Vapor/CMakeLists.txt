@@ -7,6 +7,7 @@ find_package(cereal CONFIG REQUIRED)
 find_package(Jolt CONFIG REQUIRED)
 find_package(enkiTS CONFIG REQUIRED)
 find_package(SDL3 CONFIG REQUIRED)
+find_package(Tracy CONFIG REQUIRED)
 
 add_subdirectory(metal)
 add_subdirectory(MikkTSpace)
@@ -65,6 +66,7 @@ target_link_libraries(Vapor PRIVATE
     mikktspace
     Jolt::Jolt
     enkiTS::enkiTS
+    Tracy::TracyClient
 )
 
 
