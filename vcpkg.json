@@ -15,7 +15,13 @@
       ]
     },
     "enkits",
-    "tracy",
+    {
+      "name": "tracy",
+      "features": [
+        "gui-tools",
+        "on-demand"
+      ]
+    },
     "sdl3",
     "vulkan",
     {
