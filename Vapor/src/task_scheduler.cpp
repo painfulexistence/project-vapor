@@ -26,7 +26,8 @@ void TaskScheduler::init(uint32_t numThreads) {
         }
     }
 
-    m_scheduler->Initialize(numThreads);
+    m_numThreads = numThreads;
+    m_scheduler->Initialize(m_numThreads);
     m_initialized = true;
 }
 

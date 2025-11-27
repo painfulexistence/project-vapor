@@ -27,6 +27,9 @@ public:
     // Get the underlying enkiTS task scheduler
     enki::TaskScheduler* getScheduler() { return m_scheduler.get(); }
 
+    // Get the number of threads the scheduler is initialized with
+    uint32_t getNumThreads() const { return m_numThreads; }
+
     // Wait for all submitted tasks to complete
     void waitForAll();
 
@@ -40,6 +43,7 @@ public:
 private:
     std::unique_ptr<enki::TaskScheduler> m_scheduler;
     std::atomic<bool> m_initialized{false};
+    uint32_t m_numThreads = 0;
 };
 
 // Lambda task wrapper for enkiTS
@@ -49,6 +53,9 @@ public:
 
     void ExecuteRange(enki::TaskSetPartition range, uint32_t threadnum) override {
         m_func();
+        // This task is allocated with 'new' and not managed by any other system,
+        // so it must delete itself upon completion to avoid memory leaks.
+        delete this;
     }
 
 private:
