@@ -1,19 +1,23 @@
 #pragma once
+
 #include "rhi.hpp"
+
 #include <SDL3/SDL_video.h>
-#include <SDL3/SDL_vulkan.h>
-#include <vulkan/vulkan.h>
-#include <vector>
+#include <SDL3/SDL_render.h>
+#include <Foundation/Foundation.hpp>
+#include <Metal/Metal.hpp>
+#include <QuartzCore/QuartzCore.hpp>
 #include <unordered_map>
+#include <vector>
 
 // ============================================================================
-// RHI_Vulkan - Vulkan implementation of RHI interface
+// RHI_Metal - Metal Implementation of RHI Interface
 // ============================================================================
 
-class RHI_Vulkan : public RHI {
+class RHI_Metal : public RHI {
 public:
-    RHI_Vulkan();
-    ~RHI_Vulkan() override;
+    RHI_Metal();
+    ~RHI_Metal() override;
 
     // ========================================================================
     // Initialization
@@ -79,6 +83,9 @@ public:
     void setStorageBuffer(Uint32 set, Uint32 binding, BufferHandle buffer, size_t offset, size_t range) override;
     void setTexture(Uint32 set, Uint32 binding, TextureHandle texture, SamplerHandle sampler) override;
 
+    void setVertexBytes(const void* data, size_t size, Uint32 binding) override;
+    void setFragmentBytes(const void* data, size_t size, Uint32 binding) override;
+
     void draw(Uint32 vertexCount, Uint32 instanceCount, Uint32 firstVertex, Uint32 firstInstance) override;
     void drawIndexed(Uint32 indexCount, Uint32 instanceCount, Uint32 firstIndex, int32_t vertexOffset, Uint32 firstInstance) override;
 
@@ -107,93 +114,84 @@ public:
     // ========================================================================
 
     void* getBackendDevice() const override;
-    void* getBackendPhysicalDevice() const override;
-    void* getBackendInstance() const override;
+    void* getBackendPhysicalDevice() const override { return nullptr; } // N/A for Metal
+    void* getBackendInstance() const override { return nullptr; } // N/A for Metal
     void* getBackendQueue() const override;
     void* getBackendCommandBuffer() const override;
+    MTL::RenderCommandEncoder* getCurrentRenderEncoder() const;
+    CA::MetalDrawable* getCurrentDrawable() const;
 
 private:
     // ========================================================================
-    // Vulkan Objects
+    // Metal Objects
     // ========================================================================
 
     SDL_Window* window = nullptr;
-    VkInstance instance = VK_NULL_HANDLE;
-    VkSurfaceKHR surface = VK_NULL_HANDLE;
-    VkPhysicalDevice physicalDevice = VK_NULL_HANDLE;
-    VkDevice device = VK_NULL_HANDLE;
-    VkQueue graphicsQueue = VK_NULL_HANDLE;
-    VkQueue presentQueue = VK_NULL_HANDLE;
-    Uint32 graphicsFamilyIdx = UINT32_MAX;
-    Uint32 presentFamilyIdx = UINT32_MAX;
+    SDL_Renderer* renderer = nullptr;
+    CA::MetalLayer* swapchain = nullptr;
+    MTL::Device* device = nullptr;
+    NS::SharedPtr<MTL::CommandQueue> commandQueue;
 
-    VkSwapchainKHR swapchain = VK_NULL_HANDLE;
-    VkFormat swapchainImageFormat;
-    VkExtent2D swapchainExtent;
-    std::vector<VkImage> swapchainImages;
-    std::vector<VkImageView> swapchainImageViews;
+    // Current frame resources
+    CA::MetalDrawable* currentDrawable = nullptr;
+    NS::SharedPtr<MTL::CommandBuffer> currentCommandBuffer;
+    MTL::RenderCommandEncoder* currentRenderEncoder = nullptr;
+    MTL::ComputeCommandEncoder* currentComputeEncoder = nullptr;
 
-    VkCommandPool commandPool = VK_NULL_HANDLE;
-    std::vector<VkCommandBuffer> commandBuffers;
-
-    std::vector<VkSemaphore> imageAvailableSemaphores;
-    std::vector<VkSemaphore> renderFinishedSemaphores;
-    std::vector<VkFence> inFlightFences;
-
-    // Current frame
-    const Uint32 MAX_FRAMES_IN_FLIGHT = 2;
-    Uint32 currentFrameInFlight = 0;
-    Uint32 currentSwapchainImageIndex = 0;
-    VkCommandBuffer currentCommandBuffer = VK_NULL_HANDLE;
+    // Swapchain properties
+    Uint32 swapchainWidth = 0;
+    Uint32 swapchainHeight = 0;
+    MTL::PixelFormat swapchainFormat = MTL::PixelFormatRGBA8Unorm_sRGB;
 
     // ========================================================================
-    // Resource Maps
+    // Resource Storage
     // ========================================================================
 
     struct BufferResource {
-        VkBuffer buffer;
-        VkDeviceMemory memory;
-        VkDeviceSize size;
+        NS::SharedPtr<MTL::Buffer> buffer;
+        size_t size;
         bool isMapped;
-        void* mappedData;
+        void* mappedPointer;
     };
 
     struct TextureResource {
-        VkImage image;
-        VkImageView view;
-        VkDeviceMemory memory;
-        VkFormat format;
+        NS::SharedPtr<MTL::Texture> texture;
         Uint32 width;
         Uint32 height;
+        Uint32 depth;
+        Uint32 mipLevels;
+        MTL::PixelFormat format;
     };
 
     struct ShaderResource {
-        VkShaderModule module;
+        NS::SharedPtr<MTL::Library> library;
+        NS::SharedPtr<MTL::Function> function;
         ShaderStage stage;
     };
 
     struct SamplerResource {
-        VkSampler sampler;
+        NS::SharedPtr<MTL::SamplerState> sampler;
     };
 
     struct PipelineResource {
-        VkPipeline pipeline;
-        VkPipelineLayout layout;
+        NS::SharedPtr<MTL::RenderPipelineState> renderPipeline;
+        NS::SharedPtr<MTL::ComputePipelineState> computePipeline;
+        bool isCompute;
     };
 
     struct ComputePipelineResource {
-        VkPipeline pipeline;
-        VkPipelineLayout layout;
+        NS::SharedPtr<MTL::ComputePipelineState> pipeline;
     };
 
     struct AccelStructResource {
-        // Vulkan ray tracing is not implemented yet
-        // Will use VK_KHR_acceleration_structure when needed
-        VkBuffer scratchBuffer;
-        VkDeviceMemory scratchMemory;
-        void* buildData;
+        NS::SharedPtr<MTL::AccelerationStructure> accelStruct;
+        NS::SharedPtr<MTL::Buffer> scratchBuffer;
+        AccelStructType type;
+        std::vector<AccelStructGeometry> geometries;
+        std::vector<AccelStructInstance> instances;
     };
 
+    // Resource maps
     Uint32 nextBufferId = 1;
     Uint32 nextTextureId = 1;
     Uint32 nextShaderId = 1;
@@ -210,29 +208,28 @@ private:
     std::unordered_map<Uint32, ComputePipelineResource> computePipelines;
     std::unordered_map<Uint32, AccelStructResource> accelStructs;
 
+    // Current binding state
+    PipelineHandle currentPipeline = {0};
+    ComputePipelineHandle currentComputePipeline = {0};
+    BufferHandle currentVertexBuffer = {0};
+    BufferHandle currentIndexBuffer = {0};
+
     // ========================================================================
     // Internal Helpers
     // ========================================================================
 
-    void createInstance();
-    void createSurface();
-    void pickPhysicalDevice();
-    void createLogicalDevice();
-    void createSwapchain();
-    void createCommandPool();
-    void createCommandBuffers();
-    void createSyncObjects();
+    MTL::PixelFormat convertPixelFormat(PixelFormat format);
+    MTL::TextureUsage convertTextureUsage(TextureUsage usage);
+    MTL::SamplerAddressMode convertSamplerAddressMode(AddressMode mode);
+    MTL::SamplerMinMagFilter convertSamplerFilter(FilterMode filter);
+    MTL::SamplerMipFilter convertSamplerMipFilter(FilterMode filter);
+    MTL::CompareFunction convertCompareOp(CompareOp op);
+    MTL::PrimitiveType convertPrimitiveTopology(PrimitiveTopology topology);
+    MTL::CullMode convertCullMode(CullMode mode);
+    MTL::Winding convertFrontFace(bool counterClockwise);
+    MTL::BlendFactor convertBlendFactor(BlendMode mode, bool isSource, bool isAlpha);
+    MTL::BlendOperation convertBlendOp();
 
-    Uint32 findMemoryType(Uint32 typeFilter, VkMemoryPropertyFlags properties);
-    VkFormat convertPixelFormat(PixelFormat format);
-    VkFilter convertFilterMode(FilterMode mode);
-    VkSamplerAddressMode convertAddressMode(AddressMode mode);
-    VkCompareOp convertCompareOp(CompareOp op);
-    VkPrimitiveTopology convertPrimitiveTopology(PrimitiveTopology topology);
-    VkCullModeFlags convertCullMode(CullMode mode);
-    VkBufferUsageFlags convertBufferUsage(BufferUsage usage);
-    VkImageUsageFlags convertTextureUsage(TextureUsage usage);
+    NS::SharedPtr<MTL::Function> createShaderFunction(const std::string& source, ShaderStage stage);
+    NS::SharedPtr<MTL::RenderPipelineState> createRenderPipeline(const PipelineDesc& desc);
 };
-
-// Factory function
-RHI* createRHIVulkan();

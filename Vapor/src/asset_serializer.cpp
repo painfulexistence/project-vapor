@@ -16,9 +16,13 @@ void AssetSerializer::serializeScene(const std::shared_ptr<Scene>& scene, const 
     }
 
     cereal::BinaryOutputArchive archive(file);
+    
+    // Write format version
+    const Uint32 FORMAT_VERSION = 2; // Increment when format changes
+    archive(FORMAT_VERSION);
+    
     // archive(scene.name);
-    archive(scene->vertices);
-    archive(scene->indices);
+    // Note: vertices and indices are now stored per-mesh, not in Scene
 
     std::unordered_map<std::shared_ptr<Image>, Uint32> imageIDs;
     Uint32 nextImageID = 0;
@@ -68,11 +72,29 @@ std::shared_ptr<Scene> AssetSerializer::deserializeScene(const std::string& path
         throw std::runtime_error(fmt::format("Failed to open file for reading: {}", path));
     }
 
-    cereal::BinaryInputArchive archive(file);
-    auto scene = std::make_shared<Scene>();
-    // archive(scene->name);
-    archive(scene->vertices);
-    archive(scene->indices);
+    try {
+        cereal::BinaryInputArchive archive(file);
+        
+        // Read format version
+        Uint32 formatVersion = 0;
+        try {
+            archive(formatVersion);
+        } catch (...) {
+            // Old format files don't have version - treat as version 1
+            formatVersion = 1;
+            // Reset file position if possible (though cereal doesn't support this easily)
+            // Instead, we'll throw a clear error
+            throw std::runtime_error("Old format file detected (no version header). Please delete .vscene and .vscene_optimized cache files and reload.");
+        }
+        
+        if (formatVersion < 2) {
+            throw std::runtime_error(fmt::format("Unsupported file format version: {} (current: 2). Please delete .vscene and .vscene_optimized cache files and reload.", formatVersion));
+        }
+        
+        auto scene = std::make_shared<Scene>();
+        // archive(scene->name);
+        // Note: vertices and indices are now stored per-mesh, not in Scene
+        // Old format files had these fields - they are no longer serialized
 
     Uint32 imageCount;
     archive(imageCount);
@@ -125,10 +147,13 @@ std::shared_ptr<Scene> AssetSerializer::deserializeScene(const std::string& path
         scene->nodes.push_back(deserializeNode(archive, materials));
     }
 
-    scene->update(0.0f); // making sure world transform is updated
+        scene->update(0.0f); // making sure world transform is updated
 
-    fmt::print("Scene deserialized from: {} in {} ms\n", path, SDL_GetTicks() - start);
-    return scene;
+        fmt::print("Scene deserialized from: {} in {} ms\n", path, SDL_GetTicks() - start);
+        return scene;
+    } catch (const std::exception& e) {
+        throw std::runtime_error(fmt::format("Failed to deserialize scene from {}: {}. The file may be in an old format or corrupted. Please delete .vscene and .vscene_optimized cache files and reload the scene.", path, e.what()));
+    }
 }
 
 void AssetSerializer::serializeNode(cereal::BinaryOutputArchive& archive, const std::shared_ptr<Node>& node,
@@ -317,11 +342,39 @@ std::shared_ptr<Image> AssetSerializer::deserializeImage(cereal::BinaryInputArch
     }
     auto image = std::make_shared<Image>();
 
-    archive(image->uri);
-    archive(image->width);
-    archive(image->height);
-    archive(image->channelCount);
-    archive(image->byteArray);
+    try {
+        archive(image->uri);
+        
+        // Validate URI size (sanity check)
+        if (image->uri.size() > 4096) {
+            throw std::runtime_error(fmt::format("Invalid URI size: {} (file may be corrupted or in old format). Please delete .vscene cache files and reload.", image->uri.size()));
+        }
+        
+        archive(image->width);
+        archive(image->height);
+        archive(image->channelCount);
+        
+        // Validate dimensions before reading byteArray
+        if (image->width == 0 || image->height == 0 || image->channelCount == 0 || 
+            image->width > 65536 || image->height > 65536 || image->channelCount > 16) {
+            throw std::runtime_error(fmt::format("Invalid image dimensions: {}x{}x{} (file may be corrupted or in old format). Please delete .vscene cache files and reload.", 
+                image->width, image->height, image->channelCount));
+        }
+        
+        archive(image->byteArray);
+        
+        // Validate byteArray size matches expected size
+        size_t expectedSize = static_cast<size_t>(image->width) * image->height * image->channelCount;
+        if (image->byteArray.size() != expectedSize && image->byteArray.size() > 0) {
+            // Allow some tolerance for padding, but not huge differences
+            if (image->byteArray.size() > expectedSize * 2 || image->byteArray.size() < expectedSize / 2) {
+                throw std::runtime_error(fmt::format("Image byteArray size mismatch: expected {}, got {} (file may be corrupted). Please delete .vscene cache files and reload.", 
+                    expectedSize, image->byteArray.size()));
+            }
+        }
+    } catch (const std::exception& e) {
+        throw std::runtime_error(fmt::format("Failed to deserialize image: {}. The serialized file may be in an old format or corrupted. Please delete .vscene and .vscene_optimized cache files and reload the scene.", e.what()));
+    }
 
     return image;
 }
@@ -342,13 +395,9 @@ void AssetSerializer::serializeMesh(cereal::BinaryOutputArchive& archive, const 
     archive(mesh->vertices);
     archive(mesh->indices);
     archive(static_cast<int>(mesh->primitiveMode));
-
-    archive(mesh->vertexOffset);
-    archive(mesh->indexOffset);
-    archive(mesh->vertexCount);
-    archive(mesh->indexCount);
     archive(mesh->localAABBMin);
     archive(mesh->localAABBMax);
+    // Note: vertexOffset, indexOffset, vertexCount, indexCount are now managed by Renderer layer
 
     if (mesh->material) {
         auto it = materialIDs.find(mesh->material);
@@ -384,14 +433,13 @@ std::shared_ptr<Mesh> AssetSerializer::deserializeMesh(cereal::BinaryInputArchiv
     int primitiveModeInt;
     archive(primitiveModeInt);
     mesh->primitiveMode = static_cast<PrimitiveMode>(primitiveModeInt);
-
-    archive(mesh->vertexOffset);
-    archive(mesh->indexOffset);
-    archive(mesh->vertexCount);
-    archive(mesh->indexCount);
+    
+    // Note: vertexOffset, indexOffset, vertexCount, indexCount are no longer serialized
+    // They are now managed by Renderer layer at runtime
+    // Old format files will need to be regenerated
+    
     archive(mesh->localAABBMin);
     archive(mesh->localAABBMax);
-    mesh->isGeometryDirty = false; // prevent AABB updating
 
     bool hasMaterial;
     archive(hasMaterial);

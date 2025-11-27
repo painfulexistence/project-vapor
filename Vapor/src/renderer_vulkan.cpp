@@ -1036,8 +1036,9 @@ auto Renderer_Vulkan::stage(std::shared_ptr<Scene> scene) -> void {
     }
 
     // Textures
+    // Note: Image no longer has texture field - store mapping instead
     for (auto& img : scene->images) {
-        img->texture = createTexture(img);
+        imageToTextureMap[img] = createTexture(img);
     }
 
     // Pipelines
@@ -1053,10 +1054,13 @@ auto Renderer_Vulkan::stage(std::shared_ptr<Scene> scene) -> void {
     const std::function<void(const std::shared_ptr<Node>&)> stageNode = [&](const std::shared_ptr<Node>& node) {
         if (node->meshGroup) {
             for (auto& mesh : node->meshGroup->meshes) {
-                mesh->vbos.push_back(createVertexBuffer(mesh->vertices));// TODO: use single vbo for all meshes
-                mesh->ebo = createIndexBuffer(mesh->indices);
-                mesh->materialID = materialIDs.at(mesh->material);
-                mesh->instanceID = nextInstanceID++;
+                MeshGPUResources& resources = meshGPUResources[mesh];
+                resources.vbos.push_back(createVertexBuffer(mesh->vertices));// TODO: use single vbo for all meshes
+                resources.ebo = createIndexBuffer(mesh->indices);
+                resources.materialID = materialIDs.at(mesh->material);
+                resources.instanceID = nextInstanceID++;
+                resources.vertexCount = static_cast<Uint32>(mesh->vertices.size());
+                resources.indexCount = static_cast<Uint32>(mesh->indices.size());
             }
         }
         for (const auto& child : node->children) {
@@ -1096,30 +1100,32 @@ auto Renderer_Vulkan::stage(std::shared_ptr<Scene> scene) -> void {
         auto& mat = scene->materials[i];
 
         VkDescriptorImageInfo albedoImageInfo;
-        albedoImageInfo.imageView = getTextureView(mat->albedoMap ? mat->albedoMap->texture : defaultAlbedoTexture);
+        TextureHandle albedoTexture = mat->albedoMap ? imageToTextureMap[mat->albedoMap] : defaultAlbedoTexture;
+        albedoImageInfo.imageView = getTextureView(albedoTexture);
         albedoImageInfo.sampler = defaultSampler;
         albedoImageInfo.imageLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
 
         VkDescriptorImageInfo normalImageInfo;
-        normalImageInfo.imageView = getTextureView(mat->normalMap ? mat->normalMap->texture : defaultNormalTexture);
+        TextureHandle normalTexture = mat->normalMap ? imageToTextureMap[mat->normalMap] : defaultNormalTexture;
+        normalImageInfo.imageView = getTextureView(normalTexture);
         normalImageInfo.sampler = defaultSampler;
         normalImageInfo.imageLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
 
         VkDescriptorImageInfo metallicRoughnessImageInfo;
-        metallicRoughnessImageInfo.imageView =
-          getTextureView(mat->roughnessMap ? mat->roughnessMap->texture : defaultORMTexture);
+        TextureHandle roughnessTexture = mat->roughnessMap ? imageToTextureMap[mat->roughnessMap] : defaultORMTexture;
+        metallicRoughnessImageInfo.imageView = getTextureView(roughnessTexture);
         metallicRoughnessImageInfo.sampler = defaultSampler;
         metallicRoughnessImageInfo.imageLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
 
         VkDescriptorImageInfo occlusionImageInfo;
-        occlusionImageInfo.imageView =
-          getTextureView(mat->occlusionMap ? mat->occlusionMap->texture : defaultORMTexture);
+        TextureHandle occlusionTexture = mat->occlusionMap ? imageToTextureMap[mat->occlusionMap] : defaultORMTexture;
+        occlusionImageInfo.imageView = getTextureView(occlusionTexture);
         occlusionImageInfo.sampler = defaultSampler;
         occlusionImageInfo.imageLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
 
         VkDescriptorImageInfo emissiveImageInfo;
-        emissiveImageInfo.imageView =
-          getTextureView(mat->emissiveMap ? mat->emissiveMap->texture : defaultEmissiveTexture);
+        TextureHandle emissiveTexture = mat->emissiveMap ? imageToTextureMap[mat->emissiveMap] : defaultEmissiveTexture;
+        emissiveImageInfo.imageView = getTextureView(emissiveTexture);
         emissiveImageInfo.sampler = defaultSampler;
         emissiveImageInfo.imageLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
 
@@ -1296,12 +1302,13 @@ auto Renderer_Vulkan::draw(std::shared_ptr<Scene> scene, Camera& camera) -> void
         if (node->meshGroup) {
             const glm::mat4& transform = node->worldTransform;
             for (auto& mesh : node->meshGroup->meshes) {
+                const MeshGPUResources& resources = meshGPUResources[mesh];
                 instances.push_back({ .model = transform,
-                                      .vertexOffset = mesh->vertexOffset,
-                                      .indexOffset = mesh->indexOffset,
-                                      .vertexCount = mesh->vertexCount,
-                                      .indexCount = mesh->indexCount,
-                                      .materialID = mesh->materialID,
+                                      .vertexOffset = resources.vertexOffset,
+                                      .indexOffset = resources.indexOffset,
+                                      .vertexCount = resources.vertexCount,
+                                      .indexCount = resources.indexCount,
+                                      .materialID = resources.materialID,
                                       .primitiveMode = mesh->primitiveMode,
                                       .AABBMin = mesh->worldAABBMin,
                                       .AABBMax = mesh->worldAABBMax });
@@ -1373,10 +1380,11 @@ auto Renderer_Vulkan::draw(std::shared_ptr<Scene> scene, Camera& camera) -> void
                     continue;
                 }
                 // vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, getPipeline(mesh->material->pipeline.rid));
-                VkBuffer vertexBuffers[] = { getBuffer(mesh->vbos[0]) };
+                const MeshGPUResources& resources = meshGPUResources[mesh];
+                VkBuffer vertexBuffers[] = { getBuffer(resources.vbos[0]) };
                 VkDeviceSize offsets[] = { 0 };
                 vkCmdBindVertexBuffers(cmd, 0, 1, vertexBuffers, offsets);
-                vkCmdBindIndexBuffer(cmd, getBuffer(mesh->ebo), 0, VkIndexType::VK_INDEX_TYPE_UINT32);
+                vkCmdBindIndexBuffer(cmd, getBuffer(resources.ebo), 0, VkIndexType::VK_INDEX_TYPE_UINT32);
                 // TODO: bind camera and instance data buffer outside the loop
                 std::array<VkDescriptorSet, 2> descriptorSets = { set0s[currentFrameInFlight],
                                                                   materialTextureSets.at(mesh->material) };
@@ -1390,8 +1398,9 @@ auto Renderer_Vulkan::draw(std::shared_ptr<Scene> scene, Camera& camera) -> void
                   0,
                   nullptr
                 );// resources are set here
+                const MeshGPUResources& resources = meshGPUResources[mesh];
                 vkCmdPushConstants(
-                  cmd, prePassPipelineLayout, VK_SHADER_STAGE_VERTEX_BIT, 0, sizeof(Uint32), &mesh->instanceID
+                  cmd, prePassPipelineLayout, VK_SHADER_STAGE_VERTEX_BIT, 0, sizeof(Uint32), &resources.instanceID
                 );
                 vkCmdDrawIndexed(cmd, mesh->indices.size(), 1, 0, 0, 0);
             }
@@ -1423,10 +1432,11 @@ auto Renderer_Vulkan::draw(std::shared_ptr<Scene> scene, Camera& camera) -> void
                     continue;
                 }
                 // vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, getPipeline(mesh->material->pipeline.rid));
-                VkBuffer vertexBuffers[] = { getBuffer(mesh->vbos[0]) };
+                const MeshGPUResources& resources = meshGPUResources[mesh];
+                VkBuffer vertexBuffers[] = { getBuffer(resources.vbos[0]) };
                 VkDeviceSize offsets[] = { 0 };
                 vkCmdBindVertexBuffers(cmd, 0, 1, vertexBuffers, offsets);
-                vkCmdBindIndexBuffer(cmd, getBuffer(mesh->ebo), 0, VkIndexType::VK_INDEX_TYPE_UINT32);
+                vkCmdBindIndexBuffer(cmd, getBuffer(resources.ebo), 0, VkIndexType::VK_INDEX_TYPE_UINT32);
                 // TODO: bind camera and instance data buffer outside the loop
                 std::array<VkDescriptorSet, 2> descriptorSets = { set0s[currentFrameInFlight],
                                                                   materialTextureSets.at(mesh->material) };
@@ -1449,7 +1459,7 @@ auto Renderer_Vulkan::draw(std::shared_ptr<Scene> scene, Camera& camera) -> void
                   VK_SHADER_STAGE_VERTEX_BIT,
                   sizeof(glm::vec3),
                   sizeof(Uint32),
-                  &mesh->instanceID
+                  &meshGPUResources[mesh].instanceID
                 );
                 vkCmdDrawIndexed(cmd, mesh->indices.size(), 1, 0, 0, 0);
             }

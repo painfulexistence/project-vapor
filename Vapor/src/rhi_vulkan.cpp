@@ -476,6 +476,15 @@ PipelineHandle RHI_Vulkan::createPipeline(const PipelineDesc& desc) {
             colorBlendAttachment.dstColorBlendFactor = VK_BLEND_FACTOR_ONE;
             colorBlendAttachment.colorBlendOp = VK_BLEND_OP_ADD;
             colorBlendAttachment.srcAlphaBlendFactor = VK_BLEND_FACTOR_ONE;
+            colorBlendAttachment.dstAlphaBlendFactor = VK_BLEND_FACTOR_ONE;
+            colorBlendAttachment.alphaBlendOp = VK_BLEND_OP_ADD;
+            break;
+        case BlendMode::Multiply:
+            colorBlendAttachment.blendEnable = VK_TRUE;
+            colorBlendAttachment.srcColorBlendFactor = VK_BLEND_FACTOR_DST_COLOR;
+            colorBlendAttachment.dstColorBlendFactor = VK_BLEND_FACTOR_ZERO;
+            colorBlendAttachment.colorBlendOp = VK_BLEND_OP_ADD;
+            colorBlendAttachment.srcAlphaBlendFactor = VK_BLEND_FACTOR_ONE;
             colorBlendAttachment.dstAlphaBlendFactor = VK_BLEND_FACTOR_ZERO;
             colorBlendAttachment.alphaBlendOp = VK_BLEND_OP_ADD;
             break;
@@ -783,48 +792,52 @@ void RHI_Vulkan::endFrame() {
 void RHI_Vulkan::beginRenderPass(const RenderPassDesc& desc) {
     // Setup color attachments
     std::vector<VkRenderingAttachmentInfo> colorAttachments;
-    for (const auto& colorAttachment : desc.colorAttachments) {
+    for (size_t i = 0; i < desc.colorAttachments.size(); ++i) {
+        const auto& colorAttachmentHandle = desc.colorAttachments[i];
         VkRenderingAttachmentInfo attachmentInfo{};
         attachmentInfo.sType = VK_STRUCTURE_TYPE_RENDERING_ATTACHMENT_INFO;
 
         // Get the image view for this attachment
-        if (colorAttachment.texture.id == 0) {
+        if (colorAttachmentHandle.id == 0) {
             // Use swapchain image
             attachmentInfo.imageView = swapchainImageViews[currentSwapchainImageIndex];
         } else {
-            auto it = textures.find(colorAttachment.texture.id);
+            auto it = textures.find(colorAttachmentHandle.id);
             if (it != textures.end()) {
                 attachmentInfo.imageView = it->second.view;
             }
         }
 
         attachmentInfo.imageLayout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL;
-        attachmentInfo.loadOp = colorAttachment.loadOp == LoadOp::Clear ? VK_ATTACHMENT_LOAD_OP_CLEAR :
-                                colorAttachment.loadOp == LoadOp::Load ? VK_ATTACHMENT_LOAD_OP_LOAD :
-                                VK_ATTACHMENT_LOAD_OP_DONT_CARE;
-        attachmentInfo.storeOp = colorAttachment.storeOp == StoreOp::Store ? VK_ATTACHMENT_STORE_OP_STORE :
-                                 VK_ATTACHMENT_STORE_OP_DONT_CARE;
-        attachmentInfo.clearValue.color = {{colorAttachment.clearColor.r, colorAttachment.clearColor.g,
-                                            colorAttachment.clearColor.b, colorAttachment.clearColor.a}};
+        // Load/store operations from loadColor vector (true = load, false = clear)
+        bool shouldLoad = (i < desc.loadColor.size()) ? desc.loadColor[i] : false;
+        attachmentInfo.loadOp = shouldLoad ? VK_ATTACHMENT_LOAD_OP_LOAD : VK_ATTACHMENT_LOAD_OP_CLEAR;
+        attachmentInfo.storeOp = VK_ATTACHMENT_STORE_OP_STORE;
+
+        // Clear color from clearColors vector
+        if (i < desc.clearColors.size()) {
+            const auto& clearColor = desc.clearColors[i];
+            attachmentInfo.clearValue.color = {{clearColor.r, clearColor.g, clearColor.b, clearColor.a}};
+        } else {
+            attachmentInfo.clearValue.color = {{0.0f, 0.0f, 0.0f, 1.0f}};
+        }
 
         colorAttachments.push_back(attachmentInfo);
     }
 
     // Setup depth attachment
     VkRenderingAttachmentInfo depthAttachment{};
-    if (desc.depthAttachment.texture.id != 0) {
+    if (desc.depthAttachment.id != 0) {
         depthAttachment.sType = VK_STRUCTURE_TYPE_RENDERING_ATTACHMENT_INFO;
-        auto it = textures.find(desc.depthAttachment.texture.id);
+        auto it = textures.find(desc.depthAttachment.id);
         if (it != textures.end()) {
             depthAttachment.imageView = it->second.view;
         }
         depthAttachment.imageLayout = VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL;
-        depthAttachment.loadOp = desc.depthAttachment.loadOp == LoadOp::Clear ? VK_ATTACHMENT_LOAD_OP_CLEAR :
-                                 desc.depthAttachment.loadOp == LoadOp::Load ? VK_ATTACHMENT_LOAD_OP_LOAD :
-                                 VK_ATTACHMENT_LOAD_OP_DONT_CARE;
-        depthAttachment.storeOp = desc.depthAttachment.storeOp == StoreOp::Store ? VK_ATTACHMENT_STORE_OP_STORE :
-                                  VK_ATTACHMENT_STORE_OP_DONT_CARE;
-        depthAttachment.clearValue.depthStencil = {desc.depthAttachment.clearDepth, 0};
+        // Load/store operations (loadDepth: true = load, false = clear)
+        depthAttachment.loadOp = desc.loadDepth ? VK_ATTACHMENT_LOAD_OP_LOAD : VK_ATTACHMENT_LOAD_OP_CLEAR;
+        depthAttachment.storeOp = VK_ATTACHMENT_STORE_OP_STORE;
+        depthAttachment.clearValue.depthStencil = {desc.clearDepth, desc.clearStencil};
     }
 
     // Begin dynamic rendering
@@ -835,7 +848,7 @@ void RHI_Vulkan::beginRenderPass(const RenderPassDesc& desc) {
     renderingInfo.layerCount = 1;
     renderingInfo.colorAttachmentCount = static_cast<uint32_t>(colorAttachments.size());
     renderingInfo.pColorAttachments = colorAttachments.data();
-    if (desc.depthAttachment.texture.id != 0) {
+    if (desc.depthAttachment.id != 0) {
         renderingInfo.pDepthAttachment = &depthAttachment;
     }
 
@@ -866,6 +879,7 @@ void RHI_Vulkan::endRenderPass() {
 // ============================================================================
 
 void RHI_Vulkan::bindPipeline(PipelineHandle pipeline) {
+    currentPipeline = pipeline;
     // TODO: Implement
 }
 
@@ -890,6 +904,31 @@ void RHI_Vulkan::setUniformBuffer(Uint32 set, Uint32 binding, BufferHandle buffe
 
 void RHI_Vulkan::setStorageBuffer(Uint32 set, Uint32 binding, BufferHandle buffer, size_t offset, size_t range) {
     // TODO: Implement descriptor set binding
+}
+
+void RHI_Vulkan::setVertexBytes(const void* data, size_t size, Uint32 binding) {
+    if (currentCommandBuffer && data && size > 0 && currentPipeline.isValid()) {
+        auto it = pipelines.find(currentPipeline.id);
+        if (it != pipelines.end()) {
+            // Use push constants for small data (up to 128 bytes in Vulkan)
+            // For larger data, we'd need to use a buffer, but for instanceID (4 bytes) this is fine
+            if (size <= 128) {
+                vkCmdPushConstants(currentCommandBuffer, it->second.layout, VK_SHADER_STAGE_VERTEX_BIT, 0, static_cast<Uint32>(size), data);
+            }
+        }
+    }
+}
+
+void RHI_Vulkan::setFragmentBytes(const void* data, size_t size, Uint32 binding) {
+    if (currentCommandBuffer && data && size > 0 && currentPipeline.isValid()) {
+        auto it = pipelines.find(currentPipeline.id);
+        if (it != pipelines.end()) {
+            // Use push constants for small data (up to 128 bytes in Vulkan)
+            if (size <= 128) {
+                vkCmdPushConstants(currentCommandBuffer, it->second.layout, VK_SHADER_STAGE_FRAGMENT_BIT, 0, static_cast<Uint32>(size), data);
+            }
+        }
+    }
 }
 
 void RHI_Vulkan::setTexture(Uint32 set, Uint32 binding, TextureHandle texture, SamplerHandle sampler) {
@@ -1077,7 +1116,7 @@ void RHI_Vulkan::createLogicalDevice() {
     synchronization2Features.synchronization2 = VK_TRUE;
 
     // Device extensions
-    const std::vector<const char*> deviceExtensions = {
+    std::vector<const char*> deviceExtensions = {
         VK_KHR_SWAPCHAIN_EXTENSION_NAME,
         VK_KHR_PORTABILITY_SUBSET_EXTENSION_NAME,
         VK_KHR_DYNAMIC_RENDERING_EXTENSION_NAME,
@@ -1112,6 +1151,14 @@ void RHI_Vulkan::createLogicalDevice() {
     // Get queue handles
     vkGetDeviceQueue(device, graphicsFamilyIdx, 0, &graphicsQueue);
     vkGetDeviceQueue(device, presentFamilyIdx, 0, &presentQueue);
+
+    // Load extension function pointers
+    vkCmdBeginRenderingKHR = (PFN_vkCmdBeginRenderingKHR)vkGetDeviceProcAddr(device, "vkCmdBeginRenderingKHR");
+    vkCmdEndRenderingKHR = (PFN_vkCmdEndRenderingKHR)vkGetDeviceProcAddr(device, "vkCmdEndRenderingKHR");
+
+    if (!vkCmdBeginRenderingKHR || !vkCmdEndRenderingKHR) {
+        throw std::runtime_error("Failed to load dynamic rendering extension functions");
+    }
 }
 
 void RHI_Vulkan::createSwapchain() {

@@ -153,12 +153,20 @@ void RHI_Metal::destroyBuffer(BufferHandle handle) {
 
 TextureHandle RHI_Metal::createTexture(const TextureDesc& desc) {
     auto textureDesc = MTL::TextureDescriptor::alloc()->init();
-    textureDesc->setTextureType(MTL::TextureType2D);
+
+    // Set texture type based on sample count (MSAA uses multisample type)
+    if (desc.sampleCount > 1) {
+        textureDesc->setTextureType(MTL::TextureType2DMultisample);
+    } else {
+        textureDesc->setTextureType(MTL::TextureType2D);
+    }
+
     textureDesc->setWidth(desc.width);
     textureDesc->setHeight(desc.height);
     textureDesc->setDepth(desc.depth);
     textureDesc->setMipmapLevelCount(desc.mipLevels);
     textureDesc->setArrayLength(desc.arrayLayers);
+    textureDesc->setSampleCount(desc.sampleCount);
     textureDesc->setPixelFormat(convertPixelFormat(desc.format));
     textureDesc->setUsage(convertTextureUsage(desc.usage));
     textureDesc->setStorageMode(MTL::StorageModePrivate);
@@ -210,26 +218,34 @@ ShaderHandle RHI_Metal::createShader(const ShaderDesc& desc) {
             throw std::runtime_error("Failed to create shader library");
         }
 
-        // Get main function
-        function = NS::TransferPtr(library->newFunction(NS::String::string("main0", NS::UTF8StringEncoding)));
-        if (!function) {
-            throw std::runtime_error("Failed to find shader entry point 'main0'");
+        // Get function by entry point name (use default Metal naming if not specified)
+        std::string entryPoint;
+        if (desc.entryPoint && strlen(desc.entryPoint) > 0) {
+            entryPoint = desc.entryPoint;
+        } else {
+            // Use default Metal naming convention based on shader stage
+            switch (desc.stage) {
+                case ShaderStage::Vertex:
+                    entryPoint = "vertexMain";
+                    break;
+                case ShaderStage::Fragment:
+                    entryPoint = "fragmentMain";
+                    break;
+                case ShaderStage::Compute:
+                    entryPoint = "computeMain";
+                    break;
+                default:
+                    entryPoint = "main";
+                    break;
+            }
         }
-    } else if (desc.filepath) {
-        // Load library from file
-        NS::Error* error = nullptr;
-        auto path = NS::String::string(desc.filepath, NS::UTF8StringEncoding);
-        library = NS::TransferPtr(device->newLibrary(path, &error));
-
-        if (!library || error) {
-            throw std::runtime_error("Failed to load shader from file");
-        }
-
-        function = NS::TransferPtr(library->newFunction(NS::String::string("main0", NS::UTF8StringEncoding)));
+        function = NS::TransferPtr(library->newFunction(NS::String::string(entryPoint.c_str(), NS::UTF8StringEncoding)));
         if (!function) {
-            throw std::runtime_error("Failed to find shader entry point");
+            throw std::runtime_error(fmt::format("Failed to find shader entry point '{}'", entryPoint));
         }
     }
+    // Note: ShaderDesc only supports code/codeSize, not filepath
+    // If file loading is needed, it should be done before creating ShaderDesc
 
     Uint32 id = nextShaderId++;
     shaders[id] = {library, function, desc.stage};
@@ -253,7 +269,7 @@ SamplerHandle RHI_Metal::createSampler(const SamplerDesc& desc) {
     samplerDesc->setSAddressMode(convertSamplerAddressMode(desc.addressModeU));
     samplerDesc->setTAddressMode(convertSamplerAddressMode(desc.addressModeV));
     samplerDesc->setRAddressMode(convertSamplerAddressMode(desc.addressModeW));
-    samplerDesc->setMaxAnisotropy(desc.anisotropyEnable ? desc.maxAnisotropy : 1);
+    samplerDesc->setMaxAnisotropy(desc.enableAnisotropy ? desc.maxAnisotropy : 1);
     samplerDesc->setCompareFunction(convertCompareOp(desc.compareOp));
 
     auto sampler = NS::TransferPtr(device->newSamplerState(samplerDesc));
@@ -307,12 +323,19 @@ PipelineHandle RHI_Metal::createPipeline(const PipelineDesc& desc) {
             colorAttachment->setRgbBlendOperation(MTL::BlendOperationAdd);
             colorAttachment->setSourceAlphaBlendFactor(MTL::BlendFactorOne);
             colorAttachment->setDestinationAlphaBlendFactor(MTL::BlendFactorZero);
-            colorAttachment->setAlphaBlendOperation(MTL::BlendOperationAdd);
             break;
         case BlendMode::Additive:
             colorAttachment->setBlendingEnabled(true);
             colorAttachment->setSourceRGBBlendFactor(MTL::BlendFactorOne);
             colorAttachment->setDestinationRGBBlendFactor(MTL::BlendFactorOne);
+            colorAttachment->setRgbBlendOperation(MTL::BlendOperationAdd);
+            colorAttachment->setSourceAlphaBlendFactor(MTL::BlendFactorOne);
+            colorAttachment->setDestinationAlphaBlendFactor(MTL::BlendFactorOne);
+            break;
+        case BlendMode::Multiply:
+            colorAttachment->setBlendingEnabled(true);
+            colorAttachment->setSourceRGBBlendFactor(MTL::BlendFactorDestinationColor);
+            colorAttachment->setDestinationRGBBlendFactor(MTL::BlendFactorZero);
             colorAttachment->setRgbBlendOperation(MTL::BlendOperationAdd);
             colorAttachment->setSourceAlphaBlendFactor(MTL::BlendFactorOne);
             colorAttachment->setDestinationAlphaBlendFactor(MTL::BlendFactorZero);
@@ -361,12 +384,45 @@ void RHI_Metal::updateBuffer(BufferHandle handle, const void* data, size_t offse
         return;
     }
 
-    void* bufferData = it->second.buffer->contents();
-    std::memcpy(static_cast<char*>(bufferData) + offset, data, size);
+    MTL::Buffer* buffer = it->second.buffer.get();
+    MTL::StorageMode storageMode = buffer->storageMode();
 
-    // Notify Metal of modified range if managed storage
-    if (it->second.buffer->storageMode() == MTL::StorageModeManaged) {
-        it->second.buffer->didModifyRange(NS::Range::Make(offset, size));
+    if (storageMode == MTL::StorageModePrivate) {
+        // GPU-only buffer: use staging buffer and blit encoder
+        auto stagingBuffer = NS::TransferPtr(device->newBuffer(size, MTL::ResourceStorageModeShared));
+        if (!stagingBuffer) {
+            throw std::runtime_error("Failed to create staging buffer for updateBuffer");
+        }
+
+        std::memcpy(stagingBuffer->contents(), data, size);
+
+        // Create a temporary command buffer for the copy
+        auto cmdBuffer = NS::TransferPtr(commandQueue->commandBuffer());
+        if (!cmdBuffer) {
+            throw std::runtime_error("Failed to create command buffer for updateBuffer");
+        }
+
+        auto blitEncoder = cmdBuffer->blitCommandEncoder();
+        if (!blitEncoder) {
+            throw std::runtime_error("Failed to create blit encoder for updateBuffer");
+        }
+
+        blitEncoder->copyFromBuffer(stagingBuffer.get(), 0, buffer, offset, size);
+        blitEncoder->endEncoding();
+        cmdBuffer->commit();
+        cmdBuffer->waitUntilCompleted();
+    } else {
+        // CPU-accessible buffer: direct write
+        void* bufferData = buffer->contents();
+        if (!bufferData) {
+            throw std::runtime_error("Buffer contents() returned nullptr");
+        }
+        std::memcpy(static_cast<char*>(bufferData) + offset, data, size);
+
+        // Notify Metal of modified range if managed storage
+        if (storageMode == MTL::StorageModeManaged) {
+            buffer->didModifyRange(NS::Range::Make(offset, size));
+        }
     }
 }
 
@@ -377,14 +433,60 @@ void RHI_Metal::updateTexture(TextureHandle handle, const void* data, size_t siz
     }
 
     const TextureResource& texRes = it->second;
+    MTL::Texture* texture = texRes.texture.get();
 
-    // Calculate bytes per row
-    Uint32 bytesPerPixel = 4; // Assume RGBA8 for now
-    Uint32 bytesPerRow = texRes.width * bytesPerPixel;
+    // Check storage mode - Private textures need staging buffer
+    if (texture->storageMode() == MTL::StorageModePrivate) {
+        // GPU-only texture: use staging buffer and blit encoder
+        Uint32 bytesPerPixel = 4; // Assume RGBA8 for now
+        Uint32 bytesPerRow = texRes.width * bytesPerPixel;
+        Uint32 bytesPerImage = bytesPerRow * texRes.height;
 
-    // Replace texture region
-    MTL::Region region(0, 0, 0, texRes.width, texRes.height, 1);
-    texRes.texture->replaceRegion(region, 0, data, bytesPerRow);
+        // Create staging buffer
+        auto stagingBuffer = NS::TransferPtr(device->newBuffer(size, MTL::ResourceStorageModeShared));
+        if (!stagingBuffer) {
+            throw std::runtime_error("Failed to create staging buffer for updateTexture");
+        }
+
+        std::memcpy(stagingBuffer->contents(), data, size);
+
+        // Create a temporary command buffer for the copy
+        auto cmdBuffer = NS::TransferPtr(commandQueue->commandBuffer());
+        if (!cmdBuffer) {
+            throw std::runtime_error("Failed to create command buffer for updateTexture");
+        }
+
+        auto blitEncoder = cmdBuffer->blitCommandEncoder();
+        if (!blitEncoder) {
+            throw std::runtime_error("Failed to create blit encoder for updateTexture");
+        }
+
+        // Copy from staging buffer to texture
+        // API: copyFromBuffer(sourceBuffer, sourceOffset, sourceBytesPerRow, sourceBytesPerImage, sourceSize,
+        //                     destinationTexture, destinationSlice, destinationLevel, destinationOrigin)
+        blitEncoder->copyFromBuffer(
+            stagingBuffer.get(),                    // sourceBuffer
+            0,                                      // sourceOffset
+            bytesPerRow,                           // sourceBytesPerRow
+            bytesPerImage,                         // sourceBytesPerImage
+            MTL::Size::Make(texRes.width, texRes.height, 1),  // sourceSize
+            texture,                               // destinationTexture
+            0,                                     // destinationSlice
+            0,                                     // destinationLevel
+            MTL::Origin::Make(0, 0, 0)             // destinationOrigin
+        );
+
+        blitEncoder->endEncoding();
+        cmdBuffer->commit();
+        cmdBuffer->waitUntilCompleted();
+    } else {
+        // CPU-accessible texture: direct write
+        Uint32 bytesPerPixel = 4; // Assume RGBA8 for now
+        Uint32 bytesPerRow = texRes.width * bytesPerPixel;
+
+        MTL::Region region(0, 0, 0, texRes.width, texRes.height, 1);
+        texture->replaceRegion(region, 0, data, bytesPerRow);
+    }
 }
 
 // ============================================================================
@@ -448,9 +550,11 @@ void RHI_Metal::beginRenderPass(const RenderPassDesc& desc) {
             colorAttachment->setTexture(currentDrawable->texture());
         } else {
             auto it = textures.find(desc.colorAttachments[i].id);
-            if (it != textures.end()) {
-                colorAttachment->setTexture(it->second.texture.get());
+            if (it == textures.end()) {
+                renderPassDesc->release();
+                throw std::runtime_error(fmt::format("Failed to find color attachment texture with id {}", desc.colorAttachments[i].id));
             }
+            colorAttachment->setTexture(it->second.texture.get());
         }
 
         // Load/store operations
@@ -471,9 +575,15 @@ void RHI_Metal::beginRenderPass(const RenderPassDesc& desc) {
     if (desc.depthAttachment.id != 0) {
         auto depthAttachment = renderPassDesc->depthAttachment();
         auto it = textures.find(desc.depthAttachment.id);
-        if (it != textures.end()) {
-            depthAttachment->setTexture(it->second.texture.get());
+        if (it == textures.end()) {
+            renderPassDesc->release();
+            // Check if it's an invalid handle
+            if (desc.depthAttachment.id == UINT32_MAX) {
+                throw std::runtime_error("Depth attachment texture handle is invalid (UINT32_MAX). Render targets may not have been created.");
+            }
+            throw std::runtime_error(fmt::format("Failed to find depth attachment texture with id {}", desc.depthAttachment.id));
         }
+        depthAttachment->setTexture(it->second.texture.get());
 
         if (desc.loadDepth) {
             depthAttachment->setLoadAction(MTL::LoadActionLoad);
@@ -482,6 +592,10 @@ void RHI_Metal::beginRenderPass(const RenderPassDesc& desc) {
             depthAttachment->setClearDepth(desc.clearDepth);
         }
         depthAttachment->setStoreAction(MTL::StoreActionStore);
+    } else if (desc.depthAttachment.id == 0 && currentDrawable) {
+        // Use default depth buffer (swapchain doesn't have depth, so we skip it)
+        // In Metal, we need to create a separate depth texture for swapchain rendering
+        // For now, skip depth attachment when rendering to swapchain
     }
 
     // Create render command encoder
@@ -491,6 +605,23 @@ void RHI_Metal::beginRenderPass(const RenderPassDesc& desc) {
     if (!currentRenderEncoder) {
         throw std::runtime_error("Failed to create render command encoder");
     }
+
+    // Set viewport and scissor rect (required for rendering)
+    MTL::Viewport viewport;
+    viewport.originX = 0.0;
+    viewport.originY = 0.0;
+    viewport.width = static_cast<double>(swapchainWidth);
+    viewport.height = static_cast<double>(swapchainHeight);
+    viewport.znear = 0.0;
+    viewport.zfar = 1.0;
+    currentRenderEncoder->setViewport(viewport);
+
+    MTL::ScissorRect scissorRect;
+    scissorRect.x = 0;
+    scissorRect.y = 0;
+    scissorRect.width = swapchainWidth;
+    scissorRect.height = swapchainHeight;
+    currentRenderEncoder->setScissorRect(scissorRect);
 }
 
 void RHI_Metal::endRenderPass() {
@@ -560,6 +691,18 @@ void RHI_Metal::setTexture(Uint32 set, Uint32 binding, TextureHandle texture, Sa
     }
 }
 
+void RHI_Metal::setVertexBytes(const void* data, size_t size, Uint32 binding) {
+    if (currentRenderEncoder && data && size > 0) {
+        currentRenderEncoder->setVertexBytes(data, size, binding);
+    }
+}
+
+void RHI_Metal::setFragmentBytes(const void* data, size_t size, Uint32 binding) {
+    if (currentRenderEncoder && data && size > 0) {
+        currentRenderEncoder->setFragmentBytes(data, size, binding);
+    }
+}
+
 void RHI_Metal::draw(Uint32 vertexCount, Uint32 instanceCount, Uint32 firstVertex, Uint32 firstInstance) {
     if (currentRenderEncoder) {
         currentRenderEncoder->drawPrimitives(
@@ -601,7 +744,7 @@ Uint32 RHI_Metal::getSwapchainHeight() const {
 }
 
 PixelFormat RHI_Metal::getSwapchainFormat() const {
-    return PixelFormat::BGRA8_UNORM_SRGB;
+    return PixelFormat::BGRA8_SRGB;
 }
 
 // ============================================================================
@@ -620,6 +763,14 @@ void* RHI_Metal::getBackendCommandBuffer() const {
     return (void*)currentCommandBuffer.get();
 }
 
+MTL::RenderCommandEncoder* RHI_Metal::getCurrentRenderEncoder() const {
+    return currentRenderEncoder;
+}
+
+CA::MetalDrawable* RHI_Metal::getCurrentDrawable() const {
+    return currentDrawable;
+}
+
 // ============================================================================
 // Format Conversion Helpers
 // ============================================================================
@@ -629,59 +780,61 @@ MTL::PixelFormat RHI_Metal::convertPixelFormat(PixelFormat format) {
         case PixelFormat::RGBA8_UNORM: return MTL::PixelFormatRGBA8Unorm;
         case PixelFormat::RGBA8_SRGB: return MTL::PixelFormatRGBA8Unorm_sRGB;
         case PixelFormat::BGRA8_UNORM: return MTL::PixelFormatBGRA8Unorm;
-        case PixelFormat::BGRA8_UNORM_SRGB: return MTL::PixelFormatBGRA8Unorm_sRGB;
+        case PixelFormat::BGRA8_SRGB: return MTL::PixelFormatBGRA8Unorm_sRGB;
         case PixelFormat::RGBA16_FLOAT: return MTL::PixelFormatRGBA16Float;
         case PixelFormat::RGBA32_FLOAT: return MTL::PixelFormatRGBA32Float;
         case PixelFormat::R8_UNORM: return MTL::PixelFormatR8Unorm;
         case PixelFormat::R16_FLOAT: return MTL::PixelFormatR16Float;
         case PixelFormat::R32_FLOAT: return MTL::PixelFormatR32Float;
-        case PixelFormat::D32_FLOAT: return MTL::PixelFormatDepth32Float;
-        case PixelFormat::D24_UNORM_S8_UINT: return MTL::PixelFormatDepth24Unorm_Stencil8;
+        case PixelFormat::Depth32Float: return MTL::PixelFormatDepth32Float;
+        case PixelFormat::Depth24Stencil8: return MTL::PixelFormatDepth24Unorm_Stencil8;
         default: return MTL::PixelFormatRGBA8Unorm;
     }
 }
 
-MTL::TextureUsage RHI_Metal::convertTextureUsage(Uint32 usage) {
+MTL::TextureUsage RHI_Metal::convertTextureUsage(TextureUsage usage) {
     MTL::TextureUsage metalUsage = MTL::TextureUsageUnknown;
 
-    if (usage & (Uint32)TextureUsage::Sampled) {
+    // TextureUsage is an enum class, check each value
+    Uint32 usageFlags = static_cast<Uint32>(usage);
+    if (usageFlags & static_cast<Uint32>(TextureUsage::Sampled)) {
         metalUsage |= MTL::TextureUsageShaderRead;
     }
-    if (usage & (Uint32)TextureUsage::Storage) {
+    if (usageFlags & static_cast<Uint32>(TextureUsage::Storage)) {
         metalUsage |= MTL::TextureUsageShaderWrite;
     }
-    if (usage & (Uint32)TextureUsage::ColorAttachment) {
+    if (usageFlags & static_cast<Uint32>(TextureUsage::RenderTarget)) {
         metalUsage |= MTL::TextureUsageRenderTarget;
     }
-    if (usage & (Uint32)TextureUsage::DepthStencilAttachment) {
+    if (usageFlags & static_cast<Uint32>(TextureUsage::DepthStencil)) {
         metalUsage |= MTL::TextureUsageRenderTarget;
     }
 
     return metalUsage;
 }
 
-MTL::SamplerAddressMode RHI_Metal::convertSamplerAddressMode(SamplerAddressMode mode) {
+MTL::SamplerAddressMode RHI_Metal::convertSamplerAddressMode(AddressMode mode) {
     switch (mode) {
-        case SamplerAddressMode::Repeat: return MTL::SamplerAddressModeRepeat;
-        case SamplerAddressMode::MirroredRepeat: return MTL::SamplerAddressModeMirrorRepeat;
-        case SamplerAddressMode::ClampToEdge: return MTL::SamplerAddressModeClampToEdge;
-        case SamplerAddressMode::ClampToBorder: return MTL::SamplerAddressModeClampToZero;
+        case AddressMode::Repeat: return MTL::SamplerAddressModeRepeat;
+        case AddressMode::MirrorRepeat: return MTL::SamplerAddressModeMirrorRepeat;
+        case AddressMode::ClampToEdge: return MTL::SamplerAddressModeClampToEdge;
+        case AddressMode::ClampToBorder: return MTL::SamplerAddressModeClampToZero;
         default: return MTL::SamplerAddressModeRepeat;
     }
 }
 
-MTL::SamplerMinMagFilter RHI_Metal::convertSamplerFilter(SamplerFilter filter) {
+MTL::SamplerMinMagFilter RHI_Metal::convertSamplerFilter(FilterMode filter) {
     switch (filter) {
-        case SamplerFilter::Nearest: return MTL::SamplerMinMagFilterNearest;
-        case SamplerFilter::Linear: return MTL::SamplerMinMagFilterLinear;
+        case FilterMode::Nearest: return MTL::SamplerMinMagFilterNearest;
+        case FilterMode::Linear: return MTL::SamplerMinMagFilterLinear;
         default: return MTL::SamplerMinMagFilterLinear;
     }
 }
 
-MTL::SamplerMipFilter RHI_Metal::convertSamplerMipFilter(SamplerFilter filter) {
+MTL::SamplerMipFilter RHI_Metal::convertSamplerMipFilter(FilterMode filter) {
     switch (filter) {
-        case SamplerFilter::Nearest: return MTL::SamplerMipFilterNearest;
-        case SamplerFilter::Linear: return MTL::SamplerMipFilterLinear;
+        case FilterMode::Nearest: return MTL::SamplerMipFilterNearest;
+        case FilterMode::Linear: return MTL::SamplerMipFilterLinear;
         default: return MTL::SamplerMipFilterLinear;
     }
 }
@@ -791,7 +944,7 @@ void RHI_Metal::buildAccelerationStructure(AccelStructHandle handle) {
         for (const auto& geom : resource.geometries) {
             auto vertexBufIt = buffers.find(geom.vertexBuffer.id);
             auto indexBufIt = buffers.find(geom.indexBuffer.id);
-            if (vertexBufIt == buffers.end() || indexBufIt == indexBufIt.end()) {
+            if (vertexBufIt == buffers.end() || indexBufIt == buffers.end()) {
                 continue;
             }
 
@@ -805,11 +958,12 @@ void RHI_Metal::buildAccelerationStructure(AccelStructHandle handle) {
             geomDesc->setTriangleCount(geom.indexCount / 3);
 
             auto accelDesc = NS::TransferPtr(MTL::PrimitiveAccelerationStructureDescriptor::alloc()->init());
-            auto geomArray = NS::Array::array(static_cast<NS::Object*>(geomDesc.get()), 1);
+            NS::Object* geomDescPtr = static_cast<NS::Object*>(geomDesc.get());
+            auto geomArray = NS::Array::array(&geomDescPtr, 1);
             accelDesc->setGeometryDescriptors(geomArray);
 
             auto accelSizes = device->accelerationStructureSizes(accelDesc.get());
-            
+
             resource.scratchBuffer = NS::TransferPtr(device->newBuffer(accelSizes.buildScratchBufferSize, MTL::ResourceStorageModePrivate));
             resource.accelStruct = NS::TransferPtr(device->newAccelerationStructure(accelSizes.accelerationStructureSize));
 

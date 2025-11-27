@@ -2,6 +2,8 @@
 #include <SDL3/SDL_stdinc.h>
 #include <cstdint>
 #include <vector>
+#include <glm/vec4.hpp>  // Full definition needed for RenderPassDesc::clearColors (std::vector<glm::vec4>)
+#include <glm/mat4x4.hpp>  // Full definition needed for AccelStructInstance::transform
 
 // ============================================================================
 // RHI (Render Hardware Interface) Layer
@@ -13,12 +15,6 @@
 
 // Forward declarations
 struct SDL_Window;
-namespace glm {
-    struct vec2;
-    struct vec3;
-    struct vec4;
-    struct mat4;
-}
 
 // ============================================================================
 // Handle Types
@@ -176,6 +172,7 @@ struct TextureDesc {
     Uint32 depth = 1;
     Uint32 mipLevels = 1;
     Uint32 arrayLayers = 1;
+    Uint32 sampleCount = 1;  // For MSAA render targets
     PixelFormat format = PixelFormat::RGBA8_UNORM;
     TextureUsage usage = TextureUsage::Sampled;
 };
@@ -361,6 +358,10 @@ public:
     virtual void setUniformBuffer(Uint32 set, Uint32 binding, BufferHandle buffer, size_t offset = 0, size_t range = 0) = 0;
     virtual void setStorageBuffer(Uint32 set, Uint32 binding, BufferHandle buffer, size_t offset = 0, size_t range = 0) = 0;
     virtual void setTexture(Uint32 set, Uint32 binding, TextureHandle texture, SamplerHandle sampler) = 0;
+
+    // Direct data binding (for small constants like instanceID)
+    virtual void setVertexBytes(const void* data, size_t size, Uint32 binding) = 0;
+    virtual void setFragmentBytes(const void* data, size_t size, Uint32 binding) = 0;
 
     virtual void draw(Uint32 vertexCount, Uint32 instanceCount = 1, Uint32 firstVertex = 0, Uint32 firstInstance = 0) = 0;
     virtual void drawIndexed(Uint32 indexCount, Uint32 instanceCount = 1, Uint32 firstIndex = 0, int32_t vertexOffset = 0, Uint32 firstInstance = 0) = 0;

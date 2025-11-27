@@ -18,6 +18,12 @@
 // - Clustered lighting and ray tracing
 // ============================================================================
 
+// Graphics backend selection
+enum class GraphicsBackend {
+    Metal,
+    Vulkan
+};
+
 // Render path selection
 enum class RenderPath {
     Forward,    // Simple forward rendering
@@ -34,7 +40,9 @@ public:
     // Initialization
     // ========================================================================
 
-    void initialize(RHI* rhi);
+    // Initialize with RHI ownership
+    // Note: Use createRenderer() factory function instead of calling initialize() directly
+    void initialize(std::unique_ptr<RHI> rhiPtr, GraphicsBackend backend);
     void shutdown();
 
     // ========================================================================
@@ -82,7 +90,7 @@ public:
     // Getters
     // ========================================================================
 
-    RHI* getRHI() const { return rhi; }
+    RHI* getRHI() const { return rhi.get(); }
 
     // Stats
     Uint32 getDrawCount() const { return drawCount; }
@@ -97,7 +105,6 @@ private:
     void performCulling();
     void sortDrawables();
     void updateBuffers();
-    void executeDrawCalls();
     void createDefaultResources();
     void createRenderPipeline();
     void createRenderTargets();
@@ -109,7 +116,7 @@ private:
     void prePass();
     void normalResolvePass();
     void clusterBuildPass();
-    void lightCullingPass();
+    void tileCullingPass();
     void raytraceShadowPass();
     void raytraceAOPass();
     void mainRenderPass();
@@ -124,10 +131,16 @@ private:
     void bindMaterial(MaterialId materialId);
 
     // ========================================================================
-    // RHI Reference
+    // RHI Ownership
     // ========================================================================
 
-    RHI* rhi = nullptr;
+    std::unique_ptr<RHI> rhi;
+
+    // ========================================================================
+    // Backend Info
+    // ========================================================================
+
+    GraphicsBackend backend;  // Store backend for ImGui shutdown
 
     // ========================================================================
     // Registered Resources
@@ -139,6 +152,9 @@ private:
 
     // Texture cache (path -> TextureId)
     std::unordered_map<std::string, TextureId> textureCache;
+
+    // Mapping from drawable index to instance ID (for correct instance data indexing)
+    std::unordered_map<Uint32, Uint32> drawableToInstanceID;
 
     // ========================================================================
     // Per-Frame Data
@@ -180,6 +196,9 @@ private:
     TextureHandle normalRT;
     TextureHandle shadowRT;
     TextureHandle aoRT;
+
+    // Default depth buffer for swapchain rendering (when not using render targets)
+    TextureHandle swapchainDepthBuffer;
 
     // Graphics pipelines
     PipelineHandle mainPipeline;
@@ -235,3 +254,11 @@ private:
     Uint32 currentInstanceCount = 0;
     Uint32 culledInstanceCount = 0;
 };
+
+// ============================================================================
+// Factory Functions
+// ============================================================================
+
+// Create a Renderer with the specified backend
+// The RHI is created internally and owned by the Renderer
+std::unique_ptr<Renderer> createRenderer(GraphicsBackend backend, SDL_Window* window);

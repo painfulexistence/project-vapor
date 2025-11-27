@@ -384,7 +384,6 @@ std::shared_ptr<Scene> AssetManager::loadGLTF(const std::string& filename) {
                 } else {
                     mesh->calculateLocalAABB();
                 }
-                mesh->isGeometryDirty = false;
             }
             if (mesh->hasNormal) {
                 const auto& accessor = model.accessors[primitive.attributes.at("NORMAL")];
@@ -561,27 +560,7 @@ std::shared_ptr<Scene> AssetManager::loadGLTFOptimized(const std::string& filena
     optimizedScene->directionalLights = originalScene->directionalLights;
     optimizedScene->pointLights = originalScene->pointLights;
 
-    Uint32 totalVertexCount = 0;
-    Uint32 totalIndexCount = 0;
-    std::function<void(const std::shared_ptr<Node>&)> countNode = [&](const std::shared_ptr<Node>& node) {
-        if (node->meshGroup) {
-            for (const auto& mesh : node->meshGroup->meshes) {
-                totalVertexCount += mesh->vertices.size();
-                totalIndexCount += mesh->indices.size();
-            }
-        }
-        for (const auto& child : node->children) {
-            countNode(child);
-        }
-    };
-    for (const auto& node : originalScene->nodes) {
-        countNode(node);
-    }
-    optimizedScene->vertices.reserve(totalVertexCount);
-    optimizedScene->indices.reserve(totalIndexCount);
-
-    Uint32 currentVertexOffset = 0;
-    Uint32 currentIndexOffset = 0;
+    // Copy nodes and meshes (GPU resource optimization is now handled by Renderer layer)
     std::function<std::shared_ptr<Node>(const std::shared_ptr<Node>&)> processNode =
       [&](const std::shared_ptr<Node>& originalNode) -> std::shared_ptr<Node> {
         auto newNode = std::make_shared<Node>();
@@ -592,6 +571,7 @@ std::shared_ptr<Scene> AssetManager::loadGLTFOptimized(const std::string& filena
             newMeshGroup->name = originalNode->meshGroup->name;
 
             for (const auto& originalMesh : originalNode->meshGroup->meshes) {
+                // Create a copy of the mesh with all its geometry data
                 auto newMesh = std::make_shared<Mesh>();
                 newMesh->hasPosition = originalMesh->hasPosition;
                 newMesh->hasNormal = originalMesh->hasNormal;
@@ -603,33 +583,12 @@ std::shared_ptr<Scene> AssetManager::loadGLTFOptimized(const std::string& filena
                 newMesh->primitiveMode = originalMesh->primitiveMode;
                 newMesh->localAABBMin = originalMesh->localAABBMin;
                 newMesh->localAABBMax = originalMesh->localAABBMax;
-                newMesh->vertexOffset = currentVertexOffset;
-                newMesh->indexOffset = currentIndexOffset;
-                newMesh->vertexCount = originalMesh->vertices.size();
-                newMesh->indexCount = originalMesh->indices.size();
-                newMesh->isGeometryDirty = false;// prevent AABB updating
 
-                optimizedScene->vertices.insert(
-                  optimizedScene->vertices.end(), originalMesh->vertices.begin(), originalMesh->vertices.end()
-                );
-                for (Uint32 index : originalMesh->indices) {
-                    optimizedScene->indices.push_back(index);
-                }
-                currentVertexOffset += originalMesh->vertices.size();
-                currentIndexOffset += originalMesh->indices.size();
+                // Copy vertex and index data
+                newMesh->vertices = originalMesh->vertices;
+                newMesh->indices = originalMesh->indices;
+
                 newMeshGroup->meshes.push_back(newMesh);
-
-                fmt::print(
-                  "Mesh: vertexOffset={}, indexOffset={}, vertexCount={}, indexCount={}\n",
-                  newMesh->vertexOffset,
-                  newMesh->indexOffset,
-                  newMesh->vertexCount,
-                  newMesh->indexCount
-                );
-
-                // TODO: clean up
-                // originalMesh->vertices.clear();
-                // originalMesh->indices.clear();
             }
             newNode->meshGroup = newMeshGroup;
         }
@@ -643,12 +602,6 @@ std::shared_ptr<Scene> AssetManager::loadGLTFOptimized(const std::string& filena
         auto newNode = processNode(originalNode);
         optimizedScene->nodes.push_back(newNode);
     }
-
-    fmt::print(
-      "Optimized scene created: {} vertices, {} indices\n",
-      optimizedScene->vertices.size(),
-      optimizedScene->indices.size()
-    );
 
     optimizedScene->update(0.0f);// making sure world transform is updated
 

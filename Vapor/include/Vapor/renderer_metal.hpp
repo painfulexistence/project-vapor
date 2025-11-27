@@ -1,5 +1,7 @@
 #pragma once
-#include "renderer.hpp"
+#include "renderer_legacy.hpp"
+// Note: We define local handle types to avoid conflict with rhi.hpp's BufferUsage enum
+// These are compatible with rhi.hpp's handle types (both use Uint32 id)
 
 #include <SDL3/SDL_video.h>
 #include <SDL3/SDL_render.h>
@@ -35,6 +37,11 @@ public:
 
     NS::SharedPtr<MTL::RenderPipelineState> createPipeline(const std::string& filename, bool isHDR, bool isColorOnly, Uint32 sampleCount);
     NS::SharedPtr<MTL::ComputePipelineState> createComputePipeline(const std::string& filename);
+
+    // Handle types (compatible with rhi.hpp but defined locally to avoid BufferUsage conflict)
+    struct TextureHandle { Uint32 id = UINT32_MAX; };
+    struct BufferHandle { Uint32 id = UINT32_MAX; };
+    struct PipelineHandle { Uint32 id = UINT32_MAX; };
 
     TextureHandle createTexture(const std::shared_ptr<Image>& img);
 
@@ -107,6 +114,21 @@ private:
     NS::SharedPtr<NS::Array> BLASArray;
 
     std::unordered_map<std::shared_ptr<Material>, Uint32> materialIDs;
+    // Temporary mapping for Image to TextureHandle (until full refactor to new Renderer interface)
+    std::unordered_map<std::shared_ptr<Image>, TextureHandle> imageToTextureMap;
+    // Temporary storage for scene GPU resources (until full refactor to new Renderer interface)
+    BufferHandle sceneVertexBuffer;
+    BufferHandle sceneIndexBuffer;
+    // Temporary storage for mesh GPU resources (until full refactor to new Renderer interface)
+    struct MeshGPUResources {
+        Uint32 vertexOffset = 0;
+        Uint32 indexOffset = 0;
+        Uint32 vertexCount = 0;
+        Uint32 indexCount = 0;
+        Uint32 materialID = UINT32_MAX;
+        Uint32 instanceID = UINT32_MAX;
+    };
+    std::unordered_map<std::shared_ptr<Mesh>, MeshGPUResources> meshGPUResources;
 
     RenderPath currentRenderPath = RenderPath::Forward;
 

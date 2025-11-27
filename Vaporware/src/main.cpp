@@ -10,6 +10,7 @@
 
 #include "Vapor/scene.hpp"
 #include "Vapor/renderer.hpp"
+#include "Vapor/render_data.hpp"
 #include "Vapor/graphics.hpp"
 #include "Vapor/physics_3d.hpp"
 #include "Vapor/asset_manager.hpp"
@@ -88,8 +89,12 @@ int main(int argc, char* args[]) {
     engineCore->init(); // Auto-detects thread count
     fmt::print("Engine core initialized\n");
 
-    auto renderer = createRenderer(gfxBackend);
-    renderer->init(window);
+    // Create renderer with the new interface
+    auto renderer = createRenderer(gfxBackend, window);
+    if (!renderer) {
+        fmt::print("Failed to create renderer!\n");
+        return 1;
+    }
 
     // Initialize physics (Physics3D creates its own JoltEnkiJobSystem internally)
     auto physics = std::make_unique<Physics3D>();
@@ -166,7 +171,62 @@ int main(int argc, char* args[]) {
     // auto entity4 = scene->createNode("Obj Model");
     // scene->addMeshToNode(entity4, AssetManager::loadOBJ(std::string("assets/models/Sibenik/sibenik.obj"), std::string("assets/models/Sibenik/")));
 
-    renderer->stage(scene);
+    // Register all meshes and materials from scene
+    std::unordered_map<std::shared_ptr<Mesh>, MeshId> meshToId;
+    std::unordered_map<std::shared_ptr<Material>, MaterialId> materialToId;
+
+    const std::function<void(const std::shared_ptr<Node>&)> registerNode = [&](const std::shared_ptr<Node>& node) {
+        if (node->meshGroup) {
+            for (const auto& mesh : node->meshGroup->meshes) {
+                // Register mesh if not already registered
+                if (meshToId.find(mesh) == meshToId.end()) {
+                    MeshId meshId = renderer->registerMesh(mesh->vertices, mesh->indices);
+                    meshToId[mesh] = meshId;
+                }
+
+                // Register material if not already registered
+                if (mesh->material && materialToId.find(mesh->material) == materialToId.end()) {
+                    MaterialDataInput materialData;
+                    materialData.baseColorFactor = mesh->material->baseColorFactor;
+                    materialData.normalScale = mesh->material->normalScale;
+                    materialData.metallicFactor = mesh->material->metallicFactor;
+                    materialData.roughnessFactor = mesh->material->roughnessFactor;
+                    materialData.occlusionStrength = mesh->material->occlusionStrength;
+                    materialData.emissiveFactor = mesh->material->emissiveFactor;
+                    materialData.emissiveStrength = mesh->material->emissiveStrength;
+                    materialData.subsurface = mesh->material->subsurface;
+                    materialData.specular = mesh->material->specular;
+                    materialData.specularTint = mesh->material->specularTint;
+                    materialData.anisotropic = mesh->material->anisotropic;
+                    materialData.sheen = mesh->material->sheen;
+                    materialData.sheenTint = mesh->material->sheenTint;
+                    materialData.clearcoat = mesh->material->clearcoat;
+                    materialData.clearcoatGloss = mesh->material->clearcoatGloss;
+                    materialData.albedoMap = mesh->material->albedoMap;
+                    materialData.normalMap = mesh->material->normalMap;
+                    materialData.metallicMap = mesh->material->metallicMap;
+                    materialData.roughnessMap = mesh->material->roughnessMap;
+                    materialData.occlusionMap = mesh->material->occlusionMap;
+                    materialData.emissiveMap = mesh->material->emissiveMap;
+                    materialData.alphaMode = mesh->material->alphaMode;
+                    materialData.alphaCutoff = mesh->material->alphaCutoff;
+                    materialData.doubleSided = mesh->material->doubleSided;
+
+                    MaterialId materialId = renderer->registerMaterial(materialData);
+                    materialToId[mesh->material] = materialId;
+                }
+            }
+        }
+        for (const auto& child : node->children) {
+            registerNode(child);
+        }
+    };
+
+    for (const auto& node : scene->nodes) {
+        registerNode(node);
+    }
+
+    fmt::print("Registered {} meshes and {} materials\n", meshToId.size(), materialToId.size());
 
     int windowWidth, windowHeight;
     SDL_GetWindowSize(window, &windowWidth, &windowHeight);
@@ -308,13 +368,102 @@ int main(int argc, char* args[]) {
         physics->process(scene, deltaTime);
         // scene->update(deltaTime);
 
-        renderer->draw(scene, camera);
+        // Prepare camera data
+        CameraRenderData cameraData;
+        cameraData.view = camera.getViewMatrix();
+        cameraData.proj = camera.getProjMatrix();
+        cameraData.viewProj = cameraData.proj * cameraData.view;
+        cameraData.invView = glm::inverse(cameraData.view);
+        cameraData.invProj = glm::inverse(cameraData.proj);
+        cameraData.position = camera.getEye();
+        cameraData.nearPlane = camera.near();
+        cameraData.farPlane = camera.far();
+
+        // Begin frame
+        renderer->beginFrame(cameraData);
+
+        // Submit directional lights
+        for (const auto& light : scene->directionalLights) {
+            DirectionalLightData lightData;
+            lightData.direction = light.direction;
+            lightData.color = light.color;
+            lightData.intensity = light.intensity;
+            renderer->submitDirectionalLight(lightData);
+        }
+
+        // Submit point lights
+        for (const auto& light : scene->pointLights) {
+            PointLightData lightData;
+            lightData.position = light.position;
+            lightData.color = light.color;
+            lightData.intensity = light.intensity;
+            lightData.radius = light.radius;
+            renderer->submitPointLight(lightData);
+        }
+
+        // Submit drawables from scene
+        const std::function<void(const std::shared_ptr<Node>&)> submitNode = [&](const std::shared_ptr<Node>& node) {
+            if (node->meshGroup) {
+                for (const auto& mesh : node->meshGroup->meshes) {
+                    Drawable drawable;
+                    drawable.transform = node->worldTransform;
+                    drawable.mesh = meshToId[mesh];
+                    drawable.material = mesh->material ? materialToId[mesh->material] : INVALID_MATERIAL_ID;
+                    drawable.aabbMin = mesh->worldAABBMin;
+                    drawable.aabbMax = mesh->worldAABBMax;
+                    drawable.color = glm::vec4(1.0f);
+
+                    // Debug: print transform if it's not identity
+                    glm::vec3 pos = glm::vec3(drawable.transform[3]);
+                    glm::mat4 identity = glm::mat4(1.0f);
+                    bool isNotIdentity = false;
+                    for (int i = 0; i < 4; ++i) {
+                        for (int j = 0; j < 4; ++j) {
+                            if (std::abs(drawable.transform[i][j] - identity[i][j]) > 0.001f) {
+                                isNotIdentity = true;
+                                break;
+                            }
+                        }
+                        if (isNotIdentity) break;
+                    }
+                    if (isNotIdentity) {
+                        fmt::print("submitDrawable: mesh={}, material={}, transform=[{}, {}, {}]\n",
+                                   drawable.mesh, drawable.material, pos.x, pos.y, pos.z);
+                    }
+
+                    renderer->submitDrawable(drawable);
+                }
+            }
+            for (const auto& child : node->children) {
+                submitNode(child);
+            }
+        };
+
+        for (const auto& node : scene->nodes) {
+            submitNode(node);
+        }
+
+        // ImGui frame (matching old renderer behavior)
+        ImGui_ImplSDL3_NewFrame();
+        ImGui::NewFrame();
+
+        // Simple ImGui test window
+        ImGui::Begin("Test Window");
+        ImGui::Text("Hello, ImGui!");
+        ImGui::Text("Frame: %d", frameCount);
+        ImGui::End();
+
+        ImGui::Render();
+
+        // Execute rendering
+        renderer->render();
+        renderer->endFrame();
 
         frameCount++;
     }
 
     // Shutdown subsystems
-    renderer->deinit();
+    renderer->shutdown();
     physics->deinit();
     engineCore->shutdown();
 

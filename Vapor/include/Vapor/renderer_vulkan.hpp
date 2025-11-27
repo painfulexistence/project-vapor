@@ -12,6 +12,12 @@
 
 #include "graphics.hpp"
 
+// Handle types (compatible with rhi.hpp but defined locally to avoid BufferUsage conflict)
+struct TextureHandle { Uint32 id = UINT32_MAX; };
+struct BufferHandle { Uint32 id = UINT32_MAX; };
+struct PipelineHandle { Uint32 id = UINT32_MAX; };
+struct RenderTargetHandle { Uint32 id = UINT32_MAX; };
+
 
 class Renderer_Vulkan final : public Renderer {
 public:
@@ -157,6 +163,20 @@ private:
     std::unordered_map<Uint32, VkPipeline> pipelines;
     std::unordered_map<std::shared_ptr<Material>, VkDescriptorSet> materialTextureSets;
     std::unordered_map<std::shared_ptr<Material>, Uint32> materialIDs;
+    // Temporary mapping for Image to TextureHandle (until full refactor to new Renderer interface)
+    std::unordered_map<std::shared_ptr<Image>, TextureHandle> imageToTextureMap;
+    // Temporary storage for mesh GPU resources (until full refactor to new Renderer interface)
+    struct MeshGPUResources {
+        std::vector<BufferHandle> vbos;
+        BufferHandle ebo;
+        Uint32 materialID = UINT32_MAX;
+        Uint32 instanceID = UINT32_MAX;
+        Uint32 vertexOffset = 0;
+        Uint32 indexOffset = 0;
+        Uint32 vertexCount = 0;
+        Uint32 indexCount = 0;
+    };
+    std::unordered_map<std::shared_ptr<Mesh>, MeshGPUResources> meshGPUResources;
 
     RenderPath currentRenderPath = RenderPath::Forward;
 

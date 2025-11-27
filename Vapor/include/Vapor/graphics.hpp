@@ -23,21 +23,8 @@ enum class PrimitiveMode {
     TRIANGLE_STRIP,
 };
 
-struct PipelineHandle {
-    Uint32 rid = UINT32_MAX;
-};
-
-struct BufferHandle {
-    Uint32 rid = UINT32_MAX;
-};
-
-struct TextureHandle {
-    Uint32 rid = UINT32_MAX;
-};
-
-struct RenderTargetHandle {
-    Uint32 rid = UINT32_MAX;
-};
+// Note: PipelineHandle, BufferHandle, TextureHandle are now defined in rhi.hpp
+// RenderTargetHandle is no longer used (replaced by RHI's RenderPassDesc)
 
 struct Image {
     std::string uri;
