@@ -414,3 +414,36 @@ bool Physics3D::raycast(const glm::vec3& from, const glm::vec3& to, RaycastHit& 
 void Physics3D::setGravity(const glm::vec3& acc) {
     physicsSystem->SetGravity(JPH::Vec3(acc.x, acc.y, acc.z));
 }
+
+void Physics3D::getBodyTransform(BodyHandle handle, glm::vec3& position, glm::quat& rotation) {
+    if (!handle.valid() || bodies.find(handle.rid) == bodies.end()) {
+        return;
+    }
+
+    auto id = bodies.at(handle.rid);
+    auto pos = bodyInterface->GetPosition(id);
+    auto rot = bodyInterface->GetRotation(id);
+
+    position = glm::vec3(pos.GetX(), pos.GetY(), pos.GetZ());
+    rotation = glm::quat(rot.GetW(), rot.GetX(), rot.GetY(), rot.GetZ());
+}
+
+void Physics3D::setBodyTransform(BodyHandle handle, const glm::vec3& position, const glm::quat& rotation) {
+    if (!handle.valid() || bodies.find(handle.rid) == bodies.end()) {
+        return;
+    }
+
+    auto id = bodies.at(handle.rid);
+    bodyInterface->SetPosition(id, JPH::RVec3(position.x, position.y, position.z), JPH::EActivation::DontActivate);
+    bodyInterface->SetRotation(id, JPH::Quat(rotation.x, rotation.y, rotation.z, rotation.w), JPH::EActivation::DontActivate);
+}
+
+void Physics3D::process(float dt) {
+    // update physics world
+    timeAccum += dt;
+    while (timeAccum >= FIXED_TIME_STEP) {
+        ++step;
+        physicsSystem->Update(FIXED_TIME_STEP, 1, tempAllocator.get(), jobSystem.get());
+        timeAccum -= FIXED_TIME_STEP;
+    }
+}

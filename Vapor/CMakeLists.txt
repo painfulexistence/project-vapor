@@ -4,6 +4,7 @@ find_package(glm CONFIG REQUIRED)
 find_package(Vulkan REQUIRED)
 find_path(TINYGLTF_INCLUDE_DIRS "tiny_gltf.h")
 find_package(cereal CONFIG REQUIRED)
+find_package(EnTT CONFIG REQUIRED)
 find_package(Jolt CONFIG REQUIRED)
 find_package(enkiTS CONFIG REQUIRED)
 find_package(SDL3 CONFIG REQUIRED)
@@ -21,10 +22,13 @@ set(SOURCES
     src/renderer_metal.cpp
     src/renderer_vulkan.cpp
     src/scene.cpp
+    src/scene_ecs.cpp
     src/task_scheduler.cpp
     src/resource_manager.cpp
     src/jolt_enki_job_system.cpp
     src/engine_core.cpp
+    src/ecs_components.cpp
+    src/ecs_systems.cpp
     imgui/imgui.cpp
     imgui/imgui_draw.cpp
     imgui/imgui_tables.cpp
@@ -56,6 +60,7 @@ target_link_libraries(Vapor PUBLIC
     fmt::fmt
     glm::glm
     cereal::cereal
+    EnTT::EnTT
     SDL3::SDL3
 )
 target_link_libraries(Vapor PRIVATE

@@ -8,6 +8,7 @@
     "args",
     "tinygltf",
     "cereal",
+    "entt",
     {
       "name": "joltphysics",
       "features": [
