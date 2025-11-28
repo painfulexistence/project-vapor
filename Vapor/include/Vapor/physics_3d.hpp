@@ -54,6 +54,10 @@ struct BodyHandle {
     bool valid() const {
         return rid != UINT32_MAX;
     }
+
+    bool isValid() const {
+        return valid();
+    }
 };
 
 class Physics3D {
@@ -78,6 +82,11 @@ public:
     void addBody(BodyHandle body, bool activate = false);
     void removeBody(BodyHandle body);
     void destroyBody(BodyHandle body);
+
+    // ECS support - sync transforms
+    void getBodyTransform(BodyHandle body, glm::vec3& position, glm::quat& rotation);
+    void setBodyTransform(BodyHandle body, const glm::vec3& position, const glm::quat& rotation);
+    void process(float dt); // ECS-friendly version
 
     bool raycast(const glm::vec3& from, const glm::vec3& to, RaycastHit& hit);
     void setGravity(const glm::vec3& acc);
