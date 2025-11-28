@@ -1,4 +1,9 @@
-add_executable(main src/main.cpp)
+set(SOURCES
+    src/main.cpp
+    src/camera_manager.cpp
+)
+
+add_executable(main ${SOURCES})
 target_link_libraries(main PRIVATE Vapor)
 
 add_executable(physics_demo src/physics_demo.cpp)
