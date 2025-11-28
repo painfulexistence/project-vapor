@@ -65,6 +65,8 @@ void EngineCore::shutdown() {
     // Wait for all pending tasks
     m_taskScheduler->waitForAll();
 
+    m_actionManager->stopAll();
+
     // Cleanup subsystems in reverse order
     m_actionManager.reset();
     m_resourceManager.reset();
