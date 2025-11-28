@@ -1,7 +1,7 @@
 #pragma once
 
-#include "camera.hpp"
-#include "scene.hpp"
+#include "Vapor/camera.hpp"
+#include "Vapor/scene.hpp"
 #include <SDL3/SDL.h>
 #include <string>
 #include <memory>
@@ -15,9 +15,9 @@ namespace Vapor {
  * Provides a common interface for different camera implementations.
  * All cameras must implement update() and provide access to the underlying Camera.
  */
-class ICamera {
+class VirtualCamera {
 public:
-    virtual ~ICamera() = default;
+    virtual ~VirtualCamera() = default;
 
     /**
      * Update camera state based on input and time
@@ -57,7 +57,7 @@ public:
  *     );
  *     flyCam->update(dt, keyboardState);
  */
-class FlyCam : public ICamera {
+class FlyCam : public VirtualCamera {
 public:
     FlyCam(
         glm::vec3 eye = glm::vec3(0.0f, 0.0f, 3.0f),
@@ -107,7 +107,7 @@ private:
  *     );
  *     followCam->update(dt, keyboardState);
  */
-class FollowCam : public ICamera {
+class FollowCam : public VirtualCamera {
 public:
     FollowCam(
         std::shared_ptr<Node> target,
@@ -181,7 +181,7 @@ public:
      * @param camera Camera instance to add
      * @throws std::runtime_error if camera with same name already exists
      */
-    void addCamera(const std::string& name, std::unique_ptr<ICamera> camera);
+    void addCamera(const std::string& name, std::unique_ptr<VirtualCamera> camera);
 
     /**
      * Switch to a different camera
@@ -194,14 +194,14 @@ public:
      * Get the currently active camera
      * @return Pointer to current ICamera, or nullptr if no cameras exist
      */
-    ICamera* getCurrentCamera();
+    VirtualCamera* getCurrentCamera();
 
     /**
      * Get a specific camera by name
      * @param name Camera name
      * @return Pointer to ICamera, or nullptr if not found
      */
-    ICamera* getCamera(const std::string& name);
+    VirtualCamera* getCamera(const std::string& name);
 
     /**
      * Get the name of the currently active camera
@@ -236,7 +236,7 @@ public:
     void resetCurrentCamera();
 
 private:
-    std::unordered_map<std::string, std::unique_ptr<ICamera>> _cameras;
+    std::unordered_map<std::string, std::unique_ptr<VirtualCamera>> _cameras;
     std::string _currentCameraName;
 };
 

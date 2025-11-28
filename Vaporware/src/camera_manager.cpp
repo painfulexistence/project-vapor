@@ -1,4 +1,6 @@
 #include "camera_manager.hpp"
+
+#include <glm/glm.hpp>
 #include <fmt/core.h>
 #include <stdexcept>
 
@@ -169,7 +171,7 @@ void FollowCam::reset() {
 // CameraManager Implementation
 // ============================================================================
 
-void CameraManager::addCamera(const std::string& name, std::unique_ptr<ICamera> camera) {
+void CameraManager::addCamera(const std::string& name, std::unique_ptr<VirtualCamera> camera) {
     if (_cameras.find(name) != _cameras.end()) {
         throw std::runtime_error(fmt::format("Camera '{}' already exists", name));
     }
@@ -193,7 +195,7 @@ void CameraManager::switchCamera(const std::string& name) {
     fmt::print("[CameraManager] Switched to camera: '{}'\n", name);
 }
 
-ICamera* CameraManager::getCurrentCamera() {
+VirtualCamera* CameraManager::getCurrentCamera() {
     if (_currentCameraName.empty() || _cameras.empty()) {
         return nullptr;
     }
@@ -206,7 +208,7 @@ ICamera* CameraManager::getCurrentCamera() {
     return it->second.get();
 }
 
-ICamera* CameraManager::getCamera(const std::string& name) {
+VirtualCamera* CameraManager::getCamera(const std::string& name) {
     auto it = _cameras.find(name);
     if (it == _cameras.end()) {
         return nullptr;
@@ -215,7 +217,7 @@ ICamera* CameraManager::getCamera(const std::string& name) {
 }
 
 void CameraManager::update(float deltaTime, const std::unordered_map<SDL_Scancode, bool>& keyboardState) {
-    ICamera* current = getCurrentCamera();
+    VirtualCamera* current = getCurrentCamera();
     if (current) {
         current->update(deltaTime, keyboardState);
     }
@@ -248,7 +250,7 @@ bool CameraManager::removeCamera(const std::string& name) {
 }
 
 void CameraManager::resetCurrentCamera() {
-    ICamera* current = getCurrentCamera();
+    VirtualCamera* current = getCurrentCamera();
     if (current) {
         current->reset();
         fmt::print("[CameraManager] Reset current camera\n");

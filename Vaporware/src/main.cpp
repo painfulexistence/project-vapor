@@ -15,10 +15,10 @@
 #include "Vapor/asset_manager.hpp"
 #include "Vapor/mesh_builder.hpp"
 #include "Vapor/camera.hpp"
-#include "Vapor/camera_manager.hpp"
 #include "Vapor/rng.hpp"
 #include "Vapor/engine_core.hpp"
 
+#include "camera_manager.hpp"
 
 int main(int argc, char* args[]) {
     args::ArgumentParser parser { "This is Project Vapor." };
@@ -192,7 +192,7 @@ int main(int argc, char* args[]) {
     // Add FollowCam (follows entity1)
     auto followCam = std::make_unique<Vapor::FollowCam>(
         entity1,                          // Target to follow
-        glm::vec3(0.0f, 3.0f, 6.0f),     // Offset (behind and above)
+        glm::vec3(0.0f, 1.0f, 2.0f),     // Offset (behind and above)
         glm::radians(60.0f),              // FOV
         (float)windowWidth / (float)windowHeight,  // Aspect ratio
         0.05f,                            // Near plane
