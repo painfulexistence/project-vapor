@@ -12,6 +12,7 @@ add_subdirectory(metal)
 add_subdirectory(MikkTSpace)
 
 set(SOURCES
+    src/action_manager.cpp
     src/asset_manager.cpp
     src/asset_serializer.cpp
     src/camera.cpp
