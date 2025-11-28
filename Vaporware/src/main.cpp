@@ -18,6 +18,7 @@
 #include "Vapor/rng.hpp"
 #include "Vapor/engine_core.hpp"
 
+#include "camera_manager.hpp"
 
 int main(int argc, char* args[]) {
     args::ArgumentParser parser { "This is Project Vapor." };
@@ -170,15 +171,42 @@ int main(int argc, char* args[]) {
 
     int windowWidth, windowHeight;
     SDL_GetWindowSize(window, &windowWidth, &windowHeight);
-    Camera camera = Camera(
-        glm::vec3(0.0f, 0.0f, 3.0f),
-        glm::vec3(0.0f, 0.0f, 0.0f),
-        glm::vec3(0.0f, 1.0f, 0.0f),
-        glm::radians(60.0f),
-        (float)windowWidth / (float)windowHeight,
-        0.05f,
-        500.0f
+
+    // Create camera manager with FlyCam and FollowCam
+    Vapor::CameraManager cameraManager;
+
+    // Add FlyCam (free-flying camera)
+    auto flyCam = std::make_unique<Vapor::FlyCam>(
+        glm::vec3(0.0f, 2.0f, 8.0f),     // Eye position
+        glm::vec3(0.0f, 0.0f, 0.0f),     // Look at center
+        glm::vec3(0.0f, 1.0f, 0.0f),     // Up vector
+        glm::radians(60.0f),              // FOV
+        (float)windowWidth / (float)windowHeight,  // Aspect ratio
+        0.05f,                            // Near plane
+        500.0f,                           // Far plane
+        5.0f,                             // Move speed
+        1.5f                              // Rotate speed
     );
+    cameraManager.addCamera("fly", std::move(flyCam));
+
+    // Add FollowCam (follows entity1)
+    auto followCam = std::make_unique<Vapor::FollowCam>(
+        entity1,                          // Target to follow
+        glm::vec3(0.0f, 1.0f, 2.0f),     // Offset (behind and above)
+        glm::radians(60.0f),              // FOV
+        (float)windowWidth / (float)windowHeight,  // Aspect ratio
+        0.05f,                            // Near plane
+        500.0f,                           // Far plane
+        0.1f,                             // Smooth factor (lower = smoother)
+        0.1f                              // Deadzone
+    );
+    cameraManager.addCamera("follow", std::move(followCam));
+
+    // Start with fly camera
+    cameraManager.switchCamera("fly");
+    fmt::print("Camera controls:\n");
+    fmt::print("  Press '1' - Switch to Fly Camera (free movement with WASDRF + IJKL)\n");
+    fmt::print("  Press '2' - Switch to Follow Camera (follows Cube 1)\n");
 
     Uint32 frameCount = 0;
     float time = SDL_GetTicks() / 1000.0f;
@@ -197,6 +225,13 @@ int main(int argc, char* args[]) {
             case SDL_EVENT_KEY_DOWN: {
                 if (e.key.scancode == SDL_SCANCODE_ESCAPE) {
                     quit = true;
+                }
+                // Camera switching with number keys
+                if (e.key.scancode == SDL_SCANCODE_1) {
+                    cameraManager.switchCamera("fly");
+                }
+                if (e.key.scancode == SDL_SCANCODE_2) {
+                    cameraManager.switchCamera("follow");
                 }
                 keyboardState[e.key.scancode] = true;
                 break;
@@ -230,42 +265,8 @@ int main(int argc, char* args[]) {
         float deltaTime = currTime - time;
         time = currTime;
 
-        if (keyboardState[SDL_SCANCODE_W]) {
-            camera.dolly(1.0f * deltaTime);
-        }
-        if (keyboardState[SDL_SCANCODE_S]) {
-            camera.dolly(-1.0f * deltaTime);
-        }
-        if (keyboardState[SDL_SCANCODE_D]) {
-            camera.truck(1.0f * deltaTime);
-        }
-        if (keyboardState[SDL_SCANCODE_A]) {
-            camera.truck(-1.0f * deltaTime);
-        }
-        if (keyboardState[SDL_SCANCODE_R]) {
-            camera.pedestal(1.0f * deltaTime);
-        }
-        if (keyboardState[SDL_SCANCODE_F]) {
-            camera.pedestal(-1.0f * deltaTime);
-        }
-        if (keyboardState[SDL_SCANCODE_I]) {
-            camera.tilt(1.0f * deltaTime);
-        }
-        if (keyboardState[SDL_SCANCODE_K]) {
-            camera.tilt(-1.0f * deltaTime);
-        }
-        if (keyboardState[SDL_SCANCODE_L]) {
-            camera.pan(-1.0f * deltaTime);
-        }
-        if (keyboardState[SDL_SCANCODE_J]) {
-            camera.pan(1.0f * deltaTime);
-        }
-        if (keyboardState[SDL_SCANCODE_U]) {
-            camera.roll(-1.0f * deltaTime);
-        }
-        if (keyboardState[SDL_SCANCODE_O]) {
-            camera.roll(1.0f * deltaTime);
-        }
+        // Update camera manager (handles input and camera updates)
+        cameraManager.update(deltaTime, keyboardState);
 
         entity1->rotate(glm::vec3(0.0f, 1.0f, -1.0f), 1.5f * deltaTime);
         float speed = 0.5f;
@@ -308,7 +309,11 @@ int main(int argc, char* args[]) {
         physics->process(scene, deltaTime);
         // scene->update(deltaTime);
 
-        renderer->draw(scene, camera);
+        // Get current camera from camera manager
+        auto* currentCam = cameraManager.getCurrentCamera();
+        if (currentCam) {
+            renderer->draw(scene, currentCam->getCamera());
+        }
 
         frameCount++;
     }
