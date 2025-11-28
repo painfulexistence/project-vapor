@@ -3,6 +3,7 @@
 #include <SDL3/SDL_stdinc.h>
 #include <SDL3/SDL_timer.h>
 #include <fmt/core.h>
+#include <tracy/Tracy.hpp>
 #include <glm/vec2.hpp>
 #include <glm/vec3.hpp>
 #include <glm/vec4.hpp>
@@ -86,6 +87,8 @@ Renderer_Vulkan::~Renderer_Vulkan() {
 }
 
 auto Renderer_Vulkan::init(SDL_Window* window) -> void {
+    ZoneScoped;
+
     int windowWidth, windowHeight;
     SDL_GetWindowSize(window, &windowWidth, &windowHeight);
 
@@ -990,6 +993,8 @@ auto Renderer_Vulkan::createResources() -> void {
 }
 
 auto Renderer_Vulkan::stage(std::shared_ptr<Scene> scene) -> void {
+    ZoneScoped;
+
     // Lights
     directionalLightBuffers.resize(MAX_FRAMES_IN_FLIGHT);
     directionalLightBuffersMapped.resize(MAX_FRAMES_IN_FLIGHT);
@@ -1246,6 +1251,9 @@ auto Renderer_Vulkan::stage(std::shared_ptr<Scene> scene) -> void {
 }
 
 auto Renderer_Vulkan::draw(std::shared_ptr<Scene> scene, Camera& camera) -> void {
+    ZoneScoped;
+    FrameMark;
+
     vkWaitForFences(device, 1, &renderFences[currentFrameInFlight], VK_TRUE, UINT64_MAX);
     vkResetFences(device, 1, &renderFences[currentFrameInFlight]);
 

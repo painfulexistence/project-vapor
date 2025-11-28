@@ -1,5 +1,6 @@
 #include "task_scheduler.hpp"
 #include <thread>
+#include <tracy/Tracy.hpp>
 
 namespace Vapor {
 
@@ -14,6 +15,8 @@ TaskScheduler::~TaskScheduler() {
 }
 
 void TaskScheduler::init(uint32_t numThreads) {
+    ZoneScoped;
+
     if (m_initialized) {
         return;
     }
@@ -40,6 +43,8 @@ void TaskScheduler::shutdown() {
 }
 
 void TaskScheduler::waitForAll() {
+    ZoneScoped;
+
     if (!m_initialized) {
         return;
     }

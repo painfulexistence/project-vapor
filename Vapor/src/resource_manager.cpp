@@ -1,6 +1,7 @@
 #include "resource_manager.hpp"
 #include "asset_manager.hpp"
 #include <fmt/core.h>
+#include <tracy/Tracy.hpp>
 
 namespace Vapor {
 
@@ -114,10 +115,16 @@ size_t ResourceManager::getActiveLoadCount() const {
 // === Internal Loading Functions ===
 
 std::shared_ptr<Image> ResourceManager::loadImageInternal(const std::string& path) {
+    ZoneScoped;
+    ZoneName(path.c_str(), path.size());
+
     return AssetManager::loadImage(path);
 }
 
 std::shared_ptr<Scene> ResourceManager::loadSceneInternal(const std::string& path, bool optimized) {
+    ZoneScoped;
+    ZoneName(path.c_str(), path.size());
+
     if (optimized) {
         return AssetManager::loadGLTFOptimized(path);
     } else {
@@ -126,6 +133,9 @@ std::shared_ptr<Scene> ResourceManager::loadSceneInternal(const std::string& pat
 }
 
 std::shared_ptr<Mesh> ResourceManager::loadMeshInternal(const std::string& path, const std::string& mtlBasedir) {
+    ZoneScoped;
+    ZoneName(path.c_str(), path.size());
+
     return AssetManager::loadOBJ(path, mtlBasedir);
 }
 
