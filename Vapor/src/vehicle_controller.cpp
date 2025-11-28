@@ -135,7 +135,8 @@ VehicleController::VehicleController(Physics3D* physics, const VehicleSettings& 
         // Base wheel properties
         joltWheel->mPosition = JPH::Vec3(wheelSettings.position.x, wheelSettings.position.y, wheelSettings.position.z);
         joltWheel->mSuspensionDirection = JPH::Vec3(wheelSettings.suspensionDirection.x, wheelSettings.suspensionDirection.y, wheelSettings.suspensionDirection.z);
-        joltWheel->mSteeringAxis = JPH::Vec3(wheelSettings.wheelUp.x, wheelSettings.wheelUp.y, wheelSettings.wheelUp.z);
+        // Steering axis is typically the vertical axis (0, 1, 0) for normal steering
+        joltWheel->mSteeringAxis = JPH::Vec3(0.0f, 1.0f, 0.0f);
         joltWheel->mWheelForward = JPH::Vec3(wheelSettings.wheelForward.x, wheelSettings.wheelForward.y, wheelSettings.wheelForward.z);
         joltWheel->mWheelUp = JPH::Vec3(wheelSettings.wheelUp.x, wheelSettings.wheelUp.y, wheelSettings.wheelUp.z);
 
@@ -173,21 +174,71 @@ VehicleController::VehicleController(Physics3D* physics, const VehicleSettings& 
 
     // Create the constraint
     vehicleConstraint = std::make_unique<JPH::VehicleConstraint>(*vehicleBody, vehicleSettings);
+
+    // Set collision tester for wheel-ground collision detection
+    // This is REQUIRED for VehicleConstraint::OnStep to work properly
+    // Without this, OnStep will crash when trying to access the collision tester
+    // Use MOVING layer (1) so wheels can collide with NON_MOVING (0) ground
+    JPH::Ref<JPH::VehicleCollisionTester> collisionTester = new JPH::VehicleCollisionTesterRay(
+        1,  // Object layer (MOVING = 1, will collide with NON_MOVING = 0 ground)
+        JPH::Vec3(0.0f, 1.0f, 0.0f)  // Up vector (world space up direction)
+    );
+    vehicleConstraint->SetVehicleCollisionTester(collisionTester.GetPtr());
+
     physicsSystem->AddConstraint(vehicleConstraint.get());
     physicsSystem->AddStepListener(vehicleConstraint.get());
 }
 
 VehicleController::~VehicleController() {
-    if (vehicleConstraint) {
-        auto* physicsSystem = physics->getPhysicsSystem();
-        physicsSystem->RemoveStepListener(vehicleConstraint.get());
-        physicsSystem->RemoveConstraint(vehicleConstraint.get());
+    // Check if physics system is still valid before trying to remove constraints/listeners
+    // This can happen during shutdown when PhysicsSystem is destroyed before VehicleController
+    if (!physics) {
+        // Physics system already destroyed, just reset the constraint pointer
+        vehicleConstraint.reset();
+        return;
     }
 
+    // Check if physics system is still initialized
+    auto* physicsSystem = physics->getPhysicsSystem();
+    if (!physicsSystem) {
+        // Physics system already destroyed, just reset the constraint pointer
+        vehicleConstraint.reset();
+        return;
+    }
+
+    // Try to remove step listener and constraint
+    // If PhysicsSystem is being destroyed, these operations may fail
+    if (vehicleConstraint) {
+        // Use a try-catch to handle cases where PhysicsSystem is being destroyed
+        // The mutex inside PhysicsSystem may be invalid during shutdown
+        try {
+            physicsSystem->RemoveStepListener(vehicleConstraint.get());
+        } catch (...) {
+            // Physics system may be in the process of being destroyed, ignore errors
+        }
+
+        try {
+            physicsSystem->RemoveConstraint(vehicleConstraint.get());
+        } catch (...) {
+            // Physics system may be in the process of being destroyed, ignore errors
+        }
+
+        // IMPORTANT: Reset the constraint immediately after removing it from PhysicsSystem
+        // This ensures it's destroyed before PhysicsSystem is destroyed
+        vehicleConstraint.reset();
+    }
+
+    // Try to remove and destroy body
     if (vehicleBody) {
         auto* bodyInterface = physics->getBodyInterface();
-        bodyInterface->RemoveBody(vehicleBody->GetID());
-        bodyInterface->DestroyBody(vehicleBody->GetID());
+        if (bodyInterface) {
+            try {
+                bodyInterface->RemoveBody(vehicleBody->GetID());
+                bodyInterface->DestroyBody(vehicleBody->GetID());
+            } catch (...) {
+                // Physics system may be in the process of being destroyed, ignore errors
+            }
+        }
     }
 }
 
@@ -208,27 +259,38 @@ void VehicleController::setHandbrake(bool enabled) {
 }
 
 glm::vec3 VehicleController::getPosition() const {
-    JPH::RVec3 pos = vehicleBody->GetPosition();
+    // Use BodyInterface for thread-safe access
+    auto* bodyInterface = physics->getBodyInterface();
+    JPH::RVec3 pos = bodyInterface->GetPosition(vehicleBody->GetID());
     return glm::vec3(pos.GetX(), pos.GetY(), pos.GetZ());
 }
 
 glm::quat VehicleController::getRotation() const {
-    JPH::Quat rot = vehicleBody->GetRotation();
+    // Use BodyInterface for thread-safe access
+    auto* bodyInterface = physics->getBodyInterface();
+    JPH::Quat rot = bodyInterface->GetRotation(vehicleBody->GetID());
     return glm::quat(rot.GetW(), rot.GetX(), rot.GetY(), rot.GetZ());
 }
 
 glm::vec3 VehicleController::getLinearVelocity() const {
-    JPH::Vec3 vel = vehicleBody->GetLinearVelocity();
+    // Use BodyInterface for thread-safe access
+    auto* bodyInterface = physics->getBodyInterface();
+    JPH::Vec3 vel = bodyInterface->GetLinearVelocity(vehicleBody->GetID());
     return glm::vec3(vel.GetX(), vel.GetY(), vel.GetZ());
 }
 
 glm::vec3 VehicleController::getAngularVelocity() const {
-    JPH::Vec3 vel = vehicleBody->GetAngularVelocity();
+    // Use BodyInterface for thread-safe access
+    auto* bodyInterface = physics->getBodyInterface();
+    JPH::Vec3 vel = bodyInterface->GetAngularVelocity(vehicleBody->GetID());
     return glm::vec3(vel.GetX(), vel.GetY(), vel.GetZ());
 }
 
 float VehicleController::getSpeed() const {
-    return vehicleBody->GetLinearVelocity().Length();
+    // Use BodyInterface for thread-safe access
+    auto* bodyInterface = physics->getBodyInterface();
+    JPH::Vec3 vel = bodyInterface->GetLinearVelocity(vehicleBody->GetID());
+    return vel.Length();
 }
 
 float VehicleController::getSpeedKmh() const {
@@ -241,32 +303,46 @@ int VehicleController::getWheelCount() const {
 
 bool VehicleController::isWheelInContact(int wheelIndex) const {
     if (wheelIndex < 0 || wheelIndex >= getWheelCount()) return false;
+    // Note: VehicleConstraint methods should be called from main thread only
+    // These are typically called after physics update, so should be safe
     const JPH::Wheel* wheel = vehicleConstraint->GetWheel(wheelIndex);
+    if (!wheel) return false;
     return wheel->HasContact();
 }
 
 glm::vec3 VehicleController::getWheelPosition(int wheelIndex) const {
     if (wheelIndex < 0 || wheelIndex >= getWheelCount()) return glm::vec3(0.0f);
+    // Note: VehicleConstraint methods should be called from main thread only
     const JPH::Wheel* wheel = vehicleConstraint->GetWheel(wheelIndex);
+    if (!wheel) return glm::vec3(0.0f);
     JPH::RVec3 pos = wheel->GetContactPosition();
     return glm::vec3(pos.GetX(), pos.GetY(), pos.GetZ());
 }
 
 glm::vec3 VehicleController::getWheelContactNormal(int wheelIndex) const {
     if (wheelIndex < 0 || wheelIndex >= getWheelCount()) return glm::vec3(0, 1, 0);
+    // Note: VehicleConstraint methods should be called from main thread only
     const JPH::Wheel* wheel = vehicleConstraint->GetWheel(wheelIndex);
+    if (!wheel) return glm::vec3(0, 1, 0);
     JPH::Vec3 normal = wheel->GetContactNormal();
     return glm::vec3(normal.GetX(), normal.GetY(), normal.GetZ());
 }
 
 float VehicleController::getWheelSuspensionLength(int wheelIndex) const {
     if (wheelIndex < 0 || wheelIndex >= getWheelCount()) return 0.0f;
+    // Note: VehicleConstraint methods should be called from main thread only
     const JPH::Wheel* wheel = vehicleConstraint->GetWheel(wheelIndex);
+    if (!wheel) return 0.0f;
     return wheel->GetSuspensionLength();
 }
 
 void VehicleController::update(float deltaTime) {
+    // This is called from main thread after physics update, so should be safe
+    // But we still need to ensure vehicleConstraint is valid
+    if (!vehicleConstraint) return;
+
     auto* controller = static_cast<JPH::WheeledVehicleController*>(vehicleConstraint->GetController());
+    if (!controller) return;
 
     // Apply throttle (forward/reverse) and steering
     // Note: SetDriverInput already handles steering, so we don't need SetWheelSteering

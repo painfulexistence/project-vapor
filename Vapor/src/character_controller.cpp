@@ -34,13 +34,16 @@ CharacterController::CharacterController(Physics3D* physics, const CharacterCont
     // Create character
     character = std::make_unique<JPH::CharacterVirtual>(
         &charSettings,
-        JPH::RVec3::sZero(),
+        JPH::RVec3::sZero(),  // Initial position (will be set by warp)
         JPH::Quat::sIdentity(),
         0,  // User data
         physicsSystem
     );
 
     character->SetListener(nullptr);  // Can add custom listener later
+
+    // Set initial max speed
+    maxSpeed = 5.0f;  // Default movement speed
 }
 
 CharacterController::~CharacterController() {
@@ -48,19 +51,21 @@ CharacterController::~CharacterController() {
 }
 
 void CharacterController::move(const glm::vec3& movementDirection, float deltaTime) {
-    JPH::Vec3 velocity(movementDirection.x, movementDirection.y, movementDirection.z);
-
-    // Clamp to max speed (preserve vertical velocity)
+    // Get current velocity to preserve vertical component
     JPH::Vec3 currentVel = character->GetLinearVelocity();
-    JPH::Vec3 horizontalVel(velocity.GetX(), 0, velocity.GetZ());
+
+    // Apply horizontal movement (preserve vertical velocity for gravity/jumping)
+    JPH::Vec3 horizontalVel(movementDirection.x, 0, movementDirection.z);
     float horizontalSpeed = horizontalVel.Length();
 
+    // Clamp horizontal speed to max speed
     if (horizontalSpeed > maxSpeed) {
         horizontalVel = horizontalVel.Normalized() * maxSpeed;
-        velocity = JPH::Vec3(horizontalVel.GetX(), velocity.GetY(), horizontalVel.GetZ());
     }
 
-    character->SetLinearVelocity(velocity);
+    // Combine horizontal movement with current vertical velocity
+    JPH::Vec3 newVelocity(horizontalVel.GetX(), currentVel.GetY(), horizontalVel.GetZ());
+    character->SetLinearVelocity(newVelocity);
 }
 
 void CharacterController::jump(float jumpSpeed) {
@@ -118,8 +123,8 @@ void CharacterController::update(float deltaTime, const glm::vec3& gravity) {
     JPH::CharacterVirtual::ExtendedUpdateSettings updateSettings;
 
     // Use system default filters
-    auto broadPhaseFilter = physicsSystem->GetDefaultBroadPhaseLayerFilter(0);  // Use MOVING layer
-    auto layerFilter = physicsSystem->GetDefaultLayerFilter(0);
+    auto broadPhaseFilter = physicsSystem->GetDefaultBroadPhaseLayerFilter(1);  // MOVING layer
+    auto layerFilter = physicsSystem->GetDefaultLayerFilter(1);  // MOVING layer
 
     character->ExtendedUpdate(
         deltaTime,

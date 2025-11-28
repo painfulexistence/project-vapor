@@ -376,18 +376,31 @@ void Physics3D::process(const std::shared_ptr<Scene>& scene, float dt) {
         );
     }
 
+    // TODO: fix trace trap
     // Apply fluid forces before physics update
-    for (auto& fluidVolume : scene->fluidVolumes) {
-        if (fluidVolume) {
-            fluidVolume->applyForcesToBodies(dt);
-        }
-    }
+    // for (auto& fluidVolume : scene->fluidVolumes) {
+    //     if (fluidVolume) {
+    //         fluidVolume->applyForcesToBodies(dt);
+    //     }
+    // }
 
     // update physics world
     timeAccum += dt;
     while (timeAccum >= FIXED_TIME_STEP) {
         ++step;
-        physicsSystem->Update(FIXED_TIME_STEP, 1, tempAllocator.get(), jobSystem.get());
+
+        // Update vehicle controllers
+        std::function<void(const std::shared_ptr<Node>&)> updateVehicleControllers = [&](const std::shared_ptr<Node>& node) {
+            if (node->vehicleController) {
+                node->vehicleController->update(FIXED_TIME_STEP);
+            }
+            for (const auto& child : node->children) {
+                updateVehicleControllers(child);
+            }
+        };
+        for (auto& node : scene->nodes) {
+            updateVehicleControllers(node);
+        }
 
         // Update character controllers
         std::function<void(const std::shared_ptr<Node>&)> updateCharacterControllers = [&](const std::shared_ptr<Node>& node) {
@@ -402,18 +415,8 @@ void Physics3D::process(const std::shared_ptr<Scene>& scene, float dt) {
             updateCharacterControllers(node);
         }
 
-        // Update vehicle controllers
-        std::function<void(const std::shared_ptr<Node>&)> updateVehicleControllers = [&](const std::shared_ptr<Node>& node) {
-            if (node->vehicleController) {
-                node->vehicleController->update(FIXED_TIME_STEP);
-            }
-            for (const auto& child : node->children) {
-                updateVehicleControllers(child);
-            }
-        };
-        for (auto& node : scene->nodes) {
-            updateVehicleControllers(node);
-        }
+        // Update physics (after controller updates)
+        physicsSystem->Update(FIXED_TIME_STEP, 1, tempAllocator.get(), jobSystem.get());
 
         timeAccum -= FIXED_TIME_STEP;
     }
