@@ -6,7 +6,7 @@
 #include <Jolt/Physics/Body/Body.h>
 #include <Jolt/Physics/Body/BodyLockInterface.h>
 #include <Jolt/Physics/Collision/Shape/Shape.h>
-#include <Jolt/Physics/Collision/AABox.h>
+#include <Jolt/Geometry/AABox.h>
 
 // Template: Water volume
 FluidVolumeSettings FluidVolumeSettings::createWaterVolume(const glm::vec3& position, const glm::vec3& dimensions) {
@@ -82,7 +82,7 @@ float FluidVolume::calculateSubmergedRatio(const JPH::BodyID& bodyID) const {
     );
 
     // Calculate intersection volume
-    JPH::AABox intersection = worldBounds.Intersection(fluidBounds);
+    JPH::AABox intersection = worldBounds.Intersect(fluidBounds);
     if (intersection.IsValid()) {
         JPH::Vec3 intersectionSize = intersection.GetSize();
         float intersectionVolume = intersectionSize.GetX() * intersectionSize.GetY() * intersectionSize.GetZ();

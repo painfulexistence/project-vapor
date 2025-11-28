@@ -12,6 +12,7 @@
  * - ESC: Quit
  */
 
+#define GLM_ENABLE_EXPERIMENTAL
 #include <SDL3/SDL.h>
 #include <fmt/core.h>
 #include <glm/ext/matrix_transform.hpp>
@@ -36,7 +37,7 @@ public:
         if (heldBody.valid()) return false;  // Already holding something
 
         // Raycast from camera forward
-        glm::vec3 rayStart = camera->position;
+        glm::vec3 rayStart = camera->getEye();
         glm::vec3 rayDir = camera->getForward();
         glm::vec3 rayEnd = rayStart + rayDir * pickupRange;
 
@@ -108,7 +109,7 @@ public:
         if (!heldBody.valid()) return;
 
         // Calculate target position (in front of camera)
-        glm::vec3 targetPos = camera->position + camera->getForward() * holdOffset;
+        glm::vec3 targetPos = camera->getEye() + camera->getForward() * holdOffset;
 
         // Smoothly move held object to target
         glm::vec3 currentPos = physics->getPosition(heldBody);

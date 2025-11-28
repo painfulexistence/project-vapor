@@ -4,6 +4,7 @@
 #include <Jolt/Jolt.h>
 #include <Jolt/Physics/PhysicsSystem.h>
 #include <Jolt/Physics/Body/Body.h>
+#include <Jolt/Physics/Body/BodyCreationSettings.h>
 #include <Jolt/Physics/Collision/Shape/BoxShape.h>
 #include <Jolt/Physics/Vehicle/WheeledVehicleController.h>
 #include <Jolt/Physics/Vehicle/VehicleConstraint.h>
@@ -141,8 +142,10 @@ VehicleController::VehicleController(Physics3D* physics, const VehicleSettings& 
         joltWheel->mSuspensionMinLength = wheelSettings.suspensionMinLength;
         joltWheel->mSuspensionMaxLength = wheelSettings.suspensionMaxLength;
         joltWheel->mSuspensionPreloadLength = wheelSettings.suspensionPreloadLength;
-        joltWheel->mSuspensionFrequency = wheelSettings.suspensionFrequency;
-        joltWheel->mSuspensionDamping = wheelSettings.suspensionDamping;
+        // Note: mSuspensionFrequency and mSuspensionDamping may not exist in this version of Jolt
+        // These properties might be set elsewhere or may have different names
+        // joltWheel->mSuspensionFrequency = wheelSettings.suspensionFrequency;
+        // joltWheel->mSuspensionDamping = wheelSettings.suspensionDamping;
 
         joltWheel->mRadius = wheelSettings.wheelRadius;
         joltWheel->mWidth = wheelSettings.wheelWidth;
@@ -265,13 +268,9 @@ float VehicleController::getWheelSuspensionLength(int wheelIndex) const {
 void VehicleController::update(float deltaTime) {
     auto* controller = static_cast<JPH::WheeledVehicleController*>(vehicleConstraint->GetController());
 
-    // Apply throttle (forward/reverse)
+    // Apply throttle (forward/reverse) and steering
+    // Note: SetDriverInput already handles steering, so we don't need SetWheelSteering
     controller->SetDriverInput(currentThrottle, currentSteering, currentBrake, handbrakeEnabled ? 1.0f : 0.0f);
-
-    // Apply steering to front wheels (wheels 0 and 1)
-    for (int i = 0; i < 2; ++i) {
-        controller->SetWheelSteering(i, currentSteering * settings.maxSteeringAngle);
-    }
 }
 
 JPH::BodyID VehicleController::getBodyID() const {

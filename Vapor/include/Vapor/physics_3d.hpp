@@ -175,10 +175,7 @@ public:
     JPH::PhysicsSystem* getPhysicsSystem() { return physicsSystem.get(); }
     JPH::BodyInterface* getBodyInterface() { return bodyInterface; }
     JPH::TempAllocatorImpl* getTempAllocator() { return tempAllocator.get(); }
-    JPH::BodyID getBodyID(BodyHandle handle) const {
-        auto it = bodies.find(handle.rid);
-        return it != bodies.end() ? it->second : JPH::BodyID();
-    }
+    JPH::BodyID getBodyID(BodyHandle handle) const;
 
 private:
     constexpr static float FIXED_TIME_STEP = 1.0f / 60.0f;

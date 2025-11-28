@@ -13,6 +13,9 @@
 #include <fmt/core.h>
 #include <glm/ext/matrix_transform.hpp>
 #include <glm/ext/vector_float3.hpp>
+#include "imgui.h"
+#include <typeinfo>
+#include <cstdio>
 
 #include "Vapor/scene.hpp"
 #include "Vapor/renderer.hpp"
@@ -26,16 +29,35 @@
 #include "Vapor/engine_core.hpp"
 
 int main(int argc, char* args[]) {
+    // Check if SDL is already initialized
+    if (SDL_WasInit(SDL_INIT_VIDEO)) {
+        fmt::print("SDL video subsystem already initialized\n");
+    }
+
+    // SDL3: SDL_Init returns bool (true = success, false = failure)
     if (!SDL_Init(SDL_INIT_VIDEO)) {
-        fmt::print("SDL could not initialize! Error: {}\n", SDL_GetError());
+        const char* error = SDL_GetError();
+        fmt::print("SDL could not initialize! Error: '{}'\n",
+                   error && strlen(error) > 0 ? error : "(no error message)");
+        return 1;
+    }
+    fmt::print("SDL initialized successfully\n");
+
+    const char* winTitle = "Jolt Physics Demo - Character, Vehicle & Fluid";
+    Uint32 winFlags = SDL_WINDOW_RESIZABLE | SDL_WINDOW_HIGH_PIXEL_DENSITY | SDL_WINDOW_METAL;
+    GraphicsBackend gfxBackend = GraphicsBackend::Metal;
+
+    auto window = SDL_CreateWindow(winTitle, 1920, 1080, winFlags);
+    if (!window) {
+        fmt::print("Window could not be created! Error: {}\n", SDL_GetError());
+        SDL_Quit();
         return 1;
     }
 
-    const char* winTitle = "Jolt Physics Demo - Character, Vehicle & Fluid";
-    Uint32 winFlags = SDL_WINDOW_RESIZABLE | SDL_WINDOW_HIGH_PIXEL_DENSITY | SDL_WINDOW_VULKAN;
-    GraphicsBackend gfxBackend = GraphicsBackend::Vulkan;
-
-    auto window = SDL_CreateWindow(winTitle, 1920, 1080, winFlags);
+    // Initialize ImGui
+    IMGUI_CHECKVERSION();
+    ImGui::CreateContext();
+    ImGui::GetIO().ConfigFlags |= ImGuiConfigFlags_DockingEnable;
 
     // Initialize engine core
     auto engineCore = std::make_unique<Vapor::EngineCore>();
@@ -43,7 +65,22 @@ int main(int argc, char* args[]) {
     fmt::print("Engine core initialized\n");
 
     auto renderer = createRenderer(gfxBackend);
-    renderer->init(window);
+    if (!renderer) {
+        fmt::print("Failed to create renderer!\n");
+        SDL_DestroyWindow(window);
+        SDL_Quit();
+        return 1;
+    }
+
+    try {
+        renderer->init(window);
+        fmt::print("Renderer initialized successfully\n");
+    } catch (const std::exception& e) {
+        fmt::print("Error initializing renderer: {}\n", e.what());
+        SDL_DestroyWindow(window);
+        SDL_Quit();
+        return 1;
+    }
 
     // Initialize physics
     auto physics = std::make_unique<Physics3D>();
@@ -157,11 +194,27 @@ int main(int argc, char* args[]) {
         triggerZone->getWorldPosition()
     );
 
-    renderer->stage(scene);
+    fmt::print("Staging scene...\n");
+    try {
+        renderer->stage(scene);
+        fmt::print("Scene staged successfully\n");
+    } catch (const std::exception& e) {
+        fmt::print("Error in renderer->stage(): {}\n", e.what());
+        SDL_DestroyWindow(window);
+        SDL_Quit();
+        return 1;
+    }
 
     // Setup camera
+    fmt::print("Setting up camera...\n");
     int windowWidth, windowHeight;
-    SDL_GetWindowSize(window, &windowWidth, &windowHeight);
+    if (!SDL_GetWindowSize(window, &windowWidth, &windowHeight)) {
+        fmt::print("Failed to get window size: {}\n", SDL_GetError());
+        SDL_DestroyWindow(window);
+        SDL_Quit();
+        return 1;
+    }
+    fmt::print("Window size: {}x{}\n", windowWidth, windowHeight);
     Camera camera(
         glm::vec3(0.0f, 5.0f, 15.0f),
         glm::vec3(0.0f, 0.0f, 0.0f),
@@ -185,6 +238,7 @@ int main(int argc, char* args[]) {
     bool controlCharacter = true;  // Toggle between character and vehicle control
 
     fmt::print("\n=== Jolt Physics Demo ===\n");
+    fmt::print("Entering main loop...\n");
     fmt::print("Controls:\n");
     fmt::print("  WASD: Move character\n");
     fmt::print("  Space: Jump\n");
@@ -220,6 +274,12 @@ int main(int argc, char* args[]) {
         float deltaTime = currTime - time;
         time = currTime;
 
+        static int frameCount = 0;
+        if (frameCount == 0) {
+            fmt::print("First frame rendering...\n");
+        }
+        frameCount++;
+
         // Camera controls
         if (keyboardState[SDL_SCANCODE_I]) camera.tilt(1.0f * deltaTime);
         if (keyboardState[SDL_SCANCODE_K]) camera.tilt(-1.0f * deltaTime);
@@ -250,7 +310,7 @@ int main(int argc, char* args[]) {
                 }
 
                 // Camera follows character
-                camera.setLookAt(character->getWorldPosition());
+                camera.setCenter(character->getWorldPosition());
             }
         } else {
             // Vehicle controls
@@ -269,7 +329,7 @@ int main(int argc, char* args[]) {
                 vehicleController->setBrake(keyboardState[SDL_SCANCODE_SPACE] ? 1.0f : 0.0f);
 
                 // Camera follows vehicle
-                camera.setLookAt(vehicle->getWorldPosition());
+                camera.setCenter(vehicle->getWorldPosition());
 
                 // Print vehicle stats every 2 seconds
                 static float statTimer = 0.0f;
@@ -289,11 +349,46 @@ int main(int argc, char* args[]) {
         }
 
         // Update systems
-        engineCore->update(deltaTime);
-        scene->update(deltaTime);
-        physics->process(scene, deltaTime);
+        // IMPORTANT: Order matters for Jolt Physics locks!
+        // 1. Update scene graph first (no physics locks)
+        if (scene) scene->update(deltaTime);
+        // 2. Then process physics (will sync scene->physics and physics->scene)
+        if (physics && scene) {
+            physics->process(scene, deltaTime);
+        }
+        // 3. Update engine core last
+        if (engineCore) engineCore->update(deltaTime);
 
-        renderer->draw(scene, camera);
+        // Render with error handling
+        fmt::print("Before render check: renderer={}, scene={}\n",
+                  (void*)renderer.get(), (void*)scene.get());
+        std::fflush(stdout);
+        if (renderer && scene) {
+            fmt::print("About to call renderer->draw()...\n");
+            std::fflush(stdout);
+            try {
+                const char* typeName = typeid(*renderer).name();
+                fmt::print("renderer type: {}\n", typeName);
+                std::fflush(stdout);
+                fmt::print("Calling renderer->draw()...\n");
+                std::fflush(stdout);
+                renderer->draw(scene, camera);
+                fmt::print("renderer->draw() completed successfully\n");
+                std::fflush(stdout);
+            } catch (const std::exception& e) {
+                fmt::print("Error in renderer->draw(): {}\n", e.what());
+                std::fflush(stdout);
+                break;
+            } catch (...) {
+                fmt::print("Unknown error in renderer->draw()\n");
+                std::fflush(stdout);
+                break;
+            }
+        } else {
+            fmt::print("ERROR: renderer or scene is null! renderer={}, scene={}\n",
+                      (void*)renderer.get(), (void*)scene.get());
+            std::fflush(stdout);
+        }
     }
 
     // Cleanup

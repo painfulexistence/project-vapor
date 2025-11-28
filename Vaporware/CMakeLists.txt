@@ -30,14 +30,14 @@ add_custom_target(copy_assets COMMAND ${CMAKE_COMMAND} -E copy_directory
 )
 add_dependencies(main copy_assets)
 
-add_custom_target(copy_assets_physics_demo COMMAND ${CMAKE_COMMAND} -E copy_directory
-    "${CMAKE_CURRENT_SOURCE_DIR}/../Vapor/assets" $<TARGET_FILE_DIR:physics_demo>/assets
-    DEPENDS ${SPIRV_BINARY_FILES}
-)
-add_dependencies(physics_demo copy_assets_physics_demo)
+# add_custom_target(copy_assets_physics_demo COMMAND ${CMAKE_COMMAND} -E copy_directory
+#     "${CMAKE_CURRENT_SOURCE_DIR}/../Vapor/assets" $<TARGET_FILE_DIR:physics_demo>/assets
+#     DEPENDS ${SPIRV_BINARY_FILES}
+# )
+# add_dependencies(physics_demo copy_assets_physics_demo)
 
-add_custom_target(copy_assets_interactive COMMAND ${CMAKE_COMMAND} -E copy_directory
-    "${CMAKE_CURRENT_SOURCE_DIR}/../Vapor/assets" $<TARGET_FILE_DIR:interactive_physics_demo>/assets
-    DEPENDS ${SPIRV_BINARY_FILES}
-)
-add_dependencies(interactive_physics_demo copy_assets_interactive)
+# add_custom_target(copy_assets_interactive COMMAND ${CMAKE_COMMAND} -E copy_directory
+#     "${CMAKE_CURRENT_SOURCE_DIR}/../Vapor/assets" $<TARGET_FILE_DIR:interactive_physics_demo>/assets
+#     DEPENDS ${SPIRV_BINARY_FILES}
+# )
+# add_dependencies(interactive_physics_demo copy_assets_interactive)

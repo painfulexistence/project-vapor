@@ -11,11 +11,9 @@
 
 #include "graphics.hpp"
 #include "physics_3d.hpp"
+#include "character_controller.hpp"
+#include "vehicle_controller.hpp"
 
-class CharacterController;
-struct CharacterControllerSettings;
-class VehicleController;
-struct VehicleSettings;
 class FluidVolume;
 struct FluidVolumeSettings;
 
@@ -196,7 +194,6 @@ public:
     std::shared_ptr<Node> findNode(const std::string& name);
     std::shared_ptr<Node> findNodeInHierarchy(const std::string& name, const std::shared_ptr<Node>& node);
 
-    // Fluid volume management
     std::shared_ptr<FluidVolume> createFluidVolume(Physics3D* physics, const FluidVolumeSettings& settings);
     void addFluidVolume(std::shared_ptr<FluidVolume> fluidVolume);
 

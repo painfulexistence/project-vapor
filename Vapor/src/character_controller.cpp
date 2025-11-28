@@ -1,6 +1,7 @@
 #include "character_controller.hpp"
 #include "physics_3d.hpp"
 #include <Jolt/Jolt.h>
+#include <Jolt/Physics/PhysicsSystem.h>
 #include <Jolt/Physics/Character/CharacterVirtual.h>
 #include <Jolt/Physics/Collision/Shape/CapsuleShape.h>
 #include <Jolt/Physics/Collision/Shape/RotatedTranslatedShape.h>

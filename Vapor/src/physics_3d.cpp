@@ -332,31 +332,48 @@ void Physics3D::deinit() {
 
 void Physics3D::process(const std::shared_ptr<Scene>& scene, float dt) {
     // sync physics world with scene data (Scene → Physics)
+    // Collect nodes that need syncing first to avoid lock conflicts
+    struct SyncData {
+        JPH::BodyID bodyID;
+        glm::vec3 position;
+        glm::quat rotation;
+    };
+    std::vector<SyncData> nodesToSync;
+
+    // First pass: collect motion types and positions/rotations
     for (auto& node : scene->nodes) {
         if (node->body.valid()) {
             auto bodyID = bodies[node->body.rid];
-            auto motionType = bodyInterface->GetMotionType(bodyID);
+            JPH::BodyLockRead lock(physicsSystem->GetBodyLockInterface(), bodyID);
+            if (!lock.Succeeded()) {
+                continue;
+            }
+            const JPH::Body& body = lock.GetBody();
+            auto motionType = body.GetMotionType();
 
             // Only sync Kinematic and Static bodies from scene to physics
-            // Dynamic bodies are controlled by physics engine
             if (motionType != JPH::EMotionType::Dynamic) {
-                // Sync position
-                auto pos = node->getWorldPosition();
-                bodyInterface->SetPosition(
+                nodesToSync.push_back({
                     bodyID,
-                    JPH::RVec3(pos.x, pos.y, pos.z),
-                    JPH::EActivation::DontActivate
-                );
-
-                // Sync rotation
-                auto rot = node->getWorldRotation();
-                bodyInterface->SetRotation(
-                    bodyID,
-                    JPH::Quat(rot.x, rot.y, rot.z, rot.w),
-                    JPH::EActivation::DontActivate
-                );
+                    node->getWorldPosition(),
+                    node->getWorldRotation()
+                });
             }
         }
+    }
+
+    // Second pass: sync positions and rotations (BodyInterface handles locking)
+    for (const auto& syncData : nodesToSync) {
+        bodyInterface->SetPosition(
+            syncData.bodyID,
+            JPH::RVec3(syncData.position.x, syncData.position.y, syncData.position.z),
+            JPH::EActivation::DontActivate
+        );
+        bodyInterface->SetRotation(
+            syncData.bodyID,
+            JPH::Quat(syncData.rotation.x, syncData.rotation.y, syncData.rotation.z, syncData.rotation.w),
+            JPH::EActivation::DontActivate
+        );
     }
 
     // Apply fluid forces before physics update
@@ -402,19 +419,27 @@ void Physics3D::process(const std::shared_ptr<Scene>& scene, float dt) {
     }
 
     // sync scene data with physics world (Physics → Scene)
+    // Use explicit locks to avoid lock conflicts when calling multiple BodyInterface methods
     for (auto& node : scene->nodes) {
         if (node->body.valid()) {
             auto bodyID = bodies[node->body.rid];
-            auto motionType = bodyInterface->GetMotionType(bodyID);
+
+            // Use BodyLockRead to safely read body properties
+            JPH::BodyLockRead lock(physicsSystem->GetBodyLockInterface(), bodyID);
+            if (!lock.Succeeded()) {
+                continue;  // Body was removed, skip it
+            }
+
+            const JPH::Body& body = lock.GetBody();
+            auto motionType = body.GetMotionType();
 
             // Only sync Dynamic bodies from physics to scene
             if (motionType == JPH::EMotionType::Dynamic) {
-                // Sync position
-                auto pos = bodyInterface->GetPosition(bodyID);
+                // Sync position and rotation using the locked body
+                auto pos = body.GetPosition();
                 node->setPosition(glm::vec3(pos.GetX(), pos.GetY(), pos.GetZ()));
 
-                // Sync rotation
-                auto rot = bodyInterface->GetRotation(bodyID);
+                auto rot = body.GetRotation();
                 node->setLocalRotation(glm::quat(rot.GetW(), rot.GetX(), rot.GetY(), rot.GetZ()));
 
                 node->isTransformDirty = true;
@@ -710,16 +735,27 @@ void Physics3D::setMass(BodyHandle handle, float mass) {
     if (!handle.valid() || bodies.find(handle.rid) == bodies.end()) return;
 
     JPH::BodyID bodyID = bodies[handle.rid];
-    bodyInterface->GetMotionProperties(bodyID)->SetInverseMass(1.0f / mass);
+    JPH::BodyLockWrite lock(physicsSystem->GetBodyLockInterface(), bodyID);
+    if (lock.Succeeded()) {
+        JPH::Body& body = lock.GetBody();
+        if (body.GetMotionType() == JPH::EMotionType::Dynamic) {
+            body.GetMotionProperties()->SetInverseMass(1.0f / mass);
+        }
+    }
 }
 
 float Physics3D::getMass(BodyHandle handle) const {
     if (!handle.valid() || bodies.find(handle.rid) == bodies.end()) return 0.0f;
 
     JPH::BodyID bodyID = bodies.at(handle.rid);
-    auto* motionProps = bodyInterface->GetMotionProperties(bodyID);
-    if (!motionProps) return 0.0f;
-    return 1.0f / motionProps->GetInverseMass();
+    JPH::BodyLockRead lock(physicsSystem->GetBodyLockInterface(), bodyID);
+    if (lock.Succeeded()) {
+        const JPH::Body& body = lock.GetBody();
+        if (body.GetMotionType() == JPH::EMotionType::Dynamic) {
+            return 1.0f / body.GetMotionProperties()->GetInverseMass();
+        }
+    }
+    return 0.0f;
 }
 
 void Physics3D::setFriction(BodyHandle handle, float friction) {
@@ -754,9 +790,12 @@ void Physics3D::setLinearDamping(BodyHandle handle, float damping) {
     if (!handle.valid() || bodies.find(handle.rid) == bodies.end()) return;
 
     JPH::BodyID bodyID = bodies[handle.rid];
-    auto* motionProps = bodyInterface->GetMotionProperties(bodyID);
-    if (motionProps) {
-        motionProps->SetLinearDamping(damping);
+    JPH::BodyLockWrite lock(physicsSystem->GetBodyLockInterface(), bodyID);
+    if (lock.Succeeded()) {
+        JPH::Body& body = lock.GetBody();
+        if (body.GetMotionType() == JPH::EMotionType::Dynamic) {
+            body.GetMotionProperties()->SetLinearDamping(damping);
+        }
     }
 }
 
@@ -764,17 +803,26 @@ float Physics3D::getLinearDamping(BodyHandle handle) const {
     if (!handle.valid() || bodies.find(handle.rid) == bodies.end()) return 0.0f;
 
     JPH::BodyID bodyID = bodies.at(handle.rid);
-    auto* motionProps = bodyInterface->GetMotionProperties(bodyID);
-    return motionProps ? motionProps->GetLinearDamping() : 0.0f;
+    JPH::BodyLockRead lock(physicsSystem->GetBodyLockInterface(), bodyID);
+    if (lock.Succeeded()) {
+        const JPH::Body& body = lock.GetBody();
+        if (body.GetMotionType() == JPH::EMotionType::Dynamic) {
+            return body.GetMotionProperties()->GetLinearDamping();
+        }
+    }
+    return 0.0f;
 }
 
 void Physics3D::setAngularDamping(BodyHandle handle, float damping) {
     if (!handle.valid() || bodies.find(handle.rid) == bodies.end()) return;
 
     JPH::BodyID bodyID = bodies[handle.rid];
-    auto* motionProps = bodyInterface->GetMotionProperties(bodyID);
-    if (motionProps) {
-        motionProps->SetAngularDamping(damping);
+    JPH::BodyLockWrite lock(physicsSystem->GetBodyLockInterface(), bodyID);
+    if (lock.Succeeded()) {
+        JPH::Body& body = lock.GetBody();
+        if (body.GetMotionType() == JPH::EMotionType::Dynamic) {
+            body.GetMotionProperties()->SetAngularDamping(damping);
+        }
     }
 }
 
@@ -782,8 +830,14 @@ float Physics3D::getAngularDamping(BodyHandle handle) const {
     if (!handle.valid() || bodies.find(handle.rid) == bodies.end()) return 0.0f;
 
     JPH::BodyID bodyID = bodies.at(handle.rid);
-    auto* motionProps = bodyInterface->GetMotionProperties(bodyID);
-    return motionProps ? motionProps->GetAngularDamping() : 0.0f;
+    JPH::BodyLockRead lock(physicsSystem->GetBodyLockInterface(), bodyID);
+    if (lock.Succeeded()) {
+        const JPH::Body& body = lock.GetBody();
+        if (body.GetMotionType() == JPH::EMotionType::Dynamic) {
+            return body.GetMotionProperties()->GetAngularDamping();
+        }
+    }
+    return 0.0f;
 }
 
 // ====== 運動狀態 ======
@@ -816,9 +870,12 @@ void Physics3D::setGravityFactor(BodyHandle handle, float factor) {
     if (!handle.valid() || bodies.find(handle.rid) == bodies.end()) return;
 
     JPH::BodyID bodyID = bodies[handle.rid];
-    auto* motionProps = bodyInterface->GetMotionProperties(bodyID);
-    if (motionProps) {
-        motionProps->SetGravityFactor(factor);
+    JPH::BodyLockWrite lock(physicsSystem->GetBodyLockInterface(), bodyID);
+    if (lock.Succeeded()) {
+        JPH::Body& body = lock.GetBody();
+        if (body.GetMotionType() == JPH::EMotionType::Dynamic) {
+            body.GetMotionProperties()->SetGravityFactor(factor);
+        }
     }
 }
 
@@ -826,8 +883,14 @@ float Physics3D::getGravityFactor(BodyHandle handle) const {
     if (!handle.valid() || bodies.find(handle.rid) == bodies.end()) return 1.0f;
 
     JPH::BodyID bodyID = bodies.at(handle.rid);
-    auto* motionProps = bodyInterface->GetMotionProperties(bodyID);
-    return motionProps ? motionProps->GetGravityFactor() : 1.0f;
+    JPH::BodyLockRead lock(physicsSystem->GetBodyLockInterface(), bodyID);
+    if (lock.Succeeded()) {
+        const JPH::Body& body = lock.GetBody();
+        if (body.GetMotionType() == JPH::EMotionType::Dynamic) {
+            return body.GetMotionProperties()->GetGravityFactor();
+        }
+    }
+    return 1.0f;
 }
 
 // ====== 啟用/停用 ======
@@ -1192,11 +1255,12 @@ OverlapResult Physics3D::overlapSphere(const glm::vec3& center, float radius) {
     JPH::CollideShapeSettings settings;
     JPH::AllHitCollisionCollector<JPH::CollideShapeCollector> collector;
 
+    // Create transform matrix from position and rotation
+    JPH::RMat44 transform = JPH::RMat44::sRotationTranslation(queryRot, queryPos);
     physicsSystem->GetNarrowPhaseQuery().CollideShape(
         &queryShape,
         JPH::Vec3::sReplicate(1.0f),  // Scale
-        queryPos,
-        queryRot,
+        transform,
         settings,
         JPH::RVec3::sZero(),
         collector
@@ -1242,11 +1306,12 @@ OverlapResult Physics3D::overlapBox(
     JPH::CollideShapeSettings settings;
     JPH::AllHitCollisionCollector<JPH::CollideShapeCollector> collector;
 
+    // Create transform matrix from position and rotation
+    JPH::RMat44 transform = JPH::RMat44::sRotationTranslation(queryRot, queryPos);
     physicsSystem->GetNarrowPhaseQuery().CollideShape(
         &queryShape,
         JPH::Vec3::sReplicate(1.0f),
-        queryPos,
-        queryRot,
+        transform,
         settings,
         JPH::RVec3::sZero(),
         collector
@@ -1313,11 +1378,12 @@ OverlapResult Physics3D::overlapCapsule(
     JPH::CollideShapeSettings settings;
     JPH::AllHitCollisionCollector<JPH::CollideShapeCollector> collector;
 
+    // Create transform matrix from position and rotation
+    JPH::RMat44 transform = JPH::RMat44::sRotationTranslation(queryRot, center);
     physicsSystem->GetNarrowPhaseQuery().CollideShape(
         &queryShape,
         JPH::Vec3::sReplicate(1.0f),
-        center,
-        queryRot,
+        transform,
         settings,
         JPH::RVec3::sZero(),
         collector
@@ -1343,4 +1409,9 @@ OverlapResult Physics3D::overlapCapsule(
     }
 
     return result;
+}
+
+JPH::BodyID Physics3D::getBodyID(BodyHandle handle) const {
+    auto it = bodies.find(handle.rid);
+    return it != bodies.end() ? it->second : JPH::BodyID();
 }
