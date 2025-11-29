@@ -4,6 +4,7 @@
 #include "task_scheduler.hpp"
 #include "resource_manager.hpp"
 #include "action_manager.hpp"
+#include "input_manager.hpp"
 #include <memory>
 
 namespace Vapor {
@@ -35,6 +36,9 @@ public:
     // Get the action manager
     ActionManager& getActionManager() { return *m_actionManager; }
 
+    // Get the input manager
+    InputManager& getInputManager() { return *m_inputManager; }
+
     // Update per-frame (for async task management and action updates)
     void update(float deltaTime);
 
@@ -50,6 +54,7 @@ private:
     std::unique_ptr<TaskScheduler> m_taskScheduler;
     std::unique_ptr<ResourceManager> m_resourceManager;
     std::unique_ptr<ActionManager> m_actionManager;
+    std::unique_ptr<InputManager> m_inputManager;
 
     bool m_initialized{false};
     uint32_t m_numThreads{0};

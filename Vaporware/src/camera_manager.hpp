@@ -2,7 +2,7 @@
 
 #include "Vapor/camera.hpp"
 #include "Vapor/scene.hpp"
-#include <SDL3/SDL.h>
+#include "Vapor/input_manager.hpp"
 #include <string>
 #include <memory>
 #include <unordered_map>
@@ -22,9 +22,9 @@ public:
     /**
      * Update camera state based on input and time
      * @param deltaTime Time elapsed since last frame (seconds)
-     * @param keyboardState Current keyboard state map
+     * @param inputState Current input state
      */
-    virtual void update(float deltaTime, const std::unordered_map<SDL_Scancode, bool>& keyboardState) = 0;
+    virtual void update(float deltaTime, const InputState& inputState) = 0;
 
     /**
      * Get the underlying Camera object for rendering
@@ -55,7 +55,7 @@ public:
  *         glm::vec3(0, 0, 0),  // Look at point
  *         fov, aspect, near, far
  *     );
- *     flyCam->update(dt, keyboardState);
+ *     flyCam->update(dt, inputState);
  */
 class FlyCam : public VirtualCamera {
 public:
@@ -71,7 +71,7 @@ public:
         float rotateSpeed = 1.5f
     );
 
-    void update(float deltaTime, const std::unordered_map<SDL_Scancode, bool>& keyboardState) override;
+    void update(float deltaTime, const InputState& inputState) override;
     Camera& getCamera() override { return _camera; }
     void reset() override;
 
@@ -105,7 +105,7 @@ private:
  *         fov, aspect, near, far,
  *         0.1f                    // Smooth factor (lower = smoother)
  *     );
- *     followCam->update(dt, keyboardState);
+ *     followCam->update(dt, inputState);
  */
 class FollowCam : public VirtualCamera {
 public:
@@ -120,7 +120,7 @@ public:
         float deadzone = 0.1f
     );
 
-    void update(float deltaTime, const std::unordered_map<SDL_Scancode, bool>& keyboardState) override;
+    void update(float deltaTime, const InputState& inputState) override;
     Camera& getCamera() override { return _camera; }
     void reset() override;
 
@@ -166,7 +166,7 @@ private:
  *     cameraManager.switchCamera("follow");
  *
  *     // Update current camera
- *     cameraManager.update(dt, keyboardState);
+ *     cameraManager.update(dt, inputState);
  *
  *     // Get camera for rendering
  *     Camera& camera = cameraManager.getCurrentCamera()->getCamera();
@@ -212,9 +212,9 @@ public:
     /**
      * Update the current camera
      * @param deltaTime Time elapsed since last frame (seconds)
-     * @param keyboardState Current keyboard state map
+     * @param inputState Current input state
      */
-    void update(float deltaTime, const std::unordered_map<SDL_Scancode, bool>& keyboardState);
+    void update(float deltaTime, const InputState& inputState);
 
     /**
      * Check if a camera with the given name exists

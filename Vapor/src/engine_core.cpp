@@ -50,6 +50,9 @@ void EngineCore::init(uint32_t numThreads) {
     // Initialize action manager
     m_actionManager = std::make_unique<ActionManager>();
 
+    // Initialize input manager
+    m_inputManager = std::make_unique<InputManager>();
+
     m_initialized = true;
 
     fmt::print("EngineCore initialized successfully\n");
@@ -68,6 +71,7 @@ void EngineCore::shutdown() {
     m_actionManager->stopAll();
 
     // Cleanup subsystems in reverse order
+    m_inputManager.reset();
     m_actionManager.reset();
     m_resourceManager.reset();
     m_taskScheduler->shutdown();
@@ -82,6 +86,9 @@ void EngineCore::update(float deltaTime) {
     if (!m_initialized) {
         return;
     }
+
+    // Update input manager (clear per-frame state, clean buffer)
+    m_inputManager->update(deltaTime);
 
     // Update action manager (time-based actions)
     m_actionManager->update(deltaTime);
