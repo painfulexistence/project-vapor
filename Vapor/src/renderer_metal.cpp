@@ -290,6 +290,180 @@ public:
     }
 };
 
+// Sky capture pass: Captures atmosphere to environment cubemap for IBL
+class SkyCapturePass : public RenderPass {
+public:
+    explicit SkyCapturePass(Renderer_Metal* renderer) : RenderPass(renderer) {}
+
+    const char* getName() const override { return "SkyCapturePass"; }
+
+    void execute() override {
+        auto& r = *renderer;
+
+        if (!r.iblNeedsUpdate) return;
+
+        // Cubemap face view matrices (looking outward from origin)
+        const glm::mat4 captureViews[6] = {
+            glm::lookAt(glm::vec3(0), glm::vec3( 1, 0, 0), glm::vec3(0,-1, 0)), // +X
+            glm::lookAt(glm::vec3(0), glm::vec3(-1, 0, 0), glm::vec3(0,-1, 0)), // -X
+            glm::lookAt(glm::vec3(0), glm::vec3( 0, 1, 0), glm::vec3(0, 0, 1)), // +Y
+            glm::lookAt(glm::vec3(0), glm::vec3( 0,-1, 0), glm::vec3(0, 0,-1)), // -Y
+            glm::lookAt(glm::vec3(0), glm::vec3( 0, 0, 1), glm::vec3(0,-1, 0)), // +Z
+            glm::lookAt(glm::vec3(0), glm::vec3( 0, 0,-1), glm::vec3(0,-1, 0)), // -Z
+        };
+        const glm::mat4 captureProj = glm::perspective(glm::radians(90.0f), 1.0f, 0.1f, 10.0f);
+
+        // Render each face of the cubemap
+        for (uint32_t face = 0; face < 6; ++face) {
+            // Update capture data
+            IBLCaptureData* captureData = reinterpret_cast<IBLCaptureData*>(r.iblCaptureDataBuffer->contents());
+            captureData->viewProj = captureProj * captureViews[face];
+            captureData->faceIndex = face;
+            captureData->roughness = 0.0f;
+            r.iblCaptureDataBuffer->didModifyRange(NS::Range::Make(0, r.iblCaptureDataBuffer->length()));
+
+            // Create render pass for this face
+            auto passDesc = NS::TransferPtr(MTL::RenderPassDescriptor::renderPassDescriptor());
+            auto colorAttachment = passDesc->colorAttachments()->object(0);
+            colorAttachment->setLoadAction(MTL::LoadActionClear);
+            colorAttachment->setStoreAction(MTL::StoreActionStore);
+            colorAttachment->setClearColor(MTL::ClearColor(0.0, 0.0, 0.0, 1.0));
+            colorAttachment->setTexture(r.environmentCubemap.get());
+            colorAttachment->setSlice(face);
+            colorAttachment->setLevel(0);
+
+            auto encoder = r.currentCommandBuffer->renderCommandEncoder(passDesc.get());
+            encoder->setRenderPipelineState(r.skyCapturePipeline.get());
+            encoder->setCullMode(MTL::CullModeNone);
+            encoder->setVertexBuffer(r.iblCaptureDataBuffer.get(), 0, 0);
+            encoder->setFragmentBuffer(r.atmosphereDataBuffer.get(), 0, 0);
+            encoder->drawPrimitives(MTL::PrimitiveType::PrimitiveTypeTriangle, 0, 3, 1);
+            encoder->endEncoding();
+        }
+
+        // Generate mipmaps for environment cubemap
+        auto blitEncoder = r.currentCommandBuffer->blitCommandEncoder();
+        blitEncoder->generateMipmaps(r.environmentCubemap.get());
+        blitEncoder->endEncoding();
+    }
+};
+
+// Irradiance convolution pass: Creates diffuse irradiance map from environment cubemap
+class IrradianceConvolutionPass : public RenderPass {
+public:
+    explicit IrradianceConvolutionPass(Renderer_Metal* renderer) : RenderPass(renderer) {}
+
+    const char* getName() const override { return "IrradianceConvolutionPass"; }
+
+    void execute() override {
+        auto& r = *renderer;
+
+        if (!r.iblNeedsUpdate) return;
+
+        // Render each face of the irradiance cubemap
+        for (uint32_t face = 0; face < 6; ++face) {
+            IBLCaptureData* captureData = reinterpret_cast<IBLCaptureData*>(r.iblCaptureDataBuffer->contents());
+            captureData->faceIndex = face;
+            captureData->roughness = 0.0f;
+            r.iblCaptureDataBuffer->didModifyRange(NS::Range::Make(0, r.iblCaptureDataBuffer->length()));
+
+            auto passDesc = NS::TransferPtr(MTL::RenderPassDescriptor::renderPassDescriptor());
+            auto colorAttachment = passDesc->colorAttachments()->object(0);
+            colorAttachment->setLoadAction(MTL::LoadActionClear);
+            colorAttachment->setStoreAction(MTL::StoreActionStore);
+            colorAttachment->setClearColor(MTL::ClearColor(0.0, 0.0, 0.0, 1.0));
+            colorAttachment->setTexture(r.irradianceMap.get());
+            colorAttachment->setSlice(face);
+            colorAttachment->setLevel(0);
+
+            auto encoder = r.currentCommandBuffer->renderCommandEncoder(passDesc.get());
+            encoder->setRenderPipelineState(r.irradianceConvolutionPipeline.get());
+            encoder->setCullMode(MTL::CullModeNone);
+            encoder->setVertexBuffer(r.iblCaptureDataBuffer.get(), 0, 0);
+            encoder->setFragmentTexture(r.environmentCubemap.get(), 0);
+            encoder->drawPrimitives(MTL::PrimitiveType::PrimitiveTypeTriangle, 0, 3, 1);
+            encoder->endEncoding();
+        }
+    }
+};
+
+// Pre-filter environment map pass: Creates specular pre-filtered cubemap with roughness mips
+class PrefilterEnvMapPass : public RenderPass {
+public:
+    explicit PrefilterEnvMapPass(Renderer_Metal* renderer) : RenderPass(renderer) {}
+
+    const char* getName() const override { return "PrefilterEnvMapPass"; }
+
+    void execute() override {
+        auto& r = *renderer;
+
+        if (!r.iblNeedsUpdate) return;
+
+        const uint32_t maxMipLevels = 5;
+
+        // For each mip level (roughness level)
+        for (uint32_t mip = 0; mip < maxMipLevels; ++mip) {
+            float roughness = (float)mip / (float)(maxMipLevels - 1);
+
+            // For each face
+            for (uint32_t face = 0; face < 6; ++face) {
+                IBLCaptureData* captureData = reinterpret_cast<IBLCaptureData*>(r.iblCaptureDataBuffer->contents());
+                captureData->faceIndex = face;
+                captureData->roughness = roughness;
+                r.iblCaptureDataBuffer->didModifyRange(NS::Range::Make(0, r.iblCaptureDataBuffer->length()));
+
+                auto passDesc = NS::TransferPtr(MTL::RenderPassDescriptor::renderPassDescriptor());
+                auto colorAttachment = passDesc->colorAttachments()->object(0);
+                colorAttachment->setLoadAction(MTL::LoadActionClear);
+                colorAttachment->setStoreAction(MTL::StoreActionStore);
+                colorAttachment->setClearColor(MTL::ClearColor(0.0, 0.0, 0.0, 1.0));
+                colorAttachment->setTexture(r.prefilterMap.get());
+                colorAttachment->setSlice(face);
+                colorAttachment->setLevel(mip);
+
+                auto encoder = r.currentCommandBuffer->renderCommandEncoder(passDesc.get());
+                encoder->setRenderPipelineState(r.prefilterEnvMapPipeline.get());
+                encoder->setCullMode(MTL::CullModeNone);
+                encoder->setVertexBuffer(r.iblCaptureDataBuffer.get(), 0, 0);
+                encoder->setFragmentBuffer(r.iblCaptureDataBuffer.get(), 0, 0);
+                encoder->setFragmentTexture(r.environmentCubemap.get(), 0);
+                encoder->drawPrimitives(MTL::PrimitiveType::PrimitiveTypeTriangle, 0, 3, 1);
+                encoder->endEncoding();
+            }
+        }
+    }
+};
+
+// BRDF LUT pass: Pre-computes BRDF integration lookup table
+class BRDFLUTPass : public RenderPass {
+public:
+    explicit BRDFLUTPass(Renderer_Metal* renderer) : RenderPass(renderer) {}
+
+    const char* getName() const override { return "BRDFLUTPass"; }
+
+    void execute() override {
+        auto& r = *renderer;
+
+        if (!r.iblNeedsUpdate) return;
+
+        auto passDesc = NS::TransferPtr(MTL::RenderPassDescriptor::renderPassDescriptor());
+        auto colorAttachment = passDesc->colorAttachments()->object(0);
+        colorAttachment->setLoadAction(MTL::LoadActionClear);
+        colorAttachment->setStoreAction(MTL::StoreActionStore);
+        colorAttachment->setClearColor(MTL::ClearColor(0.0, 0.0, 0.0, 1.0));
+        colorAttachment->setTexture(r.brdfLUT.get());
+
+        auto encoder = r.currentCommandBuffer->renderCommandEncoder(passDesc.get());
+        encoder->setRenderPipelineState(r.brdfLUTPipeline.get());
+        encoder->setCullMode(MTL::CullModeNone);
+        encoder->drawPrimitives(MTL::PrimitiveType::PrimitiveTypeTriangle, 0, 3, 1);
+        encoder->endEncoding();
+
+        // IBL update complete
+        r.iblNeedsUpdate = false;
+    }
+};
+
 // Main render pass: Renders the scene with PBR lighting
 class MainRenderPass : public RenderPass {
 public:
@@ -360,6 +534,11 @@ public:
                 r.getTexture(material->emissiveMap ? material->emissiveMap->texture : r.defaultEmissiveTexture).get(), 5
             );
             encoder->setFragmentTexture(r.shadowRT.get(), 7);
+
+            // IBL textures
+            encoder->setFragmentTexture(r.irradianceMap.get(), 8);
+            encoder->setFragmentTexture(r.prefilterMap.get(), 9);
+            encoder->setFragmentTexture(r.brdfLUT.get(), 10);
 
             for (const auto& mesh : meshes) {
                 if (!r.currentCamera->isVisible(mesh->getWorldBoundingSphere())) {
@@ -473,6 +652,13 @@ auto Renderer_Metal::init(SDL_Window* window) -> void {
     createResources();
 
     // Initialize render graph with all passes
+    // IBL passes (run conditionally when iblNeedsUpdate is true)
+    graph.addPass(std::make_unique<SkyCapturePass>(this));
+    graph.addPass(std::make_unique<IrradianceConvolutionPass>(this));
+    graph.addPass(std::make_unique<PrefilterEnvMapPass>(this));
+    graph.addPass(std::make_unique<BRDFLUTPass>(this));
+
+    // Scene rendering passes
     graph.addPass(std::make_unique<TLASBuildPass>(this));
     graph.addPass(std::make_unique<PrePass>(this));
     graph.addPass(std::make_unique<NormalResolvePass>(this));
@@ -511,6 +697,10 @@ auto Renderer_Metal::createResources() -> void {
     raytraceShadowPipeline = createComputePipeline("assets/shaders/3d_raytrace_shadow.metal");
     raytraceAOPipeline = createComputePipeline("assets/shaders/3d_ssao.metal");
     atmospherePipeline = createPipeline("assets/shaders/3d_atmosphere.metal", true, true, MSAA_SAMPLE_COUNT);
+    skyCapturePipeline = createPipeline("assets/shaders/3d_sky_capture.metal", true, true, 1);
+    irradianceConvolutionPipeline = createPipeline("assets/shaders/3d_irradiance_convolution.metal", true, true, 1);
+    prefilterEnvMapPipeline = createPipeline("assets/shaders/3d_prefilter_envmap.metal", true, true, 1);
+    brdfLUTPipeline = createPipeline("assets/shaders/3d_brdf_lut.metal", false, true, 1);
 
     // Create buffers
     frameDataBuffers.resize(MAX_FRAMES_IN_FLIGHT);
@@ -551,6 +741,64 @@ auto Renderer_Metal::createResources() -> void {
     atmosphereData->mieCoefficient = 21e-6f;
     atmosphereData->exposure = 1.0f;
     atmosphereDataBuffer->didModifyRange(NS::Range::Make(0, atmosphereDataBuffer->length()));
+
+    // Create IBL capture data buffer
+    iblCaptureDataBuffer = NS::TransferPtr(device->newBuffer(sizeof(IBLCaptureData), MTL::ResourceStorageModeManaged));
+
+    // Create IBL textures
+    const uint32_t envMapSize = 512;
+    const uint32_t irradianceMapSize = 32;
+    const uint32_t prefilterMapSize = 128;
+    const uint32_t brdfLUTSize = 512;
+    const uint32_t prefilterMipLevels = 5;
+
+    // Environment cubemap (captured from atmosphere)
+    MTL::TextureDescriptor* envMapDesc = MTL::TextureDescriptor::alloc()->init();
+    envMapDesc->setTextureType(MTL::TextureTypeCube);
+    envMapDesc->setPixelFormat(MTL::PixelFormatRGBA16Float);
+    envMapDesc->setWidth(envMapSize);
+    envMapDesc->setHeight(envMapSize);
+    envMapDesc->setMipmapLevelCount(calculateMipmapLevelCount(envMapSize, envMapSize));
+    envMapDesc->setUsage(MTL::TextureUsageRenderTarget | MTL::TextureUsageShaderRead);
+    envMapDesc->setStorageMode(MTL::StorageModePrivate);
+    environmentCubemap = NS::TransferPtr(device->newTexture(envMapDesc));
+    envMapDesc->release();
+
+    // Irradiance cubemap (diffuse IBL)
+    MTL::TextureDescriptor* irradianceDesc = MTL::TextureDescriptor::alloc()->init();
+    irradianceDesc->setTextureType(MTL::TextureTypeCube);
+    irradianceDesc->setPixelFormat(MTL::PixelFormatRGBA16Float);
+    irradianceDesc->setWidth(irradianceMapSize);
+    irradianceDesc->setHeight(irradianceMapSize);
+    irradianceDesc->setMipmapLevelCount(1);
+    irradianceDesc->setUsage(MTL::TextureUsageRenderTarget | MTL::TextureUsageShaderRead);
+    irradianceDesc->setStorageMode(MTL::StorageModePrivate);
+    irradianceMap = NS::TransferPtr(device->newTexture(irradianceDesc));
+    irradianceDesc->release();
+
+    // Pre-filtered environment cubemap (specular IBL)
+    MTL::TextureDescriptor* prefilterDesc = MTL::TextureDescriptor::alloc()->init();
+    prefilterDesc->setTextureType(MTL::TextureTypeCube);
+    prefilterDesc->setPixelFormat(MTL::PixelFormatRGBA16Float);
+    prefilterDesc->setWidth(prefilterMapSize);
+    prefilterDesc->setHeight(prefilterMapSize);
+    prefilterDesc->setMipmapLevelCount(prefilterMipLevels);
+    prefilterDesc->setUsage(MTL::TextureUsageRenderTarget | MTL::TextureUsageShaderRead);
+    prefilterDesc->setStorageMode(MTL::StorageModePrivate);
+    prefilterMap = NS::TransferPtr(device->newTexture(prefilterDesc));
+    prefilterDesc->release();
+
+    // BRDF LUT (2D texture)
+    MTL::TextureDescriptor* brdfDesc = MTL::TextureDescriptor::alloc()->init();
+    brdfDesc->setTextureType(MTL::TextureType2D);
+    brdfDesc->setPixelFormat(MTL::PixelFormatRG16Float);
+    brdfDesc->setWidth(brdfLUTSize);
+    brdfDesc->setHeight(brdfLUTSize);
+    brdfDesc->setMipmapLevelCount(1);
+    brdfDesc->setUsage(MTL::TextureUsageRenderTarget | MTL::TextureUsageShaderRead);
+    brdfDesc->setStorageMode(MTL::StorageModePrivate);
+    brdfLUT = NS::TransferPtr(device->newTexture(brdfDesc));
+    brdfDesc->release();
 
     accelInstanceBuffers.resize(MAX_FRAMES_IN_FLIGHT);
     TLASScratchBuffers.resize(MAX_FRAMES_IN_FLIGHT);
@@ -1030,8 +1278,20 @@ auto Renderer_Metal::draw(std::shared_ptr<Scene> scene, Camera& camera) -> void 
                 ImGui::TreePop();
             }
 
+            ImGui::Separator();
+            ImGui::Text("IBL Status: %s", iblNeedsUpdate ? "Pending Update" : "Up to Date");
+            if (ImGui::Button("Refresh IBL")) {
+                iblNeedsUpdate = true;
+            }
+            ImGui::SameLine();
+            ImGui::TextDisabled("(?)");
+            if (ImGui::IsItemHovered()) {
+                ImGui::SetTooltip("Re-bakes the sky to IBL cubemaps.\nAutomatically triggered when atmosphere parameters change.");
+            }
+
             if (atmosChanged) {
                 atmosphereDataBuffer->didModifyRange(NS::Range::Make(0, atmosphereDataBuffer->length()));
+                iblNeedsUpdate = true; // Trigger IBL update when atmosphere changes
             }
             ImGui::TreePop();
         }

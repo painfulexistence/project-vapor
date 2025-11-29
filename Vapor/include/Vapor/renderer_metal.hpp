@@ -20,6 +20,10 @@ class TileCullingPass;
 class RaytraceShadowPass;
 class RaytraceAOPass;
 class SkyAtmospherePass;
+class SkyCapturePass;
+class IrradianceConvolutionPass;
+class PrefilterEnvMapPass;
+class BRDFLUTPass;
 class MainRenderPass;
 class PostProcessPass;
 class ImGuiPass;
@@ -68,6 +72,10 @@ class Renderer_Metal final : public Renderer { // Must be public or factory func
     friend class RaytraceShadowPass;
     friend class RaytraceAOPass;
     friend class SkyAtmospherePass;
+    friend class SkyCapturePass;
+    friend class IrradianceConvolutionPass;
+    friend class PrefilterEnvMapPass;
+    friend class BRDFLUTPass;
     friend class MainRenderPass;
     friend class PostProcessPass;
     friend class ImGuiPass;
@@ -133,6 +141,10 @@ protected:
     NS::SharedPtr<MTL::ComputePipelineState> raytraceShadowPipeline;
     NS::SharedPtr<MTL::ComputePipelineState> raytraceAOPipeline;
     NS::SharedPtr<MTL::RenderPipelineState> atmospherePipeline;
+    NS::SharedPtr<MTL::RenderPipelineState> skyCapturePipeline;
+    NS::SharedPtr<MTL::RenderPipelineState> irradianceConvolutionPipeline;
+    NS::SharedPtr<MTL::RenderPipelineState> prefilterEnvMapPipeline;
+    NS::SharedPtr<MTL::RenderPipelineState> brdfLUTPipeline;
 
     // Default textures
     TextureHandle defaultAlbedoTexture;
@@ -150,7 +162,15 @@ protected:
     NS::SharedPtr<MTL::Buffer> pointLightBuffer;
     NS::SharedPtr<MTL::Buffer> materialDataBuffer;
     NS::SharedPtr<MTL::Buffer> atmosphereDataBuffer;
+    NS::SharedPtr<MTL::Buffer> iblCaptureDataBuffer;
     std::vector<NS::SharedPtr<MTL::Buffer>> clusterBuffers;
+
+    // IBL textures
+    NS::SharedPtr<MTL::Texture> environmentCubemap;      // Captured sky cubemap
+    NS::SharedPtr<MTL::Texture> irradianceMap;           // Diffuse irradiance cubemap
+    NS::SharedPtr<MTL::Texture> prefilterMap;            // Pre-filtered specular cubemap (with mipmaps)
+    NS::SharedPtr<MTL::Texture> brdfLUT;                 // BRDF integration LUT
+    bool iblNeedsUpdate = true;                          // Flag to trigger IBL update
     std::vector<NS::SharedPtr<MTL::Buffer>> accelInstanceBuffers;
     std::vector<NS::SharedPtr<MTL::Buffer>> TLASScratchBuffers;
     std::vector<NS::SharedPtr<MTL::AccelerationStructure>> TLASBuffers;

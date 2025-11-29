@@ -186,6 +186,14 @@ struct alignas(16) AtmosphereData {
     float _pad2[2];
 };
 
+// IBL capture data for rendering atmosphere to cubemap
+struct alignas(16) IBLCaptureData {
+    glm::mat4 viewProj;              // View-projection matrix for current cubemap face
+    Uint32 faceIndex;                // Current cubemap face (0-5)
+    float roughness;                 // Roughness level for prefilter pass
+    float _pad[2];
+};
+
 struct VertexData {
     glm::vec3 position;
     glm::vec2 uv;
