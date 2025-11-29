@@ -6,6 +6,7 @@
 #include <functional>
 #include <array>
 #include <vector>
+#include <mutex>
 
 // Forward declare miniaudio types
 struct ma_engine;
@@ -228,6 +229,7 @@ private:
     AudioInstance* getInstance(AudioID id);
     const AudioInstance* getInstance(AudioID id) const;
     AudioID allocateInstance();
+    void cleanupInstance(AudioInstance& inst);
 
     ma_engine* m_engine = nullptr;
     std::array<AudioInstance, MAX_AUDIO_INSTANCES> m_instances;
@@ -236,6 +238,16 @@ private:
     AudioListener m_listener;
     float m_masterVolume = 1.0f;
     bool m_initialized = false;
+
+    mutable std::mutex m_mutex;
+
+    // Pending callbacks to invoke on main thread (outside mutex)
+    struct PendingCallback {
+        std::function<void(AudioID, const std::string&)> callback;
+        AudioID id;
+        std::string filePath;
+    };
+    std::vector<PendingCallback> m_pendingCallbacks;
 };
 
 } // namespace Vapor

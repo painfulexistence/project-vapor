@@ -33,6 +33,8 @@ AudioManager::~AudioManager() {
 }
 
 bool AudioManager::init() {
+    std::lock_guard<std::mutex> lock(m_mutex);
+
     if (m_initialized) {
         return true;
     }
@@ -57,11 +59,25 @@ bool AudioManager::init() {
 }
 
 void AudioManager::shutdown() {
+    std::lock_guard<std::mutex> lock(m_mutex);
+
     if (!m_initialized) {
         return;
     }
 
-    stopAll();
+    // Stop and cleanup all instances
+    for (auto& inst : m_instances) {
+        if (inst.sound) {
+            ma_sound_stop(inst.sound);
+            ma_sound_uninit(inst.sound);
+            delete inst.sound;
+            inst.sound = nullptr;
+            inst.state = AudioState::Stopped;
+            inst.finishCallback = nullptr;
+        }
+    }
+
+    m_pendingCallbacks.clear();
 
     if (m_engine) {
         ma_engine_uninit(m_engine);
@@ -74,22 +90,48 @@ void AudioManager::shutdown() {
 }
 
 void AudioManager::update(float deltaTime) {
-    if (!m_initialized) return;
+    // Collect finished sounds and their callbacks (under lock)
+    {
+        std::lock_guard<std::mutex> lock(m_mutex);
 
-    for (auto& inst : m_instances) {
-        if (inst.sound && inst.state == AudioState::Playing) {
-            if (ma_sound_at_end(inst.sound) && !ma_sound_is_looping(inst.sound)) {
-                inst.state = AudioState::Stopped;
+        if (!m_initialized) return;
 
-                if (inst.finishCallback) {
-                    inst.finishCallback(inst.id, inst.filePath);
+        for (auto& inst : m_instances) {
+            if (inst.sound && inst.state == AudioState::Playing) {
+                if (ma_sound_at_end(inst.sound) && !ma_sound_is_looping(inst.sound)) {
+                    inst.state = AudioState::Stopped;
+
+                    // Queue callback for invocation outside the lock
+                    if (inst.finishCallback) {
+                        m_pendingCallbacks.push_back({
+                            std::move(inst.finishCallback),
+                            inst.id,
+                            inst.filePath
+                        });
+                        inst.finishCallback = nullptr;
+                    }
+
+                    cleanupInstance(inst);
                 }
-
-                ma_sound_uninit(inst.sound);
-                delete inst.sound;
-                inst.sound = nullptr;
             }
         }
+    }
+
+    // Invoke callbacks outside the lock (safe for user to call AudioManager methods)
+    for (auto& pending : m_pendingCallbacks) {
+        if (pending.callback) {
+            pending.callback(pending.id, pending.filePath);
+        }
+    }
+    m_pendingCallbacks.clear();
+}
+
+void AudioManager::cleanupInstance(AudioInstance& inst) {
+    // Must be called with lock held
+    if (inst.sound) {
+        ma_sound_uninit(inst.sound);
+        delete inst.sound;
+        inst.sound = nullptr;
     }
 }
 
@@ -98,6 +140,8 @@ void AudioManager::update(float deltaTime) {
 // ============================================================
 
 AudioID AudioManager::play2d(const std::string& filePath, bool loop, float volume) {
+    std::lock_guard<std::mutex> lock(m_mutex);
+
     if (!m_initialized) return AUDIO_ID_INVALID;
 
     AudioID id = allocateInstance();
@@ -119,6 +163,7 @@ AudioID AudioManager::play2d(const std::string& filePath, bool loop, float volum
     inst.is3D = false;
     inst.volume = volume;
     inst.state = AudioState::Playing;
+    inst.finishCallback = nullptr;
 
     ma_sound_set_volume(inst.sound, volume * m_masterVolume);
     ma_sound_set_looping(inst.sound, loop);
@@ -135,6 +180,8 @@ AudioID AudioManager::play3d(const std::string& filePath, const glm::vec3& posit
 
 AudioID AudioManager::play3d(const std::string& filePath, const Audio3DConfig& config,
                               bool loop, float volume) {
+    std::lock_guard<std::mutex> lock(m_mutex);
+
     if (!m_initialized) return AUDIO_ID_INVALID;
 
     AudioID id = allocateInstance();
@@ -157,6 +204,7 @@ AudioID AudioManager::play3d(const std::string& filePath, const Audio3DConfig& c
     inst.volume = volume;
     inst.config3D = config;
     inst.state = AudioState::Playing;
+    inst.finishCallback = nullptr;
 
     ma_sound_set_volume(inst.sound, volume * m_masterVolume);
     ma_sound_set_looping(inst.sound, loop);
@@ -186,29 +234,33 @@ AudioID AudioManager::play3d(const std::string& filePath, const Audio3DConfig& c
 // ============================================================
 
 void AudioManager::stop(AudioID id) {
+    std::lock_guard<std::mutex> lock(m_mutex);
+
     auto* inst = getInstance(id);
     if (!inst) return;
 
     ma_sound_stop(inst->sound);
-    ma_sound_uninit(inst->sound);
-    delete inst->sound;
-    inst->sound = nullptr;
     inst->state = AudioState::Stopped;
+    inst->finishCallback = nullptr;
+    cleanupInstance(*inst);
 }
 
 void AudioManager::stopAll() {
+    std::lock_guard<std::mutex> lock(m_mutex);
+
     for (auto& inst : m_instances) {
         if (inst.sound) {
             ma_sound_stop(inst.sound);
-            ma_sound_uninit(inst.sound);
-            delete inst.sound;
-            inst.sound = nullptr;
             inst.state = AudioState::Stopped;
+            inst.finishCallback = nullptr;
+            cleanupInstance(inst);
         }
     }
 }
 
 void AudioManager::pause(AudioID id) {
+    std::lock_guard<std::mutex> lock(m_mutex);
+
     auto* inst = getInstance(id);
     if (!inst || inst->state != AudioState::Playing) return;
 
@@ -217,6 +269,8 @@ void AudioManager::pause(AudioID id) {
 }
 
 void AudioManager::pauseAll() {
+    std::lock_guard<std::mutex> lock(m_mutex);
+
     for (auto& inst : m_instances) {
         if (inst.sound && inst.state == AudioState::Playing) {
             ma_sound_stop(inst.sound);
@@ -226,6 +280,8 @@ void AudioManager::pauseAll() {
 }
 
 void AudioManager::resume(AudioID id) {
+    std::lock_guard<std::mutex> lock(m_mutex);
+
     auto* inst = getInstance(id);
     if (!inst || inst->state != AudioState::Paused) return;
 
@@ -234,6 +290,8 @@ void AudioManager::resume(AudioID id) {
 }
 
 void AudioManager::resumeAll() {
+    std::lock_guard<std::mutex> lock(m_mutex);
+
     for (auto& inst : m_instances) {
         if (inst.sound && inst.state == AudioState::Paused) {
             ma_sound_start(inst.sound);
@@ -247,6 +305,8 @@ void AudioManager::resumeAll() {
 // ============================================================
 
 void AudioManager::setVolume(AudioID id, float volume) {
+    std::lock_guard<std::mutex> lock(m_mutex);
+
     auto* inst = getInstance(id);
     if (!inst) return;
 
@@ -255,31 +315,43 @@ void AudioManager::setVolume(AudioID id, float volume) {
 }
 
 float AudioManager::getVolume(AudioID id) const {
+    std::lock_guard<std::mutex> lock(m_mutex);
+
     auto* inst = getInstance(id);
     return inst ? inst->volume : 0.0f;
 }
 
 void AudioManager::setLoop(AudioID id, bool loop) {
+    std::lock_guard<std::mutex> lock(m_mutex);
+
     auto* inst = getInstance(id);
     if (inst) ma_sound_set_looping(inst->sound, loop);
 }
 
 bool AudioManager::isLoop(AudioID id) const {
+    std::lock_guard<std::mutex> lock(m_mutex);
+
     auto* inst = getInstance(id);
     return inst ? ma_sound_is_looping(inst->sound) : false;
 }
 
 void AudioManager::setPitch(AudioID id, float pitch) {
+    std::lock_guard<std::mutex> lock(m_mutex);
+
     auto* inst = getInstance(id);
     if (inst) ma_sound_set_pitch(inst->sound, pitch);
 }
 
 float AudioManager::getPitch(AudioID id) const {
+    std::lock_guard<std::mutex> lock(m_mutex);
+
     auto* inst = getInstance(id);
     return inst ? ma_sound_get_pitch(inst->sound) : 1.0f;
 }
 
 float AudioManager::getCurrentTime(AudioID id) const {
+    std::lock_guard<std::mutex> lock(m_mutex);
+
     auto* inst = getInstance(id);
     if (!inst) return 0.0f;
 
@@ -289,6 +361,8 @@ float AudioManager::getCurrentTime(AudioID id) const {
 }
 
 void AudioManager::setCurrentTime(AudioID id, float time) {
+    std::lock_guard<std::mutex> lock(m_mutex);
+
     auto* inst = getInstance(id);
     if (!inst) return;
 
@@ -297,6 +371,8 @@ void AudioManager::setCurrentTime(AudioID id, float time) {
 }
 
 float AudioManager::getDuration(AudioID id) const {
+    std::lock_guard<std::mutex> lock(m_mutex);
+
     auto* inst = getInstance(id);
     if (!inst) return 0.0f;
 
@@ -306,6 +382,8 @@ float AudioManager::getDuration(AudioID id) const {
 }
 
 AudioState AudioManager::getState(AudioID id) const {
+    std::lock_guard<std::mutex> lock(m_mutex);
+
     auto* inst = getInstance(id);
     return inst ? inst->state : AudioState::Error;
 }
@@ -315,6 +393,8 @@ AudioState AudioManager::getState(AudioID id) const {
 // ============================================================
 
 void AudioManager::setPosition3d(AudioID id, const glm::vec3& position) {
+    std::lock_guard<std::mutex> lock(m_mutex);
+
     auto* inst = getInstance(id);
     if (!inst || !inst->is3D) return;
 
@@ -323,11 +403,15 @@ void AudioManager::setPosition3d(AudioID id, const glm::vec3& position) {
 }
 
 glm::vec3 AudioManager::getPosition3d(AudioID id) const {
+    std::lock_guard<std::mutex> lock(m_mutex);
+
     auto* inst = getInstance(id);
     return inst ? inst->config3D.position : glm::vec3(0.0f);
 }
 
 void AudioManager::setVelocity3d(AudioID id, const glm::vec3& velocity) {
+    std::lock_guard<std::mutex> lock(m_mutex);
+
     auto* inst = getInstance(id);
     if (!inst || !inst->is3D) return;
 
@@ -336,6 +420,8 @@ void AudioManager::setVelocity3d(AudioID id, const glm::vec3& velocity) {
 }
 
 void AudioManager::setDirection3d(AudioID id, const glm::vec3& direction) {
+    std::lock_guard<std::mutex> lock(m_mutex);
+
     auto* inst = getInstance(id);
     if (!inst || !inst->is3D) return;
 
@@ -344,6 +430,8 @@ void AudioManager::setDirection3d(AudioID id, const glm::vec3& direction) {
 }
 
 void AudioManager::setDistanceParameters(AudioID id, float minDist, float maxDist, float rolloff) {
+    std::lock_guard<std::mutex> lock(m_mutex);
+
     auto* inst = getInstance(id);
     if (!inst || !inst->is3D) return;
 
@@ -357,6 +445,8 @@ void AudioManager::setDistanceParameters(AudioID id, float minDist, float maxDis
 }
 
 void AudioManager::setDistanceModel(AudioID id, DistanceModel model) {
+    std::lock_guard<std::mutex> lock(m_mutex);
+
     auto* inst = getInstance(id);
     if (!inst || !inst->is3D) return;
 
@@ -365,6 +455,8 @@ void AudioManager::setDistanceModel(AudioID id, DistanceModel model) {
 }
 
 void AudioManager::setCone(AudioID id, float innerAngle, float outerAngle, float outerGain) {
+    std::lock_guard<std::mutex> lock(m_mutex);
+
     auto* inst = getInstance(id);
     if (!inst || !inst->is3D) return;
 
@@ -379,6 +471,8 @@ void AudioManager::setCone(AudioID id, float innerAngle, float outerAngle, float
 }
 
 void AudioManager::set3DConfig(AudioID id, const Audio3DConfig& config) {
+    std::lock_guard<std::mutex> lock(m_mutex);
+
     auto* inst = getInstance(id);
     if (!inst || !inst->is3D) return;
 
@@ -404,18 +498,24 @@ void AudioManager::set3DConfig(AudioID id, const Audio3DConfig& config) {
 // ============================================================
 
 void AudioManager::setListenerPosition(const glm::vec3& position) {
+    std::lock_guard<std::mutex> lock(m_mutex);
+
     if (!m_initialized) return;
     m_listener.position = position;
     ma_engine_listener_set_position(m_engine, 0, position.x, position.y, position.z);
 }
 
 void AudioManager::setListenerVelocity(const glm::vec3& velocity) {
+    std::lock_guard<std::mutex> lock(m_mutex);
+
     if (!m_initialized) return;
     m_listener.velocity = velocity;
     ma_engine_listener_set_velocity(m_engine, 0, velocity.x, velocity.y, velocity.z);
 }
 
 void AudioManager::setListenerOrientation(const glm::vec3& forward, const glm::vec3& up) {
+    std::lock_guard<std::mutex> lock(m_mutex);
+
     if (!m_initialized) return;
     m_listener.forward = forward;
     m_listener.up = up;
@@ -424,6 +524,8 @@ void AudioManager::setListenerOrientation(const glm::vec3& forward, const glm::v
 }
 
 void AudioManager::setListener(const AudioListener& listener) {
+    std::lock_guard<std::mutex> lock(m_mutex);
+
     if (!m_initialized) return;
     m_listener = listener;
     ma_engine_listener_set_position(m_engine, 0, listener.position.x, listener.position.y, listener.position.z);
@@ -437,6 +539,8 @@ void AudioManager::setListener(const AudioListener& listener) {
 // ============================================================
 
 void AudioManager::setMasterVolume(float volume) {
+    std::lock_guard<std::mutex> lock(m_mutex);
+
     m_masterVolume = volume;
     if (m_initialized) {
         ma_engine_set_volume(m_engine, volume);
@@ -444,6 +548,8 @@ void AudioManager::setMasterVolume(float volume) {
 }
 
 void AudioManager::setDopplerFactor(float factor) {
+    std::lock_guard<std::mutex> lock(m_mutex);
+
     if (!m_initialized) return;
     for (auto& inst : m_instances) {
         if (inst.sound && inst.is3D) {
@@ -457,11 +563,15 @@ void AudioManager::setDopplerFactor(float factor) {
 // ============================================================
 
 void AudioManager::setFinishCallback(AudioID id, std::function<void(AudioID, const std::string&)> callback) {
+    std::lock_guard<std::mutex> lock(m_mutex);
+
     auto* inst = getInstance(id);
     if (inst) inst->finishCallback = std::move(callback);
 }
 
 int AudioManager::getPlayingCount() const {
+    std::lock_guard<std::mutex> lock(m_mutex);
+
     int count = 0;
     for (const auto& inst : m_instances) {
         if (inst.sound && inst.state == AudioState::Playing) count++;
@@ -470,12 +580,14 @@ int AudioManager::getPlayingCount() const {
 }
 
 std::string AudioManager::getFilePath(AudioID id) const {
+    std::lock_guard<std::mutex> lock(m_mutex);
+
     auto* inst = getInstance(id);
     return inst ? inst->filePath : "";
 }
 
 // ============================================================
-// Private helpers
+// Private helpers (must be called with lock held)
 // ============================================================
 
 AudioManager::AudioInstance* AudioManager::getInstance(AudioID id) {
@@ -491,6 +603,7 @@ const AudioManager::AudioInstance* AudioManager::getInstance(AudioID id) const {
 }
 
 AudioID AudioManager::allocateInstance() {
+    // Must be called with lock held
     for (int i = 0; i < MAX_AUDIO_INSTANCES; i++) {
         int idx = (m_nextID + i) % MAX_AUDIO_INSTANCES;
         if (!m_instances[idx].sound) {
