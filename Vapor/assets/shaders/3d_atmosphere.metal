@@ -3,8 +3,8 @@ using namespace metal;
 #include "assets/shaders/3d_common.metal"
 
 // Atmosphere rendering using Rayleigh and Mie scattering
-// Based on: https://github.com/wwwtyro/glsl-atmosphere
-// and NVIDIA GPU Gems 2 Chapter 16
+// Based on: https://cpp-rendering.io/sky-and-atmosphere-rendering/
+// Implements physically-based sky rendering with Rayleigh, Mie, and Ozone
 
 struct AtmosphereData {
     float3 sunDirection;
@@ -21,6 +21,11 @@ struct AtmosphereData {
     float exposure;
     float _pad2[2];
 };
+
+// Physical constants
+constant float3 OZONE_ABSORPTION = float3(3.426, 8.298, 0.356) * 0.06 * 1e-5;  // Ozone absorption
+constant float OZONE_SCALE_HEIGHT = 8000.0;  // Same as Rayleigh for simplicity
+constant float MIE_EXTINCTION_FACTOR = 1.11;  // Mie has ~10% absorption
 
 // Full screen triangle vertices
 constant float2 ndcVerts[3] = {
@@ -113,6 +118,7 @@ float3 computeAtmosphere(
     float3 mieAccum = float3(0.0);
     float rayleighOpticalDepth = 0.0;
     float mieOpticalDepth = 0.0;
+    float ozoneOpticalDepth = 0.0;
 
     // March along the primary ray
     for (int i = 0; i < PRIMARY_STEPS; i++) {
@@ -122,9 +128,12 @@ float3 computeAtmosphere(
         // Calculate optical depth at this sample
         float rayleighDensity = exp(-sampleHeight / rayleighScale) * stepSize;
         float mieDensity = exp(-sampleHeight / mieScale) * stepSize;
+        // Ozone density peaks around 25km altitude with ~15km width
+        float ozoneDensity = exp(-sampleHeight / OZONE_SCALE_HEIGHT) * stepSize;
 
         rayleighOpticalDepth += rayleighDensity;
         mieOpticalDepth += mieDensity;
+        ozoneOpticalDepth += ozoneDensity;
 
         // Calculate light ray optical depth (secondary ray to sun)
         float2 sunAtmosphereHit = raySphereIntersect(samplePos, sunDir, planetCenter, atmosphereRadius);
@@ -135,6 +144,7 @@ float3 computeAtmosphere(
 
             float rayleighOpticalDepthLight = 0.0;
             float mieOpticalDepthLight = 0.0;
+            float ozoneOpticalDepthLight = 0.0;
 
             // March along the light ray
             for (int j = 0; j < SECONDARY_STEPS; j++) {
@@ -149,12 +159,15 @@ float3 computeAtmosphere(
 
                 rayleighOpticalDepthLight += exp(-lightSampleHeight / rayleighScale) * sunStepSize;
                 mieOpticalDepthLight += exp(-lightSampleHeight / mieScale) * sunStepSize;
+                ozoneOpticalDepthLight += exp(-lightSampleHeight / OZONE_SCALE_HEIGHT) * sunStepSize;
             }
 
-            // Calculate attenuation
+            // Calculate attenuation with ozone absorption and Mie extinction factor
+            // Mie extinction = Mie scattering * 1.11 (accounts for ~10% absorption)
             float3 attenuation = exp(
                 -rayleighCoeff * (rayleighOpticalDepth + rayleighOpticalDepthLight) -
-                mieCoeff * (mieOpticalDepth + mieOpticalDepthLight)
+                mieCoeff * MIE_EXTINCTION_FACTOR * (mieOpticalDepth + mieOpticalDepthLight) -
+                OZONE_ABSORPTION * (ozoneOpticalDepth + ozoneOpticalDepthLight)
             );
 
             rayleighAccum += rayleighDensity * attenuation;

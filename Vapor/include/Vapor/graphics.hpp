@@ -179,7 +179,7 @@ struct alignas(16) AtmosphereData {
     float rayleighScaleHeight;       // Rayleigh scale height (Earth: 8500)
     float mieScaleHeight;            // Mie scale height (Earth: 1200)
     float miePreferredDirection;     // Mie preferred scattering direction (g parameter, typically 0.758)
-    glm::vec3 rayleighCoefficients;  // Rayleigh scattering coefficients (Earth: 5.5e-6, 13.0e-6, 22.4e-6)
+    glm::vec3 rayleighCoefficients;  // Rayleigh scattering coefficients (Earth: 5.8e-6, 13.5e-6, 33.1e-6)
     float _pad1;
     float mieCoefficient;            // Mie scattering coefficient (Earth: 21e-6)
     float exposure;                  // Exposure for tone mapping

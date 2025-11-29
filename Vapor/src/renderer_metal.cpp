@@ -737,7 +737,7 @@ auto Renderer_Metal::createResources() -> void {
     atmosphereData->rayleighScaleHeight = 8500.0f; // Rayleigh scale height
     atmosphereData->mieScaleHeight = 1200.0f;      // Mie scale height
     atmosphereData->miePreferredDirection = 0.758f; // Mie phase function g parameter
-    atmosphereData->rayleighCoefficients = glm::vec3(5.5e-6f, 13.0e-6f, 22.4e-6f);
+    atmosphereData->rayleighCoefficients = glm::vec3(5.8e-6f, 13.5e-6f, 33.1e-6f); // Article values
     atmosphereData->mieCoefficient = 21e-6f;
     atmosphereData->exposure = 1.0f;
     atmosphereDataBuffer->didModifyRange(NS::Range::Make(0, atmosphereDataBuffer->length()));
@@ -1270,7 +1270,7 @@ auto Renderer_Metal::draw(std::shared_ptr<Scene> scene, Camera& camera) -> void 
                     atmos->rayleighScaleHeight = 8500.0f;
                     atmos->mieScaleHeight = 1200.0f;
                     atmos->miePreferredDirection = 0.758f;
-                    atmos->rayleighCoefficients = glm::vec3(5.5e-6f, 13.0e-6f, 22.4e-6f);
+                    atmos->rayleighCoefficients = glm::vec3(5.8e-6f, 13.5e-6f, 33.1e-6f);
                     atmos->mieCoefficient = 21e-6f;
                     atmosChanged = true;
                 }

@@ -28,6 +28,11 @@ struct IBLCaptureData {
     float _pad[2];
 };
 
+// Physical constants (matching 3d_atmosphere.metal)
+constant float3 OZONE_ABSORPTION = float3(3.426, 8.298, 0.356) * 0.06 * 1e-5;
+constant float OZONE_SCALE_HEIGHT = 8000.0;
+constant float MIE_EXTINCTION_FACTOR = 1.11;
+
 // Full screen triangle vertices
 constant float2 ndcVerts[3] = {
     float2(-1.0, -1.0),
@@ -111,6 +116,7 @@ float3 computeAtmosphere(
     float3 mieAccum = float3(0.0);
     float rayleighOpticalDepth = 0.0;
     float mieOpticalDepth = 0.0;
+    float ozoneOpticalDepth = 0.0;
 
     for (int i = 0; i < PRIMARY_STEPS; i++) {
         float3 samplePos = rayOrigin + rayDir * (rayStart + stepSize * (float(i) + 0.5));
@@ -118,9 +124,11 @@ float3 computeAtmosphere(
 
         float rayleighDensity = exp(-sampleHeight / rayleighScale) * stepSize;
         float mieDensity = exp(-sampleHeight / mieScale) * stepSize;
+        float ozoneDensity = exp(-sampleHeight / OZONE_SCALE_HEIGHT) * stepSize;
 
         rayleighOpticalDepth += rayleighDensity;
         mieOpticalDepth += mieDensity;
+        ozoneOpticalDepth += ozoneDensity;
 
         float2 sunAtmosphereHit = raySphereIntersect(samplePos, sunDir, planetCenter, atmosphereRadius);
 
@@ -130,6 +138,7 @@ float3 computeAtmosphere(
 
             float rayleighOpticalDepthLight = 0.0;
             float mieOpticalDepthLight = 0.0;
+            float ozoneOpticalDepthLight = 0.0;
 
             for (int j = 0; j < SECONDARY_STEPS; j++) {
                 float3 lightSamplePos = samplePos + sunDir * sunStepSize * (float(j) + 0.5);
@@ -142,11 +151,14 @@ float3 computeAtmosphere(
 
                 rayleighOpticalDepthLight += exp(-lightSampleHeight / rayleighScale) * sunStepSize;
                 mieOpticalDepthLight += exp(-lightSampleHeight / mieScale) * sunStepSize;
+                ozoneOpticalDepthLight += exp(-lightSampleHeight / OZONE_SCALE_HEIGHT) * sunStepSize;
             }
 
+            // Calculate attenuation with ozone absorption and Mie extinction factor
             float3 attenuation = exp(
                 -rayleighCoeff * (rayleighOpticalDepth + rayleighOpticalDepthLight) -
-                mieCoeff * (mieOpticalDepth + mieOpticalDepthLight)
+                mieCoeff * MIE_EXTINCTION_FACTOR * (mieOpticalDepth + mieOpticalDepthLight) -
+                OZONE_ABSORPTION * (ozoneOpticalDepth + ozoneOpticalDepthLight)
             );
 
             rayleighAccum += rayleighDensity * attenuation;
