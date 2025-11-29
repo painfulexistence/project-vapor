@@ -68,11 +68,38 @@ void CharacterController::move(const glm::vec3& movementDirection, float deltaTi
     character->SetLinearVelocity(newVelocity);
 }
 
+void CharacterController::moveRelativeToDirection(const glm::vec2& inputVector, const glm::vec3& forwardDirection, float deltaTime) {
+    // Normalize the forward direction and remove vertical component
+    glm::vec3 forward = glm::normalize(glm::vec3(forwardDirection.x, 0.0f, forwardDirection.z));
+
+    // Calculate right direction (perpendicular to forward)
+    glm::vec3 right = glm::normalize(glm::cross(forward, glm::vec3(0.0f, 1.0f, 0.0f)));
+
+    // Calculate movement direction based on input
+    // inputVector.x = right/left (-1 to 1)
+    // inputVector.y = forward/backward (-1 to 1)
+    glm::vec3 movementDirection = forward * inputVector.y + right * inputVector.x;
+
+    // Normalize if needed (diagonal movement)
+    float length = glm::length(movementDirection);
+    if (length > 1.0f) {
+        movementDirection = movementDirection / length;
+    }
+
+    // Scale by max speed
+    movementDirection *= maxSpeed;
+
+    // Apply movement
+    move(movementDirection, deltaTime);
+}
+
 void CharacterController::jump(float jumpSpeed) {
-    if (isOnGround()) {
+    // Only jump if on ground and cooldown has expired
+    if (isOnGround() && jumpCooldown <= 0.0f) {
         JPH::Vec3 currentVel = character->GetLinearVelocity();
         currentVel.SetY(jumpSpeed);
         character->SetLinearVelocity(currentVel);
+        jumpCooldown = JUMP_COOLDOWN_TIME;  // Start cooldown
     }
 }
 
@@ -118,6 +145,11 @@ void CharacterController::setGravity(const glm::vec3& gravity) {
 void CharacterController::update(float deltaTime, const glm::vec3& gravity) {
     auto* physicsSystem = physics->getPhysicsSystem();
     auto* tempAllocator = physics->getTempAllocator();
+
+    // Update jump cooldown
+    if (jumpCooldown > 0.0f) {
+        jumpCooldown -= deltaTime;
+    }
 
     // Update character (performs collision detection and movement)
     JPH::CharacterVirtual::ExtendedUpdateSettings updateSettings;
