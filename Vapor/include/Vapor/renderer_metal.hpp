@@ -19,6 +19,7 @@ class NormalResolvePass;
 class TileCullingPass;
 class RaytraceShadowPass;
 class RaytraceAOPass;
+class SkyAtmospherePass;
 class MainRenderPass;
 class PostProcessPass;
 class ImGuiPass;
@@ -66,6 +67,7 @@ class Renderer_Metal final : public Renderer { // Must be public or factory func
     friend class TileCullingPass;
     friend class RaytraceShadowPass;
     friend class RaytraceAOPass;
+    friend class SkyAtmospherePass;
     friend class MainRenderPass;
     friend class PostProcessPass;
     friend class ImGuiPass;
@@ -130,6 +132,7 @@ protected:
     NS::SharedPtr<MTL::ComputePipelineState> normalResolvePipeline;
     NS::SharedPtr<MTL::ComputePipelineState> raytraceShadowPipeline;
     NS::SharedPtr<MTL::ComputePipelineState> raytraceAOPipeline;
+    NS::SharedPtr<MTL::RenderPipelineState> atmospherePipeline;
 
     // Default textures
     TextureHandle defaultAlbedoTexture;
@@ -146,6 +149,7 @@ protected:
     NS::SharedPtr<MTL::Buffer> directionalLightBuffer;
     NS::SharedPtr<MTL::Buffer> pointLightBuffer;
     NS::SharedPtr<MTL::Buffer> materialDataBuffer;
+    NS::SharedPtr<MTL::Buffer> atmosphereDataBuffer;
     std::vector<NS::SharedPtr<MTL::Buffer>> clusterBuffers;
     std::vector<NS::SharedPtr<MTL::Buffer>> accelInstanceBuffers;
     std::vector<NS::SharedPtr<MTL::Buffer>> TLASScratchBuffers;

@@ -169,6 +169,23 @@ struct alignas(16) LightCullData {
     Uint32 lightCount;
 };
 
+// Atmosphere rendering data for Rayleigh and Mie scattering
+struct alignas(16) AtmosphereData {
+    glm::vec3 sunDirection;          // Normalized sun direction
+    float sunIntensity;              // Sun light intensity
+    glm::vec3 sunColor;              // Sun light color
+    float planetRadius;              // Planet radius in meters (Earth: 6371e3)
+    float atmosphereRadius;          // Atmosphere radius in meters (Earth: 6471e3)
+    float rayleighScaleHeight;       // Rayleigh scale height (Earth: 8500)
+    float mieScaleHeight;            // Mie scale height (Earth: 1200)
+    float miePreferredDirection;     // Mie preferred scattering direction (g parameter, typically 0.758)
+    glm::vec3 rayleighCoefficients;  // Rayleigh scattering coefficients (Earth: 5.5e-6, 13.0e-6, 22.4e-6)
+    float _pad1;
+    float mieCoefficient;            // Mie scattering coefficient (Earth: 21e-6)
+    float exposure;                  // Exposure for tone mapping
+    float _pad2[2];
+};
+
 struct VertexData {
     glm::vec3 position;
     glm::vec2 uv;

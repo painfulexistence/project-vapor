@@ -254,6 +254,42 @@ public:
     }
 };
 
+// Sky atmosphere pass: Renders procedural sky with Rayleigh and Mie scattering
+class SkyAtmospherePass : public RenderPass {
+public:
+    explicit SkyAtmospherePass(Renderer_Metal* renderer) : RenderPass(renderer) {}
+
+    const char* getName() const override { return "SkyAtmospherePass"; }
+
+    void execute() override {
+        auto& r = *renderer;
+
+        // Create render pass descriptor - render to color RT with blending
+        auto skyPassDesc = NS::TransferPtr(MTL::RenderPassDescriptor::renderPassDescriptor());
+        auto skyPassColorRT = skyPassDesc->colorAttachments()->object(0);
+        skyPassColorRT->setLoadAction(MTL::LoadActionLoad); // Preserve existing content
+        skyPassColorRT->setStoreAction(MTL::StoreActionMultisampleResolve);
+        skyPassColorRT->setTexture(r.colorRT_MS.get());
+        skyPassColorRT->setResolveTexture(r.colorRT.get());
+
+        // Execute the pass
+        auto encoder = r.currentCommandBuffer->renderCommandEncoder(skyPassDesc.get());
+        encoder->setRenderPipelineState(r.atmospherePipeline.get());
+        encoder->setCullMode(MTL::CullModeNone);
+
+        // Set buffers
+        encoder->setFragmentBuffer(r.cameraDataBuffers[r.currentFrameInFlight].get(), 0, 0);
+        encoder->setFragmentBuffer(r.atmosphereDataBuffer.get(), 0, 1);
+
+        // Set depth texture for sky masking
+        encoder->setFragmentTexture(r.depthStencilRT.get(), 0);
+
+        // Draw full-screen triangle
+        encoder->drawPrimitives(MTL::PrimitiveType::PrimitiveTypeTriangle, 0, 3, 1);
+        encoder->endEncoding();
+    }
+};
+
 // Main render pass: Renders the scene with PBR lighting
 class MainRenderPass : public RenderPass {
 public:
@@ -444,6 +480,7 @@ auto Renderer_Metal::init(SDL_Window* window) -> void {
     graph.addPass(std::make_unique<RaytraceShadowPass>(this));
     graph.addPass(std::make_unique<RaytraceAOPass>(this));
     graph.addPass(std::make_unique<MainRenderPass>(this));
+    graph.addPass(std::make_unique<SkyAtmospherePass>(this));
     graph.addPass(std::make_unique<PostProcessPass>(this));
     graph.addPass(std::make_unique<ImGuiPass>(this));
 }
@@ -473,6 +510,7 @@ auto Renderer_Metal::createResources() -> void {
     normalResolvePipeline = createComputePipeline("assets/shaders/3d_normal_resolve.metal");
     raytraceShadowPipeline = createComputePipeline("assets/shaders/3d_raytrace_shadow.metal");
     raytraceAOPipeline = createComputePipeline("assets/shaders/3d_ssao.metal");
+    atmospherePipeline = createPipeline("assets/shaders/3d_atmosphere.metal", true, true, MSAA_SAMPLE_COUNT);
 
     // Create buffers
     frameDataBuffers.resize(MAX_FRAMES_IN_FLIGHT);
@@ -497,6 +535,22 @@ auto Renderer_Metal::createResources() -> void {
     for (auto& clusterBuffer : clusterBuffers) {
         clusterBuffer = NS::TransferPtr(device->newBuffer(clusterGridSizeX * clusterGridSizeY * clusterGridSizeZ * sizeof(Cluster), MTL::ResourceStorageModeManaged));
     }
+
+    // Create atmosphere data buffer with default Earth-like settings
+    atmosphereDataBuffer = NS::TransferPtr(device->newBuffer(sizeof(AtmosphereData), MTL::ResourceStorageModeManaged));
+    AtmosphereData* atmosphereData = reinterpret_cast<AtmosphereData*>(atmosphereDataBuffer->contents());
+    atmosphereData->sunDirection = glm::normalize(glm::vec3(0.5f, 0.5f, 0.5f));
+    atmosphereData->sunIntensity = 22.0f;
+    atmosphereData->sunColor = glm::vec3(1.0f, 1.0f, 1.0f);
+    atmosphereData->planetRadius = 6371e3f;        // Earth radius in meters
+    atmosphereData->atmosphereRadius = 6471e3f;    // Atmosphere radius (100km above surface)
+    atmosphereData->rayleighScaleHeight = 8500.0f; // Rayleigh scale height
+    atmosphereData->mieScaleHeight = 1200.0f;      // Mie scale height
+    atmosphereData->miePreferredDirection = 0.758f; // Mie phase function g parameter
+    atmosphereData->rayleighCoefficients = glm::vec3(5.5e-6f, 13.0e-6f, 22.4e-6f);
+    atmosphereData->mieCoefficient = 21e-6f;
+    atmosphereData->exposure = 1.0f;
+    atmosphereDataBuffer->didModifyRange(NS::Range::Make(0, atmosphereDataBuffer->length()));
 
     accelInstanceBuffers.resize(MAX_FRAMES_IN_FLIGHT);
     TLASScratchBuffers.resize(MAX_FRAMES_IN_FLIGHT);
@@ -920,6 +974,64 @@ auto Renderer_Metal::draw(std::shared_ptr<Scene> scene, Camera& camera) -> void 
                 ImGui::DragFloat("Intensity", &l.intensity, 0.1f, 0.0001f);
                 ImGui::DragFloat("Radius", &l.radius, 0.1f, 0.0001f);
                 ImGui::PopID();
+            }
+            ImGui::TreePop();
+        }
+
+        if (ImGui::TreeNode("Atmosphere")) {
+            ImGui::Separator();
+            AtmosphereData* atmos = reinterpret_cast<AtmosphereData*>(atmosphereDataBuffer->contents());
+            bool atmosChanged = false;
+
+            atmosChanged |= ImGui::DragFloat3("Sun Direction", (float*)&atmos->sunDirection, 0.01f, -1.0f, 1.0f);
+            if (atmosChanged) {
+                atmos->sunDirection = glm::normalize(atmos->sunDirection);
+            }
+            atmosChanged |= ImGui::DragFloat("Sun Intensity", &atmos->sunIntensity, 0.5f, 0.0f, 100.0f);
+            atmosChanged |= ImGui::ColorEdit3("Sun Color", (float*)&atmos->sunColor);
+            atmosChanged |= ImGui::DragFloat("Exposure", &atmos->exposure, 0.01f, 0.01f, 10.0f);
+
+            if (ImGui::TreeNode("Advanced")) {
+                atmosChanged |= ImGui::DragFloat("Planet Radius (m)", &atmos->planetRadius, 1000.0f, 1e3f, 1e8f, "%.0f");
+                atmosChanged |= ImGui::DragFloat("Atmosphere Radius (m)", &atmos->atmosphereRadius, 1000.0f, 1e3f, 1e8f, "%.0f");
+                atmosChanged |= ImGui::DragFloat("Rayleigh Scale Height", &atmos->rayleighScaleHeight, 100.0f, 100.0f, 50000.0f);
+                atmosChanged |= ImGui::DragFloat("Mie Scale Height", &atmos->mieScaleHeight, 100.0f, 100.0f, 10000.0f);
+                atmosChanged |= ImGui::DragFloat("Mie Direction (g)", &atmos->miePreferredDirection, 0.01f, -0.999f, 0.999f);
+
+                float rayleighR = atmos->rayleighCoefficients.r * 1e6f;
+                float rayleighG = atmos->rayleighCoefficients.g * 1e6f;
+                float rayleighB = atmos->rayleighCoefficients.b * 1e6f;
+                bool rayleighChanged = false;
+                rayleighChanged |= ImGui::DragFloat("Rayleigh R (x1e-6)", &rayleighR, 0.1f, 0.0f, 100.0f);
+                rayleighChanged |= ImGui::DragFloat("Rayleigh G (x1e-6)", &rayleighG, 0.1f, 0.0f, 100.0f);
+                rayleighChanged |= ImGui::DragFloat("Rayleigh B (x1e-6)", &rayleighB, 0.1f, 0.0f, 100.0f);
+                if (rayleighChanged) {
+                    atmos->rayleighCoefficients = glm::vec3(rayleighR * 1e-6f, rayleighG * 1e-6f, rayleighB * 1e-6f);
+                    atmosChanged = true;
+                }
+
+                float mie = atmos->mieCoefficient * 1e6f;
+                if (ImGui::DragFloat("Mie Coeff (x1e-6)", &mie, 0.1f, 0.0f, 100.0f)) {
+                    atmos->mieCoefficient = mie * 1e-6f;
+                    atmosChanged = true;
+                }
+
+                if (ImGui::Button("Reset to Earth Defaults")) {
+                    atmos->planetRadius = 6371e3f;
+                    atmos->atmosphereRadius = 6471e3f;
+                    atmos->rayleighScaleHeight = 8500.0f;
+                    atmos->mieScaleHeight = 1200.0f;
+                    atmos->miePreferredDirection = 0.758f;
+                    atmos->rayleighCoefficients = glm::vec3(5.5e-6f, 13.0e-6f, 22.4e-6f);
+                    atmos->mieCoefficient = 21e-6f;
+                    atmosChanged = true;
+                }
+
+                ImGui::TreePop();
+            }
+
+            if (atmosChanged) {
+                atmosphereDataBuffer->didModifyRange(NS::Range::Make(0, atmosphereDataBuffer->length()));
             }
             ImGui::TreePop();
         }
