@@ -46,7 +46,7 @@ public:
         prePassNormalRT->setTexture(r.normalRT_MS.get());
 
         auto prePassDepthRT = prePassDesc->depthAttachment();
-        prePassDepthRT->setClearDepth(clearDepth);
+        prePassDepthRT->setClearDepth(r.clearDepth);
         prePassDepthRT->setLoadAction(MTL::LoadActionClear);
         prePassDepthRT->setStoreAction(MTL::StoreActionStoreAndMultisampleResolve);
         prePassDepthRT->setDepthResolveFilter(MTL::MultisampleDepthResolveFilter::MultisampleDepthResolveFilterMin);
@@ -160,7 +160,7 @@ public:
         encoder->setComputePipelineState(r.normalResolvePipeline.get());
         encoder->setTexture(r.normalRT_MS.get(), 0);
         encoder->setTexture(r.normalRT.get(), 1);
-        encoder->setBytes(&MSAA_SAMPLE_COUNT, sizeof(Uint32), 0);
+        encoder->setBytes(&r.MSAA_SAMPLE_COUNT, sizeof(Uint32), 0);
         encoder->dispatchThreadgroups(MTL::Size(screenSize.x, screenSize.y, 1), MTL::Size(1, 1, 1));
         encoder->endEncoding();
     }
@@ -178,7 +178,7 @@ public:
 
         auto drawableSize = r.swapchain->drawableSize();
         glm::vec2 screenSize = glm::vec2(drawableSize.width, drawableSize.height);
-        glm::uvec3 gridSize = glm::uvec3(clusterGridSizeX, clusterGridSizeY, clusterGridSizeZ);
+        glm::uvec3 gridSize = glm::uvec3(r.clusterGridSizeX, r.clusterGridSizeY, r.clusterGridSizeZ);
         uint pointLightCount = r.currentScene->pointLights.size();
 
         auto encoder = r.currentCommandBuffer->computeCommandEncoder();
@@ -189,7 +189,7 @@ public:
         encoder->setBytes(&pointLightCount, sizeof(uint), 3);
         encoder->setBytes(&gridSize, sizeof(glm::uvec3), 4);
         encoder->setBytes(&screenSize, sizeof(glm::vec2), 5);
-        encoder->dispatchThreadgroups(MTL::Size(clusterGridSizeX, clusterGridSizeY, 1), MTL::Size(1, 1, 1));
+        encoder->dispatchThreadgroups(MTL::Size(r.clusterGridSizeX, r.clusterGridSizeY, 1), MTL::Size(1, 1, 1));
         encoder->endEncoding();
     }
 };
@@ -265,13 +265,13 @@ public:
 
         auto drawableSize = r.swapchain->drawableSize();
         glm::vec2 screenSize = glm::vec2(drawableSize.width, drawableSize.height);
-        glm::uvec3 gridSize = glm::uvec3(clusterGridSizeX, clusterGridSizeY, clusterGridSizeZ);
+        glm::uvec3 gridSize = glm::uvec3(r.clusterGridSizeX, r.clusterGridSizeY, r.clusterGridSizeZ);
         auto time = (float)SDL_GetTicks() / 1000.0f;
 
         // Create render pass descriptor
         auto renderPassDesc = NS::TransferPtr(MTL::RenderPassDescriptor::renderPassDescriptor());
         auto renderPassColorRT = renderPassDesc->colorAttachments()->object(0);
-        renderPassColorRT->setClearColor(MTL::ClearColor(clearColor.r, clearColor.g, clearColor.b, clearColor.a));
+        renderPassColorRT->setClearColor(MTL::ClearColor(r.clearColor.r, r.clearColor.g, r.clearColor.b, r.clearColor.a));
         renderPassColorRT->setLoadAction(MTL::LoadActionClear);
         renderPassColorRT->setStoreAction(MTL::StoreActionMultisampleResolve);
         renderPassColorRT->setTexture(r.colorRT_MS.get());
@@ -360,7 +360,7 @@ public:
         // Create render pass descriptor
         auto postPassDesc = NS::TransferPtr(MTL::RenderPassDescriptor::renderPassDescriptor());
         auto postPassColorRT = postPassDesc->colorAttachments()->object(0);
-        postPassColorRT->setClearColor(MTL::ClearColor(clearColor.r, clearColor.g, clearColor.b, clearColor.a));
+        postPassColorRT->setClearColor(MTL::ClearColor(r.clearColor.r, r.clearColor.g, r.clearColor.b, r.clearColor.a));
         postPassColorRT->setLoadAction(MTL::LoadActionClear);
         postPassColorRT->setStoreAction(MTL::StoreActionStore);
         postPassColorRT->setTexture(r.currentDrawable->texture());
