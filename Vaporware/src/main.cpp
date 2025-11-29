@@ -211,13 +211,25 @@ int main(int argc, char* args[]) {
     Uint32 frameCount = 0;
     float time = SDL_GetTicks() / 1000.0f;
     bool quit = false;
-    std::unordered_map<SDL_Scancode, bool> keyboardState;
-    std::unordered_map<SDL_Scancode, bool> prevKeyboardState;
+
+    auto& inputManager = engineCore->getInputManager();
+
     while (!quit) {
-        prevKeyboardState = keyboardState;
+        float currTime = SDL_GetTicks() / 1000.0f;
+        float deltaTime = currTime - time;
+        time = currTime;
+
+        // IMPORTANT: Update input manager FIRST to clear previous frame's pressed/released actions
+        // This must happen BEFORE processing new events
+        inputManager.update(deltaTime);
+
         SDL_Event e;
         while (SDL_PollEvent(&e) != 0) {
             ImGui_ImplSDL3_ProcessEvent(&e);
+
+            inputManager.processEvent(e);
+
+            // Handle special events
             switch (e.type) {
             case SDL_EVENT_QUIT:
                 quit = true;
@@ -226,30 +238,6 @@ int main(int argc, char* args[]) {
                 if (e.key.scancode == SDL_SCANCODE_ESCAPE) {
                     quit = true;
                 }
-                // Camera switching with number keys
-                if (e.key.scancode == SDL_SCANCODE_1) {
-                    cameraManager.switchCamera("fly");
-                }
-                if (e.key.scancode == SDL_SCANCODE_2) {
-                    cameraManager.switchCamera("follow");
-                }
-                keyboardState[e.key.scancode] = true;
-                break;
-            }
-            case SDL_EVENT_KEY_UP: {
-                keyboardState[e.key.scancode] = false;
-                break;
-            }
-            case SDL_EVENT_MOUSE_MOTION: {
-                break;
-            }
-            case SDL_EVENT_MOUSE_WHEEL: {
-                break;
-            }
-            case SDL_EVENT_MOUSE_BUTTON_DOWN: {
-                break;
-            }
-            case SDL_EVENT_MOUSE_BUTTON_UP: {
                 break;
             }
             case SDL_EVENT_WINDOW_RESIZED: {
@@ -261,12 +249,20 @@ int main(int argc, char* args[]) {
             }
         }
 
-        float currTime = SDL_GetTicks() / 1000.0f;
-        float deltaTime = currTime - time;
-        time = currTime;
+        const auto& inputState = inputManager.getInputState();
 
-        // Update camera manager (handles input and camera updates)
-        cameraManager.update(deltaTime, keyboardState);
+        if (inputState.isPressed(Vapor::InputAction::Hotkey1)) {
+            cameraManager.switchCamera("fly");
+            fmt::print("[Main] Switched to Fly Camera\n");
+        }
+        if (inputState.isPressed(Vapor::InputAction::Hotkey2)) {
+            cameraManager.switchCamera("follow");
+            fmt::print("[Main] Switched to Follow Camera\n");
+        }
+
+        cameraManager.update(deltaTime, inputState);
+
+        engineCore->update(deltaTime);
 
         entity1->rotate(glm::vec3(0.0f, 1.0f, -1.0f), 1.5f * deltaTime);
         float speed = 0.5f;
@@ -301,9 +297,6 @@ int main(int argc, char* args[]) {
             }
             l.intensity = 3.0f + 2.0f * (0.5f + 0.5f * sin(time * 0.3f + i * 0.1f));
         }
-
-        // Update engine core (handles async task completion)
-        engineCore->update(deltaTime);
 
         scene->update(deltaTime);
         physics->process(scene, deltaTime);

@@ -13,6 +13,7 @@ add_subdirectory(MikkTSpace)
 
 set(SOURCES
     src/action_manager.cpp
+    src/input_manager.cpp
     src/asset_manager.cpp
     src/asset_serializer.cpp
     src/camera.cpp
