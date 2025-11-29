@@ -87,9 +87,6 @@ void EngineCore::update(float deltaTime) {
         return;
     }
 
-    // Update input manager (clear per-frame state, clean buffer)
-    m_inputManager->update(deltaTime);
-
     // Update action manager (time-based actions)
     m_actionManager->update(deltaTime);
 

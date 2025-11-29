@@ -1,98 +1,8 @@
 #include "Vapor/input_manager.hpp"
-#include <algorithm>
 
 namespace Vapor {
 
-InputManager::InputManager()
-{
-    loadDefaultMappings();
-}
-
-void InputManager::processEvent(const SDL_Event& event)
-{
-    switch (event.type) {
-        case SDL_EVENT_KEY_DOWN: {
-            auto it = m_keyToAction.find(event.key.scancode);
-            if (it != m_keyToAction.end()) {
-                InputAction action = it->second;
-
-                // Only add to pressed if not already held
-                if (m_currentState.m_heldActions.find(action) == m_currentState.m_heldActions.end()) {
-                    m_currentState.m_heldActions.insert(action);
-                    m_currentState.m_pressedActions.insert(action);
-                    addToBuffer(action);
-                }
-            }
-            break;
-        }
-
-        case SDL_EVENT_KEY_UP: {
-            auto it = m_keyToAction.find(event.key.scancode);
-            if (it != m_keyToAction.end()) {
-                InputAction action = it->second;
-
-                // Only add to released if it was held
-                if (m_currentState.m_heldActions.find(action) != m_currentState.m_heldActions.end()) {
-                    m_currentState.m_heldActions.erase(action);
-                    m_currentState.m_releasedActions.insert(action);
-                }
-            }
-            break;
-        }
-
-        case SDL_EVENT_MOUSE_MOTION: {
-            m_mousePosition = glm::vec2(event.motion.x, event.motion.y);
-            break;
-        }
-
-        default:
-            break;
-    }
-}
-
-void InputManager::update(float deltaTime)
-{
-    // Update time (convert deltaTime from seconds to milliseconds)
-    m_currentTime += static_cast<uint64_t>(deltaTime * 1000.0f);
-
-    // Clear pressed and released actions (they only last one frame)
-    m_currentState.m_pressedActions.clear();
-    m_currentState.m_releasedActions.clear();
-
-    // Update mouse delta
-    m_mouseDelta = m_mousePosition - m_prevMousePosition;
-    m_prevMousePosition = m_mousePosition;
-
-    // Clean old events from buffer
-    cleanBuffer();
-}
-
-void InputManager::mapKey(SDL_Scancode key, InputAction action)
-{
-    m_keyToAction[key] = action;
-}
-
-void InputManager::unmapKey(SDL_Scancode key)
-{
-    m_keyToAction.erase(key);
-}
-
-const InputAction* InputManager::getActionForKey(SDL_Scancode key) const
-{
-    auto it = m_keyToAction.find(key);
-    if (it != m_keyToAction.end()) {
-        return &it->second;
-    }
-    return nullptr;
-}
-
-void InputManager::clearMappings()
-{
-    m_keyToAction.clear();
-}
-
-void InputManager::loadDefaultMappings()
-{
+InputManager::InputManager() {
     // Movement (WASD)
     mapKey(SDL_SCANCODE_W, InputAction::MoveForward);
     mapKey(SDL_SCANCODE_S, InputAction::MoveBackward);
@@ -109,39 +19,113 @@ void InputManager::loadDefaultMappings()
     mapKey(SDL_SCANCODE_U, InputAction::RollLeft);
     mapKey(SDL_SCANCODE_O, InputAction::RollRight);
 
-    // Camera switching (1/2)
-    mapKey(SDL_SCANCODE_1, InputAction::SwitchToFlyCam);
-    mapKey(SDL_SCANCODE_2, InputAction::SwitchToFollowCam);
-
     // General actions
     mapKey(SDL_SCANCODE_SPACE, InputAction::Jump);
     mapKey(SDL_SCANCODE_LSHIFT, InputAction::Sprint);
     mapKey(SDL_SCANCODE_LCTRL, InputAction::Crouch);
     mapKey(SDL_SCANCODE_E, InputAction::Interact);
     mapKey(SDL_SCANCODE_ESCAPE, InputAction::Cancel);
+
+    // Hotkeys
+    mapKey(SDL_SCANCODE_1, InputAction::Hotkey1);
+    mapKey(SDL_SCANCODE_2, InputAction::Hotkey2);
+    mapKey(SDL_SCANCODE_3, InputAction::Hotkey3);
+    mapKey(SDL_SCANCODE_4, InputAction::Hotkey4);
+    mapKey(SDL_SCANCODE_5, InputAction::Hotkey5);
+    mapKey(SDL_SCANCODE_6, InputAction::Hotkey6);
+    mapKey(SDL_SCANCODE_7, InputAction::Hotkey7);
+    mapKey(SDL_SCANCODE_8, InputAction::Hotkey8);
+    mapKey(SDL_SCANCODE_9, InputAction::Hotkey9);
+    mapKey(SDL_SCANCODE_0, InputAction::Hotkey10);
 }
 
-void InputManager::addToBuffer(InputAction action)
-{
-    m_inputBuffer.push_back({action, m_currentTime});
+void InputManager::processEvent(const SDL_Event& event) {
+    switch (event.type) {
+    case SDL_EVENT_KEY_DOWN: {
+        auto it = keyToAction.find(event.key.scancode);
+        if (it != keyToAction.end()) {
+            InputAction action = it->second;
+            // Only add to pressed if not already held
+            if (currentState.heldActions.find(action) == currentState.heldActions.end()) {
+                currentState.heldActions.insert(action);
+                currentState.pressedActions.insert(action);
 
-    // Enforce max buffer size
-    while (m_inputBuffer.size() > m_maxBufferSize) {
-        m_inputBuffer.pop_front();
-    }
-}
-
-void InputManager::cleanBuffer()
-{
-    // Remove events older than INPUT_EVENT_LIFETIME_MS
-    while (!m_inputBuffer.empty()) {
-        const auto& oldestEvent = m_inputBuffer.front();
-        if (m_currentTime - oldestEvent.timestamp > INPUT_EVENT_LIFETIME_MS) {
-            m_inputBuffer.pop_front();
-        } else {
-            break;  // Events are ordered by time, so we can stop here
+                inputHistory.push_back({action, currentTime});
+            }
         }
+        break;
     }
+    case SDL_EVENT_KEY_UP: {
+        auto it = keyToAction.find(event.key.scancode);
+        if (it != keyToAction.end()) {
+            InputAction action = it->second;
+            // Only add to released if it was held
+            if (currentState.heldActions.find(action) != currentState.heldActions.end()) {
+                currentState.heldActions.erase(action);
+                currentState.releasedActions.insert(action);
+
+                inputHistory.push_back({action, currentTime});
+            }
+        }
+        break;
+    }
+    case SDL_EVENT_MOUSE_MOTION: {
+        currMousePosition = glm::vec2(event.motion.x, event.motion.y);
+        break;
+    }
+    default:
+        break;
+    }
+    while (inputHistory.size() > MAX_INPUT_HISTORY_SIZE) {
+        inputHistory.pop_front();
+    }
+}
+
+// TODO: get time directly from SDL
+void InputManager::update(float deltaTime) {
+    // Update time (convert deltaTime from seconds to milliseconds)
+    currentTime += static_cast<uint64_t>(deltaTime * 1000.0f);
+
+    // Clear pressed and released actions (they only last one frame)
+    currentState.pressedActions.clear();
+    currentState.releasedActions.clear();
+
+    // Update mouse delta
+    mouseDelta = currMousePosition - prevMousePosition;
+    prevMousePosition = currMousePosition;
+
+    while (!inputHistory.empty() && (currentTime - inputHistory.front().timestamp > INPUT_EVENT_LIFETIME_MS)) {
+        inputHistory.pop_front();
+    }
+}
+
+void InputManager::mapKey(SDL_Scancode key, InputAction action)
+{
+    keyToAction[key] = action;
+}
+
+void InputManager::unmapKey(SDL_Scancode key)
+{
+    keyToAction.erase(key);
+}
+
+void InputManager::updateMappings(const std::unordered_map<SDL_Scancode, InputAction>& mappings)
+{
+    keyToAction = mappings;
+}
+
+void InputManager::clearMappings()
+{
+    keyToAction.clear();
+}
+
+const InputAction InputManager::getActionForKey(SDL_Scancode key) const
+{
+    auto it = keyToAction.find(key);
+    if (it != keyToAction.end()) {
+        return it->second;
+    }
+    return InputAction::UNKNOWN;
 }
 
 } // namespace Vapor

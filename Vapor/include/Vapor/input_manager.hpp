@@ -9,12 +9,6 @@
 
 namespace Vapor {
 
-/**
- * InputAction - Abstract game actions
- *
- * Maps physical input (keys, buttons) to logical game actions.
- * This allows for rebindable controls and platform-independent input handling.
- */
 enum class InputAction {
     // Movement
     MoveForward,
@@ -32,10 +26,6 @@ enum class InputAction {
     RollLeft,
     RollRight,
 
-    // Camera switching
-    SwitchToFlyCam,
-    SwitchToFollowCam,
-
     // General actions
     Jump,
     Crouch,
@@ -43,25 +33,22 @@ enum class InputAction {
     Interact,
     Cancel,
 
+    // Hotkeys
+    Hotkey1,
+    Hotkey2,
+    Hotkey3,
+    Hotkey4,
+    Hotkey5,
+    Hotkey6,
+    Hotkey7,
+    Hotkey8,
+    Hotkey9,
+    Hotkey10,
+
     // Count for iteration
-    COUNT
+    UNKNOWN
 };
 
-/**
- * InputState - Represents the current state of input actions
- *
- * Tracks which actions are held, pressed (this frame), or released (this frame).
- * Similar to Python InputState but for C++.
- *
- * Example:
- *     const InputState& state = inputManager.getInputState();
- *     if (state.isPressed(InputAction::Jump)) {
- *         player.jump();
- *     }
- *     if (state.isHeld(InputAction::MoveForward)) {
- *         player.moveForward(dt);
- *     }
- */
 class InputState {
 public:
     InputState() = default;
@@ -70,33 +57,23 @@ public:
      * Check if action is currently held down.
      */
     bool isHeld(InputAction action) const {
-        return m_heldActions.find(action) != m_heldActions.end();
+        return heldActions.find(action) != heldActions.end();
     }
 
     /**
      * Check if action was just pressed this frame.
      */
     bool isPressed(InputAction action) const {
-        return m_pressedActions.find(action) != m_pressedActions.end();
+        return pressedActions.find(action) != pressedActions.end();
     }
 
     /**
      * Check if action was just released this frame.
      */
     bool isReleased(InputAction action) const {
-        return m_releasedActions.find(action) != m_releasedActions.end();
+        return releasedActions.find(action) != releasedActions.end();
     }
 
-    /**
-     * Get normalized movement vector from directional actions.
-     *
-     * Example:
-     *     auto movement = state.getMovementVector(
-     *         InputAction::StrafeLeft, InputAction::StrafeRight,
-     *         InputAction::MoveBackward, InputAction::MoveForward
-     *     );
-     *     player.move(movement.x, movement.y);
-     */
     glm::vec2 getMovementVector(
         InputAction left, InputAction right,
         InputAction backward, InputAction forward
@@ -106,175 +83,88 @@ public:
         return glm::vec2(x, y);
     }
 
-    /**
-     * Get all currently held actions.
-     */
     const std::unordered_set<InputAction>& getHeldActions() const {
-        return m_heldActions;
+        return heldActions;
     }
 
-    /**
-     * Get all actions pressed this frame.
-     */
     const std::unordered_set<InputAction>& getPressedActions() const {
-        return m_pressedActions;
+        return pressedActions;
     }
 
-    /**
-     * Get all actions released this frame.
-     */
     const std::unordered_set<InputAction>& getReleasedActions() const {
-        return m_releasedActions;
+        return releasedActions;
     }
 
 private:
-    std::unordered_set<InputAction> m_heldActions;
-    std::unordered_set<InputAction> m_pressedActions;
-    std::unordered_set<InputAction> m_releasedActions;
+    std::unordered_set<InputAction> heldActions;
+    std::unordered_set<InputAction> pressedActions;
+    std::unordered_set<InputAction> releasedActions;
 
     friend class InputManager;
 };
 
-/**
- * InputEvent - Represents a single input event in the buffer
- */
+
 struct InputEvent {
     InputAction action;
     uint64_t timestamp;  // Milliseconds
 };
 
-/**
- * InputManager - Input State Handling
- *
- * Manages input state capture and action mapping for keyboard/controller input.
- * Uses state-based input (not purely event-driven) for game controls.
- *
- * Features:
- * - Action-based input abstraction
- * - Input state tracking (held/pressed/released)
- * - Input event buffer (for debugging and combo detection)
- * - Rebindable key mappings
- * - Mouse position and delta tracking
- *
- * Usage:
- *     InputManager inputManager;
- *
- *     // Setup default key mappings
- *     inputManager.mapKey(SDL_SCANCODE_W, InputAction::MoveForward);
- *     inputManager.mapKey(SDL_SCANCODE_SPACE, InputAction::Jump);
- *
- *     // In main loop:
- *     while (SDL_PollEvent(&e)) {
- *         inputManager.processEvent(e);
- *     }
- *     inputManager.update(deltaTime);
- *
- *     // Query input state
- *     const InputState& state = inputManager.getInputState();
- *     if (state.isPressed(InputAction::Jump)) {
- *         player.jump();
- *     }
- */
+
 class InputManager {
 public:
     InputManager();
     ~InputManager() = default;
 
-    /**
-     * Process a single SDL event.
-     * Call this for each event in your event polling loop.
-     */
     void processEvent(const SDL_Event& event);
 
-    /**
-     * Update input state for the current frame.
-     * Call this once per frame after processing all events.
-     *
-     * @param deltaTime Time elapsed since last frame (for time-based input buffer cleanup)
-     */
     void update(float deltaTime);
 
-    /**
-     * Get the current frame's input state.
-     */
-    const InputState& getInputState() const { return m_currentState; }
+    const InputState& getInputState() const { return currentState; }
 
-    /**
-     * Map a key to an action.
-     *
-     * Example:
-     *     inputManager.mapKey(SDL_SCANCODE_W, InputAction::MoveForward);
-     */
     void mapKey(SDL_Scancode key, InputAction action);
 
-    /**
-     * Unmap a key (remove its action binding).
-     */
     void unmapKey(SDL_Scancode key);
 
-    /**
-     * Get the action bound to a key (if any).
-     * Returns nullptr if key is not mapped.
-     */
-    const InputAction* getActionForKey(SDL_Scancode key) const;
+    void updateMappings(const std::unordered_map<SDL_Scancode, InputAction>& mappings);
 
-    /**
-     * Clear all key mappings.
-     */
     void clearMappings();
 
-    /**
-     * Load default key mappings.
-     * Call this to restore default controls.
-     */
-    void loadDefaultMappings();
+    const InputAction getActionForKey(SDL_Scancode key) const;
 
-    /**
-     * Get the input event buffer (recent input events).
-     * Useful for debugging or implementing combo systems.
-     */
-    const std::deque<InputEvent>& getInputBuffer() const { return m_inputBuffer; }
+    const std::deque<InputEvent>& getInputBuffer() const { return inputHistory; }
 
-    /**
-     * Set maximum size of input buffer.
-     */
-    void setInputBufferSize(size_t size) { m_maxBufferSize = size; }
+    glm::vec2 getMousePosition() const { return currMousePosition; }
 
-    /**
-     * Get mouse position in screen coordinates.
-     */
-    glm::vec2 getMousePosition() const { return m_mousePosition; }
-
-    /**
-     * Get mouse delta (movement since last frame).
-     */
-    glm::vec2 getMouseDelta() const { return m_mouseDelta; }
+    glm::vec2 getMouseDelta() const { return mouseDelta; }
 
 private:
-    // Key to action mapping
-    std::unordered_map<SDL_Scancode, InputAction> m_keyToAction;
+    std::unordered_map<SDL_Scancode, InputAction> keyToAction;
 
-    // Current input state
-    InputState m_currentState;
+    InputState currentState;
 
-    // Input event buffer (for recent input history)
-    std::deque<InputEvent> m_inputBuffer;
-    size_t m_maxBufferSize = 32;
+    std::deque<InputEvent> inputHistory;
+    static constexpr size_t MAX_INPUT_HISTORY_SIZE = 32;
     static constexpr uint64_t INPUT_EVENT_LIFETIME_MS = 1000;
 
     // Mouse state
-    glm::vec2 m_mousePosition{0.0f};
-    glm::vec2 m_mouseDelta{0.0f};
-    glm::vec2 m_prevMousePosition{0.0f};
+    glm::vec2 currMousePosition{0.0f};
+    glm::vec2 mouseDelta{0.0f};
+    glm::vec2 prevMousePosition{0.0f};
 
     // Time tracking (in milliseconds)
-    uint64_t m_currentTime = 0;
+    uint64_t currentTime = 0;
 
-    // Helper to add event to buffer
-    void addToBuffer(InputAction action);
-
-    // Helper to clean old events from buffer
-    void cleanBuffer();
+    bool wasActionPressedRecently(InputAction action, float timeWindow) const {
+        float now = (float)SDL_GetTicks() / 1000.0f;
+        for (const auto& event : inputHistory) {
+            if (event.action == action) {
+                if (now - event.timestamp <= timeWindow) {
+                    return true;
+                }
+            }
+        }
+        return false;
+    }
 };
 
 } // namespace Vapor

@@ -212,15 +212,21 @@ int main(int argc, char* args[]) {
     float time = SDL_GetTicks() / 1000.0f;
     bool quit = false;
 
-    // Get input manager from engine core
     auto& inputManager = engineCore->getInputManager();
 
     while (!quit) {
+        float currTime = SDL_GetTicks() / 1000.0f;
+        float deltaTime = currTime - time;
+        time = currTime;
+
+        // IMPORTANT: Update input manager FIRST to clear previous frame's pressed/released actions
+        // This must happen BEFORE processing new events
+        inputManager.update(deltaTime);
+
         SDL_Event e;
         while (SDL_PollEvent(&e) != 0) {
             ImGui_ImplSDL3_ProcessEvent(&e);
 
-            // Process event through InputManager
             inputManager.processEvent(e);
 
             // Handle special events
@@ -243,26 +249,20 @@ int main(int argc, char* args[]) {
             }
         }
 
-        float currTime = SDL_GetTicks() / 1000.0f;
-        float deltaTime = currTime - time;
-        time = currTime;
-
-        // Update engine core (updates input manager and action manager)
-        engineCore->update(deltaTime);
-
-        // Get current input state
         const auto& inputState = inputManager.getInputState();
 
-        // Handle camera switching
-        if (inputState.isPressed(Vapor::InputAction::SwitchToFlyCam)) {
+        if (inputState.isPressed(Vapor::InputAction::Hotkey1)) {
             cameraManager.switchCamera("fly");
+            fmt::print("[Main] Switched to Fly Camera\n");
         }
-        if (inputState.isPressed(Vapor::InputAction::SwitchToFollowCam)) {
+        if (inputState.isPressed(Vapor::InputAction::Hotkey2)) {
             cameraManager.switchCamera("follow");
+            fmt::print("[Main] Switched to Follow Camera\n");
         }
 
-        // Update camera manager (handles input and camera updates)
         cameraManager.update(deltaTime, inputState);
+
+        engineCore->update(deltaTime);
 
         entity1->rotate(glm::vec3(0.0f, 1.0f, -1.0f), 1.5f * deltaTime);
         float speed = 0.5f;
