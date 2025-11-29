@@ -29,58 +29,58 @@ FlyCam::FlyCam(
 {
 }
 
-void FlyCam::update(float deltaTime, const std::unordered_map<SDL_Scancode, bool>& keyboardState) {
-    // Movement controls (WASDRF)
+void FlyCam::update(float deltaTime, const InputState& inputState) {
+    // Movement controls
     float moveDistance = _moveSpeed * deltaTime;
 
-    // W/S - Dolly (forward/backward)
-    if (keyboardState.count(SDL_SCANCODE_W) && keyboardState.at(SDL_SCANCODE_W)) {
+    // Forward/Backward - Dolly
+    if (inputState.isHeld(InputAction::MoveForward)) {
         _camera.dolly(moveDistance);
     }
-    if (keyboardState.count(SDL_SCANCODE_S) && keyboardState.at(SDL_SCANCODE_S)) {
+    if (inputState.isHeld(InputAction::MoveBackward)) {
         _camera.dolly(-moveDistance);
     }
 
-    // A/D - Truck (strafe left/right)
-    if (keyboardState.count(SDL_SCANCODE_A) && keyboardState.at(SDL_SCANCODE_A)) {
+    // Left/Right - Truck (strafe)
+    if (inputState.isHeld(InputAction::StrafeLeft)) {
         _camera.truck(-moveDistance);
     }
-    if (keyboardState.count(SDL_SCANCODE_D) && keyboardState.at(SDL_SCANCODE_D)) {
+    if (inputState.isHeld(InputAction::StrafeRight)) {
         _camera.truck(moveDistance);
     }
 
-    // R/F - Pedestal (up/down)
-    if (keyboardState.count(SDL_SCANCODE_R) && keyboardState.at(SDL_SCANCODE_R)) {
+    // Up/Down - Pedestal
+    if (inputState.isHeld(InputAction::MoveUp)) {
         _camera.pedestal(moveDistance);
     }
-    if (keyboardState.count(SDL_SCANCODE_F) && keyboardState.at(SDL_SCANCODE_F)) {
+    if (inputState.isHeld(InputAction::MoveDown)) {
         _camera.pedestal(-moveDistance);
     }
 
-    // Rotation controls (IJKL UO)
+    // Rotation controls
     float rotateAngle = _rotateSpeed * deltaTime;
 
-    // I/K - Tilt (look up/down)
-    if (keyboardState.count(SDL_SCANCODE_I) && keyboardState.at(SDL_SCANCODE_I)) {
+    // Tilt (look up/down)
+    if (inputState.isHeld(InputAction::LookUp)) {
         _camera.tilt(rotateAngle);
     }
-    if (keyboardState.count(SDL_SCANCODE_K) && keyboardState.at(SDL_SCANCODE_K)) {
+    if (inputState.isHeld(InputAction::LookDown)) {
         _camera.tilt(-rotateAngle);
     }
 
-    // J/L - Pan (turn left/right)
-    if (keyboardState.count(SDL_SCANCODE_J) && keyboardState.at(SDL_SCANCODE_J)) {
+    // Pan (turn left/right)
+    if (inputState.isHeld(InputAction::LookLeft)) {
         _camera.pan(rotateAngle);
     }
-    if (keyboardState.count(SDL_SCANCODE_L) && keyboardState.at(SDL_SCANCODE_L)) {
+    if (inputState.isHeld(InputAction::LookRight)) {
         _camera.pan(-rotateAngle);
     }
 
-    // U/O - Roll
-    if (keyboardState.count(SDL_SCANCODE_U) && keyboardState.at(SDL_SCANCODE_U)) {
+    // Roll
+    if (inputState.isHeld(InputAction::RollLeft)) {
         _camera.roll(rotateAngle);
     }
-    if (keyboardState.count(SDL_SCANCODE_O) && keyboardState.at(SDL_SCANCODE_O)) {
+    if (inputState.isHeld(InputAction::RollRight)) {
         _camera.roll(-rotateAngle);
     }
 }
@@ -122,9 +122,9 @@ FollowCam::FollowCam(
     }
 }
 
-void FollowCam::update(float deltaTime, const std::unordered_map<SDL_Scancode, bool>& keyboardState) {
+void FollowCam::update(float deltaTime, const InputState& inputState) {
     // Unused parameter for interface compatibility
-    (void)keyboardState;
+    (void)inputState;
     (void)deltaTime;
 
     if (!_target) {
@@ -216,10 +216,10 @@ VirtualCamera* CameraManager::getCamera(const std::string& name) {
     return it->second.get();
 }
 
-void CameraManager::update(float deltaTime, const std::unordered_map<SDL_Scancode, bool>& keyboardState) {
+void CameraManager::update(float deltaTime, const InputState& inputState) {
     VirtualCamera* current = getCurrentCamera();
     if (current) {
-        current->update(deltaTime, keyboardState);
+        current->update(deltaTime, inputState);
     }
 }
 
