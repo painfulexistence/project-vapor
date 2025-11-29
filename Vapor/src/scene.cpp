@@ -1,4 +1,5 @@
 #include "scene.hpp"
+#include "fluid_volume.hpp"
 
 #include <SDL3/SDL_log.h>
 #include <fmt/core.h>
@@ -179,3 +180,24 @@ void Scene::addMeshToNode(std::shared_ptr<Node> node, std::shared_ptr<Mesh> mesh
 // auto scene = Scene();
 // auto entity = scene.createNode("Cube", glm::identity<glm::mat4>());
 // scene.addMeshToNode(entity, MeshBuilder::buildCube(1.0f));
+
+void Node::attachCharacterController(Physics3D* physics, const CharacterControllerSettings& settings) {
+    characterController = std::make_unique<CharacterController>(physics, settings);
+
+    // Sync initial position from node to character controller
+    characterController->warp(getWorldPosition());
+}
+
+void Node::attachVehicleController(Physics3D* physics, const VehicleSettings& settings) {
+    vehicleController = std::make_unique<VehicleController>(physics, settings, getWorldPosition(), getWorldRotation());
+}
+
+std::shared_ptr<FluidVolume> Scene::createFluidVolume(Physics3D* physics, const FluidVolumeSettings& settings) {
+    auto fluidVolume = std::make_shared<FluidVolume>(physics, settings);
+    fluidVolumes.push_back(fluidVolume);
+    return fluidVolume;
+}
+
+void Scene::addFluidVolume(std::shared_ptr<FluidVolume> fluidVolume) {
+    fluidVolumes.push_back(fluidVolume);
+}

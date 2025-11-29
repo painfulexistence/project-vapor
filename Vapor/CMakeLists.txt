@@ -19,6 +19,9 @@ set(SOURCES
     src/graphics.cpp
     src/helper.cpp
     src/physics_3d.cpp
+    src/character_controller.cpp
+    src/vehicle_controller.cpp
+    src/fluid_volume.cpp
     src/renderer_metal.cpp
     src/renderer_vulkan.cpp
     src/scene.cpp
