@@ -12,7 +12,51 @@
 
 #include "graphics.hpp"
 
+// Forward declarations
+class Renderer_Metal;
+class RenderPass;
+
+// Render pass base class
+class RenderPass {
+public:
+    explicit RenderPass(Renderer_Metal* renderer) : renderer(renderer) {}
+    virtual ~RenderPass() = default;
+    virtual void execute() = 0;
+    virtual const char* getName() const = 0;
+
+    bool enabled = true;
+
+protected:
+    Renderer_Metal* renderer;
+};
+
+// Render graph that manages and executes render passes
+class RenderGraph {
+public:
+    void addPass(std::unique_ptr<RenderPass> pass) {
+        passes.push_back(std::move(pass));
+    }
+
+    void execute() {
+        for (auto& pass : passes) {
+            if (pass->enabled) {
+                pass->execute();
+            }
+        }
+    }
+
+    void clear() {
+        passes.clear();
+    }
+
+private:
+    std::vector<std::unique_ptr<RenderPass>> passes;
+};
+
 class Renderer_Metal final : public Renderer { // Must be public or factory function won't work
+    // Allow render passes to access private members
+    friend class RenderPass;
+
 public:
     Renderer_Metal();
 
@@ -47,6 +91,14 @@ public:
     NS::SharedPtr<MTL::RenderPipelineState> getPipeline(PipelineHandle handle) const;
 
 private:
+    // Render graph for managing passes
+    RenderGraph graph;
+
+    // Per-frame data that passes need access to
+    MTL::CommandBuffer* currentCommandBuffer = nullptr;
+    std::shared_ptr<Scene> currentScene;
+    Camera* currentCamera = nullptr;
+    CA::MetalDrawable* currentDrawable = nullptr;
     SDL_Renderer* renderer;
     CA::MetalLayer* swapchain;
     MTL::Device* device;

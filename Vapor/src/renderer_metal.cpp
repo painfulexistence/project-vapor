@@ -23,6 +23,388 @@
 #include "asset_manager.hpp"
 #include "helper.hpp"
 
+// ============================================================================
+// Render Pass Implementations
+// ============================================================================
+
+// Pre-pass: Renders depth and normals
+class PrePass : public RenderPass {
+public:
+    explicit PrePass(Renderer_Metal* renderer) : RenderPass(renderer) {}
+
+    const char* getName() const override { return "PrePass"; }
+
+    void execute() override {
+        auto& r = *renderer;
+
+        // Create render pass descriptor
+        auto prePassDesc = NS::TransferPtr(MTL::RenderPassDescriptor::renderPassDescriptor());
+        auto prePassNormalRT = prePassDesc->colorAttachments()->object(0);
+        prePassNormalRT->setClearColor(MTL::ClearColor(0.0, 0.0, 0.0, 1.0));
+        prePassNormalRT->setLoadAction(MTL::LoadActionClear);
+        prePassNormalRT->setStoreAction(MTL::StoreActionStore);
+        prePassNormalRT->setTexture(r.normalRT_MS.get());
+
+        auto prePassDepthRT = prePassDesc->depthAttachment();
+        prePassDepthRT->setClearDepth(clearDepth);
+        prePassDepthRT->setLoadAction(MTL::LoadActionClear);
+        prePassDepthRT->setStoreAction(MTL::StoreActionStoreAndMultisampleResolve);
+        prePassDepthRT->setDepthResolveFilter(MTL::MultisampleDepthResolveFilter::MultisampleDepthResolveFilterMin);
+        prePassDepthRT->setTexture(r.depthStencilRT_MS.get());
+        prePassDepthRT->setResolveTexture(r.depthStencilRT.get());
+
+        // Execute the pass
+        auto encoder = r.currentCommandBuffer->renderCommandEncoder(prePassDesc.get());
+        encoder->setRenderPipelineState(r.prePassPipeline.get());
+        encoder->setCullMode(MTL::CullModeBack);
+        encoder->setFrontFacingWinding(MTL::Winding::WindingCounterClockwise);
+        encoder->setDepthStencilState(r.depthStencilState.get());
+
+        encoder->setVertexBuffer(r.cameraDataBuffers[r.currentFrameInFlight].get(), 0, 0);
+        encoder->setVertexBuffer(r.materialDataBuffer.get(), 0, 1);
+        encoder->setVertexBuffer(r.instanceDataBuffers[r.currentFrameInFlight].get(), 0, 2);
+        encoder->setVertexBuffer(r.getBuffer(r.currentScene->vertexBuffer).get(), 0, 3);
+
+        for (const auto& [material, meshes] : r.instanceBatches) {
+            encoder->setFragmentTexture(
+                r.getTexture(material->albedoMap ? material->albedoMap->texture : r.defaultAlbedoTexture).get(),
+                0
+            );
+
+            for (const auto& mesh : meshes) {
+                if (!r.currentCamera->isVisible(mesh->getWorldBoundingSphere())) {
+                    continue;
+                }
+
+                encoder->setVertexBytes(&mesh->instanceID, sizeof(Uint32), 4);
+                encoder->drawIndexedPrimitives(
+                    MTL::PrimitiveType::PrimitiveTypeTriangle,
+                    mesh->indexCount,
+                    MTL::IndexTypeUInt32,
+                    r.getBuffer(r.currentScene->indexBuffer).get(),
+                    mesh->indexOffset * sizeof(Uint32)
+                );
+                r.drawCount++;
+            }
+        }
+
+        encoder->endEncoding();
+    }
+};
+
+// TLAS build pass: Builds top-level acceleration structure for ray tracing
+class TLASBuildPass : public RenderPass {
+public:
+    explicit TLASBuildPass(Renderer_Metal* renderer) : RenderPass(renderer) {}
+
+    const char* getName() const override { return "TLASBuildPass"; }
+
+    void execute() override {
+        auto& r = *renderer;
+
+        // Build BLAS array if geometry is dirty
+        if (r.currentScene->isGeometryDirty) {
+            std::vector<NS::Object*> BLASObjects;
+            BLASObjects.reserve(r.BLASs.size());
+            for (auto blas : r.BLASs) {
+                BLASObjects.push_back(static_cast<NS::Object*>(blas.get()));
+            }
+            r.BLASArray = NS::TransferPtr(NS::Array::array(BLASObjects.data(), BLASObjects.size()));
+            r.currentScene->isGeometryDirty = false;
+        }
+
+        // Create TLAS descriptor
+        auto TLASDesc = NS::TransferPtr(MTL::InstanceAccelerationStructureDescriptor::alloc()->init());
+        TLASDesc->setInstanceCount(r.accelInstances.size());
+        TLASDesc->setInstancedAccelerationStructures(r.BLASArray.get());
+        TLASDesc->setInstanceDescriptorBuffer(r.accelInstanceBuffers[r.currentFrameInFlight].get());
+
+        auto TLASSizes = r.device->accelerationStructureSizes(TLASDesc.get());
+        if (!r.TLASScratchBuffers[r.currentFrameInFlight] ||
+            r.TLASScratchBuffers[r.currentFrameInFlight]->length() < TLASSizes.buildScratchBufferSize) {
+            r.TLASScratchBuffers[r.currentFrameInFlight] =
+                NS::TransferPtr(r.device->newBuffer(TLASSizes.buildScratchBufferSize, MTL::ResourceStorageModePrivate));
+        }
+        if (!r.TLASBuffers[r.currentFrameInFlight] ||
+            r.TLASBuffers[r.currentFrameInFlight]->size() < TLASSizes.accelerationStructureSize) {
+            r.TLASBuffers[r.currentFrameInFlight] =
+                NS::TransferPtr(r.device->newAccelerationStructure(TLASSizes.accelerationStructureSize));
+        }
+
+        // Build TLAS
+        auto accelEncoder = r.currentCommandBuffer->accelerationStructureCommandEncoder();
+        accelEncoder->buildAccelerationStructure(
+            r.TLASBuffers[r.currentFrameInFlight].get(),
+            TLASDesc.get(),
+            r.TLASScratchBuffers[r.currentFrameInFlight].get(),
+            0
+        );
+        accelEncoder->endEncoding();
+    }
+};
+
+// Normal resolve pass: Resolves MSAA normal texture
+class NormalResolvePass : public RenderPass {
+public:
+    explicit NormalResolvePass(Renderer_Metal* renderer) : RenderPass(renderer) {}
+
+    const char* getName() const override { return "NormalResolvePass"; }
+
+    void execute() override {
+        auto& r = *renderer;
+
+        auto drawableSize = r.swapchain->drawableSize();
+        glm::vec2 screenSize = glm::vec2(drawableSize.width, drawableSize.height);
+
+        auto encoder = r.currentCommandBuffer->computeCommandEncoder();
+        encoder->setComputePipelineState(r.normalResolvePipeline.get());
+        encoder->setTexture(r.normalRT_MS.get(), 0);
+        encoder->setTexture(r.normalRT.get(), 1);
+        encoder->setBytes(&MSAA_SAMPLE_COUNT, sizeof(Uint32), 0);
+        encoder->dispatchThreadgroups(MTL::Size(screenSize.x, screenSize.y, 1), MTL::Size(1, 1, 1));
+        encoder->endEncoding();
+    }
+};
+
+// Tile culling pass: Performs light culling for tiled rendering
+class TileCullingPass : public RenderPass {
+public:
+    explicit TileCullingPass(Renderer_Metal* renderer) : RenderPass(renderer) {}
+
+    const char* getName() const override { return "TileCullingPass"; }
+
+    void execute() override {
+        auto& r = *renderer;
+
+        auto drawableSize = r.swapchain->drawableSize();
+        glm::vec2 screenSize = glm::vec2(drawableSize.width, drawableSize.height);
+        glm::uvec3 gridSize = glm::uvec3(clusterGridSizeX, clusterGridSizeY, clusterGridSizeZ);
+        uint pointLightCount = r.currentScene->pointLights.size();
+
+        auto encoder = r.currentCommandBuffer->computeCommandEncoder();
+        encoder->setComputePipelineState(r.tileCullingPipeline.get());
+        encoder->setBuffer(r.clusterBuffers[r.currentFrameInFlight].get(), 0, 0);
+        encoder->setBuffer(r.pointLightBuffer.get(), 0, 1);
+        encoder->setBuffer(r.cameraDataBuffers[r.currentFrameInFlight].get(), 0, 2);
+        encoder->setBytes(&pointLightCount, sizeof(uint), 3);
+        encoder->setBytes(&gridSize, sizeof(glm::uvec3), 4);
+        encoder->setBytes(&screenSize, sizeof(glm::vec2), 5);
+        encoder->dispatchThreadgroups(MTL::Size(clusterGridSizeX, clusterGridSizeY, 1), MTL::Size(1, 1, 1));
+        encoder->endEncoding();
+    }
+};
+
+// Raytrace shadow pass: Computes ray-traced shadows
+class RaytraceShadowPass : public RenderPass {
+public:
+    explicit RaytraceShadowPass(Renderer_Metal* renderer) : RenderPass(renderer) {}
+
+    const char* getName() const override { return "RaytraceShadowPass"; }
+
+    void execute() override {
+        auto& r = *renderer;
+
+        auto drawableSize = r.swapchain->drawableSize();
+        glm::vec2 screenSize = glm::vec2(drawableSize.width, drawableSize.height);
+
+        auto encoder = r.currentCommandBuffer->computeCommandEncoder();
+        encoder->setComputePipelineState(r.raytraceShadowPipeline.get());
+        encoder->setTexture(r.depthStencilRT.get(), 0);
+        encoder->setTexture(r.normalRT.get(), 1);
+        encoder->setTexture(r.shadowRT.get(), 2);
+        encoder->setBuffer(r.cameraDataBuffers[r.currentFrameInFlight].get(), 0, 0);
+        encoder->setBuffer(r.directionalLightBuffer.get(), 0, 1);
+        encoder->setBuffer(r.pointLightBuffer.get(), 0, 2);
+        encoder->setBytes(&screenSize, sizeof(glm::vec2), 3);
+        encoder->setAccelerationStructure(r.TLASBuffers[r.currentFrameInFlight].get(), 4);
+        encoder->dispatchThreadgroups(MTL::Size(screenSize.x, screenSize.y, 1), MTL::Size(1, 1, 1));
+        encoder->endEncoding();
+
+        // Generate mipmaps for shadow texture
+        auto mipmapEncoder = NS::TransferPtr(r.currentCommandBuffer->blitCommandEncoder());
+        mipmapEncoder->generateMipmaps(r.shadowRT.get());
+        mipmapEncoder->endEncoding();
+    }
+};
+
+// Raytrace AO pass: Computes ray-traced ambient occlusion
+class RaytraceAOPass : public RenderPass {
+public:
+    explicit RaytraceAOPass(Renderer_Metal* renderer) : RenderPass(renderer) {}
+
+    const char* getName() const override { return "RaytraceAOPass"; }
+
+    void execute() override {
+        auto& r = *renderer;
+
+        auto drawableSize = r.swapchain->drawableSize();
+        glm::vec2 screenSize = glm::vec2(drawableSize.width, drawableSize.height);
+
+        auto encoder = r.currentCommandBuffer->computeCommandEncoder();
+        encoder->setComputePipelineState(r.raytraceAOPipeline.get());
+        encoder->setTexture(r.depthStencilRT.get(), 0);
+        encoder->setTexture(r.normalRT.get(), 1);
+        encoder->setTexture(r.aoRT.get(), 2);
+        encoder->setBuffer(r.frameDataBuffers[r.currentFrameInFlight].get(), 0, 0);
+        encoder->setBuffer(r.cameraDataBuffers[r.currentFrameInFlight].get(), 0, 1);
+        encoder->setAccelerationStructure(r.TLASBuffers[r.currentFrameInFlight].get(), 2);
+        encoder->dispatchThreadgroups(MTL::Size(screenSize.x, screenSize.y, 1), MTL::Size(1, 1, 1));
+        encoder->endEncoding();
+    }
+};
+
+// Main render pass: Renders the scene with PBR lighting
+class MainRenderPass : public RenderPass {
+public:
+    explicit MainRenderPass(Renderer_Metal* renderer) : RenderPass(renderer) {}
+
+    const char* getName() const override { return "MainRenderPass"; }
+
+    void execute() override {
+        auto& r = *renderer;
+
+        auto drawableSize = r.swapchain->drawableSize();
+        glm::vec2 screenSize = glm::vec2(drawableSize.width, drawableSize.height);
+        glm::uvec3 gridSize = glm::uvec3(clusterGridSizeX, clusterGridSizeY, clusterGridSizeZ);
+        auto time = (float)SDL_GetTicks() / 1000.0f;
+
+        // Create render pass descriptor
+        auto renderPassDesc = NS::TransferPtr(MTL::RenderPassDescriptor::renderPassDescriptor());
+        auto renderPassColorRT = renderPassDesc->colorAttachments()->object(0);
+        renderPassColorRT->setClearColor(MTL::ClearColor(clearColor.r, clearColor.g, clearColor.b, clearColor.a));
+        renderPassColorRT->setLoadAction(MTL::LoadActionClear);
+        renderPassColorRT->setStoreAction(MTL::StoreActionMultisampleResolve);
+        renderPassColorRT->setTexture(r.colorRT_MS.get());
+        renderPassColorRT->setResolveTexture(r.colorRT.get());
+
+        auto renderPassDepthRT = renderPassDesc->depthAttachment();
+        renderPassDepthRT->setLoadAction(MTL::LoadActionLoad);
+        renderPassDepthRT->setTexture(r.depthStencilRT_MS.get());
+
+        // Execute the pass
+        auto encoder = r.currentCommandBuffer->renderCommandEncoder(renderPassDesc.get());
+        encoder->setRenderPipelineState(r.drawPipeline.get());
+        encoder->setCullMode(MTL::CullModeBack);
+        encoder->setFrontFacingWinding(MTL::Winding::WindingCounterClockwise);
+        encoder->setDepthStencilState(r.depthStencilState.get());
+
+        r.currentInstanceCount = 0;
+        r.culledInstanceCount = 0;
+
+        encoder->setVertexBuffer(r.cameraDataBuffers[r.currentFrameInFlight].get(), 0, 0);
+        encoder->setVertexBuffer(r.materialDataBuffer.get(), 0, 1);
+        encoder->setVertexBuffer(r.instanceDataBuffers[r.currentFrameInFlight].get(), 0, 2);
+        encoder->setVertexBuffer(r.getBuffer(r.currentScene->vertexBuffer).get(), 0, 3);
+        encoder->setFragmentBuffer(r.directionalLightBuffer.get(), 0, 0);
+        encoder->setFragmentBuffer(r.pointLightBuffer.get(), 0, 1);
+        encoder->setFragmentBuffer(r.clusterBuffers[r.currentFrameInFlight].get(), 0, 2);
+        encoder->setFragmentBuffer(r.cameraDataBuffers[r.currentFrameInFlight].get(), 0, 3);
+        encoder->setFragmentBytes(&screenSize, sizeof(glm::vec2), 4);
+        encoder->setFragmentBytes(&gridSize, sizeof(glm::uvec3), 5);
+        encoder->setFragmentBytes(&time, sizeof(float), 6);
+
+        for (const auto& [material, meshes] : r.instanceBatches) {
+            encoder->setFragmentTexture(
+                r.getTexture(material->albedoMap ? material->albedoMap->texture : r.defaultAlbedoTexture).get(), 0
+            );
+            encoder->setFragmentTexture(
+                r.getTexture(material->normalMap ? material->normalMap->texture : r.defaultNormalTexture).get(), 1
+            );
+            encoder->setFragmentTexture(
+                r.getTexture(material->metallicMap ? material->metallicMap->texture : r.defaultORMTexture).get(), 2
+            );
+            encoder->setFragmentTexture(
+                r.getTexture(material->roughnessMap ? material->roughnessMap->texture : r.defaultORMTexture).get(), 3
+            );
+            encoder->setFragmentTexture(
+                r.getTexture(material->occlusionMap ? material->occlusionMap->texture : r.defaultORMTexture).get(), 4
+            );
+            encoder->setFragmentTexture(
+                r.getTexture(material->emissiveMap ? material->emissiveMap->texture : r.defaultEmissiveTexture).get(), 5
+            );
+            encoder->setFragmentTexture(r.shadowRT.get(), 7);
+
+            for (const auto& mesh : meshes) {
+                if (!r.currentCamera->isVisible(mesh->getWorldBoundingSphere())) {
+                    r.culledInstanceCount++;
+                    continue;
+                }
+
+                r.currentInstanceCount++;
+                encoder->setVertexBytes(&mesh->instanceID, sizeof(Uint32), 4);
+                encoder->drawIndexedPrimitives(
+                    MTL::PrimitiveType::PrimitiveTypeTriangle,
+                    mesh->indexCount,
+                    MTL::IndexTypeUInt32,
+                    r.getBuffer(r.currentScene->indexBuffer).get(),
+                    mesh->indexOffset * sizeof(Uint32)
+                );
+                r.drawCount++;
+            }
+        }
+
+        encoder->endEncoding();
+    }
+};
+
+// Post-process pass: Applies tone mapping and other post-processing effects
+class PostProcessPass : public RenderPass {
+public:
+    explicit PostProcessPass(Renderer_Metal* renderer) : RenderPass(renderer) {}
+
+    const char* getName() const override { return "PostProcessPass"; }
+
+    void execute() override {
+        auto& r = *renderer;
+
+        // Create render pass descriptor
+        auto postPassDesc = NS::TransferPtr(MTL::RenderPassDescriptor::renderPassDescriptor());
+        auto postPassColorRT = postPassDesc->colorAttachments()->object(0);
+        postPassColorRT->setClearColor(MTL::ClearColor(clearColor.r, clearColor.g, clearColor.b, clearColor.a));
+        postPassColorRT->setLoadAction(MTL::LoadActionClear);
+        postPassColorRT->setStoreAction(MTL::StoreActionStore);
+        postPassColorRT->setTexture(r.currentDrawable->texture());
+
+        // Execute the pass
+        auto encoder = r.currentCommandBuffer->renderCommandEncoder(postPassDesc.get());
+        encoder->setRenderPipelineState(r.postProcessPipeline.get());
+        encoder->setCullMode(MTL::CullModeBack);
+        encoder->setFrontFacingWinding(MTL::Winding::WindingCounterClockwise);
+        encoder->setFragmentTexture(r.colorRT.get(), 0);
+        encoder->setFragmentTexture(r.aoRT.get(), 1);
+        encoder->setFragmentTexture(r.normalRT.get(), 2);
+        encoder->drawPrimitives(MTL::PrimitiveType::PrimitiveTypeTriangle, 0, 3, 1);
+        encoder->endEncoding();
+    }
+};
+
+// ImGui pass: Renders the ImGui UI overlay
+class ImGuiPass : public RenderPass {
+public:
+    explicit ImGuiPass(Renderer_Metal* renderer) : RenderPass(renderer) {}
+
+    const char* getName() const override { return "ImGuiPass"; }
+
+    void execute() override {
+        auto& r = *renderer;
+
+        // UI building is done in draw() before this pass
+        // This pass just renders the ImGui draw data
+        ImGui::Render();
+
+        // Create render pass descriptor
+        auto imguiPassDesc = NS::TransferPtr(MTL::RenderPassDescriptor::renderPassDescriptor());
+        auto imguiPassColorRT = imguiPassDesc->colorAttachments()->object(0);
+        imguiPassColorRT->setLoadAction(MTL::LoadActionLoad);
+        imguiPassColorRT->setStoreAction(MTL::StoreActionStore);
+        imguiPassColorRT->setTexture(r.currentDrawable->texture());
+
+        auto encoder = r.currentCommandBuffer->renderCommandEncoder(imguiPassDesc.get());
+        ImGui_ImplMetal_RenderDrawData(ImGui::GetDrawData(), r.currentCommandBuffer, encoder);
+        encoder->endEncoding();
+    }
+};
+
 
 std::unique_ptr<Renderer> createRendererMetal() {
     return std::make_unique<Renderer_Metal>();
@@ -52,6 +434,17 @@ auto Renderer_Metal::init(SDL_Window* window) -> void {
     isInitialized = true;
 
     createResources();
+
+    // Initialize render graph with all passes
+    graph.addPass(std::make_unique<TLASBuildPass>(this));
+    graph.addPass(std::make_unique<PrePass>(this));
+    graph.addPass(std::make_unique<NormalResolvePass>(this));
+    graph.addPass(std::make_unique<TileCullingPass>(this));
+    graph.addPass(std::make_unique<RaytraceShadowPass>(this));
+    graph.addPass(std::make_unique<RaytraceAOPass>(this));
+    graph.addPass(std::make_unique<MainRenderPass>(this));
+    graph.addPass(std::make_unique<PostProcessPass>(this));
+    graph.addPass(std::make_unique<ImGuiPass>(this));
 }
 
 auto Renderer_Metal::deinit() -> void {
@@ -271,12 +664,15 @@ auto Renderer_Metal::stage(std::shared_ptr<Scene> scene) -> void {
 }
 
 auto Renderer_Metal::draw(std::shared_ptr<Scene> scene, Camera& camera) -> void {
+    // Get drawable
     auto surface = swapchain->nextDrawable();
     if (!surface) {
         return;
     }
 
-    // Prepare data
+    // ==========================================================================
+    // Prepare frame data
+    // ==========================================================================
     auto time = (float)SDL_GetTicks() / 1000.0f;
 
     FrameData* frameData = reinterpret_cast<FrameData*>(frameDataBuffers[currentFrameInFlight]->contents());
@@ -342,12 +738,7 @@ auto Renderer_Metal::draw(std::shared_ptr<Scene> scene, Camera& camera) -> void 
     }
     materialDataBuffer->didModifyRange(NS::Range::Make(0, materialDataBuffer->length()));
 
-    auto drawableSize = swapchain->drawableSize();
-    glm::vec2 screenSize = glm::vec2(drawableSize.width, drawableSize.height);
-    glm::uvec3 gridSize = glm::uvec3(clusterGridSizeX, clusterGridSizeY, clusterGridSizeZ);
-    uint pointLightCount = scene->pointLights.size();
-    uint directionalLightCount = scene->directionalLights.size();
-
+    // Update instance data
     instances.clear();
     accelInstances.clear();
     instanceBatches.clear();
@@ -390,295 +781,39 @@ auto Renderer_Metal::draw(std::shared_ptr<Scene> scene, Camera& camera) -> void 
     for (const auto& node : scene->nodes) {
         updateNode(node);
     }
-    if (instances.size() > MAX_INSTANCES) { // TODO: reallocate when needed
+    if (instances.size() > MAX_INSTANCES) {
         fmt::print("Warning: Instance count ({}) exceeds MAX_INSTANCES ({})\n", instances.size(), MAX_INSTANCES);
     }
-    // TODO: avoid updating the entire instance data buffer every frame
     memcpy(instanceDataBuffers[currentFrameInFlight]->contents(), instances.data(), instances.size() * sizeof(InstanceData));
     instanceDataBuffers[currentFrameInFlight]->didModifyRange(NS::Range::Make(0, instanceDataBuffers[currentFrameInFlight]->length()));
     memcpy(accelInstanceBuffers[currentFrameInFlight]->contents(), accelInstances.data(), accelInstances.size() * sizeof(MTL::AccelerationStructureInstanceDescriptor));
     accelInstanceBuffers[currentFrameInFlight]->didModifyRange(NS::Range::Make(0, accelInstanceBuffers[currentFrameInFlight]->length()));
 
-    if (scene->isGeometryDirty) {
-        std::vector<NS::Object*> BLASObjects;
-        BLASObjects.reserve(BLASs.size());
-        for (auto blas : BLASs) {
-            BLASObjects.push_back(static_cast<NS::Object*>(blas.get()));
-        }
-        BLASArray = NS::TransferPtr(NS::Array::array(BLASObjects.data(), BLASObjects.size()));
-        scene->isGeometryDirty = false;
-    }
-
-    auto TLASDesc = NS::TransferPtr(MTL::InstanceAccelerationStructureDescriptor::alloc()->init());
-    TLASDesc->setInstanceCount(accelInstances.size());
-    TLASDesc->setInstancedAccelerationStructures(BLASArray.get());
-    TLASDesc->setInstanceDescriptorBuffer(accelInstanceBuffers[currentFrameInFlight].get());
-    auto TLASSizes = device->accelerationStructureSizes(TLASDesc.get());
-    if (!TLASScratchBuffers[currentFrameInFlight] || TLASScratchBuffers[currentFrameInFlight]->length() < TLASSizes.buildScratchBufferSize) {
-        TLASScratchBuffers[currentFrameInFlight] = NS::TransferPtr(device->newBuffer(TLASSizes.buildScratchBufferSize, MTL::ResourceStorageModePrivate));
-    }
-    if (!TLASBuffers[currentFrameInFlight] || TLASBuffers[currentFrameInFlight]->size() < TLASSizes.accelerationStructureSize) {
-        TLASBuffers[currentFrameInFlight] = NS::TransferPtr(device->newAccelerationStructure(TLASSizes.accelerationStructureSize));
-    }
-
-    // Create render pass descriptors
-    auto prePass = NS::TransferPtr(MTL::RenderPassDescriptor::renderPassDescriptor());
-    auto prePassNormalRT = prePass->colorAttachments()->object(0);
-    prePassNormalRT->setClearColor(MTL::ClearColor(0.0, 0.0, 0.0, 1.0)); // default no normal
-    prePassNormalRT->setLoadAction(MTL::LoadActionClear);
-    prePassNormalRT->setStoreAction(MTL::StoreActionStore);
-    prePassNormalRT->setTexture(normalRT_MS.get());
-    auto prePassDepthRT = prePass->depthAttachment();
-    prePassDepthRT->setClearDepth(clearDepth);
-    prePassDepthRT->setLoadAction(MTL::LoadActionClear);
-    prePassDepthRT->setStoreAction(MTL::StoreActionStoreAndMultisampleResolve);
-    prePassDepthRT->setDepthResolveFilter(MTL::MultisampleDepthResolveFilter::MultisampleDepthResolveFilterMin);
-    prePassDepthRT->setTexture(depthStencilRT_MS.get());
-    prePassDepthRT->setResolveTexture(depthStencilRT.get());
-
-    auto renderPass = NS::TransferPtr(MTL::RenderPassDescriptor::renderPassDescriptor());
-    auto renderPassColorRT = renderPass->colorAttachments()->object(0);
-    renderPassColorRT->setClearColor(MTL::ClearColor(clearColor.r, clearColor.g, clearColor.b, clearColor.a));
-    renderPassColorRT->setLoadAction(MTL::LoadActionClear);
-    renderPassColorRT->setStoreAction(MTL::StoreActionMultisampleResolve);
-    renderPassColorRT->setTexture(colorRT_MS.get());
-    renderPassColorRT->setResolveTexture(colorRT.get());
-    auto renderPassDepthRT = renderPass->depthAttachment();
-    renderPassDepthRT->setLoadAction(MTL::LoadActionLoad);
-    renderPassDepthRT->setTexture(depthStencilRT_MS.get());
-
-    auto postPass = NS::TransferPtr(MTL::RenderPassDescriptor::renderPassDescriptor());
-    auto postPassColorRT = postPass->colorAttachments()->object(0);
-    postPassColorRT->setClearColor(MTL::ClearColor(clearColor.r, clearColor.g, clearColor.b, clearColor.a));
-    postPassColorRT->setLoadAction(MTL::LoadActionClear);
-    postPassColorRT->setStoreAction(MTL::StoreActionStore);
-    postPassColorRT->setTexture(surface->texture());
-
-    auto imguiPass = NS::TransferPtr(MTL::RenderPassDescriptor::renderPassDescriptor());
-    auto imguiPassColorRT = imguiPass->colorAttachments()->object(0);
-    imguiPassColorRT->setLoadAction(MTL::LoadActionLoad);
-    imguiPassColorRT->setStoreAction(MTL::StoreActionStore);
-    imguiPassColorRT->setTexture(surface->texture());
-
-    // Start rendering
+    // ==========================================================================
+    // Set up rendering context for passes
+    // ==========================================================================
     auto cmd = queue->commandBuffer();
+    currentCommandBuffer = cmd;
+    currentScene = scene;
+    currentCamera = &camera;
+    currentDrawable = surface;
     drawCount = 0;
 
-    // 0. build TLAS
-    // TODO: only build TLAS if it's dirty
-    auto accelEncoder = cmd->accelerationStructureCommandEncoder();
-    accelEncoder->buildAccelerationStructure(TLASBuffers[currentFrameInFlight].get(), TLASDesc.get(), TLASScratchBuffers[currentFrameInFlight].get(), 0);
-    accelEncoder->endEncoding();
+    // ==========================================================================
+    // Build ImGui UI (before ImGuiPass executes)
+    // ==========================================================================
+    // Create temporary render pass descriptor for ImGui initialization
+    auto imguiPassDesc = NS::TransferPtr(MTL::RenderPassDescriptor::renderPassDescriptor());
+    auto imguiPassColorRT = imguiPassDesc->colorAttachments()->object(0);
+    imguiPassColorRT->setTexture(surface->texture());
 
-    // 1. pre-pass
-    auto prePassEncoder = cmd->renderCommandEncoder(prePass.get());
-    prePassEncoder->setRenderPipelineState(prePassPipeline.get());
-    prePassEncoder->setCullMode(MTL::CullModeBack);
-    prePassEncoder->setFrontFacingWinding(MTL::Winding::WindingCounterClockwise);
-    prePassEncoder->setDepthStencilState(depthStencilState.get());
-
-    prePassEncoder->setVertexBuffer(cameraDataBuffers[currentFrameInFlight].get(), 0, 0);
-    prePassEncoder->setVertexBuffer(materialDataBuffer.get(), 0, 1);
-    prePassEncoder->setVertexBuffer(instanceDataBuffers[currentFrameInFlight].get(), 0, 2);
-    prePassEncoder->setVertexBuffer(getBuffer(scene->vertexBuffer).get(), 0, 3);
-    for (const auto& [material, meshes] : instanceBatches) {
-        prePassEncoder->setFragmentTexture(
-            getTexture(material->albedoMap ? material->albedoMap->texture : defaultAlbedoTexture).get(),
-            0
-        );
-        // prePassEncoder->setFragmentTexture(
-        //     getTexture(material->displacementMap ? material->displacementMap->texture : defaultDisplacementTexture).get(),
-        //     1
-        // );
-        for (const auto& mesh : meshes) {
-            if (!camera.isVisible(mesh->getWorldBoundingSphere())) {
-                continue;
-            }
-            // prePassEncoder->setVertexBuffer(getBuffer(mesh->vbos[0]).get(), 0, 2);
-            prePassEncoder->setVertexBytes(&mesh->instanceID, sizeof(Uint32), 4);
-            prePassEncoder->drawIndexedPrimitives(
-                MTL::PrimitiveType::PrimitiveTypeTriangle,
-                mesh->indexCount,// mesh->indices.size(),
-                MTL::IndexTypeUInt32,
-                getBuffer(scene->indexBuffer).get(), // getBuffer(mesh->ebo).get(),
-                mesh->indexOffset * sizeof(Uint32) // 0
-            );
-            drawCount++;
-        }
-    }
-    prePassEncoder->endEncoding();
-
-    // 2. normal resolve pass
-    auto normalResolveEncoder = cmd->computeCommandEncoder();
-    normalResolveEncoder->setComputePipelineState(normalResolvePipeline.get());
-    normalResolveEncoder->setTexture(normalRT_MS.get(), 0);
-    normalResolveEncoder->setTexture(normalRT.get(), 1);
-    normalResolveEncoder->setBytes(&MSAA_SAMPLE_COUNT, sizeof(Uint32), 0);
-    normalResolveEncoder->dispatchThreadgroups(MTL::Size(screenSize.x, screenSize.y, 1), MTL::Size(1, 1, 1));
-    normalResolveEncoder->endEncoding();
-
-    // // 2. cluster building pass
-    // auto clusterEncoder = cmd->computeCommandEncoder();
-    // clusterEncoder->setComputePipelineState(buildClustersPipeline.get());
-    // // clusterEncoder->useResource(clusterBuffer.get(), MTL::ResourceUsageWrite);
-    // clusterEncoder->setBuffer(clusterBuffers[currentFrameInFlight].get(), 0, 0);
-    // clusterEncoder->setBuffer(cameraDataBuffers[currentFrameInFlight].get(), 0, 1);
-    // clusterEncoder->setBytes(&screenSize, sizeof(glm::vec2), 2);
-    // clusterEncoder->setBytes(&gridSize, sizeof(glm::uvec3), 3);
-    // clusterEncoder->dispatchThreadgroups(MTL::Size(clusterGridSizeX, clusterGridSizeY, clusterGridSizeZ), MTL::Size(1, 1, 1));
-    // clusterEncoder->endEncoding();
-
-    // // 3. light culling pass
-    // auto cullingEncoder = cmd->computeCommandEncoder();
-    // cullingEncoder->setComputePipelineState(cullLightsPipeline.get());
-    // // cullingEncoder->useResource(clusterBuffer.get(), MTL::ResourceUsageWrite);
-    // cullingEncoder->setBuffer(clusterBuffers[currentFrameInFlight].get(), 0, 0);
-    // cullingEncoder->setBuffer(pointLightBuffer.get(), 0, 1);
-    // cullingEncoder->setBuffer(cameraDataBuffers[currentFrameInFlight].get(), 0, 2);
-    // cullingEncoder->setBytes(&lightCount, sizeof(uint), 3);
-    // cullingEncoder->setBytes(&gridSize, sizeof(glm::uvec3), 4);
-    // cullingEncoder->dispatchThreadgroups(MTL::Size(clusterGridSizeX, clusterGridSizeY, clusterGridSizeZ), MTL::Size(1, 1, 1));
-    // cullingEncoder->endEncoding();
-
-    // 2 & 3. tile culling pass
-    auto tileCullingEncoder = cmd->computeCommandEncoder();
-    tileCullingEncoder->setComputePipelineState(tileCullingPipeline.get());
-    // tileCullingEncoder->useResource(clusterBuffer.get(), MTL::ResourceUsageWrite);
-    tileCullingEncoder->setBuffer(clusterBuffers[currentFrameInFlight].get(), 0, 0);
-    tileCullingEncoder->setBuffer(pointLightBuffer.get(), 0, 1);
-    tileCullingEncoder->setBuffer(cameraDataBuffers[currentFrameInFlight].get(), 0, 2);
-    tileCullingEncoder->setBytes(&pointLightCount, sizeof(uint), 3);
-    tileCullingEncoder->setBytes(&gridSize, sizeof(glm::uvec3), 4);
-    tileCullingEncoder->setBytes(&screenSize, sizeof(glm::vec2), 5);
-    tileCullingEncoder->dispatchThreadgroups(MTL::Size(clusterGridSizeX, clusterGridSizeY, 1), MTL::Size(1, 1, 1));
-    tileCullingEncoder->endEncoding();
-
-    // 3. raytrace shadow pass
-    auto raytraceShadowEncoder = cmd->computeCommandEncoder();
-    raytraceShadowEncoder->setComputePipelineState(raytraceShadowPipeline.get());
-    raytraceShadowEncoder->setTexture(depthStencilRT.get(), 0);
-    raytraceShadowEncoder->setTexture(normalRT.get(), 1);
-    raytraceShadowEncoder->setTexture(shadowRT.get(), 2);
-    raytraceShadowEncoder->setBuffer(cameraDataBuffers[currentFrameInFlight].get(), 0, 0);
-    raytraceShadowEncoder->setBuffer(directionalLightBuffer.get(), 0, 1);
-    raytraceShadowEncoder->setBuffer(pointLightBuffer.get(), 0, 2);
-    raytraceShadowEncoder->setBytes(&screenSize, sizeof(glm::vec2), 3);
-    raytraceShadowEncoder->setAccelerationStructure(TLASBuffers[currentFrameInFlight].get(), 4);
-    raytraceShadowEncoder->dispatchThreadgroups(MTL::Size(screenSize.x, screenSize.y, 1), MTL::Size(1, 1, 1));
-    raytraceShadowEncoder->endEncoding();
-    // TODO: not sure if this is needed
-    auto mipmapEncoder = NS::TransferPtr(cmd->blitCommandEncoder());
-    mipmapEncoder->generateMipmaps(shadowRT.get());
-    mipmapEncoder->endEncoding();
-
-    // 3. raytrace AO pass
-    auto raytraceAOEncoder = cmd->computeCommandEncoder();
-    raytraceAOEncoder->setComputePipelineState(raytraceAOPipeline.get());
-    raytraceAOEncoder->setTexture(depthStencilRT.get(), 0);
-    raytraceAOEncoder->setTexture(normalRT.get(), 1);
-    raytraceAOEncoder->setTexture(aoRT.get(), 2);
-    raytraceAOEncoder->setBuffer(frameDataBuffers[currentFrameInFlight].get(), 0, 0);
-    raytraceAOEncoder->setBuffer(cameraDataBuffers[currentFrameInFlight].get(), 0, 1);
-    raytraceAOEncoder->setAccelerationStructure(TLASBuffers[currentFrameInFlight].get(), 2);
-    raytraceAOEncoder->dispatchThreadgroups(MTL::Size(screenSize.x, screenSize.y, 1), MTL::Size(1, 1, 1));
-    raytraceAOEncoder->endEncoding();
-
-    // 4. render pass
-    auto renderEncoder = cmd->renderCommandEncoder(renderPass.get());
-    renderEncoder->setRenderPipelineState(drawPipeline.get());
-    renderEncoder->setCullMode(MTL::CullModeBack);
-    renderEncoder->setFrontFacingWinding(MTL::Winding::WindingCounterClockwise);
-    renderEncoder->setDepthStencilState(depthStencilState.get());
-    // encoder->useResource(clusterBuffer.get(), MTL::ResourceUsageRead, MTL::RenderStageFragment);
-    // encoder->useResource(pointLightBuffer.get(), MTL::ResourceUsageRead, MTL::RenderStageFragment);
-    // encoder->useResource(testStorageBuffer.get(), MTL::ResourceUsageRead, MTL::RenderStageVertex | MTL::RenderStageFragment);
-
-    currentInstanceCount = 0;
-    culledInstanceCount = 0;
-    renderEncoder->setVertexBuffer(cameraDataBuffers[currentFrameInFlight].get(), 0, 0);
-    renderEncoder->setVertexBuffer(materialDataBuffer.get(), 0, 1);
-    renderEncoder->setVertexBuffer(instanceDataBuffers[currentFrameInFlight].get(), 0, 2);
-    renderEncoder->setVertexBuffer(getBuffer(scene->vertexBuffer).get(), 0, 3);
-    renderEncoder->setFragmentBuffer(directionalLightBuffer.get(), 0, 0);
-    renderEncoder->setFragmentBuffer(pointLightBuffer.get(), 0, 1);
-    renderEncoder->setFragmentBuffer(clusterBuffers[currentFrameInFlight].get(), 0, 2);
-    renderEncoder->setFragmentBuffer(cameraDataBuffers[currentFrameInFlight].get(), 0, 3);
-    renderEncoder->setFragmentBytes(&screenSize, sizeof(glm::vec2), 4);
-    renderEncoder->setFragmentBytes(&gridSize, sizeof(glm::uvec3), 5);
-    renderEncoder->setFragmentBytes(&time, sizeof(float), 6);
-    for (const auto& [material, meshes] : instanceBatches) {
-        // renderEncoder->setRenderPipelineState(getPipeline(material->pipeline).get());
-        renderEncoder->setFragmentTexture(
-            getTexture(material->albedoMap ? material->albedoMap->texture : defaultAlbedoTexture).get(),
-            0
-        );
-        renderEncoder->setFragmentTexture(
-            getTexture(material->normalMap ? material->normalMap->texture : defaultNormalTexture).get(),
-            1
-        );
-        renderEncoder->setFragmentTexture(
-            getTexture(material->metallicMap ? material->metallicMap->texture : defaultORMTexture).get(),
-            2
-        );
-        renderEncoder->setFragmentTexture(
-            getTexture(material->roughnessMap ? material->roughnessMap->texture : defaultORMTexture).get(),
-            3
-        );
-        renderEncoder->setFragmentTexture(
-            getTexture(material->occlusionMap ? material->occlusionMap->texture : defaultORMTexture).get(),
-            4
-        );
-        renderEncoder->setFragmentTexture(
-            getTexture(material->emissiveMap ? material->emissiveMap->texture : defaultEmissiveTexture).get(),
-            5
-        );
-        // renderEncoder->setFragmentTexture(
-        //     getTexture(material->displacementMap ? material->displacementMap->texture : defaultDisplacementTexture).get(),
-        //     6
-        // );
-        renderEncoder->setFragmentTexture(
-            shadowRT.get(),
-            7
-        );
-        for (const auto& mesh : meshes) {
-            if (!camera.isVisible(mesh->getWorldBoundingSphere())) {
-                culledInstanceCount++;
-                continue;
-            }
-            currentInstanceCount++;
-            // renderEncoder->setVertexBuffer(getBuffer(mesh->vbos[0]).get(), 0, 2);
-            renderEncoder->setVertexBytes(&mesh->instanceID, sizeof(Uint32), 4);
-            renderEncoder->drawIndexedPrimitives(
-                MTL::PrimitiveType::PrimitiveTypeTriangle,
-                mesh->indexCount,// mesh->indices.size(),
-                MTL::IndexTypeUInt32,
-                getBuffer(scene->indexBuffer).get(), // getBuffer(mesh->ebo).get(),
-                mesh->indexOffset * sizeof(Uint32) // 0
-            );
-            drawCount++;
-        }
-    }
-    renderEncoder->endEncoding();
-
-    // 5. post-processing pass
-    auto postProcessEncoder = cmd->renderCommandEncoder(postPass.get());
-    postProcessEncoder->setRenderPipelineState(postProcessPipeline.get());
-    postProcessEncoder->setCullMode(MTL::CullModeBack);
-    postProcessEncoder->setFrontFacingWinding(MTL::Winding::WindingCounterClockwise);
-    postProcessEncoder->setFragmentTexture(colorRT.get(), 0);
-    postProcessEncoder->setFragmentTexture(aoRT.get(), 1);
-    postProcessEncoder->setFragmentTexture(normalRT.get(), 2);
-    postProcessEncoder->drawPrimitives(MTL::PrimitiveType::PrimitiveTypeTriangle, 0, 3, 1);
-    postProcessEncoder->endEncoding();
-
-    ImGui_ImplMetal_NewFrame(imguiPass.get());
+    ImGui_ImplMetal_NewFrame(imguiPassDesc.get());
     ImGui_ImplSDL3_NewFrame();
     ImGui::NewFrame();
 
     // ImGui::DockSpaceOverViewport();
 
     if (ImGui::CollapsingHeader("Graphics", ImGuiTreeNodeFlags_DefaultOpen)) {
-        // ImGui::Text("Frame rate: %.3f ms/frame (%.1f FPS)", 1000.0f * deltaTime, 1.0f / deltaTime);
         ImGui::Text("Average frame rate: %.3f ms/frame (%.1f FPS)", 1000.0f / ImGui::GetIO().Framerate, ImGui::GetIO().Framerate);
         ImGui::ColorEdit3("Clear color", (float*)&clearColor);
 
@@ -717,7 +852,6 @@ auto Renderer_Metal::draw(std::shared_ptr<Scene> scene, Camera& camera) -> void 
                 }
                 ImGui::PushID(m.get());
                 if (ImGui::TreeNode(fmt:: format("Mat #{}", m->name).c_str())) {
-                    // TODO: show error image if texture is not uploaded
                     if (m->albedoMap) {
                         ImGui::Text("Albedo Map");
                         ImGui::Image((ImTextureID)(intptr_t)getTexture(m->albedoMap->texture).get(), ImVec2(64, 64));
@@ -827,11 +961,14 @@ auto Renderer_Metal::draw(std::shared_ptr<Scene> scene, Camera& camera) -> void 
         }
     }
 
-    ImGui::Render();
-    auto imguiEncoder = cmd->renderCommandEncoder(imguiPass.get());
-    ImGui_ImplMetal_RenderDrawData(ImGui::GetDrawData(), cmd, imguiEncoder);
-    imguiEncoder->endEncoding();
+    // ==========================================================================
+    // Execute all render passes
+    // ==========================================================================
+    graph.execute();
 
+    // ==========================================================================
+    // Present and cleanup
+    // ==========================================================================
     cmd->presentDrawable(surface);
     cmd->commit();
 
