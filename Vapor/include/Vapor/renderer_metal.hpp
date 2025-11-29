@@ -16,6 +16,17 @@
 class Renderer_Metal;
 class RenderPass;
 
+// Forward declarations for render pass classes
+class PrePass;
+class TLASBuildPass;
+class NormalResolvePass;
+class TileCullingPass;
+class RaytraceShadowPass;
+class RaytraceAOPass;
+class MainRenderPass;
+class PostProcessPass;
+class ImGuiPass;
+
 // Render pass base class
 class RenderPass {
 public:
@@ -54,6 +65,17 @@ private:
 };
 
 class Renderer_Metal final : public Renderer { // Must be public or factory function won't work
+    // Allow all render pass classes to access protected members
+    friend class PrePass;
+    friend class TLASBuildPass;
+    friend class NormalResolvePass;
+    friend class TileCullingPass;
+    friend class RaytraceShadowPass;
+    friend class RaytraceAOPass;
+    friend class MainRenderPass;
+    friend class PostProcessPass;
+    friend class ImGuiPass;
+
 public:
     Renderer_Metal();
 
