@@ -12,11 +12,7 @@
 
 #include "graphics.hpp"
 
-// Forward declarations
 class Renderer_Metal;
-class RenderPass;
-
-// Forward declarations for render pass classes
 class PrePass;
 class TLASBuildPass;
 class NormalResolvePass;
@@ -27,7 +23,6 @@ class MainRenderPass;
 class PostProcessPass;
 class ImGuiPass;
 
-// Render pass base class
 class RenderPass {
 public:
     explicit RenderPass(Renderer_Metal* renderer) : renderer(renderer) {}
@@ -41,7 +36,6 @@ protected:
     Renderer_Metal* renderer;
 };
 
-// Render graph that manages and executes render passes
 class RenderGraph {
 public:
     void addPass(std::unique_ptr<RenderPass> pass) {
@@ -64,8 +58,8 @@ private:
     std::vector<std::unique_ptr<RenderPass>> passes;
 };
 
+
 class Renderer_Metal final : public Renderer { // Must be public or factory function won't work
-    // Allow all render pass classes to access protected members
     friend class PrePass;
     friend class TLASBuildPass;
     friend class NormalResolvePass;
@@ -110,11 +104,6 @@ public:
     NS::SharedPtr<MTL::RenderPipelineState> getPipeline(PipelineHandle handle) const;
 
 protected:
-    // ======================================================================
-    // Protected members accessible by RenderPass subclasses
-    // ======================================================================
-
-    // Render graph for managing passes
     RenderGraph graph;
 
     // Per-frame rendering context
@@ -187,26 +176,20 @@ protected:
     Uint32 drawCount = 0;
 
 private:
-    // ======================================================================
-    // Private members - internal implementation details
-    // ======================================================================
-
-    // Resource ID generators
+    // Resource ID counters
     Uint32 nextBufferID = 0;
     Uint32 nextTextureID = 0;
     Uint32 nextPipelineID = 0;
     Uint32 nextInstanceID = 0;
     Uint32 nextMaterialID = 0;
 
-    // Resource handle maps
+    // Resource handle dicts
     std::unordered_map<Uint32, NS::SharedPtr<MTL::Buffer>> buffers;
     std::unordered_map<Uint32, NS::SharedPtr<MTL::Texture>> textures;
     std::unordered_map<Uint32, NS::SharedPtr<MTL::RenderPipelineState>> pipelines;
     std::unordered_map<std::shared_ptr<Material>, Uint32> materialIDs;
 
-    // Current render path
     RenderPath currentRenderPath = RenderPath::Forward;
 
-    // Resource creation
     void createResources();
 };

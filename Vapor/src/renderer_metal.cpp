@@ -132,6 +132,7 @@ public:
         }
 
         // Build TLAS
+        // TODO: only build TLAS if it's dirty
         auto accelEncoder = r.currentCommandBuffer->accelerationStructureCommandEncoder();
         accelEncoder->buildAccelerationStructure(
             r.TLASBuffers[r.currentFrameInFlight].get(),
@@ -781,9 +782,10 @@ auto Renderer_Metal::draw(std::shared_ptr<Scene> scene, Camera& camera) -> void 
     for (const auto& node : scene->nodes) {
         updateNode(node);
     }
-    if (instances.size() > MAX_INSTANCES) {
+    if (instances.size() > MAX_INSTANCES) {// TODO: reallocate when needed
         fmt::print("Warning: Instance count ({}) exceeds MAX_INSTANCES ({})\n", instances.size(), MAX_INSTANCES);
     }
+    // TODO: avoid updating the entire instance data buffer every frame
     memcpy(instanceDataBuffers[currentFrameInFlight]->contents(), instances.data(), instances.size() * sizeof(InstanceData));
     instanceDataBuffers[currentFrameInFlight]->didModifyRange(NS::Range::Make(0, instanceDataBuffers[currentFrameInFlight]->length()));
     memcpy(accelInstanceBuffers[currentFrameInFlight]->contents(), accelInstances.data(), accelInstances.size() * sizeof(MTL::AccelerationStructureInstanceDescriptor));
@@ -814,6 +816,7 @@ auto Renderer_Metal::draw(std::shared_ptr<Scene> scene, Camera& camera) -> void 
     // ImGui::DockSpaceOverViewport();
 
     if (ImGui::CollapsingHeader("Graphics", ImGuiTreeNodeFlags_DefaultOpen)) {
+        // ImGui::Text("Frame rate: %.3f ms/frame (%.1f FPS)", 1000.0f * deltaTime, 1.0f / deltaTime);
         ImGui::Text("Average frame rate: %.3f ms/frame (%.1f FPS)", 1000.0f / ImGui::GetIO().Framerate, ImGui::GetIO().Framerate);
         ImGui::ColorEdit3("Clear color", (float*)&clearColor);
 
@@ -852,6 +855,7 @@ auto Renderer_Metal::draw(std::shared_ptr<Scene> scene, Camera& camera) -> void 
                 }
                 ImGui::PushID(m.get());
                 if (ImGui::TreeNode(fmt:: format("Mat #{}", m->name).c_str())) {
+                    // TODO: show error image if texture is not uploaded
                     if (m->albedoMap) {
                         ImGui::Text("Albedo Map");
                         ImGui::Image((ImTextureID)(intptr_t)getTexture(m->albedoMap->texture).get(), ImVec2(64, 64));
