@@ -13,13 +13,7 @@ Using [Nuklear](https://github.com/Immediate-Mode-UI/Nuklear)
 Using [RmlUi](https://github.com/mikke89/RmlUi)
 
 ## Audio Engine
-Using [miniaudio](https://github.com/mackron/miniaudio) - a single-header C library that provides:
-- Cross-platform audio playback (Windows, macOS, Linux, iOS, Android)
-- Low-latency audio with dedicated audio thread
-- Built-in 3D spatial audio (HRTF, distance attenuation, Doppler effect)
-- Support for WAV, MP3, FLAC, and Vorbis formats
-
-See `Vapor/include/Vapor/audio_engine.hpp` for threading model documentation.
+Using [miniaudio](https://github.com/mackron/miniaudio) for spatial audio
 
 ## Physics Engine
 Using [Jolt](https://github.com/jrouwe/JoltPhysics) for better multi-threading support

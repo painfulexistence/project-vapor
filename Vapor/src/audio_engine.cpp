@@ -1,7 +1,9 @@
-#define MINIAUDIO_IMPLEMENTATION
-#include "../miniaudio/miniaudio.h"
-
 #include "Vapor/audio_engine.hpp"
+
+#define MINIAUDIO_IMPLEMENTATION
+#include "miniaudio.h"
+
+#include <SDL3/SDL_filesystem.h>
 #include <fmt/core.h>
 
 namespace Vapor {
@@ -139,7 +141,7 @@ void AudioManager::cleanupInstance(AudioInstance& inst) {
 // Playback
 // ============================================================
 
-AudioID AudioManager::play2d(const std::string& filePath, bool loop, float volume) {
+AudioID AudioManager::play2d(const std::string& filename, bool loop, float volume) {
     std::lock_guard<std::mutex> lock(m_mutex);
 
     if (!m_initialized) return AUDIO_ID_INVALID;
@@ -150,9 +152,10 @@ AudioID AudioManager::play2d(const std::string& filePath, bool loop, float volum
     auto& inst = m_instances[id % MAX_AUDIO_INSTANCES];
     inst.sound = new ma_sound();
 
+    std::string filePath = SDL_GetBasePath() + filename;
     if (ma_sound_init_from_file(m_engine, filePath.c_str(), MA_SOUND_FLAG_DECODE,
                                  nullptr, nullptr, inst.sound) != MA_SUCCESS) {
-        fmt::print("Failed to load audio: {}\n", filePath);
+        fmt::print("Failed to load audio: {}\n", filename);
         delete inst.sound;
         inst.sound = nullptr;
         return AUDIO_ID_INVALID;
@@ -173,12 +176,12 @@ AudioID AudioManager::play2d(const std::string& filePath, bool loop, float volum
     return id;
 }
 
-AudioID AudioManager::play3d(const std::string& filePath, const glm::vec3& position,
+AudioID AudioManager::play3d(const std::string& filename, const glm::vec3& position,
                               bool loop, float volume) {
-    return play3d(filePath, Audio3DConfig(position), loop, volume);
+    return play3d(filename, Audio3DConfig(position), loop, volume);
 }
 
-AudioID AudioManager::play3d(const std::string& filePath, const Audio3DConfig& config,
+AudioID AudioManager::play3d(const std::string& filename, const Audio3DConfig& config,
                               bool loop, float volume) {
     std::lock_guard<std::mutex> lock(m_mutex);
 
@@ -190,9 +193,10 @@ AudioID AudioManager::play3d(const std::string& filePath, const Audio3DConfig& c
     auto& inst = m_instances[id % MAX_AUDIO_INSTANCES];
     inst.sound = new ma_sound();
 
+    std::string filePath = SDL_GetBasePath() + filename;
     if (ma_sound_init_from_file(m_engine, filePath.c_str(), MA_SOUND_FLAG_DECODE,
                                  nullptr, nullptr, inst.sound) != MA_SUCCESS) {
-        fmt::print("Failed to load audio: {}\n", filePath);
+        fmt::print("Failed to load audio: {}\n", filename);
         delete inst.sound;
         inst.sound = nullptr;
         return AUDIO_ID_INVALID;

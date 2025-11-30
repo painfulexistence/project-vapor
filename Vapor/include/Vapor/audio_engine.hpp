@@ -1,73 +1,6 @@
 #pragma once
 
-/**
- * @file audio_engine.hpp
- * @brief High-level audio API with miniaudio backend and 3D spatial audio support.
- *
- * ═══════════════════════════════════════════════════════════════════════════════
- * THREADING MODEL
- * ═══════════════════════════════════════════════════════════════════════════════
- *
- * Audio systems use a dedicated audio thread for low-latency playback:
- *
- *   ┌─────────────────────────────────────────────────────────────┐
- *   │  Main Thread (Game Loop)                                    │
- *   │  ┌───────────────────────────────────────────────────────┐  │
- *   │  │  while (running) {                                    │  │
- *   │  │      input.update();                                  │  │
- *   │  │      physics.step();                                  │  │
- *   │  │      gameLogic.update();                              │  │
- *   │  │      audioManager.update(dt);  // ← Check finished    │  │
- *   │  │      renderer.draw();                                 │  │
- *   │  │  }                                                    │  │
- *   │  └───────────────────────────────────────────────────────┘  │
- *   └─────────────────────────────────────────────────────────────┘
- *                               │
- *                               │ play2d(), setPosition3d(), etc.
- *                               ▼
- *   ┌─────────────────────────────────────────────────────────────┐
- *   │  Audio Thread (miniaudio, ~5ms intervals)                   │
- *   │  ┌───────────────────────────────────────────────────────┐  │
- *   │  │  - Mix audio samples from all playing sounds          │  │
- *   │  │  - Apply 3D spatialization (distance, panning)        │  │
- *   │  │  - Apply Doppler effect based on velocities           │  │
- *   │  │  - Send mixed buffer to audio hardware                │  │
- *   │  └───────────────────────────────────────────────────────┘  │
- *   └─────────────────────────────────────────────────────────────┘
- *                               │
- *                               ▼
- *                        [ Audio Hardware ]
- *
- * WHY A SEPARATE AUDIO THREAD?
- * ────────────────────────────
- * At 44100 Hz sample rate with 256-sample buffer = 5.8ms latency.
- * If the audio thread is blocked for >5.8ms, audio will stutter (buffer underrun).
- * The dedicated thread ensures smooth playback even if the game hitches.
- *
- * THREAD SAFETY
- * ─────────────
- * All public methods are protected by a mutex. The audio thread and main thread
- * may access shared state (sound instances, volumes, positions) concurrently.
- *
- * Race conditions prevented:
- * - Main thread calls stop() while audio thread reads PCM data → Use-after-free
- * - Main thread modifies state while audio thread reads it → Data race
- * - Both threads iterate m_instances simultaneously → Undefined behavior
- *
- * CALLBACK DISPATCH
- * ─────────────────
- * Finish callbacks (setFinishCallback) are NOT called from the audio thread.
- * Instead, update() polls ma_sound_at_end() and invokes callbacks on the main
- * thread. This allows callbacks to safely:
- * - Call AudioManager methods (play2d, stop, etc.)
- * - Modify game state, UI, or ECS entities
- * - Avoid deadlocks (callbacks execute outside the mutex)
- *
- * ═══════════════════════════════════════════════════════════════════════════════
- */
-
 #include <glm/glm.hpp>
-#include <memory>
 #include <string>
 #include <functional>
 #include <array>
@@ -187,16 +120,16 @@ public:
     // 2D Audio Playback
     // ============================================================
 
-    AudioID play2d(const std::string& filePath, bool loop = false, float volume = 1.0f);
+    AudioID play2d(const std::string& filename, bool loop = false, float volume = 1.0f);
 
     // ============================================================
     // 3D Spatial Audio Playback
     // ============================================================
 
-    AudioID play3d(const std::string& filePath, const Audio3DConfig& config,
+    AudioID play3d(const std::string& filename, const Audio3DConfig& config,
                    bool loop = false, float volume = 1.0f);
 
-    AudioID play3d(const std::string& filePath, const glm::vec3& position,
+    AudioID play3d(const std::string& filename, const glm::vec3& position,
                    bool loop = false, float volume = 1.0f);
 
     // ============================================================
