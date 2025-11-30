@@ -34,6 +34,8 @@ public:
         return currentRenderPath;
     }
 
+    virtual void reloadShaders() override;
+
     VkPipeline createPipeline(const std::string& filename1, const std::string& filename2);
     VkPipeline createRenderPipeline(const std::string& vertShader, const std::string& fragShader);
     VkPipeline createPrePassPipeline(const std::string& vertShader, const std::string& fragShader);

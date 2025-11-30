@@ -90,6 +90,8 @@ public:
         return currentRenderPath;
     }
 
+    virtual void reloadShaders() override;
+
     NS::SharedPtr<MTL::RenderPipelineState> createPipeline(const std::string& filename, bool isHDR, bool isColorOnly, Uint32 sampleCount);
     NS::SharedPtr<MTL::ComputePipelineState> createComputePipeline(const std::string& filename);
 

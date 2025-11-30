@@ -2439,3 +2439,48 @@ VkDeviceMemory Renderer_Vulkan::getRenderTargetMemory(RenderTargetHandle handle)
 VkPipeline Renderer_Vulkan::getPipeline(PipelineHandle handle) const {
     return pipelines.at(handle.rid);
 }
+
+void Renderer_Vulkan::reloadShaders() {
+    fmt::print("[Renderer] Reloading shaders...\n");
+
+    // Wait for GPU to finish all operations
+    vkDeviceWaitIdle(device);
+
+    // Destroy old pipelines
+    if (renderPipeline != VK_NULL_HANDLE) {
+        vkDestroyPipeline(device, renderPipeline, nullptr);
+        renderPipeline = VK_NULL_HANDLE;
+    }
+    if (prePassPipeline != VK_NULL_HANDLE) {
+        vkDestroyPipeline(device, prePassPipeline, nullptr);
+        prePassPipeline = VK_NULL_HANDLE;
+    }
+    if (postProcessPipeline != VK_NULL_HANDLE) {
+        vkDestroyPipeline(device, postProcessPipeline, nullptr);
+        postProcessPipeline = VK_NULL_HANDLE;
+    }
+    if (tileCullingPipeline != VK_NULL_HANDLE) {
+        vkDestroyPipeline(device, tileCullingPipeline, nullptr);
+        tileCullingPipeline = VK_NULL_HANDLE;
+    }
+
+    // Recreate pipelines with reloaded shader files
+    renderPipeline = createRenderPipeline(
+        std::string("assets/shaders/TBN.vert.spv"),
+        std::string("assets/shaders/PBRNormalMapped.frag.spv")
+    );
+    prePassPipeline = createPrePassPipeline(
+        std::string("assets/shaders/PrePass.vert.spv"),
+        std::string("assets/shaders/PrePass.frag.spv")
+    );
+    postProcessPipeline = createPostProcessPipeline(
+        std::string("assets/shaders/FullScreen.vert.spv"),
+        std::string("assets/shaders/PostProcess.frag.spv")
+    );
+    tileCullingPipeline = createComputePipeline(
+        std::string("assets/shaders/TileLightCull.comp.spv"),
+        tileCullingPipelineLayout
+    );
+
+    fmt::print("[Renderer] Shaders reloaded successfully\n");
+}

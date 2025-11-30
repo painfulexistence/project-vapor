@@ -302,6 +302,29 @@ int main(int argc, char* args[]) {
         physics->process(scene, deltaTime);
         // scene->update(deltaTime);
 
+        // Debug panel
+        if (ImGui::Begin("Debug")) {
+            if (ImGui::CollapsingHeader("Hot Reload", ImGuiTreeNodeFlags_DefaultOpen)) {
+                if (ImGui::Button("Reload Shaders")) {
+                    renderer->reloadShaders();
+                }
+            }
+            if (ImGui::CollapsingHeader("Resources")) {
+                ImGui::Text("Images: %zu", resourceManager.getImageCacheSize());
+                ImGui::Text("Scenes: %zu", resourceManager.getSceneCacheSize());
+                ImGui::Text("Meshes: %zu", resourceManager.getMeshCacheSize());
+                if (ImGui::Button("Clear All Caches")) {
+                    resourceManager.clearAllCaches();
+                }
+            }
+            if (ImGui::CollapsingHeader("Stats")) {
+                ImGui::Text("Frame: %u", frameCount);
+                ImGui::Text("Delta: %.3f ms", deltaTime * 1000.0f);
+                ImGui::Text("FPS: %.1f", 1.0f / deltaTime);
+            }
+        }
+        ImGui::End();
+
         // Get current camera from camera manager
         auto* currentCam = cameraManager.getCurrentCamera();
         if (currentCam) {

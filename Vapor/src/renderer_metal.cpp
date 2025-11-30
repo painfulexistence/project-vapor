@@ -1187,3 +1187,20 @@ NS::SharedPtr<MTL::Texture> Renderer_Metal::getTexture(TextureHandle handle) con
 NS::SharedPtr<MTL::RenderPipelineState> Renderer_Metal::getPipeline(PipelineHandle handle) const {
     return pipelines.at(handle.rid);
 }
+
+void Renderer_Metal::reloadShaders() {
+    fmt::print("[Renderer] Reloading shaders...\n");
+
+    // Recreate pipelines (Metal compiles from source, so just recreate)
+    drawPipeline = createPipeline("assets/shaders/3d_pbr_normal_mapped.metal", true, false, MSAA_SAMPLE_COUNT);
+    prePassPipeline = createPipeline("assets/shaders/3d_depth_only.metal", true, false, MSAA_SAMPLE_COUNT);
+    postProcessPipeline = createPipeline("assets/shaders/3d_post_process.metal", false, true, 1);
+    buildClustersPipeline = createComputePipeline("assets/shaders/3d_cluster_build.metal");
+    cullLightsPipeline = createComputePipeline("assets/shaders/3d_light_cull.metal");
+    tileCullingPipeline = createComputePipeline("assets/shaders/3d_tile_light_cull.metal");
+    normalResolvePipeline = createComputePipeline("assets/shaders/3d_normal_resolve.metal");
+    raytraceShadowPipeline = createComputePipeline("assets/shaders/3d_raytrace_shadow.metal");
+    raytraceAOPipeline = createComputePipeline("assets/shaders/3d_raytrace_ao.metal");
+
+    fmt::print("[Renderer] Shaders reloaded successfully\n");
+}
