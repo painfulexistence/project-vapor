@@ -73,10 +73,38 @@ target_link_libraries(Vapor PRIVATE
 )
 
 
-install(TARGETS Vapor
+message(STATUS "Configuring Vapor package install...")
+include(CMakePackageConfigHelpers)
+
+write_basic_package_version_file(
+    "${CMAKE_CURRENT_BINARY_DIR}/vapor-config-version.cmake"
+    VERSION ${PROJECT_VERSION}
+    COMPATIBILITY SameMajorVersion
+)
+
+configure_package_config_file(
+    "${CMAKE_CURRENT_SOURCE_DIR}/vapor-config.cmake.in"
+    "${CMAKE_CURRENT_BINARY_DIR}/vapor-config.cmake"
+    INSTALL_DESTINATION share/vapor
+)
+
+install(TARGETS Vapor metal mikktspace
+    EXPORT VaporTargets
     LIBRARY DESTINATION ${CMAKE_INSTALL_LIBDIR}
     ARCHIVE DESTINATION ${CMAKE_INSTALL_LIBDIR}
     RUNTIME DESTINATION ${CMAKE_INSTALL_BINDIR}
+)
+
+install(EXPORT VaporTargets
+    FILE VaporTargets.cmake
+    NAMESPACE Vapor::
+    DESTINATION share/vapor
+)
+
+install(FILES
+    "${CMAKE_CURRENT_BINARY_DIR}/vapor-config.cmake"
+    "${CMAKE_CURRENT_BINARY_DIR}/vapor-config-version.cmake"
+    DESTINATION share/vapor
 )
 
 install(DIRECTORY include/ DESTINATION ${CMAKE_INSTALL_INCLUDEDIR})
