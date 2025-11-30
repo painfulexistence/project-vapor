@@ -13,7 +13,7 @@ Using [Nuklear](https://github.com/Immediate-Mode-UI/Nuklear)
 Using [RmlUi](https://github.com/mikke89/RmlUi)
 
 ## Audio Engine
-Using [OpenAL Soft](https://github.com/kcat/openal-soft)?
+Using [miniaudio](https://github.com/mackron/miniaudio) for spatial audio
 
 ## Physics Engine
 Using [Jolt](https://github.com/jrouwe/JoltPhysics) for better multi-threading support
