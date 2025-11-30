@@ -254,6 +254,216 @@ public:
     }
 };
 
+// Sky atmosphere pass: Renders procedural sky with Rayleigh and Mie scattering
+class SkyAtmospherePass : public RenderPass {
+public:
+    explicit SkyAtmospherePass(Renderer_Metal* renderer) : RenderPass(renderer) {}
+
+    const char* getName() const override { return "SkyAtmospherePass"; }
+
+    void execute() override {
+        auto& r = *renderer;
+
+        // Create render pass descriptor - render to color RT with blending
+        auto skyPassDesc = NS::TransferPtr(MTL::RenderPassDescriptor::renderPassDescriptor());
+        auto skyPassColorRT = skyPassDesc->colorAttachments()->object(0);
+        skyPassColorRT->setLoadAction(MTL::LoadActionLoad); // Preserve existing content
+        skyPassColorRT->setStoreAction(MTL::StoreActionMultisampleResolve);
+        skyPassColorRT->setTexture(r.colorRT_MS.get());
+        skyPassColorRT->setResolveTexture(r.colorRT.get());
+
+        // Execute the pass
+        auto encoder = r.currentCommandBuffer->renderCommandEncoder(skyPassDesc.get());
+        encoder->setRenderPipelineState(r.atmospherePipeline.get());
+        encoder->setCullMode(MTL::CullModeNone);
+
+        // Set buffers
+        encoder->setFragmentBuffer(r.cameraDataBuffers[r.currentFrameInFlight].get(), 0, 0);
+        encoder->setFragmentBuffer(r.atmosphereDataBuffer.get(), 0, 1);
+
+        // Set depth texture for sky masking
+        encoder->setFragmentTexture(r.depthStencilRT.get(), 0);
+
+        // Draw full-screen triangle
+        encoder->drawPrimitives(MTL::PrimitiveType::PrimitiveTypeTriangle, 0, 3, 1);
+        encoder->endEncoding();
+    }
+};
+
+// Sky capture pass: Captures atmosphere to environment cubemap for IBL
+class SkyCapturePass : public RenderPass {
+public:
+    explicit SkyCapturePass(Renderer_Metal* renderer) : RenderPass(renderer) {}
+
+    const char* getName() const override { return "SkyCapturePass"; }
+
+    void execute() override {
+        auto& r = *renderer;
+
+        if (!r.iblNeedsUpdate) return;
+
+        // Cubemap face view matrices (looking outward from origin)
+        const glm::mat4 captureViews[6] = {
+            glm::lookAt(glm::vec3(0), glm::vec3( 1, 0, 0), glm::vec3(0,-1, 0)), // +X
+            glm::lookAt(glm::vec3(0), glm::vec3(-1, 0, 0), glm::vec3(0,-1, 0)), // -X
+            glm::lookAt(glm::vec3(0), glm::vec3( 0, 1, 0), glm::vec3(0, 0, 1)), // +Y
+            glm::lookAt(glm::vec3(0), glm::vec3( 0,-1, 0), glm::vec3(0, 0,-1)), // -Y
+            glm::lookAt(glm::vec3(0), glm::vec3( 0, 0, 1), glm::vec3(0,-1, 0)), // +Z
+            glm::lookAt(glm::vec3(0), glm::vec3( 0, 0,-1), glm::vec3(0,-1, 0)), // -Z
+        };
+        const glm::mat4 captureProj = glm::perspective(glm::radians(90.0f), 1.0f, 0.1f, 10.0f);
+
+        // Render each face of the cubemap
+        for (uint32_t face = 0; face < 6; ++face) {
+            // Update capture data
+            IBLCaptureData* captureData = reinterpret_cast<IBLCaptureData*>(r.iblCaptureDataBuffer->contents());
+            captureData->viewProj = captureProj * captureViews[face];
+            captureData->faceIndex = face;
+            captureData->roughness = 0.0f;
+            r.iblCaptureDataBuffer->didModifyRange(NS::Range::Make(0, r.iblCaptureDataBuffer->length()));
+
+            // Create render pass for this face
+            auto passDesc = NS::TransferPtr(MTL::RenderPassDescriptor::renderPassDescriptor());
+            auto colorAttachment = passDesc->colorAttachments()->object(0);
+            colorAttachment->setLoadAction(MTL::LoadActionClear);
+            colorAttachment->setStoreAction(MTL::StoreActionStore);
+            colorAttachment->setClearColor(MTL::ClearColor(0.0, 0.0, 0.0, 1.0));
+            colorAttachment->setTexture(r.environmentCubemap.get());
+            colorAttachment->setSlice(face);
+            colorAttachment->setLevel(0);
+
+            auto encoder = r.currentCommandBuffer->renderCommandEncoder(passDesc.get());
+            encoder->setRenderPipelineState(r.skyCapturePipeline.get());
+            encoder->setCullMode(MTL::CullModeNone);
+            encoder->setVertexBuffer(r.iblCaptureDataBuffer.get(), 0, 0);
+            encoder->setFragmentBuffer(r.atmosphereDataBuffer.get(), 0, 0);
+            encoder->drawPrimitives(MTL::PrimitiveType::PrimitiveTypeTriangle, 0, 3, 1);
+            encoder->endEncoding();
+        }
+
+        // Generate mipmaps for environment cubemap
+        auto blitEncoder = r.currentCommandBuffer->blitCommandEncoder();
+        blitEncoder->generateMipmaps(r.environmentCubemap.get());
+        blitEncoder->endEncoding();
+    }
+};
+
+// Irradiance convolution pass: Creates diffuse irradiance map from environment cubemap
+class IrradianceConvolutionPass : public RenderPass {
+public:
+    explicit IrradianceConvolutionPass(Renderer_Metal* renderer) : RenderPass(renderer) {}
+
+    const char* getName() const override { return "IrradianceConvolutionPass"; }
+
+    void execute() override {
+        auto& r = *renderer;
+
+        if (!r.iblNeedsUpdate) return;
+
+        // Render each face of the irradiance cubemap
+        for (uint32_t face = 0; face < 6; ++face) {
+            IBLCaptureData* captureData = reinterpret_cast<IBLCaptureData*>(r.iblCaptureDataBuffer->contents());
+            captureData->faceIndex = face;
+            captureData->roughness = 0.0f;
+            r.iblCaptureDataBuffer->didModifyRange(NS::Range::Make(0, r.iblCaptureDataBuffer->length()));
+
+            auto passDesc = NS::TransferPtr(MTL::RenderPassDescriptor::renderPassDescriptor());
+            auto colorAttachment = passDesc->colorAttachments()->object(0);
+            colorAttachment->setLoadAction(MTL::LoadActionClear);
+            colorAttachment->setStoreAction(MTL::StoreActionStore);
+            colorAttachment->setClearColor(MTL::ClearColor(0.0, 0.0, 0.0, 1.0));
+            colorAttachment->setTexture(r.irradianceMap.get());
+            colorAttachment->setSlice(face);
+            colorAttachment->setLevel(0);
+
+            auto encoder = r.currentCommandBuffer->renderCommandEncoder(passDesc.get());
+            encoder->setRenderPipelineState(r.irradianceConvolutionPipeline.get());
+            encoder->setCullMode(MTL::CullModeNone);
+            encoder->setVertexBuffer(r.iblCaptureDataBuffer.get(), 0, 0);
+            encoder->setFragmentTexture(r.environmentCubemap.get(), 0);
+            encoder->drawPrimitives(MTL::PrimitiveType::PrimitiveTypeTriangle, 0, 3, 1);
+            encoder->endEncoding();
+        }
+    }
+};
+
+// Pre-filter environment map pass: Creates specular pre-filtered cubemap with roughness mips
+class PrefilterEnvMapPass : public RenderPass {
+public:
+    explicit PrefilterEnvMapPass(Renderer_Metal* renderer) : RenderPass(renderer) {}
+
+    const char* getName() const override { return "PrefilterEnvMapPass"; }
+
+    void execute() override {
+        auto& r = *renderer;
+
+        if (!r.iblNeedsUpdate) return;
+
+        const uint32_t maxMipLevels = 5;
+
+        // For each mip level (roughness level)
+        for (uint32_t mip = 0; mip < maxMipLevels; ++mip) {
+            float roughness = (float)mip / (float)(maxMipLevels - 1);
+
+            // For each face
+            for (uint32_t face = 0; face < 6; ++face) {
+                IBLCaptureData* captureData = reinterpret_cast<IBLCaptureData*>(r.iblCaptureDataBuffer->contents());
+                captureData->faceIndex = face;
+                captureData->roughness = roughness;
+                r.iblCaptureDataBuffer->didModifyRange(NS::Range::Make(0, r.iblCaptureDataBuffer->length()));
+
+                auto passDesc = NS::TransferPtr(MTL::RenderPassDescriptor::renderPassDescriptor());
+                auto colorAttachment = passDesc->colorAttachments()->object(0);
+                colorAttachment->setLoadAction(MTL::LoadActionClear);
+                colorAttachment->setStoreAction(MTL::StoreActionStore);
+                colorAttachment->setClearColor(MTL::ClearColor(0.0, 0.0, 0.0, 1.0));
+                colorAttachment->setTexture(r.prefilterMap.get());
+                colorAttachment->setSlice(face);
+                colorAttachment->setLevel(mip);
+
+                auto encoder = r.currentCommandBuffer->renderCommandEncoder(passDesc.get());
+                encoder->setRenderPipelineState(r.prefilterEnvMapPipeline.get());
+                encoder->setCullMode(MTL::CullModeNone);
+                encoder->setVertexBuffer(r.iblCaptureDataBuffer.get(), 0, 0);
+                encoder->setFragmentBuffer(r.iblCaptureDataBuffer.get(), 0, 0);
+                encoder->setFragmentTexture(r.environmentCubemap.get(), 0);
+                encoder->drawPrimitives(MTL::PrimitiveType::PrimitiveTypeTriangle, 0, 3, 1);
+                encoder->endEncoding();
+            }
+        }
+    }
+};
+
+// BRDF LUT pass: Pre-computes BRDF integration lookup table
+class BRDFLUTPass : public RenderPass {
+public:
+    explicit BRDFLUTPass(Renderer_Metal* renderer) : RenderPass(renderer) {}
+
+    const char* getName() const override { return "BRDFLUTPass"; }
+
+    void execute() override {
+        auto& r = *renderer;
+
+        if (!r.iblNeedsUpdate) return;
+
+        auto passDesc = NS::TransferPtr(MTL::RenderPassDescriptor::renderPassDescriptor());
+        auto colorAttachment = passDesc->colorAttachments()->object(0);
+        colorAttachment->setLoadAction(MTL::LoadActionClear);
+        colorAttachment->setStoreAction(MTL::StoreActionStore);
+        colorAttachment->setClearColor(MTL::ClearColor(0.0, 0.0, 0.0, 1.0));
+        colorAttachment->setTexture(r.brdfLUT.get());
+
+        auto encoder = r.currentCommandBuffer->renderCommandEncoder(passDesc.get());
+        encoder->setRenderPipelineState(r.brdfLUTPipeline.get());
+        encoder->setCullMode(MTL::CullModeNone);
+        encoder->drawPrimitives(MTL::PrimitiveType::PrimitiveTypeTriangle, 0, 3, 1);
+        encoder->endEncoding();
+
+        // IBL update complete
+        r.iblNeedsUpdate = false;
+    }
+};
+
 // Main render pass: Renders the scene with PBR lighting
 class MainRenderPass : public RenderPass {
 public:
@@ -324,6 +534,11 @@ public:
                 r.getTexture(material->emissiveMap ? material->emissiveMap->texture : r.defaultEmissiveTexture).get(), 5
             );
             encoder->setFragmentTexture(r.shadowRT.get(), 7);
+
+            // IBL textures
+            encoder->setFragmentTexture(r.irradianceMap.get(), 8);
+            encoder->setFragmentTexture(r.prefilterMap.get(), 9);
+            encoder->setFragmentTexture(r.brdfLUT.get(), 10);
 
             for (const auto& mesh : meshes) {
                 if (!r.currentCamera->isVisible(mesh->getWorldBoundingSphere())) {
@@ -437,6 +652,13 @@ auto Renderer_Metal::init(SDL_Window* window) -> void {
     createResources();
 
     // Initialize render graph with all passes
+    // IBL passes (run conditionally when iblNeedsUpdate is true)
+    graph.addPass(std::make_unique<SkyCapturePass>(this));
+    graph.addPass(std::make_unique<IrradianceConvolutionPass>(this));
+    graph.addPass(std::make_unique<PrefilterEnvMapPass>(this));
+    graph.addPass(std::make_unique<BRDFLUTPass>(this));
+
+    // Scene rendering passes
     graph.addPass(std::make_unique<TLASBuildPass>(this));
     graph.addPass(std::make_unique<PrePass>(this));
     graph.addPass(std::make_unique<NormalResolvePass>(this));
@@ -444,6 +666,7 @@ auto Renderer_Metal::init(SDL_Window* window) -> void {
     graph.addPass(std::make_unique<RaytraceShadowPass>(this));
     graph.addPass(std::make_unique<RaytraceAOPass>(this));
     graph.addPass(std::make_unique<MainRenderPass>(this));
+    graph.addPass(std::make_unique<SkyAtmospherePass>(this));
     graph.addPass(std::make_unique<PostProcessPass>(this));
     graph.addPass(std::make_unique<ImGuiPass>(this));
 }
@@ -473,6 +696,11 @@ auto Renderer_Metal::createResources() -> void {
     normalResolvePipeline = createComputePipeline("assets/shaders/3d_normal_resolve.metal");
     raytraceShadowPipeline = createComputePipeline("assets/shaders/3d_raytrace_shadow.metal");
     raytraceAOPipeline = createComputePipeline("assets/shaders/3d_ssao.metal");
+    atmospherePipeline = createPipeline("assets/shaders/3d_atmosphere.metal", true, true, MSAA_SAMPLE_COUNT);
+    skyCapturePipeline = createPipeline("assets/shaders/3d_sky_capture.metal", true, true, 1);
+    irradianceConvolutionPipeline = createPipeline("assets/shaders/3d_irradiance_convolution.metal", true, true, 1);
+    prefilterEnvMapPipeline = createPipeline("assets/shaders/3d_prefilter_envmap.metal", true, true, 1);
+    brdfLUTPipeline = createPipeline("assets/shaders/3d_brdf_lut.metal", false, true, 1);
 
     // Create buffers
     frameDataBuffers.resize(MAX_FRAMES_IN_FLIGHT);
@@ -497,6 +725,80 @@ auto Renderer_Metal::createResources() -> void {
     for (auto& clusterBuffer : clusterBuffers) {
         clusterBuffer = NS::TransferPtr(device->newBuffer(clusterGridSizeX * clusterGridSizeY * clusterGridSizeZ * sizeof(Cluster), MTL::ResourceStorageModeManaged));
     }
+
+    // Create atmosphere data buffer with default Earth-like settings
+    atmosphereDataBuffer = NS::TransferPtr(device->newBuffer(sizeof(AtmosphereData), MTL::ResourceStorageModeManaged));
+    AtmosphereData* atmosphereData = reinterpret_cast<AtmosphereData*>(atmosphereDataBuffer->contents());
+    atmosphereData->sunDirection = glm::normalize(glm::vec3(0.5f, 0.5f, 0.5f));
+    atmosphereData->sunIntensity = 22.0f;
+    atmosphereData->sunColor = glm::vec3(1.0f, 1.0f, 1.0f);
+    atmosphereData->planetRadius = 6371e3f;        // Earth radius in meters
+    atmosphereData->atmosphereRadius = 6471e3f;    // Atmosphere radius (100km above surface)
+    atmosphereData->rayleighScaleHeight = 8500.0f; // Rayleigh scale height
+    atmosphereData->mieScaleHeight = 1200.0f;      // Mie scale height
+    atmosphereData->miePreferredDirection = 0.758f; // Mie phase function g parameter
+    atmosphereData->rayleighCoefficients = glm::vec3(5.8e-6f, 13.5e-6f, 33.1e-6f); // Article values
+    atmosphereData->mieCoefficient = 21e-6f;
+    atmosphereData->exposure = 1.0f;
+    atmosphereDataBuffer->didModifyRange(NS::Range::Make(0, atmosphereDataBuffer->length()));
+
+    // Create IBL capture data buffer
+    iblCaptureDataBuffer = NS::TransferPtr(device->newBuffer(sizeof(IBLCaptureData), MTL::ResourceStorageModeManaged));
+
+    // Create IBL textures
+    const uint32_t envMapSize = 512;
+    const uint32_t irradianceMapSize = 32;
+    const uint32_t prefilterMapSize = 128;
+    const uint32_t brdfLUTSize = 512;
+    const uint32_t prefilterMipLevels = 5;
+
+    // Environment cubemap (captured from atmosphere)
+    MTL::TextureDescriptor* envMapDesc = MTL::TextureDescriptor::alloc()->init();
+    envMapDesc->setTextureType(MTL::TextureTypeCube);
+    envMapDesc->setPixelFormat(MTL::PixelFormatRGBA16Float);
+    envMapDesc->setWidth(envMapSize);
+    envMapDesc->setHeight(envMapSize);
+    envMapDesc->setMipmapLevelCount(calculateMipmapLevelCount(envMapSize, envMapSize));
+    envMapDesc->setUsage(MTL::TextureUsageRenderTarget | MTL::TextureUsageShaderRead);
+    envMapDesc->setStorageMode(MTL::StorageModePrivate);
+    environmentCubemap = NS::TransferPtr(device->newTexture(envMapDesc));
+    envMapDesc->release();
+
+    // Irradiance cubemap (diffuse IBL)
+    MTL::TextureDescriptor* irradianceDesc = MTL::TextureDescriptor::alloc()->init();
+    irradianceDesc->setTextureType(MTL::TextureTypeCube);
+    irradianceDesc->setPixelFormat(MTL::PixelFormatRGBA16Float);
+    irradianceDesc->setWidth(irradianceMapSize);
+    irradianceDesc->setHeight(irradianceMapSize);
+    irradianceDesc->setMipmapLevelCount(1);
+    irradianceDesc->setUsage(MTL::TextureUsageRenderTarget | MTL::TextureUsageShaderRead);
+    irradianceDesc->setStorageMode(MTL::StorageModePrivate);
+    irradianceMap = NS::TransferPtr(device->newTexture(irradianceDesc));
+    irradianceDesc->release();
+
+    // Pre-filtered environment cubemap (specular IBL)
+    MTL::TextureDescriptor* prefilterDesc = MTL::TextureDescriptor::alloc()->init();
+    prefilterDesc->setTextureType(MTL::TextureTypeCube);
+    prefilterDesc->setPixelFormat(MTL::PixelFormatRGBA16Float);
+    prefilterDesc->setWidth(prefilterMapSize);
+    prefilterDesc->setHeight(prefilterMapSize);
+    prefilterDesc->setMipmapLevelCount(prefilterMipLevels);
+    prefilterDesc->setUsage(MTL::TextureUsageRenderTarget | MTL::TextureUsageShaderRead);
+    prefilterDesc->setStorageMode(MTL::StorageModePrivate);
+    prefilterMap = NS::TransferPtr(device->newTexture(prefilterDesc));
+    prefilterDesc->release();
+
+    // BRDF LUT (2D texture)
+    MTL::TextureDescriptor* brdfDesc = MTL::TextureDescriptor::alloc()->init();
+    brdfDesc->setTextureType(MTL::TextureType2D);
+    brdfDesc->setPixelFormat(MTL::PixelFormatRG16Float);
+    brdfDesc->setWidth(brdfLUTSize);
+    brdfDesc->setHeight(brdfLUTSize);
+    brdfDesc->setMipmapLevelCount(1);
+    brdfDesc->setUsage(MTL::TextureUsageRenderTarget | MTL::TextureUsageShaderRead);
+    brdfDesc->setStorageMode(MTL::StorageModePrivate);
+    brdfLUT = NS::TransferPtr(device->newTexture(brdfDesc));
+    brdfDesc->release();
 
     accelInstanceBuffers.resize(MAX_FRAMES_IN_FLIGHT);
     TLASScratchBuffers.resize(MAX_FRAMES_IN_FLIGHT);
@@ -920,6 +1222,76 @@ auto Renderer_Metal::draw(std::shared_ptr<Scene> scene, Camera& camera) -> void 
                 ImGui::DragFloat("Intensity", &l.intensity, 0.1f, 0.0001f);
                 ImGui::DragFloat("Radius", &l.radius, 0.1f, 0.0001f);
                 ImGui::PopID();
+            }
+            ImGui::TreePop();
+        }
+
+        if (ImGui::TreeNode("Atmosphere")) {
+            ImGui::Separator();
+            AtmosphereData* atmos = reinterpret_cast<AtmosphereData*>(atmosphereDataBuffer->contents());
+            bool atmosChanged = false;
+
+            atmosChanged |= ImGui::DragFloat3("Sun Direction", (float*)&atmos->sunDirection, 0.01f, -1.0f, 1.0f);
+            if (atmosChanged) {
+                atmos->sunDirection = glm::normalize(atmos->sunDirection);
+            }
+            atmosChanged |= ImGui::DragFloat("Sun Intensity", &atmos->sunIntensity, 0.5f, 0.0f, 100.0f);
+            atmosChanged |= ImGui::ColorEdit3("Sun Color", (float*)&atmos->sunColor);
+            atmosChanged |= ImGui::DragFloat("Exposure", &atmos->exposure, 0.01f, 0.01f, 10.0f);
+
+            if (ImGui::TreeNode("Advanced")) {
+                atmosChanged |= ImGui::DragFloat("Planet Radius (m)", &atmos->planetRadius, 1000.0f, 1e3f, 1e8f, "%.0f");
+                atmosChanged |= ImGui::DragFloat("Atmosphere Radius (m)", &atmos->atmosphereRadius, 1000.0f, 1e3f, 1e8f, "%.0f");
+                atmosChanged |= ImGui::DragFloat("Rayleigh Scale Height", &atmos->rayleighScaleHeight, 100.0f, 100.0f, 50000.0f);
+                atmosChanged |= ImGui::DragFloat("Mie Scale Height", &atmos->mieScaleHeight, 100.0f, 100.0f, 10000.0f);
+                atmosChanged |= ImGui::DragFloat("Mie Direction (g)", &atmos->miePreferredDirection, 0.01f, -0.999f, 0.999f);
+
+                float rayleighR = atmos->rayleighCoefficients.r * 1e6f;
+                float rayleighG = atmos->rayleighCoefficients.g * 1e6f;
+                float rayleighB = atmos->rayleighCoefficients.b * 1e6f;
+                bool rayleighChanged = false;
+                rayleighChanged |= ImGui::DragFloat("Rayleigh R (x1e-6)", &rayleighR, 0.1f, 0.0f, 100.0f);
+                rayleighChanged |= ImGui::DragFloat("Rayleigh G (x1e-6)", &rayleighG, 0.1f, 0.0f, 100.0f);
+                rayleighChanged |= ImGui::DragFloat("Rayleigh B (x1e-6)", &rayleighB, 0.1f, 0.0f, 100.0f);
+                if (rayleighChanged) {
+                    atmos->rayleighCoefficients = glm::vec3(rayleighR * 1e-6f, rayleighG * 1e-6f, rayleighB * 1e-6f);
+                    atmosChanged = true;
+                }
+
+                float mie = atmos->mieCoefficient * 1e6f;
+                if (ImGui::DragFloat("Mie Coeff (x1e-6)", &mie, 0.1f, 0.0f, 100.0f)) {
+                    atmos->mieCoefficient = mie * 1e-6f;
+                    atmosChanged = true;
+                }
+
+                if (ImGui::Button("Reset to Earth Defaults")) {
+                    atmos->planetRadius = 6371e3f;
+                    atmos->atmosphereRadius = 6471e3f;
+                    atmos->rayleighScaleHeight = 8500.0f;
+                    atmos->mieScaleHeight = 1200.0f;
+                    atmos->miePreferredDirection = 0.758f;
+                    atmos->rayleighCoefficients = glm::vec3(5.8e-6f, 13.5e-6f, 33.1e-6f);
+                    atmos->mieCoefficient = 21e-6f;
+                    atmosChanged = true;
+                }
+
+                ImGui::TreePop();
+            }
+
+            ImGui::Separator();
+            ImGui::Text("IBL Status: %s", iblNeedsUpdate ? "Pending Update" : "Up to Date");
+            if (ImGui::Button("Refresh IBL")) {
+                iblNeedsUpdate = true;
+            }
+            ImGui::SameLine();
+            ImGui::TextDisabled("(?)");
+            if (ImGui::IsItemHovered()) {
+                ImGui::SetTooltip("Re-bakes the sky to IBL cubemaps.\nAutomatically triggered when atmosphere parameters change.");
+            }
+
+            if (atmosChanged) {
+                atmosphereDataBuffer->didModifyRange(NS::Range::Make(0, atmosphereDataBuffer->length()));
+                iblNeedsUpdate = true; // Trigger IBL update when atmosphere changes
             }
             ImGui::TreePop();
         }
