@@ -7,18 +7,17 @@ using namespace metal;
 
 struct AtmosphereData {
     float3 sunDirection;
-    float sunIntensity;
     float3 sunColor;
+    float sunIntensity;
     float planetRadius;
     float atmosphereRadius;
+    float exposure;
+    float3 rayleighCoefficients;
     float rayleighScaleHeight;
+    float mieCoefficient;
     float mieScaleHeight;
     float miePreferredDirection;
-    float3 rayleighCoefficients;
-    float _pad1;
-    float mieCoefficient;
-    float exposure;
-    float _pad2[2];
+    float3 groundColor;
 };
 
 struct IBLCaptureData {

@@ -267,22 +267,34 @@ public:
         // Create render pass descriptor - render to color RT with blending
         auto skyPassDesc = NS::TransferPtr(MTL::RenderPassDescriptor::renderPassDescriptor());
         auto skyPassColorRT = skyPassDesc->colorAttachments()->object(0);
-        skyPassColorRT->setLoadAction(MTL::LoadActionLoad); // Preserve existing content
-        skyPassColorRT->setStoreAction(MTL::StoreActionMultisampleResolve);
-        skyPassColorRT->setTexture(r.colorRT_MS.get());
-        skyPassColorRT->setResolveTexture(r.colorRT.get());
+        skyPassColorRT->setLoadAction(MTL::LoadActionLoad); // Preserve existing scene content
+        skyPassColorRT->setStoreAction(MTL::StoreActionStore);
+        skyPassColorRT->setTexture(r.colorRT.get());
+
+        // Set depth attachment - use resolved depth from MainRenderPass
+        auto skyPassDepthRT = skyPassDesc->depthAttachment();
+        skyPassDepthRT->setLoadAction(MTL::LoadActionLoad);
+        skyPassDepthRT->setStoreAction(MTL::StoreActionDontCare); // Don't write depth
+        skyPassDepthRT->setTexture(r.depthStencilRT.get());
 
         // Execute the pass
         auto encoder = r.currentCommandBuffer->renderCommandEncoder(skyPassDesc.get());
         encoder->setRenderPipelineState(r.atmospherePipeline.get());
         encoder->setCullMode(MTL::CullModeNone);
 
+        // Use hardware depth test: only render sky where depth == 1.0 (far plane, no geometry)
+        // CompareFunctionEqual: sky depth (1.0) == depth buffer (1.0) -> pass, render sky
+        //                      sky depth (1.0) == depth buffer (0.5) -> fail, don't render (preserves scene)
+        MTL::DepthStencilDescriptor* skyDepthDesc = MTL::DepthStencilDescriptor::alloc()->init();
+        skyDepthDesc->setDepthCompareFunction(MTL::CompareFunction::CompareFunctionEqual); // Only pass when depth == 1.0 (far plane)
+        skyDepthDesc->setDepthWriteEnabled(false); // Don't write depth for sky
+        NS::SharedPtr<MTL::DepthStencilState> skyDepthState = NS::TransferPtr(r.device->newDepthStencilState(skyDepthDesc));
+        skyDepthDesc->release();
+        encoder->setDepthStencilState(skyDepthState.get());
+
         // Set buffers
         encoder->setFragmentBuffer(r.cameraDataBuffers[r.currentFrameInFlight].get(), 0, 0);
         encoder->setFragmentBuffer(r.atmosphereDataBuffer.get(), 0, 1);
-
-        // Set depth texture for sky masking
-        encoder->setFragmentTexture(r.depthStencilRT.get(), 0);
 
         // Draw full-screen triangle
         encoder->drawPrimitives(MTL::PrimitiveType::PrimitiveTypeTriangle, 0, 3, 1);
@@ -696,7 +708,7 @@ auto Renderer_Metal::createResources() -> void {
     normalResolvePipeline = createComputePipeline("assets/shaders/3d_normal_resolve.metal");
     raytraceShadowPipeline = createComputePipeline("assets/shaders/3d_raytrace_shadow.metal");
     raytraceAOPipeline = createComputePipeline("assets/shaders/3d_ssao.metal");
-    atmospherePipeline = createPipeline("assets/shaders/3d_atmosphere.metal", true, true, MSAA_SAMPLE_COUNT);
+    atmospherePipeline = createPipeline("assets/shaders/3d_atmosphere.metal", true, false, 1); // No MSAA for sky (full-screen triangle)
     skyCapturePipeline = createPipeline("assets/shaders/3d_sky_capture.metal", true, true, 1);
     irradianceConvolutionPipeline = createPipeline("assets/shaders/3d_irradiance_convolution.metal", true, true, 1);
     prefilterEnvMapPipeline = createPipeline("assets/shaders/3d_prefilter_envmap.metal", true, true, 1);
@@ -730,16 +742,17 @@ auto Renderer_Metal::createResources() -> void {
     atmosphereDataBuffer = NS::TransferPtr(device->newBuffer(sizeof(AtmosphereData), MTL::ResourceStorageModeManaged));
     AtmosphereData* atmosphereData = reinterpret_cast<AtmosphereData*>(atmosphereDataBuffer->contents());
     atmosphereData->sunDirection = glm::normalize(glm::vec3(0.5f, 0.5f, 0.5f));
-    atmosphereData->sunIntensity = 22.0f;
+    atmosphereData->sunIntensity = 12.0f;
     atmosphereData->sunColor = glm::vec3(1.0f, 1.0f, 1.0f);
     atmosphereData->planetRadius = 6371e3f;        // Earth radius in meters
     atmosphereData->atmosphereRadius = 6471e3f;    // Atmosphere radius (100km above surface)
     atmosphereData->rayleighScaleHeight = 8500.0f; // Rayleigh scale height
     atmosphereData->mieScaleHeight = 1200.0f;      // Mie scale height
     atmosphereData->miePreferredDirection = 0.758f; // Mie phase function g parameter
-    atmosphereData->rayleighCoefficients = glm::vec3(5.8e-6f, 13.5e-6f, 33.1e-6f); // Article values
+    atmosphereData->rayleighCoefficients = glm::vec3(5.8e-6f, 13.5e-6f, 33.1e-6f);
     atmosphereData->mieCoefficient = 21e-6f;
     atmosphereData->exposure = 1.0f;
+    atmosphereData->groundColor = glm::vec3(0.015f, 0.015f, 0.02f); // Default dark blue
     atmosphereDataBuffer->didModifyRange(NS::Range::Make(0, atmosphereDataBuffer->length()));
 
     // Create IBL capture data buffer
@@ -1238,6 +1251,7 @@ auto Renderer_Metal::draw(std::shared_ptr<Scene> scene, Camera& camera) -> void 
             atmosChanged |= ImGui::DragFloat("Sun Intensity", &atmos->sunIntensity, 0.5f, 0.0f, 100.0f);
             atmosChanged |= ImGui::ColorEdit3("Sun Color", (float*)&atmos->sunColor);
             atmosChanged |= ImGui::DragFloat("Exposure", &atmos->exposure, 0.01f, 0.01f, 10.0f);
+            atmosChanged |= ImGui::ColorEdit3("Ground Color", (float*)&atmos->groundColor);
 
             if (ImGui::TreeNode("Advanced")) {
                 atmosChanged |= ImGui::DragFloat("Planet Radius (m)", &atmos->planetRadius, 1000.0f, 1e3f, 1e8f, "%.0f");
@@ -1414,6 +1428,7 @@ NS::SharedPtr<MTL::RenderPipelineState> Renderer_Metal::createPipeline(const std
     } else {
         colorAttachment->setPixelFormat(swapchain->pixelFormat());
     }
+    // TODO: optinal blending for particles
     // colorAttachment->setBlendingEnabled(true);
     // colorAttachment->setAlphaBlendOperation(MTL::BlendOperation::BlendOperationAdd);
     // colorAttachment->setRgbBlendOperation(MTL::BlendOperation::BlendOperationAdd);

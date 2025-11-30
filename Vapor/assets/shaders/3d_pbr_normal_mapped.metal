@@ -323,8 +323,9 @@ fragment float4 fragmentMain(
         result += CalculatePointLight(pointLights[lightIndex], norm, T, B, viewDir, surf, in.worldPosition.xyz);
     }
 
-    // IBL ambient lighting (replaces simple ambient)
-    result += CalculateIBL(norm, viewDir, surf, irradianceMap, prefilterMap, brdfLUT);
+    result += float3(0.2) * surf.ao * surf.color;
+    // TODO: IBL
+    // result += CalculateIBL(norm, viewDir, surf, irradianceMap, prefilterMap, brdfLUT);
 
     result += surf.emission;
 

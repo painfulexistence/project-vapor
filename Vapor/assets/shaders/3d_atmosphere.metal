@@ -8,18 +8,17 @@ using namespace metal;
 
 struct AtmosphereData {
     float3 sunDirection;
-    float sunIntensity;
     float3 sunColor;
+    float sunIntensity;
     float planetRadius;
     float atmosphereRadius;
+    float exposure;
+    float3 rayleighCoefficients;
     float rayleighScaleHeight;
+    float mieCoefficient;
     float mieScaleHeight;
     float miePreferredDirection;
-    float3 rayleighCoefficients;
-    float _pad1;
-    float mieCoefficient;
-    float exposure;
-    float _pad2[2];
+    float3 groundColor;  // Ground color for horizon and IBL
 };
 
 // Physical constants
@@ -198,17 +197,8 @@ vertex SkyVertexOut vertexMain(uint vertexID [[vertex_id]]) {
 fragment float4 fragmentMain(
     SkyVertexOut in [[stage_in]],
     constant CameraData& camera [[buffer(0)]],
-    constant AtmosphereData& atmosphere [[buffer(1)]],
-    texture2d<float, access::sample> depthTexture [[texture(0)]]
+    constant AtmosphereData& atmosphere [[buffer(1)]]
 ) {
-    // Sample depth
-    constexpr sampler depthSampler(mag_filter::nearest, min_filter::nearest);
-    float depth = depthTexture.sample(depthSampler, in.uv).r;
-
-    // Only render sky where there's no geometry (depth at far plane)
-    if (depth < 0.9999) {
-        discard_fragment();
-    }
 
     // Reconstruct view ray from UV
     float2 ndc = in.uv * 2.0 - 1.0;
@@ -220,8 +210,31 @@ fragment float4 fragmentMain(
 
     float3 rayDir = normalize((camera.invView * float4(viewPos.xyz, 0.0)).xyz);
 
-    // Camera position (treat as at ground level for atmosphere)
-    float3 rayOrigin = float3(0.0, 1.0, 0.0); // 1 meter above ground
+    // Use actual camera position for ray origin (in world space)
+    float3 rayOrigin = camera.position; // Camera position in world space
+
+    // Check if ray points below horizon (towards ground)
+    // Planet center is at (0, -planetRadius, 0), so ground is at y = 0
+    // If ray would hit the planet surface, compute ground color instead of sky
+    float3 planetCenter = float3(0.0, -atmosphere.planetRadius, 0.0);
+    float2 planetHit = raySphereIntersect(rayOrigin, rayDir, planetCenter, atmosphere.planetRadius);
+
+    // If ray hits planet surface (below horizon), compute ground color
+    // This provides fallback ground color for IBL and areas without geometry
+    if (planetHit.x > 0.0) {
+        // Calculate simple ground color based on sun angle (Lambertian lighting)
+        float3 groundNormal = float3(0.0, 1.0, 0.0); // Ground normal points up
+        float3 sunDir = normalize(atmosphere.sunDirection);
+        float sunDot = max(0.0, dot(groundNormal, sunDir));
+
+        // Simple Lambertian ground color with sun lighting
+        float3 groundColor = atmosphere.groundColor * atmosphere.sunColor * atmosphere.sunIntensity * sunDot * 0.1;
+
+        // Apply exposure (tone mapping)
+        groundColor = 1.0 - exp(-atmosphere.exposure * groundColor);
+
+        return float4(groundColor, 1.0);
+    }
 
     // Compute atmosphere color
     float3 color = computeAtmosphere(
@@ -239,7 +252,7 @@ fragment float4 fragmentMain(
         atmosphere.miePreferredDirection
     );
 
-    // Apply exposure
+    // Apply exposure (tone mapping)
     color = 1.0 - exp(-atmosphere.exposure * color);
 
     // Add sun disk
