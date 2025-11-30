@@ -142,6 +142,7 @@ protected:
     Uint32 waterIndexCount = 0;
     bool waterEnabled = true;
     WaterData waterSettings;
+    WaterTransform waterTransform;
 
     // Default textures
     TextureHandle defaultAlbedoTexture;

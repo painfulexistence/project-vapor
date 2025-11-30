@@ -207,6 +207,12 @@ struct alignas(16) WaterData {
     float _pad2[3];
 };
 
+// Water transform (CPU-side, used to build modelMatrix)
+struct WaterTransform {
+    glm::vec3 position = glm::vec3(0.0f, 0.0f, 0.0f);
+    glm::vec3 scale = glm::vec3(1.0f, 1.0f, 1.0f);
+};
+
 struct VertexData {
     glm::vec3 position;
     glm::vec2 uv;

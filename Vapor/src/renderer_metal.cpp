@@ -367,9 +367,15 @@ public:
         glm::vec2 screenSize = glm::vec2(drawableSize.width, drawableSize.height);
         auto time = (float)SDL_GetTicks() / 1000.0f;
 
+        // Build model matrix from transform
+        glm::mat4 modelMatrix = glm::mat4(1.0f);
+        modelMatrix = glm::translate(modelMatrix, r.waterTransform.position);
+        modelMatrix = glm::scale(modelMatrix, r.waterTransform.scale);
+
         // Update water data buffer
         WaterData* waterData = reinterpret_cast<WaterData*>(r.waterDataBuffers[r.currentFrameInFlight]->contents());
         *waterData = r.waterSettings;
+        waterData->modelMatrix = modelMatrix;
         waterData->time = time;
         r.waterDataBuffers[r.currentFrameInFlight]->didModifyRange(NS::Range::Make(0, r.waterDataBuffers[r.currentFrameInFlight]->length()));
 
@@ -746,6 +752,10 @@ auto Renderer_Metal::createResources() -> void {
 
         waterIndexCount = static_cast<Uint32>(waterIndices.size());
     }
+
+    // Initialize default water transform (positioned above floor in Sponza)
+    waterTransform.position = glm::vec3(0.0f, 0.5f, 0.0f);  // y=0.5 to be above the floor
+    waterTransform.scale = glm::vec3(1.0f, 1.0f, 1.0f);
 
     // Initialize default water settings
     waterSettings.modelMatrix = glm::mat4(1.0f);
@@ -1321,6 +1331,12 @@ auto Renderer_Metal::draw(std::shared_ptr<Scene> scene, Camera& camera) -> void 
         if (ImGui::TreeNode("Water Settings")) {
             ImGui::Separator();
             ImGui::Checkbox("Water Enabled", &waterEnabled);
+
+            if (ImGui::TreeNode("Transform")) {
+                ImGui::DragFloat3("Position", (float*)&waterTransform.position, 0.1f);
+                ImGui::DragFloat3("Scale", (float*)&waterTransform.scale, 0.1f, 0.1f, 10.0f);
+                ImGui::TreePop();
+            }
 
             if (ImGui::TreeNode("Colors")) {
                 ImGui::ColorEdit4("Surface Color", (float*)&waterSettings.surfaceColor);
