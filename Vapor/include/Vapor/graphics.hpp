@@ -169,6 +169,34 @@ struct alignas(16) LightCullData {
     Uint32 lightCount;
 };
 
+// Atmosphere rendering data for Rayleigh and Mie scattering
+struct alignas(16) AtmosphereData {
+    glm::vec3 sunDirection;          // Normalized sun direction
+    float _pad1;
+    glm::vec3 sunColor;              // Sun light color
+    float _pad2;
+    float sunIntensity;              // Sun light intensity
+    float planetRadius;              // Planet radius in meters (Earth: 6371e3)
+    float atmosphereRadius;          // Atmosphere radius in meters (Earth: 6471e3)
+    float exposure;                  // Exposure for tone mapping
+    glm::vec3 rayleighCoefficients;  // Rayleigh scattering coefficients (Earth: 5.8e-6, 13.5e-6, 33.1e-6)
+    float _pad3;
+    float rayleighScaleHeight;       // Rayleigh scale height (Earth: 8500)
+    float mieCoefficient;            // Mie scattering coefficient (Earth: 21e-6)
+    float mieScaleHeight;            // Mie scale height (Earth: 1200)
+    float miePreferredDirection;     // Mie preferred scattering direction (g parameter, typically 0.758)
+    glm::vec3 groundColor;          // Ground color for horizon and IBL (default: greenish)
+    float _pad4;
+};
+
+// IBL capture data for rendering atmosphere to cubemap
+struct alignas(16) IBLCaptureData {
+    glm::mat4 viewProj;              // View-projection matrix for current cubemap face
+    Uint32 faceIndex;                // Current cubemap face (0-5)
+    float roughness;                 // Roughness level for prefilter pass
+    float _pad[2];
+};
+
 struct VertexData {
     glm::vec3 position;
     glm::vec2 uv;
