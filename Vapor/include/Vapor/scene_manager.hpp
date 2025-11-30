@@ -9,6 +9,11 @@
 
 namespace Vapor {
 
+enum class LoadMode {
+    Replace,   // Replace active scene
+    Additive   // Append to active scene
+};
+
 class SceneManager {
 public:
     explicit SceneManager(World* world);
@@ -18,17 +23,14 @@ public:
     SceneManager(const SceneManager&) = delete;
     SceneManager& operator=(const SceneManager&) = delete;
 
-    // Load a GLTF file and create a scene
-    // Returns the SceneID of the loaded scene
-    SceneID load(const std::string& path, bool optimized = true);
+    // Load a scene (from AssetManager::loadGLTF result)
+    // Replace: set as new active scene
+    // Additive: append to current active scene
+    // Returns the scene itself for chaining
+    std::shared_ptr<Scene> load(std::shared_ptr<Scene> scene, LoadMode mode = LoadMode::Replace);
 
-    // Load a GLTF file asynchronously
-    void loadAsync(const std::string& path,
-                   std::function<void(SceneID)> onComplete,
-                   bool optimized = true);
-
-    // Create an empty scene
-    SceneID createScene(const std::string& name = "");
+    // Load with specific parent node (always additive)
+    std::shared_ptr<Scene> load(std::shared_ptr<Scene> scene, std::shared_ptr<Node> parent);
 
     // Unload a scene by ID
     void unload(SceneID id);
@@ -45,9 +47,8 @@ public:
     // Get all active scene IDs
     std::vector<SceneID> getActiveSceneIds() const;
 
-    // Get the main/active scene (first loaded scene by default)
+    // Get the main/active scene
     std::shared_ptr<Scene> getActiveScene() const;
-    void setActiveScene(SceneID id);
 
 private:
     SceneID generateSceneId();

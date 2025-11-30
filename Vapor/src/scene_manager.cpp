@@ -1,62 +1,68 @@
 #include "Vapor/scene_manager.hpp"
-#include "Vapor/asset_manager.hpp"
-#include "Vapor/resource_manager.hpp"
 
 namespace Vapor {
 
 SceneManager::SceneManager(World* world) : world(world) {}
 
-SceneID SceneManager::load(const std::string& path, bool optimized) {
-    std::shared_ptr<Scene> scene;
-    if (optimized) {
-        scene = AssetManager::loadGLTFOptimized(path);
-    } else {
-        scene = AssetManager::loadGLTF(path);
-    }
-
+std::shared_ptr<Scene> SceneManager::load(std::shared_ptr<Scene> scene, LoadMode mode) {
     if (!scene) {
-        return InvalidSceneID;
+        return nullptr;
     }
 
     SceneID id = generateSceneId();
     scene->sceneId = id;
 
-    // Register all nodes to World
+    if (mode == LoadMode::Replace) {
+        // Register nodes to World
+        registerSceneNodes(scene, id);
+
+        // Track this scene
+        scenes[id] = scene;
+        activeSceneId = id;
+    } else {
+        // Additive: append to active scene
+        auto activeScene = getActiveScene();
+        if (activeScene) {
+            // Register nodes to World with the NEW scene's ID
+            registerSceneNodes(scene, id);
+
+            // Append content to active scene
+            activeScene->append(scene);
+
+            // Track the appended scene (for unloading later)
+            scenes[id] = scene;
+        } else {
+            // No active scene, treat as Replace
+            registerSceneNodes(scene, id);
+            scenes[id] = scene;
+            activeSceneId = id;
+        }
+    }
+
+    return scene;
+}
+
+std::shared_ptr<Scene> SceneManager::load(std::shared_ptr<Scene> scene, std::shared_ptr<Node> parent) {
+    if (!scene || !parent) {
+        return nullptr;
+    }
+
+    SceneID id = generateSceneId();
+    scene->sceneId = id;
+
+    // Register nodes to World
     registerSceneNodes(scene, id);
 
+    // Append to active scene under the specified parent
+    auto activeScene = getActiveScene();
+    if (activeScene) {
+        activeScene->append(scene, parent);
+    }
+
+    // Track the appended scene
     scenes[id] = scene;
 
-    // Set as active scene if this is the first one
-    if (activeSceneId == InvalidSceneID) {
-        activeSceneId = id;
-    }
-
-    return id;
-}
-
-void SceneManager::loadAsync(const std::string& path,
-                              std::function<void(SceneID)> onComplete,
-                              bool optimized) {
-    // For now, just do synchronous loading
-    // TODO: Integrate with ResourceManager for true async loading
-    SceneID id = load(path, optimized);
-    if (onComplete) {
-        onComplete(id);
-    }
-}
-
-SceneID SceneManager::createScene(const std::string& name) {
-    auto scene = std::make_shared<Scene>(name);
-    SceneID id = generateSceneId();
-    scene->sceneId = id;
-
-    scenes[id] = scene;
-
-    if (activeSceneId == InvalidSceneID) {
-        activeSceneId = id;
-    }
-
-    return id;
+    return scene;
 }
 
 void SceneManager::unload(SceneID id) {
@@ -65,7 +71,7 @@ void SceneManager::unload(SceneID id) {
         return;
     }
 
-    // Unregister all nodes from World
+    // Unregister nodes from World
     world->unregisterScene(id);
 
     scenes.erase(it);
@@ -111,12 +117,6 @@ std::vector<SceneID> SceneManager::getActiveSceneIds() const {
 
 std::shared_ptr<Scene> SceneManager::getActiveScene() const {
     return getScene(activeSceneId);
-}
-
-void SceneManager::setActiveScene(SceneID id) {
-    if (isLoaded(id)) {
-        activeSceneId = id;
-    }
 }
 
 SceneID SceneManager::generateSceneId() {
