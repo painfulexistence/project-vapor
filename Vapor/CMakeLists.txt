@@ -13,6 +13,7 @@ add_subdirectory(MikkTSpace)
 
 set(SOURCES
     src/action_manager.cpp
+    src/audio_engine.cpp
     src/input_manager.cpp
     src/asset_manager.cpp
     src/asset_serializer.cpp
@@ -55,6 +56,7 @@ target_include_directories(Vapor PRIVATE
     imgui
     ${CMAKE_CURRENT_SOURCE_DIR}/include/Vapor
     ${CMAKE_CURRENT_SOURCE_DIR}
+    ${CMAKE_CURRENT_SOURCE_DIR}/miniaudio
 )
 
 target_link_libraries(Vapor PUBLIC
