@@ -169,12 +169,59 @@ struct alignas(16) LightCullData {
     Uint32 lightCount;
 };
 
+// Water rendering data structures
+struct alignas(16) WaveData {
+    glm::vec3 direction;
+    float steepness;
+    float waveLength;
+    float amplitude;
+    float speed;
+    float _pad1;
+};
+
+struct alignas(16) WaterData {
+    glm::mat4 modelMatrix;
+    glm::vec4 surfaceColor;           // Water surface tint color
+    glm::vec4 refractionColor;        // Deep water color
+    glm::vec4 ssrSettings;            // x: step size, y: max steps, z: refinement steps, w: distance factor
+    glm::vec4 normalMapScroll;        // xy: scroll direction 1, zw: scroll direction 2
+    glm::vec2 normalMapScrollSpeed;   // Scroll speeds for both normal maps
+    float refractionDistortionFactor;
+    float refractionHeightFactor;
+    float refractionDistanceFactor;
+    float depthSofteningDistance;
+    float foamHeightStart;
+    float foamFadeDistance;
+    float foamTiling;
+    float foamAngleExponent;
+    float roughness;
+    float reflectance;
+    float specIntensity;
+    float foamBrightness;
+    float tessellationFactor;
+    float dampeningFactor;
+    float time;
+    float _pad1;
+    WaveData waves[4];               // Up to 4 waves
+    Uint32 waveCount;
+    float _pad2[3];
+};
+
 struct VertexData {
     glm::vec3 position;
     glm::vec2 uv;
     glm::vec3 normal;
     glm::vec4 tangent;
     // glm::vec3 bitangent;
+};
+
+// Water vertex data with two UV channels
+// uv0: per-tile tiling coordinates
+// uv1: whole grid coordinates (0-1 across entire grid)
+struct WaterVertexData {
+    glm::vec3 position;
+    glm::vec2 uv0;  // Tiled UV for normal map scrolling
+    glm::vec2 uv1;  // Grid UV for edge dampening
 };
 
 struct Particle {

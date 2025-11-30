@@ -346,6 +346,97 @@ public:
         return mesh;
     };
 
+    // Build a water grid mesh with two UV channels:
+    // - uv0: tiled coordinates for normal map scrolling
+    // - uv1: whole grid coordinates (0-1) for edge dampening
+    // gridSize: number of tiles in X and Z directions
+    // tileSize: world space size of each tile
+    // texTile: UV tiling factor for normal maps
+    static void buildWaterGrid(
+        Uint32 gridSizeX, Uint32 gridSizeZ,
+        float tileSize,
+        float texTileX, float texTileZ,
+        std::vector<WaterVertexData>& outVertices,
+        std::vector<Uint32>& outIndices
+    ) {
+        outVertices.clear();
+        outIndices.clear();
+
+        // Total size of the grid
+        float totalSizeX = gridSizeX * tileSize;
+        float totalSizeZ = gridSizeZ * tileSize;
+
+        // Center the grid
+        float offsetX = -totalSizeX * 0.5f;
+        float offsetZ = -totalSizeZ * 0.5f;
+
+        float oneOverXTiles = 1.0f / static_cast<float>(gridSizeX);
+        float oneOverZTiles = 1.0f / static_cast<float>(gridSizeZ);
+
+        // Create vertices for each tile (6 vertices per tile for 2 triangles)
+        for (Uint32 x = 0; x < gridSizeX; ++x) {
+            for (Uint32 z = 0; z < gridSizeZ; ++z) {
+                // Tiled UV coordinates
+                float xBeginTile = (oneOverXTiles * static_cast<float>(x)) * texTileX;
+                float xEndTile = (oneOverXTiles * static_cast<float>(x + 1)) * texTileX;
+                float zBeginTile = (oneOverZTiles * static_cast<float>(z)) * texTileZ;
+                float zEndTile = (oneOverZTiles * static_cast<float>(z + 1)) * texTileZ;
+
+                // Whole grid UV coordinates (0-1)
+                float xBegin = oneOverXTiles * static_cast<float>(x);
+                float xEnd = oneOverXTiles * static_cast<float>(x + 1);
+                float zBegin = oneOverZTiles * static_cast<float>(z);
+                float zEnd = oneOverZTiles * static_cast<float>(z + 1);
+
+                // World positions
+                float posX0 = offsetX + x * tileSize;
+                float posX1 = offsetX + (x + 1) * tileSize;
+                float posZ0 = offsetZ + z * tileSize;
+                float posZ1 = offsetZ + (z + 1) * tileSize;
+
+                Uint32 baseIndex = static_cast<Uint32>(outVertices.size());
+
+                // Vertex 0: bottom-left
+                outVertices.push_back({
+                    { posX0, 0.0f, posZ0 },
+                    { xBeginTile, zBeginTile },
+                    { xBegin, zBegin }
+                });
+
+                // Vertex 1: bottom-right
+                outVertices.push_back({
+                    { posX1, 0.0f, posZ0 },
+                    { xEndTile, zBeginTile },
+                    { xEnd, zBegin }
+                });
+
+                // Vertex 2: top-left
+                outVertices.push_back({
+                    { posX0, 0.0f, posZ1 },
+                    { xBeginTile, zEndTile },
+                    { xBegin, zEnd }
+                });
+
+                // Vertex 3: top-right
+                outVertices.push_back({
+                    { posX1, 0.0f, posZ1 },
+                    { xEndTile, zEndTile },
+                    { xEnd, zEnd }
+                });
+
+                // Triangle 1: 0, 2, 1
+                outIndices.push_back(baseIndex + 0);
+                outIndices.push_back(baseIndex + 2);
+                outIndices.push_back(baseIndex + 1);
+
+                // Triangle 2: 1, 2, 3
+                outIndices.push_back(baseIndex + 1);
+                outIndices.push_back(baseIndex + 2);
+                outIndices.push_back(baseIndex + 3);
+            }
+        }
+    };
+
 private:
     MeshBuilder() = delete;
 };

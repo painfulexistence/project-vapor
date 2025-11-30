@@ -20,6 +20,7 @@ class TileCullingPass;
 class RaytraceShadowPass;
 class RaytraceAOPass;
 class MainRenderPass;
+class WaterPass;
 class PostProcessPass;
 class ImGuiPass;
 
@@ -67,6 +68,7 @@ class Renderer_Metal final : public Renderer { // Must be public or factory func
     friend class RaytraceShadowPass;
     friend class RaytraceAOPass;
     friend class MainRenderPass;
+    friend class WaterPass;
     friend class PostProcessPass;
     friend class ImGuiPass;
 
@@ -131,12 +133,29 @@ protected:
     NS::SharedPtr<MTL::ComputePipelineState> raytraceShadowPipeline;
     NS::SharedPtr<MTL::ComputePipelineState> raytraceAOPipeline;
 
+    // Water rendering pipeline and resources
+    NS::SharedPtr<MTL::RenderPipelineState> waterPipeline;
+    NS::SharedPtr<MTL::DepthStencilState> waterDepthStencilState;
+    std::vector<NS::SharedPtr<MTL::Buffer>> waterDataBuffers;
+    NS::SharedPtr<MTL::Buffer> waterVertexBuffer;
+    NS::SharedPtr<MTL::Buffer> waterIndexBuffer;
+    Uint32 waterIndexCount = 0;
+    bool waterEnabled = true;
+    WaterData waterSettings;
+
     // Default textures
     TextureHandle defaultAlbedoTexture;
     TextureHandle defaultNormalTexture;
     TextureHandle defaultORMTexture;
     TextureHandle defaultEmissiveTexture;
     TextureHandle defaultDisplacementTexture;
+
+    // Water textures
+    TextureHandle waterNormalMap1;
+    TextureHandle waterNormalMap2;
+    TextureHandle waterFoamMap;
+    TextureHandle waterNoiseMap;
+    NS::SharedPtr<MTL::Texture> environmentCubeMap;
 
     // Per-frame buffers
     std::vector<NS::SharedPtr<MTL::Buffer>> frameDataBuffers;
