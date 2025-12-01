@@ -34,6 +34,21 @@ public:
         _isFrustumDirty = true;
     }
 
+    glm::vec3 getCenter() const { return _center; }
+    void setCenter(const glm::vec3& center) {
+        _center = center;
+        _isViewDirty = true;
+        _isFrustumDirty = true;
+    }
+
+    void setLookAt(const glm::vec3& target) {
+        setCenter(target);
+    }
+
+    glm::vec3 getForward() const {
+        return glm::normalize(_center - _eye);
+    }
+
     glm::mat4 getViewMatrix() {
         if (_isViewDirty) {
             _viewMatrix = glm::lookAt(_eye, _center, _up);

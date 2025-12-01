@@ -11,6 +11,11 @@
 
 #include "graphics.hpp"
 #include "physics_3d.hpp"
+#include "character_controller.hpp"
+#include "vehicle_controller.hpp"
+
+class FluidVolume;
+struct FluidVolumeSettings;
 
 struct MeshGroup {
     std::string name;
@@ -24,7 +29,16 @@ struct Node {
     glm::mat4 worldTransform = glm::identity<glm::mat4>(); // calculated from localTransform and parent's worldTransform
     std::shared_ptr<MeshGroup> meshGroup = nullptr;
     BodyHandle body;
+    TriggerHandle trigger;
+    std::unique_ptr<CharacterController> characterController;
+    std::unique_ptr<VehicleController> vehicleController;
     bool isTransformDirty = true;
+
+    // Virtual callbacks for physics events (can be overridden in subclasses)
+    virtual void onTriggerEnter(Node* other) {}
+    virtual void onTriggerExit(Node* other) {}
+    virtual void onCollisionEnter(Node* other) {}
+    virtual void onCollisionExit(Node* other) {}
 
     glm::vec3 getLocalPosition() const {
         return glm::vec3(localTransform[3]);
@@ -140,6 +154,14 @@ struct Node {
         child->isTransformDirty = true;
         children.push_back(child);
     }
+
+    // Character controller management
+    void attachCharacterController(Physics3D* physics, const CharacterControllerSettings& settings);
+    CharacterController* getCharacterController() { return characterController.get(); }
+
+    // Vehicle controller management
+    void attachVehicleController(Physics3D* physics, const VehicleSettings& settings);
+    VehicleController* getVehicleController() { return vehicleController.get(); }
 };
 
 class Scene {
@@ -150,6 +172,7 @@ public:
     std::vector<std::shared_ptr<Node>> nodes;
     std::vector<DirectionalLight> directionalLights;
     std::vector<PointLight> pointLights;
+    std::vector<std::shared_ptr<FluidVolume>> fluidVolumes;
 
     // GPU-driven rendering
     std::vector<VertexData> vertices;
@@ -170,6 +193,9 @@ public:
     void addNode(std::shared_ptr<Node> node);
     std::shared_ptr<Node> findNode(const std::string& name);
     std::shared_ptr<Node> findNodeInHierarchy(const std::string& name, const std::shared_ptr<Node>& node);
+
+    std::shared_ptr<FluidVolume> createFluidVolume(Physics3D* physics, const FluidVolumeSettings& settings);
+    void addFluidVolume(std::shared_ptr<FluidVolume> fluidVolume);
 
     void addMeshToNode(std::shared_ptr<Node> node, std::shared_ptr<Mesh> mesh);
     // void AddLightToNode(std::shared_ptr<Node> node, std::shared_ptr<Light> light);
