@@ -1385,7 +1385,15 @@ auto Renderer_Metal::draw(std::shared_ptr<Scene> scene, Camera& camera) -> void 
         dirLights[i].color = scene->directionalLights[i].color;
         dirLights[i].intensity = scene->directionalLights[i].intensity;
     }
-    pointLightBuffer->didModifyRange(NS::Range::Make(0, directionalLightBuffer->length()));
+    directionalLightBuffer->didModifyRange(NS::Range::Make(0, directionalLightBuffer->length()));
+
+    AtmosphereData* atmosphereData = reinterpret_cast<AtmosphereData*>(atmosphereDataBuffer->contents());
+    if (!scene->directionalLights.empty()) {
+        const auto& sunLight = scene->directionalLights[0];
+        atmosphereData->sunDirection = -glm::normalize(sunLight.direction);
+        atmosphereData->sunColor = sunLight.color;
+        atmosphereData->sunIntensity = sunLight.intensity;
+    }
 
     PointLight* pointLights = reinterpret_cast<PointLight*>(pointLightBuffer->contents());
     for (size_t i = 0; i < scene->pointLights.size(); ++i) {
@@ -1609,12 +1617,33 @@ auto Renderer_Metal::draw(std::shared_ptr<Scene> scene, Camera& camera) -> void 
             AtmosphereData* atmos = reinterpret_cast<AtmosphereData*>(atmosphereDataBuffer->contents());
             bool atmosChanged = false;
 
+            if (!scene->directionalLights.empty()) {
+                ImGui::TextColored(ImVec4(0.5f, 0.8f, 1.0f, 1.0f),
+                    "Sun synced from first directional light");
+                if (ImGui::IsItemHovered()) {
+                    ImGui::SetTooltip("The first directional light in the scene is automatically used as the sun for atmosphere rendering.");
+                }
+            } else {
+                ImGui::TextColored(ImVec4(1.0f, 0.5f, 0.5f, 1.0f), "No directional lights - using default sun");
+            }
+            ImGui::Separator();
+
             atmosChanged |= ImGui::DragFloat3("Sun Direction", (float*)&atmos->sunDirection, 0.01f, -1.0f, 1.0f);
             if (atmosChanged) {
                 atmos->sunDirection = glm::normalize(atmos->sunDirection);
+                // Sync back to first directional light if it exists (negate to match convention)
+                if (!scene->directionalLights.empty()) {
+                    scene->directionalLights[0].direction = -atmos->sunDirection;
+                }
             }
             atmosChanged |= ImGui::DragFloat("Sun Intensity", &atmos->sunIntensity, 0.5f, 0.0f, 100.0f);
+            if (atmosChanged && !scene->directionalLights.empty()) {
+                scene->directionalLights[0].intensity = atmos->sunIntensity;
+            }
             atmosChanged |= ImGui::ColorEdit3("Sun Color", (float*)&atmos->sunColor);
+            if (atmosChanged && !scene->directionalLights.empty()) {
+                scene->directionalLights[0].color = atmos->sunColor;
+            }
             atmosChanged |= ImGui::DragFloat("Exposure", &atmos->exposure, 0.01f, 0.01f, 10.0f);
             atmosChanged |= ImGui::ColorEdit3("Ground Color", (float*)&atmos->groundColor);
 
