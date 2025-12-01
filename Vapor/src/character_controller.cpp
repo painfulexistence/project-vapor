@@ -68,6 +68,21 @@ void CharacterController::move(const glm::vec3& movementDirection, float deltaTi
     character->SetLinearVelocity(newVelocity);
 }
 
+void CharacterController::moveAlong(const glm::vec2& inputVector, const glm::vec3& forwardDirection, float deltaTime) {
+    glm::vec3 forward = glm::normalize(glm::vec3(forwardDirection.x, 0.0f, forwardDirection.z));
+    glm::vec3 right = glm::normalize(glm::cross(forward, glm::vec3(0.0f, 1.0f, 0.0f)));
+    glm::vec3 movementDirection = forward * inputVector.y + right * inputVector.x;
+
+    float length = glm::length(movementDirection);
+    if (length > 1.0f) {
+        movementDirection = movementDirection / length;
+    }
+
+    movementDirection *= maxSpeed;
+
+    move(movementDirection, deltaTime);
+}
+
 void CharacterController::jump(float jumpSpeed) {
     if (isOnGround()) {
         JPH::Vec3 currentVel = character->GetLinearVelocity();

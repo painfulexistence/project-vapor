@@ -32,6 +32,7 @@ public:
 
     // Movement control
     void move(const glm::vec3& movementDirection, float deltaTime);
+    void moveAlong(const glm::vec2& inputVector, const glm::vec3& forwardDirection, float deltaTime);
     void jump(float jumpSpeed);
     void warp(const glm::vec3& position);  // Teleport
 
