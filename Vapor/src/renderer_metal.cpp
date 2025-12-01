@@ -719,6 +719,124 @@ public:
     }
 };
 
+// RmlUi pass: Renders the RmlUi UI overlay
+class RmlUiPass : public RenderPass {
+public:
+    explicit RmlUiPass(Renderer_Metal* renderer) : RenderPass(renderer) {}
+
+    const char* getName() const override { return "RmlUiPass"; }
+
+    void execute() override {
+        auto& r = *renderer;
+
+        // Skip if no render commands
+        if (r.rmluiRenderCommands.empty()) {
+            return;
+        }
+
+        // Create render pass descriptor
+        auto passDesc = NS::TransferPtr(MTL::RenderPassDescriptor::renderPassDescriptor());
+        auto colorRT = passDesc->colorAttachments()->object(0);
+        colorRT->setLoadAction(MTL::LoadActionLoad);
+        colorRT->setStoreAction(MTL::StoreActionStore);
+        colorRT->setTexture(r.currentDrawable->texture());
+
+        auto encoder = r.currentCommandBuffer->renderCommandEncoder(passDesc.get());
+        encoder->setCullMode(MTL::CullModeNone);
+        encoder->setDepthStencilState(r.rmluiDepthStencilState.get());
+
+        // Set viewport
+        MTL::Viewport viewport = {
+            0.0, 0.0,
+            static_cast<double>(r.rmluiViewportWidth),
+            static_cast<double>(r.rmluiViewportHeight),
+            0.0, 1.0
+        };
+        encoder->setViewport(viewport);
+
+        // Create orthographic projection matrix
+        float L = 0.0f;
+        float R = static_cast<float>(r.rmluiViewportWidth);
+        float T = 0.0f;
+        float B = static_cast<float>(r.rmluiViewportHeight);
+        float ortho[16] = {
+            2.0f / (R - L),     0.0f,               0.0f, 0.0f,
+            0.0f,               2.0f / (T - B),     0.0f, 0.0f,
+            0.0f,               0.0f,               1.0f, 0.0f,
+            (R + L) / (L - R),  (T + B) / (B - T),  0.0f, 1.0f
+        };
+        encoder->setVertexBytes(&ortho, sizeof(ortho), 1);
+
+        // Render all commands
+        for (const auto& cmd : r.rmluiRenderCommands) {
+            auto geomIt = r.rmluiGeometries.find(cmd.geometryId);
+            if (geomIt == r.rmluiGeometries.end()) {
+                continue;
+            }
+
+            const auto& geom = geomIt->second;
+
+            // Set pipeline based on texture presence
+            if (cmd.hasTexture) {
+                encoder->setRenderPipelineState(r.rmluiTexturedPipeline.get());
+                auto texIt = r.rmluiTextures.find(cmd.textureId);
+                if (texIt != r.rmluiTextures.end()) {
+                    encoder->setFragmentTexture(texIt->second.get(), 0);
+                }
+            } else {
+                encoder->setRenderPipelineState(r.rmluiColorPipeline.get());
+            }
+
+            // Set scissor
+            if (cmd.enableScissor) {
+                MTL::ScissorRect scissor;
+                scissor.x = static_cast<NS::UInteger>(std::max(0, cmd.scissorX));
+                scissor.y = static_cast<NS::UInteger>(std::max(0, cmd.scissorY));
+                scissor.width = static_cast<NS::UInteger>(std::max(0, cmd.scissorWidth));
+                scissor.height = static_cast<NS::UInteger>(std::max(0, cmd.scissorHeight));
+
+                // Clamp to viewport
+                if (scissor.x + scissor.width > static_cast<NS::UInteger>(r.rmluiViewportWidth)) {
+                    scissor.width = static_cast<NS::UInteger>(r.rmluiViewportWidth) - scissor.x;
+                }
+                if (scissor.y + scissor.height > static_cast<NS::UInteger>(r.rmluiViewportHeight)) {
+                    scissor.height = static_cast<NS::UInteger>(r.rmluiViewportHeight) - scissor.y;
+                }
+
+                encoder->setScissorRect(scissor);
+            } else {
+                MTL::ScissorRect fullScissor = {
+                    0, 0,
+                    static_cast<NS::UInteger>(r.rmluiViewportWidth),
+                    static_cast<NS::UInteger>(r.rmluiViewportHeight)
+                };
+                encoder->setScissorRect(fullScissor);
+            }
+
+            // Set translation uniform
+            float translation[2] = { cmd.translation.x, cmd.translation.y };
+            encoder->setVertexBytes(&translation, sizeof(translation), 2);
+
+            // Set vertex buffer
+            encoder->setVertexBuffer(geom.vertexBuffer.get(), 0, 0);
+
+            // Draw
+            encoder->drawIndexedPrimitives(
+                MTL::PrimitiveTypeTriangle,
+                geom.indexCount,
+                MTL::IndexTypeUInt32,
+                geom.indexBuffer.get(),
+                0
+            );
+        }
+
+        encoder->endEncoding();
+
+        // Clear commands for next frame
+        r.rmluiRenderCommands.clear();
+    }
+};
+
 
 std::unique_ptr<Renderer> createRendererMetal() {
     return std::make_unique<Renderer_Metal>();
@@ -769,6 +887,7 @@ auto Renderer_Metal::init(SDL_Window* window) -> void {
     graph.addPass(std::make_unique<SkyAtmospherePass>(this));
     // graph.addPass(std::make_unique<WaterPass>(this));
     graph.addPass(std::make_unique<PostProcessPass>(this));
+    graph.addPass(std::make_unique<RmlUiPass>(this));
     graph.addPass(std::make_unique<ImGuiPass>(this));
 }
 
@@ -2055,4 +2174,233 @@ NS::SharedPtr<MTL::Texture> Renderer_Metal::getTexture(TextureHandle handle) con
 
 NS::SharedPtr<MTL::RenderPipelineState> Renderer_Metal::getPipeline(PipelineHandle handle) const {
     return pipelines.at(handle.rid);
+}
+
+// ============================================================================
+// RmlUi Renderer Interface Implementation
+// ============================================================================
+
+void Renderer_Metal::rmluiInit() {
+    // Create RmlUi depth stencil state (no depth testing for UI)
+    auto depthDesc = MTL::DepthStencilDescriptor::alloc()->init();
+    depthDesc->setDepthWriteEnabled(false);
+    depthDesc->setDepthCompareFunction(MTL::CompareFunctionAlways);
+    rmluiDepthStencilState = NS::TransferPtr(device->newDepthStencilState(depthDesc));
+    depthDesc->release();
+
+    // Create RmlUi pipelines
+    auto shaderSrc = readFile("assets/shaders/rmlui.metal");
+    auto code = NS::String::string(shaderSrc.data(), NS::StringEncoding::UTF8StringEncoding);
+    NS::Error* error = nullptr;
+    MTL::Library* library = device->newLibrary(code, nullptr, &error);
+    if (!library) {
+        fmt::print("[RmlUi] Failed to compile shader: {}\n", error->localizedDescription()->utf8String());
+        return;
+    }
+
+    // Vertex descriptor for RmlUi
+    auto vertexDesc = MTL::VertexDescriptor::alloc()->init();
+
+    // Position (float2)
+    auto posAttr = vertexDesc->attributes()->object(0);
+    posAttr->setFormat(MTL::VertexFormatFloat2);
+    posAttr->setOffset(offsetof(Vapor::RmlUiVertex, position));
+    posAttr->setBufferIndex(0);
+
+    // Color (uchar4)
+    auto colorAttr = vertexDesc->attributes()->object(1);
+    colorAttr->setFormat(MTL::VertexFormatUChar4Normalized);
+    colorAttr->setOffset(offsetof(Vapor::RmlUiVertex, color));
+    colorAttr->setBufferIndex(0);
+
+    // TexCoord (float2)
+    auto texAttr = vertexDesc->attributes()->object(2);
+    texAttr->setFormat(MTL::VertexFormatFloat2);
+    texAttr->setOffset(offsetof(Vapor::RmlUiVertex, texCoord));
+    texAttr->setBufferIndex(0);
+
+    auto layout = vertexDesc->layouts()->object(0);
+    layout->setStride(sizeof(Vapor::RmlUiVertex));
+    layout->setStepFunction(MTL::VertexStepFunctionPerVertex);
+    layout->setStepRate(1);
+
+    // Create textured pipeline
+    {
+        auto vertexFuncName = NS::String::string("rmlui_vertex_main", NS::StringEncoding::UTF8StringEncoding);
+        auto fragmentFuncName = NS::String::string("rmlui_fragment_textured", NS::StringEncoding::UTF8StringEncoding);
+        auto vertexFunc = library->newFunction(vertexFuncName);
+        auto fragmentFunc = library->newFunction(fragmentFuncName);
+
+        auto pipelineDesc = MTL::RenderPipelineDescriptor::alloc()->init();
+        pipelineDesc->setVertexFunction(vertexFunc);
+        pipelineDesc->setFragmentFunction(fragmentFunc);
+        pipelineDesc->setVertexDescriptor(vertexDesc);
+
+        auto colorAttachment = pipelineDesc->colorAttachments()->object(0);
+        colorAttachment->setPixelFormat(swapchain->pixelFormat());
+        colorAttachment->setBlendingEnabled(true);
+        colorAttachment->setRgbBlendOperation(MTL::BlendOperationAdd);
+        colorAttachment->setAlphaBlendOperation(MTL::BlendOperationAdd);
+        colorAttachment->setSourceRGBBlendFactor(MTL::BlendFactorSourceAlpha);
+        colorAttachment->setSourceAlphaBlendFactor(MTL::BlendFactorOne);
+        colorAttachment->setDestinationRGBBlendFactor(MTL::BlendFactorOneMinusSourceAlpha);
+        colorAttachment->setDestinationAlphaBlendFactor(MTL::BlendFactorOneMinusSourceAlpha);
+
+        rmluiTexturedPipeline = NS::TransferPtr(device->newRenderPipelineState(pipelineDesc, &error));
+        if (!rmluiTexturedPipeline) {
+            fmt::print("[RmlUi] Failed to create textured pipeline: {}\n", error->localizedDescription()->utf8String());
+        }
+
+        vertexFunc->release();
+        fragmentFunc->release();
+        pipelineDesc->release();
+    }
+
+    // Create color-only pipeline
+    {
+        auto vertexFuncName = NS::String::string("rmlui_vertex_main", NS::StringEncoding::UTF8StringEncoding);
+        auto fragmentFuncName = NS::String::string("rmlui_fragment_color", NS::StringEncoding::UTF8StringEncoding);
+        auto vertexFunc = library->newFunction(vertexFuncName);
+        auto fragmentFunc = library->newFunction(fragmentFuncName);
+
+        auto pipelineDesc = MTL::RenderPipelineDescriptor::alloc()->init();
+        pipelineDesc->setVertexFunction(vertexFunc);
+        pipelineDesc->setFragmentFunction(fragmentFunc);
+        pipelineDesc->setVertexDescriptor(vertexDesc);
+
+        auto colorAttachment = pipelineDesc->colorAttachments()->object(0);
+        colorAttachment->setPixelFormat(swapchain->pixelFormat());
+        colorAttachment->setBlendingEnabled(true);
+        colorAttachment->setRgbBlendOperation(MTL::BlendOperationAdd);
+        colorAttachment->setAlphaBlendOperation(MTL::BlendOperationAdd);
+        colorAttachment->setSourceRGBBlendFactor(MTL::BlendFactorSourceAlpha);
+        colorAttachment->setSourceAlphaBlendFactor(MTL::BlendFactorOne);
+        colorAttachment->setDestinationRGBBlendFactor(MTL::BlendFactorOneMinusSourceAlpha);
+        colorAttachment->setDestinationAlphaBlendFactor(MTL::BlendFactorOneMinusSourceAlpha);
+
+        rmluiColorPipeline = NS::TransferPtr(device->newRenderPipelineState(pipelineDesc, &error));
+        if (!rmluiColorPipeline) {
+            fmt::print("[RmlUi] Failed to create color pipeline: {}\n", error->localizedDescription()->utf8String());
+        }
+
+        vertexFunc->release();
+        fragmentFunc->release();
+        pipelineDesc->release();
+    }
+
+    vertexDesc->release();
+    library->release();
+    code->release();
+
+    fmt::print("[RmlUi] Metal renderer initialized\n");
+}
+
+void Renderer_Metal::rmluiShutdown() {
+    // Release all geometries
+    rmluiGeometries.clear();
+
+    // Release all textures
+    rmluiTextures.clear();
+
+    // Release pipelines
+    rmluiTexturedPipeline.reset();
+    rmluiColorPipeline.reset();
+    rmluiDepthStencilState.reset();
+
+    fmt::print("[RmlUi] Metal renderer shutdown\n");
+}
+
+Uint32 Renderer_Metal::rmluiCreateGeometry(const std::vector<Vapor::RmlUiVertex>& vertices, const std::vector<Uint32>& indices) {
+    Uint32 geometryId = nextRmluiGeometryId++;
+
+    RmlUiGeometry geom;
+
+    // Create vertex buffer
+    size_t vertexSize = vertices.size() * sizeof(Vapor::RmlUiVertex);
+    geom.vertexBuffer = NS::TransferPtr(device->newBuffer(vertexSize, MTL::ResourceStorageModeManaged));
+    memcpy(geom.vertexBuffer->contents(), vertices.data(), vertexSize);
+    geom.vertexBuffer->didModifyRange(NS::Range::Make(0, vertexSize));
+
+    // Create index buffer
+    size_t indexSize = indices.size() * sizeof(Uint32);
+    geom.indexBuffer = NS::TransferPtr(device->newBuffer(indexSize, MTL::ResourceStorageModeManaged));
+    memcpy(geom.indexBuffer->contents(), indices.data(), indexSize);
+    geom.indexBuffer->didModifyRange(NS::Range::Make(0, indexSize));
+
+    geom.indexCount = static_cast<Uint32>(indices.size());
+
+    rmluiGeometries[geometryId] = std::move(geom);
+
+    return geometryId;
+}
+
+void Renderer_Metal::rmluiReleaseGeometry(Uint32 geometryId) {
+    rmluiGeometries.erase(geometryId);
+}
+
+Uint32 Renderer_Metal::rmluiCreateTexture(Uint32 width, Uint32 height, const Uint8* data) {
+    Uint32 textureId = nextRmluiTextureId++;
+
+    auto textureDesc = MTL::TextureDescriptor::texture2DDescriptor(
+        MTL::PixelFormatRGBA8Unorm,
+        static_cast<NS::UInteger>(width),
+        static_cast<NS::UInteger>(height),
+        false
+    );
+    textureDesc->setUsage(MTL::TextureUsageShaderRead);
+    textureDesc->setStorageMode(MTL::StorageModeManaged);
+
+    auto texture = NS::TransferPtr(device->newTexture(textureDesc));
+
+    MTL::Region region = MTL::Region::Make2D(0, 0, width, height);
+    texture->replaceRegion(region, 0, data, width * 4);
+
+    rmluiTextures[textureId] = std::move(texture);
+
+    return textureId;
+}
+
+void Renderer_Metal::rmluiReleaseTexture(Uint32 textureId) {
+    rmluiTextures.erase(textureId);
+}
+
+void Renderer_Metal::rmluiSetViewport(int width, int height) {
+    rmluiViewportWidth = width;
+    rmluiViewportHeight = height;
+}
+
+void Renderer_Metal::rmluiBeginFrame() {
+    // Clear render commands from previous frame
+    rmluiRenderCommands.clear();
+}
+
+void Renderer_Metal::rmluiRenderGeometry(Uint32 geometryId, const glm::vec2& translation, Uint32 textureId, bool hasTexture) {
+    RmlUiRenderCmd cmd;
+    cmd.geometryId = geometryId;
+    cmd.translation = translation;
+    cmd.textureId = textureId;
+    cmd.hasTexture = hasTexture;
+    cmd.enableScissor = rmluiScissorEnabled;
+    cmd.scissorX = rmluiScissorX;
+    cmd.scissorY = rmluiScissorY;
+    cmd.scissorWidth = rmluiScissorWidth;
+    cmd.scissorHeight = rmluiScissorHeight;
+
+    rmluiRenderCommands.push_back(cmd);
+}
+
+void Renderer_Metal::rmluiEnableScissor(int x, int y, int width, int height) {
+    rmluiScissorEnabled = true;
+    rmluiScissorX = x;
+    rmluiScissorY = y;
+    rmluiScissorWidth = width;
+    rmluiScissorHeight = height;
+}
+
+void Renderer_Metal::rmluiDisableScissor() {
+    rmluiScissorEnabled = false;
+}
+
+void Renderer_Metal::rmluiEndFrame() {
+    // Nothing to do here - actual rendering happens in RmlUiPass::execute()
 }

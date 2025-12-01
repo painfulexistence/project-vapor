@@ -8,6 +8,7 @@ find_package(Jolt CONFIG REQUIRED)
 find_package(enkiTS CONFIG REQUIRED)
 find_package(SDL3 CONFIG REQUIRED)
 find_package(Tracy CONFIG REQUIRED)
+find_package(RmlUi CONFIG REQUIRED)
 
 add_subdirectory(metal)
 add_subdirectory(MikkTSpace)
@@ -32,6 +33,9 @@ set(SOURCES
     src/resource_manager.cpp
     src/jolt_enki_job_system.cpp
     src/engine_core.cpp
+    src/rmlui_system.cpp
+    src/rmlui_render.cpp
+    src/rmlui_manager.cpp
     imgui/imgui.cpp
     imgui/imgui_draw.cpp
     imgui/imgui_tables.cpp
@@ -65,6 +69,7 @@ target_link_libraries(Vapor PUBLIC
     glm::glm
     cereal::cereal
     SDL3::SDL3
+    RmlUi::RmlUi
 )
 target_link_libraries(Vapor PRIVATE
     metal

@@ -1,5 +1,6 @@
 #pragma once
 #include "renderer.hpp"
+#include "rmlui_render.hpp"
 
 #include <SDL3/SDL_video.h>
 #include <SDL3/SDL_render.h>
@@ -28,6 +29,7 @@ class MainRenderPass;
 class WaterPass;
 class PostProcessPass;
 class ImGuiPass;
+class RmlUiPass;
 
 class RenderPass {
 public:
@@ -65,7 +67,7 @@ private:
 };
 
 
-class Renderer_Metal final : public Renderer { // Must be public or factory function won't work
+class Renderer_Metal final : public Renderer, public Vapor::RmlUiRenderer { // Must be public or factory function won't work
     friend class PrePass;
     friend class TLASBuildPass;
     friend class NormalResolvePass;
@@ -81,6 +83,7 @@ class Renderer_Metal final : public Renderer { // Must be public or factory func
     friend class WaterPass;
     friend class PostProcessPass;
     friend class ImGuiPass;
+    friend class RmlUiPass;
 
 public:
     Renderer_Metal();
@@ -115,6 +118,20 @@ public:
     NS::SharedPtr<MTL::Texture> getTexture(TextureHandle handle) const;
     NS::SharedPtr<MTL::RenderPipelineState> getPipeline(PipelineHandle handle) const;
 
+    // --- RmlUiRenderer interface implementation ---
+    void rmluiInit() override;
+    void rmluiShutdown() override;
+    Uint32 rmluiCreateGeometry(const std::vector<Vapor::RmlUiVertex>& vertices, const std::vector<Uint32>& indices) override;
+    void rmluiReleaseGeometry(Uint32 geometryId) override;
+    Uint32 rmluiCreateTexture(Uint32 width, Uint32 height, const Uint8* data) override;
+    void rmluiReleaseTexture(Uint32 textureId) override;
+    void rmluiSetViewport(int width, int height) override;
+    void rmluiBeginFrame() override;
+    void rmluiRenderGeometry(Uint32 geometryId, const glm::vec2& translation, Uint32 textureId, bool hasTexture) override;
+    void rmluiEnableScissor(int x, int y, int width, int height) override;
+    void rmluiDisableScissor() override;
+    void rmluiEndFrame() override;
+
 protected:
     RenderGraph graph;
 
@@ -147,6 +164,38 @@ protected:
     NS::SharedPtr<MTL::RenderPipelineState> irradianceConvolutionPipeline;
     NS::SharedPtr<MTL::RenderPipelineState> prefilterEnvMapPipeline;
     NS::SharedPtr<MTL::RenderPipelineState> brdfLUTPipeline;
+
+    // RmlUi rendering pipeline and resources
+    NS::SharedPtr<MTL::RenderPipelineState> rmluiTexturedPipeline;
+    NS::SharedPtr<MTL::RenderPipelineState> rmluiColorPipeline;
+    NS::SharedPtr<MTL::DepthStencilState> rmluiDepthStencilState;
+    int rmluiViewportWidth = 0;
+    int rmluiViewportHeight = 0;
+    bool rmluiScissorEnabled = false;
+    int rmluiScissorX = 0, rmluiScissorY = 0;
+    int rmluiScissorWidth = 0, rmluiScissorHeight = 0;
+
+    // RmlUi geometry storage
+    struct RmlUiGeometry {
+        NS::SharedPtr<MTL::Buffer> vertexBuffer;
+        NS::SharedPtr<MTL::Buffer> indexBuffer;
+        Uint32 indexCount;
+    };
+    std::unordered_map<Uint32, RmlUiGeometry> rmluiGeometries;
+    std::unordered_map<Uint32, NS::SharedPtr<MTL::Texture>> rmluiTextures;
+    Uint32 nextRmluiGeometryId = 1;
+    Uint32 nextRmluiTextureId = 1;
+
+    // RmlUi render commands for batching
+    struct RmlUiRenderCmd {
+        Uint32 geometryId;
+        glm::vec2 translation;
+        Uint32 textureId;
+        bool hasTexture;
+        bool enableScissor;
+        int scissorX, scissorY, scissorWidth, scissorHeight;
+    };
+    std::vector<RmlUiRenderCmd> rmluiRenderCommands;
 
     // Water rendering pipeline and resources
     NS::SharedPtr<MTL::RenderPipelineState> waterPipeline;
