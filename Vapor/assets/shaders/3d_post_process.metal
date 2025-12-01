@@ -21,6 +21,7 @@ vertex RasterizerData vertexMain(uint vertexID [[vertex_id]]) {
     return vert;
 }
 
+// ACES Filmic Tone Mapping
 float3 aces(float3 x) {
     float a = 2.51;
     float b = 0.03;
@@ -33,14 +34,27 @@ float3 aces(float3 x) {
 fragment float4 fragmentMain(
     RasterizerData in [[stage_in]],
     texture2d<float, access::sample> texScreen [[texture(0)]],
-    texture2d<float, access::sample> texAO [[texture(1)]]
+    texture2d<float, access::sample> texAO [[texture(1)]],
+    texture2d<float, access::sample> texNormal [[texture(2)]],
+    texture2d<float, access::sample> texGodRays [[texture(3)]]
 ) {
-    constexpr sampler s(address::repeat, filter::linear, mip_filter::linear);
+    constexpr sampler s(address::clamp_to_edge, filter::linear, mip_filter::linear);
+
+    // Sample scene color
     float3 color = texScreen.sample(s, in.uv).rgb;
     float ao = texAO.sample(s, in.uv).r;
 
+    // Sample god rays / light scattering
+    float3 godRays = texGodRays.sample(s, in.uv).rgb;
+
+    // Additive blend god rays with scene color (before tone mapping)
+    // This creates the characteristic bright ray effect
+    color += godRays;
+
+    // Apply ACES tone mapping
     color = aces(color);
 
+    // Exposure adjustment
     color *= 2.0;
 
     // color = linearToSRGB(color);  // Already handled by swapchain

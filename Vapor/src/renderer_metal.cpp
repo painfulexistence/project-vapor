@@ -661,6 +661,91 @@ public:
     }
 };
 
+// Light scattering pass: Renders volumetric god rays effect
+class LightScatteringPass : public RenderPass {
+public:
+    explicit LightScatteringPass(Renderer_Metal* renderer) : RenderPass(renderer) {}
+
+    const char* getName() const override { return "LightScatteringPass"; }
+
+    void execute() override {
+        auto& r = *renderer;
+
+        if (!r.lightScatteringEnabled) return;
+
+        auto drawableSize = r.swapchain->drawableSize();
+        glm::vec2 screenSize = glm::vec2(drawableSize.width, drawableSize.height);
+
+        // Calculate sun screen position by projecting sun direction
+        AtmosphereData* atmos = reinterpret_cast<AtmosphereData*>(r.atmosphereDataBuffer->contents());
+        glm::vec3 sunDir = glm::normalize(atmos->sunDirection);
+
+        // Project sun position to screen space
+        // Sun is at infinity, so we use camera position + sun direction * large distance
+        glm::vec3 camPos = r.currentCamera->getEye();
+        glm::vec3 sunWorldPos = camPos + sunDir * 10000.0f;
+
+        glm::mat4 viewProj = r.currentCamera->getProjMatrix() * r.currentCamera->getViewMatrix();
+        glm::vec4 sunClip = viewProj * glm::vec4(sunWorldPos, 1.0f);
+
+        // Check if sun is behind camera
+        if (sunClip.w <= 0.0f) {
+            return; // Sun behind camera, no god rays
+        }
+
+        // Convert to NDC then to UV [0,1]
+        glm::vec2 sunNDC = glm::vec2(sunClip.x, sunClip.y) / sunClip.w;
+        glm::vec2 sunScreenPos = sunNDC * 0.5f + 0.5f;
+        sunScreenPos.y = 1.0f - sunScreenPos.y; // Flip Y for Metal
+
+        // Update light scattering data buffer
+        LightScatteringData* lsData = reinterpret_cast<LightScatteringData*>(
+            r.lightScatteringDataBuffers[r.currentFrameInFlight]->contents()
+        );
+        lsData->sunScreenPos = sunScreenPos;
+        lsData->screenSize = screenSize;
+        lsData->density = r.lightScatteringSettings.density;
+        lsData->weight = r.lightScatteringSettings.weight;
+        lsData->decay = r.lightScatteringSettings.decay;
+        lsData->exposure = r.lightScatteringSettings.exposure;
+        lsData->numSamples = r.lightScatteringSettings.numSamples;
+        lsData->maxDistance = r.lightScatteringSettings.maxDistance;
+        lsData->sunIntensity = r.lightScatteringSettings.sunIntensity;
+        lsData->mieG = r.lightScatteringSettings.mieG;
+        lsData->sunColor = atmos->sunColor;
+        lsData->depthThreshold = r.lightScatteringSettings.depthThreshold;
+        lsData->jitter = r.lightScatteringSettings.jitter;
+        r.lightScatteringDataBuffers[r.currentFrameInFlight]->didModifyRange(
+            NS::Range::Make(0, r.lightScatteringDataBuffers[r.currentFrameInFlight]->length())
+        );
+
+        // Create render pass descriptor - render to light scattering RT
+        auto lsPassDesc = NS::TransferPtr(MTL::RenderPassDescriptor::renderPassDescriptor());
+        auto lsPassColorRT = lsPassDesc->colorAttachments()->object(0);
+        lsPassColorRT->setClearColor(MTL::ClearColor(0.0, 0.0, 0.0, 0.0));
+        lsPassColorRT->setLoadAction(MTL::LoadActionClear);
+        lsPassColorRT->setStoreAction(MTL::StoreActionStore);
+        lsPassColorRT->setTexture(r.lightScatteringRT.get());
+
+        // Execute the pass
+        auto encoder = r.currentCommandBuffer->renderCommandEncoder(lsPassDesc.get());
+        encoder->setRenderPipelineState(r.lightScatteringPipeline.get());
+        encoder->setCullMode(MTL::CullModeNone);
+
+        // Set textures
+        encoder->setFragmentTexture(r.colorRT.get(), 0);        // Scene color
+        encoder->setFragmentTexture(r.depthStencilRT.get(), 1); // Scene depth
+
+        // Set buffers
+        encoder->setFragmentBuffer(r.lightScatteringDataBuffers[r.currentFrameInFlight].get(), 0, 0);
+        encoder->setFragmentBuffer(r.frameDataBuffers[r.currentFrameInFlight].get(), 0, 1);
+
+        // Draw full-screen triangle
+        encoder->drawPrimitives(MTL::PrimitiveType::PrimitiveTypeTriangle, 0, 3, 1);
+        encoder->endEncoding();
+    }
+};
+
 // Post-process pass: Applies tone mapping and other post-processing effects
 class PostProcessPass : public RenderPass {
 public:
@@ -687,6 +772,7 @@ public:
         encoder->setFragmentTexture(r.colorRT.get(), 0);
         encoder->setFragmentTexture(r.aoRT.get(), 1);
         encoder->setFragmentTexture(r.normalRT.get(), 2);
+        encoder->setFragmentTexture(r.lightScatteringRT.get(), 3);  // God rays texture
         encoder->drawPrimitives(MTL::PrimitiveType::PrimitiveTypeTriangle, 0, 3, 1);
         encoder->endEncoding();
     }
@@ -768,6 +854,7 @@ auto Renderer_Metal::init(SDL_Window* window) -> void {
     graph.addPass(std::make_unique<MainRenderPass>(this));
     graph.addPass(std::make_unique<SkyAtmospherePass>(this));
     // graph.addPass(std::make_unique<WaterPass>(this));
+    graph.addPass(std::make_unique<LightScatteringPass>(this));
     graph.addPass(std::make_unique<PostProcessPass>(this));
     graph.addPass(std::make_unique<ImGuiPass>(this));
 }
@@ -802,6 +889,7 @@ auto Renderer_Metal::createResources() -> void {
     irradianceConvolutionPipeline = createPipeline("assets/shaders/3d_irradiance_convolution.metal", true, true, 1);
     prefilterEnvMapPipeline = createPipeline("assets/shaders/3d_prefilter_envmap.metal", true, true, 1);
     brdfLUTPipeline = createPipeline("assets/shaders/3d_brdf_lut.metal", false, true, 1);
+    lightScatteringPipeline = createPipeline("assets/shaders/3d_light_scattering.metal", true, true, 1);
 
     // Create buffers
     frameDataBuffers.resize(MAX_FRAMES_IN_FLIGHT);
@@ -826,6 +914,27 @@ auto Renderer_Metal::createResources() -> void {
     for (auto& clusterBuffer : clusterBuffers) {
         clusterBuffer = NS::TransferPtr(device->newBuffer(clusterGridSizeX * clusterGridSizeY * clusterGridSizeZ * sizeof(Cluster), MTL::ResourceStorageModeManaged));
     }
+
+    // Create light scattering data buffers and initialize default settings
+    lightScatteringDataBuffers.resize(MAX_FRAMES_IN_FLIGHT);
+    for (auto& lsBuffer : lightScatteringDataBuffers) {
+        lsBuffer = NS::TransferPtr(device->newBuffer(sizeof(LightScatteringData), MTL::ResourceStorageModeManaged));
+    }
+
+    // Initialize light scattering default settings
+    lightScatteringSettings.sunScreenPos = glm::vec2(0.5f, 0.5f);
+    lightScatteringSettings.screenSize = glm::vec2(1920.0f, 1080.0f);
+    lightScatteringSettings.density = 1.0f;
+    lightScatteringSettings.weight = 0.01f;
+    lightScatteringSettings.decay = 0.97f;
+    lightScatteringSettings.exposure = 0.3f;
+    lightScatteringSettings.numSamples = 64;
+    lightScatteringSettings.maxDistance = 1.0f;
+    lightScatteringSettings.sunIntensity = 1.0f;
+    lightScatteringSettings.mieG = 0.76f;
+    lightScatteringSettings.sunColor = glm::vec3(1.0f, 0.95f, 0.9f);
+    lightScatteringSettings.depthThreshold = 0.9999f;
+    lightScatteringSettings.jitter = 0.5f;
 
     // Create atmosphere data buffer with default Earth-like settings
     atmosphereDataBuffer = NS::TransferPtr(device->newBuffer(sizeof(AtmosphereData), MTL::ResourceStorageModeManaged));
@@ -980,6 +1089,16 @@ auto Renderer_Metal::createResources() -> void {
     aoTextureDesc->setUsage(MTL::TextureUsageShaderRead | MTL::TextureUsageShaderWrite);
     aoRT = NS::TransferPtr(device->newTexture(aoTextureDesc));
     aoTextureDesc->release();
+
+    // Create light scattering render target (HDR format for god rays)
+    MTL::TextureDescriptor* lightScatteringTextureDesc = MTL::TextureDescriptor::alloc()->init();
+    lightScatteringTextureDesc->setTextureType(MTL::TextureType2D);
+    lightScatteringTextureDesc->setPixelFormat(MTL::PixelFormatRGBA16Float); // HDR for bright rays
+    lightScatteringTextureDesc->setWidth(swapchain->drawableSize().width);
+    lightScatteringTextureDesc->setHeight(swapchain->drawableSize().height);
+    lightScatteringTextureDesc->setUsage(MTL::TextureUsageRenderTarget | MTL::TextureUsageShaderRead);
+    lightScatteringRT = NS::TransferPtr(device->newTexture(lightScatteringTextureDesc));
+    lightScatteringTextureDesc->release();
 
     // Create depth stencil states (for depth testing)
     MTL::DepthStencilDescriptor* depthStencilDesc = MTL::DepthStencilDescriptor::alloc()->init();
@@ -1827,6 +1946,71 @@ auto Renderer_Metal::draw(std::shared_ptr<Scene> scene, Camera& camera) -> void 
                 ImGui::DragFloat("Refinement Steps", &waterSettings.ssrSettings.z, 1.0f, 1.0f, 50.0f);
                 ImGui::DragFloat("Distance Factor", &waterSettings.ssrSettings.w, 1.0f, 1.0f, 100.0f);
                 ImGui::TreePop();
+            }
+
+            ImGui::TreePop();
+        }
+
+        if (ImGui::TreeNode("Light Scattering (God Rays)")) {
+            ImGui::Separator();
+            ImGui::Checkbox("Enabled", &lightScatteringEnabled);
+
+            if (lightScatteringEnabled) {
+                ImGui::Separator();
+                ImGui::Text("Ray Marching");
+                int numSamples = static_cast<int>(lightScatteringSettings.numSamples);
+                if (ImGui::SliderInt("Samples", &numSamples, 8, 128)) {
+                    lightScatteringSettings.numSamples = static_cast<Uint32>(numSamples);
+                }
+                ImGui::DragFloat("Max Distance", &lightScatteringSettings.maxDistance, 0.01f, 0.1f, 2.0f);
+
+                ImGui::Separator();
+                ImGui::Text("Scattering Properties");
+                ImGui::DragFloat("Density", &lightScatteringSettings.density, 0.01f, 0.0f, 5.0f);
+                ImGui::DragFloat("Weight", &lightScatteringSettings.weight, 0.001f, 0.001f, 0.1f);
+                ImGui::DragFloat("Decay", &lightScatteringSettings.decay, 0.001f, 0.9f, 1.0f);
+                ImGui::DragFloat("Exposure", &lightScatteringSettings.exposure, 0.01f, 0.0f, 2.0f);
+
+                ImGui::Separator();
+                ImGui::Text("Light Properties");
+                ImGui::DragFloat("Sun Intensity", &lightScatteringSettings.sunIntensity, 0.1f, 0.0f, 10.0f);
+                ImGui::DragFloat("Mie G (Phase)", &lightScatteringSettings.mieG, 0.01f, -0.99f, 0.99f);
+                if (ImGui::IsItemHovered()) {
+                    ImGui::SetTooltip("Mie scattering direction:\n< 0: backscatter\n= 0: isotropic\n> 0: forward scatter (sun glare)");
+                }
+
+                ImGui::Separator();
+                ImGui::Text("Advanced");
+                ImGui::DragFloat("Depth Threshold", &lightScatteringSettings.depthThreshold, 0.0001f, 0.99f, 1.0f, "%.4f");
+                if (ImGui::IsItemHovered()) {
+                    ImGui::SetTooltip("Depth value above which pixels are considered 'sky'.\nHigher = only sky contributes to rays.");
+                }
+                ImGui::DragFloat("Temporal Jitter", &lightScatteringSettings.jitter, 0.01f, 0.0f, 1.0f);
+                if (ImGui::IsItemHovered()) {
+                    ImGui::SetTooltip("Jitter amount for temporal anti-aliasing.\nReduces banding artifacts.");
+                }
+
+                if (ImGui::Button("Reset to Defaults")) {
+                    lightScatteringSettings.density = 1.0f;
+                    lightScatteringSettings.weight = 0.01f;
+                    lightScatteringSettings.decay = 0.97f;
+                    lightScatteringSettings.exposure = 0.3f;
+                    lightScatteringSettings.numSamples = 64;
+                    lightScatteringSettings.maxDistance = 1.0f;
+                    lightScatteringSettings.sunIntensity = 1.0f;
+                    lightScatteringSettings.mieG = 0.76f;
+                    lightScatteringSettings.depthThreshold = 0.9999f;
+                    lightScatteringSettings.jitter = 0.5f;
+                }
+            }
+
+            // Show render target preview
+            if (lightScatteringRT) {
+                ImGui::Separator();
+                if (ImGui::TreeNode("Debug: God Rays RT")) {
+                    ImGui::Image((ImTextureID)(intptr_t)lightScatteringRT.get(), ImVec2(128, 72));
+                    ImGui::TreePop();
+                }
             }
 
             ImGui::TreePop();
