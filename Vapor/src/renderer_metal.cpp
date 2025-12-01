@@ -22,6 +22,7 @@
 #include "graphics.hpp"
 #include "asset_manager.hpp"
 #include "helper.hpp"
+#include "mesh_builder.hpp"
 
 // ============================================================================
 // Render Pass Implementations
@@ -575,6 +576,90 @@ public:
     }
 };
 
+// Water pass: Renders water surface with Gerstner waves, reflections, and refractions
+class WaterPass : public RenderPass {
+public:
+    explicit WaterPass(Renderer_Metal* renderer) : RenderPass(renderer) {}
+
+    const char* getName() const override { return "WaterPass"; }
+
+    void execute() override {
+        auto& r = *renderer;
+
+        if (!r.waterEnabled || r.waterIndexCount == 0) {
+            return;
+        }
+
+        auto drawableSize = r.swapchain->drawableSize();
+        glm::vec2 screenSize = glm::vec2(drawableSize.width, drawableSize.height);
+        auto time = (float)SDL_GetTicks() / 1000.0f;
+
+        // Build model matrix from transform
+        glm::mat4 modelMatrix = glm::mat4(1.0f);
+        modelMatrix = glm::translate(modelMatrix, r.waterTransform.position);
+        modelMatrix = glm::scale(modelMatrix, r.waterTransform.scale);
+
+        // Update water data buffer
+        WaterData* waterData = reinterpret_cast<WaterData*>(r.waterDataBuffers[r.currentFrameInFlight]->contents());
+        *waterData = r.waterSettings;
+        waterData->modelMatrix = modelMatrix;
+        waterData->time = time;
+        r.waterDataBuffers[r.currentFrameInFlight]->didModifyRange(NS::Range::Make(0, r.waterDataBuffers[r.currentFrameInFlight]->length()));
+
+        // Create render pass descriptor - renders to resolved HDR target (no MSAA for water)
+        auto waterPassDesc = NS::TransferPtr(MTL::RenderPassDescriptor::renderPassDescriptor());
+        auto waterPassColorRT = waterPassDesc->colorAttachments()->object(0);
+        waterPassColorRT->setLoadAction(MTL::LoadActionLoad);
+        waterPassColorRT->setStoreAction(MTL::StoreActionStore);
+        waterPassColorRT->setTexture(r.colorRT.get());
+
+        auto waterPassDepthRT = waterPassDesc->depthAttachment();
+        waterPassDepthRT->setLoadAction(MTL::LoadActionLoad);
+        waterPassDepthRT->setStoreAction(MTL::StoreActionStore);
+        waterPassDepthRT->setTexture(r.depthStencilRT.get());
+
+        // Execute the pass
+        auto encoder = r.currentCommandBuffer->renderCommandEncoder(waterPassDesc.get());
+        encoder->setRenderPipelineState(r.waterPipeline.get());
+        encoder->setCullMode(MTL::CullModeNone);  // Water is double-sided
+        encoder->setFrontFacingWinding(MTL::Winding::WindingCounterClockwise);
+        encoder->setDepthStencilState(r.waterDepthStencilState.get());
+
+        // Set vertex buffers
+        encoder->setVertexBuffer(r.cameraDataBuffers[r.currentFrameInFlight].get(), 0, 0);
+        encoder->setVertexBuffer(r.waterDataBuffers[r.currentFrameInFlight].get(), 0, 1);
+        encoder->setVertexBuffer(r.waterVertexBuffer.get(), 0, 2);
+
+        // Set fragment textures
+        encoder->setFragmentTexture(r.getTexture(r.waterNormalMap1).get(), 0);
+        encoder->setFragmentTexture(r.getTexture(r.waterNormalMap2).get(), 1);
+        encoder->setFragmentTexture(r.colorRT.get(), 2);  // HDR scene for refraction
+        encoder->setFragmentTexture(r.depthStencilRT.get(), 3);  // Depth for depth softening
+        encoder->setFragmentTexture(r.normalRT.get(), 4);  // Scene normals for SSR
+        encoder->setFragmentTexture(r.environmentCubeMap.get(), 5);  // Environment cube map
+        encoder->setFragmentTexture(r.getTexture(r.waterFoamMap).get(), 6);
+        encoder->setFragmentTexture(r.getTexture(r.waterNoiseMap).get(), 7);
+
+        // Set fragment buffers
+        encoder->setFragmentBuffer(r.waterDataBuffers[r.currentFrameInFlight].get(), 0, 0);
+        encoder->setFragmentBuffer(r.cameraDataBuffers[r.currentFrameInFlight].get(), 0, 1);
+        encoder->setFragmentBuffer(r.directionalLightBuffer.get(), 0, 2);
+        encoder->setFragmentBytes(&screenSize, sizeof(glm::vec2), 3);
+
+        // Draw water mesh
+        encoder->drawIndexedPrimitives(
+            MTL::PrimitiveType::PrimitiveTypeTriangle,
+            r.waterIndexCount,
+            MTL::IndexTypeUInt32,
+            r.waterIndexBuffer.get(),
+            0
+        );
+        r.drawCount++;
+
+        encoder->endEncoding();
+    }
+};
+
 // Post-process pass: Applies tone mapping and other post-processing effects
 class PostProcessPass : public RenderPass {
 public:
@@ -679,6 +764,7 @@ auto Renderer_Metal::init(SDL_Window* window) -> void {
     graph.addPass(std::make_unique<RaytraceAOPass>(this));
     graph.addPass(std::make_unique<MainRenderPass>(this));
     graph.addPass(std::make_unique<SkyAtmospherePass>(this));
+    // graph.addPass(std::make_unique<WaterPass>(this));
     graph.addPass(std::make_unique<PostProcessPass>(this));
     graph.addPass(std::make_unique<ImGuiPass>(this));
 }
@@ -898,6 +984,285 @@ auto Renderer_Metal::createResources() -> void {
     depthStencilDesc->setDepthWriteEnabled(true);
     depthStencilState = NS::TransferPtr(device->newDepthStencilState(depthStencilDesc));
     depthStencilDesc->release();
+
+    // ========================================================================
+    // Water rendering resources
+    // ========================================================================
+
+    // Create water pipeline with alpha blending
+    {
+        auto shaderSrc = readFile("assets/shaders/3d_water.metal");
+        auto code = NS::String::string(shaderSrc.data(), NS::StringEncoding::UTF8StringEncoding);
+        NS::Error* error = nullptr;
+        MTL::Library* library = device->newLibrary(code, nullptr, &error);
+        if (!library) {
+            throw std::runtime_error(fmt::format("Could not compile water shader! Error: {}\n", error->localizedDescription()->utf8String()));
+        }
+
+        auto vertexMain = library->newFunction(NS::String::string("vertexMain", NS::StringEncoding::UTF8StringEncoding));
+        auto fragmentMain = library->newFunction(NS::String::string("fragmentMain", NS::StringEncoding::UTF8StringEncoding));
+
+        auto pipelineDesc = MTL::RenderPipelineDescriptor::alloc()->init();
+        pipelineDesc->setVertexFunction(vertexMain);
+        pipelineDesc->setFragmentFunction(fragmentMain);
+
+        auto colorAttachment = pipelineDesc->colorAttachments()->object(0);
+        colorAttachment->setPixelFormat(MTL::PixelFormat::PixelFormatRGBA16Float);
+        colorAttachment->setBlendingEnabled(true);
+        colorAttachment->setAlphaBlendOperation(MTL::BlendOperation::BlendOperationAdd);
+        colorAttachment->setRgbBlendOperation(MTL::BlendOperation::BlendOperationAdd);
+        colorAttachment->setSourceRGBBlendFactor(MTL::BlendFactor::BlendFactorSourceAlpha);
+        colorAttachment->setSourceAlphaBlendFactor(MTL::BlendFactor::BlendFactorSourceAlpha);
+        colorAttachment->setDestinationRGBBlendFactor(MTL::BlendFactor::BlendFactorOneMinusSourceAlpha);
+        colorAttachment->setDestinationAlphaBlendFactor(MTL::BlendFactor::BlendFactorOneMinusSourceAlpha);
+        pipelineDesc->setDepthAttachmentPixelFormat(MTL::PixelFormatDepth32Float);
+        pipelineDesc->setSampleCount(1);  // No MSAA for water pass
+
+        waterPipeline = NS::TransferPtr(device->newRenderPipelineState(pipelineDesc, &error));
+        if (!waterPipeline) {
+            throw std::runtime_error(fmt::format("Could not create water pipeline! Error: {}\n", error->localizedDescription()->utf8String()));
+        }
+
+        code->release();
+        library->release();
+        vertexMain->release();
+        fragmentMain->release();
+        pipelineDesc->release();
+    }
+
+    // Create water depth stencil state (depth test but no write for transparency)
+    {
+        MTL::DepthStencilDescriptor* waterDepthDesc = MTL::DepthStencilDescriptor::alloc()->init();
+        waterDepthDesc->setDepthCompareFunction(MTL::CompareFunction::CompareFunctionLessEqual);
+        waterDepthDesc->setDepthWriteEnabled(false);  // Don't write depth for transparent water
+        waterDepthStencilState = NS::TransferPtr(device->newDepthStencilState(waterDepthDesc));
+        waterDepthDesc->release();
+    }
+
+    // Create water data buffers (triple buffered)
+    waterDataBuffers.resize(MAX_FRAMES_IN_FLIGHT);
+    for (auto& waterDataBuffer : waterDataBuffers) {
+        waterDataBuffer = NS::TransferPtr(device->newBuffer(sizeof(WaterData), MTL::ResourceStorageModeManaged));
+    }
+
+    // Create water mesh (100x100 grid with 1.0 unit tiles, 5x5 UV tiling)
+    {
+        std::vector<WaterVertexData> waterVertices;
+        std::vector<Uint32> waterIndices;
+        MeshBuilder::buildWaterGrid(100, 100, 1.0f, 5.0f, 5.0f, waterVertices, waterIndices);
+
+        waterVertexBuffer = NS::TransferPtr(device->newBuffer(
+            waterVertices.size() * sizeof(WaterVertexData),
+            MTL::ResourceStorageModeManaged
+        ));
+        memcpy(waterVertexBuffer->contents(), waterVertices.data(), waterVertices.size() * sizeof(WaterVertexData));
+        waterVertexBuffer->didModifyRange(NS::Range::Make(0, waterVertexBuffer->length()));
+
+        waterIndexBuffer = NS::TransferPtr(device->newBuffer(
+            waterIndices.size() * sizeof(Uint32),
+            MTL::ResourceStorageModeManaged
+        ));
+        memcpy(waterIndexBuffer->contents(), waterIndices.data(), waterIndices.size() * sizeof(Uint32));
+        waterIndexBuffer->didModifyRange(NS::Range::Make(0, waterIndexBuffer->length()));
+
+        waterIndexCount = static_cast<Uint32>(waterIndices.size());
+    }
+
+    // Initialize default water transform (positioned above floor in Sponza)
+    waterTransform.position = glm::vec3(0.0f, 0.5f, 0.0f);  // y=0.5 to be above the floor
+    waterTransform.scale = glm::vec3(1.0f, 1.0f, 1.0f);
+
+    // Initialize default water settings
+    waterSettings.modelMatrix = glm::mat4(1.0f);
+    waterSettings.surfaceColor = glm::vec4(0.465f, 0.797f, 0.991f, 1.0f);
+    waterSettings.refractionColor = glm::vec4(0.003f, 0.599f, 0.812f, 1.0f);
+    // SSR settings: x=step size, y=max steps (0 to disable), z=refinement steps, w=distance factor
+    waterSettings.ssrSettings = glm::vec4(0.5f, 0.0f, 10.0f, 20.0f);  // Set y=0 to disable SSR
+    waterSettings.normalMapScroll = glm::vec4(1.0f, 0.0f, 0.0f, 1.0f);
+    waterSettings.normalMapScrollSpeed = glm::vec2(0.01f, 0.01f);
+    waterSettings.refractionDistortionFactor = 0.04f;
+    waterSettings.refractionHeightFactor = 2.5f;
+    waterSettings.refractionDistanceFactor = 15.0f;
+    waterSettings.depthSofteningDistance = 0.5f;
+    waterSettings.foamHeightStart = 0.8f;
+    waterSettings.foamFadeDistance = 0.4f;
+    waterSettings.foamTiling = 2.0f;
+    waterSettings.foamAngleExponent = 80.0f;
+    waterSettings.roughness = 0.08f;
+    waterSettings.reflectance = 0.55f;
+    waterSettings.specIntensity = 125.0f;
+    waterSettings.foamBrightness = 4.0f;
+    // waterSettings.tessellationFactor = 7.0f;
+    waterSettings.dampeningFactor = 5.0f;
+    waterSettings.waveCount = 2;
+
+    // Wave 1
+    waterSettings.waves[0].direction = glm::vec3(0.3f, 0.0f, -0.7f);
+    waterSettings.waves[0].steepness = 1.79f;
+    waterSettings.waves[0].waveLength = 3.75f;
+    waterSettings.waves[0].amplitude = 0.85f;
+    waterSettings.waves[0].speed = 1.21f;
+
+    // Wave 2
+    waterSettings.waves[1].direction = glm::vec3(0.5f, 0.0f, -0.2f);
+    waterSettings.waves[1].steepness = 1.79f;
+    waterSettings.waves[1].waveLength = 4.1f;
+    waterSettings.waves[1].amplitude = 0.52f;
+    waterSettings.waves[1].speed = 1.03f;
+
+    // Create placeholder water textures (procedural normal maps and noise)
+    // Water normal map 1 - a simple procedural normal texture
+    {
+        const Uint32 texSize = 256;
+        std::vector<Uint8> normalData(texSize * texSize * 4);
+        for (Uint32 y = 0; y < texSize; ++y) {
+            for (Uint32 x = 0; x < texSize; ++x) {
+                float fx = static_cast<float>(x) / texSize * 6.28f;
+                float fy = static_cast<float>(y) / texSize * 6.28f;
+                float nx = sin(fx * 2.0f + fy) * 0.5f + 0.5f;
+                float ny = sin(fy * 2.0f + fx * 0.5f) * 0.5f + 0.5f;
+                float nz = 1.0f;
+                glm::vec3 n = glm::normalize(glm::vec3((nx - 0.5f) * 0.3f, (ny - 0.5f) * 0.3f, nz));
+                Uint32 idx = (y * texSize + x) * 4;
+                normalData[idx + 0] = static_cast<Uint8>((n.x * 0.5f + 0.5f) * 255);
+                normalData[idx + 1] = static_cast<Uint8>((n.y * 0.5f + 0.5f) * 255);
+                normalData[idx + 2] = static_cast<Uint8>((n.z * 0.5f + 0.5f) * 255);
+                normalData[idx + 3] = 255;
+            }
+        }
+        auto img = std::make_shared<Image>();
+        img->uri = "procedural_water_normal1";
+        img->width = texSize;
+        img->height = texSize;
+        img->channelCount = 4;
+        img->byteArray = normalData;
+        waterNormalMap1 = createTexture(img);
+    }
+
+    // Water normal map 2 - different pattern
+    {
+        const Uint32 texSize = 256;
+        std::vector<Uint8> normalData(texSize * texSize * 4);
+        for (Uint32 y = 0; y < texSize; ++y) {
+            for (Uint32 x = 0; x < texSize; ++x) {
+                float fx = static_cast<float>(x) / texSize * 6.28f;
+                float fy = static_cast<float>(y) / texSize * 6.28f;
+                float nx = cos(fx * 3.0f - fy * 0.5f) * 0.5f + 0.5f;
+                float ny = cos(fy * 3.0f + fx * 0.7f) * 0.5f + 0.5f;
+                float nz = 1.0f;
+                glm::vec3 n = glm::normalize(glm::vec3((nx - 0.5f) * 0.25f, (ny - 0.5f) * 0.25f, nz));
+                Uint32 idx = (y * texSize + x) * 4;
+                normalData[idx + 0] = static_cast<Uint8>((n.x * 0.5f + 0.5f) * 255);
+                normalData[idx + 1] = static_cast<Uint8>((n.y * 0.5f + 0.5f) * 255);
+                normalData[idx + 2] = static_cast<Uint8>((n.z * 0.5f + 0.5f) * 255);
+                normalData[idx + 3] = 255;
+            }
+        }
+        auto img = std::make_shared<Image>();
+        img->uri = "procedural_water_normal2";
+        img->width = texSize;
+        img->height = texSize;
+        img->channelCount = 4;
+        img->byteArray = normalData;
+        waterNormalMap2 = createTexture(img);
+    }
+
+    // Water foam texture - white with noise pattern
+    {
+        const Uint32 texSize = 256;
+        std::vector<Uint8> foamData(texSize * texSize * 4);
+        for (Uint32 y = 0; y < texSize; ++y) {
+            for (Uint32 x = 0; x < texSize; ++x) {
+                float fx = static_cast<float>(x) / texSize;
+                float fy = static_cast<float>(y) / texSize;
+                float noise = (sin(fx * 50.0f) * cos(fy * 50.0f) + 1.0f) * 0.5f;
+                noise *= (sin(fx * 30.0f + fy * 20.0f) + 1.0f) * 0.5f;
+                Uint8 v = static_cast<Uint8>(noise * 200 + 55);
+                Uint32 idx = (y * texSize + x) * 4;
+                foamData[idx + 0] = v;
+                foamData[idx + 1] = v;
+                foamData[idx + 2] = v;
+                foamData[idx + 3] = 255;
+            }
+        }
+        auto img = std::make_shared<Image>();
+        img->uri = "procedural_water_foam";
+        img->width = texSize;
+        img->height = texSize;
+        img->channelCount = 4;
+        img->byteArray = foamData;
+        waterFoamMap = createTexture(img);
+    }
+
+    // Water noise texture - Perlin-like noise pattern
+    {
+        const Uint32 texSize = 256;
+        std::vector<Uint8> noiseData(texSize * texSize * 4);
+        for (Uint32 y = 0; y < texSize; ++y) {
+            for (Uint32 x = 0; x < texSize; ++x) {
+                float fx = static_cast<float>(x) / texSize;
+                float fy = static_cast<float>(y) / texSize;
+                float noise = 0.0f;
+                noise += (sin(fx * 20.0f) * cos(fy * 20.0f) + 1.0f) * 0.25f;
+                noise += (sin(fx * 40.0f + 0.3f) * cos(fy * 40.0f + 0.7f) + 1.0f) * 0.125f;
+                noise += (sin(fx * 80.0f + 1.5f) * cos(fy * 80.0f + 2.1f) + 1.0f) * 0.0625f;
+                noise = glm::clamp(noise, 0.0f, 1.0f);
+                Uint8 v = static_cast<Uint8>(noise * 255);
+                Uint32 idx = (y * texSize + x) * 4;
+                noiseData[idx + 0] = v;
+                noiseData[idx + 1] = v;
+                noiseData[idx + 2] = v;
+                noiseData[idx + 3] = 255;
+            }
+        }
+        auto img = std::make_shared<Image>();
+        img->uri = "procedural_water_noise";
+        img->width = texSize;
+        img->height = texSize;
+        img->channelCount = 4;
+        img->byteArray = noiseData;
+        waterNoiseMap = createTexture(img);
+    }
+
+    // Create placeholder environment cube map (simple gradient sky)
+    {
+        const Uint32 faceSize = 64;
+        MTL::TextureDescriptor* cubeDesc = MTL::TextureDescriptor::alloc()->init();
+        cubeDesc->setTextureType(MTL::TextureTypeCube);
+        cubeDesc->setPixelFormat(MTL::PixelFormatRGBA8Unorm);
+        cubeDesc->setWidth(faceSize);
+        cubeDesc->setHeight(faceSize);
+        cubeDesc->setUsage(MTL::TextureUsageShaderRead);
+
+        environmentCubeMap = NS::TransferPtr(device->newTexture(cubeDesc));
+
+        std::vector<Uint8> faceData(faceSize * faceSize * 4);
+        for (Uint32 face = 0; face < 6; ++face) {
+            for (Uint32 y = 0; y < faceSize; ++y) {
+                for (Uint32 x = 0; x < faceSize; ++x) {
+                    float t = static_cast<float>(y) / faceSize;
+                    Uint8 r = static_cast<Uint8>((0.4f + t * 0.3f) * 255);
+                    Uint8 g = static_cast<Uint8>((0.6f + t * 0.2f) * 255);
+                    Uint8 b = static_cast<Uint8>((0.8f + t * 0.1f) * 255);
+                    Uint32 idx = (y * faceSize + x) * 4;
+                    faceData[idx + 0] = r;
+                    faceData[idx + 1] = g;
+                    faceData[idx + 2] = b;
+                    faceData[idx + 3] = 255;
+                }
+            }
+            environmentCubeMap->replaceRegion(
+                MTL::Region(0, 0, 0, faceSize, faceSize, 1),
+                0,
+                face,
+                faceData.data(),
+                faceSize * 4,
+                0
+            );
+        }
+
+        cubeDesc->release();
+    }
 }
 
 auto Renderer_Metal::stage(std::shared_ptr<Scene> scene) -> void {
@@ -1347,6 +1712,86 @@ auto Renderer_Metal::draw(std::shared_ptr<Scene> scene, Camera& camera) -> void 
             for (const auto& node : scene->nodes) {
                 showNode(node);
             }
+            ImGui::TreePop();
+        }
+
+        if (ImGui::TreeNode("Water Settings")) {
+            ImGui::Separator();
+            ImGui::Checkbox("Water Enabled", &waterEnabled);
+
+            if (ImGui::TreeNode("Transform")) {
+                ImGui::DragFloat3("Position", (float*)&waterTransform.position, 0.1f);
+                ImGui::DragFloat3("Scale", (float*)&waterTransform.scale, 0.1f, 0.1f, 10.0f);
+                ImGui::TreePop();
+            }
+
+            if (ImGui::TreeNode("Colors")) {
+                ImGui::ColorEdit4("Surface Color", (float*)&waterSettings.surfaceColor);
+                ImGui::ColorEdit4("Refraction Color", (float*)&waterSettings.refractionColor);
+                ImGui::TreePop();
+            }
+
+            if (ImGui::TreeNode("Wave Parameters")) {
+                int waveCount = static_cast<int>(waterSettings.waveCount);
+                if (ImGui::SliderInt("Wave Count", &waveCount, 0, 4)) {
+                    waterSettings.waveCount = static_cast<Uint32>(waveCount);
+                }
+
+                for (Uint32 i = 0; i < waterSettings.waveCount && i < 4; ++i) {
+                    ImGui::PushID(i);
+                    if (ImGui::TreeNode(fmt::format("Wave {}", i + 1).c_str())) {
+                        ImGui::DragFloat3("Direction", (float*)&waterSettings.waves[i].direction, 0.01f, -1.0f, 1.0f);
+                        ImGui::DragFloat("Steepness", &waterSettings.waves[i].steepness, 0.01f, 0.0f, 3.0f);
+                        ImGui::DragFloat("Wave Length", &waterSettings.waves[i].waveLength, 0.1f, 0.1f, 20.0f);
+                        ImGui::DragFloat("Amplitude", &waterSettings.waves[i].amplitude, 0.01f, 0.0f, 5.0f);
+                        ImGui::DragFloat("Speed", &waterSettings.waves[i].speed, 0.01f, 0.0f, 5.0f);
+                        ImGui::TreePop();
+                    }
+                    ImGui::PopID();
+                }
+                ImGui::TreePop();
+            }
+
+            if (ImGui::TreeNode("Visual Parameters")) {
+                ImGui::DragFloat("Roughness", &waterSettings.roughness, 0.01f, 0.0f, 1.0f);
+                ImGui::DragFloat("Reflectance", &waterSettings.reflectance, 0.01f, 0.0f, 1.0f);
+                ImGui::DragFloat("Spec Intensity", &waterSettings.specIntensity, 1.0f, 0.0f, 500.0f);
+                ImGui::DragFloat("Dampening Factor", &waterSettings.dampeningFactor, 0.1f, 0.1f, 20.0f);
+                ImGui::TreePop();
+            }
+
+            if (ImGui::TreeNode("Normal Map Scroll")) {
+                ImGui::DragFloat2("Scroll Dir 1", (float*)&waterSettings.normalMapScroll, 0.01f, -1.0f, 1.0f);
+                ImGui::DragFloat2("Scroll Dir 2", (float*)&waterSettings.normalMapScroll.z, 0.01f, -1.0f, 1.0f);
+                ImGui::DragFloat2("Scroll Speed", (float*)&waterSettings.normalMapScrollSpeed, 0.001f, 0.0f, 0.1f);
+                ImGui::TreePop();
+            }
+
+            if (ImGui::TreeNode("Refraction")) {
+                ImGui::DragFloat("Distortion Factor", &waterSettings.refractionDistortionFactor, 0.001f, 0.0f, 0.2f);
+                ImGui::DragFloat("Height Factor", &waterSettings.refractionHeightFactor, 0.1f, 0.0f, 10.0f);
+                ImGui::DragFloat("Distance Factor", &waterSettings.refractionDistanceFactor, 0.5f, 1.0f, 100.0f);
+                ImGui::DragFloat("Depth Softening", &waterSettings.depthSofteningDistance, 0.01f, 0.01f, 5.0f);
+                ImGui::TreePop();
+            }
+
+            if (ImGui::TreeNode("Foam")) {
+                ImGui::DragFloat("Height Start", &waterSettings.foamHeightStart, 0.01f, 0.0f, 2.0f);
+                ImGui::DragFloat("Fade Distance", &waterSettings.foamFadeDistance, 0.01f, 0.01f, 2.0f);
+                ImGui::DragFloat("Tiling", &waterSettings.foamTiling, 0.1f, 0.1f, 10.0f);
+                ImGui::DragFloat("Angle Exponent", &waterSettings.foamAngleExponent, 1.0f, 1.0f, 200.0f);
+                ImGui::DragFloat("Brightness", &waterSettings.foamBrightness, 0.1f, 0.1f, 10.0f);
+                ImGui::TreePop();
+            }
+
+            if (ImGui::TreeNode("SSR Settings")) {
+                ImGui::DragFloat("Step Size", &waterSettings.ssrSettings.x, 0.1f, 0.1f, 2.0f);
+                ImGui::DragFloat("Max Steps (0=disabled)", &waterSettings.ssrSettings.y, 1.0f, 0.0f, 100.0f);
+                ImGui::DragFloat("Refinement Steps", &waterSettings.ssrSettings.z, 1.0f, 1.0f, 50.0f);
+                ImGui::DragFloat("Distance Factor", &waterSettings.ssrSettings.w, 1.0f, 1.0f, 100.0f);
+                ImGui::TreePop();
+            }
+
             ImGui::TreePop();
         }
     }

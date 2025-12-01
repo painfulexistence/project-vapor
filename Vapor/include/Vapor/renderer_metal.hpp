@@ -25,6 +25,7 @@ class IrradianceConvolutionPass;
 class PrefilterEnvMapPass;
 class BRDFLUTPass;
 class MainRenderPass;
+class WaterPass;
 class PostProcessPass;
 class ImGuiPass;
 
@@ -77,6 +78,7 @@ class Renderer_Metal final : public Renderer { // Must be public or factory func
     friend class PrefilterEnvMapPass;
     friend class BRDFLUTPass;
     friend class MainRenderPass;
+    friend class WaterPass;
     friend class PostProcessPass;
     friend class ImGuiPass;
 
@@ -146,12 +148,30 @@ protected:
     NS::SharedPtr<MTL::RenderPipelineState> prefilterEnvMapPipeline;
     NS::SharedPtr<MTL::RenderPipelineState> brdfLUTPipeline;
 
+    // Water rendering pipeline and resources
+    NS::SharedPtr<MTL::RenderPipelineState> waterPipeline;
+    NS::SharedPtr<MTL::DepthStencilState> waterDepthStencilState;
+    std::vector<NS::SharedPtr<MTL::Buffer>> waterDataBuffers;
+    NS::SharedPtr<MTL::Buffer> waterVertexBuffer;
+    NS::SharedPtr<MTL::Buffer> waterIndexBuffer;
+    Uint32 waterIndexCount = 0;
+    bool waterEnabled = true;
+    WaterData waterSettings;
+    WaterTransform waterTransform;
+
     // Default textures
     TextureHandle defaultAlbedoTexture;
     TextureHandle defaultNormalTexture;
     TextureHandle defaultORMTexture;
     TextureHandle defaultEmissiveTexture;
     TextureHandle defaultDisplacementTexture;
+
+    // Water textures
+    TextureHandle waterNormalMap1;
+    TextureHandle waterNormalMap2;
+    TextureHandle waterFoamMap;
+    TextureHandle waterNoiseMap;
+    NS::SharedPtr<MTL::Texture> environmentCubeMap;
 
     // Per-frame buffers
     std::vector<NS::SharedPtr<MTL::Buffer>> frameDataBuffers;
