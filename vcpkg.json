@@ -24,6 +24,7 @@
         "tools"
       ]
     },
-    "rmlui"
+    "rmlui",
+    "entt"
   ]
 }
