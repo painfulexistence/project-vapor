@@ -764,7 +764,7 @@ auto Renderer_Metal::init(SDL_Window* window) -> void {
     graph.addPass(std::make_unique<RaytraceAOPass>(this));
     graph.addPass(std::make_unique<MainRenderPass>(this));
     graph.addPass(std::make_unique<SkyAtmospherePass>(this));
-    graph.addPass(std::make_unique<WaterPass>(this));  // Water rendered after main scene, before post-processing
+    // graph.addPass(std::make_unique<WaterPass>(this));
     graph.addPass(std::make_unique<PostProcessPass>(this));
     graph.addPass(std::make_unique<ImGuiPass>(this));
 }
