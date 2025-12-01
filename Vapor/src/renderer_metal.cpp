@@ -730,11 +730,11 @@ auto Renderer_Metal::createResources() -> void {
         waterDataBuffer = NS::TransferPtr(device->newBuffer(sizeof(WaterData), MTL::ResourceStorageModeManaged));
     }
 
-    // Create water mesh (50x50 grid with 1.0 unit tiles, 5x5 UV tiling)
+    // Create water mesh (100x100 grid with 1.0 unit tiles, 5x5 UV tiling)
     {
         std::vector<WaterVertexData> waterVertices;
         std::vector<Uint32> waterIndices;
-        MeshBuilder::buildWaterGrid(50, 50, 1.0f, 5.0f, 5.0f, waterVertices, waterIndices);
+        MeshBuilder::buildWaterGrid(100, 100, 1.0f, 5.0f, 5.0f, waterVertices, waterIndices);
 
         waterVertexBuffer = NS::TransferPtr(device->newBuffer(
             waterVertices.size() * sizeof(WaterVertexData),
@@ -761,7 +761,8 @@ auto Renderer_Metal::createResources() -> void {
     waterSettings.modelMatrix = glm::mat4(1.0f);
     waterSettings.surfaceColor = glm::vec4(0.465f, 0.797f, 0.991f, 1.0f);
     waterSettings.refractionColor = glm::vec4(0.003f, 0.599f, 0.812f, 1.0f);
-    waterSettings.ssrSettings = glm::vec4(0.5f, 20.0f, 10.0f, 20.0f);
+    // SSR settings: x=step size, y=max steps (0 to disable), z=refinement steps, w=distance factor
+    waterSettings.ssrSettings = glm::vec4(0.5f, 0.0f, 10.0f, 20.0f);  // Set y=0 to disable SSR
     waterSettings.normalMapScroll = glm::vec4(1.0f, 0.0f, 0.0f, 1.0f);
     waterSettings.normalMapScrollSpeed = glm::vec2(0.01f, 0.01f);
     waterSettings.refractionDistortionFactor = 0.04f;
@@ -776,7 +777,7 @@ auto Renderer_Metal::createResources() -> void {
     waterSettings.reflectance = 0.55f;
     waterSettings.specIntensity = 125.0f;
     waterSettings.foamBrightness = 4.0f;
-    waterSettings.tessellationFactor = 7.0f;
+    // waterSettings.tessellationFactor = 7.0f;
     waterSettings.dampeningFactor = 5.0f;
     waterSettings.waveCount = 2;
 
@@ -1399,7 +1400,7 @@ auto Renderer_Metal::draw(std::shared_ptr<Scene> scene, Camera& camera) -> void 
 
             if (ImGui::TreeNode("SSR Settings")) {
                 ImGui::DragFloat("Step Size", &waterSettings.ssrSettings.x, 0.1f, 0.1f, 2.0f);
-                ImGui::DragFloat("Max Steps", &waterSettings.ssrSettings.y, 1.0f, 1.0f, 100.0f);
+                ImGui::DragFloat("Max Steps (0=disabled)", &waterSettings.ssrSettings.y, 1.0f, 0.0f, 100.0f);
                 ImGui::DragFloat("Refinement Steps", &waterSettings.ssrSettings.z, 1.0f, 1.0f, 50.0f);
                 ImGui::DragFloat("Distance Factor", &waterSettings.ssrSettings.w, 1.0f, 1.0f, 100.0f);
                 ImGui::TreePop();

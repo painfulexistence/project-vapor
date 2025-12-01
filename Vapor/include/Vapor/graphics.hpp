@@ -172,11 +172,11 @@ struct alignas(16) LightCullData {
 // Water rendering data structures
 struct alignas(16) WaveData {
     glm::vec3 direction;
+    float _pad1;
     float steepness;
     float waveLength;
     float amplitude;
     float speed;
-    float _pad1;
 };
 
 struct alignas(16) WaterData {
@@ -186,6 +186,7 @@ struct alignas(16) WaterData {
     glm::vec4 ssrSettings;            // x: step size, y: max steps, z: refinement steps, w: distance factor
     glm::vec4 normalMapScroll;        // xy: scroll direction 1, zw: scroll direction 2
     glm::vec2 normalMapScrollSpeed;   // Scroll speeds for both normal maps
+    glm::vec2 _pad1;
     float refractionDistortionFactor;
     float refractionHeightFactor;
     float refractionDistanceFactor;
@@ -198,13 +199,11 @@ struct alignas(16) WaterData {
     float reflectance;
     float specIntensity;
     float foamBrightness;
-    float tessellationFactor;
-    float dampeningFactor;
-    float time;
-    float _pad1;
+    // float tessellationFactor;
     WaveData waves[4];               // Up to 4 waves
     Uint32 waveCount;
-    float _pad2[3];
+    float dampeningFactor;
+    float time;
 };
 
 // Water transform (CPU-side, used to build modelMatrix)

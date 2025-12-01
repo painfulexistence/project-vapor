@@ -13,12 +13,11 @@ struct WaterVertexData {
 };
 
 struct WaveData {
-    packed_float3 direction;
+    float3 direction;
     float steepness;
     float waveLength;
     float amplitude;
     float speed;
-    float _pad1;
 };
 
 struct WaterData {
@@ -40,13 +39,11 @@ struct WaterData {
     float reflectance;
     float specIntensity;
     float foamBrightness;
-    float tessellationFactor;
-    float dampeningFactor;
-    float time;
-    float _pad1;
+    // float tessellationFactor;
     WaveData waves[4];
     uint waveCount;
-    float _pad2[3];
+    float dampeningFactor;
+    float time;
 };
 
 struct WaterRasterizerData {
@@ -302,79 +299,152 @@ fragment float4 fragmentMain(
     float3 reflectionVector = normalize(reflect(-viewDir, finalNormal));
 
     // Simple SSR ray march (simplified for performance)
+    // Note: Set water.ssrSettings.y (max steps) to 0 to disable SSR
+    bool ssrEnabled = water.ssrSettings.y > 0.0;
+
     float3 rayMarchPosition = in.positionView.xyz;
     float4 rayMarchTexPosition = float4(0, 0, 0, 0);
     float stepCount = 0;
-    float forwardStepCount = water.ssrSettings.y;
+    float forwardStepCount = water.ssrSettings.y;  // Initialize to max steps (no hit found)
     float sceneZ = 0;
+    float3 finalSceneViewPos = float3(0, 0, 0);  // Initialize outside loop
+    bool foundHit = false;
 
-    while (stepCount < water.ssrSettings.y) {
+    // Forward ray march (skip if SSR is disabled)
+    if (ssrEnabled) {
+        // Note: In OpenGL-style view space, Z points towards camera (negative values)
+        // When ray marching forward, Z becomes more negative (closer to camera)
+        while (stepCount < water.ssrSettings.y) {
         rayMarchPosition += reflectionVector.xyz * water.ssrSettings.x;
-        rayMarchTexPosition = camera.proj * float4(-rayMarchPosition, 1);
 
+        // Convert view space to clip space
+        // In OpenGL-style view space, Z is negative, so we use -Z for projection
+        float4 viewPos = float4(rayMarchPosition, 1.0);
+        rayMarchTexPosition = camera.proj * viewPos;
+
+        // Check if ray is outside frustum
         if (abs(rayMarchTexPosition.w) < EPSILON) {
             rayMarchTexPosition.w = EPSILON;
+        }
+
+        // Check if ray is outside screen bounds
+        if (abs(rayMarchTexPosition.x) > rayMarchTexPosition.w ||
+            abs(rayMarchTexPosition.y) > rayMarchTexPosition.w ||
+            rayMarchTexPosition.z > rayMarchTexPosition.w) {
+            stepCount++;
+            continue;
         }
 
         rayMarchTexPosition.xy /= rayMarchTexPosition.w;
         rayMarchTexPosition.xy = float2(rayMarchTexPosition.x, -rayMarchTexPosition.y) * 0.5 + 0.5;
 
+        // Clamp to valid texture coordinates
+        if (rayMarchTexPosition.x < 0.0 || rayMarchTexPosition.x > 1.0 ||
+            rayMarchTexPosition.y < 0.0 || rayMarchTexPosition.y > 1.0) {
+            stepCount++;
+            continue;
+        }
+
         sceneZ = depthMap.sample(pointClampSampler, rayMarchTexPosition.xy).r;
         float3 sceneViewPos = getViewPositionFromDepth(rayMarchTexPosition.xy, sceneZ, camera.invProj);
 
-        if (sceneViewPos.z <= rayMarchPosition.z) {
+        // In OpenGL-style view space, Z is negative. When ray marches forward, Z becomes more negative.
+        // If scene Z is less negative (further) than ray Z, we've hit something.
+        // Since Z is negative, "less negative" means "greater" in absolute terms.
+        if (sceneViewPos.z >= rayMarchPosition.z) {  // Changed from <= to >=
             forwardStepCount = stepCount;
-            stepCount = water.ssrSettings.y;
+            finalSceneViewPos = sceneViewPos;  // Store the hit position
+            foundHit = true;
+            stepCount = water.ssrSettings.y;  // Exit loop
         } else {
             stepCount++;
         }
-    }
+        }
 
-    // Refinement step
-    if (forwardStepCount < water.ssrSettings.y) {
-        stepCount = 0;
-        while (stepCount < water.ssrSettings.z) {
-            rayMarchPosition -= reflectionVector.xyz * water.ssrSettings.x / water.ssrSettings.z;
-            rayMarchTexPosition = camera.proj * float4(-rayMarchPosition, 1);
+        // Refinement step (only if we found a hit)
+        if (foundHit && forwardStepCount < water.ssrSettings.y) {
+            stepCount = 0;
+            while (stepCount < water.ssrSettings.z) {
+                rayMarchPosition -= reflectionVector.xyz * water.ssrSettings.x / water.ssrSettings.z;
+                float4 viewPos = float4(rayMarchPosition, 1.0);
+                rayMarchTexPosition = camera.proj * viewPos;
 
-            if (abs(rayMarchTexPosition.w) < EPSILON) {
-                rayMarchTexPosition.w = EPSILON;
-            }
+                if (abs(rayMarchTexPosition.w) < EPSILON) {
+                    rayMarchTexPosition.w = EPSILON;
+                }
 
-            rayMarchTexPosition.xy /= rayMarchTexPosition.w;
-            rayMarchTexPosition.xy = float2(rayMarchTexPosition.x, -rayMarchTexPosition.y) * 0.5 + 0.5;
+                rayMarchTexPosition.xy /= rayMarchTexPosition.w;
+                rayMarchTexPosition.xy = float2(rayMarchTexPosition.x, -rayMarchTexPosition.y) * 0.5 + 0.5;
 
-            sceneZ = depthMap.sample(pointClampSampler, rayMarchTexPosition.xy).r;
-            float3 sceneViewPos = getViewPositionFromDepth(rayMarchTexPosition.xy, sceneZ, camera.invProj);
+                sceneZ = depthMap.sample(pointClampSampler, rayMarchTexPosition.xy).r;
+                float3 sceneViewPos = getViewPositionFromDepth(rayMarchTexPosition.xy, sceneZ, camera.invProj);
 
-            if (sceneViewPos.z > rayMarchPosition.z) {
-                stepCount = water.ssrSettings.z;
-            } else {
-                stepCount++;
+                if (sceneViewPos.z < rayMarchPosition.z) {  // Changed from > to <
+                    stepCount = water.ssrSettings.z;  // Exit refinement
+                } else {
+                    stepCount++;
+                    finalSceneViewPos = sceneViewPos;  // Update final position during refinement
+                }
             }
         }
-    }
+    }  // Close if (ssrEnabled)
 
     // Calculate SSR blend factor
-    float3 ssrReflectionNormal = normalMap.sample(pointClampSampler, rayMarchTexPosition.xy).xyz * 2.0 - 1.0;
-    float2 ssrDistanceFactor = float2(distance(0.5, hdrCoords.x), distance(0.5, hdrCoords.y)) * 2.0;
-    float ssrFactor = (1.0 - abs(nDotV))
-                      * (1.0 - forwardStepCount / water.ssrSettings.y)
-                      * saturate(1.0 - ssrDistanceFactor.x - ssrDistanceFactor.y)
-                      * (1.0 / (1.0 + abs(sceneZ - rayMarchPosition.z) * water.ssrSettings.w))
-                      * (1.0 - saturate(dot(ssrReflectionNormal, finalNormal)));
+    float ssrFactor = 0.0;
+    if (ssrEnabled && foundHit) {
+        // NormalRT stores world space normal directly (not encoded), so just normalize
+        float3 ssrReflectionNormal = normalize(normalMap.sample(pointClampSampler, rayMarchTexPosition.xy).xyz);
+        // Convert to view space for SSR comparison (SSR ray march is in view space)
+        float3 ssrReflectionNormalView = normalize((camera.view * float4(ssrReflectionNormal, 0.0)).xyz);
+        float2 ssrDistanceFactor = float2(abs(0.5 - hdrCoords.x), abs(0.5 - hdrCoords.y)) * 2.0;
+
+        // SSR factor calculation - compare view space normals
+        // Make sure forwardStepCount is valid (not equal to max steps)
+        float hitDistanceFactor = (forwardStepCount < water.ssrSettings.y) ? (1.0 - forwardStepCount / water.ssrSettings.y) : 0.0;
+        float depthFactor = 1.0 / (1.0 + abs(finalSceneViewPos.z - rayMarchPosition.z) * water.ssrSettings.w);
+        float normalFactor = 1.0 - saturate(dot(ssrReflectionNormalView, finalNormal));
+
+        ssrFactor = (1.0 - abs(nDotV))
+                  * hitDistanceFactor
+                  * saturate(1.0 - ssrDistanceFactor.x - ssrDistanceFactor.y)
+                  * depthFactor
+                  * normalFactor;
+    }
 
     // Blend SSR with environment reflection
-    float3 reflectionColor = hdrMap.sample(linearClampSampler, rayMarchTexPosition.xy).rgb;
+    float3 reflectionColor;
+    if (foundHit && ssrFactor > 0.001) {  // Only use SSR if factor is significant
+        // Use point clamp sampler for SSR to avoid filtering artifacts
+        reflectionColor = hdrMap.sample(pointClampSampler, rayMarchTexPosition.xy).rgb;
+    } else {
+        reflectionColor = float3(0, 0, 0);  // No SSR, will use environment map
+    }
+
+    // Calculate environment reflection color
+    // Option 1: Use environment cube map (if available)
+    // Option 2: Use simple sky gradient based on reflection direction
     float3 envReflectionDir = (camera.invView * float4(reflectionVector, 0.0)).xyz;
-    float3 skyboxColor = environmentMap.sample(linearClampSampler, envReflectionDir).rgb;
+    float3 skyboxColor;
+
+    // Simple sky gradient: blue at horizon, lighter blue/white at zenith
+    // Based on Y component of reflection direction (up = 1.0, down = -1.0)
+    float skyGradient = saturate(envReflectionDir.y * 0.5 + 0.5);  // Map from [-1,1] to [0,1]
+    float3 horizonColor = float3(0.4, 0.6, 0.9);  // Blue horizon
+    float3 zenithColor = float3(0.7, 0.8, 1.0);    // Light blue/white zenith
+    float3 simpleSkyColor = mix(horizonColor, zenithColor, skyGradient);
+
+    // Use environment map if available, otherwise use simple sky gradient
+    // You can also sample the environment map and fallback to simple sky if needed
+    skyboxColor = simpleSkyColor;  // For now, use simple sky gradient
+
     reflectionColor = mix(skyboxColor, reflectionColor, saturate(ssrFactor)) * water.surfaceColor.rgb;
 
     // ========================================================================
     // Refraction
     // ========================================================================
 
-    float4x4 viewProjInv = camera.invView * camera.invProj;
+    // Calculate inverse view-projection matrix (order: invProj * invView)
+    float4x4 viewProjInv = camera.invProj * camera.invView;
 
     // Distort refraction based on normal
     float2 distortedTexCoord = hdrCoords + ((finalNormal.xz + finalNormal.xy) * 0.5) * water.refractionDistortionFactor;
@@ -389,8 +459,8 @@ fragment float4 fragmentMain(
     float sceneDepth = depthMap.sample(pointClampSampler, hdrCoords).r;
     float3 scenePosition = getWorldPositionFromDepth(hdrCoords, sceneDepth, viewProjInv);
 
-    // Depth softening for alpha
-    float depthSoftenedAlpha = saturate(distance(scenePosition, in.positionWorld.xyz) / water.depthSofteningDistance);
+    // Depth softening for alpha (use length for true 3D distance)
+    float depthSoftenedAlpha = saturate(length(scenePosition - in.positionWorld.xyz) / water.depthSofteningDistance);
 
     // Fade refraction based on water depth
     float3 waterSurfacePosition = (distortedPosition.y < in.positionWorld.y) ? distortedPosition : scenePosition;
@@ -400,7 +470,10 @@ fragment float4 fragmentMain(
     // Blend reflections and refractions
     // ========================================================================
 
-    float waveTopReflectionFactor = pow(1.0 - saturate(dot(normalize(in.normal), viewDir)), 3.0);
+    // Use original geometric normal (before normal map) for wave top reflection
+    // This matches the article's approach of using input.normal (geometric normal)
+    float3 geometricNormal = normalize(in.normal);  // This is the wave-deformed normal, not finalNormal
+    float waveTopReflectionFactor = pow(1.0 - saturate(dot(geometricNormal, viewDir)), 3.0);
     float3 waterBaseColor = mix(waterColor, reflectionColor, saturate(saturate(length(in.positionView.xyz) / water.refractionDistanceFactor) + waveTopReflectionFactor));
 
     // Add specular
