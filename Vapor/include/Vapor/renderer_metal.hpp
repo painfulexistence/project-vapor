@@ -12,6 +12,11 @@
 
 #include "graphics.hpp"
 
+// Forward declarations
+namespace Rml {
+    class Context;
+}
+
 class Renderer_Metal;
 class PrePass;
 class TLASBuildPass;
@@ -27,6 +32,7 @@ class BRDFLUTPass;
 class MainRenderPass;
 class WaterPass;
 class PostProcessPass;
+class RmlUiPass;
 class ImGuiPass;
 
 class RenderPass {
@@ -80,6 +86,7 @@ class Renderer_Metal final : public Renderer { // Must be public or factory func
     friend class MainRenderPass;
     friend class WaterPass;
     friend class PostProcessPass;
+    friend class RmlUiPass;
     friend class ImGuiPass;
 
 public:
@@ -101,6 +108,12 @@ public:
     virtual RenderPath getRenderPath() const override {
         return currentRenderPath;
     }
+
+    // Get Metal device (for RmlUI initialization)
+    MTL::Device* getDevice() const { return device; }
+
+    // Initialize UI rendering (sets RenderInterface and finalizes RmlUI initialization)
+    bool initUI() override;
 
     NS::SharedPtr<MTL::RenderPipelineState> createPipeline(const std::string& filename, bool isHDR, bool isColorOnly, Uint32 sampleCount);
     NS::SharedPtr<MTL::ComputePipelineState> createComputePipeline(const std::string& filename);
@@ -235,5 +248,10 @@ private:
 
     RenderPath currentRenderPath = RenderPath::Forward;
 
+    // UI rendering (using void* for pimpl idiom to hide implementation)
+    void* m_uiRenderer = nullptr;
+    Rml::Context* m_uiContext = nullptr;
+
     void createResources();
+    void renderUI();  // Internal method called by RmlUiPass
 };

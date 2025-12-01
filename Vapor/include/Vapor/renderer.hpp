@@ -5,6 +5,11 @@
 #include <SDL3/SDL_video.h>
 #include <memory>
 
+// Forward declarations
+namespace Rml {
+    class Context;
+}
+
 enum class GraphicsBackend { Metal, Vulkan };
 
 enum class RenderPath { Forward, Deferred };
@@ -26,6 +31,10 @@ public:
 
     virtual void setRenderPath(RenderPath path) = 0;
     virtual RenderPath getRenderPath() const = 0;
+
+    // UI rendering (optional, implemented by backends that support it)
+    // This method should set the RenderInterface and finalize RmlUI initialization
+    virtual bool initUI() { return false; /* Default: not supported */ }
 
 protected:
     const Uint32 MAX_FRAMES_IN_FLIGHT = 3;

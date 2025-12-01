@@ -1,35 +1,36 @@
+#include "backends/imgui_impl_sdl3.h"
+#include "imgui.h"
 #include <SDL3/SDL.h>
-#include <fmt/core.h>
 #include <args.hxx>
+#include <fmt/core.h>
 #include <glm/ext/matrix_transform.hpp>
 #include <glm/ext/vector_float3.hpp>
-#include "SDL3/SDL_stdinc.h"
-#include "imgui.h"
-#include "backends/imgui_impl_sdl3.h"
 #include <iostream>
 
-#include "Vapor/scene.hpp"
-#include "Vapor/renderer.hpp"
-#include "Vapor/graphics.hpp"
-#include "Vapor/physics_3d.hpp"
 #include "Vapor/asset_manager.hpp"
-#include "Vapor/mesh_builder.hpp"
 #include "Vapor/camera.hpp"
-#include "Vapor/rng.hpp"
 #include "Vapor/engine_core.hpp"
+#include "Vapor/graphics.hpp"
+#include "Vapor/mesh_builder.hpp"
+#include "Vapor/physics_3d.hpp"
+#include "Vapor/renderer.hpp"
+#include "Vapor/rmlui_manager.hpp"
+#include "Vapor/rng.hpp"
+#include "Vapor/scene.hpp"
+#include <RmlUi/Core/ElementDocument.h>
 
 #include "camera_manager.hpp"
 
 int main(int argc, char* args[]) {
-    args::ArgumentParser parser { "This is Project Vapor." };
+    args::ArgumentParser parser{ "This is Project Vapor." };
     args::Group windowGroup(parser, "Window:");
-    args::ValueFlag<Uint32> width(windowGroup, "number", "Window width", {'w', "width"}, 1280);
-    args::ValueFlag<Uint32> height(windowGroup, "number", "Window height", {'h', "height"}, 720);
+    args::ValueFlag<Uint32> width(windowGroup, "number", "Window width", { 'w', "width" }, 1280);
+    args::ValueFlag<Uint32> height(windowGroup, "number", "Window height", { 'h', "height" }, 720);
     args::Group graphicsGroup(parser, "Graphics:", args::Group::Validators::Xor);
-    args::Flag useMetal(graphicsGroup, "Metal", "Use Metal backend", {"metal"});
-    args::Flag useVulkan(graphicsGroup, "Vulkan", "Use Vulkan backend", {"vulkan"});
+    args::Flag useMetal(graphicsGroup, "Metal", "Use Metal backend", { "metal" });
+    args::Flag useVulkan(graphicsGroup, "Vulkan", "Use Vulkan backend", { "vulkan" });
     args::Group helpGroup(parser, "Help:");
-    args::HelpFlag help(helpGroup, "help", "Display help menu", {"help"});
+    args::HelpFlag help(helpGroup, "help", "Display help menu", { "help" });
     if (argc > 1) {
         try {
             parser.ParseCLI(argc, args);
@@ -71,12 +72,7 @@ int main(int argc, char* args[]) {
     gfxBackend = GraphicsBackend::Vulkan;
 #endif
 
-    auto window = SDL_CreateWindow(
-        winTitle,
-        width.Get(),
-        height.Get(),
-        winFlags
-    );
+    auto window = SDL_CreateWindow(winTitle, width.Get(), height.Get(), winFlags);
     IMGUI_CHECKVERSION();
     ImGui::CreateContext();
     // ImGui::StyleColorsDark();
@@ -86,7 +82,7 @@ int main(int argc, char* args[]) {
 
     // Initialize engine core with enkiTS task scheduler
     auto engineCore = std::make_unique<Vapor::EngineCore>();
-    engineCore->init(); // Auto-detects thread count
+    engineCore->init();// Auto-detects thread count
     fmt::print("Engine core initialized\n");
 
     auto renderer = createRenderer(gfxBackend);
@@ -103,7 +99,7 @@ int main(int argc, char* args[]) {
     fmt::print("Loading scene asynchronously...\n");
     auto sceneResource = resourceManager.loadScene(
         std::string("assets/models/Sponza/Sponza.gltf"),
-        true,  // optimized
+        true,// optimized
         Vapor::LoadMode::Async,
         [](std::shared_ptr<Scene> loadedScene) {
             fmt::print("Scene loaded with {} nodes\n", loadedScene->nodes.size());
@@ -119,32 +115,28 @@ int main(int argc, char* args[]) {
         .intensity = 10.0,
     });
     for (int i = 0; i < 8; i++) {
-        scene->pointLights.push_back({
-            .position = glm::vec3(rng.RandomFloatInRange(-5.0f, 5.0f), rng.RandomFloatInRange(0.0f, 5.0f), rng.RandomFloatInRange(-5.0f, 5.0f)),
-            .color = glm::vec3(rng.RandomFloat(), rng.RandomFloat(), rng.RandomFloat()),
-            .intensity = 5.0f * rng.RandomFloat(),
-            .radius = 0.5f
-        });
+        scene->pointLights.push_back({ .position = glm::vec3(
+                                           rng.RandomFloatInRange(-5.0f, 5.0f),
+                                           rng.RandomFloatInRange(0.0f, 5.0f),
+                                           rng.RandomFloatInRange(-5.0f, 5.0f)
+                                       ),
+                                       .color = glm::vec3(rng.RandomFloat(), rng.RandomFloat(), rng.RandomFloat()),
+                                       .intensity = 5.0f * rng.RandomFloat(),
+                                       .radius = 0.5f });
     }
     // Load textures asynchronously
     fmt::print("Loading textures...\n");
-    auto albedoResource = resourceManager.loadImage(
-        std::string("assets/textures/american_walnut_albedo.png"),
-        Vapor::LoadMode::Async
-    );
-    auto normalResource = resourceManager.loadImage(
-        std::string("assets/textures/american_walnut_normal.png"),
-        Vapor::LoadMode::Async
-    );
-    auto roughnessResource = resourceManager.loadImage(
-        std::string("assets/textures/american_walnut_roughness.png"),
-        Vapor::LoadMode::Async
-    );
+    auto albedoResource =
+        resourceManager.loadImage(std::string("assets/textures/american_walnut_albedo.png"), Vapor::LoadMode::Async);
+    auto normalResource =
+        resourceManager.loadImage(std::string("assets/textures/american_walnut_normal.png"), Vapor::LoadMode::Async);
+    auto roughnessResource =
+        resourceManager.loadImage(std::string("assets/textures/american_walnut_roughness.png"), Vapor::LoadMode::Async);
 
     // Wait for all textures to load
     resourceManager.waitForAll();
 
-    auto material = std::make_shared<Material>(Material {
+    auto material = std::make_shared<Material>(Material{
         .albedoMap = albedoResource->get(),
         .normalMap = normalResource->get(),
         .roughnessMap = roughnessResource->get(),
@@ -153,19 +145,26 @@ int main(int argc, char* args[]) {
     auto entity1 = scene->createNode("Cube 1");
     scene->addMeshToNode(entity1, MeshBuilder::buildCube(1.0f, material));
     entity1->setPosition(glm::vec3(-2.0f, 10.5f, 0.0f));
-    entity1->body = physics->createBoxBody(glm::vec3(.5f, .5f, .5f), glm::vec3(-2.0f, 0.5f, 0.0f), glm::identity<glm::quat>(), BodyMotionType::Dynamic);
+    entity1->body = physics->createBoxBody(
+        glm::vec3(.5f, .5f, .5f), glm::vec3(-2.0f, 0.5f, 0.0f), glm::identity<glm::quat>(), BodyMotionType::Dynamic
+    );
     physics->addBody(entity1->body, true);
     auto entity2 = scene->createNode("Cube 2");
     scene->addMeshToNode(entity2, MeshBuilder::buildCube(1.0f, material));
     entity2->setPosition(glm::vec3(2.0f, 0.5f, 0.0f));
-    entity2->body = physics->createBoxBody(glm::vec3(.5f, .5f, .5f), glm::vec3(2.0f, 0.5f, 0.0f), glm::identity<glm::quat>(), BodyMotionType::Dynamic);
+    entity2->body = physics->createBoxBody(
+        glm::vec3(.5f, .5f, .5f), glm::vec3(2.0f, 0.5f, 0.0f), glm::identity<glm::quat>(), BodyMotionType::Dynamic
+    );
     physics->addBody(entity2->body, true);
     auto entity3 = scene->createNode("Floor");
     entity3->setPosition(glm::vec3(0.0f, -0.5f, 0.0f));
-    entity3->body = physics->createBoxBody(glm::vec3(50.0f, .5f, 50.0f), glm::vec3(0.0f, -.5f, 0.0f), glm::identity<glm::quat>(), BodyMotionType::Static);
+    entity3->body = physics->createBoxBody(
+        glm::vec3(50.0f, .5f, 50.0f), glm::vec3(0.0f, -.5f, 0.0f), glm::identity<glm::quat>(), BodyMotionType::Static
+    );
     physics->addBody(entity3->body, false);
     // auto entity4 = scene->createNode("Obj Model");
-    // scene->addMeshToNode(entity4, AssetManager::loadOBJ(std::string("assets/models/Sibenik/sibenik.obj"), std::string("assets/models/Sibenik/")));
+    // scene->addMeshToNode(entity4, AssetManager::loadOBJ(std::string("assets/models/Sibenik/sibenik.obj"),
+    // std::string("assets/models/Sibenik/")));
 
     renderer->stage(scene);
 
@@ -177,28 +176,28 @@ int main(int argc, char* args[]) {
 
     // Add FlyCam (free-flying camera)
     auto flyCam = std::make_unique<Vapor::FlyCam>(
-        glm::vec3(0.0f, 2.0f, 8.0f),     // Eye position
-        glm::vec3(0.0f, 0.0f, 0.0f),     // Look at center
-        glm::vec3(0.0f, 1.0f, 0.0f),     // Up vector
-        glm::radians(60.0f),              // FOV
-        (float)windowWidth / (float)windowHeight,  // Aspect ratio
-        0.05f,                            // Near plane
-        500.0f,                           // Far plane
-        5.0f,                             // Move speed
-        1.5f                              // Rotate speed
+        glm::vec3(0.0f, 2.0f, 8.0f),// Eye position
+        glm::vec3(0.0f, 0.0f, 0.0f),// Look at center
+        glm::vec3(0.0f, 1.0f, 0.0f),// Up vector
+        glm::radians(60.0f),// FOV
+        (float)windowWidth / (float)windowHeight,// Aspect ratio
+        0.05f,// Near plane
+        500.0f,// Far plane
+        5.0f,// Move speed
+        1.5f// Rotate speed
     );
     cameraManager.addCamera("fly", std::move(flyCam));
 
     // Add FollowCam (follows entity1)
     auto followCam = std::make_unique<Vapor::FollowCam>(
-        entity1,                          // Target to follow
-        glm::vec3(0.0f, 1.0f, 2.0f),     // Offset (behind and above)
-        glm::radians(60.0f),              // FOV
-        (float)windowWidth / (float)windowHeight,  // Aspect ratio
-        0.05f,                            // Near plane
-        500.0f,                           // Far plane
-        0.1f,                             // Smooth factor (lower = smoother)
-        0.1f                              // Deadzone
+        entity1,// Target to follow
+        glm::vec3(0.0f, 1.0f, 2.0f),// Offset (behind and above)
+        glm::radians(60.0f),// FOV
+        (float)windowWidth / (float)windowHeight,// Aspect ratio
+        0.05f,// Near plane
+        500.0f,// Far plane
+        0.1f,// Smooth factor (lower = smoother)
+        0.1f// Deadzone
     );
     cameraManager.addCamera("follow", std::move(followCam));
 
@@ -207,6 +206,19 @@ int main(int argc, char* args[]) {
     fmt::print("Camera controls:\n");
     fmt::print("  Press '1' - Switch to Fly Camera (free movement with WASDRF + IJKL)\n");
     fmt::print("  Press '2' - Switch to Follow Camera (follows Cube 1)\n");
+
+    // Initialize RmlUI and load HUD document (only for Metal backend)
+    Rml::ElementDocument* hudDocument = nullptr;
+    SDL_GetWindowSize(window, &windowWidth, &windowHeight);
+
+    if (engineCore->initRmlUI(windowWidth, windowHeight) && renderer->initUI()) {
+        if (auto* rmluiManager = engineCore->getRmlUiManager()) {
+            hudDocument = rmluiManager->LoadDocument("assets/ui/hud.rml");
+            if (hudDocument) {
+                hudDocument->Show();
+            }
+        }
+    }
 
     Uint32 frameCount = 0;
     float time = SDL_GetTicks() / 1000.0f;
@@ -225,6 +237,8 @@ int main(int argc, char* args[]) {
 
         SDL_Event e;
         while (SDL_PollEvent(&e) != 0) {
+            engineCore->processRmlUIEvent(e);
+
             ImGui_ImplSDL3_ProcessEvent(&e);
 
             inputManager.processEvent(e);
@@ -259,6 +273,13 @@ int main(int argc, char* args[]) {
             cameraManager.switchCamera("follow");
             fmt::print("[Main] Switched to Follow Camera\n");
         }
+        if (inputState.isPressed(Vapor::InputAction::Hotkey10)) {
+            auto* rmluiManager = engineCore->getRmlUiManager();
+            if (rmluiManager) {
+                fmt::print("Reloading UI...\n");
+                rmluiManager->ReloadDocument("assets/ui/hud.rml");
+            }
+        }
 
         cameraManager.update(deltaTime, inputState);
 
@@ -270,25 +291,25 @@ int main(int argc, char* args[]) {
         for (int i = 0; i < scene->pointLights.size(); i++) {
             auto& l = scene->pointLights[i];
             switch (i % 4) {
-            case 0:  // circular motion
+            case 0:// circular motion
                 l.position.x = 3.0f * cos(time * speed + i * 0.1f);
                 l.position.z = 3.0f * sin(time * speed + i * 0.1f);
                 l.position.y = 1.5f + 0.5f * sin(time * speed * 0.5f + i * 0.2f);
                 break;
 
-            case 1:  // figure-8 motion
+            case 1:// figure-8 motion
                 l.position.x = 4.0f * sin(time * speed * 0.7f + i * 0.15f);
                 l.position.z = 4.0f * sin(time * speed * 0.7f + i * 0.15f) * cos(time * speed * 0.7f + i * 0.15f);
                 l.position.y = 1.0f + 1.0f * cos(time * speed * 0.3f + i * 0.1f);
                 break;
 
-            case 2:  // linear motion
+            case 2:// linear motion
                 l.position.x = 4.0f * sin(time * speed * 0.6f + i * 0.12f);
                 l.position.z = 2.0f * cos(time * speed * 0.8f + i * 0.18f);
                 l.position.y = 0.5f + 2.0f * abs(sin(time * speed * 0.4f + i * 0.14f));
                 break;
 
-            case 3:  // spiral motion
+            case 3:// spiral motion
                 float spiralRadius = 2.0f + 1.0f * sin(time * speed * 0.2f + i * 0.05f);
                 l.position.x = spiralRadius * cos(time * speed * 0.5f + i * 0.08f);
                 l.position.z = spiralRadius * sin(time * speed * 0.5f + i * 0.08f);
@@ -312,9 +333,9 @@ int main(int argc, char* args[]) {
     }
 
     // Shutdown subsystems
-    renderer->deinit();
     physics->deinit();
     engineCore->shutdown();
+    renderer->deinit();
 
     ImGui::DestroyContext();
 

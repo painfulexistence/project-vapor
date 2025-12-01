@@ -1,114 +1,155 @@
 #include "engine_core.hpp"
+#include "rmlui_manager.hpp"
 #include <fmt/core.h>
+#include <fmt/format.h>
 #include <thread>
 #include <tracy/Tracy.hpp>
 
 namespace Vapor {
 
-EngineCore* EngineCore::s_instance = nullptr;
+    EngineCore* EngineCore::s_instance = nullptr;
 
-EngineCore::EngineCore() {
-    if (s_instance != nullptr) {
-        fmt::print("Warning: Multiple EngineCore instances created\n");
-    }
-    s_instance = this;
-}
-
-EngineCore::~EngineCore() {
-    if (m_initialized) {
-        shutdown();
+    EngineCore::EngineCore() {
+        if (s_instance != nullptr) {
+            fmt::print("Warning: Multiple EngineCore instances created\n");
+        }
+        s_instance = this;
     }
 
-    if (s_instance == this) {
-        s_instance = nullptr;
-    }
-}
+    EngineCore::~EngineCore() {
+        if (m_initialized) {
+            shutdown();
+        }
 
-void EngineCore::init(uint32_t numThreads) {
-    ZoneScoped;
-
-    if (m_initialized) {
-        fmt::print("EngineCore already initialized\n");
-        return;
-    }
-
-    // Determine thread count
-    if (numThreads == 0) {
-        numThreads = std::thread::hardware_concurrency();
-        if (numThreads == 0) {
-            numThreads = 4; // Fallback
+        if (s_instance == this) {
+            s_instance = nullptr;
         }
     }
-    m_numThreads = numThreads;
 
-    fmt::print("Initializing EngineCore with {} threads\n", m_numThreads);
+    void EngineCore::init(uint32_t numThreads) {
+        ZoneScoped;
 
-    // Initialize task scheduler
-    m_taskScheduler = std::make_unique<TaskScheduler>();
-    m_taskScheduler->init(m_numThreads);
+        if (m_initialized) {
+            fmt::print("EngineCore already initialized\n");
+            return;
+        }
 
-    // Initialize resource manager
-    m_resourceManager = std::make_unique<ResourceManager>(*m_taskScheduler);
+        // Determine thread count
+        if (numThreads == 0) {
+            numThreads = std::thread::hardware_concurrency();
+            if (numThreads == 0) {
+                numThreads = 4;// Fallback
+            }
+        }
+        m_numThreads = numThreads;
 
-    // Initialize action manager
-    m_actionManager = std::make_unique<ActionManager>();
+        fmt::print("Initializing EngineCore with {} threads\n", m_numThreads);
 
-    // Initialize input manager
-    m_inputManager = std::make_unique<InputManager>();
+        // Initialize task scheduler
+        m_taskScheduler = std::make_unique<TaskScheduler>();
+        m_taskScheduler->init(m_numThreads);
 
-    // Initialize audio manager
-    m_audioManager = std::make_unique<AudioManager>();
-    m_audioManager->init();
+        // Initialize resource manager
+        m_resourceManager = std::make_unique<ResourceManager>(*m_taskScheduler);
 
-    m_initialized = true;
+        // Initialize action manager
+        m_actionManager = std::make_unique<ActionManager>();
 
-    fmt::print("EngineCore initialized successfully\n");
-}
+        // Initialize input manager
+        m_inputManager = std::make_unique<InputManager>();
 
-void EngineCore::shutdown() {
-    ZoneScoped;
+        // Initialize audio manager
+        m_audioManager = std::make_unique<AudioManager>();
+        m_audioManager->init();
 
-    if (!m_initialized) {
-        return;
+        m_initialized = true;
+
+        fmt::print("EngineCore initialized successfully\n");
     }
 
-    fmt::print("Shutting down EngineCore...\n");
+    void EngineCore::shutdown() {
+        ZoneScoped;
 
-    // Wait for all pending tasks
-    m_taskScheduler->waitForAll();
+        if (!m_initialized) {
+            return;
+        }
 
-    m_actionManager->stopAll();
+        fmt::print("Shutting down EngineCore...\n");
 
-    // Cleanup subsystems in reverse order
-    m_audioManager->shutdown();
-    m_audioManager.reset();
-    m_inputManager.reset();
-    m_actionManager.reset();
-    m_resourceManager.reset();
-    m_taskScheduler->shutdown();
-    m_taskScheduler.reset();
+        // Wait for all pending tasks
+        m_taskScheduler->waitForAll();
 
-    m_initialized = false;
+        m_actionManager->stopAll();
 
-    fmt::print("EngineCore shutdown complete\n");
-}
+        // Cleanup subsystems in reverse order
+        if (m_rmluiManager) {
+            m_rmluiManager->Shutdown();
+            m_rmluiManager.reset();
+        }
+        m_audioManager->shutdown();
+        m_audioManager.reset();
+        m_inputManager.reset();
+        m_actionManager.reset();
+        m_resourceManager.reset();
+        m_taskScheduler->shutdown();
+        m_taskScheduler.reset();
 
-void EngineCore::update(float deltaTime) {
-    ZoneScoped;
+        m_initialized = false;
 
-    if (!m_initialized) {
-        return;
+        fmt::print("EngineCore shutdown complete\n");
     }
 
-    // Update action manager (time-based actions)
-    m_actionManager->update(deltaTime);
+    void EngineCore::update(float deltaTime) {
+        ZoneScoped;
 
-    // Update audio manager (cleanup finished sounds, invoke callbacks)
-    m_audioManager->update(deltaTime);
+        if (!m_initialized) {
+            return;
+        }
 
-    // Future: Handle async task completion callbacks
-    // Future: Manage render command buffer submission
-    // Future: Coordinate physics-render synchronization
-}
+        // Update action manager (time-based actions)
+        m_actionManager->update(deltaTime);
 
-} // namespace Vapor
+        // Update audio manager (cleanup finished sounds, invoke callbacks)
+        m_audioManager->update(deltaTime);
+
+        // Update RmlUI
+        if (m_rmluiManager) {
+            m_rmluiManager->Update(deltaTime);
+        }
+
+        // Future: Handle async task completion callbacks
+        // Future: Manage render command buffer submission
+        // Future: Coordinate physics-render synchronization
+    }
+
+    bool EngineCore::initRmlUI(int width, int height) {
+        if (m_rmluiManager) {
+            fmt::print("RmlUI already initialized\n");
+            return true;
+        }
+
+        m_rmluiManager = std::make_unique<RmlUiManager>();
+        if (!m_rmluiManager->Initialize(width, height)) {
+            fmt::print("Failed to initialize RmlUI\n");
+            m_rmluiManager.reset();
+            return false;
+        }
+
+        fmt::print("RmlUI initialized successfully ({}x{})\n", width, height);
+        return true;
+    }
+
+    void EngineCore::onRmlUIResize(int width, int height) {
+        if (m_rmluiManager) {
+            m_rmluiManager->OnResize(width, height);
+        }
+    }
+
+    bool EngineCore::processRmlUIEvent(const SDL_Event& event) {
+        if (m_rmluiManager && m_rmluiManager->IsInitialized()) {
+            return m_rmluiManager->ProcessEvent(event);
+        }
+        return false;
+    }
+
+}// namespace Vapor
