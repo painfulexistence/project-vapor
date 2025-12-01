@@ -10,6 +10,10 @@
 
 namespace Vapor {
 
+    struct NameComponent {
+        std::string name;
+    };
+
     struct TransformComponent {
         glm::vec3 position = glm::vec3(0.0f);
         glm::quat rotation = glm::quat(1.0f, 0.0f, 0.0f, 0.0f);
@@ -18,14 +22,16 @@ namespace Vapor {
         // 緩存的世界變換矩陣（由 TransformSystem 計算）
         glm::mat4 worldTransform = glm::mat4(1.0f);
         bool isDirty = true;
-
-        // 父實體（用於層級變換）
-        Entity parent = NULL_ENTITY;
     };
 
-    struct MeshComponent {
-        std::shared_ptr<MeshGroup> meshGroup = nullptr;
-        glm::vec4 color = glm::vec4(1.0f, 1.0f, 1.0f, 1.0f);
+    // struct Hierarchy {
+    //     entt::entity parent = entt::null;
+    // };
+
+    // Mesh rendering component
+    struct MeshRendererComponent {
+        std::string name;
+        std::vector<std::shared_ptr<Mesh>> meshes;
         bool visible = true;
         bool castShadow = true;
         bool receiveShadow = true;
@@ -37,14 +43,7 @@ namespace Vapor {
         bool syncToPhysics = false;// Kinematic/Static 同步到物理
         bool syncFromPhysics = true;// Dynamic 從物理同步
         float gravityFactor = 1.0f;
-    };
-
-    struct TagComponent {
-        std::string tag;
-    };
-
-    struct NameComponent {
-        std::string name;
+        float mass = 1.0f;
     };
 
     struct VirtualCameraComponent {
@@ -63,5 +62,18 @@ namespace Vapor {
         glm::mat4 viewMatrix = glm::mat4(1.0f);
         glm::mat4 projectionMatrix = glm::mat4(1.0f);
     };
+
+    // Light components
+    struct DirectionalLightComponent {
+        DirectionalLight light;
+    };
+
+    struct PointLightComponent {
+        PointLight light;
+    };
+
+    // Tag components for filtering
+    struct Active {};
+    struct Visible {};
 
 }// namespace Vapor
