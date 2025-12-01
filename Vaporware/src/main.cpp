@@ -18,8 +18,142 @@
 #include "Vapor/rng.hpp"
 #include "Vapor/scene.hpp"
 #include <RmlUi/Core/ElementDocument.h>
+#include <entt/entt.hpp>
 
-#include "camera_manager.hpp"
+
+#include "components.hpp"
+
+// System Functions
+void updateLightMovementSystem(entt::registry& registry, Scene* scene, float deltaTime) {
+    auto view = registry.view<ScenePointLightReferenceComponent, LightMovementLogicComponent>();
+
+    for (auto entity : view) {
+        auto& ref = view.get<ScenePointLightReferenceComponent>(entity);
+        auto& logic = view.get<LightMovementLogicComponent>(entity);
+
+        if (ref.lightIndex < 0 || ref.lightIndex >= scene->pointLights.size()) continue;
+
+        auto& light = scene->pointLights[ref.lightIndex];
+        logic.timer += deltaTime * logic.speed;
+
+        float x = 0.0f, y = 0.0f, z = 0.0f;
+
+        switch (logic.pattern) {
+        case MovementPattern::Circle:
+            x = cos(logic.timer) * logic.radius;
+            z = sin(logic.timer) * logic.radius;
+            y = logic.height;
+            break;
+        case MovementPattern::Figure8:
+            x = cos(logic.timer) * logic.radius;
+            z = sin(logic.timer * 2.0f) * (logic.radius * 0.5f);
+            y = logic.height;
+            break;
+        case MovementPattern::Linear:
+            x = sin(logic.timer) * logic.radius;
+            y = logic.height;
+            z = 0.0f;
+            break;
+        case MovementPattern::Spiral:
+            x = cos(logic.timer) * (logic.radius + sin(logic.timer * 0.5f));
+            z = sin(logic.timer) * (logic.radius + sin(logic.timer * 0.5f));
+            y = logic.height + sin(logic.timer * 0.2f);
+            break;
+        }
+
+        light.position = glm::vec3(x, y, z);
+        // Optional: intensity modulation
+        // light.intensity = 5.0f + sin(logic.timer * 2.0f) * 2.0f;
+    }
+}
+
+void updateAutoRotateSystem(entt::registry& registry, float deltaTime) {
+    auto view = registry.view<SceneNodeReferenceComponent, AutoRotateComponent>();
+    for (auto entity : view) {
+        auto& ref = view.get<SceneNodeReferenceComponent>(entity);
+        auto& rotate = view.get<AutoRotateComponent>(entity);
+        if (ref.node) {
+            ref.node->rotate(rotate.axis, rotate.speed * deltaTime);
+        }
+    }
+}
+
+void updateDirectionalLightSystem(entt::registry& registry, Scene* scene, float deltaTime) {
+    auto view = registry.view<SceneDirectionalLightReferenceComponent, DirectionalLightLogicComponent>();
+    for (auto entity : view) {
+        auto& ref = view.get<SceneDirectionalLightReferenceComponent>(entity);
+        auto& logic = view.get<DirectionalLightLogicComponent>(entity);
+        if (ref.lightIndex >= 0 && ref.lightIndex < scene->directionalLights.size()) {
+            logic.timer += deltaTime * logic.speed;
+            // Simple oscillation on Z axis relative to base direction
+            glm::vec3 newDir = logic.baseDirection;
+            newDir.z += logic.magnitude * sin(logic.timer);
+            scene->directionalLights[ref.lightIndex].direction = glm::normalize(newDir);
+        }
+    }
+}
+
+void updateCameraSystem(entt::registry& registry, Vapor::InputManager& inputManager, float deltaTime) {
+    auto view = registry.view<Vapor::VirtualCameraComponent>();
+    const auto& inputState = inputManager.getInputState();
+
+    for (auto entity : view) {
+        auto& cam = view.get<Vapor::VirtualCameraComponent>(entity);
+        if (!cam.isActive) continue;
+
+        // 1. Handle Fly Camera Logic
+        if (auto* fly = registry.try_get<FlyCameraComponent>(entity)) {
+            // Rotation
+            if (inputState.isHeld(Vapor::InputAction::LookUp)) fly->pitch -= fly->rotateSpeed * deltaTime;
+            if (inputState.isHeld(Vapor::InputAction::LookDown)) fly->pitch += fly->rotateSpeed * deltaTime;
+            if (inputState.isHeld(Vapor::InputAction::LookLeft)) fly->yaw += fly->rotateSpeed * deltaTime;
+            if (inputState.isHeld(Vapor::InputAction::LookRight)) fly->yaw -= fly->rotateSpeed * deltaTime;
+
+            fly->pitch = glm::clamp(fly->pitch, -89.0f, 89.0f);
+
+            cam.rotation = glm::quat(glm::vec3(glm::radians(-fly->pitch), glm::radians(fly->yaw - 90.0f), 0.0f));
+
+            glm::vec3 front = cam.rotation * glm::vec3(0, 0, -1);
+            glm::vec3 right = cam.rotation * glm::vec3(1, 0, 0);
+            glm::vec3 up = cam.rotation * glm::vec3(0, 1, 0);
+
+            float speed = fly->moveSpeed * deltaTime;
+            if (inputState.isHeld(Vapor::InputAction::MoveForward)) cam.position += front * speed;
+            if (inputState.isHeld(Vapor::InputAction::MoveBackward)) cam.position -= front * speed;
+            if (inputState.isHeld(Vapor::InputAction::StrafeLeft)) cam.position -= right * speed;
+            if (inputState.isHeld(Vapor::InputAction::StrafeRight)) cam.position += right * speed;
+            if (inputState.isHeld(Vapor::InputAction::MoveUp)) cam.position += up * speed;
+            if (inputState.isHeld(Vapor::InputAction::MoveDown)) cam.position -= up * speed;
+        }
+
+        // 2. Handle Follow Camera Logic
+        if (auto* follow = registry.try_get<FollowCameraComponent>(entity)) {
+            if (follow->targetNode) {
+                glm::vec3 targetPos = follow->targetNode->getWorldPosition();
+                glm::vec3 desiredPos = targetPos + follow->offset;
+
+                cam.position = glm::mix(cam.position, desiredPos, 1.0f - pow(follow->smoothFactor, deltaTime));
+                cam.rotation = glm::quatLookAt(glm::normalize(targetPos - cam.position), glm::vec3(0, 1, 0));
+            }
+        }
+
+        // 3. Update Matrices
+        glm::mat4 rotation = glm::mat4_cast(cam.rotation);
+        glm::mat4 translation = glm::translate(glm::mat4(1.0f), cam.position);
+        cam.viewMatrix = glm::inverse(translation * rotation);
+        cam.projectionMatrix = glm::perspective(cam.fov, cam.aspect, cam.near, cam.far);
+    }
+}
+
+entt::entity getActiveCamera(entt::registry& registry) {
+    auto view = registry.view<Vapor::VirtualCameraComponent>();
+    for (auto entity : view) {
+        if (view.get<Vapor::VirtualCameraComponent>(entity).isActive) {
+            return entity;
+        }
+    }
+    return entt::null;
+}
 
 int main(int argc, char* args[]) {
     args::ArgumentParser parser{ "This is Project Vapor." };
@@ -106,6 +240,8 @@ int main(int argc, char* args[]) {
         }
     );
 
+    entt::registry registry;
+
     // Wait for scene to be ready (blocking for now, but async in background)
     auto scene = sceneResource->get();
     fmt::print("Scene ready for rendering\n");
@@ -162,52 +298,91 @@ int main(int argc, char* args[]) {
         glm::vec3(50.0f, .5f, 50.0f), glm::vec3(0.0f, -.5f, 0.0f), glm::identity<glm::quat>(), BodyMotionType::Static
     );
     physics->addBody(entity3->body, false);
-    // auto entity4 = scene->createNode("Obj Model");
-    // scene->addMeshToNode(entity4, AssetManager::loadOBJ(std::string("assets/models/Sibenik/sibenik.obj"),
-    // std::string("assets/models/Sibenik/")));
 
     renderer->stage(scene);
 
     int windowWidth, windowHeight;
     SDL_GetWindowSize(window, &windowWidth, &windowHeight);
 
-    // Create camera manager with FlyCam and FollowCam
-    Vapor::CameraManager cameraManager;
+    for (int i = 0; i < scene->pointLights.size(); ++i) {
+        auto e = registry.create();
 
-    // Add FlyCam (free-flying camera)
-    auto flyCam = std::make_unique<Vapor::FlyCam>(
-        glm::vec3(0.0f, 2.0f, 8.0f),// Eye position
-        glm::vec3(0.0f, 0.0f, 0.0f),// Look at center
-        glm::vec3(0.0f, 1.0f, 0.0f),// Up vector
-        glm::radians(60.0f),// FOV
-        (float)windowWidth / (float)windowHeight,// Aspect ratio
-        0.05f,// Near plane
-        500.0f,// Far plane
-        5.0f,// Move speed
-        1.5f// Rotate speed
-    );
-    cameraManager.addCamera("fly", std::move(flyCam));
+        auto& ref = registry.emplace<ScenePointLightReferenceComponent>(e);
+        ref.lightIndex = i;
 
-    // Add FollowCam (follows entity1)
-    auto followCam = std::make_unique<Vapor::FollowCam>(
-        entity1,// Target to follow
-        glm::vec3(0.0f, 1.0f, 2.0f),// Offset (behind and above)
-        glm::radians(60.0f),// FOV
-        (float)windowWidth / (float)windowHeight,// Aspect ratio
-        0.05f,// Near plane
-        500.0f,// Far plane
-        0.1f,// Smooth factor (lower = smoother)
-        0.1f// Deadzone
-    );
-    cameraManager.addCamera("follow", std::move(followCam));
+        auto& logic = registry.emplace<LightMovementLogicComponent>(e);
+        logic.speed = 0.5f;
+        logic.timer = i * 0.1f;// Offset start time
 
-    // Start with fly camera
-    cameraManager.switchCamera("fly");
-    fmt::print("Camera controls:\n");
-    fmt::print("  Press '1' - Switch to Fly Camera (free movement with WASDRF + IJKL)\n");
-    fmt::print("  Press '2' - Switch to Follow Camera (follows Cube 1)\n");
+        switch (i % 4) {
+        case 0:
+            logic.pattern = MovementPattern::Circle;
+            logic.radius = 3.0f;
+            logic.height = 1.5f;
+            break;
+        case 1:
+            logic.pattern = MovementPattern::Figure8;
+            logic.radius = 3.0f;// Base radius, logic adds 1.0
+            break;
+        case 2:
+            logic.pattern = MovementPattern::Linear;
+            logic.radius = 3.0f;// Base radius
+            break;
+        case 3:
+            logic.pattern = MovementPattern::Spiral;
+            break;
+        }
+    }
 
-    // Initialize RmlUI and load HUD document (only for Metal backend)
+    // Create Camera Entities
+
+    // 1. Fly Camera
+    auto flyCam = registry.create();
+    {
+        auto& cam = registry.emplace<Vapor::VirtualCameraComponent>(flyCam);
+        cam.isActive = true;// Start active
+        cam.fov = glm::radians(60.0f);
+        cam.aspect = (float)windowWidth / (float)windowHeight;
+        cam.position = glm::vec3(0.0f, 0.0f, 3.0f);// Set initial position directly
+
+        auto& fly = registry.emplace<FlyCameraComponent>(flyCam);
+        fly.moveSpeed = 5.0f;
+    }
+
+    // 2. Follow Camera (following Cube 1)
+    auto followCam = registry.create();
+    {
+        auto& cam = registry.emplace<Vapor::VirtualCameraComponent>(followCam);
+        cam.isActive = false;
+        cam.aspect = (float)windowWidth / (float)windowHeight;
+        cam.position = glm::vec3(0.0f, 2.0f, 5.0f);// Initial pos
+
+        auto& follow = registry.emplace<FollowCameraComponent>(followCam);
+        follow.targetNode = entity1;// Direct reference to Node
+        follow.offset = glm::vec3(0.0f, 2.0f, 5.0f);
+    }
+
+    // Create Auto-Rotate Entity for Cube 1
+    auto rotateEntity = registry.create();
+    registry.emplace<SceneNodeReferenceComponent>(rotateEntity);
+    registry.get<SceneNodeReferenceComponent>(rotateEntity).node = entity1;
+
+    registry.emplace<AutoRotateComponent>(rotateEntity);
+    auto& rotateComp = registry.get<AutoRotateComponent>(rotateEntity);
+    rotateComp.axis = glm::vec3(0.0f, 1.0f, -1.0f);
+    rotateComp.speed = 1.5f;
+
+    // Create Directional Light Logic Entity
+    auto dirLightEntity = registry.create();
+    registry.emplace<SceneDirectionalLightReferenceComponent>(dirLightEntity);
+    registry.get<SceneDirectionalLightReferenceComponent>(dirLightEntity).lightIndex = 0;
+
+    registry.emplace<DirectionalLightLogicComponent>(dirLightEntity);
+    auto& dirLightLogic = registry.get<DirectionalLightLogicComponent>(dirLightEntity);
+    dirLightLogic.baseDirection = glm::vec3(0.5, -1.0, 0.0);
+    dirLightLogic.speed = 0.5f;
+    dirLightLogic.magnitude = 0.05f;
+
     Rml::ElementDocument* hudDocument = nullptr;
     SDL_GetWindowSize(window, &windowWidth, &windowHeight);
 
@@ -237,17 +412,15 @@ int main(int argc, char* args[]) {
 
         SDL_Event e;
         while (SDL_PollEvent(&e) != 0) {
-            engineCore->processRmlUIEvent(e);
-
             ImGui_ImplSDL3_ProcessEvent(&e);
-
+            engineCore->processRmlUIEvent(e);
             inputManager.processEvent(e);
 
-            // Handle special events
             switch (e.type) {
-            case SDL_EVENT_QUIT:
+            case SDL_EVENT_QUIT: {
                 quit = true;
                 break;
+            }
             case SDL_EVENT_KEY_DOWN: {
                 if (e.key.scancode == SDL_SCANCODE_ESCAPE) {
                     quit = true;
@@ -255,7 +428,14 @@ int main(int argc, char* args[]) {
                 break;
             }
             case SDL_EVENT_WINDOW_RESIZED: {
-                // renderer->resize(e.window.data1, e.window.data2);
+                windowWidth = e.window.data1;
+                windowHeight = e.window.data2;
+                // renderer->resize(windowWidth, windowHeight);
+                // engineCore->onWindowResize(windowWidth, windowHeight);
+
+                // Update Camera Aspect Ratio
+                auto view = registry.view<Vapor::VirtualCameraComponent>();
+                view.each([&](auto& cam) { cam.aspect = (float)windowWidth / (float)windowHeight; });
                 break;
             }
             default:
@@ -263,70 +443,45 @@ int main(int argc, char* args[]) {
             }
         }
 
+        // Input
         const auto& inputState = inputManager.getInputState();
-
         if (inputState.isPressed(Vapor::InputAction::Hotkey1)) {
-            cameraManager.switchCamera("fly");
-            fmt::print("[Main] Switched to Fly Camera\n");
+            auto view = registry.view<Vapor::VirtualCameraComponent>();
+            view.each([&](auto entity, auto& cam) { cam.isActive = registry.all_of<FlyCameraComponent>(entity); });
         }
         if (inputState.isPressed(Vapor::InputAction::Hotkey2)) {
-            cameraManager.switchCamera("follow");
-            fmt::print("[Main] Switched to Follow Camera\n");
-        }
-        if (inputState.isPressed(Vapor::InputAction::Hotkey10)) {
-            auto* rmluiManager = engineCore->getRmlUiManager();
-            if (rmluiManager) {
-                fmt::print("Reloading UI...\n");
-                rmluiManager->ReloadDocument("assets/ui/hud.rml");
-            }
+            auto view = registry.view<Vapor::VirtualCameraComponent>();
+            view.each([&](auto entity, auto& cam) { cam.isActive = registry.all_of<FollowCameraComponent>(entity); });
         }
 
-        cameraManager.update(deltaTime, inputState);
+        // Gameplay updates
+        updateCameraSystem(registry, inputManager, deltaTime);
+        updateAutoRotateSystem(registry, deltaTime);
+        updateDirectionalLightSystem(registry, scene.get(), deltaTime);
+        updateLightMovementSystem(registry, scene.get(), deltaTime);
 
+        // Engine updates
         engineCore->update(deltaTime);
 
-        entity1->rotate(glm::vec3(0.0f, 1.0f, -1.0f), 1.5f * deltaTime);
-        float speed = 0.5f;
-        scene->directionalLights[0].direction = glm::vec3(0.5, -1.0, 0.05 * sin(time * speed));
-        for (int i = 0; i < scene->pointLights.size(); i++) {
-            auto& l = scene->pointLights[i];
-            switch (i % 4) {
-            case 0:// circular motion
-                l.position.x = 3.0f * cos(time * speed + i * 0.1f);
-                l.position.z = 3.0f * sin(time * speed + i * 0.1f);
-                l.position.y = 1.5f + 0.5f * sin(time * speed * 0.5f + i * 0.2f);
-                break;
-
-            case 1:// figure-8 motion
-                l.position.x = 4.0f * sin(time * speed * 0.7f + i * 0.15f);
-                l.position.z = 4.0f * sin(time * speed * 0.7f + i * 0.15f) * cos(time * speed * 0.7f + i * 0.15f);
-                l.position.y = 1.0f + 1.0f * cos(time * speed * 0.3f + i * 0.1f);
-                break;
-
-            case 2:// linear motion
-                l.position.x = 4.0f * sin(time * speed * 0.6f + i * 0.12f);
-                l.position.z = 2.0f * cos(time * speed * 0.8f + i * 0.18f);
-                l.position.y = 0.5f + 2.0f * abs(sin(time * speed * 0.4f + i * 0.14f));
-                break;
-
-            case 3:// spiral motion
-                float spiralRadius = 2.0f + 1.0f * sin(time * speed * 0.2f + i * 0.05f);
-                l.position.x = spiralRadius * cos(time * speed * 0.5f + i * 0.08f);
-                l.position.z = spiralRadius * sin(time * speed * 0.5f + i * 0.08f);
-                l.position.y = 0.5f + 2.5f * (1.0f - cos(time * speed * 0.3f + i * 0.06f));
-                break;
-            }
-            l.intensity = 3.0f + 2.0f * (0.5f + 0.5f * sin(time * 0.3f + i * 0.1f));
-        }
-
+        // Transform
         scene->update(deltaTime);
-        physics->process(scene, deltaTime);
-        // scene->update(deltaTime);
 
-        // Get current camera from camera manager
-        auto* currentCam = cameraManager.getCurrentCamera();
-        if (currentCam) {
-            renderer->draw(scene, currentCam->getCamera());
+        // Physics
+        physics->process(scene, deltaTime);
+
+        // Rendering
+        entt::entity activeCamEntity = getActiveCamera(registry);
+        if (activeCamEntity != entt::null) {
+            auto& cam = registry.get<Vapor::VirtualCameraComponent>(activeCamEntity);
+            Camera tempCamera;// Create a temporary Camera object
+            tempCamera.setEye(cam.position);// Set position for lighting/etc
+            tempCamera.setViewMatrix(cam.viewMatrix);
+            tempCamera.setProjectionMatrix(cam.projectionMatrix);
+
+            renderer->draw(scene, tempCamera);
+        } else {
+            // Fallback camera or warning
+            // fmt::print(stderr, "Warning: No active camera found for rendering.\n");
         }
 
         frameCount++;

@@ -9,6 +9,7 @@ find_package(enkiTS CONFIG REQUIRED)
 find_package(SDL3 CONFIG REQUIRED)
 find_package(Tracy CONFIG REQUIRED)
 find_package(RmlUi CONFIG REQUIRED)
+find_package(EnTT CONFIG REQUIRED)
 
 add_subdirectory(metal)
 add_subdirectory(MikkTSpace)
@@ -70,6 +71,7 @@ target_link_libraries(Vapor PUBLIC
     cereal::cereal
     SDL3::SDL3
     RmlUi::RmlUi
+    EnTT::EnTT
 )
 target_link_libraries(Vapor PRIVATE
     metal

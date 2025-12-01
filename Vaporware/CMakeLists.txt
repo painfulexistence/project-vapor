@@ -1,6 +1,5 @@
 set(SOURCES
     src/main.cpp
-    src/camera_manager.cpp
 )
 
 add_executable(main ${SOURCES})

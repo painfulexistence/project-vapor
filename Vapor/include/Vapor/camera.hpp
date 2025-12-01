@@ -1,10 +1,10 @@
 #pragma once
-#include <glm/vec3.hpp>
-#include <glm/mat4x4.hpp>
-#include <glm/ext/matrix_transform.hpp>
 #include "glm/ext/matrix_clip_space.hpp"
-#include <fmt/core.h>
 #include <array>
+#include <fmt/core.h>
+#include <glm/ext/matrix_transform.hpp>
+#include <glm/mat4x4.hpp>
+#include <glm/vec3.hpp>
 
 enum class FrustumPlane {
     FRUSTUM_LEFT = 0,
@@ -25,16 +25,22 @@ public:
         float aspect = 1.0f,
         float near = 0.1f,
         float far = 500.0f
-    ) : _eye(eye), _center(center), _up(up), _fov(fov), _aspect(aspect), _near(near), _far(far) {}
+    )
+      : _eye(eye), _center(center), _up(up), _fov(fov), _aspect(aspect), _near(near), _far(far) {
+    }
 
-    glm::vec3 getEye() const { return _eye; }
+    glm::vec3 getEye() const {
+        return _eye;
+    }
     void setEye(const glm::vec3& position) {
         _eye = position;
         _isViewDirty = true;
         _isFrustumDirty = true;
     }
 
-    glm::vec3 getCenter() const { return _center; }
+    glm::vec3 getCenter() const {
+        return _center;
+    }
     void setCenter(const glm::vec3& center) {
         _center = center;
         _isViewDirty = true;
@@ -56,12 +62,21 @@ public:
         }
         return _viewMatrix;
     };
+    void setViewMatrix(const glm::mat4& viewMatrix) {
+        _viewMatrix = viewMatrix;
+        _isViewDirty = false;
+    }
+
     glm::mat4 getProjMatrix() {
         if (_isProjDirty) {
             _projMatrix = glm::perspective(_fov, _aspect, _near, _far);
             _isProjDirty = false;
         }
         return _projMatrix;
+    }
+    void setProjectionMatrix(const glm::mat4& projMatrix) {
+        _projMatrix = projMatrix;
+        _isProjDirty = false;
     }
 
     std::array<glm::vec4, 6> getFrustumPlanes() {
@@ -133,11 +148,15 @@ public:
 
     void updateAspectRatio(float aspect);
 
-    float near() const { return _near; }
-    float far() const { return _far; }
+    float near() const {
+        return _near;
+    }
+    float far() const {
+        return _far;
+    }
 
     bool isVisible(const glm::vec4& bsphere) {
-        getFrustumPlanes(); // also updates frustum planes
+        getFrustumPlanes();// also updates frustum planes
         glm::vec3 center = glm::vec3(bsphere);
         float radius = bsphere.w;
         for (const auto& plane : _frustumPlanes) {
@@ -151,7 +170,7 @@ public:
     }
 
     bool isVisible(const glm::vec3& min, const glm::vec3& max) {
-        getFrustumPlanes(); // also updates frustum planes
+        getFrustumPlanes();// also updates frustum planes
         for (const auto& plane : _frustumPlanes) {
             glm::vec3 normal = glm::vec3(plane.x, plane.y, plane.z);
             glm::vec3 farthest = max;
