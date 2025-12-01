@@ -32,7 +32,7 @@ public:
 
     // Movement control
     void move(const glm::vec3& movementDirection, float deltaTime);
-    void moveRelativeToDirection(const glm::vec2& inputVector, const glm::vec3& forwardDirection, float deltaTime);
+    void moveAlong(const glm::vec2& inputVector, const glm::vec3& forwardDirection, float deltaTime);
     void jump(float jumpSpeed);
     void warp(const glm::vec3& position);  // Teleport
 
@@ -57,6 +57,4 @@ private:
     CharacterControllerSettings settings;
     glm::vec3 currentGravity;
     float maxSpeed = 10.0f;
-    float jumpCooldown = 0.0f;  // Cooldown timer to prevent jump spam
-    static constexpr float JUMP_COOLDOWN_TIME = 0.2f;  // 200ms cooldown
 };
