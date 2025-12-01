@@ -53,6 +53,10 @@ void EngineCore::init(uint32_t numThreads) {
     // Initialize input manager
     m_inputManager = std::make_unique<InputManager>();
 
+    // Initialize audio manager
+    m_audioManager = std::make_unique<AudioManager>();
+    m_audioManager->init();
+
     m_initialized = true;
 
     fmt::print("EngineCore initialized successfully\n");
@@ -71,6 +75,8 @@ void EngineCore::shutdown() {
     m_actionManager->stopAll();
 
     // Cleanup subsystems in reverse order
+    m_audioManager->shutdown();
+    m_audioManager.reset();
     m_inputManager.reset();
     m_actionManager.reset();
     m_resourceManager.reset();
@@ -89,6 +95,9 @@ void EngineCore::update(float deltaTime) {
 
     // Update action manager (time-based actions)
     m_actionManager->update(deltaTime);
+
+    // Update audio manager (cleanup finished sounds, invoke callbacks)
+    m_audioManager->update(deltaTime);
 
     // Future: Handle async task completion callbacks
     // Future: Manage render command buffer submission

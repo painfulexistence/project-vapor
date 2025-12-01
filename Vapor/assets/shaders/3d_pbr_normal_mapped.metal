@@ -139,6 +139,53 @@ float3 CalculatePointLight(PointLight light, float3 norm, float3 tangent, float3
     return CookTorranceBRDF(norm, tangent, bitangent, lightDir, viewDir, surf) * radiance * clamp(dot(norm, lightDir), 0.0, 1.0);
 }
 
+// Fresnel-Schlick approximation with roughness for IBL
+float3 FresnelSchlickRoughness(float cosTheta, float3 F0, float roughness) {
+    return F0 + (max(float3(1.0 - roughness), F0) - F0) * pow(clamp(1.0 - cosTheta, 0.0, 1.0), 5.0);
+}
+
+// Calculate IBL (Image-Based Lighting) contribution
+float3 CalculateIBL(
+    float3 norm,
+    float3 viewDir,
+    Surface surf,
+    texturecube<float, access::sample> irradianceMap,
+    texturecube<float, access::sample> prefilterMap,
+    texture2d<float, access::sample> brdfLUT
+) {
+    constexpr sampler cubeSampler(filter::linear, mip_filter::linear);
+    constexpr sampler lutSampler(filter::linear, address::clamp_to_edge);
+
+    float NdotV = max(dot(norm, viewDir), 0.0);
+
+    // Calculate F0 (reflectance at normal incidence)
+    float3 F0 = float3(0.04);
+    F0 = mix(F0, surf.color, surf.metallic);
+
+    // Fresnel term with roughness
+    float3 F = FresnelSchlickRoughness(NdotV, F0, surf.roughness);
+
+    // Diffuse and specular weights
+    float3 kS = F;
+    float3 kD = (1.0 - kS) * (1.0 - surf.metallic);
+
+    // Diffuse IBL: sample irradiance map
+    float3 irradiance = irradianceMap.sample(cubeSampler, norm).rgb;
+    float3 diffuseIBL = irradiance * surf.color * kD;
+
+    // Specular IBL: sample pre-filtered environment map
+    float3 R = reflect(-viewDir, norm);
+    const float MAX_REFLECTION_LOD = 4.0;
+    float mipLevel = surf.roughness * MAX_REFLECTION_LOD;
+    float3 prefilteredColor = prefilterMap.sample(cubeSampler, R, level(mipLevel)).rgb;
+
+    // BRDF lookup
+    float2 brdf = brdfLUT.sample(lutSampler, float2(NdotV, surf.roughness)).rg;
+    float3 specularIBL = prefilteredColor * (F * brdf.x + brdf.y);
+
+    return (diffuseIBL + specularIBL) * surf.ao;
+}
+
 vertex RasterizerData vertexMain(
     uint vertexID [[vertex_id]],
     constant CameraData& camera [[buffer(0)]],
@@ -174,6 +221,9 @@ fragment float4 fragmentMain(
     texture2d<float, access::sample> texOcclusion [[texture(4)]],
     texture2d<float, access::sample> texEmissive [[texture(5)]],
     texture2d<float, access::sample> texShadow [[texture(7)]],
+    texturecube<float, access::sample> irradianceMap [[texture(8)]],
+    texturecube<float, access::sample> prefilterMap [[texture(9)]],
+    texture2d<float, access::sample> brdfLUT [[texture(10)]],
     const device DirLight* directionalLights [[buffer(0)]],
     const device PointLight* pointLights [[buffer(1)]],
     const device Cluster* clusters [[buffer(2)]],
@@ -274,6 +324,8 @@ fragment float4 fragmentMain(
     }
 
     result += float3(0.2) * surf.ao * surf.color;
+    // TODO: IBL
+    // result += CalculateIBL(norm, viewDir, surf, irradianceMap, prefilterMap, brdfLUT);
 
     result += surf.emission;
 

@@ -2,6 +2,7 @@ bin/
 build/
 build*/
 *.spv
+*.ini
 
 .vs/*
 .vscode/*
