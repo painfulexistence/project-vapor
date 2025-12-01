@@ -81,3 +81,17 @@ struct DirectionalLightLogicComponent {
     float magnitude = 0.05f;
     float timer = 0.0f;
 };
+
+// UI Components
+enum class HUDState { Hidden, FadingIn, Visible, FadingOut };
+
+struct HUDComponent {
+    std::string documentPath;
+    Rml::ElementDocument* document = nullptr;// Runtime only
+    bool isVisible = false;
+
+    // Transition support
+    HUDState state = HUDState::Visible;
+    float timer = 0.0f;
+    float fadeDuration = 0.5f;
+};

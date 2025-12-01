@@ -145,6 +145,92 @@ void updateCameraSystem(entt::registry& registry, Vapor::InputManager& inputMana
     }
 }
 
+void updateHUDSystem(entt::registry& registry, Vapor::EngineCore& engineCore, float deltaTime) {
+    auto view = registry.view<HUDComponent>();
+    auto* rmluiManager = engineCore.getRmlUiManager();
+
+    if (!rmluiManager) return;
+
+    for (auto entity : view) {
+        auto& hud = view.get<HUDComponent>(entity);
+
+        // 1. Load document if not loaded
+        if (!hud.document && !hud.documentPath.empty()) {
+            hud.document = rmluiManager->LoadDocument(hud.documentPath);
+            if (hud.document) {
+                fmt::print("Loaded HUD document: {}\n", hud.documentPath);
+                // Initialize state based on visibility
+                if (hud.isVisible) {
+                    hud.state = HUDState::Visible;
+                    hud.document->Show();
+                    // Force visible class immediately
+                    if (auto el = hud.document->GetElementById("hud_content")) {
+                        el->SetClass("visible", true);
+                    }
+                } else {
+                    hud.state = HUDState::Hidden;
+                    hud.document->Hide();
+                }
+            } else {
+                fmt::print(stderr, "Failed to load HUD document: {}\n", hud.documentPath);
+                continue;
+            }
+        }
+
+        if (!hud.document) continue;
+
+        auto element = hud.document->GetElementById("hud-container");
+        if (!element) continue;
+
+        // 2. State Machine
+        switch (hud.state) {
+        case HUDState::Hidden:
+            if (hud.isVisible) {
+                hud.state = HUDState::FadingIn;
+                hud.document->Show();
+                // Trigger fade in
+                element->SetClass("visible", true);
+                hud.timer = 0.0f;
+            }
+            break;
+
+        case HUDState::FadingIn:
+            hud.timer += deltaTime;
+            if (!hud.isVisible) {
+                // Interrupted
+                hud.state = HUDState::FadingOut;
+                element->SetClass("visible", false);
+                hud.timer = 0.0f;// Reset timer or calculate remaining? Simple reset for now.
+            } else if (hud.timer >= hud.fadeDuration) {
+                hud.state = HUDState::Visible;
+            }
+            break;
+
+        case HUDState::Visible:
+            if (!hud.isVisible) {
+                hud.state = HUDState::FadingOut;
+                // Trigger fade out
+                element->SetClass("visible", false);
+                hud.timer = 0.0f;
+            }
+            break;
+
+        case HUDState::FadingOut:
+            hud.timer += deltaTime;
+            if (hud.isVisible) {
+                // Interrupted
+                hud.state = HUDState::FadingIn;
+                element->SetClass("visible", true);
+                hud.timer = 0.0f;
+            } else if (hud.timer >= hud.fadeDuration) {
+                hud.state = HUDState::Hidden;
+                hud.document->Hide();
+            }
+            break;
+        }
+    }
+}
+
 entt::entity getActiveCamera(entt::registry& registry) {
     auto view = registry.view<Vapor::VirtualCameraComponent>();
     for (auto entity : view) {
@@ -383,16 +469,17 @@ int main(int argc, char* args[]) {
     dirLightLogic.speed = 0.5f;
     dirLightLogic.magnitude = 0.05f;
 
-    Rml::ElementDocument* hudDocument = nullptr;
     SDL_GetWindowSize(window, &windowWidth, &windowHeight);
 
+    // Create HUD Entity
+    auto hudEntity = registry.create();
+    auto& hudComp = registry.emplace<HUDComponent>(hudEntity);
+    hudComp.documentPath = "assets/ui/hud.rml";
+    hudComp.isVisible = false;
+
+    // Initialize RmlUI (System)
     if (engineCore->initRmlUI(windowWidth, windowHeight) && renderer->initUI()) {
-        if (auto* rmluiManager = engineCore->getRmlUiManager()) {
-            hudDocument = rmluiManager->LoadDocument("assets/ui/hud.rml");
-            if (hudDocument) {
-                hudDocument->Show();
-            }
-        }
+        fmt::print("RmlUI System Initialized\n");
     }
 
     Uint32 frameCount = 0;
@@ -424,6 +511,15 @@ int main(int argc, char* args[]) {
             case SDL_EVENT_KEY_DOWN: {
                 if (e.key.scancode == SDL_SCANCODE_ESCAPE) {
                     quit = true;
+                }
+                // Toggle HUD
+                if (e.key.scancode == SDL_SCANCODE_H) {
+                    auto view = registry.view<HUDComponent>();
+                    for (auto entity : view) {
+                        auto& hud = view.get<HUDComponent>(entity);
+                        hud.isVisible = !hud.isVisible;
+                        fmt::print("HUD Visibility toggled: {}\n", hud.isVisible);
+                    }
                 }
                 break;
             }
@@ -459,6 +555,7 @@ int main(int argc, char* args[]) {
         updateAutoRotateSystem(registry, deltaTime);
         updateDirectionalLightSystem(registry, scene.get(), deltaTime);
         updateLightMovementSystem(registry, scene.get(), deltaTime);
+        updateHUDSystem(registry, *engineCore, deltaTime);
 
         // Engine updates
         engineCore->update(deltaTime);
