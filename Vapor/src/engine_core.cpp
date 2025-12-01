@@ -1,6 +1,7 @@
 #include "engine_core.hpp"
 #include <fmt/core.h>
 #include <thread>
+#include <tracy/Tracy.hpp>
 
 namespace Vapor {
 
@@ -24,6 +25,8 @@ EngineCore::~EngineCore() {
 }
 
 void EngineCore::init(uint32_t numThreads) {
+    ZoneScoped;
+
     if (m_initialized) {
         fmt::print("EngineCore already initialized\n");
         return;
@@ -63,6 +66,8 @@ void EngineCore::init(uint32_t numThreads) {
 }
 
 void EngineCore::shutdown() {
+    ZoneScoped;
+
     if (!m_initialized) {
         return;
     }
@@ -89,6 +94,8 @@ void EngineCore::shutdown() {
 }
 
 void EngineCore::update(float deltaTime) {
+    ZoneScoped;
+
     if (!m_initialized) {
         return;
     }
