@@ -6,6 +6,14 @@ set(SOURCES
 add_executable(main ${SOURCES})
 target_link_libraries(main PRIVATE Vapor)
 
+# Link dl for dynamic loading on Linux
+if(UNIX AND NOT APPLE)
+    target_link_libraries(main PRIVATE dl)
+endif()
+
+# Build gameplay module
+add_subdirectory(gameplay)
+
 find_program(GLSL_VALIDATOR "glslangValidator" REQUIRED)
 file(GLOB_RECURSE SHADER_SOURCES CONFIGURE_DEPENDS
 	"${CMAKE_CURRENT_SOURCE_DIR}/../Vapor/assets/shaders/*.vert"

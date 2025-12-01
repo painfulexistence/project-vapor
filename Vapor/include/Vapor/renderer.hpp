@@ -27,9 +27,6 @@ public:
     virtual void setRenderPath(RenderPath path) = 0;
     virtual RenderPath getRenderPath() const = 0;
 
-    // Hot reload shaders (rebuilds pipelines from shader files)
-    virtual void reloadShaders() = 0;
-
 protected:
     const Uint32 MAX_FRAMES_IN_FLIGHT = 3;
     const Uint32 MSAA_SAMPLE_COUNT = 4;

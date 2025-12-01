@@ -19,6 +19,17 @@
 #include "Vapor/engine_core.hpp"
 
 #include "camera_manager.hpp"
+#include "hot_reload/game_memory.hpp"
+#include "hot_reload/module_loader.hpp"
+
+// Get the gameplay module path based on platform and build config
+std::string getGameplayModulePath() {
+#ifdef _WIN32
+    return "./gameplay/Gameplay";
+#else
+    return "./gameplay/libGameplay";
+#endif
+}
 
 int main(int argc, char* args[]) {
     args::ArgumentParser parser { "This is Project Vapor." };
@@ -214,6 +225,26 @@ int main(int argc, char* args[]) {
 
     auto& inputManager = engineCore->getInputManager();
 
+    // Initialize hot reload system
+    Game::GameMemory gameMemory;
+    gameMemory.scene = scene.get();
+    gameMemory.physics = physics.get();
+    gameMemory.renderer = renderer.get();
+    gameMemory.input = &inputManager;
+    gameMemory.engine = engineCore.get();
+
+    Game::ModuleLoader moduleLoader;
+    bool gameplayLoaded = moduleLoader.load(getGameplayModulePath());
+    if (gameplayLoaded) {
+        auto initFunc = moduleLoader.getInitFunc();
+        if (initFunc) {
+            initFunc(&gameMemory);
+        }
+    } else {
+        fmt::print("[Main] Failed to load gameplay module: {}\n", moduleLoader.getLastError());
+        fmt::print("[Main] Running without gameplay DLL\n");
+    }
+
     while (!quit) {
         float currTime = SDL_GetTicks() / 1000.0f;
         float deltaTime = currTime - time;
@@ -264,7 +295,20 @@ int main(int argc, char* args[]) {
 
         engineCore->update(deltaTime);
 
-        entity1->rotate(glm::vec3(0.0f, 1.0f, -1.0f), 1.5f * deltaTime);
+        // Call gameplay module update
+        if (moduleLoader.isLoaded()) {
+            Game::FrameInput frameInput;
+            frameInput.deltaTime = deltaTime;
+            frameInput.inputState = &inputState;
+            auto updateFunc = moduleLoader.getUpdateFunc();
+            if (updateFunc) {
+                updateFunc(&gameMemory, &frameInput);
+            }
+        } else {
+            // Fallback: run built-in gameplay logic if module not loaded
+            entity1->rotate(glm::vec3(0.0f, 1.0f, -1.0f), 1.5f * deltaTime);
+        }
+
         float speed = 0.5f;
         scene->directionalLights[0].direction = glm::vec3(0.5, -1.0, 0.05 * sin(time * speed));
         for (int i = 0; i < scene->pointLights.size(); i++) {
@@ -305,8 +349,30 @@ int main(int argc, char* args[]) {
         // Debug panel
         if (ImGui::Begin("Debug")) {
             if (ImGui::CollapsingHeader("Hot Reload", ImGuiTreeNodeFlags_DefaultOpen)) {
-                if (ImGui::Button("Reload Shaders")) {
-                    renderer->reloadShaders();
+                ImGui::Text("Module: %s", moduleLoader.isLoaded() ? "Loaded" : "Not loaded");
+                if (moduleLoader.isLoaded()) {
+                    ImGui::Text("Path: %s", moduleLoader.getModulePath().c_str());
+                    ImGui::Text("Game Time: %.2f", gameMemory.state.gameTime);
+                    ImGui::Text("Score: %d", gameMemory.state.score);
+                    ImGui::Text("Paused: %s", gameMemory.state.isPaused ? "Yes" : "No");
+                    if (ImGui::Button("Reload Gameplay")) {
+                        if (moduleLoader.reload(&gameMemory)) {
+                            fmt::print("[Main] Gameplay module reloaded successfully\n");
+                        } else {
+                            fmt::print("[Main] Reload failed: {}\n", moduleLoader.getLastError());
+                        }
+                    }
+                } else {
+                    ImGui::TextColored(ImVec4(1, 0.5f, 0, 1), "Error: %s", moduleLoader.getLastError().c_str());
+                    if (ImGui::Button("Retry Load")) {
+                        gameplayLoaded = moduleLoader.load(getGameplayModulePath());
+                        if (gameplayLoaded) {
+                            auto initFunc = moduleLoader.getInitFunc();
+                            if (initFunc) {
+                                initFunc(&gameMemory);
+                            }
+                        }
+                    }
                 }
             }
             if (ImGui::CollapsingHeader("Resources")) {
@@ -332,6 +398,15 @@ int main(int argc, char* args[]) {
         }
 
         frameCount++;
+    }
+
+    // Shutdown gameplay module
+    if (moduleLoader.isLoaded()) {
+        auto shutdownFunc = moduleLoader.getShutdownFunc();
+        if (shutdownFunc) {
+            shutdownFunc(&gameMemory);
+        }
+        moduleLoader.unload();
     }
 
     // Shutdown subsystems
