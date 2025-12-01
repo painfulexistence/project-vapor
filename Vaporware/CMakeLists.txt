@@ -23,8 +23,13 @@ foreach(GLSL ${SHADER_SOURCES})
 	list(APPEND SPIRV_BINARY_FILES ${SPIRV})
 endforeach(GLSL)
 
-add_custom_target(copy_assets COMMAND ${CMAKE_COMMAND} -E copy_directory
+add_custom_target(copy_engine_assets COMMAND ${CMAKE_COMMAND} -E copy_directory
     "${CMAKE_CURRENT_SOURCE_DIR}/../Vapor/assets" $<TARGET_FILE_DIR:main>/assets
     DEPENDS ${SPIRV_BINARY_FILES}
+)
+add_dependencies(main copy_engine_assets)
+
+add_custom_target(copy_assets COMMAND ${CMAKE_COMMAND} -E copy_directory
+    "${CMAKE_CURRENT_SOURCE_DIR}/assets" $<TARGET_FILE_DIR:main>/assets
 )
 add_dependencies(main copy_assets)
