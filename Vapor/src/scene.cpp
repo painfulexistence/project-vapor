@@ -184,12 +184,44 @@ void Scene::addMeshToNode(std::shared_ptr<Node> node, std::shared_ptr<Mesh> mesh
 void Node::attachCharacterController(Physics3D* physics, const CharacterControllerSettings& settings) {
     characterController = std::make_unique<CharacterController>(physics, settings);
 
+    // If transform is dirty, we need to compute world position first
+    // This handles the case where setPosition() was called before attachCharacterController()
+    glm::vec3 worldPos = getWorldPosition();
+    if (isTransformDirty) {
+        // For root nodes without parent, worldTransform = localTransform
+        // NOTE: This assumes the node is a root node. For child nodes, the parent's
+        // worldTransform should be passed in, but that requires scene hierarchy traversal.
+        // In most use cases, controllers are attached to root nodes.
+        worldPos = glm::vec3(localTransform[3]);
+    }
+
     // Sync initial position from node to character controller
-    characterController->warp(getWorldPosition());
+    characterController->warp(worldPos);
 }
 
 void Node::attachVehicleController(Physics3D* physics, const VehicleSettings& settings) {
-    vehicleController = std::make_unique<VehicleController>(physics, settings, getWorldPosition(), getWorldRotation());
+    // If transform is dirty, we need to compute world position/rotation first
+    // This handles the case where setPosition() was called before attachVehicleController()
+    glm::vec3 worldPos = getWorldPosition();
+    glm::quat worldRot = getWorldRotation();
+
+    if (isTransformDirty) {
+        // For root nodes without parent, worldTransform = localTransform
+        // NOTE: This assumes the node is a root node. For child nodes, the parent's
+        // worldTransform should be passed in, but that requires scene hierarchy traversal.
+        // In most use cases, controllers are attached to root nodes.
+        worldPos = glm::vec3(localTransform[3]);
+
+        // Extract rotation from localTransform
+        glm::mat3 rotation = glm::mat3(
+            glm::normalize(glm::vec3(localTransform[0])),
+            glm::normalize(glm::vec3(localTransform[1])),
+            glm::normalize(glm::vec3(localTransform[2]))
+        );
+        worldRot = glm::quat_cast(rotation);
+    }
+
+    vehicleController = std::make_unique<VehicleController>(physics, settings, worldPos, worldRot);
 }
 
 std::shared_ptr<FluidVolume> Scene::createFluidVolume(Physics3D* physics, const FluidVolumeSettings& settings) {
