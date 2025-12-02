@@ -49,8 +49,9 @@ public:
         m_updateFunc = getSymbol<GameUpdateFunc>(GAME_UPDATE_FUNC_NAME);
         m_shutdownFunc = getSymbol<GameShutdownFunc>(GAME_SHUTDOWN_FUNC_NAME);
         m_getVersionFunc = getSymbol<GameGetVersionFunc>(GAME_GET_VERSION_FUNC_NAME);
+        m_memoryFunc = getSymbol<GameMemoryFunc>(GAME_MEMORY_FUNC_NAME);
 
-        if (!m_initFunc || !m_updateFunc || !m_shutdownFunc || !m_getVersionFunc) {
+        if (!m_initFunc || !m_updateFunc || !m_shutdownFunc || !m_getVersionFunc || !m_memoryFunc) {
             m_lastError = "Missing required exports: " + getMissingExports();
             unloadLibrary();
             return false;
@@ -81,6 +82,7 @@ public:
             m_updateFunc = nullptr;
             m_shutdownFunc = nullptr;
             m_getVersionFunc = nullptr;
+            m_memoryFunc = nullptr;
             m_isLoaded = false;
             fmt::print("[ModuleLoader] Unloaded module\n");
         }
@@ -99,19 +101,23 @@ public:
     }
 
     // Reload the module (call shutdown, unload, load, init)
-    bool reload(GameMemory* memory) {
+    // Returns the new GameMemory pointer (may be same as old)
+    bool reload() {
         if (!m_isLoaded) return false;
 
         std::string path = m_modulePath;
         // Remove extension for reload
         path = path.substr(0, path.length() - strlen(MODULE_EXTENSION));
 
-        // Shutdown current module
+        // Get memory pointer from old module
+        GameMemory* memory = m_memoryFunc ? m_memoryFunc() : nullptr;
+
+        // Shutdown current module (cleanup local state, not memory)
         if (m_shutdownFunc && memory) {
             m_shutdownFunc(memory);
         }
 
-        // Unload
+        // Unload old DLL
         unload();
 
         // Small delay to ensure file is released (Windows)
@@ -124,7 +130,8 @@ public:
             return false;
         }
 
-        // Initialize (is_initialized should still be true for hot reload)
+        // Initialize new module with existing memory
+        // is_initialized should still be true, so it knows this is a hot reload
         if (m_initFunc && memory) {
             if (!m_initFunc(memory)) {
                 m_lastError = "Module init failed after reload";
@@ -145,6 +152,7 @@ public:
     GameInitFunc getInitFunc() const { return m_initFunc; }
     GameUpdateFunc getUpdateFunc() const { return m_updateFunc; }
     GameShutdownFunc getShutdownFunc() const { return m_shutdownFunc; }
+    GameMemoryFunc getMemoryFunc() const { return m_memoryFunc; }
 
 private:
     ModuleHandle m_handle = nullptr;
@@ -157,6 +165,7 @@ private:
     GameUpdateFunc m_updateFunc = nullptr;
     GameShutdownFunc m_shutdownFunc = nullptr;
     GameGetVersionFunc m_getVersionFunc = nullptr;
+    GameMemoryFunc m_memoryFunc = nullptr;
 
     template<typename T>
     T getSymbol(const char* name) {
@@ -181,6 +190,7 @@ private:
         if (!m_updateFunc) missing += GAME_UPDATE_FUNC_NAME " ";
         if (!m_shutdownFunc) missing += GAME_SHUTDOWN_FUNC_NAME " ";
         if (!m_getVersionFunc) missing += GAME_GET_VERSION_FUNC_NAME " ";
+        if (!m_memoryFunc) missing += GAME_MEMORY_FUNC_NAME " ";
         return missing;
     }
 

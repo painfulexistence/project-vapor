@@ -7,44 +7,35 @@
 #include <Vapor/engine_core.hpp>
 #include <cstdint>
 
+struct SDL_Window;
+
 namespace Game {
 
-// Game state that persists across hot reloads
-// Add your game-specific state here
-struct GameState {
-    float gameTime = 0.0f;
-    int score = 0;
-    bool isPaused = false;
-
-    // Add more game state as needed...
-};
-
 // Memory block shared between host and gameplay DLL
+// The gameplay DLL owns all game state; host only provides engine services
 struct GameMemory {
-    // A. Is memory initialized?
-    // Used by gameplay DLL to determine if it's a first launch or a hot reload
+    // Is memory initialized? Used to detect hot reload vs first launch
     bool is_initialized = false;
 
-    // B. Global game state (survives hot reload)
-    GameState state;
-
-    // C. Engine services (owned by host, passed to DLL)
-    // These pointers remain valid across hot reloads
-    Scene* scene = nullptr;
-    Physics3D* physics = nullptr;
+    // Engine services (owned by host, provided to DLL)
+    SDL_Window* window = nullptr;
     Renderer* renderer = nullptr;
-    Vapor::InputManager* input = nullptr;
+    Physics3D* physics = nullptr;
     Vapor::EngineCore* engine = nullptr;
 
-    // D. Temp memory allocator (optional)
-    // Linear allocator for per-frame allocations, avoids malloc/free
+    // Game-owned state (created and managed by DLL)
+    // These are allocated by game_init and freed by game_shutdown
+    std::shared_ptr<Scene> scene;
+
+    // Temp storage for per-frame allocations (optional)
     size_t temp_storage_size = 0;
-    void* temp_storage_buffer = nullptr;
+    void* temp_storage = nullptr;
 };
 
 // Input state passed each frame
 struct FrameInput {
     float deltaTime;
+    float totalTime;
     const Vapor::InputState* inputState;
 };
 
@@ -53,24 +44,31 @@ constexpr uint32_t GAME_MODULE_API_VERSION = 1;
 
 // Functions that the gameplay DLL must export
 extern "C" {
-    // Called once when module is first loaded
-    // Return false if initialization fails
+    // Called once when module is first loaded, or after hot reload
+    // On first load: allocate GameMemory, create scene, entities, etc.
+    // On hot reload: rebind pointers, reinitialize local state
     using GameInitFunc = bool (*)(GameMemory* memory);
 
-    // Called every frame
-    using GameUpdateFunc = void (*)(GameMemory* memory, const FrameInput* input);
+    // Called every frame - all game logic goes here
+    using GameUpdateFunc = bool (*)(GameMemory* memory, const FrameInput* input);
 
-    // Called when module is about to be unloaded (before hot reload)
+    // Called when module is about to be unloaded
+    // On hot reload: just cleanup local state (memory persists)
+    // On shutdown: free all game memory
     using GameShutdownFunc = void (*)(GameMemory* memory);
 
     // Return the API version this module was compiled with
     using GameGetVersionFunc = uint32_t (*)();
+
+    // Return pointer to game memory (for hot reload transfer)
+    using GameMemoryFunc = GameMemory* (*)();
 }
 
-// Export function names (for dlsym/GetProcAddress)
+// Export function names
 #define GAME_INIT_FUNC_NAME "game_init"
 #define GAME_UPDATE_FUNC_NAME "game_update"
 #define GAME_SHUTDOWN_FUNC_NAME "game_shutdown"
 #define GAME_GET_VERSION_FUNC_NAME "game_get_version"
+#define GAME_MEMORY_FUNC_NAME "game_memory"
 
 } // namespace Game

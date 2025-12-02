@@ -1,5 +1,6 @@
 set(GAMEPLAY_SOURCES
     gameplay_module.cpp
+    ../src/camera_manager.cpp
 )
 
 add_library(Gameplay SHARED ${GAMEPLAY_SOURCES})
