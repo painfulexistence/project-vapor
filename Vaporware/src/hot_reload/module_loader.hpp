@@ -120,10 +120,8 @@ public:
         // Unload old DLL
         unload();
 
-        // Small delay to ensure file is released (Windows)
-        #ifdef _WIN32
-            SDL_Delay(100);
-        #endif
+        // Small delay to ensure file handle is released
+        SDL_Delay(100);
 
         // Load new version
         if (!load(path)) {
