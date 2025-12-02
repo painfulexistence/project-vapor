@@ -83,8 +83,33 @@ target_link_libraries(Vapor PRIVATE
     Tracy::TracyClient
 )
 
+find_program(GLSL_VALIDATOR "glslangValidator" REQUIRED)
+file(GLOB_RECURSE SHADER_SOURCES 
+    "${CMAKE_CURRENT_SOURCE_DIR}/assets/shaders/*.vert"
+    "${CMAKE_CURRENT_SOURCE_DIR}/assets/shaders/*.frag"
+    "${CMAKE_CURRENT_SOURCE_DIR}/assets/shaders/*.comp"
+)
+
+foreach(GLSL ${SHADER_SOURCES})
+    get_filename_component(SOURCE_NAME ${GLSL} NAME)
+    set(SPIRV "${CMAKE_CURRENT_BINARY_DIR}/assets/shaders/${SOURCE_NAME}.spv")
+    
+    add_custom_command(
+        OUTPUT ${SPIRV}
+        COMMAND ${CMAKE_COMMAND} -E make_directory "${CMAKE_CURRENT_BINARY_DIR}/assets/shaders"
+        COMMAND ${GLSL_VALIDATOR} -V ${GLSL} -o ${SPIRV}
+        DEPENDS ${GLSL}
+        COMMENT "Compiling ${SOURCE_NAME} to SPIR-V"
+    )
+    list(APPEND SPIRV_BINARY_FILES ${SPIRV})
+endforeach()
+
+add_custom_target(Vapor_compile_shaders ALL DEPENDS ${SPIRV_BINARY_FILES})
+add_dependencies(Vapor Vapor_compile_shaders)
+
 
 message(STATUS "Configuring Vapor package install...")
+include(GNUInstallDirs)
 include(CMakePackageConfigHelpers)
 
 write_basic_package_version_file(
@@ -93,10 +118,13 @@ write_basic_package_version_file(
     COMPATIBILITY SameMajorVersion
 )
 
+set(VAPOR_ASSETS_DIR "${CMAKE_INSTALL_DATADIR}/vapor/assets")
+
 configure_package_config_file(
     "${CMAKE_CURRENT_SOURCE_DIR}/vapor-config.cmake.in"
     "${CMAKE_CURRENT_BINARY_DIR}/vapor-config.cmake"
-    INSTALL_DESTINATION share/vapor
+    INSTALL_DESTINATION "${CMAKE_INSTALL_DATADIR}/vapor"
+    PATH_VARS VAPOR_ASSETS_DIR
 )
 
 install(TARGETS Vapor metal mikktspace
@@ -109,16 +137,22 @@ install(TARGETS Vapor metal mikktspace
 install(EXPORT VaporTargets
     FILE VaporTargets.cmake
     NAMESPACE Vapor::
-    DESTINATION share/vapor
+    DESTINATION "${CMAKE_INSTALL_DATADIR}/vapor"
 )
 
 install(FILES
     "${CMAKE_CURRENT_BINARY_DIR}/vapor-config.cmake"
     "${CMAKE_CURRENT_BINARY_DIR}/vapor-config-version.cmake"
-    DESTINATION share/vapor
+    "cmake/VaporMacros.cmake"
+    DESTINATION "${CMAKE_INSTALL_DATADIR}/vapor"
 )
 
 install(DIRECTORY include/ DESTINATION ${CMAKE_INSTALL_INCLUDEDIR})
 install(DIRECTORY imgui/ DESTINATION ${CMAKE_INSTALL_INCLUDEDIR}/imgui
     FILES_MATCHING PATTERN "*.h"
+)
+install(DIRECTORY assets/ DESTINATION "${CMAKE_INSTALL_DATADIR}/vapor/assets")
+
+install(DIRECTORY "${CMAKE_CURRENT_BINARY_DIR}/assets/shaders"
+    DESTINATION "${CMAKE_INSTALL_DATADIR}/vapor/assets"
 )

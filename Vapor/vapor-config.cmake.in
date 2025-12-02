@@ -13,3 +13,6 @@ find_dependency(enkiTS CONFIG)
 include("${CMAKE_CURRENT_LIST_DIR}/VaporTargets.cmake")
 
 check_required_components(Vapor)
+
+set_and_check(VAPOR_ASSETS_DIR "@PACKAGE_VAPOR_ASSETS_DIR@")
+include("${CMAKE_CURRENT_LIST_DIR}/VaporMacros.cmake")
