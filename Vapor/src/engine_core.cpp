@@ -17,7 +17,7 @@ namespace Vapor {
     }
 
     EngineCore::~EngineCore() {
-        if (m_initialized) {
+        if (_initialized) {
             shutdown();
         }
 
@@ -29,7 +29,7 @@ namespace Vapor {
     void EngineCore::init(uint32_t numThreads) {
         ZoneScoped;
 
-        if (m_initialized) {
+        if (_initialized) {
             fmt::print("EngineCore already initialized\n");
             return;
         }
@@ -41,28 +41,28 @@ namespace Vapor {
                 numThreads = 4;// Fallback
             }
         }
-        m_numThreads = numThreads;
+        _numThreads = numThreads;
 
-        fmt::print("Initializing EngineCore with {} threads\n", m_numThreads);
+        fmt::print("Initializing EngineCore with {} threads\n", _numThreads);
 
         // Initialize task scheduler
-        m_taskScheduler = std::make_unique<TaskScheduler>();
-        m_taskScheduler->init(m_numThreads);
+        _taskScheduler = std::make_unique<TaskScheduler>();
+        _taskScheduler->init(_numThreads);
 
         // Initialize resource manager
-        m_resourceManager = std::make_unique<ResourceManager>(*m_taskScheduler);
+        _resourceManager = std::make_unique<ResourceManager>(*_taskScheduler);
 
         // Initialize action manager
-        m_actionManager = std::make_unique<ActionManager>();
+        _actionManager = std::make_unique<ActionManager>();
 
         // Initialize input manager
-        m_inputManager = std::make_unique<InputManager>();
+        _inputManager = std::make_unique<InputManager>();
 
         // Initialize audio manager
-        m_audioManager = std::make_unique<AudioManager>();
-        m_audioManager->init();
+        _audioManager = std::make_unique<AudioManager>();
+        _audioManager->init();
 
-        m_initialized = true;
+        _initialized = true;
 
         fmt::print("EngineCore initialized successfully\n");
     }
@@ -70,31 +70,31 @@ namespace Vapor {
     void EngineCore::shutdown() {
         ZoneScoped;
 
-        if (!m_initialized) {
+        if (!_initialized) {
             return;
         }
 
         fmt::print("Shutting down EngineCore...\n");
 
         // Wait for all pending tasks
-        m_taskScheduler->waitForAll();
+        _taskScheduler->waitForAll();
 
-        m_actionManager->stopAll();
+        _actionManager->stopAll();
 
         // Cleanup subsystems in reverse order
-        if (m_rmluiManager) {
-            m_rmluiManager->Shutdown();
-            m_rmluiManager.reset();
+        if (_rmluiManager) {
+            _rmluiManager->Shutdown();
+            _rmluiManager.reset();
         }
-        m_audioManager->shutdown();
-        m_audioManager.reset();
-        m_inputManager.reset();
-        m_actionManager.reset();
-        m_resourceManager.reset();
-        m_taskScheduler->shutdown();
-        m_taskScheduler.reset();
+        _audioManager->shutdown();
+        _audioManager.reset();
+        _inputManager.reset();
+        _actionManager.reset();
+        _resourceManager.reset();
+        _taskScheduler->shutdown();
+        _taskScheduler.reset();
 
-        m_initialized = false;
+        _initialized = false;
 
         fmt::print("EngineCore shutdown complete\n");
     }
@@ -102,19 +102,19 @@ namespace Vapor {
     void EngineCore::update(float deltaTime) {
         ZoneScoped;
 
-        if (!m_initialized) {
+        if (!_initialized) {
             return;
         }
 
         // Update action manager (time-based actions)
-        m_actionManager->update(deltaTime);
+        _actionManager->update(deltaTime);
 
         // Update audio manager (cleanup finished sounds, invoke callbacks)
-        m_audioManager->update(deltaTime);
+        _audioManager->update(deltaTime);
 
         // Update RmlUI
-        if (m_rmluiManager) {
-            m_rmluiManager->Update(deltaTime);
+        if (_rmluiManager) {
+            _rmluiManager->Update(deltaTime);
         }
 
         // Future: Handle async task completion callbacks
@@ -123,15 +123,15 @@ namespace Vapor {
     }
 
     bool EngineCore::initRmlUI(int width, int height) {
-        if (m_rmluiManager) {
+        if (_rmluiManager) {
             fmt::print("RmlUI already initialized\n");
             return true;
         }
 
-        m_rmluiManager = std::make_unique<RmlUiManager>();
-        if (!m_rmluiManager->Initialize(width, height)) {
+        _rmluiManager = std::make_unique<RmlUiManager>();
+        if (!_rmluiManager->Initialize(width, height)) {
             fmt::print("Failed to initialize RmlUI\n");
-            m_rmluiManager.reset();
+            _rmluiManager.reset();
             return false;
         }
 
@@ -140,14 +140,14 @@ namespace Vapor {
     }
 
     void EngineCore::onRmlUIResize(int width, int height) {
-        if (m_rmluiManager) {
-            m_rmluiManager->OnResize(width, height);
+        if (_rmluiManager) {
+            _rmluiManager->OnResize(width, height);
         }
     }
 
     bool EngineCore::processRmlUIEvent(const SDL_Event& event) {
-        if (m_rmluiManager && m_rmluiManager->IsInitialized()) {
-            return m_rmluiManager->ProcessEvent(event);
+        if (_rmluiManager && _rmluiManager->IsInitialized()) {
+            return _rmluiManager->ProcessEvent(event);
         }
         return false;
     }
