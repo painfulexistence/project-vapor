@@ -1,22 +1,21 @@
 #pragma once
 
 #include "game_memory.hpp"
+#include <SDL3/SDL.h>
 #include <string>
 #include <filesystem>
 #include <fmt/core.h>
 
+// SDL3 shared object handle
+using ModuleHandle = SDL_SharedObject*;
+
+// Platform-specific extension
 #ifdef _WIN32
-    #include <windows.h>
-    using ModuleHandle = HMODULE;
     #define MODULE_EXTENSION ".dll"
+#elif defined(__APPLE__)
+    #define MODULE_EXTENSION ".dylib"
 #else
-    #include <dlfcn.h>
-    using ModuleHandle = void*;
-    #ifdef __APPLE__
-        #define MODULE_EXTENSION ".dylib"
-    #else
-        #define MODULE_EXTENSION ".so"
-    #endif
+    #define MODULE_EXTENSION ".so"
 #endif
 
 namespace Game {
@@ -38,15 +37,10 @@ public:
             return false;
         }
 
-        // Load the library
-        #ifdef _WIN32
-            m_handle = LoadLibraryA(loadPath.c_str());
-        #else
-            m_handle = dlopen(loadPath.c_str(), RTLD_NOW);
-        #endif
-
+        // Load the library using SDL3
+        m_handle = SDL_LoadObject(loadPath.c_str());
         if (!m_handle) {
-            m_lastError = getSystemError();
+            m_lastError = SDL_GetError();
             return false;
         }
 
@@ -122,7 +116,7 @@ public:
 
         // Small delay to ensure file is released (Windows)
         #ifdef _WIN32
-            Sleep(100);
+            SDL_Delay(100);
         #endif
 
         // Load new version
@@ -166,20 +160,12 @@ private:
 
     template<typename T>
     T getSymbol(const char* name) {
-        #ifdef _WIN32
-            return reinterpret_cast<T>(GetProcAddress(m_handle, name));
-        #else
-            return reinterpret_cast<T>(dlsym(m_handle, name));
-        #endif
+        return reinterpret_cast<T>(SDL_LoadFunction(m_handle, name));
     }
 
     void unloadLibrary() {
         if (m_handle) {
-            #ifdef _WIN32
-                FreeLibrary(m_handle);
-            #else
-                dlclose(m_handle);
-            #endif
+            SDL_UnloadObject(m_handle);
         }
     }
 
@@ -187,21 +173,6 @@ private:
         try {
             m_lastModifyTime = std::filesystem::last_write_time(m_modulePath);
         } catch (...) {}
-    }
-
-    std::string getSystemError() {
-        #ifdef _WIN32
-            DWORD error = GetLastError();
-            char* msg = nullptr;
-            FormatMessageA(FORMAT_MESSAGE_ALLOCATE_BUFFER | FORMAT_MESSAGE_FROM_SYSTEM,
-                          nullptr, error, 0, (LPSTR)&msg, 0, nullptr);
-            std::string result = msg ? msg : "Unknown error";
-            LocalFree(msg);
-            return result;
-        #else
-            const char* err = dlerror();
-            return err ? err : "Unknown error";
-        #endif
     }
 
     std::string getMissingExports() {

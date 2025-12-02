@@ -6,11 +6,6 @@ set(SOURCES
 add_executable(main ${SOURCES})
 target_link_libraries(main PRIVATE Vapor)
 
-# Link dl for dynamic loading on Linux
-if(UNIX AND NOT APPLE)
-    target_link_libraries(main PRIVATE dl)
-endif()
-
 # Build gameplay module
 add_subdirectory(gameplay)
 

@@ -304,9 +304,6 @@ int main(int argc, char* args[]) {
             if (updateFunc) {
                 updateFunc(&gameMemory, &frameInput);
             }
-        } else {
-            // Fallback: run built-in gameplay logic if module not loaded
-            entity1->rotate(glm::vec3(0.0f, 1.0f, -1.0f), 1.5f * deltaTime);
         }
 
         float speed = 0.5f;
