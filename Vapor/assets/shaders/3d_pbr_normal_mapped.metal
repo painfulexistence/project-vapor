@@ -9,6 +9,8 @@ struct RasterizerData {
     float4 worldPosition;
     float4 worldNormal;
     float4 worldTangent;
+    float3 scaledLocalPos;
+    float3 localNormal;
     MaterialData material;
 };
 
@@ -209,6 +211,12 @@ vertex RasterizerData vertexMain(
     vert.position = camera.proj * camera.view * vert.worldPosition;
     vert.uv = in[actualVertexID].uv;
     vert.material = materials[instances[instanceID].materialID];
+    
+    // Pass scaled local position and local normal for Object Space Triplanar
+    float3 scale = float3(length(model[0].xyz), length(model[1].xyz), length(model[2].xyz));
+    vert.scaledLocalPos = float3(in[actualVertexID].position) * scale;
+    vert.localNormal = float3(in[actualVertexID].normal);
+    
     return vert;
 }
 
@@ -235,6 +243,18 @@ fragment float4 fragmentMain(
     constexpr sampler s(address::repeat, filter::linear, mip_filter::linear);
 
     MaterialData material = in.material;
+
+    if (material.usePrototypeUV > 0.5) {
+        float3 n = abs(normalize(in.localNormal));
+        if (n.x > n.y && n.x > n.z) {
+            in.uv = in.scaledLocalPos.yz;
+        } else if (n.y > n.z) {
+            in.uv = in.scaledLocalPos.xz;
+        } else {
+            in.uv = in.scaledLocalPos.xy;
+        }
+    }
+
     float4 baseColor = texAlbedo.sample(s, in.uv);
     if (baseColor.a * material.baseColorFactor.a < 0.5) {
         discard_fragment();

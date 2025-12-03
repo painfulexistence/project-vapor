@@ -66,6 +66,7 @@ struct MaterialData {
     float sheenTint;
     float clearcoat;
     float clearcoatGloss;
+    float usePrototypeUV; // TODO: separate material
 };
 
 struct DirLight {

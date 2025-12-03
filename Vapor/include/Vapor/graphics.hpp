@@ -1,13 +1,13 @@
 #pragma once
 #include <SDL3/SDL_stdinc.h>
+#include <array>
+#include <cstddef>
 #include <glm/geometric.hpp>
+#include <glm/mat4x4.hpp>
 #include <glm/vec2.hpp>
 #include <glm/vec3.hpp>
 #include <glm/vec4.hpp>
-#include <glm/mat4x4.hpp>
-#include <cstddef>
 #include <vector>
-#include <array>
 
 enum class AlphaMode {
     OPAQUE,
@@ -74,7 +74,9 @@ struct Material {
     float sheen = 0.0f;
     float sheenTint = 0.5f;
     float clearcoat = 0.0f;
-    float clearcoatGloss = 1.0f;
+    float clearcoatGloss;
+    float usePrototypeUV = 0.0f;
+    // std::string shaderPath;
     PipelineHandle pipeline;
 };
 
@@ -95,9 +97,10 @@ struct alignas(16) MaterialData {
     float sheenTint;
     float clearcoat;
     float clearcoatGloss;
+    float usePrototypeUV;
 };
 
-struct alignas(16) DirectionalLight { // Note that alignas(16) is not enough to ensure 16-byte alignment
+struct alignas(16) DirectionalLight {// Note that alignas(16) is not enough to ensure 16-byte alignment
     glm::vec3 direction;
     float _pad1;
     glm::vec3 color;
@@ -108,7 +111,7 @@ struct alignas(16) DirectionalLight { // Note that alignas(16) is not enough to 
     // Uint8 _pad4[3];
 };
 
-struct alignas(16) PointLight { // Note that alignas(16) is not enough to ensure 16-byte alignment
+struct alignas(16) PointLight {// Note that alignas(16) is not enough to ensure 16-byte alignment
     glm::vec3 position;
     float _pad1;
     glm::vec3 color;
@@ -152,7 +155,7 @@ struct alignas(16) InstanceData {
     float _pad2;
     glm::vec3 AABBMax;
     float _pad3;
-    glm::vec4 boundingSphere; // x, y, z, radius
+    glm::vec4 boundingSphere;// x, y, z, radius
 };
 
 struct alignas(16) Cluster {
@@ -181,11 +184,11 @@ struct alignas(16) WaveData {
 
 struct alignas(16) WaterData {
     glm::mat4 modelMatrix;
-    glm::vec4 surfaceColor;           // Water surface tint color
-    glm::vec4 refractionColor;        // Deep water color
-    glm::vec4 ssrSettings;            // x: step size, y: max steps, z: refinement steps, w: distance factor
-    glm::vec4 normalMapScroll;        // xy: scroll direction 1, zw: scroll direction 2
-    glm::vec2 normalMapScrollSpeed;   // Scroll speeds for both normal maps
+    glm::vec4 surfaceColor;// Water surface tint color
+    glm::vec4 refractionColor;// Deep water color
+    glm::vec4 ssrSettings;// x: step size, y: max steps, z: refinement steps, w: distance factor
+    glm::vec4 normalMapScroll;// xy: scroll direction 1, zw: scroll direction 2
+    glm::vec2 normalMapScrollSpeed;// Scroll speeds for both normal maps
     glm::vec2 _pad1;
     float refractionDistortionFactor;
     float refractionHeightFactor;
@@ -200,7 +203,7 @@ struct alignas(16) WaterData {
     float specIntensity;
     float foamBrightness;
     // float tessellationFactor;
-    WaveData waves[4];               // Up to 4 waves
+    WaveData waves[4];// Up to 4 waves
     Uint32 waveCount;
     float dampeningFactor;
     float time;
@@ -214,29 +217,29 @@ struct WaterTransform {
 
 // Atmosphere rendering data for Rayleigh and Mie scattering
 struct alignas(16) AtmosphereData {
-    glm::vec3 sunDirection;          // Normalized sun direction
+    glm::vec3 sunDirection;// Normalized sun direction
     float _pad1;
-    glm::vec3 sunColor;              // Sun light color
+    glm::vec3 sunColor;// Sun light color
     float _pad2;
-    float sunIntensity;              // Sun light intensity
-    float planetRadius;              // Planet radius in meters (Earth: 6371e3)
-    float atmosphereRadius;          // Atmosphere radius in meters (Earth: 6471e3)
-    float exposure;                  // Exposure for tone mapping
-    glm::vec3 rayleighCoefficients;  // Rayleigh scattering coefficients (Earth: 5.8e-6, 13.5e-6, 33.1e-6)
+    float sunIntensity;// Sun light intensity
+    float planetRadius;// Planet radius in meters (Earth: 6371e3)
+    float atmosphereRadius;// Atmosphere radius in meters (Earth: 6471e3)
+    float exposure;// Exposure for tone mapping
+    glm::vec3 rayleighCoefficients;// Rayleigh scattering coefficients (Earth: 5.8e-6, 13.5e-6, 33.1e-6)
     float _pad3;
-    float rayleighScaleHeight;       // Rayleigh scale height (Earth: 8500)
-    float mieCoefficient;            // Mie scattering coefficient (Earth: 21e-6)
-    float mieScaleHeight;            // Mie scale height (Earth: 1200)
-    float miePreferredDirection;     // Mie preferred scattering direction (g parameter, typically 0.758)
-    glm::vec3 groundColor;          // Ground color for horizon and IBL (default: greenish)
+    float rayleighScaleHeight;// Rayleigh scale height (Earth: 8500)
+    float mieCoefficient;// Mie scattering coefficient (Earth: 21e-6)
+    float mieScaleHeight;// Mie scale height (Earth: 1200)
+    float miePreferredDirection;// Mie preferred scattering direction (g parameter, typically 0.758)
+    glm::vec3 groundColor;// Ground color for horizon and IBL (default: greenish)
     float _pad4;
 };
 
 // IBL capture data for rendering atmosphere to cubemap
 struct alignas(16) IBLCaptureData {
-    glm::mat4 viewProj;              // View-projection matrix for current cubemap face
-    Uint32 faceIndex;                // Current cubemap face (0-5)
-    float roughness;                 // Roughness level for prefilter pass
+    glm::mat4 viewProj;// View-projection matrix for current cubemap face
+    Uint32 faceIndex;// Current cubemap face (0-5)
+    float roughness;// Roughness level for prefilter pass
     float _pad[2];
 };
 
@@ -253,8 +256,8 @@ struct VertexData {
 // uv1: whole grid coordinates (0-1 across entire grid)
 struct WaterVertexData {
     glm::vec3 position;
-    glm::vec2 uv0;  // Tiled UV for normal map scrolling
-    glm::vec2 uv1;  // Grid UV for edge dampening
+    glm::vec2 uv0;// Tiled UV for normal map scrolling
+    glm::vec2 uv1;// Grid UV for edge dampening
 };
 
 struct Particle {
@@ -286,7 +289,7 @@ struct Mesh {
     bool hasUV0 = false;
     bool hasUV1 = false;
     bool hasColor = false;
-    std::vector<VertexData> vertices; // interleaved vertex data
+    std::vector<VertexData> vertices;// interleaved vertex data
     std::vector<Uint32> indices;
     std::shared_ptr<Material> material = nullptr;
     PrimitiveMode primitiveMode;
@@ -305,6 +308,6 @@ struct Mesh {
     // Runtime data
     std::vector<BufferHandle> vbos;
     BufferHandle ebo;
-    Uint32 instanceID = UINT32_MAX; // also used as blas index
+    Uint32 instanceID = UINT32_MAX;// also used as blas index
     Uint32 materialID = UINT32_MAX;
 };
