@@ -116,7 +116,7 @@ include(CMakePackageConfigHelpers)
 
 write_basic_package_version_file(
     "${CMAKE_CURRENT_BINARY_DIR}/vapor-config-version.cmake"
-    VERSION ${PROJECT_VERSION}
+    VERSION 0.0.1
     COMPATIBILITY SameMajorVersion
 )
 
