@@ -331,8 +331,157 @@ public:
         return mesh;
     };
 
-    static std::shared_ptr<Mesh> buildCapsule(float size, std::shared_ptr<Material> material = nullptr) {
+    // Build a capsule mesh (cylinder + 2 hemisphere caps)
+    // height: total height of capsule (including both hemisphere caps)
+    // radius: radius of capsule
+    // segments: number of segments around the circumference
+    // rings: number of rings in each hemisphere
+    static std::shared_ptr<Mesh> buildCapsule(
+        float height,
+        float radius,
+        Uint32 segments = 16,
+        Uint32 rings = 8,
+        std::shared_ptr<Material> material = nullptr
+    ) {
+        std::vector<VertexData> verts;
+        std::vector<Uint32> indices;
+
+        // Calculate cylinder height (total height - 2 hemisphere caps)
+        float cylinderHeight = height - 2.0f * radius;
+        float halfCylinderHeight = cylinderHeight * 0.5f;
+
+        // Generate top hemisphere (from top to equator)
+        for (Uint32 ring = 0; ring <= rings; ++ring) {
+            float v = static_cast<float>(ring) / static_cast<float>(rings);
+            float phi = v * (M_PI * 0.5f); // 0 to PI/2
+
+            float y = halfCylinderHeight + radius * cosf(phi);
+            float ringRadius = radius * sinf(phi);
+
+            for (Uint32 seg = 0; seg <= segments; ++seg) {
+                float u = static_cast<float>(seg) / static_cast<float>(segments);
+                float theta = u * 2.0f * M_PI;
+
+                float x = ringRadius * cosf(theta);
+                float z = ringRadius * sinf(theta);
+
+                glm::vec3 pos(x, y, z);
+                glm::vec3 normal = glm::normalize(glm::vec3(x, y - halfCylinderHeight, z));
+                glm::vec2 uv(u, v * 0.25f); // Top hemisphere uses 0-0.25 of V
+
+                verts.push_back({ pos, uv, normal });
+            }
+        }
+
+        Uint32 topHemisphereVertexCount = (rings + 1) * (segments + 1);
+
+        // Generate cylinder body
+        Uint32 cylinderRings = 2; // Top and bottom edge
+        for (Uint32 ring = 0; ring < cylinderRings; ++ring) {
+            float v = static_cast<float>(ring) / static_cast<float>(cylinderRings - 1);
+            float y = halfCylinderHeight - v * cylinderHeight;
+
+            for (Uint32 seg = 0; seg <= segments; ++seg) {
+                float u = static_cast<float>(seg) / static_cast<float>(segments);
+                float theta = u * 2.0f * M_PI;
+
+                float x = radius * cosf(theta);
+                float z = radius * sinf(theta);
+
+                glm::vec3 pos(x, y, z);
+                glm::vec3 normal = glm::normalize(glm::vec3(x, 0, z));
+                glm::vec2 uv(u, 0.25f + v * 0.5f); // Cylinder uses 0.25-0.75 of V
+
+                verts.push_back({ pos, uv, normal });
+            }
+        }
+
+        Uint32 cylinderVertexCount = cylinderRings * (segments + 1);
+
+        // Generate bottom hemisphere (from equator to bottom)
+        for (Uint32 ring = 0; ring <= rings; ++ring) {
+            float v = static_cast<float>(ring) / static_cast<float>(rings);
+            float phi = v * (M_PI * 0.5f); // 0 to PI/2
+
+            float y = -halfCylinderHeight - radius * sinf(phi);
+            float ringRadius = radius * cosf(phi);
+
+            for (Uint32 seg = 0; seg <= segments; ++seg) {
+                float u = static_cast<float>(seg) / static_cast<float>(segments);
+                float theta = u * 2.0f * M_PI;
+
+                float x = ringRadius * cosf(theta);
+                float z = ringRadius * sinf(theta);
+
+                glm::vec3 pos(x, y, z);
+                glm::vec3 normal = glm::normalize(glm::vec3(x, y + halfCylinderHeight, z));
+                glm::vec2 uv(u, 0.75f + v * 0.25f); // Bottom hemisphere uses 0.75-1.0 of V
+
+                verts.push_back({ pos, uv, normal });
+            }
+        }
+
+        // Generate indices for top hemisphere
+        for (Uint32 ring = 0; ring < rings; ++ring) {
+            for (Uint32 seg = 0; seg < segments; ++seg) {
+                Uint32 current = ring * (segments + 1) + seg;
+                Uint32 next = current + segments + 1;
+
+                indices.push_back(current);
+                indices.push_back(next);
+                indices.push_back(current + 1);
+
+                indices.push_back(current + 1);
+                indices.push_back(next);
+                indices.push_back(next + 1);
+            }
+        }
+
+        // Generate indices for cylinder body
+        Uint32 cylinderStartVertex = topHemisphereVertexCount;
+        for (Uint32 ring = 0; ring < cylinderRings - 1; ++ring) {
+            for (Uint32 seg = 0; seg < segments; ++seg) {
+                Uint32 current = cylinderStartVertex + ring * (segments + 1) + seg;
+                Uint32 next = current + segments + 1;
+
+                indices.push_back(current);
+                indices.push_back(next);
+                indices.push_back(current + 1);
+
+                indices.push_back(current + 1);
+                indices.push_back(next);
+                indices.push_back(next + 1);
+            }
+        }
+
+        // Generate indices for bottom hemisphere
+        Uint32 bottomHemisphereStartVertex = topHemisphereVertexCount + cylinderVertexCount;
+        for (Uint32 ring = 0; ring < rings; ++ring) {
+            for (Uint32 seg = 0; seg < segments; ++seg) {
+                Uint32 current = bottomHemisphereStartVertex + ring * (segments + 1) + seg;
+                Uint32 next = current + segments + 1;
+
+                indices.push_back(current);
+                indices.push_back(next);
+                indices.push_back(current + 1);
+
+                indices.push_back(current + 1);
+                indices.push_back(next);
+                indices.push_back(next + 1);
+            }
+        }
+
         auto mesh = std::make_shared<Mesh>();
+        mesh->hasPosition = true;
+        mesh->hasUV0 = true;
+        mesh->hasNormal = true;
+        mesh->primitiveMode = PrimitiveMode::TRIANGLES;
+        mesh->initialize(verts.data(), verts.size(), indices.data(), indices.size());
+
+        if (material) {
+            mesh->material = material;
+        }
+
         return mesh;
     };
 
@@ -341,8 +490,118 @@ public:
         return mesh;
     };
 
-    static std::shared_ptr<Mesh> buildCylinder(float size, std::shared_ptr<Material> material = nullptr) {
+    // Build a cylinder mesh (with top and bottom caps)
+    // height: total height of cylinder
+    // radius: radius of cylinder
+    // segments: number of segments around the circumference
+    static std::shared_ptr<Mesh> buildCylinder(
+        float height,
+        float radius,
+        Uint32 segments = 16,
+        std::shared_ptr<Material> material = nullptr
+    ) {
+        std::vector<VertexData> verts;
+        std::vector<Uint32> indices;
+
+        float halfHeight = height * 0.5f;
+
+        // Generate side vertices (2 rings: top and bottom)
+        for (Uint32 ring = 0; ring < 2; ++ring) {
+            float y = (ring == 0) ? halfHeight : -halfHeight;
+            float v = static_cast<float>(ring);
+
+            for (Uint32 seg = 0; seg <= segments; ++seg) {
+                float u = static_cast<float>(seg) / static_cast<float>(segments);
+                float theta = u * 2.0f * M_PI;
+
+                float x = radius * cosf(theta);
+                float z = radius * sinf(theta);
+
+                glm::vec3 pos(x, y, z);
+                glm::vec3 normal = glm::normalize(glm::vec3(x, 0, z));
+                glm::vec2 uv(u, v);
+
+                verts.push_back({ pos, uv, normal });
+            }
+        }
+
+        // Generate side indices
+        for (Uint32 seg = 0; seg < segments; ++seg) {
+            Uint32 current = seg;
+            Uint32 next = current + segments + 1;
+
+            indices.push_back(current);
+            indices.push_back(next);
+            indices.push_back(current + 1);
+
+            indices.push_back(current + 1);
+            indices.push_back(next);
+            indices.push_back(next + 1);
+        }
+
+        Uint32 sideVertexCount = 2 * (segments + 1);
+
+        // Generate top cap
+        Uint32 topCenterIndex = static_cast<Uint32>(verts.size());
+        verts.push_back({ glm::vec3(0, halfHeight, 0), glm::vec2(0.5f, 0.5f), glm::vec3(0, 1, 0) });
+
+        for (Uint32 seg = 0; seg <= segments; ++seg) {
+            float u = static_cast<float>(seg) / static_cast<float>(segments);
+            float theta = u * 2.0f * M_PI;
+
+            float x = radius * cosf(theta);
+            float z = radius * sinf(theta);
+
+            glm::vec3 pos(x, halfHeight, z);
+            glm::vec2 uv(0.5f + 0.5f * cosf(theta), 0.5f + 0.5f * sinf(theta));
+            glm::vec3 normal(0, 1, 0);
+
+            verts.push_back({ pos, uv, normal });
+        }
+
+        // Top cap indices
+        for (Uint32 seg = 0; seg < segments; ++seg) {
+            indices.push_back(topCenterIndex);
+            indices.push_back(topCenterIndex + seg + 1);
+            indices.push_back(topCenterIndex + seg + 2);
+        }
+
+        // Generate bottom cap
+        Uint32 bottomCenterIndex = static_cast<Uint32>(verts.size());
+        verts.push_back({ glm::vec3(0, -halfHeight, 0), glm::vec2(0.5f, 0.5f), glm::vec3(0, -1, 0) });
+
+        for (Uint32 seg = 0; seg <= segments; ++seg) {
+            float u = static_cast<float>(seg) / static_cast<float>(segments);
+            float theta = u * 2.0f * M_PI;
+
+            float x = radius * cosf(theta);
+            float z = radius * sinf(theta);
+
+            glm::vec3 pos(x, -halfHeight, z);
+            glm::vec2 uv(0.5f + 0.5f * cosf(theta), 0.5f + 0.5f * sinf(theta));
+            glm::vec3 normal(0, -1, 0);
+
+            verts.push_back({ pos, uv, normal });
+        }
+
+        // Bottom cap indices (reversed winding for correct face orientation)
+        for (Uint32 seg = 0; seg < segments; ++seg) {
+            indices.push_back(bottomCenterIndex);
+            indices.push_back(bottomCenterIndex + seg + 2);
+            indices.push_back(bottomCenterIndex + seg + 1);
+        }
+
         auto mesh = std::make_shared<Mesh>();
+        mesh->hasPosition = true;
+        mesh->hasUV0 = true;
+        mesh->hasNormal = true;
+        mesh->primitiveMode = PrimitiveMode::TRIANGLES;
+        mesh->initialize(verts.data(), verts.size(), indices.data(), indices.size());
+
+        if (material) {
+            mesh->material = material;
+        }
+
         return mesh;
     };
 

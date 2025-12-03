@@ -86,6 +86,11 @@ public:
     void drawImGui(float dt);
     void deinit();
 
+    // Get interpolation alpha for smooth rendering between physics steps
+    float getInterpolationAlpha() const {
+        return timeAccum / FIXED_TIME_STEP;
+    }
+
     // ====== 創建剛體（各種形狀） ======
     BodyHandle createSphereBody(float radius, const glm::vec3& position, const glm::quat& rotation, BodyMotionType motionType);
     BodyHandle createBoxBody(const glm::vec3& halfSize, const glm::vec3& position, const glm::quat& rotation, BodyMotionType motionType);

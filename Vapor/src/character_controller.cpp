@@ -1,25 +1,27 @@
 #include "character_controller.hpp"
 #include "physics_3d.hpp"
 #include <Jolt/Jolt.h>
-#include <Jolt/Physics/PhysicsSystem.h>
+
+#include <Jolt/Core/Factory.h>
 #include <Jolt/Physics/Character/CharacterVirtual.h>
 #include <Jolt/Physics/Collision/Shape/CapsuleShape.h>
 #include <Jolt/Physics/Collision/Shape/RotatedTranslatedShape.h>
-#include <Jolt/Core/Factory.h>
+#include <Jolt/Physics/PhysicsSystem.h>
 
 CharacterController::CharacterController(Physics3D* physics, const CharacterControllerSettings& settings)
-    : physics(physics)
-    , settings(settings)
-    , currentGravity(0, -9.81f, 0)
-{
+  : physics(physics), settings(settings), currentGravity(0, -9.81f, 0) {
     auto* physicsSystem = physics->getPhysicsSystem();
 
     // Create standing shape (capsule)
-    JPH::Ref<JPH::Shape> standingShape = JPH::RotatedTranslatedShapeSettings(
-        JPH::Vec3(0, 0.5f * settings.height + settings.radius, 0),
-        JPH::Quat::sIdentity(),
-        new JPH::CapsuleShape(0.5f * settings.height, settings.radius)
-    ).Create().Get();
+    // settings.height is the total capsule height
+    // Capsule total height = cylinderHeight + 2*radius
+    // So cylinderHeight = totalHeight - 2*radius
+    // halfHeight (for Jolt) = cylinderHeight / 2 = (totalHeight - 2*radius) / 2
+    float halfHeightOfCylinder = (settings.height - 2.0f * settings.radius) * 0.5f;
+
+    // Capsule is centered at character position
+    // Bottom at y = -halfHeight - radius, Top at y = +halfHeight + radius
+    JPH::Ref<JPH::Shape> standingShape = new JPH::CapsuleShape(halfHeightOfCylinder, settings.radius);
 
     // Create CharacterVirtual settings
     JPH::CharacterVirtualSettings charSettings;
@@ -34,16 +36,22 @@ CharacterController::CharacterController(Physics3D* physics, const CharacterCont
     // Create character
     character = std::make_unique<JPH::CharacterVirtual>(
         &charSettings,
-        JPH::RVec3::sZero(),  // Initial position (will be set by warp)
+        JPH::RVec3::sZero(),// Initial position (will be set by warp)
         JPH::Quat::sIdentity(),
-        0,  // User data
+        0,// User data
         physicsSystem
     );
 
-    character->SetListener(nullptr);  // Can add custom listener later
+    character->SetListener(nullptr);// Can add custom listener later
 
     // Set initial max speed
-    maxSpeed = 5.0f;  // Default movement speed
+    maxSpeed = 5.0f;// Default movement speed
+    desiredHorizontalVelocity = glm::vec3(0.0f);
+
+    // Initialize positions from character's current position
+    JPH::RVec3 initialPos = character->GetPosition();
+    currentPosition = glm::vec3(initialPos.GetX(), initialPos.GetY(), initialPos.GetZ());
+    previousPosition = currentPosition;
 }
 
 CharacterController::~CharacterController() {
@@ -51,21 +59,16 @@ CharacterController::~CharacterController() {
 }
 
 void CharacterController::move(const glm::vec3& movementDirection, float deltaTime) {
-    // Get current velocity to preserve vertical component
-    JPH::Vec3 currentVel = character->GetLinearVelocity();
+    // Store desired horizontal velocity (will be applied in update())
+    glm::vec3 horizontalDir(movementDirection.x, 0, movementDirection.z);
+    float horizontalSpeed = glm::length(horizontalDir);
 
-    // Apply horizontal movement (preserve vertical velocity for gravity/jumping)
-    JPH::Vec3 horizontalVel(movementDirection.x, 0, movementDirection.z);
-    float horizontalSpeed = horizontalVel.Length();
-
-    // Clamp horizontal speed to max speed
-    if (horizontalSpeed > maxSpeed) {
-        horizontalVel = horizontalVel.Normalized() * maxSpeed;
+    if (horizontalSpeed > 0.001f) {
+        horizontalDir = glm::normalize(horizontalDir);
+        desiredHorizontalVelocity = horizontalDir * maxSpeed;
+    } else {
+        desiredHorizontalVelocity = glm::vec3(0.0f);
     }
-
-    // Combine horizontal movement with current vertical velocity
-    JPH::Vec3 newVelocity(horizontalVel.GetX(), currentVel.GetY(), horizontalVel.GetZ());
-    character->SetLinearVelocity(newVelocity);
 }
 
 void CharacterController::moveAlong(const glm::vec2& inputVector, const glm::vec3& forwardDirection, float deltaTime) {
@@ -85,7 +88,9 @@ void CharacterController::moveAlong(const glm::vec2& inputVector, const glm::vec
 
 void CharacterController::jump(float jumpSpeed) {
     if (isOnGround()) {
+        // Get current velocity to preserve horizontal movement
         JPH::Vec3 currentVel = character->GetLinearVelocity();
+        // Only set vertical component for jump, preserve horizontal
         currentVel.SetY(jumpSpeed);
         character->SetLinearVelocity(currentVel);
     }
@@ -93,6 +98,9 @@ void CharacterController::jump(float jumpSpeed) {
 
 void CharacterController::warp(const glm::vec3& position) {
     character->SetPosition(JPH::RVec3(position.x, position.y, position.z));
+    // Reset interpolation positions on warp
+    previousPosition = position;
+    currentPosition = position;
 }
 
 bool CharacterController::isOnGround() const {
@@ -104,8 +112,15 @@ bool CharacterController::isSliding() const {
 }
 
 glm::vec3 CharacterController::getPosition() const {
-    JPH::RVec3 pos = character->GetPosition();
-    return glm::vec3(pos.GetX(), pos.GetY(), pos.GetZ());
+    // Return the current physics position (not interpolated)
+    return currentPosition;
+}
+
+glm::vec3 CharacterController::getInterpolatedPosition(float alpha) const {
+    // Linear interpolation between previous and current position
+    // alpha = 0.0 means use previous position (start of physics step)
+    // alpha = 1.0 means use current position (end of physics step)
+    return glm::mix(previousPosition, currentPosition, alpha);
 }
 
 glm::vec3 CharacterController::getVelocity() const {
@@ -134,12 +149,34 @@ void CharacterController::update(float deltaTime, const glm::vec3& gravity) {
     auto* physicsSystem = physics->getPhysicsSystem();
     auto* tempAllocator = physics->getTempAllocator();
 
+    // Note: previousPosition should be set externally before the physics update loop
+    // to handle multiple physics steps correctly
+
+    // Get current velocity - preserve vertical component for gravity/jumping
+    JPH::Vec3 currentVel = character->GetLinearVelocity();
+
+    // Apply desired horizontal velocity while preserving vertical velocity
+    // This allows gravity to work properly
+    JPH::Vec3 newVelocity(
+        desiredHorizontalVelocity.x,
+        currentVel.GetY(),// Preserve vertical - let ExtendedUpdate apply gravity
+        desiredHorizontalVelocity.z
+    );
+    character->SetLinearVelocity(newVelocity);
+
     // Update character (performs collision detection and movement)
     JPH::CharacterVirtual::ExtendedUpdateSettings updateSettings;
 
+    // Configure update settings to prevent sticking and improve movement
+    // Reduced mStickToFloorStepDown to minimize vertical jitter on flat surfaces
+    updateSettings.mStickToFloorStepDown = JPH::Vec3(0.0f, -0.01f, 0.0f);// Very small step down - reduces jitter
+    updateSettings.mWalkStairsStepUp = JPH::Vec3(0.0f, 0.15f, 0.0f);// Allow stepping up small obstacles
+    updateSettings.mWalkStairsMinStepForward = 0.1f;// Minimum forward distance for step up
+    updateSettings.mWalkStairsStepDownExtra = JPH::Vec3(0.0f, 0.0f, 0.0f);// Disabled to reduce jitter
+
     // Use system default filters
-    auto broadPhaseFilter = physicsSystem->GetDefaultBroadPhaseLayerFilter(1);  // MOVING layer
-    auto layerFilter = physicsSystem->GetDefaultLayerFilter(1);  // MOVING layer
+    auto broadPhaseFilter = physicsSystem->GetDefaultBroadPhaseLayerFilter(1);// MOVING layer
+    auto layerFilter = physicsSystem->GetDefaultLayerFilter(1);// MOVING layer
 
     character->ExtendedUpdate(
         deltaTime,
@@ -147,8 +184,12 @@ void CharacterController::update(float deltaTime, const glm::vec3& gravity) {
         updateSettings,
         broadPhaseFilter,
         layerFilter,
-        {},  // Body filter
-        {},  // Shape filter
+        {},// Body filter
+        {},// Shape filter
         *tempAllocator
     );
+
+    // Update current position after physics step
+    JPH::RVec3 pos = character->GetPosition();
+    currentPosition = glm::vec3(pos.GetX(), pos.GetY(), pos.GetZ());
 }

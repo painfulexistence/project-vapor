@@ -40,6 +40,7 @@ public:
     bool isOnGround() const;
     bool isSliding() const;  // On slope too steep
     glm::vec3 getPosition() const;
+    glm::vec3 getInterpolatedPosition(float alpha) const;  // Get position interpolated between previous and current
     glm::vec3 getVelocity() const;
     glm::vec3 getGroundNormal() const;
 
@@ -51,10 +52,20 @@ public:
     // Internal update (called by Physics3D)
     void update(float deltaTime, const glm::vec3& gravity);
 
+    // Store current position as previous (for interpolation)
+    void storePreviousPosition() {
+        previousPosition = currentPosition;
+    }
+
 private:
     Physics3D* physics;
     std::unique_ptr<JPH::CharacterVirtual> character;
     CharacterControllerSettings settings;
     glm::vec3 currentGravity;
     float maxSpeed = 10.0f;
+    glm::vec3 desiredHorizontalVelocity = glm::vec3(0.0f);  // Desired horizontal movement
+
+    // For interpolation
+    glm::vec3 previousPosition = glm::vec3(0.0f);
+    glm::vec3 currentPosition = glm::vec3(0.0f);
 };

@@ -23,11 +23,22 @@ void Scene::printNode(const std::shared_ptr<Node>& node) {
         fmt::print("   Mesh group {} ({} meshes)\n", node->meshGroup->name, node->meshGroup->meshes.size());
         for (const auto& mesh : node->meshGroup->meshes) {
             fmt::print("    Mesh\n");
-            fmt::print("     vertexOffset={}, indexOffset={}, vertexCount={}, indexCount={}\n",
-                mesh->vertexOffset, mesh->indexOffset, mesh->vertexCount, mesh->indexCount);
-            fmt::print("     AABB: min=({}, {}, {}), max=({}, {}, {})\n",
-                mesh->worldAABBMin.x, mesh->worldAABBMin.y, mesh->worldAABBMin.z,
-                mesh->worldAABBMax.x, mesh->worldAABBMax.y, mesh->worldAABBMax.z);
+            fmt::print(
+                "     vertexOffset={}, indexOffset={}, vertexCount={}, indexCount={}\n",
+                mesh->vertexOffset,
+                mesh->indexOffset,
+                mesh->vertexCount,
+                mesh->indexCount
+            );
+            fmt::print(
+                "     AABB: min=({}, {}, {}), max=({}, {}, {})\n",
+                mesh->worldAABBMin.x,
+                mesh->worldAABBMin.y,
+                mesh->worldAABBMin.z,
+                mesh->worldAABBMax.x,
+                mesh->worldAABBMax.y,
+                mesh->worldAABBMax.z
+            );
             // SDL_Log("Vertex count: %zu", mesh->vertices.size());
             // if (mesh->indices.size() > 0) {
             //     SDL_Log("Index count: %zu", mesh->indices.size());
@@ -147,7 +158,7 @@ void Scene::addMeshToNode(std::shared_ptr<Node> node, std::shared_ptr<Mesh> mesh
     // mesh->vertices.clear();
     // mesh->indices.clear();
     node->meshGroup->meshes.push_back(mesh);
-    if (mesh->material) { // TODO: check if material & images are already in the scene
+    if (mesh->material) {// TODO: check if material & images are already in the scene
         materials.push_back(mesh->material);
         if (mesh->material->albedoMap) {
             images.push_back(mesh->material->albedoMap);
@@ -184,14 +195,9 @@ void Scene::addMeshToNode(std::shared_ptr<Node> node, std::shared_ptr<Mesh> mesh
 void Node::attachCharacterController(Physics3D* physics, const CharacterControllerSettings& settings) {
     characterController = std::make_unique<CharacterController>(physics, settings);
 
-    // If transform is dirty, we need to compute world position first
-    // This handles the case where setPosition() was called before attachCharacterController()
+    // TODO: migrate to body create system; this only works for root nodes
     glm::vec3 worldPos = getWorldPosition();
     if (isTransformDirty) {
-        // For root nodes without parent, worldTransform = localTransform
-        // NOTE: This assumes the node is a root node. For child nodes, the parent's
-        // worldTransform should be passed in, but that requires scene hierarchy traversal.
-        // In most use cases, controllers are attached to root nodes.
         worldPos = glm::vec3(localTransform[3]);
     }
 
@@ -205,14 +211,10 @@ void Node::attachVehicleController(Physics3D* physics, const VehicleSettings& se
     glm::vec3 worldPos = getWorldPosition();
     glm::quat worldRot = getWorldRotation();
 
+    // TODO: migrate to body create system; this only works for root nodes
     if (isTransformDirty) {
-        // For root nodes without parent, worldTransform = localTransform
-        // NOTE: This assumes the node is a root node. For child nodes, the parent's
-        // worldTransform should be passed in, but that requires scene hierarchy traversal.
-        // In most use cases, controllers are attached to root nodes.
-        worldPos = glm::vec3(localTransform[3]);
 
-        // Extract rotation from localTransform
+        worldPos = glm::vec3(localTransform[3]);
         glm::mat3 rotation = glm::mat3(
             glm::normalize(glm::vec3(localTransform[0])),
             glm::normalize(glm::vec3(localTransform[1])),

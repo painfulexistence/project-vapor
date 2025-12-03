@@ -386,6 +386,22 @@ void Physics3D::process(const std::shared_ptr<Scene>& scene, float dt) {
 
     // update physics world
     timeAccum += dt;
+
+    // Store previous positions BEFORE any physics updates (for interpolation)
+    // This ensures that even if we do multiple physics steps (catch-up),
+    // we interpolate from the position at the start of this frame
+    std::function<void(const std::shared_ptr<Node>&)> storePreviousPositions = [&](const std::shared_ptr<Node>& node) {
+        if (node->characterController) {
+            node->characterController->storePreviousPosition();
+        }
+        for (const auto& child : node->children) {
+            storePreviousPositions(child);
+        }
+    };
+    for (auto& node : scene->nodes) {
+        storePreviousPositions(node);
+    }
+
     while (timeAccum >= FIXED_TIME_STEP) {
         ++step;
 
@@ -450,10 +466,14 @@ void Physics3D::process(const std::shared_ptr<Scene>& scene, float dt) {
         }
     }
 
-    // Sync character controller positions back to nodes
+    // Sync character controller positions back to nodes (with interpolation)
+    // Calculate interpolation alpha: how far we are between physics steps
+    float alpha = timeAccum / FIXED_TIME_STEP;
+
     std::function<void(const std::shared_ptr<Node>&)> syncCharacterControllers = [&](const std::shared_ptr<Node>& node) {
         if (node->characterController) {
-            glm::vec3 charPos = node->characterController->getPosition();
+            // Use interpolated position for smooth rendering
+            glm::vec3 charPos = node->characterController->getInterpolatedPosition(alpha);
             node->setPosition(charPos);
             node->isTransformDirty = true;
         }
