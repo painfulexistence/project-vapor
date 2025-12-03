@@ -1086,6 +1086,153 @@ public:
     }
 };
 
+// ============================================================================
+// Bloom passes: Physically-based bloom implementation
+// ============================================================================
+
+// Bloom brightness pass: Extracts bright pixels from the scene
+class BloomBrightnessPass : public RenderPass {
+public:
+    explicit BloomBrightnessPass(Renderer_Metal* renderer) : RenderPass(renderer) {}
+
+    const char* getName() const override {
+        return "BloomBrightnessPass";
+    }
+
+    void execute() override {
+        auto& r = *renderer;
+
+        auto passDesc = NS::TransferPtr(MTL::RenderPassDescriptor::renderPassDescriptor());
+        auto colorRT = passDesc->colorAttachments()->object(0);
+        colorRT->setClearColor(MTL::ClearColor(0.0, 0.0, 0.0, 1.0));
+        colorRT->setLoadAction(MTL::LoadActionClear);
+        colorRT->setStoreAction(MTL::StoreActionStore);
+        colorRT->setTexture(r.bloomBrightnessRT.get());
+
+        auto encoder = r.currentCommandBuffer->renderCommandEncoder(passDesc.get());
+        encoder->setRenderPipelineState(r.bloomBrightnessPipeline.get());
+        encoder->setCullMode(MTL::CullModeBack);
+        encoder->setFrontFacingWinding(MTL::Winding::WindingCounterClockwise);
+        encoder->setFragmentTexture(r.colorRT.get(), 0);
+        encoder->setFragmentBytes(&r.bloomThreshold, sizeof(float), 0);
+        encoder->drawPrimitives(MTL::PrimitiveType::PrimitiveTypeTriangle, 0, 3, 1);
+        encoder->endEncoding();
+    }
+};
+
+// Bloom downsample pass: Creates the bloom mipmap pyramid
+class BloomDownsamplePass : public RenderPass {
+public:
+    explicit BloomDownsamplePass(Renderer_Metal* renderer) : RenderPass(renderer) {}
+
+    const char* getName() const override {
+        return "BloomDownsamplePass";
+    }
+
+    void execute() override {
+        auto& r = *renderer;
+
+        // First downsample from brightness RT to pyramid level 0
+        {
+            auto passDesc = NS::TransferPtr(MTL::RenderPassDescriptor::renderPassDescriptor());
+            auto colorRT = passDesc->colorAttachments()->object(0);
+            colorRT->setClearColor(MTL::ClearColor(0.0, 0.0, 0.0, 1.0));
+            colorRT->setLoadAction(MTL::LoadActionClear);
+            colorRT->setStoreAction(MTL::StoreActionStore);
+            colorRT->setTexture(r.bloomPyramidRTs[0].get());
+
+            auto encoder = r.currentCommandBuffer->renderCommandEncoder(passDesc.get());
+            encoder->setRenderPipelineState(r.bloomDownsamplePipeline.get());
+            encoder->setCullMode(MTL::CullModeBack);
+            encoder->setFrontFacingWinding(MTL::Winding::WindingCounterClockwise);
+            encoder->setFragmentTexture(r.bloomBrightnessRT.get(), 0);
+            encoder->drawPrimitives(MTL::PrimitiveType::PrimitiveTypeTriangle, 0, 3, 1);
+            encoder->endEncoding();
+        }
+
+        // Downsample through the rest of the pyramid
+        for (Uint32 i = 1; i < r.BLOOM_PYRAMID_LEVELS; i++) {
+            auto passDesc = NS::TransferPtr(MTL::RenderPassDescriptor::renderPassDescriptor());
+            auto colorRT = passDesc->colorAttachments()->object(0);
+            colorRT->setClearColor(MTL::ClearColor(0.0, 0.0, 0.0, 1.0));
+            colorRT->setLoadAction(MTL::LoadActionClear);
+            colorRT->setStoreAction(MTL::StoreActionStore);
+            colorRT->setTexture(r.bloomPyramidRTs[i].get());
+
+            auto encoder = r.currentCommandBuffer->renderCommandEncoder(passDesc.get());
+            encoder->setRenderPipelineState(r.bloomDownsamplePipeline.get());
+            encoder->setCullMode(MTL::CullModeBack);
+            encoder->setFrontFacingWinding(MTL::Winding::WindingCounterClockwise);
+            encoder->setFragmentTexture(r.bloomPyramidRTs[i - 1].get(), 0);
+            encoder->drawPrimitives(MTL::PrimitiveType::PrimitiveTypeTriangle, 0, 3, 1);
+            encoder->endEncoding();
+        }
+    }
+};
+
+// Bloom upsample pass: Upsamples and accumulates the bloom
+class BloomUpsamplePass : public RenderPass {
+public:
+    explicit BloomUpsamplePass(Renderer_Metal* renderer) : RenderPass(renderer) {}
+
+    const char* getName() const override {
+        return "BloomUpsamplePass";
+    }
+
+    void execute() override {
+        auto& r = *renderer;
+
+        // Upsample from bottom of pyramid to top, accumulating bloom
+        for (int i = static_cast<int>(r.BLOOM_PYRAMID_LEVELS) - 2; i >= 0; i--) {
+            auto passDesc = NS::TransferPtr(MTL::RenderPassDescriptor::renderPassDescriptor());
+            auto colorRT = passDesc->colorAttachments()->object(0);
+            colorRT->setLoadAction(MTL::LoadActionLoad);  // Load to blend with existing content
+            colorRT->setStoreAction(MTL::StoreActionStore);
+            colorRT->setTexture(r.bloomPyramidRTs[i].get());
+
+            auto encoder = r.currentCommandBuffer->renderCommandEncoder(passDesc.get());
+            encoder->setRenderPipelineState(r.bloomUpsamplePipeline.get());
+            encoder->setCullMode(MTL::CullModeBack);
+            encoder->setFrontFacingWinding(MTL::Winding::WindingCounterClockwise);
+            encoder->setFragmentTexture(r.bloomPyramidRTs[i + 1].get(), 0);  // Lower res texture
+            encoder->setFragmentTexture(r.bloomPyramidRTs[i].get(), 1);      // Current level to blend
+            encoder->drawPrimitives(MTL::PrimitiveType::PrimitiveTypeTriangle, 0, 3, 1);
+            encoder->endEncoding();
+        }
+    }
+};
+
+// Bloom composite pass: Combines bloom with the scene
+class BloomCompositePass : public RenderPass {
+public:
+    explicit BloomCompositePass(Renderer_Metal* renderer) : RenderPass(renderer) {}
+
+    const char* getName() const override {
+        return "BloomCompositePass";
+    }
+
+    void execute() override {
+        auto& r = *renderer;
+
+        auto passDesc = NS::TransferPtr(MTL::RenderPassDescriptor::renderPassDescriptor());
+        auto colorRT = passDesc->colorAttachments()->object(0);
+        colorRT->setClearColor(MTL::ClearColor(0.0, 0.0, 0.0, 1.0));
+        colorRT->setLoadAction(MTL::LoadActionClear);
+        colorRT->setStoreAction(MTL::StoreActionStore);
+        colorRT->setTexture(r.bloomResultRT.get());
+
+        auto encoder = r.currentCommandBuffer->renderCommandEncoder(passDesc.get());
+        encoder->setRenderPipelineState(r.bloomCompositePipeline.get());
+        encoder->setCullMode(MTL::CullModeBack);
+        encoder->setFrontFacingWinding(MTL::Winding::WindingCounterClockwise);
+        encoder->setFragmentTexture(r.colorRT.get(), 0);           // Original scene
+        encoder->setFragmentTexture(r.bloomPyramidRTs[0].get(), 1); // Accumulated bloom
+        encoder->setFragmentBytes(&r.bloomStrength, sizeof(float), 0);
+        encoder->drawPrimitives(MTL::PrimitiveType::PrimitiveTypeTriangle, 0, 3, 1);
+        encoder->endEncoding();
+    }
+};
+
 // Post-process pass: Applies tone mapping and other post-processing effects
 class PostProcessPass : public RenderPass {
 public:
@@ -1112,7 +1259,8 @@ public:
         encoder->setRenderPipelineState(r.postProcessPipeline.get());
         encoder->setCullMode(MTL::CullModeBack);
         encoder->setFrontFacingWinding(MTL::Winding::WindingCounterClockwise);
-        encoder->setFragmentTexture(r.colorRT.get(), 0);
+        // Use bloom result instead of raw colorRT for post-processing
+        encoder->setFragmentTexture(r.bloomResultRT.get(), 0);
         encoder->setFragmentTexture(r.aoRT.get(), 1);
         encoder->setFragmentTexture(r.normalRT.get(), 2);
         encoder->drawPrimitives(MTL::PrimitiveType::PrimitiveTypeTriangle, 0, 3, 1);
@@ -1215,6 +1363,13 @@ auto Renderer_Metal::init(SDL_Window* window) -> void {
     graph.addPass(std::make_unique<MainRenderPass>(this));
     graph.addPass(std::make_unique<SkyAtmospherePass>(this));
     // graph.addPass(std::make_unique<WaterPass>(this));
+
+    // Bloom passes (physically-based bloom)
+    graph.addPass(std::make_unique<BloomBrightnessPass>(this));
+    graph.addPass(std::make_unique<BloomDownsamplePass>(this));
+    graph.addPass(std::make_unique<BloomUpsamplePass>(this));
+    graph.addPass(std::make_unique<BloomCompositePass>(this));
+
     graph.addPass(std::make_unique<PostProcessPass>(this));
     graph.addPass(std::make_unique<RmlUiPass>(this));// RmlUI before ImGui
     graph.addPass(std::make_unique<ImGuiPass>(this));
@@ -1503,6 +1658,192 @@ auto Renderer_Metal::createResources() -> void {
     aoTextureDesc->setUsage(MTL::TextureUsageShaderRead | MTL::TextureUsageShaderWrite);
     aoRT = NS::TransferPtr(device->newTexture(aoTextureDesc));
     aoTextureDesc->release();
+
+    // ========================================================================
+    // Bloom render targets
+    // ========================================================================
+
+    // Brightness extraction RT (half resolution)
+    {
+        MTL::TextureDescriptor* bloomBrightnessDesc = MTL::TextureDescriptor::alloc()->init();
+        bloomBrightnessDesc->setTextureType(MTL::TextureType2D);
+        bloomBrightnessDesc->setPixelFormat(MTL::PixelFormatRGBA16Float);
+        bloomBrightnessDesc->setWidth(swapchain->drawableSize().width / 2);
+        bloomBrightnessDesc->setHeight(swapchain->drawableSize().height / 2);
+        bloomBrightnessDesc->setUsage(MTL::TextureUsageRenderTarget | MTL::TextureUsageShaderRead);
+        bloomBrightnessRT = NS::TransferPtr(device->newTexture(bloomBrightnessDesc));
+        bloomBrightnessDesc->release();
+    }
+
+    // Bloom pyramid render targets (progressively smaller)
+    bloomPyramidRTs.resize(BLOOM_PYRAMID_LEVELS);
+    for (Uint32 i = 0; i < BLOOM_PYRAMID_LEVELS; i++) {
+        Uint32 width = swapchain->drawableSize().width / (1 << (i + 1));
+        Uint32 height = swapchain->drawableSize().height / (1 << (i + 1));
+        width = std::max(width, 1u);
+        height = std::max(height, 1u);
+
+        MTL::TextureDescriptor* pyramidDesc = MTL::TextureDescriptor::alloc()->init();
+        pyramidDesc->setTextureType(MTL::TextureType2D);
+        pyramidDesc->setPixelFormat(MTL::PixelFormatRGBA16Float);
+        pyramidDesc->setWidth(width);
+        pyramidDesc->setHeight(height);
+        pyramidDesc->setUsage(MTL::TextureUsageRenderTarget | MTL::TextureUsageShaderRead);
+        bloomPyramidRTs[i] = NS::TransferPtr(device->newTexture(pyramidDesc));
+        pyramidDesc->release();
+    }
+
+    // Final bloom result RT (full resolution)
+    {
+        MTL::TextureDescriptor* bloomResultDesc = MTL::TextureDescriptor::alloc()->init();
+        bloomResultDesc->setTextureType(MTL::TextureType2D);
+        bloomResultDesc->setPixelFormat(MTL::PixelFormatRGBA16Float);
+        bloomResultDesc->setWidth(swapchain->drawableSize().width);
+        bloomResultDesc->setHeight(swapchain->drawableSize().height);
+        bloomResultDesc->setUsage(MTL::TextureUsageRenderTarget | MTL::TextureUsageShaderRead);
+        bloomResultRT = NS::TransferPtr(device->newTexture(bloomResultDesc));
+        bloomResultDesc->release();
+    }
+
+    // ========================================================================
+    // Bloom pipelines
+    // ========================================================================
+
+    // Bloom brightness pipeline
+    {
+        auto shaderSrc = readFile("assets/shaders/3d_bloom_brightness.metal");
+        auto code = NS::String::string(shaderSrc.data(), NS::StringEncoding::UTF8StringEncoding);
+        NS::Error* error = nullptr;
+        MTL::Library* library = device->newLibrary(code, nullptr, &error);
+        if (!library) {
+            throw std::runtime_error(
+                fmt::format("Could not compile bloom brightness shader! Error: {}\n", error->localizedDescription()->utf8String())
+            );
+        }
+
+        auto vertexMain = library->newFunction(NS::String::string("vertexMain", NS::StringEncoding::UTF8StringEncoding));
+        auto fragmentMain = library->newFunction(NS::String::string("fragmentMain", NS::StringEncoding::UTF8StringEncoding));
+
+        auto pipelineDesc = MTL::RenderPipelineDescriptor::alloc()->init();
+        pipelineDesc->setVertexFunction(vertexMain);
+        pipelineDesc->setFragmentFunction(fragmentMain);
+        pipelineDesc->colorAttachments()->object(0)->setPixelFormat(MTL::PixelFormatRGBA16Float);
+
+        bloomBrightnessPipeline = NS::TransferPtr(device->newRenderPipelineState(pipelineDesc, &error));
+        if (!bloomBrightnessPipeline) {
+            throw std::runtime_error(
+                fmt::format("Could not create bloom brightness pipeline! Error: {}\n", error->localizedDescription()->utf8String())
+            );
+        }
+
+        code->release();
+        library->release();
+        vertexMain->release();
+        fragmentMain->release();
+        pipelineDesc->release();
+    }
+
+    // Bloom downsample pipeline
+    {
+        auto shaderSrc = readFile("assets/shaders/3d_bloom_downsample.metal");
+        auto code = NS::String::string(shaderSrc.data(), NS::StringEncoding::UTF8StringEncoding);
+        NS::Error* error = nullptr;
+        MTL::Library* library = device->newLibrary(code, nullptr, &error);
+        if (!library) {
+            throw std::runtime_error(
+                fmt::format("Could not compile bloom downsample shader! Error: {}\n", error->localizedDescription()->utf8String())
+            );
+        }
+
+        auto vertexMain = library->newFunction(NS::String::string("vertexMain", NS::StringEncoding::UTF8StringEncoding));
+        auto fragmentMain = library->newFunction(NS::String::string("fragmentMain", NS::StringEncoding::UTF8StringEncoding));
+
+        auto pipelineDesc = MTL::RenderPipelineDescriptor::alloc()->init();
+        pipelineDesc->setVertexFunction(vertexMain);
+        pipelineDesc->setFragmentFunction(fragmentMain);
+        pipelineDesc->colorAttachments()->object(0)->setPixelFormat(MTL::PixelFormatRGBA16Float);
+
+        bloomDownsamplePipeline = NS::TransferPtr(device->newRenderPipelineState(pipelineDesc, &error));
+        if (!bloomDownsamplePipeline) {
+            throw std::runtime_error(
+                fmt::format("Could not create bloom downsample pipeline! Error: {}\n", error->localizedDescription()->utf8String())
+            );
+        }
+
+        code->release();
+        library->release();
+        vertexMain->release();
+        fragmentMain->release();
+        pipelineDesc->release();
+    }
+
+    // Bloom upsample pipeline
+    {
+        auto shaderSrc = readFile("assets/shaders/3d_bloom_upsample.metal");
+        auto code = NS::String::string(shaderSrc.data(), NS::StringEncoding::UTF8StringEncoding);
+        NS::Error* error = nullptr;
+        MTL::Library* library = device->newLibrary(code, nullptr, &error);
+        if (!library) {
+            throw std::runtime_error(
+                fmt::format("Could not compile bloom upsample shader! Error: {}\n", error->localizedDescription()->utf8String())
+            );
+        }
+
+        auto vertexMain = library->newFunction(NS::String::string("vertexMain", NS::StringEncoding::UTF8StringEncoding));
+        auto fragmentMain = library->newFunction(NS::String::string("fragmentMain", NS::StringEncoding::UTF8StringEncoding));
+
+        auto pipelineDesc = MTL::RenderPipelineDescriptor::alloc()->init();
+        pipelineDesc->setVertexFunction(vertexMain);
+        pipelineDesc->setFragmentFunction(fragmentMain);
+        pipelineDesc->colorAttachments()->object(0)->setPixelFormat(MTL::PixelFormatRGBA16Float);
+
+        bloomUpsamplePipeline = NS::TransferPtr(device->newRenderPipelineState(pipelineDesc, &error));
+        if (!bloomUpsamplePipeline) {
+            throw std::runtime_error(
+                fmt::format("Could not create bloom upsample pipeline! Error: {}\n", error->localizedDescription()->utf8String())
+            );
+        }
+
+        code->release();
+        library->release();
+        vertexMain->release();
+        fragmentMain->release();
+        pipelineDesc->release();
+    }
+
+    // Bloom composite pipeline
+    {
+        auto shaderSrc = readFile("assets/shaders/3d_bloom_composite.metal");
+        auto code = NS::String::string(shaderSrc.data(), NS::StringEncoding::UTF8StringEncoding);
+        NS::Error* error = nullptr;
+        MTL::Library* library = device->newLibrary(code, nullptr, &error);
+        if (!library) {
+            throw std::runtime_error(
+                fmt::format("Could not compile bloom composite shader! Error: {}\n", error->localizedDescription()->utf8String())
+            );
+        }
+
+        auto vertexMain = library->newFunction(NS::String::string("vertexMain", NS::StringEncoding::UTF8StringEncoding));
+        auto fragmentMain = library->newFunction(NS::String::string("fragmentMain", NS::StringEncoding::UTF8StringEncoding));
+
+        auto pipelineDesc = MTL::RenderPipelineDescriptor::alloc()->init();
+        pipelineDesc->setVertexFunction(vertexMain);
+        pipelineDesc->setFragmentFunction(fragmentMain);
+        pipelineDesc->colorAttachments()->object(0)->setPixelFormat(MTL::PixelFormatRGBA16Float);
+
+        bloomCompositePipeline = NS::TransferPtr(device->newRenderPipelineState(pipelineDesc, &error));
+        if (!bloomCompositePipeline) {
+            throw std::runtime_error(
+                fmt::format("Could not create bloom composite pipeline! Error: {}\n", error->localizedDescription()->utf8String())
+            );
+        }
+
+        code->release();
+        library->release();
+        vertexMain->release();
+        fragmentMain->release();
+        pipelineDesc->release();
+    }
 
     // Create depth stencil states (for depth testing)
     MTL::DepthStencilDescriptor* depthStencilDesc = MTL::DepthStencilDescriptor::alloc()->init();

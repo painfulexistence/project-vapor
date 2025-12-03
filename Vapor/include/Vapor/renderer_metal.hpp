@@ -32,6 +32,10 @@ class BRDFLUTPass;
 class MainRenderPass;
 class WaterPass;
 class PostProcessPass;
+class BloomBrightnessPass;
+class BloomDownsamplePass;
+class BloomUpsamplePass;
+class BloomCompositePass;
 class RmlUiPass;
 class ImGuiPass;
 
@@ -86,6 +90,10 @@ class Renderer_Metal final : public Renderer { // Must be public or factory func
     friend class MainRenderPass;
     friend class WaterPass;
     friend class PostProcessPass;
+    friend class BloomBrightnessPass;
+    friend class BloomDownsamplePass;
+    friend class BloomUpsamplePass;
+    friend class BloomCompositePass;
     friend class RmlUiPass;
     friend class ImGuiPass;
 
@@ -161,6 +169,12 @@ protected:
     NS::SharedPtr<MTL::RenderPipelineState> prefilterEnvMapPipeline;
     NS::SharedPtr<MTL::RenderPipelineState> brdfLUTPipeline;
 
+    // Bloom pipelines
+    NS::SharedPtr<MTL::RenderPipelineState> bloomBrightnessPipeline;
+    NS::SharedPtr<MTL::RenderPipelineState> bloomDownsamplePipeline;
+    NS::SharedPtr<MTL::RenderPipelineState> bloomUpsamplePipeline;
+    NS::SharedPtr<MTL::RenderPipelineState> bloomCompositePipeline;
+
     // Water rendering pipeline and resources
     NS::SharedPtr<MTL::RenderPipelineState> waterPipeline;
     NS::SharedPtr<MTL::DepthStencilState> waterDepthStencilState;
@@ -222,6 +236,14 @@ protected:
     NS::SharedPtr<MTL::Texture> normalRT;
     NS::SharedPtr<MTL::Texture> shadowRT;
     NS::SharedPtr<MTL::Texture> aoRT;
+
+    // Bloom render targets
+    NS::SharedPtr<MTL::Texture> bloomBrightnessRT;       // Half-res brightness extraction
+    std::vector<NS::SharedPtr<MTL::Texture>> bloomPyramidRTs;  // Mipmap pyramid for bloom (5 levels)
+    NS::SharedPtr<MTL::Texture> bloomResultRT;           // Final bloom result
+    static constexpr Uint32 BLOOM_PYRAMID_LEVELS = 5;
+    float bloomThreshold = 1.0f;
+    float bloomStrength = 0.08f;
 
     // Acceleration structures for ray tracing
     std::vector<NS::SharedPtr<MTL::AccelerationStructure>> BLASs;
