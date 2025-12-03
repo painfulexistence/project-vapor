@@ -75,7 +75,7 @@ struct Material {
     float sheenTint = 0.5f;
     float clearcoat = 0.0f;
     float clearcoatGloss;
-    float usePrototypeUV = 0.0f;
+    bool usePrototypeUV = false;
     // std::string shaderPath;
     PipelineHandle pipeline;
 };

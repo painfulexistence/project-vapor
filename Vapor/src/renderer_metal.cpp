@@ -1954,23 +1954,22 @@ auto Renderer_Metal::draw(std::shared_ptr<Scene> scene, Camera& camera) -> void 
     MaterialData* materialData = reinterpret_cast<MaterialData*>(materialDataBuffer->contents());
     for (size_t i = 0; i < scene->materials.size(); ++i) {
         const auto& mat = scene->materials[i];
-        materialData[i] = MaterialData{
-            .baseColorFactor = mat->baseColorFactor,
-            .normalScale = mat->normalScale,
-            .metallicFactor = mat->metallicFactor,
-            .roughnessFactor = mat->roughnessFactor,
-            .occlusionStrength = mat->occlusionStrength,
-            .emissiveFactor = mat->emissiveFactor,
-            .emissiveStrength = mat->emissiveStrength,
-            .subsurface = mat->subsurface,
-            .specular = mat->specular,
-            .specularTint = mat->specularTint,
-            .anisotropic = mat->anisotropic,
-            .sheen = mat->sheen,
-            .sheenTint = mat->sheenTint,
-            .clearcoat = mat->clearcoat,
-            .clearcoatGloss = mat->clearcoatGloss,
-        };
+        materialData[i] = MaterialData{ .baseColorFactor = mat->baseColorFactor,
+                                        .normalScale = mat->normalScale,
+                                        .metallicFactor = mat->metallicFactor,
+                                        .roughnessFactor = mat->roughnessFactor,
+                                        .occlusionStrength = mat->occlusionStrength,
+                                        .emissiveFactor = mat->emissiveFactor,
+                                        .emissiveStrength = mat->emissiveStrength,
+                                        .subsurface = mat->subsurface,
+                                        .specular = mat->specular,
+                                        .specularTint = mat->specularTint,
+                                        .anisotropic = mat->anisotropic,
+                                        .sheen = mat->sheen,
+                                        .sheenTint = mat->sheenTint,
+                                        .clearcoat = mat->clearcoat,
+                                        .clearcoatGloss = mat->clearcoatGloss,
+                                        .usePrototypeUV = mat->usePrototypeUV ? 1.0f : 0.0f };
     }
     materialDataBuffer->didModifyRange(NS::Range::Make(0, materialDataBuffer->length()));
 
