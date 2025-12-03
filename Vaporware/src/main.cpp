@@ -11,6 +11,7 @@
 #include "Vapor/camera.hpp"
 #include "Vapor/engine_core.hpp"
 #include "Vapor/graphics.hpp"
+#include "Vapor/input_manager.hpp"
 #include "Vapor/mesh_builder.hpp"
 #include "Vapor/physics_3d.hpp"
 #include "Vapor/renderer.hpp"
@@ -22,214 +23,7 @@
 
 
 #include "components.hpp"
-
-// System Functions
-void updateLightMovementSystem(entt::registry& registry, Scene* scene, float deltaTime) {
-    auto view = registry.view<ScenePointLightReferenceComponent, LightMovementLogicComponent>();
-
-    for (auto entity : view) {
-        auto& ref = view.get<ScenePointLightReferenceComponent>(entity);
-        auto& logic = view.get<LightMovementLogicComponent>(entity);
-
-        if (ref.lightIndex < 0 || ref.lightIndex >= scene->pointLights.size()) continue;
-
-        auto& light = scene->pointLights[ref.lightIndex];
-        logic.timer += deltaTime * logic.speed;
-
-        float x = 0.0f, y = 0.0f, z = 0.0f;
-
-        switch (logic.pattern) {
-        case MovementPattern::Circle:
-            x = cos(logic.timer) * logic.radius;
-            z = sin(logic.timer) * logic.radius;
-            y = logic.height;
-            break;
-        case MovementPattern::Figure8:
-            x = cos(logic.timer) * logic.radius;
-            z = sin(logic.timer * 2.0f) * (logic.radius * 0.5f);
-            y = logic.height;
-            break;
-        case MovementPattern::Linear:
-            x = sin(logic.timer) * logic.radius;
-            y = logic.height;
-            z = 0.0f;
-            break;
-        case MovementPattern::Spiral:
-            x = cos(logic.timer) * (logic.radius + sin(logic.timer * 0.5f));
-            z = sin(logic.timer) * (logic.radius + sin(logic.timer * 0.5f));
-            y = logic.height + sin(logic.timer * 0.2f);
-            break;
-        }
-
-        light.position = glm::vec3(x, y, z);
-        // Optional: intensity modulation
-        // light.intensity = 5.0f + sin(logic.timer * 2.0f) * 2.0f;
-    }
-}
-
-void updateAutoRotateSystem(entt::registry& registry, float deltaTime) {
-    auto view = registry.view<SceneNodeReferenceComponent, AutoRotateComponent>();
-    for (auto entity : view) {
-        auto& ref = view.get<SceneNodeReferenceComponent>(entity);
-        auto& rotate = view.get<AutoRotateComponent>(entity);
-        if (ref.node) {
-            ref.node->rotate(rotate.axis, rotate.speed * deltaTime);
-        }
-    }
-}
-
-void updateDirectionalLightSystem(entt::registry& registry, Scene* scene, float deltaTime) {
-    auto view = registry.view<SceneDirectionalLightReferenceComponent, DirectionalLightLogicComponent>();
-    for (auto entity : view) {
-        auto& ref = view.get<SceneDirectionalLightReferenceComponent>(entity);
-        auto& logic = view.get<DirectionalLightLogicComponent>(entity);
-        if (ref.lightIndex >= 0 && ref.lightIndex < scene->directionalLights.size()) {
-            logic.timer += deltaTime * logic.speed;
-            // Simple oscillation on Z axis relative to base direction
-            glm::vec3 newDir = logic.baseDirection;
-            newDir.z += logic.magnitude * sin(logic.timer);
-            scene->directionalLights[ref.lightIndex].direction = glm::normalize(newDir);
-        }
-    }
-}
-
-void updateCameraSystem(entt::registry& registry, Vapor::InputManager& inputManager, float deltaTime) {
-    auto view = registry.view<Vapor::VirtualCameraComponent>();
-    const auto& inputState = inputManager.getInputState();
-
-    for (auto entity : view) {
-        auto& cam = view.get<Vapor::VirtualCameraComponent>(entity);
-        if (!cam.isActive) continue;
-
-        // 1. Handle Fly Camera Logic
-        if (auto* fly = registry.try_get<FlyCameraComponent>(entity)) {
-            // Rotation
-            if (inputState.isHeld(Vapor::InputAction::LookUp)) fly->pitch -= fly->rotateSpeed * deltaTime;
-            if (inputState.isHeld(Vapor::InputAction::LookDown)) fly->pitch += fly->rotateSpeed * deltaTime;
-            if (inputState.isHeld(Vapor::InputAction::LookLeft)) fly->yaw += fly->rotateSpeed * deltaTime;
-            if (inputState.isHeld(Vapor::InputAction::LookRight)) fly->yaw -= fly->rotateSpeed * deltaTime;
-
-            fly->pitch = glm::clamp(fly->pitch, -89.0f, 89.0f);
-
-            cam.rotation = glm::quat(glm::vec3(glm::radians(-fly->pitch), glm::radians(fly->yaw - 90.0f), 0.0f));
-
-            glm::vec3 front = cam.rotation * glm::vec3(0, 0, -1);
-            glm::vec3 right = cam.rotation * glm::vec3(1, 0, 0);
-            glm::vec3 up = cam.rotation * glm::vec3(0, 1, 0);
-
-            float speed = fly->moveSpeed * deltaTime;
-            if (inputState.isHeld(Vapor::InputAction::MoveForward)) cam.position += front * speed;
-            if (inputState.isHeld(Vapor::InputAction::MoveBackward)) cam.position -= front * speed;
-            if (inputState.isHeld(Vapor::InputAction::StrafeLeft)) cam.position -= right * speed;
-            if (inputState.isHeld(Vapor::InputAction::StrafeRight)) cam.position += right * speed;
-            if (inputState.isHeld(Vapor::InputAction::MoveUp)) cam.position += up * speed;
-            if (inputState.isHeld(Vapor::InputAction::MoveDown)) cam.position -= up * speed;
-        }
-
-        // 2. Handle Follow Camera Logic
-        if (auto* follow = registry.try_get<FollowCameraComponent>(entity)) {
-            if (follow->targetNode) {
-                glm::vec3 targetPos = follow->targetNode->getWorldPosition();
-                glm::vec3 desiredPos = targetPos + follow->offset;
-
-                cam.position = glm::mix(cam.position, desiredPos, 1.0f - pow(follow->smoothFactor, deltaTime));
-                cam.rotation = glm::quatLookAt(glm::normalize(targetPos - cam.position), glm::vec3(0, 1, 0));
-            }
-        }
-
-        // 3. Update Matrices
-        glm::mat4 rotation = glm::mat4_cast(cam.rotation);
-        glm::mat4 translation = glm::translate(glm::mat4(1.0f), cam.position);
-        cam.viewMatrix = glm::inverse(translation * rotation);
-        cam.projectionMatrix = glm::perspective(cam.fov, cam.aspect, cam.near, cam.far);
-    }
-}
-
-void updateHUDSystem(entt::registry& registry, Vapor::EngineCore& engineCore, float deltaTime) {
-    auto view = registry.view<HUDComponent>();
-    auto* rmluiManager = engineCore.getRmlUiManager();
-
-    if (!rmluiManager) return;
-
-    for (auto entity : view) {
-        auto& hud = view.get<HUDComponent>(entity);
-
-        // 1. Load document if not loaded
-        if (!hud.document && !hud.documentPath.empty()) {
-            hud.document = rmluiManager->LoadDocument(hud.documentPath);
-            if (hud.document) {
-                fmt::print("Loaded HUD document: {}\n", hud.documentPath);
-                // Initialize state based on visibility
-                if (hud.isVisible) {
-                    hud.state = HUDState::Visible;
-                    hud.document->Show();
-                    // Force visible class immediately
-                    if (auto el = hud.document->GetElementById("hud_content")) {
-                        el->SetClass("visible", true);
-                    }
-                } else {
-                    hud.state = HUDState::Hidden;
-                    hud.document->Hide();
-                }
-            } else {
-                fmt::print(stderr, "Failed to load HUD document: {}\n", hud.documentPath);
-                continue;
-            }
-        }
-
-        if (!hud.document) continue;
-
-        auto element = hud.document->GetElementById("hud-container");
-        if (!element) continue;
-
-        // 2. State Machine
-        switch (hud.state) {
-        case HUDState::Hidden:
-            if (hud.isVisible) {
-                hud.state = HUDState::FadingIn;
-                hud.document->Show();
-                // Trigger fade in
-                element->SetClass("visible", true);
-                hud.timer = 0.0f;
-            }
-            break;
-
-        case HUDState::FadingIn:
-            hud.timer += deltaTime;
-            if (!hud.isVisible) {
-                // Interrupted
-                hud.state = HUDState::FadingOut;
-                element->SetClass("visible", false);
-                hud.timer = 0.0f;// Reset timer or calculate remaining? Simple reset for now.
-            } else if (hud.timer >= hud.fadeDuration) {
-                hud.state = HUDState::Visible;
-            }
-            break;
-
-        case HUDState::Visible:
-            if (!hud.isVisible) {
-                hud.state = HUDState::FadingOut;
-                // Trigger fade out
-                element->SetClass("visible", false);
-                hud.timer = 0.0f;
-            }
-            break;
-
-        case HUDState::FadingOut:
-            hud.timer += deltaTime;
-            if (hud.isVisible) {
-                // Interrupted
-                hud.state = HUDState::FadingIn;
-                element->SetClass("visible", true);
-                hud.timer = 0.0f;
-            } else if (hud.timer >= hud.fadeDuration) {
-                hud.state = HUDState::Hidden;
-                hud.document->Hide();
-            }
-            break;
-        }
-    }
-}
+#include "systems.hpp"
 
 entt::entity getActiveCamera(entt::registry& registry) {
     auto view = registry.view<Vapor::VirtualCameraComponent>();
@@ -293,29 +87,35 @@ int main(int argc, char* args[]) {
 #endif
 
     auto window = SDL_CreateWindow(winTitle, width.Get(), height.Get(), winFlags);
+    int windowWidth, windowHeight;
+    SDL_GetWindowSize(window, &windowWidth, &windowHeight);
+
     IMGUI_CHECKVERSION();
     ImGui::CreateContext();
     // ImGui::StyleColorsDark();
     ImGui::GetIO().ConfigFlags |= ImGuiConfigFlags_DockingEnable;
 
-    RNG rng;
-
-    // Initialize engine core with enkiTS task scheduler
+    // Initialization
     auto engineCore = std::make_unique<Vapor::EngineCore>();
-    engineCore->init();// Auto-detects thread count
-    fmt::print("Engine core initialized\n");
+    engineCore->init();
+
+    Vapor::RNG rng;
 
     auto renderer = createRenderer(gfxBackend);
     renderer->init(window);
 
-    // Initialize physics (Physics3D creates its own JoltEnkiJobSystem internally)
+    if (engineCore->initRmlUI(windowWidth, windowHeight) && renderer->initUI()) {
+        fmt::print("RmlUI System Initialized\n");
+    }
+
     auto physics = std::make_unique<Physics3D>();
     physics->init(engineCore->getTaskScheduler());
 
-    // Get resource manager
+    fmt::print("Engine initialized\n");
+
+    // Resource loading
     auto& resourceManager = engineCore->getResourceManager();
 
-    // Load scene asynchronously
     fmt::print("Loading scene asynchronously...\n");
     auto sceneResource = resourceManager.loadScene(
         std::string("assets/models/Sponza/Sponza.gltf"),
@@ -325,17 +125,101 @@ int main(int argc, char* args[]) {
             fmt::print("Scene loaded with {} nodes\n", loadedScene->nodes.size());
         }
     );
+    auto albedoResource =
+        resourceManager.loadImage(std::string("assets/textures/american_walnut_albedo.png"), Vapor::LoadMode::Async);
+    auto normalResource =
+        resourceManager.loadImage(std::string("assets/textures/american_walnut_normal.png"), Vapor::LoadMode::Async);
+    auto roughnessResource =
+        resourceManager.loadImage(std::string("assets/textures/american_walnut_roughness.png"), Vapor::LoadMode::Async);
+
+    // NOTES: optionally call resourceManager.waitForAll();
+
+    auto scene = sceneResource->get();
+
+    auto material = std::make_shared<Material>(Material{
+        .albedoMap = albedoResource->get(),
+        .normalMap = normalResource->get(),
+        .roughnessMap = roughnessResource->get(),
+    });
 
     entt::registry registry;
 
-    // Wait for scene to be ready (blocking for now, but async in background)
-    auto scene = sceneResource->get();
-    fmt::print("Scene ready for rendering\n");
+    auto cube1 = registry.create();
+    {
+        auto& transform = registry.emplace<Vapor::TransformComponent>(cube1);
+        transform.position = glm::vec3(-2.0f, 0.5f, 0.0f);
+        auto& col = registry.emplace<Vapor::BoxColliderComponent>(cube1);
+        col.halfSize = glm::vec3(.5f, .5f, .5f);
+        auto& rb = registry.emplace<Vapor::RigidbodyComponent>(cube1);
+        rb.motionType = BodyMotionType::Dynamic;
+
+        auto node = scene->createNode("Cube 1");
+        scene->addMeshToNode(node, MeshBuilder::buildCube(1.0f, material));
+        node->setPosition(transform.position);
+        node->body = physics->createBoxBody(col.halfSize, transform.position, transform.rotation, rb.motionType);
+        physics->addBody(node->body, true);
+
+        auto& nodeRef = registry.emplace<SceneNodeReferenceComponent>(cube1);
+        nodeRef.node = node;
+
+        auto& rotateComp = registry.emplace<AutoRotateComponent>(cube1);
+        rotateComp.axis = glm::vec3(0.0f, 1.0f, -1.0f);
+        rotateComp.speed = 1.5f;
+    }
+
+    auto cube2 = registry.create();
+    {
+        auto& transform = registry.emplace<Vapor::TransformComponent>(cube2);
+        transform.position = glm::vec3(2.0f, 0.5f, 0.0f);
+        auto& col = registry.emplace<Vapor::BoxColliderComponent>(cube2);
+        col.halfSize = glm::vec3(.5f, .5f, .5f);
+        auto& rb = registry.emplace<Vapor::RigidbodyComponent>(cube2);
+        rb.motionType = BodyMotionType::Dynamic;
+
+        auto node = scene->createNode("Cube 2");
+        scene->addMeshToNode(node, MeshBuilder::buildCube(1.0f, material));
+        node->setPosition(transform.position);
+        node->body = physics->createBoxBody(col.halfSize, transform.position, transform.rotation, rb.motionType);
+        physics->addBody(node->body, true);
+
+        auto& nodeRef = registry.emplace<SceneNodeReferenceComponent>(cube2);
+        nodeRef.node = node;
+    }
+
+    auto floor = registry.create();
+    {
+        auto& transform = registry.emplace<Vapor::TransformComponent>(floor);
+        transform.position = glm::vec3(0.0f, -0.5f, 0.0f);
+        auto& col = registry.emplace<Vapor::BoxColliderComponent>(floor);
+        col.halfSize = glm::vec3(50.0f, .5f, 50.0f);
+        auto& rb = registry.emplace<Vapor::RigidbodyComponent>(floor);
+        rb.motionType = BodyMotionType::Static;
+
+        auto node = scene->createNode("Floor");
+        node->setPosition(transform.position);
+        node->body = physics->createBoxBody(col.halfSize, transform.position, transform.rotation, rb.motionType);
+        physics->addBody(node->body, false);
+
+        auto& nodeRef = registry.emplace<SceneNodeReferenceComponent>(floor);
+        nodeRef.node = node;
+    }
+
     scene->directionalLights.push_back({
         .direction = glm::vec3(0.5, -1.0, 0.0),
         .color = glm::vec3(1.0, 1.0, 1.0),
         .intensity = 10.0,
     });
+    auto sunLight = registry.create();
+    {
+        auto& ref = registry.emplace<SceneDirectionalLightReferenceComponent>(sunLight);
+        ref.lightIndex = 0;
+
+        auto& logic = registry.emplace<DirectionalLightLogicComponent>(sunLight);
+        logic.baseDirection = glm::vec3(0.5, -1.0, 0.0);
+        logic.speed = 0.5f;
+        logic.magnitude = 0.05f;
+    }
+
     for (int i = 0; i < 8; i++) {
         scene->pointLights.push_back({ .position = glm::vec3(
                                            rng.RandomFloatInRange(-5.0f, 5.0f),
@@ -346,50 +230,6 @@ int main(int argc, char* args[]) {
                                        .intensity = 5.0f * rng.RandomFloat(),
                                        .radius = 0.5f });
     }
-    // Load textures asynchronously
-    fmt::print("Loading textures...\n");
-    auto albedoResource =
-        resourceManager.loadImage(std::string("assets/textures/american_walnut_albedo.png"), Vapor::LoadMode::Async);
-    auto normalResource =
-        resourceManager.loadImage(std::string("assets/textures/american_walnut_normal.png"), Vapor::LoadMode::Async);
-    auto roughnessResource =
-        resourceManager.loadImage(std::string("assets/textures/american_walnut_roughness.png"), Vapor::LoadMode::Async);
-
-    // Wait for all textures to load
-    resourceManager.waitForAll();
-
-    auto material = std::make_shared<Material>(Material{
-        .albedoMap = albedoResource->get(),
-        .normalMap = normalResource->get(),
-        .roughnessMap = roughnessResource->get(),
-    });
-    fmt::print("Textures loaded\n");
-    auto entity1 = scene->createNode("Cube 1");
-    scene->addMeshToNode(entity1, MeshBuilder::buildCube(1.0f, material));
-    entity1->setPosition(glm::vec3(-2.0f, 10.5f, 0.0f));
-    entity1->body = physics->createBoxBody(
-        glm::vec3(.5f, .5f, .5f), glm::vec3(-2.0f, 0.5f, 0.0f), glm::identity<glm::quat>(), BodyMotionType::Dynamic
-    );
-    physics->addBody(entity1->body, true);
-    auto entity2 = scene->createNode("Cube 2");
-    scene->addMeshToNode(entity2, MeshBuilder::buildCube(1.0f, material));
-    entity2->setPosition(glm::vec3(2.0f, 0.5f, 0.0f));
-    entity2->body = physics->createBoxBody(
-        glm::vec3(.5f, .5f, .5f), glm::vec3(2.0f, 0.5f, 0.0f), glm::identity<glm::quat>(), BodyMotionType::Dynamic
-    );
-    physics->addBody(entity2->body, true);
-    auto entity3 = scene->createNode("Floor");
-    entity3->setPosition(glm::vec3(0.0f, -0.5f, 0.0f));
-    entity3->body = physics->createBoxBody(
-        glm::vec3(50.0f, .5f, 50.0f), glm::vec3(0.0f, -.5f, 0.0f), glm::identity<glm::quat>(), BodyMotionType::Static
-    );
-    physics->addBody(entity3->body, false);
-
-    renderer->stage(scene);
-
-    int windowWidth, windowHeight;
-    SDL_GetWindowSize(window, &windowWidth, &windowHeight);
-
     for (int i = 0; i < scene->pointLights.size(); ++i) {
         auto e = registry.create();
 
@@ -420,9 +260,6 @@ int main(int argc, char* args[]) {
         }
     }
 
-    // Create Camera Entities
-
-    // 1. Fly Camera
     auto flyCam = registry.create();
     {
         auto& cam = registry.emplace<Vapor::VirtualCameraComponent>(flyCam);
@@ -433,9 +270,10 @@ int main(int argc, char* args[]) {
 
         auto& fly = registry.emplace<FlyCameraComponent>(flyCam);
         fly.moveSpeed = 5.0f;
+
+        registry.emplace<CharacterIntent>(flyCam);
     }
 
-    // 2. Follow Camera (following Cube 1)
     auto followCam = registry.create();
     {
         auto& cam = registry.emplace<Vapor::VirtualCameraComponent>(followCam);
@@ -444,43 +282,23 @@ int main(int argc, char* args[]) {
         cam.position = glm::vec3(0.0f, 2.0f, 5.0f);// Initial pos
 
         auto& follow = registry.emplace<FollowCameraComponent>(followCam);
-        follow.targetNode = entity1;// Direct reference to Node
+        follow.target = cube1;
         follow.offset = glm::vec3(0.0f, 2.0f, 5.0f);
     }
 
-    // Create Auto-Rotate Entity for Cube 1
-    auto rotateEntity = registry.create();
-    registry.emplace<SceneNodeReferenceComponent>(rotateEntity);
-    registry.get<SceneNodeReferenceComponent>(rotateEntity).node = entity1;
-
-    registry.emplace<AutoRotateComponent>(rotateEntity);
-    auto& rotateComp = registry.get<AutoRotateComponent>(rotateEntity);
-    rotateComp.axis = glm::vec3(0.0f, 1.0f, -1.0f);
-    rotateComp.speed = 1.5f;
-
-    // Create Directional Light Logic Entity
-    auto dirLightEntity = registry.create();
-    registry.emplace<SceneDirectionalLightReferenceComponent>(dirLightEntity);
-    registry.get<SceneDirectionalLightReferenceComponent>(dirLightEntity).lightIndex = 0;
-
-    registry.emplace<DirectionalLightLogicComponent>(dirLightEntity);
-    auto& dirLightLogic = registry.get<DirectionalLightLogicComponent>(dirLightEntity);
-    dirLightLogic.baseDirection = glm::vec3(0.5, -1.0, 0.0);
-    dirLightLogic.speed = 0.5f;
-    dirLightLogic.magnitude = 0.05f;
-
-    SDL_GetWindowSize(window, &windowWidth, &windowHeight);
-
-    // Create HUD Entity
-    auto hudEntity = registry.create();
-    auto& hudComp = registry.emplace<HUDComponent>(hudEntity);
-    hudComp.documentPath = "assets/ui/hud.rml";
-    hudComp.isVisible = false;
-
-    // Initialize RmlUI (System)
-    if (engineCore->initRmlUI(windowWidth, windowHeight) && renderer->initUI()) {
-        fmt::print("RmlUI System Initialized\n");
+    auto hud = registry.create();
+    {
+        auto& hudState = registry.emplace<HUDComponent>(hud);
+        hudState.documentPath = "assets/ui/hud.rml";
+        hudState.isVisible = false;
     }
+
+    auto global = registry.create();
+
+    scene->update(0.0f);
+    // TODO: migrate to body create system (remember to use body destroy system, too)
+    // BodyCreateSystem::update(registry, physics.get());
+    renderer->stage(scene);
 
     Uint32 frameCount = 0;
     float time = SDL_GetTicks() / 1000.0f;
@@ -542,20 +360,37 @@ int main(int argc, char* args[]) {
         // Input
         const auto& inputState = inputManager.getInputState();
         if (inputState.isPressed(Vapor::InputAction::Hotkey1)) {
-            auto view = registry.view<Vapor::VirtualCameraComponent>();
-            view.each([&](auto entity, auto& cam) { cam.isActive = registry.all_of<FlyCameraComponent>(entity); });
+            auto& request = registry.emplace_or_replace<CameraSwitchRequest>(global);
+            request.mode = CameraSwitchRequest::Mode::Free;
         }
         if (inputState.isPressed(Vapor::InputAction::Hotkey2)) {
-            auto view = registry.view<Vapor::VirtualCameraComponent>();
-            view.each([&](auto entity, auto& cam) { cam.isActive = registry.all_of<FollowCameraComponent>(entity); });
+            auto& request = registry.emplace_or_replace<CameraSwitchRequest>(global);
+            request.mode = CameraSwitchRequest::Mode::Follow;
         }
+        registry.view<CharacterIntent>().each([&](auto& intent) {
+            intent.lookVector = inputState.getVector(
+                Vapor::InputAction::LookLeft,
+                Vapor::InputAction::LookRight,
+                Vapor::InputAction::LookDown,
+                Vapor::InputAction::LookUp
+            );
+            intent.moveVector = inputState.getVector(
+                Vapor::InputAction::StrafeLeft,
+                Vapor::InputAction::StrafeRight,
+                Vapor::InputAction::MoveBackward,
+                Vapor::InputAction::MoveForward
+            );
+            intent.moveVerticalAxis = inputState.getAxis(Vapor::InputAction::MoveDown, Vapor::InputAction::MoveUp);
+            intent.jump = inputState.isPressed(Vapor::InputAction::Jump);
+            intent.sprint = inputState.isPressed(Vapor::InputAction::Sprint);
+        });
 
         // Gameplay updates
-        updateCameraSystem(registry, inputManager, deltaTime);
+        CameraSwitchSystem::update(registry, global);
+        updateCameraSystem(registry, deltaTime);
         updateAutoRotateSystem(registry, deltaTime);
-        updateDirectionalLightSystem(registry, scene.get(), deltaTime);
         updateLightMovementSystem(registry, scene.get(), deltaTime);
-        updateHUDSystem(registry, *engineCore, deltaTime);
+        updateHUDSystem(registry, engineCore->getRmlUiManager(), deltaTime);
 
         // Engine updates
         engineCore->update(deltaTime);
@@ -565,6 +400,8 @@ int main(int argc, char* args[]) {
 
         // Physics
         physics->process(scene, deltaTime);
+
+        scene->update(deltaTime);
 
         // Rendering
         entt::entity activeCamEntity = getActiveCamera(registry);

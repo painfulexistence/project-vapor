@@ -1,6 +1,5 @@
 #pragma once
 
-#include "Vapor/world.hpp"
 #include "graphics.hpp"
 #include "physics_3d.hpp"
 #include "scene.hpp"
@@ -35,6 +34,24 @@ namespace Vapor {
         bool visible = true;
         bool castShadow = true;
         bool receiveShadow = true;
+    };
+
+    struct BoxColliderComponent {
+        glm::vec3 halfSize = glm::vec3(0.5f);
+    };
+
+    struct SphereColliderComponent {
+        float radius = 0.5f;
+    };
+
+    struct CapsuleColliderComponent {
+        float radius = 0.5f;
+        float halfHeight = 0.5f;
+    };
+
+    struct CylinderColliderComponent {
+        float radius = 0.5f;
+        float halfHeight = 0.5f;
     };
 
     struct RigidbodyComponent {
