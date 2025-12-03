@@ -31,6 +31,7 @@ class PrefilterEnvMapPass;
 class BRDFLUTPass;
 class MainRenderPass;
 class WaterPass;
+class ParticlePass;
 class PostProcessPass;
 class RmlUiPass;
 class ImGuiPass;
@@ -85,6 +86,7 @@ class Renderer_Metal final : public Renderer { // Must be public or factory func
     friend class BRDFLUTPass;
     friend class MainRenderPass;
     friend class WaterPass;
+    friend class ParticlePass;
     friend class PostProcessPass;
     friend class RmlUiPass;
     friend class ImGuiPass;
@@ -185,6 +187,20 @@ protected:
     TextureHandle waterFoamMap;
     TextureHandle waterNoiseMap;
     NS::SharedPtr<MTL::Texture> environmentCubeMap;
+
+    // Particle system
+    static constexpr Uint32 MAX_PARTICLES = 50000;
+    bool particleSystemEnabled = true;
+    Uint32 particleCount = MAX_PARTICLES;
+
+    NS::SharedPtr<MTL::ComputePipelineState> particleForcePipeline;
+    NS::SharedPtr<MTL::ComputePipelineState> particleIntegratePipeline;
+    NS::SharedPtr<MTL::RenderPipelineState> particleRenderPipeline;
+    NS::SharedPtr<MTL::DepthStencilState> particleDepthStencilState;
+
+    std::vector<NS::SharedPtr<MTL::Buffer>> particleBuffers;
+    std::vector<NS::SharedPtr<MTL::Buffer>> particleSimParamsBuffers;
+    std::vector<NS::SharedPtr<MTL::Buffer>> particleAttractorBuffers;
 
     // Per-frame buffers
     std::vector<NS::SharedPtr<MTL::Buffer>> frameDataBuffers;

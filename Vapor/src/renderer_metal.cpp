@@ -19,6 +19,8 @@
 #include <glm/ext/matrix_transform.hpp>
 #include <imgui.h>
 #include <vector>
+#include <ctime>
+#include <cstdlib>
 
 #include "asset_manager.hpp"
 #include "engine_core.hpp"
@@ -1086,6 +1088,128 @@ public:
     }
 };
 
+// Particle pass: GPU particle simulation and rendering
+class ParticlePass : public RenderPass {
+public:
+    explicit ParticlePass(Renderer_Metal* renderer) : RenderPass(renderer) {
+    }
+
+    const char* getName() const override {
+        return "ParticlePass";
+    }
+
+    void execute() override {
+        auto& r = *renderer;
+
+        if (!r.particleSystemEnabled || r.particleCount == 0) {
+            return;
+        }
+
+        auto time = (float)SDL_GetTicks() / 1000.0f;
+        static float lastTime = time;
+        float deltaTime = time - lastTime;
+        lastTime = time;
+
+        // Compute attractor position (in front of camera)
+        glm::vec3 camPos = r.currentCamera->getEye();
+        glm::mat4 view = r.currentCamera->getViewMatrix();
+        glm::vec3 forward = -glm::vec3(view[0][2], view[1][2], view[2][2]);
+        glm::vec3 attractorPos = camPos + forward * 3.0f;
+
+        // Update simulation params buffer
+        struct ParticleSimParams {
+            glm::vec2 resolution;
+            glm::vec2 mousePosition;
+            float time;
+            float deltaTime;
+            float _pad1;
+            float _pad2;
+        } simParams;
+
+        auto drawableSize = r.swapchain->drawableSize();
+        simParams.resolution = glm::vec2(drawableSize.width, drawableSize.height);
+        simParams.mousePosition = glm::vec2(0.0f);
+        simParams.time = time;
+        simParams.deltaTime = deltaTime;
+
+        memcpy(r.particleSimParamsBuffers[r.currentFrameInFlight]->contents(), &simParams, sizeof(ParticleSimParams));
+
+        // Update attractor buffer
+        struct ParticleAttractor {
+            glm::vec3 position;
+            float strength;
+        } attractor;
+
+        attractor.position = attractorPos;
+        attractor.strength = 5.0f;
+
+        memcpy(r.particleAttractorBuffers[r.currentFrameInFlight]->contents(), &attractor, sizeof(ParticleAttractor));
+
+        // Compute pass: Force calculation
+        {
+            auto computeEncoder = r.currentCommandBuffer->computeCommandEncoder();
+            computeEncoder->setComputePipelineState(r.particleForcePipeline.get());
+            computeEncoder->setBuffer(r.particleBuffers[r.currentFrameInFlight].get(), 0, 0);
+            computeEncoder->setBuffer(r.particleSimParamsBuffers[r.currentFrameInFlight].get(), 0, 1);
+            computeEncoder->setBuffer(r.particleAttractorBuffers[r.currentFrameInFlight].get(), 0, 2);
+
+            MTL::Size gridSize = MTL::Size((r.particleCount + 255) / 256, 1, 1);
+            MTL::Size threadGroupSize = MTL::Size(256, 1, 1);
+            computeEncoder->dispatchThreadgroups(gridSize, threadGroupSize);
+            computeEncoder->endEncoding();
+        }
+
+        // Compute pass: Integration
+        {
+            auto computeEncoder = r.currentCommandBuffer->computeCommandEncoder();
+            computeEncoder->setComputePipelineState(r.particleIntegratePipeline.get());
+            computeEncoder->setBuffer(r.particleBuffers[r.currentFrameInFlight].get(), 0, 0);
+            computeEncoder->setBuffer(r.particleSimParamsBuffers[r.currentFrameInFlight].get(), 0, 1);
+
+            MTL::Size gridSize = MTL::Size((r.particleCount + 255) / 256, 1, 1);
+            MTL::Size threadGroupSize = MTL::Size(256, 1, 1);
+            computeEncoder->dispatchThreadgroups(gridSize, threadGroupSize);
+            computeEncoder->endEncoding();
+        }
+
+        // Render pass: Draw particles
+        {
+            auto renderPassDesc = NS::TransferPtr(MTL::RenderPassDescriptor::renderPassDescriptor());
+            auto colorAttachment = renderPassDesc->colorAttachments()->object(0);
+            colorAttachment->setLoadAction(MTL::LoadActionLoad);
+            colorAttachment->setStoreAction(MTL::StoreActionStore);
+            colorAttachment->setTexture(r.colorRT.get());
+
+            auto depthAttachment = renderPassDesc->depthAttachment();
+            depthAttachment->setLoadAction(MTL::LoadActionLoad);
+            depthAttachment->setStoreAction(MTL::StoreActionDontCare);
+            depthAttachment->setTexture(r.depthStencilRT.get());
+
+            auto encoder = r.currentCommandBuffer->renderCommandEncoder(renderPassDesc.get());
+            encoder->setRenderPipelineState(r.particleRenderPipeline.get());
+            encoder->setDepthStencilState(r.particleDepthStencilState.get());
+            encoder->setCullMode(MTL::CullModeNone);
+
+            // Set buffers
+            encoder->setVertexBuffer(r.cameraDataBuffers[r.currentFrameInFlight].get(), 0, 0);
+
+            struct ParticlePushConstants {
+                float particleSize;
+                float _pad1;
+                float _pad2;
+                float _pad3;
+            } pushConstants;
+            pushConstants.particleSize = 0.02f;
+            encoder->setVertexBytes(&pushConstants, sizeof(ParticlePushConstants), 1);
+            encoder->setVertexBuffer(r.particleBuffers[r.currentFrameInFlight].get(), 0, 2);
+
+            // Draw 6 vertices per particle (2 triangles = 1 quad), instanced
+            encoder->drawPrimitives(MTL::PrimitiveType::PrimitiveTypeTriangle, 0, 6, r.particleCount);
+            encoder->endEncoding();
+        }
+    }
+};
+
 // Post-process pass: Applies tone mapping and other post-processing effects
 class PostProcessPass : public RenderPass {
 public:
@@ -1215,6 +1339,7 @@ auto Renderer_Metal::init(SDL_Window* window) -> void {
     graph.addPass(std::make_unique<MainRenderPass>(this));
     graph.addPass(std::make_unique<SkyAtmospherePass>(this));
     // graph.addPass(std::make_unique<WaterPass>(this));
+    graph.addPass(std::make_unique<ParticlePass>(this));
     graph.addPass(std::make_unique<PostProcessPass>(this));
     graph.addPass(std::make_unique<RmlUiPass>(this));// RmlUI before ImGui
     graph.addPass(std::make_unique<ImGuiPass>(this));
@@ -1787,6 +1912,141 @@ auto Renderer_Metal::createResources() -> void {
 
         cubeDesc->release();
     }
+
+    // ========================================================================
+    // Particle system initialization
+    // ========================================================================
+
+    // Create particle compute pipelines
+    {
+        NS::Error* error = nullptr;
+        auto shaderSrc = readFile("assets/shaders/3d_particle.metal");
+        auto code = NS::String::string(shaderSrc.data(), NS::StringEncoding::UTF8StringEncoding);
+        MTL::CompileOptions* options = nullptr;
+        auto library = NS::TransferPtr(device->newLibrary(code, options, &error));
+
+        if (!library) {
+            fmt::print("Failed to compile particle compute shader: {}\n", error->localizedDescription()->utf8String());
+        } else {
+            // Create force pipeline
+            auto forceFuncName = NS::String::string("particleForce", NS::StringEncoding::UTF8StringEncoding);
+            auto forceFunc = library->newFunction(forceFuncName);
+            if (forceFunc) {
+                particleForcePipeline = NS::TransferPtr(device->newComputePipelineState(forceFunc, &error));
+                forceFunc->release();
+            }
+
+            // Create integrate pipeline
+            auto integrateFuncName = NS::String::string("particleIntegrate", NS::StringEncoding::UTF8StringEncoding);
+            auto integrateFunc = library->newFunction(integrateFuncName);
+            if (integrateFunc) {
+                particleIntegratePipeline = NS::TransferPtr(device->newComputePipelineState(integrateFunc, &error));
+                integrateFunc->release();
+            }
+        }
+        code->release();
+    }
+
+    // Create particle render pipeline
+    {
+        NS::Error* error = nullptr;
+        auto library = NS::TransferPtr(device->newDefaultLibrary());
+        if (!library) {
+            auto shaderSource = readFile("assets/shaders/3d_particle.metal");
+            auto source = NS::String::string(shaderSource.c_str(), NS::UTF8StringEncoding);
+            auto options = NS::TransferPtr(MTL::CompileOptions::alloc()->init());
+            library = NS::TransferPtr(device->newLibrary(source, options.get(), &error));
+        }
+
+        if (library) {
+            auto vertexFunc = NS::TransferPtr(library->newFunction(NS::String::string("particleVertex", NS::UTF8StringEncoding)));
+            auto fragFunc = NS::TransferPtr(library->newFunction(NS::String::string("particleFragment", NS::UTF8StringEncoding)));
+
+            auto pipelineDesc = NS::TransferPtr(MTL::RenderPipelineDescriptor::alloc()->init());
+            pipelineDesc->setVertexFunction(vertexFunc.get());
+            pipelineDesc->setFragmentFunction(fragFunc.get());
+
+            // Color attachment with additive blending
+            auto colorAttachment = pipelineDesc->colorAttachments()->object(0);
+            colorAttachment->setPixelFormat(MTL::PixelFormatRGBA16Float);
+            colorAttachment->setBlendingEnabled(true);
+            colorAttachment->setSourceRGBBlendFactor(MTL::BlendFactorOne);
+            colorAttachment->setDestinationRGBBlendFactor(MTL::BlendFactorOneMinusSourceColor);
+            colorAttachment->setRgbBlendOperation(MTL::BlendOperationAdd);
+            colorAttachment->setSourceAlphaBlendFactor(MTL::BlendFactorOne);
+            colorAttachment->setDestinationAlphaBlendFactor(MTL::BlendFactorZero);
+            colorAttachment->setAlphaBlendOperation(MTL::BlendOperationAdd);
+
+            pipelineDesc->setDepthAttachmentPixelFormat(MTL::PixelFormatDepth32Float);
+
+            particleRenderPipeline = NS::TransferPtr(device->newRenderPipelineState(pipelineDesc.get(), &error));
+            if (error) {
+                fmt::print("Failed to create particle render pipeline: {}\n", error->localizedDescription()->utf8String());
+            }
+        }
+
+        // Create depth stencil state (depth test enabled, write disabled)
+        auto depthDesc = MTL::DepthStencilDescriptor::alloc()->init();
+        depthDesc->setDepthCompareFunction(MTL::CompareFunctionLess);
+        depthDesc->setDepthWriteEnabled(false);
+        particleDepthStencilState = NS::TransferPtr(device->newDepthStencilState(depthDesc));
+        depthDesc->release();
+    }
+
+    // Create particle buffers
+    particleBuffers.resize(MAX_FRAMES_IN_FLIGHT);
+    particleSimParamsBuffers.resize(MAX_FRAMES_IN_FLIGHT);
+    particleAttractorBuffers.resize(MAX_FRAMES_IN_FLIGHT);
+
+    size_t particleBufferSize = sizeof(GPUParticle) * MAX_PARTICLES;
+
+    for (size_t i = 0; i < MAX_FRAMES_IN_FLIGHT; i++) {
+        particleBuffers[i] = NS::TransferPtr(device->newBuffer(particleBufferSize, MTL::ResourceStorageModeShared));
+        particleSimParamsBuffers[i] = NS::TransferPtr(device->newBuffer(sizeof(ParticleSimulationParams), MTL::ResourceStorageModeShared));
+        particleAttractorBuffers[i] = NS::TransferPtr(device->newBuffer(sizeof(ParticleAttractorData), MTL::ResourceStorageModeShared));
+    }
+
+    // Initialize particles with random positions and colors
+    {
+        std::srand(static_cast<unsigned>(std::time(nullptr)));
+
+        GPUParticle* particles = reinterpret_cast<GPUParticle*>(particleBuffers[0]->contents());
+        for (size_t i = 0; i < MAX_PARTICLES; i++) {
+            float r = std::sqrt(static_cast<float>(std::rand()) / RAND_MAX) * 5.0f;
+            float theta = static_cast<float>(std::rand()) / RAND_MAX * 2.0f * 3.14159265f;
+            float phi = static_cast<float>(std::rand()) / RAND_MAX * 3.14159265f;
+
+            particles[i].position = glm::vec3(
+                r * std::sin(phi) * std::cos(theta),
+                r * std::sin(phi) * std::sin(theta),
+                r * std::cos(phi)
+            );
+
+            glm::vec3 tangent = glm::normalize(glm::cross(
+                particles[i].position,
+                glm::vec3(0.0f, 1.0f, 0.0f)
+            ));
+            if (glm::length(tangent) < 0.001f) {
+                tangent = glm::vec3(1.0f, 0.0f, 0.0f);
+            }
+            particles[i].velocity = tangent * (0.5f / (r + 0.1f));
+
+            float brightness = 1.0f - (r / 5.0f);
+            glm::vec3 a = glm::vec3(0.427f, 0.346f, 0.372f);
+            glm::vec3 b = glm::vec3(0.288f, 0.918f, 0.336f);
+            glm::vec3 c = glm::vec3(0.635f, 1.136f, 0.404f);
+            glm::vec3 d = glm::vec3(1.893f, 0.663f, 1.910f);
+            glm::vec3 color = a + b * glm::cos(6.28318f * (c * brightness + d));
+            particles[i].color = glm::vec4(color, 1.0f);
+        }
+
+        // Copy to other frame buffers
+        for (size_t i = 1; i < MAX_FRAMES_IN_FLIGHT; i++) {
+            memcpy(particleBuffers[i]->contents(), particles, particleBufferSize);
+        }
+    }
+
+    fmt::print("Particle system initialized with {} particles\n", MAX_PARTICLES);
 }
 
 auto Renderer_Metal::stage(std::shared_ptr<Scene> scene) -> void {
