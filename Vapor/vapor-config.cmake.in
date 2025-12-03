@@ -9,6 +9,8 @@ find_dependency(args CONFIG)
 find_dependency(Vulkan)
 find_dependency(Jolt CONFIG)
 find_dependency(enkiTS CONFIG)
+find_dependency(RmlUi CONFIG)
+find_dependency(EnTT CONFIG)
 
 include("${CMAKE_CURRENT_LIST_DIR}/VaporTargets.cmake")
 
