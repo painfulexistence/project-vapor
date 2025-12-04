@@ -2552,12 +2552,22 @@ TextureHandle Renderer_Metal::createTexture(const std::shared_ptr<Image>& img) {
         case 1:
             pixelFormat = MTL::PixelFormat::PixelFormatR8Unorm;
             break;
+        case 2:
+            pixelFormat = MTL::PixelFormat::PixelFormatRG8Unorm;
+            break;
         case 3:
         case 4:
             pixelFormat = MTL::PixelFormat::PixelFormatRGBA8Unorm;
             break;
         default:
-            throw std::runtime_error(fmt::format("Unknown texture format at {}\n", img->uri));
+            throw std::runtime_error(fmt::format(
+                "Unknown texture format at {} (channelCount={}, width={}, height={}, byteArraySize={})\n",
+                img->uri,
+                img->channelCount,
+                img->width,
+                img->height,
+                img->byteArray.size()
+            ));
             break;
         }
         int numLevels = calculateMipmapLevelCount(img->width, img->height);
@@ -2573,9 +2583,25 @@ TextureHandle Renderer_Metal::createTexture(const std::shared_ptr<Image>& img) {
         textureDesc->setUsage(MTL::ResourceUsageSample | MTL::ResourceUsageRead);
 
         auto texture = NS::TransferPtr(device->newTexture(textureDesc.get()));
-        texture->replaceRegion(
-            MTL::Region(0, 0, 0, img->width, img->height, 1), 0, img->byteArray.data(), img->width * img->channelCount
-        );
+        if (img->channelCount == 3) {
+            // Convert RGB to RGBA by adding alpha channel
+            std::vector<Uint8> rgbaData;
+            rgbaData.reserve(img->width * img->height * 4);
+            for (size_t i = 0; i < img->byteArray.size(); i += 3) {
+                rgbaData.push_back(img->byteArray[i]);// R
+                rgbaData.push_back(img->byteArray[i + 1]);// G
+                rgbaData.push_back(img->byteArray[i + 2]);// B
+                rgbaData.push_back(255);// A (opaque)
+            }
+            texture->replaceRegion(
+                MTL::Region(0, 0, 0, img->width, img->height, 1), 0, rgbaData.data(), img->width * 4
+            );
+        } else {
+            size_t bytesPerPixel = img->channelCount;
+            texture->replaceRegion(
+                MTL::Region(0, 0, 0, img->width, img->height, 1), 0, img->byteArray.data(), img->width * bytesPerPixel
+            );
+        }
 
         if (numLevels > 1) {
             auto cmdBlit = NS::TransferPtr(queue->commandBuffer());
