@@ -1233,7 +1233,135 @@ public:
     }
 };
 
-// Post-process pass: Applies tone mapping and other post-processing effects
+// ============================================================================
+// DOF (Tilt-Shift) passes: Octopath Traveler style depth of field
+// ============================================================================
+
+// DOF CoC pass: Calculate Circle of Confusion based on screen position
+class DOFCoCPass : public RenderPass {
+public:
+    explicit DOFCoCPass(Renderer_Metal* renderer) : RenderPass(renderer) {}
+
+    const char* getName() const override {
+        return "DOFCoCPass";
+    }
+
+    void execute() override {
+        auto& r = *renderer;
+
+        // GPU-compatible DOF params struct (matches shader)
+        struct GPUDOFParams {
+            float focusCenter;
+            float focusWidth;
+            float focusFalloff;
+            float maxBlur;
+            float tiltAngle;
+            float bokehRoundness;
+            float padding1;
+            float padding2;
+        } gpuParams = {
+            r.dofParams.focusCenter,
+            r.dofParams.focusWidth,
+            r.dofParams.focusFalloff,
+            r.dofParams.maxBlur,
+            r.dofParams.tiltAngle,
+            r.dofParams.bokehRoundness,
+            0.0f, 0.0f
+        };
+
+        auto passDesc = NS::TransferPtr(MTL::RenderPassDescriptor::renderPassDescriptor());
+        auto colorRT = passDesc->colorAttachments()->object(0);
+        colorRT->setClearColor(MTL::ClearColor(0.0, 0.0, 0.0, 0.0));
+        colorRT->setLoadAction(MTL::LoadActionClear);
+        colorRT->setStoreAction(MTL::StoreActionStore);
+        colorRT->setTexture(r.dofCoCRT.get());
+
+        auto encoder = r.currentCommandBuffer->renderCommandEncoder(passDesc.get());
+        encoder->setRenderPipelineState(r.dofCoCPipeline.get());
+        encoder->setCullMode(MTL::CullModeBack);
+        encoder->setFrontFacingWinding(MTL::Winding::WindingCounterClockwise);
+        encoder->setFragmentTexture(r.bloomResultRT.get(), 0);  // Input from bloom
+        encoder->setFragmentTexture(r.depthStencilRT.get(), 1); // Depth (optional for hybrid mode)
+        encoder->setFragmentBytes(&gpuParams, sizeof(GPUDOFParams), 0);
+        encoder->drawPrimitives(MTL::PrimitiveType::PrimitiveTypeTriangle, 0, 3, 1);
+        encoder->endEncoding();
+    }
+};
+
+// DOF Blur pass: Apply bokeh blur based on CoC
+class DOFBlurPass : public RenderPass {
+public:
+    explicit DOFBlurPass(Renderer_Metal* renderer) : RenderPass(renderer) {}
+
+    const char* getName() const override {
+        return "DOFBlurPass";
+    }
+
+    void execute() override {
+        auto& r = *renderer;
+
+        struct DOFBlurParams {
+            float texelSizeX;
+            float texelSizeY;
+            float blurScale;
+            int sampleCount;
+        } blurParams = {
+            1.0f / r.dofBlurRT->width(),
+            1.0f / r.dofBlurRT->height(),
+            1.0f,
+            r.dofParams.sampleCount
+        };
+
+        auto passDesc = NS::TransferPtr(MTL::RenderPassDescriptor::renderPassDescriptor());
+        auto colorRT = passDesc->colorAttachments()->object(0);
+        colorRT->setClearColor(MTL::ClearColor(0.0, 0.0, 0.0, 0.0));
+        colorRT->setLoadAction(MTL::LoadActionClear);
+        colorRT->setStoreAction(MTL::StoreActionStore);
+        colorRT->setTexture(r.dofBlurRT.get());
+
+        auto encoder = r.currentCommandBuffer->renderCommandEncoder(passDesc.get());
+        encoder->setRenderPipelineState(r.dofBlurPipeline.get());
+        encoder->setCullMode(MTL::CullModeBack);
+        encoder->setFrontFacingWinding(MTL::Winding::WindingCounterClockwise);
+        encoder->setFragmentTexture(r.dofCoCRT.get(), 0);
+        encoder->setFragmentBytes(&blurParams, sizeof(DOFBlurParams), 0);
+        encoder->drawPrimitives(MTL::PrimitiveType::PrimitiveTypeTriangle, 0, 3, 1);
+        encoder->endEncoding();
+    }
+};
+
+// DOF Composite pass: Blend sharp and blurred images
+class DOFCompositePass : public RenderPass {
+public:
+    explicit DOFCompositePass(Renderer_Metal* renderer) : RenderPass(renderer) {}
+
+    const char* getName() const override {
+        return "DOFCompositePass";
+    }
+
+    void execute() override {
+        auto& r = *renderer;
+
+        auto passDesc = NS::TransferPtr(MTL::RenderPassDescriptor::renderPassDescriptor());
+        auto colorRT = passDesc->colorAttachments()->object(0);
+        colorRT->setClearColor(MTL::ClearColor(0.0, 0.0, 0.0, 1.0));
+        colorRT->setLoadAction(MTL::LoadActionClear);
+        colorRT->setStoreAction(MTL::StoreActionStore);
+        colorRT->setTexture(r.dofResultRT.get());
+
+        auto encoder = r.currentCommandBuffer->renderCommandEncoder(passDesc.get());
+        encoder->setRenderPipelineState(r.dofCompositePipeline.get());
+        encoder->setCullMode(MTL::CullModeBack);
+        encoder->setFrontFacingWinding(MTL::Winding::WindingCounterClockwise);
+        encoder->setFragmentTexture(r.bloomResultRT.get(), 0);  // Sharp (from bloom)
+        encoder->setFragmentTexture(r.dofBlurRT.get(), 1);       // Blurred
+        encoder->setFragmentBytes(&r.dofParams.blendSharpness, sizeof(float), 0);
+        encoder->drawPrimitives(MTL::PrimitiveType::PrimitiveTypeTriangle, 0, 3, 1);
+        encoder->endEncoding();
+    }
+};
+
+// Post-process pass: Applies tone mapping, color grading, chromatic aberration, vignette
 class PostProcessPass : public RenderPass {
 public:
     explicit PostProcessPass(Renderer_Metal* renderer) : RenderPass(renderer) {
@@ -1245,6 +1373,33 @@ public:
 
     void execute() override {
         auto& r = *renderer;
+
+        // GPU-compatible post-process params struct (must match shader)
+        struct GPUPostProcessParams {
+            float chromaticAberrationStrength;
+            float chromaticAberrationFalloff;
+            float vignetteStrength;
+            float vignetteRadius;
+            float vignetteSoftness;
+            float saturation;
+            float contrast;
+            float brightness;
+            float temperature;
+            float tint;
+            float exposure;
+        } gpuParams = {
+            r.postProcessParams.chromaticAberrationStrength,
+            r.postProcessParams.chromaticAberrationFalloff,
+            r.postProcessParams.vignetteStrength,
+            r.postProcessParams.vignetteRadius,
+            r.postProcessParams.vignetteSoftness,
+            r.postProcessParams.saturation,
+            r.postProcessParams.contrast,
+            r.postProcessParams.brightness,
+            r.postProcessParams.temperature,
+            r.postProcessParams.tint,
+            r.postProcessParams.exposure
+        };
 
         // Create render pass descriptor
         auto postPassDesc = NS::TransferPtr(MTL::RenderPassDescriptor::renderPassDescriptor());
@@ -1259,10 +1414,13 @@ public:
         encoder->setRenderPipelineState(r.postProcessPipeline.get());
         encoder->setCullMode(MTL::CullModeBack);
         encoder->setFrontFacingWinding(MTL::Winding::WindingCounterClockwise);
-        // Use bloom result instead of raw colorRT for post-processing
+
+        // Input texture: DOF result if DOF enabled, otherwise bloom result
+        // Note: When DOF passes are commented out, dofResultRT won't have valid content
+        // So we use bloomResultRT by default. Uncomment DOF passes and change this to dofResultRT.
         encoder->setFragmentTexture(r.bloomResultRT.get(), 0);
         encoder->setFragmentTexture(r.aoRT.get(), 1);
-        encoder->setFragmentTexture(r.normalRT.get(), 2);
+        encoder->setFragmentBytes(&gpuParams, sizeof(GPUPostProcessParams), 0);
         encoder->drawPrimitives(MTL::PrimitiveType::PrimitiveTypeTriangle, 0, 3, 1);
         encoder->endEncoding();
     }
@@ -1370,6 +1528,13 @@ auto Renderer_Metal::init(SDL_Window* window) -> void {
     graph.addPass(std::make_unique<BloomUpsamplePass>(this));
     graph.addPass(std::make_unique<BloomCompositePass>(this));
 
+    // DOF passes (Octopath Traveler style tilt-shift)
+    // Uncomment these to enable DOF, and change PostProcessPass input to dofResultRT
+    // graph.addPass(std::make_unique<DOFCoCPass>(this));
+    // graph.addPass(std::make_unique<DOFBlurPass>(this));
+    // graph.addPass(std::make_unique<DOFCompositePass>(this));
+
+    // Post-processing (tone mapping, color grading, chromatic aberration, vignette)
     graph.addPass(std::make_unique<PostProcessPass>(this));
     graph.addPass(std::make_unique<RmlUiPass>(this));// RmlUI before ImGui
     graph.addPass(std::make_unique<ImGuiPass>(this));
@@ -1835,6 +2000,152 @@ auto Renderer_Metal::createResources() -> void {
         if (!bloomCompositePipeline) {
             throw std::runtime_error(
                 fmt::format("Could not create bloom composite pipeline! Error: {}\n", error->localizedDescription()->utf8String())
+            );
+        }
+
+        code->release();
+        library->release();
+        vertexMain->release();
+        fragmentMain->release();
+        pipelineDesc->release();
+    }
+
+    // ========================================================================
+    // DOF (Tilt-Shift) render targets
+    // ========================================================================
+
+    // DOF CoC RT (full resolution, RGBA for color + CoC in alpha)
+    {
+        MTL::TextureDescriptor* dofCoCDesc = MTL::TextureDescriptor::alloc()->init();
+        dofCoCDesc->setTextureType(MTL::TextureType2D);
+        dofCoCDesc->setPixelFormat(MTL::PixelFormatRGBA16Float);
+        dofCoCDesc->setWidth(swapchain->drawableSize().width);
+        dofCoCDesc->setHeight(swapchain->drawableSize().height);
+        dofCoCDesc->setUsage(MTL::TextureUsageRenderTarget | MTL::TextureUsageShaderRead);
+        dofCoCRT = NS::TransferPtr(device->newTexture(dofCoCDesc));
+        dofCoCDesc->release();
+    }
+
+    // DOF Blur RT (half resolution for performance)
+    {
+        MTL::TextureDescriptor* dofBlurDesc = MTL::TextureDescriptor::alloc()->init();
+        dofBlurDesc->setTextureType(MTL::TextureType2D);
+        dofBlurDesc->setPixelFormat(MTL::PixelFormatRGBA16Float);
+        dofBlurDesc->setWidth(swapchain->drawableSize().width / 2);
+        dofBlurDesc->setHeight(swapchain->drawableSize().height / 2);
+        dofBlurDesc->setUsage(MTL::TextureUsageRenderTarget | MTL::TextureUsageShaderRead);
+        dofBlurRT = NS::TransferPtr(device->newTexture(dofBlurDesc));
+        dofBlurDesc->release();
+    }
+
+    // DOF Result RT (full resolution)
+    {
+        MTL::TextureDescriptor* dofResultDesc = MTL::TextureDescriptor::alloc()->init();
+        dofResultDesc->setTextureType(MTL::TextureType2D);
+        dofResultDesc->setPixelFormat(MTL::PixelFormatRGBA16Float);
+        dofResultDesc->setWidth(swapchain->drawableSize().width);
+        dofResultDesc->setHeight(swapchain->drawableSize().height);
+        dofResultDesc->setUsage(MTL::TextureUsageRenderTarget | MTL::TextureUsageShaderRead);
+        dofResultRT = NS::TransferPtr(device->newTexture(dofResultDesc));
+        dofResultDesc->release();
+    }
+
+    // ========================================================================
+    // DOF (Tilt-Shift) pipelines
+    // ========================================================================
+
+    // DOF CoC pipeline
+    {
+        auto shaderSrc = readFile("assets/shaders/3d_dof_coc.metal");
+        auto code = NS::String::string(shaderSrc.data(), NS::StringEncoding::UTF8StringEncoding);
+        NS::Error* error = nullptr;
+        MTL::Library* library = device->newLibrary(code, nullptr, &error);
+        if (!library) {
+            throw std::runtime_error(
+                fmt::format("Could not compile DOF CoC shader! Error: {}\n", error->localizedDescription()->utf8String())
+            );
+        }
+
+        auto vertexMain = library->newFunction(NS::String::string("vertexMain", NS::StringEncoding::UTF8StringEncoding));
+        auto fragmentMain = library->newFunction(NS::String::string("fragmentMain", NS::StringEncoding::UTF8StringEncoding));
+
+        auto pipelineDesc = MTL::RenderPipelineDescriptor::alloc()->init();
+        pipelineDesc->setVertexFunction(vertexMain);
+        pipelineDesc->setFragmentFunction(fragmentMain);
+        pipelineDesc->colorAttachments()->object(0)->setPixelFormat(MTL::PixelFormatRGBA16Float);
+
+        dofCoCPipeline = NS::TransferPtr(device->newRenderPipelineState(pipelineDesc, &error));
+        if (!dofCoCPipeline) {
+            throw std::runtime_error(
+                fmt::format("Could not create DOF CoC pipeline! Error: {}\n", error->localizedDescription()->utf8String())
+            );
+        }
+
+        code->release();
+        library->release();
+        vertexMain->release();
+        fragmentMain->release();
+        pipelineDesc->release();
+    }
+
+    // DOF Blur pipeline
+    {
+        auto shaderSrc = readFile("assets/shaders/3d_dof_blur.metal");
+        auto code = NS::String::string(shaderSrc.data(), NS::StringEncoding::UTF8StringEncoding);
+        NS::Error* error = nullptr;
+        MTL::Library* library = device->newLibrary(code, nullptr, &error);
+        if (!library) {
+            throw std::runtime_error(
+                fmt::format("Could not compile DOF Blur shader! Error: {}\n", error->localizedDescription()->utf8String())
+            );
+        }
+
+        auto vertexMain = library->newFunction(NS::String::string("vertexMain", NS::StringEncoding::UTF8StringEncoding));
+        auto fragmentMain = library->newFunction(NS::String::string("fragmentMain", NS::StringEncoding::UTF8StringEncoding));
+
+        auto pipelineDesc = MTL::RenderPipelineDescriptor::alloc()->init();
+        pipelineDesc->setVertexFunction(vertexMain);
+        pipelineDesc->setFragmentFunction(fragmentMain);
+        pipelineDesc->colorAttachments()->object(0)->setPixelFormat(MTL::PixelFormatRGBA16Float);
+
+        dofBlurPipeline = NS::TransferPtr(device->newRenderPipelineState(pipelineDesc, &error));
+        if (!dofBlurPipeline) {
+            throw std::runtime_error(
+                fmt::format("Could not create DOF Blur pipeline! Error: {}\n", error->localizedDescription()->utf8String())
+            );
+        }
+
+        code->release();
+        library->release();
+        vertexMain->release();
+        fragmentMain->release();
+        pipelineDesc->release();
+    }
+
+    // DOF Composite pipeline
+    {
+        auto shaderSrc = readFile("assets/shaders/3d_dof_composite.metal");
+        auto code = NS::String::string(shaderSrc.data(), NS::StringEncoding::UTF8StringEncoding);
+        NS::Error* error = nullptr;
+        MTL::Library* library = device->newLibrary(code, nullptr, &error);
+        if (!library) {
+            throw std::runtime_error(
+                fmt::format("Could not compile DOF Composite shader! Error: {}\n", error->localizedDescription()->utf8String())
+            );
+        }
+
+        auto vertexMain = library->newFunction(NS::String::string("vertexMain", NS::StringEncoding::UTF8StringEncoding));
+        auto fragmentMain = library->newFunction(NS::String::string("fragmentMain", NS::StringEncoding::UTF8StringEncoding));
+
+        auto pipelineDesc = MTL::RenderPipelineDescriptor::alloc()->init();
+        pipelineDesc->setVertexFunction(vertexMain);
+        pipelineDesc->setFragmentFunction(fragmentMain);
+        pipelineDesc->colorAttachments()->object(0)->setPixelFormat(MTL::PixelFormatRGBA16Float);
+
+        dofCompositePipeline = NS::TransferPtr(device->newRenderPipelineState(pipelineDesc, &error));
+        if (!dofCompositePipeline) {
+            throw std::runtime_error(
+                fmt::format("Could not create DOF Composite pipeline! Error: {}\n", error->localizedDescription()->utf8String())
             );
         }
 
