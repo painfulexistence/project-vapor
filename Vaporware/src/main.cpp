@@ -24,6 +24,7 @@
 
 #include "components.hpp"
 #include "systems.hpp"
+#include "animation_systems.hpp"
 
 entt::entity getActiveCamera(entt::registry& registry) {
     auto view = registry.view<Vapor::VirtualCameraComponent>();
@@ -391,6 +392,9 @@ int main(int argc, char* args[]) {
         updateAutoRotateSystem(registry, deltaTime);
         updateLightMovementSystem(registry, scene.get(), deltaTime);
         updateHUDSystem(registry, engineCore->getRmlUiManager(), deltaTime);
+
+        // Animation systems (tween, sprite animation, timeline/cutscene)
+        AnimationSystem::update(registry, deltaTime);
 
         // Engine updates
         engineCore->update(deltaTime);
