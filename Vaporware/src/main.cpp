@@ -25,6 +25,7 @@
 #include "components.hpp"
 #include "systems.hpp"
 #include "animation_systems.hpp"
+#include "fsm_system.hpp"
 
 entt::entity getActiveCamera(entt::registry& registry) {
     auto view = registry.view<Vapor::VirtualCameraComponent>();
@@ -185,6 +186,17 @@ int main(int argc, char* args[]) {
 
         auto& nodeRef = registry.emplace<SceneNodeReferenceComponent>(cube2);
         nodeRef.node = node;
+
+        // FSM Demo: Patrol between two positions
+        auto& fsm = registry.emplace<FSMComponent>(cube2,
+            FSMPatterns::createPatrolFSM(
+                cube2,
+                glm::vec3(2.0f, 0.5f, 0.0f),   // Position A
+                glm::vec3(2.0f, 0.5f, 5.0f),   // Position B
+                2.0f,   // Walk duration
+                1.0f    // Wait duration
+            )
+        );
     }
 
     auto floor = registry.create();
@@ -294,6 +306,37 @@ int main(int argc, char* args[]) {
         hudState.isVisible = false;
     }
 
+    // FSM Demo 2: Event-triggered cube (press T to trigger)
+    auto triggerCube = registry.create();
+    {
+        auto& transform = registry.emplace<Vapor::TransformComponent>(triggerCube);
+        transform.position = glm::vec3(-5.0f, 0.5f, 0.0f);
+        transform.scale = glm::vec3(1.0f);
+
+        auto node = scene->createNode("Trigger Cube");
+        scene->addMeshToNode(node, MeshBuilder::buildCube(1.0f, material));
+        node->setPosition(transform.position);
+
+        auto& nodeRef = registry.emplace<SceneNodeReferenceComponent>(triggerCube);
+        nodeRef.node = node;
+
+        // Event-triggered FSM: Idle -> Jump up -> Fall down -> Idle
+        using namespace AnimationBuilder;
+        auto& fsm = registry.emplace<FSMComponent>(triggerCube,
+            FSMBuilder()
+                .state("Idle")
+                    .transitionTo("JumpUp", "trigger")
+                .state("JumpUp")
+                    .enter({ moveTo(triggerCube, glm::vec3(-5.0f, 3.0f, 0.0f), 0.5f, Easing::OutCubic) })
+                    .transitionOnComplete("FallDown")
+                .state("FallDown")
+                    .enter({ moveTo(triggerCube, glm::vec3(-5.0f, 0.5f, 0.0f), 0.3f, Easing::InCubic) })
+                    .transitionOnComplete("Idle")
+                .initialState("Idle")
+                .build()
+        );
+    }
+
     auto global = registry.create();
 
     scene->update(0.0f);
@@ -339,6 +382,11 @@ int main(int argc, char* args[]) {
                         hud.isVisible = !hud.isVisible;
                         fmt::print("HUD Visibility toggled: {}\n", hud.isVisible);
                     }
+                }
+                // Trigger FSM event (demo)
+                if (e.key.scancode == SDL_SCANCODE_T) {
+                    FSMSystem::broadcastEvent(registry, "trigger");
+                    fmt::print("FSM: Sent 'trigger' event\n");
                 }
                 break;
             }
@@ -392,6 +440,9 @@ int main(int argc, char* args[]) {
         updateAutoRotateSystem(registry, deltaTime);
         updateLightMovementSystem(registry, scene.get(), deltaTime);
         updateHUDSystem(registry, engineCore->getRmlUiManager(), deltaTime);
+
+        // FSM system (runs before animation to emplace action components)
+        FSMSystem::update(registry);
 
         // Animation systems (tween, sprite animation, timeline/cutscene)
         AnimationSystem::update(registry, deltaTime);
