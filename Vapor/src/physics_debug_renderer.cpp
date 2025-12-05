@@ -1,124 +1,125 @@
 #include "physics_debug_renderer.hpp"
 #include <Jolt/Jolt.h>
-#include <Jolt/Physics/PhysicsSystem.h>
 #include <Jolt/Physics/Body/Body.h>
 #include <Jolt/Physics/Body/BodyLockInterface.h>
-#include <Jolt/Physics/Collision/Shape/Shape.h>
 #include <Jolt/Physics/Collision/Shape/BoxShape.h>
-#include <Jolt/Physics/Collision/Shape/SphereShape.h>
 #include <Jolt/Physics/Collision/Shape/CapsuleShape.h>
-#include <Jolt/Physics/Collision/Shape/CylinderShape.h>
-#include <Jolt/Physics/Collision/Shape/ConvexHullShape.h>
-#include <Jolt/Physics/Collision/Shape/MeshShape.h>
 #include <Jolt/Physics/Collision/Shape/CompoundShape.h>
+#include <Jolt/Physics/Collision/Shape/ConvexHullShape.h>
+#include <Jolt/Physics/Collision/Shape/CylinderShape.h>
+#include <Jolt/Physics/Collision/Shape/MeshShape.h>
+#include <Jolt/Physics/Collision/Shape/OffsetCenterOfMassShape.h>
 #include <Jolt/Physics/Collision/Shape/RotatedTranslatedShape.h>
 #include <Jolt/Physics/Collision/Shape/ScaledShape.h>
-#include <Jolt/Physics/Collision/Shape/OffsetCenterOfMassShape.h>
+#include <Jolt/Physics/Collision/Shape/Shape.h>
+#include <Jolt/Physics/Collision/Shape/SphereShape.h>
+#include <Jolt/Physics/PhysicsSystem.h>
+#include <vector>
 
 namespace Vapor {
 
-PhysicsDebugRenderer::PhysicsDebugRenderer() = default;
-PhysicsDebugRenderer::~PhysicsDebugRenderer() = default;
+    PhysicsDebugRenderer::PhysicsDebugRenderer() = default;
+    PhysicsDebugRenderer::~PhysicsDebugRenderer() = default;
 
-void PhysicsDebugRenderer::setPhysicsSystem(Physics3D* physics) {
-    this->physics = physics;
-}
-
-void PhysicsDebugRenderer::setDebugDraw(DebugDraw* debugDraw) {
-    this->debugDraw = debugDraw;
-}
-
-void PhysicsDebugRenderer::update() {
-    if (!enabled || !physics || !debugDraw) {
-        return;
+    void PhysicsDebugRenderer::setPhysicsSystem(Physics3D* physics) {
+        this->physics = physics;
     }
 
-    JPH::PhysicsSystem* physicsSystem = physics->getPhysicsSystem();
-    if (!physicsSystem) {
-        return;
+    void PhysicsDebugRenderer::setDebugDraw(DebugDraw* debugDraw) {
+        this->debugDraw = debugDraw;
     }
 
-    const JPH::BodyLockInterface& bodyLockInterface = physicsSystem->GetBodyLockInterface();
-
-    // Get all body IDs
-    JPH::BodyIDVector bodyIDs;
-    physicsSystem->GetBodies(bodyIDs);
-
-    // Draw each body
-    for (const JPH::BodyID& bodyID : bodyIDs) {
-        JPH::BodyLockRead lock(bodyLockInterface, bodyID);
-        if (!lock.Succeeded()) {
-            continue;
+    void PhysicsDebugRenderer::update() {
+        if (!enabled || !physics || !debugDraw) {
+            return;
         }
 
-        const JPH::Body& body = lock.GetBody();
-
-        // Skip triggers if not configured to draw them
-        if (body.IsSensor() && !config.drawTriggers) {
-            continue;
+        JPH::PhysicsSystem* physicsSystem = physics->getPhysicsSystem();
+        if (!physicsSystem) {
+            return;
         }
 
-        // Skip regular bodies if not configured to draw them
-        if (!body.IsSensor() && !config.drawBodies) {
-            continue;
-        }
+        const JPH::BodyLockInterface& bodyLockInterface = physicsSystem->GetBodyLockInterface();
 
-        glm::vec4 color = getBodyColor(body);
-        drawBody(body, color);
+        // Get all body IDs
+        JPH::BodyIDVector bodyIDs;
+        physicsSystem->GetBodies(bodyIDs);
 
-        // Draw velocity vector if enabled
-        if (config.drawVelocities && body.GetMotionType() == JPH::EMotionType::Dynamic) {
-            JPH::RVec3 pos = body.GetPosition();
-            JPH::Vec3 vel = body.GetLinearVelocity();
+        // Draw each body
+        for (const JPH::BodyID& bodyID : bodyIDs) {
+            JPH::BodyLockRead lock(bodyLockInterface, bodyID);
+            if (!lock.Succeeded()) {
+                continue;
+            }
 
-            glm::vec3 position(pos.GetX(), pos.GetY(), pos.GetZ());
-            glm::vec3 velocity(vel.GetX(), vel.GetY(), vel.GetZ());
+            const JPH::Body& body = lock.GetBody();
 
-            if (glm::length(velocity) > 0.01f) {
-                debugDraw->addArrow(position, position + velocity * config.velocityScale,
-                                   DebugColors::Yellow, 0.2f);
+            // Skip triggers if not configured to draw them
+            if (body.IsSensor() && !config.drawTriggers) {
+                continue;
+            }
+
+            // Skip regular bodies if not configured to draw them
+            if (!body.IsSensor() && !config.drawBodies) {
+                continue;
+            }
+
+            glm::vec4 color = getBodyColor(body);
+            drawBody(body, color);
+
+            // Draw velocity vector if enabled
+            if (config.drawVelocities && body.GetMotionType() == JPH::EMotionType::Dynamic) {
+                JPH::RVec3 pos = body.GetPosition();
+                JPH::Vec3 vel = body.GetLinearVelocity();
+
+                glm::vec3 position(pos.GetX(), pos.GetY(), pos.GetZ());
+                glm::vec3 velocity(vel.GetX(), vel.GetY(), vel.GetZ());
+
+                if (glm::length(velocity) > 0.01f) {
+                    debugDraw->addArrow(
+                        position, position + velocity * config.velocityScale, DebugColors::Yellow, 0.2f
+                    );
+                }
+            }
+
+            // Draw center of mass if enabled
+            if (config.drawCenterOfMass && body.GetMotionType() == JPH::EMotionType::Dynamic) {
+                JPH::RVec3 com = body.GetCenterOfMassPosition();
+                glm::vec3 centerOfMass(com.GetX(), com.GetY(), com.GetZ());
+                debugDraw->addCross(centerOfMass, 0.1f, DebugColors::Magenta);
             }
         }
+    }
 
-        // Draw center of mass if enabled
-        if (config.drawCenterOfMass && body.GetMotionType() == JPH::EMotionType::Dynamic) {
-            JPH::RVec3 com = body.GetCenterOfMassPosition();
-            glm::vec3 centerOfMass(com.GetX(), com.GetY(), com.GetZ());
-            debugDraw->addCross(centerOfMass, 0.1f, DebugColors::Magenta);
+    void PhysicsDebugRenderer::drawBody(const JPH::Body& body, const glm::vec4& color) {
+        JPH::RVec3 pos = body.GetPosition();
+        JPH::Quat rot = body.GetRotation();
+
+        glm::vec3 position(pos.GetX(), pos.GetY(), pos.GetZ());
+        glm::quat rotation(rot.GetW(), rot.GetX(), rot.GetY(), rot.GetZ());
+
+        const JPH::Shape* shape = body.GetShape();
+        drawShape(shape, position, rotation, color);
+
+        // Draw AABB if enabled
+        if (config.drawBoundingBoxes) {
+            JPH::AABox bounds = body.GetWorldSpaceBounds();
+            glm::vec3 min(bounds.mMin.GetX(), bounds.mMin.GetY(), bounds.mMin.GetZ());
+            glm::vec3 max(bounds.mMax.GetX(), bounds.mMax.GetY(), bounds.mMax.GetZ());
+            debugDraw->addAABB(min, max, glm::vec4(color.r, color.g, color.b, 0.3f));
         }
     }
-}
 
-void PhysicsDebugRenderer::drawBody(const JPH::Body& body, const glm::vec4& color) {
-    JPH::RVec3 pos = body.GetPosition();
-    JPH::Quat rot = body.GetRotation();
+    void PhysicsDebugRenderer::drawShape(
+        const JPH::Shape* shape, const glm::vec3& position, const glm::quat& rotation, const glm::vec4& color
+    ) {
+        if (!shape) return;
 
-    glm::vec3 position(pos.GetX(), pos.GetY(), pos.GetZ());
-    glm::quat rotation(rot.GetW(), rot.GetX(), rot.GetY(), rot.GetZ());
-
-    const JPH::Shape* shape = body.GetShape();
-    drawShape(shape, position, rotation, color);
-
-    // Draw AABB if enabled
-    if (config.drawBoundingBoxes) {
-        JPH::AABox bounds = body.GetWorldSpaceBounds();
-        glm::vec3 min(bounds.mMin.GetX(), bounds.mMin.GetY(), bounds.mMin.GetZ());
-        glm::vec3 max(bounds.mMax.GetX(), bounds.mMax.GetY(), bounds.mMax.GetZ());
-        debugDraw->addAABB(min, max, glm::vec4(color.r, color.g, color.b, 0.3f));
-    }
-}
-
-void PhysicsDebugRenderer::drawShape(const JPH::Shape* shape, const glm::vec3& position,
-                                     const glm::quat& rotation, const glm::vec4& color) {
-    if (!shape) return;
-
-    switch (shape->GetSubType()) {
+        switch (shape->GetSubType()) {
         case JPH::EShapeSubType::Box: {
             const JPH::BoxShape* box = static_cast<const JPH::BoxShape*>(shape);
             JPH::Vec3 half = box->GetHalfExtent();
-            debugDraw->addBox(position,
-                             glm::vec3(half.GetX(), half.GetY(), half.GetZ()),
-                             rotation, color);
+            debugDraw->addBox(position, glm::vec3(half.GetX(), half.GetY(), half.GetZ()), rotation, color);
             break;
         }
 
@@ -130,19 +131,13 @@ void PhysicsDebugRenderer::drawShape(const JPH::Shape* shape, const glm::vec3& p
 
         case JPH::EShapeSubType::Capsule: {
             const JPH::CapsuleShape* capsule = static_cast<const JPH::CapsuleShape*>(shape);
-            debugDraw->addCapsule(position,
-                                 capsule->GetHalfHeightOfCylinder(),
-                                 capsule->GetRadius(),
-                                 rotation, color);
+            debugDraw->addCapsule(position, capsule->GetHalfHeightOfCylinder(), capsule->GetRadius(), rotation, color);
             break;
         }
 
         case JPH::EShapeSubType::Cylinder: {
             const JPH::CylinderShape* cylinder = static_cast<const JPH::CylinderShape*>(shape);
-            debugDraw->addCylinder(position,
-                                  cylinder->GetHalfHeight(),
-                                  cylinder->GetRadius(),
-                                  rotation, color);
+            debugDraw->addCylinder(position, cylinder->GetHalfHeight(), cylinder->GetRadius(), rotation, color);
             break;
         }
 
@@ -156,7 +151,8 @@ void PhysicsDebugRenderer::drawShape(const JPH::Shape* shape, const glm::vec3& p
                 if (numVertices < 3) continue;
 
                 // Get face vertices
-                const uint8_t* indices = hull->GetFaceVertices(f);
+                std::vector<uint> indices(numVertices);
+                hull->GetFaceVertices(f, numVertices, indices.data());
 
                 // Draw edges of this face
                 for (uint v = 0; v < numVertices; ++v) {
@@ -178,11 +174,13 @@ void PhysicsDebugRenderer::drawShape(const JPH::Shape* shape, const glm::vec3& p
         case JPH::EShapeSubType::Mesh: {
             // For mesh shapes, just draw the AABB (too expensive to draw all triangles)
             JPH::AABox localBounds = shape->GetLocalBounds();
-            glm::vec3 center = position + rotation * glm::vec3(
-                (localBounds.mMin.GetX() + localBounds.mMax.GetX()) * 0.5f,
-                (localBounds.mMin.GetY() + localBounds.mMax.GetY()) * 0.5f,
-                (localBounds.mMin.GetZ() + localBounds.mMax.GetZ()) * 0.5f
-            );
+            glm::vec3 center = position
+                               + rotation
+                                     * glm::vec3(
+                                         (localBounds.mMin.GetX() + localBounds.mMax.GetX()) * 0.5f,
+                                         (localBounds.mMin.GetY() + localBounds.mMax.GetY()) * 0.5f,
+                                         (localBounds.mMin.GetZ() + localBounds.mMax.GetZ()) * 0.5f
+                                     );
             glm::vec3 halfExtents(
                 (localBounds.mMax.GetX() - localBounds.mMin.GetX()) * 0.5f,
                 (localBounds.mMax.GetY() - localBounds.mMin.GetY()) * 0.5f,
@@ -237,11 +235,13 @@ void PhysicsDebugRenderer::drawShape(const JPH::Shape* shape, const glm::vec3& p
         default:
             // Unsupported shape - draw local bounds
             JPH::AABox localBounds = shape->GetLocalBounds();
-            glm::vec3 center = position + rotation * glm::vec3(
-                (localBounds.mMin.GetX() + localBounds.mMax.GetX()) * 0.5f,
-                (localBounds.mMin.GetY() + localBounds.mMax.GetY()) * 0.5f,
-                (localBounds.mMin.GetZ() + localBounds.mMax.GetZ()) * 0.5f
-            );
+            glm::vec3 center = position
+                               + rotation
+                                     * glm::vec3(
+                                         (localBounds.mMin.GetX() + localBounds.mMax.GetX()) * 0.5f,
+                                         (localBounds.mMin.GetY() + localBounds.mMax.GetY()) * 0.5f,
+                                         (localBounds.mMin.GetZ() + localBounds.mMax.GetZ()) * 0.5f
+                                     );
             glm::vec3 halfExtents(
                 (localBounds.mMax.GetX() - localBounds.mMin.GetX()) * 0.5f,
                 (localBounds.mMax.GetY() - localBounds.mMin.GetY()) * 0.5f,
@@ -249,33 +249,33 @@ void PhysicsDebugRenderer::drawShape(const JPH::Shape* shape, const glm::vec3& p
             );
             debugDraw->addBox(center, halfExtents, rotation, color);
             break;
-    }
-}
-
-glm::vec4 PhysicsDebugRenderer::getBodyColor(const JPH::Body& body) const {
-    if (!config.colorByState) {
-        return config.defaultColor;
+        }
     }
 
-    // Color based on body state
-    if (body.IsSensor()) {
-        return DebugColors::Trigger;  // Cyan, semi-transparent
-    }
+    glm::vec4 PhysicsDebugRenderer::getBodyColor(const JPH::Body& body) const {
+        if (!config.colorByState) {
+            return config.defaultColor;
+        }
 
-    switch (body.GetMotionType()) {
+        // Color based on body state
+        if (body.IsSensor()) {
+            return DebugColors::Trigger;// Cyan, semi-transparent
+        }
+
+        switch (body.GetMotionType()) {
         case JPH::EMotionType::Static:
-            return DebugColors::StaticBody;  // Gray
+            return DebugColors::StaticBody;// Gray
         case JPH::EMotionType::Kinematic:
-            return DebugColors::KinematicBody;  // Light blue
+            return DebugColors::KinematicBody;// Light blue
         case JPH::EMotionType::Dynamic:
             if (body.IsActive()) {
-                return DebugColors::DynamicBody;  // Green
+                return DebugColors::DynamicBody;// Green
             } else {
-                return DebugColors::SleepingBody;  // Orange (sleeping)
+                return DebugColors::SleepingBody;// Orange (sleeping)
             }
         default:
             return config.defaultColor;
+        }
     }
-}
 
-} // namespace Vapor
+}// namespace Vapor

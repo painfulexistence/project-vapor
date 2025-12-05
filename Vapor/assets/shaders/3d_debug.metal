@@ -47,11 +47,10 @@ fragment float4 debug_fragment(DebugVertexOut in [[stage_in]]) {
 
 // Alternative fragment shader with depth fade (optional)
 fragment float4 debug_fragment_depth_fade(
-    DebugVertexOut in [[stage_in]],
-    float4 fragCoord [[position]]
+    DebugVertexOut in [[stage_in]]
 ) {
     // Fade color based on depth for better visibility
-    float depth = fragCoord.z;
+    float depth = in.position.z;
     float fade = 1.0 - smoothstep(0.0, 1.0, depth);
     float4 color = in.color;
     color.a *= fade;

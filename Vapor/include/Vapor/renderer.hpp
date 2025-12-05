@@ -10,6 +10,10 @@ namespace Rml {
     class Context;
 }
 
+namespace Vapor {
+    class DebugDraw;
+}
+
 enum class GraphicsBackend { Metal, Vulkan };
 
 enum class RenderPath { Forward, Deferred };
@@ -34,7 +38,15 @@ public:
 
     // UI rendering (optional, implemented by backends that support it)
     // This method should set the RenderInterface and finalize RmlUI initialization
-    virtual bool initUI() { return false; /* Default: not supported */ }
+    virtual bool initUI() {
+        return false; /* Default: not supported */
+    }
+
+    virtual void setDebugDraw(Vapor::DebugDraw* draw) {
+    }
+    virtual Vapor::DebugDraw* getDebugDraw() {
+        return nullptr;
+    }
 
 protected:
     const Uint32 MAX_FRAMES_IN_FLIGHT = 3;

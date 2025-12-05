@@ -9,11 +9,13 @@
 
 #include "Vapor/asset_manager.hpp"
 #include "Vapor/camera.hpp"
+#include "Vapor/debug_draw.hpp"
 #include "Vapor/engine_core.hpp"
 #include "Vapor/graphics.hpp"
 #include "Vapor/input_manager.hpp"
 #include "Vapor/mesh_builder.hpp"
 #include "Vapor/physics_3d.hpp"
+#include "Vapor/physics_debug_renderer.hpp"
 #include "Vapor/renderer.hpp"
 #include "Vapor/rmlui_manager.hpp"
 #include "Vapor/rng.hpp"
@@ -104,12 +106,20 @@ int main(int argc, char* args[]) {
     auto renderer = createRenderer(gfxBackend);
     renderer->init(window);
 
+    auto debugDraw = std::make_unique<Vapor::DebugDraw>();
+    renderer->setDebugDraw(debugDraw.get());
+
     if (engineCore->initRmlUI(windowWidth, windowHeight) && renderer->initUI()) {
         fmt::print("RmlUI System Initialized\n");
     }
 
     auto physics = std::make_unique<Physics3D>();
     physics->init(engineCore->getTaskScheduler());
+
+    auto physicsDebug = std::make_unique<Vapor::PhysicsDebugRenderer>();
+    physicsDebug->setPhysicsSystem(physics.get());
+    physicsDebug->setDebugDraw(debugDraw.get());
+    physicsDebug->setEnabled(true);
 
     fmt::print("Engine initialized\n");
 
@@ -330,7 +340,6 @@ int main(int argc, char* args[]) {
                 if (e.key.scancode == SDL_SCANCODE_ESCAPE) {
                     quit = true;
                 }
-                // Toggle HUD
                 if (e.key.scancode == SDL_SCANCODE_H) {
                     auto view = registry.view<HUDComponent>();
                     for (auto entity : view) {
@@ -338,6 +347,11 @@ int main(int argc, char* args[]) {
                         hud.isVisible = !hud.isVisible;
                         fmt::print("HUD Visibility toggled: {}\n", hud.isVisible);
                     }
+                }
+                if (e.key.scancode == SDL_SCANCODE_F3) {
+                    bool enabled = !physicsDebug->isEnabled();
+                    physicsDebug->setEnabled(enabled);
+                    fmt::print("Physics Debug Renderer: {}\n", enabled ? "Enabled" : "Disabled");
                 }
                 break;
             }
@@ -395,13 +409,12 @@ int main(int argc, char* args[]) {
         // Engine updates
         engineCore->update(deltaTime);
 
-        // Transform
         scene->update(deltaTime);
-
-        // Physics
         physics->process(scene, deltaTime);
-
         scene->update(deltaTime);
+
+        debugDraw->clear();
+        physicsDebug->update();
 
         // Rendering
         entt::entity activeCamEntity = getActiveCamera(registry);

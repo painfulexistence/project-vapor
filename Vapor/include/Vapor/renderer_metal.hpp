@@ -1,17 +1,17 @@
 #pragma once
 #include "renderer.hpp"
 
-#include <SDL3/SDL_video.h>
-#include <SDL3/SDL_render.h>
-#include <SDL3/SDL_stdinc.h>
 #include <Foundation/Foundation.hpp>
 #include <Metal/Metal.hpp>
 #include <QuartzCore/QuartzCore.hpp>
+#include <SDL3/SDL_render.h>
+#include <SDL3/SDL_stdinc.h>
+#include <SDL3/SDL_video.h>
 #include <string>
 #include <unordered_map>
 
-#include "graphics.hpp"
 #include "debug_draw.hpp"
+#include "graphics.hpp"
 
 // Forward declarations
 namespace Rml {
@@ -39,7 +39,8 @@ class DebugDrawPass;
 
 class RenderPass {
 public:
-    explicit RenderPass(Renderer_Metal* renderer) : renderer(renderer) {}
+    explicit RenderPass(Renderer_Metal* renderer) : renderer(renderer) {
+    }
     virtual ~RenderPass() = default;
     virtual void execute() = 0;
     virtual const char* getName() const = 0;
@@ -73,7 +74,7 @@ private:
 };
 
 
-class Renderer_Metal final : public Renderer { // Must be public or factory function won't work
+class Renderer_Metal final : public Renderer {// Must be public or factory function won't work
     friend class PrePass;
     friend class TLASBuildPass;
     friend class NormalResolvePass;
@@ -113,15 +114,23 @@ public:
     }
 
     // Get Metal device (for RmlUI initialization)
-    MTL::Device* getDevice() const { return device; }
+    MTL::Device* getDevice() const {
+        return device;
+    }
 
     // Initialize UI rendering (sets RenderInterface and finalizes RmlUI initialization)
     bool initUI() override;
 
     // Debug draw - set the external debug draw queue
-    void setDebugDraw(Vapor::DebugDraw* draw) { debugDraw = draw; }
+    void setDebugDraw(Vapor::DebugDraw* draw) override {
+        debugDraw = draw;
+    }
+    Vapor::DebugDraw* getDebugDraw() override {
+        return debugDraw;
+    }
 
-    NS::SharedPtr<MTL::RenderPipelineState> createPipeline(const std::string& filename, bool isHDR, bool isColorOnly, Uint32 sampleCount);
+    NS::SharedPtr<MTL::RenderPipelineState>
+        createPipeline(const std::string& filename, bool isHDR, bool isColorOnly, Uint32 sampleCount);
     NS::SharedPtr<MTL::ComputePipelineState> createComputePipeline(const std::string& filename);
 
     TextureHandle createTexture(const std::shared_ptr<Image>& img);
@@ -170,8 +179,8 @@ protected:
     // Debug draw pipeline and resources
     NS::SharedPtr<MTL::RenderPipelineState> debugDrawPipeline;
     NS::SharedPtr<MTL::DepthStencilState> debugDrawDepthStencilState;
-    std::vector<NS::SharedPtr<MTL::Buffer>> debugDrawVertexBuffers;  // Per-frame buffers
-    Vapor::DebugDraw* debugDraw = nullptr;  // External debug draw queue (not owned)
+    std::vector<NS::SharedPtr<MTL::Buffer>> debugDrawVertexBuffers;// Per-frame buffers
+    Vapor::DebugDraw* debugDraw = nullptr;// External debug draw queue (not owned)
 
     // Water rendering pipeline and resources
     NS::SharedPtr<MTL::RenderPipelineState> waterPipeline;
@@ -211,11 +220,11 @@ protected:
     std::vector<NS::SharedPtr<MTL::Buffer>> clusterBuffers;
 
     // IBL textures
-    NS::SharedPtr<MTL::Texture> environmentCubemap;      // Captured sky cubemap
-    NS::SharedPtr<MTL::Texture> irradianceMap;           // Diffuse irradiance cubemap
-    NS::SharedPtr<MTL::Texture> prefilterMap;            // Pre-filtered specular cubemap (with mipmaps)
-    NS::SharedPtr<MTL::Texture> brdfLUT;                 // BRDF integration LUT
-    bool iblNeedsUpdate = true;                          // Flag to trigger IBL update
+    NS::SharedPtr<MTL::Texture> environmentCubemap;// Captured sky cubemap
+    NS::SharedPtr<MTL::Texture> irradianceMap;// Diffuse irradiance cubemap
+    NS::SharedPtr<MTL::Texture> prefilterMap;// Pre-filtered specular cubemap (with mipmaps)
+    NS::SharedPtr<MTL::Texture> brdfLUT;// BRDF integration LUT
+    bool iblNeedsUpdate = true;// Flag to trigger IBL update
     std::vector<NS::SharedPtr<MTL::Buffer>> accelInstanceBuffers;
     std::vector<NS::SharedPtr<MTL::Buffer>> TLASScratchBuffers;
     std::vector<NS::SharedPtr<MTL::AccelerationStructure>> TLASBuffers;
@@ -265,5 +274,5 @@ private:
     Rml::Context* m_uiContext = nullptr;
 
     void createResources();
-    void renderUI();  // Internal method called by RmlUiPass
+    void renderUI();// Internal method called by RmlUiPass
 };
