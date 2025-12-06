@@ -1138,6 +1138,7 @@ public:
         simParams.particleCount = r.particleCount;
 
         memcpy(r.particleSimParamsBuffers[r.currentFrameInFlight]->contents(), &simParams, sizeof(ParticleSimParams));
+        r.particleSimParamsBuffers[r.currentFrameInFlight]->didModifyRange(NS::Range::Make(0, sizeof(ParticleSimParams)));
 
         // Update attractor buffer
         struct ParticleAttractor {
@@ -1149,10 +1150,13 @@ public:
         attractor.strength = 5.0f;
 
         memcpy(r.particleAttractorBuffers[r.currentFrameInFlight]->contents(), &attractor, sizeof(ParticleAttractor));
+        r.particleAttractorBuffers[r.currentFrameInFlight]->didModifyRange(NS::Range::Make(0, sizeof(ParticleAttractor)));
 
-        // Compute pass: Force calculation
+        // Compute passes: Use single encoder with memory barrier
         {
             auto computeEncoder = r.currentCommandBuffer->computeCommandEncoder();
+
+            // Force calculation
             computeEncoder->setComputePipelineState(r.particleForcePipeline.get());
             computeEncoder->setBuffer(r.particleBuffers[r.currentFrameInFlight].get(), 0, 0);
             computeEncoder->setBuffer(r.particleSimParamsBuffers[r.currentFrameInFlight].get(), 0, 1);
@@ -1161,19 +1165,16 @@ public:
             MTL::Size gridSize = MTL::Size((r.particleCount + 255) / 256, 1, 1);
             MTL::Size threadGroupSize = MTL::Size(256, 1, 1);
             computeEncoder->dispatchThreadgroups(gridSize, threadGroupSize);
-            computeEncoder->endEncoding();
-        }
 
-        // Compute pass: Integration
-        {
-            auto computeEncoder = r.currentCommandBuffer->computeCommandEncoder();
+            // Memory barrier between compute dispatches
+            computeEncoder->memoryBarrier(MTL::BarrierScopeBuffers);
+
+            // Integration
             computeEncoder->setComputePipelineState(r.particleIntegratePipeline.get());
             computeEncoder->setBuffer(r.particleBuffers[r.currentFrameInFlight].get(), 0, 0);
             computeEncoder->setBuffer(r.particleSimParamsBuffers[r.currentFrameInFlight].get(), 0, 1);
-
-            MTL::Size gridSize = MTL::Size((r.particleCount + 255) / 256, 1, 1);
-            MTL::Size threadGroupSize = MTL::Size(256, 1, 1);
             computeEncoder->dispatchThreadgroups(gridSize, threadGroupSize);
+
             computeEncoder->endEncoding();
         }
 
