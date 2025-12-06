@@ -10,6 +10,7 @@ find_package(SDL3 CONFIG REQUIRED)
 find_package(Tracy CONFIG REQUIRED)
 find_package(RmlUi CONFIG REQUIRED)
 find_package(EnTT CONFIG REQUIRED)
+find_package(ozz_animation CONFIG REQUIRED)
 
 add_subdirectory(metal)
 add_subdirectory(MikkTSpace)
@@ -39,6 +40,10 @@ set(SOURCES
     src/rmlui_manager.cpp
     src/rmlui_renderer.cpp
     src/rmlui_system.cpp
+    # Animation system
+    src/animation.cpp
+    src/animator.cpp
+    src/animation_loader.cpp
     imgui/imgui.cpp
     imgui/imgui_draw.cpp
     imgui/imgui_tables.cpp
@@ -83,6 +88,8 @@ target_link_libraries(Vapor PRIVATE
     Jolt::Jolt
     enkiTS::enkiTS
     Tracy::TracyClient
+    ozz_animation::ozz_animation
+    ozz_animation::ozz_animation_offline
 )
 
 find_program(GLSL_VALIDATOR "glslangValidator" REQUIRED)

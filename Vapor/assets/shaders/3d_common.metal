@@ -25,6 +25,34 @@ struct VertexData {
     packed_float4 tangent;
 };
 
+// Skinned vertex data for skeletal animation
+// Contains joint indices and weights for GPU skinning
+struct SkinnedVertexData {
+    packed_float3 position;
+    packed_float2 uv;
+    packed_float3 normal;
+    packed_float4 tangent;
+    packed_uint4 jointIndices;   // Indices into bone matrix palette
+    packed_float4 jointWeights;  // Blend weights (sum to 1.0)
+};
+
+// Instance data for skinned meshes
+struct SkinnedInstanceData {
+    float4x4 model;
+    float4 color;
+    uint vertexOffset;
+    uint indexOffset;
+    uint vertexCount;
+    uint indexCount;
+    uint materialID;
+    uint primitiveMode;
+    uint boneMatrixOffset;       // Offset into bone matrix buffer
+    uint boneCount;              // Number of bones
+    float3 AABBMin;
+    float3 AABBMax;
+    float4 boundingSphere;
+};
+
 struct CameraData {
     float4x4 proj;
     float4x4 view;

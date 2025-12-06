@@ -6,6 +6,15 @@
 #include <glm/glm.hpp>
 #include <glm/gtc/quaternion.hpp>
 #include <memory>
+#include <string>
+#include <unordered_map>
+
+// Forward declarations for animation types
+namespace Vapor {
+class Skeleton;
+class Animator;
+class AnimationClip;
+}
 
 namespace Vapor {
 
@@ -87,6 +96,86 @@ namespace Vapor {
 
     struct PointLightComponent {
         PointLight light;
+    };
+
+    // =========================================================================
+    // Animation Components
+    // =========================================================================
+
+    /**
+     * @brief Skinned mesh renderer component for skeletal animation.
+     *
+     * Contains skinned meshes with joint weights. Used together with
+     * AnimatorComponent for animated characters.
+     */
+    struct SkinnedMeshRendererComponent {
+        std::string name;
+        std::vector<std::shared_ptr<SkinnedMesh>> meshes;
+        std::shared_ptr<Skeleton> skeleton;
+        bool visible = true;
+        bool castShadow = true;
+        bool receiveShadow = true;
+
+        // GPU buffer offset for this instance's bone matrices
+        Uint32 boneMatrixOffset = 0;
+    };
+
+    /**
+     * @brief Animator component for controlling skeletal animations.
+     *
+     * Manages animation playback, blending, and state for an entity.
+     * Designed for per-entity animation control.
+     */
+    struct AnimatorComponent {
+        std::shared_ptr<Animator> animator;
+
+        // Quick access to common operations
+        bool isPlaying() const;
+        void play(const std::string& animationName, bool loop = true, float blendTime = 0.0f);
+        void stop();
+        void pause();
+        void resume();
+        void setSpeed(float speed);
+    };
+
+    /**
+     * @brief Animation state machine component for complex animation logic.
+     *
+     * Optional component for entities needing state-based animation control
+     * (e.g., Idle -> Walk -> Run transitions).
+     */
+    struct AnimationStateMachineComponent {
+        std::string currentState;
+        std::string previousState;
+        float transitionTime = 0.0f;
+        float transitionDuration = 0.2f;
+        bool isTransitioning = false;
+
+        // State-to-animation mapping
+        std::unordered_map<std::string, std::string> stateAnimations;
+
+        // Transition rules: from -> to -> blend time
+        std::unordered_map<std::string, std::unordered_map<std::string, float>> transitionRules;
+
+        void setState(const std::string& newState);
+        void addStateAnimation(const std::string& state, const std::string& animationName);
+        void addTransition(const std::string& from, const std::string& to, float blendTime);
+    };
+
+    /**
+     * @brief Bone attachment component for attaching objects to animated bones.
+     *
+     * Use this to attach weapons, accessories, or effects to specific bones.
+     */
+    struct BoneAttachmentComponent {
+        std::string boneName;
+        int boneIndex = -1;  // Cached bone index for performance
+        glm::vec3 localOffset = glm::vec3(0.0f);
+        glm::quat localRotation = glm::quat(1.0f, 0.0f, 0.0f, 0.0f);
+        glm::vec3 localScale = glm::vec3(1.0f);
+
+        // Cached world transform (updated by animation system)
+        glm::mat4 worldTransform = glm::mat4(1.0f);
     };
 
     // Tag components for filtering

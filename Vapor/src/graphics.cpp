@@ -118,3 +118,100 @@ void Mesh::print() {
         // fmt::print("Bitangent {}: {} {} {}\n", i, vertices[i].bitangent.x, vertices[i].bitangent.y, vertices[i].bitangent.z);
     }
 }
+
+// ============================================================================
+// SkinnedMesh Implementation
+// ============================================================================
+
+// MikkTSpace callbacks for SkinnedMesh
+static int getNumFacesSkinned(const SMikkTSpaceContext* ctx) {
+    auto mesh = static_cast<SkinnedMesh*>(ctx->m_pUserData);
+    if (mesh->indices.size() == 0) {
+        return mesh->vertices.size() / 3;
+    }
+    return mesh->indices.size() / 3;
+}
+
+static int getNumVerticesOfFaceSkinned(const SMikkTSpaceContext* ctx, const int face) {
+    return 3;
+}
+
+static void getPositionSkinned(const SMikkTSpaceContext* ctx, float* pos, const int face, const int vert) {
+    auto mesh = static_cast<SkinnedMesh*>(ctx->m_pUserData);
+    auto index = mesh->indices.size() == 0 ? face * 3 + vert : mesh->indices[face * 3 + vert];
+    pos[0] = mesh->vertices[index].position.x;
+    pos[1] = mesh->vertices[index].position.y;
+    pos[2] = mesh->vertices[index].position.z;
+}
+
+static void getNormalSkinned(const SMikkTSpaceContext* ctx, float* normal, const int face, const int vert) {
+    auto mesh = static_cast<SkinnedMesh*>(ctx->m_pUserData);
+    auto index = mesh->indices.size() == 0 ? face * 3 + vert : mesh->indices[face * 3 + vert];
+    normal[0] = mesh->vertices[index].normal.x;
+    normal[1] = mesh->vertices[index].normal.y;
+    normal[2] = mesh->vertices[index].normal.z;
+}
+
+static void getTexCoordSkinned(const SMikkTSpaceContext* ctx, float* texC, const int face, const int vert) {
+    auto mesh = static_cast<SkinnedMesh*>(ctx->m_pUserData);
+    auto index = mesh->indices.size() == 0 ? face * 3 + vert : mesh->indices[face * 3 + vert];
+    texC[0] = mesh->vertices[index].uv.x;
+    texC[1] = mesh->vertices[index].uv.y;
+}
+
+static void setTSpaceBasicSkinned(const SMikkTSpaceContext* ctx, const float* tan, float sign, const int face, const int vert) {
+    auto mesh = static_cast<SkinnedMesh*>(ctx->m_pUserData);
+    auto index = mesh->indices.size() == 0 ? face * 3 + vert : mesh->indices[face * 3 + vert];
+    mesh->vertices[index].tangent = glm::vec4(tan[0], tan[1], tan[2], sign);
+}
+
+void SkinnedMesh::initialize(const std::vector<SkinnedVertexData>& vertices, const std::vector<Uint32>& indices) {
+    this->vertices = vertices;
+    this->indices = indices;
+    calculateTangents();
+    calculateLocalAABB();
+}
+
+void SkinnedMesh::calculateNormals() {
+    for (size_t i = 0; i + 2 < indices.size(); i += 3) {
+        glm::vec3 edge1 = vertices[indices[i]].position - vertices[indices[i + 1]].position;
+        glm::vec3 edge2 = vertices[indices[i + 2]].position - vertices[indices[i + 1]].position;
+        glm::vec3 normal = glm::normalize(glm::cross(edge2, edge1));
+        vertices[indices[i]].normal = normal;
+        vertices[indices[i + 1]].normal = normal;
+        vertices[indices[i + 2]].normal = normal;
+    }
+}
+
+void SkinnedMesh::calculateTangents() {
+    SMikkTSpaceInterface interface {
+        .m_getNumFaces = getNumFacesSkinned,
+        .m_getNumVerticesOfFace = getNumVerticesOfFaceSkinned,
+        .m_getPosition = getPositionSkinned,
+        .m_getNormal = getNormalSkinned,
+        .m_getTexCoord = getTexCoordSkinned,
+        .m_setTSpaceBasic = setTSpaceBasicSkinned,
+    };
+    SMikkTSpaceContext ctx {
+        .m_pInterface = &interface,
+        .m_pUserData = this
+    };
+    if (!genTangSpaceDefault(&ctx)) {
+        fmt::print("Warning: MikkTSpace calculation failed for skinned mesh\n");
+    }
+}
+
+void SkinnedMesh::calculateLocalAABB() {
+    localAABBMin = glm::vec3(std::numeric_limits<float>::max());
+    localAABBMax = glm::vec3(-std::numeric_limits<float>::max());
+    for (const auto& vertex : vertices) {
+        localAABBMin = glm::min(localAABBMin, vertex.position);
+        localAABBMax = glm::max(localAABBMax, vertex.position);
+    }
+}
+
+glm::vec4 SkinnedMesh::getWorldBoundingSphere() const {
+    glm::vec3 center = (worldAABBMin + worldAABBMax) * 0.5f;
+    float radius = glm::length(worldAABBMax - center);
+    return glm::vec4(center, radius);
+}
