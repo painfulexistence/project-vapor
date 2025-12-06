@@ -1303,6 +1303,272 @@ public:
 };
 
 // ============================================================================
+// Volumetric Fog Pass: Height-based fog with scattering
+// ============================================================================
+
+class VolumetricFogPass : public RenderPass {
+public:
+    explicit VolumetricFogPass(Renderer_Metal* renderer) : RenderPass(renderer) {
+    }
+
+    const char* getName() const override {
+        return "VolumetricFogPass";
+    }
+
+    void execute() override {
+        auto& r = *renderer;
+
+        if (!r.volumetricFogEnabled || !r.fogSimplePipeline) return;
+
+        auto drawableSize = r.swapchain->drawableSize();
+
+        // Update fog data buffer
+        AtmosphereData* atmos = reinterpret_cast<AtmosphereData*>(r.atmosphereDataBuffer->contents());
+
+        VolumetricFogData* fogData =
+            reinterpret_cast<VolumetricFogData*>(r.volumetricFogDataBuffers[r.currentFrameInFlight]->contents());
+        fogData->invViewProj = glm::inverse(r.currentCamera->getProjMatrix() * r.currentCamera->getViewMatrix());
+        fogData->cameraPosition = r.currentCamera->getEye();
+        fogData->sunDirection = glm::normalize(atmos->sunDirection);
+        fogData->sunColor = atmos->sunColor;
+        fogData->sunIntensity = atmos->sunIntensity;
+        fogData->screenSize = glm::vec2(drawableSize.width, drawableSize.height);
+        fogData->nearPlane = r.currentCamera->getNearPlane();
+        fogData->farPlane = r.volumetricFogSettings.farPlane;
+        fogData->frameIndex = r.currentFrameInFlight;
+        fogData->time = r.volumetricFogSettings.time;
+
+        // Copy settings
+        fogData->fogDensity = r.volumetricFogSettings.fogDensity;
+        fogData->fogHeightFalloff = r.volumetricFogSettings.fogHeightFalloff;
+        fogData->fogBaseHeight = r.volumetricFogSettings.fogBaseHeight;
+        fogData->fogMaxHeight = r.volumetricFogSettings.fogMaxHeight;
+        fogData->scatteringCoeff = r.volumetricFogSettings.scatteringCoeff;
+        fogData->extinctionCoeff = r.volumetricFogSettings.extinctionCoeff;
+        fogData->anisotropy = r.volumetricFogSettings.anisotropy;
+        fogData->ambientIntensity = r.volumetricFogSettings.ambientIntensity;
+        fogData->noiseScale = r.volumetricFogSettings.noiseScale;
+        fogData->noiseIntensity = r.volumetricFogSettings.noiseIntensity;
+        fogData->windSpeed = r.volumetricFogSettings.windSpeed;
+        fogData->windDirection = r.volumetricFogSettings.windDirection;
+        fogData->temporalBlend = r.volumetricFogSettings.temporalBlend;
+
+        r.volumetricFogDataBuffers[r.currentFrameInFlight]->didModifyRange(
+            NS::Range::Make(0, r.volumetricFogDataBuffers[r.currentFrameInFlight]->length())
+        );
+
+        // Simple fog pass (renders to bloom result RT which then goes to post-process)
+        auto passDesc = NS::TransferPtr(MTL::RenderPassDescriptor::renderPassDescriptor());
+        auto colorRT = passDesc->colorAttachments()->object(0);
+        colorRT->setLoadAction(MTL::LoadActionLoad);
+        colorRT->setStoreAction(MTL::StoreActionStore);
+        colorRT->setTexture(r.colorRT.get());
+
+        auto encoder = r.currentCommandBuffer->renderCommandEncoder(passDesc.get());
+        encoder->setRenderPipelineState(r.fogSimplePipeline.get());
+        encoder->setCullMode(MTL::CullModeNone);
+        encoder->setFragmentTexture(r.colorRT.get(), 0);
+        encoder->setFragmentTexture(r.depthStencilRT.get(), 1);
+        encoder->setFragmentBuffer(r.volumetricFogDataBuffers[r.currentFrameInFlight].get(), 0, 0);
+        encoder->setFragmentBuffer(r.cameraDataBuffers[r.currentFrameInFlight].get(), 0, 1);
+        encoder->drawPrimitives(MTL::PrimitiveType::PrimitiveTypeTriangle, 0, 3, 1);
+        encoder->endEncoding();
+    }
+};
+
+// ============================================================================
+// Volumetric Cloud Pass: Ray-marched clouds
+// ============================================================================
+
+class VolumetricCloudPass : public RenderPass {
+public:
+    explicit VolumetricCloudPass(Renderer_Metal* renderer) : RenderPass(renderer) {
+    }
+
+    const char* getName() const override {
+        return "VolumetricCloudPass";
+    }
+
+    void execute() override {
+        auto& r = *renderer;
+
+        if (!r.volumetricCloudsEnabled || !r.cloudRenderPipeline) return;
+
+        auto drawableSize = r.swapchain->drawableSize();
+
+        // Update cloud data buffer
+        AtmosphereData* atmos = reinterpret_cast<AtmosphereData*>(r.atmosphereDataBuffer->contents());
+
+        VolumetricCloudData* cloudData =
+            reinterpret_cast<VolumetricCloudData*>(r.volumetricCloudDataBuffers[r.currentFrameInFlight]->contents());
+        cloudData->invViewProj = glm::inverse(r.currentCamera->getProjMatrix() * r.currentCamera->getViewMatrix());
+        cloudData->cameraPosition = r.currentCamera->getEye();
+        cloudData->sunDirection = glm::normalize(atmos->sunDirection);
+        cloudData->sunColor = atmos->sunColor;
+        cloudData->sunIntensity = atmos->sunIntensity;
+        cloudData->screenSize = glm::vec2(drawableSize.width, drawableSize.height);
+        cloudData->frameIndex = r.currentFrameInFlight;
+        cloudData->time = r.volumetricCloudSettings.time;
+
+        // Update wind offset (accumulate over time)
+        r.volumetricCloudSettings.windOffset += r.volumetricCloudSettings.windDirection *
+            r.volumetricCloudSettings.windSpeed * 0.016f; // Assuming ~60fps
+        cloudData->windOffset = r.volumetricCloudSettings.windOffset;
+
+        // Copy settings
+        cloudData->cloudLayerBottom = r.volumetricCloudSettings.cloudLayerBottom;
+        cloudData->cloudLayerTop = r.volumetricCloudSettings.cloudLayerTop;
+        cloudData->cloudLayerThickness = cloudData->cloudLayerTop - cloudData->cloudLayerBottom;
+        cloudData->cloudCoverage = r.volumetricCloudSettings.cloudCoverage;
+        cloudData->cloudDensity = r.volumetricCloudSettings.cloudDensity;
+        cloudData->cloudType = r.volumetricCloudSettings.cloudType;
+        cloudData->erosionStrength = r.volumetricCloudSettings.erosionStrength;
+        cloudData->shapeNoiseScale = r.volumetricCloudSettings.shapeNoiseScale;
+        cloudData->detailNoiseScale = r.volumetricCloudSettings.detailNoiseScale;
+        cloudData->ambientIntensity = r.volumetricCloudSettings.ambientIntensity;
+        cloudData->silverLiningIntensity = r.volumetricCloudSettings.silverLiningIntensity;
+        cloudData->silverLiningSpread = r.volumetricCloudSettings.silverLiningSpread;
+        cloudData->phaseG1 = r.volumetricCloudSettings.phaseG1;
+        cloudData->phaseG2 = r.volumetricCloudSettings.phaseG2;
+        cloudData->phaseBlend = r.volumetricCloudSettings.phaseBlend;
+        cloudData->powderStrength = r.volumetricCloudSettings.powderStrength;
+        cloudData->windDirection = r.volumetricCloudSettings.windDirection;
+        cloudData->windSpeed = r.volumetricCloudSettings.windSpeed;
+        cloudData->primarySteps = r.volumetricCloudSettings.primarySteps;
+        cloudData->lightSteps = r.volumetricCloudSettings.lightSteps;
+        cloudData->temporalBlend = r.volumetricCloudSettings.temporalBlend;
+
+        r.volumetricCloudDataBuffers[r.currentFrameInFlight]->didModifyRange(
+            NS::Range::Make(0, r.volumetricCloudDataBuffers[r.currentFrameInFlight]->length())
+        );
+
+        // Render clouds directly to color RT
+        auto passDesc = NS::TransferPtr(MTL::RenderPassDescriptor::renderPassDescriptor());
+        auto colorRT = passDesc->colorAttachments()->object(0);
+        colorRT->setLoadAction(MTL::LoadActionLoad);
+        colorRT->setStoreAction(MTL::StoreActionStore);
+        colorRT->setTexture(r.colorRT.get());
+
+        auto encoder = r.currentCommandBuffer->renderCommandEncoder(passDesc.get());
+        encoder->setRenderPipelineState(r.cloudRenderPipeline.get());
+        encoder->setCullMode(MTL::CullModeNone);
+        encoder->setFragmentTexture(r.colorRT.get(), 0);
+        encoder->setFragmentTexture(r.depthStencilRT.get(), 1);
+        encoder->setFragmentBuffer(r.volumetricCloudDataBuffers[r.currentFrameInFlight].get(), 0, 0);
+        encoder->setFragmentBuffer(r.cameraDataBuffers[r.currentFrameInFlight].get(), 0, 1);
+        encoder->drawPrimitives(MTL::PrimitiveType::PrimitiveTypeTriangle, 0, 3, 1);
+        encoder->endEncoding();
+    }
+};
+
+// ============================================================================
+// Sun Flare Pass: Lens flare effect with procedural textures
+// ============================================================================
+
+class SunFlarePass : public RenderPass {
+public:
+    explicit SunFlarePass(Renderer_Metal* renderer) : RenderPass(renderer) {
+    }
+
+    const char* getName() const override {
+        return "SunFlarePass";
+    }
+
+    void execute() override {
+        auto& r = *renderer;
+
+        if (!r.sunFlareEnabled || !r.sunFlarePipeline) return;
+
+        auto drawableSize = r.swapchain->drawableSize();
+        glm::vec2 screenSize = glm::vec2(drawableSize.width, drawableSize.height);
+
+        // Calculate sun screen position
+        AtmosphereData* atmos = reinterpret_cast<AtmosphereData*>(r.atmosphereDataBuffer->contents());
+        glm::vec3 sunDir = glm::normalize(atmos->sunDirection);
+        glm::vec3 camPos = r.currentCamera->getEye();
+        glm::vec3 sunWorldPos = camPos + sunDir * 10000.0f;
+
+        glm::mat4 viewProj = r.currentCamera->getProjMatrix() * r.currentCamera->getViewMatrix();
+        glm::vec4 sunClip = viewProj * glm::vec4(sunWorldPos, 1.0f);
+
+        // Sun behind camera
+        if (sunClip.w <= 0.0f) {
+            return;
+        }
+
+        // Convert to screen UV
+        glm::vec2 sunNDC = glm::vec2(sunClip.x, sunClip.y) / sunClip.w;
+        glm::vec2 sunScreenPos = sunNDC * 0.5f + 0.5f;
+        sunScreenPos.y = 1.0f - sunScreenPos.y;
+
+        // Update flare data buffer
+        SunFlareData* flareData =
+            reinterpret_cast<SunFlareData*>(r.sunFlareDataBuffers[r.currentFrameInFlight]->contents());
+        flareData->sunScreenPos = sunScreenPos;
+        flareData->screenSize = screenSize;
+        flareData->screenCenter = glm::vec2(0.5f, 0.5f);
+        flareData->aspectRatio = glm::vec2(screenSize.y / screenSize.x, 1.0f);
+        flareData->sunColor = atmos->sunColor;
+
+        // Simple visibility check using depth at sun position
+        // For proper occlusion, we'd use the compute shader, but this is a simple approximation
+        float visibility = 1.0f;
+        if (sunScreenPos.x < 0.0f || sunScreenPos.x > 1.0f ||
+            sunScreenPos.y < 0.0f || sunScreenPos.y > 1.0f) {
+            visibility = 0.0f;
+        }
+        flareData->visibility = visibility;
+
+        // Copy settings
+        flareData->sunIntensity = r.sunFlareSettings.sunIntensity;
+        flareData->fadeEdge = r.sunFlareSettings.fadeEdge;
+        flareData->glowIntensity = r.sunFlareSettings.glowIntensity;
+        flareData->glowFalloff = r.sunFlareSettings.glowFalloff;
+        flareData->glowSize = r.sunFlareSettings.glowSize;
+        flareData->haloIntensity = r.sunFlareSettings.haloIntensity;
+        flareData->haloRadius = r.sunFlareSettings.haloRadius;
+        flareData->haloWidth = r.sunFlareSettings.haloWidth;
+        flareData->haloFalloff = r.sunFlareSettings.haloFalloff;
+        flareData->ghostCount = r.sunFlareSettings.ghostCount;
+        flareData->ghostSpacing = r.sunFlareSettings.ghostSpacing;
+        flareData->ghostIntensity = r.sunFlareSettings.ghostIntensity;
+        flareData->ghostSize = r.sunFlareSettings.ghostSize;
+        flareData->ghostChromaticOffset = r.sunFlareSettings.ghostChromaticOffset;
+        flareData->ghostFalloff = r.sunFlareSettings.ghostFalloff;
+        flareData->streakIntensity = r.sunFlareSettings.streakIntensity;
+        flareData->streakLength = r.sunFlareSettings.streakLength;
+        flareData->streakFalloff = r.sunFlareSettings.streakFalloff;
+        flareData->starburstIntensity = r.sunFlareSettings.starburstIntensity;
+        flareData->starburstSize = r.sunFlareSettings.starburstSize;
+        flareData->starburstPoints = r.sunFlareSettings.starburstPoints;
+        flareData->starburstRotation = r.sunFlareSettings.starburstRotation;
+        flareData->dirtIntensity = r.sunFlareSettings.dirtIntensity;
+        flareData->dirtScale = r.sunFlareSettings.dirtScale;
+        flareData->time = r.sunFlareSettings.time;
+
+        r.sunFlareDataBuffers[r.currentFrameInFlight]->didModifyRange(
+            NS::Range::Make(0, r.sunFlareDataBuffers[r.currentFrameInFlight]->length())
+        );
+
+        // Render flare
+        auto passDesc = NS::TransferPtr(MTL::RenderPassDescriptor::renderPassDescriptor());
+        auto colorRT = passDesc->colorAttachments()->object(0);
+        colorRT->setLoadAction(MTL::LoadActionLoad);
+        colorRT->setStoreAction(MTL::StoreActionStore);
+        colorRT->setTexture(r.bloomResultRT.get()); // Render after bloom composite
+
+        auto encoder = r.currentCommandBuffer->renderCommandEncoder(passDesc.get());
+        encoder->setRenderPipelineState(r.sunFlarePipeline.get());
+        encoder->setCullMode(MTL::CullModeNone);
+        encoder->setFragmentTexture(r.bloomResultRT.get(), 0);
+        encoder->setFragmentTexture(r.depthStencilRT.get(), 1);
+        encoder->setFragmentBuffer(r.sunFlareDataBuffers[r.currentFrameInFlight].get(), 0, 0);
+        encoder->drawPrimitives(MTL::PrimitiveType::PrimitiveTypeTriangle, 0, 3, 1);
+        encoder->endEncoding();
+    }
+};
+
+// ============================================================================
 // Bloom passes: Physically-based bloom implementation
 // ============================================================================
 
@@ -1818,6 +2084,12 @@ auto Renderer_Metal::init(SDL_Window* window) -> void {
     graph.addPass(std::make_unique<SkyAtmospherePass>(this));
     // graph.addPass(std::make_unique<WaterPass>(this));
     graph.addPass(std::make_unique<ParticlePass>(this));
+
+    // Volumetric effects (fog and clouds)
+    graph.addPass(std::make_unique<VolumetricFogPass>(this));
+    graph.addPass(std::make_unique<VolumetricCloudPass>(this));
+
+    // Light scattering (god rays)
     graph.addPass(std::make_unique<LightScatteringPass>(this));
 
     // Bloom passes (physically-based bloom)
@@ -1825,6 +2097,9 @@ auto Renderer_Metal::init(SDL_Window* window) -> void {
     graph.addPass(std::make_unique<BloomDownsamplePass>(this));
     graph.addPass(std::make_unique<BloomUpsamplePass>(this));
     graph.addPass(std::make_unique<BloomCompositePass>(this));
+
+    // Sun flare / lens flare effect (after bloom)
+    graph.addPass(std::make_unique<SunFlarePass>(this));
 
     // DOF passes (Octopath Traveler style tilt-shift)
     // Uncomment these to enable DOF, and change PostProcessPass input to dofResultRT
@@ -2052,6 +2327,99 @@ auto Renderer_Metal::createResources() -> void {
     lightScatteringSettings.sunColor = glm::vec3(1.0f, 0.95f, 0.9f);
     lightScatteringSettings.depthThreshold = 0.9999f;
     lightScatteringSettings.jitter = 0.5f;
+
+    // ========================================================================
+    // Volumetric Fog buffers and initialization
+    // ========================================================================
+    volumetricFogDataBuffers.resize(MAX_FRAMES_IN_FLIGHT);
+    for (auto& fogBuffer : volumetricFogDataBuffers) {
+        fogBuffer = NS::TransferPtr(device->newBuffer(sizeof(VolumetricFogData), MTL::ResourceStorageModeManaged));
+    }
+
+    // Initialize volumetric fog default settings
+    volumetricFogSettings.fogDensity = 0.02f;
+    volumetricFogSettings.fogHeightFalloff = 0.1f;
+    volumetricFogSettings.fogBaseHeight = 0.0f;
+    volumetricFogSettings.fogMaxHeight = 100.0f;
+    volumetricFogSettings.scatteringCoeff = 0.5f;
+    volumetricFogSettings.extinctionCoeff = 0.5f;
+    volumetricFogSettings.anisotropy = 0.6f;
+    volumetricFogSettings.ambientIntensity = 0.3f;
+    volumetricFogSettings.nearPlane = 0.1f;
+    volumetricFogSettings.farPlane = 500.0f;
+    volumetricFogSettings.noiseScale = 0.01f;
+    volumetricFogSettings.noiseIntensity = 0.5f;
+    volumetricFogSettings.windSpeed = 1.0f;
+    volumetricFogSettings.windDirection = glm::vec3(1.0f, 0.0f, 0.0f);
+    volumetricFogSettings.temporalBlend = 0.1f;
+
+    // ========================================================================
+    // Volumetric Cloud buffers and initialization
+    // ========================================================================
+    volumetricCloudDataBuffers.resize(MAX_FRAMES_IN_FLIGHT);
+    for (auto& cloudBuffer : volumetricCloudDataBuffers) {
+        cloudBuffer = NS::TransferPtr(device->newBuffer(sizeof(VolumetricCloudData), MTL::ResourceStorageModeManaged));
+    }
+
+    // Initialize volumetric cloud default settings
+    volumetricCloudSettings.cloudLayerBottom = 1500.0f;
+    volumetricCloudSettings.cloudLayerTop = 4000.0f;
+    volumetricCloudSettings.cloudLayerThickness = 2500.0f;
+    volumetricCloudSettings.cloudCoverage = 0.5f;
+    volumetricCloudSettings.cloudDensity = 0.3f;
+    volumetricCloudSettings.cloudType = 0.5f;
+    volumetricCloudSettings.erosionStrength = 0.3f;
+    volumetricCloudSettings.shapeNoiseScale = 1.0f;
+    volumetricCloudSettings.detailNoiseScale = 5.0f;
+    volumetricCloudSettings.ambientIntensity = 0.3f;
+    volumetricCloudSettings.silverLiningIntensity = 0.5f;
+    volumetricCloudSettings.silverLiningSpread = 2.0f;
+    volumetricCloudSettings.phaseG1 = 0.8f;
+    volumetricCloudSettings.phaseG2 = -0.3f;
+    volumetricCloudSettings.phaseBlend = 0.3f;
+    volumetricCloudSettings.powderStrength = 0.5f;
+    volumetricCloudSettings.windDirection = glm::vec3(1.0f, 0.0f, 0.0f);
+    volumetricCloudSettings.windSpeed = 10.0f;
+    volumetricCloudSettings.windOffset = glm::vec3(0.0f);
+    volumetricCloudSettings.primarySteps = 64;
+    volumetricCloudSettings.lightSteps = 6;
+    volumetricCloudSettings.temporalBlend = 0.05f;
+
+    // ========================================================================
+    // Sun Flare buffers and initialization
+    // ========================================================================
+    sunFlareDataBuffers.resize(MAX_FRAMES_IN_FLIGHT);
+    for (auto& flareBuffer : sunFlareDataBuffers) {
+        flareBuffer = NS::TransferPtr(device->newBuffer(sizeof(SunFlareData), MTL::ResourceStorageModeManaged));
+    }
+
+    // Initialize sun flare default settings
+    sunFlareSettings.sunIntensity = 1.0f;
+    sunFlareSettings.visibility = 1.0f;
+    sunFlareSettings.fadeEdge = 0.8f;
+    sunFlareSettings.sunColor = glm::vec3(1.0f, 0.95f, 0.8f);
+    sunFlareSettings.glowIntensity = 0.5f;
+    sunFlareSettings.glowFalloff = 8.0f;
+    sunFlareSettings.glowSize = 0.15f;
+    sunFlareSettings.haloIntensity = 0.3f;
+    sunFlareSettings.haloRadius = 0.25f;
+    sunFlareSettings.haloWidth = 0.03f;
+    sunFlareSettings.haloFalloff = 0.01f;
+    sunFlareSettings.ghostCount = 6;
+    sunFlareSettings.ghostSpacing = 0.3f;
+    sunFlareSettings.ghostIntensity = 0.15f;
+    sunFlareSettings.ghostSize = 0.05f;
+    sunFlareSettings.ghostChromaticOffset = 0.005f;
+    sunFlareSettings.ghostFalloff = 1.5f;
+    sunFlareSettings.streakIntensity = 0.2f;
+    sunFlareSettings.streakLength = 0.3f;
+    sunFlareSettings.streakFalloff = 50.0f;
+    sunFlareSettings.starburstIntensity = 0.15f;
+    sunFlareSettings.starburstSize = 0.4f;
+    sunFlareSettings.starburstPoints = 6;
+    sunFlareSettings.starburstRotation = 0.0f;
+    sunFlareSettings.dirtIntensity = 0.0f;
+    sunFlareSettings.dirtScale = 10.0f;
 
     // Create atmosphere data buffer with default Earth-like settings
     atmosphereDataBuffer = NS::TransferPtr(device->newBuffer(sizeof(AtmosphereData), MTL::ResourceStorageModeManaged));
