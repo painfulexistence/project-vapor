@@ -1,170 +1,177 @@
 #pragma once
 
 #include <SDL3/SDL.h>
+#include <cstdint>
+#include <deque>
 #include <glm/glm.hpp>
 #include <unordered_map>
 #include <unordered_set>
-#include <deque>
-#include <cstdint>
 
 namespace Vapor {
 
-enum class InputAction {
-    // Movement
-    MoveForward,
-    MoveBackward,
-    StrafeLeft,
-    StrafeRight,
-    MoveUp,
-    MoveDown,
+    enum class InputAction {
+        // Movement
+        MoveForward,
+        MoveBackward,
+        StrafeLeft,
+        StrafeRight,
+        MoveUp,
+        MoveDown,
 
-    // Camera rotation
-    LookUp,
-    LookDown,
-    LookLeft,
-    LookRight,
-    RollLeft,
-    RollRight,
+        // Camera rotation
+        LookUp,
+        LookDown,
+        LookLeft,
+        LookRight,
+        RollLeft,
+        RollRight,
 
-    // General actions
-    Jump,
-    Crouch,
-    Sprint,
-    Interact,
-    Cancel,
+        // General actions
+        Jump,
+        Crouch,
+        Sprint,
+        Interact,
+        Cancel,
 
-    // Hotkeys
-    Hotkey1,
-    Hotkey2,
-    Hotkey3,
-    Hotkey4,
-    Hotkey5,
-    Hotkey6,
-    Hotkey7,
-    Hotkey8,
-    Hotkey9,
-    Hotkey10,
+        // Hotkeys
+        Hotkey1,
+        Hotkey2,
+        Hotkey3,
+        Hotkey4,
+        Hotkey5,
+        Hotkey6,
+        Hotkey7,
+        Hotkey8,
+        Hotkey9,
+        Hotkey10,
 
-    // Count for iteration
-    UNKNOWN
-};
+        // Count for iteration
+        UNKNOWN
+    };
 
-class InputState {
-public:
-    InputState() = default;
+    class InputState {
+    public:
+        InputState() = default;
 
-    /**
-     * Check if action is currently held down.
-     */
-    bool isHeld(InputAction action) const {
-        return heldActions.find(action) != heldActions.end();
-    }
+        /**
+         * Check if action is currently held down.
+         */
+        bool isHeld(InputAction action) const {
+            return heldActions.find(action) != heldActions.end();
+        }
 
-    /**
-     * Check if action was just pressed this frame.
-     */
-    bool isPressed(InputAction action) const {
-        return pressedActions.find(action) != pressedActions.end();
-    }
+        /**
+         * Check if action was just pressed this frame.
+         */
+        bool isPressed(InputAction action) const {
+            return pressedActions.find(action) != pressedActions.end();
+        }
 
-    /**
-     * Check if action was just released this frame.
-     */
-    bool isReleased(InputAction action) const {
-        return releasedActions.find(action) != releasedActions.end();
-    }
+        /**
+         * Check if action was just released this frame.
+         */
+        bool isReleased(InputAction action) const {
+            return releasedActions.find(action) != releasedActions.end();
+        }
 
-    glm::vec2 getMovementVector(
-        InputAction left, InputAction right,
-        InputAction backward, InputAction forward
-    ) const {
-        float x = (isHeld(right) ? 1.0f : 0.0f) - (isHeld(left) ? 1.0f : 0.0f);
-        float y = (isHeld(forward) ? 1.0f : 0.0f) - (isHeld(backward) ? 1.0f : 0.0f);
-        return glm::vec2(x, y);
-    }
+        auto getAxis(InputAction neg, InputAction pos) const -> float {
+            return (isHeld(pos) ? 1.0f : 0.0f) - (isHeld(neg) ? 1.0f : 0.0f);
+        }
 
-    const std::unordered_set<InputAction>& getHeldActions() const {
-        return heldActions;
-    }
+        auto getVector(InputAction left, InputAction right, InputAction down, InputAction up) const -> glm::vec2 {
+            return glm::vec2(getAxis(left, right), getAxis(down, up));
+        }
 
-    const std::unordered_set<InputAction>& getPressedActions() const {
-        return pressedActions;
-    }
+        const std::unordered_set<InputAction>& getHeldActions() const {
+            return heldActions;
+        }
 
-    const std::unordered_set<InputAction>& getReleasedActions() const {
-        return releasedActions;
-    }
+        const std::unordered_set<InputAction>& getPressedActions() const {
+            return pressedActions;
+        }
 
-private:
-    std::unordered_set<InputAction> heldActions;
-    std::unordered_set<InputAction> pressedActions;
-    std::unordered_set<InputAction> releasedActions;
+        const std::unordered_set<InputAction>& getReleasedActions() const {
+            return releasedActions;
+        }
 
-    friend class InputManager;
-};
+    private:
+        std::unordered_set<InputAction> heldActions;
+        std::unordered_set<InputAction> pressedActions;
+        std::unordered_set<InputAction> releasedActions;
 
-
-struct InputEvent {
-    InputAction action;
-    uint64_t timestamp;  // Milliseconds
-};
+        friend class InputManager;
+    };
 
 
-class InputManager {
-public:
-    InputManager();
-    ~InputManager() = default;
+    struct InputEvent {
+        InputAction action;
+        uint64_t timestamp;// Milliseconds
+    };
 
-    void processEvent(const SDL_Event& event);
 
-    void update(float deltaTime);
+    class InputManager {
+    public:
+        InputManager();
+        ~InputManager() = default;
 
-    const InputState& getInputState() const { return currentState; }
+        void processEvent(const SDL_Event& event);
 
-    void mapKey(SDL_Scancode key, InputAction action);
+        void update(float deltaTime);
 
-    void unmapKey(SDL_Scancode key);
+        const InputState& getInputState() const {
+            return currentState;
+        }
 
-    void updateMappings(const std::unordered_map<SDL_Scancode, InputAction>& mappings);
+        void mapKey(SDL_Scancode key, InputAction action);
 
-    void clearMappings();
+        void unmapKey(SDL_Scancode key);
 
-    const InputAction getActionForKey(SDL_Scancode key) const;
+        void updateMappings(const std::unordered_map<SDL_Scancode, InputAction>& mappings);
 
-    const std::deque<InputEvent>& getInputBuffer() const { return inputHistory; }
+        void clearMappings();
 
-    glm::vec2 getMousePosition() const { return currMousePosition; }
+        const InputAction getActionForKey(SDL_Scancode key) const;
 
-    glm::vec2 getMouseDelta() const { return mouseDelta; }
+        const std::deque<InputEvent>& getInputBuffer() const {
+            return inputHistory;
+        }
 
-private:
-    std::unordered_map<SDL_Scancode, InputAction> keyToAction;
+        glm::vec2 getMousePosition() const {
+            return currMousePosition;
+        }
 
-    InputState currentState;
+        glm::vec2 getMouseDelta() const {
+            return mouseDelta;
+        }
 
-    std::deque<InputEvent> inputHistory;
-    static constexpr size_t MAX_INPUT_HISTORY_SIZE = 32;
-    static constexpr uint64_t INPUT_EVENT_LIFETIME_MS = 1000;
+    private:
+        std::unordered_map<SDL_Scancode, InputAction> keyToAction;
 
-    // Mouse state
-    glm::vec2 currMousePosition{0.0f};
-    glm::vec2 mouseDelta{0.0f};
-    glm::vec2 prevMousePosition{0.0f};
+        InputState currentState;
 
-    // Time tracking (in milliseconds)
-    uint64_t currentTime = 0;
+        std::deque<InputEvent> inputHistory;
+        static constexpr size_t MAX_INPUT_HISTORY_SIZE = 32;
+        static constexpr uint64_t INPUT_EVENT_LIFETIME_MS = 1000;
 
-    bool wasActionPressedRecently(InputAction action, float timeWindow) const {
-        float now = (float)SDL_GetTicks() / 1000.0f;
-        for (const auto& event : inputHistory) {
-            if (event.action == action) {
-                if (now - event.timestamp <= timeWindow) {
-                    return true;
+        // Mouse state
+        glm::vec2 currMousePosition{ 0.0f };
+        glm::vec2 mouseDelta{ 0.0f };
+        glm::vec2 prevMousePosition{ 0.0f };
+
+        // Time tracking (in milliseconds)
+        uint64_t currentTime = 0;
+
+        bool wasActionPressedRecently(InputAction action, float timeWindow) const {
+            float now = (float)SDL_GetTicks() / 1000.0f;
+            for (const auto& event : inputHistory) {
+                if (event.action == action) {
+                    if (now - event.timestamp <= timeWindow) {
+                        return true;
+                    }
                 }
             }
+            return false;
         }
-        return false;
-    }
-};
+    };
 
-} // namespace Vapor
+}// namespace Vapor

@@ -1,70 +1,91 @@
-#ifndef ENGINE_CORE_HPP
-#define ENGINE_CORE_HPP
+#pragma once
 
-#include "task_scheduler.hpp"
-#include "resource_manager.hpp"
 #include "action_manager.hpp"
-#include "input_manager.hpp"
 #include "audio_engine.hpp"
+#include "input_manager.hpp"
+#include "resource_manager.hpp"
+#include "task_scheduler.hpp"
 #include <memory>
 
 namespace Vapor {
 
-/**
- * Central engine core that manages core subsystems
- * Provides:
- * - Unified task scheduling (TaskScheduler)
- * - Resource management (ResourceManager)
- * - Action management (ActionManager)
- */
-class EngineCore {
-public:
-    EngineCore();
-    ~EngineCore();
+    class RmlUiManager;
 
-    // Initialize the engine with specified thread count
-    void init(uint32_t numThreads = 0);
+    class EngineCore {
+    public:
+        EngineCore();
+        ~EngineCore();
 
-    // Shutdown and cleanup
-    void shutdown();
+        // Initialize the engine with specified thread count
+        void init(uint32_t numThreads = 0);
 
-    // Get the task scheduler
-    TaskScheduler& getTaskScheduler() { return *m_taskScheduler; }
+        // Shutdown and cleanup
+        void shutdown();
 
-    // Get the resource manager
-    ResourceManager& getResourceManager() { return *m_resourceManager; }
+        // Get the task scheduler
+        TaskScheduler& getTaskScheduler() {
+            return *_taskScheduler;
+        }
 
-    // Get the action manager
-    ActionManager& getActionManager() { return *m_actionManager; }
+        // Get the resource manager
+        ResourceManager& getResourceManager() {
+            return *_resourceManager;
+        }
 
-    // Get the input manager
-    InputManager& getInputManager() { return *m_inputManager; }
+        // Get the action manager
+        ActionManager& getActionManager() {
+            return *_actionManager;
+        }
 
-    // Get the audio manager
-    AudioManager& getAudioManager() { return *m_audioManager; }
+        // Get the input manager
+        InputManager& getInputManager() {
+            return *_inputManager;
+        }
 
-    // Update per-frame (for async task management and action updates)
-    void update(float deltaTime);
+        // Get the audio manager
+        AudioManager& getAudioManager() {
+            return *_audioManager;
+        }
 
-    // Check if engine is initialized
-    bool isInitialized() const { return m_initialized; }
+        // Initialize RmlUI
+        bool initRmlUI(int width, int height);
 
-    // Get singleton instance
-    static EngineCore* Get() { return s_instance; }
+        // Get the RmlUI manager
+        RmlUiManager* getRmlUiManager() {
+            return _rmluiManager.get();
+        }
 
-private:
-    static EngineCore* s_instance;
+        // Handle window resize for RmlUI
+        void onRmlUIResize(int width, int height);
 
-    std::unique_ptr<TaskScheduler> m_taskScheduler;
-    std::unique_ptr<ResourceManager> m_resourceManager;
-    std::unique_ptr<ActionManager> m_actionManager;
-    std::unique_ptr<InputManager> m_inputManager;
-    std::unique_ptr<AudioManager> m_audioManager;
+        // Process SDL event for RmlUI (returns true if event was consumed by RmlUI)
+        bool processRmlUIEvent(const SDL_Event& event);
 
-    bool m_initialized{false};
-    uint32_t m_numThreads{0};
-};
+        // Update per-frame (for async task management and action updates)
+        void update(float deltaTime);
 
-} // namespace Vapor
+        // Check if engine is initialized
+        bool isInitialized() const {
+            return _initialized;
+        }
 
-#endif // ENGINE_CORE_HPP
+        // Get singleton instance
+        static EngineCore* Get() {
+            return s_instance;
+        }
+
+    private:
+        static EngineCore* s_instance;
+
+        std::unique_ptr<TaskScheduler> _taskScheduler;
+        std::unique_ptr<ResourceManager> _resourceManager;
+        std::unique_ptr<ActionManager> _actionManager;
+        std::unique_ptr<InputManager> _inputManager;
+        std::unique_ptr<AudioManager> _audioManager;
+        std::unique_ptr<RmlUiManager> _rmluiManager;
+
+        bool _initialized{ false };
+        uint32_t _numThreads{ 0 };
+    };
+
+}// namespace Vapor

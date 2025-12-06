@@ -23,6 +23,8 @@
       "features": [
         "tools"
       ]
-    }
+    },
+    "rmlui",
+    "entt"
   ]
 }

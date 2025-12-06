@@ -18,12 +18,14 @@ namespace JPH {
     class BroadPhaseLayerInterface;
     class ObjectVsBroadPhaseLayerFilter;
     class ObjectLayerPairFilter;
-}
+}// namespace JPH
 
 namespace Vapor {
     class JoltEnkiJobSystem;
     class TaskScheduler;
-}
+    class DebugDraw;
+    class PhysicsDebugRenderer;
+}// namespace Vapor
 
 class BPLayerInterfaceImpl;
 class ObjectVsBroadPhaseLayerFilterImpl;
@@ -81,10 +83,18 @@ public:
     Physics3D();
     ~Physics3D();
 
-    void init(Vapor::TaskScheduler& taskScheduler);
+    void init(Vapor::TaskScheduler& taskScheduler, std::shared_ptr<Vapor::DebugDraw> debugDraw = nullptr);
     void process(const std::shared_ptr<Scene>& scene, float dt);
+
+    void setDebugEnabled(bool enabled);
+    bool isDebugEnabled() const;
     void drawImGui(float dt);
     void deinit();
+
+    // Get interpolation alpha for smooth rendering between physics steps
+    float getInterpolationAlpha() const {
+        return timeAccum / FIXED_TIME_STEP;
+    }
 
     // ====== 創建剛體（各種形狀） ======
     BodyHandle createSphereBody(float radius, const glm::vec3& position, const glm::quat& rotation, BodyMotionType motionType);
@@ -214,6 +224,8 @@ private:
     std::unique_ptr<ObjectLayerPairFilterImpl> object_vs_object_layer_filter;
     std::unique_ptr<JPH::ContactListener> contactListener;
     std::unique_ptr<JPH::BodyActivationListener> bodyActivationListener;
+    std::unique_ptr<Vapor::PhysicsDebugRenderer> debugRenderer;
+    bool debugDrawEnabled = false;
 
     JPH::BodyInterface* bodyInterface;
 

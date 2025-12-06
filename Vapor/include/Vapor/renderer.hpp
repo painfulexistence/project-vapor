@@ -5,6 +5,15 @@
 #include <SDL3/SDL_video.h>
 #include <memory>
 
+// Forward declarations
+namespace Rml {
+    class Context;
+}
+
+namespace Vapor {
+    class DebugDraw;
+}
+
 enum class GraphicsBackend { Metal, Vulkan };
 
 enum class RenderPath { Forward, Deferred };
@@ -27,10 +36,20 @@ public:
     virtual void setRenderPath(RenderPath path) = 0;
     virtual RenderPath getRenderPath() const = 0;
 
+    // UI rendering (optional, implemented by backends that support it)
+    // This method should set the RenderInterface and finalize RmlUI initialization
+    virtual bool initUI() {
+        return false; /* Default: not supported */
+    }
+
+    virtual std::shared_ptr<Vapor::DebugDraw> getDebugDraw() {
+        return nullptr;
+    }
+
 protected:
     const Uint32 MAX_FRAMES_IN_FLIGHT = 3;
     const Uint32 MSAA_SAMPLE_COUNT = 4;
-    const Uint32 MAX_INSTANCES = 1000;
+    const Uint32 MAX_INSTANCES = 5000;// Increased for large scenes like Bistro (2911 instances)
     glm::vec4 clearColor = glm::vec4(0.0f, 0.5f, 1.0f, 1.0f);
     double clearDepth = 1.0;
     Uint32 clusterGridSizeX = 16;
