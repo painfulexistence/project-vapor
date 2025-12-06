@@ -3019,6 +3019,13 @@ auto Renderer_Metal::createResources() -> void {
             // Clamp color to [0, 1] to prevent negative values and oversaturation
             color = glm::clamp(color, 0.0f, 1.0f);
             particles[i].color = glm::vec4(color, 1.0f);
+
+            // Initialize multi-emitter fields
+            // emitterID = 0 means these particles belong to the default emitter
+            particles[i].life = 1.0f;     // Fully alive
+            particles[i].age = 0.0f;      // Just spawned
+            particles[i].maxLife = 0.0f;  // 0 = infinite lifetime (legacy behavior)
+            particles[i].emitterID = 0;   // Default emitter
         }
     }
 

@@ -2753,6 +2753,12 @@ void Renderer_Vulkan::initParticleSystem() {
         glm::vec3 d = glm::vec3(1.893f, 0.663f, 1.910f);
         glm::vec3 color = a + b * glm::cos(6.28318f * (c * brightness + d));
         initialParticles[i].color = glm::vec4(color, 1.0f);
+
+        // Initialize multi-emitter fields
+        initialParticles[i].life = 1.0f;     // Fully alive
+        initialParticles[i].age = 0.0f;      // Just spawned
+        initialParticles[i].maxLife = 0.0f;  // 0 = infinite lifetime (legacy behavior)
+        initialParticles[i].emitterID = 0;   // Default emitter
     }
 
     // Upload initial particle data
