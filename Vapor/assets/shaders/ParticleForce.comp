@@ -9,6 +9,11 @@ struct Particle {
     vec3 force;
     float _pad3;
     vec4 color;
+    // Multi-emitter support
+    float life;
+    float age;
+    float maxLife;
+    uint emitterID;
 };
 
 layout(std140, set = 0, binding = 0) uniform SimulationParams {
@@ -16,8 +21,8 @@ layout(std140, set = 0, binding = 0) uniform SimulationParams {
     vec2 mousePosition;
     float time;
     float deltaTime;
+    uint emitterCount;
     float _pad1;
-    float _pad2;
 };
 
 layout(std140, set = 0, binding = 1) uniform AttractorData {
