@@ -23,6 +23,41 @@ enum class PrimitiveMode {
     TRIANGLE_STRIP,
 };
 
+// Blend modes for 2D batch rendering
+enum class BlendMode {
+    None,        // No blending (opaque)
+    Alpha,       // Standard alpha blending: srcAlpha, 1-srcAlpha
+    Additive,    // Additive blending: srcAlpha, 1
+    Multiply,    // Multiply blending: dstColor, 0
+    Screen,      // Screen blending: 1, 1-srcColor
+    Premultiplied // Premultiplied alpha: 1, 1-srcAlpha
+};
+
+// Vertex data for 2D batch rendering
+struct alignas(16) Batch2DVertex {
+    glm::vec3 position = glm::vec3(0.0f);
+    glm::vec4 color = glm::vec4(1.0f);
+    glm::vec2 uv = glm::vec2(0.0f);
+    float texIndex = 0.0f;
+    float entityID = -1.0f;
+};
+
+// Uniforms for 2D batch rendering
+struct alignas(16) Batch2DUniforms {
+    glm::mat4 projectionMatrix;
+};
+
+// Statistics for 2D batch rendering
+struct Batch2DStats {
+    Uint32 drawCalls = 0;
+    Uint32 quadCount = 0;
+    Uint32 lineCount = 0;
+    Uint32 triangleCount = 0;
+    Uint32 circleCount = 0;
+    Uint32 vertexCount = 0;
+    Uint32 indexCount = 0;
+};
+
 struct PipelineHandle {
     Uint32 rid = UINT32_MAX;
 };

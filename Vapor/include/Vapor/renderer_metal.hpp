@@ -46,6 +46,8 @@ class DOFCompositePass;
 class RmlUiPass;
 class ImGuiPass;
 class DebugDrawPass;
+class Batch2DPass;
+class Batch2D;
 
 class RenderPass {
 public:
@@ -111,6 +113,7 @@ class Renderer_Metal final : public Renderer {// Must be public or factory funct
     friend class RmlUiPass;
     friend class ImGuiPass;
     friend class DebugDrawPass;
+    friend class Batch2DPass;
 
 public:
     Renderer_Metal();
@@ -143,6 +146,11 @@ public:
     // Debug draw - set the external debug draw queue
     std::shared_ptr<Vapor::DebugDraw> getDebugDraw() override {
         return debugDraw;
+    }
+
+    // 2D Batch Renderer - get the batch renderer for 2D drawing
+    Batch2D* getBatch2D() const {
+        return batch2D.get();
     }
 
     NS::SharedPtr<MTL::RenderPipelineState>
@@ -209,6 +217,18 @@ protected:
     NS::SharedPtr<MTL::DepthStencilState> debugDrawDepthStencilState;
     std::vector<NS::SharedPtr<MTL::Buffer>> debugDrawVertexBuffers;// Per-frame buffers
     std::shared_ptr<Vapor::DebugDraw> debugDraw = nullptr;
+
+    // 2D Batch rendering pipeline and resources
+    NS::SharedPtr<MTL::RenderPipelineState> batch2DPipeline;
+    NS::SharedPtr<MTL::RenderPipelineState> batch2DPipelineAdditive;
+    NS::SharedPtr<MTL::RenderPipelineState> batch2DPipelineMultiply;
+    NS::SharedPtr<MTL::DepthStencilState> batch2DDepthStencilState;
+    std::vector<NS::SharedPtr<MTL::Buffer>> batch2DVertexBuffers;  // Per-frame triple-buffered
+    std::vector<NS::SharedPtr<MTL::Buffer>> batch2DIndexBuffers;   // Per-frame triple-buffered
+    std::vector<NS::SharedPtr<MTL::Buffer>> batch2DUniformBuffers; // Per-frame triple-buffered
+    NS::SharedPtr<MTL::Texture> batch2DWhiteTexture;               // 1x1 white texture
+    TextureHandle batch2DWhiteTextureHandle;
+    std::unique_ptr<Batch2D> batch2D;
 
     // Water rendering pipeline and resources
     NS::SharedPtr<MTL::RenderPipelineState> waterPipeline;

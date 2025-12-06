@@ -30,6 +30,7 @@
 #include "helper.hpp"
 #include "mesh_builder.hpp"
 #include "rmlui_manager.hpp"
+#include "Vapor/batch2d.hpp"
 
 #include <RmlUi/Core.h>
 #include <glm/gtc/matrix_transform.hpp>
@@ -1769,6 +1770,145 @@ public:
     }
 };
 
+// 2D Batch pass: Renders batched 2D primitives (quads, lines, shapes)
+class Batch2DPass : public RenderPass {
+public:
+    explicit Batch2DPass(Renderer_Metal* renderer) : RenderPass(renderer) {
+    }
+
+    const char* getName() const override {
+        return "Batch2DPass";
+    }
+
+    void execute() override {
+        auto& r = *renderer;
+
+        // Skip if no batch data
+        if (!r.batch2D || !r.batch2D->hasData()) {
+            return;
+        }
+
+        // Get current frame buffers
+        auto& vertexBuffer = r.batch2DVertexBuffers[r.currentFrameInFlight];
+        auto& indexBuffer = r.batch2DIndexBuffers[r.currentFrameInFlight];
+        auto& uniformBuffer = r.batch2DUniformBuffers[r.currentFrameInFlight];
+
+        // Get batch data
+        Uint32 vertexCount = r.batch2D->getVertexCount();
+        Uint32 indexCount = r.batch2D->getIndexCount();
+        const Batch2DVertex* vertices = r.batch2D->getVertexData();
+        const Uint32* indices = r.batch2D->getIndexData();
+
+        if (vertexCount == 0 || indexCount == 0) {
+            return;
+        }
+
+        // Calculate required buffer sizes
+        size_t vertexDataSize = vertexCount * sizeof(Batch2DVertex);
+        size_t indexDataSize = indexCount * sizeof(Uint32);
+
+        // Reallocate vertex buffer if needed
+        if (!vertexBuffer || vertexBuffer->length() < vertexDataSize) {
+            size_t allocSize = std::max(vertexDataSize, size_t(256 * 1024)); // Min 256KB
+            vertexBuffer = NS::TransferPtr(r.device->newBuffer(allocSize, MTL::ResourceStorageModeShared));
+        }
+
+        // Reallocate index buffer if needed
+        if (!indexBuffer || indexBuffer->length() < indexDataSize) {
+            size_t allocSize = std::max(indexDataSize, size_t(128 * 1024)); // Min 128KB
+            indexBuffer = NS::TransferPtr(r.device->newBuffer(allocSize, MTL::ResourceStorageModeShared));
+        }
+
+        // Upload vertex data
+        memcpy(vertexBuffer->contents(), vertices, vertexDataSize);
+
+        // Upload index data
+        memcpy(indexBuffer->contents(), indices, indexDataSize);
+
+        // Upload uniform data
+        Batch2DUniforms uniforms;
+        uniforms.projectionMatrix = r.batch2D->getProjectionMatrix();
+        memcpy(uniformBuffer->contents(), &uniforms, sizeof(Batch2DUniforms));
+
+        // Select pipeline based on blend mode
+        MTL::RenderPipelineState* pipeline = nullptr;
+        BlendMode blendMode = r.batch2D->getCurrentBlendMode();
+        switch (blendMode) {
+            case BlendMode::Additive:
+                pipeline = r.batch2DPipelineAdditive.get();
+                break;
+            case BlendMode::Multiply:
+                pipeline = r.batch2DPipelineMultiply.get();
+                break;
+            case BlendMode::Alpha:
+            case BlendMode::Premultiplied:
+            case BlendMode::Screen:
+            case BlendMode::None:
+            default:
+                pipeline = r.batch2DPipeline.get();
+                break;
+        }
+
+        if (!pipeline) {
+            return;
+        }
+
+        // Create render pass descriptor
+        auto passDesc = NS::TransferPtr(MTL::RenderPassDescriptor::renderPassDescriptor());
+        auto colorAttachment = passDesc->colorAttachments()->object(0);
+        colorAttachment->setTexture(r.currentDrawable->texture());
+        colorAttachment->setLoadAction(MTL::LoadActionLoad);
+        colorAttachment->setStoreAction(MTL::StoreActionStore);
+
+        auto encoder = r.currentCommandBuffer->renderCommandEncoder(passDesc.get());
+
+        // Set viewport
+        auto drawableWidth = r.currentDrawable->texture()->width();
+        auto drawableHeight = r.currentDrawable->texture()->height();
+        MTL::Viewport viewport = { 0.0, 0.0, static_cast<double>(drawableWidth),
+                                   static_cast<double>(drawableHeight), 0.0, 1.0 };
+        encoder->setViewport(viewport);
+
+        // Set pipeline and state
+        encoder->setRenderPipelineState(pipeline);
+        encoder->setDepthStencilState(r.batch2DDepthStencilState.get());
+        encoder->setCullMode(MTL::CullModeNone);
+
+        // Set vertex buffers
+        encoder->setVertexBuffer(vertexBuffer.get(), 0, 0);
+        encoder->setVertexBuffer(uniformBuffer.get(), 0, 1);
+
+        // Bind textures
+        const auto& textureSlots = r.batch2D->getTextureSlots();
+        Uint32 textureSlotCount = r.batch2D->getTextureSlotCount();
+        for (Uint32 i = 0; i < textureSlotCount; i++) {
+            TextureHandle handle = textureSlots[i];
+            MTL::Texture* texture = nullptr;
+            if (handle.rid != UINT32_MAX) {
+                auto texPtr = r.getTexture(handle);
+                if (texPtr) {
+                    texture = texPtr.get();
+                }
+            }
+            if (!texture) {
+                texture = r.batch2DWhiteTexture.get();
+            }
+            encoder->setFragmentTexture(texture, i);
+        }
+
+        // Draw indexed triangles
+        encoder->drawIndexedPrimitives(MTL::PrimitiveTypeTriangle,
+                                       NS::UInteger(indexCount),
+                                       MTL::IndexTypeUInt32,
+                                       indexBuffer.get(),
+                                       NS::UInteger(0));
+
+        encoder->endEncoding();
+
+        // Reset batch for next frame
+        r.batch2D->resetBatch();
+    }
+};
 
 std::unique_ptr<Renderer> createRendererMetal() {
     return std::make_unique<Renderer_Metal>();
@@ -1835,10 +1975,16 @@ auto Renderer_Metal::init(SDL_Window* window) -> void {
     // Post-processing (tone mapping, color grading, chromatic aberration, vignette)
     graph.addPass(std::make_unique<PostProcessPass>(this));
     graph.addPass(std::make_unique<DebugDrawPass>(this));// Debug draw after post-process
+    graph.addPass(std::make_unique<Batch2DPass>(this));// 2D batch rendering
     graph.addPass(std::make_unique<RmlUiPass>(this));// RmlUI before ImGui
     graph.addPass(std::make_unique<ImGuiPass>(this));
 
     debugDraw = std::make_shared<Vapor::DebugDraw>();
+
+    // Initialize 2D batch renderer
+    batch2D = std::make_unique<Batch2D>();
+    batch2D->init();
+    batch2D->setWhiteTexture(batch2DWhiteTextureHandle);
 }
 
 auto Renderer_Metal::deinit() -> void {
@@ -2002,6 +2148,146 @@ auto Renderer_Metal::createResources() -> void {
         for (auto& buffer : debugDrawVertexBuffers) {
             buffer = nullptr;// Will be allocated on demand
         }
+    }
+
+    // Create 2D batch rendering pipeline
+    {
+        auto shaderSrc = readFile("assets/shaders/2d_batch.metal");
+        auto code = NS::String::string(shaderSrc.data(), NS::StringEncoding::UTF8StringEncoding);
+        NS::Error* error = nullptr;
+        MTL::Library* library = device->newLibrary(code, nullptr, &error);
+        if (!library) {
+            fmt::print(
+                "Warning: Could not compile 2D batch shader: {}\n",
+                error ? error->localizedDescription()->utf8String() : "unknown error"
+            );
+        } else {
+            auto vertexFuncName = NS::String::string("batch2d_vertex", NS::StringEncoding::UTF8StringEncoding);
+            auto vertexMain = library->newFunction(vertexFuncName);
+
+            auto fragmentFuncName = NS::String::string("batch2d_fragment", NS::StringEncoding::UTF8StringEncoding);
+            auto fragmentMain = library->newFunction(fragmentFuncName);
+
+            if (!vertexMain || !fragmentMain) {
+                fmt::print("Warning: Could not find batch2d shader functions\n");
+            } else {
+                // Create pipeline with alpha blending (default)
+                {
+                    MTL::RenderPipelineDescriptor* pipelineDesc = MTL::RenderPipelineDescriptor::alloc()->init();
+                    pipelineDesc->setVertexFunction(vertexMain);
+                    pipelineDesc->setFragmentFunction(fragmentMain);
+                    pipelineDesc->colorAttachments()->object(0)->setPixelFormat(swapchain->pixelFormat());
+
+                    auto colorAttachment = pipelineDesc->colorAttachments()->object(0);
+                    colorAttachment->setBlendingEnabled(true);
+                    colorAttachment->setRgbBlendOperation(MTL::BlendOperationAdd);
+                    colorAttachment->setAlphaBlendOperation(MTL::BlendOperationAdd);
+                    colorAttachment->setSourceRGBBlendFactor(MTL::BlendFactorSourceAlpha);
+                    colorAttachment->setDestinationRGBBlendFactor(MTL::BlendFactorOneMinusSourceAlpha);
+                    colorAttachment->setSourceAlphaBlendFactor(MTL::BlendFactorOne);
+                    colorAttachment->setDestinationAlphaBlendFactor(MTL::BlendFactorOneMinusSourceAlpha);
+
+                    batch2DPipeline = NS::TransferPtr(device->newRenderPipelineState(pipelineDesc, &error));
+                    if (!batch2DPipeline) {
+                        fmt::print(
+                            "Warning: Could not create 2D batch pipeline: {}\n",
+                            error ? error->localizedDescription()->utf8String() : "unknown error"
+                        );
+                    }
+                    pipelineDesc->release();
+                }
+
+                // Create pipeline with additive blending
+                {
+                    MTL::RenderPipelineDescriptor* pipelineDesc = MTL::RenderPipelineDescriptor::alloc()->init();
+                    pipelineDesc->setVertexFunction(vertexMain);
+                    pipelineDesc->setFragmentFunction(fragmentMain);
+                    pipelineDesc->colorAttachments()->object(0)->setPixelFormat(swapchain->pixelFormat());
+
+                    auto colorAttachment = pipelineDesc->colorAttachments()->object(0);
+                    colorAttachment->setBlendingEnabled(true);
+                    colorAttachment->setRgbBlendOperation(MTL::BlendOperationAdd);
+                    colorAttachment->setAlphaBlendOperation(MTL::BlendOperationAdd);
+                    colorAttachment->setSourceRGBBlendFactor(MTL::BlendFactorSourceAlpha);
+                    colorAttachment->setDestinationRGBBlendFactor(MTL::BlendFactorOne);
+                    colorAttachment->setSourceAlphaBlendFactor(MTL::BlendFactorOne);
+                    colorAttachment->setDestinationAlphaBlendFactor(MTL::BlendFactorOne);
+
+                    batch2DPipelineAdditive = NS::TransferPtr(device->newRenderPipelineState(pipelineDesc, &error));
+                    pipelineDesc->release();
+                }
+
+                // Create pipeline with multiply blending
+                {
+                    MTL::RenderPipelineDescriptor* pipelineDesc = MTL::RenderPipelineDescriptor::alloc()->init();
+                    pipelineDesc->setVertexFunction(vertexMain);
+                    pipelineDesc->setFragmentFunction(fragmentMain);
+                    pipelineDesc->colorAttachments()->object(0)->setPixelFormat(swapchain->pixelFormat());
+
+                    auto colorAttachment = pipelineDesc->colorAttachments()->object(0);
+                    colorAttachment->setBlendingEnabled(true);
+                    colorAttachment->setRgbBlendOperation(MTL::BlendOperationAdd);
+                    colorAttachment->setAlphaBlendOperation(MTL::BlendOperationAdd);
+                    colorAttachment->setSourceRGBBlendFactor(MTL::BlendFactorDestinationColor);
+                    colorAttachment->setDestinationRGBBlendFactor(MTL::BlendFactorZero);
+                    colorAttachment->setSourceAlphaBlendFactor(MTL::BlendFactorOne);
+                    colorAttachment->setDestinationAlphaBlendFactor(MTL::BlendFactorZero);
+
+                    batch2DPipelineMultiply = NS::TransferPtr(device->newRenderPipelineState(pipelineDesc, &error));
+                    pipelineDesc->release();
+                }
+
+                vertexMain->release();
+                fragmentMain->release();
+            }
+            library->release();
+        }
+
+        // Create depth stencil state for 2D batch (no depth testing/writing)
+        MTL::DepthStencilDescriptor* depthDesc = MTL::DepthStencilDescriptor::alloc()->init();
+        depthDesc->setDepthCompareFunction(MTL::CompareFunctionAlways);
+        depthDesc->setDepthWriteEnabled(false);
+        batch2DDepthStencilState = NS::TransferPtr(device->newDepthStencilState(depthDesc));
+        depthDesc->release();
+
+        // Create per-frame buffers for 2D batch
+        batch2DVertexBuffers.resize(MAX_FRAMES_IN_FLIGHT);
+        batch2DIndexBuffers.resize(MAX_FRAMES_IN_FLIGHT);
+        batch2DUniformBuffers.resize(MAX_FRAMES_IN_FLIGHT);
+        for (size_t i = 0; i < MAX_FRAMES_IN_FLIGHT; i++) {
+            batch2DVertexBuffers[i] = nullptr;  // Allocated on demand
+            batch2DIndexBuffers[i] = nullptr;   // Allocated on demand
+            batch2DUniformBuffers[i] = NS::TransferPtr(
+                device->newBuffer(sizeof(Batch2DUniforms), MTL::ResourceStorageModeShared)
+            );
+        }
+
+        // Create 1x1 white texture for untextured primitives
+        MTL::TextureDescriptor* texDesc = MTL::TextureDescriptor::alloc()->init();
+        texDesc->setWidth(1);
+        texDesc->setHeight(1);
+        texDesc->setPixelFormat(MTL::PixelFormatRGBA8Unorm);
+        texDesc->setTextureType(MTL::TextureType2D);
+        texDesc->setStorageMode(MTL::StorageModeShared);
+        texDesc->setUsage(MTL::TextureUsageShaderRead);
+
+        batch2DWhiteTexture = NS::TransferPtr(device->newTexture(texDesc));
+        texDesc->release();
+
+        // Fill with white pixel
+        uint32_t whitePixel = 0xFFFFFFFF;
+        batch2DWhiteTexture->replaceRegion(
+            MTL::Region(0, 0, 1, 1),
+            0,
+            &whitePixel,
+            sizeof(uint32_t)
+        );
+
+        // Create texture handle for the white texture
+        batch2DWhiteTextureHandle.rid = nextTextureID++;
+        textures[batch2DWhiteTextureHandle.rid] = batch2DWhiteTexture;
+
+        fmt::print("2D batch rendering pipeline initialized\n");
     }
 
     // Create buffers
