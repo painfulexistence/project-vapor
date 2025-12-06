@@ -2,13 +2,6 @@
 using namespace metal;
 #include "assets/shaders/3d_common.metal"
 
-// FrameData for temporal jitter
-struct FrameData {
-    uint frameNumber;
-    float time;
-    float deltaTime;
-};
-
 // Volumetric Light Scattering (God Rays) Pass
 // Modern screen-space implementation with depth-aware ray marching
 // Based on GPU Gems 3 technique with improvements:
@@ -17,6 +10,7 @@ struct FrameData {
 // - Temporal stability support (via jitter)
 // - Half-resolution option for performance
 
+// FrameData for temporal jitter
 struct FrameData {
     uint frameNumber;
     float time;
