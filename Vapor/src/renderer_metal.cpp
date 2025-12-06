@@ -1147,7 +1147,7 @@ public:
         } attractor;
 
         attractor.position = attractorPos;
-        attractor.strength = 5.0f;
+        attractor.strength = 50.0f; // Increased strength
 
         memcpy(r.particleAttractorBuffers[r.currentFrameInFlight]->contents(), &attractor, sizeof(ParticleAttractor));
         r.particleAttractorBuffers[r.currentFrameInFlight]->didModifyRange(NS::Range::Make(0, sizeof(ParticleAttractor)));
@@ -1202,7 +1202,7 @@ public:
                 float _pad2;
                 float _pad3;
             } pushConstants;
-            pushConstants.particleSize = 0.02f;
+            pushConstants.particleSize = 0.1f; // Larger particles for visibility
             encoder->setVertexBytes(&pushConstants, sizeof(ParticlePushConstants), 1);
             encoder->setVertexBuffer(r.particleBuffer.get(), 0, 2);
 
@@ -2833,7 +2833,8 @@ auto Renderer_Metal::createResources() -> void {
 
         GPUParticle* particles = reinterpret_cast<GPUParticle*>(particleBuffer->contents());
         for (size_t i = 0; i < MAX_PARTICLES; i++) {
-            float r = std::sqrt(static_cast<float>(std::rand()) / RAND_MAX) * 5.0f;
+            // Minimum radius of 0.5 to avoid particles at origin
+            float r = 0.5f + std::sqrt(static_cast<float>(std::rand()) / RAND_MAX) * 4.5f;
             float theta = static_cast<float>(std::rand()) / RAND_MAX * 2.0f * 3.14159265f;
             float phi = static_cast<float>(std::rand()) / RAND_MAX * 3.14159265f;
 
@@ -2845,6 +2846,7 @@ auto Renderer_Metal::createResources() -> void {
                 tangent = glm::vec3(1.0f, 0.0f, 0.0f);
             }
             particles[i].velocity = tangent * (0.5f / (r + 0.1f));
+            particles[i].force = glm::vec3(0.0f); // Initialize force to zero
 
             float brightness = 1.0f - (r / 5.0f);
             glm::vec3 a = glm::vec3(0.427f, 0.346f, 0.372f);
