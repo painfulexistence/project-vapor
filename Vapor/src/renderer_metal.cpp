@@ -30,7 +30,6 @@
 #include "helper.hpp"
 #include "mesh_builder.hpp"
 #include "rmlui_manager.hpp"
-#include "Vapor/batch2d.hpp"
 
 #include <RmlUi/Core.h>
 #include <glm/gtc/matrix_transform.hpp>
@@ -1784,7 +1783,7 @@ public:
         auto& r = *renderer;
 
         // Skip if no batch data
-        if (!r.batch2D || !r.batch2D->hasData()) {
+        if (r.batch2DVertices.empty() || r.batch2DIndices.empty()) {
             return;
         }
 
@@ -1793,15 +1792,8 @@ public:
         auto& indexBuffer = r.batch2DIndexBuffers[r.currentFrameInFlight];
         auto& uniformBuffer = r.batch2DUniformBuffers[r.currentFrameInFlight];
 
-        // Get batch data
-        Uint32 vertexCount = r.batch2D->getVertexCount();
-        Uint32 indexCount = r.batch2D->getIndexCount();
-        const Batch2DVertex* vertices = r.batch2D->getVertexData();
-        const Uint32* indices = r.batch2D->getIndexData();
-
-        if (vertexCount == 0 || indexCount == 0) {
-            return;
-        }
+        Uint32 vertexCount = static_cast<Uint32>(r.batch2DVertices.size());
+        Uint32 indexCount = static_cast<Uint32>(r.batch2DIndices.size());
 
         // Calculate required buffer sizes
         size_t vertexDataSize = vertexCount * sizeof(Batch2DVertex);
@@ -1820,20 +1812,19 @@ public:
         }
 
         // Upload vertex data
-        memcpy(vertexBuffer->contents(), vertices, vertexDataSize);
+        memcpy(vertexBuffer->contents(), r.batch2DVertices.data(), vertexDataSize);
 
         // Upload index data
-        memcpy(indexBuffer->contents(), indices, indexDataSize);
+        memcpy(indexBuffer->contents(), r.batch2DIndices.data(), indexDataSize);
 
         // Upload uniform data
         Batch2DUniforms uniforms;
-        uniforms.projectionMatrix = r.batch2D->getProjectionMatrix();
+        uniforms.projectionMatrix = r.batch2DProjection;
         memcpy(uniformBuffer->contents(), &uniforms, sizeof(Batch2DUniforms));
 
         // Select pipeline based on blend mode
         MTL::RenderPipelineState* pipeline = nullptr;
-        BlendMode blendMode = r.batch2D->getCurrentBlendMode();
-        switch (blendMode) {
+        switch (r.batch2DBlendMode) {
             case BlendMode::Additive:
                 pipeline = r.batch2DPipelineAdditive.get();
                 break;
@@ -1879,10 +1870,8 @@ public:
         encoder->setVertexBuffer(uniformBuffer.get(), 0, 1);
 
         // Bind textures
-        const auto& textureSlots = r.batch2D->getTextureSlots();
-        Uint32 textureSlotCount = r.batch2D->getTextureSlotCount();
-        for (Uint32 i = 0; i < textureSlotCount; i++) {
-            TextureHandle handle = textureSlots[i];
+        for (Uint32 i = 0; i < r.batch2DTextureSlotIndex; i++) {
+            TextureHandle handle = r.batch2DTextureSlots[i];
             MTL::Texture* texture = nullptr;
             if (handle.rid != UINT32_MAX) {
                 auto texPtr = r.getTexture(handle);
@@ -1905,8 +1894,16 @@ public:
 
         encoder->endEncoding();
 
-        // Reset batch for next frame
-        r.batch2D->resetBatch();
+        // Update stats
+        r.batch2DStats.drawCalls++;
+        r.batch2DStats.vertexCount += vertexCount;
+        r.batch2DStats.indexCount += indexCount;
+
+        // Clear batch for next frame
+        r.batch2DVertices.clear();
+        r.batch2DIndices.clear();
+        r.batch2DTextureSlotIndex = 1;
+        r.batch2DActive = false;
     }
 };
 
@@ -1981,10 +1978,23 @@ auto Renderer_Metal::init(SDL_Window* window) -> void {
 
     debugDraw = std::make_shared<Vapor::DebugDraw>();
 
-    // Initialize 2D batch renderer
-    batch2D = std::make_unique<Batch2D>();
-    batch2D->init();
-    batch2D->setWhiteTexture(batch2DWhiteTextureHandle);
+    // Initialize 2D batch state
+    batch2DVertices.reserve(Batch2DMaxVertices);
+    batch2DIndices.reserve(Batch2DMaxIndices);
+    batch2DTextureSlots[0] = batch2DWhiteTextureHandle;
+    batch2DTextureSlotIndex = 1;
+
+    // Pre-compute quad vertex positions (centered at origin, size 1x1)
+    batch2DQuadPositions[0] = { -0.5f, -0.5f, 0.0f, 1.0f };
+    batch2DQuadPositions[1] = { 0.5f, -0.5f, 0.0f, 1.0f };
+    batch2DQuadPositions[2] = { 0.5f, 0.5f, 0.0f, 1.0f };
+    batch2DQuadPositions[3] = { -0.5f, 0.5f, 0.0f, 1.0f };
+
+    // Default UVs
+    batch2DQuadTexCoords[0] = { 0.0f, 0.0f };
+    batch2DQuadTexCoords[1] = { 1.0f, 0.0f };
+    batch2DQuadTexCoords[2] = { 1.0f, 1.0f };
+    batch2DQuadTexCoords[3] = { 0.0f, 1.0f };
 }
 
 auto Renderer_Metal::deinit() -> void {
@@ -4236,6 +4246,235 @@ NS::SharedPtr<MTL::Texture> Renderer_Metal::getTexture(TextureHandle handle) con
 
 NS::SharedPtr<MTL::RenderPipelineState> Renderer_Metal::getPipeline(PipelineHandle handle) const {
     return pipelines.at(handle.rid);
+}
+
+// ===== 2D Batch Rendering Implementation =====
+
+void Renderer_Metal::beginBatch2D(const glm::mat4& projection, BlendMode blendMode) {
+    batch2DProjection = projection;
+    batch2DBlendMode = blendMode;
+    batch2DVertices.clear();
+    batch2DIndices.clear();
+    batch2DTextureSlots[0] = batch2DWhiteTextureHandle;
+    batch2DTextureSlotIndex = 1;
+    batch2DActive = true;
+}
+
+void Renderer_Metal::endBatch2D() {
+    // Batch will be rendered by Batch2DPass in the render graph
+    batch2DActive = false;
+}
+
+// Helper to find or add a texture slot
+static float findOrAddTextureSlot(
+    std::array<TextureHandle, 16>& slots,
+    Uint32& slotIndex,
+    TextureHandle texture,
+    TextureHandle whiteTexture
+) {
+    if (texture.rid == UINT32_MAX || texture.rid == whiteTexture.rid) {
+        return 0.0f;
+    }
+
+    for (Uint32 i = 1; i < slotIndex; i++) {
+        if (slots[i].rid == texture.rid) {
+            return static_cast<float>(i);
+        }
+    }
+
+    if (slotIndex >= 16) {
+        return 0.0f; // Fallback to white texture if slots full
+    }
+
+    float texIndex = static_cast<float>(slotIndex);
+    slots[slotIndex] = texture;
+    slotIndex++;
+    return texIndex;
+}
+
+void Renderer_Metal::drawQuad2D(const glm::vec2& position, const glm::vec2& size, const glm::vec4& color) {
+    drawQuad2D(glm::vec3(position, 0.0f), size, color);
+}
+
+void Renderer_Metal::drawQuad2D(const glm::vec3& position, const glm::vec2& size, const glm::vec4& color) {
+    glm::mat4 transform = glm::translate(glm::mat4(1.0f), position)
+                        * glm::scale(glm::mat4(1.0f), glm::vec3(size, 1.0f));
+    drawQuad2D(transform, color);
+}
+
+void Renderer_Metal::drawQuad2D(const glm::vec2& position, const glm::vec2& size, TextureHandle texture, const glm::vec4& tintColor) {
+    glm::mat4 transform = glm::translate(glm::mat4(1.0f), glm::vec3(position, 0.0f))
+                        * glm::scale(glm::mat4(1.0f), glm::vec3(size, 1.0f));
+    drawQuad2D(transform, texture, batch2DQuadTexCoords, tintColor);
+}
+
+void Renderer_Metal::drawQuad2D(const glm::mat4& transform, const glm::vec4& color, int entityID) {
+    drawQuad2D(transform, batch2DWhiteTextureHandle, batch2DQuadTexCoords, color, entityID);
+}
+
+void Renderer_Metal::drawQuad2D(const glm::mat4& transform, TextureHandle texture, const glm::vec2* texCoords, const glm::vec4& tintColor, int entityID) {
+    if (batch2DIndices.size() >= Batch2DMaxIndices) {
+        return; // Batch full
+    }
+
+    float textureIndex = findOrAddTextureSlot(batch2DTextureSlots, batch2DTextureSlotIndex, texture, batch2DWhiteTextureHandle);
+    Uint32 vertexOffset = static_cast<Uint32>(batch2DVertices.size());
+
+    // Add 4 vertices
+    for (int i = 0; i < 4; i++) {
+        Batch2DVertex vertex;
+        vertex.position = transform * batch2DQuadPositions[i];
+        vertex.color = tintColor;
+        vertex.uv = texCoords[i];
+        vertex.texIndex = textureIndex;
+        vertex.entityID = static_cast<float>(entityID);
+        batch2DVertices.push_back(vertex);
+    }
+
+    // Add 6 indices (2 triangles)
+    batch2DIndices.push_back(vertexOffset + 0);
+    batch2DIndices.push_back(vertexOffset + 1);
+    batch2DIndices.push_back(vertexOffset + 2);
+    batch2DIndices.push_back(vertexOffset + 2);
+    batch2DIndices.push_back(vertexOffset + 3);
+    batch2DIndices.push_back(vertexOffset + 0);
+
+    batch2DStats.quadCount++;
+}
+
+void Renderer_Metal::drawRotatedQuad2D(const glm::vec2& position, const glm::vec2& size, float rotation, const glm::vec4& color) {
+    glm::mat4 transform = glm::translate(glm::mat4(1.0f), glm::vec3(position, 0.0f))
+                        * glm::rotate(glm::mat4(1.0f), rotation, glm::vec3(0.0f, 0.0f, 1.0f))
+                        * glm::scale(glm::mat4(1.0f), glm::vec3(size, 1.0f));
+    drawQuad2D(transform, color);
+}
+
+void Renderer_Metal::drawRotatedQuad2D(const glm::vec2& position, const glm::vec2& size, float rotation, TextureHandle texture, const glm::vec4& tintColor) {
+    glm::mat4 transform = glm::translate(glm::mat4(1.0f), glm::vec3(position, 0.0f))
+                        * glm::rotate(glm::mat4(1.0f), rotation, glm::vec3(0.0f, 0.0f, 1.0f))
+                        * glm::scale(glm::mat4(1.0f), glm::vec3(size, 1.0f));
+    drawQuad2D(transform, texture, batch2DQuadTexCoords, tintColor);
+}
+
+void Renderer_Metal::drawLine2D(const glm::vec2& p0, const glm::vec2& p1, const glm::vec4& color, float thickness) {
+    drawLine2D(glm::vec3(p0, 0.0f), glm::vec3(p1, 0.0f), color, thickness);
+}
+
+void Renderer_Metal::drawLine2D(const glm::vec3& p0, const glm::vec3& p1, const glm::vec4& color, float thickness) {
+    glm::vec3 direction = p1 - p0;
+    float length = glm::length(glm::vec2(direction));
+    if (length < 0.0001f) return;
+
+    glm::vec3 normalized = direction / length;
+    glm::vec3 perpendicular(-normalized.y, normalized.x, 0.0f);
+    float halfThickness = thickness * 0.5f;
+
+    // Four corners of the line quad
+    glm::vec3 v0 = p0 - perpendicular * halfThickness;
+    glm::vec3 v1 = p1 - perpendicular * halfThickness;
+    glm::vec3 v2 = p1 + perpendicular * halfThickness;
+    glm::vec3 v3 = p0 + perpendicular * halfThickness;
+
+    if (batch2DIndices.size() >= Batch2DMaxIndices) return;
+
+    glm::vec2 defaultUV(0.5f, 0.5f);
+    Uint32 vertexOffset = static_cast<Uint32>(batch2DVertices.size());
+
+    Batch2DVertex vertex;
+    vertex.color = color;
+    vertex.uv = defaultUV;
+    vertex.texIndex = 0.0f;
+    vertex.entityID = -1.0f;
+
+    vertex.position = v0; batch2DVertices.push_back(vertex);
+    vertex.position = v1; batch2DVertices.push_back(vertex);
+    vertex.position = v2; batch2DVertices.push_back(vertex);
+    vertex.position = v3; batch2DVertices.push_back(vertex);
+
+    batch2DIndices.push_back(vertexOffset + 0);
+    batch2DIndices.push_back(vertexOffset + 1);
+    batch2DIndices.push_back(vertexOffset + 2);
+    batch2DIndices.push_back(vertexOffset + 2);
+    batch2DIndices.push_back(vertexOffset + 3);
+    batch2DIndices.push_back(vertexOffset + 0);
+
+    batch2DStats.lineCount++;
+}
+
+void Renderer_Metal::drawRect2D(const glm::vec2& position, const glm::vec2& size, const glm::vec4& color, float thickness) {
+    glm::vec2 topLeft = position;
+    glm::vec2 topRight = position + glm::vec2(size.x, 0.0f);
+    glm::vec2 bottomRight = position + size;
+    glm::vec2 bottomLeft = position + glm::vec2(0.0f, size.y);
+
+    drawLine2D(topLeft, topRight, color, thickness);
+    drawLine2D(topRight, bottomRight, color, thickness);
+    drawLine2D(bottomRight, bottomLeft, color, thickness);
+    drawLine2D(bottomLeft, topLeft, color, thickness);
+}
+
+void Renderer_Metal::drawCircle2D(const glm::vec2& center, float radius, const glm::vec4& color, int segments) {
+    float angleStep = 2.0f * glm::pi<float>() / static_cast<float>(segments);
+    for (int i = 0; i < segments; ++i) {
+        float angle0 = angleStep * i;
+        float angle1 = angleStep * (i + 1);
+
+        glm::vec2 p0 = center + glm::vec2(std::cos(angle0) * radius, std::sin(angle0) * radius);
+        glm::vec2 p1 = center + glm::vec2(std::cos(angle1) * radius, std::sin(angle1) * radius);
+
+        drawLine2D(p0, p1, color, 1.0f);
+    }
+    batch2DStats.circleCount++;
+}
+
+void Renderer_Metal::drawCircleFilled2D(const glm::vec2& center, float radius, const glm::vec4& color, int segments) {
+    float angleStep = 2.0f * glm::pi<float>() / static_cast<float>(segments);
+
+    for (int i = 0; i < segments; ++i) {
+        float angle0 = angleStep * i;
+        float angle1 = angleStep * (i + 1);
+
+        glm::vec2 p0 = center;
+        glm::vec2 p1 = center + glm::vec2(std::cos(angle0) * radius, std::sin(angle0) * radius);
+        glm::vec2 p2 = center + glm::vec2(std::cos(angle1) * radius, std::sin(angle1) * radius);
+
+        drawTriangleFilled2D(p0, p1, p2, color);
+    }
+    batch2DStats.circleCount++;
+}
+
+void Renderer_Metal::drawTriangle2D(const glm::vec2& p0, const glm::vec2& p1, const glm::vec2& p2, const glm::vec4& color) {
+    drawLine2D(p0, p1, color, 1.0f);
+    drawLine2D(p1, p2, color, 1.0f);
+    drawLine2D(p2, p0, color, 1.0f);
+}
+
+void Renderer_Metal::drawTriangleFilled2D(const glm::vec2& p0, const glm::vec2& p1, const glm::vec2& p2, const glm::vec4& color) {
+    if (batch2DIndices.size() >= Batch2DMaxIndices) return;
+
+    glm::vec2 defaultUV(0.5f, 0.5f);
+    Uint32 vertexOffset = static_cast<Uint32>(batch2DVertices.size());
+
+    Batch2DVertex vertex;
+    vertex.color = color;
+    vertex.uv = defaultUV;
+    vertex.texIndex = 0.0f;
+    vertex.entityID = -1.0f;
+
+    vertex.position = glm::vec3(p0, 0.0f); batch2DVertices.push_back(vertex);
+    vertex.position = glm::vec3(p1, 0.0f); batch2DVertices.push_back(vertex);
+    vertex.position = glm::vec3(p2, 0.0f); batch2DVertices.push_back(vertex);
+    // Degenerate 4th vertex
+    vertex.position = glm::vec3(p2, 0.0f); batch2DVertices.push_back(vertex);
+
+    batch2DIndices.push_back(vertexOffset + 0);
+    batch2DIndices.push_back(vertexOffset + 1);
+    batch2DIndices.push_back(vertexOffset + 2);
+    batch2DIndices.push_back(vertexOffset + 2);
+    batch2DIndices.push_back(vertexOffset + 3);
+    batch2DIndices.push_back(vertexOffset + 0);
+
+    batch2DStats.triangleCount++;
 }
 
 // Helper function to get Metal device without including renderer_metal.hpp in main.cpp

@@ -1,6 +1,7 @@
 #pragma once
 #include "renderer.hpp"
 
+#include <array>
 #include <Foundation/Foundation.hpp>
 #include <Metal/Metal.hpp>
 #include <QuartzCore/QuartzCore.hpp>
@@ -47,7 +48,6 @@ class RmlUiPass;
 class ImGuiPass;
 class DebugDrawPass;
 class Batch2DPass;
-class Batch2D;
 
 class RenderPass {
 public:
@@ -148,10 +148,35 @@ public:
         return debugDraw;
     }
 
-    // 2D Batch Renderer - get the batch renderer for 2D drawing
-    Batch2D* getBatch2D() const {
-        return batch2D.get();
-    }
+    // ===== 2D Batch Rendering API =====
+    void beginBatch2D(const glm::mat4& projection, BlendMode blendMode = BlendMode::Alpha);
+    void endBatch2D();
+
+    // Quad drawing
+    void drawQuad2D(const glm::vec2& position, const glm::vec2& size, const glm::vec4& color);
+    void drawQuad2D(const glm::vec3& position, const glm::vec2& size, const glm::vec4& color);
+    void drawQuad2D(const glm::vec2& position, const glm::vec2& size, TextureHandle texture, const glm::vec4& tintColor = glm::vec4(1.0f));
+    void drawQuad2D(const glm::mat4& transform, const glm::vec4& color, int entityID = -1);
+    void drawQuad2D(const glm::mat4& transform, TextureHandle texture, const glm::vec2* texCoords, const glm::vec4& tintColor = glm::vec4(1.0f), int entityID = -1);
+
+    // Rotated quad
+    void drawRotatedQuad2D(const glm::vec2& position, const glm::vec2& size, float rotation, const glm::vec4& color);
+    void drawRotatedQuad2D(const glm::vec2& position, const glm::vec2& size, float rotation, TextureHandle texture, const glm::vec4& tintColor = glm::vec4(1.0f));
+
+    // Line drawing
+    void drawLine2D(const glm::vec2& p0, const glm::vec2& p1, const glm::vec4& color, float thickness = 1.0f);
+    void drawLine2D(const glm::vec3& p0, const glm::vec3& p1, const glm::vec4& color, float thickness = 1.0f);
+
+    // Shape drawing
+    void drawRect2D(const glm::vec2& position, const glm::vec2& size, const glm::vec4& color, float thickness = 1.0f);
+    void drawCircle2D(const glm::vec2& center, float radius, const glm::vec4& color, int segments = 32);
+    void drawCircleFilled2D(const glm::vec2& center, float radius, const glm::vec4& color, int segments = 32);
+    void drawTriangle2D(const glm::vec2& p0, const glm::vec2& p1, const glm::vec2& p2, const glm::vec4& color);
+    void drawTriangleFilled2D(const glm::vec2& p0, const glm::vec2& p1, const glm::vec2& p2, const glm::vec4& color);
+
+    // Batch statistics
+    Batch2DStats getBatch2DStats() const { return batch2DStats; }
+    void resetBatch2DStats() { batch2DStats = {}; }
 
     NS::SharedPtr<MTL::RenderPipelineState>
         createPipeline(const std::string& filename, bool isHDR, bool isColorOnly, Uint32 sampleCount);
@@ -228,7 +253,25 @@ protected:
     std::vector<NS::SharedPtr<MTL::Buffer>> batch2DUniformBuffers; // Per-frame triple-buffered
     NS::SharedPtr<MTL::Texture> batch2DWhiteTexture;               // 1x1 white texture
     TextureHandle batch2DWhiteTextureHandle;
-    std::unique_ptr<Batch2D> batch2D;
+
+    // 2D Batch CPU-side state
+    static constexpr Uint32 Batch2DMaxQuads = 20000;
+    static constexpr Uint32 Batch2DMaxVertices = Batch2DMaxQuads * 4;
+    static constexpr Uint32 Batch2DMaxIndices = Batch2DMaxQuads * 6;
+    static constexpr Uint32 Batch2DMaxTextureSlots = 16;
+
+    std::vector<Batch2DVertex> batch2DVertices;
+    std::vector<Uint32> batch2DIndices;
+    std::array<TextureHandle, 16> batch2DTextureSlots;
+    Uint32 batch2DTextureSlotIndex = 1;  // 0 = white texture
+    glm::mat4 batch2DProjection = glm::mat4(1.0f);
+    BlendMode batch2DBlendMode = BlendMode::Alpha;
+    Batch2DStats batch2DStats;
+    bool batch2DActive = false;
+
+    // Pre-computed quad positions and UVs
+    glm::vec4 batch2DQuadPositions[4];
+    glm::vec2 batch2DQuadTexCoords[4];
 
     // Water rendering pipeline and resources
     NS::SharedPtr<MTL::RenderPipelineState> waterPipeline;
