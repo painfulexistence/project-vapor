@@ -149,34 +149,34 @@ public:
     }
 
     // ===== 2D Batch Rendering API =====
-    void beginBatch2D(const glm::mat4& projection, BlendMode blendMode = BlendMode::Alpha, bool depthTest = false);
-    void endBatch2D();
+    void beginBatch2D(const glm::mat4& projection, BlendMode blendMode = BlendMode::Alpha, bool depthTest = false) override;
+    void endBatch2D() override;
 
     // Quad drawing
-    void drawQuad2D(const glm::vec2& position, const glm::vec2& size, const glm::vec4& color);
-    void drawQuad2D(const glm::vec3& position, const glm::vec2& size, const glm::vec4& color);
-    void drawQuad2D(const glm::vec2& position, const glm::vec2& size, TextureHandle texture, const glm::vec4& tintColor = glm::vec4(1.0f));
-    void drawQuad2D(const glm::mat4& transform, const glm::vec4& color, int entityID = -1);
-    void drawQuad2D(const glm::mat4& transform, TextureHandle texture, const glm::vec2* texCoords, const glm::vec4& tintColor = glm::vec4(1.0f), int entityID = -1);
+    void drawQuad2D(const glm::vec2& position, const glm::vec2& size, const glm::vec4& color) override;
+    void drawQuad2D(const glm::vec3& position, const glm::vec2& size, const glm::vec4& color) override;
+    void drawQuad2D(const glm::vec2& position, const glm::vec2& size, TextureHandle texture, const glm::vec4& tintColor = glm::vec4(1.0f)) override;
+    void drawQuad2D(const glm::mat4& transform, const glm::vec4& color, int entityID = -1) override;
+    void drawQuad2D(const glm::mat4& transform, TextureHandle texture, const glm::vec2* texCoords, const glm::vec4& tintColor = glm::vec4(1.0f), int entityID = -1) override;
 
     // Rotated quad
-    void drawRotatedQuad2D(const glm::vec2& position, const glm::vec2& size, float rotation, const glm::vec4& color);
-    void drawRotatedQuad2D(const glm::vec2& position, const glm::vec2& size, float rotation, TextureHandle texture, const glm::vec4& tintColor = glm::vec4(1.0f));
+    void drawRotatedQuad2D(const glm::vec2& position, const glm::vec2& size, float rotation, const glm::vec4& color) override;
+    void drawRotatedQuad2D(const glm::vec2& position, const glm::vec2& size, float rotation, TextureHandle texture, const glm::vec4& tintColor = glm::vec4(1.0f)) override;
 
     // Line drawing
-    void drawLine2D(const glm::vec2& p0, const glm::vec2& p1, const glm::vec4& color, float thickness = 1.0f);
-    void drawLine2D(const glm::vec3& p0, const glm::vec3& p1, const glm::vec4& color, float thickness = 1.0f);
+    void drawLine2D(const glm::vec2& p0, const glm::vec2& p1, const glm::vec4& color, float thickness = 1.0f) override;
+    void drawLine2D(const glm::vec3& p0, const glm::vec3& p1, const glm::vec4& color, float thickness = 1.0f) override;
 
     // Shape drawing
-    void drawRect2D(const glm::vec2& position, const glm::vec2& size, const glm::vec4& color, float thickness = 1.0f);
-    void drawCircle2D(const glm::vec2& center, float radius, const glm::vec4& color, int segments = 32);
-    void drawCircleFilled2D(const glm::vec2& center, float radius, const glm::vec4& color, int segments = 32);
-    void drawTriangle2D(const glm::vec2& p0, const glm::vec2& p1, const glm::vec2& p2, const glm::vec4& color);
-    void drawTriangleFilled2D(const glm::vec2& p0, const glm::vec2& p1, const glm::vec2& p2, const glm::vec4& color);
+    void drawRect2D(const glm::vec2& position, const glm::vec2& size, const glm::vec4& color, float thickness = 1.0f) override;
+    void drawCircle2D(const glm::vec2& center, float radius, const glm::vec4& color, int segments = 32) override;
+    void drawCircleFilled2D(const glm::vec2& center, float radius, const glm::vec4& color, int segments = 32) override;
+    void drawTriangle2D(const glm::vec2& p0, const glm::vec2& p1, const glm::vec2& p2, const glm::vec4& color) override;
+    void drawTriangleFilled2D(const glm::vec2& p0, const glm::vec2& p1, const glm::vec2& p2, const glm::vec4& color) override;
 
     // Batch statistics
-    Batch2DStats getBatch2DStats() const { return batch2DStats; }
-    void resetBatch2DStats() { batch2DStats = {}; }
+    Batch2DStats getBatch2DStats() const override { return batch2DStats; }
+    void resetBatch2DStats() override { batch2DStats = {}; }
 
     NS::SharedPtr<MTL::RenderPipelineState>
         createPipeline(const std::string& filename, bool isHDR, bool isColorOnly, Uint32 sampleCount);

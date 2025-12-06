@@ -3,8 +3,10 @@
 #include <SDL3/SDL.h>
 #include <args.hxx>
 #include <fmt/core.h>
+#include <glm/ext/matrix_clip_space.hpp>
 #include <glm/ext/matrix_transform.hpp>
 #include <glm/ext/vector_float3.hpp>
+#include <glm/trigonometric.hpp>
 #include <iostream>
 
 #include "Vapor/asset_manager.hpp"
@@ -413,6 +415,52 @@ int main(int argc, char* args[]) {
             tempCamera.setProjectionMatrix(cam.projectionMatrix);
 
             renderer->draw(scene, tempCamera);
+
+            // ===== 2D Batch Rendering Demo =====
+            // Screen-space orthographic projection (origin at top-left)
+            glm::mat4 projection2D = glm::ortho(0.0f, (float)windowWidth, (float)windowHeight, 0.0f, -1.0f, 1.0f);
+            renderer->beginBatch2D(projection2D, BlendMode::Alpha);
+
+            // Draw many colored quads in a grid pattern
+            float quadSize = 20.0f;
+            float spacing = 25.0f;
+            int cols = 10;
+            int rows = 5;
+            for (int y = 0; y < rows; y++) {
+                for (int x = 0; x < cols; x++) {
+                    float px = 50.0f + x * spacing;
+                    float py = 50.0f + y * spacing;
+                    // Rainbow colors based on position
+                    float hue = (float)(x + y * cols) / (float)(cols * rows);
+                    glm::vec4 color = glm::vec4(
+                        0.5f + 0.5f * sin(hue * 6.28f),
+                        0.5f + 0.5f * sin(hue * 6.28f + 2.09f),
+                        0.5f + 0.5f * sin(hue * 6.28f + 4.18f),
+                        0.8f
+                    );
+                    renderer->drawQuad2D(glm::vec2(px, py), glm::vec2(quadSize, quadSize), color);
+                }
+            }
+
+            // Draw some shapes
+            renderer->drawCircleFilled2D(glm::vec2(400.0f, 100.0f), 30.0f, glm::vec4(1.0f, 0.5f, 0.0f, 1.0f));
+            renderer->drawRect2D(glm::vec2(450.0f, 70.0f), glm::vec2(60.0f, 60.0f), glm::vec4(0.0f, 1.0f, 0.5f, 1.0f), 2.0f);
+            renderer->drawTriangleFilled2D(
+                glm::vec2(550.0f, 130.0f),
+                glm::vec2(520.0f, 70.0f),
+                glm::vec2(580.0f, 70.0f),
+                glm::vec4(0.5f, 0.0f, 1.0f, 1.0f)
+            );
+
+            // Draw rotating quad (using time for animation)
+            renderer->drawRotatedQuad2D(
+                glm::vec2(650.0f, 100.0f),
+                glm::vec2(40.0f, 40.0f),
+                time * 2.0f,  // rotation in radians
+                glm::vec4(1.0f, 1.0f, 0.0f, 1.0f)
+            );
+
+            renderer->endBatch2D();
         } else {
             // Fallback camera or warning
             // fmt::print(stderr, "Warning: No active camera found for rendering.\n");
