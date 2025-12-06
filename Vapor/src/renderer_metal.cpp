@@ -1152,31 +1152,9 @@ public:
         memcpy(r.particleAttractorBuffers[r.currentFrameInFlight]->contents(), &attractor, sizeof(ParticleAttractor));
         r.particleAttractorBuffers[r.currentFrameInFlight]->didModifyRange(NS::Range::Make(0, sizeof(ParticleAttractor)));
 
-        // Compute passes: Use single encoder with memory barrier
+        // Test: Empty compute encoder to see if encoder creation is the issue
         {
             auto computeEncoder = r.currentCommandBuffer->computeCommandEncoder();
-
-            // Force calculation
-            computeEncoder->setComputePipelineState(r.particleForcePipeline.get());
-            computeEncoder->setBuffer(r.particleBuffers[r.currentFrameInFlight].get(), 0, 0);
-            computeEncoder->setBuffer(r.particleSimParamsBuffers[r.currentFrameInFlight].get(), 0, 1);
-            computeEncoder->setBuffer(r.particleAttractorBuffers[r.currentFrameInFlight].get(), 0, 2);
-
-            // Use dispatchThreads for exact thread count
-            NS::UInteger threadExecutionWidth = r.particleForcePipeline->threadExecutionWidth();
-            MTL::Size threadsPerGroup = MTL::Size(threadExecutionWidth, 1, 1);
-            MTL::Size numThreads = MTL::Size(r.particleCount, 1, 1);
-            computeEncoder->dispatchThreads(numThreads, threadsPerGroup);
-
-            // Memory barrier between compute dispatches
-            computeEncoder->memoryBarrier(MTL::BarrierScopeBuffers);
-
-            // Integration
-            computeEncoder->setComputePipelineState(r.particleIntegratePipeline.get());
-            computeEncoder->setBuffer(r.particleBuffers[r.currentFrameInFlight].get(), 0, 0);
-            computeEncoder->setBuffer(r.particleSimParamsBuffers[r.currentFrameInFlight].get(), 0, 1);
-            computeEncoder->dispatchThreads(numThreads, threadsPerGroup);
-
             computeEncoder->endEncoding();
         }
 
