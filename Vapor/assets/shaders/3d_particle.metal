@@ -17,8 +17,8 @@ struct ParticleSimParams {
     float2 mousePosition;
     float time;
     float deltaTime;
+    uint particleCount;
     float _pad1;
-    float _pad2;
 };
 
 // Attractor data
@@ -37,6 +37,11 @@ kernel void particleForce(
     constant ParticleAttractor& attractor [[buffer(2)]],
     uint id [[thread_position_in_grid]]
 ) {
+    // Bounds check to avoid out-of-bounds access
+    if (id >= params.particleCount) {
+        return;
+    }
+
     Particle p = particles[id];
 
     // Reset force
@@ -63,6 +68,11 @@ kernel void particleIntegrate(
     constant ParticleSimParams& params [[buffer(1)]],
     uint id [[thread_position_in_grid]]
 ) {
+    // Bounds check to avoid out-of-bounds access
+    if (id >= params.particleCount) {
+        return;
+    }
+
     Particle p = particles[id];
 
     // Semi-implicit Euler integration

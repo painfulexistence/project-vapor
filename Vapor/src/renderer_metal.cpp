@@ -1103,14 +1103,16 @@ public:
     void execute() override {
         auto& r = *renderer;
 
+        // Skip if particle system is disabled or pipelines aren't ready
         if (!r.particleSystemEnabled || r.particleCount == 0) {
+            return;
+        }
+        if (!r.particleForcePipeline || !r.particleIntegratePipeline || !r.particleRenderPipeline) {
             return;
         }
 
         auto time = (float)SDL_GetTicks() / 1000.0f;
-        static float lastTime = time;
-        float deltaTime = time - lastTime;
-        lastTime = time;
+        float deltaTime = 1.0f / 60.0f; // Use fixed timestep to avoid issues
 
         // Compute attractor position (in front of camera)
         glm::vec3 camPos = r.currentCamera->getEye();
@@ -1124,8 +1126,8 @@ public:
             glm::vec2 mousePosition;
             float time;
             float deltaTime;
+            Uint32 particleCount;
             float _pad1;
-            float _pad2;
         } simParams;
 
         auto drawableSize = r.swapchain->drawableSize();
@@ -1133,6 +1135,7 @@ public:
         simParams.mousePosition = glm::vec2(0.0f);
         simParams.time = time;
         simParams.deltaTime = deltaTime;
+        simParams.particleCount = r.particleCount;
 
         memcpy(r.particleSimParamsBuffers[r.currentFrameInFlight]->contents(), &simParams, sizeof(ParticleSimParams));
 
@@ -2758,45 +2761,48 @@ auto Renderer_Metal::createResources() -> void {
         code->release();
     }
 
-    // Create particle render pipeline
+    // Create particle render pipeline - compile from source file
     {
         NS::Error* error = nullptr;
-        auto library = NS::TransferPtr(device->newDefaultLibrary());
-        if (!library) {
-            auto shaderSource = readFile("assets/shaders/3d_particle.metal");
-            auto source = NS::String::string(shaderSource.c_str(), NS::UTF8StringEncoding);
-            auto options = NS::TransferPtr(MTL::CompileOptions::alloc()->init());
-            library = NS::TransferPtr(device->newLibrary(source, options.get(), &error));
-        }
+        auto shaderSource = readFile("assets/shaders/3d_particle.metal");
+        auto source = NS::String::string(shaderSource.c_str(), NS::UTF8StringEncoding);
+        auto options = NS::TransferPtr(MTL::CompileOptions::alloc()->init());
+        auto library = NS::TransferPtr(device->newLibrary(source, options.get(), &error));
 
-        if (library) {
+        if (!library) {
+            fmt::print("Failed to compile particle render shader: {}\n", error->localizedDescription()->utf8String());
+        } else {
             auto vertexFunc =
                 NS::TransferPtr(library->newFunction(NS::String::string("particleVertex", NS::UTF8StringEncoding)));
             auto fragFunc =
                 NS::TransferPtr(library->newFunction(NS::String::string("particleFragment", NS::UTF8StringEncoding)));
 
-            auto pipelineDesc = NS::TransferPtr(MTL::RenderPipelineDescriptor::alloc()->init());
-            pipelineDesc->setVertexFunction(vertexFunc.get());
-            pipelineDesc->setFragmentFunction(fragFunc.get());
+            if (!vertexFunc || !fragFunc) {
+                fmt::print("Failed to find particle vertex/fragment functions\n");
+            } else {
+                auto pipelineDesc = NS::TransferPtr(MTL::RenderPipelineDescriptor::alloc()->init());
+                pipelineDesc->setVertexFunction(vertexFunc.get());
+                pipelineDesc->setFragmentFunction(fragFunc.get());
 
-            // Color attachment with additive blending
-            auto colorAttachment = pipelineDesc->colorAttachments()->object(0);
-            colorAttachment->setPixelFormat(MTL::PixelFormatRGBA16Float);
-            colorAttachment->setBlendingEnabled(true);
-            colorAttachment->setSourceRGBBlendFactor(MTL::BlendFactorOne);
-            colorAttachment->setDestinationRGBBlendFactor(MTL::BlendFactorOneMinusSourceColor);
-            colorAttachment->setRgbBlendOperation(MTL::BlendOperationAdd);
-            colorAttachment->setSourceAlphaBlendFactor(MTL::BlendFactorOne);
-            colorAttachment->setDestinationAlphaBlendFactor(MTL::BlendFactorZero);
-            colorAttachment->setAlphaBlendOperation(MTL::BlendOperationAdd);
+                // Color attachment with additive blending
+                auto colorAttachment = pipelineDesc->colorAttachments()->object(0);
+                colorAttachment->setPixelFormat(MTL::PixelFormatRGBA16Float);
+                colorAttachment->setBlendingEnabled(true);
+                colorAttachment->setSourceRGBBlendFactor(MTL::BlendFactorOne);
+                colorAttachment->setDestinationRGBBlendFactor(MTL::BlendFactorOne);
+                colorAttachment->setRgbBlendOperation(MTL::BlendOperationAdd);
+                colorAttachment->setSourceAlphaBlendFactor(MTL::BlendFactorOne);
+                colorAttachment->setDestinationAlphaBlendFactor(MTL::BlendFactorZero);
+                colorAttachment->setAlphaBlendOperation(MTL::BlendOperationAdd);
 
-            pipelineDesc->setDepthAttachmentPixelFormat(MTL::PixelFormatDepth32Float);
+                pipelineDesc->setDepthAttachmentPixelFormat(MTL::PixelFormatDepth32Float);
 
-            particleRenderPipeline = NS::TransferPtr(device->newRenderPipelineState(pipelineDesc.get(), &error));
-            if (error) {
-                fmt::print(
-                    "Failed to create particle render pipeline: {}\n", error->localizedDescription()->utf8String()
-                );
+                particleRenderPipeline = NS::TransferPtr(device->newRenderPipelineState(pipelineDesc.get(), &error));
+                if (error) {
+                    fmt::print(
+                        "Failed to create particle render pipeline: {}\n", error->localizedDescription()->utf8String()
+                    );
+                }
             }
         }
 
