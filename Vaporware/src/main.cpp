@@ -417,9 +417,7 @@ int main(int argc, char* args[]) {
             renderer->draw(scene, tempCamera);
 
             // ===== 2D Batch Rendering Demo =====
-            // Screen-space orthographic projection (origin at top-left)
-            glm::mat4 projection2D = glm::ortho(0.0f, (float)windowWidth, (float)windowHeight, 0.0f, -1.0f, 1.0f);
-            renderer->beginBatch2D(projection2D, BlendMode::Alpha);
+            // Just draw - projection is computed internally from window size
 
             // Draw many colored quads in a grid pattern
             float quadSize = 20.0f;
@@ -460,7 +458,8 @@ int main(int argc, char* args[]) {
                 glm::vec4(1.0f, 1.0f, 0.0f, 1.0f)
             );
 
-            renderer->endBatch2D();
+            // Draw 3D quad in world space (will be occluded by geometry)
+            renderer->drawQuad3D(glm::vec3(0.0f, 2.0f, 0.0f), glm::vec2(1.0f, 1.0f), glm::vec4(1.0f, 0.0f, 0.0f, 1.0f));
         } else {
             // Fallback camera or warning
             // fmt::print(stderr, "Warning: No active camera found for rendering.\n");

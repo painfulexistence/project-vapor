@@ -48,6 +48,7 @@ class RmlUiPass;
 class ImGuiPass;
 class DebugDrawPass;
 class Batch2DPass;
+class Batch3DPass;
 
 class RenderPass {
 public:
@@ -114,6 +115,7 @@ class Renderer_Metal final : public Renderer {// Must be public or factory funct
     friend class ImGuiPass;
     friend class DebugDrawPass;
     friend class Batch2DPass;
+    friend class Batch3DPass;
 
 public:
     Renderer_Metal();
@@ -148,16 +150,18 @@ public:
         return debugDraw;
     }
 
-    // ===== 2D Batch Rendering API =====
-    void beginBatch2D(const glm::mat4& projection, BlendMode blendMode = BlendMode::Alpha, bool depthTest = false) override;
-    void endBatch2D() override;
+    // ===== 2D/3D Batch Rendering API =====
+    void flush2D() override;
+    void flush3D() override;
 
-    // Quad drawing
+    // Quad drawing (2D = screen space, 3D = world space with depth)
     void drawQuad2D(const glm::vec2& position, const glm::vec2& size, const glm::vec4& color) override;
     void drawQuad2D(const glm::vec3& position, const glm::vec2& size, const glm::vec4& color) override;
     void drawQuad2D(const glm::vec2& position, const glm::vec2& size, TextureHandle texture, const glm::vec4& tintColor = glm::vec4(1.0f)) override;
     void drawQuad2D(const glm::mat4& transform, const glm::vec4& color, int entityID = -1) override;
     void drawQuad2D(const glm::mat4& transform, TextureHandle texture, const glm::vec2* texCoords, const glm::vec4& tintColor = glm::vec4(1.0f), int entityID = -1) override;
+    void drawQuad3D(const glm::vec3& position, const glm::vec2& size, const glm::vec4& color) override;
+    void drawQuad3D(const glm::mat4& transform, const glm::vec4& color, int entityID = -1) override;
 
     // Rotated quad
     void drawRotatedQuad2D(const glm::vec2& position, const glm::vec2& size, float rotation, const glm::vec4& color) override;
@@ -165,7 +169,7 @@ public:
 
     // Line drawing
     void drawLine2D(const glm::vec2& p0, const glm::vec2& p1, const glm::vec4& color, float thickness = 1.0f) override;
-    void drawLine2D(const glm::vec3& p0, const glm::vec3& p1, const glm::vec4& color, float thickness = 1.0f) override;
+    void drawLine3D(const glm::vec3& p0, const glm::vec3& p1, const glm::vec4& color, float thickness = 1.0f) override;
 
     // Shape drawing
     void drawRect2D(const glm::vec2& position, const glm::vec2& size, const glm::vec4& color, float thickness = 1.0f) override;
@@ -255,25 +259,35 @@ protected:
     NS::SharedPtr<MTL::Texture> batch2DWhiteTexture;               // 1x1 white texture
     TextureHandle batch2DWhiteTextureHandle;
 
-    // 2D Batch CPU-side state
-    static constexpr Uint32 Batch2DMaxQuads = 20000;
-    static constexpr Uint32 Batch2DMaxVertices = Batch2DMaxQuads * 4;
-    static constexpr Uint32 Batch2DMaxIndices = Batch2DMaxQuads * 6;
-    static constexpr Uint32 Batch2DMaxTextureSlots = 16;
+    // Batch constants
+    static constexpr Uint32 BatchMaxQuads = 20000;
+    static constexpr Uint32 BatchMaxVertices = BatchMaxQuads * 4;
+    static constexpr Uint32 BatchMaxIndices = BatchMaxQuads * 6;
+    static constexpr Uint32 BatchMaxTextureSlots = 16;
 
+    // 2D Batch CPU-side state (screen space, no depth)
     std::vector<Batch2DVertex> batch2DVertices;
     std::vector<Uint32> batch2DIndices;
     std::array<TextureHandle, 16> batch2DTextureSlots;
     Uint32 batch2DTextureSlotIndex = 1;  // 0 = white texture
     glm::mat4 batch2DProjection = glm::mat4(1.0f);
     BlendMode batch2DBlendMode = BlendMode::Alpha;
-    bool batch2DDepthTest = false;
     Batch2DStats batch2DStats;
     bool batch2DActive = false;
 
+    // 3D Batch CPU-side state (world space, with depth)
+    std::vector<Batch2DVertex> batch3DVertices;
+    std::vector<Uint32> batch3DIndices;
+    std::array<TextureHandle, 16> batch3DTextureSlots;
+    Uint32 batch3DTextureSlotIndex = 1;
+    glm::mat4 batch3DProjection = glm::mat4(1.0f);
+    BlendMode batch3DBlendMode = BlendMode::Alpha;
+    Batch2DStats batch3DStats;
+    bool batch3DActive = false;
+
     // Pre-computed quad positions and UVs
-    glm::vec4 batch2DQuadPositions[4];
-    glm::vec2 batch2DQuadTexCoords[4];
+    glm::vec4 batchQuadPositions[4];
+    glm::vec2 batchQuadTexCoords[4];
 
     // Water rendering pipeline and resources
     NS::SharedPtr<MTL::RenderPipelineState> waterPipeline;
@@ -416,6 +430,12 @@ protected:
     Uint32 drawCount = 0;
 
 private:
+    // Internal batch management
+    void beginBatch2D();
+    void endBatch2D();
+    void beginBatch3D();
+    void endBatch3D();
+
     // Resource ID counters
     Uint32 nextBufferID = 0;
     Uint32 nextTextureID = 0;
