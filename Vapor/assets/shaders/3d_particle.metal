@@ -80,8 +80,8 @@ kernel void particleForce(
     constant ParticleAttractor& attractor [[buffer(2)]],
     uint id [[thread_position_in_grid]]
 ) {
-    // Bounds check to avoid out-of-bounds access
-    if (id >= params.particleCount) {
+    // Bounds check (use fixed max since emitterCount replaced particleCount)
+    if (id >= 50000) {
         return;
     }
 

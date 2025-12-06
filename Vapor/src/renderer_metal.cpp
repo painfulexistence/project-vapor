@@ -1120,14 +1120,32 @@ public:
         glm::vec3 forward = -glm::vec3(view[0][2], view[1][2], view[2][2]);
         glm::vec3 attractorPos = camPos + forward * 3.0f;
 
-        // Update simulation params buffer
+        // For now, use a default emitter with depth effects disabled
+        // TODO: Collect emitter data from ECS
+        Uint32 emitterCount = 1;
+        ParticleEmitterGPUData defaultEmitter;
+        defaultEmitter.position = glm::vec3(0.0f);
+        defaultEmitter.direction = glm::vec3(0.0f, 1.0f, 0.0f);
+        defaultEmitter.particleSize = 0.1f;
+        defaultEmitter.depthFadeEnabled = 0;  // Disabled by default
+        defaultEmitter.depthFadeDistance = 0.5f;
+        defaultEmitter.groundClampEnabled = 0;  // Disabled by default
+        defaultEmitter.groundOffset = 0.02f;
+        defaultEmitter.groundFriction = 0.8f;
+
+        memcpy(r.particleEmitterBuffers[r.currentFrameInFlight]->contents(), &defaultEmitter, sizeof(ParticleEmitterGPUData));
+        r.particleEmitterBuffers[r.currentFrameInFlight]->didModifyRange(NS::Range::Make(0, sizeof(ParticleEmitterGPUData)));
+
+        // Update simulation params buffer (with emitterCount instead of particleCount)
         struct ParticleSimParams {
             glm::vec2 resolution;
+            glm::vec2 _pad1;
             glm::vec2 mousePosition;
+            glm::vec2 _pad2;
             float time;
             float deltaTime;
-            Uint32 particleCount;
-            float _pad1;
+            Uint32 emitterCount;
+            float _pad3;
         } simParams;
 
         auto drawableSize = r.swapchain->drawableSize();
@@ -1135,11 +1153,10 @@ public:
         simParams.mousePosition = glm::vec2(0.0f);
         simParams.time = time;
         simParams.deltaTime = deltaTime;
-        simParams.particleCount = r.particleCount;
+        simParams.emitterCount = emitterCount;
 
         memcpy(r.particleSimParamsBuffers[r.currentFrameInFlight]->contents(), &simParams, sizeof(ParticleSimParams));
-        r.particleSimParamsBuffers[r.currentFrameInFlight]->didModifyRange(NS::Range::Make(0, sizeof(ParticleSimParams))
-        );
+        r.particleSimParamsBuffers[r.currentFrameInFlight]->didModifyRange(NS::Range::Make(0, sizeof(ParticleSimParams)));
 
         // Update attractor buffer
         struct ParticleAttractor {
@@ -1151,8 +1168,7 @@ public:
         attractor.strength = 50.0f;// Increased strength
 
         memcpy(r.particleAttractorBuffers[r.currentFrameInFlight]->contents(), &attractor, sizeof(ParticleAttractor));
-        r.particleAttractorBuffers[r.currentFrameInFlight]->didModifyRange(NS::Range::Make(0, sizeof(ParticleAttractor))
-        );
+        r.particleAttractorBuffers[r.currentFrameInFlight]->didModifyRange(NS::Range::Make(0, sizeof(ParticleAttractor)));
 
         // Compute passes (single particle buffer - persistent state)
         {
@@ -1168,10 +1184,13 @@ public:
             MTL::Size threadGroupSize = MTL::Size(256, 1, 1);
             computeEncoder->dispatchThreadgroups(gridSize, threadGroupSize);
 
-            // Integration
+            // Integration - now with camera, emitters, and depth texture for ground clamping
             computeEncoder->setComputePipelineState(r.particleIntegratePipeline.get());
             computeEncoder->setBuffer(r.particleBuffer.get(), 0, 0);
             computeEncoder->setBuffer(r.particleSimParamsBuffers[r.currentFrameInFlight].get(), 0, 1);
+            computeEncoder->setBuffer(r.cameraDataBuffers[r.currentFrameInFlight].get(), 0, 2);
+            computeEncoder->setBuffer(r.particleEmitterBuffers[r.currentFrameInFlight].get(), 0, 3);
+            computeEncoder->setTexture(r.depthStencilRT.get(), 0);  // Depth texture for ground clamping
             computeEncoder->dispatchThreadgroups(gridSize, threadGroupSize);
 
             computeEncoder->endEncoding();
@@ -1195,18 +1214,27 @@ public:
             encoder->setDepthStencilState(r.particleDepthStencilState.get());
             encoder->setCullMode(MTL::CullModeNone);
 
-            // Set buffers
+            // Vertex shader buffers
             encoder->setVertexBuffer(r.cameraDataBuffers[r.currentFrameInFlight].get(), 0, 0);
 
             struct ParticlePushConstants {
                 float particleSize;
-                float _pad1;
-                float _pad2;
-                float _pad3;
+                float globalTime;
+                Uint32 emitterCount;
+                Uint32 _pad1;
             } pushConstants;
-            pushConstants.particleSize = 0.1f;// Larger particles for visibility
+            pushConstants.particleSize = 0.1f;
+            pushConstants.globalTime = time;
+            pushConstants.emitterCount = emitterCount;
             encoder->setVertexBytes(&pushConstants, sizeof(ParticlePushConstants), 1);
             encoder->setVertexBuffer(r.particleBuffer.get(), 0, 2);
+            encoder->setVertexBuffer(r.particleEmitterBuffers[r.currentFrameInFlight].get(), 0, 3);
+
+            // Fragment shader buffers
+            encoder->setFragmentBuffer(r.cameraDataBuffers[r.currentFrameInFlight].get(), 0, 0);
+            encoder->setFragmentBytes(&pushConstants, sizeof(ParticlePushConstants), 1);
+            encoder->setFragmentBuffer(r.particleEmitterBuffers[r.currentFrameInFlight].get(), 0, 2);
+            encoder->setFragmentTexture(r.depthStencilRT.get(), 0);  // Depth texture for depth fade
 
             // Draw 6 vertices per particle (2 triangles = 1 quad), instanced
             encoder->drawPrimitives(MTL::PrimitiveType::PrimitiveTypeTriangle, 0, 6, r.particleCount);
@@ -2944,11 +2972,14 @@ auto Renderer_Metal::createResources() -> void {
     // Per-frame uniform buffers (triple-buffered)
     particleSimParamsBuffers.resize(MAX_FRAMES_IN_FLIGHT);
     particleAttractorBuffers.resize(MAX_FRAMES_IN_FLIGHT);
+    particleEmitterBuffers.resize(MAX_FRAMES_IN_FLIGHT);
     for (size_t i = 0; i < MAX_FRAMES_IN_FLIGHT; i++) {
         particleSimParamsBuffers[i] =
             NS::TransferPtr(device->newBuffer(sizeof(ParticleSimulationParams), MTL::ResourceStorageModeShared));
         particleAttractorBuffers[i] =
             NS::TransferPtr(device->newBuffer(sizeof(ParticleAttractorData), MTL::ResourceStorageModeShared));
+        particleEmitterBuffers[i] =
+            NS::TransferPtr(device->newBuffer(sizeof(ParticleEmitterGPUData) * MAX_EMITTERS, MTL::ResourceStorageModeShared));
     }
 
     // Initialize particles with random positions and colors
