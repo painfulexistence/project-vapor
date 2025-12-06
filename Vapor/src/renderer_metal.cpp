@@ -1152,6 +1152,9 @@ public:
         memcpy(r.particleAttractorBuffers[r.currentFrameInFlight]->contents(), &attractor, sizeof(ParticleAttractor));
         r.particleAttractorBuffers[r.currentFrameInFlight]->didModifyRange(NS::Range::Make(0, sizeof(ParticleAttractor)));
 
+        // Skip compute passes for now - render static particles
+        // TODO: Re-enable once rendering is confirmed working
+        #if 0
         // Compute passes: Use single encoder with memory barrier
         {
             auto computeEncoder = r.currentCommandBuffer->computeCommandEncoder();
@@ -1177,6 +1180,7 @@ public:
 
             computeEncoder->endEncoding();
         }
+        #endif
 
         // Render pass: Draw particles
         {
