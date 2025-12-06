@@ -33,6 +33,7 @@ class PrefilterEnvMapPass;
 class BRDFLUTPass;
 class MainRenderPass;
 class WaterPass;
+class ParticlePass;
 class LightScatteringPass;
 class PostProcessPass;
 class BloomBrightnessPass;
@@ -97,6 +98,7 @@ class Renderer_Metal final : public Renderer {// Must be public or factory funct
     friend class BRDFLUTPass;
     friend class MainRenderPass;
     friend class WaterPass;
+    friend class ParticlePass;
     friend class LightScatteringPass;
     friend class PostProcessPass;
     friend class BloomBrightnessPass;
@@ -232,6 +234,22 @@ protected:
     TextureHandle waterFoamMap;
     TextureHandle waterNoiseMap;
     NS::SharedPtr<MTL::Texture> environmentCubeMap;
+
+    // Particle system
+    static constexpr Uint32 MAX_PARTICLES = 1000;// Reduced for debugging
+    bool particleSystemEnabled = true;
+    Uint32 particleCount = MAX_PARTICLES;
+
+    NS::SharedPtr<MTL::ComputePipelineState> particleForcePipeline;
+    NS::SharedPtr<MTL::ComputePipelineState> particleIntegratePipeline;
+    NS::SharedPtr<MTL::RenderPipelineState> particleRenderPipeline;
+    NS::SharedPtr<MTL::DepthStencilState> particleDepthStencilState;
+
+    // Single particle buffer (persistent state, not triple-buffered)
+    NS::SharedPtr<MTL::Buffer> particleBuffer;
+    // Per-frame uniform buffers (triple-buffered)
+    std::vector<NS::SharedPtr<MTL::Buffer>> particleSimParamsBuffers;
+    std::vector<NS::SharedPtr<MTL::Buffer>> particleAttractorBuffers;
 
     // Per-frame buffers
     std::vector<NS::SharedPtr<MTL::Buffer>> frameDataBuffers;

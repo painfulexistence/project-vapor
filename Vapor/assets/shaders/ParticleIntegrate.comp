@@ -1,0 +1,50 @@
+#version 450
+layout(local_size_x = 256, local_size_y = 1, local_size_z = 1) in;
+
+struct Particle {
+    vec3 position;
+    float _pad1;
+    vec3 velocity;
+    float _pad2;
+    vec3 force;
+    float _pad3;
+    vec4 color;
+};
+
+layout(std140, set = 0, binding = 0) uniform SimulationParams {
+    vec2 resolution;
+    vec2 mousePosition;
+    float time;
+    float deltaTime;
+    float _pad1;
+    float _pad2;
+};
+
+layout(std430, set = 0, binding = 2) buffer ParticleBuffer {
+    Particle particles[];
+};
+
+void main() {
+    uint idx = gl_GlobalInvocationID.x;
+    if (idx >= particles.length()) {
+        return;
+    }
+
+    Particle p = particles[idx];
+
+    // Semi-implicit Euler integration
+    p.velocity += p.force * deltaTime;
+    p.position += p.velocity * deltaTime;
+
+    // Boundary conditions (keep particles in a sphere)
+    float maxDist = 20.0;
+    float dist = length(p.position);
+    if (dist > maxDist) {
+        p.position = normalize(p.position) * maxDist;
+        // Reflect velocity
+        vec3 normal = normalize(p.position);
+        p.velocity = reflect(p.velocity, normal) * 0.5;
+    }
+
+    particles[idx] = p;
+}
