@@ -1152,9 +1152,26 @@ public:
         memcpy(r.particleAttractorBuffers[r.currentFrameInFlight]->contents(), &attractor, sizeof(ParticleAttractor));
         r.particleAttractorBuffers[r.currentFrameInFlight]->didModifyRange(NS::Range::Make(0, sizeof(ParticleAttractor)));
 
-        // Test: Empty compute encoder to see if encoder creation is the issue
+        // Compute passes: Test without memory barrier
         {
             auto computeEncoder = r.currentCommandBuffer->computeCommandEncoder();
+
+            // Force calculation
+            computeEncoder->setComputePipelineState(r.particleForcePipeline.get());
+            computeEncoder->setBuffer(r.particleBuffers[r.currentFrameInFlight].get(), 0, 0);
+            computeEncoder->setBuffer(r.particleSimParamsBuffers[r.currentFrameInFlight].get(), 0, 1);
+            computeEncoder->setBuffer(r.particleAttractorBuffers[r.currentFrameInFlight].get(), 0, 2);
+
+            MTL::Size gridSize = MTL::Size((r.particleCount + 255) / 256, 1, 1);
+            MTL::Size threadGroupSize = MTL::Size(256, 1, 1);
+            computeEncoder->dispatchThreadgroups(gridSize, threadGroupSize);
+
+            // Integration (no barrier between dispatches)
+            computeEncoder->setComputePipelineState(r.particleIntegratePipeline.get());
+            computeEncoder->setBuffer(r.particleBuffers[r.currentFrameInFlight].get(), 0, 0);
+            computeEncoder->setBuffer(r.particleSimParamsBuffers[r.currentFrameInFlight].get(), 0, 1);
+            computeEncoder->dispatchThreadgroups(gridSize, threadGroupSize);
+
             computeEncoder->endEncoding();
         }
 
