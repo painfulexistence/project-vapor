@@ -169,6 +169,7 @@ struct alignas(16) LightCullData {
     glm::vec2 screenSize;
     glm::vec2 _pad1;
     glm::uvec3 gridSize;
+    float _pad2;
     Uint32 lightCount;
 };
 
@@ -241,6 +242,25 @@ struct alignas(16) IBLCaptureData {
     Uint32 faceIndex;// Current cubemap face (0-5)
     float roughness;// Roughness level for prefilter pass
     float _pad[2];
+};
+
+// Light scattering (God Rays) data for volumetric light effect
+struct alignas(16) LightScatteringData {
+    glm::vec2 sunScreenPos;          // Sun position in screen space [0,1]
+    glm::vec2 screenSize;            // Screen dimensions in pixels
+    float density;                   // Scattering density multiplier (default: 1.0)
+    float weight;                    // Per-sample weight (default: 0.01)
+    float decay;                     // Exponential decay factor per sample (default: 0.97)
+    float exposure;                  // Final exposure/brightness multiplier (default: 0.3)
+    Uint32 numSamples;               // Number of ray march samples (default: 64)
+    float maxDistance;               // Maximum ray distance in UV space (default: 1.0)
+    float sunIntensity;              // Sun intensity multiplier (default: 1.0)
+    float mieG;                      // Mie scattering g parameter [-1,1] (default: 0.76)
+    glm::vec3 sunColor;              // Sun/light color (default: white)
+    float _pad1;
+    float depthThreshold;            // Depth threshold for sky detection (default: 0.9999)
+    float jitter;                    // Temporal jitter amount [0,1] (default: 0.5)
+    glm::vec2 _pad2;
 };
 
 struct VertexData {
