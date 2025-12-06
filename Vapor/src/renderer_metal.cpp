@@ -1,6 +1,8 @@
+#include <memory>
 #define NS_PRIVATE_IMPLEMENTATION
 #define MTL_PRIVATE_IMPLEMENTATION
 #define CA_PRIVATE_IMPLEMENTATION
+#include "debug_draw.hpp"
 #include "renderer_metal.hpp"
 
 #include <SDL3/SDL_stdinc.h>
@@ -1426,6 +1428,86 @@ public:
     }
 };
 
+// Debug draw pass: Renders wireframe debug shapes (lines)
+class DebugDrawPass : public RenderPass {
+public:
+    explicit DebugDrawPass(Renderer_Metal* renderer) : RenderPass(renderer) {
+    }
+
+    const char* getName() const override {
+        return "DebugDrawPass";
+    }
+
+    void execute() override {
+        auto& r = *renderer;
+
+        // Skip if no debug draw data
+        if (!r.debugDraw || !r.debugDraw->hasContent()) {
+            return;
+        }
+
+        const auto& lineVertices = r.debugDraw->getLineVertices();
+        if (lineVertices.empty()) {
+            return;
+        }
+
+        // Get or create vertex buffer for this frame
+        auto& vertexBuffer = r.debugDrawVertexBuffers[r.currentFrameInFlight];
+
+        // Calculate required buffer size
+        size_t requiredSize = lineVertices.size() * sizeof(Vapor::DebugVertex);
+
+        // Reallocate buffer if needed
+        if (!vertexBuffer || vertexBuffer->length() < requiredSize) {
+            // Allocate with some extra space to avoid frequent reallocations
+            size_t allocSize = std::max(requiredSize, size_t(64 * 1024));// Min 64KB
+            vertexBuffer = NS::TransferPtr(r.device->newBuffer(allocSize, MTL::ResourceStorageModeShared));
+        }
+
+        // Upload vertex data
+        memcpy(vertexBuffer->contents(), lineVertices.data(), requiredSize);
+        vertexBuffer->didModifyRange(NS::Range(0, requiredSize));
+
+        // Create render pass descriptor
+        auto passDesc = NS::TransferPtr(MTL::RenderPassDescriptor::renderPassDescriptor());
+        auto colorAttachment = passDesc->colorAttachments()->object(0);
+        colorAttachment->setTexture(r.currentDrawable->texture());
+        colorAttachment->setLoadAction(MTL::LoadActionLoad);
+        colorAttachment->setStoreAction(MTL::StoreActionStore);
+
+        // Use depth buffer for proper occlusion
+        auto depthAttachment = passDesc->depthAttachment();
+        depthAttachment->setTexture(r.depthStencilRT.get());
+        depthAttachment->setLoadAction(MTL::LoadActionLoad);
+        depthAttachment->setStoreAction(MTL::StoreActionStore);
+
+        auto encoder = r.currentCommandBuffer->renderCommandEncoder(passDesc.get());
+
+        // Set viewport
+        auto drawableSize = r.currentDrawable->texture()->width();
+        auto drawableHeight = r.currentDrawable->texture()->height();
+        MTL::Viewport viewport = { 0.0, 0.0, static_cast<double>(drawableSize), static_cast<double>(drawableHeight),
+                                   0.0, 1.0 };
+        encoder->setViewport(viewport);
+
+        // Set pipeline and depth state
+        encoder->setRenderPipelineState(r.debugDrawPipeline.get());
+        encoder->setDepthStencilState(r.debugDrawDepthStencilState.get());
+        encoder->setCullMode(MTL::CullModeNone);
+
+        // Set vertex buffer
+        encoder->setVertexBuffer(vertexBuffer.get(), 0, 0);
+        encoder->setVertexBuffer(r.cameraDataBuffers[r.currentFrameInFlight].get(), 0, 1);
+
+        // Draw lines
+        encoder->drawPrimitives(MTL::PrimitiveTypeLine, NS::UInteger(0), NS::UInteger(lineVertices.size()));
+
+        encoder->endEncoding();
+
+        r.debugDraw->clear();
+    }
+};
+
 // RmlUI pass: Renders the RmlUI overlay (before ImGui)
 class RmlUiPass : public RenderPass {
 public:
@@ -1536,8 +1618,11 @@ auto Renderer_Metal::init(SDL_Window* window) -> void {
 
     // Post-processing (tone mapping, color grading, chromatic aberration, vignette)
     graph.addPass(std::make_unique<PostProcessPass>(this));
+    graph.addPass(std::make_unique<DebugDrawPass>(this));// Debug draw after post-process
     graph.addPass(std::make_unique<RmlUiPass>(this));// RmlUI before ImGui
     graph.addPass(std::make_unique<ImGuiPass>(this));
+
+    debugDraw = std::make_shared<Vapor::DebugDraw>();
 }
 
 auto Renderer_Metal::deinit() -> void {
@@ -1639,6 +1724,68 @@ auto Renderer_Metal::createResources() -> void {
     irradianceConvolutionPipeline = createPipeline("assets/shaders/3d_irradiance_convolution.metal", true, true, 1);
     prefilterEnvMapPipeline = createPipeline("assets/shaders/3d_prefilter_envmap.metal", true, true, 1);
     brdfLUTPipeline = createPipeline("assets/shaders/3d_brdf_lut.metal", false, true, 1);
+
+    // Create debug draw pipeline
+    {
+        auto shaderSrc = readFile("assets/shaders/3d_debug.metal");
+        auto code = NS::String::string(shaderSrc.data(), NS::StringEncoding::UTF8StringEncoding);
+        NS::Error* error = nullptr;
+        MTL::Library* library = device->newLibrary(code, nullptr, &error);
+        if (!library) {
+            fmt::print(
+                "Warning: Could not compile debug draw shader: {}\n",
+                error ? error->localizedDescription()->utf8String() : "unknown error"
+            );
+        } else {
+            auto vertexFuncName = NS::String::string("debug_vertex", NS::StringEncoding::UTF8StringEncoding);
+            auto vertexMain = library->newFunction(vertexFuncName);
+
+            auto fragmentFuncName = NS::String::string("debug_fragment", NS::StringEncoding::UTF8StringEncoding);
+            auto fragmentMain = library->newFunction(fragmentFuncName);
+
+            MTL::RenderPipelineDescriptor* pipelineDesc = MTL::RenderPipelineDescriptor::alloc()->init();
+            pipelineDesc->setVertexFunction(vertexMain);
+            pipelineDesc->setFragmentFunction(fragmentMain);
+            pipelineDesc->colorAttachments()->object(0)->setPixelFormat(swapchain->pixelFormat());
+            pipelineDesc->setDepthAttachmentPixelFormat(MTL::PixelFormatDepth32Float);
+
+            // Enable blending for semi-transparent debug shapes
+            auto colorAttachment = pipelineDesc->colorAttachments()->object(0);
+            colorAttachment->setBlendingEnabled(true);
+            colorAttachment->setRgbBlendOperation(MTL::BlendOperationAdd);
+            colorAttachment->setAlphaBlendOperation(MTL::BlendOperationAdd);
+            colorAttachment->setSourceRGBBlendFactor(MTL::BlendFactorSourceAlpha);
+            colorAttachment->setDestinationRGBBlendFactor(MTL::BlendFactorOneMinusSourceAlpha);
+            colorAttachment->setSourceAlphaBlendFactor(MTL::BlendFactorOne);
+            colorAttachment->setDestinationAlphaBlendFactor(MTL::BlendFactorZero);
+
+            debugDrawPipeline = NS::TransferPtr(device->newRenderPipelineState(pipelineDesc, &error));
+            if (!debugDrawPipeline) {
+                fmt::print(
+                    "Warning: Could not create debug draw pipeline: {}\n",
+                    error ? error->localizedDescription()->utf8String() : "unknown error"
+                );
+            }
+
+            pipelineDesc->release();
+            vertexMain->release();
+            fragmentMain->release();
+            library->release();
+        }
+
+        // Create depth stencil state for debug draw (read depth, don't write)
+        MTL::DepthStencilDescriptor* depthDesc = MTL::DepthStencilDescriptor::alloc()->init();
+        depthDesc->setDepthCompareFunction(MTL::CompareFunctionLessEqual);
+        depthDesc->setDepthWriteEnabled(false);// Don't write to depth buffer
+        debugDrawDepthStencilState = NS::TransferPtr(device->newDepthStencilState(depthDesc));
+        depthDesc->release();
+
+        // Create per-frame vertex buffers for debug draw
+        debugDrawVertexBuffers.resize(MAX_FRAMES_IN_FLIGHT);
+        for (auto& buffer : debugDrawVertexBuffers) {
+            buffer = nullptr;// Will be allocated on demand
+        }
+    }
 
     // Create buffers
     frameDataBuffers.resize(MAX_FRAMES_IN_FLIGHT);
@@ -3204,12 +3351,22 @@ TextureHandle Renderer_Metal::createTexture(const std::shared_ptr<Image>& img) {
         case 1:
             pixelFormat = MTL::PixelFormat::PixelFormatR8Unorm;
             break;
+        case 2:
+            pixelFormat = MTL::PixelFormat::PixelFormatRG8Unorm;
+            break;
         case 3:
         case 4:
             pixelFormat = MTL::PixelFormat::PixelFormatRGBA8Unorm;
             break;
         default:
-            throw std::runtime_error(fmt::format("Unknown texture format at {}\n", img->uri));
+            throw std::runtime_error(fmt::format(
+                "Unknown texture format at {} (channelCount={}, width={}, height={}, byteArraySize={})\n",
+                img->uri,
+                img->channelCount,
+                img->width,
+                img->height,
+                img->byteArray.size()
+            ));
             break;
         }
         int numLevels = calculateMipmapLevelCount(img->width, img->height);
@@ -3225,9 +3382,25 @@ TextureHandle Renderer_Metal::createTexture(const std::shared_ptr<Image>& img) {
         textureDesc->setUsage(MTL::ResourceUsageSample | MTL::ResourceUsageRead);
 
         auto texture = NS::TransferPtr(device->newTexture(textureDesc.get()));
-        texture->replaceRegion(
-            MTL::Region(0, 0, 0, img->width, img->height, 1), 0, img->byteArray.data(), img->width * img->channelCount
-        );
+        if (img->channelCount == 3) {
+            // Convert RGB to RGBA by adding alpha channel
+            std::vector<Uint8> rgbaData;
+            rgbaData.reserve(img->width * img->height * 4);
+            for (size_t i = 0; i < img->byteArray.size(); i += 3) {
+                rgbaData.push_back(img->byteArray[i]);// R
+                rgbaData.push_back(img->byteArray[i + 1]);// G
+                rgbaData.push_back(img->byteArray[i + 2]);// B
+                rgbaData.push_back(255);// A (opaque)
+            }
+            texture->replaceRegion(
+                MTL::Region(0, 0, 0, img->width, img->height, 1), 0, rgbaData.data(), img->width * 4
+            );
+        } else {
+            size_t bytesPerPixel = img->channelCount;
+            texture->replaceRegion(
+                MTL::Region(0, 0, 0, img->width, img->height, 1), 0, img->byteArray.data(), img->width * bytesPerPixel
+            );
+        }
 
         if (numLevels > 1) {
             auto cmdBlit = NS::TransferPtr(queue->commandBuffer());

@@ -109,7 +109,8 @@ int main(int argc, char* args[]) {
     }
 
     auto physics = std::make_unique<Physics3D>();
-    physics->init(engineCore->getTaskScheduler());
+    physics->init(engineCore->getTaskScheduler(), renderer->getDebugDraw());
+    physics->setDebugEnabled(true);
 
     fmt::print("Engine initialized\n");
 
@@ -330,7 +331,6 @@ int main(int argc, char* args[]) {
                 if (e.key.scancode == SDL_SCANCODE_ESCAPE) {
                     quit = true;
                 }
-                // Toggle HUD
                 if (e.key.scancode == SDL_SCANCODE_H) {
                     auto view = registry.view<HUDComponent>();
                     for (auto entity : view) {
@@ -338,6 +338,10 @@ int main(int argc, char* args[]) {
                         hud.isVisible = !hud.isVisible;
                         fmt::print("HUD Visibility toggled: {}\n", hud.isVisible);
                     }
+                }
+                if (e.key.scancode == SDL_SCANCODE_F3) {
+                    physics->setDebugEnabled(!physics->isDebugEnabled());
+                    fmt::print("Physics Debug Renderer: {}\n", physics->isDebugEnabled() ? "Enabled" : "Disabled");
                 }
                 break;
             }
@@ -395,12 +399,8 @@ int main(int argc, char* args[]) {
         // Engine updates
         engineCore->update(deltaTime);
 
-        // Transform
         scene->update(deltaTime);
-
-        // Physics
         physics->process(scene, deltaTime);
-
         scene->update(deltaTime);
 
         // Rendering

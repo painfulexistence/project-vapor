@@ -7,9 +7,11 @@
 #include <SDL3/SDL_render.h>
 #include <SDL3/SDL_stdinc.h>
 #include <SDL3/SDL_video.h>
+#include <memory>
 #include <string>
 #include <unordered_map>
 
+#include "debug_draw.hpp"
 #include "graphics.hpp"
 
 // Forward declarations
@@ -41,6 +43,7 @@ class DOFBlurPass;
 class DOFCompositePass;
 class RmlUiPass;
 class ImGuiPass;
+class DebugDrawPass;
 
 class RenderPass {
 public:
@@ -103,6 +106,7 @@ class Renderer_Metal final : public Renderer {// Must be public or factory funct
     friend class DOFCompositePass;
     friend class RmlUiPass;
     friend class ImGuiPass;
+    friend class DebugDrawPass;
 
 public:
     Renderer_Metal();
@@ -131,6 +135,11 @@ public:
 
     // Initialize UI rendering (sets RenderInterface and finalizes RmlUI initialization)
     bool initUI() override;
+
+    // Debug draw - set the external debug draw queue
+    std::shared_ptr<Vapor::DebugDraw> getDebugDraw() override {
+        return debugDraw;
+    }
 
     NS::SharedPtr<MTL::RenderPipelineState>
         createPipeline(const std::string& filename, bool isHDR, bool isColorOnly, Uint32 sampleCount);
@@ -189,6 +198,12 @@ protected:
     NS::SharedPtr<MTL::RenderPipelineState> dofCoCPipeline;
     NS::SharedPtr<MTL::RenderPipelineState> dofBlurPipeline;
     NS::SharedPtr<MTL::RenderPipelineState> dofCompositePipeline;
+
+    // Debug draw pipeline and resources
+    NS::SharedPtr<MTL::RenderPipelineState> debugDrawPipeline;
+    NS::SharedPtr<MTL::DepthStencilState> debugDrawDepthStencilState;
+    std::vector<NS::SharedPtr<MTL::Buffer>> debugDrawVertexBuffers;// Per-frame buffers
+    std::shared_ptr<Vapor::DebugDraw> debugDraw = nullptr;
 
     // Water rendering pipeline and resources
     NS::SharedPtr<MTL::RenderPipelineState> waterPipeline;
