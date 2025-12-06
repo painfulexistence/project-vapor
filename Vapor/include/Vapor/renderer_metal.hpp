@@ -242,7 +242,9 @@ protected:
     NS::SharedPtr<MTL::RenderPipelineState> particleRenderPipeline;
     NS::SharedPtr<MTL::DepthStencilState> particleDepthStencilState;
 
-    std::vector<NS::SharedPtr<MTL::Buffer>> particleBuffers;
+    // Single particle buffer (persistent state, not triple-buffered)
+    NS::SharedPtr<MTL::Buffer> particleBuffer;
+    // Per-frame uniform buffers (triple-buffered)
     std::vector<NS::SharedPtr<MTL::Buffer>> particleSimParamsBuffers;
     std::vector<NS::SharedPtr<MTL::Buffer>> particleAttractorBuffers;
 

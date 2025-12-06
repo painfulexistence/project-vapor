@@ -1152,13 +1152,13 @@ public:
         memcpy(r.particleAttractorBuffers[r.currentFrameInFlight]->contents(), &attractor, sizeof(ParticleAttractor));
         r.particleAttractorBuffers[r.currentFrameInFlight]->didModifyRange(NS::Range::Make(0, sizeof(ParticleAttractor)));
 
-        // Compute passes: Test without memory barrier
+        // Compute passes (single particle buffer - persistent state)
         {
             auto computeEncoder = r.currentCommandBuffer->computeCommandEncoder();
 
             // Force calculation
             computeEncoder->setComputePipelineState(r.particleForcePipeline.get());
-            computeEncoder->setBuffer(r.particleBuffers[r.currentFrameInFlight].get(), 0, 0);
+            computeEncoder->setBuffer(r.particleBuffer.get(), 0, 0);
             computeEncoder->setBuffer(r.particleSimParamsBuffers[r.currentFrameInFlight].get(), 0, 1);
             computeEncoder->setBuffer(r.particleAttractorBuffers[r.currentFrameInFlight].get(), 0, 2);
 
@@ -1166,9 +1166,9 @@ public:
             MTL::Size threadGroupSize = MTL::Size(256, 1, 1);
             computeEncoder->dispatchThreadgroups(gridSize, threadGroupSize);
 
-            // Integration (no barrier between dispatches)
+            // Integration
             computeEncoder->setComputePipelineState(r.particleIntegratePipeline.get());
-            computeEncoder->setBuffer(r.particleBuffers[r.currentFrameInFlight].get(), 0, 0);
+            computeEncoder->setBuffer(r.particleBuffer.get(), 0, 0);
             computeEncoder->setBuffer(r.particleSimParamsBuffers[r.currentFrameInFlight].get(), 0, 1);
             computeEncoder->dispatchThreadgroups(gridSize, threadGroupSize);
 
@@ -1204,7 +1204,7 @@ public:
             } pushConstants;
             pushConstants.particleSize = 0.02f;
             encoder->setVertexBytes(&pushConstants, sizeof(ParticlePushConstants), 1);
-            encoder->setVertexBuffer(r.particleBuffers[r.currentFrameInFlight].get(), 0, 2);
+            encoder->setVertexBuffer(r.particleBuffer.get(), 0, 2);
 
             // Draw 6 vertices per particle (2 triangles = 1 quad), instanced
             encoder->drawPrimitives(MTL::PrimitiveType::PrimitiveTypeTriangle, 0, 6, r.particleCount);
@@ -2813,14 +2813,14 @@ auto Renderer_Metal::createResources() -> void {
     }
 
     // Create particle buffers
-    particleBuffers.resize(MAX_FRAMES_IN_FLIGHT);
+    // Single particle buffer for persistent state (not triple-buffered)
+    size_t particleBufferSize = sizeof(GPUParticle) * MAX_PARTICLES;
+    particleBuffer = NS::TransferPtr(device->newBuffer(particleBufferSize, MTL::ResourceStorageModeShared));
+
+    // Per-frame uniform buffers (triple-buffered)
     particleSimParamsBuffers.resize(MAX_FRAMES_IN_FLIGHT);
     particleAttractorBuffers.resize(MAX_FRAMES_IN_FLIGHT);
-
-    size_t particleBufferSize = sizeof(GPUParticle) * MAX_PARTICLES;
-
     for (size_t i = 0; i < MAX_FRAMES_IN_FLIGHT; i++) {
-        particleBuffers[i] = NS::TransferPtr(device->newBuffer(particleBufferSize, MTL::ResourceStorageModeShared));
         particleSimParamsBuffers[i] =
             NS::TransferPtr(device->newBuffer(sizeof(ParticleSimulationParams), MTL::ResourceStorageModeShared));
         particleAttractorBuffers[i] =
@@ -2831,7 +2831,7 @@ auto Renderer_Metal::createResources() -> void {
     {
         std::srand(static_cast<unsigned>(std::time(nullptr)));
 
-        GPUParticle* particles = reinterpret_cast<GPUParticle*>(particleBuffers[0]->contents());
+        GPUParticle* particles = reinterpret_cast<GPUParticle*>(particleBuffer->contents());
         for (size_t i = 0; i < MAX_PARTICLES; i++) {
             float r = std::sqrt(static_cast<float>(std::rand()) / RAND_MAX) * 5.0f;
             float theta = static_cast<float>(std::rand()) / RAND_MAX * 2.0f * 3.14159265f;
@@ -2853,11 +2853,6 @@ auto Renderer_Metal::createResources() -> void {
             glm::vec3 d = glm::vec3(1.893f, 0.663f, 1.910f);
             glm::vec3 color = a + b * glm::cos(6.28318f * (c * brightness + d));
             particles[i].color = glm::vec4(color, 1.0f);
-        }
-
-        // Copy to other frame buffers
-        for (size_t i = 1; i < MAX_FRAMES_IN_FLIGHT; i++) {
-            memcpy(particleBuffers[i]->contents(), particles, particleBufferSize);
         }
     }
 
