@@ -47,8 +47,8 @@ class DOFCompositePass;
 class RmlUiPass;
 class ImGuiPass;
 class DebugDrawPass;
-class Batch2DPass;
-class Batch3DPass;
+class CanvasPass;
+class WorldUIPass;
 
 class RenderPass {
 public:
@@ -114,8 +114,8 @@ class Renderer_Metal final : public Renderer {// Must be public or factory funct
     friend class RmlUiPass;
     friend class ImGuiPass;
     friend class DebugDrawPass;
-    friend class Batch2DPass;
-    friend class Batch3DPass;
+    friend class CanvasPass;
+    friend class WorldUIPass;
 
 public:
     Renderer_Metal();

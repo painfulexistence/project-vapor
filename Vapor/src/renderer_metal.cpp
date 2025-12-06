@@ -1770,13 +1770,13 @@ public:
 };
 
 // 2D Batch pass: Renders batched 2D primitives (quads, lines, shapes)
-class Batch3DPass : public RenderPass {
+class WorldUIPass : public RenderPass {
 public:
-    explicit Batch3DPass(Renderer_Metal* renderer) : RenderPass(renderer) {
+    explicit WorldUIPass(Renderer_Metal* renderer) : RenderPass(renderer) {
     }
 
     const char* getName() const override {
-        return "Batch3DPass";
+        return "WorldUIPass";
     }
 
     void execute() override {
@@ -1872,13 +1872,13 @@ public:
     }
 };
 
-class Batch2DPass : public RenderPass {
+class CanvasPass : public RenderPass {
 public:
-    explicit Batch2DPass(Renderer_Metal* renderer) : RenderPass(renderer) {
+    explicit CanvasPass(Renderer_Metal* renderer) : RenderPass(renderer) {
     }
 
     const char* getName() const override {
-        return "Batch2DPass";
+        return "CanvasPass";
     }
 
     void execute() override {
@@ -2052,8 +2052,8 @@ auto Renderer_Metal::init(SDL_Window* window) -> void {
     // Post-processing (tone mapping, color grading, chromatic aberration, vignette)
     graph.addPass(std::make_unique<PostProcessPass>(this));
     graph.addPass(std::make_unique<DebugDrawPass>(this));// Debug draw after post-process
-    graph.addPass(std::make_unique<Batch3DPass>(this));// 3D batch (world space with depth)
-    graph.addPass(std::make_unique<Batch2DPass>(this));// 2D batch (screen space overlay)
+    graph.addPass(std::make_unique<WorldUIPass>(this));// 3D batch (world space with depth)
+    graph.addPass(std::make_unique<CanvasPass>(this));// 2D batch (screen space overlay)
     graph.addPass(std::make_unique<RmlUiPass>(this));// RmlUI before ImGui
     graph.addPass(std::make_unique<ImGuiPass>(this));
 
@@ -4365,12 +4365,12 @@ void Renderer_Metal::endBatch3D() {
 }
 
 void Renderer_Metal::flush2D() {
-    // Will be rendered by Batch2DPass
+    // Will be rendered by CanvasPass
     endBatch2D();
 }
 
 void Renderer_Metal::flush3D() {
-    // Will be rendered by Batch3DPass
+    // Will be rendered by WorldUIPass
     endBatch3D();
 }
 
