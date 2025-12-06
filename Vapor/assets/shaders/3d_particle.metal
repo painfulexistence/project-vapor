@@ -3,11 +3,8 @@
 // GPU Particle structure for compute shader simulation
 struct Particle {
     float3 position;
-    float _pad1;
     float3 velocity;
-    float _pad2;
     float3 force;
-    float _pad3;
     float4 color;
 };
 
@@ -18,7 +15,6 @@ struct ParticleSimParams {
     float time;
     float deltaTime;
     uint particleCount;
-    float _pad1;
 };
 
 // Attractor data
@@ -47,18 +43,18 @@ kernel void particleForce(
     // Reset force
     p.force = float3(0.0);
 
-    // Attractor force
+    // Attractor force (orbital motion)
     float3 toAttractor = attractor.position - p.position;
     float dist = length(toAttractor);
     if (dist > 0.001) {
         float3 dir = toAttractor / dist;
-        // Inverse square law with softening
-        float forceMag = attractor.strength / (dist * dist + 0.1);
+        // Inverse square law with softening for smooth orbital motion
+        float forceMag = attractor.strength / (dist * dist + 0.5);
         p.force += dir * forceMag;
     }
 
-    // Damping force (velocity-dependent drag)
-    p.force -= p.velocity * 0.5;
+    // Light damping to prevent excessive spiraling (reduced from 0.5 to 0.1)
+    p.force -= p.velocity * 0.1;
 
     particles[id] = p;
 }

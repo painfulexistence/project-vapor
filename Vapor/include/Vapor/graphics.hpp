@@ -274,25 +274,24 @@ struct alignas(16) GPUParticle {
 // Particle simulation parameters (uniform buffer)
 struct alignas(16) ParticleSimulationParams {
     glm::vec2 resolution = glm::vec2(1280.0f, 720.0f);
+    glm::vec2 _pad1;
     glm::vec2 mousePosition = glm::vec2(0.0f);
+    glm::vec2 _pad2;
     float time = 0.0f;
     float deltaTime = 0.0f;
-    float _pad1 = 0.0f;
-    float _pad2 = 0.0f;
+    Uint32 particleCount = 0;
 };
 
 // Attractor data for particle simulation
 struct alignas(16) ParticleAttractorData {
     glm::vec3 position = glm::vec3(0.0f);
+    float _pad1;
     float strength = 1.0f;
 };
 
 // Particle push constants for rendering
 struct ParticlePushConstants {
     float particleSize = 0.05f;
-    float _pad1 = 0.0f;
-    float _pad2 = 0.0f;
-    float _pad3 = 0.0f;
 };
 
 // Legacy CPU particle (for compatibility)

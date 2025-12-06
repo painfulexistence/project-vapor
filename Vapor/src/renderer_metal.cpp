@@ -2841,19 +2841,28 @@ auto Renderer_Metal::createResources() -> void {
             particles[i].position =
                 glm::vec3(r * std::sin(phi) * std::cos(theta), r * std::sin(phi) * std::sin(theta), r * std::cos(phi));
 
+            // Initialize tangential velocity for orbital motion
             glm::vec3 tangent = glm::normalize(glm::cross(particles[i].position, glm::vec3(0.0f, 1.0f, 0.0f)));
             if (glm::length(tangent) < 0.001f) {
                 tangent = glm::vec3(1.0f, 0.0f, 0.0f);
             }
-            particles[i].velocity = tangent * (0.5f / (r + 0.1f));
-            particles[i].force = glm::vec3(0.0f); // Initialize force to zero
+            // Increase initial velocity for more dynamic motion (was 0.5)
+            // Velocity inversely proportional to radius for stable orbits
+            particles[i].velocity = tangent * (1.5f / std::sqrt(r + 0.1f));
+            particles[i].force = glm::vec3(0.0f);
 
             float brightness = 1.0f - (r / 5.0f);
-            glm::vec3 a = glm::vec3(0.427f, 0.346f, 0.372f);
-            glm::vec3 b = glm::vec3(0.288f, 0.918f, 0.336f);
-            glm::vec3 c = glm::vec3(0.635f, 1.136f, 0.404f);
-            glm::vec3 d = glm::vec3(1.893f, 0.663f, 1.910f);
+
+            // "Nocturne" palette - mysterious, elegant purple-blue gradient
+            // Perfect for piano atmosphere: deep purple → indigo → electric blue
+            glm::vec3 a = glm::vec3(0.25f, 0.25f, 0.6f);  // Base: royal blue
+            glm::vec3 b = glm::vec3(0.35f, 0.3f, 0.4f);   // Amplitude: purple-blue dominant
+            glm::vec3 c = glm::vec3(0.8f, 0.9f, 1.0f);    // Frequency: blue channel most active
+            glm::vec3 d = glm::vec3(0.7f, 0.65f, 0.5f);   // Phase: starts from purple
+
             glm::vec3 color = a + b * glm::cos(6.28318f * (c * brightness + d));
+            // Clamp color to [0, 1] to prevent negative values and oversaturation
+            color = glm::clamp(color, 0.0f, 1.0f);
             particles[i].color = glm::vec4(color, 1.0f);
         }
     }
