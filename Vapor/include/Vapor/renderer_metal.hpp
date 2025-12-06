@@ -233,7 +233,7 @@ protected:
     NS::SharedPtr<MTL::Texture> environmentCubeMap;
 
     // Particle system
-    static constexpr Uint32 MAX_PARTICLES = 50000;
+    static constexpr Uint32 MAX_PARTICLES = 1000; // Reduced for debugging
     bool particleSystemEnabled = true;
     Uint32 particleCount = MAX_PARTICLES;
 
