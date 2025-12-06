@@ -26,6 +26,7 @@
 #include "systems.hpp"
 #include "animation_systems.hpp"
 #include "fsm_system.hpp"
+#include "camera_trauma_system.hpp"
 
 entt::entity getActiveCamera(entt::registry& registry) {
     auto view = registry.view<Vapor::VirtualCameraComponent>();
@@ -388,6 +389,15 @@ int main(int argc, char* args[]) {
                     FSMSystem::broadcastEvent(registry, "trigger");
                     fmt::print("FSM: Sent 'trigger' event\n");
                 }
+                // Camera trauma demo (press G for shake, B for big impact)
+                if (e.key.scancode == SDL_SCANCODE_G) {
+                    CameraTraumaSystem::addTraumaToActiveCamera(registry, TraumaPresets::mediumImpact());
+                    fmt::print("Camera: Medium shake\n");
+                }
+                if (e.key.scancode == SDL_SCANCODE_B) {
+                    CameraTraumaSystem::addTraumaToActiveCamera(registry, TraumaPresets::heavyImpact());
+                    fmt::print("Camera: Heavy impact!\n");
+                }
                 break;
             }
             case SDL_EVENT_WINDOW_RESIZED: {
@@ -446,6 +456,9 @@ int main(int argc, char* args[]) {
 
         // Animation systems (tween, sprite animation, timeline/cutscene)
         AnimationSystem::update(registry, deltaTime);
+
+        // Camera trauma (runs after camera updates base position)
+        CameraTraumaSystem::update(registry, deltaTime);
 
         // Engine updates
         engineCore->update(deltaTime);
