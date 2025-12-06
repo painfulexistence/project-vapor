@@ -247,7 +247,7 @@ protected:
 
     // Light scattering (God Rays) resources
     std::vector<NS::SharedPtr<MTL::Buffer>> lightScatteringDataBuffers;
-    NS::SharedPtr<MTL::Texture> lightScatteringRT;  // Half-resolution scattering texture
+    NS::SharedPtr<MTL::Texture> lightScatteringRT;// Half-resolution scattering texture
     bool lightScatteringEnabled = true;
     LightScatteringData lightScatteringSettings;
 

@@ -1915,7 +1915,7 @@ auto Renderer_Metal::createResources() -> void {
     lightScatteringSettings.sunScreenPos = glm::vec2(0.5f, 0.5f);
     lightScatteringSettings.screenSize = glm::vec2(1920.0f, 1080.0f);
     lightScatteringSettings.density = 1.0f;
-    lightScatteringSettings.weight = 0.01f;
+    lightScatteringSettings.weight = 0.05f;
     lightScatteringSettings.decay = 0.97f;
     lightScatteringSettings.exposure = 0.3f;
     lightScatteringSettings.numSamples = 64;
@@ -2875,7 +2875,6 @@ auto Renderer_Metal::draw(std::shared_ptr<Scene> scene, Camera& camera) -> void 
         atmosphereData->sunColor = sunLight.color;
         atmosphereData->sunIntensity = sunLight.intensity;
     }
-    atmosphereDataBuffer->didModifyRange(NS::Range::Make(0, atmosphereDataBuffer->length()));
 
     PointLight* pointLights = reinterpret_cast<PointLight*>(pointLightBuffer->contents());
     for (size_t i = 0; i < scene->pointLights.size(); ++i) {
@@ -3041,6 +3040,12 @@ auto Renderer_Metal::draw(std::shared_ptr<Scene> scene, Camera& camera) -> void 
             if (ImGui::TreeNode(fmt::format("Scene Normal RT").c_str())) {
                 ImGui::Image((ImTextureID)(intptr_t)normalRT.get(), ImVec2(64, 64));
                 ImGui::TreePop();
+            }
+            if (lightScatteringRT) {
+                if (ImGui::TreeNode(fmt::format("Light Scattering RT").c_str())) {
+                    ImGui::Image((ImTextureID)(intptr_t)lightScatteringRT.get(), ImVec2(64, 64));
+                    ImGui::TreePop();
+                }
             }
             ImGui::TreePop();
         }
@@ -3345,6 +3350,18 @@ auto Renderer_Metal::draw(std::shared_ptr<Scene> scene, Camera& camera) -> void 
 
             if (lightScatteringEnabled) {
                 ImGui::Separator();
+
+                AtmosphereData* debugAtmos = reinterpret_cast<AtmosphereData*>(atmosphereDataBuffer->contents());
+                glm::vec3 debugSunDir = glm::normalize(debugAtmos->sunDirection);
+                glm::vec3 debugCamPos = camera.getEye();
+                glm::vec3 debugSunWorldPos = debugCamPos + debugSunDir * 10000.0f;
+                glm::mat4 debugViewProj = camera.getProjMatrix() * camera.getViewMatrix();
+                glm::vec4 debugSunClip = debugViewProj * glm::vec4(debugSunWorldPos, 1.0f);
+
+                if (debugSunClip.w <= 0.0f) {
+                    ImGui::TextColored(ImVec4(1.0f, 0.5f, 0.5f, 1.0f), "Sun behind camera");
+                }
+
                 ImGui::Text("Ray Marching");
                 int numSamples = static_cast<int>(lightScatteringSettings.numSamples);
                 if (ImGui::SliderInt("Samples", &numSamples, 8, 128)) {
@@ -3397,36 +3414,6 @@ auto Renderer_Metal::draw(std::shared_ptr<Scene> scene, Camera& camera) -> void 
                     lightScatteringSettings.jitter = 0.5f;
                 }
             }
-
-            // Show debug info and render target preview
-            ImGui::Separator();
-            if (ImGui::TreeNode("Debug")) {
-                // Calculate and display sun screen position
-                AtmosphereData* debugAtmos = reinterpret_cast<AtmosphereData*>(atmosphereDataBuffer->contents());
-                glm::vec3 debugSunDir = glm::normalize(debugAtmos->sunDirection);
-                glm::vec3 debugCamPos = camera.getEye();
-                glm::vec3 debugSunWorldPos = debugCamPos + debugSunDir * 10000.0f;
-                glm::mat4 debugViewProj = camera.getProjMatrix() * camera.getViewMatrix();
-                glm::vec4 debugSunClip = debugViewProj * glm::vec4(debugSunWorldPos, 1.0f);
-
-                if (debugSunClip.w > 0.0f) {
-                    glm::vec2 debugSunNDC = glm::vec2(debugSunClip.x, debugSunClip.y) / debugSunClip.w;
-                    glm::vec2 debugSunScreen = debugSunNDC * 0.5f + 0.5f;
-                    debugSunScreen.y = 1.0f - debugSunScreen.y;
-                    ImGui::Text("Sun Screen Pos: (%.3f, %.3f)", debugSunScreen.x, debugSunScreen.y);
-                    ImGui::Text("Sun Direction: (%.3f, %.3f, %.3f)", debugSunDir.x, debugSunDir.y, debugSunDir.z);
-                } else {
-                    ImGui::TextColored(ImVec4(1.0f, 0.5f, 0.5f, 1.0f), "Sun behind camera");
-                }
-
-                if (lightScatteringRT) {
-                    ImGui::Separator();
-                    ImGui::Text("God Rays RT:");
-                    ImGui::Image((ImTextureID)(intptr_t)lightScatteringRT.get(), ImVec2(128, 72));
-                }
-                ImGui::TreePop();
-            }
-
             ImGui::TreePop();
         }
     }
