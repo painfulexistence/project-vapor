@@ -133,6 +133,10 @@ glm::vec3 CharacterController::getGroundNormal() const {
     return glm::vec3(normal.GetX(), normal.GetY(), normal.GetZ());
 }
 
+BodyHandle CharacterController::getBodyHandle() const {
+    return BodyHandle{ character->GetInnerBodyID().GetIndexAndSequenceNumber() };
+}
+
 void CharacterController::setLinearVelocity(const glm::vec3& velocity) {
     character->SetLinearVelocity(JPH::Vec3(velocity.x, velocity.y, velocity.z));
 }
