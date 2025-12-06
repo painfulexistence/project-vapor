@@ -21,9 +21,11 @@ set(SOURCES
     src/asset_manager.cpp
     src/asset_serializer.cpp
     src/camera.cpp
+    src/debug_draw.cpp
     src/graphics.cpp
     src/helper.cpp
     src/physics_3d.cpp
+    src/physics_debug_renderer.cpp
     src/character_controller.cpp
     src/vehicle_controller.cpp
     src/fluid_volume.cpp
