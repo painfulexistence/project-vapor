@@ -250,6 +250,8 @@ protected:
     // Per-frame uniform buffers (triple-buffered)
     std::vector<NS::SharedPtr<MTL::Buffer>> particleSimParamsBuffers;
     std::vector<NS::SharedPtr<MTL::Buffer>> particleAttractorBuffers;
+    std::vector<NS::SharedPtr<MTL::Buffer>> particleEmitterBuffers;  // Per-emitter GPU data
+    static constexpr Uint32 MAX_EMITTERS = 64;
 
     // Per-frame buffers
     std::vector<NS::SharedPtr<MTL::Buffer>> frameDataBuffers;

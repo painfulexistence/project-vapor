@@ -289,6 +289,12 @@ struct alignas(16) GPUParticle {
     glm::vec3 force = glm::vec3(0.0f);
     float _pad3 = 0.0f;
     glm::vec4 color = glm::vec4(1.0f);
+
+    // Multi-emitter support
+    float life = 1.0f;       // 0.0 = dead, 1.0 = just born
+    float age = 0.0f;        // 已存活時間（秒）
+    float maxLife = 1.0f;    // 最大壽命
+    Uint32 emitterID = 0;    // 所屬 emitter ID
 };
 
 // Particle simulation parameters (uniform buffer)
@@ -299,7 +305,8 @@ struct alignas(16) ParticleSimulationParams {
     glm::vec2 _pad2;
     float time = 0.0f;
     float deltaTime = 0.0f;
-    Uint32 particleCount = 0;
+    Uint32 emitterCount = 0;
+    float _pad3 = 0.0f;
 };
 
 // Attractor data for particle simulation
@@ -309,9 +316,57 @@ struct alignas(16) ParticleAttractorData {
     float strength = 1.0f;
 };
 
-// Particle push constants for rendering
+// Particle push constants for rendering (global parameters only)
 struct ParticlePushConstants {
-    float particleSize = 0.05f;
+    float particleSize = 0.05f;  // Default/fallback size
+    float globalTime = 0.0f;
+    Uint32 emitterCount = 0;
+    Uint32 _pad1 = 0;
+};
+
+// GPU-side emitter parameters (uploaded per frame)
+struct alignas(16) ParticleEmitterGPUData {
+    glm::vec3 position = glm::vec3(0.0f);
+    float _pad1 = 0.0f;
+
+    glm::vec3 direction = glm::vec3(0.0f, 1.0f, 0.0f);
+    float emitAngle = 0.0f;
+
+    glm::vec4 startColor = glm::vec4(1.0f);
+    glm::vec4 endColor = glm::vec4(1.0f, 1.0f, 1.0f, 0.0f);
+
+    glm::vec3 gravity = glm::vec3(0.0f);
+    float damping = 0.1f;
+
+    glm::vec3 attractorPosition = glm::vec3(0.0f);
+    float attractorStrength = 0.0f;
+
+    float emitSpeed = 5.0f;
+    float lifetime = 2.0f;
+    float particleSize = 0.1f;
+    Uint32 maxParticles = 100;
+
+    Uint32 startIndex = 0;  // 此 emitter 在全局 buffer 中的起始索引
+    Uint32 usePalette = 0;
+
+    // Depth effects
+    Uint32 depthFadeEnabled = 0;
+    float depthFadeDistance = 0.5f;
+
+    Uint32 groundClampEnabled = 0;
+    float groundOffset = 0.02f;
+    float groundFriction = 0.8f;
+    float _pad2 = 0.0f;
+
+    // Cosine Palette 參數
+    glm::vec3 paletteA = glm::vec3(0.5f);
+    float _pad3 = 0.0f;
+    glm::vec3 paletteB = glm::vec3(0.5f);
+    float _pad4 = 0.0f;
+    glm::vec3 paletteC = glm::vec3(1.0f);
+    float _pad5 = 0.0f;
+    glm::vec3 paletteD = glm::vec3(0.0f);
+    float _pad6 = 0.0f;
 };
 
 // Legacy CPU particle (for compatibility)

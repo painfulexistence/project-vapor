@@ -9,6 +9,46 @@ struct Particle {
     vec3 force;
     float _pad3;
     vec4 color;
+    // Multi-emitter support
+    float life;
+    float age;
+    float maxLife;
+    uint emitterID;
+};
+
+struct EmitterParams {
+    vec3 position;
+    float _pad1;
+    vec3 direction;
+    float emitAngle;
+    vec4 startColor;
+    vec4 endColor;
+    vec3 gravity;
+    float damping;
+    vec3 attractorPosition;
+    float attractorStrength;
+    float emitSpeed;
+    float lifetime;
+    float particleSize;
+    uint maxParticles;
+    uint startIndex;
+    uint usePalette;
+    // Depth effects
+    uint depthFadeEnabled;
+    float depthFadeDistance;
+    uint groundClampEnabled;
+    float groundOffset;
+    float groundFriction;
+    float _pad2;
+    // Palette
+    vec3 paletteA;
+    float _pad3;
+    vec3 paletteB;
+    float _pad4;
+    vec3 paletteC;
+    float _pad5;
+    vec3 paletteD;
+    float _pad6;
 };
 
 layout(std140, set = 0, binding = 0) uniform SimulationParams {
@@ -16,13 +56,48 @@ layout(std140, set = 0, binding = 0) uniform SimulationParams {
     vec2 mousePosition;
     float time;
     float deltaTime;
+    uint emitterCount;
     float _pad1;
-    float _pad2;
+};
+
+layout(std140, set = 0, binding = 1) uniform CameraData {
+    mat4 proj;
+    mat4 view;
+    mat4 invProj;
+    mat4 invView;
+    float near;
+    float far;
+    vec3 cameraPosition;
+    float _cameraPad;
 };
 
 layout(std430, set = 0, binding = 2) buffer ParticleBuffer {
     Particle particles[];
 };
+
+layout(std430, set = 0, binding = 3) readonly buffer EmitterBuffer {
+    EmitterParams emitters[];
+};
+
+layout(set = 1, binding = 0) uniform sampler2D depthTexture;
+
+// Reconstruct world position from screen UV and depth
+vec3 reconstructWorldPosition(vec2 screenUV, float depth) {
+    // Convert UV to NDC
+    vec2 ndc = screenUV * 2.0 - 1.0;
+
+    // Reconstruct clip position
+    vec4 clipPos = vec4(ndc, depth, 1.0);
+
+    // Transform to view space
+    vec4 viewPos = invProj * clipPos;
+    viewPos /= viewPos.w;
+
+    // Transform to world space
+    vec4 worldPos = invView * viewPos;
+
+    return worldPos.xyz;
+}
 
 void main() {
     uint idx = gl_GlobalInvocationID.x;
@@ -32,9 +107,51 @@ void main() {
 
     Particle p = particles[idx];
 
+    // Get emitter params if available
+    EmitterParams emitter;
+    bool hasEmitter = p.emitterID < emitterCount;
+    if (hasEmitter) {
+        emitter = emitters[p.emitterID];
+    }
+
     // Semi-implicit Euler integration
     p.velocity += p.force * deltaTime;
     p.position += p.velocity * deltaTime;
+
+    // Ground clamping (falling leaves effect)
+    if (hasEmitter && emitter.groundClampEnabled != 0) {
+        // Project particle position to screen space
+        vec4 clipPos = proj * view * vec4(p.position, 1.0);
+        vec3 ndc = clipPos.xyz / clipPos.w;
+        vec2 screenUV = ndc.xy * 0.5 + 0.5;
+
+        // Check if particle is within screen bounds
+        if (screenUV.x >= 0.0 && screenUV.x <= 1.0 &&
+            screenUV.y >= 0.0 && screenUV.y <= 1.0 &&
+            ndc.z >= 0.0 && ndc.z <= 1.0) {
+
+            // Sample scene depth
+            float sceneDepth = texture(depthTexture, screenUV).r;
+
+            // Reconstruct ground position in world space
+            vec3 groundPos = reconstructWorldPosition(screenUV, sceneDepth);
+
+            // Check if particle is below ground level
+            // Using Y-axis comparison (assuming Y is up)
+            float groundY = groundPos.y + emitter.groundOffset;
+
+            if (p.position.y < groundY) {
+                // Clamp to ground
+                p.position.y = groundY;
+
+                // Apply friction to horizontal velocity
+                p.velocity.xz *= (1.0 - emitter.groundFriction);
+
+                // Stop vertical movement
+                p.velocity.y = 0.0;
+            }
+        }
+    }
 
     // Boundary conditions (keep particles in a sphere)
     float maxDist = 20.0;
