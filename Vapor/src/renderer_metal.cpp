@@ -1820,7 +1820,7 @@ public:
 
         auto passDesc = NS::TransferPtr(MTL::RenderPassDescriptor::renderPassDescriptor());
         auto colorAttachment = passDesc->colorAttachments()->object(0);
-        colorAttachment->setTexture(r.currentDrawable->texture());
+        colorAttachment->setTexture(r.colorRT.get());  // Render to HDR RT (before bloom)
         colorAttachment->setLoadAction(MTL::LoadActionLoad);
         colorAttachment->setStoreAction(MTL::StoreActionStore);
 
@@ -1834,8 +1834,8 @@ public:
 
         auto encoder = r.currentCommandBuffer->renderCommandEncoder(passDesc.get());
 
-        auto drawableWidth = r.currentDrawable->texture()->width();
-        auto drawableHeight = r.currentDrawable->texture()->height();
+        auto drawableWidth = r.colorRT->width();
+        auto drawableHeight = r.colorRT->height();
         MTL::Viewport viewport = { 0.0, 0.0, static_cast<double>(drawableWidth),
                                    static_cast<double>(drawableHeight), 0.0, 1.0 };
         encoder->setViewport(viewport);
@@ -2036,6 +2036,7 @@ auto Renderer_Metal::init(SDL_Window* window) -> void {
     // graph.addPass(std::make_unique<WaterPass>(this));
     graph.addPass(std::make_unique<ParticlePass>(this));
     graph.addPass(std::make_unique<LightScatteringPass>(this));
+    graph.addPass(std::make_unique<WorldUIPass>(this));// World UI renders to HDR RT (can receive bloom)
 
     // Bloom passes (physically-based bloom)
     graph.addPass(std::make_unique<BloomBrightnessPass>(this));
@@ -2052,7 +2053,6 @@ auto Renderer_Metal::init(SDL_Window* window) -> void {
     // Post-processing (tone mapping, color grading, chromatic aberration, vignette)
     graph.addPass(std::make_unique<PostProcessPass>(this));
     graph.addPass(std::make_unique<DebugDrawPass>(this));// Debug draw after post-process
-    graph.addPass(std::make_unique<WorldUIPass>(this));// 3D batch (world space with depth)
     graph.addPass(std::make_unique<CanvasPass>(this));// 2D batch (screen space overlay)
     graph.addPass(std::make_unique<RmlUiPass>(this));// RmlUI before ImGui
     graph.addPass(std::make_unique<ImGuiPass>(this));
