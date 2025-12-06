@@ -10,7 +10,7 @@
 //
 // This system follows ECS principles:
 // - Only manages state transition logic
-// - Triggers actions by emplacing CutsceneComponent
+// - Triggers actions by emplacing ActionQueueComponent
 // - Lets AnimationSystem handle the actual execution
 // ============================================================
 
@@ -97,7 +97,7 @@ private:
             // No enter actions, go directly to InState
             fsm.phase = FSMPhase::InState;
         } else {
-            // Emplace CutsceneComponent for AnimationSystem to execute
+            // Emplace ActionQueueComponent for AnimationSystem to execute
             emplaceActions(reg, entity, state->onEnterActions, "fsm_enter");
             reg.emplace_or_replace<FSMActionsRunningTag>(entity);
             fsm.phase = FSMPhase::EnteringState;
@@ -163,14 +163,14 @@ private:
     static bool checkCondition(entt::registry& reg, entt::entity entity, FSMComponent& fsm,
                                 const FSMEventComponent* events, const ActionsCompleteCondition& cond) {
         // Actions are complete when we're in InState phase (enter actions done)
-        // and no CutsceneComponent is running
-        return !reg.any_of<CutsceneComponent>(entity) ||
-               reg.get<CutsceneComponent>(entity).state == TimelineState::Completed;
+        // and no ActionQueueComponent is running
+        return !reg.any_of<ActionQueueComponent>(entity) ||
+               reg.get<ActionQueueComponent>(entity).state == TimelineState::Completed;
     }
 
     static bool checkActionsComplete(entt::registry& reg, entt::entity entity) {
-        // Check if CutsceneComponent with fsm tag is done
-        if (auto* cutscene = reg.try_get<CutsceneComponent>(entity)) {
+        // Check if ActionQueueComponent with fsm tag is done
+        if (auto* cutscene = reg.try_get<ActionQueueComponent>(entity)) {
             if (cutscene->tag == "fsm_enter" || cutscene->tag == "fsm_exit") {
                 return cutscene->state == TimelineState::Completed || cutscene->isComplete();
             }
@@ -183,7 +183,7 @@ private:
                                 const std::vector<TimelineAction>& actions,
                                 const std::string& tag) {
         // Deep copy actions since FSMState owns the originals
-        auto& cutscene = reg.emplace_or_replace<CutsceneComponent>(entity);
+        auto& cutscene = reg.emplace_or_replace<ActionQueueComponent>(entity);
         cutscene.actions = actions;  // Copy
         cutscene.tag = tag;
         cutscene.currentActionIndex = 0;

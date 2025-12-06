@@ -346,8 +346,8 @@ struct TimelineComponent {
     }
 };
 
-// Simplified cutscene component for linear sequences
-struct CutsceneComponent {
+// Linear action sequence (used by FSM, triggers, or any action queue)
+struct ActionQueueComponent {
     std::vector<TimelineAction> actions;
     size_t currentActionIndex = 0;
     TimelineState state = TimelineState::Idle;

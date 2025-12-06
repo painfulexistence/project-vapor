@@ -405,7 +405,7 @@ public:
         reg.view<TimelineComponent>().each([&](auto& timeline) {
             if (timeline.tag == tag) timeline.play();
         });
-        reg.view<CutsceneComponent>().each([&](auto& cutscene) {
+        reg.view<ActionQueueComponent>().each([&](auto& cutscene) {
             if (cutscene.tag == tag) cutscene.play();
         });
     }
@@ -415,7 +415,7 @@ public:
         reg.view<TimelineComponent>().each([&](auto& timeline) {
             if (timeline.tag == tag) timeline.stop();
         });
-        reg.view<CutsceneComponent>().each([&](auto& cutscene) {
+        reg.view<ActionQueueComponent>().each([&](auto& cutscene) {
             if (cutscene.tag == tag) cutscene.stop();
         });
     }
@@ -423,13 +423,13 @@ public:
     // Pause all timelines
     static void pauseAll(entt::registry& reg) {
         reg.view<TimelineComponent>().each([](auto& timeline) { timeline.pause(); });
-        reg.view<CutsceneComponent>().each([](auto& cutscene) { cutscene.pause(); });
+        reg.view<ActionQueueComponent>().each([](auto& cutscene) { cutscene.pause(); });
     }
 
     // Resume all timelines
     static void resumeAll(entt::registry& reg) {
         reg.view<TimelineComponent>().each([](auto& timeline) { timeline.resume(); });
-        reg.view<CutsceneComponent>().each([](auto& cutscene) {
+        reg.view<ActionQueueComponent>().each([](auto& cutscene) {
             if (cutscene.state == TimelineState::Paused) cutscene.state = TimelineState::Playing;
         });
     }
@@ -500,9 +500,9 @@ private:
     }
 
     static void updateCutscenes(entt::registry& reg, float deltaTime) {
-        auto view = reg.view<CutsceneComponent>();
+        auto view = reg.view<ActionQueueComponent>();
         for (auto entity : view) {
-            auto& cutscene = view.get<CutsceneComponent>(entity);
+            auto& cutscene = view.get<ActionQueueComponent>(entity);
 
             if (cutscene.state != TimelineState::Playing) continue;
 
@@ -749,7 +749,7 @@ private:
             }
         });
 
-        reg.view<CutsceneComponent>().each([&](auto entity, auto& cutscene) {
+        reg.view<ActionQueueComponent>().each([&](auto entity, auto& cutscene) {
             if (cutscene.state == TimelineState::Completed && cutscene.autoDestroy) {
                 toRemove.push_back(entity);
             }
@@ -757,7 +757,7 @@ private:
 
         for (auto entity : toRemove) {
             reg.remove<TimelineComponent>(entity);
-            reg.remove<CutsceneComponent>(entity);
+            reg.remove<ActionQueueComponent>(entity);
         }
     }
 };
@@ -860,7 +860,7 @@ namespace AnimationHelpers {
         std::function<void()> onComplete = nullptr,
         const std::string& tag = ""
     ) {
-        auto& cutscene = reg.emplace_or_replace<CutsceneComponent>(entity);
+        auto& cutscene = reg.emplace_or_replace<ActionQueueComponent>(entity);
         cutscene.actions = std::move(actions);
         cutscene.tag = tag;
         cutscene.onComplete = std::move(onComplete);
