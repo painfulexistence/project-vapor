@@ -3,14 +3,12 @@ using namespace metal;
 #include "assets/shaders/3d_common.metal"
 
 // Volumetric Light Scattering (God Rays) Pass
-// Modern screen-space implementation with depth-aware ray marching
-// Based on GPU Gems 3 technique with improvements:
-// - Depth-aware occlusion sampling
-// - Mie phase function for realistic scattering
-// - Temporal stability support (via jitter)
-// - Half-resolution option for performance
+// Screen-space radial blur implementation based on GPU Gems 3
+// Key features:
+// - Depth-aware occlusion (rays blocked by geometry)
+// - Sun visibility check (no rays when sun is fully occluded)
+// - Radial blur from sun position
 
-// FrameData for temporal jitter
 struct FrameData {
     uint frameNumber;
     float time;
@@ -27,7 +25,7 @@ struct LightScatteringData {
     int numSamples;           // Number of samples per ray (default: 64)
     float maxDistance;        // Maximum ray distance in UV space (default: 1.0)
     float sunIntensity;       // Sun intensity multiplier
-    float mieG;               // Mie scattering g parameter (-1 to 1)
+    float mieG;               // Unused in simplified version
     float3 sunColor;          // Sun color
     float _pad1;
     float depthThreshold;     // Depth threshold for occlusion (0.9999 = sky only)
@@ -47,26 +45,9 @@ struct VertexOut {
     float2 uv;
 };
 
-// Henyey-Greenstein phase function
-// Approximates Mie scattering angular distribution
-// g < 0: backscattering, g = 0: isotropic, g > 0: forward scattering
-float henyeyGreenstein(float cosTheta, float g) {
-    float g2 = g * g;
-    float denom = 1.0 + g2 - 2.0 * g * cosTheta;
-    return (1.0 - g2) / (4.0 * PI * pow(max(denom, 0.0001), 1.5));
-}
-
-// Simplified Cornette-Shanks phase function (better for sun glare)
-float cornetteShanks(float cosTheta, float g) {
-    float g2 = g * g;
-    float num = 3.0 * (1.0 - g2) * (1.0 + cosTheta * cosTheta);
-    float denom = 2.0 * (2.0 + g2) * pow(1.0 + g2 - 2.0 * g * cosTheta, 1.5);
-    return num / max(denom, 0.0001);
-}
-
-// Gold noise for temporal jitter
-float goldNoise(float2 xy, float seed) {
-    return fract(tan(distance(xy * 1.61803398874989484820459, xy) * seed) * xy.x);
+// Simple hash for jitter
+float hash(float2 p) {
+    return fract(sin(dot(p, float2(127.1, 311.7))) * 43758.5453);
 }
 
 vertex VertexOut vertexMain(uint vertexID [[vertex_id]]) {
@@ -89,39 +70,41 @@ fragment float4 fragmentMain(
     float2 uv = in.uv;
     float2 sunPos = data.sunScreenPos;
 
-    // Early out if sun is behind the camera (off-screen check with margin)
-    // Allow some margin for rays to still be visible near screen edges
-    float margin = 0.5;
+    // Early out if sun is too far off-screen
+    float margin = 0.3;
     if (sunPos.x < -margin || sunPos.x > 1.0 + margin ||
         sunPos.y < -margin || sunPos.y > 1.0 + margin) {
-        // Sun is too far off-screen, no god rays visible
         return float4(0.0, 0.0, 0.0, 0.0);
     }
 
-    // Calculate ray from pixel to sun
+    // Check if sun itself is visible (not occluded by geometry)
+    // Sample depth at sun position - if depth < threshold, sun is behind geometry
+    float2 sunUVClamped = clamp(sunPos, float2(0.001), float2(0.999));
+    float sunDepth = depthTexture.sample(linearSampler, sunUVClamped).r;
+    float sunVisibility = step(data.depthThreshold, sunDepth);
+
+    // If sun is completely occluded, no god rays
+    if (sunVisibility < 0.01) {
+        return float4(0.0, 0.0, 0.0, 0.0);
+    }
+
+    // Calculate ray direction from current pixel towards sun
     float2 deltaUV = sunPos - uv;
-    float rayLength = length(deltaUV);
+    float distToSun = length(deltaUV);
 
-    // Limit ray distance
-    rayLength = min(rayLength, data.maxDistance);
+    // Skip if too close to sun position (avoid artifacts)
+    if (distToSun < 0.001) {
+        return float4(0.0, 0.0, 0.0, 0.0);
+    }
 
-    // Normalize and scale delta for sampling
-    float2 rayDir = normalize(deltaUV);
-    float stepSize = rayLength / float(data.numSamples);
-    float2 stepDelta = rayDir * stepSize;
+    // Normalize direction and calculate step size
+    float2 rayDir = deltaUV / distToSun;
+    float stepLen = min(distToSun, data.maxDistance) / float(data.numSamples);
+    float2 stepDelta = rayDir * stepLen;
 
     // Add temporal jitter to reduce banding
-    float jitterOffset = data.jitter * goldNoise(uv * data.screenSize, frame.frameNumber * 0.1);
-    float2 sampleUV = uv + stepDelta * jitterOffset;
-
-    // Calculate angular attenuation based on view angle to sun
-    // This creates the characteristic "ray" appearance
-    float2 viewDir = normalize(uv - float2(0.5));
-    float2 sunDir = normalize(sunPos - float2(0.5));
-    float cosAngle = dot(viewDir, sunDir);
-
-    // Apply phase function for realistic scattering appearance
-    float phase = cornetteShanks(cosAngle, data.mieG);
+    float jitterAmount = data.jitter * hash(uv * data.screenSize + float2(frame.frameNumber));
+    float2 sampleUV = uv + stepDelta * jitterAmount;
 
     // Ray march towards sun, accumulating light
     float3 accumLight = float3(0.0);
@@ -130,28 +113,21 @@ fragment float4 fragmentMain(
     for (int i = 0; i < data.numSamples; i++) {
         // Bounds check
         if (sampleUV.x < 0.0 || sampleUV.x > 1.0 || sampleUV.y < 0.0 || sampleUV.y > 1.0) {
-            sampleUV += stepDelta;
-            illuminationDecay *= data.decay;
-            continue;
+            break; // Stop when leaving screen
         }
 
-        // Sample depth to determine occlusion
+        // Sample depth - check if this point sees the sky
         float sampleDepth = depthTexture.sample(linearSampler, sampleUV).r;
+        float isUnoccluded = step(data.depthThreshold, sampleDepth);
 
-        // Only accumulate light from unoccluded samples (sky/far depth)
-        // This creates the shadow ray effect - rays are blocked by geometry
-        float occlusion = step(data.depthThreshold, sampleDepth);
-
-        // Sample scene color for light contribution
-        // Using color instead of just white gives colored god rays
+        // Sample scene color at this point
         float3 sampleColor = colorTexture.sample(linearSampler, sampleUV).rgb;
 
-        // Luminance-based contribution for cleaner rays
+        // Use luminance of sky color as light contribution
         float luminance = dot(sampleColor, float3(0.2126, 0.7152, 0.0722));
-        float3 lightContrib = data.sunColor * luminance * data.sunIntensity;
 
-        // Accumulate with decay
-        accumLight += lightContrib * occlusion * illuminationDecay * data.weight;
+        // Accumulate light with decay
+        accumLight += data.sunColor * luminance * isUnoccluded * illuminationDecay * data.weight;
 
         // Apply exponential decay
         illuminationDecay *= data.decay;
@@ -160,13 +136,13 @@ fragment float4 fragmentMain(
         sampleUV += stepDelta;
     }
 
-    // Apply density and exposure
-    float3 godRays = accumLight * data.density * data.exposure * phase;
+    // Apply density, exposure, and sun visibility
+    float3 godRays = accumLight * data.density * data.exposure * data.sunIntensity * sunVisibility;
 
-    // Distance-based falloff from sun position
-    float distFromSun = length(uv - sunPos);
-    float radialFalloff = 1.0 - saturate(distFromSun * 1.5);
-    godRays *= radialFalloff;
+    // Radial falloff - rays fade with distance from sun
+    float falloff = 1.0 - saturate(distToSun * 0.8);
+    falloff = falloff * falloff; // Quadratic falloff for smoother fade
+    godRays *= falloff;
 
     return float4(godRays, 1.0);
 }
