@@ -169,6 +169,7 @@ struct alignas(16) LightCullData {
     glm::vec2 screenSize;
     glm::vec2 _pad1;
     glm::uvec3 gridSize;
+    float _pad2;
     Uint32 lightCount;
 };
 
