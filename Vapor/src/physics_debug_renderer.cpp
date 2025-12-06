@@ -14,6 +14,7 @@
 #include <Jolt/Physics/Collision/Shape/Shape.h>
 #include <Jolt/Physics/Collision/Shape/SphereShape.h>
 #include <Jolt/Physics/PhysicsSystem.h>
+#include <memory>
 #include <vector>
 
 namespace Vapor {
@@ -25,7 +26,7 @@ namespace Vapor {
         this->physics = physics;
     }
 
-    void PhysicsDebugRenderer::setDebugDraw(DebugDraw* debugDraw) {
+    void PhysicsDebugRenderer::setDebugDraw(std::shared_ptr<DebugDraw> debugDraw) {
         this->debugDraw = debugDraw;
     }
 

@@ -7,6 +7,7 @@
 #include <SDL3/SDL_render.h>
 #include <SDL3/SDL_stdinc.h>
 #include <SDL3/SDL_video.h>
+#include <memory>
 #include <string>
 #include <unordered_map>
 
@@ -122,10 +123,7 @@ public:
     bool initUI() override;
 
     // Debug draw - set the external debug draw queue
-    void setDebugDraw(Vapor::DebugDraw* draw) override {
-        debugDraw = draw;
-    }
-    Vapor::DebugDraw* getDebugDraw() override {
+    std::shared_ptr<Vapor::DebugDraw> getDebugDraw() override {
         return debugDraw;
     }
 
@@ -180,7 +178,7 @@ protected:
     NS::SharedPtr<MTL::RenderPipelineState> debugDrawPipeline;
     NS::SharedPtr<MTL::DepthStencilState> debugDrawDepthStencilState;
     std::vector<NS::SharedPtr<MTL::Buffer>> debugDrawVertexBuffers;// Per-frame buffers
-    Vapor::DebugDraw* debugDraw = nullptr;// External debug draw queue (not owned)
+    std::shared_ptr<Vapor::DebugDraw> debugDraw = nullptr;
 
     // Water rendering pipeline and resources
     NS::SharedPtr<MTL::RenderPipelineState> waterPipeline;

@@ -1,6 +1,8 @@
+#include <memory>
 #define NS_PRIVATE_IMPLEMENTATION
 #define MTL_PRIVATE_IMPLEMENTATION
 #define CA_PRIVATE_IMPLEMENTATION
+#include "debug_draw.hpp"
 #include "renderer_metal.hpp"
 
 #include <SDL3/SDL_stdinc.h>
@@ -1152,10 +1154,8 @@ public:
         // Reallocate buffer if needed
         if (!vertexBuffer || vertexBuffer->length() < requiredSize) {
             // Allocate with some extra space to avoid frequent reallocations
-            size_t allocSize = std::max(requiredSize, size_t(64 * 1024)); // Min 64KB
-            vertexBuffer = NS::TransferPtr(
-                r.device->newBuffer(allocSize, MTL::ResourceStorageModeShared)
-            );
+            size_t allocSize = std::max(requiredSize, size_t(64 * 1024));// Min 64KB
+            vertexBuffer = NS::TransferPtr(r.device->newBuffer(allocSize, MTL::ResourceStorageModeShared));
         }
 
         // Upload vertex data
@@ -1180,12 +1180,8 @@ public:
         // Set viewport
         auto drawableSize = r.currentDrawable->texture()->width();
         auto drawableHeight = r.currentDrawable->texture()->height();
-        MTL::Viewport viewport = {
-            0.0, 0.0,
-            static_cast<double>(drawableSize),
-            static_cast<double>(drawableHeight),
-            0.0, 1.0
-        };
+        MTL::Viewport viewport = { 0.0, 0.0, static_cast<double>(drawableSize), static_cast<double>(drawableHeight),
+                                   0.0, 1.0 };
         encoder->setViewport(viewport);
 
         // Set pipeline and depth state
@@ -1201,6 +1197,8 @@ public:
         encoder->drawPrimitives(MTL::PrimitiveTypeLine, NS::UInteger(0), NS::UInteger(lineVertices.size()));
 
         encoder->endEncoding();
+
+        r.debugDraw->clear();
     }
 };
 
@@ -1300,9 +1298,11 @@ auto Renderer_Metal::init(SDL_Window* window) -> void {
     graph.addPass(std::make_unique<SkyAtmospherePass>(this));
     // graph.addPass(std::make_unique<WaterPass>(this));
     graph.addPass(std::make_unique<PostProcessPass>(this));
-    graph.addPass(std::make_unique<DebugDrawPass>(this));  // Debug draw after post-process
+    graph.addPass(std::make_unique<DebugDrawPass>(this));// Debug draw after post-process
     graph.addPass(std::make_unique<RmlUiPass>(this));// RmlUI before ImGui
     graph.addPass(std::make_unique<ImGuiPass>(this));
+
+    debugDraw = std::make_shared<Vapor::DebugDraw>();
 }
 
 auto Renderer_Metal::deinit() -> void {
@@ -1412,8 +1412,10 @@ auto Renderer_Metal::createResources() -> void {
         NS::Error* error = nullptr;
         MTL::Library* library = device->newLibrary(code, nullptr, &error);
         if (!library) {
-            fmt::print("Warning: Could not compile debug draw shader: {}\n",
-                       error ? error->localizedDescription()->utf8String() : "unknown error");
+            fmt::print(
+                "Warning: Could not compile debug draw shader: {}\n",
+                error ? error->localizedDescription()->utf8String() : "unknown error"
+            );
         } else {
             auto vertexFuncName = NS::String::string("debug_vertex", NS::StringEncoding::UTF8StringEncoding);
             auto vertexMain = library->newFunction(vertexFuncName);
@@ -1439,8 +1441,10 @@ auto Renderer_Metal::createResources() -> void {
 
             debugDrawPipeline = NS::TransferPtr(device->newRenderPipelineState(pipelineDesc, &error));
             if (!debugDrawPipeline) {
-                fmt::print("Warning: Could not create debug draw pipeline: {}\n",
-                           error ? error->localizedDescription()->utf8String() : "unknown error");
+                fmt::print(
+                    "Warning: Could not create debug draw pipeline: {}\n",
+                    error ? error->localizedDescription()->utf8String() : "unknown error"
+                );
             }
 
             pipelineDesc->release();
@@ -1452,14 +1456,14 @@ auto Renderer_Metal::createResources() -> void {
         // Create depth stencil state for debug draw (read depth, don't write)
         MTL::DepthStencilDescriptor* depthDesc = MTL::DepthStencilDescriptor::alloc()->init();
         depthDesc->setDepthCompareFunction(MTL::CompareFunctionLessEqual);
-        depthDesc->setDepthWriteEnabled(false);  // Don't write to depth buffer
+        depthDesc->setDepthWriteEnabled(false);// Don't write to depth buffer
         debugDrawDepthStencilState = NS::TransferPtr(device->newDepthStencilState(depthDesc));
         depthDesc->release();
 
         // Create per-frame vertex buffers for debug draw
         debugDrawVertexBuffers.resize(MAX_FRAMES_IN_FLIGHT);
         for (auto& buffer : debugDrawVertexBuffers) {
-            buffer = nullptr;  // Will be allocated on demand
+            buffer = nullptr;// Will be allocated on demand
         }
     }
 
