@@ -1088,6 +1088,93 @@ public:
     }
 };
 
+// Light scattering pass: Renders volumetric god rays effect
+class LightScatteringPass : public RenderPass {
+public:
+    explicit LightScatteringPass(Renderer_Metal* renderer) : RenderPass(renderer) {
+    }
+
+    const char* getName() const override {
+        return "LightScatteringPass";
+    }
+
+    void execute() override {
+        auto& r = *renderer;
+
+        if (!r.lightScatteringEnabled) return;
+
+        auto drawableSize = r.swapchain->drawableSize();
+        glm::vec2 screenSize = glm::vec2(drawableSize.width, drawableSize.height);
+
+        // Calculate sun screen position by projecting sun direction
+        AtmosphereData* atmos = reinterpret_cast<AtmosphereData*>(r.atmosphereDataBuffer->contents());
+        glm::vec3 sunDir = glm::normalize(atmos->sunDirection);
+
+        // Project sun position to screen space
+        // Sun is at infinity, so we use camera position + sun direction * large distance
+        glm::vec3 camPos = r.currentCamera->getEye();
+        glm::vec3 sunWorldPos = camPos + sunDir * 10000.0f;
+
+        glm::mat4 viewProj = r.currentCamera->getProjMatrix() * r.currentCamera->getViewMatrix();
+        glm::vec4 sunClip = viewProj * glm::vec4(sunWorldPos, 1.0f);
+
+        // Check if sun is behind camera
+        if (sunClip.w <= 0.0f) {
+            return;// Sun behind camera, no god rays
+        }
+
+        // Convert to NDC then to UV [0,1]
+        glm::vec2 sunNDC = glm::vec2(sunClip.x, sunClip.y) / sunClip.w;
+        glm::vec2 sunScreenPos = sunNDC * 0.5f + 0.5f;
+        sunScreenPos.y = 1.0f - sunScreenPos.y;// Flip Y for Metal
+
+        // Update light scattering data buffer
+        LightScatteringData* lsData =
+            reinterpret_cast<LightScatteringData*>(r.lightScatteringDataBuffers[r.currentFrameInFlight]->contents());
+        lsData->sunScreenPos = sunScreenPos;
+        lsData->screenSize = screenSize;
+        lsData->density = r.lightScatteringSettings.density;
+        lsData->weight = r.lightScatteringSettings.weight;
+        lsData->decay = r.lightScatteringSettings.decay;
+        lsData->exposure = r.lightScatteringSettings.exposure;
+        lsData->numSamples = r.lightScatteringSettings.numSamples;
+        lsData->maxDistance = r.lightScatteringSettings.maxDistance;
+        lsData->sunIntensity = r.lightScatteringSettings.sunIntensity;
+        lsData->mieG = r.lightScatteringSettings.mieG;
+        lsData->sunColor = atmos->sunColor;
+        lsData->depthThreshold = r.lightScatteringSettings.depthThreshold;
+        lsData->jitter = r.lightScatteringSettings.jitter;
+        r.lightScatteringDataBuffers[r.currentFrameInFlight]->didModifyRange(
+            NS::Range::Make(0, r.lightScatteringDataBuffers[r.currentFrameInFlight]->length())
+        );
+
+        // Create render pass descriptor - render to light scattering RT
+        auto lsPassDesc = NS::TransferPtr(MTL::RenderPassDescriptor::renderPassDescriptor());
+        auto lsPassColorRT = lsPassDesc->colorAttachments()->object(0);
+        lsPassColorRT->setClearColor(MTL::ClearColor(0.0, 0.0, 0.0, 0.0));
+        lsPassColorRT->setLoadAction(MTL::LoadActionClear);
+        lsPassColorRT->setStoreAction(MTL::StoreActionStore);
+        lsPassColorRT->setTexture(r.lightScatteringRT.get());
+
+        // Execute the pass
+        auto encoder = r.currentCommandBuffer->renderCommandEncoder(lsPassDesc.get());
+        encoder->setRenderPipelineState(r.lightScatteringPipeline.get());
+        encoder->setCullMode(MTL::CullModeNone);
+
+        // Set textures
+        encoder->setFragmentTexture(r.colorRT.get(), 0);// Scene color
+        encoder->setFragmentTexture(r.depthStencilRT.get(), 1);// Scene depth
+
+        // Set buffers
+        encoder->setFragmentBuffer(r.lightScatteringDataBuffers[r.currentFrameInFlight].get(), 0, 0);
+        encoder->setFragmentBuffer(r.frameDataBuffers[r.currentFrameInFlight].get(), 0, 1);
+
+        // Draw full-screen triangle
+        encoder->drawPrimitives(MTL::PrimitiveType::PrimitiveTypeTriangle, 0, 3, 1);
+        encoder->endEncoding();
+    }
+};
+
 // ============================================================================
 // Bloom passes: Physically-based bloom implementation
 // ============================================================================
@@ -1095,7 +1182,8 @@ public:
 // Bloom brightness pass: Extracts bright pixels from the scene
 class BloomBrightnessPass : public RenderPass {
 public:
-    explicit BloomBrightnessPass(Renderer_Metal* renderer) : RenderPass(renderer) {}
+    explicit BloomBrightnessPass(Renderer_Metal* renderer) : RenderPass(renderer) {
+    }
 
     const char* getName() const override {
         return "BloomBrightnessPass";
@@ -1125,7 +1213,8 @@ public:
 // Bloom downsample pass: Creates the bloom mipmap pyramid
 class BloomDownsamplePass : public RenderPass {
 public:
-    explicit BloomDownsamplePass(Renderer_Metal* renderer) : RenderPass(renderer) {}
+    explicit BloomDownsamplePass(Renderer_Metal* renderer) : RenderPass(renderer) {
+    }
 
     const char* getName() const override {
         return "BloomDownsamplePass";
@@ -1175,7 +1264,8 @@ public:
 // Bloom upsample pass: Upsamples and accumulates the bloom
 class BloomUpsamplePass : public RenderPass {
 public:
-    explicit BloomUpsamplePass(Renderer_Metal* renderer) : RenderPass(renderer) {}
+    explicit BloomUpsamplePass(Renderer_Metal* renderer) : RenderPass(renderer) {
+    }
 
     const char* getName() const override {
         return "BloomUpsamplePass";
@@ -1188,7 +1278,7 @@ public:
         for (int i = static_cast<int>(r.BLOOM_PYRAMID_LEVELS) - 2; i >= 0; i--) {
             auto passDesc = NS::TransferPtr(MTL::RenderPassDescriptor::renderPassDescriptor());
             auto colorRT = passDesc->colorAttachments()->object(0);
-            colorRT->setLoadAction(MTL::LoadActionLoad);  // Load to blend with existing content
+            colorRT->setLoadAction(MTL::LoadActionLoad);// Load to blend with existing content
             colorRT->setStoreAction(MTL::StoreActionStore);
             colorRT->setTexture(r.bloomPyramidRTs[i].get());
 
@@ -1196,8 +1286,8 @@ public:
             encoder->setRenderPipelineState(r.bloomUpsamplePipeline.get());
             encoder->setCullMode(MTL::CullModeBack);
             encoder->setFrontFacingWinding(MTL::Winding::WindingCounterClockwise);
-            encoder->setFragmentTexture(r.bloomPyramidRTs[i + 1].get(), 0);  // Lower res texture
-            encoder->setFragmentTexture(r.bloomPyramidRTs[i].get(), 1);      // Current level to blend
+            encoder->setFragmentTexture(r.bloomPyramidRTs[i + 1].get(), 0);// Lower res texture
+            encoder->setFragmentTexture(r.bloomPyramidRTs[i].get(), 1);// Current level to blend
             encoder->drawPrimitives(MTL::PrimitiveType::PrimitiveTypeTriangle, 0, 3, 1);
             encoder->endEncoding();
         }
@@ -1207,7 +1297,8 @@ public:
 // Bloom composite pass: Combines bloom with the scene
 class BloomCompositePass : public RenderPass {
 public:
-    explicit BloomCompositePass(Renderer_Metal* renderer) : RenderPass(renderer) {}
+    explicit BloomCompositePass(Renderer_Metal* renderer) : RenderPass(renderer) {
+    }
 
     const char* getName() const override {
         return "BloomCompositePass";
@@ -1227,8 +1318,8 @@ public:
         encoder->setRenderPipelineState(r.bloomCompositePipeline.get());
         encoder->setCullMode(MTL::CullModeBack);
         encoder->setFrontFacingWinding(MTL::Winding::WindingCounterClockwise);
-        encoder->setFragmentTexture(r.colorRT.get(), 0);           // Original scene
-        encoder->setFragmentTexture(r.bloomPyramidRTs[0].get(), 1); // Accumulated bloom
+        encoder->setFragmentTexture(r.colorRT.get(), 0);// Original scene
+        encoder->setFragmentTexture(r.bloomPyramidRTs[0].get(), 1);// Accumulated bloom
         encoder->setFragmentBytes(&r.bloomStrength, sizeof(float), 0);
         encoder->drawPrimitives(MTL::PrimitiveType::PrimitiveTypeTriangle, 0, 3, 1);
         encoder->endEncoding();
@@ -1242,7 +1333,8 @@ public:
 // DOF CoC pass: Calculate Circle of Confusion based on screen position
 class DOFCoCPass : public RenderPass {
 public:
-    explicit DOFCoCPass(Renderer_Metal* renderer) : RenderPass(renderer) {}
+    explicit DOFCoCPass(Renderer_Metal* renderer) : RenderPass(renderer) {
+    }
 
     const char* getName() const override {
         return "DOFCoCPass";
@@ -1261,15 +1353,14 @@ public:
             float bokehRoundness;
             float padding1;
             float padding2;
-        } gpuParams = {
-            r.dofParams.focusCenter,
-            r.dofParams.focusWidth,
-            r.dofParams.focusFalloff,
-            r.dofParams.maxBlur,
-            r.dofParams.tiltAngle,
-            r.dofParams.bokehRoundness,
-            0.0f, 0.0f
-        };
+        } gpuParams = { r.dofParams.focusCenter,
+                        r.dofParams.focusWidth,
+                        r.dofParams.focusFalloff,
+                        r.dofParams.maxBlur,
+                        r.dofParams.tiltAngle,
+                        r.dofParams.bokehRoundness,
+                        0.0f,
+                        0.0f };
 
         auto passDesc = NS::TransferPtr(MTL::RenderPassDescriptor::renderPassDescriptor());
         auto colorRT = passDesc->colorAttachments()->object(0);
@@ -1282,8 +1373,8 @@ public:
         encoder->setRenderPipelineState(r.dofCoCPipeline.get());
         encoder->setCullMode(MTL::CullModeBack);
         encoder->setFrontFacingWinding(MTL::Winding::WindingCounterClockwise);
-        encoder->setFragmentTexture(r.bloomResultRT.get(), 0);  // Input from bloom
-        encoder->setFragmentTexture(r.depthStencilRT.get(), 1); // Depth (optional for hybrid mode)
+        encoder->setFragmentTexture(r.bloomResultRT.get(), 0);// Input from bloom
+        encoder->setFragmentTexture(r.depthStencilRT.get(), 1);// Depth (optional for hybrid mode)
         encoder->setFragmentBytes(&gpuParams, sizeof(GPUDOFParams), 0);
         encoder->drawPrimitives(MTL::PrimitiveType::PrimitiveTypeTriangle, 0, 3, 1);
         encoder->endEncoding();
@@ -1293,7 +1384,8 @@ public:
 // DOF Blur pass: Apply bokeh blur based on CoC
 class DOFBlurPass : public RenderPass {
 public:
-    explicit DOFBlurPass(Renderer_Metal* renderer) : RenderPass(renderer) {}
+    explicit DOFBlurPass(Renderer_Metal* renderer) : RenderPass(renderer) {
+    }
 
     const char* getName() const override {
         return "DOFBlurPass";
@@ -1307,12 +1399,7 @@ public:
             float texelSizeY;
             float blurScale;
             int sampleCount;
-        } blurParams = {
-            1.0f / r.dofBlurRT->width(),
-            1.0f / r.dofBlurRT->height(),
-            1.0f,
-            r.dofParams.sampleCount
-        };
+        } blurParams = { 1.0f / r.dofBlurRT->width(), 1.0f / r.dofBlurRT->height(), 1.0f, r.dofParams.sampleCount };
 
         auto passDesc = NS::TransferPtr(MTL::RenderPassDescriptor::renderPassDescriptor());
         auto colorRT = passDesc->colorAttachments()->object(0);
@@ -1335,7 +1422,8 @@ public:
 // DOF Composite pass: Blend sharp and blurred images
 class DOFCompositePass : public RenderPass {
 public:
-    explicit DOFCompositePass(Renderer_Metal* renderer) : RenderPass(renderer) {}
+    explicit DOFCompositePass(Renderer_Metal* renderer) : RenderPass(renderer) {
+    }
 
     const char* getName() const override {
         return "DOFCompositePass";
@@ -1355,8 +1443,8 @@ public:
         encoder->setRenderPipelineState(r.dofCompositePipeline.get());
         encoder->setCullMode(MTL::CullModeBack);
         encoder->setFrontFacingWinding(MTL::Winding::WindingCounterClockwise);
-        encoder->setFragmentTexture(r.bloomResultRT.get(), 0);  // Sharp (from bloom)
-        encoder->setFragmentTexture(r.dofBlurRT.get(), 1);       // Blurred
+        encoder->setFragmentTexture(r.bloomResultRT.get(), 0);// Sharp (from bloom)
+        encoder->setFragmentTexture(r.dofBlurRT.get(), 1);// Blurred
         encoder->setFragmentBytes(&r.dofParams.blendSharpness, sizeof(float), 0);
         encoder->drawPrimitives(MTL::PrimitiveType::PrimitiveTypeTriangle, 0, 3, 1);
         encoder->endEncoding();
@@ -1389,19 +1477,17 @@ public:
             float temperature;
             float tint;
             float exposure;
-        } gpuParams = {
-            r.postProcessParams.chromaticAberrationStrength,
-            r.postProcessParams.chromaticAberrationFalloff,
-            r.postProcessParams.vignetteStrength,
-            r.postProcessParams.vignetteRadius,
-            r.postProcessParams.vignetteSoftness,
-            r.postProcessParams.saturation,
-            r.postProcessParams.contrast,
-            r.postProcessParams.brightness,
-            r.postProcessParams.temperature,
-            r.postProcessParams.tint,
-            r.postProcessParams.exposure
-        };
+        } gpuParams = { r.postProcessParams.chromaticAberrationStrength,
+                        r.postProcessParams.chromaticAberrationFalloff,
+                        r.postProcessParams.vignetteStrength,
+                        r.postProcessParams.vignetteRadius,
+                        r.postProcessParams.vignetteSoftness,
+                        r.postProcessParams.saturation,
+                        r.postProcessParams.contrast,
+                        r.postProcessParams.brightness,
+                        r.postProcessParams.temperature,
+                        r.postProcessParams.tint,
+                        r.postProcessParams.exposure };
 
         // Create render pass descriptor
         auto postPassDesc = NS::TransferPtr(MTL::RenderPassDescriptor::renderPassDescriptor());
@@ -1422,6 +1508,8 @@ public:
         // So we use bloomResultRT by default. Uncomment DOF passes and change this to dofResultRT.
         encoder->setFragmentTexture(r.bloomResultRT.get(), 0);
         encoder->setFragmentTexture(r.aoRT.get(), 1);
+        encoder->setFragmentTexture(r.normalRT.get(), 2);
+        encoder->setFragmentTexture(r.lightScatteringRT.get(), 3);// God rays texture
         encoder->setFragmentBytes(&gpuParams, sizeof(GPUPostProcessParams), 0);
         encoder->drawPrimitives(MTL::PrimitiveType::PrimitiveTypeTriangle, 0, 3, 1);
         encoder->endEncoding();
@@ -1603,6 +1691,7 @@ auto Renderer_Metal::init(SDL_Window* window) -> void {
     graph.addPass(std::make_unique<MainRenderPass>(this));
     graph.addPass(std::make_unique<SkyAtmospherePass>(this));
     // graph.addPass(std::make_unique<WaterPass>(this));
+    graph.addPass(std::make_unique<LightScatteringPass>(this));
 
     // Bloom passes (physically-based bloom)
     graph.addPass(std::make_unique<BloomBrightnessPass>(this));
@@ -1724,6 +1813,7 @@ auto Renderer_Metal::createResources() -> void {
     irradianceConvolutionPipeline = createPipeline("assets/shaders/3d_irradiance_convolution.metal", true, true, 1);
     prefilterEnvMapPipeline = createPipeline("assets/shaders/3d_prefilter_envmap.metal", true, true, 1);
     brdfLUTPipeline = createPipeline("assets/shaders/3d_brdf_lut.metal", false, true, 1);
+    lightScatteringPipeline = createPipeline("assets/shaders/3d_light_scattering.metal", true, true, 1);
 
     // Create debug draw pipeline
     {
@@ -1814,6 +1904,27 @@ auto Renderer_Metal::createResources() -> void {
             clusterGridSizeX * clusterGridSizeY * clusterGridSizeZ * sizeof(Cluster), MTL::ResourceStorageModeManaged
         ));
     }
+
+    // Create light scattering data buffers and initialize default settings
+    lightScatteringDataBuffers.resize(MAX_FRAMES_IN_FLIGHT);
+    for (auto& lsBuffer : lightScatteringDataBuffers) {
+        lsBuffer = NS::TransferPtr(device->newBuffer(sizeof(LightScatteringData), MTL::ResourceStorageModeManaged));
+    }
+
+    // Initialize light scattering default settings
+    lightScatteringSettings.sunScreenPos = glm::vec2(0.5f, 0.5f);
+    lightScatteringSettings.screenSize = glm::vec2(1920.0f, 1080.0f);
+    lightScatteringSettings.density = 1.0f;
+    lightScatteringSettings.weight = 0.05f;
+    lightScatteringSettings.decay = 0.97f;
+    lightScatteringSettings.exposure = 0.3f;
+    lightScatteringSettings.numSamples = 64;
+    lightScatteringSettings.maxDistance = 1.0f;
+    lightScatteringSettings.sunIntensity = 1.0f;
+    lightScatteringSettings.mieG = 0.76f;
+    lightScatteringSettings.sunColor = glm::vec3(1.0f, 0.95f, 0.9f);
+    lightScatteringSettings.depthThreshold = 0.9999f;
+    lightScatteringSettings.jitter = 0.5f;
 
     // Create atmosphere data buffer with default Earth-like settings
     atmosphereDataBuffer = NS::TransferPtr(device->newBuffer(sizeof(AtmosphereData), MTL::ResourceStorageModeManaged));
@@ -1971,6 +2082,16 @@ auto Renderer_Metal::createResources() -> void {
     aoRT = NS::TransferPtr(device->newTexture(aoTextureDesc));
     aoTextureDesc->release();
 
+    // Create light scattering render target (HDR format for god rays)
+    MTL::TextureDescriptor* lightScatteringTextureDesc = MTL::TextureDescriptor::alloc()->init();
+    lightScatteringTextureDesc->setTextureType(MTL::TextureType2D);
+    lightScatteringTextureDesc->setPixelFormat(MTL::PixelFormatRGBA16Float);// HDR for bright rays
+    lightScatteringTextureDesc->setWidth(swapchain->drawableSize().width);
+    lightScatteringTextureDesc->setHeight(swapchain->drawableSize().height);
+    lightScatteringTextureDesc->setUsage(MTL::TextureUsageRenderTarget | MTL::TextureUsageShaderRead);
+    lightScatteringRT = NS::TransferPtr(device->newTexture(lightScatteringTextureDesc));
+    lightScatteringTextureDesc->release();
+
     // ========================================================================
     // Bloom render targets
     // ========================================================================
@@ -2028,13 +2149,15 @@ auto Renderer_Metal::createResources() -> void {
         NS::Error* error = nullptr;
         MTL::Library* library = device->newLibrary(code, nullptr, &error);
         if (!library) {
-            throw std::runtime_error(
-                fmt::format("Could not compile bloom brightness shader! Error: {}\n", error->localizedDescription()->utf8String())
-            );
+            throw std::runtime_error(fmt::format(
+                "Could not compile bloom brightness shader! Error: {}\n", error->localizedDescription()->utf8String()
+            ));
         }
 
-        auto vertexMain = library->newFunction(NS::String::string("vertexMain", NS::StringEncoding::UTF8StringEncoding));
-        auto fragmentMain = library->newFunction(NS::String::string("fragmentMain", NS::StringEncoding::UTF8StringEncoding));
+        auto vertexMain =
+            library->newFunction(NS::String::string("vertexMain", NS::StringEncoding::UTF8StringEncoding));
+        auto fragmentMain =
+            library->newFunction(NS::String::string("fragmentMain", NS::StringEncoding::UTF8StringEncoding));
 
         auto pipelineDesc = MTL::RenderPipelineDescriptor::alloc()->init();
         pipelineDesc->setVertexFunction(vertexMain);
@@ -2043,9 +2166,9 @@ auto Renderer_Metal::createResources() -> void {
 
         bloomBrightnessPipeline = NS::TransferPtr(device->newRenderPipelineState(pipelineDesc, &error));
         if (!bloomBrightnessPipeline) {
-            throw std::runtime_error(
-                fmt::format("Could not create bloom brightness pipeline! Error: {}\n", error->localizedDescription()->utf8String())
-            );
+            throw std::runtime_error(fmt::format(
+                "Could not create bloom brightness pipeline! Error: {}\n", error->localizedDescription()->utf8String()
+            ));
         }
 
         code->release();
@@ -2062,13 +2185,15 @@ auto Renderer_Metal::createResources() -> void {
         NS::Error* error = nullptr;
         MTL::Library* library = device->newLibrary(code, nullptr, &error);
         if (!library) {
-            throw std::runtime_error(
-                fmt::format("Could not compile bloom downsample shader! Error: {}\n", error->localizedDescription()->utf8String())
-            );
+            throw std::runtime_error(fmt::format(
+                "Could not compile bloom downsample shader! Error: {}\n", error->localizedDescription()->utf8String()
+            ));
         }
 
-        auto vertexMain = library->newFunction(NS::String::string("vertexMain", NS::StringEncoding::UTF8StringEncoding));
-        auto fragmentMain = library->newFunction(NS::String::string("fragmentMain", NS::StringEncoding::UTF8StringEncoding));
+        auto vertexMain =
+            library->newFunction(NS::String::string("vertexMain", NS::StringEncoding::UTF8StringEncoding));
+        auto fragmentMain =
+            library->newFunction(NS::String::string("fragmentMain", NS::StringEncoding::UTF8StringEncoding));
 
         auto pipelineDesc = MTL::RenderPipelineDescriptor::alloc()->init();
         pipelineDesc->setVertexFunction(vertexMain);
@@ -2077,9 +2202,9 @@ auto Renderer_Metal::createResources() -> void {
 
         bloomDownsamplePipeline = NS::TransferPtr(device->newRenderPipelineState(pipelineDesc, &error));
         if (!bloomDownsamplePipeline) {
-            throw std::runtime_error(
-                fmt::format("Could not create bloom downsample pipeline! Error: {}\n", error->localizedDescription()->utf8String())
-            );
+            throw std::runtime_error(fmt::format(
+                "Could not create bloom downsample pipeline! Error: {}\n", error->localizedDescription()->utf8String()
+            ));
         }
 
         code->release();
@@ -2096,13 +2221,15 @@ auto Renderer_Metal::createResources() -> void {
         NS::Error* error = nullptr;
         MTL::Library* library = device->newLibrary(code, nullptr, &error);
         if (!library) {
-            throw std::runtime_error(
-                fmt::format("Could not compile bloom upsample shader! Error: {}\n", error->localizedDescription()->utf8String())
-            );
+            throw std::runtime_error(fmt::format(
+                "Could not compile bloom upsample shader! Error: {}\n", error->localizedDescription()->utf8String()
+            ));
         }
 
-        auto vertexMain = library->newFunction(NS::String::string("vertexMain", NS::StringEncoding::UTF8StringEncoding));
-        auto fragmentMain = library->newFunction(NS::String::string("fragmentMain", NS::StringEncoding::UTF8StringEncoding));
+        auto vertexMain =
+            library->newFunction(NS::String::string("vertexMain", NS::StringEncoding::UTF8StringEncoding));
+        auto fragmentMain =
+            library->newFunction(NS::String::string("fragmentMain", NS::StringEncoding::UTF8StringEncoding));
 
         auto pipelineDesc = MTL::RenderPipelineDescriptor::alloc()->init();
         pipelineDesc->setVertexFunction(vertexMain);
@@ -2111,9 +2238,9 @@ auto Renderer_Metal::createResources() -> void {
 
         bloomUpsamplePipeline = NS::TransferPtr(device->newRenderPipelineState(pipelineDesc, &error));
         if (!bloomUpsamplePipeline) {
-            throw std::runtime_error(
-                fmt::format("Could not create bloom upsample pipeline! Error: {}\n", error->localizedDescription()->utf8String())
-            );
+            throw std::runtime_error(fmt::format(
+                "Could not create bloom upsample pipeline! Error: {}\n", error->localizedDescription()->utf8String()
+            ));
         }
 
         code->release();
@@ -2130,13 +2257,15 @@ auto Renderer_Metal::createResources() -> void {
         NS::Error* error = nullptr;
         MTL::Library* library = device->newLibrary(code, nullptr, &error);
         if (!library) {
-            throw std::runtime_error(
-                fmt::format("Could not compile bloom composite shader! Error: {}\n", error->localizedDescription()->utf8String())
-            );
+            throw std::runtime_error(fmt::format(
+                "Could not compile bloom composite shader! Error: {}\n", error->localizedDescription()->utf8String()
+            ));
         }
 
-        auto vertexMain = library->newFunction(NS::String::string("vertexMain", NS::StringEncoding::UTF8StringEncoding));
-        auto fragmentMain = library->newFunction(NS::String::string("fragmentMain", NS::StringEncoding::UTF8StringEncoding));
+        auto vertexMain =
+            library->newFunction(NS::String::string("vertexMain", NS::StringEncoding::UTF8StringEncoding));
+        auto fragmentMain =
+            library->newFunction(NS::String::string("fragmentMain", NS::StringEncoding::UTF8StringEncoding));
 
         auto pipelineDesc = MTL::RenderPipelineDescriptor::alloc()->init();
         pipelineDesc->setVertexFunction(vertexMain);
@@ -2145,9 +2274,9 @@ auto Renderer_Metal::createResources() -> void {
 
         bloomCompositePipeline = NS::TransferPtr(device->newRenderPipelineState(pipelineDesc, &error));
         if (!bloomCompositePipeline) {
-            throw std::runtime_error(
-                fmt::format("Could not create bloom composite pipeline! Error: {}\n", error->localizedDescription()->utf8String())
-            );
+            throw std::runtime_error(fmt::format(
+                "Could not create bloom composite pipeline! Error: {}\n", error->localizedDescription()->utf8String()
+            ));
         }
 
         code->release();
@@ -2208,13 +2337,15 @@ auto Renderer_Metal::createResources() -> void {
         NS::Error* error = nullptr;
         MTL::Library* library = device->newLibrary(code, nullptr, &error);
         if (!library) {
-            throw std::runtime_error(
-                fmt::format("Could not compile DOF CoC shader! Error: {}\n", error->localizedDescription()->utf8String())
-            );
+            throw std::runtime_error(fmt::format(
+                "Could not compile DOF CoC shader! Error: {}\n", error->localizedDescription()->utf8String()
+            ));
         }
 
-        auto vertexMain = library->newFunction(NS::String::string("vertexMain", NS::StringEncoding::UTF8StringEncoding));
-        auto fragmentMain = library->newFunction(NS::String::string("fragmentMain", NS::StringEncoding::UTF8StringEncoding));
+        auto vertexMain =
+            library->newFunction(NS::String::string("vertexMain", NS::StringEncoding::UTF8StringEncoding));
+        auto fragmentMain =
+            library->newFunction(NS::String::string("fragmentMain", NS::StringEncoding::UTF8StringEncoding));
 
         auto pipelineDesc = MTL::RenderPipelineDescriptor::alloc()->init();
         pipelineDesc->setVertexFunction(vertexMain);
@@ -2223,9 +2354,9 @@ auto Renderer_Metal::createResources() -> void {
 
         dofCoCPipeline = NS::TransferPtr(device->newRenderPipelineState(pipelineDesc, &error));
         if (!dofCoCPipeline) {
-            throw std::runtime_error(
-                fmt::format("Could not create DOF CoC pipeline! Error: {}\n", error->localizedDescription()->utf8String())
-            );
+            throw std::runtime_error(fmt::format(
+                "Could not create DOF CoC pipeline! Error: {}\n", error->localizedDescription()->utf8String()
+            ));
         }
 
         code->release();
@@ -2242,13 +2373,15 @@ auto Renderer_Metal::createResources() -> void {
         NS::Error* error = nullptr;
         MTL::Library* library = device->newLibrary(code, nullptr, &error);
         if (!library) {
-            throw std::runtime_error(
-                fmt::format("Could not compile DOF Blur shader! Error: {}\n", error->localizedDescription()->utf8String())
-            );
+            throw std::runtime_error(fmt::format(
+                "Could not compile DOF Blur shader! Error: {}\n", error->localizedDescription()->utf8String()
+            ));
         }
 
-        auto vertexMain = library->newFunction(NS::String::string("vertexMain", NS::StringEncoding::UTF8StringEncoding));
-        auto fragmentMain = library->newFunction(NS::String::string("fragmentMain", NS::StringEncoding::UTF8StringEncoding));
+        auto vertexMain =
+            library->newFunction(NS::String::string("vertexMain", NS::StringEncoding::UTF8StringEncoding));
+        auto fragmentMain =
+            library->newFunction(NS::String::string("fragmentMain", NS::StringEncoding::UTF8StringEncoding));
 
         auto pipelineDesc = MTL::RenderPipelineDescriptor::alloc()->init();
         pipelineDesc->setVertexFunction(vertexMain);
@@ -2257,9 +2390,9 @@ auto Renderer_Metal::createResources() -> void {
 
         dofBlurPipeline = NS::TransferPtr(device->newRenderPipelineState(pipelineDesc, &error));
         if (!dofBlurPipeline) {
-            throw std::runtime_error(
-                fmt::format("Could not create DOF Blur pipeline! Error: {}\n", error->localizedDescription()->utf8String())
-            );
+            throw std::runtime_error(fmt::format(
+                "Could not create DOF Blur pipeline! Error: {}\n", error->localizedDescription()->utf8String()
+            ));
         }
 
         code->release();
@@ -2276,13 +2409,15 @@ auto Renderer_Metal::createResources() -> void {
         NS::Error* error = nullptr;
         MTL::Library* library = device->newLibrary(code, nullptr, &error);
         if (!library) {
-            throw std::runtime_error(
-                fmt::format("Could not compile DOF Composite shader! Error: {}\n", error->localizedDescription()->utf8String())
-            );
+            throw std::runtime_error(fmt::format(
+                "Could not compile DOF Composite shader! Error: {}\n", error->localizedDescription()->utf8String()
+            ));
         }
 
-        auto vertexMain = library->newFunction(NS::String::string("vertexMain", NS::StringEncoding::UTF8StringEncoding));
-        auto fragmentMain = library->newFunction(NS::String::string("fragmentMain", NS::StringEncoding::UTF8StringEncoding));
+        auto vertexMain =
+            library->newFunction(NS::String::string("vertexMain", NS::StringEncoding::UTF8StringEncoding));
+        auto fragmentMain =
+            library->newFunction(NS::String::string("fragmentMain", NS::StringEncoding::UTF8StringEncoding));
 
         auto pipelineDesc = MTL::RenderPipelineDescriptor::alloc()->init();
         pipelineDesc->setVertexFunction(vertexMain);
@@ -2291,9 +2426,9 @@ auto Renderer_Metal::createResources() -> void {
 
         dofCompositePipeline = NS::TransferPtr(device->newRenderPipelineState(pipelineDesc, &error));
         if (!dofCompositePipeline) {
-            throw std::runtime_error(
-                fmt::format("Could not create DOF Composite pipeline! Error: {}\n", error->localizedDescription()->utf8String())
-            );
+            throw std::runtime_error(fmt::format(
+                "Could not create DOF Composite pipeline! Error: {}\n", error->localizedDescription()->utf8String()
+            ));
         }
 
         code->release();
@@ -2906,6 +3041,12 @@ auto Renderer_Metal::draw(std::shared_ptr<Scene> scene, Camera& camera) -> void 
                 ImGui::Image((ImTextureID)(intptr_t)normalRT.get(), ImVec2(64, 64));
                 ImGui::TreePop();
             }
+            if (lightScatteringRT) {
+                if (ImGui::TreeNode(fmt::format("Light Scattering RT").c_str())) {
+                    ImGui::Image((ImTextureID)(intptr_t)lightScatteringRT.get(), ImVec2(64, 64));
+                    ImGui::TreePop();
+                }
+            }
             ImGui::TreePop();
         }
 
@@ -3200,6 +3341,79 @@ auto Renderer_Metal::draw(std::shared_ptr<Scene> scene, Camera& camera) -> void 
                 ImGui::TreePop();
             }
 
+            ImGui::TreePop();
+        }
+
+        if (ImGui::TreeNode("Light Scattering (God Rays)")) {
+            ImGui::Separator();
+            ImGui::Checkbox("Enabled", &lightScatteringEnabled);
+
+            if (lightScatteringEnabled) {
+                ImGui::Separator();
+
+                AtmosphereData* debugAtmos = reinterpret_cast<AtmosphereData*>(atmosphereDataBuffer->contents());
+                glm::vec3 debugSunDir = glm::normalize(debugAtmos->sunDirection);
+                glm::vec3 debugCamPos = camera.getEye();
+                glm::vec3 debugSunWorldPos = debugCamPos + debugSunDir * 10000.0f;
+                glm::mat4 debugViewProj = camera.getProjMatrix() * camera.getViewMatrix();
+                glm::vec4 debugSunClip = debugViewProj * glm::vec4(debugSunWorldPos, 1.0f);
+
+                if (debugSunClip.w <= 0.0f) {
+                    ImGui::TextColored(ImVec4(1.0f, 0.5f, 0.5f, 1.0f), "Sun behind camera");
+                }
+
+                ImGui::Text("Ray Marching");
+                int numSamples = static_cast<int>(lightScatteringSettings.numSamples);
+                if (ImGui::SliderInt("Samples", &numSamples, 8, 128)) {
+                    lightScatteringSettings.numSamples = static_cast<Uint32>(numSamples);
+                }
+                ImGui::DragFloat("Max Distance", &lightScatteringSettings.maxDistance, 0.01f, 0.1f, 2.0f);
+
+                ImGui::Separator();
+                ImGui::Text("Scattering Properties");
+                ImGui::DragFloat("Density", &lightScatteringSettings.density, 0.01f, 0.0f, 5.0f);
+                ImGui::DragFloat("Weight", &lightScatteringSettings.weight, 0.001f, 0.001f, 0.1f);
+                ImGui::DragFloat("Decay", &lightScatteringSettings.decay, 0.001f, 0.9f, 1.0f);
+                ImGui::DragFloat("Exposure", &lightScatteringSettings.exposure, 0.01f, 0.0f, 2.0f);
+
+                ImGui::Separator();
+                ImGui::Text("Light Properties");
+                ImGui::DragFloat("Sun Intensity", &lightScatteringSettings.sunIntensity, 0.1f, 0.0f, 10.0f);
+                ImGui::DragFloat("Mie G (Phase)", &lightScatteringSettings.mieG, 0.01f, -0.99f, 0.99f);
+                if (ImGui::IsItemHovered()) {
+                    ImGui::SetTooltip(
+                        "Mie scattering direction:\n< 0: backscatter\n= 0: isotropic\n> 0: forward scatter (sun glare)"
+                    );
+                }
+
+                ImGui::Separator();
+                ImGui::Text("Advanced");
+                ImGui::DragFloat(
+                    "Depth Threshold", &lightScatteringSettings.depthThreshold, 0.0001f, 0.99f, 1.0f, "%.4f"
+                );
+                if (ImGui::IsItemHovered()) {
+                    ImGui::SetTooltip(
+                        "Depth value above which pixels are considered 'sky'.\nHigher = only sky contributes to rays."
+                    );
+                }
+                ImGui::DragFloat("Temporal Jitter", &lightScatteringSettings.jitter, 0.01f, 0.0f, 1.0f);
+                if (ImGui::IsItemHovered()) {
+                    ImGui::SetTooltip("Jitter amount for temporal anti-aliasing.\nReduces banding artifacts.");
+                }
+
+                if (ImGui::Button("Reset to Defaults")) {
+                    lightScatteringSettings.density = 1.0f;
+                    lightScatteringSettings.weight = 0.01f;
+                    lightScatteringSettings.decay = 0.97f;
+                    lightScatteringSettings.exposure = 0.3f;
+                    lightScatteringSettings.numSamples = 64;
+                    lightScatteringSettings.maxDistance = 1.0f;
+                    lightScatteringSettings.sunIntensity = 1.0f;
+                    lightScatteringSettings.mieG = 0.76f;
+                    lightScatteringSettings.depthThreshold = 0.9999f;
+                    lightScatteringSettings.jitter = 0.5f;
+                }
+            }
             ImGui::TreePop();
         }
     }

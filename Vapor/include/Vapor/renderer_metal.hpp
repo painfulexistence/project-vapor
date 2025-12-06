@@ -33,6 +33,7 @@ class PrefilterEnvMapPass;
 class BRDFLUTPass;
 class MainRenderPass;
 class WaterPass;
+class LightScatteringPass;
 class PostProcessPass;
 class BloomBrightnessPass;
 class BloomDownsamplePass;
@@ -96,6 +97,7 @@ class Renderer_Metal final : public Renderer {// Must be public or factory funct
     friend class BRDFLUTPass;
     friend class MainRenderPass;
     friend class WaterPass;
+    friend class LightScatteringPass;
     friend class PostProcessPass;
     friend class BloomBrightnessPass;
     friend class BloomDownsamplePass;
@@ -187,6 +189,7 @@ protected:
     NS::SharedPtr<MTL::RenderPipelineState> irradianceConvolutionPipeline;
     NS::SharedPtr<MTL::RenderPipelineState> prefilterEnvMapPipeline;
     NS::SharedPtr<MTL::RenderPipelineState> brdfLUTPipeline;
+    NS::SharedPtr<MTL::RenderPipelineState> lightScatteringPipeline;
 
     // Bloom pipelines
     NS::SharedPtr<MTL::RenderPipelineState> bloomBrightnessPipeline;
@@ -241,6 +244,12 @@ protected:
     NS::SharedPtr<MTL::Buffer> atmosphereDataBuffer;
     NS::SharedPtr<MTL::Buffer> iblCaptureDataBuffer;
     std::vector<NS::SharedPtr<MTL::Buffer>> clusterBuffers;
+
+    // Light scattering (God Rays) resources
+    std::vector<NS::SharedPtr<MTL::Buffer>> lightScatteringDataBuffers;
+    NS::SharedPtr<MTL::Texture> lightScatteringRT;// Half-resolution scattering texture
+    bool lightScatteringEnabled = true;
+    LightScatteringData lightScatteringSettings;
 
     // IBL textures
     NS::SharedPtr<MTL::Texture> environmentCubemap;// Captured sky cubemap

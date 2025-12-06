@@ -43,7 +43,7 @@ vertex RasterizerData vertexMain(uint vertexID [[vertex_id]]) {
     return vert;
 }
 
-// ACES tone mapping
+// ACES Filmic Tone Mapping
 float3 aces(float3 x) {
     float a = 2.51;
     float b = 0.03;
@@ -81,6 +81,8 @@ fragment float4 fragmentMain(
     RasterizerData in [[stage_in]],
     texture2d<float, access::sample> texScreen [[texture(0)]],
     texture2d<float, access::sample> texAO [[texture(1)]],
+    texture2d<float, access::sample> texNormal [[texture(2)]],
+    texture2d<float, access::sample> texGodRays [[texture(3)]],
     constant PostProcessParams& params [[buffer(0)]]
 ) {
     constexpr sampler s(address::clamp_to_edge, filter::linear, mip_filter::linear);
@@ -91,7 +93,7 @@ fragment float4 fragmentMain(
     float distFromCenter = length(toCenter);
 
     // ========================================================================
-    // Chromatic Aberration (in HDR space, before tone mapping)
+    // Chromatic Aberration & God Rays
     // ========================================================================
     float caStrength = params.chromaticAberrationStrength;
     float caFalloff = params.chromaticAberrationFalloff;
@@ -105,9 +107,9 @@ fragment float4 fragmentMain(
     float2 uvB = uv - caDirection * caAmount;
 
     float3 color;
-    color.r = texScreen.sample(s, uvR).r;
-    color.g = texScreen.sample(s, uv).g;
-    color.b = texScreen.sample(s, uvB).b;
+    color.r = texScreen.sample(s, uvR).r + texGodRays.sample(s, uvR).r;
+    color.g = texScreen.sample(s, uv).g + texGodRays.sample(s, uv).g;
+    color.b = texScreen.sample(s, uvB).b + texGodRays.sample(s, uvB).b;
 
     // Get AO
     float ao = texAO.sample(s, uv).r;
