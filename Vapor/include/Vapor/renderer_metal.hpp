@@ -48,7 +48,7 @@ class RmlUiPass;
 class ImGuiPass;
 class DebugDrawPass;
 class CanvasPass;
-class WorldUIPass;
+class WorldCanvasPass;
 
 class RenderPass {
 public:
@@ -115,7 +115,7 @@ class Renderer_Metal final : public Renderer {// Must be public or factory funct
     friend class ImGuiPass;
     friend class DebugDrawPass;
     friend class CanvasPass;
-    friend class WorldUIPass;
+    friend class WorldCanvasPass;
 
 public:
     Renderer_Metal();

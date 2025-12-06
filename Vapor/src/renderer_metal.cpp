@@ -1770,13 +1770,13 @@ public:
 };
 
 // 2D Batch pass: Renders batched 2D primitives (quads, lines, shapes)
-class WorldUIPass : public RenderPass {
+class WorldCanvasPass : public RenderPass {
 public:
-    explicit WorldUIPass(Renderer_Metal* renderer) : RenderPass(renderer) {
+    explicit WorldCanvasPass(Renderer_Metal* renderer) : RenderPass(renderer) {
     }
 
     const char* getName() const override {
-        return "WorldUIPass";
+        return "WorldCanvasPass";
     }
 
     void execute() override {
@@ -2036,7 +2036,7 @@ auto Renderer_Metal::init(SDL_Window* window) -> void {
     // graph.addPass(std::make_unique<WaterPass>(this));
     graph.addPass(std::make_unique<ParticlePass>(this));
     graph.addPass(std::make_unique<LightScatteringPass>(this));
-    graph.addPass(std::make_unique<WorldUIPass>(this));// World UI renders to HDR RT (can receive bloom)
+    graph.addPass(std::make_unique<WorldCanvasPass>(this));// World UI renders to HDR RT (can receive bloom)
 
     // Bloom passes (physically-based bloom)
     graph.addPass(std::make_unique<BloomBrightnessPass>(this));
@@ -4370,7 +4370,7 @@ void Renderer_Metal::flush2D() {
 }
 
 void Renderer_Metal::flush3D() {
-    // Will be rendered by WorldUIPass
+    // Will be rendered by WorldCanvasPass
     endBatch3D();
 }
 
