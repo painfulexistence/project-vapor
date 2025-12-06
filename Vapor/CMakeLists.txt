@@ -32,6 +32,8 @@ set(SOURCES
     src/renderer_metal.cpp
     src/renderer_vulkan.cpp
     src/scene.cpp
+    src/scene_manager.cpp
+    src/world.cpp
     src/task_scheduler.cpp
     src/resource_manager.cpp
     src/jolt_enki_job_system.cpp
