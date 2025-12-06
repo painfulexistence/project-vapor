@@ -10,6 +10,12 @@ using namespace metal;
 // - Temporal stability support (via jitter)
 // - Half-resolution option for performance
 
+struct FrameData {
+    uint frameNumber;
+    float time;
+    float deltaTime;
+};
+
 struct LightScatteringData {
     float2 sunScreenPos;      // Sun position in screen space [0,1]
     float2 screenSize;        // Screen dimensions
