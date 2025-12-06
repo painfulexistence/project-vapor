@@ -149,7 +149,7 @@ public:
     }
 
     // ===== 2D Batch Rendering API =====
-    void beginBatch2D(const glm::mat4& projection, BlendMode blendMode = BlendMode::Alpha);
+    void beginBatch2D(const glm::mat4& projection, BlendMode blendMode = BlendMode::Alpha, bool depthTest = false);
     void endBatch2D();
 
     // Quad drawing
@@ -247,7 +247,8 @@ protected:
     NS::SharedPtr<MTL::RenderPipelineState> batch2DPipeline;
     NS::SharedPtr<MTL::RenderPipelineState> batch2DPipelineAdditive;
     NS::SharedPtr<MTL::RenderPipelineState> batch2DPipelineMultiply;
-    NS::SharedPtr<MTL::DepthStencilState> batch2DDepthStencilState;
+    NS::SharedPtr<MTL::DepthStencilState> batch2DDepthStencilState;         // No depth test
+    NS::SharedPtr<MTL::DepthStencilState> batch2DDepthStencilStateEnabled;  // With depth test
     std::vector<NS::SharedPtr<MTL::Buffer>> batch2DVertexBuffers;  // Per-frame triple-buffered
     std::vector<NS::SharedPtr<MTL::Buffer>> batch2DIndexBuffers;   // Per-frame triple-buffered
     std::vector<NS::SharedPtr<MTL::Buffer>> batch2DUniformBuffers; // Per-frame triple-buffered
@@ -266,6 +267,7 @@ protected:
     Uint32 batch2DTextureSlotIndex = 1;  // 0 = white texture
     glm::mat4 batch2DProjection = glm::mat4(1.0f);
     BlendMode batch2DBlendMode = BlendMode::Alpha;
+    bool batch2DDepthTest = false;
     Batch2DStats batch2DStats;
     bool batch2DActive = false;
 

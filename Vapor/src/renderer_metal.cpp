@@ -1851,6 +1851,14 @@ public:
         colorAttachment->setLoadAction(MTL::LoadActionLoad);
         colorAttachment->setStoreAction(MTL::StoreActionStore);
 
+        // Attach depth buffer when depth testing is enabled (for world UI)
+        if (r.batch2DDepthTest && r.depthStencilRT) {
+            auto depthAttachment = passDesc->depthAttachment();
+            depthAttachment->setTexture(r.depthStencilRT.get());
+            depthAttachment->setLoadAction(MTL::LoadActionLoad);
+            depthAttachment->setStoreAction(MTL::StoreActionStore);
+        }
+
         auto encoder = r.currentCommandBuffer->renderCommandEncoder(passDesc.get());
 
         // Set viewport
@@ -1862,7 +1870,10 @@ public:
 
         // Set pipeline and state
         encoder->setRenderPipelineState(pipeline);
-        encoder->setDepthStencilState(r.batch2DDepthStencilState.get());
+        // Use depth-enabled state for world UI, disabled state for screen UI
+        auto depthState = r.batch2DDepthTest ? r.batch2DDepthStencilStateEnabled.get()
+                                              : r.batch2DDepthStencilState.get();
+        encoder->setDepthStencilState(depthState);
         encoder->setCullMode(MTL::CullModeNone);
 
         // Set vertex buffers
@@ -2259,6 +2270,13 @@ auto Renderer_Metal::createResources() -> void {
         depthDesc->setDepthWriteEnabled(false);
         batch2DDepthStencilState = NS::TransferPtr(device->newDepthStencilState(depthDesc));
         depthDesc->release();
+
+        // Create depth stencil state for 2D batch with depth testing (for world UI)
+        MTL::DepthStencilDescriptor* depthDescEnabled = MTL::DepthStencilDescriptor::alloc()->init();
+        depthDescEnabled->setDepthCompareFunction(MTL::CompareFunctionLessEqual);
+        depthDescEnabled->setDepthWriteEnabled(true);
+        batch2DDepthStencilStateEnabled = NS::TransferPtr(device->newDepthStencilState(depthDescEnabled));
+        depthDescEnabled->release();
 
         // Create per-frame buffers for 2D batch
         batch2DVertexBuffers.resize(MAX_FRAMES_IN_FLIGHT);
@@ -4250,9 +4268,10 @@ NS::SharedPtr<MTL::RenderPipelineState> Renderer_Metal::getPipeline(PipelineHand
 
 // ===== 2D Batch Rendering Implementation =====
 
-void Renderer_Metal::beginBatch2D(const glm::mat4& projection, BlendMode blendMode) {
+void Renderer_Metal::beginBatch2D(const glm::mat4& projection, BlendMode blendMode, bool depthTest) {
     batch2DProjection = projection;
     batch2DBlendMode = blendMode;
+    batch2DDepthTest = depthTest;
     batch2DVertices.clear();
     batch2DIndices.clear();
     batch2DTextureSlots[0] = batch2DWhiteTextureHandle;
