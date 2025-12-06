@@ -1,4 +1,4 @@
-#include "3d_common.metal"
+#include "assets/shaders/3d_common.metal"
 
 // GPU Particle structure for compute shader simulation
 struct Particle {
