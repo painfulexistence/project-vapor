@@ -1912,12 +1912,12 @@ public:
         memcpy(vertexBuffer->contents(), r.batch2DVertices.data(), vertexDataSize);
         memcpy(indexBuffer->contents(), r.batch2DIndices.data(), indexDataSize);
 
-        // Compute ortho projection from drawable size (origin top-left)
-        auto drawableWidth = r.currentDrawable->texture()->width();
-        auto drawableHeight = r.currentDrawable->texture()->height();
+        // Compute ortho projection from HDR RT size (origin top-left)
+        auto rtWidth = r.colorRT->width();
+        auto rtHeight = r.colorRT->height();
         Batch2DUniforms uniforms;
-        uniforms.projectionMatrix = glm::ortho(0.0f, static_cast<float>(drawableWidth),
-                                                static_cast<float>(drawableHeight), 0.0f,
+        uniforms.projectionMatrix = glm::ortho(0.0f, static_cast<float>(rtWidth),
+                                                static_cast<float>(rtHeight), 0.0f,
                                                 -1.0f, 1.0f);
         memcpy(uniformBuffer->contents(), &uniforms, sizeof(Batch2DUniforms));
 
@@ -1928,17 +1928,17 @@ public:
             return;
         }
 
-        // Create render pass descriptor (no depth for screen-space 2D)
+        // Create render pass descriptor - render to HDR RT (before bloom)
         auto passDesc = NS::TransferPtr(MTL::RenderPassDescriptor::renderPassDescriptor());
         auto colorAttachment = passDesc->colorAttachments()->object(0);
-        colorAttachment->setTexture(r.currentDrawable->texture());
+        colorAttachment->setTexture(r.colorRT.get());  // Render to HDR RT
         colorAttachment->setLoadAction(MTL::LoadActionLoad);
         colorAttachment->setStoreAction(MTL::StoreActionStore);
 
         auto encoder = r.currentCommandBuffer->renderCommandEncoder(passDesc.get());
 
-        MTL::Viewport viewport = { 0.0, 0.0, static_cast<double>(drawableWidth),
-                                   static_cast<double>(drawableHeight), 0.0, 1.0 };
+        MTL::Viewport viewport = { 0.0, 0.0, static_cast<double>(rtWidth),
+                                   static_cast<double>(rtHeight), 0.0, 1.0 };
         encoder->setViewport(viewport);
 
         encoder->setRenderPipelineState(pipeline);
@@ -2036,7 +2036,8 @@ auto Renderer_Metal::init(SDL_Window* window) -> void {
     // graph.addPass(std::make_unique<WaterPass>(this));
     graph.addPass(std::make_unique<ParticlePass>(this));
     graph.addPass(std::make_unique<LightScatteringPass>(this));
-    graph.addPass(std::make_unique<WorldCanvasPass>(this));// World UI renders to HDR RT (can receive bloom)
+    graph.addPass(std::make_unique<WorldCanvasPass>(this));// 3D world-space quads (with depth)
+    graph.addPass(std::make_unique<CanvasPass>(this));// 2D screen-space quads (no depth, for pure 2D games)
 
     // Bloom passes (physically-based bloom)
     graph.addPass(std::make_unique<BloomBrightnessPass>(this));
@@ -2053,8 +2054,7 @@ auto Renderer_Metal::init(SDL_Window* window) -> void {
     // Post-processing (tone mapping, color grading, chromatic aberration, vignette)
     graph.addPass(std::make_unique<PostProcessPass>(this));
     graph.addPass(std::make_unique<DebugDrawPass>(this));// Debug draw after post-process
-    graph.addPass(std::make_unique<CanvasPass>(this));// 2D batch (screen space overlay)
-    graph.addPass(std::make_unique<RmlUiPass>(this));// RmlUI before ImGui
+    graph.addPass(std::make_unique<RmlUiPass>(this));// RmlUI (pure UI, no bloom)
     graph.addPass(std::make_unique<ImGuiPass>(this));
 
     debugDraw = std::make_shared<Vapor::DebugDraw>();
