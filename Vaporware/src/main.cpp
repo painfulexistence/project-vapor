@@ -107,7 +107,7 @@ int main(int argc, char* args[]) {
     renderer->init(window);
 
     // Load a sprite texture for 2D/3D batch rendering demo
-    auto spriteImage = Vapor::AssetManager::loadImage("assets/textures/default_albedo.png");
+    auto spriteImage = AssetManager::loadImage("assets/textures/default_albedo.png");
     TextureHandle spriteTexture = renderer->createTexture(spriteImage);
     fmt::print("Sprite texture loaded\n");
 
@@ -453,26 +453,14 @@ int main(int argc, char* args[]) {
                 glm::vec2(650.0f, 100.0f),
                 glm::vec2(40.0f, 40.0f),
                 time * 2.0f,// rotation in radians
-                glm::vec4(1.0f, 1.0f, 0.0f, 1.0f)
+                spriteTexture,
+                glm::vec4(1.0f, 1.0f, 1.0f, 1.0f)
             );
             // renderer->flush2D();
 
-            // ===== Sprite Demo (textured quads) =====
-            // 2D textured sprite (screen space)
-            renderer->drawQuad2D(glm::vec2(700.0f, 50.0f), glm::vec2(80.0f, 80.0f), spriteTexture, glm::vec4(1.0f));
-            // 2D textured sprite with tint
-            renderer->drawQuad2D(
-                glm::vec2(800.0f, 50.0f), glm::vec2(80.0f, 80.0f), spriteTexture, glm::vec4(1.0f, 0.5f, 0.5f, 1.0f)
+            renderer->drawQuad3D(
+                glm::vec3(0.0f, 2.0f, 0.0f), glm::vec2(1.0f, 1.0f), spriteTexture, glm::vec4(1.0f, 0.5f, 0.5f, 1.0f)
             );
-            // Rotating textured sprite
-            renderer->drawRotatedQuad2D(
-                glm::vec2(750.0f, 180.0f), glm::vec2(60.0f, 60.0f), time * 1.5f, spriteTexture, glm::vec4(1.0f)
-            );
-
-            // 3D textured sprite in world space (billboard-style, will be occluded by geometry)
-            renderer->drawQuad3D(glm::vec3(0.0f, 2.0f, 0.0f), glm::vec2(1.0f, 1.0f), spriteTexture, glm::vec4(1.0f));
-            // 3D colored quad for comparison
-            renderer->drawQuad3D(glm::vec3(2.0f, 2.0f, 0.0f), glm::vec2(1.0f, 1.0f), glm::vec4(1.0f, 0.0f, 0.0f, 1.0f));
 
             renderer->draw(scene, tempCamera);
         } else {
