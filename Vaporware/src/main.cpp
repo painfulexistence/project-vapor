@@ -25,6 +25,7 @@
 
 
 #include "animation_systems.hpp"
+#include "camera_mixing_system.hpp"
 #include "camera_trauma_system.hpp"
 #include "components.hpp"
 #include "examples.hpp"
@@ -296,6 +297,9 @@ int main(int argc, char* args[]) {
         fly.moveSpeed = 5.0f;
 
         registry.emplace<CharacterIntent>(flyCam);
+
+        // Additive camera effects
+        registry.emplace<CameraBreathState>(flyCam, BreathPresets::calm());
     }
 
     auto followCam = registry.create();
@@ -308,6 +312,9 @@ int main(int argc, char* args[]) {
         auto& follow = registry.emplace<FollowCameraComponent>(followCam);
         follow.target = cube1;
         follow.offset = glm::vec3(0.0f, 2.0f, 5.0f);
+
+        // Additive camera effects
+        registry.emplace<CameraBreathState>(followCam, BreathPresets::calm());
     }
 
     auto hud = registry.create();
@@ -508,8 +515,9 @@ int main(int argc, char* args[]) {
         // Animation systems (tween, sprite animation, timeline/cutscene)
         AnimationSystem::update(registry, deltaTime);
 
-        // Camera trauma (runs after camera updates base position)
+        // Camera additive effects (compute offsets, no side effects)
         CameraTraumaSystem::update(registry, deltaTime);
+        CameraBreathSystem::update(registry, deltaTime);
 
         // Engine updates
         engineCore->update(deltaTime);
@@ -519,13 +527,9 @@ int main(int argc, char* args[]) {
         scene->update(deltaTime);
 
         // Rendering
-        entt::entity activeCamEntity = getActiveCamera(registry);
-        if (activeCamEntity != entt::null) {
-            auto& cam = registry.get<Vapor::VirtualCameraComponent>(activeCamEntity);
-            Camera tempCamera;// Create a temporary Camera object
-            tempCamera.setEye(cam.position);// Set position for lighting/etc
-            tempCamera.setViewMatrix(cam.viewMatrix);
-            tempCamera.setProjectionMatrix(cam.projectionMatrix);
+        // CameraMixingSystem resolves: base position + trauma + breath → final camera
+        if (CameraMixingSystem::hasActiveCamera(registry)) {
+            Camera finalCamera = CameraMixingSystem::resolve(registry);
 
             // NOTES: projection is computed internally from window size
             float quadSize = 20.0f;
@@ -570,7 +574,7 @@ int main(int argc, char* args[]) {
                 glm::vec3(0.0f, 2.0f, 0.0f), glm::vec2(1.0f, 1.0f), spriteTexture, glm::vec4(1.0f, 0.5f, 0.5f, 1.0f)
             );
 
-            renderer->draw(scene, tempCamera);
+            renderer->draw(scene, finalCamera);
         } else {
             // Fallback camera or warning
             // fmt::print(stderr, "Warning: No active camera found for rendering.\n");
