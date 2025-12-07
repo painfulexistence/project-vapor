@@ -45,7 +45,7 @@ public:
 
     RenderTargetHandle createRenderTarget(RenderTargetUsage usage, VkFormat format);
 
-    TextureHandle createTexture(std::shared_ptr<Image> img);
+    TextureHandle createTexture(const std::shared_ptr<Image>& img) override;
 
     BufferHandle createBuffer(BufferUsage usage, VkDeviceSize size);
 
@@ -159,6 +159,35 @@ private:
     std::unordered_map<std::shared_ptr<Material>, Uint32> materialIDs;
 
     RenderPath currentRenderPath = RenderPath::Forward;
+
+    // Particle system
+    static constexpr Uint32 MAX_PARTICLES = 50000;
+    bool particleSystemEnabled = true;
+    Uint32 particleCount = MAX_PARTICLES;
+
+    VkDescriptorPool particleDescriptorPool;
+    VkDescriptorSetLayout particleComputeSetLayout;
+    VkDescriptorSetLayout particleRenderSetLayout;
+    std::vector<VkDescriptorSet> particleComputeSets;
+    std::vector<VkDescriptorSet> particleRenderSets;
+
+    VkPipelineLayout particleComputePipelineLayout;
+    VkPipeline particleForcePipeline;
+    VkPipeline particleIntegratePipeline;
+
+    VkPipelineLayout particleRenderPipelineLayout;
+    VkPipeline particleRenderPipeline;
+
+    std::vector<BufferHandle> particleBuffers;              // Double buffered for compute
+    std::vector<BufferHandle> particleSimParamsBuffers;     // Simulation parameters
+    std::vector<void*> particleSimParamsBuffersMapped;
+    std::vector<BufferHandle> particleAttractorBuffers;     // Attractor data
+    std::vector<void*> particleAttractorBuffersMapped;
+
+    void initParticleSystem();
+    void updateParticleSimulation(VkCommandBuffer cmd, float deltaTime, const glm::vec3& attractorPos);
+    void renderParticles(VkCommandBuffer cmd);
+    void cleanupParticleSystem();
 
     void createResources();
 };

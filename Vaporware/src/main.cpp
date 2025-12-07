@@ -3,8 +3,10 @@
 #include <SDL3/SDL.h>
 #include <args.hxx>
 #include <fmt/core.h>
+#include <glm/ext/matrix_clip_space.hpp>
 #include <glm/ext/matrix_transform.hpp>
 #include <glm/ext/vector_float3.hpp>
+#include <glm/trigonometric.hpp>
 #include <iostream>
 
 #include "Vapor/asset_manager.hpp"
@@ -22,11 +24,11 @@
 #include <entt/entt.hpp>
 
 
-#include "components.hpp"
-#include "systems.hpp"
 #include "animation_systems.hpp"
-#include "fsm_system.hpp"
 #include "camera_trauma_system.hpp"
+#include "components.hpp"
+#include "fsm_system.hpp"
+#include "systems.hpp"
 
 entt::entity getActiveCamera(entt::registry& registry) {
     auto view = registry.view<Vapor::VirtualCameraComponent>();
@@ -107,12 +109,18 @@ int main(int argc, char* args[]) {
     auto renderer = createRenderer(gfxBackend);
     renderer->init(window);
 
+    // Load a sprite texture for 2D/3D batch rendering demo
+    auto spriteImage = AssetManager::loadImage("assets/textures/default_albedo.png");
+    TextureHandle spriteTexture = renderer->createTexture(spriteImage);
+    fmt::print("Sprite texture loaded\n");
+
     if (engineCore->initRmlUI(windowWidth, windowHeight) && renderer->initUI()) {
         fmt::print("RmlUI System Initialized\n");
     }
 
     auto physics = std::make_unique<Physics3D>();
-    physics->init(engineCore->getTaskScheduler());
+    physics->init(engineCore->getTaskScheduler(), renderer->getDebugDraw());
+    physics->setDebugEnabled(true);
 
     fmt::print("Engine initialized\n");
 
@@ -189,13 +197,14 @@ int main(int argc, char* args[]) {
         nodeRef.node = node;
 
         // FSM Demo: Patrol between two positions
-        auto& fsm = registry.emplace<FSMComponent>(cube2,
+        auto& fsm = registry.emplace<FSMComponent>(
+            cube2,
             FSMPatterns::createPatrolFSM(
                 cube2,
-                glm::vec3(2.0f, 0.5f, 0.0f),   // Position A
-                glm::vec3(2.0f, 0.5f, 5.0f),   // Position B
-                2.0f,   // Walk duration
-                1.0f    // Wait duration
+                glm::vec3(2.0f, 0.5f, 0.0f),// Position A
+                glm::vec3(2.0f, 0.5f, 5.0f),// Position B
+                2.0f,// Walk duration
+                1.0f// Wait duration
             )
         );
     }
@@ -323,16 +332,17 @@ int main(int argc, char* args[]) {
 
         // Event-triggered FSM: Idle -> Jump up -> Fall down -> Idle
         using namespace AnimationBuilder;
-        auto& fsm = registry.emplace<FSMComponent>(triggerCube,
+        auto& fsm = registry.emplace<FSMComponent>(
+            triggerCube,
             FSMBuilder()
                 .state("Idle")
-                    .transitionTo("JumpUp", "trigger")
+                .transitionTo("JumpUp", "trigger")
                 .state("JumpUp")
-                    .enter({ moveTo(triggerCube, glm::vec3(-5.0f, 3.0f, 0.0f), 0.5f, Easing::OutCubic) })
-                    .transitionOnComplete("FallDown")
+                .enter({ moveTo(triggerCube, glm::vec3(-5.0f, 3.0f, 0.0f), 0.5f, Easing::OutCubic) })
+                .transitionOnComplete("FallDown")
                 .state("FallDown")
-                    .enter({ moveTo(triggerCube, glm::vec3(-5.0f, 0.5f, 0.0f), 0.3f, Easing::InCubic) })
-                    .transitionOnComplete("Idle")
+                .enter({ moveTo(triggerCube, glm::vec3(-5.0f, 0.5f, 0.0f), 0.3f, Easing::InCubic) })
+                .transitionOnComplete("Idle")
                 .initialState("Idle")
                 .build()
         );
@@ -375,7 +385,6 @@ int main(int argc, char* args[]) {
                 if (e.key.scancode == SDL_SCANCODE_ESCAPE) {
                     quit = true;
                 }
-                // Toggle HUD
                 if (e.key.scancode == SDL_SCANCODE_H) {
                     auto view = registry.view<HUDComponent>();
                     for (auto entity : view) {
@@ -397,6 +406,10 @@ int main(int argc, char* args[]) {
                 if (e.key.scancode == SDL_SCANCODE_B) {
                     CameraTraumaSystem::addTraumaToActiveCamera(registry, TraumaPresets::heavyImpact());
                     fmt::print("Camera: Heavy impact!\n");
+                }
+                if (e.key.scancode == SDL_SCANCODE_F3) {
+                    physics->setDebugEnabled(!physics->isDebugEnabled());
+                    fmt::print("Physics Debug Renderer: {}\n", physics->isDebugEnabled() ? "Enabled" : "Disabled");
                 }
                 break;
             }
@@ -463,12 +476,8 @@ int main(int argc, char* args[]) {
         // Engine updates
         engineCore->update(deltaTime);
 
-        // Transform
         scene->update(deltaTime);
-
-        // Physics
         physics->process(scene, deltaTime);
-
         scene->update(deltaTime);
 
         // Rendering
@@ -479,6 +488,49 @@ int main(int argc, char* args[]) {
             tempCamera.setEye(cam.position);// Set position for lighting/etc
             tempCamera.setViewMatrix(cam.viewMatrix);
             tempCamera.setProjectionMatrix(cam.projectionMatrix);
+
+            // NOTES: projection is computed internally from window size
+            float quadSize = 20.0f;
+            float spacing = 25.0f;
+            int cols = 10;
+            int rows = 5;
+            for (int y = 0; y < rows; y++) {
+                for (int x = 0; x < cols; x++) {
+                    float px = 50.0f + x * spacing;
+                    float py = 50.0f + y * spacing;
+                    // Rainbow colors based on position
+                    float hue = (float)(x + y * cols) / (float)(cols * rows);
+                    glm::vec4 color = glm::vec4(
+                        0.5f + 0.5f * sin(hue * 6.28f),
+                        0.5f + 0.5f * sin(hue * 6.28f + 2.09f),
+                        0.5f + 0.5f * sin(hue * 6.28f + 4.18f),
+                        0.8f
+                    );
+                    renderer->drawQuad2D(glm::vec2(px, py), glm::vec2(quadSize, quadSize), color);
+                }
+            }
+            renderer->drawCircleFilled2D(glm::vec2(400.0f, 100.0f), 30.0f, glm::vec4(1.0f, 0.5f, 0.0f, 1.0f));
+            renderer->drawRect2D(
+                glm::vec2(450.0f, 70.0f), glm::vec2(60.0f, 60.0f), glm::vec4(0.0f, 1.0f, 0.5f, 1.0f), 2.0f
+            );
+            renderer->drawTriangleFilled2D(
+                glm::vec2(550.0f, 130.0f),
+                glm::vec2(520.0f, 70.0f),
+                glm::vec2(580.0f, 70.0f),
+                glm::vec4(0.5f, 0.0f, 1.0f, 1.0f)
+            );
+            renderer->drawRotatedQuad2D(
+                glm::vec2(650.0f, 100.0f),
+                glm::vec2(40.0f, 40.0f),
+                time * 2.0f,// rotation in radians
+                spriteTexture,
+                glm::vec4(1.0f, 1.0f, 1.0f, 1.0f)
+            );
+            // renderer->flush2D();
+
+            renderer->drawQuad3D(
+                glm::vec3(0.0f, 2.0f, 0.0f), glm::vec2(1.0f, 1.0f), spriteTexture, glm::vec4(1.0f, 0.5f, 0.5f, 1.0f)
+            );
 
             renderer->draw(scene, tempCamera);
         } else {

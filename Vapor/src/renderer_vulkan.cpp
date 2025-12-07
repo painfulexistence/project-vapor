@@ -7,6 +7,8 @@
 #include <glm/vec2.hpp>
 #include <glm/vec3.hpp>
 #include <glm/vec4.hpp>
+#include <cstdlib>
+#include <ctime>
 #define GLM_FORCE_DEPTH_ZERO_TO_ONE
 #define GLM_FORCE_LEFT_HANDED
 #include "backends/imgui_impl_sdl3.h"
@@ -375,6 +377,10 @@ auto Renderer_Vulkan::deinit() -> void {
 
     // TODO: clean up all resources
     vkDeviceWaitIdle(device);
+
+    // Cleanup particle system
+    cleanupParticleSystem();
+
     vkDestroyPipeline(device, renderPipeline, nullptr);
     vkDestroyPipeline(device, prePassPipeline, nullptr);
     vkDestroyPipeline(device, postProcessPipeline, nullptr);
@@ -1248,6 +1254,9 @@ auto Renderer_Vulkan::stage(std::shared_ptr<Scene> scene) -> void {
                                                          } } };
         vkUpdateDescriptorSets(device, writes.size(), writes.data(), 0, nullptr);
     }
+
+    // Initialize particle system
+    initParticleSystem();
 }
 
 auto Renderer_Vulkan::draw(std::shared_ptr<Scene> scene, Camera& camera) -> void {
@@ -1420,6 +1429,11 @@ auto Renderer_Vulkan::draw(std::shared_ptr<Scene> scene, Camera& camera) -> void
     );
     vkCmdDispatch(cmd, clusterGridSizeX, clusterGridSizeY, 1);
 
+    // Particle simulation (compute pass)
+    float deltaTime = 1.0f / 60.0f; // TODO: pass actual delta time
+    glm::vec3 attractorPos = camPos + glm::normalize(glm::vec3(glm::inverse(view) * glm::vec4(0.0f, 0.0f, -1.0f, 0.0f))) * 3.0f;
+    updateParticleSimulation(cmd, deltaTime, attractorPos);
+
     vkCmdBeginRenderPass(cmd, &renderPassInfo, VK_SUBPASS_CONTENTS_INLINE);
     vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, renderPipeline);
 
@@ -1469,6 +1483,9 @@ auto Renderer_Vulkan::draw(std::shared_ptr<Scene> scene, Camera& camera) -> void
     for (auto& node : scene->nodes) {
         drawNode(node);
     }
+
+    // Render particles (after scene, before post-process)
+    renderParticles(cmd);
 
     vkCmdEndRenderPass(cmd);
 
@@ -2126,7 +2143,7 @@ RenderTargetHandle Renderer_Vulkan::createRenderTarget(RenderTargetUsage usage, 
     return RenderTargetHandle{ nextImageID++ };
 }
 
-TextureHandle Renderer_Vulkan::createTexture(std::shared_ptr<Image> img) {
+TextureHandle Renderer_Vulkan::createTexture(const std::shared_ptr<Image>& img) {
     if (!img) {
         throw std::runtime_error(fmt::format("Failed to create texture at {}!\n", img->uri));
     }
@@ -2446,4 +2463,545 @@ VkDeviceMemory Renderer_Vulkan::getRenderTargetMemory(RenderTargetHandle handle)
 
 VkPipeline Renderer_Vulkan::getPipeline(PipelineHandle handle) const {
     return pipelines.at(handle.rid);
+}
+
+// ============================================================================
+// Particle System Implementation
+// ============================================================================
+
+void Renderer_Vulkan::initParticleSystem() {
+    if (!particleSystemEnabled) return;
+
+    // Create descriptor set layout for particle compute
+    std::array<VkDescriptorSetLayoutBinding, 3> computeBindings = {{
+        {
+            .binding = 0,
+            .descriptorType = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER,
+            .descriptorCount = 1,
+            .stageFlags = VK_SHADER_STAGE_COMPUTE_BIT,
+        },
+        {
+            .binding = 1,
+            .descriptorType = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER,
+            .descriptorCount = 1,
+            .stageFlags = VK_SHADER_STAGE_COMPUTE_BIT,
+        },
+        {
+            .binding = 2,
+            .descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,
+            .descriptorCount = 1,
+            .stageFlags = VK_SHADER_STAGE_COMPUTE_BIT,
+        },
+    }};
+
+    VkDescriptorSetLayoutCreateInfo computeLayoutInfo = {
+        .sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO,
+        .bindingCount = static_cast<uint32_t>(computeBindings.size()),
+        .pBindings = computeBindings.data(),
+    };
+
+    if (vkCreateDescriptorSetLayout(device, &computeLayoutInfo, nullptr, &particleComputeSetLayout) != VK_SUCCESS) {
+        throw std::runtime_error("Failed to create particle compute descriptor set layout!");
+    }
+
+    // Create descriptor set layout for particle rendering (set 1 for particle buffer)
+    std::array<VkDescriptorSetLayoutBinding, 1> renderBindings = {{
+        {
+            .binding = 0,
+            .descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,
+            .descriptorCount = 1,
+            .stageFlags = VK_SHADER_STAGE_VERTEX_BIT,
+        },
+    }};
+
+    VkDescriptorSetLayoutCreateInfo renderLayoutInfo = {
+        .sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO,
+        .bindingCount = static_cast<uint32_t>(renderBindings.size()),
+        .pBindings = renderBindings.data(),
+    };
+
+    if (vkCreateDescriptorSetLayout(device, &renderLayoutInfo, nullptr, &particleRenderSetLayout) != VK_SUCCESS) {
+        throw std::runtime_error("Failed to create particle render descriptor set layout!");
+    }
+
+    // Create compute pipeline layout
+    VkPipelineLayoutCreateInfo computePipelineLayoutInfo = {
+        .sType = VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO,
+        .setLayoutCount = 1,
+        .pSetLayouts = &particleComputeSetLayout,
+    };
+
+    if (vkCreatePipelineLayout(device, &computePipelineLayoutInfo, nullptr, &particleComputePipelineLayout) != VK_SUCCESS) {
+        throw std::runtime_error("Failed to create particle compute pipeline layout!");
+    }
+
+    // Create render pipeline layout with push constants
+    VkPushConstantRange pushConstantRange = {
+        .stageFlags = VK_SHADER_STAGE_VERTEX_BIT,
+        .offset = 0,
+        .size = sizeof(ParticlePushConstants),
+    };
+
+    std::array<VkDescriptorSetLayout, 2> renderSetLayouts = { set0Layout, particleRenderSetLayout };
+
+    VkPipelineLayoutCreateInfo renderPipelineLayoutInfo = {
+        .sType = VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO,
+        .setLayoutCount = static_cast<uint32_t>(renderSetLayouts.size()),
+        .pSetLayouts = renderSetLayouts.data(),
+        .pushConstantRangeCount = 1,
+        .pPushConstantRanges = &pushConstantRange,
+    };
+
+    if (vkCreatePipelineLayout(device, &renderPipelineLayoutInfo, nullptr, &particleRenderPipelineLayout) != VK_SUCCESS) {
+        throw std::runtime_error("Failed to create particle render pipeline layout!");
+    }
+
+    // Create compute pipelines
+    particleForcePipeline = createComputePipeline(
+        std::string("assets/shaders/ParticleForce.comp.spv"),
+        particleComputePipelineLayout
+    );
+
+    particleIntegratePipeline = createComputePipeline(
+        std::string("assets/shaders/ParticleIntegrate.comp.spv"),
+        particleComputePipelineLayout
+    );
+
+    // Create particle render pipeline
+    auto vertShaderCode = readFile("assets/shaders/Particle.vert.spv");
+    auto fragShaderCode = readFile("assets/shaders/Particle.frag.spv");
+    auto vertShaderModule = createShaderModule(vertShaderCode);
+    auto fragShaderModule = createShaderModule(fragShaderCode);
+
+    VkPipelineShaderStageCreateInfo vertShaderStageInfo = {
+        .sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO,
+        .stage = VK_SHADER_STAGE_VERTEX_BIT,
+        .module = vertShaderModule,
+        .pName = "main",
+    };
+
+    VkPipelineShaderStageCreateInfo fragShaderStageInfo = {
+        .sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO,
+        .stage = VK_SHADER_STAGE_FRAGMENT_BIT,
+        .module = fragShaderModule,
+        .pName = "main",
+    };
+
+    std::array<VkPipelineShaderStageCreateInfo, 2> shaderStages = { vertShaderStageInfo, fragShaderStageInfo };
+
+    // No vertex input - all data comes from storage buffer
+    VkPipelineVertexInputStateCreateInfo vertexInputInfo = {
+        .sType = VK_STRUCTURE_TYPE_PIPELINE_VERTEX_INPUT_STATE_CREATE_INFO,
+        .vertexBindingDescriptionCount = 0,
+        .vertexAttributeDescriptionCount = 0,
+    };
+
+    VkPipelineInputAssemblyStateCreateInfo inputAssembly = {
+        .sType = VK_STRUCTURE_TYPE_PIPELINE_INPUT_ASSEMBLY_STATE_CREATE_INFO,
+        .topology = VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST,
+        .primitiveRestartEnable = VK_FALSE,
+    };
+
+    VkViewport viewport = {
+        .x = 0.0f,
+        .y = static_cast<float>(swapchainExtent.height),
+        .width = static_cast<float>(swapchainExtent.width),
+        .height = -static_cast<float>(swapchainExtent.height),
+        .minDepth = 0.0f,
+        .maxDepth = 1.0f,
+    };
+
+    VkRect2D scissor = {
+        .offset = { 0, 0 },
+        .extent = swapchainExtent,
+    };
+
+    VkPipelineViewportStateCreateInfo viewportState = {
+        .sType = VK_STRUCTURE_TYPE_PIPELINE_VIEWPORT_STATE_CREATE_INFO,
+        .viewportCount = 1,
+        .pViewports = &viewport,
+        .scissorCount = 1,
+        .pScissors = &scissor,
+    };
+
+    VkPipelineRasterizationStateCreateInfo rasterizer = {
+        .sType = VK_STRUCTURE_TYPE_PIPELINE_RASTERIZATION_STATE_CREATE_INFO,
+        .depthClampEnable = VK_FALSE,
+        .rasterizerDiscardEnable = VK_FALSE,
+        .polygonMode = VK_POLYGON_MODE_FILL,
+        .cullMode = VK_CULL_MODE_NONE,
+        .frontFace = VK_FRONT_FACE_COUNTER_CLOCKWISE,
+        .depthBiasEnable = VK_FALSE,
+        .lineWidth = 1.0f,
+    };
+
+    VkPipelineMultisampleStateCreateInfo multisampling = {
+        .sType = VK_STRUCTURE_TYPE_PIPELINE_MULTISAMPLE_STATE_CREATE_INFO,
+        .rasterizationSamples = (VkSampleCountFlagBits)MSAA_SAMPLE_COUNT,
+        .sampleShadingEnable = VK_FALSE,
+    };
+
+    VkPipelineDepthStencilStateCreateInfo depthStencil = {
+        .sType = VK_STRUCTURE_TYPE_PIPELINE_DEPTH_STENCIL_STATE_CREATE_INFO,
+        .depthTestEnable = VK_TRUE,
+        .depthWriteEnable = VK_FALSE, // Particles don't write depth
+        .depthCompareOp = VK_COMPARE_OP_LESS,
+        .depthBoundsTestEnable = VK_FALSE,
+        .stencilTestEnable = VK_FALSE,
+    };
+
+    // Additive blending for particles
+    VkPipelineColorBlendAttachmentState colorBlendAttachment = {
+        .blendEnable = VK_TRUE,
+        .srcColorBlendFactor = VK_BLEND_FACTOR_ONE,
+        .dstColorBlendFactor = VK_BLEND_FACTOR_ONE_MINUS_SRC_COLOR,
+        .colorBlendOp = VK_BLEND_OP_ADD,
+        .srcAlphaBlendFactor = VK_BLEND_FACTOR_ONE,
+        .dstAlphaBlendFactor = VK_BLEND_FACTOR_ZERO,
+        .alphaBlendOp = VK_BLEND_OP_ADD,
+        .colorWriteMask = VK_COLOR_COMPONENT_R_BIT | VK_COLOR_COMPONENT_G_BIT |
+                          VK_COLOR_COMPONENT_B_BIT | VK_COLOR_COMPONENT_A_BIT,
+    };
+
+    VkPipelineColorBlendStateCreateInfo colorBlending = {
+        .sType = VK_STRUCTURE_TYPE_PIPELINE_COLOR_BLEND_STATE_CREATE_INFO,
+        .logicOpEnable = VK_FALSE,
+        .attachmentCount = 1,
+        .pAttachments = &colorBlendAttachment,
+    };
+
+    VkGraphicsPipelineCreateInfo pipelineInfo = {
+        .sType = VK_STRUCTURE_TYPE_GRAPHICS_PIPELINE_CREATE_INFO,
+        .stageCount = static_cast<uint32_t>(shaderStages.size()),
+        .pStages = shaderStages.data(),
+        .pVertexInputState = &vertexInputInfo,
+        .pInputAssemblyState = &inputAssembly,
+        .pViewportState = &viewportState,
+        .pRasterizationState = &rasterizer,
+        .pMultisampleState = &multisampling,
+        .pDepthStencilState = &depthStencil,
+        .pColorBlendState = &colorBlending,
+        .layout = particleRenderPipelineLayout,
+        .renderPass = renderPass,
+        .subpass = 0,
+    };
+
+    if (vkCreateGraphicsPipelines(device, VK_NULL_HANDLE, 1, &pipelineInfo, nullptr, &particleRenderPipeline) != VK_SUCCESS) {
+        throw std::runtime_error("Failed to create particle render pipeline!");
+    }
+
+    vkDestroyShaderModule(device, vertShaderModule, nullptr);
+    vkDestroyShaderModule(device, fragShaderModule, nullptr);
+
+    // Create particle buffers
+    VkDeviceSize particleBufferSize = sizeof(GPUParticle) * MAX_PARTICLES;
+    particleBuffers.resize(MAX_FRAMES_IN_FLIGHT);
+    for (size_t i = 0; i < MAX_FRAMES_IN_FLIGHT; i++) {
+        particleBuffers[i] = createBuffer(BufferUsage::STORAGE, particleBufferSize);
+    }
+
+    // Create simulation params buffers
+    particleSimParamsBuffers.resize(MAX_FRAMES_IN_FLIGHT);
+    particleSimParamsBuffersMapped.resize(MAX_FRAMES_IN_FLIGHT);
+    for (size_t i = 0; i < MAX_FRAMES_IN_FLIGHT; i++) {
+        particleSimParamsBuffers[i] = createBufferMapped(
+            BufferUsage::UNIFORM,
+            sizeof(ParticleSimulationParams),
+            &particleSimParamsBuffersMapped[i]
+        );
+    }
+
+    // Create attractor buffers
+    particleAttractorBuffers.resize(MAX_FRAMES_IN_FLIGHT);
+    particleAttractorBuffersMapped.resize(MAX_FRAMES_IN_FLIGHT);
+    for (size_t i = 0; i < MAX_FRAMES_IN_FLIGHT; i++) {
+        particleAttractorBuffers[i] = createBufferMapped(
+            BufferUsage::UNIFORM,
+            sizeof(ParticleAttractorData),
+            &particleAttractorBuffersMapped[i]
+        );
+    }
+
+    // Initialize particles with random positions and colors
+    std::vector<GPUParticle> initialParticles(MAX_PARTICLES);
+    std::srand(static_cast<unsigned>(std::time(nullptr)));
+
+    for (size_t i = 0; i < MAX_PARTICLES; i++) {
+        float r = std::sqrt(static_cast<float>(std::rand()) / RAND_MAX) * 5.0f;
+        float theta = static_cast<float>(std::rand()) / RAND_MAX * 2.0f * 3.14159265f;
+        float phi = static_cast<float>(std::rand()) / RAND_MAX * 3.14159265f;
+
+        initialParticles[i].position = glm::vec3(
+            r * std::sin(phi) * std::cos(theta),
+            r * std::sin(phi) * std::sin(theta),
+            r * std::cos(phi)
+        );
+
+        glm::vec3 tangent = glm::normalize(glm::cross(
+            initialParticles[i].position,
+            glm::vec3(0.0f, 1.0f, 0.0f)
+        ));
+        if (glm::length(tangent) < 0.001f) {
+            tangent = glm::vec3(1.0f, 0.0f, 0.0f);
+        }
+        initialParticles[i].velocity = tangent * (0.5f / (r + 0.1f));
+
+        float brightness = 1.0f - (r / 5.0f);
+        glm::vec3 a = glm::vec3(0.427f, 0.346f, 0.372f);
+        glm::vec3 b = glm::vec3(0.288f, 0.918f, 0.336f);
+        glm::vec3 c = glm::vec3(0.635f, 1.136f, 0.404f);
+        glm::vec3 d = glm::vec3(1.893f, 0.663f, 1.910f);
+        glm::vec3 color = a + b * glm::cos(6.28318f * (c * brightness + d));
+        initialParticles[i].color = glm::vec4(color, 1.0f);
+    }
+
+    // Upload initial particle data
+    for (size_t i = 0; i < MAX_FRAMES_IN_FLIGHT; i++) {
+        VkDeviceMemory bufferMemory = getBufferMemory(particleBuffers[i]);
+        void* data;
+        vkMapMemory(device, bufferMemory, 0, particleBufferSize, 0, &data);
+        memcpy(data, initialParticles.data(), particleBufferSize);
+        vkUnmapMemory(device, bufferMemory);
+    }
+
+    // Create descriptor pool for particles
+    std::array<VkDescriptorPoolSize, 2> poolSizes = {{
+        { VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER, 2 * static_cast<uint32_t>(MAX_FRAMES_IN_FLIGHT) },
+        { VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, 2 * static_cast<uint32_t>(MAX_FRAMES_IN_FLIGHT) },
+    }};
+
+    VkDescriptorPoolCreateInfo poolInfo = {
+        .sType = VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO,
+        .maxSets = 2 * static_cast<uint32_t>(MAX_FRAMES_IN_FLIGHT),
+        .poolSizeCount = static_cast<uint32_t>(poolSizes.size()),
+        .pPoolSizes = poolSizes.data(),
+    };
+
+    if (vkCreateDescriptorPool(device, &poolInfo, nullptr, &particleDescriptorPool) != VK_SUCCESS) {
+        throw std::runtime_error("Failed to create particle descriptor pool!");
+    }
+
+    // Allocate compute descriptor sets
+    std::vector<VkDescriptorSetLayout> computeLayouts(MAX_FRAMES_IN_FLIGHT, particleComputeSetLayout);
+    VkDescriptorSetAllocateInfo computeAllocInfo = {
+        .sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO,
+        .descriptorPool = particleDescriptorPool,
+        .descriptorSetCount = static_cast<uint32_t>(MAX_FRAMES_IN_FLIGHT),
+        .pSetLayouts = computeLayouts.data(),
+    };
+
+    particleComputeSets.resize(MAX_FRAMES_IN_FLIGHT);
+    if (vkAllocateDescriptorSets(device, &computeAllocInfo, particleComputeSets.data()) != VK_SUCCESS) {
+        throw std::runtime_error("Failed to allocate particle compute descriptor sets!");
+    }
+
+    // Allocate render descriptor sets
+    std::vector<VkDescriptorSetLayout> renderLayouts(MAX_FRAMES_IN_FLIGHT, particleRenderSetLayout);
+    VkDescriptorSetAllocateInfo renderAllocInfo = {
+        .sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO,
+        .descriptorPool = particleDescriptorPool,
+        .descriptorSetCount = static_cast<uint32_t>(MAX_FRAMES_IN_FLIGHT),
+        .pSetLayouts = renderLayouts.data(),
+    };
+
+    particleRenderSets.resize(MAX_FRAMES_IN_FLIGHT);
+    if (vkAllocateDescriptorSets(device, &renderAllocInfo, particleRenderSets.data()) != VK_SUCCESS) {
+        throw std::runtime_error("Failed to allocate particle render descriptor sets!");
+    }
+
+    // Update descriptor sets
+    for (size_t i = 0; i < MAX_FRAMES_IN_FLIGHT; i++) {
+        VkDescriptorBufferInfo simParamsInfo = {
+            .buffer = getBuffer(particleSimParamsBuffers[i]),
+            .offset = 0,
+            .range = sizeof(ParticleSimulationParams),
+        };
+
+        VkDescriptorBufferInfo attractorInfo = {
+            .buffer = getBuffer(particleAttractorBuffers[i]),
+            .offset = 0,
+            .range = sizeof(ParticleAttractorData),
+        };
+
+        VkDescriptorBufferInfo particleBufferInfo = {
+            .buffer = getBuffer(particleBuffers[i]),
+            .offset = 0,
+            .range = sizeof(GPUParticle) * MAX_PARTICLES,
+        };
+
+        std::array<VkWriteDescriptorSet, 3> computeWrites = {{
+            {
+                .sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET,
+                .dstSet = particleComputeSets[i],
+                .dstBinding = 0,
+                .dstArrayElement = 0,
+                .descriptorCount = 1,
+                .descriptorType = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER,
+                .pBufferInfo = &simParamsInfo,
+            },
+            {
+                .sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET,
+                .dstSet = particleComputeSets[i],
+                .dstBinding = 1,
+                .dstArrayElement = 0,
+                .descriptorCount = 1,
+                .descriptorType = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER,
+                .pBufferInfo = &attractorInfo,
+            },
+            {
+                .sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET,
+                .dstSet = particleComputeSets[i],
+                .dstBinding = 2,
+                .dstArrayElement = 0,
+                .descriptorCount = 1,
+                .descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,
+                .pBufferInfo = &particleBufferInfo,
+            },
+        }};
+
+        vkUpdateDescriptorSets(device, static_cast<uint32_t>(computeWrites.size()), computeWrites.data(), 0, nullptr);
+
+        // Update render descriptor set
+        VkWriteDescriptorSet renderWrite = {
+            .sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET,
+            .dstSet = particleRenderSets[i],
+            .dstBinding = 0,
+            .dstArrayElement = 0,
+            .descriptorCount = 1,
+            .descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,
+            .pBufferInfo = &particleBufferInfo,
+        };
+
+        vkUpdateDescriptorSets(device, 1, &renderWrite, 0, nullptr);
+    }
+
+    fmt::print("Particle system initialized with {} particles\n", MAX_PARTICLES);
+}
+
+void Renderer_Vulkan::updateParticleSimulation(VkCommandBuffer cmd, float deltaTime, const glm::vec3& attractorPos) {
+    if (!particleSystemEnabled) return;
+
+    // Update simulation parameters
+    ParticleSimulationParams simParams = {
+        .resolution = glm::vec2(swapchainExtent.width, swapchainExtent.height),
+        .mousePosition = glm::vec2(0.0f),
+        .time = static_cast<float>(SDL_GetTicks()) / 1000.0f,
+        .deltaTime = deltaTime,
+    };
+    memcpy(particleSimParamsBuffersMapped[currentFrameInFlight], &simParams, sizeof(ParticleSimulationParams));
+
+    // Update attractor
+    ParticleAttractorData attractor = {
+        .position = attractorPos,
+        .strength = 5.0f,
+    };
+    memcpy(particleAttractorBuffersMapped[currentFrameInFlight], &attractor, sizeof(ParticleAttractorData));
+
+    // Memory barrier before compute
+    VkMemoryBarrier memoryBarrier = {
+        .sType = VK_STRUCTURE_TYPE_MEMORY_BARRIER,
+        .srcAccessMask = VK_ACCESS_SHADER_WRITE_BIT,
+        .dstAccessMask = VK_ACCESS_SHADER_READ_BIT | VK_ACCESS_SHADER_WRITE_BIT,
+    };
+
+    // Force computation pass
+    vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, particleForcePipeline);
+    vkCmdBindDescriptorSets(
+        cmd,
+        VK_PIPELINE_BIND_POINT_COMPUTE,
+        particleComputePipelineLayout,
+        0, 1,
+        &particleComputeSets[currentFrameInFlight],
+        0, nullptr
+    );
+    vkCmdDispatch(cmd, (particleCount + 255) / 256, 1, 1);
+
+    // Barrier between force and integrate
+    vkCmdPipelineBarrier(
+        cmd,
+        VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
+        VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
+        0,
+        1, &memoryBarrier,
+        0, nullptr,
+        0, nullptr
+    );
+
+    // Integration pass
+    vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, particleIntegratePipeline);
+    vkCmdBindDescriptorSets(
+        cmd,
+        VK_PIPELINE_BIND_POINT_COMPUTE,
+        particleComputePipelineLayout,
+        0, 1,
+        &particleComputeSets[currentFrameInFlight],
+        0, nullptr
+    );
+    vkCmdDispatch(cmd, (particleCount + 255) / 256, 1, 1);
+
+    // Barrier before rendering
+    vkCmdPipelineBarrier(
+        cmd,
+        VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
+        VK_PIPELINE_STAGE_VERTEX_SHADER_BIT,
+        0,
+        1, &memoryBarrier,
+        0, nullptr,
+        0, nullptr
+    );
+}
+
+void Renderer_Vulkan::renderParticles(VkCommandBuffer cmd) {
+    if (!particleSystemEnabled) return;
+
+    vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, particleRenderPipeline);
+
+    std::array<VkDescriptorSet, 2> descriptorSets = {
+        set0s[currentFrameInFlight],
+        particleRenderSets[currentFrameInFlight]
+    };
+
+    vkCmdBindDescriptorSets(
+        cmd,
+        VK_PIPELINE_BIND_POINT_GRAPHICS,
+        particleRenderPipelineLayout,
+        0,
+        static_cast<uint32_t>(descriptorSets.size()),
+        descriptorSets.data(),
+        0, nullptr
+    );
+
+    ParticlePushConstants pushConstants = {
+        .particleSize = 0.02f,
+    };
+
+    vkCmdPushConstants(
+        cmd,
+        particleRenderPipelineLayout,
+        VK_SHADER_STAGE_VERTEX_BIT,
+        0,
+        sizeof(ParticlePushConstants),
+        &pushConstants
+    );
+
+    // Draw 6 vertices per particle (2 triangles = 1 quad), instanced
+    vkCmdDraw(cmd, 6, particleCount, 0, 0);
+}
+
+void Renderer_Vulkan::cleanupParticleSystem() {
+    if (!particleSystemEnabled) return;
+
+    vkDestroyPipeline(device, particleRenderPipeline, nullptr);
+    vkDestroyPipeline(device, particleForcePipeline, nullptr);
+    vkDestroyPipeline(device, particleIntegratePipeline, nullptr);
+
+    vkDestroyPipelineLayout(device, particleRenderPipelineLayout, nullptr);
+    vkDestroyPipelineLayout(device, particleComputePipelineLayout, nullptr);
+
+    vkDestroyDescriptorSetLayout(device, particleRenderSetLayout, nullptr);
+    vkDestroyDescriptorSetLayout(device, particleComputeSetLayout, nullptr);
+
+    vkDestroyDescriptorPool(device, particleDescriptorPool, nullptr);
+
+    // Note: buffers are cleaned up in the main deinit() through the buffers map
 }
