@@ -38,7 +38,6 @@ set(SOURCES
     src/jolt_enki_job_system.cpp
     src/engine_core.cpp
     src/rmlui_manager.cpp
-    src/rmlui_renderer.cpp
     src/rmlui_system.cpp
     imgui/imgui.cpp
     imgui/imgui_draw.cpp
