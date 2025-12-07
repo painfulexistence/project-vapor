@@ -24,7 +24,7 @@
 #include <entt/entt.hpp>
 
 
-#include "animation_systems.hpp"
+#include "action_system.hpp"
 #include "camera_mixing_system.hpp"
 #include "camera_trauma_system.hpp"
 #include "components.hpp"
@@ -448,7 +448,7 @@ int main(int argc, char* args[]) {
                 // Action sequence demo: door open effect (using preset)
                 if (e.key.scancode == SDL_SCANCODE_O) {
                     auto actions = ActionSequence::doorOpen(triggerCube, glm::vec3(-5.0f, 3.0f, 0.0f));
-                    AnimationHelpers::playCutscene(registry, triggerCube, actions, []() {
+                    ActionHelpers::playSequence(registry, triggerCube, actions, []() {
                         fmt::print("Action Sequence: Door opened!\n");
                     });
                     fmt::print("Action Sequence: Starting door open animation\n");
@@ -513,8 +513,8 @@ int main(int argc, char* args[]) {
         // FSM system (runs before animation to emplace action components)
         FSMSystem::update(registry);
 
-        // Animation systems (tween, sprite animation, timeline/cutscene)
-        AnimationSystem::update(registry, deltaTime);
+        // Action system (unified tween/timeline handling)
+        ActionSystem::update(registry, deltaTime);
 
         // Camera additive effects (compute offsets, no side effects)
         CameraTraumaSystem::update(registry, deltaTime);

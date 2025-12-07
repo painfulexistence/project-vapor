@@ -1,6 +1,6 @@
 #pragma once
 
-#include "animation_components.hpp"
+#include "action_components.hpp"
 #include "fsm_components.hpp"
 #include <entt/entt.hpp>
 #include <fmt/core.h>
@@ -11,7 +11,7 @@
 // This system follows ECS principles:
 // - Only manages state transition logic
 // - Triggers actions by emplacing ActionQueueComponent
-// - Lets AnimationSystem handle the actual execution
+// - Lets ActionSystem handle the actual execution
 // ============================================================
 
 class FSMSystem {
@@ -97,7 +97,7 @@ private:
             // No enter actions, go directly to InState
             fsm.phase = FSMPhase::InState;
         } else {
-            // Emplace ActionQueueComponent for AnimationSystem to execute
+            // Emplace ActionQueueComponent for ActionSystem to execute
             emplaceActions(reg, entity, state->onEnterActions, "fsm_enter");
             reg.emplace_or_replace<FSMActionsRunningTag>(entity);
             fsm.phase = FSMPhase::EnteringState;
@@ -162,42 +162,39 @@ private:
 
     static bool checkCondition(entt::registry& reg, entt::entity entity, FSMComponent& fsm,
                                 const FSMEventComponent* events, const ActionsCompleteCondition& cond) {
-        // Actions are complete when we're in InState phase (enter actions done)
-        // and no ActionQueueComponent is running
-        return !reg.any_of<ActionQueueComponent>(entity) ||
-               reg.get<ActionQueueComponent>(entity).state == TimelineState::Completed;
+        // Actions are complete when ActionQueueComponent is done or doesn't exist
+        if (auto* queue = reg.try_get<ActionQueueComponent>(entity)) {
+            return queue->isComplete();
+        }
+        return true;
     }
 
     static bool checkActionsComplete(entt::registry& reg, entt::entity entity) {
         // Check if ActionQueueComponent with fsm tag is done
-        if (auto* cutscene = reg.try_get<ActionQueueComponent>(entity)) {
-            if (cutscene->tag == "fsm_enter" || cutscene->tag == "fsm_exit") {
-                return cutscene->state == TimelineState::Completed || cutscene->isComplete();
+        if (auto* queue = reg.try_get<ActionQueueComponent>(entity)) {
+            if (queue->debugName == "fsm_enter" || queue->debugName == "fsm_exit") {
+                return queue->isComplete();
             }
         }
-        // No cutscene means actions are complete (or there were none)
+        // No queue means actions are complete (or there were none)
         return !reg.any_of<FSMActionsRunningTag>(entity);
     }
 
     static void emplaceActions(entt::registry& reg, entt::entity entity,
-                                const std::vector<TimelineAction>& actions,
+                                const std::vector<Action>& actions,
                                 const std::string& tag) {
-        // Deep copy actions since FSMState owns the originals
-        auto& cutscene = reg.emplace_or_replace<ActionQueueComponent>(entity);
-        cutscene.actions = actions;  // Copy
-        cutscene.tag = tag;
-        cutscene.currentActionIndex = 0;
-        cutscene.state = TimelineState::Idle;
-        cutscene.autoDestroy = false;  // FSMSystem manages lifecycle
+        auto& queue = reg.emplace_or_replace<ActionQueueComponent>(entity);
+        queue.actions = actions;  // Copy
+        queue.debugName = tag;
+        queue.currentIndex = 0;
+        queue.onComplete = nullptr;
 
         // Reset action states
-        for (auto& action : cutscene.actions) {
+        for (auto& action : queue.actions) {
             action.started = false;
             action.completed = false;
             action.elapsed = 0.0f;
         }
-
-        cutscene.play();
     }
 
     static void clearEvents(entt::registry& reg) {
@@ -220,20 +217,18 @@ namespace FSMPatterns {
                                          const glm::vec3& posB,
                                          float walkDuration = 2.0f,
                                          float waitDuration = 1.0f) {
-        using namespace AnimationBuilder;
-
         return FSMBuilder()
             .state("WaitA")
-                .enter({ wait(waitDuration) })
+                .enter({ Action::wait(waitDuration) })
                 .transitionOnComplete("WalkToB")
             .state("WalkToB")
-                .enter({ moveTo(self, posB, walkDuration, Easing::InOutQuad) })
+                .enter({ Action::moveTo(self, posB, walkDuration, Easing::InOutQuad) })
                 .transitionOnComplete("WaitB")
             .state("WaitB")
-                .enter({ wait(waitDuration) })
+                .enter({ Action::wait(waitDuration) })
                 .transitionOnComplete("WalkToA")
             .state("WalkToA")
-                .enter({ moveTo(self, posA, walkDuration, Easing::InOutQuad) })
+                .enter({ Action::moveTo(self, posA, walkDuration, Easing::InOutQuad) })
                 .transitionOnComplete("WaitA")
             .initialState("WaitA")
             .build();
@@ -241,10 +236,8 @@ namespace FSMPatterns {
 
     // Create a trigger-based FSM: Idle -> Triggered -> Cooldown -> Idle
     inline FSMComponent createTriggerFSM(entt::entity self,
-                                          std::vector<TimelineAction> onTriggerActions,
+                                          std::vector<Action> onTriggerActions,
                                           float cooldownDuration = 3.0f) {
-        using namespace AnimationBuilder;
-
         return FSMBuilder()
             .state("Idle")
                 .transitionTo("Triggered", "trigger")
@@ -252,7 +245,7 @@ namespace FSMPatterns {
                 .enter(std::move(onTriggerActions))
                 .transitionOnComplete("Cooldown")
             .state("Cooldown")
-                .enter({ wait(cooldownDuration) })
+                .enter({ Action::wait(cooldownDuration) })
                 .transitionOnComplete("Idle")
             .initialState("Idle")
             .build();
@@ -260,8 +253,8 @@ namespace FSMPatterns {
 
     // Create an interaction FSM: Idle <-> Active (toggle on event)
     inline FSMComponent createToggleFSM(entt::entity self,
-                                         std::vector<TimelineAction> onActivate,
-                                         std::vector<TimelineAction> onDeactivate) {
+                                         std::vector<Action> onActivate,
+                                         std::vector<Action> onDeactivate) {
         return FSMBuilder()
             .state("Inactive")
                 .enter(std::move(onDeactivate))

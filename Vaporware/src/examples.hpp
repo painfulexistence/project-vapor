@@ -1,7 +1,7 @@
 #pragma once
 
-#include "animation_components.hpp"
-#include "animation_systems.hpp"
+#include "action_components.hpp"
+#include "action_system.hpp"
 #include "camera_mixing_system.hpp"
 #include "camera_trauma_system.hpp"
 #include "components.hpp"
@@ -18,128 +18,48 @@
 //
 // All functions return COMPONENT DATA, they don't emplace.
 // Usage: registry.emplace<XxxComponent>(entity, Xxx::preset());
+//
+// Tween:: presets are in action_components.hpp
 // ============================================================
 
 // ============================================================
-// 1. TWEEN PRESETS - Returns TweenComponent data
-// ============================================================
-
-namespace Tween {
-
-    // Bounce in effect (scale from 0 to 1 with overshoot)
-    inline TweenTransformComponent bounceIn(float duration = 0.5f) {
-        TweenTransformComponent tween;
-        tween.base.duration = duration;
-        tween.base.easing = Easing::OutBack;
-        tween.base.state = TweenState::Running;
-        tween.target = TweenTransformTarget::Scale;
-        tween.startScale = glm::vec3(0.0f);
-        tween.endScale = glm::vec3(1.0f);
-        return tween;
-    }
-
-    // Bounce out effect (scale from 1 to 0)
-    inline TweenTransformComponent bounceOut(float duration = 0.3f) {
-        TweenTransformComponent tween;
-        tween.base.duration = duration;
-        tween.base.easing = Easing::InBack;
-        tween.base.state = TweenState::Running;
-        tween.target = TweenTransformTarget::Scale;
-        tween.startScale = glm::vec3(1.0f);
-        tween.endScale = glm::vec3(0.0f);
-        return tween;
-    }
-
-    // Pulsing scale (looping)
-    inline TweenTransformComponent pulse(float minScale = 0.9f, float maxScale = 1.1f, float duration = 1.0f) {
-        TweenTransformComponent tween;
-        tween.base.duration = duration;
-        tween.base.easing = Easing::InOutQuad;
-        tween.base.state = TweenState::Running;
-        tween.base.loopMode = TweenLoopMode::PingPong;
-        tween.base.loopCount = -1;  // Infinite
-        tween.target = TweenTransformTarget::Scale;
-        tween.startScale = glm::vec3(minScale);
-        tween.endScale = glm::vec3(maxScale);
-        return tween;
-    }
-
-    // Fade out (alpha 1 → 0)
-    inline TweenColorComponent fadeOut(float duration = 0.3f) {
-        TweenColorComponent tween;
-        tween.base.duration = duration;
-        tween.base.easing = Easing::OutCubic;
-        tween.base.state = TweenState::Running;
-        tween.startValue = glm::vec4(1.0f);
-        tween.endValue = glm::vec4(1.0f, 1.0f, 1.0f, 0.0f);
-        return tween;
-    }
-
-    // Fade in (alpha 0 → 1)
-    inline TweenColorComponent fadeIn(float duration = 0.3f) {
-        TweenColorComponent tween;
-        tween.base.duration = duration;
-        tween.base.easing = Easing::OutCubic;
-        tween.base.state = TweenState::Running;
-        tween.startValue = glm::vec4(1.0f, 1.0f, 1.0f, 0.0f);
-        tween.endValue = glm::vec4(1.0f);
-        return tween;
-    }
-
-    // Move from A to B
-    inline TweenTransformComponent move(const glm::vec3& from, const glm::vec3& to,
-                                         float duration = 0.5f, EasingFunction easing = Easing::OutCubic) {
-        TweenTransformComponent tween;
-        tween.base.duration = duration;
-        tween.base.easing = easing;
-        tween.base.state = TweenState::Running;
-        tween.target = TweenTransformTarget::Position;
-        tween.startPosition = from;
-        tween.endPosition = to;
-        return tween;
-    }
-
-}  // namespace Tween
-
-// ============================================================
-// 2. ACTION SEQUENCE PRESETS - Returns vector of actions
+// 1. ACTION SEQUENCE PRESETS - Returns vector of actions
 // ============================================================
 
 namespace ActionSequence {
-    using namespace AnimationBuilder;
 
     // Door open sequence: wait → move up
-    inline std::vector<TimelineAction> doorOpen(entt::entity door, const glm::vec3& openPos) {
+    inline std::vector<Action> doorOpen(entt::entity door, const glm::vec3& openPos) {
         return {
-            wait(0.2f),
-            moveTo(door, openPos, 1.0f, Easing::OutCubic)
+            Action::wait(0.2f),
+            Action::moveTo(door, openPos, 1.0f, Easing::OutCubic)
         };
     }
 
     // Attack combo sequence
-    inline std::vector<TimelineAction> attackCombo(entt::entity attacker) {
+    inline std::vector<Action> attackCombo(entt::entity attacker) {
         return {
-            playAnimation(attacker, "slash1"),
-            wait(0.3f),
-            playAnimation(attacker, "slash2"),
-            wait(0.3f),
-            playAnimation(attacker, "heavy_slash"),
-            wait(0.4f)
+            Action::playAnimation(attacker, "slash1"),
+            Action::wait(0.3f),
+            Action::playAnimation(attacker, "slash2"),
+            Action::wait(0.3f),
+            Action::playAnimation(attacker, "heavy_slash"),
+            Action::wait(0.4f)
         };
     }
 
-    // Spawn effect: scale up + fade in
-    inline std::vector<TimelineAction> spawnEffect(entt::entity entity) {
+    // Spawn effect: activate + wait for tween
+    inline std::vector<Action> spawnEffect(entt::entity entity) {
         return {
-            setActive(entity, true),
-            wait(0.5f)  // Let tween play
+            Action::setActive(entity, true),
+            Action::wait(0.5f)
         };
     }
 
 }  // namespace ActionSequence
 
 // ============================================================
-// 3. FSM PRESETS - Returns FSMComponent data
+// 2. FSM PRESETS - Returns FSMComponent data
 // ============================================================
 
 namespace FSM {
@@ -149,14 +69,12 @@ namespace FSM {
                                 const glm::vec3& idlePos,
                                 const glm::vec3& activePos,
                                 float duration = 0.5f) {
-        using namespace AnimationBuilder;
-
         return FSMBuilder()
             .state("Idle")
-                .enter({ moveTo(self, idlePos, duration, Easing::OutCubic) })
+                .enter({ Action::moveTo(self, idlePos, duration, Easing::OutCubic) })
                 .transitionTo("Active", "interact")
             .state("Active")
-                .enter({ moveTo(self, activePos, duration, Easing::OutCubic) })
+                .enter({ Action::moveTo(self, activePos, duration, Easing::OutCubic) })
                 .transitionTo("Idle", "interact")
             .initialState("Idle")
             .build();
@@ -165,11 +83,9 @@ namespace FSM {
     // Combat AI: Idle → Chase → Attack → Cooldown → loop
     inline FSMComponent combatAI(entt::entity self, entt::entity target,
                                   float detectRange = 10.0f, float attackRange = 2.0f) {
-        using namespace AnimationBuilder;
-
         return FSMBuilder()
             .state("Idle")
-                .enter({ playAnimation(self, "idle") })
+                .enter({ Action::playAnimation(self, "idle") })
                 .transitionTo("Chase", "player_spotted")
                 .transitionTo("Chase", [target, detectRange](entt::registry& reg, entt::entity e) {
                     auto* selfTrans = reg.try_get<Vapor::TransformComponent>(e);
@@ -179,7 +95,7 @@ namespace FSM {
                 })
 
             .state("Chase")
-                .enter({ playAnimation(self, "run") })
+                .enter({ Action::playAnimation(self, "run") })
                 .transitionTo("Attack", [target, attackRange](entt::registry& reg, entt::entity e) {
                     auto* selfTrans = reg.try_get<Vapor::TransformComponent>(e);
                     auto* targetTrans = reg.try_get<Vapor::TransformComponent>(target);
@@ -190,13 +106,13 @@ namespace FSM {
 
             .state("Attack")
                 .enter({
-                    playAnimation(self, "attack"),
-                    wait(0.5f)
+                    Action::playAnimation(self, "attack"),
+                    Action::wait(0.5f)
                 })
                 .transitionOnComplete("Cooldown")
 
             .state("Cooldown")
-                .enter({ wait(1.0f) })
+                .enter({ Action::wait(1.0f) })
                 .transitionOnComplete("Chase")
 
             .initialState("Idle")
@@ -205,15 +121,13 @@ namespace FSM {
 
     // Dialogue NPC: Idle → Talking → Waiting → Done
     inline FSMComponent dialogueNPC(entt::entity self) {
-        using namespace AnimationBuilder;
-
         return FSMBuilder()
             .state("Idle")
-                .enter({ playAnimation(self, "idle") })
+                .enter({ Action::playAnimation(self, "idle") })
                 .transitionTo("Talking", "start_dialogue")
 
             .state("Talking")
-                .enter({ playAnimation(self, "talk") })
+                .enter({ Action::playAnimation(self, "talk") })
                 .transitionTo("Waiting", "dialogue_shown")
 
             .state("Waiting")
@@ -221,7 +135,7 @@ namespace FSM {
                 .transitionTo("Done", "end_dialogue")
 
             .state("Done")
-                .enter({ playAnimation(self, "wave") })
+                .enter({ Action::playAnimation(self, "wave") })
                 .transitionOnComplete("Idle")
 
             .initialState("Idle")
@@ -234,20 +148,18 @@ namespace FSM {
                                 const glm::vec3& pointB,
                                 float walkDuration = 2.0f,
                                 float waitDuration = 1.0f) {
-        using namespace AnimationBuilder;
-
         return FSMBuilder()
             .state("WalkToB")
-                .enter({ moveTo(self, pointB, walkDuration, Easing::Linear) })
+                .enter({ Action::moveTo(self, pointB, walkDuration, Easing::Linear) })
                 .transitionOnComplete("WaitAtB")
             .state("WaitAtB")
-                .enter({ wait(waitDuration) })
+                .enter({ Action::wait(waitDuration) })
                 .transitionOnComplete("WalkToA")
             .state("WalkToA")
-                .enter({ moveTo(self, pointA, walkDuration, Easing::Linear) })
+                .enter({ Action::moveTo(self, pointA, walkDuration, Easing::Linear) })
                 .transitionOnComplete("WaitAtA")
             .state("WaitAtA")
-                .enter({ wait(waitDuration) })
+                .enter({ Action::wait(waitDuration) })
                 .transitionOnComplete("WalkToB")
             .initialState("WalkToB")
             .build();
@@ -256,10 +168,9 @@ namespace FSM {
 }  // namespace FSM
 
 // ============================================================
-// 4. LANDING EFFECT (Squash + Particles + Shake)
+// 3. LANDING EFFECT (Squash + Particles + Shake)
 // ============================================================
 
-// Components for landing system
 struct GroundState {
     bool isGrounded = false;
     bool wasGrounded = false;
@@ -373,116 +284,9 @@ public:
 };
 
 // ============================================================
-// 5. CUTSCENE EXAMPLE (Multi-entity Coordination)
+// 4. SCENE MANAGEMENT
 // ============================================================
 
-namespace CutsceneExamples {
-
-    // Intro cutscene: Camera pan → NPC walks in → Dialogue
-    inline void playIntroCutscene(entt::registry& reg,
-                                   entt::entity camera,
-                                   entt::entity player,
-                                   entt::entity npc) {
-        using namespace AnimationBuilder;
-
-        // Create a cutscene controller entity
-        auto cutsceneController = reg.create();
-
-        AnimationHelpers::playCutscene(reg, cutsceneController, {
-            // Disable player control
-            callback([&reg, player]() {
-                if (auto* intent = reg.try_get<CharacterIntent>(player)) {
-                    // Could add a "CutsceneControlled" tag to disable input
-                }
-            }),
-
-            // Camera pan to scene
-            moveTo(camera, glm::vec3(0, 5, 10), 2.0f, Easing::InOutQuad),
-
-            wait(0.5f),
-
-            // NPC walks into frame
-            parallel({
-                moveTo(npc, glm::vec3(0, 0, 0), 1.5f, Easing::OutQuad),
-                playAnimation(npc, "walk")
-            }),
-
-            // NPC stops and turns
-            playAnimation(npc, "idle"),
-            wait(0.3f),
-
-            // Start dialogue
-            callback([&reg, npc]() {
-                FSMSystem::sendEvent(reg, npc, "start_dialogue");
-            }),
-
-            // Wait for dialogue to finish (manual advance)
-            wait(5.0f),  // Or use a condition-based wait
-
-            // Camera returns to player
-            moveTo(camera, glm::vec3(0, 2, 5), 1.0f, Easing::InOutQuad),
-
-            // Re-enable player control
-            callback([&reg, player]() {
-                // Remove "CutsceneControlled" tag
-            })
-        }, [&reg, cutsceneController]() {
-            // Cleanup cutscene controller
-            reg.destroy(cutsceneController);
-        }, "intro_cutscene");
-    }
-
-    // Boss intro: Screen shake → Boss lands → Roar → Health bar appears
-    inline void playBossIntro(entt::registry& reg,
-                               entt::entity boss,
-                               entt::entity camera,
-                               entt::entity healthBarUI) {
-        using namespace AnimationBuilder;
-
-        auto cutsceneController = reg.create();
-
-        AnimationHelpers::playCutscene(reg, cutsceneController, {
-            // Rumble warning
-            callback([&reg]() {
-                CameraTraumaSystem::addTraumaToActiveCamera(reg, CameraTraumaRequest::shake(0.3f));
-            }),
-            wait(1.0f),
-
-            // Boss drops from sky
-            setActive(boss, true),
-            moveTo(boss, glm::vec3(0, 0, 0), 0.5f, Easing::InCubic),
-
-            // Impact!
-            callback([&reg]() {
-                CameraTraumaSystem::addTraumaToActiveCamera(reg, TraumaPresets::heavyImpact());
-            }),
-            wait(0.3f),
-
-            // Boss roar animation
-            playAnimation(boss, "roar"),
-            wait(2.0f),
-
-            // Show health bar
-            setActive(healthBarUI, true),
-            callback([&reg, healthBarUI]() {
-                TweenExamples::bounceIn(reg, healthBarUI, 0.5f);
-            }),
-            wait(0.5f),
-
-            // Boss enters combat stance
-            playAnimation(boss, "combat_idle")
-        }, [&reg, cutsceneController]() {
-            reg.destroy(cutsceneController);
-        }, "boss_intro");
-    }
-
-}  // namespace CutsceneExamples
-
-// ============================================================
-// 6. SCENE MANAGER SYSTEM
-// ============================================================
-
-// Scene transition types
 enum class SceneTransitionType : uint8_t {
     None,
     Fade,
@@ -490,24 +294,22 @@ enum class SceneTransitionType : uint8_t {
     Wipe
 };
 
-// Scene request component
 struct SceneRequest {
-    enum class Action : uint8_t {
+    enum class ActionType : uint8_t {
         Load,
         Unload,
         Reload
     };
 
-    Action action = Action::Load;
+    ActionType action = ActionType::Load;
     std::string sceneId;
     bool unloadCurrent = true;
     SceneTransitionType transition = SceneTransitionType::Fade;
     float transitionDuration = 0.5f;
-    glm::vec3 spawnPosition{0.0f};      // Where to spawn player
-    std::string spawnPointId;            // Or use named spawn point
+    glm::vec3 spawnPosition{0.0f};
+    std::string spawnPointId;
 };
 
-// Scene state component (on a global/manager entity)
 struct SceneState {
     std::string currentSceneId;
     std::string pendingSceneId;
@@ -524,7 +326,6 @@ struct SceneState {
     float transitionDuration = 0.5f;
 };
 
-// Trigger zone component
 struct SceneTriggerZone {
     std::string targetSceneId;
     std::string spawnPointId;
@@ -533,7 +334,6 @@ struct SceneTriggerZone {
     bool triggered = false;
 };
 
-// Player contact detection (set by physics/collision system)
 struct PlayerContact {
     entt::entity player = entt::null;
 };
@@ -542,20 +342,16 @@ struct PlayerContact {
 // Scene Systems - Each system has ONE update, ONE responsibility
 // ============================================================
 
-// Helper functions for scene loading (not systems)
 namespace SceneHelpers {
     inline void loadScene(entt::registry& reg, const std::string& sceneId) {
-        // TODO: Implement actual scene loading
         fmt::print("Loading scene: {}\n", sceneId);
     }
 
     inline void unloadScene(entt::registry& reg, const std::string& sceneId) {
-        // TODO: Implement actual scene unloading
         fmt::print("Unloading scene: {}\n", sceneId);
     }
 }
 
-// System 1: Detects trigger zones → emplaces SceneRequest
 class SceneTriggerSystem {
 public:
     static void update(entt::registry& reg) {
@@ -567,10 +363,9 @@ public:
             if (contact.player != entt::null && !trigger.triggered) {
                 trigger.triggered = true;
 
-                // Emplace scene request
                 auto reqEntity = reg.create();
                 auto& request = reg.emplace<SceneRequest>(reqEntity);
-                request.action = SceneRequest::Action::Load;
+                request.action = SceneRequest::ActionType::Load;
                 request.sceneId = trigger.targetSceneId;
                 request.unloadCurrent = true;
                 request.transition = SceneTransitionType::Fade;
@@ -581,17 +376,14 @@ public:
                 }
             }
 
-            // Clear contact after processing
             reg.remove<PlayerContact>(entity);
         }
     }
 };
 
-// System 2: Consumes SceneRequest → starts transition in SceneState
 class SceneRequestSystem {
 public:
     static void update(entt::registry& reg) {
-        // Find scene state
         SceneState* sceneState = nullptr;
         auto stateView = reg.view<SceneState>();
         if (stateView.begin() != stateView.end()) {
@@ -599,7 +391,6 @@ public:
         }
         if (!sceneState) return;
 
-        // Don't process new requests while transitioning
         if (sceneState->isTransitioning) return;
 
         auto view = reg.view<SceneRequest>();
@@ -607,7 +398,7 @@ public:
             auto& request = view.get<SceneRequest>(entity);
 
             switch (request.action) {
-                case SceneRequest::Action::Load:
+                case SceneRequest::ActionType::Load:
                     sceneState->pendingSceneId = request.sceneId;
                     sceneState->isTransitioning = true;
                     sceneState->phase = SceneState::Phase::FadingOut;
@@ -615,25 +406,23 @@ public:
                     sceneState->transitionDuration = request.transitionDuration;
                     break;
 
-                case SceneRequest::Action::Unload:
+                case SceneRequest::ActionType::Unload:
                     SceneHelpers::unloadScene(reg, request.sceneId);
                     break;
 
-                case SceneRequest::Action::Reload:
+                case SceneRequest::ActionType::Reload:
                     sceneState->pendingSceneId = sceneState->currentSceneId;
                     sceneState->isTransitioning = true;
                     sceneState->phase = SceneState::Phase::FadingOut;
                     break;
             }
 
-            // Consume request
             reg.destroy(entity);
-            break;  // One request at a time
+            break;
         }
     }
 };
 
-// System 3: Updates transition animation based on SceneState.phase
 class SceneTransitionSystem {
 public:
     static void update(entt::registry& reg, float dt) {
@@ -676,93 +465,6 @@ public:
 };
 
 // ============================================================
-// 7. COMPLETE TRIGGER ZONE → SCENE TRANSITION EXAMPLE
-// ============================================================
-
-namespace SceneTransitionExample {
-
-    // Setup a trigger zone that transitions to another scene
-    inline entt::entity createSceneTrigger(entt::registry& reg,
-                                            const glm::vec3& position,
-                                            const glm::vec3& size,
-                                            const std::string& targetScene,
-                                            const std::string& spawnPoint = "") {
-        auto trigger = reg.create();
-
-        // Transform
-        auto& transform = reg.emplace<Vapor::TransformComponent>(trigger);
-        transform.position = position;
-        transform.scale = size;
-
-        // Trigger zone
-        auto& zone = reg.emplace<SceneTriggerZone>(trigger);
-        zone.targetSceneId = targetScene;
-        zone.spawnPointId = spawnPoint;
-        zone.useSpawnPoint = !spawnPoint.empty();
-
-        // Collider (for physics system to detect)
-        auto& collider = reg.emplace<Vapor::BoxColliderComponent>(trigger);
-        collider.halfSize = size * 0.5f;
-
-        return trigger;
-    }
-
-    // Setup scene manager
-    inline entt::entity setupSceneManager(entt::registry& reg, const std::string& initialScene) {
-        auto manager = reg.create();
-
-        auto& state = reg.emplace<SceneState>(manager);
-        state.currentSceneId = initialScene;
-
-        return manager;
-    }
-
-    // Example: Complete game loop integration
-    inline void exampleGameLoop(entt::registry& reg, float dt) {
-        // ... input handling ...
-        // ... physics (sets PlayerContact on trigger zones) ...
-
-        // Scene management (each system has one responsibility)
-        SceneTriggerSystem::update(reg);      // Trigger → SceneRequest
-        SceneRequestSystem::update(reg);      // SceneRequest → start transition
-        SceneTransitionSystem::update(reg, dt); // Update transition animation
-
-        // ... rest of game loop ...
-    }
-
-    // Example: Creating a level with trigger zones
-    inline void setupLevel(entt::registry& reg) {
-        // Scene manager
-        setupSceneManager(reg, "level_1");
-
-        // Exit to level 2
-        createSceneTrigger(reg,
-            glm::vec3(50, 0, 0),    // Position
-            glm::vec3(2, 4, 2),     // Size
-            "level_2",              // Target scene
-            "spawn_from_level_1"    // Spawn point
-        );
-
-        // Secret area
-        createSceneTrigger(reg,
-            glm::vec3(10, -5, 0),
-            glm::vec3(2, 2, 2),
-            "secret_area",
-            "spawn_main"
-        );
-
-        // Return to hub
-        createSceneTrigger(reg,
-            glm::vec3(-50, 0, 0),
-            glm::vec3(3, 4, 3),
-            "hub_world",
-            "spawn_from_level_1"
-        );
-    }
-
-}  // namespace SceneTransitionExample
-
-// ============================================================
 // GAME LOOP EXAMPLE - Complete System Order
 // ============================================================
 
@@ -771,32 +473,28 @@ namespace GameLoopExample {
     inline void update(entt::registry& reg, float dt) {
         // ===== 1. INPUT =====
         // inputManager.update(dt);
-        // updateCharacterIntent(reg, inputState);
 
         // ===== 2. STATE CHANGE DETECTION =====
         GroundCheckSystem::update(reg);
-        // CollisionEventSystem::update(reg);
 
-        // ===== 3. SCENE MANAGEMENT (3 systems, 3 responsibilities) =====
-        SceneTriggerSystem::update(reg);        // Trigger → SceneRequest
-        SceneRequestSystem::update(reg);        // SceneRequest → start transition
-        SceneTransitionSystem::update(reg, dt); // Update transition animation
+        // ===== 3. SCENE MANAGEMENT =====
+        SceneTriggerSystem::update(reg);
+        SceneRequestSystem::update(reg);
+        SceneTransitionSystem::update(reg, dt);
 
-        // ===== 4. REQUEST CONSUMERS (Init systems) =====
+        // ===== 4. REQUEST CONSUMERS =====
         SquashInitSystem::update(reg);
-        // ParticleSpawnSystem::update(reg);
 
         // ===== 5. FSM (State transitions → emplace ActionQueue) =====
         FSMSystem::update(reg);
 
-        // ===== 6. ANIMATION EXECUTION =====
-        AnimationSystem::update(reg, dt);
+        // ===== 6. ACTION EXECUTION =====
+        ActionSystem::update(reg, dt);
 
         // ===== 7. CONTINUOUS UPDATE SYSTEMS =====
         SquashUpdateSystem::update(reg, dt);
         CameraTraumaSystem::update(reg, dt);
         CameraBreathSystem::update(reg, dt);
-        // ParticleUpdateSystem::update(reg, dt);
 
         // ===== 8. CLEANUP =====
         AutoDestroySystem::update(reg, dt);

@@ -1,6 +1,6 @@
 #pragma once
 
-#include "animation_components.hpp"
+#include "action_components.hpp"
 #include <entt/entt.hpp>
 #include <functional>
 #include <optional>
@@ -66,22 +66,22 @@ struct FSMTransition {
 struct FSMState {
     std::string name;
 
-    // Actions to execute when entering this state (emplace as CutsceneComponent)
-    std::vector<TimelineAction> onEnterActions;
+    // Actions to execute when entering this state
+    std::vector<Action> onEnterActions;
 
     // Actions to execute when exiting this state
-    std::vector<TimelineAction> onExitActions;
+    std::vector<Action> onExitActions;
 
     // Possible transitions from this state
     std::vector<FSMTransition> transitions;
 
     // Builder pattern for convenience
-    FSMState& enter(std::vector<TimelineAction> actions) {
+    FSMState& enter(std::vector<Action> actions) {
         onEnterActions = std::move(actions);
         return *this;
     }
 
-    FSMState& exit(std::vector<TimelineAction> actions) {
+    FSMState& exit(std::vector<Action> actions) {
         onExitActions = std::move(actions);
         return *this;
     }
@@ -177,14 +177,14 @@ public:
         return *this;
     }
 
-    FSMBuilder& enter(std::vector<TimelineAction> actions) {
+    FSMBuilder& enter(std::vector<Action> actions) {
         if (m_currentStateIndex < m_states.size()) {
             m_states[m_currentStateIndex].onEnterActions = std::move(actions);
         }
         return *this;
     }
 
-    FSMBuilder& exit(std::vector<TimelineAction> actions) {
+    FSMBuilder& exit(std::vector<Action> actions) {
         if (m_currentStateIndex < m_states.size()) {
             m_states[m_currentStateIndex].onExitActions = std::move(actions);
         }
