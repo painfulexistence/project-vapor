@@ -12,6 +12,7 @@
 #include "Vapor/asset_manager.hpp"
 #include "Vapor/camera.hpp"
 #include "Vapor/engine_core.hpp"
+#include "Vapor/font_manager.hpp"
 #include "Vapor/graphics.hpp"
 #include "Vapor/input_manager.hpp"
 #include "Vapor/mesh_builder.hpp"
@@ -110,6 +111,14 @@ int main(int argc, char* args[]) {
     auto spriteImage = AssetManager::loadImage("assets/textures/default_albedo.png");
     TextureHandle spriteTexture = renderer->createTexture(spriteImage);
     fmt::print("Sprite texture loaded\n");
+
+    // Load a font for text rendering
+    FontHandle gameFont = renderer->loadFont("assets/fonts/Arial Black.ttf", 48.0f);
+    if (gameFont.isValid()) {
+        fmt::print("Font loaded successfully\n");
+    } else {
+        fmt::print("Failed to load font\n");
+    }
 
     if (engineCore->initRmlUI(windowWidth, windowHeight) && renderer->initUI()) {
         fmt::print("RmlUI System Initialized\n");
@@ -419,15 +428,17 @@ int main(int argc, char* args[]) {
             tempCamera.setViewMatrix(cam.viewMatrix);
             tempCamera.setProjectionMatrix(cam.projectionMatrix);
 
-            // NOTES: projection is computed internally from window size
-            float quadSize = 20.0f;
-            float spacing = 25.0f;
-            int cols = 10;
-            int rows = 5;
+            // ===== 2D Canvas Demo (World Space Ortho) =====
+            // Note: CanvasPass now uses world space coordinates centered on camera
+            // Draw some 2D shapes in world space
+            float quadSize = 0.5f;
+            float spacing = 0.8f;
+            int cols = 5;
+            int rows = 3;
             for (int y = 0; y < rows; y++) {
                 for (int x = 0; x < cols; x++) {
-                    float px = 50.0f + x * spacing;
-                    float py = 50.0f + y * spacing;
+                    float px = -2.0f + x * spacing;
+                    float py = 3.0f + y * spacing;
                     // Rainbow colors based on position
                     float hue = (float)(x + y * cols) / (float)(cols * rows);
                     glm::vec4 color = glm::vec4(
@@ -439,25 +450,61 @@ int main(int argc, char* args[]) {
                     renderer->drawQuad2D(glm::vec2(px, py), glm::vec2(quadSize, quadSize), color);
                 }
             }
-            renderer->drawCircleFilled2D(glm::vec2(400.0f, 100.0f), 30.0f, glm::vec4(1.0f, 0.5f, 0.0f, 1.0f));
+            renderer->drawCircleFilled2D(glm::vec2(3.0f, 4.0f), 0.5f, glm::vec4(1.0f, 0.5f, 0.0f, 1.0f));
             renderer->drawRect2D(
-                glm::vec2(450.0f, 70.0f), glm::vec2(60.0f, 60.0f), glm::vec4(0.0f, 1.0f, 0.5f, 1.0f), 2.0f
+                glm::vec2(4.0f, 3.5f), glm::vec2(1.0f, 1.0f), glm::vec4(0.0f, 1.0f, 0.5f, 1.0f), 0.05f
             );
             renderer->drawTriangleFilled2D(
-                glm::vec2(550.0f, 130.0f),
-                glm::vec2(520.0f, 70.0f),
-                glm::vec2(580.0f, 70.0f),
+                glm::vec2(5.5f, 4.5f),
+                glm::vec2(5.0f, 3.5f),
+                glm::vec2(6.0f, 3.5f),
                 glm::vec4(0.5f, 0.0f, 1.0f, 1.0f)
             );
             renderer->drawRotatedQuad2D(
-                glm::vec2(650.0f, 100.0f),
-                glm::vec2(40.0f, 40.0f),
+                glm::vec2(-3.0f, 4.0f),
+                glm::vec2(0.8f, 0.8f),
                 time * 2.0f,// rotation in radians
                 spriteTexture,
                 glm::vec4(1.0f, 1.0f, 1.0f, 1.0f)
             );
-            // renderer->flush2D();
 
+            // ===== Text Rendering Demo =====
+            if (gameFont.isValid()) {
+                // Draw text labels above cube positions (world space 2D)
+                auto cube1Node = registry.get<SceneNodeReferenceComponent>(cube1).node;
+                auto cube2Node = registry.get<SceneNodeReferenceComponent>(cube2).node;
+
+                glm::vec3 cube1Pos = cube1Node->getWorldPosition();
+                glm::vec3 cube2Pos = cube2Node->getWorldPosition();
+
+                // Draw names above cubes (offset by Y to appear above)
+                renderer->drawText2D(
+                    gameFont,
+                    "Cube 1",
+                    glm::vec2(cube1Pos.x - 0.5f, cube1Pos.y + 1.5f),
+                    0.02f, // scale (world units per font pixel)
+                    glm::vec4(1.0f, 1.0f, 0.0f, 1.0f) // yellow
+                );
+
+                renderer->drawText2D(
+                    gameFont,
+                    "Cube 2",
+                    glm::vec2(cube2Pos.x - 0.5f, cube2Pos.y + 1.5f),
+                    0.02f,
+                    glm::vec4(0.0f, 1.0f, 1.0f, 1.0f) // cyan
+                );
+
+                // Draw a title at fixed world position
+                renderer->drawText2D(
+                    gameFont,
+                    "Project Vapor",
+                    glm::vec2(-3.0f, 6.0f),
+                    0.03f,
+                    glm::vec4(1.0f, 1.0f, 1.0f, 1.0f)
+                );
+            }
+
+            // ===== 3D Batch Demo =====
             renderer->drawQuad3D(
                 glm::vec3(0.0f, 2.0f, 0.0f), glm::vec2(1.0f, 1.0f), spriteTexture, glm::vec4(1.0f, 0.5f, 0.5f, 1.0f)
             );
