@@ -4800,6 +4800,90 @@ auto Renderer_Metal::draw(std::shared_ptr<Scene> scene, Camera& camera) -> void 
             }
             ImGui::TreePop();
         }
+
+        if (ImGui::TreeNode("Volumetric Fog")) {
+            ImGui::Separator();
+            ImGui::Checkbox("Enabled", &volumetricFogEnabled);
+
+            if (volumetricFogEnabled) {
+                ImGui::Separator();
+                ImGui::Text("Fog Parameters");
+                ImGui::DragFloat("Density", &volumetricFogSettings.fogDensity, 0.001f, 0.0f, 0.5f);
+                ImGui::DragFloat("Height Falloff", &volumetricFogSettings.fogHeightFalloff, 0.01f, 0.001f, 1.0f);
+                ImGui::DragFloat("Base Height", &volumetricFogSettings.fogBaseHeight, 1.0f, -100.0f, 100.0f);
+                ImGui::DragFloat("Max Height", &volumetricFogSettings.fogMaxHeight, 10.0f, 0.0f, 500.0f);
+
+                ImGui::Separator();
+                ImGui::Text("Scattering");
+                ImGui::DragFloat("Anisotropy", &volumetricFogSettings.anisotropy, 0.01f, -0.99f, 0.99f);
+                ImGui::DragFloat("Ambient Intensity", &volumetricFogSettings.ambientIntensity, 0.01f, 0.0f, 2.0f);
+
+                if (ImGui::Button("Reset to Defaults")) {
+                    volumetricFogSettings.fogDensity = 0.02f;
+                    volumetricFogSettings.fogHeightFalloff = 0.1f;
+                    volumetricFogSettings.fogBaseHeight = 0.0f;
+                    volumetricFogSettings.fogMaxHeight = 100.0f;
+                    volumetricFogSettings.anisotropy = 0.6f;
+                    volumetricFogSettings.ambientIntensity = 0.3f;
+                }
+            }
+            ImGui::TreePop();
+        }
+
+        if (ImGui::TreeNode("Volumetric Clouds")) {
+            ImGui::Separator();
+            ImGui::Checkbox("Enabled", &volumetricCloudsEnabled);
+
+            if (volumetricCloudsEnabled) {
+                ImGui::Separator();
+                ImGui::Text("Cloud Layer");
+                ImGui::DragFloat("Bottom (m)", &volumetricCloudSettings.cloudLayerBottom, 100.0f, 0.0f, 10000.0f);
+                ImGui::DragFloat("Top (m)", &volumetricCloudSettings.cloudLayerTop, 100.0f, 0.0f, 15000.0f);
+                ImGui::DragFloat("Coverage", &volumetricCloudSettings.cloudCoverage, 0.01f, 0.0f, 1.0f);
+                ImGui::DragFloat("Density", &volumetricCloudSettings.cloudDensity, 0.01f, 0.0f, 1.0f);
+                ImGui::DragFloat("Type (Stratus-Cumulus)", &volumetricCloudSettings.cloudType, 0.01f, 0.0f, 1.0f);
+
+                ImGui::Separator();
+                ImGui::Text("Lighting");
+                ImGui::DragFloat("Ambient", &volumetricCloudSettings.ambientIntensity, 0.01f, 0.0f, 1.0f);
+                ImGui::DragFloat("Silver Lining", &volumetricCloudSettings.silverLiningIntensity, 0.01f, 0.0f, 2.0f);
+            }
+            ImGui::TreePop();
+        }
+
+        if (ImGui::TreeNode("Sun Flare (Lens Flare)")) {
+            ImGui::Separator();
+            ImGui::Checkbox("Enabled", &sunFlareEnabled);
+
+            if (sunFlareEnabled) {
+                ImGui::Separator();
+                ImGui::Text("Sun Flare Color: warm white/yellow (based on sun color)");
+                ImGui::ColorEdit3("Sun Color", &sunFlareSettings.sunColor.x);
+                ImGui::DragFloat("Intensity", &sunFlareSettings.sunIntensity, 0.1f, 0.0f, 5.0f);
+                ImGui::DragFloat("Visibility", &sunFlareSettings.visibility, 0.01f, 0.0f, 1.0f);
+
+                ImGui::Separator();
+                ImGui::Text("Glow");
+                ImGui::DragFloat("Glow Intensity", &sunFlareSettings.glowIntensity, 0.01f, 0.0f, 2.0f);
+                ImGui::DragFloat("Glow Size", &sunFlareSettings.glowSize, 0.01f, 0.01f, 0.5f);
+
+                ImGui::Separator();
+                ImGui::Text("Halo");
+                ImGui::DragFloat("Halo Intensity", &sunFlareSettings.haloIntensity, 0.01f, 0.0f, 1.0f);
+                ImGui::DragFloat("Halo Radius", &sunFlareSettings.haloRadius, 0.01f, 0.05f, 0.5f);
+
+                ImGui::Separator();
+                ImGui::Text("Ghosts");
+                ImGui::SliderInt("Ghost Count", &sunFlareSettings.ghostCount, 0, 10);
+                ImGui::DragFloat("Ghost Intensity", &sunFlareSettings.ghostIntensity, 0.01f, 0.0f, 0.5f);
+
+                ImGui::Separator();
+                ImGui::Text("Streak");
+                ImGui::DragFloat("Streak Intensity", &sunFlareSettings.streakIntensity, 0.01f, 0.0f, 1.0f);
+                ImGui::DragFloat("Streak Length", &sunFlareSettings.streakLength, 0.1f, 0.0f, 2.0f);
+            }
+            ImGui::TreePop();
+        }
     }
 
     // ==========================================================================
