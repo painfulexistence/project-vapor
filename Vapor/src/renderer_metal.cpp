@@ -1303,6 +1303,398 @@ public:
 };
 
 // ============================================================================
+// Volumetric Fog Pass: Height-based fog with scattering
+// ============================================================================
+
+class VolumetricFogPass : public RenderPass {
+public:
+    explicit VolumetricFogPass(Renderer_Metal* renderer) : RenderPass(renderer) {
+    }
+
+    const char* getName() const override {
+        return "VolumetricFogPass";
+    }
+
+    void execute() override {
+        auto& r = *renderer;
+
+        if (!r.volumetricFogEnabled || !r.fogSimplePipeline) return;
+
+        auto drawableSize = r.swapchain->drawableSize();
+
+        // Update fog data buffer
+        AtmosphereData* atmos = reinterpret_cast<AtmosphereData*>(r.atmosphereDataBuffer->contents());
+
+        VolumetricFogData* fogData =
+            reinterpret_cast<VolumetricFogData*>(r.volumetricFogDataBuffers[r.currentFrameInFlight]->contents());
+        fogData->invViewProj = glm::inverse(r.currentCamera->getProjMatrix() * r.currentCamera->getViewMatrix());
+        fogData->cameraPosition = r.currentCamera->getEye();
+        fogData->sunDirection = glm::normalize(atmos->sunDirection);
+        fogData->sunColor = atmos->sunColor;
+        fogData->sunIntensity = atmos->sunIntensity;
+        fogData->screenSize = glm::vec2(drawableSize.width, drawableSize.height);
+        fogData->nearPlane = r.currentCamera->near();
+        fogData->farPlane = r.volumetricFogSettings.farPlane;
+        fogData->frameIndex = r.currentFrameInFlight;
+        fogData->time = r.volumetricFogSettings.time;
+
+        // Copy settings
+        fogData->fogDensity = r.volumetricFogSettings.fogDensity;
+        fogData->fogHeightFalloff = r.volumetricFogSettings.fogHeightFalloff;
+        fogData->fogBaseHeight = r.volumetricFogSettings.fogBaseHeight;
+        fogData->fogMaxHeight = r.volumetricFogSettings.fogMaxHeight;
+        fogData->scatteringCoeff = r.volumetricFogSettings.scatteringCoeff;
+        fogData->extinctionCoeff = r.volumetricFogSettings.extinctionCoeff;
+        fogData->anisotropy = r.volumetricFogSettings.anisotropy;
+        fogData->ambientIntensity = r.volumetricFogSettings.ambientIntensity;
+        fogData->noiseScale = r.volumetricFogSettings.noiseScale;
+        fogData->noiseIntensity = r.volumetricFogSettings.noiseIntensity;
+        fogData->windSpeed = r.volumetricFogSettings.windSpeed;
+        fogData->windDirection = r.volumetricFogSettings.windDirection;
+        fogData->temporalBlend = r.volumetricFogSettings.temporalBlend;
+
+        r.volumetricFogDataBuffers[r.currentFrameInFlight]->didModifyRange(
+            NS::Range::Make(0, r.volumetricFogDataBuffers[r.currentFrameInFlight]->length())
+        );
+
+        // Simple fog pass - ping-pong: read from colorRT, write to tempColorRT
+        auto passDesc = NS::TransferPtr(MTL::RenderPassDescriptor::renderPassDescriptor());
+        auto colorAttach = passDesc->colorAttachments()->object(0);
+        colorAttach->setLoadAction(MTL::LoadActionDontCare);
+        colorAttach->setStoreAction(MTL::StoreActionStore);
+        colorAttach->setTexture(r.tempColorRT.get());// Write to temp
+
+        auto encoder = r.currentCommandBuffer->renderCommandEncoder(passDesc.get());
+        encoder->setRenderPipelineState(r.fogSimplePipeline.get());
+        encoder->setCullMode(MTL::CullModeNone);
+        encoder->setFragmentTexture(r.colorRT.get(), 0);// Read from color
+        encoder->setFragmentTexture(r.depthStencilRT.get(), 1);
+        encoder->setFragmentBuffer(r.volumetricFogDataBuffers[r.currentFrameInFlight].get(), 0, 0);
+        encoder->setFragmentBuffer(r.cameraDataBuffers[r.currentFrameInFlight].get(), 0, 1);
+        encoder->drawPrimitives(MTL::PrimitiveType::PrimitiveTypeTriangle, 0, 3, 1);
+        encoder->endEncoding();
+
+        // Swap so colorRT now contains the fogged result
+        std::swap(r.colorRT, r.tempColorRT);
+    }
+};
+
+// ============================================================================
+// Volumetric Cloud Pass: Ray-marched clouds
+// ============================================================================
+
+class VolumetricCloudPass : public RenderPass {
+public:
+    explicit VolumetricCloudPass(Renderer_Metal* renderer) : RenderPass(renderer) {
+    }
+
+    const char* getName() const override {
+        return "VolumetricCloudPass";
+    }
+
+    void execute() override {
+        auto& r = *renderer;
+
+        // Check if any required pipeline is available
+        bool hasLowResPipeline = r.cloudLowResPipeline && r.cloudCompositePipeline;
+        bool hasFullResPipeline = r.cloudRenderPipeline.get() != nullptr;
+
+        if (!r.volumetricCloudsEnabled || (!hasLowResPipeline && !hasFullResPipeline)) return;
+
+        auto drawableSize = r.swapchain->drawableSize();
+
+        // Update cloud data buffer
+        AtmosphereData* atmos = reinterpret_cast<AtmosphereData*>(r.atmosphereDataBuffer->contents());
+
+        VolumetricCloudData* cloudData =
+            reinterpret_cast<VolumetricCloudData*>(r.volumetricCloudDataBuffers[r.currentFrameInFlight]->contents());
+        cloudData->invViewProj = glm::inverse(r.currentCamera->getProjMatrix() * r.currentCamera->getViewMatrix());
+        cloudData->prevViewProj = r.volumetricCloudSettings.prevViewProj;// For temporal reprojection
+        cloudData->cameraPosition = r.currentCamera->getEye();
+        cloudData->sunDirection = glm::normalize(atmos->sunDirection);
+        cloudData->sunColor = atmos->sunColor;
+        cloudData->sunIntensity = atmos->sunIntensity;
+        cloudData->frameIndex = r.currentFrameInFlight;
+        cloudData->time = r.volumetricCloudSettings.time;
+
+        // Update wind offset (accumulate over time)
+        r.volumetricCloudSettings.windOffset +=
+            r.volumetricCloudSettings.windDirection * r.volumetricCloudSettings.windSpeed * 0.016f;
+        cloudData->windOffset = r.volumetricCloudSettings.windOffset;
+
+        // Copy settings
+        cloudData->cloudLayerBottom = r.volumetricCloudSettings.cloudLayerBottom;
+        cloudData->cloudLayerTop = r.volumetricCloudSettings.cloudLayerTop;
+        cloudData->cloudLayerThickness = cloudData->cloudLayerTop - cloudData->cloudLayerBottom;
+        cloudData->cloudCoverage = r.volumetricCloudSettings.cloudCoverage;
+        cloudData->cloudDensity = r.volumetricCloudSettings.cloudDensity;
+        cloudData->cloudType = r.volumetricCloudSettings.cloudType;
+        cloudData->erosionStrength = r.volumetricCloudSettings.erosionStrength;
+        cloudData->shapeNoiseScale = r.volumetricCloudSettings.shapeNoiseScale;
+        cloudData->detailNoiseScale = r.volumetricCloudSettings.detailNoiseScale;
+        cloudData->ambientIntensity = r.volumetricCloudSettings.ambientIntensity;
+        cloudData->silverLiningIntensity = r.volumetricCloudSettings.silverLiningIntensity;
+        cloudData->silverLiningSpread = r.volumetricCloudSettings.silverLiningSpread;
+        cloudData->phaseG1 = r.volumetricCloudSettings.phaseG1;
+        cloudData->phaseG2 = r.volumetricCloudSettings.phaseG2;
+        cloudData->phaseBlend = r.volumetricCloudSettings.phaseBlend;
+        cloudData->powderStrength = r.volumetricCloudSettings.powderStrength;
+        cloudData->windDirection = r.volumetricCloudSettings.windDirection;
+        cloudData->windSpeed = r.volumetricCloudSettings.windSpeed;
+        cloudData->primarySteps = r.volumetricCloudSettings.primarySteps;
+        cloudData->lightSteps = r.volumetricCloudSettings.lightSteps;
+        cloudData->temporalBlend = r.volumetricCloudSettings.temporalBlend;
+
+        r.volumetricCloudDataBuffers[r.currentFrameInFlight]->didModifyRange(
+            NS::Range::Make(0, r.volumetricCloudDataBuffers[r.currentFrameInFlight]->length())
+        );
+
+        // Use quarter-resolution pipeline if available, otherwise fall back to full-res
+        if (hasLowResPipeline && r.cloudRT && r.cloudHistoryRT) {
+            Uint32 cloudWidth = drawableSize.width / 4;
+            Uint32 cloudHeight = drawableSize.height / 4;
+
+            // Update screen size for quarter resolution
+            cloudData->screenSize = glm::vec2(cloudWidth, cloudHeight);
+            r.volumetricCloudDataBuffers[r.currentFrameInFlight]->didModifyRange(
+                NS::Range::Make(0, r.volumetricCloudDataBuffers[r.currentFrameInFlight]->length())
+            );
+
+            // ================================================================
+            // Pass 1: Render clouds at quarter resolution
+            // ================================================================
+            {
+                auto passDesc = NS::TransferPtr(MTL::RenderPassDescriptor::renderPassDescriptor());
+                auto colorAttach = passDesc->colorAttachments()->object(0);
+                colorAttach->setClearColor(MTL::ClearColor(0.0, 0.0, 0.0, 1.0));
+                colorAttach->setLoadAction(MTL::LoadActionClear);
+                colorAttach->setStoreAction(MTL::StoreActionStore);
+                colorAttach->setTexture(r.cloudRT.get());
+
+                auto encoder = r.currentCommandBuffer->renderCommandEncoder(passDesc.get());
+                encoder->setRenderPipelineState(r.cloudLowResPipeline.get());
+                encoder->setCullMode(MTL::CullModeNone);
+
+                // Set viewport to quarter resolution
+                MTL::Viewport viewport;
+                viewport.originX = 0.0;
+                viewport.originY = 0.0;
+                viewport.width = cloudWidth;
+                viewport.height = cloudHeight;
+                viewport.znear = 0.0;
+                viewport.zfar = 1.0;
+                encoder->setViewport(viewport);
+
+                encoder->setFragmentTexture(r.depthStencilRT.get(), 0);
+                encoder->setFragmentBuffer(r.volumetricCloudDataBuffers[r.currentFrameInFlight].get(), 0, 0);
+                encoder->setFragmentBuffer(r.cameraDataBuffers[r.currentFrameInFlight].get(), 0, 1);
+                encoder->drawPrimitives(MTL::PrimitiveType::PrimitiveTypeTriangle, 0, 3, 1);
+                encoder->endEncoding();
+            }
+
+            // ================================================================
+            // Pass 2: Temporal resolve (blend current with history)
+            // ================================================================
+            if (r.cloudTemporalResolvePipeline) {
+                // Swap cloudRT and cloudHistoryRT for temporal accumulation
+                auto passDesc = NS::TransferPtr(MTL::RenderPassDescriptor::renderPassDescriptor());
+                auto colorAttach = passDesc->colorAttachments()->object(0);
+                colorAttach->setLoadAction(MTL::LoadActionDontCare);
+                colorAttach->setStoreAction(MTL::StoreActionStore);
+                colorAttach->setTexture(r.cloudHistoryRT.get());
+
+                auto encoder = r.currentCommandBuffer->renderCommandEncoder(passDesc.get());
+                encoder->setRenderPipelineState(r.cloudTemporalResolvePipeline.get());
+                encoder->setCullMode(MTL::CullModeNone);
+
+                MTL::Viewport viewport;
+                viewport.originX = 0.0;
+                viewport.originY = 0.0;
+                viewport.width = cloudWidth;
+                viewport.height = cloudHeight;
+                viewport.znear = 0.0;
+                viewport.zfar = 1.0;
+                encoder->setViewport(viewport);
+
+                encoder->setFragmentTexture(r.cloudRT.get(), 0);// Current frame
+                encoder->setFragmentTexture(r.cloudHistoryRT.get(), 1);// History (will be overwritten)
+                encoder->setFragmentTexture(r.depthStencilRT.get(), 2);
+                encoder->setFragmentBuffer(r.volumetricCloudDataBuffers[r.currentFrameInFlight].get(), 0, 0);
+                encoder->drawPrimitives(MTL::PrimitiveType::PrimitiveTypeTriangle, 0, 3, 1);
+                encoder->endEncoding();
+
+                // Swap RT pointers for next frame
+                std::swap(r.cloudRT, r.cloudHistoryRT);
+            }
+
+            // ================================================================
+            // Pass 3: Upscale and composite - ping-pong to avoid hazard
+            // ================================================================
+            {
+                // Restore screen size for composite pass
+                cloudData->screenSize = glm::vec2(drawableSize.width, drawableSize.height);
+                r.volumetricCloudDataBuffers[r.currentFrameInFlight]->didModifyRange(
+                    NS::Range::Make(0, r.volumetricCloudDataBuffers[r.currentFrameInFlight]->length())
+                );
+
+                auto passDesc = NS::TransferPtr(MTL::RenderPassDescriptor::renderPassDescriptor());
+                auto colorAttach = passDesc->colorAttachments()->object(0);
+                colorAttach->setLoadAction(MTL::LoadActionDontCare);
+                colorAttach->setStoreAction(MTL::StoreActionStore);
+                colorAttach->setTexture(r.tempColorRT.get());// Write to temp
+
+                auto encoder = r.currentCommandBuffer->renderCommandEncoder(passDesc.get());
+                encoder->setRenderPipelineState(r.cloudCompositePipeline.get());
+                encoder->setCullMode(MTL::CullModeNone);
+                encoder->setFragmentTexture(r.colorRT.get(), 0);// Read from color
+                encoder->setFragmentTexture(r.cloudRT.get(), 1);// Cloud (quarter res)
+                encoder->setFragmentTexture(r.depthStencilRT.get(), 2);
+                encoder->setFragmentBuffer(r.volumetricCloudDataBuffers[r.currentFrameInFlight].get(), 0, 0);
+                encoder->drawPrimitives(MTL::PrimitiveType::PrimitiveTypeTriangle, 0, 3, 1);
+                encoder->endEncoding();
+
+                // Swap so colorRT now contains the composited result
+                std::swap(r.colorRT, r.tempColorRT);
+            }
+        } else if (hasFullResPipeline) {
+            // Fallback: Full resolution rendering - ping-pong to avoid hazard
+            cloudData->screenSize = glm::vec2(drawableSize.width, drawableSize.height);
+            r.volumetricCloudDataBuffers[r.currentFrameInFlight]->didModifyRange(
+                NS::Range::Make(0, r.volumetricCloudDataBuffers[r.currentFrameInFlight]->length())
+            );
+
+            auto passDesc = NS::TransferPtr(MTL::RenderPassDescriptor::renderPassDescriptor());
+            auto colorAttach = passDesc->colorAttachments()->object(0);
+            colorAttach->setLoadAction(MTL::LoadActionDontCare);
+            colorAttach->setStoreAction(MTL::StoreActionStore);
+            colorAttach->setTexture(r.tempColorRT.get());// Write to temp
+
+            auto encoder = r.currentCommandBuffer->renderCommandEncoder(passDesc.get());
+            encoder->setRenderPipelineState(r.cloudRenderPipeline.get());
+            encoder->setCullMode(MTL::CullModeNone);
+            encoder->setFragmentTexture(r.colorRT.get(), 0);// Read from color
+            encoder->setFragmentTexture(r.depthStencilRT.get(), 1);
+            encoder->setFragmentBuffer(r.volumetricCloudDataBuffers[r.currentFrameInFlight].get(), 0, 0);
+            encoder->setFragmentBuffer(r.cameraDataBuffers[r.currentFrameInFlight].get(), 0, 1);
+            encoder->drawPrimitives(MTL::PrimitiveType::PrimitiveTypeTriangle, 0, 3, 1);
+            encoder->endEncoding();
+
+            // Swap so colorRT now contains the composited result
+            std::swap(r.colorRT, r.tempColorRT);
+        }
+
+        // Store current view-proj for next frame's temporal reprojection
+        r.volumetricCloudSettings.prevViewProj = r.currentCamera->getProjMatrix() * r.currentCamera->getViewMatrix();
+    }
+};
+
+// ============================================================================
+// Sun Flare Pass: Lens flare effect with procedural textures
+// ============================================================================
+
+class SunFlarePass : public RenderPass {
+public:
+    explicit SunFlarePass(Renderer_Metal* renderer) : RenderPass(renderer) {
+    }
+
+    const char* getName() const override {
+        return "SunFlarePass";
+    }
+
+    void execute() override {
+        auto& r = *renderer;
+
+        if (!r.sunFlareEnabled || !r.sunFlarePipeline) return;
+
+        auto drawableSize = r.swapchain->drawableSize();
+        glm::vec2 screenSize = glm::vec2(drawableSize.width, drawableSize.height);
+
+        // Calculate sun screen position
+        AtmosphereData* atmos = reinterpret_cast<AtmosphereData*>(r.atmosphereDataBuffer->contents());
+        glm::vec3 sunDir = glm::normalize(atmos->sunDirection);
+        glm::vec3 camPos = r.currentCamera->getEye();
+        glm::vec3 sunWorldPos = camPos + sunDir * 10000.0f;
+
+        glm::mat4 viewProj = r.currentCamera->getProjMatrix() * r.currentCamera->getViewMatrix();
+        glm::vec4 sunClip = viewProj * glm::vec4(sunWorldPos, 1.0f);
+
+        // Sun behind camera
+        if (sunClip.w <= 0.0f) {
+            return;
+        }
+
+        // Convert to screen UV
+        glm::vec2 sunNDC = glm::vec2(sunClip.x, sunClip.y) / sunClip.w;
+        glm::vec2 sunScreenPos = sunNDC * 0.5f + 0.5f;
+        sunScreenPos.y = 1.0f - sunScreenPos.y;
+
+        // Update flare data buffer
+        SunFlareData* flareData =
+            reinterpret_cast<SunFlareData*>(r.sunFlareDataBuffers[r.currentFrameInFlight]->contents());
+        flareData->sunScreenPos = sunScreenPos;
+        flareData->screenSize = screenSize;
+        flareData->screenCenter = glm::vec2(0.5f, 0.5f);
+        flareData->aspectRatio = glm::vec2(screenSize.x / screenSize.y, 1.0f);
+        flareData->sunColor = atmos->sunColor;
+
+        // Simple visibility check using depth at sun position
+        // For proper occlusion, we'd use the compute shader, but this is a simple approximation
+        float visibility = 1.0f;
+        if (sunScreenPos.x < 0.0f || sunScreenPos.x > 1.0f || sunScreenPos.y < 0.0f || sunScreenPos.y > 1.0f) {
+            visibility = 0.0f;
+        }
+        flareData->visibility = visibility;
+
+        // Copy settings
+        flareData->sunIntensity = r.sunFlareSettings.sunIntensity;
+        flareData->fadeEdge = r.sunFlareSettings.fadeEdge;
+        flareData->glowIntensity = r.sunFlareSettings.glowIntensity;
+        flareData->glowFalloff = r.sunFlareSettings.glowFalloff;
+        flareData->glowSize = r.sunFlareSettings.glowSize;
+        flareData->haloIntensity = r.sunFlareSettings.haloIntensity;
+        flareData->haloRadius = r.sunFlareSettings.haloRadius;
+        flareData->haloWidth = r.sunFlareSettings.haloWidth;
+        flareData->haloFalloff = r.sunFlareSettings.haloFalloff;
+        flareData->ghostCount = r.sunFlareSettings.ghostCount;
+        flareData->ghostSpacing = r.sunFlareSettings.ghostSpacing;
+        flareData->ghostIntensity = r.sunFlareSettings.ghostIntensity;
+        flareData->ghostSize = r.sunFlareSettings.ghostSize;
+        flareData->ghostChromaticOffset = r.sunFlareSettings.ghostChromaticOffset;
+        flareData->ghostFalloff = r.sunFlareSettings.ghostFalloff;
+        flareData->streakIntensity = r.sunFlareSettings.streakIntensity;
+        flareData->streakLength = r.sunFlareSettings.streakLength;
+        flareData->streakFalloff = r.sunFlareSettings.streakFalloff;
+        flareData->starburstIntensity = r.sunFlareSettings.starburstIntensity;
+        flareData->starburstSize = r.sunFlareSettings.starburstSize;
+        flareData->starburstPoints = r.sunFlareSettings.starburstPoints;
+        flareData->starburstRotation = r.sunFlareSettings.starburstRotation;
+        flareData->dirtIntensity = r.sunFlareSettings.dirtIntensity;
+        flareData->dirtScale = r.sunFlareSettings.dirtScale;
+        flareData->time = r.sunFlareSettings.time;
+
+        r.sunFlareDataBuffers[r.currentFrameInFlight]->didModifyRange(
+            NS::Range::Make(0, r.sunFlareDataBuffers[r.currentFrameInFlight]->length())
+        );
+
+        // Render flare with additive blending (hardware blends output onto existing content)
+        auto passDesc = NS::TransferPtr(MTL::RenderPassDescriptor::renderPassDescriptor());
+        auto colorAttach = passDesc->colorAttachments()->object(0);
+        colorAttach->setLoadAction(MTL::LoadActionLoad);// Preserve existing bloom result
+        colorAttach->setStoreAction(MTL::StoreActionStore);
+        colorAttach->setTexture(r.bloomResultRT.get());
+
+        auto encoder = r.currentCommandBuffer->renderCommandEncoder(passDesc.get());
+        encoder->setRenderPipelineState(r.sunFlarePipeline.get());
+        encoder->setCullMode(MTL::CullModeNone);
+        // No need to bind bloomResultRT as input - hardware blending handles compositing
+        encoder->setFragmentTexture(r.depthStencilRT.get(), 1);
+        encoder->setFragmentBuffer(r.sunFlareDataBuffers[r.currentFrameInFlight].get(), 0, 0);
+        encoder->drawPrimitives(MTL::PrimitiveType::PrimitiveTypeTriangle, 0, 3, 1);
+        encoder->endEncoding();
+    }
+};
+
+// ============================================================================
 // Bloom passes: Physically-based bloom implementation
 // ============================================================================
 
@@ -2037,6 +2429,12 @@ auto Renderer_Metal::init(SDL_Window* window) -> void {
     graph.addPass(std::make_unique<SkyAtmospherePass>(this));
     // graph.addPass(std::make_unique<WaterPass>(this));
     graph.addPass(std::make_unique<ParticlePass>(this));
+
+    // Volumetric effects (fog and clouds)
+    graph.addPass(std::make_unique<VolumetricFogPass>(this));
+    graph.addPass(std::make_unique<VolumetricCloudPass>(this));
+
+    // Light scattering (god rays)
     graph.addPass(std::make_unique<LightScatteringPass>(this));
     graph.addPass(std::make_unique<WorldCanvasPass>(this));// 3D world-space quads (with depth)
     graph.addPass(std::make_unique<CanvasPass>(this));// 2D screen-space quads (no depth, for pure 2D games)
@@ -2046,6 +2444,9 @@ auto Renderer_Metal::init(SDL_Window* window) -> void {
     graph.addPass(std::make_unique<BloomDownsamplePass>(this));
     graph.addPass(std::make_unique<BloomUpsamplePass>(this));
     graph.addPass(std::make_unique<BloomCompositePass>(this));
+
+    // Sun flare / lens flare effect (after bloom)
+    graph.addPass(std::make_unique<SunFlarePass>(this));
 
     // DOF passes (Octopath Traveler style tilt-shift)
     // Uncomment these to enable DOF, and change PostProcessPass input to dofResultRT
@@ -2441,6 +2842,99 @@ auto Renderer_Metal::createResources() -> void {
     lightScatteringSettings.depthThreshold = 0.9999f;
     lightScatteringSettings.jitter = 0.5f;
 
+    // ========================================================================
+    // Volumetric Fog buffers and initialization
+    // ========================================================================
+    volumetricFogDataBuffers.resize(MAX_FRAMES_IN_FLIGHT);
+    for (auto& fogBuffer : volumetricFogDataBuffers) {
+        fogBuffer = NS::TransferPtr(device->newBuffer(sizeof(VolumetricFogData), MTL::ResourceStorageModeManaged));
+    }
+
+    // Initialize volumetric fog default settings
+    volumetricFogSettings.fogDensity = 0.02f;
+    volumetricFogSettings.fogHeightFalloff = 0.1f;
+    volumetricFogSettings.fogBaseHeight = 0.0f;
+    volumetricFogSettings.fogMaxHeight = 100.0f;
+    volumetricFogSettings.scatteringCoeff = 0.5f;
+    volumetricFogSettings.extinctionCoeff = 0.5f;
+    volumetricFogSettings.anisotropy = 0.6f;
+    volumetricFogSettings.ambientIntensity = 0.3f;
+    volumetricFogSettings.nearPlane = 0.1f;
+    volumetricFogSettings.farPlane = 500.0f;
+    volumetricFogSettings.noiseScale = 0.01f;
+    volumetricFogSettings.noiseIntensity = 0.5f;
+    volumetricFogSettings.windSpeed = 1.0f;
+    volumetricFogSettings.windDirection = glm::vec3(1.0f, 0.0f, 0.0f);
+    volumetricFogSettings.temporalBlend = 0.1f;
+
+    // ========================================================================
+    // Volumetric Cloud buffers and initialization
+    // ========================================================================
+    volumetricCloudDataBuffers.resize(MAX_FRAMES_IN_FLIGHT);
+    for (auto& cloudBuffer : volumetricCloudDataBuffers) {
+        cloudBuffer = NS::TransferPtr(device->newBuffer(sizeof(VolumetricCloudData), MTL::ResourceStorageModeManaged));
+    }
+
+    // Initialize volumetric cloud default settings
+    volumetricCloudSettings.cloudLayerBottom = 2000.0f;
+    volumetricCloudSettings.cloudLayerTop = 12000.0f;
+    volumetricCloudSettings.cloudLayerThickness = 2500.0f;
+    volumetricCloudSettings.cloudCoverage = 0.25f;
+    volumetricCloudSettings.cloudDensity = 0.3f;
+    volumetricCloudSettings.cloudType = 0.5f;
+    volumetricCloudSettings.erosionStrength = 0.3f;
+    volumetricCloudSettings.shapeNoiseScale = 1.0f;
+    volumetricCloudSettings.detailNoiseScale = 5.0f;
+    volumetricCloudSettings.ambientIntensity = 0.001f;
+    volumetricCloudSettings.silverLiningIntensity = 0.001f;
+    volumetricCloudSettings.silverLiningSpread = 2.0f;
+    volumetricCloudSettings.phaseG1 = 0.8f;
+    volumetricCloudSettings.phaseG2 = -0.3f;
+    volumetricCloudSettings.phaseBlend = 0.3f;
+    volumetricCloudSettings.powderStrength = 0.5f;
+    volumetricCloudSettings.windDirection = glm::vec3(1.0f, 0.0f, 0.0f);
+    volumetricCloudSettings.windSpeed = 10.0f;
+    volumetricCloudSettings.windOffset = glm::vec3(0.0f);
+    volumetricCloudSettings.primarySteps = 64;
+    volumetricCloudSettings.lightSteps = 6;
+    volumetricCloudSettings.temporalBlend = 0.05f;
+
+    // ========================================================================
+    // Sun Flare buffers and initialization
+    // ========================================================================
+    sunFlareDataBuffers.resize(MAX_FRAMES_IN_FLIGHT);
+    for (auto& flareBuffer : sunFlareDataBuffers) {
+        flareBuffer = NS::TransferPtr(device->newBuffer(sizeof(SunFlareData), MTL::ResourceStorageModeManaged));
+    }
+
+    // Initialize sun flare default settings
+    sunFlareSettings.sunIntensity = 1.0f;
+    sunFlareSettings.visibility = 1.0f;
+    sunFlareSettings.fadeEdge = 0.8f;
+    sunFlareSettings.sunColor = glm::vec3(1.0f, 0.95f, 0.8f);
+    sunFlareSettings.glowIntensity = 0.5f;
+    sunFlareSettings.glowFalloff = 8.0f;
+    sunFlareSettings.glowSize = 0.15f;
+    sunFlareSettings.haloIntensity = 0.08f;
+    sunFlareSettings.haloRadius = 0.09f;
+    sunFlareSettings.haloWidth = 0.001f;
+    sunFlareSettings.haloFalloff = 0.01f;
+    sunFlareSettings.ghostCount = 10;
+    sunFlareSettings.ghostSpacing = 0.3f;
+    sunFlareSettings.ghostIntensity = 0.02f;
+    sunFlareSettings.ghostSize = 0.3f;
+    sunFlareSettings.ghostChromaticOffset = 0.015f;
+    sunFlareSettings.ghostFalloff = 2.5f;
+    sunFlareSettings.streakIntensity = 0.2f;
+    sunFlareSettings.streakLength = 0.3f;
+    sunFlareSettings.streakFalloff = 50.0f;
+    sunFlareSettings.starburstIntensity = 0.15f;
+    sunFlareSettings.starburstSize = 0.4f;
+    sunFlareSettings.starburstPoints = 6;
+    sunFlareSettings.starburstRotation = 0.0f;
+    sunFlareSettings.dirtIntensity = 0.0f;
+    sunFlareSettings.dirtScale = 10.0f;
+
     // Create atmosphere data buffer with default Earth-like settings
     atmosphereDataBuffer = NS::TransferPtr(device->newBuffer(sizeof(AtmosphereData), MTL::ResourceStorageModeManaged));
     AtmosphereData* atmosphereData = reinterpret_cast<AtmosphereData*>(atmosphereDataBuffer->contents());
@@ -2560,6 +3054,8 @@ auto Renderer_Metal::createResources() -> void {
     colorTextureDesc->setSampleCount(1);
     colorTextureDesc->setUsage(MTL::TextureUsageRenderTarget | MTL::TextureUsageShaderRead);
     colorRT = NS::TransferPtr(device->newTexture(colorTextureDesc));
+    // Create tempColorRT for ping-pong post-processing (same format as colorRT)
+    tempColorRT = NS::TransferPtr(device->newTexture(colorTextureDesc));
     colorTextureDesc->release();
 
     MTL::TextureDescriptor* normalTextureDesc = MTL::TextureDescriptor::alloc()->init();
@@ -2799,6 +3295,235 @@ auto Renderer_Metal::createResources() -> void {
         vertexMain->release();
         fragmentMain->release();
         pipelineDesc->release();
+    }
+
+    // ========================================================================
+    // Volumetric Fog pipeline (simple height fog)
+    // ========================================================================
+    {
+        auto shaderSrc = readFile("assets/shaders/3d_volumetric_fog.metal");
+        auto code = NS::String::string(shaderSrc.data(), NS::StringEncoding::UTF8StringEncoding);
+        NS::Error* error = nullptr;
+        MTL::Library* library = device->newLibrary(code, nullptr, &error);
+        if (!library) {
+            fmt::print(
+                "Warning: Could not compile volumetric fog shader: {}\n",
+                error ? error->localizedDescription()->utf8String() : "unknown error"
+            );
+        } else {
+            auto vertexMain =
+                library->newFunction(NS::String::string("volumetricFogVertex", NS::StringEncoding::UTF8StringEncoding));
+            auto fragmentMain =
+                library->newFunction(NS::String::string("simpleFogFragment", NS::StringEncoding::UTF8StringEncoding));
+
+            if (vertexMain && fragmentMain) {
+                auto pipelineDesc = MTL::RenderPipelineDescriptor::alloc()->init();
+                pipelineDesc->setVertexFunction(vertexMain);
+                pipelineDesc->setFragmentFunction(fragmentMain);
+                pipelineDesc->colorAttachments()->object(0)->setPixelFormat(MTL::PixelFormatRGBA16Float);
+
+                fogSimplePipeline = NS::TransferPtr(device->newRenderPipelineState(pipelineDesc, &error));
+                if (!fogSimplePipeline) {
+                    fmt::print(
+                        "Warning: Could not create fog simple pipeline: {}\n",
+                        error ? error->localizedDescription()->utf8String() : "unknown error"
+                    );
+                }
+
+                pipelineDesc->release();
+                vertexMain->release();
+                fragmentMain->release();
+            }
+            library->release();
+        }
+        code->release();
+    }
+
+    // ========================================================================
+    // Volumetric Cloud render targets (quarter resolution for performance)
+    // ========================================================================
+    {
+        Uint32 cloudWidth = swapchain->drawableSize().width / 4;
+        Uint32 cloudHeight = swapchain->drawableSize().height / 4;
+
+        // Quarter-res cloud render target
+        MTL::TextureDescriptor* cloudRTDesc = MTL::TextureDescriptor::alloc()->init();
+        cloudRTDesc->setTextureType(MTL::TextureType2D);
+        cloudRTDesc->setPixelFormat(MTL::PixelFormatRGBA16Float);
+        cloudRTDesc->setWidth(cloudWidth);
+        cloudRTDesc->setHeight(cloudHeight);
+        cloudRTDesc->setUsage(MTL::TextureUsageRenderTarget | MTL::TextureUsageShaderRead);
+        cloudRT = NS::TransferPtr(device->newTexture(cloudRTDesc));
+        cloudRTDesc->release();
+
+        // History buffer for temporal reprojection (same size as cloudRT)
+        MTL::TextureDescriptor* cloudHistoryDesc = MTL::TextureDescriptor::alloc()->init();
+        cloudHistoryDesc->setTextureType(MTL::TextureType2D);
+        cloudHistoryDesc->setPixelFormat(MTL::PixelFormatRGBA16Float);
+        cloudHistoryDesc->setWidth(cloudWidth);
+        cloudHistoryDesc->setHeight(cloudHeight);
+        cloudHistoryDesc->setUsage(MTL::TextureUsageRenderTarget | MTL::TextureUsageShaderRead);
+        cloudHistoryRT = NS::TransferPtr(device->newTexture(cloudHistoryDesc));
+        cloudHistoryDesc->release();
+    }
+
+    // ========================================================================
+    // Volumetric Cloud pipelines
+    // ========================================================================
+    {
+        auto shaderSrc = readFile("assets/shaders/3d_volumetric_clouds.metal");
+        auto code = NS::String::string(shaderSrc.data(), NS::StringEncoding::UTF8StringEncoding);
+        NS::Error* error = nullptr;
+        MTL::Library* library = device->newLibrary(code, nullptr, &error);
+        if (!library) {
+            fmt::print(
+                "Warning: Could not compile volumetric clouds shader: {}\n",
+                error ? error->localizedDescription()->utf8String() : "unknown error"
+            );
+        } else {
+            // Low-res cloud rendering pipeline (quarter resolution)
+            auto vertexMain =
+                library->newFunction(NS::String::string("cloudVertex", NS::StringEncoding::UTF8StringEncoding));
+            auto fragmentLowRes =
+                library->newFunction(NS::String::string("cloudFragmentLowRes", NS::StringEncoding::UTF8StringEncoding));
+
+            if (vertexMain && fragmentLowRes) {
+                auto pipelineDesc = MTL::RenderPipelineDescriptor::alloc()->init();
+                pipelineDesc->setVertexFunction(vertexMain);
+                pipelineDesc->setFragmentFunction(fragmentLowRes);
+                pipelineDesc->colorAttachments()->object(0)->setPixelFormat(MTL::PixelFormatRGBA16Float);
+
+                cloudLowResPipeline = NS::TransferPtr(device->newRenderPipelineState(pipelineDesc, &error));
+                if (!cloudLowResPipeline) {
+                    fmt::print(
+                        "Warning: Could not create cloud low-res pipeline: {}\n",
+                        error ? error->localizedDescription()->utf8String() : "unknown error"
+                    );
+                }
+                pipelineDesc->release();
+                fragmentLowRes->release();
+            }
+
+            // Temporal resolve pipeline
+            auto fragmentTemporal =
+                library->newFunction(NS::String::string("cloudTemporalResolve", NS::StringEncoding::UTF8StringEncoding)
+                );
+
+            if (vertexMain && fragmentTemporal) {
+                auto pipelineDesc = MTL::RenderPipelineDescriptor::alloc()->init();
+                pipelineDesc->setVertexFunction(vertexMain);
+                pipelineDesc->setFragmentFunction(fragmentTemporal);
+                pipelineDesc->colorAttachments()->object(0)->setPixelFormat(MTL::PixelFormatRGBA16Float);
+
+                cloudTemporalResolvePipeline = NS::TransferPtr(device->newRenderPipelineState(pipelineDesc, &error));
+                if (!cloudTemporalResolvePipeline) {
+                    fmt::print(
+                        "Warning: Could not create cloud temporal resolve pipeline: {}\n",
+                        error ? error->localizedDescription()->utf8String() : "unknown error"
+                    );
+                }
+                pipelineDesc->release();
+                fragmentTemporal->release();
+            }
+
+            // Upscale and composite pipeline
+            auto fragmentComposite =
+                library->newFunction(NS::String::string("cloudUpscaleComposite", NS::StringEncoding::UTF8StringEncoding)
+                );
+
+            if (vertexMain && fragmentComposite) {
+                auto pipelineDesc = MTL::RenderPipelineDescriptor::alloc()->init();
+                pipelineDesc->setVertexFunction(vertexMain);
+                pipelineDesc->setFragmentFunction(fragmentComposite);
+                pipelineDesc->colorAttachments()->object(0)->setPixelFormat(MTL::PixelFormatRGBA16Float);
+
+                cloudCompositePipeline = NS::TransferPtr(device->newRenderPipelineState(pipelineDesc, &error));
+                if (!cloudCompositePipeline) {
+                    fmt::print(
+                        "Warning: Could not create cloud composite pipeline: {}\n",
+                        error ? error->localizedDescription()->utf8String() : "unknown error"
+                    );
+                }
+                pipelineDesc->release();
+                fragmentComposite->release();
+            }
+
+            // Full-res cloud pipeline (fallback/debug)
+            auto fragmentFull =
+                library->newFunction(NS::String::string("cloudFragment", NS::StringEncoding::UTF8StringEncoding));
+
+            if (vertexMain && fragmentFull) {
+                auto pipelineDesc = MTL::RenderPipelineDescriptor::alloc()->init();
+                pipelineDesc->setVertexFunction(vertexMain);
+                pipelineDesc->setFragmentFunction(fragmentFull);
+                pipelineDesc->colorAttachments()->object(0)->setPixelFormat(MTL::PixelFormatRGBA16Float);
+
+                cloudRenderPipeline = NS::TransferPtr(device->newRenderPipelineState(pipelineDesc, &error));
+                if (!cloudRenderPipeline) {
+                    fmt::print(
+                        "Warning: Could not create cloud render pipeline: {}\n",
+                        error ? error->localizedDescription()->utf8String() : "unknown error"
+                    );
+                }
+                pipelineDesc->release();
+                fragmentFull->release();
+            }
+
+            if (vertexMain) vertexMain->release();
+            library->release();
+        }
+        code->release();
+    }
+
+    // ========================================================================
+    // Sun Flare pipeline
+    // ========================================================================
+    {
+        auto shaderSrc = readFile("assets/shaders/3d_sun_flare.metal");
+        auto code = NS::String::string(shaderSrc.data(), NS::StringEncoding::UTF8StringEncoding);
+        NS::Error* error = nullptr;
+        MTL::Library* library = device->newLibrary(code, nullptr, &error);
+        if (!library) {
+            fmt::print(
+                "Warning: Could not compile sun flare shader: {}\n",
+                error ? error->localizedDescription()->utf8String() : "unknown error"
+            );
+        } else {
+            auto vertexMain =
+                library->newFunction(NS::String::string("sunFlareVertex", NS::StringEncoding::UTF8StringEncoding));
+            auto fragmentMain =
+                library->newFunction(NS::String::string("sunFlareFragment", NS::StringEncoding::UTF8StringEncoding));
+
+            if (vertexMain && fragmentMain) {
+                auto pipelineDesc = MTL::RenderPipelineDescriptor::alloc()->init();
+                pipelineDesc->setVertexFunction(vertexMain);
+                pipelineDesc->setFragmentFunction(fragmentMain);
+                auto colorAttach = pipelineDesc->colorAttachments()->object(0);
+                colorAttach->setPixelFormat(MTL::PixelFormatRGBA16Float);
+                // Additive blending: output = src + dst
+                colorAttach->setBlendingEnabled(true);
+                colorAttach->setSourceRGBBlendFactor(MTL::BlendFactorOne);
+                colorAttach->setDestinationRGBBlendFactor(MTL::BlendFactorOne);
+                colorAttach->setRgbBlendOperation(MTL::BlendOperationAdd);
+                colorAttach->setSourceAlphaBlendFactor(MTL::BlendFactorOne);
+                colorAttach->setDestinationAlphaBlendFactor(MTL::BlendFactorZero);
+                colorAttach->setAlphaBlendOperation(MTL::BlendOperationAdd);
+
+                sunFlarePipeline = NS::TransferPtr(device->newRenderPipelineState(pipelineDesc, &error));
+                if (!sunFlarePipeline) {
+                    fmt::print(
+                        "Warning: Could not create sun flare pipeline: {}\n",
+                        error ? error->localizedDescription()->utf8String() : "unknown error"
+                    );
+                }
+
+                pipelineDesc->release();
+                vertexMain->release();
+                fragmentMain->release();
+            }
+            library->release();
+        }
+        code->release();
     }
 
     // ========================================================================
@@ -4075,6 +4800,113 @@ auto Renderer_Metal::draw(std::shared_ptr<Scene> scene, Camera& camera) -> void 
             }
             ImGui::TreePop();
         }
+
+        if (ImGui::TreeNode("Height Fog")) {
+            ImGui::Separator();
+            ImGui::Checkbox("Enabled", &volumetricFogEnabled);
+
+            if (volumetricFogEnabled) {
+                ImGui::Separator();
+                ImGui::Text("Fog Parameters");
+                ImGui::DragFloat("Density", &volumetricFogSettings.fogDensity, 0.001f, 0.0f, 0.5f);
+                ImGui::DragFloat("Height Falloff", &volumetricFogSettings.fogHeightFalloff, 0.01f, 0.001f, 1.0f);
+                ImGui::DragFloat("Base Height", &volumetricFogSettings.fogBaseHeight, 1.0f, -100.0f, 100.0f);
+                ImGui::DragFloat("Max Height", &volumetricFogSettings.fogMaxHeight, 10.0f, 0.0f, 500.0f);
+
+                ImGui::Separator();
+                ImGui::Text("Scattering");
+                ImGui::DragFloat("Anisotropy", &volumetricFogSettings.anisotropy, 0.01f, -0.99f, 0.99f);
+                ImGui::DragFloat("Ambient Intensity", &volumetricFogSettings.ambientIntensity, 0.01f, 0.0f, 2.0f);
+
+                if (ImGui::Button("Reset to Defaults")) {
+                    volumetricFogSettings.fogDensity = 0.02f;
+                    volumetricFogSettings.fogHeightFalloff = 0.1f;
+                    volumetricFogSettings.fogBaseHeight = 0.0f;
+                    volumetricFogSettings.fogMaxHeight = 100.0f;
+                    volumetricFogSettings.anisotropy = 0.6f;
+                    volumetricFogSettings.ambientIntensity = 0.3f;
+                }
+            }
+            ImGui::TreePop();
+        }
+
+        if (ImGui::TreeNode("Volumetric Clouds")) {
+            ImGui::Separator();
+            ImGui::Checkbox("Enabled", &volumetricCloudsEnabled);
+
+            if (volumetricCloudsEnabled) {
+                ImGui::Separator();
+                ImGui::Text("Cloud Layer");
+                ImGui::DragFloat("Bottom (m)", &volumetricCloudSettings.cloudLayerBottom, 100.0f, 0.0f, 10000.0f);
+                ImGui::DragFloat("Top (m)", &volumetricCloudSettings.cloudLayerTop, 100.0f, 0.0f, 15000.0f);
+                ImGui::DragFloat("Coverage", &volumetricCloudSettings.cloudCoverage, 0.01f, 0.0f, 1.0f);
+                ImGui::DragFloat("Density", &volumetricCloudSettings.cloudDensity, 0.01f, 0.0f, 1.0f);
+                ImGui::DragFloat("Type (Stratus-Cumulus)", &volumetricCloudSettings.cloudType, 0.01f, 0.0f, 1.0f);
+
+                ImGui::Separator();
+                ImGui::Text("Lighting");
+                ImGui::DragFloat("Ambient", &volumetricCloudSettings.ambientIntensity, 0.01f, 0.0f, 1.0f);
+                ImGui::DragFloat("Silver Lining", &volumetricCloudSettings.silverLiningIntensity, 0.01f, 0.0f, 2.0f);
+            }
+            ImGui::TreePop();
+        }
+
+        if (ImGui::TreeNode("Sun Flare (Lens Flare)")) {
+            ImGui::Separator();
+            ImGui::Checkbox("Enabled", &sunFlareEnabled);
+
+            ImGui::DragFloat("Sun Intensity", &sunFlareSettings.sunIntensity, 0.1f, 0.0f, 100.0f);
+            ImGui::ColorEdit3("Sun Color", &sunFlareSettings.sunColor[0]);
+            ImGui::DragFloat("Fade Edge", &sunFlareSettings.fadeEdge, 0.01f, 0.0f, 1.0f);
+
+            ImGui::Separator();
+            ImGui::Text("Glow");
+            ImGui::DragFloat("Glow Intensity", &sunFlareSettings.glowIntensity, 0.01f, 0.0f, 2.0f);
+            ImGui::DragFloat("Glow Falloff", &sunFlareSettings.glowFalloff, 0.1f, 0.1f, 20.0f);
+            ImGui::DragFloat("Glow Size", &sunFlareSettings.glowSize, 0.01f, 0.0f, 2.0f);
+
+            ImGui::Separator();
+            ImGui::Text("Halo");
+            ImGui::DragFloat("Halo Intensity", &sunFlareSettings.haloIntensity, 0.01f, 0.0f, 1.0f);
+            ImGui::DragFloat("Halo Radius", &sunFlareSettings.haloRadius, 0.01f, 0.0f, 1.0f);
+            ImGui::DragFloat("Halo Width", &sunFlareSettings.haloWidth, 0.01f, 0.0f, 0.5f);
+            ImGui::DragFloat("Halo Falloff", &sunFlareSettings.haloFalloff, 0.01f, 0.0f, 1.0f);
+
+            ImGui::Separator();
+            ImGui::Text("Ghosts");
+            int count = static_cast<int>(sunFlareSettings.ghostCount);
+            if (ImGui::SliderInt("Ghost Count", &count, 0, 10)) {
+                sunFlareSettings.ghostCount = static_cast<Uint32>(count);
+            }
+            ImGui::DragFloat("Ghost Spacing", &sunFlareSettings.ghostSpacing, 0.01f, -1.0f, 1.0f);
+            ImGui::DragFloat("Ghost Intensity", &sunFlareSettings.ghostIntensity, 0.01f, 0.0f, 1.0f);
+            ImGui::DragFloat("Ghost Size", &sunFlareSettings.ghostSize, 0.01f, 0.0f, 0.5f);
+            ImGui::DragFloat("Ghost Chromatic", &sunFlareSettings.ghostChromaticOffset, 0.001f, 0.0f, 0.05f);
+            ImGui::DragFloat("Ghost Falloff", &sunFlareSettings.ghostFalloff, 0.1f, 0.1f, 10.0f);
+
+            ImGui::Separator();
+            ImGui::Text("Streak");
+            ImGui::DragFloat("Streak Intensity", &sunFlareSettings.streakIntensity, 0.01f, 0.0f, 1.0f);
+            ImGui::DragFloat("Streak Length", &sunFlareSettings.streakLength, 0.01f, 0.0f, 2.0f);
+            ImGui::DragFloat("Streak Falloff", &sunFlareSettings.streakFalloff, 0.1f, 0.1f, 100.0f);
+
+            ImGui::Separator();
+            ImGui::Text("Starburst");
+            ImGui::DragFloat("Starburst Intensity", &sunFlareSettings.starburstIntensity, 0.01f, 0.0f, 1.0f);
+            ImGui::DragFloat("Starburst Size", &sunFlareSettings.starburstSize, 0.01f, 0.0f, 2.0f);
+            int points = static_cast<int>(sunFlareSettings.starburstPoints);
+            if (ImGui::SliderInt("Starburst Points", &points, 0, 16)) {
+                sunFlareSettings.starburstPoints = static_cast<Uint32>(points);
+            }
+            ImGui::DragFloat("Starburst Rotation", &sunFlareSettings.starburstRotation, 0.01f, -3.14f, 3.14f);
+
+            ImGui::Separator();
+            ImGui::Text("Dirt");
+            ImGui::DragFloat("Dirt Intensity", &sunFlareSettings.dirtIntensity, 0.01f, 0.0f, 1.0f);
+            ImGui::DragFloat("Dirt Scale", &sunFlareSettings.dirtScale, 0.1f, 0.1f, 20.0f);
+
+            ImGui::TreePop();
+        }
     }
 
     // ==========================================================================
@@ -4535,9 +5367,11 @@ void Renderer_Metal::drawQuad3D(const glm::vec3& position, const glm::vec2& size
     drawQuad3D(transform, color);
 }
 
-void Renderer_Metal::drawQuad3D(const glm::vec3& position, const glm::vec2& size, TextureHandle texture, const glm::vec4& tintColor) {
-    glm::mat4 transform = glm::translate(glm::mat4(1.0f), position)
-                        * glm::scale(glm::mat4(1.0f), glm::vec3(size, 1.0f));
+void Renderer_Metal::drawQuad3D(
+    const glm::vec3& position, const glm::vec2& size, TextureHandle texture, const glm::vec4& tintColor
+) {
+    glm::mat4 transform =
+        glm::translate(glm::mat4(1.0f), position) * glm::scale(glm::mat4(1.0f), glm::vec3(size, 1.0f));
     drawQuad3D(transform, texture, batchQuadTexCoords, tintColor);
 }
 
@@ -4545,11 +5379,18 @@ void Renderer_Metal::drawQuad3D(const glm::mat4& transform, const glm::vec4& col
     drawQuad3D(transform, batch2DWhiteTextureHandle, batchQuadTexCoords, color, entityID);
 }
 
-void Renderer_Metal::drawQuad3D(const glm::mat4& transform, TextureHandle texture, const glm::vec2* texCoords, const glm::vec4& tintColor, int entityID) {
-    beginBatch3D();  // Auto-start batch
+void Renderer_Metal::drawQuad3D(
+    const glm::mat4& transform,
+    TextureHandle texture,
+    const glm::vec2* texCoords,
+    const glm::vec4& tintColor,
+    int entityID
+) {
+    beginBatch3D();// Auto-start batch
     if (batch3DIndices.size() >= BatchMaxIndices) return;
 
-    float textureIndex = findOrAddTextureSlot(batch3DTextureSlots, batch3DTextureSlotIndex, texture, batch2DWhiteTextureHandle);
+    float textureIndex =
+        findOrAddTextureSlot(batch3DTextureSlots, batch3DTextureSlotIndex, texture, batch2DWhiteTextureHandle);
     Uint32 vertexOffset = static_cast<Uint32>(batch3DVertices.size());
 
     for (int i = 0; i < 4; i++) {

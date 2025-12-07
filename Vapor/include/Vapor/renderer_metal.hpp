@@ -36,6 +36,9 @@ class MainRenderPass;
 class WaterPass;
 class ParticlePass;
 class LightScatteringPass;
+class VolumetricFogPass;
+class VolumetricCloudPass;
+class SunFlarePass;
 class PostProcessPass;
 class BloomBrightnessPass;
 class BloomDownsamplePass;
@@ -103,6 +106,9 @@ class Renderer_Metal final : public Renderer {// Must be public or factory funct
     friend class WaterPass;
     friend class ParticlePass;
     friend class LightScatteringPass;
+    friend class VolumetricFogPass;
+    friend class VolumetricCloudPass;
+    friend class SunFlarePass;
     friend class PostProcessPass;
     friend class BloomBrightnessPass;
     friend class BloomDownsamplePass;
@@ -172,9 +178,20 @@ public:
         int entityID = -1
     ) override;
     void drawQuad3D(const glm::vec3& position, const glm::vec2& size, const glm::vec4& color) override;
-    void drawQuad3D(const glm::vec3& position, const glm::vec2& size, TextureHandle texture, const glm::vec4& tintColor = glm::vec4(1.0f)) override;
+    void drawQuad3D(
+        const glm::vec3& position,
+        const glm::vec2& size,
+        TextureHandle texture,
+        const glm::vec4& tintColor = glm::vec4(1.0f)
+    ) override;
     void drawQuad3D(const glm::mat4& transform, const glm::vec4& color, int entityID = -1) override;
-    void drawQuad3D(const glm::mat4& transform, TextureHandle texture, const glm::vec2* texCoords, const glm::vec4& tintColor = glm::vec4(1.0f), int entityID = -1) override;
+    void drawQuad3D(
+        const glm::mat4& transform,
+        TextureHandle texture,
+        const glm::vec2* texCoords,
+        const glm::vec4& tintColor = glm::vec4(1.0f),
+        int entityID = -1
+    ) override;
 
     // Rotated quad
     void drawRotatedQuad2D(const glm::vec2& position, const glm::vec2& size, float rotation, const glm::vec4& color)
@@ -379,6 +396,36 @@ protected:
     bool lightScatteringEnabled = true;
     LightScatteringData lightScatteringSettings;
 
+    // Volumetric Fog resources
+    NS::SharedPtr<MTL::ComputePipelineState> fogFroxelInjectionPipeline;
+    NS::SharedPtr<MTL::ComputePipelineState> fogScatteringIntegrationPipeline;
+    NS::SharedPtr<MTL::RenderPipelineState> fogApplyPipeline;
+    NS::SharedPtr<MTL::RenderPipelineState> fogSimplePipeline;
+    std::vector<NS::SharedPtr<MTL::Buffer>> volumetricFogDataBuffers;
+    NS::SharedPtr<MTL::Texture> fogFroxelGrid;// 3D froxel data texture
+    NS::SharedPtr<MTL::Texture> fogIntegratedVolume;// 3D integrated scattering
+    bool volumetricFogEnabled = true;
+    VolumetricFogData volumetricFogSettings;
+
+    // Volumetric Cloud resources
+    NS::SharedPtr<MTL::RenderPipelineState> cloudRenderPipeline;
+    NS::SharedPtr<MTL::RenderPipelineState> cloudLowResPipeline;
+    NS::SharedPtr<MTL::RenderPipelineState> cloudTemporalResolvePipeline;
+    NS::SharedPtr<MTL::RenderPipelineState> cloudCompositePipeline;
+    std::vector<NS::SharedPtr<MTL::Buffer>> volumetricCloudDataBuffers;
+    NS::SharedPtr<MTL::Texture> cloudRT;// Cloud render target (quarter res)
+    NS::SharedPtr<MTL::Texture> cloudHistoryRT;// Previous frame clouds (for TAA)
+    bool volumetricCloudsEnabled = false;
+    VolumetricCloudData volumetricCloudSettings;
+
+    // Sun Flare resources
+    NS::SharedPtr<MTL::RenderPipelineState> sunFlarePipeline;
+    NS::SharedPtr<MTL::ComputePipelineState> sunOcclusionPipeline;
+    std::vector<NS::SharedPtr<MTL::Buffer>> sunFlareDataBuffers;
+    NS::SharedPtr<MTL::Buffer> sunVisibilityBuffer;// Single float for occlusion result
+    bool sunFlareEnabled = false;
+    SunFlareData sunFlareSettings;
+
     // IBL textures
     NS::SharedPtr<MTL::Texture> environmentCubemap;// Captured sky cubemap
     NS::SharedPtr<MTL::Texture> irradianceMap;// Diffuse irradiance cubemap
@@ -397,6 +444,7 @@ protected:
     // Render targets
     NS::SharedPtr<MTL::Texture> colorRT_MS;
     NS::SharedPtr<MTL::Texture> colorRT;
+    NS::SharedPtr<MTL::Texture> tempColorRT;// For ping-pong post-processing (fog, clouds)
     NS::SharedPtr<MTL::Texture> depthStencilRT_MS;
     NS::SharedPtr<MTL::Texture> depthStencilRT;
     NS::SharedPtr<MTL::Texture> normalRT_MS;
