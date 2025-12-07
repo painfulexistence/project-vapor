@@ -263,7 +263,15 @@ float heightFogDensity(float height, float fogBaseHeight, float fogFalloff) {
 
 // Exponential height fog
 float exponentialHeightFog(float distance, float height, float fogDensity, float fogHeightFalloff) {
-    float fogAmount = fogDensity * exp(-height * fogHeightFalloff) * (1.0 - exp(-distance * fogHeightFalloff)) / fogHeightFalloff;
+    // Prevent division by zero
+    float falloff = max(fogHeightFalloff, 0.0001);
+    // Height-based density attenuation
+    float heightFactor = exp(-max(0.0, height) * falloff);
+    // Distance-based fog accumulation
+    float distFactor = (1.0 - exp(-distance * falloff)) / falloff;
+    // Combined fog amount
+    float fogAmount = fogDensity * heightFactor * distFactor;
+    // Convert to opacity using Beer-Lambert
     return 1.0 - exp(-fogAmount);
 }
 

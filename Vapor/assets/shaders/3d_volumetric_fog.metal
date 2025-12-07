@@ -317,11 +317,16 @@ fragment float4 simpleFogFragment(
     float4 color = sceneColor.sample(linearSampler, in.uv);
     float depth = sceneDepth.sample(linearSampler, in.uv).r;
 
-    // Reconstruct world position
+    // Skip sky pixels (no fog at infinity)
+    if (depth >= 0.9999) {
+        return color;
+    }
+
+    // Reconstruct world position using invViewProj
     float2 ndc = in.uv * 2.0 - 1.0;
-    ndc.y = -ndc.y;
+    ndc.y = -ndc.y;  // Metal Y-flip
     float4 clipPos = float4(ndc, depth, 1.0);
-    float4 worldPos4 = camera.invView * camera.invProj * clipPos;
+    float4 worldPos4 = data.invViewProj * clipPos;
     float3 worldPos = worldPos4.xyz / worldPos4.w;
 
     // Calculate fog
@@ -332,15 +337,18 @@ fragment float4 simpleFogFragment(
     // Height-based exponential fog
     float fogAmount = exponentialHeightFog(distance, height, data.fogDensity, data.fogHeightFalloff);
 
-    // Phase function for sun
+    // Clamp fog amount to reasonable range
+    fogAmount = saturate(fogAmount);
+
+    // Phase function for sun (forward scattering effect)
     float cosTheta = dot(rayDir, data.sunDirection);
     float phase = phaseHenyeyGreenstein(cosTheta, data.anisotropy);
 
-    // Fog color (sun + ambient)
-    float3 fogColor = data.sunColor * data.sunIntensity * phase + float3(0.5, 0.6, 0.7) * data.ambientIntensity;
+    // Fog color (sun contribution + ambient)
+    float3 fogColor = data.sunColor * data.sunIntensity * phase * 0.1 + float3(0.5, 0.6, 0.7) * data.ambientIntensity;
 
     // Apply fog
-    float3 result = mix(color.rgb, fogColor, saturate(fogAmount));
+    float3 result = mix(color.rgb, fogColor, fogAmount);
 
     return float4(result, color.a);
 }
