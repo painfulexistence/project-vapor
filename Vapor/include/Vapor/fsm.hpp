@@ -8,38 +8,39 @@
 namespace Vapor {
 
 // ============================================================
-// FSM Components - Pure Data, No Callbacks
+// FSM Components - Pure Data
 // ============================================================
 
 /**
- * Core FSM state component - pure data.
- *
- * Systems can query justEntered/justExited to react to state changes
- * instead of using callbacks.
+ * Core FSM state data.
  */
 struct FSMStateComponent {
     uint32_t currentState = 0;
-    uint32_t previousState = 0;
-    float stateTime = 0.0f;       // Time spent in current state
-    float totalTime = 0.0f;       // Total FSM runtime
-    bool justEntered = false;     // True on the frame we entered current state
-    bool justExited = false;      // True on the frame we left previous state
-
-    // Check if we just transitioned this frame
-    bool hasTransitioned() const { return justEntered; }
-
-    // Check if in a specific state (by index)
-    bool isInState(uint32_t stateIndex) const { return currentState == stateIndex; }
+    float stateTime = 0.0f;
+    float totalTime = 0.0f;
 };
 
 /**
- * Transition rule - pure data definition.
+ * State change event - emitted by FSMSystem when state changes.
+ * Consumed by other systems to trigger effects.
+ *
+ * Pattern:
+ *   FSMSystem emits → EffectsSystem consumes → Request components
+ */
+struct FSMStateChangeEvent {
+    uint32_t fromState;
+    uint32_t toState;
+    float previousStateTime;  // How long we were in the previous state
+};
+
+/**
+ * Transition rule - event triggered.
  */
 struct FSMTransitionRule {
     uint32_t fromState;
     uint32_t toState;
-    std::string triggerEvent;     // Event name that triggers this transition
-    float minStateTime = 0.0f;    // Minimum time in state before transition allowed
+    std::string triggerEvent;
+    float minStateTime = 0.0f;
 
     FSMTransitionRule() = default;
     FSMTransitionRule(uint32_t from, uint32_t to, std::string event, float minTime = 0.0f)
@@ -60,8 +61,7 @@ struct FSMTimedTransition {
 };
 
 /**
- * FSM definition component - defines states and transitions.
- * Shared across entities with the same FSM structure.
+ * FSM definition - shared state machine structure.
  */
 struct FSMDefinition {
     std::vector<std::string> stateNames;
@@ -69,7 +69,6 @@ struct FSMDefinition {
     std::vector<FSMTimedTransition> timedTransitions;
     uint32_t initialState = 0;
 
-    // Helper to get state index by name
     uint32_t getStateIndex(const std::string& name) const {
         for (uint32_t i = 0; i < stateNames.size(); ++i) {
             if (stateNames[i] == name) return i;
@@ -77,91 +76,82 @@ struct FSMDefinition {
         return 0;
     }
 
-    // Helper to get state name by index
     const std::string& getStateName(uint32_t index) const {
         static const std::string empty;
         return index < stateNames.size() ? stateNames[index] : empty;
     }
-
-    // Check if state index is valid
-    bool isValidState(uint32_t index) const {
-        return index < stateNames.size();
-    }
 };
 
 /**
- * Event queue component - holds pending events.
+ * Event queue - input events pending processing.
  */
 struct FSMEventQueue {
     std::vector<std::string> events;
 
-    void push(const std::string& event) {
-        events.push_back(event);
-    }
-
-    void push(std::string&& event) {
-        events.push_back(std::move(event));
-    }
-
-    void clear() {
-        events.clear();
-    }
-
-    bool empty() const {
-        return events.empty();
-    }
-};
-
-/**
- * Optional: FSM variables for storing state-machine-scoped data.
- * Use typed components instead when possible for better ECS patterns.
- */
-struct FSMVariables {
-    std::unordered_map<std::string, float> floats;
-    std::unordered_map<std::string, int> ints;
-    std::unordered_map<std::string, bool> bools;
-
-    void setFloat(const std::string& name, float value) { floats[name] = value; }
-    void setInt(const std::string& name, int value) { ints[name] = value; }
-    void setBool(const std::string& name, bool value) { bools[name] = value; }
-
-    float getFloat(const std::string& name, float defaultVal = 0.0f) const {
-        auto it = floats.find(name);
-        return it != floats.end() ? it->second : defaultVal;
-    }
-
-    int getInt(const std::string& name, int defaultVal = 0) const {
-        auto it = ints.find(name);
-        return it != ints.end() ? it->second : defaultVal;
-    }
-
-    bool getBool(const std::string& name, bool defaultVal = false) const {
-        auto it = bools.find(name);
-        return it != bools.end() ? it->second : defaultVal;
-    }
+    void push(const std::string& event) { events.push_back(event); }
+    void push(std::string&& event) { events.push_back(std::move(event)); }
+    void clear() { events.clear(); }
+    bool empty() const { return events.empty(); }
 };
 
 // ============================================================
-// FSM Builder - Fluent API for building FSMDefinition
+// Common Request Components - Output from effect systems
 // ============================================================
 
 /**
- * Builder for creating FSMDefinition with a fluent API.
- *
- * Example:
- *     auto def = FSMDefinitionBuilder()
- *         .state("Idle")
- *         .state("Walk")
- *         .state("Run")
- *         .state("Attack", 0.5f)  // 0.5s duration, auto-transitions
- *         .transition("Idle", "Walk", "StartWalk")
- *         .transition("Walk", "Idle", "Stop")
- *         .transition("Walk", "Run", "Sprint")
- *         .transition("Run", "Walk", "StopSprint")
- *         .timedTransition("Attack", "Idle", 0.5f)
- *         .initialState("Idle")
- *         .build();
+ * Request to spawn particles.
+ * Consumed by ParticleSpawnSystem.
  */
+struct ParticleBurstRequest {
+    std::string configName;
+    uint32_t count = 10;
+    // Optional: offset from entity position
+    float offsetX = 0.0f;
+    float offsetY = 0.0f;
+    float offsetZ = 0.0f;
+};
+
+/**
+ * Request to trigger squash/stretch effect.
+ * Consumed by SquashInitSystem.
+ */
+struct SquashRequest {
+    float scaleX = 1.0f;
+    float scaleY = 1.0f;
+};
+
+/**
+ * Request to add camera trauma (screen shake).
+ * Consumed by CameraTraumaSystem.
+ */
+struct CameraTraumaRequest {
+    float amount = 0.5f;
+};
+
+/**
+ * Request to play a sound.
+ * Consumed by AudioSystem.
+ */
+struct SoundRequest {
+    std::string soundName;
+    float volume = 1.0f;
+    float pitch = 1.0f;
+};
+
+/**
+ * Request to play an animation.
+ * Consumed by AnimationSystem.
+ */
+struct AnimationRequest {
+    std::string animationName;
+    bool loop = false;
+    float speed = 1.0f;
+};
+
+// ============================================================
+// FSM Builder
+// ============================================================
+
 class FSMDefinitionBuilder {
 public:
     FSMDefinitionBuilder& state(const std::string& name) {
@@ -189,9 +179,7 @@ public:
         return *this;
     }
 
-    FSMDefinition build() {
-        return std::move(m_definition);
-    }
+    FSMDefinition build() { return std::move(m_definition); }
 
 private:
     FSMDefinition m_definition;
@@ -206,27 +194,7 @@ private:
 };
 
 // ============================================================
-// State Name Constants - Define your states as constants
-// ============================================================
-
-/**
- * Example of how to define state constants for type safety:
- *
- *     namespace CharacterStates {
- *         constexpr uint32_t Idle = 0;
- *         constexpr uint32_t Walk = 1;
- *         constexpr uint32_t Run = 2;
- *         constexpr uint32_t Attack = 3;
- *     }
- *
- *     // In system:
- *     if (fsm.currentState == CharacterStates::Idle && fsm.justEntered) {
- *         // Play idle animation
- *     }
- */
-
-// ============================================================
-// Common FSM Events - String constants for common events
+// Common Events
 // ============================================================
 
 namespace FSMEvents {
@@ -237,7 +205,6 @@ namespace FSMEvents {
     constexpr const char* Attack = "Attack";
     constexpr const char* Hurt = "Hurt";
     constexpr const char* Die = "Die";
-    constexpr const char* Respawn = "Respawn";
 }
 
 } // namespace Vapor
