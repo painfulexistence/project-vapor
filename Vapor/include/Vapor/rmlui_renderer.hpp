@@ -88,10 +88,10 @@ namespace Vapor {
         Rml::CompiledGeometryHandle m_nextGeometryHandle = 1;
         Rml::TextureHandle m_nextTextureHandle = 1;
 
-        int m_viewportWidth = 0;  // Logical (window) size for RmlUI coordinates
-        int m_viewportHeight = 0;
-        int m_framebufferWidth = 0;  // Actual framebuffer size for viewport/scissor
-        int m_framebufferHeight = 0;
+        int m_logicalWidth = 0;   // Logical (window) size for RmlUI coordinates / projection
+        int m_logicalHeight = 0;
+        float m_scaleX = 1.0f;    // Framebuffer / logical scale for HiDPI
+        float m_scaleY = 1.0f;
 
         struct ScissorRegion {
             bool enabled = false;

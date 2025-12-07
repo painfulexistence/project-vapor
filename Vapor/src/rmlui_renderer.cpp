@@ -47,12 +47,14 @@ namespace Vapor {
         }
 
         // width/height are logical (window) size for RmlUI coordinate system
-        m_viewportWidth = width;
-        m_viewportHeight = height;
+        m_logicalWidth = width;
+        m_logicalHeight = height;
 
-        // Get actual framebuffer size from render target for viewport/scissor
-        m_framebufferWidth = static_cast<int>(renderTarget->width());
-        m_framebufferHeight = static_cast<int>(renderTarget->height());
+        // Get framebuffer size and calculate HiDPI scale
+        int fbWidth = static_cast<int>(renderTarget->width());
+        int fbHeight = static_cast<int>(renderTarget->height());
+        m_scaleX = width > 0 ? static_cast<float>(fbWidth) / width : 1.0f;
+        m_scaleY = height > 0 ? static_cast<float>(fbHeight) / height : 1.0f;
 
         // Don't take ownership of commandBuffer - it's managed by the renderer
         // Just store raw pointer for this frame
@@ -78,8 +80,8 @@ namespace Vapor {
         MTL::Viewport viewport;
         viewport.originX = 0.0;
         viewport.originY = 0.0;
-        viewport.width = static_cast<double>(m_framebufferWidth);
-        viewport.height = static_cast<double>(m_framebufferHeight);
+        viewport.width = static_cast<double>(fbWidth);
+        viewport.height = static_cast<double>(fbHeight);
         viewport.znear = 0.0;
         viewport.zfar = 1.0;
         m_currentEncoder->setViewport(viewport);
@@ -88,8 +90,8 @@ namespace Vapor {
         MTL::ScissorRect scissorRect;
         scissorRect.x = 0;
         scissorRect.y = 0;
-        scissorRect.width = static_cast<NS::UInteger>(m_framebufferWidth);
-        scissorRect.height = static_cast<NS::UInteger>(m_framebufferHeight);
+        scissorRect.width = static_cast<NS::UInteger>(fbWidth);
+        scissorRect.height = static_cast<NS::UInteger>(fbHeight);
         m_currentEncoder->setScissorRect(scissorRect);
     }
 
@@ -173,9 +175,9 @@ namespace Vapor {
         // Calculate projection matrix (orthographic, top-left origin)
         // RmlUI uses top-left origin (0,0 at top-left), Metal uses bottom-left origin for NDC
         // So we need to flip Y: ortho(left, right, bottom, top) -> ortho(0, width, height, 0)
-        glm::mat4 projection = glm::ortho(0.0f, (float)m_viewportWidth, (float)m_viewportHeight, 0.0f, -1.0f, 1.0f);
+        glm::mat4 projection = glm::ortho(0.0f, (float)m_logicalWidth, (float)m_logicalHeight, 0.0f, -1.0f, 1.0f);
         fmt::print(
-            "RmlUiRenderer::RenderGeometry: Projection matrix: width={}, height={}\n", m_viewportWidth, m_viewportHeight
+            "RmlUiRenderer::RenderGeometry: Projection matrix: width={}, height={}\n", m_logicalWidth, m_logicalHeight
         );
 
         // Apply translation to transform
@@ -214,17 +216,14 @@ namespace Vapor {
             }
         }
 
-        // Setup scissor test
+        // Setup scissor test (scale from logical to framebuffer coordinates)
         if (m_scissor.enabled) {
-            // Scale from logical (RmlUI) coordinates to framebuffer coordinates
-            float scaleX = m_viewportWidth > 0 ? static_cast<float>(m_framebufferWidth) / m_viewportWidth : 1.0f;
-            float scaleY = m_viewportHeight > 0 ? static_cast<float>(m_framebufferHeight) / m_viewportHeight : 1.0f;
-
+            int fbHeight = static_cast<int>(m_logicalHeight * m_scaleY);
             MTL::ScissorRect scissorRect;
-            scissorRect.x = static_cast<NS::UInteger>(m_scissor.x * scaleX);
-            scissorRect.y = static_cast<NS::UInteger>(m_framebufferHeight - (m_scissor.y + m_scissor.height) * scaleY);// Flip Y
-            scissorRect.width = static_cast<NS::UInteger>(m_scissor.width * scaleX);
-            scissorRect.height = static_cast<NS::UInteger>(m_scissor.height * scaleY);
+            scissorRect.x = static_cast<NS::UInteger>(m_scissor.x * m_scaleX);
+            scissorRect.y = static_cast<NS::UInteger>(fbHeight - (m_scissor.y + m_scissor.height) * m_scaleY);// Flip Y
+            scissorRect.width = static_cast<NS::UInteger>(m_scissor.width * m_scaleX);
+            scissorRect.height = static_cast<NS::UInteger>(m_scissor.height * m_scaleY);
             m_currentEncoder->setScissorRect(scissorRect);
         }
 
