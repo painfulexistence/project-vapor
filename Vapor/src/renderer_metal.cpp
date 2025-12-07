@@ -5203,7 +5203,7 @@ void Renderer_Metal::drawText2D(
     const glm::vec4& color
 ) {
     Font* font = m_fontManager.getFont(fontHandle);
-    if (!font || !font->textureHandle.rid) return;
+    if (!font || font->textureHandle.rid == UINT32_MAX) return;
 
     float cursorX = position.x;
     float cursorY = position.y;
@@ -5243,7 +5243,7 @@ void Renderer_Metal::drawText3D(
     const glm::vec4& color
 ) {
     Font* font = m_fontManager.getFont(fontHandle);
-    if (!font || !font->textureHandle.rid) return;
+    if (!font || font->textureHandle.rid == UINT32_MAX) return;
 
     // For 3D text, we draw at the world position
     // The text will be rendered as billboards facing the camera
