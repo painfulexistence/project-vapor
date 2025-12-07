@@ -203,7 +203,7 @@ private:
         queue.actions = actions;// Copy
         queue.debugName = tag;
         queue.currentIndex = 0;
-        queue.onComplete = nullptr;
+        queue.completionTag = 0; // FSM tracks completion via FSMActionsRunningTag
 
         // Reset action states
         for (auto& action : queue.actions) {

@@ -9,7 +9,6 @@
 #include "fsm_components.hpp"
 #include "fsm_system.hpp"
 #include <entt/entt.hpp>
-#include <functional>
 #include <glm/glm.hpp>
 #include <string>
 

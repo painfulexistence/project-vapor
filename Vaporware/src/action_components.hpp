@@ -2,7 +2,6 @@
 
 #include <cmath>
 #include <entt/entt.hpp>
-#include <functional>
 #include <glm/glm.hpp>
 #include <glm/gtc/quaternion.hpp>
 #include <string>
@@ -95,8 +94,6 @@ enum class ActionType : uint8_t {
 
     // Control
     Wait,// Wait for duration
-    Callback,// Execute function
-    Parallel,// Execute children in parallel
 
     // Entity
     SetActive,// Show/hide entity
@@ -154,11 +151,8 @@ struct ActionComponent {
     // For PlayAnimation / debug
     std::string name;
 
-    // For Callback
-    std::function<void()> callback;
-
-    // For Parallel
-    std::vector<ActionComponent> children;
+    // Completion notification (0 = no event emitted)
+    uint32_t completionTag = 0;
 
     // Helper: get progress (0-1)
     float getProgress() const {
@@ -175,11 +169,31 @@ struct ActionComponent {
     }
 };
 
+// Event emitted when action/queue completes (1:N broadcast)
+struct ActionCompleteEvent {
+    uint32_t tag = 0;
+};
+
+// Parallel action group - tracks multiple simultaneous actions
+struct ActionGroupComponent {
+    uint32_t groupId = 0;
+    size_t totalActions = 0;
+    size_t completedActions = 0;
+    uint32_t completionTag = 0; // Emitted when all complete
+
+    bool isComplete() const { return completedActions >= totalActions; }
+};
+
+// Tag linking an action to a group
+struct ActionGroupMemberTag {
+    entt::entity groupEntity = entt::null;
+};
+
 // Queue of actions (sequential execution)
 struct ActionQueueComponent {
     std::vector<ActionComponent> actions;
     size_t currentIndex = 0;
-    std::function<void()> onComplete;
+    uint32_t completionTag = 0; // 0 = no event emitted
     std::string debugName;
 
     bool isComplete() const {
@@ -284,22 +298,35 @@ namespace Action {
         return a;
     }
 
-    inline struct ActionComponent call(std::function<void()> fn) {
-        struct ActionComponent a;
-        a.type = ActionType::Callback;
-        a.callback = std::move(fn);
+    // Notify on completion (emits ActionCompleteEvent with this tag)
+    inline struct ActionComponent& onComplete(struct ActionComponent& a, uint32_t tag) {
+        a.completionTag = tag;
         return a;
     }
 
-    inline struct ActionComponent parallel(std::vector<struct ActionComponent> children) {
-        struct ActionComponent a;
-        a.type = ActionType::Parallel;
-        a.children = std::move(children);
-        // Duration is max of children
-        for (const auto& child : a.children) {
-            a.duration = std::max(a.duration, child.duration);
+    // Create parallel action group - returns the group entity
+    // Usage: auto group = Action::parallel(reg, { action1, action2 }, completionTag);
+    inline entt::entity parallel(
+        entt::registry& reg,
+        std::vector<ActionComponent> actions,
+        uint32_t completionTag = 0
+    ) {
+        static uint32_t nextGroupId = 1;
+
+        auto groupEntity = reg.create();
+        auto& group = reg.emplace<ActionGroupComponent>(groupEntity);
+        group.groupId = nextGroupId++;
+        group.totalActions = actions.size();
+        group.completedActions = 0;
+        group.completionTag = completionTag;
+
+        for (auto& action : actions) {
+            auto actionEntity = reg.create();
+            reg.emplace<ActionComponent>(actionEntity, std::move(action));
+            reg.emplace<ActionGroupMemberTag>(actionEntity, groupEntity);
         }
-        return a;
+
+        return groupEntity;
     }
 
     // === Entity ===

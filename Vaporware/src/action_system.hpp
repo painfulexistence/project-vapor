@@ -10,8 +10,9 @@
 // Unified system for all time-based actions:
 // - Single actions (ActionComponent)
 // - Queued actions (ActionQueueComponent)
+// - Parallel groups (ActionGroupComponent)
 //
-// Handles: tweens, waits, callbacks, parallel execution
+// Completion notification via ActionCompleteEvent (no callbacks)
 // ============================================================
 
 class ActionSystem {
@@ -19,6 +20,7 @@ public:
     static void update(entt::registry& reg, float dt) {
         updateSingleActions(reg, dt);
         updateActionQueues(reg, dt);
+        updateActionGroups(reg);
     }
 
 private:
@@ -49,8 +51,24 @@ private:
             }
         }
 
-        // Remove completed actions
+        // Handle completed actions
         for (auto entity : completed) {
+            auto& action = reg.get<ActionComponent>(entity);
+
+            // Emit completion event if tagged
+            if (action.completionTag != 0) {
+                emitCompleteEvent(reg, action.completionTag);
+            }
+
+            // Notify group if member
+            if (auto* member = reg.try_get<ActionGroupMemberTag>(entity)) {
+                if (reg.valid(member->groupEntity)) {
+                    if (auto* group = reg.try_get<ActionGroupComponent>(member->groupEntity)) {
+                        group->completedActions++;
+                    }
+                }
+            }
+
             reg.remove<ActionComponent>(entity);
         }
     }
@@ -71,6 +89,10 @@ private:
                 bool actionDone = executeAction(reg, entity, *current, dt);
 
                 if (actionDone) {
+                    // Emit individual action completion event if tagged
+                    if (current->completionTag != 0) {
+                        emitCompleteEvent(reg, current->completionTag);
+                    }
                     queue.advance();
                     // Don't break - try to execute next instant action in same frame
                 } else {
@@ -79,8 +101,9 @@ private:
             }
 
             if (queue.isComplete()) {
-                if (queue.onComplete) {
-                    queue.onComplete();
+                // Emit queue completion event if tagged
+                if (queue.completionTag != 0) {
+                    emitCompleteEvent(reg, queue.completionTag);
                 }
                 completed.push_back(entity);
             }
@@ -90,6 +113,35 @@ private:
         for (auto entity : completed) {
             reg.remove<ActionQueueComponent>(entity);
         }
+    }
+
+    // ========== Action Groups ==========
+
+    static void updateActionGroups(entt::registry& reg) {
+        auto view = reg.view<ActionGroupComponent>();
+        std::vector<entt::entity> completed;
+
+        for (auto entity : view) {
+            auto& group = view.get<ActionGroupComponent>(entity);
+
+            if (group.isComplete()) {
+                if (group.completionTag != 0) {
+                    emitCompleteEvent(reg, group.completionTag);
+                }
+                completed.push_back(entity);
+            }
+        }
+
+        for (auto entity : completed) {
+            reg.destroy(entity);
+        }
+    }
+
+    // ========== Emit Completion Event ==========
+
+    static void emitCompleteEvent(entt::registry& reg, uint32_t tag) {
+        auto eventEntity = reg.create();
+        reg.emplace<ActionCompleteEvent>(eventEntity, tag);
     }
 
     // ========== Execute Single Action ==========
@@ -165,14 +217,6 @@ private:
             // Could capture from material/sprite component if available
             break;
         }
-        case ActionType::Parallel: {
-            // Initialize all children
-            for (auto& child : action.children) {
-                entt::entity childTarget = (child.target != entt::null) ? child.target : target;
-                initializeAction(reg, childTarget, child);
-            }
-            break;
-        }
         default:
             break;
         }
@@ -182,12 +226,6 @@ private:
 
     static void applyInstantAction(entt::registry& reg, entt::entity target, ActionComponent& action) {
         switch (action.type) {
-        case ActionType::Callback: {
-            if (action.callback) {
-                action.callback();
-            }
-            break;
-        }
         case ActionType::SetActive: {
             if (action.activeValue) {
                 reg.emplace_or_replace<Vapor::Active>(target);
@@ -242,17 +280,6 @@ private:
             // Just wait, nothing to apply
             break;
         }
-        case ActionType::Parallel: {
-            // Update all children
-            for (auto& child : action.children) {
-                if (!child.completed) {
-                    entt::entity childTarget = (child.target != entt::null) ? child.target : target;
-                    executeAction(reg, childTarget, child, 0.0f);// dt already applied to parent
-                    child.elapsed = action.elapsed;// Sync elapsed time
-                }
-            }
-            break;
-        }
         default:
             break;
         }
@@ -270,20 +297,30 @@ namespace ActionHelpers {
         entt::registry& reg,
         entt::entity entity,
         std::vector<ActionComponent> actions,
-        std::function<void()> onComplete = nullptr,
+        uint32_t completionTag = 0,
         const std::string& debugName = ""
     ) {
         auto& queue = reg.emplace_or_replace<ActionQueueComponent>(entity);
         queue.actions = std::move(actions);
         queue.currentIndex = 0;
-        queue.onComplete = std::move(onComplete);
+        queue.completionTag = completionTag;
         queue.debugName = debugName;
     }
 
     // Play a single action on an entity
     inline void play(entt::registry& reg, entt::entity entity, ActionComponent action) {
-        auto& comp = reg.emplace_or_replace<ActionComponent>(entity);
-        static_cast<ActionComponent&>(comp) = std::move(action);
+        reg.emplace_or_replace<ActionComponent>(entity, std::move(action));
     }
 
 }// namespace ActionHelpers
+
+// ============================================================
+// Event Cleanup System - Clear events at end of frame
+// ============================================================
+
+class ActionEventCleanupSystem {
+public:
+    static void update(entt::registry& reg) {
+        reg.clear<ActionCompleteEvent>();
+    }
+};
