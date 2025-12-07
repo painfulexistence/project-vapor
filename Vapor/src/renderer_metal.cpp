@@ -2570,10 +2570,11 @@ void Renderer_Metal::renderUI() {
     auto surface = currentDrawable;
     if (!surface) return;
 
-    int width = static_cast<int>(surface->texture()->width());
-    int height = static_cast<int>(surface->texture()->height());
+    // Use window size for RmlUI coordinate system (not framebuffer size)
+    int windowWidth, windowHeight;
+    SDL_GetWindowSize(window, &windowWidth, &windowHeight);
 
-    uiRenderer->BeginFrame(currentCommandBuffer, surface->texture(), width, height);
+    uiRenderer->BeginFrame(currentCommandBuffer, surface->texture(), windowWidth, windowHeight);
     m_uiContext->Render();
     uiRenderer->EndFrame();
 }

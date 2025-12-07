@@ -46,8 +46,14 @@ namespace Vapor {
             return;
         }
 
+        // width/height are logical (window) size for RmlUI coordinate system
         m_viewportWidth = width;
         m_viewportHeight = height;
+
+        // Get actual framebuffer size from render target for viewport/scissor
+        m_framebufferWidth = static_cast<int>(renderTarget->width());
+        m_framebufferHeight = static_cast<int>(renderTarget->height());
+
         // Don't take ownership of commandBuffer - it's managed by the renderer
         // Just store raw pointer for this frame
         m_currentCommandBuffer = commandBuffer;
@@ -68,22 +74,22 @@ namespace Vapor {
 
         m_currentEncoder = commandBuffer->renderCommandEncoder(m_currentPassDesc.get());
 
-        // Set viewport to match render target size
+        // Set viewport to match render target (framebuffer) size
         MTL::Viewport viewport;
         viewport.originX = 0.0;
         viewport.originY = 0.0;
-        viewport.width = static_cast<double>(width);
-        viewport.height = static_cast<double>(height);
+        viewport.width = static_cast<double>(m_framebufferWidth);
+        viewport.height = static_cast<double>(m_framebufferHeight);
         viewport.znear = 0.0;
         viewport.zfar = 1.0;
         m_currentEncoder->setViewport(viewport);
 
-        // Set scissor rect to full screen (disable scissor by default)
+        // Set scissor rect to full framebuffer (disable scissor by default)
         MTL::ScissorRect scissorRect;
         scissorRect.x = 0;
         scissorRect.y = 0;
-        scissorRect.width = static_cast<NS::UInteger>(width);
-        scissorRect.height = static_cast<NS::UInteger>(height);
+        scissorRect.width = static_cast<NS::UInteger>(m_framebufferWidth);
+        scissorRect.height = static_cast<NS::UInteger>(m_framebufferHeight);
         m_currentEncoder->setScissorRect(scissorRect);
     }
 
@@ -210,11 +216,15 @@ namespace Vapor {
 
         // Setup scissor test
         if (m_scissor.enabled) {
+            // Scale from logical (RmlUI) coordinates to framebuffer coordinates
+            float scaleX = m_viewportWidth > 0 ? static_cast<float>(m_framebufferWidth) / m_viewportWidth : 1.0f;
+            float scaleY = m_viewportHeight > 0 ? static_cast<float>(m_framebufferHeight) / m_viewportHeight : 1.0f;
+
             MTL::ScissorRect scissorRect;
-            scissorRect.x = m_scissor.x;
-            scissorRect.y = m_viewportHeight - (m_scissor.y + m_scissor.height);// Flip Y
-            scissorRect.width = m_scissor.width;
-            scissorRect.height = m_scissor.height;
+            scissorRect.x = static_cast<NS::UInteger>(m_scissor.x * scaleX);
+            scissorRect.y = static_cast<NS::UInteger>(m_framebufferHeight - (m_scissor.y + m_scissor.height) * scaleY);// Flip Y
+            scissorRect.width = static_cast<NS::UInteger>(m_scissor.width * scaleX);
+            scissorRect.height = static_cast<NS::UInteger>(m_scissor.height * scaleY);
             m_currentEncoder->setScissorRect(scissorRect);
         }
 
