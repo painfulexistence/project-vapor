@@ -22,9 +22,7 @@ struct VolumetricFogData {
     float4x4 invViewProj;           // Inverse view-projection matrix
     float4x4 prevViewProj;          // Previous frame view-projection (for TAA)
     float3 cameraPosition;          // Camera world position
-    float _pad1;
     float3 sunDirection;            // Sun direction (normalized)
-    float _pad2;
     float3 sunColor;                // Sun color
     float sunIntensity;             // Sun light intensity
 
@@ -48,7 +46,6 @@ struct VolumetricFogData {
     // Temporal
     uint frameIndex;                // Frame counter for temporal jitter
     float temporalBlend;            // Blend factor for TAA (0.05-0.1)
-    float2 _pad3;
 
     // Noise parameters
     float noiseScale;               // Scale of density noise
@@ -56,7 +53,6 @@ struct VolumetricFogData {
     float windSpeed;                // Wind animation speed
     float time;                     // Current time
     float3 windDirection;           // Wind direction
-    float _pad4;
 };
 
 struct FroxelData {

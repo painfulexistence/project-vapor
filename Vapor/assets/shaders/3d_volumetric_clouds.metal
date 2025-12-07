@@ -21,9 +21,7 @@ struct VolumetricCloudData {
     float4x4 invViewProj;           // Inverse view-projection matrix
     float4x4 prevViewProj;          // Previous frame view-projection
     float3 cameraPosition;          // Camera world position
-    float _pad1;
     float3 sunDirection;            // Sun direction (normalized)
-    float _pad2;
     float3 sunColor;                // Sun color
     float sunIntensity;             // Sun light intensity
 
@@ -31,7 +29,6 @@ struct VolumetricCloudData {
     float cloudLayerBottom;         // Bottom of cloud layer (e.g., 1500m)
     float cloudLayerTop;            // Top of cloud layer (e.g., 4000m)
     float cloudLayerThickness;      // = top - bottom
-    float _pad3;
 
     // Cloud shape parameters
     float cloudCoverage;            // Global coverage (0-1)
@@ -50,27 +47,27 @@ struct VolumetricCloudData {
     float silverLiningIntensity;    // Multi-scatter silver lining
     float silverLiningSpread;       // Spread of silver lining effect
     float phaseG1;                  // Forward scatter g
-
     float phaseG2;                  // Back scatter g
     float phaseBlend;               // Blend between phases
     float powderStrength;           // Beer-powder effect strength
-    float _pad4;
+    float _pad1;
 
     // Animation
     float3 windDirection;           // Wind direction
-    float windSpeed;                // Wind speed
     float3 windOffset;              // Accumulated wind offset
+    float windSpeed;                // Wind speed
     float time;                     // Current time
 
     // Ray marching
     uint primarySteps;              // Primary ray march steps
     uint lightSteps;                // Light ray march steps
     float2 screenSize;              // Screen dimensions
+    float _pad2;
 
     // Temporal
     uint frameIndex;                // Frame counter
     float temporalBlend;            // TAA blend factor
-    float2 _pad5;
+    float2 _pad3;
 };
 
 // ============================================================================

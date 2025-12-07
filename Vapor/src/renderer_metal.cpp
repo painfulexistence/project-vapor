@@ -1362,12 +1362,12 @@ public:
         auto colorAttach = passDesc->colorAttachments()->object(0);
         colorAttach->setLoadAction(MTL::LoadActionDontCare);
         colorAttach->setStoreAction(MTL::StoreActionStore);
-        colorAttach->setTexture(r.tempColorRT.get());  // Write to temp
+        colorAttach->setTexture(r.tempColorRT.get());// Write to temp
 
         auto encoder = r.currentCommandBuffer->renderCommandEncoder(passDesc.get());
         encoder->setRenderPipelineState(r.fogSimplePipeline.get());
         encoder->setCullMode(MTL::CullModeNone);
-        encoder->setFragmentTexture(r.colorRT.get(), 0);  // Read from color
+        encoder->setFragmentTexture(r.colorRT.get(), 0);// Read from color
         encoder->setFragmentTexture(r.depthStencilRT.get(), 1);
         encoder->setFragmentBuffer(r.volumetricFogDataBuffers[r.currentFrameInFlight].get(), 0, 0);
         encoder->setFragmentBuffer(r.cameraDataBuffers[r.currentFrameInFlight].get(), 0, 1);
@@ -1541,13 +1541,13 @@ public:
                 auto colorAttach = passDesc->colorAttachments()->object(0);
                 colorAttach->setLoadAction(MTL::LoadActionDontCare);
                 colorAttach->setStoreAction(MTL::StoreActionStore);
-                colorAttach->setTexture(r.tempColorRT.get());  // Write to temp
+                colorAttach->setTexture(r.tempColorRT.get());// Write to temp
 
                 auto encoder = r.currentCommandBuffer->renderCommandEncoder(passDesc.get());
                 encoder->setRenderPipelineState(r.cloudCompositePipeline.get());
                 encoder->setCullMode(MTL::CullModeNone);
-                encoder->setFragmentTexture(r.colorRT.get(), 0);   // Read from color
-                encoder->setFragmentTexture(r.cloudRT.get(), 1);   // Cloud (quarter res)
+                encoder->setFragmentTexture(r.colorRT.get(), 0);// Read from color
+                encoder->setFragmentTexture(r.cloudRT.get(), 1);// Cloud (quarter res)
                 encoder->setFragmentTexture(r.depthStencilRT.get(), 2);
                 encoder->setFragmentBuffer(r.volumetricCloudDataBuffers[r.currentFrameInFlight].get(), 0, 0);
                 encoder->drawPrimitives(MTL::PrimitiveType::PrimitiveTypeTriangle, 0, 3, 1);
@@ -1567,12 +1567,12 @@ public:
             auto colorAttach = passDesc->colorAttachments()->object(0);
             colorAttach->setLoadAction(MTL::LoadActionDontCare);
             colorAttach->setStoreAction(MTL::StoreActionStore);
-            colorAttach->setTexture(r.tempColorRT.get());  // Write to temp
+            colorAttach->setTexture(r.tempColorRT.get());// Write to temp
 
             auto encoder = r.currentCommandBuffer->renderCommandEncoder(passDesc.get());
             encoder->setRenderPipelineState(r.cloudRenderPipeline.get());
             encoder->setCullMode(MTL::CullModeNone);
-            encoder->setFragmentTexture(r.colorRT.get(), 0);  // Read from color
+            encoder->setFragmentTexture(r.colorRT.get(), 0);// Read from color
             encoder->setFragmentTexture(r.depthStencilRT.get(), 1);
             encoder->setFragmentBuffer(r.volumetricCloudDataBuffers[r.currentFrameInFlight].get(), 0, 0);
             encoder->setFragmentBuffer(r.cameraDataBuffers[r.currentFrameInFlight].get(), 0, 1);
@@ -1679,7 +1679,7 @@ public:
         // Render flare with additive blending (hardware blends output onto existing content)
         auto passDesc = NS::TransferPtr(MTL::RenderPassDescriptor::renderPassDescriptor());
         auto colorAttach = passDesc->colorAttachments()->object(0);
-        colorAttach->setLoadAction(MTL::LoadActionLoad);  // Preserve existing bloom result
+        colorAttach->setLoadAction(MTL::LoadActionLoad);// Preserve existing bloom result
         colorAttach->setStoreAction(MTL::StoreActionStore);
         colorAttach->setTexture(r.bloomResultRT.get());
 
@@ -4874,7 +4874,10 @@ auto Renderer_Metal::draw(std::shared_ptr<Scene> scene, Camera& camera) -> void 
 
                 ImGui::Separator();
                 ImGui::Text("Ghosts");
-                ImGui::SliderInt("Ghost Count", &sunFlareSettings.ghostCount, 0, 10);
+                int count = static_cast<int>(sunFlareSettings.ghostCount);
+                if (ImGui::SliderInt("Ghost Count", &count, 0, 10)) {
+                    sunFlareSettings.ghostCount = static_cast<Uint32>(count);
+                }
                 ImGui::DragFloat("Ghost Intensity", &sunFlareSettings.ghostIntensity, 0.01f, 0.0f, 0.5f);
 
                 ImGui::Separator();
@@ -5344,9 +5347,11 @@ void Renderer_Metal::drawQuad3D(const glm::vec3& position, const glm::vec2& size
     drawQuad3D(transform, color);
 }
 
-void Renderer_Metal::drawQuad3D(const glm::vec3& position, const glm::vec2& size, TextureHandle texture, const glm::vec4& tintColor) {
-    glm::mat4 transform = glm::translate(glm::mat4(1.0f), position)
-                        * glm::scale(glm::mat4(1.0f), glm::vec3(size, 1.0f));
+void Renderer_Metal::drawQuad3D(
+    const glm::vec3& position, const glm::vec2& size, TextureHandle texture, const glm::vec4& tintColor
+) {
+    glm::mat4 transform =
+        glm::translate(glm::mat4(1.0f), position) * glm::scale(glm::mat4(1.0f), glm::vec3(size, 1.0f));
     drawQuad3D(transform, texture, batchQuadTexCoords, tintColor);
 }
 
@@ -5354,11 +5359,18 @@ void Renderer_Metal::drawQuad3D(const glm::mat4& transform, const glm::vec4& col
     drawQuad3D(transform, batch2DWhiteTextureHandle, batchQuadTexCoords, color, entityID);
 }
 
-void Renderer_Metal::drawQuad3D(const glm::mat4& transform, TextureHandle texture, const glm::vec2* texCoords, const glm::vec4& tintColor, int entityID) {
-    beginBatch3D();  // Auto-start batch
+void Renderer_Metal::drawQuad3D(
+    const glm::mat4& transform,
+    TextureHandle texture,
+    const glm::vec2* texCoords,
+    const glm::vec4& tintColor,
+    int entityID
+) {
+    beginBatch3D();// Auto-start batch
     if (batch3DIndices.size() >= BatchMaxIndices) return;
 
-    float textureIndex = findOrAddTextureSlot(batch3DTextureSlots, batch3DTextureSlotIndex, texture, batch2DWhiteTextureHandle);
+    float textureIndex =
+        findOrAddTextureSlot(batch3DTextureSlots, batch3DTextureSlotIndex, texture, batch2DWhiteTextureHandle);
     Uint32 vertexOffset = static_cast<Uint32>(batch3DVertices.size());
 
     for (int i = 0; i < 4; i++) {

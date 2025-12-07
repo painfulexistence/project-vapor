@@ -26,16 +26,13 @@ struct SunFlareData {
     float sunIntensity;             // Overall intensity
     float visibility;               // Sun visibility (0-1, from occlusion test)
     float fadeEdge;                 // Fade when sun near screen edge
-    float _pad1;
 
     float3 sunColor;                // Sun tint color
-    float _pad2;
 
     // Main glow parameters
     float glowIntensity;            // Central glow brightness
     float glowFalloff;              // Glow falloff exponent
     float glowSize;                 // Glow radius
-    float _pad3;
 
     // Halo parameters
     float haloIntensity;            // Halo brightness
@@ -51,13 +48,11 @@ struct SunFlareData {
 
     float ghostChromaticOffset;     // Chromatic aberration for ghosts
     float ghostFalloff;             // Ghost edge falloff
-    float2 _pad4;
 
     // Streak parameters
     float streakIntensity;          // Anamorphic streak brightness
     float streakLength;             // Streak length
     float streakFalloff;            // Streak vertical falloff
-    float _pad5;
 
     // Starburst parameters
     float starburstIntensity;       // Starburst brightness
@@ -68,11 +63,10 @@ struct SunFlareData {
     // Dirt/dust parameters
     float dirtIntensity;            // Lens dirt brightness
     float dirtScale;                // Dirt texture scale
-    float2 _pad6;
 
     // Animation
     float time;                     // For subtle animation
-    float3 _pad7;
+    float _pad;
 };
 
 // ============================================================================
@@ -147,7 +141,7 @@ float proceduralPolygon(float2 uv, float2 center, float size, int sides, float r
     float halfSegment = segmentAngle * 0.5;
 
     // Distance to edge
-    float a = mod(angle + halfSegment, segmentAngle) - halfSegment;
+    float a = fmod(angle + halfSegment, segmentAngle) - halfSegment;
     float r = size / cos(a);
 
     return 1.0 - smoothstep(r * 0.85, r, radius);

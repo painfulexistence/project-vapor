@@ -365,160 +365,141 @@ struct Particle {
 
 // Volumetric Fog data structure
 struct alignas(16) VolumetricFogData {
-    glm::mat4 invViewProj;           // Inverse view-projection matrix
-    glm::mat4 prevViewProj;          // Previous frame view-projection (for TAA)
-    glm::vec3 cameraPosition;        // Camera world position
+    glm::mat4 invViewProj;// Inverse view-projection matrix
+    glm::mat4 prevViewProj;// Previous frame view-projection (for TAA)
+    glm::vec3 cameraPosition;// Camera world position
     float _pad1;
-    glm::vec3 sunDirection;          // Sun direction (normalized)
+    glm::vec3 sunDirection;// Sun direction (normalized)
     float _pad2;
-    glm::vec3 sunColor;              // Sun color
-    float sunIntensity;              // Sun light intensity
-
+    glm::vec3 sunColor;// Sun color
+    float _pad3;
+    float sunIntensity;// Sun light intensity
     // Fog parameters
-    float fogDensity = 0.02f;        // Base fog density
-    float fogHeightFalloff = 0.1f;   // Height-based density falloff
-    float fogBaseHeight = 0.0f;      // Height where fog is densest
-    float fogMaxHeight = 100.0f;     // Maximum height for fog
-
+    float fogDensity = 0.02f;// Base fog density
+    float fogHeightFalloff = 0.1f;// Height-based density falloff
+    float fogBaseHeight = 0.0f;// Height where fog is densest
+    float fogMaxHeight = 100.0f;// Maximum height for fog
     // Scattering parameters
-    float scatteringCoeff = 0.5f;    // Scattering coefficient
-    float extinctionCoeff = 0.5f;    // Extinction coefficient
-    float anisotropy = 0.6f;         // Phase function anisotropy (g parameter)
-    float ambientIntensity = 0.3f;   // Ambient light contribution
-
+    float scatteringCoeff = 0.5f;// Scattering coefficient
+    float extinctionCoeff = 0.5f;// Extinction coefficient
+    float anisotropy = 0.6f;// Phase function anisotropy (g parameter)
+    float ambientIntensity = 0.3f;// Ambient light contribution
     // Grid parameters
-    float nearPlane = 0.1f;          // Camera near plane
-    float farPlane = 500.0f;         // Camera far plane (fog far)
-    glm::vec2 screenSize;            // Screen dimensions
-
-    // Temporal
-    Uint32 frameIndex = 0;           // Frame counter for temporal jitter
-    float temporalBlend = 0.1f;      // Blend factor for TAA
-    glm::vec2 _pad3;
-
-    // Noise parameters
-    float noiseScale = 0.01f;        // Scale of density noise
-    float noiseIntensity = 0.5f;     // Intensity of density variation
-    float windSpeed = 1.0f;          // Wind animation speed
-    float time = 0.0f;               // Current time
-    glm::vec3 windDirection = glm::vec3(1.0f, 0.0f, 0.0f);
+    float nearPlane = 0.1f;// Camera near plane
+    float farPlane = 500.0f;// Camera far plane (fog far)
     float _pad4;
+    glm::vec2 screenSize;// Screen dimensions
+    glm::vec2 _pad5;
+    // Temporal
+    Uint32 frameIndex = 0;// Frame counter for temporal jitter
+    float temporalBlend = 0.1f;// Blend factor for TAA
+    // Noise parameters
+    float noiseScale = 0.01f;// Scale of density noise
+    float noiseIntensity = 0.5f;// Intensity of density variation
+    float windSpeed = 1.0f;// Wind animation speed
+    float time = 0.0f;// Current time
+    glm::vec2 _pad6;
+    glm::vec3 windDirection = glm::vec3(1.0f, 0.0f, 0.0f);
+    float _pad7;
 };
 
 // Volumetric Cloud data structure
 struct alignas(16) VolumetricCloudData {
-    glm::mat4 invViewProj;           // Inverse view-projection matrix
-    glm::mat4 prevViewProj;          // Previous frame view-projection
-    glm::vec3 cameraPosition;        // Camera world position
+    glm::mat4 invViewProj;// Inverse view-projection matrix
+    glm::mat4 prevViewProj;// Previous frame view-projection
+    glm::vec3 cameraPosition;// Camera world position
     float _pad1;
-    glm::vec3 sunDirection;          // Sun direction (normalized)
+    glm::vec3 sunDirection;// Sun direction (normalized)
     float _pad2;
-    glm::vec3 sunColor;              // Sun color
-    float sunIntensity = 22.0f;      // Sun light intensity
-
-    // Cloud layer bounds (world space heights in meters)
-    float cloudLayerBottom = 1500.0f;  // Bottom of cloud layer
-    float cloudLayerTop = 4000.0f;     // Top of cloud layer
-    float cloudLayerThickness = 2500.0f; // = top - bottom
+    glm::vec3 sunColor;// Sun color
     float _pad3;
-
+    float sunIntensity = 22.0f;// Sun light intensity
+    // Cloud layer bounds (world space heights in meters)
+    float cloudLayerBottom = 1500.0f;// Bottom of cloud layer
+    float cloudLayerTop = 4000.0f;// Top of cloud layer
+    float cloudLayerThickness = 2500.0f;// = top - bottom
     // Cloud shape parameters
-    float cloudCoverage = 0.5f;      // Global coverage (0-1)
-    float cloudDensity = 0.3f;       // Density multiplier
-    float cloudType = 0.5f;          // Cloud type blend (0=stratus, 1=cumulus)
-    float erosionStrength = 0.3f;    // Detail erosion strength
-
+    float cloudCoverage = 0.5f;// Global coverage (0-1)
+    float cloudDensity = 0.3f;// Density multiplier
+    float cloudType = 0.5f;// Cloud type blend (0=stratus, 1=cumulus)
+    float erosionStrength = 0.3f;// Detail erosion strength
     // Noise scales
-    float shapeNoiseScale = 1.0f;    // Scale for base shape noise
-    float detailNoiseScale = 5.0f;   // Scale for detail noise
-    float curlNoiseScale = 1.0f;     // Scale for curl noise
-    float curlNoiseStrength = 0.1f;  // Strength of curl distortion
-
+    float shapeNoiseScale = 1.0f;// Scale for base shape noise
+    float detailNoiseScale = 5.0f;// Scale for detail noise
+    float curlNoiseScale = 1.0f;// Scale for curl noise
+    float curlNoiseStrength = 0.1f;// Strength of curl distortion
     // Lighting
-    float ambientIntensity = 0.3f;   // Ambient light from sky
-    float silverLiningIntensity = 0.5f; // Multi-scatter silver lining
-    float silverLiningSpread = 2.0f; // Spread of silver lining effect
-    float phaseG1 = 0.8f;            // Forward scatter g
-
-    float phaseG2 = -0.3f;           // Back scatter g
-    float phaseBlend = 0.3f;         // Blend between phases
-    float powderStrength = 0.5f;     // Beer-powder effect strength
+    float ambientIntensity = 0.3f;// Ambient light from sky
+    float silverLiningIntensity = 0.5f;// Multi-scatter silver lining
+    float silverLiningSpread = 2.0f;// Spread of silver lining effect
+    float phaseG1 = 0.8f;// Forward scatter g
+    float phaseG2 = -0.3f;// Back scatter g
+    float phaseBlend = 0.3f;// Blend between phases
+    float powderStrength = 0.5f;// Beer-powder effect strength
     float _pad4;
-
     // Animation
     glm::vec3 windDirection = glm::vec3(1.0f, 0.0f, 0.0f);
-    float windSpeed = 10.0f;         // Wind speed (m/s)
-    glm::vec3 windOffset;            // Accumulated wind offset
-    float time = 0.0f;               // Current time
-
+    float _pad5;
+    glm::vec3 windOffset;// Accumulated wind offset
+    float _pad6;
+    float windSpeed = 10.0f;// Wind speed (m/s)
+    float time = 0.0f;// Current time
     // Ray marching
-    Uint32 primarySteps = 64;        // Primary ray march steps
-    Uint32 lightSteps = 6;           // Light ray march steps
-    glm::vec2 screenSize;            // Screen dimensions
+    Uint32 primarySteps = 64;// Primary ray march steps
+    Uint32 lightSteps = 6;// Light ray march steps
+    glm::vec2 screenSize;// Screen dimensions
+    glm::vec2 _pad7;
 
     // Temporal
-    Uint32 frameIndex = 0;           // Frame counter
-    float temporalBlend = 0.05f;     // TAA blend factor
-    glm::vec2 _pad5;
+    Uint32 frameIndex = 0;// Frame counter
+    float temporalBlend = 0.05f;// TAA blend factor
+    glm::vec2 _pad8;
 };
 
 // Sun Flare / Lens Flare data structure
 struct alignas(16) SunFlareData {
-    glm::vec2 sunScreenPos;          // Sun position in screen space [0,1]
-    glm::vec2 screenSize;            // Screen dimensions
+    glm::vec2 sunScreenPos;// Sun position in screen space [0,1]
+    glm::vec2 screenSize;// Screen dimensions
     glm::vec2 screenCenter = glm::vec2(0.5f, 0.5f);
     glm::vec2 aspectRatio = glm::vec2(1.0f, 1.0f);
-
-    float sunIntensity = 1.0f;       // Overall intensity
-    float visibility = 1.0f;         // Sun visibility (0-1)
-    float fadeEdge = 0.8f;           // Fade when sun near screen edge
+    float sunIntensity = 1.0f;// Overall intensity
+    float visibility = 1.0f;// Sun visibility (0-1)
+    float fadeEdge = 0.8f;// Fade when sun near screen edge
     float _pad1;
-
     glm::vec3 sunColor = glm::vec3(1.0f, 0.95f, 0.8f);
     float _pad2;
 
     // Main glow parameters
-    float glowIntensity = 0.5f;      // Central glow brightness
-    float glowFalloff = 8.0f;        // Glow falloff exponent
-    float glowSize = 0.15f;          // Glow radius
-    float _pad3;
-
+    float glowIntensity = 0.5f;// Central glow brightness
+    float glowFalloff = 8.0f;// Glow falloff exponent
+    float glowSize = 0.15f;// Glow radius
     // Halo parameters
-    float haloIntensity = 0.3f;      // Halo brightness
-    float haloRadius = 0.25f;        // Halo ring radius
-    float haloWidth = 0.03f;         // Halo ring width
-    float haloFalloff = 0.01f;       // Halo edge softness
-
+    float haloIntensity = 0.3f;// Halo brightness
+    float haloRadius = 0.25f;// Halo ring radius
+    float haloWidth = 0.03f;// Halo ring width
+    float haloFalloff = 0.01f;// Halo edge softness
     // Ghost parameters
-    Uint32 ghostCount = 6;           // Number of ghost sprites (4-8)
-    float ghostSpacing = 0.3f;       // Spacing multiplier along axis
-    float ghostIntensity = 0.15f;    // Ghost brightness
-    float ghostSize = 0.05f;         // Base ghost size
-
-    float ghostChromaticOffset = 0.005f; // Chromatic aberration
-    float ghostFalloff = 1.5f;       // Ghost edge falloff
-    glm::vec2 _pad4;
-
+    Uint32 ghostCount = 6;// Number of ghost sprites (4-8)
+    float ghostSpacing = 0.3f;// Spacing multiplier along axis
+    float ghostIntensity = 0.15f;// Ghost brightness
+    float ghostSize = 0.05f;// Base ghost size
+    float ghostChromaticOffset = 0.005f;// Chromatic aberration
+    float ghostFalloff = 1.5f;// Ghost edge falloff
     // Streak parameters
-    float streakIntensity = 0.2f;    // Anamorphic streak brightness
-    float streakLength = 0.3f;       // Streak length
-    float streakFalloff = 50.0f;     // Streak vertical falloff
-    float _pad5;
-
+    float streakIntensity = 0.2f;// Anamorphic streak brightness
+    float streakLength = 0.3f;// Streak length
+    float streakFalloff = 50.0f;// Streak vertical falloff
     // Starburst parameters
-    float starburstIntensity = 0.15f; // Starburst brightness
-    float starburstSize = 0.4f;      // Starburst radius
-    Uint32 starburstPoints = 6;      // Number of rays
-    float starburstRotation = 0.0f;  // Rotation angle
-
+    float starburstIntensity = 0.15f;// Starburst brightness
+    float starburstSize = 0.4f;// Starburst radius
+    Uint32 starburstPoints = 6;// Number of rays
+    float starburstRotation = 0.0f;// Rotation angle
     // Dirt/dust parameters
-    float dirtIntensity = 0.0f;      // Lens dirt brightness
-    float dirtScale = 10.0f;         // Dirt texture scale
-    glm::vec2 _pad6;
-
+    float dirtIntensity = 0.0f;// Lens dirt brightness
+    float dirtScale = 10.0f;// Dirt texture scale
     // Animation
-    float time = 0.0f;               // For subtle animation
-    glm::vec3 _pad7;
+    float time = 0.0f;// For subtle animation
+    float _pad3;
 };
 
 struct Mesh {
