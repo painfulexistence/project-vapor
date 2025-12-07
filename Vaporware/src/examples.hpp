@@ -2,10 +2,11 @@
 
 #include "animation_components.hpp"
 #include "animation_systems.hpp"
-#include "fsm_components.hpp"
-#include "fsm_system.hpp"
+#include "camera_mixing_system.hpp"
 #include "camera_trauma_system.hpp"
 #include "components.hpp"
+#include "fsm_components.hpp"
+#include "fsm_system.hpp"
 #include "Vapor/components.hpp"
 #include <entt/entt.hpp>
 #include <glm/glm.hpp>
@@ -521,18 +522,27 @@ struct PlayerContact {
     entt::entity player = entt::null;
 };
 
-// Scene Manager System
-class SceneManagerSystem {
-public:
-    static void update(entt::registry& reg, float dt) {
-        processTriggers(reg);
-        processRequests(reg);
-        updateTransition(reg, dt);
+// ============================================================
+// Scene Systems - Each system has ONE update, ONE responsibility
+// ============================================================
+
+// Helper functions for scene loading (not systems)
+namespace SceneHelpers {
+    inline void loadScene(entt::registry& reg, const std::string& sceneId) {
+        // TODO: Implement actual scene loading
+        fmt::print("Loading scene: {}\n", sceneId);
     }
 
-private:
-    // Check trigger zones for player contact
-    static void processTriggers(entt::registry& reg) {
+    inline void unloadScene(entt::registry& reg, const std::string& sceneId) {
+        // TODO: Implement actual scene unloading
+        fmt::print("Unloading scene: {}\n", sceneId);
+    }
+}
+
+// System 1: Detects trigger zones → emplaces SceneRequest
+class SceneTriggerSystem {
+public:
+    static void update(entt::registry& reg) {
         auto view = reg.view<SceneTriggerZone, PlayerContact>();
         for (auto entity : view) {
             auto& trigger = view.get<SceneTriggerZone>(entity);
@@ -541,7 +551,7 @@ private:
             if (contact.player != entt::null && !trigger.triggered) {
                 trigger.triggered = true;
 
-                // Create scene request
+                // Emplace scene request
                 auto reqEntity = reg.create();
                 auto& request = reg.emplace<SceneRequest>(reqEntity);
                 request.action = SceneRequest::Action::Load;
@@ -559,10 +569,13 @@ private:
             reg.remove<PlayerContact>(entity);
         }
     }
+};
 
-    // Process scene change requests
-    static void processRequests(entt::registry& reg) {
-        // Find or create scene state
+// System 2: Consumes SceneRequest → starts transition in SceneState
+class SceneRequestSystem {
+public:
+    static void update(entt::registry& reg) {
+        // Find scene state
         SceneState* sceneState = nullptr;
         auto stateView = reg.view<SceneState>();
         if (stateView.begin() != stateView.end()) {
@@ -587,8 +600,7 @@ private:
                     break;
 
                 case SceneRequest::Action::Unload:
-                    // Just unload, no transition
-                    unloadScene(reg, request.sceneId);
+                    SceneHelpers::unloadScene(reg, request.sceneId);
                     break;
 
                 case SceneRequest::Action::Reload:
@@ -600,12 +612,15 @@ private:
 
             // Consume request
             reg.destroy(entity);
-            break;  // Process one request at a time
+            break;  // One request at a time
         }
     }
+};
 
-    // Update transition animation
-    static void updateTransition(entt::registry& reg, float dt) {
+// System 3: Updates transition animation based on SceneState.phase
+class SceneTransitionSystem {
+public:
+    static void update(entt::registry& reg, float dt) {
         auto view = reg.view<SceneState>();
         for (auto entity : view) {
             auto& state = view.get<SceneState>(entity);
@@ -615,7 +630,6 @@ private:
 
             switch (state.phase) {
                 case SceneState::Phase::FadingOut:
-                    // Update fade overlay opacity (0 → 1)
                     if (state.transitionProgress >= 1.0f) {
                         state.phase = SceneState::Phase::Loading;
                         state.transitionProgress = 0.0f;
@@ -623,10 +637,8 @@ private:
                     break;
 
                 case SceneState::Phase::Loading:
-                    // Unload current scene
-                    unloadScene(reg, state.currentSceneId);
-                    // Load new scene
-                    loadScene(reg, state.pendingSceneId);
+                    SceneHelpers::unloadScene(reg, state.currentSceneId);
+                    SceneHelpers::loadScene(reg, state.pendingSceneId);
                     state.currentSceneId = state.pendingSceneId;
                     state.pendingSceneId.clear();
                     state.phase = SceneState::Phase::FadingIn;
@@ -634,7 +646,6 @@ private:
                     break;
 
                 case SceneState::Phase::FadingIn:
-                    // Update fade overlay opacity (1 → 0)
                     if (state.transitionProgress >= 1.0f) {
                         state.phase = SceneState::Phase::Idle;
                         state.isTransitioning = false;
@@ -645,22 +656,6 @@ private:
                     break;
             }
         }
-    }
-
-    // Scene loading/unloading (implement based on your scene system)
-    static void loadScene(entt::registry& reg, const std::string& sceneId) {
-        // TODO: Implement actual scene loading
-        // - Load scene file
-        // - Create entities
-        // - Setup trigger zones, spawn points, etc.
-        fmt::print("Loading scene: {}\n", sceneId);
-    }
-
-    static void unloadScene(entt::registry& reg, const std::string& sceneId) {
-        // TODO: Implement actual scene unloading
-        // - Destroy scene entities (except persistent ones)
-        // - Clear scene-specific components
-        fmt::print("Unloading scene: {}\n", sceneId);
     }
 };
 
@@ -711,8 +706,10 @@ namespace SceneTransitionExample {
         // ... input handling ...
         // ... physics (sets PlayerContact on trigger zones) ...
 
-        // Scene management (processes triggers and requests)
-        SceneManagerSystem::update(reg, dt);
+        // Scene management (each system has one responsibility)
+        SceneTriggerSystem::update(reg);      // Trigger → SceneRequest
+        SceneRequestSystem::update(reg);      // SceneRequest → start transition
+        SceneTransitionSystem::update(reg, dt); // Update transition animation
 
         // ... rest of game loop ...
     }
@@ -764,8 +761,10 @@ namespace GameLoopExample {
         GroundCheckSystem::update(reg);
         // CollisionEventSystem::update(reg);
 
-        // ===== 3. SCENE MANAGEMENT =====
-        SceneManagerSystem::update(reg, dt);
+        // ===== 3. SCENE MANAGEMENT (3 systems, 3 responsibilities) =====
+        SceneTriggerSystem::update(reg);        // Trigger → SceneRequest
+        SceneRequestSystem::update(reg);        // SceneRequest → start transition
+        SceneTransitionSystem::update(reg, dt); // Update transition animation
 
         // ===== 4. REQUEST CONSUMERS (Init systems) =====
         SquashInitSystem::update(reg);
@@ -780,6 +779,7 @@ namespace GameLoopExample {
         // ===== 7. CONTINUOUS UPDATE SYSTEMS =====
         SquashUpdateSystem::update(reg, dt);
         CameraTraumaSystem::update(reg, dt);
+        CameraBreathSystem::update(reg, dt);
         // ParticleUpdateSystem::update(reg, dt);
 
         // ===== 8. CLEANUP =====
@@ -789,7 +789,8 @@ namespace GameLoopExample {
         // physics->process(scene, dt);
 
         // ===== 10. RENDER =====
-        // renderer->draw(scene, camera);
+        // Camera finalCamera = CameraMixingSystem::resolve(reg);
+        // renderer->draw(scene, finalCamera);
     }
 
 }  // namespace GameLoopExample
