@@ -3,6 +3,10 @@
 #include "Vapor/components.hpp"
 #include "action_components.hpp"
 #include <entt/entt.hpp>
+#include <fmt/core.h>
+
+// Action event tags
+constexpr uint32_t DOOR_OPENED = 1;
 
 // ============================================================
 // Action System
@@ -19,6 +23,15 @@ public:
         updateSingleActions(reg, dt);
         updateActionQueues(reg, dt);
         updateActionGroups(reg);
+        auto view = reg.view<ActionCompleteEvent>();
+        for (auto entity : view) {
+            auto& event = view.get<ActionCompleteEvent>(entity);
+            if (event.tag == DOOR_OPENED) {
+                // React: play sound, spawn particles, etc.
+                fmt::print("Door opened!\n");
+                reg.destroy(entity);
+            }
+        }
     }
 
 private:
@@ -138,13 +151,8 @@ private:
 
     // ========== Execute Single Action (ActionComponent) ==========
 
-    static bool executeAction(
-        entt::registry& reg,
-        entt::entity owner,
-        Action& action,
-        ActionComponent& state,
-        float dt
-    ) {
+    static bool
+        executeAction(entt::registry& reg, entt::entity owner, Action& action, ActionComponent& state, float dt) {
         entt::entity target = (action.target != entt::null) ? action.target : owner;
 
         if (!state.started) {
@@ -172,11 +180,7 @@ private:
     // ========== Execute Queued Action (uses queue's runtime state) ==========
 
     static bool executeQueuedAction(
-        entt::registry& reg,
-        entt::entity owner,
-        Action& action,
-        ActionQueueComponent& queue,
-        float dt
+        entt::registry& reg, entt::entity owner, Action& action, ActionQueueComponent& queue, float dt
     ) {
         entt::entity target = (action.target != entt::null) ? action.target : owner;
 
@@ -262,12 +266,7 @@ private:
 
     // ========== Apply Tween (ActionComponent) ==========
 
-    static void applyTweenAction(
-        entt::registry& reg,
-        entt::entity target,
-        Action& action,
-        ActionComponent& state
-    ) {
+    static void applyTweenAction(entt::registry& reg, entt::entity target, Action& action, ActionComponent& state) {
         float t = state.getProgress();
         applyTweenValue(reg, target, action, t);
     }
@@ -275,26 +274,16 @@ private:
     // ========== Apply Tween (Queue) ==========
 
     static void applyTweenActionFromQueue(
-        entt::registry& reg,
-        entt::entity target,
-        Action& action,
-        ActionQueueComponent& queue
+        entt::registry& reg, entt::entity target, Action& action, ActionQueueComponent& queue
     ) {
-        float rawT = (action.duration > 0.0f)
-            ? std::clamp(queue.elapsed / action.duration, 0.0f, 1.0f)
-            : 1.0f;
+        float rawT = (action.duration > 0.0f) ? std::clamp(queue.elapsed / action.duration, 0.0f, 1.0f) : 1.0f;
         float t = action.easing ? action.easing(rawT) : rawT;
         applyTweenValue(reg, target, action, t);
     }
 
     // ========== Apply Tween Value ==========
 
-    static void applyTweenValue(
-        entt::registry& reg,
-        entt::entity target,
-        Action& action,
-        float t
-    ) {
+    static void applyTweenValue(entt::registry& reg, entt::entity target, Action& action, float t) {
         switch (action.type) {
         case ActionType::Position: {
             if (auto* transform = reg.try_get<Vapor::TransformComponent>(target)) {

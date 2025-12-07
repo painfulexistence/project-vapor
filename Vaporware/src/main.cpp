@@ -345,10 +345,10 @@ int main(int argc, char* args[]) {
                 .state("Idle")
                 .transitionTo("JumpUp", "trigger")
                 .state("JumpUp")
-                .enter({ Action::moveTo(triggerCube, glm::vec3(-5.0f, 3.0f, 0.0f), 0.5f, Easing::OutCubic) })
+                .enter({ Action::moveTo(triggerCube, glm::vec3(-5.0f, 3.0f, 0.0f)).dur(0.5f).ease(Easing::OutCubic) })
                 .transitionOnComplete("FallDown")
                 .state("FallDown")
-                .enter({ Action::moveTo(triggerCube, glm::vec3(-5.0f, 0.5f, 0.0f), 0.3f, Easing::InCubic) })
+                .enter({ Action::moveTo(triggerCube, glm::vec3(-5.0f, 0.5f, 0.0f)).dur(0.3f).ease(Easing::InCubic) })
                 .transitionOnComplete("Idle")
                 .initialState("Idle")
                 .build()
@@ -446,10 +446,8 @@ int main(int argc, char* args[]) {
                 }
                 // Action sequence demo: door open effect (using preset)
                 if (e.key.scancode == SDL_SCANCODE_O) {
-                    auto actions = ActionSequence::doorOpen(triggerCube, glm::vec3(-5.0f, 3.0f, 0.0f));
-                    ActionHelpers::playSequence(registry, triggerCube, actions, []() {
-                        fmt::print("Action Sequence: Door opened!\n");
-                    });
+                    auto& queue = registry.emplace<ActionQueueComponent>(triggerCube);
+                    queue.actions = ActionSequence::doorOpen(triggerCube, glm::vec3(-5.0f, 3.0f, 0.0f));
                     fmt::print("Action Sequence: Starting door open animation\n");
                 }
                 if (e.key.scancode == SDL_SCANCODE_F3) {

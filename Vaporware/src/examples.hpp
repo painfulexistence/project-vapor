@@ -29,7 +29,8 @@ namespace ActionSequence {
 
     // Door open sequence: wait → move up
     inline std::vector<Action> doorOpen(entt::entity door, const glm::vec3& openPos) {
-        return { Action::wait(0.2f), Action::moveTo(door, openPos).dur(1.0f).ease(Easing::OutCubic) };
+        return { Action::wait(0.2f),
+                 Action::moveTo(door, openPos).dur(1.0f).ease(Easing::OutCubic).onComplete(DOOR_OPENED) };
     }
 
     // Attack combo sequence
