@@ -1,5 +1,6 @@
 #pragma once
 #include "camera.hpp"
+#include "font_manager.hpp"
 #include "graphics.hpp"
 #include "scene.hpp"
 #include <SDL3/SDL_video.h>
@@ -85,6 +86,32 @@ public:
 
     // Texture creation for sprites
     virtual TextureHandle createTexture(const std::shared_ptr<Image>& img) { return {}; }
+
+    // ===== Font Rendering API =====
+    // Load a font from file path with specified base size
+    virtual FontHandle loadFont(const std::string& path, float baseSize) { return {}; }
+    // Unload a previously loaded font
+    virtual void unloadFont(FontHandle handle) {}
+    // Draw text at screen position (2D, no depth test)
+    virtual void drawText2D(
+        FontHandle font,
+        const std::string& text,
+        const glm::vec2& position,
+        float scale = 1.0f,
+        const glm::vec4& color = glm::vec4(1.0f)
+    ) {}
+    // Draw text at world position (3D, with depth test, billboard facing camera)
+    virtual void drawText3D(
+        FontHandle font,
+        const std::string& text,
+        const glm::vec3& worldPosition,
+        float scale = 1.0f,
+        const glm::vec4& color = glm::vec4(1.0f)
+    ) {}
+    // Measure text dimensions at given scale
+    virtual glm::vec2 measureText(FontHandle font, const std::string& text, float scale = 1.0f) { return {}; }
+    // Get line height for a font at given scale
+    virtual float getFontLineHeight(FontHandle font, float scale = 1.0f) { return 0.0f; }
 
 protected:
     const Uint32 MAX_FRAMES_IN_FLIGHT = 3;

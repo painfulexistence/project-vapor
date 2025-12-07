@@ -231,6 +231,26 @@ public:
 
     TextureHandle createTexture(const std::shared_ptr<Image>& img) override;
 
+    // ===== Font Rendering API =====
+    FontHandle loadFont(const std::string& path, float baseSize) override;
+    void unloadFont(FontHandle handle) override;
+    void drawText2D(
+        FontHandle font,
+        const std::string& text,
+        const glm::vec2& position,
+        float scale = 1.0f,
+        const glm::vec4& color = glm::vec4(1.0f)
+    ) override;
+    void drawText3D(
+        FontHandle font,
+        const std::string& text,
+        const glm::vec3& worldPosition,
+        float scale = 1.0f,
+        const glm::vec4& color = glm::vec4(1.0f)
+    ) override;
+    glm::vec2 measureText(FontHandle font, const std::string& text, float scale = 1.0f) override;
+    float getFontLineHeight(FontHandle font, float scale = 1.0f) override;
+
     BufferHandle createVertexBuffer(const std::vector<VertexData>& vertices);
     BufferHandle createIndexBuffer(const std::vector<Uint32>& indices);
     BufferHandle createStorageBuffer(const std::vector<VertexData>& vertices);
@@ -533,6 +553,9 @@ private:
     // UI rendering (using void* for pimpl idiom to hide implementation)
     void* m_uiRenderer = nullptr;
     Rml::Context* m_uiContext = nullptr;
+
+    // Font rendering
+    FontManager m_fontManager;
 
     void createResources();
     void renderUI();// Internal method called by RmlUiPass

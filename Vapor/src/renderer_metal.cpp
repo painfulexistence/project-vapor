@@ -5123,6 +5123,155 @@ TextureHandle Renderer_Metal::createTexture(const std::shared_ptr<Image>& img) {
     }
 }
 
+// ===== Font Rendering Implementation =====
+
+FontHandle Renderer_Metal::loadFont(const std::string& path, float baseSize) {
+    // Load font using FontManager
+    FontHandle fontHandle = m_fontManager.loadFont(path, baseSize);
+    if (!fontHandle.isValid()) {
+        return fontHandle;
+    }
+
+    // Get atlas data and create Metal texture
+    const FontManager::AtlasData* atlasData = m_fontManager.getAtlasData(fontHandle);
+    if (!atlasData) {
+        m_fontManager.unloadFont(fontHandle);
+        return FontHandle{};
+    }
+
+    // Create texture from atlas data
+    auto textureDesc = NS::TransferPtr(MTL::TextureDescriptor::alloc()->init());
+    textureDesc->setPixelFormat(MTL::PixelFormat::PixelFormatRGBA8Unorm);
+    textureDesc->setTextureType(MTL::TextureType::TextureType2D);
+    textureDesc->setWidth(NS::UInteger(atlasData->width));
+    textureDesc->setHeight(NS::UInteger(atlasData->height));
+    textureDesc->setMipmapLevelCount(1);
+    textureDesc->setSampleCount(1);
+    textureDesc->setStorageMode(MTL::StorageMode::StorageModeManaged);
+    textureDesc->setUsage(MTL::ResourceUsageSample | MTL::ResourceUsageRead);
+
+    auto texture = NS::TransferPtr(device->newTexture(textureDesc.get()));
+    texture->replaceRegion(
+        MTL::Region(0, 0, 0, atlasData->width, atlasData->height, 1),
+        0,
+        atlasData->rgbaData.data(),
+        atlasData->width * 4
+    );
+
+    // Store texture and create handle
+    textures[nextTextureID] = texture;
+    TextureHandle texHandle{nextTextureID++};
+
+    // Associate texture handle with font
+    m_fontManager.setFontTextureHandle(fontHandle, texHandle);
+
+    return fontHandle;
+}
+
+void Renderer_Metal::unloadFont(FontHandle handle) {
+    if (!handle.isValid()) return;
+
+    // Get texture handle before unloading
+    TextureHandle texHandle = m_fontManager.getFontTexture(handle);
+    if (texHandle.rid != UINT32_MAX) {
+        textures.erase(texHandle.rid);
+    }
+
+    m_fontManager.unloadFont(handle);
+}
+
+void Renderer_Metal::drawText2D(
+    FontHandle fontHandle,
+    const std::string& text,
+    const glm::vec2& position,
+    float scale,
+    const glm::vec4& color
+) {
+    Font* font = m_fontManager.getFont(fontHandle);
+    if (!font || !font->textureHandle.rid) return;
+
+    float cursorX = position.x;
+    float cursorY = position.y;
+
+    for (char c : text) {
+        const Glyph* glyph = m_fontManager.getGlyph(fontHandle, static_cast<int>(c));
+        if (!glyph) continue;
+
+        float drawX = cursorX + glyph->xOffset * scale;
+        float drawY = cursorY + glyph->yOffset * scale + font->ascent * scale;
+        float drawW = glyph->width * scale;
+        float drawH = glyph->height * scale;
+
+        if (drawW > 0 && drawH > 0) {
+            // Create UV coordinates for this glyph
+            glm::vec2 uvs[4] = {
+                {glyph->u0, glyph->v0}, // top-left
+                {glyph->u1, glyph->v0}, // top-right
+                {glyph->u1, glyph->v1}, // bottom-right
+                {glyph->u0, glyph->v1}  // bottom-left
+            };
+
+            glm::mat4 transform = glm::translate(glm::mat4(1.0f), glm::vec3(drawX, drawY, 0.0f));
+            transform = glm::scale(transform, glm::vec3(drawW, drawH, 1.0f));
+            drawQuad2D(transform, font->textureHandle, uvs, color);
+        }
+
+        cursorX += glyph->advance * scale;
+    }
+}
+
+void Renderer_Metal::drawText3D(
+    FontHandle fontHandle,
+    const std::string& text,
+    const glm::vec3& worldPosition,
+    float scale,
+    const glm::vec4& color
+) {
+    Font* font = m_fontManager.getFont(fontHandle);
+    if (!font || !font->textureHandle.rid) return;
+
+    // For 3D text, we draw at the world position
+    // The text will be rendered as billboards facing the camera
+    float cursorX = 0.0f;
+
+    for (char c : text) {
+        const Glyph* glyph = m_fontManager.getGlyph(fontHandle, static_cast<int>(c));
+        if (!glyph) continue;
+
+        float drawX = cursorX + glyph->xOffset * scale;
+        float drawY = glyph->yOffset * scale + font->ascent * scale;
+        float drawW = glyph->width * scale;
+        float drawH = glyph->height * scale;
+
+        if (drawW > 0 && drawH > 0) {
+            // Create UV coordinates for this glyph
+            glm::vec2 uvs[4] = {
+                {glyph->u0, glyph->v0}, // top-left
+                {glyph->u1, glyph->v0}, // top-right
+                {glyph->u1, glyph->v1}, // bottom-right
+                {glyph->u0, glyph->v1}  // bottom-left
+            };
+
+            // Create transform in world space
+            glm::mat4 transform = glm::translate(glm::mat4(1.0f), worldPosition);
+            transform = glm::translate(transform, glm::vec3(drawX, drawY, 0.0f));
+            transform = glm::scale(transform, glm::vec3(drawW, drawH, 1.0f));
+            drawQuad3D(transform, font->textureHandle, uvs, color);
+        }
+
+        cursorX += glyph->advance * scale;
+    }
+}
+
+glm::vec2 Renderer_Metal::measureText(FontHandle fontHandle, const std::string& text, float scale) {
+    return m_fontManager.measureText(fontHandle, text, scale);
+}
+
+float Renderer_Metal::getFontLineHeight(FontHandle fontHandle, float scale) {
+    Font* font = m_fontManager.getFont(fontHandle);
+    return font ? font->lineHeight * scale : 0.0f;
+}
+
 BufferHandle Renderer_Metal::createVertexBuffer(const std::vector<VertexData>& vertices) {
     auto stagingBuffer =
         NS::TransferPtr(device->newBuffer(vertices.size() * sizeof(VertexData), MTL::ResourceStorageModeShared));
