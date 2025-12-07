@@ -69,8 +69,16 @@ namespace Vapor {
                 return;
             }
 
-            m_viewportWidth = width;
-            m_viewportHeight = height;
+            // width/height are logical (window) size for RmlUI coordinates / projection
+            m_logicalWidth = width;
+            m_logicalHeight = height;
+
+            // Get framebuffer size and calculate HiDPI scale
+            int fbWidth = static_cast<int>(renderTarget->width());
+            int fbHeight = static_cast<int>(renderTarget->height());
+            m_scaleX = width > 0 ? static_cast<float>(fbWidth) / width : 1.0f;
+            m_scaleY = height > 0 ? static_cast<float>(fbHeight) / height : 1.0f;
+
             m_currentCommandBuffer = commandBuffer;
             m_currentRenderTarget = renderTarget;
 
@@ -83,22 +91,22 @@ namespace Vapor {
 
             m_currentEncoder = commandBuffer->renderCommandEncoder(m_currentPassDesc.get());
 
-            // Set viewport
+            // Set viewport to framebuffer size
             MTL::Viewport viewport;
             viewport.originX = 0.0;
             viewport.originY = 0.0;
-            viewport.width = static_cast<double>(width);
-            viewport.height = static_cast<double>(height);
+            viewport.width = static_cast<double>(fbWidth);
+            viewport.height = static_cast<double>(fbHeight);
             viewport.znear = 0.0;
             viewport.zfar = 1.0;
             m_currentEncoder->setViewport(viewport);
 
-            // Set scissor rect to full screen
+            // Set scissor rect to full framebuffer
             MTL::ScissorRect scissorRect;
             scissorRect.x = 0;
             scissorRect.y = 0;
-            scissorRect.width = static_cast<NS::UInteger>(width);
-            scissorRect.height = static_cast<NS::UInteger>(height);
+            scissorRect.width = static_cast<NS::UInteger>(fbWidth);
+            scissorRect.height = static_cast<NS::UInteger>(fbHeight);
             m_currentEncoder->setScissorRect(scissorRect);
         }
 
@@ -162,8 +170,8 @@ namespace Vapor {
             m_currentEncoder->setDepthStencilState(m_depthStencilState.get());
             m_currentEncoder->setCullMode(MTL::CullModeNone);
 
-            // Calculate projection matrix
-            glm::mat4 projection = glm::ortho(0.0f, (float)m_viewportWidth, (float)m_viewportHeight, 0.0f, -1.0f, 1.0f);
+            // Calculate projection matrix (use logical size for RmlUI coordinates)
+            glm::mat4 projection = glm::ortho(0.0f, (float)m_logicalWidth, (float)m_logicalHeight, 0.0f, -1.0f, 1.0f);
 
             // Apply translation
             glm::mat4 transform = glm::make_mat4(m_transform.data());
@@ -193,13 +201,14 @@ namespace Vapor {
                 m_currentEncoder->setFragmentTexture(m_defaultWhiteTexture.get(), 0);
             }
 
-            // Setup scissor
+            // Setup scissor (scale from logical to framebuffer coordinates)
             if (m_scissor.enabled) {
+                int fbHeight = static_cast<int>(m_logicalHeight * m_scaleY);
                 MTL::ScissorRect scissorRect;
-                scissorRect.x = m_scissor.x;
-                scissorRect.y = m_viewportHeight - (m_scissor.y + m_scissor.height);
-                scissorRect.width = m_scissor.width;
-                scissorRect.height = m_scissor.height;
+                scissorRect.x = static_cast<NS::UInteger>(m_scissor.x * m_scaleX);
+                scissorRect.y = static_cast<NS::UInteger>(fbHeight - (m_scissor.y + m_scissor.height) * m_scaleY);
+                scissorRect.width = static_cast<NS::UInteger>(m_scissor.width * m_scaleX);
+                scissorRect.height = static_cast<NS::UInteger>(m_scissor.height * m_scaleY);
                 m_currentEncoder->setScissorRect(scissorRect);
             }
 
@@ -402,8 +411,10 @@ namespace Vapor {
         Rml::CompiledGeometryHandle m_nextGeometryHandle = 1;
         Rml::TextureHandle m_nextTextureHandle = 1;
 
-        int m_viewportWidth = 0;
-        int m_viewportHeight = 0;
+        int m_logicalWidth = 0;
+        int m_logicalHeight = 0;
+        float m_scaleX = 1.0f;
+        float m_scaleY = 1.0f;
 
         struct ScissorRegion {
             bool enabled = false;
@@ -2574,7 +2585,7 @@ void Renderer_Metal::renderUI() {
     int windowWidth, windowHeight;
     SDL_GetWindowSize(window, &windowWidth, &windowHeight);
 
-    uiRenderer->BeginFrame(windowWidth, windowHeight, currentCommandBuffer, surface->texture());
+    uiRenderer->BeginFrame(currentCommandBuffer, surface->texture(), windowWidth, windowHeight);
     m_uiContext->Render();
     uiRenderer->EndFrame();
 }
