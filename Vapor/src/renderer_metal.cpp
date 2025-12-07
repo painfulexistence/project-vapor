@@ -5218,6 +5218,10 @@ void Renderer_Metal::drawText2D(
         float drawH = glyph->height * scale;
 
         if (drawW > 0 && drawH > 0) {
+            // Adjust for centered quad rendering (batchQuadPositions uses -0.5 to 0.5)
+            float finalX = drawX + drawW * 0.5f;
+            float finalY = drawY + drawH * 0.5f;
+
             // Create UV coordinates for this glyph
             glm::vec2 uvs[4] = {
                 {glyph->u0, glyph->v0}, // top-left
@@ -5226,7 +5230,7 @@ void Renderer_Metal::drawText2D(
                 {glyph->u0, glyph->v1}  // bottom-left
             };
 
-            glm::mat4 transform = glm::translate(glm::mat4(1.0f), glm::vec3(drawX, drawY, 0.0f));
+            glm::mat4 transform = glm::translate(glm::mat4(1.0f), glm::vec3(finalX, finalY, 0.0f));
             transform = glm::scale(transform, glm::vec3(drawW, drawH, 1.0f));
             drawQuad2D(transform, font->textureHandle, uvs, color);
         }
@@ -5259,6 +5263,10 @@ void Renderer_Metal::drawText3D(
         float drawH = glyph->height * scale;
 
         if (drawW > 0 && drawH > 0) {
+            // Adjust for centered quad rendering (batchQuadPositions uses -0.5 to 0.5)
+            float finalX = drawX + drawW * 0.5f;
+            float finalY = drawY + drawH * 0.5f;
+
             // Create UV coordinates for this glyph
             glm::vec2 uvs[4] = {
                 {glyph->u0, glyph->v0}, // top-left
@@ -5269,7 +5277,7 @@ void Renderer_Metal::drawText3D(
 
             // Create transform in world space
             glm::mat4 transform = glm::translate(glm::mat4(1.0f), worldPosition);
-            transform = glm::translate(transform, glm::vec3(drawX, drawY, 0.0f));
+            transform = glm::translate(transform, glm::vec3(finalX, finalY, 0.0f));
             transform = glm::scale(transform, glm::vec3(drawW, drawH, 1.0f));
             drawQuad3D(transform, font->textureHandle, uvs, color);
         }
