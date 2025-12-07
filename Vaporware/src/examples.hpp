@@ -14,47 +14,45 @@
 #include <string>
 
 // ============================================================
-// EXAMPLES - Showcasing the ECS Animation/FSM System
+// PRESETS - Pure data factories for common gameplay patterns
 //
-// This file demonstrates various gameplay effects that can be
-// achieved with the ECS-based animation architecture.
+// All functions return COMPONENT DATA, they don't emplace.
+// Usage: registry.emplace<XxxComponent>(entity, Xxx::preset());
 // ============================================================
 
 // ============================================================
-// 1. TWEEN EXAMPLES
+// 1. TWEEN PRESETS - Returns TweenComponent data
 // ============================================================
 
-namespace TweenExamples {
-
-    // Simple position tween
-    inline void moveEntity(entt::registry& reg, entt::entity entity,
-                           const glm::vec3& from, const glm::vec3& to,
-                           float duration) {
-        AnimationHelpers::tweenPosition(reg, entity, from, to, duration, Easing::OutCubic);
-    }
+namespace Tween {
 
     // Bounce in effect (scale from 0 to 1 with overshoot)
-    inline void bounceIn(entt::registry& reg, entt::entity entity, float duration = 0.5f) {
-        AnimationHelpers::tweenScale(reg, entity,
-            glm::vec3(0.0f), glm::vec3(1.0f),
-            duration, Easing::OutBack);
+    inline TweenTransformComponent bounceIn(float duration = 0.5f) {
+        TweenTransformComponent tween;
+        tween.base.duration = duration;
+        tween.base.easing = Easing::OutBack;
+        tween.base.state = TweenState::Running;
+        tween.target = TweenTransformTarget::Scale;
+        tween.startScale = glm::vec3(0.0f);
+        tween.endScale = glm::vec3(1.0f);
+        return tween;
     }
 
-    // Fade out and destroy
-    inline void fadeOutAndDestroy(entt::registry& reg, entt::entity entity, float duration = 0.3f) {
-        auto& tween = reg.emplace_or_replace<TweenColorComponent>(entity);
+    // Bounce out effect (scale from 1 to 0)
+    inline TweenTransformComponent bounceOut(float duration = 0.3f) {
+        TweenTransformComponent tween;
         tween.base.duration = duration;
-        tween.base.easing = Easing::OutCubic;
+        tween.base.easing = Easing::InBack;
         tween.base.state = TweenState::Running;
-        tween.startValue = glm::vec4(1.0f);
-        tween.endValue = glm::vec4(1.0f, 1.0f, 1.0f, 0.0f);
-        // Note: Would need a system to check completion and destroy
+        tween.target = TweenTransformTarget::Scale;
+        tween.startScale = glm::vec3(1.0f);
+        tween.endScale = glm::vec3(0.0f);
+        return tween;
     }
 
     // Pulsing scale (looping)
-    inline void pulseScale(entt::registry& reg, entt::entity entity,
-                           float minScale = 0.9f, float maxScale = 1.1f, float duration = 1.0f) {
-        auto& tween = reg.emplace_or_replace<TweenTransformComponent>(entity);
+    inline TweenTransformComponent pulse(float minScale = 0.9f, float maxScale = 1.1f, float duration = 1.0f) {
+        TweenTransformComponent tween;
         tween.base.duration = duration;
         tween.base.easing = Easing::InOutQuad;
         tween.base.state = TweenState::Running;
@@ -63,138 +61,137 @@ namespace TweenExamples {
         tween.target = TweenTransformTarget::Scale;
         tween.startScale = glm::vec3(minScale);
         tween.endScale = glm::vec3(maxScale);
+        return tween;
     }
 
-}  // namespace TweenExamples
+    // Fade out (alpha 1 → 0)
+    inline TweenColorComponent fadeOut(float duration = 0.3f) {
+        TweenColorComponent tween;
+        tween.base.duration = duration;
+        tween.base.easing = Easing::OutCubic;
+        tween.base.state = TweenState::Running;
+        tween.startValue = glm::vec4(1.0f);
+        tween.endValue = glm::vec4(1.0f, 1.0f, 1.0f, 0.0f);
+        return tween;
+    }
+
+    // Fade in (alpha 0 → 1)
+    inline TweenColorComponent fadeIn(float duration = 0.3f) {
+        TweenColorComponent tween;
+        tween.base.duration = duration;
+        tween.base.easing = Easing::OutCubic;
+        tween.base.state = TweenState::Running;
+        tween.startValue = glm::vec4(1.0f, 1.0f, 1.0f, 0.0f);
+        tween.endValue = glm::vec4(1.0f);
+        return tween;
+    }
+
+    // Move from A to B
+    inline TweenTransformComponent move(const glm::vec3& from, const glm::vec3& to,
+                                         float duration = 0.5f, EasingFunction easing = Easing::OutCubic) {
+        TweenTransformComponent tween;
+        tween.base.duration = duration;
+        tween.base.easing = easing;
+        tween.base.state = TweenState::Running;
+        tween.target = TweenTransformTarget::Position;
+        tween.startPosition = from;
+        tween.endPosition = to;
+        return tween;
+    }
+
+}  // namespace Tween
 
 // ============================================================
-// 2. ACTION SEQUENCE EXAMPLES
+// 2. ACTION SEQUENCE PRESETS - Returns vector of actions
 // ============================================================
 
-namespace ActionSequenceExamples {
+namespace ActionSequence {
+    using namespace AnimationBuilder;
 
-    // Door open sequence: shake → move up → callback
-    inline void openDoor(entt::registry& reg, entt::entity door,
-                         std::function<void()> onOpen = nullptr) {
-        using namespace AnimationBuilder;
-
-        AnimationHelpers::playCutscene(reg, door, {
-            // Shake before opening
-            callback([&reg]() {
-                CameraTraumaSystem::addTraumaToActiveCamera(reg, TraumaPresets::lightImpact());
-            }),
+    // Door open sequence: wait → move up
+    inline std::vector<TimelineAction> doorOpen(entt::entity door, const glm::vec3& openPos) {
+        return {
             wait(0.2f),
-            // Move door up
-            moveTo(door, glm::vec3(0, 3, 0), 1.0f, Easing::OutCubic),
-            // Notify completion
-            callback(onOpen ? onOpen : [](){})
-        }, nullptr, "door_open");
+            moveTo(door, openPos, 1.0f, Easing::OutCubic)
+        };
     }
 
-    // Chest open sequence: bounce → spawn particles → reveal item
-    inline void openChest(entt::registry& reg, entt::entity chest, entt::entity item) {
-        using namespace AnimationBuilder;
-
-        AnimationHelpers::playCutscene(reg, chest, {
-            // Bounce effect on chest
-            callback([&reg, chest]() {
-                TweenExamples::bounceIn(reg, chest, 0.3f);
-            }),
+    // Attack combo sequence
+    inline std::vector<TimelineAction> attackCombo(entt::entity attacker) {
+        return {
+            playAnimation(attacker, "slash1"),
             wait(0.3f),
-            // Show item with scale animation
-            setActive(item, true),
-            callback([&reg, item]() {
-                TweenExamples::bounceIn(reg, item, 0.5f);
-            }),
-            // Camera shake for impact
-            callback([&reg]() {
-                CameraTraumaSystem::addTraumaToActiveCamera(reg, TraumaPresets::lightImpact());
-            })
-        });
-    }
-
-    // Attack combo: slash1 → slash2 → heavy slash
-    inline void attackCombo(entt::registry& reg, entt::entity player,
-                            const glm::vec3& target, std::function<void()> onHit) {
-        using namespace AnimationBuilder;
-
-        AnimationHelpers::playCutscene(reg, player, {
-            // First slash
-            playAnimation(player, "slash1"),
-            wait(0.2f),
-            callback(onHit),
-            wait(0.1f),
-            // Second slash
-            playAnimation(player, "slash2"),
-            wait(0.2f),
-            callback(onHit),
-            wait(0.1f),
-            // Heavy finisher
-            playAnimation(player, "heavy_slash"),
+            playAnimation(attacker, "slash2"),
             wait(0.3f),
-            callback([&reg, onHit]() {
-                onHit();
-                CameraTraumaSystem::addTraumaToActiveCamera(reg, TraumaPresets::mediumImpact());
-            })
-        }, nullptr, "attack_combo");
+            playAnimation(attacker, "heavy_slash"),
+            wait(0.4f)
+        };
     }
 
-}  // namespace ActionSequenceExamples
+    // Spawn effect: scale up + fade in
+    inline std::vector<TimelineAction> spawnEffect(entt::entity entity) {
+        return {
+            setActive(entity, true),
+            wait(0.5f)  // Let tween play
+        };
+    }
+
+}  // namespace ActionSequence
 
 // ============================================================
-// 3. FSM EXAMPLES
+// 3. FSM PRESETS - Returns FSMComponent data
 // ============================================================
 
-namespace FSMExamples {
+namespace FSM {
 
-    // Simple interactive object: Idle <-> Active (toggle)
-    inline FSMComponent createInteractiveObject(entt::entity self,
-                                                 const glm::vec3& idlePos,
-                                                 const glm::vec3& activePos) {
+    // Simple toggle: Idle <-> Active
+    inline FSMComponent toggle(entt::entity self,
+                                const glm::vec3& idlePos,
+                                const glm::vec3& activePos,
+                                float duration = 0.5f) {
         using namespace AnimationBuilder;
 
         return FSMBuilder()
             .state("Idle")
-                .enter({ moveTo(self, idlePos, 0.5f, Easing::OutCubic) })
+                .enter({ moveTo(self, idlePos, duration, Easing::OutCubic) })
                 .transitionTo("Active", "interact")
             .state("Active")
-                .enter({ moveTo(self, activePos, 0.5f, Easing::OutCubic) })
+                .enter({ moveTo(self, activePos, duration, Easing::OutCubic) })
                 .transitionTo("Idle", "interact")
             .initialState("Idle")
             .build();
     }
 
-    // Combat AI: Idle → Chase → Attack → Cooldown → Chase/Idle
-    inline FSMComponent createCombatAI(entt::entity self, entt::entity target) {
+    // Combat AI: Idle → Chase → Attack → Cooldown → loop
+    inline FSMComponent combatAI(entt::entity self, entt::entity target,
+                                  float detectRange = 10.0f, float attackRange = 2.0f) {
         using namespace AnimationBuilder;
 
         return FSMBuilder()
             .state("Idle")
                 .enter({ playAnimation(self, "idle") })
                 .transitionTo("Chase", "player_spotted")
-                .transitionTo("Chase", [target](entt::registry& reg, entt::entity e) {
-                    // Transition when player is within detection range
+                .transitionTo("Chase", [target, detectRange](entt::registry& reg, entt::entity e) {
                     auto* selfTrans = reg.try_get<Vapor::TransformComponent>(e);
                     auto* targetTrans = reg.try_get<Vapor::TransformComponent>(target);
                     if (!selfTrans || !targetTrans) return false;
-                    return glm::distance(selfTrans->position, targetTrans->position) < 10.0f;
+                    return glm::distance(selfTrans->position, targetTrans->position) < detectRange;
                 })
 
             .state("Chase")
                 .enter({ playAnimation(self, "run") })
-                .transitionTo("Attack", [target](entt::registry& reg, entt::entity e) {
+                .transitionTo("Attack", [target, attackRange](entt::registry& reg, entt::entity e) {
                     auto* selfTrans = reg.try_get<Vapor::TransformComponent>(e);
                     auto* targetTrans = reg.try_get<Vapor::TransformComponent>(target);
                     if (!selfTrans || !targetTrans) return false;
-                    return glm::distance(selfTrans->position, targetTrans->position) < 2.0f;
+                    return glm::distance(selfTrans->position, targetTrans->position) < attackRange;
                 })
                 .transitionTo("Idle", "player_lost")
 
             .state("Attack")
                 .enter({
                     playAnimation(self, "attack"),
-                    wait(0.5f),
-                    callback([]() { /* Deal damage */ })
+                    wait(0.5f)
                 })
                 .transitionOnComplete("Cooldown")
 
@@ -206,8 +203,8 @@ namespace FSMExamples {
             .build();
     }
 
-    // NPC Dialogue: Idle → Talking → Waiting → Talking → Done
-    inline FSMComponent createDialogueNPC(entt::entity self) {
+    // Dialogue NPC: Idle → Talking → Waiting → Done
+    inline FSMComponent dialogueNPC(entt::entity self) {
         using namespace AnimationBuilder;
 
         return FSMBuilder()
@@ -216,10 +213,7 @@ namespace FSMExamples {
                 .transitionTo("Talking", "start_dialogue")
 
             .state("Talking")
-                .enter({
-                    playAnimation(self, "talk"),
-                    callback([]() { /* Show dialogue UI */ })
-                })
+                .enter({ playAnimation(self, "talk") })
                 .transitionTo("Waiting", "dialogue_shown")
 
             .state("Waiting")
@@ -227,17 +221,39 @@ namespace FSMExamples {
                 .transitionTo("Done", "end_dialogue")
 
             .state("Done")
-                .enter({
-                    playAnimation(self, "wave"),
-                    callback([]() { /* Hide dialogue UI */ })
-                })
+                .enter({ playAnimation(self, "wave") })
                 .transitionOnComplete("Idle")
 
             .initialState("Idle")
             .build();
     }
 
-}  // namespace FSMExamples
+    // Patrol between two points
+    inline FSMComponent patrol(entt::entity self,
+                                const glm::vec3& pointA,
+                                const glm::vec3& pointB,
+                                float walkDuration = 2.0f,
+                                float waitDuration = 1.0f) {
+        using namespace AnimationBuilder;
+
+        return FSMBuilder()
+            .state("WalkToB")
+                .enter({ moveTo(self, pointB, walkDuration, Easing::Linear) })
+                .transitionOnComplete("WaitAtB")
+            .state("WaitAtB")
+                .enter({ wait(waitDuration) })
+                .transitionOnComplete("WalkToA")
+            .state("WalkToA")
+                .enter({ moveTo(self, pointA, walkDuration, Easing::Linear) })
+                .transitionOnComplete("WaitAtA")
+            .state("WaitAtA")
+                .enter({ wait(waitDuration) })
+                .transitionOnComplete("WalkToB")
+            .initialState("WalkToB")
+            .build();
+    }
+
+}  // namespace FSM
 
 // ============================================================
 // 4. LANDING EFFECT (Squash + Particles + Shake)

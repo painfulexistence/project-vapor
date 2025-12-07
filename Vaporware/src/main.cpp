@@ -370,10 +370,10 @@ int main(int argc, char* args[]) {
         auto& nodeRef = registry.emplace<SceneNodeReferenceComponent>(interactiveBox);
         nodeRef.node = node;
 
-        // Use FSMExamples::createInteractiveObject from examples.hpp
+        // Use FSM::toggle from presets
         auto& fsm = registry.emplace<FSMComponent>(
             interactiveBox,
-            FSMExamples::createInteractiveObject(
+            FSM::toggle(
                 interactiveBox,
                 glm::vec3(0.0f, 0.5f, -3.0f),   // Idle position
                 glm::vec3(0.0f, 2.0f, -3.0f)    // Active position (raised)
@@ -445,9 +445,10 @@ int main(int argc, char* args[]) {
                     FSMSystem::sendEvent(registry, interactiveBox, "interact");
                     fmt::print("FSM: Sent 'interact' event to interactive box\n");
                 }
-                // Action sequence demo: door open effect
+                // Action sequence demo: door open effect (using preset)
                 if (e.key.scancode == SDL_SCANCODE_O) {
-                    ActionSequenceExamples::openDoor(registry, triggerCube, []() {
+                    auto actions = ActionSequence::doorOpen(triggerCube, glm::vec3(-5.0f, 3.0f, 0.0f));
+                    AnimationHelpers::playCutscene(registry, triggerCube, actions, []() {
                         fmt::print("Action Sequence: Door opened!\n");
                     });
                     fmt::print("Action Sequence: Starting door open animation\n");
