@@ -249,18 +249,13 @@ vertex FlareVertexOut sunFlareVertex(uint vertexID [[vertex_id]]) {
 
 fragment float4 sunFlareFragment(
     FlareVertexOut in [[stage_in]],
-    texture2d<float, access::sample> sceneColor [[texture(0)]],
+    texture2d<float, access::sample> sceneColor [[texture(0)]],  // Unused with hardware blending
     texture2d<float, access::sample> sceneDepth [[texture(1)]],
     constant SunFlareData& data [[buffer(0)]]
 ) {
-    constexpr sampler linearSampler(filter::linear, address::clamp_to_edge);
-
-    // Sample scene
-    float4 scene = sceneColor.sample(linearSampler, in.uv);
-
-    // Early out if sun not visible
+    // Early out if sun not visible - return zero (add nothing)
     if (data.visibility < 0.01) {
-        return scene;
+        return float4(0.0);
     }
 
     // Check if sun is within valid screen range
@@ -268,7 +263,7 @@ fragment float4 sunFlareFragment(
     float margin = 0.5;
     if (sunPos.x < -margin || sunPos.x > 1.0 + margin ||
         sunPos.y < -margin || sunPos.y > 1.0 + margin) {
-        return scene;
+        return float4(0.0);
     }
 
     float2 uv = in.uv;
@@ -403,10 +398,8 @@ fragment float4 sunFlareFragment(
     // Apply overall intensity
     flareColor *= intensity;
 
-    // Additive blend with scene
-    float3 result = scene.rgb + flareColor;
-
-    return float4(result, scene.a);
+    // Output only flare color - hardware additive blending handles compositing
+    return float4(flareColor, 0.0);
 }
 
 // ============================================================================

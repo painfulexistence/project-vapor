@@ -1357,22 +1357,25 @@ public:
             NS::Range::Make(0, r.volumetricFogDataBuffers[r.currentFrameInFlight]->length())
         );
 
-        // Simple fog pass (renders to bloom result RT which then goes to post-process)
+        // Simple fog pass - ping-pong: read from colorRT, write to tempColorRT
         auto passDesc = NS::TransferPtr(MTL::RenderPassDescriptor::renderPassDescriptor());
-        auto colorRT = passDesc->colorAttachments()->object(0);
-        colorRT->setLoadAction(MTL::LoadActionLoad);
-        colorRT->setStoreAction(MTL::StoreActionStore);
-        colorRT->setTexture(r.colorRT.get());
+        auto colorAttach = passDesc->colorAttachments()->object(0);
+        colorAttach->setLoadAction(MTL::LoadActionDontCare);
+        colorAttach->setStoreAction(MTL::StoreActionStore);
+        colorAttach->setTexture(r.tempColorRT.get());  // Write to temp
 
         auto encoder = r.currentCommandBuffer->renderCommandEncoder(passDesc.get());
         encoder->setRenderPipelineState(r.fogSimplePipeline.get());
         encoder->setCullMode(MTL::CullModeNone);
-        encoder->setFragmentTexture(r.colorRT.get(), 0);
+        encoder->setFragmentTexture(r.colorRT.get(), 0);  // Read from color
         encoder->setFragmentTexture(r.depthStencilRT.get(), 1);
         encoder->setFragmentBuffer(r.volumetricFogDataBuffers[r.currentFrameInFlight].get(), 0, 0);
         encoder->setFragmentBuffer(r.cameraDataBuffers[r.currentFrameInFlight].get(), 0, 1);
         encoder->drawPrimitives(MTL::PrimitiveType::PrimitiveTypeTriangle, 0, 3, 1);
         encoder->endEncoding();
+
+        // Swap so colorRT now contains the fogged result
+        std::swap(r.colorRT, r.tempColorRT);
     }
 };
 
@@ -1525,7 +1528,7 @@ public:
             }
 
             // ================================================================
-            // Pass 3: Upscale and composite to main color RT
+            // Pass 3: Upscale and composite - ping-pong to avoid hazard
             // ================================================================
             {
                 // Restore screen size for composite pass
@@ -1536,22 +1539,25 @@ public:
 
                 auto passDesc = NS::TransferPtr(MTL::RenderPassDescriptor::renderPassDescriptor());
                 auto colorAttach = passDesc->colorAttachments()->object(0);
-                colorAttach->setLoadAction(MTL::LoadActionLoad);
+                colorAttach->setLoadAction(MTL::LoadActionDontCare);
                 colorAttach->setStoreAction(MTL::StoreActionStore);
-                colorAttach->setTexture(r.colorRT.get());
+                colorAttach->setTexture(r.tempColorRT.get());  // Write to temp
 
                 auto encoder = r.currentCommandBuffer->renderCommandEncoder(passDesc.get());
                 encoder->setRenderPipelineState(r.cloudCompositePipeline.get());
                 encoder->setCullMode(MTL::CullModeNone);
-                encoder->setFragmentTexture(r.colorRT.get(), 0);// Scene color
-                encoder->setFragmentTexture(r.cloudRT.get(), 1);// Cloud (quarter res, will be upscaled)
+                encoder->setFragmentTexture(r.colorRT.get(), 0);   // Read from color
+                encoder->setFragmentTexture(r.cloudRT.get(), 1);   // Cloud (quarter res)
                 encoder->setFragmentTexture(r.depthStencilRT.get(), 2);
                 encoder->setFragmentBuffer(r.volumetricCloudDataBuffers[r.currentFrameInFlight].get(), 0, 0);
                 encoder->drawPrimitives(MTL::PrimitiveType::PrimitiveTypeTriangle, 0, 3, 1);
                 encoder->endEncoding();
+
+                // Swap so colorRT now contains the composited result
+                std::swap(r.colorRT, r.tempColorRT);
             }
         } else if (hasFullResPipeline) {
-            // Fallback: Full resolution rendering (slower but simpler)
+            // Fallback: Full resolution rendering - ping-pong to avoid hazard
             cloudData->screenSize = glm::vec2(drawableSize.width, drawableSize.height);
             r.volumetricCloudDataBuffers[r.currentFrameInFlight]->didModifyRange(
                 NS::Range::Make(0, r.volumetricCloudDataBuffers[r.currentFrameInFlight]->length())
@@ -1559,19 +1565,22 @@ public:
 
             auto passDesc = NS::TransferPtr(MTL::RenderPassDescriptor::renderPassDescriptor());
             auto colorAttach = passDesc->colorAttachments()->object(0);
-            colorAttach->setLoadAction(MTL::LoadActionLoad);
+            colorAttach->setLoadAction(MTL::LoadActionDontCare);
             colorAttach->setStoreAction(MTL::StoreActionStore);
-            colorAttach->setTexture(r.colorRT.get());
+            colorAttach->setTexture(r.tempColorRT.get());  // Write to temp
 
             auto encoder = r.currentCommandBuffer->renderCommandEncoder(passDesc.get());
             encoder->setRenderPipelineState(r.cloudRenderPipeline.get());
             encoder->setCullMode(MTL::CullModeNone);
-            encoder->setFragmentTexture(r.colorRT.get(), 0);
+            encoder->setFragmentTexture(r.colorRT.get(), 0);  // Read from color
             encoder->setFragmentTexture(r.depthStencilRT.get(), 1);
             encoder->setFragmentBuffer(r.volumetricCloudDataBuffers[r.currentFrameInFlight].get(), 0, 0);
             encoder->setFragmentBuffer(r.cameraDataBuffers[r.currentFrameInFlight].get(), 0, 1);
             encoder->drawPrimitives(MTL::PrimitiveType::PrimitiveTypeTriangle, 0, 3, 1);
             encoder->endEncoding();
+
+            // Swap so colorRT now contains the composited result
+            std::swap(r.colorRT, r.tempColorRT);
         }
 
         // Store current view-proj for next frame's temporal reprojection
@@ -1667,17 +1676,17 @@ public:
             NS::Range::Make(0, r.sunFlareDataBuffers[r.currentFrameInFlight]->length())
         );
 
-        // Render flare
+        // Render flare with additive blending (hardware blends output onto existing content)
         auto passDesc = NS::TransferPtr(MTL::RenderPassDescriptor::renderPassDescriptor());
-        auto colorRT = passDesc->colorAttachments()->object(0);
-        colorRT->setLoadAction(MTL::LoadActionLoad);
-        colorRT->setStoreAction(MTL::StoreActionStore);
-        colorRT->setTexture(r.bloomResultRT.get());// Render after bloom composite
+        auto colorAttach = passDesc->colorAttachments()->object(0);
+        colorAttach->setLoadAction(MTL::LoadActionLoad);  // Preserve existing bloom result
+        colorAttach->setStoreAction(MTL::StoreActionStore);
+        colorAttach->setTexture(r.bloomResultRT.get());
 
         auto encoder = r.currentCommandBuffer->renderCommandEncoder(passDesc.get());
         encoder->setRenderPipelineState(r.sunFlarePipeline.get());
         encoder->setCullMode(MTL::CullModeNone);
-        encoder->setFragmentTexture(r.bloomResultRT.get(), 0);
+        // No need to bind bloomResultRT as input - hardware blending handles compositing
         encoder->setFragmentTexture(r.depthStencilRT.get(), 1);
         encoder->setFragmentBuffer(r.sunFlareDataBuffers[r.currentFrameInFlight].get(), 0, 0);
         encoder->drawPrimitives(MTL::PrimitiveType::PrimitiveTypeTriangle, 0, 3, 1);
@@ -3045,6 +3054,8 @@ auto Renderer_Metal::createResources() -> void {
     colorTextureDesc->setSampleCount(1);
     colorTextureDesc->setUsage(MTL::TextureUsageRenderTarget | MTL::TextureUsageShaderRead);
     colorRT = NS::TransferPtr(device->newTexture(colorTextureDesc));
+    // Create tempColorRT for ping-pong post-processing (same format as colorRT)
+    tempColorRT = NS::TransferPtr(device->newTexture(colorTextureDesc));
     colorTextureDesc->release();
 
     MTL::TextureDescriptor* normalTextureDesc = MTL::TextureDescriptor::alloc()->init();
@@ -3487,7 +3498,16 @@ auto Renderer_Metal::createResources() -> void {
                 auto pipelineDesc = MTL::RenderPipelineDescriptor::alloc()->init();
                 pipelineDesc->setVertexFunction(vertexMain);
                 pipelineDesc->setFragmentFunction(fragmentMain);
-                pipelineDesc->colorAttachments()->object(0)->setPixelFormat(MTL::PixelFormatRGBA16Float);
+                auto colorAttach = pipelineDesc->colorAttachments()->object(0);
+                colorAttach->setPixelFormat(MTL::PixelFormatRGBA16Float);
+                // Additive blending: output = src + dst
+                colorAttach->setBlendingEnabled(true);
+                colorAttach->setSourceRGBBlendFactor(MTL::BlendFactorOne);
+                colorAttach->setDestinationRGBBlendFactor(MTL::BlendFactorOne);
+                colorAttach->setRgbBlendOperation(MTL::BlendOperationAdd);
+                colorAttach->setSourceAlphaBlendFactor(MTL::BlendFactorOne);
+                colorAttach->setDestinationAlphaBlendFactor(MTL::BlendFactorZero);
+                colorAttach->setAlphaBlendOperation(MTL::BlendOperationAdd);
 
                 sunFlarePipeline = NS::TransferPtr(device->newRenderPipelineState(pipelineDesc, &error));
                 if (!sunFlarePipeline) {

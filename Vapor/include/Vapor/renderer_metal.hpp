@@ -433,6 +433,7 @@ protected:
     // Render targets
     NS::SharedPtr<MTL::Texture> colorRT_MS;
     NS::SharedPtr<MTL::Texture> colorRT;
+    NS::SharedPtr<MTL::Texture> tempColorRT;  // For ping-pong post-processing (fog, clouds)
     NS::SharedPtr<MTL::Texture> depthStencilRT_MS;
     NS::SharedPtr<MTL::Texture> depthStencilRT;
     NS::SharedPtr<MTL::Texture> normalRT_MS;
