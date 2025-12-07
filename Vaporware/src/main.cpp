@@ -414,8 +414,6 @@ int main(int argc, char* args[]) {
             tempCamera.setViewMatrix(cam.viewMatrix);
             tempCamera.setProjectionMatrix(cam.projectionMatrix);
 
-            renderer->draw(scene, tempCamera);
-
             // ===== 2D Batch Rendering Demo =====
             // Just draw - projection is computed internally from window size
 
@@ -460,6 +458,10 @@ int main(int argc, char* args[]) {
 
             // Draw 3D quad in world space (will be occluded by geometry)
             renderer->drawQuad3D(glm::vec3(0.0f, 2.0f, 0.0f), glm::vec2(1.0f, 1.0f), glm::vec4(1.0f, 0.0f, 0.0f, 1.0f));
+
+            renderer->draw(scene, tempCamera);
+
+
         } else {
             // Fallback camera or warning
             // fmt::print(stderr, "Warning: No active camera found for rendering.\n");

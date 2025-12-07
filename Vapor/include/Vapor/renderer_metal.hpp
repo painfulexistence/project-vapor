@@ -1,13 +1,13 @@
 #pragma once
 #include "renderer.hpp"
 
-#include <array>
 #include <Foundation/Foundation.hpp>
 #include <Metal/Metal.hpp>
 #include <QuartzCore/QuartzCore.hpp>
 #include <SDL3/SDL_render.h>
 #include <SDL3/SDL_stdinc.h>
 #include <SDL3/SDL_video.h>
+#include <array>
 #include <memory>
 #include <string>
 #include <unordered_map>
@@ -157,30 +157,54 @@ public:
     // Quad drawing (2D = screen space, 3D = world space with depth)
     void drawQuad2D(const glm::vec2& position, const glm::vec2& size, const glm::vec4& color) override;
     void drawQuad2D(const glm::vec3& position, const glm::vec2& size, const glm::vec4& color) override;
-    void drawQuad2D(const glm::vec2& position, const glm::vec2& size, TextureHandle texture, const glm::vec4& tintColor = glm::vec4(1.0f)) override;
+    void drawQuad2D(
+        const glm::vec2& position,
+        const glm::vec2& size,
+        TextureHandle texture,
+        const glm::vec4& tintColor = glm::vec4(1.0f)
+    ) override;
     void drawQuad2D(const glm::mat4& transform, const glm::vec4& color, int entityID = -1) override;
-    void drawQuad2D(const glm::mat4& transform, TextureHandle texture, const glm::vec2* texCoords, const glm::vec4& tintColor = glm::vec4(1.0f), int entityID = -1) override;
+    void drawQuad2D(
+        const glm::mat4& transform,
+        TextureHandle texture,
+        const glm::vec2* texCoords,
+        const glm::vec4& tintColor = glm::vec4(1.0f),
+        int entityID = -1
+    ) override;
     void drawQuad3D(const glm::vec3& position, const glm::vec2& size, const glm::vec4& color) override;
     void drawQuad3D(const glm::mat4& transform, const glm::vec4& color, int entityID = -1) override;
 
     // Rotated quad
-    void drawRotatedQuad2D(const glm::vec2& position, const glm::vec2& size, float rotation, const glm::vec4& color) override;
-    void drawRotatedQuad2D(const glm::vec2& position, const glm::vec2& size, float rotation, TextureHandle texture, const glm::vec4& tintColor = glm::vec4(1.0f)) override;
+    void drawRotatedQuad2D(const glm::vec2& position, const glm::vec2& size, float rotation, const glm::vec4& color)
+        override;
+    void drawRotatedQuad2D(
+        const glm::vec2& position,
+        const glm::vec2& size,
+        float rotation,
+        TextureHandle texture,
+        const glm::vec4& tintColor = glm::vec4(1.0f)
+    ) override;
 
     // Line drawing
     void drawLine2D(const glm::vec2& p0, const glm::vec2& p1, const glm::vec4& color, float thickness = 1.0f) override;
     void drawLine3D(const glm::vec3& p0, const glm::vec3& p1, const glm::vec4& color, float thickness = 1.0f) override;
 
     // Shape drawing
-    void drawRect2D(const glm::vec2& position, const glm::vec2& size, const glm::vec4& color, float thickness = 1.0f) override;
+    void drawRect2D(const glm::vec2& position, const glm::vec2& size, const glm::vec4& color, float thickness = 1.0f)
+        override;
     void drawCircle2D(const glm::vec2& center, float radius, const glm::vec4& color, int segments = 32) override;
     void drawCircleFilled2D(const glm::vec2& center, float radius, const glm::vec4& color, int segments = 32) override;
     void drawTriangle2D(const glm::vec2& p0, const glm::vec2& p1, const glm::vec2& p2, const glm::vec4& color) override;
-    void drawTriangleFilled2D(const glm::vec2& p0, const glm::vec2& p1, const glm::vec2& p2, const glm::vec4& color) override;
+    void drawTriangleFilled2D(const glm::vec2& p0, const glm::vec2& p1, const glm::vec2& p2, const glm::vec4& color)
+        override;
 
     // Batch statistics
-    Batch2DStats getBatch2DStats() const override { return batch2DStats; }
-    void resetBatch2DStats() override { batch2DStats = {}; }
+    Batch2DStats getBatch2DStats() const override {
+        return batch2DStats;
+    }
+    void resetBatch2DStats() override {
+        batch2DStats = {};
+    }
 
     NS::SharedPtr<MTL::RenderPipelineState>
         createPipeline(const std::string& filename, bool isHDR, bool isColorOnly, Uint32 sampleCount);
@@ -251,12 +275,12 @@ protected:
     NS::SharedPtr<MTL::RenderPipelineState> batch2DPipeline;
     NS::SharedPtr<MTL::RenderPipelineState> batch2DPipelineAdditive;
     NS::SharedPtr<MTL::RenderPipelineState> batch2DPipelineMultiply;
-    NS::SharedPtr<MTL::DepthStencilState> batch2DDepthStencilState;         // No depth test
-    NS::SharedPtr<MTL::DepthStencilState> batch2DDepthStencilStateEnabled;  // With depth test
-    std::vector<NS::SharedPtr<MTL::Buffer>> batch2DVertexBuffers;  // Per-frame triple-buffered
-    std::vector<NS::SharedPtr<MTL::Buffer>> batch2DIndexBuffers;   // Per-frame triple-buffered
-    std::vector<NS::SharedPtr<MTL::Buffer>> batch2DUniformBuffers; // Per-frame triple-buffered
-    NS::SharedPtr<MTL::Texture> batch2DWhiteTexture;               // 1x1 white texture
+    NS::SharedPtr<MTL::DepthStencilState> batch2DDepthStencilState;// No depth test
+    NS::SharedPtr<MTL::DepthStencilState> batch2DDepthStencilStateEnabled;// With depth test
+    std::vector<NS::SharedPtr<MTL::Buffer>> batch2DVertexBuffers;// Per-frame triple-buffered
+    std::vector<NS::SharedPtr<MTL::Buffer>> batch2DIndexBuffers;// Per-frame triple-buffered
+    std::vector<NS::SharedPtr<MTL::Buffer>> batch2DUniformBuffers;// Per-frame triple-buffered
+    NS::SharedPtr<MTL::Texture> batch2DWhiteTexture;// 1x1 white texture
     TextureHandle batch2DWhiteTextureHandle;
 
     // Batch constants
@@ -269,7 +293,7 @@ protected:
     std::vector<Batch2DVertex> batch2DVertices;
     std::vector<Uint32> batch2DIndices;
     std::array<TextureHandle, 16> batch2DTextureSlots;
-    Uint32 batch2DTextureSlotIndex = 1;  // 0 = white texture
+    Uint32 batch2DTextureSlotIndex = 1;// 0 = white texture
     glm::mat4 batch2DProjection = glm::mat4(1.0f);
     BlendMode batch2DBlendMode = BlendMode::Alpha;
     Batch2DStats batch2DStats;

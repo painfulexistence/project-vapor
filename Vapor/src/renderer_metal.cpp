@@ -1812,7 +1812,7 @@ public:
 
         // Use camera's viewProj for 3D batch
         Batch2DUniforms uniforms;
-        uniforms.projectionMatrix = r.currentCamera->getProjectionMatrix() * r.currentCamera->getViewMatrix();
+        uniforms.projectionMatrix = r.currentCamera->getProjMatrix() * r.currentCamera->getViewMatrix();
         memcpy(uniformBuffer->contents(), &uniforms, sizeof(Batch2DUniforms));
 
         MTL::RenderPipelineState* pipeline = r.batch2DPipeline.get();
@@ -1820,7 +1820,7 @@ public:
 
         auto passDesc = NS::TransferPtr(MTL::RenderPassDescriptor::renderPassDescriptor());
         auto colorAttachment = passDesc->colorAttachments()->object(0);
-        colorAttachment->setTexture(r.colorRT.get());  // Render to HDR RT (before bloom)
+        colorAttachment->setTexture(r.colorRT.get());// Render to HDR RT (before bloom)
         colorAttachment->setLoadAction(MTL::LoadActionLoad);
         colorAttachment->setStoreAction(MTL::StoreActionStore);
 
@@ -1836,12 +1836,12 @@ public:
 
         auto drawableWidth = r.colorRT->width();
         auto drawableHeight = r.colorRT->height();
-        MTL::Viewport viewport = { 0.0, 0.0, static_cast<double>(drawableWidth),
-                                   static_cast<double>(drawableHeight), 0.0, 1.0 };
+        MTL::Viewport viewport = { 0.0, 0.0, static_cast<double>(drawableWidth), static_cast<double>(drawableHeight),
+                                   0.0, 1.0 };
         encoder->setViewport(viewport);
 
         encoder->setRenderPipelineState(pipeline);
-        encoder->setDepthStencilState(r.batch2DDepthStencilStateEnabled.get());
+        encoder->setDepthStencilState(r.batch2DDepthStencilState.get());
         encoder->setCullMode(MTL::CullModeNone);
 
         encoder->setVertexBuffer(vertexBuffer.get(), 0, 0);
@@ -1857,11 +1857,13 @@ public:
             encoder->setFragmentTexture(texture, i);
         }
 
-        encoder->drawIndexedPrimitives(MTL::PrimitiveTypeTriangle,
-                                       NS::UInteger(indexCount),
-                                       MTL::IndexTypeUInt32,
-                                       indexBuffer.get(),
-                                       NS::UInteger(0));
+        encoder->drawIndexedPrimitives(
+            MTL::PrimitiveTypeTriangle,
+            NS::UInteger(indexCount),
+            MTL::IndexTypeUInt32,
+            indexBuffer.get(),
+            NS::UInteger(0)
+        );
         encoder->endEncoding();
 
         // Clear batch
@@ -1916,9 +1918,8 @@ public:
         auto rtWidth = r.colorRT->width();
         auto rtHeight = r.colorRT->height();
         Batch2DUniforms uniforms;
-        uniforms.projectionMatrix = glm::ortho(0.0f, static_cast<float>(rtWidth),
-                                                static_cast<float>(rtHeight), 0.0f,
-                                                -1.0f, 1.0f);
+        uniforms.projectionMatrix =
+            glm::ortho(0.0f, static_cast<float>(rtWidth), static_cast<float>(rtHeight), 0.0f, -1.0f, 1.0f);
         memcpy(uniformBuffer->contents(), &uniforms, sizeof(Batch2DUniforms));
 
         // Select pipeline based on blend mode
@@ -1931,14 +1932,13 @@ public:
         // Create render pass descriptor - render to HDR RT (before bloom)
         auto passDesc = NS::TransferPtr(MTL::RenderPassDescriptor::renderPassDescriptor());
         auto colorAttachment = passDesc->colorAttachments()->object(0);
-        colorAttachment->setTexture(r.colorRT.get());  // Render to HDR RT
+        colorAttachment->setTexture(r.colorRT.get());// Render to HDR RT
         colorAttachment->setLoadAction(MTL::LoadActionLoad);
         colorAttachment->setStoreAction(MTL::StoreActionStore);
 
         auto encoder = r.currentCommandBuffer->renderCommandEncoder(passDesc.get());
 
-        MTL::Viewport viewport = { 0.0, 0.0, static_cast<double>(rtWidth),
-                                   static_cast<double>(rtHeight), 0.0, 1.0 };
+        MTL::Viewport viewport = { 0.0, 0.0, static_cast<double>(rtWidth), static_cast<double>(rtHeight), 0.0, 1.0 };
         encoder->setViewport(viewport);
 
         encoder->setRenderPipelineState(pipeline);
@@ -1966,11 +1966,13 @@ public:
         }
 
         // Draw indexed triangles
-        encoder->drawIndexedPrimitives(MTL::PrimitiveTypeTriangle,
-                                       NS::UInteger(indexCount),
-                                       MTL::IndexTypeUInt32,
-                                       indexBuffer.get(),
-                                       NS::UInteger(0));
+        encoder->drawIndexedPrimitives(
+            MTL::PrimitiveTypeTriangle,
+            NS::UInteger(indexCount),
+            MTL::IndexTypeUInt32,
+            indexBuffer.get(),
+            NS::UInteger(0)
+        );
 
         encoder->endEncoding();
 
@@ -2353,11 +2355,10 @@ auto Renderer_Metal::createResources() -> void {
         batch2DIndexBuffers.resize(MAX_FRAMES_IN_FLIGHT);
         batch2DUniformBuffers.resize(MAX_FRAMES_IN_FLIGHT);
         for (size_t i = 0; i < MAX_FRAMES_IN_FLIGHT; i++) {
-            batch2DVertexBuffers[i] = nullptr;  // Allocated on demand
-            batch2DIndexBuffers[i] = nullptr;   // Allocated on demand
-            batch2DUniformBuffers[i] = NS::TransferPtr(
-                device->newBuffer(sizeof(Batch2DUniforms), MTL::ResourceStorageModeShared)
-            );
+            batch2DVertexBuffers[i] = nullptr;// Allocated on demand
+            batch2DIndexBuffers[i] = nullptr;// Allocated on demand
+            batch2DUniformBuffers[i] =
+                NS::TransferPtr(device->newBuffer(sizeof(Batch2DUniforms), MTL::ResourceStorageModeShared));
         }
 
         // Create 1x1 white texture for untextured primitives
@@ -2374,12 +2375,7 @@ auto Renderer_Metal::createResources() -> void {
 
         // Fill with white pixel
         uint32_t whitePixel = 0xFFFFFFFF;
-        batch2DWhiteTexture->replaceRegion(
-            MTL::Region(0, 0, 1, 1),
-            0,
-            &whitePixel,
-            sizeof(uint32_t)
-        );
+        batch2DWhiteTexture->replaceRegion(MTL::Region(0, 0, 1, 1), 0, &whitePixel, sizeof(uint32_t));
 
         // Create texture handle for the white texture
         batch2DWhiteTextureHandle.rid = nextTextureID++;
@@ -4376,10 +4372,7 @@ void Renderer_Metal::flush3D() {
 
 // Helper to find or add a texture slot
 static float findOrAddTextureSlot(
-    std::array<TextureHandle, 16>& slots,
-    Uint32& slotIndex,
-    TextureHandle texture,
-    TextureHandle whiteTexture
+    std::array<TextureHandle, 16>& slots, Uint32& slotIndex, TextureHandle texture, TextureHandle whiteTexture
 ) {
     if (texture.rid == UINT32_MAX || texture.rid == whiteTexture.rid) {
         return 0.0f;
@@ -4392,7 +4385,7 @@ static float findOrAddTextureSlot(
     }
 
     if (slotIndex >= 16) {
-        return 0.0f; // Fallback to white texture if slots full
+        return 0.0f;// Fallback to white texture if slots full
     }
 
     float texIndex = static_cast<float>(slotIndex);
@@ -4406,14 +4399,16 @@ void Renderer_Metal::drawQuad2D(const glm::vec2& position, const glm::vec2& size
 }
 
 void Renderer_Metal::drawQuad2D(const glm::vec3& position, const glm::vec2& size, const glm::vec4& color) {
-    glm::mat4 transform = glm::translate(glm::mat4(1.0f), position)
-                        * glm::scale(glm::mat4(1.0f), glm::vec3(size, 1.0f));
+    glm::mat4 transform =
+        glm::translate(glm::mat4(1.0f), position) * glm::scale(glm::mat4(1.0f), glm::vec3(size, 1.0f));
     drawQuad2D(transform, color);
 }
 
-void Renderer_Metal::drawQuad2D(const glm::vec2& position, const glm::vec2& size, TextureHandle texture, const glm::vec4& tintColor) {
-    glm::mat4 transform = glm::translate(glm::mat4(1.0f), glm::vec3(position, 0.0f))
-                        * glm::scale(glm::mat4(1.0f), glm::vec3(size, 1.0f));
+void Renderer_Metal::drawQuad2D(
+    const glm::vec2& position, const glm::vec2& size, TextureHandle texture, const glm::vec4& tintColor
+) {
+    glm::mat4 transform =
+        glm::translate(glm::mat4(1.0f), glm::vec3(position, 0.0f)) * glm::scale(glm::mat4(1.0f), glm::vec3(size, 1.0f));
     drawQuad2D(transform, texture, batchQuadTexCoords, tintColor);
 }
 
@@ -4421,13 +4416,20 @@ void Renderer_Metal::drawQuad2D(const glm::mat4& transform, const glm::vec4& col
     drawQuad2D(transform, batch2DWhiteTextureHandle, batchQuadTexCoords, color, entityID);
 }
 
-void Renderer_Metal::drawQuad2D(const glm::mat4& transform, TextureHandle texture, const glm::vec2* texCoords, const glm::vec4& tintColor, int entityID) {
-    beginBatch2D();  // Auto-start batch
+void Renderer_Metal::drawQuad2D(
+    const glm::mat4& transform,
+    TextureHandle texture,
+    const glm::vec2* texCoords,
+    const glm::vec4& tintColor,
+    int entityID
+) {
+    beginBatch2D();// Auto-start batch
     if (batch2DIndices.size() >= BatchMaxIndices) {
-        return; // Batch full
+        return;// Batch full
     }
 
-    float textureIndex = findOrAddTextureSlot(batch2DTextureSlots, batch2DTextureSlotIndex, texture, batch2DWhiteTextureHandle);
+    float textureIndex =
+        findOrAddTextureSlot(batch2DTextureSlots, batch2DTextureSlotIndex, texture, batch2DWhiteTextureHandle);
     Uint32 vertexOffset = static_cast<Uint32>(batch2DVertices.size());
 
     // Add 4 vertices
@@ -4452,40 +4454,40 @@ void Renderer_Metal::drawQuad2D(const glm::mat4& transform, TextureHandle textur
     batch2DStats.quadCount++;
 }
 
-void Renderer_Metal::drawRotatedQuad2D(const glm::vec2& position, const glm::vec2& size, float rotation, const glm::vec4& color) {
+void Renderer_Metal::drawRotatedQuad2D(
+    const glm::vec2& position, const glm::vec2& size, float rotation, const glm::vec4& color
+) {
     glm::mat4 transform = glm::translate(glm::mat4(1.0f), glm::vec3(position, 0.0f))
-                        * glm::rotate(glm::mat4(1.0f), rotation, glm::vec3(0.0f, 0.0f, 1.0f))
-                        * glm::scale(glm::mat4(1.0f), glm::vec3(size, 1.0f));
+                          * glm::rotate(glm::mat4(1.0f), rotation, glm::vec3(0.0f, 0.0f, 1.0f))
+                          * glm::scale(glm::mat4(1.0f), glm::vec3(size, 1.0f));
     drawQuad2D(transform, color);
 }
 
-void Renderer_Metal::drawRotatedQuad2D(const glm::vec2& position, const glm::vec2& size, float rotation, TextureHandle texture, const glm::vec4& tintColor) {
+void Renderer_Metal::drawRotatedQuad2D(
+    const glm::vec2& position, const glm::vec2& size, float rotation, TextureHandle texture, const glm::vec4& tintColor
+) {
     glm::mat4 transform = glm::translate(glm::mat4(1.0f), glm::vec3(position, 0.0f))
-                        * glm::rotate(glm::mat4(1.0f), rotation, glm::vec3(0.0f, 0.0f, 1.0f))
-                        * glm::scale(glm::mat4(1.0f), glm::vec3(size, 1.0f));
+                          * glm::rotate(glm::mat4(1.0f), rotation, glm::vec3(0.0f, 0.0f, 1.0f))
+                          * glm::scale(glm::mat4(1.0f), glm::vec3(size, 1.0f));
     drawQuad2D(transform, texture, batchQuadTexCoords, tintColor);
 }
 
 void Renderer_Metal::drawLine2D(const glm::vec2& p0, const glm::vec2& p1, const glm::vec4& color, float thickness) {
-    drawLine2D(glm::vec3(p0, 0.0f), glm::vec3(p1, 0.0f), color, thickness);
-}
+    beginBatch2D();// Auto-start batch
 
-void Renderer_Metal::drawLine2D(const glm::vec3& p0, const glm::vec3& p1, const glm::vec4& color, float thickness) {
-    beginBatch2D();  // Auto-start batch
-
-    glm::vec3 direction = p1 - p0;
-    float length = glm::length(glm::vec2(direction));
+    glm::vec2 direction = p1 - p0;
+    float length = glm::length(direction);
     if (length < 0.0001f) return;
 
-    glm::vec3 normalized = direction / length;
-    glm::vec3 perpendicular(-normalized.y, normalized.x, 0.0f);
+    glm::vec2 normalized = direction / length;
+    glm::vec2 perpendicular(-normalized.y, normalized.x);
     float halfThickness = thickness * 0.5f;
 
     // Four corners of the line quad
-    glm::vec3 v0 = p0 - perpendicular * halfThickness;
-    glm::vec3 v1 = p1 - perpendicular * halfThickness;
-    glm::vec3 v2 = p1 + perpendicular * halfThickness;
-    glm::vec3 v3 = p0 + perpendicular * halfThickness;
+    glm::vec3 v0 = glm::vec3(p0 - perpendicular * halfThickness, 0.0f);
+    glm::vec3 v1 = glm::vec3(p1 - perpendicular * halfThickness, 0.0f);
+    glm::vec3 v2 = glm::vec3(p1 + perpendicular * halfThickness, 0.0f);
+    glm::vec3 v3 = glm::vec3(p0 + perpendicular * halfThickness, 0.0f);
 
     if (batch2DIndices.size() >= BatchMaxIndices) return;
 
@@ -4498,10 +4500,14 @@ void Renderer_Metal::drawLine2D(const glm::vec3& p0, const glm::vec3& p1, const 
     vertex.texIndex = 0.0f;
     vertex.entityID = -1.0f;
 
-    vertex.position = v0; batch2DVertices.push_back(vertex);
-    vertex.position = v1; batch2DVertices.push_back(vertex);
-    vertex.position = v2; batch2DVertices.push_back(vertex);
-    vertex.position = v3; batch2DVertices.push_back(vertex);
+    vertex.position = v0;
+    batch2DVertices.push_back(vertex);
+    vertex.position = v1;
+    batch2DVertices.push_back(vertex);
+    vertex.position = v2;
+    batch2DVertices.push_back(vertex);
+    vertex.position = v3;
+    batch2DVertices.push_back(vertex);
 
     batch2DIndices.push_back(vertexOffset + 0);
     batch2DIndices.push_back(vertexOffset + 1);
@@ -4516,16 +4522,16 @@ void Renderer_Metal::drawLine2D(const glm::vec3& p0, const glm::vec3& p1, const 
 // ===== 3D Batch Drawing (world space with depth) =====
 
 void Renderer_Metal::drawQuad3D(const glm::vec3& position, const glm::vec2& size, const glm::vec4& color) {
-    glm::mat4 transform = glm::translate(glm::mat4(1.0f), position)
-                        * glm::scale(glm::mat4(1.0f), glm::vec3(size, 1.0f));
+    glm::mat4 transform =
+        glm::translate(glm::mat4(1.0f), position) * glm::scale(glm::mat4(1.0f), glm::vec3(size, 1.0f));
     drawQuad3D(transform, color);
 }
 
 void Renderer_Metal::drawQuad3D(const glm::mat4& transform, const glm::vec4& color, int entityID) {
-    beginBatch3D();  // Auto-start batch
+    beginBatch3D();// Auto-start batch
     if (batch3DIndices.size() >= BatchMaxIndices) return;
 
-    float textureIndex = 0.0f;  // White texture
+    float textureIndex = 0.0f;// White texture
     Uint32 vertexOffset = static_cast<Uint32>(batch3DVertices.size());
 
     for (int i = 0; i < 4; i++) {
@@ -4549,7 +4555,7 @@ void Renderer_Metal::drawQuad3D(const glm::mat4& transform, const glm::vec4& col
 }
 
 void Renderer_Metal::drawLine3D(const glm::vec3& p0, const glm::vec3& p1, const glm::vec4& color, float thickness) {
-    beginBatch3D();  // Auto-start batch
+    beginBatch3D();// Auto-start batch
 
     glm::vec3 direction = p1 - p0;
     float length = glm::length(direction);
@@ -4577,10 +4583,14 @@ void Renderer_Metal::drawLine3D(const glm::vec3& p0, const glm::vec3& p1, const 
     vertex.texIndex = 0.0f;
     vertex.entityID = -1.0f;
 
-    vertex.position = v0; batch3DVertices.push_back(vertex);
-    vertex.position = v1; batch3DVertices.push_back(vertex);
-    vertex.position = v2; batch3DVertices.push_back(vertex);
-    vertex.position = v3; batch3DVertices.push_back(vertex);
+    vertex.position = v0;
+    batch3DVertices.push_back(vertex);
+    vertex.position = v1;
+    batch3DVertices.push_back(vertex);
+    vertex.position = v2;
+    batch3DVertices.push_back(vertex);
+    vertex.position = v3;
+    batch3DVertices.push_back(vertex);
 
     batch3DIndices.push_back(vertexOffset + 0);
     batch3DIndices.push_back(vertexOffset + 1);
@@ -4592,7 +4602,9 @@ void Renderer_Metal::drawLine3D(const glm::vec3& p0, const glm::vec3& p1, const 
     batch3DStats.lineCount++;
 }
 
-void Renderer_Metal::drawRect2D(const glm::vec2& position, const glm::vec2& size, const glm::vec4& color, float thickness) {
+void Renderer_Metal::drawRect2D(
+    const glm::vec2& position, const glm::vec2& size, const glm::vec4& color, float thickness
+) {
     glm::vec2 topLeft = position;
     glm::vec2 topRight = position + glm::vec2(size.x, 0.0f);
     glm::vec2 bottomRight = position + size;
@@ -4634,13 +4646,17 @@ void Renderer_Metal::drawCircleFilled2D(const glm::vec2& center, float radius, c
     batch2DStats.circleCount++;
 }
 
-void Renderer_Metal::drawTriangle2D(const glm::vec2& p0, const glm::vec2& p1, const glm::vec2& p2, const glm::vec4& color) {
+void Renderer_Metal::drawTriangle2D(
+    const glm::vec2& p0, const glm::vec2& p1, const glm::vec2& p2, const glm::vec4& color
+) {
     drawLine2D(p0, p1, color, 1.0f);
     drawLine2D(p1, p2, color, 1.0f);
     drawLine2D(p2, p0, color, 1.0f);
 }
 
-void Renderer_Metal::drawTriangleFilled2D(const glm::vec2& p0, const glm::vec2& p1, const glm::vec2& p2, const glm::vec4& color) {
+void Renderer_Metal::drawTriangleFilled2D(
+    const glm::vec2& p0, const glm::vec2& p1, const glm::vec2& p2, const glm::vec4& color
+) {
     if (batch2DIndices.size() >= BatchMaxIndices) return;
 
     glm::vec2 defaultUV(0.5f, 0.5f);
@@ -4652,11 +4668,15 @@ void Renderer_Metal::drawTriangleFilled2D(const glm::vec2& p0, const glm::vec2& 
     vertex.texIndex = 0.0f;
     vertex.entityID = -1.0f;
 
-    vertex.position = glm::vec3(p0, 0.0f); batch2DVertices.push_back(vertex);
-    vertex.position = glm::vec3(p1, 0.0f); batch2DVertices.push_back(vertex);
-    vertex.position = glm::vec3(p2, 0.0f); batch2DVertices.push_back(vertex);
+    vertex.position = glm::vec3(p0, 0.0f);
+    batch2DVertices.push_back(vertex);
+    vertex.position = glm::vec3(p1, 0.0f);
+    batch2DVertices.push_back(vertex);
+    vertex.position = glm::vec3(p2, 0.0f);
+    batch2DVertices.push_back(vertex);
     // Degenerate 4th vertex
-    vertex.position = glm::vec3(p2, 0.0f); batch2DVertices.push_back(vertex);
+    vertex.position = glm::vec3(p2, 0.0f);
+    batch2DVertices.push_back(vertex);
 
     batch2DIndices.push_back(vertexOffset + 0);
     batch2DIndices.push_back(vertexOffset + 1);
