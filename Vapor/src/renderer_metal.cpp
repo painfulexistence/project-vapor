@@ -1787,10 +1787,10 @@ public:
             return;
         }
 
-        // Reuse 2D buffers for 3D (they share the same structure)
-        auto& vertexBuffer = r.batch2DVertexBuffers[r.currentFrameInFlight];
-        auto& indexBuffer = r.batch2DIndexBuffers[r.currentFrameInFlight];
-        auto& uniformBuffer = r.batch2DUniformBuffers[r.currentFrameInFlight];
+        // Use 3D buffers
+        auto& vertexBuffer = r.batch3DVertexBuffers[r.currentFrameInFlight];
+        auto& indexBuffer = r.batch3DIndexBuffers[r.currentFrameInFlight];
+        auto& uniformBuffer = r.batch3DUniformBuffers[r.currentFrameInFlight];
 
         Uint32 vertexCount = static_cast<Uint32>(r.batch3DVertices.size());
         Uint32 indexCount = static_cast<Uint32>(r.batch3DIndices.size());
@@ -1841,7 +1841,7 @@ public:
         encoder->setViewport(viewport);
 
         encoder->setRenderPipelineState(pipeline);
-        encoder->setDepthStencilState(r.batch2DDepthStencilState.get());
+        encoder->setDepthStencilState(r.batch2DDepthStencilStateEnabled.get());
         encoder->setCullMode(MTL::CullModeNone);
 
         encoder->setVertexBuffer(vertexBuffer.get(), 0, 0);
@@ -2269,7 +2269,7 @@ auto Renderer_Metal::createResources() -> void {
                     MTL::RenderPipelineDescriptor* pipelineDesc = MTL::RenderPipelineDescriptor::alloc()->init();
                     pipelineDesc->setVertexFunction(vertexMain);
                     pipelineDesc->setFragmentFunction(fragmentMain);
-                    pipelineDesc->colorAttachments()->object(0)->setPixelFormat(swapchain->pixelFormat());
+                    pipelineDesc->colorAttachments()->object(0)->setPixelFormat(MTL::PixelFormatRGBA16Float);
 
                     auto colorAttachment = pipelineDesc->colorAttachments()->object(0);
                     colorAttachment->setBlendingEnabled(true);
@@ -2295,7 +2295,7 @@ auto Renderer_Metal::createResources() -> void {
                     MTL::RenderPipelineDescriptor* pipelineDesc = MTL::RenderPipelineDescriptor::alloc()->init();
                     pipelineDesc->setVertexFunction(vertexMain);
                     pipelineDesc->setFragmentFunction(fragmentMain);
-                    pipelineDesc->colorAttachments()->object(0)->setPixelFormat(swapchain->pixelFormat());
+                    pipelineDesc->colorAttachments()->object(0)->setPixelFormat(MTL::PixelFormatRGBA16Float);
 
                     auto colorAttachment = pipelineDesc->colorAttachments()->object(0);
                     colorAttachment->setBlendingEnabled(true);
@@ -2315,7 +2315,7 @@ auto Renderer_Metal::createResources() -> void {
                     MTL::RenderPipelineDescriptor* pipelineDesc = MTL::RenderPipelineDescriptor::alloc()->init();
                     pipelineDesc->setVertexFunction(vertexMain);
                     pipelineDesc->setFragmentFunction(fragmentMain);
-                    pipelineDesc->colorAttachments()->object(0)->setPixelFormat(swapchain->pixelFormat());
+                    pipelineDesc->colorAttachments()->object(0)->setPixelFormat(MTL::PixelFormatRGBA16Float);
 
                     auto colorAttachment = pipelineDesc->colorAttachments()->object(0);
                     colorAttachment->setBlendingEnabled(true);
@@ -2354,10 +2354,18 @@ auto Renderer_Metal::createResources() -> void {
         batch2DVertexBuffers.resize(MAX_FRAMES_IN_FLIGHT);
         batch2DIndexBuffers.resize(MAX_FRAMES_IN_FLIGHT);
         batch2DUniformBuffers.resize(MAX_FRAMES_IN_FLIGHT);
+        batch3DVertexBuffers.resize(MAX_FRAMES_IN_FLIGHT);
+        batch3DIndexBuffers.resize(MAX_FRAMES_IN_FLIGHT);
+        batch3DUniformBuffers.resize(MAX_FRAMES_IN_FLIGHT);
         for (size_t i = 0; i < MAX_FRAMES_IN_FLIGHT; i++) {
             batch2DVertexBuffers[i] = nullptr;// Allocated on demand
             batch2DIndexBuffers[i] = nullptr;// Allocated on demand
             batch2DUniformBuffers[i] =
+                NS::TransferPtr(device->newBuffer(sizeof(Batch2DUniforms), MTL::ResourceStorageModeShared));
+
+            batch3DVertexBuffers[i] = nullptr;// Allocated on demand
+            batch3DIndexBuffers[i] = nullptr;// Allocated on demand
+            batch3DUniformBuffers[i] =
                 NS::TransferPtr(device->newBuffer(sizeof(Batch2DUniforms), MTL::ResourceStorageModeShared));
         }
 

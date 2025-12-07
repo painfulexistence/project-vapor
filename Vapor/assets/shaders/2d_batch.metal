@@ -11,6 +11,7 @@ struct Batch2DVertexIn {
     packed_float2 uv;
     float texIndex;
     float entityID;
+    float _pad;
 };
 
 // Uniforms for 2D batch rendering

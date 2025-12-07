@@ -419,10 +419,7 @@ int main(int argc, char* args[]) {
             tempCamera.setViewMatrix(cam.viewMatrix);
             tempCamera.setProjectionMatrix(cam.projectionMatrix);
 
-            // ===== 2D Batch Rendering Demo =====
-            // Just draw - projection is computed internally from window size
-
-            // Draw many colored quads in a grid pattern
+            // NOTES: projection is computed internally from window size
             float quadSize = 20.0f;
             float spacing = 25.0f;
             int cols = 10;
@@ -442,32 +439,35 @@ int main(int argc, char* args[]) {
                     renderer->drawQuad2D(glm::vec2(px, py), glm::vec2(quadSize, quadSize), color);
                 }
             }
-
-            // Draw some shapes
             renderer->drawCircleFilled2D(glm::vec2(400.0f, 100.0f), 30.0f, glm::vec4(1.0f, 0.5f, 0.0f, 1.0f));
-            renderer->drawRect2D(glm::vec2(450.0f, 70.0f), glm::vec2(60.0f, 60.0f), glm::vec4(0.0f, 1.0f, 0.5f, 1.0f), 2.0f);
+            renderer->drawRect2D(
+                glm::vec2(450.0f, 70.0f), glm::vec2(60.0f, 60.0f), glm::vec4(0.0f, 1.0f, 0.5f, 1.0f), 2.0f
+            );
             renderer->drawTriangleFilled2D(
                 glm::vec2(550.0f, 130.0f),
                 glm::vec2(520.0f, 70.0f),
                 glm::vec2(580.0f, 70.0f),
                 glm::vec4(0.5f, 0.0f, 1.0f, 1.0f)
             );
-
-            // Draw rotating quad (using time for animation)
             renderer->drawRotatedQuad2D(
                 glm::vec2(650.0f, 100.0f),
                 glm::vec2(40.0f, 40.0f),
-                time * 2.0f,  // rotation in radians
+                time * 2.0f,// rotation in radians
                 glm::vec4(1.0f, 1.0f, 0.0f, 1.0f)
             );
+            // renderer->flush2D();
 
             // ===== Sprite Demo (textured quads) =====
             // 2D textured sprite (screen space)
             renderer->drawQuad2D(glm::vec2(700.0f, 50.0f), glm::vec2(80.0f, 80.0f), spriteTexture, glm::vec4(1.0f));
             // 2D textured sprite with tint
-            renderer->drawQuad2D(glm::vec2(800.0f, 50.0f), glm::vec2(80.0f, 80.0f), spriteTexture, glm::vec4(1.0f, 0.5f, 0.5f, 1.0f));
+            renderer->drawQuad2D(
+                glm::vec2(800.0f, 50.0f), glm::vec2(80.0f, 80.0f), spriteTexture, glm::vec4(1.0f, 0.5f, 0.5f, 1.0f)
+            );
             // Rotating textured sprite
-            renderer->drawRotatedQuad2D(glm::vec2(750.0f, 180.0f), glm::vec2(60.0f, 60.0f), time * 1.5f, spriteTexture, glm::vec4(1.0f));
+            renderer->drawRotatedQuad2D(
+                glm::vec2(750.0f, 180.0f), glm::vec2(60.0f, 60.0f), time * 1.5f, spriteTexture, glm::vec4(1.0f)
+            );
 
             // 3D textured sprite in world space (billboard-style, will be occluded by geometry)
             renderer->drawQuad3D(glm::vec3(0.0f, 2.0f, 0.0f), glm::vec2(1.0f, 1.0f), spriteTexture, glm::vec4(1.0f));

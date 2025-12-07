@@ -282,6 +282,11 @@ protected:
     std::vector<NS::SharedPtr<MTL::Buffer>> batch2DVertexBuffers;// Per-frame triple-buffered
     std::vector<NS::SharedPtr<MTL::Buffer>> batch2DIndexBuffers;// Per-frame triple-buffered
     std::vector<NS::SharedPtr<MTL::Buffer>> batch2DUniformBuffers;// Per-frame triple-buffered
+
+    // 3D Batch buffers (to avoid overwriting 2D buffers in the same frame)
+    std::vector<NS::SharedPtr<MTL::Buffer>> batch3DVertexBuffers;
+    std::vector<NS::SharedPtr<MTL::Buffer>> batch3DIndexBuffers;
+    std::vector<NS::SharedPtr<MTL::Buffer>> batch3DUniformBuffers;
     NS::SharedPtr<MTL::Texture> batch2DWhiteTexture;// 1x1 white texture
     TextureHandle batch2DWhiteTextureHandle;
 
