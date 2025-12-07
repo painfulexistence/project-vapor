@@ -4527,18 +4527,28 @@ void Renderer_Metal::drawQuad3D(const glm::vec3& position, const glm::vec2& size
     drawQuad3D(transform, color);
 }
 
+void Renderer_Metal::drawQuad3D(const glm::vec3& position, const glm::vec2& size, TextureHandle texture, const glm::vec4& tintColor) {
+    glm::mat4 transform = glm::translate(glm::mat4(1.0f), position)
+                        * glm::scale(glm::mat4(1.0f), glm::vec3(size, 1.0f));
+    drawQuad3D(transform, texture, batchQuadTexCoords, tintColor);
+}
+
 void Renderer_Metal::drawQuad3D(const glm::mat4& transform, const glm::vec4& color, int entityID) {
-    beginBatch3D();// Auto-start batch
+    drawQuad3D(transform, batch2DWhiteTextureHandle, batchQuadTexCoords, color, entityID);
+}
+
+void Renderer_Metal::drawQuad3D(const glm::mat4& transform, TextureHandle texture, const glm::vec2* texCoords, const glm::vec4& tintColor, int entityID) {
+    beginBatch3D();  // Auto-start batch
     if (batch3DIndices.size() >= BatchMaxIndices) return;
 
-    float textureIndex = 0.0f;// White texture
+    float textureIndex = findOrAddTextureSlot(batch3DTextureSlots, batch3DTextureSlotIndex, texture, batch2DWhiteTextureHandle);
     Uint32 vertexOffset = static_cast<Uint32>(batch3DVertices.size());
 
     for (int i = 0; i < 4; i++) {
         Batch2DVertex vertex;
         vertex.position = transform * batchQuadPositions[i];
-        vertex.color = color;
-        vertex.uv = batchQuadTexCoords[i];
+        vertex.color = tintColor;
+        vertex.uv = texCoords[i];
         vertex.texIndex = textureIndex;
         vertex.entityID = static_cast<float>(entityID);
         batch3DVertices.push_back(vertex);

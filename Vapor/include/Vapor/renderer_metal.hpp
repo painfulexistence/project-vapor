@@ -172,7 +172,9 @@ public:
         int entityID = -1
     ) override;
     void drawQuad3D(const glm::vec3& position, const glm::vec2& size, const glm::vec4& color) override;
+    void drawQuad3D(const glm::vec3& position, const glm::vec2& size, TextureHandle texture, const glm::vec4& tintColor = glm::vec4(1.0f)) override;
     void drawQuad3D(const glm::mat4& transform, const glm::vec4& color, int entityID = -1) override;
+    void drawQuad3D(const glm::mat4& transform, TextureHandle texture, const glm::vec2* texCoords, const glm::vec4& tintColor = glm::vec4(1.0f), int entityID = -1) override;
 
     // Rotated quad
     void drawRotatedQuad2D(const glm::vec2& position, const glm::vec2& size, float rotation, const glm::vec4& color)
@@ -210,7 +212,7 @@ public:
         createPipeline(const std::string& filename, bool isHDR, bool isColorOnly, Uint32 sampleCount);
     NS::SharedPtr<MTL::ComputePipelineState> createComputePipeline(const std::string& filename);
 
-    TextureHandle createTexture(const std::shared_ptr<Image>& img);
+    TextureHandle createTexture(const std::shared_ptr<Image>& img) override;
 
     BufferHandle createVertexBuffer(const std::vector<VertexData>& vertices);
     BufferHandle createIndexBuffer(const std::vector<Uint32>& indices);
