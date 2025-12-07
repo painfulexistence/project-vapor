@@ -173,8 +173,7 @@ struct ActionComponent {
 
     // Helper: check if action needs time
     bool isInstant() const {
-        return type == ActionType::Callback || type == ActionType::SetActive || type == ActionType::PlayAnimation
-               || duration <= 0.0f;
+        return type == ActionType::SetActive || type == ActionType::PlayAnimation || duration <= 0.0f;
     }
 };
 
