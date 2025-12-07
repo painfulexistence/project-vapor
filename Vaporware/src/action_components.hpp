@@ -8,14 +8,10 @@
 #include <vector>
 
 // ============================================================
-// Unified Action System
+// Action System
 //
-// Single concept for all time-based operations:
-// - Tween (move, scale, fade, rotate)
-// - Wait
-// - Callback
-// - Parallel execution
-// - Animation playback
+// Action = pure data definition (can be stored, serialized, reused)
+// ActionComponent = ECS runtime state (attached to entity during execution)
 // ============================================================
 
 // ============================================================
@@ -25,21 +21,13 @@
 using EasingFunction = float (*)(float);
 
 namespace Easing {
-    inline float Linear(float t) {
-        return t;
-    }
-    inline float InQuad(float t) {
-        return t * t;
-    }
-    inline float OutQuad(float t) {
-        return t * (2.0f - t);
-    }
+    inline float Linear(float t) { return t; }
+    inline float InQuad(float t) { return t * t; }
+    inline float OutQuad(float t) { return t * (2.0f - t); }
     inline float InOutQuad(float t) {
         return t < 0.5f ? 2.0f * t * t : -1.0f + (4.0f - 2.0f * t) * t;
     }
-    inline float InCubic(float t) {
-        return t * t * t;
-    }
+    inline float InCubic(float t) { return t * t * t; }
     inline float OutCubic(float t) {
         float f = t - 1.0f;
         return f * f * f + 1.0f;
@@ -67,75 +55,49 @@ namespace Easing {
     }
     inline float OutBounce(float t) {
         if (t < 1.0f / 2.75f) return 7.5625f * t * t;
-        if (t < 2.0f / 2.75f) {
-            t -= 1.5f / 2.75f;
-            return 7.5625f * t * t + 0.75f;
-        }
-        if (t < 2.5f / 2.75f) {
-            t -= 2.25f / 2.75f;
-            return 7.5625f * t * t + 0.9375f;
-        }
+        if (t < 2.0f / 2.75f) { t -= 1.5f / 2.75f; return 7.5625f * t * t + 0.75f; }
+        if (t < 2.5f / 2.75f) { t -= 2.25f / 2.75f; return 7.5625f * t * t + 0.9375f; }
         t -= 2.625f / 2.75f;
         return 7.5625f * t * t + 0.984375f;
     }
 }// namespace Easing
 
 // ============================================================
-// Action Type
+// Enums
 // ============================================================
 
 enum class ActionType : uint8_t {
-    // Tweens
-    Position,// Move entity position
-    Rotation,// Rotate entity
-    Scale,// Scale entity
-    Color,// Fade/color change
-    Float,// Tween arbitrary float
-
-    // Control
-    Wait,// Wait for duration
-
-    // Entity
-    SetActive,// Show/hide entity
-    PlayAnimation,// Play sprite/skeletal animation
+    Position,      // Move entity position
+    Rotation,      // Rotate entity
+    Scale,         // Scale entity
+    Color,         // Fade/color change
+    Float,         // Tween arbitrary float
+    Wait,          // Wait for duration
+    SetActive,     // Show/hide entity
+    PlayAnimation, // Play sprite/skeletal animation
 };
-
-// ============================================================
-// Loop Mode
-// ============================================================
 
 enum class LoopMode : uint8_t {
-    None,// Play once
-    Loop,// Restart from beginning
-    PingPong// Reverse direction
+    None,    // Play once
+    Loop,    // Restart from beginning
+    PingPong // Reverse direction
 };
 
 // ============================================================
-// Action - Unified action structure
+// Action - Pure data definition (POD with static factory methods)
 // ============================================================
 
-struct ActionComponent {
+struct Action {
+    // === Data ===
     ActionType type = ActionType::Wait;
-
-    // Timing
     float duration = 0.0f;
-    float elapsed = 0.0f;
     EasingFunction easing = Easing::Linear;
 
-    // State
-    bool started = false;
-    bool completed = false;
-
-    // Loop
     LoopMode loopMode = LoopMode::None;
-    int loopCount = 1;// -1 = infinite
-    int currentLoop = 0;
-    bool pingPongReverse = false;
+    int loopCount = 1; // -1 = infinite
 
-    // Target entity (null = use owner entity)
     entt::entity target = entt::null;
 
-    // Values (used based on type)
     glm::vec3 vec3Start{ 0.0f };
     glm::vec3 vec3End{ 0.0f };
     glm::vec4 vec4Start{ 1.0f };
@@ -145,101 +107,35 @@ struct ActionComponent {
     float floatStart = 0.0f;
     float floatEnd = 0.0f;
 
-    // For SetActive
     bool activeValue = true;
-
-    // For PlayAnimation / debug
     std::string name;
 
-    // Completion notification (0 = no event emitted)
     uint32_t completionTag = 0;
 
-    // ===== Fluent modifiers =====
+    // === Fluent modifiers ===
+    Action& dur(float d) { duration = d; return *this; }
+    Action& ease(EasingFunction e) { easing = e; return *this; }
+    Action& onComplete(uint32_t tag) { completionTag = tag; return *this; }
+    Action& loop(int count = -1) { loopMode = LoopMode::Loop; loopCount = count; return *this; }
+    Action& pingPong(int count = -1) { loopMode = LoopMode::PingPong; loopCount = count; return *this; }
 
-    ActionComponent& dur(float d) { duration = d; return *this; }
-    ActionComponent& ease(EasingFunction e) { easing = e; return *this; }
-    ActionComponent& onComplete(uint32_t tag) { completionTag = tag; return *this; }
-    ActionComponent& loop(int count = -1) { loopMode = LoopMode::Loop; loopCount = count; return *this; }
-    ActionComponent& pingPong(int count = -1) { loopMode = LoopMode::PingPong; loopCount = count; return *this; }
-
-    // ===== Helpers =====
-
-    float getProgress() const {
-        if (duration <= 0.0f) return 1.0f;
-        float t = std::clamp(elapsed / duration, 0.0f, 1.0f);
-        if (pingPongReverse) t = 1.0f - t;
-        return easing ? easing(t) : t;
-    }
-
-    // Helper: check if action needs time
+    // === Helpers ===
     bool isInstant() const {
         return type == ActionType::SetActive || type == ActionType::PlayAnimation || duration <= 0.0f;
     }
-};
 
-// Event emitted when action/queue completes (1:N broadcast)
-struct ActionCompleteEvent {
-    uint32_t tag = 0;
-};
+    // === Static factory methods ===
 
-// Parallel action group - tracks multiple simultaneous actions
-struct ActionGroupComponent {
-    uint32_t groupId = 0;
-    size_t totalActions = 0;
-    size_t completedActions = 0;
-    uint32_t completionTag = 0; // Emitted when all complete
-
-    bool isComplete() const { return completedActions >= totalActions; }
-};
-
-// Tag linking an action to a group
-struct ActionGroupMemberTag {
-    entt::entity groupEntity = entt::null;
-};
-
-// Queue of actions (sequential execution)
-struct ActionQueueComponent {
-    std::vector<ActionComponent> actions;
-    size_t currentIndex = 0;
-    uint32_t completionTag = 0; // 0 = no event emitted
-    std::string debugName;
-
-    bool isComplete() const {
-        return currentIndex >= actions.size();
-    }
-
-    ActionComponent* current() {
-        if (currentIndex < actions.size()) {
-            return &actions[currentIndex];
-        }
-        return nullptr;
-    }
-
-    void advance() {
-        if (currentIndex < actions.size()) {
-            currentIndex++;
-        }
-    }
-};
-
-// ============================================================
-// Action Builder - Fluent API for creating actions
-// ============================================================
-
-namespace Action {
-
-    // === Tweens (use .dur() and .ease() to configure) ===
-
-    inline ActionComponent moveTo(entt::entity target, const glm::vec3& end) {
-        ActionComponent a;
+    static Action moveTo(entt::entity target, const glm::vec3& end) {
+        Action a;
         a.type = ActionType::Position;
         a.target = target;
         a.vec3End = end;
         return a;
     }
 
-    inline ActionComponent moveBy(entt::entity target, const glm::vec3& delta) {
-        ActionComponent a;
+    static Action moveBy(entt::entity target, const glm::vec3& delta) {
+        Action a;
         a.type = ActionType::Position;
         a.target = target;
         a.vec3End = delta;
@@ -247,69 +143,65 @@ namespace Action {
         return a;
     }
 
-    inline ActionComponent scaleTo(entt::entity target, const glm::vec3& end) {
-        ActionComponent a;
+    static Action scaleTo(entt::entity target, const glm::vec3& end) {
+        Action a;
         a.type = ActionType::Scale;
         a.target = target;
         a.vec3End = end;
         return a;
     }
 
-    inline ActionComponent rotateTo(entt::entity target, const glm::quat& end) {
-        ActionComponent a;
+    static Action rotateTo(entt::entity target, const glm::quat& end) {
+        Action a;
         a.type = ActionType::Rotation;
         a.target = target;
         a.quatEnd = end;
         return a;
     }
 
-    inline ActionComponent fadeTo(entt::entity target, float alpha) {
-        ActionComponent a;
+    static Action fadeTo(entt::entity target, float alpha) {
+        Action a;
         a.type = ActionType::Color;
         a.target = target;
         a.vec4End = glm::vec4(1.0f, 1.0f, 1.0f, alpha);
         return a;
     }
 
-    inline ActionComponent colorTo(entt::entity target, const glm::vec4& end) {
-        ActionComponent a;
+    static Action colorTo(entt::entity target, const glm::vec4& end) {
+        Action a;
         a.type = ActionType::Color;
         a.target = target;
         a.vec4End = end;
         return a;
     }
 
-    // === Control ===
-
-    inline ActionComponent wait(float duration) {
-        ActionComponent a;
+    static Action wait(float duration) {
+        Action a;
         a.type = ActionType::Wait;
         a.duration = duration;
         return a;
     }
 
-    // === Entity ===
-
-    inline ActionComponent setActive(entt::entity target, bool active) {
-        ActionComponent a;
+    static Action setActive(entt::entity target, bool active) {
+        Action a;
         a.type = ActionType::SetActive;
         a.target = target;
         a.activeValue = active;
         return a;
     }
 
-    inline ActionComponent playAnimation(entt::entity target, const std::string& animName) {
-        ActionComponent a;
+    static Action playAnimation(entt::entity target, const std::string& animName) {
+        Action a;
         a.type = ActionType::PlayAnimation;
         a.target = target;
         a.name = animName;
         return a;
     }
 
-    // === Presets (common patterns with defaults) ===
+    // === Presets ===
 
-    inline ActionComponent bounceIn() {
-        ActionComponent a;
+    static Action bounceIn() {
+        Action a;
         a.type = ActionType::Scale;
         a.vec3Start = glm::vec3(0.0f);
         a.vec3End = glm::vec3(1.0f);
@@ -318,8 +210,8 @@ namespace Action {
         return a;
     }
 
-    inline ActionComponent bounceOut() {
-        ActionComponent a;
+    static Action bounceOut() {
+        Action a;
         a.type = ActionType::Scale;
         a.vec3Start = glm::vec3(1.0f);
         a.vec3End = glm::vec3(0.0f);
@@ -328,8 +220,8 @@ namespace Action {
         return a;
     }
 
-    inline ActionComponent pulse(float minScale = 0.9f, float maxScale = 1.1f) {
-        ActionComponent a;
+    static Action pulse(float minScale = 0.9f, float maxScale = 1.1f) {
+        Action a;
         a.type = ActionType::Scale;
         a.vec3Start = glm::vec3(minScale);
         a.vec3End = glm::vec3(maxScale);
@@ -340,8 +232,8 @@ namespace Action {
         return a;
     }
 
-    inline ActionComponent fadeOut() {
-        ActionComponent a;
+    static Action fadeOut() {
+        Action a;
         a.type = ActionType::Color;
         a.vec4Start = glm::vec4(1.0f);
         a.vec4End = glm::vec4(1.0f, 1.0f, 1.0f, 0.0f);
@@ -350,8 +242,8 @@ namespace Action {
         return a;
     }
 
-    inline ActionComponent fadeIn() {
-        ActionComponent a;
+    static Action fadeIn() {
+        Action a;
         a.type = ActionType::Color;
         a.vec4Start = glm::vec4(1.0f, 1.0f, 1.0f, 0.0f);
         a.vec4End = glm::vec4(1.0f);
@@ -359,5 +251,87 @@ namespace Action {
         a.easing = Easing::OutCubic;
         return a;
     }
+};
 
-}// namespace Action
+// ============================================================
+// ActionComponent - ECS runtime state
+// ============================================================
+
+struct ActionComponent {
+    Action action;
+
+    // Runtime state
+    float elapsed = 0.0f;
+    bool started = false;
+    bool completed = false;
+    int currentLoop = 0;
+    bool pingPongReverse = false;
+
+    // Construct from Action
+    ActionComponent() = default;
+    ActionComponent(const Action& a) : action(a) {}
+    ActionComponent(Action&& a) : action(std::move(a)) {}
+
+    // Helper: get progress (0-1)
+    float getProgress() const {
+        if (action.duration <= 0.0f) return 1.0f;
+        float t = std::clamp(elapsed / action.duration, 0.0f, 1.0f);
+        if (pingPongReverse) t = 1.0f - t;
+        return action.easing ? action.easing(t) : t;
+    }
+
+    bool isInstant() const { return action.isInstant(); }
+};
+
+// ============================================================
+// Event & Group Components
+// ============================================================
+
+struct ActionCompleteEvent {
+    uint32_t tag = 0;
+};
+
+struct ActionGroupComponent {
+    uint32_t groupId = 0;
+    size_t totalActions = 0;
+    size_t completedActions = 0;
+    uint32_t completionTag = 0;
+
+    bool isComplete() const { return completedActions >= totalActions; }
+};
+
+struct ActionGroupMemberTag {
+    entt::entity groupEntity = entt::null;
+};
+
+// ============================================================
+// ActionQueueComponent - Sequential execution
+// ============================================================
+
+struct ActionQueueComponent {
+    std::vector<Action> actions;
+    size_t currentIndex = 0;
+    uint32_t completionTag = 0;
+    std::string debugName;
+
+    // Runtime state for current action
+    float elapsed = 0.0f;
+    bool started = false;
+
+    bool isComplete() const { return currentIndex >= actions.size(); }
+
+    Action* current() {
+        if (currentIndex < actions.size()) {
+            return &actions[currentIndex];
+        }
+        return nullptr;
+    }
+
+    void advance() {
+        if (currentIndex < actions.size()) {
+            currentIndex++;
+            elapsed = 0.0f;
+            started = false;
+        }
+    }
+};

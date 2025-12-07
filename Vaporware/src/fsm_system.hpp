@@ -197,20 +197,15 @@ private:
     }
 
     static void emplaceActions(
-        entt::registry& reg, entt::entity entity, const std::vector<ActionComponent>& actions, const std::string& tag
+        entt::registry& reg, entt::entity entity, const std::vector<Action>& actions, const std::string& tag
     ) {
         auto& queue = reg.emplace_or_replace<ActionQueueComponent>(entity);
-        queue.actions = actions;// Copy
+        queue.actions = actions;
         queue.debugName = tag;
         queue.currentIndex = 0;
-        queue.completionTag = 0; // FSM tracks completion via FSMActionsRunningTag
-
-        // Reset action states
-        for (auto& action : queue.actions) {
-            action.started = false;
-            action.completed = false;
-            action.elapsed = 0.0f;
-        }
+        queue.completionTag = 0;
+        queue.elapsed = 0.0f;
+        queue.started = false;
     }
 
     static void clearEvents(entt::registry& reg) {
@@ -254,7 +249,7 @@ namespace FSMPatterns {
 
     // Create a trigger-based FSM: Idle -> Triggered -> Cooldown -> Idle
     inline FSMComponent createTriggerFSM(
-        entt::entity self, std::vector<ActionComponent> onTriggerActions, float cooldownDuration = 3.0f
+        entt::entity self, std::vector<Action> onTriggerActions, float cooldownDuration = 3.0f
     ) {
         return FSMBuilder()
             .state("Idle")
@@ -271,7 +266,7 @@ namespace FSMPatterns {
 
     // Create an interaction FSM: Idle <-> Active (toggle on event)
     inline FSMComponent createToggleFSM(
-        entt::entity self, std::vector<ActionComponent> onActivate, std::vector<ActionComponent> onDeactivate
+        entt::entity self, std::vector<Action> onActivate, std::vector<Action> onDeactivate
     ) {
         return FSMBuilder()
             .state("Inactive")

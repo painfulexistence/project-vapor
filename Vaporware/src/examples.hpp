@@ -28,19 +28,19 @@
 namespace ActionSequence {
 
     // Door open sequence: wait → move up
-    inline std::vector<ActionComponent> doorOpen(entt::entity door, const glm::vec3& openPos) {
+    inline std::vector<Action> doorOpen(entt::entity door, const glm::vec3& openPos) {
         return { Action::wait(0.2f), Action::moveTo(door, openPos).dur(1.0f).ease(Easing::OutCubic) };
     }
 
     // Attack combo sequence
-    inline std::vector<ActionComponent> attackCombo(entt::entity attacker) {
+    inline std::vector<Action> attackCombo(entt::entity attacker) {
         return { Action::playAnimation(attacker, "slash1"),      Action::wait(0.3f),
                  Action::playAnimation(attacker, "slash2"),      Action::wait(0.3f),
                  Action::playAnimation(attacker, "heavy_slash"), Action::wait(0.4f) };
     }
 
     // Spawn effect: activate + wait for tween
-    inline std::vector<ActionComponent> spawnEffect(entt::entity entity) {
+    inline std::vector<Action> spawnEffect(entt::entity entity) {
         return { Action::setActive(entity, true), Action::wait(0.5f) };
     }
 

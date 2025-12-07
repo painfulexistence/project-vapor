@@ -62,21 +62,21 @@ struct FSMState {
     std::string name;
 
     // Actions to execute when entering this state
-    std::vector<ActionComponent> onEnterActions;
+    std::vector<Action> onEnterActions;
 
     // Actions to execute when exiting this state
-    std::vector<ActionComponent> onExitActions;
+    std::vector<Action> onExitActions;
 
     // Possible transitions from this state
     std::vector<FSMTransition> transitions;
 
     // Builder pattern for convenience
-    FSMState& enter(std::vector<ActionComponent> actions) {
+    FSMState& enter(std::vector<Action> actions) {
         onEnterActions = std::move(actions);
         return *this;
     }
 
-    FSMState& exit(std::vector<ActionComponent> actions) {
+    FSMState& exit(std::vector<Action> actions) {
         onExitActions = std::move(actions);
         return *this;
     }
@@ -172,14 +172,14 @@ public:
         return *this;
     }
 
-    FSMBuilder& enter(std::vector<ActionComponent> actions) {
+    FSMBuilder& enter(std::vector<Action> actions) {
         if (m_currentStateIndex < m_states.size()) {
             m_states[m_currentStateIndex].onEnterActions = std::move(actions);
         }
         return *this;
     }
 
-    FSMBuilder& exit(std::vector<ActionComponent> actions) {
+    FSMBuilder& exit(std::vector<Action> actions) {
         if (m_currentStateIndex < m_states.size()) {
             m_states[m_currentStateIndex].onExitActions = std::move(actions);
         }
