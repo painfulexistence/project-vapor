@@ -2309,16 +2309,20 @@ public:
         auto rtWidth = r.colorRT->width();
         auto rtHeight = r.colorRT->height();
 
+        // Get window size for screen space coordinates (not framebuffer size!)
+        int windowWidth, windowHeight;
+        SDL_GetWindowSize(r.window, &windowWidth, &windowHeight);
+
         // Compute projection matrix based on camera mode
         Batch2DUniforms uniforms;
         if (r.currentCamera && r.currentCamera->isOrthographic()) {
             // World space ortho: use camera's projection and view matrices
             uniforms.projectionMatrix = r.currentCamera->getProjMatrix() * r.currentCamera->getViewMatrix();
         } else {
-            // Fallback: screen space ortho (origin top-left, pixel coordinates)
+            // Fallback: screen space ortho using window size (origin top-left, pixel coordinates)
             uniforms.projectionMatrix = glm::ortho(
-                0.0f, static_cast<float>(rtWidth),
-                static_cast<float>(rtHeight), 0.0f,
+                0.0f, static_cast<float>(windowWidth),
+                static_cast<float>(windowHeight), 0.0f,
                 -1.0f, 1.0f
             );
         }
@@ -2405,6 +2409,7 @@ Renderer_Metal::~Renderer_Metal() {
 auto Renderer_Metal::init(SDL_Window* window) -> void {
     ZoneScoped;
 
+    this->window = window;
     renderer = SDL_CreateRenderer(window, nullptr);
     swapchain = (CA::MetalLayer*)SDL_GetRenderMetalLayer(renderer);
     // swapchain->setDisplaySyncEnabled(true);

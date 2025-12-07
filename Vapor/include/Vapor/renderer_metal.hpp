@@ -269,6 +269,7 @@ protected:
     CA::MetalDrawable* currentDrawable = nullptr;
 
     // Metal device and core resources
+    SDL_Window* window = nullptr;
     SDL_Renderer* renderer;
     CA::MetalLayer* swapchain;
     MTL::Device* device;
