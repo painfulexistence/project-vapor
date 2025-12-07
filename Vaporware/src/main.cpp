@@ -428,17 +428,17 @@ int main(int argc, char* args[]) {
             tempCamera.setViewMatrix(cam.viewMatrix);
             tempCamera.setProjectionMatrix(cam.projectionMatrix);
 
-            // ===== 2D Canvas Demo (World Space Ortho) =====
-            // Note: CanvasPass now uses world space coordinates centered on camera
-            // Draw some 2D shapes in world space
-            float quadSize = 0.5f;
-            float spacing = 0.8f;
-            int cols = 5;
-            int rows = 3;
+            // ===== 2D Canvas Demo (Screen Space) =====
+            // Note: When camera is perspective (default), CanvasPass uses screen space (pixel coords)
+            // When camera is orthographic, CanvasPass uses world space ortho
+            float quadSize = 20.0f;
+            float spacing = 25.0f;
+            int cols = 10;
+            int rows = 5;
             for (int y = 0; y < rows; y++) {
                 for (int x = 0; x < cols; x++) {
-                    float px = -2.0f + x * spacing;
-                    float py = 3.0f + y * spacing;
+                    float px = 50.0f + x * spacing;
+                    float py = 50.0f + y * spacing;
                     // Rainbow colors based on position
                     float hue = (float)(x + y * cols) / (float)(cols * rows);
                     glm::vec4 color = glm::vec4(
@@ -450,57 +450,50 @@ int main(int argc, char* args[]) {
                     renderer->drawQuad2D(glm::vec2(px, py), glm::vec2(quadSize, quadSize), color);
                 }
             }
-            renderer->drawCircleFilled2D(glm::vec2(3.0f, 4.0f), 0.5f, glm::vec4(1.0f, 0.5f, 0.0f, 1.0f));
+            renderer->drawCircleFilled2D(glm::vec2(400.0f, 100.0f), 30.0f, glm::vec4(1.0f, 0.5f, 0.0f, 1.0f));
             renderer->drawRect2D(
-                glm::vec2(4.0f, 3.5f), glm::vec2(1.0f, 1.0f), glm::vec4(0.0f, 1.0f, 0.5f, 1.0f), 0.05f
+                glm::vec2(450.0f, 70.0f), glm::vec2(60.0f, 60.0f), glm::vec4(0.0f, 1.0f, 0.5f, 1.0f), 2.0f
             );
             renderer->drawTriangleFilled2D(
-                glm::vec2(5.5f, 4.5f),
-                glm::vec2(5.0f, 3.5f),
-                glm::vec2(6.0f, 3.5f),
+                glm::vec2(550.0f, 130.0f),
+                glm::vec2(520.0f, 70.0f),
+                glm::vec2(580.0f, 70.0f),
                 glm::vec4(0.5f, 0.0f, 1.0f, 1.0f)
             );
             renderer->drawRotatedQuad2D(
-                glm::vec2(-3.0f, 4.0f),
-                glm::vec2(0.8f, 0.8f),
+                glm::vec2(650.0f, 100.0f),
+                glm::vec2(40.0f, 40.0f),
                 time * 2.0f,// rotation in radians
                 spriteTexture,
                 glm::vec4(1.0f, 1.0f, 1.0f, 1.0f)
             );
 
-            // ===== Text Rendering Demo =====
+            // ===== Text Rendering Demo (Screen Space) =====
             if (gameFont.isValid()) {
-                // Draw text labels above cube positions (world space 2D)
-                auto cube1Node = registry.get<SceneNodeReferenceComponent>(cube1).node;
-                auto cube2Node = registry.get<SceneNodeReferenceComponent>(cube2).node;
-
-                glm::vec3 cube1Pos = cube1Node->getWorldPosition();
-                glm::vec3 cube2Pos = cube2Node->getWorldPosition();
-
-                // Draw names above cubes (offset by Y to appear above)
-                renderer->drawText2D(
-                    gameFont,
-                    "Cube 1",
-                    glm::vec2(cube1Pos.x - 0.5f, cube1Pos.y + 1.5f),
-                    0.02f, // scale (world units per font pixel)
-                    glm::vec4(1.0f, 1.0f, 0.0f, 1.0f) // yellow
-                );
-
-                renderer->drawText2D(
-                    gameFont,
-                    "Cube 2",
-                    glm::vec2(cube2Pos.x - 0.5f, cube2Pos.y + 1.5f),
-                    0.02f,
-                    glm::vec4(0.0f, 1.0f, 1.0f, 1.0f) // cyan
-                );
-
-                // Draw a title at fixed world position
+                // Draw text at screen positions (pixel coordinates)
                 renderer->drawText2D(
                     gameFont,
                     "Project Vapor",
-                    glm::vec2(-3.0f, 6.0f),
-                    0.03f,
+                    glm::vec2(50.0f, 200.0f),
+                    1.0f,
                     glm::vec4(1.0f, 1.0f, 1.0f, 1.0f)
+                );
+
+                renderer->drawText2D(
+                    gameFont,
+                    "Press H to toggle HUD",
+                    glm::vec2(50.0f, 250.0f),
+                    0.5f,
+                    glm::vec4(0.8f, 0.8f, 0.8f, 1.0f)
+                );
+
+                // Show FPS
+                renderer->drawText2D(
+                    gameFont,
+                    fmt::format("FPS: {:.1f}", 1.0f / deltaTime),
+                    glm::vec2(50.0f, 300.0f),
+                    0.5f,
+                    glm::vec4(0.0f, 1.0f, 0.0f, 1.0f)
                 );
             }
 

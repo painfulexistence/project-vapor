@@ -2306,29 +2306,22 @@ public:
         memcpy(vertexBuffer->contents(), r.batch2DVertices.data(), vertexDataSize);
         memcpy(indexBuffer->contents(), r.batch2DIndices.data(), indexDataSize);
 
-        // Compute world space ortho projection
-        // Origin is at camera position, Y-up, visible area based on RT aspect ratio
         auto rtWidth = r.colorRT->width();
         auto rtHeight = r.colorRT->height();
-        float aspect = static_cast<float>(rtWidth) / static_cast<float>(rtHeight);
 
-        // Define ortho view size (adjust this to control zoom level)
-        float orthoHeight = 20.0f; // World units visible vertically
-        float orthoWidth = orthoHeight * aspect;
-
-        // Get camera position for world-space offset
-        glm::vec3 camPos = r.currentCamera->getEye();
-
-        // World space ortho: centered on camera XY, looking down -Z
+        // Compute projection matrix based on camera mode
         Batch2DUniforms uniforms;
-        glm::mat4 orthoProj = glm::ortho(
-            -orthoWidth * 0.5f, orthoWidth * 0.5f,   // left, right
-            -orthoHeight * 0.5f, orthoHeight * 0.5f, // bottom, top
-            -100.0f, 100.0f                          // near, far
-        );
-        // View matrix: translate by camera position (2D, XY plane)
-        glm::mat4 view = glm::translate(glm::mat4(1.0f), glm::vec3(-camPos.x, -camPos.y, 0.0f));
-        uniforms.projectionMatrix = orthoProj * view;
+        if (r.currentCamera && r.currentCamera->isOrthographic()) {
+            // World space ortho: use camera's projection and view matrices
+            uniforms.projectionMatrix = r.currentCamera->getProjMatrix() * r.currentCamera->getViewMatrix();
+        } else {
+            // Fallback: screen space ortho (origin top-left, pixel coordinates)
+            uniforms.projectionMatrix = glm::ortho(
+                0.0f, static_cast<float>(rtWidth),
+                static_cast<float>(rtHeight), 0.0f,
+                -1.0f, 1.0f
+            );
+        }
         memcpy(uniformBuffer->contents(), &uniforms, sizeof(Batch2DUniforms));
 
         // Select pipeline based on blend mode
