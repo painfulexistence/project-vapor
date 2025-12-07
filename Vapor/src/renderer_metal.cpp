@@ -1333,7 +1333,7 @@ public:
         fogData->sunColor = atmos->sunColor;
         fogData->sunIntensity = atmos->sunIntensity;
         fogData->screenSize = glm::vec2(drawableSize.width, drawableSize.height);
-        fogData->nearPlane = r.currentCamera->getNearPlane();
+        fogData->nearPlane = r.currentCamera->near();
         fogData->farPlane = r.volumetricFogSettings.farPlane;
         fogData->frameIndex = r.currentFrameInFlight;
         fogData->time = r.volumetricFogSettings.time;
@@ -1394,7 +1394,7 @@ public:
 
         // Check if any required pipeline is available
         bool hasLowResPipeline = r.cloudLowResPipeline && r.cloudCompositePipeline;
-        bool hasFullResPipeline = r.cloudRenderPipeline != nullptr;
+        bool hasFullResPipeline = r.cloudRenderPipeline.get() != nullptr;
 
         if (!r.volumetricCloudsEnabled || (!hasLowResPipeline && !hasFullResPipeline)) return;
 
@@ -1406,7 +1406,7 @@ public:
         VolumetricCloudData* cloudData =
             reinterpret_cast<VolumetricCloudData*>(r.volumetricCloudDataBuffers[r.currentFrameInFlight]->contents());
         cloudData->invViewProj = glm::inverse(r.currentCamera->getProjMatrix() * r.currentCamera->getViewMatrix());
-        cloudData->prevViewProj = r.volumetricCloudSettings.prevViewProj; // For temporal reprojection
+        cloudData->prevViewProj = r.volumetricCloudSettings.prevViewProj;// For temporal reprojection
         cloudData->cameraPosition = r.currentCamera->getEye();
         cloudData->sunDirection = glm::normalize(atmos->sunDirection);
         cloudData->sunColor = atmos->sunColor;
@@ -1415,8 +1415,8 @@ public:
         cloudData->time = r.volumetricCloudSettings.time;
 
         // Update wind offset (accumulate over time)
-        r.volumetricCloudSettings.windOffset += r.volumetricCloudSettings.windDirection *
-            r.volumetricCloudSettings.windSpeed * 0.016f;
+        r.volumetricCloudSettings.windOffset +=
+            r.volumetricCloudSettings.windDirection * r.volumetricCloudSettings.windSpeed * 0.016f;
         cloudData->windOffset = r.volumetricCloudSettings.windOffset;
 
         // Copy settings
@@ -1513,8 +1513,8 @@ public:
                 viewport.zfar = 1.0;
                 encoder->setViewport(viewport);
 
-                encoder->setFragmentTexture(r.cloudRT.get(), 0);        // Current frame
-                encoder->setFragmentTexture(r.cloudHistoryRT.get(), 1); // History (will be overwritten)
+                encoder->setFragmentTexture(r.cloudRT.get(), 0);// Current frame
+                encoder->setFragmentTexture(r.cloudHistoryRT.get(), 1);// History (will be overwritten)
                 encoder->setFragmentTexture(r.depthStencilRT.get(), 2);
                 encoder->setFragmentBuffer(r.volumetricCloudDataBuffers[r.currentFrameInFlight].get(), 0, 0);
                 encoder->drawPrimitives(MTL::PrimitiveType::PrimitiveTypeTriangle, 0, 3, 1);
@@ -1543,8 +1543,8 @@ public:
                 auto encoder = r.currentCommandBuffer->renderCommandEncoder(passDesc.get());
                 encoder->setRenderPipelineState(r.cloudCompositePipeline.get());
                 encoder->setCullMode(MTL::CullModeNone);
-                encoder->setFragmentTexture(r.colorRT.get(), 0);   // Scene color
-                encoder->setFragmentTexture(r.cloudRT.get(), 1);   // Cloud (quarter res, will be upscaled)
+                encoder->setFragmentTexture(r.colorRT.get(), 0);// Scene color
+                encoder->setFragmentTexture(r.cloudRT.get(), 1);// Cloud (quarter res, will be upscaled)
                 encoder->setFragmentTexture(r.depthStencilRT.get(), 2);
                 encoder->setFragmentBuffer(r.volumetricCloudDataBuffers[r.currentFrameInFlight].get(), 0, 0);
                 encoder->drawPrimitives(MTL::PrimitiveType::PrimitiveTypeTriangle, 0, 3, 1);
@@ -1631,8 +1631,7 @@ public:
         // Simple visibility check using depth at sun position
         // For proper occlusion, we'd use the compute shader, but this is a simple approximation
         float visibility = 1.0f;
-        if (sunScreenPos.x < 0.0f || sunScreenPos.x > 1.0f ||
-            sunScreenPos.y < 0.0f || sunScreenPos.y > 1.0f) {
+        if (sunScreenPos.x < 0.0f || sunScreenPos.x > 1.0f || sunScreenPos.y < 0.0f || sunScreenPos.y > 1.0f) {
             visibility = 0.0f;
         }
         flareData->visibility = visibility;
@@ -1673,7 +1672,7 @@ public:
         auto colorRT = passDesc->colorAttachments()->object(0);
         colorRT->setLoadAction(MTL::LoadActionLoad);
         colorRT->setStoreAction(MTL::StoreActionStore);
-        colorRT->setTexture(r.bloomResultRT.get()); // Render after bloom composite
+        colorRT->setTexture(r.bloomResultRT.get());// Render after bloom composite
 
         auto encoder = r.currentCommandBuffer->renderCommandEncoder(passDesc.get());
         encoder->setRenderPipelineState(r.sunFlarePipeline.get());
@@ -2908,13 +2907,15 @@ auto Renderer_Metal::createResources() -> void {
         NS::Error* error = nullptr;
         MTL::Library* library = device->newLibrary(code, nullptr, &error);
         if (!library) {
-            fmt::print("Warning: Could not compile volumetric fog shader: {}\n",
-                       error ? error->localizedDescription()->utf8String() : "unknown error");
+            fmt::print(
+                "Warning: Could not compile volumetric fog shader: {}\n",
+                error ? error->localizedDescription()->utf8String() : "unknown error"
+            );
         } else {
-            auto vertexMain = library->newFunction(
-                NS::String::string("volumetricFogVertex", NS::StringEncoding::UTF8StringEncoding));
-            auto fragmentMain = library->newFunction(
-                NS::String::string("simpleFogFragment", NS::StringEncoding::UTF8StringEncoding));
+            auto vertexMain =
+                library->newFunction(NS::String::string("volumetricFogVertex", NS::StringEncoding::UTF8StringEncoding));
+            auto fragmentMain =
+                library->newFunction(NS::String::string("simpleFogFragment", NS::StringEncoding::UTF8StringEncoding));
 
             if (vertexMain && fragmentMain) {
                 auto pipelineDesc = MTL::RenderPipelineDescriptor::alloc()->init();
@@ -2924,8 +2925,10 @@ auto Renderer_Metal::createResources() -> void {
 
                 fogSimplePipeline = NS::TransferPtr(device->newRenderPipelineState(pipelineDesc, &error));
                 if (!fogSimplePipeline) {
-                    fmt::print("Warning: Could not create fog simple pipeline: {}\n",
-                               error ? error->localizedDescription()->utf8String() : "unknown error");
+                    fmt::print(
+                        "Warning: Could not create fog simple pipeline: {}\n",
+                        error ? error->localizedDescription()->utf8String() : "unknown error"
+                    );
                 }
 
                 pipelineDesc->release();
@@ -2974,14 +2977,16 @@ auto Renderer_Metal::createResources() -> void {
         NS::Error* error = nullptr;
         MTL::Library* library = device->newLibrary(code, nullptr, &error);
         if (!library) {
-            fmt::print("Warning: Could not compile volumetric clouds shader: {}\n",
-                       error ? error->localizedDescription()->utf8String() : "unknown error");
+            fmt::print(
+                "Warning: Could not compile volumetric clouds shader: {}\n",
+                error ? error->localizedDescription()->utf8String() : "unknown error"
+            );
         } else {
             // Low-res cloud rendering pipeline (quarter resolution)
-            auto vertexMain = library->newFunction(
-                NS::String::string("cloudVertex", NS::StringEncoding::UTF8StringEncoding));
-            auto fragmentLowRes = library->newFunction(
-                NS::String::string("cloudFragmentLowRes", NS::StringEncoding::UTF8StringEncoding));
+            auto vertexMain =
+                library->newFunction(NS::String::string("cloudVertex", NS::StringEncoding::UTF8StringEncoding));
+            auto fragmentLowRes =
+                library->newFunction(NS::String::string("cloudFragmentLowRes", NS::StringEncoding::UTF8StringEncoding));
 
             if (vertexMain && fragmentLowRes) {
                 auto pipelineDesc = MTL::RenderPipelineDescriptor::alloc()->init();
@@ -2991,16 +2996,19 @@ auto Renderer_Metal::createResources() -> void {
 
                 cloudLowResPipeline = NS::TransferPtr(device->newRenderPipelineState(pipelineDesc, &error));
                 if (!cloudLowResPipeline) {
-                    fmt::print("Warning: Could not create cloud low-res pipeline: {}\n",
-                               error ? error->localizedDescription()->utf8String() : "unknown error");
+                    fmt::print(
+                        "Warning: Could not create cloud low-res pipeline: {}\n",
+                        error ? error->localizedDescription()->utf8String() : "unknown error"
+                    );
                 }
                 pipelineDesc->release();
                 fragmentLowRes->release();
             }
 
             // Temporal resolve pipeline
-            auto fragmentTemporal = library->newFunction(
-                NS::String::string("cloudTemporalResolve", NS::StringEncoding::UTF8StringEncoding));
+            auto fragmentTemporal =
+                library->newFunction(NS::String::string("cloudTemporalResolve", NS::StringEncoding::UTF8StringEncoding)
+                );
 
             if (vertexMain && fragmentTemporal) {
                 auto pipelineDesc = MTL::RenderPipelineDescriptor::alloc()->init();
@@ -3010,16 +3018,19 @@ auto Renderer_Metal::createResources() -> void {
 
                 cloudTemporalResolvePipeline = NS::TransferPtr(device->newRenderPipelineState(pipelineDesc, &error));
                 if (!cloudTemporalResolvePipeline) {
-                    fmt::print("Warning: Could not create cloud temporal resolve pipeline: {}\n",
-                               error ? error->localizedDescription()->utf8String() : "unknown error");
+                    fmt::print(
+                        "Warning: Could not create cloud temporal resolve pipeline: {}\n",
+                        error ? error->localizedDescription()->utf8String() : "unknown error"
+                    );
                 }
                 pipelineDesc->release();
                 fragmentTemporal->release();
             }
 
             // Upscale and composite pipeline
-            auto fragmentComposite = library->newFunction(
-                NS::String::string("cloudUpscaleComposite", NS::StringEncoding::UTF8StringEncoding));
+            auto fragmentComposite =
+                library->newFunction(NS::String::string("cloudUpscaleComposite", NS::StringEncoding::UTF8StringEncoding)
+                );
 
             if (vertexMain && fragmentComposite) {
                 auto pipelineDesc = MTL::RenderPipelineDescriptor::alloc()->init();
@@ -3029,16 +3040,18 @@ auto Renderer_Metal::createResources() -> void {
 
                 cloudCompositePipeline = NS::TransferPtr(device->newRenderPipelineState(pipelineDesc, &error));
                 if (!cloudCompositePipeline) {
-                    fmt::print("Warning: Could not create cloud composite pipeline: {}\n",
-                               error ? error->localizedDescription()->utf8String() : "unknown error");
+                    fmt::print(
+                        "Warning: Could not create cloud composite pipeline: {}\n",
+                        error ? error->localizedDescription()->utf8String() : "unknown error"
+                    );
                 }
                 pipelineDesc->release();
                 fragmentComposite->release();
             }
 
             // Full-res cloud pipeline (fallback/debug)
-            auto fragmentFull = library->newFunction(
-                NS::String::string("cloudFragment", NS::StringEncoding::UTF8StringEncoding));
+            auto fragmentFull =
+                library->newFunction(NS::String::string("cloudFragment", NS::StringEncoding::UTF8StringEncoding));
 
             if (vertexMain && fragmentFull) {
                 auto pipelineDesc = MTL::RenderPipelineDescriptor::alloc()->init();
@@ -3048,8 +3061,10 @@ auto Renderer_Metal::createResources() -> void {
 
                 cloudRenderPipeline = NS::TransferPtr(device->newRenderPipelineState(pipelineDesc, &error));
                 if (!cloudRenderPipeline) {
-                    fmt::print("Warning: Could not create cloud render pipeline: {}\n",
-                               error ? error->localizedDescription()->utf8String() : "unknown error");
+                    fmt::print(
+                        "Warning: Could not create cloud render pipeline: {}\n",
+                        error ? error->localizedDescription()->utf8String() : "unknown error"
+                    );
                 }
                 pipelineDesc->release();
                 fragmentFull->release();
@@ -3070,13 +3085,15 @@ auto Renderer_Metal::createResources() -> void {
         NS::Error* error = nullptr;
         MTL::Library* library = device->newLibrary(code, nullptr, &error);
         if (!library) {
-            fmt::print("Warning: Could not compile sun flare shader: {}\n",
-                       error ? error->localizedDescription()->utf8String() : "unknown error");
+            fmt::print(
+                "Warning: Could not compile sun flare shader: {}\n",
+                error ? error->localizedDescription()->utf8String() : "unknown error"
+            );
         } else {
-            auto vertexMain = library->newFunction(
-                NS::String::string("sunFlareVertex", NS::StringEncoding::UTF8StringEncoding));
-            auto fragmentMain = library->newFunction(
-                NS::String::string("sunFlareFragment", NS::StringEncoding::UTF8StringEncoding));
+            auto vertexMain =
+                library->newFunction(NS::String::string("sunFlareVertex", NS::StringEncoding::UTF8StringEncoding));
+            auto fragmentMain =
+                library->newFunction(NS::String::string("sunFlareFragment", NS::StringEncoding::UTF8StringEncoding));
 
             if (vertexMain && fragmentMain) {
                 auto pipelineDesc = MTL::RenderPipelineDescriptor::alloc()->init();
@@ -3086,8 +3103,10 @@ auto Renderer_Metal::createResources() -> void {
 
                 sunFlarePipeline = NS::TransferPtr(device->newRenderPipelineState(pipelineDesc, &error));
                 if (!sunFlarePipeline) {
-                    fmt::print("Warning: Could not create sun flare pipeline: {}\n",
-                               error ? error->localizedDescription()->utf8String() : "unknown error");
+                    fmt::print(
+                        "Warning: Could not create sun flare pipeline: {}\n",
+                        error ? error->localizedDescription()->utf8String() : "unknown error"
+                    );
                 }
 
                 pipelineDesc->release();
