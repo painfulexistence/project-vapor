@@ -287,34 +287,6 @@ private:
 };
 
 // ============================================================
-// Helper functions for common operations
-// ============================================================
-
-namespace ActionHelpers {
-
-    // Play a sequence of actions on an entity
-    inline void playSequence(
-        entt::registry& reg,
-        entt::entity entity,
-        std::vector<ActionComponent> actions,
-        uint32_t completionTag = 0,
-        const std::string& debugName = ""
-    ) {
-        auto& queue = reg.emplace_or_replace<ActionQueueComponent>(entity);
-        queue.actions = std::move(actions);
-        queue.currentIndex = 0;
-        queue.completionTag = completionTag;
-        queue.debugName = debugName;
-    }
-
-    // Play a single action on an entity
-    inline void play(entt::registry& reg, entt::entity entity, ActionComponent action) {
-        reg.emplace_or_replace<ActionComponent>(entity, std::move(action));
-    }
-
-}// namespace ActionHelpers
-
-// ============================================================
 // Event Cleanup System - Clear events at end of frame
 // ============================================================
 

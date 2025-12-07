@@ -154,7 +154,16 @@ struct ActionComponent {
     // Completion notification (0 = no event emitted)
     uint32_t completionTag = 0;
 
-    // Helper: get progress (0-1)
+    // ===== Fluent modifiers =====
+
+    ActionComponent& dur(float d) { duration = d; return *this; }
+    ActionComponent& ease(EasingFunction e) { easing = e; return *this; }
+    ActionComponent& onComplete(uint32_t tag) { completionTag = tag; return *this; }
+    ActionComponent& loop(int count = -1) { loopMode = LoopMode::Loop; loopCount = count; return *this; }
+    ActionComponent& pingPong(int count = -1) { loopMode = LoopMode::PingPong; loopCount = count; return *this; }
+
+    // ===== Helpers =====
+
     float getProgress() const {
         if (duration <= 0.0f) return 1.0f;
         float t = std::clamp(elapsed / duration, 0.0f, 1.0f);
@@ -220,208 +229,135 @@ struct ActionQueueComponent {
 
 namespace Action {
 
-    // === Tweens ===
+    // === Tweens (use .dur() and .ease() to configure) ===
 
-    inline struct ActionComponent
-        moveTo(entt::entity target, const glm::vec3& end, float duration, EasingFunction easing = Easing::OutCubic) {
-        struct ActionComponent a;
+    inline ActionComponent moveTo(entt::entity target, const glm::vec3& end) {
+        ActionComponent a;
         a.type = ActionType::Position;
         a.target = target;
         a.vec3End = end;
-        a.duration = duration;
-        a.easing = easing;
         return a;
     }
 
-    inline struct ActionComponent
-        moveBy(entt::entity target, const glm::vec3& delta, float duration, EasingFunction easing = Easing::OutCubic) {
-        struct ActionComponent a;
+    inline ActionComponent moveBy(entt::entity target, const glm::vec3& delta) {
+        ActionComponent a;
         a.type = ActionType::Position;
         a.target = target;
-        a.vec3End = delta;// Will be resolved to absolute in system
-        a.duration = duration;
-        a.easing = easing;
-        a.name = "relative";// Flag for relative movement
+        a.vec3End = delta;
+        a.name = "relative";
         return a;
     }
 
-    inline struct ActionComponent
-        scaleTo(entt::entity target, const glm::vec3& end, float duration, EasingFunction easing = Easing::OutCubic) {
-        struct ActionComponent a;
+    inline ActionComponent scaleTo(entt::entity target, const glm::vec3& end) {
+        ActionComponent a;
         a.type = ActionType::Scale;
         a.target = target;
         a.vec3End = end;
-        a.duration = duration;
-        a.easing = easing;
         return a;
     }
 
-    inline struct ActionComponent
-        rotateTo(entt::entity target, const glm::quat& end, float duration, EasingFunction easing = Easing::OutCubic) {
-        struct ActionComponent a;
+    inline ActionComponent rotateTo(entt::entity target, const glm::quat& end) {
+        ActionComponent a;
         a.type = ActionType::Rotation;
         a.target = target;
         a.quatEnd = end;
-        a.duration = duration;
-        a.easing = easing;
         return a;
     }
 
-    inline struct ActionComponent
-        fadeTo(entt::entity target, float alpha, float duration, EasingFunction easing = Easing::OutCubic) {
-        struct ActionComponent a;
+    inline ActionComponent fadeTo(entt::entity target, float alpha) {
+        ActionComponent a;
         a.type = ActionType::Color;
         a.target = target;
         a.vec4End = glm::vec4(1.0f, 1.0f, 1.0f, alpha);
-        a.duration = duration;
-        a.easing = easing;
         return a;
     }
 
-    inline struct ActionComponent
-        colorTo(entt::entity target, const glm::vec4& end, float duration, EasingFunction easing = Easing::OutCubic) {
-        struct ActionComponent a;
+    inline ActionComponent colorTo(entt::entity target, const glm::vec4& end) {
+        ActionComponent a;
         a.type = ActionType::Color;
         a.target = target;
         a.vec4End = end;
-        a.duration = duration;
-        a.easing = easing;
         return a;
     }
 
     // === Control ===
 
-    inline struct ActionComponent wait(float duration) {
-        struct ActionComponent a;
+    inline ActionComponent wait(float duration) {
+        ActionComponent a;
         a.type = ActionType::Wait;
         a.duration = duration;
         return a;
     }
 
-    // Notify on completion (emits ActionCompleteEvent with this tag)
-    inline struct ActionComponent& onComplete(struct ActionComponent& a, uint32_t tag) {
-        a.completionTag = tag;
-        return a;
-    }
-
-    // Create parallel action group - returns the group entity
-    // Usage: auto group = Action::parallel(reg, { action1, action2 }, completionTag);
-    inline entt::entity parallel(
-        entt::registry& reg,
-        std::vector<ActionComponent> actions,
-        uint32_t completionTag = 0
-    ) {
-        static uint32_t nextGroupId = 1;
-
-        auto groupEntity = reg.create();
-        auto& group = reg.emplace<ActionGroupComponent>(groupEntity);
-        group.groupId = nextGroupId++;
-        group.totalActions = actions.size();
-        group.completedActions = 0;
-        group.completionTag = completionTag;
-
-        for (auto& action : actions) {
-            auto actionEntity = reg.create();
-            reg.emplace<ActionComponent>(actionEntity, std::move(action));
-            reg.emplace<ActionGroupMemberTag>(actionEntity, groupEntity);
-        }
-
-        return groupEntity;
-    }
-
     // === Entity ===
 
-    inline struct ActionComponent setActive(entt::entity target, bool active) {
-        struct ActionComponent a;
+    inline ActionComponent setActive(entt::entity target, bool active) {
+        ActionComponent a;
         a.type = ActionType::SetActive;
         a.target = target;
         a.activeValue = active;
         return a;
     }
 
-    inline struct ActionComponent playAnimation(entt::entity target, const std::string& animName) {
-        struct ActionComponent a;
+    inline ActionComponent playAnimation(entt::entity target, const std::string& animName) {
+        ActionComponent a;
         a.type = ActionType::PlayAnimation;
         a.target = target;
         a.name = animName;
         return a;
     }
 
-    // === Modifiers ===
+    // === Presets (common patterns with defaults) ===
 
-    inline struct ActionComponent& loop(struct ActionComponent& a, int count = -1) {
-        a.loopMode = LoopMode::Loop;
-        a.loopCount = count;
-        return a;
-    }
-
-    inline struct ActionComponent& pingPong(struct ActionComponent& a, int count = -1) {
-        a.loopMode = LoopMode::PingPong;
-        a.loopCount = count;
-        return a;
-    }
-
-    inline ActionComponent bounceIn(float duration = 0.5f) {
+    inline ActionComponent bounceIn() {
         ActionComponent a;
         a.type = ActionType::Scale;
         a.vec3Start = glm::vec3(0.0f);
         a.vec3End = glm::vec3(1.0f);
-        a.duration = duration;
+        a.duration = 0.5f;
         a.easing = Easing::OutBack;
         return a;
     }
 
-    inline ActionComponent bounceOut(float duration = 0.3f) {
+    inline ActionComponent bounceOut() {
         ActionComponent a;
         a.type = ActionType::Scale;
         a.vec3Start = glm::vec3(1.0f);
         a.vec3End = glm::vec3(0.0f);
-        a.duration = duration;
+        a.duration = 0.3f;
         a.easing = Easing::InBack;
         return a;
     }
 
-    inline ActionComponent pulse(float minScale = 0.9f, float maxScale = 1.1f, float duration = 1.0f) {
+    inline ActionComponent pulse(float minScale = 0.9f, float maxScale = 1.1f) {
         ActionComponent a;
         a.type = ActionType::Scale;
         a.vec3Start = glm::vec3(minScale);
         a.vec3End = glm::vec3(maxScale);
-        a.duration = duration;
+        a.duration = 1.0f;
         a.easing = Easing::InOutQuad;
         a.loopMode = LoopMode::PingPong;
         a.loopCount = -1;
         return a;
     }
 
-    inline ActionComponent fadeOut(float duration = 0.3f) {
+    inline ActionComponent fadeOut() {
         ActionComponent a;
         a.type = ActionType::Color;
         a.vec4Start = glm::vec4(1.0f);
         a.vec4End = glm::vec4(1.0f, 1.0f, 1.0f, 0.0f);
-        a.duration = duration;
+        a.duration = 0.3f;
         a.easing = Easing::OutCubic;
         return a;
     }
 
-    inline ActionComponent fadeIn(float duration = 0.3f) {
+    inline ActionComponent fadeIn() {
         ActionComponent a;
         a.type = ActionType::Color;
         a.vec4Start = glm::vec4(1.0f, 1.0f, 1.0f, 0.0f);
         a.vec4End = glm::vec4(1.0f);
-        a.duration = duration;
+        a.duration = 0.3f;
         a.easing = Easing::OutCubic;
-        return a;
-    }
-
-    inline ActionComponent move(
-        const glm::vec3& from, const glm::vec3& to, float duration = 0.5f, EasingFunction easing = Easing::OutCubic
-    ) {
-        ActionComponent a;
-        a.type = ActionType::Position;
-        a.vec3Start = from;
-        a.vec3End = to;
-        a.duration = duration;
-        a.easing = easing;
         return a;
     }
 

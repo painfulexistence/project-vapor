@@ -29,7 +29,7 @@ namespace ActionSequence {
 
     // Door open sequence: wait → move up
     inline std::vector<ActionComponent> doorOpen(entt::entity door, const glm::vec3& openPos) {
-        return { Action::wait(0.2f), Action::moveTo(door, openPos, 1.0f, Easing::OutCubic) };
+        return { Action::wait(0.2f), Action::moveTo(door, openPos).dur(1.0f).ease(Easing::OutCubic) };
     }
 
     // Attack combo sequence
@@ -57,10 +57,10 @@ namespace FSM {
         toggle(entt::entity self, const glm::vec3& idlePos, const glm::vec3& activePos, float duration = 0.5f) {
         return FSMBuilder()
             .state("Idle")
-            .enter({ Action::moveTo(self, idlePos, duration, Easing::OutCubic) })
+            .enter({ Action::moveTo(self, idlePos).dur(duration).ease(Easing::OutCubic) })
             .transitionTo("Active", "interact")
             .state("Active")
-            .enter({ Action::moveTo(self, activePos, duration, Easing::OutCubic) })
+            .enter({ Action::moveTo(self, activePos).dur(duration).ease(Easing::OutCubic) })
             .transitionTo("Idle", "interact")
             .initialState("Idle")
             .build();
@@ -141,13 +141,13 @@ namespace FSM {
     ) {
         return FSMBuilder()
             .state("WalkToB")
-            .enter({ Action::moveTo(self, pointB, walkDuration, Easing::Linear) })
+            .enter({ Action::moveTo(self, pointB).dur(walkDuration).ease(Easing::Linear) })
             .transitionOnComplete("WaitAtB")
             .state("WaitAtB")
             .enter({ Action::wait(waitDuration) })
             .transitionOnComplete("WalkToA")
             .state("WalkToA")
-            .enter({ Action::moveTo(self, pointA, walkDuration, Easing::Linear) })
+            .enter({ Action::moveTo(self, pointA).dur(walkDuration).ease(Easing::Linear) })
             .transitionOnComplete("WaitAtA")
             .state("WaitAtA")
             .enter({ Action::wait(waitDuration) })
