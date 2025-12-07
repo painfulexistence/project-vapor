@@ -22,6 +22,7 @@ set(SOURCES
     src/asset_serializer.cpp
     src/camera.cpp
     src/debug_draw.cpp
+    src/font_manager.cpp
     src/graphics.cpp
     src/helper.cpp
     src/physics_3d.cpp
@@ -37,7 +38,6 @@ set(SOURCES
     src/jolt_enki_job_system.cpp
     src/engine_core.cpp
     src/rmlui_manager.cpp
-    src/rmlui_renderer.cpp
     src/rmlui_system.cpp
     imgui/imgui.cpp
     imgui/imgui_draw.cpp

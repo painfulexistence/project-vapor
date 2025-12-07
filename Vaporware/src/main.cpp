@@ -12,6 +12,7 @@
 #include "Vapor/asset_manager.hpp"
 #include "Vapor/camera.hpp"
 #include "Vapor/engine_core.hpp"
+#include "Vapor/font_manager.hpp"
 #include "Vapor/graphics.hpp"
 #include "Vapor/input_manager.hpp"
 #include "Vapor/mesh_builder.hpp"
@@ -105,6 +106,14 @@ int main(int argc, char* args[]) {
 
     auto renderer = createRenderer(gfxBackend);
     renderer->init(window);
+
+    // Load a font for text rendering
+    FontHandle gameFont = renderer->loadFont("assets/fonts/Arial Black.ttf", 48.0f);
+    if (gameFont.isValid()) {
+        fmt::print("Font loaded successfully\n");
+    } else {
+        fmt::print("Failed to load font\n");
+    }
 
     // Load a sprite texture for 2D/3D batch rendering demo
     auto spriteImage = AssetManager::loadImage("assets/textures/default_albedo.png");
@@ -419,7 +428,9 @@ int main(int argc, char* args[]) {
             tempCamera.setViewMatrix(cam.viewMatrix);
             tempCamera.setProjectionMatrix(cam.projectionMatrix);
 
-            // NOTES: projection is computed internally from window size
+            // ===== 2D Canvas Demo (Screen Space) =====
+            // Note: When camera is perspective (default), CanvasPass uses screen space (pixel coords)
+            // When camera is orthographic, CanvasPass uses world space ortho
             float quadSize = 20.0f;
             float spacing = 25.0f;
             int cols = 10;
@@ -456,8 +467,29 @@ int main(int argc, char* args[]) {
                 spriteTexture,
                 glm::vec4(1.0f, 1.0f, 1.0f, 1.0f)
             );
-            // renderer->flush2D();
 
+            // ===== Text Rendering Demo (Screen Space) =====
+            if (gameFont.isValid()) {
+                // Draw text at screen positions (pixel coordinates)
+                renderer->drawText2D(
+                    gameFont, "Project Vapor", glm::vec2(50.0f, 200.0f), 1.0f, glm::vec4(1.0f, 1.0f, 1.0f, 1.0f)
+                );
+
+                renderer->drawText2D(
+                    gameFont, "Press H to toggle HUD", glm::vec2(50.0f, 250.0f), 0.5f, glm::vec4(0.8f, 0.8f, 0.8f, 1.0f)
+                );
+
+                // Show FPS
+                renderer->drawText2D(
+                    gameFont,
+                    fmt::format("FPS: {:.1f}", 1.0f / deltaTime),
+                    glm::vec2(50.0f, 300.0f),
+                    0.5f,
+                    glm::vec4(0.0f, 1.0f, 0.0f, 1.0f)
+                );
+            }
+
+            // ===== 3D Batch Demo =====
             renderer->drawQuad3D(
                 glm::vec3(0.0f, 2.0f, 0.0f), glm::vec2(1.0f, 1.0f), spriteTexture, glm::vec4(1.0f, 0.5f, 0.5f, 1.0f)
             );
