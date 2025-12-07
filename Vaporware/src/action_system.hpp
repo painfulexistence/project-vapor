@@ -1,7 +1,7 @@
 #pragma once
 
-#include "action_components.hpp"
 #include "Vapor/components.hpp"
+#include "action_components.hpp"
 #include <entt/entt.hpp>
 
 // ============================================================
@@ -65,7 +65,7 @@ private:
             auto& queue = view.get<ActionQueueComponent>(entity);
 
             while (!queue.isComplete()) {
-                Action* current = queue.current();
+                ActionComponent* current = queue.current();
                 if (!current) break;
 
                 bool actionDone = executeAction(reg, entity, *current, dt);
@@ -74,7 +74,7 @@ private:
                     queue.advance();
                     // Don't break - try to execute next instant action in same frame
                 } else {
-                    break;  // Action still running, wait for next frame
+                    break;// Action still running, wait for next frame
                 }
             }
 
@@ -94,7 +94,7 @@ private:
 
     // ========== Execute Single Action ==========
 
-    static bool executeAction(entt::registry& reg, entt::entity owner, Action& action, float dt) {
+    static bool executeAction(entt::registry& reg, entt::entity owner, ActionComponent& action, float dt) {
         // Resolve target
         entt::entity target = (action.target != entt::null) ? action.target : owner;
 
@@ -128,133 +128,133 @@ private:
 
     // ========== Initialize Action (capture start values) ==========
 
-    static void initializeAction(entt::registry& reg, entt::entity target, Action& action) {
+    static void initializeAction(entt::registry& reg, entt::entity target, ActionComponent& action) {
         switch (action.type) {
-            case ActionType::Position: {
-                if (auto* transform = reg.try_get<Vapor::TransformComponent>(target)) {
-                    // If relative movement (flagged with name="relative")
-                    if (action.name == "relative") {
-                        action.vec3Start = transform->position;
-                        action.vec3End = transform->position + action.vec3End;
-                        action.name.clear();
-                    } else if (action.vec3Start == glm::vec3(0.0f) && !action.started) {
-                        action.vec3Start = transform->position;
-                    }
+        case ActionType::Position: {
+            if (auto* transform = reg.try_get<Vapor::TransformComponent>(target)) {
+                // If relative movement (flagged with name="relative")
+                if (action.name == "relative") {
+                    action.vec3Start = transform->position;
+                    action.vec3End = transform->position + action.vec3End;
+                    action.name.clear();
+                } else if (action.vec3Start == glm::vec3(0.0f) && !action.started) {
+                    action.vec3Start = transform->position;
                 }
-                break;
             }
-            case ActionType::Scale: {
-                if (auto* transform = reg.try_get<Vapor::TransformComponent>(target)) {
-                    if (action.vec3Start == glm::vec3(0.0f) && action.vec3End != glm::vec3(0.0f)) {
-                        // bounceIn case: start from 0
-                    } else if (action.vec3Start == glm::vec3(0.0f)) {
-                        action.vec3Start = transform->scale;
-                    }
+            break;
+        }
+        case ActionType::Scale: {
+            if (auto* transform = reg.try_get<Vapor::TransformComponent>(target)) {
+                if (action.vec3Start == glm::vec3(0.0f) && action.vec3End != glm::vec3(0.0f)) {
+                    // bounceIn case: start from 0
+                } else if (action.vec3Start == glm::vec3(0.0f)) {
+                    action.vec3Start = transform->scale;
                 }
-                break;
             }
-            case ActionType::Rotation: {
-                if (auto* transform = reg.try_get<Vapor::TransformComponent>(target)) {
-                    if (action.quatStart == glm::quat(1, 0, 0, 0)) {
-                        action.quatStart = transform->rotation;
-                    }
+            break;
+        }
+        case ActionType::Rotation: {
+            if (auto* transform = reg.try_get<Vapor::TransformComponent>(target)) {
+                if (action.quatStart == glm::quat(1, 0, 0, 0)) {
+                    action.quatStart = transform->rotation;
                 }
-                break;
             }
-            case ActionType::Color: {
-                // Could capture from material/sprite component if available
-                break;
+            break;
+        }
+        case ActionType::Color: {
+            // Could capture from material/sprite component if available
+            break;
+        }
+        case ActionType::Parallel: {
+            // Initialize all children
+            for (auto& child : action.children) {
+                entt::entity childTarget = (child.target != entt::null) ? child.target : target;
+                initializeAction(reg, childTarget, child);
             }
-            case ActionType::Parallel: {
-                // Initialize all children
-                for (auto& child : action.children) {
-                    entt::entity childTarget = (child.target != entt::null) ? child.target : target;
-                    initializeAction(reg, childTarget, child);
-                }
-                break;
-            }
-            default:
-                break;
+            break;
+        }
+        default:
+            break;
         }
     }
 
     // ========== Apply Instant Action ==========
 
-    static void applyInstantAction(entt::registry& reg, entt::entity target, Action& action) {
+    static void applyInstantAction(entt::registry& reg, entt::entity target, ActionComponent& action) {
         switch (action.type) {
-            case ActionType::Callback: {
-                if (action.callback) {
-                    action.callback();
-                }
-                break;
+        case ActionType::Callback: {
+            if (action.callback) {
+                action.callback();
             }
-            case ActionType::SetActive: {
-                if (action.activeValue) {
-                    reg.emplace_or_replace<Vapor::Active>(target);
-                } else {
-                    reg.remove<Vapor::Active>(target);
-                }
-                break;
+            break;
+        }
+        case ActionType::SetActive: {
+            if (action.activeValue) {
+                reg.emplace_or_replace<Vapor::Active>(target);
+            } else {
+                reg.remove<Vapor::Active>(target);
             }
-            case ActionType::PlayAnimation: {
-                // Would trigger animation system
-                // reg.emplace_or_replace<PlayAnimationRequest>(target, action.name);
-                break;
-            }
-            default:
-                break;
+            break;
+        }
+        case ActionType::PlayAnimation: {
+            // Would trigger animation system
+            // reg.emplace_or_replace<PlayAnimationRequest>(target, action.name);
+            break;
+        }
+        default:
+            break;
         }
     }
 
     // ========== Apply Tween Action ==========
 
-    static void applyTweenAction(entt::registry& reg, entt::entity target, Action& action) {
+    static void applyTweenAction(entt::registry& reg, entt::entity target, ActionComponent& action) {
         float t = action.getProgress();
 
         switch (action.type) {
-            case ActionType::Position: {
-                if (auto* transform = reg.try_get<Vapor::TransformComponent>(target)) {
-                    transform->position = glm::mix(action.vec3Start, action.vec3End, t);
-                    transform->isDirty = true;
+        case ActionType::Position: {
+            if (auto* transform = reg.try_get<Vapor::TransformComponent>(target)) {
+                transform->position = glm::mix(action.vec3Start, action.vec3End, t);
+                transform->isDirty = true;
+            }
+            break;
+        }
+        case ActionType::Scale: {
+            if (auto* transform = reg.try_get<Vapor::TransformComponent>(target)) {
+                transform->scale = glm::mix(action.vec3Start, action.vec3End, t);
+                transform->isDirty = true;
+            }
+            break;
+        }
+        case ActionType::Rotation: {
+            if (auto* transform = reg.try_get<Vapor::TransformComponent>(target)) {
+                transform->rotation = glm::slerp(action.quatStart, action.quatEnd, t);
+                transform->isDirty = true;
+            }
+            break;
+        }
+        case ActionType::Color: {
+            // Would apply to material/sprite component
+            // glm::vec4 color = glm::mix(action.vec4Start, action.vec4End, t);
+            break;
+        }
+        case ActionType::Wait: {
+            // Just wait, nothing to apply
+            break;
+        }
+        case ActionType::Parallel: {
+            // Update all children
+            for (auto& child : action.children) {
+                if (!child.completed) {
+                    entt::entity childTarget = (child.target != entt::null) ? child.target : target;
+                    executeAction(reg, childTarget, child, 0.0f);// dt already applied to parent
+                    child.elapsed = action.elapsed;// Sync elapsed time
                 }
-                break;
             }
-            case ActionType::Scale: {
-                if (auto* transform = reg.try_get<Vapor::TransformComponent>(target)) {
-                    transform->scale = glm::mix(action.vec3Start, action.vec3End, t);
-                    transform->isDirty = true;
-                }
-                break;
-            }
-            case ActionType::Rotation: {
-                if (auto* transform = reg.try_get<Vapor::TransformComponent>(target)) {
-                    transform->rotation = glm::slerp(action.quatStart, action.quatEnd, t);
-                    transform->isDirty = true;
-                }
-                break;
-            }
-            case ActionType::Color: {
-                // Would apply to material/sprite component
-                // glm::vec4 color = glm::mix(action.vec4Start, action.vec4End, t);
-                break;
-            }
-            case ActionType::Wait: {
-                // Just wait, nothing to apply
-                break;
-            }
-            case ActionType::Parallel: {
-                // Update all children
-                for (auto& child : action.children) {
-                    if (!child.completed) {
-                        entt::entity childTarget = (child.target != entt::null) ? child.target : target;
-                        executeAction(reg, childTarget, child, 0.0f);  // dt already applied to parent
-                        child.elapsed = action.elapsed;  // Sync elapsed time
-                    }
-                }
-                break;
-            }
-            default:
-                break;
+            break;
+        }
+        default:
+            break;
         }
     }
 };
@@ -266,10 +266,13 @@ private:
 namespace ActionHelpers {
 
     // Play a sequence of actions on an entity
-    inline void playSequence(entt::registry& reg, entt::entity entity,
-                              std::vector<Action> actions,
-                              std::function<void()> onComplete = nullptr,
-                              const std::string& debugName = "") {
+    inline void playSequence(
+        entt::registry& reg,
+        entt::entity entity,
+        std::vector<ActionComponent> actions,
+        std::function<void()> onComplete = nullptr,
+        const std::string& debugName = ""
+    ) {
         auto& queue = reg.emplace_or_replace<ActionQueueComponent>(entity);
         queue.actions = std::move(actions);
         queue.currentIndex = 0;
@@ -278,9 +281,9 @@ namespace ActionHelpers {
     }
 
     // Play a single action on an entity
-    inline void play(entt::registry& reg, entt::entity entity, Action action) {
+    inline void play(entt::registry& reg, entt::entity entity, ActionComponent action) {
         auto& comp = reg.emplace_or_replace<ActionComponent>(entity);
-        static_cast<Action&>(comp) = std::move(action);
+        static_cast<ActionComponent&>(comp) = std::move(action);
     }
 
-}  // namespace ActionHelpers
+}// namespace ActionHelpers

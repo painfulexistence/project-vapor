@@ -18,8 +18,7 @@ struct EventCondition {
 };
 
 // Condition that checks if a component exists on the entity
-template<typename T>
-struct HasComponentCondition {};
+template<typename T> struct HasComponentCondition {};
 
 // Condition with custom logic
 struct CustomCondition {
@@ -30,11 +29,7 @@ struct CustomCondition {
 struct ActionsCompleteCondition {};
 
 // Variant of all possible conditions
-using TransitionCondition = std::variant<
-    EventCondition,
-    CustomCondition,
-    ActionsCompleteCondition
->;
+using TransitionCondition = std::variant<EventCondition, CustomCondition, ActionsCompleteCondition>;
 
 // ============================================================
 // FSM Transition
@@ -49,8 +44,8 @@ struct FSMTransition {
         return { target, EventCondition{ eventName } };
     }
 
-    static FSMTransition onCondition(const std::string& target,
-                                      std::function<bool(entt::registry&, entt::entity)> pred) {
+    static FSMTransition
+        onCondition(const std::string& target, std::function<bool(entt::registry&, entt::entity)> pred) {
         return { target, CustomCondition{ std::move(pred) } };
     }
 
@@ -67,21 +62,21 @@ struct FSMState {
     std::string name;
 
     // Actions to execute when entering this state
-    std::vector<Action> onEnterActions;
+    std::vector<ActionComponent> onEnterActions;
 
     // Actions to execute when exiting this state
-    std::vector<Action> onExitActions;
+    std::vector<ActionComponent> onExitActions;
 
     // Possible transitions from this state
     std::vector<FSMTransition> transitions;
 
     // Builder pattern for convenience
-    FSMState& enter(std::vector<Action> actions) {
+    FSMState& enter(std::vector<ActionComponent> actions) {
         onEnterActions = std::move(actions);
         return *this;
     }
 
-    FSMState& exit(std::vector<Action> actions) {
+    FSMState& exit(std::vector<ActionComponent> actions) {
         onExitActions = std::move(actions);
         return *this;
     }
@@ -97,17 +92,17 @@ struct FSMState {
 // ============================================================
 
 enum class FSMPhase : uint8_t {
-    Idle,           // Waiting for state entry
-    EnteringState,  // Running onEnter actions
-    InState,        // Actions complete, checking transitions
-    ExitingState    // Running onExit actions
+    Idle,// Waiting for state entry
+    EnteringState,// Running onEnter actions
+    InState,// Actions complete, checking transitions
+    ExitingState// Running onExit actions
 };
 
 struct FSMComponent {
     std::vector<FSMState> states;
     std::string currentState;
     std::string previousState;
-    std::string pendingState;       // State to transition to after exit actions
+    std::string pendingState;// State to transition to after exit actions
     FSMPhase phase = FSMPhase::Idle;
 
     // For tracking if current actions are done
@@ -177,14 +172,14 @@ public:
         return *this;
     }
 
-    FSMBuilder& enter(std::vector<Action> actions) {
+    FSMBuilder& enter(std::vector<ActionComponent> actions) {
         if (m_currentStateIndex < m_states.size()) {
             m_states[m_currentStateIndex].onEnterActions = std::move(actions);
         }
         return *this;
     }
 
-    FSMBuilder& exit(std::vector<Action> actions) {
+    FSMBuilder& exit(std::vector<ActionComponent> actions) {
         if (m_currentStateIndex < m_states.size()) {
             m_states[m_currentStateIndex].onExitActions = std::move(actions);
         }
@@ -193,18 +188,14 @@ public:
 
     FSMBuilder& transitionTo(const std::string& target, const std::string& onEvent) {
         if (m_currentStateIndex < m_states.size()) {
-            m_states[m_currentStateIndex].transitions.push_back(
-                FSMTransition::onEvent(target, onEvent)
-            );
+            m_states[m_currentStateIndex].transitions.push_back(FSMTransition::onEvent(target, onEvent));
         }
         return *this;
     }
 
-    FSMBuilder& transitionTo(const std::string& target,
-                             std::function<bool(entt::registry&, entt::entity)> condition) {
+    FSMBuilder& transitionTo(const std::string& target, std::function<bool(entt::registry&, entt::entity)> condition) {
         if (m_currentStateIndex < m_states.size()) {
-            m_states[m_currentStateIndex].transitions.push_back(
-                FSMTransition::onCondition(target, std::move(condition))
+            m_states[m_currentStateIndex].transitions.push_back(FSMTransition::onCondition(target, std::move(condition))
             );
         }
         return *this;
@@ -212,9 +203,7 @@ public:
 
     FSMBuilder& transitionOnComplete(const std::string& target) {
         if (m_currentStateIndex < m_states.size()) {
-            m_states[m_currentStateIndex].transitions.push_back(
-                FSMTransition::onActionsComplete(target)
-            );
+            m_states[m_currentStateIndex].transitions.push_back(FSMTransition::onActionsComplete(target));
         }
         return *this;
     }

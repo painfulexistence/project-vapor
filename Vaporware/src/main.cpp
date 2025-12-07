@@ -339,17 +339,16 @@ int main(int argc, char* args[]) {
         nodeRef.node = node;
 
         // Event-triggered FSM: Idle -> Jump up -> Fall down -> Idle
-        using namespace AnimationBuilder;
         auto& fsm = registry.emplace<FSMComponent>(
             triggerCube,
             FSMBuilder()
                 .state("Idle")
                 .transitionTo("JumpUp", "trigger")
                 .state("JumpUp")
-                .enter({ moveTo(triggerCube, glm::vec3(-5.0f, 3.0f, 0.0f), 0.5f, Easing::OutCubic) })
+                .enter({ Action::moveTo(triggerCube, glm::vec3(-5.0f, 3.0f, 0.0f), 0.5f, Easing::OutCubic) })
                 .transitionOnComplete("FallDown")
                 .state("FallDown")
-                .enter({ moveTo(triggerCube, glm::vec3(-5.0f, 0.5f, 0.0f), 0.3f, Easing::InCubic) })
+                .enter({ Action::moveTo(triggerCube, glm::vec3(-5.0f, 0.5f, 0.0f), 0.3f, Easing::InCubic) })
                 .transitionOnComplete("Idle")
                 .initialState("Idle")
                 .build()
@@ -375,8 +374,8 @@ int main(int argc, char* args[]) {
             interactiveBox,
             FSM::toggle(
                 interactiveBox,
-                glm::vec3(0.0f, 0.5f, -3.0f),   // Idle position
-                glm::vec3(0.0f, 2.0f, -3.0f)    // Active position (raised)
+                glm::vec3(0.0f, 0.5f, -3.0f),// Idle position
+                glm::vec3(0.0f, 2.0f, -3.0f)// Active position (raised)
             )
         );
     }

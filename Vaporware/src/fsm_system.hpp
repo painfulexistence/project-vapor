@@ -52,36 +52,36 @@ public:
 private:
     static void updateEntity(entt::registry& reg, entt::entity entity, FSMComponent& fsm) {
         switch (fsm.phase) {
-            case FSMPhase::Idle:
-                // Start entering the initial state
-                if (!fsm.currentState.empty()) {
-                    beginEnterState(reg, entity, fsm);
-                }
-                break;
+        case FSMPhase::Idle:
+            // Start entering the initial state
+            if (!fsm.currentState.empty()) {
+                beginEnterState(reg, entity, fsm);
+            }
+            break;
 
-            case FSMPhase::EnteringState:
-                // Check if enter actions completed
-                if (checkActionsComplete(reg, entity)) {
-                    fsm.phase = FSMPhase::InState;
-                    reg.remove<FSMActionsRunningTag>(entity);
-                }
-                break;
+        case FSMPhase::EnteringState:
+            // Check if enter actions completed
+            if (checkActionsComplete(reg, entity)) {
+                fsm.phase = FSMPhase::InState;
+                reg.remove<FSMActionsRunningTag>(entity);
+            }
+            break;
 
-            case FSMPhase::InState:
-                // Check transitions
-                checkTransitions(reg, entity, fsm);
-                break;
+        case FSMPhase::InState:
+            // Check transitions
+            checkTransitions(reg, entity, fsm);
+            break;
 
-            case FSMPhase::ExitingState:
-                // Check if exit actions completed
-                if (checkActionsComplete(reg, entity)) {
-                    reg.remove<FSMActionsRunningTag>(entity);
-                    // Now enter the pending state
-                    fsm.currentState = fsm.pendingState;
-                    fsm.pendingState.clear();
-                    beginEnterState(reg, entity, fsm);
-                }
-                break;
+        case FSMPhase::ExitingState:
+            // Check if exit actions completed
+            if (checkActionsComplete(reg, entity)) {
+                reg.remove<FSMActionsRunningTag>(entity);
+                // Now enter the pending state
+                fsm.currentState = fsm.pendingState;
+                fsm.pendingState.clear();
+                beginEnterState(reg, entity, fsm);
+            }
+            break;
         }
     }
 
@@ -104,8 +104,8 @@ private:
         }
     }
 
-    static void beginExitState(entt::registry& reg, entt::entity entity, FSMComponent& fsm,
-                                const std::string& nextState) {
+    static void
+        beginExitState(entt::registry& reg, entt::entity entity, FSMComponent& fsm, const std::string& nextState) {
         const FSMState* state = fsm.getCurrentState();
 
         fsm.previousState = fsm.currentState;
@@ -124,9 +124,9 @@ private:
         }
     }
 
-    static void beginTransition(entt::registry& reg, entt::entity entity, FSMComponent& fsm,
-                                 const std::string& targetState) {
-        if (fsm.currentState == targetState) return;  // Already in target state
+    static void
+        beginTransition(entt::registry& reg, entt::entity entity, FSMComponent& fsm, const std::string& targetState) {
+        if (fsm.currentState == targetState) return;// Already in target state
 
         beginExitState(reg, entity, fsm, targetState);
     }
@@ -138,30 +138,46 @@ private:
         const FSMEventComponent* events = reg.try_get<FSMEventComponent>(entity);
 
         for (const auto& transition : state->transitions) {
-            bool shouldTransition = std::visit([&](const auto& cond) -> bool {
-                return checkCondition(reg, entity, fsm, events, cond);
-            }, transition.condition);
+            bool shouldTransition = std::visit(
+                [&](const auto& cond) -> bool { return checkCondition(reg, entity, fsm, events, cond); },
+                transition.condition
+            );
 
             if (shouldTransition) {
                 beginTransition(reg, entity, fsm, transition.targetState);
-                break;  // Only one transition per frame
+                break;// Only one transition per frame
             }
         }
     }
 
     // Condition checkers for each type
-    static bool checkCondition(entt::registry& reg, entt::entity entity, FSMComponent& fsm,
-                                const FSMEventComponent* events, const EventCondition& cond) {
+    static bool checkCondition(
+        entt::registry& reg,
+        entt::entity entity,
+        FSMComponent& fsm,
+        const FSMEventComponent* events,
+        const EventCondition& cond
+    ) {
         return events && events->hasEvent(cond.eventName);
     }
 
-    static bool checkCondition(entt::registry& reg, entt::entity entity, FSMComponent& fsm,
-                                const FSMEventComponent* events, const CustomCondition& cond) {
+    static bool checkCondition(
+        entt::registry& reg,
+        entt::entity entity,
+        FSMComponent& fsm,
+        const FSMEventComponent* events,
+        const CustomCondition& cond
+    ) {
         return cond.predicate && cond.predicate(reg, entity);
     }
 
-    static bool checkCondition(entt::registry& reg, entt::entity entity, FSMComponent& fsm,
-                                const FSMEventComponent* events, const ActionsCompleteCondition& cond) {
+    static bool checkCondition(
+        entt::registry& reg,
+        entt::entity entity,
+        FSMComponent& fsm,
+        const FSMEventComponent* events,
+        const ActionsCompleteCondition& cond
+    ) {
         // Actions are complete when ActionQueueComponent is done or doesn't exist
         if (auto* queue = reg.try_get<ActionQueueComponent>(entity)) {
             return queue->isComplete();
@@ -180,11 +196,11 @@ private:
         return !reg.any_of<FSMActionsRunningTag>(entity);
     }
 
-    static void emplaceActions(entt::registry& reg, entt::entity entity,
-                                const std::vector<Action>& actions,
-                                const std::string& tag) {
+    static void emplaceActions(
+        entt::registry& reg, entt::entity entity, const std::vector<ActionComponent>& actions, const std::string& tag
+    ) {
         auto& queue = reg.emplace_or_replace<ActionQueueComponent>(entity);
-        queue.actions = actions;  // Copy
+        queue.actions = actions;// Copy
         queue.debugName = tag;
         queue.currentIndex = 0;
         queue.onComplete = nullptr;
@@ -212,58 +228,60 @@ private:
 namespace FSMPatterns {
 
     // Create a simple patrol FSM: Idle <-> Walk
-    inline FSMComponent createPatrolFSM(entt::entity self,
-                                         const glm::vec3& posA,
-                                         const glm::vec3& posB,
-                                         float walkDuration = 2.0f,
-                                         float waitDuration = 1.0f) {
+    inline FSMComponent createPatrolFSM(
+        entt::entity self,
+        const glm::vec3& posA,
+        const glm::vec3& posB,
+        float walkDuration = 2.0f,
+        float waitDuration = 1.0f
+    ) {
         return FSMBuilder()
             .state("WaitA")
-                .enter({ Action::wait(waitDuration) })
-                .transitionOnComplete("WalkToB")
+            .enter({ Action::wait(waitDuration) })
+            .transitionOnComplete("WalkToB")
             .state("WalkToB")
-                .enter({ Action::moveTo(self, posB, walkDuration, Easing::InOutQuad) })
-                .transitionOnComplete("WaitB")
+            .enter({ Action::moveTo(self, posB, walkDuration, Easing::InOutQuad) })
+            .transitionOnComplete("WaitB")
             .state("WaitB")
-                .enter({ Action::wait(waitDuration) })
-                .transitionOnComplete("WalkToA")
+            .enter({ Action::wait(waitDuration) })
+            .transitionOnComplete("WalkToA")
             .state("WalkToA")
-                .enter({ Action::moveTo(self, posA, walkDuration, Easing::InOutQuad) })
-                .transitionOnComplete("WaitA")
+            .enter({ Action::moveTo(self, posA, walkDuration, Easing::InOutQuad) })
+            .transitionOnComplete("WaitA")
             .initialState("WaitA")
             .build();
     }
 
     // Create a trigger-based FSM: Idle -> Triggered -> Cooldown -> Idle
-    inline FSMComponent createTriggerFSM(entt::entity self,
-                                          std::vector<Action> onTriggerActions,
-                                          float cooldownDuration = 3.0f) {
+    inline FSMComponent createTriggerFSM(
+        entt::entity self, std::vector<ActionComponent> onTriggerActions, float cooldownDuration = 3.0f
+    ) {
         return FSMBuilder()
             .state("Idle")
-                .transitionTo("Triggered", "trigger")
+            .transitionTo("Triggered", "trigger")
             .state("Triggered")
-                .enter(std::move(onTriggerActions))
-                .transitionOnComplete("Cooldown")
+            .enter(std::move(onTriggerActions))
+            .transitionOnComplete("Cooldown")
             .state("Cooldown")
-                .enter({ Action::wait(cooldownDuration) })
-                .transitionOnComplete("Idle")
+            .enter({ Action::wait(cooldownDuration) })
+            .transitionOnComplete("Idle")
             .initialState("Idle")
             .build();
     }
 
     // Create an interaction FSM: Idle <-> Active (toggle on event)
-    inline FSMComponent createToggleFSM(entt::entity self,
-                                         std::vector<Action> onActivate,
-                                         std::vector<Action> onDeactivate) {
+    inline FSMComponent createToggleFSM(
+        entt::entity self, std::vector<ActionComponent> onActivate, std::vector<ActionComponent> onDeactivate
+    ) {
         return FSMBuilder()
             .state("Inactive")
-                .enter(std::move(onDeactivate))
-                .transitionTo("Active", "toggle")
+            .enter(std::move(onDeactivate))
+            .transitionTo("Active", "toggle")
             .state("Active")
-                .enter(std::move(onActivate))
-                .transitionTo("Inactive", "toggle")
+            .enter(std::move(onActivate))
+            .transitionTo("Inactive", "toggle")
             .initialState("Inactive")
             .build();
     }
 
-}  // namespace FSMPatterns
+}// namespace FSMPatterns
