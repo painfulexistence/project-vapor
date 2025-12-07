@@ -1,6 +1,7 @@
 #define STB_TRUETYPE_IMPLEMENTATION
 #include "stb/stb_truetype.h"
 
+#include "SDL3/SDL_filesystem.h"
 #include "Vapor/font_manager.hpp"
 #include <cmath>
 #include <fmt/format.h>
@@ -10,8 +11,8 @@ void FontManager::initialize(MTL::Device* device) {
     m_device = device;
 }
 
-FontHandle FontManager::loadFont(const std::string& path, float baseSize, int firstChar, int numChars) {
-    // Read font file
+FontHandle FontManager::loadFont(const std::string& filename, float baseSize, int firstChar, int numChars) {
+    std::string path = SDL_GetBasePath() + filename;
     std::ifstream file(path, std::ios::binary | std::ios::ate);
     if (!file.is_open()) {
         fmt::print(stderr, "[FontManager] Failed to open font file: {}\n", path);
@@ -28,7 +29,7 @@ FontHandle FontManager::loadFont(const std::string& path, float baseSize, int fi
     }
 
     // Create font entry
-    FontHandle handle{m_nextFontID++};
+    FontHandle handle{ m_nextFontID++ };
     Font& font = m_fonts[handle.rid];
     font.fontSize = baseSize;
 
@@ -140,7 +141,7 @@ bool FontManager::bakeFontAtlas(
     while (atlasSize < glyphsPerRow * static_cast<int>(fontSize * 1.5f)) {
         atlasSize *= 2;
     }
-    atlasSize = std::min(atlasSize, 2048); // Cap at 2048
+    atlasSize = std::min(atlasSize, 2048);// Cap at 2048
 
     font.textureWidth = atlasSize;
     font.textureHeight = atlasSize;
@@ -182,14 +183,7 @@ bool FontManager::bakeFontAtlas(
         // Render glyph to atlas
         if (glyphWidth > 0 && glyphHeight > 0) {
             stbtt_MakeCodepointBitmap(
-                &fontInfo,
-                &atlasBitmap[y * atlasSize + x],
-                glyphWidth,
-                glyphHeight,
-                atlasSize,
-                scale,
-                scale,
-                codepoint
+                &fontInfo, &atlasBitmap[y * atlasSize + x], glyphWidth, glyphHeight, atlasSize, scale, scale, codepoint
             );
         }
 
@@ -214,16 +208,16 @@ bool FontManager::bakeFontAtlas(
 
     // Convert single-channel to RGBA (white text with alpha)
     // Store in atlas data for later texture creation
-    AtlasData& atlasData = m_atlasData[m_nextFontID - 1]; // Use the ID we just assigned
+    AtlasData& atlasData = m_atlasData[m_nextFontID - 1];// Use the ID we just assigned
     atlasData.width = atlasSize;
     atlasData.height = atlasSize;
     atlasData.rgbaData.resize(atlasSize * atlasSize * 4);
 
     for (int i = 0; i < atlasSize * atlasSize; i++) {
-        atlasData.rgbaData[i * 4 + 0] = 255; // R
-        atlasData.rgbaData[i * 4 + 1] = 255; // G
-        atlasData.rgbaData[i * 4 + 2] = 255; // B
-        atlasData.rgbaData[i * 4 + 3] = atlasBitmap[i]; // A (from grayscale)
+        atlasData.rgbaData[i * 4 + 0] = 255;// R
+        atlasData.rgbaData[i * 4 + 1] = 255;// G
+        atlasData.rgbaData[i * 4 + 2] = 255;// B
+        atlasData.rgbaData[i * 4 + 3] = atlasBitmap[i];// A (from grayscale)
     }
 
     return true;

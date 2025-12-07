@@ -158,8 +158,8 @@ namespace Vapor {
             geom.indexCount,
             translation.x,
             translation.y,
-            m_viewportWidth,
-            m_viewportHeight
+            m_logicalWidth,
+            m_logicalHeight
         );
 
         // Set pipeline state

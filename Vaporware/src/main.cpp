@@ -107,11 +107,6 @@ int main(int argc, char* args[]) {
     auto renderer = createRenderer(gfxBackend);
     renderer->init(window);
 
-    // Load a sprite texture for 2D/3D batch rendering demo
-    auto spriteImage = AssetManager::loadImage("assets/textures/default_albedo.png");
-    TextureHandle spriteTexture = renderer->createTexture(spriteImage);
-    fmt::print("Sprite texture loaded\n");
-
     // Load a font for text rendering
     FontHandle gameFont = renderer->loadFont("assets/fonts/Arial Black.ttf", 48.0f);
     if (gameFont.isValid()) {
@@ -119,6 +114,11 @@ int main(int argc, char* args[]) {
     } else {
         fmt::print("Failed to load font\n");
     }
+
+    // Load a sprite texture for 2D/3D batch rendering demo
+    auto spriteImage = AssetManager::loadImage("assets/textures/default_albedo.png");
+    TextureHandle spriteTexture = renderer->createTexture(spriteImage);
+    fmt::print("Sprite texture loaded\n");
 
     if (engineCore->initRmlUI(windowWidth, windowHeight) && renderer->initUI()) {
         fmt::print("RmlUI System Initialized\n");
@@ -472,19 +472,11 @@ int main(int argc, char* args[]) {
             if (gameFont.isValid()) {
                 // Draw text at screen positions (pixel coordinates)
                 renderer->drawText2D(
-                    gameFont,
-                    "Project Vapor",
-                    glm::vec2(50.0f, 200.0f),
-                    1.0f,
-                    glm::vec4(1.0f, 1.0f, 1.0f, 1.0f)
+                    gameFont, "Project Vapor", glm::vec2(50.0f, 200.0f), 1.0f, glm::vec4(1.0f, 1.0f, 1.0f, 1.0f)
                 );
 
                 renderer->drawText2D(
-                    gameFont,
-                    "Press H to toggle HUD",
-                    glm::vec2(50.0f, 250.0f),
-                    0.5f,
-                    glm::vec4(0.8f, 0.8f, 0.8f, 1.0f)
+                    gameFont, "Press H to toggle HUD", glm::vec2(50.0f, 250.0f), 0.5f, glm::vec4(0.8f, 0.8f, 0.8f, 1.0f)
                 );
 
                 // Show FPS
