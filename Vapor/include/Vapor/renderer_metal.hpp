@@ -393,7 +393,7 @@ protected:
     // Light scattering (God Rays) resources
     std::vector<NS::SharedPtr<MTL::Buffer>> lightScatteringDataBuffers;
     NS::SharedPtr<MTL::Texture> lightScatteringRT;// Half-resolution scattering texture
-    bool lightScatteringEnabled = false;
+    bool lightScatteringEnabled = true;
     LightScatteringData lightScatteringSettings;
 
     // Volumetric Fog resources
@@ -415,7 +415,7 @@ protected:
     std::vector<NS::SharedPtr<MTL::Buffer>> volumetricCloudDataBuffers;
     NS::SharedPtr<MTL::Texture> cloudRT;// Cloud render target (quarter res)
     NS::SharedPtr<MTL::Texture> cloudHistoryRT;// Previous frame clouds (for TAA)
-    bool volumetricCloudsEnabled = true;
+    bool volumetricCloudsEnabled = false;
     VolumetricCloudData volumetricCloudSettings;
 
     // Sun Flare resources

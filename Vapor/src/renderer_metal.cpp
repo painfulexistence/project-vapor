@@ -1634,7 +1634,7 @@ public:
         flareData->sunScreenPos = sunScreenPos;
         flareData->screenSize = screenSize;
         flareData->screenCenter = glm::vec2(0.5f, 0.5f);
-        flareData->aspectRatio = glm::vec2(screenSize.y / screenSize.x, 1.0f);
+        flareData->aspectRatio = glm::vec2(screenSize.x / screenSize.y, 1.0f);
         flareData->sunColor = atmos->sunColor;
 
         // Simple visibility check using depth at sun position
@@ -2876,17 +2876,17 @@ auto Renderer_Metal::createResources() -> void {
     }
 
     // Initialize volumetric cloud default settings
-    volumetricCloudSettings.cloudLayerBottom = 1500.0f;
-    volumetricCloudSettings.cloudLayerTop = 4000.0f;
+    volumetricCloudSettings.cloudLayerBottom = 2000.0f;
+    volumetricCloudSettings.cloudLayerTop = 12000.0f;
     volumetricCloudSettings.cloudLayerThickness = 2500.0f;
-    volumetricCloudSettings.cloudCoverage = 0.5f;
+    volumetricCloudSettings.cloudCoverage = 0.25f;
     volumetricCloudSettings.cloudDensity = 0.3f;
     volumetricCloudSettings.cloudType = 0.5f;
     volumetricCloudSettings.erosionStrength = 0.3f;
     volumetricCloudSettings.shapeNoiseScale = 1.0f;
     volumetricCloudSettings.detailNoiseScale = 5.0f;
-    volumetricCloudSettings.ambientIntensity = 0.3f;
-    volumetricCloudSettings.silverLiningIntensity = 0.5f;
+    volumetricCloudSettings.ambientIntensity = 0.001f;
+    volumetricCloudSettings.silverLiningIntensity = 0.001f;
     volumetricCloudSettings.silverLiningSpread = 2.0f;
     volumetricCloudSettings.phaseG1 = 0.8f;
     volumetricCloudSettings.phaseG2 = -0.3f;
@@ -2915,16 +2915,16 @@ auto Renderer_Metal::createResources() -> void {
     sunFlareSettings.glowIntensity = 0.5f;
     sunFlareSettings.glowFalloff = 8.0f;
     sunFlareSettings.glowSize = 0.15f;
-    sunFlareSettings.haloIntensity = 0.3f;
-    sunFlareSettings.haloRadius = 0.25f;
-    sunFlareSettings.haloWidth = 0.03f;
+    sunFlareSettings.haloIntensity = 0.08f;
+    sunFlareSettings.haloRadius = 0.09f;
+    sunFlareSettings.haloWidth = 0.001f;
     sunFlareSettings.haloFalloff = 0.01f;
-    sunFlareSettings.ghostCount = 6;
+    sunFlareSettings.ghostCount = 10;
     sunFlareSettings.ghostSpacing = 0.3f;
-    sunFlareSettings.ghostIntensity = 0.15f;
-    sunFlareSettings.ghostSize = 0.05f;
-    sunFlareSettings.ghostChromaticOffset = 0.005f;
-    sunFlareSettings.ghostFalloff = 1.5f;
+    sunFlareSettings.ghostIntensity = 0.02f;
+    sunFlareSettings.ghostSize = 0.3f;
+    sunFlareSettings.ghostChromaticOffset = 0.015f;
+    sunFlareSettings.ghostFalloff = 2.5f;
     sunFlareSettings.streakIntensity = 0.2f;
     sunFlareSettings.streakLength = 0.3f;
     sunFlareSettings.streakFalloff = 50.0f;
@@ -4801,7 +4801,7 @@ auto Renderer_Metal::draw(std::shared_ptr<Scene> scene, Camera& camera) -> void 
             ImGui::TreePop();
         }
 
-        if (ImGui::TreeNode("Volumetric Fog")) {
+        if (ImGui::TreeNode("Height Fog")) {
             ImGui::Separator();
             ImGui::Checkbox("Enabled", &volumetricFogEnabled);
 
@@ -4855,36 +4855,56 @@ auto Renderer_Metal::draw(std::shared_ptr<Scene> scene, Camera& camera) -> void 
             ImGui::Separator();
             ImGui::Checkbox("Enabled", &sunFlareEnabled);
 
-            if (sunFlareEnabled) {
-                ImGui::Separator();
-                ImGui::Text("Sun Flare Color: warm white/yellow (based on sun color)");
-                ImGui::ColorEdit3("Sun Color", &sunFlareSettings.sunColor.x);
-                ImGui::DragFloat("Intensity", &sunFlareSettings.sunIntensity, 0.1f, 0.0f, 5.0f);
-                ImGui::DragFloat("Visibility", &sunFlareSettings.visibility, 0.01f, 0.0f, 1.0f);
+            ImGui::DragFloat("Sun Intensity", &sunFlareSettings.sunIntensity, 0.1f, 0.0f, 100.0f);
+            ImGui::ColorEdit3("Sun Color", &sunFlareSettings.sunColor[0]);
+            ImGui::DragFloat("Fade Edge", &sunFlareSettings.fadeEdge, 0.01f, 0.0f, 1.0f);
 
-                ImGui::Separator();
-                ImGui::Text("Glow");
-                ImGui::DragFloat("Glow Intensity", &sunFlareSettings.glowIntensity, 0.01f, 0.0f, 2.0f);
-                ImGui::DragFloat("Glow Size", &sunFlareSettings.glowSize, 0.01f, 0.01f, 0.5f);
+            ImGui::Separator();
+            ImGui::Text("Glow");
+            ImGui::DragFloat("Glow Intensity", &sunFlareSettings.glowIntensity, 0.01f, 0.0f, 2.0f);
+            ImGui::DragFloat("Glow Falloff", &sunFlareSettings.glowFalloff, 0.1f, 0.1f, 20.0f);
+            ImGui::DragFloat("Glow Size", &sunFlareSettings.glowSize, 0.01f, 0.0f, 2.0f);
 
-                ImGui::Separator();
-                ImGui::Text("Halo");
-                ImGui::DragFloat("Halo Intensity", &sunFlareSettings.haloIntensity, 0.01f, 0.0f, 1.0f);
-                ImGui::DragFloat("Halo Radius", &sunFlareSettings.haloRadius, 0.01f, 0.05f, 0.5f);
+            ImGui::Separator();
+            ImGui::Text("Halo");
+            ImGui::DragFloat("Halo Intensity", &sunFlareSettings.haloIntensity, 0.01f, 0.0f, 1.0f);
+            ImGui::DragFloat("Halo Radius", &sunFlareSettings.haloRadius, 0.01f, 0.0f, 1.0f);
+            ImGui::DragFloat("Halo Width", &sunFlareSettings.haloWidth, 0.01f, 0.0f, 0.5f);
+            ImGui::DragFloat("Halo Falloff", &sunFlareSettings.haloFalloff, 0.01f, 0.0f, 1.0f);
 
-                ImGui::Separator();
-                ImGui::Text("Ghosts");
-                int count = static_cast<int>(sunFlareSettings.ghostCount);
-                if (ImGui::SliderInt("Ghost Count", &count, 0, 10)) {
-                    sunFlareSettings.ghostCount = static_cast<Uint32>(count);
-                }
-                ImGui::DragFloat("Ghost Intensity", &sunFlareSettings.ghostIntensity, 0.01f, 0.0f, 0.5f);
-
-                ImGui::Separator();
-                ImGui::Text("Streak");
-                ImGui::DragFloat("Streak Intensity", &sunFlareSettings.streakIntensity, 0.01f, 0.0f, 1.0f);
-                ImGui::DragFloat("Streak Length", &sunFlareSettings.streakLength, 0.1f, 0.0f, 2.0f);
+            ImGui::Separator();
+            ImGui::Text("Ghosts");
+            int count = static_cast<int>(sunFlareSettings.ghostCount);
+            if (ImGui::SliderInt("Ghost Count", &count, 0, 10)) {
+                sunFlareSettings.ghostCount = static_cast<Uint32>(count);
             }
+            ImGui::DragFloat("Ghost Spacing", &sunFlareSettings.ghostSpacing, 0.01f, -1.0f, 1.0f);
+            ImGui::DragFloat("Ghost Intensity", &sunFlareSettings.ghostIntensity, 0.01f, 0.0f, 1.0f);
+            ImGui::DragFloat("Ghost Size", &sunFlareSettings.ghostSize, 0.01f, 0.0f, 0.5f);
+            ImGui::DragFloat("Ghost Chromatic", &sunFlareSettings.ghostChromaticOffset, 0.001f, 0.0f, 0.05f);
+            ImGui::DragFloat("Ghost Falloff", &sunFlareSettings.ghostFalloff, 0.1f, 0.1f, 10.0f);
+
+            ImGui::Separator();
+            ImGui::Text("Streak");
+            ImGui::DragFloat("Streak Intensity", &sunFlareSettings.streakIntensity, 0.01f, 0.0f, 1.0f);
+            ImGui::DragFloat("Streak Length", &sunFlareSettings.streakLength, 0.01f, 0.0f, 2.0f);
+            ImGui::DragFloat("Streak Falloff", &sunFlareSettings.streakFalloff, 0.1f, 0.1f, 100.0f);
+
+            ImGui::Separator();
+            ImGui::Text("Starburst");
+            ImGui::DragFloat("Starburst Intensity", &sunFlareSettings.starburstIntensity, 0.01f, 0.0f, 1.0f);
+            ImGui::DragFloat("Starburst Size", &sunFlareSettings.starburstSize, 0.01f, 0.0f, 2.0f);
+            int points = static_cast<int>(sunFlareSettings.starburstPoints);
+            if (ImGui::SliderInt("Starburst Points", &points, 0, 16)) {
+                sunFlareSettings.starburstPoints = static_cast<Uint32>(points);
+            }
+            ImGui::DragFloat("Starburst Rotation", &sunFlareSettings.starburstRotation, 0.01f, -3.14f, 3.14f);
+
+            ImGui::Separator();
+            ImGui::Text("Dirt");
+            ImGui::DragFloat("Dirt Intensity", &sunFlareSettings.dirtIntensity, 0.01f, 0.0f, 1.0f);
+            ImGui::DragFloat("Dirt Scale", &sunFlareSettings.dirtScale, 0.1f, 0.1f, 20.0f);
+
             ImGui::TreePop();
         }
     }

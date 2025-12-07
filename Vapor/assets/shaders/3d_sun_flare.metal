@@ -176,7 +176,7 @@ float proceduralStreak(float2 uv, float2 center, float length, float width) {
     float2 p = uv - center;
 
     // Horizontal streak (anamorphic lens artifact)
-    float horizontal = exp(-abs(p.x) / length) * exp(-abs(p.y) * width * 50.0);
+    float horizontal = exp(-abs(p.x) / length) * exp(-abs(p.y) * width);
 
     return horizontal;
 }
