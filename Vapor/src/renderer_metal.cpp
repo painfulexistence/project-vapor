@@ -2574,7 +2574,7 @@ void Renderer_Metal::renderUI() {
     int windowWidth, windowHeight;
     SDL_GetWindowSize(window, &windowWidth, &windowHeight);
 
-    uiRenderer->BeginFrame(currentCommandBuffer, surface->texture(), windowWidth, windowHeight);
+    uiRenderer->BeginFrame(windowWidth, windowHeight, currentCommandBuffer, surface->texture());
     m_uiContext->Render();
     uiRenderer->EndFrame();
 }
