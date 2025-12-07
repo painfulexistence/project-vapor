@@ -45,7 +45,7 @@ public:
 
     RenderTargetHandle createRenderTarget(RenderTargetUsage usage, VkFormat format);
 
-    TextureHandle createTexture(std::shared_ptr<Image> img);
+    TextureHandle createTexture(const std::shared_ptr<Image>& img) override;
 
     BufferHandle createBuffer(BufferUsage usage, VkDeviceSize size);
 
