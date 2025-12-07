@@ -9,12 +9,14 @@ struct Particle {
 };
 
 // Particle simulation parameters
+// TODO: check alignment
 struct ParticleSimParams {
     float2 resolution;
     float2 mousePosition;
     float time;
     float deltaTime;
     uint particleCount;
+    float _pad;
 };
 
 // Attractor data

@@ -2143,7 +2143,7 @@ RenderTargetHandle Renderer_Vulkan::createRenderTarget(RenderTargetUsage usage, 
     return RenderTargetHandle{ nextImageID++ };
 }
 
-TextureHandle Renderer_Vulkan::createTexture(std::shared_ptr<Image> img) {
+TextureHandle Renderer_Vulkan::createTexture(const std::shared_ptr<Image>& img) {
     if (!img) {
         throw std::runtime_error(fmt::format("Failed to create texture at {}!\n", img->uri));
     }

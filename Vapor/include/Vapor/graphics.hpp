@@ -23,6 +23,42 @@ enum class PrimitiveMode {
     TRIANGLE_STRIP,
 };
 
+// Blend modes for 2D batch rendering
+enum class BlendMode {
+    None,// No blending (opaque)
+    Alpha,// Standard alpha blending: srcAlpha, 1-srcAlpha
+    Additive,// Additive blending: srcAlpha, 1
+    Multiply,// Multiply blending: dstColor, 0
+    Screen,// Screen blending: 1, 1-srcColor
+    Premultiplied// Premultiplied alpha: 1, 1-srcAlpha
+};
+
+// Vertex data for 2D batch rendering
+struct alignas(16) Batch2DVertex {
+    glm::vec3 position = glm::vec3(0.0f);
+    glm::vec4 color = glm::vec4(1.0f);
+    glm::vec2 uv = glm::vec2(0.0f);
+    float texIndex = 0.0f;
+    float entityID = -1.0f;
+    float _pad;
+};
+
+// Uniforms for 2D batch rendering
+struct alignas(16) Batch2DUniforms {
+    glm::mat4 projectionMatrix;
+};
+
+// Statistics for 2D batch rendering
+struct Batch2DStats {
+    Uint32 drawCalls = 0;
+    Uint32 quadCount = 0;
+    Uint32 lineCount = 0;
+    Uint32 triangleCount = 0;
+    Uint32 circleCount = 0;
+    Uint32 vertexCount = 0;
+    Uint32 indexCount = 0;
+};
+
 struct PipelineHandle {
     Uint32 rid = UINT32_MAX;
 };
@@ -246,20 +282,20 @@ struct alignas(16) IBLCaptureData {
 
 // Light scattering (God Rays) data for volumetric light effect
 struct alignas(16) LightScatteringData {
-    glm::vec2 sunScreenPos;          // Sun position in screen space [0,1]
-    glm::vec2 screenSize;            // Screen dimensions in pixels
-    float density;                   // Scattering density multiplier (default: 1.0)
-    float weight;                    // Per-sample weight (default: 0.01)
-    float decay;                     // Exponential decay factor per sample (default: 0.97)
-    float exposure;                  // Final exposure/brightness multiplier (default: 0.3)
-    Uint32 numSamples;               // Number of ray march samples (default: 64)
-    float maxDistance;               // Maximum ray distance in UV space (default: 1.0)
-    float sunIntensity;              // Sun intensity multiplier (default: 1.0)
-    float mieG;                      // Mie scattering g parameter [-1,1] (default: 0.76)
-    glm::vec3 sunColor;              // Sun/light color (default: white)
+    glm::vec2 sunScreenPos;// Sun position in screen space [0,1]
+    glm::vec2 screenSize;// Screen dimensions in pixels
+    float density;// Scattering density multiplier (default: 1.0)
+    float weight;// Per-sample weight (default: 0.01)
+    float decay;// Exponential decay factor per sample (default: 0.97)
+    float exposure;// Final exposure/brightness multiplier (default: 0.3)
+    Uint32 numSamples;// Number of ray march samples (default: 64)
+    float maxDistance;// Maximum ray distance in UV space (default: 1.0)
+    float sunIntensity;// Sun intensity multiplier (default: 1.0)
+    float mieG;// Mie scattering g parameter [-1,1] (default: 0.76)
+    glm::vec3 sunColor;// Sun/light color (default: white)
     float _pad1;
-    float depthThreshold;            // Depth threshold for sky detection (default: 0.9999)
-    float jitter;                    // Temporal jitter amount [0,1] (default: 0.5)
+    float depthThreshold;// Depth threshold for sky detection (default: 0.9999)
+    float jitter;// Temporal jitter amount [0,1] (default: 0.5)
     glm::vec2 _pad2;
 };
 
@@ -280,7 +316,6 @@ struct WaterVertexData {
     glm::vec2 uv1;// Grid UV for edge dampening
 };
 
-// GPU Particle for compute shader simulation
 struct alignas(16) GPUParticle {
     glm::vec3 position = glm::vec3(0.0f);
     float _pad1 = 0.0f;
@@ -291,18 +326,17 @@ struct alignas(16) GPUParticle {
     glm::vec4 color = glm::vec4(1.0f);
 };
 
-// Particle simulation parameters (uniform buffer)
+// TODO: check alignment
 struct alignas(16) ParticleSimulationParams {
     glm::vec2 resolution = glm::vec2(1280.0f, 720.0f);
-    glm::vec2 _pad1;
+    // glm::vec2 _pad1;
     glm::vec2 mousePosition = glm::vec2(0.0f);
-    glm::vec2 _pad2;
+    // glm::vec2 _pad2;
     float time = 0.0f;
     float deltaTime = 0.0f;
     Uint32 particleCount = 0;
 };
 
-// Attractor data for particle simulation
 struct alignas(16) ParticleAttractorData {
     glm::vec3 position = glm::vec3(0.0f);
     float _pad1;
