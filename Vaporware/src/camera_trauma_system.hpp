@@ -47,13 +47,19 @@ public:
 
     // Immediately clear all trauma (e.g., when entering cutscene)
     static void clearAllTrauma(entt::registry& reg) {
-        auto view = reg.view<CameraTraumaState>();
+        auto view = reg.view<CameraTraumaState, Vapor::VirtualCameraComponent>();
         for (auto entity : view) {
             auto& state = view.get<CameraTraumaState>(entity);
+            auto& cam = view.get<Vapor::VirtualCameraComponent>(entity);
+
+            // Restore camera position before clearing
+            cam.position -= state.previousOffset;
+
             state.shakeTrauma = 0.0f;
             state.kickTrauma = 0.0f;
             state.rollTrauma = 0.0f;
             state.positionOffset = glm::vec3(0.0f);
+            state.previousOffset = glm::vec3(0.0f);
             state.rollOffset = 0.0f;
         }
     }
@@ -121,10 +127,10 @@ private:
             state.rollOffset = TraumaNoise::fbm(state.noiseTime + 300.0f) * rollIntensity * state.maxRollAngle;
 
             // Apply to camera position
-            // Note: We store the offset separately so the base position isn't corrupted
-            // The actual application depends on your camera setup
-            // Here we directly modify - you might want to store base position separately
+            // First, undo the previous frame's offset, then apply the new offset
+            cam.position -= state.previousOffset;
             cam.position += state.positionOffset;
+            state.previousOffset = state.positionOffset;
 
             // Decay trauma
             state.shakeTrauma = std::max(0.0f, state.shakeTrauma - state.decayRate * deltaTime);
@@ -134,6 +140,7 @@ private:
             // Clean up if no more trauma
             if (!state.hasTrauma()) {
                 state.positionOffset = glm::vec3(0.0f);
+                state.previousOffset = glm::vec3(0.0f);
                 state.rollOffset = 0.0f;
             }
         }

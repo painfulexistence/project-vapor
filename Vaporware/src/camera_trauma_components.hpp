@@ -69,6 +69,7 @@ struct CameraTraumaState {
 
     // Computed results (applied to camera each frame)
     glm::vec3 positionOffset{0.0f};
+    glm::vec3 previousOffset{0.0f};     // Previous frame offset (for correction)
     float rollOffset = 0.0f;
 
     // Internal time accumulator for noise

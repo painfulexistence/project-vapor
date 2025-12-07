@@ -27,6 +27,7 @@
 #include "animation_systems.hpp"
 #include "camera_trauma_system.hpp"
 #include "components.hpp"
+#include "examples.hpp"
 #include "fsm_system.hpp"
 #include "systems.hpp"
 
@@ -348,6 +349,31 @@ int main(int argc, char* args[]) {
         );
     }
 
+    // FSM Demo 3: Interactive object from examples.hpp (press I to interact)
+    auto interactiveBox = registry.create();
+    {
+        auto& transform = registry.emplace<Vapor::TransformComponent>(interactiveBox);
+        transform.position = glm::vec3(0.0f, 0.5f, -3.0f);
+        transform.scale = glm::vec3(0.8f);
+
+        auto node = scene->createNode("Interactive Box");
+        scene->addMeshToNode(node, MeshBuilder::buildCube(0.8f, material));
+        node->setPosition(transform.position);
+
+        auto& nodeRef = registry.emplace<SceneNodeReferenceComponent>(interactiveBox);
+        nodeRef.node = node;
+
+        // Use FSMExamples::createInteractiveObject from examples.hpp
+        auto& fsm = registry.emplace<FSMComponent>(
+            interactiveBox,
+            FSMExamples::createInteractiveObject(
+                interactiveBox,
+                glm::vec3(0.0f, 0.5f, -3.0f),   // Idle position
+                glm::vec3(0.0f, 2.0f, -3.0f)    // Active position (raised)
+            )
+        );
+    }
+
     auto global = registry.create();
 
     scene->update(0.0f);
@@ -406,6 +432,18 @@ int main(int argc, char* args[]) {
                 if (e.key.scancode == SDL_SCANCODE_B) {
                     CameraTraumaSystem::addTraumaToActiveCamera(registry, TraumaPresets::heavyImpact());
                     fmt::print("Camera: Heavy impact!\n");
+                }
+                // Interactive object demo (from examples.hpp)
+                if (e.key.scancode == SDL_SCANCODE_I) {
+                    FSMSystem::sendEvent(registry, interactiveBox, "interact");
+                    fmt::print("FSM: Sent 'interact' event to interactive box\n");
+                }
+                // Action sequence demo: door open effect
+                if (e.key.scancode == SDL_SCANCODE_O) {
+                    ActionSequenceExamples::openDoor(registry, triggerCube, []() {
+                        fmt::print("Action Sequence: Door opened!\n");
+                    });
+                    fmt::print("Action Sequence: Starting door open animation\n");
                 }
                 if (e.key.scancode == SDL_SCANCODE_F3) {
                     physics->setDebugEnabled(!physics->isDebugEnabled());
