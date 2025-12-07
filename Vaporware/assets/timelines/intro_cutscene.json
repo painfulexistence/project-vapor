@@ -1,0 +1,74 @@
+{
+  "name": "intro_cutscene",
+  "tracks": [
+    {
+      "target": "player",
+      "sequence": {
+        "actions": [
+          {
+            "type": "moveTo",
+            "vec3": [0, 0, -5],
+            "duration": 2.0,
+            "easing": "OutCubic"
+          },
+          {
+            "type": "playAnimation",
+            "stringValue": "wave"
+          },
+          {
+            "type": "wait",
+            "duration": 0.5
+          },
+          {
+            "type": "moveTo",
+            "vec3": [3, 0, 0],
+            "duration": 1.5,
+            "easing": "InOutQuad"
+          }
+        ]
+      }
+    },
+    {
+      "target": "npc_guide",
+      "sequence": {
+        "actions": [
+          {
+            "type": "wait",
+            "duration": 1.0
+          },
+          {
+            "type": "moveTo",
+            "vec3": [0, 0, -3],
+            "duration": 1.5,
+            "easing": "OutQuad"
+          },
+          {
+            "type": "scaleTo",
+            "vec3": [1.2, 1.2, 1.2],
+            "duration": 0.3,
+            "easing": "OutBack"
+          },
+          {
+            "type": "scaleTo",
+            "vec3": [1, 1, 1],
+            "duration": 0.2
+          }
+        ]
+      }
+    },
+    {
+      "target": "camera",
+      "sequence": {
+        "actions": [
+          {
+            "type": "moveTo",
+            "vec3": [0, 5, 10],
+            "duration": 3.0,
+            "easing": "InOutCubic"
+          }
+        ]
+      }
+    }
+  ],
+  "completionTag": 1001
+}
