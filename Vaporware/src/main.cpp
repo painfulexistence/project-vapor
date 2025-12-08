@@ -310,6 +310,22 @@ int main(int argc, char* args[]) {
         hudState.isVisible = false;
     }
 
+    auto scrollText = registry.create();
+    {
+        auto& scroll = registry.emplace<ScrollTextComponent>(scrollText);
+        scroll.documentPath = "assets/ui/scroll_text.rml";
+        scroll.lines = {
+            "Welcome to Project Vapor",
+            "Press SPACE to advance text",
+            "This is a teleprompter-style scroll effect",
+            "Each line scrolls up and fades out",
+            "While the next line fades in from below",
+            "Perfect for cutscenes or tutorials",
+            "End of demo - press SPACE to restart"
+        };
+        scroll.scrollDuration = 0.4f;
+    }
+
     auto global = registry.create();
 
     scene->update(0.0f);
@@ -358,6 +374,25 @@ int main(int argc, char* args[]) {
                 if (e.key.scancode == SDL_SCANCODE_F3) {
                     physics->setDebugEnabled(!physics->isDebugEnabled());
                     fmt::print("Physics Debug Renderer: {}\n", physics->isDebugEnabled() ? "Enabled" : "Disabled");
+                }
+                if (e.key.scancode == SDL_SCANCODE_SPACE) {
+                    auto view = registry.view<ScrollTextComponent>();
+                    for (auto entity : view) {
+                        auto& scroll = view.get<ScrollTextComponent>(entity);
+                        if (scroll.state == ScrollTextState::Idle) {
+                            // If at the end, restart from beginning
+                            if (scroll.currentIndex >= (int)scroll.lines.size() - 1) {
+                                scroll.currentIndex = 0;
+                                if (scroll.document) {
+                                    if (auto el = scroll.document->GetElementById("scroll-text")) {
+                                        el->SetInnerRML(scroll.lines[0].c_str());
+                                    }
+                                }
+                            } else {
+                                scroll.advanceRequested = true;
+                            }
+                        }
+                    }
                 }
                 break;
             }
@@ -411,6 +446,7 @@ int main(int argc, char* args[]) {
         updateAutoRotateSystem(registry, deltaTime);
         updateLightMovementSystem(registry, scene.get(), deltaTime);
         updateHUDSystem(registry, engineCore->getRmlUiManager(), deltaTime);
+        updateScrollTextSystem(registry, engineCore->getRmlUiManager(), deltaTime);
 
         // Engine updates
         engineCore->update(deltaTime);

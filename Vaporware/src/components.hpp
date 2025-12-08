@@ -130,4 +130,21 @@ struct HUDComponent {
     float fadeDuration = 0.5f;
 };
 
+// Scroll Text (Teleprompter-style)
+enum class ScrollTextState { Idle, ScrollingOut, ScrollingIn };
+
+struct ScrollTextComponent {
+    std::string documentPath;
+    Rml::ElementDocument* document = nullptr;
+
+    std::vector<std::string> lines;
+    int currentIndex = 0;
+    bool advanceRequested = false;
+
+    // Animation state
+    ScrollTextState state = ScrollTextState::Idle;
+    float timer = 0.0f;
+    float scrollDuration = 0.4f;
+};
+
 struct DeadTag {};

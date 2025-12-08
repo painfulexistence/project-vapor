@@ -1,0 +1,51 @@
+/* Scroll Text Styles - Teleprompter Effect */
+
+body {
+    width: 100%;
+    height: 100%;
+    font-family: LatoLatin;
+    font-size: 24dp;
+}
+
+#scroll-container {
+    position: absolute;
+    left: 50%;
+    top: 50%;
+    width: 600dp;
+    margin-left: -300dp;
+    margin-top: -50dp;
+    height: 100dp;
+    overflow: hidden;
+    text-align: center;
+}
+
+#scroll-text {
+    /* Base state: hidden below */
+    opacity: 0;
+    transform: translateY(60dp);
+    transition: transform 0.4s ease-out, opacity 0.3s ease-out;
+
+    color: #ffffff;
+    text-shadow: 2dp 2dp 4dp #000000;
+    padding: 10dp;
+}
+
+/* Visible state: centered */
+#scroll-text.visible {
+    opacity: 1;
+    transform: translateY(0dp);
+}
+
+/* Scrolling out: move up and fade */
+#scroll-text.scroll-out {
+    opacity: 0;
+    transform: translateY(-60dp);
+    transition: transform 0.4s ease-in, opacity 0.3s ease-in;
+}
+
+/* Scrolling in: start from below */
+#scroll-text.scroll-in {
+    opacity: 1;
+    transform: translateY(0dp);
+    transition: transform 0.4s ease-out, opacity 0.3s ease-out;
+}

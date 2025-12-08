@@ -291,3 +291,78 @@ void updateHUDSystem(entt::registry& reg, Vapor::RmlUiManager* rmluiManager, flo
         }
     }
 }
+
+void updateScrollTextSystem(entt::registry& reg, Vapor::RmlUiManager* rmluiManager, float deltaTime) {
+    if (!rmluiManager) return;
+
+    auto view = reg.view<ScrollTextComponent>();
+    for (auto entity : view) {
+        auto& scroll = view.get<ScrollTextComponent>(entity);
+
+        // 1. Load document if not loaded
+        if (!scroll.document && !scroll.documentPath.empty()) {
+            scroll.document = rmluiManager->LoadDocument(scroll.documentPath);
+            if (scroll.document) {
+                fmt::print("Loaded scroll text document: {}\n", scroll.documentPath);
+                scroll.document->Show();
+
+                // Set initial text
+                if (!scroll.lines.empty()) {
+                    if (auto el = scroll.document->GetElementById("scroll-text")) {
+                        el->SetInnerRML(scroll.lines[scroll.currentIndex].c_str());
+                        el->SetClass("visible", true);
+                    }
+                }
+            } else {
+                fmt::print(stderr, "Failed to load scroll text document: {}\n", scroll.documentPath);
+                continue;
+            }
+        }
+
+        if (!scroll.document) continue;
+
+        auto element = scroll.document->GetElementById("scroll-text");
+        if (!element) continue;
+
+        // 2. State Machine
+        switch (scroll.state) {
+        case ScrollTextState::Idle:
+            if (scroll.advanceRequested && scroll.currentIndex < (int)scroll.lines.size() - 1) {
+                scroll.advanceRequested = false;
+                scroll.state = ScrollTextState::ScrollingOut;
+                scroll.timer = 0.0f;
+                // Trigger scroll out animation
+                element->SetClass("visible", false);
+                element->SetClass("scroll-out", true);
+            } else {
+                scroll.advanceRequested = false;// Clear if at end
+            }
+            break;
+
+        case ScrollTextState::ScrollingOut:
+            scroll.timer += deltaTime;
+            if (scroll.timer >= scroll.scrollDuration) {
+                // Move to next line
+                scroll.currentIndex++;
+                if (scroll.currentIndex < (int)scroll.lines.size()) {
+                    element->SetInnerRML(scroll.lines[scroll.currentIndex].c_str());
+                }
+                // Switch to scrolling in
+                scroll.state = ScrollTextState::ScrollingIn;
+                scroll.timer = 0.0f;
+                element->SetClass("scroll-out", false);
+                element->SetClass("scroll-in", true);
+            }
+            break;
+
+        case ScrollTextState::ScrollingIn:
+            scroll.timer += deltaTime;
+            if (scroll.timer >= scroll.scrollDuration) {
+                scroll.state = ScrollTextState::Idle;
+                element->SetClass("scroll-in", false);
+                element->SetClass("visible", true);
+            }
+            break;
+        }
+    }
+}
