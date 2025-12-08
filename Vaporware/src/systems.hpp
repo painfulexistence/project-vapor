@@ -3,9 +3,11 @@
 #include "Vapor/engine_core.hpp"
 #include "Vapor/input_manager.hpp"
 #include "Vapor/physics_3d.hpp"
+#include "Vapor/renderer.hpp"
 #include "Vapor/rmlui_manager.hpp"
 #include "Vapor/scene.hpp"
 #include "components.hpp"
+#include <algorithm>
 #include <fmt/core.h>
 
 class CleanupSystem {
@@ -14,6 +16,90 @@ public:
         auto view = reg.view<DeadTag>();
         for (auto entity : view) {
             reg.destroy(entity);
+        }
+    }
+};
+
+class FlipbookSystem {
+public:
+    static void update(entt::registry& reg, float deltaTime) {
+        auto view = reg.view<Vapor::SpriteComponent, Vapor::FlipbookComponent>();
+        for (auto entity : view) {
+            auto& sprite = view.get<Vapor::SpriteComponent>(entity);
+            auto& flipbook = view.get<Vapor::FlipbookComponent>(entity);
+
+            if (!flipbook.playing || flipbook.frameIndices.empty()) continue;
+
+            flipbook.timer += deltaTime;
+            if (flipbook.timer >= flipbook.frameTime) {
+                flipbook.timer -= flipbook.frameTime;
+                flipbook.currentIndex++;
+                if (flipbook.currentIndex >= flipbook.frameIndices.size()) {
+                    flipbook.currentIndex = flipbook.loop ? 0 : flipbook.frameIndices.size() - 1;
+                    if (!flipbook.loop) flipbook.playing = false;
+                }
+                sprite.frameIndex = flipbook.frameIndices[flipbook.currentIndex];
+            }
+        }
+    }
+};
+
+class SpriteRenderSystem {
+public:
+    static void update(
+        entt::registry& reg,
+        Vapor::Renderer* renderer,
+        const std::unordered_map<Uint32, Vapor::SpriteAtlas>& atlasMap
+    ) {
+        // Collect visible sprites
+        std::vector<std::tuple<glm::mat4, Vapor::SpriteComponent*, entt::entity>> sprites;
+
+        auto view = reg.view<Vapor::TransformComponent, Vapor::SpriteComponent>();
+        for (auto entity : view) {
+            auto& sprite = view.get<Vapor::SpriteComponent>(entity);
+            if (!sprite.visible || !sprite.atlas.valid()) continue;
+
+            auto& transform = view.get<Vapor::TransformComponent>(entity);
+            sprites.push_back({transform.worldTransform, &sprite, entity});
+        }
+
+        // Sort by layer, then order
+        std::sort(sprites.begin(), sprites.end(), [](const auto& a, const auto& b) {
+            auto* sa = std::get<1>(a);
+            auto* sb = std::get<1>(b);
+            if (sa->sortingLayer != sb->sortingLayer) return sa->sortingLayer < sb->sortingLayer;
+            return sa->orderInLayer < sb->orderInLayer;
+        });
+
+        // Render
+        for (auto& [worldTransform, sprite, entity] : sprites) {
+            auto it = atlasMap.find(sprite->atlas.rid);
+            if (it == atlasMap.end()) continue;
+
+            const auto& atlas = it->second;
+            const auto* frame = atlas.getFrame(sprite->frameIndex);
+            if (!frame) continue;
+
+            // Build sprite transform with pivot offset
+            glm::vec2 pivotOffset = (sprite->pivot - glm::vec2(0.5f)) * sprite->size;
+            glm::mat4 spriteTransform = worldTransform;
+            spriteTransform = glm::translate(spriteTransform, glm::vec3(-pivotOffset, 0.0f));
+            spriteTransform = glm::scale(spriteTransform, glm::vec3(sprite->size, 1.0f));
+
+            // Handle flip
+            glm::vec4 uv = frame->uvRect;
+            if (sprite->flipX) std::swap(uv.x, uv.z);
+            if (sprite->flipY) std::swap(uv.y, uv.w);
+
+            // Convert uvRect to texCoords array
+            glm::vec2 texCoords[4] = {
+                {uv.x, uv.w},  // bottom-left
+                {uv.z, uv.w},  // bottom-right
+                {uv.z, uv.y},  // top-right
+                {uv.x, uv.y}   // top-left
+            };
+
+            renderer->drawQuad2D(spriteTransform, atlas.texture, texCoords, sprite->tint, static_cast<int>(entity));
         }
     }
 };
