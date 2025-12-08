@@ -4,6 +4,7 @@
 #include "Vapor/input_manager.hpp"
 #include "Vapor/physics_3d.hpp"
 #include "Vapor/renderer.hpp"
+#include "Vapor/resource_manager.hpp"
 #include "Vapor/rmlui_manager.hpp"
 #include "Vapor/scene.hpp"
 #include "components.hpp"
@@ -49,7 +50,7 @@ public:
     static void update(
         entt::registry& reg,
         Vapor::Renderer* renderer,
-        const std::unordered_map<Uint32, Vapor::SpriteAtlas>& atlasMap
+        Vapor::ResourceManager* resourceManager
     ) {
         // Collect visible sprites
         std::vector<std::tuple<glm::mat4, Vapor::SpriteComponent*, entt::entity>> sprites;
@@ -73,11 +74,10 @@ public:
 
         // Render
         for (auto& [worldTransform, sprite, entity] : sprites) {
-            auto it = atlasMap.find(sprite->atlas.rid);
-            if (it == atlasMap.end()) continue;
+            const auto* atlas = resourceManager->getAtlas(sprite->atlas);
+            if (!atlas) continue;
 
-            const auto& atlas = it->second;
-            const auto* frame = atlas.getFrame(sprite->frameIndex);
+            const auto* frame = atlas->getFrame(sprite->frameIndex);
             if (!frame) continue;
 
             // Build sprite transform with pivot offset
@@ -99,7 +99,7 @@ public:
                 {uv.x, uv.y}   // top-left
             };
 
-            renderer->drawQuad2D(spriteTransform, atlas.texture, texCoords, sprite->tint, static_cast<int>(entity));
+            renderer->drawQuad2D(spriteTransform, atlas->texture, texCoords, sprite->tint, static_cast<int>(entity));
         }
     }
 };

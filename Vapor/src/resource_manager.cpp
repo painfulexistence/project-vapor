@@ -238,4 +238,64 @@ namespace Vapor {
     template std::shared_ptr<Resource<std::string>> ResourceManager::
         loadResource(const std::string&, ResourceCache<std::string>&, std::function<std::shared_ptr<std::string>()>, LoadMode, std::function<void(std::shared_ptr<std::string>)>);
 
+    // === Atlas Management ===
+
+    AtlasHandle ResourceManager::registerAtlas(const std::string& name, SpriteAtlas atlas) {
+        std::lock_guard<std::mutex> lock(m_atlasMutex);
+
+        // Check if already registered
+        auto it = m_atlasNameToId.find(name);
+        if (it != m_atlasNameToId.end()) {
+            // Update existing atlas
+            m_atlasMap[it->second] = std::move(atlas);
+            return AtlasHandle{ it->second };
+        }
+
+        // Register new atlas
+        Uint32 id = m_nextAtlasId++;
+        atlas.name = name;
+        m_atlasMap[id] = std::move(atlas);
+        m_atlasNameToId[name] = id;
+
+        return AtlasHandle{ id };
+    }
+
+    SpriteAtlas* ResourceManager::getAtlas(AtlasHandle handle) {
+        std::lock_guard<std::mutex> lock(m_atlasMutex);
+        auto it = m_atlasMap.find(handle.rid);
+        return it != m_atlasMap.end() ? &it->second : nullptr;
+    }
+
+    const SpriteAtlas* ResourceManager::getAtlas(AtlasHandle handle) const {
+        std::lock_guard<std::mutex> lock(m_atlasMutex);
+        auto it = m_atlasMap.find(handle.rid);
+        return it != m_atlasMap.end() ? &it->second : nullptr;
+    }
+
+    AtlasHandle ResourceManager::getAtlasHandle(const std::string& name) const {
+        std::lock_guard<std::mutex> lock(m_atlasMutex);
+        auto it = m_atlasNameToId.find(name);
+        return it != m_atlasNameToId.end() ? AtlasHandle{ it->second } : AtlasHandle{};
+    }
+
+    void ResourceManager::removeAtlas(AtlasHandle handle) {
+        std::lock_guard<std::mutex> lock(m_atlasMutex);
+        auto it = m_atlasMap.find(handle.rid);
+        if (it != m_atlasMap.end()) {
+            m_atlasNameToId.erase(it->second.name);
+            m_atlasMap.erase(it);
+        }
+    }
+
+    void ResourceManager::clearAtlasCache() {
+        std::lock_guard<std::mutex> lock(m_atlasMutex);
+        m_atlasMap.clear();
+        m_atlasNameToId.clear();
+    }
+
+    size_t ResourceManager::getAtlasCacheSize() const {
+        std::lock_guard<std::mutex> lock(m_atlasMutex);
+        return m_atlasMap.size();
+    }
+
 }// namespace Vapor

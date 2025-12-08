@@ -282,6 +282,27 @@ namespace Vapor {
         // Get number of active loading tasks
         size_t getActiveLoadCount() const;
 
+        // === Atlas Management ===
+
+        // Register a sprite atlas and return its handle
+        AtlasHandle registerAtlas(const std::string& name, SpriteAtlas atlas);
+
+        // Get atlas by handle (returns nullptr if not found)
+        SpriteAtlas* getAtlas(AtlasHandle handle);
+        const SpriteAtlas* getAtlas(AtlasHandle handle) const;
+
+        // Get atlas by name (returns invalid handle if not found)
+        AtlasHandle getAtlasHandle(const std::string& name) const;
+
+        // Remove atlas
+        void removeAtlas(AtlasHandle handle);
+
+        // Clear all atlases
+        void clearAtlasCache();
+
+        // Get atlas count
+        size_t getAtlasCacheSize() const;
+
     private:
         TaskScheduler& m_scheduler;
 
@@ -290,6 +311,12 @@ namespace Vapor {
         ResourceCache<Scene> m_sceneCache;
         ResourceCache<Mesh> m_meshCache;
         ResourceCache<std::string> m_textCache;
+
+        // Atlas storage (handle-based, not async)
+        std::unordered_map<Uint32, SpriteAtlas> m_atlasMap;
+        std::unordered_map<std::string, Uint32> m_atlasNameToId;
+        Uint32 m_nextAtlasId = 0;
+        mutable std::mutex m_atlasMutex;
 
         std::atomic<size_t> m_activeLoads{ 0 };
 
