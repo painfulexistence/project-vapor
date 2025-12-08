@@ -43,7 +43,14 @@ body {
     transition: transform 0.4s ease-in, opacity 0.3s ease-in;
 }
 
-/* Scrolling in: start from below */
+/* Prepare for scroll-in: instantly position below (no transition) */
+#scroll-text.scroll-in-prepare {
+    opacity: 0;
+    transform: translateY(60dp);
+    transition: none;
+}
+
+/* Scrolling in: animate from below to center */
 #scroll-text.scroll-in {
     opacity: 1;
     transform: translateY(0dp);

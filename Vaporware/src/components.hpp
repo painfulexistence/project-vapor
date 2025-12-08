@@ -131,7 +131,7 @@ struct HUDComponent {
 };
 
 // Scroll Text (Teleprompter-style)
-enum class ScrollTextState { Idle, ScrollingOut, ScrollingIn };
+enum class ScrollTextState { Idle, ScrollingOut, PreparingScrollIn, ScrollingIn };
 
 struct ScrollTextComponent {
     std::string documentPath;

@@ -347,12 +347,19 @@ void updateScrollTextSystem(entt::registry& reg, Vapor::RmlUiManager* rmluiManag
                 if (scroll.currentIndex < (int)scroll.lines.size()) {
                     element->SetInnerRML(scroll.lines[scroll.currentIndex].c_str());
                 }
-                // Switch to scrolling in
-                scroll.state = ScrollTextState::ScrollingIn;
-                scroll.timer = 0.0f;
+                // Prepare for scroll-in: position element below without transition
+                scroll.state = ScrollTextState::PreparingScrollIn;
                 element->SetClass("scroll-out", false);
-                element->SetClass("scroll-in", true);
+                element->SetClass("scroll-in-prepare", true);
             }
+            break;
+
+        case ScrollTextState::PreparingScrollIn:
+            // Wait one frame for the element to be positioned, then animate in
+            scroll.state = ScrollTextState::ScrollingIn;
+            scroll.timer = 0.0f;
+            element->SetClass("scroll-in-prepare", false);
+            element->SetClass("scroll-in", true);
             break;
 
         case ScrollTextState::ScrollingIn:
