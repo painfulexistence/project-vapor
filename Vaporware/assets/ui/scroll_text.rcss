@@ -1,4 +1,4 @@
-/* Scroll Text Styles - Teleprompter Effect */
+/* Scroll Text Styles - 3D Drum/Cylinder Effect */
 
 body {
     width: 100%;
@@ -17,42 +17,49 @@ body {
     height: 100dp;
     overflow: hidden;
     text-align: center;
+
+    /* 3D perspective for cylinder effect */
+    perspective: 300dp;
+    perspective-origin: center center;
 }
 
 #scroll-text {
-    /* Base state: hidden below */
+    /* Base state: rotated away (below the cylinder) */
     opacity: 0;
-    transform: translateY(60dp);
-    transition: transform 0.4s ease-out, opacity 0.3s ease-out;
+    transform: rotateX(-60deg) translateZ(-50dp);
+    transition: transform 0.5s ease-out, opacity 0.4s ease-out;
 
     color: #ffffff;
     text-shadow: 2dp 2dp 4dp #000000;
     padding: 10dp;
+
+    /* Needed for 3D transforms */
+    transform-style: preserve-3d;
 }
 
-/* Visible state: centered */
+/* Visible state: facing viewer */
 #scroll-text.visible {
     opacity: 1;
-    transform: translateY(0dp);
+    transform: rotateX(0deg) translateZ(0dp);
 }
 
-/* Scrolling out: move up and fade */
+/* Scrolling out: rotate up and away (top of cylinder) */
 #scroll-text.scroll-out {
     opacity: 0;
-    transform: translateY(-60dp);
-    transition: transform 0.4s ease-in, opacity 0.3s ease-in;
+    transform: rotateX(60deg) translateZ(-50dp);
+    transition: transform 0.5s ease-in, opacity 0.4s ease-in;
 }
 
-/* Prepare for scroll-in: instantly position below (no transition) */
+/* Prepare for scroll-in: instantly position at bottom of cylinder (no transition) */
 #scroll-text.scroll-in-prepare {
     opacity: 0;
-    transform: translateY(60dp);
+    transform: rotateX(-60deg) translateZ(-50dp);
     transition: none;
 }
 
-/* Scrolling in: animate from below to center */
+/* Scrolling in: rotate from below into view */
 #scroll-text.scroll-in {
     opacity: 1;
-    transform: translateY(0dp);
-    transition: transform 0.4s ease-out, opacity 0.3s ease-out;
+    transform: rotateX(0deg) translateZ(0dp);
+    transition: transform 0.5s ease-out, opacity 0.4s ease-out;
 }
