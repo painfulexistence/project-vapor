@@ -147,4 +147,22 @@ struct ScrollTextComponent {
     float scrollDuration = 0.4f;
 };
 
+// Letterbox (Cinematic black bars)
+enum class LetterboxState { Hidden, Opening, Open, Closing };
+
+struct LetterboxComponent {
+    std::string documentPath;
+    Rml::ElementDocument* document = nullptr;
+
+    bool isOpen = false;
+
+    // Animation state
+    LetterboxState state = LetterboxState::Hidden;
+    float timer = 0.0f;
+    float animDuration = 0.8f;
+
+    // Target aspect ratio (2.35:1 = cinematic widescreen)
+    float targetAspect = 2.35f;
+};
+
 struct DeadTag {};

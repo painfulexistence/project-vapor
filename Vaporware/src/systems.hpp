@@ -373,3 +373,77 @@ void updateScrollTextSystem(entt::registry& reg, Vapor::RmlUiManager* rmluiManag
         }
     }
 }
+
+void updateLetterboxSystem(entt::registry& reg, Vapor::RmlUiManager* rmluiManager, float deltaTime) {
+    if (!rmluiManager) return;
+
+    auto view = reg.view<LetterboxComponent>();
+    for (auto entity : view) {
+        auto& lb = view.get<LetterboxComponent>(entity);
+
+        // 1. Load document if not loaded
+        if (!lb.document && !lb.documentPath.empty()) {
+            lb.document = rmluiManager->LoadDocument(lb.documentPath);
+            if (lb.document) {
+                fmt::print("Loaded letterbox document: {}\n", lb.documentPath);
+                lb.document->Show();
+            } else {
+                fmt::print(stderr, "Failed to load letterbox document: {}\n", lb.documentPath);
+                continue;
+            }
+        }
+
+        if (!lb.document) continue;
+
+        auto topBar = lb.document->GetElementById("letterbox-top");
+        auto bottomBar = lb.document->GetElementById("letterbox-bottom");
+        if (!topBar || !bottomBar) continue;
+
+        // 2. State Machine
+        switch (lb.state) {
+        case LetterboxState::Hidden:
+            if (lb.isOpen) {
+                lb.state = LetterboxState::Opening;
+                lb.timer = 0.0f;
+                topBar->SetClass("open", true);
+                bottomBar->SetClass("open", true);
+            }
+            break;
+
+        case LetterboxState::Opening:
+            lb.timer += deltaTime;
+            if (!lb.isOpen) {
+                // Interrupted - close
+                lb.state = LetterboxState::Closing;
+                lb.timer = 0.0f;
+                topBar->SetClass("open", false);
+                bottomBar->SetClass("open", false);
+            } else if (lb.timer >= lb.animDuration) {
+                lb.state = LetterboxState::Open;
+            }
+            break;
+
+        case LetterboxState::Open:
+            if (!lb.isOpen) {
+                lb.state = LetterboxState::Closing;
+                lb.timer = 0.0f;
+                topBar->SetClass("open", false);
+                bottomBar->SetClass("open", false);
+            }
+            break;
+
+        case LetterboxState::Closing:
+            lb.timer += deltaTime;
+            if (lb.isOpen) {
+                // Interrupted - reopen
+                lb.state = LetterboxState::Opening;
+                lb.timer = 0.0f;
+                topBar->SetClass("open", true);
+                bottomBar->SetClass("open", true);
+            } else if (lb.timer >= lb.animDuration) {
+                lb.state = LetterboxState::Hidden;
+            }
+            break;
+        }
+    }
+}

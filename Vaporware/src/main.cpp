@@ -326,6 +326,14 @@ int main(int argc, char* args[]) {
         scroll.scrollDuration = 0.4f;
     }
 
+    auto letterbox = registry.create();
+    {
+        auto& lb = registry.emplace<LetterboxComponent>(letterbox);
+        lb.documentPath = "assets/ui/letterbox.rml";
+        lb.targetAspect = 2.35f;// Cinematic widescreen
+        lb.animDuration = 0.8f;
+    }
+
     auto global = registry.create();
 
     scene->update(0.0f);
@@ -394,6 +402,14 @@ int main(int argc, char* args[]) {
                         }
                     }
                 }
+                if (e.key.scancode == SDL_SCANCODE_L) {
+                    auto view = registry.view<LetterboxComponent>();
+                    for (auto entity : view) {
+                        auto& lb = view.get<LetterboxComponent>(entity);
+                        lb.isOpen = !lb.isOpen;
+                        fmt::print("Letterbox toggled: {}\n", lb.isOpen ? "Opening" : "Closing");
+                    }
+                }
                 break;
             }
             case SDL_EVENT_WINDOW_RESIZED: {
@@ -447,6 +463,7 @@ int main(int argc, char* args[]) {
         updateLightMovementSystem(registry, scene.get(), deltaTime);
         updateHUDSystem(registry, engineCore->getRmlUiManager(), deltaTime);
         updateScrollTextSystem(registry, engineCore->getRmlUiManager(), deltaTime);
+        updateLetterboxSystem(registry, engineCore->getRmlUiManager(), deltaTime);
 
         // Engine updates
         engineCore->update(deltaTime);
