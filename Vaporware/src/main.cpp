@@ -25,7 +25,12 @@
 #include <entt/entt.hpp>
 
 
+#include "action_system.hpp"
+#include "camera_mixing_system.hpp"
+#include "camera_trauma_system.hpp"
 #include "components.hpp"
+#include "examples.hpp"
+#include "fsm_system.hpp"
 #include "systems.hpp"
 
 entt::entity getActiveCamera(entt::registry& registry) {
@@ -201,6 +206,18 @@ int main(int argc, char* args[]) {
 
         auto& nodeRef = registry.emplace<SceneNodeReferenceComponent>(cube2);
         nodeRef.node = node;
+
+        // FSM Demo: Patrol between two positions
+        auto& fsm = registry.emplace<FSMComponent>(
+            cube2,
+            FSMPatterns::createPatrolFSM(
+                cube2,
+                glm::vec3(2.0f, 0.5f, 0.0f),// Position A
+                glm::vec3(2.0f, 0.5f, 5.0f),// Position B
+                2.0f,// Walk duration
+                1.0f// Wait duration
+            )
+        );
     }
 
     auto floor = registry.create();
@@ -289,6 +306,9 @@ int main(int argc, char* args[]) {
         fly.moveSpeed = 5.0f;
 
         registry.emplace<CharacterIntent>(flyCam);
+
+        // Additive camera effects
+        registry.emplace<CameraBreathState>(flyCam, BreathPresets::calm());
     }
 
     auto followCam = registry.create();
@@ -301,6 +321,9 @@ int main(int argc, char* args[]) {
         auto& follow = registry.emplace<FollowCameraComponent>(followCam);
         follow.target = cube1;
         follow.offset = glm::vec3(0.0f, 2.0f, 5.0f);
+
+        // Additive camera effects
+        registry.emplace<CameraBreathState>(followCam, BreathPresets::calm());
     }
 
     auto hud = registry.create();
@@ -308,6 +331,62 @@ int main(int argc, char* args[]) {
         auto& hudState = registry.emplace<HUDComponent>(hud);
         hudState.documentPath = "assets/ui/hud.rml";
         hudState.isVisible = false;
+    }
+
+    // FSM Demo 2: Event-triggered cube (press T to trigger)
+    auto triggerCube = registry.create();
+    {
+        auto& transform = registry.emplace<Vapor::TransformComponent>(triggerCube);
+        transform.position = glm::vec3(-5.0f, 0.5f, 0.0f);
+        transform.scale = glm::vec3(1.0f);
+
+        auto node = scene->createNode("Trigger Cube");
+        scene->addMeshToNode(node, MeshBuilder::buildCube(1.0f, material));
+        node->setPosition(transform.position);
+
+        auto& nodeRef = registry.emplace<SceneNodeReferenceComponent>(triggerCube);
+        nodeRef.node = node;
+
+        // Event-triggered FSM: Idle -> Jump up -> Fall down -> Idle
+        auto& fsm = registry.emplace<FSMComponent>(
+            triggerCube,
+            FSMBuilder()
+                .state("Idle")
+                .transitionTo("JumpUp", "trigger")
+                .state("JumpUp")
+                .enter({ Action::moveTo(triggerCube, glm::vec3(-5.0f, 3.0f, 0.0f)).dur(0.5f).ease(Easing::OutCubic) })
+                .transitionOnComplete("FallDown")
+                .state("FallDown")
+                .enter({ Action::moveTo(triggerCube, glm::vec3(-5.0f, 0.5f, 0.0f)).dur(0.3f).ease(Easing::InCubic) })
+                .transitionOnComplete("Idle")
+                .initialState("Idle")
+                .build()
+        );
+    }
+
+    // FSM Demo 3: Interactive object from examples.hpp (press I to interact)
+    auto interactiveBox = registry.create();
+    {
+        auto& transform = registry.emplace<Vapor::TransformComponent>(interactiveBox);
+        transform.position = glm::vec3(0.0f, 0.5f, -3.0f);
+        transform.scale = glm::vec3(0.8f);
+
+        auto node = scene->createNode("Interactive Box");
+        scene->addMeshToNode(node, MeshBuilder::buildCube(0.8f, material));
+        node->setPosition(transform.position);
+
+        auto& nodeRef = registry.emplace<SceneNodeReferenceComponent>(interactiveBox);
+        nodeRef.node = node;
+
+        // Use FSM::toggle from presets
+        auto& fsm = registry.emplace<FSMComponent>(
+            interactiveBox,
+            FSM::toggle(
+                interactiveBox,
+                glm::vec3(0.0f, 0.5f, -3.0f),// Idle position
+                glm::vec3(0.0f, 2.0f, -3.0f)// Active position (raised)
+            )
+        );
     }
 
     auto global = registry.create();
@@ -354,6 +433,31 @@ int main(int argc, char* args[]) {
                         hud.isVisible = !hud.isVisible;
                         fmt::print("HUD Visibility toggled: {}\n", hud.isVisible);
                     }
+                }
+                // Trigger FSM event (demo)
+                if (e.key.scancode == SDL_SCANCODE_T) {
+                    FSMSystem::broadcastEvent(registry, "trigger");
+                    fmt::print("FSM: Sent 'trigger' event\n");
+                }
+                // Camera trauma demo (press G for shake, B for big impact)
+                if (e.key.scancode == SDL_SCANCODE_G) {
+                    CameraTraumaSystem::addTraumaToActiveCamera(registry, TraumaPresets::mediumImpact());
+                    fmt::print("Camera: Medium shake\n");
+                }
+                if (e.key.scancode == SDL_SCANCODE_B) {
+                    CameraTraumaSystem::addTraumaToActiveCamera(registry, TraumaPresets::heavyImpact());
+                    fmt::print("Camera: Heavy impact!\n");
+                }
+                // Interactive object demo (from examples.hpp)
+                if (e.key.scancode == SDL_SCANCODE_I) {
+                    FSMSystem::sendEvent(registry, interactiveBox, "interact");
+                    fmt::print("FSM: Sent 'interact' event to interactive box\n");
+                }
+                // Action sequence demo: door open effect (using preset)
+                if (e.key.scancode == SDL_SCANCODE_O) {
+                    auto& queue = registry.emplace<ActionQueueComponent>(triggerCube);
+                    queue.actions = ActionSequence::doorOpen(triggerCube, glm::vec3(-5.0f, 3.0f, 0.0f));
+                    fmt::print("Action Sequence: Starting door open animation\n");
                 }
                 if (e.key.scancode == SDL_SCANCODE_F3) {
                     physics->setDebugEnabled(!physics->isDebugEnabled());
@@ -412,6 +516,16 @@ int main(int argc, char* args[]) {
         updateLightMovementSystem(registry, scene.get(), deltaTime);
         updateHUDSystem(registry, engineCore->getRmlUiManager(), deltaTime);
 
+        // FSM system (runs before animation to emplace action components)
+        FSMSystem::update(registry);
+
+        // Action system (unified tween/timeline handling)
+        ActionSystem::update(registry, deltaTime);
+
+        // Camera additive effects (compute offsets, no side effects)
+        CameraTraumaSystem::update(registry, deltaTime);
+        CameraBreathSystem::update(registry, deltaTime);
+
         // Engine updates
         engineCore->update(deltaTime);
 
@@ -420,13 +534,9 @@ int main(int argc, char* args[]) {
         scene->update(deltaTime);
 
         // Rendering
-        entt::entity activeCamEntity = getActiveCamera(registry);
-        if (activeCamEntity != entt::null) {
-            auto& cam = registry.get<Vapor::VirtualCameraComponent>(activeCamEntity);
-            Camera tempCamera;// Create a temporary Camera object
-            tempCamera.setEye(cam.position);// Set position for lighting/etc
-            tempCamera.setViewMatrix(cam.viewMatrix);
-            tempCamera.setProjectionMatrix(cam.projectionMatrix);
+        // CameraMixingSystem resolves: base position + trauma + breath → final camera
+        if (CameraMixingSystem::hasActiveCamera(registry)) {
+            Camera finalCamera = CameraMixingSystem::resolve(registry);
 
             // ===== 2D Canvas Demo (Screen Space) =====
             // Note: When camera is perspective (default), CanvasPass uses screen space (pixel coords)
@@ -494,7 +604,7 @@ int main(int argc, char* args[]) {
                 glm::vec3(0.0f, 2.0f, 0.0f), glm::vec2(1.0f, 1.0f), spriteTexture, glm::vec4(1.0f, 0.5f, 0.5f, 1.0f)
             );
 
-            renderer->draw(scene, tempCamera);
+            renderer->draw(scene, finalCamera);
         } else {
             // Fallback camera or warning
             // fmt::print(stderr, "Warning: No active camera found for rendering.\n");
