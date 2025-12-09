@@ -3,10 +3,15 @@
 #include <SDL3/SDL_filesystem.h>
 #include <SDL3/SDL_stdinc.h>
 #include <filesystem>
+#include <fstream>
 #include <fmt/core.h>
 #include <glm/ext/matrix_float4x4.hpp>
 #include <glm/ext/matrix_transform.hpp>
 #include <glm/gtc/quaternion.hpp>
+#include <cereal/archives/binary.hpp>
+#include <cereal/types/vector.hpp>
+#include <cereal/types/string.hpp>
+#include <cereal/types/memory.hpp>
 
 #define STB_IMAGE_IMPLEMENTATION
 #include <stb_image.h>
@@ -655,4 +660,265 @@ std::shared_ptr<Scene> AssetManager::loadGLTFOptimized(const std::string& filena
     AssetSerializer::serializeScene(optimizedScene, scenePath.string());
 
     return optimizedScene;
+}
+
+// Cereal serialization for GLM types (needed for VaporAsset structures)
+namespace cereal {
+    template<class Archive>
+    void serialize(Archive& archive, glm::vec2& vec) {
+        archive(vec.x, vec.y);
+    }
+    template<class Archive>
+    void serialize(Archive& archive, glm::vec3& vec) {
+        archive(vec.x, vec.y, vec.z);
+    }
+    template<class Archive>
+    void serialize(Archive& archive, glm::vec4& vec) {
+        archive(vec.x, vec.y, vec.z, vec.w);
+    }
+    template<class Archive>
+    void serialize(Archive& archive, glm::mat4& mat) {
+        archive(mat[0], mat[1], mat[2], mat[3]);
+    }
+    template<class Archive>
+    void serialize(Archive& archive, VertexData& v) {
+        archive(v.position, v.uv, v.normal, v.tangent);
+    }
+}
+
+// Internal structure matching vapor-asset tool's output format
+namespace {
+    constexpr uint32_t VSCENE_LOD_MAGIC = 0x564C4F44; // "VLOD"
+    constexpr uint32_t VSCENE_LOD_VERSION = 1;
+
+    struct VaporAssetLODLevel {
+        std::vector<VertexData> vertices;
+        std::vector<Uint32> indices;
+        float error = 0.0f;
+        float screenSizeThreshold = 0.0f;
+
+        template<class Archive>
+        void serialize(Archive& archive) {
+            archive(vertices, indices, error, screenSizeThreshold);
+        }
+    };
+
+    struct VaporAssetLODMesh {
+        std::string name;
+        std::vector<VaporAssetLODLevel> lodLevels;
+        glm::vec3 localAABBMin;
+        glm::vec3 localAABBMax;
+        glm::vec3 boundingSphereCenter;
+        float boundingSphereRadius;
+        uint32_t materialIndex;
+
+        template<class Archive>
+        void serialize(Archive& archive) {
+            archive(name, lodLevels, localAABBMin, localAABBMax,
+                    boundingSphereCenter, boundingSphereRadius, materialIndex);
+        }
+    };
+
+    struct VaporAssetMaterial {
+        std::string name;
+        glm::vec4 baseColorFactor = glm::vec4(1.0f);
+        float metallicFactor = 1.0f;
+        float roughnessFactor = 1.0f;
+        std::string albedoTexturePath;
+        std::string normalTexturePath;
+        std::string metallicRoughnessTexturePath;
+
+        template<class Archive>
+        void serialize(Archive& archive) {
+            archive(name, baseColorFactor, metallicFactor, roughnessFactor,
+                    albedoTexturePath, normalTexturePath, metallicRoughnessTexturePath);
+        }
+    };
+
+    struct VaporAssetSceneNode {
+        std::string name;
+        glm::mat4 localTransform;
+        std::vector<uint32_t> meshIndices;
+        std::vector<std::shared_ptr<VaporAssetSceneNode>> children;
+
+        template<class Archive>
+        void serialize(Archive& archive) {
+            archive(name, localTransform, meshIndices, children);
+        }
+    };
+
+    struct VaporAssetSceneData {
+        std::string name;
+        std::vector<VaporAssetLODMesh> meshes;
+        std::vector<VaporAssetMaterial> materials;
+        std::vector<std::shared_ptr<VaporAssetSceneNode>> rootNodes;
+        uint32_t totalOriginalTriangles = 0;
+        uint32_t totalTrianglesWithLODs = 0;
+
+        template<class Archive>
+        void serialize(Archive& archive) {
+            archive(name, meshes, materials, rootNodes, totalOriginalTriangles, totalTrianglesWithLODs);
+        }
+    };
+}
+
+std::shared_ptr<Scene> AssetManager::loadSceneWithLOD(const std::string& filename) {
+    std::filesystem::path filePath(SDL_GetBasePath() + filename);
+
+    std::ifstream file(filePath, std::ios::binary);
+    if (!file.is_open()) {
+        throw std::runtime_error(fmt::format("Failed to open LOD scene file: {}", filePath.string()));
+    }
+
+    // Read and verify header
+    uint32_t magic, version;
+    file.read(reinterpret_cast<char*>(&magic), sizeof(magic));
+    file.read(reinterpret_cast<char*>(&version), sizeof(version));
+
+    if (magic != VSCENE_LOD_MAGIC) {
+        throw std::runtime_error(fmt::format("Invalid file format: not a .vscene_lod file: {}", filePath.string()));
+    }
+    if (version != VSCENE_LOD_VERSION) {
+        throw std::runtime_error(fmt::format("Unsupported .vscene_lod version: {}", version));
+    }
+
+    // Read scene data from vapor-asset format
+    VaporAssetSceneData assetData;
+    {
+        cereal::BinaryInputArchive archive(file);
+        archive(assetData);
+    }
+
+    fmt::print("Loading LOD scene: {} meshes, {} materials\n",
+        assetData.meshes.size(), assetData.materials.size());
+
+    // Create Vapor scene and consolidate buffers
+    auto scene = std::make_shared<Scene>();
+    scene->name = assetData.name;
+
+    // Create materials
+    for (const auto& assetMat : assetData.materials) {
+        auto mat = std::make_shared<Material>();
+        mat->name = assetMat.name;
+        mat->baseColorFactor = assetMat.baseColorFactor;
+        mat->metallicFactor = assetMat.metallicFactor;
+        mat->roughnessFactor = assetMat.roughnessFactor;
+        // Note: texture loading would need to be implemented for full support
+        scene->materials.push_back(mat);
+    }
+
+    // Ensure at least one default material
+    if (scene->materials.empty()) {
+        auto defaultMat = std::make_shared<Material>();
+        defaultMat->name = "default";
+        scene->materials.push_back(defaultMat);
+    }
+
+    // First pass: count total vertices and indices needed
+    Uint32 totalVertexCount = 0;
+    Uint32 totalIndexCount = 0;
+    for (const auto& assetMesh : assetData.meshes) {
+        if (!assetMesh.lodLevels.empty()) {
+            // LOD0 vertices (shared by all LOD levels)
+            totalVertexCount += assetMesh.lodLevels[0].vertices.size();
+            // All LOD levels need their own indices
+            for (const auto& lod : assetMesh.lodLevels) {
+                totalIndexCount += lod.indices.size();
+            }
+        }
+    }
+    scene->vertices.reserve(totalVertexCount);
+    scene->indices.reserve(totalIndexCount);
+
+    // Second pass: consolidate all data
+    Uint32 currentVertexOffset = 0;
+    Uint32 currentIndexOffset = 0;
+
+    // Create a flat node structure with all meshes
+    auto rootNode = std::make_shared<Node>();
+    rootNode->name = "root";
+    rootNode->meshGroup = std::make_shared<MeshGroup>();
+    rootNode->meshGroup->name = "all_meshes";
+
+    for (size_t meshIdx = 0; meshIdx < assetData.meshes.size(); ++meshIdx) {
+        const auto& assetMesh = assetData.meshes[meshIdx];
+
+        if (assetMesh.lodLevels.empty()) {
+            fmt::print("Warning: Mesh '{}' has no LOD levels, skipping\n", assetMesh.name);
+            continue;
+        }
+
+        auto mesh = std::make_shared<Mesh>();
+        mesh->hasPosition = true;
+        mesh->hasNormal = true;
+        mesh->hasTangent = true;
+        mesh->hasUV0 = true;
+        mesh->primitiveMode = PrimitiveMode::TRIANGLES;
+        mesh->localAABBMin = assetMesh.localAABBMin;
+        mesh->localAABBMax = assetMesh.localAABBMax;
+        mesh->isGeometryDirty = false;
+
+        // Set material
+        uint32_t matIdx = assetMesh.materialIndex;
+        if (matIdx < scene->materials.size()) {
+            mesh->material = scene->materials[matIdx];
+        } else {
+            mesh->material = scene->materials[0];
+        }
+
+        // LOD0 vertices go into the consolidated buffer
+        const auto& lod0 = assetMesh.lodLevels[0];
+        Uint32 meshVertexOffset = currentVertexOffset;
+
+        scene->vertices.insert(scene->vertices.end(), lod0.vertices.begin(), lod0.vertices.end());
+        mesh->vertices = lod0.vertices; // Keep a copy for potential use
+        mesh->vertexOffset = meshVertexOffset;
+        mesh->vertexCount = lod0.vertices.size();
+        currentVertexOffset += lod0.vertices.size();
+
+        // Process each LOD level
+        mesh->lodLevels.resize(assetMesh.lodLevels.size());
+
+        for (size_t lodIdx = 0; lodIdx < assetMesh.lodLevels.size(); ++lodIdx) {
+            const auto& assetLOD = assetMesh.lodLevels[lodIdx];
+            auto& meshLOD = mesh->lodLevels[lodIdx];
+
+            meshLOD.error = assetLOD.error;
+            meshLOD.screenSizeThreshold = assetLOD.screenSizeThreshold;
+            meshLOD.vertexOffset = meshVertexOffset; // All LODs share vertices from LOD0
+            meshLOD.vertexCount = lod0.vertices.size();
+            meshLOD.indexOffset = currentIndexOffset;
+            meshLOD.indexCount = assetLOD.indices.size();
+
+            // Add indices to consolidated buffer
+            scene->indices.insert(scene->indices.end(), assetLOD.indices.begin(), assetLOD.indices.end());
+            meshLOD.indices = assetLOD.indices; // Keep a copy
+
+            currentIndexOffset += assetLOD.indices.size();
+        }
+
+        // Set mesh's main index data to LOD0
+        mesh->indices = lod0.indices;
+        mesh->indexOffset = mesh->lodLevels[0].indexOffset;
+        mesh->indexCount = mesh->lodLevels[0].indexCount;
+
+        rootNode->meshGroup->meshes.push_back(mesh);
+
+        fmt::print("  Mesh '{}': {} verts, {} LODs (", assetMesh.name,
+            mesh->vertexCount, mesh->lodLevels.size());
+        for (size_t i = 0; i < mesh->lodLevels.size(); ++i) {
+            fmt::print("{}", mesh->lodLevels[i].indexCount / 3);
+            if (i < mesh->lodLevels.size() - 1) fmt::print(", ");
+        }
+        fmt::print(" tris)\n");
+    }
+
+    scene->nodes.push_back(rootNode);
+
+    fmt::print("LOD scene loaded: {} vertices, {} indices in consolidated buffers\n",
+        scene->vertices.size(), scene->indices.size());
+
+    scene->update(0.0f); // Update world transforms
+
+    return scene;
 }

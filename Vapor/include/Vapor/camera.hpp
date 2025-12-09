@@ -57,10 +57,16 @@ public:
     glm::vec3 getEye() const {
         return _eye;
     }
+    glm::vec3 getPosition() const {
+        return _eye;
+    }
     void setEye(const glm::vec3& position) {
         _eye = position;
         _isViewDirty = true;
         _isFrustumDirty = true;
+    }
+    float getFOV() const {
+        return _fov;
     }
 
     glm::vec3 getCenter() const {

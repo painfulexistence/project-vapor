@@ -502,6 +502,20 @@ struct alignas(16) SunFlareData {
     float _pad3;
 };
 
+// LOD level data - stores geometry for a single level of detail
+struct LODLevelData {
+    std::vector<VertexData> vertices;
+    std::vector<Uint32> indices;
+    float error = 0.0f;              // Simplification error metric
+    float screenSizeThreshold = 0.0f; // Screen-space size threshold for this LOD
+
+    // GPU offsets (set during staging)
+    Uint32 vertexOffset = 0;
+    Uint32 indexOffset = 0;
+    Uint32 vertexCount = 0;
+    Uint32 indexCount = 0;
+};
+
 struct Mesh {
     void initialize(const std::vector<VertexData>& vertices, const std::vector<Uint32>& indices);
     void initialize(VertexData* vertexData, size_t vertexCount, Uint32* indexData, size_t indexCount);
@@ -511,14 +525,22 @@ struct Mesh {
     glm::vec4 getWorldBoundingSphere() const;
     void print();
 
+    // Select appropriate LOD level based on screen-space size
+    // screenSize: object's size as fraction of screen height (0.0 - 1.0)
+    // Returns index into lodLevels array
+    Uint32 selectLOD(float screenSize) const;
+
+    // Get the active LOD level (based on currentLOD)
+    const LODLevelData& getActiveLOD() const;
+
     bool hasPosition = false;
     bool hasNormal = false;
     bool hasTangent = false;
     bool hasUV0 = false;
     bool hasUV1 = false;
     bool hasColor = false;
-    std::vector<VertexData> vertices;// interleaved vertex data
-    std::vector<Uint32> indices;
+    std::vector<VertexData> vertices;// interleaved vertex data (LOD0)
+    std::vector<Uint32> indices;     // indices (LOD0)
     std::shared_ptr<Material> material = nullptr;
     PrimitiveMode primitiveMode;
     glm::vec3 localAABBMin;
@@ -527,7 +549,12 @@ struct Mesh {
     glm::vec3 worldAABBMax;
     bool isGeometryDirty = true;
 
-    // GPU-driven rendering
+    // LOD support
+    std::vector<LODLevelData> lodLevels; // Empty = no LOD, use vertices/indices directly
+    Uint32 currentLOD = 0;               // Currently selected LOD level (runtime)
+    bool hasLOD() const { return !lodLevels.empty(); }
+
+    // GPU-driven rendering (for LOD0 or single-LOD mesh)
     Uint32 vertexOffset = 0;
     Uint32 indexOffset = 0;
     Uint32 vertexCount = 0;
