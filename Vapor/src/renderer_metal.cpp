@@ -445,11 +445,21 @@ public:
 
         // Create render pass descriptor
         auto prePassDesc = NS::TransferPtr(MTL::RenderPassDescriptor::renderPassDescriptor());
+
+        // Color attachment 0: Normal
         auto prePassNormalRT = prePassDesc->colorAttachments()->object(0);
         prePassNormalRT->setClearColor(MTL::ClearColor(0.0, 0.0, 0.0, 1.0));
         prePassNormalRT->setLoadAction(MTL::LoadActionClear);
         prePassNormalRT->setStoreAction(MTL::StoreActionStore);
         prePassNormalRT->setTexture(r.normalRT_MS.get());
+
+        // Color attachment 1: Albedo (for GIBS)
+        auto prePassAlbedoRT = prePassDesc->colorAttachments()->object(1);
+        prePassAlbedoRT->setClearColor(MTL::ClearColor(0.0, 0.0, 0.0, 1.0));
+        prePassAlbedoRT->setLoadAction(MTL::LoadActionClear);
+        prePassAlbedoRT->setStoreAction(MTL::StoreActionMultisampleResolve);
+        prePassAlbedoRT->setTexture(r.albedoRT_MS.get());
+        prePassAlbedoRT->setResolveTexture(r.albedoRT.get());
 
         auto prePassDepthRT = prePassDesc->depthAttachment();
         prePassDepthRT->setClearDepth(r.clearDepth);
@@ -2615,7 +2625,47 @@ void Renderer_Metal::renderUI() {
 auto Renderer_Metal::createResources() -> void {
     // Create pipelines
     drawPipeline = createPipeline("assets/shaders/3d_pbr_normal_mapped.metal", true, false, MSAA_SAMPLE_COUNT);
-    prePassPipeline = createPipeline("assets/shaders/3d_depth_only.metal", true, false, MSAA_SAMPLE_COUNT);
+
+    // PrePass pipeline with MRT (normal + albedo)
+    {
+        auto shaderSrc = readFile("assets/shaders/3d_depth_only.metal");
+        auto code = NS::String::string(shaderSrc.data(), NS::StringEncoding::UTF8StringEncoding);
+        NS::Error* error = nullptr;
+        MTL::Library* library = device->newLibrary(code, nullptr, &error);
+        if (!library) {
+            throw std::runtime_error(fmt::format("PrePass shader compile error: {}\n", error->localizedDescription()->utf8String()));
+        }
+
+        auto vertexMain = library->newFunction(NS::String::string("vertexMain", NS::UTF8StringEncoding));
+        auto fragmentMain = library->newFunction(NS::String::string("fragmentMain", NS::UTF8StringEncoding));
+
+        auto pipelineDesc = MTL::RenderPipelineDescriptor::alloc()->init();
+        pipelineDesc->setVertexFunction(vertexMain);
+        pipelineDesc->setFragmentFunction(fragmentMain);
+
+        // Color attachment 0: Normal (HDR)
+        auto colorAttachment0 = pipelineDesc->colorAttachments()->object(0);
+        colorAttachment0->setPixelFormat(MTL::PixelFormatRGBA16Float);
+
+        // Color attachment 1: Albedo (LDR)
+        auto colorAttachment1 = pipelineDesc->colorAttachments()->object(1);
+        colorAttachment1->setPixelFormat(MTL::PixelFormatRGBA8Unorm);
+
+        pipelineDesc->setDepthAttachmentPixelFormat(MTL::PixelFormatDepth32Float);
+        pipelineDesc->setSampleCount(NS::UInteger(MSAA_SAMPLE_COUNT));
+
+        prePassPipeline = NS::TransferPtr(device->newRenderPipelineState(pipelineDesc, &error));
+        if (!prePassPipeline) {
+            throw std::runtime_error(fmt::format("PrePass pipeline error: {}\n", error->localizedDescription()->utf8String()));
+        }
+
+        pipelineDesc->release();
+        vertexMain->release();
+        fragmentMain->release();
+        library->release();
+        code->release();
+    }
+
     postProcessPipeline = createPipeline("assets/shaders/3d_post_process.metal", false, true, 1);
     buildClustersPipeline = createComputePipeline("assets/shaders/3d_cluster_build.metal");
     cullLightsPipeline = createComputePipeline("assets/shaders/3d_light_cull.metal");
@@ -3138,6 +3188,21 @@ auto Renderer_Metal::createResources() -> void {
     normalTextureDesc->setUsage(MTL::TextureUsageShaderRead | MTL::TextureUsageShaderWrite);
     normalRT = NS::TransferPtr(device->newTexture(normalTextureDesc));
     normalTextureDesc->release();
+
+    // Albedo RT for GIBS (stores albedo color from PrePass)
+    MTL::TextureDescriptor* albedoTextureDesc = MTL::TextureDescriptor::alloc()->init();
+    albedoTextureDesc->setTextureType(MTL::TextureType2DMultisample);
+    albedoTextureDesc->setPixelFormat(MTL::PixelFormatRGBA8Unorm);
+    albedoTextureDesc->setWidth(swapchain->drawableSize().width);
+    albedoTextureDesc->setHeight(swapchain->drawableSize().height);
+    albedoTextureDesc->setSampleCount(NS::UInteger(MSAA_SAMPLE_COUNT));
+    albedoTextureDesc->setUsage(MTL::TextureUsageRenderTarget | MTL::TextureUsageShaderRead);
+    albedoRT_MS = NS::TransferPtr(device->newTexture(albedoTextureDesc));
+    albedoTextureDesc->setTextureType(MTL::TextureType2D);
+    albedoTextureDesc->setSampleCount(1);
+    albedoTextureDesc->setUsage(MTL::TextureUsageShaderRead | MTL::TextureUsageShaderWrite);
+    albedoRT = NS::TransferPtr(device->newTexture(albedoTextureDesc));
+    albedoTextureDesc->release();
 
     MTL::TextureDescriptor* shadowTextureDesc = MTL::TextureDescriptor::alloc()->init();
     shadowTextureDesc->setTextureType(MTL::TextureType2D);

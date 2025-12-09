@@ -488,6 +488,8 @@ protected:
     NS::SharedPtr<MTL::Texture> depthStencilRT;
     NS::SharedPtr<MTL::Texture> normalRT_MS;
     NS::SharedPtr<MTL::Texture> normalRT;
+    NS::SharedPtr<MTL::Texture> albedoRT_MS;  // PrePass albedo output (for GIBS)
+    NS::SharedPtr<MTL::Texture> albedoRT;
     NS::SharedPtr<MTL::Texture> shadowRT;
     NS::SharedPtr<MTL::Texture> aoRT;
 

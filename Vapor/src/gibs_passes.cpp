@@ -40,7 +40,7 @@ void SurfelGenerationPass::execute() {
     // Textures
     encoder->setTexture(r.depthStencilRT.get(), 0);
     encoder->setTexture(r.normalRT.get(), 1);
-    encoder->setTexture(r.colorRT.get(), 2); // Using color as albedo proxy
+    encoder->setTexture(r.albedoRT.get(), 2); // Albedo from PrePass MRT
 
     // Buffers
     encoder->setBuffer(gibsManager->getSurfelBuffer(), 0, 0);

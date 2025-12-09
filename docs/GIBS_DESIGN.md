@@ -168,27 +168,27 @@ enum class GIBSQuality {
 
 ## Albedo 來源問題
 
-### 現況
+### 現況（已實作方案 A）
 
-目前 surfel 生成時使用 `colorRT` 作為 albedo 的近似值：
+目前 surfel 生成時使用 PrePass MRT 輸出的 `albedoRT`：
 
 ```cpp
 // gibs_passes.cpp - SurfelGenerationPass
-encoder->setTexture(r.colorRT.get(), 2); // Using color as albedo proxy
+encoder->setTexture(r.albedoRT.get(), 2); // Albedo from PrePass MRT
 ```
 
-**問題**：
-- `colorRT` 是 MainPass 輸出，包含光照結果，不是純 albedo
-- GIBS passes 在 MainPass 之前執行，時序上有矛盾
-- 目前實際拿到的是上一幀的結果
+**實作內容**：
+- PrePass 使用 MRT 同時輸出 normal (attachment 0) 和 albedo (attachment 1)
+- `albedoRT_MS` + `albedoRT` 與 `normalRT_MS` + `normalRT` 格式一致
+- Shader 輸出 `baseColor * material.baseColorFactor`
 
-### 改善方案
+### 未來改善方案
 
-| 方案 | 存儲內容 | 頻寬 | 複雜度 | 適用場景 |
-|------|----------|------|--------|----------|
-| A | Albedo RT | +4 bytes/pixel | 低 | 純 Diffuse GI |
-| B | Material ID | +4 bytes/pixel | 中 | 需要材質屬性查詢 |
-| C | Visibility Buffer | +8 bytes/pixel | 高 | RTX Reflection, Deferred Texturing |
+| 方案 | 存儲內容 | 頻寬 | 複雜度 | 適用場景 | 狀態 |
+|------|----------|------|--------|----------|------|
+| A | Albedo RT | +4 bytes/pixel | 低 | 純 Diffuse GI | ✅ 已實作 |
+| B | Material ID | +4 bytes/pixel | 中 | 需要材質屬性查詢 | 待實作 |
+| C | Visibility Buffer | +8 bytes/pixel | 高 | RTX Reflection, Deferred Texturing | 待實作 |
 
 ---
 
