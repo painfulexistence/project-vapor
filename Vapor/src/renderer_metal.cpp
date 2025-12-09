@@ -950,6 +950,9 @@ public:
 
         r.currentInstanceCount = 0;
         r.culledInstanceCount = 0;
+        r.lodTrianglesRendered = 0;
+        r.lodTrianglesOriginal = 0;
+        r.lodLevelCounts.fill(0);
 
         encoder->setVertexBuffer(r.cameraDataBuffers[r.currentFrameInFlight].get(), 0, 0);
         encoder->setVertexBuffer(r.materialDataBuffer.get(), 0, 1);
@@ -990,19 +993,55 @@ public:
             encoder->setFragmentTexture(r.brdfLUT.get(), 10);
 
             for (const auto& mesh : meshes) {
-                if (!r.currentCamera->isVisible(mesh->getWorldBoundingSphere())) {
+                glm::vec4 boundingSphere = mesh->getWorldBoundingSphere();
+                if (!r.currentCamera->isVisible(boundingSphere)) {
                     r.culledInstanceCount++;
                     continue;
+                }
+
+                // LOD selection based on screen-space size
+                Uint32 indexCount = mesh->indexCount;
+                Uint32 indexOffset = mesh->indexOffset;
+
+                if (r.lodEnabled && mesh->hasLOD()) {
+                    // Calculate screen-space size
+                    glm::vec3 sphereCenter(boundingSphere.x, boundingSphere.y, boundingSphere.z);
+                    float sphereRadius = boundingSphere.w;
+                    float distance = glm::length(sphereCenter - r.currentCamera->getPosition());
+
+                    // Approximate screen size as ratio of sphere diameter to view frustum height at that distance
+                    float fovY = r.currentCamera->getFOV();
+                    float viewHeight = 2.0f * distance * tanf(fovY * 0.5f);
+                    float screenSize = (viewHeight > 0.0001f) ? (sphereRadius * 2.0f) / viewHeight : 1.0f;
+
+                    // Select LOD level
+                    Uint32 lodLevel = mesh->selectLOD(screenSize);
+                    const_cast<Mesh*>(mesh.get())->currentLOD = lodLevel;
+
+                    // Track LOD statistics
+                    if (lodLevel < r.lodLevelCounts.size()) {
+                        r.lodLevelCounts[lodLevel]++;
+                    }
+                    r.lodTrianglesOriginal += mesh->lodLevels[0].indexCount / 3;
+
+                    // Use LOD level's index data
+                    const auto& lod = mesh->lodLevels[lodLevel];
+                    indexCount = lod.indexCount;
+                    indexOffset = lod.indexOffset;
+                    r.lodTrianglesRendered += indexCount / 3;
+                } else {
+                    r.lodTrianglesOriginal += mesh->indexCount / 3;
+                    r.lodTrianglesRendered += mesh->indexCount / 3;
                 }
 
                 r.currentInstanceCount++;
                 encoder->setVertexBytes(&mesh->instanceID, sizeof(Uint32), 4);
                 encoder->drawIndexedPrimitives(
                     MTL::PrimitiveType::PrimitiveTypeTriangle,
-                    mesh->indexCount,
+                    indexCount,
                     MTL::IndexTypeUInt32,
                     r.getBuffer(r.currentScene->indexBuffer).get(),
-                    mesh->indexOffset * sizeof(Uint32)
+                    indexOffset * sizeof(Uint32)
                 );
                 r.drawCount++;
             }
@@ -4426,6 +4465,17 @@ auto Renderer_Metal::draw(std::shared_ptr<Scene> scene, Camera& camera) -> void 
         ImGui::Text(
             "Average frame rate: %.3f ms/frame (%.1f FPS)", 1000.0f / ImGui::GetIO().Framerate, ImGui::GetIO().Framerate
         );
+        ImGui::Text("Draw calls: %u, Instances: %u, Culled: %u", drawCount, currentInstanceCount, culledInstanceCount);
+
+        // LOD statistics
+        if (lodTrianglesOriginal > 0) {
+            float lodReduction = 100.0f * (1.0f - static_cast<float>(lodTrianglesRendered) / static_cast<float>(lodTrianglesOriginal));
+            ImGui::Text("LOD: %u/%u tris (%.1f%% reduction)", lodTrianglesRendered, lodTrianglesOriginal, lodReduction);
+            ImGui::Text("LOD levels: L0=%u L1=%u L2=%u L3=%u L4=%u",
+                lodLevelCounts[0], lodLevelCounts[1], lodLevelCounts[2], lodLevelCounts[3], lodLevelCounts[4]);
+        }
+        ImGui::Checkbox("Enable LOD", &lodEnabled);
+
         ImGui::ColorEdit3("Clear color", (float*)&clearColor);
 
         ImGui::Separator();

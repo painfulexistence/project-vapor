@@ -46,6 +46,12 @@ namespace cereal {
     void serialize(Archive& archive, VertexData& vertex) {
         archive(vertex.position, vertex.uv, vertex.normal, vertex.tangent);
     }
+
+    template<class Archive>
+    void serialize(Archive& archive, LODLevelData& lod) {
+        archive(lod.vertices, lod.indices, lod.error, lod.screenSizeThreshold,
+                lod.vertexOffset, lod.indexOffset, lod.vertexCount, lod.indexCount);
+    }
 }
 
 class AssetSerializer {

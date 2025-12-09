@@ -12,4 +12,10 @@ find_package(SDL3 CONFIG REQUIRED)
 add_subdirectory(Vapor)
 add_subdirectory(Vaporware)
 
+# Tools (optional, enable with -DBUILD_TOOLS=ON)
+option(BUILD_TOOLS "Build asset processing tools" OFF)
+if(BUILD_TOOLS)
+    add_subdirectory(tools/vapor-asset)
+endif()
+
 # install(FILES LICENSE DESTINATION "share/${PROJECT_NAME}")
