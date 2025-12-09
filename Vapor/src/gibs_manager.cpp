@@ -26,10 +26,32 @@ void GIBSManager::init() {
     // Create GPU buffers
     createBuffers();
 
+    // Note: createTextures() must be called separately after screen size is known
+    // Call initTextures(width, height) from renderer after swapchain is ready
+
     SDL_Log("[GIBS] Initialized: %u max surfels, %u rays/surfel, %.1fx resolution",
             maxSurfels, raysPerSurfel, resolutionScale);
     SDL_Log("[GIBS] Spatial hash: %ux%ux%u cells (%.1fm cell size), total %u cells",
             gridSize.x, gridSize.y, gridSize.z, cellSize, totalCells);
+}
+
+void GIBSManager::initTextures(Uint32 screenWidth, Uint32 screenHeight) {
+    Uint32 targetWidth = static_cast<Uint32>(screenWidth * resolutionScale);
+    Uint32 targetHeight = static_cast<Uint32>(screenHeight * resolutionScale);
+
+    if (giResultTexture) {
+        // Already initialized, check if resize needed
+        if (giTextureWidth == targetWidth && giTextureHeight == targetHeight) {
+            return; // No change needed
+        }
+        // Release old textures
+        giResultTexture.reset();
+        giHistoryTexture.reset();
+        SDL_Log("[GIBS] Resizing GI textures from %ux%u to %ux%u",
+                giTextureWidth, giTextureHeight, targetWidth, targetHeight);
+    }
+
+    createTextures(screenWidth, screenHeight);
 }
 
 void GIBSManager::deinit() {

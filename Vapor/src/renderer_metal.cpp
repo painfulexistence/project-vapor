@@ -2632,17 +2632,17 @@ auto Renderer_Metal::createResources() -> void {
     lightScatteringPipeline = createPipeline("assets/shaders/3d_light_scattering.metal", true, true, 1);
 
     // GIBS (Global Illumination Based on Surfels) pipelines
-    surfelGenerationPipeline = createComputePipeline("assets/shaders/gibs_surfel_generation.metal");
-    surfelClearCellsPipeline = createComputePipeline("assets/shaders/gibs_spatial_hash.metal");
-    surfelCountPerCellPipeline = createComputePipeline("assets/shaders/gibs_spatial_hash.metal");
-    surfelPrefixSumPipeline = createComputePipeline("assets/shaders/gibs_spatial_hash.metal");
-    surfelScatterPipeline = createComputePipeline("assets/shaders/gibs_spatial_hash.metal");
-    surfelRaytracingPipeline = createComputePipeline("assets/shaders/gibs_raytracing.metal");
-    surfelRaytracingSimplePipeline = createComputePipeline("assets/shaders/gibs_raytracing.metal");
-    gibsTemporalPipeline = createComputePipeline("assets/shaders/gibs_temporal.metal");
-    gibsSamplePipeline = createComputePipeline("assets/shaders/gibs_sample.metal");
-    gibsUpsamplePipeline = createComputePipeline("assets/shaders/gibs_sample.metal");
-    gibsCompositePipeline = createComputePipeline("assets/shaders/gibs_sample.metal");
+    surfelGenerationPipeline = createComputePipeline("assets/shaders/gibs_surfel_generation.metal", "surfelGeneration");
+    surfelClearCellsPipeline = createComputePipeline("assets/shaders/gibs_spatial_hash.metal", "clearCellCounts");
+    surfelCountPerCellPipeline = createComputePipeline("assets/shaders/gibs_spatial_hash.metal", "countSurfelsPerCell");
+    surfelPrefixSumPipeline = createComputePipeline("assets/shaders/gibs_spatial_hash.metal", "prefixSumCellsSerial");
+    surfelScatterPipeline = createComputePipeline("assets/shaders/gibs_spatial_hash.metal", "scatterSurfels");
+    surfelRaytracingPipeline = createComputePipeline("assets/shaders/gibs_raytracing.metal", "surfelRaytracing");
+    surfelRaytracingSimplePipeline = createComputePipeline("assets/shaders/gibs_raytracing.metal", "surfelRaytracingSimple");
+    gibsTemporalPipeline = createComputePipeline("assets/shaders/gibs_temporal.metal", "surfelTemporalSmooth");
+    gibsSamplePipeline = createComputePipeline("assets/shaders/gibs_sample.metal", "giSample");
+    gibsUpsamplePipeline = createComputePipeline("assets/shaders/gibs_sample.metal", "giBilateralUpsample");
+    gibsCompositePipeline = createComputePipeline("assets/shaders/gibs_sample.metal", "giComposite");
 
     // Initialize GIBS Manager
     gibsManager = std::make_unique<Vapor::GIBSManager>(this);
@@ -4431,6 +4431,36 @@ auto Renderer_Metal::draw(std::shared_ptr<Scene> scene, Camera& camera) -> void 
     drawCount = 0;
 
     // ==========================================================================
+    // Update GIBS (Global Illumination Based on Surfels)
+    // ==========================================================================
+    if (gibsEnabled && gibsManager) {
+        // Initialize GI textures if needed (or resize on window resize)
+        Uint32 screenW = static_cast<Uint32>(surface->texture()->width());
+        Uint32 screenH = static_cast<Uint32>(surface->texture()->height());
+        gibsManager->initTextures(screenW, screenH);
+
+        // Begin frame for GIBS
+        gibsManager->beginFrame(currentFrameInFlight);
+
+        // Update GIBS data with camera and lighting info
+        glm::mat4 viewProj = proj * view;
+        glm::mat4 invViewProj = glm::inverse(viewProj);
+
+        // Get sun direction and color from first directional light
+        glm::vec3 sunDir = glm::vec3(0.0f, -1.0f, 0.0f);
+        glm::vec3 sunColor = glm::vec3(1.0f);
+        float sunIntensity = 1.0f;
+        if (!scene->directionalLights.empty()) {
+            const auto& sunLight = scene->directionalLights[0];
+            sunDir = glm::normalize(sunLight.direction);
+            sunColor = sunLight.color;
+            sunIntensity = sunLight.intensity;
+        }
+
+        gibsManager->updateGIBSData(viewProj, invViewProj, camPos, sunDir, sunColor, sunIntensity);
+    }
+
+    // ==========================================================================
     // Initialize RmlUI if not already initialized (delayed initialization)
     // ==========================================================================
     auto* engineCore = Vapor::EngineCore::Get();
@@ -5091,6 +5121,10 @@ NS::SharedPtr<MTL::RenderPipelineState>
 }
 
 NS::SharedPtr<MTL::ComputePipelineState> Renderer_Metal::createComputePipeline(const std::string& filename) {
+    return createComputePipeline(filename, "computeMain");
+}
+
+NS::SharedPtr<MTL::ComputePipelineState> Renderer_Metal::createComputePipeline(const std::string& filename, const std::string& functionName) {
     auto shaderSrc = readFile(filename);
 
     auto code = NS::String::string(shaderSrc.data(), NS::StringEncoding::UTF8StringEncoding);
@@ -5102,16 +5136,25 @@ NS::SharedPtr<MTL::ComputePipelineState> Renderer_Metal::createComputePipeline(c
             fmt::format("Could not compile shader! Error: {}\n", error->localizedDescription()->utf8String())
         );
     }
-    // fmt::print("Shader compiled successfully. Shader: {}\n", code->cString(NS::StringEncoding::UTF8StringEncoding));
 
-    auto computeFuncName = NS::String::string("computeMain", NS::StringEncoding::UTF8StringEncoding);
-    auto computeMain = library->newFunction(computeFuncName);
+    auto computeFuncName = NS::String::string(functionName.c_str(), NS::StringEncoding::UTF8StringEncoding);
+    auto computeFunc = library->newFunction(computeFuncName);
+    if (!computeFunc) {
+        throw std::runtime_error(
+            fmt::format("Could not find compute function '{}' in shader '{}'\n", functionName, filename)
+        );
+    }
 
-    auto pipeline = NS::TransferPtr(device->newComputePipelineState(computeMain, &error));
+    auto pipeline = NS::TransferPtr(device->newComputePipelineState(computeFunc, &error));
+    if (!pipeline) {
+        throw std::runtime_error(
+            fmt::format("Could not create compute pipeline for '{}': {}\n", functionName, error->localizedDescription()->utf8String())
+        );
+    }
 
     code->release();
     library->release();
-    computeMain->release();
+    computeFunc->release();
 
     return pipeline;
 }

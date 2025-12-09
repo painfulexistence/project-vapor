@@ -28,6 +28,7 @@ public:
 
     // Lifecycle
     void init();
+    void initTextures(Uint32 screenWidth, Uint32 screenHeight);
     void deinit();
 
     // Per-frame update

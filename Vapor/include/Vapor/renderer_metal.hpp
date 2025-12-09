@@ -245,6 +245,7 @@ public:
     NS::SharedPtr<MTL::RenderPipelineState>
         createPipeline(const std::string& filename, bool isHDR, bool isColorOnly, Uint32 sampleCount);
     NS::SharedPtr<MTL::ComputePipelineState> createComputePipeline(const std::string& filename);
+    NS::SharedPtr<MTL::ComputePipelineState> createComputePipeline(const std::string& filename, const std::string& functionName);
 
     TextureHandle createTexture(const std::shared_ptr<Image>& img) override;
 

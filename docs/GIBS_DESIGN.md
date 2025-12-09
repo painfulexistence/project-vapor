@@ -207,5 +207,74 @@ PrePass → TLASBuild → NormalResolve → TileCulling → RaytraceShadow → R
 
 ---
 
-*文件版本：1.0*
-*最後更新：2024-01*
+## 參考文獻
+
+### 核心論文
+
+1. **Lumen (Epic Games, 2021)**
+   - Unreal Engine 5 的全局光照系統
+   - 結合 Software Ray Tracing + Surface Cache + Screen Probes
+   - 官方技術報告：[Lumen Global Illumination](https://docs.unrealengine.com/5.0/en-US/lumen-global-illumination-and-reflections-in-unreal-engine/)
+
+2. **RTXGI (NVIDIA, 2019-2022)**
+   - Dynamic Diffuse Global Illumination with Ray-Traced Irradiance Fields
+   - McGuire et al., "Dynamic Diffuse Global Illumination with Ray-Traced Irradiance Fields"
+   - [RTXGI SDK](https://developer.nvidia.com/rtxgi)
+
+3. **Surfels: Surface Elements as Rendering Primitives (Pfister et al., 2000)**
+   - Surfels 概念的原始論文
+   - ACM SIGGRAPH 2000 Conference Proceedings
+   - DOI: 10.1145/344779.344936
+
+4. **Real-time Global Illumination by Precomputed Local Reconstruction from Sparse Radiance Probes (Silvennoinen & Lehtinen, 2017)**
+   - SIGGRAPH Asia 2017
+   - 稀疏探針的 GI 重建方法
+
+### 空間資料結構
+
+5. **Optimized Spatial Hashing for Collision Detection of Deformable Objects (Teschner et al., 2003)**
+   - 空間哈希在 GPU 上的優化方法
+   - VMV 2003
+
+6. **GPU Gems 3: Chapter 32 - Fast N-Body Simulation with CUDA**
+   - 空間哈希在 GPU 上的實作參考
+   - NVIDIA, 2007
+
+### 時序穩定
+
+7. **Temporally Reliable Motion Vectors for Real-time Ray Tracing (Schied et al., 2019)**
+   - NVIDIA Research
+   - 用於降噪的時序穩定技術
+
+8. **Spatiotemporal Variance-Guided Filtering (SVGF) (Schied et al., 2017)**
+   - HPG 2017
+   - 時序累積和變異數引導濾波
+
+### 實作參考
+
+9. **Ray Tracing Gems II (2021)**
+   - Apress, Chapter 25-30
+   - 實時光線追蹤最佳實踐
+
+10. **Metal Best Practices Guide**
+    - Apple Developer Documentation
+    - GPU compute shader 優化指南
+
+11. **A Survey on Bounding Volume Hierarchies for Ray Tracing (Meister et al., 2021)**
+    - Eurographics 2021
+    - BVH 和空間資料結構比較
+
+### 相關開源專案
+
+12. **DDGI (Casual Effects, 2019)**
+    - McGuire et al. 的 DDGI 參考實作
+    - https://morgan3d.github.io/articles/2019-04-01-ddgi/
+
+13. **AMD Capsaicin Framework**
+    - AMD 的 GI 研究框架
+    - https://github.com/GPUOpen-LibrariesAndSDKs/Capsaicin
+
+---
+
+*文件版本：1.1*
+*最後更新：2024-12*
