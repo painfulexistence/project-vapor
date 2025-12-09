@@ -164,6 +164,138 @@ enum class GIBSQuality {
 3. **動態光源**：光源移動時需要較長時間收斂
 4. **遠距離**：超出空間哈希範圍的區域無 GI
 
+---
+
+## Albedo 來源問題
+
+### 現況
+
+目前 surfel 生成時使用 `colorRT` 作為 albedo 的近似值：
+
+```cpp
+// gibs_passes.cpp - SurfelGenerationPass
+encoder->setTexture(r.colorRT.get(), 2); // Using color as albedo proxy
+```
+
+**問題**：
+- `colorRT` 是 MainPass 輸出，包含光照結果，不是純 albedo
+- GIBS passes 在 MainPass 之前執行，時序上有矛盾
+- 目前實際拿到的是上一幀的結果
+
+### 改善方案
+
+| 方案 | 存儲內容 | 頻寬 | 複雜度 | 適用場景 |
+|------|----------|------|--------|----------|
+| A | Albedo RT | +4 bytes/pixel | 低 | 純 Diffuse GI |
+| B | Material ID | +4 bytes/pixel | 中 | 需要材質屬性查詢 |
+| C | Visibility Buffer | +8 bytes/pixel | 高 | RTX Reflection, Deferred Texturing |
+
+---
+
+### 方案 A：Albedo RT
+
+在 PrePass 同時輸出 albedo（MRT）。
+
+**Shader 修改**：
+```metal
+struct FragmentOutput {
+    float4 normal [[color(0)]];
+    float4 albedo [[color(1)]];
+};
+
+fragment FragmentOutput fragmentMain(...) {
+    FragmentOutput out;
+    out.normal = float4(N, 1.0);
+    out.albedo = texAlbedo.sample(s, uv) * material.baseColorFactor;
+    return out;
+}
+```
+
+**優點**：最簡單，直接拿到帶貼圖的 albedo
+**缺點**：只解決 albedo，未來擴展性有限
+
+---
+
+### 方案 B：Material ID RT
+
+在 PrePass 輸出 material ID，surfel 生成時查表。
+
+**Shader 修改**：
+```metal
+struct FragmentOutput {
+    float4 normal [[color(0)]];
+    uint materialID [[color(1)]];
+};
+```
+
+**Surfel 生成時**：
+```metal
+uint matID = materialIDRT.read(pixel).r;
+MaterialData mat = materials[matID];
+float3 albedo = mat.baseColorFactor.rgb; // 注意：沒有貼圖！
+```
+
+**優點**：可同時拿到 roughness, metallic 等
+**缺點**：無法取得貼圖 albedo（需要 UV）
+
+---
+
+### 方案 C：Visibility Buffer
+
+存儲 instance ID + primitive ID，完整重建材質屬性。
+
+**PrePass 輸出**：
+```metal
+struct VisibilityOutput {
+    float4 normal [[color(0)]];
+    uint2 visibility [[color(1)]]; // (instanceID, primitiveID)
+};
+```
+
+**Surfel 生成時**：
+```metal
+uint2 vis = visibilityRT.read(pixel).rg;
+uint instID = vis.x;
+uint primID = vis.y;
+
+// 查表取得材質
+uint matID = instances[instID].materialID;
+MaterialData mat = materials[matID];
+
+// 重建 UV（需要頂點資料和重心座標）
+float2 uv = reconstructUV(pixel, instID, primID, depth);
+
+// 採樣貼圖
+float3 albedo = albedoTextures[matID].sample(s, uv) * mat.baseColorFactor.rgb;
+```
+
+**優點**：
+- 完整的材質資訊（包含貼圖）
+- 為 RTX Reflection deferred shading 打基礎
+- 為 Visibility Buffer 渲染架構打基礎
+
+**缺點**：
+- 需要實作 UV 重建（barycentric coordinates）
+- 更多 buffer 綁定和查表
+- 實作複雜度較高
+
+---
+
+### 建議路線
+
+```
+Phase 1: 方案 A（Albedo RT）
+         ↓ 快速解決 GIBS albedo 問題
+
+Phase 2: 方案 C（Visibility Buffer）
+         ↓ 支援 RTX Reflection, Specular GI
+
+Phase 3: 完整 Visibility Buffer 渲染
+         ↓ 替換傳統 G-Buffer
+```
+
+---
+
 ## 實作摘要
 
 ### 新增檔案
