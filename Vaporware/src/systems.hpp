@@ -447,3 +447,161 @@ void updateLetterboxSystem(entt::registry& reg, Vapor::RmlUiManager* rmluiManage
         }
     }
 }
+
+void updateSubtitleSystem(entt::registry& reg, Vapor::RmlUiManager* rmluiManager, float deltaTime) {
+    if (!rmluiManager) return;
+
+    auto view = reg.view<SubtitleComponent>();
+    for (auto entity : view) {
+        auto& sub = view.get<SubtitleComponent>(entity);
+
+        // 1. Load document if not loaded
+        if (!sub.document && !sub.documentPath.empty()) {
+            sub.document = rmluiManager->LoadDocument(sub.documentPath);
+            if (sub.document) {
+                fmt::print("Loaded subtitle document: {}\n", sub.documentPath);
+                sub.document->Show();
+            } else {
+                fmt::print(stderr, "Failed to load subtitle document: {}\n", sub.documentPath);
+                continue;
+            }
+        }
+
+        if (!sub.document) continue;
+
+        auto container = sub.document->GetElementById("subtitle-container");
+        auto speakerEl = sub.document->GetElementById("subtitle-speaker");
+        auto textEl = sub.document->GetElementById("subtitle-text");
+        if (!container || !speakerEl || !textEl) continue;
+
+        // 2. State Machine
+        switch (sub.state) {
+        case SubtitleState::Hidden:
+            // Check for advance request or auto-advance to next in queue
+            if (sub.advanceRequested || (sub.autoAdvance && sub.currentIndex < (int)sub.queue.size() - 1)) {
+                sub.advanceRequested = false;
+                sub.currentIndex++;
+
+                if (sub.currentIndex < (int)sub.queue.size()) {
+                    auto& entry = sub.queue[sub.currentIndex];
+
+                    // Set speaker (hide if empty)
+                    if (entry.speaker.empty()) {
+                        speakerEl->SetClass("hidden", true);
+                    } else {
+                        speakerEl->SetClass("hidden", false);
+                        speakerEl->SetInnerRML(entry.speaker.c_str());
+                    }
+
+                    // Set text
+                    textEl->SetInnerRML(entry.text.c_str());
+
+                    // Start fade in
+                    sub.state = SubtitleState::FadingIn;
+                    sub.timer = 0.0f;
+                    container->SetClass("visible", true);
+                }
+            }
+            break;
+
+        case SubtitleState::FadingIn:
+            sub.timer += deltaTime;
+            if (sub.timer >= sub.fadeDuration) {
+                sub.state = SubtitleState::Visible;
+                sub.displayTimer = 0.0f;
+            }
+            break;
+
+        case SubtitleState::Visible:
+            sub.displayTimer += deltaTime;
+            // Check for manual advance or duration expired
+            if (sub.advanceRequested ||
+                (sub.autoAdvance && sub.currentIndex < (int)sub.queue.size() &&
+                 sub.displayTimer >= sub.queue[sub.currentIndex].duration)) {
+                sub.advanceRequested = false;
+                sub.state = SubtitleState::FadingOut;
+                sub.timer = 0.0f;
+                container->SetClass("visible", false);
+            }
+            break;
+
+        case SubtitleState::FadingOut:
+            sub.timer += deltaTime;
+            if (sub.timer >= sub.fadeDuration) {
+                sub.state = SubtitleState::Hidden;
+                // Will auto-advance to next if autoAdvance is true
+            }
+            break;
+        }
+    }
+}
+
+void updateChapterTitleSystem(entt::registry& reg, Vapor::RmlUiManager* rmluiManager, float deltaTime) {
+    if (!rmluiManager) return;
+
+    auto view = reg.view<ChapterTitleComponent>();
+    for (auto entity : view) {
+        auto& ch = view.get<ChapterTitleComponent>(entity);
+
+        // 1. Load document if not loaded
+        if (!ch.document && !ch.documentPath.empty()) {
+            ch.document = rmluiManager->LoadDocument(ch.documentPath);
+            if (ch.document) {
+                fmt::print("Loaded chapter title document: {}\n", ch.documentPath);
+                ch.document->Show();
+            } else {
+                fmt::print(stderr, "Failed to load chapter title document: {}\n", ch.documentPath);
+                continue;
+            }
+        }
+
+        if (!ch.document) continue;
+
+        auto container = ch.document->GetElementById("chapter-container");
+        auto numberEl = ch.document->GetElementById("chapter-number");
+        auto titleEl = ch.document->GetElementById("chapter-title");
+        if (!container || !numberEl || !titleEl) continue;
+
+        // 2. State Machine
+        switch (ch.state) {
+        case ChapterTitleState::Hidden:
+            if (ch.showRequested) {
+                ch.showRequested = false;
+
+                // Set content
+                numberEl->SetInnerRML(ch.chapterNumber.c_str());
+                titleEl->SetInnerRML(ch.chapterTitle.c_str());
+
+                // Start fade in
+                ch.state = ChapterTitleState::FadingIn;
+                ch.timer = 0.0f;
+                container->SetClass("visible", true);
+            }
+            break;
+
+        case ChapterTitleState::FadingIn:
+            ch.timer += deltaTime;
+            if (ch.timer >= ch.fadeDuration) {
+                ch.state = ChapterTitleState::Visible;
+                ch.timer = 0.0f;
+            }
+            break;
+
+        case ChapterTitleState::Visible:
+            ch.timer += deltaTime;
+            if (ch.timer >= ch.displayDuration) {
+                ch.state = ChapterTitleState::FadingOut;
+                ch.timer = 0.0f;
+                container->SetClass("visible", false);
+            }
+            break;
+
+        case ChapterTitleState::FadingOut:
+            ch.timer += deltaTime;
+            if (ch.timer >= ch.fadeDuration) {
+                ch.state = ChapterTitleState::Hidden;
+            }
+            break;
+        }
+    }
+}

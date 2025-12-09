@@ -1,0 +1,66 @@
+/* Cinematic Subtitle Styles */
+
+body {
+    width: 100%;
+    height: 100%;
+    font-family: LatoLatin;
+}
+
+#subtitle-container {
+    position: absolute;
+    bottom: 8%;
+    left: 50%;
+    width: 80%;
+    margin-left: -40%;
+    text-align: center;
+
+    /* Fade animation */
+    opacity: 0;
+    transition: opacity 0.25s ease-in-out;
+}
+
+#subtitle-container.visible {
+    opacity: 1;
+}
+
+#subtitle-speaker {
+    font-size: 16dp;
+    font-weight: bold;
+    color: #ffcc00;
+    text-transform: uppercase;
+    letter-spacing: 2dp;
+    margin-bottom: 8dp;
+
+    /* Text shadow for readability */
+    text-shadow: 1dp 1dp 2dp #000000,
+                 -1dp -1dp 2dp #000000,
+                 1dp -1dp 2dp #000000,
+                 -1dp 1dp 2dp #000000;
+}
+
+#subtitle-speaker.hidden {
+    display: none;
+}
+
+#subtitle-text {
+    font-size: 22dp;
+    font-weight: normal;
+    color: #ffffff;
+    line-height: 1.5;
+
+    /* Strong outline + shadow for any background */
+    text-shadow: 2dp 2dp 3dp #000000,
+                 -2dp -2dp 3dp #000000,
+                 2dp -2dp 3dp #000000,
+                 -2dp 2dp 3dp #000000,
+                 0dp 2dp 3dp #000000,
+                 0dp -2dp 3dp #000000,
+                 2dp 0dp 3dp #000000,
+                 -2dp 0dp 3dp #000000;
+}
+
+/* Optional: italic for internal thoughts */
+#subtitle-text.thought {
+    font-style: italic;
+    color: #cccccc;
+}

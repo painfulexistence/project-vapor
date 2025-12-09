@@ -165,4 +165,47 @@ struct LetterboxComponent {
     float targetAspect = 2.35f;
 };
 
+// Subtitle System (Cinematic dialogue)
+enum class SubtitleState { Hidden, FadingIn, Visible, FadingOut };
+
+struct SubtitleEntry {
+    std::string speaker;// Empty for no speaker name
+    std::string text;
+    float duration = 3.0f;// How long to display
+};
+
+struct SubtitleComponent {
+    std::string documentPath;
+    Rml::ElementDocument* document = nullptr;
+
+    std::vector<SubtitleEntry> queue;
+    int currentIndex = -1;
+    bool advanceRequested = false;
+    bool autoAdvance = true;// Auto-advance after duration
+
+    // Animation state
+    SubtitleState state = SubtitleState::Hidden;
+    float timer = 0.0f;
+    float fadeDuration = 0.25f;
+    float displayTimer = 0.0f;
+};
+
+// Chapter Title Card
+enum class ChapterTitleState { Hidden, FadingIn, Visible, FadingOut };
+
+struct ChapterTitleComponent {
+    std::string documentPath;
+    Rml::ElementDocument* document = nullptr;
+
+    std::string chapterNumber;// "Chapter 1" or "I"
+    std::string chapterTitle; // "The Beginning"
+    bool showRequested = false;
+
+    // Animation state
+    ChapterTitleState state = ChapterTitleState::Hidden;
+    float timer = 0.0f;
+    float fadeDuration = 0.8f;
+    float displayDuration = 2.5f;
+};
+
 struct DeadTag {};

@@ -334,6 +334,30 @@ int main(int argc, char* args[]) {
         lb.animDuration = 0.8f;
     }
 
+    auto subtitle = registry.create();
+    {
+        auto& sub = registry.emplace<SubtitleComponent>(subtitle);
+        sub.documentPath = "assets/ui/subtitle.rml";
+        sub.autoAdvance = true;
+        sub.queue = {
+            { "NARRATOR", "In a world where code meets creativity...", 3.0f },
+            { "NARRATOR", "One engine dared to dream differently.", 2.5f },
+            { "", "Press C to show chapter title.", 2.0f },
+            { "DEVELOPER", "Welcome to Project Vapor.", 2.5f },
+            { "", "(End of subtitle demo)", 2.0f }
+        };
+    }
+
+    auto chapterTitle = registry.create();
+    {
+        auto& ch = registry.emplace<ChapterTitleComponent>(chapterTitle);
+        ch.documentPath = "assets/ui/chapter_title.rml";
+        ch.chapterNumber = "Chapter I";
+        ch.chapterTitle = "The Beginning";
+        ch.fadeDuration = 0.8f;
+        ch.displayDuration = 2.5f;
+    }
+
     auto global = registry.create();
 
     scene->update(0.0f);
@@ -410,6 +434,38 @@ int main(int argc, char* args[]) {
                         fmt::print("Letterbox toggled: {}\n", lb.isOpen ? "Opening" : "Closing");
                     }
                 }
+                if (e.key.scancode == SDL_SCANCODE_T) {
+                    // Start/advance subtitles
+                    auto view = registry.view<SubtitleComponent>();
+                    for (auto entity : view) {
+                        auto& sub = view.get<SubtitleComponent>(entity);
+                        if (sub.state == SubtitleState::Hidden && sub.currentIndex < 0) {
+                            // Start from beginning
+                            sub.advanceRequested = true;
+                            fmt::print("Subtitles started\n");
+                        } else if (sub.state == SubtitleState::Visible) {
+                            // Skip current subtitle
+                            sub.advanceRequested = true;
+                        } else if (sub.currentIndex >= (int)sub.queue.size() - 1 &&
+                                   sub.state == SubtitleState::Hidden) {
+                            // Restart from beginning
+                            sub.currentIndex = -1;
+                            sub.advanceRequested = true;
+                            fmt::print("Subtitles restarted\n");
+                        }
+                    }
+                }
+                if (e.key.scancode == SDL_SCANCODE_C) {
+                    // Show chapter title
+                    auto view = registry.view<ChapterTitleComponent>();
+                    for (auto entity : view) {
+                        auto& ch = view.get<ChapterTitleComponent>(entity);
+                        if (ch.state == ChapterTitleState::Hidden) {
+                            ch.showRequested = true;
+                            fmt::print("Chapter title showing\n");
+                        }
+                    }
+                }
                 break;
             }
             case SDL_EVENT_WINDOW_RESIZED: {
@@ -464,6 +520,8 @@ int main(int argc, char* args[]) {
         updateHUDSystem(registry, engineCore->getRmlUiManager(), deltaTime);
         updateScrollTextSystem(registry, engineCore->getRmlUiManager(), deltaTime);
         updateLetterboxSystem(registry, engineCore->getRmlUiManager(), deltaTime);
+        updateSubtitleSystem(registry, engineCore->getRmlUiManager(), deltaTime);
+        updateChapterTitleSystem(registry, engineCore->getRmlUiManager(), deltaTime);
 
         // Engine updates
         engineCore->update(deltaTime);
