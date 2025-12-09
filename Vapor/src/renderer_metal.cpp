@@ -35,6 +35,10 @@
 #include <glm/gtc/matrix_transform.hpp>
 #include <glm/gtc/type_ptr.hpp>
 
+// GIBS (Global Illumination Based on Surfels)
+#include "Vapor/gibs_manager.hpp"
+#include "Vapor/gibs_passes.hpp"
+
 namespace Vapor {
 
     class RmlUiRenderer_Metal : public Rml::RenderInterface {
@@ -988,6 +992,13 @@ public:
             encoder->setFragmentTexture(r.irradianceMap.get(), 8);
             encoder->setFragmentTexture(r.prefilterMap.get(), 9);
             encoder->setFragmentTexture(r.brdfLUT.get(), 10);
+
+            // GIBS GI texture
+            if (r.gibsEnabled && r.gibsManager && r.gibsManager->getGIResultTexture()) {
+                encoder->setFragmentTexture(r.gibsManager->getGIResultTexture(), 11);
+            }
+            Uint32 gibsEnabledFlag = r.gibsEnabled ? 1 : 0;
+            encoder->setFragmentBytes(&gibsEnabledFlag, sizeof(Uint32), 7);
 
             for (const auto& mesh : meshes) {
                 if (!r.currentCamera->isVisible(mesh->getWorldBoundingSphere())) {
@@ -2451,6 +2462,17 @@ auto Renderer_Metal::init(SDL_Window* window) -> void {
     graph.addPass(std::make_unique<TileCullingPass>(this));
     graph.addPass(std::make_unique<RaytraceShadowPass>(this));
     graph.addPass(std::make_unique<RaytraceAOPass>(this));
+
+    // GIBS (Global Illumination Based on Surfels) passes
+    // These run after depth/normal are available but before main render
+    if (gibsEnabled && gibsManager) {
+        graph.addPass(std::make_unique<Vapor::SurfelGenerationPass>(this, gibsManager.get()));
+        graph.addPass(std::make_unique<Vapor::SurfelHashBuildPass>(this, gibsManager.get()));
+        graph.addPass(std::make_unique<Vapor::SurfelRaytracingPass>(this, gibsManager.get()));
+        graph.addPass(std::make_unique<Vapor::GIBSTemporalPass>(this, gibsManager.get()));
+        graph.addPass(std::make_unique<Vapor::GIBSSamplePass>(this, gibsManager.get()));
+    }
+
     graph.addPass(std::make_unique<MainRenderPass>(this));
     graph.addPass(std::make_unique<SkyAtmospherePass>(this));
     // graph.addPass(std::make_unique<WaterPass>(this));
@@ -2608,6 +2630,24 @@ auto Renderer_Metal::createResources() -> void {
     prefilterEnvMapPipeline = createPipeline("assets/shaders/3d_prefilter_envmap.metal", true, true, 1);
     brdfLUTPipeline = createPipeline("assets/shaders/3d_brdf_lut.metal", false, true, 1);
     lightScatteringPipeline = createPipeline("assets/shaders/3d_light_scattering.metal", true, true, 1);
+
+    // GIBS (Global Illumination Based on Surfels) pipelines
+    surfelGenerationPipeline = createComputePipeline("assets/shaders/gibs_surfel_generation.metal");
+    surfelClearCellsPipeline = createComputePipeline("assets/shaders/gibs_spatial_hash.metal");
+    surfelCountPerCellPipeline = createComputePipeline("assets/shaders/gibs_spatial_hash.metal");
+    surfelPrefixSumPipeline = createComputePipeline("assets/shaders/gibs_spatial_hash.metal");
+    surfelScatterPipeline = createComputePipeline("assets/shaders/gibs_spatial_hash.metal");
+    surfelRaytracingPipeline = createComputePipeline("assets/shaders/gibs_raytracing.metal");
+    surfelRaytracingSimplePipeline = createComputePipeline("assets/shaders/gibs_raytracing.metal");
+    gibsTemporalPipeline = createComputePipeline("assets/shaders/gibs_temporal.metal");
+    gibsSamplePipeline = createComputePipeline("assets/shaders/gibs_sample.metal");
+    gibsUpsamplePipeline = createComputePipeline("assets/shaders/gibs_sample.metal");
+    gibsCompositePipeline = createComputePipeline("assets/shaders/gibs_sample.metal");
+
+    // Initialize GIBS Manager
+    gibsManager = std::make_unique<Vapor::GIBSManager>(this);
+    gibsManager->setQuality(gibsQuality);
+    gibsManager->init();
 
     // Create debug draw pipeline
     {

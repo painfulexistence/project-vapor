@@ -53,6 +53,16 @@ class DebugDrawPass;
 class CanvasPass;
 class WorldCanvasPass;
 
+// GIBS (Global Illumination Based on Surfels) forward declarations
+namespace Vapor {
+    class GIBSManager;
+    class SurfelGenerationPass;
+    class SurfelHashBuildPass;
+    class SurfelRaytracingPass;
+    class GIBSTemporalPass;
+    class GIBSSamplePass;
+}
+
 class RenderPass {
 public:
     explicit RenderPass(Renderer_Metal* renderer) : renderer(renderer) {
@@ -122,6 +132,13 @@ class Renderer_Metal final : public Renderer {// Must be public or factory funct
     friend class DebugDrawPass;
     friend class CanvasPass;
     friend class WorldCanvasPass;
+
+    // GIBS (Global Illumination Based on Surfels) passes
+    friend class Vapor::SurfelGenerationPass;
+    friend class Vapor::SurfelHashBuildPass;
+    friend class Vapor::SurfelRaytracingPass;
+    friend class Vapor::GIBSTemporalPass;
+    friend class Vapor::GIBSSamplePass;
 
 public:
     Renderer_Metal();
@@ -519,6 +536,24 @@ protected:
         // Tone Mapping
         float exposure = 1.0f;// Exposure multiplier
     } postProcessParams;
+
+    // ===== GIBS (Global Illumination Based on Surfels) =====
+    std::unique_ptr<Vapor::GIBSManager> gibsManager;
+    bool gibsEnabled = true;
+    GIBSQuality gibsQuality = GIBSQuality::Medium;
+
+    // GIBS Compute Pipelines
+    NS::SharedPtr<MTL::ComputePipelineState> surfelGenerationPipeline;
+    NS::SharedPtr<MTL::ComputePipelineState> surfelClearCellsPipeline;
+    NS::SharedPtr<MTL::ComputePipelineState> surfelCountPerCellPipeline;
+    NS::SharedPtr<MTL::ComputePipelineState> surfelPrefixSumPipeline;
+    NS::SharedPtr<MTL::ComputePipelineState> surfelScatterPipeline;
+    NS::SharedPtr<MTL::ComputePipelineState> surfelRaytracingPipeline;
+    NS::SharedPtr<MTL::ComputePipelineState> surfelRaytracingSimplePipeline;
+    NS::SharedPtr<MTL::ComputePipelineState> gibsTemporalPipeline;
+    NS::SharedPtr<MTL::ComputePipelineState> gibsSamplePipeline;
+    NS::SharedPtr<MTL::ComputePipelineState> gibsUpsamplePipeline;
+    NS::SharedPtr<MTL::ComputePipelineState> gibsCompositePipeline;
 
     // Acceleration structures for ray tracing
     std::vector<NS::SharedPtr<MTL::AccelerationStructure>> BLASs;
