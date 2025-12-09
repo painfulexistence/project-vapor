@@ -232,13 +232,15 @@ fragment float4 fragmentMain(
     texturecube<float, access::sample> irradianceMap [[texture(8)]],
     texturecube<float, access::sample> prefilterMap [[texture(9)]],
     texture2d<float, access::sample> brdfLUT [[texture(10)]],
+    texture2d<float, access::sample> gibsGI [[texture(11)]], // GIBS indirect lighting
     const device DirLight* directionalLights [[buffer(0)]],
     const device PointLight* pointLights [[buffer(1)]],
     const device Cluster* clusters [[buffer(2)]],
     constant CameraData& camera [[buffer(3)]],
     constant float2& screenSize [[buffer(4)]],
     constant packed_uint3& gridSize [[buffer(5)]],
-    constant float& time [[buffer(6)]]
+    constant float& time [[buffer(6)]],
+    constant uint& gibsEnabled [[buffer(7)]] // GIBS enable flag
 ) {
     constexpr sampler s(address::repeat, filter::linear, mip_filter::linear);
 
@@ -343,8 +345,17 @@ fragment float4 fragmentMain(
         result += CalculatePointLight(pointLights[lightIndex], norm, T, B, viewDir, surf, in.worldPosition.xyz);
     }
 
-    result += float3(0.2) * surf.ao * surf.color;
-    // TODO: IBL
+    // GIBS Global Illumination or fallback ambient
+    if (gibsEnabled > 0) {
+        // Sample GIBS indirect lighting at screen position
+        float3 giContribution = gibsGI.sample(s, screenUV).rgb;
+        // Apply ambient occlusion to indirect lighting
+        result += giContribution * surf.ao;
+    } else {
+        // Fallback to simple ambient term
+        result += float3(0.2) * surf.ao * surf.color;
+    }
+    // TODO: IBL for specular GI
     // result += CalculateIBL(norm, viewDir, surf, irradianceMap, prefilterMap, brdfLUT);
 
     result += surf.emission;
