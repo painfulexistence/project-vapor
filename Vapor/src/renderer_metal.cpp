@@ -277,6 +277,35 @@ namespace Vapor {
             m_textures.erase(texture_handle);
         }
 
+        // Register an external Metal texture for use in RmlUI
+        // This allows render textures to be displayed in RmlUI documents
+        Rml::TextureHandle RegisterExternalTexture(MTL::Texture* texture, int width, int height) {
+            if (!texture) {
+                return 0;
+            }
+
+            TextureData texData;
+            // We don't own this texture, so we use a shared pointer that doesn't release
+            texData.texture = NS::RetainPtr(texture);
+            texData.width = width;
+            texData.height = height;
+
+            Rml::TextureHandle textureHandle = m_nextTextureHandle++;
+            m_textures[textureHandle] = std::move(texData);
+
+            return textureHandle;
+        }
+
+        // Update an existing external texture (useful when render texture is re-rendered)
+        void UpdateExternalTexture(Rml::TextureHandle handle, MTL::Texture* texture, int width, int height) {
+            auto it = m_textures.find(handle);
+            if (it != m_textures.end()) {
+                it->second.texture = NS::RetainPtr(texture);
+                it->second.width = width;
+                it->second.height = height;
+            }
+        }
+
         void SetTransform(const Rml::Matrix4f* transform) override {
             if (transform) {
                 m_transform = *transform;
@@ -5148,6 +5177,242 @@ TextureHandle Renderer_Metal::createTexture(const std::shared_ptr<Image>& img) {
     } else {
         throw std::runtime_error(fmt::format("Failed to create texture at {}!\n", img->uri));
     }
+}
+
+// ===== Render-to-Texture Implementation =====
+
+RenderTextureHandle Renderer_Metal::createRenderTexture(const RenderTextureDesc& desc) {
+    RenderTextureData rtData;
+    rtData.width = desc.width;
+    rtData.height = desc.height;
+    rtData.hdr = desc.hdr;
+    rtData.sampleCount = desc.sampleCount;
+
+    // Create color texture
+    auto colorDesc = NS::TransferPtr(MTL::TextureDescriptor::alloc()->init());
+    colorDesc->setTextureType(MTL::TextureType2D);
+    colorDesc->setPixelFormat(desc.hdr ? MTL::PixelFormatRGBA16Float : MTL::PixelFormatRGBA8Unorm);
+    colorDesc->setWidth(desc.width);
+    colorDesc->setHeight(desc.height);
+    colorDesc->setMipmapLevelCount(1);
+    colorDesc->setSampleCount(desc.sampleCount);
+    colorDesc->setStorageMode(MTL::StorageModePrivate);
+    colorDesc->setUsage(MTL::TextureUsageRenderTarget | MTL::TextureUsageShaderRead);
+
+    rtData.colorTexture = NS::TransferPtr(device->newTexture(colorDesc.get()));
+    if (!rtData.colorTexture) {
+        return RenderTextureHandle{};
+    }
+
+    // Create depth texture if requested
+    if (desc.hasDepth) {
+        auto depthDesc = NS::TransferPtr(MTL::TextureDescriptor::alloc()->init());
+        depthDesc->setTextureType(MTL::TextureType2D);
+        depthDesc->setPixelFormat(MTL::PixelFormatDepth32Float);
+        depthDesc->setWidth(desc.width);
+        depthDesc->setHeight(desc.height);
+        depthDesc->setMipmapLevelCount(1);
+        depthDesc->setSampleCount(desc.sampleCount);
+        depthDesc->setStorageMode(MTL::StorageModePrivate);
+        depthDesc->setUsage(MTL::TextureUsageRenderTarget);
+
+        rtData.depthTexture = NS::TransferPtr(device->newTexture(depthDesc.get()));
+    }
+
+    // Store the color texture as a regular texture handle for sampling
+    textures[nextTextureID] = rtData.colorTexture;
+    rtData.textureHandle = TextureHandle{nextTextureID++};
+
+    // Store render texture data
+    Uint32 rtID = nextRenderTextureID++;
+    renderTextures[rtID] = std::move(rtData);
+
+    return RenderTextureHandle{rtID};
+}
+
+void Renderer_Metal::destroyRenderTexture(RenderTextureHandle handle) {
+    auto it = renderTextures.find(handle.rid);
+    if (it != renderTextures.end()) {
+        // Remove from regular textures as well
+        textures.erase(it->second.textureHandle.rid);
+        renderTextures.erase(it);
+    }
+}
+
+TextureHandle Renderer_Metal::getRenderTextureAsTexture(RenderTextureHandle handle) {
+    auto it = renderTextures.find(handle.rid);
+    if (it != renderTextures.end()) {
+        return it->second.textureHandle;
+    }
+    return TextureHandle{};
+}
+
+glm::uvec2 Renderer_Metal::getRenderTextureSize(RenderTextureHandle handle) {
+    auto it = renderTextures.find(handle.rid);
+    if (it != renderTextures.end()) {
+        return glm::uvec2(it->second.width, it->second.height);
+    }
+    return glm::uvec2(0);
+}
+
+void Renderer_Metal::renderToTexture(
+    RenderTextureHandle target,
+    std::shared_ptr<Scene> scene,
+    Camera& camera,
+    const glm::vec4& clearColor
+) {
+    auto it = renderTextures.find(target.rid);
+    if (it == renderTextures.end() || !scene) {
+        return;
+    }
+
+    const RenderTextureData& rtData = it->second;
+
+    // Create a command buffer for this render
+    auto cmdBuffer = NS::TransferPtr(queue->commandBuffer());
+
+    // Create render pass descriptor
+    auto passDesc = NS::TransferPtr(MTL::RenderPassDescriptor::alloc()->init());
+
+    // Color attachment
+    auto colorAttachment = passDesc->colorAttachments()->object(0);
+    colorAttachment->setTexture(rtData.colorTexture.get());
+    colorAttachment->setLoadAction(MTL::LoadActionClear);
+    colorAttachment->setStoreAction(MTL::StoreActionStore);
+    colorAttachment->setClearColor(MTL::ClearColor(clearColor.r, clearColor.g, clearColor.b, clearColor.a));
+
+    // Depth attachment
+    if (rtData.depthTexture) {
+        auto depthAttachment = passDesc->depthAttachment();
+        depthAttachment->setTexture(rtData.depthTexture.get());
+        depthAttachment->setLoadAction(MTL::LoadActionClear);
+        depthAttachment->setStoreAction(MTL::StoreActionDontCare);
+        depthAttachment->setClearDepth(1.0);
+    }
+
+    // Get render encoder
+    auto encoder = cmdBuffer->renderCommandEncoder(passDesc.get());
+
+    // Set viewport
+    MTL::Viewport viewport;
+    viewport.originX = 0.0;
+    viewport.originY = 0.0;
+    viewport.width = static_cast<double>(rtData.width);
+    viewport.height = static_cast<double>(rtData.height);
+    viewport.znear = 0.0;
+    viewport.zfar = 1.0;
+    encoder->setViewport(viewport);
+
+    // Update camera data for this render texture's aspect ratio
+    float aspect = static_cast<float>(rtData.width) / static_cast<float>(rtData.height);
+    camera.updateAspectRatio(aspect);
+
+    // Update camera data buffer
+    CameraData cameraData;
+    cameraData.proj = camera.getProjMatrix();
+    cameraData.view = camera.getViewMatrix();
+    cameraData.invProj = glm::inverse(cameraData.proj);
+    cameraData.invView = glm::inverse(cameraData.view);
+    cameraData.near = camera.near();
+    cameraData.far = camera.far();
+    cameraData.position = camera.getEye();
+    auto frustumPlanes = camera.getFrustumPlanes();
+    for (int i = 0; i < 6; i++) {
+        cameraData.frustumPlanes[i] = frustumPlanes[i];
+    }
+
+    // Create temporary camera buffer for this render
+    auto tempCameraBuffer = NS::TransferPtr(device->newBuffer(sizeof(CameraData), MTL::ResourceStorageModeShared));
+    memcpy(tempCameraBuffer->contents(), &cameraData, sizeof(CameraData));
+
+    // Set pipeline state
+    encoder->setRenderPipelineState(drawPipeline.get());
+    encoder->setDepthStencilState(depthStencilState.get());
+    encoder->setCullMode(MTL::CullModeBack);
+    encoder->setFrontFacingWinding(MTL::WindingCounterClockwise);
+
+    glm::vec2 screenSize = glm::vec2(rtData.width, rtData.height);
+    glm::uvec3 gridSize = glm::uvec3(clusterGridSizeX, clusterGridSizeY, clusterGridSizeZ);
+    float time = static_cast<float>(SDL_GetTicks()) / 1000.0f;
+
+    // Bind vertex buffers (matching MainRenderPass layout)
+    encoder->setVertexBuffer(tempCameraBuffer.get(), 0, 0);
+    encoder->setVertexBuffer(materialDataBuffer.get(), 0, 1);
+    encoder->setVertexBuffer(instanceDataBuffers[currentFrameInFlight].get(), 0, 2);
+    encoder->setVertexBuffer(getBuffer(scene->vertexBuffer).get(), 0, 3);
+
+    // Bind fragment buffers
+    encoder->setFragmentBuffer(directionalLightBuffer.get(), 0, 0);
+    encoder->setFragmentBuffer(pointLightBuffer.get(), 0, 1);
+    encoder->setFragmentBuffer(clusterBuffers[currentFrameInFlight].get(), 0, 2);
+    encoder->setFragmentBuffer(tempCameraBuffer.get(), 0, 3);
+    encoder->setFragmentBytes(&screenSize, sizeof(glm::vec2), 4);
+    encoder->setFragmentBytes(&gridSize, sizeof(glm::uvec3), 5);
+    encoder->setFragmentBytes(&time, sizeof(float), 6);
+
+    // Render using instance batches (same as MainRenderPass)
+    for (const auto& [material, meshes] : instanceBatches) {
+        // Bind material textures
+        encoder->setFragmentTexture(
+            getTexture(material->albedoMap ? material->albedoMap->texture : defaultAlbedoTexture).get(), 0
+        );
+        encoder->setFragmentTexture(
+            getTexture(material->normalMap ? material->normalMap->texture : defaultNormalTexture).get(), 1
+        );
+        encoder->setFragmentTexture(
+            getTexture(material->metallicMap ? material->metallicMap->texture : defaultORMTexture).get(), 2
+        );
+        encoder->setFragmentTexture(
+            getTexture(material->roughnessMap ? material->roughnessMap->texture : defaultORMTexture).get(), 3
+        );
+        encoder->setFragmentTexture(
+            getTexture(material->occlusionMap ? material->occlusionMap->texture : defaultORMTexture).get(), 4
+        );
+        encoder->setFragmentTexture(
+            getTexture(material->emissiveMap ? material->emissiveMap->texture : defaultEmissiveTexture).get(), 5
+        );
+        encoder->setFragmentTexture(shadowRT.get(), 7);
+
+        // IBL textures
+        encoder->setFragmentTexture(irradianceMap.get(), 8);
+        encoder->setFragmentTexture(prefilterMap.get(), 9);
+        encoder->setFragmentTexture(brdfLUT.get(), 10);
+
+        for (const auto& mesh : meshes) {
+            // Frustum culling with render texture camera
+            if (!camera.isVisible(mesh->getWorldBoundingSphere())) {
+                continue;
+            }
+
+            encoder->setVertexBytes(&mesh->instanceID, sizeof(Uint32), 4);
+            encoder->drawIndexedPrimitives(
+                MTL::PrimitiveTypeTriangle,
+                mesh->indexCount,
+                MTL::IndexTypeUInt32,
+                getBuffer(scene->indexBuffer).get(),
+                mesh->indexOffset * sizeof(Uint32)
+            );
+        }
+    }
+
+    encoder->endEncoding();
+    cmdBuffer->commit();
+    cmdBuffer->waitUntilCompleted();
+}
+
+Uint64 Renderer_Metal::registerRenderTextureForUI(RenderTextureHandle handle) {
+    auto it = renderTextures.find(handle.rid);
+    if (it == renderTextures.end()) {
+        return 0;
+    }
+
+    // Get the RmlUI renderer
+    if (!m_uiRenderer) {
+        return 0;
+    }
+
+    auto* uiRenderer = static_cast<Vapor::RmlUiRenderer_Metal*>(m_uiRenderer);
+    return uiRenderer->RegisterExternalTexture(it->second.colorTexture.get(), it->second.width, it->second.height);
 }
 
 // ===== Font Rendering Implementation =====

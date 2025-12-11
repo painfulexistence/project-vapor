@@ -87,6 +87,27 @@ public:
     // Texture creation for sprites
     virtual TextureHandle createTexture(const std::shared_ptr<Image>& img) { return {}; }
 
+    // ===== Render-to-Texture API =====
+    // Create a render texture that can be rendered to
+    virtual RenderTextureHandle createRenderTexture(const RenderTextureDesc& desc) { return {}; }
+    // Destroy a render texture
+    virtual void destroyRenderTexture(RenderTextureHandle handle) {}
+    // Get the texture handle for sampling (use as material texture or sprite)
+    virtual TextureHandle getRenderTextureAsTexture(RenderTextureHandle handle) { return {}; }
+    // Begin rendering to a render texture (with a callback that receives the scene and camera to render)
+    // The callback should call draw commands that will be rendered to the texture
+    virtual void renderToTexture(
+        RenderTextureHandle target,
+        std::shared_ptr<Scene> scene,
+        Camera& camera,
+        const glm::vec4& clearColor = glm::vec4(0.0f, 0.0f, 0.0f, 1.0f)
+    ) {}
+    // Get render texture dimensions
+    virtual glm::uvec2 getRenderTextureSize(RenderTextureHandle handle) { return glm::uvec2(0); }
+    // Register a render texture with RmlUI (returns RmlUI texture handle)
+    // This allows using the render texture as an image source in RmlUI documents
+    virtual Uint64 registerRenderTextureForUI(RenderTextureHandle handle) { return 0; }
+
     // ===== Font Rendering API =====
     // Load a font from file path with specified base size
     virtual FontHandle loadFont(const std::string& path, float baseSize) { return {}; }
