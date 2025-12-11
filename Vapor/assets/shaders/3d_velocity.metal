@@ -9,47 +9,7 @@
 // - Temporal Volumetrics
 // ============================================================================
 
-#include <metal_stdlib>
-using namespace metal;
-
-// ----------------------------------------------------------------------------
-// Data Structures
-// ----------------------------------------------------------------------------
-
-struct VertexData {
-    packed_float3 position;
-    packed_float2 uv;
-    packed_float3 normal;
-    packed_float4 tangent;
-};
-
-struct CameraData {
-    float4x4 proj;
-    float4x4 view;
-    float4x4 invProj;
-    float4x4 invView;
-    float4x4 prevViewProj;  // Previous frame's view-projection matrix
-    float near;
-    float far;
-    float3 position;
-    float2 jitter;          // TAA jitter offset
-    float2 prevJitter;      // Previous frame's jitter
-};
-
-struct InstanceData {
-    float4x4 model;
-    float4x4 prevModel;     // Previous frame's model matrix
-    float4 color;
-    uint vertexOffset;
-    uint indexOffset;
-    uint vertexCount;
-    uint indexCount;
-    uint materialID;
-    uint primitiveMode;
-    float3 AABBMin;
-    float3 AABBMax;
-    float4 boundingSphere;
-};
+#include "3d_common.metal"
 
 struct VelocityVertexOut {
     float4 position [[position]];

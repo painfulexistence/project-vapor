@@ -170,15 +170,19 @@ struct alignas(16) CameraData {
     glm::mat4 view;
     glm::mat4 invProj;
     glm::mat4 invView;
+    glm::mat4 prevViewProj;  // Previous frame's view-projection for velocity/TAA
     float near;
     float far;
     glm::vec3 position;
     float _pad1;
+    glm::vec2 jitter;        // TAA jitter offset (NDC)
+    glm::vec2 prevJitter;    // Previous frame's jitter
     glm::vec4 frustumPlanes[6];
 };
 
 struct alignas(16) InstanceData {
     glm::mat4 model;
+    glm::mat4 prevModel;     // Previous frame's model matrix for velocity
     glm::vec4 color;
     Uint32 vertexOffset;
     Uint32 indexOffset;

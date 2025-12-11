@@ -493,6 +493,73 @@ public:
     }
 };
 
+// ============================================================================
+// Velocity Pass: Outputs per-pixel motion vectors for temporal effects
+// ============================================================================
+class VelocityPass : public RenderPass {
+public:
+    explicit VelocityPass(Renderer_Metal* renderer) : RenderPass(renderer) {
+    }
+
+    const char* getName() const override {
+        return "VelocityPass";
+    }
+
+    void execute() override {
+        auto& r = *renderer;
+
+        if (!r.velocityPipeline || !r.velocityRT) return;
+
+        // Create render pass descriptor
+        auto passDesc = NS::TransferPtr(MTL::RenderPassDescriptor::renderPassDescriptor());
+
+        // Velocity output (RG16Float)
+        auto velocityAttach = passDesc->colorAttachments()->object(0);
+        velocityAttach->setClearColor(MTL::ClearColor(0.0, 0.0, 0.0, 0.0));  // Zero velocity = no motion
+        velocityAttach->setLoadAction(MTL::LoadActionClear);
+        velocityAttach->setStoreAction(MTL::StoreActionStore);
+        velocityAttach->setTexture(r.velocityRT.get());
+
+        // Use existing depth buffer (read-only, no write)
+        auto depthAttach = passDesc->depthAttachment();
+        depthAttach->setLoadAction(MTL::LoadActionLoad);  // Keep existing depth from PrePass
+        depthAttach->setStoreAction(MTL::StoreActionDontCare);
+        depthAttach->setTexture(r.depthStencilRT.get());
+
+        // Execute the pass
+        auto encoder = r.currentCommandBuffer->renderCommandEncoder(passDesc.get());
+        encoder->setRenderPipelineState(r.velocityPipeline.get());
+        encoder->setCullMode(MTL::CullModeBack);
+        encoder->setFrontFacingWinding(MTL::Winding::WindingCounterClockwise);
+        encoder->setDepthStencilState(r.depthStencilState.get());
+
+        encoder->setVertexBuffer(r.cameraDataBuffers[r.currentFrameInFlight].get(), 0, 0);
+        encoder->setVertexBuffer(r.instanceDataBuffers[r.currentFrameInFlight].get(), 0, 1);
+        encoder->setVertexBuffer(r.getBuffer(r.currentScene->vertexBuffer).get(), 0, 2);
+
+        encoder->setFragmentBuffer(r.cameraDataBuffers[r.currentFrameInFlight].get(), 0, 0);
+
+        for (const auto& [material, meshes] : r.instanceBatches) {
+            for (const auto& mesh : meshes) {
+                if (!r.currentCamera->isVisible(mesh->getWorldBoundingSphere())) {
+                    continue;
+                }
+
+                encoder->setVertexBytes(&mesh->instanceID, sizeof(Uint32), 3);
+                encoder->drawIndexedPrimitives(
+                    MTL::PrimitiveType::PrimitiveTypeTriangle,
+                    mesh->indexCount,
+                    MTL::IndexTypeUInt32,
+                    r.getBuffer(r.currentScene->indexBuffer).get(),
+                    mesh->indexOffset * sizeof(Uint32)
+                );
+            }
+        }
+
+        encoder->endEncoding();
+    }
+};
+
 // TLAS build pass: Builds top-level acceleration structure for ray tracing
 class TLASBuildPass : public RenderPass {
 public:
@@ -1530,6 +1597,7 @@ public:
                 encoder->setFragmentTexture(r.cloudRT.get(), 0);// Current frame
                 encoder->setFragmentTexture(r.cloudHistoryRT.get(), 1);// History (will be overwritten)
                 encoder->setFragmentTexture(r.depthStencilRT.get(), 2);
+                encoder->setFragmentTexture(r.velocityRT.get(), 3);// Velocity buffer for reprojection
                 encoder->setFragmentBuffer(r.volumetricCloudDataBuffers[r.currentFrameInFlight].get(), 0, 0);
                 encoder->drawPrimitives(MTL::PrimitiveType::PrimitiveTypeTriangle, 0, 3, 1);
                 encoder->endEncoding();
@@ -2448,6 +2516,7 @@ auto Renderer_Metal::init(SDL_Window* window) -> void {
     graph.addPass(std::make_unique<TLASBuildPass>(this));
     graph.addPass(std::make_unique<PrePass>(this));
     graph.addPass(std::make_unique<NormalResolvePass>(this));
+    graph.addPass(std::make_unique<VelocityPass>(this));  // After PrePass (needs depth buffer)
     graph.addPass(std::make_unique<TileCullingPass>(this));
     graph.addPass(std::make_unique<RaytraceShadowPass>(this));
     graph.addPass(std::make_unique<RaytraceAOPass>(this));
@@ -2595,6 +2664,43 @@ auto Renderer_Metal::createResources() -> void {
     drawPipeline = createPipeline("assets/shaders/3d_pbr_normal_mapped.metal", true, false, MSAA_SAMPLE_COUNT);
     prePassPipeline = createPipeline("assets/shaders/3d_depth_only.metal", true, false, MSAA_SAMPLE_COUNT);
     postProcessPipeline = createPipeline("assets/shaders/3d_post_process.metal", false, true, 1);
+
+    // Create velocity pipeline (custom: RG16Float output, depth read-only)
+    {
+        auto shaderSrc = readFile("assets/shaders/3d_velocity.metal");
+        auto code = NS::String::string(shaderSrc.data(), NS::StringEncoding::UTF8StringEncoding);
+        NS::Error* error = nullptr;
+        MTL::Library* library = device->newLibrary(code, nullptr, &error);
+        if (!library) {
+            fmt::print(
+                "Warning: Could not compile velocity shader: {}\n",
+                error ? error->localizedDescription()->utf8String() : "unknown error"
+            );
+        } else {
+            auto vertexMain = library->newFunction(NS::String::string("velocityVertex", NS::StringEncoding::UTF8StringEncoding));
+            auto fragmentMain = library->newFunction(NS::String::string("velocityFragment", NS::StringEncoding::UTF8StringEncoding));
+
+            if (vertexMain && fragmentMain) {
+                auto pipelineDesc = MTL::RenderPipelineDescriptor::alloc()->init();
+                pipelineDesc->setVertexFunction(vertexMain);
+                pipelineDesc->setFragmentFunction(fragmentMain);
+                pipelineDesc->colorAttachments()->object(0)->setPixelFormat(MTL::PixelFormatRG16Float);
+                pipelineDesc->setDepthAttachmentPixelFormat(MTL::PixelFormatDepth32Float);
+
+                velocityPipeline = NS::TransferPtr(device->newRenderPipelineState(pipelineDesc, &error));
+                if (!velocityPipeline) {
+                    fmt::print(
+                        "Warning: Could not create velocity pipeline: {}\n",
+                        error ? error->localizedDescription()->utf8String() : "unknown error"
+                    );
+                }
+                pipelineDesc->release();
+                fragmentMain->release();
+            }
+            if (vertexMain) vertexMain->release();
+            library->release();
+        }
+    }
     buildClustersPipeline = createComputePipeline("assets/shaders/3d_cluster_build.metal");
     cullLightsPipeline = createComputePipeline("assets/shaders/3d_light_cull.metal");
     tileCullingPipeline = createComputePipeline("assets/shaders/3d_tile_light_cull.metal");
@@ -3119,6 +3225,16 @@ auto Renderer_Metal::createResources() -> void {
     aoTextureDesc->setUsage(MTL::TextureUsageShaderRead | MTL::TextureUsageShaderWrite);
     aoRT = NS::TransferPtr(device->newTexture(aoTextureDesc));
     aoTextureDesc->release();
+
+    // Create velocity render target (RG16Float for motion vectors in NDC space)
+    MTL::TextureDescriptor* velocityTextureDesc = MTL::TextureDescriptor::alloc()->init();
+    velocityTextureDesc->setTextureType(MTL::TextureType2D);
+    velocityTextureDesc->setPixelFormat(MTL::PixelFormatRG16Float);  // Only need RG for 2D velocity
+    velocityTextureDesc->setWidth(swapchain->drawableSize().width);
+    velocityTextureDesc->setHeight(swapchain->drawableSize().height);
+    velocityTextureDesc->setUsage(MTL::TextureUsageRenderTarget | MTL::TextureUsageShaderRead);
+    velocityRT = NS::TransferPtr(device->newTexture(velocityTextureDesc));
+    velocityTextureDesc->release();
 
     // Create light scattering render target (HDR format for god rays)
     MTL::TextureDescriptor* lightScatteringTextureDesc = MTL::TextureDescriptor::alloc()->init();
@@ -4257,6 +4373,7 @@ auto Renderer_Metal::draw(std::shared_ptr<Scene> scene, Camera& camera) -> void 
     glm::vec3 camPos = camera.getEye();
     glm::mat4 proj = camera.getProjMatrix();
     glm::mat4 view = camera.getViewMatrix();
+    glm::mat4 viewProj = proj * view;
     glm::mat4 invProj = glm::inverse(proj);
     glm::mat4 invView = glm::inverse(view);
     CameraData* cameraData = reinterpret_cast<CameraData*>(cameraDataBuffers[currentFrameInFlight]->contents());
@@ -4264,12 +4381,18 @@ auto Renderer_Metal::draw(std::shared_ptr<Scene> scene, Camera& camera) -> void 
     cameraData->view = view;
     cameraData->invProj = invProj;
     cameraData->invView = invView;
+    cameraData->prevViewProj = prevViewProj;  // Previous frame's view-projection
     cameraData->near = near;
     cameraData->far = far;
     cameraData->position = camPos;
+    cameraData->jitter = glm::vec2(0.0f);     // TAA jitter (0 for now, can be implemented later)
+    cameraData->prevJitter = glm::vec2(0.0f); // Previous jitter
     cameraDataBuffers[currentFrameInFlight]->didModifyRange(
         NS::Range::Make(0, cameraDataBuffers[currentFrameInFlight]->length())
     );
+
+    // Store current viewProj for next frame's velocity calculation
+    prevViewProj = viewProj;
 
     DirectionalLight* dirLights = reinterpret_cast<DirectionalLight*>(directionalLightBuffer->contents());
     for (size_t i = 0; i < scene->directionalLights.size(); ++i) {
@@ -4322,12 +4445,27 @@ auto Renderer_Metal::draw(std::shared_ptr<Scene> scene, Camera& camera) -> void 
     instances.clear();
     accelInstances.clear();
     instanceBatches.clear();
+
+    // Temporary map to store current frame's instance models for next frame
+    std::unordered_map<Uint32, glm::mat4> currentInstanceModels;
+
     const std::function<void(const std::shared_ptr<Node>&)> updateNode = [&](const std::shared_ptr<Node>& node) {
         if (node->meshGroup) {
             const glm::mat4& transform = node->worldTransform;
             for (const auto& mesh : node->meshGroup->meshes) {
+                // Get previous model matrix (use current if first frame or new instance)
+                glm::mat4 prevModel = transform;  // Default to current
+                auto it = prevInstanceModels.find(mesh->instanceID);
+                if (it != prevInstanceModels.end()) {
+                    prevModel = it->second;
+                }
+
+                // Store current model for next frame
+                currentInstanceModels[mesh->instanceID] = transform;
+
                 instances.push_back({
                     .model = transform,
+                    .prevModel = prevModel,
                     .color = glm::vec4(1.0f, 0.0f, 0.0f, 1.0f),
                     .vertexOffset = mesh->vertexOffset,
                     .indexOffset = mesh->indexOffset,
@@ -4361,6 +4499,9 @@ auto Renderer_Metal::draw(std::shared_ptr<Scene> scene, Camera& camera) -> void 
     for (const auto& node : scene->nodes) {
         updateNode(node);
     }
+
+    // Update prevInstanceModels for next frame
+    prevInstanceModels = std::move(currentInstanceModels);
     if (instances.size() > MAX_INSTANCES) {// TODO: reallocate when needed
         fmt::print("Warning: Instance count ({}) exceeds MAX_INSTANCES ({})\n", instances.size(), MAX_INSTANCES);
     }

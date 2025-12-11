@@ -30,14 +30,19 @@ struct CameraData {
     float4x4 view;
     float4x4 invProj;
     float4x4 invView;
+    float4x4 prevViewProj;  // Previous frame's view-projection for velocity/TAA
     float near;
     float far;
     float3 position;
+    float _pad1;
+    float2 jitter;          // TAA jitter offset (NDC)
+    float2 prevJitter;      // Previous frame's jitter
     float4 frustumPlanes[6];
 };
 
 struct InstanceData {
     float4x4 model;
+    float4x4 prevModel;     // Previous frame's model matrix for velocity
     float4 color;
     uint vertexOffset;
     uint indexOffset;
@@ -45,8 +50,11 @@ struct InstanceData {
     uint indexCount;
     uint materialID;
     uint primitiveMode;
+    uint _pad1[2];
     float3 AABBMin;
+    float _pad2;
     float3 AABBMax;
+    float _pad3;
     float4 boundingSphere; // x, y, z, radius
 };
 

@@ -22,6 +22,7 @@ namespace Rml {
 
 class Renderer_Metal;
 class PrePass;
+class VelocityPass;
 class TLASBuildPass;
 class NormalResolvePass;
 class TileCullingPass;
@@ -92,6 +93,7 @@ private:
 
 class Renderer_Metal final : public Renderer {// Must be public or factory function won't work
     friend class PrePass;
+    friend class VelocityPass;
     friend class TLASBuildPass;
     friend class NormalResolvePass;
     friend class TileCullingPass;
@@ -278,6 +280,7 @@ protected:
     // Pipeline states
     NS::SharedPtr<MTL::DepthStencilState> depthStencilState;
     NS::SharedPtr<MTL::RenderPipelineState> prePassPipeline;
+    NS::SharedPtr<MTL::RenderPipelineState> velocityPipeline;
     NS::SharedPtr<MTL::RenderPipelineState> drawPipeline;
     NS::SharedPtr<MTL::RenderPipelineState> postProcessPipeline;
 
@@ -472,6 +475,7 @@ protected:
     NS::SharedPtr<MTL::Texture> normalRT;
     NS::SharedPtr<MTL::Texture> shadowRT;
     NS::SharedPtr<MTL::Texture> aoRT;
+    NS::SharedPtr<MTL::Texture> velocityRT;  // Motion vectors (RG16Float)
 
     // Bloom render targets
     NS::SharedPtr<MTL::Texture> bloomBrightnessRT;// Half-res brightness extraction
@@ -528,6 +532,10 @@ protected:
     Uint32 currentInstanceCount = 0;
     Uint32 culledInstanceCount = 0;
     Uint32 drawCount = 0;
+
+    // Previous frame data for temporal effects (velocity, TAA)
+    glm::mat4 prevViewProj = glm::mat4(1.0f);
+    std::unordered_map<Uint32, glm::mat4> prevInstanceModels;  // instanceID -> prevModel
 
 private:
     // Internal batch management
