@@ -11,6 +11,7 @@
 #include <Jolt/Jolt.h>
 #include <Jolt/Physics/Body/BodyActivationListener.h>
 #include <Jolt/Physics/Body/BodyCreationSettings.h>
+#include <Jolt/Physics/Body/BodyFilter.h>
 #include <Jolt/Physics/Body/BodyLockInterface.h>
 #include <Jolt/Physics/Collision/CastResult.h>
 #include <Jolt/Physics/Collision/CollideShape.h>
@@ -628,10 +629,19 @@ void Physics3D::destroyBody(BodyHandle handle) {
     bodyInterface->DestroyBody(id);
 }
 
-bool Physics3D::raycast(const glm::vec3& from, const glm::vec3& to, RaycastHit& hit) {
+bool Physics3D::raycast(const glm::vec3& from, const glm::vec3& to, RaycastHit& hit, BodyHandle ignoreBody) {
     JPH::RRayCast ray(JPH::RVec3(from.x, from.y, from.z), JPH::RVec3(to.x - from.x, to.y - from.y, to.z - from.z));
     JPH::RayCastResult result;
-    bool hasHit = physicsSystem->GetNarrowPhaseQuery().CastRay(ray, result);
+
+    bool hasHit = false;
+    if (ignoreBody.valid() && bodies.find(ignoreBody.rid) != bodies.end()) {
+        JPH::BodyID ignoreID = bodies.at(ignoreBody.rid);
+        JPH::IgnoreSingleBodyFilter bodyFilter(ignoreID);
+        hasHit = physicsSystem->GetNarrowPhaseQuery().CastRay(ray, result, {}, {}, bodyFilter);
+    } else {
+        hasHit = physicsSystem->GetNarrowPhaseQuery().CastRay(ray, result);
+    }
+
     if (hasHit) {
         JPH::BodyID hitBodyID = result.mBodyID;
         JPH::RVec3 hitPoint = ray.GetPointOnRay(result.mFraction);
