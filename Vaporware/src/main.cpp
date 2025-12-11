@@ -310,6 +310,51 @@ int main(int argc, char* args[]) {
         hudState.isVisible = false;
     }
 
+    auto scrollText = registry.create();
+    {
+        auto& scroll = registry.emplace<ScrollTextComponent>(scrollText);
+        scroll.documentPath = "assets/ui/scroll_text.rml";
+        scroll.lines = { "Welcome to Project Vapor",
+                         "Press ENTER to advance text",
+                         "This is a teleprompter-style scroll effect",
+                         "Each line scrolls up and fades out",
+                         "While the next line fades in from below",
+                         "Perfect for cutscenes or tutorials",
+                         "End of demo - press ENTER to restart" };
+        scroll.scrollDuration = 0.4f;
+    }
+
+    auto letterbox = registry.create();
+    {
+        auto& lb = registry.emplace<LetterboxComponent>(letterbox);
+        lb.documentPath = "assets/ui/letterbox.rml";
+        lb.targetAspect = 2.35f;// Cinematic widescreen
+        lb.animDuration = 2.0f;
+    }
+
+    auto subtitle = registry.create();
+    {
+        auto& sub = registry.emplace<SubtitleComponent>(subtitle);
+        sub.documentPath = "assets/ui/subtitle.rml";
+        sub.autoAdvance = true;
+        sub.queue = { { "NARRATOR", "In a world where code meets creativity...", 3.0f },
+                      { "NARRATOR", "One engine dared to dream differently.", 2.5f },
+                      { "", "Press F8 to show chapter title.", 2.0f },
+                      { "DEVELOPER", "Welcome to Project Vapor.", 2.5f },
+                      { "", "(End of subtitle demo)", 2.0f } };
+    }
+
+    auto chapterTitle = registry.create();
+    {
+        auto& ch = registry.emplace<ChapterTitleComponent>(chapterTitle);
+        ch.documentPath = "assets/ui/chapter_title.rml";
+        ch.chapterNumber = "Chapter I";
+        ch.chapterTitle = "The Beginning";
+        ch.fadeDuration = 0.8f;
+        ch.displayDuration = 2.5f;
+        ch.showRequested = true;// Show immediately on start
+    }
+
     auto global = registry.create();
 
     scene->update(0.0f);
@@ -347,7 +392,7 @@ int main(int argc, char* args[]) {
                 if (e.key.scancode == SDL_SCANCODE_ESCAPE) {
                     quit = true;
                 }
-                if (e.key.scancode == SDL_SCANCODE_H) {
+                if (e.key.scancode == SDL_SCANCODE_F5) {
                     auto view = registry.view<HUDComponent>();
                     for (auto entity : view) {
                         auto& hud = view.get<HUDComponent>(entity);
@@ -358,6 +403,64 @@ int main(int argc, char* args[]) {
                 if (e.key.scancode == SDL_SCANCODE_F3) {
                     physics->setDebugEnabled(!physics->isDebugEnabled());
                     fmt::print("Physics Debug Renderer: {}\n", physics->isDebugEnabled() ? "Enabled" : "Disabled");
+                }
+                if (e.key.scancode == SDL_SCANCODE_RETURN) {
+                    auto view = registry.view<ScrollTextComponent>();
+                    for (auto entity : view) {
+                        auto& scroll = view.get<ScrollTextComponent>(entity);
+                        if (scroll.state == ScrollTextState::Idle) {
+                            // If at the end, restart from beginning
+                            if (scroll.currentIndex >= (int)scroll.lines.size() - 1) {
+                                scroll.currentIndex = 0;
+                                if (scroll.document) {
+                                    if (auto el = scroll.document->GetElementById("scroll-text")) {
+                                        el->SetInnerRML(scroll.lines[0].c_str());
+                                    }
+                                }
+                            } else {
+                                scroll.advanceRequested = true;
+                            }
+                        }
+                    }
+                }
+                if (e.key.scancode == SDL_SCANCODE_F6) {
+                    auto view = registry.view<LetterboxComponent>();
+                    for (auto entity : view) {
+                        auto& lb = view.get<LetterboxComponent>(entity);
+                        lb.isOpen = !lb.isOpen;
+                        fmt::print("Letterbox toggled: {}\n", lb.isOpen ? "Opening" : "Closing");
+                    }
+                }
+                if (e.key.scancode == SDL_SCANCODE_F7) {
+                    // Start/advance subtitles
+                    auto view = registry.view<SubtitleComponent>();
+                    for (auto entity : view) {
+                        auto& sub = view.get<SubtitleComponent>(entity);
+                        if (sub.state == SubtitleState::Hidden && sub.currentIndex < 0) {
+                            // Start from beginning
+                            sub.advanceRequested = true;
+                            fmt::print("Subtitles started\n");
+                        } else if (sub.state == SubtitleState::Visible) {
+                            // Skip current subtitle
+                            sub.advanceRequested = true;
+                        } else if (sub.currentIndex >= (int)sub.queue.size() - 1 && sub.state == SubtitleState::Hidden) {
+                            // Restart from beginning
+                            sub.currentIndex = -1;
+                            sub.advanceRequested = true;
+                            fmt::print("Subtitles restarted\n");
+                        }
+                    }
+                }
+                if (e.key.scancode == SDL_SCANCODE_F8) {
+                    // Show chapter title
+                    auto view = registry.view<ChapterTitleComponent>();
+                    for (auto entity : view) {
+                        auto& ch = view.get<ChapterTitleComponent>(entity);
+                        if (ch.state == ChapterTitleState::Hidden) {
+                            ch.showRequested = true;
+                            fmt::print("Chapter title showing\n");
+                        }
+                    }
                 }
                 break;
             }
@@ -411,6 +514,10 @@ int main(int argc, char* args[]) {
         updateAutoRotateSystem(registry, deltaTime);
         updateLightMovementSystem(registry, scene.get(), deltaTime);
         updateHUDSystem(registry, engineCore->getRmlUiManager(), deltaTime);
+        updateScrollTextSystem(registry, engineCore->getRmlUiManager(), deltaTime);
+        updateLetterboxSystem(registry, engineCore->getRmlUiManager(), deltaTime);
+        updateSubtitleSystem(registry, engineCore->getRmlUiManager(), deltaTime);
+        updateChapterTitleSystem(registry, engineCore->getRmlUiManager(), deltaTime);
 
         // Engine updates
         engineCore->update(deltaTime);
@@ -476,7 +583,11 @@ int main(int argc, char* args[]) {
                 );
 
                 renderer->drawText2D(
-                    gameFont, "Press H to toggle HUD", glm::vec2(50.0f, 250.0f), 0.5f, glm::vec4(0.8f, 0.8f, 0.8f, 1.0f)
+                    gameFont,
+                    "F5: HUD | F6: Letterbox | F7: Subtitles",
+                    glm::vec2(50.0f, 250.0f),
+                    0.5f,
+                    glm::vec4(0.8f, 0.8f, 0.8f, 1.0f)
                 );
 
                 // Show FPS

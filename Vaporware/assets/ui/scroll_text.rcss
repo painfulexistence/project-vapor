@@ -1,0 +1,61 @@
+/* Scroll Text Styles - 3D Drum/Cylinder Effect */
+
+body {
+    width: 100%;
+    height: 100%;
+    font-family: "Arial Black";
+    font-size: 24dp;
+}
+
+#scroll-container {
+    position: absolute;
+    left: 50%;
+    top: 50%;
+    width: 600dp;
+    margin-left: -300dp;
+    margin-top: -50dp;
+    height: 100dp;
+    overflow: hidden;
+    text-align: center;
+
+    /* 3D perspective for cylinder effect */
+    perspective: 300dp;
+    perspective-origin: center center;
+}
+
+#scroll-text {
+    /* Base state: rotated away (below the cylinder) */
+    opacity: 0;
+    transform: rotateX(-60deg) translateZ(-50dp);
+    transition: transform 0.5s sine-out, opacity 0.4s sine-out;
+    color: #ffffff;
+    font-effect: shadow(2dp 2dp #000000);
+    padding: 10dp;
+}
+
+/* Visible state: facing viewer */
+#scroll-text.visible {
+    opacity: 1;
+    transform: rotateX(0deg) translateZ(0dp);
+}
+
+/* Scrolling out: rotate up and away (top of cylinder) */
+#scroll-text.scroll-out {
+    opacity: 0;
+    transform: rotateX(60deg) translateZ(-50dp);
+    transition: transform 0.5s sine-in, opacity 0.4s sine-in;
+}
+
+/* Prepare for scroll-in: instantly position at bottom of cylinder (no transition) */
+#scroll-text.scroll-in-prepare {
+    opacity: 0;
+    transform: rotateX(-60deg) translateZ(-50dp);
+    transition: none;
+}
+
+/* Scrolling in: rotate from below into view */
+#scroll-text.scroll-in {
+    opacity: 1;
+    transform: rotateX(0deg) translateZ(0dp);
+    transition: transform 0.5s sine-out, opacity 0.4s sine-out;
+}

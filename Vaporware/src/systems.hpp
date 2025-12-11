@@ -291,3 +291,326 @@ void updateHUDSystem(entt::registry& reg, Vapor::RmlUiManager* rmluiManager, flo
         }
     }
 }
+
+void updateScrollTextSystem(entt::registry& reg, Vapor::RmlUiManager* rmluiManager, float deltaTime) {
+    if (!rmluiManager) return;
+
+    auto view = reg.view<ScrollTextComponent>();
+    for (auto entity : view) {
+        auto& scroll = view.get<ScrollTextComponent>(entity);
+
+        // 1. Load document if not loaded
+        if (!scroll.document && !scroll.documentPath.empty()) {
+            scroll.document = rmluiManager->LoadDocument(scroll.documentPath);
+            if (scroll.document) {
+                fmt::print("Loaded scroll text document: {}\n", scroll.documentPath);
+                scroll.document->Show();
+
+                // Set initial text
+                if (!scroll.lines.empty()) {
+                    if (auto el = scroll.document->GetElementById("scroll-text")) {
+                        el->SetInnerRML(scroll.lines[scroll.currentIndex].c_str());
+                        el->SetClass("visible", true);
+                    }
+                }
+            } else {
+                fmt::print(stderr, "Failed to load scroll text document: {}\n", scroll.documentPath);
+                continue;
+            }
+        }
+
+        if (!scroll.document) continue;
+
+        auto element = scroll.document->GetElementById("scroll-text");
+        if (!element) continue;
+
+        // 2. State Machine
+        switch (scroll.state) {
+        case ScrollTextState::Idle:
+            if (scroll.advanceRequested && scroll.currentIndex < (int)scroll.lines.size() - 1) {
+                scroll.advanceRequested = false;
+                scroll.state = ScrollTextState::ScrollingOut;
+                scroll.timer = 0.0f;
+                // Trigger scroll out animation
+                element->SetClass("visible", false);
+                element->SetClass("scroll-out", true);
+            } else {
+                scroll.advanceRequested = false;// Clear if at end
+            }
+            break;
+
+        case ScrollTextState::ScrollingOut:
+            scroll.timer += deltaTime;
+            if (scroll.timer >= scroll.scrollDuration) {
+                // Move to next line
+                scroll.currentIndex++;
+                if (scroll.currentIndex < (int)scroll.lines.size()) {
+                    element->SetInnerRML(scroll.lines[scroll.currentIndex].c_str());
+                }
+                // Prepare for scroll-in: position element below without transition
+                scroll.state = ScrollTextState::PreparingScrollIn;
+                element->SetClass("scroll-out", false);
+                element->SetClass("scroll-in-prepare", true);
+            }
+            break;
+
+        case ScrollTextState::PreparingScrollIn:
+            // Wait one frame for the element to be positioned, then animate in
+            scroll.state = ScrollTextState::ScrollingIn;
+            scroll.timer = 0.0f;
+            element->SetClass("scroll-in-prepare", false);
+            element->SetClass("scroll-in", true);
+            break;
+
+        case ScrollTextState::ScrollingIn:
+            scroll.timer += deltaTime;
+            if (scroll.timer >= scroll.scrollDuration) {
+                scroll.state = ScrollTextState::Idle;
+                element->SetClass("scroll-in", false);
+                element->SetClass("visible", true);
+            }
+            break;
+        }
+    }
+}
+
+void updateLetterboxSystem(entt::registry& reg, Vapor::RmlUiManager* rmluiManager, float deltaTime) {
+    if (!rmluiManager) return;
+
+    auto view = reg.view<LetterboxComponent>();
+    for (auto entity : view) {
+        auto& lb = view.get<LetterboxComponent>(entity);
+
+        // 1. Load document if not loaded
+        if (!lb.document && !lb.documentPath.empty()) {
+            lb.document = rmluiManager->LoadDocument(lb.documentPath);
+            if (lb.document) {
+                fmt::print("Loaded letterbox document: {}\n", lb.documentPath);
+                lb.document->Show();
+            } else {
+                fmt::print(stderr, "Failed to load letterbox document: {}\n", lb.documentPath);
+                continue;
+            }
+        }
+
+        if (!lb.document) continue;
+
+        auto topBar = lb.document->GetElementById("letterbox-top");
+        auto bottomBar = lb.document->GetElementById("letterbox-bottom");
+        if (!topBar || !bottomBar) {
+            fmt::print(stderr, "Error: Missing letterbox elements (letterbox-top/bottom) in {}\n", lb.documentPath);
+            continue;
+        }
+
+        // 2. State Machine
+        switch (lb.state) {
+        case LetterboxState::Hidden:
+            if (lb.isOpen) {
+                lb.state = LetterboxState::Opening;
+                lb.timer = 0.0f;
+                topBar->SetClass("open", true);
+                bottomBar->SetClass("open", true);
+            }
+            break;
+
+        case LetterboxState::Opening:
+            lb.timer += deltaTime;
+            if (!lb.isOpen) {
+                // Interrupted - close
+                lb.state = LetterboxState::Closing;
+                lb.timer = 0.0f;
+                topBar->SetClass("open", false);
+                bottomBar->SetClass("open", false);
+            } else if (lb.timer >= lb.animDuration) {
+                lb.state = LetterboxState::Open;
+            }
+            break;
+
+        case LetterboxState::Open:
+            if (!lb.isOpen) {
+                lb.state = LetterboxState::Closing;
+                lb.timer = 0.0f;
+                topBar->SetClass("open", false);
+                bottomBar->SetClass("open", false);
+            }
+            break;
+
+        case LetterboxState::Closing:
+            lb.timer += deltaTime;
+            if (lb.isOpen) {
+                // Interrupted - reopen
+                lb.state = LetterboxState::Opening;
+                lb.timer = 0.0f;
+                topBar->SetClass("open", true);
+                bottomBar->SetClass("open", true);
+            } else if (lb.timer >= lb.animDuration) {
+                lb.state = LetterboxState::Hidden;
+            }
+            break;
+        }
+    }
+}
+
+void updateSubtitleSystem(entt::registry& reg, Vapor::RmlUiManager* rmluiManager, float deltaTime) {
+    if (!rmluiManager) return;
+
+    auto view = reg.view<SubtitleComponent>();
+    for (auto entity : view) {
+        auto& sub = view.get<SubtitleComponent>(entity);
+
+        // 1. Load document if not loaded
+        if (!sub.document && !sub.documentPath.empty()) {
+            sub.document = rmluiManager->LoadDocument(sub.documentPath);
+            if (sub.document) {
+                fmt::print("Loaded subtitle document: {}\n", sub.documentPath);
+                sub.document->Show();
+            } else {
+                fmt::print(stderr, "Failed to load subtitle document: {}\n", sub.documentPath);
+                continue;
+            }
+        }
+
+        if (!sub.document) continue;
+
+        auto container = sub.document->GetElementById("subtitle-container");
+        auto speakerEl = sub.document->GetElementById("subtitle-speaker");
+        auto textEl = sub.document->GetElementById("subtitle-text");
+        if (!container || !speakerEl || !textEl) {
+            fmt::print(stderr, "Error: Missing subtitle elements in {}\n", sub.documentPath);
+            continue;
+        }
+
+        // 2. State Machine
+        switch (sub.state) {
+        case SubtitleState::Hidden:
+            // Check for advance request or auto-advance to next in queue
+            if (sub.advanceRequested || (sub.autoAdvance && sub.currentIndex < (int)sub.queue.size() - 1)) {
+                sub.advanceRequested = false;
+                sub.currentIndex++;
+
+                if (sub.currentIndex < (int)sub.queue.size()) {
+                    auto& entry = sub.queue[sub.currentIndex];
+
+                    // Set speaker (hide if empty)
+                    if (entry.speaker.empty()) {
+                        speakerEl->SetClass("hidden", true);
+                    } else {
+                        speakerEl->SetClass("hidden", false);
+                        speakerEl->SetInnerRML(entry.speaker.c_str());
+                    }
+
+                    // Set text
+                    textEl->SetInnerRML(entry.text.c_str());
+
+                    // Start fade in
+                    sub.state = SubtitleState::FadingIn;
+                    sub.timer = 0.0f;
+                    container->SetClass("visible", true);
+                }
+            }
+            break;
+
+        case SubtitleState::FadingIn:
+            sub.timer += deltaTime;
+            if (sub.timer >= sub.fadeDuration) {
+                sub.state = SubtitleState::Visible;
+                sub.displayTimer = 0.0f;
+            }
+            break;
+
+        case SubtitleState::Visible:
+            sub.displayTimer += deltaTime;
+            // Check for manual advance or duration expired
+            if (sub.advanceRequested
+                || (sub.autoAdvance && sub.currentIndex < (int)sub.queue.size()
+                    && sub.displayTimer >= sub.queue[sub.currentIndex].duration)) {
+                sub.advanceRequested = false;
+                sub.state = SubtitleState::FadingOut;
+                sub.timer = 0.0f;
+                container->SetClass("visible", false);
+            }
+            break;
+
+        case SubtitleState::FadingOut:
+            sub.timer += deltaTime;
+            if (sub.timer >= sub.fadeDuration) {
+                sub.state = SubtitleState::Hidden;
+                // Will auto-advance to next if autoAdvance is true
+            }
+            break;
+        }
+    }
+}
+
+void updateChapterTitleSystem(entt::registry& reg, Vapor::RmlUiManager* rmluiManager, float deltaTime) {
+    if (!rmluiManager) return;
+
+    auto view = reg.view<ChapterTitleComponent>();
+    for (auto entity : view) {
+        auto& ch = view.get<ChapterTitleComponent>(entity);
+
+        // 1. Load document if not loaded
+        if (!ch.document && !ch.documentPath.empty()) {
+            ch.document = rmluiManager->LoadDocument(ch.documentPath);
+            if (ch.document) {
+                fmt::print("Loaded chapter title document: {}\n", ch.documentPath);
+                ch.document->Show();
+            } else {
+                fmt::print(stderr, "Failed to load chapter title document: {}\n", ch.documentPath);
+                continue;
+            }
+        }
+
+        if (!ch.document) continue;
+
+        auto container = ch.document->GetElementById("chapter-container");
+        auto numberEl = ch.document->GetElementById("chapter-number");
+        auto titleEl = ch.document->GetElementById("chapter-title");
+        if (!container || !numberEl || !titleEl) {
+            fmt::print(stderr, "Error: Missing chapter title elements in {}\n", ch.documentPath);
+            continue;
+        }
+
+        // 2. State Machine
+        switch (ch.state) {
+        case ChapterTitleState::Hidden:
+            if (ch.showRequested) {
+                ch.showRequested = false;
+
+                // Set content
+                numberEl->SetInnerRML(ch.chapterNumber.c_str());
+                titleEl->SetInnerRML(ch.chapterTitle.c_str());
+
+                // Start fade in
+                ch.state = ChapterTitleState::FadingIn;
+                ch.timer = 0.0f;
+                container->SetClass("visible", true);
+            }
+            break;
+
+        case ChapterTitleState::FadingIn:
+            ch.timer += deltaTime;
+            if (ch.timer >= ch.fadeDuration) {
+                ch.state = ChapterTitleState::Visible;
+                ch.timer = 0.0f;
+            }
+            break;
+
+        case ChapterTitleState::Visible:
+            ch.timer += deltaTime;
+            if (ch.timer >= ch.displayDuration) {
+                ch.state = ChapterTitleState::FadingOut;
+                ch.timer = 0.0f;
+                container->SetClass("visible", false);
+            }
+            break;
+
+        case ChapterTitleState::FadingOut:
+            ch.timer += deltaTime;
+            if (ch.timer >= ch.fadeDuration) {
+                ch.state = ChapterTitleState::Hidden;
+            }
+            break;
+        }
+    }
+}

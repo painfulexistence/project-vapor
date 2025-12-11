@@ -1,0 +1,13 @@
+<rml>
+<head>
+    <title>Scroll Text</title>
+    <link type="text/rcss" href="scroll_text.rcss"/>
+</head>
+<body>
+    <div id="scroll-container">
+        <div id="scroll-text" class="visible">
+            <!-- Text content set dynamically -->
+        </div>
+    </div>
+</body>
+</rml>

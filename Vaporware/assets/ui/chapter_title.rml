@@ -1,0 +1,13 @@
+<rml>
+<head>
+    <title>Chapter Title</title>
+    <link type="text/rcss" href="chapter_title.rcss"/>
+</head>
+<body>
+    <div id="chapter-container">
+        <div id="chapter-number"></div>
+        <div id="chapter-divider"></div>
+        <div id="chapter-title"></div>
+    </div>
+</body>
+</rml>

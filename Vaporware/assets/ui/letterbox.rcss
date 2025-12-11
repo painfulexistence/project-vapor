@@ -1,0 +1,37 @@
+/* Letterbox - Cinematic Black Bars */
+
+body {
+    width: 100%;
+    height: 100%;
+}
+
+.bar {
+    position: absolute;
+    left: 0;
+    width: 100%;
+    height: 0%;
+    background-color: #000000;
+    transition: height 1.6s sine-in-out;
+}
+
+#letterbox-top {
+    top: 0;
+}
+
+#letterbox-bottom {
+    bottom: 0;
+}
+
+/* Open state - bars visible */
+/* Height is set dynamically via C++ based on aspect ratio */
+.bar.open {
+    /* Default: ~12% each side for 2.35:1 on 16:9 screen */
+    height: 12%;
+}
+
+/* For reference - common aspect ratios on 16:9 (each bar height):
+   2.00:1 = ~6%
+   2.35:1 = ~12%
+   2.39:1 = ~13%
+   2.76:1 = ~18% (Ultra Panavision)
+*/
