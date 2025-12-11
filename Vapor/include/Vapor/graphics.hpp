@@ -502,6 +502,46 @@ struct alignas(16) SunFlareData {
     float _pad3;
 };
 
+// Shadow rendering mode
+enum class ShadowMode {
+    None,             // No shadows
+    RayTraced,        // Ray-traced hard shadows (Metal only)
+    CascadedShadowMap,// Traditional CSM
+    Hybrid            // CSM base + RT refinement for soft shadows
+};
+
+// Cascaded Shadow Map data structure
+constexpr Uint32 CSM_CASCADE_COUNT = 4;
+constexpr Uint32 CSM_SHADOW_MAP_SIZE = 2048;
+
+struct alignas(16) CascadeShadowData {
+    glm::mat4 lightViewProj[CSM_CASCADE_COUNT];// Light space matrices for each cascade
+    glm::vec4 cascadeSplits;                   // Split distances (x=c0, y=c1, z=c2, w=c3)
+    glm::vec4 cascadeScales[CSM_CASCADE_COUNT];// UV scale for each cascade (xy=scale, zw=offset)
+    glm::vec3 lightDirection;                  // Normalized light direction
+    float shadowBias;                          // Depth bias to reduce shadow acne
+    float normalBias;                          // Normal-based bias
+    float pcfRadius;                           // PCF filter radius (in texels)
+    Uint32 cascadeCount;                       // Active cascade count (1-4)
+    Uint32 pcfSampleCount;                     // PCF sample count (4, 8, 16, 32)
+    float cascadeBlendRange;                   // Blend range between cascades (0-1)
+    float maxShadowDistance;                   // Maximum shadow distance
+    Uint32 softShadowEnabled;                  // Enable PCF soft shadows
+    Uint32 cascadeVisualization;               // Debug: visualize cascade colors
+};
+
+// Hybrid shadow settings (CSM + RT)
+struct alignas(16) HybridShadowData {
+    float penumbraThresholdLow;  // Shadow values below this are fully shadowed
+    float penumbraThresholdHigh; // Shadow values above this are fully lit
+    float rtSampleRadius;        // RT ray spread for soft shadows
+    Uint32 rtSampleCount;        // Number of RT rays in penumbra region
+    float contactShadowLength;   // Length of contact shadow rays
+    float contactShadowThickness;// Thickness of contact shadow test
+    Uint32 hybridEnabled;        // Enable hybrid mode
+    float _pad1;
+};
+
 struct Mesh {
     void initialize(const std::vector<VertexData>& vertices, const std::vector<Uint32>& indices);
     void initialize(VertexData* vertexData, size_t vertexCount, Uint32* indexData, size_t indexCount);

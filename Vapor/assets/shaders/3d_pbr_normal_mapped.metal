@@ -1,6 +1,7 @@
 #include <metal_stdlib>
 using namespace metal;
 #include "assets/shaders/3d_common.metal" // TODO: use more robust include path
+#include "assets/shaders/3d_shadow_common.metal"
 
 
 struct RasterizerData {
@@ -232,13 +233,17 @@ fragment float4 fragmentMain(
     texturecube<float, access::sample> irradianceMap [[texture(8)]],
     texturecube<float, access::sample> prefilterMap [[texture(9)]],
     texture2d<float, access::sample> brdfLUT [[texture(10)]],
+    depth2d_array<float, access::sample> csmShadowMap [[texture(11)]],
     const device DirLight* directionalLights [[buffer(0)]],
     const device PointLight* pointLights [[buffer(1)]],
     const device Cluster* clusters [[buffer(2)]],
     constant CameraData& camera [[buffer(3)]],
     constant float2& screenSize [[buffer(4)]],
     constant packed_uint3& gridSize [[buffer(5)]],
-    constant float& time [[buffer(6)]]
+    constant float& time [[buffer(6)]],
+    constant CascadeShadowData& csmData [[buffer(7)]],
+    constant HybridShadowData& hybridData [[buffer(8)]],
+    constant uint& shadowMode [[buffer(9)]]
 ) {
     constexpr sampler s(address::repeat, filter::linear, mip_filter::linear);
 
@@ -284,9 +289,74 @@ fragment float4 fragmentMain(
 
     float2 screenUV = in.position.xy / screenSize;
 
+    // Calculate view-space depth for cascade selection
+    float4 viewPos = camera.view * in.worldPosition;
+    float viewDepth = -viewPos.z;
+
+    // Shadow sampler for CSM
+    constexpr sampler shadowSampler(
+        address::clamp_to_edge,
+        filter::linear,
+        compare_func::less
+    );
+
     float3 result = float3(0.0);
-    float shadowFactor = texShadow.sample(s, screenUV).r;
-    result += CalculateDirectionalLight(directionalLights[0], norm, T, B, viewDir, surf) * shadowFactor; // result += CookTorranceBRDF(norm, lightDir, viewDir, surf) * (mainLight.color * mainLight.intensity) * clamp(dot(norm, lightDir), 0.0, 1.0);
+
+    // Calculate shadow factor based on shadow mode
+    // shadowMode: 0 = None, 1 = RayTraced, 2 = CSM, 3 = Hybrid
+    float shadowFactor = 1.0;
+    if (shadowMode == 1) {
+        // Ray-traced shadow (from pre-computed shadow texture)
+        shadowFactor = texShadow.sample(s, screenUV).r;
+    } else if (shadowMode == 2) {
+        // Cascaded Shadow Map
+        shadowFactor = calculateCSMShadow(
+            in.worldPosition.xyz,
+            norm,
+            viewDepth,
+            in.position.xy,
+            csmData,
+            csmShadowMap,
+            shadowSampler
+        );
+
+        // Debug: visualize cascades
+        if (csmData.cascadeVisualization > 0) {
+            uint cascade = selectCascade(viewDepth, csmData.cascadeSplits, csmData.cascadeCount);
+            float3 cascadeColor = getCascadeDebugColor(cascade);
+            return float4(mix(cascadeColor, float3(shadowFactor), 0.7), 1.0);
+        }
+    } else if (shadowMode == 3) {
+        // Hybrid: CSM base + RT refinement in penumbra regions
+        float csmShadow = calculateCSMShadow(
+            in.worldPosition.xyz,
+            norm,
+            viewDepth,
+            in.position.xy,
+            csmData,
+            csmShadowMap,
+            shadowSampler
+        );
+
+        // Check if we're in a penumbra region (partial shadow)
+        if (hybridData.hybridEnabled > 0 &&
+            csmShadow > hybridData.penumbraThresholdLow &&
+            csmShadow < hybridData.penumbraThresholdHigh) {
+            // In penumbra region - use RT shadow for refinement
+            float rtShadow = texShadow.sample(s, screenUV).r;
+            // Blend CSM with RT based on penumbra region
+            float penumbraFactor = smoothstep(
+                hybridData.penumbraThresholdLow,
+                hybridData.penumbraThresholdHigh,
+                csmShadow
+            );
+            shadowFactor = mix(csmShadow, rtShadow, 0.5);
+        } else {
+            shadowFactor = csmShadow;
+        }
+    }
+
+    result += CalculateDirectionalLight(directionalLights[0], norm, T, B, viewDir, surf) * shadowFactor;
 
     uint tileX = uint(screenUV.x * float(gridSize.x));
     uint tileY = uint((1.0 - screenUV.y) * float(gridSize.y));

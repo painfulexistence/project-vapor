@@ -605,6 +605,195 @@ public:
     }
 };
 
+// ============================================================================
+// CSM Depth Pass: Renders shadow maps for cascaded shadow mapping
+// ============================================================================
+class CSMDepthPass : public RenderPass {
+public:
+    explicit CSMDepthPass(Renderer_Metal* renderer) : RenderPass(renderer) {
+    }
+
+    const char* getName() const override {
+        return "CSMDepthPass";
+    }
+
+    void execute() override {
+        auto& r = *renderer;
+
+        // Skip if not using CSM or Hybrid mode
+        if (r.shadowMode != ShadowMode::CascadedShadowMap && r.shadowMode != ShadowMode::Hybrid) {
+            return;
+        }
+
+        // Get directional light (use first one for shadows)
+        if (r.currentScene->directionalLights.empty()) {
+            return;
+        }
+        const auto& light = r.currentScene->directionalLights[0];
+        glm::vec3 lightDir = glm::normalize(light.direction);
+
+        // Calculate cascade splits using practical split scheme
+        float nearClip = r.currentCamera->getNear();
+        float farClip = std::min(r.currentCamera->getFar(), r.csmSettings.maxShadowDistance);
+        float clipRange = farClip - nearClip;
+        float lambda = r.csmCascadeSplitLambda;
+
+        // Calculate cascade split distances
+        glm::vec4 cascadeSplits;
+        for (uint32_t i = 0; i < CSM_CASCADE_COUNT; i++) {
+            float p = float(i + 1) / float(CSM_CASCADE_COUNT);
+            float logSplit = nearClip * std::pow(farClip / nearClip, p);
+            float uniformSplit = nearClip + clipRange * p;
+            float d = lambda * logSplit + (1.0f - lambda) * uniformSplit;
+            cascadeSplits[i] = d;
+        }
+        r.csmSettings.cascadeSplits = cascadeSplits;
+        r.csmSettings.lightDirection = lightDir;
+
+        // Get camera matrices
+        glm::mat4 camView = r.currentCamera->getViewMatrix();
+        glm::mat4 camProj = r.currentCamera->getProjectionMatrix();
+        glm::mat4 invCamViewProj = glm::inverse(camProj * camView);
+
+        // Calculate light-space matrices for each cascade
+        float lastSplit = nearClip;
+        for (uint32_t cascade = 0; cascade < CSM_CASCADE_COUNT; cascade++) {
+            float splitDist = cascadeSplits[cascade];
+
+            // Get frustum corners in world space for this cascade
+            glm::vec3 frustumCorners[8] = {
+                glm::vec3(-1.0f, 1.0f, 0.0f),  glm::vec3(1.0f, 1.0f, 0.0f),
+                glm::vec3(1.0f, -1.0f, 0.0f),  glm::vec3(-1.0f, -1.0f, 0.0f),
+                glm::vec3(-1.0f, 1.0f, 1.0f),  glm::vec3(1.0f, 1.0f, 1.0f),
+                glm::vec3(1.0f, -1.0f, 1.0f),  glm::vec3(-1.0f, -1.0f, 1.0f)
+            };
+
+            // Transform corners to world space
+            for (int i = 0; i < 8; i++) {
+                glm::vec4 corner = invCamViewProj * glm::vec4(frustumCorners[i], 1.0f);
+                frustumCorners[i] = glm::vec3(corner) / corner.w;
+            }
+
+            // Adjust corners to cascade range
+            for (int i = 0; i < 4; i++) {
+                glm::vec3 dist = frustumCorners[i + 4] - frustumCorners[i];
+                float nearRatio = (lastSplit - nearClip) / (farClip - nearClip);
+                float farRatio = (splitDist - nearClip) / (farClip - nearClip);
+                frustumCorners[i + 4] = frustumCorners[i] + dist * farRatio;
+                frustumCorners[i] = frustumCorners[i] + dist * nearRatio;
+            }
+
+            // Calculate frustum center
+            glm::vec3 center(0.0f);
+            for (int i = 0; i < 8; i++) {
+                center += frustumCorners[i];
+            }
+            center /= 8.0f;
+
+            // Calculate bounding sphere radius for stable shadows
+            float radius = 0.0f;
+            for (int i = 0; i < 8; i++) {
+                float distance = glm::length(frustumCorners[i] - center);
+                radius = std::max(radius, distance);
+            }
+            radius = std::ceil(radius * 16.0f) / 16.0f;  // Round up for stability
+
+            // Calculate light view matrix
+            glm::vec3 lightPos = center - lightDir * radius;
+            glm::mat4 lightView = glm::lookAt(lightPos, center, glm::vec3(0.0f, 1.0f, 0.0f));
+
+            // Calculate orthographic projection
+            glm::mat4 lightProj = glm::ortho(-radius, radius, -radius, radius, 0.0f, radius * 2.0f);
+
+            // Store light-space matrix
+            r.csmSettings.lightViewProj[cascade] = lightProj * lightView;
+
+            // Store cascade scale/offset for shader
+            r.csmSettings.cascadeScales[cascade] = glm::vec4(1.0f / (radius * 2.0f), 1.0f / (radius * 2.0f), 0.0f, 0.0f);
+
+            lastSplit = splitDist;
+        }
+
+        // Update CSM data buffer
+        memcpy(r.csmDataBuffers[r.currentFrameInFlight]->contents(), &r.csmSettings, sizeof(CascadeShadowData));
+        r.csmDataBuffers[r.currentFrameInFlight]->didModifyRange(NS::Range(0, sizeof(CascadeShadowData)));
+
+        // Render depth for each cascade
+        for (uint32_t cascade = 0; cascade < CSM_CASCADE_COUNT; cascade++) {
+            auto passDesc = NS::TransferPtr(MTL::RenderPassDescriptor::renderPassDescriptor());
+
+            auto depthAttachment = passDesc->depthAttachment();
+            depthAttachment->setTexture(r.csmShadowMapArray.get());
+            depthAttachment->setSlice(cascade);
+            depthAttachment->setClearDepth(1.0);
+            depthAttachment->setLoadAction(MTL::LoadActionClear);
+            depthAttachment->setStoreAction(MTL::StoreActionStore);
+
+            auto encoder = r.currentCommandBuffer->renderCommandEncoder(passDesc.get());
+            encoder->setLabel(NS::String::string(
+                fmt::format("CSM Cascade {}", cascade).c_str(), NS::StringEncoding::UTF8StringEncoding
+            ));
+            encoder->setRenderPipelineState(r.csmDepthPipeline.get());
+            encoder->setCullMode(MTL::CullModeBack);
+            encoder->setFrontFacingWinding(MTL::Winding::WindingCounterClockwise);
+            encoder->setDepthStencilState(r.csmDepthStencilState.get());
+            encoder->setDepthBias(1.0f, 4.0f, 0.0f);  // Depth bias to reduce shadow acne
+
+            // Set light-space matrix for this cascade
+            encoder->setVertexBytes(&r.csmSettings.lightViewProj[cascade], sizeof(glm::mat4), 0);
+            encoder->setVertexBuffer(r.instanceDataBuffers[r.currentFrameInFlight].get(), 0, 1);
+            encoder->setVertexBuffer(r.getBuffer(r.currentScene->vertexBuffer).get(), 0, 2);
+
+            // Render all shadow-casting meshes
+            for (const auto& [material, meshes] : r.instanceBatches) {
+                for (const auto& mesh : meshes) {
+                    // TODO: Add castShadow check from MeshRendererComponent
+                    encoder->setVertexBytes(&mesh->instanceID, sizeof(Uint32), 3);
+                    encoder->drawIndexedPrimitives(
+                        MTL::PrimitiveType::PrimitiveTypeTriangle,
+                        mesh->indexCount,
+                        MTL::IndexTypeUInt32,
+                        r.getBuffer(r.currentScene->indexBuffer).get(),
+                        mesh->indexOffset * sizeof(Uint32)
+                    );
+                }
+            }
+
+            encoder->endEncoding();
+        }
+    }
+};
+
+// ============================================================================
+// Hybrid Shadow Pass: Combines CSM with RT for soft shadows in penumbra regions
+// ============================================================================
+class HybridShadowPass : public RenderPass {
+public:
+    explicit HybridShadowPass(Renderer_Metal* renderer) : RenderPass(renderer) {
+    }
+
+    const char* getName() const override {
+        return "HybridShadowPass";
+    }
+
+    void execute() override {
+        auto& r = *renderer;
+
+        // Only run in Hybrid mode
+        if (r.shadowMode != ShadowMode::Hybrid) {
+            return;
+        }
+
+        // Update hybrid shadow data
+        memcpy(r.hybridShadowDataBuffers[r.currentFrameInFlight]->contents(), &r.hybridSettings, sizeof(HybridShadowData));
+        r.hybridShadowDataBuffers[r.currentFrameInFlight]->didModifyRange(NS::Range(0, sizeof(HybridShadowData)));
+
+        // The actual hybrid shadow computation is done in the PBR shader
+        // This pass just prepares the data buffers
+        // RT refinement in penumbra regions is handled during the main render pass
+    }
+};
+
 // Raytrace shadow pass: Computes ray-traced shadows
 class RaytraceShadowPass : public RenderPass {
 public:
@@ -617,6 +806,11 @@ public:
 
     void execute() override {
         auto& r = *renderer;
+
+        // Skip if not using RT shadow mode
+        if (r.shadowMode != ShadowMode::RayTraced) {
+            return;
+        }
 
         auto drawableSize = r.swapchain->drawableSize();
         glm::vec2 screenSize = glm::vec2(drawableSize.width, drawableSize.height);
@@ -963,6 +1157,12 @@ public:
         encoder->setFragmentBytes(&gridSize, sizeof(glm::uvec3), 5);
         encoder->setFragmentBytes(&time, sizeof(float), 6);
 
+        // CSM and shadow mode data
+        encoder->setFragmentBuffer(r.csmDataBuffers[r.currentFrameInFlight].get(), 0, 7);
+        encoder->setFragmentBuffer(r.hybridShadowDataBuffers[r.currentFrameInFlight].get(), 0, 8);
+        uint32_t shadowModeValue = static_cast<uint32_t>(r.shadowMode);
+        encoder->setFragmentBytes(&shadowModeValue, sizeof(uint32_t), 9);
+
         for (const auto& [material, meshes] : r.instanceBatches) {
             encoder->setFragmentTexture(
                 r.getTexture(material->albedoMap ? material->albedoMap->texture : r.defaultAlbedoTexture).get(), 0
@@ -988,6 +1188,9 @@ public:
             encoder->setFragmentTexture(r.irradianceMap.get(), 8);
             encoder->setFragmentTexture(r.prefilterMap.get(), 9);
             encoder->setFragmentTexture(r.brdfLUT.get(), 10);
+
+            // CSM shadow map array
+            encoder->setFragmentTexture(r.csmShadowMapArray.get(), 11);
 
             for (const auto& mesh : meshes) {
                 if (!r.currentCamera->isVisible(mesh->getWorldBoundingSphere())) {
@@ -2449,7 +2652,10 @@ auto Renderer_Metal::init(SDL_Window* window) -> void {
     graph.addPass(std::make_unique<PrePass>(this));
     graph.addPass(std::make_unique<NormalResolvePass>(this));
     graph.addPass(std::make_unique<TileCullingPass>(this));
+    // Shadow passes (CSM runs before RT, Hybrid uses both)
+    graph.addPass(std::make_unique<CSMDepthPass>(this));
     graph.addPass(std::make_unique<RaytraceShadowPass>(this));
+    graph.addPass(std::make_unique<HybridShadowPass>(this));
     graph.addPass(std::make_unique<RaytraceAOPass>(this));
     graph.addPass(std::make_unique<MainRenderPass>(this));
     graph.addPass(std::make_unique<SkyAtmospherePass>(this));
@@ -2601,6 +2807,51 @@ auto Renderer_Metal::createResources() -> void {
     normalResolvePipeline = createComputePipeline("assets/shaders/3d_normal_resolve.metal");
     raytraceShadowPipeline = createComputePipeline("assets/shaders/3d_raytrace_shadow.metal");
     raytraceAOPipeline = createComputePipeline("assets/shaders/3d_ssao.metal");
+
+    // Create CSM depth pipeline
+    {
+        auto shaderSrc = readFile("assets/shaders/3d_csm_depth.metal");
+        auto code = NS::String::string(shaderSrc.data(), NS::StringEncoding::UTF8StringEncoding);
+        NS::Error* error = nullptr;
+        MTL::Library* library = device->newLibrary(code, nullptr, &error);
+        if (!library) {
+            fmt::print(
+                "Warning: Could not compile CSM depth shader: {}\n",
+                error ? error->localizedDescription()->utf8String() : "unknown error"
+            );
+        } else {
+            auto vertexFuncName = NS::String::string("vertexMain", NS::StringEncoding::UTF8StringEncoding);
+            auto vertexMain = library->newFunction(vertexFuncName);
+
+            auto fragmentFuncName = NS::String::string("fragmentMainOpaque", NS::StringEncoding::UTF8StringEncoding);
+            auto fragmentMain = library->newFunction(fragmentFuncName);
+
+            MTL::RenderPipelineDescriptor* pipelineDesc = MTL::RenderPipelineDescriptor::alloc()->init();
+            pipelineDesc->setVertexFunction(vertexMain);
+            pipelineDesc->setFragmentFunction(fragmentMain);
+            pipelineDesc->setDepthAttachmentPixelFormat(MTL::PixelFormatDepth32Float);
+
+            csmDepthPipeline = NS::TransferPtr(device->newRenderPipelineState(pipelineDesc, &error));
+            if (!csmDepthPipeline) {
+                fmt::print(
+                    "Warning: Could not create CSM depth pipeline: {}\n",
+                    error ? error->localizedDescription()->utf8String() : "unknown error"
+                );
+            }
+
+            pipelineDesc->release();
+            vertexMain->release();
+            fragmentMain->release();
+            library->release();
+        }
+
+        // Create depth stencil state for CSM (write depth, compare less)
+        MTL::DepthStencilDescriptor* depthDesc = MTL::DepthStencilDescriptor::alloc()->init();
+        depthDesc->setDepthCompareFunction(MTL::CompareFunctionLess);
+        depthDesc->setDepthWriteEnabled(true);
+        csmDepthStencilState = NS::TransferPtr(device->newDepthStencilState(depthDesc));
+        depthDesc->release();
+    }
     atmospherePipeline =
         createPipeline("assets/shaders/3d_atmosphere.metal", true, false, 1);// No MSAA for sky (full-screen triangle)
     skyCapturePipeline = createPipeline("assets/shaders/3d_sky_capture.metal", true, true, 1);
@@ -3119,6 +3370,35 @@ auto Renderer_Metal::createResources() -> void {
     aoTextureDesc->setUsage(MTL::TextureUsageShaderRead | MTL::TextureUsageShaderWrite);
     aoRT = NS::TransferPtr(device->newTexture(aoTextureDesc));
     aoTextureDesc->release();
+
+    // ========================================================================
+    // Cascaded Shadow Map resources
+    // ========================================================================
+
+    // Create CSM shadow map array (depth texture array for 4 cascades)
+    {
+        MTL::TextureDescriptor* csmTextureDesc = MTL::TextureDescriptor::alloc()->init();
+        csmTextureDesc->setTextureType(MTL::TextureType2DArray);
+        csmTextureDesc->setPixelFormat(MTL::PixelFormatDepth32Float);
+        csmTextureDesc->setWidth(CSM_SHADOW_MAP_SIZE);
+        csmTextureDesc->setHeight(CSM_SHADOW_MAP_SIZE);
+        csmTextureDesc->setArrayLength(CSM_CASCADE_COUNT);
+        csmTextureDesc->setMipmapLevelCount(1);
+        csmTextureDesc->setUsage(MTL::TextureUsageRenderTarget | MTL::TextureUsageShaderRead);
+        csmTextureDesc->setStorageMode(MTL::StorageModePrivate);
+        csmShadowMapArray = NS::TransferPtr(device->newTexture(csmTextureDesc));
+        csmTextureDesc->release();
+    }
+
+    // Create CSM data buffers (per-frame)
+    csmDataBuffers.resize(MAX_FRAMES_IN_FLIGHT);
+    hybridShadowDataBuffers.resize(MAX_FRAMES_IN_FLIGHT);
+    for (size_t i = 0; i < MAX_FRAMES_IN_FLIGHT; i++) {
+        csmDataBuffers[i] =
+            NS::TransferPtr(device->newBuffer(sizeof(CascadeShadowData), MTL::ResourceStorageModeManaged));
+        hybridShadowDataBuffers[i] =
+            NS::TransferPtr(device->newBuffer(sizeof(HybridShadowData), MTL::ResourceStorageModeManaged));
+    }
 
     // Create light scattering render target (HDR format for god rays)
     MTL::TextureDescriptor* lightScatteringTextureDesc = MTL::TextureDescriptor::alloc()->init();
