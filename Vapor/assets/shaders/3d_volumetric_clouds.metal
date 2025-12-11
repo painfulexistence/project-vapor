@@ -449,19 +449,35 @@ fragment float4 cloudTemporalResolve(
     constexpr sampler linearSampler(filter::linear, address::clamp_to_edge);
 
     float4 current = currentCloud.sample(linearSampler, in.uv);
-
-    // Simple motion vectors from depth reprojection
     float depth = sceneDepth.sample(linearSampler, in.uv).r;
-    float2 ndc = in.uv * 2.0 - 1.0;
-    ndc.y = -ndc.y;
-    float4 clipPos = float4(ndc, depth, 1.0);
-    float4 worldPos = data.invViewProj * clipPos;
-    worldPos /= worldPos.w;
 
-    // Reproject to previous frame
-    float4 prevClip = data.prevViewProj * worldPos;
-    float2 prevUV = prevClip.xy / prevClip.w * 0.5 + 0.5;
-    prevUV.y = 1.0 - prevUV.y;
+    // Use velocity buffer for reprojection
+    // Velocity is in NDC space: current_ndc - prev_ndc
+    float2 velocity = velocityBuffer.sample(linearSampler, in.uv).rg;
+
+    // For sky pixels (depth ~= 1.0), the velocity buffer won't have valid data
+    // because sky doesn't render to velocity pass. Fall back to camera-only reprojection.
+    bool isSkyPixel = depth >= 0.9999;
+
+    float2 prevUV;
+    if (isSkyPixel) {
+        // Camera-only reprojection for sky/clouds (original method)
+        float2 ndc = in.uv * 2.0 - 1.0;
+        ndc.y = -ndc.y;
+        float4 clipPos = float4(ndc, depth, 1.0);
+        float4 worldPos = data.invViewProj * clipPos;
+        worldPos /= worldPos.w;
+
+        float4 prevClip = data.prevViewProj * worldPos;
+        prevUV = prevClip.xy / prevClip.w * 0.5 + 0.5;
+        prevUV.y = 1.0 - prevUV.y;
+    } else {
+        // Use velocity buffer directly (accounts for object motion)
+        // Convert NDC velocity to UV space
+        float2 velocityUV = velocity * 0.5;  // NDC range [-2,2] -> UV range [-1,1]
+        velocityUV.y = -velocityUV.y;        // Flip Y for UV coordinates
+        prevUV = in.uv - velocityUV;
+    }
 
     // Sample history
     float4 history = historyCloud.sample(linearSampler, prevUV);
@@ -470,25 +486,40 @@ fragment float4 cloudTemporalResolve(
     bool validHistory = prevUV.x >= 0.0 && prevUV.x <= 1.0 &&
                         prevUV.y >= 0.0 && prevUV.y <= 1.0;
 
-    // Neighborhood clamping for anti-ghosting
+    // Neighborhood clamping for anti-ghosting (variance clipping)
     float4 minBound = current;
     float4 maxBound = current;
+    float4 moment1 = current;
+    float4 moment2 = current * current;
 
-    // Sample neighbors (simplified - full implementation would use 3x3)
     float2 texelSize = 1.0 / data.screenSize;
     for (int y = -1; y <= 1; y++) {
         for (int x = -1; x <= 1; x++) {
+            if (x == 0 && y == 0) continue;
             float4 neighbor = currentCloud.sample(linearSampler, in.uv + float2(x, y) * texelSize);
             minBound = min(minBound, neighbor);
             maxBound = max(maxBound, neighbor);
+            moment1 += neighbor;
+            moment2 += neighbor * neighbor;
         }
     }
 
-    // Clamp history to neighborhood
-    history = clamp(history, minBound, maxBound);
+    // Variance clipping (tighter than min/max clamping, reduces ghosting)
+    moment1 /= 9.0;
+    moment2 /= 9.0;
+    float4 sigma = sqrt(max(moment2 - moment1 * moment1, float4(0.0)));
+    float4 varianceMin = moment1 - 1.25 * sigma;
+    float4 varianceMax = moment1 + 1.25 * sigma;
 
-    // Blend
-    float blend = validHistory ? data.temporalBlend : 1.0;
+    // Use tighter variance bounds
+    history = clamp(history, max(minBound, varianceMin), min(maxBound, varianceMax));
+
+    // Adaptive blend based on velocity magnitude
+    // Higher velocity = trust current frame more (less ghosting)
+    float velocityMag = length(velocity);
+    float adaptiveBlend = mix(data.temporalBlend, 0.5, saturate(velocityMag * 5.0));
+
+    float blend = validHistory ? adaptiveBlend : 1.0;
     return mix(history, current, blend);
 }
 
