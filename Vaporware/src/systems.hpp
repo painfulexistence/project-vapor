@@ -397,7 +397,10 @@ void updateLetterboxSystem(entt::registry& reg, Vapor::RmlUiManager* rmluiManage
 
         auto topBar = lb.document->GetElementById("letterbox-top");
         auto bottomBar = lb.document->GetElementById("letterbox-bottom");
-        if (!topBar || !bottomBar) continue;
+        if (!topBar || !bottomBar) {
+            fmt::print(stderr, "Error: Missing letterbox elements (letterbox-top/bottom) in {}\n", lb.documentPath);
+            continue;
+        }
 
         // 2. State Machine
         switch (lb.state) {
@@ -472,7 +475,10 @@ void updateSubtitleSystem(entt::registry& reg, Vapor::RmlUiManager* rmluiManager
         auto container = sub.document->GetElementById("subtitle-container");
         auto speakerEl = sub.document->GetElementById("subtitle-speaker");
         auto textEl = sub.document->GetElementById("subtitle-text");
-        if (!container || !speakerEl || !textEl) continue;
+        if (!container || !speakerEl || !textEl) {
+            fmt::print(stderr, "Error: Missing subtitle elements in {}\n", sub.documentPath);
+            continue;
+        }
 
         // 2. State Machine
         switch (sub.state) {
@@ -515,9 +521,9 @@ void updateSubtitleSystem(entt::registry& reg, Vapor::RmlUiManager* rmluiManager
         case SubtitleState::Visible:
             sub.displayTimer += deltaTime;
             // Check for manual advance or duration expired
-            if (sub.advanceRequested ||
-                (sub.autoAdvance && sub.currentIndex < (int)sub.queue.size() &&
-                 sub.displayTimer >= sub.queue[sub.currentIndex].duration)) {
+            if (sub.advanceRequested
+                || (sub.autoAdvance && sub.currentIndex < (int)sub.queue.size()
+                    && sub.displayTimer >= sub.queue[sub.currentIndex].duration)) {
                 sub.advanceRequested = false;
                 sub.state = SubtitleState::FadingOut;
                 sub.timer = 0.0f;
@@ -560,7 +566,10 @@ void updateChapterTitleSystem(entt::registry& reg, Vapor::RmlUiManager* rmluiMan
         auto container = ch.document->GetElementById("chapter-container");
         auto numberEl = ch.document->GetElementById("chapter-number");
         auto titleEl = ch.document->GetElementById("chapter-title");
-        if (!container || !numberEl || !titleEl) continue;
+        if (!container || !numberEl || !titleEl) {
+            fmt::print(stderr, "Error: Missing chapter title elements in {}\n", ch.documentPath);
+            continue;
+        }
 
         // 2. State Machine
         switch (ch.state) {

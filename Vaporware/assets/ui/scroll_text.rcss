@@ -3,7 +3,7 @@
 body {
     width: 100%;
     height: 100%;
-    font-family: LatoLatin;
+    font-family: "Arial Black";
     font-size: 24dp;
 }
 
@@ -27,14 +27,10 @@ body {
     /* Base state: rotated away (below the cylinder) */
     opacity: 0;
     transform: rotateX(-60deg) translateZ(-50dp);
-    transition: transform 0.5s ease-out, opacity 0.4s ease-out;
-
+    transition: transform 0.5s sine-out, opacity 0.4s sine-out;
     color: #ffffff;
-    text-shadow: 2dp 2dp 4dp #000000;
+    font-effect: shadow(2dp 2dp #000000);
     padding: 10dp;
-
-    /* Needed for 3D transforms */
-    transform-style: preserve-3d;
 }
 
 /* Visible state: facing viewer */
@@ -47,7 +43,7 @@ body {
 #scroll-text.scroll-out {
     opacity: 0;
     transform: rotateX(60deg) translateZ(-50dp);
-    transition: transform 0.5s ease-in, opacity 0.4s ease-in;
+    transition: transform 0.5s sine-in, opacity 0.4s sine-in;
 }
 
 /* Prepare for scroll-in: instantly position at bottom of cylinder (no transition) */
@@ -61,5 +57,5 @@ body {
 #scroll-text.scroll-in {
     opacity: 1;
     transform: rotateX(0deg) translateZ(0dp);
-    transition: transform 0.5s ease-out, opacity 0.4s ease-out;
+    transition: transform 0.5s sine-out, opacity 0.4s sine-out;
 }

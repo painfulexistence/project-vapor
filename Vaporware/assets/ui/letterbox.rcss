@@ -11,7 +11,7 @@ body {
     width: 100%;
     height: 0%;
     background-color: #000000;
-    transition: height 0.8s ease-in-out;
+    transition: height 1.6s sine-in-out;
 }
 
 #letterbox-top {

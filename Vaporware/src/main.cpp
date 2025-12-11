@@ -314,15 +314,13 @@ int main(int argc, char* args[]) {
     {
         auto& scroll = registry.emplace<ScrollTextComponent>(scrollText);
         scroll.documentPath = "assets/ui/scroll_text.rml";
-        scroll.lines = {
-            "Welcome to Project Vapor",
-            "Press SPACE to advance text",
-            "This is a teleprompter-style scroll effect",
-            "Each line scrolls up and fades out",
-            "While the next line fades in from below",
-            "Perfect for cutscenes or tutorials",
-            "End of demo - press SPACE to restart"
-        };
+        scroll.lines = { "Welcome to Project Vapor",
+                         "Press ENTER to advance text",
+                         "This is a teleprompter-style scroll effect",
+                         "Each line scrolls up and fades out",
+                         "While the next line fades in from below",
+                         "Perfect for cutscenes or tutorials",
+                         "End of demo - press ENTER to restart" };
         scroll.scrollDuration = 0.4f;
     }
 
@@ -331,7 +329,7 @@ int main(int argc, char* args[]) {
         auto& lb = registry.emplace<LetterboxComponent>(letterbox);
         lb.documentPath = "assets/ui/letterbox.rml";
         lb.targetAspect = 2.35f;// Cinematic widescreen
-        lb.animDuration = 0.8f;
+        lb.animDuration = 2.0f;
     }
 
     auto subtitle = registry.create();
@@ -339,13 +337,11 @@ int main(int argc, char* args[]) {
         auto& sub = registry.emplace<SubtitleComponent>(subtitle);
         sub.documentPath = "assets/ui/subtitle.rml";
         sub.autoAdvance = true;
-        sub.queue = {
-            { "NARRATOR", "In a world where code meets creativity...", 3.0f },
-            { "NARRATOR", "One engine dared to dream differently.", 2.5f },
-            { "", "Press C to show chapter title.", 2.0f },
-            { "DEVELOPER", "Welcome to Project Vapor.", 2.5f },
-            { "", "(End of subtitle demo)", 2.0f }
-        };
+        sub.queue = { { "NARRATOR", "In a world where code meets creativity...", 3.0f },
+                      { "NARRATOR", "One engine dared to dream differently.", 2.5f },
+                      { "", "Press F8 to show chapter title.", 2.0f },
+                      { "DEVELOPER", "Welcome to Project Vapor.", 2.5f },
+                      { "", "(End of subtitle demo)", 2.0f } };
     }
 
     auto chapterTitle = registry.create();
@@ -356,6 +352,7 @@ int main(int argc, char* args[]) {
         ch.chapterTitle = "The Beginning";
         ch.fadeDuration = 0.8f;
         ch.displayDuration = 2.5f;
+        ch.showRequested = true;// Show immediately on start
     }
 
     auto global = registry.create();
@@ -395,7 +392,7 @@ int main(int argc, char* args[]) {
                 if (e.key.scancode == SDL_SCANCODE_ESCAPE) {
                     quit = true;
                 }
-                if (e.key.scancode == SDL_SCANCODE_H) {
+                if (e.key.scancode == SDL_SCANCODE_F5) {
                     auto view = registry.view<HUDComponent>();
                     for (auto entity : view) {
                         auto& hud = view.get<HUDComponent>(entity);
@@ -407,7 +404,7 @@ int main(int argc, char* args[]) {
                     physics->setDebugEnabled(!physics->isDebugEnabled());
                     fmt::print("Physics Debug Renderer: {}\n", physics->isDebugEnabled() ? "Enabled" : "Disabled");
                 }
-                if (e.key.scancode == SDL_SCANCODE_SPACE) {
+                if (e.key.scancode == SDL_SCANCODE_RETURN) {
                     auto view = registry.view<ScrollTextComponent>();
                     for (auto entity : view) {
                         auto& scroll = view.get<ScrollTextComponent>(entity);
@@ -426,7 +423,7 @@ int main(int argc, char* args[]) {
                         }
                     }
                 }
-                if (e.key.scancode == SDL_SCANCODE_L) {
+                if (e.key.scancode == SDL_SCANCODE_F6) {
                     auto view = registry.view<LetterboxComponent>();
                     for (auto entity : view) {
                         auto& lb = view.get<LetterboxComponent>(entity);
@@ -434,7 +431,7 @@ int main(int argc, char* args[]) {
                         fmt::print("Letterbox toggled: {}\n", lb.isOpen ? "Opening" : "Closing");
                     }
                 }
-                if (e.key.scancode == SDL_SCANCODE_T) {
+                if (e.key.scancode == SDL_SCANCODE_F7) {
                     // Start/advance subtitles
                     auto view = registry.view<SubtitleComponent>();
                     for (auto entity : view) {
@@ -446,8 +443,7 @@ int main(int argc, char* args[]) {
                         } else if (sub.state == SubtitleState::Visible) {
                             // Skip current subtitle
                             sub.advanceRequested = true;
-                        } else if (sub.currentIndex >= (int)sub.queue.size() - 1 &&
-                                   sub.state == SubtitleState::Hidden) {
+                        } else if (sub.currentIndex >= (int)sub.queue.size() - 1 && sub.state == SubtitleState::Hidden) {
                             // Restart from beginning
                             sub.currentIndex = -1;
                             sub.advanceRequested = true;
@@ -455,7 +451,7 @@ int main(int argc, char* args[]) {
                         }
                     }
                 }
-                if (e.key.scancode == SDL_SCANCODE_C) {
+                if (e.key.scancode == SDL_SCANCODE_F8) {
                     // Show chapter title
                     auto view = registry.view<ChapterTitleComponent>();
                     for (auto entity : view) {
@@ -587,7 +583,11 @@ int main(int argc, char* args[]) {
                 );
 
                 renderer->drawText2D(
-                    gameFont, "Press H to toggle HUD", glm::vec2(50.0f, 250.0f), 0.5f, glm::vec4(0.8f, 0.8f, 0.8f, 1.0f)
+                    gameFont,
+                    "F5: HUD | F6: Letterbox | F7: Subtitles",
+                    glm::vec2(50.0f, 250.0f),
+                    0.5f,
+                    glm::vec4(0.8f, 0.8f, 0.8f, 1.0f)
                 );
 
                 // Show FPS

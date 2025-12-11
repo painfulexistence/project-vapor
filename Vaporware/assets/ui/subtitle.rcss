@@ -3,7 +3,7 @@
 body {
     width: 100%;
     height: 100%;
-    font-family: LatoLatin;
+    font-family: "Arial Black";
 }
 
 #subtitle-container {
@@ -16,7 +16,7 @@ body {
 
     /* Fade animation */
     opacity: 0;
-    transition: opacity 0.25s ease-in-out;
+    transition: opacity 0.25s sine-in-out;
 }
 
 #subtitle-container.visible {
@@ -32,10 +32,8 @@ body {
     margin-bottom: 8dp;
 
     /* Text shadow for readability */
-    text-shadow: 1dp 1dp 2dp #000000,
-                 -1dp -1dp 2dp #000000,
-                 1dp -1dp 2dp #000000,
-                 -1dp 1dp 2dp #000000;
+    /* Outline effect for readability */
+    font-effect: outline(1dp #000000);
 }
 
 #subtitle-speaker.hidden {
@@ -49,14 +47,8 @@ body {
     line-height: 1.5;
 
     /* Strong outline + shadow for any background */
-    text-shadow: 2dp 2dp 3dp #000000,
-                 -2dp -2dp 3dp #000000,
-                 2dp -2dp 3dp #000000,
-                 -2dp 2dp 3dp #000000,
-                 0dp 2dp 3dp #000000,
-                 0dp -2dp 3dp #000000,
-                 2dp 0dp 3dp #000000,
-                 -2dp 0dp 3dp #000000;
+    /* Strong outline + shadow */
+    font-effect: outline(2dp #000000), shadow(2dp 2dp #000000);
 }
 
 /* Optional: italic for internal thoughts */
