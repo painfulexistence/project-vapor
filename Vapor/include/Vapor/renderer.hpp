@@ -108,6 +108,14 @@ public:
     // This allows using the render texture as an image source in RmlUI documents
     virtual Uint64 registerRenderTextureForUI(RenderTextureHandle handle) { return 0; }
 
+    // ===== Render Texture Post-Processing API =====
+    // Apply bloom effect to render texture (requires HDR render texture)
+    virtual void applyBloom(RenderTextureHandle target, float threshold = 1.0f, float strength = 0.5f) {}
+    // Apply tone mapping to render texture (converts HDR to LDR)
+    virtual void applyToneMapping(RenderTextureHandle target, float exposure = 1.0f) {}
+    // Apply vignette effect
+    virtual void applyVignette(RenderTextureHandle target, float strength = 0.3f, float radius = 0.8f) {}
+
     // ===== Font Rendering API =====
     // Load a font from file path with specified base size
     virtual FontHandle loadFont(const std::string& path, float baseSize) { return {}; }

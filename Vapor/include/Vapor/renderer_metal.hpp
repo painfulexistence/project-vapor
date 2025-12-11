@@ -244,6 +244,11 @@ public:
     glm::uvec2 getRenderTextureSize(RenderTextureHandle handle) override;
     Uint64 registerRenderTextureForUI(RenderTextureHandle handle) override;
 
+    // Render texture post-processing
+    void applyBloom(RenderTextureHandle target, float threshold = 1.0f, float strength = 0.5f) override;
+    void applyToneMapping(RenderTextureHandle target, float exposure = 1.0f) override;
+    void applyVignette(RenderTextureHandle target, float strength = 0.3f, float radius = 0.8f) override;
+
     // ===== Font Rendering API =====
     FontHandle loadFont(const std::string& path, float baseSize) override;
     void unloadFont(FontHandle handle) override;
@@ -565,6 +570,7 @@ private:
     // Render texture internal data
     struct RenderTextureData {
         NS::SharedPtr<MTL::Texture> colorTexture;
+        NS::SharedPtr<MTL::Texture> tempTexture;// For ping-pong post-processing
         NS::SharedPtr<MTL::Texture> depthTexture;
         TextureHandle textureHandle;// Handle for using as sampler texture
         Uint32 width = 0;

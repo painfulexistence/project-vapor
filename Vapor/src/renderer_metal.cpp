@@ -5219,6 +5219,18 @@ RenderTextureHandle Renderer_Metal::createRenderTexture(const RenderTextureDesc&
         rtData.depthTexture = NS::TransferPtr(device->newTexture(depthDesc.get()));
     }
 
+    // Create temp texture for ping-pong post-processing (same format as color)
+    auto tempDesc = NS::TransferPtr(MTL::TextureDescriptor::alloc()->init());
+    tempDesc->setTextureType(MTL::TextureType2D);
+    tempDesc->setPixelFormat(desc.hdr ? MTL::PixelFormatRGBA16Float : MTL::PixelFormatRGBA8Unorm);
+    tempDesc->setWidth(desc.width);
+    tempDesc->setHeight(desc.height);
+    tempDesc->setMipmapLevelCount(1);
+    tempDesc->setSampleCount(1);
+    tempDesc->setStorageMode(MTL::StorageModePrivate);
+    tempDesc->setUsage(MTL::TextureUsageRenderTarget | MTL::TextureUsageShaderRead);
+    rtData.tempTexture = NS::TransferPtr(device->newTexture(tempDesc.get()));
+
     // Store the color texture as a regular texture handle for sampling
     textures[nextTextureID] = rtData.colorTexture;
     rtData.textureHandle = TextureHandle{nextTextureID++};
@@ -5413,6 +5425,161 @@ Uint64 Renderer_Metal::registerRenderTextureForUI(RenderTextureHandle handle) {
 
     auto* uiRenderer = static_cast<Vapor::RmlUiRenderer_Metal*>(m_uiRenderer);
     return uiRenderer->RegisterExternalTexture(it->second.colorTexture.get(), it->second.width, it->second.height);
+}
+
+// ===== Render Texture Post-Processing Implementation =====
+
+void Renderer_Metal::applyBloom(RenderTextureHandle target, float threshold, float strength) {
+    auto it = renderTextures.find(target.rid);
+    if (it == renderTextures.end()) {
+        return;
+    }
+
+    RenderTextureData& rtData = it->second;
+    auto cmdBuffer = NS::TransferPtr(queue->commandBuffer());
+
+    // Step 1: Extract bright pixels to temp texture
+    {
+        auto passDesc = NS::TransferPtr(MTL::RenderPassDescriptor::alloc()->init());
+        auto colorAttachment = passDesc->colorAttachments()->object(0);
+        colorAttachment->setTexture(rtData.tempTexture.get());
+        colorAttachment->setLoadAction(MTL::LoadActionClear);
+        colorAttachment->setStoreAction(MTL::StoreActionStore);
+        colorAttachment->setClearColor(MTL::ClearColor(0, 0, 0, 1));
+
+        auto encoder = cmdBuffer->renderCommandEncoder(passDesc.get());
+        encoder->setRenderPipelineState(bloomBrightnessPipeline.get());
+
+        MTL::Viewport viewport = {0, 0, (double)rtData.width, (double)rtData.height, 0, 1};
+        encoder->setViewport(viewport);
+
+        // Bind source texture and uniforms
+        encoder->setFragmentTexture(rtData.colorTexture.get(), 0);
+        encoder->setFragmentBytes(&threshold, sizeof(float), 0);
+
+        // Draw fullscreen quad
+        encoder->drawPrimitives(MTL::PrimitiveTypeTriangle, NS::UInteger(0), NS::UInteger(3));
+        encoder->endEncoding();
+    }
+
+    // Step 2: Composite bloom back to color texture
+    {
+        auto passDesc = NS::TransferPtr(MTL::RenderPassDescriptor::alloc()->init());
+        auto colorAttachment = passDesc->colorAttachments()->object(0);
+        colorAttachment->setTexture(rtData.colorTexture.get());
+        colorAttachment->setLoadAction(MTL::LoadActionLoad);
+        colorAttachment->setStoreAction(MTL::StoreActionStore);
+
+        auto encoder = cmdBuffer->renderCommandEncoder(passDesc.get());
+        encoder->setRenderPipelineState(bloomCompositePipeline.get());
+
+        MTL::Viewport viewport = {0, 0, (double)rtData.width, (double)rtData.height, 0, 1};
+        encoder->setViewport(viewport);
+
+        encoder->setFragmentTexture(rtData.tempTexture.get(), 0);
+        encoder->setFragmentBytes(&strength, sizeof(float), 0);
+
+        encoder->drawPrimitives(MTL::PrimitiveTypeTriangle, NS::UInteger(0), NS::UInteger(3));
+        encoder->endEncoding();
+    }
+
+    cmdBuffer->commit();
+    cmdBuffer->waitUntilCompleted();
+}
+
+void Renderer_Metal::applyToneMapping(RenderTextureHandle target, float exposure) {
+    auto it = renderTextures.find(target.rid);
+    if (it == renderTextures.end()) {
+        return;
+    }
+
+    RenderTextureData& rtData = it->second;
+    auto cmdBuffer = NS::TransferPtr(queue->commandBuffer());
+
+    // Copy color to temp first
+    {
+        auto blitEncoder = cmdBuffer->blitCommandEncoder();
+        blitEncoder->copyFromTexture(
+            rtData.colorTexture.get(), 0, 0, MTL::Origin(0, 0, 0),
+            MTL::Size(rtData.width, rtData.height, 1),
+            rtData.tempTexture.get(), 0, 0, MTL::Origin(0, 0, 0)
+        );
+        blitEncoder->endEncoding();
+    }
+
+    // Apply tone mapping from temp to color
+    {
+        auto passDesc = NS::TransferPtr(MTL::RenderPassDescriptor::alloc()->init());
+        auto colorAttachment = passDesc->colorAttachments()->object(0);
+        colorAttachment->setTexture(rtData.colorTexture.get());
+        colorAttachment->setLoadAction(MTL::LoadActionDontCare);
+        colorAttachment->setStoreAction(MTL::StoreActionStore);
+
+        auto encoder = cmdBuffer->renderCommandEncoder(passDesc.get());
+        encoder->setRenderPipelineState(postProcessPipeline.get());
+
+        MTL::Viewport viewport = {0, 0, (double)rtData.width, (double)rtData.height, 0, 1};
+        encoder->setViewport(viewport);
+
+        encoder->setFragmentTexture(rtData.tempTexture.get(), 0);
+        encoder->setFragmentBytes(&exposure, sizeof(float), 0);
+
+        encoder->drawPrimitives(MTL::PrimitiveTypeTriangle, NS::UInteger(0), NS::UInteger(3));
+        encoder->endEncoding();
+    }
+
+    cmdBuffer->commit();
+    cmdBuffer->waitUntilCompleted();
+}
+
+void Renderer_Metal::applyVignette(RenderTextureHandle target, float strength, float radius) {
+    auto it = renderTextures.find(target.rid);
+    if (it == renderTextures.end()) {
+        return;
+    }
+
+    RenderTextureData& rtData = it->second;
+    auto cmdBuffer = NS::TransferPtr(queue->commandBuffer());
+
+    // Copy color to temp
+    {
+        auto blitEncoder = cmdBuffer->blitCommandEncoder();
+        blitEncoder->copyFromTexture(
+            rtData.colorTexture.get(), 0, 0, MTL::Origin(0, 0, 0),
+            MTL::Size(rtData.width, rtData.height, 1),
+            rtData.tempTexture.get(), 0, 0, MTL::Origin(0, 0, 0)
+        );
+        blitEncoder->endEncoding();
+    }
+
+    // Apply vignette from temp to color
+    {
+        auto passDesc = NS::TransferPtr(MTL::RenderPassDescriptor::alloc()->init());
+        auto colorAttachment = passDesc->colorAttachments()->object(0);
+        colorAttachment->setTexture(rtData.colorTexture.get());
+        colorAttachment->setLoadAction(MTL::LoadActionDontCare);
+        colorAttachment->setStoreAction(MTL::StoreActionStore);
+
+        auto encoder = cmdBuffer->renderCommandEncoder(passDesc.get());
+        encoder->setRenderPipelineState(postProcessPipeline.get());
+
+        MTL::Viewport viewport = {0, 0, (double)rtData.width, (double)rtData.height, 0, 1};
+        encoder->setViewport(viewport);
+
+        struct VignetteParams {
+            float strength;
+            float radius;
+        } params = {strength, radius};
+
+        encoder->setFragmentTexture(rtData.tempTexture.get(), 0);
+        encoder->setFragmentBytes(&params, sizeof(VignetteParams), 0);
+
+        encoder->drawPrimitives(MTL::PrimitiveTypeTriangle, NS::UInteger(0), NS::UInteger(3));
+        encoder->endEncoding();
+    }
+
+    cmdBuffer->commit();
+    cmdBuffer->waitUntilCompleted();
 }
 
 // ===== Font Rendering Implementation =====
