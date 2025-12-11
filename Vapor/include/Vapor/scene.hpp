@@ -171,7 +171,9 @@ public:
     std::vector<std::shared_ptr<Material>> materials;
     std::vector<std::shared_ptr<Node>> nodes;
     std::vector<DirectionalLight> directionalLights;
+    std::vector<bool> directionalLightsEnabled;  // Per-light enable flags for ImGui control
     std::vector<PointLight> pointLights;
+    std::vector<bool> pointLightsEnabled;  // Per-light enable flags for ImGui control
     std::vector<std::shared_ptr<FluidVolume>> fluidVolumes;
 
     // GPU-driven rendering

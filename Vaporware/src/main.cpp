@@ -1,5 +1,8 @@
 #include "backends/imgui_impl_sdl3.h"
 #include "imgui.h"
+#if defined(__APPLE__)
+#include "Vapor/renderer_metal.hpp"
+#endif
 #include <SDL3/SDL.h>
 #include <args.hxx>
 #include <fmt/core.h>
@@ -320,6 +323,11 @@ int main(int argc, char* args[]) {
     Uint32 frameCount = 0;
     float time = SDL_GetTicks() / 1000.0f;
     bool quit = false;
+    bool showDebugWindow = false;
+
+    // Initialize light enabled arrays to match light counts
+    scene->directionalLightsEnabled.resize(scene->directionalLights.size(), true);
+    scene->pointLightsEnabled.resize(scene->pointLights.size(), true);
 
     auto& inputManager = engineCore->getInputManager();
 
@@ -358,6 +366,10 @@ int main(int argc, char* args[]) {
                 if (e.key.scancode == SDL_SCANCODE_F3) {
                     physics->setDebugEnabled(!physics->isDebugEnabled());
                     fmt::print("Physics Debug Renderer: {}\n", physics->isDebugEnabled() ? "Enabled" : "Disabled");
+                }
+                if (e.key.scancode == SDL_SCANCODE_F4) {
+                    showDebugWindow = !showDebugWindow;
+                    fmt::print("Debug Window: {}\n", showDebugWindow ? "Visible" : "Hidden");
                 }
                 break;
             }
@@ -493,6 +505,74 @@ int main(int argc, char* args[]) {
             renderer->drawQuad3D(
                 glm::vec3(0.0f, 2.0f, 0.0f), glm::vec2(1.0f, 1.0f), spriteTexture, glm::vec4(1.0f, 0.5f, 0.5f, 1.0f)
             );
+
+            // ===== ImGui Debug Window (F4 to toggle) =====
+            ImGui_ImplSDL3_NewFrame();
+            ImGui::NewFrame();
+
+            if (showDebugWindow) {
+                ImGui::Begin("Render Debug", &showDebugWindow);
+
+#if defined(__APPLE__)
+                // Metal: Control render passes via RenderGraph
+                auto* metalRenderer = dynamic_cast<Renderer_Metal*>(renderer.get());
+                if (metalRenderer) {
+                    if (ImGui::CollapsingHeader("Render Passes", ImGuiTreeNodeFlags_DefaultOpen)) {
+                        auto& passes = metalRenderer->getRenderGraph().getPasses();
+                        for (auto& pass : passes) {
+                            ImGui::Checkbox(pass->getName(), &pass->enabled);
+                        }
+                    }
+                }
+#endif
+
+                // Directional Lights
+                if (ImGui::CollapsingHeader("Directional Lights", ImGuiTreeNodeFlags_DefaultOpen)) {
+                    for (size_t i = 0; i < scene->directionalLights.size(); ++i) {
+                        // Ensure enabled array is large enough
+                        if (i >= scene->directionalLightsEnabled.size()) {
+                            scene->directionalLightsEnabled.resize(i + 1, true);
+                        }
+                        ImGui::PushID(static_cast<int>(i));
+                        auto& light = scene->directionalLights[i];
+                        std::string label = fmt::format("Dir Light {}", i);
+                        if (ImGui::TreeNode(label.c_str())) {
+                            ImGui::Checkbox("Enabled", &scene->directionalLightsEnabled[i]);
+                            ImGui::DragFloat3("Direction", &light.direction.x, 0.01f, -1.0f, 1.0f);
+                            ImGui::ColorEdit3("Color", &light.color.x);
+                            ImGui::DragFloat("Intensity", &light.intensity, 0.1f, 0.0f, 100.0f);
+                            ImGui::TreePop();
+                        }
+                        ImGui::PopID();
+                    }
+                }
+
+                // Point Lights
+                if (ImGui::CollapsingHeader("Point Lights", ImGuiTreeNodeFlags_DefaultOpen)) {
+                    for (size_t i = 0; i < scene->pointLights.size(); ++i) {
+                        // Ensure enabled array is large enough
+                        if (i >= scene->pointLightsEnabled.size()) {
+                            scene->pointLightsEnabled.resize(i + 1, true);
+                        }
+                        ImGui::PushID(static_cast<int>(i + 1000)); // Offset to avoid ID collision
+                        auto& light = scene->pointLights[i];
+                        std::string label = fmt::format("Point Light {}", i);
+                        if (ImGui::TreeNode(label.c_str())) {
+                            ImGui::Checkbox("Enabled", &scene->pointLightsEnabled[i]);
+                            ImGui::DragFloat3("Position", &light.position.x, 0.1f);
+                            ImGui::ColorEdit3("Color", &light.color.x);
+                            ImGui::DragFloat("Intensity", &light.intensity, 0.1f, 0.0f, 100.0f);
+                            ImGui::DragFloat("Radius", &light.radius, 0.01f, 0.0f, 10.0f);
+                            ImGui::TreePop();
+                        }
+                        ImGui::PopID();
+                    }
+                }
+
+                ImGui::End();
+            }
+
+            ImGui::Render();
 
             renderer->draw(scene, tempCamera);
         } else {

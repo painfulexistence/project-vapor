@@ -23,6 +23,15 @@ enum class BufferUsage { VERTEX, INDEX, UNIFORM, STORAGE, COPY_SRC, COPY_DST };
 
 enum class RenderTargetUsage { COLOR_MSAA, COLOR, DEPTH_MSAA, DEPTH_STENCIL_MSAA, DEPTH, DEPTH_STENCIL };
 
+// Render pass toggles for debugging/visualization
+struct RenderPassToggles {
+    bool prePass = true;
+    bool tileCulling = true;
+    bool mainPass = true;
+    bool particles = true;
+    bool postProcess = true;
+};
+
 class Renderer {
 public:
     virtual ~Renderer() = default;
@@ -36,6 +45,10 @@ public:
 
     virtual void setRenderPath(RenderPath path) = 0;
     virtual RenderPath getRenderPath() const = 0;
+
+    // Render pass toggles for debugging
+    RenderPassToggles& getPassToggles() { return passToggles; }
+    const RenderPassToggles& getPassToggles() const { return passToggles; }
 
     // UI rendering (optional, implemented by backends that support it)
     // This method should set the RenderInterface and finalize RmlUI initialization
@@ -114,6 +127,7 @@ public:
     virtual float getFontLineHeight(FontHandle font, float scale = 1.0f) { return 0.0f; }
 
 protected:
+    RenderPassToggles passToggles;
     const Uint32 MAX_FRAMES_IN_FLIGHT = 3;
     const Uint32 MSAA_SAMPLE_COUNT = 4;
     const Uint32 MAX_INSTANCES = 5000;// Increased for large scenes like Bistro (2911 instances)

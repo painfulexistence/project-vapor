@@ -4271,28 +4271,53 @@ auto Renderer_Metal::draw(std::shared_ptr<Scene> scene, Camera& camera) -> void 
         NS::Range::Make(0, cameraDataBuffers[currentFrameInFlight]->length())
     );
 
+    // Filter and upload enabled directional lights
     DirectionalLight* dirLights = reinterpret_cast<DirectionalLight*>(directionalLightBuffer->contents());
+    size_t enabledDirLightCount = 0;
     for (size_t i = 0; i < scene->directionalLights.size(); ++i) {
-        dirLights[i].direction = scene->directionalLights[i].direction;
-        dirLights[i].color = scene->directionalLights[i].color;
-        dirLights[i].intensity = scene->directionalLights[i].intensity;
+        bool enabled = i < scene->directionalLightsEnabled.size() ? scene->directionalLightsEnabled[i] : true;
+        if (enabled) {
+            dirLights[enabledDirLightCount].direction = scene->directionalLights[i].direction;
+            dirLights[enabledDirLightCount].color = scene->directionalLights[i].color;
+            dirLights[enabledDirLightCount].intensity = scene->directionalLights[i].intensity;
+            enabledDirLightCount++;
+        }
+    }
+    // Zero out remaining slots to disable them in shader
+    for (size_t i = enabledDirLightCount; i < scene->directionalLights.size(); ++i) {
+        dirLights[i].intensity = 0.0f;
     }
     directionalLightBuffer->didModifyRange(NS::Range::Make(0, directionalLightBuffer->length()));
 
     AtmosphereData* atmosphereData = reinterpret_cast<AtmosphereData*>(atmosphereDataBuffer->contents());
-    if (!scene->directionalLights.empty()) {
-        const auto& sunLight = scene->directionalLights[0];
-        atmosphereData->sunDirection = -glm::normalize(sunLight.direction);
-        atmosphereData->sunColor = sunLight.color;
-        atmosphereData->sunIntensity = sunLight.intensity;
+    // Find first enabled directional light for atmosphere
+    for (size_t i = 0; i < scene->directionalLights.size(); ++i) {
+        bool enabled = i < scene->directionalLightsEnabled.size() ? scene->directionalLightsEnabled[i] : true;
+        if (enabled) {
+            const auto& sunLight = scene->directionalLights[i];
+            atmosphereData->sunDirection = -glm::normalize(sunLight.direction);
+            atmosphereData->sunColor = sunLight.color;
+            atmosphereData->sunIntensity = sunLight.intensity;
+            break;
+        }
     }
 
+    // Filter and upload enabled point lights
     PointLight* pointLights = reinterpret_cast<PointLight*>(pointLightBuffer->contents());
+    size_t enabledPointLightCount = 0;
     for (size_t i = 0; i < scene->pointLights.size(); ++i) {
-        pointLights[i].position = scene->pointLights[i].position;
-        pointLights[i].color = scene->pointLights[i].color;
-        pointLights[i].intensity = scene->pointLights[i].intensity;
-        pointLights[i].radius = scene->pointLights[i].radius;
+        bool enabled = i < scene->pointLightsEnabled.size() ? scene->pointLightsEnabled[i] : true;
+        if (enabled) {
+            pointLights[enabledPointLightCount].position = scene->pointLights[i].position;
+            pointLights[enabledPointLightCount].color = scene->pointLights[i].color;
+            pointLights[enabledPointLightCount].intensity = scene->pointLights[i].intensity;
+            pointLights[enabledPointLightCount].radius = scene->pointLights[i].radius;
+            enabledPointLightCount++;
+        }
+    }
+    // Zero out remaining slots to disable them in shader
+    for (size_t i = enabledPointLightCount; i < scene->pointLights.size(); ++i) {
+        pointLights[i].intensity = 0.0f;
     }
     pointLightBuffer->didModifyRange(NS::Range::Make(0, pointLightBuffer->length()));
 

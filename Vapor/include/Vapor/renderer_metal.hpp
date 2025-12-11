@@ -8,6 +8,7 @@
 #include <SDL3/SDL_stdinc.h>
 #include <SDL3/SDL_video.h>
 #include <array>
+#include <cstring>
 #include <memory>
 #include <string>
 #include <unordered_map>
@@ -85,6 +86,21 @@ public:
         passes.clear();
     }
 
+    // Get pass by name for ImGui control
+    RenderPass* getPass(const char* name) {
+        for (auto& pass : passes) {
+            if (std::strcmp(pass->getName(), name) == 0) {
+                return pass.get();
+            }
+        }
+        return nullptr;
+    }
+
+    // Get all passes for iteration
+    std::vector<std::unique_ptr<RenderPass>>& getPasses() {
+        return passes;
+    }
+
 private:
     std::vector<std::unique_ptr<RenderPass>> passes;
 };
@@ -154,6 +170,11 @@ public:
     // Debug draw - set the external debug draw queue
     std::shared_ptr<Vapor::DebugDraw> getDebugDraw() override {
         return debugDraw;
+    }
+
+    // Get render graph for ImGui pass control
+    RenderGraph& getRenderGraph() {
+        return graph;
     }
 
     // ===== 2D/3D Batch Rendering API =====
