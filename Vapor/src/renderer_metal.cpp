@@ -4455,6 +4455,15 @@ auto Renderer_Metal::draw(std::shared_ptr<Scene> scene, Camera& camera) -> void 
 
         ImGui::Separator();
 
+        if (ImGui::TreeNode("Render Passes")) {
+            ImGui::Separator();
+            auto& passes = graph.getPasses();
+            for (auto& pass : passes) {
+                ImGui::Checkbox(pass->getName(), &pass->enabled);
+            }
+            ImGui::TreePop();
+        }
+
         if (ImGui::TreeNode("RTs")) {
             ImGui::Separator();
             if (ImGui::TreeNode(fmt::format("Scene Color RT").c_str())) {
@@ -4543,21 +4552,43 @@ auto Renderer_Metal::draw(std::shared_ptr<Scene> scene, Camera& camera) -> void 
 
         if (ImGui::TreeNode("Scene Lights")) {
             ImGui::Separator();
-            for (auto& l : scene->directionalLights) {
-                ImGui::Text("Directional Light");
-                ImGui::PushID(&l);
-                ImGui::DragFloat3("Direction", (float*)&l.direction, 0.1f);
-                ImGui::ColorEdit3("Color", (float*)&l.color);
-                ImGui::DragFloat("Intensity", &l.intensity, 0.1f, 0.0001f);
+
+            // Directional Lights
+            for (size_t i = 0; i < scene->directionalLights.size(); ++i) {
+                auto& l = scene->directionalLights[i];
+                // Ensure enabled array is large enough
+                if (i >= scene->directionalLightsEnabled.size()) {
+                    scene->directionalLightsEnabled.resize(i + 1, true);
+                }
+                ImGui::PushID(static_cast<int>(i));
+                if (ImGui::TreeNode(fmt::format("Directional Light {}", i).c_str())) {
+                    ImGui::Checkbox("Enabled", &scene->directionalLightsEnabled[i]);
+                    ImGui::DragFloat3("Direction", (float*)&l.direction, 0.1f);
+                    ImGui::ColorEdit3("Color", (float*)&l.color);
+                    ImGui::DragFloat("Intensity", &l.intensity, 0.1f, 0.0001f);
+                    ImGui::TreePop();
+                }
                 ImGui::PopID();
             }
-            for (auto& l : scene->pointLights) {
-                ImGui::Text("Point Light");
-                ImGui::PushID(&l);
-                ImGui::DragFloat3("Position", (float*)&l.position, 0.1f);
-                ImGui::ColorEdit3("Color", (float*)&l.color);
-                ImGui::DragFloat("Intensity", &l.intensity, 0.1f, 0.0001f);
-                ImGui::DragFloat("Radius", &l.radius, 0.1f, 0.0001f);
+
+            ImGui::Separator();
+
+            // Point Lights
+            for (size_t i = 0; i < scene->pointLights.size(); ++i) {
+                auto& l = scene->pointLights[i];
+                // Ensure enabled array is large enough
+                if (i >= scene->pointLightsEnabled.size()) {
+                    scene->pointLightsEnabled.resize(i + 1, true);
+                }
+                ImGui::PushID(static_cast<int>(i + 1000)); // Offset to avoid ID collision
+                if (ImGui::TreeNode(fmt::format("Point Light {}", i).c_str())) {
+                    ImGui::Checkbox("Enabled", &scene->pointLightsEnabled[i]);
+                    ImGui::DragFloat3("Position", (float*)&l.position, 0.1f);
+                    ImGui::ColorEdit3("Color", (float*)&l.color);
+                    ImGui::DragFloat("Intensity", &l.intensity, 0.1f, 0.0001f);
+                    ImGui::DragFloat("Radius", &l.radius, 0.1f, 0.0001f);
+                    ImGui::TreePop();
+                }
                 ImGui::PopID();
             }
             ImGui::TreePop();
