@@ -284,6 +284,14 @@ protected:
     NS::SharedPtr<MTL::ComputePipelineState> buildClustersPipeline;
     NS::SharedPtr<MTL::ComputePipelineState> cullLightsPipeline;
     NS::SharedPtr<MTL::ComputePipelineState> tileCullingPipeline;
+
+    // Compact clustered light culling pipelines
+    NS::SharedPtr<MTL::ComputePipelineState> buildClustersCompactPipeline;
+    NS::SharedPtr<MTL::ComputePipelineState> lightCountPipeline;
+    NS::SharedPtr<MTL::ComputePipelineState> prefixSumBlocksPipeline;
+    NS::SharedPtr<MTL::ComputePipelineState> prefixSumBlockSumsPipeline;
+    NS::SharedPtr<MTL::ComputePipelineState> addBlockSumsPipeline;
+    NS::SharedPtr<MTL::ComputePipelineState> lightWritePipeline;
     NS::SharedPtr<MTL::ComputePipelineState> normalResolvePipeline;
     NS::SharedPtr<MTL::ComputePipelineState> raytraceShadowPipeline;
     NS::SharedPtr<MTL::ComputePipelineState> raytraceAOPipeline;
@@ -410,6 +418,12 @@ protected:
     NS::SharedPtr<MTL::Buffer> atmosphereDataBuffer;
     NS::SharedPtr<MTL::Buffer> iblCaptureDataBuffer;
     std::vector<NS::SharedPtr<MTL::Buffer>> clusterBuffers;
+
+    // Compact clustered light culling resources (global light index buffer approach)
+    std::vector<NS::SharedPtr<MTL::Buffer>> clusterCompactBuffers;
+    std::vector<NS::SharedPtr<MTL::Buffer>> globalLightIndexBuffers;
+    NS::SharedPtr<MTL::Buffer> prefixSumBlockSumsBuffer;
+    bool useCompactClusters = true; // Toggle between old and new implementation
 
     // Light scattering (God Rays) resources
     std::vector<NS::SharedPtr<MTL::Buffer>> lightScatteringDataBuffers;

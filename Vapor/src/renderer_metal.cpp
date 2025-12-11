@@ -592,16 +592,103 @@ public:
         glm::uvec3 gridSize = glm::uvec3(r.clusterGridSizeX, r.clusterGridSizeY, r.clusterGridSizeZ);
         uint pointLightCount = r.currentScene->pointLights.size();
 
-        auto encoder = r.currentCommandBuffer->computeCommandEncoder();
-        encoder->setComputePipelineState(r.tileCullingPipeline.get());
-        encoder->setBuffer(r.clusterBuffers[r.currentFrameInFlight].get(), 0, 0);
-        encoder->setBuffer(r.pointLightBuffer.get(), 0, 1);
-        encoder->setBuffer(r.cameraDataBuffers[r.currentFrameInFlight].get(), 0, 2);
-        encoder->setBytes(&pointLightCount, sizeof(uint), 3);
-        encoder->setBytes(&gridSize, sizeof(glm::uvec3), 4);
-        encoder->setBytes(&screenSize, sizeof(glm::vec2), 5);
-        encoder->dispatchThreadgroups(MTL::Size(r.clusterGridSizeX, r.clusterGridSizeY, 1), MTL::Size(1, 1, 1));
-        encoder->endEncoding();
+        if (r.useCompactClusters) {
+            // New compact cluster approach: Build AABBs → Count → Prefix Sum → Write
+            uint32_t numClusters = r.clusterGridSizeX * r.clusterGridSizeY * r.clusterGridSizeZ;
+            uint32_t numBlocks = (numClusters + 255) / 256;
+
+            // Pass 0: Build cluster AABBs
+            {
+                auto encoder = r.currentCommandBuffer->computeCommandEncoder();
+                encoder->setComputePipelineState(r.buildClustersCompactPipeline.get());
+                encoder->setBuffer(r.clusterCompactBuffers[r.currentFrameInFlight].get(), 0, 0);
+                encoder->setBuffer(r.cameraDataBuffers[r.currentFrameInFlight].get(), 0, 1);
+                encoder->setBytes(&screenSize, sizeof(glm::vec2), 2);
+                encoder->setBytes(&gridSize, sizeof(glm::uvec3), 3);
+                encoder->dispatchThreadgroups(
+                    MTL::Size(r.clusterGridSizeX, r.clusterGridSizeY, r.clusterGridSizeZ),
+                    MTL::Size(1, 1, 1)
+                );
+                encoder->endEncoding();
+            }
+
+            // Pass 1: Count lights per cluster
+            {
+                auto encoder = r.currentCommandBuffer->computeCommandEncoder();
+                encoder->setComputePipelineState(r.lightCountPipeline.get());
+                encoder->setBuffer(r.clusterCompactBuffers[r.currentFrameInFlight].get(), 0, 0);
+                encoder->setBuffer(r.pointLightBuffer.get(), 0, 1);
+                encoder->setBuffer(r.cameraDataBuffers[r.currentFrameInFlight].get(), 0, 2);
+                encoder->setBytes(&pointLightCount, sizeof(uint), 3);
+                encoder->setBytes(&gridSize, sizeof(glm::uvec3), 4);
+                encoder->dispatchThreadgroups(
+                    MTL::Size(r.clusterGridSizeX, r.clusterGridSizeY, r.clusterGridSizeZ),
+                    MTL::Size(1, 1, 1)
+                );
+                encoder->endEncoding();
+            }
+
+            // Pass 2a: Block-level prefix sum
+            {
+                auto encoder = r.currentCommandBuffer->computeCommandEncoder();
+                encoder->setComputePipelineState(r.prefixSumBlocksPipeline.get());
+                encoder->setBuffer(r.clusterCompactBuffers[r.currentFrameInFlight].get(), 0, 0);
+                encoder->setBuffer(r.prefixSumBlockSumsBuffer.get(), 0, 1);
+                encoder->setBytes(&numClusters, sizeof(uint32_t), 2);
+                encoder->dispatchThreadgroups(MTL::Size(numBlocks, 1, 1), MTL::Size(256, 1, 1));
+                encoder->endEncoding();
+            }
+
+            // Pass 2b: Scan block sums
+            {
+                auto encoder = r.currentCommandBuffer->computeCommandEncoder();
+                encoder->setComputePipelineState(r.prefixSumBlockSumsPipeline.get());
+                encoder->setBuffer(r.prefixSumBlockSumsBuffer.get(), 0, 0);
+                encoder->setBytes(&numBlocks, sizeof(uint32_t), 1);
+                encoder->dispatchThreadgroups(MTL::Size(1, 1, 1), MTL::Size(256, 1, 1));
+                encoder->endEncoding();
+            }
+
+            // Pass 2c: Add block sums back
+            {
+                auto encoder = r.currentCommandBuffer->computeCommandEncoder();
+                encoder->setComputePipelineState(r.addBlockSumsPipeline.get());
+                encoder->setBuffer(r.clusterCompactBuffers[r.currentFrameInFlight].get(), 0, 0);
+                encoder->setBuffer(r.prefixSumBlockSumsBuffer.get(), 0, 1);
+                encoder->setBytes(&numClusters, sizeof(uint32_t), 2);
+                encoder->dispatchThreadgroups(MTL::Size(numBlocks, 1, 1), MTL::Size(256, 1, 1));
+                encoder->endEncoding();
+            }
+
+            // Pass 3: Write light indices to global buffer
+            {
+                auto encoder = r.currentCommandBuffer->computeCommandEncoder();
+                encoder->setComputePipelineState(r.lightWritePipeline.get());
+                encoder->setBuffer(r.clusterCompactBuffers[r.currentFrameInFlight].get(), 0, 0);
+                encoder->setBuffer(r.pointLightBuffer.get(), 0, 1);
+                encoder->setBuffer(r.globalLightIndexBuffers[r.currentFrameInFlight].get(), 0, 2);
+                encoder->setBuffer(r.cameraDataBuffers[r.currentFrameInFlight].get(), 0, 3);
+                encoder->setBytes(&pointLightCount, sizeof(uint), 4);
+                encoder->setBytes(&gridSize, sizeof(glm::uvec3), 5);
+                encoder->dispatchThreadgroups(
+                    MTL::Size(r.clusterGridSizeX, r.clusterGridSizeY, r.clusterGridSizeZ),
+                    MTL::Size(1, 1, 1)
+                );
+                encoder->endEncoding();
+            }
+        } else {
+            // Original per-cluster storage approach
+            auto encoder = r.currentCommandBuffer->computeCommandEncoder();
+            encoder->setComputePipelineState(r.tileCullingPipeline.get());
+            encoder->setBuffer(r.clusterBuffers[r.currentFrameInFlight].get(), 0, 0);
+            encoder->setBuffer(r.pointLightBuffer.get(), 0, 1);
+            encoder->setBuffer(r.cameraDataBuffers[r.currentFrameInFlight].get(), 0, 2);
+            encoder->setBytes(&pointLightCount, sizeof(uint), 3);
+            encoder->setBytes(&gridSize, sizeof(glm::uvec3), 4);
+            encoder->setBytes(&screenSize, sizeof(glm::vec2), 5);
+            encoder->dispatchThreadgroups(MTL::Size(r.clusterGridSizeX, r.clusterGridSizeY, 1), MTL::Size(1, 1, 1));
+            encoder->endEncoding();
+        }
     }
 };
 
@@ -957,11 +1044,18 @@ public:
         encoder->setVertexBuffer(r.getBuffer(r.currentScene->vertexBuffer).get(), 0, 3);
         encoder->setFragmentBuffer(r.directionalLightBuffer.get(), 0, 0);
         encoder->setFragmentBuffer(r.pointLightBuffer.get(), 0, 1);
-        encoder->setFragmentBuffer(r.clusterBuffers[r.currentFrameInFlight].get(), 0, 2);
+        if (r.useCompactClusters) {
+            encoder->setFragmentBuffer(r.clusterCompactBuffers[r.currentFrameInFlight].get(), 0, 2);
+            encoder->setFragmentBuffer(r.globalLightIndexBuffers[r.currentFrameInFlight].get(), 0, 7);
+        } else {
+            encoder->setFragmentBuffer(r.clusterBuffers[r.currentFrameInFlight].get(), 0, 2);
+        }
         encoder->setFragmentBuffer(r.cameraDataBuffers[r.currentFrameInFlight].get(), 0, 3);
         encoder->setFragmentBytes(&screenSize, sizeof(glm::vec2), 4);
         encoder->setFragmentBytes(&gridSize, sizeof(glm::uvec3), 5);
         encoder->setFragmentBytes(&time, sizeof(float), 6);
+        uint32_t useCompact = r.useCompactClusters ? 1 : 0;
+        encoder->setFragmentBytes(&useCompact, sizeof(uint32_t), 8);
 
         for (const auto& [material, meshes] : r.instanceBatches) {
             encoder->setFragmentTexture(
@@ -2598,6 +2692,13 @@ auto Renderer_Metal::createResources() -> void {
     buildClustersPipeline = createComputePipeline("assets/shaders/3d_cluster_build.metal");
     cullLightsPipeline = createComputePipeline("assets/shaders/3d_light_cull.metal");
     tileCullingPipeline = createComputePipeline("assets/shaders/3d_tile_light_cull.metal");
+    // Compact clustered light culling pipelines
+    buildClustersCompactPipeline = createComputePipeline("assets/shaders/3d_cluster_build_compact.metal");
+    lightCountPipeline = createComputePipeline("assets/shaders/3d_cluster_light_count.metal");
+    prefixSumBlocksPipeline = createComputePipeline("assets/shaders/3d_cluster_prefix_sum_blocks.metal");
+    prefixSumBlockSumsPipeline = createComputePipeline("assets/shaders/3d_cluster_prefix_sum_block_sums.metal");
+    addBlockSumsPipeline = createComputePipeline("assets/shaders/3d_cluster_add_block_sums.metal");
+    lightWritePipeline = createComputePipeline("assets/shaders/3d_cluster_light_write.metal");
     normalResolvePipeline = createComputePipeline("assets/shaders/3d_normal_resolve.metal");
     raytraceShadowPipeline = createComputePipeline("assets/shaders/3d_raytrace_shadow.metal");
     raytraceAOPipeline = createComputePipeline("assets/shaders/3d_ssao.metal");
@@ -2847,6 +2948,27 @@ auto Renderer_Metal::createResources() -> void {
             clusterGridSizeX * clusterGridSizeY * clusterGridSizeZ * sizeof(Cluster), MTL::ResourceStorageModeManaged
         ));
     }
+
+    // Compact cluster buffers for global light index approach
+    uint32_t numClusters = clusterGridSizeX * clusterGridSizeY * clusterGridSizeZ;
+    uint32_t numBlocks = (numClusters + 255) / 256; // ceil(numClusters / 256)
+    uint32_t maxTotalLightIndices = 256 * 1024; // 1MB max for light indices
+
+    clusterCompactBuffers.resize(MAX_FRAMES_IN_FLIGHT);
+    for (auto& buf : clusterCompactBuffers) {
+        buf = NS::TransferPtr(device->newBuffer(
+            numClusters * sizeof(ClusterCompact), MTL::ResourceStorageModeManaged
+        ));
+    }
+    globalLightIndexBuffers.resize(MAX_FRAMES_IN_FLIGHT);
+    for (auto& buf : globalLightIndexBuffers) {
+        buf = NS::TransferPtr(device->newBuffer(
+            maxTotalLightIndices * sizeof(uint32_t), MTL::ResourceStorageModeManaged
+        ));
+    }
+    prefixSumBlockSumsBuffer = NS::TransferPtr(device->newBuffer(
+        numBlocks * sizeof(uint32_t), MTL::ResourceStorageModeManaged
+    ));
 
     // Create light scattering data buffers and initialize default settings
     lightScatteringDataBuffers.resize(MAX_FRAMES_IN_FLIGHT);

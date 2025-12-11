@@ -201,6 +201,15 @@ struct alignas(16) Cluster {
     Uint32 lightIndices[256];
 };
 
+// Compact cluster structure for global light index buffer approach
+// Uses Count → Prefix Sum → Write pattern for better memory efficiency
+struct alignas(16) ClusterCompact {
+    glm::vec4 min;
+    glm::vec4 max;
+    Uint32 offset;     // Index into global light index buffer
+    Uint32 lightCount; // Number of lights affecting this cluster
+};
+
 struct alignas(16) LightCullData {
     glm::vec2 screenSize;
     glm::vec2 _pad1;

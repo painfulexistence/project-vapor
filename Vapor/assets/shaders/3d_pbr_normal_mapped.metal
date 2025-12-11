@@ -220,6 +220,14 @@ vertex RasterizerData vertexMain(
     return vert;
 }
 
+// Compact cluster structure for global light index buffer approach
+struct ClusterCompact {
+    float4 min;
+    float4 max;
+    uint offset;
+    uint lightCount;
+};
+
 fragment float4 fragmentMain(
     RasterizerData in [[stage_in]],
     texture2d<float, access::sample> texAlbedo [[texture(0)]],
@@ -234,11 +242,13 @@ fragment float4 fragmentMain(
     texture2d<float, access::sample> brdfLUT [[texture(10)]],
     const device DirLight* directionalLights [[buffer(0)]],
     const device PointLight* pointLights [[buffer(1)]],
-    const device Cluster* clusters [[buffer(2)]],
+    const device ClusterCompact* clustersCompact [[buffer(2)]],
     constant CameraData& camera [[buffer(3)]],
     constant float2& screenSize [[buffer(4)]],
     constant packed_uint3& gridSize [[buffer(5)]],
-    constant float& time [[buffer(6)]]
+    constant float& time [[buffer(6)]],
+    const device uint* globalLightIndices [[buffer(7)]],
+    constant uint& useCompactClusters [[buffer(8)]]
 ) {
     constexpr sampler s(address::repeat, filter::linear, mip_filter::linear);
 
@@ -288,58 +298,24 @@ fragment float4 fragmentMain(
     float shadowFactor = texShadow.sample(s, screenUV).r;
     result += CalculateDirectionalLight(directionalLights[0], norm, T, B, viewDir, surf) * shadowFactor; // result += CookTorranceBRDF(norm, lightDir, viewDir, surf) * (mainLight.color * mainLight.intensity) * clamp(dot(norm, lightDir), 0.0, 1.0);
 
+    // Calculate cluster/tile index
     uint tileX = uint(screenUV.x * float(gridSize.x));
     uint tileY = uint((1.0 - screenUV.y) * float(gridSize.y));
-    // float depthVS = (camera.view * in.worldPosition).z;
-    // uint tileZ = uint((log(abs(depthVS) / camera.near) * gridSize.z) / log(camera.far / camera.near));
-    // uint clusterIndex = tileX + (tileY * gridSize.x) + (tileZ * gridSize.x * gridSize.y);
-    // Cluster cluster = clusters[clusterIndex];
-    // uint lightCount = cluster.lightCount;
+    float depthVS = (camera.view * in.worldPosition).z;
+    uint tileZ = uint((log(abs(depthVS) / camera.near) * float(gridSize.z)) / log(camera.far / camera.near));
+    tileZ = clamp(tileZ, 0u, gridSize.z - 1u);
 
-    // // Debug output - view space depth
-    // // return float4((-depthVS - camera.near) / (camera.far - camera.near), 0.0, 0.0, 1.0);
+    // Use 3D clustered light culling with compact global light index buffer
+    uint clusterIndex = tileX + (tileY * gridSize.x) + (tileZ * gridSize.x * gridSize.y);
+    ClusterCompact cluster = clustersCompact[clusterIndex];
+    uint lightCount = cluster.lightCount;
+    uint lightOffset = cluster.offset;
 
-    // // Debug output - tile indices
-    // // return float4(tileX / float(gridSize.x), tileY / float(gridSize.y), 0.5, 1.0);
-    // // return float4(tileX / float(gridSize.x), tileY / float(gridSize.y), 0.0, 1.0) * (tileZ / float(gridSize.z));
+    // Debug output - light count per cluster
+    // return float4(float(lightCount) / 32.0, 0.0, 0.0, 1.0);
 
-    // // Debug output - tile z
-    // // return float4(tileZ / float(gridSize.z), 0.0, 0.0, 1.0);
-
-    // // Debug output - cluster index
-    // // return float4(clusterIndex / float(gridSize.x * gridSize.y * gridSize.z), 0.0, 0.0, 1.0);
-
-    // // Debug output - cluster AABB
-    // // return float4(
-    // //     (cluster.min.x < cluster.max.x ? 1.0 : 0.0),
-    // //     (cluster.min.y < cluster.max.y ? 1.0 : 0.0),
-    // //     (cluster.min.z < cluster.max.z ? 1.0 : 0.0),
-    // //     1.0
-    // // );
-
-    // // Debug output - light coverage
-    // // for (uint i = 0; i < lightCount; i++) {
-    // //     return float4(
-    // //         cluster.lightIndices[i] == 0 ? 1.0 : 0.0,
-    // //         cluster.lightIndices[i] == 1 ? 1.0 : 0.0,
-    // //         cluster.lightIndices[i] == 2 ? 1.0 : 0.0,
-    // //         1.0
-    // //     );
-    // // }
-
-    // // Debug output - light count
-    // // return float4(lightCount / 100.0, 0.0, 0.0, 1.0);
-
-    // for (uint i = 0; i < lightCount; i++) {
-    //     uint lightIndex = cluster.lightIndices[i];
-    //     result += CalculatePointLight(pointLights[lightIndex], norm, T, B, viewDir, surf, in.worldPosition.xyz);
-    // }
-
-    uint tileIndex = tileX + tileY * gridSize.x;
-    Cluster tile = clusters[tileIndex];
-    uint lightCount = tile.lightCount;
     for (uint i = 0; i < lightCount; i++) {
-        uint lightIndex = tile.lightIndices[i];
+        uint lightIndex = globalLightIndices[lightOffset + i];
         result += CalculatePointLight(pointLights[lightIndex], norm, T, B, viewDir, surf, in.worldPosition.xyz);
     }
 
