@@ -111,7 +111,9 @@ struct Material {
     float sheenTint = 0.5f;
     float clearcoat = 0.0f;
     float clearcoatGloss;
-    bool usePrototypeUV = false;
+    // Prototype UV Mode: 0 = Off, 1 = World Space (static objects), 2 = Object Space (dynamic objects)
+    int prototypeUVMode = 0;
+    float uvScale = 1.0f;
     // std::string shaderPath;
     PipelineHandle pipeline;
 };
@@ -133,7 +135,8 @@ struct alignas(16) MaterialData {
     float sheenTint;
     float clearcoat;
     float clearcoatGloss;
-    float usePrototypeUV;
+    float prototypeUVMode; // 0 = Off, 1 = World Space, 2 = Object Space
+    float uvScale;
 };
 
 struct alignas(16) DirectionalLight {// Note that alignas(16) is not enough to ensure 16-byte alignment

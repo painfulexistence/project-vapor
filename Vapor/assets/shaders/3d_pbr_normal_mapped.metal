@@ -244,14 +244,28 @@ fragment float4 fragmentMain(
 
     MaterialData material = in.material;
 
-    if (material.usePrototypeUV > 0.5) {
-        float3 n = abs(normalize(in.localNormal));
-        if (n.x > n.y && n.x > n.z) {
-            in.uv = in.scaledLocalPos.yz;
-        } else if (n.y > n.z) {
-            in.uv = in.scaledLocalPos.xz;
+    // Prototype UV: triplanar mapping with world space or object space
+    // Mode: 0 = Off, 1 = World Space (static objects), 2 = Object Space (dynamic objects)
+    if (material.prototypeUVMode > 0.5) {
+        float3 pos;
+        float3 n;
+        if (material.prototypeUVMode > 1.5) {
+            // Object Space: position and normal in local space (texture follows object rotation)
+            pos = in.scaledLocalPos;
+            n = abs(normalize(in.localNormal));
         } else {
-            in.uv = in.scaledLocalPos.xy;
+            // World Space: position and normal in world space (texture fixed in world)
+            pos = in.worldPosition.xyz;
+            n = abs(normalize(in.worldNormal.xyz));
+        }
+
+        // Select projection plane based on dominant normal axis
+        if (n.x > n.y && n.x > n.z) {
+            in.uv = pos.yz * material.uvScale;
+        } else if (n.y > n.z) {
+            in.uv = pos.xz * material.uvScale;
+        } else {
+            in.uv = pos.xy * material.uvScale;
         }
     }
 
