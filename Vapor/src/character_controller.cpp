@@ -88,9 +88,7 @@ void CharacterController::moveAlong(const glm::vec2& inputVector, const glm::vec
 
 void CharacterController::jump(float jumpSpeed) {
     if (isOnGround()) {
-        // Get current velocity to preserve horizontal movement
         JPH::Vec3 currentVel = character->GetLinearVelocity();
-        // Only set vertical component for jump, preserve horizontal
         currentVel.SetY(jumpSpeed);
         character->SetLinearVelocity(currentVel);
     }
@@ -156,16 +154,22 @@ void CharacterController::update(float deltaTime, const glm::vec3& gravity) {
     // Note: previousPosition should be set externally before the physics update loop
     // to handle multiple physics steps correctly
 
-    // Get current velocity - preserve vertical component for gravity/jumping
-    JPH::Vec3 currentVel = character->GetLinearVelocity();
+    JPH::Vec3 newVelocity;
 
-    // Apply desired horizontal velocity while preserving vertical velocity
-    // This allows gravity to work properly
-    JPH::Vec3 newVelocity(
-        desiredHorizontalVelocity.x,
-        currentVel.GetY(),// Preserve vertical - let ExtendedUpdate apply gravity
-        desiredHorizontalVelocity.z
-    );
+    if (character->GetGroundState() == JPH::CharacterVirtual::EGroundState::OnGround) {
+        newVelocity = JPH::Vec3(desiredHorizontalVelocity.x, 0.0f, desiredHorizontalVelocity.z);
+    } else {
+        // In air: manually apply gravity to vertical component
+        JPH::Vec3 currentVel = character->GetLinearVelocity();
+
+        JPH::Vec3 up = character->GetUp();
+        float verticalSpeed = currentVel.Dot(up);
+
+        verticalSpeed += gravity.y * deltaTime;
+
+        newVelocity = JPH::Vec3(desiredHorizontalVelocity.x, verticalSpeed, desiredHorizontalVelocity.z);
+    }
+
     character->SetLinearVelocity(newVelocity);
 
     // Update character (performs collision detection and movement)
