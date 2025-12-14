@@ -70,22 +70,31 @@ fragment float4 fragmentMain(
     float2 uv = in.uv;
     float2 sunPos = data.sunScreenPos;
 
-    // Early out if sun is too far off-screen
-    float margin = 0.3;
+    // Allow sun to be significantly off-screen - god rays can still emanate
+    // from an off-screen sun position. We use a large margin (2.0 = 2x screen size)
+    // because the radial blur direction is still valid even when sun is far off-screen
+    float margin = 2.0;
     if (sunPos.x < -margin || sunPos.x > 1.0 + margin ||
         sunPos.y < -margin || sunPos.y > 1.0 + margin) {
         return float4(0.0, 0.0, 0.0, 0.0);
     }
 
-    // Check if sun itself is visible (not occluded by geometry)
-    // Sample depth at sun position - if depth < threshold, sun is behind geometry
-    float2 sunUVClamped = clamp(sunPos, float2(0.001), float2(0.999));
-    float sunDepth = depthTexture.sample(linearSampler, sunUVClamped).r;
-    float sunVisibility = step(data.depthThreshold, sunDepth);
+    // Check sun visibility - only when sun is on-screen
+    // When sun is off-screen, we can't sample its depth, so we assume it's visible
+    // and rely on the ray marching to determine occlusion
+    float sunVisibility = 1.0;
+    bool sunOnScreen = sunPos.x >= 0.0 && sunPos.x <= 1.0 &&
+                       sunPos.y >= 0.0 && sunPos.y <= 1.0;
 
-    // If sun is completely occluded, no god rays
-    if (sunVisibility < 0.01) {
-        return float4(0.0, 0.0, 0.0, 0.0);
+    if (sunOnScreen) {
+        // Sample depth at sun position - if depth < threshold, sun is behind geometry
+        float sunDepth = depthTexture.sample(linearSampler, sunPos).r;
+        sunVisibility = step(data.depthThreshold, sunDepth);
+
+        // If sun is completely occluded, no god rays
+        if (sunVisibility < 0.01) {
+            return float4(0.0, 0.0, 0.0, 0.0);
+        }
     }
 
     // Calculate ray direction from current pixel towards sun
@@ -140,9 +149,19 @@ fragment float4 fragmentMain(
     float3 godRays = accumLight * data.density * data.exposure * data.sunIntensity * sunVisibility;
 
     // Radial falloff - rays fade with distance from sun
-    float falloff = 1.0 - saturate(distToSun * 0.8);
+    // Use a gentler falloff that works for both on-screen and off-screen sun
+    float falloff = 1.0 - saturate(distToSun * 0.5);
     falloff = falloff * falloff; // Quadratic falloff for smoother fade
     godRays *= falloff;
+
+    // Additional fade when sun is off-screen - rays gradually fade as sun moves away
+    if (!sunOnScreen) {
+        // Calculate how far outside screen the sun is (0 = at edge, 1 = 1 screen away)
+        float2 outsideAmount = max(float2(0.0), max(-sunPos, sunPos - float2(1.0)));
+        float outsideDist = length(outsideAmount);
+        float offScreenFade = 1.0 - saturate(outsideDist * 0.7);
+        godRays *= offScreenFade * offScreenFade;
+    }
 
     return float4(godRays, 1.0);
 }
