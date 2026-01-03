@@ -4314,7 +4314,8 @@ auto Renderer_Metal::draw(std::shared_ptr<Scene> scene, Camera& camera) -> void 
                                         .sheenTint = mat->sheenTint,
                                         .clearcoat = mat->clearcoat,
                                         .clearcoatGloss = mat->clearcoatGloss,
-                                        .usePrototypeUV = mat->usePrototypeUV ? 1.0f : 0.0f };
+                                        .prototypeUVMode = static_cast<float>(mat->prototypeUVMode),
+                                        .uvScale = mat->uvScale };
     }
     materialDataBuffer->didModifyRange(NS::Range::Make(0, materialDataBuffer->length()));
 
