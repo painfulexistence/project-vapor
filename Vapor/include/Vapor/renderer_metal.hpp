@@ -529,6 +529,12 @@ protected:
     Uint32 culledInstanceCount = 0;
     Uint32 drawCount = 0;
 
+    // LOD statistics
+    bool lodEnabled = true;  // Enable/disable LOD selection
+    Uint32 lodTrianglesRendered = 0;
+    Uint32 lodTrianglesOriginal = 0;
+    std::array<Uint32, 8> lodLevelCounts = {}; // Count of meshes at each LOD level
+
 private:
     // Internal batch management
     void beginBatch2D();

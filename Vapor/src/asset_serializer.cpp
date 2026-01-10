@@ -350,6 +350,12 @@ void AssetSerializer::serializeMesh(cereal::BinaryOutputArchive& archive, const 
     archive(mesh->localAABBMin);
     archive(mesh->localAABBMax);
 
+    // LOD data
+    archive(static_cast<Uint32>(mesh->lodLevels.size()));
+    for (const auto& lod : mesh->lodLevels) {
+        archive(lod);
+    }
+
     if (mesh->material) {
         auto it = materialIDs.find(mesh->material);
         if (it != materialIDs.end()) {
@@ -392,6 +398,14 @@ std::shared_ptr<Mesh> AssetSerializer::deserializeMesh(cereal::BinaryInputArchiv
     archive(mesh->localAABBMin);
     archive(mesh->localAABBMax);
     mesh->isGeometryDirty = false; // prevent AABB updating
+
+    // LOD data
+    Uint32 lodCount;
+    archive(lodCount);
+    mesh->lodLevels.resize(lodCount);
+    for (Uint32 i = 0; i < lodCount; ++i) {
+        archive(mesh->lodLevels[i]);
+    }
 
     bool hasMaterial;
     archive(hasMaterial);

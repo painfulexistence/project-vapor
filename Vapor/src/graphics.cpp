@@ -118,3 +118,30 @@ void Mesh::print() {
         // fmt::print("Bitangent {}: {} {} {}\n", i, vertices[i].bitangent.x, vertices[i].bitangent.y, vertices[i].bitangent.z);
     }
 }
+
+Uint32 Mesh::selectLOD(float screenSize) const {
+    if (lodLevels.empty()) {
+        return 0;
+    }
+
+    // Find the appropriate LOD level based on screen size
+    // lodLevels[0] has the highest threshold (for closest/largest objects)
+    // lodLevels[N] has the lowest threshold (for farthest/smallest objects)
+    for (Uint32 i = 0; i < static_cast<Uint32>(lodLevels.size()); ++i) {
+        if (screenSize >= lodLevels[i].screenSizeThreshold) {
+            return i;
+        }
+    }
+
+    // Return lowest LOD if object is very small
+    return static_cast<Uint32>(lodLevels.size() - 1);
+}
+
+const LODLevelData& Mesh::getActiveLOD() const {
+    if (lodLevels.empty()) {
+        // Return a static empty LOD - caller should check hasLOD() first
+        static LODLevelData emptyLOD;
+        return emptyLOD;
+    }
+    return lodLevels[std::min(currentLOD, static_cast<Uint32>(lodLevels.size() - 1))];
+}
