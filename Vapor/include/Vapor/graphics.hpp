@@ -75,6 +75,24 @@ struct RenderTargetHandle {
     Uint32 rid = UINT32_MAX;
 };
 
+// Handle for render textures (textures that can be rendered to)
+struct RenderTextureHandle {
+    Uint32 rid = UINT32_MAX;
+
+    bool isValid() const {
+        return rid != UINT32_MAX;
+    }
+};
+
+// Render texture descriptor for creation
+struct RenderTextureDesc {
+    Uint32 width = 512;
+    Uint32 height = 512;
+    bool hasDepth = true;// Whether to include depth buffer
+    bool hdr = false;// Use HDR format (RGBA16Float) vs LDR (RGBA8Unorm)
+    Uint32 sampleCount = 1;// MSAA sample count (1 = no MSAA)
+};
+
 struct Image {
     std::string uri;
     Uint32 width;

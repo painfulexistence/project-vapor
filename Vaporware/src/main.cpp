@@ -120,6 +120,26 @@ int main(int argc, char* args[]) {
     TextureHandle spriteTexture = renderer->createTexture(spriteImage);
     fmt::print("Sprite texture loaded\n");
 
+    // Create a render texture for render-to-texture demo
+    RenderTextureDesc rtDesc;
+    rtDesc.width = 512;
+    rtDesc.height = 512;
+    rtDesc.hasDepth = true;
+    rtDesc.hdr = true;// HDR for post-processing effects
+    RenderTextureHandle renderTexture = renderer->createRenderTexture(rtDesc);
+    fmt::print("Render texture created: {}x{}\n", rtDesc.width, rtDesc.height);
+
+    // Camera for the render texture (different angle from main camera)
+    Camera rtCamera(
+        glm::vec3(5.0f, 3.0f, 5.0f),// Eye position
+        glm::vec3(0.0f, 0.0f, 0.0f),// Look at origin
+        glm::vec3(0.0f, 1.0f, 0.0f),// Up
+        glm::radians(60.0f),// FOV
+        1.0f,// Aspect (square)
+        0.1f,// Near
+        100.0f// Far
+    );
+
     if (engineCore->initRmlUI(windowWidth, windowHeight) && renderer->initUI()) {
         fmt::print("RmlUI System Initialized\n");
     }
@@ -600,10 +620,37 @@ int main(int argc, char* args[]) {
                 );
             }
 
+            // ===== Render-to-Texture Demo =====
+            // Update RT camera to orbit around the scene
+            float rtAngle = time * 0.5f;
+            rtCamera.setEye(glm::vec3(sin(rtAngle) * 8.0f, 4.0f, cos(rtAngle) * 8.0f));
+            rtCamera.setCenter(glm::vec3(0.0f, 0.0f, 0.0f));
+
+            // Render scene to texture with different camera angle
+            renderer->renderToTexture(renderTexture, scene, rtCamera, glm::vec4(0.1f, 0.1f, 0.15f, 1.0f));
+
+            // Apply post-processing effects to the render texture
+            renderer->applyBloom(renderTexture, 0.8f, 0.3f);
+            renderer->applyToneMapping(renderTexture, 1.2f);
+
+            // Get the render texture as a regular texture for drawing
+            TextureHandle rtTexHandle = renderer->getRenderTextureAsTexture(renderTexture);
+
             // ===== 3D Batch Demo =====
             renderer->drawQuad3D(
                 glm::vec3(0.0f, 2.0f, 0.0f), glm::vec2(1.0f, 1.0f), spriteTexture, glm::vec4(1.0f, 0.5f, 0.5f, 1.0f)
             );
+
+            // Draw the render texture on a 3D quad (like a TV screen in the world)
+            if (rtTexHandle.rid != UINT32_MAX) {
+                // Create a transform for the "TV screen"
+                glm::mat4 tvTransform = glm::mat4(1.0f);
+                tvTransform = glm::translate(tvTransform, glm::vec3(-3.0f, 2.0f, 0.0f));
+                tvTransform = glm::rotate(tvTransform, glm::radians(30.0f), glm::vec3(0.0f, 1.0f, 0.0f));
+                tvTransform = glm::scale(tvTransform, glm::vec3(2.0f, 2.0f, 1.0f));
+
+                renderer->drawQuad3D(tvTransform, rtTexHandle, nullptr, glm::vec4(1.0f));
+            }
 
             renderer->draw(scene, tempCamera);
         } else {
