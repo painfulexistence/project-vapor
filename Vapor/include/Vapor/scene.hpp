@@ -8,6 +8,7 @@
 #include <string>
 #include <vector>
 #include <memory>
+#include <cstdint>
 
 #include "graphics.hpp"
 #include "physics_3d.hpp"
@@ -16,6 +17,10 @@
 
 class FluidVolume;
 struct FluidVolumeSettings;
+class World;
+
+using SceneID = uint32_t;
+constexpr SceneID InvalidSceneID = 0;
 
 struct MeshGroup {
     std::string name;
@@ -24,6 +29,7 @@ struct MeshGroup {
 
 struct Node {
     std::string name;
+    SceneID sceneId = InvalidSceneID;
     std::vector<std::shared_ptr<Node>> children;
     glm::mat4 localTransform = glm::identity<glm::mat4>();
     glm::mat4 worldTransform = glm::identity<glm::mat4>(); // calculated from localTransform and parent's worldTransform
@@ -166,6 +172,7 @@ struct Node {
 
 class Scene {
 public:
+    SceneID sceneId = InvalidSceneID;
     std::string name;
     std::vector<std::shared_ptr<Image>> images;
     std::vector<std::shared_ptr<Material>> materials;
@@ -193,6 +200,10 @@ public:
     void addNode(std::shared_ptr<Node> node);
     std::shared_ptr<Node> findNode(const std::string& name);
     std::shared_ptr<Node> findNodeInHierarchy(const std::string& name, const std::shared_ptr<Node>& node);
+
+    // Append another scene's content to this scene
+    void append(std::shared_ptr<Scene> other);
+    void append(std::shared_ptr<Scene> other, std::shared_ptr<Node> parent);
 
     std::shared_ptr<FluidVolume> createFluidVolume(Physics3D* physics, const FluidVolumeSettings& settings);
     void addFluidVolume(std::shared_ptr<FluidVolume> fluidVolume);

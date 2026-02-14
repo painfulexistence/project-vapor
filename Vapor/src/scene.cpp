@@ -235,3 +235,68 @@ std::shared_ptr<FluidVolume> Scene::createFluidVolume(Physics3D* physics, const 
 void Scene::addFluidVolume(std::shared_ptr<FluidVolume> fluidVolume) {
     fluidVolumes.push_back(fluidVolume);
 }
+
+void Scene::append(std::shared_ptr<Scene> other) {
+    append(other, nullptr);
+}
+
+void Scene::append(std::shared_ptr<Scene> other, std::shared_ptr<Node> parent) {
+    if (!other) return;
+
+    // Merge images
+    for (auto& img : other->images) {
+        images.push_back(img);
+    }
+
+    // Merge materials
+    for (auto& mat : other->materials) {
+        materials.push_back(mat);
+    }
+
+    // Merge lights
+    for (auto& light : other->directionalLights) {
+        directionalLights.push_back(light);
+    }
+    for (auto& light : other->pointLights) {
+        pointLights.push_back(light);
+    }
+
+    // Merge vertices and indices (update offsets)
+    size_t vertexOffset = vertices.size();
+    size_t indexOffset = indices.size();
+
+    // Update mesh offsets in the other scene's nodes
+    std::function<void(const std::shared_ptr<Node>&)> updateOffsets = [&](const std::shared_ptr<Node>& node) {
+        if (node->meshGroup) {
+            for (auto& mesh : node->meshGroup->meshes) {
+                mesh->vertexOffset += vertexOffset;
+                mesh->indexOffset += indexOffset;
+            }
+        }
+        for (auto& child : node->children) {
+            updateOffsets(child);
+        }
+    };
+
+    for (auto& node : other->nodes) {
+        updateOffsets(node);
+    }
+
+    // Merge vertex and index data
+    vertices.insert(vertices.end(), other->vertices.begin(), other->vertices.end());
+    indices.insert(indices.end(), other->indices.begin(), other->indices.end());
+
+    // Add nodes to hierarchy
+    if (parent) {
+        for (auto& node : other->nodes) {
+            parent->addChild(node);
+        }
+    } else {
+        for (auto& node : other->nodes) {
+            nodes.push_back(node);
+        }
+    }
+
+    // Mark geometry as dirty for renderer to rebuild buffers
+    isGeometryDirty = true;
+}
