@@ -35,6 +35,7 @@ struct Node {
     bool isTransformDirty = true;
 
     // Virtual callbacks for physics events (can be overridden in subclasses)
+    virtual ~Node() = default;
     virtual void onTriggerEnter(Node* other) {}
     virtual void onTriggerExit(Node* other) {}
     virtual void onCollisionEnter(Node* other) {}
@@ -142,10 +143,10 @@ struct Node {
         setLocalPosition(localPos);
     }
 
-    std::shared_ptr<Node> createChild(const std::string& name, const glm::mat4& localTransform) {
+    std::shared_ptr<Node> createChild(const std::string& childName, const glm::mat4& childTransform) {
         auto child = std::make_shared<Node>();
-        child->name = name;
-        child->localTransform = localTransform;
+        child->name = childName;
+        child->localTransform = childTransform;
         child->isTransformDirty = true;
         children.push_back(child);
         return child;
@@ -202,5 +203,5 @@ public:
 
 private:
     void printNode(const std::shared_ptr<Node>& node);
-    void updateNode(const std::shared_ptr<Node>& node, const glm::mat4& parentTransform);
+    void updateNode(const std::shared_ptr<Node>& node, const glm::mat4& parentTransform, bool parentDirty = false);
 };

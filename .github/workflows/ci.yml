@@ -1,0 +1,92 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+jobs:
+  # ── Unit tests (no GPU required) ─────────────────────────────────────────
+  test:
+    name: Unit Tests (macOS / Clang)
+    runs-on: macos-15
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          submodules: recursive  # vcpkg is a submodule
+
+      - name: Install system dependencies
+        run: |
+          brew install ninja ccache glslang
+
+      - name: Restore ccache
+        uses: actions/cache@v4
+        with:
+          path: ~/.ccache
+          key: ccache-macos-${{ github.ref_name }}-${{ github.sha }}
+          restore-keys: |
+            ccache-macos-${{ github.ref_name }}-
+            ccache-macos-
+
+      - name: Configure (vcpkg + Ninja)
+        run: |
+          cmake --preset ninja-local-vcpkg \
+            -DCMAKE_BUILD_TYPE=Release \
+            -DCMAKE_CXX_COMPILER_LAUNCHER=ccache
+        env:
+          VCPKG_ROOT: ${{ github.workspace }}/vcpkg
+
+      - name: Build tests only
+        run: |
+          cmake --build build --config Release \
+            --target test_action_system test_scene_transform test_camera \
+            -- -j$(sysctl -n hw.logicalcpu)
+
+      - name: Run tests
+        working-directory: build
+        run: ctest -C Release --output-on-failure --timeout 60 -j$(sysctl -n hw.logicalcpu)
+
+      - name: Print ccache stats
+        run: ccache --show-stats
+
+  # ── Build check (confirms engine compiles, no GPU smoke test) ────────────
+  build-check:
+    name: Build Check (macOS / Clang)
+    runs-on: macos-15
+    needs: test
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      - name: Install system dependencies
+        run: |
+          brew install ninja ccache glslang
+
+      - name: Restore ccache
+        uses: actions/cache@v4
+        with:
+          path: ~/.ccache
+          key: ccache-macos-${{ github.ref_name }}-${{ github.sha }}
+          restore-keys: |
+            ccache-macos-${{ github.ref_name }}-
+            ccache-macos-
+
+      - name: Configure
+        run: |
+          cmake --preset ninja-local-vcpkg \
+            -DCMAKE_BUILD_TYPE=Release \
+            -DCMAKE_CXX_COMPILER_LAUNCHER=ccache
+        env:
+          VCPKG_ROOT: ${{ github.workspace }}/vcpkg
+
+      - name: Build Vapor library
+        run: |
+          cmake --build build --config Release \
+            --target Vapor \
+            -- -j$(sysctl -n hw.logicalcpu)

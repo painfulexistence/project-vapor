@@ -256,20 +256,30 @@ Physics3D::~Physics3D() {
     deinit();
 }
 
-void Physics3D::init(Vapor::TaskScheduler& taskScheduler, std::shared_ptr<Vapor::DebugDraw> debugDraw) {
-    JPH::RegisterDefaultAllocator();
-    JPH::Trace = TraceImpl;
+static int s_PhysicsInstances = 0;
 
-    JPH::Factory::sInstance = new JPH::Factory();
-    JPH::RegisterTypes();
+void Physics3D::init(Vapor::TaskScheduler& taskScheduler, std::shared_ptr<Vapor::DebugDraw> debugDraw) {
+    if (s_PhysicsInstances == 0) {
+        JPH::RegisterDefaultAllocator();
+        JPH::Trace = TraceImpl;
+#ifdef JPH_ENABLE_ASSERTS
+        JPH::AssertFailed = [](const char* expr, const char* msg, const char* file, JPH::uint line) -> bool {
+            fmt::print(stderr, "JPH_ASSERT FAILED: {} ({}) at {}:{}\n", expr, msg ? msg : "", file, line);
+            fflush(stderr);
+            return true;
+        };
+#endif
+        JPH::Factory::sInstance = new JPH::Factory();
+        JPH::RegisterTypes();
+    }
+    s_PhysicsInstances++;
 
     tempAllocator = std::make_unique<JPH::TempAllocatorImpl>(10 * 1024 * 1024);
 
-    // Create JoltEnkiJobSystem using the provided task scheduler
-    jobSystem = std::make_unique<Vapor::JoltEnkiJobSystem>(taskScheduler, 2048);
-    // jobSystem = std::make_unique<JPH::JobSystemThreadPool>(
-    //   JPH::cMaxPhysicsJobs, JPH::cMaxPhysicsBarriers, std::thread::hardware_concurrency() - 1
-    // );
+    // jobSystem = std::make_unique<Vapor::JoltEnkiJobSystem>(taskScheduler, 2048);
+    jobSystem = std::make_unique<JPH::JobSystemThreadPool>(
+      JPH::cMaxPhysicsJobs, JPH::cMaxPhysicsBarriers, std::thread::hardware_concurrency() - 1
+    );
 
     const uint cMaxBodies = 1024;
     const uint cNumBodyMutexes = 0;
@@ -317,8 +327,9 @@ void Physics3D::deinit() {
         return;
     }
 
-    for (auto body : bodies) {
-        bodyInterface->RemoveBody(body.second);
+    for (auto& body : bodies) {
+        if (bodyInterface->IsAdded(body.second))
+            bodyInterface->RemoveBody(body.second);
         bodyInterface->DestroyBody(body.second);
     }
     bodies.clear();
@@ -332,9 +343,13 @@ void Physics3D::deinit() {
     timeAccum = 0.0f;
     step = 0;
 
-    JPH::UnregisterTypes();
-    delete JPH::Factory::sInstance;
-    JPH::Factory::sInstance = nullptr;
+    s_PhysicsInstances--;
+    if (s_PhysicsInstances == 0) {
+        // Optional: Keep Jolt types registered to avoid re-init issues in some environments
+        // JPH::UnregisterTypes();
+        // delete JPH::Factory::sInstance;
+        // JPH::Factory::sInstance = nullptr;
+    }
 
     isInitialized = false;
 }
@@ -571,8 +586,16 @@ void Physics3D::drawImGui(float dt) {
 BodyHandle Physics3D::createSphereBody(
     float radius, const glm::vec3& position, const glm::quat& rotation, BodyMotionType motionType
 ) {
+    JPH::SphereShapeSettings shapeSettings(radius);
+    shapeSettings.SetEmbedded();
+    JPH::ShapeSettings::ShapeResult shapeResult = shapeSettings.Create();
+    if (shapeResult.HasError()) {
+        throw std::runtime_error("Failed to create sphere shape");
+    }
+    JPH::ShapeRefC shape = shapeResult.Get();
+
     JPH::BodyCreationSettings bodySettings(
-        new JPH::SphereShape(radius),
+        shape,
         JPH::RVec3(position.x, position.y, position.z),
         JPH::Quat(rotation.x, rotation.y, rotation.z, rotation.w),
         convertMotionType(motionType),
@@ -626,7 +649,10 @@ void Physics3D::removeBody(BodyHandle handle) {
 
 void Physics3D::destroyBody(BodyHandle handle) {
     auto id = bodies.at(handle.rid);
+    if (bodyInterface->IsAdded(id))
+        bodyInterface->RemoveBody(id);
     bodyInterface->DestroyBody(id);
+    bodies.erase(handle.rid);
 }
 
 bool Physics3D::raycast(const glm::vec3& from, const glm::vec3& to, RaycastHit& hit, BodyHandle ignoreBody) {

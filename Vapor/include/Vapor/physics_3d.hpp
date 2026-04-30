@@ -4,7 +4,7 @@
 #include <glm/vec3.hpp>
 #include <unordered_map>
 
-class Node;
+struct Node;
 class Scene;
 
 namespace JPH {
@@ -50,21 +50,17 @@ enum class BodyMotionType {
     Kinematic,
 };
 
-struct BodyHandle {
+template<typename Tag>
+struct PhysicsHandle {
     Uint32 rid = UINT32_MAX;
-
-    bool valid() const {
-        return rid != UINT32_MAX;
-    }
+    bool valid() const { return rid != UINT32_MAX; }
+    bool operator==(const PhysicsHandle&) const = default;
 };
 
-struct TriggerHandle {
-    Uint32 rid = UINT32_MAX;
-
-    bool valid() const {
-        return rid != UINT32_MAX;
-    }
-};
+struct BodyTag {};
+struct TriggerTag {};
+using BodyHandle    = PhysicsHandle<BodyTag>;
+using TriggerHandle = PhysicsHandle<TriggerTag>;
 
 struct OverlapResult {
     std::vector<Node*> nodes;
@@ -246,7 +242,7 @@ private:
     Uint32 nextTriggerID = 0;
 
     std::unique_ptr<JPH::TempAllocatorImpl> tempAllocator;
-    std::unique_ptr<Vapor::JoltEnkiJobSystem> jobSystem;// Owned by Physics3D
+    std::unique_ptr<JPH::JobSystem> jobSystem;// Owned by Physics3D
     std::unique_ptr<JPH::PhysicsSystem> physicsSystem;
     std::unique_ptr<BPLayerInterfaceImpl> broad_phase_layer_interface;
     std::unique_ptr<ObjectVsBroadPhaseLayerFilterImpl> object_vs_broadphase_layer_filter;

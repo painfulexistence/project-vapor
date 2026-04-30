@@ -38,6 +38,16 @@
       "generator": "Xcode",
       "binaryDir": "${sourceDir}/build-xcode",
       "inherits": ["global-vcpkg"]
+    },
+    {
+      "name": "ci",
+      "generator": "Ninja Multi-Config",
+      "binaryDir": "${sourceDir}/build",
+      "inherits": ["global-vcpkg"],
+      "cacheVariables": {
+        "CMAKE_BUILD_TYPE": "Release",
+        "CMAKE_EXPORT_COMPILE_COMMANDS": "ON"
+      }
     }
   ]
 }

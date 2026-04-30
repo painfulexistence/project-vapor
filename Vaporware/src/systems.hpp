@@ -8,6 +8,21 @@
 #include "components.hpp"
 #include <fmt/core.h>
 
+namespace RmlUIHelpers {
+    static Rml::ElementDocument* ensureDocument(
+        Rml::ElementDocument*& docPtr, Vapor::RmlUiManager* rml, const std::string& path)
+    {
+        if (docPtr || path.empty()) return docPtr;
+        docPtr = rml->LoadDocument(path);
+        return docPtr;
+    }
+
+    static bool tickTimer(float& timer, float dt, float duration) {
+        timer += dt;
+        return timer >= duration;
+    }
+}
+
 class CleanupSystem {
 public:
     static void update(entt::registry& reg) {
@@ -56,7 +71,9 @@ public:
     }
 };
 
-void updateLightMovementSystem(entt::registry& reg, Scene* scene, float deltaTime) {
+class LightMovementSystem {
+public:
+static void update(entt::registry& reg, Scene* scene, float deltaTime) {
     auto pointLightView = reg.view<ScenePointLightReferenceComponent, LightMovementLogicComponent>();
     for (auto entity : pointLightView) {
         auto& ref = pointLightView.get<ScenePointLightReferenceComponent>(entity);
@@ -109,8 +126,11 @@ void updateLightMovementSystem(entt::registry& reg, Scene* scene, float deltaTim
         }
     }
 }
+};
 
-void updateAutoRotateSystem(entt::registry& registry, float deltaTime) {
+class AutoRotateSystem {
+public:
+static void update(entt::registry& registry, float deltaTime) {
     auto view = registry.view<SceneNodeReferenceComponent, AutoRotateComponent>();
     for (auto entity : view) {
         auto& ref = view.get<SceneNodeReferenceComponent>(entity);
@@ -120,6 +140,7 @@ void updateAutoRotateSystem(entt::registry& registry, float deltaTime) {
         }
     }
 }
+};
 
 class CameraSwitchSystem {
 public:
@@ -161,7 +182,9 @@ public:
     }
 };
 
-void updateCameraSystem(entt::registry& reg, float deltaTime) {
+class CameraSystem {
+public:
+static void update(entt::registry& reg, float deltaTime) {
     auto view = reg.view<Vapor::VirtualCameraComponent>();
 
     for (auto entity : view) {
@@ -207,8 +230,11 @@ void updateCameraSystem(entt::registry& reg, float deltaTime) {
         cam.projectionMatrix = glm::perspective(cam.fov, cam.aspect, cam.near, cam.far);
     }
 }
+};
 
-void updateHUDSystem(entt::registry& reg, Vapor::RmlUiManager* rmluiManager, float deltaTime) {
+class HUDSystem {
+public:
+static void update(entt::registry& reg, Vapor::RmlUiManager* rmluiManager, float deltaTime) {
     if (!rmluiManager) return;
 
     auto view = reg.view<HUDComponent>();
@@ -216,25 +242,21 @@ void updateHUDSystem(entt::registry& reg, Vapor::RmlUiManager* rmluiManager, flo
         auto& hud = view.get<HUDComponent>(entity);
 
         // 1. Load document if not loaded
-        if (!hud.document && !hud.documentPath.empty()) {
-            hud.document = rmluiManager->LoadDocument(hud.documentPath);
-            if (hud.document) {
-                fmt::print("Loaded HUD document: {}\n", hud.documentPath);
-                // Initialize state based on visibility
-                if (hud.isVisible) {
-                    hud.state = HUDState::Visible;
-                    hud.document->Show();
-                    // Force visible class immediately
-                    if (auto el = hud.document->GetElementById("hud_content")) {
-                        el->SetClass("visible", true);
-                    }
-                } else {
-                    hud.state = HUDState::Hidden;
-                    hud.document->Hide();
-                }
-            } else {
+        if (!hud.document) {
+            if (!RmlUIHelpers::ensureDocument(hud.document, rmluiManager, hud.documentPath)) {
                 fmt::print(stderr, "Failed to load HUD document: {}\n", hud.documentPath);
                 continue;
+            }
+            fmt::print("Loaded HUD document: {}\n", hud.documentPath);
+            if (hud.isVisible) {
+                hud.state = HUDState::Visible;
+                hud.document->Show();
+                if (auto el = hud.document->GetElementById("hud_content")) {
+                    el->SetClass("visible", true);
+                }
+            } else {
+                hud.state = HUDState::Hidden;
+                hud.document->Hide();
             }
         }
 
@@ -291,8 +313,11 @@ void updateHUDSystem(entt::registry& reg, Vapor::RmlUiManager* rmluiManager, flo
         }
     }
 }
+};
 
-void updateScrollTextSystem(entt::registry& reg, Vapor::RmlUiManager* rmluiManager, float deltaTime) {
+class ScrollTextSystem {
+public:
+static void update(entt::registry& reg, Vapor::RmlUiManager* rmluiManager, float deltaTime) {
     if (!rmluiManager) return;
 
     auto view = reg.view<ScrollTextComponent>();
@@ -300,22 +325,18 @@ void updateScrollTextSystem(entt::registry& reg, Vapor::RmlUiManager* rmluiManag
         auto& scroll = view.get<ScrollTextComponent>(entity);
 
         // 1. Load document if not loaded
-        if (!scroll.document && !scroll.documentPath.empty()) {
-            scroll.document = rmluiManager->LoadDocument(scroll.documentPath);
-            if (scroll.document) {
-                fmt::print("Loaded scroll text document: {}\n", scroll.documentPath);
-                scroll.document->Show();
-
-                // Set initial text
-                if (!scroll.lines.empty()) {
-                    if (auto el = scroll.document->GetElementById("scroll-text")) {
-                        el->SetInnerRML(scroll.lines[scroll.currentIndex].c_str());
-                        el->SetClass("visible", true);
-                    }
-                }
-            } else {
+        if (!scroll.document) {
+            if (!RmlUIHelpers::ensureDocument(scroll.document, rmluiManager, scroll.documentPath)) {
                 fmt::print(stderr, "Failed to load scroll text document: {}\n", scroll.documentPath);
                 continue;
+            }
+            fmt::print("Loaded scroll text document: {}\n", scroll.documentPath);
+            scroll.document->Show();
+            if (!scroll.lines.empty()) {
+                if (auto el = scroll.document->GetElementById("scroll-text")) {
+                    el->SetInnerRML(scroll.lines[scroll.currentIndex].c_str());
+                    el->SetClass("visible", true);
+                }
             }
         }
 
@@ -340,8 +361,7 @@ void updateScrollTextSystem(entt::registry& reg, Vapor::RmlUiManager* rmluiManag
             break;
 
         case ScrollTextState::ScrollingOut:
-            scroll.timer += deltaTime;
-            if (scroll.timer >= scroll.scrollDuration) {
+            if (RmlUIHelpers::tickTimer(scroll.timer, deltaTime, scroll.scrollDuration)) {
                 // Move to next line
                 scroll.currentIndex++;
                 if (scroll.currentIndex < (int)scroll.lines.size()) {
@@ -363,8 +383,7 @@ void updateScrollTextSystem(entt::registry& reg, Vapor::RmlUiManager* rmluiManag
             break;
 
         case ScrollTextState::ScrollingIn:
-            scroll.timer += deltaTime;
-            if (scroll.timer >= scroll.scrollDuration) {
+            if (RmlUIHelpers::tickTimer(scroll.timer, deltaTime, scroll.scrollDuration)) {
                 scroll.state = ScrollTextState::Idle;
                 element->SetClass("scroll-in", false);
                 element->SetClass("visible", true);
@@ -373,8 +392,11 @@ void updateScrollTextSystem(entt::registry& reg, Vapor::RmlUiManager* rmluiManag
         }
     }
 }
+};
 
-void updateLetterboxSystem(entt::registry& reg, Vapor::RmlUiManager* rmluiManager, float deltaTime) {
+class LetterboxSystem {
+public:
+static void update(entt::registry& reg, Vapor::RmlUiManager* rmluiManager, float deltaTime) {
     if (!rmluiManager) return;
 
     auto view = reg.view<LetterboxComponent>();
@@ -382,15 +404,13 @@ void updateLetterboxSystem(entt::registry& reg, Vapor::RmlUiManager* rmluiManage
         auto& lb = view.get<LetterboxComponent>(entity);
 
         // 1. Load document if not loaded
-        if (!lb.document && !lb.documentPath.empty()) {
-            lb.document = rmluiManager->LoadDocument(lb.documentPath);
-            if (lb.document) {
-                fmt::print("Loaded letterbox document: {}\n", lb.documentPath);
-                lb.document->Show();
-            } else {
+        if (!lb.document) {
+            if (!RmlUIHelpers::ensureDocument(lb.document, rmluiManager, lb.documentPath)) {
                 fmt::print(stderr, "Failed to load letterbox document: {}\n", lb.documentPath);
                 continue;
             }
+            fmt::print("Loaded letterbox document: {}\n", lb.documentPath);
+            lb.document->Show();
         }
 
         if (!lb.document) continue;
@@ -450,8 +470,11 @@ void updateLetterboxSystem(entt::registry& reg, Vapor::RmlUiManager* rmluiManage
         }
     }
 }
+};
 
-void updateSubtitleSystem(entt::registry& reg, Vapor::RmlUiManager* rmluiManager, float deltaTime) {
+class SubtitleSystem {
+public:
+static void update(entt::registry& reg, Vapor::RmlUiManager* rmluiManager, float deltaTime) {
     if (!rmluiManager) return;
 
     auto view = reg.view<SubtitleComponent>();
@@ -459,15 +482,13 @@ void updateSubtitleSystem(entt::registry& reg, Vapor::RmlUiManager* rmluiManager
         auto& sub = view.get<SubtitleComponent>(entity);
 
         // 1. Load document if not loaded
-        if (!sub.document && !sub.documentPath.empty()) {
-            sub.document = rmluiManager->LoadDocument(sub.documentPath);
-            if (sub.document) {
-                fmt::print("Loaded subtitle document: {}\n", sub.documentPath);
-                sub.document->Show();
-            } else {
+        if (!sub.document) {
+            if (!RmlUIHelpers::ensureDocument(sub.document, rmluiManager, sub.documentPath)) {
                 fmt::print(stderr, "Failed to load subtitle document: {}\n", sub.documentPath);
                 continue;
             }
+            fmt::print("Loaded subtitle document: {}\n", sub.documentPath);
+            sub.document->Show();
         }
 
         if (!sub.document) continue;
@@ -511,8 +532,7 @@ void updateSubtitleSystem(entt::registry& reg, Vapor::RmlUiManager* rmluiManager
             break;
 
         case SubtitleState::FadingIn:
-            sub.timer += deltaTime;
-            if (sub.timer >= sub.fadeDuration) {
+            if (RmlUIHelpers::tickTimer(sub.timer, deltaTime, sub.fadeDuration)) {
                 sub.state = SubtitleState::Visible;
                 sub.displayTimer = 0.0f;
             }
@@ -532,8 +552,7 @@ void updateSubtitleSystem(entt::registry& reg, Vapor::RmlUiManager* rmluiManager
             break;
 
         case SubtitleState::FadingOut:
-            sub.timer += deltaTime;
-            if (sub.timer >= sub.fadeDuration) {
+            if (RmlUIHelpers::tickTimer(sub.timer, deltaTime, sub.fadeDuration)) {
                 sub.state = SubtitleState::Hidden;
                 // Will auto-advance to next if autoAdvance is true
             }
@@ -541,8 +560,11 @@ void updateSubtitleSystem(entt::registry& reg, Vapor::RmlUiManager* rmluiManager
         }
     }
 }
+};
 
-void updateChapterTitleSystem(entt::registry& reg, Vapor::RmlUiManager* rmluiManager, float deltaTime) {
+class ChapterTitleSystem {
+public:
+static void update(entt::registry& reg, Vapor::RmlUiManager* rmluiManager, float deltaTime) {
     if (!rmluiManager) return;
 
     auto view = reg.view<ChapterTitleComponent>();
@@ -550,15 +572,13 @@ void updateChapterTitleSystem(entt::registry& reg, Vapor::RmlUiManager* rmluiMan
         auto& ch = view.get<ChapterTitleComponent>(entity);
 
         // 1. Load document if not loaded
-        if (!ch.document && !ch.documentPath.empty()) {
-            ch.document = rmluiManager->LoadDocument(ch.documentPath);
-            if (ch.document) {
-                fmt::print("Loaded chapter title document: {}\n", ch.documentPath);
-                ch.document->Show();
-            } else {
+        if (!ch.document) {
+            if (!RmlUIHelpers::ensureDocument(ch.document, rmluiManager, ch.documentPath)) {
                 fmt::print(stderr, "Failed to load chapter title document: {}\n", ch.documentPath);
                 continue;
             }
+            fmt::print("Loaded chapter title document: {}\n", ch.documentPath);
+            ch.document->Show();
         }
 
         if (!ch.document) continue;
@@ -589,16 +609,14 @@ void updateChapterTitleSystem(entt::registry& reg, Vapor::RmlUiManager* rmluiMan
             break;
 
         case ChapterTitleState::FadingIn:
-            ch.timer += deltaTime;
-            if (ch.timer >= ch.fadeDuration) {
+            if (RmlUIHelpers::tickTimer(ch.timer, deltaTime, ch.fadeDuration)) {
                 ch.state = ChapterTitleState::Visible;
                 ch.timer = 0.0f;
             }
             break;
 
         case ChapterTitleState::Visible:
-            ch.timer += deltaTime;
-            if (ch.timer >= ch.displayDuration) {
+            if (RmlUIHelpers::tickTimer(ch.timer, deltaTime, ch.displayDuration)) {
                 ch.state = ChapterTitleState::FadingOut;
                 ch.timer = 0.0f;
                 container->SetClass("visible", false);
@@ -606,11 +624,11 @@ void updateChapterTitleSystem(entt::registry& reg, Vapor::RmlUiManager* rmluiMan
             break;
 
         case ChapterTitleState::FadingOut:
-            ch.timer += deltaTime;
-            if (ch.timer >= ch.fadeDuration) {
+            if (RmlUIHelpers::tickTimer(ch.timer, deltaTime, ch.fadeDuration)) {
                 ch.state = ChapterTitleState::Hidden;
             }
             break;
         }
     }
 }
+};

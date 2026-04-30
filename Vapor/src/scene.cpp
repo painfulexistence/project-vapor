@@ -107,8 +107,9 @@ void Scene::update(float dt) {
     }
 }
 
-void Scene::updateNode(const std::shared_ptr<Node>& node, const glm::mat4& parentTransform) {
-    if (node->isTransformDirty) {
+void Scene::updateNode(const std::shared_ptr<Node>& node, const glm::mat4& parentTransform, bool parentDirty) {
+    bool dirty = node->isTransformDirty || parentDirty;
+    if (dirty) {
         node->worldTransform = parentTransform * node->localTransform;
         if (node->meshGroup) {
             for (const auto& mesh : node->meshGroup->meshes) {
@@ -139,7 +140,7 @@ void Scene::updateNode(const std::shared_ptr<Node>& node, const glm::mat4& paren
         node->isTransformDirty = false;
     }
     for (const auto& child : node->children) {
-        updateNode(child, node->worldTransform);
+        updateNode(child, node->worldTransform, dirty);
     }
 }
 

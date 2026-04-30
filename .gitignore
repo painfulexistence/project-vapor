@@ -1,8 +1,11 @@
 bin/
 build/
 build*/
+Testing/
 *.spv
 *.ini
+
+tmp/
 
 .vs/*
 .vscode/*

@@ -12,4 +12,7 @@ find_package(SDL3 CONFIG REQUIRED)
 add_subdirectory(Vapor)
 add_subdirectory(Vaporware)
 
+enable_testing()
+add_subdirectory(tests)
+
 # install(FILES LICENSE DESTINATION "share/${PROJECT_NAME}")

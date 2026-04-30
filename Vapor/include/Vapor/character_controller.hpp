@@ -13,7 +13,7 @@ namespace Vapor {
 }
 
 class Physics3D;
-struct BodyHandle;
+#include "physics_3d.hpp"
 
 struct CharacterControllerSettings {
     float height = 1.8f;// Capsule height

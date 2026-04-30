@@ -334,16 +334,18 @@ public:
             return;
         }
 
-        auto& currentAction = m_actions[m_currentIndex];
-        currentAction->update(dt);
+        auto* currentAction = &m_actions[m_currentIndex];
+        (*currentAction)->update(dt);
 
-        if (currentAction->isDone()) {
+        while ((*currentAction)->isDone()) {
             m_currentIndex++;
             if (m_currentIndex >= m_actions.size()) {
                 m_finished = true;
-            } else {
-                startCurrentAction();
+                return;
             }
+            startCurrentAction();
+            currentAction = &m_actions[m_currentIndex];
+            (*currentAction)->update(dt);
         }
     }
 
