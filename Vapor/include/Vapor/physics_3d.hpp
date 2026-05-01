@@ -244,9 +244,9 @@ private:
     std::unique_ptr<JPH::TempAllocatorImpl> tempAllocator;
     std::unique_ptr<JPH::JobSystem> jobSystem;// Owned by Physics3D
     std::unique_ptr<JPH::PhysicsSystem> physicsSystem;
-    std::unique_ptr<BPLayerInterfaceImpl> broad_phase_layer_interface;
-    std::unique_ptr<ObjectVsBroadPhaseLayerFilterImpl> object_vs_broadphase_layer_filter;
-    std::unique_ptr<ObjectLayerPairFilterImpl> object_vs_object_layer_filter;
+    std::unique_ptr<BPLayerInterfaceImpl> broadPhaseLayerInterface;
+    std::unique_ptr<ObjectVsBroadPhaseLayerFilterImpl> objectVsBroadphaseLayerFilter;
+    std::unique_ptr<ObjectLayerPairFilterImpl> objectVsObjectLayerFilter;
     std::unique_ptr<JPH::ContactListener> contactListener;
     std::unique_ptr<JPH::BodyActivationListener> bodyActivationListener;
     std::unique_ptr<Vapor::PhysicsDebugRenderer> debugRenderer;

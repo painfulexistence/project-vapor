@@ -5,6 +5,9 @@
 
 namespace Vapor {
 
+static constexpr float kPi = glm::pi<float>();
+
+
 void DebugDraw::clear() {
     lineVertices.clear();
     triangleVertices.clear();
@@ -71,12 +74,10 @@ void DebugDraw::addBox(const glm::vec3& center, const glm::vec3& halfExtents,
 
 void DebugDraw::addSphere(const glm::vec3& center, float radius, const glm::vec4& color,
                           int segments) {
-    const float pi = glm::pi<float>();
-
     // Draw 3 circles (XY, XZ, YZ planes)
     for (int i = 0; i < segments; ++i) {
-        float angle1 = (float(i) / segments) * 2.0f * pi;
-        float angle2 = (float(i + 1) / segments) * 2.0f * pi;
+        float angle1 = (float(i) / segments) * 2.0f * kPi;
+        float angle2 = (float(i + 1) / segments) * 2.0f * kPi;
 
         // XY plane (around Z axis)
         glm::vec3 p1 = center + glm::vec3(std::cos(angle1), std::sin(angle1), 0.0f) * radius;
@@ -97,8 +98,6 @@ void DebugDraw::addSphere(const glm::vec3& center, float radius, const glm::vec4
 
 void DebugDraw::addCapsule(const glm::vec3& center, float halfHeight, float radius,
                            const glm::quat& rotation, const glm::vec4& color, int segments) {
-    const float pi = glm::pi<float>();
-
     // Local up direction (Y axis in local space)
     glm::vec3 localUp = glm::vec3(0.0f, 1.0f, 0.0f);
     glm::vec3 localRight = glm::vec3(1.0f, 0.0f, 0.0f);
@@ -115,8 +114,8 @@ void DebugDraw::addCapsule(const glm::vec3& center, float halfHeight, float radi
 
     // Draw top hemisphere
     for (int i = 0; i < segments; ++i) {
-        float angle1 = (float(i) / segments) * 2.0f * pi;
-        float angle2 = (float(i + 1) / segments) * 2.0f * pi;
+        float angle1 = (float(i) / segments) * 2.0f * kPi;
+        float angle2 = (float(i + 1) / segments) * 2.0f * kPi;
 
         // Horizontal circle at top
         glm::vec3 p1 = topCenter + (right * std::cos(angle1) + forward * std::sin(angle1)) * radius;
@@ -132,8 +131,8 @@ void DebugDraw::addCapsule(const glm::vec3& center, float halfHeight, float radi
     // Draw hemisphere arcs (top)
     int halfSegments = segments / 2;
     for (int i = 0; i < halfSegments; ++i) {
-        float angle1 = (float(i) / halfSegments) * pi * 0.5f;
-        float angle2 = (float(i + 1) / halfSegments) * pi * 0.5f;
+        float angle1 = (float(i) / halfSegments) * kPi * 0.5f;
+        float angle2 = (float(i + 1) / halfSegments) * kPi * 0.5f;
 
         float h1 = std::sin(angle1) * radius;
         float r1 = std::cos(angle1) * radius;
@@ -163,8 +162,8 @@ void DebugDraw::addCapsule(const glm::vec3& center, float halfHeight, float radi
 
     // Draw hemisphere arcs (bottom)
     for (int i = 0; i < halfSegments; ++i) {
-        float angle1 = (float(i) / halfSegments) * pi * 0.5f;
-        float angle2 = (float(i + 1) / halfSegments) * pi * 0.5f;
+        float angle1 = (float(i) / halfSegments) * kPi * 0.5f;
+        float angle2 = (float(i + 1) / halfSegments) * kPi * 0.5f;
 
         float h1 = std::sin(angle1) * radius;
         float r1 = std::cos(angle1) * radius;
@@ -201,8 +200,6 @@ void DebugDraw::addCapsule(const glm::vec3& center, float halfHeight, float radi
 
 void DebugDraw::addCylinder(const glm::vec3& center, float halfHeight, float radius,
                             const glm::quat& rotation, const glm::vec4& color, int segments) {
-    const float pi = glm::pi<float>();
-
     glm::vec3 up = rotatePoint(glm::vec3(0.0f, 1.0f, 0.0f), rotation);
     glm::vec3 right = rotatePoint(glm::vec3(1.0f, 0.0f, 0.0f), rotation);
     glm::vec3 forward = rotatePoint(glm::vec3(0.0f, 0.0f, 1.0f), rotation);
@@ -212,8 +209,8 @@ void DebugDraw::addCylinder(const glm::vec3& center, float halfHeight, float rad
 
     // Draw top and bottom circles
     for (int i = 0; i < segments; ++i) {
-        float angle1 = (float(i) / segments) * 2.0f * pi;
-        float angle2 = (float(i + 1) / segments) * 2.0f * pi;
+        float angle1 = (float(i) / segments) * 2.0f * kPi;
+        float angle2 = (float(i + 1) / segments) * 2.0f * kPi;
 
         glm::vec3 offset1 = right * std::cos(angle1) * radius + forward * std::sin(angle1) * radius;
         glm::vec3 offset2 = right * std::cos(angle2) * radius + forward * std::sin(angle2) * radius;
@@ -227,7 +224,7 @@ void DebugDraw::addCylinder(const glm::vec3& center, float halfHeight, float rad
     // Vertical lines
     int verticalLines = 4;
     for (int i = 0; i < verticalLines; ++i) {
-        float angle = (float(i) / verticalLines) * 2.0f * pi;
+        float angle = (float(i) / verticalLines) * 2.0f * kPi;
         glm::vec3 offset = right * std::cos(angle) * radius + forward * std::sin(angle) * radius;
         addLine(topCenter + offset, bottomCenter + offset, color);
     }
@@ -235,8 +232,6 @@ void DebugDraw::addCylinder(const glm::vec3& center, float halfHeight, float rad
 
 void DebugDraw::addCone(const glm::vec3& apex, const glm::vec3& direction, float height,
                         float radius, const glm::vec4& color, int segments) {
-    const float pi = glm::pi<float>();
-
     glm::vec3 dir = glm::normalize(direction);
     glm::vec3 baseCenter = apex + dir * height;
 
@@ -247,8 +242,8 @@ void DebugDraw::addCone(const glm::vec3& apex, const glm::vec3& direction, float
 
     // Draw base circle and lines to apex
     for (int i = 0; i < segments; ++i) {
-        float angle1 = (float(i) / segments) * 2.0f * pi;
-        float angle2 = (float(i + 1) / segments) * 2.0f * pi;
+        float angle1 = (float(i) / segments) * 2.0f * kPi;
+        float angle2 = (float(i + 1) / segments) * 2.0f * kPi;
 
         glm::vec3 p1 = baseCenter + right * std::cos(angle1) * radius + forward * std::sin(angle1) * radius;
         glm::vec3 p2 = baseCenter + right * std::cos(angle2) * radius + forward * std::sin(angle2) * radius;
@@ -260,7 +255,7 @@ void DebugDraw::addCone(const glm::vec3& apex, const glm::vec3& direction, float
     // Lines from apex to base
     int lineCount = 4;
     for (int i = 0; i < lineCount; ++i) {
-        float angle = (float(i) / lineCount) * 2.0f * pi;
+        float angle = (float(i) / lineCount) * 2.0f * kPi;
         glm::vec3 basePoint = baseCenter + right * std::cos(angle) * radius + forward * std::sin(angle) * radius;
         addLine(apex, basePoint, color);
     }
@@ -335,7 +330,6 @@ void DebugDraw::addFrustum(const glm::mat4& viewProj, const glm::vec4& color) {
 
 void DebugDraw::addCircle(const glm::vec3& center, const glm::vec3& normal, float radius,
                           const glm::vec4& color, int segments) {
-    const float pi = glm::pi<float>();
 
     glm::vec3 n = glm::normalize(normal);
     glm::vec3 up = std::abs(n.y) < 0.999f ? glm::vec3(0.0f, 1.0f, 0.0f) : glm::vec3(1.0f, 0.0f, 0.0f);
@@ -343,8 +337,8 @@ void DebugDraw::addCircle(const glm::vec3& center, const glm::vec3& normal, floa
     glm::vec3 forward = glm::cross(n, right);
 
     for (int i = 0; i < segments; ++i) {
-        float angle1 = (float(i) / segments) * 2.0f * pi;
-        float angle2 = (float(i + 1) / segments) * 2.0f * pi;
+        float angle1 = (float(i) / segments) * 2.0f * kPi;
+        float angle2 = (float(i + 1) / segments) * 2.0f * kPi;
 
         glm::vec3 p1 = center + right * std::cos(angle1) * radius + forward * std::sin(angle1) * radius;
         glm::vec3 p2 = center + right * std::cos(angle2) * radius + forward * std::sin(angle2) * radius;

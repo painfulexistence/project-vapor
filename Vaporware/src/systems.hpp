@@ -9,7 +9,7 @@
 #include <fmt/core.h>
 
 namespace RmlUIHelpers {
-    static Rml::ElementDocument* ensureDocument(
+    Rml::ElementDocument* ensureDocument(
         Rml::ElementDocument*& docPtr, Vapor::RmlUiManager* rml, const std::string& path)
     {
         if (docPtr || path.empty()) return docPtr;
@@ -17,8 +17,8 @@ namespace RmlUIHelpers {
         return docPtr;
     }
 
-    static bool tickTimer(float& timer, float dt, float duration) {
-        timer += dt;
+    bool tickTimer(float& timer, float deltaTime, float duration) {
+        timer += deltaTime;
         return timer >= duration;
     }
 }
@@ -73,73 +73,73 @@ public:
 
 class LightMovementSystem {
 public:
-static void update(entt::registry& reg, Scene* scene, float deltaTime) {
-    auto pointLightView = reg.view<ScenePointLightReferenceComponent, LightMovementLogicComponent>();
-    for (auto entity : pointLightView) {
-        auto& ref = pointLightView.get<ScenePointLightReferenceComponent>(entity);
-        auto& logic = pointLightView.get<LightMovementLogicComponent>(entity);
+    static void update(entt::registry& reg, Scene* scene, float deltaTime) {
+        auto pointLightView = reg.view<ScenePointLightReferenceComponent, LightMovementLogicComponent>();
+        for (auto entity : pointLightView) {
+            auto& ref = pointLightView.get<ScenePointLightReferenceComponent>(entity);
+            auto& logic = pointLightView.get<LightMovementLogicComponent>(entity);
 
-        if (ref.lightIndex < 0 || ref.lightIndex >= scene->pointLights.size()) continue;
+            if (ref.lightIndex < 0 || ref.lightIndex >= scene->pointLights.size()) continue;
 
-        auto& light = scene->pointLights[ref.lightIndex];
-        logic.timer += deltaTime * logic.speed;
-
-        float x = 0.0f, y = 0.0f, z = 0.0f;
-
-        switch (logic.pattern) {
-        case MovementPattern::Circle:
-            x = cos(logic.timer) * logic.radius;
-            z = sin(logic.timer) * logic.radius;
-            y = logic.height;
-            break;
-        case MovementPattern::Figure8:
-            x = cos(logic.timer) * logic.radius;
-            z = sin(logic.timer * 2.0f) * (logic.radius * 0.5f);
-            y = logic.height;
-            break;
-        case MovementPattern::Linear:
-            x = sin(logic.timer) * logic.radius;
-            y = logic.height;
-            z = 0.0f;
-            break;
-        case MovementPattern::Spiral:
-            x = cos(logic.timer) * (logic.radius + sin(logic.timer * 0.5f));
-            z = sin(logic.timer) * (logic.radius + sin(logic.timer * 0.5f));
-            y = logic.height + sin(logic.timer * 0.2f);
-            break;
-        }
-
-        light.position = glm::vec3(x, y, z);
-        // Optional: intensity modulation
-        // light.intensity = 5.0f + sin(logic.timer * 2.0f) * 2.0f;
-    }
-    auto directionalLightView = reg.view<SceneDirectionalLightReferenceComponent, DirectionalLightLogicComponent>();
-    for (auto entity : directionalLightView) {
-        auto& ref = directionalLightView.get<SceneDirectionalLightReferenceComponent>(entity);
-        auto& logic = directionalLightView.get<DirectionalLightLogicComponent>(entity);
-        if (ref.lightIndex >= 0 && ref.lightIndex < scene->directionalLights.size()) {
+            auto& light = scene->pointLights[ref.lightIndex];
             logic.timer += deltaTime * logic.speed;
-            // Simple oscillation on Z axis relative to base direction
-            glm::vec3 newDir = logic.baseDirection;
-            newDir.z += logic.magnitude * sin(logic.timer);
-            scene->directionalLights[ref.lightIndex].direction = glm::normalize(newDir);
+
+            float x = 0.0f, y = 0.0f, z = 0.0f;
+
+            switch (logic.pattern) {
+            case MovementPattern::Circle:
+                x = cos(logic.timer) * logic.radius;
+                z = sin(logic.timer) * logic.radius;
+                y = logic.height;
+                break;
+            case MovementPattern::Figure8:
+                x = cos(logic.timer) * logic.radius;
+                z = sin(logic.timer * 2.0f) * (logic.radius * 0.5f);
+                y = logic.height;
+                break;
+            case MovementPattern::Linear:
+                x = sin(logic.timer) * logic.radius;
+                y = logic.height;
+                z = 0.0f;
+                break;
+            case MovementPattern::Spiral:
+                x = cos(logic.timer) * (logic.radius + sin(logic.timer * 0.5f));
+                z = sin(logic.timer) * (logic.radius + sin(logic.timer * 0.5f));
+                y = logic.height + sin(logic.timer * 0.2f);
+                break;
+            }
+
+            light.position = glm::vec3(x, y, z);
+            // Optional: intensity modulation
+            // light.intensity = 5.0f + sin(logic.timer * 2.0f) * 2.0f;
+        }
+        auto directionalLightView = reg.view<SceneDirectionalLightReferenceComponent, DirectionalLightLogicComponent>();
+        for (auto entity : directionalLightView) {
+            auto& ref = directionalLightView.get<SceneDirectionalLightReferenceComponent>(entity);
+            auto& logic = directionalLightView.get<DirectionalLightLogicComponent>(entity);
+            if (ref.lightIndex >= 0 && ref.lightIndex < scene->directionalLights.size()) {
+                logic.timer += deltaTime * logic.speed;
+                // Simple oscillation on Z axis relative to base direction
+                glm::vec3 newDir = logic.baseDirection;
+                newDir.z += logic.magnitude * sin(logic.timer);
+                scene->directionalLights[ref.lightIndex].direction = glm::normalize(newDir);
+            }
         }
     }
-}
 };
 
 class AutoRotateSystem {
 public:
-static void update(entt::registry& registry, float deltaTime) {
-    auto view = registry.view<SceneNodeReferenceComponent, AutoRotateComponent>();
-    for (auto entity : view) {
-        auto& ref = view.get<SceneNodeReferenceComponent>(entity);
-        auto& rotate = view.get<AutoRotateComponent>(entity);
-        if (ref.node) {
-            ref.node->rotate(rotate.axis, rotate.speed * deltaTime);
+    static void update(entt::registry& registry, float deltaTime) {
+        auto view = registry.view<SceneNodeReferenceComponent, AutoRotateComponent>();
+        for (auto entity : view) {
+            auto& ref = view.get<SceneNodeReferenceComponent>(entity);
+            auto& rotate = view.get<AutoRotateComponent>(entity);
+            if (ref.node) {
+                ref.node->rotate(rotate.axis, rotate.speed * deltaTime);
+            }
         }
     }
-}
 };
 
 class CameraSwitchSystem {
@@ -184,451 +184,418 @@ public:
 
 class CameraSystem {
 public:
-static void update(entt::registry& reg, float deltaTime) {
-    auto view = reg.view<Vapor::VirtualCameraComponent>();
+    static void update(entt::registry& reg, float deltaTime) {
+        auto view = reg.view<Vapor::VirtualCameraComponent>();
 
-    for (auto entity : view) {
-        auto& cam = view.get<Vapor::VirtualCameraComponent>(entity);
-        if (!cam.isActive) continue;
+        for (auto entity : view) {
+            auto& cam = view.get<Vapor::VirtualCameraComponent>(entity);
+            if (!cam.isActive) continue;
 
-        // 1. Handle Fly Camera Logic
-        if (auto [fly, intent] = reg.try_get<FlyCameraComponent, CharacterIntent>(entity); fly && intent) {
-            // Rotation
-            fly->pitch -= intent->lookVector.y * fly->rotateSpeed * deltaTime;
-            fly->yaw -= intent->lookVector.x * fly->rotateSpeed * deltaTime;
-            fly->pitch = glm::clamp(fly->pitch, -89.0f, 89.0f);
+            if (auto [fly, intent] = reg.try_get<FlyCameraComponent, CharacterIntent>(entity); fly && intent) {
+                fly->pitch -= intent->lookVector.y * fly->rotateSpeed * deltaTime;
+                fly->yaw -= intent->lookVector.x * fly->rotateSpeed * deltaTime;
+                fly->pitch = glm::clamp(fly->pitch, -89.0f, 89.0f);
 
-            cam.rotation = glm::quat(glm::vec3(glm::radians(-fly->pitch), glm::radians(fly->yaw - 90.0f), 0.0f));
+                cam.rotation = glm::quat(glm::vec3(glm::radians(-fly->pitch), glm::radians(fly->yaw - 90.0f), 0.0f));
 
-            glm::vec3 front = cam.rotation * glm::vec3(0, 0, -1);
-            glm::vec3 right = cam.rotation * glm::vec3(1, 0, 0);
-            glm::vec3 up = cam.rotation * glm::vec3(0, 1, 0);
+                glm::vec3 front = cam.rotation * glm::vec3(0, 0, -1);
+                glm::vec3 right = cam.rotation * glm::vec3(1, 0, 0);
+                glm::vec3 up = cam.rotation * glm::vec3(0, 1, 0);
 
-            if (intent->moveVector.x != 0.0f) cam.position += intent->moveVector.x * right * fly->moveSpeed * deltaTime;
-            if (intent->moveVector.y != 0.0f) cam.position += intent->moveVector.y * front * fly->moveSpeed * deltaTime;
-            if (intent->moveVerticalAxis != 0.0f)
-                cam.position += intent->moveVerticalAxis * up * fly->moveSpeed * deltaTime;
-        }
+                if (intent->moveVector.x != 0.0f) cam.position += intent->moveVector.x * right * fly->moveSpeed * deltaTime;
+                if (intent->moveVector.y != 0.0f) cam.position += intent->moveVector.y * front * fly->moveSpeed * deltaTime;
+                if (intent->moveVerticalAxis != 0.0f)
+                    cam.position += intent->moveVerticalAxis * up * fly->moveSpeed * deltaTime;
+            }
 
-        // 2. Handle Follow Camera Logic
-        if (auto* follow = reg.try_get<FollowCameraComponent>(entity)) {
-            if (!reg.valid(follow->target)) continue;
-            if (auto* nodeRef = reg.try_get<SceneNodeReferenceComponent>(follow->target)) {
-                if (nodeRef->node) {
-                    glm::vec3 targetPos = nodeRef->node->getWorldPosition();
-                    glm::vec3 desiredPos = targetPos + follow->offset;
-                    cam.position = glm::mix(cam.position, desiredPos, 1.0f - pow(follow->smoothFactor, deltaTime));
-                    cam.rotation = glm::quatLookAt(glm::normalize(targetPos - cam.position), glm::vec3(0, 1, 0));
+            if (auto* follow = reg.try_get<FollowCameraComponent>(entity)) {
+                if (!reg.valid(follow->target)) continue;
+                if (auto* nodeRef = reg.try_get<SceneNodeReferenceComponent>(follow->target)) {
+                    if (nodeRef->node) {
+                        glm::vec3 targetPos = nodeRef->node->getWorldPosition();
+                        glm::vec3 desiredPos = targetPos + follow->offset;
+                        cam.position = glm::mix(cam.position, desiredPos, 1.0f - pow(follow->smoothFactor, deltaTime));
+                        cam.rotation = glm::quatLookAt(glm::normalize(targetPos - cam.position), glm::vec3(0, 1, 0));
+                    }
                 }
             }
-        }
 
-        // 3. Update Matrices
-        glm::mat4 rotation = glm::mat4_cast(cam.rotation);
-        glm::mat4 translation = glm::translate(glm::mat4(1.0f), cam.position);
-        cam.viewMatrix = glm::inverse(translation * rotation);
-        cam.projectionMatrix = glm::perspective(cam.fov, cam.aspect, cam.near, cam.far);
+            glm::mat4 rotation = glm::mat4_cast(cam.rotation);
+            glm::mat4 translation = glm::translate(glm::mat4(1.0f), cam.position);
+            cam.viewMatrix = glm::inverse(translation * rotation);
+            cam.projectionMatrix = glm::perspective(cam.fov, cam.aspect, cam.near, cam.far);
+        }
     }
-}
 };
 
 class HUDSystem {
 public:
-static void update(entt::registry& reg, Vapor::RmlUiManager* rmluiManager, float deltaTime) {
-    if (!rmluiManager) return;
+    static void update(entt::registry& reg, Vapor::RmlUiManager* rmluiManager, float deltaTime) {
+        if (!rmluiManager) return;
 
-    auto view = reg.view<HUDComponent>();
-    for (auto entity : view) {
-        auto& hud = view.get<HUDComponent>(entity);
+        auto view = reg.view<HUDComponent>();
+        for (auto entity : view) {
+            auto& hud = view.get<HUDComponent>(entity);
 
-        // 1. Load document if not loaded
-        if (!hud.document) {
-            if (!RmlUIHelpers::ensureDocument(hud.document, rmluiManager, hud.documentPath)) {
-                fmt::print(stderr, "Failed to load HUD document: {}\n", hud.documentPath);
-                continue;
-            }
-            fmt::print("Loaded HUD document: {}\n", hud.documentPath);
-            if (hud.isVisible) {
-                hud.state = HUDState::Visible;
-                hud.document->Show();
-                if (auto el = hud.document->GetElementById("hud_content")) {
-                    el->SetClass("visible", true);
+            if (!hud.document) {
+                if (!RmlUIHelpers::ensureDocument(hud.document, rmluiManager, hud.documentPath)) {
+                    fmt::print(stderr, "Failed to load HUD document: {}\n", hud.documentPath);
+                    continue;
                 }
-            } else {
-                hud.state = HUDState::Hidden;
-                hud.document->Hide();
+                fmt::print("Loaded HUD document: {}\n", hud.documentPath);
+                if (hud.isVisible) {
+                    hud.state = HUDState::Visible;
+                    hud.document->Show();
+                    if (auto el = hud.document->GetElementById("hud_content")) {
+                        el->SetClass("visible", true);
+                    }
+                } else {
+                    hud.state = HUDState::Hidden;
+                    hud.document->Hide();
+                }
             }
-        }
 
-        if (!hud.document) continue;
+            if (!hud.document) continue;
 
-        auto element = hud.document->GetElementById("hud-container");
-        if (!element) continue;
+            auto element = hud.document->GetElementById("hud-container");
+            if (!element) continue;
 
-        // 2. State Machine
-        switch (hud.state) {
-        case HUDState::Hidden:
-            if (hud.isVisible) {
-                hud.state = HUDState::FadingIn;
-                hud.document->Show();
-                // Trigger fade in
-                element->SetClass("visible", true);
-                hud.timer = 0.0f;
+            switch (hud.state) {
+            case HUDState::Hidden:
+                if (hud.isVisible) {
+                    hud.state = HUDState::FadingIn;
+                    hud.document->Show();
+                    element->SetClass("visible", true);
+                    hud.timer = 0.0f;
+                }
+                break;
+
+            case HUDState::FadingIn:
+                hud.timer += deltaTime;
+                if (!hud.isVisible) {
+                    hud.state = HUDState::FadingOut;
+                    element->SetClass("visible", false);
+                    hud.timer = 0.0f;
+                } else if (hud.timer >= hud.fadeDuration) {
+                    hud.state = HUDState::Visible;
+                }
+                break;
+
+            case HUDState::Visible:
+                if (!hud.isVisible) {
+                    hud.state = HUDState::FadingOut;
+                    element->SetClass("visible", false);
+                    hud.timer = 0.0f;
+                }
+                break;
+
+            case HUDState::FadingOut:
+                hud.timer += deltaTime;
+                if (hud.isVisible) {
+                    hud.state = HUDState::FadingIn;
+                    element->SetClass("visible", true);
+                    hud.timer = 0.0f;
+                } else if (hud.timer >= hud.fadeDuration) {
+                    hud.state = HUDState::Hidden;
+                    hud.document->Hide();
+                }
+                break;
             }
-            break;
-
-        case HUDState::FadingIn:
-            hud.timer += deltaTime;
-            if (!hud.isVisible) {
-                // Interrupted
-                hud.state = HUDState::FadingOut;
-                element->SetClass("visible", false);
-                hud.timer = 0.0f;// Reset timer or calculate remaining? Simple reset for now.
-            } else if (hud.timer >= hud.fadeDuration) {
-                hud.state = HUDState::Visible;
-            }
-            break;
-
-        case HUDState::Visible:
-            if (!hud.isVisible) {
-                hud.state = HUDState::FadingOut;
-                // Trigger fade out
-                element->SetClass("visible", false);
-                hud.timer = 0.0f;
-            }
-            break;
-
-        case HUDState::FadingOut:
-            hud.timer += deltaTime;
-            if (hud.isVisible) {
-                // Interrupted
-                hud.state = HUDState::FadingIn;
-                element->SetClass("visible", true);
-                hud.timer = 0.0f;
-            } else if (hud.timer >= hud.fadeDuration) {
-                hud.state = HUDState::Hidden;
-                hud.document->Hide();
-            }
-            break;
         }
     }
-}
 };
 
 class ScrollTextSystem {
 public:
-static void update(entt::registry& reg, Vapor::RmlUiManager* rmluiManager, float deltaTime) {
-    if (!rmluiManager) return;
+    static void update(entt::registry& reg, Vapor::RmlUiManager* rmluiManager, float deltaTime) {
+        if (!rmluiManager) return;
 
-    auto view = reg.view<ScrollTextComponent>();
-    for (auto entity : view) {
-        auto& scroll = view.get<ScrollTextComponent>(entity);
+        auto view = reg.view<ScrollTextComponent>();
+        for (auto entity : view) {
+            auto& scroll = view.get<ScrollTextComponent>(entity);
 
-        // 1. Load document if not loaded
-        if (!scroll.document) {
-            if (!RmlUIHelpers::ensureDocument(scroll.document, rmluiManager, scroll.documentPath)) {
-                fmt::print(stderr, "Failed to load scroll text document: {}\n", scroll.documentPath);
-                continue;
-            }
-            fmt::print("Loaded scroll text document: {}\n", scroll.documentPath);
-            scroll.document->Show();
-            if (!scroll.lines.empty()) {
-                if (auto el = scroll.document->GetElementById("scroll-text")) {
-                    el->SetInnerRML(scroll.lines[scroll.currentIndex].c_str());
-                    el->SetClass("visible", true);
+            if (!scroll.document) {
+                if (!RmlUIHelpers::ensureDocument(scroll.document, rmluiManager, scroll.documentPath)) {
+                    fmt::print(stderr, "Failed to load scroll text document: {}\n", scroll.documentPath);
+                    continue;
+                }
+                fmt::print("Loaded scroll text document: {}\n", scroll.documentPath);
+                scroll.document->Show();
+                if (!scroll.lines.empty()) {
+                    if (auto el = scroll.document->GetElementById("scroll-text")) {
+                        el->SetInnerRML(scroll.lines[scroll.currentIndex].c_str());
+                        el->SetClass("visible", true);
+                    }
                 }
             }
-        }
 
-        if (!scroll.document) continue;
+            if (!scroll.document) continue;
 
-        auto element = scroll.document->GetElementById("scroll-text");
-        if (!element) continue;
+            auto element = scroll.document->GetElementById("scroll-text");
+            if (!element) continue;
 
-        // 2. State Machine
-        switch (scroll.state) {
-        case ScrollTextState::Idle:
-            if (scroll.advanceRequested && scroll.currentIndex < (int)scroll.lines.size() - 1) {
-                scroll.advanceRequested = false;
-                scroll.state = ScrollTextState::ScrollingOut;
+            switch (scroll.state) {
+            case ScrollTextState::Idle:
+                if (scroll.advanceRequested && scroll.currentIndex < (int)scroll.lines.size() - 1) {
+                    scroll.advanceRequested = false;
+                    scroll.state = ScrollTextState::ScrollingOut;
+                    scroll.timer = 0.0f;
+                    element->SetClass("visible", false);
+                    element->SetClass("scroll-out", true);
+                } else {
+                    scroll.advanceRequested = false;
+                }
+                break;
+
+            case ScrollTextState::ScrollingOut:
+                if (RmlUIHelpers::tickTimer(scroll.timer, deltaTime, scroll.scrollDuration)) {
+                    scroll.currentIndex++;
+                    if (scroll.currentIndex < (int)scroll.lines.size()) {
+                        element->SetInnerRML(scroll.lines[scroll.currentIndex].c_str());
+                    }
+                    scroll.state = ScrollTextState::PreparingScrollIn;
+                    element->SetClass("scroll-out", false);
+                    element->SetClass("scroll-in-prepare", true);
+                }
+                break;
+
+            case ScrollTextState::PreparingScrollIn:
+                // Wait one frame for CSS transition to position element before animating in
+                scroll.state = ScrollTextState::ScrollingIn;
                 scroll.timer = 0.0f;
-                // Trigger scroll out animation
-                element->SetClass("visible", false);
-                element->SetClass("scroll-out", true);
-            } else {
-                scroll.advanceRequested = false;// Clear if at end
-            }
-            break;
+                element->SetClass("scroll-in-prepare", false);
+                element->SetClass("scroll-in", true);
+                break;
 
-        case ScrollTextState::ScrollingOut:
-            if (RmlUIHelpers::tickTimer(scroll.timer, deltaTime, scroll.scrollDuration)) {
-                // Move to next line
-                scroll.currentIndex++;
-                if (scroll.currentIndex < (int)scroll.lines.size()) {
-                    element->SetInnerRML(scroll.lines[scroll.currentIndex].c_str());
+            case ScrollTextState::ScrollingIn:
+                if (RmlUIHelpers::tickTimer(scroll.timer, deltaTime, scroll.scrollDuration)) {
+                    scroll.state = ScrollTextState::Idle;
+                    element->SetClass("scroll-in", false);
+                    element->SetClass("visible", true);
                 }
-                // Prepare for scroll-in: position element below without transition
-                scroll.state = ScrollTextState::PreparingScrollIn;
-                element->SetClass("scroll-out", false);
-                element->SetClass("scroll-in-prepare", true);
+                break;
             }
-            break;
-
-        case ScrollTextState::PreparingScrollIn:
-            // Wait one frame for the element to be positioned, then animate in
-            scroll.state = ScrollTextState::ScrollingIn;
-            scroll.timer = 0.0f;
-            element->SetClass("scroll-in-prepare", false);
-            element->SetClass("scroll-in", true);
-            break;
-
-        case ScrollTextState::ScrollingIn:
-            if (RmlUIHelpers::tickTimer(scroll.timer, deltaTime, scroll.scrollDuration)) {
-                scroll.state = ScrollTextState::Idle;
-                element->SetClass("scroll-in", false);
-                element->SetClass("visible", true);
-            }
-            break;
         }
     }
-}
 };
 
 class LetterboxSystem {
 public:
-static void update(entt::registry& reg, Vapor::RmlUiManager* rmluiManager, float deltaTime) {
-    if (!rmluiManager) return;
+    static void update(entt::registry& reg, Vapor::RmlUiManager* rmluiManager, float deltaTime) {
+        if (!rmluiManager) return;
 
-    auto view = reg.view<LetterboxComponent>();
-    for (auto entity : view) {
-        auto& lb = view.get<LetterboxComponent>(entity);
+        auto view = reg.view<LetterboxComponent>();
+        for (auto entity : view) {
+            auto& lb = view.get<LetterboxComponent>(entity);
 
-        // 1. Load document if not loaded
-        if (!lb.document) {
-            if (!RmlUIHelpers::ensureDocument(lb.document, rmluiManager, lb.documentPath)) {
-                fmt::print(stderr, "Failed to load letterbox document: {}\n", lb.documentPath);
+            if (!lb.document) {
+                if (!RmlUIHelpers::ensureDocument(lb.document, rmluiManager, lb.documentPath)) {
+                    fmt::print(stderr, "Failed to load letterbox document: {}\n", lb.documentPath);
+                    continue;
+                }
+                fmt::print("Loaded letterbox document: {}\n", lb.documentPath);
+                lb.document->Show();
+            }
+
+            if (!lb.document) continue;
+
+            auto topBar = lb.document->GetElementById("letterbox-top");
+            auto bottomBar = lb.document->GetElementById("letterbox-bottom");
+            if (!topBar || !bottomBar) {
+                fmt::print(stderr, "Error: Missing letterbox elements (letterbox-top/bottom) in {}\n", lb.documentPath);
                 continue;
             }
-            fmt::print("Loaded letterbox document: {}\n", lb.documentPath);
-            lb.document->Show();
-        }
 
-        if (!lb.document) continue;
+            switch (lb.state) {
+            case LetterboxState::Hidden:
+                if (lb.isOpen) {
+                    lb.state = LetterboxState::Opening;
+                    lb.timer = 0.0f;
+                    topBar->SetClass("open", true);
+                    bottomBar->SetClass("open", true);
+                }
+                break;
 
-        auto topBar = lb.document->GetElementById("letterbox-top");
-        auto bottomBar = lb.document->GetElementById("letterbox-bottom");
-        if (!topBar || !bottomBar) {
-            fmt::print(stderr, "Error: Missing letterbox elements (letterbox-top/bottom) in {}\n", lb.documentPath);
-            continue;
-        }
+            case LetterboxState::Opening:
+                lb.timer += deltaTime;
+                if (!lb.isOpen) {
+                    lb.state = LetterboxState::Closing;
+                    lb.timer = 0.0f;
+                    topBar->SetClass("open", false);
+                    bottomBar->SetClass("open", false);
+                } else if (lb.timer >= lb.animDuration) {
+                    lb.state = LetterboxState::Open;
+                }
+                break;
 
-        // 2. State Machine
-        switch (lb.state) {
-        case LetterboxState::Hidden:
-            if (lb.isOpen) {
-                lb.state = LetterboxState::Opening;
-                lb.timer = 0.0f;
-                topBar->SetClass("open", true);
-                bottomBar->SetClass("open", true);
+            case LetterboxState::Open:
+                if (!lb.isOpen) {
+                    lb.state = LetterboxState::Closing;
+                    lb.timer = 0.0f;
+                    topBar->SetClass("open", false);
+                    bottomBar->SetClass("open", false);
+                }
+                break;
+
+            case LetterboxState::Closing:
+                lb.timer += deltaTime;
+                if (lb.isOpen) {
+                    lb.state = LetterboxState::Opening;
+                    lb.timer = 0.0f;
+                    topBar->SetClass("open", true);
+                    bottomBar->SetClass("open", true);
+                } else if (lb.timer >= lb.animDuration) {
+                    lb.state = LetterboxState::Hidden;
+                }
+                break;
             }
-            break;
-
-        case LetterboxState::Opening:
-            lb.timer += deltaTime;
-            if (!lb.isOpen) {
-                // Interrupted - close
-                lb.state = LetterboxState::Closing;
-                lb.timer = 0.0f;
-                topBar->SetClass("open", false);
-                bottomBar->SetClass("open", false);
-            } else if (lb.timer >= lb.animDuration) {
-                lb.state = LetterboxState::Open;
-            }
-            break;
-
-        case LetterboxState::Open:
-            if (!lb.isOpen) {
-                lb.state = LetterboxState::Closing;
-                lb.timer = 0.0f;
-                topBar->SetClass("open", false);
-                bottomBar->SetClass("open", false);
-            }
-            break;
-
-        case LetterboxState::Closing:
-            lb.timer += deltaTime;
-            if (lb.isOpen) {
-                // Interrupted - reopen
-                lb.state = LetterboxState::Opening;
-                lb.timer = 0.0f;
-                topBar->SetClass("open", true);
-                bottomBar->SetClass("open", true);
-            } else if (lb.timer >= lb.animDuration) {
-                lb.state = LetterboxState::Hidden;
-            }
-            break;
         }
     }
-}
 };
 
 class SubtitleSystem {
 public:
-static void update(entt::registry& reg, Vapor::RmlUiManager* rmluiManager, float deltaTime) {
-    if (!rmluiManager) return;
+    static void update(entt::registry& reg, Vapor::RmlUiManager* rmluiManager, float deltaTime) {
+        if (!rmluiManager) return;
 
-    auto view = reg.view<SubtitleComponent>();
-    for (auto entity : view) {
-        auto& sub = view.get<SubtitleComponent>(entity);
+        auto view = reg.view<SubtitleComponent>();
+        for (auto entity : view) {
+            auto& sub = view.get<SubtitleComponent>(entity);
 
-        // 1. Load document if not loaded
-        if (!sub.document) {
-            if (!RmlUIHelpers::ensureDocument(sub.document, rmluiManager, sub.documentPath)) {
-                fmt::print(stderr, "Failed to load subtitle document: {}\n", sub.documentPath);
+            if (!sub.document) {
+                if (!RmlUIHelpers::ensureDocument(sub.document, rmluiManager, sub.documentPath)) {
+                    fmt::print(stderr, "Failed to load subtitle document: {}\n", sub.documentPath);
+                    continue;
+                }
+                fmt::print("Loaded subtitle document: {}\n", sub.documentPath);
+                sub.document->Show();
+            }
+
+            if (!sub.document) continue;
+
+            auto container = sub.document->GetElementById("subtitle-container");
+            auto speakerEl = sub.document->GetElementById("subtitle-speaker");
+            auto textEl = sub.document->GetElementById("subtitle-text");
+            if (!container || !speakerEl || !textEl) {
+                fmt::print(stderr, "Error: Missing subtitle elements in {}\n", sub.documentPath);
                 continue;
             }
-            fmt::print("Loaded subtitle document: {}\n", sub.documentPath);
-            sub.document->Show();
-        }
 
-        if (!sub.document) continue;
+            switch (sub.state) {
+            case SubtitleState::Hidden:
+                if (sub.advanceRequested || (sub.autoAdvance && sub.currentIndex < (int)sub.queue.size() - 1)) {
+                    sub.advanceRequested = false;
+                    sub.currentIndex++;
 
-        auto container = sub.document->GetElementById("subtitle-container");
-        auto speakerEl = sub.document->GetElementById("subtitle-speaker");
-        auto textEl = sub.document->GetElementById("subtitle-text");
-        if (!container || !speakerEl || !textEl) {
-            fmt::print(stderr, "Error: Missing subtitle elements in {}\n", sub.documentPath);
-            continue;
-        }
+                    if (sub.currentIndex < (int)sub.queue.size()) {
+                        auto& entry = sub.queue[sub.currentIndex];
 
-        // 2. State Machine
-        switch (sub.state) {
-        case SubtitleState::Hidden:
-            // Check for advance request or auto-advance to next in queue
-            if (sub.advanceRequested || (sub.autoAdvance && sub.currentIndex < (int)sub.queue.size() - 1)) {
-                sub.advanceRequested = false;
-                sub.currentIndex++;
+                        if (entry.speaker.empty()) {
+                            speakerEl->SetClass("hidden", true);
+                        } else {
+                            speakerEl->SetClass("hidden", false);
+                            speakerEl->SetInnerRML(entry.speaker.c_str());
+                        }
+                        textEl->SetInnerRML(entry.text.c_str());
 
-                if (sub.currentIndex < (int)sub.queue.size()) {
-                    auto& entry = sub.queue[sub.currentIndex];
-
-                    // Set speaker (hide if empty)
-                    if (entry.speaker.empty()) {
-                        speakerEl->SetClass("hidden", true);
-                    } else {
-                        speakerEl->SetClass("hidden", false);
-                        speakerEl->SetInnerRML(entry.speaker.c_str());
+                        sub.state = SubtitleState::FadingIn;
+                        sub.timer = 0.0f;
+                        container->SetClass("visible", true);
                     }
-
-                    // Set text
-                    textEl->SetInnerRML(entry.text.c_str());
-
-                    // Start fade in
-                    sub.state = SubtitleState::FadingIn;
-                    sub.timer = 0.0f;
-                    container->SetClass("visible", true);
                 }
-            }
-            break;
+                break;
 
-        case SubtitleState::FadingIn:
-            if (RmlUIHelpers::tickTimer(sub.timer, deltaTime, sub.fadeDuration)) {
-                sub.state = SubtitleState::Visible;
-                sub.displayTimer = 0.0f;
-            }
-            break;
+            case SubtitleState::FadingIn:
+                if (RmlUIHelpers::tickTimer(sub.timer, deltaTime, sub.fadeDuration)) {
+                    sub.state = SubtitleState::Visible;
+                    sub.displayTimer = 0.0f;
+                }
+                break;
 
-        case SubtitleState::Visible:
-            sub.displayTimer += deltaTime;
-            // Check for manual advance or duration expired
-            if (sub.advanceRequested
-                || (sub.autoAdvance && sub.currentIndex < (int)sub.queue.size()
-                    && sub.displayTimer >= sub.queue[sub.currentIndex].duration)) {
-                sub.advanceRequested = false;
-                sub.state = SubtitleState::FadingOut;
-                sub.timer = 0.0f;
-                container->SetClass("visible", false);
-            }
-            break;
+            case SubtitleState::Visible:
+                sub.displayTimer += deltaTime;
+                if (sub.advanceRequested
+                    || (sub.autoAdvance && sub.currentIndex < (int)sub.queue.size()
+                        && sub.displayTimer >= sub.queue[sub.currentIndex].duration)) {
+                    sub.advanceRequested = false;
+                    sub.state = SubtitleState::FadingOut;
+                    sub.timer = 0.0f;
+                    container->SetClass("visible", false);
+                }
+                break;
 
-        case SubtitleState::FadingOut:
-            if (RmlUIHelpers::tickTimer(sub.timer, deltaTime, sub.fadeDuration)) {
-                sub.state = SubtitleState::Hidden;
-                // Will auto-advance to next if autoAdvance is true
+            case SubtitleState::FadingOut:
+                if (RmlUIHelpers::tickTimer(sub.timer, deltaTime, sub.fadeDuration)) {
+                    sub.state = SubtitleState::Hidden;
+                    // Will auto-advance to next if autoAdvance is true
+                }
+                break;
             }
-            break;
         }
     }
-}
 };
 
 class ChapterTitleSystem {
 public:
-static void update(entt::registry& reg, Vapor::RmlUiManager* rmluiManager, float deltaTime) {
-    if (!rmluiManager) return;
+    static void update(entt::registry& reg, Vapor::RmlUiManager* rmluiManager, float deltaTime) {
+        if (!rmluiManager) return;
 
-    auto view = reg.view<ChapterTitleComponent>();
-    for (auto entity : view) {
-        auto& ch = view.get<ChapterTitleComponent>(entity);
+        auto view = reg.view<ChapterTitleComponent>();
+        for (auto entity : view) {
+            auto& ch = view.get<ChapterTitleComponent>(entity);
 
-        // 1. Load document if not loaded
-        if (!ch.document) {
-            if (!RmlUIHelpers::ensureDocument(ch.document, rmluiManager, ch.documentPath)) {
-                fmt::print(stderr, "Failed to load chapter title document: {}\n", ch.documentPath);
+            if (!ch.document) {
+                if (!RmlUIHelpers::ensureDocument(ch.document, rmluiManager, ch.documentPath)) {
+                    fmt::print(stderr, "Failed to load chapter title document: {}\n", ch.documentPath);
+                    continue;
+                }
+                fmt::print("Loaded chapter title document: {}\n", ch.documentPath);
+                ch.document->Show();
+            }
+
+            if (!ch.document) continue;
+
+            auto container = ch.document->GetElementById("chapter-container");
+            auto numberEl = ch.document->GetElementById("chapter-number");
+            auto titleEl = ch.document->GetElementById("chapter-title");
+            if (!container || !numberEl || !titleEl) {
+                fmt::print(stderr, "Error: Missing chapter title elements in {}\n", ch.documentPath);
                 continue;
             }
-            fmt::print("Loaded chapter title document: {}\n", ch.documentPath);
-            ch.document->Show();
-        }
 
-        if (!ch.document) continue;
+            switch (ch.state) {
+            case ChapterTitleState::Hidden:
+                if (ch.showRequested) {
+                    ch.showRequested = false;
+                    numberEl->SetInnerRML(ch.chapterNumber.c_str());
+                    titleEl->SetInnerRML(ch.chapterTitle.c_str());
+                    ch.state = ChapterTitleState::FadingIn;
+                    ch.timer = 0.0f;
+                    container->SetClass("visible", true);
+                }
+                break;
 
-        auto container = ch.document->GetElementById("chapter-container");
-        auto numberEl = ch.document->GetElementById("chapter-number");
-        auto titleEl = ch.document->GetElementById("chapter-title");
-        if (!container || !numberEl || !titleEl) {
-            fmt::print(stderr, "Error: Missing chapter title elements in {}\n", ch.documentPath);
-            continue;
-        }
+            case ChapterTitleState::FadingIn:
+                if (RmlUIHelpers::tickTimer(ch.timer, deltaTime, ch.fadeDuration)) {
+                    ch.state = ChapterTitleState::Visible;
+                    ch.timer = 0.0f;
+                }
+                break;
 
-        // 2. State Machine
-        switch (ch.state) {
-        case ChapterTitleState::Hidden:
-            if (ch.showRequested) {
-                ch.showRequested = false;
+            case ChapterTitleState::Visible:
+                if (RmlUIHelpers::tickTimer(ch.timer, deltaTime, ch.displayDuration)) {
+                    ch.state = ChapterTitleState::FadingOut;
+                    ch.timer = 0.0f;
+                    container->SetClass("visible", false);
+                }
+                break;
 
-                // Set content
-                numberEl->SetInnerRML(ch.chapterNumber.c_str());
-                titleEl->SetInnerRML(ch.chapterTitle.c_str());
-
-                // Start fade in
-                ch.state = ChapterTitleState::FadingIn;
-                ch.timer = 0.0f;
-                container->SetClass("visible", true);
+            case ChapterTitleState::FadingOut:
+                if (RmlUIHelpers::tickTimer(ch.timer, deltaTime, ch.fadeDuration)) {
+                    ch.state = ChapterTitleState::Hidden;
+                }
+                break;
             }
-            break;
-
-        case ChapterTitleState::FadingIn:
-            if (RmlUIHelpers::tickTimer(ch.timer, deltaTime, ch.fadeDuration)) {
-                ch.state = ChapterTitleState::Visible;
-                ch.timer = 0.0f;
-            }
-            break;
-
-        case ChapterTitleState::Visible:
-            if (RmlUIHelpers::tickTimer(ch.timer, deltaTime, ch.displayDuration)) {
-                ch.state = ChapterTitleState::FadingOut;
-                ch.timer = 0.0f;
-                container->SetClass("visible", false);
-            }
-            break;
-
-        case ChapterTitleState::FadingOut:
-            if (RmlUIHelpers::tickTimer(ch.timer, deltaTime, ch.fadeDuration)) {
-                ch.state = ChapterTitleState::Hidden;
-            }
-            break;
         }
     }
-}
 };

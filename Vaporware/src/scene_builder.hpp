@@ -25,7 +25,7 @@ inline SceneResources buildScene(
     Vapor::RNG& rng)
 {
     SceneResources res;
-    res.scene    = scene;
+    res.scene = scene;
     res.material = material;
 
     auto cube1 = registry.create();
@@ -33,7 +33,7 @@ inline SceneResources buildScene(
         auto& transform = registry.emplace<Vapor::TransformComponent>(cube1);
         transform.position = glm::vec3(-2.0f, 0.5f, 0.0f);
         auto& col = registry.emplace<Vapor::BoxColliderComponent>(cube1);
-        col.halfSize = glm::vec3(.5f, .5f, .5f);
+        col.halfSize = glm::vec3(0.5f, 0.5f, 0.5f);
         auto& rb = registry.emplace<Vapor::RigidbodyComponent>(cube1);
         rb.motionType = BodyMotionType::Dynamic;
 
@@ -57,7 +57,7 @@ inline SceneResources buildScene(
         auto& transform = registry.emplace<Vapor::TransformComponent>(cube2);
         transform.position = glm::vec3(2.0f, 0.5f, 0.0f);
         auto& col = registry.emplace<Vapor::BoxColliderComponent>(cube2);
-        col.halfSize = glm::vec3(.5f, .5f, .5f);
+        col.halfSize = glm::vec3(0.5f, 0.5f, 0.5f);
         auto& rb = registry.emplace<Vapor::RigidbodyComponent>(cube2);
         rb.motionType = BodyMotionType::Dynamic;
 
@@ -76,7 +76,7 @@ inline SceneResources buildScene(
         auto& transform = registry.emplace<Vapor::TransformComponent>(floor);
         transform.position = glm::vec3(0.0f, -0.5f, 0.0f);
         auto& col = registry.emplace<Vapor::BoxColliderComponent>(floor);
-        col.halfSize = glm::vec3(50.0f, .5f, 50.0f);
+        col.halfSize = glm::vec3(50.0f, 0.5f, 50.0f);
         auto& rb = registry.emplace<Vapor::RigidbodyComponent>(floor);
         rb.motionType = BodyMotionType::Static;
 

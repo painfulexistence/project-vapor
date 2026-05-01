@@ -140,69 +140,6 @@ std::shared_ptr<Mesh> AssetManager::loadOBJ(const std::string& filename, const s
     return mesh;
 }
 
-// std::shared_ptr<Mesh> AssetManager::loadGLTF(const std::string& filename) {
-//     std::vector<VertexData> vertices;
-//     std::vector<Uint32> indices;
-
-//     cgltf_options options = {};
-//     cgltf_data* data = nullptr;
-
-//     cgltf_result result = cgltf_parse_file(&options, (SDL_GetBasePath() + filename).c_str(), &data);
-//     if (result != cgltf_result_success) {
-//         throw std::runtime_error(fmt::format("Failed to load model at {}!\n", filename));
-//     } else {
-//         for (cgltf_size i = 0; i < data->meshes_count; ++i) {
-//             const cgltf_mesh& mesh = data->meshes[i];
-//             for (cgltf_size j = 0; j < mesh.primitives_count; ++j) {
-//                 const cgltf_primitive& primitive = mesh.primitives[j];
-
-//                 const cgltf_accessor* position_accessor = nullptr;
-//                 const cgltf_accessor* normal_accessor = nullptr;
-//                 const cgltf_accessor* uv_accessor = nullptr;
-//                 for (cgltf_size k = 0; k < primitive.attributes_count; ++k) {
-//                     const cgltf_attribute& attribute = primitive.attributes[k];
-//                     if (attribute.type == cgltf_attribute_type_position) {
-//                         position_accessor = attribute.data;
-//                     } else if (attribute.type == cgltf_attribute_type_normal) {
-//                         normal_accessor = attribute.data;
-//                     } else if (attribute.type == cgltf_attribute_type_texcoord) {
-//                         uv_accessor = attribute.data;
-//                     }
-//                 }
-
-//                 if (position_accessor) {
-//                     for (cgltf_size v = 0; v < position_accessor->count; ++v) {
-//                         VertexData vert = {};
-
-//                         cgltf_float position[3];
-//                         cgltf_accessor_read_float(position_accessor, v, position, 3);
-//                         vert.position = { position[0], position[1], position[2] };
-//                         fmt::print("position: {}, {}, {}\n", position[0], position[1], position[2]);
-//                         if (normal_accessor && v < normal_accessor->count) {
-//                             cgltf_float normal[3];
-//                             cgltf_accessor_read_float(normal_accessor, v, normal, 3);
-//                             vert.normal = { normal[0], normal[1], normal[2] };
-//                         }
-//                         if (uv_accessor && v < uv_accessor->count) {
-//                             cgltf_float uv[2];
-//                             cgltf_accessor_read_float(uv_accessor, v, uv, 2);
-//                             vert.uv = { uv[0], uv[1] };
-//                         }
-
-//                         vertices.push_back(vert);
-//                         indices.push_back(indices.size());
-//                     }
-//                 }
-//             }
-//         }
-//         cgltf_free(data);
-//     }
-
-//     auto mesh = std::make_shared<Mesh>();
-//     mesh->initialize(vertices, indices);
-//     fmt::print("vertices size: {}, indices size: {}\n", vertices.size(), indices.size());
-//     return mesh;
-// }
 std::shared_ptr<Scene> AssetManager::loadGLTF(const std::string& filename) {
     std::filesystem::path filePath(SDL_GetBasePath() + filename);
     std::filesystem::path scenePath(filePath);// make a copy
@@ -417,20 +354,7 @@ std::shared_ptr<Scene> AssetManager::loadGLTF(const std::string& filename) {
                     mesh->vertices[i].uv = glm::vec2(data[i * 2 + 0], data[i * 2 + 1]);
                 }
             }
-            if (mesh->hasColor) {
-                // const auto& accessor = model.accessors[primitive.attributes.at("COLOR_0")];
-                // const auto& bufferView = model.bufferViews[accessor.bufferView];
-                // const auto& buffer = model.buffers[bufferView.buffer];
-                // const float* data = reinterpret_cast<const float*>(&buffer.data[bufferView.byteOffset +
-                // accessor.byteOffset]); for (size_t i = 0; i < vertexCount; i++) {
-                //     mesh->vertices[i].color = glm::vec4(
-                //         data[i * 4 + 0],
-                //         data[i * 4 + 1],
-                //         data[i * 4 + 2],
-                //         data[i * 4 + 3]
-                //     );
-                // }
-            }
+            // TODO: implement vertex color (COLOR_0 accessor)
             if (primitive.indices >= 0) {
                 const auto& accessor = model.accessors[primitive.indices];
                 const auto& bufferView = model.bufferViews[accessor.bufferView];

@@ -96,7 +96,6 @@ int main(int argc, char* args[]) {
 
     IMGUI_CHECKVERSION();
     ImGui::CreateContext();
-    // ImGui::StyleColorsDark();
     ImGui::GetIO().ConfigFlags |= ImGuiConfigFlags_DockingEnable;
 
     // Initialization
@@ -166,8 +165,6 @@ int main(int argc, char* args[]) {
         buildScene(registry, *physics, scene, material, windowWidth, windowHeight, rng);
 
     scene->update(0.0f);
-    // TODO: migrate to body create system (remember to use body destroy system, too)
-    // BodyCreateSystem::update(registry, physics.get());
     renderer->stage(scene);
 
     Uint32 frameCount = 0;
@@ -275,9 +272,6 @@ int main(int argc, char* args[]) {
             case SDL_EVENT_WINDOW_RESIZED: {
                 windowWidth = e.window.data1;
                 windowHeight = e.window.data2;
-                // renderer->resize(windowWidth, windowHeight);
-                // engineCore->onWindowResize(windowWidth, windowHeight);
-
                 // Update Camera Aspect Ratio
                 auto view = registry.view<Vapor::VirtualCameraComponent>();
                 view.each([&](auto& cam) { cam.aspect = (float)windowWidth / (float)windowHeight; });
@@ -414,9 +408,6 @@ int main(int argc, char* args[]) {
             );
 
             renderer->draw(scene, tempCamera);
-        } else {
-            // Fallback camera or warning
-            // fmt::print(stderr, "Warning: No active camera found for rendering.\n");
         }
 
         frameCount++;

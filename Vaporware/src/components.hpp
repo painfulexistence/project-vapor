@@ -15,7 +15,7 @@ struct SceneNodeReferenceComponent {
 };
 
 struct ScenePointLightReferenceComponent {
-    int lightIndex = -1;// Index into Scene::pointLights
+    int lightIndex = -1; // Index into Scene::pointLights
 };
 
 struct SceneDirectionalLightReferenceComponent {

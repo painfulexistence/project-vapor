@@ -8,9 +8,7 @@
 
 namespace Vapor {
 
-// ============================================================
 // Helper functions
-// ============================================================
 
 static ma_attenuation_model toMiniaudioModel(DistanceModel model) {
     switch (model) {
@@ -22,9 +20,7 @@ static ma_attenuation_model toMiniaudioModel(DistanceModel model) {
     }
 }
 
-// ============================================================
 // AudioManager Implementation
-// ============================================================
 
 AudioManager::AudioManager() = default;
 
@@ -137,9 +133,7 @@ void AudioManager::cleanupInstance(AudioInstance& inst) {
     }
 }
 
-// ============================================================
 // Playback
-// ============================================================
 
 AudioID AudioManager::play2d(const std::string& filename, bool loop, float volume) {
     std::lock_guard<std::mutex> lock(m_mutex);
@@ -233,9 +227,7 @@ AudioID AudioManager::play3d(const std::string& filename, const Audio3DConfig& c
     return id;
 }
 
-// ============================================================
 // Playback Control
-// ============================================================
 
 void AudioManager::stop(AudioID id) {
     std::lock_guard<std::mutex> lock(m_mutex);
@@ -304,9 +296,7 @@ void AudioManager::resumeAll() {
     }
 }
 
-// ============================================================
 // Audio Properties
-// ============================================================
 
 void AudioManager::setVolume(AudioID id, float volume) {
     std::lock_guard<std::mutex> lock(m_mutex);
@@ -392,9 +382,7 @@ AudioState AudioManager::getState(AudioID id) const {
     return inst ? inst->state : AudioState::Error;
 }
 
-// ============================================================
 // 3D Audio Source Control
-// ============================================================
 
 void AudioManager::setPosition3d(AudioID id, const glm::vec3& position) {
     std::lock_guard<std::mutex> lock(m_mutex);
@@ -497,9 +485,7 @@ void AudioManager::set3DConfig(AudioID id, const Audio3DConfig& config) {
                       config.coneOuterGain);
 }
 
-// ============================================================
 // Listener Control
-// ============================================================
 
 void AudioManager::setListenerPosition(const glm::vec3& position) {
     std::lock_guard<std::mutex> lock(m_mutex);
@@ -538,9 +524,7 @@ void AudioManager::setListener(const AudioListener& listener) {
     ma_engine_listener_set_world_up(m_engine, 0, listener.up.x, listener.up.y, listener.up.z);
 }
 
-// ============================================================
 // Global Settings
-// ============================================================
 
 void AudioManager::setMasterVolume(float volume) {
     std::lock_guard<std::mutex> lock(m_mutex);
@@ -562,9 +546,7 @@ void AudioManager::setDopplerFactor(float factor) {
     }
 }
 
-// ============================================================
 // Callbacks & Utility
-// ============================================================
 
 void AudioManager::setFinishCallback(AudioID id, std::function<void(AudioID, const std::string&)> callback) {
     std::lock_guard<std::mutex> lock(m_mutex);
@@ -590,9 +572,7 @@ std::string AudioManager::getFilePath(AudioID id) const {
     return inst ? inst->filePath : "";
 }
 
-// ============================================================
 // Private helpers (must be called with lock held)
-// ============================================================
 
 AudioManager::AudioInstance* AudioManager::getInstance(AudioID id) {
     if (id == AUDIO_ID_INVALID) return nullptr;

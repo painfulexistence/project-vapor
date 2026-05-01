@@ -276,7 +276,6 @@ void Physics3D::init(Vapor::TaskScheduler& taskScheduler, std::shared_ptr<Vapor:
 
     tempAllocator = std::make_unique<JPH::TempAllocatorImpl>(10 * 1024 * 1024);
 
-    // jobSystem = std::make_unique<Vapor::JoltEnkiJobSystem>(taskScheduler, 2048);
     jobSystem = std::make_unique<JPH::JobSystemThreadPool>(
       JPH::cMaxPhysicsJobs, JPH::cMaxPhysicsBarriers, std::thread::hardware_concurrency() - 1
     );
@@ -285,18 +284,18 @@ void Physics3D::init(Vapor::TaskScheduler& taskScheduler, std::shared_ptr<Vapor:
     const uint cNumBodyMutexes = 0;
     const uint cMaxBodyPairs = 1024;
     const uint cMaxContactConstraints = 1024;
-    broad_phase_layer_interface = std::make_unique<BPLayerInterfaceImpl>();
-    object_vs_broadphase_layer_filter = std::make_unique<ObjectVsBroadPhaseLayerFilterImpl>();
-    object_vs_object_layer_filter = std::make_unique<ObjectLayerPairFilterImpl>();
+    broadPhaseLayerInterface = std::make_unique<BPLayerInterfaceImpl>();
+    objectVsBroadphaseLayerFilter = std::make_unique<ObjectVsBroadPhaseLayerFilterImpl>();
+    objectVsObjectLayerFilter = std::make_unique<ObjectLayerPairFilterImpl>();
     physicsSystem = std::make_unique<JPH::PhysicsSystem>();
     physicsSystem->Init(
         cMaxBodies,
         cNumBodyMutexes,
         cMaxBodyPairs,
         cMaxContactConstraints,
-        *broad_phase_layer_interface.get(),
-        *object_vs_broadphase_layer_filter.get(),
-        *object_vs_object_layer_filter.get()
+        *broadPhaseLayerInterface.get(),
+        *objectVsBroadphaseLayerFilter.get(),
+        *objectVsObjectLayerFilter.get()
     );
 
     bodyActivationListener = std::make_unique<MyBodyActivationListener>();
@@ -344,12 +343,6 @@ void Physics3D::deinit() {
     step = 0;
 
     s_PhysicsInstances--;
-    if (s_PhysicsInstances == 0) {
-        // Optional: Keep Jolt types registered to avoid re-init issues in some environments
-        // JPH::UnregisterTypes();
-        // delete JPH::Factory::sInstance;
-        // JPH::Factory::sInstance = nullptr;
-    }
 
     isInitialized = false;
 }
@@ -562,22 +555,6 @@ void Physics3D::process(const std::shared_ptr<Scene>& scene, float dt) {
         // TODO: physics debug UI
     }
 
-    // debug output
-    // static int debugCounter = 0;
-    // if (++debugCounter % 60 == 0) { // print every 60 frames
-    //     for (auto& node : scene->nodes) {
-    //         if (node->body.valid()) {
-    //             auto body = bodies[node->body.rid];
-    //             auto pos = bodyInterface->GetPosition(body);
-    //             auto motionType = bodyInterface->GetMotionType(body);
-    //             fmt::print(
-    //                 "Node: {}, Pos: ({:.2f}, {:.2f}, {:.2f}), Motion: {}\n",
-    //                 node->name, pos.GetX(), pos.GetY(), pos.GetZ(),
-    //                 motionType == JPH::EMotionType::Dynamic ? "Dynamic" : "Static"
-    //             );
-    //         }
-    //     }
-    // }
 }
 
 void Physics3D::drawImGui(float dt) {
