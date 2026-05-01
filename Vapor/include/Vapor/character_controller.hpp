@@ -70,4 +70,7 @@ private:
     // For interpolation
     glm::vec3 previousPosition = glm::vec3(0.0f);
     glm::vec3 currentPosition = glm::vec3(0.0f);
+
+    // Jump state - when true, disable stick-to-floor to allow jumping
+    bool isJumping = false;
 };

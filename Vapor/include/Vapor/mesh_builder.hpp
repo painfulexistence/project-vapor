@@ -179,18 +179,21 @@ public:
         }
 
         // Generate indices for top hemisphere
+        // Use CCW winding order for front faces (viewed from outside)
         for (Uint32 ring = 0; ring < rings; ++ring) {
             for (Uint32 seg = 0; seg < segments; ++seg) {
                 Uint32 current = ring * (segments + 1) + seg;
                 Uint32 next = current + segments + 1;
 
+                // Triangle 1: current, current+1, next (CCW from outside)
                 indices.push_back(current);
-                indices.push_back(next);
                 indices.push_back(current + 1);
+                indices.push_back(next);
 
+                // Triangle 2: current+1, next+1, next (CCW from outside)
                 indices.push_back(current + 1);
-                indices.push_back(next);
                 indices.push_back(next + 1);
+                indices.push_back(next);
             }
         }
 
@@ -201,13 +204,15 @@ public:
                 Uint32 current = cylinderStartVertex + ring * (segments + 1) + seg;
                 Uint32 next = current + segments + 1;
 
+                // Triangle 1: current, current+1, next (CCW from outside)
                 indices.push_back(current);
-                indices.push_back(next);
                 indices.push_back(current + 1);
+                indices.push_back(next);
 
+                // Triangle 2: current+1, next+1, next (CCW from outside)
                 indices.push_back(current + 1);
-                indices.push_back(next);
                 indices.push_back(next + 1);
+                indices.push_back(next);
             }
         }
 
@@ -218,13 +223,15 @@ public:
                 Uint32 current = bottomHemisphereStartVertex + ring * (segments + 1) + seg;
                 Uint32 next = current + segments + 1;
 
+                // Triangle 1: current, current+1, next (CCW from outside)
                 indices.push_back(current);
-                indices.push_back(next);
                 indices.push_back(current + 1);
+                indices.push_back(next);
 
+                // Triangle 2: current+1, next+1, next (CCW from outside)
                 indices.push_back(current + 1);
-                indices.push_back(next);
                 indices.push_back(next + 1);
+                indices.push_back(next);
             }
         }
 

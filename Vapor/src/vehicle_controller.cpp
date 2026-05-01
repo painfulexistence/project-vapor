@@ -126,6 +126,10 @@ VehicleController::VehicleController(Physics3D* physics, const VehicleSettings& 
     // Create vehicle constraint
     JPH::VehicleConstraintSettings vehicleSettings;
 
+    // Set the up vector for the vehicle (critical for gravity to work correctly)
+    vehicleSettings.mUp = JPH::Vec3(0.0f, 1.0f, 0.0f);
+    vehicleSettings.mForward = JPH::Vec3(0.0f, 0.0f, 1.0f);
+
     // Configure wheels using WheelSettingsWV (Wheeled Vehicle)
     vehicleSettings.mWheels.resize(settings.wheels.size());
     for (size_t i = 0; i < settings.wheels.size(); ++i) {

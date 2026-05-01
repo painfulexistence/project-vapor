@@ -87,10 +87,13 @@ void CharacterController::moveAlong(const glm::vec2& inputVector, const glm::vec
 }
 
 void CharacterController::jump(float jumpSpeed) {
-    if (isOnGround()) {
+    if (isOnGround() && !isJumping) {
+        // Get current velocity to preserve horizontal movement
         JPH::Vec3 currentVel = character->GetLinearVelocity();
         currentVel.SetY(jumpSpeed);
         character->SetLinearVelocity(currentVel);
+        // Mark as jumping to disable stick-to-floor in update
+        isJumping = true;
     }
 }
 
@@ -176,8 +179,13 @@ void CharacterController::update(float deltaTime, const glm::vec3& gravity) {
     JPH::CharacterVirtual::ExtendedUpdateSettings updateSettings;
 
     // Configure update settings to prevent sticking and improve movement
-    // Reduced mStickToFloorStepDown to minimize vertical jitter on flat surfaces
-    updateSettings.mStickToFloorStepDown = JPH::Vec3(0.0f, -0.01f, 0.0f);// Very small step down - reduces jitter
+    if (isJumping) {
+        // When jumping, disable stick-to-floor completely to allow leaving the ground
+        updateSettings.mStickToFloorStepDown = JPH::Vec3::sZero();
+    } else {
+        // Normal movement: small step down to stay grounded on slopes
+        updateSettings.mStickToFloorStepDown = JPH::Vec3(0.0f, -0.05f, 0.0f);
+    }
     updateSettings.mWalkStairsStepUp = JPH::Vec3(0.0f, 0.15f, 0.0f);// Allow stepping up small obstacles
     updateSettings.mWalkStairsMinStepForward = 0.1f;// Minimum forward distance for step up
     updateSettings.mWalkStairsStepDownExtra = JPH::Vec3(0.0f, 0.0f, 0.0f);// Disabled to reduce jitter
@@ -200,4 +208,9 @@ void CharacterController::update(float deltaTime, const glm::vec3& gravity) {
     // Update current position after physics step
     JPH::RVec3 pos = character->GetPosition();
     currentPosition = glm::vec3(pos.GetX(), pos.GetY(), pos.GetZ());
+
+    // Reset jumping state when we land
+    if (isJumping && isOnGround()) {
+        isJumping = false;
+    }
 }
