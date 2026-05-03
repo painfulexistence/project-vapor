@@ -5,10 +5,8 @@
 #include <entt/entt.hpp>
 #include <glm/vec2.hpp>
 #include <memory>
-
-namespace Rml {
-    class ElementDocument;
-}
+#include <string>
+#include <vector>
 
 struct SceneNodeReferenceComponent {
     std::shared_ptr<Node> node = nullptr;
@@ -116,96 +114,54 @@ struct DirectionalLightLogicComponent {
 };
 
 
-// UI Components
-enum class HUDState { Hidden, FadingIn, Visible, FadingOut };
-
-struct HUDComponent {
-    std::string documentPath;
-    Rml::ElementDocument* document = nullptr;// Runtime only
-    bool isVisible = false;
-
-    // Transition support
-    HUDState state = HUDState::Visible;
-    float timer = 0.0f;
-    float fadeDuration = 0.5f;
-};
-
-// Scroll Text (Teleprompter-style)
-enum class ScrollTextState { Idle, ScrollingOut, PreparingScrollIn, ScrollingIn };
-
-struct ScrollTextComponent {
-    std::string documentPath;
-    Rml::ElementDocument* document = nullptr;
-
-    std::vector<std::string> lines;
-    int currentIndex = 0;
-    bool advanceRequested = false;
-
-    // Animation state
-    ScrollTextState state = ScrollTextState::Idle;
-    float timer = 0.0f;
-    float scrollDuration = 0.4f;
-};
-
-// Letterbox (Cinematic black bars)
-enum class LetterboxState { Hidden, Opening, Open, Closing };
-
-struct LetterboxComponent {
-    std::string documentPath;
-    Rml::ElementDocument* document = nullptr;
-
-    bool isOpen = false;
-
-    // Animation state
-    LetterboxState state = LetterboxState::Hidden;
-    float timer = 0.0f;
-    float animDuration = 0.8f;
-
-    // Target aspect ratio (2.35:1 = cinematic widescreen)
-    float targetAspect = 2.35f;
-};
-
-// Subtitle System (Cinematic dialogue)
-enum class SubtitleState { Hidden, FadingIn, Visible, FadingOut };
+// --- UI Trigger Components ---
+// These hold content/timing data. The visual presentation lives in the
+// corresponding Page subclass. Systems here drive the pages via PageSystem.
 
 struct SubtitleEntry {
-    std::string speaker;// Empty for no speaker name
+    std::string speaker;
     std::string text;
-    float duration = 3.0f;// How long to display
+    float duration = 3.0f;
 };
 
-struct SubtitleComponent {
-    std::string documentPath;
-    Rml::ElementDocument* document = nullptr;
+enum class SubtitleQueueState { Idle, WaitingForVisible, Displaying, WaitingForHidden };
 
+struct SubtitleQueueComponent {
     std::vector<SubtitleEntry> queue;
-    int currentIndex = -1;
+    int currentIndex  = -1;
     bool advanceRequested = false;
-    bool autoAdvance = true;// Auto-advance after duration
-
-    // Animation state
-    SubtitleState state = SubtitleState::Hidden;
-    float timer = 0.0f;
-    float fadeDuration = 0.25f;
+    bool autoAdvance  = true;
+    SubtitleQueueState state = SubtitleQueueState::Idle;
     float displayTimer = 0.0f;
 };
 
-// Chapter Title Card
-enum class ChapterTitleState { Hidden, FadingIn, Visible, FadingOut };
-
-struct ChapterTitleComponent {
-    std::string documentPath;
-    Rml::ElementDocument* document = nullptr;
-
-    std::string chapterNumber;// "Chapter 1" or "I"
-    std::string chapterTitle; // "The Beginning"
-    bool showRequested = false;
-
-    // Animation state
-    ChapterTitleState state = ChapterTitleState::Hidden;
-    float timer = 0.0f;
-    float fadeDuration = 0.8f;
-    float displayDuration = 2.5f;
+struct ScrollTextQueueComponent {
+    std::vector<std::string> lines;
+    int currentIndex = 0;
+    bool advanceRequested = false;
 };
 
+struct ChapterTitleTriggerComponent {
+    std::string number;
+    std::string title;
+    bool showRequested = false;
+};
+
+// Scene transition (see SCENE_TRANSITIONS.md)
+enum class SceneTransitionState {
+    Idle,
+    FadingInLoadingScreen,
+    UnloadingScene,
+    LoadingAssets,
+    BuildingScene,
+    FadingOutLoadingScreen,
+};
+
+struct SceneTransitionComponent {
+    std::string targetScene;
+    SceneTransitionState state = SceneTransitionState::Idle;
+    float progress = 0.0f;
+};
+
+struct PersistentTag {};
 struct DeadTag {};

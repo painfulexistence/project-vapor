@@ -1,0 +1,16 @@
+<rml>
+<head>
+    <title>Main Menu</title>
+    <link type="text/rcss" href="main_menu.rcss"/>
+</head>
+<body>
+    <div id="main-menu-container">
+        <div id="menu-title">Project Vapor</div>
+        <div id="menu-buttons">
+            <button id="btn-start">Start Game</button>
+            <button id="btn-settings">Settings</button>
+            <button id="btn-quit">Quit</button>
+        </div>
+    </div>
+</body>
+</rml>
