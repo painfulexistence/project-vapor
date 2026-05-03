@@ -1,9 +1,21 @@
 #pragma once
+#include <SDL3/SDL.h>
+#include <fmt/core.h>
 #include "Vapor/mesh_builder.hpp"
 #include "Vapor/physics_3d.hpp"
 #include "Vapor/rng.hpp"
 #include "Vapor/scene.hpp"
 #include "components.hpp"
+#include "pages/page_system.hpp"
+#include "pages/hud_page.hpp"
+#include "pages/letterbox_page.hpp"
+#include "pages/subtitle_page.hpp"
+#include "pages/scroll_text_page.hpp"
+#include "pages/chapter_title_page.hpp"
+#include "pages/main_menu_page.hpp"
+#include "pages/pause_menu_page.hpp"
+#include "pages/settings_page.hpp"
+#include "pages/loading_screen_page.hpp"
 #include <entt/entt.hpp>
 #include <glm/vec3.hpp>
 #include <memory>
@@ -171,57 +183,66 @@ inline SceneResources buildScene(
         follow.offset = glm::vec3(0.0f, 2.0f, 5.0f);
     }
 
-    auto hud = registry.create();
+    // --- UI (one persistent entity owns all pages + trigger components) ---
+    auto uiEntity = registry.create();
+    registry.emplace<PersistentTag>(uiEntity);
     {
-        auto& hudState = registry.emplace<HUDComponent>(hud);
-        hudState.documentPath = "assets/ui/hud.rml";
-        hudState.isVisible = false;
+        auto& ui = registry.emplace<UIStateComponent>(uiEntity);
+
+        // Overlay pages — eager-loaded, always resident
+        ui.pages[PageID::HUD]          = { "assets/ui/hud.rml",          std::make_unique<HUDPage>() };
+        ui.pages[PageID::Letterbox]    = { "assets/ui/letterbox.rml",    std::make_unique<LetterboxPage>() };
+        ui.pages[PageID::Subtitle]     = { "assets/ui/subtitle.rml",     std::make_unique<SubtitlePage>() };
+        ui.pages[PageID::ScrollText]   = { "assets/ui/scroll_text.rml",  std::make_unique<ScrollTextPage>() };
+        ui.pages[PageID::ChapterTitle] = { "assets/ui/chapter_title.rml",std::make_unique<ChapterTitlePage>() };
+
+        // Menu pages — lazy-loaded (document created only when first shown)
+        ui.pages[PageID::MainMenu] = { "assets/ui/menus/main_menu.rml", std::make_unique<MainMenuPage>(
+            [&registry] { PageSystem::popAll(registry); /* game start logic goes here */ },
+            [] { SDL_Event e{}; e.type = SDL_EVENT_QUIT; SDL_PushEvent(&e); }
+        ), false, true };
+        ui.pages[PageID::PauseMenu] = { "assets/ui/menus/pause_menu.rml", std::make_unique<PauseMenuPage>(
+            [&registry] { PageSystem::pop(registry); },
+            [&registry] { PageSystem::popAll(registry); PageSystem::push(registry, PageID::MainMenu); }
+        ), false, true };
+        ui.pages[PageID::Settings]      = { "assets/ui/menus/settings.rml",      std::make_unique<SettingsPage>(),     false, true };
+        ui.pages[PageID::LoadingScreen] = { "assets/ui/menus/loading_screen.rml",std::make_unique<LoadingScreenPage>(),false, true };
+
+        // Show main menu at startup
+        PageSystem::push(registry, PageID::MainMenu);
     }
 
-    auto scrollText = registry.create();
+    // Trigger components — content/timing data for cinematic overlays
     {
-        auto& scroll = registry.emplace<ScrollTextComponent>(scrollText);
-        scroll.documentPath = "assets/ui/scroll_text.rml";
-        scroll.lines = { "Welcome to Project Vapor",
-                         "Press ENTER to advance text",
-                         "This is a teleprompter-style scroll effect",
-                         "Each line scrolls up and fades out",
-                         "While the next line fades in from below",
-                         "Perfect for cutscenes or tutorials",
-                         "End of demo - press ENTER to restart" };
-        scroll.scrollDuration = 0.4f;
+        auto& sq = registry.emplace<SubtitleQueueComponent>(uiEntity);
+        sq.autoAdvance = true;
+        sq.queue = {
+            { "NARRATOR",  "In a world where code meets creativity...", 3.0f },
+            { "NARRATOR",  "One engine dared to dream differently.",    2.5f },
+            { "",          "Press F8 to show chapter title.",           2.0f },
+            { "DEVELOPER", "Welcome to Project Vapor.",                 2.5f },
+            { "",          "(End of subtitle demo)",                    2.0f },
+        };
     }
-
-    auto letterbox = registry.create();
     {
-        auto& lb = registry.emplace<LetterboxComponent>(letterbox);
-        lb.documentPath = "assets/ui/letterbox.rml";
-        lb.targetAspect = 2.35f;
-        lb.animDuration = 2.0f;
+        auto& stq = registry.emplace<ScrollTextQueueComponent>(uiEntity);
+        stq.lines = {
+            "Welcome to Project Vapor",
+            "Press ENTER to advance text",
+            "This is a teleprompter-style scroll effect",
+            "Each line scrolls up and fades out",
+            "While the next line fades in from below",
+            "Perfect for cutscenes or tutorials",
+            "End of demo - press ENTER to restart",
+        };
     }
-
-    auto subtitle = registry.create();
     {
-        auto& sub = registry.emplace<SubtitleComponent>(subtitle);
-        sub.documentPath = "assets/ui/subtitle.rml";
-        sub.autoAdvance = true;
-        sub.queue = { { "NARRATOR", "In a world where code meets creativity...", 3.0f },
-                      { "NARRATOR", "One engine dared to dream differently.", 2.5f },
-                      { "", "Press F8 to show chapter title.", 2.0f },
-                      { "DEVELOPER", "Welcome to Project Vapor.", 2.5f },
-                      { "", "(End of subtitle demo)", 2.0f } };
+        auto& ct = registry.emplace<ChapterTitleTriggerComponent>(uiEntity);
+        ct.number       = "Chapter I";
+        ct.title        = "The Beginning";
+        ct.showRequested = true;
     }
-
-    auto chapterTitle = registry.create();
-    {
-        auto& ch = registry.emplace<ChapterTitleComponent>(chapterTitle);
-        ch.documentPath = "assets/ui/chapter_title.rml";
-        ch.chapterNumber = "Chapter I";
-        ch.chapterTitle = "The Beginning";
-        ch.fadeDuration = 0.8f;
-        ch.displayDuration = 2.5f;
-        ch.showRequested = true;
-    }
+    registry.emplace<SceneTransitionComponent>(uiEntity);
 
     res.global = registry.create();
 

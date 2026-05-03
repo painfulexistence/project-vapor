@@ -6,22 +6,12 @@
 #include "Vapor/rmlui_manager.hpp"
 #include "Vapor/scene.hpp"
 #include "components.hpp"
+#include "pages/page_system.hpp"
+#include "pages/subtitle_page.hpp"
+#include "pages/scroll_text_page.hpp"
+#include "pages/chapter_title_page.hpp"
 #include <fmt/core.h>
 
-namespace RmlUIHelpers {
-    Rml::ElementDocument* ensureDocument(
-        Rml::ElementDocument*& docPtr, Vapor::RmlUiManager* rml, const std::string& path)
-    {
-        if (docPtr || path.empty()) return docPtr;
-        docPtr = rml->LoadDocument(path);
-        return docPtr;
-    }
-
-    bool tickTimer(float& timer, float deltaTime, float duration) {
-        timer += deltaTime;
-        return timer >= duration;
-    }
-}
 
 class CleanupSystem {
 public:
@@ -228,374 +218,143 @@ public:
     }
 };
 
-class HUDSystem {
+
+// --- UI Trigger Systems ---
+// These systems own the content/timing logic for cinematic overlay pages.
+// They talk to their corresponding Page via PageSystem::getPage<T>().
+
+class SubtitleQueueSystem {
 public:
-    static void update(entt::registry& reg, Vapor::RmlUiManager* rmluiManager, float deltaTime) {
-        if (!rmluiManager) return;
+    static void update(entt::registry& reg, float dt) {
+        auto* page = PageSystem::getPage<SubtitlePage>(reg, PageID::Subtitle);
+        if (!page) return;
 
-        auto view = reg.view<HUDComponent>();
+        auto view = reg.view<SubtitleQueueComponent>();
         for (auto entity : view) {
-            auto& hud = view.get<HUDComponent>(entity);
+            auto& q = view.get<SubtitleQueueComponent>(entity);
 
-            if (!hud.document) {
-                if (!RmlUIHelpers::ensureDocument(hud.document, rmluiManager, hud.documentPath)) {
-                    fmt::print(stderr, "Failed to load HUD document: {}\n", hud.documentPath);
-                    continue;
-                }
-                fmt::print("Loaded HUD document: {}\n", hud.documentPath);
-                if (hud.isVisible) {
-                    hud.state = HUDState::Visible;
-                    hud.document->Show();
-                    if (auto el = hud.document->GetElementById("hud_content")) {
-                        el->SetClass("visible", true);
-                    }
-                } else {
-                    hud.state = HUDState::Hidden;
-                    hud.document->Hide();
-                }
-            }
-
-            if (!hud.document) continue;
-
-            auto element = hud.document->GetElementById("hud-container");
-            if (!element) continue;
-
-            switch (hud.state) {
-            case HUDState::Hidden:
-                if (hud.isVisible) {
-                    hud.state = HUDState::FadingIn;
-                    hud.document->Show();
-                    element->SetClass("visible", true);
-                    hud.timer = 0.0f;
-                }
-                break;
-
-            case HUDState::FadingIn:
-                hud.timer += deltaTime;
-                if (!hud.isVisible) {
-                    hud.state = HUDState::FadingOut;
-                    element->SetClass("visible", false);
-                    hud.timer = 0.0f;
-                } else if (hud.timer >= hud.fadeDuration) {
-                    hud.state = HUDState::Visible;
-                }
-                break;
-
-            case HUDState::Visible:
-                if (!hud.isVisible) {
-                    hud.state = HUDState::FadingOut;
-                    element->SetClass("visible", false);
-                    hud.timer = 0.0f;
-                }
-                break;
-
-            case HUDState::FadingOut:
-                hud.timer += deltaTime;
-                if (hud.isVisible) {
-                    hud.state = HUDState::FadingIn;
-                    element->SetClass("visible", true);
-                    hud.timer = 0.0f;
-                } else if (hud.timer >= hud.fadeDuration) {
-                    hud.state = HUDState::Hidden;
-                    hud.document->Hide();
-                }
-                break;
-            }
-        }
-    }
-};
-
-class ScrollTextSystem {
-public:
-    static void update(entt::registry& reg, Vapor::RmlUiManager* rmluiManager, float deltaTime) {
-        if (!rmluiManager) return;
-
-        auto view = reg.view<ScrollTextComponent>();
-        for (auto entity : view) {
-            auto& scroll = view.get<ScrollTextComponent>(entity);
-
-            if (!scroll.document) {
-                if (!RmlUIHelpers::ensureDocument(scroll.document, rmluiManager, scroll.documentPath)) {
-                    fmt::print(stderr, "Failed to load scroll text document: {}\n", scroll.documentPath);
-                    continue;
-                }
-                fmt::print("Loaded scroll text document: {}\n", scroll.documentPath);
-                scroll.document->Show();
-                if (!scroll.lines.empty()) {
-                    if (auto el = scroll.document->GetElementById("scroll-text")) {
-                        el->SetInnerRML(scroll.lines[scroll.currentIndex].c_str());
-                        el->SetClass("visible", true);
-                    }
-                }
-            }
-
-            if (!scroll.document) continue;
-
-            auto element = scroll.document->GetElementById("scroll-text");
-            if (!element) continue;
-
-            switch (scroll.state) {
-            case ScrollTextState::Idle:
-                if (scroll.advanceRequested && scroll.currentIndex < (int)scroll.lines.size() - 1) {
-                    scroll.advanceRequested = false;
-                    scroll.state = ScrollTextState::ScrollingOut;
-                    scroll.timer = 0.0f;
-                    element->SetClass("visible", false);
-                    element->SetClass("scroll-out", true);
-                } else {
-                    scroll.advanceRequested = false;
-                }
-                break;
-
-            case ScrollTextState::ScrollingOut:
-                if (RmlUIHelpers::tickTimer(scroll.timer, deltaTime, scroll.scrollDuration)) {
-                    scroll.currentIndex++;
-                    if (scroll.currentIndex < (int)scroll.lines.size()) {
-                        element->SetInnerRML(scroll.lines[scroll.currentIndex].c_str());
-                    }
-                    scroll.state = ScrollTextState::PreparingScrollIn;
-                    element->SetClass("scroll-out", false);
-                    element->SetClass("scroll-in-prepare", true);
-                }
-                break;
-
-            case ScrollTextState::PreparingScrollIn:
-                // Wait one frame for CSS transition to position element before animating in
-                scroll.state = ScrollTextState::ScrollingIn;
-                scroll.timer = 0.0f;
-                element->SetClass("scroll-in-prepare", false);
-                element->SetClass("scroll-in", true);
-                break;
-
-            case ScrollTextState::ScrollingIn:
-                if (RmlUIHelpers::tickTimer(scroll.timer, deltaTime, scroll.scrollDuration)) {
-                    scroll.state = ScrollTextState::Idle;
-                    element->SetClass("scroll-in", false);
-                    element->SetClass("visible", true);
-                }
-                break;
-            }
-        }
-    }
-};
-
-class LetterboxSystem {
-public:
-    static void update(entt::registry& reg, Vapor::RmlUiManager* rmluiManager, float deltaTime) {
-        if (!rmluiManager) return;
-
-        auto view = reg.view<LetterboxComponent>();
-        for (auto entity : view) {
-            auto& lb = view.get<LetterboxComponent>(entity);
-
-            if (!lb.document) {
-                if (!RmlUIHelpers::ensureDocument(lb.document, rmluiManager, lb.documentPath)) {
-                    fmt::print(stderr, "Failed to load letterbox document: {}\n", lb.documentPath);
-                    continue;
-                }
-                fmt::print("Loaded letterbox document: {}\n", lb.documentPath);
-                lb.document->Show();
-            }
-
-            if (!lb.document) continue;
-
-            auto topBar = lb.document->GetElementById("letterbox-top");
-            auto bottomBar = lb.document->GetElementById("letterbox-bottom");
-            if (!topBar || !bottomBar) {
-                fmt::print(stderr, "Error: Missing letterbox elements (letterbox-top/bottom) in {}\n", lb.documentPath);
-                continue;
-            }
-
-            switch (lb.state) {
-            case LetterboxState::Hidden:
-                if (lb.isOpen) {
-                    lb.state = LetterboxState::Opening;
-                    lb.timer = 0.0f;
-                    topBar->SetClass("open", true);
-                    bottomBar->SetClass("open", true);
-                }
-                break;
-
-            case LetterboxState::Opening:
-                lb.timer += deltaTime;
-                if (!lb.isOpen) {
-                    lb.state = LetterboxState::Closing;
-                    lb.timer = 0.0f;
-                    topBar->SetClass("open", false);
-                    bottomBar->SetClass("open", false);
-                } else if (lb.timer >= lb.animDuration) {
-                    lb.state = LetterboxState::Open;
-                }
-                break;
-
-            case LetterboxState::Open:
-                if (!lb.isOpen) {
-                    lb.state = LetterboxState::Closing;
-                    lb.timer = 0.0f;
-                    topBar->SetClass("open", false);
-                    bottomBar->SetClass("open", false);
-                }
-                break;
-
-            case LetterboxState::Closing:
-                lb.timer += deltaTime;
-                if (lb.isOpen) {
-                    lb.state = LetterboxState::Opening;
-                    lb.timer = 0.0f;
-                    topBar->SetClass("open", true);
-                    bottomBar->SetClass("open", true);
-                } else if (lb.timer >= lb.animDuration) {
-                    lb.state = LetterboxState::Hidden;
-                }
-                break;
-            }
-        }
-    }
-};
-
-class SubtitleSystem {
-public:
-    static void update(entt::registry& reg, Vapor::RmlUiManager* rmluiManager, float deltaTime) {
-        if (!rmluiManager) return;
-
-        auto view = reg.view<SubtitleComponent>();
-        for (auto entity : view) {
-            auto& sub = view.get<SubtitleComponent>(entity);
-
-            if (!sub.document) {
-                if (!RmlUIHelpers::ensureDocument(sub.document, rmluiManager, sub.documentPath)) {
-                    fmt::print(stderr, "Failed to load subtitle document: {}\n", sub.documentPath);
-                    continue;
-                }
-                fmt::print("Loaded subtitle document: {}\n", sub.documentPath);
-                sub.document->Show();
-            }
-
-            if (!sub.document) continue;
-
-            auto container = sub.document->GetElementById("subtitle-container");
-            auto speakerEl = sub.document->GetElementById("subtitle-speaker");
-            auto textEl = sub.document->GetElementById("subtitle-text");
-            if (!container || !speakerEl || !textEl) {
-                fmt::print(stderr, "Error: Missing subtitle elements in {}\n", sub.documentPath);
-                continue;
-            }
-
-            switch (sub.state) {
-            case SubtitleState::Hidden:
-                if (sub.advanceRequested || (sub.autoAdvance && sub.currentIndex < (int)sub.queue.size() - 1)) {
-                    sub.advanceRequested = false;
-                    sub.currentIndex++;
-
-                    if (sub.currentIndex < (int)sub.queue.size()) {
-                        auto& entry = sub.queue[sub.currentIndex];
-
-                        if (entry.speaker.empty()) {
-                            speakerEl->SetClass("hidden", true);
-                        } else {
-                            speakerEl->SetClass("hidden", false);
-                            speakerEl->SetInnerRML(entry.speaker.c_str());
+            switch (q.state) {
+            case SubtitleQueueState::Idle:
+                if (page->isFullyHidden()) {
+                    bool advance = q.advanceRequested
+                        || (q.autoAdvance && q.currentIndex < (int)q.queue.size() - 1);
+                    if (advance) {
+                        q.advanceRequested = false;
+                        q.currentIndex++;
+                        if (q.currentIndex < (int)q.queue.size()) {
+                            auto& entry = q.queue[q.currentIndex];
+                            page->setContent(entry.speaker, entry.text);
+                            PageSystem::show(reg, PageID::Subtitle);
+                            q.displayTimer = 0.0f;
+                            q.state = SubtitleQueueState::WaitingForVisible;
                         }
-                        textEl->SetInnerRML(entry.text.c_str());
-
-                        sub.state = SubtitleState::FadingIn;
-                        sub.timer = 0.0f;
-                        container->SetClass("visible", true);
+                    } else {
+                        q.advanceRequested = false;
                     }
                 }
                 break;
 
-            case SubtitleState::FadingIn:
-                if (RmlUIHelpers::tickTimer(sub.timer, deltaTime, sub.fadeDuration)) {
-                    sub.state = SubtitleState::Visible;
-                    sub.displayTimer = 0.0f;
+            case SubtitleQueueState::WaitingForVisible:
+                if (page->isFullyVisible()) {
+                    q.state = SubtitleQueueState::Displaying;
                 }
                 break;
 
-            case SubtitleState::Visible:
-                sub.displayTimer += deltaTime;
-                if (sub.advanceRequested
-                    || (sub.autoAdvance && sub.currentIndex < (int)sub.queue.size()
-                        && sub.displayTimer >= sub.queue[sub.currentIndex].duration)) {
-                    sub.advanceRequested = false;
-                    sub.state = SubtitleState::FadingOut;
-                    sub.timer = 0.0f;
-                    container->SetClass("visible", false);
+            case SubtitleQueueState::Displaying:
+                q.displayTimer += dt;
+                {
+                    bool done = q.advanceRequested
+                        || (q.autoAdvance && q.currentIndex < (int)q.queue.size()
+                            && q.displayTimer >= q.queue[q.currentIndex].duration);
+                    if (done) {
+                        q.advanceRequested = false;
+                        PageSystem::hide(reg, PageID::Subtitle);
+                        q.state = SubtitleQueueState::WaitingForHidden;
+                    }
                 }
                 break;
 
-            case SubtitleState::FadingOut:
-                if (RmlUIHelpers::tickTimer(sub.timer, deltaTime, sub.fadeDuration)) {
-                    sub.state = SubtitleState::Hidden;
-                    // Will auto-advance to next if autoAdvance is true
+            case SubtitleQueueState::WaitingForHidden:
+                if (page->isFullyHidden()) {
+                    q.state = SubtitleQueueState::Idle;
                 }
                 break;
             }
         }
     }
+
+    static void restart(entt::registry& reg) {
+        auto view = reg.view<SubtitleQueueComponent>();
+        for (auto entity : view) {
+            auto& q = view.get<SubtitleQueueComponent>(entity);
+            q.currentIndex = -1;
+            q.state = SubtitleQueueState::Idle;
+            q.advanceRequested = true;
+        }
+    }
+
+    static void advance(entt::registry& reg) {
+        auto view = reg.view<SubtitleQueueComponent>();
+        for (auto entity : view)
+            view.get<SubtitleQueueComponent>(entity).advanceRequested = true;
+    }
 };
 
-class ChapterTitleSystem {
+class ScrollTextQueueSystem {
 public:
-    static void update(entt::registry& reg, Vapor::RmlUiManager* rmluiManager, float deltaTime) {
-        if (!rmluiManager) return;
+    static void update(entt::registry& reg) {
+        auto* page = PageSystem::getPage<ScrollTextPage>(reg, PageID::ScrollText);
+        if (!page) return;
 
-        auto view = reg.view<ChapterTitleComponent>();
+        auto view = reg.view<ScrollTextQueueComponent>();
         for (auto entity : view) {
-            auto& ch = view.get<ChapterTitleComponent>(entity);
-
-            if (!ch.document) {
-                if (!RmlUIHelpers::ensureDocument(ch.document, rmluiManager, ch.documentPath)) {
-                    fmt::print(stderr, "Failed to load chapter title document: {}\n", ch.documentPath);
-                    continue;
-                }
-                fmt::print("Loaded chapter title document: {}\n", ch.documentPath);
-                ch.document->Show();
-            }
-
-            if (!ch.document) continue;
-
-            auto container = ch.document->GetElementById("chapter-container");
-            auto numberEl = ch.document->GetElementById("chapter-number");
-            auto titleEl = ch.document->GetElementById("chapter-title");
-            if (!container || !numberEl || !titleEl) {
-                fmt::print(stderr, "Error: Missing chapter title elements in {}\n", ch.documentPath);
+            auto& q = view.get<ScrollTextQueueComponent>(entity);
+            if (!q.advanceRequested || !page->isIdle()) {
+                q.advanceRequested = false;
                 continue;
             }
+            q.advanceRequested = false;
 
-            switch (ch.state) {
-            case ChapterTitleState::Hidden:
-                if (ch.showRequested) {
-                    ch.showRequested = false;
-                    numberEl->SetInnerRML(ch.chapterNumber.c_str());
-                    titleEl->SetInnerRML(ch.chapterTitle.c_str());
-                    ch.state = ChapterTitleState::FadingIn;
-                    ch.timer = 0.0f;
-                    container->SetClass("visible", true);
-                }
-                break;
-
-            case ChapterTitleState::FadingIn:
-                if (RmlUIHelpers::tickTimer(ch.timer, deltaTime, ch.fadeDuration)) {
-                    ch.state = ChapterTitleState::Visible;
-                    ch.timer = 0.0f;
-                }
-                break;
-
-            case ChapterTitleState::Visible:
-                if (RmlUIHelpers::tickTimer(ch.timer, deltaTime, ch.displayDuration)) {
-                    ch.state = ChapterTitleState::FadingOut;
-                    ch.timer = 0.0f;
-                    container->SetClass("visible", false);
-                }
-                break;
-
-            case ChapterTitleState::FadingOut:
-                if (RmlUIHelpers::tickTimer(ch.timer, deltaTime, ch.fadeDuration)) {
-                    ch.state = ChapterTitleState::Hidden;
-                }
-                break;
+            if (q.currentIndex >= (int)q.lines.size() - 1) {
+                q.currentIndex = 0;
+                page->setLine(q.lines[0]);
+            } else {
+                q.currentIndex++;
+                page->scrollToNext(q.lines[q.currentIndex]);
             }
+        }
+    }
+
+    static void advance(entt::registry& reg) {
+        auto view = reg.view<ScrollTextQueueComponent>();
+        for (auto entity : view)
+            view.get<ScrollTextQueueComponent>(entity).advanceRequested = true;
+    }
+};
+
+class ChapterTitleTriggerSystem {
+public:
+    static void update(entt::registry& reg) {
+        auto* page = PageSystem::getPage<ChapterTitlePage>(reg, PageID::ChapterTitle);
+        if (!page) return;
+
+        auto view = reg.view<ChapterTitleTriggerComponent>();
+        for (auto entity : view) {
+            auto& t = view.get<ChapterTitleTriggerComponent>(entity);
+            if (t.showRequested && page->isFullyHidden()) {
+                t.showRequested = false;
+                page->display(t.number, t.title);
+            }
+        }
+    }
+
+    static void request(entt::registry& reg, const std::string& number, const std::string& title) {
+        auto view = reg.view<ChapterTitleTriggerComponent>();
+        for (auto entity : view) {
+            auto& t = view.get<ChapterTitleTriggerComponent>(entity);
+            t.number = number;
+            t.title  = title;
+            t.showRequested = true;
         }
     }
 };

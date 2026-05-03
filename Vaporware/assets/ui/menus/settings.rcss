@@ -1,0 +1,126 @@
+body {
+    width: 100%;
+    height: 100%;
+    font-family: "Arial Black";
+}
+
+#settings-container {
+    position: absolute;
+    top: 0;
+    left: 0;
+    width: 100%;
+    height: 100%;
+    background-color: #0a0a0aee;
+
+    opacity: 0;
+    transition: opacity 0.3s sine-in-out;
+}
+
+#settings-container.visible {
+    opacity: 1;
+}
+
+#settings-title {
+    position: absolute;
+    top: 6%;
+    left: 50%;
+    width: 400dp;
+    margin-left: -200dp;
+    text-align: center;
+    font-size: 40dp;
+    font-weight: bold;
+    color: #ffffff;
+    letter-spacing: 4dp;
+}
+
+#settings-tabs {
+    position: absolute;
+    top: 18%;
+    left: 50%;
+    width: 560dp;
+    margin-left: -280dp;
+}
+
+#settings-tabs button {
+    display: inline-block;
+    width: 180dp;
+    padding: 10dp 0dp;
+    margin-right: 10dp;
+    background-color: #ffffff18;
+    border: 2dp #ffffff33;
+    color: #aaaaaa;
+    font-size: 18dp;
+    text-align: center;
+    transition: background-color 0.15s linear, color 0.15s linear;
+}
+
+#settings-tabs button.active {
+    background-color: #ffffff33;
+    color: #ffffff;
+    border: 2dp #ffffffaa;
+}
+
+#settings-tabs button:hover {
+    color: #ffffff;
+}
+
+#settings-panels {
+    position: absolute;
+    top: 28%;
+    left: 50%;
+    width: 560dp;
+    margin-left: -280dp;
+    height: 55%;
+}
+
+#panel-audio, #panel-video, #panel-controls {
+    display: none;
+    width: 100%;
+}
+
+#panel-audio.active, #panel-video.active, #panel-controls.active {
+    display: block;
+}
+
+.setting-row {
+    margin-bottom: 20dp;
+    color: #cccccc;
+    font-size: 18dp;
+}
+
+.setting-row label {
+    display: inline-block;
+    width: 220dp;
+}
+
+input.range {
+    width: 200dp;
+}
+
+select {
+    width: 200dp;
+    background-color: #ffffff22;
+    color: #ffffff;
+    border: 1dp #ffffff44;
+    padding: 4dp 8dp;
+}
+
+#btn-back {
+    position: absolute;
+    bottom: 6%;
+    left: 50%;
+    width: 200dp;
+    margin-left: -100dp;
+    padding: 12dp 0dp;
+    background-color: #ffffff18;
+    border: 2dp #ffffff44;
+    color: #ffffff;
+    font-size: 20dp;
+    text-align: center;
+    transition: background-color 0.15s linear, color 0.15s linear;
+}
+
+#btn-back:hover {
+    background-color: #ffffffcc;
+    color: #111111;
+}

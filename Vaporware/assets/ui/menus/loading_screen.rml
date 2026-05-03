@@ -1,0 +1,14 @@
+<rml>
+<head>
+    <title>Loading</title>
+    <link type="text/rcss" href="loading_screen.rcss"/>
+</head>
+<body>
+    <div id="loading-container">
+        <div id="loading-label">Loading...</div>
+        <div id="loading-progress-track">
+            <div id="loading-progress-fill"></div>
+        </div>
+    </div>
+</body>
+</rml>

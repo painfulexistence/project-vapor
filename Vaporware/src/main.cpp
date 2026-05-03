@@ -28,6 +28,9 @@
 #include "components.hpp"
 #include "scene_builder.hpp"
 #include "systems.hpp"
+#include "pages/page_system.hpp"
+#include "pages/hud_page.hpp"
+#include "pages/letterbox_page.hpp"
 
 entt::entity getActiveCamera(entt::registry& registry) {
     auto view = registry.view<Vapor::VirtualCameraComponent>();
@@ -195,14 +198,23 @@ int main(int argc, char* args[]) {
             }
             case SDL_EVENT_KEY_DOWN: {
                 if (e.key.scancode == SDL_SCANCODE_ESCAPE) {
-                    quit = true;
+                    auto& ui = registry.view<UIStateComponent>().get<UIStateComponent>(
+                        registry.view<UIStateComponent>().front());
+                    if (!ui.menuStack.empty() && ui.menuStack.back() == PageID::PauseMenu) {
+                        PageSystem::pop(registry);
+                    } else if (ui.menuStack.empty()) {
+                        PageSystem::push(registry, PageID::PauseMenu);
+                    } else {
+                        quit = true;
+                    }
                 }
                 if (e.key.scancode == SDL_SCANCODE_F5) {
-                    auto view = registry.view<HUDComponent>();
-                    for (auto entity : view) {
-                        auto& hud = view.get<HUDComponent>(entity);
-                        hud.isVisible = !hud.isVisible;
-                        fmt::print("HUD Visibility toggled: {}\n", hud.isVisible);
+                    auto* hudPage = PageSystem::getPage<HUDPage>(registry, PageID::HUD);
+                    if (hudPage) {
+                        bool nowVisible = !hudPage->isFullyVisible();
+                        if (nowVisible) PageSystem::show(registry, PageID::HUD);
+                        else            PageSystem::hide(registry, PageID::HUD);
+                        fmt::print("HUD toggled: {}\n", nowVisible ? "on" : "off");
                     }
                 }
                 if (e.key.scancode == SDL_SCANCODE_F3) {
@@ -210,62 +222,33 @@ int main(int argc, char* args[]) {
                     fmt::print("Physics Debug Renderer: {}\n", physics->isDebugEnabled() ? "Enabled" : "Disabled");
                 }
                 if (e.key.scancode == SDL_SCANCODE_RETURN) {
-                    auto view = registry.view<ScrollTextComponent>();
-                    for (auto entity : view) {
-                        auto& scroll = view.get<ScrollTextComponent>(entity);
-                        if (scroll.state == ScrollTextState::Idle) {
-                            // If at the end, restart from beginning
-                            if (scroll.currentIndex >= (int)scroll.lines.size() - 1) {
-                                scroll.currentIndex = 0;
-                                if (scroll.document) {
-                                    if (auto el = scroll.document->GetElementById("scroll-text")) {
-                                        el->SetInnerRML(scroll.lines[0].c_str());
-                                    }
-                                }
-                            } else {
-                                scroll.advanceRequested = true;
-                            }
-                        }
-                    }
+                    ScrollTextQueueSystem::advance(registry);
                 }
                 if (e.key.scancode == SDL_SCANCODE_F6) {
-                    auto view = registry.view<LetterboxComponent>();
-                    for (auto entity : view) {
-                        auto& lb = view.get<LetterboxComponent>(entity);
-                        lb.isOpen = !lb.isOpen;
-                        fmt::print("Letterbox toggled: {}\n", lb.isOpen ? "Opening" : "Closing");
+                    auto* lb = PageSystem::getPage<LetterboxPage>(registry, PageID::Letterbox);
+                    if (lb) {
+                        bool open = !lb->isOpen();
+                        if (open) PageSystem::show(registry, PageID::Letterbox);
+                        else      PageSystem::hide(registry, PageID::Letterbox);
+                        fmt::print("Letterbox toggled: {}\n", open ? "opening" : "closing");
                     }
                 }
                 if (e.key.scancode == SDL_SCANCODE_F7) {
-                    // Start/advance subtitles
-                    auto view = registry.view<SubtitleComponent>();
+                    auto view = registry.view<SubtitleQueueComponent>();
                     for (auto entity : view) {
-                        auto& sub = view.get<SubtitleComponent>(entity);
-                        if (sub.state == SubtitleState::Hidden && sub.currentIndex < 0) {
-                            // Start from beginning
-                            sub.advanceRequested = true;
-                            fmt::print("Subtitles started\n");
-                        } else if (sub.state == SubtitleState::Visible) {
-                            // Skip current subtitle
-                            sub.advanceRequested = true;
-                        } else if (sub.currentIndex >= (int)sub.queue.size() - 1 && sub.state == SubtitleState::Hidden) {
-                            // Restart from beginning
-                            sub.currentIndex = -1;
-                            sub.advanceRequested = true;
+                        auto& q = view.get<SubtitleQueueComponent>(entity);
+                        if (q.currentIndex >= (int)q.queue.size() - 1
+                            && q.state == SubtitleQueueState::Idle) {
+                            SubtitleQueueSystem::restart(registry);
                             fmt::print("Subtitles restarted\n");
+                        } else {
+                            SubtitleQueueSystem::advance(registry);
                         }
                     }
                 }
                 if (e.key.scancode == SDL_SCANCODE_F8) {
-                    // Show chapter title
-                    auto view = registry.view<ChapterTitleComponent>();
-                    for (auto entity : view) {
-                        auto& ch = view.get<ChapterTitleComponent>(entity);
-                        if (ch.state == ChapterTitleState::Hidden) {
-                            ch.showRequested = true;
-                            fmt::print("Chapter title showing\n");
-                        }
-                    }
+                    ChapterTitleTriggerSystem::request(registry, "Chapter I", "The Beginning");
+                    fmt::print("Chapter title requested\n");
                 }
                 break;
             }
@@ -315,11 +298,10 @@ int main(int argc, char* args[]) {
         CameraSystem::update(registry, deltaTime);
         AutoRotateSystem::update(registry, deltaTime);
         LightMovementSystem::update(registry, scene.get(), deltaTime);
-        HUDSystem::update(registry, engineCore->getRmlUiManager(), deltaTime);
-        ScrollTextSystem::update(registry, engineCore->getRmlUiManager(), deltaTime);
-        LetterboxSystem::update(registry, engineCore->getRmlUiManager(), deltaTime);
-        SubtitleSystem::update(registry, engineCore->getRmlUiManager(), deltaTime);
-        ChapterTitleSystem::update(registry, engineCore->getRmlUiManager(), deltaTime);
+        SubtitleQueueSystem::update(registry, deltaTime);
+        ScrollTextQueueSystem::update(registry);
+        ChapterTitleTriggerSystem::update(registry);
+        PageSystem::update(registry, engineCore->getRmlUiManager(), deltaTime);
 
         // Engine updates
         engineCore->update(deltaTime);
