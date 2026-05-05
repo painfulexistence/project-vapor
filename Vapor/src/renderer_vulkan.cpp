@@ -22,7 +22,6 @@
 #include "graphics.hpp"
 #include "helper.hpp"
 #define ENABLE_VALIDATION 1
-#define USE_DYNAMIC_RENDERING 0
 
 
 std::unique_ptr<Renderer> createRendererVulkan() {
@@ -345,6 +344,10 @@ auto Renderer_Vulkan::init(SDL_Window* window) -> void {
 
     // ImGui init
     ImGui_ImplSDL3_InitForVulkan(window);
+    VkPipelineRenderingCreateInfo imguiPipelineRenderingInfo = {};
+    imguiPipelineRenderingInfo.sType = VK_STRUCTURE_TYPE_PIPELINE_RENDERING_CREATE_INFO;
+    imguiPipelineRenderingInfo.colorAttachmentCount = 1;
+    imguiPipelineRenderingInfo.pColorAttachmentFormats = &swapchainImageFormat;
     ImGui_ImplVulkan_InitInfo initInfo = {
         .ApiVersion = VK_API_VERSION_1_3,
         .Instance = instance,
@@ -354,15 +357,17 @@ auto Renderer_Vulkan::init(SDL_Window* window) -> void {
         .Queue = graphicsQueue,
         .MinImageCount = static_cast<Uint32>(swapchainImages.size()),
         .ImageCount = static_cast<Uint32>(swapchainImages.size()),
-        .MSAASamples = (VkSampleCountFlagBits)MSAA_SAMPLE_COUNT,
+        .MSAASamples = VK_SAMPLE_COUNT_1_BIT,
         .PipelineCache = VK_NULL_HANDLE,
         .DescriptorPoolSize = 1000,
         .UseDynamicRendering = true,
+        .PipelineRenderingCreateInfo = imguiPipelineRenderingInfo,
         .Allocator = nullptr,
         .CheckVkResultFn = nullptr,
     };
     ImGui_ImplVulkan_Init(&initInfo);
 
+    createResources();
     isInitialized = true;
 }
 
@@ -462,7 +467,6 @@ auto Renderer_Vulkan::createResources() -> void {
     msaaDepthImage = createRenderTarget(RenderTargetUsage::DEPTH_MSAA, VK_FORMAT_D32_SFLOAT);
     resolveColorImage = createRenderTarget(RenderTargetUsage::COLOR, VK_FORMAT_R16G16B16A16_SFLOAT);// HDR format
 
-#if !(USE_DYNAMIC_RENDERING)
     // Create render passes
     std::array<VkAttachmentDescription, 1> prePassAttachments = { { {
       .format = VK_FORMAT_D32_SFLOAT,
@@ -661,7 +665,6 @@ auto Renderer_Vulkan::createResources() -> void {
             throw std::runtime_error("Failed to create post-processing framebuffer!");
         }
     }
-#endif
 
     // Create descriptor set layouts
     VkDescriptorSetLayoutCreateInfo emptySetLayoutDesc = {};
@@ -1263,6 +1266,10 @@ auto Renderer_Vulkan::draw(std::shared_ptr<Scene> scene, Camera& camera) -> void
     ZoneScoped;
     FrameMark;
 
+    ImGui_ImplVulkan_NewFrame();
+    ImGui_ImplSDL3_NewFrame();
+    ImGui::NewFrame();
+
     vkWaitForFences(device, 1, &renderFences[currentFrameInFlight], VK_TRUE, UINT64_MAX);
     vkResetFences(device, 1, &renderFences[currentFrameInFlight]);
 
@@ -1346,7 +1353,6 @@ auto Renderer_Vulkan::draw(std::shared_ptr<Scene> scene, Camera& camera) -> void
         throw std::runtime_error("Failed to begin recording command buffer!");
     }
 
-#if !(USE_DYNAMIC_RENDERING)
     VkRenderPassBeginInfo prePassInfo{};
     prePassInfo.sType = VK_STRUCTURE_TYPE_RENDER_PASS_BEGIN_INFO;
     prePassInfo.renderPass = prePass;
@@ -1505,70 +1511,37 @@ auto Renderer_Vulkan::draw(std::shared_ptr<Scene> scene, Camera& camera) -> void
     );
     vkCmdDraw(cmd, 3, 1, 0, 0);
     vkCmdEndRenderPass(cmd);
-#else
+
+    // ImGui overlay — rendered via dynamic rendering directly to swapchain
+    // postProcessPass finalLayout is PRESENT_SRC_KHR; transition back for attachment write
     insertImageMemoryBarrier(
-      cmd,
-      swapchainImages[swapchainImageIndex],
-      0,
-      VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT,
-      VK_IMAGE_LAYOUT_UNDEFINED,
-      VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL,
-      VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT,
-      VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT,
+      cmd, swapchainImages[swapchainImageIndex],
+      VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT, VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT,
+      VK_IMAGE_LAYOUT_PRESENT_SRC_KHR, VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL,
+      VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT, VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT,
       { VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1 }
     );
-    // insertImageMemoryBarrier(
-    //     cmd, depthImage,
-    //     0, VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT,
-    //     VK_IMAGE_LAYOUT_UNDEFINED, VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL,
-    //     VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT, VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT,
-    //     { VK_IMAGE_ASPECT_DEPTH_BIT, 0, 1, 0, 1 }
-    // );
-
-    VkRenderingAttachmentInfo colorAttachment = { VK_STRUCTURE_TYPE_RENDERING_ATTACHMENT_INFO };
-    colorAttachment.imageView = swapchainImageViews[swapchainImageIndex];
-    colorAttachment.imageLayout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL;
-    colorAttachment.resolveMode = VK_RESOLVE_MODE_AVERAGE_BIT;
-    colorAttachment.resolveImageView = colorImageView;
-    colorAttachment.resolveImageLayout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL;
-    colorAttachment.loadOp = VK_ATTACHMENT_LOAD_OP_DONT_CARE;
-    colorAttachment.storeOp = VK_ATTACHMENT_STORE_OP_DONT_CARE;
-    colorAttachment.clearValue.color = { 0.0f, 0.0f, 0.2f, 0.0f };
-
-    VkRenderingAttachmentInfo depthAttachment = { VK_STRUCTURE_TYPE_RENDERING_ATTACHMENT_INFO };
-    depthAttachment.imageView = depthImageView;
-    depthAttachment.imageLayout = VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL;
-    depthAttachment.resolveMode = VK_RESOLVE_MODE_NONE;
-    depthAttachment.loadOp = VK_ATTACHMENT_LOAD_OP_CLEAR;
-    depthAttachment.storeOp = VK_ATTACHMENT_STORE_OP_STORE;
-    depthAttachment.clearValue.depthStencil = { 0.0f, 0 };
-
-    VkRenderingInfo renderingInfo = { VK_STRUCTURE_TYPE_RENDERING_INFO };
-    renderingInfo.renderArea = { 0, 0, swapchainExtent.width, swapchainExtent.height };
-    renderingInfo.layerCount = 1;
-    renderingInfo.colorAttachmentCount = 1;
-    renderingInfo.pColorAttachments = &colorAttachment;
-    renderingInfo.pDepthAttachment = &depthAttachment;
-
-    vkCmdBeginRendering(cmd, &renderingInfo);
-
-    // vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, testDrawPipeline);
-    // vkCmdDraw(cmd, 6, 1, 0, 0);
-
+    VkRenderingAttachmentInfo imguiColorAttachment = { VK_STRUCTURE_TYPE_RENDERING_ATTACHMENT_INFO };
+    imguiColorAttachment.imageView = swapchainImageViews[swapchainImageIndex];
+    imguiColorAttachment.imageLayout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL;
+    imguiColorAttachment.loadOp = VK_ATTACHMENT_LOAD_OP_LOAD;
+    imguiColorAttachment.storeOp = VK_ATTACHMENT_STORE_OP_STORE;
+    VkRenderingInfo imguiRenderingInfo = { VK_STRUCTURE_TYPE_RENDERING_INFO };
+    imguiRenderingInfo.renderArea = { 0, 0, swapchainExtent.width, swapchainExtent.height };
+    imguiRenderingInfo.layerCount = 1;
+    imguiRenderingInfo.colorAttachmentCount = 1;
+    imguiRenderingInfo.pColorAttachments = &imguiColorAttachment;
+    vkCmdBeginRendering(cmd, &imguiRenderingInfo);
+    ImGui::Render();
+    ImGui_ImplVulkan_RenderDrawData(ImGui::GetDrawData(), cmd);
     vkCmdEndRendering(cmd);
-
     insertImageMemoryBarrier(
-      cmd,
-      swapchainImages[swapchainImageIndex],
-      VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT,
-      0,
-      VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL,
-      VK_IMAGE_LAYOUT_PRESENT_SRC_KHR,
-      VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT,
-      VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT,
+      cmd, swapchainImages[swapchainImageIndex],
+      VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT, 0,
+      VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL, VK_IMAGE_LAYOUT_PRESENT_SRC_KHR,
+      VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT, VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT,
       { VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1 }
     );
-#endif
 
     if (vkEndCommandBuffer(cmd) != VK_SUCCESS) {
         throw std::runtime_error("Failed to end recording command buffer!");
@@ -1736,10 +1709,8 @@ VkPipeline Renderer_Vulkan::createRenderPipeline(const std::string& vertShader, 
     pipelineInfo.pViewportState = &viewportStateInfo;
     pipelineInfo.pDepthStencilState = &depthStencilStateInfo;
     pipelineInfo.pDynamicState = &dynamicStateInfo;
-#if !(USE_DYNAMIC_RENDERING)
     pipelineInfo.renderPass = renderPass;
     pipelineInfo.subpass = 0;
-#endif
 
     VkPipeline pipeline;
     if (vkCreateGraphicsPipelines(device, nullptr, 1, &pipelineInfo, nullptr, &pipeline) != VK_SUCCESS) {
@@ -1871,10 +1842,8 @@ VkPipeline Renderer_Vulkan::createPrePassPipeline(const std::string& vertShader,
     pipelineInfo.pViewportState = &viewportStateInfo;
     pipelineInfo.pDepthStencilState = &depthStencilStateInfo;
     pipelineInfo.pDynamicState = &dynamicStateInfo;
-#if !(USE_DYNAMIC_RENDERING)
     pipelineInfo.renderPass = prePass;
     pipelineInfo.subpass = 0;
-#endif
 
     VkPipeline pipeline;
     if (vkCreateGraphicsPipelines(device, nullptr, 1, &pipelineInfo, nullptr, &pipeline) != VK_SUCCESS) {
@@ -1995,10 +1964,8 @@ VkPipeline Renderer_Vulkan::createPostProcessPipeline(const std::string& vertSha
     pipelineInfo.pViewportState = &viewportStateInfo;
     pipelineInfo.pDepthStencilState = &depthStencilStateInfo;
     pipelineInfo.pDynamicState = &dynamicStateInfo;
-#if !(USE_DYNAMIC_RENDERING)
     pipelineInfo.renderPass = postProcessPass;
     pipelineInfo.subpass = 0;
-#endif
 
     VkPipeline pipeline;
     if (vkCreateGraphicsPipelines(device, nullptr, 1, &pipelineInfo, nullptr, &pipeline) != VK_SUCCESS) {

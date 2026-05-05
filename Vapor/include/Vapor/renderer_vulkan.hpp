@@ -53,7 +53,7 @@ public:
 
     // ===== Interface parity stubs (no functional implementation) =====
 
-    bool initUI() override { return false; }
+    bool initUI() override { return true; }
     std::shared_ptr<Vapor::DebugDraw> getDebugDraw() override { return nullptr; }
 
     void flush2D() override {}
