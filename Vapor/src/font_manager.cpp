@@ -11,7 +11,7 @@ void FontManager::initialize(MTL::Device* device) {
     m_device = device;
 }
 
-FontHandle FontManager::loadFont(const std::string& filename, float baseSize, int firstChar, int numChars) {
+auto FontManager::loadFont(const std::string& filename, float baseSize, int firstChar, int numChars) -> FontHandle {
     std::string path = SDL_GetBasePath() + filename;
     std::ifstream file(path, std::ios::binary | std::ios::ate);
     if (!file.is_open()) {
@@ -64,18 +64,18 @@ void FontManager::unloadFont(FontHandle handle) {
     }
 }
 
-Font* FontManager::getFont(FontHandle handle) {
+auto FontManager::getFont(FontHandle handle) -> Font* {
     if (!handle.isValid()) return nullptr;
     auto it = m_fonts.find(handle.rid);
     return (it != m_fonts.end()) ? &it->second : nullptr;
 }
 
-TextureHandle FontManager::getFontTexture(FontHandle handle) {
+auto FontManager::getFontTexture(FontHandle handle) -> TextureHandle {
     Font* font = getFont(handle);
     return font ? font->textureHandle : TextureHandle{};
 }
 
-glm::vec2 FontManager::measureText(FontHandle handle, const std::string& text, float scale) {
+auto FontManager::measureText(FontHandle handle, const std::string& text, float scale) -> glm::vec2 {
     Font* font = getFont(handle);
     if (!font) return glm::vec2(0.0f);
 
@@ -94,7 +94,7 @@ glm::vec2 FontManager::measureText(FontHandle handle, const std::string& text, f
     return glm::vec2(width, maxHeight > 0 ? maxHeight : font->lineHeight * scale);
 }
 
-const Glyph* FontManager::getGlyph(FontHandle handle, int codepoint) {
+auto FontManager::getGlyph(FontHandle handle, int codepoint) -> const Glyph* {
     Font* font = getFont(handle);
     if (!font) return nullptr;
 
@@ -111,14 +111,14 @@ void FontManager::setFontTextureHandle(FontHandle fontHandle, TextureHandle texH
     m_atlasData.erase(fontHandle.rid);
 }
 
-const FontManager::AtlasData* FontManager::getAtlasData(FontHandle handle) const {
+auto FontManager::getAtlasData(FontHandle handle) const -> const FontManager::AtlasData* {
     auto it = m_atlasData.find(handle.rid);
     return (it != m_atlasData.end()) ? &it->second : nullptr;
 }
 
-bool FontManager::bakeFontAtlas(
+auto FontManager::bakeFontAtlas(
     Font& font, const unsigned char* fontData, float fontSize, int firstChar, int numChars
-) {
+) -> bool {
     // Initialize stb_truetype
     stbtt_fontinfo fontInfo;
     if (!stbtt_InitFont(&fontInfo, fontData, 0)) {

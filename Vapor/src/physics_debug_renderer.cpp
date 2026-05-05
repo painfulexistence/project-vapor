@@ -253,7 +253,7 @@ namespace Vapor {
         }
     }
 
-    glm::vec4 PhysicsDebugRenderer::getBodyColor(const JPH::Body& body) const {
+    auto PhysicsDebugRenderer::getBodyColor(const JPH::Body& body) const -> glm::vec4 {
         if (!config.colorByState) {
             return config.defaultColor;
         }

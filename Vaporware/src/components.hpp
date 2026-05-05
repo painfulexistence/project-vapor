@@ -57,7 +57,6 @@ struct GrabberComponent {
     float maxPickupRange = 5.0f;
 };
 
-
 // Light Logic
 enum class MovementPattern { Circle, Figure8, Linear, Spiral };
 
@@ -198,7 +197,7 @@ struct ChapterTitleComponent {
     Rml::ElementDocument* document = nullptr;
 
     std::string chapterNumber;// "Chapter 1" or "I"
-    std::string chapterTitle; // "The Beginning"
+    std::string chapterTitle;// "The Beginning"
     bool showRequested = false;
 
     // Animation state

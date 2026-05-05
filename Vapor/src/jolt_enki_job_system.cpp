@@ -17,15 +17,15 @@ JoltEnkiJobSystem::~JoltEnkiJobSystem() {
     m_scheduler.waitForAll();
 }
 
-int JoltEnkiJobSystem::GetMaxConcurrency() const {
+auto JoltEnkiJobSystem::GetMaxConcurrency() const -> int {
     // Return hardware thread count
     int concurrency = std::thread::hardware_concurrency();
     return concurrency > 0 ? concurrency : 4;
 }
 
-JPH::JobHandle JoltEnkiJobSystem::CreateJob(const char* name, JPH::ColorArg color,
+auto JoltEnkiJobSystem::CreateJob(const char* name, JPH::ColorArg color,
                                              const JPH::JobSystem::JobFunction& jobFunction,
-                                             uint32_t numDependencies) {
+                                             uint32_t numDependencies) -> JPH::JobHandle {
     // Check if we have available job slots
     while (m_numJobs.load() >= m_maxJobs) {
         std::this_thread::yield();

@@ -14,7 +14,7 @@ namespace Vapor {
         Shutdown();
     }
 
-    bool RmlUiManager::Initialize(int width, int height) {
+    auto RmlUiManager::Initialize(int width, int height) -> bool {
         if (m_initialized) {
             // spdlog::warn("RmlUiManager already initialized");
             return true;
@@ -36,7 +36,7 @@ namespace Vapor {
         return true;
     }
 
-    bool RmlUiManager::FinalizeInitialization() {
+    auto RmlUiManager::FinalizeInitialization() -> bool {
         if (!m_initialized) {
             fmt::print("RmlUiManager::FinalizeInitialization: Not initialized\n");
             return false;
@@ -106,7 +106,7 @@ namespace Vapor {
         }
     }
 
-    Rml::ElementDocument* RmlUiManager::LoadDocument(const std::string& filename) {
+    auto RmlUiManager::loadDocument(const std::string& filename) -> Rml::ElementDocument* {
         if (!m_context) {
             fmt::print("RmlUiManager::LoadDocument: RmlUi not initialized\n");
             return nullptr;
@@ -123,16 +123,16 @@ namespace Vapor {
         return document;
     }
 
-    Rml::ElementDocument* RmlUiManager::ReloadDocument(const std::string& filename) {
+    auto RmlUiManager::reloadDocument(const std::string& filename) -> Rml::ElementDocument* {
         if (!m_context) return nullptr;
 
         std::string path = SDL_GetBasePath() + filename;
         fmt::print("RmlUiManager::ReloadDocument: Looking for document with path: {}\n", path);
 
         // Debug: List all documents
-        int num_docs = m_context->GetNumDocuments();
-        fmt::print("RmlUiManager::ReloadDocument: Open documents: {}\n", num_docs);
-        for (int i = 0; i < num_docs; ++i) {
+        int numDocs = m_context->GetNumDocuments();
+        fmt::print("RmlUiManager::ReloadDocument: Open documents: {}\n", numDocs);
+        for (int i = 0; i < numDocs; ++i) {
             auto* doc = m_context->GetDocument(i);
             fmt::print("  Doc {}: {}\n", i, doc->GetId());
         }
@@ -161,7 +161,7 @@ namespace Vapor {
         }
     }
 
-    void RmlUiManager::ShowDocument(const std::string& id) {
+    void RmlUiManager::showDocument(const std::string& id) {
         if (!m_context) return;
 
         Rml::ElementDocument* document = m_context->GetDocument(id);
@@ -172,7 +172,7 @@ namespace Vapor {
         }
     }
 
-    void RmlUiManager::HideDocument(const std::string& id) {
+    void RmlUiManager::hideDocument(const std::string& id) {
         if (!m_context) return;
 
         Rml::ElementDocument* document = m_context->GetDocument(id);
@@ -182,7 +182,7 @@ namespace Vapor {
     }
 
     // Helper function to convert SDL scancode to RmlUI key identifier
-    static Rml::Input::KeyIdentifier SDLScancodeToRmlKey(SDL_Scancode scancode) {
+    static auto sdlScancodeToRmlKey(SDL_Scancode scancode) -> Rml::Input::KeyIdentifier {
         // Basic mapping - can be extended as needed
         switch (scancode) {
         case SDL_SCANCODE_BACKSPACE:
@@ -229,7 +229,7 @@ namespace Vapor {
     }
 
     // Helper function to get key modifier from SDL event
-    static int GetKeyModifier(const SDL_Event& event) {
+    static auto getKeyModifier(const SDL_Event& event) -> int {
         int modifier = 0;
         SDL_Keymod mod = SDL_GetModState();
 
@@ -247,23 +247,23 @@ namespace Vapor {
     }
 
     // Main event processing method - routes SDL events to RmlUI
-    bool RmlUiManager::ProcessEvent(const SDL_Event& event) {
+    auto RmlUiManager::ProcessEvent(const SDL_Event& event) -> bool {
         if (!m_initialized || !m_context) {
             return false;// RmlUI not initialized, event not consumed
         }
 
-        int key_modifier = GetKeyModifier(event);
+        int keyModifier = getKeyModifier(event);
         bool consumed = false;
 
         switch (event.type) {
         case SDL_EVENT_KEY_DOWN: {
-            ProcessKeyDown(event.key.scancode, key_modifier);
+            ProcessKeyDown(event.key.scancode, keyModifier);
             // Check if RmlUI consumed the event (if hovering over UI element)
             consumed = m_context->GetHoverElement() != nullptr;
             break;
         }
         case SDL_EVENT_KEY_UP: {
-            ProcessKeyUp(event.key.scancode, key_modifier);
+            ProcessKeyUp(event.key.scancode, keyModifier);
             consumed = m_context->GetHoverElement() != nullptr;
             break;
         }
@@ -277,24 +277,24 @@ namespace Vapor {
             break;
         }
         case SDL_EVENT_MOUSE_MOTION: {
-            ProcessMouseMove(event.motion.x, event.motion.y, key_modifier);
+            ProcessMouseMove(event.motion.x, event.motion.y, keyModifier);
             consumed = m_context->GetHoverElement() != nullptr;
             break;
         }
         case SDL_EVENT_MOUSE_BUTTON_DOWN: {
-            ProcessMouseButtonDown(event.button.button, key_modifier);
+            ProcessMouseButtonDown(event.button.button, keyModifier);
             consumed = m_context->GetHoverElement() != nullptr;
             break;
         }
         case SDL_EVENT_MOUSE_BUTTON_UP: {
-            ProcessMouseButtonUp(event.button.button, key_modifier);
+            ProcessMouseButtonUp(event.button.button, keyModifier);
             consumed = m_context->GetHoverElement() != nullptr;
             break;
         }
         case SDL_EVENT_MOUSE_WHEEL: {
             // SDL3 uses precise scrolling
-            float wheel_delta = event.wheel.y;
-            ProcessMouseWheel(wheel_delta, key_modifier);
+            float wheelDelta = event.wheel.y;
+            ProcessMouseWheel(wheelDelta, keyModifier);
             consumed = m_context->GetHoverElement() != nullptr;
             break;
         }
@@ -315,7 +315,7 @@ namespace Vapor {
     void RmlUiManager::ProcessKeyDown(SDL_Scancode scancode, int key_modifier) {
         if (!m_context) return;
 
-        Rml::Input::KeyIdentifier key = SDLScancodeToRmlKey(scancode);
+        Rml::Input::KeyIdentifier key = sdlScancodeToRmlKey(scancode);
         if (key != Rml::Input::KI_UNKNOWN) {
             m_context->ProcessKeyDown(key, key_modifier);
         }
@@ -324,7 +324,7 @@ namespace Vapor {
     void RmlUiManager::ProcessKeyUp(SDL_Scancode scancode, int key_modifier) {
         if (!m_context) return;
 
-        Rml::Input::KeyIdentifier key = SDLScancodeToRmlKey(scancode);
+        Rml::Input::KeyIdentifier key = sdlScancodeToRmlKey(scancode);
         if (key != Rml::Input::KI_UNKNOWN) {
             m_context->ProcessKeyUp(key, key_modifier);
         }
@@ -346,33 +346,33 @@ namespace Vapor {
         if (m_context) {
             // SDL button indices: 1=left, 2=middle, 3=right
             // RmlUI expects: 0=left, 1=right, 2=middle
-            int rml_button = 0;
+            int rmlButton = 0;
             if (button_index == SDL_BUTTON_LEFT)
-                rml_button = 0;
+                rmlButton = 0;
             else if (button_index == SDL_BUTTON_RIGHT)
-                rml_button = 1;
+                rmlButton = 1;
             else if (button_index == SDL_BUTTON_MIDDLE)
-                rml_button = 2;
+                rmlButton = 2;
             else
                 return;
 
-            m_context->ProcessMouseButtonDown(rml_button, key_modifier);
+            m_context->ProcessMouseButtonDown(rmlButton, key_modifier);
         }
     }
 
     void RmlUiManager::ProcessMouseButtonUp(int button_index, int key_modifier) {
         if (m_context) {
-            int rml_button = 0;
+            int rmlButton = 0;
             if (button_index == SDL_BUTTON_LEFT)
-                rml_button = 0;
+                rmlButton = 0;
             else if (button_index == SDL_BUTTON_RIGHT)
-                rml_button = 1;
+                rmlButton = 1;
             else if (button_index == SDL_BUTTON_MIDDLE)
-                rml_button = 2;
+                rmlButton = 2;
             else
                 return;
 
-            m_context->ProcessMouseButtonUp(rml_button, key_modifier);
+            m_context->ProcessMouseButtonUp(rmlButton, key_modifier);
         }
     }
 

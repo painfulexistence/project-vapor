@@ -29,7 +29,7 @@
 #include "scene_builder.hpp"
 #include "systems.hpp"
 
-entt::entity getActiveCamera(entt::registry& registry) {
+auto getActiveCamera(entt::registry& registry) -> entt::entity {
     auto view = registry.view<Vapor::VirtualCameraComponent>();
     for (auto entity : view) {
         if (view.get<Vapor::VirtualCameraComponent>(entity).isActive) {
@@ -39,7 +39,7 @@ entt::entity getActiveCamera(entt::registry& registry) {
     return entt::null;
 }
 
-int main(int argc, char* args[]) {
+auto main(int argc, char* args[]) -> int {
     args::ArgumentParser parser{ "This is Project Vapor." };
     args::Group windowGroup(parser, "Window:");
     args::ValueFlag<Uint32> width(windowGroup, "number", "Window width", { 'w', "width" }, 1280);
@@ -138,7 +138,7 @@ int main(int argc, char* args[]) {
         std::string("assets/models/Sponza/Sponza.gltf"),
         true,// optimized
         Vapor::LoadMode::Async,
-        [](std::shared_ptr<Scene> loadedScene) {
+        [](std::shared_ptr<Scene> loadedScene) -> void {
             fmt::print("Scene loaded with {} nodes\n", loadedScene->nodes.size());
         }
     );
@@ -274,7 +274,7 @@ int main(int argc, char* args[]) {
                 windowHeight = e.window.data2;
                 // Update Camera Aspect Ratio
                 auto view = registry.view<Vapor::VirtualCameraComponent>();
-                view.each([&](auto& cam) { cam.aspect = (float)windowWidth / (float)windowHeight; });
+                view.each([&](auto& cam) -> auto { cam.aspect = (float)windowWidth / (float)windowHeight; });
                 break;
             }
             default:
@@ -292,7 +292,7 @@ int main(int argc, char* args[]) {
             auto& request = registry.emplace_or_replace<CameraSwitchRequest>(global);
             request.mode = CameraSwitchRequest::Mode::Follow;
         }
-        registry.view<CharacterIntent>().each([&](auto& intent) {
+        registry.view<CharacterIntent>().each([&](auto& intent) -> auto {
             intent.lookVector = inputState.getVector(
                 Vapor::InputAction::LookLeft,
                 Vapor::InputAction::LookRight,

@@ -122,7 +122,7 @@ namespace Vapor {
         // Future: Coordinate physics-render synchronization
     }
 
-    bool EngineCore::initRmlUI(int width, int height) {
+    auto EngineCore::initRmlUI(int width, int height) -> bool {
         if (_rmluiManager) {
             fmt::print("RmlUI already initialized\n");
             return true;
@@ -145,7 +145,7 @@ namespace Vapor {
         }
     }
 
-    bool EngineCore::processRmlUIEvent(const SDL_Event& event) {
+    auto EngineCore::processRmlUIEvent(const SDL_Event& event) -> bool {
         if (_rmluiManager && _rmluiManager->IsInitialized()) {
             return _rmluiManager->ProcessEvent(event);
         }

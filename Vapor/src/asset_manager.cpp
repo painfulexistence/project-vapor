@@ -171,7 +171,7 @@ std::shared_ptr<Scene> AssetManager::loadGLTF(const std::string& filename) {
 
     std::shared_ptr<Scene> scene = std::make_shared<Scene>();
 
-    const auto GetLocalMatrix = [](const tinygltf::Node& node) -> glm::mat4 {
+    const auto getLocalMatrix = [](const tinygltf::Node& node) -> glm::mat4 {
         if (!node.matrix.empty()) {
             return glm::mat4(
               node.matrix[0],
@@ -203,7 +203,7 @@ std::shared_ptr<Scene> AssetManager::loadGLTF(const std::string& filename) {
             : glm::quat(
                 float(node.rotation[3]), float(node.rotation[0]), float(node.rotation[1]), float(node.rotation[2])
               );
-        const auto TR = translation * glm::mat4_cast(rotationQuat);
+        const auto tr = translation * glm::mat4_cast(rotationQuat);
         return node.scale.empty() ? TR : glm::scale(TR, glm::vec3(node.scale[0], node.scale[1], node.scale[2]));
     };
 

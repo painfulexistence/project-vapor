@@ -10,7 +10,7 @@ namespace Vapor {
 
 // Helper functions
 
-static ma_attenuation_model toMiniaudioModel(DistanceModel model) {
+static auto toMiniaudioModel(DistanceModel model) -> ma_attenuation_model {
     switch (model) {
         case DistanceModel::None:        return ma_attenuation_model_none;
         case DistanceModel::Linear:      return ma_attenuation_model_linear;
@@ -30,7 +30,7 @@ AudioManager::~AudioManager() {
     }
 }
 
-bool AudioManager::init() {
+auto AudioManager::init() -> bool {
     std::lock_guard<std::mutex> lock(m_mutex);
 
     if (m_initialized) {
@@ -135,7 +135,7 @@ void AudioManager::cleanupInstance(AudioInstance& inst) {
 
 // Playback
 
-AudioID AudioManager::play2d(const std::string& filename, bool loop, float volume) {
+auto AudioManager::play2d(const std::string& filename, bool loop, float volume) -> AudioID {
     std::lock_guard<std::mutex> lock(m_mutex);
 
     if (!m_initialized) return AUDIO_ID_INVALID;
@@ -170,13 +170,13 @@ AudioID AudioManager::play2d(const std::string& filename, bool loop, float volum
     return id;
 }
 
-AudioID AudioManager::play3d(const std::string& filename, const glm::vec3& position,
-                              bool loop, float volume) {
+auto AudioManager::play3d(const std::string& filename, const glm::vec3& position,
+                              bool loop, float volume) -> AudioID {
     return play3d(filename, Audio3DConfig(position), loop, volume);
 }
 
-AudioID AudioManager::play3d(const std::string& filename, const Audio3DConfig& config,
-                              bool loop, float volume) {
+auto AudioManager::play3d(const std::string& filename, const Audio3DConfig& config,
+                              bool loop, float volume) -> AudioID {
     std::lock_guard<std::mutex> lock(m_mutex);
 
     if (!m_initialized) return AUDIO_ID_INVALID;
@@ -308,7 +308,7 @@ void AudioManager::setVolume(AudioID id, float volume) {
     ma_sound_set_volume(inst->sound, volume * m_masterVolume);
 }
 
-float AudioManager::getVolume(AudioID id) const {
+auto AudioManager::getVolume(AudioID id) const -> float {
     std::lock_guard<std::mutex> lock(m_mutex);
 
     auto* inst = getInstance(id);
@@ -322,7 +322,7 @@ void AudioManager::setLoop(AudioID id, bool loop) {
     if (inst) ma_sound_set_looping(inst->sound, loop);
 }
 
-bool AudioManager::isLoop(AudioID id) const {
+auto AudioManager::isLoop(AudioID id) const -> bool {
     std::lock_guard<std::mutex> lock(m_mutex);
 
     auto* inst = getInstance(id);
@@ -336,14 +336,14 @@ void AudioManager::setPitch(AudioID id, float pitch) {
     if (inst) ma_sound_set_pitch(inst->sound, pitch);
 }
 
-float AudioManager::getPitch(AudioID id) const {
+auto AudioManager::getPitch(AudioID id) const -> float {
     std::lock_guard<std::mutex> lock(m_mutex);
 
     auto* inst = getInstance(id);
     return inst ? ma_sound_get_pitch(inst->sound) : 1.0f;
 }
 
-float AudioManager::getCurrentTime(AudioID id) const {
+auto AudioManager::getCurrentTime(AudioID id) const -> float {
     std::lock_guard<std::mutex> lock(m_mutex);
 
     auto* inst = getInstance(id);
@@ -360,11 +360,11 @@ void AudioManager::setCurrentTime(AudioID id, float time) {
     auto* inst = getInstance(id);
     if (!inst) return;
 
-    ma_uint64 frame = static_cast<ma_uint64>(time * ma_engine_get_sample_rate(m_engine));
+    auto frame = static_cast<ma_uint64>(time * ma_engine_get_sample_rate(m_engine));
     ma_sound_seek_to_pcm_frame(inst->sound, frame);
 }
 
-float AudioManager::getDuration(AudioID id) const {
+auto AudioManager::getDuration(AudioID id) const -> float {
     std::lock_guard<std::mutex> lock(m_mutex);
 
     auto* inst = getInstance(id);
@@ -375,7 +375,7 @@ float AudioManager::getDuration(AudioID id) const {
     return length;
 }
 
-AudioState AudioManager::getState(AudioID id) const {
+auto AudioManager::getState(AudioID id) const -> AudioState {
     std::lock_guard<std::mutex> lock(m_mutex);
 
     auto* inst = getInstance(id);
@@ -394,7 +394,7 @@ void AudioManager::setPosition3d(AudioID id, const glm::vec3& position) {
     ma_sound_set_position(inst->sound, position.x, position.y, position.z);
 }
 
-glm::vec3 AudioManager::getPosition3d(AudioID id) const {
+auto AudioManager::getPosition3d(AudioID id) const -> glm::vec3 {
     std::lock_guard<std::mutex> lock(m_mutex);
 
     auto* inst = getInstance(id);
@@ -555,7 +555,7 @@ void AudioManager::setFinishCallback(AudioID id, std::function<void(AudioID, con
     if (inst) inst->finishCallback = std::move(callback);
 }
 
-int AudioManager::getPlayingCount() const {
+auto AudioManager::getPlayingCount() const -> int {
     std::lock_guard<std::mutex> lock(m_mutex);
 
     int count = 0;
@@ -574,19 +574,19 @@ std::string AudioManager::getFilePath(AudioID id) const {
 
 // Private helpers (must be called with lock held)
 
-AudioManager::AudioInstance* AudioManager::getInstance(AudioID id) {
+auto AudioManager::getInstance(AudioID id) -> AudioManager::AudioInstance* {
     if (id == AUDIO_ID_INVALID) return nullptr;
     auto& inst = m_instances[id % MAX_AUDIO_INSTANCES];
     return (inst.sound && inst.id == id) ? &inst : nullptr;
 }
 
-const AudioManager::AudioInstance* AudioManager::getInstance(AudioID id) const {
+auto AudioManager::getInstance(AudioID id) const -> const AudioManager::AudioInstance* {
     if (id == AUDIO_ID_INVALID) return nullptr;
     const auto& inst = m_instances[id % MAX_AUDIO_INSTANCES];
     return (inst.sound && inst.id == id) ? &inst : nullptr;
 }
 
-AudioID AudioManager::allocateInstance() {
+auto AudioManager::allocateInstance() -> AudioID {
     // Must be called with lock held
     for (int i = 0; i < MAX_AUDIO_INSTANCES; i++) {
         int idx = (m_nextID + i) % MAX_AUDIO_INSTANCES;
