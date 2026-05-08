@@ -1,8 +1,8 @@
+#include "MikkTSpace/mikktspace.h"
 #include "graphics_mesh.hpp"
 #include <fmt/core.h>
-#include "MikkTSpace/mikktspace.h"
-#include <utility>
 #include <limits>
+#include <utility>
 
 static auto getNumFaces(const SMikkTSpaceContext* ctx) -> int {
     auto mesh = static_cast<Mesh*>(ctx->m_pUserData);
@@ -39,7 +39,8 @@ static void getTexCoord(const SMikkTSpaceContext* ctx, float* texC, const int fa
     texC[1] = mesh->vertices[index].uv.y;
 }
 
-static void setTSpaceBasic(const SMikkTSpaceContext* ctx, const float* tan, float sign, const int face, const int vert) {
+static void
+    setTSpaceBasic(const SMikkTSpaceContext* ctx, const float* tan, float sign, const int face, const int vert) {
     auto mesh = static_cast<Mesh*>(ctx->m_pUserData);
     auto index = mesh->indices.size() == 0 ? face * 3 + vert : mesh->indices[face * 3 + vert];
     mesh->vertices[index].tangent = glm::vec4(tan[0], tan[1], tan[2], sign);
@@ -52,7 +53,7 @@ void Mesh::initialize(const std::vector<VertexData>& vertices, const std::vector
     calculateTangents();
 };
 
-void Mesh::initialize(VertexData* vertexData, size_t vertexCount, Uint32* indexData, size_t indexCount){
+void Mesh::initialize(VertexData* vertexData, size_t vertexCount, Uint32* indexData, size_t indexCount) {
     vertices.resize(vertexCount);
     for (size_t i = 0; i < vertexCount; ++i) {
         vertices[i] = vertexData[i];
@@ -65,7 +66,7 @@ void Mesh::initialize(VertexData* vertexData, size_t vertexCount, Uint32* indexD
     calculateTangents();
 };
 
-void Mesh::calculateNormals(){
+void Mesh::calculateNormals() {
     for (size_t i = 0; i < indices.size(); i += 3) {
         glm::vec3 edge1 = vertices[indices[i]].position - vertices[indices[i + 1]].position;
         glm::vec3 edge2 = vertices[indices[i + 2]].position - vertices[indices[i + 1]].position;
@@ -77,8 +78,8 @@ void Mesh::calculateNormals(){
     }
 };
 
-void Mesh::calculateTangents(){
-    SMikkTSpaceInterface interface {
+void Mesh::calculateTangents() {
+    SMikkTSpaceInterface interface{
         .m_getNumFaces = getNumFaces,
         .m_getNumVerticesOfFace = getNumVerticesOfFace,
         .m_getPosition = getPosition,
@@ -86,16 +87,13 @@ void Mesh::calculateTangents(){
         .m_getTexCoord = getTexCoord,
         .m_setTSpaceBasic = setTSpaceBasic,
     };
-    SMikkTSpaceContext ctx {
-        .m_pInterface = &interface,
-        .m_pUserData = this
-    };
+    SMikkTSpaceContext ctx{ .m_pInterface = &interface, .m_pUserData = this };
     if (!genTangSpaceDefault(&ctx)) {
         throw std::runtime_error("Mikktspace calculation failed");
     }
 }
 
-void Mesh::calculateLocalAABB(){
+void Mesh::calculateLocalAABB() {
     localAABBMin = glm::vec3(std::numeric_limits<float>::max());
     localAABBMax = glm::vec3(-std::numeric_limits<float>::max());
     for (const auto& vertex : vertices) {
@@ -115,6 +113,7 @@ void Mesh::print() {
         fmt::print("Vertex {}: {} {} {}\n", i, vertices[i].position.x, vertices[i].position.y, vertices[i].position.z);
         fmt::print("Normal {}: {} {} {}\n", i, vertices[i].normal.x, vertices[i].normal.y, vertices[i].normal.z);
         fmt::print("Tangent {}: {} {} {}\n", i, vertices[i].tangent.x, vertices[i].tangent.y, vertices[i].tangent.z);
-        // fmt::print("Bitangent {}: {} {} {}\n", i, vertices[i].bitangent.x, vertices[i].bitangent.y, vertices[i].bitangent.z);
+        // fmt::print("Bitangent {}: {} {} {}\n", i, vertices[i].bitangent.x, vertices[i].bitangent.y,
+        // vertices[i].bitangent.z);
     }
 }

@@ -10,40 +10,41 @@
 namespace MTL {
     class Device;
     class Texture;
-}
+}// namespace MTL
 
 namespace NS {
-    template<typename T>
-    class SharedPtr;
+    template<typename T> class SharedPtr;
 }
 
 // Handle type for fonts
 struct FontHandle {
     Uint32 rid = UINT32_MAX;
-    bool isValid() const { return rid != UINT32_MAX; }
+    bool isValid() const {
+        return rid != UINT32_MAX;
+    }
 };
 
 // Glyph metrics and UV coordinates
 struct Glyph {
-    float u0 = 0.0f, v0 = 0.0f;  // Top-left UV
-    float u1 = 0.0f, v1 = 0.0f;  // Bottom-right UV
-    float xOffset = 0.0f;        // X offset from cursor
-    float yOffset = 0.0f;        // Y offset from baseline
-    float width = 0.0f;          // Glyph width in pixels
-    float height = 0.0f;         // Glyph height in pixels
-    float advance = 0.0f;        // Horizontal advance
+    float u0 = 0.0f, v0 = 0.0f;// Top-left UV
+    float u1 = 0.0f, v1 = 0.0f;// Bottom-right UV
+    float xOffset = 0.0f;// X offset from cursor
+    float yOffset = 0.0f;// Y offset from baseline
+    float width = 0.0f;// Glyph width in pixels
+    float height = 0.0f;// Glyph height in pixels
+    float advance = 0.0f;// Horizontal advance
 };
 
 // Font data
 struct Font {
-    float fontSize = 0.0f;       // Base font size
-    float ascent = 0.0f;         // Ascent (above baseline)
-    float descent = 0.0f;        // Descent (below baseline)
-    float lineHeight = 0.0f;     // Total line height
-    Uint32 textureWidth = 0;     // Atlas texture width
-    Uint32 textureHeight = 0;    // Atlas texture height
-    TextureHandle textureHandle; // Atlas texture handle
-    std::unordered_map<int, Glyph> glyphs; // Codepoint -> Glyph mapping
+    float fontSize = 0.0f;// Base font size
+    float ascent = 0.0f;// Ascent (above baseline)
+    float descent = 0.0f;// Descent (below baseline)
+    float lineHeight = 0.0f;// Total line height
+    Uint32 textureWidth = 0;// Atlas texture width
+    Uint32 textureHeight = 0;// Atlas texture height
+    TextureHandle textureHandle;// Atlas texture handle
+    std::unordered_map<int, Glyph> glyphs;// Codepoint -> Glyph mapping
 };
 
 // FontManager - handles font loading, atlas generation, and glyph lookup
@@ -90,6 +91,6 @@ private:
 
     MTL::Device* m_device = nullptr;
     std::unordered_map<Uint32, Font> m_fonts;
-    std::unordered_map<Uint32, AtlasData> m_atlasData; // Temporary storage until texture is created
+    std::unordered_map<Uint32, AtlasData> m_atlasData;// Temporary storage until texture is created
     Uint32 m_nextFontID = 1;
 };

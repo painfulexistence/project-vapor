@@ -194,8 +194,9 @@ public:
     ) override;
 
     // Rotated quad
-    void drawRotatedQuad2D(const glm::vec2& position, const glm::vec2& size, float rotation, const glm::vec4& color)
-        override;
+    void drawRotatedQuad2D(
+        const glm::vec2& position, const glm::vec2& size, float rotation, const glm::vec4& color
+    ) override;
     void drawRotatedQuad2D(
         const glm::vec2& position,
         const glm::vec2& size,
@@ -209,13 +210,15 @@ public:
     void drawLine3D(const glm::vec3& p0, const glm::vec3& p1, const glm::vec4& color, float thickness = 1.0f) override;
 
     // Shape drawing
-    void drawRect2D(const glm::vec2& position, const glm::vec2& size, const glm::vec4& color, float thickness = 1.0f)
-        override;
+    void drawRect2D(
+        const glm::vec2& position, const glm::vec2& size, const glm::vec4& color, float thickness = 1.0f
+    ) override;
     void drawCircle2D(const glm::vec2& center, float radius, const glm::vec4& color, int segments = 32) override;
     void drawCircleFilled2D(const glm::vec2& center, float radius, const glm::vec4& color, int segments = 32) override;
     void drawTriangle2D(const glm::vec2& p0, const glm::vec2& p1, const glm::vec2& p2, const glm::vec4& color) override;
-    void drawTriangleFilled2D(const glm::vec2& p0, const glm::vec2& p1, const glm::vec2& p2, const glm::vec4& color)
-        override;
+    void drawTriangleFilled2D(
+        const glm::vec2& p0, const glm::vec2& p1, const glm::vec2& p2, const glm::vec4& color
+    ) override;
 
     // Batch statistics
     Batch2DStats getBatch2DStats() const override {

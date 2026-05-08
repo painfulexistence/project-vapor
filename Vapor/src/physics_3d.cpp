@@ -5,10 +5,11 @@
 #include "physics_debug_renderer.hpp"
 #include "task_scheduler.hpp"
 #include "vehicle_controller.hpp"
+#include <Jolt/Jolt.h>
+
 #include <Jolt/Core/Factory.h>
 #include <Jolt/Core/JobSystemThreadPool.h>
 #include <Jolt/Core/TempAllocator.h>
-#include <Jolt/Jolt.h>
 #include <Jolt/Physics/Body/BodyActivationListener.h>
 #include <Jolt/Physics/Body/BodyCreationSettings.h>
 #include <Jolt/Physics/Body/BodyFilter.h>
@@ -74,12 +75,12 @@ class ObjectLayerPairFilterImpl : public JPH::ObjectLayerPairFilter {
 public:
     virtual auto ShouldCollide(JPH::ObjectLayer inObject1, JPH::ObjectLayer inObject2) const -> bool override {
         switch (inObject1) {
-        case Layers::NON_MOVING:
-            return inObject2 == Layers::MOVING;// Static only collides with Dynamic
-        case Layers::MOVING:
+        case Layers::nonMoving:
+            return inObject2 == Layers::moving;// Static only collides with Dynamic
+        case Layers::moving:
             return true;// Dynamic collides with all layers (including Trigger)
-        case Layers::TRIGGER:
-            return inObject2 == Layers::MOVING;// Trigger only detects Dynamic objects
+        case Layers::trigger:
+            return inObject2 == Layers::moving;// Trigger only detects Dynamic objects
         default:
             JPH_ASSERT(false);
             return false;
@@ -97,28 +98,28 @@ namespace BroadPhaseLayers {
 class BPLayerInterfaceImpl final : public JPH::BroadPhaseLayerInterface {
 public:
     BPLayerInterfaceImpl() {
-        mObjectToBroadPhase[Layers::NON_MOVING] = BroadPhaseLayers::NON_MOVING;
-        mObjectToBroadPhase[Layers::MOVING] = BroadPhaseLayers::MOVING;
-        mObjectToBroadPhase[Layers::TRIGGER] = BroadPhaseLayers::TRIGGER;
+        mObjectToBroadPhase[Layers::nonMoving] = BroadPhaseLayers::nonMoving;
+        mObjectToBroadPhase[Layers::moving] = BroadPhaseLayers::moving;
+        mObjectToBroadPhase[Layers::trigger] = BroadPhaseLayers::trigger;
     }
 
-    virtual uint GetNumBroadPhaseLayers() const override {
-        return BroadPhaseLayers::NUM_LAYERS;
+    virtual auto GetNumBroadPhaseLayers() const -> uint override {
+        return BroadPhaseLayers::numLayers;
     }
 
     virtual auto GetBroadPhaseLayer(JPH::ObjectLayer inLayer) const -> JPH::BroadPhaseLayer override {
-        JPH_ASSERT(inLayer < Layers::NUM_LAYERS);
+        JPH_ASSERT(inLayer < Layers::numLayers);
         return mObjectToBroadPhase[inLayer];
     }
 
 #if defined(JPH_EXTERNAL_PROFILE) || defined(JPH_PROFILE_ENABLED)
     virtual const char* GetBroadPhaseLayerName(JPH::BroadPhaseLayer inLayer) const override {
         switch ((JPH::BroadPhaseLayer::Type)inLayer) {
-        case (JPH::BroadPhaseLayer::Type)BroadPhaseLayers::NON_MOVING:
+        case (JPH::BroadPhaseLayer::Type)BroadPhaseLayers::nonMoving:
             return "NON_MOVING";
-        case (JPH::BroadPhaseLayer::Type)BroadPhaseLayers::MOVING:
+        case (JPH::BroadPhaseLayer::Type)BroadPhaseLayers::moving:
             return "MOVING";
-        case (JPH::BroadPhaseLayer::Type)BroadPhaseLayers::TRIGGER:
+        case (JPH::BroadPhaseLayer::Type)BroadPhaseLayers::trigger:
             return "TRIGGER";
         default:
             JPH_ASSERT(false);
@@ -128,18 +129,18 @@ public:
 #endif
 
 private:
-    JPH::BroadPhaseLayer mObjectToBroadPhase[Layers::NUM_LAYERS];
+    JPH::BroadPhaseLayer mObjectToBroadPhase[Layers::numLayers];
 };
 
 class ObjectVsBroadPhaseLayerFilterImpl : public JPH::ObjectVsBroadPhaseLayerFilter {
 public:
     virtual auto ShouldCollide(JPH::ObjectLayer inLayer1, JPH::BroadPhaseLayer inLayer2) const -> bool override {
         switch (inLayer1) {
-        case Layers::NON_MOVING:
+        case Layers::nonMoving:
             return inLayer2 == BroadPhaseLayers::moving;
-        case Layers::MOVING:
+        case Layers::moving:
             return true;
-        case Layers::TRIGGER:
+        case Layers::trigger:
             return inLayer2 == BroadPhaseLayers::moving;
         default:
             JPH_ASSERT(false);
@@ -277,7 +278,7 @@ void Physics3D::init(Vapor::TaskScheduler& taskScheduler, std::shared_ptr<Vapor:
     tempAllocator = std::make_unique<JPH::TempAllocatorImpl>(10 * 1024 * 1024);
 
     jobSystem = std::make_unique<JPH::JobSystemThreadPool>(
-      JPH::cMaxPhysicsJobs, JPH::cMaxPhysicsBarriers, std::thread::hardware_concurrency() - 1
+        JPH::cMaxPhysicsJobs, JPH::cMaxPhysicsBarriers, std::thread::hardware_concurrency() - 1
     );
 
     const uint cMaxBodies = 1024;
@@ -327,8 +328,7 @@ void Physics3D::deinit() {
     }
 
     for (auto& body : bodies) {
-        if (bodyInterface->IsAdded(body.second))
-            bodyInterface->RemoveBody(body.second);
+        if (bodyInterface->IsAdded(body.second)) bodyInterface->RemoveBody(body.second);
         bodyInterface->DestroyBody(body.second);
     }
     bodies.clear();
@@ -403,7 +403,8 @@ void Physics3D::process(const std::shared_ptr<Scene>& scene, float dt) {
     // Store previous positions BEFORE any physics updates (for interpolation)
     // This ensures that even if we do multiple physics steps (catch-up),
     // we interpolate from the position at the start of this frame
-    std::function<void(const std::shared_ptr<Node>&)> storePreviousPositions = [&](const std::shared_ptr<Node>& node) {
+    std::function<void(const std::shared_ptr<Node>&)> storePreviousPositions =
+        [&](const std::shared_ptr<Node>& node) -> void {
         if (node->characterController) {
             node->characterController->storePreviousPosition();
         }
@@ -420,28 +421,28 @@ void Physics3D::process(const std::shared_ptr<Scene>& scene, float dt) {
 
         // Update vehicle controllers
         std::function<void(const std::shared_ptr<Node>&)> updateVehicleControllers =
-            [&](const std::shared_ptr<Node>& node) {
-                if (node->vehicleController) {
-                    node->vehicleController->update(FIXED_TIME_STEP);
-                }
-                for (const auto& child : node->children) {
-                    updateVehicleControllers(child);
-                }
-            };
+            [&](const std::shared_ptr<Node>& node) -> void {
+            if (node->vehicleController) {
+                node->vehicleController->update(FIXED_TIME_STEP);
+            }
+            for (const auto& child : node->children) {
+                updateVehicleControllers(child);
+            }
+        };
         for (auto& node : scene->nodes) {
             updateVehicleControllers(node);
         }
 
         // Update character controllers
         std::function<void(const std::shared_ptr<Node>&)> updateCharacterControllers =
-            [&](const std::shared_ptr<Node>& node) {
-                if (node->characterController) {
-                    node->characterController->update(FIXED_TIME_STEP, getGravity());
-                }
-                for (const auto& child : node->children) {
-                    updateCharacterControllers(child);
-                }
-            };
+            [&](const std::shared_ptr<Node>& node) -> void {
+            if (node->characterController) {
+                node->characterController->update(FIXED_TIME_STEP, getGravity());
+            }
+            for (const auto& child : node->children) {
+                updateCharacterControllers(child);
+            }
+        };
         for (auto& node : scene->nodes) {
             updateCharacterControllers(node);
         }
@@ -489,8 +490,8 @@ void Physics3D::process(const std::shared_ptr<Scene>& scene, float dt) {
     // Calculate interpolation alpha: how far we are between physics steps
     float alpha = timeAccum / FIXED_TIME_STEP;
 
-    std::function<void(const std::shared_ptr<Node>&)> syncCharacterControllers = [&](const std::shared_ptr<Node>& node
-                                                                                 ) {
+    std::function<void(const std::shared_ptr<Node>&)> syncCharacterControllers =
+        [&](const std::shared_ptr<Node>& node) -> void {
         if (node->characterController) {
             // Use interpolated position for smooth rendering
             glm::vec3 charPos = node->characterController->getInterpolatedPosition(alpha);
@@ -506,7 +507,8 @@ void Physics3D::process(const std::shared_ptr<Scene>& scene, float dt) {
     }
 
     // Sync vehicle controller positions/rotations back to nodes
-    std::function<void(const std::shared_ptr<Node>&)> syncVehicleControllers = [&](const std::shared_ptr<Node>& node) {
+    std::function<void(const std::shared_ptr<Node>&)> syncVehicleControllers =
+        [&](const std::shared_ptr<Node>& node) -> void {
         if (node->vehicleController) {
             glm::vec3 vehiclePos = node->vehicleController->getPosition();
             glm::quat vehicleRot = node->vehicleController->getRotation();
@@ -554,7 +556,6 @@ void Physics3D::process(const std::shared_ptr<Scene>& scene, float dt) {
     if (isDebugUIEnabled) {
         // TODO: physics debug UI
     }
-
 }
 
 void Physics3D::drawImGui(float dt) {
@@ -576,7 +577,7 @@ auto Physics3D::createSphereBody(
         JPH::RVec3(position.x, position.y, position.z),
         JPH::Quat(rotation.x, rotation.y, rotation.z, rotation.w),
         convertMotionType(motionType),
-        motionType == BodyMotionType::Static ? Layers::NON_MOVING : Layers::MOVING
+        motionType == BodyMotionType::Static ? Layers::nonMoving : Layers::moving
     );
     JPH::Body* body = bodyInterface->CreateBody(bodySettings);
     if (!body) {
@@ -603,7 +604,7 @@ auto Physics3D::createBoxBody(
         JPH::RVec3(position.x, position.y, position.z),
         JPH::Quat(rotation.x, rotation.y, rotation.z, rotation.w),
         convertMotionType(motionType),
-        motionType == BodyMotionType::Static ? Layers::NON_MOVING : Layers::MOVING
+        motionType == BodyMotionType::Static ? Layers::nonMoving : Layers::moving
     );
     JPH::Body* body = bodyInterface->CreateBody(bodySettings);
     if (!body) {
@@ -626,8 +627,7 @@ void Physics3D::removeBody(BodyHandle handle) {
 
 void Physics3D::destroyBody(BodyHandle handle) {
     auto id = bodies.at(handle.rid);
-    if (bodyInterface->IsAdded(id))
-        bodyInterface->RemoveBody(id);
+    if (bodyInterface->IsAdded(id)) bodyInterface->RemoveBody(id);
     bodyInterface->DestroyBody(id);
     bodies.erase(handle.rid);
 }
@@ -1024,7 +1024,7 @@ auto Physics3D::createCapsuleBody(
         JPH::RVec3(position.x, position.y, position.z),
         JPH::Quat(rotation.x, rotation.y, rotation.z, rotation.w),
         convertMotionType(motionType),
-        motionType == BodyMotionType::Static ? Layers::NON_MOVING : Layers::MOVING
+        motionType == BodyMotionType::Static ? Layers::nonMoving : Layers::moving
     );
 
     JPH::Body* body = bodyInterface->CreateBody(bodySettings);
@@ -1052,7 +1052,7 @@ auto Physics3D::createCylinderBody(
         JPH::RVec3(position.x, position.y, position.z),
         JPH::Quat(rotation.x, rotation.y, rotation.z, rotation.w),
         convertMotionType(motionType),
-        motionType == BodyMotionType::Static ? Layers::NON_MOVING : Layers::MOVING
+        motionType == BodyMotionType::Static ? Layers::nonMoving : Layers::moving
     );
 
     JPH::Body* body = bodyInterface->CreateBody(bodySettings);
@@ -1104,7 +1104,7 @@ auto Physics3D::createMeshBody(
         JPH::RVec3(position.x, position.y, position.z),
         JPH::Quat(rotation.x, rotation.y, rotation.z, rotation.w),
         convertMotionType(motionType),
-        Layers::NON_MOVING// Mesh shapes should be static
+        Layers::nonMoving// Mesh shapes should be static
     );
 
     JPH::Body* body = bodyInterface->CreateBody(bodySettings);
@@ -1143,7 +1143,7 @@ auto Physics3D::createConvexHullBody(
         JPH::RVec3(position.x, position.y, position.z),
         JPH::Quat(rotation.x, rotation.y, rotation.z, rotation.w),
         convertMotionType(motionType),
-        motionType == BodyMotionType::Static ? Layers::NON_MOVING : Layers::MOVING
+        motionType == BodyMotionType::Static ? Layers::nonMoving : Layers::moving
     );
 
     JPH::Body* body = bodyInterface->CreateBody(bodySettings);
@@ -1156,8 +1156,8 @@ auto Physics3D::createConvexHullBody(
 }
 
 // ====== Trigger 創建方法 ======
-auto
-    Physics3D::createBoxTrigger(const glm::vec3& halfSize, const glm::vec3& position, const glm::quat& rotation) -> TriggerHandle {
+auto Physics3D::createBoxTrigger(const glm::vec3& halfSize, const glm::vec3& position, const glm::quat& rotation)
+    -> TriggerHandle {
     JPH::BoxShapeSettings shapeSettings(JPH::Vec3(halfSize.x, halfSize.y, halfSize.z));
     shapeSettings.SetEmbedded();
     JPH::ShapeSettings::ShapeResult shapeResult = shapeSettings.Create();
@@ -1171,7 +1171,7 @@ auto
         JPH::RVec3(position.x, position.y, position.z),
         JPH::Quat(rotation.x, rotation.y, rotation.z, rotation.w),
         JPH::EMotionType::Static,// Triggers are usually static
-        Layers::TRIGGER
+        Layers::trigger
     );
 
     bodySettings.mIsSensor = true;// Critical: Set as sensor (no physical collision)
@@ -1187,7 +1187,8 @@ auto
     return TriggerHandle{ nextTriggerID++ };
 }
 
-auto Physics3D::createSphereTrigger(float radius, const glm::vec3& position, const glm::quat& rotation) -> TriggerHandle {
+auto Physics3D::createSphereTrigger(float radius, const glm::vec3& position, const glm::quat& rotation)
+    -> TriggerHandle {
     JPH::SphereShapeSettings shapeSettings(radius);
     shapeSettings.SetEmbedded();
     JPH::ShapeSettings::ShapeResult shapeResult = shapeSettings.Create();
@@ -1201,7 +1202,7 @@ auto Physics3D::createSphereTrigger(float radius, const glm::vec3& position, con
         JPH::RVec3(position.x, position.y, position.z),
         JPH::Quat(rotation.x, rotation.y, rotation.z, rotation.w),
         JPH::EMotionType::Static,
-        Layers::TRIGGER
+        Layers::trigger
     );
 
     bodySettings.mIsSensor = true;
@@ -1233,7 +1234,7 @@ auto Physics3D::createCapsuleTrigger(
         JPH::RVec3(position.x, position.y, position.z),
         JPH::Quat(rotation.x, rotation.y, rotation.z, rotation.w),
         JPH::EMotionType::Static,
-        Layers::TRIGGER
+        Layers::trigger
     );
 
     bodySettings.mIsSensor = true;
@@ -1326,7 +1327,8 @@ auto Physics3D::overlapSphere(const glm::vec3& center, float radius) -> OverlapR
     return result;
 }
 
-auto Physics3D::overlapBox(const glm::vec3& center, const glm::vec3& halfExtents, const glm::quat& rotation) -> OverlapResult {
+auto Physics3D::overlapBox(const glm::vec3& center, const glm::vec3& halfExtents, const glm::quat& rotation)
+    -> OverlapResult {
     OverlapResult result;
 
     // Create query shape

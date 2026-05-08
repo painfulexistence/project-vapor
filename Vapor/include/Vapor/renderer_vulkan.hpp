@@ -1,18 +1,18 @@
 #pragma once
 #include "renderer.hpp"
 
-#include <SDL3/SDL_video.h>
 #include <SDL3/SDL_stdinc.h>
+#include <SDL3/SDL_video.h>
 #include <SDL3/SDL_vulkan.h>
-#include <vulkan/vulkan.h>
-#include <vulkan/vulkan_beta.h>
 #include <glm/mat4x4.hpp>
 #include <glm/vec2.hpp>
 #include <glm/vec3.hpp>
 #include <glm/vec4.hpp>
+#include <memory>
 #include <string>
 #include <unordered_map>
-#include <memory>
+#include <vulkan/vulkan.h>
+#include <vulkan/vulkan_beta.h>
 
 #include "graphics.hpp"
 
@@ -53,44 +53,127 @@ public:
 
     // ===== Interface parity stubs (no functional implementation) =====
 
-    bool initUI() override { return true; }
-    std::shared_ptr<Vapor::DebugDraw> getDebugDraw() override { return nullptr; }
+    bool initUI() override {
+        return true;
+    }
+    std::shared_ptr<Vapor::DebugDraw> getDebugDraw() override {
+        return nullptr;
+    }
 
-    void flush2D() override {}
-    void flush3D() override {}
+    void flush2D() override {
+    }
+    void flush3D() override {
+    }
 
-    void drawQuad2D(const glm::vec2& position, const glm::vec2& size, const glm::vec4& color) override {}
-    void drawQuad2D(const glm::vec3& position, const glm::vec2& size, const glm::vec4& color) override {}
-    void drawQuad2D(const glm::vec2& position, const glm::vec2& size, TextureHandle texture, const glm::vec4& tintColor = glm::vec4(1.0f)) override {}
-    void drawQuad2D(const glm::mat4& transform, const glm::vec4& color, int entityID = -1) override {}
-    void drawQuad2D(const glm::mat4& transform, TextureHandle texture, const glm::vec2* texCoords, const glm::vec4& tintColor = glm::vec4(1.0f), int entityID = -1) override {}
+    void drawQuad2D(const glm::vec2& position, const glm::vec2& size, const glm::vec4& color) override {
+    }
+    void drawQuad2D(const glm::vec3& position, const glm::vec2& size, const glm::vec4& color) override {
+    }
+    void drawQuad2D(
+        const glm::vec2& position,
+        const glm::vec2& size,
+        TextureHandle texture,
+        const glm::vec4& tintColor = glm::vec4(1.0f)
+    ) override {
+    }
+    void drawQuad2D(const glm::mat4& transform, const glm::vec4& color, int entityID = -1) override {
+    }
+    void drawQuad2D(
+        const glm::mat4& transform,
+        TextureHandle texture,
+        const glm::vec2* texCoords,
+        const glm::vec4& tintColor = glm::vec4(1.0f),
+        int entityID = -1
+    ) override {
+    }
 
-    void drawQuad3D(const glm::vec3& position, const glm::vec2& size, const glm::vec4& color) override {}
-    void drawQuad3D(const glm::vec3& position, const glm::vec2& size, TextureHandle texture, const glm::vec4& tintColor = glm::vec4(1.0f)) override {}
-    void drawQuad3D(const glm::mat4& transform, const glm::vec4& color, int entityID = -1) override {}
-    void drawQuad3D(const glm::mat4& transform, TextureHandle texture, const glm::vec2* texCoords, const glm::vec4& tintColor = glm::vec4(1.0f), int entityID = -1) override {}
+    void drawQuad3D(const glm::vec3& position, const glm::vec2& size, const glm::vec4& color) override {
+    }
+    void drawQuad3D(
+        const glm::vec3& position,
+        const glm::vec2& size,
+        TextureHandle texture,
+        const glm::vec4& tintColor = glm::vec4(1.0f)
+    ) override {
+    }
+    void drawQuad3D(const glm::mat4& transform, const glm::vec4& color, int entityID = -1) override {
+    }
+    void drawQuad3D(
+        const glm::mat4& transform,
+        TextureHandle texture,
+        const glm::vec2* texCoords,
+        const glm::vec4& tintColor = glm::vec4(1.0f),
+        int entityID = -1
+    ) override {
+    }
 
-    void drawRotatedQuad2D(const glm::vec2& position, const glm::vec2& size, float rotation, const glm::vec4& color) override {}
-    void drawRotatedQuad2D(const glm::vec2& position, const glm::vec2& size, float rotation, TextureHandle texture, const glm::vec4& tintColor = glm::vec4(1.0f)) override {}
+    void drawRotatedQuad2D(
+        const glm::vec2& position, const glm::vec2& size, float rotation, const glm::vec4& color
+    ) override {
+    }
+    void drawRotatedQuad2D(
+        const glm::vec2& position,
+        const glm::vec2& size,
+        float rotation,
+        TextureHandle texture,
+        const glm::vec4& tintColor = glm::vec4(1.0f)
+    ) override {
+    }
 
-    void drawLine2D(const glm::vec2& p0, const glm::vec2& p1, const glm::vec4& color, float thickness = 1.0f) override {}
-    void drawLine3D(const glm::vec3& p0, const glm::vec3& p1, const glm::vec4& color, float thickness = 1.0f) override {}
+    void drawLine2D(const glm::vec2& p0, const glm::vec2& p1, const glm::vec4& color, float thickness = 1.0f) override {
+    }
+    void drawLine3D(const glm::vec3& p0, const glm::vec3& p1, const glm::vec4& color, float thickness = 1.0f) override {
+    }
 
-    void drawRect2D(const glm::vec2& position, const glm::vec2& size, const glm::vec4& color, float thickness = 1.0f) override {}
-    void drawCircle2D(const glm::vec2& center, float radius, const glm::vec4& color, int segments = 32) override {}
-    void drawCircleFilled2D(const glm::vec2& center, float radius, const glm::vec4& color, int segments = 32) override {}
-    void drawTriangle2D(const glm::vec2& p0, const glm::vec2& p1, const glm::vec2& p2, const glm::vec4& color) override {}
-    void drawTriangleFilled2D(const glm::vec2& p0, const glm::vec2& p1, const glm::vec2& p2, const glm::vec4& color) override {}
+    void drawRect2D(
+        const glm::vec2& position, const glm::vec2& size, const glm::vec4& color, float thickness = 1.0f
+    ) override {
+    }
+    void drawCircle2D(const glm::vec2& center, float radius, const glm::vec4& color, int segments = 32) override {
+    }
+    void drawCircleFilled2D(const glm::vec2& center, float radius, const glm::vec4& color, int segments = 32) override {
+    }
+    void
+        drawTriangle2D(const glm::vec2& p0, const glm::vec2& p1, const glm::vec2& p2, const glm::vec4& color) override {
+    }
+    void drawTriangleFilled2D(
+        const glm::vec2& p0, const glm::vec2& p1, const glm::vec2& p2, const glm::vec4& color
+    ) override {
+    }
 
-    Batch2DStats getBatch2DStats() const override { return {}; }
-    void resetBatch2DStats() override {}
+    Batch2DStats getBatch2DStats() const override {
+        return {};
+    }
+    void resetBatch2DStats() override {
+    }
 
-    FontHandle loadFont(const std::string& path, float baseSize) override { return {}; }
-    void unloadFont(FontHandle handle) override {}
-    void drawText2D(FontHandle font, const std::string& text, const glm::vec2& position, float scale = 1.0f, const glm::vec4& color = glm::vec4(1.0f)) override {}
-    void drawText3D(FontHandle font, const std::string& text, const glm::vec3& worldPosition, float scale = 1.0f, const glm::vec4& color = glm::vec4(1.0f)) override {}
-    glm::vec2 measureText(FontHandle font, const std::string& text, float scale = 1.0f) override { return {}; }
-    float getFontLineHeight(FontHandle font, float scale = 1.0f) override { return 0.0f; }
+    FontHandle loadFont(const std::string& path, float baseSize) override {
+        return {};
+    }
+    void unloadFont(FontHandle handle) override {
+    }
+    void drawText2D(
+        FontHandle font,
+        const std::string& text,
+        const glm::vec2& position,
+        float scale = 1.0f,
+        const glm::vec4& color = glm::vec4(1.0f)
+    ) override {
+    }
+    void drawText3D(
+        FontHandle font,
+        const std::string& text,
+        const glm::vec3& worldPosition,
+        float scale = 1.0f,
+        const glm::vec4& color = glm::vec4(1.0f)
+    ) override {
+    }
+    glm::vec2 measureText(FontHandle font, const std::string& text, float scale = 1.0f) override {
+        return {};
+    }
+    float getFontLineHeight(FontHandle font, float scale = 1.0f) override {
+        return 0.0f;
+    }
 
     BufferHandle createBuffer(BufferUsage usage, VkDeviceSize size);
 
@@ -157,12 +240,12 @@ private:
     VkDescriptorPool set0DescriptorPool;
     VkDescriptorPool set1DescriptorPool;
     VkDescriptorPool set2DescriptorPool;
-    VkDescriptorSetLayout emptySetLayout; // required because VK_EXT_graphics_pipeline_library not supported
+    VkDescriptorSetLayout emptySetLayout;// required because VK_EXT_graphics_pipeline_library not supported
     VkDescriptorSetLayout set0Layout;
     VkDescriptorSetLayout set1Layout;
     VkDescriptorSetLayout set2Layout;
-    std::vector<VkDescriptorSet> set0s; // global
-    std::vector<VkDescriptorSet> set1s; // 1 set per material
+    std::vector<VkDescriptorSet> set0s;// global
+    std::vector<VkDescriptorSet> set1s;// 1 set per material
     std::vector<VkDescriptorSet> set2s;
 
     RenderTargetHandle msaaColorImage;
@@ -223,10 +306,10 @@ private:
     VkPipelineLayout particleRenderPipelineLayout;
     VkPipeline particleRenderPipeline;
 
-    std::vector<BufferHandle> particleBuffers;              // Double buffered for compute
-    std::vector<BufferHandle> particleSimParamsBuffers;     // Simulation parameters
+    std::vector<BufferHandle> particleBuffers;// Double buffered for compute
+    std::vector<BufferHandle> particleSimParamsBuffers;// Simulation parameters
     std::vector<void*> particleSimParamsBuffersMapped;
-    std::vector<BufferHandle> particleAttractorBuffers;     // Attractor data
+    std::vector<BufferHandle> particleAttractorBuffers;// Attractor data
     std::vector<void*> particleAttractorBuffersMapped;
 
     void initParticleSystem();

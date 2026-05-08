@@ -121,8 +121,8 @@ namespace Vapor {
         }
 
         // Rml::RenderInterface implementation
-        auto
-            CompileGeometry(Rml::Span<const Rml::Vertex> vertices, Rml::Span<const int> indices) -> Rml::CompiledGeometryHandle override {
+        auto CompileGeometry(Rml::Span<const Rml::Vertex> vertices, Rml::Span<const int> indices)
+            -> Rml::CompiledGeometryHandle override {
             if (!m_device) {
                 return 0;
             }
@@ -149,8 +149,9 @@ namespace Vapor {
             return handle;
         }
 
-        void RenderGeometry(Rml::CompiledGeometryHandle geometry, Rml::Vector2f translation, Rml::TextureHandle texture)
-            override {
+        void RenderGeometry(
+            Rml::CompiledGeometryHandle geometry, Rml::Vector2f translation, Rml::TextureHandle texture
+        ) override {
             if (!m_currentEncoder) {
                 return;
             }
@@ -240,8 +241,8 @@ namespace Vapor {
             return 0;
         }
 
-        auto
-            GenerateTexture(Rml::Span<const Rml::byte> source, Rml::Vector2i source_dimensions) -> Rml::TextureHandle override {
+        auto GenerateTexture(Rml::Span<const Rml::byte> source, Rml::Vector2i source_dimensions)
+            -> Rml::TextureHandle override {
             if (!m_device) {
                 return 0;
             }
@@ -508,12 +509,12 @@ public:
 
         // Build BLAS array if geometry is dirty
         if (r.currentScene->isGeometryDirty) {
-            std::vector<NS::Object*> BLASObjects;
-            BLASObjects.reserve(r.BLASs.size());
+            std::vector<NS::Object*> blasObjects;
+            blasObjects.reserve(r.BLASs.size());
             for (auto blas : r.BLASs) {
-                BLASObjects.push_back(static_cast<NS::Object*>(blas.get()));
+                blasObjects.push_back(static_cast<NS::Object*>(blas.get()));
             }
-            r.BLASArray = NS::TransferPtr(NS::Array::array(BLASObjects.data(), BLASObjects.size()));
+            r.BLASArray = NS::TransferPtr(NS::Array::array(blasObjects.data(), blasObjects.size()));
             r.currentScene->isGeometryDirty = false;
         }
 
@@ -523,16 +524,16 @@ public:
         tlasDesc->setInstancedAccelerationStructures(r.BLASArray.get());
         tlasDesc->setInstanceDescriptorBuffer(r.accelInstanceBuffers[r.currentFrameInFlight].get());
 
-        auto tlasSizes = r.device->accelerationStructureSizes(TLASDesc.get());
+        auto tlasSizes = r.device->accelerationStructureSizes(tlasDesc.get());
         if (!r.TLASScratchBuffers[r.currentFrameInFlight]
-            || r.TLASScratchBuffers[r.currentFrameInFlight]->length() < TLASSizes.buildScratchBufferSize) {
+            || r.TLASScratchBuffers[r.currentFrameInFlight]->length() < tlasSizes.buildScratchBufferSize) {
             r.TLASScratchBuffers[r.currentFrameInFlight] =
-                NS::TransferPtr(r.device->newBuffer(TLASSizes.buildScratchBufferSize, MTL::ResourceStorageModePrivate));
+                NS::TransferPtr(r.device->newBuffer(tlasSizes.buildScratchBufferSize, MTL::ResourceStorageModePrivate));
         }
         if (!r.TLASBuffers[r.currentFrameInFlight]
-            || r.TLASBuffers[r.currentFrameInFlight]->size() < TLASSizes.accelerationStructureSize) {
+            || r.TLASBuffers[r.currentFrameInFlight]->size() < tlasSizes.accelerationStructureSize) {
             r.TLASBuffers[r.currentFrameInFlight] =
-                NS::TransferPtr(r.device->newAccelerationStructure(TLASSizes.accelerationStructureSize));
+                NS::TransferPtr(r.device->newAccelerationStructure(tlasSizes.accelerationStructureSize));
         }
 
         // Build TLAS
@@ -540,7 +541,7 @@ public:
         auto accelEncoder = r.currentCommandBuffer->accelerationStructureCommandEncoder();
         accelEncoder->buildAccelerationStructure(
             r.TLASBuffers[r.currentFrameInFlight].get(),
-            TLASDesc.get(),
+            tlasDesc.get(),
             r.TLASScratchBuffers[r.currentFrameInFlight].get(),
             0
         );
@@ -705,7 +706,8 @@ public:
         // CompareFunctionEqual: sky depth (1.0) == depth buffer (1.0) -> pass, render sky
         //                      sky depth (1.0) == depth buffer (0.5) -> fail, don't render (preserves scene)
         MTL::DepthStencilDescriptor* skyDepthDesc = MTL::DepthStencilDescriptor::alloc()->init();
-        skyDepthDesc->setDepthCompareFunction(MTL::CompareFunction::CompareFunctionEqual
+        skyDepthDesc->setDepthCompareFunction(
+            MTL::CompareFunction::CompareFunctionEqual
         );// Only pass when depth == 1.0 (far plane)
         skyDepthDesc->setDepthWriteEnabled(false);// Don't write depth for sky
         NS::SharedPtr<MTL::DepthStencilState> skyDepthState =
@@ -930,7 +932,8 @@ public:
         // Create render pass descriptor
         auto renderPassDesc = NS::TransferPtr(MTL::RenderPassDescriptor::renderPassDescriptor());
         auto renderPassColorRT = renderPassDesc->colorAttachments()->object(0);
-        renderPassColorRT->setClearColor(MTL::ClearColor(r.clearColor.r, r.clearColor.g, r.clearColor.b, r.clearColor.a)
+        renderPassColorRT->setClearColor(
+            MTL::ClearColor(r.clearColor.r, r.clearColor.g, r.clearColor.b, r.clearColor.a)
         );
         renderPassColorRT->setLoadAction(MTL::LoadActionClear);
         renderPassColorRT->setStoreAction(MTL::StoreActionMultisampleResolve);
@@ -1034,7 +1037,7 @@ public:
         auto time = (float)SDL_GetTicks() / 1000.0f;
 
         // Build model matrix from transform
-        glm::mat4 modelMatrix = glm::mat4(1.0f);
+        auto modelMatrix = glm::mat4(1.0f);
         modelMatrix = glm::translate(modelMatrix, r.waterTransform.position);
         modelMatrix = glm::scale(modelMatrix, r.waterTransform.scale);
 
@@ -1149,7 +1152,8 @@ public:
         simParams.particleCount = r.particleCount;
 
         memcpy(r.particleSimParamsBuffers[r.currentFrameInFlight]->contents(), &simParams, sizeof(ParticleSimParams));
-        r.particleSimParamsBuffers[r.currentFrameInFlight]->didModifyRange(NS::Range::Make(0, sizeof(ParticleSimParams))
+        r.particleSimParamsBuffers[r.currentFrameInFlight]->didModifyRange(
+            NS::Range::Make(0, sizeof(ParticleSimParams))
         );
 
         // Update attractor buffer
@@ -1162,7 +1166,8 @@ public:
         attractor.strength = 50.0f;// Increased strength
 
         memcpy(r.particleAttractorBuffers[r.currentFrameInFlight]->contents(), &attractor, sizeof(ParticleAttractor));
-        r.particleAttractorBuffers[r.currentFrameInFlight]->didModifyRange(NS::Range::Make(0, sizeof(ParticleAttractor))
+        r.particleAttractorBuffers[r.currentFrameInFlight]->didModifyRange(
+            NS::Range::Make(0, sizeof(ParticleAttractor))
         );
 
         // Compute passes (single particle buffer - persistent state)
@@ -1640,8 +1645,7 @@ public:
         sunScreenPos.y = 1.0f - sunScreenPos.y;
 
         // Update flare data buffer
-        auto* flareData =
-            reinterpret_cast<SunFlareData*>(r.sunFlareDataBuffers[r.currentFrameInFlight]->contents());
+        auto* flareData = reinterpret_cast<SunFlareData*>(r.sunFlareDataBuffers[r.currentFrameInFlight]->contents());
         flareData->sunScreenPos = sunScreenPos;
         flareData->screenSize = screenSize;
         flareData->screenCenter = glm::vec2(0.5f, 0.5f);
@@ -2331,11 +2335,8 @@ public:
             uniforms.projectionMatrix = r.currentCamera->getProjMatrix() * r.currentCamera->getViewMatrix();
         } else {
             // Fallback: screen space ortho using window size (origin top-left, pixel coordinates)
-            uniforms.projectionMatrix = glm::ortho(
-                0.0f, static_cast<float>(windowWidth),
-                static_cast<float>(windowHeight), 0.0f,
-                -1.0f, 1.0f
-            );
+            uniforms.projectionMatrix =
+                glm::ortho(0.0f, static_cast<float>(windowWidth), static_cast<float>(windowHeight), 0.0f, -1.0f, 1.0f);
         }
         memcpy(uniformBuffer->contents(), &uniforms, sizeof(Batch2DUniforms));
 
@@ -2406,7 +2407,7 @@ public:
     }
 };
 
-std::unique_ptr<Renderer> createRendererMetal() {
+auto createRendererMetal() -> std::unique_ptr<Renderer> {
     return std::make_unique<Renderer_Metal>();
 }
 
@@ -2964,7 +2965,7 @@ auto Renderer_Metal::createResources() -> void {
 
     // Create atmosphere data buffer with default Earth-like settings
     atmosphereDataBuffer = NS::TransferPtr(device->newBuffer(sizeof(AtmosphereData), MTL::ResourceStorageModeManaged));
-    AtmosphereData* atmosphereData = reinterpret_cast<AtmosphereData*>(atmosphereDataBuffer->contents());
+    auto* atmosphereData = reinterpret_cast<AtmosphereData*>(atmosphereDataBuffer->contents());
     atmosphereData->sunDirection = glm::normalize(glm::vec3(0.5f, 0.5f, 0.5f));
     atmosphereData->sunIntensity = 12.0f;
     atmosphereData->sunColor = glm::vec3(1.0f, 1.0f, 1.0f);
@@ -3049,7 +3050,8 @@ auto Renderer_Metal::createResources() -> void {
     }
 
     // Create textures
-    defaultAlbedoTexture = createTexture(AssetManager::loadImage("assets/textures/default_albedo.png")
+    defaultAlbedoTexture = createTexture(
+        AssetManager::loadImage("assets/textures/default_albedo.png")
     );// createTexture(AssetManager::loadImage("assets/textures/viking_room.png"));
     defaultNormalTexture = createTexture(AssetManager::loadImage("assets/textures/default_norm.png"));
     defaultORMTexture = createTexture(AssetManager::loadImage("assets/textures/default_orm.png"));
@@ -3187,9 +3189,12 @@ auto Renderer_Metal::createResources() -> void {
         NS::Error* error = nullptr;
         MTL::Library* library = device->newLibrary(code, nullptr, &error);
         if (!library) {
-            throw std::runtime_error(fmt::format(
-                "Could not compile bloom brightness shader! Error: {}\n", error->localizedDescription()->utf8String()
-            ));
+            throw std::runtime_error(
+                fmt::format(
+                    "Could not compile bloom brightness shader! Error: {}\n",
+                    error->localizedDescription()->utf8String()
+                )
+            );
         }
 
         auto vertexMain =
@@ -3204,9 +3209,12 @@ auto Renderer_Metal::createResources() -> void {
 
         bloomBrightnessPipeline = NS::TransferPtr(device->newRenderPipelineState(pipelineDesc, &error));
         if (!bloomBrightnessPipeline) {
-            throw std::runtime_error(fmt::format(
-                "Could not create bloom brightness pipeline! Error: {}\n", error->localizedDescription()->utf8String()
-            ));
+            throw std::runtime_error(
+                fmt::format(
+                    "Could not create bloom brightness pipeline! Error: {}\n",
+                    error->localizedDescription()->utf8String()
+                )
+            );
         }
 
         code->release();
@@ -3223,9 +3231,12 @@ auto Renderer_Metal::createResources() -> void {
         NS::Error* error = nullptr;
         MTL::Library* library = device->newLibrary(code, nullptr, &error);
         if (!library) {
-            throw std::runtime_error(fmt::format(
-                "Could not compile bloom downsample shader! Error: {}\n", error->localizedDescription()->utf8String()
-            ));
+            throw std::runtime_error(
+                fmt::format(
+                    "Could not compile bloom downsample shader! Error: {}\n",
+                    error->localizedDescription()->utf8String()
+                )
+            );
         }
 
         auto vertexMain =
@@ -3240,9 +3251,12 @@ auto Renderer_Metal::createResources() -> void {
 
         bloomDownsamplePipeline = NS::TransferPtr(device->newRenderPipelineState(pipelineDesc, &error));
         if (!bloomDownsamplePipeline) {
-            throw std::runtime_error(fmt::format(
-                "Could not create bloom downsample pipeline! Error: {}\n", error->localizedDescription()->utf8String()
-            ));
+            throw std::runtime_error(
+                fmt::format(
+                    "Could not create bloom downsample pipeline! Error: {}\n",
+                    error->localizedDescription()->utf8String()
+                )
+            );
         }
 
         code->release();
@@ -3259,9 +3273,11 @@ auto Renderer_Metal::createResources() -> void {
         NS::Error* error = nullptr;
         MTL::Library* library = device->newLibrary(code, nullptr, &error);
         if (!library) {
-            throw std::runtime_error(fmt::format(
-                "Could not compile bloom upsample shader! Error: {}\n", error->localizedDescription()->utf8String()
-            ));
+            throw std::runtime_error(
+                fmt::format(
+                    "Could not compile bloom upsample shader! Error: {}\n", error->localizedDescription()->utf8String()
+                )
+            );
         }
 
         auto vertexMain =
@@ -3276,9 +3292,11 @@ auto Renderer_Metal::createResources() -> void {
 
         bloomUpsamplePipeline = NS::TransferPtr(device->newRenderPipelineState(pipelineDesc, &error));
         if (!bloomUpsamplePipeline) {
-            throw std::runtime_error(fmt::format(
-                "Could not create bloom upsample pipeline! Error: {}\n", error->localizedDescription()->utf8String()
-            ));
+            throw std::runtime_error(
+                fmt::format(
+                    "Could not create bloom upsample pipeline! Error: {}\n", error->localizedDescription()->utf8String()
+                )
+            );
         }
 
         code->release();
@@ -3295,9 +3313,11 @@ auto Renderer_Metal::createResources() -> void {
         NS::Error* error = nullptr;
         MTL::Library* library = device->newLibrary(code, nullptr, &error);
         if (!library) {
-            throw std::runtime_error(fmt::format(
-                "Could not compile bloom composite shader! Error: {}\n", error->localizedDescription()->utf8String()
-            ));
+            throw std::runtime_error(
+                fmt::format(
+                    "Could not compile bloom composite shader! Error: {}\n", error->localizedDescription()->utf8String()
+                )
+            );
         }
 
         auto vertexMain =
@@ -3312,9 +3332,12 @@ auto Renderer_Metal::createResources() -> void {
 
         bloomCompositePipeline = NS::TransferPtr(device->newRenderPipelineState(pipelineDesc, &error));
         if (!bloomCompositePipeline) {
-            throw std::runtime_error(fmt::format(
-                "Could not create bloom composite pipeline! Error: {}\n", error->localizedDescription()->utf8String()
-            ));
+            throw std::runtime_error(
+                fmt::format(
+                    "Could not create bloom composite pipeline! Error: {}\n",
+                    error->localizedDescription()->utf8String()
+                )
+            );
         }
 
         code->release();
@@ -3432,9 +3455,9 @@ auto Renderer_Metal::createResources() -> void {
             }
 
             // Temporal resolve pipeline
-            auto fragmentTemporal =
-                library->newFunction(NS::String::string("cloudTemporalResolve", NS::StringEncoding::UTF8StringEncoding)
-                );
+            auto fragmentTemporal = library->newFunction(
+                NS::String::string("cloudTemporalResolve", NS::StringEncoding::UTF8StringEncoding)
+            );
 
             if (vertexMain && fragmentTemporal) {
                 auto pipelineDesc = MTL::RenderPipelineDescriptor::alloc()->init();
@@ -3454,9 +3477,9 @@ auto Renderer_Metal::createResources() -> void {
             }
 
             // Upscale and composite pipeline
-            auto fragmentComposite =
-                library->newFunction(NS::String::string("cloudUpscaleComposite", NS::StringEncoding::UTF8StringEncoding)
-                );
+            auto fragmentComposite = library->newFunction(
+                NS::String::string("cloudUpscaleComposite", NS::StringEncoding::UTF8StringEncoding)
+            );
 
             if (vertexMain && fragmentComposite) {
                 auto pipelineDesc = MTL::RenderPipelineDescriptor::alloc()->init();
@@ -3604,9 +3627,11 @@ auto Renderer_Metal::createResources() -> void {
         NS::Error* error = nullptr;
         MTL::Library* library = device->newLibrary(code, nullptr, &error);
         if (!library) {
-            throw std::runtime_error(fmt::format(
-                "Could not compile DOF CoC shader! Error: {}\n", error->localizedDescription()->utf8String()
-            ));
+            throw std::runtime_error(
+                fmt::format(
+                    "Could not compile DOF CoC shader! Error: {}\n", error->localizedDescription()->utf8String()
+                )
+            );
         }
 
         auto vertexMain =
@@ -3621,9 +3646,11 @@ auto Renderer_Metal::createResources() -> void {
 
         dofCoCPipeline = NS::TransferPtr(device->newRenderPipelineState(pipelineDesc, &error));
         if (!dofCoCPipeline) {
-            throw std::runtime_error(fmt::format(
-                "Could not create DOF CoC pipeline! Error: {}\n", error->localizedDescription()->utf8String()
-            ));
+            throw std::runtime_error(
+                fmt::format(
+                    "Could not create DOF CoC pipeline! Error: {}\n", error->localizedDescription()->utf8String()
+                )
+            );
         }
 
         code->release();
@@ -3640,9 +3667,11 @@ auto Renderer_Metal::createResources() -> void {
         NS::Error* error = nullptr;
         MTL::Library* library = device->newLibrary(code, nullptr, &error);
         if (!library) {
-            throw std::runtime_error(fmt::format(
-                "Could not compile DOF Blur shader! Error: {}\n", error->localizedDescription()->utf8String()
-            ));
+            throw std::runtime_error(
+                fmt::format(
+                    "Could not compile DOF Blur shader! Error: {}\n", error->localizedDescription()->utf8String()
+                )
+            );
         }
 
         auto vertexMain =
@@ -3657,9 +3686,11 @@ auto Renderer_Metal::createResources() -> void {
 
         dofBlurPipeline = NS::TransferPtr(device->newRenderPipelineState(pipelineDesc, &error));
         if (!dofBlurPipeline) {
-            throw std::runtime_error(fmt::format(
-                "Could not create DOF Blur pipeline! Error: {}\n", error->localizedDescription()->utf8String()
-            ));
+            throw std::runtime_error(
+                fmt::format(
+                    "Could not create DOF Blur pipeline! Error: {}\n", error->localizedDescription()->utf8String()
+                )
+            );
         }
 
         code->release();
@@ -3676,9 +3707,11 @@ auto Renderer_Metal::createResources() -> void {
         NS::Error* error = nullptr;
         MTL::Library* library = device->newLibrary(code, nullptr, &error);
         if (!library) {
-            throw std::runtime_error(fmt::format(
-                "Could not compile DOF Composite shader! Error: {}\n", error->localizedDescription()->utf8String()
-            ));
+            throw std::runtime_error(
+                fmt::format(
+                    "Could not compile DOF Composite shader! Error: {}\n", error->localizedDescription()->utf8String()
+                )
+            );
         }
 
         auto vertexMain =
@@ -3693,9 +3726,11 @@ auto Renderer_Metal::createResources() -> void {
 
         dofCompositePipeline = NS::TransferPtr(device->newRenderPipelineState(pipelineDesc, &error));
         if (!dofCompositePipeline) {
-            throw std::runtime_error(fmt::format(
-                "Could not create DOF Composite pipeline! Error: {}\n", error->localizedDescription()->utf8String()
-            ));
+            throw std::runtime_error(
+                fmt::format(
+                    "Could not create DOF Composite pipeline! Error: {}\n", error->localizedDescription()->utf8String()
+                )
+            );
         }
 
         code->release();
@@ -4095,7 +4130,7 @@ auto Renderer_Metal::createResources() -> void {
     {
         std::srand(static_cast<unsigned>(std::time(nullptr)));
 
-        GPUParticle* particles = reinterpret_cast<GPUParticle*>(particleBuffer->contents());
+        auto* particles = reinterpret_cast<GPUParticle*>(particleBuffer->contents());
         for (size_t i = 0; i < MAX_PARTICLES; i++) {
             // Minimum radius of 0.5 to avoid particles at origin
             float r = 0.5f + std::sqrt(static_cast<float>(std::rand()) / RAND_MAX) * 4.5f;
@@ -4177,7 +4212,7 @@ auto Renderer_Metal::stage(std::shared_ptr<Scene> scene) -> void {
 
     auto cmd = queue->commandBuffer();
 
-    const std::function<void(const std::shared_ptr<Node>&)> stageNode = [&](const std::shared_ptr<Node>& node) {
+    const std::function<void(const std::shared_ptr<Node>&)> stageNode = [&](const std::shared_ptr<Node>& node) -> void {
         if (node->meshGroup) {
             for (auto& mesh : node->meshGroup->meshes) {
                 // mesh->vbos.push_back(createVertexBuffer(mesh->vertices));
@@ -4244,7 +4279,7 @@ auto Renderer_Metal::draw(std::shared_ptr<Scene> scene, Camera& camera) -> void 
     // ==========================================================================
     auto time = (float)SDL_GetTicks() / 1000.0f;
 
-    FrameData* frameData = reinterpret_cast<FrameData*>(frameDataBuffers[currentFrameInFlight]->contents());
+    auto* frameData = reinterpret_cast<FrameData*>(frameDataBuffers[currentFrameInFlight]->contents());
     frameData->frameNumber = frameNumber;
     frameData->time = time;
     frameData->deltaTime = 0.016f;// TODO:
@@ -4259,7 +4294,7 @@ auto Renderer_Metal::draw(std::shared_ptr<Scene> scene, Camera& camera) -> void 
     glm::mat4 view = camera.getViewMatrix();
     glm::mat4 invProj = glm::inverse(proj);
     glm::mat4 invView = glm::inverse(view);
-    CameraData* cameraData = reinterpret_cast<CameraData*>(cameraDataBuffers[currentFrameInFlight]->contents());
+    auto* cameraData = reinterpret_cast<CameraData*>(cameraDataBuffers[currentFrameInFlight]->contents());
     cameraData->proj = proj;
     cameraData->view = view;
     cameraData->invProj = invProj;
@@ -4271,7 +4306,7 @@ auto Renderer_Metal::draw(std::shared_ptr<Scene> scene, Camera& camera) -> void 
         NS::Range::Make(0, cameraDataBuffers[currentFrameInFlight]->length())
     );
 
-    DirectionalLight* dirLights = reinterpret_cast<DirectionalLight*>(directionalLightBuffer->contents());
+    auto* dirLights = reinterpret_cast<DirectionalLight*>(directionalLightBuffer->contents());
     for (size_t i = 0; i < scene->directionalLights.size(); ++i) {
         dirLights[i].direction = scene->directionalLights[i].direction;
         dirLights[i].color = scene->directionalLights[i].color;
@@ -4279,7 +4314,7 @@ auto Renderer_Metal::draw(std::shared_ptr<Scene> scene, Camera& camera) -> void 
     }
     directionalLightBuffer->didModifyRange(NS::Range::Make(0, directionalLightBuffer->length()));
 
-    AtmosphereData* atmosphereData = reinterpret_cast<AtmosphereData*>(atmosphereDataBuffer->contents());
+    auto* atmosphereData = reinterpret_cast<AtmosphereData*>(atmosphereDataBuffer->contents());
     if (!scene->directionalLights.empty()) {
         const auto& sunLight = scene->directionalLights[0];
         atmosphereData->sunDirection = -glm::normalize(sunLight.direction);
@@ -4287,7 +4322,7 @@ auto Renderer_Metal::draw(std::shared_ptr<Scene> scene, Camera& camera) -> void 
         atmosphereData->sunIntensity = sunLight.intensity;
     }
 
-    PointLight* pointLights = reinterpret_cast<PointLight*>(pointLightBuffer->contents());
+    auto* pointLights = reinterpret_cast<PointLight*>(pointLightBuffer->contents());
     for (size_t i = 0; i < scene->pointLights.size(); ++i) {
         pointLights[i].position = scene->pointLights[i].position;
         pointLights[i].color = scene->pointLights[i].color;
@@ -4296,7 +4331,7 @@ auto Renderer_Metal::draw(std::shared_ptr<Scene> scene, Camera& camera) -> void 
     }
     pointLightBuffer->didModifyRange(NS::Range::Make(0, pointLightBuffer->length()));
 
-    MaterialData* materialData = reinterpret_cast<MaterialData*>(materialDataBuffer->contents());
+    auto* materialData = reinterpret_cast<MaterialData*>(materialDataBuffer->contents());
     for (size_t i = 0; i < scene->materials.size(); ++i) {
         const auto& mat = scene->materials[i];
         materialData[i] = MaterialData{ .baseColorFactor = mat->baseColorFactor,
@@ -4323,22 +4358,25 @@ auto Renderer_Metal::draw(std::shared_ptr<Scene> scene, Camera& camera) -> void 
     instances.clear();
     accelInstances.clear();
     instanceBatches.clear();
-    const std::function<void(const std::shared_ptr<Node>&)> updateNode = [&](const std::shared_ptr<Node>& node) {
+    const std::function<void(const std::shared_ptr<Node>&)> updateNode =
+        [&](const std::shared_ptr<Node>& node) -> void {
         if (node->meshGroup) {
             const glm::mat4& transform = node->worldTransform;
             for (const auto& mesh : node->meshGroup->meshes) {
-                instances.push_back({
-                    .model = transform,
-                    .color = glm::vec4(1.0f, 0.0f, 0.0f, 1.0f),
-                    .vertexOffset = mesh->vertexOffset,
-                    .indexOffset = mesh->indexOffset,
-                    .vertexCount = mesh->vertexCount,
-                    .indexCount = mesh->indexCount,
-                    .materialID = mesh->materialID,
-                    .primitiveMode = mesh->primitiveMode,
-                    .AABBMin = mesh->worldAABBMin,
-                    .AABBMax = mesh->worldAABBMax,
-                });
+                instances.push_back(
+                    {
+                        .model = transform,
+                        .color = glm::vec4(1.0f, 0.0f, 0.0f, 1.0f),
+                        .vertexOffset = mesh->vertexOffset,
+                        .indexOffset = mesh->indexOffset,
+                        .vertexCount = mesh->vertexCount,
+                        .indexCount = mesh->indexCount,
+                        .materialID = mesh->materialID,
+                        .primitiveMode = mesh->primitiveMode,
+                        .AABBMin = mesh->worldAABBMin,
+                        .AABBMax = mesh->worldAABBMax,
+                    }
+                );
                 MTL::AccelerationStructureInstanceDescriptor accelInstanceDesc;
                 for (int i = 0; i < 4; ++i) {
                     for (int j = 0; j < 3; ++j) {
@@ -4541,7 +4579,7 @@ auto Renderer_Metal::draw(std::shared_ptr<Scene> scene, Camera& camera) -> void 
 
         if (ImGui::TreeNode("Atmosphere")) {
             ImGui::Separator();
-            AtmosphereData* atmos = reinterpret_cast<AtmosphereData*>(atmosphereDataBuffer->contents());
+            auto* atmos = reinterpret_cast<AtmosphereData*>(atmosphereDataBuffer->contents());
             bool atmosChanged = false;
 
             if (!scene->directionalLights.empty()) {
@@ -4643,7 +4681,8 @@ auto Renderer_Metal::draw(std::shared_ptr<Scene> scene, Camera& camera) -> void 
             ImGui::Separator();
             ImGui::Text("Total vertices: %zu", scene->vertices.size());
             ImGui::Text("Total indices: %zu", scene->indices.size());
-            const std::function<void(const std::shared_ptr<Node>&)> showNode = [&](const std::shared_ptr<Node>& node) {
+            const std::function<void(const std::shared_ptr<Node>&)> showNode =
+                [&](const std::shared_ptr<Node>& node) -> void {
                 ImGui::PushID(node.get());
                 ImGui::Text("Node #%s", node->name.c_str());
                 glm::vec3 pos = node->getLocalPosition();
@@ -4763,7 +4802,7 @@ auto Renderer_Metal::draw(std::shared_ptr<Scene> scene, Camera& camera) -> void 
             if (lightScatteringEnabled) {
                 ImGui::Separator();
 
-                AtmosphereData* debugAtmos = reinterpret_cast<AtmosphereData*>(atmosphereDataBuffer->contents());
+                auto* debugAtmos = reinterpret_cast<AtmosphereData*>(atmosphereDataBuffer->contents());
                 glm::vec3 debugSunDir = glm::normalize(debugAtmos->sunDirection);
                 glm::vec3 debugCamPos = camera.getEye();
                 glm::vec3 debugSunWorldPos = debugCamPos + debugSunDir * 10000.0f;
@@ -4958,8 +4997,8 @@ auto Renderer_Metal::draw(std::shared_ptr<Scene> scene, Camera& camera) -> void 
 }
 
 
-auto
-    Renderer_Metal::createPipeline(const std::string& filename, bool isHDR, bool isColorOnly, Uint32 sampleCount) -> NS::SharedPtr<MTL::RenderPipelineState> {
+auto Renderer_Metal::createPipeline(const std::string& filename, bool isHDR, bool isColorOnly, Uint32 sampleCount)
+    -> NS::SharedPtr<MTL::RenderPipelineState> {
     auto shaderSrc = readFile(filename);
 
     auto code = NS::String::string(shaderSrc.data(), NS::StringEncoding::UTF8StringEncoding);
@@ -5092,14 +5131,16 @@ auto Renderer_Metal::createTexture(const std::shared_ptr<Image>& img) -> Texture
             pixelFormat = MTL::PixelFormat::PixelFormatRGBA8Unorm;
             break;
         default:
-            throw std::runtime_error(fmt::format(
-                "Unknown texture format at {} (channelCount={}, width={}, height={}, byteArraySize={})\n",
-                img->uri,
-                img->channelCount,
-                img->width,
-                img->height,
-                img->byteArray.size()
-            ));
+            throw std::runtime_error(
+                fmt::format(
+                    "Unknown texture format at {} (channelCount={}, width={}, height={}, byteArraySize={})\n",
+                    img->uri,
+                    img->channelCount,
+                    img->width,
+                    img->height,
+                    img->byteArray.size()
+                )
+            );
             break;
         }
         int numLevels = calculateMipmapLevelCount(img->width, img->height);
@@ -5188,7 +5229,7 @@ auto Renderer_Metal::loadFont(const std::string& path, float baseSize) -> FontHa
 
     // Store texture and create handle
     textures[nextTextureID] = texture;
-    TextureHandle texHandle{nextTextureID++};
+    TextureHandle texHandle{ nextTextureID++ };
 
     // Associate texture handle with font
     m_fontManager.setFontTextureHandle(fontHandle, texHandle);
@@ -5209,11 +5250,7 @@ void Renderer_Metal::unloadFont(FontHandle handle) {
 }
 
 void Renderer_Metal::drawText2D(
-    FontHandle fontHandle,
-    const std::string& text,
-    const glm::vec2& position,
-    float scale,
-    const glm::vec4& color
+    FontHandle fontHandle, const std::string& text, const glm::vec2& position, float scale, const glm::vec4& color
 ) {
     Font* font = m_fontManager.getFont(fontHandle);
     if (!font || font->textureHandle.rid == UINT32_MAX) return;
@@ -5237,10 +5274,10 @@ void Renderer_Metal::drawText2D(
 
             // Create UV coordinates for this glyph
             glm::vec2 uvs[4] = {
-                {glyph->u0, glyph->v0}, // top-left
-                {glyph->u1, glyph->v0}, // top-right
-                {glyph->u1, glyph->v1}, // bottom-right
-                {glyph->u0, glyph->v1}  // bottom-left
+                { glyph->u0, glyph->v0 },// top-left
+                { glyph->u1, glyph->v0 },// top-right
+                { glyph->u1, glyph->v1 },// bottom-right
+                { glyph->u0, glyph->v1 }// bottom-left
             };
 
             glm::mat4 transform = glm::translate(glm::mat4(1.0f), glm::vec3(finalX, finalY, 0.0f));
@@ -5253,11 +5290,7 @@ void Renderer_Metal::drawText2D(
 }
 
 void Renderer_Metal::drawText3D(
-    FontHandle fontHandle,
-    const std::string& text,
-    const glm::vec3& worldPosition,
-    float scale,
-    const glm::vec4& color
+    FontHandle fontHandle, const std::string& text, const glm::vec3& worldPosition, float scale, const glm::vec4& color
 ) {
     Font* font = m_fontManager.getFont(fontHandle);
     if (!font || font->textureHandle.rid == UINT32_MAX) return;
@@ -5282,10 +5315,10 @@ void Renderer_Metal::drawText3D(
 
             // Create UV coordinates for this glyph
             glm::vec2 uvs[4] = {
-                {glyph->u0, glyph->v0}, // top-left
-                {glyph->u1, glyph->v0}, // top-right
-                {glyph->u1, glyph->v1}, // bottom-right
-                {glyph->u0, glyph->v1}  // bottom-left
+                { glyph->u0, glyph->v0 },// top-left
+                { glyph->u1, glyph->v0 },// top-right
+                { glyph->u1, glyph->v1 },// bottom-right
+                { glyph->u0, glyph->v1 }// bottom-left
             };
 
             // Create transform in world space
@@ -5396,9 +5429,9 @@ void Renderer_Metal::flush3D() {
 }
 
 // Helper to find or add a texture slot
-static float findOrAddTextureSlot(
+static auto findOrAddTextureSlot(
     std::array<TextureHandle, 16>& slots, Uint32& slotIndex, TextureHandle texture, TextureHandle whiteTexture
-) {
+) -> float {
     if (texture.rid == UINT32_MAX || texture.rid == whiteTexture.rid) {
         return 0.0f;
     }
@@ -5413,7 +5446,7 @@ static float findOrAddTextureSlot(
         return 0.0f;// Fallback to white texture if slots full
     }
 
-    float texIndex = static_cast<float>(slotIndex);
+    auto texIndex = static_cast<float>(slotIndex);
     slots[slotIndex] = texture;
     slotIndex++;
     return texIndex;
@@ -5455,7 +5488,7 @@ void Renderer_Metal::drawQuad2D(
 
     float textureIndex =
         findOrAddTextureSlot(batch2DTextureSlots, batch2DTextureSlotIndex, texture, batch2DWhiteTextureHandle);
-    Uint32 vertexOffset = static_cast<Uint32>(batch2DVertices.size());
+    auto vertexOffset = static_cast<Uint32>(batch2DVertices.size());
 
     // Add 4 vertices
     for (int i = 0; i < 4; i++) {
@@ -5517,7 +5550,7 @@ void Renderer_Metal::drawLine2D(const glm::vec2& p0, const glm::vec2& p1, const 
     if (batch2DIndices.size() >= BatchMaxIndices) return;
 
     glm::vec2 defaultUV(0.5f, 0.5f);
-    Uint32 vertexOffset = static_cast<Uint32>(batch2DVertices.size());
+    auto vertexOffset = static_cast<Uint32>(batch2DVertices.size());
 
     Batch2DVertex vertex;
     vertex.color = color;
@@ -5576,7 +5609,7 @@ void Renderer_Metal::drawQuad3D(
 
     float textureIndex =
         findOrAddTextureSlot(batch3DTextureSlots, batch3DTextureSlotIndex, texture, batch2DWhiteTextureHandle);
-    Uint32 vertexOffset = static_cast<Uint32>(batch3DVertices.size());
+    auto vertexOffset = static_cast<Uint32>(batch3DVertices.size());
 
     for (int i = 0; i < 4; i++) {
         Batch2DVertex vertex;
@@ -5619,7 +5652,7 @@ void Renderer_Metal::drawLine3D(const glm::vec3& p0, const glm::vec3& p1, const 
     if (batch3DIndices.size() >= BatchMaxIndices) return;
 
     glm::vec2 defaultUV(0.5f, 0.5f);
-    Uint32 vertexOffset = static_cast<Uint32>(batch3DVertices.size());
+    auto vertexOffset = static_cast<Uint32>(batch3DVertices.size());
 
     Batch2DVertex vertex;
     vertex.color = color;
@@ -5704,7 +5737,7 @@ void Renderer_Metal::drawTriangleFilled2D(
     if (batch2DIndices.size() >= BatchMaxIndices) return;
 
     glm::vec2 defaultUV(0.5f, 0.5f);
-    Uint32 vertexOffset = static_cast<Uint32>(batch2DVertices.size());
+    auto vertexOffset = static_cast<Uint32>(batch2DVertices.size());
 
     Batch2DVertex vertex;
     vertex.color = color;

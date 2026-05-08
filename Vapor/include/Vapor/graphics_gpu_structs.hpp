@@ -51,7 +51,7 @@ struct alignas(16) PointLight {
     glm::vec3 color;
     float _pad2;
     float intensity = 1.0f;
-    float radius    = 0.5f;
+    float radius = 0.5f;
 };
 
 struct alignas(16) FrameData {

@@ -7,14 +7,19 @@
 // The tag parameter makes handles incompatible at compile-time — passing a
 // BufferHandle where a TextureHandle is expected is now a type error.
 
-template<typename Tag>
-struct GPUHandle {
+template<typename Tag> struct GPUHandle {
     Uint32 rid = UINT32_MAX;
 
-    bool valid() const { return rid != UINT32_MAX; }
+    bool valid() const {
+        return rid != UINT32_MAX;
+    }
 
-    bool operator==(const GPUHandle& other) const { return rid == other.rid; }
-    bool operator!=(const GPUHandle& other) const { return rid != other.rid; }
+    bool operator==(const GPUHandle& other) const {
+        return rid == other.rid;
+    }
+    bool operator!=(const GPUHandle& other) const {
+        return rid != other.rid;
+    }
 };
 
 struct PipelineHandleTag {};
@@ -22,7 +27,7 @@ struct BufferHandleTag {};
 struct TextureHandleTag {};
 struct RenderTargetHandleTag {};
 
-using PipelineHandle     = GPUHandle<PipelineHandleTag>;
-using BufferHandle       = GPUHandle<BufferHandleTag>;
-using TextureHandle      = GPUHandle<TextureHandleTag>;
+using PipelineHandle = GPUHandle<PipelineHandleTag>;
+using BufferHandle = GPUHandle<BufferHandleTag>;
+using TextureHandle = GPUHandle<TextureHandleTag>;
 using RenderTargetHandle = GPUHandle<RenderTargetHandleTag>;

@@ -116,9 +116,8 @@ auto FontManager::getAtlasData(FontHandle handle) const -> const FontManager::At
     return (it != m_atlasData.end()) ? &it->second : nullptr;
 }
 
-auto FontManager::bakeFontAtlas(
-    Font& font, const unsigned char* fontData, float fontSize, int firstChar, int numChars
-) -> bool {
+auto FontManager::bakeFontAtlas(Font& font, const unsigned char* fontData, float fontSize, int firstChar, int numChars)
+    -> bool {
     // Initialize stb_truetype
     stbtt_fontinfo fontInfo;
     if (!stbtt_InitFont(&fontInfo, fontData, 0)) {

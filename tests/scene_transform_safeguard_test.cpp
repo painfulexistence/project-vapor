@@ -7,8 +7,9 @@
 // Physics, rendering, fluid volumes are excluded.
 
 #define GLM_ENABLE_EXPERIMENTAL
-#include <catch2/catch_test_macros.hpp>
+#include <array>
 #include <catch2/catch_approx.hpp>
+#include <catch2/catch_test_macros.hpp>
 #include <glm/glm.hpp>
 #include <glm/gtc/matrix_transform.hpp>
 #include <glm/gtc/quaternion.hpp>
@@ -16,7 +17,6 @@
 #include <memory>
 #include <string>
 #include <vector>
-#include <array>
 
 using Catch::Approx;
 
@@ -27,13 +27,15 @@ using Catch::Approx;
 struct MinimalNode {
     std::string name;
     std::vector<std::shared_ptr<MinimalNode>> children;
-    glm::mat4 localTransform  = glm::identity<glm::mat4>();
-    glm::mat4 worldTransform  = glm::identity<glm::mat4>();
-    bool isTransformDirty     = true;
+    glm::mat4 localTransform = glm::identity<glm::mat4>();
+    glm::mat4 worldTransform = glm::identity<glm::mat4>();
+    bool isTransformDirty = true;
 
-    glm::vec3 getLocalPosition() const { return glm::vec3(localTransform[3]); }
+    auto getLocalPosition() const -> glm::vec3 {
+        return glm::vec3(localTransform[3]);
+    }
 
-    glm::quat getLocalRotation() const {
+    auto getLocalRotation() const -> glm::quat {
         glm::mat3 r(
             glm::normalize(glm::vec3(localTransform[0])),
             glm::normalize(glm::vec3(localTransform[1])),
@@ -42,7 +44,7 @@ struct MinimalNode {
         return glm::quat_cast(r);
     }
 
-    glm::vec3 getLocalScale() const {
+    auto getLocalScale() const -> glm::vec3 {
         return glm::vec3(
             glm::length(glm::vec3(localTransform[0])),
             glm::length(glm::vec3(localTransform[1])),
@@ -50,7 +52,9 @@ struct MinimalNode {
         );
     }
 
-    glm::vec3 getWorldPosition() const { return glm::vec3(worldTransform[3]); }
+    auto getWorldPosition() const -> glm::vec3 {
+        return glm::vec3(worldTransform[3]);
+    }
 
     void setLocalPosition(const glm::vec3& pos) {
         glm::vec3 s = getLocalScale();
@@ -74,9 +78,11 @@ struct MinimalNode {
         isTransformDirty = true;
     }
 
-    void translate(const glm::vec3& offset) { setLocalPosition(getLocalPosition() + offset); }
+    void translate(const glm::vec3& offset) {
+        setLocalPosition(getLocalPosition() + offset);
+    }
 
-    std::shared_ptr<MinimalNode> createChild(const std::string& n, const glm::mat4& t) {
+    auto createChild(const std::string& n, const glm::mat4& t) -> std::shared_ptr<MinimalNode> {
         auto c = std::make_shared<MinimalNode>();
         c->name = n;
         c->localTransform = t;
@@ -87,7 +93,8 @@ struct MinimalNode {
 };
 
 // updateNode replicates Scene::updateNode logic exactly
-static void updateNode(const std::shared_ptr<MinimalNode>& node, const glm::mat4& parentWorld, bool parentDirty = false) {
+static void
+    updateNode(const std::shared_ptr<MinimalNode>& node, const glm::mat4& parentWorld, bool parentDirty = false) {
     bool dirty = node->isTransformDirty || parentDirty;
     if (dirty) {
         node->worldTransform = parentWorld * node->localTransform;
@@ -99,7 +106,7 @@ static void updateNode(const std::shared_ptr<MinimalNode>& node, const glm::mat4
 }
 
 static void updateScene(std::vector<std::shared_ptr<MinimalNode>>& roots) {
-    const glm::mat4 identity = glm::identity<glm::mat4>();
+    const auto identity = glm::identity<glm::mat4>();
     for (const auto& node : roots) {
         updateNode(node, identity);
     }
@@ -111,7 +118,7 @@ static void updateScene(std::vector<std::shared_ptr<MinimalNode>>& roots) {
 
 TEST_CASE("Node getLocalPosition 從 localTransform 正確反解位置", "[scene][transform]") {
     auto node = std::make_shared<MinimalNode>();
-    node->setLocalPosition({3.0f, -1.5f, 7.0f});
+    node->setLocalPosition({ 3.0f, -1.5f, 7.0f });
     auto pos = node->getLocalPosition();
     REQUIRE(pos.x == Approx(3.0f));
     REQUIRE(pos.y == Approx(-1.5f));
@@ -120,7 +127,7 @@ TEST_CASE("Node getLocalPosition 從 localTransform 正確反解位置", "[scene
 
 TEST_CASE("Node getLocalScale 從 localTransform 正確反解縮放", "[scene][transform]") {
     auto node = std::make_shared<MinimalNode>();
-    node->setLocalScale({2.0f, 3.0f, 0.5f});
+    node->setLocalScale({ 2.0f, 3.0f, 0.5f });
     auto s = node->getLocalScale();
     REQUIRE(s.x == Approx(2.0f).epsilon(0.001f));
     REQUIRE(s.y == Approx(3.0f).epsilon(0.001f));
@@ -130,16 +137,16 @@ TEST_CASE("Node getLocalScale 從 localTransform 正確反解縮放", "[scene][t
 TEST_CASE("Node setLocalScale 零軸分量被忽略", "[scene][transform]") {
     // 鎖定行為：零 scale 呼叫被 early-return，localTransform 不變
     auto node = std::make_shared<MinimalNode>();
-    node->setLocalPosition({1.0f, 2.0f, 3.0f});
+    node->setLocalPosition({ 1.0f, 2.0f, 3.0f });
     glm::mat4 before = node->localTransform;
-    node->setLocalScale({0.0f, 1.0f, 1.0f});  // x=0，應被忽略
+    node->setLocalScale({ 0.0f, 1.0f, 1.0f });// x=0，應被忽略
     REQUIRE(node->localTransform == before);
 }
 
 TEST_CASE("Node setLocalPosition 保持現有 rotation 和 scale", "[scene][transform]") {
     auto node = std::make_shared<MinimalNode>();
-    node->setLocalScale({2.0f, 2.0f, 2.0f});
-    node->setLocalPosition({5.0f, 0.0f, 0.0f});
+    node->setLocalScale({ 2.0f, 2.0f, 2.0f });
+    node->setLocalPosition({ 5.0f, 0.0f, 0.0f });
 
     auto s = node->getLocalScale();
     REQUIRE(s.x == Approx(2.0f).epsilon(0.001f));
@@ -168,18 +175,18 @@ TEST_CASE("setLocalPosition 再次標記為 dirty", "[scene][dirty]") {
     updateNode(node, glm::identity<glm::mat4>());
     REQUIRE(node->isTransformDirty == false);
 
-    node->setLocalPosition({1.0f, 0.0f, 0.0f});
+    node->setLocalPosition({ 1.0f, 0.0f, 0.0f });
     REQUIRE(node->isTransformDirty == true);
 }
 
 TEST_CASE("updateNode 在 dirty=false 時不重新計算 worldTransform", "[scene][dirty]") {
     auto node = std::make_shared<MinimalNode>();
-    node->setLocalPosition({1.0f, 0.0f, 0.0f});
+    node->setLocalPosition({ 1.0f, 0.0f, 0.0f });
     updateNode(node, glm::identity<glm::mat4>());
     REQUIRE(node->isTransformDirty == false);
 
     // 手動污染 worldTransform 後不更新（dirty=false）
-    glm::mat4 fakeWorld = glm::translate(glm::mat4(1.f), {99.f, 99.f, 99.f});
+    glm::mat4 fakeWorld = glm::translate(glm::mat4(1.f), { 99.f, 99.f, 99.f });
     node->worldTransform = fakeWorld;
 
     updateNode(node, glm::identity<glm::mat4>());
@@ -195,23 +202,22 @@ TEST_CASE("updateNode 在 dirty=false 時不重新計算 worldTransform", "[scen
 
 TEST_CASE("根節點 worldTransform = parentWorld * localTransform", "[scene][world]") {
     auto node = std::make_shared<MinimalNode>();
-    node->setLocalPosition({5.0f, 0.0f, 0.0f});
+    node->setLocalPosition({ 5.0f, 0.0f, 0.0f });
 
-    glm::mat4 parent = glm::translate(glm::mat4(1.f), {10.0f, 0.0f, 0.0f});
+    glm::mat4 parent = glm::translate(glm::mat4(1.f), { 10.0f, 0.0f, 0.0f });
     updateNode(node, parent);
 
     auto worldPos = node->getWorldPosition();
-    REQUIRE(worldPos.x == Approx(15.0f));  // 10 + 5
+    REQUIRE(worldPos.x == Approx(15.0f));// 10 + 5
     REQUIRE(worldPos.y == Approx(0.0f));
     REQUIRE(worldPos.z == Approx(0.0f));
 }
 
 TEST_CASE("子節點 worldTransform 由父節點 worldTransform 決定", "[scene][world]") {
     auto parent = std::make_shared<MinimalNode>();
-    parent->setLocalPosition({10.0f, 0.0f, 0.0f});
+    parent->setLocalPosition({ 10.0f, 0.0f, 0.0f });
 
-    auto child = parent->createChild("child",
-        glm::translate(glm::mat4(1.f), {5.0f, 0.0f, 0.0f}));
+    auto child = parent->createChild("child", glm::translate(glm::mat4(1.f), { 5.0f, 0.0f, 0.0f }));
 
     updateNode(parent, glm::identity<glm::mat4>());
 
@@ -223,28 +229,28 @@ TEST_CASE("子節點 worldTransform 由父節點 worldTransform 決定", "[scene
 
 TEST_CASE("三層節點樹 world transform 正確傳遞", "[scene][world]") {
     auto root = std::make_shared<MinimalNode>();
-    root->setLocalPosition({1.0f, 0.0f, 0.0f});
+    root->setLocalPosition({ 1.0f, 0.0f, 0.0f });
 
-    auto mid = root->createChild("mid", glm::translate(glm::mat4(1.f), {2.0f, 0.0f, 0.0f}));
-    auto leaf = mid->createChild("leaf", glm::translate(glm::mat4(1.f), {3.0f, 0.0f, 0.0f}));
+    auto mid = root->createChild("mid", glm::translate(glm::mat4(1.f), { 2.0f, 0.0f, 0.0f }));
+    auto leaf = mid->createChild("leaf", glm::translate(glm::mat4(1.f), { 3.0f, 0.0f, 0.0f }));
 
     updateNode(root, glm::identity<glm::mat4>());
 
     REQUIRE(root->getWorldPosition().x == Approx(1.0f));
-    REQUIRE(mid->getWorldPosition().x  == Approx(3.0f));   // 1+2
-    REQUIRE(leaf->getWorldPosition().x == Approx(6.0f));   // 1+2+3
+    REQUIRE(mid->getWorldPosition().x == Approx(3.0f));// 1+2
+    REQUIRE(leaf->getWorldPosition().x == Approx(6.0f));// 1+2+3
 }
 
 TEST_CASE("父節點移動後子節點 dirty 傳播（需重新呼叫 update）", "[scene][world]") {
     auto parent = std::make_shared<MinimalNode>();
-    auto child  = parent->createChild("c", glm::identity<glm::mat4>());
+    auto child = parent->createChild("c", glm::identity<glm::mat4>());
 
     updateNode(parent, glm::identity<glm::mat4>());
     REQUIRE(parent->isTransformDirty == false);
     REQUIRE(child->isTransformDirty == false);
 
     // 移動父節點
-    parent->setLocalPosition({5.0f, 0.0f, 0.0f});
+    parent->setLocalPosition({ 5.0f, 0.0f, 0.0f });
     REQUIRE(parent->isTransformDirty == true);
     // 子節點的 dirty flag 本身不會被自動設定（由呼叫者負責觸發 update）
     // 鎖定此行為：子節點 dirty 是 false，但 worldTransform 過期了
@@ -258,8 +264,8 @@ TEST_CASE("父節點移動後子節點 dirty 傳播（需重新呼叫 update）"
 
 TEST_CASE("Node::translate 累加位移", "[scene][transform]") {
     auto node = std::make_shared<MinimalNode>();
-    node->setLocalPosition({1.0f, 0.0f, 0.0f});
-    node->translate({2.0f, 3.0f, 0.0f});
+    node->setLocalPosition({ 1.0f, 0.0f, 0.0f });
+    node->translate({ 2.0f, 3.0f, 0.0f });
 
     auto pos = node->getLocalPosition();
     REQUIRE(pos.x == Approx(3.0f));
@@ -272,8 +278,10 @@ TEST_CASE("Node::translate 累加位移", "[scene][transform]") {
 
 TEST_CASE("findNodeInHierarchy 找到目標節點", "[scene][find]") {
     // 複製 Scene::findNodeInHierarchy 邏輯用於測試
-    std::function<std::shared_ptr<MinimalNode>(const std::string&, const std::shared_ptr<MinimalNode>&)> findInHierarchy;
-    findInHierarchy = [&](const std::string& name, const std::shared_ptr<MinimalNode>& node) -> std::shared_ptr<MinimalNode> {
+    std::function<std::shared_ptr<MinimalNode>(const std::string&, const std::shared_ptr<MinimalNode>&)>
+        findInHierarchy;
+    findInHierarchy = [&](const std::string& name,
+                          const std::shared_ptr<MinimalNode>& node) -> std::shared_ptr<MinimalNode> {
         if (node->name == name) return node;
         for (const auto& child : node->children) {
             auto r = findInHierarchy(name, child);
@@ -293,8 +301,10 @@ TEST_CASE("findNodeInHierarchy 找到目標節點", "[scene][find]") {
 }
 
 TEST_CASE("findNodeInHierarchy 找不到時回傳 nullptr", "[scene][find]") {
-    std::function<std::shared_ptr<MinimalNode>(const std::string&, const std::shared_ptr<MinimalNode>&)> findInHierarchy;
-    findInHierarchy = [&](const std::string& name, const std::shared_ptr<MinimalNode>& node) -> std::shared_ptr<MinimalNode> {
+    std::function<std::shared_ptr<MinimalNode>(const std::string&, const std::shared_ptr<MinimalNode>&)>
+        findInHierarchy;
+    findInHierarchy = [&](const std::string& name,
+                          const std::shared_ptr<MinimalNode>& node) -> std::shared_ptr<MinimalNode> {
         if (node->name == name) return node;
         for (const auto& child : node->children) {
             auto r = findInHierarchy(name, child);

@@ -1,7 +1,7 @@
 #pragma once
 // Mesh and material CPU-side data structures.
-#include "graphics_handles.hpp"
 #include "graphics_gpu_structs.hpp"
+#include "graphics_handles.hpp"
 #include <SDL3/SDL_stdinc.h>
 #include <glm/vec2.hpp>
 #include <glm/vec3.hpp>
@@ -26,13 +26,13 @@ struct Material {
     AlphaMode alphaMode;
     float alphaCutoff;
     bool doubleSided;
-    glm::vec4 baseColorFactor  = glm::vec4(1.0f);
-    float normalScale          = 1.0f;
-    float metallicFactor       = 1.0f;
-    float roughnessFactor      = 1.0f;
-    float occlusionStrength    = 1.0f;
-    glm::vec3 emissiveFactor   = glm::vec3(0.0f);
-    float emissiveStrength     = 1.0f;
+    glm::vec4 baseColorFactor = glm::vec4(1.0f);
+    float normalScale = 1.0f;
+    float metallicFactor = 1.0f;
+    float roughnessFactor = 1.0f;
+    float occlusionStrength = 1.0f;
+    glm::vec3 emissiveFactor = glm::vec3(0.0f);
+    float emissiveStrength = 1.0f;
     std::shared_ptr<Image> albedoMap;
     std::shared_ptr<Image> normalMap;
     std::shared_ptr<Image> metallicMap;
@@ -40,17 +40,17 @@ struct Material {
     std::shared_ptr<Image> occlusionMap;
     std::shared_ptr<Image> emissiveMap;
     std::shared_ptr<Image> displacementMap;
-    float subsurface           = 0.0f;
-    float specular             = 0.5f;
-    float specularTint         = 0.0f;
-    float anisotropic          = 0.0f;
-    float sheen                = 0.0f;
-    float sheenTint            = 0.5f;
-    float clearcoat            = 0.0f;
+    float subsurface = 0.0f;
+    float specular = 0.5f;
+    float specularTint = 0.0f;
+    float anisotropic = 0.0f;
+    float sheen = 0.0f;
+    float sheenTint = 0.5f;
+    float clearcoat = 0.0f;
     float clearcoatGloss;
     // Prototype UV Mode: 0 = Off, 1 = World Space, 2 = Object Space
-    int prototypeUVMode        = 0;
-    float uvScale              = 1.0f;
+    int prototypeUVMode = 0;
+    float uvScale = 1.0f;
     PipelineHandle pipeline;
 };
 
@@ -77,12 +77,12 @@ struct Mesh {
     glm::vec4 getWorldBoundingSphere() const;
     void print();
 
-    bool hasPosition    = false;
-    bool hasNormal      = false;
-    bool hasTangent     = false;
-    bool hasUV0         = false;
-    bool hasUV1         = false;
-    bool hasColor       = false;
+    bool hasPosition = false;
+    bool hasNormal = false;
+    bool hasTangent = false;
+    bool hasUV0 = false;
+    bool hasUV1 = false;
+    bool hasColor = false;
     std::vector<VertexData> vertices;
     std::vector<Uint32> indices;
     std::shared_ptr<Material> material = nullptr;
@@ -95,9 +95,9 @@ struct Mesh {
 
     // GPU-driven rendering offsets into the scene's flat vertex/index buffers
     Uint32 vertexOffset = 0;
-    Uint32 indexOffset  = 0;
-    Uint32 vertexCount  = 0;
-    Uint32 indexCount   = 0;
+    Uint32 indexOffset = 0;
+    Uint32 vertexCount = 0;
+    Uint32 indexCount = 0;
 
     std::vector<BufferHandle> vbos;
     BufferHandle ebo;

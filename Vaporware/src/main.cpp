@@ -248,7 +248,8 @@ auto main(int argc, char* args[]) -> int {
                         } else if (sub.state == SubtitleState::Visible) {
                             // Skip current subtitle
                             sub.advanceRequested = true;
-                        } else if (sub.currentIndex >= (int)sub.queue.size() - 1 && sub.state == SubtitleState::Hidden) {
+                        } else if (sub.currentIndex >= (int)sub.queue.size() - 1
+                                   && sub.state == SubtitleState::Hidden) {
                             // Restart from beginning
                             sub.currentIndex = -1;
                             sub.advanceRequested = true;

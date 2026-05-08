@@ -2,19 +2,20 @@
 #include "physics_3d.hpp"
 
 #include <Jolt/Jolt.h>
-#include <Jolt/Physics/PhysicsSystem.h>
+
 #include <Jolt/Physics/Body/Body.h>
 #include <Jolt/Physics/Body/BodyCreationSettings.h>
 #include <Jolt/Physics/Collision/Shape/BoxShape.h>
-#include <Jolt/Physics/Vehicle/WheeledVehicleController.h>
-#include <Jolt/Physics/Vehicle/VehicleConstraint.h>
+#include <Jolt/Physics/PhysicsSystem.h>
 #include <Jolt/Physics/Vehicle/VehicleCollisionTester.h>
+#include <Jolt/Physics/Vehicle/VehicleConstraint.h>
+#include <Jolt/Physics/Vehicle/WheeledVehicleController.h>
 
 // Template: Sedan configuration
 auto VehicleSettings::createSedan() -> VehicleSettings {
     VehicleSettings settings;
     settings.mass = 1500.0f;
-    settings.dimensions = glm::vec3(0.9f, 0.7f, 2.2f);  // Typical sedan size
+    settings.dimensions = glm::vec3(0.9f, 0.7f, 2.2f);// Typical sedan size
     settings.maxSteeringAngle = 0.7f;
     settings.maxEngineTorque = 500.0f;
     settings.maxBrakeTorque = 1500.0f;
@@ -22,33 +23,21 @@ auto VehicleSettings::createSedan() -> VehicleSettings {
     // 4 wheels: front-left, front-right, rear-left, rear-right
     settings.wheels = {
         // Front-left wheel (steering)
-        WheelSettings{
-            .position = glm::vec3(-0.8f, -0.5f, 1.3f),
-            .wheelRadius = 0.3f,
-            .wheelWidth = 0.2f,
-            .enableTraction = true
-        },
+        WheelSettings{ .position = glm::vec3(-0.8f, -0.5f, 1.3f),
+                       .wheelRadius = 0.3f,
+                       .wheelWidth = 0.2f,
+                       .enableTraction = true },
         // Front-right wheel (steering)
         WheelSettings{
-            .position = glm::vec3(0.8f, -0.5f, 1.3f),
-            .wheelRadius = 0.3f,
-            .wheelWidth = 0.2f,
-            .enableTraction = true
-        },
+            .position = glm::vec3(0.8f, -0.5f, 1.3f), .wheelRadius = 0.3f, .wheelWidth = 0.2f, .enableTraction = true },
         // Rear-left wheel (drive)
-        WheelSettings{
-            .position = glm::vec3(-0.8f, -0.5f, -1.3f),
-            .wheelRadius = 0.3f,
-            .wheelWidth = 0.2f,
-            .enableTraction = true
-        },
+        WheelSettings{ .position = glm::vec3(-0.8f, -0.5f, -1.3f),
+                       .wheelRadius = 0.3f,
+                       .wheelWidth = 0.2f,
+                       .enableTraction = true },
         // Rear-right wheel (drive)
         WheelSettings{
-            .position = glm::vec3(0.8f, -0.5f, -1.3f),
-            .wheelRadius = 0.3f,
-            .wheelWidth = 0.2f,
-            .enableTraction = true
-        }
+            .position = glm::vec3(0.8f, -0.5f, -1.3f), .wheelRadius = 0.3f, .wheelWidth = 0.2f, .enableTraction = true }
     };
 
     return settings;
@@ -58,55 +47,45 @@ auto VehicleSettings::createSedan() -> VehicleSettings {
 auto VehicleSettings::createTruck() -> VehicleSettings {
     VehicleSettings settings;
     settings.mass = 3500.0f;
-    settings.dimensions = glm::vec3(1.2f, 1.2f, 3.0f);  // Larger truck size
-    settings.maxSteeringAngle = 0.5f;  // Less steering angle
+    settings.dimensions = glm::vec3(1.2f, 1.2f, 3.0f);// Larger truck size
+    settings.maxSteeringAngle = 0.5f;// Less steering angle
     settings.maxEngineTorque = 1000.0f;
     settings.maxBrakeTorque = 3000.0f;
 
     // 4 wheels with larger radius
     settings.wheels = {
         // Front-left wheel
-        WheelSettings{
-            .position = glm::vec3(-1.0f, -0.8f, 1.8f),
-            .wheelRadius = 0.4f,
-            .wheelWidth = 0.3f,
-            .enableTraction = true
-        },
+        WheelSettings{ .position = glm::vec3(-1.0f, -0.8f, 1.8f),
+                       .wheelRadius = 0.4f,
+                       .wheelWidth = 0.3f,
+                       .enableTraction = true },
         // Front-right wheel
         WheelSettings{
-            .position = glm::vec3(1.0f, -0.8f, 1.8f),
-            .wheelRadius = 0.4f,
-            .wheelWidth = 0.3f,
-            .enableTraction = true
-        },
+            .position = glm::vec3(1.0f, -0.8f, 1.8f), .wheelRadius = 0.4f, .wheelWidth = 0.3f, .enableTraction = true },
         // Rear-left wheel
-        WheelSettings{
-            .position = glm::vec3(-1.0f, -0.8f, -1.8f),
-            .wheelRadius = 0.4f,
-            .wheelWidth = 0.3f,
-            .enableTraction = true
-        },
+        WheelSettings{ .position = glm::vec3(-1.0f, -0.8f, -1.8f),
+                       .wheelRadius = 0.4f,
+                       .wheelWidth = 0.3f,
+                       .enableTraction = true },
         // Rear-right wheel
         WheelSettings{
-            .position = glm::vec3(1.0f, -0.8f, -1.8f),
-            .wheelRadius = 0.4f,
-            .wheelWidth = 0.3f,
-            .enableTraction = true
-        }
+            .position = glm::vec3(1.0f, -0.8f, -1.8f), .wheelRadius = 0.4f, .wheelWidth = 0.3f, .enableTraction = true }
     };
 
     return settings;
 }
 
-VehicleController::VehicleController(Physics3D* physics, const VehicleSettings& settings, const glm::vec3& position, const glm::quat& rotation)
-    : physics(physics)
-    , settings(settings)
-{
+VehicleController::VehicleController(
+    Physics3D* physics, const VehicleSettings& settings, const glm::vec3& position, const glm::quat& rotation
+)
+  : physics(physics), settings(settings) {
     auto* physicsSystem = physics->getPhysicsSystem();
     auto* bodyInterface = physics->getBodyInterface();
 
     // Create vehicle body (box shape)
-    JPH::BoxShapeSettings bodyShapeSettings(JPH::Vec3(settings.dimensions.x, settings.dimensions.y, settings.dimensions.z));
+    JPH::BoxShapeSettings bodyShapeSettings(
+        JPH::Vec3(settings.dimensions.x, settings.dimensions.y, settings.dimensions.z)
+    );
     JPH::ShapeSettings::ShapeResult bodyShapeResult = bodyShapeSettings.Create();
     JPH::ShapeRefC bodyShape = bodyShapeResult.Get();
 
@@ -115,7 +94,7 @@ VehicleController::VehicleController(Physics3D* physics, const VehicleSettings& 
         JPH::RVec3(position.x, position.y, position.z),
         JPH::Quat(rotation.x, rotation.y, rotation.z, rotation.w),
         JPH::EMotionType::Dynamic,
-        1  // MOVING layer
+        1// MOVING layer
     );
     bodySettings.mOverrideMassProperties = JPH::EOverrideMassProperties::CalculateInertia;
     bodySettings.mMassPropertiesOverride.mMass = settings.mass;
@@ -130,14 +109,19 @@ VehicleController::VehicleController(Physics3D* physics, const VehicleSettings& 
     vehicleSettings.mWheels.resize(settings.wheels.size());
     for (size_t i = 0; i < settings.wheels.size(); ++i) {
         const auto& wheelSettings = settings.wheels[i];
-        JPH::WheelSettingsWV* joltWheel = new JPH::WheelSettingsWV();
+        auto* joltWheel = new JPH::WheelSettingsWV();
 
         // Base wheel properties
         joltWheel->mPosition = JPH::Vec3(wheelSettings.position.x, wheelSettings.position.y, wheelSettings.position.z);
-        joltWheel->mSuspensionDirection = JPH::Vec3(wheelSettings.suspensionDirection.x, wheelSettings.suspensionDirection.y, wheelSettings.suspensionDirection.z);
+        joltWheel->mSuspensionDirection = JPH::Vec3(
+            wheelSettings.suspensionDirection.x,
+            wheelSettings.suspensionDirection.y,
+            wheelSettings.suspensionDirection.z
+        );
         // Steering axis is typically the vertical axis (0, 1, 0) for normal steering
         joltWheel->mSteeringAxis = JPH::Vec3(0.0f, 1.0f, 0.0f);
-        joltWheel->mWheelForward = JPH::Vec3(wheelSettings.wheelForward.x, wheelSettings.wheelForward.y, wheelSettings.wheelForward.z);
+        joltWheel->mWheelForward =
+            JPH::Vec3(wheelSettings.wheelForward.x, wheelSettings.wheelForward.y, wheelSettings.wheelForward.z);
         joltWheel->mWheelUp = JPH::Vec3(wheelSettings.wheelUp.x, wheelSettings.wheelUp.y, wheelSettings.wheelUp.z);
 
         joltWheel->mSuspensionMinLength = wheelSettings.suspensionMinLength;
@@ -152,23 +136,23 @@ VehicleController::VehicleController(Physics3D* physics, const VehicleSettings& 
         joltWheel->mWidth = wheelSettings.wheelWidth;
 
         // WheelSettingsWV specific properties
-        joltWheel->mInertia = 0.9f;  // Wheel rotational inertia
-        joltWheel->mAngularDamping = 0.2f;  // Wheel angular damping
-        joltWheel->mMaxSteerAngle = (i < 2) ? settings.maxSteeringAngle : 0.0f;  // Front wheels can steer
-        joltWheel->mMaxHandBrakeTorque = (i >= 2) ? settings.maxBrakeTorque * 0.5f : 0.0f;  // Rear wheels only
+        joltWheel->mInertia = 0.9f;// Wheel rotational inertia
+        joltWheel->mAngularDamping = 0.2f;// Wheel angular damping
+        joltWheel->mMaxSteerAngle = (i < 2) ? settings.maxSteeringAngle : 0.0f;// Front wheels can steer
+        joltWheel->mMaxHandBrakeTorque = (i >= 2) ? settings.maxBrakeTorque * 0.5f : 0.0f;// Rear wheels only
 
         vehicleSettings.mWheels[i] = joltWheel;
     }
 
     // Create wheeled vehicle controller
-    JPH::WheeledVehicleControllerSettings* controller = new JPH::WheeledVehicleControllerSettings;
+    auto* controller = new JPH::WheeledVehicleControllerSettings;
     controller->mEngine.mMaxTorque = settings.maxEngineTorque;
     controller->mTransmission.mMode = JPH::ETransmissionMode::Auto;
 
     // Configure differential (rear-wheel drive for simplicity)
     controller->mDifferentials.resize(1);
-    controller->mDifferentials[0].mLeftWheel = 2;   // Rear-left
-    controller->mDifferentials[0].mRightWheel = 3;  // Rear-right
+    controller->mDifferentials[0].mLeftWheel = 2;// Rear-left
+    controller->mDifferentials[0].mRightWheel = 3;// Rear-right
 
     vehicleSettings.mController = controller;
 
@@ -180,8 +164,8 @@ VehicleController::VehicleController(Physics3D* physics, const VehicleSettings& 
     // Without this, OnStep will crash when trying to access the collision tester
     // Use MOVING layer (1) so wheels can collide with NON_MOVING (0) ground
     JPH::Ref<JPH::VehicleCollisionTester> collisionTester = new JPH::VehicleCollisionTesterRay(
-        1,  // Object layer (MOVING = 1, will collide with NON_MOVING = 0 ground)
-        JPH::Vec3(0.0f, 1.0f, 0.0f)  // Up vector (world space up direction)
+        1,// Object layer (MOVING = 1, will collide with NON_MOVING = 0 ground)
+        JPH::Vec3(0.0f, 1.0f, 0.0f)// Up vector (world space up direction)
     );
     vehicleConstraint->SetVehicleCollisionTester(collisionTester.GetPtr());
 
@@ -294,7 +278,7 @@ auto VehicleController::getSpeed() const -> float {
 }
 
 auto VehicleController::getSpeedKmh() const -> float {
-    return getSpeed() * 3.6f;  // m/s to km/h
+    return getSpeed() * 3.6f;// m/s to km/h
 }
 
 auto VehicleController::getWheelCount() const -> int {

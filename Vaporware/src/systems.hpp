@@ -9,9 +9,8 @@
 #include <fmt/core.h>
 
 namespace RmlUIHelpers {
-    Rml::ElementDocument* ensureDocument(
-        Rml::ElementDocument*& docPtr, Vapor::RmlUiManager* rml, const std::string& path)
-    {
+    Rml::ElementDocument*
+        ensureDocument(Rml::ElementDocument*& docPtr, Vapor::RmlUiManager* rml, const std::string& path) {
         if (docPtr || path.empty()) return docPtr;
         docPtr = rml->LoadDocument(path);
         return docPtr;
@@ -21,7 +20,7 @@ namespace RmlUIHelpers {
         timer += deltaTime;
         return timer >= duration;
     }
-}
+}// namespace RmlUIHelpers
 
 class CleanupSystem {
 public:
@@ -159,8 +158,9 @@ public:
             }
             case CameraSwitchRequest::Mode::FirstPerson: {
                 auto view = reg.view<Vapor::VirtualCameraComponent>();
-                view.each([&](auto entity, auto& cam) { cam.isActive = reg.all_of<FirstPersonCameraComponent>(entity); }
-                );
+                view.each([&](auto entity, auto& cam) {
+                    cam.isActive = reg.all_of<FirstPersonCameraComponent>(entity);
+                });
                 break;
             }
             }
@@ -202,8 +202,10 @@ public:
                 glm::vec3 right = cam.rotation * glm::vec3(1, 0, 0);
                 glm::vec3 up = cam.rotation * glm::vec3(0, 1, 0);
 
-                if (intent->moveVector.x != 0.0f) cam.position += intent->moveVector.x * right * fly->moveSpeed * deltaTime;
-                if (intent->moveVector.y != 0.0f) cam.position += intent->moveVector.y * front * fly->moveSpeed * deltaTime;
+                if (intent->moveVector.x != 0.0f)
+                    cam.position += intent->moveVector.x * right * fly->moveSpeed * deltaTime;
+                if (intent->moveVector.y != 0.0f)
+                    cam.position += intent->moveVector.y * front * fly->moveSpeed * deltaTime;
                 if (intent->moveVerticalAxis != 0.0f)
                     cam.position += intent->moveVerticalAxis * up * fly->moveSpeed * deltaTime;
             }

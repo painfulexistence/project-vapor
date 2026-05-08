@@ -1,8 +1,8 @@
 // Characterization tests for the Action System (Easing, Timer, ActionManager).
 // These lock CURRENT behaviour — do not change expected values without understanding the impact.
-#include <catch2/catch_test_macros.hpp>
-#include <catch2/catch_approx.hpp>
 #include <Vapor/action_manager.hpp>
+#include <catch2/catch_approx.hpp>
+#include <catch2/catch_test_macros.hpp>
 #include <vector>
 
 using namespace Vapor;
@@ -22,13 +22,13 @@ TEST_CASE("Easing::Linear 邊界值", "[easing][linear]") {
 TEST_CASE("Easing::InQuad 邊界值與中點", "[easing][quad]") {
     REQUIRE(Easing::InQuad(0.0f) == Approx(0.0f));
     REQUIRE(Easing::InQuad(1.0f) == Approx(1.0f));
-    REQUIRE(Easing::InQuad(0.5f) == Approx(0.25f));  // 0.5^2
+    REQUIRE(Easing::InQuad(0.5f) == Approx(0.25f));// 0.5^2
 }
 
 TEST_CASE("Easing::OutQuad 邊界值與中點", "[easing][quad]") {
     REQUIRE(Easing::OutQuad(0.0f) == Approx(0.0f));
     REQUIRE(Easing::OutQuad(1.0f) == Approx(1.0f));
-    REQUIRE(Easing::OutQuad(0.5f) == Approx(0.75f));  // 0.5*(2-0.5)
+    REQUIRE(Easing::OutQuad(0.5f) == Approx(0.75f));// 0.5*(2-0.5)
 }
 
 TEST_CASE("Easing::InOutQuad 對稱性與邊界", "[easing][quad]") {
@@ -43,7 +43,7 @@ TEST_CASE("Easing::InOutQuad 對稱性與邊界", "[easing][quad]") {
 TEST_CASE("Easing::InCubic 邊界值", "[easing][cubic]") {
     REQUIRE(Easing::InCubic(0.0f) == Approx(0.0f));
     REQUIRE(Easing::InCubic(1.0f) == Approx(1.0f));
-    REQUIRE(Easing::InCubic(0.5f) == Approx(0.125f));  // 0.5^3
+    REQUIRE(Easing::InCubic(0.5f) == Approx(0.125f));// 0.5^3
 }
 
 TEST_CASE("Easing::OutCubic 邊界值", "[easing][cubic]") {
@@ -60,7 +60,7 @@ TEST_CASE("Easing::OutBack 超射行為（值會超過 1.0）", "[easing][back]"
     for (int i = 0; i <= 100; ++i) {
         maxVal = std::max(maxVal, Easing::OutBack(i / 100.0f));
     }
-    REQUIRE(maxVal > 1.0f);  // 確認超射行為存在
+    REQUIRE(maxVal > 1.0f);// 確認超射行為存在
 }
 
 // ============================================================
@@ -93,7 +93,7 @@ TEST_CASE("Timer::getProgress 鉗制在 1.0", "[timer]") {
     Timer t(1.0f);
     t.update(0.5f);
     REQUIRE(t.getProgress() == Approx(0.5f));
-    t.update(2.0f);  // 超過 duration
+    t.update(2.0f);// 超過 duration
     REQUIRE(t.getProgress() == Approx(1.0f));
 }
 
@@ -137,7 +137,7 @@ TEST_CASE("DelayAction 在 duration 後完成", "[action][delay]") {
     REQUIRE_FALSE(action->isDone());
     action->update(0.3f);
     REQUIRE_FALSE(action->isDone());
-    action->update(0.3f);  // 累計 0.6 >= 0.5
+    action->update(0.3f);// 累計 0.6 >= 0.5
     REQUIRE(action->isDone());
 }
 
@@ -146,9 +146,9 @@ TEST_CASE("DelayAction onStart 重置計時器", "[action][delay]") {
     action->onStart();
     action->update(0.4f);
     REQUIRE_FALSE(action->isDone());
-    action->onStart();  // reset
+    action->onStart();// reset
     action->update(0.4f);
-    REQUIRE_FALSE(action->isDone());  // 重新計時，尚未完成
+    REQUIRE_FALSE(action->isDone());// 重新計時，尚未完成
 }
 
 // ============================================================
@@ -157,20 +157,20 @@ TEST_CASE("DelayAction onStart 重置計時器", "[action][delay]") {
 
 TEST_CASE("CallbackAction 在 onStart 時立即執行 callback", "[action][callback]") {
     int count = 0;
-    auto action = std::make_shared<CallbackAction>([&count]() { count++; });
+    auto action = std::make_shared<CallbackAction>([&count]() -> void { count++; });
     REQUIRE(count == 0);
     action->onStart();
     REQUIRE(count == 1);
-    REQUIRE(action->isDone());  // CallbackAction 在 onStart 後立即完成
+    REQUIRE(action->isDone());// CallbackAction 在 onStart 後立即完成
 }
 
 TEST_CASE("CallbackAction update 不再次執行 callback", "[action][callback]") {
     int count = 0;
-    auto action = std::make_shared<CallbackAction>([&count]() { count++; });
+    auto action = std::make_shared<CallbackAction>([&count]() -> void { count++; });
     action->onStart();
     action->update(1.0f);
     action->update(1.0f);
-    REQUIRE(count == 1);  // 只執行一次
+    REQUIRE(count == 1);// 只執行一次
 }
 
 // ============================================================
@@ -179,7 +179,7 @@ TEST_CASE("CallbackAction update 不再次執行 callback", "[action][callback]"
 
 TEST_CASE("TimedCallbackAction 在 delay 後執行 callback", "[action][timed_callback]") {
     int count = 0;
-    auto action = std::make_shared<TimedCallbackAction>(0.5f, [&count]() { count++; });
+    auto action = std::make_shared<TimedCallbackAction>(0.5f, [&count]() -> void { count++; });
     action->onStart();
     REQUIRE(count == 0);
     action->update(0.3f);
@@ -191,7 +191,7 @@ TEST_CASE("TimedCallbackAction 在 delay 後執行 callback", "[action][timed_ca
 
 TEST_CASE("TimedCallbackAction duration=0 在 onStart 立即執行", "[action][timed_callback]") {
     int count = 0;
-    auto action = std::make_shared<TimedCallbackAction>(0.0f, [&count]() { count++; });
+    auto action = std::make_shared<TimedCallbackAction>(0.0f, [&count]() -> void { count++; });
     action->onStart();
     REQUIRE(count == 1);
     REQUIRE(action->isDone());
@@ -203,9 +203,8 @@ TEST_CASE("TimedCallbackAction duration=0 在 onStart 立即執行", "[action][t
 
 TEST_CASE("UpdateAction 在 duration 期間每幀呼叫 updateFunc", "[action][update]") {
     std::vector<float> progresses;
-    auto action = std::make_shared<UpdateAction>(1.0f, [&](float dt, float progress) {
-        progresses.push_back(progress);
-    });
+    auto action =
+        std::make_shared<UpdateAction>(1.0f, [&](float dt, float progress) -> void { progresses.push_back(progress); });
     action->onStart();
     action->update(0.25f);
     action->update(0.25f);
@@ -226,18 +225,18 @@ TEST_CASE("UpdateAction 在 duration 期間每幀呼叫 updateFunc", "[action][u
 TEST_CASE("TimelineAction 依序執行子動作", "[action][timeline]") {
     std::vector<int> order;
     auto timeline = std::make_shared<TimelineAction>();
-    timeline->add(std::make_shared<CallbackAction>([&]() { order.push_back(1); }));
+    timeline->add(std::make_shared<CallbackAction>([&]() -> void { order.push_back(1); }));
     timeline->add(std::make_shared<DelayAction>(0.5f));
-    timeline->add(std::make_shared<CallbackAction>([&]() { order.push_back(2); }));
+    timeline->add(std::make_shared<CallbackAction>([&]() -> void { order.push_back(2); }));
 
     timeline->onStart();
     // CallbackAction 立即完成，第二個 DelayAction 開始
-    REQUIRE(order == std::vector<int>{1});
+    REQUIRE(order == std::vector<int>{ 1 });
     REQUIRE_FALSE(timeline->isDone());
 
     // 推進超過 delay
     timeline->update(0.6f);
-    REQUIRE(order == std::vector<int>{1, 2});
+    REQUIRE(order == std::vector<int>{ 1, 2 });
     REQUIRE(timeline->isDone());
 }
 
@@ -254,8 +253,8 @@ TEST_CASE("TimelineAction 空序列立即完成", "[action][timeline]") {
 TEST_CASE("ParallelAction 同時啟動所有子動作", "[action][parallel]") {
     std::vector<int> started;
     auto parallel = std::make_shared<ParallelAction>();
-    parallel->add(std::make_shared<CallbackAction>([&]() { started.push_back(1); }));
-    parallel->add(std::make_shared<CallbackAction>([&]() { started.push_back(2); }));
+    parallel->add(std::make_shared<CallbackAction>([&]() -> void { started.push_back(1); }));
+    parallel->add(std::make_shared<CallbackAction>([&]() -> void { started.push_back(2); }));
 
     parallel->onStart();
     // 兩個 CallbackAction 都在 onStart 時被呼叫
@@ -269,7 +268,7 @@ TEST_CASE("ParallelAction 等待所有子動作完成才結束", "[action][paral
 
     parallel->onStart();
     parallel->update(0.4f);
-    REQUIRE_FALSE(parallel->isDone());  // 0.7s 的那個還沒完
+    REQUIRE_FALSE(parallel->isDone());// 0.7s 的那個還沒完
     parallel->update(0.4f);
     REQUIRE(parallel->isDone());
 }
@@ -286,7 +285,7 @@ TEST_CASE("ParallelAction 空時立即完成", "[action][parallel]") {
 
 TEST_CASE("RepeatAction 重複指定次數", "[action][repeat]") {
     int count = 0;
-    auto inner = std::make_shared<CallbackAction>([&]() { count++; });
+    auto inner = std::make_shared<CallbackAction>([&]() -> void { count++; });
     auto repeat = std::make_shared<RepeatAction>(inner, 3);
 
     // Execution trace (CallbackAction finishes in onStart, so each update drives one cycle):
@@ -297,7 +296,7 @@ TEST_CASE("RepeatAction 重複指定次數", "[action][repeat]") {
     repeat->onStart();
     repeat->update(0.0f);
     repeat->update(0.0f);
-    repeat->update(0.0f);  // third cycle completes, RepeatAction finishes
+    repeat->update(0.0f);// third cycle completes, RepeatAction finishes
 
     REQUIRE(count == 3);
     REQUIRE(repeat->isDone());
@@ -310,9 +309,9 @@ TEST_CASE("RepeatAction count=-1 不自動結束", "[action][repeat]") {
 
     repeat->onStart();
     for (int i = 0; i < 100; ++i) {
-        repeat->update(0.15f);  // 每次超過 delay，inner 重置
+        repeat->update(0.15f);// 每次超過 delay，inner 重置
     }
-    REQUIRE_FALSE(repeat->isDone());  // 永不結束
+    REQUIRE_FALSE(repeat->isDone());// 永不結束
 }
 
 // ============================================================
@@ -338,7 +337,7 @@ TEST_CASE("ActionManager::start 同一個 action 不重複加入", "[action_mana
     ActionManager mgr;
     auto action = std::make_shared<DelayAction>(1.0f);
     mgr.start(action);
-    mgr.start(action);  // 重複 start
+    mgr.start(action);// 重複 start
     REQUIRE(mgr.getActionCount() == 1);
 }
 
@@ -387,9 +386,9 @@ TEST_CASE("ActionManager::getActionsByTag 回傳正確集合", "[action_manager]
 
 TEST_CASE("ActionManager 無 tag 的 action 在 stopByTag 後不受影響", "[action_manager][tag]") {
     ActionManager mgr;
-    mgr.start(std::make_shared<DelayAction>(10.0f));         // no tag
-    mgr.start(std::make_shared<DelayAction>(10.0f), "anim"); // tagged
+    mgr.start(std::make_shared<DelayAction>(10.0f));// no tag
+    mgr.start(std::make_shared<DelayAction>(10.0f), "anim");// tagged
 
     mgr.stopByTag("anim");
-    REQUIRE(mgr.getActionCount() == 1);  // 沒有 tag 的那個仍存在
+    REQUIRE(mgr.getActionCount() == 1);// 沒有 tag 的那個仍存在
 }

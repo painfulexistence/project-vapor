@@ -106,7 +106,7 @@ namespace Vapor {
         }
     }
 
-    auto RmlUiManager::loadDocument(const std::string& filename) -> Rml::ElementDocument* {
+    auto RmlUiManager::LoadDocument(const std::string& filename) -> Rml::ElementDocument* {
         if (!m_context) {
             fmt::print("RmlUiManager::LoadDocument: RmlUi not initialized\n");
             return nullptr;
@@ -123,7 +123,7 @@ namespace Vapor {
         return document;
     }
 
-    auto RmlUiManager::reloadDocument(const std::string& filename) -> Rml::ElementDocument* {
+    auto RmlUiManager::ReloadDocument(const std::string& filename) -> Rml::ElementDocument* {
         if (!m_context) return nullptr;
 
         std::string path = SDL_GetBasePath() + filename;
@@ -161,7 +161,7 @@ namespace Vapor {
         }
     }
 
-    void RmlUiManager::showDocument(const std::string& id) {
+    void RmlUiManager::ShowDocument(const std::string& id) {
         if (!m_context) return;
 
         Rml::ElementDocument* document = m_context->GetDocument(id);
@@ -172,7 +172,7 @@ namespace Vapor {
         }
     }
 
-    void RmlUiManager::hideDocument(const std::string& id) {
+    void RmlUiManager::HideDocument(const std::string& id) {
         if (!m_context) return;
 
         Rml::ElementDocument* document = m_context->GetDocument(id);
