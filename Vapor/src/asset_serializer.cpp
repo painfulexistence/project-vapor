@@ -1,10 +1,10 @@
 #include "asset_serializer.hpp"
-#include <fmt/core.h>
 #include <SDL3/SDL_stdinc.h>
 #include <SDL3/SDL_timer.h>
+#include <fmt/core.h>
 #include <fstream>
-#include <unordered_map>
 #include <stdexcept>
+#include <unordered_map>
 
 
 void AssetSerializer::serializeScene(const std::shared_ptr<Scene>& scene, const std::string& path) {
@@ -60,7 +60,7 @@ void AssetSerializer::serializeScene(const std::shared_ptr<Scene>& scene, const 
     fmt::print("Scene serialized to: {} in {} ms\n", path, SDL_GetTicks() - start);
 }
 
-std::shared_ptr<Scene> AssetSerializer::deserializeScene(const std::string& path) {
+auto AssetSerializer::deserializeScene(const std::string& path) -> std::shared_ptr<Scene> {
     auto start = SDL_GetTicks();
 
     std::ifstream file(path, std::ios::binary);
@@ -125,14 +125,17 @@ std::shared_ptr<Scene> AssetSerializer::deserializeScene(const std::string& path
         scene->nodes.push_back(deserializeNode(archive, materials));
     }
 
-    scene->update(0.0f); // making sure world transform is updated
+    scene->update(0.0f);// making sure world transform is updated
 
     fmt::print("Scene deserialized from: {} in {} ms\n", path, SDL_GetTicks() - start);
     return scene;
 }
 
-void AssetSerializer::serializeNode(cereal::BinaryOutputArchive& archive, const std::shared_ptr<Node>& node,
-                                                  const std::unordered_map<std::shared_ptr<Material>, Uint32>& materialIDs) {
+void AssetSerializer::serializeNode(
+    cereal::BinaryOutputArchive& archive,
+    const std::shared_ptr<Node>& node,
+    const std::unordered_map<std::shared_ptr<Material>, Uint32>& materialIDs
+) {
     if (!node) {
         archive(false);
         return;
@@ -156,8 +159,9 @@ void AssetSerializer::serializeNode(cereal::BinaryOutputArchive& archive, const 
     }
 }
 
-std::shared_ptr<Node> AssetSerializer::deserializeNode(cereal::BinaryInputArchive& archive,
-                                                                     const std::unordered_map<Uint32, std::shared_ptr<Material>>& materials) {
+auto AssetSerializer::deserializeNode(
+    cereal::BinaryInputArchive& archive, const std::unordered_map<Uint32, std::shared_ptr<Material>>& materials
+) -> std::shared_ptr<Node> {
     bool isNotNull;
     archive(isNotNull);
     if (!isNotNull) {
@@ -190,8 +194,11 @@ std::shared_ptr<Node> AssetSerializer::deserializeNode(cereal::BinaryInputArchiv
     return node;
 }
 
-void AssetSerializer::serializeMaterial(cereal::BinaryOutputArchive& archive, const std::shared_ptr<Material>& material,
-                                                   const std::unordered_map<std::shared_ptr<Image>, Uint32>& imageIDs) {
+void AssetSerializer::serializeMaterial(
+    cereal::BinaryOutputArchive& archive,
+    const std::shared_ptr<Material>& material,
+    const std::unordered_map<std::shared_ptr<Image>, Uint32>& imageIDs
+) {
     if (!material) {
         archive(false);
         return;
@@ -217,7 +224,7 @@ void AssetSerializer::serializeMaterial(cereal::BinaryOutputArchive& archive, co
     archive(material->clearcoat);
     archive(material->clearcoatGloss);
 
-    auto serializeImageID = [&](const std::shared_ptr<Image>& image) {
+    auto serializeImageID = [&](const std::shared_ptr<Image>& image) -> void {
         if (!image) {
             archive(static_cast<Uint32>(-1));
         } else {
@@ -239,8 +246,9 @@ void AssetSerializer::serializeMaterial(cereal::BinaryOutputArchive& archive, co
     // serializeImageID(material->displacementMap);
 }
 
-std::shared_ptr<Material> AssetSerializer::deserializeMaterial(cereal::BinaryInputArchive& archive,
-                                                                          const std::unordered_map<Uint32, std::shared_ptr<Image>>& images) {
+auto AssetSerializer::deserializeMaterial(
+    cereal::BinaryInputArchive& archive, const std::unordered_map<Uint32, std::shared_ptr<Image>>& images
+) -> std::shared_ptr<Material> {
     bool isNotNull;
     archive(isNotNull);
     if (!isNotNull) {
@@ -309,7 +317,7 @@ void AssetSerializer::serializeImage(cereal::BinaryOutputArchive& archive, const
     archive(image->byteArray);
 }
 
-std::shared_ptr<Image> AssetSerializer::deserializeImage(cereal::BinaryInputArchive& archive) {
+auto AssetSerializer::deserializeImage(cereal::BinaryInputArchive& archive) -> std::shared_ptr<Image> {
     bool isNotNull;
     archive(isNotNull);
     if (!isNotNull) {
@@ -326,8 +334,11 @@ std::shared_ptr<Image> AssetSerializer::deserializeImage(cereal::BinaryInputArch
     return image;
 }
 
-void AssetSerializer::serializeMesh(cereal::BinaryOutputArchive& archive, const std::shared_ptr<Mesh>& mesh,
-                                                   const std::unordered_map<std::shared_ptr<Material>, Uint32>& materialIDs) {
+void AssetSerializer::serializeMesh(
+    cereal::BinaryOutputArchive& archive,
+    const std::shared_ptr<Mesh>& mesh,
+    const std::unordered_map<std::shared_ptr<Material>, Uint32>& materialIDs
+) {
     if (!mesh) {
         archive(false);
         return;
@@ -363,8 +374,9 @@ void AssetSerializer::serializeMesh(cereal::BinaryOutputArchive& archive, const 
     }
 }
 
-std::shared_ptr<Mesh> AssetSerializer::deserializeMesh(cereal::BinaryInputArchive& archive,
-                                                                     const std::unordered_map<Uint32, std::shared_ptr<Material>>& materials) {
+auto AssetSerializer::deserializeMesh(
+    cereal::BinaryInputArchive& archive, const std::unordered_map<Uint32, std::shared_ptr<Material>>& materials
+) -> std::shared_ptr<Mesh> {
     bool isNotNull;
     archive(isNotNull);
     if (!isNotNull) {
@@ -391,7 +403,7 @@ std::shared_ptr<Mesh> AssetSerializer::deserializeMesh(cereal::BinaryInputArchiv
     archive(mesh->indexCount);
     archive(mesh->localAABBMin);
     archive(mesh->localAABBMax);
-    mesh->isGeometryDirty = false; // prevent AABB updating
+    mesh->isGeometryDirty = false;// prevent AABB updating
 
     bool hasMaterial;
     archive(hasMaterial);
@@ -415,7 +427,7 @@ void AssetSerializer::serializeDirectionalLight(cereal::BinaryOutputArchive& arc
     archive(light.intensity);
 }
 
-DirectionalLight AssetSerializer::deserializeDirectionalLight(cereal::BinaryInputArchive& archive) {
+auto AssetSerializer::deserializeDirectionalLight(cereal::BinaryInputArchive& archive) -> DirectionalLight {
     DirectionalLight light;
     archive(light.direction);
     archive(light.color);
@@ -430,7 +442,7 @@ void AssetSerializer::serializePointLight(cereal::BinaryOutputArchive& archive, 
     archive(light.radius);
 }
 
-PointLight AssetSerializer::deserializePointLight(cereal::BinaryInputArchive& archive) {
+auto AssetSerializer::deserializePointLight(cereal::BinaryInputArchive& archive) -> PointLight {
     PointLight light;
     archive(light.position);
     archive(light.color);

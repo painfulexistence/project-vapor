@@ -1,5 +1,6 @@
 #include "character_controller.hpp"
 #include "physics_3d.hpp"
+
 #include <Jolt/Jolt.h>
 
 #include <Jolt/Core/Factory.h>
@@ -101,37 +102,37 @@ void CharacterController::warp(const glm::vec3& position) {
     currentPosition = position;
 }
 
-bool CharacterController::isOnGround() const {
+auto CharacterController::isOnGround() const -> bool {
     return character->GetGroundState() == JPH::CharacterVirtual::EGroundState::OnGround;
 }
 
-bool CharacterController::isSliding() const {
+auto CharacterController::isSliding() const -> bool {
     return character->GetGroundState() == JPH::CharacterVirtual::EGroundState::OnSteepGround;
 }
 
-glm::vec3 CharacterController::getPosition() const {
+auto CharacterController::getPosition() const -> glm::vec3 {
     // Return the current physics position (not interpolated)
     return currentPosition;
 }
 
-glm::vec3 CharacterController::getInterpolatedPosition(float alpha) const {
+auto CharacterController::getInterpolatedPosition(float alpha) const -> glm::vec3 {
     // Linear interpolation between previous and current position
     // alpha = 0.0 means use previous position (start of physics step)
     // alpha = 1.0 means use current position (end of physics step)
     return glm::mix(previousPosition, currentPosition, alpha);
 }
 
-glm::vec3 CharacterController::getVelocity() const {
+auto CharacterController::getVelocity() const -> glm::vec3 {
     JPH::Vec3 vel = character->GetLinearVelocity();
     return glm::vec3(vel.GetX(), vel.GetY(), vel.GetZ());
 }
 
-glm::vec3 CharacterController::getGroundNormal() const {
+auto CharacterController::getGroundNormal() const -> glm::vec3 {
     JPH::Vec3 normal = character->GetGroundNormal();
     return glm::vec3(normal.GetX(), normal.GetY(), normal.GetZ());
 }
 
-BodyHandle CharacterController::getBodyHandle() const {
+auto CharacterController::getBodyHandle() const -> BodyHandle {
     return BodyHandle{ character->GetInnerBodyID().GetIndexAndSequenceNumber() };
 }
 

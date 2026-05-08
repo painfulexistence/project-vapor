@@ -1,7 +1,7 @@
 #include "camera.hpp"
 #define GLM_ENABLE_EXPERIMENTAL
-#include <glm/trigonometric.hpp>
 #include <glm/gtx/rotate_vector.hpp>
+#include <glm/trigonometric.hpp>
 
 void Camera::dolly(float offset) {
     glm::vec3 dir = _center - _eye;

@@ -50,16 +50,17 @@ enum class BodyMotionType {
     Kinematic,
 };
 
-template<typename Tag>
-struct PhysicsHandle {
+template<typename Tag> struct PhysicsHandle {
     Uint32 rid = UINT32_MAX;
-    bool valid() const { return rid != UINT32_MAX; }
+    bool valid() const {
+        return rid != UINT32_MAX;
+    }
     bool operator==(const PhysicsHandle&) const = default;
 };
 
 struct BodyTag {};
 struct TriggerTag {};
-using BodyHandle    = PhysicsHandle<BodyTag>;
+using BodyHandle = PhysicsHandle<BodyTag>;
 using TriggerHandle = PhysicsHandle<TriggerTag>;
 
 struct OverlapResult {

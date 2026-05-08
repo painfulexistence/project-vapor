@@ -13,7 +13,7 @@ struct SceneNodeReferenceComponent {
 };
 
 struct ScenePointLightReferenceComponent {
-    int lightIndex = -1; // Index into Scene::pointLights
+    int lightIndex = -1;// Index into Scene::pointLights
 };
 
 struct SceneDirectionalLightReferenceComponent {
@@ -54,7 +54,6 @@ struct GrabberComponent {
     entt::entity heldEntity = entt::null;
     float maxPickupRange = 5.0f;
 };
-
 
 // Light Logic
 enum class MovementPattern { Circle, Figure8, Linear, Spiral };
@@ -128,9 +127,9 @@ enum class SubtitleQueueState { Idle, WaitingForVisible, Displaying, WaitingForH
 
 struct SubtitleQueueComponent {
     std::vector<SubtitleEntry> queue;
-    int currentIndex  = -1;
+    int currentIndex = -1;
     bool advanceRequested = false;
-    bool autoAdvance  = true;
+    bool autoAdvance = true;
     SubtitleQueueState state = SubtitleQueueState::Idle;
     float displayTimer = 0.0f;
 };
@@ -139,6 +138,24 @@ struct ScrollTextQueueComponent {
     std::vector<std::string> lines;
     int currentIndex = 0;
     bool advanceRequested = false;
+};
+
+// Chapter Title Card
+enum class ChapterTitleState { Hidden, FadingIn, Visible, FadingOut };
+
+struct ChapterTitleComponent {
+    std::string documentPath;
+    Rml::ElementDocument* document = nullptr;
+
+    std::string chapterNumber;// "Chapter 1" or "I"
+    std::string chapterTitle;// "The Beginning"
+    bool showRequested = false;
+
+    // Animation state
+    ChapterTitleState state = ChapterTitleState::Hidden;
+    float timer = 0.0f;
+    float fadeDuration = 0.8f;
+    float displayDuration = 2.5f;
 };
 
 struct ChapterTitleTriggerComponent {

@@ -5,6 +5,7 @@ on:
     branches: [main]
   pull_request:
     branches: [main]
+  workflow_dispatch:
 
 jobs:
   # ── Unit tests (no GPU required) ─────────────────────────────────────────
@@ -52,41 +53,62 @@ jobs:
       - name: Print ccache stats
         run: ccache --show-stats
 
-  # ── Build check (confirms engine compiles, no GPU smoke test) ────────────
-  build-check:
-    name: Build Check (macOS / Clang)
-    runs-on: macos-15
+  # ── Multi-OS Build ───────────────────────────────────────────────────────
+  build:
+    runs-on: ${{ matrix.os }}
     needs: test
 
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [macos-latest, ubuntu-latest, windows-latest]
+        build-type: [Debug, Release, MinSizeRel]
+
     steps:
-      - name: Checkout
-        uses: actions/checkout@v4
+      - uses: actions/checkout@v4
         with:
-          submodules: recursive
+          submodules: 'recursive'
 
-      - name: Install system dependencies
-        run: |
-          brew install ninja ccache glslang
-
-      - name: Restore ccache
-        uses: actions/cache@v4
+      - uses: rlalik/setup-cpp-compiler@master
         with:
-          path: ~/.ccache
-          key: ccache-macos-${{ github.ref_name }}-${{ github.sha }}
-          restore-keys: |
-            ccache-macos-${{ github.ref_name }}-
-            ccache-macos-
+          compiler: latest
 
-      - name: Configure
-        run: |
-          cmake --preset ninja-local-vcpkg \
-            -DCMAKE_BUILD_TYPE=Release \
-            -DCMAKE_CXX_COMPILER_LAUNCHER=ccache
-        env:
-          VCPKG_ROOT: ${{ github.workspace }}/vcpkg
+      - uses: seanmiddleditch/gha-setup-ninja@master
 
-      - name: Build Vapor library
+      # WORKAROUND: Install Vcpkg (submodule seems not working?)
+      - uses: actions/checkout@v4
+        with:
+          repository: 'microsoft/vcpkg'
+          path: 'vcpkg'
+
+      - name: Set strings
+        id: strings
         run: |
-          cmake --build build --config Release \
-            --target Vapor \
-            -- -j$(sysctl -n hw.logicalcpu)
+          echo "build-dir=${{ github.workspace }}/build" >> "$GITHUB_OUTPUT"
+        shell: bash
+
+      - name: Bootstrap vcpkg
+        run: |
+          ${{ github.workspace }}/vcpkg/bootstrap-vcpkg.sh
+        shell: bash
+
+      - name: Install CMake and other dependencies on Ubuntu
+        if: matrix.os == 'ubuntu-latest'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y cmake libxmu-dev libxi-dev libgl-dev libxinerama-dev libxcursor-dev xorg-dev libglu1-mesa-dev pkg-config
+
+      - name: Install CMake on macOS
+        if: matrix.os == 'macos-latest'
+        run: |
+          brew install cmake
+
+      - name: CMake Configure
+        run: >
+          cmake -G Ninja
+          -B ${{ steps.strings.outputs.build-dir }}
+          -DCMAKE_BUILD_TYPE=${{ matrix.build-type }}
+          -S ${{ github.workspace }}
+
+      - name: CMake Build
+        run: cmake --build ${{ steps.strings.outputs.build-dir }}

@@ -6,12 +6,25 @@
 #include "Vapor/rmlui_manager.hpp"
 #include "Vapor/scene.hpp"
 #include "components.hpp"
-#include "pages/page_system.hpp"
-#include "pages/subtitle_page.hpp"
-#include "pages/scroll_text_page.hpp"
 #include "pages/chapter_title_page.hpp"
+#include "pages/page_system.hpp"
+#include "pages/scroll_text_page.hpp"
+#include "pages/subtitle_page.hpp"
 #include <fmt/core.h>
 
+namespace RmlUIHelpers {
+    Rml::ElementDocument*
+        ensureDocument(Rml::ElementDocument*& docPtr, Vapor::RmlUiManager* rml, const std::string& path) {
+        if (docPtr || path.empty()) return docPtr;
+        docPtr = rml->LoadDocument(path);
+        return docPtr;
+    }
+
+    bool tickTimer(float& timer, float deltaTime, float duration) {
+        timer += deltaTime;
+        return timer >= duration;
+    }
+}// namespace RmlUIHelpers
 
 class CleanupSystem {
 public:
@@ -192,8 +205,10 @@ public:
                 glm::vec3 right = cam.rotation * glm::vec3(1, 0, 0);
                 glm::vec3 up = cam.rotation * glm::vec3(0, 1, 0);
 
-                if (intent->moveVector.x != 0.0f) cam.position += intent->moveVector.x * right * fly->moveSpeed * deltaTime;
-                if (intent->moveVector.y != 0.0f) cam.position += intent->moveVector.y * front * fly->moveSpeed * deltaTime;
+                if (intent->moveVector.x != 0.0f)
+                    cam.position += intent->moveVector.x * right * fly->moveSpeed * deltaTime;
+                if (intent->moveVector.y != 0.0f)
+                    cam.position += intent->moveVector.y * front * fly->moveSpeed * deltaTime;
                 if (intent->moveVerticalAxis != 0.0f)
                     cam.position += intent->moveVerticalAxis * up * fly->moveSpeed * deltaTime;
             }
@@ -236,8 +251,7 @@ public:
             switch (q.state) {
             case SubtitleQueueState::Idle:
                 if (page->isFullyHidden()) {
-                    bool advance = q.advanceRequested
-                        || (q.autoAdvance && q.currentIndex < (int)q.queue.size() - 1);
+                    bool advance = q.advanceRequested || (q.autoAdvance && q.currentIndex < (int)q.queue.size() - 1);
                     if (advance) {
                         q.advanceRequested = false;
                         q.currentIndex++;
@@ -264,8 +278,8 @@ public:
                 q.displayTimer += dt;
                 {
                     bool done = q.advanceRequested
-                        || (q.autoAdvance && q.currentIndex < (int)q.queue.size()
-                            && q.displayTimer >= q.queue[q.currentIndex].duration);
+                                || (q.autoAdvance && q.currentIndex < (int)q.queue.size()
+                                    && q.displayTimer >= q.queue[q.currentIndex].duration);
                     if (done) {
                         q.advanceRequested = false;
                         PageSystem::hide(reg, PageID::Subtitle);
@@ -353,7 +367,7 @@ public:
         for (auto entity : view) {
             auto& t = view.get<ChapterTitleTriggerComponent>(entity);
             t.number = number;
-            t.title  = title;
+            t.title = title;
             t.showRequested = true;
         }
     }

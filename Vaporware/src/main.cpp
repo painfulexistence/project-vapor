@@ -26,13 +26,13 @@
 
 
 #include "components.hpp"
-#include "scene_builder.hpp"
-#include "systems.hpp"
-#include "pages/page_system.hpp"
 #include "pages/hud_page.hpp"
 #include "pages/letterbox_page.hpp"
+#include "pages/page_system.hpp"
+#include "scene_builder.hpp"
+#include "systems.hpp"
 
-entt::entity getActiveCamera(entt::registry& registry) {
+auto getActiveCamera(entt::registry& registry) -> entt::entity {
     auto view = registry.view<Vapor::VirtualCameraComponent>();
     for (auto entity : view) {
         if (view.get<Vapor::VirtualCameraComponent>(entity).isActive) {
@@ -42,7 +42,7 @@ entt::entity getActiveCamera(entt::registry& registry) {
     return entt::null;
 }
 
-int main(int argc, char* args[]) {
+auto main(int argc, char* args[]) -> int {
     args::ArgumentParser parser{ "This is Project Vapor." };
     args::Group windowGroup(parser, "Window:");
     args::ValueFlag<Uint32> width(windowGroup, "number", "Window width", { 'w', "width" }, 1280);
@@ -94,6 +94,10 @@ int main(int argc, char* args[]) {
 #endif
 
     auto window = SDL_CreateWindow(winTitle, width.Get(), height.Get(), winFlags);
+    if (!window) {
+        fmt::print(stderr, "Failed to create SDL_Window: {}\n", SDL_GetError());
+        return 1;
+    }
     int windowWidth, windowHeight;
     SDL_GetWindowSize(window, &windowWidth, &windowHeight);
 
@@ -141,7 +145,7 @@ int main(int argc, char* args[]) {
         std::string("assets/models/Sponza/Sponza.gltf"),
         true,// optimized
         Vapor::LoadMode::Async,
-        [](std::shared_ptr<Scene> loadedScene) {
+        [](std::shared_ptr<Scene> loadedScene) -> void {
             fmt::print("Scene loaded with {} nodes\n", loadedScene->nodes.size());
         }
     );
@@ -199,7 +203,8 @@ int main(int argc, char* args[]) {
             case SDL_EVENT_KEY_DOWN: {
                 if (e.key.scancode == SDL_SCANCODE_ESCAPE) {
                     auto& ui = registry.view<UIStateComponent>().get<UIStateComponent>(
-                        registry.view<UIStateComponent>().front());
+                        registry.view<UIStateComponent>().front()
+                    );
                     if (!ui.menuStack.empty() && ui.menuStack.back() == PageID::PauseMenu) {
                         PageSystem::pop(registry);
                     } else if (ui.menuStack.empty()) {
@@ -212,8 +217,10 @@ int main(int argc, char* args[]) {
                     auto* hudPage = PageSystem::getPage<HUDPage>(registry, PageID::HUD);
                     if (hudPage) {
                         bool nowVisible = !hudPage->isFullyVisible();
-                        if (nowVisible) PageSystem::show(registry, PageID::HUD);
-                        else            PageSystem::hide(registry, PageID::HUD);
+                        if (nowVisible)
+                            PageSystem::show(registry, PageID::HUD);
+                        else
+                            PageSystem::hide(registry, PageID::HUD);
                         fmt::print("HUD toggled: {}\n", nowVisible ? "on" : "off");
                     }
                 }
@@ -228,8 +235,10 @@ int main(int argc, char* args[]) {
                     auto* lb = PageSystem::getPage<LetterboxPage>(registry, PageID::Letterbox);
                     if (lb) {
                         bool open = !lb->isOpen();
-                        if (open) PageSystem::show(registry, PageID::Letterbox);
-                        else      PageSystem::hide(registry, PageID::Letterbox);
+                        if (open)
+                            PageSystem::show(registry, PageID::Letterbox);
+                        else
+                            PageSystem::hide(registry, PageID::Letterbox);
                         fmt::print("Letterbox toggled: {}\n", open ? "opening" : "closing");
                     }
                 }
@@ -237,8 +246,7 @@ int main(int argc, char* args[]) {
                     auto view = registry.view<SubtitleQueueComponent>();
                     for (auto entity : view) {
                         auto& q = view.get<SubtitleQueueComponent>(entity);
-                        if (q.currentIndex >= (int)q.queue.size() - 1
-                            && q.state == SubtitleQueueState::Idle) {
+                        if (q.currentIndex >= (int)q.queue.size() - 1 && q.state == SubtitleQueueState::Idle) {
                             SubtitleQueueSystem::restart(registry);
                             fmt::print("Subtitles restarted\n");
                         } else {
@@ -257,7 +265,7 @@ int main(int argc, char* args[]) {
                 windowHeight = e.window.data2;
                 // Update Camera Aspect Ratio
                 auto view = registry.view<Vapor::VirtualCameraComponent>();
-                view.each([&](auto& cam) { cam.aspect = (float)windowWidth / (float)windowHeight; });
+                view.each([&](auto& cam) -> auto { cam.aspect = (float)windowWidth / (float)windowHeight; });
                 break;
             }
             default:
@@ -275,7 +283,7 @@ int main(int argc, char* args[]) {
             auto& request = registry.emplace_or_replace<CameraSwitchRequest>(global);
             request.mode = CameraSwitchRequest::Mode::Follow;
         }
-        registry.view<CharacterIntent>().each([&](auto& intent) {
+        registry.view<CharacterIntent>().each([&](auto& intent) -> auto {
             intent.lookVector = inputState.getVector(
                 Vapor::InputAction::LookLeft,
                 Vapor::InputAction::LookRight,

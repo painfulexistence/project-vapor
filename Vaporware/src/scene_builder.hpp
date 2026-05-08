@@ -34,8 +34,8 @@ inline SceneResources buildScene(
     std::shared_ptr<Material> material,
     int windowWidth,
     int windowHeight,
-    Vapor::RNG& rng)
-{
+    Vapor::RNG& rng
+) {
     SceneResources res;
     res.scene = scene;
     res.material = material;
@@ -101,11 +101,13 @@ inline SceneResources buildScene(
         nodeRef.node = node;
     }
 
-    scene->directionalLights.push_back({
-        .direction = glm::vec3(0.5, -1.0, 0.0),
-        .color = glm::vec3(1.0, 1.0, 1.0),
-        .intensity = 10.0,
-    });
+    scene->directionalLights.push_back(
+        {
+            .direction = glm::vec3(0.5, -1.0, 0.0),
+            .color = glm::vec3(1.0, 1.0, 1.0),
+            .intensity = 10.0,
+        }
+    );
     auto sunLight = registry.create();
     {
         auto& ref = registry.emplace<SceneDirectionalLightReferenceComponent>(sunLight);
@@ -118,14 +120,16 @@ inline SceneResources buildScene(
     }
 
     for (int i = 0; i < 8; i++) {
-        scene->pointLights.push_back({ .position = glm::vec3(
-                                           rng.RandomFloatInRange(-5.0f, 5.0f),
-                                           rng.RandomFloatInRange(0.0f, 5.0f),
-                                           rng.RandomFloatInRange(-5.0f, 5.0f)
-                                       ),
-                                       .color = glm::vec3(rng.RandomFloat(), rng.RandomFloat(), rng.RandomFloat()),
-                                       .intensity = 5.0f * rng.RandomFloat(),
-                                       .radius = 0.5f });
+        scene->pointLights.push_back(
+            { .position = glm::vec3(
+                  rng.RandomFloatInRange(-5.0f, 5.0f),
+                  rng.RandomFloatInRange(0.0f, 5.0f),
+                  rng.RandomFloatInRange(-5.0f, 5.0f)
+              ),
+              .color = glm::vec3(rng.RandomFloat(), rng.RandomFloat(), rng.RandomFloat()),
+              .intensity = 5.0f * rng.RandomFloat(),
+              .radius = 0.5f }
+        );
     }
     for (int i = 0; i < (int)scene->pointLights.size(); ++i) {
         auto e = registry.create();

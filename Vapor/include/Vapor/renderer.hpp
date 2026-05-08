@@ -49,49 +49,108 @@ public:
 
     // ===== 2D/3D Batch Rendering API =====
     // Manual flush (for controlling draw order)
-    virtual void flush2D() {}
-    virtual void flush3D() {}
+    virtual void flush2D() {
+    }
+    virtual void flush3D() {
+    }
 
     // Quad drawing
-    virtual void drawQuad2D(const glm::vec2& position, const glm::vec2& size, const glm::vec4& color) {}
-    virtual void drawQuad2D(const glm::vec3& position, const glm::vec2& size, const glm::vec4& color) {}
-    virtual void drawQuad2D(const glm::vec2& position, const glm::vec2& size, TextureHandle texture, const glm::vec4& tintColor = glm::vec4(1.0f)) {}
-    virtual void drawQuad2D(const glm::mat4& transform, const glm::vec4& color, int entityID = -1) {}
-    virtual void drawQuad2D(const glm::mat4& transform, TextureHandle texture, const glm::vec2* texCoords, const glm::vec4& tintColor = glm::vec4(1.0f), int entityID = -1) {}
+    virtual void drawQuad2D(const glm::vec2& position, const glm::vec2& size, const glm::vec4& color) {
+    }
+    virtual void drawQuad2D(const glm::vec3& position, const glm::vec2& size, const glm::vec4& color) {
+    }
+    virtual void drawQuad2D(
+        const glm::vec2& position,
+        const glm::vec2& size,
+        TextureHandle texture,
+        const glm::vec4& tintColor = glm::vec4(1.0f)
+    ) {
+    }
+    virtual void drawQuad2D(const glm::mat4& transform, const glm::vec4& color, int entityID = -1) {
+    }
+    virtual void drawQuad2D(
+        const glm::mat4& transform,
+        TextureHandle texture,
+        const glm::vec2* texCoords,
+        const glm::vec4& tintColor = glm::vec4(1.0f),
+        int entityID = -1
+    ) {
+    }
 
     // 3D versions (world space with depth)
-    virtual void drawQuad3D(const glm::vec3& position, const glm::vec2& size, const glm::vec4& color) {}
-    virtual void drawQuad3D(const glm::vec3& position, const glm::vec2& size, TextureHandle texture, const glm::vec4& tintColor = glm::vec4(1.0f)) {}
-    virtual void drawQuad3D(const glm::mat4& transform, const glm::vec4& color, int entityID = -1) {}
-    virtual void drawQuad3D(const glm::mat4& transform, TextureHandle texture, const glm::vec2* texCoords, const glm::vec4& tintColor = glm::vec4(1.0f), int entityID = -1) {}
+    virtual void drawQuad3D(const glm::vec3& position, const glm::vec2& size, const glm::vec4& color) {
+    }
+    virtual void drawQuad3D(
+        const glm::vec3& position,
+        const glm::vec2& size,
+        TextureHandle texture,
+        const glm::vec4& tintColor = glm::vec4(1.0f)
+    ) {
+    }
+    virtual void drawQuad3D(const glm::mat4& transform, const glm::vec4& color, int entityID = -1) {
+    }
+    virtual void drawQuad3D(
+        const glm::mat4& transform,
+        TextureHandle texture,
+        const glm::vec2* texCoords,
+        const glm::vec4& tintColor = glm::vec4(1.0f),
+        int entityID = -1
+    ) {
+    }
 
     // Rotated quad
-    virtual void drawRotatedQuad2D(const glm::vec2& position, const glm::vec2& size, float rotation, const glm::vec4& color) {}
-    virtual void drawRotatedQuad2D(const glm::vec2& position, const glm::vec2& size, float rotation, TextureHandle texture, const glm::vec4& tintColor = glm::vec4(1.0f)) {}
+    virtual void
+        drawRotatedQuad2D(const glm::vec2& position, const glm::vec2& size, float rotation, const glm::vec4& color) {
+    }
+    virtual void drawRotatedQuad2D(
+        const glm::vec2& position,
+        const glm::vec2& size,
+        float rotation,
+        TextureHandle texture,
+        const glm::vec4& tintColor = glm::vec4(1.0f)
+    ) {
+    }
 
     // Line drawing
-    virtual void drawLine2D(const glm::vec2& p0, const glm::vec2& p1, const glm::vec4& color, float thickness = 1.0f) {}
-    virtual void drawLine3D(const glm::vec3& p0, const glm::vec3& p1, const glm::vec4& color, float thickness = 1.0f) {}
+    virtual void drawLine2D(const glm::vec2& p0, const glm::vec2& p1, const glm::vec4& color, float thickness = 1.0f) {
+    }
+    virtual void drawLine3D(const glm::vec3& p0, const glm::vec3& p1, const glm::vec4& color, float thickness = 1.0f) {
+    }
 
     // Shape drawing
-    virtual void drawRect2D(const glm::vec2& position, const glm::vec2& size, const glm::vec4& color, float thickness = 1.0f) {}
-    virtual void drawCircle2D(const glm::vec2& center, float radius, const glm::vec4& color, int segments = 32) {}
-    virtual void drawCircleFilled2D(const glm::vec2& center, float radius, const glm::vec4& color, int segments = 32) {}
-    virtual void drawTriangle2D(const glm::vec2& p0, const glm::vec2& p1, const glm::vec2& p2, const glm::vec4& color) {}
-    virtual void drawTriangleFilled2D(const glm::vec2& p0, const glm::vec2& p1, const glm::vec2& p2, const glm::vec4& color) {}
+    virtual void
+        drawRect2D(const glm::vec2& position, const glm::vec2& size, const glm::vec4& color, float thickness = 1.0f) {
+    }
+    virtual void drawCircle2D(const glm::vec2& center, float radius, const glm::vec4& color, int segments = 32) {
+    }
+    virtual void drawCircleFilled2D(const glm::vec2& center, float radius, const glm::vec4& color, int segments = 32) {
+    }
+    virtual void drawTriangle2D(const glm::vec2& p0, const glm::vec2& p1, const glm::vec2& p2, const glm::vec4& color) {
+    }
+    virtual void
+        drawTriangleFilled2D(const glm::vec2& p0, const glm::vec2& p1, const glm::vec2& p2, const glm::vec4& color) {
+    }
 
     // Batch statistics
-    virtual Batch2DStats getBatch2DStats() const { return {}; }
-    virtual void resetBatch2DStats() {}
+    virtual Batch2DStats getBatch2DStats() const {
+        return {};
+    }
+    virtual void resetBatch2DStats() {
+    }
 
     // Texture creation for sprites
-    virtual TextureHandle createTexture(const std::shared_ptr<Image>& img) { return {}; }
+    virtual TextureHandle createTexture(const std::shared_ptr<Image>& img) {
+        return {};
+    }
 
     // ===== Font Rendering API =====
     // Load a font from file path with specified base size
-    virtual FontHandle loadFont(const std::string& path, float baseSize) { return {}; }
+    virtual FontHandle loadFont(const std::string& path, float baseSize) {
+        return {};
+    }
     // Unload a previously loaded font
-    virtual void unloadFont(FontHandle handle) {}
+    virtual void unloadFont(FontHandle handle) {
+    }
     // Draw text at screen position (2D, no depth test)
     virtual void drawText2D(
         FontHandle font,
@@ -99,7 +158,8 @@ public:
         const glm::vec2& position,
         float scale = 1.0f,
         const glm::vec4& color = glm::vec4(1.0f)
-    ) {}
+    ) {
+    }
     // Draw text at world position (3D, with depth test, billboard facing camera)
     virtual void drawText3D(
         FontHandle font,
@@ -107,11 +167,16 @@ public:
         const glm::vec3& worldPosition,
         float scale = 1.0f,
         const glm::vec4& color = glm::vec4(1.0f)
-    ) {}
+    ) {
+    }
     // Measure text dimensions at given scale
-    virtual glm::vec2 measureText(FontHandle font, const std::string& text, float scale = 1.0f) { return {}; }
+    virtual glm::vec2 measureText(FontHandle font, const std::string& text, float scale = 1.0f) {
+        return {};
+    }
     // Get line height for a font at given scale
-    virtual float getFontLineHeight(FontHandle font, float scale = 1.0f) { return 0.0f; }
+    virtual float getFontLineHeight(FontHandle font, float scale = 1.0f) {
+        return 0.0f;
+    }
 
 protected:
     const Uint32 MAX_FRAMES_IN_FLIGHT = 3;
