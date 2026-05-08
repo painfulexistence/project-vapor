@@ -3,6 +3,7 @@
 #include <glm/gtc/quaternion.hpp>
 #include <glm/vec3.hpp>
 #include <unordered_map>
+#include <memory>
 
 struct Node;
 class Scene;
