@@ -4,7 +4,7 @@
 #include <utility>
 #include <limits>
 
-static int getNumFaces(const SMikkTSpaceContext* ctx) {
+static auto getNumFaces(const SMikkTSpaceContext* ctx) -> int {
     auto mesh = static_cast<Mesh*>(ctx->m_pUserData);
     if (mesh->indices.size() == 0) {
         return mesh->vertices.size() / 3;
@@ -12,7 +12,7 @@ static int getNumFaces(const SMikkTSpaceContext* ctx) {
     return mesh->indices.size() / 3;
 }
 
-static int getNumVerticesOfFace(const SMikkTSpaceContext* ctx, const int face) {
+static auto getNumVerticesOfFace(const SMikkTSpaceContext* ctx, const int face) -> int {
     return 3;
 }
 
@@ -104,7 +104,7 @@ void Mesh::calculateLocalAABB(){
     }
 };
 
-glm::vec4 Mesh::getWorldBoundingSphere() const {
+auto Mesh::getWorldBoundingSphere() const -> glm::vec4 {
     glm::vec3 center = (worldAABBMin + worldAABBMax) * 0.5f;
     float radius = glm::length(worldAABBMax - center);
     return glm::vec4(center, radius);

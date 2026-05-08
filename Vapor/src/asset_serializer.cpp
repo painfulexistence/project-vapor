@@ -15,7 +15,7 @@ void AssetSerializer::serializeScene(const std::shared_ptr<Scene>& scene, const 
         throw std::runtime_error(fmt::format("Failed to open file for writing: {}", path));
     }
 
-    cereal::BinaryOutputArchive archive(file);
+    auto archive(file) -> cereal::BinaryOutputArchive;
     // archive(scene.name);
     archive(scene->vertices);
     archive(scene->indices);
@@ -68,7 +68,7 @@ std::shared_ptr<Scene> AssetSerializer::deserializeScene(const std::string& path
         throw std::runtime_error(fmt::format("Failed to open file for reading: {}", path));
     }
 
-    cereal::BinaryInputArchive archive(file);
+    auto archive(file) -> cereal::BinaryInputArchive;
     auto scene = std::make_shared<Scene>();
     // archive(scene->name);
     archive(scene->vertices);
@@ -217,7 +217,7 @@ void AssetSerializer::serializeMaterial(cereal::BinaryOutputArchive& archive, co
     archive(material->clearcoat);
     archive(material->clearcoatGloss);
 
-    auto serializeImageID = [&](const std::shared_ptr<Image>& image) {
+    auto serializeImageID = [&](const std::shared_ptr<Image>& image) -> void {
         if (!image) {
             archive(static_cast<Uint32>(-1));
         } else {
@@ -415,7 +415,7 @@ void AssetSerializer::serializeDirectionalLight(cereal::BinaryOutputArchive& arc
     archive(light.intensity);
 }
 
-DirectionalLight AssetSerializer::deserializeDirectionalLight(cereal::BinaryInputArchive& archive) {
+auto AssetSerializer::deserializeDirectionalLight(cereal::BinaryInputArchive& archive) -> DirectionalLight {
     DirectionalLight light;
     archive(light.direction);
     archive(light.color);
@@ -430,7 +430,7 @@ void AssetSerializer::serializePointLight(cereal::BinaryOutputArchive& archive, 
     archive(light.radius);
 }
 
-PointLight AssetSerializer::deserializePointLight(cereal::BinaryInputArchive& archive) {
+auto AssetSerializer::deserializePointLight(cereal::BinaryInputArchive& archive) -> PointLight {
     PointLight light;
     archive(light.position);
     archive(light.color);

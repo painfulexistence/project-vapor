@@ -119,7 +119,7 @@ void InputManager::clearMappings()
     keyToAction.clear();
 }
 
-const InputAction InputManager::getActionForKey(SDL_Scancode key) const
+auto InputManager::getActionForKey(SDL_Scancode key) const -> const InputAction
 {
     auto it = keyToAction.find(key);
     if (it != keyToAction.end()) {

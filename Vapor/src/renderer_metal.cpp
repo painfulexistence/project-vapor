@@ -37,26 +37,26 @@
 
 namespace Vapor {
 
-    class RmlUiRenderer_Metal : public Rml::RenderInterface {
+    class RmlUiRendererMetal : public Rml::RenderInterface {
     public:
-        explicit RmlUiRenderer_Metal(MTL::Device* device) : m_device(device) {
+        explicit RmlUiRendererMetal(MTL::Device* device) : m_device(device) {
             m_transform = Rml::Matrix4f::Identity();
         }
 
-        ~RmlUiRenderer_Metal() override {
-            Shutdown();
+        ~RmlUiRendererMetal() override {
+            shutdown();
         }
 
-        bool Initialize() {
+        auto initialize() -> bool {
             if (!m_device) {
                 return false;
             }
-            CreateDefaultWhiteTexture();
-            CreatePipelineState();
+            createDefaultWhiteTexture();
+            createPipelineState();
             return true;
         }
 
-        void Shutdown() {
+        void shutdown() {
             m_geometry.clear();
             m_textures.clear();
             m_pipelineState.reset();
@@ -64,7 +64,7 @@ namespace Vapor {
             m_defaultWhiteTexture.reset();
         }
 
-        void BeginFrame(MTL::CommandBuffer* commandBuffer, MTL::Texture* renderTarget, int width, int height) {
+        void beginFrame(MTL::CommandBuffer* commandBuffer, MTL::Texture* renderTarget, int width, int height) {
             if (!commandBuffer || !renderTarget) {
                 return;
             }
@@ -110,7 +110,7 @@ namespace Vapor {
             m_currentEncoder->setScissorRect(scissorRect);
         }
 
-        void EndFrame() {
+        void endFrame() {
             if (m_currentEncoder) {
                 m_currentEncoder->endEncoding();
                 m_currentEncoder = nullptr;
@@ -121,8 +121,8 @@ namespace Vapor {
         }
 
         // Rml::RenderInterface implementation
-        Rml::CompiledGeometryHandle
-            CompileGeometry(Rml::Span<const Rml::Vertex> vertices, Rml::Span<const int> indices) override {
+        auto
+            CompileGeometry(Rml::Span<const Rml::Vertex> vertices, Rml::Span<const int> indices) -> Rml::CompiledGeometryHandle override {
             if (!m_device) {
                 return 0;
             }
@@ -235,13 +235,13 @@ namespace Vapor {
             m_scissor.height = region.Height();
         }
 
-        Rml::TextureHandle LoadTexture(Rml::Vector2i& texture_dimensions, const Rml::String& source) override {
+        auto LoadTexture(Rml::Vector2i& texture_dimensions, const Rml::String& source) -> Rml::TextureHandle override {
             // Not implemented for now
             return 0;
         }
 
-        Rml::TextureHandle
-            GenerateTexture(Rml::Span<const Rml::byte> source, Rml::Vector2i source_dimensions) override {
+        auto
+            GenerateTexture(Rml::Span<const Rml::byte> source, Rml::Vector2i source_dimensions) -> Rml::TextureHandle override {
             if (!m_device) {
                 return 0;
             }
@@ -298,7 +298,7 @@ namespace Vapor {
             int height;
         };
 
-        void CreateDefaultWhiteTexture() {
+        void createDefaultWhiteTexture() {
             if (!m_device) {
                 return;
             }
@@ -319,7 +319,7 @@ namespace Vapor {
             }
         }
 
-        void CreatePipelineState() {
+        void createPipelineState() {
             if (!m_device) {
                 return;
             }
@@ -432,7 +432,7 @@ public:
     explicit PrePass(Renderer_Metal* renderer) : RenderPass(renderer) {
     }
 
-    const char* getName() const override {
+    auto getName() const -> const char* override {
         return "PrePass";
     }
 
@@ -499,7 +499,7 @@ public:
     explicit TLASBuildPass(Renderer_Metal* renderer) : RenderPass(renderer) {
     }
 
-    const char* getName() const override {
+    auto getName() const -> const char* override {
         return "TLASBuildPass";
     }
 
@@ -518,12 +518,12 @@ public:
         }
 
         // Create TLAS descriptor
-        auto TLASDesc = NS::TransferPtr(MTL::InstanceAccelerationStructureDescriptor::alloc()->init());
-        TLASDesc->setInstanceCount(r.accelInstances.size());
-        TLASDesc->setInstancedAccelerationStructures(r.BLASArray.get());
-        TLASDesc->setInstanceDescriptorBuffer(r.accelInstanceBuffers[r.currentFrameInFlight].get());
+        auto tlasDesc = NS::TransferPtr(MTL::InstanceAccelerationStructureDescriptor::alloc()->init());
+        tlasDesc->setInstanceCount(r.accelInstances.size());
+        tlasDesc->setInstancedAccelerationStructures(r.BLASArray.get());
+        tlasDesc->setInstanceDescriptorBuffer(r.accelInstanceBuffers[r.currentFrameInFlight].get());
 
-        auto TLASSizes = r.device->accelerationStructureSizes(TLASDesc.get());
+        auto tlasSizes = r.device->accelerationStructureSizes(TLASDesc.get());
         if (!r.TLASScratchBuffers[r.currentFrameInFlight]
             || r.TLASScratchBuffers[r.currentFrameInFlight]->length() < TLASSizes.buildScratchBufferSize) {
             r.TLASScratchBuffers[r.currentFrameInFlight] =
@@ -554,7 +554,7 @@ public:
     explicit NormalResolvePass(Renderer_Metal* renderer) : RenderPass(renderer) {
     }
 
-    const char* getName() const override {
+    auto getName() const -> const char* override {
         return "NormalResolvePass";
     }
 
@@ -580,7 +580,7 @@ public:
     explicit TileCullingPass(Renderer_Metal* renderer) : RenderPass(renderer) {
     }
 
-    const char* getName() const override {
+    auto getName() const -> const char* override {
         return "TileCullingPass";
     }
 
@@ -611,7 +611,7 @@ public:
     explicit RaytraceShadowPass(Renderer_Metal* renderer) : RenderPass(renderer) {
     }
 
-    const char* getName() const override {
+    auto getName() const -> const char* override {
         return "RaytraceShadowPass";
     }
 
@@ -647,7 +647,7 @@ public:
     explicit RaytraceAOPass(Renderer_Metal* renderer) : RenderPass(renderer) {
     }
 
-    const char* getName() const override {
+    auto getName() const -> const char* override {
         return "RaytraceAOPass";
     }
 
@@ -676,7 +676,7 @@ public:
     explicit SkyAtmospherePass(Renderer_Metal* renderer) : RenderPass(renderer) {
     }
 
-    const char* getName() const override {
+    auto getName() const -> const char* override {
         return "SkyAtmospherePass";
     }
 
@@ -729,7 +729,7 @@ public:
     explicit SkyCapturePass(Renderer_Metal* renderer) : RenderPass(renderer) {
     }
 
-    const char* getName() const override {
+    auto getName() const -> const char* override {
         return "SkyCapturePass";
     }
 
@@ -752,7 +752,7 @@ public:
         // Render each face of the cubemap
         for (uint32_t face = 0; face < 6; ++face) {
             // Update capture data
-            IBLCaptureData* captureData = reinterpret_cast<IBLCaptureData*>(r.iblCaptureDataBuffer->contents());
+            auto* captureData = reinterpret_cast<IBLCaptureData*>(r.iblCaptureDataBuffer->contents());
             captureData->viewProj = captureProj * captureViews[face];
             captureData->faceIndex = face;
             captureData->roughness = 0.0f;
@@ -790,7 +790,7 @@ public:
     explicit IrradianceConvolutionPass(Renderer_Metal* renderer) : RenderPass(renderer) {
     }
 
-    const char* getName() const override {
+    auto getName() const -> const char* override {
         return "IrradianceConvolutionPass";
     }
 
@@ -801,7 +801,7 @@ public:
 
         // Render each face of the irradiance cubemap
         for (uint32_t face = 0; face < 6; ++face) {
-            IBLCaptureData* captureData = reinterpret_cast<IBLCaptureData*>(r.iblCaptureDataBuffer->contents());
+            auto* captureData = reinterpret_cast<IBLCaptureData*>(r.iblCaptureDataBuffer->contents());
             captureData->faceIndex = face;
             captureData->roughness = 0.0f;
             r.iblCaptureDataBuffer->didModifyRange(NS::Range::Make(0, r.iblCaptureDataBuffer->length()));
@@ -832,7 +832,7 @@ public:
     explicit PrefilterEnvMapPass(Renderer_Metal* renderer) : RenderPass(renderer) {
     }
 
-    const char* getName() const override {
+    auto getName() const -> const char* override {
         return "PrefilterEnvMapPass";
     }
 
@@ -849,7 +849,7 @@ public:
 
             // For each face
             for (uint32_t face = 0; face < 6; ++face) {
-                IBLCaptureData* captureData = reinterpret_cast<IBLCaptureData*>(r.iblCaptureDataBuffer->contents());
+                auto* captureData = reinterpret_cast<IBLCaptureData*>(r.iblCaptureDataBuffer->contents());
                 captureData->faceIndex = face;
                 captureData->roughness = roughness;
                 r.iblCaptureDataBuffer->didModifyRange(NS::Range::Make(0, r.iblCaptureDataBuffer->length()));
@@ -882,7 +882,7 @@ public:
     explicit BRDFLUTPass(Renderer_Metal* renderer) : RenderPass(renderer) {
     }
 
-    const char* getName() const override {
+    auto getName() const -> const char* override {
         return "BRDFLUTPass";
     }
 
@@ -915,7 +915,7 @@ public:
     explicit MainRenderPass(Renderer_Metal* renderer) : RenderPass(renderer) {
     }
 
-    const char* getName() const override {
+    auto getName() const -> const char* override {
         return "MainRenderPass";
     }
 
@@ -1018,7 +1018,7 @@ public:
     explicit WaterPass(Renderer_Metal* renderer) : RenderPass(renderer) {
     }
 
-    const char* getName() const override {
+    auto getName() const -> const char* override {
         return "WaterPass";
     }
 
@@ -1039,7 +1039,7 @@ public:
         modelMatrix = glm::scale(modelMatrix, r.waterTransform.scale);
 
         // Update water data buffer
-        WaterData* waterData = reinterpret_cast<WaterData*>(r.waterDataBuffers[r.currentFrameInFlight]->contents());
+        auto* waterData = reinterpret_cast<WaterData*>(r.waterDataBuffers[r.currentFrameInFlight]->contents());
         *waterData = r.waterSettings;
         waterData->modelMatrix = modelMatrix;
         waterData->time = time;
@@ -1107,7 +1107,7 @@ public:
     explicit ParticlePass(Renderer_Metal* renderer) : RenderPass(renderer) {
     }
 
-    const char* getName() const override {
+    auto getName() const -> const char* override {
         return "ParticlePass";
     }
 
@@ -1232,7 +1232,7 @@ public:
     explicit LightScatteringPass(Renderer_Metal* renderer) : RenderPass(renderer) {
     }
 
-    const char* getName() const override {
+    auto getName() const -> const char* override {
         return "LightScatteringPass";
     }
 
@@ -1245,7 +1245,7 @@ public:
         glm::vec2 screenSize = glm::vec2(drawableSize.width, drawableSize.height);
 
         // Calculate sun screen position by projecting sun direction
-        AtmosphereData* atmos = reinterpret_cast<AtmosphereData*>(r.atmosphereDataBuffer->contents());
+        auto* atmos = reinterpret_cast<AtmosphereData*>(r.atmosphereDataBuffer->contents());
         glm::vec3 sunDir = glm::normalize(atmos->sunDirection);
 
         // Project sun position to screen space
@@ -1267,7 +1267,7 @@ public:
         sunScreenPos.y = 1.0f - sunScreenPos.y;// Flip Y for Metal
 
         // Update light scattering data buffer
-        LightScatteringData* lsData =
+        auto* lsData =
             reinterpret_cast<LightScatteringData*>(r.lightScatteringDataBuffers[r.currentFrameInFlight]->contents());
         lsData->sunScreenPos = sunScreenPos;
         lsData->screenSize = screenSize;
@@ -1322,7 +1322,7 @@ public:
     explicit VolumetricFogPass(Renderer_Metal* renderer) : RenderPass(renderer) {
     }
 
-    const char* getName() const override {
+    auto getName() const -> const char* override {
         return "VolumetricFogPass";
     }
 
@@ -1334,9 +1334,9 @@ public:
         auto drawableSize = r.swapchain->drawableSize();
 
         // Update fog data buffer
-        AtmosphereData* atmos = reinterpret_cast<AtmosphereData*>(r.atmosphereDataBuffer->contents());
+        auto* atmos = reinterpret_cast<AtmosphereData*>(r.atmosphereDataBuffer->contents());
 
-        VolumetricFogData* fogData =
+        auto* fogData =
             reinterpret_cast<VolumetricFogData*>(r.volumetricFogDataBuffers[r.currentFrameInFlight]->contents());
         fogData->invViewProj = glm::inverse(r.currentCamera->getProjMatrix() * r.currentCamera->getViewMatrix());
         fogData->cameraPosition = r.currentCamera->getEye();
@@ -1399,7 +1399,7 @@ public:
     explicit VolumetricCloudPass(Renderer_Metal* renderer) : RenderPass(renderer) {
     }
 
-    const char* getName() const override {
+    auto getName() const -> const char* override {
         return "VolumetricCloudPass";
     }
 
@@ -1415,9 +1415,9 @@ public:
         auto drawableSize = r.swapchain->drawableSize();
 
         // Update cloud data buffer
-        AtmosphereData* atmos = reinterpret_cast<AtmosphereData*>(r.atmosphereDataBuffer->contents());
+        auto* atmos = reinterpret_cast<AtmosphereData*>(r.atmosphereDataBuffer->contents());
 
-        VolumetricCloudData* cloudData =
+        auto* cloudData =
             reinterpret_cast<VolumetricCloudData*>(r.volumetricCloudDataBuffers[r.currentFrameInFlight]->contents());
         cloudData->invViewProj = glm::inverse(r.currentCamera->getProjMatrix() * r.currentCamera->getViewMatrix());
         cloudData->prevViewProj = r.volumetricCloudSettings.prevViewProj;// For temporal reprojection
@@ -1608,7 +1608,7 @@ public:
     explicit SunFlarePass(Renderer_Metal* renderer) : RenderPass(renderer) {
     }
 
-    const char* getName() const override {
+    auto getName() const -> const char* override {
         return "SunFlarePass";
     }
 
@@ -1621,7 +1621,7 @@ public:
         glm::vec2 screenSize = glm::vec2(drawableSize.width, drawableSize.height);
 
         // Calculate sun screen position
-        AtmosphereData* atmos = reinterpret_cast<AtmosphereData*>(r.atmosphereDataBuffer->contents());
+        auto* atmos = reinterpret_cast<AtmosphereData*>(r.atmosphereDataBuffer->contents());
         glm::vec3 sunDir = glm::normalize(atmos->sunDirection);
         glm::vec3 camPos = r.currentCamera->getEye();
         glm::vec3 sunWorldPos = camPos + sunDir * 10000.0f;
@@ -1640,7 +1640,7 @@ public:
         sunScreenPos.y = 1.0f - sunScreenPos.y;
 
         // Update flare data buffer
-        SunFlareData* flareData =
+        auto* flareData =
             reinterpret_cast<SunFlareData*>(r.sunFlareDataBuffers[r.currentFrameInFlight]->contents());
         flareData->sunScreenPos = sunScreenPos;
         flareData->screenSize = screenSize;
@@ -1715,7 +1715,7 @@ public:
     explicit BloomBrightnessPass(Renderer_Metal* renderer) : RenderPass(renderer) {
     }
 
-    const char* getName() const override {
+    auto getName() const -> const char* override {
         return "BloomBrightnessPass";
     }
 
@@ -1745,7 +1745,7 @@ public:
     explicit BloomDownsamplePass(Renderer_Metal* renderer) : RenderPass(renderer) {
     }
 
-    const char* getName() const override {
+    auto getName() const -> const char* override {
         return "BloomDownsamplePass";
     }
 
@@ -1796,7 +1796,7 @@ public:
     explicit BloomUpsamplePass(Renderer_Metal* renderer) : RenderPass(renderer) {
     }
 
-    const char* getName() const override {
+    auto getName() const -> const char* override {
         return "BloomUpsamplePass";
     }
 
@@ -1829,7 +1829,7 @@ public:
     explicit BloomCompositePass(Renderer_Metal* renderer) : RenderPass(renderer) {
     }
 
-    const char* getName() const override {
+    auto getName() const -> const char* override {
         return "BloomCompositePass";
     }
 
@@ -1865,7 +1865,7 @@ public:
     explicit DOFCoCPass(Renderer_Metal* renderer) : RenderPass(renderer) {
     }
 
-    const char* getName() const override {
+    auto getName() const -> const char* override {
         return "DOFCoCPass";
     }
 
@@ -1916,7 +1916,7 @@ public:
     explicit DOFBlurPass(Renderer_Metal* renderer) : RenderPass(renderer) {
     }
 
-    const char* getName() const override {
+    auto getName() const -> const char* override {
         return "DOFBlurPass";
     }
 
@@ -1954,7 +1954,7 @@ public:
     explicit DOFCompositePass(Renderer_Metal* renderer) : RenderPass(renderer) {
     }
 
-    const char* getName() const override {
+    auto getName() const -> const char* override {
         return "DOFCompositePass";
     }
 
@@ -1986,7 +1986,7 @@ public:
     explicit PostProcessPass(Renderer_Metal* renderer) : RenderPass(renderer) {
     }
 
-    const char* getName() const override {
+    auto getName() const -> const char* override {
         return "PostProcessPass";
     }
 
@@ -2051,7 +2051,7 @@ public:
     explicit DebugDrawPass(Renderer_Metal* renderer) : RenderPass(renderer) {
     }
 
-    const char* getName() const override {
+    auto getName() const -> const char* override {
         return "DebugDrawPass";
     }
 
@@ -2131,7 +2131,7 @@ public:
     explicit RmlUiPass(Renderer_Metal* renderer) : RenderPass(renderer) {
     }
 
-    const char* getName() const override {
+    auto getName() const -> const char* override {
         return "RmlUiPass";
     }
 
@@ -2148,7 +2148,7 @@ public:
     explicit ImGuiPass(Renderer_Metal* renderer) : RenderPass(renderer) {
     }
 
-    const char* getName() const override {
+    auto getName() const -> const char* override {
         return "ImGuiPass";
     }
 
@@ -2178,7 +2178,7 @@ public:
     explicit WorldCanvasPass(Renderer_Metal* renderer) : RenderPass(renderer) {
     }
 
-    const char* getName() const override {
+    auto getName() const -> const char* override {
         return "WorldCanvasPass";
     }
 
@@ -2195,8 +2195,8 @@ public:
         auto& indexBuffer = r.batch3DIndexBuffers[r.currentFrameInFlight];
         auto& uniformBuffer = r.batch3DUniformBuffers[r.currentFrameInFlight];
 
-        Uint32 vertexCount = static_cast<Uint32>(r.batch3DVertices.size());
-        Uint32 indexCount = static_cast<Uint32>(r.batch3DIndices.size());
+        auto vertexCount = static_cast<Uint32>(r.batch3DVertices.size());
+        auto indexCount = static_cast<Uint32>(r.batch3DIndices.size());
 
         size_t vertexDataSize = vertexCount * sizeof(Batch2DVertex);
         size_t indexDataSize = indexCount * sizeof(Uint32);
@@ -2282,7 +2282,7 @@ public:
     explicit CanvasPass(Renderer_Metal* renderer) : RenderPass(renderer) {
     }
 
-    const char* getName() const override {
+    auto getName() const -> const char* override {
         return "CanvasPass";
     }
 
@@ -2299,8 +2299,8 @@ public:
         auto& indexBuffer = r.batch2DIndexBuffers[r.currentFrameInFlight];
         auto& uniformBuffer = r.batch2DUniformBuffers[r.currentFrameInFlight];
 
-        Uint32 vertexCount = static_cast<Uint32>(r.batch2DVertices.size());
-        Uint32 indexCount = static_cast<Uint32>(r.batch2DIndices.size());
+        auto vertexCount = static_cast<Uint32>(r.batch2DVertices.size());
+        auto indexCount = static_cast<Uint32>(r.batch2DIndices.size());
 
         size_t vertexDataSize = vertexCount * sizeof(Batch2DVertex);
         size_t indexDataSize = indexCount * sizeof(Uint32);
@@ -2514,8 +2514,8 @@ auto Renderer_Metal::deinit() -> void {
 
     // UI cleanup
     if (m_uiRenderer) {
-        auto* uiRenderer = static_cast<Vapor::RmlUiRenderer_Metal*>(m_uiRenderer);
-        uiRenderer->Shutdown();
+        auto* uiRenderer = static_cast<Vapor::RmlUiRendererMetal*>(m_uiRenderer);
+        uiRenderer->shutdown();
         delete uiRenderer;
         m_uiRenderer = nullptr;
     }
@@ -2529,7 +2529,7 @@ auto Renderer_Metal::deinit() -> void {
     isInitialized = false;
 }
 
-bool Renderer_Metal::initUI() {
+auto Renderer_Metal::initUI() -> bool {
     // Get the engine core and RmlUI manager
     auto* engineCore = Vapor::EngineCore::Get();
     if (!engineCore) {
@@ -2544,8 +2544,8 @@ bool Renderer_Metal::initUI() {
     }
 
     // Create Metal UI renderer
-    auto* uiRenderer = new Vapor::RmlUiRenderer_Metal(device);
-    if (!uiRenderer->Initialize()) {
+    auto* uiRenderer = new Vapor::RmlUiRendererMetal(device);
+    if (!uiRenderer->initialize()) {
         fmt::print("Renderer_Metal::initUI: Failed to initialize Metal UI renderer\n");
         delete uiRenderer;
         return false;
@@ -2576,7 +2576,7 @@ void Renderer_Metal::renderUI() {
         return;
     }
 
-    auto* uiRenderer = static_cast<Vapor::RmlUiRenderer_Metal*>(m_uiRenderer);
+    auto* uiRenderer = static_cast<Vapor::RmlUiRendererMetal*>(m_uiRenderer);
 
     auto surface = currentDrawable;
     if (!surface) return;
@@ -2585,9 +2585,9 @@ void Renderer_Metal::renderUI() {
     int windowWidth, windowHeight;
     SDL_GetWindowSize(window, &windowWidth, &windowHeight);
 
-    uiRenderer->BeginFrame(currentCommandBuffer, surface->texture(), windowWidth, windowHeight);
+    uiRenderer->beginFrame(currentCommandBuffer, surface->texture(), windowWidth, windowHeight);
     m_uiContext->Render();
-    uiRenderer->EndFrame();
+    uiRenderer->endFrame();
 }
 
 auto Renderer_Metal::createResources() -> void {
@@ -3907,7 +3907,7 @@ auto Renderer_Metal::createResources() -> void {
                 float fy = static_cast<float>(y) / texSize;
                 float noise = (sin(fx * 50.0f) * cos(fy * 50.0f) + 1.0f) * 0.5f;
                 noise *= (sin(fx * 30.0f + fy * 20.0f) + 1.0f) * 0.5f;
-                Uint8 v = static_cast<Uint8>(noise * 200 + 55);
+                auto v = static_cast<Uint8>(noise * 200 + 55);
                 Uint32 idx = (y * texSize + x) * 4;
                 foamData[idx + 0] = v;
                 foamData[idx + 1] = v;
@@ -3937,7 +3937,7 @@ auto Renderer_Metal::createResources() -> void {
                 noise += (sin(fx * 40.0f + 0.3f) * cos(fy * 40.0f + 0.7f) + 1.0f) * 0.125f;
                 noise += (sin(fx * 80.0f + 1.5f) * cos(fy * 80.0f + 2.1f) + 1.0f) * 0.0625f;
                 noise = glm::clamp(noise, 0.0f, 1.0f);
-                Uint8 v = static_cast<Uint8>(noise * 255);
+                auto v = static_cast<Uint8>(noise * 255);
                 Uint32 idx = (y * texSize + x) * 4;
                 noiseData[idx + 0] = v;
                 noiseData[idx + 1] = v;
@@ -3971,9 +3971,9 @@ auto Renderer_Metal::createResources() -> void {
             for (Uint32 y = 0; y < faceSize; ++y) {
                 for (Uint32 x = 0; x < faceSize; ++x) {
                     float t = static_cast<float>(y) / faceSize;
-                    Uint8 r = static_cast<Uint8>((0.4f + t * 0.3f) * 255);
-                    Uint8 g = static_cast<Uint8>((0.6f + t * 0.2f) * 255);
-                    Uint8 b = static_cast<Uint8>((0.8f + t * 0.1f) * 255);
+                    auto r = static_cast<Uint8>((0.4f + t * 0.3f) * 255);
+                    auto g = static_cast<Uint8>((0.6f + t * 0.2f) * 255);
+                    auto b = static_cast<Uint8>((0.8f + t * 0.1f) * 255);
                     Uint32 idx = (y * faceSize + x) * 4;
                     faceData[idx + 0] = r;
                     faceData[idx + 1] = g;
@@ -4958,8 +4958,8 @@ auto Renderer_Metal::draw(std::shared_ptr<Scene> scene, Camera& camera) -> void 
 }
 
 
-NS::SharedPtr<MTL::RenderPipelineState>
-    Renderer_Metal::createPipeline(const std::string& filename, bool isHDR, bool isColorOnly, Uint32 sampleCount) {
+auto
+    Renderer_Metal::createPipeline(const std::string& filename, bool isHDR, bool isColorOnly, Uint32 sampleCount) -> NS::SharedPtr<MTL::RenderPipelineState> {
     auto shaderSrc = readFile(filename);
 
     auto code = NS::String::string(shaderSrc.data(), NS::StringEncoding::UTF8StringEncoding);
@@ -5051,7 +5051,7 @@ NS::SharedPtr<MTL::RenderPipelineState>
     return pipeline;
 }
 
-NS::SharedPtr<MTL::ComputePipelineState> Renderer_Metal::createComputePipeline(const std::string& filename) {
+auto Renderer_Metal::createComputePipeline(const std::string& filename) -> NS::SharedPtr<MTL::ComputePipelineState> {
     auto shaderSrc = readFile(filename);
 
     auto code = NS::String::string(shaderSrc.data(), NS::StringEncoding::UTF8StringEncoding);
@@ -5077,7 +5077,7 @@ NS::SharedPtr<MTL::ComputePipelineState> Renderer_Metal::createComputePipeline(c
     return pipeline;
 }
 
-TextureHandle Renderer_Metal::createTexture(const std::shared_ptr<Image>& img) {
+auto Renderer_Metal::createTexture(const std::shared_ptr<Image>& img) -> TextureHandle {
     if (img) {
         MTL::PixelFormat pixelFormat = MTL::PixelFormat::PixelFormatRGBA8Unorm;
         switch (img->channelCount) {
@@ -5153,7 +5153,7 @@ TextureHandle Renderer_Metal::createTexture(const std::shared_ptr<Image>& img) {
 
 // ===== Font Rendering Implementation =====
 
-FontHandle Renderer_Metal::loadFont(const std::string& path, float baseSize) {
+auto Renderer_Metal::loadFont(const std::string& path, float baseSize) -> FontHandle {
     // Load font using FontManager
     FontHandle fontHandle = m_fontManager.loadFont(path, baseSize);
     if (!fontHandle.isValid()) {
@@ -5299,16 +5299,16 @@ void Renderer_Metal::drawText3D(
     }
 }
 
-glm::vec2 Renderer_Metal::measureText(FontHandle fontHandle, const std::string& text, float scale) {
+auto Renderer_Metal::measureText(FontHandle fontHandle, const std::string& text, float scale) -> glm::vec2 {
     return m_fontManager.measureText(fontHandle, text, scale);
 }
 
-float Renderer_Metal::getFontLineHeight(FontHandle fontHandle, float scale) {
+auto Renderer_Metal::getFontLineHeight(FontHandle fontHandle, float scale) -> float {
     Font* font = m_fontManager.getFont(fontHandle);
     return font ? font->lineHeight * scale : 0.0f;
 }
 
-BufferHandle Renderer_Metal::createVertexBuffer(const std::vector<VertexData>& vertices) {
+auto Renderer_Metal::createVertexBuffer(const std::vector<VertexData>& vertices) -> BufferHandle {
     auto stagingBuffer =
         NS::TransferPtr(device->newBuffer(vertices.size() * sizeof(VertexData), MTL::ResourceStorageModeShared));
     memcpy(stagingBuffer->contents(), vertices.data(), vertices.size() * sizeof(VertexData));
@@ -5327,7 +5327,7 @@ BufferHandle Renderer_Metal::createVertexBuffer(const std::vector<VertexData>& v
     return BufferHandle{ nextBufferID++ };
 }
 
-BufferHandle Renderer_Metal::createIndexBuffer(const std::vector<Uint32>& indices) {
+auto Renderer_Metal::createIndexBuffer(const std::vector<Uint32>& indices) -> BufferHandle {
     auto stagingBuffer =
         NS::TransferPtr(device->newBuffer(indices.size() * sizeof(Uint32), MTL::ResourceStorageModeShared));
     memcpy(stagingBuffer->contents(), indices.data(), indices.size() * sizeof(Uint32));
@@ -5345,15 +5345,15 @@ BufferHandle Renderer_Metal::createIndexBuffer(const std::vector<Uint32>& indice
     return BufferHandle{ nextBufferID++ };
 }
 
-NS::SharedPtr<MTL::Buffer> Renderer_Metal::getBuffer(BufferHandle handle) const {
+auto Renderer_Metal::getBuffer(BufferHandle handle) const -> NS::SharedPtr<MTL::Buffer> {
     return buffers.at(handle.rid);
 }
 
-NS::SharedPtr<MTL::Texture> Renderer_Metal::getTexture(TextureHandle handle) const {
+auto Renderer_Metal::getTexture(TextureHandle handle) const -> NS::SharedPtr<MTL::Texture> {
     return textures.at(handle.rid);
 }
 
-NS::SharedPtr<MTL::RenderPipelineState> Renderer_Metal::getPipeline(PipelineHandle handle) const {
+auto Renderer_Metal::getPipeline(PipelineHandle handle) const -> NS::SharedPtr<MTL::RenderPipelineState> {
     return pipelines.at(handle.rid);
 }
 
@@ -5734,9 +5734,9 @@ void Renderer_Metal::drawTriangleFilled2D(
 
 // Helper function to get Metal device without including renderer_metal.hpp in main.cpp
 // Takes void* to avoid needing Renderer_Metal definition in caller
-extern "C" void* getMetalDevice(void* renderer) {
+extern "C" auto getMetalDevice(void* renderer) -> void* {
     if (renderer) {
-        Renderer_Metal* metalRenderer = static_cast<Renderer_Metal*>(renderer);
+        auto* metalRenderer = static_cast<Renderer_Metal*>(renderer);
         return static_cast<void*>(metalRenderer->getDevice());
     }
     return nullptr;

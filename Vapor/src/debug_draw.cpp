@@ -13,7 +13,7 @@ void DebugDraw::clear() {
     triangleVertices.clear();
 }
 
-glm::vec3 DebugDraw::rotatePoint(const glm::vec3& point, const glm::quat& rotation) const {
+auto DebugDraw::rotatePoint(const glm::vec3& point, const glm::quat& rotation) const -> glm::vec3 {
     return rotation * point;
 }
 

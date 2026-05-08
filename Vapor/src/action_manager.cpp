@@ -68,7 +68,7 @@ void ActionManager::stopAll() {
     m_actions.clear();
 }
 
-bool ActionManager::hasTag(const std::string& tag) const {
+auto ActionManager::hasTag(const std::string& tag) const -> bool {
     auto it = m_tagActions.find(tag);
     return it != m_tagActions.end() && !it->second.empty();
 }

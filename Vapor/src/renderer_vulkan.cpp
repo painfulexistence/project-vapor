@@ -1574,7 +1574,7 @@ auto Renderer_Vulkan::draw(std::shared_ptr<Scene> scene, Camera& camera) -> void
     currentFrameInFlight = (currentFrameInFlight + 1) % MAX_FRAMES_IN_FLIGHT;
 }
 
-VkShaderModule Renderer_Vulkan::createShaderModule(const std::string& code) {
+auto Renderer_Vulkan::createShaderModule(const std::string& code) -> VkShaderModule {
     VkShaderModuleCreateInfo shaderModuleInfo = {};
     shaderModuleInfo.sType = VK_STRUCTURE_TYPE_SHADER_MODULE_CREATE_INFO;
     shaderModuleInfo.codeSize = code.size();
@@ -1586,12 +1586,12 @@ VkShaderModule Renderer_Vulkan::createShaderModule(const std::string& code) {
     return shaderModule;
 }
 
-VkPipeline Renderer_Vulkan::createPipeline(const std::string& filename1, const std::string& filename2) {
+auto Renderer_Vulkan::createPipeline(const std::string& filename1, const std::string& filename2) -> VkPipeline {
     // TODO: add a generic pipeline creation function
     return createRenderPipeline(filename1, filename2);
 }
 
-VkPipeline Renderer_Vulkan::createRenderPipeline(const std::string& vertShader, const std::string& fragShader) {
+auto Renderer_Vulkan::createRenderPipeline(const std::string& vertShader, const std::string& fragShader) -> VkPipeline {
     // Shader stages
     auto vertShaderCode = readFile(vertShader);
     auto fragShaderCode = readFile(fragShader);
@@ -1723,7 +1723,7 @@ VkPipeline Renderer_Vulkan::createRenderPipeline(const std::string& vertShader, 
     return pipeline;
 }
 
-VkPipeline Renderer_Vulkan::createPrePassPipeline(const std::string& vertShader, const std::string& fragShader) {
+auto Renderer_Vulkan::createPrePassPipeline(const std::string& vertShader, const std::string& fragShader) -> VkPipeline {
     // Shader stages
     auto vertShaderCode = readFile(vertShader);
     auto fragShaderCode = readFile(fragShader);
@@ -1856,7 +1856,7 @@ VkPipeline Renderer_Vulkan::createPrePassPipeline(const std::string& vertShader,
     return pipeline;
 }
 
-VkPipeline Renderer_Vulkan::createPostProcessPipeline(const std::string& vertShader, const std::string& fragShader) {
+auto Renderer_Vulkan::createPostProcessPipeline(const std::string& vertShader, const std::string& fragShader) -> VkPipeline {
     // Shader stages
     auto vertShaderCode = readFile(vertShader);
     auto fragShaderCode = readFile(fragShader);
@@ -1978,7 +1978,7 @@ VkPipeline Renderer_Vulkan::createPostProcessPipeline(const std::string& vertSha
     return pipeline;
 }
 
-VkPipeline Renderer_Vulkan::createComputePipeline(const std::string& filename, VkPipelineLayout layout) {
+auto Renderer_Vulkan::createComputePipeline(const std::string& filename, VkPipelineLayout layout) -> VkPipeline {
     auto shaderCode = readFile(filename);
     auto shaderModule = createShaderModule(shaderCode);
     VkPipelineShaderStageCreateInfo compShaderStageInfo{};
@@ -2003,7 +2003,7 @@ VkPipeline Renderer_Vulkan::createComputePipeline(const std::string& filename, V
     return pipeline;
 }
 
-RenderTargetHandle Renderer_Vulkan::createRenderTarget(RenderTargetUsage usage, VkFormat format) {
+auto Renderer_Vulkan::createRenderTarget(RenderTargetUsage usage, VkFormat format) -> RenderTargetHandle {
     VkImageUsageFlagBits usageFlag;
     VkImageAspectFlagBits aspectFlag;
     VkSampleCountFlagBits sampleCount;
@@ -2110,7 +2110,7 @@ RenderTargetHandle Renderer_Vulkan::createRenderTarget(RenderTargetUsage usage, 
     return RenderTargetHandle{ nextImageID++ };
 }
 
-TextureHandle Renderer_Vulkan::createTexture(const std::shared_ptr<Image>& img) {
+auto Renderer_Vulkan::createTexture(const std::shared_ptr<Image>& img) -> TextureHandle {
     if (!img) {
         throw std::runtime_error(fmt::format("Failed to create texture at {}!\n", img->uri));
     }
@@ -2322,7 +2322,7 @@ BufferHandle Renderer_Vulkan::createIndexBuffer(std::vector<Uint32> indices) {
     return bufferHandle;
 }
 
-BufferHandle Renderer_Vulkan::createBuffer(BufferUsage usage, VkDeviceSize size) {
+auto Renderer_Vulkan::createBuffer(BufferUsage usage, VkDeviceSize size) -> BufferHandle {
     VkBufferCreateInfo bufferInfo{};
     bufferInfo.sType = VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO;
     bufferInfo.size = size;
@@ -2385,7 +2385,7 @@ BufferHandle Renderer_Vulkan::createBuffer(BufferUsage usage, VkDeviceSize size)
     return BufferHandle{ nextBufferID++ };
 }
 
-BufferHandle Renderer_Vulkan::createBufferMapped(BufferUsage usage, VkDeviceSize size, void** mappedDataPtr) {
+auto Renderer_Vulkan::createBufferMapped(BufferUsage usage, VkDeviceSize size, void** mappedDataPtr) -> BufferHandle {
     auto bufferHandle = createBuffer(usage, size);
 
     VkDeviceMemory bufferMemory = getBufferMemory(bufferHandle);// TODO: use internal pointer
@@ -2396,39 +2396,39 @@ BufferHandle Renderer_Vulkan::createBufferMapped(BufferUsage usage, VkDeviceSize
     return bufferHandle;
 }
 
-VkBuffer Renderer_Vulkan::getBuffer(BufferHandle handle) const {
+auto Renderer_Vulkan::getBuffer(BufferHandle handle) const -> VkBuffer {
     return buffers.at(handle.rid);
 }
 
-VkDeviceMemory Renderer_Vulkan::getBufferMemory(BufferHandle handle) const {
+auto Renderer_Vulkan::getBufferMemory(BufferHandle handle) const -> VkDeviceMemory {
     return bufferMemories.at(handle.rid);
 }
 
-VkImage Renderer_Vulkan::getTexture(TextureHandle handle) const {
+auto Renderer_Vulkan::getTexture(TextureHandle handle) const -> VkImage {
     return images.at(handle.rid);
 }
 
-VkImageView Renderer_Vulkan::getTextureView(TextureHandle handle) const {
+auto Renderer_Vulkan::getTextureView(TextureHandle handle) const -> VkImageView {
     return imageViews.at(handle.rid);
 }
 
-VkDeviceMemory Renderer_Vulkan::getTextureMemory(TextureHandle handle) const {
+auto Renderer_Vulkan::getTextureMemory(TextureHandle handle) const -> VkDeviceMemory {
     return imageMemories.at(handle.rid);
 }
 
-VkImage Renderer_Vulkan::getRenderTarget(RenderTargetHandle handle) const {
+auto Renderer_Vulkan::getRenderTarget(RenderTargetHandle handle) const -> VkImage {
     return images.at(handle.rid);
 }
 
-VkImageView Renderer_Vulkan::getRenderTargetView(RenderTargetHandle handle) const {
+auto Renderer_Vulkan::getRenderTargetView(RenderTargetHandle handle) const -> VkImageView {
     return imageViews.at(handle.rid);
 }
 
-VkDeviceMemory Renderer_Vulkan::getRenderTargetMemory(RenderTargetHandle handle) const {
+auto Renderer_Vulkan::getRenderTargetMemory(RenderTargetHandle handle) const -> VkDeviceMemory {
     return imageMemories.at(handle.rid);
 }
 
-VkPipeline Renderer_Vulkan::getPipeline(PipelineHandle handle) const {
+auto Renderer_Vulkan::getPipeline(PipelineHandle handle) const -> VkPipeline {
     return pipelines.at(handle.rid);
 }
 

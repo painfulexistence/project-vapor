@@ -11,7 +11,7 @@
 #include <Jolt/Physics/Vehicle/VehicleCollisionTester.h>
 
 // Template: Sedan configuration
-VehicleSettings VehicleSettings::createSedan() {
+auto VehicleSettings::createSedan() -> VehicleSettings {
     VehicleSettings settings;
     settings.mass = 1500.0f;
     settings.dimensions = glm::vec3(0.9f, 0.7f, 2.2f);  // Typical sedan size
@@ -55,7 +55,7 @@ VehicleSettings VehicleSettings::createSedan() {
 }
 
 // Template: Truck configuration
-VehicleSettings VehicleSettings::createTruck() {
+auto VehicleSettings::createTruck() -> VehicleSettings {
     VehicleSettings settings;
     settings.mass = 3500.0f;
     settings.dimensions = glm::vec3(1.2f, 1.2f, 3.0f);  // Larger truck size
@@ -258,50 +258,50 @@ void VehicleController::setHandbrake(bool enabled) {
     handbrakeEnabled = enabled;
 }
 
-glm::vec3 VehicleController::getPosition() const {
+auto VehicleController::getPosition() const -> glm::vec3 {
     // Use BodyInterface for thread-safe access
     auto* bodyInterface = physics->getBodyInterface();
     JPH::RVec3 pos = bodyInterface->GetPosition(vehicleBody->GetID());
     return glm::vec3(pos.GetX(), pos.GetY(), pos.GetZ());
 }
 
-glm::quat VehicleController::getRotation() const {
+auto VehicleController::getRotation() const -> glm::quat {
     // Use BodyInterface for thread-safe access
     auto* bodyInterface = physics->getBodyInterface();
     JPH::Quat rot = bodyInterface->GetRotation(vehicleBody->GetID());
     return glm::quat(rot.GetW(), rot.GetX(), rot.GetY(), rot.GetZ());
 }
 
-glm::vec3 VehicleController::getLinearVelocity() const {
+auto VehicleController::getLinearVelocity() const -> glm::vec3 {
     // Use BodyInterface for thread-safe access
     auto* bodyInterface = physics->getBodyInterface();
     JPH::Vec3 vel = bodyInterface->GetLinearVelocity(vehicleBody->GetID());
     return glm::vec3(vel.GetX(), vel.GetY(), vel.GetZ());
 }
 
-glm::vec3 VehicleController::getAngularVelocity() const {
+auto VehicleController::getAngularVelocity() const -> glm::vec3 {
     // Use BodyInterface for thread-safe access
     auto* bodyInterface = physics->getBodyInterface();
     JPH::Vec3 vel = bodyInterface->GetAngularVelocity(vehicleBody->GetID());
     return glm::vec3(vel.GetX(), vel.GetY(), vel.GetZ());
 }
 
-float VehicleController::getSpeed() const {
+auto VehicleController::getSpeed() const -> float {
     // Use BodyInterface for thread-safe access
     auto* bodyInterface = physics->getBodyInterface();
     JPH::Vec3 vel = bodyInterface->GetLinearVelocity(vehicleBody->GetID());
     return vel.Length();
 }
 
-float VehicleController::getSpeedKmh() const {
+auto VehicleController::getSpeedKmh() const -> float {
     return getSpeed() * 3.6f;  // m/s to km/h
 }
 
-int VehicleController::getWheelCount() const {
+auto VehicleController::getWheelCount() const -> int {
     return static_cast<int>(settings.wheels.size());
 }
 
-bool VehicleController::isWheelInContact(int wheelIndex) const {
+auto VehicleController::isWheelInContact(int wheelIndex) const -> bool {
     if (wheelIndex < 0 || wheelIndex >= getWheelCount()) return false;
     // Note: VehicleConstraint methods should be called from main thread only
     // These are typically called after physics update, so should be safe
@@ -310,7 +310,7 @@ bool VehicleController::isWheelInContact(int wheelIndex) const {
     return wheel->HasContact();
 }
 
-glm::vec3 VehicleController::getWheelPosition(int wheelIndex) const {
+auto VehicleController::getWheelPosition(int wheelIndex) const -> glm::vec3 {
     if (wheelIndex < 0 || wheelIndex >= getWheelCount()) return glm::vec3(0.0f);
     // Note: VehicleConstraint methods should be called from main thread only
     const JPH::Wheel* wheel = vehicleConstraint->GetWheel(wheelIndex);
@@ -319,7 +319,7 @@ glm::vec3 VehicleController::getWheelPosition(int wheelIndex) const {
     return glm::vec3(pos.GetX(), pos.GetY(), pos.GetZ());
 }
 
-glm::vec3 VehicleController::getWheelContactNormal(int wheelIndex) const {
+auto VehicleController::getWheelContactNormal(int wheelIndex) const -> glm::vec3 {
     if (wheelIndex < 0 || wheelIndex >= getWheelCount()) return glm::vec3(0, 1, 0);
     // Note: VehicleConstraint methods should be called from main thread only
     const JPH::Wheel* wheel = vehicleConstraint->GetWheel(wheelIndex);
@@ -328,7 +328,7 @@ glm::vec3 VehicleController::getWheelContactNormal(int wheelIndex) const {
     return glm::vec3(normal.GetX(), normal.GetY(), normal.GetZ());
 }
 
-float VehicleController::getWheelSuspensionLength(int wheelIndex) const {
+auto VehicleController::getWheelSuspensionLength(int wheelIndex) const -> float {
     if (wheelIndex < 0 || wheelIndex >= getWheelCount()) return 0.0f;
     // Note: VehicleConstraint methods should be called from main thread only
     const JPH::Wheel* wheel = vehicleConstraint->GetWheel(wheelIndex);
@@ -349,6 +349,6 @@ void VehicleController::update(float deltaTime) {
     controller->SetDriverInput(currentThrottle, currentSteering, currentBrake, handbrakeEnabled ? 1.0f : 0.0f);
 }
 
-JPH::BodyID VehicleController::getBodyID() const {
+auto VehicleController::getBodyID() const -> JPH::BodyID {
     return vehicleBody->GetID();
 }

@@ -20,7 +20,7 @@ namespace Vapor {
     ) {
 
         return loadResource<Image>(
-            path, m_imageCache, [path]() { return loadImageInternal(path); }, mode, onComplete
+            path, m_imageCache, [path]() -> auto { return loadImageInternal(path); }, mode, onComplete
         );
     }
 
@@ -34,7 +34,7 @@ namespace Vapor {
         std::string cacheKey = path + (optimized ? ":optimized" : ":standard");
 
         return loadResource<Scene>(
-            cacheKey, m_sceneCache, [path, optimized]() { return loadSceneInternal(path, optimized); }, mode, onComplete
+            cacheKey, m_sceneCache, [path, optimized]() -> auto { return loadSceneInternal(path, optimized); }, mode, onComplete
         );
     }
 
@@ -48,7 +48,7 @@ namespace Vapor {
     ) {
 
         return loadResource<Mesh>(
-            path, m_meshCache, [path, mtlBasedir]() { return loadMeshInternal(path, mtlBasedir); }, mode, onComplete
+            path, m_meshCache, [path, mtlBasedir]() -> auto { return loadMeshInternal(path, mtlBasedir); }, mode, onComplete
         );
     }
 
@@ -88,19 +88,19 @@ namespace Vapor {
         clearTextCache();
     }
 
-    size_t ResourceManager::getImageCacheSize() const {
+    auto ResourceManager::getImageCacheSize() const -> size_t {
         return m_imageCache.size();
     }
 
-    size_t ResourceManager::getSceneCacheSize() const {
+    auto ResourceManager::getSceneCacheSize() const -> size_t {
         return m_sceneCache.size();
     }
 
-    size_t ResourceManager::getMeshCacheSize() const {
+    auto ResourceManager::getMeshCacheSize() const -> size_t {
         return m_meshCache.size();
     }
 
-    size_t ResourceManager::getTextCacheSize() const {
+    auto ResourceManager::getTextCacheSize() const -> size_t {
         return m_textCache.size();
     }
 
@@ -110,11 +110,11 @@ namespace Vapor {
         m_scheduler.waitForAll();
     }
 
-    bool ResourceManager::hasPendingLoads() const {
+    auto ResourceManager::hasPendingLoads() const -> bool {
         return m_activeLoads.load() > 0;
     }
 
-    size_t ResourceManager::getActiveLoadCount() const {
+    auto ResourceManager::getActiveLoadCount() const -> size_t {
         return m_activeLoads.load();
     }
 
@@ -209,7 +209,7 @@ namespace Vapor {
             // Asynchronous loading
             m_activeLoads++;
 
-            m_scheduler.submitTask([this, resource, path, loader]() {
+            m_scheduler.submitTask([this, resource, path, loader]() -> auto {
                 try {
                     auto data = loader();
                     resource->setData(data);
