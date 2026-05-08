@@ -91,6 +91,10 @@ auto main(int argc, char* args[]) -> int {
 #endif
 
     auto window = SDL_CreateWindow(winTitle, width.Get(), height.Get(), winFlags);
+    if (!window) {
+        fmt::print(stderr, "Failed to create SDL_Window: {}\n", SDL_GetError());
+        return 1;
+    }
     int windowWidth, windowHeight;
     SDL_GetWindowSize(window, &windowWidth, &windowHeight);
 
