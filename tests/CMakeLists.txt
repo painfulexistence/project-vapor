@@ -88,6 +88,19 @@ target_link_libraries(test_backend_support PRIVATE
 target_compile_features(test_backend_support PRIVATE cxx_std_20)
 target_compile_options(test_backend_support PRIVATE ${TEST_WARNING_FLAGS})
 
+# ── UI System tests (PageSystem, MenuStack, Queue logic) ──────────────────
+add_executable(test_ui_system
+    ui_system_test.cpp
+)
+target_link_libraries(test_ui_system PRIVATE
+    Vapor
+    Catch2::Catch2WithMain
+    glm::glm
+    fmt::fmt
+)
+target_compile_features(test_ui_system PRIVATE cxx_std_20)
+target_compile_options(test_ui_system PRIVATE ${TEST_WARNING_FLAGS})
+
 include(CTest)
 include(Catch)
 catch_discover_tests(test_action_system)
@@ -96,3 +109,4 @@ catch_discover_tests(test_camera)
 catch_discover_tests(test_physics)
 catch_discover_tests(test_resource_manager)
 catch_discover_tests(test_backend_support)
+catch_discover_tests(test_ui_system)
