@@ -13,8 +13,8 @@ public:
     virtual void onUpdate(float dt) {}
 
     Rml::ElementDocument* document() const { return doc_; }
-    void show() { targetVisible_ = true; }
-    void hide() { targetVisible_ = false; }
+    virtual void show() { targetVisible_ = true; }
+    virtual void hide() { targetVisible_ = false; }
 
 protected:
     Rml::ElementDocument* doc_ = nullptr;
