@@ -1,0 +1,61 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - "v*"
+  workflow_dispatch:
+
+jobs:
+  release:
+    runs-on: macos-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      - name: Install system dependencies
+        run: |
+          brew install ninja glslang ccache
+
+      - name: Configure (vcpkg + Ninja)
+        run: |
+          cmake --preset ninja-local-vcpkg \
+            -DCMAKE_BUILD_TYPE=MinSizeRel \
+            -DCMAKE_CXX_COMPILER_LAUNCHER=ccache
+        env:
+          VCPKG_ROOT: ${{ github.workspace }}/vcpkg
+
+      - name: Build all targets
+        run: |
+          cmake --build build --config MinSizeRel
+
+      - name: Run tests
+        working-directory: build
+        run: ctest -C MinSizeRel --output-on-failure --timeout 60
+
+      - name: Package Release
+        run: |
+          TAG_NAME=${{ github.ref_name }}
+          PACKAGE_NAME="project-vapor-${TAG_NAME}-macos"
+          
+          # Create a directory for the distribution
+          mkdir -p dist/Vapor
+          
+          # Copy binary and assets
+          cp -r build/Vaporware dist/
+          cp -r build/assets dist/
+          
+          cd dist
+          zip -r "../${PACKAGE_NAME}.zip" .
+          cd ..
+
+      - name: Create Release
+        uses: softprops/action-gh-release@v1
+        with:
+          files: "*.zip"
+          generate_release_notes: true
+          draft: false
+          prerelease: false
