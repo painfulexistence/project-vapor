@@ -107,6 +107,7 @@ jobs:
         run: >
           cmake -G Ninja
           -B ${{ steps.strings.outputs.build-dir }}
+          -DCMAKE_TOOLCHAIN_FILE=${{ github.workspace }}/vcpkg/scripts/buildsystems/vcpkg.cmake
           -DCMAKE_BUILD_TYPE=${{ matrix.build-type }}
           -S ${{ github.workspace }}
 
