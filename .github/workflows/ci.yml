@@ -43,7 +43,7 @@ jobs:
       - name: Build tests only
         run: |
           cmake --build build --config Release \
-            --target test_action_system test_scene_transform test_camera \
+            --target test_action_system test_scene_transform test_camera test_physics test_resource_manager test_backend_support test_ui_system \
             -- -j$(sysctl -n hw.logicalcpu)
 
       - name: Run tests
