@@ -25,7 +25,7 @@ enum class PageID {
 struct UIStateComponent {
     struct Entry {
         std::string documentPath;
-        std::unique_ptr<Page> page;
+        std::shared_ptr<Page> page;
         bool shouldBeVisible  = false;
         bool lazyLoad         = false;
         bool lastSentVisible  = false;

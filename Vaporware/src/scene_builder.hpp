@@ -194,23 +194,23 @@ inline SceneResources buildScene(
         auto& ui = registry.emplace<UIStateComponent>(uiEntity);
 
         // Overlay pages — eager-loaded, always resident
-        ui.pages[PageID::HUD]          = { "assets/ui/hud.rml",          std::make_unique<HUDPage>() };
-        ui.pages[PageID::Letterbox]    = { "assets/ui/letterbox.rml",    std::make_unique<LetterboxPage>() };
-        ui.pages[PageID::Subtitle]     = { "assets/ui/subtitle.rml",     std::make_unique<SubtitlePage>() };
-        ui.pages[PageID::ScrollText]   = { "assets/ui/scroll_text.rml",  std::make_unique<ScrollTextPage>() };
-        ui.pages[PageID::ChapterTitle] = { "assets/ui/chapter_title.rml",std::make_unique<ChapterTitlePage>() };
-
+        ui.pages[PageID::HUD]          = { "assets/ui/hud.rml",          std::make_shared<HUDPage>() };
+        ui.pages[PageID::Letterbox]    = { "assets/ui/letterbox.rml",    std::make_shared<LetterboxPage>() };
+        ui.pages[PageID::Subtitle]     = { "assets/ui/subtitle.rml",     std::make_shared<SubtitlePage>() };
+        ui.pages[PageID::ScrollText]   = { "assets/ui/scroll_text.rml",  std::make_shared<ScrollTextPage>() };
+        ui.pages[PageID::ChapterTitle] = { "assets/ui/chapter_title.rml",std::make_shared<ChapterTitlePage>() };
+ 
         // Menu pages — lazy-loaded (document created only when first shown)
-        ui.pages[PageID::MainMenu] = { "assets/ui/menus/main_menu.rml", std::make_unique<MainMenuPage>(
+        ui.pages[PageID::MainMenu] = { "assets/ui/menus/main_menu.rml", std::make_shared<MainMenuPage>(
             [&registry] { PageSystem::popAll(registry); /* game start logic goes here */ },
             [] { SDL_Event e{}; e.type = SDL_EVENT_QUIT; SDL_PushEvent(&e); }
         ), false, true };
-        ui.pages[PageID::PauseMenu] = { "assets/ui/menus/pause_menu.rml", std::make_unique<PauseMenuPage>(
+        ui.pages[PageID::PauseMenu] = { "assets/ui/menus/pause_menu.rml", std::make_shared<PauseMenuPage>(
             [&registry] { PageSystem::pop(registry); },
             [&registry] { PageSystem::popAll(registry); PageSystem::push(registry, PageID::MainMenu); }
         ), false, true };
-        ui.pages[PageID::Settings]      = { "assets/ui/menus/settings.rml",      std::make_unique<SettingsPage>(),     false, true };
-        ui.pages[PageID::LoadingScreen] = { "assets/ui/menus/loading_screen.rml",std::make_unique<LoadingScreenPage>(),false, true };
+        ui.pages[PageID::Settings]      = { "assets/ui/menus/settings.rml",      std::make_shared<SettingsPage>(),     false, true };
+        ui.pages[PageID::LoadingScreen] = { "assets/ui/menus/loading_screen.rml",std::make_shared<LoadingScreenPage>(),false, true };
 
         // Show main menu at startup
         PageSystem::push(registry, PageID::MainMenu);

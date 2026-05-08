@@ -12,19 +12,7 @@
 #include "pages/subtitle_page.hpp"
 #include <fmt/core.h>
 
-namespace RmlUIHelpers {
-    Rml::ElementDocument*
-        ensureDocument(Rml::ElementDocument*& docPtr, Vapor::RmlUiManager* rml, const std::string& path) {
-        if (docPtr || path.empty()) return docPtr;
-        docPtr = rml->LoadDocument(path);
-        return docPtr;
-    }
 
-    bool tickTimer(float& timer, float deltaTime, float duration) {
-        timer += deltaTime;
-        return timer >= duration;
-    }
-}// namespace RmlUIHelpers
 
 class CleanupSystem {
 public:
