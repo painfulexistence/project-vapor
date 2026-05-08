@@ -91,6 +91,10 @@ auto main(int argc, char* args[]) -> int {
 #endif
 
     auto window = SDL_CreateWindow(winTitle, width.Get(), height.Get(), winFlags);
+    if (!window) {
+        fmt::print(stderr, "Failed to create SDL_Window: {}\n", SDL_GetError());
+        return 1;
+    }
     int windowWidth, windowHeight;
     SDL_GetWindowSize(window, &windowWidth, &windowHeight);
 
@@ -248,7 +252,8 @@ auto main(int argc, char* args[]) -> int {
                         } else if (sub.state == SubtitleState::Visible) {
                             // Skip current subtitle
                             sub.advanceRequested = true;
-                        } else if (sub.currentIndex >= (int)sub.queue.size() - 1 && sub.state == SubtitleState::Hidden) {
+                        } else if (sub.currentIndex >= (int)sub.queue.size() - 1
+                                   && sub.state == SubtitleState::Hidden) {
                             // Restart from beginning
                             sub.currentIndex = -1;
                             sub.advanceRequested = true;

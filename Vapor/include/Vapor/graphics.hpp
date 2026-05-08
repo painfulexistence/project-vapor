@@ -9,8 +9,8 @@
 //   graphics_effects.hpp   — WaterData, AtmosphereData, VolumetricFogData, VolumetricCloudData,
 //                            LightScatteringData, SunFlareData, GPUParticle, Particle
 
-#include "graphics_handles.hpp"
 #include "graphics_batch2d.hpp"
-#include "graphics_gpu_structs.hpp"
-#include "graphics_mesh.hpp"
 #include "graphics_effects.hpp"
+#include "graphics_gpu_structs.hpp"
+#include "graphics_handles.hpp"
+#include "graphics_mesh.hpp"

@@ -1,16 +1,16 @@
-#include <catch2/catch_test_macros.hpp>
-#include <catch2/catch_approx.hpp>
 #include <Vapor/resource_manager.hpp>
 #include <Vapor/task_scheduler.hpp>
-#include <fstream>
+#include <catch2/catch_approx.hpp>
+#include <catch2/catch_test_macros.hpp>
 #include <filesystem>
+#include <fstream>
 
 using namespace Vapor;
 
 TEST_CASE("ResourceManager Basic Loading", "[resource]") {
     TaskScheduler scheduler;
     scheduler.init(1);
-    
+
     ResourceManager rm(scheduler);
 
     SECTION("Text file loading") {
@@ -22,13 +22,13 @@ TEST_CASE("ResourceManager Basic Loading", "[resource]") {
         }
 
         auto resource = rm.loadText(testFile, LoadMode::Sync);
-        
+
         REQUIRE(resource->isReady());
         REQUIRE(*resource->get() == "Hello Vapor!");
 
         // Test cache
         auto resource2 = rm.loadText(testFile, LoadMode::Sync);
-        REQUIRE(resource == resource2); // Should be the same object from cache
+        REQUIRE(resource == resource2);// Should be the same object from cache
 
         std::filesystem::remove(testFile);
     }
@@ -41,10 +41,10 @@ TEST_CASE("ResourceManager Basic Loading", "[resource]") {
         }
 
         auto resource = rm.loadText(testFile, LoadMode::Async);
-        
+
         // It might not be ready immediately, so we wait
         rm.waitForAll();
-        
+
         REQUIRE(resource->isReady());
         REQUIRE(*resource->get() == "Async Data");
 

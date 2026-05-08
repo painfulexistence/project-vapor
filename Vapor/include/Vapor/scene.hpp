@@ -1,17 +1,17 @@
 #pragma once
 #include <SDL3/SDL_stdinc.h>
-#include <glm/mat4x4.hpp>
 #include <glm/gtc/matrix_transform.hpp>
 #include <glm/gtc/quaternion.hpp>
+#include <glm/mat4x4.hpp>
 #define GLM_ENABLE_EXPERIMENTAL
 #include <glm/gtx/quaternion.hpp>
+#include <memory>
 #include <string>
 #include <vector>
-#include <memory>
 
+#include "character_controller.hpp"
 #include "graphics.hpp"
 #include "physics_3d.hpp"
-#include "character_controller.hpp"
 #include "vehicle_controller.hpp"
 
 class FluidVolume;
@@ -26,7 +26,7 @@ struct Node {
     std::string name;
     std::vector<std::shared_ptr<Node>> children;
     glm::mat4 localTransform = glm::identity<glm::mat4>();
-    glm::mat4 worldTransform = glm::identity<glm::mat4>(); // calculated from localTransform and parent's worldTransform
+    glm::mat4 worldTransform = glm::identity<glm::mat4>();// calculated from localTransform and parent's worldTransform
     std::shared_ptr<MeshGroup> meshGroup = nullptr;
     BodyHandle body;
     TriggerHandle trigger;
@@ -36,10 +36,14 @@ struct Node {
 
     // Virtual callbacks for physics events (can be overridden in subclasses)
     virtual ~Node() = default;
-    virtual void onTriggerEnter(Node* other) {}
-    virtual void onTriggerExit(Node* other) {}
-    virtual void onCollisionEnter(Node* other) {}
-    virtual void onCollisionExit(Node* other) {}
+    virtual void onTriggerEnter(Node* other) {
+    }
+    virtual void onTriggerExit(Node* other) {
+    }
+    virtual void onCollisionEnter(Node* other) {
+    }
+    virtual void onCollisionExit(Node* other) {
+    }
 
     glm::vec3 getLocalPosition() const {
         return glm::vec3(localTransform[3]);
@@ -90,14 +94,16 @@ struct Node {
         glm::vec3 currScale = getLocalScale();
         glm::quat currRotation = getLocalRotation();
 
-        localTransform = glm::translate(glm::mat4(1.0f), position) * glm::mat4_cast(currRotation) * glm::scale(glm::mat4(1.0f), currScale);
+        localTransform = glm::translate(glm::mat4(1.0f), position) * glm::mat4_cast(currRotation)
+                         * glm::scale(glm::mat4(1.0f), currScale);
         isTransformDirty = true;
     }
     void setLocalRotation(const glm::quat& rotation) {
         glm::vec3 currPosition = getLocalPosition();
         glm::vec3 currScale = getLocalScale();
 
-        localTransform = glm::translate(glm::mat4(1.0f), currPosition) * glm::mat4_cast(rotation) * glm::scale(glm::mat4(1.0f), currScale);
+        localTransform = glm::translate(glm::mat4(1.0f), currPosition) * glm::mat4_cast(rotation)
+                         * glm::scale(glm::mat4(1.0f), currScale);
         isTransformDirty = true;
     }
     void setLocalEulerAngles(const glm::vec3& eulerAngles) {
@@ -110,7 +116,8 @@ struct Node {
         glm::vec3 currPosition = getLocalPosition();
         glm::quat currRotation = getLocalRotation();
 
-        localTransform = glm::translate(glm::mat4(1.0f), currPosition) * glm::mat4_cast(currRotation) * glm::scale(glm::mat4(1.0f), scale);
+        localTransform = glm::translate(glm::mat4(1.0f), currPosition) * glm::mat4_cast(currRotation)
+                         * glm::scale(glm::mat4(1.0f), scale);
         isTransformDirty = true;
     }
     void rotateAroundLocalAxis(const glm::vec3& axis, float angle) {
@@ -158,11 +165,15 @@ struct Node {
 
     // Character controller management
     void attachCharacterController(Physics3D* physics, const CharacterControllerSettings& settings);
-    CharacterController* getCharacterController() { return characterController.get(); }
+    CharacterController* getCharacterController() {
+        return characterController.get();
+    }
 
     // Vehicle controller management
     void attachVehicleController(Physics3D* physics, const VehicleSettings& settings);
-    VehicleController* getVehicleController() { return vehicleController.get(); }
+    VehicleController* getVehicleController() {
+        return vehicleController.get();
+    }
 };
 
 class Scene {

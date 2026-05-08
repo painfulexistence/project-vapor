@@ -2,18 +2,20 @@
 #include "physics_3d.hpp"
 
 #include <Jolt/Jolt.h>
-#include <Jolt/Physics/PhysicsSystem.h>
+
+#include <Jolt/Geometry/AABox.h>
 #include <Jolt/Physics/Body/Body.h>
 #include <Jolt/Physics/Body/BodyLockInterface.h>
 #include <Jolt/Physics/Collision/Shape/Shape.h>
-#include <Jolt/Geometry/AABox.h>
+#include <Jolt/Physics/PhysicsSystem.h>
 
 // Template: Water volume
-auto FluidVolumeSettings::createWaterVolume(const glm::vec3& position, const glm::vec3& dimensions) -> FluidVolumeSettings {
+auto FluidVolumeSettings::createWaterVolume(const glm::vec3& position, const glm::vec3& dimensions)
+    -> FluidVolumeSettings {
     FluidVolumeSettings settings;
     settings.position = position;
     settings.dimensions = dimensions;
-    settings.density = 1000.0f;  // Water density
+    settings.density = 1000.0f;// Water density
     settings.linearDragCoefficient = 0.5f;
     settings.angularDragCoefficient = 0.5f;
     settings.flowVelocity = glm::vec3(0.0f);
@@ -21,21 +23,20 @@ auto FluidVolumeSettings::createWaterVolume(const glm::vec3& position, const glm
 }
 
 // Template: Oil volume
-auto FluidVolumeSettings::createOilVolume(const glm::vec3& position, const glm::vec3& dimensions) -> FluidVolumeSettings {
+auto FluidVolumeSettings::createOilVolume(const glm::vec3& position, const glm::vec3& dimensions)
+    -> FluidVolumeSettings {
     FluidVolumeSettings settings;
     settings.position = position;
     settings.dimensions = dimensions;
-    settings.density = 900.0f;  // Oil density (lighter than water)
-    settings.linearDragCoefficient = 0.8f;  // More viscous
+    settings.density = 900.0f;// Oil density (lighter than water)
+    settings.linearDragCoefficient = 0.8f;// More viscous
     settings.angularDragCoefficient = 0.8f;
     settings.flowVelocity = glm::vec3(0.0f);
     return settings;
 }
 
 FluidVolume::FluidVolume(Physics3D* physics, const FluidVolumeSettings& settings)
-    : physics(physics)
-    , settings(settings)
-{
+  : physics(physics), settings(settings) {
 }
 
 FluidVolume::~FluidVolume() {
@@ -48,9 +49,8 @@ auto FluidVolume::isPointInFluid(const glm::vec3& point) const -> bool {
     glm::vec3 localPoint = glm::vec3(invTransform * glm::vec4(point, 1.0f));
 
     // Check if point is inside AABB
-    return std::abs(localPoint.x) <= settings.dimensions.x &&
-           std::abs(localPoint.y) <= settings.dimensions.y &&
-           std::abs(localPoint.z) <= settings.dimensions.z;
+    return std::abs(localPoint.x) <= settings.dimensions.x && std::abs(localPoint.y) <= settings.dimensions.y
+           && std::abs(localPoint.z) <= settings.dimensions.z;
 }
 
 auto FluidVolume::isBodyInFluid(const JPH::BodyID& bodyID) const -> bool {
@@ -77,8 +77,7 @@ auto FluidVolume::calculateSubmergedRatio(const JPH::BodyID& bodyID) const -> fl
 
     // Convert to Jolt AABox
     JPH::AABox fluidBounds(
-        JPH::Vec3(fluidMin.x, fluidMin.y, fluidMin.z),
-        JPH::Vec3(fluidMax.x, fluidMax.y, fluidMax.z)
+        JPH::Vec3(fluidMin.x, fluidMin.y, fluidMin.z), JPH::Vec3(fluidMax.x, fluidMax.y, fluidMax.z)
     );
 
     // Calculate intersection volume
@@ -197,10 +196,7 @@ void FluidVolume::applyForcesToBodies(float deltaTime) {
         // Apply buoyancy force
         glm::vec3 buoyancyForce = calculateBuoyancyForce(bodyID, submergedVolume);
         if (glm::length(buoyancyForce) > 0.0f) {
-            bodyInterface->AddForce(
-                bodyID,
-                JPH::Vec3(buoyancyForce.x, buoyancyForce.y, buoyancyForce.z)
-            );
+            bodyInterface->AddForce(bodyID, JPH::Vec3(buoyancyForce.x, buoyancyForce.y, buoyancyForce.z));
         }
 
         // Apply drag forces
@@ -211,13 +207,10 @@ void FluidVolume::applyForcesToBodies(float deltaTime) {
         glm::vec3 relativeVelocity = bodyVelocity - settings.flowVelocity;
 
         glm::vec3 dragForce = calculateDragForce(bodyID, relativeVelocity);
-        dragForce *= submergedRatio;  // Scale drag by submerged ratio
+        dragForce *= submergedRatio;// Scale drag by submerged ratio
 
         if (glm::length(dragForce) > 0.0f) {
-            bodyInterface->AddForce(
-                bodyID,
-                JPH::Vec3(dragForce.x, dragForce.y, dragForce.z)
-            );
+            bodyInterface->AddForce(bodyID, JPH::Vec3(dragForce.x, dragForce.y, dragForce.z));
         }
 
         // Apply angular drag
@@ -226,10 +219,7 @@ void FluidVolume::applyForcesToBodies(float deltaTime) {
 
         if (glm::length(angularVelocity) > 0.001f) {
             glm::vec3 angularDrag = -angularVelocity * settings.angularDragCoefficient * submergedRatio;
-            bodyInterface->AddTorque(
-                bodyID,
-                JPH::Vec3(angularDrag.x, angularDrag.y, angularDrag.z)
-            );
+            bodyInterface->AddTorque(bodyID, JPH::Vec3(angularDrag.x, angularDrag.y, angularDrag.z));
         }
     }
 }

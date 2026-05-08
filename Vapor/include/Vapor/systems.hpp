@@ -93,18 +93,20 @@ namespace Vapor {
                 const glm::mat4& modelMatrix = transform->worldTransform;
 
                 for (const auto& mesh : render.meshGroup->meshes) {
-                    instances.push_back({
-                        .model = modelMatrix,
-                        .color = render.color,
-                        .vertexOffset = mesh->vertexOffset,
-                        .indexOffset = mesh->indexOffset,
-                        .vertexCount = mesh->vertexCount,
-                        .indexCount = mesh->indexCount,
-                        .materialID = mesh->materialID,
-                        .primitiveMode = mesh->primitiveMode,
-                        .AABBMin = mesh->worldAABBMin,
-                        .AABBMax = mesh->worldAABBMax,
-                    });
+                    instances.push_back(
+                        {
+                            .model = modelMatrix,
+                            .color = render.color,
+                            .vertexOffset = mesh->vertexOffset,
+                            .indexOffset = mesh->indexOffset,
+                            .vertexCount = mesh->vertexCount,
+                            .indexCount = mesh->indexCount,
+                            .materialID = mesh->materialID,
+                            .primitiveMode = mesh->primitiveMode,
+                            .AABBMin = mesh->worldAABBMin,
+                            .AABBMax = mesh->worldAABBMax,
+                        }
+                    );
 
                     if (mesh->material) {
                         instanceBatches[mesh->material].push_back(mesh);

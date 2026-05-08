@@ -2,13 +2,13 @@
 
 #include <SDL3/SDL_stdinc.h>
 #include <SDL3/SDL_timer.h>
+#include <cstdlib>
+#include <ctime>
 #include <fmt/core.h>
-#include <tracy/Tracy.hpp>
 #include <glm/vec2.hpp>
 #include <glm/vec3.hpp>
 #include <glm/vec4.hpp>
-#include <cstdlib>
-#include <ctime>
+#include <tracy/Tracy.hpp>
 #define GLM_FORCE_DEPTH_ZERO_TO_ONE
 #define GLM_FORCE_LEFT_HANDED
 #include "backends/imgui_impl_sdl3.h"
@@ -22,23 +22,22 @@
 #include "graphics.hpp"
 #include "helper.hpp"
 #define ENABLE_VALIDATION 1
-#define USE_DYNAMIC_RENDERING 0
 
 
-std::unique_ptr<Renderer> createRendererVulkan() {
+auto createRendererVulkan() -> std::unique_ptr<Renderer> {
     return std::make_unique<Renderer_Vulkan>();
 }
 
 void insertImageMemoryBarrier(
-  VkCommandBuffer cmd,
-  VkImage image,
-  VkAccessFlags srcAccessMask,
-  VkAccessFlags dstAccessMask,
-  VkImageLayout currentLayout,
-  VkImageLayout newLayout,
-  VkPipelineStageFlags srcStageMask,
-  VkPipelineStageFlags dstStageMask,
-  VkImageSubresourceRange subresourceRange
+    VkCommandBuffer cmd,
+    VkImage image,
+    VkAccessFlags srcAccessMask,
+    VkAccessFlags dstAccessMask,
+    VkImageLayout currentLayout,
+    VkImageLayout newLayout,
+    VkPipelineStageFlags srcStageMask,
+    VkPipelineStageFlags dstStageMask,
+    VkImageSubresourceRange subresourceRange
 ) {
     VkImageMemoryBarrier imageMemoryBarrier = {};
     imageMemoryBarrier.sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER;
@@ -54,11 +53,11 @@ void insertImageMemoryBarrier(
 }
 
 void insertImageMemoryBarrier2(
-  VkCommandBuffer cmd,
-  VkImage image,
-  VkImageLayout currentLayout,
-  VkImageLayout newLayout,
-  VkImageSubresourceRange subresourceRange
+    VkCommandBuffer cmd,
+    VkImage image,
+    VkImageLayout currentLayout,
+    VkImageLayout newLayout,
+    VkImageSubresourceRange subresourceRange
 ) {
     VkImageMemoryBarrier2 imageMemoryBarrier = {};
     imageMemoryBarrier.sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER_2;
@@ -229,10 +228,11 @@ auto Renderer_Vulkan::init(SDL_Window* window) -> void {
     VkExtent2D extent = capabilities.currentExtent;
     if (capabilities.currentExtent.width == UINT32_MAX) {
         VkExtent2D actualExtent = { static_cast<uint32_t>(windowWidth), static_cast<uint32_t>(windowHeight) };
-        actualExtent.width =
-          std::max(capabilities.minImageExtent.width, std::min(capabilities.maxImageExtent.width, actualExtent.width));
+        actualExtent.width = std::max(
+            capabilities.minImageExtent.width, std::min(capabilities.maxImageExtent.width, actualExtent.width)
+        );
         actualExtent.height = std::max(
-          capabilities.minImageExtent.height, std::min(capabilities.maxImageExtent.height, actualExtent.height)
+            capabilities.minImageExtent.height, std::min(capabilities.maxImageExtent.height, actualExtent.height)
         );
         extent = actualExtent;
     }
@@ -345,6 +345,10 @@ auto Renderer_Vulkan::init(SDL_Window* window) -> void {
 
     // ImGui init
     ImGui_ImplSDL3_InitForVulkan(window);
+    VkPipelineRenderingCreateInfo imguiPipelineRenderingInfo = {};
+    imguiPipelineRenderingInfo.sType = VK_STRUCTURE_TYPE_PIPELINE_RENDERING_CREATE_INFO;
+    imguiPipelineRenderingInfo.colorAttachmentCount = 1;
+    imguiPipelineRenderingInfo.pColorAttachmentFormats = &swapchainImageFormat;
     ImGui_ImplVulkan_InitInfo initInfo = {
         .ApiVersion = VK_API_VERSION_1_3,
         .Instance = instance,
@@ -354,15 +358,17 @@ auto Renderer_Vulkan::init(SDL_Window* window) -> void {
         .Queue = graphicsQueue,
         .MinImageCount = static_cast<Uint32>(swapchainImages.size()),
         .ImageCount = static_cast<Uint32>(swapchainImages.size()),
-        .MSAASamples = (VkSampleCountFlagBits)MSAA_SAMPLE_COUNT,
+        .MSAASamples = VK_SAMPLE_COUNT_1_BIT,
         .PipelineCache = VK_NULL_HANDLE,
         .DescriptorPoolSize = 1000,
         .UseDynamicRendering = true,
+        .PipelineRenderingCreateInfo = imguiPipelineRenderingInfo,
         .Allocator = nullptr,
         .CheckVkResultFn = nullptr,
     };
     ImGui_ImplVulkan_Init(&initInfo);
 
+    createResources();
     isInitialized = true;
 }
 
@@ -462,17 +468,16 @@ auto Renderer_Vulkan::createResources() -> void {
     msaaDepthImage = createRenderTarget(RenderTargetUsage::DEPTH_MSAA, VK_FORMAT_D32_SFLOAT);
     resolveColorImage = createRenderTarget(RenderTargetUsage::COLOR, VK_FORMAT_R16G16B16A16_SFLOAT);// HDR format
 
-#if !(USE_DYNAMIC_RENDERING)
     // Create render passes
     std::array<VkAttachmentDescription, 1> prePassAttachments = { { {
-      .format = VK_FORMAT_D32_SFLOAT,
-      .samples = (VkSampleCountFlagBits)MSAA_SAMPLE_COUNT,
-      .loadOp = VK_ATTACHMENT_LOAD_OP_CLEAR,
-      .storeOp = VK_ATTACHMENT_STORE_OP_STORE,
-      .stencilLoadOp = VK_ATTACHMENT_LOAD_OP_DONT_CARE,
-      .stencilStoreOp = VK_ATTACHMENT_STORE_OP_DONT_CARE,
-      .initialLayout = VK_IMAGE_LAYOUT_UNDEFINED,
-      .finalLayout = VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL,
+        .format = VK_FORMAT_D32_SFLOAT,
+        .samples = (VkSampleCountFlagBits)MSAA_SAMPLE_COUNT,
+        .loadOp = VK_ATTACHMENT_LOAD_OP_CLEAR,
+        .storeOp = VK_ATTACHMENT_STORE_OP_STORE,
+        .stencilLoadOp = VK_ATTACHMENT_LOAD_OP_DONT_CARE,
+        .stencilStoreOp = VK_ATTACHMENT_STORE_OP_DONT_CARE,
+        .initialLayout = VK_IMAGE_LAYOUT_UNDEFINED,
+        .finalLayout = VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL,
     } } };
 
     VkAttachmentReference prePassDepthAttachmentRef = {};
@@ -506,30 +511,30 @@ auto Renderer_Vulkan::createResources() -> void {
 
     std::array<VkAttachmentDescription, 3> renderPassAttachments = {
         { {
-            .format = VK_FORMAT_R16G16B16A16_SFLOAT,// HDR format
-            .samples = (VkSampleCountFlagBits)MSAA_SAMPLE_COUNT,
-            .loadOp = VK_ATTACHMENT_LOAD_OP_CLEAR,
-            .storeOp = VK_ATTACHMENT_STORE_OP_STORE,
-            .initialLayout = VK_IMAGE_LAYOUT_UNDEFINED,
-            .finalLayout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL,
+              .format = VK_FORMAT_R16G16B16A16_SFLOAT,// HDR format
+              .samples = (VkSampleCountFlagBits)MSAA_SAMPLE_COUNT,
+              .loadOp = VK_ATTACHMENT_LOAD_OP_CLEAR,
+              .storeOp = VK_ATTACHMENT_STORE_OP_STORE,
+              .initialLayout = VK_IMAGE_LAYOUT_UNDEFINED,
+              .finalLayout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL,
           },
           {
-            .format = VK_FORMAT_D32_SFLOAT,
-            .samples = (VkSampleCountFlagBits)MSAA_SAMPLE_COUNT,
-            .loadOp = VK_ATTACHMENT_LOAD_OP_LOAD,
-            .storeOp = VK_ATTACHMENT_STORE_OP_DONT_CARE,
-            .stencilLoadOp = VK_ATTACHMENT_LOAD_OP_DONT_CARE,
-            .stencilStoreOp = VK_ATTACHMENT_STORE_OP_DONT_CARE,
-            .initialLayout = VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL,
-            .finalLayout = VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL,
+              .format = VK_FORMAT_D32_SFLOAT,
+              .samples = (VkSampleCountFlagBits)MSAA_SAMPLE_COUNT,
+              .loadOp = VK_ATTACHMENT_LOAD_OP_LOAD,
+              .storeOp = VK_ATTACHMENT_STORE_OP_DONT_CARE,
+              .stencilLoadOp = VK_ATTACHMENT_LOAD_OP_DONT_CARE,
+              .stencilStoreOp = VK_ATTACHMENT_STORE_OP_DONT_CARE,
+              .initialLayout = VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL,
+              .finalLayout = VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL,
           },
           {
-            .format = VK_FORMAT_R16G16B16A16_SFLOAT,// HDR format
-            .samples = VK_SAMPLE_COUNT_1_BIT,
-            .loadOp = VK_ATTACHMENT_LOAD_OP_CLEAR,
-            .storeOp = VK_ATTACHMENT_STORE_OP_STORE,
-            .initialLayout = VK_IMAGE_LAYOUT_UNDEFINED,
-            .finalLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
+              .format = VK_FORMAT_R16G16B16A16_SFLOAT,// HDR format
+              .samples = VK_SAMPLE_COUNT_1_BIT,
+              .loadOp = VK_ATTACHMENT_LOAD_OP_CLEAR,
+              .storeOp = VK_ATTACHMENT_STORE_OP_STORE,
+              .initialLayout = VK_IMAGE_LAYOUT_UNDEFINED,
+              .finalLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
           } }
     };
 
@@ -556,12 +561,12 @@ auto Renderer_Vulkan::createResources() -> void {
     renderPassDependency.srcSubpass = VK_SUBPASS_EXTERNAL;
     renderPassDependency.dstSubpass = 0;
     renderPassDependency.srcStageMask =
-      VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT | VK_PIPELINE_STAGE_EARLY_FRAGMENT_TESTS_BIT;
+        VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT | VK_PIPELINE_STAGE_EARLY_FRAGMENT_TESTS_BIT;
     renderPassDependency.srcAccessMask = 0;
     renderPassDependency.dstStageMask =
-      VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT | VK_PIPELINE_STAGE_EARLY_FRAGMENT_TESTS_BIT;
+        VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT | VK_PIPELINE_STAGE_EARLY_FRAGMENT_TESTS_BIT;
     renderPassDependency.dstAccessMask =
-      VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT | VK_ACCESS_DEPTH_STENCIL_ATTACHMENT_WRITE_BIT;
+        VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT | VK_ACCESS_DEPTH_STENCIL_ATTACHMENT_WRITE_BIT;
 
     VkRenderPassCreateInfo renderPassInfo{};
     renderPassInfo.sType = VK_STRUCTURE_TYPE_RENDER_PASS_CREATE_INFO;
@@ -576,12 +581,12 @@ auto Renderer_Vulkan::createResources() -> void {
     }
 
     std::array<VkAttachmentDescription, 1> postPassAttachments = { { {
-      .format = swapchainImageFormat,
-      .samples = VK_SAMPLE_COUNT_1_BIT,
-      .loadOp = VK_ATTACHMENT_LOAD_OP_CLEAR,
-      .storeOp = VK_ATTACHMENT_STORE_OP_STORE,
-      .initialLayout = VK_IMAGE_LAYOUT_UNDEFINED,
-      .finalLayout = VK_IMAGE_LAYOUT_PRESENT_SRC_KHR,
+        .format = swapchainImageFormat,
+        .samples = VK_SAMPLE_COUNT_1_BIT,
+        .loadOp = VK_ATTACHMENT_LOAD_OP_CLEAR,
+        .storeOp = VK_ATTACHMENT_STORE_OP_STORE,
+        .initialLayout = VK_IMAGE_LAYOUT_UNDEFINED,
+        .finalLayout = VK_IMAGE_LAYOUT_PRESENT_SRC_KHR,
     } } };
 
     VkAttachmentReference postPassColorAttachmentRef = {};
@@ -597,7 +602,7 @@ auto Renderer_Vulkan::createResources() -> void {
     postPassDependency.srcSubpass = VK_SUBPASS_EXTERNAL;
     postPassDependency.dstSubpass = 0;
     postPassDependency.srcStageMask =
-      VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT | VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT;
+        VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT | VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT;
     postPassDependency.srcAccessMask = VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT | VK_ACCESS_SHADER_READ_BIT;
     postPassDependency.dstStageMask = VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT;
     postPassDependency.dstAccessMask = VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT;
@@ -661,7 +666,6 @@ auto Renderer_Vulkan::createResources() -> void {
             throw std::runtime_error("Failed to create post-processing framebuffer!");
         }
     }
-#endif
 
     // Create descriptor set layouts
     VkDescriptorSetLayoutCreateInfo emptySetLayoutDesc = {};
@@ -673,42 +677,42 @@ auto Renderer_Vulkan::createResources() -> void {
     }
 
     std::array<VkDescriptorSetLayoutBinding, 6> set0LayoutBindings = { {
-      // Camera data
-      { .binding = 0,
-        .descriptorType = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER,
-        .descriptorCount = 1,
-        .stageFlags = VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_COMPUTE_BIT,
-        .pImmutableSamplers = nullptr },
-      // Instances data
-      { .binding = 1,
-        .descriptorType = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER,
-        .descriptorCount = 1,
-        .stageFlags = VK_SHADER_STAGE_VERTEX_BIT,
-        .pImmutableSamplers = nullptr },
-      // Directional lights
-      { .binding = 2,
-        .descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,
-        .descriptorCount = 1,
-        .stageFlags = VK_SHADER_STAGE_FRAGMENT_BIT,
-        .pImmutableSamplers = nullptr },
-      // Point lights
-      { .binding = 3,
-        .descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,
-        .descriptorCount = 1,
-        .stageFlags = VK_SHADER_STAGE_FRAGMENT_BIT | VK_SHADER_STAGE_COMPUTE_BIT,
-        .pImmutableSamplers = nullptr },
-      // Light cull data
-      { .binding = 4,
-        .descriptorType = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER,
-        .descriptorCount = 1,
-        .stageFlags = VK_SHADER_STAGE_COMPUTE_BIT | VK_SHADER_STAGE_FRAGMENT_BIT,
-        .pImmutableSamplers = nullptr },
-      // Cluster data
-      { .binding = 5,
-        .descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,
-        .descriptorCount = 1,
-        .stageFlags = VK_SHADER_STAGE_COMPUTE_BIT | VK_SHADER_STAGE_FRAGMENT_BIT,
-        .pImmutableSamplers = nullptr },
+        // Camera data
+        { .binding = 0,
+          .descriptorType = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER,
+          .descriptorCount = 1,
+          .stageFlags = VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_COMPUTE_BIT,
+          .pImmutableSamplers = nullptr },
+        // Instances data
+        { .binding = 1,
+          .descriptorType = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER,
+          .descriptorCount = 1,
+          .stageFlags = VK_SHADER_STAGE_VERTEX_BIT,
+          .pImmutableSamplers = nullptr },
+        // Directional lights
+        { .binding = 2,
+          .descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,
+          .descriptorCount = 1,
+          .stageFlags = VK_SHADER_STAGE_FRAGMENT_BIT,
+          .pImmutableSamplers = nullptr },
+        // Point lights
+        { .binding = 3,
+          .descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,
+          .descriptorCount = 1,
+          .stageFlags = VK_SHADER_STAGE_FRAGMENT_BIT | VK_SHADER_STAGE_COMPUTE_BIT,
+          .pImmutableSamplers = nullptr },
+        // Light cull data
+        { .binding = 4,
+          .descriptorType = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER,
+          .descriptorCount = 1,
+          .stageFlags = VK_SHADER_STAGE_COMPUTE_BIT | VK_SHADER_STAGE_FRAGMENT_BIT,
+          .pImmutableSamplers = nullptr },
+        // Cluster data
+        { .binding = 5,
+          .descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,
+          .descriptorCount = 1,
+          .stageFlags = VK_SHADER_STAGE_COMPUTE_BIT | VK_SHADER_STAGE_FRAGMENT_BIT,
+          .pImmutableSamplers = nullptr },
     } };
     VkDescriptorSetLayoutCreateInfo set0LayoutDesc = {};
     set0LayoutDesc.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO;
@@ -758,12 +762,13 @@ auto Renderer_Vulkan::createResources() -> void {
         throw std::runtime_error("Failed to create set 1 layout!");
     }
 
-    std::array<VkDescriptorSetLayoutBinding, 1> set2LayoutBindings = { { { .binding = 0,
-                                                                           .descriptorType =
-                                                                             VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER,
-                                                                           .descriptorCount = 1,
-                                                                           .stageFlags = VK_SHADER_STAGE_FRAGMENT_BIT,
-                                                                           .pImmutableSamplers = nullptr } } };
+    std::array<VkDescriptorSetLayoutBinding, 1> set2LayoutBindings = {
+        { { .binding = 0,
+            .descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER,
+            .descriptorCount = 1,
+            .stageFlags = VK_SHADER_STAGE_FRAGMENT_BIT,
+            .pImmutableSamplers = nullptr } }
+    };
     VkDescriptorSetLayoutCreateInfo set2LayoutDesc = {};
     set2LayoutDesc.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO;
     set2LayoutDesc.bindingCount = static_cast<uint32_t>(set2LayoutBindings.size());
@@ -829,29 +834,30 @@ auto Renderer_Vulkan::createResources() -> void {
 
     // Create pipelines
     renderPipeline = createRenderPipeline(
-      std::string("assets/shaders/TBN.vert.spv"), std::string("assets/shaders/PBRNormalMapped.frag.spv")
+        std::string("assets/shaders/TBN.vert.spv"), std::string("assets/shaders/PBRNormalMapped.frag.spv")
     );
     prePassPipeline = createPrePassPipeline(
-      std::string("assets/shaders/PrePass.vert.spv"), std::string("assets/shaders/PrePass.frag.spv")
+        std::string("assets/shaders/PrePass.vert.spv"), std::string("assets/shaders/PrePass.frag.spv")
     );
     postProcessPipeline = createPostProcessPipeline(
-      std::string("assets/shaders/FullScreen.vert.spv"), std::string("assets/shaders/PostProcess.frag.spv")
+        std::string("assets/shaders/FullScreen.vert.spv"), std::string("assets/shaders/PostProcess.frag.spv")
     );
     tileCullingPipeline =
-      createComputePipeline(std::string("assets/shaders/TileLightCull.comp.spv"), tileCullingPipelineLayout);
+        createComputePipeline(std::string("assets/shaders/TileLightCull.comp.spv"), tileCullingPipelineLayout);
 
     // Create uniform buffers
     cameraDataBuffers.resize(MAX_FRAMES_IN_FLIGHT);
     cameraDataBuffersMapped.resize(MAX_FRAMES_IN_FLIGHT);
     for (size_t i = 0; i < MAX_FRAMES_IN_FLIGHT; i++) {
         cameraDataBuffers[i] =
-          createBufferMapped(BufferUsage::UNIFORM, sizeof(CameraData), &cameraDataBuffersMapped[i]);
+            createBufferMapped(BufferUsage::UNIFORM, sizeof(CameraData), &cameraDataBuffersMapped[i]);
     }
     instanceDataBuffers.resize(MAX_FRAMES_IN_FLIGHT);
     instanceDataBuffersMapped.resize(MAX_FRAMES_IN_FLIGHT);
     for (size_t i = 0; i < MAX_FRAMES_IN_FLIGHT; i++) {
-        instanceDataBuffers[i] =
-          createBufferMapped(BufferUsage::UNIFORM, sizeof(InstanceData) * MAX_INSTANCES, &instanceDataBuffersMapped[i]);
+        instanceDataBuffers[i] = createBufferMapped(
+            BufferUsage::UNIFORM, sizeof(InstanceData) * MAX_INSTANCES, &instanceDataBuffersMapped[i]
+        );
     }
 
     // Create textures
@@ -919,7 +925,7 @@ auto Renderer_Vulkan::createResources() -> void {
     }
 
     std::array<VkDescriptorPoolSize, 1> set2PoolSizes = { {
-      { VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, 1 * static_cast<uint32_t>(MAX_FRAMES_IN_FLIGHT) },
+        { VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, 1 * static_cast<uint32_t>(MAX_FRAMES_IN_FLIGHT) },
     } };
 
     VkDescriptorPoolCreateInfo set2PoolDesc{};
@@ -957,24 +963,24 @@ auto Renderer_Vulkan::createResources() -> void {
 
         std::array<VkWriteDescriptorSet, 2> writes = { { // must match descriptor set layout bindings
                                                          {
-                                                           .sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET,
-                                                           .dstSet = set0s[i],
-                                                           .dstBinding = 0,
-                                                           .dstArrayElement = 0,
-                                                           .descriptorCount = 1,
-                                                           .descriptorType = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER,
-                                                           .pImageInfo = nullptr,
-                                                           .pBufferInfo = &cameraDataBufferInfo,
+                                                             .sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET,
+                                                             .dstSet = set0s[i],
+                                                             .dstBinding = 0,
+                                                             .dstArrayElement = 0,
+                                                             .descriptorCount = 1,
+                                                             .descriptorType = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER,
+                                                             .pImageInfo = nullptr,
+                                                             .pBufferInfo = &cameraDataBufferInfo,
                                                          },
                                                          {
-                                                           .sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET,
-                                                           .dstSet = set0s[i],
-                                                           .dstBinding = 1,
-                                                           .dstArrayElement = 0,
-                                                           .descriptorCount = 1,
-                                                           .descriptorType = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER,
-                                                           .pImageInfo = nullptr,
-                                                           .pBufferInfo = &instanceBufferInfo,
+                                                             .sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET,
+                                                             .dstSet = set0s[i],
+                                                             .dstBinding = 1,
+                                                             .dstArrayElement = 0,
+                                                             .descriptorCount = 1,
+                                                             .descriptorType = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER,
+                                                             .pImageInfo = nullptr,
+                                                             .pBufferInfo = &instanceBufferInfo,
                                                          } } };
         vkUpdateDescriptorSets(device, writes.size(), writes.data(), 0, nullptr);
     }
@@ -1006,14 +1012,14 @@ auto Renderer_Vulkan::stage(std::shared_ptr<Scene> scene) -> void {
     directionalLightBuffersMapped.resize(MAX_FRAMES_IN_FLIGHT);
     for (size_t i = 0; i < MAX_FRAMES_IN_FLIGHT; i++) {
         directionalLightBuffers[i] = createBufferMapped(
-          BufferUsage::STORAGE,
-          sizeof(DirectionalLight) * scene->directionalLights.size(),
-          &directionalLightBuffersMapped[i]
+            BufferUsage::STORAGE,
+            sizeof(DirectionalLight) * scene->directionalLights.size(),
+            &directionalLightBuffersMapped[i]
         );
         memcpy(
-          directionalLightBuffersMapped[i],
-          scene->directionalLights.data(),
-          sizeof(DirectionalLight) * scene->directionalLights.size()
+            directionalLightBuffersMapped[i],
+            scene->directionalLights.data(),
+            sizeof(DirectionalLight) * scene->directionalLights.size()
         );
     }
 
@@ -1021,7 +1027,7 @@ auto Renderer_Vulkan::stage(std::shared_ptr<Scene> scene) -> void {
     pointLightBuffersMapped.resize(MAX_FRAMES_IN_FLIGHT);
     for (size_t i = 0; i < MAX_FRAMES_IN_FLIGHT; i++) {
         pointLightBuffers[i] = createBufferMapped(
-          BufferUsage::STORAGE, sizeof(PointLight) * scene->pointLights.size(), &pointLightBuffersMapped[i]
+            BufferUsage::STORAGE, sizeof(PointLight) * scene->pointLights.size(), &pointLightBuffersMapped[i]
         );
         memcpy(pointLightBuffersMapped[i], scene->pointLights.data(), sizeof(PointLight) * scene->pointLights.size());
     }
@@ -1042,8 +1048,9 @@ auto Renderer_Vulkan::stage(std::shared_ptr<Scene> scene) -> void {
 
     clusterBuffers.resize(MAX_FRAMES_IN_FLIGHT);
     for (size_t i = 0; i < MAX_FRAMES_IN_FLIGHT; i++) {
-        clusterBuffers[i] =
-          createBuffer(BufferUsage::STORAGE, sizeof(Cluster) * clusterGridSizeX * clusterGridSizeY * clusterGridSizeZ);
+        clusterBuffers[i] = createBuffer(
+            BufferUsage::STORAGE, sizeof(Cluster) * clusterGridSizeX * clusterGridSizeY * clusterGridSizeZ
+        );
     }
 
     // Textures
@@ -1061,7 +1068,7 @@ auto Renderer_Vulkan::stage(std::shared_ptr<Scene> scene) -> void {
     }
 
     // Buffers
-    const std::function<void(const std::shared_ptr<Node>&)> stageNode = [&](const std::shared_ptr<Node>& node) {
+    const std::function<void(const std::shared_ptr<Node>&)> stageNode = [&](const std::shared_ptr<Node>& node) -> void {
         if (node->meshGroup) {
             for (auto& mesh : node->meshGroup->meshes) {
                 mesh->vbos.push_back(createVertexBuffer(mesh->vertices));// TODO: use single vbo for all meshes
@@ -1118,73 +1125,75 @@ auto Renderer_Vulkan::stage(std::shared_ptr<Scene> scene) -> void {
 
         VkDescriptorImageInfo metallicRoughnessImageInfo;
         metallicRoughnessImageInfo.imageView =
-          getTextureView(mat->roughnessMap ? mat->roughnessMap->texture : defaultORMTexture);
+            getTextureView(mat->roughnessMap ? mat->roughnessMap->texture : defaultORMTexture);
         metallicRoughnessImageInfo.sampler = defaultSampler;
         metallicRoughnessImageInfo.imageLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
 
         VkDescriptorImageInfo occlusionImageInfo;
         occlusionImageInfo.imageView =
-          getTextureView(mat->occlusionMap ? mat->occlusionMap->texture : defaultORMTexture);
+            getTextureView(mat->occlusionMap ? mat->occlusionMap->texture : defaultORMTexture);
         occlusionImageInfo.sampler = defaultSampler;
         occlusionImageInfo.imageLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
 
         VkDescriptorImageInfo emissiveImageInfo;
         emissiveImageInfo.imageView =
-          getTextureView(mat->emissiveMap ? mat->emissiveMap->texture : defaultEmissiveTexture);
+            getTextureView(mat->emissiveMap ? mat->emissiveMap->texture : defaultEmissiveTexture);
         emissiveImageInfo.sampler = defaultSampler;
         emissiveImageInfo.imageLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
 
-        std::array<VkWriteDescriptorSet, 5> writes = { { // must match descriptor set layout bindings
-                                                         {
-                                                           .sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET,
-                                                           .dstSet = set1s[i],
-                                                           .dstBinding = 0,
-                                                           .dstArrayElement = 0,
-                                                           .descriptorCount = 1,
-                                                           .descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER,
-                                                           .pImageInfo = &albedoImageInfo,
-                                                           .pBufferInfo = nullptr,
-                                                         },
-                                                         {
-                                                           .sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET,
-                                                           .dstSet = set1s[i],
-                                                           .dstBinding = 1,
-                                                           .dstArrayElement = 0,
-                                                           .descriptorCount = 1,
-                                                           .descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER,
-                                                           .pImageInfo = &normalImageInfo,
-                                                           .pBufferInfo = nullptr,
-                                                         },
-                                                         {
-                                                           .sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET,
-                                                           .dstSet = set1s[i],
-                                                           .dstBinding = 2,
-                                                           .dstArrayElement = 0,
-                                                           .descriptorCount = 1,
-                                                           .descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER,
-                                                           .pImageInfo = &metallicRoughnessImageInfo,
-                                                           .pBufferInfo = nullptr,
-                                                         },
-                                                         {
-                                                           .sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET,
-                                                           .dstSet = set1s[i],
-                                                           .dstBinding = 3,
-                                                           .dstArrayElement = 0,
-                                                           .descriptorCount = 1,
-                                                           .descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER,
-                                                           .pImageInfo = &occlusionImageInfo,
-                                                           .pBufferInfo = nullptr,
-                                                         },
-                                                         {
-                                                           .sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET,
-                                                           .dstSet = set1s[i],
-                                                           .dstBinding = 4,
-                                                           .dstArrayElement = 0,
-                                                           .descriptorCount = 1,
-                                                           .descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER,
-                                                           .pImageInfo = &emissiveImageInfo,
-                                                           .pBufferInfo = nullptr,
-                                                         } } };
+        std::array<VkWriteDescriptorSet, 5> writes = {
+            { // must match descriptor set layout bindings
+              {
+                  .sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET,
+                  .dstSet = set1s[i],
+                  .dstBinding = 0,
+                  .dstArrayElement = 0,
+                  .descriptorCount = 1,
+                  .descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER,
+                  .pImageInfo = &albedoImageInfo,
+                  .pBufferInfo = nullptr,
+              },
+              {
+                  .sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET,
+                  .dstSet = set1s[i],
+                  .dstBinding = 1,
+                  .dstArrayElement = 0,
+                  .descriptorCount = 1,
+                  .descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER,
+                  .pImageInfo = &normalImageInfo,
+                  .pBufferInfo = nullptr,
+              },
+              {
+                  .sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET,
+                  .dstSet = set1s[i],
+                  .dstBinding = 2,
+                  .dstArrayElement = 0,
+                  .descriptorCount = 1,
+                  .descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER,
+                  .pImageInfo = &metallicRoughnessImageInfo,
+                  .pBufferInfo = nullptr,
+              },
+              {
+                  .sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET,
+                  .dstSet = set1s[i],
+                  .dstBinding = 3,
+                  .dstArrayElement = 0,
+                  .descriptorCount = 1,
+                  .descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER,
+                  .pImageInfo = &occlusionImageInfo,
+                  .pBufferInfo = nullptr,
+              },
+              {
+                  .sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET,
+                  .dstSet = set1s[i],
+                  .dstBinding = 4,
+                  .dstArrayElement = 0,
+                  .descriptorCount = 1,
+                  .descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER,
+                  .pImageInfo = &emissiveImageInfo,
+                  .pBufferInfo = nullptr,
+              } }
+        };
         vkUpdateDescriptorSets(device, writes.size(), writes.data(), 0, nullptr);
 
         materialTextureSets[mat] = set1s[i];
@@ -1213,44 +1222,44 @@ auto Renderer_Vulkan::stage(std::shared_ptr<Scene> scene) -> void {
 
         std::array<VkWriteDescriptorSet, 4> writes = { { // must match descriptor set layout bindings
                                                          {
-                                                           .sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET,
-                                                           .dstSet = set0s[i],
-                                                           .dstBinding = 2,
-                                                           .dstArrayElement = 0,
-                                                           .descriptorCount = 1,
-                                                           .descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,
-                                                           .pImageInfo = nullptr,
-                                                           .pBufferInfo = &directionalLightBufferInfo,
+                                                             .sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET,
+                                                             .dstSet = set0s[i],
+                                                             .dstBinding = 2,
+                                                             .dstArrayElement = 0,
+                                                             .descriptorCount = 1,
+                                                             .descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,
+                                                             .pImageInfo = nullptr,
+                                                             .pBufferInfo = &directionalLightBufferInfo,
                                                          },
                                                          {
-                                                           .sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET,
-                                                           .dstSet = set0s[i],
-                                                           .dstBinding = 3,
-                                                           .dstArrayElement = 0,
-                                                           .descriptorCount = 1,
-                                                           .descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,
-                                                           .pImageInfo = nullptr,
-                                                           .pBufferInfo = &pointLightBufferInfo,
+                                                             .sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET,
+                                                             .dstSet = set0s[i],
+                                                             .dstBinding = 3,
+                                                             .dstArrayElement = 0,
+                                                             .descriptorCount = 1,
+                                                             .descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,
+                                                             .pImageInfo = nullptr,
+                                                             .pBufferInfo = &pointLightBufferInfo,
                                                          },
                                                          {
-                                                           .sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET,
-                                                           .dstSet = set0s[i],
-                                                           .dstBinding = 4,
-                                                           .dstArrayElement = 0,
-                                                           .descriptorCount = 1,
-                                                           .descriptorType = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER,
-                                                           .pImageInfo = nullptr,
-                                                           .pBufferInfo = &lightCullDataBufferInfo,
+                                                             .sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET,
+                                                             .dstSet = set0s[i],
+                                                             .dstBinding = 4,
+                                                             .dstArrayElement = 0,
+                                                             .descriptorCount = 1,
+                                                             .descriptorType = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER,
+                                                             .pImageInfo = nullptr,
+                                                             .pBufferInfo = &lightCullDataBufferInfo,
                                                          },
                                                          {
-                                                           .sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET,
-                                                           .dstSet = set0s[i],
-                                                           .dstBinding = 5,
-                                                           .dstArrayElement = 0,
-                                                           .descriptorCount = 1,
-                                                           .descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,
-                                                           .pImageInfo = nullptr,
-                                                           .pBufferInfo = &clusterBufferInfo,
+                                                             .sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET,
+                                                             .dstSet = set0s[i],
+                                                             .dstBinding = 5,
+                                                             .dstArrayElement = 0,
+                                                             .descriptorCount = 1,
+                                                             .descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,
+                                                             .pImageInfo = nullptr,
+                                                             .pBufferInfo = &clusterBufferInfo,
                                                          } } };
         vkUpdateDescriptorSets(device, writes.size(), writes.data(), 0, nullptr);
     }
@@ -1263,17 +1272,21 @@ auto Renderer_Vulkan::draw(std::shared_ptr<Scene> scene, Camera& camera) -> void
     ZoneScoped;
     FrameMark;
 
+    ImGui_ImplVulkan_NewFrame();
+    ImGui_ImplSDL3_NewFrame();
+    ImGui::NewFrame();
+
     vkWaitForFences(device, 1, &renderFences[currentFrameInFlight], VK_TRUE, UINT64_MAX);
     vkResetFences(device, 1, &renderFences[currentFrameInFlight]);
 
     uint32_t swapchainImageIndex;
     if (vkAcquireNextImageKHR(
-          device,
-          swapchain,
-          UINT64_MAX,
-          imageAvailableSemaphores[currentFrameInFlight],
-          VK_NULL_HANDLE,
-          &swapchainImageIndex
+            device,
+            swapchain,
+            UINT64_MAX,
+            imageAvailableSemaphores[currentFrameInFlight],
+            VK_NULL_HANDLE,
+            &swapchainImageIndex
         )
         != VK_SUCCESS) {
         return;
@@ -1298,30 +1311,33 @@ auto Renderer_Vulkan::draw(std::shared_ptr<Scene> scene, Camera& camera) -> void
     };
     memcpy(cameraDataBuffersMapped[currentFrameInFlight], &cameraData, sizeof(CameraData));
     memcpy(
-      directionalLightBuffersMapped[currentFrameInFlight],
-      scene->directionalLights.data(),
-      sizeof(DirectionalLight) * scene->directionalLights.size()
+        directionalLightBuffersMapped[currentFrameInFlight],
+        scene->directionalLights.data(),
+        sizeof(DirectionalLight) * scene->directionalLights.size()
     );
     memcpy(
-      pointLightBuffersMapped[currentFrameInFlight],
-      scene->pointLights.data(),
-      sizeof(PointLight) * scene->pointLights.size()
+        pointLightBuffersMapped[currentFrameInFlight],
+        scene->pointLights.data(),
+        sizeof(PointLight) * scene->pointLights.size()
     );
 
     instances.clear();
-    const std::function<void(const std::shared_ptr<Node>&)> updateNode = [&](const std::shared_ptr<Node>& node) {
+    const std::function<void(const std::shared_ptr<Node>&)> updateNode =
+        [&](const std::shared_ptr<Node>& node) -> void {
         if (node->meshGroup) {
             const glm::mat4& transform = node->worldTransform;
             for (auto& mesh : node->meshGroup->meshes) {
-                instances.push_back({ .model = transform,
-                                      .vertexOffset = mesh->vertexOffset,
-                                      .indexOffset = mesh->indexOffset,
-                                      .vertexCount = mesh->vertexCount,
-                                      .indexCount = mesh->indexCount,
-                                      .materialID = mesh->materialID,
-                                      .primitiveMode = mesh->primitiveMode,
-                                      .AABBMin = mesh->worldAABBMin,
-                                      .AABBMax = mesh->worldAABBMax });
+                instances.push_back(
+                    { .model = transform,
+                      .vertexOffset = mesh->vertexOffset,
+                      .indexOffset = mesh->indexOffset,
+                      .vertexCount = mesh->vertexCount,
+                      .indexCount = mesh->indexCount,
+                      .materialID = mesh->materialID,
+                      .primitiveMode = mesh->primitiveMode,
+                      .AABBMin = mesh->worldAABBMin,
+                      .AABBMax = mesh->worldAABBMax }
+                );
             }
         }
         for (const auto& child : node->children) {
@@ -1346,7 +1362,6 @@ auto Renderer_Vulkan::draw(std::shared_ptr<Scene> scene, Camera& camera) -> void
         throw std::runtime_error("Failed to begin recording command buffer!");
     }
 
-#if !(USE_DYNAMIC_RENDERING)
     VkRenderPassBeginInfo prePassInfo{};
     prePassInfo.sType = VK_STRUCTURE_TYPE_RENDER_PASS_BEGIN_INFO;
     prePassInfo.renderPass = prePass;
@@ -1382,7 +1397,8 @@ auto Renderer_Vulkan::draw(std::shared_ptr<Scene> scene, Camera& camera) -> void
     vkCmdBeginRenderPass(cmd, &prePassInfo, VK_SUBPASS_CONTENTS_INLINE);
     vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, prePassPipeline);
 
-    const std::function<void(const std::shared_ptr<Node>&)> drawNodeDepth = [&](const std::shared_ptr<Node>& node) {
+    const std::function<void(const std::shared_ptr<Node>&)> drawNodeDepth =
+        [&](const std::shared_ptr<Node>& node) -> void {
         if (node->meshGroup) {
             for (auto& mesh : node->meshGroup->meshes) {
                 if (!mesh->material) {
@@ -1398,17 +1414,17 @@ auto Renderer_Vulkan::draw(std::shared_ptr<Scene> scene, Camera& camera) -> void
                 std::array<VkDescriptorSet, 2> descriptorSets = { set0s[currentFrameInFlight],
                                                                   materialTextureSets.at(mesh->material) };
                 vkCmdBindDescriptorSets(
-                  cmd,
-                  VK_PIPELINE_BIND_POINT_GRAPHICS,
-                  prePassPipelineLayout,
-                  0,
-                  descriptorSets.size(),
-                  descriptorSets.data(),
-                  0,
-                  nullptr
+                    cmd,
+                    VK_PIPELINE_BIND_POINT_GRAPHICS,
+                    prePassPipelineLayout,
+                    0,
+                    descriptorSets.size(),
+                    descriptorSets.data(),
+                    0,
+                    nullptr
                 );// resources are set here
                 vkCmdPushConstants(
-                  cmd, prePassPipelineLayout, VK_SHADER_STAGE_VERTEX_BIT, 0, sizeof(Uint32), &mesh->instanceID
+                    cmd, prePassPipelineLayout, VK_SHADER_STAGE_VERTEX_BIT, 0, sizeof(Uint32), &mesh->instanceID
                 );
                 vkCmdDrawIndexed(cmd, mesh->indices.size(), 1, 0, 0, 0);
             }
@@ -1425,19 +1441,20 @@ auto Renderer_Vulkan::draw(std::shared_ptr<Scene> scene, Camera& camera) -> void
 
     vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, tileCullingPipeline);
     vkCmdBindDescriptorSets(
-      cmd, VK_PIPELINE_BIND_POINT_COMPUTE, tileCullingPipelineLayout, 0, 1, &set0s[currentFrameInFlight], 0, nullptr
+        cmd, VK_PIPELINE_BIND_POINT_COMPUTE, tileCullingPipelineLayout, 0, 1, &set0s[currentFrameInFlight], 0, nullptr
     );
     vkCmdDispatch(cmd, clusterGridSizeX, clusterGridSizeY, 1);
 
     // Particle simulation (compute pass)
-    float deltaTime = 1.0f / 60.0f; // TODO: pass actual delta time
-    glm::vec3 attractorPos = camPos + glm::normalize(glm::vec3(glm::inverse(view) * glm::vec4(0.0f, 0.0f, -1.0f, 0.0f))) * 3.0f;
+    float deltaTime = 1.0f / 60.0f;// TODO: pass actual delta time
+    glm::vec3 attractorPos =
+        camPos + glm::normalize(glm::vec3(glm::inverse(view) * glm::vec4(0.0f, 0.0f, -1.0f, 0.0f))) * 3.0f;
     updateParticleSimulation(cmd, deltaTime, attractorPos);
 
     vkCmdBeginRenderPass(cmd, &renderPassInfo, VK_SUBPASS_CONTENTS_INLINE);
     vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, renderPipeline);
 
-    const std::function<void(const std::shared_ptr<Node>&)> drawNode = [&](const std::shared_ptr<Node>& node) {
+    const std::function<void(const std::shared_ptr<Node>&)> drawNode = [&](const std::shared_ptr<Node>& node) -> void {
         if (node->meshGroup) {
             for (auto& mesh : node->meshGroup->meshes) {
                 if (!mesh->material) {
@@ -1453,25 +1470,25 @@ auto Renderer_Vulkan::draw(std::shared_ptr<Scene> scene, Camera& camera) -> void
                 std::array<VkDescriptorSet, 2> descriptorSets = { set0s[currentFrameInFlight],
                                                                   materialTextureSets.at(mesh->material) };
                 vkCmdBindDescriptorSets(
-                  cmd,
-                  VK_PIPELINE_BIND_POINT_GRAPHICS,
-                  renderPipelineLayout,
-                  0,
-                  descriptorSets.size(),
-                  descriptorSets.data(),
-                  0,
-                  nullptr
+                    cmd,
+                    VK_PIPELINE_BIND_POINT_GRAPHICS,
+                    renderPipelineLayout,
+                    0,
+                    descriptorSets.size(),
+                    descriptorSets.data(),
+                    0,
+                    nullptr
                 );// resources are set here
                 vkCmdPushConstants(
-                  cmd, renderPipelineLayout, VK_SHADER_STAGE_FRAGMENT_BIT, 0, sizeof(glm::vec3), &camPos
+                    cmd, renderPipelineLayout, VK_SHADER_STAGE_FRAGMENT_BIT, 0, sizeof(glm::vec3), &camPos
                 );
                 vkCmdPushConstants(
-                  cmd,
-                  renderPipelineLayout,
-                  VK_SHADER_STAGE_VERTEX_BIT,
-                  sizeof(glm::vec3),
-                  sizeof(Uint32),
-                  &mesh->instanceID
+                    cmd,
+                    renderPipelineLayout,
+                    VK_SHADER_STAGE_VERTEX_BIT,
+                    sizeof(glm::vec3),
+                    sizeof(Uint32),
+                    &mesh->instanceID
                 );
                 vkCmdDrawIndexed(cmd, mesh->indices.size(), 1, 0, 0, 0);
             }
@@ -1494,81 +1511,56 @@ auto Renderer_Vulkan::draw(std::shared_ptr<Scene> scene, Camera& camera) -> void
     std::array<VkDescriptorSet, 1> descriptorSets = { set2s[currentFrameInFlight] };
     // TODO: research descriptor binding best practices
     vkCmdBindDescriptorSets(
-      cmd,
-      VK_PIPELINE_BIND_POINT_GRAPHICS,
-      postProcessPipelineLayout,
-      2,
-      descriptorSets.size(),
-      descriptorSets.data(),
-      0,
-      nullptr
+        cmd,
+        VK_PIPELINE_BIND_POINT_GRAPHICS,
+        postProcessPipelineLayout,
+        2,
+        descriptorSets.size(),
+        descriptorSets.data(),
+        0,
+        nullptr
     );
     vkCmdDraw(cmd, 3, 1, 0, 0);
     vkCmdEndRenderPass(cmd);
-#else
+
+    // ImGui overlay — rendered via dynamic rendering directly to swapchain
+    // postProcessPass finalLayout is PRESENT_SRC_KHR; transition back for attachment write
     insertImageMemoryBarrier(
-      cmd,
-      swapchainImages[swapchainImageIndex],
-      0,
-      VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT,
-      VK_IMAGE_LAYOUT_UNDEFINED,
-      VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL,
-      VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT,
-      VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT,
-      { VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1 }
+        cmd,
+        swapchainImages[swapchainImageIndex],
+        VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT,
+        VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT,
+        VK_IMAGE_LAYOUT_PRESENT_SRC_KHR,
+        VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL,
+        VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT,
+        VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT,
+        { VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1 }
     );
-    // insertImageMemoryBarrier(
-    //     cmd, depthImage,
-    //     0, VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT,
-    //     VK_IMAGE_LAYOUT_UNDEFINED, VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL,
-    //     VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT, VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT,
-    //     { VK_IMAGE_ASPECT_DEPTH_BIT, 0, 1, 0, 1 }
-    // );
-
-    VkRenderingAttachmentInfo colorAttachment = { VK_STRUCTURE_TYPE_RENDERING_ATTACHMENT_INFO };
-    colorAttachment.imageView = swapchainImageViews[swapchainImageIndex];
-    colorAttachment.imageLayout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL;
-    colorAttachment.resolveMode = VK_RESOLVE_MODE_AVERAGE_BIT;
-    colorAttachment.resolveImageView = colorImageView;
-    colorAttachment.resolveImageLayout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL;
-    colorAttachment.loadOp = VK_ATTACHMENT_LOAD_OP_DONT_CARE;
-    colorAttachment.storeOp = VK_ATTACHMENT_STORE_OP_DONT_CARE;
-    colorAttachment.clearValue.color = { 0.0f, 0.0f, 0.2f, 0.0f };
-
-    VkRenderingAttachmentInfo depthAttachment = { VK_STRUCTURE_TYPE_RENDERING_ATTACHMENT_INFO };
-    depthAttachment.imageView = depthImageView;
-    depthAttachment.imageLayout = VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL;
-    depthAttachment.resolveMode = VK_RESOLVE_MODE_NONE;
-    depthAttachment.loadOp = VK_ATTACHMENT_LOAD_OP_CLEAR;
-    depthAttachment.storeOp = VK_ATTACHMENT_STORE_OP_STORE;
-    depthAttachment.clearValue.depthStencil = { 0.0f, 0 };
-
-    VkRenderingInfo renderingInfo = { VK_STRUCTURE_TYPE_RENDERING_INFO };
-    renderingInfo.renderArea = { 0, 0, swapchainExtent.width, swapchainExtent.height };
-    renderingInfo.layerCount = 1;
-    renderingInfo.colorAttachmentCount = 1;
-    renderingInfo.pColorAttachments = &colorAttachment;
-    renderingInfo.pDepthAttachment = &depthAttachment;
-
-    vkCmdBeginRendering(cmd, &renderingInfo);
-
-    // vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, testDrawPipeline);
-    // vkCmdDraw(cmd, 6, 1, 0, 0);
-
+    VkRenderingAttachmentInfo imguiColorAttachment = { VK_STRUCTURE_TYPE_RENDERING_ATTACHMENT_INFO };
+    imguiColorAttachment.imageView = swapchainImageViews[swapchainImageIndex];
+    imguiColorAttachment.imageLayout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL;
+    imguiColorAttachment.loadOp = VK_ATTACHMENT_LOAD_OP_LOAD;
+    imguiColorAttachment.storeOp = VK_ATTACHMENT_STORE_OP_STORE;
+    VkRenderingInfo imguiRenderingInfo = { VK_STRUCTURE_TYPE_RENDERING_INFO };
+    imguiRenderingInfo.renderArea = { 0, 0, swapchainExtent.width, swapchainExtent.height };
+    imguiRenderingInfo.layerCount = 1;
+    imguiRenderingInfo.colorAttachmentCount = 1;
+    imguiRenderingInfo.pColorAttachments = &imguiColorAttachment;
+    vkCmdBeginRendering(cmd, &imguiRenderingInfo);
+    ImGui::Render();
+    ImGui_ImplVulkan_RenderDrawData(ImGui::GetDrawData(), cmd);
     vkCmdEndRendering(cmd);
-
     insertImageMemoryBarrier(
-      cmd,
-      swapchainImages[swapchainImageIndex],
-      VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT,
-      0,
-      VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL,
-      VK_IMAGE_LAYOUT_PRESENT_SRC_KHR,
-      VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT,
-      VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT,
-      { VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1 }
+        cmd,
+        swapchainImages[swapchainImageIndex],
+        VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT,
+        0,
+        VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL,
+        VK_IMAGE_LAYOUT_PRESENT_SRC_KHR,
+        VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT,
+        VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT,
+        { VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1 }
     );
-#endif
 
     if (vkEndCommandBuffer(cmd) != VK_SUCCESS) {
         throw std::runtime_error("Failed to end recording command buffer!");
@@ -1736,10 +1728,8 @@ auto Renderer_Vulkan::createRenderPipeline(const std::string& vertShader, const 
     pipelineInfo.pViewportState = &viewportStateInfo;
     pipelineInfo.pDepthStencilState = &depthStencilStateInfo;
     pipelineInfo.pDynamicState = &dynamicStateInfo;
-#if !(USE_DYNAMIC_RENDERING)
     pipelineInfo.renderPass = renderPass;
     pipelineInfo.subpass = 0;
-#endif
 
     VkPipeline pipeline;
     if (vkCreateGraphicsPipelines(device, nullptr, 1, &pipelineInfo, nullptr, &pipeline) != VK_SUCCESS) {
@@ -1752,7 +1742,8 @@ auto Renderer_Vulkan::createRenderPipeline(const std::string& vertShader, const 
     return pipeline;
 }
 
-auto Renderer_Vulkan::createPrePassPipeline(const std::string& vertShader, const std::string& fragShader) -> VkPipeline {
+auto Renderer_Vulkan::createPrePassPipeline(const std::string& vertShader, const std::string& fragShader)
+    -> VkPipeline {
     // Shader stages
     auto vertShaderCode = readFile(vertShader);
     auto fragShaderCode = readFile(fragShader);
@@ -1778,11 +1769,11 @@ auto Renderer_Vulkan::createPrePassPipeline(const std::string& vertShader, const
         { { 0, sizeof(VertexData), VK_VERTEX_INPUT_RATE_VERTEX } }
     };
     std::array<VkVertexInputAttributeDescription, 4> vertexAttributeDescriptions = { {
-      { 0, 0, VK_FORMAT_R32G32B32_SFLOAT, offsetof(VertexData, position) },
-      { 1, 0, VK_FORMAT_R32G32_SFLOAT, offsetof(VertexData, uv) },
-      { 2, 0, VK_FORMAT_R32G32B32_SFLOAT, offsetof(VertexData, normal) },
-      { 3, 0, VK_FORMAT_R32G32B32A32_SFLOAT, offsetof(VertexData, tangent) },
-      // { 4, 0, VK_FORMAT_R32G32B32_SFLOAT, offsetof(VertexData, bitangent) }
+        { 0, 0, VK_FORMAT_R32G32B32_SFLOAT, offsetof(VertexData, position) },
+        { 1, 0, VK_FORMAT_R32G32_SFLOAT, offsetof(VertexData, uv) },
+        { 2, 0, VK_FORMAT_R32G32B32_SFLOAT, offsetof(VertexData, normal) },
+        { 3, 0, VK_FORMAT_R32G32B32A32_SFLOAT, offsetof(VertexData, tangent) },
+        // { 4, 0, VK_FORMAT_R32G32B32_SFLOAT, offsetof(VertexData, bitangent) }
     } };
 
     VkPipelineVertexInputStateCreateInfo vertexInputStateInfo = {
@@ -1871,10 +1862,8 @@ auto Renderer_Vulkan::createPrePassPipeline(const std::string& vertShader, const
     pipelineInfo.pViewportState = &viewportStateInfo;
     pipelineInfo.pDepthStencilState = &depthStencilStateInfo;
     pipelineInfo.pDynamicState = &dynamicStateInfo;
-#if !(USE_DYNAMIC_RENDERING)
     pipelineInfo.renderPass = prePass;
     pipelineInfo.subpass = 0;
-#endif
 
     VkPipeline pipeline;
     if (vkCreateGraphicsPipelines(device, nullptr, 1, &pipelineInfo, nullptr, &pipeline) != VK_SUCCESS) {
@@ -1887,7 +1876,8 @@ auto Renderer_Vulkan::createPrePassPipeline(const std::string& vertShader, const
     return pipeline;
 }
 
-auto Renderer_Vulkan::createPostProcessPipeline(const std::string& vertShader, const std::string& fragShader) -> VkPipeline {
+auto Renderer_Vulkan::createPostProcessPipeline(const std::string& vertShader, const std::string& fragShader)
+    -> VkPipeline {
     // Shader stages
     auto vertShaderCode = readFile(vertShader);
     auto fragShaderCode = readFile(fragShader);
@@ -1995,10 +1985,8 @@ auto Renderer_Vulkan::createPostProcessPipeline(const std::string& vertShader, c
     pipelineInfo.pViewportState = &viewportStateInfo;
     pipelineInfo.pDepthStencilState = &depthStencilStateInfo;
     pipelineInfo.pDynamicState = &dynamicStateInfo;
-#if !(USE_DYNAMIC_RENDERING)
     pipelineInfo.renderPass = postProcessPass;
     pipelineInfo.subpass = 0;
-#endif
 
     VkPipeline pipeline;
     if (vkCreateGraphicsPipelines(device, nullptr, 1, &pipelineInfo, nullptr, &pipeline) != VK_SUCCESS) {
@@ -2054,13 +2042,13 @@ auto Renderer_Vulkan::createRenderTarget(RenderTargetUsage usage, VkFormat forma
         break;
     case RenderTargetUsage::DEPTH_MSAA:
         usageFlag =
-          (VkImageUsageFlagBits)(VK_IMAGE_USAGE_DEPTH_STENCIL_ATTACHMENT_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT);
+            (VkImageUsageFlagBits)(VK_IMAGE_USAGE_DEPTH_STENCIL_ATTACHMENT_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT);
         aspectFlag = VK_IMAGE_ASPECT_DEPTH_BIT;
         sampleCount = (VkSampleCountFlagBits)MSAA_SAMPLE_COUNT;
         break;
     case RenderTargetUsage::DEPTH_STENCIL_MSAA:
         usageFlag =
-          (VkImageUsageFlagBits)(VK_IMAGE_USAGE_DEPTH_STENCIL_ATTACHMENT_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT);
+            (VkImageUsageFlagBits)(VK_IMAGE_USAGE_DEPTH_STENCIL_ATTACHMENT_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT);
         aspectFlag = (VkImageAspectFlagBits)(VK_IMAGE_ASPECT_DEPTH_BIT | VK_IMAGE_ASPECT_STENCIL_BIT);
         sampleCount = (VkSampleCountFlagBits)MSAA_SAMPLE_COUNT;
         break;
@@ -2235,15 +2223,15 @@ auto Renderer_Vulkan::createTexture(const std::shared_ptr<Image>& img) -> Textur
     vkBeginCommandBuffer(cmd, &beginInfo);
 
     insertImageMemoryBarrier(
-      cmd,
-      image,
-      0,
-      VK_ACCESS_TRANSFER_WRITE_BIT,
-      VK_IMAGE_LAYOUT_UNDEFINED,
-      VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
-      VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT,
-      VK_PIPELINE_STAGE_TRANSFER_BIT,
-      { VK_IMAGE_ASPECT_COLOR_BIT, 0, static_cast<uint32_t>(numLevels), 0, 1 }
+        cmd,
+        image,
+        0,
+        VK_ACCESS_TRANSFER_WRITE_BIT,
+        VK_IMAGE_LAYOUT_UNDEFINED,
+        VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
+        VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT,
+        VK_PIPELINE_STAGE_TRANSFER_BIT,
+        { VK_IMAGE_ASPECT_COLOR_BIT, 0, static_cast<uint32_t>(numLevels), 0, 1 }
     );
     VkBufferImageCopy copyRegion = {};
     copyRegion.bufferOffset = 0;
@@ -2255,15 +2243,15 @@ auto Renderer_Vulkan::createTexture(const std::shared_ptr<Image>& img) -> Textur
     vkCmdCopyBufferToImage(cmd, stagingBuffer, image, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 1, &copyRegion);
 
     insertImageMemoryBarrier(
-      cmd,
-      image,
-      VK_ACCESS_TRANSFER_WRITE_BIT,
-      VK_ACCESS_TRANSFER_READ_BIT,
-      VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
-      VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
-      VK_PIPELINE_STAGE_TRANSFER_BIT,
-      VK_PIPELINE_STAGE_TRANSFER_BIT,
-      { VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1 }
+        cmd,
+        image,
+        VK_ACCESS_TRANSFER_WRITE_BIT,
+        VK_ACCESS_TRANSFER_READ_BIT,
+        VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
+        VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
+        VK_PIPELINE_STAGE_TRANSFER_BIT,
+        VK_PIPELINE_STAGE_TRANSFER_BIT,
+        { VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1 }
     );
     for (int i = 1; i < numLevels; i++) {
         VkImageBlit blit = {};
@@ -2276,38 +2264,38 @@ auto Renderer_Vulkan::createTexture(const std::shared_ptr<Image>& img) -> Textur
         blit.dstOffsets[0] = { 0, 0, 0 };
         blit.dstOffsets[1] = { static_cast<int32_t>(img->width >> i), static_cast<int32_t>(img->height >> i), 1 };
         vkCmdBlitImage(
-          cmd,
-          image,
-          VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
-          image,
-          VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
-          1,
-          &blit,
-          VK_FILTER_LINEAR
+            cmd,
+            image,
+            VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
+            image,
+            VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
+            1,
+            &blit,
+            VK_FILTER_LINEAR
         );
         insertImageMemoryBarrier(
-          cmd,
-          image,
-          VK_ACCESS_TRANSFER_WRITE_BIT,
-          VK_ACCESS_TRANSFER_READ_BIT,
-          VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
-          VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
-          VK_PIPELINE_STAGE_TRANSFER_BIT,
-          VK_PIPELINE_STAGE_TRANSFER_BIT,
-          { VK_IMAGE_ASPECT_COLOR_BIT, static_cast<uint32_t>(i), 1, 0, 1 }
+            cmd,
+            image,
+            VK_ACCESS_TRANSFER_WRITE_BIT,
+            VK_ACCESS_TRANSFER_READ_BIT,
+            VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
+            VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
+            VK_PIPELINE_STAGE_TRANSFER_BIT,
+            VK_PIPELINE_STAGE_TRANSFER_BIT,
+            { VK_IMAGE_ASPECT_COLOR_BIT, static_cast<uint32_t>(i), 1, 0, 1 }
         );
     }
 
     insertImageMemoryBarrier(
-      cmd,
-      image,
-      VK_ACCESS_TRANSFER_READ_BIT,
-      VK_ACCESS_SHADER_READ_BIT,
-      VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
-      VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
-      VK_PIPELINE_STAGE_TRANSFER_BIT,
-      VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT,
-      { VK_IMAGE_ASPECT_COLOR_BIT, 0, static_cast<uint32_t>(numLevels), 0, 1 }
+        cmd,
+        image,
+        VK_ACCESS_TRANSFER_READ_BIT,
+        VK_ACCESS_SHADER_READ_BIT,
+        VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
+        VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
+        VK_PIPELINE_STAGE_TRANSFER_BIT,
+        VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT,
+        { VK_IMAGE_ASPECT_COLOR_BIT, 0, static_cast<uint32_t>(numLevels), 0, 1 }
     );
 
     vkEndCommandBuffer(cmd);
@@ -2329,7 +2317,7 @@ auto Renderer_Vulkan::createTexture(const std::shared_ptr<Image>& img) -> Textur
     return TextureHandle{ nextImageID++ };
 }
 
-BufferHandle Renderer_Vulkan::createVertexBuffer(std::vector<VertexData> vertices) {
+auto Renderer_Vulkan::createVertexBuffer(std::vector<VertexData> vertices) -> BufferHandle {
     VkDeviceSize bufferSize = sizeof(VertexData) * vertices.size();
     auto bufferHandle = createBuffer(BufferUsage::VERTEX, bufferSize);
     VkDeviceMemory bufferMemory = getBufferMemory(bufferHandle);// TODO: use internal pointer
@@ -2342,7 +2330,7 @@ BufferHandle Renderer_Vulkan::createVertexBuffer(std::vector<VertexData> vertice
     return bufferHandle;
 }
 
-BufferHandle Renderer_Vulkan::createIndexBuffer(std::vector<Uint32> indices) {
+auto Renderer_Vulkan::createIndexBuffer(std::vector<Uint32> indices) -> BufferHandle {
     VkDeviceSize bufferSize = sizeof(Uint32) * indices.size();
     auto bufferHandle = createBuffer(BufferUsage::INDEX, bufferSize);
     VkDeviceMemory bufferMemory = getBufferMemory(bufferHandle);// TODO: use internal pointer
@@ -2396,7 +2384,8 @@ auto Renderer_Vulkan::createBuffer(BufferUsage usage, VkDeviceSize size) -> Buff
     int memTypeIdx = 0;
     for (; memTypeIdx < memProperties.memoryTypeCount; memTypeIdx++) {
         if ((memRequirements.memoryTypeBits & (1 << memTypeIdx))
-            && (memProperties.memoryTypes[memTypeIdx].propertyFlags & (VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT))) {
+            && (memProperties.memoryTypes[memTypeIdx].propertyFlags
+                & (VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT))) {
             break;
         }
     }
@@ -2423,7 +2412,7 @@ auto Renderer_Vulkan::createBufferMapped(BufferUsage usage, VkDeviceSize size, v
 
     VkDeviceMemory bufferMemory = getBufferMemory(bufferHandle);// TODO: use internal pointer
     vkMapMemory(
-      device, bufferMemory, 0, size, 0, mappedDataPtr
+        device, bufferMemory, 0, size, 0, mappedDataPtr
     );// NOTE: vkMapMemory might reassign the data pointer, so using pointer of pointer is necessary
 
     return bufferHandle;
@@ -2473,7 +2462,7 @@ void Renderer_Vulkan::initParticleSystem() {
     if (!particleSystemEnabled) return;
 
     // Create descriptor set layout for particle compute
-    std::array<VkDescriptorSetLayoutBinding, 3> computeBindings = {{
+    std::array<VkDescriptorSetLayoutBinding, 3> computeBindings = { {
         {
             .binding = 0,
             .descriptorType = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER,
@@ -2492,7 +2481,7 @@ void Renderer_Vulkan::initParticleSystem() {
             .descriptorCount = 1,
             .stageFlags = VK_SHADER_STAGE_COMPUTE_BIT,
         },
-    }};
+    } };
 
     VkDescriptorSetLayoutCreateInfo computeLayoutInfo = {
         .sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO,
@@ -2505,14 +2494,14 @@ void Renderer_Vulkan::initParticleSystem() {
     }
 
     // Create descriptor set layout for particle rendering (set 1 for particle buffer)
-    std::array<VkDescriptorSetLayoutBinding, 1> renderBindings = {{
+    std::array<VkDescriptorSetLayoutBinding, 1> renderBindings = { {
         {
             .binding = 0,
             .descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,
             .descriptorCount = 1,
             .stageFlags = VK_SHADER_STAGE_VERTEX_BIT,
         },
-    }};
+    } };
 
     VkDescriptorSetLayoutCreateInfo renderLayoutInfo = {
         .sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO,
@@ -2531,7 +2520,8 @@ void Renderer_Vulkan::initParticleSystem() {
         .pSetLayouts = &particleComputeSetLayout,
     };
 
-    if (vkCreatePipelineLayout(device, &computePipelineLayoutInfo, nullptr, &particleComputePipelineLayout) != VK_SUCCESS) {
+    if (vkCreatePipelineLayout(device, &computePipelineLayoutInfo, nullptr, &particleComputePipelineLayout)
+        != VK_SUCCESS) {
         throw std::runtime_error("Failed to create particle compute pipeline layout!");
     }
 
@@ -2552,20 +2542,17 @@ void Renderer_Vulkan::initParticleSystem() {
         .pPushConstantRanges = &pushConstantRange,
     };
 
-    if (vkCreatePipelineLayout(device, &renderPipelineLayoutInfo, nullptr, &particleRenderPipelineLayout) != VK_SUCCESS) {
+    if (vkCreatePipelineLayout(device, &renderPipelineLayoutInfo, nullptr, &particleRenderPipelineLayout)
+        != VK_SUCCESS) {
         throw std::runtime_error("Failed to create particle render pipeline layout!");
     }
 
     // Create compute pipelines
-    particleForcePipeline = createComputePipeline(
-        std::string("assets/shaders/ParticleForce.comp.spv"),
-        particleComputePipelineLayout
-    );
+    particleForcePipeline =
+        createComputePipeline(std::string("assets/shaders/ParticleForce.comp.spv"), particleComputePipelineLayout);
 
-    particleIntegratePipeline = createComputePipeline(
-        std::string("assets/shaders/ParticleIntegrate.comp.spv"),
-        particleComputePipelineLayout
-    );
+    particleIntegratePipeline =
+        createComputePipeline(std::string("assets/shaders/ParticleIntegrate.comp.spv"), particleComputePipelineLayout);
 
     // Create particle render pipeline
     auto vertShaderCode = readFile("assets/shaders/Particle.vert.spv");
@@ -2644,7 +2631,7 @@ void Renderer_Vulkan::initParticleSystem() {
     VkPipelineDepthStencilStateCreateInfo depthStencil = {
         .sType = VK_STRUCTURE_TYPE_PIPELINE_DEPTH_STENCIL_STATE_CREATE_INFO,
         .depthTestEnable = VK_TRUE,
-        .depthWriteEnable = VK_FALSE, // Particles don't write depth
+        .depthWriteEnable = VK_FALSE,// Particles don't write depth
         .depthCompareOp = VK_COMPARE_OP_LESS,
         .depthBoundsTestEnable = VK_FALSE,
         .stencilTestEnable = VK_FALSE,
@@ -2659,8 +2646,8 @@ void Renderer_Vulkan::initParticleSystem() {
         .srcAlphaBlendFactor = VK_BLEND_FACTOR_ONE,
         .dstAlphaBlendFactor = VK_BLEND_FACTOR_ZERO,
         .alphaBlendOp = VK_BLEND_OP_ADD,
-        .colorWriteMask = VK_COLOR_COMPONENT_R_BIT | VK_COLOR_COMPONENT_G_BIT |
-                          VK_COLOR_COMPONENT_B_BIT | VK_COLOR_COMPONENT_A_BIT,
+        .colorWriteMask =
+            VK_COLOR_COMPONENT_R_BIT | VK_COLOR_COMPONENT_G_BIT | VK_COLOR_COMPONENT_B_BIT | VK_COLOR_COMPONENT_A_BIT,
     };
 
     VkPipelineColorBlendStateCreateInfo colorBlending = {
@@ -2686,7 +2673,8 @@ void Renderer_Vulkan::initParticleSystem() {
         .subpass = 0,
     };
 
-    if (vkCreateGraphicsPipelines(device, VK_NULL_HANDLE, 1, &pipelineInfo, nullptr, &particleRenderPipeline) != VK_SUCCESS) {
+    if (vkCreateGraphicsPipelines(device, VK_NULL_HANDLE, 1, &pipelineInfo, nullptr, &particleRenderPipeline)
+        != VK_SUCCESS) {
         throw std::runtime_error("Failed to create particle render pipeline!");
     }
 
@@ -2705,9 +2693,7 @@ void Renderer_Vulkan::initParticleSystem() {
     particleSimParamsBuffersMapped.resize(MAX_FRAMES_IN_FLIGHT);
     for (size_t i = 0; i < MAX_FRAMES_IN_FLIGHT; i++) {
         particleSimParamsBuffers[i] = createBufferMapped(
-            BufferUsage::UNIFORM,
-            sizeof(ParticleSimulationParams),
-            &particleSimParamsBuffersMapped[i]
+            BufferUsage::UNIFORM, sizeof(ParticleSimulationParams), &particleSimParamsBuffersMapped[i]
         );
     }
 
@@ -2715,11 +2701,8 @@ void Renderer_Vulkan::initParticleSystem() {
     particleAttractorBuffers.resize(MAX_FRAMES_IN_FLIGHT);
     particleAttractorBuffersMapped.resize(MAX_FRAMES_IN_FLIGHT);
     for (size_t i = 0; i < MAX_FRAMES_IN_FLIGHT; i++) {
-        particleAttractorBuffers[i] = createBufferMapped(
-            BufferUsage::UNIFORM,
-            sizeof(ParticleAttractorData),
-            &particleAttractorBuffersMapped[i]
-        );
+        particleAttractorBuffers[i] =
+            createBufferMapped(BufferUsage::UNIFORM, sizeof(ParticleAttractorData), &particleAttractorBuffersMapped[i]);
     }
 
     // Initialize particles with random positions and colors
@@ -2731,16 +2714,10 @@ void Renderer_Vulkan::initParticleSystem() {
         float theta = static_cast<float>(std::rand()) / RAND_MAX * 2.0f * 3.14159265f;
         float phi = static_cast<float>(std::rand()) / RAND_MAX * 3.14159265f;
 
-        initialParticles[i].position = glm::vec3(
-            r * std::sin(phi) * std::cos(theta),
-            r * std::sin(phi) * std::sin(theta),
-            r * std::cos(phi)
-        );
+        initialParticles[i].position =
+            glm::vec3(r * std::sin(phi) * std::cos(theta), r * std::sin(phi) * std::sin(theta), r * std::cos(phi));
 
-        glm::vec3 tangent = glm::normalize(glm::cross(
-            initialParticles[i].position,
-            glm::vec3(0.0f, 1.0f, 0.0f)
-        ));
+        glm::vec3 tangent = glm::normalize(glm::cross(initialParticles[i].position, glm::vec3(0.0f, 1.0f, 0.0f)));
         if (glm::length(tangent) < 0.001f) {
             tangent = glm::vec3(1.0f, 0.0f, 0.0f);
         }
@@ -2765,10 +2742,10 @@ void Renderer_Vulkan::initParticleSystem() {
     }
 
     // Create descriptor pool for particles
-    std::array<VkDescriptorPoolSize, 2> poolSizes = {{
+    std::array<VkDescriptorPoolSize, 2> poolSizes = { {
         { VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER, 2 * static_cast<uint32_t>(MAX_FRAMES_IN_FLIGHT) },
         { VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, 2 * static_cast<uint32_t>(MAX_FRAMES_IN_FLIGHT) },
-    }};
+    } };
 
     VkDescriptorPoolCreateInfo poolInfo = {
         .sType = VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO,
@@ -2829,7 +2806,7 @@ void Renderer_Vulkan::initParticleSystem() {
             .range = sizeof(GPUParticle) * MAX_PARTICLES,
         };
 
-        std::array<VkWriteDescriptorSet, 3> computeWrites = {{
+        std::array<VkWriteDescriptorSet, 3> computeWrites = { {
             {
                 .sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET,
                 .dstSet = particleComputeSets[i],
@@ -2857,7 +2834,7 @@ void Renderer_Vulkan::initParticleSystem() {
                 .descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,
                 .pBufferInfo = &particleBufferInfo,
             },
-        }};
+        } };
 
         vkUpdateDescriptorSets(device, static_cast<uint32_t>(computeWrites.size()), computeWrites.data(), 0, nullptr);
 
@@ -2910,9 +2887,11 @@ void Renderer_Vulkan::updateParticleSimulation(VkCommandBuffer cmd, float deltaT
         cmd,
         VK_PIPELINE_BIND_POINT_COMPUTE,
         particleComputePipelineLayout,
-        0, 1,
+        0,
+        1,
         &particleComputeSets[currentFrameInFlight],
-        0, nullptr
+        0,
+        nullptr
     );
     vkCmdDispatch(cmd, (particleCount + 255) / 256, 1, 1);
 
@@ -2922,9 +2901,12 @@ void Renderer_Vulkan::updateParticleSimulation(VkCommandBuffer cmd, float deltaT
         VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
         VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
         0,
-        1, &memoryBarrier,
-        0, nullptr,
-        0, nullptr
+        1,
+        &memoryBarrier,
+        0,
+        nullptr,
+        0,
+        nullptr
     );
 
     // Integration pass
@@ -2933,9 +2915,11 @@ void Renderer_Vulkan::updateParticleSimulation(VkCommandBuffer cmd, float deltaT
         cmd,
         VK_PIPELINE_BIND_POINT_COMPUTE,
         particleComputePipelineLayout,
-        0, 1,
+        0,
+        1,
         &particleComputeSets[currentFrameInFlight],
-        0, nullptr
+        0,
+        nullptr
     );
     vkCmdDispatch(cmd, (particleCount + 255) / 256, 1, 1);
 
@@ -2945,9 +2929,12 @@ void Renderer_Vulkan::updateParticleSimulation(VkCommandBuffer cmd, float deltaT
         VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
         VK_PIPELINE_STAGE_VERTEX_SHADER_BIT,
         0,
-        1, &memoryBarrier,
-        0, nullptr,
-        0, nullptr
+        1,
+        &memoryBarrier,
+        0,
+        nullptr,
+        0,
+        nullptr
     );
 }
 
@@ -2956,10 +2943,8 @@ void Renderer_Vulkan::renderParticles(VkCommandBuffer cmd) {
 
     vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, particleRenderPipeline);
 
-    std::array<VkDescriptorSet, 2> descriptorSets = {
-        set0s[currentFrameInFlight],
-        particleRenderSets[currentFrameInFlight]
-    };
+    std::array<VkDescriptorSet, 2> descriptorSets = { set0s[currentFrameInFlight],
+                                                      particleRenderSets[currentFrameInFlight] };
 
     vkCmdBindDescriptorSets(
         cmd,
@@ -2968,7 +2953,8 @@ void Renderer_Vulkan::renderParticles(VkCommandBuffer cmd) {
         0,
         static_cast<uint32_t>(descriptorSets.size()),
         descriptorSets.data(),
-        0, nullptr
+        0,
+        nullptr
     );
 
     ParticlePushConstants pushConstants = {
@@ -2976,12 +2962,7 @@ void Renderer_Vulkan::renderParticles(VkCommandBuffer cmd) {
     };
 
     vkCmdPushConstants(
-        cmd,
-        particleRenderPipelineLayout,
-        VK_SHADER_STAGE_VERTEX_BIT,
-        0,
-        sizeof(ParticlePushConstants),
-        &pushConstants
+        cmd, particleRenderPipelineLayout, VK_SHADER_STAGE_VERTEX_BIT, 0, sizeof(ParticlePushConstants), &pushConstants
     );
 
     // Draw 6 vertices per particle (2 triangles = 1 quad), instanced
