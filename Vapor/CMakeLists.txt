@@ -30,7 +30,6 @@ set(SOURCES
     src/character_controller.cpp
     src/vehicle_controller.cpp
     src/fluid_volume.cpp
-    src/renderer_metal.cpp
     src/renderer_vulkan.cpp
     src/scene.cpp
     src/task_scheduler.cpp
@@ -46,8 +45,14 @@ set(SOURCES
     imgui/imgui_demo.cpp
     imgui/backends/imgui_impl_sdl3.cpp
     imgui/backends/imgui_impl_vulkan.cpp
-    imgui/backends/imgui_impl_metal.mm
 )
+
+if(APPLE)
+    list(APPEND SOURCES 
+        src/renderer_metal.cpp
+        imgui/backends/imgui_impl_metal.mm
+    )
+endif()
 
 add_library(Vapor ${SOURCES})
 target_compile_features(Vapor PRIVATE cxx_std_20)
@@ -76,7 +81,6 @@ target_link_libraries(Vapor PUBLIC
     EnTT::EnTT
 )
 target_link_libraries(Vapor PRIVATE
-    metal
     Vulkan::Vulkan
     taywee::args
     mikktspace
@@ -84,6 +88,10 @@ target_link_libraries(Vapor PRIVATE
     enkiTS::enkiTS
     Tracy::TracyClient
 )
+
+if(APPLE)
+    target_link_libraries(Vapor PRIVATE metal)
+endif()
 
 find_program(GLSL_VALIDATOR "glslangValidator" REQUIRED)
 file(GLOB_RECURSE SHADER_SOURCES 
@@ -110,6 +118,7 @@ add_custom_target(Vapor_compile_shaders ALL DEPENDS ${SPIRV_BINARY_FILES})
 add_dependencies(Vapor Vapor_compile_shaders)
 
 set(VAPOR_ASSETS_DIR "${CMAKE_CURRENT_SOURCE_DIR}/assets" PARENT_SCOPE)
+set(VAPOR_BINARY_ASSETS_DIR "${CMAKE_CURRENT_BINARY_DIR}/assets" PARENT_SCOPE)
 
 
 message(STATUS "Configuring Vapor package install...")
@@ -131,7 +140,10 @@ configure_package_config_file(
     PATH_VARS VAPOR_ASSETS_DIR
 )
 
-install(TARGETS Vapor metal mikktspace
+if(APPLE)
+    set(PLATFORM_LIBS metal)
+endif()
+install(TARGETS Vapor ${PLATFORM_LIBS} mikktspace
     EXPORT VaporTargets
     LIBRARY DESTINATION ${CMAKE_INSTALL_LIBDIR}
     ARCHIVE DESTINATION ${CMAKE_INSTALL_LIBDIR}
