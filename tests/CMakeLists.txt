@@ -93,6 +93,7 @@ target_compile_options(test_asset_management PRIVATE ${TEST_WARNING_FLAGS})
 # ── Backend Support tests (Metal/Vulkan window initialization) ────────────
 add_executable(test_backend_support
     backend_support_test.cpp
+    backend_screenshot_test.cpp
 )
 target_link_libraries(test_backend_support PRIVATE
     Vapor

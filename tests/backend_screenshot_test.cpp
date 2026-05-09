@@ -1,0 +1,68 @@
+#include <catch2/catch_test_macros.hpp>
+#include "Vapor/renderer.hpp"
+#include "Vapor/scene.hpp"
+#include <SDL3/SDL.h>
+#include <imgui.h>
+#include <stb_image_write.h>
+#include <filesystem>
+
+TEST_CASE("Renderer - Screenshot Capture", "[backend][screenshot]") {
+    if (!SDL_Init(SDL_INIT_VIDEO)) {
+        SKIP("SDL_INIT_VIDEO failed");
+    }
+
+    auto window = SDL_CreateWindow("Capture Test", 100, 100, SDL_WINDOW_HIDDEN);
+    if (!window) {
+        SDL_Quit();
+        SKIP("Window creation failed");
+    }
+
+    // Initialize ImGui context BEFORE renderer init, because renderer init setup backends
+    IMGUI_CHECKVERSION();
+    ImGui::CreateContext();
+
+#if defined(__APPLE__)
+    auto renderer = createRenderer(GraphicsBackend::Metal);
+#else
+    auto renderer = createRenderer(GraphicsBackend::Vulkan);
+#endif
+    renderer->init(window);
+    
+    SECTION("Capture current frame") {
+        bool captured = false;
+        GpuImageData capturedImage;
+
+        renderer->readPixelsAsync([&](const GpuImageData& img) {
+            capturedImage = img;
+            captured = true;
+        });
+
+        // Run dummy frames to trigger capture
+        int timeout = 0;
+        while (!captured && timeout < 100) {
+            auto scene = std::make_shared<Scene>("CaptureTest");
+            
+            
+            Camera cam;
+            renderer->draw(scene, cam);
+            SDL_Delay(10);
+            timeout++;
+        }
+
+        REQUIRE(captured);
+        CHECK(capturedImage.width > 0);
+        CHECK(capturedImage.height > 0);
+        CHECK(capturedImage.channelCount == 4);
+
+        // Save to disk for manual inspection
+        std::string filename = "test_baseline.png";
+        stbi_write_png(filename.c_str(), capturedImage.width, capturedImage.height, 
+                       capturedImage.channelCount, capturedImage.data.data(), 
+                       capturedImage.width * capturedImage.channelCount);
+    }
+
+    renderer->deinit();
+    ImGui::DestroyContext();
+    SDL_DestroyWindow(window);
+    SDL_Quit();
+}

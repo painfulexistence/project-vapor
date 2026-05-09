@@ -136,6 +136,8 @@ public:
 
     virtual void draw(std::shared_ptr<Scene> scene, Camera& camera) override;
 
+    virtual void readPixelsAsync(ScreenshotCallback callback) override;
+
     virtual void setRenderPath(RenderPath path) override {
         currentRenderPath = path;
     }
@@ -557,6 +559,7 @@ private:
     // UI rendering (using void* for pimpl idiom to hide implementation)
     void* m_uiRenderer = nullptr;
     Rml::Context* m_uiContext = nullptr;
+    std::vector<ScreenshotCallback> m_pendingScreenshots;
 
     // Font rendering
     FontManager m_fontManager;

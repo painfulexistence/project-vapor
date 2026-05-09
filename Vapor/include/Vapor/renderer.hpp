@@ -5,6 +5,8 @@
 #include "scene.hpp"
 #include <SDL3/SDL_video.h>
 #include <memory>
+#include <functional>
+#include <vector>
 
 // Forward declarations
 namespace Rml {
@@ -23,6 +25,16 @@ enum class BufferUsage { VERTEX, INDEX, UNIFORM, STORAGE, COPY_SRC, COPY_DST };
 
 enum class RenderTargetUsage { COLOR_MSAA, COLOR, DEPTH_MSAA, DEPTH_STENCIL_MSAA, DEPTH, DEPTH_STENCIL };
 
+
+struct GpuImageData {
+    std::vector<uint8_t> data;
+    uint32_t width;
+    uint32_t height;
+    uint32_t channelCount;
+};
+
+using ScreenshotCallback = std::function<void(const GpuImageData&)>;
+
 class Renderer {
 public:
     virtual ~Renderer() = default;
@@ -33,6 +45,8 @@ public:
     virtual void stage(std::shared_ptr<Scene> scene) = 0;
 
     virtual void draw(std::shared_ptr<Scene> scene, Camera& camera) = 0;
+
+    virtual void readPixelsAsync(ScreenshotCallback callback) = 0;
 
     virtual void setRenderPath(RenderPath path) = 0;
     virtual RenderPath getRenderPath() const = 0;

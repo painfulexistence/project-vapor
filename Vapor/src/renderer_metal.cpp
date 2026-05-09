@@ -4984,6 +4984,36 @@ auto Renderer_Metal::draw(std::shared_ptr<Scene> scene, Camera& camera) -> void 
     // ==========================================================================
     // Present and cleanup
     // ==========================================================================
+    
+    // Process pending screenshots
+    if (!m_pendingScreenshots.empty()) {
+        MTL::Texture* texture = surface->texture();
+        uint32_t width = static_cast<uint32_t>(texture->width());
+        uint32_t height = static_cast<uint32_t>(texture->height());
+        uint32_t bytesPerPixel = 4;
+        uint32_t bytesPerRow = width * bytesPerPixel;
+        uint32_t totalBytes = bytesPerRow * height;
+
+        for (auto& callback : m_pendingScreenshots) {
+            NS::SharedPtr<MTL::Buffer> cpuBuffer = NS::TransferPtr(device->newBuffer(totalBytes, MTL::ResourceStorageModeShared));
+            MTL::BlitCommandEncoder* blitEncoder = cmd->blitCommandEncoder();
+            blitEncoder->copyFromTexture(texture, 0, 0, MTL::Origin(0, 0, 0), MTL::Size(width, height, 1),
+                                       cpuBuffer.get(), 0, bytesPerRow, totalBytes);
+            blitEncoder->endEncoding();
+
+            cmd->addCompletedHandler([callback, cpuBuffer, width, height, totalBytes](MTL::CommandBuffer* buffer) {
+                GpuImageData imageData;
+                imageData.width = width;
+                imageData.height = height;
+                imageData.channelCount = 4;
+                imageData.data.resize(totalBytes);
+                memcpy(imageData.data.data(), cpuBuffer->contents(), totalBytes);
+                callback(imageData);
+            });
+        }
+        m_pendingScreenshots.clear();
+    }
+
     cmd->presentDrawable(surface);
     cmd->commit();
 
@@ -5379,14 +5409,17 @@ auto Renderer_Metal::createIndexBuffer(const std::vector<Uint32>& indices) -> Bu
 }
 
 auto Renderer_Metal::getBuffer(BufferHandle handle) const -> NS::SharedPtr<MTL::Buffer> {
+    if (handle.rid == UINT32_MAX || buffers.find(handle.rid) == buffers.end()) return nullptr;
     return buffers.at(handle.rid);
 }
 
 auto Renderer_Metal::getTexture(TextureHandle handle) const -> NS::SharedPtr<MTL::Texture> {
+    if (handle.rid == UINT32_MAX || textures.find(handle.rid) == textures.end()) return nullptr;
     return textures.at(handle.rid);
 }
 
 auto Renderer_Metal::getPipeline(PipelineHandle handle) const -> NS::SharedPtr<MTL::RenderPipelineState> {
+    if (handle.rid == UINT32_MAX || pipelines.find(handle.rid) == pipelines.end()) return nullptr;
     return pipelines.at(handle.rid);
 }
 
@@ -5765,8 +5798,12 @@ void Renderer_Metal::drawTriangleFilled2D(
     batch2DStats.triangleCount++;
 }
 
-// Helper function to get Metal device without including renderer_metal.hpp in main.cpp
-// Takes void* to avoid needing Renderer_Metal definition in caller
+
+
+void Renderer_Metal::readPixelsAsync(ScreenshotCallback callback) {
+    m_pendingScreenshots.push_back(callback);
+}
+
 extern "C" auto getMetalDevice(void* renderer) -> void* {
     if (renderer) {
         auto* metalRenderer = static_cast<Renderer_Metal*>(renderer);

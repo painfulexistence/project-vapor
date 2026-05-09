@@ -31,6 +31,8 @@ public:
 
     virtual void draw(std::shared_ptr<Scene> scene, Camera& camera) override;
 
+    virtual void readPixelsAsync(ScreenshotCallback callback) override;
+
     virtual void setRenderPath(RenderPath path) override {
         currentRenderPath = path;
     }
@@ -357,7 +359,19 @@ private:
     void createResources();
 
 private:
+    
+    struct PendingScreenshot {
+        BufferHandle buffer;
+        ScreenshotCallback callback;
+        uint32_t width;
+        uint32_t height;
+        VkFence fence;
+    };
+    std::vector<PendingScreenshot> pendingScreenshots;
+    std::vector<ScreenshotCallback> m_pendingScreenshotRequests;
+
     void cleanupResources();
+    void processPendingScreenshots();
 
     PFN_vkCmdBeginRenderingKHR vkCmdBeginRendering_ptr = nullptr;
     PFN_vkCmdEndRenderingKHR vkCmdEndRendering_ptr = nullptr;

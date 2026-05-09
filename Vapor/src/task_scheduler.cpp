@@ -52,4 +52,16 @@ namespace Vapor {
         m_scheduler->WaitforAll();
     }
 
+    void TaskScheduler::processMainThreadTasks() {
+        std::vector<std::function<void()>> tasksToExecute;
+        {
+            std::lock_guard<std::mutex> lock(m_mainThreadMutex);
+            tasksToExecute.swap(m_mainThreadQueue);
+        }
+
+        for (auto& task : tasksToExecute) {
+            task();
+        }
+    }
+
 }// namespace Vapor

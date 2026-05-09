@@ -4,6 +4,8 @@
 #include <atomic>
 #include <enkiTS/TaskScheduler.h>
 #include <functional>
+#include <mutex>
+#include <vector>
 #include <memory>
 
 namespace Vapor {
@@ -36,11 +38,26 @@ namespace Vapor {
         template<typename Func> void submitTask(Func&& func);
 
         // Check if scheduler is initialized
+        
+        // Submit a task to be executed on the Main Thread (during processMainThreadTasks)
+        template<typename Func> void runOnMainThread(Func&& func) {
+        std::lock_guard<std::mutex> lock(m_mainThreadMutex);
+        m_mainThreadQueue.push_back(std::forward<Func>(func));
+    }
+
+
+        // Process all pending main thread tasks (should be called from the main thread)
+        void processMainThreadTasks();
+
         bool isInitialized() const {
             return m_initialized;
         }
 
     private:
+        
+        std::vector<std::function<void()>> m_mainThreadQueue;
+        std::mutex m_mainThreadMutex;
+
         std::unique_ptr<enki::TaskScheduler> m_scheduler;
         std::atomic<bool> m_initialized{ false };
     };
@@ -73,3 +90,5 @@ namespace Vapor {
 }// namespace Vapor
 
 #endif// TASK_SCHEDULER_HPP
+
+    

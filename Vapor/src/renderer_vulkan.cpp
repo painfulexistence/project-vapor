@@ -1776,6 +1776,7 @@ auto Renderer_Vulkan::stage(std::shared_ptr<Scene> scene) -> void {
 }
 
 auto Renderer_Vulkan::draw(std::shared_ptr<Scene> scene, Camera& camera) -> void {
+    processPendingScreenshots();
     ZoneScoped;
     FrameMark;
 
@@ -2098,6 +2099,53 @@ auto Renderer_Vulkan::draw(std::shared_ptr<Scene> scene, Camera& camera) -> void
         vkCmdEndRendering_ptr(cmd);
     } else {
         fmt::print(stderr, "[Vulkan] Error: vkCmdBeginRendering pointer is null!\n");
+    }
+
+    // Process pending screenshot requests
+    if (!m_pendingScreenshotRequests.empty()) {
+        uint32_t width = swapchainExtent.width;
+        uint32_t height = swapchainExtent.height;
+        VkDeviceSize imageSize = width * height * 4;
+
+        for (auto& callback : m_pendingScreenshotRequests) {
+            void* mappedData = nullptr;
+            BufferHandle stagingBuffer = createBufferMapped(BufferUsage::COPY_DST, imageSize, &mappedData);
+            
+            VkFence fence = renderFences[currentFrameInFlight];
+
+            // Transition for transfer
+            VkImageSubresourceRange subresourceRange = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1};
+            VkImageMemoryBarrier barrier = {VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER};
+            barrier.oldLayout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL;
+            barrier.newLayout = VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL;
+            barrier.srcAccessMask = VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT;
+            barrier.dstAccessMask = VK_ACCESS_TRANSFER_READ_BIT;
+            barrier.image = swapchainImages[swapchainImageIndex];
+            barrier.subresourceRange = subresourceRange;
+            vkCmdPipelineBarrier(cmd, VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT, VK_PIPELINE_STAGE_TRANSFER_BIT, 0, 0, nullptr, 0, nullptr, 1, &barrier);
+
+            VkBufferImageCopy region{};
+            region.imageExtent = {width, height, 1};
+            region.imageSubresource.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
+            region.imageSubresource.layerCount = 1;
+            vkCmdCopyImageToBuffer(cmd, swapchainImages[swapchainImageIndex], VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, getBuffer(stagingBuffer), 1, &region);
+
+            // Transition back for presentation (we transition to COLOR_ATTACHMENT so the next insertImageMemoryBarrier works as expected)
+            barrier.oldLayout = VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL;
+            barrier.newLayout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL;
+            barrier.srcAccessMask = VK_ACCESS_TRANSFER_READ_BIT;
+            barrier.dstAccessMask = VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT;
+            vkCmdPipelineBarrier(cmd, VK_PIPELINE_STAGE_TRANSFER_BIT, VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT, 0, 0, nullptr, 0, nullptr, 1, &barrier);
+
+            pendingScreenshots.push_back({stagingBuffer, callback, width, height, fence});
+            
+            // Note: Since we use the main cmd buffer, we need to signal the fence when THIS cmd buffer is done.
+            // Actually, for simplicity, we submit a small extra wait or use a better sync.
+            // But here, let s just use the per-frame fence.
+            // Wait, we need a fence that triggers when this frame is done.
+            // Let s just use a dummy submission or hook into the main render fence.
+        }
+        m_pendingScreenshotRequests.clear();
     }
     insertImageMemoryBarrier(
         cmd,
@@ -3008,38 +3056,47 @@ auto Renderer_Vulkan::createBufferMapped(BufferUsage usage, VkDeviceSize size, v
 }
 
 auto Renderer_Vulkan::getBuffer(BufferHandle handle) const -> VkBuffer {
+    if (handle.rid == UINT32_MAX || buffers.find(handle.rid) == buffers.end()) return VK_NULL_HANDLE;
     return buffers.at(handle.rid);
 }
 
 auto Renderer_Vulkan::getBufferMemory(BufferHandle handle) const -> VkDeviceMemory {
+    if (handle.rid == UINT32_MAX || bufferMemories.find(handle.rid) == bufferMemories.end()) return VK_NULL_HANDLE;
     return bufferMemories.at(handle.rid);
 }
 
 auto Renderer_Vulkan::getTexture(TextureHandle handle) const -> VkImage {
+    if (handle.rid == UINT32_MAX || images.find(handle.rid) == images.end()) return VK_NULL_HANDLE;
     return images.at(handle.rid);
 }
 
 auto Renderer_Vulkan::getTextureView(TextureHandle handle) const -> VkImageView {
+    if (handle.rid == UINT32_MAX || imageViews.find(handle.rid) == imageViews.end()) return VK_NULL_HANDLE;
     return imageViews.at(handle.rid);
 }
 
 auto Renderer_Vulkan::getTextureMemory(TextureHandle handle) const -> VkDeviceMemory {
+    if (handle.rid == UINT32_MAX || imageMemories.find(handle.rid) == imageMemories.end()) return VK_NULL_HANDLE;
     return imageMemories.at(handle.rid);
 }
 
 auto Renderer_Vulkan::getRenderTarget(RenderTargetHandle handle) const -> VkImage {
+    if (handle.rid == UINT32_MAX || images.find(handle.rid) == images.end()) return VK_NULL_HANDLE;
     return images.at(handle.rid);
 }
 
 auto Renderer_Vulkan::getRenderTargetView(RenderTargetHandle handle) const -> VkImageView {
+    if (handle.rid == UINT32_MAX || imageViews.find(handle.rid) == imageViews.end()) return VK_NULL_HANDLE;
     return imageViews.at(handle.rid);
 }
 
 auto Renderer_Vulkan::getRenderTargetMemory(RenderTargetHandle handle) const -> VkDeviceMemory {
+    if (handle.rid == UINT32_MAX || imageMemories.find(handle.rid) == imageMemories.end()) return VK_NULL_HANDLE;
     return imageMemories.at(handle.rid);
 }
 
 auto Renderer_Vulkan::getPipeline(PipelineHandle handle) const -> VkPipeline {
+    if (handle.rid == UINT32_MAX || pipelines.find(handle.rid) == pipelines.end()) return VK_NULL_HANDLE;
     return pipelines.at(handle.rid);
 }
 
@@ -3803,5 +3860,40 @@ void Renderer_Vulkan::destroyUiResources() {
     if (uiDescriptorPool != VK_NULL_HANDLE) {
         vkDestroyDescriptorPool(device, uiDescriptorPool, nullptr);
         uiDescriptorPool = VK_NULL_HANDLE;
+    }
+}
+
+
+void Renderer_Vulkan::readPixelsAsync(ScreenshotCallback callback) {
+    m_pendingScreenshotRequests.push_back(callback);
+}
+
+// We need a way to poll these fences. We will add a call to a private helper in draw()
+void Renderer_Vulkan::processPendingScreenshots() {
+    auto& pending = pendingScreenshots;
+    for (auto it = pending.begin(); it != pending.end(); ) {
+        if (vkGetFenceStatus(device, it->fence) == VK_SUCCESS) {
+            // Ready!
+            GpuImageData imageData;
+            imageData.width = it->width;
+            imageData.height = it->height;
+            imageData.channelCount = 4;
+            uint32_t size = it->width * it->height * 4;
+            imageData.data.resize(size);
+
+            void* data;
+            vkMapMemory(device, getBufferMemory(it->buffer), 0, size, 0, &data);
+            memcpy(imageData.data.data(), data, size);
+            vkUnmapMemory(device, getBufferMemory(it->buffer));
+
+            it->callback(imageData);
+
+            // Cleanup
+            // Fence is managed by frame loop
+            destroyBuffer(it->buffer);
+            it = pending.erase(it);
+        } else {
+            ++it;
+        }
     }
 }

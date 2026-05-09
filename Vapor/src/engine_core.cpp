@@ -100,6 +100,7 @@ namespace Vapor {
     }
 
     void EngineCore::update(float deltaTime) {
+        _taskScheduler->processMainThreadTasks();
         ZoneScoped;
 
         if (!_initialized) {
