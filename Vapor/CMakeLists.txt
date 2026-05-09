@@ -120,7 +120,6 @@ add_custom_target(Vapor_compile_shaders ALL DEPENDS ${SPIRV_BINARY_FILES})
 add_dependencies(Vapor Vapor_compile_shaders)
 
 set(VAPOR_ASSETS_DIR "${CMAKE_CURRENT_SOURCE_DIR}/assets" PARENT_SCOPE)
-set(VAPOR_BINARY_ASSETS_DIR "${CMAKE_CURRENT_BINARY_DIR}/assets" PARENT_SCOPE)
 
 
 message(STATUS "Configuring Vapor package install...")
