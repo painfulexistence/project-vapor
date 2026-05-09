@@ -16,6 +16,8 @@
 #include <functional>
 #include <glm/ext/matrix_clip_space.hpp>
 #include <glm/ext/matrix_transform.hpp>
+#include <algorithm>
+#include <cmath>
 #include <vector>
 
 #include "asset_manager.hpp"
@@ -80,6 +82,450 @@ void insertImageMemoryBarrier2(
     vkCmdPipelineBarrier2(cmd, &depInfo);
 }
 
+#include <glm/gtc/type_ptr.hpp>
+
+#include "engine_core.hpp"
+#include "rmlui_manager.hpp"
+#include <RmlUi/Core.h>
+#include <RmlUi/Core/RenderInterface.h>
+
+namespace {
+    struct RmlUiVertex {
+        glm::vec2 pos;
+        glm::vec4 color;
+        glm::vec2 uv;
+    };
+
+    struct RmlUiUniforms {
+        glm::mat4 projection;
+    };
+
+    struct RmlUiGeometry {
+        BufferHandle vertexBuffer;
+        BufferHandle indexBuffer;
+        uint32_t indexCount;
+    };
+
+    struct RmlUiTexture {
+        VkImage image;
+        VkImageView imageView;
+        VkDeviceMemory memory;
+        VkDescriptorSet descriptorSet;
+    };
+}
+
+class RmlUiRendererVulkan : public Rml::RenderInterface {
+public:
+    RmlUiRendererVulkan(Renderer_Vulkan* renderer) : m_renderer(renderer) {
+        // Create a 1x1 white texture
+        Rml::byte white[4] = { 255, 255, 255, 255 };
+        m_whiteTexture = GenerateTexture(Rml::Span<const Rml::byte>(white, 4), Rml::Vector2i(1, 1));
+    }
+
+    auto CompileGeometry(Rml::Span<const Rml::Vertex> vertices, Rml::Span<const int> indices)
+        -> Rml::CompiledGeometryHandle override;
+
+    void RenderGeometry(Rml::CompiledGeometryHandle geometry, Rml::Vector2f translation, Rml::TextureHandle texture)
+        override;
+
+    void ReleaseGeometry(Rml::CompiledGeometryHandle geometry) override;
+
+    void EnableScissorRegion(bool enable) override;
+
+    void SetScissorRegion(Rml::Rectanglei region) override;
+
+    auto LoadTexture(Rml::Vector2i& texture_dimensions, const Rml::String& source) -> Rml::TextureHandle override;
+
+    auto GenerateTexture(Rml::Span<const Rml::byte> source, Rml::Vector2i source_dimensions)
+        -> Rml::TextureHandle override;
+
+    void ReleaseTexture(Rml::TextureHandle texture) override;
+
+    void SetTransform(const Rml::Matrix4f* transform) override;
+
+    void beginFrame(VkCommandBuffer cmd, uint32_t width, uint32_t height, uint32_t fbWidth, uint32_t fbHeight);
+    void endFrame();
+    ~RmlUiRendererVulkan() {
+        if (m_whiteTexture != 0) {
+            ReleaseTexture(m_whiteTexture);
+        }
+        // Ensure all remaining geometry and textures are released
+        auto textures_copy = m_textures;
+        for (auto const& [handle, texture] : textures_copy) {
+            ReleaseTexture(handle);
+        }
+        auto geometry_copy = m_geometry;
+        for (auto const& [handle, geometry] : geometry_copy) {
+            ReleaseGeometry(handle);
+        }
+    }
+
+private:
+    Renderer_Vulkan* m_renderer;
+    VkCommandBuffer m_cmd = VK_NULL_HANDLE;
+    uint32_t m_width = 0;
+    uint32_t m_fbWidth = 0;
+    uint32_t m_height = 0;
+    uint32_t m_fbHeight = 0;
+
+    std::unordered_map<Rml::CompiledGeometryHandle, RmlUiGeometry> m_geometry;
+    Rml::CompiledGeometryHandle m_nextGeometryHandle = 1;
+
+    std::unordered_map<Rml::TextureHandle, RmlUiTexture> m_textures;
+    Rml::TextureHandle m_nextTextureHandle = 1;
+
+    struct {
+        bool enabled = false;
+        int x, y, width, height;
+    } m_scissor;
+    Rml::TextureHandle m_whiteTexture = 0;
+
+    glm::mat4 m_transform = glm::mat4(1.0f);
+};
+
+
+auto RmlUiRendererVulkan::CompileGeometry(Rml::Span<const Rml::Vertex> vertices, Rml::Span<const int> indices)
+    -> Rml::CompiledGeometryHandle {
+    std::vector<RmlUiVertex> uiVertices(vertices.size());
+    for (size_t i = 0; i < vertices.size(); i++) {
+        uiVertices[i].pos = glm::vec2(vertices[i].position.x, vertices[i].position.y);
+        uiVertices[i].color = glm::vec4(
+            vertices[i].colour.red / 255.0f,
+            vertices[i].colour.green / 255.0f,
+            vertices[i].colour.blue / 255.0f,
+            vertices[i].colour.alpha / 255.0f
+        );
+        uiVertices[i].uv = glm::vec2(vertices[i].tex_coord.x, vertices[i].tex_coord.y);
+    }
+
+    std::vector<uint32_t> uiIndices(indices.begin(), indices.end());
+
+    if (uiVertices.empty() || uiIndices.empty()) {
+        return 0;
+    }
+
+    RmlUiGeometry geom;
+
+    VkDeviceSize vertexBufferSize = uiVertices.size() * sizeof(RmlUiVertex);
+    geom.vertexBuffer = m_renderer->createBuffer(BufferUsage::VERTEX, vertexBufferSize);
+    void* vertexData;
+    vkMapMemory(
+        m_renderer->getDevice(), m_renderer->getBufferMemory(geom.vertexBuffer), 0, VK_WHOLE_SIZE, 0, &vertexData
+    );
+    memcpy(vertexData, uiVertices.data(), vertexBufferSize);
+    vkUnmapMemory(m_renderer->getDevice(), m_renderer->getBufferMemory(geom.vertexBuffer));
+
+    VkDeviceSize indexBufferSize = uiIndices.size() * sizeof(uint32_t);
+    geom.indexBuffer = m_renderer->createBuffer(BufferUsage::INDEX, indexBufferSize);
+    void* indexData;
+    vkMapMemory(
+        m_renderer->getDevice(), m_renderer->getBufferMemory(geom.indexBuffer), 0, VK_WHOLE_SIZE, 0, &indexData
+    );
+    memcpy(indexData, uiIndices.data(), indexBufferSize);
+    vkUnmapMemory(m_renderer->getDevice(), m_renderer->getBufferMemory(geom.indexBuffer));
+
+    geom.indexCount = static_cast<uint32_t>(uiIndices.size());
+
+    Rml::CompiledGeometryHandle handle = m_nextGeometryHandle++;
+    m_geometry[handle] = geom;
+    return handle;
+}
+
+void RmlUiRendererVulkan::RenderGeometry(
+    Rml::CompiledGeometryHandle geometry, Rml::Vector2f translation, Rml::TextureHandle texture
+) {
+    if (m_cmd == VK_NULL_HANDLE) return;
+
+    auto it = m_geometry.find(geometry);
+    if (it == m_geometry.end()) return;
+
+    const RmlUiGeometry& geom = it->second;
+
+    vkCmdBindPipeline(m_cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, m_renderer->getUiPipeline());
+
+    RmlUiUniforms uniforms;
+    uniforms.projection = glm::ortho(0.0f, (float)m_width, (float)m_height, 0.0f, -1.0f, 1.0f);
+    glm::mat4 model = glm::translate(m_transform, glm::vec3(translation.x, translation.y, 0.0f));
+
+    struct PushConstants {
+        glm::mat4 projection;
+        glm::mat4 model;
+    } pc;
+    pc.projection = uniforms.projection;
+    pc.model = model;
+
+    vkCmdPushConstants(
+        m_cmd, m_renderer->getUiPipelineLayout(), VK_SHADER_STAGE_VERTEX_BIT, 0, sizeof(PushConstants), &pc
+    );
+
+    VkBuffer vBuffer = m_renderer->getBuffer(geom.vertexBuffer);
+    VkDeviceSize offset = 0;
+    vkCmdBindVertexBuffers(m_cmd, 0, 1, &vBuffer, &offset);
+    vkCmdBindIndexBuffer(m_cmd, m_renderer->getBuffer(geom.indexBuffer), 0, VK_INDEX_TYPE_UINT32);
+
+    // Set dynamic state
+    VkViewport viewport{};
+    viewport.x = 0;
+    viewport.y = (float)m_fbHeight;
+    viewport.width = (float)m_fbWidth;
+    viewport.height = -(float)m_fbHeight;
+    viewport.minDepth = 0.0f;
+    viewport.maxDepth = 1.0f;
+    vkCmdSetViewport(m_cmd, 0, 1, &viewport);
+
+    if (m_scissor.enabled) {
+        float scaleX = (float)m_fbWidth / m_width;
+        float scaleY = (float)m_fbHeight / m_height;
+        VkRect2D scissor{};
+        scissor.offset = { (int32_t)(m_scissor.x * scaleX), (int32_t)(m_scissor.y * scaleY) };
+        scissor.extent = { (uint32_t)(m_scissor.width * scaleX), (uint32_t)(m_scissor.height * scaleY) };
+        vkCmdSetScissor(m_cmd, 0, 1, &scissor);
+    } else {
+        VkRect2D scissor{};
+        scissor.offset = { 0, 0 };
+        scissor.extent = { (uint32_t)m_fbWidth, (uint32_t)m_fbHeight };
+        vkCmdSetScissor(m_cmd, 0, 1, &scissor);
+    }
+
+    // Set texture
+    Rml::TextureHandle activeTex = texture ? texture : m_whiteTexture;
+    if (activeTex) {
+        auto texIt = m_textures.find(activeTex);
+        if (texIt != m_textures.end()) {
+            vkCmdBindDescriptorSets(m_cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, m_renderer->getUiPipelineLayout(), 0, 1, &texIt->second.descriptorSet, 0, nullptr);
+        }
+    }
+
+    // Draw
+    if (geom.indexCount > 0) {
+        vkCmdDrawIndexed(m_cmd, geom.indexCount, 1, 0, 0, 0);
+    }
+}
+
+void RmlUiRendererVulkan::ReleaseGeometry(Rml::CompiledGeometryHandle geometry) {
+    auto it = m_geometry.find(geometry);
+    if (it != m_geometry.end()) {
+        m_renderer->destroyBuffer(it->second.vertexBuffer);
+        m_renderer->destroyBuffer(it->second.indexBuffer);
+        m_geometry.erase(it);
+    }
+}
+
+void RmlUiRendererVulkan::EnableScissorRegion(bool enable) {
+    m_scissor.enabled = enable;
+}
+
+void RmlUiRendererVulkan::SetScissorRegion(Rml::Rectanglei region) {
+    m_scissor.x = region.Left();
+    m_scissor.y = region.Top();
+    m_scissor.width = region.Width();
+    m_scissor.height = region.Height();
+}
+
+auto RmlUiRendererVulkan::LoadTexture(Rml::Vector2i& texture_dimensions, const Rml::String& source) -> Rml::TextureHandle {
+    // Use AssetManager to load texture and wrap it
+    auto img = AssetManager::loadImage(source.c_str());
+    if (!img) {
+        return 0;
+    }
+    texture_dimensions.x = img->width;
+    texture_dimensions.y = img->height;
+    return GenerateTexture(Rml::Span<const Rml::byte>((const Rml::byte*)img->byteArray.data(), img->byteArray.size()), texture_dimensions);
+}
+
+auto RmlUiRendererVulkan::GenerateTexture(Rml::Span<const Rml::byte> source, Rml::Vector2i source_dimensions)
+    -> Rml::TextureHandle {
+    if (source.empty()) return 0;
+
+    VkFormat format = VK_FORMAT_R8G8B8A8_UNORM;
+    if (source.size() == (size_t)source_dimensions.x * source_dimensions.y) {
+        format = VK_FORMAT_R8_UNORM;
+    }
+
+    // This is a bit complex to do without helpers, but I'll try to use m_renderer's existing logic
+    // Actually, I'll just return a new handle and implement it properly.
+    
+    VkDevice device = m_renderer->getDevice();
+    VkDeviceSize imageSize = source.size();
+
+    // Create staging buffer
+    VkBuffer stagingBuffer;
+    VkDeviceMemory stagingBufferMemory;
+    VkBufferCreateInfo bufferInfo{};
+    bufferInfo.sType = VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO;
+    bufferInfo.size = imageSize;
+    bufferInfo.usage = VK_BUFFER_USAGE_TRANSFER_SRC_BIT;
+    bufferInfo.sharingMode = VK_SHARING_MODE_EXCLUSIVE;
+    vkCreateBuffer(device, &bufferInfo, nullptr, &stagingBuffer);
+
+    VkMemoryRequirements memReqs;
+    vkGetBufferMemoryRequirements(device, stagingBuffer, &memReqs);
+    VkMemoryAllocateInfo allocInfo{};
+    allocInfo.sType = VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO;
+    allocInfo.allocationSize = memReqs.size;
+    allocInfo.memoryTypeIndex = m_renderer->findMemoryType(memReqs.memoryTypeBits, VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT);
+    vkAllocateMemory(device, &allocInfo, nullptr, &stagingBufferMemory);
+    vkBindBufferMemory(device, stagingBuffer, stagingBufferMemory, 0);
+
+    void* data;
+    vkMapMemory(device, stagingBufferMemory, 0, imageSize, 0, &data);
+    memcpy(data, source.data(), (size_t)imageSize);
+    vkUnmapMemory(device, stagingBufferMemory);
+
+    // Create image
+    VkImage image;
+    VkDeviceMemory imageMemory;
+    VkImageCreateInfo imageInfo{};
+    imageInfo.sType = VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO;
+    imageInfo.imageType = VK_IMAGE_TYPE_2D;
+    imageInfo.extent.width = source_dimensions.x;
+    imageInfo.extent.height = source_dimensions.y;
+    imageInfo.extent.depth = 1;
+    imageInfo.mipLevels = 1;
+    imageInfo.arrayLayers = 1;
+    imageInfo.format = VK_FORMAT_R8G8B8A8_UNORM;
+    imageInfo.tiling = VK_IMAGE_TILING_OPTIMAL;
+    imageInfo.initialLayout = VK_IMAGE_LAYOUT_UNDEFINED;
+    imageInfo.usage = VK_IMAGE_USAGE_TRANSFER_DST_BIT | VK_IMAGE_USAGE_SAMPLED_BIT;
+    imageInfo.sharingMode = VK_SHARING_MODE_EXCLUSIVE;
+    imageInfo.samples = VK_SAMPLE_COUNT_1_BIT;
+    vkCreateImage(device, &imageInfo, nullptr, &image);
+
+    vkGetImageMemoryRequirements(device, image, &memReqs);
+    allocInfo.allocationSize = memReqs.size;
+    allocInfo.memoryTypeIndex = m_renderer->findMemoryType(memReqs.memoryTypeBits, VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT);
+    vkAllocateMemory(device, &allocInfo, nullptr, &imageMemory);
+    vkBindImageMemory(device, image, imageMemory, 0);
+
+    // Transition and copy
+    VkCommandBuffer cmd = m_renderer->beginSingleTimeCommands();
+
+    VkImageMemoryBarrier barrier{};
+    barrier.sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER;
+    barrier.oldLayout = VK_IMAGE_LAYOUT_UNDEFINED;
+    barrier.newLayout = VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL;
+    barrier.srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+    barrier.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+    barrier.image = image;
+    barrier.subresourceRange.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
+    barrier.subresourceRange.baseMipLevel = 0;
+    barrier.subresourceRange.levelCount = 1;
+    barrier.subresourceRange.baseArrayLayer = 0;
+    barrier.subresourceRange.layerCount = 1;
+    barrier.srcAccessMask = 0;
+    barrier.dstAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
+
+    vkCmdPipelineBarrier(cmd, VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT, VK_PIPELINE_STAGE_TRANSFER_BIT, 0, 0, nullptr, 0, nullptr, 1, &barrier);
+
+    VkBufferImageCopy region{};
+    region.bufferOffset = 0;
+    region.bufferRowLength = 0;
+    region.bufferImageHeight = 0;
+    region.imageSubresource.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
+    region.imageSubresource.mipLevel = 0;
+    region.imageSubresource.baseArrayLayer = 0;
+    region.imageSubresource.layerCount = 1;
+    region.imageOffset = { 0, 0, 0 };
+    region.imageExtent = { (uint32_t)source_dimensions.x, (uint32_t)source_dimensions.y, 1 };
+
+    vkCmdCopyBufferToImage(cmd, stagingBuffer, image, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 1, &region);
+
+    barrier.oldLayout = VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL;
+    barrier.newLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
+    barrier.srcAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
+    barrier.dstAccessMask = VK_ACCESS_SHADER_READ_BIT;
+
+    vkCmdPipelineBarrier(cmd, VK_PIPELINE_STAGE_TRANSFER_BIT, VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT, 0, 0, nullptr, 0, nullptr, 1, &barrier);
+
+    m_renderer->endSingleTimeCommands(cmd);
+
+    vkDestroyBuffer(device, stagingBuffer, nullptr);
+    vkFreeMemory(device, stagingBufferMemory, nullptr);
+
+    // Create view
+    VkImageView imageView;
+    VkImageViewCreateInfo viewInfo{};
+    viewInfo.sType = VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO;
+    viewInfo.image = image;
+    viewInfo.viewType = VK_IMAGE_VIEW_TYPE_2D;
+    viewInfo.format = VK_FORMAT_R8G8B8A8_UNORM;
+    viewInfo.subresourceRange.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
+    viewInfo.subresourceRange.baseMipLevel = 0;
+    viewInfo.subresourceRange.levelCount = 1;
+    viewInfo.subresourceRange.baseArrayLayer = 0;
+    viewInfo.subresourceRange.layerCount = 1;
+    vkCreateImageView(device, &viewInfo, nullptr, &imageView);
+
+    // Create descriptor set
+    VkDescriptorSet descriptorSet;
+    VkDescriptorSetAllocateInfo descriptorAllocInfo{};
+    descriptorAllocInfo.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO;
+    descriptorAllocInfo.descriptorPool = m_renderer->getUiDescriptorPool();
+    descriptorAllocInfo.descriptorSetCount = 1;
+    VkDescriptorSetLayout layout = m_renderer->getUiDescriptorSetLayout();
+    descriptorAllocInfo.pSetLayouts = &layout;
+    vkAllocateDescriptorSets(device, &descriptorAllocInfo, &descriptorSet);
+
+    VkDescriptorImageInfo imageInfoDesc{};
+    imageInfoDesc.imageLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
+    imageInfoDesc.imageView = imageView;
+    imageInfoDesc.sampler = m_renderer->getDefaultSampler();
+
+    VkWriteDescriptorSet descriptorWrite{};
+    descriptorWrite.sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
+    descriptorWrite.dstSet = descriptorSet;
+    descriptorWrite.dstBinding = 0;
+    descriptorWrite.dstArrayElement = 0;
+    descriptorWrite.descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
+    descriptorWrite.descriptorCount = 1;
+    descriptorWrite.pImageInfo = &imageInfoDesc;
+    vkUpdateDescriptorSets(device, 1, &descriptorWrite, 0, nullptr);
+
+    RmlUiTexture texture;
+    texture.image = image;
+    texture.imageView = imageView;
+    texture.memory = imageMemory;
+    texture.descriptorSet = descriptorSet;
+
+    Rml::TextureHandle handle = m_nextTextureHandle++;
+    m_textures[handle] = texture;
+
+    return handle;
+}
+
+void RmlUiRendererVulkan::ReleaseTexture(Rml::TextureHandle texture) {
+    vkDeviceWaitIdle(m_renderer->getDevice());
+    auto it = m_textures.find(texture);
+    if (it != m_textures.end()) {
+        VkDevice device = m_renderer->getDevice();
+        vkDestroyImageView(device, it->second.imageView, nullptr);
+        vkDestroyImage(device, it->second.image, nullptr);
+        vkFreeMemory(device, it->second.memory, nullptr);
+        vkFreeDescriptorSets(device, m_renderer->getUiDescriptorPool(), 1, &it->second.descriptorSet);
+        m_textures.erase(it);
+    }
+}
+
+void RmlUiRendererVulkan::SetTransform(const Rml::Matrix4f* transform) {
+    if (transform) {
+        m_transform = glm::make_mat4(transform->data());
+    } else {
+        m_transform = glm::mat4(1.0f);
+    }
+}
+
+void RmlUiRendererVulkan::beginFrame(VkCommandBuffer cmd, uint32_t width, uint32_t height, uint32_t fbWidth, uint32_t fbHeight) {
+    m_cmd = cmd;
+    m_width = width;
+    m_height = height;
+    m_fbWidth = fbWidth;
+    m_fbHeight = fbHeight;
+}
+
+void RmlUiRendererVulkan::endFrame() {
+    m_cmd = VK_NULL_HANDLE;
+}
+
 Renderer_Vulkan::Renderer_Vulkan() {
 }
 
@@ -88,6 +534,7 @@ Renderer_Vulkan::~Renderer_Vulkan() {
 }
 
 auto Renderer_Vulkan::init(SDL_Window* window) -> void {
+    this->window = window;
     ZoneScoped;
 
     int windowWidth, windowHeight;
@@ -217,8 +664,18 @@ auto Renderer_Vulkan::init(SDL_Window* window) -> void {
         deviceInfo.queueCreateInfoCount = 2;
     }
     if (vkCreateDevice(physicalDevice, &deviceInfo, nullptr, &device) != VK_SUCCESS) {
-        throw std::runtime_error("Failed to create device!");
+        throw std::runtime_error("Failed to create logical device!");
     }
+
+    vkCmdBeginRendering_ptr = (PFN_vkCmdBeginRenderingKHR)vkGetDeviceProcAddr(device, "vkCmdBeginRenderingKHR");
+    vkCmdEndRendering_ptr = (PFN_vkCmdEndRenderingKHR)vkGetDeviceProcAddr(device, "vkCmdEndRenderingKHR");
+
+    if (!vkCmdBeginRendering_ptr || !vkCmdEndRendering_ptr) {
+        // Try without KHR suffix (Core 1.3)
+        vkCmdBeginRendering_ptr = (PFN_vkCmdBeginRenderingKHR)vkGetDeviceProcAddr(device, "vkCmdBeginRendering");
+        vkCmdEndRendering_ptr = (PFN_vkCmdEndRenderingKHR)vkGetDeviceProcAddr(device, "vkCmdEndRendering");
+    }
+
     vkGetDeviceQueue(device, graphicsFamilyIdx, 0, &graphicsQueue);
     vkGetDeviceQueue(device, presentFamilyIdx, 0, &presentQueue);
 
@@ -317,7 +774,6 @@ auto Renderer_Vulkan::init(SDL_Window* window) -> void {
     VkCommandBufferAllocateInfo allocInfo = {};
     allocInfo.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO;
     allocInfo.commandPool = commandPool;
-    allocInfo.level = VK_COMMAND_BUFFER_LEVEL_PRIMARY;
     allocInfo.commandBufferCount = static_cast<uint32_t>(commandBuffers.size());
     if (vkAllocateCommandBuffers(device, &allocInfo, commandBuffers.data()) != VK_SUCCESS) {
         throw std::runtime_error("Failed to allocate command buffers!");
@@ -380,6 +836,9 @@ auto Renderer_Vulkan::deinit() -> void {
     // ImGui deinit
     ImGui_ImplVulkan_Shutdown();
     ImGui_ImplSDL3_Shutdown();
+
+    uiRenderer.reset();
+    destroyUiResources();
 
     // TODO: clean up all resources
     vkDeviceWaitIdle(device);
@@ -779,9 +1238,8 @@ auto Renderer_Vulkan::createResources() -> void {
 
     // Create pipeline layouts
     std::array<VkDescriptorSetLayout, 2> renderDescriptorSetLayouts = { set0Layout, set1Layout };
-    std::array<VkPushConstantRange, 2> renderPushConstantRanges = {
-        { { VK_SHADER_STAGE_FRAGMENT_BIT, 0, sizeof(glm::vec3) },
-          { VK_SHADER_STAGE_VERTEX_BIT, sizeof(glm::vec3), sizeof(Uint32) } }
+    std::array<VkPushConstantRange, 1> renderPushConstantRanges = {
+        { VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT, 0, 16 }
     };
     VkPipelineLayoutCreateInfo renderPipelineLayoutInfo = {};
     renderPipelineLayoutInfo.sType = VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO;
@@ -794,7 +1252,7 @@ auto Renderer_Vulkan::createResources() -> void {
     }
 
     std::array<VkPushConstantRange, 1> depthOnlyPushConstantRanges = {
-        { { VK_SHADER_STAGE_VERTEX_BIT, 0, sizeof(Uint32) } }
+        { VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT, 0, 16 }
     };
     std::array<VkDescriptorSetLayout, 2> depthOnlyDescriptorSetLayouts = { set0Layout, set1Layout };
     VkPipelineLayoutCreateInfo depthOnlyPipelineLayoutInfo = {};
@@ -842,6 +1300,8 @@ auto Renderer_Vulkan::createResources() -> void {
     postProcessPipeline = createPostProcessPipeline(
         std::string("assets/shaders/FullScreen.vert.spv"), std::string("assets/shaders/PostProcess.frag.spv")
     );
+
+    createUiResources();
     tileCullingPipeline =
         createComputePipeline(std::string("assets/shaders/TileLightCull.comp.spv"), tileCullingPipelineLayout);
 
@@ -858,6 +1318,32 @@ auto Renderer_Vulkan::createResources() -> void {
         instanceDataBuffers[i] = createBufferMapped(
             BufferUsage::UNIFORM, sizeof(InstanceData) * MAX_INSTANCES, &instanceDataBuffersMapped[i]
         );
+    }
+
+    directionalLightBuffers.resize(MAX_FRAMES_IN_FLIGHT);
+    directionalLightBuffersMapped.resize(MAX_FRAMES_IN_FLIGHT);
+    for (size_t i = 0; i < MAX_FRAMES_IN_FLIGHT; i++) {
+        directionalLightBuffers[i] = createBufferMapped(
+            BufferUsage::STORAGE, sizeof(DirectionalLight) * MAX_DIRECTIONAL_LIGHTS, &directionalLightBuffersMapped[i]
+        );
+    }
+
+    pointLightBuffers.resize(MAX_FRAMES_IN_FLIGHT);
+    pointLightBuffersMapped.resize(MAX_FRAMES_IN_FLIGHT);
+    for (size_t i = 0; i < MAX_FRAMES_IN_FLIGHT; i++) {
+        pointLightBuffers[i] = createBufferMapped(
+            BufferUsage::STORAGE, sizeof(PointLight) * MAX_POINT_LIGHTS, &pointLightBuffersMapped[i]
+        );
+    }
+
+    lightCullDataBuffers.resize(MAX_FRAMES_IN_FLIGHT);
+    for (size_t i = 0; i < MAX_FRAMES_IN_FLIGHT; i++) {
+        lightCullDataBuffers[i] = createBuffer(BufferUsage::UNIFORM, sizeof(LightCullData));
+    }
+
+    clusterBuffers.resize(MAX_FRAMES_IN_FLIGHT);
+    for (size_t i = 0; i < MAX_FRAMES_IN_FLIGHT; i++) {
+        clusterBuffers[i] = createBuffer(BufferUsage::STORAGE, sizeof(Cluster) * numClusters);
     }
 
     // Create textures
@@ -899,8 +1385,8 @@ auto Renderer_Vulkan::createResources() -> void {
 
     // Create descriptor pool and sets
     std::array<VkDescriptorPoolSize, 2> set0PoolSizes = {
-        { { VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER, 3 * static_cast<uint32_t>(MAX_FRAMES_IN_FLIGHT) },
-          { VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, 3 * static_cast<uint32_t>(MAX_FRAMES_IN_FLIGHT) } }
+        { { VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER, 6 * static_cast<uint32_t>(MAX_FRAMES_IN_FLIGHT) },
+          { VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, 6 * static_cast<uint32_t>(MAX_FRAMES_IN_FLIGHT) } }
     };
 
     VkDescriptorPoolCreateInfo set0PoolDesc{};
@@ -951,38 +1437,75 @@ auto Renderer_Vulkan::createResources() -> void {
 
     // Write descriptor sets
     for (size_t i = 0; i < MAX_FRAMES_IN_FLIGHT; i++) {
-        VkDescriptorBufferInfo cameraDataBufferInfo = {};
-        cameraDataBufferInfo.buffer = getBuffer(cameraDataBuffers[i]);
-        cameraDataBufferInfo.offset = 0;
-        cameraDataBufferInfo.range = sizeof(CameraData);
+        VkDescriptorBufferInfo cameraDataBufferInfo = {
+            .buffer = getBuffer(cameraDataBuffers[i]), .offset = 0, .range = sizeof(CameraData)
+        };
 
-        VkDescriptorBufferInfo instanceBufferInfo = {};
-        instanceBufferInfo.buffer = getBuffer(instanceDataBuffers[i]);
-        instanceBufferInfo.offset = 0;
-        instanceBufferInfo.range = sizeof(InstanceData) * MAX_INSTANCES;
+        VkDescriptorBufferInfo instanceBufferInfo = {
+            .buffer = getBuffer(instanceDataBuffers[i]), .offset = 0, .range = sizeof(InstanceData) * MAX_INSTANCES
+        };
 
-        std::array<VkWriteDescriptorSet, 2> writes = { { // must match descriptor set layout bindings
-                                                         {
-                                                             .sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET,
-                                                             .dstSet = set0s[i],
-                                                             .dstBinding = 0,
-                                                             .dstArrayElement = 0,
-                                                             .descriptorCount = 1,
-                                                             .descriptorType = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER,
-                                                             .pImageInfo = nullptr,
-                                                             .pBufferInfo = &cameraDataBufferInfo,
-                                                         },
-                                                         {
-                                                             .sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET,
-                                                             .dstSet = set0s[i],
-                                                             .dstBinding = 1,
-                                                             .dstArrayElement = 0,
-                                                             .descriptorCount = 1,
-                                                             .descriptorType = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER,
-                                                             .pImageInfo = nullptr,
-                                                             .pBufferInfo = &instanceBufferInfo,
-                                                         } } };
-        vkUpdateDescriptorSets(device, writes.size(), writes.data(), 0, nullptr);
+        VkDescriptorBufferInfo directionalLightBufferInfo = {
+            .buffer = getBuffer(directionalLightBuffers[i]),
+            .offset = 0,
+            .range = sizeof(DirectionalLight) * MAX_DIRECTIONAL_LIGHTS
+        };
+
+        VkDescriptorBufferInfo pointLightBufferInfo = {
+            .buffer = getBuffer(pointLightBuffers[i]), .offset = 0, .range = sizeof(PointLight) * MAX_POINT_LIGHTS
+        };
+
+        VkDescriptorBufferInfo lightCullBufferInfo = {
+            .buffer = getBuffer(lightCullDataBuffers[i]), .offset = 0, .range = sizeof(LightCullData)
+        };
+
+        VkDescriptorBufferInfo clusterBufferInfo = {
+            .buffer = getBuffer(clusterBuffers[i]), .offset = 0, .range = sizeof(Cluster) * numClusters
+        };
+
+        std::array<VkWriteDescriptorSet, 6> writes = { { { .sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET,
+                                                           .dstSet = set0s[i],
+                                                           .dstBinding = 0,
+                                                           .dstArrayElement = 0,
+                                                           .descriptorCount = 1,
+                                                           .descriptorType = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER,
+                                                           .pBufferInfo = &cameraDataBufferInfo },
+                                                         { .sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET,
+                                                           .dstSet = set0s[i],
+                                                           .dstBinding = 1,
+                                                           .dstArrayElement = 0,
+                                                           .descriptorCount = 1,
+                                                           .descriptorType = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER,
+                                                           .pBufferInfo = &instanceBufferInfo },
+                                                         { .sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET,
+                                                           .dstSet = set0s[i],
+                                                           .dstBinding = 2,
+                                                           .dstArrayElement = 0,
+                                                           .descriptorCount = 1,
+                                                           .descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,
+                                                           .pBufferInfo = &directionalLightBufferInfo },
+                                                         { .sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET,
+                                                           .dstSet = set0s[i],
+                                                           .dstBinding = 3,
+                                                           .dstArrayElement = 0,
+                                                           .descriptorCount = 1,
+                                                           .descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,
+                                                           .pBufferInfo = &pointLightBufferInfo },
+                                                         { .sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET,
+                                                           .dstSet = set0s[i],
+                                                           .dstBinding = 4,
+                                                           .dstArrayElement = 0,
+                                                           .descriptorCount = 1,
+                                                           .descriptorType = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER,
+                                                           .pBufferInfo = &lightCullBufferInfo },
+                                                         { .sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET,
+                                                           .dstSet = set0s[i],
+                                                           .dstBinding = 5,
+                                                           .dstArrayElement = 0,
+                                                           .descriptorCount = 1,
+                                                           .descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,
+                                                           .pBufferInfo = &clusterBufferInfo } } };
+        vkUpdateDescriptorSets(device, static_cast<uint32_t>(writes.size()), writes.data(), 0, nullptr);
     }
     for (size_t i = 0; i < MAX_FRAMES_IN_FLIGHT; i++) {
         VkDescriptorImageInfo colorImageInfo = {};
@@ -1007,50 +1530,34 @@ auto Renderer_Vulkan::createResources() -> void {
 auto Renderer_Vulkan::stage(std::shared_ptr<Scene> scene) -> void {
     ZoneScoped;
 
-    // Lights
-    directionalLightBuffers.resize(MAX_FRAMES_IN_FLIGHT);
-    directionalLightBuffersMapped.resize(MAX_FRAMES_IN_FLIGHT);
+    // Initial data copy for lights
     for (size_t i = 0; i < MAX_FRAMES_IN_FLIGHT; i++) {
-        directionalLightBuffers[i] = createBufferMapped(
-            BufferUsage::STORAGE,
-            sizeof(DirectionalLight) * scene->directionalLights.size(),
-            &directionalLightBuffersMapped[i]
-        );
-        memcpy(
-            directionalLightBuffersMapped[i],
-            scene->directionalLights.data(),
-            sizeof(DirectionalLight) * scene->directionalLights.size()
-        );
-    }
-
-    pointLightBuffers.resize(MAX_FRAMES_IN_FLIGHT);
-    pointLightBuffersMapped.resize(MAX_FRAMES_IN_FLIGHT);
-    for (size_t i = 0; i < MAX_FRAMES_IN_FLIGHT; i++) {
-        pointLightBuffers[i] = createBufferMapped(
-            BufferUsage::STORAGE, sizeof(PointLight) * scene->pointLights.size(), &pointLightBuffersMapped[i]
-        );
-        memcpy(pointLightBuffersMapped[i], scene->pointLights.data(), sizeof(PointLight) * scene->pointLights.size());
+        if (!scene->directionalLights.empty()) {
+            memcpy(
+                directionalLightBuffersMapped[i],
+                scene->directionalLights.data(),
+                sizeof(DirectionalLight) * std::min((Uint32)scene->directionalLights.size(), MAX_DIRECTIONAL_LIGHTS)
+            );
+        }
+        if (!scene->pointLights.empty()) {
+            memcpy(
+                pointLightBuffersMapped[i],
+                scene->pointLights.data(),
+                sizeof(PointLight) * std::min((Uint32)scene->pointLights.size(), MAX_POINT_LIGHTS)
+            );
+        }
     }
 
     LightCullData lightCullData = {};
     lightCullData.screenSize = glm::vec2(swapchainExtent.width, swapchainExtent.height);
     lightCullData.gridSize = glm::uvec3(clusterGridSizeX, clusterGridSizeY, clusterGridSizeZ);
     lightCullData.lightCount = scene->pointLights.size();
-    lightCullDataBuffers.resize(MAX_FRAMES_IN_FLIGHT);
     for (size_t i = 0; i < MAX_FRAMES_IN_FLIGHT; i++) {
-        lightCullDataBuffers[i] = createBuffer(BufferUsage::UNIFORM, sizeof(LightCullData));
         VkDeviceMemory bufferMemory = getBufferMemory(lightCullDataBuffers[i]);
         void* data;
         vkMapMemory(device, bufferMemory, 0, sizeof(LightCullData), 0, &data);
         memcpy(data, &lightCullData, sizeof(LightCullData));
         vkUnmapMemory(device, bufferMemory);
-    }
-
-    clusterBuffers.resize(MAX_FRAMES_IN_FLIGHT);
-    for (size_t i = 0; i < MAX_FRAMES_IN_FLIGHT; i++) {
-        clusterBuffers[i] = createBuffer(
-            BufferUsage::STORAGE, sizeof(Cluster) * clusterGridSizeX * clusterGridSizeY * clusterGridSizeZ
-        );
     }
 
     // Textures
@@ -1405,14 +1912,20 @@ auto Renderer_Vulkan::draw(std::shared_ptr<Scene> scene, Camera& camera) -> void
                     fmt::print("No material found for mesh in mesh group {}\n", node->meshGroup->name);
                     continue;
                 }
-                // vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, getPipeline(mesh->material->pipeline.rid));
+                if (mesh->vbos.empty() || mesh->vbos[0].rid == UINT32_MAX || mesh->ebo.rid == UINT32_MAX) {
+                    continue;
+                }
+                auto matSetIt = materialTextureSets.find(mesh->material);
+                if (matSetIt == materialTextureSets.end()) {
+                    fmt::print("[WARN] DepthPass: material missing for mesh in node {}\n", node->name);
+                    continue;
+                }
                 VkBuffer vertexBuffers[] = { getBuffer(mesh->vbos[0]) };
                 VkDeviceSize offsets[] = { 0 };
                 vkCmdBindVertexBuffers(cmd, 0, 1, vertexBuffers, offsets);
                 vkCmdBindIndexBuffer(cmd, getBuffer(mesh->ebo), 0, VkIndexType::VK_INDEX_TYPE_UINT32);
-                // TODO: bind camera and instance data buffer outside the loop
                 std::array<VkDescriptorSet, 2> descriptorSets = { set0s[currentFrameInFlight],
-                                                                  materialTextureSets.at(mesh->material) };
+                                                                  matSetIt->second };
                 vkCmdBindDescriptorSets(
                     cmd,
                     VK_PIPELINE_BIND_POINT_GRAPHICS,
@@ -1422,9 +1935,11 @@ auto Renderer_Vulkan::draw(std::shared_ptr<Scene> scene, Camera& camera) -> void
                     descriptorSets.data(),
                     0,
                     nullptr
-                );// resources are set here
+                );
+                struct PrePassPC { glm::vec3 _pad; uint32_t instanceID; };
+                PrePassPC pc{ {}, mesh->instanceID };
                 vkCmdPushConstants(
-                    cmd, prePassPipelineLayout, VK_SHADER_STAGE_VERTEX_BIT, 0, sizeof(Uint32), &mesh->instanceID
+                    cmd, prePassPipelineLayout, VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT, 0, sizeof(PrePassPC), &pc
                 );
                 vkCmdDrawIndexed(cmd, mesh->indices.size(), 1, 0, 0, 0);
             }
@@ -1461,14 +1976,20 @@ auto Renderer_Vulkan::draw(std::shared_ptr<Scene> scene, Camera& camera) -> void
                     fmt::print("No material found for mesh in mesh group {}\n", node->meshGroup->name);
                     continue;
                 }
-                // vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, getPipeline(mesh->material->pipeline.rid));
+                if (mesh->vbos.empty() || mesh->vbos[0].rid == UINT32_MAX || mesh->ebo.rid == UINT32_MAX) {
+                    continue;
+                }
+                auto matSetIt = materialTextureSets.find(mesh->material);
+                if (matSetIt == materialTextureSets.end()) {
+                    fmt::print("[WARN] ColorPass: material missing for mesh in node {}\n", node->name);
+                    continue;
+                }
                 VkBuffer vertexBuffers[] = { getBuffer(mesh->vbos[0]) };
                 VkDeviceSize offsets[] = { 0 };
                 vkCmdBindVertexBuffers(cmd, 0, 1, vertexBuffers, offsets);
                 vkCmdBindIndexBuffer(cmd, getBuffer(mesh->ebo), 0, VkIndexType::VK_INDEX_TYPE_UINT32);
-                // TODO: bind camera and instance data buffer outside the loop
                 std::array<VkDescriptorSet, 2> descriptorSets = { set0s[currentFrameInFlight],
-                                                                  materialTextureSets.at(mesh->material) };
+                                                                  matSetIt->second };
                 vkCmdBindDescriptorSets(
                     cmd,
                     VK_PIPELINE_BIND_POINT_GRAPHICS,
@@ -1479,16 +2000,15 @@ auto Renderer_Vulkan::draw(std::shared_ptr<Scene> scene, Camera& camera) -> void
                     0,
                     nullptr
                 );// resources are set here
-                vkCmdPushConstants(
-                    cmd, renderPipelineLayout, VK_SHADER_STAGE_FRAGMENT_BIT, 0, sizeof(glm::vec3), &camPos
-                );
+                struct PushConstants { glm::vec3 camPos; uint32_t instanceID; };
+                PushConstants pc{ camPos, mesh->instanceID };
                 vkCmdPushConstants(
                     cmd,
                     renderPipelineLayout,
-                    VK_SHADER_STAGE_VERTEX_BIT,
-                    sizeof(glm::vec3),
-                    sizeof(Uint32),
-                    &mesh->instanceID
+                    VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT,
+                    0,
+                    sizeof(PushConstants),
+                    &pc
                 );
                 vkCmdDrawIndexed(cmd, mesh->indices.size(), 1, 0, 0, 0);
             }
@@ -1546,10 +2066,39 @@ auto Renderer_Vulkan::draw(std::shared_ptr<Scene> scene, Camera& camera) -> void
     imguiRenderingInfo.layerCount = 1;
     imguiRenderingInfo.colorAttachmentCount = 1;
     imguiRenderingInfo.pColorAttachments = &imguiColorAttachment;
-    vkCmdBeginRendering(cmd, &imguiRenderingInfo);
-    ImGui::Render();
-    ImGui_ImplVulkan_RenderDrawData(ImGui::GetDrawData(), cmd);
-    vkCmdEndRendering(cmd);
+
+    // Ensure viewport and scissor match the swapchain size (left‑top origin)
+    VkViewport uiViewport = {};
+    uiViewport.x = 0.0f;
+    uiViewport.y = 0.0f; // top‑left origin
+    uiViewport.width  = static_cast<float>(swapchainExtent.width);
+    uiViewport.height = static_cast<float>(swapchainExtent.height);
+    uiViewport.minDepth = 0.0f;
+    uiViewport.maxDepth = 1.0f;
+    vkCmdSetViewport(cmd, 0, 1, &uiViewport);
+
+    VkRect2D uiScissor = {};
+    uiScissor.offset = {0, 0};
+    uiScissor.extent = swapchainExtent;
+    vkCmdSetScissor(cmd, 0, 1, &uiScissor);
+
+    if (vkCmdBeginRendering_ptr) {
+        vkCmdBeginRendering_ptr(cmd, &imguiRenderingInfo);
+        
+        if (uiRenderer && m_uiContext) {
+                        int winW, winH;
+            SDL_GetWindowSize(window, &winW, &winH);
+            uiRenderer->beginFrame(cmd, (uint32_t)winW, (uint32_t)winH, swapchainExtent.width, swapchainExtent.height);
+            m_uiContext->Render();
+            uiRenderer->endFrame();
+        }
+
+        ImGui::Render();
+        ImGui_ImplVulkan_RenderDrawData(ImGui::GetDrawData(), cmd);
+        vkCmdEndRendering_ptr(cmd);
+    } else {
+        fmt::print(stderr, "[Vulkan] Error: vkCmdBeginRendering pointer is null!\n");
+    }
     insertImageMemoryBarrier(
         cmd,
         swapchainImages[swapchainImageIndex],
@@ -1608,6 +2157,70 @@ auto Renderer_Vulkan::createShaderModule(const std::string& code) -> VkShaderMod
 auto Renderer_Vulkan::createPipeline(const std::string& filename1, const std::string& filename2) -> VkPipeline {
     // TODO: add a generic pipeline creation function
     return createRenderPipeline(filename1, filename2);
+}
+
+auto Renderer_Vulkan::initUI() -> bool {
+    if (!uiRenderer) {
+        uiRenderer = std::make_unique<RmlUiRendererVulkan>(this);
+        Rml::SetRenderInterface(static_cast<Rml::RenderInterface*>(uiRenderer.get()));
+    }
+
+    if (!m_uiContext) {
+        auto* rmluiManager = Vapor::EngineCore::Get()->getRmlUiManager();
+        if (rmluiManager) {
+            if (rmluiManager->FinalizeInitialization()) {
+                m_uiContext = rmluiManager->GetContext();
+            }
+        }
+    }
+
+    return m_uiContext != nullptr;
+}
+
+VkCommandBuffer Renderer_Vulkan::beginSingleTimeCommands() {
+    VkCommandBufferAllocateInfo allocInfo{};
+    allocInfo.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO;
+    allocInfo.level = VK_COMMAND_BUFFER_LEVEL_PRIMARY;
+    allocInfo.commandPool = commandPool;
+    allocInfo.commandBufferCount = 1;
+
+    VkCommandBuffer commandBuffer;
+    vkAllocateCommandBuffers(device, &allocInfo, &commandBuffer);
+
+    VkCommandBufferBeginInfo beginInfo{};
+    beginInfo.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO;
+    beginInfo.flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT;
+
+    vkBeginCommandBuffer(commandBuffer, &beginInfo);
+
+    return commandBuffer;
+}
+
+void Renderer_Vulkan::endSingleTimeCommands(VkCommandBuffer commandBuffer) {
+    vkEndCommandBuffer(commandBuffer);
+
+    VkSubmitInfo submitInfo{};
+    submitInfo.sType = VK_STRUCTURE_TYPE_SUBMIT_INFO;
+    submitInfo.commandBufferCount = 1;
+    submitInfo.pCommandBuffers = &commandBuffer;
+
+    vkQueueSubmit(graphicsQueue, 1, &submitInfo, VK_NULL_HANDLE);
+    vkQueueWaitIdle(graphicsQueue);
+
+    vkFreeCommandBuffers(device, commandPool, 1, &commandBuffer);
+}
+
+uint32_t Renderer_Vulkan::findMemoryType(uint32_t typeFilter, VkMemoryPropertyFlags properties) const {
+    VkPhysicalDeviceMemoryProperties memProperties;
+    vkGetPhysicalDeviceMemoryProperties(physicalDevice, &memProperties);
+
+    for (uint32_t i = 0; i < memProperties.memoryTypeCount; i++) {
+        if ((typeFilter & (1 << i)) && (memProperties.memoryTypes[i].propertyFlags & properties) == properties) {
+            return i;
+        }
+    }
+
+    throw std::runtime_error("failed to find suitable memory type!");
 }
 
 auto Renderer_Vulkan::createRenderPipeline(const std::string& vertShader, const std::string& fragShader) -> VkPipeline {
@@ -2092,21 +2705,11 @@ auto Renderer_Vulkan::createRenderTarget(RenderTargetUsage usage, VkFormat forma
     VkMemoryRequirements memRequirements;
     vkGetImageMemoryRequirements(device, image, &memRequirements);
 
-    VkPhysicalDeviceMemoryProperties memProperties;
-    vkGetPhysicalDeviceMemoryProperties(physicalDevice, &memProperties);
-    int memTypeIdx = 0;
-    for (; memTypeIdx < memProperties.memoryTypeCount; memTypeIdx++) {
-        if ((memRequirements.memoryTypeBits & (1 << memTypeIdx))
-            && (memProperties.memoryTypes[memTypeIdx].propertyFlags & (VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT))) {
-            break;
-        }
-    }
-
     VkDeviceMemory imageMemory;
     VkMemoryAllocateInfo allocInfo = {};
     allocInfo.sType = VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO;
     allocInfo.allocationSize = memRequirements.size;
-    allocInfo.memoryTypeIndex = memTypeIdx;
+    allocInfo.memoryTypeIndex = findMemoryType(memRequirements.memoryTypeBits, VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT);
     if (vkAllocateMemory(device, &allocInfo, nullptr, &imageMemory) != VK_SUCCESS) {
         throw std::runtime_error("Failed to allocate image memory!");
     }
@@ -2164,21 +2767,11 @@ auto Renderer_Vulkan::createTexture(const std::shared_ptr<Image>& img) -> Textur
     VkMemoryRequirements memRequirements;
     vkGetImageMemoryRequirements(device, image, &memRequirements);
 
-    VkPhysicalDeviceMemoryProperties memProperties;
-    vkGetPhysicalDeviceMemoryProperties(physicalDevice, &memProperties);
-    int memTypeIdx = 0;
-    for (; memTypeIdx < memProperties.memoryTypeCount; memTypeIdx++) {
-        if ((memRequirements.memoryTypeBits & (1 << memTypeIdx))
-            && (memProperties.memoryTypes[memTypeIdx].propertyFlags & (VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT))) {
-            break;
-        }
-    }
-
     VkDeviceMemory imageMemory;
     VkMemoryAllocateInfo allocInfo = {};
     allocInfo.sType = VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO;
     allocInfo.allocationSize = memRequirements.size;
-    allocInfo.memoryTypeIndex = memTypeIdx;
+    allocInfo.memoryTypeIndex = findMemoryType(memRequirements.memoryTypeBits, VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT);
 
     if (vkAllocateMemory(device, &allocInfo, nullptr, &imageMemory) != VK_SUCCESS) {
         throw std::runtime_error("Failed to allocate image memory!");
@@ -2318,12 +2911,13 @@ auto Renderer_Vulkan::createTexture(const std::shared_ptr<Image>& img) -> Textur
 }
 
 auto Renderer_Vulkan::createVertexBuffer(std::vector<VertexData> vertices) -> BufferHandle {
+    if (vertices.empty()) return {};
     VkDeviceSize bufferSize = sizeof(VertexData) * vertices.size();
     auto bufferHandle = createBuffer(BufferUsage::VERTEX, bufferSize);
-    VkDeviceMemory bufferMemory = getBufferMemory(bufferHandle);// TODO: use internal pointer
+    VkDeviceMemory bufferMemory = getBufferMemory(bufferHandle);
 
     void* data;
-    vkMapMemory(device, bufferMemory, 0, bufferSize, 0, &data);
+    vkMapMemory(device, bufferMemory, 0, VK_WHOLE_SIZE, 0, &data);
     memcpy(data, vertices.data(), bufferSize);
     vkUnmapMemory(device, bufferMemory);
 
@@ -2331,12 +2925,13 @@ auto Renderer_Vulkan::createVertexBuffer(std::vector<VertexData> vertices) -> Bu
 }
 
 auto Renderer_Vulkan::createIndexBuffer(std::vector<Uint32> indices) -> BufferHandle {
+    if (indices.empty()) return {};
     VkDeviceSize bufferSize = sizeof(Uint32) * indices.size();
     auto bufferHandle = createBuffer(BufferUsage::INDEX, bufferSize);
-    VkDeviceMemory bufferMemory = getBufferMemory(bufferHandle);// TODO: use internal pointer
+    VkDeviceMemory bufferMemory = getBufferMemory(bufferHandle);
 
     void* data;
-    vkMapMemory(device, bufferMemory, 0, bufferSize, 0, &data);
+    vkMapMemory(device, bufferMemory, 0, VK_WHOLE_SIZE, 0, &data);
     memcpy(data, indices.data(), bufferSize);
     vkUnmapMemory(device, bufferMemory);
 
@@ -2344,6 +2939,10 @@ auto Renderer_Vulkan::createIndexBuffer(std::vector<Uint32> indices) -> BufferHa
 }
 
 auto Renderer_Vulkan::createBuffer(BufferUsage usage, VkDeviceSize size) -> BufferHandle {
+    if (size == 0) {
+        fmt::print(stderr, "[Vulkan] Warning: createBuffer called with size 0, usage: {}\n", (int)usage);
+        size = 1;
+    }
     VkBufferCreateInfo bufferInfo{};
     bufferInfo.sType = VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO;
     bufferInfo.size = size;
@@ -2379,22 +2978,11 @@ auto Renderer_Vulkan::createBuffer(BufferUsage usage, VkDeviceSize size) -> Buff
     VkMemoryRequirements memRequirements;
     vkGetBufferMemoryRequirements(device, buffer, &memRequirements);
 
-    VkPhysicalDeviceMemoryProperties memProperties;
-    vkGetPhysicalDeviceMemoryProperties(physicalDevice, &memProperties);
-    int memTypeIdx = 0;
-    for (; memTypeIdx < memProperties.memoryTypeCount; memTypeIdx++) {
-        if ((memRequirements.memoryTypeBits & (1 << memTypeIdx))
-            && (memProperties.memoryTypes[memTypeIdx].propertyFlags
-                & (VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT))) {
-            break;
-        }
-    }
-
     VkDeviceMemory memory;
     VkMemoryAllocateInfo allocInfo = {};
     allocInfo.sType = VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO;
     allocInfo.allocationSize = memRequirements.size;
-    allocInfo.memoryTypeIndex = memTypeIdx;
+    allocInfo.memoryTypeIndex = findMemoryType(memRequirements.memoryTypeBits, VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT);
 
     if (vkAllocateMemory(device, &allocInfo, nullptr, &memory) != VK_SUCCESS) {
         throw std::runtime_error("Failed to allocate buffer memory!");
@@ -2408,6 +2996,7 @@ auto Renderer_Vulkan::createBuffer(BufferUsage usage, VkDeviceSize size) -> Buff
 }
 
 auto Renderer_Vulkan::createBufferMapped(BufferUsage usage, VkDeviceSize size, void** mappedDataPtr) -> BufferHandle {
+    if (size == 0) size = 1;
     auto bufferHandle = createBuffer(usage, size);
 
     VkDeviceMemory bufferMemory = getBufferMemory(bufferHandle);// TODO: use internal pointer
@@ -2452,6 +3041,20 @@ auto Renderer_Vulkan::getRenderTargetMemory(RenderTargetHandle handle) const -> 
 
 auto Renderer_Vulkan::getPipeline(PipelineHandle handle) const -> VkPipeline {
     return pipelines.at(handle.rid);
+}
+
+void Renderer_Vulkan::destroyBuffer(BufferHandle handle) {
+    vkDeviceWaitIdle(device);
+    auto it = buffers.find(handle.rid);
+    if (it != buffers.end()) {
+        vkDestroyBuffer(device, it->second, nullptr);
+        buffers.erase(it);
+    }
+    auto memIt = bufferMemories.find(handle.rid);
+    if (memIt != bufferMemories.end()) {
+        vkFreeMemory(device, memIt->second, nullptr);
+        bufferMemories.erase(memIt);
+    }
 }
 
 // ============================================================================
@@ -2983,6 +3586,222 @@ void Renderer_Vulkan::cleanupParticleSystem() {
     vkDestroyDescriptorSetLayout(device, particleComputeSetLayout, nullptr);
 
     vkDestroyDescriptorPool(device, particleDescriptorPool, nullptr);
+}
 
-    // Note: buffers are cleaned up in the main deinit() through the buffers map
+void Renderer_Vulkan::createUiResources() {
+    // Descriptor Set Layout for UI (single sampler)
+    VkDescriptorSetLayoutBinding samplerLayoutBinding{};
+    samplerLayoutBinding.binding = 0;
+    samplerLayoutBinding.descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
+    samplerLayoutBinding.descriptorCount = 1;
+    samplerLayoutBinding.stageFlags = VK_SHADER_STAGE_FRAGMENT_BIT;
+    samplerLayoutBinding.pImmutableSamplers = nullptr;
+
+    VkDescriptorSetLayoutCreateInfo layoutInfo{};
+    layoutInfo.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO;
+    layoutInfo.bindingCount = 1;
+    layoutInfo.pBindings = &samplerLayoutBinding;
+
+    if (vkCreateDescriptorSetLayout(device, &layoutInfo, nullptr, &uiDescriptorSetLayout) != VK_SUCCESS) {
+        throw std::runtime_error("Failed to create UI descriptor set layout!");
+    }
+
+    // Create Descriptor Pool for UI textures
+    std::array<VkDescriptorPoolSize, 1> poolSizes{};
+    poolSizes[0].type = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
+    poolSizes[0].descriptorCount = 100;// Support up to 100 textures for UI
+
+    VkDescriptorPoolCreateInfo poolInfo{};
+    poolInfo.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO;
+    poolInfo.flags = VK_DESCRIPTOR_POOL_CREATE_FREE_DESCRIPTOR_SET_BIT;
+    poolInfo.poolSizeCount = 1;
+    poolInfo.pPoolSizes = poolSizes.data();
+    poolInfo.maxSets = 100;
+
+    if (vkCreateDescriptorPool(device, &poolInfo, nullptr, &uiDescriptorPool) != VK_SUCCESS) {
+        throw std::runtime_error("Failed to create UI descriptor pool!");
+    }
+
+    // Pipeline Layout for UI
+    VkPushConstantRange pushConstantRange{};
+    pushConstantRange.stageFlags = VK_SHADER_STAGE_VERTEX_BIT;
+    pushConstantRange.offset = 0;
+    pushConstantRange.size = sizeof(glm::mat4) * 2;// Projection + Model
+
+    VkPipelineLayoutCreateInfo pipelineLayoutInfo{};
+    pipelineLayoutInfo.sType = VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO;
+    pipelineLayoutInfo.setLayoutCount = 1;
+    pipelineLayoutInfo.pSetLayouts = &uiDescriptorSetLayout;
+    pipelineLayoutInfo.pushConstantRangeCount = 1;
+    pipelineLayoutInfo.pPushConstantRanges = &pushConstantRange;
+
+    if (vkCreatePipelineLayout(device, &pipelineLayoutInfo, nullptr, &uiPipelineLayout) != VK_SUCCESS) {
+        throw std::runtime_error("Failed to create UI pipeline layout!");
+    }
+
+    uiPipeline = createUiPipeline("assets/shaders/RmlUi.vert.spv", "assets/shaders/RmlUi.frag.spv");
+}
+
+VkPipeline Renderer_Vulkan::createUiPipeline(const std::string& vertShader, const std::string& fragShader) {
+    auto vertShaderCode = readFile(vertShader);
+    auto fragShaderCode = readFile(fragShader);
+    auto vertShaderModule = createShaderModule(vertShaderCode);
+    auto fragShaderModule = createShaderModule(fragShaderCode);
+
+    VkPipelineShaderStageCreateInfo vertShaderStageInfo{};
+    vertShaderStageInfo.sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO;
+    vertShaderStageInfo.stage = VK_SHADER_STAGE_VERTEX_BIT;
+    vertShaderStageInfo.module = vertShaderModule;
+    vertShaderStageInfo.pName = "main";
+
+    VkPipelineShaderStageCreateInfo fragShaderStageInfo{};
+    fragShaderStageInfo.sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO;
+    fragShaderStageInfo.stage = VK_SHADER_STAGE_FRAGMENT_BIT;
+    fragShaderStageInfo.module = fragShaderModule;
+    fragShaderStageInfo.pName = "main";
+
+    VkPipelineShaderStageCreateInfo shaderStages[] = { vertShaderStageInfo, fragShaderStageInfo };
+
+    // Vertex input for RmlUiVertex
+    VkVertexInputBindingDescription bindingDescription{};
+    bindingDescription.binding = 0;
+    bindingDescription.stride = sizeof(RmlUiVertex);
+    bindingDescription.inputRate = VK_VERTEX_INPUT_RATE_VERTEX;
+
+    std::array<VkVertexInputAttributeDescription, 3> attributeDescriptions{};
+    attributeDescriptions[0].binding = 0;
+    attributeDescriptions[0].location = 0;
+    attributeDescriptions[0].format = VK_FORMAT_R32G32_SFLOAT;
+    attributeDescriptions[0].offset = offsetof(RmlUiVertex, pos);
+
+    attributeDescriptions[1].binding = 0;
+    attributeDescriptions[1].location = 1;
+    attributeDescriptions[1].format = VK_FORMAT_R32G32B32A32_SFLOAT;
+    attributeDescriptions[1].offset = offsetof(RmlUiVertex, color);
+
+    attributeDescriptions[2].binding = 0;
+    attributeDescriptions[2].location = 2;
+    attributeDescriptions[2].format = VK_FORMAT_R32G32_SFLOAT;
+    attributeDescriptions[2].offset = offsetof(RmlUiVertex, uv);
+
+    VkPipelineVertexInputStateCreateInfo vertexInputInfo{};
+    vertexInputInfo.sType = VK_STRUCTURE_TYPE_PIPELINE_VERTEX_INPUT_STATE_CREATE_INFO;
+    vertexInputInfo.vertexBindingDescriptionCount = 1;
+    vertexInputInfo.pVertexBindingDescriptions = &bindingDescription;
+    vertexInputInfo.vertexAttributeDescriptionCount = static_cast<uint32_t>(attributeDescriptions.size());
+    vertexInputInfo.pVertexAttributeDescriptions = attributeDescriptions.data();
+
+    VkPipelineInputAssemblyStateCreateInfo inputAssembly{};
+    inputAssembly.sType = VK_STRUCTURE_TYPE_PIPELINE_INPUT_ASSEMBLY_STATE_CREATE_INFO;
+    inputAssembly.topology = VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST;
+    inputAssembly.primitiveRestartEnable = VK_FALSE;
+
+    VkViewport viewport{};
+    viewport.x = 0.0f;
+    viewport.y = 0.0f;
+    viewport.width = (float)swapchainExtent.width;
+    viewport.height = (float)swapchainExtent.height;
+    viewport.minDepth = 0.0f;
+    viewport.maxDepth = 1.0f;
+
+    VkRect2D scissor{};
+    scissor.offset = { 0, 0 };
+    scissor.extent = swapchainExtent;
+
+    VkPipelineViewportStateCreateInfo viewportState{};
+    viewportState.sType = VK_STRUCTURE_TYPE_PIPELINE_VIEWPORT_STATE_CREATE_INFO;
+    viewportState.viewportCount = 1;
+    viewportState.pViewports = &viewport;
+    viewportState.scissorCount = 1;
+    viewportState.pScissors = &scissor;
+
+    VkPipelineRasterizationStateCreateInfo rasterizer{};
+    rasterizer.sType = VK_STRUCTURE_TYPE_PIPELINE_RASTERIZATION_STATE_CREATE_INFO;
+    rasterizer.depthClampEnable = VK_FALSE;
+    rasterizer.rasterizerDiscardEnable = VK_FALSE;
+    rasterizer.polygonMode = VK_POLYGON_MODE_FILL;
+    rasterizer.lineWidth = 1.0f;
+    rasterizer.cullMode = VK_CULL_MODE_NONE;
+    rasterizer.frontFace = VK_FRONT_FACE_COUNTER_CLOCKWISE;
+    rasterizer.depthBiasEnable = VK_FALSE;
+
+    VkPipelineMultisampleStateCreateInfo multisampling{};
+    multisampling.sType = VK_STRUCTURE_TYPE_PIPELINE_MULTISAMPLE_STATE_CREATE_INFO;
+    multisampling.sampleShadingEnable = VK_FALSE;
+    multisampling.rasterizationSamples = VK_SAMPLE_COUNT_1_BIT;
+
+    VkPipelineColorBlendAttachmentState colorBlendAttachment{};
+    colorBlendAttachment.colorWriteMask =
+        VK_COLOR_COMPONENT_R_BIT | VK_COLOR_COMPONENT_G_BIT | VK_COLOR_COMPONENT_B_BIT | VK_COLOR_COMPONENT_A_BIT;
+    colorBlendAttachment.blendEnable = VK_TRUE;
+    colorBlendAttachment.srcColorBlendFactor = VK_BLEND_FACTOR_SRC_ALPHA;
+    colorBlendAttachment.dstColorBlendFactor = VK_BLEND_FACTOR_ONE_MINUS_SRC_ALPHA;
+    colorBlendAttachment.colorBlendOp = VK_BLEND_OP_ADD;
+    colorBlendAttachment.srcAlphaBlendFactor = VK_BLEND_FACTOR_ONE;
+    colorBlendAttachment.dstAlphaBlendFactor = VK_BLEND_FACTOR_ZERO;
+    colorBlendAttachment.alphaBlendOp = VK_BLEND_OP_ADD;
+
+    VkPipelineColorBlendStateCreateInfo colorBlending{};
+    colorBlending.sType = VK_STRUCTURE_TYPE_PIPELINE_COLOR_BLEND_STATE_CREATE_INFO;
+    colorBlending.logicOpEnable = VK_FALSE;
+    colorBlending.attachmentCount = 1;
+    colorBlending.pAttachments = &colorBlendAttachment;
+
+    // Use dynamic state for scissor and viewport
+    std::vector<VkDynamicState> dynamicStates = { VK_DYNAMIC_STATE_VIEWPORT, VK_DYNAMIC_STATE_SCISSOR };
+    VkPipelineDynamicStateCreateInfo dynamicState{};
+    dynamicState.sType = VK_STRUCTURE_TYPE_PIPELINE_DYNAMIC_STATE_CREATE_INFO;
+    dynamicState.dynamicStateCount = static_cast<uint32_t>(dynamicStates.size());
+    dynamicState.pDynamicStates = dynamicStates.data();
+
+    VkGraphicsPipelineCreateInfo pipelineInfo{};
+    pipelineInfo.sType = VK_STRUCTURE_TYPE_GRAPHICS_PIPELINE_CREATE_INFO;
+    pipelineInfo.stageCount = 2;
+    pipelineInfo.pStages = shaderStages;
+    pipelineInfo.pVertexInputState = &vertexInputInfo;
+    pipelineInfo.pInputAssemblyState = &inputAssembly;
+    pipelineInfo.pViewportState = &viewportState;
+    pipelineInfo.pRasterizationState = &rasterizer;
+    pipelineInfo.pMultisampleState = &multisampling;
+    pipelineInfo.pColorBlendState = &colorBlending;
+    pipelineInfo.pDynamicState = &dynamicState;
+    pipelineInfo.layout = uiPipelineLayout;
+    pipelineInfo.renderPass = VK_NULL_HANDLE;// Use dynamic rendering
+    
+    // Set dynamic rendering info
+    VkPipelineRenderingCreateInfoKHR pipelineRenderingInfo{};
+    pipelineRenderingInfo.sType = VK_STRUCTURE_TYPE_PIPELINE_RENDERING_CREATE_INFO_KHR;
+    pipelineRenderingInfo.colorAttachmentCount = 1;
+    VkFormat swapchainFormat = swapchainImageFormat;
+    pipelineRenderingInfo.pColorAttachmentFormats = &swapchainFormat;
+    
+    pipelineInfo.pNext = &pipelineRenderingInfo;
+
+    VkPipeline pipeline;
+    if (vkCreateGraphicsPipelines(device, VK_NULL_HANDLE, 1, &pipelineInfo, nullptr, &pipeline) != VK_SUCCESS) {
+        throw std::runtime_error("Failed to create UI pipeline!");
+    }
+
+    vkDestroyShaderModule(device, fragShaderModule, nullptr);
+    vkDestroyShaderModule(device, vertShaderModule, nullptr);
+
+    return pipeline;
+}
+void Renderer_Vulkan::destroyUiResources() {
+    if (uiPipeline != VK_NULL_HANDLE) {
+        vkDestroyPipeline(device, uiPipeline, nullptr);
+        uiPipeline = VK_NULL_HANDLE;
+    }
+    if (uiPipelineLayout != VK_NULL_HANDLE) {
+        vkDestroyPipelineLayout(device, uiPipelineLayout, nullptr);
+        uiPipelineLayout = VK_NULL_HANDLE;
+    }
+    if (uiDescriptorSetLayout != VK_NULL_HANDLE) {
+        vkDestroyDescriptorSetLayout(device, uiDescriptorSetLayout, nullptr);
+        uiDescriptorSetLayout = VK_NULL_HANDLE;
+    }
+    if (uiDescriptorPool != VK_NULL_HANDLE) {
+        vkDestroyDescriptorPool(device, uiDescriptorPool, nullptr);
+        uiDescriptorPool = VK_NULL_HANDLE;
+    }
 }

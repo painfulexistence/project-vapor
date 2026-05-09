@@ -13,9 +13,7 @@ function(vapor_copy_assets TARGET_NAME)
         COMMAND ${CMAKE_COMMAND} -E copy_directory
         "${VAPOR_ASSETS_DIR}"
         "$<TARGET_FILE_DIR:${TARGET_NAME}>/assets"
-        COMMENT "Copying engine assets to TARGET asset directory"
+        COMMENT "Copying engine assets to ${TARGET_NAME} asset directory"
     )
     add_dependencies(${TARGET_NAME} copy_engine_assets_for_${TARGET_NAME})
 endfunction()
-
-

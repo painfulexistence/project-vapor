@@ -241,6 +241,9 @@ struct alignas(16) ParticleAttractorData {
 
 struct ParticlePushConstants {
     float particleSize = 0.05f;
+    float _pad1 = 0.0f;
+    float _pad2 = 0.0f;
+    float _pad3 = 0.0f;
 };
 
 // Legacy CPU particle (kept for compatibility with older systems)

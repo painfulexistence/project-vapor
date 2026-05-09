@@ -53,12 +53,12 @@ public:
 
     // ===== Interface parity stubs (no functional implementation) =====
 
-    bool initUI() override {
-        return true;
-    }
+    bool initUI() override;
     std::shared_ptr<Vapor::DebugDraw> getDebugDraw() override {
         return nullptr;
     }
+
+    Rml::Context* m_uiContext = nullptr;
 
     void flush2D() override {
     }
@@ -178,6 +178,7 @@ public:
     BufferHandle createBuffer(BufferUsage usage, VkDeviceSize size);
 
     BufferHandle createBufferMapped(BufferUsage usage, VkDeviceSize size, void** mappedDataPtr);
+    void destroyBuffer(BufferHandle handle);
 
     BufferHandle createVertexBuffer(std::vector<VertexData> vertices);
 
@@ -196,7 +197,37 @@ public:
 
     VkPipeline getPipeline(PipelineHandle handle) const;
 
+    VkPipeline getUiPipeline() const {
+        return uiPipeline;
+    }
+    VkDescriptorPool getUiDescriptorPool() const { return uiDescriptorPool; }
+    VkDescriptorSetLayout getUiDescriptorSetLayout() const { return uiDescriptorSetLayout; }
+    VkPipelineLayout getUiPipelineLayout() const { return uiPipelineLayout; }
+
+    VkSampler getDefaultSampler() const {
+        return defaultSampler;
+    }
+
+    VkCommandBuffer beginSingleTimeCommands();
+    void endSingleTimeCommands(VkCommandBuffer commandBuffer);
+
+    uint32_t findMemoryType(uint32_t typeFilter, VkMemoryPropertyFlags properties) const;
+
+    VkDevice getDevice() const {
+        return device;
+    }
+    VkPhysicalDevice getPhysicalDevice() const {
+        return physicalDevice;
+    }
+
 private:
+
+    void createUiResources();
+    void destroyUiResources();
+    VkPipeline createUiPipeline(const std::string& vertShader, const std::string& fragShader);
+
+private:
+    SDL_Window* window = nullptr;
     VkInstance instance;
     VkSurfaceKHR surface;
     VkPhysicalDevice physicalDevice;
@@ -226,6 +257,12 @@ private:
     VkPipeline renderPipeline;
     VkPipeline prePassPipeline;
     VkPipeline postProcessPipeline;
+
+    VkPipelineLayout uiPipelineLayout;
+    VkPipeline uiPipeline;
+    VkDescriptorSetLayout uiDescriptorSetLayout;
+    VkDescriptorPool uiDescriptorPool;
+    std::unique_ptr<class RmlUiRendererVulkan> uiRenderer;
 
     VkPipelineLayout tileCullingPipelineLayout;
     VkPipeline tileCullingPipeline;
@@ -318,4 +355,10 @@ private:
     void cleanupParticleSystem();
 
     void createResources();
+
+private:
+    void cleanupResources();
+
+    PFN_vkCmdBeginRenderingKHR vkCmdBeginRendering_ptr = nullptr;
+    PFN_vkCmdEndRenderingKHR vkCmdEndRendering_ptr = nullptr;
 };
