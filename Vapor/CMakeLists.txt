@@ -11,7 +11,9 @@ find_package(Tracy CONFIG REQUIRED)
 find_package(RmlUi CONFIG REQUIRED)
 find_package(EnTT CONFIG REQUIRED)
 
-add_subdirectory(metal)
+if(APPLE)
+    add_subdirectory(metal)
+endif()
 add_subdirectory(MikkTSpace)
 
 set(SOURCES
