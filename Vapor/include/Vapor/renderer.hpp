@@ -182,6 +182,8 @@ protected:
     const Uint32 MAX_FRAMES_IN_FLIGHT = 3;
     const Uint32 MSAA_SAMPLE_COUNT = 4;
     const Uint32 MAX_INSTANCES = 5000;// Increased for large scenes like Bistro (2911 instances)
+    const Uint32 MAX_DIRECTIONAL_LIGHTS = 4;
+    const Uint32 MAX_POINT_LIGHTS = 1024;
     glm::vec4 clearColor = glm::vec4(0.0f, 0.5f, 1.0f, 1.0f);
     double clearDepth = 1.0;
     Uint32 clusterGridSizeX = 16;
@@ -197,13 +199,19 @@ protected:
     }
 };
 
+#ifdef __APPLE__
 std::unique_ptr<Renderer> createRendererMetal();
+#endif
 std::unique_ptr<Renderer> createRendererVulkan();
 
 inline std::unique_ptr<Renderer> createRenderer(GraphicsBackend backend) {
     switch (backend) {
     case GraphicsBackend::Metal:
+#ifdef __APPLE__
         return createRendererMetal();
+#else
+        return nullptr;
+#endif
     case GraphicsBackend::Vulkan:
         return createRendererVulkan();
     default:
