@@ -10,36 +10,45 @@
 void AssetSerializer::serializeScene(const std::shared_ptr<Scene>& scene, const std::string& path) {
     auto start = SDL_GetTicks();
 
-    std::ofstream file(path, std::ios::binary);
-    if (!file.is_open()) {
-        throw std::runtime_error(fmt::format("Failed to open file for writing: {}", path));
-    }
+    {
+        std::ofstream file(path, std::ios::binary);
+        if (!file.is_open()) {
+            throw std::runtime_error(fmt::format("Failed to open file for writing: {}", path));
+        }
 
-    cereal::BinaryOutputArchive archive(file);
-    // archive(scene.name);
-    archive(scene->vertices);
-    archive(scene->indices);
+        cereal::BinaryOutputArchive archive(file);
+        archive(scene->name);
+        archive(scene->vertices);
+        archive(scene->indices);
 
     std::unordered_map<std::shared_ptr<Image>, Uint32> imageIDs;
-    Uint32 nextImageID = 0;
-    archive(static_cast<Uint32>(scene->images.size()));
-    for (const auto& image : scene->images) {
-        if (image && imageIDs.find(image) == imageIDs.end()) {
-            archive(nextImageID);
-            serializeImage(archive, image);
-            imageIDs[image] = nextImageID++;
+    std::vector<std::shared_ptr<Image>> uniqueImages;
+    for (const auto& img : scene->images) {
+        if (img && imageIDs.find(img) == imageIDs.end()) {
+            imageIDs[img] = static_cast<Uint32>(uniqueImages.size());
+            uniqueImages.push_back(img);
         }
+    }
+
+    archive(static_cast<Uint32>(uniqueImages.size()));
+    for (Uint32 i = 0; i < uniqueImages.size(); ++i) {
+        archive(i);
+        serializeImage(archive, uniqueImages[i]);
     }
 
     std::unordered_map<std::shared_ptr<Material>, Uint32> materialIDs;
-    Uint32 nextMaterialID = 0;
-    archive(static_cast<Uint32>(scene->materials.size()));
-    for (const auto& material : scene->materials) {
-        if (material && materialIDs.find(material) == materialIDs.end()) {
-            archive(nextMaterialID);
-            serializeMaterial(archive, material, imageIDs);
-            materialIDs[material] = nextMaterialID++;
+    std::vector<std::shared_ptr<Material>> uniqueMaterials;
+    for (const auto& mat : scene->materials) {
+        if (mat && materialIDs.find(mat) == materialIDs.end()) {
+            materialIDs[mat] = static_cast<Uint32>(uniqueMaterials.size());
+            uniqueMaterials.push_back(mat);
         }
+    }
+
+    archive(static_cast<Uint32>(uniqueMaterials.size()));
+    for (Uint32 i = 0; i < uniqueMaterials.size(); ++i) {
+        archive(i);
+        serializeMaterial(archive, uniqueMaterials[i], imageIDs);
     }
 
     archive(static_cast<Uint32>(scene->directionalLights.size()));
@@ -57,6 +66,7 @@ void AssetSerializer::serializeScene(const std::shared_ptr<Scene>& scene, const 
         serializeNode(archive, node, materialIDs);
     }
 
+    } // Ensure archive is flushed
     fmt::print("Scene serialized to: {} in {} ms\n", path, SDL_GetTicks() - start);
 }
 
@@ -70,7 +80,7 @@ auto AssetSerializer::deserializeScene(const std::string& path) -> std::shared_p
 
     cereal::BinaryInputArchive archive(file);
     auto scene = std::make_shared<Scene>();
-    // archive(scene->name);
+    archive(scene->name);
     archive(scene->vertices);
     archive(scene->indices);
 

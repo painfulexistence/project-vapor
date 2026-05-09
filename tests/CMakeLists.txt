@@ -76,6 +76,20 @@ target_link_libraries(test_resource_manager PRIVATE
 target_compile_features(test_resource_manager PRIVATE cxx_std_20)
 target_compile_options(test_resource_manager PRIVATE ${TEST_WARNING_FLAGS})
 
+# ── Asset Management tests (including asset loading & serialization) ──────────────
+add_executable(test_asset_management
+    asset_manager_test.cpp
+    asset_serializer_test.cpp
+)
+target_link_libraries(test_asset_management PRIVATE
+    Vapor
+    Catch2::Catch2WithMain
+    glm::glm
+    fmt::fmt
+)
+target_compile_features(test_asset_management PRIVATE cxx_std_20)
+target_compile_options(test_asset_management PRIVATE ${TEST_WARNING_FLAGS})
+
 # ── Backend Support tests (Metal/Vulkan window initialization) ────────────
 add_executable(test_backend_support
     backend_support_test.cpp
@@ -107,6 +121,7 @@ catch_discover_tests(test_action_system)
 catch_discover_tests(test_scene_transform)
 catch_discover_tests(test_camera)
 catch_discover_tests(test_physics)
+catch_discover_tests(test_asset_management)
 catch_discover_tests(test_resource_manager)
 catch_discover_tests(test_backend_support)
 catch_discover_tests(test_ui_system)

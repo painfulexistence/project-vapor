@@ -14,5 +14,6 @@ add_subdirectory(Vaporware)
 
 enable_testing()
 add_subdirectory(tests)
+add_subdirectory(benchmarks)
 
 # install(FILES LICENSE DESTINATION "share/${PROJECT_NAME}")

@@ -18,7 +18,7 @@ TEST_CASE("Vulkan Backend Window Support", "[backend][vulkan]") {
     }
 
     // Attempt to load Vulkan library first
-    if (SDL_Vulkan_LoadLibrary(nullptr) != 0) {
+    if (!SDL_Vulkan_LoadLibrary(nullptr)) {
         SDL_Quit();
         SKIP("Vulkan library could not be loaded: " << SDL_GetError());
     }
@@ -31,7 +31,7 @@ TEST_CASE("Vulkan Backend Window Support", "[backend][vulkan]") {
     }
 
     uint32_t extensionCount = 0;
-    const char* const* extensions = SDL_Vulkan_GetInstanceExtensions(&extensionCount);
+    [[maybe_unused]] const char* const* extensions = SDL_Vulkan_GetInstanceExtensions(&extensionCount);
     CHECK(extensionCount >= 0);
 
     SDL_DestroyWindow(window);
