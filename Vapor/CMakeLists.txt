@@ -104,7 +104,7 @@ file(GLOB_RECURSE SHADER_SOURCES
 
 foreach(GLSL ${SHADER_SOURCES})
     get_filename_component(SOURCE_NAME ${GLSL} NAME)
-    set(SPIRV "${CMAKE_CURRENT_BINARY_DIR}/assets/shaders/${SOURCE_NAME}.spv")
+    set(SPIRV "${CMAKE_CURRENT_SOURCE_DIR}/assets/shaders/${SOURCE_NAME}.spv")
     
     add_custom_command(
         OUTPUT ${SPIRV}
