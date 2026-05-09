@@ -4,6 +4,8 @@
 [![Follow on Twitter](https://img.shields.io/twitter/follow/DevLucidum.svg?style=social)](https://twitter.com/intent/follow?screen_name=DevLucidum)
 [![Substack](https://img.shields.io/badge/Substack-%23006f5c.svg?style=flat&logo=substack&logoColor=ffffff&label=Arcane%20Realms)](https://painfulexistence.substack.com/)
 <br />
+[![CI](https://github.com/painfulexistence/project-vapor/actions/workflows/ci.yml/badge.svg)](https://github.com/painfulexistence/project-vapor/actions/workflows/ci.yml)
+<br />
 <br />
 
 <p>A modern 3D renderer built from scratch with C++ and Metal/Vulkan. </p>
