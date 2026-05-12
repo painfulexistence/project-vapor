@@ -25,6 +25,8 @@
 #include "asset_serializer.hpp"
 #include "graphics.hpp"
 
+using namespace Vapor;
+
 auto AssetManager::loadImage(const std::string& filename) -> std::shared_ptr<Image> {
     int width, height, numChannels;
     if (!stbi_info((SDL_GetBasePath() + filename).c_str(), &width, &height, &numChannels)) {

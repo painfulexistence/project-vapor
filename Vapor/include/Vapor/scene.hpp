@@ -19,7 +19,7 @@ struct FluidVolumeSettings;
 
 struct MeshGroup {
     std::string name;
-    std::vector<std::shared_ptr<Mesh>> meshes;
+    std::vector<std::shared_ptr<Vapor::Mesh>> meshes;
 };
 
 struct Node {
@@ -179,15 +179,15 @@ struct Node {
 class Scene {
 public:
     std::string name;
-    std::vector<std::shared_ptr<Image>> images;
-    std::vector<std::shared_ptr<Material>> materials;
+    std::vector<std::shared_ptr<Vapor::Image>> images;
+    std::vector<std::shared_ptr<Vapor::Material>> materials;
     std::vector<std::shared_ptr<Node>> nodes;
     std::vector<DirectionalLight> directionalLights;
     std::vector<PointLight> pointLights;
     std::vector<std::shared_ptr<FluidVolume>> fluidVolumes;
 
     // GPU-driven rendering
-    std::vector<VertexData> vertices;
+    std::vector<Vapor::VertexData> vertices;
     std::vector<Uint32> indices;
     BufferHandle vertexBuffer;
     BufferHandle indexBuffer;
@@ -209,7 +209,7 @@ public:
     std::shared_ptr<FluidVolume> createFluidVolume(Physics3D* physics, const FluidVolumeSettings& settings);
     void addFluidVolume(std::shared_ptr<FluidVolume> fluidVolume);
 
-    void addMeshToNode(std::shared_ptr<Node> node, std::shared_ptr<Mesh> mesh);
+    void addMeshToNode(std::shared_ptr<Node> node, std::shared_ptr<Vapor::Mesh> mesh);
     // void AddLightToNode(std::shared_ptr<Node> node, std::shared_ptr<Light> light);
 
 private:

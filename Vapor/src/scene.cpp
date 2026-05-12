@@ -5,6 +5,9 @@
 #include <fmt/core.h>
 #include <functional>
 
+
+using namespace Vapor;
+
 void Scene::print() {
     fmt::print("Scene {}\n", name);
     fmt::print(" Images: {}\n", images.size());

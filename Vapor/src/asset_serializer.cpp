@@ -7,6 +7,8 @@
 #include <unordered_map>
 
 
+using namespace Vapor;
+
 void AssetSerializer::serializeScene(const std::shared_ptr<Scene>& scene, const std::string& path) {
     auto start = SDL_GetTicks();
 
@@ -21,52 +23,52 @@ void AssetSerializer::serializeScene(const std::shared_ptr<Scene>& scene, const 
         archive(scene->vertices);
         archive(scene->indices);
 
-    std::unordered_map<std::shared_ptr<Image>, Uint32> imageIDs;
-    std::vector<std::shared_ptr<Image>> uniqueImages;
-    for (const auto& img : scene->images) {
-        if (img && imageIDs.find(img) == imageIDs.end()) {
-            imageIDs[img] = static_cast<Uint32>(uniqueImages.size());
-            uniqueImages.push_back(img);
+        std::unordered_map<std::shared_ptr<Image>, Uint32> imageIDs;
+        std::vector<std::shared_ptr<Image>> uniqueImages;
+        for (const auto& img : scene->images) {
+            if (img && imageIDs.find(img) == imageIDs.end()) {
+                imageIDs[img] = static_cast<Uint32>(uniqueImages.size());
+                uniqueImages.push_back(img);
+            }
         }
-    }
 
-    archive(static_cast<Uint32>(uniqueImages.size()));
-    for (Uint32 i = 0; i < uniqueImages.size(); ++i) {
-        archive(i);
-        serializeImage(archive, uniqueImages[i]);
-    }
-
-    std::unordered_map<std::shared_ptr<Material>, Uint32> materialIDs;
-    std::vector<std::shared_ptr<Material>> uniqueMaterials;
-    for (const auto& mat : scene->materials) {
-        if (mat && materialIDs.find(mat) == materialIDs.end()) {
-            materialIDs[mat] = static_cast<Uint32>(uniqueMaterials.size());
-            uniqueMaterials.push_back(mat);
+        archive(static_cast<Uint32>(uniqueImages.size()));
+        for (Uint32 i = 0; i < uniqueImages.size(); ++i) {
+            archive(i);
+            serializeImage(archive, uniqueImages[i]);
         }
-    }
 
-    archive(static_cast<Uint32>(uniqueMaterials.size()));
-    for (Uint32 i = 0; i < uniqueMaterials.size(); ++i) {
-        archive(i);
-        serializeMaterial(archive, uniqueMaterials[i], imageIDs);
-    }
+        std::unordered_map<std::shared_ptr<Material>, Uint32> materialIDs;
+        std::vector<std::shared_ptr<Material>> uniqueMaterials;
+        for (const auto& mat : scene->materials) {
+            if (mat && materialIDs.find(mat) == materialIDs.end()) {
+                materialIDs[mat] = static_cast<Uint32>(uniqueMaterials.size());
+                uniqueMaterials.push_back(mat);
+            }
+        }
 
-    archive(static_cast<Uint32>(scene->directionalLights.size()));
-    for (const auto& light : scene->directionalLights) {
-        serializeDirectionalLight(archive, light);
-    }
+        archive(static_cast<Uint32>(uniqueMaterials.size()));
+        for (Uint32 i = 0; i < uniqueMaterials.size(); ++i) {
+            archive(i);
+            serializeMaterial(archive, uniqueMaterials[i], imageIDs);
+        }
 
-    archive(static_cast<Uint32>(scene->pointLights.size()));
-    for (const auto& light : scene->pointLights) {
-        serializePointLight(archive, light);
-    }
+        archive(static_cast<Uint32>(scene->directionalLights.size()));
+        for (const auto& light : scene->directionalLights) {
+            serializeDirectionalLight(archive, light);
+        }
 
-    archive(static_cast<Uint32>(scene->nodes.size()));
-    for (const auto& node : scene->nodes) {
-        serializeNode(archive, node, materialIDs);
-    }
+        archive(static_cast<Uint32>(scene->pointLights.size()));
+        for (const auto& light : scene->pointLights) {
+            serializePointLight(archive, light);
+        }
 
-    } // Ensure archive is flushed
+        archive(static_cast<Uint32>(scene->nodes.size()));
+        for (const auto& node : scene->nodes) {
+            serializeNode(archive, node, materialIDs);
+        }
+
+    }// Ensure archive is flushed
     fmt::print("Scene serialized to: {} in {} ms\n", path, SDL_GetTicks() - start);
 }
 

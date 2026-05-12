@@ -37,14 +37,6 @@ enum class PhysicsDebugMode {
     WIREFRAME = 1,
 };
 
-struct RaycastHit {
-    glm::vec3 point;
-    glm::vec3 normal;
-    Node* node;
-    float hitDistance;
-    float hitFraction;
-};
-
 enum class BodyMotionType {
     Static,
     Dynamic,
@@ -63,6 +55,15 @@ struct BodyTag {};
 struct TriggerTag {};
 using BodyHandle = PhysicsHandle<BodyTag>;
 using TriggerHandle = PhysicsHandle<TriggerTag>;
+
+struct RaycastHit {
+    glm::vec3 point;
+    glm::vec3 normal;
+    Node* node;       // legacy: set when userData was stored as Node*
+    BodyHandle body;  // handle of the hit body, use getBodyUserData() to resolve entity
+    float hitDistance;
+    float hitFraction;
+};
 
 struct OverlapResult {
     std::vector<Node*> nodes;
@@ -238,6 +239,7 @@ private:
     };
 
     std::unordered_map<Uint32, JPH::BodyID> bodies;
+    std::unordered_map<Uint32, Uint32> bodyIDToRid; // JPH::BodyID.GetIndexAndSequenceNumber() -> rid
     Uint32 nextBodyID = 0;
 
     std::unordered_map<Uint32, JPH::BodyID> triggers;

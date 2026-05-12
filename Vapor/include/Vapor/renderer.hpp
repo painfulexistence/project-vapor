@@ -4,8 +4,9 @@
 #include "graphics.hpp"
 #include "scene.hpp"
 #include <SDL3/SDL_video.h>
-#include <memory>
+#include <entt/entt.hpp>
 #include <functional>
+#include <memory>
 #include <vector>
 
 // Forward declarations
@@ -45,7 +46,7 @@ public:
     virtual void stage(std::shared_ptr<Scene> scene) = 0;
 
     virtual void draw(std::shared_ptr<Scene> scene, Camera& camera) = 0;
-
+    virtual void draw(entt::registry& registry, Camera& camera) = 0;
     virtual void readPixelsAsync(ScreenshotCallback callback) = 0;
 
     virtual void setRenderPath(RenderPath path) = 0;
@@ -153,7 +154,7 @@ public:
     }
 
     // Texture creation for sprites
-    virtual TextureHandle createTexture(const std::shared_ptr<Image>& img) {
+    virtual TextureHandle createTexture(const std::shared_ptr<Vapor::Image>& img) {
         return {};
     }
 

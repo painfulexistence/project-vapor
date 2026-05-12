@@ -7,13 +7,13 @@
 
 class MeshBuilder {
 public:
-    static std::shared_ptr<Mesh> buildTriforce(std::shared_ptr<Material> material = nullptr) {
-        VertexData verts[6] = { { { -0.5f, 0.5f, 0.0f }, { 0.0f, 0.0f } },  { { -0.5f, -0.5f, 0.0f }, { 0.0f, 1.0f } },
+    static std::shared_ptr<Vapor::Mesh> buildTriforce(std::shared_ptr<Vapor::Material> material = nullptr) {
+        Vapor::VertexData verts[6] = { { { -0.5f, 0.5f, 0.0f }, { 0.0f, 0.0f } },  { { -0.5f, -0.5f, 0.0f }, { 0.0f, 1.0f } },
                                 { { 0.5f, 0.5f, 0.0f }, { 1.0f, 0.0f } },   { { 0.5f, 0.5f, 0.0f }, { 1.0f, 0.0f } },
                                 { { -0.5f, -0.5f, 0.0f }, { 0.0f, 1.0f } }, { { 0.5f, -0.5f, 0.0f }, { 1.0f, 1.0f } } };
         Uint32 indices[6] = { 0, 1, 2, 3, 4, 5 };
 
-        auto mesh = std::make_shared<Mesh>();
+        auto mesh = std::make_shared<Vapor::Mesh>();
         mesh->hasPosition = true;
         mesh->hasUV0 = true;
         mesh->primitiveMode = PrimitiveMode::TRIANGLES;
@@ -22,8 +22,8 @@ public:
         return mesh;
     };
 
-    static std::shared_ptr<Mesh> buildCube(float size, std::shared_ptr<Material> material = nullptr) {
-        std::array<VertexData, 24> verts = {
+    static std::shared_ptr<Vapor::Mesh> buildCube(float size, std::shared_ptr<Vapor::Material> material = nullptr) {
+        std::array<Vapor::VertexData, 24> verts = {
             { // front
               { { .5f * size, .5f * size, .5f * size }, { 1.f, 1.f }, { 0.0f, 0.0f, 1.0f } },
               { { -.5f * size, .5f * size, .5f * size }, { 0.f, 1.f }, { 0.0f, 0.0f, 1.0f } },
@@ -57,7 +57,7 @@ public:
         };
         std::array<Uint32, 36> tris = { 0,  1,  2,  2,  1,  3,  4,  5,  6,  6,  5,  7,  8,  9,  10, 10, 9,  11,
                                         12, 13, 14, 14, 13, 15, 16, 17, 18, 18, 17, 19, 20, 21, 22, 22, 21, 23 };
-        auto mesh = std::make_shared<Mesh>();
+        auto mesh = std::make_shared<Vapor::Mesh>();
         mesh->hasPosition = true;
         mesh->hasUV0 = true;
         mesh->hasNormal = true;
@@ -76,10 +76,10 @@ public:
     // radius: radius of capsule
     // segments: number of segments around the circumference
     // rings: number of rings in each hemisphere
-    static std::shared_ptr<Mesh> buildCapsule(
-        float height, float radius, Uint32 segments = 16, Uint32 rings = 8, std::shared_ptr<Material> material = nullptr
+    static std::shared_ptr<Vapor::Mesh> buildCapsule(
+        float height, float radius, Uint32 segments = 16, Uint32 rings = 8, std::shared_ptr<Vapor::Material> material = nullptr
     ) {
-        std::vector<VertexData> verts;
+        std::vector<Vapor::VertexData> verts;
         std::vector<Uint32> indices;
 
         // Calculate cylinder height (total height - 2 hemisphere caps)
@@ -214,7 +214,7 @@ public:
             }
         }
 
-        auto mesh = std::make_shared<Mesh>();
+        auto mesh = std::make_shared<Vapor::Mesh>();
         mesh->hasPosition = true;
         mesh->hasUV0 = true;
         mesh->hasNormal = true;
@@ -228,8 +228,8 @@ public:
         return mesh;
     };
 
-    static std::shared_ptr<Mesh> buildCone(float size, std::shared_ptr<Material> material = nullptr) {
-        auto mesh = std::make_shared<Mesh>();
+    static std::shared_ptr<Vapor::Mesh> buildCone(float size, std::shared_ptr<Vapor::Material> material = nullptr) {
+        auto mesh = std::make_shared<Vapor::Mesh>();
         return mesh;
     };
 
@@ -237,9 +237,9 @@ public:
     // height: total height of cylinder
     // radius: radius of cylinder
     // segments: number of segments around the circumference
-    static std::shared_ptr<Mesh>
-        buildCylinder(float height, float radius, Uint32 segments = 16, std::shared_ptr<Material> material = nullptr) {
-        std::vector<VertexData> verts;
+    static std::shared_ptr<Vapor::Mesh>
+        buildCylinder(float height, float radius, Uint32 segments = 16, std::shared_ptr<Vapor::Material> material = nullptr) {
+        std::vector<Vapor::VertexData> verts;
         std::vector<Uint32> indices;
 
         float halfHeight = height * 0.5f;
@@ -330,7 +330,7 @@ public:
             indices.push_back(bottomCenterIndex + seg + 1);
         }
 
-        auto mesh = std::make_shared<Mesh>();
+        auto mesh = std::make_shared<Vapor::Mesh>();
         mesh->hasPosition = true;
         mesh->hasUV0 = true;
         mesh->hasNormal = true;
@@ -356,7 +356,7 @@ public:
         float tileSize,
         float texTileX,
         float texTileZ,
-        std::vector<WaterVertexData>& outVertices,
+        std::vector<Vapor::WaterVertexData>& outVertices,
         std::vector<Uint32>& outIndices
     ) {
         outVertices.clear();

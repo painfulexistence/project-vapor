@@ -31,6 +31,8 @@ public:
 
     virtual void draw(std::shared_ptr<Scene> scene, Camera& camera) override;
 
+    virtual void draw(entt::registry& registry, Camera& camera) override;
+
     virtual void readPixelsAsync(ScreenshotCallback callback) override;
 
     virtual void setRenderPath(RenderPath path) override {
@@ -51,7 +53,7 @@ public:
 
     RenderTargetHandle createRenderTarget(RenderTargetUsage usage, VkFormat format);
 
-    TextureHandle createTexture(const std::shared_ptr<Image>& img) override;
+    TextureHandle createTexture(const std::shared_ptr<Vapor::Image>& img) override;
 
     // ===== Interface parity stubs (no functional implementation) =====
 
@@ -109,9 +111,8 @@ public:
     ) override {
     }
 
-    void drawRotatedQuad2D(
-        const glm::vec2& position, const glm::vec2& size, float rotation, const glm::vec4& color
-    ) override {
+    void drawRotatedQuad2D(const glm::vec2& position, const glm::vec2& size, float rotation, const glm::vec4& color)
+        override {
     }
     void drawRotatedQuad2D(
         const glm::vec2& position,
@@ -127,9 +128,8 @@ public:
     void drawLine3D(const glm::vec3& p0, const glm::vec3& p1, const glm::vec4& color, float thickness = 1.0f) override {
     }
 
-    void drawRect2D(
-        const glm::vec2& position, const glm::vec2& size, const glm::vec4& color, float thickness = 1.0f
-    ) override {
+    void drawRect2D(const glm::vec2& position, const glm::vec2& size, const glm::vec4& color, float thickness = 1.0f)
+        override {
     }
     void drawCircle2D(const glm::vec2& center, float radius, const glm::vec4& color, int segments = 32) override {
     }
@@ -138,9 +138,8 @@ public:
     void
         drawTriangle2D(const glm::vec2& p0, const glm::vec2& p1, const glm::vec2& p2, const glm::vec4& color) override {
     }
-    void drawTriangleFilled2D(
-        const glm::vec2& p0, const glm::vec2& p1, const glm::vec2& p2, const glm::vec4& color
-    ) override {
+    void drawTriangleFilled2D(const glm::vec2& p0, const glm::vec2& p1, const glm::vec2& p2, const glm::vec4& color)
+        override {
     }
 
     Batch2DStats getBatch2DStats() const override {
@@ -182,7 +181,7 @@ public:
     BufferHandle createBufferMapped(BufferUsage usage, VkDeviceSize size, void** mappedDataPtr);
     void destroyBuffer(BufferHandle handle);
 
-    BufferHandle createVertexBuffer(std::vector<VertexData> vertices);
+    BufferHandle createVertexBuffer(std::vector<Vapor::VertexData> vertices);
 
     BufferHandle createIndexBuffer(std::vector<Uint32> indices);
 
@@ -202,9 +201,15 @@ public:
     VkPipeline getUiPipeline() const {
         return uiPipeline;
     }
-    VkDescriptorPool getUiDescriptorPool() const { return uiDescriptorPool; }
-    VkDescriptorSetLayout getUiDescriptorSetLayout() const { return uiDescriptorSetLayout; }
-    VkPipelineLayout getUiPipelineLayout() const { return uiPipelineLayout; }
+    VkDescriptorPool getUiDescriptorPool() const {
+        return uiDescriptorPool;
+    }
+    VkDescriptorSetLayout getUiDescriptorSetLayout() const {
+        return uiDescriptorSetLayout;
+    }
+    VkPipelineLayout getUiPipelineLayout() const {
+        return uiPipelineLayout;
+    }
 
     VkSampler getDefaultSampler() const {
         return defaultSampler;
@@ -223,7 +228,6 @@ public:
     }
 
 private:
-
     void createUiResources();
     void destroyUiResources();
     VkPipeline createUiPipeline(const std::string& vertShader, const std::string& fragShader);
@@ -322,8 +326,8 @@ private:
     std::unordered_map<Uint32, VkDeviceMemory> imageMemories;
     std::unordered_map<Uint32, VkImageView> imageViews;
     std::unordered_map<Uint32, VkPipeline> pipelines;
-    std::unordered_map<std::shared_ptr<Material>, VkDescriptorSet> materialTextureSets;
-    std::unordered_map<std::shared_ptr<Material>, Uint32> materialIDs;
+    std::unordered_map<std::shared_ptr<Vapor::Material>, VkDescriptorSet> materialTextureSets;
+    std::unordered_map<std::shared_ptr<Vapor::Material>, Uint32> materialIDs;
 
     RenderPath currentRenderPath = RenderPath::Forward;
 
@@ -359,7 +363,6 @@ private:
     void createResources();
 
 private:
-    
     struct PendingScreenshot {
         BufferHandle buffer;
         ScreenshotCallback callback;

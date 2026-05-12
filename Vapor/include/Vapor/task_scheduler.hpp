@@ -1,12 +1,11 @@
-#ifndef TASK_SCHEDULER_HPP
-#define TASK_SCHEDULER_HPP
+#pragma once
 
 #include <atomic>
 #include <enkiTS/TaskScheduler.h>
 #include <functional>
+#include <memory>
 #include <mutex>
 #include <vector>
-#include <memory>
 
 namespace Vapor {
 
@@ -38,12 +37,12 @@ namespace Vapor {
         template<typename Func> void submitTask(Func&& func);
 
         // Check if scheduler is initialized
-        
+
         // Submit a task to be executed on the Main Thread (during processMainThreadTasks)
         template<typename Func> void runOnMainThread(Func&& func) {
-        std::lock_guard<std::mutex> lock(m_mainThreadMutex);
-        m_mainThreadQueue.push_back(std::forward<Func>(func));
-    }
+            std::lock_guard<std::mutex> lock(m_mainThreadMutex);
+            m_mainThreadQueue.push_back(std::forward<Func>(func));
+        }
 
 
         // Process all pending main thread tasks (should be called from the main thread)
@@ -54,7 +53,6 @@ namespace Vapor {
         }
 
     private:
-        
         std::vector<std::function<void()>> m_mainThreadQueue;
         std::mutex m_mainThreadMutex;
 
@@ -88,7 +86,3 @@ namespace Vapor {
     }
 
 }// namespace Vapor
-
-#endif// TASK_SCHEDULER_HPP
-
-    
