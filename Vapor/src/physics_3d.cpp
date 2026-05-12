@@ -33,6 +33,7 @@
 #include <SDL3/SDL_stdinc.h>
 #include <fmt/core.h>
 #include <thread>
+#include <mutex>
 
 // #include "physics_debug_drawer.hpp"
 #include "scene.hpp"
@@ -165,7 +166,8 @@ public:
 
     std::vector<TriggerEvent> triggerEvents;
     std::vector<CollisionEvent> collisionEvents;
-    std::unordered_map<uint64_t, bool> activeContacts;// Track active contacts for exit detection
+    std::unordered_map<uint64_t, bool> activeContacts;
+    std::mutex eventMutex;// Track active contacts for exit detection
 
     // Helper to create unique contact ID
     auto makeContactID(JPH::BodyID id1, JPH::BodyID id2) const -> uint64_t {
@@ -199,6 +201,8 @@ public:
         bool isSensor2 = inBody2.IsSensor();
 
         uint64_t contactID = makeContactID(inBody1.GetID(), inBody2.GetID());
+
+        std::lock_guard<std::mutex> lock(eventMutex);
         activeContacts[contactID] = true;
 
         // Trigger event (one or both are sensors)
@@ -227,6 +231,7 @@ public:
     }
 
     void clearEvents() {
+        std::lock_guard<std::mutex> lock(eventMutex);
         triggerEvents.clear();
         collisionEvents.clear();
     }
@@ -527,8 +532,16 @@ void Physics3D::process(const std::shared_ptr<Scene>& scene, float dt) {
     // Process physics events (triggers and collisions)
     auto* listener = static_cast<MyContactListener*>(contactListener.get());
 
+    std::vector<MyContactListener::TriggerEvent> triggerEvents;
+    std::vector<MyContactListener::CollisionEvent> collisionEvents;
+    {
+        std::lock_guard<std::mutex> lock(listener->eventMutex);
+        triggerEvents.swap(listener->triggerEvents);
+        collisionEvents.swap(listener->collisionEvents);
+    }
+
     // Process trigger events
-    for (auto& event : listener->triggerEvents) {
+    for (auto& event : triggerEvents) {
         if (event.isEnter) {
             event.triggerNode->onTriggerEnter(event.otherNode);
             event.otherNode->onTriggerEnter(event.triggerNode);// Bidirectional notification
@@ -539,7 +552,7 @@ void Physics3D::process(const std::shared_ptr<Scene>& scene, float dt) {
     }
 
     // Process collision events
-    for (auto& event : listener->collisionEvents) {
+    for (auto& event : collisionEvents) {
         if (event.isEnter) {
             event.node1->onCollisionEnter(event.node2);
             event.node2->onCollisionEnter(event.node1);
@@ -549,8 +562,7 @@ void Physics3D::process(const std::shared_ptr<Scene>& scene, float dt) {
         }
     }
 
-    // Clear events for next frame
-    listener->clearEvents();
+    // Events are cleared by swap
 
     // draw debug UI
     if (isDebugUIEnabled) {
