@@ -13,9 +13,8 @@ public:
 
     void onAttach(Rml::ElementDocument* doc, entt::registry& reg) override {
         Page::onAttach(doc, reg);
-        bind(doc->GetElementById("btn-start"),    [this] { onStartGame_(); });
-        bind(doc->GetElementById("btn-settings"), [this, &reg] { PageSystem::push(reg, PageID::Settings); });
-        bind(doc->GetElementById("btn-quit"),     [this] { onQuit_(); });
+        bind(doc->GetElementById("btn-start"), [this] { onStartGame_(); });
+        bind(doc->GetElementById("btn-quit"),  [this] { onQuit_(); });
     }
 
     void onDetach() override { listeners_.clear(); }
