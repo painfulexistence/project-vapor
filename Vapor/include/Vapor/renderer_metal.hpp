@@ -442,6 +442,7 @@ protected:
     NS::SharedPtr<MTL::Texture> cloudRT;// Cloud render target (quarter res)
     NS::SharedPtr<MTL::Texture> cloudHistoryRT;// Previous frame clouds (for TAA)
     bool volumetricCloudsEnabled = false;
+    bool m_supportsRaytracing = false;
     VolumetricCloudData volumetricCloudSettings;
 
     // Sun Flare resources
