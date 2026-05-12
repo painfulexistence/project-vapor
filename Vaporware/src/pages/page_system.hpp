@@ -3,4 +3,8 @@
 using Vapor::Page;
 using Vapor::PageID;
 using Vapor::PageSystem;
-using Vapor::UIStateComponent;
+using Vapor::UIOverlayTag;
+using Vapor::UIVisibleTag;
+using Vapor::UIDocumentComponent;
+using Vapor::UIPageBehaviorComponent;
+using Vapor::UINavigatorComponent;

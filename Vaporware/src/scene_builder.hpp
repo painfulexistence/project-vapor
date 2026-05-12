@@ -187,38 +187,44 @@ inline SceneResources buildScene(
         follow.offset = glm::vec3(0.0f, 2.0f, 5.0f);
     }
 
-    // --- UI (one persistent entity owns all pages + trigger components) ---
-    auto uiEntity = registry.create();
-    registry.emplace<PersistentTag>(uiEntity);
-    {
-        auto& ui = registry.emplace<UIStateComponent>(uiEntity);
+    // --- UI navigator (singleton entity: owns PageID→entity map + menu stack) ---
+    auto navEntity = registry.create();
+    registry.emplace<PersistentTag>(navEntity);
+    auto& nav = registry.emplace<UINavigatorComponent>(navEntity);
 
-        // Overlay pages — eager-loaded, always resident
-        ui.pages[PageID::HUD]          = { "assets/ui/hud.rml",          std::make_shared<HUDPage>() };
-        ui.pages[PageID::Letterbox]    = { "assets/ui/letterbox.rml",    std::make_shared<LetterboxPage>() };
-        ui.pages[PageID::Subtitle]     = { "assets/ui/subtitle.rml",     std::make_shared<SubtitlePage>() };
-        ui.pages[PageID::ScrollText]   = { "assets/ui/scroll_text.rml",  std::make_shared<ScrollTextPage>() };
-        ui.pages[PageID::ChapterTitle] = { "assets/ui/chapter_title.rml",std::make_shared<ChapterTitlePage>() };
- 
-        // Menu pages — lazy-loaded (document created only when first shown)
-        ui.pages[PageID::MainMenu] = { "assets/ui/menus/main_menu.rml", std::make_shared<MainMenuPage>(
-            [&registry] { PageSystem::popAll(registry); /* game start logic goes here */ },
-            [] { SDL_Event e{}; e.type = SDL_EVENT_QUIT; SDL_PushEvent(&e); }
-        ), false, true };
-        ui.pages[PageID::PauseMenu] = { "assets/ui/menus/pause_menu.rml", std::make_shared<PauseMenuPage>(
-            [&registry] { PageSystem::pop(registry); },
-            [&registry] { PageSystem::popAll(registry); PageSystem::push(registry, PageID::MainMenu); }
-        ), false, true };
-        ui.pages[PageID::Settings]      = { "assets/ui/menus/settings.rml",      std::make_shared<SettingsPage>(),     false, true };
-        ui.pages[PageID::LoadingScreen] = { "assets/ui/menus/loading_screen.rml",std::make_shared<LoadingScreenPage>(),false, true };
+    auto addPage = [&](PageID id, std::string path, std::shared_ptr<Page> page,
+                       bool lazyLoad = false, bool overlay = false) {
+        auto e = registry.create();
+        registry.emplace<UIDocumentComponent>(e, UIDocumentComponent{ .path = std::move(path), .lazyLoad = lazyLoad });
+        registry.emplace<UIPageBehaviorComponent>(e, UIPageBehaviorComponent{ .page = std::move(page) });
+        if (overlay) registry.emplace<UIOverlayTag>(e);
+        nav.pages[id] = e;
+    };
 
-        // Show main menu at startup
-        PageSystem::push(registry, PageID::MainMenu);
-    }
+    // Overlay pages — eager-loaded, always resident
+    addPage(PageID::HUD,          "assets/ui/hud.rml",           std::make_shared<HUDPage>(),          false, true);
+    addPage(PageID::Letterbox,    "assets/ui/letterbox.rml",     std::make_shared<LetterboxPage>(),    false, true);
+    addPage(PageID::Subtitle,     "assets/ui/subtitle.rml",      std::make_shared<SubtitlePage>(),     false, true);
+    addPage(PageID::ScrollText,   "assets/ui/scroll_text.rml",   std::make_shared<ScrollTextPage>(),   false, true);
+    addPage(PageID::ChapterTitle, "assets/ui/chapter_title.rml", std::make_shared<ChapterTitlePage>(), false, true);
+
+    // Menu pages — lazy-loaded (document created only when first shown)
+    addPage(PageID::MainMenu, "assets/ui/menus/main_menu.rml", std::make_shared<MainMenuPage>(
+        [&registry] { PageSystem::popAll(registry); },
+        [] { SDL_Event e{}; e.type = SDL_EVENT_QUIT; SDL_PushEvent(&e); }
+    ), true);
+    addPage(PageID::PauseMenu, "assets/ui/menus/pause_menu.rml", std::make_shared<PauseMenuPage>(
+        [&registry] { PageSystem::pop(registry); },
+        [&registry] { PageSystem::popAll(registry); PageSystem::push(registry, PageID::MainMenu); }
+    ), true);
+    addPage(PageID::Settings,      "assets/ui/menus/settings.rml",       std::make_shared<SettingsPage>(),      true);
+    addPage(PageID::LoadingScreen, "assets/ui/menus/loading_screen.rml",  std::make_shared<LoadingScreenPage>(), true);
+
+    PageSystem::push(registry, PageID::MainMenu);
 
     // Trigger components — content/timing data for cinematic overlays
     {
-        auto& sq = registry.emplace<SubtitleQueueComponent>(uiEntity);
+        auto& sq = registry.emplace<SubtitleQueueComponent>(navEntity);
         sq.autoAdvance = true;
         sq.queue = {
             { "NARRATOR",  "In a world where code meets creativity...", 3.0f },
@@ -229,7 +235,7 @@ inline SceneResources buildScene(
         };
     }
     {
-        auto& stq = registry.emplace<ScrollTextQueueComponent>(uiEntity);
+        auto& stq = registry.emplace<ScrollTextQueueComponent>(navEntity);
         stq.lines = {
             "Welcome to Project Vapor",
             "Press ENTER to advance text",
@@ -241,12 +247,12 @@ inline SceneResources buildScene(
         };
     }
     {
-        auto& ct = registry.emplace<ChapterTitleTriggerComponent>(uiEntity);
+        auto& ct = registry.emplace<ChapterTitleTriggerComponent>(navEntity);
         ct.number       = "Chapter I";
         ct.title        = "The Beginning";
         ct.showRequested = true;
     }
-    registry.emplace<SceneTransitionComponent>(uiEntity);
+    registry.emplace<SceneTransitionComponent>(navEntity);
 
     res.global = registry.create();
 

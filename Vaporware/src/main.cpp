@@ -202,12 +202,9 @@ auto main(int argc, char* args[]) -> int {
             }
             case SDL_EVENT_KEY_DOWN: {
                 if (e.key.scancode == SDL_SCANCODE_ESCAPE) {
-                    auto& ui = registry.view<UIStateComponent>().get<UIStateComponent>(
-                        registry.view<UIStateComponent>().front()
-                    );
-                    if (!ui.menuStack.empty() && ui.menuStack.back() == PageID::PauseMenu) {
+                    if (PageSystem::isTopOfStack(registry, PageID::PauseMenu)) {
                         PageSystem::pop(registry);
-                    } else if (ui.menuStack.empty()) {
+                    } else if (PageSystem::isStackEmpty(registry)) {
                         PageSystem::push(registry, PageID::PauseMenu);
                     } else {
                         quit = true;
