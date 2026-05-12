@@ -3,6 +3,7 @@
 #include "page_system.hpp"
 #include <RmlUi/Core/EventListener.h>
 #include <functional>
+#include <fmt/core.h>
 #include <memory>
 #include <vector>
 
@@ -22,7 +23,6 @@ public:
     void onUpdate(float dt) override {
         if (!doc_) return;
         auto* el = doc_->GetElementById("main-menu-container");
-        if (!el) return;
 
         switch (state_) {
         case State::Hidden:
@@ -64,11 +64,9 @@ public:
 private:
     struct ClickListener : Rml::EventListener {
         std::function<void()> fn;
-        void ProcessEvent(Rml::Event&) override { fn(); }
     };
 
     void bind(Rml::Element* el, std::function<void()> fn) {
-        if (!el) return;
         auto l = std::make_unique<ClickListener>();
         l->fn = std::move(fn);
         el->AddEventListener(Rml::EventId::Click, l.get());

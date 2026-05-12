@@ -13,7 +13,7 @@ body {
     background-color: #0a0a0a;
 
     opacity: 0;
-    transition: opacity 0.3s sine-in-out;
+    transition: opacity 0.3s ease-in-out;
 }
 
 #main-menu-container.visible {

@@ -210,7 +210,6 @@ inline SceneResources buildScene(
 
     // Menu pages — lazy-loaded (document created only when first shown)
     addPage(PageID::MainMenu, "assets/ui/menus/main_menu.rml", std::make_shared<MainMenuPage>(
-        [&registry] { PageSystem::popAll(registry); },
         [] { SDL_Event e{}; e.type = SDL_EVENT_QUIT; SDL_PushEvent(&e); }
     ), true);
     addPage(PageID::PauseMenu, "assets/ui/menus/pause_menu.rml", std::make_shared<PauseMenuPage>(
