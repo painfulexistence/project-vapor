@@ -2,8 +2,9 @@
 #include <SDL3/SDL_stdinc.h>
 #include <glm/gtc/quaternion.hpp>
 #include <glm/vec3.hpp>
-#include <unordered_map>
 #include <memory>
+#include <unordered_map>
+#include <vector>
 
 struct Node;
 class Scene;
@@ -70,6 +71,19 @@ struct OverlapResult {
     std::vector<BodyHandle> bodies;
 };
 
+// ECS-mode collision events: bodies are identified by BodyHandle (resolve entity via getBodyUserData)
+struct CollisionEvent {
+    BodyHandle body1;
+    BodyHandle body2;
+    bool isEnter;
+};
+
+struct TriggerEvent {
+    BodyHandle triggerBody;
+    BodyHandle otherBody;
+    bool isEnter;
+};
+
 class Physics3D {
 private:
     static Physics3D* _instance;
@@ -128,6 +142,10 @@ public:
     bool raycast(const glm::vec3& from, const glm::vec3& to, RaycastHit& hit, BodyHandle ignoreBody = BodyHandle{});
     void setGravity(const glm::vec3& acc);
     glm::vec3 getGravity() const;
+
+    // ====== ECS 碰撞事件（每幀 process() 後可取用，取完即清空） ======
+    std::vector<CollisionEvent> popCollisionEvents();
+    std::vector<TriggerEvent> popTriggerEvents();
 
     // ====== Trigger 創建 ======
     TriggerHandle createBoxTrigger(
@@ -241,6 +259,9 @@ private:
     std::unordered_map<Uint32, JPH::BodyID> bodies;
     std::unordered_map<Uint32, Uint32> bodyIDToRid; // JPH::BodyID.GetIndexAndSequenceNumber() -> rid
     Uint32 nextBodyID = 0;
+
+    std::vector<CollisionEvent> pendingCollisionEvents;
+    std::vector<TriggerEvent> pendingTriggerEvents;
 
     std::unordered_map<Uint32, JPH::BodyID> triggers;
     Uint32 nextTriggerID = 0;

@@ -31,7 +31,7 @@ public:
 
     virtual void draw(std::shared_ptr<Scene> scene, Camera& camera) override;
 
-    virtual void draw(entt::registry& registry, Camera& camera) override;
+    virtual void draw(entt::registry& registry, std::shared_ptr<Scene> scene, Camera& camera) override;
 
     virtual void readPixelsAsync(ScreenshotCallback callback) override;
 

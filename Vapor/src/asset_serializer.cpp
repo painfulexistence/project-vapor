@@ -1,5 +1,7 @@
 #include "asset_serializer.hpp"
 #include <SDL3/SDL_stdinc.h>
+
+using namespace Vapor;
 #include <SDL3/SDL_timer.h>
 #include <fmt/core.h>
 #include <fstream>

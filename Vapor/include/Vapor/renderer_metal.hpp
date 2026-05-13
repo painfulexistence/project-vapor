@@ -135,7 +135,7 @@ public:
     virtual void stage(std::shared_ptr<Scene> scene) override;
 
     virtual void draw(std::shared_ptr<Scene> scene, Camera& camera) override;
-    virtual void draw(entt::registry& registry, Camera& camera) override;
+    virtual void draw(entt::registry& registry, std::shared_ptr<Scene> scene, Camera& camera) override;
 
     virtual void readPixelsAsync(ScreenshotCallback callback) override;
 
@@ -461,9 +461,13 @@ protected:
     std::vector<NS::SharedPtr<MTL::AccelerationStructure>> TLASBuffers;
 
     // Instance data
+    // instanceBatches: material → list of (mesh, instanceArrayIndex) for rasterization draw calls
+    struct MeshDraw { std::shared_ptr<Vapor::Mesh> mesh; uint32_t instanceIndex; };
     std::vector<InstanceData> instances;
+    std::vector<InstanceData> pendingEcsInstances;
+    std::unordered_map<std::shared_ptr<Vapor::Material>, std::vector<MeshDraw>> pendingEcsBatches;
     std::vector<MTL::AccelerationStructureInstanceDescriptor> accelInstances;
-    std::unordered_map<std::shared_ptr<Vapor::Material>, std::vector<std::shared_ptr<Vapor::Mesh>>> instanceBatches;
+    std::unordered_map<std::shared_ptr<Vapor::Material>, std::vector<MeshDraw>> instanceBatches;
 
     // Render targets
     NS::SharedPtr<MTL::Texture> colorRT_MS;

@@ -46,7 +46,7 @@ public:
     virtual void stage(std::shared_ptr<Scene> scene) = 0;
 
     virtual void draw(std::shared_ptr<Scene> scene, Camera& camera) = 0;
-    virtual void draw(entt::registry& registry, Camera& camera) = 0;
+    virtual void draw(entt::registry& registry, std::shared_ptr<Scene> scene, Camera& camera) = 0;
     virtual void readPixelsAsync(ScreenshotCallback callback) = 0;
 
     virtual void setRenderPath(RenderPath path) = 0;

@@ -471,23 +471,23 @@ public:
         encoder->setVertexBuffer(r.instanceDataBuffers[r.currentFrameInFlight].get(), 0, 2);
         encoder->setVertexBuffer(r.getBuffer(r.currentScene->vertexBuffer).get(), 0, 3);
 
-        for (const auto& [material, meshes] : r.instanceBatches) {
+        for (const auto& [material, draws] : r.instanceBatches) {
             encoder->setFragmentTexture(
                 r.getTexture(material->albedoMap ? material->albedoMap->texture : r.defaultAlbedoTexture).get(), 0
             );
 
-            for (const auto& mesh : meshes) {
-                if (!r.currentCamera->isVisible(mesh->getWorldBoundingSphere())) {
+            for (const auto& draw : draws) {
+                if (!r.currentCamera->isVisible(draw.mesh->getWorldBoundingSphere())) {
                     continue;
                 }
 
-                encoder->setVertexBytes(&mesh->instanceID, sizeof(Uint32), 4);
+                encoder->setVertexBytes(&draw.instanceIndex, sizeof(Uint32), 4);
                 encoder->drawIndexedPrimitives(
                     MTL::PrimitiveType::PrimitiveTypeTriangle,
-                    mesh->indexCount,
+                    draw.mesh->indexCount,
                     MTL::IndexTypeUInt32,
                     r.getBuffer(r.currentScene->indexBuffer).get(),
-                    mesh->indexOffset * sizeof(Uint32)
+                    draw.mesh->indexOffset * sizeof(Uint32)
                 );
                 r.drawCount++;
             }
@@ -967,7 +967,7 @@ public:
         encoder->setFragmentBytes(&gridSize, sizeof(glm::uvec3), 5);
         encoder->setFragmentBytes(&time, sizeof(float), 6);
 
-        for (const auto& [material, meshes] : r.instanceBatches) {
+        for (const auto& [material, draws] : r.instanceBatches) {
             encoder->setFragmentTexture(
                 r.getTexture(material->albedoMap ? material->albedoMap->texture : r.defaultAlbedoTexture).get(), 0
             );
@@ -993,20 +993,20 @@ public:
             encoder->setFragmentTexture(r.prefilterMap.get(), 9);
             encoder->setFragmentTexture(r.brdfLUT.get(), 10);
 
-            for (const auto& mesh : meshes) {
-                if (!r.currentCamera->isVisible(mesh->getWorldBoundingSphere())) {
+            for (const auto& draw : draws) {
+                if (!r.currentCamera->isVisible(draw.mesh->getWorldBoundingSphere())) {
                     r.culledInstanceCount++;
                     continue;
                 }
 
                 r.currentInstanceCount++;
-                encoder->setVertexBytes(&mesh->instanceID, sizeof(Uint32), 4);
+                encoder->setVertexBytes(&draw.instanceIndex, sizeof(Uint32), 4);
                 encoder->drawIndexedPrimitives(
                     MTL::PrimitiveType::PrimitiveTypeTriangle,
-                    mesh->indexCount,
+                    draw.mesh->indexCount,
                     MTL::IndexTypeUInt32,
                     r.getBuffer(r.currentScene->indexBuffer).get(),
-                    mesh->indexOffset * sizeof(Uint32)
+                    draw.mesh->indexOffset * sizeof(Uint32)
                 );
                 r.drawCount++;
             }
@@ -4353,7 +4353,7 @@ auto Renderer_Metal::draw(std::shared_ptr<Scene> scene, Camera& camera) -> void 
                     fmt::print("No material found for mesh in mesh group {}\n", node->meshGroup->name);
                     continue;
                 }
-                instanceBatches[mesh->material].push_back(mesh);
+                instanceBatches[mesh->material].push_back(MeshDraw{ mesh, static_cast<uint32_t>(instances.size() - 1) });
             }
         }
         for (const auto& child : node->children) {
@@ -4363,6 +4363,13 @@ auto Renderer_Metal::draw(std::shared_ptr<Scene> scene, Camera& camera) -> void 
     for (const auto& node : scene->nodes) {
         updateNode(node);
     }
+
+    // ECS draw path: override Node-derived instances and batches with ECS data
+    if (!pendingEcsInstances.empty()) {
+        instances = pendingEcsInstances;
+        instanceBatches = pendingEcsBatches;
+    }
+
     if (instances.size() > MAX_INSTANCES) {// TODO: reallocate when needed
         fmt::print("Warning: Instance count ({}) exceeds MAX_INSTANCES ({})\n", instances.size(), MAX_INSTANCES);
     }
@@ -5781,36 +5788,36 @@ extern "C" auto getMetalDevice(void* renderer) -> void* {
     }
     return nullptr;
 }
-void Renderer_Metal::draw(entt::registry& registry, Camera& camera) {
-    // This is a bridge implementation for Phase 2/3.
-    // It populates the instance buffer from the ECS, but then calls the
-    // old draw path which uses the legacy scene graph.
-    // This allows both ECS-driven and Node-driven objects to be rendered.
-
-    currentCamera = &camera;// Make sure the camera is set
-
-    // 1. Clear instance data from previous frame
-    instances.clear();
-
-    // 2. Populate instances from ECS registry
+void Renderer_Metal::draw(entt::registry& registry, std::shared_ptr<Scene> scene, Camera& camera) {
+    // Build ECS instance data; draw(scene, camera) will clear instances/instanceBatches from Nodes,
+    // so store them here and inject after Node traversal via pendingEcsInstances.
+    pendingEcsInstances.clear();
+    pendingEcsBatches.clear();
     auto view = registry.view<::Vapor::TransformComponent, ::Vapor::MeshRendererComponent>();
     for (auto entity : view) {
         auto& transform = view.get<::Vapor::TransformComponent>(entity);
         auto& meshRenderer = view.get<::Vapor::MeshRendererComponent>(entity);
-
         if (!meshRenderer.visible) continue;
-
         for (auto& mesh : meshRenderer.meshes) {
-            InstanceData instance{};
-            instance.model = transform.worldTransform;
-            instance.materialID = mesh->materialID;
-            instances.push_back(instance);
+            uint32_t instanceIdx = static_cast<uint32_t>(pendingEcsInstances.size());
+            pendingEcsInstances.push_back({
+                .model = transform.worldTransform,
+                .color = glm::vec4(1.0f),
+                .vertexOffset = mesh->vertexOffset,
+                .indexOffset = mesh->indexOffset,
+                .vertexCount = mesh->vertexCount,
+                .indexCount = mesh->indexCount,
+                .materialID = mesh->materialID,
+                .primitiveMode = mesh->primitiveMode,
+                .AABBMin = mesh->worldAABBMin,
+                .AABBMax = mesh->worldAABBMax,
+            });
+            if (mesh->material) {
+                pendingEcsBatches[mesh->material].push_back(MeshDraw{ mesh, instanceIdx });
+            }
         }
     }
-
-    // 3. Call the legacy draw function, which will append Node-based objects
-    //    and then execute the render graph.
-    if (currentScene) {
-        draw(currentScene, camera);
-    }
+    draw(scene, camera);
+    pendingEcsInstances.clear();
+    pendingEcsBatches.clear();
 }

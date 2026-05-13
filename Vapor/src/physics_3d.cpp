@@ -152,24 +152,17 @@ public:
 
 class MyContactListener : public JPH::ContactListener {
 public:
-    struct TriggerEvent {
-        Node* triggerNode;
-        Node* otherNode;
-        bool isEnter;// true = Enter, false = Exit
-    };
-
-    struct CollisionEvent {
-        Node* node1;
-        Node* node2;
+    // Store raw Jolt BodyIDs; Physics3D::process() converts to BodyHandles via bodyIDToRid
+    struct RawCollisionEvent {
+        JPH::BodyID id1;
+        JPH::BodyID id2;
+        bool isTrigger;
         bool isEnter;
     };
 
-    std::vector<TriggerEvent> triggerEvents;
-    std::vector<CollisionEvent> collisionEvents;
-    std::unordered_map<uint64_t, bool> activeContacts;
-    std::mutex eventMutex;// Track active contacts for exit detection
+    std::vector<RawCollisionEvent> rawEvents;
+    std::mutex eventMutex;
 
-    // Helper to create unique contact ID
     auto makeContactID(JPH::BodyID id1, JPH::BodyID id2) const -> uint64_t {
         uint32_t a = id1.GetIndexAndSequenceNumber();
         uint32_t b = id2.GetIndexAndSequenceNumber();
@@ -192,28 +185,9 @@ public:
         const JPH::ContactManifold& inManifold,
         JPH::ContactSettings& ioSettings
     ) override {
-        auto node1 = reinterpret_cast<Node*>(inBody1.GetUserData());
-        auto node2 = reinterpret_cast<Node*>(inBody2.GetUserData());
-
-        if (!node1 || !node2) return;
-
-        bool isSensor1 = inBody1.IsSensor();
-        bool isSensor2 = inBody2.IsSensor();
-
-        uint64_t contactID = makeContactID(inBody1.GetID(), inBody2.GetID());
-
+        bool isTrigger = inBody1.IsSensor() || inBody2.IsSensor();
         std::lock_guard<std::mutex> lock(eventMutex);
-        activeContacts[contactID] = true;
-
-        // Trigger event (one or both are sensors)
-        if (isSensor1 || isSensor2) {
-            Node* triggerNode = isSensor1 ? node1 : node2;
-            Node* otherNode = isSensor1 ? node2 : node1;
-            triggerEvents.push_back({ triggerNode, otherNode, true });
-        } else {
-            // Regular collision event
-            collisionEvents.push_back({ node1, node2, true });
-        }
+        rawEvents.push_back({ inBody1.GetID(), inBody2.GetID(), isTrigger, true });
     }
 
     virtual void OnContactPersisted(
@@ -221,20 +195,9 @@ public:
         const JPH::Body& inBody2,
         const JPH::ContactManifold& inManifold,
         JPH::ContactSettings& ioSettings
-    ) override {
-        // Contact still active, no need to add event
-    }
+    ) override {}
 
-    virtual void OnContactRemoved(const JPH::SubShapeIDPair& inSubShapePair) override {
-        // Note: We can't get UserData here directly, so we need to handle this differently
-        // We'll mark the contact as removed and process it in the next physics update
-    }
-
-    void clearEvents() {
-        std::lock_guard<std::mutex> lock(eventMutex);
-        triggerEvents.clear();
-        collisionEvents.clear();
-    }
+    virtual void OnContactRemoved(const JPH::SubShapeIDPair& inSubShapePair) override {}
 };
 
 class MyBodyActivationListener : public JPH::BodyActivationListener {
@@ -529,40 +492,31 @@ void Physics3D::process(const std::shared_ptr<Scene>& scene, float dt) {
         syncVehicleControllers(node);
     }
 
-    // Process physics events (triggers and collisions)
+    // Drain raw contact events from listener and convert to ECS BodyHandle events
     auto* listener = static_cast<MyContactListener*>(contactListener.get());
-
-    std::vector<MyContactListener::TriggerEvent> triggerEvents;
-    std::vector<MyContactListener::CollisionEvent> collisionEvents;
+    std::vector<MyContactListener::RawCollisionEvent> rawEvents;
     {
         std::lock_guard<std::mutex> lock(listener->eventMutex);
-        triggerEvents.swap(listener->triggerEvents);
-        collisionEvents.swap(listener->collisionEvents);
+        rawEvents.swap(listener->rawEvents);
     }
 
-    // Process trigger events
-    for (auto& event : triggerEvents) {
-        if (event.isEnter) {
-            event.triggerNode->onTriggerEnter(event.otherNode);
-            event.otherNode->onTriggerEnter(event.triggerNode);// Bidirectional notification
+    pendingCollisionEvents.clear();
+    pendingTriggerEvents.clear();
+
+    for (auto& raw : rawEvents) {
+        Uint32 ridA = UINT32_MAX, ridB = UINT32_MAX;
+        auto itA = bodyIDToRid.find(raw.id1.GetIndexAndSequenceNumber());
+        auto itB = bodyIDToRid.find(raw.id2.GetIndexAndSequenceNumber());
+        if (itA != bodyIDToRid.end()) ridA = itA->second;
+        if (itB != bodyIDToRid.end()) ridB = itB->second;
+        BodyHandle ha{ ridA }, hb{ ridB };
+
+        if (raw.isTrigger) {
+            pendingTriggerEvents.push_back({ ha, hb, raw.isEnter });
         } else {
-            event.triggerNode->onTriggerExit(event.otherNode);
-            event.otherNode->onTriggerExit(event.triggerNode);
+            pendingCollisionEvents.push_back({ ha, hb, raw.isEnter });
         }
     }
-
-    // Process collision events
-    for (auto& event : collisionEvents) {
-        if (event.isEnter) {
-            event.node1->onCollisionEnter(event.node2);
-            event.node2->onCollisionEnter(event.node1);
-        } else {
-            event.node1->onCollisionExit(event.node2);
-            event.node2->onCollisionExit(event.node1);
-        }
-    }
-
-    // Events are cleared by swap
 
     // draw debug UI
     if (isDebugUIEnabled) {
@@ -571,6 +525,14 @@ void Physics3D::process(const std::shared_ptr<Scene>& scene, float dt) {
 }
 
 void Physics3D::drawImGui(float dt) {
+}
+
+auto Physics3D::popCollisionEvents() -> std::vector<CollisionEvent> {
+    return std::move(pendingCollisionEvents);
+}
+
+auto Physics3D::popTriggerEvents() -> std::vector<TriggerEvent> {
+    return std::move(pendingTriggerEvents);
 }
 
 auto Physics3D::createSphereBody(
@@ -596,6 +558,7 @@ auto Physics3D::createSphereBody(
         throw std::runtime_error("Failed to create body");
     }
     bodies[nextBodyID] = body->GetID();
+    bodyIDToRid[body->GetID().GetIndexAndSequenceNumber()] = nextBodyID;
 
     return BodyHandle{ nextBodyID++ };
 }
@@ -623,6 +586,7 @@ auto Physics3D::createBoxBody(
         throw std::runtime_error("Failed to create body");
     }
     bodies[nextBodyID] = body->GetID();
+    bodyIDToRid[body->GetID().GetIndexAndSequenceNumber()] = nextBodyID;
 
     return BodyHandle{ nextBodyID++ };
 }
@@ -1044,6 +1008,7 @@ auto Physics3D::createCapsuleBody(
         throw std::runtime_error("Failed to create capsule body");
     }
     bodies[nextBodyID] = body->GetID();
+    bodyIDToRid[body->GetID().GetIndexAndSequenceNumber()] = nextBodyID;
 
     return BodyHandle{ nextBodyID++ };
 }
@@ -1072,6 +1037,7 @@ auto Physics3D::createCylinderBody(
         throw std::runtime_error("Failed to create cylinder body");
     }
     bodies[nextBodyID] = body->GetID();
+    bodyIDToRid[body->GetID().GetIndexAndSequenceNumber()] = nextBodyID;
 
     return BodyHandle{ nextBodyID++ };
 }
@@ -1124,6 +1090,7 @@ auto Physics3D::createMeshBody(
         throw std::runtime_error("Failed to create mesh body");
     }
     bodies[nextBodyID] = body->GetID();
+    bodyIDToRid[body->GetID().GetIndexAndSequenceNumber()] = nextBodyID;
 
     return BodyHandle{ nextBodyID++ };
 }
@@ -1163,6 +1130,7 @@ auto Physics3D::createConvexHullBody(
         throw std::runtime_error("Failed to create convex hull body");
     }
     bodies[nextBodyID] = body->GetID();
+    bodyIDToRid[body->GetID().GetIndexAndSequenceNumber()] = nextBodyID;
 
     return BodyHandle{ nextBodyID++ };
 }

@@ -1,5 +1,7 @@
 #include "renderer_vulkan.hpp"
 
+using namespace Vapor;
+
 #include <SDL3/SDL_stdinc.h>
 #include <SDL3/SDL_timer.h>
 #include <cstdlib>
@@ -3965,5 +3967,5 @@ void Renderer_Vulkan::processPendingScreenshots() {
         }
     }
 }
-void Renderer_Vulkan::draw(entt::registry& registry, Camera& camera) { /* TODO */
+void Renderer_Vulkan::draw(entt::registry& registry, std::shared_ptr<Scene> scene, Camera& camera) { /* TODO */
 }

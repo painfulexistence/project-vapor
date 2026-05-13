@@ -1,6 +1,8 @@
 #include "scene.hpp"
 #include "fluid_volume.hpp"
 
+using namespace Vapor;
+
 #include <SDL3/SDL_log.h>
 #include <fmt/core.h>
 #include <functional>
