@@ -121,13 +121,30 @@ vapor_copy_assets(test_resource_manager)
 vapor_copy_assets(test_asset_management)
 vapor_copy_assets(test_backend_support)
 vapor_copy_assets(test_ui_system)
+
+# catch_discover_tests' default WORKING_DIRECTORY is CMAKE_CURRENT_BINARY_DIR
+# (build/tests/), but vapor_copy_assets places engine assets in the per-config
+# exe directory (build/Release/). Copy engine assets here as well so tests can
+# find them without relying on generator-expression expansion in POST_BUILD
+# discovery scripts.
+if(DEFINED VAPOR_ASSETS_DIR AND EXISTS "${VAPOR_ASSETS_DIR}")
+    add_custom_target(copy_engine_assets_to_test_dir
+        COMMAND ${CMAKE_COMMAND} -E copy_directory
+                "${VAPOR_ASSETS_DIR}" "${CMAKE_CURRENT_BINARY_DIR}/assets"
+        COMMENT "Copying engine assets to test working directory"
+    )
+    foreach(_t test_physics test_resource_manager test_asset_management test_backend_support test_ui_system)
+        add_dependencies(${_t} copy_engine_assets_to_test_dir)
+    endforeach()
+endif()
+
 include(CTest)
 include(Catch)
 catch_discover_tests(test_action_system)
 catch_discover_tests(test_scene_transform)
 catch_discover_tests(test_camera)
-catch_discover_tests(test_physics         WORKING_DIRECTORY "$<TARGET_FILE_DIR:test_physics>")
-catch_discover_tests(test_asset_management WORKING_DIRECTORY "$<TARGET_FILE_DIR:test_asset_management>")
-catch_discover_tests(test_resource_manager WORKING_DIRECTORY "$<TARGET_FILE_DIR:test_resource_manager>")
-catch_discover_tests(test_backend_support  WORKING_DIRECTORY "$<TARGET_FILE_DIR:test_backend_support>")
-catch_discover_tests(test_ui_system        WORKING_DIRECTORY "$<TARGET_FILE_DIR:test_ui_system>")
+catch_discover_tests(test_physics)
+catch_discover_tests(test_asset_management)
+catch_discover_tests(test_resource_manager)
+catch_discover_tests(test_backend_support)
+catch_discover_tests(test_ui_system)
