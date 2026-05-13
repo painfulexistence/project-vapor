@@ -9,20 +9,11 @@ function(vapor_copy_assets TARGET_NAME)
         return()
     endif()
 
-    # Each target gets a unique stamp so CMake doesn't complain about duplicate
-    # OUTPUT paths. Concurrent same-content writes to the shared asset directory
-    # are benign (identical bytes, typical asset sizes are written atomically).
-    set(_stamp "$<TARGET_FILE_DIR:${TARGET_NAME}>/assets/.stamp_${TARGET_NAME}")
-
-    add_custom_command(
-        OUTPUT  "${_stamp}"
+    add_custom_target(copy_engine_assets_for_${TARGET_NAME}
         COMMAND ${CMAKE_COMMAND} -E copy_directory
                 "${VAPOR_ASSETS_DIR}"
                 "$<TARGET_FILE_DIR:${TARGET_NAME}>/assets"
-        COMMAND ${CMAKE_COMMAND} -E touch "${_stamp}"
-        DEPENDS "${VAPOR_ASSETS_DIR}"
         COMMENT "Copying engine assets for ${TARGET_NAME}"
     )
-    add_custom_target(copy_engine_assets_for_${TARGET_NAME} DEPENDS "${_stamp}")
     add_dependencies(${TARGET_NAME} copy_engine_assets_for_${TARGET_NAME})
 endfunction()
