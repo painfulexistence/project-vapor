@@ -122,22 +122,15 @@ vapor_copy_assets(test_asset_management)
 vapor_copy_assets(test_backend_support)
 vapor_copy_assets(test_ui_system)
 
-# catch_discover_tests' default WORKING_DIRECTORY is CMAKE_CURRENT_BINARY_DIR
-# (build/tests/), but vapor_copy_assets places engine assets in the per-config
-# exe directory (build/Release/). Copy engine assets at configure time so they
-# are present before any build step runs, avoiding build-time ordering issues.
-if(DEFINED VAPOR_ASSETS_DIR AND EXISTS "${VAPOR_ASSETS_DIR}")
-    file(COPY "${VAPOR_ASSETS_DIR}/" DESTINATION "${CMAKE_CURRENT_BINARY_DIR}/assets")
-    file(COPY "${VAPOR_ASSETS_DIR}/" DESTINATION "${CMAKE_BINARY_DIR}/assets")
-endif()
-
 include(CTest)
 include(Catch)
-catch_discover_tests(test_action_system)
-catch_discover_tests(test_scene_transform)
-catch_discover_tests(test_camera)
-catch_discover_tests(test_physics)
-catch_discover_tests(test_asset_management)
-catch_discover_tests(test_resource_manager)
-catch_discover_tests(test_backend_support)
-catch_discover_tests(test_ui_system)
+# Run each test from its executable's directory so that SDL_GetBasePath()
+# (used by readFile) resolves asset paths correctly.
+catch_discover_tests(test_action_system   WORKING_DIRECTORY "$<TARGET_FILE_DIR:test_action_system>")
+catch_discover_tests(test_scene_transform WORKING_DIRECTORY "$<TARGET_FILE_DIR:test_scene_transform>")
+catch_discover_tests(test_camera          WORKING_DIRECTORY "$<TARGET_FILE_DIR:test_camera>")
+catch_discover_tests(test_physics         WORKING_DIRECTORY "$<TARGET_FILE_DIR:test_physics>")
+catch_discover_tests(test_asset_management   WORKING_DIRECTORY "$<TARGET_FILE_DIR:test_asset_management>")
+catch_discover_tests(test_resource_manager   WORKING_DIRECTORY "$<TARGET_FILE_DIR:test_resource_manager>")
+catch_discover_tests(test_backend_support    WORKING_DIRECTORY "$<TARGET_FILE_DIR:test_backend_support>")
+catch_discover_tests(test_ui_system          WORKING_DIRECTORY "$<TARGET_FILE_DIR:test_ui_system>")
