@@ -1,10 +1,11 @@
 # Project Vapor
 
+[![CI](https://github.com/painfulexistence/project-vapor/actions/workflows/ci.yml/badge.svg)](https://github.com/painfulexistence/project-vapor/actions/workflows/ci.yml)
+<br />
+
 ![C++](https://img.shields.io/badge/C%2B%2B-00599C?style=flat&logo=c%2B%2B&logoColor=white)
 [![Follow on Twitter](https://img.shields.io/twitter/follow/DevLucidum.svg?style=social)](https://twitter.com/intent/follow?screen_name=DevLucidum)
 [![Substack](https://img.shields.io/badge/Substack-%23006f5c.svg?style=flat&logo=substack&logoColor=ffffff&label=Arcane%20Realms)](https://painfulexistence.substack.com/)
-<br />
-[![CI](https://github.com/painfulexistence/project-vapor/actions/workflows/ci.yml/badge.svg)](https://github.com/painfulexistence/project-vapor/actions/workflows/ci.yml)
 <br />
 <br />
 

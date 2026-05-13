@@ -2428,6 +2428,8 @@ auto Renderer_Metal::init(SDL_Window* window) -> void {
     swapchain->setColorspace(CGColorSpaceCreateWithName(kCGColorSpaceSRGB));
     device = swapchain->device();
     queue = NS::TransferPtr(device->newCommandQueue());
+    m_supportsRaytracing = device->supportsRaytracing();
+    if (std::getenv("GITHUB_ACTIONS")) m_supportsRaytracing = false;
 
     // ImGui init
     ImGui_ImplSDL3_InitForMetal(window);
@@ -2445,12 +2447,12 @@ auto Renderer_Metal::init(SDL_Window* window) -> void {
     graph.addPass(std::make_unique<BRDFLUTPass>(this));
 
     // Scene rendering passes
-    graph.addPass(std::make_unique<TLASBuildPass>(this));
+    if (m_supportsRaytracing) graph.addPass(std::make_unique<TLASBuildPass>(this));
     graph.addPass(std::make_unique<PrePass>(this));
     graph.addPass(std::make_unique<NormalResolvePass>(this));
     graph.addPass(std::make_unique<TileCullingPass>(this));
-    graph.addPass(std::make_unique<RaytraceShadowPass>(this));
-    graph.addPass(std::make_unique<RaytraceAOPass>(this));
+    if (m_supportsRaytracing) graph.addPass(std::make_unique<RaytraceShadowPass>(this));
+    if (m_supportsRaytracing) graph.addPass(std::make_unique<RaytraceAOPass>(this));
     graph.addPass(std::make_unique<MainRenderPass>(this));
     graph.addPass(std::make_unique<SkyAtmospherePass>(this));
     // graph.addPass(std::make_unique<WaterPass>(this));
@@ -2599,8 +2601,8 @@ auto Renderer_Metal::createResources() -> void {
     cullLightsPipeline = createComputePipeline("assets/shaders/3d_light_cull.metal");
     tileCullingPipeline = createComputePipeline("assets/shaders/3d_tile_light_cull.metal");
     normalResolvePipeline = createComputePipeline("assets/shaders/3d_normal_resolve.metal");
-    raytraceShadowPipeline = createComputePipeline("assets/shaders/3d_raytrace_shadow.metal");
-    raytraceAOPipeline = createComputePipeline("assets/shaders/3d_ssao.metal");
+    if (m_supportsRaytracing) raytraceShadowPipeline = createComputePipeline("assets/shaders/3d_raytrace_shadow.metal");
+    if (m_supportsRaytracing) raytraceAOPipeline = createComputePipeline("assets/shaders/3d_ssao.metal");
     atmospherePipeline =
         createPipeline("assets/shaders/3d_atmosphere.metal", true, false, 1);// No MSAA for sky (full-screen triangle)
     skyCapturePipeline = createPipeline("assets/shaders/3d_sky_capture.metal", true, true, 1);
@@ -4183,36 +4185,39 @@ auto Renderer_Metal::stage(std::shared_ptr<Scene> scene) -> void {
                 // mesh->vbos.push_back(createVertexBuffer(mesh->vertices));
                 // mesh->ebo = createIndexBuffer(mesh->indices);
 
-                auto geomDesc = NS::TransferPtr(MTL::AccelerationStructureTriangleGeometryDescriptor::alloc()->init());
-                geomDesc->setVertexBuffer(getBuffer(scene->vertexBuffer).get());
-                geomDesc->setVertexStride(sizeof(VertexData));
-                geomDesc->setVertexFormat(MTL::AttributeFormatFloat3);
-                geomDesc->setVertexBufferOffset(
-                    mesh->vertexOffset * sizeof(VertexData) + offsetof(VertexData, position)
-                );
-                geomDesc->setIndexBuffer(getBuffer(scene->indexBuffer).get());
-                geomDesc->setIndexType(MTL::IndexTypeUInt32);
-                geomDesc->setIndexBufferOffset(mesh->indexOffset * sizeof(Uint32));
-                geomDesc->setTriangleCount(mesh->indexCount / 3);
-                geomDesc->setOpaque(true);
+                if (m_supportsRaytracing) {
+                    auto geomDesc =
+                        NS::TransferPtr(MTL::AccelerationStructureTriangleGeometryDescriptor::alloc()->init());
+                    geomDesc->setVertexBuffer(getBuffer(scene->vertexBuffer).get());
+                    geomDesc->setVertexStride(sizeof(VertexData));
+                    geomDesc->setVertexFormat(MTL::AttributeFormatFloat3);
+                    geomDesc->setVertexBufferOffset(
+                        mesh->vertexOffset * sizeof(VertexData) + offsetof(VertexData, position)
+                    );
+                    geomDesc->setIndexBuffer(getBuffer(scene->indexBuffer).get());
+                    geomDesc->setIndexType(MTL::IndexTypeUInt32);
+                    geomDesc->setIndexBufferOffset(mesh->indexOffset * sizeof(Uint32));
+                    geomDesc->setTriangleCount(mesh->indexCount / 3);
+                    geomDesc->setOpaque(true);
 
-                auto accelDesc = NS::TransferPtr(MTL::PrimitiveAccelerationStructureDescriptor::alloc()->init());
-                NS::Object* descriptors[] = { geomDesc.get() };
-                auto geomArray = NS::TransferPtr(NS::Array::array(descriptors, 1));
-                accelDesc->setGeometryDescriptors(geomArray.get());
+                    auto accelDesc = NS::TransferPtr(MTL::PrimitiveAccelerationStructureDescriptor::alloc()->init());
+                    NS::Object* descriptors[] = { geomDesc.get() };
+                    auto geomArray = NS::TransferPtr(NS::Array::array(descriptors, 1));
+                    accelDesc->setGeometryDescriptors(geomArray.get());
 
-                auto accelSizes = device->accelerationStructureSizes(accelDesc.get());
-                auto accelStruct =
-                    NS::TransferPtr(device->newAccelerationStructure(accelSizes.accelerationStructureSize));
-                auto scratchBuffer = NS::TransferPtr(
-                    device->newBuffer(accelSizes.buildScratchBufferSize, MTL::ResourceStorageModePrivate)
-                );
+                    auto accelSizes = device->accelerationStructureSizes(accelDesc.get());
+                    auto accelStruct =
+                        NS::TransferPtr(device->newAccelerationStructure(accelSizes.accelerationStructureSize));
+                    auto scratchBuffer = NS::TransferPtr(
+                        device->newBuffer(accelSizes.buildScratchBufferSize, MTL::ResourceStorageModePrivate)
+                    );
 
-                auto encoder = cmd->accelerationStructureCommandEncoder();
-                encoder->buildAccelerationStructure(accelStruct.get(), accelDesc.get(), scratchBuffer.get(), 0);
-                encoder->endEncoding();
+                    auto encoder = cmd->accelerationStructureCommandEncoder();
+                    encoder->buildAccelerationStructure(accelStruct.get(), accelDesc.get(), scratchBuffer.get(), 0);
+                    encoder->endEncoding();
 
-                BLASs.push_back(accelStruct);
+                    BLASs.push_back(accelStruct);
+                }
 
                 mesh->materialID = materialIDs[mesh->material];
                 mesh->instanceID = nextInstanceID++;
@@ -4340,20 +4345,23 @@ auto Renderer_Metal::draw(std::shared_ptr<Scene> scene, Camera& camera) -> void 
                     .AABBMin = mesh->worldAABBMin,
                     .AABBMax = mesh->worldAABBMax,
                 });
-                MTL::AccelerationStructureInstanceDescriptor accelInstanceDesc;
-                for (int i = 0; i < 4; ++i) {
-                    for (int j = 0; j < 3; ++j) {
-                        accelInstanceDesc.transformationMatrix.columns[i][j] = transform[i][j];
+                if (m_supportsRaytracing) {
+                    MTL::AccelerationStructureInstanceDescriptor accelInstanceDesc;
+                    for (int i = 0; i < 4; ++i) {
+                        for (int j = 0; j < 3; ++j) {
+                            accelInstanceDesc.transformationMatrix.columns[i][j] = transform[i][j];
+                        }
                     }
+                    accelInstanceDesc.accelerationStructureIndex = mesh->instanceID;
+                    accelInstanceDesc.mask = 0xFF;
+                    accelInstances.push_back(accelInstanceDesc);
                 }
-                accelInstanceDesc.accelerationStructureIndex = mesh->instanceID;
-                accelInstanceDesc.mask = 0xFF;
-                accelInstances.push_back(accelInstanceDesc);
                 if (!mesh->material) {
                     fmt::print("No material found for mesh in mesh group {}\n", node->meshGroup->name);
                     continue;
                 }
-                instanceBatches[mesh->material].push_back(MeshDraw{ mesh, static_cast<uint32_t>(instances.size() - 1) });
+                instanceBatches[mesh->material].push_back(MeshDraw{ mesh, static_cast<uint32_t>(instances.size() - 1) }
+                );
             }
         }
         for (const auto& child : node->children) {
