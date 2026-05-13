@@ -160,7 +160,7 @@ auto main(int argc, char* args[]) -> int {
 
     auto scene = sceneResource->get();
 
-    auto material = std::make_shared<Material>(Material{
+    auto material = std::make_shared<Vapor::Material>(Vapor::Material{
         .albedoMap = albedoResource->get(),
         .normalMap = normalResource->get(),
         .roughnessMap = roughnessResource->get(),

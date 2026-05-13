@@ -22,7 +22,7 @@
 
 struct SceneResources {
     std::shared_ptr<Scene> scene;
-    std::shared_ptr<Material> material;
+    std::shared_ptr<Vapor::Material> material;
     entt::entity cube1 = entt::null;
     entt::entity global = entt::null;
 };
@@ -31,7 +31,7 @@ inline SceneResources buildScene(
     entt::registry& registry,
     Physics3D& physics,
     std::shared_ptr<Scene> scene,
-    std::shared_ptr<Material> material,
+    std::shared_ptr<Vapor::Material> material,
     int windowWidth,
     int windowHeight,
     Vapor::RNG& rng
