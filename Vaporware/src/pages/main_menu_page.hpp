@@ -3,6 +3,7 @@
 #include "page_system.hpp"
 #include <RmlUi/Core/EventListener.h>
 #include <functional>
+#include <fmt/core.h>
 #include <memory>
 #include <vector>
 
@@ -13,9 +14,8 @@ public:
 
     void onAttach(Rml::ElementDocument* doc, entt::registry& reg) override {
         Page::onAttach(doc, reg);
-        bind(doc->GetElementById("btn-start"),    [this] { onStartGame_(); });
-        bind(doc->GetElementById("btn-settings"), [this, &reg] { PageSystem::push(reg, PageID::Settings); });
-        bind(doc->GetElementById("btn-quit"),     [this] { onQuit_(); });
+        bind(doc->GetElementById("btn-start"), [this] { onStartGame_(); });
+        bind(doc->GetElementById("btn-quit"),  [this] { onQuit_(); });
     }
 
     void onDetach() override { listeners_.clear(); }
@@ -23,7 +23,6 @@ public:
     void onUpdate(float dt) override {
         if (!doc_) return;
         auto* el = doc_->GetElementById("main-menu-container");
-        if (!el) return;
 
         switch (state_) {
         case State::Hidden:
@@ -69,7 +68,6 @@ private:
     };
 
     void bind(Rml::Element* el, std::function<void()> fn) {
-        if (!el) return;
         auto l = std::make_unique<ClickListener>();
         l->fn = std::move(fn);
         el->AddEventListener(Rml::EventId::Click, l.get());

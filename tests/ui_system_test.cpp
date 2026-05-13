@@ -16,39 +16,50 @@ public:
     void hide() override { isVisible = false; Vapor::Page::hide(); }
 };
 
+// Helper: create a page entity pre-loaded (bypasses document loading in update)
+static entt::entity makePage(entt::registry& reg, UINavigatorComponent& nav,
+                              PageID id, std::shared_ptr<MockPage> page,
+                              const std::string& path = "dummy/path") {
+    auto e = reg.create();
+    reg.emplace<UIDocumentComponent>(e, UIDocumentComponent{
+        .path = path,
+        .doc  = reinterpret_cast<Rml::ElementDocument*>(0xdeadbeef),
+    });
+    reg.emplace<UIPageBehaviorComponent>(e, UIPageBehaviorComponent{ .page = page });
+    nav.pages[id] = e;
+    return e;
+}
+
 // --- Tests ---
 
 TEST_CASE("UI System - Basic Visibility", "[ui]") {
     entt::registry reg;
-    auto entity = reg.create();
-    auto& ui = reg.emplace<UIStateComponent>(entity);
+    auto navEntity = reg.create();
+    auto& nav = reg.emplace<UINavigatorComponent>(navEntity);
 
     auto page = std::make_shared<MockPage>();
-    page->onAttach(reinterpret_cast<Rml::ElementDocument*>(0xdeadbeef), reg);
-    
-    ui.pages[PageID::HUD] = { "dummy/path", page };
+    auto hudEntity = makePage(reg, nav, PageID::HUD, page);
 
     SECTION("Initial state is hidden") {
         CHECK(page->isVisible == false);
-        CHECK(ui.pages[PageID::HUD].shouldBeVisible == false);
+        CHECK(!reg.all_of<UIVisibleTag>(hudEntity));
     }
 
-    SECTION("Showing page updates state and calls page->show()") {
+    SECTION("Showing page sets UIVisibleTag and calls page->show()") {
         PageSystem::show(reg, PageID::HUD);
-        CHECK(ui.pages[PageID::HUD].shouldBeVisible == true);
-        
-        // Use a non-null pointer for RmlUiManager to pass the guard
+        CHECK(reg.all_of<UIVisibleTag>(hudEntity));
+
         PageSystem::update(reg, reinterpret_cast<RmlUiManager*>(0x1), 0.016f);
         CHECK(page->isVisible == true);
     }
 
-    SECTION("Hiding page updates state and calls page->hide()") {
+    SECTION("Hiding page removes UIVisibleTag and calls page->hide()") {
         PageSystem::show(reg, PageID::HUD);
         PageSystem::update(reg, reinterpret_cast<RmlUiManager*>(0x1), 0.016f);
-        
+
         PageSystem::hide(reg, PageID::HUD);
-        CHECK(ui.pages[PageID::HUD].shouldBeVisible == false);
-        
+        CHECK(!reg.all_of<UIVisibleTag>(hudEntity));
+
         PageSystem::update(reg, reinterpret_cast<RmlUiManager*>(0x1), 0.016f);
         CHECK(page->isVisible == false);
     }
@@ -56,22 +67,19 @@ TEST_CASE("UI System - Basic Visibility", "[ui]") {
 
 TEST_CASE("UI System - Menu Stack (Push/Pop)", "[ui]") {
     entt::registry reg;
-    auto entity = reg.create();
-    auto& ui = reg.emplace<UIStateComponent>(entity);
+    auto navEntity = reg.create();
+    auto& nav = reg.emplace<UINavigatorComponent>(navEntity);
 
     auto menuA = std::make_shared<MockPage>();
     auto menuB = std::make_shared<MockPage>();
-    menuA->onAttach(reinterpret_cast<Rml::ElementDocument*>(0x1), reg);
-    menuB->onAttach(reinterpret_cast<Rml::ElementDocument*>(0x2), reg);
-
-    ui.pages[PageID::MainMenu] = { "path/a", menuA };
-    ui.pages[PageID::PauseMenu] = { "path/b", menuB };
+    auto mainMenuEntity = makePage(reg, nav, PageID::MainMenu, menuA, "path/a");
+    auto pauseMenuEntity = makePage(reg, nav, PageID::PauseMenu, menuB, "path/b");
 
     SECTION("Pushing a menu shows it") {
         PageSystem::push(reg, PageID::MainMenu);
-        CHECK(ui.menuStack.size() == 1);
-        CHECK(ui.pages[PageID::MainMenu].shouldBeVisible == true);
-        
+        CHECK(nav.stack.size() == 1);
+        CHECK(reg.all_of<UIVisibleTag>(mainMenuEntity));
+
         PageSystem::update(reg, reinterpret_cast<RmlUiManager*>(0x1), 0.016f);
         CHECK(menuA->isVisible == true);
     }
@@ -79,10 +87,10 @@ TEST_CASE("UI System - Menu Stack (Push/Pop)", "[ui]") {
     SECTION("Pushing a second menu hides the first one") {
         PageSystem::push(reg, PageID::MainMenu);
         PageSystem::push(reg, PageID::PauseMenu);
-        
-        CHECK(ui.menuStack.size() == 2);
-        CHECK(ui.pages[PageID::MainMenu].shouldBeVisible == false);
-        CHECK(ui.pages[PageID::PauseMenu].shouldBeVisible == true);
+
+        CHECK(nav.stack.size() == 2);
+        CHECK(!reg.all_of<UIVisibleTag>(mainMenuEntity));
+        CHECK(reg.all_of<UIVisibleTag>(pauseMenuEntity));
 
         PageSystem::update(reg, reinterpret_cast<RmlUiManager*>(0x1), 0.016f);
         CHECK(menuA->isVisible == false);
@@ -93,16 +101,30 @@ TEST_CASE("UI System - Menu Stack (Push/Pop)", "[ui]") {
         PageSystem::push(reg, PageID::MainMenu);
         PageSystem::push(reg, PageID::PauseMenu);
         PageSystem::update(reg, reinterpret_cast<RmlUiManager*>(0x1), 0.016f);
-        
+
         PageSystem::pop(reg);
-        
-        CHECK(ui.menuStack.size() == 1);
-        CHECK(ui.menuStack.back() == PageID::MainMenu);
-        CHECK(ui.pages[PageID::MainMenu].shouldBeVisible == true);
-        CHECK(ui.pages[PageID::PauseMenu].shouldBeVisible == false);
+
+        CHECK(nav.stack.size() == 1);
+        CHECK(nav.stack.back() == mainMenuEntity);
+        CHECK(reg.all_of<UIVisibleTag>(mainMenuEntity));
+        CHECK(!reg.all_of<UIVisibleTag>(pauseMenuEntity));
 
         PageSystem::update(reg, reinterpret_cast<RmlUiManager*>(0x1), 0.016f);
         CHECK(menuA->isVisible == true);
         CHECK(menuB->isVisible == false);
+    }
+
+    SECTION("isTopOfStack and isStackEmpty helpers") {
+        CHECK(PageSystem::isStackEmpty(reg));
+        CHECK(!PageSystem::isTopOfStack(reg, PageID::MainMenu));
+
+        PageSystem::push(reg, PageID::MainMenu);
+        CHECK(!PageSystem::isStackEmpty(reg));
+        CHECK(PageSystem::isTopOfStack(reg, PageID::MainMenu));
+        CHECK(!PageSystem::isTopOfStack(reg, PageID::PauseMenu));
+
+        PageSystem::push(reg, PageID::PauseMenu);
+        CHECK(PageSystem::isTopOfStack(reg, PageID::PauseMenu));
+        CHECK(!PageSystem::isTopOfStack(reg, PageID::MainMenu));
     }
 }

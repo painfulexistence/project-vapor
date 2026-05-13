@@ -22,112 +22,131 @@ enum class PageID {
     LoadingScreen,
 };
 
-struct UIStateComponent {
-    struct Entry {
-        std::string documentPath;
-        std::shared_ptr<Page> page;
-        bool shouldBeVisible  = false;
-        bool lazyLoad         = false;
-        bool lastSentVisible  = false;
-    };
-    std::unordered_map<PageID, Entry> pages;
-    std::vector<PageID> menuStack;
+// Tag: always-on overlay, not part of the menu stack
+struct UIOverlayTag {};
+
+// Tag: this page entity should currently be displayed
+struct UIVisibleTag {};
+
+// RmlUI document path + loaded state for one page entity
+struct UIDocumentComponent {
+    std::string path;
+    Rml::ElementDocument* doc = nullptr;
+    bool lazyLoad        = false;
+    bool lastSentVisible = false;
+};
+
+// Owns the Page subclass (button binding, fade state machine)
+struct UIPageBehaviorComponent {
+    std::shared_ptr<Page> page;
+};
+
+// Singleton: maps PageIDs to page entities and owns the menu navigation stack
+struct UINavigatorComponent {
+    std::unordered_map<PageID, entt::entity> pages;
+    std::vector<entt::entity> stack;
 };
 
 class PageSystem {
 public:
     static void update(entt::registry& reg, RmlUiManager* rml, float dt) {
         if (!rml) return;
-        auto view = reg.view<UIStateComponent>();
+        auto view = reg.view<UIDocumentComponent, UIPageBehaviorComponent>();
         for (auto entity : view) {
-            auto& ui = view.get<UIStateComponent>(entity);
-            for (auto& [id, entry] : ui.pages) {
-                if (!entry.page) continue;
+            auto& doc      = view.get<UIDocumentComponent>(entity);
+            auto& behavior = view.get<UIPageBehaviorComponent>(entity);
 
-                if (!entry.page->doc_) {
-                    bool shouldLoad = !entry.lazyLoad || entry.shouldBeVisible;
-                    if (shouldLoad) {
-                        auto* doc = rml->LoadDocument(entry.documentPath);
-                        if (!doc) {
-                            fmt::print(stderr, "PageSystem: failed to load '{}'\n", entry.documentPath);
-                            continue;
-                        }
-                        entry.page->onAttach(doc, reg);
+            if (!doc.doc) {
+                bool shouldLoad = !doc.lazyLoad || reg.all_of<UIVisibleTag>(entity);
+                if (shouldLoad) {
+                    auto* d = rml->LoadDocument(doc.path);
+                    if (!d) {
+                        fmt::print(stderr, "PageSystem: failed to load '{}'\n", doc.path);
+                        continue;
                     }
+                    doc.doc = d;
+                    behavior.page->onAttach(d, reg);
                 }
-
-                if (!entry.page->doc_) continue;
-
-                if (entry.shouldBeVisible != entry.lastSentVisible) {
-                    if (entry.shouldBeVisible) entry.page->show();
-                    else                       entry.page->hide();
-                    entry.lastSentVisible = entry.shouldBeVisible;
-                }
-
-                entry.page->onUpdate(dt);
             }
+
+            if (!doc.doc) continue;
+
+            bool visible = reg.all_of<UIVisibleTag>(entity);
+            if (visible != doc.lastSentVisible) {
+                if (visible) behavior.page->show();
+                else         behavior.page->hide();
+                doc.lastSentVisible = visible;
+            }
+
+            behavior.page->onUpdate(dt);
         }
     }
 
-    static void show(entt::registry& reg, PageID id) { setVisible(reg, id, true); }
-    static void hide(entt::registry& reg, PageID id) { setVisible(reg, id, false); }
+    static void show(entt::registry& reg, PageID id) {
+        auto e = findEntity(reg, id);
+        if (e != entt::null) reg.emplace_or_replace<UIVisibleTag>(e);
+    }
+
+    static void hide(entt::registry& reg, PageID id) {
+        auto e = findEntity(reg, id);
+        if (e != entt::null) reg.remove<UIVisibleTag>(e);
+    }
 
     static void push(entt::registry& reg, PageID id) {
-        auto view = reg.view<UIStateComponent>();
-        for (auto entity : view) {
-            auto& ui = view.get<UIStateComponent>(entity);
-            if (!ui.menuStack.empty())
-                setPageVisible(ui, ui.menuStack.back(), false);
-            ui.menuStack.push_back(id);
-            setPageVisible(ui, id, true);
-        }
+        auto& nav = getNavigator(reg);
+        if (!nav.stack.empty())
+            reg.remove<UIVisibleTag>(nav.stack.back());
+        auto it = nav.pages.find(id);
+        if (it == nav.pages.end()) return;
+        nav.stack.push_back(it->second);
+        reg.emplace_or_replace<UIVisibleTag>(it->second);
     }
 
     static void pop(entt::registry& reg) {
-        auto view = reg.view<UIStateComponent>();
-        for (auto entity : view) {
-            auto& ui = view.get<UIStateComponent>(entity);
-            if (ui.menuStack.empty()) return;
-            setPageVisible(ui, ui.menuStack.back(), false);
-            ui.menuStack.pop_back();
-            if (!ui.menuStack.empty())
-                setPageVisible(ui, ui.menuStack.back(), true);
-        }
+        auto& nav = getNavigator(reg);
+        if (nav.stack.empty()) return;
+        reg.remove<UIVisibleTag>(nav.stack.back());
+        nav.stack.pop_back();
+        if (!nav.stack.empty())
+            reg.emplace_or_replace<UIVisibleTag>(nav.stack.back());
     }
 
     static void popAll(entt::registry& reg) {
-        auto view = reg.view<UIStateComponent>();
-        for (auto entity : view) {
-            auto& ui = view.get<UIStateComponent>(entity);
-            for (auto id : ui.menuStack)
-                setPageVisible(ui, id, false);
-            ui.menuStack.clear();
-        }
+        auto& nav = getNavigator(reg);
+        for (auto e : nav.stack)
+            reg.remove<UIVisibleTag>(e);
+        nav.stack.clear();
+    }
+
+    static bool isTopOfStack(entt::registry& reg, PageID id) {
+        auto& nav = getNavigator(reg);
+        if (nav.stack.empty()) return false;
+        auto it = nav.pages.find(id);
+        return it != nav.pages.end() && nav.stack.back() == it->second;
+    }
+
+    static bool isStackEmpty(entt::registry& reg) {
+        return getNavigator(reg).stack.empty();
     }
 
     template<typename T>
     static T* getPage(entt::registry& reg, PageID id) {
-        auto view = reg.view<UIStateComponent>();
-        for (auto entity : view) {
-            auto& ui = view.get<UIStateComponent>(entity);
-            auto it = ui.pages.find(id);
-            if (it != ui.pages.end() && it->second.page)
-                return static_cast<T*>(it->second.page.get());
-        }
-        return nullptr;
+        auto e = findEntity(reg, id);
+        if (e == entt::null) return nullptr;
+        auto* b = reg.try_get<UIPageBehaviorComponent>(e);
+        return b ? static_cast<T*>(b->page.get()) : nullptr;
     }
 
 private:
-    static void setVisible(entt::registry& reg, PageID id, bool visible) {
-        auto view = reg.view<UIStateComponent>();
-        for (auto entity : view)
-            setPageVisible(view.get<UIStateComponent>(entity), id, visible);
+    static UINavigatorComponent& getNavigator(entt::registry& reg) {
+        auto view = reg.view<UINavigatorComponent>();
+        return view.get<UINavigatorComponent>(view.front());
     }
 
-    static void setPageVisible(UIStateComponent& ui, PageID id, bool visible) {
-        auto it = ui.pages.find(id);
-        if (it != ui.pages.end())
-            it->second.shouldBeVisible = visible;
+    static entt::entity findEntity(entt::registry& reg, PageID id) {
+        auto& nav = getNavigator(reg);
+        auto it = nav.pages.find(id);
+        return it != nav.pages.end() ? it->second : entt::null;
     }
 };
 

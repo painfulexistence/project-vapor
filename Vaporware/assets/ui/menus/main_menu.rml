@@ -8,7 +8,6 @@
         <div id="menu-title">Project Vapor</div>
         <div id="menu-buttons">
             <button id="btn-start">Start Game</button>
-            <button id="btn-settings">Settings</button>
             <button id="btn-quit">Quit</button>
         </div>
     </div>
