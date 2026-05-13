@@ -64,6 +64,7 @@ public:
 private:
     struct ClickListener : Rml::EventListener {
         std::function<void()> fn;
+        void ProcessEvent(Rml::Event&) override { fn(); }
     };
 
     void bind(Rml::Element* el, std::function<void()> fn) {
