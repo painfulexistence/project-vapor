@@ -84,6 +84,9 @@ struct TriggerEvent {
     bool isEnter;
 };
 
+class CharacterController;
+class VehicleController;
+
 class Physics3D {
 private:
     static Physics3D* _instance;
@@ -98,6 +101,11 @@ public:
 
     void init(Vapor::TaskScheduler& taskScheduler, std::shared_ptr<Vapor::DebugDraw> debugDraw = nullptr);
     void process(const std::shared_ptr<Scene>& scene, float dt);
+
+    void registerCharacterController(CharacterController* ctrl);
+    void unregisterCharacterController(CharacterController* ctrl);
+    void registerVehicleController(VehicleController* ctrl);
+    void unregisterVehicleController(VehicleController* ctrl);
 
     void setDebugEnabled(bool enabled);
     bool isDebugEnabled() const;
@@ -278,6 +286,9 @@ private:
     bool debugDrawEnabled = false;
 
     JPH::BodyInterface* bodyInterface;
+
+    std::vector<CharacterController*> characterControllers;
+    std::vector<VehicleController*>   vehicleControllers;
 
     float timeAccum;
     Uint32 step;
