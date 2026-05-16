@@ -32,6 +32,7 @@
 #include <Jolt/RegisterTypes.h>
 #include <SDL3/SDL_stdinc.h>
 #include <fmt/core.h>
+#include <algorithm>
 #include <thread>
 #include <mutex>
 
@@ -312,110 +313,55 @@ void Physics3D::deinit() {
 
     sPhysicsInstances--;
 
+    characterControllers.clear();
+    vehicleControllers.clear();
+
     isInitialized = false;
 }
 
-void Physics3D::process(const std::shared_ptr<Scene>& scene, float dt) {
-    // sync physics world with scene data (Scene → Physics)
-    // Collect nodes that need syncing first to avoid lock conflicts
-    struct SyncData {
-        JPH::BodyID bodyID;
-        glm::vec3 position;
-        glm::quat rotation;
-    };
-    std::vector<SyncData> nodesToSync;
+void Physics3D::registerCharacterController(CharacterController* ctrl) {
+    characterControllers.push_back(ctrl);
+}
 
-    // First pass: collect motion types and positions/rotations
-    for (auto& node : scene->nodes) {
-        if (node->body.valid()) {
-            auto bodyID = bodies[node->body.rid];
-            JPH::BodyLockRead lock(physicsSystem->GetBodyLockInterface(), bodyID);
-            if (!lock.Succeeded()) {
-                continue;
-            }
-            const JPH::Body& body = lock.GetBody();
-            auto motionType = body.GetMotionType();
+void Physics3D::unregisterCharacterController(CharacterController* ctrl) {
+    characterControllers.erase(
+        std::remove(characterControllers.begin(), characterControllers.end(), ctrl),
+        characterControllers.end()
+    );
+}
 
-            // Only sync Kinematic and Static bodies from scene to physics
-            if (motionType != JPH::EMotionType::Dynamic) {
-                nodesToSync.push_back({ bodyID, node->getWorldPosition(), node->getWorldRotation() });
-            }
-        }
-    }
+void Physics3D::registerVehicleController(VehicleController* ctrl) {
+    vehicleControllers.push_back(ctrl);
+}
 
-    // Second pass: sync positions and rotations (BodyInterface handles locking)
-    for (const auto& syncData : nodesToSync) {
-        bodyInterface->SetPosition(
-            syncData.bodyID,
-            JPH::RVec3(syncData.position.x, syncData.position.y, syncData.position.z),
-            JPH::EActivation::DontActivate
-        );
-        bodyInterface->SetRotation(
-            syncData.bodyID,
-            JPH::Quat(syncData.rotation.x, syncData.rotation.y, syncData.rotation.z, syncData.rotation.w),
-            JPH::EActivation::DontActivate
-        );
-    }
+void Physics3D::unregisterVehicleController(VehicleController* ctrl) {
+    vehicleControllers.erase(
+        std::remove(vehicleControllers.begin(), vehicleControllers.end(), ctrl),
+        vehicleControllers.end()
+    );
+}
 
-    // TODO: fix trace trap
-    // Apply fluid forces before physics update
-    // for (auto& fluidVolume : scene->fluidVolumes) {
-    //     if (fluidVolume) {
-    //         fluidVolume->applyForcesToBodies(dt);
-    //     }
-    // }
-
-    // update physics world
+void Physics3D::process(float dt) {
     timeAccum += dt;
 
-    // Store previous positions BEFORE any physics updates (for interpolation)
-    // This ensures that even if we do multiple physics steps (catch-up),
-    // we interpolate from the position at the start of this frame
-    std::function<void(const std::shared_ptr<Node>&)> storePreviousPositions =
-        [&](const std::shared_ptr<Node>& node) -> void {
-        if (node->characterController) {
-            node->characterController->storePreviousPosition();
-        }
-        for (const auto& child : node->children) {
-            storePreviousPositions(child);
-        }
-    };
-    for (auto& node : scene->nodes) {
-        storePreviousPositions(node);
+    // Store previous positions for interpolation (CharacterController only)
+    for (auto* ctrl : characterControllers) {
+        ctrl->storePreviousPosition();
     }
 
     while (timeAccum >= FIXED_TIME_STEP) {
         ++step;
 
-        // Update vehicle controllers
-        std::function<void(const std::shared_ptr<Node>&)> updateVehicleControllers =
-            [&](const std::shared_ptr<Node>& node) -> void {
-            if (node->vehicleController) {
-                node->vehicleController->update(FIXED_TIME_STEP);
-            }
-            for (const auto& child : node->children) {
-                updateVehicleControllers(child);
-            }
-        };
-        for (auto& node : scene->nodes) {
-            updateVehicleControllers(node);
+        // Update vehicle controllers BEFORE physics step (Jolt requirement)
+        for (auto* ctrl : vehicleControllers) {
+            ctrl->update(FIXED_TIME_STEP);
         }
 
-        // Update character controllers
-        std::function<void(const std::shared_ptr<Node>&)> updateCharacterControllers =
-            [&](const std::shared_ptr<Node>& node) -> void {
-            if (node->characterController) {
-                node->characterController->update(FIXED_TIME_STEP, getGravity());
-            }
-            for (const auto& child : node->children) {
-                updateCharacterControllers(child);
-            }
-        };
-        for (auto& node : scene->nodes) {
-            updateCharacterControllers(node);
+        // Update character controllers BEFORE physics step (Jolt requirement)
+        for (auto* ctrl : characterControllers) {
+            ctrl->update(FIXED_TIME_STEP, getGravity());
         }
 
-        // Update physics (after controller updates)
         physicsSystem->Update(FIXED_TIME_STEP, 1, tempAllocator.get(), jobSystem.get());
 
         timeAccum -= FIXED_TIME_STEP;
@@ -423,73 +369,6 @@ void Physics3D::process(const std::shared_ptr<Scene>& scene, float dt) {
 
     if (debugDrawEnabled && debugRenderer) {
         debugRenderer->update();
-    }
-
-    // sync scene data with physics world (Physics → Scene)
-    // Use explicit locks to avoid lock conflicts when calling multiple BodyInterface methods
-    for (auto& node : scene->nodes) {
-        if (node->body.valid()) {
-            auto bodyID = bodies[node->body.rid];
-
-            // Use BodyLockRead to safely read body properties
-            JPH::BodyLockRead lock(physicsSystem->GetBodyLockInterface(), bodyID);
-            if (!lock.Succeeded()) {
-                continue;// Body was removed, skip it
-            }
-
-            const JPH::Body& body = lock.GetBody();
-            auto motionType = body.GetMotionType();
-
-            // Only sync Dynamic bodies from physics to scene
-            if (motionType == JPH::EMotionType::Dynamic) {
-                // Sync position and rotation using the locked body
-                auto pos = body.GetPosition();
-                node->setPosition(glm::vec3(pos.GetX(), pos.GetY(), pos.GetZ()));
-
-                auto rot = body.GetRotation();
-                node->setLocalRotation(glm::quat(rot.GetW(), rot.GetX(), rot.GetY(), rot.GetZ()));
-
-                node->isTransformDirty = true;
-            }
-        }
-    }
-
-    // Sync character controller positions back to nodes (with interpolation)
-    // Calculate interpolation alpha: how far we are between physics steps
-    float alpha = timeAccum / FIXED_TIME_STEP;
-
-    std::function<void(const std::shared_ptr<Node>&)> syncCharacterControllers =
-        [&](const std::shared_ptr<Node>& node) -> void {
-        if (node->characterController) {
-            // Use interpolated position for smooth rendering
-            glm::vec3 charPos = node->characterController->getInterpolatedPosition(alpha);
-            node->setPosition(charPos);
-            node->isTransformDirty = true;
-        }
-        for (const auto& child : node->children) {
-            syncCharacterControllers(child);
-        }
-    };
-    for (auto& node : scene->nodes) {
-        syncCharacterControllers(node);
-    }
-
-    // Sync vehicle controller positions/rotations back to nodes
-    std::function<void(const std::shared_ptr<Node>&)> syncVehicleControllers =
-        [&](const std::shared_ptr<Node>& node) -> void {
-        if (node->vehicleController) {
-            glm::vec3 vehiclePos = node->vehicleController->getPosition();
-            glm::quat vehicleRot = node->vehicleController->getRotation();
-            node->setPosition(vehiclePos);
-            node->setLocalRotation(vehicleRot);
-            node->isTransformDirty = true;
-        }
-        for (const auto& child : node->children) {
-            syncVehicleControllers(child);
-        }
-    };
-    for (auto& node : scene->nodes) {
-        syncVehicleControllers(node);
     }
 
     // Drain raw contact events from listener and convert to ECS BodyHandle events
@@ -516,11 +395,6 @@ void Physics3D::process(const std::shared_ptr<Scene>& scene, float dt) {
         } else {
             pendingCollisionEvents.push_back({ ha, hb, raw.isEnter });
         }
-    }
-
-    // draw debug UI
-    if (isDebugUIEnabled) {
-        // TODO: physics debug UI
     }
 }
 

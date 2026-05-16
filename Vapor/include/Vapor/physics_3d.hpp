@@ -100,7 +100,7 @@ public:
     ~Physics3D();
 
     void init(Vapor::TaskScheduler& taskScheduler, std::shared_ptr<Vapor::DebugDraw> debugDraw = nullptr);
-    void process(const std::shared_ptr<Scene>& scene, float dt);
+    void process(float dt);
 
     void registerCharacterController(CharacterController* ctrl);
     void unregisterCharacterController(CharacterController* ctrl);
