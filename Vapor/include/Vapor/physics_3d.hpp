@@ -1,5 +1,6 @@
 #pragma once
 #include <SDL3/SDL_stdinc.h>
+#include <entt/entt.hpp>
 #include <glm/gtc/quaternion.hpp>
 #include <glm/vec3.hpp>
 #include <memory>
@@ -101,6 +102,8 @@ public:
 
     void init(Vapor::TaskScheduler& taskScheduler, std::shared_ptr<Vapor::DebugDraw> debugDraw = nullptr);
     void process(float dt);
+    void attach(entt::registry& reg);
+    void process(entt::registry& reg, float dt);
 
     void registerCharacterController(CharacterController* ctrl);
     void unregisterCharacterController(CharacterController* ctrl);

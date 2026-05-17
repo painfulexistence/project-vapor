@@ -1,5 +1,7 @@
 #pragma once
+#include "character_controller.hpp"
 #include "physics_3d.hpp"
+#include "vehicle_controller.hpp"
 #include <entt/entt.hpp>
 #include <glm/glm.hpp>
 #include <glm/gtc/quaternion.hpp>
@@ -90,6 +92,28 @@ namespace Vapor {
         entt::entity holder = entt::null;
         float originalGravityFactor = 1.0f;
         float holdDistance = 3.0f;
+    };
+
+    // ============================================================================
+    // Character Controller (ECS-owned)
+    // ============================================================================
+    struct CharacterBodyComponent {
+        CharacterControllerSettings settings;
+        std::unique_ptr<CharacterController> controller;
+        glm::vec3 desiredVelocity = glm::vec3(0.0f);
+        bool jumpRequested = false;
+    };
+
+    // ============================================================================
+    // Vehicle Controller (ECS-owned)
+    // ============================================================================
+    struct VehicleBodyComponent {
+        VehicleSettings settings;
+        std::unique_ptr<VehicleController> controller;
+        float throttle  = 0.0f;
+        float steering  = 0.0f;
+        float brake     = 0.0f;
+        bool  handbrake = false;
     };
 
 }// namespace Vapor

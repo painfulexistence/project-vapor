@@ -1,4 +1,5 @@
 #include "physics_3d.hpp"
+#include "Vapor/components.hpp"
 #include "character_controller.hpp"
 #include "fluid_volume.hpp"
 #include "jolt_enki_job_system.hpp"
@@ -339,6 +340,155 @@ void Physics3D::unregisterVehicleController(VehicleController* ctrl) {
         std::remove(vehicleControllers.begin(), vehicleControllers.end(), ctrl),
         vehicleControllers.end()
     );
+}
+
+void Physics3D::attach(entt::registry& reg) {
+    reg.on_destroy<Vapor::CharacterBodyComponent>().connect<[](entt::registry& r, entt::entity e) {
+        auto& comp = r.get<Vapor::CharacterBodyComponent>(e);
+        if (comp.controller) {
+            auto* self = Physics3D::Get();
+            if (self) {
+                auto& v = self->characterControllers;
+                v.erase(std::remove(v.begin(), v.end(), comp.controller.get()), v.end());
+            }
+        }
+    }>();
+
+    reg.on_destroy<Vapor::VehicleBodyComponent>().connect<[](entt::registry& r, entt::entity e) {
+        auto& comp = r.get<Vapor::VehicleBodyComponent>(e);
+        if (comp.controller) {
+            auto* self = Physics3D::Get();
+            if (self) {
+                auto& v = self->vehicleControllers;
+                v.erase(std::remove(v.begin(), v.end(), comp.controller.get()), v.end());
+            }
+        }
+    }>();
+}
+
+void Physics3D::process(entt::registry& reg, float dt) {
+    if (!isInitialized) return;
+
+    // 1. Instantiate controllers for newly added components (controller == nullptr)
+    {
+        auto charView = reg.view<Vapor::CharacterBodyComponent, Vapor::TransformComponent>();
+        for (auto entity : charView) {
+            auto& comp = charView.get<Vapor::CharacterBodyComponent>(entity);
+            if (!comp.controller) {
+                auto& t = charView.get<Vapor::TransformComponent>(entity);
+                comp.controller = std::make_unique<CharacterController>(this, comp.settings);
+                comp.controller->warp(t.position);
+                characterControllers.push_back(comp.controller.get());
+            }
+        }
+        auto vehView = reg.view<Vapor::VehicleBodyComponent, Vapor::TransformComponent>();
+        for (auto entity : vehView) {
+            auto& comp = vehView.get<Vapor::VehicleBodyComponent>(entity);
+            if (!comp.controller) {
+                auto& t = vehView.get<Vapor::TransformComponent>(entity);
+                comp.controller = std::make_unique<VehicleController>(
+                    this, comp.settings, t.position, t.rotation
+                );
+                vehicleControllers.push_back(comp.controller.get());
+            }
+        }
+    }
+
+    // 2. Apply input to vehicle controllers
+    {
+        auto view = reg.view<Vapor::VehicleBodyComponent>();
+        for (auto entity : view) {
+            auto& comp = view.get<Vapor::VehicleBodyComponent>(entity);
+            if (!comp.controller) continue;
+            comp.controller->setThrottle(comp.throttle);
+            comp.controller->setSteering(comp.steering);
+            comp.controller->setBrake(comp.brake);
+            comp.controller->setHandbrake(comp.handbrake);
+        }
+    }
+
+    // 3. Apply input to character controllers
+    {
+        auto view = reg.view<Vapor::CharacterBodyComponent>();
+        for (auto entity : view) {
+            auto& comp = view.get<Vapor::CharacterBodyComponent>(entity);
+            if (!comp.controller) continue;
+            comp.controller->move(comp.desiredVelocity, dt);
+            if (comp.jumpRequested) {
+                comp.controller->jump(5.0f);
+                comp.jumpRequested = false;
+            }
+        }
+    }
+
+    // 4. Fixed-step physics
+    for (auto* ctrl : characterControllers) {
+        ctrl->storePreviousPosition();
+    }
+
+    timeAccum += dt;
+    while (timeAccum >= FIXED_TIME_STEP) {
+        ++step;
+        for (auto* ctrl : vehicleControllers) ctrl->update(FIXED_TIME_STEP);
+        for (auto* ctrl : characterControllers) ctrl->update(FIXED_TIME_STEP, getGravity());
+        physicsSystem->Update(FIXED_TIME_STEP, 1, tempAllocator.get(), jobSystem.get());
+        timeAccum -= FIXED_TIME_STEP;
+    }
+
+    if (debugDrawEnabled && debugRenderer) {
+        debugRenderer->update();
+    }
+
+    // 5. Drain collision/trigger events
+    auto* listener = static_cast<MyContactListener*>(contactListener.get());
+    std::vector<MyContactListener::RawCollisionEvent> rawEvents;
+    {
+        std::lock_guard<std::mutex> lock(listener->eventMutex);
+        rawEvents.swap(listener->rawEvents);
+    }
+
+    pendingCollisionEvents.clear();
+    pendingTriggerEvents.clear();
+
+    for (auto& raw : rawEvents) {
+        Uint32 ridA = UINT32_MAX, ridB = UINT32_MAX;
+        auto itA = bodyIDToRid.find(raw.id1.GetIndexAndSequenceNumber());
+        auto itB = bodyIDToRid.find(raw.id2.GetIndexAndSequenceNumber());
+        if (itA != bodyIDToRid.end()) ridA = itA->second;
+        if (itB != bodyIDToRid.end()) ridB = itB->second;
+        BodyHandle ha{ ridA }, hb{ ridB };
+
+        if (raw.isTrigger) {
+            pendingTriggerEvents.push_back({ ha, hb, raw.isEnter });
+        } else {
+            pendingCollisionEvents.push_back({ ha, hb, raw.isEnter });
+        }
+    }
+
+    // 6. Sync character positions back to TransformComponent
+    {
+        auto view = reg.view<Vapor::CharacterBodyComponent, Vapor::TransformComponent>();
+        for (auto entity : view) {
+            auto& comp = view.get<Vapor::CharacterBodyComponent>(entity);
+            if (!comp.controller) continue;
+            auto& t = view.get<Vapor::TransformComponent>(entity);
+            t.position = comp.controller->getPosition();
+            t.isDirty  = true;
+        }
+    }
+
+    // 7. Sync vehicle positions/rotations back to TransformComponent
+    {
+        auto view = reg.view<Vapor::VehicleBodyComponent, Vapor::TransformComponent>();
+        for (auto entity : view) {
+            auto& comp = view.get<Vapor::VehicleBodyComponent>(entity);
+            if (!comp.controller) continue;
+            auto& t = view.get<Vapor::TransformComponent>(entity);
+            t.position = comp.controller->getPosition();
+            t.rotation = comp.controller->getRotation();
+            t.isDirty  = true;
+        }
+    }
 }
 
 void Physics3D::process(float dt) {
