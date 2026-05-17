@@ -467,6 +467,7 @@ protected:
     std::vector<InstanceData> instances;
     std::vector<InstanceData> pendingEcsInstances;
     std::unordered_map<std::shared_ptr<Vapor::Material>, std::vector<MeshDraw>> pendingEcsBatches;
+    std::vector<MTL::AccelerationStructureInstanceDescriptor> pendingEcsAccelInstances;
     std::vector<MTL::AccelerationStructureInstanceDescriptor> accelInstances;
     std::unordered_map<std::shared_ptr<Vapor::Material>, std::vector<MeshDraw>> instanceBatches;
 

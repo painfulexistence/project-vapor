@@ -477,10 +477,9 @@ public:
             );
 
             for (const auto& draw : draws) {
-                if (!r.currentCamera->isVisible(draw.mesh->getWorldBoundingSphere())) {
+                if (!r.currentCamera->isVisible(r.instances[draw.instanceIndex].boundingSphere)) {
                     continue;
                 }
-
                 encoder->setVertexBytes(&draw.instanceIndex, sizeof(Uint32), 4);
                 encoder->drawIndexedPrimitives(
                     MTL::PrimitiveType::PrimitiveTypeTriangle,
@@ -994,11 +993,10 @@ public:
             encoder->setFragmentTexture(r.brdfLUT.get(), 10);
 
             for (const auto& draw : draws) {
-                if (!r.currentCamera->isVisible(draw.mesh->getWorldBoundingSphere())) {
+                if (!r.currentCamera->isVisible(r.instances[draw.instanceIndex].boundingSphere)) {
                     r.culledInstanceCount++;
                     continue;
                 }
-
                 r.currentInstanceCount++;
                 encoder->setVertexBytes(&draw.instanceIndex, sizeof(Uint32), 4);
                 encoder->drawIndexedPrimitives(
@@ -4372,10 +4370,13 @@ auto Renderer_Metal::draw(std::shared_ptr<Scene> scene, Camera& camera) -> void 
         updateNode(node);
     }
 
-    // ECS draw path: override Node-derived instances and batches with ECS data
+    // ECS draw path: override Node-derived instances, batches, and accel instances with ECS data
     if (!pendingEcsInstances.empty()) {
         instances = pendingEcsInstances;
         instanceBatches = pendingEcsBatches;
+        if (!pendingEcsAccelInstances.empty()) {
+            accelInstances = pendingEcsAccelInstances;
+        }
     }
 
     if (instances.size() > MAX_INSTANCES) {// TODO: reallocate when needed
@@ -5801,15 +5802,34 @@ void Renderer_Metal::draw(entt::registry& registry, std::shared_ptr<Scene> scene
     // so store them here and inject after Node traversal via pendingEcsInstances.
     pendingEcsInstances.clear();
     pendingEcsBatches.clear();
+    pendingEcsAccelInstances.clear();
     auto view = registry.view<::Vapor::TransformComponent, ::Vapor::MeshRendererComponent>();
     for (auto entity : view) {
         auto& transform = view.get<::Vapor::TransformComponent>(entity);
         auto& meshRenderer = view.get<::Vapor::MeshRendererComponent>(entity);
         if (!meshRenderer.visible) continue;
         for (auto& mesh : meshRenderer.meshes) {
-            uint32_t instanceIdx = static_cast<uint32_t>(pendingEcsInstances.size());
+            // Compute world AABB from local AABB and current ECS worldTransform.
+            const glm::mat4& worldMat = transform.worldTransform;
+            const glm::vec3& lMin = mesh->localAABBMin;
+            const glm::vec3& lMax = mesh->localAABBMax;
+            glm::vec3 wMin(FLT_MAX), wMax(-FLT_MAX);
+            for (int cx = 0; cx < 2; ++cx)
+            for (int cy = 0; cy < 2; ++cy)
+            for (int cz = 0; cz < 2; ++cz) {
+                glm::vec3 corner(cx ? lMax.x : lMin.x, cy ? lMax.y : lMin.y, cz ? lMax.z : lMin.z);
+                glm::vec3 w = glm::vec3(worldMat * glm::vec4(corner, 1.0f));
+                wMin = glm::min(wMin, w);
+                wMax = glm::max(wMax, w);
+            }
+            mesh->worldAABBMin = wMin;
+            mesh->worldAABBMax = wMax;
+
+            glm::vec3 bsCenter = (wMin + wMax) * 0.5f;
+            float bsRadius = glm::length(wMax - bsCenter);
+            auto instanceIdx = static_cast<uint32_t>(pendingEcsInstances.size());
             pendingEcsInstances.push_back({
-                .model = transform.worldTransform,
+                .model = worldMat,
                 .color = glm::vec4(1.0f),
                 .vertexOffset = mesh->vertexOffset,
                 .indexOffset = mesh->indexOffset,
@@ -5817,15 +5837,27 @@ void Renderer_Metal::draw(entt::registry& registry, std::shared_ptr<Scene> scene
                 .indexCount = mesh->indexCount,
                 .materialID = mesh->materialID,
                 .primitiveMode = mesh->primitiveMode,
-                .AABBMin = mesh->worldAABBMin,
-                .AABBMax = mesh->worldAABBMax,
+                .AABBMin = wMin,
+                .AABBMax = wMax,
+                .boundingSphere = glm::vec4(bsCenter, bsRadius),
             });
             if (mesh->material) {
                 pendingEcsBatches[mesh->material].push_back(MeshDraw{ mesh, instanceIdx });
+            }
+
+            if (m_supportsRaytracing) {
+                MTL::AccelerationStructureInstanceDescriptor accelDesc;
+                for (int i = 0; i < 4; ++i)
+                    for (int j = 0; j < 3; ++j)
+                        accelDesc.transformationMatrix.columns[i][j] = worldMat[i][j];
+                accelDesc.accelerationStructureIndex = mesh->instanceID;
+                accelDesc.mask = 0xFF;
+                pendingEcsAccelInstances.push_back(accelDesc);
             }
         }
     }
     draw(scene, camera);
     pendingEcsInstances.clear();
     pendingEcsBatches.clear();
+    pendingEcsAccelInstances.clear();
 }
