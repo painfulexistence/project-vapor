@@ -151,24 +151,6 @@ extern "C" void Vapor_LoadScene(const char* path) {
     // TODO: scene loading API not yet designed
 }
 
-// Vapor has no "UI mode" vs "scene mode" switch; rendering is controlled
-// per-pass. If Virga needs to suppress the 3-D pass it should do so by
-// not submitting draw calls rather than by toggling a global flag here.
-// This entry point exists solely to satisfy the ABI and will not be
-// implemented in Vapor. The API should be removed from VirgaNativeAPI.h
-// in a future revision.
-extern "C" void Vapor_EnableUIMode(int enable) {
-    (void)enable;
-}
-
-// Terrain generation is game-content logic, not engine infrastructure.
-// This entry point exists solely to satisfy the ABI and will not be
-// implemented in Vapor. The API should be removed from VirgaNativeAPI.h
-// in a future revision.
-extern "C" void Vapor_UpdateTerrainSeed(int seed) {
-    (void)seed;
-}
-
 // ── RmlUI ───────────────────────────────────────────────────────────────────────
 
 extern "C" void Vapor_Rml_LoadDocument(const char* path) {

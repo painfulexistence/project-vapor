@@ -43,11 +43,9 @@ VIRGA_API void Vapor_ResizeView(int width, int height);
 VIRGA_API void Vapor_InjectMouseEvent(double x, double y, int button);
 VIRGA_API void Vapor_InjectKeyEvent(int sdlScancode, int pressed);
 
-/* ── Scene / mode ──────────────────────────────────────────────────────────────── */
+/* ── Scene ─────────────────────────────────────────────────────────────────────── */
 
 VIRGA_API void Vapor_LoadScene(const char* path);
-VIRGA_API void Vapor_EnableUIMode(int enable);
-VIRGA_API void Vapor_UpdateTerrainSeed(int seed);
 
 /* ── RmlUI ─────────────────────────────────────────────────────────────────────── */
 
