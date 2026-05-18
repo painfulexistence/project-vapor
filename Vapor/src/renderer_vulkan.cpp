@@ -1292,18 +1292,18 @@ auto Renderer_Vulkan::createResources() -> void {
 
     // Create pipelines
     renderPipeline = createRenderPipeline(
-        std::string("assets/shaders/TBN.vert.spv"), std::string("assets/shaders/PBRNormalMapped.frag.spv")
+        std::string("shaders/TBN.vert.spv"), std::string("shaders/PBRNormalMapped.frag.spv")
     );
     prePassPipeline = createPrePassPipeline(
-        std::string("assets/shaders/PrePass.vert.spv"), std::string("assets/shaders/PrePass.frag.spv")
+        std::string("shaders/PrePass.vert.spv"), std::string("shaders/PrePass.frag.spv")
     );
     postProcessPipeline = createPostProcessPipeline(
-        std::string("assets/shaders/FullScreen.vert.spv"), std::string("assets/shaders/PostProcess.frag.spv")
+        std::string("shaders/FullScreen.vert.spv"), std::string("shaders/PostProcess.frag.spv")
     );
 
     createUiResources();
     tileCullingPipeline =
-        createComputePipeline(std::string("assets/shaders/TileLightCull.comp.spv"), tileCullingPipelineLayout);
+        createComputePipeline(std::string("shaders/TileLightCull.comp.spv"), tileCullingPipelineLayout);
 
     // Create uniform buffers
     cameraDataBuffers.resize(MAX_FRAMES_IN_FLIGHT);
@@ -1347,11 +1347,11 @@ auto Renderer_Vulkan::createResources() -> void {
     }
 
     // Create textures
-    defaultAlbedoTexture = createTexture(AssetManager::loadImage("assets/textures/default_albedo.png"));
-    defaultNormalTexture = createTexture(AssetManager::loadImage("assets/textures/default_norm.png"));
-    defaultORMTexture = createTexture(AssetManager::loadImage("assets/textures/default_orm.png"));
-    defaultEmissiveTexture = createTexture(AssetManager::loadImage("assets/textures/default_emissive.png"));
-    // defaultDisplacementTexture = createTexture(AssetManager::loadImage("assets/textures/default_disp.png"));
+    defaultAlbedoTexture = createTexture(AssetManager::loadImage("textures/default_albedo.png"));
+    defaultNormalTexture = createTexture(AssetManager::loadImage("textures/default_norm.png"));
+    defaultORMTexture = createTexture(AssetManager::loadImage("textures/default_orm.png"));
+    defaultEmissiveTexture = createTexture(AssetManager::loadImage("textures/default_emissive.png"));
+    // defaultDisplacementTexture = createTexture(AssetManager::loadImage("textures/default_disp.png"));
 
     // Create samplers
     VkSamplerCreateInfo samplerInfo = {};
@@ -3209,14 +3209,14 @@ void Renderer_Vulkan::initParticleSystem() {
 
     // Create compute pipelines
     particleForcePipeline =
-        createComputePipeline(std::string("assets/shaders/ParticleForce.comp.spv"), particleComputePipelineLayout);
+        createComputePipeline(std::string("shaders/ParticleForce.comp.spv"), particleComputePipelineLayout);
 
     particleIntegratePipeline =
-        createComputePipeline(std::string("assets/shaders/ParticleIntegrate.comp.spv"), particleComputePipelineLayout);
+        createComputePipeline(std::string("shaders/ParticleIntegrate.comp.spv"), particleComputePipelineLayout);
 
     // Create particle render pipeline
-    auto vertShaderCode = readFile("assets/shaders/Particle.vert.spv");
-    auto fragShaderCode = readFile("assets/shaders/Particle.frag.spv");
+    auto vertShaderCode = readFile("shaders/Particle.vert.spv");
+    auto fragShaderCode = readFile("shaders/Particle.frag.spv");
     auto vertShaderModule = createShaderModule(vertShaderCode);
     auto fragShaderModule = createShaderModule(fragShaderCode);
 
@@ -3696,7 +3696,7 @@ void Renderer_Vulkan::createUiResources() {
         throw std::runtime_error("Failed to create UI pipeline layout!");
     }
 
-    uiPipeline = createUiPipeline("assets/shaders/RmlUi.vert.spv", "assets/shaders/RmlUi.frag.spv");
+    uiPipeline = createUiPipeline("shaders/RmlUi.vert.spv", "shaders/RmlUi.frag.spv");
 }
 
 VkPipeline Renderer_Vulkan::createUiPipeline(const std::string& vertShader, const std::string& fragShader) {

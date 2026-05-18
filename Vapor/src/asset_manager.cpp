@@ -1,6 +1,6 @@
 #include "asset_manager.hpp"
 
-#include <SDL3/SDL_filesystem.h>
+#include "Vapor/file_system.hpp"
 #include <SDL3/SDL_stdinc.h>
 #include <filesystem>
 #include <fmt/core.h>
@@ -26,8 +26,9 @@
 #include "graphics.hpp"
 
 auto AssetManager::loadImage(const std::string& filename) -> std::shared_ptr<Image> {
+    std::string fullPath = FileSystem::instance().resolvePathOrThrow(filename);
     int width, height, numChannels;
-    if (!stbi_info((SDL_GetBasePath() + filename).c_str(), &width, &height, &numChannels)) {
+    if (!stbi_info(fullPath.c_str(), &width, &height, &numChannels)) {
         throw std::runtime_error(fmt::format("Failed to load image at {}!\n", filename));
     }
     int desiredChannels = 0;
@@ -45,7 +46,7 @@ auto AssetManager::loadImage(const std::string& filename) -> std::shared_ptr<Ima
         throw std::runtime_error(fmt::format("Unknown texture format at {}\n", filename));
         break;
     }
-    uint8_t* data = stbi_load((SDL_GetBasePath() + filename).c_str(), &width, &height, &numChannels, desiredChannels);
+    uint8_t* data = stbi_load(fullPath.c_str(), &width, &height, &numChannels, desiredChannels);
     if (data) {
         auto image = std::make_shared<Image>(Image{
             .uri = filename,
@@ -76,8 +77,8 @@ auto AssetManager::loadOBJ(const std::string& filename, const std::string& mtl_b
             &shapes,
             &materials,
             &err,
-            (SDL_GetBasePath() + filename).c_str(),
-            mtl_basedir.empty() ? nullptr : (SDL_GetBasePath() + mtl_basedir).c_str()
+            FileSystem::instance().resolvePathOrThrow(filename).c_str(),
+            mtl_basedir.empty() ? nullptr : FileSystem::instance().resolvePathOrThrow(mtl_basedir).c_str()
         )) {
         throw std::runtime_error(fmt::format("Failed to load model: {}", err));
     }
@@ -141,7 +142,12 @@ auto AssetManager::loadOBJ(const std::string& filename, const std::string& mtl_b
 }
 
 auto AssetManager::loadGLTF(const std::string& filename) -> std::shared_ptr<Scene> {
-    std::filesystem::path filePath(SDL_GetBasePath() + filename);
+    auto resolved = FileSystem::instance().resolvePath(filename);
+    if (!resolved) {
+        fmt::print("GLTF not found in any search path: {}\n", filename);
+        return nullptr;
+    }
+    std::filesystem::path filePath(*resolved);
     std::filesystem::path scenePath(filePath);// make a copy
     if (std::filesystem::exists(scenePath.replace_extension(".vscene"))) {
         return AssetSerializer::deserializeScene(scenePath.string());
@@ -469,7 +475,12 @@ auto AssetManager::loadGLTF(const std::string& filename) -> std::shared_ptr<Scen
 }
 
 auto AssetManager::loadGLTFOptimized(const std::string& filename) -> std::shared_ptr<Scene> {
-    std::filesystem::path filePath(SDL_GetBasePath() + filename);
+    auto resolved = FileSystem::instance().resolvePath(filename);
+    if (!resolved) {
+        fmt::print("GLTF not found in any search path: {}\n", filename);
+        return nullptr;
+    }
+    std::filesystem::path filePath(*resolved);
     std::filesystem::path scenePath(filePath);// make a copy
     if (std::filesystem::exists(scenePath.replace_extension(".vscene_optimized"))) {
         return AssetSerializer::deserializeScene(scenePath.string());

@@ -1,4 +1,5 @@
 #include "engine_core.hpp"
+#include "Vapor/file_system.hpp"
 #include "rmlui_manager.hpp"
 #include <fmt/core.h>
 #include <fmt/format.h>
@@ -44,6 +45,9 @@ namespace Vapor {
         _numThreads = numThreads;
 
         fmt::print("Initializing EngineCore with {} threads\n", _numThreads);
+
+        // Initialize file system search paths before any asset loading
+        FileSystem::instance().initialize();
 
         // Initialize task scheduler
         _taskScheduler = std::make_unique<TaskScheduler>();

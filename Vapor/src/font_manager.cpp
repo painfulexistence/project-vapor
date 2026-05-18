@@ -1,7 +1,7 @@
 #define STB_TRUETYPE_IMPLEMENTATION
 #include "stb/stb_truetype.h"
 
-#include "SDL3/SDL_filesystem.h"
+#include "Vapor/file_system.hpp"
 #include "Vapor/font_manager.hpp"
 #include <cmath>
 #include <fmt/format.h>
@@ -12,7 +12,12 @@ void FontManager::initialize(MTL::Device* device) {
 }
 
 auto FontManager::loadFont(const std::string& filename, float baseSize, int firstChar, int numChars) -> FontHandle {
-    std::string path = SDL_GetBasePath() + filename;
+    auto resolved = FileSystem::instance().resolvePath(filename);
+    if (!resolved) {
+        fmt::print(stderr, "[FontManager] Font not found in any search path: {}\n", filename);
+        return FontHandle{};
+    }
+    std::string path = *resolved;
     std::ifstream file(path, std::ios::binary | std::ios::ate);
     if (!file.is_open()) {
         fmt::print(stderr, "[FontManager] Failed to open font file: {}\n", path);
