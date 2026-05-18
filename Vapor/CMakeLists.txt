@@ -173,3 +173,5 @@ install(DIRECTORY assets/ DESTINATION "${CMAKE_INSTALL_DATADIR}/vapor/assets")
 install(DIRECTORY "${CMAKE_CURRENT_BINARY_DIR}/assets/shaders"
     DESTINATION "${CMAKE_INSTALL_DATADIR}/vapor/assets"
 )
+
+add_subdirectory(capi)
