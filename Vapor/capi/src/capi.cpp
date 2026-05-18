@@ -6,6 +6,8 @@
 #include <RmlUi/Core/Context.h>
 #include <RmlUi/Core/Element.h>
 #include <RmlUi/Core/ElementDocument.h>
+#include <RmlUi/Core/PropertiesIteratorView.h>
+#include <RmlUi/Core/StyleSheetSpecification.h>
 #include <RmlUi/Core/Types.h>
 
 #include <SDL3/SDL.h>
@@ -16,9 +18,11 @@
 
 namespace {
 
-static Vapor::EngineCore* g_engine   = nullptr;
-static int                g_surfaceW = 0;
-static int                g_surfaceH = 0;
+static Vapor::EngineCore* g_engine        = nullptr;
+static int                g_surfaceW      = 0;
+static int                g_surfaceH      = 0;
+// Path as handed to Vapor_Rml_LoadDocument (without SDL_GetBasePath prefix).
+static std::string        g_activeDocPath;
 
 // Each JSON-returning function writes into its own stable buffer so that the
 // caller may hold the pointer until the next call to the same function.
@@ -92,7 +96,7 @@ extern "C" int Vapor_IsRunning(void) {
 extern "C" void Vapor_CreateSharedSurface(int width, int height) {
     g_surfaceW = width;
     g_surfaceH = height;
-    // Kick off partial RmlUI init so that LoadDocument/etc. work once a
+    // Kick off partial RmlUI init so that LoadDocument / etc. work once a
     // renderer calls FinalizeInitialization().
     if (g_engine) g_engine->initRmlUI(width, height);
     // TODO: create IOSurface / platform texture and bind to renderer
@@ -119,15 +123,16 @@ extern "C" void Vapor_ResizeView(int width, int height) {
 
 // ── Input ────────────────────────────────────────────────────────────────────────
 
-// button convention: 0 = move only; positive = press (index = button-1);
-//                   negative = release (index = -button-1)
+// button uses SDL conventions: 0 = move only; 1/2/3 = left/middle/right press;
+// negative = release (-1/-2/-3 = left/middle/right).
+// ProcessMouseButtonDown/Up already map SDL indices to RmlUI indices internally.
 extern "C" void Vapor_InjectMouseEvent(double x, double y, int button) {
     if (!g_engine) return;
     auto* rml = g_engine->getRmlUiManager();
     if (!rml || !rml->IsInitialized()) return;
     rml->ProcessMouseMove(static_cast<int>(x), static_cast<int>(y), 0);
-    if (button > 0)      rml->ProcessMouseButtonDown(button - 1, 0);
-    else if (button < 0) rml->ProcessMouseButtonUp((-button) - 1, 0);
+    if (button > 0)      rml->ProcessMouseButtonDown(button, 0);
+    else if (button < 0) rml->ProcessMouseButtonUp(-button, 0);
 }
 
 extern "C" void Vapor_InjectKeyEvent(int sdlScancode, int pressed) {
@@ -161,11 +166,15 @@ extern "C" void Vapor_UpdateTerrainSeed(int seed) {
 extern "C" void Vapor_Rml_LoadDocument(const char* path) {
     if (!g_engine || !path) return;
     auto* rml = g_engine->getRmlUiManager();
-    if (rml && rml->IsInitialized()) rml->LoadDocument(path);
+    if (!rml || !rml->IsInitialized()) return;
+    g_activeDocPath = path; // remember for ReloadDocument
+    rml->LoadDocument(path);
 }
 
 extern "C" void Vapor_Rml_ReloadDocument(void) {
-    // TODO: track the active document path and call RmlUiManager::ReloadDocument
+    if (!g_engine || g_activeDocPath.empty()) return;
+    auto* rml = g_engine->getRmlUiManager();
+    if (rml && rml->IsInitialized()) rml->ReloadDocument(g_activeDocPath);
 }
 
 extern "C" const char* Vapor_Rml_GetDomTreeJson(void) {
@@ -193,8 +202,19 @@ extern "C" const char* Vapor_Rml_GetElementStyle(const char* elementId) {
         elem = ctx->GetDocument(i)->GetElementById(elementId);
     if (!elem) { g_styleBuf = "{}"; return g_styleBuf.c_str(); }
 
-    // TODO: iterate elem->IterateLocalProperties() to serialise inline styles
-    g_styleBuf = "{}";
+    g_styleBuf += '{';
+    bool first = true;
+    for (auto it = elem->IterateLocalProperties(); !it.AtEnd(); ++it) {
+        if (!first) g_styleBuf += ',';
+        first = false;
+        g_styleBuf += '"';
+        JsonAppendEscaped(g_styleBuf, Rml::StyleSheetSpecification::GetPropertyName(it.GetName()));
+        g_styleBuf += "\":";
+        g_styleBuf += '"';
+        JsonAppendEscaped(g_styleBuf, it.GetProperty().ToString());
+        g_styleBuf += '"';
+    }
+    g_styleBuf += '}';
     return g_styleBuf.c_str();
 }
 
