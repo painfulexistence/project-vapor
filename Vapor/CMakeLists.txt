@@ -50,9 +50,14 @@ set(SOURCES
 )
 
 if(APPLE)
-    list(APPEND SOURCES 
+    list(APPEND SOURCES
         src/renderer_metal.cpp
+        src/ui_renderer_metal.mm
         imgui/backends/imgui_impl_metal.mm
+    )
+else()
+    list(APPEND SOURCES
+        src/ui_renderer_stub.cpp
     )
 endif()
 

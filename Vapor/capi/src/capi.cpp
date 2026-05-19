@@ -2,6 +2,7 @@
 
 #include <Vapor/engine_core.hpp>
 #include <Vapor/rmlui_manager.hpp>
+#include <Vapor/ui_renderer.hpp>
 
 #include <RmlUi/Core/Context.h>
 #include <RmlUi/Core/Element.h>
@@ -14,23 +15,21 @@
 
 #include <string>
 
-// ── Module state ─────────────────────────────────────────────────────────────────────
+// ── Module state ──────────────────────────────────────────────────────────────
 
 namespace {
 
-static Vapor::EngineCore* g_engine        = nullptr;
-static int                g_surfaceW      = 0;
-static int                g_surfaceH      = 0;
-// Path as handed to Vapor_Rml_LoadDocument (without SDL_GetBasePath prefix).
+static Vapor::EngineCore* g_engine      = nullptr;
+static Vapor::UIRenderer* g_uiRenderer  = nullptr;
+static int                g_surfaceW    = 0;
+static int                g_surfaceH    = 0;
 static std::string        g_activeDocPath;
 
-// Each JSON-returning function writes into its own stable buffer so that the
-// caller may hold the pointer until the next call to the same function.
 static std::string g_domTreeBuf;
 static std::string g_styleBuf;
 static std::string g_elementAtBuf;
 
-// ── Helpers ────────────────────────────────────────────────────────────────────────
+// ── Helpers ───────────────────────────────────────────────────────────────────
 
 static void JsonAppendEscaped(std::string& out, const std::string& s) {
     for (char c : s) {
@@ -68,7 +67,7 @@ static Rml::Context* RmlContext() {
 
 } // namespace
 
-// ── Lifecycle ───────────────────────────────────────────────────────────────────────
+// ── Lifecycle ─────────────────────────────────────────────────────────────────
 
 extern "C" void Vapor_Initialize(void) {
     if (g_engine) return;
@@ -77,6 +76,11 @@ extern "C" void Vapor_Initialize(void) {
 }
 
 extern "C" void Vapor_Shutdown(void) {
+    if (g_uiRenderer) {
+        g_uiRenderer->shutdown();
+        delete g_uiRenderer;
+        g_uiRenderer = nullptr;
+    }
     if (!g_engine) return;
     g_engine->shutdown();
     delete g_engine;
@@ -85,47 +89,60 @@ extern "C" void Vapor_Shutdown(void) {
 
 extern "C" void Vapor_Tick(float deltaTime) {
     if (g_engine) g_engine->update(deltaTime);
+    // Render UI after logic update, while the context is still valid this tick.
+    if (g_uiRenderer) {
+        if (auto* ctx = RmlContext())
+            g_uiRenderer->renderFrame(ctx);
+    }
 }
 
 extern "C" int Vapor_IsRunning(void) {
     return (g_engine && g_engine->isInitialized()) ? 1 : 0;
 }
 
-// ── Shared framebuffer ───────────────────────────────────────────────────────────────
+// ── Shared framebuffer ────────────────────────────────────────────────────────
 
 extern "C" void Vapor_CreateSharedSurface(int width, int height) {
     g_surfaceW = width;
     g_surfaceH = height;
-    // Kick off partial RmlUI init so that LoadDocument / etc. work once a
-    // renderer calls FinalizeInitialization().
-    if (g_engine) g_engine->initRmlUI(width, height);
-    // TODO: create IOSurface / platform texture and bind to renderer
+
+    if (!g_engine) return;
+
+    // Phase 1: set up system interface only (no Rml::Context yet).
+    g_engine->initRmlUI(width, height);
+
+    // Phase 2: create platform render target, wire Rml::RenderInterface,
+    // and call FinalizeInitialization() — UIRenderer::create() does all three.
+    auto renderer = Vapor::UIRenderer::create(width, height);
+    if (renderer) {
+        g_uiRenderer = renderer.release();
+    }
 }
 
 extern "C" void* Vapor_GetDisplayTexture(void) {
-    return nullptr; // TODO: return renderer-owned display texture
+    return g_uiRenderer ? g_uiRenderer->getSharedTexture() : nullptr;
 }
 
-extern "C" void Vapor_ReleaseTexture(void* texture) {
-    (void)texture; // TODO: release renderer texture
+extern "C" void Vapor_ReleaseTexture(void* /*texture*/) {
+    // Texture lifetime is managed by UIRenderer; caller must not free it.
 }
 
 extern "C" int Vapor_SurfaceWidth(void)  { return g_surfaceW; }
 extern "C" int Vapor_SurfaceHeight(void) { return g_surfaceH; }
 
-// ── Viewport ──────────────────────────────────────────────────────────────────────
+// ── Viewport ──────────────────────────────────────────────────────────────────
 
 extern "C" void Vapor_ResizeView(int width, int height) {
     g_surfaceW = width;
     g_surfaceH = height;
     if (g_engine) g_engine->onRmlUIResize(width, height);
+    if (g_uiRenderer) g_uiRenderer->resize(width, height);
 }
 
-// ── Input ────────────────────────────────────────────────────────────────────────
+// ── Input ─────────────────────────────────────────────────────────────────────
 
-// button uses SDL conventions: 0 = move only; 1/2/3 = left/middle/right press;
-// negative = release (-1/-2/-3 = left/middle/right).
-// ProcessMouseButtonDown/Up already map SDL indices to RmlUI indices internally.
+// button: 0 = move only; 1/2/3 = left/middle/right press; negative = release.
+// ProcessMouseButtonDown/Up expects SDL indices; pass through directly.
 extern "C" void Vapor_InjectMouseEvent(double x, double y, int button) {
     if (!g_engine) return;
     auto* rml = g_engine->getRmlUiManager();
@@ -144,20 +161,20 @@ extern "C" void Vapor_InjectKeyEvent(int sdlScancode, int pressed) {
     else         rml->ProcessKeyUp(sc, 0);
 }
 
-// ── Scene ────────────────────────────────────────────────────────────────────────
+// ── Scene ─────────────────────────────────────────────────────────────────────
 
 extern "C" void Vapor_LoadScene(const char* path) {
     (void)path;
     // TODO: scene loading API not yet designed
 }
 
-// ── RmlUI ───────────────────────────────────────────────────────────────────────
+// ── RmlUI ─────────────────────────────────────────────────────────────────────
 
 extern "C" void Vapor_Rml_LoadDocument(const char* path) {
     if (!g_engine || !path) return;
     auto* rml = g_engine->getRmlUiManager();
     if (!rml || !rml->IsInitialized()) return;
-    g_activeDocPath = path; // remember for ReloadDocument
+    g_activeDocPath = path;
     rml->LoadDocument(path);
 }
 
@@ -171,7 +188,6 @@ extern "C" const char* Vapor_Rml_GetDomTreeJson(void) {
     g_domTreeBuf.clear();
     auto* ctx = RmlContext();
     if (!ctx) { g_domTreeBuf = "[]"; return g_domTreeBuf.c_str(); }
-
     g_domTreeBuf += '[';
     int n = ctx->GetNumDocuments();
     for (int i = 0; i < n; ++i) {
@@ -186,12 +202,10 @@ extern "C" const char* Vapor_Rml_GetElementStyle(const char* elementId) {
     g_styleBuf.clear();
     auto* ctx = RmlContext();
     if (!ctx || !elementId) { g_styleBuf = "{}"; return g_styleBuf.c_str(); }
-
     Rml::Element* elem = nullptr;
     for (int i = 0, n = ctx->GetNumDocuments(); !elem && i < n; ++i)
         elem = ctx->GetDocument(i)->GetElementById(elementId);
     if (!elem) { g_styleBuf = "{}"; return g_styleBuf.c_str(); }
-
     g_styleBuf += '{';
     bool first = true;
     for (auto it = elem->IterateLocalProperties(); !it.AtEnd(); ++it) {
@@ -199,8 +213,7 @@ extern "C" const char* Vapor_Rml_GetElementStyle(const char* elementId) {
         first = false;
         g_styleBuf += '"';
         JsonAppendEscaped(g_styleBuf, Rml::StyleSheetSpecification::GetPropertyName(it.GetName()));
-        g_styleBuf += "\":";
-        g_styleBuf += '"';
+        g_styleBuf += "\":\"";
         JsonAppendEscaped(g_styleBuf, it.GetProperty().ToString());
         g_styleBuf += '"';
     }
