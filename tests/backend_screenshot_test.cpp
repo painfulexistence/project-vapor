@@ -1,4 +1,5 @@
 #include <catch2/catch_test_macros.hpp>
+#include "Vapor/file_system.hpp"
 #include "Vapor/renderer.hpp"
 #include "Vapor/scene.hpp"
 #include <SDL3/SDL.h>
@@ -16,6 +17,8 @@ TEST_CASE("Renderer - Screenshot Capture", "[backend][screenshot]") {
         SDL_Quit();
         SKIP("Window creation failed");
     }
+
+    FileSystem::instance().initialize();
 
     // Initialize ImGui context BEFORE renderer init, because renderer init setup backends
     IMGUI_CHECKVERSION();
