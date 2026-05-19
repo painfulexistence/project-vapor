@@ -62,6 +62,7 @@ else()
 endif()
 
 add_library(Vapor ${SOURCES})
+set_target_properties(Vapor PROPERTIES POSITION_INDEPENDENT_CODE ON)
 target_compile_features(Vapor PRIVATE cxx_std_20)
 set_target_properties(Vapor PROPERTIES CXX_EXTENSIONS OFF)
 
