@@ -27,4 +27,8 @@ private:
         int priority;
     };
     std::vector<SearchEntry> m_paths; // sorted ascending by priority (lower = searched first)
+    bool m_initialized = false;
+
+    // Called automatically by resolvePath if initialize() was never called.
+    void lazyInitialize();
 };

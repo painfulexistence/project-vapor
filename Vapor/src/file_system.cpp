@@ -12,13 +12,25 @@ FileSystem& FileSystem::instance() {
 }
 
 void FileSystem::initialize() {
-    std::string base = SDL_GetBasePath();
+    if (m_initialized) return;
+    const char* baseCStr = SDL_GetBasePath();
+    if (!baseCStr) {
+        fmt::print(stderr, "[FileSystem] SDL_GetBasePath() returned null; no search paths configured.\n");
+        m_initialized = true;
+        return;
+    }
+    std::string base = baseCStr;
 #ifndef NDEBUG
     addSearchPath(base + "ResHR",    0);
 #endif
     addSearchPath(base + "ResPatch", 1);
     addSearchPath(base + "Res",      2);
     addSearchPath(base + "ResDLC",   3);
+    m_initialized = true;
+}
+
+void FileSystem::lazyInitialize() {
+    if (!m_initialized) initialize();
 }
 
 void FileSystem::addSearchPath(std::string absolutePath, int priority) {
@@ -37,6 +49,7 @@ void FileSystem::removeSearchPath(const std::string& absolutePath) {
 }
 
 std::optional<std::string> FileSystem::resolvePath(const std::string& relativePath) const {
+    const_cast<FileSystem*>(this)->lazyInitialize();
     for (const auto& entry : m_paths) {
         std::filesystem::path full = std::filesystem::path(entry.absolutePath) / relativePath;
         if (std::filesystem::exists(full)) {
