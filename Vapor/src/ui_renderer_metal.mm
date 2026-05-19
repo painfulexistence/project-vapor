@@ -42,7 +42,7 @@ public:
         if (!m_device) return false;
         createDefaultWhiteTexture();
         createPipelineState();
-        return m_pipelineState != nullptr;
+        return m_pipelineState.get() != nullptr;
     }
 
     void shutdown() {
