@@ -1,6 +1,6 @@
 #include <metal_stdlib>
 using namespace metal;
-#include "assets/shaders/3d_common.metal"
+#include "Res/shaders/3d_common.metal"
 
 // Irradiance convolution shader
 // Convolves the environment cubemap to create a diffuse irradiance map

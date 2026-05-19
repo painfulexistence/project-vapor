@@ -32,10 +32,13 @@ TEST_CASE("Renderer - Screenshot Capture", "[backend][screenshot]") {
     try {
         renderer->init(window);
     } catch (const std::exception& e) {
+        std::string reason = e.what();
+        renderer->deinit();
+        renderer.reset();
         ImGui::DestroyContext();
         SDL_DestroyWindow(window);
         SDL_Quit();
-        SKIP("Renderer init failed: " << e.what());
+        SKIP("Renderer init failed: " << reason);
     }
 
     SECTION("Capture current frame") {
