@@ -1606,21 +1606,16 @@ auto Renderer_Vulkan::stage(std::shared_ptr<Scene> scene) -> void {
     }
 
     // Buffers
-    const std::function<void(const std::shared_ptr<Node>&)> stageNode = [&](const std::shared_ptr<Node>& node) -> void {
-        if (node->meshGroup) {
-            for (auto& mesh : node->meshGroup->meshes) {
-                mesh->vbos.push_back(createVertexBuffer(mesh->vertices));// TODO: use single vbo for all meshes
-                mesh->ebo = createIndexBuffer(mesh->indices);
-                mesh->materialID = materialIDs.at(mesh->material);
-                mesh->instanceID = nextInstanceID++;
-            }
+    const auto stageMesh = [&](std::shared_ptr<Vapor::Mesh>& mesh) {
+        mesh->vbos.push_back(createVertexBuffer(mesh->vertices));
+        mesh->ebo = createIndexBuffer(mesh->indices);
+        if (mesh->material && materialIDs.count(mesh->material)) {
+            mesh->materialID = materialIDs.at(mesh->material);
         }
-        for (const auto& child : node->children) {
-            stageNode(child);
-        }
+        mesh->instanceID = nextInstanceID++;
     };
-    for (auto& node : scene->nodes) {
-        stageNode(node);
+    for (auto& mesh : scene->stagedMeshes) {
+        stageMesh(mesh);
     }
 
     // Descriptor sets
@@ -1861,28 +1856,18 @@ auto Renderer_Vulkan::draw(std::shared_ptr<Scene> scene, Camera& camera) -> void
     );
 
     instances.clear();
-    const std::function<void(const std::shared_ptr<Node>&)> updateNode = [&](const std::shared_ptr<Node>& node
-                                                                         ) -> void {
-        if (node->meshGroup) {
-            const glm::mat4& transform = node->worldTransform;
-            for (auto& mesh : node->meshGroup->meshes) {
-                instances.push_back({ .model = transform,
-                                      .vertexOffset = mesh->vertexOffset,
-                                      .indexOffset = mesh->indexOffset,
-                                      .vertexCount = mesh->vertexCount,
-                                      .indexCount = mesh->indexCount,
-                                      .materialID = mesh->materialID,
-                                      .primitiveMode = mesh->primitiveMode,
-                                      .AABBMin = mesh->worldAABBMin,
-                                      .AABBMax = mesh->worldAABBMax });
-            }
-        }
-        for (const auto& child : node->children) {
-            updateNode(child);
-        }
-    };
-    for (const auto& node : scene->nodes) {
-        updateNode(node);
+    for (auto& mesh : scene->stagedMeshes) {
+        glm::vec3 center = (mesh->localAABBMin + mesh->localAABBMax) * 0.5f;
+        glm::vec3 extent = mesh->localAABBMax - center;
+        instances.push_back({ .model = glm::identity<glm::mat4>(),
+                              .vertexOffset = mesh->vertexOffset,
+                              .indexOffset = mesh->indexOffset,
+                              .vertexCount = mesh->vertexCount,
+                              .indexCount = mesh->indexCount,
+                              .materialID = mesh->materialID,
+                              .primitiveMode = mesh->primitiveMode,
+                              .AABBMin = center - extent,
+                              .AABBMax = center + extent });
     }
     if (instances.size() > MAX_INSTANCES) {// TODO: reallocate when needed
         fmt::print("Warning: Instance count ({}) exceeds MAX_INSTANCES ({})\n", instances.size(), MAX_INSTANCES);
@@ -1934,59 +1919,24 @@ auto Renderer_Vulkan::draw(std::shared_ptr<Scene> scene, Camera& camera) -> void
     vkCmdBeginRenderPass(cmd, &prePassInfo, VK_SUBPASS_CONTENTS_INLINE);
     vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, prePassPipeline);
 
-    const std::function<void(const std::shared_ptr<Node>&)> drawNodeDepth = [&](const std::shared_ptr<Node>& node
-                                                                            ) -> void {
-        if (node->meshGroup) {
-            for (auto& mesh : node->meshGroup->meshes) {
-                if (!mesh->material) {
-                    fmt::print("No material found for mesh in mesh group {}\n", node->meshGroup->name);
-                    continue;
-                }
-                if (mesh->vbos.empty() || mesh->vbos[0].rid == UINT32_MAX || mesh->ebo.rid == UINT32_MAX) {
-                    continue;
-                }
-                auto matSetIt = materialTextureSets.find(mesh->material);
-                if (matSetIt == materialTextureSets.end()) {
-                    fmt::print("[WARN] DepthPass: material missing for mesh in node {}\n", node->name);
-                    continue;
-                }
-                VkBuffer vertexBuffers[] = { getBuffer(mesh->vbos[0]) };
-                VkDeviceSize offsets[] = { 0 };
-                vkCmdBindVertexBuffers(cmd, 0, 1, vertexBuffers, offsets);
-                vkCmdBindIndexBuffer(cmd, getBuffer(mesh->ebo), 0, VkIndexType::VK_INDEX_TYPE_UINT32);
-                std::array<VkDescriptorSet, 2> descriptorSets = { set0s[currentFrameInFlight], matSetIt->second };
-                vkCmdBindDescriptorSets(
-                    cmd,
-                    VK_PIPELINE_BIND_POINT_GRAPHICS,
-                    prePassPipelineLayout,
-                    0,
-                    descriptorSets.size(),
-                    descriptorSets.data(),
-                    0,
-                    nullptr
-                );
-                struct PrePassPC {
-                    glm::vec3 _pad;
-                    uint32_t instanceID;
-                };
-                PrePassPC pc{ {}, mesh->instanceID };
-                vkCmdPushConstants(
-                    cmd,
-                    prePassPipelineLayout,
-                    VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT,
-                    0,
-                    sizeof(PrePassPC),
-                    &pc
-                );
-                vkCmdDrawIndexed(cmd, mesh->indices.size(), 1, 0, 0, 0);
-            }
-        }
-        for (const auto& child : node->children) {
-            drawNodeDepth(child);
-        }
-    };
-    for (auto& node : scene->nodes) {
-        drawNodeDepth(node);
+    for (auto& mesh : scene->stagedMeshes) {
+        if (!mesh->material) continue;
+        if (mesh->vbos.empty() || mesh->vbos[0].rid == UINT32_MAX || mesh->ebo.rid == UINT32_MAX) continue;
+        auto matSetIt = materialTextureSets.find(mesh->material);
+        if (matSetIt == materialTextureSets.end()) continue;
+        VkBuffer vertexBuffers[] = { getBuffer(mesh->vbos[0]) };
+        VkDeviceSize offsets[] = { 0 };
+        vkCmdBindVertexBuffers(cmd, 0, 1, vertexBuffers, offsets);
+        vkCmdBindIndexBuffer(cmd, getBuffer(mesh->ebo), 0, VkIndexType::VK_INDEX_TYPE_UINT32);
+        std::array<VkDescriptorSet, 2> descriptorSets = { set0s[currentFrameInFlight], matSetIt->second };
+        vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, prePassPipelineLayout, 0, descriptorSets.size(), descriptorSets.data(), 0, nullptr);
+        struct PrePassPC {
+            glm::vec3 _pad;
+            uint32_t instanceID;
+        };
+        PrePassPC pc{ {}, mesh->instanceID };
+        vkCmdPushConstants(cmd, prePassPipelineLayout, VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT, 0, sizeof(PrePassPC), &pc);
+        vkCmdDrawIndexed(cmd, mesh->indices.size(), 1, 0, 0, 0);
     }
 
     vkCmdEndRenderPass(cmd);
@@ -2006,58 +1956,24 @@ auto Renderer_Vulkan::draw(std::shared_ptr<Scene> scene, Camera& camera) -> void
     vkCmdBeginRenderPass(cmd, &renderPassInfo, VK_SUBPASS_CONTENTS_INLINE);
     vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, renderPipeline);
 
-    const std::function<void(const std::shared_ptr<Node>&)> drawNode = [&](const std::shared_ptr<Node>& node) -> void {
-        if (node->meshGroup) {
-            for (auto& mesh : node->meshGroup->meshes) {
-                if (!mesh->material) {
-                    fmt::print("No material found for mesh in mesh group {}\n", node->meshGroup->name);
-                    continue;
-                }
-                if (mesh->vbos.empty() || mesh->vbos[0].rid == UINT32_MAX || mesh->ebo.rid == UINT32_MAX) {
-                    continue;
-                }
-                auto matSetIt = materialTextureSets.find(mesh->material);
-                if (matSetIt == materialTextureSets.end()) {
-                    fmt::print("[WARN] ColorPass: material missing for mesh in node {}\n", node->name);
-                    continue;
-                }
-                VkBuffer vertexBuffers[] = { getBuffer(mesh->vbos[0]) };
-                VkDeviceSize offsets[] = { 0 };
-                vkCmdBindVertexBuffers(cmd, 0, 1, vertexBuffers, offsets);
-                vkCmdBindIndexBuffer(cmd, getBuffer(mesh->ebo), 0, VkIndexType::VK_INDEX_TYPE_UINT32);
-                std::array<VkDescriptorSet, 2> descriptorSets = { set0s[currentFrameInFlight], matSetIt->second };
-                vkCmdBindDescriptorSets(
-                    cmd,
-                    VK_PIPELINE_BIND_POINT_GRAPHICS,
-                    renderPipelineLayout,
-                    0,
-                    descriptorSets.size(),
-                    descriptorSets.data(),
-                    0,
-                    nullptr
-                );// resources are set here
-                struct PushConstants {
-                    glm::vec3 camPos;
-                    uint32_t instanceID;
-                };
-                PushConstants pc{ camPos, mesh->instanceID };
-                vkCmdPushConstants(
-                    cmd,
-                    renderPipelineLayout,
-                    VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT,
-                    0,
-                    sizeof(PushConstants),
-                    &pc
-                );
-                vkCmdDrawIndexed(cmd, mesh->indices.size(), 1, 0, 0, 0);
-            }
-        }
-        for (const auto& child : node->children) {
-            drawNode(child);
-        }
-    };
-    for (auto& node : scene->nodes) {
-        drawNode(node);
+    for (auto& mesh : scene->stagedMeshes) {
+        if (!mesh->material) continue;
+        if (mesh->vbos.empty() || mesh->vbos[0].rid == UINT32_MAX || mesh->ebo.rid == UINT32_MAX) continue;
+        auto matSetIt = materialTextureSets.find(mesh->material);
+        if (matSetIt == materialTextureSets.end()) continue;
+        VkBuffer vertexBuffers[] = { getBuffer(mesh->vbos[0]) };
+        VkDeviceSize offsets[] = { 0 };
+        vkCmdBindVertexBuffers(cmd, 0, 1, vertexBuffers, offsets);
+        vkCmdBindIndexBuffer(cmd, getBuffer(mesh->ebo), 0, VkIndexType::VK_INDEX_TYPE_UINT32);
+        std::array<VkDescriptorSet, 2> descriptorSets = { set0s[currentFrameInFlight], matSetIt->second };
+        vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, renderPipelineLayout, 0, descriptorSets.size(), descriptorSets.data(), 0, nullptr);
+        struct PushConstants {
+            glm::vec3 camPos;
+            uint32_t instanceID;
+        };
+        PushConstants pc{ camPos, mesh->instanceID };
+        vkCmdPushConstants(cmd, renderPipelineLayout, VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT, 0, sizeof(PushConstants), &pc);
+        vkCmdDrawIndexed(cmd, mesh->indices.size(), 1, 0, 0, 0);
     }
 
     // Render particles (after scene, before post-process)

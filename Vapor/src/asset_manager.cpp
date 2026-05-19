@@ -511,15 +511,10 @@ auto AssetManager::loadGLTFOptimized(const std::string& filename) -> std::shared
 
     Uint32 currentVertexOffset = 0;
     Uint32 currentIndexOffset = 0;
-    std::function<std::shared_ptr<Node>(const std::shared_ptr<Node>&)> processNode =
-        [&](const std::shared_ptr<Node>& originalNode) -> std::shared_ptr<Node> {
-        auto newNode = std::make_shared<Node>();
-        newNode->name = originalNode->name;
-        newNode->localTransform = originalNode->localTransform;
+    std::function<void(const std::shared_ptr<Node>&, const glm::mat4&)> processNode =
+        [&](const std::shared_ptr<Node>& originalNode, const glm::mat4& parentWorld) -> void {
+        glm::mat4 worldTransform = parentWorld * originalNode->localTransform;
         if (originalNode->meshGroup) {
-            auto newMeshGroup = std::make_shared<MeshGroup>();
-            newMeshGroup->name = originalNode->meshGroup->name;
-
             for (const auto& originalMesh : originalNode->meshGroup->meshes) {
                 auto newMesh = std::make_shared<Mesh>();
                 newMesh->hasPosition = originalMesh->hasPosition;
@@ -536,7 +531,7 @@ auto AssetManager::loadGLTFOptimized(const std::string& filename) -> std::shared
                 newMesh->indexOffset = currentIndexOffset;
                 newMesh->vertexCount = originalMesh->vertices.size();
                 newMesh->indexCount = originalMesh->indices.size();
-                newMesh->isGeometryDirty = false;// prevent AABB updating
+                newMesh->isGeometryDirty = false;
 
                 optimizedScene->vertices.insert(
                     optimizedScene->vertices.end(), originalMesh->vertices.begin(), originalMesh->vertices.end()
@@ -546,31 +541,17 @@ auto AssetManager::loadGLTFOptimized(const std::string& filename) -> std::shared
                 }
                 currentVertexOffset += originalMesh->vertices.size();
                 currentIndexOffset += originalMesh->indices.size();
-                newMeshGroup->meshes.push_back(newMesh);
 
-                fmt::print(
-                    "Mesh: vertexOffset={}, indexOffset={}, vertexCount={}, indexCount={}\n",
-                    newMesh->vertexOffset,
-                    newMesh->indexOffset,
-                    newMesh->vertexCount,
-                    newMesh->indexCount
-                );
-
-                // TODO: clean up
-                // originalMesh->vertices.clear();
-                // originalMesh->indices.clear();
+                optimizedScene->stagedMeshes.push_back(newMesh);
+                optimizedScene->stagedMeshTransforms.push_back(worldTransform);
             }
-            newNode->meshGroup = newMeshGroup;
         }
         for (const auto& originalChild : originalNode->children) {
-            auto newChild = processNode(originalChild);
-            newNode->children.push_back(newChild);
+            processNode(originalChild, worldTransform);
         }
-        return newNode;
     };
     for (const auto& originalNode : originalScene->nodes) {
-        auto newNode = processNode(originalNode);
-        optimizedScene->nodes.push_back(newNode);
+        processNode(originalNode, glm::identity<glm::mat4>());
     }
 
     fmt::print(
@@ -579,7 +560,7 @@ auto AssetManager::loadGLTFOptimized(const std::string& filename) -> std::shared
         optimizedScene->indices.size()
     );
 
-    optimizedScene->update(0.0f);// making sure world transform is updated
+    // world transforms are baked into stagedMeshTransforms; no Node update needed
 
     AssetSerializer::serializeScene(optimizedScene, scenePath.string());
 

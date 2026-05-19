@@ -65,9 +65,13 @@ void AssetSerializer::serializeScene(const std::shared_ptr<Scene>& scene, const 
             serializePointLight(archive, light);
         }
 
-        archive(static_cast<Uint32>(scene->nodes.size()));
-        for (const auto& node : scene->nodes) {
-            serializeNode(archive, node, materialIDs);
+        archive(static_cast<Uint32>(scene->stagedMeshes.size()));
+        for (size_t i = 0; i < scene->stagedMeshes.size(); ++i) {
+            serializeMesh(archive, scene->stagedMeshes[i], materialIDs);
+            glm::mat4 t = i < scene->stagedMeshTransforms.size()
+                ? scene->stagedMeshTransforms[i]
+                : glm::identity<glm::mat4>();
+            archive(t);
         }
 
     }// Ensure archive is flushed
@@ -132,80 +136,19 @@ auto AssetSerializer::deserializeScene(const std::string& path) -> std::shared_p
         scene->pointLights.push_back(light);
     }
 
-    Uint32 nodeCount;
-    archive(nodeCount);
-    scene->nodes.reserve(nodeCount);
-    for (Uint32 i = 0; i < nodeCount; ++i) {
-        scene->nodes.push_back(deserializeNode(archive, materials));
+    Uint32 meshCount;
+    archive(meshCount);
+    scene->stagedMeshes.reserve(meshCount);
+    scene->stagedMeshTransforms.reserve(meshCount);
+    for (Uint32 i = 0; i < meshCount; ++i) {
+        scene->stagedMeshes.push_back(deserializeMesh(archive, materials));
+        glm::mat4 t;
+        archive(t);
+        scene->stagedMeshTransforms.push_back(t);
     }
-
-    scene->update(0.0f);// making sure world transform is updated
 
     fmt::print("Scene deserialized from: {} in {} ms\n", path, SDL_GetTicks() - start);
     return scene;
-}
-
-void AssetSerializer::serializeNode(
-    cereal::BinaryOutputArchive& archive,
-    const std::shared_ptr<Node>& node,
-    const std::unordered_map<std::shared_ptr<Material>, Uint32>& materialIDs
-) {
-    if (!node) {
-        archive(false);
-        return;
-    }
-    archive(true);
-    // archive(node->name);
-    archive(node->localTransform);
-    if (!node->meshGroup) {
-        archive(false);
-    } else {
-        archive(true);
-        // archive(node->meshGroup->name);
-        archive(static_cast<Uint32>(node->meshGroup->meshes.size()));
-        for (const auto& mesh : node->meshGroup->meshes) {
-            serializeMesh(archive, mesh, materialIDs);
-        }
-    }
-    archive(static_cast<Uint32>(node->children.size()));
-    for (const auto& child : node->children) {
-        serializeNode(archive, child, materialIDs);
-    }
-}
-
-auto AssetSerializer::deserializeNode(
-    cereal::BinaryInputArchive& archive, const std::unordered_map<Uint32, std::shared_ptr<Material>>& materials
-) -> std::shared_ptr<Node> {
-    bool isNotNull;
-    archive(isNotNull);
-    if (!isNotNull) {
-        return nullptr;
-    }
-    auto node = std::make_shared<Node>();
-    // archive(node->name);
-    archive(node->localTransform);
-    bool hasMeshGroup;
-    archive(hasMeshGroup);
-    if (!hasMeshGroup) {
-        node->meshGroup = nullptr;
-    } else {
-        // archive(node->meshGroup->name);
-        auto meshGroup = std::make_shared<MeshGroup>();
-        Uint32 meshCount;
-        archive(meshCount);
-        meshGroup->meshes.reserve(meshCount);
-        for (Uint32 i = 0; i < meshCount; ++i) {
-            meshGroup->meshes.push_back(deserializeMesh(archive, materials));
-        }
-        node->meshGroup = meshGroup;
-    }
-    Uint32 childCount;
-    archive(childCount);
-    node->children.reserve(childCount);
-    for (Uint32 i = 0; i < childCount; ++i) {
-        node->children.push_back(deserializeNode(archive, materials));
-    }
-    return node;
 }
 
 void AssetSerializer::serializeMaterial(

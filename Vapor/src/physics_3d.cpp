@@ -38,7 +38,6 @@
 #include <mutex>
 
 // #include "physics_debug_drawer.hpp"
-#include "scene.hpp"
 
 JPH_SUPPRESS_WARNINGS
 
@@ -653,9 +652,8 @@ auto Physics3D::raycast(const glm::vec3& from, const glm::vec3& to, RaycastHit& 
         hit.hitDistance = result.mFraction * glm::distance(from, to);
         hit.hitFraction = result.mFraction;
 
-        // Get Node from UserData
         Uint64 userData = bodyInterface->GetUserData(hitBodyID);
-        hit.node = reinterpret_cast<Node*>(userData);
+        hit.entity = userData != 0 ? static_cast<entt::entity>(static_cast<Uint32>(userData)) : entt::null;
 
         // Get surface normal at hit point
         JPH::BodyLockRead lock(physicsSystem->GetBodyLockInterface(), hitBodyID);
@@ -1320,8 +1318,7 @@ auto Physics3D::overlapSphere(const glm::vec3& center, float radius) -> OverlapR
                 // Get Node from UserData
                 Uint64 userData = bodyInterface->GetUserData(hitBodyID);
                 if (userData != 0) {
-                    Node* node = reinterpret_cast<Node*>(userData);
-                    result.nodes.push_back(node);
+                    result.entities.push_back(static_cast<entt::entity>(static_cast<Uint32>(userData)));
                 }
                 break;
             }
@@ -1361,8 +1358,7 @@ auto Physics3D::overlapBox(const glm::vec3& center, const glm::vec3& halfExtents
 
                 Uint64 userData = bodyInterface->GetUserData(hitBodyID);
                 if (userData != 0) {
-                    Node* node = reinterpret_cast<Node*>(userData);
-                    result.nodes.push_back(node);
+                    result.entities.push_back(static_cast<entt::entity>(static_cast<Uint32>(userData)));
                 }
                 break;
             }
@@ -1421,8 +1417,7 @@ auto Physics3D::overlapCapsule(const glm::vec3& point1, const glm::vec3& point2,
 
                 Uint64 userData = bodyInterface->GetUserData(hitBodyID);
                 if (userData != 0) {
-                    Node* node = reinterpret_cast<Node*>(userData);
-                    result.nodes.push_back(node);
+                    result.entities.push_back(static_cast<entt::entity>(static_cast<Uint32>(userData)));
                 }
                 break;
             }

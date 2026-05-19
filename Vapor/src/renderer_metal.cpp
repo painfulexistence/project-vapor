@@ -4177,56 +4177,47 @@ auto Renderer_Metal::stage(std::shared_ptr<Scene> scene) -> void {
 
     auto cmd = queue->commandBuffer();
 
-    const std::function<void(const std::shared_ptr<Node>&)> stageNode = [&](const std::shared_ptr<Node>& node) -> void {
-        if (node->meshGroup) {
-            for (auto& mesh : node->meshGroup->meshes) {
-                // mesh->vbos.push_back(createVertexBuffer(mesh->vertices));
-                // mesh->ebo = createIndexBuffer(mesh->indices);
+    const auto stageMesh = [&](std::shared_ptr<Vapor::Mesh>& mesh) {
+        if (m_supportsRaytracing) {
+            auto geomDesc =
+                NS::TransferPtr(MTL::AccelerationStructureTriangleGeometryDescriptor::alloc()->init());
+            geomDesc->setVertexBuffer(getBuffer(scene->vertexBuffer).get());
+            geomDesc->setVertexStride(sizeof(VertexData));
+            geomDesc->setVertexFormat(MTL::AttributeFormatFloat3);
+            geomDesc->setVertexBufferOffset(
+                mesh->vertexOffset * sizeof(VertexData) + offsetof(VertexData, position)
+            );
+            geomDesc->setIndexBuffer(getBuffer(scene->indexBuffer).get());
+            geomDesc->setIndexType(MTL::IndexTypeUInt32);
+            geomDesc->setIndexBufferOffset(mesh->indexOffset * sizeof(Uint32));
+            geomDesc->setTriangleCount(mesh->indexCount / 3);
+            geomDesc->setOpaque(true);
 
-                if (m_supportsRaytracing) {
-                    auto geomDesc =
-                        NS::TransferPtr(MTL::AccelerationStructureTriangleGeometryDescriptor::alloc()->init());
-                    geomDesc->setVertexBuffer(getBuffer(scene->vertexBuffer).get());
-                    geomDesc->setVertexStride(sizeof(VertexData));
-                    geomDesc->setVertexFormat(MTL::AttributeFormatFloat3);
-                    geomDesc->setVertexBufferOffset(
-                        mesh->vertexOffset * sizeof(VertexData) + offsetof(VertexData, position)
-                    );
-                    geomDesc->setIndexBuffer(getBuffer(scene->indexBuffer).get());
-                    geomDesc->setIndexType(MTL::IndexTypeUInt32);
-                    geomDesc->setIndexBufferOffset(mesh->indexOffset * sizeof(Uint32));
-                    geomDesc->setTriangleCount(mesh->indexCount / 3);
-                    geomDesc->setOpaque(true);
+            auto accelDesc = NS::TransferPtr(MTL::PrimitiveAccelerationStructureDescriptor::alloc()->init());
+            NS::Object* descriptors[] = { geomDesc.get() };
+            auto geomArray = NS::TransferPtr(NS::Array::array(descriptors, 1));
+            accelDesc->setGeometryDescriptors(geomArray.get());
 
-                    auto accelDesc = NS::TransferPtr(MTL::PrimitiveAccelerationStructureDescriptor::alloc()->init());
-                    NS::Object* descriptors[] = { geomDesc.get() };
-                    auto geomArray = NS::TransferPtr(NS::Array::array(descriptors, 1));
-                    accelDesc->setGeometryDescriptors(geomArray.get());
+            auto accelSizes = device->accelerationStructureSizes(accelDesc.get());
+            auto accelStruct =
+                NS::TransferPtr(device->newAccelerationStructure(accelSizes.accelerationStructureSize));
+            auto scratchBuffer = NS::TransferPtr(
+                device->newBuffer(accelSizes.buildScratchBufferSize, MTL::ResourceStorageModePrivate)
+            );
 
-                    auto accelSizes = device->accelerationStructureSizes(accelDesc.get());
-                    auto accelStruct =
-                        NS::TransferPtr(device->newAccelerationStructure(accelSizes.accelerationStructureSize));
-                    auto scratchBuffer = NS::TransferPtr(
-                        device->newBuffer(accelSizes.buildScratchBufferSize, MTL::ResourceStorageModePrivate)
-                    );
+            auto encoder = cmd->accelerationStructureCommandEncoder();
+            encoder->buildAccelerationStructure(accelStruct.get(), accelDesc.get(), scratchBuffer.get(), 0);
+            encoder->endEncoding();
 
-                    auto encoder = cmd->accelerationStructureCommandEncoder();
-                    encoder->buildAccelerationStructure(accelStruct.get(), accelDesc.get(), scratchBuffer.get(), 0);
-                    encoder->endEncoding();
-
-                    BLASs.push_back(accelStruct);
-                }
-
-                mesh->materialID = materialIDs[mesh->material];
-                mesh->instanceID = nextInstanceID++;
-            }
+            BLASs.push_back(accelStruct);
         }
-        for (const auto& child : node->children) {
-            stageNode(child);
-        }
+
+        mesh->materialID = materialIDs[mesh->material];
+        mesh->instanceID = nextInstanceID++;
     };
-    for (auto& node : scene->nodes) {
-        stageNode(node);
+
+    for (auto& mesh : scene->stagedMeshes) {
+        stageMesh(mesh);
     }
 
     cmd->commit();
@@ -4322,55 +4313,10 @@ auto Renderer_Metal::draw(std::shared_ptr<Scene> scene, Camera& camera) -> void 
     }
     materialDataBuffer->didModifyRange(NS::Range::Make(0, materialDataBuffer->length()));
 
-    // Update instance data
+    // Update instance data from ECS (set by draw(registry, scene, camera) before calling this)
     instances.clear();
     accelInstances.clear();
     instanceBatches.clear();
-    const std::function<void(const std::shared_ptr<Node>&)> updateNode = [&](const std::shared_ptr<Node>& node
-                                                                         ) -> void {
-        if (node->meshGroup) {
-            const glm::mat4& transform = node->worldTransform;
-            for (const auto& mesh : node->meshGroup->meshes) {
-                instances.push_back({
-                    .model = transform,
-                    .color = glm::vec4(1.0f, 0.0f, 0.0f, 1.0f),
-                    .vertexOffset = mesh->vertexOffset,
-                    .indexOffset = mesh->indexOffset,
-                    .vertexCount = mesh->vertexCount,
-                    .indexCount = mesh->indexCount,
-                    .materialID = mesh->materialID,
-                    .primitiveMode = mesh->primitiveMode,
-                    .AABBMin = mesh->worldAABBMin,
-                    .AABBMax = mesh->worldAABBMax,
-                });
-                if (m_supportsRaytracing) {
-                    MTL::AccelerationStructureInstanceDescriptor accelInstanceDesc;
-                    for (int i = 0; i < 4; ++i) {
-                        for (int j = 0; j < 3; ++j) {
-                            accelInstanceDesc.transformationMatrix.columns[i][j] = transform[i][j];
-                        }
-                    }
-                    accelInstanceDesc.accelerationStructureIndex = mesh->instanceID;
-                    accelInstanceDesc.mask = 0xFF;
-                    accelInstances.push_back(accelInstanceDesc);
-                }
-                if (!mesh->material) {
-                    fmt::print("No material found for mesh in mesh group {}\n", node->meshGroup->name);
-                    continue;
-                }
-                instanceBatches[mesh->material].push_back(MeshDraw{ mesh, static_cast<uint32_t>(instances.size() - 1) }
-                );
-            }
-        }
-        for (const auto& child : node->children) {
-            updateNode(child);
-        }
-    };
-    for (const auto& node : scene->nodes) {
-        updateNode(node);
-    }
-
-    // ECS draw path: override Node-derived instances, batches, and accel instances with ECS data
     if (!pendingEcsInstances.empty()) {
         instances = pendingEcsInstances;
         instanceBatches = pendingEcsBatches;
@@ -4660,36 +4606,18 @@ auto Renderer_Metal::draw(std::shared_ptr<Scene> scene, Camera& camera) -> void 
             ImGui::Separator();
             ImGui::Text("Total vertices: %zu", scene->vertices.size());
             ImGui::Text("Total indices: %zu", scene->indices.size());
-            const std::function<void(const std::shared_ptr<Node>&)> showNode = [&](const std::shared_ptr<Node>& node
-                                                                               ) -> void {
-                ImGui::PushID(node.get());
-                ImGui::Text("Node #%s", node->name.c_str());
-                glm::vec3 pos = node->getLocalPosition();
-                glm::vec3 euler = node->getLocalEulerAngles();
-                glm::vec3 scale = node->getLocalScale();
-                if (ImGui::DragFloat3("Position", &pos.x, 0.1f)) node->setLocalPosition(pos);
-                if (ImGui::DragFloat3("Rotation", &euler.x, 1.0f)) node->setLocalEulerAngles(euler);
-                if (ImGui::DragFloat3("Scale", &scale.x, 0.1f, 0.0001f)) node->setLocalScale(scale);
-                if (node->meshGroup) {
-                    for (const auto& mesh : node->meshGroup->meshes) {
-                        ImGui::PushID(mesh.get());
-                        if (ImGui::TreeNode(fmt::format("Mesh").c_str())) {
-                            ImGui::Text("Vertex count: %u", mesh->vertexCount);
-                            ImGui::Text("Vertex offset: %u", mesh->vertexOffset);
-                            ImGui::Text("Index count: %u", mesh->indexCount);
-                            ImGui::Text("Index offset: %u", mesh->indexOffset);
-                            ImGui::TreePop();
-                        }
-                        ImGui::PopID();
-                    }
+            ImGui::Text("Staged meshes: %zu", scene->stagedMeshes.size());
+            for (size_t mi = 0; mi < scene->stagedMeshes.size(); ++mi) {
+                auto& mesh = scene->stagedMeshes[mi];
+                ImGui::PushID(static_cast<int>(mi));
+                if (ImGui::TreeNode(fmt::format("Mesh #{}", mi).c_str())) {
+                    ImGui::Text("Vertex count: %u", mesh->vertexCount);
+                    ImGui::Text("Vertex offset: %u", mesh->vertexOffset);
+                    ImGui::Text("Index count: %u", mesh->indexCount);
+                    ImGui::Text("Index offset: %u", mesh->indexOffset);
+                    ImGui::TreePop();
                 }
                 ImGui::PopID();
-                for (const auto& child : node->children) {
-                    showNode(child);
-                }
-            };
-            for (const auto& node : scene->nodes) {
-                showNode(node);
             }
             ImGui::TreePop();
         }
@@ -5854,6 +5782,43 @@ void Renderer_Metal::draw(entt::registry& registry, std::shared_ptr<Scene> scene
                 accelDesc.mask = 0xFF;
                 pendingEcsAccelInstances.push_back(accelDesc);
             }
+        }
+    }
+    // Staged meshes (GLTF scenes, static) — add after ECS entities
+    for (size_t i = 0; i < scene->stagedMeshes.size(); ++i) {
+        auto& mesh = scene->stagedMeshes[i];
+        const glm::mat4& worldMat = i < scene->stagedMeshTransforms.size()
+            ? scene->stagedMeshTransforms[i]
+            : glm::identity<glm::mat4>();
+        const glm::vec3& lMin = mesh->localAABBMin;
+        const glm::vec3& lMax = mesh->localAABBMax;
+        glm::vec3 wMin(FLT_MAX), wMax(-FLT_MAX);
+        for (int cx = 0; cx < 2; ++cx)
+        for (int cy = 0; cy < 2; ++cy)
+        for (int cz = 0; cz < 2; ++cz) {
+            glm::vec3 corner(cx ? lMax.x : lMin.x, cy ? lMax.y : lMin.y, cz ? lMax.z : lMin.z);
+            glm::vec3 w = glm::vec3(worldMat * glm::vec4(corner, 1.0f));
+            wMin = glm::min(wMin, w);
+            wMax = glm::max(wMax, w);
+        }
+        glm::vec3 bsCenter = (wMin + wMax) * 0.5f;
+        float bsRadius = glm::length(wMax - bsCenter);
+        auto instanceIdx = static_cast<uint32_t>(pendingEcsInstances.size());
+        pendingEcsInstances.push_back({
+            .model = worldMat,
+            .color = glm::vec4(1.0f),
+            .vertexOffset = mesh->vertexOffset,
+            .indexOffset = mesh->indexOffset,
+            .vertexCount = mesh->vertexCount,
+            .indexCount = mesh->indexCount,
+            .materialID = mesh->materialID,
+            .primitiveMode = mesh->primitiveMode,
+            .AABBMin = wMin,
+            .AABBMax = wMax,
+            .boundingSphere = glm::vec4(bsCenter, bsRadius),
+        });
+        if (mesh->material) {
+            pendingEcsBatches[mesh->material].push_back(MeshDraw{ mesh, instanceIdx });
         }
     }
     draw(scene, camera);

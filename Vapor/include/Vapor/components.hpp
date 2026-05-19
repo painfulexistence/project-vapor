@@ -3,6 +3,7 @@
 #include "physics_3d.hpp"
 #include "vehicle_controller.hpp"
 #include <entt/entt.hpp>
+#include <functional>
 #include <glm/glm.hpp>
 #include <glm/gtc/quaternion.hpp>
 #include <memory>
@@ -114,6 +115,15 @@ namespace Vapor {
         float steering  = 0.0f;
         float brake     = 0.0f;
         bool  handbrake = false;
+    };
+
+    // ============================================================================
+    // Trigger Volume (ECS-owned)
+    // ============================================================================
+    struct TriggerVolumeComponent {
+        TriggerHandle trigger;
+        std::function<void(entt::entity)> onEnter;
+        std::function<void(entt::entity)> onExit;
     };
 
 }// namespace Vapor

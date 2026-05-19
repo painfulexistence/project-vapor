@@ -60,15 +60,6 @@ private:
     static void serializeImage(cereal::BinaryOutputArchive& archive, const std::shared_ptr<Vapor::Image>& image);
     static std::shared_ptr<Vapor::Image> deserializeImage(cereal::BinaryInputArchive& archive);
 
-    static void serializeNode(
-        cereal::BinaryOutputArchive& archive,
-        const std::shared_ptr<Node>& node,
-        const std::unordered_map<std::shared_ptr<Vapor::Material>, Uint32>& materialIDs
-    );
-    static std::shared_ptr<Node> deserializeNode(
-        cereal::BinaryInputArchive& archive, const std::unordered_map<Uint32, std::shared_ptr<Vapor::Material>>& materials
-    );
-
     static void serializeMesh(
         cereal::BinaryOutputArchive& archive,
         const std::shared_ptr<Vapor::Mesh>& mesh,

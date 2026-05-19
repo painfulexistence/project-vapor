@@ -7,7 +7,6 @@
 #include <unordered_map>
 #include <vector>
 
-struct Node;
 class Scene;
 
 namespace JPH {
@@ -61,15 +60,15 @@ using TriggerHandle = PhysicsHandle<TriggerTag>;
 struct RaycastHit {
     glm::vec3 point;
     glm::vec3 normal;
-    Node* node;       // legacy: set when userData was stored as Node*
-    BodyHandle body;  // handle of the hit body, use getBodyUserData() to resolve entity
+    BodyHandle body;
+    entt::entity entity = entt::null;
     float hitDistance;
     float hitFraction;
 };
 
 struct OverlapResult {
-    std::vector<Node*> nodes;
     std::vector<BodyHandle> bodies;
+    std::vector<entt::entity> entities;
 };
 
 // ECS-mode collision events: bodies are identified by BodyHandle (resolve entity via getBodyUserData)

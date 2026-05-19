@@ -1,5 +1,4 @@
 #include <Vapor/physics_3d.hpp>
-#include <Vapor/scene.hpp>
 #include <Vapor/task_scheduler.hpp>
 #include <catch2/catch_approx.hpp>
 #include <catch2/catch_test_macros.hpp>
@@ -26,19 +25,12 @@ TEST_CASE("Physics3D Combined Tests", "[physics]") {
     SECTION("Falling Body") {
         physics.setGravity({ 0, -10.0f, 0 });
 
-        auto scene = std::make_shared<Scene>();
-        auto node = std::make_shared<Node>();
-        node->name = "FallingSphere";
-        scene->nodes.push_back(node);
-
         BodyHandle body =
             physics.createSphereBody(1.0f, { 0, 10.0f, 0 }, glm::quat(1, 0, 0, 0), BodyMotionType::Dynamic);
-        node->body = body;
         physics.addBody(body, true);
-        physics.setBodyUserData(body, reinterpret_cast<Uint64>(node.get()));
 
         for (int i = 0; i < 60; ++i) {
-            physics.process(scene, 1.0f / 60.0f);
+            physics.process(1.0f / 60.0f);
         }
 
         glm::vec3 pos = physics.getPosition(body);

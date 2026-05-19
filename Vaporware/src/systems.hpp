@@ -122,13 +122,12 @@ public:
 class AutoRotateSystem {
 public:
     static void update(entt::registry& registry, float deltaTime) {
-        auto view = registry.view<SceneNodeReferenceComponent, AutoRotateComponent>();
+        auto view = registry.view<Vapor::TransformComponent, AutoRotateComponent>();
         for (auto entity : view) {
-            auto& ref = view.get<SceneNodeReferenceComponent>(entity);
+            auto& transform = view.get<Vapor::TransformComponent>(entity);
             auto& rotate = view.get<AutoRotateComponent>(entity);
-            if (ref.node) {
-                ref.node->rotate(rotate.axis, rotate.speed * deltaTime);
-            }
+            glm::quat delta = glm::angleAxis(rotate.speed * deltaTime, glm::normalize(rotate.axis));
+            transform.rotation = delta * transform.rotation;
         }
     }
 };
@@ -203,13 +202,11 @@ public:
 
             if (auto* follow = reg.try_get<FollowCameraComponent>(entity)) {
                 if (!reg.valid(follow->target)) continue;
-                if (auto* nodeRef = reg.try_get<SceneNodeReferenceComponent>(follow->target)) {
-                    if (nodeRef->node) {
-                        glm::vec3 targetPos = nodeRef->node->getWorldPosition();
-                        glm::vec3 desiredPos = targetPos + follow->offset;
-                        cam.position = glm::mix(cam.position, desiredPos, 1.0f - pow(follow->smoothFactor, deltaTime));
-                        cam.rotation = glm::quatLookAt(glm::normalize(targetPos - cam.position), glm::vec3(0, 1, 0));
-                    }
+                if (auto* transform = reg.try_get<Vapor::TransformComponent>(follow->target)) {
+                    glm::vec3 targetPos = transform->position;
+                    glm::vec3 desiredPos = targetPos + follow->offset;
+                    cam.position = glm::mix(cam.position, desiredPos, 1.0f - pow(follow->smoothFactor, deltaTime));
+                    cam.rotation = glm::quatLookAt(glm::normalize(targetPos - cam.position), glm::vec3(0, 1, 0));
                 }
             }
 

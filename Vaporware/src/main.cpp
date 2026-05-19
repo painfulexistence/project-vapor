@@ -146,7 +146,7 @@ auto main(int argc, char* args[]) -> int {
         true,// optimized
         Vapor::LoadMode::Async,
         [](std::shared_ptr<Scene> loadedScene) -> void {
-            fmt::print("Scene loaded with {} nodes\n", loadedScene->nodes.size());
+            fmt::print("Scene loaded with {} staged meshes\n", loadedScene->stagedMeshes.size());
         }
     );
     auto albedoResource =
@@ -312,7 +312,7 @@ auto main(int argc, char* args[]) -> int {
         engineCore->update(deltaTime);
 
         scene->update(deltaTime);
-        physics->process(scene, deltaTime);
+        physics->process(registry, deltaTime);
         scene->update(deltaTime);
 
         // Rendering
