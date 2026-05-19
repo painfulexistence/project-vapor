@@ -8,7 +8,6 @@
 #include <RmlUi/Core/Element.h>
 #include <RmlUi/Core/ElementDocument.h>
 #include <RmlUi/Core/PropertiesIteratorView.h>
-#include <RmlUi/Core/StyleSheetSpecification.h>
 #include <RmlUi/Core/Types.h>
 
 #include <SDL3/SDL.h>
@@ -212,7 +211,7 @@ extern "C" const char* Vapor_Rml_GetElementStyle(const char* elementId) {
         if (!first) g_styleBuf += ',';
         first = false;
         g_styleBuf += '"';
-        JsonAppendEscaped(g_styleBuf, Rml::StyleSheetSpecification::GetPropertyName(it.GetName()));
+        JsonAppendEscaped(g_styleBuf, it.GetName());
         g_styleBuf += "\":\"";
         JsonAppendEscaped(g_styleBuf, it.GetProperty().ToString());
         g_styleBuf += '"';
