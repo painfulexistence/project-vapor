@@ -195,7 +195,7 @@ public:
     bool isGeometryDirty = true;
 
     Scene() = default;
-    Scene(const std::string& name) : name(name) {};
+    Scene(const std::string& sceneName) : name(sceneName) {};
     ~Scene() = default;
 
     void print();
