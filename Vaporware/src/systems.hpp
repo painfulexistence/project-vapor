@@ -127,7 +127,7 @@ public:
             auto& transform = view.get<Vapor::TransformComponent>(entity);
             auto& rotate = view.get<AutoRotateComponent>(entity);
             glm::quat delta = glm::angleAxis(rotate.speed * deltaTime, glm::normalize(rotate.axis));
-            transform.rotation = delta * transform.rotation;
+            transform.rotation = glm::normalize(delta * transform.rotation);
         }
     }
 };
