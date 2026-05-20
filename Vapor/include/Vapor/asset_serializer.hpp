@@ -44,6 +44,8 @@ namespace cereal {
 
 class AssetSerializer {
 public:
+    static constexpr uint32_t SCENE_FORMAT_VERSION = 2;
+
     static void serializeScene(const std::shared_ptr<Scene>& scene, const std::string& path);
     static std::shared_ptr<Scene> deserializeScene(const std::string& path);
 

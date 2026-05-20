@@ -1,13 +1,10 @@
 #include "asset_serializer.hpp"
 #include <SDL3/SDL_stdinc.h>
-
-using namespace Vapor;
 #include <SDL3/SDL_timer.h>
 #include <fmt/core.h>
 #include <fstream>
 #include <stdexcept>
 #include <unordered_map>
-
 
 using namespace Vapor;
 
@@ -21,6 +18,7 @@ void AssetSerializer::serializeScene(const std::shared_ptr<Scene>& scene, const 
         }
 
         cereal::BinaryOutputArchive archive(file);
+        archive(SCENE_FORMAT_VERSION);
         archive(scene->name);
         archive(scene->vertices);
         archive(scene->indices);
@@ -87,6 +85,20 @@ auto AssetSerializer::deserializeScene(const std::string& path) -> std::shared_p
     }
 
     cereal::BinaryInputArchive archive(file);
+    uint32_t version = 0;
+    try {
+        archive(version);
+    } catch (...) {
+        throw std::runtime_error(fmt::format(
+            "Failed to read scene format version from: {}. Delete the cache file and re-run.", path
+        ));
+    }
+    if (version != SCENE_FORMAT_VERSION) {
+        throw std::runtime_error(fmt::format(
+            "Scene cache version mismatch in {}: expected {}, got {}. Delete the cache file and re-run.",
+            path, SCENE_FORMAT_VERSION, version
+        ));
+    }
     auto scene = std::make_shared<Scene>();
     archive(scene->name);
     archive(scene->vertices);
