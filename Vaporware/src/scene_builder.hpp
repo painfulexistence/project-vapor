@@ -192,23 +192,23 @@ inline SceneResources buildScene(
     };
 
     // Overlay pages — eager-loaded, always resident
-    addPage(PageID::HUD,          "assets/ui/hud.rml",           std::make_shared<HUDPage>(),          false, true);
-    addPage(PageID::Letterbox,    "assets/ui/letterbox.rml",     std::make_shared<LetterboxPage>(),    false, true);
-    addPage(PageID::Subtitle,     "assets/ui/subtitle.rml",      std::make_shared<SubtitlePage>(),     false, true);
-    addPage(PageID::ScrollText,   "assets/ui/scroll_text.rml",   std::make_shared<ScrollTextPage>(),   false, true);
-    addPage(PageID::ChapterTitle, "assets/ui/chapter_title.rml", std::make_shared<ChapterTitlePage>(), false, true);
+    addPage(PageID::HUD,          "ui/hud.rml",           std::make_shared<HUDPage>(),          false, true);
+    addPage(PageID::Letterbox,    "ui/letterbox.rml",     std::make_shared<LetterboxPage>(),    false, true);
+    addPage(PageID::Subtitle,     "ui/subtitle.rml",      std::make_shared<SubtitlePage>(),     false, true);
+    addPage(PageID::ScrollText,   "ui/scroll_text.rml",   std::make_shared<ScrollTextPage>(),   false, true);
+    addPage(PageID::ChapterTitle, "ui/chapter_title.rml", std::make_shared<ChapterTitlePage>(), false, true);
 
     // Menu pages — lazy-loaded (document created only when first shown)
-    addPage(PageID::MainMenu, "assets/ui/menus/main_menu.rml", std::make_shared<MainMenuPage>(
+    addPage(PageID::MainMenu, "ui/menus/main_menu.rml", std::make_shared<MainMenuPage>(
         [&registry] { PageSystem::popAll(registry); },
         [] { SDL_Event e{}; e.type = SDL_EVENT_QUIT; SDL_PushEvent(&e); }
     ), true);
-    addPage(PageID::PauseMenu, "assets/ui/menus/pause_menu.rml", std::make_shared<PauseMenuPage>(
+    addPage(PageID::PauseMenu, "ui/menus/pause_menu.rml", std::make_shared<PauseMenuPage>(
         [&registry] { PageSystem::pop(registry); },
         [&registry] { PageSystem::popAll(registry); PageSystem::push(registry, PageID::MainMenu); }
     ), true);
-    addPage(PageID::Settings,      "assets/ui/menus/settings.rml",       std::make_shared<SettingsPage>(),      true);
-    addPage(PageID::LoadingScreen, "assets/ui/menus/loading_screen.rml",  std::make_shared<LoadingScreenPage>(), true);
+    addPage(PageID::Settings,      "ui/menus/settings.rml",       std::make_shared<SettingsPage>(),      true);
+    addPage(PageID::LoadingScreen, "ui/menus/loading_screen.rml",  std::make_shared<LoadingScreenPage>(), true);
 
     PageSystem::push(registry, PageID::MainMenu);
 

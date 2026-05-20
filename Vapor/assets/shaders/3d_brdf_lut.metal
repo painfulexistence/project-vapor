@@ -1,6 +1,6 @@
 #include <metal_stdlib>
 using namespace metal;
-#include "assets/shaders/3d_common.metal"
+#include "Res/shaders/3d_common.metal"
 
 // BRDF Integration LUT shader
 // Pre-computes the split-sum BRDF integration for IBL specular

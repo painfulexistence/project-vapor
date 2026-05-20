@@ -1,10 +1,11 @@
 #include "Vapor/asset_manager.hpp"
+#include "Vapor/file_system.hpp"
 #include <catch2/catch_test_macros.hpp>
-#include <filesystem>
 
 TEST_CASE("asset manager - model loading", "[assets]") {
-    std::string modelPath = "assets/models/cube.obj";
-    if (!std::filesystem::exists(modelPath)) {
+    FileSystem::instance().initialize();
+    std::string modelPath = "models/cube.obj";
+    if (!FileSystem::instance().resolvePath(modelPath)) {
         SKIP("Test model not found: " << modelPath);
     }
 

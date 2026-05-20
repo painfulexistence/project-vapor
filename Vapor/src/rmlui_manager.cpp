@@ -1,5 +1,6 @@
 #include "rmlui_manager.hpp"
 #include "rmlui_system.hpp"
+#include "Vapor/file_system.hpp"
 #include <RmlUi/Core.h>
 #include <RmlUi/Debugger.h>
 #include <SDL3/SDL.h>
@@ -54,7 +55,8 @@ namespace Vapor {
         }
 
         // Load fonts
-        if (!Rml::LoadFontFace(SDL_GetBasePath() + std::string("assets/fonts/Arial Black.ttf"))) {
+        auto fontPath = FileSystem::instance().resolvePath("fonts/Arial Black.ttf");
+        if (!fontPath || !Rml::LoadFontFace(*fontPath)) {
             fmt::print("RmlUiManager::FinalizeInitialization: Warning - failed to load font\n");
         }
 
@@ -111,7 +113,12 @@ namespace Vapor {
             fmt::print("RmlUiManager::LoadDocument: RmlUi not initialized\n");
             return nullptr;
         }
-        std::string path = SDL_GetBasePath() + filename;
+        auto resolved = FileSystem::instance().resolvePath(filename);
+        if (!resolved) {
+            fmt::print("RmlUiManager::LoadDocument: Asset not found: {}\n", filename);
+            return nullptr;
+        }
+        std::string path = *resolved;
         fmt::print("RmlUiManager::LoadDocument: Attempting to load: {}\n", path);
         Rml::ElementDocument* document = m_context->LoadDocument(path);
         if (!document) {
@@ -126,7 +133,8 @@ namespace Vapor {
     auto RmlUiManager::ReloadDocument(const std::string& filename) -> Rml::ElementDocument* {
         if (!m_context) return nullptr;
 
-        std::string path = SDL_GetBasePath() + filename;
+        auto resolved = FileSystem::instance().resolvePath(filename);
+        std::string path = resolved ? *resolved : "";
         fmt::print("RmlUiManager::ReloadDocument: Looking for document with path: {}\n", path);
 
         // Debug: List all documents

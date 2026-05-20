@@ -2,7 +2,7 @@
 #include <metal_raytracing>
 using namespace metal;
 using raytracing::instance_acceleration_structure;
-#include "assets/shaders/3d_common.metal" // TODO: use more robust include path
+#include "Res/shaders/3d_common.metal" // TODO: use more robust include path
 
 
 struct Ray {

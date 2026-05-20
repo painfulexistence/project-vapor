@@ -19,6 +19,7 @@ add_subdirectory(MikkTSpace)
 set(SOURCES
     src/action_manager.cpp
     src/audio_engine.cpp
+    src/file_system.cpp
     src/input_manager.cpp
     src/asset_manager.cpp
     src/asset_serializer.cpp
@@ -50,13 +51,19 @@ set(SOURCES
 )
 
 if(APPLE)
-    list(APPEND SOURCES 
+    list(APPEND SOURCES
         src/renderer_metal.cpp
+        src/ui_renderer_metal.mm
         imgui/backends/imgui_impl_metal.mm
+    )
+else()
+    list(APPEND SOURCES
+        src/ui_renderer_stub.cpp
     )
 endif()
 
 add_library(Vapor ${SOURCES})
+set_target_properties(Vapor PROPERTIES POSITION_INDEPENDENT_CODE ON)
 target_compile_features(Vapor PRIVATE cxx_std_20)
 set_target_properties(Vapor PROPERTIES CXX_EXTENSIONS OFF)
 
@@ -173,3 +180,5 @@ install(DIRECTORY assets/ DESTINATION "${CMAKE_INSTALL_DATADIR}/vapor/assets")
 install(DIRECTORY "${CMAKE_CURRENT_BINARY_DIR}/assets/shaders"
     DESTINATION "${CMAKE_INSTALL_DATADIR}/vapor/assets"
 )
+
+add_subdirectory(capi)

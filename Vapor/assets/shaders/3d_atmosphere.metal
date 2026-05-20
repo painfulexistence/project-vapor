@@ -1,6 +1,6 @@
 #include <metal_stdlib>
 using namespace metal;
-#include "assets/shaders/3d_common.metal"
+#include "Res/shaders/3d_common.metal"
 
 // Atmosphere rendering using Rayleigh and Mie scattering
 // Based on: https://cpp-rendering.io/sky-and-atmosphere-rendering/

@@ -1,6 +1,6 @@
 #include <metal_stdlib>
 using namespace metal;
-#include "assets/shaders/3d_common.metal"
+#include "Res/shaders/3d_common.metal"
 
 // Sky capture shader - renders atmosphere to a cubemap face
 // Used for IBL (Image-Based Lighting)
