@@ -115,7 +115,7 @@ auto main(int argc, char* args[]) -> int {
     renderer->init(window);
 
     // Load a font for text rendering
-    FontHandle gameFont = renderer->loadFont("assets/fonts/Arial Black.ttf", 48.0f);
+    FontHandle gameFont = renderer->loadFont("fonts/Arial Black.ttf", 48.0f);
     if (gameFont.isValid()) {
         fmt::print("Font loaded successfully\n");
     } else {
@@ -123,7 +123,7 @@ auto main(int argc, char* args[]) -> int {
     }
 
     // Load a sprite texture for 2D/3D batch rendering demo
-    auto spriteImage = AssetManager::loadImage("assets/textures/default_albedo.png");
+    auto spriteImage = AssetManager::loadImage("textures/default_albedo.png");
     TextureHandle spriteTexture = renderer->createTexture(spriteImage);
     fmt::print("Sprite texture loaded\n");
 
@@ -142,7 +142,7 @@ auto main(int argc, char* args[]) -> int {
 
     fmt::print("Loading scene asynchronously...\n");
     auto sceneResource = resourceManager.loadScene(
-        std::string("assets/models/Sponza/Sponza.gltf"),
+        std::string("models/Sponza/Sponza.gltf"),
         true,// optimized
         Vapor::LoadMode::Async,
         [](std::shared_ptr<Scene> loadedScene) -> void {
@@ -150,11 +150,11 @@ auto main(int argc, char* args[]) -> int {
         }
     );
     auto albedoResource =
-        resourceManager.loadImage(std::string("assets/textures/american_walnut_albedo.png"), Vapor::LoadMode::Async);
+        resourceManager.loadImage(std::string("textures/american_walnut_albedo.png"), Vapor::LoadMode::Async);
     auto normalResource =
-        resourceManager.loadImage(std::string("assets/textures/american_walnut_normal.png"), Vapor::LoadMode::Async);
+        resourceManager.loadImage(std::string("textures/american_walnut_normal.png"), Vapor::LoadMode::Async);
     auto roughnessResource =
-        resourceManager.loadImage(std::string("assets/textures/american_walnut_roughness.png"), Vapor::LoadMode::Async);
+        resourceManager.loadImage(std::string("textures/american_walnut_roughness.png"), Vapor::LoadMode::Async);
 
     // NOTES: optionally call resourceManager.waitForAll();
 

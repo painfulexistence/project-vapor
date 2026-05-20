@@ -116,6 +116,18 @@ target_link_libraries(test_ui_system PRIVATE
 target_compile_features(test_ui_system PRIVATE cxx_std_20)
 target_compile_options(test_ui_system PRIVATE ${TEST_WARNING_FLAGS})
 
+# ── FileSystem unit tests (path resolution, priority, add/remove) ─────────
+add_executable(test_file_system
+    file_system_test.cpp
+)
+target_link_libraries(test_file_system PRIVATE
+    Vapor
+    Catch2::Catch2WithMain
+    fmt::fmt
+)
+target_compile_features(test_file_system PRIVATE cxx_std_20)
+target_compile_options(test_file_system PRIVATE ${TEST_WARNING_FLAGS})
+
 vapor_copy_assets(test_physics)
 vapor_copy_assets(test_resource_manager)
 vapor_copy_assets(test_asset_management)
@@ -134,3 +146,4 @@ catch_discover_tests(test_asset_management   WORKING_DIRECTORY "$<TARGET_FILE_DI
 catch_discover_tests(test_resource_manager   WORKING_DIRECTORY "$<TARGET_FILE_DIR:test_resource_manager>")
 catch_discover_tests(test_backend_support    WORKING_DIRECTORY "$<TARGET_FILE_DIR:test_backend_support>")
 catch_discover_tests(test_ui_system          WORKING_DIRECTORY "$<TARGET_FILE_DIR:test_ui_system>")
+catch_discover_tests(test_file_system        WORKING_DIRECTORY "$<TARGET_FILE_DIR:test_file_system>")

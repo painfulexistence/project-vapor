@@ -3,7 +3,7 @@
 #define MINIAUDIO_IMPLEMENTATION
 #include "miniaudio.h"
 
-#include <SDL3/SDL_filesystem.h>
+#include "Vapor/file_system.hpp"
 #include <fmt/core.h>
 
 namespace Vapor {
@@ -147,7 +147,12 @@ namespace Vapor {
         auto& inst = m_instances[id % MAX_AUDIO_INSTANCES];
         inst.sound = new ma_sound();
 
-        std::string filePath = SDL_GetBasePath() + filename;
+        auto resolvedAudio = FileSystem::instance().resolvePath(filename);
+        if (!resolvedAudio) {
+            fmt::print("Audio file not found in any search path: {}\n", filename);
+            return AUDIO_ID_INVALID;
+        }
+        std::string filePath = *resolvedAudio;
         if (ma_sound_init_from_file(m_engine, filePath.c_str(), MA_SOUND_FLAG_DECODE, nullptr, nullptr, inst.sound)
             != MA_SUCCESS) {
             fmt::print("Failed to load audio: {}\n", filename);
@@ -188,7 +193,12 @@ namespace Vapor {
         auto& inst = m_instances[id % MAX_AUDIO_INSTANCES];
         inst.sound = new ma_sound();
 
-        std::string filePath = SDL_GetBasePath() + filename;
+        auto resolvedAudio = FileSystem::instance().resolvePath(filename);
+        if (!resolvedAudio) {
+            fmt::print("Audio file not found in any search path: {}\n", filename);
+            return AUDIO_ID_INVALID;
+        }
+        std::string filePath = *resolvedAudio;
         if (ma_sound_init_from_file(m_engine, filePath.c_str(), MA_SOUND_FLAG_DECODE, nullptr, nullptr, inst.sound)
             != MA_SUCCESS) {
             fmt::print("Failed to load audio: {}\n", filename);

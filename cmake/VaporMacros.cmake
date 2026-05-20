@@ -18,8 +18,8 @@ function(vapor_copy_assets TARGET_NAME)
         add_custom_target(${_copy_target}
             COMMAND ${CMAKE_COMMAND} -E copy_directory
                     "${VAPOR_ASSETS_DIR}"
-                    "$<TARGET_FILE_DIR:${TARGET_NAME}>/assets"
-            COMMENT "Copying engine assets to $<TARGET_FILE_DIR:${TARGET_NAME}>/assets"
+                    "$<TARGET_FILE_DIR:${TARGET_NAME}>/Res"
+            COMMENT "Copying engine assets to $<TARGET_FILE_DIR:${TARGET_NAME}>/Res"
         )
     endif()
 

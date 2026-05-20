@@ -326,7 +326,7 @@ namespace Vapor {
             }
 
             // Load shader
-            std::string shaderSrc = readFile("assets/shaders/rmlui.metal");
+            std::string shaderSrc = readFile("shaders/rmlui.metal");
             auto code = NS::String::string(shaderSrc.data(), NS::StringEncoding::UTF8StringEncoding);
             NS::Error* error = nullptr;
             MTL::Library* library = m_device->newLibrary(code, nullptr, &error);
@@ -2595,26 +2595,26 @@ void Renderer_Metal::renderUI() {
 
 auto Renderer_Metal::createResources() -> void {
     // Create pipelines
-    drawPipeline = createPipeline("assets/shaders/3d_pbr_normal_mapped.metal", true, false, MSAA_SAMPLE_COUNT);
-    prePassPipeline = createPipeline("assets/shaders/3d_depth_only.metal", true, false, MSAA_SAMPLE_COUNT);
-    postProcessPipeline = createPipeline("assets/shaders/3d_post_process.metal", false, true, 1);
-    buildClustersPipeline = createComputePipeline("assets/shaders/3d_cluster_build.metal");
-    cullLightsPipeline = createComputePipeline("assets/shaders/3d_light_cull.metal");
-    tileCullingPipeline = createComputePipeline("assets/shaders/3d_tile_light_cull.metal");
-    normalResolvePipeline = createComputePipeline("assets/shaders/3d_normal_resolve.metal");
-    if (m_supportsRaytracing) raytraceShadowPipeline = createComputePipeline("assets/shaders/3d_raytrace_shadow.metal");
-    if (m_supportsRaytracing) raytraceAOPipeline = createComputePipeline("assets/shaders/3d_ssao.metal");
+    drawPipeline = createPipeline("shaders/3d_pbr_normal_mapped.metal", true, false, MSAA_SAMPLE_COUNT);
+    prePassPipeline = createPipeline("shaders/3d_depth_only.metal", true, false, MSAA_SAMPLE_COUNT);
+    postProcessPipeline = createPipeline("shaders/3d_post_process.metal", false, true, 1);
+    buildClustersPipeline = createComputePipeline("shaders/3d_cluster_build.metal");
+    cullLightsPipeline = createComputePipeline("shaders/3d_light_cull.metal");
+    tileCullingPipeline = createComputePipeline("shaders/3d_tile_light_cull.metal");
+    normalResolvePipeline = createComputePipeline("shaders/3d_normal_resolve.metal");
+    if (m_supportsRaytracing) raytraceShadowPipeline = createComputePipeline("shaders/3d_raytrace_shadow.metal");
+    if (m_supportsRaytracing) raytraceAOPipeline = createComputePipeline("shaders/3d_ssao.metal");
     atmospherePipeline =
-        createPipeline("assets/shaders/3d_atmosphere.metal", true, false, 1);// No MSAA for sky (full-screen triangle)
-    skyCapturePipeline = createPipeline("assets/shaders/3d_sky_capture.metal", true, true, 1);
-    irradianceConvolutionPipeline = createPipeline("assets/shaders/3d_irradiance_convolution.metal", true, true, 1);
-    prefilterEnvMapPipeline = createPipeline("assets/shaders/3d_prefilter_envmap.metal", true, true, 1);
-    brdfLUTPipeline = createPipeline("assets/shaders/3d_brdf_lut.metal", false, true, 1);
-    lightScatteringPipeline = createPipeline("assets/shaders/3d_light_scattering.metal", true, true, 1);
+        createPipeline("shaders/3d_atmosphere.metal", true, false, 1);// No MSAA for sky (full-screen triangle)
+    skyCapturePipeline = createPipeline("shaders/3d_sky_capture.metal", true, true, 1);
+    irradianceConvolutionPipeline = createPipeline("shaders/3d_irradiance_convolution.metal", true, true, 1);
+    prefilterEnvMapPipeline = createPipeline("shaders/3d_prefilter_envmap.metal", true, true, 1);
+    brdfLUTPipeline = createPipeline("shaders/3d_brdf_lut.metal", false, true, 1);
+    lightScatteringPipeline = createPipeline("shaders/3d_light_scattering.metal", true, true, 1);
 
     // Create debug draw pipeline
     {
-        auto shaderSrc = readFile("assets/shaders/3d_debug.metal");
+        auto shaderSrc = readFile("shaders/3d_debug.metal");
         auto code = NS::String::string(shaderSrc.data(), NS::StringEncoding::UTF8StringEncoding);
         NS::Error* error = nullptr;
         MTL::Library* library = device->newLibrary(code, nullptr, &error);
@@ -2676,7 +2676,7 @@ auto Renderer_Metal::createResources() -> void {
 
     // Create 2D batch rendering pipeline
     {
-        auto shaderSrc = readFile("assets/shaders/2d_batch.metal");
+        auto shaderSrc = readFile("shaders/2d_batch.metal");
         auto code = NS::String::string(shaderSrc.data(), NS::StringEncoding::UTF8StringEncoding);
         NS::Error* error = nullptr;
         MTL::Library* library = device->newLibrary(code, nullptr, &error);
@@ -3053,11 +3053,11 @@ auto Renderer_Metal::createResources() -> void {
 
     // Create textures
     defaultAlbedoTexture = createTexture(
-        AssetManager::loadImage("assets/textures/default_albedo.png")
-    );// createTexture(AssetManager::loadImage("assets/textures/viking_room.png"));
-    defaultNormalTexture = createTexture(AssetManager::loadImage("assets/textures/default_norm.png"));
-    defaultORMTexture = createTexture(AssetManager::loadImage("assets/textures/default_orm.png"));
-    defaultEmissiveTexture = createTexture(AssetManager::loadImage("assets/textures/default_emissive.png"));
+        AssetManager::loadImage("textures/default_albedo.png")
+    );// createTexture(AssetManager::loadImage("textures/viking_room.png"));
+    defaultNormalTexture = createTexture(AssetManager::loadImage("textures/default_norm.png"));
+    defaultORMTexture = createTexture(AssetManager::loadImage("textures/default_orm.png"));
+    defaultEmissiveTexture = createTexture(AssetManager::loadImage("textures/default_emissive.png"));
 
     MTL::TextureDescriptor* depthStencilTextureDesc = MTL::TextureDescriptor::alloc()->init();
     depthStencilTextureDesc->setTextureType(MTL::TextureType2DMultisample);
@@ -3186,7 +3186,7 @@ auto Renderer_Metal::createResources() -> void {
 
     // Bloom brightness pipeline
     {
-        auto shaderSrc = readFile("assets/shaders/3d_bloom_brightness.metal");
+        auto shaderSrc = readFile("shaders/3d_bloom_brightness.metal");
         auto code = NS::String::string(shaderSrc.data(), NS::StringEncoding::UTF8StringEncoding);
         NS::Error* error = nullptr;
         MTL::Library* library = device->newLibrary(code, nullptr, &error);
@@ -3228,7 +3228,7 @@ auto Renderer_Metal::createResources() -> void {
 
     // Bloom downsample pipeline
     {
-        auto shaderSrc = readFile("assets/shaders/3d_bloom_downsample.metal");
+        auto shaderSrc = readFile("shaders/3d_bloom_downsample.metal");
         auto code = NS::String::string(shaderSrc.data(), NS::StringEncoding::UTF8StringEncoding);
         NS::Error* error = nullptr;
         MTL::Library* library = device->newLibrary(code, nullptr, &error);
@@ -3270,7 +3270,7 @@ auto Renderer_Metal::createResources() -> void {
 
     // Bloom upsample pipeline
     {
-        auto shaderSrc = readFile("assets/shaders/3d_bloom_upsample.metal");
+        auto shaderSrc = readFile("shaders/3d_bloom_upsample.metal");
         auto code = NS::String::string(shaderSrc.data(), NS::StringEncoding::UTF8StringEncoding);
         NS::Error* error = nullptr;
         MTL::Library* library = device->newLibrary(code, nullptr, &error);
@@ -3310,7 +3310,7 @@ auto Renderer_Metal::createResources() -> void {
 
     // Bloom composite pipeline
     {
-        auto shaderSrc = readFile("assets/shaders/3d_bloom_composite.metal");
+        auto shaderSrc = readFile("shaders/3d_bloom_composite.metal");
         auto code = NS::String::string(shaderSrc.data(), NS::StringEncoding::UTF8StringEncoding);
         NS::Error* error = nullptr;
         MTL::Library* library = device->newLibrary(code, nullptr, &error);
@@ -3353,7 +3353,7 @@ auto Renderer_Metal::createResources() -> void {
     // Volumetric Fog pipeline (simple height fog)
     // ========================================================================
     {
-        auto shaderSrc = readFile("assets/shaders/3d_volumetric_fog.metal");
+        auto shaderSrc = readFile("shaders/3d_volumetric_fog.metal");
         auto code = NS::String::string(shaderSrc.data(), NS::StringEncoding::UTF8StringEncoding);
         NS::Error* error = nullptr;
         MTL::Library* library = device->newLibrary(code, nullptr, &error);
@@ -3423,7 +3423,7 @@ auto Renderer_Metal::createResources() -> void {
     // Volumetric Cloud pipelines
     // ========================================================================
     {
-        auto shaderSrc = readFile("assets/shaders/3d_volumetric_clouds.metal");
+        auto shaderSrc = readFile("shaders/3d_volumetric_clouds.metal");
         auto code = NS::String::string(shaderSrc.data(), NS::StringEncoding::UTF8StringEncoding);
         NS::Error* error = nullptr;
         MTL::Library* library = device->newLibrary(code, nullptr, &error);
@@ -3531,7 +3531,7 @@ auto Renderer_Metal::createResources() -> void {
     // Sun Flare pipeline
     // ========================================================================
     {
-        auto shaderSrc = readFile("assets/shaders/3d_sun_flare.metal");
+        auto shaderSrc = readFile("shaders/3d_sun_flare.metal");
         auto code = NS::String::string(shaderSrc.data(), NS::StringEncoding::UTF8StringEncoding);
         NS::Error* error = nullptr;
         MTL::Library* library = device->newLibrary(code, nullptr, &error);
@@ -3624,7 +3624,7 @@ auto Renderer_Metal::createResources() -> void {
 
     // DOF CoC pipeline
     {
-        auto shaderSrc = readFile("assets/shaders/3d_dof_coc.metal");
+        auto shaderSrc = readFile("shaders/3d_dof_coc.metal");
         auto code = NS::String::string(shaderSrc.data(), NS::StringEncoding::UTF8StringEncoding);
         NS::Error* error = nullptr;
         MTL::Library* library = device->newLibrary(code, nullptr, &error);
@@ -3664,7 +3664,7 @@ auto Renderer_Metal::createResources() -> void {
 
     // DOF Blur pipeline
     {
-        auto shaderSrc = readFile("assets/shaders/3d_dof_blur.metal");
+        auto shaderSrc = readFile("shaders/3d_dof_blur.metal");
         auto code = NS::String::string(shaderSrc.data(), NS::StringEncoding::UTF8StringEncoding);
         NS::Error* error = nullptr;
         MTL::Library* library = device->newLibrary(code, nullptr, &error);
@@ -3704,7 +3704,7 @@ auto Renderer_Metal::createResources() -> void {
 
     // DOF Composite pipeline
     {
-        auto shaderSrc = readFile("assets/shaders/3d_dof_composite.metal");
+        auto shaderSrc = readFile("shaders/3d_dof_composite.metal");
         auto code = NS::String::string(shaderSrc.data(), NS::StringEncoding::UTF8StringEncoding);
         NS::Error* error = nullptr;
         MTL::Library* library = device->newLibrary(code, nullptr, &error);
@@ -3755,7 +3755,7 @@ auto Renderer_Metal::createResources() -> void {
 
     // Create water pipeline with alpha blending
     {
-        auto shaderSrc = readFile("assets/shaders/3d_water.metal");
+        auto shaderSrc = readFile("shaders/3d_water.metal");
         auto code = NS::String::string(shaderSrc.data(), NS::StringEncoding::UTF8StringEncoding);
         NS::Error* error = nullptr;
         MTL::Library* library = device->newLibrary(code, nullptr, &error);
@@ -4033,7 +4033,7 @@ auto Renderer_Metal::createResources() -> void {
     // Create particle compute pipelines
     {
         NS::Error* error = nullptr;
-        auto shaderSrc = readFile("assets/shaders/3d_particle.metal");
+        auto shaderSrc = readFile("shaders/3d_particle.metal");
         auto code = NS::String::string(shaderSrc.data(), NS::StringEncoding::UTF8StringEncoding);
         MTL::CompileOptions* options = nullptr;
         auto library = NS::TransferPtr(device->newLibrary(code, options, &error));
@@ -4063,7 +4063,7 @@ auto Renderer_Metal::createResources() -> void {
     // Create particle render pipeline - compile from source file
     {
         NS::Error* error = nullptr;
-        auto shaderSource = readFile("assets/shaders/3d_particle.metal");
+        auto shaderSource = readFile("shaders/3d_particle.metal");
         auto source = NS::String::string(shaderSource.c_str(), NS::UTF8StringEncoding);
         auto options = NS::TransferPtr(MTL::CompileOptions::alloc()->init());
         auto library = NS::TransferPtr(device->newLibrary(source, options.get(), &error));

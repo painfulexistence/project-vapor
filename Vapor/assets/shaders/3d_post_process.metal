@@ -1,6 +1,6 @@
 #include <metal_stdlib>
 using namespace metal;
-#include "assets/shaders/3d_common.metal" // TODO: use more robust include path
+#include "Res/shaders/3d_common.metal" // TODO: use more robust include path
 
 constant float2 ndcVerts[3] = {
     float2(-1.0, -1.0),
