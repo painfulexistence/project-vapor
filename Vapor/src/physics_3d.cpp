@@ -426,12 +426,18 @@ void Physics3D::process(entt::registry& reg, float dt) {
     }
 
     timeAccum += dt;
-    while (timeAccum >= FIXED_TIME_STEP) {
+    constexpr int MAX_PHYSICS_STEPS_PER_FRAME = 4;
+    int stepsThisFrame = 0;
+    while (timeAccum >= FIXED_TIME_STEP && stepsThisFrame < MAX_PHYSICS_STEPS_PER_FRAME) {
         ++step;
+        ++stepsThisFrame;
         for (auto* ctrl : vehicleControllers) ctrl->update(FIXED_TIME_STEP);
         for (auto* ctrl : characterControllers) ctrl->update(FIXED_TIME_STEP, getGravity());
         physicsSystem->Update(FIXED_TIME_STEP, 1, tempAllocator.get(), jobSystem.get());
         timeAccum -= FIXED_TIME_STEP;
+    }
+    if (timeAccum > FIXED_TIME_STEP * MAX_PHYSICS_STEPS_PER_FRAME) {
+        timeAccum = FIXED_TIME_STEP;
     }
 
     if (debugDrawEnabled && debugRenderer) {
@@ -446,21 +452,24 @@ void Physics3D::process(entt::registry& reg, float dt) {
         rawEvents.swap(listener->rawEvents);
     }
 
-    pendingCollisionEvents.clear();
-    pendingTriggerEvents.clear();
+    {
+        std::lock_guard<std::mutex> popLock(popMutex);
+        pendingCollisionEvents.clear();
+        pendingTriggerEvents.clear();
 
-    for (auto& raw : rawEvents) {
-        Uint32 ridA = UINT32_MAX, ridB = UINT32_MAX;
-        auto itA = bodyIDToRid.find(raw.id1.GetIndexAndSequenceNumber());
-        auto itB = bodyIDToRid.find(raw.id2.GetIndexAndSequenceNumber());
-        if (itA != bodyIDToRid.end()) ridA = itA->second;
-        if (itB != bodyIDToRid.end()) ridB = itB->second;
-        BodyHandle ha{ ridA }, hb{ ridB };
+        for (auto& raw : rawEvents) {
+            Uint32 ridA = UINT32_MAX, ridB = UINT32_MAX;
+            auto itA = bodyIDToRid.find(raw.id1.GetIndexAndSequenceNumber());
+            auto itB = bodyIDToRid.find(raw.id2.GetIndexAndSequenceNumber());
+            if (itA != bodyIDToRid.end()) ridA = itA->second;
+            if (itB != bodyIDToRid.end()) ridB = itB->second;
+            BodyHandle ha{ ridA }, hb{ ridB };
 
-        if (raw.isTrigger) {
-            pendingTriggerEvents.push_back({ ha, hb, raw.isEnter });
-        } else {
-            pendingCollisionEvents.push_back({ ha, hb, raw.isEnter });
+            if (raw.isTrigger) {
+                pendingTriggerEvents.push_back({ ha, hb, raw.isEnter });
+            } else {
+                pendingCollisionEvents.push_back({ ha, hb, raw.isEnter });
+            }
         }
     }
 
@@ -488,6 +497,32 @@ void Physics3D::process(entt::registry& reg, float dt) {
             t.isDirty  = true;
         }
     }
+
+    // 8. Sync dynamic RigidbodyComponent positions/rotations → TransformComponent
+    {
+        auto view = reg.view<Vapor::RigidbodyComponent, Vapor::TransformComponent>();
+        for (auto entity : view) {
+            auto& rb = view.get<Vapor::RigidbodyComponent>(entity);
+            if (!rb.syncFromPhysics) continue;
+            if (!rb.body.valid()) continue;
+
+            auto it = bodies.find(rb.body.rid);
+            if (it == bodies.end()) continue;
+
+            JPH::BodyLockRead lock(physicsSystem->GetBodyLockInterface(), it->second);
+            if (!lock.Succeeded()) continue;
+
+            const JPH::Body& body = lock.GetBody();
+            if (body.GetMotionType() != JPH::EMotionType::Dynamic) continue;
+
+            auto& t = view.get<Vapor::TransformComponent>(entity);
+            auto pos = body.GetPosition();
+            auto rot = body.GetRotation();
+            t.position = glm::vec3(pos.GetX(), pos.GetY(), pos.GetZ());
+            t.rotation = glm::quat(rot.GetW(), rot.GetX(), rot.GetY(), rot.GetZ());
+            t.isDirty  = true;
+        }
+    }
 }
 
 void Physics3D::process(float dt) {
@@ -498,8 +533,11 @@ void Physics3D::process(float dt) {
         ctrl->storePreviousPosition();
     }
 
-    while (timeAccum >= FIXED_TIME_STEP) {
+    constexpr int MAX_PHYSICS_STEPS_PER_FRAME = 4;
+    int stepsThisFrame = 0;
+    while (timeAccum >= FIXED_TIME_STEP && stepsThisFrame < MAX_PHYSICS_STEPS_PER_FRAME) {
         ++step;
+        ++stepsThisFrame;
 
         // Update vehicle controllers BEFORE physics step (Jolt requirement)
         for (auto* ctrl : vehicleControllers) {
@@ -515,6 +553,9 @@ void Physics3D::process(float dt) {
 
         timeAccum -= FIXED_TIME_STEP;
     }
+    if (timeAccum > FIXED_TIME_STEP * MAX_PHYSICS_STEPS_PER_FRAME) {
+        timeAccum = FIXED_TIME_STEP;
+    }
 
     if (debugDrawEnabled && debugRenderer) {
         debugRenderer->update();
@@ -528,21 +569,24 @@ void Physics3D::process(float dt) {
         rawEvents.swap(listener->rawEvents);
     }
 
-    pendingCollisionEvents.clear();
-    pendingTriggerEvents.clear();
+    {
+        std::lock_guard<std::mutex> popLock(popMutex);
+        pendingCollisionEvents.clear();
+        pendingTriggerEvents.clear();
 
-    for (auto& raw : rawEvents) {
-        Uint32 ridA = UINT32_MAX, ridB = UINT32_MAX;
-        auto itA = bodyIDToRid.find(raw.id1.GetIndexAndSequenceNumber());
-        auto itB = bodyIDToRid.find(raw.id2.GetIndexAndSequenceNumber());
-        if (itA != bodyIDToRid.end()) ridA = itA->second;
-        if (itB != bodyIDToRid.end()) ridB = itB->second;
-        BodyHandle ha{ ridA }, hb{ ridB };
+        for (auto& raw : rawEvents) {
+            Uint32 ridA = UINT32_MAX, ridB = UINT32_MAX;
+            auto itA = bodyIDToRid.find(raw.id1.GetIndexAndSequenceNumber());
+            auto itB = bodyIDToRid.find(raw.id2.GetIndexAndSequenceNumber());
+            if (itA != bodyIDToRid.end()) ridA = itA->second;
+            if (itB != bodyIDToRid.end()) ridB = itB->second;
+            BodyHandle ha{ ridA }, hb{ ridB };
 
-        if (raw.isTrigger) {
-            pendingTriggerEvents.push_back({ ha, hb, raw.isEnter });
-        } else {
-            pendingCollisionEvents.push_back({ ha, hb, raw.isEnter });
+            if (raw.isTrigger) {
+                pendingTriggerEvents.push_back({ ha, hb, raw.isEnter });
+            } else {
+                pendingCollisionEvents.push_back({ ha, hb, raw.isEnter });
+            }
         }
     }
 }
@@ -551,10 +595,12 @@ void Physics3D::drawImGui(float dt) {
 }
 
 auto Physics3D::popCollisionEvents() -> std::vector<CollisionEvent> {
+    std::lock_guard<std::mutex> lock(popMutex);
     return std::move(pendingCollisionEvents);
 }
 
 auto Physics3D::popTriggerEvents() -> std::vector<TriggerEvent> {
+    std::lock_guard<std::mutex> lock(popMutex);
     return std::move(pendingTriggerEvents);
 }
 

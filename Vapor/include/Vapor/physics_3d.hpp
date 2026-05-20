@@ -4,6 +4,7 @@
 #include <glm/gtc/quaternion.hpp>
 #include <glm/vec3.hpp>
 #include <memory>
+#include <mutex>
 #include <unordered_map>
 #include <vector>
 
@@ -272,6 +273,7 @@ private:
 
     std::vector<CollisionEvent> pendingCollisionEvents;
     std::vector<TriggerEvent> pendingTriggerEvents;
+    std::mutex popMutex; // protects pendingCollisionEvents / pendingTriggerEvents
 
     std::unordered_map<Uint32, JPH::BodyID> triggers;
     Uint32 nextTriggerID = 0;
