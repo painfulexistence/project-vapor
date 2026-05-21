@@ -61,9 +61,10 @@ jobs:
       - name: Print ccache stats
         run: ccache --show-stats
 
-  # ── Multi-OS Build (manual dispatch only) ────────────────────────────────
+  # ── Multi-OS Build ───────────────────────────────────────────────────────
+  # PRs: Ubuntu Release only (macOS already covered by the test job above)
+  # Manual dispatch: full matrix for thorough compatibility checks
   build:
-    if: github.event_name == 'workflow_dispatch'
     runs-on: ${{ matrix.os }}
     needs: test
     env:
@@ -72,8 +73,8 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        os: [macos-latest, ubuntu-latest]
-        build-type: [Debug, Release, MinSizeRel]
+        os: ${{ github.event_name == 'pull_request' && fromJSON('["ubuntu-latest"]') || fromJSON('["macos-latest", "ubuntu-latest"]') }}
+        build-type: ${{ github.event_name == 'pull_request' && fromJSON('["Release"]') || fromJSON('["Debug", "Release", "MinSizeRel"]') }}
 
     steps:
       - uses: actions/checkout@v4
@@ -130,4 +131,4 @@ jobs:
           -S ${{ github.workspace }}
 
       - name: CMake Build
-        run: cmake --build ${{ steps.strings.outputs.build-dir }}
+        run: cmake --build ${{ steps.strings.outputs.build-dir }} --parallel $(nproc 2>/dev/null || sysctl -n hw.logicalcpu)
