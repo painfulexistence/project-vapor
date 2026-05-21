@@ -53,6 +53,7 @@ set(SOURCES
 if(APPLE)
     list(APPEND SOURCES
         src/renderer_metal.cpp
+        src/rml_renderer_metal.cpp
         src/ui_renderer_metal.cpp
         imgui/backends/imgui_impl_metal.mm
     )

@@ -30,431 +30,11 @@
 #include "helper.hpp"
 #include "mesh_builder.hpp"
 #include "rmlui_manager.hpp"
+#include "Vapor/rml_renderer_metal.hpp"
 
 #include <RmlUi/Core.h>
 #include <glm/gtc/matrix_transform.hpp>
 #include <glm/gtc/type_ptr.hpp>
-
-namespace Vapor {
-
-    class RmlUiRendererMetal : public Rml::RenderInterface {
-    public:
-        explicit RmlUiRendererMetal(MTL::Device* device) : m_device(device) {
-            m_transform = Rml::Matrix4f::Identity();
-        }
-
-        ~RmlUiRendererMetal() override {
-            shutdown();
-        }
-
-        auto initialize() -> bool {
-            if (!m_device) {
-                return false;
-            }
-            createDefaultWhiteTexture();
-            createPipelineState();
-            return true;
-        }
-
-        void shutdown() {
-            m_geometry.clear();
-            m_textures.clear();
-            m_pipelineState.reset();
-            m_depthStencilState.reset();
-            m_defaultWhiteTexture.reset();
-        }
-
-        void beginFrame(MTL::CommandBuffer* commandBuffer, MTL::Texture* renderTarget, int width, int height) {
-            if (!commandBuffer || !renderTarget) {
-                return;
-            }
-
-            // width/height are logical (window) size for RmlUI coordinates / projection
-            m_logicalWidth = width;
-            m_logicalHeight = height;
-
-            // Get framebuffer size and calculate HiDPI scale
-            int fbWidth = static_cast<int>(renderTarget->width());
-            int fbHeight = static_cast<int>(renderTarget->height());
-            m_scaleX = width > 0 ? static_cast<float>(fbWidth) / width : 1.0f;
-            m_scaleY = height > 0 ? static_cast<float>(fbHeight) / height : 1.0f;
-
-            m_currentCommandBuffer = commandBuffer;
-            m_currentRenderTarget = renderTarget;
-
-            // Create render pass descriptor
-            m_currentPassDesc = NS::TransferPtr(MTL::RenderPassDescriptor::renderPassDescriptor());
-            auto colorAttachment = m_currentPassDesc->colorAttachments()->object(0);
-            colorAttachment->setTexture(renderTarget);
-            colorAttachment->setLoadAction(MTL::LoadActionLoad);// Load existing content
-            colorAttachment->setStoreAction(MTL::StoreActionStore);
-
-            m_currentEncoder = commandBuffer->renderCommandEncoder(m_currentPassDesc.get());
-
-            // Set viewport to framebuffer size
-            MTL::Viewport viewport;
-            viewport.originX = 0.0;
-            viewport.originY = 0.0;
-            viewport.width = static_cast<double>(fbWidth);
-            viewport.height = static_cast<double>(fbHeight);
-            viewport.znear = 0.0;
-            viewport.zfar = 1.0;
-            m_currentEncoder->setViewport(viewport);
-
-            // Set scissor rect to full framebuffer
-            MTL::ScissorRect scissorRect;
-            scissorRect.x = 0;
-            scissorRect.y = 0;
-            scissorRect.width = static_cast<NS::UInteger>(fbWidth);
-            scissorRect.height = static_cast<NS::UInteger>(fbHeight);
-            m_currentEncoder->setScissorRect(scissorRect);
-        }
-
-        void endFrame() {
-            if (m_currentEncoder) {
-                m_currentEncoder->endEncoding();
-                m_currentEncoder = nullptr;
-            }
-            m_currentCommandBuffer = nullptr;
-            m_currentRenderTarget = nullptr;
-            m_currentPassDesc.reset();
-        }
-
-        // Rml::RenderInterface implementation
-        auto CompileGeometry(Rml::Span<const Rml::Vertex> vertices, Rml::Span<const int> indices)
-            -> Rml::CompiledGeometryHandle override {
-            if (!m_device) {
-                return 0;
-            }
-
-            // Create vertex buffer
-            auto vertexBuffer = NS::TransferPtr(
-                m_device->newBuffer(vertices.size() * sizeof(Rml::Vertex), MTL::ResourceStorageModeShared)
-            );
-            memcpy(vertexBuffer->contents(), vertices.data(), vertices.size() * sizeof(Rml::Vertex));
-
-            // Create index buffer
-            auto indexBuffer =
-                NS::TransferPtr(m_device->newBuffer(indices.size() * sizeof(int), MTL::ResourceStorageModeShared));
-            memcpy(indexBuffer->contents(), indices.data(), indices.size() * sizeof(int));
-
-            CompiledGeometry geom;
-            geom.vertexBuffer = vertexBuffer;
-            geom.indexBuffer = indexBuffer;
-            geom.indexCount = static_cast<NS::UInteger>(indices.size());
-
-            Rml::CompiledGeometryHandle handle = m_nextGeometryHandle++;
-            m_geometry[handle] = std::move(geom);
-
-            return handle;
-        }
-
-        void RenderGeometry(
-            Rml::CompiledGeometryHandle geometry, Rml::Vector2f translation, Rml::TextureHandle texture
-        ) override {
-            if (!m_currentEncoder) {
-                return;
-            }
-
-            auto it = m_geometry.find(geometry);
-            if (it == m_geometry.end()) {
-                return;
-            }
-
-            const CompiledGeometry& geom = it->second;
-
-            // Set pipeline state
-            if (!m_pipelineState) {
-                return;
-            }
-            m_currentEncoder->setRenderPipelineState(m_pipelineState.get());
-            m_currentEncoder->setDepthStencilState(m_depthStencilState.get());
-            m_currentEncoder->setCullMode(MTL::CullModeNone);
-
-            // Calculate projection matrix (use logical size for RmlUI coordinates)
-            glm::mat4 projection = glm::ortho(0.0f, (float)m_logicalWidth, (float)m_logicalHeight, 0.0f, -1.0f, 1.0f);
-
-            // Apply translation
-            glm::mat4 transform = glm::make_mat4(m_transform.data());
-            transform = glm::translate(transform, glm::vec3(translation.x, translation.y, 0.0f));
-
-            // Create uniforms
-            struct Uniforms {
-                glm::mat4 projectionMatrix;
-                glm::mat4 transformMatrix;
-            } uniforms;
-            uniforms.projectionMatrix = projection;
-            uniforms.transformMatrix = transform;
-
-            m_currentEncoder->setVertexBytes(&uniforms, sizeof(Uniforms), 0);
-            m_currentEncoder->setVertexBuffer(geom.vertexBuffer.get(), 0, 1);
-
-            // Set texture
-            bool hasTexture = (texture != 0);
-            if (hasTexture) {
-                auto texIt = m_textures.find(texture);
-                if (texIt != m_textures.end()) {
-                    m_currentEncoder->setFragmentTexture(texIt->second.texture.get(), 0);
-                } else if (m_defaultWhiteTexture) {
-                    m_currentEncoder->setFragmentTexture(m_defaultWhiteTexture.get(), 0);
-                }
-            } else if (m_defaultWhiteTexture) {
-                m_currentEncoder->setFragmentTexture(m_defaultWhiteTexture.get(), 0);
-            }
-
-            // Setup scissor (scale from logical to framebuffer coordinates)
-            if (m_scissor.enabled) {
-                int fbHeight = static_cast<int>(m_logicalHeight * m_scaleY);
-                MTL::ScissorRect scissorRect;
-                scissorRect.x = static_cast<NS::UInteger>(m_scissor.x * m_scaleX);
-                scissorRect.y = static_cast<NS::UInteger>(fbHeight - (m_scissor.y + m_scissor.height) * m_scaleY);
-                scissorRect.width = static_cast<NS::UInteger>(m_scissor.width * m_scaleX);
-                scissorRect.height = static_cast<NS::UInteger>(m_scissor.height * m_scaleY);
-                m_currentEncoder->setScissorRect(scissorRect);
-            }
-
-            // Draw
-            if (geom.indexCount > 0) {
-                m_currentEncoder->drawIndexedPrimitives(
-                    MTL::PrimitiveTypeTriangle, geom.indexCount, MTL::IndexTypeUInt32, geom.indexBuffer.get(), 0
-                );
-            }
-        }
-
-        void ReleaseGeometry(Rml::CompiledGeometryHandle geometry) override {
-            m_geometry.erase(geometry);
-        }
-
-        void EnableScissorRegion(bool enable) override {
-            m_scissor.enabled = enable;
-        }
-
-        void SetScissorRegion(Rml::Rectanglei region) override {
-            m_scissor.x = region.Left();
-            m_scissor.y = region.Top();
-            m_scissor.width = region.Width();
-            m_scissor.height = region.Height();
-        }
-
-        auto LoadTexture(Rml::Vector2i& texture_dimensions, const Rml::String& source) -> Rml::TextureHandle override {
-            // Not implemented for now
-            return 0;
-        }
-
-        auto GenerateTexture(Rml::Span<const Rml::byte> source, Rml::Vector2i source_dimensions)
-            -> Rml::TextureHandle override {
-            if (!m_device) {
-                return 0;
-            }
-
-            auto texDesc = NS::TransferPtr(MTL::TextureDescriptor::alloc()->init());
-            texDesc->setTextureType(MTL::TextureType2D);
-            texDesc->setPixelFormat(MTL::PixelFormatRGBA8Unorm);
-            texDesc->setWidth(source_dimensions.x);
-            texDesc->setHeight(source_dimensions.y);
-            texDesc->setUsage(MTL::TextureUsageShaderRead);
-            texDesc->setStorageMode(MTL::StorageModeShared);
-
-            auto texture = NS::TransferPtr(m_device->newTexture(texDesc.get()));
-            if (!texture) {
-                return 0;
-            }
-
-            MTL::Region region(0, 0, 0, source_dimensions.x, source_dimensions.y, 1);
-            texture->replaceRegion(region, 0, source.data(), source_dimensions.x * 4);
-
-            TextureData texData;
-            texData.texture = texture;
-            texData.width = source_dimensions.x;
-            texData.height = source_dimensions.y;
-
-            Rml::TextureHandle textureHandle = m_nextTextureHandle++;
-            m_textures[textureHandle] = std::move(texData);
-
-            return textureHandle;
-        }
-
-        void ReleaseTexture(Rml::TextureHandle texture_handle) override {
-            m_textures.erase(texture_handle);
-        }
-
-        // Register an external Metal texture for use in RmlUI
-        // This allows render textures to be displayed in RmlUI documents
-        Rml::TextureHandle RegisterExternalTexture(MTL::Texture* texture, int width, int height) {
-            if (!texture) {
-                return 0;
-            }
-
-            TextureData texData;
-            // We don't own this texture, so we use a shared pointer that doesn't release
-            texData.texture = NS::RetainPtr(texture);
-            texData.width = width;
-            texData.height = height;
-
-            Rml::TextureHandle textureHandle = m_nextTextureHandle++;
-            m_textures[textureHandle] = std::move(texData);
-
-            return textureHandle;
-        }
-
-        // Update an existing external texture (useful when render texture is re-rendered)
-        void UpdateExternalTexture(Rml::TextureHandle handle, MTL::Texture* texture, int width, int height) {
-            auto it = m_textures.find(handle);
-            if (it != m_textures.end()) {
-                it->second.texture = NS::RetainPtr(texture);
-                it->second.width = width;
-                it->second.height = height;
-            }
-        }
-
-        void SetTransform(const Rml::Matrix4f* transform) override {
-            if (transform) {
-                m_transform = *transform;
-            } else {
-                m_transform = Rml::Matrix4f::Identity();
-            }
-        }
-
-    private:
-        struct CompiledGeometry {
-            NS::SharedPtr<MTL::Buffer> vertexBuffer;
-            NS::SharedPtr<MTL::Buffer> indexBuffer;
-            NS::UInteger indexCount;
-        };
-
-        struct TextureData {
-            NS::SharedPtr<MTL::Texture> texture;
-            int width;
-            int height;
-        };
-
-        void createDefaultWhiteTexture() {
-            if (!m_device) {
-                return;
-            }
-
-            auto texDesc = NS::TransferPtr(MTL::TextureDescriptor::alloc()->init());
-            texDesc->setTextureType(MTL::TextureType2D);
-            texDesc->setPixelFormat(MTL::PixelFormatRGBA8Unorm);
-            texDesc->setWidth(1);
-            texDesc->setHeight(1);
-            texDesc->setUsage(MTL::TextureUsageShaderRead);
-            texDesc->setStorageMode(MTL::StorageModeShared);
-
-            m_defaultWhiteTexture = NS::TransferPtr(m_device->newTexture(texDesc.get()));
-            if (m_defaultWhiteTexture) {
-                uint8_t whitePixel[4] = { 255, 255, 255, 255 };
-                MTL::Region region(0, 0, 0, 1, 1, 1);
-                m_defaultWhiteTexture->replaceRegion(region, 0, whitePixel, 4);
-            }
-        }
-
-        void createPipelineState() {
-            if (!m_device) {
-                return;
-            }
-
-            // Load shader
-            std::string shaderSrc = readFile("shaders/rmlui.metal");
-            auto code = NS::String::string(shaderSrc.data(), NS::StringEncoding::UTF8StringEncoding);
-            NS::Error* error = nullptr;
-            MTL::Library* library = m_device->newLibrary(code, nullptr, &error);
-            if (!library) {
-                return;
-            }
-
-            auto vertexFunc =
-                library->newFunction(NS::String::string("vertexMain", NS::StringEncoding::UTF8StringEncoding));
-            auto fragmentFunc =
-                library->newFunction(NS::String::string("fragmentMain", NS::StringEncoding::UTF8StringEncoding));
-
-            if (!vertexFunc || !fragmentFunc) {
-                library->release();
-                return;
-            }
-
-            // Create vertex descriptor
-            auto vertexDesc = NS::TransferPtr(MTL::VertexDescriptor::alloc()->init());
-
-            auto posAttr = vertexDesc->attributes()->object(0);
-            posAttr->setFormat(MTL::VertexFormatFloat2);
-            posAttr->setOffset(offsetof(Rml::Vertex, position));
-            posAttr->setBufferIndex(1);
-
-            auto colorAttr = vertexDesc->attributes()->object(1);
-            colorAttr->setFormat(MTL::VertexFormatUChar4Normalized);
-            colorAttr->setOffset(offsetof(Rml::Vertex, colour));
-            colorAttr->setBufferIndex(1);
-
-            auto texAttr = vertexDesc->attributes()->object(2);
-            texAttr->setFormat(MTL::VertexFormatFloat2);
-            texAttr->setOffset(offsetof(Rml::Vertex, tex_coord));
-            texAttr->setBufferIndex(1);
-
-            auto layout = vertexDesc->layouts()->object(1);
-            layout->setStride(sizeof(Rml::Vertex));
-            layout->setStepFunction(MTL::VertexStepFunctionPerVertex);
-            layout->setStepRate(1);
-
-            // Create pipeline descriptor
-            auto pipelineDesc = NS::TransferPtr(MTL::RenderPipelineDescriptor::alloc()->init());
-            pipelineDesc->setVertexFunction(vertexFunc);
-            pipelineDesc->setFragmentFunction(fragmentFunc);
-            pipelineDesc->setVertexDescriptor(vertexDesc.get());
-
-            auto colorAttachment = pipelineDesc->colorAttachments()->object(0);
-            colorAttachment->setPixelFormat(MTL::PixelFormatRGBA8Unorm_sRGB);
-            colorAttachment->setBlendingEnabled(true);
-            colorAttachment->setRgbBlendOperation(MTL::BlendOperationAdd);
-            colorAttachment->setAlphaBlendOperation(MTL::BlendOperationAdd);
-            colorAttachment->setSourceRGBBlendFactor(MTL::BlendFactorSourceAlpha);
-            colorAttachment->setSourceAlphaBlendFactor(MTL::BlendFactorSourceAlpha);
-            colorAttachment->setDestinationRGBBlendFactor(MTL::BlendFactorOneMinusSourceAlpha);
-            colorAttachment->setDestinationAlphaBlendFactor(MTL::BlendFactorOneMinusSourceAlpha);
-
-            m_pipelineState = NS::TransferPtr(m_device->newRenderPipelineState(pipelineDesc.get(), &error));
-
-            // Create depth stencil state
-            auto depthStencilDesc = NS::TransferPtr(MTL::DepthStencilDescriptor::alloc()->init());
-            depthStencilDesc->setDepthCompareFunction(MTL::CompareFunctionAlways);
-            depthStencilDesc->setDepthWriteEnabled(false);
-            m_depthStencilState = NS::TransferPtr(m_device->newDepthStencilState(depthStencilDesc.get()));
-
-            vertexFunc->release();
-            fragmentFunc->release();
-            library->release();
-        }
-
-        MTL::Device* m_device = nullptr;
-        MTL::CommandBuffer* m_currentCommandBuffer = nullptr;
-        MTL::RenderCommandEncoder* m_currentEncoder = nullptr;
-        MTL::Texture* m_currentRenderTarget = nullptr;
-        NS::SharedPtr<MTL::RenderPassDescriptor> m_currentPassDesc;
-
-        NS::SharedPtr<MTL::RenderPipelineState> m_pipelineState;
-        NS::SharedPtr<MTL::DepthStencilState> m_depthStencilState;
-        NS::SharedPtr<MTL::Texture> m_defaultWhiteTexture;
-
-        std::unordered_map<Rml::CompiledGeometryHandle, CompiledGeometry> m_geometry;
-        std::unordered_map<Rml::TextureHandle, TextureData> m_textures;
-
-        Rml::CompiledGeometryHandle m_nextGeometryHandle = 1;
-        Rml::TextureHandle m_nextTextureHandle = 1;
-
-        int m_logicalWidth = 0;
-        int m_logicalHeight = 0;
-        float m_scaleX = 1.0f;
-        float m_scaleY = 1.0f;
-
-        struct ScissorRegion {
-            bool enabled = false;
-            int x = 0, y = 0, width = 0, height = 0;
-        } m_scissor;
-
-        Rml::Matrix4f m_transform;
-    };
-
-}// namespace Vapor
 
 // Pre-pass: Renders depth and normals
 class PrePass : public RenderPass {
@@ -2546,7 +2126,7 @@ auto Renderer_Metal::deinit() -> void {
 
     // UI cleanup
     if (m_uiRenderer) {
-        auto* uiRenderer = static_cast<Vapor::RmlUiRendererMetal*>(m_uiRenderer);
+        auto* uiRenderer = static_cast<Vapor::RmlRendererMetal*>(m_uiRenderer);
         uiRenderer->shutdown();
         delete uiRenderer;
         m_uiRenderer = nullptr;
@@ -2575,8 +2155,8 @@ auto Renderer_Metal::initUI() -> bool {
         return false;
     }
 
-    // Create Metal UI renderer
-    auto* uiRenderer = new Vapor::RmlUiRendererMetal(device);
+    // Create Metal UI renderer (shared implementation)
+    auto* uiRenderer = new Vapor::RmlRendererMetal(device);
     if (!uiRenderer->initialize()) {
         fmt::print("Renderer_Metal::initUI: Failed to initialize Metal UI renderer\n");
         delete uiRenderer;
@@ -2608,7 +2188,7 @@ void Renderer_Metal::renderUI() {
         return;
     }
 
-    auto* uiRenderer = static_cast<Vapor::RmlUiRendererMetal*>(m_uiRenderer);
+    auto* uiRenderer = static_cast<Vapor::RmlRendererMetal*>(m_uiRenderer);
 
     auto surface = currentDrawable;
     if (!surface) return;
@@ -2617,9 +2197,22 @@ void Renderer_Metal::renderUI() {
     int windowWidth, windowHeight;
     SDL_GetWindowSize(window, &windowWidth, &windowHeight);
 
-    uiRenderer->beginFrame(currentCommandBuffer, surface->texture(), windowWidth, windowHeight);
+    MTL::Texture* renderTarget = surface->texture();
+    int fbWidth  = static_cast<int>(renderTarget->width());
+    int fbHeight = static_cast<int>(renderTarget->height());
+
+    // Create render pass (load existing content)
+    auto passDesc = NS::TransferPtr(MTL::RenderPassDescriptor::renderPassDescriptor());
+    auto colorAttachment = passDesc->colorAttachments()->object(0);
+    colorAttachment->setTexture(renderTarget);
+    colorAttachment->setLoadAction(MTL::LoadActionLoad);
+    colorAttachment->setStoreAction(MTL::StoreActionStore);
+
+    auto* encoder = currentCommandBuffer->renderCommandEncoder(passDesc.get());
+    uiRenderer->setEncoder(encoder, windowWidth, windowHeight, fbWidth, fbHeight);
     m_uiContext->Render();
-    uiRenderer->endFrame();
+    uiRenderer->clearEncoder();
+    encoder->endEncoding();
 }
 
 auto Renderer_Metal::createResources() -> void {
@@ -5501,8 +5094,8 @@ Uint64 Renderer_Metal::registerRenderTextureForUI(RenderTextureHandle handle) {
         return 0;
     }
 
-    auto* uiRenderer = static_cast<Vapor::RmlUiRenderer_Metal*>(m_uiRenderer);
-    return uiRenderer->RegisterExternalTexture(it->second.colorTexture.get(), it->second.width, it->second.height);
+    auto* uiRenderer = static_cast<Vapor::RmlRendererMetal*>(m_uiRenderer);
+    return uiRenderer->registerExternalTexture(it->second.colorTexture.get(), it->second.width, it->second.height);
 }
 
 // ===== Render Texture Post-Processing Implementation =====
