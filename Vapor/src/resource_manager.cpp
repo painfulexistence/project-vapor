@@ -15,51 +15,63 @@ namespace Vapor {
 
     // === Image Loading ===
 
-    std::shared_ptr<Resource<Image>> ResourceManager::loadImage(
+    auto ResourceManager::loadImage(
         const std::string& path, LoadMode mode, std::function<void(std::shared_ptr<Image>)> onComplete
-    ) {
+    ) -> std::shared_ptr<Resource<Image>> {
 
         return loadResource<Image>(
-            path, m_imageCache, [path]() { return loadImageInternal(path); }, mode, onComplete
+            path, m_imageCache, [path]() -> auto { return loadImageInternal(path); }, mode, onComplete
         );
     }
 
     // === Scene Loading ===
 
-    std::shared_ptr<Resource<Scene>> ResourceManager::loadScene(
+    auto ResourceManager::loadScene(
         const std::string& path, bool optimized, LoadMode mode, std::function<void(std::shared_ptr<Scene>)> onComplete
-    ) {
+    ) -> std::shared_ptr<Resource<Scene>> {
 
         // Include optimization flag in cache key
         std::string cacheKey = path + (optimized ? ":optimized" : ":standard");
 
         return loadResource<Scene>(
-            cacheKey, m_sceneCache, [path, optimized]() { return loadSceneInternal(path, optimized); }, mode, onComplete
+            cacheKey,
+            m_sceneCache,
+            [path, optimized]() -> auto { return loadSceneInternal(path, optimized); },
+            mode,
+            onComplete
         );
     }
 
     // === OBJ Loading ===
 
-    std::shared_ptr<Resource<Mesh>> ResourceManager::loadOBJ(
+    auto ResourceManager::loadOBJ(
         const std::string& path,
         const std::string& mtlBasedir,
         LoadMode mode,
         std::function<void(std::shared_ptr<Mesh>)> onComplete
-    ) {
+    ) -> std::shared_ptr<Resource<Mesh>> {
 
         return loadResource<Mesh>(
-            path, m_meshCache, [path, mtlBasedir]() { return loadMeshInternal(path, mtlBasedir); }, mode, onComplete
+            path,
+            m_meshCache,
+            [path, mtlBasedir]() -> auto { return loadMeshInternal(path, mtlBasedir); },
+            mode,
+            onComplete
         );
     }
 
     // === Text Loading ===
 
-    std::shared_ptr<Resource<std::string>> ResourceManager::loadText(
+    auto ResourceManager::loadText(
         const std::string& path, LoadMode mode, std::function<void(std::shared_ptr<std::string>)> onComplete
-    ) {
+    ) -> std::shared_ptr<Resource<std::string>> {
 
         return loadResource<std::string>(
-            path, m_textCache, [path]() { return loadTextInternal(path); }, mode, onComplete
+            path,
+            m_textCache,
+            [path]() -> std::shared_ptr<std::string> { return loadTextInternal(path); },
+            mode,
+            onComplete
         );
     }
 
@@ -88,19 +100,19 @@ namespace Vapor {
         clearTextCache();
     }
 
-    size_t ResourceManager::getImageCacheSize() const {
+    auto ResourceManager::getImageCacheSize() const -> size_t {
         return m_imageCache.size();
     }
 
-    size_t ResourceManager::getSceneCacheSize() const {
+    auto ResourceManager::getSceneCacheSize() const -> size_t {
         return m_sceneCache.size();
     }
 
-    size_t ResourceManager::getMeshCacheSize() const {
+    auto ResourceManager::getMeshCacheSize() const -> size_t {
         return m_meshCache.size();
     }
 
-    size_t ResourceManager::getTextCacheSize() const {
+    auto ResourceManager::getTextCacheSize() const -> size_t {
         return m_textCache.size();
     }
 
@@ -110,24 +122,24 @@ namespace Vapor {
         m_scheduler.waitForAll();
     }
 
-    bool ResourceManager::hasPendingLoads() const {
+    auto ResourceManager::hasPendingLoads() const -> bool {
         return m_activeLoads.load() > 0;
     }
 
-    size_t ResourceManager::getActiveLoadCount() const {
+    auto ResourceManager::getActiveLoadCount() const -> size_t {
         return m_activeLoads.load();
     }
 
     // === Internal Loading Functions ===
 
-    std::shared_ptr<Image> ResourceManager::loadImageInternal(const std::string& path) {
+    auto ResourceManager::loadImageInternal(const std::string& path) -> std::shared_ptr<Image> {
         ZoneScoped;
         ZoneName(path.c_str(), path.size());
 
         return AssetManager::loadImage(path);
     }
 
-    std::shared_ptr<Scene> ResourceManager::loadSceneInternal(const std::string& path, bool optimized) {
+    auto ResourceManager::loadSceneInternal(const std::string& path, bool optimized) -> std::shared_ptr<Scene> {
         ZoneScoped;
         ZoneName(path.c_str(), path.size());
 
@@ -138,14 +150,15 @@ namespace Vapor {
         }
     }
 
-    std::shared_ptr<Mesh> ResourceManager::loadMeshInternal(const std::string& path, const std::string& mtlBasedir) {
+    auto ResourceManager::loadMeshInternal(const std::string& path, const std::string& mtlBasedir)
+        -> std::shared_ptr<Mesh> {
         ZoneScoped;
         ZoneName(path.c_str(), path.size());
 
         return AssetManager::loadOBJ(path, mtlBasedir);
     }
 
-    std::shared_ptr<std::string> ResourceManager::loadTextInternal(const std::string& path) {
+    auto ResourceManager::loadTextInternal(const std::string& path) -> std::shared_ptr<std::string> {
         ZoneScoped;
         ZoneName(path.c_str(), path.size());
 
@@ -165,13 +178,13 @@ namespace Vapor {
     // === Helper Template Implementation ===
 
     template<typename T>
-    std::shared_ptr<Resource<T>> ResourceManager::loadResource(
+    auto ResourceManager::loadResource(
         const std::string& path,
         ResourceCache<T>& cache,
         std::function<std::shared_ptr<T>()> loader,
         LoadMode mode,
         std::function<void(std::shared_ptr<T>)> onComplete
-    ) {
+    ) -> std::shared_ptr<Resource<T>> {
 
         // Check cache first
         auto cached = cache.get(path);
@@ -209,7 +222,7 @@ namespace Vapor {
             // Asynchronous loading
             m_activeLoads++;
 
-            m_scheduler.submitTask([this, resource, path, loader]() {
+            m_scheduler.submitTask([this, resource, path, loader]() -> auto {
                 try {
                     auto data = loader();
                     resource->setData(data);
@@ -226,16 +239,36 @@ namespace Vapor {
     }
 
     // Explicit template instantiations
-    template std::shared_ptr<Resource<Image>> ResourceManager::
-        loadResource(const std::string&, ResourceCache<Image>&, std::function<std::shared_ptr<Image>()>, LoadMode, std::function<void(std::shared_ptr<Image>)>);
+    template std::shared_ptr<Resource<Image>> ResourceManager::loadResource(
+        const std::string&,
+        ResourceCache<Image>&,
+        std::function<std::shared_ptr<Image>()>,
+        LoadMode,
+        std::function<void(std::shared_ptr<Image>)>
+    );
 
-    template std::shared_ptr<Resource<Scene>> ResourceManager::
-        loadResource(const std::string&, ResourceCache<Scene>&, std::function<std::shared_ptr<Scene>()>, LoadMode, std::function<void(std::shared_ptr<Scene>)>);
+    template std::shared_ptr<Resource<Scene>> ResourceManager::loadResource(
+        const std::string&,
+        ResourceCache<Scene>&,
+        std::function<std::shared_ptr<Scene>()>,
+        LoadMode,
+        std::function<void(std::shared_ptr<Scene>)>
+    );
 
-    template std::shared_ptr<Resource<Mesh>> ResourceManager::
-        loadResource(const std::string&, ResourceCache<Mesh>&, std::function<std::shared_ptr<Mesh>()>, LoadMode, std::function<void(std::shared_ptr<Mesh>)>);
+    template std::shared_ptr<Resource<Mesh>> ResourceManager::loadResource(
+        const std::string&,
+        ResourceCache<Mesh>&,
+        std::function<std::shared_ptr<Mesh>()>,
+        LoadMode,
+        std::function<void(std::shared_ptr<Mesh>)>
+    );
 
-    template std::shared_ptr<Resource<std::string>> ResourceManager::
-        loadResource(const std::string&, ResourceCache<std::string>&, std::function<std::shared_ptr<std::string>()>, LoadMode, std::function<void(std::shared_ptr<std::string>)>);
+    template std::shared_ptr<Resource<std::string>> ResourceManager::loadResource(
+        const std::string&,
+        ResourceCache<std::string>&,
+        std::function<std::shared_ptr<std::string>()>,
+        LoadMode,
+        std::function<void(std::shared_ptr<std::string>)>
+    );
 
 }// namespace Vapor

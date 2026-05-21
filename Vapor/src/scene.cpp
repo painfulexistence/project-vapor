@@ -65,7 +65,7 @@ void Scene::printNode(const std::shared_ptr<Node>& node) {
     }
 }
 
-std::shared_ptr<Node> Scene::createNode(const std::string& name, const glm::mat4& transform) {
+auto Scene::createNode(const std::string& name, const glm::mat4& transform) -> std::shared_ptr<Node> {
     auto node = std::make_shared<Node>();
     node->name = name;
     node->localTransform = transform;
@@ -77,7 +77,7 @@ void Scene::addNode(std::shared_ptr<Node> node) {
     nodes.push_back(node);
 }
 
-std::shared_ptr<Node> Scene::findNode(const std::string& name) {
+auto Scene::findNode(const std::string& name) -> std::shared_ptr<Node> {
     for (const auto& node : nodes) {
         auto result = findNodeInHierarchy(name, node);
         if (result) {
@@ -87,7 +87,7 @@ std::shared_ptr<Node> Scene::findNode(const std::string& name) {
     return nullptr;
 }
 
-std::shared_ptr<Node> Scene::findNodeInHierarchy(const std::string& name, const std::shared_ptr<Node>& node) {
+auto Scene::findNodeInHierarchy(const std::string& name, const std::shared_ptr<Node>& node) -> std::shared_ptr<Node> {
     if (node->name == name) {
         return node;
     }
@@ -107,8 +107,9 @@ void Scene::update(float dt) {
     }
 }
 
-void Scene::updateNode(const std::shared_ptr<Node>& node, const glm::mat4& parentTransform) {
-    if (node->isTransformDirty) {
+void Scene::updateNode(const std::shared_ptr<Node>& node, const glm::mat4& parentTransform, bool parentDirty) {
+    bool dirty = node->isTransformDirty || parentDirty;
+    if (dirty) {
         node->worldTransform = parentTransform * node->localTransform;
         if (node->meshGroup) {
             for (const auto& mesh : node->meshGroup->meshes) {
@@ -139,7 +140,7 @@ void Scene::updateNode(const std::shared_ptr<Node>& node, const glm::mat4& paren
         node->isTransformDirty = false;
     }
     for (const auto& child : node->children) {
-        updateNode(child, node->worldTransform);
+        updateNode(child, node->worldTransform, dirty);
     }
 }
 
@@ -226,7 +227,7 @@ void Node::attachVehicleController(Physics3D* physics, const VehicleSettings& se
     vehicleController = std::make_unique<VehicleController>(physics, settings, worldPos, worldRot);
 }
 
-std::shared_ptr<FluidVolume> Scene::createFluidVolume(Physics3D* physics, const FluidVolumeSettings& settings) {
+auto Scene::createFluidVolume(Physics3D* physics, const FluidVolumeSettings& settings) -> std::shared_ptr<FluidVolume> {
     auto fluidVolume = std::make_shared<FluidVolume>(physics, settings);
     fluidVolumes.push_back(fluidVolume);
     return fluidVolume;

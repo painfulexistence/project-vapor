@@ -7,6 +7,7 @@
 #include <functional>
 #include <memory>
 #include <mutex>
+#include <condition_variable>
 #include <string>
 #include <unordered_map>
 
@@ -301,13 +302,13 @@ namespace Vapor {
 
         // Helper to load resource with caching
         template<typename T>
-        std::shared_ptr<Resource<T>> loadResource(
+        auto loadResource(
             const std::string& path,
             ResourceCache<T>& cache,
             std::function<std::shared_ptr<T>()> loader,
             LoadMode mode,
             std::function<void(std::shared_ptr<T>)> onComplete
-        );
+        ) -> std::shared_ptr<Resource<T>>;
     };
 
 }// namespace Vapor

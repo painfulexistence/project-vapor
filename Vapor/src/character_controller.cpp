@@ -1,5 +1,6 @@
 #include "character_controller.hpp"
 #include "physics_3d.hpp"
+
 #include <Jolt/Jolt.h>
 
 #include <Jolt/Core/Factory.h>
@@ -87,12 +88,13 @@ void CharacterController::moveAlong(const glm::vec2& inputVector, const glm::vec
 }
 
 void CharacterController::jump(float jumpSpeed) {
-    if (isOnGround()) {
+    if (isOnGround() && !isJumping) {
         // Get current velocity to preserve horizontal movement
         JPH::Vec3 currentVel = character->GetLinearVelocity();
-        // Only set vertical component for jump, preserve horizontal
         currentVel.SetY(jumpSpeed);
         character->SetLinearVelocity(currentVel);
+        // Mark as jumping to disable stick-to-floor in update
+        isJumping = true;
     }
 }
 
@@ -103,37 +105,37 @@ void CharacterController::warp(const glm::vec3& position) {
     currentPosition = position;
 }
 
-bool CharacterController::isOnGround() const {
+auto CharacterController::isOnGround() const -> bool {
     return character->GetGroundState() == JPH::CharacterVirtual::EGroundState::OnGround;
 }
 
-bool CharacterController::isSliding() const {
+auto CharacterController::isSliding() const -> bool {
     return character->GetGroundState() == JPH::CharacterVirtual::EGroundState::OnSteepGround;
 }
 
-glm::vec3 CharacterController::getPosition() const {
+auto CharacterController::getPosition() const -> glm::vec3 {
     // Return the current physics position (not interpolated)
     return currentPosition;
 }
 
-glm::vec3 CharacterController::getInterpolatedPosition(float alpha) const {
+auto CharacterController::getInterpolatedPosition(float alpha) const -> glm::vec3 {
     // Linear interpolation between previous and current position
     // alpha = 0.0 means use previous position (start of physics step)
     // alpha = 1.0 means use current position (end of physics step)
     return glm::mix(previousPosition, currentPosition, alpha);
 }
 
-glm::vec3 CharacterController::getVelocity() const {
+auto CharacterController::getVelocity() const -> glm::vec3 {
     JPH::Vec3 vel = character->GetLinearVelocity();
     return glm::vec3(vel.GetX(), vel.GetY(), vel.GetZ());
 }
 
-glm::vec3 CharacterController::getGroundNormal() const {
+auto CharacterController::getGroundNormal() const -> glm::vec3 {
     JPH::Vec3 normal = character->GetGroundNormal();
     return glm::vec3(normal.GetX(), normal.GetY(), normal.GetZ());
 }
 
-BodyHandle CharacterController::getBodyHandle() const {
+auto CharacterController::getBodyHandle() const -> BodyHandle {
     return BodyHandle{ character->GetInnerBodyID().GetIndexAndSequenceNumber() };
 }
 
@@ -156,24 +158,35 @@ void CharacterController::update(float deltaTime, const glm::vec3& gravity) {
     // Note: previousPosition should be set externally before the physics update loop
     // to handle multiple physics steps correctly
 
-    // Get current velocity - preserve vertical component for gravity/jumping
-    JPH::Vec3 currentVel = character->GetLinearVelocity();
+    JPH::Vec3 newVelocity;
 
-    // Apply desired horizontal velocity while preserving vertical velocity
-    // This allows gravity to work properly
-    JPH::Vec3 newVelocity(
-        desiredHorizontalVelocity.x,
-        currentVel.GetY(),// Preserve vertical - let ExtendedUpdate apply gravity
-        desiredHorizontalVelocity.z
-    );
+    if (character->GetGroundState() == JPH::CharacterVirtual::EGroundState::OnGround) {
+        newVelocity = JPH::Vec3(desiredHorizontalVelocity.x, 0.0f, desiredHorizontalVelocity.z);
+    } else {
+        // In air: manually apply gravity to vertical component
+        JPH::Vec3 currentVel = character->GetLinearVelocity();
+
+        JPH::Vec3 up = character->GetUp();
+        float verticalSpeed = currentVel.Dot(up);
+
+        verticalSpeed += gravity.y * deltaTime;
+
+        newVelocity = JPH::Vec3(desiredHorizontalVelocity.x, verticalSpeed, desiredHorizontalVelocity.z);
+    }
+
     character->SetLinearVelocity(newVelocity);
 
     // Update character (performs collision detection and movement)
     JPH::CharacterVirtual::ExtendedUpdateSettings updateSettings;
 
     // Configure update settings to prevent sticking and improve movement
-    // Reduced mStickToFloorStepDown to minimize vertical jitter on flat surfaces
-    updateSettings.mStickToFloorStepDown = JPH::Vec3(0.0f, -0.01f, 0.0f);// Very small step down - reduces jitter
+    if (isJumping) {
+        // When jumping, disable stick-to-floor completely to allow leaving the ground
+        updateSettings.mStickToFloorStepDown = JPH::Vec3::sZero();
+    } else {
+        // Normal movement: small step down to stay grounded on slopes
+        updateSettings.mStickToFloorStepDown = JPH::Vec3(0.0f, -0.05f, 0.0f);
+    }
     updateSettings.mWalkStairsStepUp = JPH::Vec3(0.0f, 0.15f, 0.0f);// Allow stepping up small obstacles
     updateSettings.mWalkStairsMinStepForward = 0.1f;// Minimum forward distance for step up
     updateSettings.mWalkStairsStepDownExtra = JPH::Vec3(0.0f, 0.0f, 0.0f);// Disabled to reduce jitter
@@ -196,4 +209,9 @@ void CharacterController::update(float deltaTime, const glm::vec3& gravity) {
     // Update current position after physics step
     JPH::RVec3 pos = character->GetPosition();
     currentPosition = glm::vec3(pos.GetX(), pos.GetY(), pos.GetZ());
+
+    // Reset jumping state when we land
+    if (isJumping && isOnGround()) {
+        isJumping = false;
+    }
 }

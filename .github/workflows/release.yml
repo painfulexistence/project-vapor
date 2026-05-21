@@ -1,0 +1,61 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - "v*"
+  workflow_dispatch:
+
+jobs:
+  release:
+    runs-on: macos-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      - name: Install system dependencies
+        run: |
+          brew install ninja glslang ccache
+
+      - name: Configure (vcpkg + Ninja)
+        run: |
+          cmake -G Ninja -B build \
+            -DCMAKE_TOOLCHAIN_FILE=${{ github.workspace }}/vcpkg/scripts/buildsystems/vcpkg.cmake \
+            -DCMAKE_BUILD_TYPE=MinSizeRel \
+            -DCMAKE_CXX_COMPILER_LAUNCHER=ccache \
+            -S .
+
+      - name: Build all targets
+        run: |
+          cmake --build build
+
+      - name: Run tests
+        working-directory: build
+        run: ctest --output-on-failure --timeout 60
+
+      - name: Package Release
+        run: |
+          TAG_NAME=${{ github.ref_name }}
+          PACKAGE_NAME="project-vapor-${TAG_NAME}-macos"
+          
+          mkdir -p dist
+          
+          # Copy the actual executable (main) and the gathered assets
+          # Since we used standard Ninja, the binary is in build/Vaporware/main
+          cp build/Vaporware/main dist/Vaporware
+          cp -r build/Vaporware/assets dist/assets
+          
+          cd dist
+          zip -r "../${PACKAGE_NAME}.zip" .
+          cd ..
+
+      - name: Create Release
+        uses: softprops/action-gh-release@v1
+        with:
+          files: "*.zip"
+          generate_release_notes: true
+          draft: false
+          prerelease: false

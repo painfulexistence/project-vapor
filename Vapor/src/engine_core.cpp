@@ -1,4 +1,5 @@
 #include "engine_core.hpp"
+#include "Vapor/file_system.hpp"
 #include "rmlui_manager.hpp"
 #include <fmt/core.h>
 #include <fmt/format.h>
@@ -44,6 +45,9 @@ namespace Vapor {
         _numThreads = numThreads;
 
         fmt::print("Initializing EngineCore with {} threads\n", _numThreads);
+
+        // Initialize file system search paths before any asset loading
+        FileSystem::instance().initialize();
 
         // Initialize task scheduler
         _taskScheduler = std::make_unique<TaskScheduler>();
@@ -100,6 +104,7 @@ namespace Vapor {
     }
 
     void EngineCore::update(float deltaTime) {
+        _taskScheduler->processMainThreadTasks();
         ZoneScoped;
 
         if (!_initialized) {
@@ -122,7 +127,7 @@ namespace Vapor {
         // Future: Coordinate physics-render synchronization
     }
 
-    bool EngineCore::initRmlUI(int width, int height) {
+    auto EngineCore::initRmlUI(int width, int height) -> bool {
         if (_rmluiManager) {
             fmt::print("RmlUI already initialized\n");
             return true;
@@ -145,7 +150,7 @@ namespace Vapor {
         }
     }
 
-    bool EngineCore::processRmlUIEvent(const SDL_Event& event) {
+    auto EngineCore::processRmlUIEvent(const SDL_Event& event) -> bool {
         if (_rmluiManager && _rmluiManager->IsInitialized()) {
             return _rmluiManager->ProcessEvent(event);
         }

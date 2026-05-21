@@ -1,7 +1,7 @@
 #include <metal_stdlib>
 using namespace metal;
-#include "assets/shaders/3d_common.metal"
-#include "assets/shaders/3d_volumetric_common.metal"
+#include "Res/shaders/3d_common.metal"
+#include "Res/shaders/3d_volumetric_common.metal"
 
 // ============================================================================
 // Volumetric Clouds - Ray Marched Implementation
