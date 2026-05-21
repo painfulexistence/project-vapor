@@ -38,9 +38,8 @@ jobs:
         uses: actions/cache@v4
         with:
           path: ${{ env.CCACHE_DIR }}
-          key: ccache-macos-${{ github.ref_name }}-${{ github.sha }}
+          key: ccache-macos-${{ github.sha }}
           restore-keys: |
-            ccache-macos-${{ github.ref_name }}-
             ccache-macos-
 
       - name: Configure (vcpkg + Ninja)
@@ -124,9 +123,8 @@ jobs:
         uses: actions/cache@v4
         with:
           path: ${{ env.CCACHE_DIR }}
-          key: ccache-${{ matrix.os }}-${{ matrix.build-type }}-${{ github.ref_name }}-${{ github.sha }}
+          key: ccache-${{ matrix.os }}-${{ matrix.build-type }}-${{ github.sha }}
           restore-keys: |
-            ccache-${{ matrix.os }}-${{ matrix.build-type }}-${{ github.ref_name }}-
             ccache-${{ matrix.os }}-${{ matrix.build-type }}-
 
       - name: Bootstrap vcpkg
