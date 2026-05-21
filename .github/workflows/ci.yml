@@ -31,10 +31,13 @@ jobs:
           HOMEBREW_NO_AUTO_UPDATE: "1"
         run: brew install ninja ccache glslang
 
+      - name: Set ccache dir
+        run: echo "CCACHE_DIR=$(ccache --get-config cache_dir)" >> $GITHUB_ENV
+
       - name: Restore ccache
         uses: actions/cache@v4
         with:
-          path: ~/.ccache
+          path: ${{ env.CCACHE_DIR }}
           key: ccache-macos-${{ github.ref_name }}-${{ github.sha }}
           restore-keys: |
             ccache-macos-${{ github.ref_name }}-
@@ -114,10 +117,13 @@ jobs:
           HOMEBREW_NO_AUTO_UPDATE: "1"
         run: brew install cmake ccache
 
+      - name: Set ccache dir
+        run: echo "CCACHE_DIR=$(ccache --get-config cache_dir)" >> $GITHUB_ENV
+
       - name: Restore ccache
         uses: actions/cache@v4
         with:
-          path: ~/.ccache
+          path: ${{ env.CCACHE_DIR }}
           key: ccache-${{ matrix.os }}-${{ matrix.build-type }}-${{ github.ref_name }}-${{ github.sha }}
           restore-keys: |
             ccache-${{ matrix.os }}-${{ matrix.build-type }}-${{ github.ref_name }}-
