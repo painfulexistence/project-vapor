@@ -62,19 +62,16 @@ jobs:
         run: ccache --show-stats
 
   # ── Multi-OS Build ───────────────────────────────────────────────────────
-  # PRs: Ubuntu Release only (macOS already covered by the test job above)
-  # Manual dispatch: full matrix for thorough compatibility checks
   build:
     runs-on: ${{ matrix.os }}
-    needs: test
     env:
       VCPKG_BINARY_SOURCES: "clear;x-gha,readwrite"
 
     strategy:
       fail-fast: false
       matrix:
-        os: ${{ github.event_name == 'pull_request' && fromJSON('["ubuntu-latest"]') || fromJSON('["macos-latest", "ubuntu-latest"]') }}
-        build-type: ${{ github.event_name == 'pull_request' && fromJSON('["Release"]') || fromJSON('["Debug", "Release", "MinSizeRel"]') }}
+        os: [macos-latest, ubuntu-latest]
+        build-type: [Debug, Release, MinSizeRel]
 
     steps:
       - uses: actions/checkout@v4
@@ -102,25 +99,33 @@ jobs:
 
       - name: Set strings
         id: strings
-        run: |
-          echo "build-dir=${{ github.workspace }}/build" >> "$GITHUB_OUTPUT"
         shell: bash
+        run: echo "build-dir=${{ github.workspace }}/build" >> "$GITHUB_OUTPUT"
 
-      - name: Bootstrap vcpkg
-        run: |
-          ${{ github.workspace }}/vcpkg/bootstrap-vcpkg.sh
-        shell: bash
-
-      - name: Install CMake and other dependencies on Ubuntu
+      - name: Install system dependencies on Ubuntu
         if: matrix.os == 'ubuntu-latest'
         run: |
           sudo apt-get update
-          sudo apt-get install -y cmake libxmu-dev libxi-dev libgl-dev libxinerama-dev libxcursor-dev xorg-dev libglu1-mesa-dev pkg-config
+          sudo apt-get install -y cmake ccache libxmu-dev libxi-dev libgl-dev libxinerama-dev libxcursor-dev xorg-dev libglu1-mesa-dev pkg-config
 
-      - name: Install CMake on macOS
+      - name: Install system dependencies on macOS
         if: matrix.os == 'macos-latest'
-        run: |
-          brew install cmake
+        env:
+          HOMEBREW_NO_AUTO_UPDATE: "1"
+        run: brew install cmake ccache
+
+      - name: Restore ccache
+        uses: actions/cache@v4
+        with:
+          path: ~/.ccache
+          key: ccache-${{ matrix.os }}-${{ matrix.build-type }}-${{ github.ref_name }}-${{ github.sha }}
+          restore-keys: |
+            ccache-${{ matrix.os }}-${{ matrix.build-type }}-${{ github.ref_name }}-
+            ccache-${{ matrix.os }}-${{ matrix.build-type }}-
+
+      - name: Bootstrap vcpkg
+        shell: bash
+        run: ${{ github.workspace }}/vcpkg/bootstrap-vcpkg.sh
 
       - name: CMake Configure
         run: >
@@ -128,7 +133,11 @@ jobs:
           -B ${{ steps.strings.outputs.build-dir }}
           -DCMAKE_TOOLCHAIN_FILE=${{ github.workspace }}/vcpkg/scripts/buildsystems/vcpkg.cmake
           -DCMAKE_BUILD_TYPE=${{ matrix.build-type }}
+          -DCMAKE_CXX_COMPILER_LAUNCHER=ccache
           -S ${{ github.workspace }}
 
       - name: CMake Build
         run: cmake --build ${{ steps.strings.outputs.build-dir }} --parallel $(nproc 2>/dev/null || sysctl -n hw.logicalcpu)
+
+      - name: Print ccache stats
+        run: ccache --show-stats
