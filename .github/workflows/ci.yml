@@ -1,8 +1,6 @@
 name: CI
 
 on:
-  push:
-    branches: [main]
   pull_request:
     branches: [main]
   workflow_dispatch:
@@ -12,6 +10,8 @@ jobs:
   test:
     name: Unit Tests (macOS / Clang)
     runs-on: macos-15
+    env:
+      VCPKG_BINARY_SOURCES: "clear;x-gha,readwrite"
 
     steps:
       - name: Checkout
@@ -19,14 +19,25 @@ jobs:
         with:
           submodules: recursive  # vcpkg is a submodule
 
+      - name: Export GitHub Actions cache environment variables
+        uses: actions/github-script@v7
+        with:
+          script: |
+            core.exportVariable('ACTIONS_CACHE_URL', process.env.ACTIONS_CACHE_URL || '');
+            core.exportVariable('ACTIONS_RUNTIME_TOKEN', process.env.ACTIONS_RUNTIME_TOKEN || '');
+
       - name: Install system dependencies
-        run: |
-          brew install ninja ccache glslang
+        env:
+          HOMEBREW_NO_AUTO_UPDATE: "1"
+        run: brew install ninja ccache glslang
+
+      - name: Set ccache dir
+        run: echo "CCACHE_DIR=$(ccache --get-config cache_dir)" >> $GITHUB_ENV
 
       - name: Restore ccache
         uses: actions/cache@v4
         with:
-          path: ~/.ccache
+          path: ${{ env.CCACHE_DIR }}
           key: ccache-macos-${{ github.ref_name }}-${{ github.sha }}
           restore-keys: |
             ccache-macos-${{ github.ref_name }}-
@@ -56,7 +67,8 @@ jobs:
   # ── Multi-OS Build ───────────────────────────────────────────────────────
   build:
     runs-on: ${{ matrix.os }}
-    needs: test
+    env:
+      VCPKG_BINARY_SOURCES: "clear;x-gha,readwrite"
 
     strategy:
       fail-fast: false
@@ -68,6 +80,13 @@ jobs:
       - uses: actions/checkout@v4
         with:
           submodules: 'recursive'
+
+      - name: Export GitHub Actions cache environment variables
+        uses: actions/github-script@v7
+        with:
+          script: |
+            core.exportVariable('ACTIONS_CACHE_URL', process.env.ACTIONS_CACHE_URL || '');
+            core.exportVariable('ACTIONS_RUNTIME_TOKEN', process.env.ACTIONS_RUNTIME_TOKEN || '');
 
       - uses: rlalik/setup-cpp-compiler@master
         with:
@@ -83,25 +102,36 @@ jobs:
 
       - name: Set strings
         id: strings
-        run: |
-          echo "build-dir=${{ github.workspace }}/build" >> "$GITHUB_OUTPUT"
         shell: bash
+        run: echo "build-dir=${{ github.workspace }}/build" >> "$GITHUB_OUTPUT"
 
-      - name: Bootstrap vcpkg
-        run: |
-          ${{ github.workspace }}/vcpkg/bootstrap-vcpkg.sh
-        shell: bash
-
-      - name: Install CMake and other dependencies on Ubuntu
+      - name: Install system dependencies on Ubuntu
         if: matrix.os == 'ubuntu-latest'
         run: |
           sudo apt-get update
-          sudo apt-get install -y cmake libxmu-dev libxi-dev libgl-dev libxinerama-dev libxcursor-dev xorg-dev libglu1-mesa-dev pkg-config
+          sudo apt-get install -y cmake ccache libxmu-dev libxi-dev libgl-dev libxinerama-dev libxcursor-dev xorg-dev libglu1-mesa-dev pkg-config
 
-      - name: Install CMake on macOS
+      - name: Install system dependencies on macOS
         if: matrix.os == 'macos-latest'
-        run: |
-          brew install cmake
+        env:
+          HOMEBREW_NO_AUTO_UPDATE: "1"
+        run: brew install cmake ccache
+
+      - name: Set ccache dir
+        run: echo "CCACHE_DIR=$(ccache --get-config cache_dir)" >> $GITHUB_ENV
+
+      - name: Restore ccache
+        uses: actions/cache@v4
+        with:
+          path: ${{ env.CCACHE_DIR }}
+          key: ccache-${{ matrix.os }}-${{ matrix.build-type }}-${{ github.ref_name }}-${{ github.sha }}
+          restore-keys: |
+            ccache-${{ matrix.os }}-${{ matrix.build-type }}-${{ github.ref_name }}-
+            ccache-${{ matrix.os }}-${{ matrix.build-type }}-
+
+      - name: Bootstrap vcpkg
+        shell: bash
+        run: ${{ github.workspace }}/vcpkg/bootstrap-vcpkg.sh
 
       - name: CMake Configure
         run: >
@@ -109,7 +139,11 @@ jobs:
           -B ${{ steps.strings.outputs.build-dir }}
           -DCMAKE_TOOLCHAIN_FILE=${{ github.workspace }}/vcpkg/scripts/buildsystems/vcpkg.cmake
           -DCMAKE_BUILD_TYPE=${{ matrix.build-type }}
+          -DCMAKE_CXX_COMPILER_LAUNCHER=ccache
           -S ${{ github.workspace }}
 
       - name: CMake Build
-        run: cmake --build ${{ steps.strings.outputs.build-dir }}
+        run: cmake --build ${{ steps.strings.outputs.build-dir }} --parallel $(nproc 2>/dev/null || sysctl -n hw.logicalcpu)
+
+      - name: Print ccache stats
+        run: ccache --show-stats
