@@ -1,9 +1,9 @@
 #ifdef __APPLE__
 
 #include "ui_renderer.hpp"
-#include "engine_core.hpp"
+#include "rmlui_system.hpp"
 #include "helper.hpp"
-#include "rmlui_manager.hpp"
+#include "Vapor/file_system.hpp"
 
 #include <Foundation/Foundation.hpp>
 #include <Metal/Metal.hpp>
@@ -12,10 +12,9 @@
 #include <RmlUi/Core.h>
 #include <glm/ext/matrix_clip_space.hpp>
 #include <glm/gtc/type_ptr.hpp>
-#include <glm/mat4x4.hpp>
-#include <glm/vec3.hpp>
 #include <glm/gtc/matrix_transform.hpp>
 
+#include <SDL3/SDL.h>
 #include <fmt/core.h>
 #include <memory>
 #include <string>
@@ -24,11 +23,8 @@
 namespace Vapor {
 
 // ── RmlUiMetal ───────────────────────────────────────────────────────────────
-// Rml::RenderInterface backed by Metal-cpp.
+// Rml::RenderInterface backed by metal-cpp.
 // Self-contained — no dependency on Renderer_Metal or SDL.
-// Functionally equivalent to the RmlUiRendererMetal inner class in
-// renderer_metal.cpp, but the render pass clears to transparent black so the
-// CAPI render target starts clean every frame.
 
 class RmlUiMetal : public Rml::RenderInterface {
 public:
@@ -56,7 +52,7 @@ public:
     void beginFrame(MTL::CommandBuffer* cmd, MTL::Texture* target, int logicalW, int logicalH) {
         if (!cmd || !target) return;
 
-        m_logicalWidth = logicalW;
+        m_logicalWidth  = logicalW;
         m_logicalHeight = logicalH;
 
         int fbW = static_cast<int>(target->width());
@@ -65,7 +61,7 @@ public:
         m_scaleY = logicalH > 0 ? static_cast<float>(fbH) / logicalH : 1.0f;
 
         m_currentCommandBuffer = cmd;
-        m_currentRenderTarget = target;
+        m_currentRenderTarget  = target;
 
         auto passDesc = NS::TransferPtr(MTL::RenderPassDescriptor::renderPassDescriptor());
         auto ca = passDesc->colorAttachments()->object(0);
@@ -79,13 +75,13 @@ public:
 
         MTL::Viewport vp;
         vp.originX = 0; vp.originY = 0;
-        vp.width = fbW; vp.height = fbH;
-        vp.znear = 0; vp.zfar = 1;
+        vp.width   = fbW; vp.height = fbH;
+        vp.znear   = 0;   vp.zfar   = 1;
         m_currentEncoder->setViewport(vp);
 
         MTL::ScissorRect sr;
         sr.x = 0; sr.y = 0;
-        sr.width = static_cast<NS::UInteger>(fbW);
+        sr.width  = static_cast<NS::UInteger>(fbW);
         sr.height = static_cast<NS::UInteger>(fbH);
         m_currentEncoder->setScissorRect(sr);
     }
@@ -96,7 +92,7 @@ public:
             m_currentEncoder = nullptr;
         }
         m_currentCommandBuffer = nullptr;
-        m_currentRenderTarget = nullptr;
+        m_currentRenderTarget  = nullptr;
         m_currentPassDesc.reset();
     }
 
@@ -104,7 +100,7 @@ public:
 
     Rml::CompiledGeometryHandle CompileGeometry(
         Rml::Span<const Rml::Vertex> vertices,
-        Rml::Span<const int> indices) override
+        Rml::Span<const int>         indices) override
     {
         if (!m_device) return 0;
 
@@ -123,8 +119,8 @@ public:
 
     void RenderGeometry(
         Rml::CompiledGeometryHandle geometry,
-        Rml::Vector2f translation,
-        Rml::TextureHandle texture) override
+        Rml::Vector2f               translation,
+        Rml::TextureHandle          texture) override
     {
         if (!m_currentEncoder || !m_pipelineState) return;
 
@@ -136,10 +132,7 @@ public:
         m_currentEncoder->setDepthStencilState(m_depthStencilState.get());
         m_currentEncoder->setCullMode(MTL::CullModeNone);
 
-        glm::mat4 proj = glm::ortho(
-            0.0f, (float)m_logicalWidth,
-            (float)m_logicalHeight, 0.0f,
-            -1.0f, 1.0f);
+        glm::mat4 proj  = glm::ortho(0.0f, (float)m_logicalWidth, (float)m_logicalHeight, 0.0f, -1.0f, 1.0f);
         glm::mat4 xform = glm::make_mat4(m_transform.data());
         xform = glm::translate(xform, glm::vec3(translation.x, translation.y, 0.0f));
 
@@ -158,8 +151,8 @@ public:
         if (m_scissor.enabled) {
             int fbH = static_cast<int>(m_logicalHeight * m_scaleY);
             MTL::ScissorRect sr;
-            sr.x = static_cast<NS::UInteger>(m_scissor.x * m_scaleX);
-            sr.y = static_cast<NS::UInteger>(fbH - (m_scissor.y + m_scissor.height) * m_scaleY);
+            sr.x      = static_cast<NS::UInteger>(m_scissor.x * m_scaleX);
+            sr.y      = static_cast<NS::UInteger>(fbH - (m_scissor.y + m_scissor.height) * m_scaleY);
             sr.width  = static_cast<NS::UInteger>(m_scissor.width  * m_scaleX);
             sr.height = static_cast<NS::UInteger>(m_scissor.height * m_scaleY);
             m_currentEncoder->setScissorRect(sr);
@@ -184,7 +177,7 @@ public:
 
     Rml::TextureHandle GenerateTexture(
         Rml::Span<const Rml::byte> source,
-        Rml::Vector2i dims) override
+        Rml::Vector2i              dims) override
     {
         if (!m_device) return 0;
         auto desc = NS::TransferPtr(MTL::TextureDescriptor::alloc()->init());
@@ -231,7 +224,7 @@ private:
         auto lib = NS::TransferPtr(m_device->newLibrary(code, nullptr, &err));
         if (!lib) { fmt::print("[UIRenderer] Failed to compile rmlui.metal\n"); return; }
 
-        auto vf = lib->newFunction(NS::String::string("vertexMain", NS::StringEncoding::UTF8StringEncoding));
+        auto vf = lib->newFunction(NS::String::string("vertexMain",   NS::StringEncoding::UTF8StringEncoding));
         auto ff = lib->newFunction(NS::String::string("fragmentMain", NS::StringEncoding::UTF8StringEncoding));
         if (!vf || !ff) { lib->release(); return; }
 
@@ -281,27 +274,65 @@ private:
         int width, height;
     };
 
-    MTL::Device*               m_device          = nullptr;
+    MTL::Device*               m_device               = nullptr;
     MTL::CommandBuffer*        m_currentCommandBuffer = nullptr;
-    MTL::RenderCommandEncoder* m_currentEncoder   = nullptr;
-    MTL::Texture*              m_currentRenderTarget = nullptr;
+    MTL::RenderCommandEncoder* m_currentEncoder       = nullptr;
+    MTL::Texture*              m_currentRenderTarget  = nullptr;
     NS::SharedPtr<MTL::RenderPassDescriptor> m_currentPassDesc;
 
     NS::SharedPtr<MTL::RenderPipelineState> m_pipelineState;
     NS::SharedPtr<MTL::DepthStencilState>   m_depthStencilState;
     NS::SharedPtr<MTL::Texture>             m_defaultWhiteTexture;
 
-    std::unordered_map<Rml::CompiledGeometryHandle, Geom>    m_geometry;
-    std::unordered_map<Rml::TextureHandle, TexData>           m_textures;
+    std::unordered_map<Rml::CompiledGeometryHandle, Geom>   m_geometry;
+    std::unordered_map<Rml::TextureHandle,          TexData> m_textures;
     Rml::CompiledGeometryHandle m_nextGeom = 1;
     Rml::TextureHandle          m_nextTex  = 1;
 
-    int m_logicalWidth = 0, m_logicalHeight = 0;
-    float m_scaleX = 1.0f, m_scaleY = 1.0f;
+    int   m_logicalWidth  = 0, m_logicalHeight = 0;
+    float m_scaleX        = 1.0f, m_scaleY     = 1.0f;
 
     struct { bool enabled = false; int x=0,y=0,width=0,height=0; } m_scissor;
     Rml::Matrix4f m_transform;
 };
+
+// ── Global Rml state (shared across all UIRendererMetal instances) ────────────
+
+namespace {
+
+static std::unique_ptr<RmlUiSystem> s_rmlSystem;
+static bool s_rmlInitialized = false;
+static int  s_instanceCount  = 0;
+static int  s_nextContextId  = 0;
+
+static Rml::Input::KeyIdentifier sdlScancodeToRmlKey(SDL_Scancode sc) {
+    switch (sc) {
+    case SDL_SCANCODE_BACKSPACE: return Rml::Input::KI_BACK;
+    case SDL_SCANCODE_TAB:       return Rml::Input::KI_TAB;
+    case SDL_SCANCODE_RETURN:    return Rml::Input::KI_RETURN;
+    case SDL_SCANCODE_ESCAPE:    return Rml::Input::KI_ESCAPE;
+    case SDL_SCANCODE_SPACE:     return Rml::Input::KI_SPACE;
+    case SDL_SCANCODE_LEFT:      return Rml::Input::KI_LEFT;
+    case SDL_SCANCODE_UP:        return Rml::Input::KI_UP;
+    case SDL_SCANCODE_RIGHT:     return Rml::Input::KI_RIGHT;
+    case SDL_SCANCODE_DOWN:      return Rml::Input::KI_DOWN;
+    case SDL_SCANCODE_DELETE:    return Rml::Input::KI_DELETE;
+    case SDL_SCANCODE_HOME:      return Rml::Input::KI_HOME;
+    case SDL_SCANCODE_END:       return Rml::Input::KI_END;
+    case SDL_SCANCODE_PAGEUP:    return Rml::Input::KI_PRIOR;
+    case SDL_SCANCODE_PAGEDOWN:  return Rml::Input::KI_NEXT;
+    default:
+        if (sc >= SDL_SCANCODE_A && sc <= SDL_SCANCODE_Z)
+            return static_cast<Rml::Input::KeyIdentifier>(Rml::Input::KI_A + (sc - SDL_SCANCODE_A));
+        if (sc >= SDL_SCANCODE_1 && sc <= SDL_SCANCODE_9)
+            return static_cast<Rml::Input::KeyIdentifier>(Rml::Input::KI_1 + (sc - SDL_SCANCODE_1));
+        if (sc == SDL_SCANCODE_0)
+            return Rml::Input::KI_0;
+        return Rml::Input::KI_UNKNOWN;
+    }
+}
+
+} // namespace
 
 // ── UIRendererMetal ──────────────────────────────────────────────────────────
 
@@ -316,66 +347,139 @@ public:
             fmt::print("[UIRenderer] No Metal device available\n");
             return false;
         }
-
         m_commandQueue = NS::TransferPtr(m_device->newCommandQueue());
         if (!m_commandQueue) return false;
-
         if (!createRenderTarget(m_width, m_height)) return false;
 
         m_rmlRenderer = std::make_unique<RmlUiMetal>(m_device.get());
         if (!m_rmlRenderer->initialize()) {
-            fmt::print("[UIRenderer] RmlUiMetal::initialize failed\n");
+            fmt::print("[UIRenderer] RmlUiMetal init failed\n");
             return false;
         }
 
-        // Wire up RmlUI — caller must have run initRmlUI() first.
-        Rml::SetRenderInterface(m_rmlRenderer.get());
+        if (!s_rmlInitialized) {
+            s_rmlSystem = std::make_unique<RmlUiSystem>();
+            Rml::SetSystemInterface(s_rmlSystem.get());
+            Rml::SetRenderInterface(m_rmlRenderer.get());
+            if (!Rml::Initialise()) {
+                fmt::print("[UIRenderer] Rml::Initialise() failed\n");
+                return false;
+            }
+            auto fontPath = FileSystem::instance().resolvePath("fonts/Arial Black.ttf");
+            if (fontPath) Rml::LoadFontFace(*fontPath);
+            s_rmlInitialized = true;
+        } else {
+            // Switch global render interface to this surface's renderer
+            Rml::SetRenderInterface(m_rmlRenderer.get());
+        }
 
-        auto* core = EngineCore::Get();
-        if (!core) {
-            fmt::print("[UIRenderer] EngineCore not initialized\n");
+        m_contextName = fmt::format("surface_{}", s_nextContextId++);
+        m_context = Rml::CreateContext(m_contextName, Rml::Vector2i(m_width, m_height));
+        if (!m_context) {
+            fmt::print("[UIRenderer] Failed to create Rml context '{}'\n", m_contextName);
             return false;
         }
-        auto* mgr = core->getRmlUiManager();
-        if (!mgr || !mgr->FinalizeInitialization()) {
-            fmt::print("[UIRenderer] RmlUiManager::FinalizeInitialization failed\n");
-            return false;
-        }
 
-        fmt::print("[UIRenderer] Initialized ({}x{})\n", m_width, m_height);
+        ++s_instanceCount;
+        m_active = true;
+        fmt::print("[UIRenderer] Surface '{}' ready ({}x{})\n", m_contextName, m_width, m_height);
         return true;
     }
 
-    void renderFrame(Rml::Context* ctx) override {
-        if (!ctx || !m_renderTarget || !m_commandQueue || !m_rmlRenderer) return;
+    void renderFrame() override {
+        if (!m_context || !m_renderTarget || !m_commandQueue || !m_rmlRenderer) return;
+
+        // Switch global render interface before rendering this surface
+        Rml::SetRenderInterface(m_rmlRenderer.get());
+        m_context->Update();
 
         auto* cmd = m_commandQueue->commandBuffer();
         if (!cmd) return;
-
         m_rmlRenderer->beginFrame(cmd, m_renderTarget.get(), m_width, m_height);
-        ctx->Render();
+        m_context->Render();
         m_rmlRenderer->endFrame();
         cmd->commit();
     }
 
     void resize(int width, int height) override {
         if (width == m_width && height == m_height) return;
-        m_width = width;
+        m_width  = width;
         m_height = height;
         createRenderTarget(width, height);
+        if (m_context) m_context->SetDimensions(Rml::Vector2i(width, height));
     }
 
-    // Returns a MTL::Texture* cast to void*.
-    // On the Virga side: IntPtr → MTLTexture handle for Avalonia's Metal layer.
     void* getSharedTexture() override {
         return static_cast<void*>(m_renderTarget.get());
     }
 
     void shutdown() override {
+        if (!m_active) return;
+        m_active = false;
+
+        if (m_context) {
+            Rml::RemoveContext(m_contextName);
+            m_context = nullptr;
+        }
         if (m_rmlRenderer) { m_rmlRenderer->shutdown(); m_rmlRenderer.reset(); }
         m_renderTarget.reset();
         m_commandQueue.reset();
         m_device.reset();
+
+        if (--s_instanceCount == 0 && s_rmlInitialized) {
+            Rml::Shutdown();
+            s_rmlInitialized = false;
+            s_rmlSystem.reset();
+        }
+    }
+
+    void loadDocument(const std::string& path) override {
+        if (!m_context) return;
+        auto resolved = FileSystem::instance().resolvePath(path);
+        std::string absPath = resolved ? *resolved : path;
+        Rml::SetRenderInterface(m_rmlRenderer.get());
+        auto* doc = m_context->LoadDocument(absPath);
+        if (doc) {
+            doc->Show();
+            m_activeDocPath = path;
+        } else {
+            fmt::print("[UIRenderer] Failed to load document: {}\n", absPath);
+        }
+    }
+
+    void reloadDocument() override {
+        if (!m_context || m_activeDocPath.empty()) return;
+        auto resolved = FileSystem::instance().resolvePath(m_activeDocPath);
+        std::string absPath = resolved ? *resolved : m_activeDocPath;
+        Rml::SetRenderInterface(m_rmlRenderer.get());
+        auto* doc = m_context->GetDocument(absPath);
+        if (doc) doc->Close();
+        auto* newDoc = m_context->LoadDocument(absPath);
+        if (newDoc) newDoc->Show();
+    }
+
+    Rml::Context* getContext() override { return m_context; }
+
+    // button: 0=move only; 1/2/3=SDL left/middle/right press; negative=release
+    void injectMouseEvent(double x, double y, int button) override {
+        if (!m_context) return;
+        m_context->ProcessMouseMove(static_cast<int>(x), static_cast<int>(y), 0);
+        if (button != 0) {
+            // Map SDL button index → RmlUI button index (0=left, 1=right, 2=middle)
+            int absBtn = button < 0 ? -button : button;
+            int rmlBtn = (absBtn == 1) ? 0 : (absBtn == 3) ? 1 : 2;
+            if (button > 0) m_context->ProcessMouseButtonDown(rmlBtn, 0);
+            else            m_context->ProcessMouseButtonUp(rmlBtn, 0);
+        }
+    }
+
+    void injectKeyEvent(int sdlScancode, int pressed) override {
+        if (!m_context) return;
+        auto key = sdlScancodeToRmlKey(static_cast<SDL_Scancode>(sdlScancode));
+        if (key != Rml::Input::KI_UNKNOWN) {
+            if (pressed) m_context->ProcessKeyDown(key, 0);
+            else         m_context->ProcessKeyUp(key, 0);
+        }
     }
 
 private:
@@ -399,7 +503,11 @@ private:
     NS::SharedPtr<MTL::CommandQueue> m_commandQueue;
     NS::SharedPtr<MTL::Texture>      m_renderTarget;
     std::unique_ptr<RmlUiMetal>      m_rmlRenderer;
-    int m_width, m_height;
+    Rml::Context*                    m_context      = nullptr;
+    std::string                      m_contextName;
+    std::string                      m_activeDocPath;
+    int  m_width, m_height;
+    bool m_active = false;
 };
 
 // ── Factory ──────────────────────────────────────────────────────────────────
