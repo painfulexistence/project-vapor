@@ -12,19 +12,23 @@
 #include <RmlUi/Core.h>
 #include <SDL3/SDL.h>
 #include <fmt/core.h>
+#include <atomic>
 #include <memory>
+#include <mutex>
 #include <string>
 
 namespace Vapor {
 
 // ── Global Rml state (shared across all UIRendererMetal instances) ────────────
+// Thread-safe: multiple surfaces may be created/destroyed from different threads.
 
 namespace {
 
 static std::unique_ptr<RmlUiSystem> s_rmlSystem;
-static bool s_rmlInitialized = false;
-static int  s_instanceCount  = 0;
-static int  s_nextContextId  = 0;
+static std::mutex                   s_rmlMutex;
+static std::atomic<bool>            s_rmlInitialized{false};
+static std::atomic<int>             s_instanceCount{0};
+static std::atomic<int>             s_nextContextId{0};
 
 static Rml::Input::KeyIdentifier sdlScancodeToRmlKey(SDL_Scancode sc) {
     switch (sc) {
@@ -78,29 +82,34 @@ public:
             return false;
         }
 
-        if (!s_rmlInitialized) {
-            s_rmlSystem = std::make_unique<RmlUiSystem>();
-            Rml::SetSystemInterface(s_rmlSystem.get());
-            Rml::SetRenderInterface(m_rmlRenderer.get());
-            if (!Rml::Initialise()) {
-                fmt::print("[UIRenderer] Rml::Initialise() failed\n");
-                return false;
+        // Thread-safe RmlUI initialization
+        {
+            std::lock_guard<std::mutex> lock(s_rmlMutex);
+            if (!s_rmlInitialized.load()) {
+                s_rmlSystem = std::make_unique<RmlUiSystem>();
+                Rml::SetSystemInterface(s_rmlSystem.get());
+                Rml::SetRenderInterface(m_rmlRenderer.get());
+                if (!Rml::Initialise()) {
+                    fmt::print("[UIRenderer] Rml::Initialise() failed\n");
+                    s_rmlSystem.reset();
+                    return false;
+                }
+                auto fontPath = FileSystem::instance().resolvePath("fonts/Arial Black.ttf");
+                if (fontPath) Rml::LoadFontFace(*fontPath);
+                s_rmlInitialized.store(true);
+            } else {
+                Rml::SetRenderInterface(m_rmlRenderer.get());
             }
-            auto fontPath = FileSystem::instance().resolvePath("fonts/Arial Black.ttf");
-            if (fontPath) Rml::LoadFontFace(*fontPath);
-            s_rmlInitialized = true;
-        } else {
-            Rml::SetRenderInterface(m_rmlRenderer.get());
         }
 
-        m_contextName = fmt::format("surface_{}", s_nextContextId++);
+        m_contextName = fmt::format("surface_{}", s_nextContextId.fetch_add(1));
         m_context = Rml::CreateContext(m_contextName, Rml::Vector2i(m_width, m_height));
         if (!m_context) {
             fmt::print("[UIRenderer] Failed to create Rml context '{}'\n", m_contextName);
             return false;
         }
 
-        ++s_instanceCount;
+        s_instanceCount.fetch_add(1);
         m_active = true;
         fmt::print("[UIRenderer] Surface '{}' ready ({}x{})\n", m_contextName, m_width, m_height);
         return true;
@@ -160,10 +169,14 @@ public:
         m_commandQueue.reset();
         m_device.reset();
 
-        if (--s_instanceCount == 0 && s_rmlInitialized) {
-            Rml::Shutdown();
-            s_rmlInitialized = false;
-            s_rmlSystem.reset();
+        // Thread-safe RmlUI shutdown (only when last instance is destroyed)
+        if (s_instanceCount.fetch_sub(1) == 1) {
+            std::lock_guard<std::mutex> lock(s_rmlMutex);
+            if (s_rmlInitialized.load()) {
+                Rml::Shutdown();
+                s_rmlInitialized.store(false);
+                s_rmlSystem.reset();
+            }
         }
     }
 

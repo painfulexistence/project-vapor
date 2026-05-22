@@ -44,11 +44,15 @@ VIRGA_API int  Vapor_IsRunning(void);
  * free it. It remains valid until Vapor_Surface_Destroy or Vapor_Shutdown.
  * ------------------------------------------------------------------------- */
 
+/* Returns surface ID (>= 1), or -1 on failure. */
 VIRGA_API int   Vapor_Surface_Create(int width, int height);
 VIRGA_API void  Vapor_Surface_Destroy(int id);
 VIRGA_API void  Vapor_Surface_Resize(int id, int width, int height);
+/* Returns MTLTexture* (macOS) cast to void*, or NULL if id is invalid. */
 VIRGA_API void* Vapor_Surface_GetTexture(int id);
+/* Returns 0 if id is invalid. */
 VIRGA_API int   Vapor_Surface_Width(int id);
+/* Returns 0 if id is invalid. */
 VIRGA_API int   Vapor_Surface_Height(int id);
 
 /* ── Input (routed to a specific surface's UI context) ───────────────────── */

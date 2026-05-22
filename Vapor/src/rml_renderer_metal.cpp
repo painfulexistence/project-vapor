@@ -230,7 +230,11 @@ void RmlRendererMetal::createPipelineState() {
 
     auto vf = lib->newFunction(NS::String::string("vertexMain",   NS::StringEncoding::UTF8StringEncoding));
     auto ff = lib->newFunction(NS::String::string("fragmentMain", NS::StringEncoding::UTF8StringEncoding));
-    if (!vf || !ff) { lib->release(); return; }
+    if (!vf || !ff) {
+        if (vf) vf->release();
+        if (ff) ff->release();
+        return;
+    }
 
     auto vd = NS::TransferPtr(MTL::VertexDescriptor::alloc()->init());
     auto pa = vd->attributes()->object(0);
@@ -265,7 +269,9 @@ void RmlRendererMetal::createPipelineState() {
     ds->setDepthWriteEnabled(false);
     m_depthStencilState = NS::TransferPtr(m_device->newDepthStencilState(ds.get()));
 
-    vf->release(); ff->release(); lib->release();
+    vf->release();
+    ff->release();
+    // Note: lib is managed by NS::TransferPtr, do not call release()
 }
 
 } // namespace Vapor
