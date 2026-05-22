@@ -184,9 +184,8 @@ auto main(int argc, char* args[]) -> int {
     // and are rendered through the unified registry draw path.
     for (size_t i = 0; i < sponzaMeshCount && i < scene->stagedMeshes.size(); ++i) {
         auto& mesh = scene->stagedMeshes[i];
-        const glm::mat4& worldMat = i < scene->stagedMeshTransforms.size()
-            ? scene->stagedMeshTransforms[i]
-            : glm::identity<glm::mat4>();
+        const glm::mat4& worldMat =
+            i < scene->stagedMeshTransforms.size() ? scene->stagedMeshTransforms[i] : glm::identity<glm::mat4>();
 
         auto e = registry.create();
         registry.emplace<Vapor::NameComponent>(e, Vapor::NameComponent{ fmt::format("Sponza_{}", i) });
@@ -207,7 +206,7 @@ auto main(int argc, char* args[]) -> int {
             tc.rotation = glm::quat_cast(rotMat);
         }
         tc.worldTransform = worldMat;
-        tc.isDirty = false; // worldTransform already correct; skip TransformSystem
+        tc.isDirty = false;// worldTransform already correct; skip TransformSystem
         auto& mrc = registry.emplace<Vapor::MeshRendererComponent>(e);
         mrc.meshes.push_back(mesh);
     }
@@ -356,7 +355,6 @@ auto main(int argc, char* args[]) -> int {
 
         scene->update(deltaTime);
         physics->process(registry, deltaTime);
-        scene->update(deltaTime);
         TransformSystem::update(registry);
 
         // Rendering
