@@ -1,7 +1,6 @@
 #include "VirgaNativeAPI.h"
 
 #include <Vapor/engine_core.hpp>
-#include <Vapor/rmlui_manager.hpp>
 #include <Vapor/ui_renderer.hpp>
 
 #include <RmlUi/Core/Context.h>
@@ -10,20 +9,25 @@
 #include <RmlUi/Core/PropertiesIteratorView.h>
 #include <RmlUi/Core/Types.h>
 
-#include <SDL3/SDL.h>
-
+#include <memory>
 #include <string>
+#include <unordered_map>
 
 // ── Module state ──────────────────────────────────────────────────────────────
 
 namespace {
 
-static Vapor::EngineCore* g_engine      = nullptr;
-static Vapor::UIRenderer* g_uiRenderer  = nullptr;
-static int                g_surfaceW    = 0;
-static int                g_surfaceH    = 0;
-static std::string        g_activeDocPath;
+struct Surface {
+    std::unique_ptr<Vapor::UIRenderer> renderer;
+    int width  = 0;
+    int height = 0;
+};
 
+static Vapor::EngineCore*               g_engine  = nullptr;
+static std::unordered_map<int, Surface> g_surfaces;
+static int                              g_nextId  = 1;
+
+// Per-call scratch buffers (returned as const char*)
 static std::string g_domTreeBuf;
 static std::string g_styleBuf;
 static std::string g_elementAtBuf;
@@ -58,10 +62,14 @@ static void SerializeNode(Rml::Element* elem, std::string& out) {
     out += "]}";
 }
 
-static Rml::Context* RmlContext() {
-    if (!g_engine) return nullptr;
-    auto* rml = g_engine->getRmlUiManager();
-    return (rml && rml->IsInitialized()) ? rml->GetContext() : nullptr;
+static Vapor::UIRenderer* GetRenderer(int id) {
+    auto it = g_surfaces.find(id);
+    return (it != g_surfaces.end()) ? it->second.renderer.get() : nullptr;
+}
+
+static Rml::Context* GetContext(int id) {
+    auto* r = GetRenderer(id);
+    return r ? r->getContext() : nullptr;
 }
 
 } // namespace
@@ -75,11 +83,11 @@ extern "C" void Vapor_Initialize(void) {
 }
 
 extern "C" void Vapor_Shutdown(void) {
-    if (g_uiRenderer) {
-        g_uiRenderer->shutdown();
-        delete g_uiRenderer;
-        g_uiRenderer = nullptr;
-    }
+    // Destroy all surfaces first (triggers Rml::Shutdown on the last one)
+    for (auto& [id, surf] : g_surfaces)
+        surf.renderer->shutdown();
+    g_surfaces.clear();
+
     if (!g_engine) return;
     g_engine->shutdown();
     delete g_engine;
@@ -88,76 +96,62 @@ extern "C" void Vapor_Shutdown(void) {
 
 extern "C" void Vapor_Tick(float deltaTime) {
     if (g_engine) g_engine->update(deltaTime);
-    // Render UI after logic update, while the context is still valid this tick.
-    if (g_uiRenderer) {
-        if (auto* ctx = RmlContext())
-            g_uiRenderer->renderFrame(ctx);
-    }
+    for (auto& [id, surf] : g_surfaces)
+        surf.renderer->renderFrame();
 }
 
 extern "C" int Vapor_IsRunning(void) {
     return (g_engine && g_engine->isInitialized()) ? 1 : 0;
 }
 
-// ── Shared framebuffer ────────────────────────────────────────────────────────
+// ── Surface ───────────────────────────────────────────────────────────────────
 
-extern "C" void Vapor_CreateSharedSurface(int width, int height) {
-    g_surfaceW = width;
-    g_surfaceH = height;
-
-    if (!g_engine) return;
-
-    // Phase 1: set up system interface only (no Rml::Context yet).
-    g_engine->initRmlUI(width, height);
-
-    // Phase 2: create platform render target, wire Rml::RenderInterface,
-    // and call FinalizeInitialization() — UIRenderer::create() does all three.
+extern "C" int Vapor_Surface_Create(int width, int height) {
     auto renderer = Vapor::UIRenderer::create(width, height);
-    if (renderer) {
-        g_uiRenderer = renderer.release();
-    }
+    if (!renderer) return -1;
+    int id = g_nextId++;
+    g_surfaces[id] = { std::move(renderer), width, height };
+    return id;
 }
 
-extern "C" void* Vapor_GetDisplayTexture(void) {
-    return g_uiRenderer ? g_uiRenderer->getSharedTexture() : nullptr;
+extern "C" void Vapor_Surface_Destroy(int id) {
+    auto it = g_surfaces.find(id);
+    if (it == g_surfaces.end()) return;
+    it->second.renderer->shutdown();
+    g_surfaces.erase(it);
 }
 
-extern "C" void Vapor_ReleaseTexture(void* /*texture*/) {
-    // Texture lifetime is managed by UIRenderer; caller must not free it.
+extern "C" void Vapor_Surface_Resize(int id, int width, int height) {
+    auto it = g_surfaces.find(id);
+    if (it == g_surfaces.end()) return;
+    it->second.renderer->resize(width, height);
+    it->second.width  = width;
+    it->second.height = height;
 }
 
-extern "C" int Vapor_SurfaceWidth(void)  { return g_surfaceW; }
-extern "C" int Vapor_SurfaceHeight(void) { return g_surfaceH; }
+extern "C" void* Vapor_Surface_GetTexture(int id) {
+    auto* r = GetRenderer(id);
+    return r ? r->getSharedTexture() : nullptr;
+}
 
-// ── Viewport ──────────────────────────────────────────────────────────────────
+extern "C" int Vapor_Surface_Width(int id) {
+    auto it = g_surfaces.find(id);
+    return (it != g_surfaces.end()) ? it->second.width : 0;
+}
 
-extern "C" void Vapor_ResizeView(int width, int height) {
-    g_surfaceW = width;
-    g_surfaceH = height;
-    if (g_engine) g_engine->onRmlUIResize(width, height);
-    if (g_uiRenderer) g_uiRenderer->resize(width, height);
+extern "C" int Vapor_Surface_Height(int id) {
+    auto it = g_surfaces.find(id);
+    return (it != g_surfaces.end()) ? it->second.height : 0;
 }
 
 // ── Input ─────────────────────────────────────────────────────────────────────
 
-// button: 0 = move only; 1/2/3 = left/middle/right press; negative = release.
-// ProcessMouseButtonDown/Up expects SDL indices; pass through directly.
-extern "C" void Vapor_InjectMouseEvent(double x, double y, int button) {
-    if (!g_engine) return;
-    auto* rml = g_engine->getRmlUiManager();
-    if (!rml || !rml->IsInitialized()) return;
-    rml->ProcessMouseMove(static_cast<int>(x), static_cast<int>(y), 0);
-    if (button > 0)      rml->ProcessMouseButtonDown(button, 0);
-    else if (button < 0) rml->ProcessMouseButtonUp(-button, 0);
+extern "C" void Vapor_Surface_InjectMouseEvent(int id, double x, double y, int button) {
+    if (auto* r = GetRenderer(id)) r->injectMouseEvent(x, y, button);
 }
 
-extern "C" void Vapor_InjectKeyEvent(int sdlScancode, int pressed) {
-    if (!g_engine) return;
-    auto* rml = g_engine->getRmlUiManager();
-    if (!rml || !rml->IsInitialized()) return;
-    auto sc = static_cast<SDL_Scancode>(sdlScancode);
-    if (pressed) rml->ProcessKeyDown(sc, 0);
-    else         rml->ProcessKeyUp(sc, 0);
+extern "C" void Vapor_Surface_InjectKeyEvent(int id, int sdlScancode, int pressed) {
+    if (auto* r = GetRenderer(id)) r->injectKeyEvent(sdlScancode, pressed);
 }
 
 // ── Scene ─────────────────────────────────────────────────────────────────────
@@ -169,23 +163,17 @@ extern "C" void Vapor_LoadScene(const char* path) {
 
 // ── RmlUI ─────────────────────────────────────────────────────────────────────
 
-extern "C" void Vapor_Rml_LoadDocument(const char* path) {
-    if (!g_engine || !path) return;
-    auto* rml = g_engine->getRmlUiManager();
-    if (!rml || !rml->IsInitialized()) return;
-    g_activeDocPath = path;
-    rml->LoadDocument(path);
+extern "C" void Vapor_Surface_Rml_LoadDocument(int id, const char* path) {
+    if (auto* r = GetRenderer(id); r && path) r->loadDocument(path);
 }
 
-extern "C" void Vapor_Rml_ReloadDocument(void) {
-    if (!g_engine || g_activeDocPath.empty()) return;
-    auto* rml = g_engine->getRmlUiManager();
-    if (rml && rml->IsInitialized()) rml->ReloadDocument(g_activeDocPath);
+extern "C" void Vapor_Surface_Rml_ReloadDocument(int id) {
+    if (auto* r = GetRenderer(id)) r->reloadDocument();
 }
 
-extern "C" const char* Vapor_Rml_GetDomTreeJson(void) {
+extern "C" const char* Vapor_Surface_Rml_GetDomTreeJson(int id) {
     g_domTreeBuf.clear();
-    auto* ctx = RmlContext();
+    auto* ctx = GetContext(id);
     if (!ctx) { g_domTreeBuf = "[]"; return g_domTreeBuf.c_str(); }
     g_domTreeBuf += '[';
     int n = ctx->GetNumDocuments();
@@ -197,9 +185,9 @@ extern "C" const char* Vapor_Rml_GetDomTreeJson(void) {
     return g_domTreeBuf.c_str();
 }
 
-extern "C" const char* Vapor_Rml_GetElementStyle(const char* elementId) {
+extern "C" const char* Vapor_Surface_Rml_GetElementStyle(int id, const char* elementId) {
     g_styleBuf.clear();
-    auto* ctx = RmlContext();
+    auto* ctx = GetContext(id);
     if (!ctx || !elementId) { g_styleBuf = "{}"; return g_styleBuf.c_str(); }
     Rml::Element* elem = nullptr;
     for (int i = 0, n = ctx->GetNumDocuments(); !elem && i < n; ++i)
@@ -220,10 +208,10 @@ extern "C" const char* Vapor_Rml_GetElementStyle(const char* elementId) {
     return g_styleBuf.c_str();
 }
 
-extern "C" void Vapor_Rml_SetElementStyle(const char* elementId,
-                                           const char* property,
-                                           const char* value) {
-    auto* ctx = RmlContext();
+extern "C" void Vapor_Surface_Rml_SetElementStyle(int id, const char* elementId,
+                                                   const char* property,
+                                                   const char* value) {
+    auto* ctx = GetContext(id);
     if (!ctx || !elementId || !property || !value) return;
     for (int i = 0, n = ctx->GetNumDocuments(); i < n; ++i) {
         if (auto* elem = ctx->GetDocument(i)->GetElementById(elementId)) {
@@ -233,9 +221,9 @@ extern "C" void Vapor_Rml_SetElementStyle(const char* elementId,
     }
 }
 
-extern "C" const char* Vapor_Rml_GetElementAt(double x, double y) {
+extern "C" const char* Vapor_Surface_Rml_GetElementAt(int id, double x, double y) {
     g_elementAtBuf.clear();
-    auto* ctx = RmlContext();
+    auto* ctx = GetContext(id);
     if (!ctx) return g_elementAtBuf.c_str();
     Rml::Vector2f pt{static_cast<float>(x), static_cast<float>(y)};
     if (auto* elem = ctx->GetElementAtPoint(pt))
