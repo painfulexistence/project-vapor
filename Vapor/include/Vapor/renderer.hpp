@@ -62,6 +62,13 @@ public:
         return nullptr;
     }
 
+    // Register a callback invoked each frame between ImGui::NewFrame() and
+    // ImGui::Render(), allowing callers to draw custom ImGui windows without
+    // touching the renderer internals.
+    virtual void setImGuiCallback(std::function<void()> callback) {
+        m_imGuiCallback = std::move(callback);
+    }
+
     // ===== 2D/3D Batch Rendering API =====
     // Manual flush (for controlling draw order)
     virtual void flush2D() {
@@ -208,6 +215,7 @@ protected:
     Uint32 currentFrameInFlight = 0;
     Uint32 frameNumber = 0;
     bool isInitialized = false;
+    std::function<void()> m_imGuiCallback;
 
     int calculateMipmapLevelCount(Uint32 width, Uint32 height) const {
         return static_cast<int>(std::floor(std::log2(std::max(width, height))) + 1);

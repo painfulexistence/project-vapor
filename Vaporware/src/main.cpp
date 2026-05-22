@@ -30,6 +30,7 @@
 #include "pages/letterbox_page.hpp"
 #include "pages/page_system.hpp"
 #include "scene_builder.hpp"
+#include "scene_inspector.hpp"
 #include "systems.hpp"
 
 auto getActiveCamera(entt::registry& registry) -> entt::entity {
@@ -114,6 +115,8 @@ auto main(int argc, char* args[]) -> int {
     auto renderer = createRenderer(gfxBackend);
     renderer->init(window);
 
+    SceneInspector sceneInspector;
+
     // Load a font for text rendering
     FontHandle gameFont = renderer->loadFont("fonts/Arial Black.ttf", 48.0f);
     if (gameFont.isValid()) {
@@ -167,6 +170,7 @@ auto main(int argc, char* args[]) -> int {
     });
 
     entt::registry registry;
+    renderer->setImGuiCallback([&]() { sceneInspector.draw(registry); });
 
     auto [sceneBuilt, materialBuilt, cube1, global] =
         buildScene(registry, *physics, scene, material, windowWidth, windowHeight, rng);

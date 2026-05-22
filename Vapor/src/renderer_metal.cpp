@@ -4884,6 +4884,10 @@ auto Renderer_Metal::draw(std::shared_ptr<Scene> scene, Camera& camera) -> void 
         }
     }
 
+    if (m_imGuiCallback) {
+        m_imGuiCallback();
+    }
+
     // ==========================================================================
     // Execute all render passes
     // ==========================================================================
