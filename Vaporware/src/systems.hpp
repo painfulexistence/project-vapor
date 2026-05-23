@@ -1,5 +1,6 @@
 #pragma once
 #include "Vapor/character_controller.hpp"
+#include "Vapor/components.hpp"
 #include "Vapor/engine_core.hpp"
 #include "Vapor/input_manager.hpp"
 #include "Vapor/physics_3d.hpp"
@@ -11,8 +12,25 @@
 #include "pages/scroll_text_page.hpp"
 #include "pages/subtitle_page.hpp"
 #include <fmt/core.h>
+#include <glm/gtc/matrix_transform.hpp>
 
 
+
+class TransformSystem {
+public:
+    static void update(entt::registry& registry) {
+        auto view = registry.view<Vapor::TransformComponent>();
+        for (auto entity : view) {
+            auto& tc = view.get<Vapor::TransformComponent>(entity);
+            if (!tc.isDirty) continue;
+            tc.worldTransform =
+                glm::translate(glm::mat4(1.0f), tc.position) *
+                glm::mat4_cast(tc.rotation) *
+                glm::scale(glm::mat4(1.0f), tc.scale);
+            tc.isDirty = false;
+        }
+    }
+};
 
 class CleanupSystem {
 public:
@@ -128,6 +146,7 @@ public:
             auto& rotate = view.get<AutoRotateComponent>(entity);
             glm::quat delta = glm::angleAxis(rotate.speed * deltaTime, glm::normalize(rotate.axis));
             transform.rotation = glm::normalize(delta * transform.rotation);
+            transform.isDirty = true;
         }
     }
 };

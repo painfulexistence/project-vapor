@@ -162,6 +162,8 @@ auto main(int argc, char* args[]) -> int {
     // NOTES: optionally call resourceManager.waitForAll();
 
     auto scene = sceneResource->get();
+    // Record how many meshes the GLTF scene contributes before buildScene adds more
+    const size_t sponzaMeshCount = scene->stagedMeshes.size();
 
     auto material = std::make_shared<Vapor::Material>(Vapor::Material{
         .albedoMap = albedoResource->get(),
@@ -177,6 +179,43 @@ auto main(int argc, char* args[]) -> int {
 
     scene->update(0.0f);
     renderer->stage(scene);
+
+    // Convert GLTF scene meshes to ECS entities so they appear in the inspector
+    // and are rendered through the unified registry draw path.
+    for (size_t i = 0; i < sponzaMeshCount && i < scene->stagedMeshes.size(); ++i) {
+        auto& mesh = scene->stagedMeshes[i];
+        const glm::mat4& worldMat = i < scene->stagedMeshTransforms.size()
+            ? scene->stagedMeshTransforms[i]
+            : glm::identity<glm::mat4>();
+
+        auto e = registry.create();
+        registry.emplace<Vapor::NameComponent>(e, Vapor::NameComponent{ fmt::format("Sponza_{}", i) });
+        auto& tc = registry.emplace<Vapor::TransformComponent>(e);
+        // Decompose baked world matrix so the inspector shows meaningful values
+        tc.position = glm::vec3(worldMat[3]);
+        tc.scale = glm::vec3(
+            glm::length(glm::vec3(worldMat[0])),
+            glm::length(glm::vec3(worldMat[1])),
+            glm::length(glm::vec3(worldMat[2]))
+        );
+        if (tc.scale.x > 0.0f && tc.scale.y > 0.0f && tc.scale.z > 0.0f) {
+            glm::mat3 rotMat(
+                glm::vec3(worldMat[0]) / tc.scale.x,
+                glm::vec3(worldMat[1]) / tc.scale.y,
+                glm::vec3(worldMat[2]) / tc.scale.z
+            );
+            tc.rotation = glm::quat_cast(rotMat);
+        }
+        tc.worldTransform = worldMat;
+        tc.isDirty = false; // worldTransform already correct; skip TransformSystem
+        auto& mrc = registry.emplace<Vapor::MeshRendererComponent>(e);
+        mrc.meshes.push_back(mesh);
+    }
+    // Clear stagedMeshes: GLTF meshes are now ECS entities; manually built
+    // meshes (cubes, floor) are already in MeshRendererComponent and were
+    // staged (materialID/instanceID set) so their mesh objects remain valid.
+    scene->stagedMeshes.clear();
+    scene->stagedMeshTransforms.clear();
 
     Uint32 frameCount = 0;
     float time = SDL_GetTicks() / 1000.0f;
@@ -318,6 +357,7 @@ auto main(int argc, char* args[]) -> int {
         scene->update(deltaTime);
         physics->process(registry, deltaTime);
         scene->update(deltaTime);
+        TransformSystem::update(registry);
 
         // Rendering
         entt::entity activeCamEntity = getActiveCamera(registry);
@@ -398,7 +438,7 @@ auto main(int argc, char* args[]) -> int {
                 glm::vec3(0.0f, 2.0f, 0.0f), glm::vec2(1.0f, 1.0f), spriteTexture, glm::vec4(1.0f, 0.5f, 0.5f, 1.0f)
             );
 
-            renderer->draw(scene, tempCamera);
+            renderer->draw(registry, scene, tempCamera);
         }
 
         frameCount++;
