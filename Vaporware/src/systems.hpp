@@ -16,22 +16,6 @@
 
 
 
-class TransformSystem {
-public:
-    static void update(entt::registry& registry) {
-        auto view = registry.view<Vapor::TransformComponent>();
-        for (auto entity : view) {
-            auto& tc = view.get<Vapor::TransformComponent>(entity);
-            if (!tc.isDirty) continue;
-            tc.worldTransform =
-                glm::translate(glm::mat4(1.0f), tc.position) *
-                glm::mat4_cast(tc.rotation) *
-                glm::scale(glm::mat4(1.0f), tc.scale);
-            tc.isDirty = false;
-        }
-    }
-};
-
 class CleanupSystem {
 public:
     static void update(entt::registry& reg) {

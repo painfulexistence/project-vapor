@@ -5104,8 +5104,34 @@ void Renderer_Metal::applyToneMapping(RenderTextureHandle target, float exposure
         MTL::Viewport viewport = { 0, 0, (double)rtData.width, (double)rtData.height, 0, 1 };
         encoder->setViewport(viewport);
 
+        struct GPUPostProcessParams {
+            float chromaticAberrationStrength;
+            float chromaticAberrationFalloff;
+            float vignetteStrength;
+            float vignetteRadius;
+            float vignetteSoftness;
+            float saturation;
+            float contrast;
+            float brightness;
+            float temperature;
+            float tint;
+            float exposure;
+        } params = {
+            0.0f, // chromaticAberrationStrength
+            0.0f, // chromaticAberrationFalloff
+            0.0f, // vignetteStrength
+            0.0f, // vignetteRadius
+            0.0f, // vignetteSoftness
+            1.0f, // saturation
+            1.0f, // contrast
+            1.0f, // brightness
+            0.0f, // temperature
+            0.0f, // tint
+            exposure // exposure
+        };
+
         encoder->setFragmentTexture(rtData.tempTexture.get(), 0);
-        encoder->setFragmentBytes(&exposure, sizeof(float), 0);
+        encoder->setFragmentBytes(&params, sizeof(GPUPostProcessParams), 0);
 
         encoder->drawPrimitives(MTL::PrimitiveTypeTriangle, NS::UInteger(0), NS::UInteger(3));
         encoder->endEncoding();
@@ -5155,13 +5181,34 @@ void Renderer_Metal::applyVignette(RenderTextureHandle target, float strength, f
         MTL::Viewport viewport = { 0, 0, (double)rtData.width, (double)rtData.height, 0, 1 };
         encoder->setViewport(viewport);
 
-        struct VignetteParams {
-            float strength;
-            float radius;
-        } params = { strength, radius };
+        struct GPUPostProcessParams {
+            float chromaticAberrationStrength;
+            float chromaticAberrationFalloff;
+            float vignetteStrength;
+            float vignetteRadius;
+            float vignetteSoftness;
+            float saturation;
+            float contrast;
+            float brightness;
+            float temperature;
+            float tint;
+            float exposure;
+        } params = {
+            0.0f, // chromaticAberrationStrength
+            0.0f, // chromaticAberrationFalloff
+            strength, // vignetteStrength
+            radius, // vignetteRadius
+            0.15f, // vignetteSoftness
+            1.0f, // saturation
+            1.0f, // contrast
+            1.0f, // brightness
+            0.0f, // temperature
+            0.0f, // tint
+            1.0f // exposure
+        };
 
         encoder->setFragmentTexture(rtData.tempTexture.get(), 0);
-        encoder->setFragmentBytes(&params, sizeof(VignetteParams), 0);
+        encoder->setFragmentBytes(&params, sizeof(GPUPostProcessParams), 0);
 
         encoder->drawPrimitives(MTL::PrimitiveTypeTriangle, NS::UInteger(0), NS::UInteger(3));
         encoder->endEncoding();
@@ -5472,12 +5519,14 @@ void Renderer_Metal::drawQuad2D(
         findOrAddTextureSlot(batch2DTextureSlots, batch2DTextureSlotIndex, texture, batch2DWhiteTextureHandle);
     auto vertexOffset = static_cast<Uint32>(batch2DVertices.size());
 
+    const glm::vec2* uvs = texCoords ? texCoords : batchQuadTexCoords;
+
     // Add 4 vertices
     for (int i = 0; i < 4; i++) {
         Batch2DVertex vertex;
         vertex.position = transform * batchQuadPositions[i];
         vertex.color = tintColor;
-        vertex.uv = texCoords[i];
+        vertex.uv = uvs[i];
         vertex.texIndex = textureIndex;
         vertex.entityID = static_cast<float>(entityID);
         batch2DVertices.push_back(vertex);
@@ -5593,11 +5642,13 @@ void Renderer_Metal::drawQuad3D(
         findOrAddTextureSlot(batch3DTextureSlots, batch3DTextureSlotIndex, texture, batch2DWhiteTextureHandle);
     auto vertexOffset = static_cast<Uint32>(batch3DVertices.size());
 
+    const glm::vec2* uvs = texCoords ? texCoords : batchQuadTexCoords;
+
     for (int i = 0; i < 4; i++) {
         Batch2DVertex vertex;
         vertex.position = transform * batchQuadPositions[i];
         vertex.color = tintColor;
-        vertex.uv = texCoords[i];
+        vertex.uv = uvs[i];
         vertex.texIndex = textureIndex;
         vertex.entityID = static_cast<float>(entityID);
         batch3DVertices.push_back(vertex);

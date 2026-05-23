@@ -42,20 +42,20 @@ private:
         std::string filter(m_searchBuf);
         for (auto& c : filter) c = static_cast<char>(tolower(c));
 
-        registry.each([&](entt::entity entity) {
+        for (auto entity : registry.storage<entt::entity>()) {
             std::string label = entityLabel(registry, entity);
             std::string labelLower = label;
             for (auto& c : labelLower) c = static_cast<char>(tolower(c));
 
             if (!filter.empty() && labelLower.find(filter) == std::string::npos)
-                return;
+                continue;
 
             bool selected = (entity == m_selected);
             ImGui::PushID(static_cast<int>(entt::to_integral(entity)));
             if (ImGui::Selectable(label.c_str(), selected))
                 m_selected = entity;
             ImGui::PopID();
-        });
+        }
 
         ImGui::Separator();
         if (ImGui::Button("Create Entity")) {
