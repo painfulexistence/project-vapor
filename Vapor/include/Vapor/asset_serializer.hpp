@@ -37,45 +37,38 @@ namespace cereal {
         archive(quat.x, quat.y, quat.z, quat.w);
     }
 
-    template<class Archive> void serialize(Archive& archive, VertexData& vertex) {
+    template<class Archive> void serialize(Archive& archive, Vapor::VertexData& vertex) {
         archive(vertex.position, vertex.uv, vertex.normal, vertex.tangent);
     }
 }// namespace cereal
 
 class AssetSerializer {
 public:
+    static constexpr uint32_t SCENE_FORMAT_VERSION = 2;
+
     static void serializeScene(const std::shared_ptr<Scene>& scene, const std::string& path);
     static std::shared_ptr<Scene> deserializeScene(const std::string& path);
 
 private:
     static void serializeMaterial(
         cereal::BinaryOutputArchive& archive,
-        const std::shared_ptr<Material>& material,
-        const std::unordered_map<std::shared_ptr<Image>, Uint32>& imageIDs
+        const std::shared_ptr<Vapor::Material>& material,
+        const std::unordered_map<std::shared_ptr<Vapor::Image>, Uint32>& imageIDs
     );
-    static std::shared_ptr<Material> deserializeMaterial(
-        cereal::BinaryInputArchive& archive, const std::unordered_map<Uint32, std::shared_ptr<Image>>& images
+    static std::shared_ptr<Vapor::Material> deserializeMaterial(
+        cereal::BinaryInputArchive& archive, const std::unordered_map<Uint32, std::shared_ptr<Vapor::Image>>& images
     );
 
-    static void serializeImage(cereal::BinaryOutputArchive& archive, const std::shared_ptr<Image>& image);
-    static std::shared_ptr<Image> deserializeImage(cereal::BinaryInputArchive& archive);
-
-    static void serializeNode(
-        cereal::BinaryOutputArchive& archive,
-        const std::shared_ptr<Node>& node,
-        const std::unordered_map<std::shared_ptr<Material>, Uint32>& materialIDs
-    );
-    static std::shared_ptr<Node> deserializeNode(
-        cereal::BinaryInputArchive& archive, const std::unordered_map<Uint32, std::shared_ptr<Material>>& materials
-    );
+    static void serializeImage(cereal::BinaryOutputArchive& archive, const std::shared_ptr<Vapor::Image>& image);
+    static std::shared_ptr<Vapor::Image> deserializeImage(cereal::BinaryInputArchive& archive);
 
     static void serializeMesh(
         cereal::BinaryOutputArchive& archive,
-        const std::shared_ptr<Mesh>& mesh,
-        const std::unordered_map<std::shared_ptr<Material>, Uint32>& materialIDs
+        const std::shared_ptr<Vapor::Mesh>& mesh,
+        const std::unordered_map<std::shared_ptr<Vapor::Material>, Uint32>& materialIDs
     );
-    static std::shared_ptr<Mesh> deserializeMesh(
-        cereal::BinaryInputArchive& archive, const std::unordered_map<Uint32, std::shared_ptr<Material>>& materials
+    static std::shared_ptr<Vapor::Mesh> deserializeMesh(
+        cereal::BinaryInputArchive& archive, const std::unordered_map<Uint32, std::shared_ptr<Vapor::Material>>& materials
     );
 
     static void serializeDirectionalLight(cereal::BinaryOutputArchive& archive, const DirectionalLight& light);

@@ -2,7 +2,11 @@
 #define NS_PRIVATE_IMPLEMENTATION
 #define MTL_PRIVATE_IMPLEMENTATION
 #define CA_PRIVATE_IMPLEMENTATION
+#include "components.hpp"
+
+using namespace Vapor;
 #include "debug_draw.hpp"
+#include "graphics_mesh.hpp"
 #include "renderer_metal.hpp"
 
 #include <SDL3/SDL_stdinc.h>
@@ -24,13 +28,13 @@
 #include <imgui.h>
 #include <vector>
 
+#include "Vapor/rml_renderer_metal.hpp"
 #include "asset_manager.hpp"
 #include "engine_core.hpp"
 #include "graphics.hpp"
 #include "helper.hpp"
 #include "mesh_builder.hpp"
 #include "rmlui_manager.hpp"
-#include "Vapor/rml_renderer_metal.hpp"
 
 #include <RmlUi/Core.h>
 #include <glm/gtc/matrix_transform.hpp>
@@ -77,23 +81,22 @@ public:
         encoder->setVertexBuffer(r.instanceDataBuffers[r.currentFrameInFlight].get(), 0, 2);
         encoder->setVertexBuffer(r.getBuffer(r.currentScene->vertexBuffer).get(), 0, 3);
 
-        for (const auto& [material, meshes] : r.instanceBatches) {
+        for (const auto& [material, draws] : r.instanceBatches) {
             encoder->setFragmentTexture(
                 r.getTexture(material->albedoMap ? material->albedoMap->texture : r.defaultAlbedoTexture).get(), 0
             );
 
-            for (const auto& mesh : meshes) {
-                if (!r.currentCamera->isVisible(mesh->getWorldBoundingSphere())) {
+            for (const auto& draw : draws) {
+                if (!r.currentCamera->isVisible(r.instances[draw.instanceIndex].boundingSphere)) {
                     continue;
                 }
-
-                encoder->setVertexBytes(&mesh->instanceID, sizeof(Uint32), 4);
+                encoder->setVertexBytes(&draw.instanceIndex, sizeof(Uint32), 4);
                 encoder->drawIndexedPrimitives(
                     MTL::PrimitiveType::PrimitiveTypeTriangle,
-                    mesh->indexCount,
+                    draw.mesh->indexCount,
                     MTL::IndexTypeUInt32,
                     r.getBuffer(r.currentScene->indexBuffer).get(),
-                    mesh->indexOffset * sizeof(Uint32)
+                    draw.mesh->indexOffset * sizeof(Uint32)
                 );
                 r.drawCount++;
             }
@@ -315,8 +318,7 @@ public:
         // CompareFunctionEqual: sky depth (1.0) == depth buffer (1.0) -> pass, render sky
         //                      sky depth (1.0) == depth buffer (0.5) -> fail, don't render (preserves scene)
         MTL::DepthStencilDescriptor* skyDepthDesc = MTL::DepthStencilDescriptor::alloc()->init();
-        skyDepthDesc->setDepthCompareFunction(
-            MTL::CompareFunction::CompareFunctionEqual
+        skyDepthDesc->setDepthCompareFunction(MTL::CompareFunction::CompareFunctionEqual
         );// Only pass when depth == 1.0 (far plane)
         skyDepthDesc->setDepthWriteEnabled(false);// Don't write depth for sky
         NS::SharedPtr<MTL::DepthStencilState> skyDepthState =
@@ -541,8 +543,7 @@ public:
         // Create render pass descriptor
         auto renderPassDesc = NS::TransferPtr(MTL::RenderPassDescriptor::renderPassDescriptor());
         auto renderPassColorRT = renderPassDesc->colorAttachments()->object(0);
-        renderPassColorRT->setClearColor(
-            MTL::ClearColor(r.clearColor.r, r.clearColor.g, r.clearColor.b, r.clearColor.a)
+        renderPassColorRT->setClearColor(MTL::ClearColor(r.clearColor.r, r.clearColor.g, r.clearColor.b, r.clearColor.a)
         );
         renderPassColorRT->setLoadAction(MTL::LoadActionClear);
         renderPassColorRT->setStoreAction(MTL::StoreActionMultisampleResolve);
@@ -575,7 +576,7 @@ public:
         encoder->setFragmentBytes(&gridSize, sizeof(glm::uvec3), 5);
         encoder->setFragmentBytes(&time, sizeof(float), 6);
 
-        for (const auto& [material, meshes] : r.instanceBatches) {
+        for (const auto& [material, draws] : r.instanceBatches) {
             encoder->setFragmentTexture(
                 r.getTexture(material->albedoMap ? material->albedoMap->texture : r.defaultAlbedoTexture).get(), 0
             );
@@ -601,20 +602,19 @@ public:
             encoder->setFragmentTexture(r.prefilterMap.get(), 9);
             encoder->setFragmentTexture(r.brdfLUT.get(), 10);
 
-            for (const auto& mesh : meshes) {
-                if (!r.currentCamera->isVisible(mesh->getWorldBoundingSphere())) {
+            for (const auto& draw : draws) {
+                if (!r.currentCamera->isVisible(r.instances[draw.instanceIndex].boundingSphere)) {
                     r.culledInstanceCount++;
                     continue;
                 }
-
                 r.currentInstanceCount++;
-                encoder->setVertexBytes(&mesh->instanceID, sizeof(Uint32), 4);
+                encoder->setVertexBytes(&draw.instanceIndex, sizeof(Uint32), 4);
                 encoder->drawIndexedPrimitives(
                     MTL::PrimitiveType::PrimitiveTypeTriangle,
-                    mesh->indexCount,
+                    draw.mesh->indexCount,
                     MTL::IndexTypeUInt32,
                     r.getBuffer(r.currentScene->indexBuffer).get(),
-                    mesh->indexOffset * sizeof(Uint32)
+                    draw.mesh->indexOffset * sizeof(Uint32)
                 );
                 r.drawCount++;
             }
@@ -761,8 +761,7 @@ public:
         simParams.particleCount = r.particleCount;
 
         memcpy(r.particleSimParamsBuffers[r.currentFrameInFlight]->contents(), &simParams, sizeof(ParticleSimParams));
-        r.particleSimParamsBuffers[r.currentFrameInFlight]->didModifyRange(
-            NS::Range::Make(0, sizeof(ParticleSimParams))
+        r.particleSimParamsBuffers[r.currentFrameInFlight]->didModifyRange(NS::Range::Make(0, sizeof(ParticleSimParams))
         );
 
         // Update attractor buffer
@@ -775,8 +774,7 @@ public:
         attractor.strength = 50.0f;// Increased strength
 
         memcpy(r.particleAttractorBuffers[r.currentFrameInFlight]->contents(), &attractor, sizeof(ParticleAttractor));
-        r.particleAttractorBuffers[r.currentFrameInFlight]->didModifyRange(
-            NS::Range::Make(0, sizeof(ParticleAttractor))
+        r.particleAttractorBuffers[r.currentFrameInFlight]->didModifyRange(NS::Range::Make(0, sizeof(ParticleAttractor))
         );
 
         // Compute passes (single particle buffer - persistent state)
@@ -2198,7 +2196,7 @@ void Renderer_Metal::renderUI() {
     SDL_GetWindowSize(window, &windowWidth, &windowHeight);
 
     MTL::Texture* renderTarget = surface->texture();
-    int fbWidth  = static_cast<int>(renderTarget->width());
+    int fbWidth = static_cast<int>(renderTarget->width());
     int fbHeight = static_cast<int>(renderTarget->height());
 
     // Create render pass (load existing content)
@@ -2674,8 +2672,7 @@ auto Renderer_Metal::createResources() -> void {
     }
 
     // Create textures
-    defaultAlbedoTexture = createTexture(
-        AssetManager::loadImage("textures/default_albedo.png")
+    defaultAlbedoTexture = createTexture(AssetManager::loadImage("textures/default_albedo.png")
     );// createTexture(AssetManager::loadImage("textures/viking_room.png"));
     defaultNormalTexture = createTexture(AssetManager::loadImage("textures/default_norm.png"));
     defaultORMTexture = createTexture(AssetManager::loadImage("textures/default_orm.png"));
@@ -2813,12 +2810,9 @@ auto Renderer_Metal::createResources() -> void {
         NS::Error* error = nullptr;
         MTL::Library* library = device->newLibrary(code, nullptr, &error);
         if (!library) {
-            throw std::runtime_error(
-                fmt::format(
-                    "Could not compile bloom brightness shader! Error: {}\n",
-                    error->localizedDescription()->utf8String()
-                )
-            );
+            throw std::runtime_error(fmt::format(
+                "Could not compile bloom brightness shader! Error: {}\n", error->localizedDescription()->utf8String()
+            ));
         }
 
         auto vertexMain =
@@ -2833,12 +2827,9 @@ auto Renderer_Metal::createResources() -> void {
 
         bloomBrightnessPipeline = NS::TransferPtr(device->newRenderPipelineState(pipelineDesc, &error));
         if (!bloomBrightnessPipeline) {
-            throw std::runtime_error(
-                fmt::format(
-                    "Could not create bloom brightness pipeline! Error: {}\n",
-                    error->localizedDescription()->utf8String()
-                )
-            );
+            throw std::runtime_error(fmt::format(
+                "Could not create bloom brightness pipeline! Error: {}\n", error->localizedDescription()->utf8String()
+            ));
         }
 
         code->release();
@@ -2855,12 +2846,9 @@ auto Renderer_Metal::createResources() -> void {
         NS::Error* error = nullptr;
         MTL::Library* library = device->newLibrary(code, nullptr, &error);
         if (!library) {
-            throw std::runtime_error(
-                fmt::format(
-                    "Could not compile bloom downsample shader! Error: {}\n",
-                    error->localizedDescription()->utf8String()
-                )
-            );
+            throw std::runtime_error(fmt::format(
+                "Could not compile bloom downsample shader! Error: {}\n", error->localizedDescription()->utf8String()
+            ));
         }
 
         auto vertexMain =
@@ -2875,12 +2863,9 @@ auto Renderer_Metal::createResources() -> void {
 
         bloomDownsamplePipeline = NS::TransferPtr(device->newRenderPipelineState(pipelineDesc, &error));
         if (!bloomDownsamplePipeline) {
-            throw std::runtime_error(
-                fmt::format(
-                    "Could not create bloom downsample pipeline! Error: {}\n",
-                    error->localizedDescription()->utf8String()
-                )
-            );
+            throw std::runtime_error(fmt::format(
+                "Could not create bloom downsample pipeline! Error: {}\n", error->localizedDescription()->utf8String()
+            ));
         }
 
         code->release();
@@ -2897,11 +2882,9 @@ auto Renderer_Metal::createResources() -> void {
         NS::Error* error = nullptr;
         MTL::Library* library = device->newLibrary(code, nullptr, &error);
         if (!library) {
-            throw std::runtime_error(
-                fmt::format(
-                    "Could not compile bloom upsample shader! Error: {}\n", error->localizedDescription()->utf8String()
-                )
-            );
+            throw std::runtime_error(fmt::format(
+                "Could not compile bloom upsample shader! Error: {}\n", error->localizedDescription()->utf8String()
+            ));
         }
 
         auto vertexMain =
@@ -2916,11 +2899,9 @@ auto Renderer_Metal::createResources() -> void {
 
         bloomUpsamplePipeline = NS::TransferPtr(device->newRenderPipelineState(pipelineDesc, &error));
         if (!bloomUpsamplePipeline) {
-            throw std::runtime_error(
-                fmt::format(
-                    "Could not create bloom upsample pipeline! Error: {}\n", error->localizedDescription()->utf8String()
-                )
-            );
+            throw std::runtime_error(fmt::format(
+                "Could not create bloom upsample pipeline! Error: {}\n", error->localizedDescription()->utf8String()
+            ));
         }
 
         code->release();
@@ -2937,11 +2918,9 @@ auto Renderer_Metal::createResources() -> void {
         NS::Error* error = nullptr;
         MTL::Library* library = device->newLibrary(code, nullptr, &error);
         if (!library) {
-            throw std::runtime_error(
-                fmt::format(
-                    "Could not compile bloom composite shader! Error: {}\n", error->localizedDescription()->utf8String()
-                )
-            );
+            throw std::runtime_error(fmt::format(
+                "Could not compile bloom composite shader! Error: {}\n", error->localizedDescription()->utf8String()
+            ));
         }
 
         auto vertexMain =
@@ -2956,12 +2935,9 @@ auto Renderer_Metal::createResources() -> void {
 
         bloomCompositePipeline = NS::TransferPtr(device->newRenderPipelineState(pipelineDesc, &error));
         if (!bloomCompositePipeline) {
-            throw std::runtime_error(
-                fmt::format(
-                    "Could not create bloom composite pipeline! Error: {}\n",
-                    error->localizedDescription()->utf8String()
-                )
-            );
+            throw std::runtime_error(fmt::format(
+                "Could not create bloom composite pipeline! Error: {}\n", error->localizedDescription()->utf8String()
+            ));
         }
 
         code->release();
@@ -3079,9 +3055,9 @@ auto Renderer_Metal::createResources() -> void {
             }
 
             // Temporal resolve pipeline
-            auto fragmentTemporal = library->newFunction(
-                NS::String::string("cloudTemporalResolve", NS::StringEncoding::UTF8StringEncoding)
-            );
+            auto fragmentTemporal =
+                library->newFunction(NS::String::string("cloudTemporalResolve", NS::StringEncoding::UTF8StringEncoding)
+                );
 
             if (vertexMain && fragmentTemporal) {
                 auto pipelineDesc = MTL::RenderPipelineDescriptor::alloc()->init();
@@ -3101,9 +3077,9 @@ auto Renderer_Metal::createResources() -> void {
             }
 
             // Upscale and composite pipeline
-            auto fragmentComposite = library->newFunction(
-                NS::String::string("cloudUpscaleComposite", NS::StringEncoding::UTF8StringEncoding)
-            );
+            auto fragmentComposite =
+                library->newFunction(NS::String::string("cloudUpscaleComposite", NS::StringEncoding::UTF8StringEncoding)
+                );
 
             if (vertexMain && fragmentComposite) {
                 auto pipelineDesc = MTL::RenderPipelineDescriptor::alloc()->init();
@@ -3251,11 +3227,9 @@ auto Renderer_Metal::createResources() -> void {
         NS::Error* error = nullptr;
         MTL::Library* library = device->newLibrary(code, nullptr, &error);
         if (!library) {
-            throw std::runtime_error(
-                fmt::format(
-                    "Could not compile DOF CoC shader! Error: {}\n", error->localizedDescription()->utf8String()
-                )
-            );
+            throw std::runtime_error(fmt::format(
+                "Could not compile DOF CoC shader! Error: {}\n", error->localizedDescription()->utf8String()
+            ));
         }
 
         auto vertexMain =
@@ -3270,11 +3244,9 @@ auto Renderer_Metal::createResources() -> void {
 
         dofCoCPipeline = NS::TransferPtr(device->newRenderPipelineState(pipelineDesc, &error));
         if (!dofCoCPipeline) {
-            throw std::runtime_error(
-                fmt::format(
-                    "Could not create DOF CoC pipeline! Error: {}\n", error->localizedDescription()->utf8String()
-                )
-            );
+            throw std::runtime_error(fmt::format(
+                "Could not create DOF CoC pipeline! Error: {}\n", error->localizedDescription()->utf8String()
+            ));
         }
 
         code->release();
@@ -3291,11 +3263,9 @@ auto Renderer_Metal::createResources() -> void {
         NS::Error* error = nullptr;
         MTL::Library* library = device->newLibrary(code, nullptr, &error);
         if (!library) {
-            throw std::runtime_error(
-                fmt::format(
-                    "Could not compile DOF Blur shader! Error: {}\n", error->localizedDescription()->utf8String()
-                )
-            );
+            throw std::runtime_error(fmt::format(
+                "Could not compile DOF Blur shader! Error: {}\n", error->localizedDescription()->utf8String()
+            ));
         }
 
         auto vertexMain =
@@ -3310,11 +3280,9 @@ auto Renderer_Metal::createResources() -> void {
 
         dofBlurPipeline = NS::TransferPtr(device->newRenderPipelineState(pipelineDesc, &error));
         if (!dofBlurPipeline) {
-            throw std::runtime_error(
-                fmt::format(
-                    "Could not create DOF Blur pipeline! Error: {}\n", error->localizedDescription()->utf8String()
-                )
-            );
+            throw std::runtime_error(fmt::format(
+                "Could not create DOF Blur pipeline! Error: {}\n", error->localizedDescription()->utf8String()
+            ));
         }
 
         code->release();
@@ -3331,11 +3299,9 @@ auto Renderer_Metal::createResources() -> void {
         NS::Error* error = nullptr;
         MTL::Library* library = device->newLibrary(code, nullptr, &error);
         if (!library) {
-            throw std::runtime_error(
-                fmt::format(
-                    "Could not compile DOF Composite shader! Error: {}\n", error->localizedDescription()->utf8String()
-                )
-            );
+            throw std::runtime_error(fmt::format(
+                "Could not compile DOF Composite shader! Error: {}\n", error->localizedDescription()->utf8String()
+            ));
         }
 
         auto vertexMain =
@@ -3350,11 +3316,9 @@ auto Renderer_Metal::createResources() -> void {
 
         dofCompositePipeline = NS::TransferPtr(device->newRenderPipelineState(pipelineDesc, &error));
         if (!dofCompositePipeline) {
-            throw std::runtime_error(
-                fmt::format(
-                    "Could not create DOF Composite pipeline! Error: {}\n", error->localizedDescription()->utf8String()
-                )
-            );
+            throw std::runtime_error(fmt::format(
+                "Could not create DOF Composite pipeline! Error: {}\n", error->localizedDescription()->utf8String()
+            ));
         }
 
         code->release();
@@ -3836,55 +3800,42 @@ auto Renderer_Metal::stage(std::shared_ptr<Scene> scene) -> void {
 
     auto cmd = queue->commandBuffer();
 
-    const std::function<void(const std::shared_ptr<Node>&)> stageNode = [&](const std::shared_ptr<Node>& node) -> void {
-        if (node->meshGroup) {
-            for (auto& mesh : node->meshGroup->meshes) {
-                // mesh->vbos.push_back(createVertexBuffer(mesh->vertices));
-                // mesh->ebo = createIndexBuffer(mesh->indices);
+    const auto stageMesh = [&](std::shared_ptr<Vapor::Mesh>& mesh) {
+        if (m_supportsRaytracing) {
+            auto geomDesc = NS::TransferPtr(MTL::AccelerationStructureTriangleGeometryDescriptor::alloc()->init());
+            geomDesc->setVertexBuffer(getBuffer(scene->vertexBuffer).get());
+            geomDesc->setVertexStride(sizeof(VertexData));
+            geomDesc->setVertexFormat(MTL::AttributeFormatFloat3);
+            geomDesc->setVertexBufferOffset(mesh->vertexOffset * sizeof(VertexData) + offsetof(VertexData, position));
+            geomDesc->setIndexBuffer(getBuffer(scene->indexBuffer).get());
+            geomDesc->setIndexType(MTL::IndexTypeUInt32);
+            geomDesc->setIndexBufferOffset(mesh->indexOffset * sizeof(Uint32));
+            geomDesc->setTriangleCount(mesh->indexCount / 3);
+            geomDesc->setOpaque(true);
 
-                if (m_supportsRaytracing) {
-                auto geomDesc = NS::TransferPtr(MTL::AccelerationStructureTriangleGeometryDescriptor::alloc()->init());
-                geomDesc->setVertexBuffer(getBuffer(scene->vertexBuffer).get());
-                geomDesc->setVertexStride(sizeof(VertexData));
-                geomDesc->setVertexFormat(MTL::AttributeFormatFloat3);
-                geomDesc->setVertexBufferOffset(
-                    mesh->vertexOffset * sizeof(VertexData) + offsetof(VertexData, position)
-                );
-                geomDesc->setIndexBuffer(getBuffer(scene->indexBuffer).get());
-                geomDesc->setIndexType(MTL::IndexTypeUInt32);
-                geomDesc->setIndexBufferOffset(mesh->indexOffset * sizeof(Uint32));
-                geomDesc->setTriangleCount(mesh->indexCount / 3);
-                geomDesc->setOpaque(true);
+            auto accelDesc = NS::TransferPtr(MTL::PrimitiveAccelerationStructureDescriptor::alloc()->init());
+            NS::Object* descriptors[] = { geomDesc.get() };
+            auto geomArray = NS::TransferPtr(NS::Array::array(descriptors, 1));
+            accelDesc->setGeometryDescriptors(geomArray.get());
 
-                auto accelDesc = NS::TransferPtr(MTL::PrimitiveAccelerationStructureDescriptor::alloc()->init());
-                NS::Object* descriptors[] = { geomDesc.get() };
-                auto geomArray = NS::TransferPtr(NS::Array::array(descriptors, 1));
-                accelDesc->setGeometryDescriptors(geomArray.get());
+            auto accelSizes = device->accelerationStructureSizes(accelDesc.get());
+            auto accelStruct = NS::TransferPtr(device->newAccelerationStructure(accelSizes.accelerationStructureSize));
+            auto scratchBuffer =
+                NS::TransferPtr(device->newBuffer(accelSizes.buildScratchBufferSize, MTL::ResourceStorageModePrivate));
 
-                auto accelSizes = device->accelerationStructureSizes(accelDesc.get());
-                auto accelStruct =
-                    NS::TransferPtr(device->newAccelerationStructure(accelSizes.accelerationStructureSize));
-                auto scratchBuffer = NS::TransferPtr(
-                    device->newBuffer(accelSizes.buildScratchBufferSize, MTL::ResourceStorageModePrivate)
-                );
+            auto encoder = cmd->accelerationStructureCommandEncoder();
+            encoder->buildAccelerationStructure(accelStruct.get(), accelDesc.get(), scratchBuffer.get(), 0);
+            encoder->endEncoding();
 
-                auto encoder = cmd->accelerationStructureCommandEncoder();
-                encoder->buildAccelerationStructure(accelStruct.get(), accelDesc.get(), scratchBuffer.get(), 0);
-                encoder->endEncoding();
-
-                BLASs.push_back(accelStruct);
-                }
-
-                mesh->materialID = materialIDs[mesh->material];
-                mesh->instanceID = nextInstanceID++;
-            }
+            BLASs.push_back(accelStruct);
         }
-        for (const auto& child : node->children) {
-            stageNode(child);
-        }
+
+        mesh->materialID = materialIDs[mesh->material];
+        mesh->instanceID = nextInstanceID++;
     };
-    for (auto& node : scene->nodes) {
-        stageNode(node);
+
+    for (auto& mesh : scene->stagedMeshes) {
+        stageMesh(mesh);
     }
 
     cmd->commit();
@@ -3980,54 +3931,18 @@ auto Renderer_Metal::draw(std::shared_ptr<Scene> scene, Camera& camera) -> void 
     }
     materialDataBuffer->didModifyRange(NS::Range::Make(0, materialDataBuffer->length()));
 
-    // Update instance data
+    // Update instance data from ECS (set by draw(registry, scene, camera) before calling this)
     instances.clear();
     accelInstances.clear();
     instanceBatches.clear();
-    const std::function<void(const std::shared_ptr<Node>&)> updateNode =
-        [&](const std::shared_ptr<Node>& node) -> void {
-        if (node->meshGroup) {
-            const glm::mat4& transform = node->worldTransform;
-            for (const auto& mesh : node->meshGroup->meshes) {
-                instances.push_back(
-                    {
-                        .model = transform,
-                        .color = glm::vec4(1.0f, 0.0f, 0.0f, 1.0f),
-                        .vertexOffset = mesh->vertexOffset,
-                        .indexOffset = mesh->indexOffset,
-                        .vertexCount = mesh->vertexCount,
-                        .indexCount = mesh->indexCount,
-                        .materialID = mesh->materialID,
-                        .primitiveMode = mesh->primitiveMode,
-                        .AABBMin = mesh->worldAABBMin,
-                        .AABBMax = mesh->worldAABBMax,
-                    }
-                );
-                if (m_supportsRaytracing) {
-                    MTL::AccelerationStructureInstanceDescriptor accelInstanceDesc;
-                for (int i = 0; i < 4; ++i) {
-                    for (int j = 0; j < 3; ++j) {
-                        accelInstanceDesc.transformationMatrix.columns[i][j] = transform[i][j];
-                    }
-                }
-                accelInstanceDesc.accelerationStructureIndex = mesh->instanceID;
-                accelInstanceDesc.mask = 0xFF;
-                accelInstances.push_back(accelInstanceDesc);
-                }
-                if (!mesh->material) {
-                    fmt::print("No material found for mesh in mesh group {}\n", node->meshGroup->name);
-                    continue;
-                }
-                instanceBatches[mesh->material].push_back(mesh);
-            }
+    if (!pendingEcsInstances.empty()) {
+        instances = pendingEcsInstances;
+        instanceBatches = pendingEcsBatches;
+        if (!pendingEcsAccelInstances.empty()) {
+            accelInstances = pendingEcsAccelInstances;
         }
-        for (const auto& child : node->children) {
-            updateNode(child);
-        }
-    };
-    for (const auto& node : scene->nodes) {
-        updateNode(node);
     }
+
     if (instances.size() > MAX_INSTANCES) {// TODO: reallocate when needed
         fmt::print("Warning: Instance count ({}) exceeds MAX_INSTANCES ({})\n", instances.size(), MAX_INSTANCES);
     }
@@ -4309,36 +4224,18 @@ auto Renderer_Metal::draw(std::shared_ptr<Scene> scene, Camera& camera) -> void 
             ImGui::Separator();
             ImGui::Text("Total vertices: %zu", scene->vertices.size());
             ImGui::Text("Total indices: %zu", scene->indices.size());
-            const std::function<void(const std::shared_ptr<Node>&)> showNode =
-                [&](const std::shared_ptr<Node>& node) -> void {
-                ImGui::PushID(node.get());
-                ImGui::Text("Node #%s", node->name.c_str());
-                glm::vec3 pos = node->getLocalPosition();
-                glm::vec3 euler = node->getLocalEulerAngles();
-                glm::vec3 scale = node->getLocalScale();
-                if (ImGui::DragFloat3("Position", &pos.x, 0.1f)) node->setLocalPosition(pos);
-                if (ImGui::DragFloat3("Rotation", &euler.x, 1.0f)) node->setLocalEulerAngles(euler);
-                if (ImGui::DragFloat3("Scale", &scale.x, 0.1f, 0.0001f)) node->setLocalScale(scale);
-                if (node->meshGroup) {
-                    for (const auto& mesh : node->meshGroup->meshes) {
-                        ImGui::PushID(mesh.get());
-                        if (ImGui::TreeNode(fmt::format("Mesh").c_str())) {
-                            ImGui::Text("Vertex count: %u", mesh->vertexCount);
-                            ImGui::Text("Vertex offset: %u", mesh->vertexOffset);
-                            ImGui::Text("Index count: %u", mesh->indexCount);
-                            ImGui::Text("Index offset: %u", mesh->indexOffset);
-                            ImGui::TreePop();
-                        }
-                        ImGui::PopID();
-                    }
+            ImGui::Text("Staged meshes: %zu", scene->stagedMeshes.size());
+            for (size_t mi = 0; mi < scene->stagedMeshes.size(); ++mi) {
+                auto& mesh = scene->stagedMeshes[mi];
+                ImGui::PushID(static_cast<int>(mi));
+                if (ImGui::TreeNode(fmt::format("Mesh #{}", mi).c_str())) {
+                    ImGui::Text("Vertex count: %u", mesh->vertexCount);
+                    ImGui::Text("Vertex offset: %u", mesh->vertexOffset);
+                    ImGui::Text("Index count: %u", mesh->indexCount);
+                    ImGui::Text("Index offset: %u", mesh->indexOffset);
+                    ImGui::TreePop();
                 }
                 ImGui::PopID();
-                for (const auto& child : node->children) {
-                    showNode(child);
-                }
-            };
-            for (const auto& node : scene->nodes) {
-                showNode(node);
             }
             ImGui::TreePop();
         }
@@ -4604,6 +4501,10 @@ auto Renderer_Metal::draw(std::shared_ptr<Scene> scene, Camera& camera) -> void 
         }
     }
 
+    if (m_imGuiCallback) {
+        m_imGuiCallback();
+    }
+
     // ==========================================================================
     // Execute all render passes
     // ==========================================================================
@@ -4612,7 +4513,7 @@ auto Renderer_Metal::draw(std::shared_ptr<Scene> scene, Camera& camera) -> void 
     // ==========================================================================
     // Present and cleanup
     // ==========================================================================
-    
+
     // Process pending screenshots
     if (!m_pendingScreenshots.empty()) {
         MTL::Texture* texture = surface->texture();
@@ -4623,10 +4524,20 @@ auto Renderer_Metal::draw(std::shared_ptr<Scene> scene, Camera& camera) -> void 
         uint32_t totalBytes = bytesPerRow * height;
 
         for (auto& callback : m_pendingScreenshots) {
-            NS::SharedPtr<MTL::Buffer> cpuBuffer = NS::TransferPtr(device->newBuffer(totalBytes, MTL::ResourceStorageModeShared));
+            NS::SharedPtr<MTL::Buffer> cpuBuffer =
+                NS::TransferPtr(device->newBuffer(totalBytes, MTL::ResourceStorageModeShared));
             MTL::BlitCommandEncoder* blitEncoder = cmd->blitCommandEncoder();
-            blitEncoder->copyFromTexture(texture, 0, 0, MTL::Origin(0, 0, 0), MTL::Size(width, height, 1),
-                                       cpuBuffer.get(), 0, bytesPerRow, totalBytes);
+            blitEncoder->copyFromTexture(
+                texture,
+                0,
+                0,
+                MTL::Origin(0, 0, 0),
+                MTL::Size(width, height, 1),
+                cpuBuffer.get(),
+                0,
+                bytesPerRow,
+                totalBytes
+            );
             blitEncoder->endEncoding();
 
             cmd->addCompletedHandler([callback, cpuBuffer, width, height, totalBytes](MTL::CommandBuffer* buffer) {
@@ -4789,16 +4700,14 @@ auto Renderer_Metal::createTexture(const std::shared_ptr<Image>& img) -> Texture
             pixelFormat = MTL::PixelFormat::PixelFormatRGBA8Unorm;
             break;
         default:
-            throw std::runtime_error(
-                fmt::format(
-                    "Unknown texture format at {} (channelCount={}, width={}, height={}, byteArraySize={})\n",
-                    img->uri,
-                    img->channelCount,
-                    img->width,
-                    img->height,
-                    img->byteArray.size()
-                )
-            );
+            throw std::runtime_error(fmt::format(
+                "Unknown texture format at {} (channelCount={}, width={}, height={}, byteArraySize={})\n",
+                img->uri,
+                img->channelCount,
+                img->width,
+                img->height,
+                img->byteArray.size()
+            ));
             break;
         }
         int numLevels = calculateMipmapLevelCount(img->width, img->height);
@@ -4904,13 +4813,13 @@ RenderTextureHandle Renderer_Metal::createRenderTexture(const RenderTextureDesc&
 
     // Store the color texture as a regular texture handle for sampling
     textures[nextTextureID] = rtData.colorTexture;
-    rtData.textureHandle = TextureHandle{nextTextureID++};
+    rtData.textureHandle = TextureHandle{ nextTextureID++ };
 
     // Store render texture data
     Uint32 rtID = nextRenderTextureID++;
     renderTextures[rtID] = std::move(rtData);
 
-    return RenderTextureHandle{rtID};
+    return RenderTextureHandle{ rtID };
 }
 
 void Renderer_Metal::destroyRenderTexture(RenderTextureHandle handle) {
@@ -4939,10 +4848,7 @@ glm::uvec2 Renderer_Metal::getRenderTextureSize(RenderTextureHandle handle) {
 }
 
 void Renderer_Metal::renderToTexture(
-    RenderTextureHandle target,
-    std::shared_ptr<Scene> scene,
-    Camera& camera,
-    const glm::vec4& clearColor
+    RenderTextureHandle target, std::shared_ptr<Scene> scene, Camera& camera, const glm::vec4& clearColor
 ) {
     auto it = renderTextures.find(target.rid);
     if (it == renderTextures.end() || !scene) {
@@ -5061,19 +4967,19 @@ void Renderer_Metal::renderToTexture(
         encoder->setFragmentTexture(prefilterMap.get(), 9);
         encoder->setFragmentTexture(brdfLUT.get(), 10);
 
-        for (const auto& mesh : meshes) {
+        for (const auto& draw : meshes) {
             // Frustum culling with render texture camera
-            if (!camera.isVisible(mesh->getWorldBoundingSphere())) {
+            if (!camera.isVisible(instances[draw.instanceIndex].boundingSphere)) {
                 continue;
             }
 
-            encoder->setVertexBytes(&mesh->instanceID, sizeof(Uint32), 4);
+            encoder->setVertexBytes(&draw.instanceIndex, sizeof(Uint32), 4);
             encoder->drawIndexedPrimitives(
                 MTL::PrimitiveTypeTriangle,
-                mesh->indexCount,
+                draw.mesh->indexCount,
                 MTL::IndexTypeUInt32,
                 getBuffer(scene->indexBuffer).get(),
-                mesh->indexOffset * sizeof(Uint32)
+                draw.mesh->indexOffset * sizeof(Uint32)
             );
         }
     }
@@ -5121,7 +5027,7 @@ void Renderer_Metal::applyBloom(RenderTextureHandle target, float threshold, flo
         auto encoder = cmdBuffer->renderCommandEncoder(passDesc.get());
         encoder->setRenderPipelineState(bloomBrightnessPipeline.get());
 
-        MTL::Viewport viewport = {0, 0, (double)rtData.width, (double)rtData.height, 0, 1};
+        MTL::Viewport viewport = { 0, 0, (double)rtData.width, (double)rtData.height, 0, 1 };
         encoder->setViewport(viewport);
 
         // Bind source texture and uniforms
@@ -5144,7 +5050,7 @@ void Renderer_Metal::applyBloom(RenderTextureHandle target, float threshold, flo
         auto encoder = cmdBuffer->renderCommandEncoder(passDesc.get());
         encoder->setRenderPipelineState(bloomCompositePipeline.get());
 
-        MTL::Viewport viewport = {0, 0, (double)rtData.width, (double)rtData.height, 0, 1};
+        MTL::Viewport viewport = { 0, 0, (double)rtData.width, (double)rtData.height, 0, 1 };
         encoder->setViewport(viewport);
 
         encoder->setFragmentTexture(rtData.tempTexture.get(), 0);
@@ -5171,9 +5077,15 @@ void Renderer_Metal::applyToneMapping(RenderTextureHandle target, float exposure
     {
         auto blitEncoder = cmdBuffer->blitCommandEncoder();
         blitEncoder->copyFromTexture(
-            rtData.colorTexture.get(), 0, 0, MTL::Origin(0, 0, 0),
+            rtData.colorTexture.get(),
+            0,
+            0,
+            MTL::Origin(0, 0, 0),
             MTL::Size(rtData.width, rtData.height, 1),
-            rtData.tempTexture.get(), 0, 0, MTL::Origin(0, 0, 0)
+            rtData.tempTexture.get(),
+            0,
+            0,
+            MTL::Origin(0, 0, 0)
         );
         blitEncoder->endEncoding();
     }
@@ -5189,11 +5101,37 @@ void Renderer_Metal::applyToneMapping(RenderTextureHandle target, float exposure
         auto encoder = cmdBuffer->renderCommandEncoder(passDesc.get());
         encoder->setRenderPipelineState(postProcessPipeline.get());
 
-        MTL::Viewport viewport = {0, 0, (double)rtData.width, (double)rtData.height, 0, 1};
+        MTL::Viewport viewport = { 0, 0, (double)rtData.width, (double)rtData.height, 0, 1 };
         encoder->setViewport(viewport);
 
+        struct GPUPostProcessParams {
+            float chromaticAberrationStrength;
+            float chromaticAberrationFalloff;
+            float vignetteStrength;
+            float vignetteRadius;
+            float vignetteSoftness;
+            float saturation;
+            float contrast;
+            float brightness;
+            float temperature;
+            float tint;
+            float exposure;
+        } params = {
+            0.0f, // chromaticAberrationStrength
+            0.0f, // chromaticAberrationFalloff
+            0.0f, // vignetteStrength
+            0.0f, // vignetteRadius
+            0.0f, // vignetteSoftness
+            1.0f, // saturation
+            1.0f, // contrast
+            1.0f, // brightness
+            0.0f, // temperature
+            0.0f, // tint
+            exposure // exposure
+        };
+
         encoder->setFragmentTexture(rtData.tempTexture.get(), 0);
-        encoder->setFragmentBytes(&exposure, sizeof(float), 0);
+        encoder->setFragmentBytes(&params, sizeof(GPUPostProcessParams), 0);
 
         encoder->drawPrimitives(MTL::PrimitiveTypeTriangle, NS::UInteger(0), NS::UInteger(3));
         encoder->endEncoding();
@@ -5216,9 +5154,15 @@ void Renderer_Metal::applyVignette(RenderTextureHandle target, float strength, f
     {
         auto blitEncoder = cmdBuffer->blitCommandEncoder();
         blitEncoder->copyFromTexture(
-            rtData.colorTexture.get(), 0, 0, MTL::Origin(0, 0, 0),
+            rtData.colorTexture.get(),
+            0,
+            0,
+            MTL::Origin(0, 0, 0),
             MTL::Size(rtData.width, rtData.height, 1),
-            rtData.tempTexture.get(), 0, 0, MTL::Origin(0, 0, 0)
+            rtData.tempTexture.get(),
+            0,
+            0,
+            MTL::Origin(0, 0, 0)
         );
         blitEncoder->endEncoding();
     }
@@ -5234,16 +5178,37 @@ void Renderer_Metal::applyVignette(RenderTextureHandle target, float strength, f
         auto encoder = cmdBuffer->renderCommandEncoder(passDesc.get());
         encoder->setRenderPipelineState(postProcessPipeline.get());
 
-        MTL::Viewport viewport = {0, 0, (double)rtData.width, (double)rtData.height, 0, 1};
+        MTL::Viewport viewport = { 0, 0, (double)rtData.width, (double)rtData.height, 0, 1 };
         encoder->setViewport(viewport);
 
-        struct VignetteParams {
-            float strength;
-            float radius;
-        } params = {strength, radius};
+        struct GPUPostProcessParams {
+            float chromaticAberrationStrength;
+            float chromaticAberrationFalloff;
+            float vignetteStrength;
+            float vignetteRadius;
+            float vignetteSoftness;
+            float saturation;
+            float contrast;
+            float brightness;
+            float temperature;
+            float tint;
+            float exposure;
+        } params = {
+            0.0f, // chromaticAberrationStrength
+            0.0f, // chromaticAberrationFalloff
+            strength, // vignetteStrength
+            radius, // vignetteRadius
+            0.15f, // vignetteSoftness
+            1.0f, // saturation
+            1.0f, // contrast
+            1.0f, // brightness
+            0.0f, // temperature
+            0.0f, // tint
+            1.0f // exposure
+        };
 
         encoder->setFragmentTexture(rtData.tempTexture.get(), 0);
-        encoder->setFragmentBytes(&params, sizeof(VignetteParams), 0);
+        encoder->setFragmentBytes(&params, sizeof(GPUPostProcessParams), 0);
 
         encoder->drawPrimitives(MTL::PrimitiveTypeTriangle, NS::UInteger(0), NS::UInteger(3));
         encoder->endEncoding();
@@ -5554,12 +5519,14 @@ void Renderer_Metal::drawQuad2D(
         findOrAddTextureSlot(batch2DTextureSlots, batch2DTextureSlotIndex, texture, batch2DWhiteTextureHandle);
     auto vertexOffset = static_cast<Uint32>(batch2DVertices.size());
 
+    const glm::vec2* uvs = texCoords ? texCoords : batchQuadTexCoords;
+
     // Add 4 vertices
     for (int i = 0; i < 4; i++) {
         Batch2DVertex vertex;
         vertex.position = transform * batchQuadPositions[i];
         vertex.color = tintColor;
-        vertex.uv = texCoords[i];
+        vertex.uv = uvs[i];
         vertex.texIndex = textureIndex;
         vertex.entityID = static_cast<float>(entityID);
         batch2DVertices.push_back(vertex);
@@ -5675,11 +5642,13 @@ void Renderer_Metal::drawQuad3D(
         findOrAddTextureSlot(batch3DTextureSlots, batch3DTextureSlotIndex, texture, batch2DWhiteTextureHandle);
     auto vertexOffset = static_cast<Uint32>(batch3DVertices.size());
 
+    const glm::vec2* uvs = texCoords ? texCoords : batchQuadTexCoords;
+
     for (int i = 0; i < 4; i++) {
         Batch2DVertex vertex;
         vertex.position = transform * batchQuadPositions[i];
         vertex.color = tintColor;
-        vertex.uv = texCoords[i];
+        vertex.uv = uvs[i];
         vertex.texIndex = textureIndex;
         vertex.entityID = static_cast<float>(entityID);
         batch3DVertices.push_back(vertex);
@@ -5830,7 +5799,6 @@ void Renderer_Metal::drawTriangleFilled2D(
 }
 
 
-
 void Renderer_Metal::readPixelsAsync(ScreenshotCallback callback) {
     m_pendingScreenshots.push_back(callback);
 }
@@ -5841,4 +5809,104 @@ extern "C" auto getMetalDevice(void* renderer) -> void* {
         return static_cast<void*>(metalRenderer->getDevice());
     }
     return nullptr;
+}
+void Renderer_Metal::draw(entt::registry& registry, std::shared_ptr<Scene> scene, Camera& camera) {
+    // Build ECS instance data; draw(scene, camera) will clear instances/instanceBatches from Nodes,
+    // so store them here and inject after Node traversal via pendingEcsInstances.
+    pendingEcsInstances.clear();
+    pendingEcsBatches.clear();
+    pendingEcsAccelInstances.clear();
+    auto view = registry.view<::Vapor::TransformComponent, ::Vapor::MeshRendererComponent>();
+    for (auto entity : view) {
+        auto& transform = view.get<::Vapor::TransformComponent>(entity);
+        auto& meshRenderer = view.get<::Vapor::MeshRendererComponent>(entity);
+        if (!meshRenderer.visible) continue;
+        for (auto& mesh : meshRenderer.meshes) {
+            // Compute world AABB from local AABB and current ECS worldTransform.
+            const glm::mat4& worldMat = transform.worldTransform;
+            const glm::vec3& lMin = mesh->localAABBMin;
+            const glm::vec3& lMax = mesh->localAABBMax;
+            glm::vec3 wMin(FLT_MAX), wMax(-FLT_MAX);
+            for (int cx = 0; cx < 2; ++cx)
+                for (int cy = 0; cy < 2; ++cy)
+                    for (int cz = 0; cz < 2; ++cz) {
+                        glm::vec3 corner(cx ? lMax.x : lMin.x, cy ? lMax.y : lMin.y, cz ? lMax.z : lMin.z);
+                        glm::vec3 w = glm::vec3(worldMat * glm::vec4(corner, 1.0f));
+                        wMin = glm::min(wMin, w);
+                        wMax = glm::max(wMax, w);
+                    }
+            mesh->worldAABBMin = wMin;
+            mesh->worldAABBMax = wMax;
+
+            glm::vec3 bsCenter = (wMin + wMax) * 0.5f;
+            float bsRadius = glm::length(wMax - bsCenter);
+            auto instanceIdx = static_cast<uint32_t>(pendingEcsInstances.size());
+            pendingEcsInstances.push_back({
+                .model = worldMat,
+                .color = glm::vec4(1.0f),
+                .vertexOffset = mesh->vertexOffset,
+                .indexOffset = mesh->indexOffset,
+                .vertexCount = mesh->vertexCount,
+                .indexCount = mesh->indexCount,
+                .materialID = mesh->materialID,
+                .primitiveMode = mesh->primitiveMode,
+                .AABBMin = wMin,
+                .AABBMax = wMax,
+                .boundingSphere = glm::vec4(bsCenter, bsRadius),
+            });
+            if (mesh->material) {
+                pendingEcsBatches[mesh->material].push_back(MeshDraw{ mesh, instanceIdx });
+            }
+
+            if (m_supportsRaytracing) {
+                MTL::AccelerationStructureInstanceDescriptor accelDesc;
+                for (int i = 0; i < 4; ++i)
+                    for (int j = 0; j < 3; ++j)
+                        accelDesc.transformationMatrix.columns[i][j] = worldMat[i][j];
+                accelDesc.accelerationStructureIndex = mesh->instanceID;
+                accelDesc.mask = 0xFF;
+                pendingEcsAccelInstances.push_back(accelDesc);
+            }
+        }
+    }
+    // Staged meshes (GLTF scenes, static) — add after ECS entities
+    for (size_t i = 0; i < scene->stagedMeshes.size(); ++i) {
+        auto& mesh = scene->stagedMeshes[i];
+        const glm::mat4& worldMat =
+            i < scene->stagedMeshTransforms.size() ? scene->stagedMeshTransforms[i] : glm::identity<glm::mat4>();
+        const glm::vec3& lMin = mesh->localAABBMin;
+        const glm::vec3& lMax = mesh->localAABBMax;
+        glm::vec3 wMin(FLT_MAX), wMax(-FLT_MAX);
+        for (int cx = 0; cx < 2; ++cx)
+            for (int cy = 0; cy < 2; ++cy)
+                for (int cz = 0; cz < 2; ++cz) {
+                    glm::vec3 corner(cx ? lMax.x : lMin.x, cy ? lMax.y : lMin.y, cz ? lMax.z : lMin.z);
+                    glm::vec3 w = glm::vec3(worldMat * glm::vec4(corner, 1.0f));
+                    wMin = glm::min(wMin, w);
+                    wMax = glm::max(wMax, w);
+                }
+        glm::vec3 bsCenter = (wMin + wMax) * 0.5f;
+        float bsRadius = glm::length(wMax - bsCenter);
+        auto instanceIdx = static_cast<uint32_t>(pendingEcsInstances.size());
+        pendingEcsInstances.push_back({
+            .model = worldMat,
+            .color = glm::vec4(1.0f),
+            .vertexOffset = mesh->vertexOffset,
+            .indexOffset = mesh->indexOffset,
+            .vertexCount = mesh->vertexCount,
+            .indexCount = mesh->indexCount,
+            .materialID = mesh->materialID,
+            .primitiveMode = mesh->primitiveMode,
+            .AABBMin = wMin,
+            .AABBMax = wMax,
+            .boundingSphere = glm::vec4(bsCenter, bsRadius),
+        });
+        if (mesh->material) {
+            pendingEcsBatches[mesh->material].push_back(MeshDraw{ mesh, instanceIdx });
+        }
+    }
+    draw(scene, camera);
+    pendingEcsInstances.clear();
+    pendingEcsBatches.clear();
+    pendingEcsAccelInstances.clear();
 }

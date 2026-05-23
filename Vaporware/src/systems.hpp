@@ -1,5 +1,6 @@
 #pragma once
 #include "Vapor/character_controller.hpp"
+#include "Vapor/components.hpp"
 #include "Vapor/engine_core.hpp"
 #include "Vapor/input_manager.hpp"
 #include "Vapor/physics_3d.hpp"
@@ -11,6 +12,7 @@
 #include "pages/scroll_text_page.hpp"
 #include "pages/subtitle_page.hpp"
 #include <fmt/core.h>
+#include <glm/gtc/matrix_transform.hpp>
 
 
 
@@ -119,16 +121,40 @@ public:
     }
 };
 
+class TransformSystem {
+public:
+    static void update(entt::registry& registry) {
+        auto view = registry.view<Vapor::TransformComponent>();
+        for (auto entity : view) {
+            auto& t = view.get<Vapor::TransformComponent>(entity);
+            if (!t.isDirty) continue;
+            glm::mat4 local = glm::translate(glm::mat4(1.0f), t.position)
+                            * glm::mat4_cast(t.rotation)
+                            * glm::scale(glm::mat4(1.0f), t.scale);
+            if (t.parent != entt::null) {
+                if (auto* parentT = registry.try_get<Vapor::TransformComponent>(t.parent)) {
+                    t.worldTransform = parentT->worldTransform * local;
+                } else {
+                    t.worldTransform = local;
+                }
+            } else {
+                t.worldTransform = local;
+            }
+            t.isDirty = false;
+        }
+    }
+};
+
 class AutoRotateSystem {
 public:
     static void update(entt::registry& registry, float deltaTime) {
-        auto view = registry.view<SceneNodeReferenceComponent, AutoRotateComponent>();
+        auto view = registry.view<Vapor::TransformComponent, AutoRotateComponent>();
         for (auto entity : view) {
-            auto& ref = view.get<SceneNodeReferenceComponent>(entity);
+            auto& transform = view.get<Vapor::TransformComponent>(entity);
             auto& rotate = view.get<AutoRotateComponent>(entity);
-            if (ref.node) {
-                ref.node->rotate(rotate.axis, rotate.speed * deltaTime);
-            }
+            glm::quat delta = glm::angleAxis(rotate.speed * deltaTime, glm::normalize(rotate.axis));
+            transform.rotation = glm::normalize(delta * transform.rotation);
+            transform.isDirty = true;
         }
     }
 };
@@ -203,13 +229,11 @@ public:
 
             if (auto* follow = reg.try_get<FollowCameraComponent>(entity)) {
                 if (!reg.valid(follow->target)) continue;
-                if (auto* nodeRef = reg.try_get<SceneNodeReferenceComponent>(follow->target)) {
-                    if (nodeRef->node) {
-                        glm::vec3 targetPos = nodeRef->node->getWorldPosition();
-                        glm::vec3 desiredPos = targetPos + follow->offset;
-                        cam.position = glm::mix(cam.position, desiredPos, 1.0f - pow(follow->smoothFactor, deltaTime));
-                        cam.rotation = glm::quatLookAt(glm::normalize(targetPos - cam.position), glm::vec3(0, 1, 0));
-                    }
+                if (auto* transform = reg.try_get<Vapor::TransformComponent>(follow->target)) {
+                    glm::vec3 targetPos = transform->position;
+                    glm::vec3 desiredPos = targetPos + follow->offset;
+                    cam.position = glm::mix(cam.position, desiredPos, 1.0f - pow(follow->smoothFactor, deltaTime));
+                    cam.rotation = glm::quatLookAt(glm::normalize(targetPos - cam.position), glm::vec3(0, 1, 0));
                 }
             }
 

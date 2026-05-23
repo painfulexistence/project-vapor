@@ -4,6 +4,9 @@
 #include <limits>
 #include <utility>
 
+
+using namespace Vapor;
+
 static auto getNumFaces(const SMikkTSpaceContext* ctx) -> int {
     auto mesh = static_cast<Mesh*>(ctx->m_pUserData);
     if (mesh->indices.size() == 0) {
@@ -51,6 +54,8 @@ void Mesh::initialize(const std::vector<VertexData>& vertices, const std::vector
     this->indices = std::move(indices);
     // recalculateNormals();
     calculateTangents();
+    calculateLocalAABB();
+    isGeometryDirty = false;
 };
 
 void Mesh::initialize(VertexData* vertexData, size_t vertexCount, Uint32* indexData, size_t indexCount) {
@@ -64,6 +69,8 @@ void Mesh::initialize(VertexData* vertexData, size_t vertexCount, Uint32* indexD
     }
     // calculateNormals();
     calculateTangents();
+    calculateLocalAABB();
+    isGeometryDirty = false;
 };
 
 void Mesh::calculateNormals() {

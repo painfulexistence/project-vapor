@@ -22,7 +22,7 @@
 
 struct SceneResources {
     std::shared_ptr<Scene> scene;
-    std::shared_ptr<Material> material;
+    std::shared_ptr<Vapor::Material> material;
     entt::entity cube1 = entt::null;
     entt::entity global = entt::null;
 };
@@ -31,7 +31,7 @@ inline SceneResources buildScene(
     entt::registry& registry,
     Physics3D& physics,
     std::shared_ptr<Scene> scene,
-    std::shared_ptr<Material> material,
+    std::shared_ptr<Vapor::Material> material,
     int windowWidth,
     int windowHeight,
     Vapor::RNG& rng
@@ -48,15 +48,13 @@ inline SceneResources buildScene(
         col.halfSize = glm::vec3(0.5f, 0.5f, 0.5f);
         auto& rb = registry.emplace<Vapor::RigidbodyComponent>(cube1);
         rb.motionType = BodyMotionType::Dynamic;
+        rb.body = physics.createBoxBody(col.halfSize, transform.position, transform.rotation, rb.motionType);
+        physics.addBody(rb.body, true);
 
-        auto node = scene->createNode("Cube 1");
-        scene->addMeshToNode(node, MeshBuilder::buildCube(1.0f, material));
-        node->setPosition(transform.position);
-        node->body = physics.createBoxBody(col.halfSize, transform.position, transform.rotation, rb.motionType);
-        physics.addBody(node->body, true);
-
-        auto& nodeRef = registry.emplace<SceneNodeReferenceComponent>(cube1);
-        nodeRef.node = node;
+        auto cubeMesh = MeshBuilder::buildCube(1.0f, material);
+        scene->addMesh(cubeMesh);
+        auto& meshRenderer = registry.emplace<Vapor::MeshRendererComponent>(cube1);
+        meshRenderer.meshes.push_back(cubeMesh);
 
         auto& rotateComp = registry.emplace<AutoRotateComponent>(cube1);
         rotateComp.axis = glm::vec3(0.0f, 1.0f, -1.0f);
@@ -72,15 +70,13 @@ inline SceneResources buildScene(
         col.halfSize = glm::vec3(0.5f, 0.5f, 0.5f);
         auto& rb = registry.emplace<Vapor::RigidbodyComponent>(cube2);
         rb.motionType = BodyMotionType::Dynamic;
+        rb.body = physics.createBoxBody(col.halfSize, transform.position, transform.rotation, rb.motionType);
+        physics.addBody(rb.body, true);
 
-        auto node = scene->createNode("Cube 2");
-        scene->addMeshToNode(node, MeshBuilder::buildCube(1.0f, material));
-        node->setPosition(transform.position);
-        node->body = physics.createBoxBody(col.halfSize, transform.position, transform.rotation, rb.motionType);
-        physics.addBody(node->body, true);
-
-        auto& nodeRef = registry.emplace<SceneNodeReferenceComponent>(cube2);
-        nodeRef.node = node;
+        auto cubeMesh2 = MeshBuilder::buildCube(1.0f, material);
+        scene->addMesh(cubeMesh2);
+        auto& meshRenderer = registry.emplace<Vapor::MeshRendererComponent>(cube2);
+        meshRenderer.meshes.push_back(cubeMesh2);
     }
 
     auto floor = registry.create();
@@ -91,14 +87,8 @@ inline SceneResources buildScene(
         col.halfSize = glm::vec3(50.0f, 0.5f, 50.0f);
         auto& rb = registry.emplace<Vapor::RigidbodyComponent>(floor);
         rb.motionType = BodyMotionType::Static;
-
-        auto node = scene->createNode("Floor");
-        node->setPosition(transform.position);
-        node->body = physics.createBoxBody(col.halfSize, transform.position, transform.rotation, rb.motionType);
-        physics.addBody(node->body, false);
-
-        auto& nodeRef = registry.emplace<SceneNodeReferenceComponent>(floor);
-        nodeRef.node = node;
+        rb.body = physics.createBoxBody(col.halfSize, transform.position, transform.rotation, rb.motionType);
+        physics.addBody(rb.body, false);
     }
 
     scene->directionalLights.push_back(

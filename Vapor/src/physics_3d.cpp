@@ -1,4 +1,5 @@
 #include "physics_3d.hpp"
+#include "Vapor/components.hpp"
 #include "character_controller.hpp"
 #include "fluid_volume.hpp"
 #include "jolt_enki_job_system.hpp"
@@ -32,11 +33,11 @@
 #include <Jolt/RegisterTypes.h>
 #include <SDL3/SDL_stdinc.h>
 #include <fmt/core.h>
+#include <algorithm>
 #include <thread>
 #include <mutex>
 
 // #include "physics_debug_drawer.hpp"
-#include "scene.hpp"
 
 JPH_SUPPRESS_WARNINGS
 
@@ -152,24 +153,17 @@ public:
 
 class MyContactListener : public JPH::ContactListener {
 public:
-    struct TriggerEvent {
-        Node* triggerNode;
-        Node* otherNode;
-        bool isEnter;// true = Enter, false = Exit
-    };
-
-    struct CollisionEvent {
-        Node* node1;
-        Node* node2;
+    // Store raw Jolt BodyIDs; Physics3D::process() converts to BodyHandles via bodyIDToRid
+    struct RawCollisionEvent {
+        JPH::BodyID id1;
+        JPH::BodyID id2;
+        bool isTrigger;
         bool isEnter;
     };
 
-    std::vector<TriggerEvent> triggerEvents;
-    std::vector<CollisionEvent> collisionEvents;
-    std::unordered_map<uint64_t, bool> activeContacts;
-    std::mutex eventMutex;// Track active contacts for exit detection
+    std::vector<RawCollisionEvent> rawEvents;
+    std::mutex eventMutex;
 
-    // Helper to create unique contact ID
     auto makeContactID(JPH::BodyID id1, JPH::BodyID id2) const -> uint64_t {
         uint32_t a = id1.GetIndexAndSequenceNumber();
         uint32_t b = id2.GetIndexAndSequenceNumber();
@@ -192,28 +186,9 @@ public:
         const JPH::ContactManifold& inManifold,
         JPH::ContactSettings& ioSettings
     ) override {
-        auto node1 = reinterpret_cast<Node*>(inBody1.GetUserData());
-        auto node2 = reinterpret_cast<Node*>(inBody2.GetUserData());
-
-        if (!node1 || !node2) return;
-
-        bool isSensor1 = inBody1.IsSensor();
-        bool isSensor2 = inBody2.IsSensor();
-
-        uint64_t contactID = makeContactID(inBody1.GetID(), inBody2.GetID());
-
+        bool isTrigger = inBody1.IsSensor() || inBody2.IsSensor();
         std::lock_guard<std::mutex> lock(eventMutex);
-        activeContacts[contactID] = true;
-
-        // Trigger event (one or both are sensors)
-        if (isSensor1 || isSensor2) {
-            Node* triggerNode = isSensor1 ? node1 : node2;
-            Node* otherNode = isSensor1 ? node2 : node1;
-            triggerEvents.push_back({ triggerNode, otherNode, true });
-        } else {
-            // Regular collision event
-            collisionEvents.push_back({ node1, node2, true });
-        }
+        rawEvents.push_back({ inBody1.GetID(), inBody2.GetID(), isTrigger, true });
     }
 
     virtual void OnContactPersisted(
@@ -221,20 +196,9 @@ public:
         const JPH::Body& inBody2,
         const JPH::ContactManifold& inManifold,
         JPH::ContactSettings& ioSettings
-    ) override {
-        // Contact still active, no need to add event
-    }
+    ) override {}
 
-    virtual void OnContactRemoved(const JPH::SubShapeIDPair& inSubShapePair) override {
-        // Note: We can't get UserData here directly, so we need to handle this differently
-        // We'll mark the contact as removed and process it in the next physics update
-    }
-
-    void clearEvents() {
-        std::lock_guard<std::mutex> lock(eventMutex);
-        triggerEvents.clear();
-        collisionEvents.clear();
-    }
+    virtual void OnContactRemoved(const JPH::SubShapeIDPair& inSubShapePair) override {}
 };
 
 class MyBodyActivationListener : public JPH::BodyActivationListener {
@@ -349,228 +313,295 @@ void Physics3D::deinit() {
 
     sPhysicsInstances--;
 
+    characterControllers.clear();
+    vehicleControllers.clear();
+
     isInitialized = false;
 }
 
-void Physics3D::process(const std::shared_ptr<Scene>& scene, float dt) {
-    // sync physics world with scene data (Scene → Physics)
-    // Collect nodes that need syncing first to avoid lock conflicts
-    struct SyncData {
-        JPH::BodyID bodyID;
-        glm::vec3 position;
-        glm::quat rotation;
-    };
-    std::vector<SyncData> nodesToSync;
+void Physics3D::registerCharacterController(CharacterController* ctrl) {
+    characterControllers.push_back(ctrl);
+}
 
-    // First pass: collect motion types and positions/rotations
-    for (auto& node : scene->nodes) {
-        if (node->body.valid()) {
-            auto bodyID = bodies[node->body.rid];
-            JPH::BodyLockRead lock(physicsSystem->GetBodyLockInterface(), bodyID);
-            if (!lock.Succeeded()) {
-                continue;
+void Physics3D::unregisterCharacterController(CharacterController* ctrl) {
+    characterControllers.erase(
+        std::remove(characterControllers.begin(), characterControllers.end(), ctrl),
+        characterControllers.end()
+    );
+}
+
+void Physics3D::registerVehicleController(VehicleController* ctrl) {
+    vehicleControllers.push_back(ctrl);
+}
+
+void Physics3D::unregisterVehicleController(VehicleController* ctrl) {
+    vehicleControllers.erase(
+        std::remove(vehicleControllers.begin(), vehicleControllers.end(), ctrl),
+        vehicleControllers.end()
+    );
+}
+
+void Physics3D::attach(entt::registry& reg) {
+    reg.on_destroy<Vapor::CharacterBodyComponent>().connect<[](entt::registry& r, entt::entity e) {
+        auto& comp = r.get<Vapor::CharacterBodyComponent>(e);
+        if (comp.controller) {
+            auto* self = Physics3D::Get();
+            if (self) {
+                auto& v = self->characterControllers;
+                v.erase(std::remove(v.begin(), v.end(), comp.controller.get()), v.end());
             }
-            const JPH::Body& body = lock.GetBody();
-            auto motionType = body.GetMotionType();
+        }
+    }>();
 
-            // Only sync Kinematic and Static bodies from scene to physics
-            if (motionType != JPH::EMotionType::Dynamic) {
-                nodesToSync.push_back({ bodyID, node->getWorldPosition(), node->getWorldRotation() });
+    reg.on_destroy<Vapor::VehicleBodyComponent>().connect<[](entt::registry& r, entt::entity e) {
+        auto& comp = r.get<Vapor::VehicleBodyComponent>(e);
+        if (comp.controller) {
+            auto* self = Physics3D::Get();
+            if (self) {
+                auto& v = self->vehicleControllers;
+                v.erase(std::remove(v.begin(), v.end(), comp.controller.get()), v.end());
+            }
+        }
+    }>();
+}
+
+void Physics3D::process(entt::registry& reg, float dt) {
+    if (!isInitialized) return;
+
+    // 1. Instantiate controllers for newly added components (controller == nullptr)
+    {
+        auto charView = reg.view<Vapor::CharacterBodyComponent, Vapor::TransformComponent>();
+        for (auto entity : charView) {
+            auto& comp = charView.get<Vapor::CharacterBodyComponent>(entity);
+            if (!comp.controller) {
+                auto& t = charView.get<Vapor::TransformComponent>(entity);
+                comp.controller = std::make_unique<CharacterController>(this, comp.settings);
+                comp.controller->warp(t.position);
+                characterControllers.push_back(comp.controller.get());
+            }
+        }
+        auto vehView = reg.view<Vapor::VehicleBodyComponent, Vapor::TransformComponent>();
+        for (auto entity : vehView) {
+            auto& comp = vehView.get<Vapor::VehicleBodyComponent>(entity);
+            if (!comp.controller) {
+                auto& t = vehView.get<Vapor::TransformComponent>(entity);
+                comp.controller = std::make_unique<VehicleController>(
+                    this, comp.settings, t.position, t.rotation
+                );
+                vehicleControllers.push_back(comp.controller.get());
             }
         }
     }
 
-    // Second pass: sync positions and rotations (BodyInterface handles locking)
-    for (const auto& syncData : nodesToSync) {
-        bodyInterface->SetPosition(
-            syncData.bodyID,
-            JPH::RVec3(syncData.position.x, syncData.position.y, syncData.position.z),
-            JPH::EActivation::DontActivate
-        );
-        bodyInterface->SetRotation(
-            syncData.bodyID,
-            JPH::Quat(syncData.rotation.x, syncData.rotation.y, syncData.rotation.z, syncData.rotation.w),
-            JPH::EActivation::DontActivate
-        );
+    // 2. Apply input to vehicle controllers
+    {
+        auto view = reg.view<Vapor::VehicleBodyComponent>();
+        for (auto entity : view) {
+            auto& comp = view.get<Vapor::VehicleBodyComponent>(entity);
+            if (!comp.controller) continue;
+            comp.controller->setThrottle(comp.throttle);
+            comp.controller->setSteering(comp.steering);
+            comp.controller->setBrake(comp.brake);
+            comp.controller->setHandbrake(comp.handbrake);
+        }
     }
 
-    // TODO: fix trace trap
-    // Apply fluid forces before physics update
-    // for (auto& fluidVolume : scene->fluidVolumes) {
-    //     if (fluidVolume) {
-    //         fluidVolume->applyForcesToBodies(dt);
-    //     }
-    // }
+    // 3. Apply input to character controllers
+    {
+        auto view = reg.view<Vapor::CharacterBodyComponent>();
+        for (auto entity : view) {
+            auto& comp = view.get<Vapor::CharacterBodyComponent>(entity);
+            if (!comp.controller) continue;
+            comp.controller->move(comp.desiredVelocity, dt);
+            if (comp.jumpRequested) {
+                comp.controller->jump(5.0f);
+                comp.jumpRequested = false;
+            }
+        }
+    }
 
-    // update physics world
+    // 4. Fixed-step physics
+    for (auto* ctrl : characterControllers) {
+        ctrl->storePreviousPosition();
+    }
+
     timeAccum += dt;
-
-    // Store previous positions BEFORE any physics updates (for interpolation)
-    // This ensures that even if we do multiple physics steps (catch-up),
-    // we interpolate from the position at the start of this frame
-    std::function<void(const std::shared_ptr<Node>&)> storePreviousPositions =
-        [&](const std::shared_ptr<Node>& node) -> void {
-        if (node->characterController) {
-            node->characterController->storePreviousPosition();
-        }
-        for (const auto& child : node->children) {
-            storePreviousPositions(child);
-        }
-    };
-    for (auto& node : scene->nodes) {
-        storePreviousPositions(node);
-    }
-
-    while (timeAccum >= FIXED_TIME_STEP) {
+    constexpr int MAX_PHYSICS_STEPS_PER_FRAME = 4;
+    int stepsThisFrame = 0;
+    while (timeAccum >= FIXED_TIME_STEP && stepsThisFrame < MAX_PHYSICS_STEPS_PER_FRAME) {
         ++step;
-
-        // Update vehicle controllers
-        std::function<void(const std::shared_ptr<Node>&)> updateVehicleControllers =
-            [&](const std::shared_ptr<Node>& node) -> void {
-            if (node->vehicleController) {
-                node->vehicleController->update(FIXED_TIME_STEP);
-            }
-            for (const auto& child : node->children) {
-                updateVehicleControllers(child);
-            }
-        };
-        for (auto& node : scene->nodes) {
-            updateVehicleControllers(node);
-        }
-
-        // Update character controllers
-        std::function<void(const std::shared_ptr<Node>&)> updateCharacterControllers =
-            [&](const std::shared_ptr<Node>& node) -> void {
-            if (node->characterController) {
-                node->characterController->update(FIXED_TIME_STEP, getGravity());
-            }
-            for (const auto& child : node->children) {
-                updateCharacterControllers(child);
-            }
-        };
-        for (auto& node : scene->nodes) {
-            updateCharacterControllers(node);
-        }
-
-        // Update physics (after controller updates)
+        ++stepsThisFrame;
+        for (auto* ctrl : vehicleControllers) ctrl->update(FIXED_TIME_STEP);
+        for (auto* ctrl : characterControllers) ctrl->update(FIXED_TIME_STEP, getGravity());
         physicsSystem->Update(FIXED_TIME_STEP, 1, tempAllocator.get(), jobSystem.get());
-
         timeAccum -= FIXED_TIME_STEP;
+    }
+    if (timeAccum > FIXED_TIME_STEP * MAX_PHYSICS_STEPS_PER_FRAME) {
+        timeAccum = FIXED_TIME_STEP;
     }
 
     if (debugDrawEnabled && debugRenderer) {
         debugRenderer->update();
     }
 
-    // sync scene data with physics world (Physics → Scene)
-    // Use explicit locks to avoid lock conflicts when calling multiple BodyInterface methods
-    for (auto& node : scene->nodes) {
-        if (node->body.valid()) {
-            auto bodyID = bodies[node->body.rid];
-
-            // Use BodyLockRead to safely read body properties
-            JPH::BodyLockRead lock(physicsSystem->GetBodyLockInterface(), bodyID);
-            if (!lock.Succeeded()) {
-                continue;// Body was removed, skip it
-            }
-
-            const JPH::Body& body = lock.GetBody();
-            auto motionType = body.GetMotionType();
-
-            // Only sync Dynamic bodies from physics to scene
-            if (motionType == JPH::EMotionType::Dynamic) {
-                // Sync position and rotation using the locked body
-                auto pos = body.GetPosition();
-                node->setPosition(glm::vec3(pos.GetX(), pos.GetY(), pos.GetZ()));
-
-                auto rot = body.GetRotation();
-                node->setLocalRotation(glm::quat(rot.GetW(), rot.GetX(), rot.GetY(), rot.GetZ()));
-
-                node->isTransformDirty = true;
-            }
-        }
-    }
-
-    // Sync character controller positions back to nodes (with interpolation)
-    // Calculate interpolation alpha: how far we are between physics steps
-    float alpha = timeAccum / FIXED_TIME_STEP;
-
-    std::function<void(const std::shared_ptr<Node>&)> syncCharacterControllers =
-        [&](const std::shared_ptr<Node>& node) -> void {
-        if (node->characterController) {
-            // Use interpolated position for smooth rendering
-            glm::vec3 charPos = node->characterController->getInterpolatedPosition(alpha);
-            node->setPosition(charPos);
-            node->isTransformDirty = true;
-        }
-        for (const auto& child : node->children) {
-            syncCharacterControllers(child);
-        }
-    };
-    for (auto& node : scene->nodes) {
-        syncCharacterControllers(node);
-    }
-
-    // Sync vehicle controller positions/rotations back to nodes
-    std::function<void(const std::shared_ptr<Node>&)> syncVehicleControllers =
-        [&](const std::shared_ptr<Node>& node) -> void {
-        if (node->vehicleController) {
-            glm::vec3 vehiclePos = node->vehicleController->getPosition();
-            glm::quat vehicleRot = node->vehicleController->getRotation();
-            node->setPosition(vehiclePos);
-            node->setLocalRotation(vehicleRot);
-            node->isTransformDirty = true;
-        }
-        for (const auto& child : node->children) {
-            syncVehicleControllers(child);
-        }
-    };
-    for (auto& node : scene->nodes) {
-        syncVehicleControllers(node);
-    }
-
-    // Process physics events (triggers and collisions)
+    // 5. Drain collision/trigger events
     auto* listener = static_cast<MyContactListener*>(contactListener.get());
-
-    std::vector<MyContactListener::TriggerEvent> triggerEvents;
-    std::vector<MyContactListener::CollisionEvent> collisionEvents;
+    std::vector<MyContactListener::RawCollisionEvent> rawEvents;
     {
         std::lock_guard<std::mutex> lock(listener->eventMutex);
-        triggerEvents.swap(listener->triggerEvents);
-        collisionEvents.swap(listener->collisionEvents);
+        rawEvents.swap(listener->rawEvents);
     }
 
-    // Process trigger events
-    for (auto& event : triggerEvents) {
-        if (event.isEnter) {
-            event.triggerNode->onTriggerEnter(event.otherNode);
-            event.otherNode->onTriggerEnter(event.triggerNode);// Bidirectional notification
-        } else {
-            event.triggerNode->onTriggerExit(event.otherNode);
-            event.otherNode->onTriggerExit(event.triggerNode);
+    {
+        std::lock_guard<std::mutex> popLock(popMutex);
+        pendingCollisionEvents.clear();
+        pendingTriggerEvents.clear();
+
+        for (auto& raw : rawEvents) {
+            Uint32 ridA = UINT32_MAX, ridB = UINT32_MAX;
+            auto itA = bodyIDToRid.find(raw.id1.GetIndexAndSequenceNumber());
+            auto itB = bodyIDToRid.find(raw.id2.GetIndexAndSequenceNumber());
+            if (itA != bodyIDToRid.end()) ridA = itA->second;
+            if (itB != bodyIDToRid.end()) ridB = itB->second;
+            BodyHandle ha{ ridA }, hb{ ridB };
+
+            if (raw.isTrigger) {
+                pendingTriggerEvents.push_back({ ha, hb, raw.isEnter });
+            } else {
+                pendingCollisionEvents.push_back({ ha, hb, raw.isEnter });
+            }
         }
     }
 
-    // Process collision events
-    for (auto& event : collisionEvents) {
-        if (event.isEnter) {
-            event.node1->onCollisionEnter(event.node2);
-            event.node2->onCollisionEnter(event.node1);
-        } else {
-            event.node1->onCollisionExit(event.node2);
-            event.node2->onCollisionExit(event.node1);
+    // 6. Sync character positions back to TransformComponent
+    {
+        auto view = reg.view<Vapor::CharacterBodyComponent, Vapor::TransformComponent>();
+        for (auto entity : view) {
+            auto& comp = view.get<Vapor::CharacterBodyComponent>(entity);
+            if (!comp.controller) continue;
+            auto& t = view.get<Vapor::TransformComponent>(entity);
+            t.position = comp.controller->getPosition();
+            t.isDirty  = true;
         }
     }
 
-    // Events are cleared by swap
+    // 7. Sync vehicle positions/rotations back to TransformComponent
+    {
+        auto view = reg.view<Vapor::VehicleBodyComponent, Vapor::TransformComponent>();
+        for (auto entity : view) {
+            auto& comp = view.get<Vapor::VehicleBodyComponent>(entity);
+            if (!comp.controller) continue;
+            auto& t = view.get<Vapor::TransformComponent>(entity);
+            t.position = comp.controller->getPosition();
+            t.rotation = comp.controller->getRotation();
+            t.isDirty  = true;
+        }
+    }
 
-    // draw debug UI
-    if (isDebugUIEnabled) {
-        // TODO: physics debug UI
+    // 8. Sync dynamic RigidbodyComponent positions/rotations → TransformComponent
+    {
+        auto view = reg.view<Vapor::RigidbodyComponent, Vapor::TransformComponent>();
+        for (auto entity : view) {
+            auto& rb = view.get<Vapor::RigidbodyComponent>(entity);
+            if (!rb.syncFromPhysics) continue;
+            if (!rb.body.valid()) continue;
+
+            auto it = bodies.find(rb.body.rid);
+            if (it == bodies.end()) continue;
+
+            JPH::BodyLockRead lock(physicsSystem->GetBodyLockInterface(), it->second);
+            if (!lock.Succeeded()) continue;
+
+            const JPH::Body& body = lock.GetBody();
+            if (body.GetMotionType() != JPH::EMotionType::Dynamic) continue;
+
+            auto& t = view.get<Vapor::TransformComponent>(entity);
+            auto pos = body.GetPosition();
+            auto rot = body.GetRotation();
+            t.position = glm::vec3(pos.GetX(), pos.GetY(), pos.GetZ());
+            t.rotation = glm::quat(rot.GetW(), rot.GetX(), rot.GetY(), rot.GetZ());
+            t.isDirty  = true;
+        }
+    }
+}
+
+void Physics3D::process(float dt) {
+    timeAccum += dt;
+
+    // Store previous positions for interpolation (CharacterController only)
+    for (auto* ctrl : characterControllers) {
+        ctrl->storePreviousPosition();
+    }
+
+    constexpr int MAX_PHYSICS_STEPS_PER_FRAME = 4;
+    int stepsThisFrame = 0;
+    while (timeAccum >= FIXED_TIME_STEP && stepsThisFrame < MAX_PHYSICS_STEPS_PER_FRAME) {
+        ++step;
+        ++stepsThisFrame;
+
+        // Update vehicle controllers BEFORE physics step (Jolt requirement)
+        for (auto* ctrl : vehicleControllers) {
+            ctrl->update(FIXED_TIME_STEP);
+        }
+
+        // Update character controllers BEFORE physics step (Jolt requirement)
+        for (auto* ctrl : characterControllers) {
+            ctrl->update(FIXED_TIME_STEP, getGravity());
+        }
+
+        physicsSystem->Update(FIXED_TIME_STEP, 1, tempAllocator.get(), jobSystem.get());
+
+        timeAccum -= FIXED_TIME_STEP;
+    }
+    if (timeAccum > FIXED_TIME_STEP * MAX_PHYSICS_STEPS_PER_FRAME) {
+        timeAccum = FIXED_TIME_STEP;
+    }
+
+    if (debugDrawEnabled && debugRenderer) {
+        debugRenderer->update();
+    }
+
+    // Drain raw contact events from listener and convert to ECS BodyHandle events
+    auto* listener = static_cast<MyContactListener*>(contactListener.get());
+    std::vector<MyContactListener::RawCollisionEvent> rawEvents;
+    {
+        std::lock_guard<std::mutex> lock(listener->eventMutex);
+        rawEvents.swap(listener->rawEvents);
+    }
+
+    {
+        std::lock_guard<std::mutex> popLock(popMutex);
+        pendingCollisionEvents.clear();
+        pendingTriggerEvents.clear();
+
+        for (auto& raw : rawEvents) {
+            Uint32 ridA = UINT32_MAX, ridB = UINT32_MAX;
+            auto itA = bodyIDToRid.find(raw.id1.GetIndexAndSequenceNumber());
+            auto itB = bodyIDToRid.find(raw.id2.GetIndexAndSequenceNumber());
+            if (itA != bodyIDToRid.end()) ridA = itA->second;
+            if (itB != bodyIDToRid.end()) ridB = itB->second;
+            BodyHandle ha{ ridA }, hb{ ridB };
+
+            if (raw.isTrigger) {
+                pendingTriggerEvents.push_back({ ha, hb, raw.isEnter });
+            } else {
+                pendingCollisionEvents.push_back({ ha, hb, raw.isEnter });
+            }
+        }
     }
 }
 
 void Physics3D::drawImGui(float dt) {
+}
+
+auto Physics3D::popCollisionEvents() -> std::vector<CollisionEvent> {
+    std::lock_guard<std::mutex> lock(popMutex);
+    return std::move(pendingCollisionEvents);
+}
+
+auto Physics3D::popTriggerEvents() -> std::vector<TriggerEvent> {
+    std::lock_guard<std::mutex> lock(popMutex);
+    return std::move(pendingTriggerEvents);
 }
 
 auto Physics3D::createSphereBody(
@@ -596,6 +627,7 @@ auto Physics3D::createSphereBody(
         throw std::runtime_error("Failed to create body");
     }
     bodies[nextBodyID] = body->GetID();
+    bodyIDToRid[body->GetID().GetIndexAndSequenceNumber()] = nextBodyID;
 
     return BodyHandle{ nextBodyID++ };
 }
@@ -623,6 +655,7 @@ auto Physics3D::createBoxBody(
         throw std::runtime_error("Failed to create body");
     }
     bodies[nextBodyID] = body->GetID();
+    bodyIDToRid[body->GetID().GetIndexAndSequenceNumber()] = nextBodyID;
 
     return BodyHandle{ nextBodyID++ };
 }
@@ -665,9 +698,8 @@ auto Physics3D::raycast(const glm::vec3& from, const glm::vec3& to, RaycastHit& 
         hit.hitDistance = result.mFraction * glm::distance(from, to);
         hit.hitFraction = result.mFraction;
 
-        // Get Node from UserData
         Uint64 userData = bodyInterface->GetUserData(hitBodyID);
-        hit.node = reinterpret_cast<Node*>(userData);
+        hit.entity = userData != 0 ? static_cast<entt::entity>(static_cast<Uint32>(userData)) : entt::null;
 
         // Get surface normal at hit point
         JPH::BodyLockRead lock(physicsSystem->GetBodyLockInterface(), hitBodyID);
@@ -1044,6 +1076,7 @@ auto Physics3D::createCapsuleBody(
         throw std::runtime_error("Failed to create capsule body");
     }
     bodies[nextBodyID] = body->GetID();
+    bodyIDToRid[body->GetID().GetIndexAndSequenceNumber()] = nextBodyID;
 
     return BodyHandle{ nextBodyID++ };
 }
@@ -1072,6 +1105,7 @@ auto Physics3D::createCylinderBody(
         throw std::runtime_error("Failed to create cylinder body");
     }
     bodies[nextBodyID] = body->GetID();
+    bodyIDToRid[body->GetID().GetIndexAndSequenceNumber()] = nextBodyID;
 
     return BodyHandle{ nextBodyID++ };
 }
@@ -1124,6 +1158,7 @@ auto Physics3D::createMeshBody(
         throw std::runtime_error("Failed to create mesh body");
     }
     bodies[nextBodyID] = body->GetID();
+    bodyIDToRid[body->GetID().GetIndexAndSequenceNumber()] = nextBodyID;
 
     return BodyHandle{ nextBodyID++ };
 }
@@ -1163,6 +1198,7 @@ auto Physics3D::createConvexHullBody(
         throw std::runtime_error("Failed to create convex hull body");
     }
     bodies[nextBodyID] = body->GetID();
+    bodyIDToRid[body->GetID().GetIndexAndSequenceNumber()] = nextBodyID;
 
     return BodyHandle{ nextBodyID++ };
 }
@@ -1328,8 +1364,7 @@ auto Physics3D::overlapSphere(const glm::vec3& center, float radius) -> OverlapR
                 // Get Node from UserData
                 Uint64 userData = bodyInterface->GetUserData(hitBodyID);
                 if (userData != 0) {
-                    Node* node = reinterpret_cast<Node*>(userData);
-                    result.nodes.push_back(node);
+                    result.entities.push_back(static_cast<entt::entity>(static_cast<Uint32>(userData)));
                 }
                 break;
             }
@@ -1369,8 +1404,7 @@ auto Physics3D::overlapBox(const glm::vec3& center, const glm::vec3& halfExtents
 
                 Uint64 userData = bodyInterface->GetUserData(hitBodyID);
                 if (userData != 0) {
-                    Node* node = reinterpret_cast<Node*>(userData);
-                    result.nodes.push_back(node);
+                    result.entities.push_back(static_cast<entt::entity>(static_cast<Uint32>(userData)));
                 }
                 break;
             }
@@ -1429,8 +1463,7 @@ auto Physics3D::overlapCapsule(const glm::vec3& point1, const glm::vec3& point2,
 
                 Uint64 userData = bodyInterface->GetUserData(hitBodyID);
                 if (userData != 0) {
-                    Node* node = reinterpret_cast<Node*>(userData);
-                    result.nodes.push_back(node);
+                    result.entities.push_back(static_cast<entt::entity>(static_cast<Uint32>(userData)));
                 }
                 break;
             }

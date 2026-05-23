@@ -178,54 +178,26 @@ VehicleController::VehicleController(
 }
 
 VehicleController::~VehicleController() {
-    // Check if physics system is still valid before trying to remove constraints/listeners
-    // This can happen during shutdown when PhysicsSystem is destroyed before VehicleController
-    if (!physics) {
-        // Physics system already destroyed, just reset the constraint pointer
-        vehicleConstraint.reset();
-        return;
-    }
+    if (!vehicleConstraint) return;
 
-    // Check if physics system is still initialized
-    auto* physicsSystem = physics->getPhysicsSystem();
-    if (!physicsSystem) {
-        // Physics system already destroyed, just reset the constraint pointer
-        vehicleConstraint.reset();
-        return;
-    }
-
-    // Try to remove step listener and constraint
-    // If PhysicsSystem is being destroyed, these operations may fail
-    if (vehicleConstraint) {
-        // Use a try-catch to handle cases where PhysicsSystem is being destroyed
-        // The mutex inside PhysicsSystem may be invalid during shutdown
-        try {
+    // JPH::VehicleConstraint is ref-counted by Jolt. RemoveConstraint() decrements the ref
+    // count and may free the object. We must release() our unique_ptr (not reset/delete) to
+    // avoid a double-free after Jolt already freed the memory.
+    if (physics) {
+        auto* physicsSystem = physics->getPhysicsSystem();
+        if (physicsSystem) {
             physicsSystem->RemoveStepListener(vehicleConstraint.get());
-        } catch (...) {
-            // Physics system may be in the process of being destroyed, ignore errors
-        }
-
-        try {
             physicsSystem->RemoveConstraint(vehicleConstraint.get());
-        } catch (...) {
-            // Physics system may be in the process of being destroyed, ignore errors
         }
-
-        // IMPORTANT: Reset the constraint immediately after removing it from PhysicsSystem
-        // This ensures it's destroyed before PhysicsSystem is destroyed
-        vehicleConstraint.reset();
     }
+    // Release without deleting — Jolt's ref-counting owns the lifetime.
+    vehicleConstraint.release();
 
-    // Try to remove and destroy body
-    if (vehicleBody) {
+    if (vehicleBody && physics) {
         auto* bodyInterface = physics->getBodyInterface();
         if (bodyInterface) {
-            try {
-                bodyInterface->RemoveBody(vehicleBody->GetID());
-                bodyInterface->DestroyBody(vehicleBody->GetID());
-            } catch (...) {
-                // Physics system may be in the process of being destroyed, ignore errors
-            }
+            bodyInterface->RemoveBody(vehicleBody->GetID());
+            bodyInterface->DestroyBody(vehicleBody->GetID());
         }
     }
 }

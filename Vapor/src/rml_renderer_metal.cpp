@@ -210,11 +210,7 @@ void RmlRendererMetal::createDefaultWhiteTexture() {
 }
 
 void RmlRendererMetal::createPipelineState() {
-    std::string src = readFile("assets/shaders/rmlui.metal");
-    if (src.empty()) {
-        // Fallback for game path (different working directory)
-        src = readFile("shaders/rmlui.metal");
-    }
+    std::string src = readFile("shaders/rmlui.metal");
     if (src.empty()) {
         fmt::print("[RmlRendererMetal] Failed to load rmlui.metal shader\n");
         return;

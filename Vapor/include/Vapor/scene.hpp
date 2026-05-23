@@ -9,17 +9,15 @@
 #include <string>
 #include <vector>
 
-#include "character_controller.hpp"
 #include "graphics.hpp"
 #include "physics_3d.hpp"
-#include "vehicle_controller.hpp"
 
 class FluidVolume;
 struct FluidVolumeSettings;
 
 struct MeshGroup {
     std::string name;
-    std::vector<std::shared_ptr<Mesh>> meshes;
+    std::vector<std::shared_ptr<Vapor::Mesh>> meshes;
 };
 
 struct Node {
@@ -30,8 +28,6 @@ struct Node {
     std::shared_ptr<MeshGroup> meshGroup = nullptr;
     BodyHandle body;
     TriggerHandle trigger;
-    std::unique_ptr<CharacterController> characterController;
-    std::unique_ptr<VehicleController> vehicleController;
     bool isTransformDirty = true;
 
     // Virtual callbacks for physics events (can be overridden in subclasses)
@@ -162,35 +158,25 @@ struct Node {
         child->isTransformDirty = true;
         children.push_back(child);
     }
-
-    // Character controller management
-    void attachCharacterController(Physics3D* physics, const CharacterControllerSettings& settings);
-    CharacterController* getCharacterController() {
-        return characterController.get();
-    }
-
-    // Vehicle controller management
-    void attachVehicleController(Physics3D* physics, const VehicleSettings& settings);
-    VehicleController* getVehicleController() {
-        return vehicleController.get();
-    }
 };
 
 class Scene {
 public:
     std::string name;
-    std::vector<std::shared_ptr<Image>> images;
-    std::vector<std::shared_ptr<Material>> materials;
+    std::vector<std::shared_ptr<Vapor::Image>> images;
+    std::vector<std::shared_ptr<Vapor::Material>> materials;
     std::vector<std::shared_ptr<Node>> nodes;
     std::vector<DirectionalLight> directionalLights;
     std::vector<PointLight> pointLights;
     std::vector<std::shared_ptr<FluidVolume>> fluidVolumes;
 
     // GPU-driven rendering
-    std::vector<VertexData> vertices;
+    std::vector<Vapor::VertexData> vertices;
     std::vector<Uint32> indices;
     BufferHandle vertexBuffer;
     BufferHandle indexBuffer;
+    std::vector<std::shared_ptr<Vapor::Mesh>> stagedMeshes;
+    std::vector<glm::mat4> stagedMeshTransforms;
 
     bool isGeometryDirty = true;
 
@@ -209,7 +195,8 @@ public:
     std::shared_ptr<FluidVolume> createFluidVolume(Physics3D* physics, const FluidVolumeSettings& settings);
     void addFluidVolume(std::shared_ptr<FluidVolume> fluidVolume);
 
-    void addMeshToNode(std::shared_ptr<Node> node, std::shared_ptr<Mesh> mesh);
+    void addMesh(std::shared_ptr<Vapor::Mesh> mesh, const glm::mat4& transform = glm::identity<glm::mat4>());
+    void addMeshToNode(std::shared_ptr<Node> node, std::shared_ptr<Vapor::Mesh> mesh);
     // void AddLightToNode(std::shared_ptr<Node> node, std::shared_ptr<Light> light);
 
 private:

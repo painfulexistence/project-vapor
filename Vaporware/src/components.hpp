@@ -1,16 +1,12 @@
 #pragma once
 
 #include "Vapor/components.hpp"
-#include "Vapor/scene.hpp"
+#include <RmlUi/Core/ElementDocument.h>
 #include <entt/entt.hpp>
 #include <glm/vec2.hpp>
 #include <memory>
 #include <string>
 #include <vector>
-
-struct SceneNodeReferenceComponent {
-    std::shared_ptr<Node> node = nullptr;
-};
 
 struct ScenePointLightReferenceComponent {
     int lightIndex = -1;// Index into Scene::pointLights

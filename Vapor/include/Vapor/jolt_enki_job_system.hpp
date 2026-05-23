@@ -1,5 +1,4 @@
-#ifndef JOLT_ENKI_JOB_SYSTEM_HPP
-#define JOLT_ENKI_JOB_SYSTEM_HPP
+#pragma once
 
 #include "task_scheduler.hpp"
 
@@ -58,5 +57,3 @@ namespace Vapor {
     };
 
 }// namespace Vapor
-
-#endif// JOLT_ENKI_JOB_SYSTEM_HPP

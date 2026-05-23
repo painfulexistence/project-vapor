@@ -4,8 +4,9 @@
 #include "graphics.hpp"
 #include "scene.hpp"
 #include <SDL3/SDL_video.h>
-#include <memory>
+#include <entt/entt.hpp>
 #include <functional>
+#include <memory>
 #include <vector>
 
 // Forward declarations
@@ -45,7 +46,7 @@ public:
     virtual void stage(std::shared_ptr<Scene> scene) = 0;
 
     virtual void draw(std::shared_ptr<Scene> scene, Camera& camera) = 0;
-
+    virtual void draw(entt::registry& registry, std::shared_ptr<Scene> scene, Camera& camera) = 0;
     virtual void readPixelsAsync(ScreenshotCallback callback) = 0;
 
     virtual void setRenderPath(RenderPath path) = 0;
@@ -59,6 +60,13 @@ public:
 
     virtual std::shared_ptr<Vapor::DebugDraw> getDebugDraw() {
         return nullptr;
+    }
+
+    // Register a callback invoked each frame between ImGui::NewFrame() and
+    // ImGui::Render(), allowing callers to draw custom ImGui windows without
+    // touching the renderer internals.
+    virtual void setImGuiCallback(std::function<void()> callback) {
+        m_imGuiCallback = std::move(callback);
     }
 
     // ===== 2D/3D Batch Rendering API =====
@@ -153,7 +161,7 @@ public:
     }
 
     // Texture creation for sprites
-    virtual TextureHandle createTexture(const std::shared_ptr<Image>& img) {
+    virtual TextureHandle createTexture(const std::shared_ptr<Vapor::Image>& img) {
         return {};
     }
 
@@ -236,6 +244,7 @@ protected:
     Uint32 currentFrameInFlight = 0;
     Uint32 frameNumber = 0;
     bool isInitialized = false;
+    std::function<void()> m_imGuiCallback;
 
     int calculateMipmapLevelCount(Uint32 width, Uint32 height) const {
         return static_cast<int>(std::floor(std::log2(std::max(width, height))) + 1);

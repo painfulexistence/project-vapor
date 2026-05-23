@@ -135,6 +135,7 @@ public:
     virtual void stage(std::shared_ptr<Scene> scene) override;
 
     virtual void draw(std::shared_ptr<Scene> scene, Camera& camera) override;
+    virtual void draw(entt::registry& registry, std::shared_ptr<Scene> scene, Camera& camera) override;
 
     virtual void readPixelsAsync(ScreenshotCallback callback) override;
 
@@ -196,9 +197,8 @@ public:
     ) override;
 
     // Rotated quad
-    void drawRotatedQuad2D(
-        const glm::vec2& position, const glm::vec2& size, float rotation, const glm::vec4& color
-    ) override;
+    void drawRotatedQuad2D(const glm::vec2& position, const glm::vec2& size, float rotation, const glm::vec4& color)
+        override;
     void drawRotatedQuad2D(
         const glm::vec2& position,
         const glm::vec2& size,
@@ -212,15 +212,13 @@ public:
     void drawLine3D(const glm::vec3& p0, const glm::vec3& p1, const glm::vec4& color, float thickness = 1.0f) override;
 
     // Shape drawing
-    void drawRect2D(
-        const glm::vec2& position, const glm::vec2& size, const glm::vec4& color, float thickness = 1.0f
-    ) override;
+    void drawRect2D(const glm::vec2& position, const glm::vec2& size, const glm::vec4& color, float thickness = 1.0f)
+        override;
     void drawCircle2D(const glm::vec2& center, float radius, const glm::vec4& color, int segments = 32) override;
     void drawCircleFilled2D(const glm::vec2& center, float radius, const glm::vec4& color, int segments = 32) override;
     void drawTriangle2D(const glm::vec2& p0, const glm::vec2& p1, const glm::vec2& p2, const glm::vec4& color) override;
-    void drawTriangleFilled2D(
-        const glm::vec2& p0, const glm::vec2& p1, const glm::vec2& p2, const glm::vec4& color
-    ) override;
+    void drawTriangleFilled2D(const glm::vec2& p0, const glm::vec2& p1, const glm::vec2& p2, const glm::vec4& color)
+        override;
 
     // Batch statistics
     Batch2DStats getBatch2DStats() const override {
@@ -234,7 +232,7 @@ public:
         createPipeline(const std::string& filename, bool isHDR, bool isColorOnly, Uint32 sampleCount);
     NS::SharedPtr<MTL::ComputePipelineState> createComputePipeline(const std::string& filename);
 
-    TextureHandle createTexture(const std::shared_ptr<Image>& img) override;
+    TextureHandle createTexture(const std::shared_ptr<Vapor::Image>& img) override;
 
     // ===== Render-to-Texture API =====
     RenderTextureHandle createRenderTexture(const RenderTextureDesc& desc) override;
@@ -274,9 +272,9 @@ public:
     glm::vec2 measureText(FontHandle font, const std::string& text, float scale = 1.0f) override;
     float getFontLineHeight(FontHandle font, float scale = 1.0f) override;
 
-    BufferHandle createVertexBuffer(const std::vector<VertexData>& vertices);
+    BufferHandle createVertexBuffer(const std::vector<Vapor::VertexData>& vertices);
     BufferHandle createIndexBuffer(const std::vector<Uint32>& indices);
-    BufferHandle createStorageBuffer(const std::vector<VertexData>& vertices);
+    BufferHandle createStorageBuffer(const std::vector<Vapor::VertexData>& vertices);
 
     NS::SharedPtr<MTL::Buffer> getBuffer(BufferHandle handle) const;
     NS::SharedPtr<MTL::Texture> getTexture(TextureHandle handle) const;
@@ -482,9 +480,14 @@ protected:
     std::vector<NS::SharedPtr<MTL::AccelerationStructure>> TLASBuffers;
 
     // Instance data
+    // instanceBatches: material → list of (mesh, instanceArrayIndex) for rasterization draw calls
+    struct MeshDraw { std::shared_ptr<Vapor::Mesh> mesh; uint32_t instanceIndex; };
     std::vector<InstanceData> instances;
+    std::vector<InstanceData> pendingEcsInstances;
+    std::unordered_map<std::shared_ptr<Vapor::Material>, std::vector<MeshDraw>> pendingEcsBatches;
+    std::vector<MTL::AccelerationStructureInstanceDescriptor> pendingEcsAccelInstances;
     std::vector<MTL::AccelerationStructureInstanceDescriptor> accelInstances;
-    std::unordered_map<std::shared_ptr<Material>, std::vector<std::shared_ptr<Mesh>>> instanceBatches;
+    std::unordered_map<std::shared_ptr<Vapor::Material>, std::vector<MeshDraw>> instanceBatches;
 
     // Render targets
     NS::SharedPtr<MTL::Texture> colorRT_MS;
@@ -571,7 +574,7 @@ private:
     std::unordered_map<Uint32, NS::SharedPtr<MTL::Buffer>> buffers;
     std::unordered_map<Uint32, NS::SharedPtr<MTL::Texture>> textures;
     std::unordered_map<Uint32, NS::SharedPtr<MTL::RenderPipelineState>> pipelines;
-    std::unordered_map<std::shared_ptr<Material>, Uint32> materialIDs;
+    std::unordered_map<std::shared_ptr<Vapor::Material>, Uint32> materialIDs;
 
     // Render texture internal data
     struct RenderTextureData {

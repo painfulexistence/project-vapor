@@ -1,5 +1,7 @@
 #include "renderer_vulkan.hpp"
 
+using namespace Vapor;
+
 #include <SDL3/SDL_stdinc.h>
 #include <SDL3/SDL_timer.h>
 #include <cstdlib>
@@ -13,11 +15,11 @@
 #define GLM_FORCE_LEFT_HANDED
 #include "backends/imgui_impl_sdl3.h"
 #include "backends/imgui_impl_vulkan.h"
+#include <algorithm>
+#include <cmath>
 #include <functional>
 #include <glm/ext/matrix_clip_space.hpp>
 #include <glm/ext/matrix_transform.hpp>
-#include <algorithm>
-#include <cmath>
 #include <vector>
 
 #include "asset_manager.hpp"
@@ -25,6 +27,7 @@
 #include "helper.hpp"
 #define ENABLE_VALIDATION 1
 
+using namespace Vapor;
 
 auto createRendererVulkan() -> std::unique_ptr<Renderer> {
     return std::make_unique<Renderer_Vulkan>();
@@ -112,7 +115,7 @@ namespace {
         VkDeviceMemory memory;
         VkDescriptorSet descriptorSet;
     };
-}
+}// namespace
 
 class RmlUiRendererVulkan : public Rml::RenderInterface {
 public:
@@ -292,7 +295,16 @@ void RmlUiRendererVulkan::RenderGeometry(
     if (activeTex) {
         auto texIt = m_textures.find(activeTex);
         if (texIt != m_textures.end()) {
-            vkCmdBindDescriptorSets(m_cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, m_renderer->getUiPipelineLayout(), 0, 1, &texIt->second.descriptorSet, 0, nullptr);
+            vkCmdBindDescriptorSets(
+                m_cmd,
+                VK_PIPELINE_BIND_POINT_GRAPHICS,
+                m_renderer->getUiPipelineLayout(),
+                0,
+                1,
+                &texIt->second.descriptorSet,
+                0,
+                nullptr
+            );
         }
     }
 
@@ -322,7 +334,8 @@ void RmlUiRendererVulkan::SetScissorRegion(Rml::Rectanglei region) {
     m_scissor.height = region.Height();
 }
 
-auto RmlUiRendererVulkan::LoadTexture(Rml::Vector2i& texture_dimensions, const Rml::String& source) -> Rml::TextureHandle {
+auto RmlUiRendererVulkan::LoadTexture(Rml::Vector2i& texture_dimensions, const Rml::String& source)
+    -> Rml::TextureHandle {
     // Use AssetManager to load texture and wrap it
     auto img = AssetManager::loadImage(source.c_str());
     if (!img) {
@@ -330,7 +343,9 @@ auto RmlUiRendererVulkan::LoadTexture(Rml::Vector2i& texture_dimensions, const R
     }
     texture_dimensions.x = img->width;
     texture_dimensions.y = img->height;
-    return GenerateTexture(Rml::Span<const Rml::byte>((const Rml::byte*)img->byteArray.data(), img->byteArray.size()), texture_dimensions);
+    return GenerateTexture(
+        Rml::Span<const Rml::byte>((const Rml::byte*)img->byteArray.data(), img->byteArray.size()), texture_dimensions
+    );
 }
 
 auto RmlUiRendererVulkan::GenerateTexture(Rml::Span<const Rml::byte> source, Rml::Vector2i source_dimensions)
@@ -344,7 +359,7 @@ auto RmlUiRendererVulkan::GenerateTexture(Rml::Span<const Rml::byte> source, Rml
 
     // This is a bit complex to do without helpers, but I'll try to use m_renderer's existing logic
     // Actually, I'll just return a new handle and implement it properly.
-    
+
     VkDevice device = m_renderer->getDevice();
     VkDeviceSize imageSize = source.size();
 
@@ -363,7 +378,9 @@ auto RmlUiRendererVulkan::GenerateTexture(Rml::Span<const Rml::byte> source, Rml
     VkMemoryAllocateInfo allocInfo{};
     allocInfo.sType = VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO;
     allocInfo.allocationSize = memReqs.size;
-    allocInfo.memoryTypeIndex = m_renderer->findMemoryType(memReqs.memoryTypeBits, VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT);
+    allocInfo.memoryTypeIndex = m_renderer->findMemoryType(
+        memReqs.memoryTypeBits, VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT
+    );
     vkAllocateMemory(device, &allocInfo, nullptr, &stagingBufferMemory);
     vkBindBufferMemory(device, stagingBuffer, stagingBufferMemory, 0);
 
@@ -415,7 +432,9 @@ auto RmlUiRendererVulkan::GenerateTexture(Rml::Span<const Rml::byte> source, Rml
     barrier.srcAccessMask = 0;
     barrier.dstAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
 
-    vkCmdPipelineBarrier(cmd, VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT, VK_PIPELINE_STAGE_TRANSFER_BIT, 0, 0, nullptr, 0, nullptr, 1, &barrier);
+    vkCmdPipelineBarrier(
+        cmd, VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT, VK_PIPELINE_STAGE_TRANSFER_BIT, 0, 0, nullptr, 0, nullptr, 1, &barrier
+    );
 
     VkBufferImageCopy region{};
     region.bufferOffset = 0;
@@ -435,7 +454,18 @@ auto RmlUiRendererVulkan::GenerateTexture(Rml::Span<const Rml::byte> source, Rml
     barrier.srcAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
     barrier.dstAccessMask = VK_ACCESS_SHADER_READ_BIT;
 
-    vkCmdPipelineBarrier(cmd, VK_PIPELINE_STAGE_TRANSFER_BIT, VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT, 0, 0, nullptr, 0, nullptr, 1, &barrier);
+    vkCmdPipelineBarrier(
+        cmd,
+        VK_PIPELINE_STAGE_TRANSFER_BIT,
+        VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT,
+        0,
+        0,
+        nullptr,
+        0,
+        nullptr,
+        1,
+        &barrier
+    );
 
     m_renderer->endSingleTimeCommands(cmd);
 
@@ -514,7 +544,9 @@ void RmlUiRendererVulkan::SetTransform(const Rml::Matrix4f* transform) {
     }
 }
 
-void RmlUiRendererVulkan::beginFrame(VkCommandBuffer cmd, uint32_t width, uint32_t height, uint32_t fbWidth, uint32_t fbHeight) {
+void RmlUiRendererVulkan::beginFrame(
+    VkCommandBuffer cmd, uint32_t width, uint32_t height, uint32_t fbWidth, uint32_t fbHeight
+) {
     m_cmd = cmd;
     m_width = width;
     m_height = height;
@@ -1437,31 +1469,30 @@ auto Renderer_Vulkan::createResources() -> void {
 
     // Write descriptor sets
     for (size_t i = 0; i < MAX_FRAMES_IN_FLIGHT; i++) {
-        VkDescriptorBufferInfo cameraDataBufferInfo = {
-            .buffer = getBuffer(cameraDataBuffers[i]), .offset = 0, .range = sizeof(CameraData)
-        };
+        VkDescriptorBufferInfo cameraDataBufferInfo = { .buffer = getBuffer(cameraDataBuffers[i]),
+                                                        .offset = 0,
+                                                        .range = sizeof(CameraData) };
 
-        VkDescriptorBufferInfo instanceBufferInfo = {
-            .buffer = getBuffer(instanceDataBuffers[i]), .offset = 0, .range = sizeof(InstanceData) * MAX_INSTANCES
-        };
+        VkDescriptorBufferInfo instanceBufferInfo = { .buffer = getBuffer(instanceDataBuffers[i]),
+                                                      .offset = 0,
+                                                      .range = sizeof(InstanceData) * MAX_INSTANCES };
 
-        VkDescriptorBufferInfo directionalLightBufferInfo = {
-            .buffer = getBuffer(directionalLightBuffers[i]),
-            .offset = 0,
-            .range = sizeof(DirectionalLight) * MAX_DIRECTIONAL_LIGHTS
-        };
+        VkDescriptorBufferInfo directionalLightBufferInfo = { .buffer = getBuffer(directionalLightBuffers[i]),
+                                                              .offset = 0,
+                                                              .range =
+                                                                  sizeof(DirectionalLight) * MAX_DIRECTIONAL_LIGHTS };
 
-        VkDescriptorBufferInfo pointLightBufferInfo = {
-            .buffer = getBuffer(pointLightBuffers[i]), .offset = 0, .range = sizeof(PointLight) * MAX_POINT_LIGHTS
-        };
+        VkDescriptorBufferInfo pointLightBufferInfo = { .buffer = getBuffer(pointLightBuffers[i]),
+                                                        .offset = 0,
+                                                        .range = sizeof(PointLight) * MAX_POINT_LIGHTS };
 
-        VkDescriptorBufferInfo lightCullBufferInfo = {
-            .buffer = getBuffer(lightCullDataBuffers[i]), .offset = 0, .range = sizeof(LightCullData)
-        };
+        VkDescriptorBufferInfo lightCullBufferInfo = { .buffer = getBuffer(lightCullDataBuffers[i]),
+                                                       .offset = 0,
+                                                       .range = sizeof(LightCullData) };
 
-        VkDescriptorBufferInfo clusterBufferInfo = {
-            .buffer = getBuffer(clusterBuffers[i]), .offset = 0, .range = sizeof(Cluster) * numClusters
-        };
+        VkDescriptorBufferInfo clusterBufferInfo = { .buffer = getBuffer(clusterBuffers[i]),
+                                                     .offset = 0,
+                                                     .range = sizeof(Cluster) * numClusters };
 
         std::array<VkWriteDescriptorSet, 6> writes = { { { .sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET,
                                                            .dstSet = set0s[i],
@@ -1575,21 +1606,16 @@ auto Renderer_Vulkan::stage(std::shared_ptr<Scene> scene) -> void {
     }
 
     // Buffers
-    const std::function<void(const std::shared_ptr<Node>&)> stageNode = [&](const std::shared_ptr<Node>& node) -> void {
-        if (node->meshGroup) {
-            for (auto& mesh : node->meshGroup->meshes) {
-                mesh->vbos.push_back(createVertexBuffer(mesh->vertices));// TODO: use single vbo for all meshes
-                mesh->ebo = createIndexBuffer(mesh->indices);
-                mesh->materialID = materialIDs.at(mesh->material);
-                mesh->instanceID = nextInstanceID++;
-            }
+    const auto stageMesh = [&](std::shared_ptr<Vapor::Mesh>& mesh) {
+        mesh->vbos.push_back(createVertexBuffer(mesh->vertices));
+        mesh->ebo = createIndexBuffer(mesh->indices);
+        if (mesh->material && materialIDs.count(mesh->material)) {
+            mesh->materialID = materialIDs.at(mesh->material);
         }
-        for (const auto& child : node->children) {
-            stageNode(child);
-        }
+        mesh->instanceID = nextInstanceID++;
     };
-    for (auto& node : scene->nodes) {
-        stageNode(node);
+    for (auto& mesh : scene->stagedMeshes) {
+        stageMesh(mesh);
     }
 
     // Descriptor sets
@@ -1830,30 +1856,18 @@ auto Renderer_Vulkan::draw(std::shared_ptr<Scene> scene, Camera& camera) -> void
     );
 
     instances.clear();
-    const std::function<void(const std::shared_ptr<Node>&)> updateNode =
-        [&](const std::shared_ptr<Node>& node) -> void {
-        if (node->meshGroup) {
-            const glm::mat4& transform = node->worldTransform;
-            for (auto& mesh : node->meshGroup->meshes) {
-                instances.push_back(
-                    { .model = transform,
-                      .vertexOffset = mesh->vertexOffset,
-                      .indexOffset = mesh->indexOffset,
-                      .vertexCount = mesh->vertexCount,
-                      .indexCount = mesh->indexCount,
-                      .materialID = mesh->materialID,
-                      .primitiveMode = mesh->primitiveMode,
-                      .AABBMin = mesh->worldAABBMin,
-                      .AABBMax = mesh->worldAABBMax }
-                );
-            }
-        }
-        for (const auto& child : node->children) {
-            updateNode(child);
-        }
-    };
-    for (const auto& node : scene->nodes) {
-        updateNode(node);
+    for (auto& mesh : scene->stagedMeshes) {
+        glm::vec3 center = (mesh->localAABBMin + mesh->localAABBMax) * 0.5f;
+        glm::vec3 extent = mesh->localAABBMax - center;
+        instances.push_back({ .model = glm::identity<glm::mat4>(),
+                              .vertexOffset = mesh->vertexOffset,
+                              .indexOffset = mesh->indexOffset,
+                              .vertexCount = mesh->vertexCount,
+                              .indexCount = mesh->indexCount,
+                              .materialID = mesh->materialID,
+                              .primitiveMode = mesh->primitiveMode,
+                              .AABBMin = center - extent,
+                              .AABBMax = center + extent });
     }
     if (instances.size() > MAX_INSTANCES) {// TODO: reallocate when needed
         fmt::print("Warning: Instance count ({}) exceeds MAX_INSTANCES ({})\n", instances.size(), MAX_INSTANCES);
@@ -1905,52 +1919,24 @@ auto Renderer_Vulkan::draw(std::shared_ptr<Scene> scene, Camera& camera) -> void
     vkCmdBeginRenderPass(cmd, &prePassInfo, VK_SUBPASS_CONTENTS_INLINE);
     vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, prePassPipeline);
 
-    const std::function<void(const std::shared_ptr<Node>&)> drawNodeDepth =
-        [&](const std::shared_ptr<Node>& node) -> void {
-        if (node->meshGroup) {
-            for (auto& mesh : node->meshGroup->meshes) {
-                if (!mesh->material) {
-                    fmt::print("No material found for mesh in mesh group {}\n", node->meshGroup->name);
-                    continue;
-                }
-                if (mesh->vbos.empty() || mesh->vbos[0].rid == UINT32_MAX || mesh->ebo.rid == UINT32_MAX) {
-                    continue;
-                }
-                auto matSetIt = materialTextureSets.find(mesh->material);
-                if (matSetIt == materialTextureSets.end()) {
-                    fmt::print("[WARN] DepthPass: material missing for mesh in node {}\n", node->name);
-                    continue;
-                }
-                VkBuffer vertexBuffers[] = { getBuffer(mesh->vbos[0]) };
-                VkDeviceSize offsets[] = { 0 };
-                vkCmdBindVertexBuffers(cmd, 0, 1, vertexBuffers, offsets);
-                vkCmdBindIndexBuffer(cmd, getBuffer(mesh->ebo), 0, VkIndexType::VK_INDEX_TYPE_UINT32);
-                std::array<VkDescriptorSet, 2> descriptorSets = { set0s[currentFrameInFlight],
-                                                                  matSetIt->second };
-                vkCmdBindDescriptorSets(
-                    cmd,
-                    VK_PIPELINE_BIND_POINT_GRAPHICS,
-                    prePassPipelineLayout,
-                    0,
-                    descriptorSets.size(),
-                    descriptorSets.data(),
-                    0,
-                    nullptr
-                );
-                struct PrePassPC { glm::vec3 _pad; uint32_t instanceID; };
-                PrePassPC pc{ {}, mesh->instanceID };
-                vkCmdPushConstants(
-                    cmd, prePassPipelineLayout, VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT, 0, sizeof(PrePassPC), &pc
-                );
-                vkCmdDrawIndexed(cmd, mesh->indices.size(), 1, 0, 0, 0);
-            }
-        }
-        for (const auto& child : node->children) {
-            drawNodeDepth(child);
-        }
-    };
-    for (auto& node : scene->nodes) {
-        drawNodeDepth(node);
+    for (auto& mesh : scene->stagedMeshes) {
+        if (!mesh->material) continue;
+        if (mesh->vbos.empty() || mesh->vbos[0].rid == UINT32_MAX || mesh->ebo.rid == UINT32_MAX) continue;
+        auto matSetIt = materialTextureSets.find(mesh->material);
+        if (matSetIt == materialTextureSets.end()) continue;
+        VkBuffer vertexBuffers[] = { getBuffer(mesh->vbos[0]) };
+        VkDeviceSize offsets[] = { 0 };
+        vkCmdBindVertexBuffers(cmd, 0, 1, vertexBuffers, offsets);
+        vkCmdBindIndexBuffer(cmd, getBuffer(mesh->ebo), 0, VkIndexType::VK_INDEX_TYPE_UINT32);
+        std::array<VkDescriptorSet, 2> descriptorSets = { set0s[currentFrameInFlight], matSetIt->second };
+        vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, prePassPipelineLayout, 0, descriptorSets.size(), descriptorSets.data(), 0, nullptr);
+        struct PrePassPC {
+            glm::vec3 _pad;
+            uint32_t instanceID;
+        };
+        PrePassPC pc{ {}, mesh->instanceID };
+        vkCmdPushConstants(cmd, prePassPipelineLayout, VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT, 0, sizeof(PrePassPC), &pc);
+        vkCmdDrawIndexed(cmd, mesh->indices.size(), 1, 0, 0, 0);
     }
 
     vkCmdEndRenderPass(cmd);
@@ -1970,56 +1956,24 @@ auto Renderer_Vulkan::draw(std::shared_ptr<Scene> scene, Camera& camera) -> void
     vkCmdBeginRenderPass(cmd, &renderPassInfo, VK_SUBPASS_CONTENTS_INLINE);
     vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, renderPipeline);
 
-    const std::function<void(const std::shared_ptr<Node>&)> drawNode = [&](const std::shared_ptr<Node>& node) -> void {
-        if (node->meshGroup) {
-            for (auto& mesh : node->meshGroup->meshes) {
-                if (!mesh->material) {
-                    fmt::print("No material found for mesh in mesh group {}\n", node->meshGroup->name);
-                    continue;
-                }
-                if (mesh->vbos.empty() || mesh->vbos[0].rid == UINT32_MAX || mesh->ebo.rid == UINT32_MAX) {
-                    continue;
-                }
-                auto matSetIt = materialTextureSets.find(mesh->material);
-                if (matSetIt == materialTextureSets.end()) {
-                    fmt::print("[WARN] ColorPass: material missing for mesh in node {}\n", node->name);
-                    continue;
-                }
-                VkBuffer vertexBuffers[] = { getBuffer(mesh->vbos[0]) };
-                VkDeviceSize offsets[] = { 0 };
-                vkCmdBindVertexBuffers(cmd, 0, 1, vertexBuffers, offsets);
-                vkCmdBindIndexBuffer(cmd, getBuffer(mesh->ebo), 0, VkIndexType::VK_INDEX_TYPE_UINT32);
-                std::array<VkDescriptorSet, 2> descriptorSets = { set0s[currentFrameInFlight],
-                                                                  matSetIt->second };
-                vkCmdBindDescriptorSets(
-                    cmd,
-                    VK_PIPELINE_BIND_POINT_GRAPHICS,
-                    renderPipelineLayout,
-                    0,
-                    descriptorSets.size(),
-                    descriptorSets.data(),
-                    0,
-                    nullptr
-                );// resources are set here
-                struct PushConstants { glm::vec3 camPos; uint32_t instanceID; };
-                PushConstants pc{ camPos, mesh->instanceID };
-                vkCmdPushConstants(
-                    cmd,
-                    renderPipelineLayout,
-                    VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT,
-                    0,
-                    sizeof(PushConstants),
-                    &pc
-                );
-                vkCmdDrawIndexed(cmd, mesh->indices.size(), 1, 0, 0, 0);
-            }
-        }
-        for (const auto& child : node->children) {
-            drawNode(child);
-        }
-    };
-    for (auto& node : scene->nodes) {
-        drawNode(node);
+    for (auto& mesh : scene->stagedMeshes) {
+        if (!mesh->material) continue;
+        if (mesh->vbos.empty() || mesh->vbos[0].rid == UINT32_MAX || mesh->ebo.rid == UINT32_MAX) continue;
+        auto matSetIt = materialTextureSets.find(mesh->material);
+        if (matSetIt == materialTextureSets.end()) continue;
+        VkBuffer vertexBuffers[] = { getBuffer(mesh->vbos[0]) };
+        VkDeviceSize offsets[] = { 0 };
+        vkCmdBindVertexBuffers(cmd, 0, 1, vertexBuffers, offsets);
+        vkCmdBindIndexBuffer(cmd, getBuffer(mesh->ebo), 0, VkIndexType::VK_INDEX_TYPE_UINT32);
+        std::array<VkDescriptorSet, 2> descriptorSets = { set0s[currentFrameInFlight], matSetIt->second };
+        vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, renderPipelineLayout, 0, descriptorSets.size(), descriptorSets.data(), 0, nullptr);
+        struct PushConstants {
+            glm::vec3 camPos;
+            uint32_t instanceID;
+        };
+        PushConstants pc{ camPos, mesh->instanceID };
+        vkCmdPushConstants(cmd, renderPipelineLayout, VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT, 0, sizeof(PushConstants), &pc);
+        vkCmdDrawIndexed(cmd, mesh->indices.size(), 1, 0, 0, 0);
     }
 
     // Render particles (after scene, before post-process)
@@ -2071,23 +2025,23 @@ auto Renderer_Vulkan::draw(std::shared_ptr<Scene> scene, Camera& camera) -> void
     // Ensure viewport and scissor match the swapchain size (left‑top origin)
     VkViewport uiViewport = {};
     uiViewport.x = 0.0f;
-    uiViewport.y = 0.0f; // top‑left origin
-    uiViewport.width  = static_cast<float>(swapchainExtent.width);
+    uiViewport.y = 0.0f;// top‑left origin
+    uiViewport.width = static_cast<float>(swapchainExtent.width);
     uiViewport.height = static_cast<float>(swapchainExtent.height);
     uiViewport.minDepth = 0.0f;
     uiViewport.maxDepth = 1.0f;
     vkCmdSetViewport(cmd, 0, 1, &uiViewport);
 
     VkRect2D uiScissor = {};
-    uiScissor.offset = {0, 0};
+    uiScissor.offset = { 0, 0 };
     uiScissor.extent = swapchainExtent;
     vkCmdSetScissor(cmd, 0, 1, &uiScissor);
 
     if (vkCmdBeginRendering_ptr) {
         vkCmdBeginRendering_ptr(cmd, &imguiRenderingInfo);
-        
+
         if (uiRenderer && m_uiContext) {
-                        int winW, winH;
+            int winW, winH;
             SDL_GetWindowSize(window, &winW, &winH);
             uiRenderer->beginFrame(cmd, (uint32_t)winW, (uint32_t)winH, swapchainExtent.width, swapchainExtent.height);
             m_uiContext->Render();
@@ -2110,35 +2064,65 @@ auto Renderer_Vulkan::draw(std::shared_ptr<Scene> scene, Camera& camera) -> void
         for (auto& callback : m_pendingScreenshotRequests) {
             void* mappedData = nullptr;
             BufferHandle stagingBuffer = createBufferMapped(BufferUsage::COPY_DST, imageSize, &mappedData);
-            
+
             VkFence fence = renderFences[currentFrameInFlight];
 
             // Transition for transfer
-            VkImageSubresourceRange subresourceRange = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1};
-            VkImageMemoryBarrier barrier = {VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER};
+            VkImageSubresourceRange subresourceRange = { VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1 };
+            VkImageMemoryBarrier barrier = { VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER };
             barrier.oldLayout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL;
             barrier.newLayout = VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL;
             barrier.srcAccessMask = VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT;
             barrier.dstAccessMask = VK_ACCESS_TRANSFER_READ_BIT;
             barrier.image = swapchainImages[swapchainImageIndex];
             barrier.subresourceRange = subresourceRange;
-            vkCmdPipelineBarrier(cmd, VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT, VK_PIPELINE_STAGE_TRANSFER_BIT, 0, 0, nullptr, 0, nullptr, 1, &barrier);
+            vkCmdPipelineBarrier(
+                cmd,
+                VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT,
+                VK_PIPELINE_STAGE_TRANSFER_BIT,
+                0,
+                0,
+                nullptr,
+                0,
+                nullptr,
+                1,
+                &barrier
+            );
 
             VkBufferImageCopy region{};
-            region.imageExtent = {width, height, 1};
+            region.imageExtent = { width, height, 1 };
             region.imageSubresource.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
             region.imageSubresource.layerCount = 1;
-            vkCmdCopyImageToBuffer(cmd, swapchainImages[swapchainImageIndex], VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, getBuffer(stagingBuffer), 1, &region);
+            vkCmdCopyImageToBuffer(
+                cmd,
+                swapchainImages[swapchainImageIndex],
+                VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
+                getBuffer(stagingBuffer),
+                1,
+                &region
+            );
 
-            // Transition back for presentation (we transition to COLOR_ATTACHMENT so the next insertImageMemoryBarrier works as expected)
+            // Transition back for presentation (we transition to COLOR_ATTACHMENT so the next insertImageMemoryBarrier
+            // works as expected)
             barrier.oldLayout = VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL;
             barrier.newLayout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL;
             barrier.srcAccessMask = VK_ACCESS_TRANSFER_READ_BIT;
             barrier.dstAccessMask = VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT;
-            vkCmdPipelineBarrier(cmd, VK_PIPELINE_STAGE_TRANSFER_BIT, VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT, 0, 0, nullptr, 0, nullptr, 1, &barrier);
+            vkCmdPipelineBarrier(
+                cmd,
+                VK_PIPELINE_STAGE_TRANSFER_BIT,
+                VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT,
+                0,
+                0,
+                nullptr,
+                0,
+                nullptr,
+                1,
+                &barrier
+            );
 
-            pendingScreenshots.push_back({stagingBuffer, callback, width, height, fence});
-            
+            pendingScreenshots.push_back({ stagingBuffer, callback, width, height, fence });
+
             // Note: Since we use the main cmd buffer, we need to signal the fence when THIS cmd buffer is done.
             // Actually, for simplicity, we submit a small extra wait or use a better sync.
             // But here, let s just use the per-frame fence.
@@ -3030,7 +3014,9 @@ auto Renderer_Vulkan::createBuffer(BufferUsage usage, VkDeviceSize size) -> Buff
     VkMemoryAllocateInfo allocInfo = {};
     allocInfo.sType = VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO;
     allocInfo.allocationSize = memRequirements.size;
-    allocInfo.memoryTypeIndex = findMemoryType(memRequirements.memoryTypeBits, VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT);
+    allocInfo.memoryTypeIndex = findMemoryType(
+        memRequirements.memoryTypeBits, VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT
+    );
 
     if (vkAllocateMemory(device, &allocInfo, nullptr, &memory) != VK_SUCCESS) {
         throw std::runtime_error("Failed to allocate buffer memory!");
@@ -3824,14 +3810,14 @@ VkPipeline Renderer_Vulkan::createUiPipeline(const std::string& vertShader, cons
     pipelineInfo.pDynamicState = &dynamicState;
     pipelineInfo.layout = uiPipelineLayout;
     pipelineInfo.renderPass = VK_NULL_HANDLE;// Use dynamic rendering
-    
+
     // Set dynamic rendering info
     VkPipelineRenderingCreateInfoKHR pipelineRenderingInfo{};
     pipelineRenderingInfo.sType = VK_STRUCTURE_TYPE_PIPELINE_RENDERING_CREATE_INFO_KHR;
     pipelineRenderingInfo.colorAttachmentCount = 1;
     VkFormat swapchainFormat = swapchainImageFormat;
     pipelineRenderingInfo.pColorAttachmentFormats = &swapchainFormat;
-    
+
     pipelineInfo.pNext = &pipelineRenderingInfo;
 
     VkPipeline pipeline;
@@ -3871,7 +3857,7 @@ void Renderer_Vulkan::readPixelsAsync(ScreenshotCallback callback) {
 // We need a way to poll these fences. We will add a call to a private helper in draw()
 void Renderer_Vulkan::processPendingScreenshots() {
     auto& pending = pendingScreenshots;
-    for (auto it = pending.begin(); it != pending.end(); ) {
+    for (auto it = pending.begin(); it != pending.end();) {
         if (vkGetFenceStatus(device, it->fence) == VK_SUCCESS) {
             // Ready!
             GpuImageData imageData;
@@ -3896,4 +3882,6 @@ void Renderer_Vulkan::processPendingScreenshots() {
             ++it;
         }
     }
+}
+void Renderer_Vulkan::draw(entt::registry& registry, std::shared_ptr<Scene> scene, Camera& camera) { /* TODO */
 }
