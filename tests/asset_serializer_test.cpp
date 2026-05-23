@@ -1,3 +1,4 @@
+#include <catch2/catch_approx.hpp>
 #include <catch2/catch_test_macros.hpp>
 #include "Vapor/asset_serializer.hpp"
 #include "Vapor/graphics.hpp"
@@ -115,6 +116,63 @@ TEST_CASE("AssetSerializer - Simple Cereal Test", "[asset][serializer][cereal]")
     CHECK(loadedData.name == "Test");
     CHECK(loadedData.numbers.size() == 5);
     CHECK(loadedData.position.x == 1.0f);
-    
+
+    std::remove(testPath.c_str());
+}
+
+TEST_CASE("AssetSerializer - round-trip preserves stagedMeshTransforms", "[asset][serializer]") {
+    auto scene = std::make_shared<Scene>("RoundTripScene");
+
+    auto mesh = std::make_shared<Mesh>();
+    mesh->vertices = {
+        { { -1.0f, -1.0f, 0.0f }, { 0.0f, 0.0f }, { 0.0f, 0.0f, 1.0f }, { 1.0f, 0.0f, 0.0f, 1.0f } },
+        { {  1.0f, -1.0f, 0.0f }, { 1.0f, 0.0f }, { 0.0f, 0.0f, 1.0f }, { 1.0f, 0.0f, 0.0f, 1.0f } },
+        { {  0.0f,  1.0f, 0.0f }, { 0.5f, 1.0f }, { 0.0f, 0.0f, 1.0f }, { 1.0f, 0.0f, 0.0f, 1.0f } },
+    };
+    mesh->indices = { 0, 1, 2 };
+    mesh->vertexCount = 3;
+    mesh->indexCount = 3;
+    mesh->primitiveMode = PrimitiveMode::TRIANGLES;
+
+    glm::mat4 worldTransform = glm::translate(glm::mat4(1.0f), glm::vec3(5.0f, 3.0f, 1.0f));
+    scene->addMesh(mesh, worldTransform);
+
+    std::string testPath = "test_staged_mesh.bin";
+    AssetSerializer::serializeScene(scene, testPath);
+
+    auto loaded = AssetSerializer::deserializeScene(testPath);
+    std::remove(testPath.c_str());
+
+    REQUIRE(loaded != nullptr);
+    REQUIRE(loaded->stagedMeshes.size() == 1);
+    REQUIRE(loaded->stagedMeshTransforms.size() == 1);
+
+    const glm::mat4& lt = loaded->stagedMeshTransforms[0];
+    for (int col = 0; col < 4; ++col)
+        for (int row = 0; row < 4; ++row)
+            CHECK(lt[col][row] == Catch::Approx(worldTransform[col][row]).epsilon(1e-5f));
+}
+
+TEST_CASE("AssetSerializer - version mismatch throws", "[asset][serializer]") {
+    std::string testPath = "test_version_mismatch.bin";
+    {
+        std::ofstream file(testPath, std::ios::binary);
+        REQUIRE(file.is_open());
+        cereal::BinaryOutputArchive archive(file);
+        uint32_t oldVersion = 0;
+        archive(oldVersion);
+        std::string fakeName = "OldScene";
+        archive(fakeName);
+    }
+
+    REQUIRE_THROWS_AS(AssetSerializer::deserializeScene(testPath), std::runtime_error);
+    std::remove(testPath.c_str());
+}
+
+TEST_CASE("AssetSerializer - correct version passes", "[asset][serializer]") {
+    auto scene = std::make_shared<Scene>("VersionOK");
+    std::string testPath = "test_version_ok.bin";
+    AssetSerializer::serializeScene(scene, testPath);
+    REQUIRE_NOTHROW(AssetSerializer::deserializeScene(testPath));
     std::remove(testPath.c_str());
 }
