@@ -116,6 +116,7 @@ auto main(int argc, char* args[]) -> int {
     renderer->init(window);
 
     SceneInspector sceneInspector;
+    sceneInspector.setGltfPath("models/Sponza/Sponza.gltf", /*optimized=*/true);
 
     // Load a font for text rendering
     FontHandle gameFont = renderer->loadFont("fonts/Arial Black.ttf", 48.0f);
@@ -210,6 +211,7 @@ auto main(int argc, char* args[]) -> int {
         tc.isDirty = false; // worldTransform already correct; skip TransformSystem
         auto& mrc = registry.emplace<Vapor::MeshRendererComponent>(e);
         mrc.meshes.push_back(mesh);
+        registry.emplace<SceneGeometryTag>(e);
     }
     // Clear stagedMeshes: GLTF meshes are now ECS entities; manually built
     // meshes (cubes, floor) are already in MeshRendererComponent and were
