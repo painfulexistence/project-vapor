@@ -18,7 +18,7 @@
 #include <fstream>
 #include <string>
 
-namespace LevelSerializer {
+namespace SceneSerializer {
 
 // ============================================================================
 // Intermediate POD structs (cereal-serializable)
@@ -182,4 +182,4 @@ inline SaveResult save(
     return { true, {}, static_cast<int>(level.entities.size()), skipped };
 }
 
-} // namespace LevelSerializer
+} // namespace SceneSerializer

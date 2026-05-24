@@ -1,4 +1,4 @@
-#include "asset_serializer.hpp"
+#include "model_serializer.hpp"
 #include <SDL3/SDL_stdinc.h>
 #include <SDL3/SDL_timer.h>
 #include <fmt/core.h>
@@ -8,7 +8,7 @@
 
 using namespace Vapor;
 
-void AssetSerializer::serializeScene(const std::shared_ptr<Scene>& scene, const std::string& path) {
+void ModelSerializer::serializeScene(const std::shared_ptr<Scene>& scene, const std::string& path) {
     auto start = SDL_GetTicks();
 
     {
@@ -76,7 +76,7 @@ void AssetSerializer::serializeScene(const std::shared_ptr<Scene>& scene, const 
     fmt::print("Scene serialized to: {} in {} ms\n", path, SDL_GetTicks() - start);
 }
 
-auto AssetSerializer::deserializeScene(const std::string& path) -> std::shared_ptr<Scene> {
+auto ModelSerializer::deserializeScene(const std::string& path) -> std::shared_ptr<Scene> {
     auto start = SDL_GetTicks();
 
     std::ifstream file(path, std::ios::binary);
@@ -163,7 +163,7 @@ auto AssetSerializer::deserializeScene(const std::string& path) -> std::shared_p
     return scene;
 }
 
-void AssetSerializer::serializeMaterial(
+void ModelSerializer::serializeMaterial(
     cereal::BinaryOutputArchive& archive,
     const std::shared_ptr<Material>& material,
     const std::unordered_map<std::shared_ptr<Image>, Uint32>& imageIDs
@@ -215,7 +215,7 @@ void AssetSerializer::serializeMaterial(
     // serializeImageID(material->displacementMap);
 }
 
-auto AssetSerializer::deserializeMaterial(
+auto ModelSerializer::deserializeMaterial(
     cereal::BinaryInputArchive& archive, const std::unordered_map<Uint32, std::shared_ptr<Image>>& images
 ) -> std::shared_ptr<Material> {
     bool isNotNull;
@@ -272,7 +272,7 @@ auto AssetSerializer::deserializeMaterial(
     return material;
 }
 
-void AssetSerializer::serializeImage(cereal::BinaryOutputArchive& archive, const std::shared_ptr<Image>& image) {
+void ModelSerializer::serializeImage(cereal::BinaryOutputArchive& archive, const std::shared_ptr<Image>& image) {
     if (!image) {
         archive(false);
         return;
@@ -286,7 +286,7 @@ void AssetSerializer::serializeImage(cereal::BinaryOutputArchive& archive, const
     archive(image->byteArray);
 }
 
-auto AssetSerializer::deserializeImage(cereal::BinaryInputArchive& archive) -> std::shared_ptr<Image> {
+auto ModelSerializer::deserializeImage(cereal::BinaryInputArchive& archive) -> std::shared_ptr<Image> {
     bool isNotNull;
     archive(isNotNull);
     if (!isNotNull) {
@@ -303,7 +303,7 @@ auto AssetSerializer::deserializeImage(cereal::BinaryInputArchive& archive) -> s
     return image;
 }
 
-void AssetSerializer::serializeMesh(
+void ModelSerializer::serializeMesh(
     cereal::BinaryOutputArchive& archive,
     const std::shared_ptr<Mesh>& mesh,
     const std::unordered_map<std::shared_ptr<Material>, Uint32>& materialIDs
@@ -343,7 +343,7 @@ void AssetSerializer::serializeMesh(
     }
 }
 
-auto AssetSerializer::deserializeMesh(
+auto ModelSerializer::deserializeMesh(
     cereal::BinaryInputArchive& archive, const std::unordered_map<Uint32, std::shared_ptr<Material>>& materials
 ) -> std::shared_ptr<Mesh> {
     bool isNotNull;
@@ -390,13 +390,13 @@ auto AssetSerializer::deserializeMesh(
     return mesh;
 }
 
-void AssetSerializer::serializeDirectionalLight(cereal::BinaryOutputArchive& archive, const DirectionalLight& light) {
+void ModelSerializer::serializeDirectionalLight(cereal::BinaryOutputArchive& archive, const DirectionalLight& light) {
     archive(light.direction);
     archive(light.color);
     archive(light.intensity);
 }
 
-auto AssetSerializer::deserializeDirectionalLight(cereal::BinaryInputArchive& archive) -> DirectionalLight {
+auto ModelSerializer::deserializeDirectionalLight(cereal::BinaryInputArchive& archive) -> DirectionalLight {
     DirectionalLight light;
     archive(light.direction);
     archive(light.color);
@@ -404,14 +404,14 @@ auto AssetSerializer::deserializeDirectionalLight(cereal::BinaryInputArchive& ar
     return light;
 }
 
-void AssetSerializer::serializePointLight(cereal::BinaryOutputArchive& archive, const PointLight& light) {
+void ModelSerializer::serializePointLight(cereal::BinaryOutputArchive& archive, const PointLight& light) {
     archive(light.position);
     archive(light.color);
     archive(light.intensity);
     archive(light.radius);
 }
 
-auto AssetSerializer::deserializePointLight(cereal::BinaryInputArchive& archive) -> PointLight {
+auto ModelSerializer::deserializePointLight(cereal::BinaryInputArchive& archive) -> PointLight {
     PointLight light;
     archive(light.position);
     archive(light.color);

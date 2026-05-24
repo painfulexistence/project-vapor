@@ -1,5 +1,5 @@
 #include <catch2/catch_test_macros.hpp>
-#include "Vapor/asset_serializer.hpp"
+#include "Vapor/model_serializer.hpp"
 #include "Vapor/graphics.hpp"
 #include "Vapor/scene.hpp"
 #include <glm/glm.hpp>
@@ -13,7 +13,7 @@
 
 using namespace Vapor;
 
-TEST_CASE("AssetSerializer - Scene Serialization", "[asset][serializer]") {
+TEST_CASE("ModelSerializer - Scene Serialization", "[model][serializer]") {
     // Create a test scene
     auto scene = std::make_shared<Scene>("TestScene");
 
@@ -65,10 +65,10 @@ TEST_CASE("AssetSerializer - Scene Serialization", "[asset][serializer]") {
 
     // Test serialization
     std::string testPath = "test_scene.bin";
-    AssetSerializer::serializeScene(scene, testPath);
+    ModelSerializer::serializeScene(scene, testPath);
 
     // Test deserialization
-    auto loadedScene = AssetSerializer::deserializeScene(testPath);
+    auto loadedScene = ModelSerializer::deserializeScene(testPath);
 
     REQUIRE(loadedScene != nullptr);
     CHECK(loadedScene->name == "TestScene");
@@ -91,7 +91,7 @@ struct TestData {
     }
 };
 
-TEST_CASE("AssetSerializer - Simple Cereal Test", "[asset][serializer][cereal]") {
+TEST_CASE("ModelSerializer - Simple Cereal Test", "[model][serializer][cereal]") {
     TestData data;
     data.name = "Test";
     data.position = glm::vec3(1.0f, 2.0f, 3.0f);

@@ -79,7 +79,7 @@ target_compile_options(test_resource_manager PRIVATE ${TEST_WARNING_FLAGS})
 # ── Asset Management tests (including asset loading & serialization) ──────────────
 add_executable(test_asset_management
     asset_manager_test.cpp
-    asset_serializer_test.cpp
+    model_serializer_test.cpp
 )
 target_link_libraries(test_asset_management PRIVATE
     Vapor

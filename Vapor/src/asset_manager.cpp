@@ -22,7 +22,7 @@
 #define TINYGLTF_IMPLEMENTATION
 #include <tiny_gltf.h>
 
-#include "asset_serializer.hpp"
+#include "model_serializer.hpp"
 #include "graphics.hpp"
 
 using namespace Vapor;
@@ -152,7 +152,7 @@ auto AssetManager::loadGLTF(const std::string& filename) -> std::shared_ptr<Scen
     std::filesystem::path filePath(*resolved);
     std::filesystem::path scenePath(filePath);// make a copy
     if (std::filesystem::exists(scenePath.replace_extension(".vscene"))) {
-        return AssetSerializer::deserializeScene(scenePath.string());
+        return ModelSerializer::deserializeScene(scenePath.string());
     }
 
     tinygltf::Model model;
@@ -471,7 +471,7 @@ auto AssetManager::loadGLTF(const std::string& filename) -> std::shared_ptr<Scen
     }
     scene->update(0.0f);// making sure world transform is updated
 
-    AssetSerializer::serializeScene(scene, scenePath.string());
+    ModelSerializer::serializeScene(scene, scenePath.string());
 
     return scene;
 }
@@ -485,7 +485,7 @@ auto AssetManager::loadGLTFOptimized(const std::string& filename) -> std::shared
     std::filesystem::path filePath(*resolved);
     std::filesystem::path scenePath(filePath);// make a copy
     if (std::filesystem::exists(scenePath.replace_extension(".vscene_optimized"))) {
-        return AssetSerializer::deserializeScene(scenePath.string());
+        return ModelSerializer::deserializeScene(scenePath.string());
     }
 
     auto originalScene = loadGLTF(filename);
@@ -573,7 +573,7 @@ auto AssetManager::loadGLTFOptimized(const std::string& filename) -> std::shared
 
     // world transforms are baked into stagedMeshTransforms; no Node update needed
 
-    AssetSerializer::serializeScene(optimizedScene, scenePath.string());
+    ModelSerializer::serializeScene(optimizedScene, scenePath.string());
 
     return optimizedScene;
 }

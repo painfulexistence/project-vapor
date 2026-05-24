@@ -3,7 +3,7 @@
 #include "Vapor/components.hpp"
 #include "Vapor/physics_3d.hpp"
 #include "components.hpp"
-#include "level_serializer.hpp"
+#include "scene_serializer.hpp"
 #include "imgui.h"
 #include <entt/entt.hpp>
 #include <fmt/core.h>
@@ -417,7 +417,7 @@ private:
         ImGui::Checkbox("Optimized GLTF", &m_gltfOptimized);
 
         if (ImGui::Button("Save")) {
-            auto result = LevelSerializer::save(
+            auto result = SceneSerializer::save(
                 registry,
                 std::string(m_gltfPathBuf),
                 m_gltfOptimized,
