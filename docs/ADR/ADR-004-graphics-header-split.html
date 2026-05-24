@@ -1,0 +1,112 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>ADR-004: Graphics Header Split — Project Vapor</title>
+  <style>
+    :root {
+      --bg: #0d0d0f; --bg-surface: #141418; --bg-raised: #1c1c22;
+      --border: #2a2a33; --text: #e2e2e8; --text-muted: #7a7a8c;
+      --accent: #7c6af7; --warn: #c97a2f; --ok: #4a9e6a; --danger: #9e4a4a;
+    }
+    * { box-sizing: border-box; margin: 0; padding: 0; }
+    body { background: var(--bg); color: var(--text); font-family: 'Berkeley Mono','JetBrains Mono','Fira Code','Cascadia Code',monospace; font-size: 15px; line-height: 1.75; }
+    nav { background: var(--bg-surface); border-bottom: 1px solid var(--border); padding: 16px 24px; display: flex; align-items: center; justify-content: space-between; }
+    nav .site-title { color: var(--text-muted); text-decoration: none; font-size: 14px; }
+    nav .links { display: flex; gap: 24px; }
+    nav .links a { color: var(--text-muted); text-decoration: none; font-size: 13px; }
+    nav .links a:hover { color: var(--accent); }
+    nav .links a.active { color: var(--accent); }
+    main { max-width: 860px; margin: 0 auto; padding: 48px 24px; }
+    .page-header { margin-bottom: 32px; }
+    .page-header .eyebrow { font-size: 12px; color: var(--text-muted); margin-bottom: 10px; }
+    .page-header .eyebrow a { color: var(--text-muted); text-decoration: none; }
+    .page-header .eyebrow a:hover { color: var(--accent); }
+    .page-header h1 { font-size: 20px; font-weight: 600; margin-bottom: 12px; }
+    .meta-row { display: flex; gap: 24px; font-size: 13px; color: var(--text-muted); }
+    .badge { display: inline-block; font-size: 11px; border-radius: 3px; padding: 2px 8px; }
+    .badge-ok { background: rgba(74,158,106,0.15); color: var(--ok); }
+    h2 { font-size: 16px; font-weight: 600; margin: 36px 0 14px; }
+    p { margin-bottom: 14px; }
+    hr { border: none; border-top: 1px solid var(--border); margin: 36px 0; }
+    pre { background: var(--bg-raised); border: 1px solid var(--border); border-radius: 3px; padding: 16px; font-size: 13px; overflow-x: auto; margin-bottom: 20px; line-height: 1.6; }
+    pre code { background: none; padding: 0; }
+    code { background: var(--bg-raised); border-radius: 3px; padding: 2px 6px; font-size: 13px; }
+    table { width: 100%; border-collapse: collapse; margin-bottom: 20px; font-size: 14px; }
+    thead th { background: var(--bg-raised); color: var(--text-muted); font-size: 11px; text-transform: uppercase; letter-spacing: 0.08em; padding: 10px 14px; text-align: left; border: 1px solid var(--border); }
+    tbody td { padding: 10px 14px; border: 1px solid var(--border); vertical-align: top; }
+    tbody tr:nth-child(even) td { background: var(--bg-raised); }
+    ul { padding-left: 20px; margin-bottom: 14px; }
+    ul li { margin-bottom: 4px; }
+    @media (max-width: 640px) { main { padding: 24px 16px; } }
+  </style>
+</head>
+<body>
+  <nav>
+    <a class="site-title" href="../index.html">Project Vapor</a>
+    <div class="links">
+      <a href="../architecture.html">Architecture</a>
+      <a href="../features.html">Features</a>
+      <a href="../techstack.html">Tech Stack</a>
+      <a href="index.html" class="active">ADRs</a>
+    </div>
+  </nav>
+  <main>
+    <div class="page-header">
+      <div class="eyebrow"><a href="index.html">ADRs</a> / ADR-004</div>
+      <h1>ADR-004: Graphics Header Split</h1>
+      <div class="meta-row">
+        <span>2026-04-29</span>
+        <span><span class="badge badge-ok">Adopted</span></span>
+      </div>
+    </div>
+
+    <h2>Context</h2>
+    <p><code>Vapor/include/Vapor/graphics.hpp</code> was a 543 LOC god header containing GPU handles, 2D batch structures, GPU layout structs, CPU-side mesh/material data, and visual effect structs — 40+ types in one file.</p>
+    <p>Any change to any struct triggered recompilation across all 14 files that included the header, regardless of which section actually changed.</p>
+
+    <h2>Decision</h2>
+    <p>Split <code>graphics.hpp</code> into five semantic sub-headers, keeping <code>graphics.hpp</code> as a zero-breakage umbrella include.</p>
+
+    <table>
+      <thead><tr><th>Sub-header</th><th>Contents</th></tr></thead>
+      <tbody>
+        <tr><td><code>graphics_handles.hpp</code></td><td><code>GPUHandle&lt;Tag&gt;</code> template + all handle typedefs</td></tr>
+        <tr><td><code>graphics_batch2d.hpp</code></td><td><code>BlendMode</code>, <code>Batch2DVertex</code>, <code>Batch2DUniforms</code>, <code>Batch2DStats</code></td></tr>
+        <tr><td><code>graphics_gpu_structs.hpp</code></td><td><code>MaterialData</code>, lights, <code>CameraData</code>, <code>InstanceData</code>, <code>Cluster</code>, <code>LightCullData</code>, <code>IBLCaptureData</code></td></tr>
+        <tr><td><code>graphics_mesh.hpp</code></td><td><code>AlphaMode</code>, <code>Image</code>, <code>Material</code>, <code>VertexData</code>, <code>Mesh</code></td></tr>
+        <tr><td><code>graphics_effects.hpp</code></td><td>Water, Atmosphere, VolumetricFog/Cloud, LightScattering, SunFlare, GPU particles</td></tr>
+      </tbody>
+    </table>
+
+    <h2>Additional Decision: Handle Type Safety</h2>
+    <p>The original four GPU handles (<code>PipelineHandle</code>, <code>BufferHandle</code>, <code>TextureHandle</code>, <code>RenderTargetHandle</code>) were structurally identical bare structs. The type system provided no protection against passing a <code>BufferHandle</code> where a <code>TextureHandle</code> was expected.</p>
+    <p>Replaced with a <code>GPUHandle&lt;Tag&gt;</code> template:</p>
+    <pre><code>template&lt;typename Tag&gt;
+struct GPUHandle {
+    Uint32 rid = UINT32_MAX;
+    bool valid() const { return rid != UINT32_MAX; }
+};
+using BufferHandle  = GPUHandle&lt;BufferHandleTag&gt;;
+using TextureHandle = GPUHandle&lt;TextureHandleTag&gt;;
+// ...</code></pre>
+    <p>Passing a <code>BufferHandle</code> where a <code>TextureHandle</code> is expected is now a compile error, at zero runtime cost.</p>
+
+    <h2>Migration</h2>
+    <ul>
+      <li>All existing <code>#include "graphics.hpp"</code> sites require no changes — the umbrella re-exports everything</li>
+      <li><code>graphics.cpp</code> switches to <code>#include "graphics_mesh.hpp"</code> (only needs <code>Mesh</code> implementation)</li>
+      <li>New files should include the most specific sub-header needed</li>
+    </ul>
+
+    <h2>Consequences</h2>
+    <ul>
+      <li>5 new header files</li>
+      <li><code>graphics.hpp</code> reduced to 15 lines</li>
+      <li>Handle types are no longer interchangeable in the GPU layer</li>
+      <li>New effect structs have a clear home (<code>graphics_effects.hpp</code>)</li>
+    </ul>
+  </main>
+</body>
+</html>

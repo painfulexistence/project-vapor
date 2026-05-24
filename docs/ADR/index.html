@@ -1,0 +1,120 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>ADRs — Project Vapor</title>
+  <style>
+    :root {
+      --bg: #0d0d0f;
+      --bg-surface: #141418;
+      --bg-raised: #1c1c22;
+      --border: #2a2a33;
+      --text: #e2e2e8;
+      --text-muted: #7a7a8c;
+      --accent: #7c6af7;
+      --warn: #c97a2f;
+      --ok: #4a9e6a;
+      --danger: #9e4a4a;
+    }
+    * { box-sizing: border-box; margin: 0; padding: 0; }
+    body {
+      background: var(--bg);
+      color: var(--text);
+      font-family: 'Berkeley Mono', 'JetBrains Mono', 'Fira Code', 'Cascadia Code', monospace;
+      font-size: 15px;
+      line-height: 1.75;
+    }
+    nav {
+      background: var(--bg-surface);
+      border-bottom: 1px solid var(--border);
+      padding: 16px 24px;
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+    }
+    nav .site-title { color: var(--text-muted); text-decoration: none; font-size: 14px; }
+    nav .links { display: flex; gap: 24px; }
+    nav .links a { color: var(--text-muted); text-decoration: none; font-size: 13px; }
+    nav .links a:hover { color: var(--accent); }
+    nav .links a.active { color: var(--accent); }
+    main { max-width: 860px; margin: 0 auto; padding: 48px 24px; }
+    .page-header { margin-bottom: 40px; }
+    .page-header h1 { font-size: 22px; font-weight: 600; margin-bottom: 8px; }
+    .page-header .muted { font-size: 13px; color: var(--text-muted); }
+    p { margin-bottom: 16px; color: var(--text-muted); font-size: 14px; }
+    .adr-list { list-style: none; margin-top: 24px; }
+    .adr-list li { border-bottom: 1px solid var(--border); }
+    .adr-list li:first-child { border-top: 1px solid var(--border); }
+    .adr-list a {
+      display: block;
+      padding: 18px 0;
+      text-decoration: none;
+      color: var(--text);
+    }
+    .adr-list a:hover .title { color: var(--accent); }
+    .adr-list .title { font-size: 15px; margin-bottom: 4px; }
+    .adr-list .meta { font-size: 12px; color: var(--text-muted); }
+    .badge {
+      display: inline-block;
+      font-size: 11px;
+      border-radius: 3px;
+      padding: 2px 8px;
+      margin-left: 10px;
+      vertical-align: middle;
+    }
+    .badge-ok { background: rgba(74,158,106,0.15); color: var(--ok); }
+    @media (max-width: 640px) { main { padding: 24px 16px; } }
+  </style>
+</head>
+<body>
+  <nav>
+    <a class="site-title" href="../index.html">Project Vapor</a>
+    <div class="links">
+      <a href="../architecture.html">Architecture</a>
+      <a href="../features.html">Features</a>
+      <a href="../techstack.html">Tech Stack</a>
+      <a href="index.html" class="active">ADRs</a>
+    </div>
+  </nav>
+  <main>
+    <div class="page-header">
+      <h1>Architecture Decision Records</h1>
+      <p class="muted">Point-in-time records of significant design decisions — what was chosen, what was rejected, and why.</p>
+    </div>
+
+    <ul class="adr-list">
+      <li>
+        <a href="ADR-001-test-framework.html">
+          <div class="title">ADR-001 — Test Framework Selection <span class="badge badge-ok">Adopted</span></div>
+          <div class="meta">2026-04-29 · Catch2 v3 chosen over GoogleTest and hand-rolled assertions</div>
+        </a>
+      </li>
+      <li>
+        <a href="ADR-002-ci-pipeline.html">
+          <div class="title">ADR-002 — CI Pipeline Design <span class="badge badge-ok">Adopted</span></div>
+          <div class="meta">2026-04-29 · GitHub Actions, two-job pipeline, ccache, macos-15 runner</div>
+        </a>
+      </li>
+      <li>
+        <a href="ADR-003-test-isolation-strategy.html">
+          <div class="title">ADR-003 — Test Isolation Strategy <span class="badge badge-ok">Adopted</span></div>
+          <div class="meta">2026-04-29 · Unit tests do not link the full Vapor library</div>
+        </a>
+      </li>
+      <li>
+        <a href="ADR-004-graphics-header-split.html">
+          <div class="title">ADR-004 — Graphics Header Split <span class="badge badge-ok">Adopted</span></div>
+          <div class="meta">2026-04-29 · graphics.hpp split into 5 focused sub-headers, GPUHandle&lt;Tag&gt; type safety</div>
+        </a>
+      </li>
+      <li>
+        <a href="ADR-005-phase4-refactoring.html">
+          <div class="title">ADR-005 — Phase 4 Refactoring <span class="badge badge-ok">Adopted</span></div>
+          <div class="meta">2026-05-01 · PhysicsHandle&lt;Tag&gt;, ECS systems naming, RmlUI helpers, SceneBuilder extraction</div>
+        </a>
+      </li>
+    </ul>
+  </main>
+</body>
+</html>
