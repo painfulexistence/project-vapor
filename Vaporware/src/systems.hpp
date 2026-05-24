@@ -1,5 +1,6 @@
 #pragma once
 #include "Vapor/character_controller.hpp"
+#include "Vapor/components.hpp"
 #include "Vapor/engine_core.hpp"
 #include "Vapor/input_manager.hpp"
 #include "Vapor/physics_3d.hpp"
@@ -8,8 +9,15 @@
 #include "Vapor/rmlui_manager.hpp"
 #include "Vapor/scene.hpp"
 #include "components.hpp"
+#include "pages/chapter_title_page.hpp"
+#include "pages/page_system.hpp"
+#include "pages/scroll_text_page.hpp"
+#include "pages/subtitle_page.hpp"
 #include <algorithm>
 #include <fmt/core.h>
+#include <glm/gtc/matrix_transform.hpp>
+
+
 
 class CleanupSystem {
 public:
@@ -142,70 +150,100 @@ public:
     }
 };
 
-void updateLightMovementSystem(entt::registry& reg, Scene* scene, float deltaTime) {
-    auto pointLightView = reg.view<ScenePointLightReferenceComponent, LightMovementLogicComponent>();
-    for (auto entity : pointLightView) {
-        auto& ref = pointLightView.get<ScenePointLightReferenceComponent>(entity);
-        auto& logic = pointLightView.get<LightMovementLogicComponent>(entity);
+class LightMovementSystem {
+public:
+    static void update(entt::registry& reg, Scene* scene, float deltaTime) {
+        auto pointLightView = reg.view<ScenePointLightReferenceComponent, LightMovementLogicComponent>();
+        for (auto entity : pointLightView) {
+            auto& ref = pointLightView.get<ScenePointLightReferenceComponent>(entity);
+            auto& logic = pointLightView.get<LightMovementLogicComponent>(entity);
 
-        if (ref.lightIndex < 0 || ref.lightIndex >= scene->pointLights.size()) continue;
+            if (ref.lightIndex < 0 || ref.lightIndex >= scene->pointLights.size()) continue;
 
-        auto& light = scene->pointLights[ref.lightIndex];
-        logic.timer += deltaTime * logic.speed;
-
-        float x = 0.0f, y = 0.0f, z = 0.0f;
-
-        switch (logic.pattern) {
-        case MovementPattern::Circle:
-            x = cos(logic.timer) * logic.radius;
-            z = sin(logic.timer) * logic.radius;
-            y = logic.height;
-            break;
-        case MovementPattern::Figure8:
-            x = cos(logic.timer) * logic.radius;
-            z = sin(logic.timer * 2.0f) * (logic.radius * 0.5f);
-            y = logic.height;
-            break;
-        case MovementPattern::Linear:
-            x = sin(logic.timer) * logic.radius;
-            y = logic.height;
-            z = 0.0f;
-            break;
-        case MovementPattern::Spiral:
-            x = cos(logic.timer) * (logic.radius + sin(logic.timer * 0.5f));
-            z = sin(logic.timer) * (logic.radius + sin(logic.timer * 0.5f));
-            y = logic.height + sin(logic.timer * 0.2f);
-            break;
-        }
-
-        light.position = glm::vec3(x, y, z);
-        // Optional: intensity modulation
-        // light.intensity = 5.0f + sin(logic.timer * 2.0f) * 2.0f;
-    }
-    auto directionalLightView = reg.view<SceneDirectionalLightReferenceComponent, DirectionalLightLogicComponent>();
-    for (auto entity : directionalLightView) {
-        auto& ref = directionalLightView.get<SceneDirectionalLightReferenceComponent>(entity);
-        auto& logic = directionalLightView.get<DirectionalLightLogicComponent>(entity);
-        if (ref.lightIndex >= 0 && ref.lightIndex < scene->directionalLights.size()) {
+            auto& light = scene->pointLights[ref.lightIndex];
             logic.timer += deltaTime * logic.speed;
-            // Simple oscillation on Z axis relative to base direction
-            glm::vec3 newDir = logic.baseDirection;
-            newDir.z += logic.magnitude * sin(logic.timer);
-            scene->directionalLights[ref.lightIndex].direction = glm::normalize(newDir);
-        }
-    }
-}
 
-void updateAutoRotateSystem(entt::registry& registry, float deltaTime) {
-    auto view = registry.view<SceneNodeReferenceComponent, AutoRotateComponent>();
-    for (auto entity : view) {
-        auto& ref = view.get<SceneNodeReferenceComponent>(entity);
-        auto& rotate = view.get<AutoRotateComponent>(entity);
-        if (ref.node) {
-            ref.node->rotate(rotate.axis, rotate.speed * deltaTime);
+            float x = 0.0f, y = 0.0f, z = 0.0f;
+
+            switch (logic.pattern) {
+            case MovementPattern::Circle:
+                x = cos(logic.timer) * logic.radius;
+                z = sin(logic.timer) * logic.radius;
+                y = logic.height;
+                break;
+            case MovementPattern::Figure8:
+                x = cos(logic.timer) * logic.radius;
+                z = sin(logic.timer * 2.0f) * (logic.radius * 0.5f);
+                y = logic.height;
+                break;
+            case MovementPattern::Linear:
+                x = sin(logic.timer) * logic.radius;
+                y = logic.height;
+                z = 0.0f;
+                break;
+            case MovementPattern::Spiral:
+                x = cos(logic.timer) * (logic.radius + sin(logic.timer * 0.5f));
+                z = sin(logic.timer) * (logic.radius + sin(logic.timer * 0.5f));
+                y = logic.height + sin(logic.timer * 0.2f);
+                break;
+            }
+
+            light.position = glm::vec3(x, y, z);
+            // Optional: intensity modulation
+            // light.intensity = 5.0f + sin(logic.timer * 2.0f) * 2.0f;
+        }
+        auto directionalLightView = reg.view<SceneDirectionalLightReferenceComponent, DirectionalLightLogicComponent>();
+        for (auto entity : directionalLightView) {
+            auto& ref = directionalLightView.get<SceneDirectionalLightReferenceComponent>(entity);
+            auto& logic = directionalLightView.get<DirectionalLightLogicComponent>(entity);
+            if (ref.lightIndex >= 0 && ref.lightIndex < scene->directionalLights.size()) {
+                logic.timer += deltaTime * logic.speed;
+                // Simple oscillation on Z axis relative to base direction
+                glm::vec3 newDir = logic.baseDirection;
+                newDir.z += logic.magnitude * sin(logic.timer);
+                scene->directionalLights[ref.lightIndex].direction = glm::normalize(newDir);
+            }
         }
     }
-}
+};
+
+class TransformSystem {
+public:
+    static void update(entt::registry& registry) {
+        auto view = registry.view<Vapor::TransformComponent>();
+        for (auto entity : view) {
+            auto& t = view.get<Vapor::TransformComponent>(entity);
+            if (!t.isDirty) continue;
+            glm::mat4 local = glm::translate(glm::mat4(1.0f), t.position)
+                            * glm::mat4_cast(t.rotation)
+                            * glm::scale(glm::mat4(1.0f), t.scale);
+            if (t.parent != entt::null) {
+                if (auto* parentT = registry.try_get<Vapor::TransformComponent>(t.parent)) {
+                    t.worldTransform = parentT->worldTransform * local;
+                } else {
+                    t.worldTransform = local;
+                }
+            } else {
+                t.worldTransform = local;
+            }
+            t.isDirty = false;
+        }
+    }
+};
+
+class AutoRotateSystem {
+public:
+    static void update(entt::registry& registry, float deltaTime) {
+        auto view = registry.view<Vapor::TransformComponent, AutoRotateComponent>();
+        for (auto entity : view) {
+            auto& transform = view.get<Vapor::TransformComponent>(entity);
+            auto& rotate = view.get<AutoRotateComponent>(entity);
+            glm::quat delta = glm::angleAxis(rotate.speed * deltaTime, glm::normalize(rotate.axis));
+            transform.rotation = glm::normalize(delta * transform.rotation);
+            transform.isDirty = true;
+        }
+    }
+};
 
 class CameraSwitchSystem {
 public:
@@ -247,133 +285,188 @@ public:
     }
 };
 
-void updateCameraSystem(entt::registry& reg, float deltaTime) {
-    auto view = reg.view<Vapor::VirtualCameraComponent>();
+class CameraSystem {
+public:
+    static void update(entt::registry& reg, float deltaTime) {
+        auto view = reg.view<Vapor::VirtualCameraComponent>();
 
-    for (auto entity : view) {
-        auto& cam = view.get<Vapor::VirtualCameraComponent>(entity);
-        if (!cam.isActive) continue;
+        for (auto entity : view) {
+            auto& cam = view.get<Vapor::VirtualCameraComponent>(entity);
+            if (!cam.isActive) continue;
 
-        // 1. Handle Fly Camera Logic
-        if (auto [fly, intent] = reg.try_get<FlyCameraComponent, CharacterIntent>(entity); fly && intent) {
-            // Rotation
-            fly->pitch -= intent->lookVector.y * fly->rotateSpeed * deltaTime;
-            fly->yaw -= intent->lookVector.x * fly->rotateSpeed * deltaTime;
-            fly->pitch = glm::clamp(fly->pitch, -89.0f, 89.0f);
+            if (auto [fly, intent] = reg.try_get<FlyCameraComponent, CharacterIntent>(entity); fly && intent) {
+                fly->pitch -= intent->lookVector.y * fly->rotateSpeed * deltaTime;
+                fly->yaw -= intent->lookVector.x * fly->rotateSpeed * deltaTime;
+                fly->pitch = glm::clamp(fly->pitch, -89.0f, 89.0f);
 
-            cam.rotation = glm::quat(glm::vec3(glm::radians(-fly->pitch), glm::radians(fly->yaw - 90.0f), 0.0f));
+                cam.rotation = glm::quat(glm::vec3(glm::radians(-fly->pitch), glm::radians(fly->yaw - 90.0f), 0.0f));
 
-            glm::vec3 front = cam.rotation * glm::vec3(0, 0, -1);
-            glm::vec3 right = cam.rotation * glm::vec3(1, 0, 0);
-            glm::vec3 up = cam.rotation * glm::vec3(0, 1, 0);
+                glm::vec3 front = cam.rotation * glm::vec3(0, 0, -1);
+                glm::vec3 right = cam.rotation * glm::vec3(1, 0, 0);
+                glm::vec3 up = cam.rotation * glm::vec3(0, 1, 0);
 
-            if (intent->moveVector.x != 0.0f) cam.position += intent->moveVector.x * right * fly->moveSpeed * deltaTime;
-            if (intent->moveVector.y != 0.0f) cam.position += intent->moveVector.y * front * fly->moveSpeed * deltaTime;
-            if (intent->moveVerticalAxis != 0.0f)
-                cam.position += intent->moveVerticalAxis * up * fly->moveSpeed * deltaTime;
-        }
+                if (intent->moveVector.x != 0.0f)
+                    cam.position += intent->moveVector.x * right * fly->moveSpeed * deltaTime;
+                if (intent->moveVector.y != 0.0f)
+                    cam.position += intent->moveVector.y * front * fly->moveSpeed * deltaTime;
+                if (intent->moveVerticalAxis != 0.0f)
+                    cam.position += intent->moveVerticalAxis * up * fly->moveSpeed * deltaTime;
+            }
 
-        // 2. Handle Follow Camera Logic
-        if (auto* follow = reg.try_get<FollowCameraComponent>(entity)) {
-            if (!reg.valid(follow->target)) continue;
-            if (auto* nodeRef = reg.try_get<SceneNodeReferenceComponent>(follow->target)) {
-                if (nodeRef->node) {
-                    glm::vec3 targetPos = nodeRef->node->getWorldPosition();
+            if (auto* follow = reg.try_get<FollowCameraComponent>(entity)) {
+                if (!reg.valid(follow->target)) continue;
+                if (auto* transform = reg.try_get<Vapor::TransformComponent>(follow->target)) {
+                    glm::vec3 targetPos = transform->position;
                     glm::vec3 desiredPos = targetPos + follow->offset;
                     cam.position = glm::mix(cam.position, desiredPos, 1.0f - pow(follow->smoothFactor, deltaTime));
                     cam.rotation = glm::quatLookAt(glm::normalize(targetPos - cam.position), glm::vec3(0, 1, 0));
                 }
             }
+
+            glm::mat4 rotation = glm::mat4_cast(cam.rotation);
+            glm::mat4 translation = glm::translate(glm::mat4(1.0f), cam.position);
+            cam.viewMatrix = glm::inverse(translation * rotation);
+            cam.projectionMatrix = glm::perspective(cam.fov, cam.aspect, cam.near, cam.far);
         }
-
-        // 3. Update Matrices
-        glm::mat4 rotation = glm::mat4_cast(cam.rotation);
-        glm::mat4 translation = glm::translate(glm::mat4(1.0f), cam.position);
-        cam.viewMatrix = glm::inverse(translation * rotation);
-        cam.projectionMatrix = glm::perspective(cam.fov, cam.aspect, cam.near, cam.far);
     }
-}
+};
 
-void updateHUDSystem(entt::registry& reg, Vapor::RmlUiManager* rmluiManager, float deltaTime) {
-    if (!rmluiManager) return;
 
-    auto view = reg.view<HUDComponent>();
-    for (auto entity : view) {
-        auto& hud = view.get<HUDComponent>(entity);
+// --- UI Trigger Systems ---
+// These systems own the content/timing logic for cinematic overlay pages.
+// They talk to their corresponding Page via PageSystem::getPage<T>().
 
-        // 1. Load document if not loaded
-        if (!hud.document && !hud.documentPath.empty()) {
-            hud.document = rmluiManager->LoadDocument(hud.documentPath);
-            if (hud.document) {
-                fmt::print("Loaded HUD document: {}\n", hud.documentPath);
-                // Initialize state based on visibility
-                if (hud.isVisible) {
-                    hud.state = HUDState::Visible;
-                    hud.document->Show();
-                    // Force visible class immediately
-                    if (auto el = hud.document->GetElementById("hud_content")) {
-                        el->SetClass("visible", true);
+class SubtitleQueueSystem {
+public:
+    static void update(entt::registry& reg, float dt) {
+        auto* page = PageSystem::getPage<SubtitlePage>(reg, PageID::Subtitle);
+        if (!page) return;
+
+        auto view = reg.view<SubtitleQueueComponent>();
+        for (auto entity : view) {
+            auto& q = view.get<SubtitleQueueComponent>(entity);
+
+            switch (q.state) {
+            case SubtitleQueueState::Idle:
+                if (page->isFullyHidden()) {
+                    bool advance = q.advanceRequested || (q.autoAdvance && q.currentIndex < (int)q.queue.size() - 1);
+                    if (advance) {
+                        q.advanceRequested = false;
+                        q.currentIndex++;
+                        if (q.currentIndex < (int)q.queue.size()) {
+                            auto& entry = q.queue[q.currentIndex];
+                            page->setContent(entry.speaker, entry.text);
+                            PageSystem::show(reg, PageID::Subtitle);
+                            q.displayTimer = 0.0f;
+                            q.state = SubtitleQueueState::WaitingForVisible;
+                        }
+                    } else {
+                        q.advanceRequested = false;
                     }
-                } else {
-                    hud.state = HUDState::Hidden;
-                    hud.document->Hide();
                 }
-            } else {
-                fmt::print(stderr, "Failed to load HUD document: {}\n", hud.documentPath);
+                break;
+
+            case SubtitleQueueState::WaitingForVisible:
+                if (page->isFullyVisible()) {
+                    q.state = SubtitleQueueState::Displaying;
+                }
+                break;
+
+            case SubtitleQueueState::Displaying:
+                q.displayTimer += dt;
+                {
+                    bool done = q.advanceRequested
+                                || (q.autoAdvance && q.currentIndex < (int)q.queue.size()
+                                    && q.displayTimer >= q.queue[q.currentIndex].duration);
+                    if (done) {
+                        q.advanceRequested = false;
+                        PageSystem::hide(reg, PageID::Subtitle);
+                        q.state = SubtitleQueueState::WaitingForHidden;
+                    }
+                }
+                break;
+
+            case SubtitleQueueState::WaitingForHidden:
+                if (page->isFullyHidden()) {
+                    q.state = SubtitleQueueState::Idle;
+                }
+                break;
+            }
+        }
+    }
+
+    static void restart(entt::registry& reg) {
+        auto view = reg.view<SubtitleQueueComponent>();
+        for (auto entity : view) {
+            auto& q = view.get<SubtitleQueueComponent>(entity);
+            q.currentIndex = -1;
+            q.state = SubtitleQueueState::Idle;
+            q.advanceRequested = true;
+        }
+    }
+
+    static void advance(entt::registry& reg) {
+        auto view = reg.view<SubtitleQueueComponent>();
+        for (auto entity : view)
+            view.get<SubtitleQueueComponent>(entity).advanceRequested = true;
+    }
+};
+
+class ScrollTextQueueSystem {
+public:
+    static void update(entt::registry& reg) {
+        auto* page = PageSystem::getPage<ScrollTextPage>(reg, PageID::ScrollText);
+        if (!page) return;
+
+        auto view = reg.view<ScrollTextQueueComponent>();
+        for (auto entity : view) {
+            auto& q = view.get<ScrollTextQueueComponent>(entity);
+            if (!q.advanceRequested || !page->isIdle()) {
+                q.advanceRequested = false;
                 continue;
             }
-        }
+            q.advanceRequested = false;
 
-        if (!hud.document) continue;
-
-        auto element = hud.document->GetElementById("hud-container");
-        if (!element) continue;
-
-        // 2. State Machine
-        switch (hud.state) {
-        case HUDState::Hidden:
-            if (hud.isVisible) {
-                hud.state = HUDState::FadingIn;
-                hud.document->Show();
-                // Trigger fade in
-                element->SetClass("visible", true);
-                hud.timer = 0.0f;
+            if (q.currentIndex >= (int)q.lines.size() - 1) {
+                q.currentIndex = 0;
+                page->setLine(q.lines[0]);
+            } else {
+                q.currentIndex++;
+                page->scrollToNext(q.lines[q.currentIndex]);
             }
-            break;
-
-        case HUDState::FadingIn:
-            hud.timer += deltaTime;
-            if (!hud.isVisible) {
-                // Interrupted
-                hud.state = HUDState::FadingOut;
-                element->SetClass("visible", false);
-                hud.timer = 0.0f;// Reset timer or calculate remaining? Simple reset for now.
-            } else if (hud.timer >= hud.fadeDuration) {
-                hud.state = HUDState::Visible;
-            }
-            break;
-
-        case HUDState::Visible:
-            if (!hud.isVisible) {
-                hud.state = HUDState::FadingOut;
-                // Trigger fade out
-                element->SetClass("visible", false);
-                hud.timer = 0.0f;
-            }
-            break;
-
-        case HUDState::FadingOut:
-            hud.timer += deltaTime;
-            if (hud.isVisible) {
-                // Interrupted
-                hud.state = HUDState::FadingIn;
-                element->SetClass("visible", true);
-                hud.timer = 0.0f;
-            } else if (hud.timer >= hud.fadeDuration) {
-                hud.state = HUDState::Hidden;
-                hud.document->Hide();
-            }
-            break;
         }
     }
-}
+
+    static void advance(entt::registry& reg) {
+        auto view = reg.view<ScrollTextQueueComponent>();
+        for (auto entity : view)
+            view.get<ScrollTextQueueComponent>(entity).advanceRequested = true;
+    }
+};
+
+class ChapterTitleTriggerSystem {
+public:
+    static void update(entt::registry& reg) {
+        auto* page = PageSystem::getPage<ChapterTitlePage>(reg, PageID::ChapterTitle);
+        if (!page) return;
+
+        auto view = reg.view<ChapterTitleTriggerComponent>();
+        for (auto entity : view) {
+            auto& t = view.get<ChapterTitleTriggerComponent>(entity);
+            if (t.showRequested && page->isFullyHidden()) {
+                t.showRequested = false;
+                page->display(t.number, t.title);
+            }
+        }
+    }
+
+    static void request(entt::registry& reg, const std::string& number, const std::string& title) {
+        auto view = reg.view<ChapterTitleTriggerComponent>();
+        for (auto entity : view) {
+            auto& t = view.get<ChapterTitleTriggerComponent>(entity);
+            t.number = number;
+            t.title = title;
+            t.showRequested = true;
+        }
+    }
+};

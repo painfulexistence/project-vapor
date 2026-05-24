@@ -2,7 +2,11 @@
 #define NS_PRIVATE_IMPLEMENTATION
 #define MTL_PRIVATE_IMPLEMENTATION
 #define CA_PRIVATE_IMPLEMENTATION
+#include "components.hpp"
+
+using namespace Vapor;
 #include "debug_draw.hpp"
+#include "graphics_mesh.hpp"
 #include "renderer_metal.hpp"
 
 #include <SDL3/SDL_stdinc.h>
@@ -24,6 +28,7 @@
 #include <imgui.h>
 #include <vector>
 
+#include "Vapor/rml_renderer_metal.hpp"
 #include "asset_manager.hpp"
 #include "engine_core.hpp"
 #include "graphics.hpp"
@@ -35,404 +40,13 @@
 #include <glm/gtc/matrix_transform.hpp>
 #include <glm/gtc/type_ptr.hpp>
 
-namespace Vapor {
-
-    class RmlUiRenderer_Metal : public Rml::RenderInterface {
-    public:
-        explicit RmlUiRenderer_Metal(MTL::Device* device) : m_device(device) {
-            m_transform = Rml::Matrix4f::Identity();
-        }
-
-        ~RmlUiRenderer_Metal() override {
-            Shutdown();
-        }
-
-        bool Initialize() {
-            if (!m_device) {
-                return false;
-            }
-            CreateDefaultWhiteTexture();
-            CreatePipelineState();
-            return true;
-        }
-
-        void Shutdown() {
-            m_geometry.clear();
-            m_textures.clear();
-            m_pipelineState.reset();
-            m_depthStencilState.reset();
-            m_defaultWhiteTexture.reset();
-        }
-
-        void BeginFrame(MTL::CommandBuffer* commandBuffer, MTL::Texture* renderTarget, int width, int height) {
-            if (!commandBuffer || !renderTarget) {
-                return;
-            }
-
-            // width/height are logical (window) size for RmlUI coordinates / projection
-            m_logicalWidth = width;
-            m_logicalHeight = height;
-
-            // Get framebuffer size and calculate HiDPI scale
-            int fbWidth = static_cast<int>(renderTarget->width());
-            int fbHeight = static_cast<int>(renderTarget->height());
-            m_scaleX = width > 0 ? static_cast<float>(fbWidth) / width : 1.0f;
-            m_scaleY = height > 0 ? static_cast<float>(fbHeight) / height : 1.0f;
-
-            m_currentCommandBuffer = commandBuffer;
-            m_currentRenderTarget = renderTarget;
-
-            // Create render pass descriptor
-            m_currentPassDesc = NS::TransferPtr(MTL::RenderPassDescriptor::renderPassDescriptor());
-            auto colorAttachment = m_currentPassDesc->colorAttachments()->object(0);
-            colorAttachment->setTexture(renderTarget);
-            colorAttachment->setLoadAction(MTL::LoadActionLoad);// Load existing content
-            colorAttachment->setStoreAction(MTL::StoreActionStore);
-
-            m_currentEncoder = commandBuffer->renderCommandEncoder(m_currentPassDesc.get());
-
-            // Set viewport to framebuffer size
-            MTL::Viewport viewport;
-            viewport.originX = 0.0;
-            viewport.originY = 0.0;
-            viewport.width = static_cast<double>(fbWidth);
-            viewport.height = static_cast<double>(fbHeight);
-            viewport.znear = 0.0;
-            viewport.zfar = 1.0;
-            m_currentEncoder->setViewport(viewport);
-
-            // Set scissor rect to full framebuffer
-            MTL::ScissorRect scissorRect;
-            scissorRect.x = 0;
-            scissorRect.y = 0;
-            scissorRect.width = static_cast<NS::UInteger>(fbWidth);
-            scissorRect.height = static_cast<NS::UInteger>(fbHeight);
-            m_currentEncoder->setScissorRect(scissorRect);
-        }
-
-        void EndFrame() {
-            if (m_currentEncoder) {
-                m_currentEncoder->endEncoding();
-                m_currentEncoder = nullptr;
-            }
-            m_currentCommandBuffer = nullptr;
-            m_currentRenderTarget = nullptr;
-            m_currentPassDesc.reset();
-        }
-
-        // Rml::RenderInterface implementation
-        Rml::CompiledGeometryHandle
-            CompileGeometry(Rml::Span<const Rml::Vertex> vertices, Rml::Span<const int> indices) override {
-            if (!m_device) {
-                return 0;
-            }
-
-            // Create vertex buffer
-            auto vertexBuffer = NS::TransferPtr(
-                m_device->newBuffer(vertices.size() * sizeof(Rml::Vertex), MTL::ResourceStorageModeShared)
-            );
-            memcpy(vertexBuffer->contents(), vertices.data(), vertices.size() * sizeof(Rml::Vertex));
-
-            // Create index buffer
-            auto indexBuffer =
-                NS::TransferPtr(m_device->newBuffer(indices.size() * sizeof(int), MTL::ResourceStorageModeShared));
-            memcpy(indexBuffer->contents(), indices.data(), indices.size() * sizeof(int));
-
-            CompiledGeometry geom;
-            geom.vertexBuffer = vertexBuffer;
-            geom.indexBuffer = indexBuffer;
-            geom.indexCount = static_cast<NS::UInteger>(indices.size());
-
-            Rml::CompiledGeometryHandle handle = m_nextGeometryHandle++;
-            m_geometry[handle] = std::move(geom);
-
-            return handle;
-        }
-
-        void RenderGeometry(Rml::CompiledGeometryHandle geometry, Rml::Vector2f translation, Rml::TextureHandle texture)
-            override {
-            if (!m_currentEncoder) {
-                return;
-            }
-
-            auto it = m_geometry.find(geometry);
-            if (it == m_geometry.end()) {
-                return;
-            }
-
-            const CompiledGeometry& geom = it->second;
-
-            // Set pipeline state
-            if (!m_pipelineState) {
-                return;
-            }
-            m_currentEncoder->setRenderPipelineState(m_pipelineState.get());
-            m_currentEncoder->setDepthStencilState(m_depthStencilState.get());
-            m_currentEncoder->setCullMode(MTL::CullModeNone);
-
-            // Calculate projection matrix (use logical size for RmlUI coordinates)
-            glm::mat4 projection = glm::ortho(0.0f, (float)m_logicalWidth, (float)m_logicalHeight, 0.0f, -1.0f, 1.0f);
-
-            // Apply translation
-            glm::mat4 transform = glm::make_mat4(m_transform.data());
-            transform = glm::translate(transform, glm::vec3(translation.x, translation.y, 0.0f));
-
-            // Create uniforms
-            struct Uniforms {
-                glm::mat4 projectionMatrix;
-                glm::mat4 transformMatrix;
-            } uniforms;
-            uniforms.projectionMatrix = projection;
-            uniforms.transformMatrix = transform;
-
-            m_currentEncoder->setVertexBytes(&uniforms, sizeof(Uniforms), 0);
-            m_currentEncoder->setVertexBuffer(geom.vertexBuffer.get(), 0, 1);
-
-            // Set texture
-            bool hasTexture = (texture != 0);
-            if (hasTexture) {
-                auto texIt = m_textures.find(texture);
-                if (texIt != m_textures.end()) {
-                    m_currentEncoder->setFragmentTexture(texIt->second.texture.get(), 0);
-                } else if (m_defaultWhiteTexture) {
-                    m_currentEncoder->setFragmentTexture(m_defaultWhiteTexture.get(), 0);
-                }
-            } else if (m_defaultWhiteTexture) {
-                m_currentEncoder->setFragmentTexture(m_defaultWhiteTexture.get(), 0);
-            }
-
-            // Setup scissor (scale from logical to framebuffer coordinates)
-            if (m_scissor.enabled) {
-                int fbHeight = static_cast<int>(m_logicalHeight * m_scaleY);
-                MTL::ScissorRect scissorRect;
-                scissorRect.x = static_cast<NS::UInteger>(m_scissor.x * m_scaleX);
-                scissorRect.y = static_cast<NS::UInteger>(fbHeight - (m_scissor.y + m_scissor.height) * m_scaleY);
-                scissorRect.width = static_cast<NS::UInteger>(m_scissor.width * m_scaleX);
-                scissorRect.height = static_cast<NS::UInteger>(m_scissor.height * m_scaleY);
-                m_currentEncoder->setScissorRect(scissorRect);
-            }
-
-            // Draw
-            if (geom.indexCount > 0) {
-                m_currentEncoder->drawIndexedPrimitives(
-                    MTL::PrimitiveTypeTriangle, geom.indexCount, MTL::IndexTypeUInt32, geom.indexBuffer.get(), 0
-                );
-            }
-        }
-
-        void ReleaseGeometry(Rml::CompiledGeometryHandle geometry) override {
-            m_geometry.erase(geometry);
-        }
-
-        void EnableScissorRegion(bool enable) override {
-            m_scissor.enabled = enable;
-        }
-
-        void SetScissorRegion(Rml::Rectanglei region) override {
-            m_scissor.x = region.Left();
-            m_scissor.y = region.Top();
-            m_scissor.width = region.Width();
-            m_scissor.height = region.Height();
-        }
-
-        Rml::TextureHandle LoadTexture(Rml::Vector2i& texture_dimensions, const Rml::String& source) override {
-            // Not implemented for now
-            return 0;
-        }
-
-        Rml::TextureHandle
-            GenerateTexture(Rml::Span<const Rml::byte> source, Rml::Vector2i source_dimensions) override {
-            if (!m_device) {
-                return 0;
-            }
-
-            auto texDesc = NS::TransferPtr(MTL::TextureDescriptor::alloc()->init());
-            texDesc->setTextureType(MTL::TextureType2D);
-            texDesc->setPixelFormat(MTL::PixelFormatRGBA8Unorm);
-            texDesc->setWidth(source_dimensions.x);
-            texDesc->setHeight(source_dimensions.y);
-            texDesc->setUsage(MTL::TextureUsageShaderRead);
-            texDesc->setStorageMode(MTL::StorageModeShared);
-
-            auto texture = NS::TransferPtr(m_device->newTexture(texDesc.get()));
-            if (!texture) {
-                return 0;
-            }
-
-            MTL::Region region(0, 0, 0, source_dimensions.x, source_dimensions.y, 1);
-            texture->replaceRegion(region, 0, source.data(), source_dimensions.x * 4);
-
-            TextureData texData;
-            texData.texture = texture;
-            texData.width = source_dimensions.x;
-            texData.height = source_dimensions.y;
-
-            Rml::TextureHandle textureHandle = m_nextTextureHandle++;
-            m_textures[textureHandle] = std::move(texData);
-
-            return textureHandle;
-        }
-
-        void ReleaseTexture(Rml::TextureHandle texture_handle) override {
-            m_textures.erase(texture_handle);
-        }
-
-        void SetTransform(const Rml::Matrix4f* transform) override {
-            if (transform) {
-                m_transform = *transform;
-            } else {
-                m_transform = Rml::Matrix4f::Identity();
-            }
-        }
-
-    private:
-        struct CompiledGeometry {
-            NS::SharedPtr<MTL::Buffer> vertexBuffer;
-            NS::SharedPtr<MTL::Buffer> indexBuffer;
-            NS::UInteger indexCount;
-        };
-
-        struct TextureData {
-            NS::SharedPtr<MTL::Texture> texture;
-            int width;
-            int height;
-        };
-
-        void CreateDefaultWhiteTexture() {
-            if (!m_device) {
-                return;
-            }
-
-            auto texDesc = NS::TransferPtr(MTL::TextureDescriptor::alloc()->init());
-            texDesc->setTextureType(MTL::TextureType2D);
-            texDesc->setPixelFormat(MTL::PixelFormatRGBA8Unorm);
-            texDesc->setWidth(1);
-            texDesc->setHeight(1);
-            texDesc->setUsage(MTL::TextureUsageShaderRead);
-            texDesc->setStorageMode(MTL::StorageModeShared);
-
-            m_defaultWhiteTexture = NS::TransferPtr(m_device->newTexture(texDesc.get()));
-            if (m_defaultWhiteTexture) {
-                uint8_t whitePixel[4] = { 255, 255, 255, 255 };
-                MTL::Region region(0, 0, 0, 1, 1, 1);
-                m_defaultWhiteTexture->replaceRegion(region, 0, whitePixel, 4);
-            }
-        }
-
-        void CreatePipelineState() {
-            if (!m_device) {
-                return;
-            }
-
-            // Load shader
-            std::string shaderSrc = readFile("assets/shaders/rmlui.metal");
-            auto code = NS::String::string(shaderSrc.data(), NS::StringEncoding::UTF8StringEncoding);
-            NS::Error* error = nullptr;
-            MTL::Library* library = m_device->newLibrary(code, nullptr, &error);
-            if (!library) {
-                return;
-            }
-
-            auto vertexFunc =
-                library->newFunction(NS::String::string("vertexMain", NS::StringEncoding::UTF8StringEncoding));
-            auto fragmentFunc =
-                library->newFunction(NS::String::string("fragmentMain", NS::StringEncoding::UTF8StringEncoding));
-
-            if (!vertexFunc || !fragmentFunc) {
-                library->release();
-                return;
-            }
-
-            // Create vertex descriptor
-            auto vertexDesc = NS::TransferPtr(MTL::VertexDescriptor::alloc()->init());
-
-            auto posAttr = vertexDesc->attributes()->object(0);
-            posAttr->setFormat(MTL::VertexFormatFloat2);
-            posAttr->setOffset(offsetof(Rml::Vertex, position));
-            posAttr->setBufferIndex(1);
-
-            auto colorAttr = vertexDesc->attributes()->object(1);
-            colorAttr->setFormat(MTL::VertexFormatUChar4Normalized);
-            colorAttr->setOffset(offsetof(Rml::Vertex, colour));
-            colorAttr->setBufferIndex(1);
-
-            auto texAttr = vertexDesc->attributes()->object(2);
-            texAttr->setFormat(MTL::VertexFormatFloat2);
-            texAttr->setOffset(offsetof(Rml::Vertex, tex_coord));
-            texAttr->setBufferIndex(1);
-
-            auto layout = vertexDesc->layouts()->object(1);
-            layout->setStride(sizeof(Rml::Vertex));
-            layout->setStepFunction(MTL::VertexStepFunctionPerVertex);
-            layout->setStepRate(1);
-
-            // Create pipeline descriptor
-            auto pipelineDesc = NS::TransferPtr(MTL::RenderPipelineDescriptor::alloc()->init());
-            pipelineDesc->setVertexFunction(vertexFunc);
-            pipelineDesc->setFragmentFunction(fragmentFunc);
-            pipelineDesc->setVertexDescriptor(vertexDesc.get());
-
-            auto colorAttachment = pipelineDesc->colorAttachments()->object(0);
-            colorAttachment->setPixelFormat(MTL::PixelFormatRGBA8Unorm_sRGB);
-            colorAttachment->setBlendingEnabled(true);
-            colorAttachment->setRgbBlendOperation(MTL::BlendOperationAdd);
-            colorAttachment->setAlphaBlendOperation(MTL::BlendOperationAdd);
-            colorAttachment->setSourceRGBBlendFactor(MTL::BlendFactorSourceAlpha);
-            colorAttachment->setSourceAlphaBlendFactor(MTL::BlendFactorSourceAlpha);
-            colorAttachment->setDestinationRGBBlendFactor(MTL::BlendFactorOneMinusSourceAlpha);
-            colorAttachment->setDestinationAlphaBlendFactor(MTL::BlendFactorOneMinusSourceAlpha);
-
-            m_pipelineState = NS::TransferPtr(m_device->newRenderPipelineState(pipelineDesc.get(), &error));
-
-            // Create depth stencil state
-            auto depthStencilDesc = NS::TransferPtr(MTL::DepthStencilDescriptor::alloc()->init());
-            depthStencilDesc->setDepthCompareFunction(MTL::CompareFunctionAlways);
-            depthStencilDesc->setDepthWriteEnabled(false);
-            m_depthStencilState = NS::TransferPtr(m_device->newDepthStencilState(depthStencilDesc.get()));
-
-            vertexFunc->release();
-            fragmentFunc->release();
-            library->release();
-        }
-
-        MTL::Device* m_device = nullptr;
-        MTL::CommandBuffer* m_currentCommandBuffer = nullptr;
-        MTL::RenderCommandEncoder* m_currentEncoder = nullptr;
-        MTL::Texture* m_currentRenderTarget = nullptr;
-        NS::SharedPtr<MTL::RenderPassDescriptor> m_currentPassDesc;
-
-        NS::SharedPtr<MTL::RenderPipelineState> m_pipelineState;
-        NS::SharedPtr<MTL::DepthStencilState> m_depthStencilState;
-        NS::SharedPtr<MTL::Texture> m_defaultWhiteTexture;
-
-        std::unordered_map<Rml::CompiledGeometryHandle, CompiledGeometry> m_geometry;
-        std::unordered_map<Rml::TextureHandle, TextureData> m_textures;
-
-        Rml::CompiledGeometryHandle m_nextGeometryHandle = 1;
-        Rml::TextureHandle m_nextTextureHandle = 1;
-
-        int m_logicalWidth = 0;
-        int m_logicalHeight = 0;
-        float m_scaleX = 1.0f;
-        float m_scaleY = 1.0f;
-
-        struct ScissorRegion {
-            bool enabled = false;
-            int x = 0, y = 0, width = 0, height = 0;
-        } m_scissor;
-
-        Rml::Matrix4f m_transform;
-    };
-
-}// namespace Vapor
-
 // Pre-pass: Renders depth and normals
 class PrePass : public RenderPass {
 public:
     explicit PrePass(Renderer_Metal* renderer) : RenderPass(renderer) {
     }
 
-    const char* getName() const override {
+    auto getName() const -> const char* override {
         return "PrePass";
     }
 
@@ -467,23 +81,22 @@ public:
         encoder->setVertexBuffer(r.instanceDataBuffers[r.currentFrameInFlight].get(), 0, 2);
         encoder->setVertexBuffer(r.getBuffer(r.currentScene->vertexBuffer).get(), 0, 3);
 
-        for (const auto& [material, meshes] : r.instanceBatches) {
+        for (const auto& [material, draws] : r.instanceBatches) {
             encoder->setFragmentTexture(
                 r.getTexture(material->albedoMap ? material->albedoMap->texture : r.defaultAlbedoTexture).get(), 0
             );
 
-            for (const auto& mesh : meshes) {
-                if (!r.currentCamera->isVisible(mesh->getWorldBoundingSphere())) {
+            for (const auto& draw : draws) {
+                if (!r.currentCamera->isVisible(r.instances[draw.instanceIndex].boundingSphere)) {
                     continue;
                 }
-
-                encoder->setVertexBytes(&mesh->instanceID, sizeof(Uint32), 4);
+                encoder->setVertexBytes(&draw.instanceIndex, sizeof(Uint32), 4);
                 encoder->drawIndexedPrimitives(
                     MTL::PrimitiveType::PrimitiveTypeTriangle,
-                    mesh->indexCount,
+                    draw.mesh->indexCount,
                     MTL::IndexTypeUInt32,
                     r.getBuffer(r.currentScene->indexBuffer).get(),
-                    mesh->indexOffset * sizeof(Uint32)
+                    draw.mesh->indexOffset * sizeof(Uint32)
                 );
                 r.drawCount++;
             }
@@ -499,7 +112,7 @@ public:
     explicit TLASBuildPass(Renderer_Metal* renderer) : RenderPass(renderer) {
     }
 
-    const char* getName() const override {
+    auto getName() const -> const char* override {
         return "TLASBuildPass";
     }
 
@@ -508,31 +121,31 @@ public:
 
         // Build BLAS array if geometry is dirty
         if (r.currentScene->isGeometryDirty) {
-            std::vector<NS::Object*> BLASObjects;
-            BLASObjects.reserve(r.BLASs.size());
+            std::vector<NS::Object*> blasObjects;
+            blasObjects.reserve(r.BLASs.size());
             for (auto blas : r.BLASs) {
-                BLASObjects.push_back(static_cast<NS::Object*>(blas.get()));
+                blasObjects.push_back(static_cast<NS::Object*>(blas.get()));
             }
-            r.BLASArray = NS::TransferPtr(NS::Array::array(BLASObjects.data(), BLASObjects.size()));
+            r.BLASArray = NS::TransferPtr(NS::Array::array(blasObjects.data(), blasObjects.size()));
             r.currentScene->isGeometryDirty = false;
         }
 
         // Create TLAS descriptor
-        auto TLASDesc = NS::TransferPtr(MTL::InstanceAccelerationStructureDescriptor::alloc()->init());
-        TLASDesc->setInstanceCount(r.accelInstances.size());
-        TLASDesc->setInstancedAccelerationStructures(r.BLASArray.get());
-        TLASDesc->setInstanceDescriptorBuffer(r.accelInstanceBuffers[r.currentFrameInFlight].get());
+        auto tlasDesc = NS::TransferPtr(MTL::InstanceAccelerationStructureDescriptor::alloc()->init());
+        tlasDesc->setInstanceCount(r.accelInstances.size());
+        tlasDesc->setInstancedAccelerationStructures(r.BLASArray.get());
+        tlasDesc->setInstanceDescriptorBuffer(r.accelInstanceBuffers[r.currentFrameInFlight].get());
 
-        auto TLASSizes = r.device->accelerationStructureSizes(TLASDesc.get());
+        auto tlasSizes = r.device->accelerationStructureSizes(tlasDesc.get());
         if (!r.TLASScratchBuffers[r.currentFrameInFlight]
-            || r.TLASScratchBuffers[r.currentFrameInFlight]->length() < TLASSizes.buildScratchBufferSize) {
+            || r.TLASScratchBuffers[r.currentFrameInFlight]->length() < tlasSizes.buildScratchBufferSize) {
             r.TLASScratchBuffers[r.currentFrameInFlight] =
-                NS::TransferPtr(r.device->newBuffer(TLASSizes.buildScratchBufferSize, MTL::ResourceStorageModePrivate));
+                NS::TransferPtr(r.device->newBuffer(tlasSizes.buildScratchBufferSize, MTL::ResourceStorageModePrivate));
         }
         if (!r.TLASBuffers[r.currentFrameInFlight]
-            || r.TLASBuffers[r.currentFrameInFlight]->size() < TLASSizes.accelerationStructureSize) {
+            || r.TLASBuffers[r.currentFrameInFlight]->size() < tlasSizes.accelerationStructureSize) {
             r.TLASBuffers[r.currentFrameInFlight] =
-                NS::TransferPtr(r.device->newAccelerationStructure(TLASSizes.accelerationStructureSize));
+                NS::TransferPtr(r.device->newAccelerationStructure(tlasSizes.accelerationStructureSize));
         }
 
         // Build TLAS
@@ -540,7 +153,7 @@ public:
         auto accelEncoder = r.currentCommandBuffer->accelerationStructureCommandEncoder();
         accelEncoder->buildAccelerationStructure(
             r.TLASBuffers[r.currentFrameInFlight].get(),
-            TLASDesc.get(),
+            tlasDesc.get(),
             r.TLASScratchBuffers[r.currentFrameInFlight].get(),
             0
         );
@@ -554,7 +167,7 @@ public:
     explicit NormalResolvePass(Renderer_Metal* renderer) : RenderPass(renderer) {
     }
 
-    const char* getName() const override {
+    auto getName() const -> const char* override {
         return "NormalResolvePass";
     }
 
@@ -580,7 +193,7 @@ public:
     explicit TileCullingPass(Renderer_Metal* renderer) : RenderPass(renderer) {
     }
 
-    const char* getName() const override {
+    auto getName() const -> const char* override {
         return "TileCullingPass";
     }
 
@@ -611,7 +224,7 @@ public:
     explicit RaytraceShadowPass(Renderer_Metal* renderer) : RenderPass(renderer) {
     }
 
-    const char* getName() const override {
+    auto getName() const -> const char* override {
         return "RaytraceShadowPass";
     }
 
@@ -647,7 +260,7 @@ public:
     explicit RaytraceAOPass(Renderer_Metal* renderer) : RenderPass(renderer) {
     }
 
-    const char* getName() const override {
+    auto getName() const -> const char* override {
         return "RaytraceAOPass";
     }
 
@@ -676,7 +289,7 @@ public:
     explicit SkyAtmospherePass(Renderer_Metal* renderer) : RenderPass(renderer) {
     }
 
-    const char* getName() const override {
+    auto getName() const -> const char* override {
         return "SkyAtmospherePass";
     }
 
@@ -729,7 +342,7 @@ public:
     explicit SkyCapturePass(Renderer_Metal* renderer) : RenderPass(renderer) {
     }
 
-    const char* getName() const override {
+    auto getName() const -> const char* override {
         return "SkyCapturePass";
     }
 
@@ -752,7 +365,7 @@ public:
         // Render each face of the cubemap
         for (uint32_t face = 0; face < 6; ++face) {
             // Update capture data
-            IBLCaptureData* captureData = reinterpret_cast<IBLCaptureData*>(r.iblCaptureDataBuffer->contents());
+            auto* captureData = reinterpret_cast<IBLCaptureData*>(r.iblCaptureDataBuffer->contents());
             captureData->viewProj = captureProj * captureViews[face];
             captureData->faceIndex = face;
             captureData->roughness = 0.0f;
@@ -790,7 +403,7 @@ public:
     explicit IrradianceConvolutionPass(Renderer_Metal* renderer) : RenderPass(renderer) {
     }
 
-    const char* getName() const override {
+    auto getName() const -> const char* override {
         return "IrradianceConvolutionPass";
     }
 
@@ -801,7 +414,7 @@ public:
 
         // Render each face of the irradiance cubemap
         for (uint32_t face = 0; face < 6; ++face) {
-            IBLCaptureData* captureData = reinterpret_cast<IBLCaptureData*>(r.iblCaptureDataBuffer->contents());
+            auto* captureData = reinterpret_cast<IBLCaptureData*>(r.iblCaptureDataBuffer->contents());
             captureData->faceIndex = face;
             captureData->roughness = 0.0f;
             r.iblCaptureDataBuffer->didModifyRange(NS::Range::Make(0, r.iblCaptureDataBuffer->length()));
@@ -832,7 +445,7 @@ public:
     explicit PrefilterEnvMapPass(Renderer_Metal* renderer) : RenderPass(renderer) {
     }
 
-    const char* getName() const override {
+    auto getName() const -> const char* override {
         return "PrefilterEnvMapPass";
     }
 
@@ -849,7 +462,7 @@ public:
 
             // For each face
             for (uint32_t face = 0; face < 6; ++face) {
-                IBLCaptureData* captureData = reinterpret_cast<IBLCaptureData*>(r.iblCaptureDataBuffer->contents());
+                auto* captureData = reinterpret_cast<IBLCaptureData*>(r.iblCaptureDataBuffer->contents());
                 captureData->faceIndex = face;
                 captureData->roughness = roughness;
                 r.iblCaptureDataBuffer->didModifyRange(NS::Range::Make(0, r.iblCaptureDataBuffer->length()));
@@ -882,7 +495,7 @@ public:
     explicit BRDFLUTPass(Renderer_Metal* renderer) : RenderPass(renderer) {
     }
 
-    const char* getName() const override {
+    auto getName() const -> const char* override {
         return "BRDFLUTPass";
     }
 
@@ -915,7 +528,7 @@ public:
     explicit MainRenderPass(Renderer_Metal* renderer) : RenderPass(renderer) {
     }
 
-    const char* getName() const override {
+    auto getName() const -> const char* override {
         return "MainRenderPass";
     }
 
@@ -963,7 +576,7 @@ public:
         encoder->setFragmentBytes(&gridSize, sizeof(glm::uvec3), 5);
         encoder->setFragmentBytes(&time, sizeof(float), 6);
 
-        for (const auto& [material, meshes] : r.instanceBatches) {
+        for (const auto& [material, draws] : r.instanceBatches) {
             encoder->setFragmentTexture(
                 r.getTexture(material->albedoMap ? material->albedoMap->texture : r.defaultAlbedoTexture).get(), 0
             );
@@ -989,20 +602,19 @@ public:
             encoder->setFragmentTexture(r.prefilterMap.get(), 9);
             encoder->setFragmentTexture(r.brdfLUT.get(), 10);
 
-            for (const auto& mesh : meshes) {
-                if (!r.currentCamera->isVisible(mesh->getWorldBoundingSphere())) {
+            for (const auto& draw : draws) {
+                if (!r.currentCamera->isVisible(r.instances[draw.instanceIndex].boundingSphere)) {
                     r.culledInstanceCount++;
                     continue;
                 }
-
                 r.currentInstanceCount++;
-                encoder->setVertexBytes(&mesh->instanceID, sizeof(Uint32), 4);
+                encoder->setVertexBytes(&draw.instanceIndex, sizeof(Uint32), 4);
                 encoder->drawIndexedPrimitives(
                     MTL::PrimitiveType::PrimitiveTypeTriangle,
-                    mesh->indexCount,
+                    draw.mesh->indexCount,
                     MTL::IndexTypeUInt32,
                     r.getBuffer(r.currentScene->indexBuffer).get(),
-                    mesh->indexOffset * sizeof(Uint32)
+                    draw.mesh->indexOffset * sizeof(Uint32)
                 );
                 r.drawCount++;
             }
@@ -1018,7 +630,7 @@ public:
     explicit WaterPass(Renderer_Metal* renderer) : RenderPass(renderer) {
     }
 
-    const char* getName() const override {
+    auto getName() const -> const char* override {
         return "WaterPass";
     }
 
@@ -1034,12 +646,12 @@ public:
         auto time = (float)SDL_GetTicks() / 1000.0f;
 
         // Build model matrix from transform
-        glm::mat4 modelMatrix = glm::mat4(1.0f);
+        auto modelMatrix = glm::mat4(1.0f);
         modelMatrix = glm::translate(modelMatrix, r.waterTransform.position);
         modelMatrix = glm::scale(modelMatrix, r.waterTransform.scale);
 
         // Update water data buffer
-        WaterData* waterData = reinterpret_cast<WaterData*>(r.waterDataBuffers[r.currentFrameInFlight]->contents());
+        auto* waterData = reinterpret_cast<WaterData*>(r.waterDataBuffers[r.currentFrameInFlight]->contents());
         *waterData = r.waterSettings;
         waterData->modelMatrix = modelMatrix;
         waterData->time = time;
@@ -1107,7 +719,7 @@ public:
     explicit ParticlePass(Renderer_Metal* renderer) : RenderPass(renderer) {
     }
 
-    const char* getName() const override {
+    auto getName() const -> const char* override {
         return "ParticlePass";
     }
 
@@ -1232,7 +844,7 @@ public:
     explicit LightScatteringPass(Renderer_Metal* renderer) : RenderPass(renderer) {
     }
 
-    const char* getName() const override {
+    auto getName() const -> const char* override {
         return "LightScatteringPass";
     }
 
@@ -1245,7 +857,7 @@ public:
         glm::vec2 screenSize = glm::vec2(drawableSize.width, drawableSize.height);
 
         // Calculate sun screen position by projecting sun direction
-        AtmosphereData* atmos = reinterpret_cast<AtmosphereData*>(r.atmosphereDataBuffer->contents());
+        auto* atmos = reinterpret_cast<AtmosphereData*>(r.atmosphereDataBuffer->contents());
         glm::vec3 sunDir = glm::normalize(atmos->sunDirection);
 
         // Project sun position to screen space
@@ -1267,7 +879,7 @@ public:
         sunScreenPos.y = 1.0f - sunScreenPos.y;// Flip Y for Metal
 
         // Update light scattering data buffer
-        LightScatteringData* lsData =
+        auto* lsData =
             reinterpret_cast<LightScatteringData*>(r.lightScatteringDataBuffers[r.currentFrameInFlight]->contents());
         lsData->sunScreenPos = sunScreenPos;
         lsData->screenSize = screenSize;
@@ -1322,7 +934,7 @@ public:
     explicit VolumetricFogPass(Renderer_Metal* renderer) : RenderPass(renderer) {
     }
 
-    const char* getName() const override {
+    auto getName() const -> const char* override {
         return "VolumetricFogPass";
     }
 
@@ -1334,9 +946,9 @@ public:
         auto drawableSize = r.swapchain->drawableSize();
 
         // Update fog data buffer
-        AtmosphereData* atmos = reinterpret_cast<AtmosphereData*>(r.atmosphereDataBuffer->contents());
+        auto* atmos = reinterpret_cast<AtmosphereData*>(r.atmosphereDataBuffer->contents());
 
-        VolumetricFogData* fogData =
+        auto* fogData =
             reinterpret_cast<VolumetricFogData*>(r.volumetricFogDataBuffers[r.currentFrameInFlight]->contents());
         fogData->invViewProj = glm::inverse(r.currentCamera->getProjMatrix() * r.currentCamera->getViewMatrix());
         fogData->cameraPosition = r.currentCamera->getEye();
@@ -1399,7 +1011,7 @@ public:
     explicit VolumetricCloudPass(Renderer_Metal* renderer) : RenderPass(renderer) {
     }
 
-    const char* getName() const override {
+    auto getName() const -> const char* override {
         return "VolumetricCloudPass";
     }
 
@@ -1415,9 +1027,9 @@ public:
         auto drawableSize = r.swapchain->drawableSize();
 
         // Update cloud data buffer
-        AtmosphereData* atmos = reinterpret_cast<AtmosphereData*>(r.atmosphereDataBuffer->contents());
+        auto* atmos = reinterpret_cast<AtmosphereData*>(r.atmosphereDataBuffer->contents());
 
-        VolumetricCloudData* cloudData =
+        auto* cloudData =
             reinterpret_cast<VolumetricCloudData*>(r.volumetricCloudDataBuffers[r.currentFrameInFlight]->contents());
         cloudData->invViewProj = glm::inverse(r.currentCamera->getProjMatrix() * r.currentCamera->getViewMatrix());
         cloudData->prevViewProj = r.volumetricCloudSettings.prevViewProj;// For temporal reprojection
@@ -1608,7 +1220,7 @@ public:
     explicit SunFlarePass(Renderer_Metal* renderer) : RenderPass(renderer) {
     }
 
-    const char* getName() const override {
+    auto getName() const -> const char* override {
         return "SunFlarePass";
     }
 
@@ -1621,7 +1233,7 @@ public:
         glm::vec2 screenSize = glm::vec2(drawableSize.width, drawableSize.height);
 
         // Calculate sun screen position
-        AtmosphereData* atmos = reinterpret_cast<AtmosphereData*>(r.atmosphereDataBuffer->contents());
+        auto* atmos = reinterpret_cast<AtmosphereData*>(r.atmosphereDataBuffer->contents());
         glm::vec3 sunDir = glm::normalize(atmos->sunDirection);
         glm::vec3 camPos = r.currentCamera->getEye();
         glm::vec3 sunWorldPos = camPos + sunDir * 10000.0f;
@@ -1640,8 +1252,7 @@ public:
         sunScreenPos.y = 1.0f - sunScreenPos.y;
 
         // Update flare data buffer
-        SunFlareData* flareData =
-            reinterpret_cast<SunFlareData*>(r.sunFlareDataBuffers[r.currentFrameInFlight]->contents());
+        auto* flareData = reinterpret_cast<SunFlareData*>(r.sunFlareDataBuffers[r.currentFrameInFlight]->contents());
         flareData->sunScreenPos = sunScreenPos;
         flareData->screenSize = screenSize;
         flareData->screenCenter = glm::vec2(0.5f, 0.5f);
@@ -1715,7 +1326,7 @@ public:
     explicit BloomBrightnessPass(Renderer_Metal* renderer) : RenderPass(renderer) {
     }
 
-    const char* getName() const override {
+    auto getName() const -> const char* override {
         return "BloomBrightnessPass";
     }
 
@@ -1745,7 +1356,7 @@ public:
     explicit BloomDownsamplePass(Renderer_Metal* renderer) : RenderPass(renderer) {
     }
 
-    const char* getName() const override {
+    auto getName() const -> const char* override {
         return "BloomDownsamplePass";
     }
 
@@ -1796,7 +1407,7 @@ public:
     explicit BloomUpsamplePass(Renderer_Metal* renderer) : RenderPass(renderer) {
     }
 
-    const char* getName() const override {
+    auto getName() const -> const char* override {
         return "BloomUpsamplePass";
     }
 
@@ -1829,7 +1440,7 @@ public:
     explicit BloomCompositePass(Renderer_Metal* renderer) : RenderPass(renderer) {
     }
 
-    const char* getName() const override {
+    auto getName() const -> const char* override {
         return "BloomCompositePass";
     }
 
@@ -1865,7 +1476,7 @@ public:
     explicit DOFCoCPass(Renderer_Metal* renderer) : RenderPass(renderer) {
     }
 
-    const char* getName() const override {
+    auto getName() const -> const char* override {
         return "DOFCoCPass";
     }
 
@@ -1916,7 +1527,7 @@ public:
     explicit DOFBlurPass(Renderer_Metal* renderer) : RenderPass(renderer) {
     }
 
-    const char* getName() const override {
+    auto getName() const -> const char* override {
         return "DOFBlurPass";
     }
 
@@ -1954,7 +1565,7 @@ public:
     explicit DOFCompositePass(Renderer_Metal* renderer) : RenderPass(renderer) {
     }
 
-    const char* getName() const override {
+    auto getName() const -> const char* override {
         return "DOFCompositePass";
     }
 
@@ -1986,7 +1597,7 @@ public:
     explicit PostProcessPass(Renderer_Metal* renderer) : RenderPass(renderer) {
     }
 
-    const char* getName() const override {
+    auto getName() const -> const char* override {
         return "PostProcessPass";
     }
 
@@ -2051,7 +1662,7 @@ public:
     explicit DebugDrawPass(Renderer_Metal* renderer) : RenderPass(renderer) {
     }
 
-    const char* getName() const override {
+    auto getName() const -> const char* override {
         return "DebugDrawPass";
     }
 
@@ -2131,7 +1742,7 @@ public:
     explicit RmlUiPass(Renderer_Metal* renderer) : RenderPass(renderer) {
     }
 
-    const char* getName() const override {
+    auto getName() const -> const char* override {
         return "RmlUiPass";
     }
 
@@ -2148,7 +1759,7 @@ public:
     explicit ImGuiPass(Renderer_Metal* renderer) : RenderPass(renderer) {
     }
 
-    const char* getName() const override {
+    auto getName() const -> const char* override {
         return "ImGuiPass";
     }
 
@@ -2178,7 +1789,7 @@ public:
     explicit WorldCanvasPass(Renderer_Metal* renderer) : RenderPass(renderer) {
     }
 
-    const char* getName() const override {
+    auto getName() const -> const char* override {
         return "WorldCanvasPass";
     }
 
@@ -2195,8 +1806,8 @@ public:
         auto& indexBuffer = r.batch3DIndexBuffers[r.currentFrameInFlight];
         auto& uniformBuffer = r.batch3DUniformBuffers[r.currentFrameInFlight];
 
-        Uint32 vertexCount = static_cast<Uint32>(r.batch3DVertices.size());
-        Uint32 indexCount = static_cast<Uint32>(r.batch3DIndices.size());
+        auto vertexCount = static_cast<Uint32>(r.batch3DVertices.size());
+        auto indexCount = static_cast<Uint32>(r.batch3DIndices.size());
 
         size_t vertexDataSize = vertexCount * sizeof(Batch2DVertex);
         size_t indexDataSize = indexCount * sizeof(Uint32);
@@ -2282,7 +1893,7 @@ public:
     explicit CanvasPass(Renderer_Metal* renderer) : RenderPass(renderer) {
     }
 
-    const char* getName() const override {
+    auto getName() const -> const char* override {
         return "CanvasPass";
     }
 
@@ -2299,8 +1910,8 @@ public:
         auto& indexBuffer = r.batch2DIndexBuffers[r.currentFrameInFlight];
         auto& uniformBuffer = r.batch2DUniformBuffers[r.currentFrameInFlight];
 
-        Uint32 vertexCount = static_cast<Uint32>(r.batch2DVertices.size());
-        Uint32 indexCount = static_cast<Uint32>(r.batch2DIndices.size());
+        auto vertexCount = static_cast<Uint32>(r.batch2DVertices.size());
+        auto indexCount = static_cast<Uint32>(r.batch2DIndices.size());
 
         size_t vertexDataSize = vertexCount * sizeof(Batch2DVertex);
         size_t indexDataSize = indexCount * sizeof(Uint32);
@@ -2331,11 +1942,8 @@ public:
             uniforms.projectionMatrix = r.currentCamera->getProjMatrix() * r.currentCamera->getViewMatrix();
         } else {
             // Fallback: screen space ortho using window size (origin top-left, pixel coordinates)
-            uniforms.projectionMatrix = glm::ortho(
-                0.0f, static_cast<float>(windowWidth),
-                static_cast<float>(windowHeight), 0.0f,
-                -1.0f, 1.0f
-            );
+            uniforms.projectionMatrix =
+                glm::ortho(0.0f, static_cast<float>(windowWidth), static_cast<float>(windowHeight), 0.0f, -1.0f, 1.0f);
         }
         memcpy(uniformBuffer->contents(), &uniforms, sizeof(Batch2DUniforms));
 
@@ -2406,7 +2014,7 @@ public:
     }
 };
 
-std::unique_ptr<Renderer> createRendererMetal() {
+auto createRendererMetal() -> std::unique_ptr<Renderer> {
     return std::make_unique<Renderer_Metal>();
 }
 
@@ -2428,6 +2036,8 @@ auto Renderer_Metal::init(SDL_Window* window) -> void {
     swapchain->setColorspace(CGColorSpaceCreateWithName(kCGColorSpaceSRGB));
     device = swapchain->device();
     queue = NS::TransferPtr(device->newCommandQueue());
+    m_supportsRaytracing = device->supportsRaytracing();
+    if (std::getenv("GITHUB_ACTIONS")) m_supportsRaytracing = false;
 
     // ImGui init
     ImGui_ImplSDL3_InitForMetal(window);
@@ -2445,12 +2055,12 @@ auto Renderer_Metal::init(SDL_Window* window) -> void {
     graph.addPass(std::make_unique<BRDFLUTPass>(this));
 
     // Scene rendering passes
-    graph.addPass(std::make_unique<TLASBuildPass>(this));
+    if (m_supportsRaytracing) graph.addPass(std::make_unique<TLASBuildPass>(this));
     graph.addPass(std::make_unique<PrePass>(this));
     graph.addPass(std::make_unique<NormalResolvePass>(this));
     graph.addPass(std::make_unique<TileCullingPass>(this));
-    graph.addPass(std::make_unique<RaytraceShadowPass>(this));
-    graph.addPass(std::make_unique<RaytraceAOPass>(this));
+    if (m_supportsRaytracing) graph.addPass(std::make_unique<RaytraceShadowPass>(this));
+    if (m_supportsRaytracing) graph.addPass(std::make_unique<RaytraceAOPass>(this));
     graph.addPass(std::make_unique<MainRenderPass>(this));
     graph.addPass(std::make_unique<SkyAtmospherePass>(this));
     // graph.addPass(std::make_unique<WaterPass>(this));
@@ -2514,8 +2124,8 @@ auto Renderer_Metal::deinit() -> void {
 
     // UI cleanup
     if (m_uiRenderer) {
-        auto* uiRenderer = static_cast<Vapor::RmlUiRenderer_Metal*>(m_uiRenderer);
-        uiRenderer->Shutdown();
+        auto* uiRenderer = static_cast<Vapor::RmlRendererMetal*>(m_uiRenderer);
+        uiRenderer->shutdown();
         delete uiRenderer;
         m_uiRenderer = nullptr;
     }
@@ -2529,7 +2139,7 @@ auto Renderer_Metal::deinit() -> void {
     isInitialized = false;
 }
 
-bool Renderer_Metal::initUI() {
+auto Renderer_Metal::initUI() -> bool {
     // Get the engine core and RmlUI manager
     auto* engineCore = Vapor::EngineCore::Get();
     if (!engineCore) {
@@ -2543,9 +2153,9 @@ bool Renderer_Metal::initUI() {
         return false;
     }
 
-    // Create Metal UI renderer
-    auto* uiRenderer = new Vapor::RmlUiRenderer_Metal(device);
-    if (!uiRenderer->Initialize()) {
+    // Create Metal UI renderer (shared implementation)
+    auto* uiRenderer = new Vapor::RmlRendererMetal(device);
+    if (!uiRenderer->initialize()) {
         fmt::print("Renderer_Metal::initUI: Failed to initialize Metal UI renderer\n");
         delete uiRenderer;
         return false;
@@ -2576,7 +2186,7 @@ void Renderer_Metal::renderUI() {
         return;
     }
 
-    auto* uiRenderer = static_cast<Vapor::RmlUiRenderer_Metal*>(m_uiRenderer);
+    auto* uiRenderer = static_cast<Vapor::RmlRendererMetal*>(m_uiRenderer);
 
     auto surface = currentDrawable;
     if (!surface) return;
@@ -2585,33 +2195,46 @@ void Renderer_Metal::renderUI() {
     int windowWidth, windowHeight;
     SDL_GetWindowSize(window, &windowWidth, &windowHeight);
 
-    uiRenderer->BeginFrame(currentCommandBuffer, surface->texture(), windowWidth, windowHeight);
+    MTL::Texture* renderTarget = surface->texture();
+    int fbWidth = static_cast<int>(renderTarget->width());
+    int fbHeight = static_cast<int>(renderTarget->height());
+
+    // Create render pass (load existing content)
+    auto passDesc = NS::TransferPtr(MTL::RenderPassDescriptor::renderPassDescriptor());
+    auto colorAttachment = passDesc->colorAttachments()->object(0);
+    colorAttachment->setTexture(renderTarget);
+    colorAttachment->setLoadAction(MTL::LoadActionLoad);
+    colorAttachment->setStoreAction(MTL::StoreActionStore);
+
+    auto* encoder = currentCommandBuffer->renderCommandEncoder(passDesc.get());
+    uiRenderer->setEncoder(encoder, windowWidth, windowHeight, fbWidth, fbHeight);
     m_uiContext->Render();
-    uiRenderer->EndFrame();
+    uiRenderer->clearEncoder();
+    encoder->endEncoding();
 }
 
 auto Renderer_Metal::createResources() -> void {
     // Create pipelines
-    drawPipeline = createPipeline("assets/shaders/3d_pbr_normal_mapped.metal", true, false, MSAA_SAMPLE_COUNT);
-    prePassPipeline = createPipeline("assets/shaders/3d_depth_only.metal", true, false, MSAA_SAMPLE_COUNT);
-    postProcessPipeline = createPipeline("assets/shaders/3d_post_process.metal", false, true, 1);
-    buildClustersPipeline = createComputePipeline("assets/shaders/3d_cluster_build.metal");
-    cullLightsPipeline = createComputePipeline("assets/shaders/3d_light_cull.metal");
-    tileCullingPipeline = createComputePipeline("assets/shaders/3d_tile_light_cull.metal");
-    normalResolvePipeline = createComputePipeline("assets/shaders/3d_normal_resolve.metal");
-    raytraceShadowPipeline = createComputePipeline("assets/shaders/3d_raytrace_shadow.metal");
-    raytraceAOPipeline = createComputePipeline("assets/shaders/3d_ssao.metal");
+    drawPipeline = createPipeline("shaders/3d_pbr_normal_mapped.metal", true, false, MSAA_SAMPLE_COUNT);
+    prePassPipeline = createPipeline("shaders/3d_depth_only.metal", true, false, MSAA_SAMPLE_COUNT);
+    postProcessPipeline = createPipeline("shaders/3d_post_process.metal", false, true, 1);
+    buildClustersPipeline = createComputePipeline("shaders/3d_cluster_build.metal");
+    cullLightsPipeline = createComputePipeline("shaders/3d_light_cull.metal");
+    tileCullingPipeline = createComputePipeline("shaders/3d_tile_light_cull.metal");
+    normalResolvePipeline = createComputePipeline("shaders/3d_normal_resolve.metal");
+    if (m_supportsRaytracing) raytraceShadowPipeline = createComputePipeline("shaders/3d_raytrace_shadow.metal");
+    if (m_supportsRaytracing) raytraceAOPipeline = createComputePipeline("shaders/3d_ssao.metal");
     atmospherePipeline =
-        createPipeline("assets/shaders/3d_atmosphere.metal", true, false, 1);// No MSAA for sky (full-screen triangle)
-    skyCapturePipeline = createPipeline("assets/shaders/3d_sky_capture.metal", true, true, 1);
-    irradianceConvolutionPipeline = createPipeline("assets/shaders/3d_irradiance_convolution.metal", true, true, 1);
-    prefilterEnvMapPipeline = createPipeline("assets/shaders/3d_prefilter_envmap.metal", true, true, 1);
-    brdfLUTPipeline = createPipeline("assets/shaders/3d_brdf_lut.metal", false, true, 1);
-    lightScatteringPipeline = createPipeline("assets/shaders/3d_light_scattering.metal", true, true, 1);
+        createPipeline("shaders/3d_atmosphere.metal", true, false, 1);// No MSAA for sky (full-screen triangle)
+    skyCapturePipeline = createPipeline("shaders/3d_sky_capture.metal", true, true, 1);
+    irradianceConvolutionPipeline = createPipeline("shaders/3d_irradiance_convolution.metal", true, true, 1);
+    prefilterEnvMapPipeline = createPipeline("shaders/3d_prefilter_envmap.metal", true, true, 1);
+    brdfLUTPipeline = createPipeline("shaders/3d_brdf_lut.metal", false, true, 1);
+    lightScatteringPipeline = createPipeline("shaders/3d_light_scattering.metal", true, true, 1);
 
     // Create debug draw pipeline
     {
-        auto shaderSrc = readFile("assets/shaders/3d_debug.metal");
+        auto shaderSrc = readFile("shaders/3d_debug.metal");
         auto code = NS::String::string(shaderSrc.data(), NS::StringEncoding::UTF8StringEncoding);
         NS::Error* error = nullptr;
         MTL::Library* library = device->newLibrary(code, nullptr, &error);
@@ -2673,7 +2296,7 @@ auto Renderer_Metal::createResources() -> void {
 
     // Create 2D batch rendering pipeline
     {
-        auto shaderSrc = readFile("assets/shaders/2d_batch.metal");
+        auto shaderSrc = readFile("shaders/2d_batch.metal");
         auto code = NS::String::string(shaderSrc.data(), NS::StringEncoding::UTF8StringEncoding);
         NS::Error* error = nullptr;
         MTL::Library* library = device->newLibrary(code, nullptr, &error);
@@ -2964,7 +2587,7 @@ auto Renderer_Metal::createResources() -> void {
 
     // Create atmosphere data buffer with default Earth-like settings
     atmosphereDataBuffer = NS::TransferPtr(device->newBuffer(sizeof(AtmosphereData), MTL::ResourceStorageModeManaged));
-    AtmosphereData* atmosphereData = reinterpret_cast<AtmosphereData*>(atmosphereDataBuffer->contents());
+    auto* atmosphereData = reinterpret_cast<AtmosphereData*>(atmosphereDataBuffer->contents());
     atmosphereData->sunDirection = glm::normalize(glm::vec3(0.5f, 0.5f, 0.5f));
     atmosphereData->sunIntensity = 12.0f;
     atmosphereData->sunColor = glm::vec3(1.0f, 1.0f, 1.0f);
@@ -3049,11 +2672,11 @@ auto Renderer_Metal::createResources() -> void {
     }
 
     // Create textures
-    defaultAlbedoTexture = createTexture(AssetManager::loadImage("assets/textures/default_albedo.png")
-    );// createTexture(AssetManager::loadImage("assets/textures/viking_room.png"));
-    defaultNormalTexture = createTexture(AssetManager::loadImage("assets/textures/default_norm.png"));
-    defaultORMTexture = createTexture(AssetManager::loadImage("assets/textures/default_orm.png"));
-    defaultEmissiveTexture = createTexture(AssetManager::loadImage("assets/textures/default_emissive.png"));
+    defaultAlbedoTexture = createTexture(AssetManager::loadImage("textures/default_albedo.png")
+    );// createTexture(AssetManager::loadImage("textures/viking_room.png"));
+    defaultNormalTexture = createTexture(AssetManager::loadImage("textures/default_norm.png"));
+    defaultORMTexture = createTexture(AssetManager::loadImage("textures/default_orm.png"));
+    defaultEmissiveTexture = createTexture(AssetManager::loadImage("textures/default_emissive.png"));
 
     MTL::TextureDescriptor* depthStencilTextureDesc = MTL::TextureDescriptor::alloc()->init();
     depthStencilTextureDesc->setTextureType(MTL::TextureType2DMultisample);
@@ -3182,7 +2805,7 @@ auto Renderer_Metal::createResources() -> void {
 
     // Bloom brightness pipeline
     {
-        auto shaderSrc = readFile("assets/shaders/3d_bloom_brightness.metal");
+        auto shaderSrc = readFile("shaders/3d_bloom_brightness.metal");
         auto code = NS::String::string(shaderSrc.data(), NS::StringEncoding::UTF8StringEncoding);
         NS::Error* error = nullptr;
         MTL::Library* library = device->newLibrary(code, nullptr, &error);
@@ -3218,7 +2841,7 @@ auto Renderer_Metal::createResources() -> void {
 
     // Bloom downsample pipeline
     {
-        auto shaderSrc = readFile("assets/shaders/3d_bloom_downsample.metal");
+        auto shaderSrc = readFile("shaders/3d_bloom_downsample.metal");
         auto code = NS::String::string(shaderSrc.data(), NS::StringEncoding::UTF8StringEncoding);
         NS::Error* error = nullptr;
         MTL::Library* library = device->newLibrary(code, nullptr, &error);
@@ -3254,7 +2877,7 @@ auto Renderer_Metal::createResources() -> void {
 
     // Bloom upsample pipeline
     {
-        auto shaderSrc = readFile("assets/shaders/3d_bloom_upsample.metal");
+        auto shaderSrc = readFile("shaders/3d_bloom_upsample.metal");
         auto code = NS::String::string(shaderSrc.data(), NS::StringEncoding::UTF8StringEncoding);
         NS::Error* error = nullptr;
         MTL::Library* library = device->newLibrary(code, nullptr, &error);
@@ -3290,7 +2913,7 @@ auto Renderer_Metal::createResources() -> void {
 
     // Bloom composite pipeline
     {
-        auto shaderSrc = readFile("assets/shaders/3d_bloom_composite.metal");
+        auto shaderSrc = readFile("shaders/3d_bloom_composite.metal");
         auto code = NS::String::string(shaderSrc.data(), NS::StringEncoding::UTF8StringEncoding);
         NS::Error* error = nullptr;
         MTL::Library* library = device->newLibrary(code, nullptr, &error);
@@ -3328,7 +2951,7 @@ auto Renderer_Metal::createResources() -> void {
     // Volumetric Fog pipeline (simple height fog)
     // ========================================================================
     {
-        auto shaderSrc = readFile("assets/shaders/3d_volumetric_fog.metal");
+        auto shaderSrc = readFile("shaders/3d_volumetric_fog.metal");
         auto code = NS::String::string(shaderSrc.data(), NS::StringEncoding::UTF8StringEncoding);
         NS::Error* error = nullptr;
         MTL::Library* library = device->newLibrary(code, nullptr, &error);
@@ -3398,7 +3021,7 @@ auto Renderer_Metal::createResources() -> void {
     // Volumetric Cloud pipelines
     // ========================================================================
     {
-        auto shaderSrc = readFile("assets/shaders/3d_volumetric_clouds.metal");
+        auto shaderSrc = readFile("shaders/3d_volumetric_clouds.metal");
         auto code = NS::String::string(shaderSrc.data(), NS::StringEncoding::UTF8StringEncoding);
         NS::Error* error = nullptr;
         MTL::Library* library = device->newLibrary(code, nullptr, &error);
@@ -3506,7 +3129,7 @@ auto Renderer_Metal::createResources() -> void {
     // Sun Flare pipeline
     // ========================================================================
     {
-        auto shaderSrc = readFile("assets/shaders/3d_sun_flare.metal");
+        auto shaderSrc = readFile("shaders/3d_sun_flare.metal");
         auto code = NS::String::string(shaderSrc.data(), NS::StringEncoding::UTF8StringEncoding);
         NS::Error* error = nullptr;
         MTL::Library* library = device->newLibrary(code, nullptr, &error);
@@ -3599,7 +3222,7 @@ auto Renderer_Metal::createResources() -> void {
 
     // DOF CoC pipeline
     {
-        auto shaderSrc = readFile("assets/shaders/3d_dof_coc.metal");
+        auto shaderSrc = readFile("shaders/3d_dof_coc.metal");
         auto code = NS::String::string(shaderSrc.data(), NS::StringEncoding::UTF8StringEncoding);
         NS::Error* error = nullptr;
         MTL::Library* library = device->newLibrary(code, nullptr, &error);
@@ -3635,7 +3258,7 @@ auto Renderer_Metal::createResources() -> void {
 
     // DOF Blur pipeline
     {
-        auto shaderSrc = readFile("assets/shaders/3d_dof_blur.metal");
+        auto shaderSrc = readFile("shaders/3d_dof_blur.metal");
         auto code = NS::String::string(shaderSrc.data(), NS::StringEncoding::UTF8StringEncoding);
         NS::Error* error = nullptr;
         MTL::Library* library = device->newLibrary(code, nullptr, &error);
@@ -3671,7 +3294,7 @@ auto Renderer_Metal::createResources() -> void {
 
     // DOF Composite pipeline
     {
-        auto shaderSrc = readFile("assets/shaders/3d_dof_composite.metal");
+        auto shaderSrc = readFile("shaders/3d_dof_composite.metal");
         auto code = NS::String::string(shaderSrc.data(), NS::StringEncoding::UTF8StringEncoding);
         NS::Error* error = nullptr;
         MTL::Library* library = device->newLibrary(code, nullptr, &error);
@@ -3718,7 +3341,7 @@ auto Renderer_Metal::createResources() -> void {
 
     // Create water pipeline with alpha blending
     {
-        auto shaderSrc = readFile("assets/shaders/3d_water.metal");
+        auto shaderSrc = readFile("shaders/3d_water.metal");
         auto code = NS::String::string(shaderSrc.data(), NS::StringEncoding::UTF8StringEncoding);
         NS::Error* error = nullptr;
         MTL::Library* library = device->newLibrary(code, nullptr, &error);
@@ -3907,7 +3530,7 @@ auto Renderer_Metal::createResources() -> void {
                 float fy = static_cast<float>(y) / texSize;
                 float noise = (sin(fx * 50.0f) * cos(fy * 50.0f) + 1.0f) * 0.5f;
                 noise *= (sin(fx * 30.0f + fy * 20.0f) + 1.0f) * 0.5f;
-                Uint8 v = static_cast<Uint8>(noise * 200 + 55);
+                auto v = static_cast<Uint8>(noise * 200 + 55);
                 Uint32 idx = (y * texSize + x) * 4;
                 foamData[idx + 0] = v;
                 foamData[idx + 1] = v;
@@ -3937,7 +3560,7 @@ auto Renderer_Metal::createResources() -> void {
                 noise += (sin(fx * 40.0f + 0.3f) * cos(fy * 40.0f + 0.7f) + 1.0f) * 0.125f;
                 noise += (sin(fx * 80.0f + 1.5f) * cos(fy * 80.0f + 2.1f) + 1.0f) * 0.0625f;
                 noise = glm::clamp(noise, 0.0f, 1.0f);
-                Uint8 v = static_cast<Uint8>(noise * 255);
+                auto v = static_cast<Uint8>(noise * 255);
                 Uint32 idx = (y * texSize + x) * 4;
                 noiseData[idx + 0] = v;
                 noiseData[idx + 1] = v;
@@ -3971,9 +3594,9 @@ auto Renderer_Metal::createResources() -> void {
             for (Uint32 y = 0; y < faceSize; ++y) {
                 for (Uint32 x = 0; x < faceSize; ++x) {
                     float t = static_cast<float>(y) / faceSize;
-                    Uint8 r = static_cast<Uint8>((0.4f + t * 0.3f) * 255);
-                    Uint8 g = static_cast<Uint8>((0.6f + t * 0.2f) * 255);
-                    Uint8 b = static_cast<Uint8>((0.8f + t * 0.1f) * 255);
+                    auto r = static_cast<Uint8>((0.4f + t * 0.3f) * 255);
+                    auto g = static_cast<Uint8>((0.6f + t * 0.2f) * 255);
+                    auto b = static_cast<Uint8>((0.8f + t * 0.1f) * 255);
                     Uint32 idx = (y * faceSize + x) * 4;
                     faceData[idx + 0] = r;
                     faceData[idx + 1] = g;
@@ -3996,7 +3619,7 @@ auto Renderer_Metal::createResources() -> void {
     // Create particle compute pipelines
     {
         NS::Error* error = nullptr;
-        auto shaderSrc = readFile("assets/shaders/3d_particle.metal");
+        auto shaderSrc = readFile("shaders/3d_particle.metal");
         auto code = NS::String::string(shaderSrc.data(), NS::StringEncoding::UTF8StringEncoding);
         MTL::CompileOptions* options = nullptr;
         auto library = NS::TransferPtr(device->newLibrary(code, options, &error));
@@ -4026,7 +3649,7 @@ auto Renderer_Metal::createResources() -> void {
     // Create particle render pipeline - compile from source file
     {
         NS::Error* error = nullptr;
-        auto shaderSource = readFile("assets/shaders/3d_particle.metal");
+        auto shaderSource = readFile("shaders/3d_particle.metal");
         auto source = NS::String::string(shaderSource.c_str(), NS::UTF8StringEncoding);
         auto options = NS::TransferPtr(MTL::CompileOptions::alloc()->init());
         auto library = NS::TransferPtr(device->newLibrary(source, options.get(), &error));
@@ -4095,7 +3718,7 @@ auto Renderer_Metal::createResources() -> void {
     {
         std::srand(static_cast<unsigned>(std::time(nullptr)));
 
-        GPUParticle* particles = reinterpret_cast<GPUParticle*>(particleBuffer->contents());
+        auto* particles = reinterpret_cast<GPUParticle*>(particleBuffer->contents());
         for (size_t i = 0; i < MAX_PARTICLES; i++) {
             // Minimum radius of 0.5 to avoid particles at origin
             float r = 0.5f + std::sqrt(static_cast<float>(std::rand()) / RAND_MAX) * 4.5f;
@@ -4177,53 +3800,42 @@ auto Renderer_Metal::stage(std::shared_ptr<Scene> scene) -> void {
 
     auto cmd = queue->commandBuffer();
 
-    const std::function<void(const std::shared_ptr<Node>&)> stageNode = [&](const std::shared_ptr<Node>& node) {
-        if (node->meshGroup) {
-            for (auto& mesh : node->meshGroup->meshes) {
-                // mesh->vbos.push_back(createVertexBuffer(mesh->vertices));
-                // mesh->ebo = createIndexBuffer(mesh->indices);
+    const auto stageMesh = [&](std::shared_ptr<Vapor::Mesh>& mesh) {
+        if (m_supportsRaytracing) {
+            auto geomDesc = NS::TransferPtr(MTL::AccelerationStructureTriangleGeometryDescriptor::alloc()->init());
+            geomDesc->setVertexBuffer(getBuffer(scene->vertexBuffer).get());
+            geomDesc->setVertexStride(sizeof(VertexData));
+            geomDesc->setVertexFormat(MTL::AttributeFormatFloat3);
+            geomDesc->setVertexBufferOffset(mesh->vertexOffset * sizeof(VertexData) + offsetof(VertexData, position));
+            geomDesc->setIndexBuffer(getBuffer(scene->indexBuffer).get());
+            geomDesc->setIndexType(MTL::IndexTypeUInt32);
+            geomDesc->setIndexBufferOffset(mesh->indexOffset * sizeof(Uint32));
+            geomDesc->setTriangleCount(mesh->indexCount / 3);
+            geomDesc->setOpaque(true);
 
-                auto geomDesc = NS::TransferPtr(MTL::AccelerationStructureTriangleGeometryDescriptor::alloc()->init());
-                geomDesc->setVertexBuffer(getBuffer(scene->vertexBuffer).get());
-                geomDesc->setVertexStride(sizeof(VertexData));
-                geomDesc->setVertexFormat(MTL::AttributeFormatFloat3);
-                geomDesc->setVertexBufferOffset(
-                    mesh->vertexOffset * sizeof(VertexData) + offsetof(VertexData, position)
-                );
-                geomDesc->setIndexBuffer(getBuffer(scene->indexBuffer).get());
-                geomDesc->setIndexType(MTL::IndexTypeUInt32);
-                geomDesc->setIndexBufferOffset(mesh->indexOffset * sizeof(Uint32));
-                geomDesc->setTriangleCount(mesh->indexCount / 3);
-                geomDesc->setOpaque(true);
+            auto accelDesc = NS::TransferPtr(MTL::PrimitiveAccelerationStructureDescriptor::alloc()->init());
+            NS::Object* descriptors[] = { geomDesc.get() };
+            auto geomArray = NS::TransferPtr(NS::Array::array(descriptors, 1));
+            accelDesc->setGeometryDescriptors(geomArray.get());
 
-                auto accelDesc = NS::TransferPtr(MTL::PrimitiveAccelerationStructureDescriptor::alloc()->init());
-                NS::Object* descriptors[] = { geomDesc.get() };
-                auto geomArray = NS::TransferPtr(NS::Array::array(descriptors, 1));
-                accelDesc->setGeometryDescriptors(geomArray.get());
+            auto accelSizes = device->accelerationStructureSizes(accelDesc.get());
+            auto accelStruct = NS::TransferPtr(device->newAccelerationStructure(accelSizes.accelerationStructureSize));
+            auto scratchBuffer =
+                NS::TransferPtr(device->newBuffer(accelSizes.buildScratchBufferSize, MTL::ResourceStorageModePrivate));
 
-                auto accelSizes = device->accelerationStructureSizes(accelDesc.get());
-                auto accelStruct =
-                    NS::TransferPtr(device->newAccelerationStructure(accelSizes.accelerationStructureSize));
-                auto scratchBuffer = NS::TransferPtr(
-                    device->newBuffer(accelSizes.buildScratchBufferSize, MTL::ResourceStorageModePrivate)
-                );
+            auto encoder = cmd->accelerationStructureCommandEncoder();
+            encoder->buildAccelerationStructure(accelStruct.get(), accelDesc.get(), scratchBuffer.get(), 0);
+            encoder->endEncoding();
 
-                auto encoder = cmd->accelerationStructureCommandEncoder();
-                encoder->buildAccelerationStructure(accelStruct.get(), accelDesc.get(), scratchBuffer.get(), 0);
-                encoder->endEncoding();
-
-                BLASs.push_back(accelStruct);
-
-                mesh->materialID = materialIDs[mesh->material];
-                mesh->instanceID = nextInstanceID++;
-            }
+            BLASs.push_back(accelStruct);
         }
-        for (const auto& child : node->children) {
-            stageNode(child);
-        }
+
+        mesh->materialID = materialIDs[mesh->material];
+        mesh->instanceID = nextInstanceID++;
     };
-    for (auto& node : scene->nodes) {
-        stageNode(node);
+
+    for (auto& mesh : scene->stagedMeshes) {
+        stageMesh(mesh);
     }
 
     cmd->commit();
@@ -4244,7 +3856,7 @@ auto Renderer_Metal::draw(std::shared_ptr<Scene> scene, Camera& camera) -> void 
     // ==========================================================================
     auto time = (float)SDL_GetTicks() / 1000.0f;
 
-    FrameData* frameData = reinterpret_cast<FrameData*>(frameDataBuffers[currentFrameInFlight]->contents());
+    auto* frameData = reinterpret_cast<FrameData*>(frameDataBuffers[currentFrameInFlight]->contents());
     frameData->frameNumber = frameNumber;
     frameData->time = time;
     frameData->deltaTime = 0.016f;// TODO:
@@ -4259,7 +3871,7 @@ auto Renderer_Metal::draw(std::shared_ptr<Scene> scene, Camera& camera) -> void 
     glm::mat4 view = camera.getViewMatrix();
     glm::mat4 invProj = glm::inverse(proj);
     glm::mat4 invView = glm::inverse(view);
-    CameraData* cameraData = reinterpret_cast<CameraData*>(cameraDataBuffers[currentFrameInFlight]->contents());
+    auto* cameraData = reinterpret_cast<CameraData*>(cameraDataBuffers[currentFrameInFlight]->contents());
     cameraData->proj = proj;
     cameraData->view = view;
     cameraData->invProj = invProj;
@@ -4271,7 +3883,7 @@ auto Renderer_Metal::draw(std::shared_ptr<Scene> scene, Camera& camera) -> void 
         NS::Range::Make(0, cameraDataBuffers[currentFrameInFlight]->length())
     );
 
-    DirectionalLight* dirLights = reinterpret_cast<DirectionalLight*>(directionalLightBuffer->contents());
+    auto* dirLights = reinterpret_cast<DirectionalLight*>(directionalLightBuffer->contents());
     for (size_t i = 0; i < scene->directionalLights.size(); ++i) {
         dirLights[i].direction = scene->directionalLights[i].direction;
         dirLights[i].color = scene->directionalLights[i].color;
@@ -4279,7 +3891,7 @@ auto Renderer_Metal::draw(std::shared_ptr<Scene> scene, Camera& camera) -> void 
     }
     directionalLightBuffer->didModifyRange(NS::Range::Make(0, directionalLightBuffer->length()));
 
-    AtmosphereData* atmosphereData = reinterpret_cast<AtmosphereData*>(atmosphereDataBuffer->contents());
+    auto* atmosphereData = reinterpret_cast<AtmosphereData*>(atmosphereDataBuffer->contents());
     if (!scene->directionalLights.empty()) {
         const auto& sunLight = scene->directionalLights[0];
         atmosphereData->sunDirection = -glm::normalize(sunLight.direction);
@@ -4287,7 +3899,7 @@ auto Renderer_Metal::draw(std::shared_ptr<Scene> scene, Camera& camera) -> void 
         atmosphereData->sunIntensity = sunLight.intensity;
     }
 
-    PointLight* pointLights = reinterpret_cast<PointLight*>(pointLightBuffer->contents());
+    auto* pointLights = reinterpret_cast<PointLight*>(pointLightBuffer->contents());
     for (size_t i = 0; i < scene->pointLights.size(); ++i) {
         pointLights[i].position = scene->pointLights[i].position;
         pointLights[i].color = scene->pointLights[i].color;
@@ -4296,7 +3908,7 @@ auto Renderer_Metal::draw(std::shared_ptr<Scene> scene, Camera& camera) -> void 
     }
     pointLightBuffer->didModifyRange(NS::Range::Make(0, pointLightBuffer->length()));
 
-    MaterialData* materialData = reinterpret_cast<MaterialData*>(materialDataBuffer->contents());
+    auto* materialData = reinterpret_cast<MaterialData*>(materialDataBuffer->contents());
     for (size_t i = 0; i < scene->materials.size(); ++i) {
         const auto& mat = scene->materials[i];
         materialData[i] = MaterialData{ .baseColorFactor = mat->baseColorFactor,
@@ -4314,53 +3926,23 @@ auto Renderer_Metal::draw(std::shared_ptr<Scene> scene, Camera& camera) -> void 
                                         .sheenTint = mat->sheenTint,
                                         .clearcoat = mat->clearcoat,
                                         .clearcoatGloss = mat->clearcoatGloss,
-                                        .usePrototypeUV = mat->usePrototypeUV ? 1.0f : 0.0f };
+                                        .prototypeUVMode = static_cast<float>(mat->prototypeUVMode),
+                                        .uvScale = mat->uvScale };
     }
     materialDataBuffer->didModifyRange(NS::Range::Make(0, materialDataBuffer->length()));
 
-    // Update instance data
+    // Update instance data from ECS (set by draw(registry, scene, camera) before calling this)
     instances.clear();
     accelInstances.clear();
     instanceBatches.clear();
-    const std::function<void(const std::shared_ptr<Node>&)> updateNode = [&](const std::shared_ptr<Node>& node) {
-        if (node->meshGroup) {
-            const glm::mat4& transform = node->worldTransform;
-            for (const auto& mesh : node->meshGroup->meshes) {
-                instances.push_back({
-                    .model = transform,
-                    .color = glm::vec4(1.0f, 0.0f, 0.0f, 1.0f),
-                    .vertexOffset = mesh->vertexOffset,
-                    .indexOffset = mesh->indexOffset,
-                    .vertexCount = mesh->vertexCount,
-                    .indexCount = mesh->indexCount,
-                    .materialID = mesh->materialID,
-                    .primitiveMode = mesh->primitiveMode,
-                    .AABBMin = mesh->worldAABBMin,
-                    .AABBMax = mesh->worldAABBMax,
-                });
-                MTL::AccelerationStructureInstanceDescriptor accelInstanceDesc;
-                for (int i = 0; i < 4; ++i) {
-                    for (int j = 0; j < 3; ++j) {
-                        accelInstanceDesc.transformationMatrix.columns[i][j] = transform[i][j];
-                    }
-                }
-                accelInstanceDesc.accelerationStructureIndex = mesh->instanceID;
-                accelInstanceDesc.mask = 0xFF;
-                accelInstances.push_back(accelInstanceDesc);
-                if (!mesh->material) {
-                    fmt::print("No material found for mesh in mesh group {}\n", node->meshGroup->name);
-                    continue;
-                }
-                instanceBatches[mesh->material].push_back(mesh);
-            }
+    if (!pendingEcsInstances.empty()) {
+        instances = pendingEcsInstances;
+        instanceBatches = pendingEcsBatches;
+        if (!pendingEcsAccelInstances.empty()) {
+            accelInstances = pendingEcsAccelInstances;
         }
-        for (const auto& child : node->children) {
-            updateNode(child);
-        }
-    };
-    for (const auto& node : scene->nodes) {
-        updateNode(node);
     }
+
     if (instances.size() > MAX_INSTANCES) {// TODO: reallocate when needed
         fmt::print("Warning: Instance count ({}) exceeds MAX_INSTANCES ({})\n", instances.size(), MAX_INSTANCES);
     }
@@ -4540,7 +4122,7 @@ auto Renderer_Metal::draw(std::shared_ptr<Scene> scene, Camera& camera) -> void 
 
         if (ImGui::TreeNode("Atmosphere")) {
             ImGui::Separator();
-            AtmosphereData* atmos = reinterpret_cast<AtmosphereData*>(atmosphereDataBuffer->contents());
+            auto* atmos = reinterpret_cast<AtmosphereData*>(atmosphereDataBuffer->contents());
             bool atmosChanged = false;
 
             if (!scene->directionalLights.empty()) {
@@ -4642,35 +4224,18 @@ auto Renderer_Metal::draw(std::shared_ptr<Scene> scene, Camera& camera) -> void 
             ImGui::Separator();
             ImGui::Text("Total vertices: %zu", scene->vertices.size());
             ImGui::Text("Total indices: %zu", scene->indices.size());
-            const std::function<void(const std::shared_ptr<Node>&)> showNode = [&](const std::shared_ptr<Node>& node) {
-                ImGui::PushID(node.get());
-                ImGui::Text("Node #%s", node->name.c_str());
-                glm::vec3 pos = node->getLocalPosition();
-                glm::vec3 euler = node->getLocalEulerAngles();
-                glm::vec3 scale = node->getLocalScale();
-                if (ImGui::DragFloat3("Position", &pos.x, 0.1f)) node->setLocalPosition(pos);
-                if (ImGui::DragFloat3("Rotation", &euler.x, 1.0f)) node->setLocalEulerAngles(euler);
-                if (ImGui::DragFloat3("Scale", &scale.x, 0.1f, 0.0001f)) node->setLocalScale(scale);
-                if (node->meshGroup) {
-                    for (const auto& mesh : node->meshGroup->meshes) {
-                        ImGui::PushID(mesh.get());
-                        if (ImGui::TreeNode(fmt::format("Mesh").c_str())) {
-                            ImGui::Text("Vertex count: %u", mesh->vertexCount);
-                            ImGui::Text("Vertex offset: %u", mesh->vertexOffset);
-                            ImGui::Text("Index count: %u", mesh->indexCount);
-                            ImGui::Text("Index offset: %u", mesh->indexOffset);
-                            ImGui::TreePop();
-                        }
-                        ImGui::PopID();
-                    }
+            ImGui::Text("Staged meshes: %zu", scene->stagedMeshes.size());
+            for (size_t mi = 0; mi < scene->stagedMeshes.size(); ++mi) {
+                auto& mesh = scene->stagedMeshes[mi];
+                ImGui::PushID(static_cast<int>(mi));
+                if (ImGui::TreeNode(fmt::format("Mesh #{}", mi).c_str())) {
+                    ImGui::Text("Vertex count: %u", mesh->vertexCount);
+                    ImGui::Text("Vertex offset: %u", mesh->vertexOffset);
+                    ImGui::Text("Index count: %u", mesh->indexCount);
+                    ImGui::Text("Index offset: %u", mesh->indexOffset);
+                    ImGui::TreePop();
                 }
                 ImGui::PopID();
-                for (const auto& child : node->children) {
-                    showNode(child);
-                }
-            };
-            for (const auto& node : scene->nodes) {
-                showNode(node);
             }
             ImGui::TreePop();
         }
@@ -4762,7 +4327,7 @@ auto Renderer_Metal::draw(std::shared_ptr<Scene> scene, Camera& camera) -> void 
             if (lightScatteringEnabled) {
                 ImGui::Separator();
 
-                AtmosphereData* debugAtmos = reinterpret_cast<AtmosphereData*>(atmosphereDataBuffer->contents());
+                auto* debugAtmos = reinterpret_cast<AtmosphereData*>(atmosphereDataBuffer->contents());
                 glm::vec3 debugSunDir = glm::normalize(debugAtmos->sunDirection);
                 glm::vec3 debugCamPos = camera.getEye();
                 glm::vec3 debugSunWorldPos = debugCamPos + debugSunDir * 10000.0f;
@@ -4936,6 +4501,10 @@ auto Renderer_Metal::draw(std::shared_ptr<Scene> scene, Camera& camera) -> void 
         }
     }
 
+    if (m_imGuiCallback) {
+        m_imGuiCallback();
+    }
+
     // ==========================================================================
     // Execute all render passes
     // ==========================================================================
@@ -4944,6 +4513,46 @@ auto Renderer_Metal::draw(std::shared_ptr<Scene> scene, Camera& camera) -> void 
     // ==========================================================================
     // Present and cleanup
     // ==========================================================================
+
+    // Process pending screenshots
+    if (!m_pendingScreenshots.empty()) {
+        MTL::Texture* texture = surface->texture();
+        uint32_t width = static_cast<uint32_t>(texture->width());
+        uint32_t height = static_cast<uint32_t>(texture->height());
+        uint32_t bytesPerPixel = 4;
+        uint32_t bytesPerRow = width * bytesPerPixel;
+        uint32_t totalBytes = bytesPerRow * height;
+
+        for (auto& callback : m_pendingScreenshots) {
+            NS::SharedPtr<MTL::Buffer> cpuBuffer =
+                NS::TransferPtr(device->newBuffer(totalBytes, MTL::ResourceStorageModeShared));
+            MTL::BlitCommandEncoder* blitEncoder = cmd->blitCommandEncoder();
+            blitEncoder->copyFromTexture(
+                texture,
+                0,
+                0,
+                MTL::Origin(0, 0, 0),
+                MTL::Size(width, height, 1),
+                cpuBuffer.get(),
+                0,
+                bytesPerRow,
+                totalBytes
+            );
+            blitEncoder->endEncoding();
+
+            cmd->addCompletedHandler([callback, cpuBuffer, width, height, totalBytes](MTL::CommandBuffer* buffer) {
+                GpuImageData imageData;
+                imageData.width = width;
+                imageData.height = height;
+                imageData.channelCount = 4;
+                imageData.data.resize(totalBytes);
+                memcpy(imageData.data.data(), cpuBuffer->contents(), totalBytes);
+                callback(imageData);
+            });
+        }
+        m_pendingScreenshots.clear();
+    }
+
     cmd->presentDrawable(surface);
     cmd->commit();
 
@@ -4957,8 +4566,8 @@ auto Renderer_Metal::draw(std::shared_ptr<Scene> scene, Camera& camera) -> void 
 }
 
 
-NS::SharedPtr<MTL::RenderPipelineState>
-    Renderer_Metal::createPipeline(const std::string& filename, bool isHDR, bool isColorOnly, Uint32 sampleCount) {
+auto Renderer_Metal::createPipeline(const std::string& filename, bool isHDR, bool isColorOnly, Uint32 sampleCount)
+    -> NS::SharedPtr<MTL::RenderPipelineState> {
     auto shaderSrc = readFile(filename);
 
     auto code = NS::String::string(shaderSrc.data(), NS::StringEncoding::UTF8StringEncoding);
@@ -5050,7 +4659,7 @@ NS::SharedPtr<MTL::RenderPipelineState>
     return pipeline;
 }
 
-NS::SharedPtr<MTL::ComputePipelineState> Renderer_Metal::createComputePipeline(const std::string& filename) {
+auto Renderer_Metal::createComputePipeline(const std::string& filename) -> NS::SharedPtr<MTL::ComputePipelineState> {
     auto shaderSrc = readFile(filename);
 
     auto code = NS::String::string(shaderSrc.data(), NS::StringEncoding::UTF8StringEncoding);
@@ -5076,7 +4685,7 @@ NS::SharedPtr<MTL::ComputePipelineState> Renderer_Metal::createComputePipeline(c
     return pipeline;
 }
 
-TextureHandle Renderer_Metal::createTexture(const std::shared_ptr<Image>& img) {
+auto Renderer_Metal::createTexture(const std::shared_ptr<Image>& img) -> TextureHandle {
     if (img) {
         MTL::PixelFormat pixelFormat = MTL::PixelFormat::PixelFormatRGBA8Unorm;
         switch (img->channelCount) {
@@ -5150,9 +4759,468 @@ TextureHandle Renderer_Metal::createTexture(const std::shared_ptr<Image>& img) {
     }
 }
 
+// ===== Render-to-Texture Implementation =====
+
+RenderTextureHandle Renderer_Metal::createRenderTexture(const RenderTextureDesc& desc) {
+    RenderTextureData rtData;
+    rtData.width = desc.width;
+    rtData.height = desc.height;
+    rtData.hdr = desc.hdr;
+    rtData.sampleCount = desc.sampleCount;
+
+    // Create color texture
+    auto colorDesc = NS::TransferPtr(MTL::TextureDescriptor::alloc()->init());
+    colorDesc->setTextureType(MTL::TextureType2D);
+    colorDesc->setPixelFormat(desc.hdr ? MTL::PixelFormatRGBA16Float : MTL::PixelFormatRGBA8Unorm);
+    colorDesc->setWidth(desc.width);
+    colorDesc->setHeight(desc.height);
+    colorDesc->setMipmapLevelCount(1);
+    colorDesc->setSampleCount(desc.sampleCount);
+    colorDesc->setStorageMode(MTL::StorageModePrivate);
+    colorDesc->setUsage(MTL::TextureUsageRenderTarget | MTL::TextureUsageShaderRead);
+
+    rtData.colorTexture = NS::TransferPtr(device->newTexture(colorDesc.get()));
+    if (!rtData.colorTexture) {
+        return RenderTextureHandle{};
+    }
+
+    // Create depth texture if requested
+    if (desc.hasDepth) {
+        auto depthDesc = NS::TransferPtr(MTL::TextureDescriptor::alloc()->init());
+        depthDesc->setTextureType(MTL::TextureType2D);
+        depthDesc->setPixelFormat(MTL::PixelFormatDepth32Float);
+        depthDesc->setWidth(desc.width);
+        depthDesc->setHeight(desc.height);
+        depthDesc->setMipmapLevelCount(1);
+        depthDesc->setSampleCount(desc.sampleCount);
+        depthDesc->setStorageMode(MTL::StorageModePrivate);
+        depthDesc->setUsage(MTL::TextureUsageRenderTarget);
+
+        rtData.depthTexture = NS::TransferPtr(device->newTexture(depthDesc.get()));
+    }
+
+    // Create temp texture for ping-pong post-processing (same format as color)
+    auto tempDesc = NS::TransferPtr(MTL::TextureDescriptor::alloc()->init());
+    tempDesc->setTextureType(MTL::TextureType2D);
+    tempDesc->setPixelFormat(desc.hdr ? MTL::PixelFormatRGBA16Float : MTL::PixelFormatRGBA8Unorm);
+    tempDesc->setWidth(desc.width);
+    tempDesc->setHeight(desc.height);
+    tempDesc->setMipmapLevelCount(1);
+    tempDesc->setSampleCount(1);
+    tempDesc->setStorageMode(MTL::StorageModePrivate);
+    tempDesc->setUsage(MTL::TextureUsageRenderTarget | MTL::TextureUsageShaderRead);
+    rtData.tempTexture = NS::TransferPtr(device->newTexture(tempDesc.get()));
+
+    // Store the color texture as a regular texture handle for sampling
+    textures[nextTextureID] = rtData.colorTexture;
+    rtData.textureHandle = TextureHandle{ nextTextureID++ };
+
+    // Store render texture data
+    Uint32 rtID = nextRenderTextureID++;
+    renderTextures[rtID] = std::move(rtData);
+
+    return RenderTextureHandle{ rtID };
+}
+
+void Renderer_Metal::destroyRenderTexture(RenderTextureHandle handle) {
+    auto it = renderTextures.find(handle.rid);
+    if (it != renderTextures.end()) {
+        // Remove from regular textures as well
+        textures.erase(it->second.textureHandle.rid);
+        renderTextures.erase(it);
+    }
+}
+
+TextureHandle Renderer_Metal::getRenderTextureAsTexture(RenderTextureHandle handle) {
+    auto it = renderTextures.find(handle.rid);
+    if (it != renderTextures.end()) {
+        return it->second.textureHandle;
+    }
+    return TextureHandle{};
+}
+
+glm::uvec2 Renderer_Metal::getRenderTextureSize(RenderTextureHandle handle) {
+    auto it = renderTextures.find(handle.rid);
+    if (it != renderTextures.end()) {
+        return glm::uvec2(it->second.width, it->second.height);
+    }
+    return glm::uvec2(0);
+}
+
+void Renderer_Metal::renderToTexture(
+    RenderTextureHandle target, std::shared_ptr<Scene> scene, Camera& camera, const glm::vec4& clearColor
+) {
+    auto it = renderTextures.find(target.rid);
+    if (it == renderTextures.end() || !scene) {
+        return;
+    }
+
+    const RenderTextureData& rtData = it->second;
+
+    // Create a command buffer for this render
+    auto cmdBuffer = NS::TransferPtr(queue->commandBuffer());
+
+    // Create render pass descriptor
+    auto passDesc = NS::TransferPtr(MTL::RenderPassDescriptor::alloc()->init());
+
+    // Color attachment
+    auto colorAttachment = passDesc->colorAttachments()->object(0);
+    colorAttachment->setTexture(rtData.colorTexture.get());
+    colorAttachment->setLoadAction(MTL::LoadActionClear);
+    colorAttachment->setStoreAction(MTL::StoreActionStore);
+    colorAttachment->setClearColor(MTL::ClearColor(clearColor.r, clearColor.g, clearColor.b, clearColor.a));
+
+    // Depth attachment
+    if (rtData.depthTexture) {
+        auto depthAttachment = passDesc->depthAttachment();
+        depthAttachment->setTexture(rtData.depthTexture.get());
+        depthAttachment->setLoadAction(MTL::LoadActionClear);
+        depthAttachment->setStoreAction(MTL::StoreActionDontCare);
+        depthAttachment->setClearDepth(1.0);
+    }
+
+    // Get render encoder
+    auto encoder = cmdBuffer->renderCommandEncoder(passDesc.get());
+
+    // Set viewport
+    MTL::Viewport viewport;
+    viewport.originX = 0.0;
+    viewport.originY = 0.0;
+    viewport.width = static_cast<double>(rtData.width);
+    viewport.height = static_cast<double>(rtData.height);
+    viewport.znear = 0.0;
+    viewport.zfar = 1.0;
+    encoder->setViewport(viewport);
+
+    // Update camera data for this render texture's aspect ratio
+    float aspect = static_cast<float>(rtData.width) / static_cast<float>(rtData.height);
+    camera.updateAspectRatio(aspect);
+
+    // Update camera data buffer
+    CameraData cameraData;
+    cameraData.proj = camera.getProjMatrix();
+    cameraData.view = camera.getViewMatrix();
+    cameraData.invProj = glm::inverse(cameraData.proj);
+    cameraData.invView = glm::inverse(cameraData.view);
+    cameraData.near = camera.near();
+    cameraData.far = camera.far();
+    cameraData.position = camera.getEye();
+    auto frustumPlanes = camera.getFrustumPlanes();
+    for (int i = 0; i < 6; i++) {
+        cameraData.frustumPlanes[i] = frustumPlanes[i];
+    }
+
+    // Create temporary camera buffer for this render
+    auto tempCameraBuffer = NS::TransferPtr(device->newBuffer(sizeof(CameraData), MTL::ResourceStorageModeShared));
+    memcpy(tempCameraBuffer->contents(), &cameraData, sizeof(CameraData));
+
+    // Set pipeline state
+    encoder->setRenderPipelineState(drawPipeline.get());
+    encoder->setDepthStencilState(depthStencilState.get());
+    encoder->setCullMode(MTL::CullModeBack);
+    encoder->setFrontFacingWinding(MTL::WindingCounterClockwise);
+
+    glm::vec2 screenSize = glm::vec2(rtData.width, rtData.height);
+    glm::uvec3 gridSize = glm::uvec3(clusterGridSizeX, clusterGridSizeY, clusterGridSizeZ);
+    float time = static_cast<float>(SDL_GetTicks()) / 1000.0f;
+
+    // Bind vertex buffers (matching MainRenderPass layout)
+    encoder->setVertexBuffer(tempCameraBuffer.get(), 0, 0);
+    encoder->setVertexBuffer(materialDataBuffer.get(), 0, 1);
+    encoder->setVertexBuffer(instanceDataBuffers[currentFrameInFlight].get(), 0, 2);
+    encoder->setVertexBuffer(getBuffer(scene->vertexBuffer).get(), 0, 3);
+
+    // Bind fragment buffers
+    encoder->setFragmentBuffer(directionalLightBuffer.get(), 0, 0);
+    encoder->setFragmentBuffer(pointLightBuffer.get(), 0, 1);
+    encoder->setFragmentBuffer(clusterBuffers[currentFrameInFlight].get(), 0, 2);
+    encoder->setFragmentBuffer(tempCameraBuffer.get(), 0, 3);
+    encoder->setFragmentBytes(&screenSize, sizeof(glm::vec2), 4);
+    encoder->setFragmentBytes(&gridSize, sizeof(glm::uvec3), 5);
+    encoder->setFragmentBytes(&time, sizeof(float), 6);
+
+    // Render using instance batches (same as MainRenderPass)
+    for (const auto& [material, meshes] : instanceBatches) {
+        // Bind material textures
+        encoder->setFragmentTexture(
+            getTexture(material->albedoMap ? material->albedoMap->texture : defaultAlbedoTexture).get(), 0
+        );
+        encoder->setFragmentTexture(
+            getTexture(material->normalMap ? material->normalMap->texture : defaultNormalTexture).get(), 1
+        );
+        encoder->setFragmentTexture(
+            getTexture(material->metallicMap ? material->metallicMap->texture : defaultORMTexture).get(), 2
+        );
+        encoder->setFragmentTexture(
+            getTexture(material->roughnessMap ? material->roughnessMap->texture : defaultORMTexture).get(), 3
+        );
+        encoder->setFragmentTexture(
+            getTexture(material->occlusionMap ? material->occlusionMap->texture : defaultORMTexture).get(), 4
+        );
+        encoder->setFragmentTexture(
+            getTexture(material->emissiveMap ? material->emissiveMap->texture : defaultEmissiveTexture).get(), 5
+        );
+        encoder->setFragmentTexture(shadowRT.get(), 7);
+
+        // IBL textures
+        encoder->setFragmentTexture(irradianceMap.get(), 8);
+        encoder->setFragmentTexture(prefilterMap.get(), 9);
+        encoder->setFragmentTexture(brdfLUT.get(), 10);
+
+        for (const auto& draw : meshes) {
+            // Frustum culling with render texture camera
+            if (!camera.isVisible(instances[draw.instanceIndex].boundingSphere)) {
+                continue;
+            }
+
+            encoder->setVertexBytes(&draw.instanceIndex, sizeof(Uint32), 4);
+            encoder->drawIndexedPrimitives(
+                MTL::PrimitiveTypeTriangle,
+                draw.mesh->indexCount,
+                MTL::IndexTypeUInt32,
+                getBuffer(scene->indexBuffer).get(),
+                draw.mesh->indexOffset * sizeof(Uint32)
+            );
+        }
+    }
+
+    encoder->endEncoding();
+    cmdBuffer->commit();
+    cmdBuffer->waitUntilCompleted();
+}
+
+Uint64 Renderer_Metal::registerRenderTextureForUI(RenderTextureHandle handle) {
+    auto it = renderTextures.find(handle.rid);
+    if (it == renderTextures.end()) {
+        return 0;
+    }
+
+    // Get the RmlUI renderer
+    if (!m_uiRenderer) {
+        return 0;
+    }
+
+    auto* uiRenderer = static_cast<Vapor::RmlRendererMetal*>(m_uiRenderer);
+    return uiRenderer->registerExternalTexture(it->second.colorTexture.get(), it->second.width, it->second.height);
+}
+
+// ===== Render Texture Post-Processing Implementation =====
+
+void Renderer_Metal::applyBloom(RenderTextureHandle target, float threshold, float strength) {
+    auto it = renderTextures.find(target.rid);
+    if (it == renderTextures.end()) {
+        return;
+    }
+
+    RenderTextureData& rtData = it->second;
+    auto cmdBuffer = NS::TransferPtr(queue->commandBuffer());
+
+    // Step 1: Extract bright pixels to temp texture
+    {
+        auto passDesc = NS::TransferPtr(MTL::RenderPassDescriptor::alloc()->init());
+        auto colorAttachment = passDesc->colorAttachments()->object(0);
+        colorAttachment->setTexture(rtData.tempTexture.get());
+        colorAttachment->setLoadAction(MTL::LoadActionClear);
+        colorAttachment->setStoreAction(MTL::StoreActionStore);
+        colorAttachment->setClearColor(MTL::ClearColor(0, 0, 0, 1));
+
+        auto encoder = cmdBuffer->renderCommandEncoder(passDesc.get());
+        encoder->setRenderPipelineState(bloomBrightnessPipeline.get());
+
+        MTL::Viewport viewport = { 0, 0, (double)rtData.width, (double)rtData.height, 0, 1 };
+        encoder->setViewport(viewport);
+
+        // Bind source texture and uniforms
+        encoder->setFragmentTexture(rtData.colorTexture.get(), 0);
+        encoder->setFragmentBytes(&threshold, sizeof(float), 0);
+
+        // Draw fullscreen quad
+        encoder->drawPrimitives(MTL::PrimitiveTypeTriangle, NS::UInteger(0), NS::UInteger(3));
+        encoder->endEncoding();
+    }
+
+    // Step 2: Composite bloom back to color texture
+    {
+        auto passDesc = NS::TransferPtr(MTL::RenderPassDescriptor::alloc()->init());
+        auto colorAttachment = passDesc->colorAttachments()->object(0);
+        colorAttachment->setTexture(rtData.colorTexture.get());
+        colorAttachment->setLoadAction(MTL::LoadActionLoad);
+        colorAttachment->setStoreAction(MTL::StoreActionStore);
+
+        auto encoder = cmdBuffer->renderCommandEncoder(passDesc.get());
+        encoder->setRenderPipelineState(bloomCompositePipeline.get());
+
+        MTL::Viewport viewport = { 0, 0, (double)rtData.width, (double)rtData.height, 0, 1 };
+        encoder->setViewport(viewport);
+
+        encoder->setFragmentTexture(rtData.tempTexture.get(), 0);
+        encoder->setFragmentBytes(&strength, sizeof(float), 0);
+
+        encoder->drawPrimitives(MTL::PrimitiveTypeTriangle, NS::UInteger(0), NS::UInteger(3));
+        encoder->endEncoding();
+    }
+
+    cmdBuffer->commit();
+    cmdBuffer->waitUntilCompleted();
+}
+
+void Renderer_Metal::applyToneMapping(RenderTextureHandle target, float exposure) {
+    auto it = renderTextures.find(target.rid);
+    if (it == renderTextures.end()) {
+        return;
+    }
+
+    RenderTextureData& rtData = it->second;
+    auto cmdBuffer = NS::TransferPtr(queue->commandBuffer());
+
+    // Copy color to temp first
+    {
+        auto blitEncoder = cmdBuffer->blitCommandEncoder();
+        blitEncoder->copyFromTexture(
+            rtData.colorTexture.get(),
+            0,
+            0,
+            MTL::Origin(0, 0, 0),
+            MTL::Size(rtData.width, rtData.height, 1),
+            rtData.tempTexture.get(),
+            0,
+            0,
+            MTL::Origin(0, 0, 0)
+        );
+        blitEncoder->endEncoding();
+    }
+
+    // Apply tone mapping from temp to color
+    {
+        auto passDesc = NS::TransferPtr(MTL::RenderPassDescriptor::alloc()->init());
+        auto colorAttachment = passDesc->colorAttachments()->object(0);
+        colorAttachment->setTexture(rtData.colorTexture.get());
+        colorAttachment->setLoadAction(MTL::LoadActionDontCare);
+        colorAttachment->setStoreAction(MTL::StoreActionStore);
+
+        auto encoder = cmdBuffer->renderCommandEncoder(passDesc.get());
+        encoder->setRenderPipelineState(postProcessPipeline.get());
+
+        MTL::Viewport viewport = { 0, 0, (double)rtData.width, (double)rtData.height, 0, 1 };
+        encoder->setViewport(viewport);
+
+        struct GPUPostProcessParams {
+            float chromaticAberrationStrength;
+            float chromaticAberrationFalloff;
+            float vignetteStrength;
+            float vignetteRadius;
+            float vignetteSoftness;
+            float saturation;
+            float contrast;
+            float brightness;
+            float temperature;
+            float tint;
+            float exposure;
+        } params = {
+            0.0f, // chromaticAberrationStrength
+            0.0f, // chromaticAberrationFalloff
+            0.0f, // vignetteStrength
+            0.0f, // vignetteRadius
+            0.0f, // vignetteSoftness
+            1.0f, // saturation
+            1.0f, // contrast
+            1.0f, // brightness
+            0.0f, // temperature
+            0.0f, // tint
+            exposure // exposure
+        };
+
+        encoder->setFragmentTexture(rtData.tempTexture.get(), 0);
+        encoder->setFragmentBytes(&params, sizeof(GPUPostProcessParams), 0);
+
+        encoder->drawPrimitives(MTL::PrimitiveTypeTriangle, NS::UInteger(0), NS::UInteger(3));
+        encoder->endEncoding();
+    }
+
+    cmdBuffer->commit();
+    cmdBuffer->waitUntilCompleted();
+}
+
+void Renderer_Metal::applyVignette(RenderTextureHandle target, float strength, float radius) {
+    auto it = renderTextures.find(target.rid);
+    if (it == renderTextures.end()) {
+        return;
+    }
+
+    RenderTextureData& rtData = it->second;
+    auto cmdBuffer = NS::TransferPtr(queue->commandBuffer());
+
+    // Copy color to temp
+    {
+        auto blitEncoder = cmdBuffer->blitCommandEncoder();
+        blitEncoder->copyFromTexture(
+            rtData.colorTexture.get(),
+            0,
+            0,
+            MTL::Origin(0, 0, 0),
+            MTL::Size(rtData.width, rtData.height, 1),
+            rtData.tempTexture.get(),
+            0,
+            0,
+            MTL::Origin(0, 0, 0)
+        );
+        blitEncoder->endEncoding();
+    }
+
+    // Apply vignette from temp to color
+    {
+        auto passDesc = NS::TransferPtr(MTL::RenderPassDescriptor::alloc()->init());
+        auto colorAttachment = passDesc->colorAttachments()->object(0);
+        colorAttachment->setTexture(rtData.colorTexture.get());
+        colorAttachment->setLoadAction(MTL::LoadActionDontCare);
+        colorAttachment->setStoreAction(MTL::StoreActionStore);
+
+        auto encoder = cmdBuffer->renderCommandEncoder(passDesc.get());
+        encoder->setRenderPipelineState(postProcessPipeline.get());
+
+        MTL::Viewport viewport = { 0, 0, (double)rtData.width, (double)rtData.height, 0, 1 };
+        encoder->setViewport(viewport);
+
+        struct GPUPostProcessParams {
+            float chromaticAberrationStrength;
+            float chromaticAberrationFalloff;
+            float vignetteStrength;
+            float vignetteRadius;
+            float vignetteSoftness;
+            float saturation;
+            float contrast;
+            float brightness;
+            float temperature;
+            float tint;
+            float exposure;
+        } params = {
+            0.0f, // chromaticAberrationStrength
+            0.0f, // chromaticAberrationFalloff
+            strength, // vignetteStrength
+            radius, // vignetteRadius
+            0.15f, // vignetteSoftness
+            1.0f, // saturation
+            1.0f, // contrast
+            1.0f, // brightness
+            0.0f, // temperature
+            0.0f, // tint
+            1.0f // exposure
+        };
+
+        encoder->setFragmentTexture(rtData.tempTexture.get(), 0);
+        encoder->setFragmentBytes(&params, sizeof(GPUPostProcessParams), 0);
+
+        encoder->drawPrimitives(MTL::PrimitiveTypeTriangle, NS::UInteger(0), NS::UInteger(3));
+        encoder->endEncoding();
+    }
+
+    cmdBuffer->commit();
+    cmdBuffer->waitUntilCompleted();
+}
+
 // ===== Font Rendering Implementation =====
 
-FontHandle Renderer_Metal::loadFont(const std::string& path, float baseSize) {
+auto Renderer_Metal::loadFont(const std::string& path, float baseSize) -> FontHandle {
     // Load font using FontManager
     FontHandle fontHandle = m_fontManager.loadFont(path, baseSize);
     if (!fontHandle.isValid()) {
@@ -5187,7 +5255,7 @@ FontHandle Renderer_Metal::loadFont(const std::string& path, float baseSize) {
 
     // Store texture and create handle
     textures[nextTextureID] = texture;
-    TextureHandle texHandle{nextTextureID++};
+    TextureHandle texHandle{ nextTextureID++ };
 
     // Associate texture handle with font
     m_fontManager.setFontTextureHandle(fontHandle, texHandle);
@@ -5208,11 +5276,7 @@ void Renderer_Metal::unloadFont(FontHandle handle) {
 }
 
 void Renderer_Metal::drawText2D(
-    FontHandle fontHandle,
-    const std::string& text,
-    const glm::vec2& position,
-    float scale,
-    const glm::vec4& color
+    FontHandle fontHandle, const std::string& text, const glm::vec2& position, float scale, const glm::vec4& color
 ) {
     Font* font = m_fontManager.getFont(fontHandle);
     if (!font || font->textureHandle.rid == UINT32_MAX) return;
@@ -5236,10 +5300,10 @@ void Renderer_Metal::drawText2D(
 
             // Create UV coordinates for this glyph
             glm::vec2 uvs[4] = {
-                {glyph->u0, glyph->v0}, // top-left
-                {glyph->u1, glyph->v0}, // top-right
-                {glyph->u1, glyph->v1}, // bottom-right
-                {glyph->u0, glyph->v1}  // bottom-left
+                { glyph->u0, glyph->v0 },// top-left
+                { glyph->u1, glyph->v0 },// top-right
+                { glyph->u1, glyph->v1 },// bottom-right
+                { glyph->u0, glyph->v1 }// bottom-left
             };
 
             glm::mat4 transform = glm::translate(glm::mat4(1.0f), glm::vec3(finalX, finalY, 0.0f));
@@ -5252,11 +5316,7 @@ void Renderer_Metal::drawText2D(
 }
 
 void Renderer_Metal::drawText3D(
-    FontHandle fontHandle,
-    const std::string& text,
-    const glm::vec3& worldPosition,
-    float scale,
-    const glm::vec4& color
+    FontHandle fontHandle, const std::string& text, const glm::vec3& worldPosition, float scale, const glm::vec4& color
 ) {
     Font* font = m_fontManager.getFont(fontHandle);
     if (!font || font->textureHandle.rid == UINT32_MAX) return;
@@ -5281,10 +5341,10 @@ void Renderer_Metal::drawText3D(
 
             // Create UV coordinates for this glyph
             glm::vec2 uvs[4] = {
-                {glyph->u0, glyph->v0}, // top-left
-                {glyph->u1, glyph->v0}, // top-right
-                {glyph->u1, glyph->v1}, // bottom-right
-                {glyph->u0, glyph->v1}  // bottom-left
+                { glyph->u0, glyph->v0 },// top-left
+                { glyph->u1, glyph->v0 },// top-right
+                { glyph->u1, glyph->v1 },// bottom-right
+                { glyph->u0, glyph->v1 }// bottom-left
             };
 
             // Create transform in world space
@@ -5298,16 +5358,16 @@ void Renderer_Metal::drawText3D(
     }
 }
 
-glm::vec2 Renderer_Metal::measureText(FontHandle fontHandle, const std::string& text, float scale) {
+auto Renderer_Metal::measureText(FontHandle fontHandle, const std::string& text, float scale) -> glm::vec2 {
     return m_fontManager.measureText(fontHandle, text, scale);
 }
 
-float Renderer_Metal::getFontLineHeight(FontHandle fontHandle, float scale) {
+auto Renderer_Metal::getFontLineHeight(FontHandle fontHandle, float scale) -> float {
     Font* font = m_fontManager.getFont(fontHandle);
     return font ? font->lineHeight * scale : 0.0f;
 }
 
-BufferHandle Renderer_Metal::createVertexBuffer(const std::vector<VertexData>& vertices) {
+auto Renderer_Metal::createVertexBuffer(const std::vector<VertexData>& vertices) -> BufferHandle {
     auto stagingBuffer =
         NS::TransferPtr(device->newBuffer(vertices.size() * sizeof(VertexData), MTL::ResourceStorageModeShared));
     memcpy(stagingBuffer->contents(), vertices.data(), vertices.size() * sizeof(VertexData));
@@ -5326,7 +5386,7 @@ BufferHandle Renderer_Metal::createVertexBuffer(const std::vector<VertexData>& v
     return BufferHandle{ nextBufferID++ };
 }
 
-BufferHandle Renderer_Metal::createIndexBuffer(const std::vector<Uint32>& indices) {
+auto Renderer_Metal::createIndexBuffer(const std::vector<Uint32>& indices) -> BufferHandle {
     auto stagingBuffer =
         NS::TransferPtr(device->newBuffer(indices.size() * sizeof(Uint32), MTL::ResourceStorageModeShared));
     memcpy(stagingBuffer->contents(), indices.data(), indices.size() * sizeof(Uint32));
@@ -5344,15 +5404,18 @@ BufferHandle Renderer_Metal::createIndexBuffer(const std::vector<Uint32>& indice
     return BufferHandle{ nextBufferID++ };
 }
 
-NS::SharedPtr<MTL::Buffer> Renderer_Metal::getBuffer(BufferHandle handle) const {
+auto Renderer_Metal::getBuffer(BufferHandle handle) const -> NS::SharedPtr<MTL::Buffer> {
+    if (handle.rid == UINT32_MAX || buffers.find(handle.rid) == buffers.end()) return nullptr;
     return buffers.at(handle.rid);
 }
 
-NS::SharedPtr<MTL::Texture> Renderer_Metal::getTexture(TextureHandle handle) const {
+auto Renderer_Metal::getTexture(TextureHandle handle) const -> NS::SharedPtr<MTL::Texture> {
+    if (handle.rid == UINT32_MAX || textures.find(handle.rid) == textures.end()) return nullptr;
     return textures.at(handle.rid);
 }
 
-NS::SharedPtr<MTL::RenderPipelineState> Renderer_Metal::getPipeline(PipelineHandle handle) const {
+auto Renderer_Metal::getPipeline(PipelineHandle handle) const -> NS::SharedPtr<MTL::RenderPipelineState> {
+    if (handle.rid == UINT32_MAX || pipelines.find(handle.rid) == pipelines.end()) return nullptr;
     return pipelines.at(handle.rid);
 }
 
@@ -5395,9 +5458,9 @@ void Renderer_Metal::flush3D() {
 }
 
 // Helper to find or add a texture slot
-static float findOrAddTextureSlot(
+static auto findOrAddTextureSlot(
     std::array<TextureHandle, 16>& slots, Uint32& slotIndex, TextureHandle texture, TextureHandle whiteTexture
-) {
+) -> float {
     if (texture.rid == UINT32_MAX || texture.rid == whiteTexture.rid) {
         return 0.0f;
     }
@@ -5412,7 +5475,7 @@ static float findOrAddTextureSlot(
         return 0.0f;// Fallback to white texture if slots full
     }
 
-    float texIndex = static_cast<float>(slotIndex);
+    auto texIndex = static_cast<float>(slotIndex);
     slots[slotIndex] = texture;
     slotIndex++;
     return texIndex;
@@ -5454,14 +5517,16 @@ void Renderer_Metal::drawQuad2D(
 
     float textureIndex =
         findOrAddTextureSlot(batch2DTextureSlots, batch2DTextureSlotIndex, texture, batch2DWhiteTextureHandle);
-    Uint32 vertexOffset = static_cast<Uint32>(batch2DVertices.size());
+    auto vertexOffset = static_cast<Uint32>(batch2DVertices.size());
+
+    const glm::vec2* uvs = texCoords ? texCoords : batchQuadTexCoords;
 
     // Add 4 vertices
     for (int i = 0; i < 4; i++) {
         Batch2DVertex vertex;
         vertex.position = transform * batchQuadPositions[i];
         vertex.color = tintColor;
-        vertex.uv = texCoords[i];
+        vertex.uv = uvs[i];
         vertex.texIndex = textureIndex;
         vertex.entityID = static_cast<float>(entityID);
         batch2DVertices.push_back(vertex);
@@ -5516,7 +5581,7 @@ void Renderer_Metal::drawLine2D(const glm::vec2& p0, const glm::vec2& p1, const 
     if (batch2DIndices.size() >= BatchMaxIndices) return;
 
     glm::vec2 defaultUV(0.5f, 0.5f);
-    Uint32 vertexOffset = static_cast<Uint32>(batch2DVertices.size());
+    auto vertexOffset = static_cast<Uint32>(batch2DVertices.size());
 
     Batch2DVertex vertex;
     vertex.color = color;
@@ -5575,13 +5640,15 @@ void Renderer_Metal::drawQuad3D(
 
     float textureIndex =
         findOrAddTextureSlot(batch3DTextureSlots, batch3DTextureSlotIndex, texture, batch2DWhiteTextureHandle);
-    Uint32 vertexOffset = static_cast<Uint32>(batch3DVertices.size());
+    auto vertexOffset = static_cast<Uint32>(batch3DVertices.size());
+
+    const glm::vec2* uvs = texCoords ? texCoords : batchQuadTexCoords;
 
     for (int i = 0; i < 4; i++) {
         Batch2DVertex vertex;
         vertex.position = transform * batchQuadPositions[i];
         vertex.color = tintColor;
-        vertex.uv = texCoords[i];
+        vertex.uv = uvs[i];
         vertex.texIndex = textureIndex;
         vertex.entityID = static_cast<float>(entityID);
         batch3DVertices.push_back(vertex);
@@ -5618,7 +5685,7 @@ void Renderer_Metal::drawLine3D(const glm::vec3& p0, const glm::vec3& p1, const 
     if (batch3DIndices.size() >= BatchMaxIndices) return;
 
     glm::vec2 defaultUV(0.5f, 0.5f);
-    Uint32 vertexOffset = static_cast<Uint32>(batch3DVertices.size());
+    auto vertexOffset = static_cast<Uint32>(batch3DVertices.size());
 
     Batch2DVertex vertex;
     vertex.color = color;
@@ -5703,7 +5770,7 @@ void Renderer_Metal::drawTriangleFilled2D(
     if (batch2DIndices.size() >= BatchMaxIndices) return;
 
     glm::vec2 defaultUV(0.5f, 0.5f);
-    Uint32 vertexOffset = static_cast<Uint32>(batch2DVertices.size());
+    auto vertexOffset = static_cast<Uint32>(batch2DVertices.size());
 
     Batch2DVertex vertex;
     vertex.color = color;
@@ -5731,12 +5798,115 @@ void Renderer_Metal::drawTriangleFilled2D(
     batch2DStats.triangleCount++;
 }
 
-// Helper function to get Metal device without including renderer_metal.hpp in main.cpp
-// Takes void* to avoid needing Renderer_Metal definition in caller
-extern "C" void* getMetalDevice(void* renderer) {
+
+void Renderer_Metal::readPixelsAsync(ScreenshotCallback callback) {
+    m_pendingScreenshots.push_back(callback);
+}
+
+extern "C" auto getMetalDevice(void* renderer) -> void* {
     if (renderer) {
-        Renderer_Metal* metalRenderer = static_cast<Renderer_Metal*>(renderer);
+        auto* metalRenderer = static_cast<Renderer_Metal*>(renderer);
         return static_cast<void*>(metalRenderer->getDevice());
     }
     return nullptr;
+}
+void Renderer_Metal::draw(entt::registry& registry, std::shared_ptr<Scene> scene, Camera& camera) {
+    // Build ECS instance data; draw(scene, camera) will clear instances/instanceBatches from Nodes,
+    // so store them here and inject after Node traversal via pendingEcsInstances.
+    pendingEcsInstances.clear();
+    pendingEcsBatches.clear();
+    pendingEcsAccelInstances.clear();
+    auto view = registry.view<::Vapor::TransformComponent, ::Vapor::MeshRendererComponent>();
+    for (auto entity : view) {
+        auto& transform = view.get<::Vapor::TransformComponent>(entity);
+        auto& meshRenderer = view.get<::Vapor::MeshRendererComponent>(entity);
+        if (!meshRenderer.visible) continue;
+        for (auto& mesh : meshRenderer.meshes) {
+            // Compute world AABB from local AABB and current ECS worldTransform.
+            const glm::mat4& worldMat = transform.worldTransform;
+            const glm::vec3& lMin = mesh->localAABBMin;
+            const glm::vec3& lMax = mesh->localAABBMax;
+            glm::vec3 wMin(FLT_MAX), wMax(-FLT_MAX);
+            for (int cx = 0; cx < 2; ++cx)
+                for (int cy = 0; cy < 2; ++cy)
+                    for (int cz = 0; cz < 2; ++cz) {
+                        glm::vec3 corner(cx ? lMax.x : lMin.x, cy ? lMax.y : lMin.y, cz ? lMax.z : lMin.z);
+                        glm::vec3 w = glm::vec3(worldMat * glm::vec4(corner, 1.0f));
+                        wMin = glm::min(wMin, w);
+                        wMax = glm::max(wMax, w);
+                    }
+            mesh->worldAABBMin = wMin;
+            mesh->worldAABBMax = wMax;
+
+            glm::vec3 bsCenter = (wMin + wMax) * 0.5f;
+            float bsRadius = glm::length(wMax - bsCenter);
+            auto instanceIdx = static_cast<uint32_t>(pendingEcsInstances.size());
+            pendingEcsInstances.push_back({
+                .model = worldMat,
+                .color = glm::vec4(1.0f),
+                .vertexOffset = mesh->vertexOffset,
+                .indexOffset = mesh->indexOffset,
+                .vertexCount = mesh->vertexCount,
+                .indexCount = mesh->indexCount,
+                .materialID = mesh->materialID,
+                .primitiveMode = mesh->primitiveMode,
+                .AABBMin = wMin,
+                .AABBMax = wMax,
+                .boundingSphere = glm::vec4(bsCenter, bsRadius),
+            });
+            if (mesh->material) {
+                pendingEcsBatches[mesh->material].push_back(MeshDraw{ mesh, instanceIdx });
+            }
+
+            if (m_supportsRaytracing) {
+                MTL::AccelerationStructureInstanceDescriptor accelDesc;
+                for (int i = 0; i < 4; ++i)
+                    for (int j = 0; j < 3; ++j)
+                        accelDesc.transformationMatrix.columns[i][j] = worldMat[i][j];
+                accelDesc.accelerationStructureIndex = mesh->instanceID;
+                accelDesc.mask = 0xFF;
+                pendingEcsAccelInstances.push_back(accelDesc);
+            }
+        }
+    }
+    // Staged meshes (GLTF scenes, static) — add after ECS entities
+    for (size_t i = 0; i < scene->stagedMeshes.size(); ++i) {
+        auto& mesh = scene->stagedMeshes[i];
+        const glm::mat4& worldMat =
+            i < scene->stagedMeshTransforms.size() ? scene->stagedMeshTransforms[i] : glm::identity<glm::mat4>();
+        const glm::vec3& lMin = mesh->localAABBMin;
+        const glm::vec3& lMax = mesh->localAABBMax;
+        glm::vec3 wMin(FLT_MAX), wMax(-FLT_MAX);
+        for (int cx = 0; cx < 2; ++cx)
+            for (int cy = 0; cy < 2; ++cy)
+                for (int cz = 0; cz < 2; ++cz) {
+                    glm::vec3 corner(cx ? lMax.x : lMin.x, cy ? lMax.y : lMin.y, cz ? lMax.z : lMin.z);
+                    glm::vec3 w = glm::vec3(worldMat * glm::vec4(corner, 1.0f));
+                    wMin = glm::min(wMin, w);
+                    wMax = glm::max(wMax, w);
+                }
+        glm::vec3 bsCenter = (wMin + wMax) * 0.5f;
+        float bsRadius = glm::length(wMax - bsCenter);
+        auto instanceIdx = static_cast<uint32_t>(pendingEcsInstances.size());
+        pendingEcsInstances.push_back({
+            .model = worldMat,
+            .color = glm::vec4(1.0f),
+            .vertexOffset = mesh->vertexOffset,
+            .indexOffset = mesh->indexOffset,
+            .vertexCount = mesh->vertexCount,
+            .indexCount = mesh->indexCount,
+            .materialID = mesh->materialID,
+            .primitiveMode = mesh->primitiveMode,
+            .AABBMin = wMin,
+            .AABBMax = wMax,
+            .boundingSphere = glm::vec4(bsCenter, bsRadius),
+        });
+        if (mesh->material) {
+            pendingEcsBatches[mesh->material].push_back(MeshDraw{ mesh, instanceIdx });
+        }
+    }
+    draw(scene, camera);
+    pendingEcsInstances.clear();
+    pendingEcsBatches.clear();
+    pendingEcsAccelInstances.clear();
 }

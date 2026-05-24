@@ -1,18 +1,12 @@
 #pragma once
 
 #include "Vapor/components.hpp"
-#include "Vapor/scene.hpp"
+#include <RmlUi/Core/ElementDocument.h>
 #include <entt/entt.hpp>
 #include <glm/vec2.hpp>
 #include <memory>
-
-namespace Rml {
-    class ElementDocument;
-}
-
-struct SceneNodeReferenceComponent {
-    std::shared_ptr<Node> node = nullptr;
-};
+#include <string>
+#include <vector>
 
 struct ScenePointLightReferenceComponent {
     int lightIndex = -1;// Index into Scene::pointLights
@@ -56,7 +50,6 @@ struct GrabberComponent {
     entt::entity heldEntity = entt::null;
     float maxPickupRange = 5.0f;
 };
-
 
 // Light Logic
 enum class MovementPattern { Circle, Figure8, Linear, Spiral };
@@ -116,18 +109,72 @@ struct DirectionalLightLogicComponent {
 };
 
 
-// UI Components
-enum class HUDState { Hidden, FadingIn, Visible, FadingOut };
+// --- UI Trigger Components ---
+// These hold content/timing data. The visual presentation lives in the
+// corresponding Page subclass. Systems here drive the pages via PageSystem.
 
-struct HUDComponent {
-    std::string documentPath;
-    Rml::ElementDocument* document = nullptr;// Runtime only
-    bool isVisible = false;
-
-    // Transition support
-    HUDState state = HUDState::Visible;
-    float timer = 0.0f;
-    float fadeDuration = 0.5f;
+struct SubtitleEntry {
+    std::string speaker;
+    std::string text;
+    float duration = 3.0f;
 };
 
+enum class SubtitleQueueState { Idle, WaitingForVisible, Displaying, WaitingForHidden };
+
+struct SubtitleQueueComponent {
+    std::vector<SubtitleEntry> queue;
+    int currentIndex = -1;
+    bool advanceRequested = false;
+    bool autoAdvance = true;
+    SubtitleQueueState state = SubtitleQueueState::Idle;
+    float displayTimer = 0.0f;
+};
+
+struct ScrollTextQueueComponent {
+    std::vector<std::string> lines;
+    int currentIndex = 0;
+    bool advanceRequested = false;
+};
+
+// Chapter Title Card
+enum class ChapterTitleState { Hidden, FadingIn, Visible, FadingOut };
+
+struct ChapterTitleComponent {
+    std::string documentPath;
+    Rml::ElementDocument* document = nullptr;
+
+    std::string chapterNumber;// "Chapter 1" or "I"
+    std::string chapterTitle;// "The Beginning"
+    bool showRequested = false;
+
+    // Animation state
+    ChapterTitleState state = ChapterTitleState::Hidden;
+    float timer = 0.0f;
+    float fadeDuration = 0.8f;
+    float displayDuration = 2.5f;
+};
+
+struct ChapterTitleTriggerComponent {
+    std::string number;
+    std::string title;
+    bool showRequested = false;
+};
+
+// Scene transition (see SCENE_TRANSITIONS.md)
+enum class SceneTransitionState {
+    Idle,
+    FadingInLoadingScreen,
+    UnloadingScene,
+    LoadingAssets,
+    BuildingScene,
+    FadingOutLoadingScreen,
+};
+
+struct SceneTransitionComponent {
+    std::string targetScene;
+    SceneTransitionState state = SceneTransitionState::Idle;
+    float progress = 0.0f;
+};
+
+struct PersistentTag {};
 struct DeadTag {};

@@ -11,12 +11,15 @@ find_package(Tracy CONFIG REQUIRED)
 find_package(RmlUi CONFIG REQUIRED)
 find_package(EnTT CONFIG REQUIRED)
 
-add_subdirectory(metal)
+if(APPLE)
+    add_subdirectory(metal)
+endif()
 add_subdirectory(MikkTSpace)
 
 set(SOURCES
     src/action_manager.cpp
     src/audio_engine.cpp
+    src/file_system.cpp
     src/input_manager.cpp
     src/asset_manager.cpp
     src/asset_serializer.cpp
@@ -30,7 +33,6 @@ set(SOURCES
     src/character_controller.cpp
     src/vehicle_controller.cpp
     src/fluid_volume.cpp
-    src/renderer_metal.cpp
     src/renderer_vulkan.cpp
     src/scene.cpp
     src/task_scheduler.cpp
@@ -46,10 +48,23 @@ set(SOURCES
     imgui/imgui_demo.cpp
     imgui/backends/imgui_impl_sdl3.cpp
     imgui/backends/imgui_impl_vulkan.cpp
-    imgui/backends/imgui_impl_metal.mm
 )
 
+if(APPLE)
+    list(APPEND SOURCES
+        src/renderer_metal.cpp
+        src/rml_renderer_metal.cpp
+        src/ui_renderer_metal.cpp
+        imgui/backends/imgui_impl_metal.mm
+    )
+else()
+    list(APPEND SOURCES
+        src/ui_renderer_stub.cpp
+    )
+endif()
+
 add_library(Vapor ${SOURCES})
+set_target_properties(Vapor PROPERTIES POSITION_INDEPENDENT_CODE ON)
 target_compile_features(Vapor PRIVATE cxx_std_20)
 set_target_properties(Vapor PROPERTIES CXX_EXTENSIONS OFF)
 
@@ -76,7 +91,6 @@ target_link_libraries(Vapor PUBLIC
     EnTT::EnTT
 )
 target_link_libraries(Vapor PRIVATE
-    metal
     Vulkan::Vulkan
     taywee::args
     mikktspace
@@ -84,6 +98,10 @@ target_link_libraries(Vapor PRIVATE
     enkiTS::enkiTS
     Tracy::TracyClient
 )
+
+if(APPLE)
+    target_link_libraries(Vapor PRIVATE metal)
+endif()
 
 find_program(GLSL_VALIDATOR "glslangValidator" REQUIRED)
 file(GLOB_RECURSE SHADER_SOURCES 
@@ -94,7 +112,7 @@ file(GLOB_RECURSE SHADER_SOURCES
 
 foreach(GLSL ${SHADER_SOURCES})
     get_filename_component(SOURCE_NAME ${GLSL} NAME)
-    set(SPIRV "${CMAKE_CURRENT_BINARY_DIR}/assets/shaders/${SOURCE_NAME}.spv")
+    set(SPIRV "${CMAKE_CURRENT_SOURCE_DIR}/assets/shaders/${SOURCE_NAME}.spv")
     
     add_custom_command(
         OUTPUT ${SPIRV}
@@ -131,7 +149,10 @@ configure_package_config_file(
     PATH_VARS VAPOR_ASSETS_DIR
 )
 
-install(TARGETS Vapor metal mikktspace
+if(APPLE)
+    set(PLATFORM_LIBS metal)
+endif()
+install(TARGETS Vapor ${PLATFORM_LIBS} mikktspace
     EXPORT VaporTargets
     LIBRARY DESTINATION ${CMAKE_INSTALL_LIBDIR}
     ARCHIVE DESTINATION ${CMAKE_INSTALL_LIBDIR}
@@ -160,3 +181,5 @@ install(DIRECTORY assets/ DESTINATION "${CMAKE_INSTALL_DATADIR}/vapor/assets")
 install(DIRECTORY "${CMAKE_CURRENT_BINARY_DIR}/assets/shaders"
     DESTINATION "${CMAKE_INSTALL_DATADIR}/vapor/assets"
 )
+
+add_subdirectory(capi)

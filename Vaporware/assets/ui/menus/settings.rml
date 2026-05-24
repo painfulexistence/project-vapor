@@ -1,0 +1,61 @@
+<rml>
+<head>
+    <title>Settings</title>
+    <link type="text/rcss" href="settings.rcss"/>
+</head>
+<body>
+    <div id="settings-container">
+        <div id="settings-title">Settings</div>
+
+        <div id="settings-tabs">
+            <button id="tab-audio">Audio</button>
+            <button id="tab-video">Video</button>
+            <button id="tab-controls">Controls</button>
+        </div>
+
+        <div id="settings-panels">
+            <div id="panel-audio">
+                <div class="setting-row">
+                    <label>Master Volume</label>
+                    <input type="range" id="master-volume" min="0" max="100" value="100"/>
+                </div>
+                <div class="setting-row">
+                    <label>Music Volume</label>
+                    <input type="range" id="music-volume" min="0" max="100" value="80"/>
+                </div>
+                <div class="setting-row">
+                    <label>SFX Volume</label>
+                    <input type="range" id="sfx-volume" min="0" max="100" value="100"/>
+                </div>
+            </div>
+
+            <div id="panel-video">
+                <div class="setting-row">
+                    <label>Resolution</label>
+                    <select id="resolution">
+                        <option>1920 x 1080</option>
+                        <option>2560 x 1440</option>
+                        <option>3840 x 2160</option>
+                    </select>
+                </div>
+                <div class="setting-row">
+                    <label>Render Path</label>
+                    <select id="render-path">
+                        <option>Forward</option>
+                        <option>Deferred</option>
+                    </select>
+                </div>
+            </div>
+
+            <div id="panel-controls">
+                <div class="setting-row">
+                    <label>Mouse Sensitivity</label>
+                    <input type="range" id="mouse-sensitivity" min="1" max="10" value="5"/>
+                </div>
+            </div>
+        </div>
+
+        <button id="btn-back">Back</button>
+    </div>
+</body>
+</rml>

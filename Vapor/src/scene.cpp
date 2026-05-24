@@ -1,9 +1,12 @@
 #include "scene.hpp"
 #include "fluid_volume.hpp"
 
+using namespace Vapor;
+
 #include <SDL3/SDL_log.h>
 #include <fmt/core.h>
-#include <functional>
+
+using namespace Vapor;
 
 void Scene::print() {
     fmt::print("Scene {}\n", name);
@@ -65,7 +68,7 @@ void Scene::printNode(const std::shared_ptr<Node>& node) {
     }
 }
 
-std::shared_ptr<Node> Scene::createNode(const std::string& name, const glm::mat4& transform) {
+auto Scene::createNode(const std::string& name, const glm::mat4& transform) -> std::shared_ptr<Node> {
     auto node = std::make_shared<Node>();
     node->name = name;
     node->localTransform = transform;
@@ -77,7 +80,7 @@ void Scene::addNode(std::shared_ptr<Node> node) {
     nodes.push_back(node);
 }
 
-std::shared_ptr<Node> Scene::findNode(const std::string& name) {
+auto Scene::findNode(const std::string& name) -> std::shared_ptr<Node> {
     for (const auto& node : nodes) {
         auto result = findNodeInHierarchy(name, node);
         if (result) {
@@ -87,7 +90,7 @@ std::shared_ptr<Node> Scene::findNode(const std::string& name) {
     return nullptr;
 }
 
-std::shared_ptr<Node> Scene::findNodeInHierarchy(const std::string& name, const std::shared_ptr<Node>& node) {
+auto Scene::findNodeInHierarchy(const std::string& name, const std::shared_ptr<Node>& node) -> std::shared_ptr<Node> {
     if (node->name == name) {
         return node;
     }
@@ -107,8 +110,9 @@ void Scene::update(float dt) {
     }
 }
 
-void Scene::updateNode(const std::shared_ptr<Node>& node, const glm::mat4& parentTransform) {
-    if (node->isTransformDirty) {
+void Scene::updateNode(const std::shared_ptr<Node>& node, const glm::mat4& parentTransform, bool parentDirty) {
+    bool dirty = node->isTransformDirty || parentDirty;
+    if (dirty) {
         node->worldTransform = parentTransform * node->localTransform;
         if (node->meshGroup) {
             for (const auto& mesh : node->meshGroup->meshes) {
@@ -139,7 +143,27 @@ void Scene::updateNode(const std::shared_ptr<Node>& node, const glm::mat4& paren
         node->isTransformDirty = false;
     }
     for (const auto& child : node->children) {
-        updateNode(child, node->worldTransform);
+        updateNode(child, node->worldTransform, dirty);
+    }
+}
+
+void Scene::addMesh(std::shared_ptr<Mesh> mesh, const glm::mat4& transform) {
+    mesh->vertexOffset = vertices.size();
+    mesh->indexOffset = indices.size();
+    mesh->vertexCount = mesh->vertices.size();
+    mesh->indexCount = mesh->indices.size();
+    vertices.insert(vertices.end(), mesh->vertices.begin(), mesh->vertices.end());
+    indices.insert(indices.end(), mesh->indices.begin(), mesh->indices.end());
+    stagedMeshes.push_back(mesh);
+    stagedMeshTransforms.push_back(transform);
+    if (mesh->material) {
+        materials.push_back(mesh->material);
+        if (mesh->material->albedoMap) images.push_back(mesh->material->albedoMap);
+        if (mesh->material->normalMap) images.push_back(mesh->material->normalMap);
+        if (mesh->material->metallicMap) images.push_back(mesh->material->metallicMap);
+        if (mesh->material->roughnessMap) images.push_back(mesh->material->roughnessMap);
+        if (mesh->material->occlusionMap) images.push_back(mesh->material->occlusionMap);
+        if (mesh->material->displacementMap) images.push_back(mesh->material->displacementMap);
     }
 }
 
@@ -192,41 +216,7 @@ void Scene::addMeshToNode(std::shared_ptr<Node> node, std::shared_ptr<Mesh> mesh
 // auto entity = scene.createNode("Cube", glm::identity<glm::mat4>());
 // scene.addMeshToNode(entity, MeshBuilder::buildCube(1.0f));
 
-void Node::attachCharacterController(Physics3D* physics, const CharacterControllerSettings& settings) {
-    characterController = std::make_unique<CharacterController>(physics, settings);
-
-    // TODO: migrate to body create system; this only works for root nodes
-    glm::vec3 worldPos = getWorldPosition();
-    if (isTransformDirty) {
-        worldPos = glm::vec3(localTransform[3]);
-    }
-
-    // Sync initial position from node to character controller
-    characterController->warp(worldPos);
-}
-
-void Node::attachVehicleController(Physics3D* physics, const VehicleSettings& settings) {
-    // If transform is dirty, we need to compute world position/rotation first
-    // This handles the case where setPosition() was called before attachVehicleController()
-    glm::vec3 worldPos = getWorldPosition();
-    glm::quat worldRot = getWorldRotation();
-
-    // TODO: migrate to body create system; this only works for root nodes
-    if (isTransformDirty) {
-
-        worldPos = glm::vec3(localTransform[3]);
-        glm::mat3 rotation = glm::mat3(
-            glm::normalize(glm::vec3(localTransform[0])),
-            glm::normalize(glm::vec3(localTransform[1])),
-            glm::normalize(glm::vec3(localTransform[2]))
-        );
-        worldRot = glm::quat_cast(rotation);
-    }
-
-    vehicleController = std::make_unique<VehicleController>(physics, settings, worldPos, worldRot);
-}
-
-std::shared_ptr<FluidVolume> Scene::createFluidVolume(Physics3D* physics, const FluidVolumeSettings& settings) {
+auto Scene::createFluidVolume(Physics3D* physics, const FluidVolumeSettings& settings) -> std::shared_ptr<FluidVolume> {
     auto fluidVolume = std::make_shared<FluidVolume>(physics, settings);
     fluidVolumes.push_back(fluidVolume);
     return fluidVolume;

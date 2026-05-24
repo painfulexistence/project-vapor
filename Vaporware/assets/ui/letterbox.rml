@@ -1,0 +1,10 @@
+<rml>
+<head>
+    <title>Letterbox</title>
+    <link type="text/rcss" href="letterbox.rcss"/>
+</head>
+<body>
+    <div id="letterbox-top" class="bar"></div>
+    <div id="letterbox-bottom" class="bar"></div>
+</body>
+</rml>
