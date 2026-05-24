@@ -2,28 +2,48 @@
 
 #include "Vapor/components.hpp"
 #include "Vapor/physics_3d.hpp"
-#include "components.hpp"
 #include "imgui.h"
 #include <entt/entt.hpp>
 #include <fmt/core.h>
 #include <glm/gtc/quaternion.hpp>
 #include <glm/gtx/euler_angles.hpp>
 #include <string>
+#include <vector>
+#include <functional>
 
-// ============================================================================
-// SceneInspector — ImGui panel: entity list + component inspector
-// ============================================================================
+namespace Vapor {
 
 class SceneInspector {
 public:
+    using CustomDrawer = std::function<void(entt::registry&, entt::entity)>;
+    using CustomMenuDrawer = std::function<void(entt::registry&, entt::entity)>;
+
     void draw(entt::registry& registry) {
         drawEntityList(registry);
         drawInspector(registry);
     }
 
+    void registerCustomDrawer(CustomDrawer drawer) {
+        m_customDrawers.push_back(std::move(drawer));
+    }
+
+    void registerCustomMenuDrawer(CustomMenuDrawer drawer) {
+        m_customMenuDrawers.push_back(std::move(drawer));
+    }
+
+    void selectEntity(entt::entity entity) {
+        m_selected = entity;
+    }
+
+    entt::entity getSelectedEntity() const {
+        return m_selected;
+    }
+
 private:
     entt::entity m_selected = entt::null;
     char m_searchBuf[128] = {};
+    std::vector<CustomDrawer> m_customDrawers;
+    std::vector<CustomMenuDrawer> m_customMenuDrawers;
 
     // -------------------------------------------------------------------------
     // Left panel — entity list
@@ -96,7 +116,7 @@ private:
         ImGui::Text("Entity %u", static_cast<Uint32>(entt::to_integral(m_selected)));
         ImGui::Separator();
 
-        // --- Engine components ---
+        // --- Core Engine components ---
         if (auto* c = registry.try_get<Vapor::NameComponent>(m_selected))
             drawNameComponent(registry, *c);
 
@@ -133,36 +153,16 @@ private:
         if (auto* c = registry.try_get<Vapor::TriggerVolumeComponent>(m_selected))
             drawTriggerVolumeComponent(*c);
 
-        // --- Game (Vaporware) components ---
-        if (auto* c = registry.try_get<AutoRotateComponent>(m_selected))
-            drawAutoRotateComponent(*c);
+        if (auto* c = registry.try_get<Vapor::CharacterBodyComponent>(m_selected))
+            drawCharacterBodyComponent(*c);
 
-        if (auto* c = registry.try_get<CharacterControllerComponent>(m_selected))
-            drawCharacterControllerComponent(*c);
+        if (auto* c = registry.try_get<Vapor::VehicleBodyComponent>(m_selected))
+            drawVehicleBodyComponent(*c);
 
-        if (auto* c = registry.try_get<CharacterIntent>(m_selected))
-            drawCharacterIntent(*c);
-
-        if (auto* c = registry.try_get<LightMovementLogicComponent>(m_selected))
-            drawLightMovementLogicComponent(*c);
-
-        if (auto* c = registry.try_get<DirectionalLightLogicComponent>(m_selected))
-            drawDirectionalLightLogicComponent(*c);
-
-        if (auto* c = registry.try_get<ScenePointLightReferenceComponent>(m_selected))
-            drawScenePointLightRefComponent(*c);
-
-        if (auto* c = registry.try_get<SceneDirectionalLightReferenceComponent>(m_selected))
-            drawSceneDirectionalLightRefComponent(*c);
-
-        if (auto* c = registry.try_get<GrabbableComponent>(m_selected))
-            drawGrabbableComponent(*c);
-
-        if (registry.all_of<PersistentTag>(m_selected))
-            componentTag("PersistentTag");
-
-        if (registry.all_of<DeadTag>(m_selected))
-            componentTag("DeadTag");
+        // --- Custom registered components ---
+        for (auto& drawer : m_customDrawers) {
+            drawer(registry, m_selected);
+        }
 
         // --- Add component button ---
         ImGui::Separator();
@@ -290,71 +290,23 @@ private:
         ImGui::LabelText("onExit", c.onExit ? "set" : "none");
     }
 
-    // --- Game components ---
-
-    void drawAutoRotateComponent(AutoRotateComponent& c) {
-        if (!ImGui::CollapsingHeader("Auto Rotate")) return;
-        ImGui::DragFloat3("Axis##arot", &c.axis.x, 0.01f, -1.0f, 1.0f);
-        ImGui::DragFloat("Speed##arot", &c.speed, 0.01f);
+    void drawCharacterBodyComponent(Vapor::CharacterBodyComponent& c) {
+        if (!ImGui::CollapsingHeader("Character Body")) return;
+        ImGui::DragFloat("Height##cb", &c.settings.height, 0.1f, 0.1f, 10.0f);
+        ImGui::DragFloat("Radius##cb", &c.settings.radius, 0.05f, 0.05f, 5.0f);
+        ImGui::DragFloat("Mass##cb", &c.settings.mass, 1.0f, 0.1f, 1000.0f);
+        ImGui::LabelText("Desired Vel", "(%.2f, %.2f, %.2f)", c.desiredVelocity.x, c.desiredVelocity.y, c.desiredVelocity.z);
+        ImGui::Checkbox("Jump Req", &c.jumpRequested);
+        ImGui::LabelText("Controller", c.controller ? "Active" : "None");
     }
 
-    void drawCharacterControllerComponent(CharacterControllerComponent& c) {
-        if (!ImGui::CollapsingHeader("Character Controller")) return;
-        ImGui::DragFloat("Move Speed##cc", &c.moveSpeed, 0.1f, 0.1f, 50.0f);
-        ImGui::DragFloat("Rotate Speed##cc", &c.rotateSpeed, 1.0f, 1.0f, 360.0f);
-    }
-
-    void drawCharacterIntent(CharacterIntent& c) {
-        if (!ImGui::CollapsingHeader("Character Intent")) return;
-        ImGui::LabelText("Look", "(%.2f, %.2f)", c.lookVector.x, c.lookVector.y);
-        ImGui::LabelText("Move", "(%.2f, %.2f)", c.moveVector.x, c.moveVector.y);
-        ImGui::LabelText("Vert Axis", "%.2f", c.moveVerticalAxis);
-        ImGui::LabelText("Jump", c.jump ? "true" : "false");
-        ImGui::LabelText("Sprint", c.sprint ? "true" : "false");
-        ImGui::LabelText("Interact", c.interact ? "true" : "false");
-    }
-
-    void drawLightMovementLogicComponent(LightMovementLogicComponent& c) {
-        if (!ImGui::CollapsingHeader("Light Movement")) return;
-        const char* patterns[] = { "Circle", "Figure8", "Linear", "Spiral" };
-        int p = static_cast<int>(c.pattern);
-        if (ImGui::Combo("Pattern", &p, patterns, 4))
-            c.pattern = static_cast<MovementPattern>(p);
-        ImGui::DragFloat("Speed##lm", &c.speed, 0.01f);
-        ImGui::DragFloat("Radius##lm", &c.radius, 0.1f, 0.0f, 100.0f);
-        ImGui::DragFloat("Height##lm", &c.height, 0.1f, -50.0f, 50.0f);
-        ImGui::LabelText("Timer##lm", "%.2f", c.timer);
-    }
-
-    void drawDirectionalLightLogicComponent(DirectionalLightLogicComponent& c) {
-        if (!ImGui::CollapsingHeader("Directional Light Logic")) return;
-        ImGui::DragFloat3("Base Dir", &c.baseDirection.x, 0.01f, -1.0f, 1.0f);
-        ImGui::DragFloat("Speed##dl", &c.speed, 0.01f);
-        ImGui::DragFloat("Magnitude##dl", &c.magnitude, 0.001f, 0.0f, 1.0f);
-    }
-
-    void drawScenePointLightRefComponent(ScenePointLightReferenceComponent& c) {
-        if (!ImGui::CollapsingHeader("Point Light Ref")) return;
-        ImGui::LabelText("Light Index", "%d", c.lightIndex);
-    }
-
-    void drawSceneDirectionalLightRefComponent(SceneDirectionalLightReferenceComponent& c) {
-        if (!ImGui::CollapsingHeader("Directional Light Ref")) return;
-        ImGui::LabelText("Light Index", "%d", c.lightIndex);
-    }
-
-    void drawGrabbableComponent(GrabbableComponent& c) {
-        if (!ImGui::CollapsingHeader("Grabbable")) return;
-        ImGui::DragFloat("Pickup Range##gb", &c.pickupRange, 0.1f, 0.0f, 50.0f);
-        ImGui::DragFloat("Hold Offset##gb", &c.holdOffset, 0.1f, 0.0f, 20.0f);
-        ImGui::DragFloat("Throw Force##gb", &c.throwForce, 10.0f, 0.0f, 5000.0f);
-        ImGui::Checkbox("Is Held##gb", &c.isHeld);
-    }
-
-    void componentTag(const char* name) {
-        ImGui::PushStyleColor(ImGuiCol_Header, ImVec4(0.2f, 0.4f, 0.2f, 1.0f));
-        ImGui::CollapsingHeader(name, ImGuiTreeNodeFlags_Leaf | ImGuiTreeNodeFlags_Bullet);
-        ImGui::PopStyleColor();
+    void drawVehicleBodyComponent(Vapor::VehicleBodyComponent& c) {
+        if (!ImGui::CollapsingHeader("Vehicle Body")) return;
+        ImGui::DragFloat("Throttle##vb", &c.throttle, 0.05f, -1.0f, 1.0f);
+        ImGui::DragFloat("Steering##vb", &c.steering, 0.05f, -1.0f, 1.0f);
+        ImGui::DragFloat("Brake##vb", &c.brake, 0.05f, 0.0f, 1.0f);
+        ImGui::Checkbox("Handbrake##vb", &c.handbrake);
+        ImGui::LabelText("Controller", c.controller ? "Active" : "None");
     }
 
     // =========================================================================
@@ -379,9 +331,11 @@ private:
             tryAdd.operator()<Vapor::SphereColliderComponent>("Sphere Collider");
             tryAdd.operator()<Vapor::VirtualCameraComponent>("Virtual Camera");
             tryAdd.operator()<Vapor::FlyCameraComponent>("Fly Camera");
-            tryAdd.operator()<AutoRotateComponent>("Auto Rotate");
-            tryAdd.operator()<GrabbableComponent>("Grabbable");
-            tryAdd.operator()<PersistentTag>("Persistent Tag");
+
+            // Draw custom component additions
+            for (auto& drawer : m_customMenuDrawers) {
+                drawer(registry, m_selected);
+            }
             ImGui::EndPopup();
         }
     }
@@ -395,3 +349,5 @@ private:
         return fmt::format("[{}]", entt::to_integral(entity));
     }
 };
+
+} // namespace Vapor

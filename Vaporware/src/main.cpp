@@ -25,13 +25,212 @@
 #include <entt/entt.hpp>
 
 
+#include "Vapor/scene_inspector.hpp"
 #include "components.hpp"
 #include "pages/hud_page.hpp"
 #include "pages/letterbox_page.hpp"
 #include "pages/page_system.hpp"
 #include "scene_builder.hpp"
-#include "scene_inspector.hpp"
 #include "systems.hpp"
+
+static void setupCustomDrawers(Vapor::SceneInspector& inspector) {
+    // 1. ScenePointLightReferenceComponent
+    inspector.registerCustomDrawer([](entt::registry& reg, entt::entity e) {
+        if (auto* c = reg.try_get<ScenePointLightReferenceComponent>(e)) {
+            if (ImGui::CollapsingHeader("Scene Point Light Ref")) {
+                ImGui::LabelText("Light Index", "%d", c->lightIndex);
+            }
+        }
+    });
+
+    // 2. SceneDirectionalLightReferenceComponent
+    inspector.registerCustomDrawer([](entt::registry& reg, entt::entity e) {
+        if (auto* c = reg.try_get<SceneDirectionalLightReferenceComponent>(e)) {
+            if (ImGui::CollapsingHeader("Scene Directional Light Ref")) {
+                ImGui::LabelText("Light Index", "%d", c->lightIndex);
+            }
+        }
+    });
+
+    // 3. CharacterIntent
+    inspector.registerCustomDrawer([](entt::registry& reg, entt::entity e) {
+        if (auto* c = reg.try_get<CharacterIntent>(e)) {
+            if (ImGui::CollapsingHeader("Character Intent")) {
+                ImGui::LabelText("Look Vector", "(%.2f, %.2f)", c->lookVector.x, c->lookVector.y);
+                ImGui::LabelText("Move Vector", "(%.2f, %.2f)", c->moveVector.x, c->moveVector.y);
+                ImGui::LabelText("Vertical Axis", "%.2f", c->moveVerticalAxis);
+                ImGui::LabelText("Jump", c->jump ? "true" : "false");
+                ImGui::LabelText("Sprint", c->sprint ? "true" : "false");
+                ImGui::LabelText("Interact", c->interact ? "true" : "false");
+            }
+        }
+    });
+
+    // 4. CharacterControllerComponent
+    inspector.registerCustomDrawer([](entt::registry& reg, entt::entity e) {
+        if (auto* c = reg.try_get<CharacterControllerComponent>(e)) {
+            if (ImGui::CollapsingHeader("Character Controller")) {
+                ImGui::DragFloat("Move Speed", &c->moveSpeed, 0.1f, 0.1f, 50.0f);
+                ImGui::DragFloat("Rotate Speed", &c->rotateSpeed, 1.0f, 1.0f, 360.0f);
+            }
+        }
+    });
+
+    // 5. GrabbableComponent
+    inspector.registerCustomDrawer([](entt::registry& reg, entt::entity e) {
+        if (auto* c = reg.try_get<GrabbableComponent>(e)) {
+            if (ImGui::CollapsingHeader("Grabbable")) {
+                ImGui::DragFloat("Pickup Range", &c->pickupRange, 0.1f, 0.0f, 50.0f);
+                ImGui::DragFloat("Hold Offset", &c->holdOffset, 0.1f, 0.0f, 20.0f);
+                ImGui::DragFloat("Throw Force", &c->throwForce, 10.0f, 0.0f, 5000.0f);
+                ImGui::Checkbox("Is Held", &c->isHeld);
+            }
+        }
+    });
+
+    // 6. LightMovementLogicComponent
+    inspector.registerCustomDrawer([](entt::registry& reg, entt::entity e) {
+        if (auto* c = reg.try_get<LightMovementLogicComponent>(e)) {
+            if (ImGui::CollapsingHeader("Light Movement Logic")) {
+                const char* patterns[] = { "Circle", "Figure8", "Linear", "Spiral" };
+                int p = static_cast<int>(c->pattern);
+                if (ImGui::Combo("Pattern", &p, patterns, 4))
+                    c->pattern = static_cast<MovementPattern>(p);
+                ImGui::DragFloat("Speed", &c->speed, 0.01f);
+                ImGui::DragFloat("Radius", &c->radius, 0.1f, 0.0f, 100.0f);
+                ImGui::DragFloat("Height", &c->height, 0.1f, -50.0f, 50.0f);
+                ImGui::LabelText("Timer", "%.2f", c->timer);
+            }
+        }
+    });
+
+    // 7. FirstPersonCameraComponent
+    inspector.registerCustomDrawer([](entt::registry& reg, entt::entity e) {
+        if (auto* c = reg.try_get<FirstPersonCameraComponent>(e)) {
+            if (ImGui::CollapsingHeader("First Person Camera")) {
+                ImGui::DragFloat("Move Speed", &c->moveSpeed, 0.1f, 0.1f, 50.0f);
+                ImGui::DragFloat("Rotate Speed", &c->rotateSpeed, 1.0f, 1.0f, 360.0f);
+                ImGui::DragFloat("Yaw", &c->yaw, 0.5f);
+                ImGui::DragFloat("Pitch", &c->pitch, 0.5f, -89.0f, 89.0f);
+            }
+        }
+    });
+
+    // 8. CameraSwitchRequest
+    inspector.registerCustomDrawer([](entt::registry& reg, entt::entity e) {
+        if (auto* c = reg.try_get<CameraSwitchRequest>(e)) {
+            if (ImGui::CollapsingHeader("Camera Switch Request")) {
+                const char* modes[] = { "Free", "Follow", "FirstPerson" };
+                int m = static_cast<int>(c->mode);
+                if (ImGui::Combo("Mode", &m, modes, 3))
+                    c->mode = static_cast<CameraSwitchRequest::Mode>(m);
+            }
+        }
+    });
+
+    // 9. AutoRotateComponent
+    inspector.registerCustomDrawer([](entt::registry& reg, entt::entity e) {
+        if (auto* c = reg.try_get<AutoRotateComponent>(e)) {
+            if (ImGui::CollapsingHeader("Auto Rotate")) {
+                ImGui::DragFloat3("Axis", &c->axis.x, 0.01f, -1.0f, 1.0f);
+                ImGui::DragFloat("Speed", &c->speed, 0.05f);
+            }
+        }
+    });
+
+    // 10. DirectionalLightLogicComponent
+    inspector.registerCustomDrawer([](entt::registry& reg, entt::entity e) {
+        if (auto* c = reg.try_get<DirectionalLightLogicComponent>(e)) {
+            if (ImGui::CollapsingHeader("Directional Light Logic")) {
+                ImGui::DragFloat3("Base Dir", &c->baseDirection.x, 0.01f, -1.0f, 1.0f);
+                ImGui::DragFloat("Speed", &c->speed, 0.05f);
+                ImGui::DragFloat("Magnitude", &c->magnitude, 0.005f, 0.0f, 1.0f);
+                ImGui::LabelText("Timer", "%.2f", c->timer);
+            }
+        }
+    });
+
+    // 11. SubtitleQueueComponent
+    inspector.registerCustomDrawer([](entt::registry& reg, entt::entity e) {
+        if (auto* c = reg.try_get<SubtitleQueueComponent>(e)) {
+            if (ImGui::CollapsingHeader("Subtitle Queue Component")) {
+                ImGui::LabelText("Queue Size", "%zu", c->queue.size());
+                ImGui::LabelText("Current Index", "%d", c->currentIndex);
+                ImGui::Checkbox("Advance Requested", &c->advanceRequested);
+                ImGui::Checkbox("Auto Advance", &c->autoAdvance);
+                const char* states[] = { "Idle", "WaitingForVisible", "Displaying", "WaitingForHidden" };
+                ImGui::LabelText("State", "%s", states[static_cast<int>(c->state)]);
+                ImGui::LabelText("Display Timer", "%.2f", c->displayTimer);
+            }
+        }
+    });
+
+    // 12. ScrollTextQueueComponent
+    inspector.registerCustomDrawer([](entt::registry& reg, entt::entity e) {
+        if (auto* c = reg.try_get<ScrollTextQueueComponent>(e)) {
+            if (ImGui::CollapsingHeader("Scroll Text Queue")) {
+                ImGui::LabelText("Lines Count", "%zu", c->lines.size());
+                ImGui::LabelText("Current Index", "%d", c->currentIndex);
+                ImGui::Checkbox("Advance Requested", &c->advanceRequested);
+            }
+        }
+    });
+
+    // 13. ChapterTitleTriggerComponent
+    inspector.registerCustomDrawer([](entt::registry& reg, entt::entity e) {
+        if (auto* c = reg.try_get<ChapterTitleTriggerComponent>(e)) {
+            if (ImGui::CollapsingHeader("Chapter Title Trigger")) {
+                ImGui::LabelText("Num", "%s", c->number.c_str());
+                ImGui::LabelText("Title", "%s", c->title.c_str());
+                ImGui::Checkbox("Show Requested", &c->showRequested);
+            }
+        }
+    });
+
+    // 14. SceneTransitionComponent
+    inspector.registerCustomDrawer([](entt::registry& reg, entt::entity e) {
+        if (auto* c = reg.try_get<SceneTransitionComponent>(e)) {
+            if (ImGui::CollapsingHeader("Scene Transition")) {
+                ImGui::LabelText("Target Scene", "%s", c->targetScene.c_str());
+                const char* states[] = { "Idle", "FadingInLoadingScreen", "UnloadingScene", "LoadingAssets", "BuildingScene", "FadingOutLoadingScreen" };
+                ImGui::LabelText("State", "%s", states[static_cast<int>(c->state)]);
+                ImGui::ProgressBar(c->progress);
+            }
+        }
+    });
+
+    // 15. PersistentTag
+    inspector.registerCustomDrawer([](entt::registry& reg, entt::entity e) {
+        if (reg.all_of<PersistentTag>(e)) {
+            ImGui::PushStyleColor(ImGuiCol_Header, ImVec4(0.2f, 0.4f, 0.2f, 1.0f));
+            ImGui::CollapsingHeader("PersistentTag", ImGuiTreeNodeFlags_Leaf | ImGuiTreeNodeFlags_Bullet);
+            ImGui::PopStyleColor();
+        }
+    });
+
+    // 16. DeadTag
+    inspector.registerCustomDrawer([](entt::registry& reg, entt::entity e) {
+        if (reg.all_of<DeadTag>(e)) {
+            ImGui::PushStyleColor(ImGuiCol_Header, ImVec4(0.5f, 0.1f, 0.1f, 1.0f));
+            ImGui::CollapsingHeader("DeadTag", ImGuiTreeNodeFlags_Leaf | ImGuiTreeNodeFlags_Bullet);
+            ImGui::PopStyleColor();
+        }
+    });
+
+    // Custom menu drawers
+    inspector.registerCustomMenuDrawer([](entt::registry& reg, entt::entity e) {
+        auto tryAdd = [&]<typename T>(const char* label) {
+            if (!reg.all_of<T>(e) && ImGui::MenuItem(label)) {
+                reg.emplace<T>(e);
+                ImGui::CloseCurrentPopup();
+            }
+        };
+        tryAdd.operator()<AutoRotateComponent>("Auto Rotate");
+        tryAdd.operator()<GrabbableComponent>("Grabbable");
+        tryAdd.operator()<CharacterControllerComponent>("Character Controller");
+        tryAdd.operator()<CharacterIntent>("Character Intent");
+    });
+}
 
 auto getActiveCamera(entt::registry& registry) -> entt::entity {
     auto view = registry.view<Vapor::VirtualCameraComponent>();
@@ -115,7 +314,8 @@ auto main(int argc, char* args[]) -> int {
     auto renderer = createRenderer(gfxBackend);
     renderer->init(window);
 
-    SceneInspector sceneInspector;
+    Vapor::SceneInspector sceneInspector;
+    setupCustomDrawers(sceneInspector);
 
     // Load a font for text rendering
     FontHandle gameFont = renderer->loadFont("fonts/Arial Black.ttf", 48.0f);
