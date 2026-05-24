@@ -92,7 +92,7 @@ struct GltfRef {
     }
 };
 
-struct LevelData {
+struct SceneData {
     int version = 1;
     GltfRef gltf;
     std::vector<EntityData> entities;
@@ -127,7 +127,7 @@ inline SaveResult save(
     bool gltfOptimized,
     const std::string& outPath
 ) {
-    LevelData level;
+    SceneData level;
     level.gltf.path = gltfPath;
     level.gltf.optimized = gltfOptimized;
 
@@ -172,7 +172,9 @@ inline SaveResult save(
 
     try {
         cereal::JSONOutputArchive archive(file);
-        archive(cereal::make_nvp("level", level));
+        archive(cereal::make_nvp("version", level.version),
+                cereal::make_nvp("gltf", level.gltf),
+                cereal::make_nvp("entities", level.entities));
     } catch (const std::exception& e) {
         return { false, fmt::format("Serialization error: {}", e.what()), 0, skipped };
     }
