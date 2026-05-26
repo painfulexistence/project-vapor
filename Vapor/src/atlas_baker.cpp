@@ -3,6 +3,7 @@
 #include <algorithm>
 #include <climits>
 #include <cstring>
+#include <numeric>
 
 namespace Vapor {
 
