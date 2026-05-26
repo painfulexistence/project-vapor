@@ -1,6 +1,8 @@
 #pragma once
 
+#include "atlas_baker.hpp"
 #include "graphics.hpp"
+#include "renderer.hpp"
 #include "scene.hpp"
 #include "task_scheduler.hpp"
 #include <atomic>
@@ -287,6 +289,18 @@ namespace Vapor {
 
         // Register a sprite atlas and return its handle
         AtlasHandle registerAtlas(const std::string& name, SpriteAtlas atlas);
+
+        // Pack individual images into a new atlas using AtlasBaker, upload the
+        // resulting texture via renderer, and register it — all in one call.
+        // Returns an invalid handle if packing fails (sprites too large for maxSize).
+        AtlasHandle bakeAtlas(
+            const std::string& name,
+            const std::vector<AtlasBaker::SpriteInput>& sprites,
+            Renderer* renderer,
+            Uint32 maxSize = 4096,
+            Uint32 padding = 1,
+            bool   trim    = true
+        );
 
         // Get atlas by handle (returns nullptr if not found)
         SpriteAtlas* getAtlas(AtlasHandle handle);

@@ -331,4 +331,21 @@ namespace Vapor {
         return m_atlasMap.size();
     }
 
+    AtlasHandle ResourceManager::bakeAtlas(
+        const std::string& name,
+        const std::vector<AtlasBaker::SpriteInput>& sprites,
+        Renderer* renderer,
+        Uint32 maxSize,
+        Uint32 padding,
+        bool   trim
+    ) {
+        auto result = AtlasBaker::pack(sprites, maxSize, padding, trim);
+        if (!result.success || !result.atlasImage) return AtlasHandle{};
+
+        result.atlas.texture = renderer->createTexture(result.atlasImage);
+        if (!result.atlas.texture.valid()) return AtlasHandle{};
+
+        return registerAtlas(name, std::move(result.atlas));
+    }
+
 }// namespace Vapor
