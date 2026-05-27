@@ -1,0 +1,69 @@
+<rml>
+<head>
+    <title>Dialog Window</title>
+    <link type="text/rcss" href="style.rcss"/>
+    <style>
+        body {
+    pointer-events: none;
+            width: 100%;
+            height: 100%;
+        }
+
+        #dialog-container {
+            position: absolute;
+            bottom: 50dp;
+            left: 50%;
+            margin-left: -300dp;
+            width: 600dp;
+            background-color: rgba(0, 0, 0, 0.85);
+            border: 3dp #666;
+            padding: 20dp;
+            color: #fff;
+        }
+
+        #speaker-name {
+            font-size: 20dp;
+            font-weight: bold;
+            color: #3498db;
+            margin-bottom: 10dp;
+        }
+
+        #dialog-text {
+            font-size: 16dp;
+            line-height: 1.5;
+            margin-bottom: 15dp;
+        }
+
+        #dialog-options {
+            margin-top: 15dp;
+        }
+
+        .dialog-option {
+            padding: 8dp 12dp;
+            margin: 5dp 0dp;
+            background-color: rgba(52, 152, 219, 0.3);
+            border: 1dp #3498db;
+            cursor: pointer;
+            transition: background-color 0.2s;
+        }
+
+        .dialog-option:hover {
+            background-color: rgba(52, 152, 219, 0.6);
+        }
+    </style>
+</head>
+<body>
+    <div id="dialog-container">
+        <div id="speaker-name">Mysterious Stranger</div>
+        <div id="dialog-text">
+            Welcome, traveler. I've been expecting you. The ancient ruins hold many secrets,
+            but they are not without danger. What brings you to this forsaken place?
+        </div>
+        <div id="dialog-options">
+            <div class="dialog-option">1. I'm searching for treasure.</div>
+            <div class="dialog-option">2. I'm looking for answers.</div>
+            <div class="dialog-option">3. None of your business.</div>
+        </div>
+    </div>
+</body>
+</rml>

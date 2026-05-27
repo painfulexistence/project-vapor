@@ -1,0 +1,79 @@
+/* Global Styles for Game UI */
+
+* {
+    box-sizing: border-box;
+}
+
+body {
+    font-family: Arial Black;
+    margin: 0;
+    padding: 0;
+}
+
+/* Common UI Elements */
+button {
+    background-color: #3498db;
+    border: 2dp #2980b9;
+    color: white;
+    padding: 10dp 20dp;
+    text-align: center;
+    cursor: pointer;
+    transition: background-color 0.2s;
+}
+
+button:hover {
+    background-color: #2980b9;
+}
+
+button:active {
+    background-color: #1c5985;
+}
+
+/* Scrollbar Styling */
+scrollbarvertical {
+    width: 12dp;
+}
+
+scrollbarvertical slidertrack {
+    background-color: #2c2c2c;
+}
+
+scrollbarvertical sliderbar {
+    background-color: #555;
+}
+
+scrollbarvertical sliderbar:hover {
+    background-color: #777;
+}
+
+scrollbarhorizontal {
+    height: 12dp;
+}
+
+scrollbarhorizontal slidertrack {
+    background-color: #2c2c2c;
+}
+
+scrollbarhorizontal sliderbar {
+    background-color: #555;
+}
+
+scrollbarhorizontal sliderbar:hover {
+    background-color: #777;
+}
+
+/* Text Styles */
+h1 {
+    font-size: 28dp;
+    margin: 10dp 0dp;
+}
+
+h2 {
+    font-size: 22dp;
+    margin: 8dp 0dp;
+}
+
+p {
+    margin: 5dp 0dp;
+    line-height: 1.4;
+}

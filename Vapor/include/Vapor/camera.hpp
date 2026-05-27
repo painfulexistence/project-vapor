@@ -29,6 +29,31 @@ public:
       : _eye(eye), _center(center), _up(up), _fov(fov), _aspect(aspect), _near(near), _far(far) {
     }
 
+    // Orthographic mode
+    bool isOrthographic() const {
+        return _isOrthographic;
+    }
+
+    void setOrthographic(float left, float right, float bottom, float top, float near, float far) {
+        _isOrthographic = true;
+        _orthoLeft = left;
+        _orthoRight = right;
+        _orthoBottom = bottom;
+        _orthoTop = top;
+        _near = near;
+        _far = far;
+        _isProjDirty = true;
+    }
+
+    void setPerspective(float fov, float aspect, float near, float far) {
+        _isOrthographic = false;
+        _fov = fov;
+        _aspect = aspect;
+        _near = near;
+        _far = far;
+        _isProjDirty = true;
+    }
+
     glm::vec3 getEye() const {
         return _eye;
     }
@@ -69,7 +94,11 @@ public:
 
     glm::mat4 getProjMatrix() {
         if (_isProjDirty) {
-            _projMatrix = glm::perspective(_fov, _aspect, _near, _far);
+            if (_isOrthographic) {
+                _projMatrix = glm::ortho(_orthoLeft, _orthoRight, _orthoBottom, _orthoTop, _near, _far);
+            } else {
+                _projMatrix = glm::perspective(_fov, _aspect, _near, _far);
+            }
             _isProjDirty = false;
         }
         return _projMatrix;
@@ -194,6 +223,13 @@ private:
     float _aspect;
     float _near;
     float _far;
+
+    // Orthographic projection parameters
+    bool _isOrthographic = false;
+    float _orthoLeft = -1.0f;
+    float _orthoRight = 1.0f;
+    float _orthoBottom = -1.0f;
+    float _orthoTop = 1.0f;
 
     glm::mat4 _viewMatrix;
     glm::mat4 _projMatrix;

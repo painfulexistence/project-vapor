@@ -1,6 +1,6 @@
 #include <metal_stdlib>
 using namespace metal;
-#include "assets/shaders/3d_common.metal"
+#include "Res/shaders/3d_common.metal"
 
 // Pre-filtered environment map shader for specular IBL
 // Each mip level corresponds to a different roughness value

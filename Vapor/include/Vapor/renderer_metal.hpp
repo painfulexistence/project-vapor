@@ -1,15 +1,18 @@
 #pragma once
 #include "renderer.hpp"
 
-#include <SDL3/SDL_video.h>
-#include <SDL3/SDL_render.h>
-#include <SDL3/SDL_stdinc.h>
 #include <Foundation/Foundation.hpp>
 #include <Metal/Metal.hpp>
 #include <QuartzCore/QuartzCore.hpp>
+#include <SDL3/SDL_render.h>
+#include <SDL3/SDL_stdinc.h>
+#include <SDL3/SDL_video.h>
+#include <array>
+#include <memory>
 #include <string>
 #include <unordered_map>
 
+#include "debug_draw.hpp"
 #include "graphics.hpp"
 
 // Forward declarations
@@ -31,13 +34,29 @@ class PrefilterEnvMapPass;
 class BRDFLUTPass;
 class MainRenderPass;
 class WaterPass;
+class ParticlePass;
+class LightScatteringPass;
+class VolumetricFogPass;
+class VolumetricCloudPass;
+class SunFlarePass;
 class PostProcessPass;
+class BloomBrightnessPass;
+class BloomDownsamplePass;
+class BloomUpsamplePass;
+class BloomCompositePass;
+class DOFCoCPass;
+class DOFBlurPass;
+class DOFCompositePass;
 class RmlUiPass;
 class ImGuiPass;
+class DebugDrawPass;
+class CanvasPass;
+class WorldCanvasPass;
 
 class RenderPass {
 public:
-    explicit RenderPass(Renderer_Metal* renderer) : renderer(renderer) {}
+    explicit RenderPass(Renderer_Metal* renderer) : renderer(renderer) {
+    }
     virtual ~RenderPass() = default;
     virtual void execute() = 0;
     virtual const char* getName() const = 0;
@@ -71,7 +90,7 @@ private:
 };
 
 
-class Renderer_Metal final : public Renderer { // Must be public or factory function won't work
+class Renderer_Metal final : public Renderer {// Must be public or factory function won't work
     friend class PrePass;
     friend class TLASBuildPass;
     friend class NormalResolvePass;
@@ -85,9 +104,24 @@ class Renderer_Metal final : public Renderer { // Must be public or factory func
     friend class BRDFLUTPass;
     friend class MainRenderPass;
     friend class WaterPass;
+    friend class ParticlePass;
+    friend class LightScatteringPass;
+    friend class VolumetricFogPass;
+    friend class VolumetricCloudPass;
+    friend class SunFlarePass;
     friend class PostProcessPass;
+    friend class BloomBrightnessPass;
+    friend class BloomDownsamplePass;
+    friend class BloomUpsamplePass;
+    friend class BloomCompositePass;
+    friend class DOFCoCPass;
+    friend class DOFBlurPass;
+    friend class DOFCompositePass;
     friend class RmlUiPass;
     friend class ImGuiPass;
+    friend class DebugDrawPass;
+    friend class CanvasPass;
+    friend class WorldCanvasPass;
 
 public:
     Renderer_Metal();
@@ -101,6 +135,9 @@ public:
     virtual void stage(std::shared_ptr<Scene> scene) override;
 
     virtual void draw(std::shared_ptr<Scene> scene, Camera& camera) override;
+    virtual void draw(entt::registry& registry, std::shared_ptr<Scene> scene, Camera& camera) override;
+
+    virtual void readPixelsAsync(ScreenshotCallback callback) override;
 
     virtual void setRenderPath(RenderPath path) override {
         currentRenderPath = path;
@@ -110,19 +147,134 @@ public:
     }
 
     // Get Metal device (for RmlUI initialization)
-    MTL::Device* getDevice() const { return device; }
+    MTL::Device* getDevice() const {
+        return device;
+    }
 
     // Initialize UI rendering (sets RenderInterface and finalizes RmlUI initialization)
     bool initUI() override;
 
-    NS::SharedPtr<MTL::RenderPipelineState> createPipeline(const std::string& filename, bool isHDR, bool isColorOnly, Uint32 sampleCount);
+    // Debug draw - set the external debug draw queue
+    std::shared_ptr<Vapor::DebugDraw> getDebugDraw() override {
+        return debugDraw;
+    }
+
+    // ===== 2D/3D Batch Rendering API =====
+    void flush2D() override;
+    void flush3D() override;
+
+    // Quad drawing (2D = screen space, 3D = world space with depth)
+    void drawQuad2D(const glm::vec2& position, const glm::vec2& size, const glm::vec4& color) override;
+    void drawQuad2D(const glm::vec3& position, const glm::vec2& size, const glm::vec4& color) override;
+    void drawQuad2D(
+        const glm::vec2& position,
+        const glm::vec2& size,
+        TextureHandle texture,
+        const glm::vec4& tintColor = glm::vec4(1.0f)
+    ) override;
+    void drawQuad2D(const glm::mat4& transform, const glm::vec4& color, int entityID = -1) override;
+    void drawQuad2D(
+        const glm::mat4& transform,
+        TextureHandle texture,
+        const glm::vec2* texCoords,
+        const glm::vec4& tintColor = glm::vec4(1.0f),
+        int entityID = -1
+    ) override;
+    void drawQuad3D(const glm::vec3& position, const glm::vec2& size, const glm::vec4& color) override;
+    void drawQuad3D(
+        const glm::vec3& position,
+        const glm::vec2& size,
+        TextureHandle texture,
+        const glm::vec4& tintColor = glm::vec4(1.0f)
+    ) override;
+    void drawQuad3D(const glm::mat4& transform, const glm::vec4& color, int entityID = -1) override;
+    void drawQuad3D(
+        const glm::mat4& transform,
+        TextureHandle texture,
+        const glm::vec2* texCoords,
+        const glm::vec4& tintColor = glm::vec4(1.0f),
+        int entityID = -1
+    ) override;
+
+    // Rotated quad
+    void drawRotatedQuad2D(const glm::vec2& position, const glm::vec2& size, float rotation, const glm::vec4& color)
+        override;
+    void drawRotatedQuad2D(
+        const glm::vec2& position,
+        const glm::vec2& size,
+        float rotation,
+        TextureHandle texture,
+        const glm::vec4& tintColor = glm::vec4(1.0f)
+    ) override;
+
+    // Line drawing
+    void drawLine2D(const glm::vec2& p0, const glm::vec2& p1, const glm::vec4& color, float thickness = 1.0f) override;
+    void drawLine3D(const glm::vec3& p0, const glm::vec3& p1, const glm::vec4& color, float thickness = 1.0f) override;
+
+    // Shape drawing
+    void drawRect2D(const glm::vec2& position, const glm::vec2& size, const glm::vec4& color, float thickness = 1.0f)
+        override;
+    void drawCircle2D(const glm::vec2& center, float radius, const glm::vec4& color, int segments = 32) override;
+    void drawCircleFilled2D(const glm::vec2& center, float radius, const glm::vec4& color, int segments = 32) override;
+    void drawTriangle2D(const glm::vec2& p0, const glm::vec2& p1, const glm::vec2& p2, const glm::vec4& color) override;
+    void drawTriangleFilled2D(const glm::vec2& p0, const glm::vec2& p1, const glm::vec2& p2, const glm::vec4& color)
+        override;
+
+    // Batch statistics
+    Batch2DStats getBatch2DStats() const override {
+        return batch2DStats;
+    }
+    void resetBatch2DStats() override {
+        batch2DStats = {};
+    }
+
+    NS::SharedPtr<MTL::RenderPipelineState>
+        createPipeline(const std::string& filename, bool isHDR, bool isColorOnly, Uint32 sampleCount);
     NS::SharedPtr<MTL::ComputePipelineState> createComputePipeline(const std::string& filename);
 
-    TextureHandle createTexture(const std::shared_ptr<Image>& img);
+    TextureHandle createTexture(const std::shared_ptr<Vapor::Image>& img) override;
 
-    BufferHandle createVertexBuffer(const std::vector<VertexData>& vertices);
+    // ===== Render-to-Texture API =====
+    RenderTextureHandle createRenderTexture(const RenderTextureDesc& desc) override;
+    void destroyRenderTexture(RenderTextureHandle handle) override;
+    TextureHandle getRenderTextureAsTexture(RenderTextureHandle handle) override;
+    void renderToTexture(
+        RenderTextureHandle target,
+        std::shared_ptr<Scene> scene,
+        Camera& camera,
+        const glm::vec4& clearColor = glm::vec4(0.0f, 0.0f, 0.0f, 1.0f)
+    ) override;
+    glm::uvec2 getRenderTextureSize(RenderTextureHandle handle) override;
+    Uint64 registerRenderTextureForUI(RenderTextureHandle handle) override;
+
+    // Render texture post-processing
+    void applyBloom(RenderTextureHandle target, float threshold = 1.0f, float strength = 0.5f) override;
+    void applyToneMapping(RenderTextureHandle target, float exposure = 1.0f) override;
+    void applyVignette(RenderTextureHandle target, float strength = 0.3f, float radius = 0.8f) override;
+
+    // ===== Font Rendering API =====
+    FontHandle loadFont(const std::string& path, float baseSize) override;
+    void unloadFont(FontHandle handle) override;
+    void drawText2D(
+        FontHandle font,
+        const std::string& text,
+        const glm::vec2& position,
+        float scale = 1.0f,
+        const glm::vec4& color = glm::vec4(1.0f)
+    ) override;
+    void drawText3D(
+        FontHandle font,
+        const std::string& text,
+        const glm::vec3& worldPosition,
+        float scale = 1.0f,
+        const glm::vec4& color = glm::vec4(1.0f)
+    ) override;
+    glm::vec2 measureText(FontHandle font, const std::string& text, float scale = 1.0f) override;
+    float getFontLineHeight(FontHandle font, float scale = 1.0f) override;
+
+    BufferHandle createVertexBuffer(const std::vector<Vapor::VertexData>& vertices);
     BufferHandle createIndexBuffer(const std::vector<Uint32>& indices);
-    BufferHandle createStorageBuffer(const std::vector<VertexData>& vertices);
+    BufferHandle createStorageBuffer(const std::vector<Vapor::VertexData>& vertices);
 
     NS::SharedPtr<MTL::Buffer> getBuffer(BufferHandle handle) const;
     NS::SharedPtr<MTL::Texture> getTexture(TextureHandle handle) const;
@@ -138,6 +290,7 @@ protected:
     CA::MetalDrawable* currentDrawable = nullptr;
 
     // Metal device and core resources
+    SDL_Window* window = nullptr;
     SDL_Renderer* renderer;
     CA::MetalLayer* swapchain;
     MTL::Device* device;
@@ -160,6 +313,82 @@ protected:
     NS::SharedPtr<MTL::RenderPipelineState> irradianceConvolutionPipeline;
     NS::SharedPtr<MTL::RenderPipelineState> prefilterEnvMapPipeline;
     NS::SharedPtr<MTL::RenderPipelineState> brdfLUTPipeline;
+    NS::SharedPtr<MTL::RenderPipelineState> lightScatteringPipeline;
+
+    // Bloom pipelines
+    NS::SharedPtr<MTL::RenderPipelineState> bloomBrightnessPipeline;
+    NS::SharedPtr<MTL::RenderPipelineState> bloomDownsamplePipeline;
+    NS::SharedPtr<MTL::RenderPipelineState> bloomUpsamplePipeline;
+    NS::SharedPtr<MTL::RenderPipelineState> bloomCompositePipeline;
+
+    // DOF (Tilt-Shift) pipelines
+    NS::SharedPtr<MTL::RenderPipelineState> dofCoCPipeline;
+    NS::SharedPtr<MTL::RenderPipelineState> dofBlurPipeline;
+    NS::SharedPtr<MTL::RenderPipelineState> dofCompositePipeline;
+
+    // Debug draw pipeline and resources
+    NS::SharedPtr<MTL::RenderPipelineState> debugDrawPipeline;
+    NS::SharedPtr<MTL::DepthStencilState> debugDrawDepthStencilState;
+    std::vector<NS::SharedPtr<MTL::Buffer>> debugDrawVertexBuffers;// Per-frame buffers
+    std::shared_ptr<Vapor::DebugDraw> debugDraw = nullptr;
+
+    // 2D Batch rendering pipeline and resources
+    NS::SharedPtr<MTL::RenderPipelineState> batch2DPipeline;
+    NS::SharedPtr<MTL::RenderPipelineState> batch2DPipelineAdditive;
+    NS::SharedPtr<MTL::RenderPipelineState> batch2DPipelineMultiply;
+    NS::SharedPtr<MTL::DepthStencilState> batch2DDepthStencilState;// No depth test
+    NS::SharedPtr<MTL::DepthStencilState> batch2DDepthStencilStateEnabled;// With depth test
+    std::vector<NS::SharedPtr<MTL::Buffer>> batch2DVertexBuffers;// Per-frame triple-buffered
+    std::vector<NS::SharedPtr<MTL::Buffer>> batch2DIndexBuffers;// Per-frame triple-buffered
+    std::vector<NS::SharedPtr<MTL::Buffer>> batch2DUniformBuffers;// Per-frame triple-buffered
+
+    // 3D Batch buffers (to avoid overwriting 2D buffers in the same frame)
+    std::vector<NS::SharedPtr<MTL::Buffer>> batch3DVertexBuffers;
+    std::vector<NS::SharedPtr<MTL::Buffer>> batch3DIndexBuffers;
+    std::vector<NS::SharedPtr<MTL::Buffer>> batch3DUniformBuffers;
+    NS::SharedPtr<MTL::Texture> batch2DWhiteTexture;// 1x1 white texture
+    TextureHandle batch2DWhiteTextureHandle;
+
+    // Batch constants
+    static constexpr Uint32 BatchMaxQuads = 20000;
+    static constexpr Uint32 BatchMaxVertices = BatchMaxQuads * 4;
+    static constexpr Uint32 BatchMaxIndices = BatchMaxQuads * 6;
+    static constexpr Uint32 BatchMaxTextureSlots = 16;
+
+    // 2D Batch CPU-side state (screen space, no depth)
+    // When texture slots overflow (>16 unique textures), the current batch is
+    // saved to batch2DSubBatches and a new batch starts automatically.
+    struct Batch2DSubBatch {
+        std::vector<Batch2DVertex>      vertices;
+        std::vector<Uint32>             indices;
+        std::array<TextureHandle, 16>   textureSlots;
+        Uint32                          textureSlotCount = 1;
+    };
+    std::vector<Batch2DSubBatch> batch2DSubBatches;
+    std::vector<Batch2DVertex> batch2DVertices;
+    std::vector<Uint32> batch2DIndices;
+    std::array<TextureHandle, 16> batch2DTextureSlots;
+    Uint32 batch2DTextureSlotIndex = 1;// 0 = white texture
+    glm::mat4 batch2DProjection = glm::mat4(1.0f);
+    BlendMode batch2DBlendMode = BlendMode::Alpha;
+    Batch2DStats batch2DStats;
+    bool batch2DActive = false;
+
+    void splitBatch2D(); // flush current batch into sub-batches, reset slots
+
+    // 3D Batch CPU-side state (world space, with depth)
+    std::vector<Batch2DVertex> batch3DVertices;
+    std::vector<Uint32> batch3DIndices;
+    std::array<TextureHandle, 16> batch3DTextureSlots;
+    Uint32 batch3DTextureSlotIndex = 1;
+    glm::mat4 batch3DProjection = glm::mat4(1.0f);
+    BlendMode batch3DBlendMode = BlendMode::Alpha;
+    Batch2DStats batch3DStats;
+    bool batch3DActive = false;
+
+    // Pre-computed quad positions and UVs
+    glm::vec4 batchQuadPositions[4];
+    glm::vec2 batchQuadTexCoords[4];
 
     // Water rendering pipeline and resources
     NS::SharedPtr<MTL::RenderPipelineState> waterPipeline;
@@ -186,6 +415,22 @@ protected:
     TextureHandle waterNoiseMap;
     NS::SharedPtr<MTL::Texture> environmentCubeMap;
 
+    // Particle system
+    static constexpr Uint32 MAX_PARTICLES = 1000;// Reduced for debugging
+    bool particleSystemEnabled = true;
+    Uint32 particleCount = MAX_PARTICLES;
+
+    NS::SharedPtr<MTL::ComputePipelineState> particleForcePipeline;
+    NS::SharedPtr<MTL::ComputePipelineState> particleIntegratePipeline;
+    NS::SharedPtr<MTL::RenderPipelineState> particleRenderPipeline;
+    NS::SharedPtr<MTL::DepthStencilState> particleDepthStencilState;
+
+    // Single particle buffer (persistent state, not triple-buffered)
+    NS::SharedPtr<MTL::Buffer> particleBuffer;
+    // Per-frame uniform buffers (triple-buffered)
+    std::vector<NS::SharedPtr<MTL::Buffer>> particleSimParamsBuffers;
+    std::vector<NS::SharedPtr<MTL::Buffer>> particleAttractorBuffers;
+
     // Per-frame buffers
     std::vector<NS::SharedPtr<MTL::Buffer>> frameDataBuffers;
     std::vector<NS::SharedPtr<MTL::Buffer>> cameraDataBuffers;
@@ -198,30 +443,120 @@ protected:
     NS::SharedPtr<MTL::Buffer> iblCaptureDataBuffer;
     std::vector<NS::SharedPtr<MTL::Buffer>> clusterBuffers;
 
+    // Light scattering (God Rays) resources
+    std::vector<NS::SharedPtr<MTL::Buffer>> lightScatteringDataBuffers;
+    NS::SharedPtr<MTL::Texture> lightScatteringRT;// Half-resolution scattering texture
+    bool lightScatteringEnabled = true;
+    LightScatteringData lightScatteringSettings;
+
+    // Volumetric Fog resources
+    NS::SharedPtr<MTL::ComputePipelineState> fogFroxelInjectionPipeline;
+    NS::SharedPtr<MTL::ComputePipelineState> fogScatteringIntegrationPipeline;
+    NS::SharedPtr<MTL::RenderPipelineState> fogApplyPipeline;
+    NS::SharedPtr<MTL::RenderPipelineState> fogSimplePipeline;
+    std::vector<NS::SharedPtr<MTL::Buffer>> volumetricFogDataBuffers;
+    NS::SharedPtr<MTL::Texture> fogFroxelGrid;// 3D froxel data texture
+    NS::SharedPtr<MTL::Texture> fogIntegratedVolume;// 3D integrated scattering
+    bool volumetricFogEnabled = true;
+    VolumetricFogData volumetricFogSettings;
+
+    // Volumetric Cloud resources
+    NS::SharedPtr<MTL::RenderPipelineState> cloudRenderPipeline;
+    NS::SharedPtr<MTL::RenderPipelineState> cloudLowResPipeline;
+    NS::SharedPtr<MTL::RenderPipelineState> cloudTemporalResolvePipeline;
+    NS::SharedPtr<MTL::RenderPipelineState> cloudCompositePipeline;
+    std::vector<NS::SharedPtr<MTL::Buffer>> volumetricCloudDataBuffers;
+    NS::SharedPtr<MTL::Texture> cloudRT;// Cloud render target (quarter res)
+    NS::SharedPtr<MTL::Texture> cloudHistoryRT;// Previous frame clouds (for TAA)
+    bool volumetricCloudsEnabled = false;
+    bool m_supportsRaytracing = false;
+    VolumetricCloudData volumetricCloudSettings;
+
+    // Sun Flare resources
+    NS::SharedPtr<MTL::RenderPipelineState> sunFlarePipeline;
+    NS::SharedPtr<MTL::ComputePipelineState> sunOcclusionPipeline;
+    std::vector<NS::SharedPtr<MTL::Buffer>> sunFlareDataBuffers;
+    NS::SharedPtr<MTL::Buffer> sunVisibilityBuffer;// Single float for occlusion result
+    bool sunFlareEnabled = false;
+    SunFlareData sunFlareSettings;
+
     // IBL textures
-    NS::SharedPtr<MTL::Texture> environmentCubemap;      // Captured sky cubemap
-    NS::SharedPtr<MTL::Texture> irradianceMap;           // Diffuse irradiance cubemap
-    NS::SharedPtr<MTL::Texture> prefilterMap;            // Pre-filtered specular cubemap (with mipmaps)
-    NS::SharedPtr<MTL::Texture> brdfLUT;                 // BRDF integration LUT
-    bool iblNeedsUpdate = true;                          // Flag to trigger IBL update
+    NS::SharedPtr<MTL::Texture> environmentCubemap;// Captured sky cubemap
+    NS::SharedPtr<MTL::Texture> irradianceMap;// Diffuse irradiance cubemap
+    NS::SharedPtr<MTL::Texture> prefilterMap;// Pre-filtered specular cubemap (with mipmaps)
+    NS::SharedPtr<MTL::Texture> brdfLUT;// BRDF integration LUT
+    bool iblNeedsUpdate = true;// Flag to trigger IBL update
     std::vector<NS::SharedPtr<MTL::Buffer>> accelInstanceBuffers;
     std::vector<NS::SharedPtr<MTL::Buffer>> TLASScratchBuffers;
     std::vector<NS::SharedPtr<MTL::AccelerationStructure>> TLASBuffers;
 
     // Instance data
+    // instanceBatches: material → list of (mesh, instanceArrayIndex) for rasterization draw calls
+    struct MeshDraw { std::shared_ptr<Vapor::Mesh> mesh; uint32_t instanceIndex; };
     std::vector<InstanceData> instances;
+    std::vector<InstanceData> pendingEcsInstances;
+    std::unordered_map<std::shared_ptr<Vapor::Material>, std::vector<MeshDraw>> pendingEcsBatches;
+    std::vector<MTL::AccelerationStructureInstanceDescriptor> pendingEcsAccelInstances;
     std::vector<MTL::AccelerationStructureInstanceDescriptor> accelInstances;
-    std::unordered_map<std::shared_ptr<Material>, std::vector<std::shared_ptr<Mesh>>> instanceBatches;
+    std::unordered_map<std::shared_ptr<Vapor::Material>, std::vector<MeshDraw>> instanceBatches;
 
     // Render targets
     NS::SharedPtr<MTL::Texture> colorRT_MS;
     NS::SharedPtr<MTL::Texture> colorRT;
+    NS::SharedPtr<MTL::Texture> tempColorRT;// For ping-pong post-processing (fog, clouds)
     NS::SharedPtr<MTL::Texture> depthStencilRT_MS;
     NS::SharedPtr<MTL::Texture> depthStencilRT;
     NS::SharedPtr<MTL::Texture> normalRT_MS;
     NS::SharedPtr<MTL::Texture> normalRT;
     NS::SharedPtr<MTL::Texture> shadowRT;
     NS::SharedPtr<MTL::Texture> aoRT;
+
+    // Bloom render targets
+    NS::SharedPtr<MTL::Texture> bloomBrightnessRT;// Half-res brightness extraction
+    std::vector<NS::SharedPtr<MTL::Texture>> bloomPyramidRTs;// Mipmap pyramid for bloom (5 levels)
+    NS::SharedPtr<MTL::Texture> bloomResultRT;// Final bloom result
+    static constexpr Uint32 BLOOM_PYRAMID_LEVELS = 5;
+    float bloomThreshold = 1.0f;
+    float bloomStrength = 0.8f;
+
+    // DOF (Tilt-Shift) render targets
+    NS::SharedPtr<MTL::Texture> dofCoCRT;// Color + CoC in alpha
+    NS::SharedPtr<MTL::Texture> dofBlurRT;// Blurred result
+    NS::SharedPtr<MTL::Texture> dofResultRT;// Final DOF composite
+
+    // DOF parameters (Octopath Traveler tilt-shift style)
+    struct DOFParams {
+        float focusCenter = 0.5f;// Y position of focus band center (0-1)
+        float focusWidth = 0.15f;// Width of the in-focus band
+        float focusFalloff = 0.8f;// How quickly blur increases outside focus
+        float maxBlur = 1.0f;// Maximum blur intensity (0-1)
+        float tiltAngle = 0.0f;// Tilt angle in radians (0 = horizontal)
+        float bokehRoundness = 0.8f;// Bokeh shape: 0 = hexagonal, 1 = circular
+        float blendSharpness = 0.3f;// Transition sharpness
+        int sampleCount = 32;// Blur quality (8-64)
+    } dofParams;
+
+    // Post-processing parameters
+    struct PostProcessParams {
+        // Chromatic Aberration
+        float chromaticAberrationStrength = 0.01f;// RGB offset strength
+        float chromaticAberrationFalloff = 2.0f;// Edge falloff power
+
+        // Vignette
+        float vignetteStrength = 0.3f;// Darkening intensity
+        float vignetteRadius = 0.8f;// Start radius (0-1)
+        float vignetteSoftness = 0.5f;// Transition softness
+
+        // Color Grading
+        float saturation = 1.0f;// Color saturation (0-2)
+        float contrast = 1.0f;// Contrast (0-2)
+        float brightness = 0.0f;// Brightness offset (-1 to 1)
+        float temperature = 0.0f;// Color temperature shift (-1 to 1)
+        float tint = 0.0f;// Green-magenta tint (-1 to 1)
+
+        // Tone Mapping
+        float exposure = 1.0f;// Exposure multiplier
+    } postProcessParams;
 
     // Acceleration structures for ray tracing
     std::vector<NS::SharedPtr<MTL::AccelerationStructure>> BLASs;
@@ -233,6 +568,12 @@ protected:
     Uint32 drawCount = 0;
 
 private:
+    // Internal batch management
+    void beginBatch2D();
+    void endBatch2D();
+    void beginBatch3D();
+    void endBatch3D();
+
     // Resource ID counters
     Uint32 nextBufferID = 0;
     Uint32 nextTextureID = 0;
@@ -244,14 +585,32 @@ private:
     std::unordered_map<Uint32, NS::SharedPtr<MTL::Buffer>> buffers;
     std::unordered_map<Uint32, NS::SharedPtr<MTL::Texture>> textures;
     std::unordered_map<Uint32, NS::SharedPtr<MTL::RenderPipelineState>> pipelines;
-    std::unordered_map<std::shared_ptr<Material>, Uint32> materialIDs;
+    std::unordered_map<std::shared_ptr<Vapor::Material>, Uint32> materialIDs;
+
+    // Render texture internal data
+    struct RenderTextureData {
+        NS::SharedPtr<MTL::Texture> colorTexture;
+        NS::SharedPtr<MTL::Texture> tempTexture;// For ping-pong post-processing
+        NS::SharedPtr<MTL::Texture> depthTexture;
+        TextureHandle textureHandle;// Handle for using as sampler texture
+        Uint32 width = 0;
+        Uint32 height = 0;
+        bool hdr = false;
+        Uint32 sampleCount = 1;
+    };
+    Uint32 nextRenderTextureID = 0;
+    std::unordered_map<Uint32, RenderTextureData> renderTextures;
 
     RenderPath currentRenderPath = RenderPath::Forward;
 
     // UI rendering (using void* for pimpl idiom to hide implementation)
     void* m_uiRenderer = nullptr;
     Rml::Context* m_uiContext = nullptr;
+    std::vector<ScreenshotCallback> m_pendingScreenshots;
+
+    // Font rendering
+    FontManager m_fontManager;
 
     void createResources();
-    void renderUI();  // Internal method called by RmlUiPass
+    void renderUI();// Internal method called by RmlUiPass
 };

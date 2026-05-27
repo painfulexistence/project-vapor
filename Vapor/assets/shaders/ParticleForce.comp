@@ -1,0 +1,57 @@
+#version 450
+layout(local_size_x = 256, local_size_y = 1, local_size_z = 1) in;
+
+struct Particle {
+    vec3 position;
+    float _pad1;
+    vec3 velocity;
+    float _pad2;
+    vec3 force;
+    float _pad3;
+    vec4 color;
+};
+
+layout(std140, set = 0, binding = 0) uniform SimulationParams {
+    vec2 resolution;
+    vec2 mousePosition;
+    float time;
+    float deltaTime;
+    float _pad1;
+    float _pad2;
+};
+
+layout(std140, set = 0, binding = 1) uniform AttractorData {
+    vec3 attractorPos;
+    float attractorStrength;
+};
+
+layout(std430, set = 0, binding = 2) buffer ParticleBuffer {
+    Particle particles[];
+};
+
+void main() {
+    uint idx = gl_GlobalInvocationID.x;
+    if (idx >= particles.length()) {
+        return;
+    }
+
+    Particle p = particles[idx];
+
+    // Reset force
+    p.force = vec3(0.0);
+
+    // Attractor force
+    vec3 toAttractor = attractorPos - p.position;
+    float dist = length(toAttractor);
+    if (dist > 0.001) {
+        vec3 dir = toAttractor / dist;
+        // Inverse square law with softening
+        float forceMag = attractorStrength / (dist * dist + 0.1);
+        p.force += dir * forceMag;
+    }
+
+    // Damping force (velocity-dependent drag)
+    p.force -= p.velocity * 0.5;
+
+    particles[idx] = p;
+}

@@ -1,0 +1,175 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Project Vapor</title>
+  <style>
+    :root {
+      --bg: #0d0d0f;
+      --bg-surface: #141418;
+      --bg-raised: #1c1c22;
+      --border: #2a2a33;
+      --text: #e2e2e8;
+      --text-muted: #7a7a8c;
+      --accent: #7c6af7;
+      --accent-dim: #3d3570;
+      --warn: #c97a2f;
+      --ok: #4a9e6a;
+      --danger: #9e4a4a;
+    }
+    * { box-sizing: border-box; margin: 0; padding: 0; }
+    body {
+      background: var(--bg);
+      color: var(--text);
+      font-family: 'Berkeley Mono', 'JetBrains Mono', 'Fira Code', 'Cascadia Code', monospace;
+      font-size: 15px;
+      line-height: 1.75;
+    }
+    nav {
+      background: var(--bg-surface);
+      border-bottom: 1px solid var(--border);
+      padding: 16px 24px;
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+    }
+    nav .site-title { color: var(--text-muted); text-decoration: none; font-size: 14px; }
+    nav .links { display: flex; gap: 24px; }
+    nav .links a { color: var(--text-muted); text-decoration: none; font-size: 13px; }
+    nav .links a:hover { color: var(--accent); }
+    nav .links a.active { color: var(--accent); }
+    main { max-width: 860px; margin: 0 auto; padding: 48px 24px; }
+    .hero { margin-bottom: 56px; }
+    .hero h1 { font-size: 26px; font-weight: 600; margin-bottom: 12px; }
+    .hero p { color: var(--text-muted); font-size: 14px; max-width: 560px; }
+    .section-label {
+      font-size: 11px;
+      color: var(--text-muted);
+      letter-spacing: 0.1em;
+      text-transform: uppercase;
+      margin-bottom: 16px;
+    }
+    .card-grid {
+      display: grid;
+      grid-template-columns: 1fr 1fr;
+      gap: 16px;
+      margin-bottom: 48px;
+    }
+    .card {
+      background: var(--bg-surface);
+      border: 1px solid var(--border);
+      border-radius: 4px;
+      padding: 24px;
+      text-decoration: none;
+      display: block;
+      transition: border-color 0.15s;
+    }
+    .card:hover { border-color: var(--accent); }
+    .card h2 { font-size: 15px; font-weight: 600; color: var(--text); margin-bottom: 8px; }
+    .card p { font-size: 13px; color: var(--text-muted); line-height: 1.6; }
+    .card .tag {
+      display: inline-block;
+      font-size: 11px;
+      color: var(--accent);
+      margin-bottom: 10px;
+    }
+    .divider { border: none; border-top: 1px solid var(--border); margin: 40px 0; }
+    .adr-list { list-style: none; }
+    .adr-list li {
+      border-bottom: 1px solid var(--border);
+      padding: 14px 0;
+    }
+    .adr-list li:first-child { border-top: 1px solid var(--border); }
+    .adr-list a { color: var(--text); text-decoration: none; font-size: 14px; }
+    .adr-list a:hover { color: var(--accent); }
+    .adr-list .meta { font-size: 12px; color: var(--text-muted); margin-top: 2px; }
+    .badge {
+      display: inline-block;
+      font-size: 11px;
+      border-radius: 3px;
+      padding: 2px 8px;
+      margin-left: 10px;
+      vertical-align: middle;
+    }
+    .badge-ok { background: rgba(74,158,106,0.15); color: var(--ok); }
+    @media (max-width: 640px) {
+      main { padding: 24px 16px; }
+      .card-grid { grid-template-columns: 1fr; }
+    }
+  </style>
+</head>
+<body>
+  <nav>
+    <a class="site-title" href="index.html">Project Vapor</a>
+    <div class="links">
+      <a href="architecture.html">Architecture</a>
+      <a href="features.html">Features</a>
+      <a href="techstack.html">Tech Stack</a>
+      <a href="roadmap.html">Roadmap</a>
+      <a href="ADR/index.html">ADRs</a>
+    </div>
+  </nav>
+  <main>
+    <div class="hero">
+      <h1>Project Vapor</h1>
+      <p>A modern 3D game engine built from scratch in C++, targeting Metal and Vulkan. Solo project — GPU-driven rendering, ECS, physics integration, and a working demo game as the proving ground.</p>
+    </div>
+
+    <div class="section-label">Documentation</div>
+    <div class="card-grid">
+      <a class="card" href="architecture.html">
+        <div class="tag">// reference</div>
+        <h2>Architecture</h2>
+        <p>Project structure, subsystem relationships, data flow for a single frame, and known technical debt.</p>
+      </a>
+      <a class="card" href="features.html">
+        <div class="tag">// reference</div>
+        <h2>Features</h2>
+        <p>Full inventory of implemented capabilities across rendering, physics, audio, input, UI, and tooling.</p>
+      </a>
+      <a class="card" href="techstack.html">
+        <div class="tag">// reference</div>
+        <h2>Tech Stack</h2>
+        <p>Third-party libraries, backend choices, and the rationale behind each dependency.</p>
+      </a>
+      <a class="card" href="ADR/index.html">
+        <div class="tag">// decisions</div>
+        <h2>Architecture Decision Records</h2>
+        <p>Point-in-time records of significant design decisions — what was chosen, what was rejected, and why.</p>
+      </a>
+    </div>
+
+    <hr class="divider">
+
+    <div class="section-label">Decision Records</div>
+    <ul class="adr-list">
+      <li>
+        <a href="ADR/ADR-001-test-framework.html">ADR-001 — Test Framework Selection</a>
+        <span class="badge badge-ok">Adopted</span>
+        <div class="meta">2026-04-29 · Catch2 v3</div>
+      </li>
+      <li>
+        <a href="ADR/ADR-002-ci-pipeline.html">ADR-002 — CI Pipeline Design</a>
+        <span class="badge badge-ok">Adopted</span>
+        <div class="meta">2026-04-29 · GitHub Actions, ccache</div>
+      </li>
+      <li>
+        <a href="ADR/ADR-003-test-isolation-strategy.html">ADR-003 — Test Isolation Strategy</a>
+        <span class="badge badge-ok">Adopted</span>
+        <div class="meta">2026-04-29 · Avoid full Vapor lib linkage in unit tests</div>
+      </li>
+      <li>
+        <a href="ADR/ADR-004-graphics-header-split.html">ADR-004 — Graphics Header Split</a>
+        <span class="badge badge-ok">Adopted</span>
+        <div class="meta">2026-04-29 · graphics.hpp → 5 focused sub-headers</div>
+      </li>
+      <li>
+        <a href="ADR/ADR-005-phase4-refactoring.html">ADR-005 — Phase 4 Refactoring</a>
+        <span class="badge badge-ok">Adopted</span>
+        <div class="meta">2026-05-01 · ECS migration, Physics3D job system</div>
+      </li>
+    </ul>
+  </main>
+</body>
+</html>

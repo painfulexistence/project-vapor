@@ -25,12 +25,12 @@ namespace Vapor {
         }
     }
 
-    double RmlUiSystem::GetElapsedTime() {
+    auto RmlUiSystem::GetElapsedTime() -> double {
         // Use SDL3's time API
         return SDL_GetTicks() / 1000.0;
     }
 
-    bool RmlUiSystem::LogMessage(Rml::Log::Type type, const Rml::String& message) {
+    auto RmlUiSystem::LogMessage(Rml::Log::Type type, const Rml::String& message) -> bool {
         switch (type) {
         case Rml::Log::LT_ALWAYS:
         case Rml::Log::LT_ERROR:
@@ -53,23 +53,23 @@ namespace Vapor {
     }
 
     void RmlUiSystem::SetMouseCursor(const Rml::String& cursor_name) {
-        SDL_SystemCursor sdl_cursor = SDL_SYSTEM_CURSOR_DEFAULT;
+        SDL_SystemCursor sdlCursor = SDL_SYSTEM_CURSOR_DEFAULT;
 
         // Map RmlUI cursor names to SDL3 cursor types (SDL3 renamed some constants)
         if (cursor_name == "arrow") {
-            sdl_cursor = SDL_SYSTEM_CURSOR_DEFAULT;
+            sdlCursor = SDL_SYSTEM_CURSOR_DEFAULT;
         } else if (cursor_name == "move") {
-            sdl_cursor = SDL_SYSTEM_CURSOR_MOVE;// SDL3: was SDL_SYSTEM_CURSOR_SIZEALL
+            sdlCursor = SDL_SYSTEM_CURSOR_MOVE;// SDL3: was SDL_SYSTEM_CURSOR_SIZEALL
         } else if (cursor_name == "pointer") {
-            sdl_cursor = SDL_SYSTEM_CURSOR_POINTER;// SDL3: was SDL_SYSTEM_CURSOR_HAND
+            sdlCursor = SDL_SYSTEM_CURSOR_POINTER;// SDL3: was SDL_SYSTEM_CURSOR_HAND
         } else if (cursor_name == "resize") {
-            sdl_cursor = SDL_SYSTEM_CURSOR_NWSE_RESIZE;// SDL3: was SDL_SYSTEM_CURSOR_SIZENWSE
+            sdlCursor = SDL_SYSTEM_CURSOR_NWSE_RESIZE;// SDL3: was SDL_SYSTEM_CURSOR_SIZENWSE
         } else if (cursor_name == "cross") {
-            sdl_cursor = SDL_SYSTEM_CURSOR_CROSSHAIR;
+            sdlCursor = SDL_SYSTEM_CURSOR_CROSSHAIR;
         } else if (cursor_name == "text") {
-            sdl_cursor = SDL_SYSTEM_CURSOR_TEXT;
+            sdlCursor = SDL_SYSTEM_CURSOR_TEXT;
         } else if (cursor_name == "unavailable") {
-            sdl_cursor = SDL_SYSTEM_CURSOR_NOT_ALLOWED;// SDL3: was SDL_SYSTEM_CURSOR_NOTALLOWED
+            sdlCursor = SDL_SYSTEM_CURSOR_NOT_ALLOWED;// SDL3: was SDL_SYSTEM_CURSOR_NOTALLOWED
         } else {
             // spdlog::trace("[RmlUi] Unknown cursor name: {}", cursor_name);
             return;
@@ -77,13 +77,13 @@ namespace Vapor {
 
         // Cache cursor if not already created
         // SDL3 has more cursor types, so we need a larger cache
-        int cursor_index = static_cast<int>(sdl_cursor);
-        if (cursor_index >= 0 && cursor_index < 20) {// Increased from 10 to 20 for SDL3
-            if (!m_cursors[cursor_index]) {
-                m_cursors[cursor_index] = SDL_CreateSystemCursor(sdl_cursor);
+        int cursorIndex = static_cast<int>(sdlCursor);
+        if (cursorIndex >= 0 && cursorIndex < 20) {// Increased from 10 to 20 for SDL3
+            if (!m_cursors[cursorIndex]) {
+                m_cursors[cursorIndex] = SDL_CreateSystemCursor(sdlCursor);
             }
-            if (m_cursors[cursor_index]) {
-                SDL_SetCursor(m_cursors[cursor_index]);
+            if (m_cursors[cursorIndex]) {
+                SDL_SetCursor(m_cursors[cursorIndex]);
             }
         }
     }
@@ -97,10 +97,10 @@ namespace Vapor {
 
     void RmlUiSystem::GetClipboardText(Rml::String& text) {
         // SDL3 clipboard API
-        char* clipboard_text = SDL_GetClipboardText();
-        if (clipboard_text) {
-            text = clipboard_text;
-            SDL_free(clipboard_text);
+        char* clipboardText = SDL_GetClipboardText();
+        if (clipboardText) {
+            text = clipboardText;
+            SDL_free(clipboardText);
         } else {
             text = "";
         }

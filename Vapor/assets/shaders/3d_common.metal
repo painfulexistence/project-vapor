@@ -66,7 +66,8 @@ struct MaterialData {
     float sheenTint;
     float clearcoat;
     float clearcoatGloss;
-    float usePrototypeUV; // TODO: separate material
+    float prototypeUVMode; // 0 = Off, 1 = World Space, 2 = Object Space
+    float uvScale;
 };
 
 struct DirLight {
