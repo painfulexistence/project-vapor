@@ -317,11 +317,8 @@ auto main(int argc, char* args[]) -> int {
     renderer->init(window);
 
     // Scene serializer — engine pre-registers transform/meshRenderer;
-    // game registers its own components and the GLTF-geometry skip predicate.
+    // game registers game-specific component writers.
     Vapor::SceneSerializer sceneSerializer;
-    sceneSerializer.registerSkipPredicate([](entt::registry& reg, entt::entity e) {
-        return reg.all_of<SceneGeometryTag>(e);
-    });
     sceneSerializer.registerComponent("autoRotate",
         [](Vapor::json& out, entt::registry& reg, entt::entity e) {
             if (auto* c = reg.try_get<AutoRotateComponent>(e))
@@ -331,6 +328,14 @@ auto main(int argc, char* args[]) -> int {
     Vapor::SceneInspector sceneInspector;
     sceneInspector.attachSerializer(sceneSerializer);
     sceneInspector.setGltfPath("models/Sponza/Sponza.gltf", /*optimized=*/true);
+    // Exclude GLTF-spawned geometry — the inspector decides what to serialize,
+    // not the serializer.
+    sceneInspector.setEntityProvider([](entt::registry& reg) {
+        std::vector<entt::entity> out;
+        for (auto e : reg.storage<entt::entity>())
+            if (!reg.all_of<SceneGeometryTag>(e)) out.push_back(e);
+        return out;
+    });
     setupCustomDrawers(sceneInspector);
 
     // Load a font for text rendering

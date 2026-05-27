@@ -11,6 +11,7 @@
 #include <functional>
 #include <string>
 #include <vector>
+#include <span>
 
 namespace Vapor {
 
@@ -18,6 +19,9 @@ class SceneInspector {
 public:
     using CustomDrawer     = std::function<void(entt::registry&, entt::entity)>;
     using CustomMenuDrawer = std::function<void(entt::registry&, entt::entity)>;
+
+    // Returns the entity list to serialize. Default: all entities.
+    using EntityProvider   = std::function<std::vector<entt::entity>(entt::registry&)>;
 
     void draw(entt::registry& registry) {
         drawEntityList(registry);
@@ -38,6 +42,12 @@ public:
         m_serializer = &serializer;
     }
 
+    // Override which entities get serialized when Save is pressed.
+    // Default (no provider): every entity in the registry.
+    void setEntityProvider(EntityProvider fn) {
+        m_entityProvider = std::move(fn);
+    }
+
     // Optionally pre-fill the GLTF path shown in the save section.
     void setGltfPath(const std::string& path, bool optimized = true) {
         strncpy(m_gltfPathBuf, path.c_str(), sizeof(m_gltfPathBuf) - 1);
@@ -55,6 +65,7 @@ private:
 
     // Save section state — only active when m_serializer != nullptr
     SceneSerializer* m_serializer    = nullptr;
+    EntityProvider   m_entityProvider;           // null → all entities
     char m_savePath[256]             = "scene.json";
     char m_gltfPathBuf[256]          = "";
     bool m_gltfOptimized             = true;
@@ -122,15 +133,26 @@ private:
         ImGui::InputText("##savepath",  m_savePath,    sizeof(m_savePath));
         ImGui::SameLine();
         if (ImGui::Button("Save")) {
+            // Caller decides which entities to serialize;
+            // default: every entity in the registry.
+            std::vector<entt::entity> entities;
+            if (m_entityProvider) {
+                entities = m_entityProvider(registry);
+            } else {
+                for (auto e : registry.storage<entt::entity>())
+                    entities.push_back(e);
+            }
+
             auto r = m_serializer->save(
                 registry,
+                std::span(entities),
                 std::string(m_gltfPathBuf),
                 m_gltfOptimized,
                 std::string(m_savePath)
             );
             m_saveOk     = r.ok;
             m_saveStatus = r.ok
-                ? fmt::format("OK  {} entities, {} GLTF skipped", r.entityCount, r.skippedCount)
+                ? fmt::format("OK  {} entities", r.entityCount)
                 : fmt::format("ERR  {}", r.error);
         }
         ImGui::InputText("GLTF path##gltfpath", m_gltfPathBuf, sizeof(m_gltfPathBuf));
