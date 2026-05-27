@@ -26,20 +26,22 @@ inline SurfelFlags operator&(SurfelFlags a, SurfelFlags b) {
 // Design Decision: 128 bytes chosen for balance between info completeness and memory
 // See GIBS_DESIGN.md Decision #1
 struct alignas(16) Surfel {
-    glm::vec3 position;       // World space position
-    float radius;             // Surfel coverage radius
-    glm::vec3 normal;         // Surface normal (normalized)
-    float _pad1;
-    glm::vec3 albedo;         // Surface reflectance (diffuse color)
-    float _pad2;
-    glm::vec3 irradiance;     // Accumulated indirect irradiance (RGB)
-    float _pad3;
-    glm::vec3 directLight;    // Direct lighting contribution
-    float age;                // Frame age for temporal stability
-    Uint32 cellHash;          // Spatial hash cell ID
-    Uint32 flags;             // SurfelFlags bitmask
-    Uint32 instanceID;        // Source mesh instance (for dynamic tracking)
-    Uint32 _pad4;
+    glm::vec3 position;       // World space position (12 bytes)
+    float radius;             // Surfel coverage radius (4 bytes) = 16
+    glm::vec3 normal;         // Surface normal (normalized) (12 bytes)
+    float _pad1;              // (4 bytes) = 32
+    glm::vec3 albedo;         // Surface reflectance (diffuse color) (12 bytes)
+    float _pad2;              // (4 bytes) = 48
+    glm::vec3 irradiance;     // Accumulated indirect irradiance (RGB) (12 bytes)
+    float _pad3;              // (4 bytes) = 64
+    glm::vec3 directLight;    // Direct lighting contribution (12 bytes)
+    float age;                // Frame age for temporal stability (4 bytes) = 80
+    Uint32 cellHash;          // Spatial hash cell ID (4 bytes)
+    Uint32 flags;             // SurfelFlags bitmask (4 bytes)
+    Uint32 instanceID;        // Source mesh instance (4 bytes)
+    Uint32 _pad4;             // (4 bytes) = 96
+    glm::vec4 _reserved1;     // Reserved for future use (16 bytes) = 112
+    glm::vec4 _reserved2;     // Reserved for future use (16 bytes) = 128
 };
 static_assert(sizeof(Surfel) == 128, "Surfel must be 128 bytes for GPU alignment");
 

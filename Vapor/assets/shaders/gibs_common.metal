@@ -28,20 +28,22 @@ constant float GIBS_EPSILON = 1e-6;
 // Single Surfel - 128 bytes
 // Design Decision: 128 bytes for balance between info and memory efficiency
 struct Surfel {
-    float3 position;        // World space position
-    float radius;           // Surfel coverage radius
-    float3 normal;          // Surface normal (normalized)
-    float _pad1;
-    float3 albedo;          // Surface reflectance (diffuse color)
-    float _pad2;
-    float3 irradiance;      // Accumulated indirect irradiance (RGB)
-    float _pad3;
-    float3 directLight;     // Direct lighting contribution
-    float age;              // Frame age for temporal stability
-    uint cellHash;          // Spatial hash cell ID
-    uint flags;             // SurfelFlags bitmask
-    uint instanceID;        // Source mesh instance
-    uint _pad4;
+    float3 position;        // World space position (12 bytes)
+    float radius;           // Surfel coverage radius (4 bytes) = 16
+    float3 normal;          // Surface normal (normalized) (12 bytes)
+    float _pad1;            // (4 bytes) = 32
+    float3 albedo;          // Surface reflectance (diffuse color) (12 bytes)
+    float _pad2;            // (4 bytes) = 48
+    float3 irradiance;      // Accumulated indirect irradiance (RGB) (12 bytes)
+    float _pad3;            // (4 bytes) = 64
+    float3 directLight;     // Direct lighting contribution (12 bytes)
+    float age;              // Frame age for temporal stability (4 bytes) = 80
+    uint cellHash;          // Spatial hash cell ID (4 bytes)
+    uint flags;             // SurfelFlags bitmask (4 bytes)
+    uint instanceID;        // Source mesh instance (4 bytes)
+    uint _pad4;             // (4 bytes) = 96
+    float4 _reserved1;      // Reserved for future use (16 bytes) = 112
+    float4 _reserved2;      // Reserved for future use (16 bytes) = 128
 };
 
 // Spatial hash cell for fast surfel lookup
