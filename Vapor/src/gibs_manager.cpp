@@ -200,10 +200,19 @@ void GIBSManager::onSceneLoaded(std::shared_ptr<Scene> scene) {
 void GIBSManager::beginFrame(Uint32 frameIndex) {
     currentFrameIndex = frameIndex % MAX_FRAMES_IN_FLIGHT;
 
-    // Reset surfel counter at frame start
+    // Read surfel count from previous frame's GPU work (1 frame latency, no sync stall)
     Uint32* counterPtr = static_cast<Uint32*>(counterBuffer->contents());
-    // Counter 0: new surfel allocation
-    // Counter 1: active surfel count (preserved across frames for stability)
+
+    // Update active surfel count from counter[1] (set by GPU in surfel generation)
+    // Use a blend to smooth transitions
+    Uint32 gpuSurfelCount = counterPtr[1];
+    if (gpuSurfelCount > 0) {
+        // Gradually blend towards GPU count for stability
+        activeSurfelCount = activeSurfelCount * 0.9f + gpuSurfelCount * 0.1f;
+        activeSurfelCount = std::min(activeSurfelCount, maxSurfels);
+    }
+
+    // Reset new surfel allocation counter for this frame
     counterPtr[0] = 0;
 }
 

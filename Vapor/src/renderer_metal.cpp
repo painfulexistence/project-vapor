@@ -616,6 +616,13 @@ public:
             encoder->setFragmentTexture(r.prefilterMap.get(), 9);
             encoder->setFragmentTexture(r.brdfLUT.get(), 10);
 
+            // GIBS (Global Illumination Based on Surfels)
+            if (r.gibsEnabled && r.gibsManager && r.gibsManager->getGIResultTexture()) {
+                encoder->setFragmentTexture(r.gibsManager->getGIResultTexture(), 11);
+            }
+            Uint32 gibsEnabledFlag = (r.gibsEnabled && r.gibsManager) ? 1 : 0;
+            encoder->setFragmentBytes(&gibsEnabledFlag, sizeof(Uint32), 7);
+
             for (const auto& draw : draws) {
                 if (!r.currentCamera->isVisible(r.instances[draw.instanceIndex].boundingSphere)) {
                     r.culledInstanceCount++;
