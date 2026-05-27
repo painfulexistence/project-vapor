@@ -1,185 +1,105 @@
 #pragma once
-// Level serializer — Step 1: save only
+// Scene serializer — human-authored JSON composition file.
 //
-// Format (cereal JSONOutputArchive):
-//   { "level": { "version": 1, "gltf": {...}, "entities": [...] } }
+// Format:
+//   {
+//     "version": 1,
+//     "gltf": { "path": "...", "optimized": true },
+//     "entities": [
+//       {
+//         "name": "cube1",
+//         "components": {
+//           "transform":  { "position": [x,y,z], "rotation": [x,y,z,w], "scale": [x,y,z] },
+//           "autoRotate": { "axis": [x,y,z], "speed": 1.5 }
+//         }
+//       }
+//     ]
+//   }
 //
-// Skips entities tagged with SceneGeometryTag (GLTF-spawned mesh entities).
-// Supported components: Name, Transform, AutoRotate.
-// Further components will be added in subsequent steps.
+// Component presence is implicit: a key in "components" means the component
+// exists. No has_* flags needed.
+//
+// Entities tagged SceneGeometryTag are GLTF-spawned meshes and are excluded;
+// the GLTF file is referenced once in the top-level "gltf" block instead.
 
 #include "Vapor/components.hpp"
 #include "components.hpp"
-#include <cereal/archives/json.hpp>
-#include <cereal/types/string.hpp>
-#include <cereal/types/vector.hpp>
 #include <entt/entt.hpp>
 #include <fmt/core.h>
 #include <fstream>
+#include <nlohmann/json.hpp>
 #include <string>
 
 namespace SceneSerializer {
 
-// ============================================================================
-// Intermediate POD structs (cereal-serializable)
-// ============================================================================
-
-struct Vec3Data {
-    float x = 0, y = 0, z = 0;
-    template <class A>
-    void serialize(A& a) {
-        a(cereal::make_nvp("x", x), cereal::make_nvp("y", y), cereal::make_nvp("z", z));
-    }
-};
-
-struct QuatData {
-    float x = 0, y = 0, z = 0, w = 1;
-    template <class A>
-    void serialize(A& a) {
-        a(cereal::make_nvp("x", x), cereal::make_nvp("y", y),
-          cereal::make_nvp("z", z), cereal::make_nvp("w", w));
-    }
-};
-
-struct TransformData {
-    Vec3Data position;
-    QuatData rotation;
-    Vec3Data scale{ 1, 1, 1 };
-    template <class A>
-    void serialize(A& a) {
-        a(cereal::make_nvp("position", position),
-          cereal::make_nvp("rotation", rotation),
-          cereal::make_nvp("scale", scale));
-    }
-};
-
-struct AutoRotateData {
-    Vec3Data axis{ 0, 1, 0 };
-    float speed = 1.0f;
-    template <class A>
-    void serialize(A& a) {
-        a(cereal::make_nvp("axis", axis), cereal::make_nvp("speed", speed));
-    }
-};
-
-// One entry per serializable entity.
-// has_* booleans allow round-trip without std::optional (cereal 1.3.x).
-struct EntityData {
-    std::string name;
-
-    bool hasTransform = false;
-    TransformData transform{};
-
-    bool hasAutoRotate = false;
-    AutoRotateData autoRotate{};
-
-    template <class A>
-    void serialize(A& a) {
-        a(cereal::make_nvp("name", name),
-          cereal::make_nvp("hasTransform", hasTransform),
-          cereal::make_nvp("transform", transform),
-          cereal::make_nvp("hasAutoRotate", hasAutoRotate),
-          cereal::make_nvp("autoRotate", autoRotate));
-    }
-};
-
-struct GltfRef {
-    std::string path;
-    bool optimized = true;
-    template <class A>
-    void serialize(A& a) {
-        a(cereal::make_nvp("path", path), cereal::make_nvp("optimized", optimized));
-    }
-};
-
-struct SceneData {
-    int version = 1;
-    GltfRef gltf;
-    std::vector<EntityData> entities;
-
-    template <class A>
-    void serialize(A& a) {
-        a(cereal::make_nvp("version", version),
-          cereal::make_nvp("gltf", gltf),
-          cereal::make_nvp("entities", entities));
-    }
-};
+using json = nlohmann::json;
 
 // ============================================================================
-// Result type (used by the inspector for feedback)
+// Result
 // ============================================================================
 struct SaveResult {
-    bool ok = false;
+    bool        ok           = false;
     std::string error;
-    int entityCount = 0;
-    int skippedCount = 0;
+    int         entityCount  = 0;
+    int         skippedCount = 0;
 };
+
+// ============================================================================
+// Helpers
+// ============================================================================
+inline json toJson(const glm::vec3& v) { return { v.x, v.y, v.z }; }
+inline json toJson(const glm::quat& q) { return { q.x, q.y, q.z, q.w }; }
 
 // ============================================================================
 // save()
 // ============================================================================
-// gltfPath / gltfOptimized: the GLTF scene file used; written as a reference
-//   so the loader knows which file to re-instantiate on load.
-// outPath: destination file (e.g. "scene.json")
 inline SaveResult save(
-    entt::registry& registry,
+    entt::registry&    registry,
     const std::string& gltfPath,
-    bool gltfOptimized,
+    bool               gltfOptimized,
     const std::string& outPath
 ) {
-    SceneData level;
-    level.gltf.path = gltfPath;
-    level.gltf.optimized = gltfOptimized;
+    json root;
+    root["version"]  = 1;
+    root["gltf"]     = { { "path", gltfPath }, { "optimized", gltfOptimized } };
+    root["entities"] = json::array();
 
     int skipped = 0;
 
     registry.each([&](entt::entity entity) {
-        // Skip GLTF-spawned mesh entities
-        if (registry.all_of<SceneGeometryTag>(entity)) {
-            ++skipped;
-            return;
-        }
+        if (registry.all_of<SceneGeometryTag>(entity)) { ++skipped; return; }
 
-        EntityData ed;
+        json e;
+        e["name"] = registry.try_get<Vapor::NameComponent>(entity)
+            ? registry.get<Vapor::NameComponent>(entity).name
+            : fmt::format("Entity_{}", entt::to_integral(entity));
 
-        // Name
-        if (auto* n = registry.try_get<Vapor::NameComponent>(entity))
-            ed.name = n->name;
-        else
-            ed.name = fmt::format("Entity_{}", entt::to_integral(entity));
+        json components = json::object();
 
-        // Transform
-        if (auto* t = registry.try_get<Vapor::TransformComponent>(entity)) {
-            ed.hasTransform = true;
-            ed.transform.position = { t->position.x, t->position.y, t->position.z };
-            ed.transform.rotation = { t->rotation.x, t->rotation.y, t->rotation.z, t->rotation.w };
-            ed.transform.scale    = { t->scale.x, t->scale.y, t->scale.z };
-        }
+        if (auto* t = registry.try_get<Vapor::TransformComponent>(entity))
+            components["transform"] = {
+                { "position", toJson(t->position) },
+                { "rotation", toJson(t->rotation) },
+                { "scale",    toJson(t->scale)    }
+            };
 
-        // AutoRotate
-        if (auto* ar = registry.try_get<AutoRotateComponent>(entity)) {
-            ed.hasAutoRotate = true;
-            ed.autoRotate.axis  = { ar->axis.x, ar->axis.y, ar->axis.z };
-            ed.autoRotate.speed = ar->speed;
-        }
+        if (auto* ar = registry.try_get<AutoRotateComponent>(entity))
+            components["autoRotate"] = {
+                { "axis",  toJson(ar->axis) },
+                { "speed", ar->speed        }
+            };
 
-        level.entities.push_back(std::move(ed));
+        e["components"] = components;
+        root["entities"].push_back(std::move(e));
     });
 
     std::ofstream file(outPath);
     if (!file.is_open())
         return { false, fmt::format("Cannot open '{}' for writing", outPath), 0, skipped };
 
-    try {
-        cereal::JSONOutputArchive archive(file);
-        archive(cereal::make_nvp("version", level.version),
-                cereal::make_nvp("gltf", level.gltf),
-                cereal::make_nvp("entities", level.entities));
-    } catch (const std::exception& e) {
-        return { false, fmt::format("Serialization error: {}", e.what()), 0, skipped };
-    }
+    file << root.dump(2);
 
-    return { true, {}, static_cast<int>(level.entities.size()), skipped };
+    return { true, {}, static_cast<int>(root["entities"].size()), skipped };
 }
 
 } // namespace SceneSerializer

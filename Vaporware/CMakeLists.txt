@@ -5,8 +5,10 @@ set(SOURCES
     src/main.cpp
 )
 
+find_package(nlohmann_json CONFIG REQUIRED)
+
 add_executable(main ${SOURCES})
-target_link_libraries(main PRIVATE Vapor)
+target_link_libraries(main PRIVATE Vapor nlohmann_json::nlohmann_json)
 
 vapor_copy_assets(main)
 

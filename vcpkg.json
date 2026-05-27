@@ -31,6 +31,7 @@
     },
     "rmlui",
     "entt",
-    "catch2"
+    "catch2",
+    "nlohmann-json"
   ]
 }
