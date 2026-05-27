@@ -19,21 +19,6 @@
 
 
 
-class TransformSystem {
-public:
-    static void update(entt::registry& registry) {
-        auto view = registry.view<Vapor::TransformComponent>();
-        for (auto entity : view) {
-            auto& tc = view.get<Vapor::TransformComponent>(entity);
-            if (!tc.isDirty) continue;
-            tc.worldTransform =
-                glm::translate(glm::mat4(1.0f), tc.position) *
-                glm::mat4_cast(tc.rotation) *
-                glm::scale(glm::mat4(1.0f), tc.scale);
-            tc.isDirty = false;
-        }
-    }
-};
 
 class CleanupSystem {
 public:
@@ -223,29 +208,6 @@ public:
     }
 };
 
-class TransformSystem {
-public:
-    static void update(entt::registry& registry) {
-        auto view = registry.view<Vapor::TransformComponent>();
-        for (auto entity : view) {
-            auto& t = view.get<Vapor::TransformComponent>(entity);
-            if (!t.isDirty) continue;
-            glm::mat4 local = glm::translate(glm::mat4(1.0f), t.position)
-                            * glm::mat4_cast(t.rotation)
-                            * glm::scale(glm::mat4(1.0f), t.scale);
-            if (t.parent != entt::null) {
-                if (auto* parentT = registry.try_get<Vapor::TransformComponent>(t.parent)) {
-                    t.worldTransform = parentT->worldTransform * local;
-                } else {
-                    t.worldTransform = local;
-                }
-            } else {
-                t.worldTransform = local;
-            }
-            t.isDirty = false;
-        }
-    }
-};
 
 class AutoRotateSystem {
 public:

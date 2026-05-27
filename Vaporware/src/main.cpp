@@ -19,6 +19,7 @@
 #include "Vapor/physics_3d.hpp"
 #include "Vapor/renderer.hpp"
 #include "Vapor/rmlui_manager.hpp"
+#include "Vapor/systems.hpp"
 #include "Vapor/rng.hpp"
 #include "Vapor/scene.hpp"
 #include <RmlUi/Core/ElementDocument.h>
@@ -611,7 +612,7 @@ auto main(int argc, char* args[]) -> int {
         engineCore->update(deltaTime);
 
         physics->process(registry, deltaTime);
-        TransformSystem::update(registry);
+        Vapor::TransformSystem::update(registry);
         FlipbookSystem::update(registry, deltaTime);
         SpriteRenderSystem::update(registry, renderer.get(), &resourceManager);
 

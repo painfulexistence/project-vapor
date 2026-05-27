@@ -66,8 +66,8 @@ inline SaveResult save(
 
     int skipped = 0;
 
-    registry.each([&](entt::entity entity) {
-        if (registry.all_of<SceneGeometryTag>(entity)) { ++skipped; return; }
+    for (auto entity : registry.storage<entt::entity>()) {
+        if (registry.all_of<SceneGeometryTag>(entity)) { ++skipped; continue; }
 
         json e;
         e["name"] = registry.try_get<Vapor::NameComponent>(entity)
@@ -91,7 +91,7 @@ inline SaveResult save(
 
         e["components"] = components;
         root["entities"].push_back(std::move(e));
-    });
+    }
 
     std::ofstream file(outPath);
     if (!file.is_open())

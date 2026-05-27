@@ -120,7 +120,7 @@ TEST_CASE("ModelSerializer - Simple Cereal Test", "[model][serializer][cereal]")
     std::remove(testPath.c_str());
 }
 
-TEST_CASE("AssetSerializer - round-trip preserves stagedMeshTransforms", "[asset][serializer]") {
+TEST_CASE("ModelSerializer - round-trip preserves stagedMeshTransforms", "[asset][serializer]") {
     auto scene = std::make_shared<Scene>("RoundTripScene");
 
     auto mesh = std::make_shared<Mesh>();
@@ -138,9 +138,9 @@ TEST_CASE("AssetSerializer - round-trip preserves stagedMeshTransforms", "[asset
     scene->addMesh(mesh, worldTransform);
 
     std::string testPath = "test_staged_mesh.bin";
-    AssetSerializer::serializeScene(scene, testPath);
+    ModelSerializer::serializeScene(scene, testPath);
 
-    auto loaded = AssetSerializer::deserializeScene(testPath);
+    auto loaded = ModelSerializer::deserializeScene(testPath);
     std::remove(testPath.c_str());
 
     REQUIRE(loaded != nullptr);
@@ -153,7 +153,7 @@ TEST_CASE("AssetSerializer - round-trip preserves stagedMeshTransforms", "[asset
             CHECK(lt[col][row] == Catch::Approx(worldTransform[col][row]).epsilon(1e-5f));
 }
 
-TEST_CASE("AssetSerializer - version mismatch throws", "[asset][serializer]") {
+TEST_CASE("ModelSerializer - version mismatch throws", "[asset][serializer]") {
     std::string testPath = "test_version_mismatch.bin";
     {
         std::ofstream file(testPath, std::ios::binary);
@@ -165,14 +165,14 @@ TEST_CASE("AssetSerializer - version mismatch throws", "[asset][serializer]") {
         archive(fakeName);
     }
 
-    REQUIRE_THROWS_AS(AssetSerializer::deserializeScene(testPath), std::runtime_error);
+    REQUIRE_THROWS_AS(ModelSerializer::deserializeScene(testPath), std::runtime_error);
     std::remove(testPath.c_str());
 }
 
-TEST_CASE("AssetSerializer - correct version passes", "[asset][serializer]") {
+TEST_CASE("ModelSerializer - correct version passes", "[asset][serializer]") {
     auto scene = std::make_shared<Scene>("VersionOK");
     std::string testPath = "test_version_ok.bin";
-    AssetSerializer::serializeScene(scene, testPath);
-    REQUIRE_NOTHROW(AssetSerializer::deserializeScene(testPath));
+    ModelSerializer::serializeScene(scene, testPath);
+    REQUIRE_NOTHROW(ModelSerializer::deserializeScene(testPath));
     std::remove(testPath.c_str());
 }
