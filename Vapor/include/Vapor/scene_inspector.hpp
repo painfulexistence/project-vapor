@@ -286,8 +286,6 @@ private:
     void drawTriggerVolumeComponent(Vapor::TriggerVolumeComponent& c) {
         if (!ImGui::CollapsingHeader("Trigger Volume")) return;
         ImGui::LabelText("Trigger", c.trigger.valid() ? "valid" : "invalid");
-        ImGui::LabelText("onEnter", c.onEnter ? "set" : "none");
-        ImGui::LabelText("onExit", c.onExit ? "set" : "none");
     }
 
     void drawCharacterBodyComponent(Vapor::CharacterBodyComponent& c) {
