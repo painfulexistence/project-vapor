@@ -1,0 +1,180 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Roadmap — Project Vapor</title>
+  <style>
+    :root {
+      --bg: #0d0d0f;
+      --bg-surface: #141418;
+      --bg-raised: #1c1c22;
+      --border: #2a2a33;
+      --text: #e2e2e8;
+      --text-muted: #7a7a8c;
+      --accent: #7c6af7;
+      --warn: #c97a2f;
+      --ok: #4a9e6a;
+      --danger: #9e4a4a;
+    }
+    * { box-sizing: border-box; margin: 0; padding: 0; }
+    body {
+      background: var(--bg);
+      color: var(--text);
+      font-family: 'Berkeley Mono', 'JetBrains Mono', 'Fira Code', 'Cascadia Code', monospace;
+      font-size: 15px;
+      line-height: 1.75;
+    }
+    nav {
+      background: var(--bg-surface);
+      border-bottom: 1px solid var(--border);
+      padding: 16px 24px;
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+    }
+    nav .site-title { color: var(--text-muted); text-decoration: none; font-size: 14px; }
+    nav .links { display: flex; gap: 24px; }
+    nav .links a { color: var(--text-muted); text-decoration: none; font-size: 13px; }
+    nav .links a:hover { color: var(--accent); }
+    nav .links a.active { color: var(--accent); }
+    main { max-width: 860px; margin: 0 auto; padding: 48px 24px; }
+    .page-header { margin-bottom: 40px; }
+    .page-header h1 { font-size: 22px; font-weight: 600; margin-bottom: 8px; }
+    .page-header .muted { font-size: 13px; color: var(--text-muted); }
+    .milestone {
+      border-left: 2px solid var(--border);
+      margin-bottom: 32px;
+      padding-left: 24px;
+      position: relative;
+    }
+    .milestone::before {
+      content: '';
+      position: absolute;
+      left: -5px;
+      top: 8px;
+      width: 8px;
+      height: 8px;
+      border-radius: 50%;
+      background: var(--border);
+    }
+    .milestone h2 {
+      font-size: 14px;
+      font-weight: 600;
+      color: var(--text-muted);
+      margin-bottom: 8px;
+    }
+    .milestone ul { list-style: none; padding: 0; }
+    .milestone ul li {
+      font-size: 14px;
+      color: var(--text);
+      padding: 3px 0;
+    }
+    .milestone ul li::before {
+      content: '— ';
+      color: var(--text-muted);
+    }
+    .milestone.empty ul li {
+      color: var(--text-muted);
+      font-style: italic;
+    }
+    @media (max-width: 640px) { main { padding: 24px 16px; } }
+  </style>
+</head>
+<body>
+  <nav>
+    <a class="site-title" href="index.html">Project Vapor</a>
+    <div class="links">
+      <a href="architecture.html">Architecture</a>
+      <a href="features.html">Features</a>
+      <a href="techstack.html">Tech Stack</a>
+      <a href="roadmap.html" class="active">Roadmap</a>
+      <a href="ADR/index.html">ADRs</a>
+    </div>
+  </nav>
+  <main>
+    <div class="page-header">
+      <h1>Roadmap</h1>
+      <p class="muted">High-level milestone plan for Project Vapor. This is a roadmap, not a todo list.</p>
+    </div>
+
+    <div class="milestone">
+      <h2>Milestone 0</h2>
+      <ul>
+        <li>Prepare a new laptop and set up the development environment (Wezterm+Neovim, VS Code, and Xcode, etc.)</li>
+        <li>Warm up social media presence (ideally, engage in some game industry networking)</li>
+      </ul>
+    </div>
+
+    <div class="milestone">
+      <h2>Milestone 1-1</h2>
+      <ul>
+        <li>Use an existing renderer to quickly assemble a prototype game engine (without a physics engine)</li>
+        <li>Implement entity management system</li>
+        <li>Implement simple audio system</li>
+        <li>Implement GUI system</li>
+      </ul>
+    </div>
+
+    <div class="milestone">
+      <h2>Milestone 1-2</h2>
+      <ul>
+        <li>Create a 3D rail shooter demo game as a sample to guide subsequent engine development</li>
+      </ul>
+    </div>
+
+    <div class="milestone">
+      <h2>Milestone 2-1</h2>
+      <ul>
+        <li>Implement a scripting system</li>
+        <li>Implement a configurable input system</li>
+      </ul>
+    </div>
+
+    <div class="milestone">
+      <h2>Milestone 2-2</h2>
+      <ul>
+        <li>Develop the renderer</li>
+      </ul>
+    </div>
+
+    <div class="milestone">
+      <h2>Milestone 3-1</h2>
+      <ul>
+        <li>Implement a resource management system</li>
+      </ul>
+    </div>
+
+    <div class="milestone">
+      <h2>Milestone 3-2</h2>
+      <ul>
+        <li>Implement heightmap terrain</li>
+      </ul>
+    </div>
+
+    <div class="milestone">
+      <h2>Milestone 4-1</h2>
+      <ul>
+        <li>Implement a thread manager (via fiber or coroutine)</li>
+        <li>Integrate a physics engine</li>
+      </ul>
+    </div>
+
+    <div class="milestone">
+      <h2>Milestone 4-2</h2>
+      <ul>
+        <li>Implement ECS</li>
+        <li>Jobify the engine</li>
+        <li>Create a new game demo</li>
+      </ul>
+    </div>
+
+    <div class="milestone empty">
+      <h2>Milestone 5</h2>
+      <ul>
+        <li>To be defined</li>
+      </ul>
+    </div>
+  </main>
+</body>
+</html>

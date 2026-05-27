@@ -9,21 +9,41 @@
 <br />
 <br />
 
-<p>A modern 3D renderer built from scratch with C++ and Metal/Vulkan. </p>
-<p>Project Vapor is my deep dive into game engine architecture and current-gen rendering techniques, specifically GPU-driven rendering and hybrid rendering. It's a solo journey where I design and to implement various aspects of a modern 3D game engine. </p>
-<p>Aside from personal learning, I'd also like to share knowledge with those learning to make engines! </p>
+A modern 3D game engine built from scratch in C++, targeting Metal and Vulkan. Solo project — GPU-driven rendering, ECS, physics, and a working demo game as the proving ground.
 
-<!--
 ### Blog
-[Arcane Realms](https://painfulexistence.substack.com/) -->
+[Arcane Realms](https://painfulexistence.substack.com/)
+
+### On Agentic Coding
+
+I don't like AI slop. Generated code that compiles but doesn't reflect intent, tests that pass without actually testing anything, architecture that looks right but collapses under real load — I've seen enough of it to be wary.
+
+That said, I'm genuinely experimenting with agentic coding here, on my own terms.
+
+The methodology has two pillars:
+
+**Skill-based agents.** Rather than prompting freely, I've encoded disciplined workflows as reusable skills — composable scripts that agents execute consistently. `/deslop-cpp` audits the codebase for low-signal code: dead branches, defensive checks that can't trigger, comments that restate what the identifier already says, abstraction that serves no present requirement. `/safeguard` identifies behavioral gaps in the test suite and fills them with characterization tests that lock in real engine behavior. Agents follow these skills the same way every time, which makes their output predictable and auditable.
+
+**Harness engineering.** Agents are most dangerous when they drift from your actual goals. I keep them aligned through two mechanisms. First, `docs/` is a living documentation site that always reflects the current state of the codebase — architecture, features, ADRs, tech stack decisions — updated in sync with code changes. Any agent working on this repo reads current docs, not stale ones, so its understanding of the engine matches mine. Second, `VISION.md` (internal) defines the engine's north star: what problems it's solving, what it is not, and what quality bar it needs to meet. Before any significant agent-driven work, the agent reads VISION.md to ensure the proposed changes are directionally correct.
+
+The result is that I get the throughput benefits of agentic coding without ceding control over what the engine actually becomes.
 
 ### Main Features
+
 #### Rendering
-- Made with Metal-cpp and Vulkan
+- Metal-cpp and Vulkan backends with feature parity tracking
 - Physically-based rendering with Disney BRDF
 - GLTF scene loading
 - Tiled Forward rendering
 - Raytraced hard shadow (Metal only)
+
+#### Engine
+- ECS architecture (EnTT) with a working game demo
+- Jolt Physics integration
+- RmlUi for in-game UI
+- Async resource loading with cache deduplication
+- ImGui scene inspector with per-component custom drawers
+- MCP dev server for external tooling integration
 
 ### Getting Started
 

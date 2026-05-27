@@ -9,7 +9,7 @@ set(TEST_WARNING_FLAGS
 
 # ── Action System tests ─────────────────────────────────────────────────────
 add_executable(test_action_system
-    action_system_safeguard_test.cpp
+    action_system_test.cpp
 )
 target_link_libraries(test_action_system PRIVATE
     Vapor
@@ -21,7 +21,7 @@ target_compile_options(test_action_system PRIVATE ${TEST_WARNING_FLAGS})
 
 # ── Node / Scene transform tests (pure logic, no GPU/Physics) ──────────────
 add_executable(test_scene_transform
-    scene_transform_safeguard_test.cpp
+    scene_transform_test.cpp
 )
 target_include_directories(test_scene_transform PRIVATE
     ${CMAKE_SOURCE_DIR}/Vapor/include
@@ -34,9 +34,22 @@ target_link_libraries(test_scene_transform PRIVATE
 target_compile_features(test_scene_transform PRIVATE cxx_std_20)
 target_compile_options(test_scene_transform PRIVATE ${TEST_WARNING_FLAGS})
 
+# ── ECS TransformSystem tests (pure logic, no GPU/Physics) ────────────────
+add_executable(test_ecs_transform
+    ecs_transform_test.cpp
+)
+find_package(EnTT CONFIG REQUIRED)
+target_link_libraries(test_ecs_transform PRIVATE
+    Catch2::Catch2WithMain
+    glm::glm
+    EnTT::EnTT
+)
+target_compile_features(test_ecs_transform PRIVATE cxx_std_20)
+target_compile_options(test_ecs_transform PRIVATE ${TEST_WARNING_FLAGS})
+
 # ── Camera frustum tests (pure logic, no GPU) ──────────────────────────────
 add_executable(test_camera
-    camera_safeguard_test.cpp
+    camera_test.cpp
 )
 target_include_directories(test_camera PRIVATE
     ${CMAKE_SOURCE_DIR}/Vapor/include
@@ -52,7 +65,7 @@ target_compile_options(test_camera PRIVATE ${TEST_WARNING_FLAGS})
 
 # ── Physics 3D tests (requires Jolt, linking Vapor) ──────────────────────
 add_executable(test_physics
-    physics_safeguard_test.cpp
+    physics_test.cpp
 )
 target_link_libraries(test_physics PRIVATE
     Vapor
@@ -65,7 +78,7 @@ target_compile_options(test_physics PRIVATE ${TEST_WARNING_FLAGS})
 
 # ── Resource Manager tests (requires enkiTS, linking Vapor) ──────────────
 add_executable(test_resource_manager
-    resource_manager_safeguard_test.cpp
+    resource_manager_test.cpp
 )
 target_link_libraries(test_resource_manager PRIVATE
     Vapor
@@ -140,6 +153,7 @@ include(Catch)
 # (used by readFile) resolves asset paths correctly.
 catch_discover_tests(test_action_system   WORKING_DIRECTORY "$<TARGET_FILE_DIR:test_action_system>")
 catch_discover_tests(test_scene_transform WORKING_DIRECTORY "$<TARGET_FILE_DIR:test_scene_transform>")
+catch_discover_tests(test_ecs_transform   WORKING_DIRECTORY "$<TARGET_FILE_DIR:test_ecs_transform>")
 catch_discover_tests(test_camera          WORKING_DIRECTORY "$<TARGET_FILE_DIR:test_camera>")
 catch_discover_tests(test_physics         WORKING_DIRECTORY "$<TARGET_FILE_DIR:test_physics>")
 catch_discover_tests(test_asset_management   WORKING_DIRECTORY "$<TARGET_FILE_DIR:test_asset_management>")

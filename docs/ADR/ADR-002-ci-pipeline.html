@@ -1,0 +1,107 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>ADR-002: CI Pipeline — Project Vapor</title>
+  <style>
+    :root {
+      --bg: #0d0d0f; --bg-surface: #141418; --bg-raised: #1c1c22;
+      --border: #2a2a33; --text: #e2e2e8; --text-muted: #7a7a8c;
+      --accent: #7c6af7; --warn: #c97a2f; --ok: #4a9e6a; --danger: #9e4a4a;
+    }
+    * { box-sizing: border-box; margin: 0; padding: 0; }
+    body { background: var(--bg); color: var(--text); font-family: 'Berkeley Mono','JetBrains Mono','Fira Code','Cascadia Code',monospace; font-size: 15px; line-height: 1.75; }
+    nav { background: var(--bg-surface); border-bottom: 1px solid var(--border); padding: 16px 24px; display: flex; align-items: center; justify-content: space-between; }
+    nav .site-title { color: var(--text-muted); text-decoration: none; font-size: 14px; }
+    nav .links { display: flex; gap: 24px; }
+    nav .links a { color: var(--text-muted); text-decoration: none; font-size: 13px; }
+    nav .links a:hover { color: var(--accent); }
+    nav .links a.active { color: var(--accent); }
+    main { max-width: 860px; margin: 0 auto; padding: 48px 24px; }
+    .page-header { margin-bottom: 32px; }
+    .page-header .eyebrow { font-size: 12px; color: var(--text-muted); margin-bottom: 10px; }
+    .page-header .eyebrow a { color: var(--text-muted); text-decoration: none; }
+    .page-header .eyebrow a:hover { color: var(--accent); }
+    .page-header h1 { font-size: 20px; font-weight: 600; margin-bottom: 12px; }
+    .meta-row { display: flex; gap: 24px; font-size: 13px; color: var(--text-muted); }
+    .badge { display: inline-block; font-size: 11px; border-radius: 3px; padding: 2px 8px; }
+    .badge-ok { background: rgba(74,158,106,0.15); color: var(--ok); }
+    h2 { font-size: 16px; font-weight: 600; margin: 36px 0 14px; }
+    h3 { font-size: 14px; font-weight: 600; margin: 24px 0 10px; color: var(--text-muted); }
+    p { margin-bottom: 14px; }
+    hr { border: none; border-top: 1px solid var(--border); margin: 36px 0; }
+    code { background: var(--bg-raised); border-radius: 3px; padding: 2px 6px; font-size: 13px; }
+    ul { padding-left: 20px; margin-bottom: 14px; }
+    ul li { margin-bottom: 4px; }
+    @media (max-width: 640px) { main { padding: 24px 16px; } }
+  </style>
+</head>
+<body>
+  <nav>
+    <a class="site-title" href="../index.html">Project Vapor</a>
+    <div class="links">
+      <a href="../architecture.html">Architecture</a>
+      <a href="../features.html">Features</a>
+      <a href="../techstack.html">Tech Stack</a>
+      <a href="../roadmap.html">Roadmap</a>
+      <a href="index.html" class="active">ADRs</a>
+    </div>
+  </nav>
+  <main>
+    <div class="page-header">
+      <div class="eyebrow">
+      <a href="index.html">ADRs</a> / ADR-002</div>
+      <h1>ADR-002: CI Pipeline Design</h1>
+      <div class="meta-row">
+        <span>2026-04-29</span>
+        <span><span class="badge badge-ok">Adopted</span></span>
+      </div>
+    </div>
+
+    <h2>Context</h2>
+    <p>No CI/CD pipeline existed. Merges had no automatic verification — breaking changes were only caught when someone manually built and ran the demo.</p>
+
+    <h2>Decision</h2>
+    <p>Create a two-job pipeline in <code>.github/workflows/ci.yml</code>:</p>
+    <ul>
+      <li><strong>test</strong> — compile and run unit test binaries only (no GPU, no demo app)</li>
+      <li><strong>build-check</strong> — runs after test passes; compiles the full Vapor library</li>
+    </ul>
+
+    <h2>Rationale</h2>
+
+    <h3>Why two jobs?</h3>
+    <p>Unit tests are much faster than a full build — test binaries have no Metal/Vulkan shader compilation. Putting tests first means logic errors are caught before waiting for the full build.</p>
+
+    <h3>Why macos-15?</h3>
+    <p>The primary development platform is macOS (Metal backend). The <code>macos-15</code> runner uses Apple Silicon (M1), matching the development environment. Linux/Vulkan CI requires a software renderer (SwiftShader/lavapipe) and is deferred.</p>
+
+    <h3>Why ccache?</h3>
+    <p>Metal shader compilation and vcpkg dependency builds are slow. ccache with <code>actions/cache</code> persists the compiler cache across runs, significantly reducing CI time on subsequent pushes.</p>
+
+    <h3>Why exclude Vaporware?</h3>
+    <p><code>main.cpp</code> requires a window system and Metal context. Neither is available on headless CI runners. CI compiles only to the Vapor library boundary.</p>
+
+    <h2>Constraints</h2>
+    <ul>
+      <li>No demo execution in CI</li>
+      <li>No GPU-dependent tests (Renderer, Physics3D require a device)</li>
+      <li>Vulkan CI deferred pending SwiftShader/lavapipe verification</li>
+    </ul>
+
+    <h2>Future Work</h2>
+    <ul>
+      <li>Linux runner for Vulkan backend build check</li>
+      <li>clang-tidy / clang-format lint job</li>
+      <li>Address sanitizer run (<code>-fsanitize=address</code> exists in dev preset but not CI)</li>
+    </ul>
+
+    <h2>Consequences</h2>
+    <ul>
+      <li><code>.github/workflows/ci.yml</code> created</li>
+      <li><code>CMakePresets.json</code> gains a <code>ci</code> preset inheriting <code>global-vcpkg</code>, using <code>$VCPKG_ROOT</code> env var</li>
+    </ul>
+  </main>
+</body>
+</html>

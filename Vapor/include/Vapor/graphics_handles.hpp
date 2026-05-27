@@ -26,8 +26,21 @@ struct PipelineHandleTag {};
 struct BufferHandleTag {};
 struct TextureHandleTag {};
 struct RenderTargetHandleTag {};
+struct RenderTextureHandleTag {};
+struct AtlasHandleTag {};
 
 using PipelineHandle = GPUHandle<PipelineHandleTag>;
 using BufferHandle = GPUHandle<BufferHandleTag>;
 using TextureHandle = GPUHandle<TextureHandleTag>;
 using RenderTargetHandle = GPUHandle<RenderTargetHandleTag>;
+using RenderTextureHandle = GPUHandle<RenderTextureHandleTag>;
+using AtlasHandle = GPUHandle<AtlasHandleTag>;
+
+// Render texture descriptor for creation
+struct RenderTextureDesc {
+    Uint32 width = 512;
+    Uint32 height = 512;
+    bool hasDepth = true;// Whether to include depth buffer
+    bool hdr = false;// Use HDR format (RGBA16Float) vs LDR (RGBA8Unorm)
+    Uint32 sampleCount = 1;// MSAA sample count (1 = no MSAA)
+};

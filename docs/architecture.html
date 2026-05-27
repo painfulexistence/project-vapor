@@ -1,0 +1,303 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Architecture — Project Vapor</title>
+  <style>
+    :root {
+      --bg: #0d0d0f;
+      --bg-surface: #141418;
+      --bg-raised: #1c1c22;
+      --border: #2a2a33;
+      --text: #e2e2e8;
+      --text-muted: #7a7a8c;
+      --accent: #7c6af7;
+      --accent-dim: #3d3570;
+      --warn: #c97a2f;
+      --ok: #4a9e6a;
+      --danger: #9e4a4a;
+    }
+    * { box-sizing: border-box; margin: 0; padding: 0; }
+    body {
+      background: var(--bg);
+      color: var(--text);
+      font-family: 'Berkeley Mono', 'JetBrains Mono', 'Fira Code', 'Cascadia Code', monospace;
+      font-size: 15px;
+      line-height: 1.75;
+    }
+    nav {
+      background: var(--bg-surface);
+      border-bottom: 1px solid var(--border);
+      padding: 16px 24px;
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+    }
+    nav .site-title { color: var(--text-muted); text-decoration: none; font-size: 14px; }
+    nav .links { display: flex; gap: 24px; }
+    nav .links a { color: var(--text-muted); text-decoration: none; font-size: 13px; }
+    nav .links a:hover { color: var(--accent); }
+    nav .links a.active { color: var(--accent); }
+    main { max-width: 860px; margin: 0 auto; padding: 48px 24px; }
+    .page-header { margin-bottom: 40px; }
+    .page-header h1 { font-size: 22px; font-weight: 600; margin-bottom: 8px; }
+    .page-header .muted { font-size: 13px; color: var(--text-muted); }
+    h2 { font-size: 17px; font-weight: 600; margin: 40px 0 16px; }
+    h3 { font-size: 15px; font-weight: 600; margin: 28px 0 12px; }
+    p { margin-bottom: 16px; }
+    hr { border: none; border-top: 1px solid var(--border); margin: 40px 0; }
+    pre {
+      background: var(--bg-raised);
+      border: 1px solid var(--border);
+      border-radius: 3px;
+      padding: 16px;
+      font-size: 13px;
+      overflow-x: auto;
+      margin-bottom: 24px;
+      line-height: 1.6;
+    }
+    code {
+      background: var(--bg-raised);
+      border-radius: 3px;
+      padding: 2px 6px;
+      font-size: 13px;
+    }
+    pre code { background: none; padding: 0; }
+    table { width: 100%; border-collapse: collapse; margin-bottom: 24px; font-size: 14px; }
+    thead th {
+      background: var(--bg-raised);
+      color: var(--text-muted);
+      font-size: 11px;
+      text-transform: uppercase;
+      letter-spacing: 0.08em;
+      padding: 10px 14px;
+      text-align: left;
+      border: 1px solid var(--border);
+    }
+    tbody td { padding: 10px 14px; border: 1px solid var(--border); vertical-align: top; }
+    tbody tr:nth-child(even) td { background: var(--bg-raised); }
+    .warn-box {
+      background: rgba(201,122,47,0.08);
+      border: 1px solid rgba(201,122,47,0.3);
+      border-radius: 4px;
+      padding: 14px 18px;
+      font-size: 13px;
+      color: var(--warn);
+      margin-bottom: 24px;
+    }
+    .strikethrough { text-decoration: line-through; color: var(--text-muted); }
+    @media (max-width: 640px) { main { padding: 24px 16px; } }
+  </style>
+</head>
+<body>
+  <nav>
+    <a class="site-title" href="index.html">Project Vapor</a>
+    <div class="links">
+      <a href="architecture.html" class="active">Architecture</a>
+      <a href="features.html">Features</a>
+      <a href="techstack.html">Tech Stack</a>
+      <a href="roadmap.html">Roadmap</a>
+      <a href="ADR/index.html">ADRs</a>
+    </div>
+  </nav>
+  <main>
+    <div class="page-header">
+      <h1>Architecture</h1>
+      <p class="muted">Last updated 2026-05-01 · Source: headers + implementation files</p>
+    </div>
+
+    <h2>1. Project Structure</h2>
+    <pre>project-vapor/
+├── Vapor/                  # Engine core library (static/shared)
+│   ├── include/Vapor/      # Public API (34 headers)
+│   └── src/                # Implementation (24 .cpp files)
+│
+├── Vaporware/              # Demo application (engine consumer)
+│   └── src/
+│       ├── main.cpp        # Entry point + game loop
+│       ├── components.hpp  # Demo-specific ECS components
+│       └── systems.hpp     # Demo-specific ECS systems
+│
+├── tests/                  # Catch2 v3 test suite
+│   ├── action_system_safeguard_test.cpp
+│   ├── scene_transform_safeguard_test.cpp
+│   ├── camera_safeguard_test.cpp
+│   ├── physics_safeguard_test.cpp
+│   └── resource_manager_safeguard_test.cpp
+│
+└── .github/workflows/ci.yml  # GitHub Actions (macos-15, Ninja, ccache)</pre>
+    <p><code>Vapor</code> and <code>Vaporware</code> are separate CMake targets. The engine does not depend on the demo; the demo depends on the engine.</p>
+
+    <hr>
+
+    <h2>2. Core Modules</h2>
+    <pre>                    ┌────────────────────────────────┐
+                    │           EngineCore            │
+                    │  (singleton coordinator)        │
+                    └──────────┬─────────────────────┘
+                               │ owns
+       ┌───────────────────────┼────────────────────┐
+       ▼                       ▼                     ▼
+TaskScheduler           ResourceManager        ActionManager
+(enkiTS thread pool)    (async/sync cache)     (easing + timers)
+       │
+       ├─────────────────────────────┐
+       ▼                             ▼
+InputManager                   AudioManager
+(SDL event → action mapping)   (miniaudio, 2D/3D spatial)
+                                     │
+                               RmlUiManager (optional)
+                               (HTML/CSS HUD)
+
+
+Physics3D                    Scene / Node Graph
+(Jolt + JPH::JobSystem)      (hierarchical transforms,
+       │                      GPU vertex/index buffers)
+       │ drives
+CharacterController           Renderer (abstract)
+VehicleController              ├── RendererMetal
+                               └── RendererVulkan</pre>
+
+    <hr>
+
+    <h2>3. Frame Lifecycle</h2>
+    <pre>SDL_PollEvents()
+      ├─→ InputManager::processEvent()    // keyboard/mouse → InputState
+      └─→ EngineCore::processRmlUIEvent() // UI consumes first
+
+EngineCore::update(dt)
+      ├─→ ActionManager::update(dt)       // advance tweens/timers
+      ├─→ AudioManager::update(dt)        // fire completion callbacks
+      └─→ ResourceManager                 // async tasks on TaskScheduler
+
+Physics3D::process(scene, dt)            // fixed 60Hz step
+      ├─→ JPH::JobSystemThreadPool        // broadphase + narrowphase
+      ├─→ ContactListener callbacks       // onCollisionEnter/Exit
+      ├─→ TriggerListener callbacks       // onTriggerEnter/Exit
+      └─→ write back Node::localTransform
+
+Scene::update(dt)
+      └─→ recursive world transform update (dirty nodes only)
+
+Renderer::draw(scene, camera)
+      ├─→ stage geometry to GPU (if dirty)
+      ├─→ depth pre-pass
+      ├─→ cluster light culling compute
+      ├─→ PBR forward pass (instanced)
+      ├─→ sky / atmosphere
+      ├─→ water pass
+      ├─→ volumetric fog / clouds / god rays
+      ├─→ post-process: bloom → DOF → tone mapping
+      ├─→ 2D/3D batch flush
+      ├─→ UI pass (RmlUI)
+      └─→ debug wireframe (optional)</pre>
+
+    <hr>
+
+    <h2>4. Key Abstractions</h2>
+
+    <h3>4.1 Renderer Interface</h3>
+    <p><code>Renderer</code> is a pure virtual interface. Metal and Vulkan each provide a full implementation, selected at runtime via <code>createRenderer(GraphicsBackend)</code>. Engine code only ever holds a <code>Renderer*</code>.</p>
+    <p>This is the most brittle boundary: <code>renderer_metal.hpp</code> exposes 31 concrete render pass types. Any pass change requires both backends to stay in sync. See the <a href="features.html">parity matrix</a> for current backend divergence.</p>
+
+    <h3>4.1a Graphics Header Modularization</h3>
+    <p>The original <code>graphics.hpp</code> (544 LOC god header) was split into five focused sub-headers:</p>
+    <table>
+      <thead><tr><th>Header</th><th>Contents</th></tr></thead>
+      <tbody>
+        <tr><td><code>graphics_handles.hpp</code></td><td>Type-safe GPU handles via <code>GPUHandle&lt;Tag&gt;</code> template</td></tr>
+        <tr><td><code>graphics_batch2d.hpp</code></td><td><code>BlendMode</code>, <code>Batch2DVertex</code>, <code>Batch2DStats</code></td></tr>
+        <tr><td><code>graphics_gpu_structs.hpp</code></td><td>GPU layout: <code>MaterialData</code>, lights, <code>CameraData</code>, <code>InstanceData</code>, clusters</td></tr>
+        <tr><td><code>graphics_mesh.hpp</code></td><td>CPU-side: <code>VertexData</code>, <code>Mesh</code>, <code>Material</code>, <code>Image</code></td></tr>
+        <tr><td><code>graphics_effects.hpp</code></td><td>Effect structs: water, atmosphere, fog, clouds, sun flare, GPU particles</td></tr>
+      </tbody>
+    </table>
+    <p><code>graphics.hpp</code> is kept as a 16-LOC umbrella include for full backwards compatibility.</p>
+
+    <h3>4.2 Node Scene Graph</h3>
+    <p><code>Node</code> uses a <code>shared_ptr</code> tree. <code>localTransform</code> is set by the user; <code>worldTransform</code> is computed lazily in <code>Scene::update()</code> via <code>isTransformDirty</code>. Physics body positions are read back from Jolt each frame and written into <code>Node::localTransform</code> — one-way data flow.</p>
+
+    <h3>4.3 Resource&lt;T&gt;</h3>
+    <p>A future-like handle. Starts as <code>Loading</code>, transitions to <code>Ready</code>. <code>get()</code> blocks; <code>tryGet()</code> does not. <code>ResourceCache&lt;T&gt;</code> deduplicates by path across threads.</p>
+
+    <h3>4.4 Handle System</h3>
+    <p>Physics bodies, triggers, textures, fonts, and audio sources use <code>uint32_t</code>-wrapped handles (<code>BodyHandle</code>, <code>TriggerHandle</code>, <code>TextureHandle</code>…). <code>UINT32_MAX</code> is the sentinel for invalid. GPU resource handles gained compile-time type safety via <code>GPUHandle&lt;Tag&gt;</code>; physics handles are still untyped.</p>
+
+    <hr>
+
+    <h2>5. Dependencies</h2>
+    <table>
+      <thead><tr><th>Library</th><th>Role</th></tr></thead>
+      <tbody>
+        <tr><td><code>SDL3</code></td><td>Window management, events, timing</td></tr>
+        <tr><td><code>glm</code></td><td>Math (vec3, mat4, quat)</td></tr>
+        <tr><td><code>Jolt Physics</code></td><td>3D rigid body simulation</td></tr>
+        <tr><td><code>enkiTS</code></td><td>Task scheduler (resource async loading)</td></tr>
+        <tr><td><code>EnTT</code></td><td>ECS (used in Vaporware demo layer)</td></tr>
+        <tr><td><code>miniaudio</code></td><td>Audio engine (single-header)</td></tr>
+        <tr><td><code>RmlUi</code></td><td>HTML/CSS in-game UI</td></tr>
+        <tr><td><code>tinygltf</code></td><td>GLTF scene loading</td></tr>
+        <tr><td><code>stb_image</code></td><td>Image decoding</td></tr>
+        <tr><td><code>MikkTSpace</code></td><td>Tangent space generation</td></tr>
+        <tr><td><code>Tracy</code></td><td>Performance profiling</td></tr>
+        <tr><td><code>ImGui</code></td><td>Developer debug UI</td></tr>
+        <tr><td><code>fmt</code></td><td>String formatting</td></tr>
+        <tr><td>Metal-cpp</td><td>C++ bindings for Metal (macOS)</td></tr>
+        <tr><td>Vulkan / glslang</td><td>Cross-platform graphics + SPIR-V compilation</td></tr>
+      </tbody>
+    </table>
+
+    <hr>
+
+    <h2>6. Known Weaknesses</h2>
+
+    <h3>6.1 Vaporware/src/main.cpp</h3>
+    <p>All game initialization, scene construction, game loop logic, camera control, and UI animation live in a single file. This is a demo problem, not an engine problem — but it makes the correct usage of the engine invisible. Integration tests are not currently possible.</p>
+
+    <h3>6.2 Renderer Pass Count</h3>
+    <p><code>renderer_metal.hpp</code> forward-declares 31 render pass structs with no shared interface — coupling is implicit via call order. Vulkan currently implements 3 passes to Metal's 31. Vulkan is a second-class backend.</p>
+
+    <h3>6.3 <span class="strikethrough">graphics.hpp God Header</span> (Fixed 2026-05-01)</h3>
+    <p>Resolved by splitting into 5 sub-headers. See §4.1a.</p>
+
+    <h3>6.4 Untyped Physics Handles</h3>
+    <p><code>BodyHandle</code> and <code>TriggerHandle</code> are both bare <code>uint32_t</code> wrappers. Mixing them is a naming-convention bug, not a compile error. GPU handles have been fixed; physics handles have not.</p>
+
+    <h3>6.5 Dual Object Model</h3>
+    <p>The demo uses EnTT ECS (<code>entt::entity</code>); the engine uses a <code>shared_ptr</code> Node tree. Both coexist with no unified mapping. A scene object can be either a <code>Node*</code> or an <code>entt::entity</code> depending on which layer you're in.</p>
+
+    <hr>
+
+    <h2>7. Test Coverage</h2>
+    <table>
+      <thead><tr><th>Binary</th><th>Tests</th><th>Coverage</th></tr></thead>
+      <tbody>
+        <tr><td><code>test_action_system</code></td><td>37</td><td>ActionManager, Timer, easing, Timeline/Parallel actions</td></tr>
+        <tr><td><code>test_scene_transform</code></td><td>16</td><td>Dirty propagation, world transform composition (3-level), findNode</td></tr>
+        <tr><td><code>test_camera</code></td><td>21</td><td>Projection matrices, view matrix caching, frustum, isVisible</td></tr>
+        <tr><td><code>test_physics</code></td><td>1</td><td>Jolt body lifecycle: create → add → remove → destroy</td></tr>
+        <tr><td><code>test_resource_manager</code></td><td>2</td><td>Async loading, cache deduplication</td></tr>
+      </tbody>
+    </table>
+    <p>GPU/Renderer, AudioManager, and RmlUI are not tested — they require hardware initialization unavailable in headless CI.</p>
+
+    <hr>
+
+    <h2>8. Strengths</h2>
+    <table>
+      <thead><tr><th>Strength</th><th>Notes</th></tr></thead>
+      <tbody>
+        <tr><td>Library / app separation</td><td>Vapor does not depend on Vaporware. Can be used as a standalone library.</td></tr>
+        <tr><td>Graphics API abstraction</td><td><code>Renderer</code> interface isolates Metal/Vulkan from user code.</td></tr>
+        <tr><td>Thread-safe resource loading</td><td><code>ResourceManager</code> + <code>TaskScheduler</code> designed correctly for safe async loading.</td></tr>
+        <tr><td>Physics / scene separation</td><td>Physics3D is an independent singleton. Interaction is driven via <code>process(scene)</code>.</td></tr>
+        <tr><td>Handle-based API</td><td>No raw pointers in the public API. Internals can be swapped without breaking callers.</td></tr>
+        <tr><td>Type-safe GPU handles</td><td><code>GPUHandle&lt;Tag&gt;</code> provides compile-time handle type safety in the graphics layer.</td></tr>
+        <tr><td>Shape cache</td><td>Same-dimension shapes are shared automatically, avoiding redundant Jolt allocations.</td></tr>
+        <tr><td>CI</td><td>Catch2 v3 + GitHub Actions. 76 tests run on every push (macos-15, Ninja, ccache).</td></tr>
+      </tbody>
+    </table>
+  </main>
+</body>
+</html>

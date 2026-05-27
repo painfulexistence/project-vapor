@@ -234,6 +234,24 @@ public:
 
     TextureHandle createTexture(const std::shared_ptr<Vapor::Image>& img) override;
 
+    // ===== Render-to-Texture API =====
+    RenderTextureHandle createRenderTexture(const RenderTextureDesc& desc) override;
+    void destroyRenderTexture(RenderTextureHandle handle) override;
+    TextureHandle getRenderTextureAsTexture(RenderTextureHandle handle) override;
+    void renderToTexture(
+        RenderTextureHandle target,
+        std::shared_ptr<Scene> scene,
+        Camera& camera,
+        const glm::vec4& clearColor = glm::vec4(0.0f, 0.0f, 0.0f, 1.0f)
+    ) override;
+    glm::uvec2 getRenderTextureSize(RenderTextureHandle handle) override;
+    Uint64 registerRenderTextureForUI(RenderTextureHandle handle) override;
+
+    // Render texture post-processing
+    void applyBloom(RenderTextureHandle target, float threshold = 1.0f, float strength = 0.5f) override;
+    void applyToneMapping(RenderTextureHandle target, float exposure = 1.0f) override;
+    void applyVignette(RenderTextureHandle target, float strength = 0.3f, float radius = 0.8f) override;
+
     // ===== Font Rendering API =====
     FontHandle loadFont(const std::string& path, float baseSize) override;
     void unloadFont(FontHandle handle) override;
@@ -338,6 +356,15 @@ protected:
     static constexpr Uint32 BatchMaxTextureSlots = 16;
 
     // 2D Batch CPU-side state (screen space, no depth)
+    // When texture slots overflow (>16 unique textures), the current batch is
+    // saved to batch2DSubBatches and a new batch starts automatically.
+    struct Batch2DSubBatch {
+        std::vector<Batch2DVertex>      vertices;
+        std::vector<Uint32>             indices;
+        std::array<TextureHandle, 16>   textureSlots;
+        Uint32                          textureSlotCount = 1;
+    };
+    std::vector<Batch2DSubBatch> batch2DSubBatches;
     std::vector<Batch2DVertex> batch2DVertices;
     std::vector<Uint32> batch2DIndices;
     std::array<TextureHandle, 16> batch2DTextureSlots;
@@ -346,6 +373,8 @@ protected:
     BlendMode batch2DBlendMode = BlendMode::Alpha;
     Batch2DStats batch2DStats;
     bool batch2DActive = false;
+
+    void splitBatch2D(); // flush current batch into sub-batches, reset slots
 
     // 3D Batch CPU-side state (world space, with depth)
     std::vector<Batch2DVertex> batch3DVertices;
@@ -557,6 +586,20 @@ private:
     std::unordered_map<Uint32, NS::SharedPtr<MTL::Texture>> textures;
     std::unordered_map<Uint32, NS::SharedPtr<MTL::RenderPipelineState>> pipelines;
     std::unordered_map<std::shared_ptr<Vapor::Material>, Uint32> materialIDs;
+
+    // Render texture internal data
+    struct RenderTextureData {
+        NS::SharedPtr<MTL::Texture> colorTexture;
+        NS::SharedPtr<MTL::Texture> tempTexture;// For ping-pong post-processing
+        NS::SharedPtr<MTL::Texture> depthTexture;
+        TextureHandle textureHandle;// Handle for using as sampler texture
+        Uint32 width = 0;
+        Uint32 height = 0;
+        bool hdr = false;
+        Uint32 sampleCount = 1;
+    };
+    Uint32 nextRenderTextureID = 0;
+    std::unordered_map<Uint32, RenderTextureData> renderTextures;
 
     RenderPath currentRenderPath = RenderPath::Forward;
 

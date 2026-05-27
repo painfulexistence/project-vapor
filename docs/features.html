@@ -1,0 +1,267 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Features — Project Vapor</title>
+  <style>
+    :root {
+      --bg: #0d0d0f;
+      --bg-surface: #141418;
+      --bg-raised: #1c1c22;
+      --border: #2a2a33;
+      --text: #e2e2e8;
+      --text-muted: #7a7a8c;
+      --accent: #7c6af7;
+      --warn: #c97a2f;
+      --ok: #4a9e6a;
+      --danger: #9e4a4a;
+    }
+    * { box-sizing: border-box; margin: 0; padding: 0; }
+    body {
+      background: var(--bg);
+      color: var(--text);
+      font-family: 'Berkeley Mono', 'JetBrains Mono', 'Fira Code', 'Cascadia Code', monospace;
+      font-size: 15px;
+      line-height: 1.75;
+    }
+    nav {
+      background: var(--bg-surface);
+      border-bottom: 1px solid var(--border);
+      padding: 16px 24px;
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+    }
+    nav .site-title { color: var(--text-muted); text-decoration: none; font-size: 14px; }
+    nav .links { display: flex; gap: 24px; }
+    nav .links a { color: var(--text-muted); text-decoration: none; font-size: 13px; }
+    nav .links a:hover { color: var(--accent); }
+    nav .links a.active { color: var(--accent); }
+    main { max-width: 860px; margin: 0 auto; padding: 48px 24px; }
+    .page-header { margin-bottom: 40px; }
+    .page-header h1 { font-size: 22px; font-weight: 600; margin-bottom: 8px; }
+    .page-header .muted { font-size: 13px; color: var(--text-muted); }
+    h2 { font-size: 17px; font-weight: 600; margin: 40px 0 16px; }
+    hr { border: none; border-top: 1px solid var(--border); margin: 40px 0; }
+    p { margin-bottom: 16px; }
+    code {
+      background: var(--bg-raised);
+      border-radius: 3px;
+      padding: 2px 6px;
+      font-size: 13px;
+    }
+    table { width: 100%; border-collapse: collapse; margin-bottom: 8px; font-size: 14px; }
+    thead th {
+      background: var(--bg-raised);
+      color: var(--text-muted);
+      font-size: 11px;
+      text-transform: uppercase;
+      letter-spacing: 0.08em;
+      padding: 10px 14px;
+      text-align: left;
+      border: 1px solid var(--border);
+    }
+    tbody td { padding: 10px 14px; border: 1px solid var(--border); vertical-align: top; }
+    tbody tr:nth-child(even) td { background: var(--bg-raised); }
+    .warn-note {
+      font-size: 12px;
+      color: var(--warn);
+    }
+    @media (max-width: 640px) { main { padding: 24px 16px; } }
+  </style>
+</head>
+<body>
+  <nav>
+    <a class="site-title" href="index.html">Project Vapor</a>
+    <div class="links">
+      <a href="architecture.html">Architecture</a>
+      <a href="features.html" class="active">Features</a>
+      <a href="techstack.html">Tech Stack</a>
+      <a href="roadmap.html">Roadmap</a>
+      <a href="ADR/index.html">ADRs</a>
+    </div>
+  </nav>
+  <main>
+    <div class="page-header">
+      <h1>Features</h1>
+      <p class="muted">Last updated 2026-05-01 · Source: <code>Vapor/include/Vapor/</code> (34 headers) + <code>Vaporware/src/</code></p>
+    </div>
+
+    <h2>Rendering</h2>
+    <table>
+      <thead><tr><th>Feature</th><th>Description</th></tr></thead>
+      <tbody>
+        <tr><td>Forward + Tiled Light Culling</td><td>Primary render path. View frustum divided into a 16×16×24 cluster grid; each cluster computes only its affecting lights.</td></tr>
+        <tr><td>GPU-Driven Instancing</td><td>5000+ simultaneous instances. Tested against the Bistro scene (2911 instances).</td></tr>
+        <tr><td>Physically-Based Rendering</td><td>Disney BRDF shading model. Supports albedo, metallic, roughness, normal, and emissive maps.</td></tr>
+        <tr><td>MSAA 4x</td><td>Hardware multi-sample anti-aliasing.</td></tr>
+        <tr><td>Raytraced Hard Shadows</td><td>Metal only. Uses Metal ray tracing API for accurate hard shadows.</td></tr>
+        <tr><td>Bloom</td><td>HDR bloom post-processing.</td></tr>
+        <tr><td>Depth of Field</td><td>CoC → blur → composite pass infrastructure exists. <span class="warn-note">Currently disabled (passes commented out).</span></td></tr>
+        <tr><td>Volumetric Fog / God Rays</td><td>Volumetric fog and Tyndall light beam effect.</td></tr>
+        <tr><td>Volumetric Clouds</td><td>Procedural volumetric cloud rendering.</td></tr>
+        <tr><td>Atmosphere Rendering</td><td>Rayleigh + Mie scattering atmosphere model.</td></tr>
+        <tr><td>Sun / Lens Flare</td><td>Sun lens flare effect.</td></tr>
+        <tr><td>Water Rendering</td><td>Normal-map water surface with foam. <span class="warn-note">Currently disabled (pass commented out).</span></td></tr>
+        <tr><td>2D Batch Rendering</td><td>Screen-space quads, lines, rectangles, circles, triangles — batched.</td></tr>
+        <tr><td>3D Batch Rendering</td><td>World-space batch rendering with depth testing.</td></tr>
+        <tr><td>Sprite / Texture Quad</td><td>Textured quad rendering with rotation and tint.</td></tr>
+        <tr><td>Bitmap Font Rendering</td><td>2D screen-space and 3D world-space text.</td></tr>
+        <tr><td>Multi-backend</td><td>Metal (macOS) and Vulkan (cross-platform) sharing the same API surface.</td></tr>
+      </tbody>
+    </table>
+
+    <hr>
+
+    <h2>Physics (Physics3D)</h2>
+    <table>
+      <thead><tr><th>Feature</th><th>Description</th></tr></thead>
+      <tbody>
+        <tr><td>Rigid Body Creation</td><td>Sphere, box, capsule, cylinder, mesh, convex hull shapes.</td></tr>
+        <tr><td>Body Lifecycle</td><td><code>addBody</code> / <code>removeBody</code> / <code>destroyBody</code>.</td></tr>
+        <tr><td>Motion Types</td><td>Static, Dynamic, Kinematic.</td></tr>
+        <tr><td>Force &amp; Impulse</td><td><code>applyForce</code>, <code>applyImpulse</code>, <code>applyTorque</code>.</td></tr>
+        <tr><td>Velocity Control</td><td><code>setLinearVelocity</code>, <code>setAngularVelocity</code>.</td></tr>
+        <tr><td>Physical Properties</td><td>Mass, friction, restitution, linear/angular damping, gravity factor.</td></tr>
+        <tr><td>Trigger Volumes</td><td>Box, sphere, capsule sensors with <code>onTriggerEnter/Exit</code> callbacks.</td></tr>
+        <tr><td>Overlap Tests</td><td><code>overlapSphere</code>, <code>overlapBox</code>, <code>overlapCapsule</code> — returns overlapping nodes.</td></tr>
+        <tr><td>Raycasting</td><td><code>raycast(from, to, hit, ignoreBody)</code> with hit point, normal, distance, node pointer.</td></tr>
+        <tr><td>Physics Debug Draw</td><td>Wireframe overlay for collision geometry visualization.</td></tr>
+        <tr><td>Fixed-step Simulation</td><td>60Hz fixed timestep with render interpolation alpha.</td></tr>
+        <tr><td>Shape Cache</td><td>Same-dimension shapes are shared automatically.</td></tr>
+        <tr><td>Task-based Parallelism</td><td>Jolt runs on <code>JPH::JobSystemThreadPool</code>.</td></tr>
+        <tr><td>Character Controller</td><td>Capsule character controller handling steps, slopes, gravity.</td></tr>
+        <tr><td>Vehicle Controller</td><td>Vehicle physics with axles and suspension.</td></tr>
+      </tbody>
+    </table>
+
+    <hr>
+
+    <h2>Audio (AudioManager)</h2>
+    <table>
+      <thead><tr><th>Feature</th><th>Description</th></tr></thead>
+      <tbody>
+        <tr><td>2D Audio</td><td><code>play2d(filename, loop, volume)</code> — non-spatialized.</td></tr>
+        <tr><td>3D Spatial Audio</td><td><code>play3d(filename, position/config)</code> — positional.</td></tr>
+        <tr><td>Playback Control</td><td><code>stop</code>, <code>pause</code>, <code>resume</code> (single or all).</td></tr>
+        <tr><td>Audio Properties</td><td>Volume, pitch, loop, seek, duration.</td></tr>
+        <tr><td>Distance Models</td><td>None, Linear, Inverse, Exponential.</td></tr>
+        <tr><td>Directional Audio Cones</td><td>Inner/outer angle + outer gain for directional sources.</td></tr>
+        <tr><td>Doppler Effect</td><td>Via <code>velocity3D</code>.</td></tr>
+        <tr><td>Listener Control</td><td>Position, velocity, orientation — wired to camera/player.</td></tr>
+        <tr><td>Completion Callback</td><td>Fires on main thread when audio finishes.</td></tr>
+        <tr><td>Instance Pool</td><td>Up to 32 simultaneous playback instances.</td></tr>
+      </tbody>
+    </table>
+
+    <hr>
+
+    <h2>Input (InputManager)</h2>
+    <table>
+      <thead><tr><th>Feature</th><th>Description</th></tr></thead>
+      <tbody>
+        <tr><td>Action Mapping</td><td><code>mapKey(scancode, InputAction)</code>.</td></tr>
+        <tr><td>Input State Query</td><td><code>isHeld</code>, <code>isPressed</code>, <code>isReleased</code>.</td></tr>
+        <tr><td>Axis / Vector Query</td><td><code>getAxis(neg, pos)</code>, <code>getVector(4 directions)</code> returning -1..1.</td></tr>
+        <tr><td>Mouse</td><td><code>getMousePosition()</code>, <code>getMouseDelta()</code>.</td></tr>
+        <tr><td>Input History Buffer</td><td>Last 32 events with timestamps, retained for 1 second.</td></tr>
+        <tr><td>SDL Event Integration</td><td><code>processEvent(SDL_Event)</code> wired into the SDL3 event loop.</td></tr>
+      </tbody>
+    </table>
+
+    <hr>
+
+    <h2>Resource Management (ResourceManager)</h2>
+    <table>
+      <thead><tr><th>Feature</th><th>Description</th></tr></thead>
+      <tbody>
+        <tr><td>Image Loading</td><td><code>loadImage(path, Sync/Async, callback)</code>.</td></tr>
+        <tr><td>GLTF Scene Loading</td><td><code>loadScene(path, optimized, Sync/Async, callback)</code>.</td></tr>
+        <tr><td>OBJ Mesh Loading</td><td><code>loadOBJ(path, mtlBasedir, Sync/Async, callback)</code>.</td></tr>
+        <tr><td>Text File Loading</td><td><code>loadText(path, Sync/Async, callback)</code>.</td></tr>
+        <tr><td>Thread-safe Cache</td><td>Same path → same handle, safe across threads.</td></tr>
+        <tr><td>Resource State Tracking</td><td>Unloaded / Loading / Ready / Failed.</td></tr>
+        <tr><td>Blocking Get</td><td><code>Resource&lt;T&gt;::get()</code> blocks until ready.</td></tr>
+        <tr><td>Non-blocking Try Get</td><td><code>Resource&lt;T&gt;::tryGet()</code> returns nullptr while loading.</td></tr>
+        <tr><td>Cache Management</td><td>Per-type clear or <code>clearAllCaches()</code>.</td></tr>
+      </tbody>
+    </table>
+
+    <hr>
+
+    <h2>Scene Graph</h2>
+    <table>
+      <thead><tr><th>Feature</th><th>Description</th></tr></thead>
+      <tbody>
+        <tr><td>Hierarchical Node Tree</td><td>World transform computed recursively from local transform.</td></tr>
+        <tr><td>Transform API</td><td>get/set LocalPosition, LocalRotation, LocalScale, LocalEulerAngles, WorldPosition.</td></tr>
+        <tr><td>Rotation Helpers</td><td><code>rotateAroundLocalAxis</code>, <code>rotateAroundWorldAxis</code>, <code>rotate</code>, <code>translate</code>, <code>scale</code>.</td></tr>
+        <tr><td>Node Search</td><td><code>findNode(name)</code>, <code>findNodeInHierarchy(name, node)</code>.</td></tr>
+        <tr><td>Physics Callbacks</td><td><code>onTriggerEnter/Exit</code>, <code>onCollisionEnter/Exit</code> as virtual methods.</td></tr>
+        <tr><td>Dirty Transform Flag</td><td>World matrix computed lazily.</td></tr>
+      </tbody>
+    </table>
+
+    <hr>
+
+    <h2>Action System (ActionManager)</h2>
+    <table>
+      <thead><tr><th>Feature</th><th>Description</th></tr></thead>
+      <tbody>
+        <tr><td>Easing Functions</td><td>Linear, ease-in, ease-out, ease-in-out, and variants.</td></tr>
+        <tr><td>Timed Actions</td><td>Time-interpolated state transitions and animations.</td></tr>
+        <tr><td>Action Chaining</td><td>Sequential actions — next fires automatically when previous completes.</td></tr>
+        <tr><td>Parallel Actions</td><td>Multiple actions running concurrently.</td></tr>
+        <tr><td>Per-frame Update</td><td><code>update(deltaTime)</code> advances all active actions.</td></tr>
+      </tbody>
+    </table>
+
+    <hr>
+
+    <h2>UI System (RmlUI)</h2>
+    <table>
+      <thead><tr><th>Feature</th><th>Description</th></tr></thead>
+      <tbody>
+        <tr><td>HTML/CSS UI Layout</td><td>Loads <code>.rml</code> documents for in-game HUD rendering.</td></tr>
+        <tr><td>HUD with Fade</td><td>Fade-in/out HUD component.</td></tr>
+        <tr><td>Subtitle System</td><td>Per-line subtitles with speaker name.</td></tr>
+        <tr><td>Scroll Text</td><td>Typewriter-effect scrolling text.</td></tr>
+        <tr><td>Letterbox</td><td>Cinematic black-bar transition animation.</td></tr>
+        <tr><td>Chapter Title Cards</td><td>Animated chapter title overlays.</td></tr>
+        <tr><td>Window Resize Handling</td><td><code>onRmlUIResize(w, h)</code>.</td></tr>
+        <tr><td>SDL Event Integration</td><td><code>processRmlUIEvent(SDL_Event)</code> lets UI consume input.</td></tr>
+      </tbody>
+    </table>
+
+    <hr>
+
+    <h2>Developer Tools</h2>
+    <table>
+      <thead><tr><th>Feature</th><th>Description</th></tr></thead>
+      <tbody>
+        <tr><td>Tracy Profiler</td><td>CPU/GPU timing markers throughout the engine.</td></tr>
+        <tr><td>ImGui Scene Inspector</td><td>Entity list, per-component panels, custom drawers registered per component type, add/destroy entity controls.</td></tr>
+        <tr><td>MCP Dev Server</td><td>HTTP JSON-RPC server (<code>GameUIServer</code>) for external tooling integration — scene dump, input injection, screen capture.</td></tr>
+        <tr><td>Physics Debug Wireframe</td><td>Real-time collision geometry overlay.</td></tr>
+        <tr><td>Batch Rendering Stats</td><td><code>getBatch2DStats()</code> for draw call counts.</td></tr>
+      </tbody>
+    </table>
+
+    <hr>
+
+    <h2>Build &amp; Infrastructure</h2>
+    <table>
+      <thead><tr><th>Feature</th><th>Description</th></tr></thead>
+      <tbody>
+        <tr><td>CMake 3.24+ Build</td><td>Preset-based configure and build.</td></tr>
+        <tr><td>vcpkg Dependency Management</td><td>All dependencies declared in <code>vcpkg.json</code>.</td></tr>
+        <tr><td>SPIR-V Shader Compilation</td><td>GLSL shaders compiled to SPIR-V via glslangValidator.</td></tr>
+        <tr><td>Multi-platform Graphics</td><td>Same engine API, Metal or Vulkan selected at runtime.</td></tr>
+        <tr><td>CI/CD</td><td>GitHub Actions on macos-15. Runs tests on every push, ccache for speed.</td></tr>
+        <tr><td>Automated Tests</td><td>Catch2 v3. 76 tests across 5 binaries.</td></tr>
+      </tbody>
+    </table>
+  </main>
+</body>
+</html>

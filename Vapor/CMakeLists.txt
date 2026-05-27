@@ -25,6 +25,7 @@ set(SOURCES
     src/model_serializer.cpp
     src/camera.cpp
     src/debug_draw.cpp
+    src/atlas_baker.cpp
     src/font_manager.cpp
     src/graphics.cpp
     src/helper.cpp
@@ -53,7 +54,8 @@ set(SOURCES
 if(APPLE)
     list(APPEND SOURCES
         src/renderer_metal.cpp
-        src/ui_renderer_metal.mm
+        src/rml_renderer_metal.cpp
+        src/ui_renderer_metal.cpp
         imgui/backends/imgui_impl_metal.mm
     )
 else()
