@@ -152,6 +152,9 @@ public:
     virtual void stage(std::shared_ptr<Scene> scene) override;
 
     virtual void draw(std::shared_ptr<Scene> scene, Camera& camera) override;
+    virtual void draw(entt::registry& registry, std::shared_ptr<Scene> scene, Camera& camera) override;
+
+    virtual void readPixelsAsync(ScreenshotCallback callback) override;
 
     virtual void setRenderPath(RenderPath path) override {
         currentRenderPath = path;
@@ -247,7 +250,25 @@ public:
     NS::SharedPtr<MTL::ComputePipelineState> createComputePipeline(const std::string& filename);
     NS::SharedPtr<MTL::ComputePipelineState> createComputePipeline(const std::string& filename, const std::string& functionName);
 
-    TextureHandle createTexture(const std::shared_ptr<Image>& img) override;
+    TextureHandle createTexture(const std::shared_ptr<Vapor::Image>& img) override;
+
+    // ===== Render-to-Texture API =====
+    RenderTextureHandle createRenderTexture(const RenderTextureDesc& desc) override;
+    void destroyRenderTexture(RenderTextureHandle handle) override;
+    TextureHandle getRenderTextureAsTexture(RenderTextureHandle handle) override;
+    void renderToTexture(
+        RenderTextureHandle target,
+        std::shared_ptr<Scene> scene,
+        Camera& camera,
+        const glm::vec4& clearColor = glm::vec4(0.0f, 0.0f, 0.0f, 1.0f)
+    ) override;
+    glm::uvec2 getRenderTextureSize(RenderTextureHandle handle) override;
+    Uint64 registerRenderTextureForUI(RenderTextureHandle handle) override;
+
+    // Render texture post-processing
+    void applyBloom(RenderTextureHandle target, float threshold = 1.0f, float strength = 0.5f) override;
+    void applyToneMapping(RenderTextureHandle target, float exposure = 1.0f) override;
+    void applyVignette(RenderTextureHandle target, float strength = 0.3f, float radius = 0.8f) override;
 
     // ===== Font Rendering API =====
     FontHandle loadFont(const std::string& path, float baseSize) override;
@@ -269,9 +290,9 @@ public:
     glm::vec2 measureText(FontHandle font, const std::string& text, float scale = 1.0f) override;
     float getFontLineHeight(FontHandle font, float scale = 1.0f) override;
 
-    BufferHandle createVertexBuffer(const std::vector<VertexData>& vertices);
+    BufferHandle createVertexBuffer(const std::vector<Vapor::VertexData>& vertices);
     BufferHandle createIndexBuffer(const std::vector<Uint32>& indices);
-    BufferHandle createStorageBuffer(const std::vector<VertexData>& vertices);
+    BufferHandle createStorageBuffer(const std::vector<Vapor::VertexData>& vertices);
 
     NS::SharedPtr<MTL::Buffer> getBuffer(BufferHandle handle) const;
     NS::SharedPtr<MTL::Texture> getTexture(TextureHandle handle) const;
@@ -353,6 +374,15 @@ protected:
     static constexpr Uint32 BatchMaxTextureSlots = 16;
 
     // 2D Batch CPU-side state (screen space, no depth)
+    // When texture slots overflow (>16 unique textures), the current batch is
+    // saved to batch2DSubBatches and a new batch starts automatically.
+    struct Batch2DSubBatch {
+        std::vector<Batch2DVertex>      vertices;
+        std::vector<Uint32>             indices;
+        std::array<TextureHandle, 16>   textureSlots;
+        Uint32                          textureSlotCount = 1;
+    };
+    std::vector<Batch2DSubBatch> batch2DSubBatches;
     std::vector<Batch2DVertex> batch2DVertices;
     std::vector<Uint32> batch2DIndices;
     std::array<TextureHandle, 16> batch2DTextureSlots;
@@ -361,6 +391,8 @@ protected:
     BlendMode batch2DBlendMode = BlendMode::Alpha;
     Batch2DStats batch2DStats;
     bool batch2DActive = false;
+
+    void splitBatch2D(); // flush current batch into sub-batches, reset slots
 
     // 3D Batch CPU-side state (world space, with depth)
     std::vector<Batch2DVertex> batch3DVertices;
@@ -455,6 +487,7 @@ protected:
     NS::SharedPtr<MTL::Texture> cloudRT;// Cloud render target (quarter res)
     NS::SharedPtr<MTL::Texture> cloudHistoryRT;// Previous frame clouds (for TAA)
     bool volumetricCloudsEnabled = false;
+    bool m_supportsRaytracing = false;
     VolumetricCloudData volumetricCloudSettings;
 
     // Sun Flare resources
@@ -476,9 +509,14 @@ protected:
     std::vector<NS::SharedPtr<MTL::AccelerationStructure>> TLASBuffers;
 
     // Instance data
+    // instanceBatches: material → list of (mesh, instanceArrayIndex) for rasterization draw calls
+    struct MeshDraw { std::shared_ptr<Vapor::Mesh> mesh; uint32_t instanceIndex; };
     std::vector<InstanceData> instances;
+    std::vector<InstanceData> pendingEcsInstances;
+    std::unordered_map<std::shared_ptr<Vapor::Material>, std::vector<MeshDraw>> pendingEcsBatches;
+    std::vector<MTL::AccelerationStructureInstanceDescriptor> pendingEcsAccelInstances;
     std::vector<MTL::AccelerationStructureInstanceDescriptor> accelInstances;
-    std::unordered_map<std::shared_ptr<Material>, std::vector<std::shared_ptr<Mesh>>> instanceBatches;
+    std::unordered_map<std::shared_ptr<Vapor::Material>, std::vector<MeshDraw>> instanceBatches;
 
     // Render targets
     NS::SharedPtr<MTL::Texture> colorRT_MS;
@@ -585,13 +623,28 @@ private:
     std::unordered_map<Uint32, NS::SharedPtr<MTL::Buffer>> buffers;
     std::unordered_map<Uint32, NS::SharedPtr<MTL::Texture>> textures;
     std::unordered_map<Uint32, NS::SharedPtr<MTL::RenderPipelineState>> pipelines;
-    std::unordered_map<std::shared_ptr<Material>, Uint32> materialIDs;
+    std::unordered_map<std::shared_ptr<Vapor::Material>, Uint32> materialIDs;
+
+    // Render texture internal data
+    struct RenderTextureData {
+        NS::SharedPtr<MTL::Texture> colorTexture;
+        NS::SharedPtr<MTL::Texture> tempTexture;// For ping-pong post-processing
+        NS::SharedPtr<MTL::Texture> depthTexture;
+        TextureHandle textureHandle;// Handle for using as sampler texture
+        Uint32 width = 0;
+        Uint32 height = 0;
+        bool hdr = false;
+        Uint32 sampleCount = 1;
+    };
+    Uint32 nextRenderTextureID = 0;
+    std::unordered_map<Uint32, RenderTextureData> renderTextures;
 
     RenderPath currentRenderPath = RenderPath::Forward;
 
     // UI rendering (using void* for pimpl idiom to hide implementation)
     void* m_uiRenderer = nullptr;
     Rml::Context* m_uiContext = nullptr;
+    std::vector<ScreenshotCallback> m_pendingScreenshots;
 
     // Font rendering
     FontManager m_fontManager;

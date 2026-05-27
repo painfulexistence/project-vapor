@@ -1,6 +1,6 @@
 #include <metal_stdlib>
 using namespace metal;
-#include "assets/shaders/3d_common.metal"
+#include "Res/shaders/3d_common.metal"
 
 // Volumetric Light Scattering (God Rays) Pass
 // Screen-space radial blur implementation based on GPU Gems 3
