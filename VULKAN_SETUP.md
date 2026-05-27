@@ -10,9 +10,11 @@
 - ✅ GLSL shaders 已經存在（15 個）
 - ✅ renderer_vulkan.cpp 完整實作（173 KB）
 - ✅ 所有渲染邏輯都已完成
+- ✅ CMake 自動 shader 編譯配置（Vapor/CMakeLists.txt）
 
-### 只缺
-- ❌ SPIR-V 編譯檔案（.spv）
+### 需要
+- ⚙️ 安裝 Vulkan SDK（提供 glslangValidator）
+- ⚙️ 執行 build（自動編譯 SPIR-V）
 
 ## 🚀 快速開始
 
@@ -36,32 +38,31 @@ sudo pacman -S vulkan-tools glslang
 #### 或從官網下載
 https://vulkan.lunarg.com/sdk/home
 
-### 步驟 2：編譯 Shaders
+### 步驟 2：建構專案（自動編譯 Shaders）
 
 ```bash
-# 在專案根目錄執行
-./compile_shaders.sh
+# 如果還沒有 build 目錄
+cmake -B build -S .
+
+# 建構（會自動編譯 15 個 GLSL shaders 為 SPIR-V）
+cmake --build build
 ```
 
-輸出應該類似：
+**重要：** CMake 會自動：
+1. 偵測所有 `.vert`, `.frag`, `.comp` 檔案
+2. 使用 `glslangValidator` 編譯為 `.spv`
+3. 將編譯為 `Vapor_compile_shaders` 目標的依賴項
+4. 無需手動執行任何 shader 編譯腳本
+
+你應該會看到類似輸出：
 ```
-=== Compiling GLSL Shaders to SPIR-V ===
-Shader directory: Vapor/assets/shaders
-Output directory: Vapor/assets/shaders
-
-Using glslangValidator: /usr/local/bin/glslangValidator
-
---- Core Rendering Shaders ---
-Compiling: Vapor/assets/shaders/TBN.vert -> Vapor/assets/shaders/TBN.vert.spv
-  ✓ Success
-Compiling: Vapor/assets/shaders/PBRNormalMapped.frag -> Vapor/assets/shaders/PBRNormalMapped.frag.spv
-  ✓ Success
+[ 10%] Compiling TBN.vert to SPIR-V
+[ 11%] Compiling PBRNormalMapped.frag to SPIR-V
 ...
-
-✓ All shaders compiled successfully!
+[ 20%] Built target Vapor_compile_shaders
 ```
 
-### 步驟 3：驗證編譯結果
+### 步驟 3：驗證編譯結果（可選）
 
 ```bash
 # 檢查是否生成了 15 個 .spv 檔案
@@ -69,17 +70,7 @@ ls -la Vapor/assets/shaders/*.spv | wc -l
 # 應該顯示: 15
 ```
 
-### 步驟 4：建構專案
-
-```bash
-# 如果還沒有 build 目錄
-cmake -B build -S .
-
-# 建構
-cmake --build build
-```
-
-### 步驟 5：執行 Vulkan 後端
+### 步驟 4：執行 Vulkan 後端
 
 ```bash
 # 使用 Vulkan 後端運行
@@ -89,9 +80,9 @@ cmake --build build
 ./build/Vapor --metal
 ```
 
-## 📋 已編譯的 Shaders 清單
+## 📋 自動編譯的 Shaders 清單
 
-編譯腳本會生成以下 15 個 SPIR-V 檔案：
+CMake build 系統會自動生成以下 15 個 SPIR-V 檔案：
 
 ### 核心渲染（6 個）
 1. `TBN.vert.spv` - 主要頂點 shader（TBN 矩陣計算）
@@ -134,15 +125,15 @@ ERROR: glslangValidator not found!
 
 **症狀：**
 ```
-Compiling: Vapor/assets/shaders/PBRNormalMapped.frag -> ...
-  ✗ Failed
-ERROR: ... : compilation errors
+[ 10%] Compiling PBRNormalMapped.frag to SPIR-V
+Error: compilation failed
 ```
 
 **解決方案：**
 1. 檢查 GLSL shader 語法
 2. 確認 #version 450
 3. 檢查 binding 和 set 編號
+4. 查看完整錯誤輸出以了解具體問題
 
 ### 問題 3：執行時找不到 shader 檔案
 
@@ -233,10 +224,10 @@ Failed to load shader: shaders/TBN.vert.spv
 
 ## ⏱️ 預期時間
 
-- **編譯 shaders**: 1-2 分鐘
-- **建構專案**: 3-5 分鐘
-- **測試兩個後端**: 10-15 分鐘
-- **總時間**: ~20 分鐘
+- **安裝 Vulkan SDK**: 1-2 分鐘
+- **建構專案（含自動 shader 編譯）**: 3-5 分鐘
+- **測試兩個後端**: 5-10 分鐘
+- **總時間**: ~10 分鐘
 
 ## 📝 下一步
 
@@ -283,4 +274,4 @@ Failed to load shader: shaders/TBN.vert.spv
 3. 比對 Metal 後端行為
 4. 檢查 shader 編譯錯誤訊息
 
-**準備好了嗎？** 執行 `./compile_shaders.sh` 開始！ 🚀
+**準備好了嗎？** 執行 `cmake --build build` 開始！ 🚀

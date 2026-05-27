@@ -51,9 +51,9 @@ Break-even point: 10-12 個月
    - `RHI_INTEGRATION_PLAN.md` - RHI 完整計畫
    - `RHI_TRADEOFF_ANALYSIS.md` - 權衡分析
 
-2. ✅ **準備工具**
-   - `compile_shaders.sh` - Shader 編譯腳本
+2. ✅ **分析完成**
    - `VULKAN_SETUP.md` - Vulkan 設定指南
+   - CMake 自動編譯 shaders（無需手動腳本）
 
 ### 下一步（使用者執行）
 
@@ -66,19 +66,18 @@ Break-even point: 10-12 個月
    sudo apt install glslang-tools
    ```
 
-2. **編譯 SPIR-V Shaders**
+2. **建構專案（自動編譯 shaders）**
    ```bash
-   ./compile_shaders.sh
-   ```
+   # 如果還沒有 build 目錄
+   cmake -B build -S .
    
-   預期輸出：15 個 .spv 檔案
-
-3. **建構專案**
-   ```bash
+   # 建構（會自動編譯 15 個 SPIR-V shaders）
    cmake --build build
    ```
+   
+   **注意：** CMakeLists.txt 已經配置自動 shader 編譯，無需手動執行腳本
 
-4. **測試兩個後端**
+3. **測試兩個後端**
    ```bash
    # Vulkan
    ./build/Vapor --vulkan
@@ -87,7 +86,7 @@ Break-even point: 10-12 個月
    ./build/Vapor --metal
    ```
 
-5. **開始正常開發**
+4. **開始正常開發**
    - 專注於遊戲功能
    - 記錄維護經驗
    - 6 個月後重新評估
@@ -119,12 +118,12 @@ Break-even point: 10-12 個月
 - ✅ 後處理效果
 - ✅ 粒子系統
 - ✅ 15 個 GLSL shaders
-- ❌ 0 個 SPIR-V 編譯檔案（**只缺這個！**）
+- ✅ **CMake 自動編譯 SPIR-V**（build 階段自動生成 .spv 檔案）
 - ❌ Ray tracing（Vulkan RT 太複雜，暫不支援）
 
-### 需要的 SPIR-V Shaders
+### SPIR-V Shaders（自動編譯）
 
-編譯腳本會生成以下 15 個檔案：
+CMake build 系統會自動生成以下 15 個檔案：
 
 **核心渲染（6 個）：**
 1. TBN.vert.spv
@@ -160,7 +159,7 @@ Break-even point: 10-12 個月
 - ✅ 可以在 macOS 使用 Metal 或 Vulkan
 - ✅ 可以在 Linux/Windows 使用 Vulkan
 - ✅ 功能基本一致（除了 ray tracing）
-- ✅ 總投資時間：~20 分鐘（vs RHI 的 40-50 小時）
+- ✅ 總投資時間：~5 分鐘（安裝 SDK + build，vs RHI 的 40-50 小時）
 
 **長期彈性：**
 - ✅ 保留未來選擇（RHI 或繼續獨立）
@@ -267,8 +266,8 @@ project-vapor/
 ├── RHI_TRADEOFF_ANALYSIS.md       # 權衡分析
 ├── IMPLEMENTATION_SUMMARY.md      # 執行摘要（本文件）⭐
 ├── VULKAN_SETUP.md                # Vulkan 設定指南
-├── compile_shaders.sh             # Shader 編譯腳本
 └── Vapor/
+    ├── CMakeLists.txt             # 包含自動 shader 編譯配置
     ├── src/
     │   ├── renderer_metal.cpp     # Metal 實作（272 KB）
     │   └── renderer_vulkan.cpp    # Vulkan 實作（173 KB）
@@ -276,7 +275,7 @@ project-vapor/
         └── shaders/
             ├── *.metal            # 41 個 Metal shaders ✅
             ├── *.vert/frag/comp   # 15 個 GLSL shaders ✅
-            └── *.spv              # 15 個 SPIR-V（待編譯）❌
+            └── *.spv              # 15 個 SPIR-V（build 時自動生成）✅
 ```
 
 ## 🎓 學習重點
@@ -308,18 +307,18 @@ project-vapor/
 - [x] 分析現有架構
 - [x] 評估 RHI vs 獨立後端
 - [x] 決定混合方案
-- [x] 創建編譯腳本
+- [x] 確認 CMake 自動編譯配置
 - [x] 撰寫設定指南
 - [ ] **使用者：安裝 Vulkan SDK**
-- [ ] **使用者：編譯 SPIR-V shaders**
+- [ ] **使用者：執行 cmake --build build（自動編譯 shaders）**
 - [ ] **使用者：測試兩個後端**
 - [ ] **使用者：正常開發 6 個月**
 - [ ] **使用者：重新評估是否需要 RHI**
 
 ---
 
-**下一步：** 請執行 `./compile_shaders.sh` 開始！ 🚀
+**下一步：** 請執行 `cmake --build build` 開始！ 🚀
 
-**時間估計：** 20 分鐘內完成所有設定
-**預期結果：** 兩個後端都能運作
+**時間估計：** 5 分鐘內完成所有設定（安裝 SDK + build）
+**預期結果：** 兩個後端都能運作，shaders 自動編譯
 **長期計畫：** 6 個月後評估
