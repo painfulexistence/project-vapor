@@ -363,6 +363,17 @@ auto main(int argc, char* args[]) -> int {
     // Resource loading
     auto& resourceManager = engineCore->getResourceManager();
 
+    // Register single-frame atlas for the demo sprite texture
+    SpriteAtlas demoAtlas;
+    demoAtlas.name    = "demo_sprite";
+    demoAtlas.texture = spriteTexture;
+    demoAtlas.size    = glm::vec2(1.0f, 1.0f);
+    demoAtlas.frames.push_back(SpriteFrame{
+        "default", {0.0f, 0.0f, 1.0f, 1.0f}, {1.0f, 1.0f}, {0.0f, 0.0f}, {0.5f, 0.5f}, false
+    });
+    demoAtlas.nameToIndex["default"] = 0;
+    AtlasHandle demoAtlasHandle = resourceManager.registerAtlas("demo_sprite", std::move(demoAtlas));
+
     fmt::print("Loading scene asynchronously...\n");
     auto sceneResource = resourceManager.loadScene(
         std::string("models/Sponza/Sponza.gltf"),
@@ -397,7 +408,6 @@ auto main(int argc, char* args[]) -> int {
     auto [sceneBuilt, materialBuilt, cube1, global] =
         buildScene(registry, *physics, scene, material, windowWidth, windowHeight, rng);
 
-    scene->update(0.0f);
     renderer->stage(scene);
 
     // Convert GLTF scene meshes to ECS entities so they appear in the inspector
@@ -435,6 +445,24 @@ auto main(int argc, char* args[]) -> int {
     // staged (materialID/instanceID set) so their mesh objects remain valid.
     scene->stagedMeshes.clear();
     scene->stagedMeshTransforms.clear();
+
+    // Demo sprite entity — replaces the old drawRotatedQuad2D(spriteTexture) call
+    {
+        auto spriteEntity = registry.create();
+        registry.emplace<Vapor::NameComponent>(spriteEntity, Vapor::NameComponent{"DemoSprite"});
+        auto& tc = registry.emplace<Vapor::TransformComponent>(spriteEntity);
+        tc.position = glm::vec3(650.0f, 100.0f, 0.0f);
+        tc.isDirty  = true;
+        auto& sc    = registry.emplace<Vapor::SpriteComponent>(spriteEntity);
+        sc.atlas      = demoAtlasHandle;
+        sc.frameIndex = 0;
+        sc.size       = glm::vec2(40.0f, 40.0f);
+        sc.tint       = glm::vec4(1.0f);
+        registry.emplace<AutoRotateComponent>(spriteEntity, AutoRotateComponent{
+            .axis  = glm::vec3(0.0f, 0.0f, 1.0f),
+            .speed = 2.0f
+        });
+    }
 
     Uint32 frameCount = 0;
     float time = SDL_GetTicks() / 1000.0f;
@@ -573,9 +601,10 @@ auto main(int argc, char* args[]) -> int {
         // Engine updates
         engineCore->update(deltaTime);
 
-        scene->update(deltaTime);
         physics->process(registry, deltaTime);
         TransformSystem::update(registry);
+        FlipbookSystem::update(registry, deltaTime);
+        SpriteRenderSystem::update(registry, renderer.get(), &resourceManager);
 
         // Rendering
         entt::entity activeCamEntity = getActiveCamera(registry);
@@ -618,14 +647,6 @@ auto main(int argc, char* args[]) -> int {
                 glm::vec2(580.0f, 70.0f),
                 glm::vec4(0.5f, 0.0f, 1.0f, 1.0f)
             );
-            renderer->drawRotatedQuad2D(
-                glm::vec2(650.0f, 100.0f),
-                glm::vec2(40.0f, 40.0f),
-                time * 2.0f,// rotation in radians
-                spriteTexture,
-                glm::vec4(1.0f, 1.0f, 1.0f, 1.0f)
-            );
-
             // ===== Text Rendering Demo (Screen Space) =====
             if (gameFont.isValid()) {
                 // Draw text at screen positions (pixel coordinates)

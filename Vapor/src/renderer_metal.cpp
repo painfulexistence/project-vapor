@@ -1900,21 +1900,38 @@ public:
     void execute() override {
         auto& r = *renderer;
 
-        // Skip if no batch data
-        if (r.batch2DVertices.empty() || r.batch2DIndices.empty()) {
-            return;
+        // Gather all sub-batches (from texture-slot splits) plus the current in-progress batch
+        struct BatchRef {
+            const std::vector<Batch2DVertex>*      vertices;
+            const std::vector<Uint32>*             indices;
+            const std::array<TextureHandle, 16>*   slots;
+            Uint32                                 slotCount;
+        };
+        std::vector<BatchRef> batches;
+        batches.reserve(r.batch2DSubBatches.size() + 1);
+        for (const auto& sub : r.batch2DSubBatches) {
+            if (!sub.vertices.empty())
+                batches.push_back({&sub.vertices, &sub.indices, &sub.textureSlots, sub.textureSlotCount});
+        }
+        if (!r.batch2DVertices.empty())
+            batches.push_back({&r.batch2DVertices, &r.batch2DIndices, &r.batch2DTextureSlots, r.batch2DTextureSlotIndex});
+
+        if (batches.empty()) return;
+
+        // Compute combined buffer sizes
+        size_t totalVertices = 0, totalIndices = 0;
+        for (const auto& b : batches) {
+            totalVertices += b.vertices->size();
+            totalIndices  += b.indices->size();
         }
 
-        // Get current frame buffers
-        auto& vertexBuffer = r.batch2DVertexBuffers[r.currentFrameInFlight];
-        auto& indexBuffer = r.batch2DIndexBuffers[r.currentFrameInFlight];
+        // Get / resize frame-buffered GPU buffers
+        auto& vertexBuffer  = r.batch2DVertexBuffers[r.currentFrameInFlight];
+        auto& indexBuffer   = r.batch2DIndexBuffers[r.currentFrameInFlight];
         auto& uniformBuffer = r.batch2DUniformBuffers[r.currentFrameInFlight];
 
-        auto vertexCount = static_cast<Uint32>(r.batch2DVertices.size());
-        auto indexCount = static_cast<Uint32>(r.batch2DIndices.size());
-
-        size_t vertexDataSize = vertexCount * sizeof(Batch2DVertex);
-        size_t indexDataSize = indexCount * sizeof(Uint32);
+        const size_t vertexDataSize = totalVertices * sizeof(Batch2DVertex);
+        const size_t indexDataSize  = totalIndices  * sizeof(Uint32);
 
         if (!vertexBuffer || vertexBuffer->length() < vertexDataSize) {
             size_t allocSize = std::max(vertexDataSize, size_t(256 * 1024));
@@ -1925,88 +1942,92 @@ public:
             indexBuffer = NS::TransferPtr(r.device->newBuffer(allocSize, MTL::ResourceStorageModeShared));
         }
 
-        memcpy(vertexBuffer->contents(), r.batch2DVertices.data(), vertexDataSize);
-        memcpy(indexBuffer->contents(), r.batch2DIndices.data(), indexDataSize);
+        // Upload all vertices contiguously
+        {
+            auto* dst = static_cast<Batch2DVertex*>(vertexBuffer->contents());
+            for (const auto& b : batches) {
+                memcpy(dst, b.vertices->data(), b.vertices->size() * sizeof(Batch2DVertex));
+                dst += b.vertices->size();
+            }
+        }
 
-        auto rtWidth = r.colorRT->width();
-        auto rtHeight = r.colorRT->height();
+        // Upload all indices with per-sub-batch vertex base offset applied
+        {
+            auto* dst = static_cast<Uint32*>(indexBuffer->contents());
+            Uint32 vertexBase = 0;
+            for (const auto& b : batches) {
+                for (Uint32 idx : *b.indices)
+                    *dst++ = idx + vertexBase;
+                vertexBase += static_cast<Uint32>(b.vertices->size());
+            }
+        }
 
-        // Get window size for screen space coordinates (not framebuffer size!)
+        // Projection matrix
         int windowWidth, windowHeight;
         SDL_GetWindowSize(r.window, &windowWidth, &windowHeight);
-
-        // Compute projection matrix based on camera mode
         Batch2DUniforms uniforms;
         if (r.currentCamera && r.currentCamera->isOrthographic()) {
-            // World space ortho: use camera's projection and view matrices
             uniforms.projectionMatrix = r.currentCamera->getProjMatrix() * r.currentCamera->getViewMatrix();
         } else {
-            // Fallback: screen space ortho using window size (origin top-left, pixel coordinates)
             uniforms.projectionMatrix =
                 glm::ortho(0.0f, static_cast<float>(windowWidth), static_cast<float>(windowHeight), 0.0f, -1.0f, 1.0f);
         }
         memcpy(uniformBuffer->contents(), &uniforms, sizeof(Batch2DUniforms));
 
-        // Select pipeline based on blend mode
         MTL::RenderPipelineState* pipeline = r.batch2DPipeline.get();
+        if (!pipeline) return;
 
-        if (!pipeline) {
-            return;
-        }
-
-        // Create render pass descriptor - render to HDR RT (before bloom)
+        // Create render pass (render to HDR RT, before bloom)
         auto passDesc = NS::TransferPtr(MTL::RenderPassDescriptor::renderPassDescriptor());
-        auto colorAttachment = passDesc->colorAttachments()->object(0);
-        colorAttachment->setTexture(r.colorRT.get());// Render to HDR RT
+        auto* colorAttachment = passDesc->colorAttachments()->object(0);
+        colorAttachment->setTexture(r.colorRT.get());
         colorAttachment->setLoadAction(MTL::LoadActionLoad);
         colorAttachment->setStoreAction(MTL::StoreActionStore);
 
         auto encoder = r.currentCommandBuffer->renderCommandEncoder(passDesc.get());
-
+        auto rtWidth  = r.colorRT->width();
+        auto rtHeight = r.colorRT->height();
         MTL::Viewport viewport = { 0.0, 0.0, static_cast<double>(rtWidth), static_cast<double>(rtHeight), 0.0, 1.0 };
         encoder->setViewport(viewport);
-
         encoder->setRenderPipelineState(pipeline);
         encoder->setDepthStencilState(r.batch2DDepthStencilState.get());
         encoder->setCullMode(MTL::CullModeNone);
-
-        // Set vertex buffers
         encoder->setVertexBuffer(vertexBuffer.get(), 0, 0);
         encoder->setVertexBuffer(uniformBuffer.get(), 0, 1);
 
-        // Bind textures
-        for (Uint32 i = 0; i < r.batch2DTextureSlotIndex; i++) {
-            TextureHandle handle = r.batch2DTextureSlots[i];
-            MTL::Texture* texture = nullptr;
-            if (handle.rid != UINT32_MAX) {
-                auto texPtr = r.getTexture(handle);
-                if (texPtr) {
-                    texture = texPtr.get();
+        // One draw call per sub-batch (texture slots differ between sub-batches)
+        NS::UInteger indexByteOffset = 0;
+        for (const auto& b : batches) {
+            // Bind this sub-batch's texture slots
+            for (Uint32 i = 0; i < b.slotCount; i++) {
+                TextureHandle handle = (*b.slots)[i];
+                MTL::Texture* tex = nullptr;
+                if (handle.rid != UINT32_MAX) {
+                    auto texPtr = r.getTexture(handle);
+                    if (texPtr) tex = texPtr.get();
                 }
+                encoder->setFragmentTexture(tex ? tex : r.batch2DWhiteTexture.get(), i);
             }
-            if (!texture) {
-                texture = r.batch2DWhiteTexture.get();
-            }
-            encoder->setFragmentTexture(texture, i);
-        }
 
-        // Draw indexed triangles
-        encoder->drawIndexedPrimitives(
-            MTL::PrimitiveTypeTriangle,
-            NS::UInteger(indexCount),
-            MTL::IndexTypeUInt32,
-            indexBuffer.get(),
-            NS::UInteger(0)
-        );
+            auto indexCount = static_cast<NS::UInteger>(b.indices->size());
+            encoder->drawIndexedPrimitives(
+                MTL::PrimitiveTypeTriangle,
+                indexCount,
+                MTL::IndexTypeUInt32,
+                indexBuffer.get(),
+                indexByteOffset
+            );
+            indexByteOffset += indexCount * sizeof(Uint32);
+
+            r.batch2DStats.drawCalls++;
+            r.batch2DStats.vertexCount += static_cast<Uint32>(b.vertices->size());
+            r.batch2DStats.indexCount  += static_cast<Uint32>(b.indices->size());
+        }
 
         encoder->endEncoding();
 
-        // Update stats
-        r.batch2DStats.drawCalls++;
-        r.batch2DStats.vertexCount += vertexCount;
-        r.batch2DStats.indexCount += indexCount;
-
-        // Clear batch for next frame
+        // Clear all batch state for next frame
+        r.batch2DSubBatches.clear();
         r.batch2DVertices.clear();
         r.batch2DIndices.clear();
         r.batch2DTextureSlotIndex = 1;
@@ -5423,11 +5444,27 @@ auto Renderer_Metal::getPipeline(PipelineHandle handle) const -> NS::SharedPtr<M
 
 void Renderer_Metal::beginBatch2D() {
     if (batch2DActive) return;
+    batch2DSubBatches.clear();
     batch2DVertices.clear();
     batch2DIndices.clear();
     batch2DTextureSlots[0] = batch2DWhiteTextureHandle;
     batch2DTextureSlotIndex = 1;
     batch2DActive = true;
+}
+
+void Renderer_Metal::splitBatch2D() {
+    if (batch2DVertices.empty()) return;
+    Batch2DSubBatch sub;
+    sub.vertices        = std::move(batch2DVertices);
+    sub.indices         = std::move(batch2DIndices);
+    sub.textureSlots    = batch2DTextureSlots;
+    sub.textureSlotCount = batch2DTextureSlotIndex;
+    batch2DSubBatches.push_back(std::move(sub));
+    // Reset in-progress batch (slot 0 stays white)
+    batch2DVertices.clear();
+    batch2DIndices.clear();
+    batch2DTextureSlots[0] = batch2DWhiteTextureHandle;
+    batch2DTextureSlotIndex = 1;
 }
 
 void Renderer_Metal::endBatch2D() {
@@ -5472,7 +5509,7 @@ static auto findOrAddTextureSlot(
     }
 
     if (slotIndex >= 16) {
-        return 0.0f;// Fallback to white texture if slots full
+        return -1.0f;// Slots full — caller must call splitBatch2D() and retry
     }
 
     auto texIndex = static_cast<float>(slotIndex);
@@ -5517,6 +5554,13 @@ void Renderer_Metal::drawQuad2D(
 
     float textureIndex =
         findOrAddTextureSlot(batch2DTextureSlots, batch2DTextureSlotIndex, texture, batch2DWhiteTextureHandle);
+    if (textureIndex < 0.0f) {
+        // Texture slots exhausted — flush current batch and start a new one
+        splitBatch2D();
+        textureIndex = findOrAddTextureSlot(
+            batch2DTextureSlots, batch2DTextureSlotIndex, texture, batch2DWhiteTextureHandle
+        );
+    }
     auto vertexOffset = static_cast<Uint32>(batch2DVertices.size());
 
     const glm::vec2* uvs = texCoords ? texCoords : batchQuadTexCoords;

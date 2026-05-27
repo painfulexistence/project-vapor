@@ -1,5 +1,7 @@
 #pragma once
 #include "character_controller.hpp"
+#include "graphics_handles.hpp"
+#include "graphics_sprite.hpp"
 #include "physics_3d.hpp"
 #include "vehicle_controller.hpp"
 #include <entt/entt.hpp>
@@ -124,6 +126,35 @@ namespace Vapor {
         TriggerHandle trigger;
         std::function<void(entt::entity)> onEnter;
         std::function<void(entt::entity)> onExit;
+    };
+
+    // 2D Sprite rendering component
+    struct SpriteComponent {
+        AtlasHandle atlas;
+        uint16_t frameIndex = 0;
+
+        glm::vec2 size = {1.0f, 1.0f};       // World units
+        glm::vec2 pivot = {0.5f, 0.5f};      // Anchor point (0-1)
+        glm::vec4 tint = {1, 1, 1, 1};       // Color tint
+        int sortingLayer = 0;
+        int orderInLayer = 0;
+        bool flipX = false;
+        bool flipY = false;
+        bool visible = true;
+    };
+
+    // Flipbook animation component (drives any frame-based animation)
+    struct FlipbookComponent {
+        std::vector<uint16_t> frameIndices;
+        float frameTime = 0.1f;              // Seconds per frame
+        float timer = 0.0f;
+        uint16_t currentIndex = 0;           // Index into frameIndices
+        bool loop = true;
+        bool playing = true;
+
+        uint16_t getCurrentFrame() const {
+            return frameIndices.empty() ? 0 : frameIndices[currentIndex];
+        }
     };
 
 }// namespace Vapor

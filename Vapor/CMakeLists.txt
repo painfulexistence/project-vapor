@@ -25,6 +25,7 @@ set(SOURCES
     src/asset_serializer.cpp
     src/camera.cpp
     src/debug_draw.cpp
+    src/atlas_baker.cpp
     src/font_manager.cpp
     src/graphics.cpp
     src/helper.cpp

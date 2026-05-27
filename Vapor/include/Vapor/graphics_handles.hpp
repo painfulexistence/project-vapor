@@ -27,12 +27,14 @@ struct BufferHandleTag {};
 struct TextureHandleTag {};
 struct RenderTargetHandleTag {};
 struct RenderTextureHandleTag {};
+struct AtlasHandleTag {};
 
 using PipelineHandle = GPUHandle<PipelineHandleTag>;
 using BufferHandle = GPUHandle<BufferHandleTag>;
 using TextureHandle = GPUHandle<TextureHandleTag>;
 using RenderTargetHandle = GPUHandle<RenderTargetHandleTag>;
 using RenderTextureHandle = GPUHandle<RenderTextureHandleTag>;
+using AtlasHandle = GPUHandle<AtlasHandleTag>;
 
 // Render texture descriptor for creation
 struct RenderTextureDesc {
