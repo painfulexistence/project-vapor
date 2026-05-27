@@ -334,69 +334,123 @@ public:
 };
 
 
-// --- UI Trigger Systems ---
-// These systems own the content/timing logic for cinematic overlay pages.
-// They talk to their corresponding Page via PageSystem::getPage<T>().
+// ============================================================================
+// Subtitle Systems - Split into single-responsibility systems
+// ============================================================================
+// Execution order:
+//   1. SubtitleInputSystem      - detect advance request, send "ShowSubtitle"
+//   2. SubtitlePageSensorSystem - detect page animation, send "PageVisible"/"PageHidden"
+//   3. SubtitleTimerSystem      - update display timer, send "HideSubtitle"
+//   4. updateFSMSystem          - process events, emit FSMStateChangeEvent
+//   5. SubtitleActionSystem     - respond to FSMStateChangeEvent, call PageSystem
 
-// SubtitleQueueSystem - Uses FSM for state management
-// Requires entity to have: SubtitleQueueComponent, FSMStateComponent, FSMDefinition, FSMEventQueue
-class SubtitleQueueSystem {
+// Detects advance requests and triggers showing next subtitle
+class SubtitleInputSystem {
 public:
-    static void update(entt::registry& reg, float dt) {
-        auto* page = PageSystem::getPage<SubtitlePage>(reg, PageID::Subtitle);
-        if (!page) return;
-
+    static void update(entt::registry& reg) {
         auto view = reg.view<SubtitleQueueComponent, Vapor::FSMStateComponent, Vapor::FSMEventQueue>();
         for (auto entity : view) {
             auto& q = view.get<SubtitleQueueComponent>(entity);
             auto& fsm = view.get<Vapor::FSMStateComponent>(entity);
             auto& events = view.get<Vapor::FSMEventQueue>(entity);
 
-            uint32_t state = fsm.currentState;
+            if (fsm.currentState != SubtitleStates::Idle) continue;
 
-            // Idle: check if we should show next subtitle
-            if (state == SubtitleStates::Idle && page->isFullyHidden()) {
-                bool advance = q.advanceRequested || (q.autoAdvance && q.currentIndex < (int)q.queue.size() - 1);
-                if (advance) {
-                    q.advanceRequested = false;
-                    q.currentIndex++;
-                    if (q.currentIndex < (int)q.queue.size()) {
-                        auto& entry = q.queue[q.currentIndex];
-                        page->setContent(entry.speaker, entry.text);
-                        PageSystem::show(reg, PageID::Subtitle);
-                        q.displayTimer = 0.0f;
-                        events.push("ShowSubtitle");
-                    }
-                } else {
-                    q.advanceRequested = false;
+            bool advance = q.advanceRequested || (q.autoAdvance && q.currentIndex < (int)q.queue.size() - 1);
+            if (advance) {
+                q.advanceRequested = false;
+                q.currentIndex++;
+                if (q.currentIndex < (int)q.queue.size()) {
+                    events.push("ShowSubtitle");
                 }
+            } else {
+                q.advanceRequested = false;
             }
+        }
+    }
+};
 
-            // WaitingForVisible: page animation complete?
-            if (state == SubtitleStates::WaitingForVisible && page->isFullyVisible()) {
+// Detects page animation state and sends corresponding events
+class SubtitlePageSensorSystem {
+public:
+    static void update(entt::registry& reg) {
+        auto* page = PageSystem::getPage<SubtitlePage>(reg, PageID::Subtitle);
+        if (!page) return;
+
+        auto view = reg.view<Vapor::FSMStateComponent, Vapor::FSMEventQueue>();
+        for (auto entity : view) {
+            auto& fsm = view.get<Vapor::FSMStateComponent>(entity);
+            auto& events = view.get<Vapor::FSMEventQueue>(entity);
+
+            if (fsm.currentState == SubtitleStates::WaitingForVisible && page->isFullyVisible()) {
                 events.push("PageVisible");
             }
 
-            // Displaying: timer or advance request
-            if (state == SubtitleStates::Displaying) {
-                q.displayTimer += dt;
-                bool done = q.advanceRequested
-                            || (q.autoAdvance && q.currentIndex < (int)q.queue.size()
-                                && q.displayTimer >= q.queue[q.currentIndex].duration);
-                if (done) {
-                    q.advanceRequested = false;
-                    PageSystem::hide(reg, PageID::Subtitle);
-                    events.push("HideSubtitle");
-                }
-            }
-
-            // WaitingForHidden: page animation complete?
-            if (state == SubtitleStates::WaitingForHidden && page->isFullyHidden()) {
+            if (fsm.currentState == SubtitleStates::WaitingForHidden && page->isFullyHidden()) {
                 events.push("PageHidden");
             }
         }
     }
+};
 
+// Updates display timer and triggers hide when done
+class SubtitleTimerSystem {
+public:
+    static void update(entt::registry& reg, float dt) {
+        auto view = reg.view<SubtitleQueueComponent, Vapor::FSMStateComponent, Vapor::FSMEventQueue>();
+        for (auto entity : view) {
+            auto& q = view.get<SubtitleQueueComponent>(entity);
+            auto& fsm = view.get<Vapor::FSMStateComponent>(entity);
+            auto& events = view.get<Vapor::FSMEventQueue>(entity);
+
+            if (fsm.currentState != SubtitleStates::Displaying) continue;
+
+            q.displayTimer += dt;
+
+            bool done = q.advanceRequested
+                        || (q.autoAdvance && q.currentIndex < (int)q.queue.size()
+                            && q.displayTimer >= q.queue[q.currentIndex].duration);
+            if (done) {
+                q.advanceRequested = false;
+                events.push("HideSubtitle");
+            }
+        }
+    }
+};
+
+// Responds to FSMStateChangeEvent and performs actions
+class SubtitleActionSystem {
+public:
+    static void update(entt::registry& reg) {
+        auto* page = PageSystem::getPage<SubtitlePage>(reg, PageID::Subtitle);
+        if (!page) return;
+
+        auto view = reg.view<SubtitleQueueComponent, Vapor::FSMStateChangeEvent>();
+        for (auto entity : view) {
+            auto& q = view.get<SubtitleQueueComponent>(entity);
+            auto& event = view.get<Vapor::FSMStateChangeEvent>(entity);
+
+            // Entering WaitingForVisible: set content and show page
+            if (event.toState == SubtitleStates::WaitingForVisible) {
+                if (q.currentIndex >= 0 && q.currentIndex < (int)q.queue.size()) {
+                    auto& entry = q.queue[q.currentIndex];
+                    page->setContent(entry.speaker, entry.text);
+                    PageSystem::show(reg, PageID::Subtitle);
+                    q.displayTimer = 0.0f;
+                }
+            }
+
+            // Entering WaitingForHidden: hide page
+            if (event.toState == SubtitleStates::WaitingForHidden) {
+                PageSystem::hide(reg, PageID::Subtitle);
+            }
+        }
+    }
+};
+
+// Helper class for restart/advance operations
+class SubtitleQueueHelper {
+public:
     static void restart(entt::registry& reg) {
         auto view = reg.view<SubtitleQueueComponent, Vapor::FSMStateComponent>();
         for (auto entity : view) {

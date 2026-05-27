@@ -540,10 +540,10 @@ auto main(int argc, char* args[]) -> int {
                         auto& q = view.get<SubtitleQueueComponent>(entity);
                         auto& fsm = view.get<Vapor::FSMStateComponent>(entity);
                         if (q.currentIndex >= (int)q.queue.size() - 1 && fsm.currentState == SubtitleStates::Idle) {
-                            SubtitleQueueSystem::restart(registry);
+                            SubtitleQueueHelper::restart(registry);
                             fmt::print("Subtitles restarted\n");
                         } else {
-                            SubtitleQueueSystem::advance(registry);
+                            SubtitleQueueHelper::advance(registry);
                         }
                     }
                 }
@@ -599,7 +599,12 @@ auto main(int argc, char* args[]) -> int {
         CameraSystem::update(registry, deltaTime);
         AutoRotateSystem::update(registry, deltaTime);
         LightMovementSystem::update(registry, scene.get(), deltaTime);
-        SubtitleQueueSystem::update(registry, deltaTime);
+        // Subtitle systems (split into single-responsibility)
+        SubtitleInputSystem::update(registry);
+        SubtitlePageSensorSystem::update(registry);
+        SubtitleTimerSystem::update(registry, deltaTime);
+        Vapor::updateFSMSystem(registry, deltaTime);
+        SubtitleActionSystem::update(registry);
         ScrollTextQueueSystem::update(registry);
         ChapterTitleTriggerSystem::update(registry);
         PageSystem::update(registry, engineCore->getRmlUiManager(), deltaTime);
