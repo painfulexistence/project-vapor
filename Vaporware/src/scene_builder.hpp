@@ -223,6 +223,10 @@ inline SceneResources buildScene(
             { "DEVELOPER", "Welcome to Project Vapor.",                 2.5f },
             { "",          "(End of subtitle demo)",                    2.0f },
         };
+        // FSM components for subtitle state machine
+        registry.emplace<Vapor::FSMDefinition>(navEntity, createSubtitleFSM());
+        Vapor::initFSM(registry, navEntity, registry.get<Vapor::FSMDefinition>(navEntity));
+        registry.emplace<Vapor::FSMEventQueue>(navEntity);
     }
     {
         auto& stq = registry.emplace<ScrollTextQueueComponent>(navEntity);
