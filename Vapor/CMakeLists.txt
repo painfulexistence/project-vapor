@@ -10,6 +10,7 @@ find_package(SDL3 CONFIG REQUIRED)
 find_package(Tracy CONFIG REQUIRED)
 find_package(RmlUi CONFIG REQUIRED)
 find_package(EnTT CONFIG REQUIRED)
+find_package(nlohmann_json CONFIG REQUIRED)
 
 if(APPLE)
     add_subdirectory(metal)
@@ -90,6 +91,7 @@ target_link_libraries(Vapor PUBLIC
     SDL3::SDL3
     RmlUi::RmlUi
     EnTT::EnTT
+    nlohmann_json::nlohmann_json
 )
 target_link_libraries(Vapor PRIVATE
     Vulkan::Vulkan

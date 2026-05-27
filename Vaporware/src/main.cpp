@@ -27,12 +27,12 @@
 
 
 #include "Vapor/scene_inspector.hpp"
+#include "Vapor/scene_serializer.hpp"
 #include "components.hpp"
 #include "pages/hud_page.hpp"
 #include "pages/letterbox_page.hpp"
 #include "pages/page_system.hpp"
 #include "scene_builder.hpp"
-#include "scene_inspector.hpp"
 #include "systems.hpp"
 
 static void setupCustomDrawers(Vapor::SceneInspector& inspector) {
@@ -316,11 +316,22 @@ auto main(int argc, char* args[]) -> int {
     auto renderer = createRenderer(gfxBackend);
     renderer->init(window);
 
-    Vapor::SceneInspector sceneInspector;
-    setupCustomDrawers(sceneInspector);
+    // Scene serializer — engine pre-registers transform/meshRenderer;
+    // game registers its own components and the GLTF-geometry skip predicate.
+    Vapor::SceneSerializer sceneSerializer;
+    sceneSerializer.registerSkipPredicate([](entt::registry& reg, entt::entity e) {
+        return reg.all_of<SceneGeometryTag>(e);
+    });
+    sceneSerializer.registerComponent("autoRotate",
+        [](Vapor::json& out, entt::registry& reg, entt::entity e) {
+            if (auto* c = reg.try_get<AutoRotateComponent>(e))
+                out = { {"axis", Vapor::toJson(c->axis)}, {"speed", c->speed} };
+        });
 
-    SceneSavePanel savePanelWidget;
-    savePanelWidget.setGltfPath("models/Sponza/Sponza.gltf", /*optimized=*/true);
+    Vapor::SceneInspector sceneInspector;
+    sceneInspector.attachSerializer(sceneSerializer);
+    sceneInspector.setGltfPath("models/Sponza/Sponza.gltf", /*optimized=*/true);
+    setupCustomDrawers(sceneInspector);
 
     // Load a font for text rendering
     FontHandle gameFont = renderer->loadFont("fonts/Arial Black.ttf", 48.0f);
@@ -408,10 +419,7 @@ auto main(int argc, char* args[]) -> int {
     });
 
     entt::registry registry;
-    renderer->setImGuiCallback([&]() {
-        sceneInspector.draw(registry);
-        savePanelWidget.draw(registry);
-    });
+    renderer->setImGuiCallback([&]() { sceneInspector.draw(registry); });
 
     auto [sceneBuilt, materialBuilt, cube1, global] =
         buildScene(registry, *physics, scene, material, windowWidth, windowHeight, rng);
