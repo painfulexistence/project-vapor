@@ -4,6 +4,7 @@
 #include <SDL3/SDL_stdinc.h>
 #include <glm/vec2.hpp>
 #include <memory>
+#include <optional>
 #include <string>
 #include <vector>
 
