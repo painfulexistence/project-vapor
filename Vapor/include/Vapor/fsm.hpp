@@ -1,9 +1,8 @@
 #pragma once
 
+#include <cstdint>
 #include <string>
 #include <vector>
-#include <unordered_map>
-#include <cstdint>
 
 namespace Vapor {
 
@@ -13,6 +12,10 @@ namespace Vapor {
 
 /**
  * Core FSM state data.
+ *
+ * Usage:
+ *   - currentState: index into FSMDefinition::stateNames
+ *   - stateTime: time spent in current state (for timed transitions)
  */
 struct FSMStateComponent {
     uint32_t currentState = 0;
@@ -22,15 +25,21 @@ struct FSMStateComponent {
 
 /**
  * State change event - emitted by FSMSystem when state changes.
- * Consumed by other systems to trigger effects.
+ * Consumed by game systems to trigger effects.
  *
  * Pattern:
- *   FSMSystem emits → EffectsSystem consumes → Request components
+ *   FSMSystem → FSMStateChangeEvent → GameEffectsSystem → GameRequests
+ *
+ * Example:
+ *   if (event.toState == CharacterStates::Grounded) {
+ *       reg.emplace<ParticleBurstRequest>(entity, ...);
+ *       reg.emplace<SquashRequest>(entity, ...);
+ *   }
  */
 struct FSMStateChangeEvent {
     uint32_t fromState;
     uint32_t toState;
-    float previousStateTime;  // How long we were in the previous state
+    float previousStateTime;
 };
 
 /**
@@ -61,7 +70,8 @@ struct FSMTimedTransition {
 };
 
 /**
- * FSM definition - shared state machine structure.
+ * FSM definition - defines states and transitions.
+ * Can be shared across entities with the same FSM structure.
  */
 struct FSMDefinition {
     std::vector<std::string> stateNames;
@@ -95,63 +105,24 @@ struct FSMEventQueue {
 };
 
 // ============================================================
-// Common Request Components - Output from effect systems
-// ============================================================
-
-/**
- * Request to spawn particles.
- * Consumed by ParticleSpawnSystem.
- */
-struct ParticleBurstRequest {
-    std::string configName;
-    uint32_t count = 10;
-    // Optional: offset from entity position
-    float offsetX = 0.0f;
-    float offsetY = 0.0f;
-    float offsetZ = 0.0f;
-};
-
-/**
- * Request to trigger squash/stretch effect.
- * Consumed by SquashInitSystem.
- */
-struct SquashRequest {
-    float scaleX = 1.0f;
-    float scaleY = 1.0f;
-};
-
-/**
- * Request to add camera trauma (screen shake).
- * Consumed by CameraTraumaSystem.
- */
-struct CameraTraumaRequest {
-    float amount = 0.5f;
-};
-
-/**
- * Request to play a sound.
- * Consumed by AudioSystem.
- */
-struct SoundRequest {
-    std::string soundName;
-    float volume = 1.0f;
-    float pitch = 1.0f;
-};
-
-/**
- * Request to play an animation.
- * Consumed by AnimationSystem.
- */
-struct AnimationRequest {
-    std::string animationName;
-    bool loop = false;
-    float speed = 1.0f;
-};
-
-// ============================================================
 // FSM Builder
 // ============================================================
 
+/**
+ * Fluent API for building FSMDefinition.
+ *
+ * Example:
+ *   auto def = FSMDefinitionBuilder()
+ *       .state("Idle")
+ *       .state("Walk")
+ *       .state("Attack")
+ *       .transition("Idle", "Walk", "StartWalk")
+ *       .transition("Walk", "Idle", "Stop")
+ *       .transition("Idle", "Attack", "Attack")
+ *       .timedTransition("Attack", "Idle", 0.5f)
+ *       .initialState("Idle")
+ *       .build();
+ */
 class FSMDefinitionBuilder {
 public:
     FSMDefinitionBuilder& state(const std::string& name) {
@@ -192,19 +163,5 @@ private:
         return static_cast<uint32_t>(m_definition.stateNames.size() - 1);
     }
 };
-
-// ============================================================
-// Common Events
-// ============================================================
-
-namespace FSMEvents {
-    constexpr const char* Start = "Start";
-    constexpr const char* Stop = "Stop";
-    constexpr const char* Jump = "Jump";
-    constexpr const char* Land = "Land";
-    constexpr const char* Attack = "Attack";
-    constexpr const char* Hurt = "Hurt";
-    constexpr const char* Die = "Die";
-}
 
 } // namespace Vapor
