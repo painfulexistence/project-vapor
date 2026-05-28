@@ -19,6 +19,7 @@
 #include "Vapor/physics_3d.hpp"
 #include "Vapor/renderer.hpp"
 #include "Vapor/rmlui_manager.hpp"
+#include "Vapor/systems.hpp"
 #include "Vapor/rng.hpp"
 #include "Vapor/scene.hpp"
 #include <RmlUi/Core/ElementDocument.h>
@@ -26,6 +27,7 @@
 
 
 #include "Vapor/scene_inspector.hpp"
+#include "Vapor/scene_serializer.hpp"
 #include "components.hpp"
 #include "pages/hud_page.hpp"
 #include "pages/letterbox_page.hpp"
@@ -314,7 +316,26 @@ auto main(int argc, char* args[]) -> int {
     auto renderer = createRenderer(gfxBackend);
     renderer->init(window);
 
+    // Scene serializer — engine pre-registers transform/meshRenderer;
+    // game registers game-specific component writers.
+    Vapor::SceneSerializer sceneSerializer;
+    sceneSerializer.registerComponent("autoRotate",
+        [](Vapor::json& out, entt::registry& reg, entt::entity e) {
+            if (auto* c = reg.try_get<AutoRotateComponent>(e))
+                out = { {"axis", Vapor::toJson(c->axis)}, {"speed", c->speed} };
+        });
+
     Vapor::SceneInspector sceneInspector;
+    sceneInspector.attachSerializer(sceneSerializer);
+    sceneInspector.setGltfPath("models/Sponza/Sponza.gltf", /*optimized=*/true);
+    // Exclude GLTF-spawned geometry — the inspector decides what to serialize,
+    // not the serializer.
+    sceneInspector.setEntityProvider([](entt::registry& reg) {
+        std::vector<entt::entity> out;
+        for (auto e : reg.storage<entt::entity>())
+            if (!reg.all_of<SceneGeometryTag>(e)) out.push_back(e);
+        return out;
+    });
     setupCustomDrawers(sceneInspector);
 
     // Load a font for text rendering
@@ -439,6 +460,7 @@ auto main(int argc, char* args[]) -> int {
         tc.isDirty = false;// worldTransform already correct; skip TransformSystem
         auto& mrc = registry.emplace<Vapor::MeshRendererComponent>(e);
         mrc.meshes.push_back(mesh);
+        registry.emplace<SceneGeometryTag>(e);// marks GLTF-spawned geometry for serializer
     }
     // Clear stagedMeshes: GLTF meshes are now ECS entities; manually built
     // meshes (cubes, floor) are already in MeshRendererComponent and were
@@ -463,6 +485,7 @@ auto main(int argc, char* args[]) -> int {
             .speed = 2.0f
         });
     }
+
 
     Uint32 frameCount = 0;
     float time = SDL_GetTicks() / 1000.0f;
@@ -602,7 +625,7 @@ auto main(int argc, char* args[]) -> int {
         engineCore->update(deltaTime);
 
         physics->process(registry, deltaTime);
-        TransformSystem::update(registry);
+        Vapor::TransformSystem::update(registry);
         FlipbookSystem::update(registry, deltaTime);
         SpriteRenderSystem::update(registry, renderer.get(), &resourceManager);
 
@@ -703,6 +726,7 @@ auto main(int argc, char* args[]) -> int {
 
                 renderer->drawQuad3D(tvTransform, rtTexHandle, nullptr, glm::vec4(1.0f));
             }
+
 
             renderer->draw(registry, scene, tempCamera);
         }
