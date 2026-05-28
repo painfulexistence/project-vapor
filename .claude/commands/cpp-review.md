@@ -39,6 +39,10 @@ Perform a strict, structured code review of the C++ codebase based on the reques
 /cpp-review design legacy --output design_report.md
 /cpp-review all --output review_report.md --fix
 /cpp-review duplicates --dir Vapor/src
+
+# Eval against ground truth fixtures:
+/cpp-review all --dir .claude/commands/cpp-review-fixtures --output actual_findings.md
+# Then compare actual_findings.md with .claude/commands/cpp-review-fixtures/expected_findings.md
 ```
 
 ---
