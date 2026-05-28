@@ -356,41 +356,49 @@ git rm Vapor/src/renderer_vulkan.cpp
 ## 🎯 當前進度
 
 - [x] 階段 0：準備工作
-- [✅] 階段 1：架構統一（完成 75%）
+- [✅] 階段 1：架構統一（完成 90%）
   - [x] 擴展 renderer.hpp API（所有方法簽名）
   - [x] 新增資料結構（BatchRenderer, RenderTextureResource, etc.）
   - [x] 實作基本 stub（所有方法都有框架）
   - [x] BatchRenderer::addQuad() 完整實作
   - [x] createRenderTexture/destroyRenderTexture 完整實作
   - [x] FontManager 整合框架
-  - [x] **Batch rendering shaders（Batch2D.vert/frag + 2d_batch.metal）**
-  - [x] **BatchRenderer::init() 完整實作（shader 載入 + 管線創建）**
-  - [x] **BatchRenderer::flush() 完整實作（RHI 繪製調用）**
-  - [ ] 實作 collectDrawables() 場景遍歷
-  - [ ] 測試 batch rendering 實際運作
+  - [x] Batch rendering shaders（Batch2D.vert/frag + 2d_batch.metal）
+  - [x] BatchRenderer::init() 完整實作（shader 載入 + 管線創建）
+  - [x] BatchRenderer::flush() 完整實作（RHI 繪製調用）
+  - [x] **collectDrawables() 框架實作（Scene + ECS）**
+  - [x] **完整測試計畫（TEST_BATCH_RENDERING.md）**
+  - [ ] 實際測試執行與問題修復
 - [🔨] 階段 2：批次渲染（進行中）
-  - 需要從 main 分支移植剩餘實作細節
+  - [x] 基礎批次系統完成
+  - [ ] 紋理綁定實作
+  - [ ] 自動 flush 實作
+  - [ ] Shape 繪製（line, circle, etc.）
 - [ ] 階段 3：字型渲染
 - [ ] 階段 4：RTT
 - [ ] 階段 5：後處理
-- [🔨] 階段 6：RHI 實作（檢查完成，基本就緒）
-  - [x] RHI_Metal 檢查（1060 行，基本完整）
-  - [x] RHI_Vulkan 檢查（1570 行，基本完整）
+- [✅] 階段 6：RHI 實作（基本完成）
+  - [x] RHI_Metal 檢查（1060 行，功能完整）
+  - [x] RHI_Vulkan 檢查（1570 行，功能完整）
   - [x] 確認所有 RHI 方法存在
 - [ ] 階段 7：清理測試
 
 ## 📝 下一步
 
-**當前狀態：** Batch rendering 核心完成！
-- ✅ Shaders 就位
-- ✅ init() 實作完成（載入 shaders，創建管線）
-- ✅ flush() 實作完成（上傳頂點，綁定狀態，繪製）
-- ✅ addQuad() 完成（3 個變體）
+**當前狀態：** Phase 1 接近完成，測試計畫就緒！
+- ✅ Scene/ECS 整合框架完成
+- ✅ 測試策略文件完整（5 個測試案例）
+- ✅ 調試工具和故障排除指南
+- ✅ 測試腳本模板就緒
+
+**立即行動：**
+1. 執行 TEST_BATCH_RENDERING.md 中的測試
+2. 根據測試結果修復問題
+3. 驗證 batch rendering 實際運作
 
 **接下來：**
-1. 實作 Scene/ECS collectDrawables() - 從場景提取 renderables
-2. 從 main 分支移植更多渲染邏輯
-3. 測試整個渲染管線
-4. 實作剩餘的 shape 繪製（line, circle, etc.）
+1. 完善批次渲染（紋理綁定、自動 flush）
+2. 實作字型渲染（使用批次系統）
+3. 從 main 分支移植更多細節
 
-**進度：** Phase 1: 75%, Overall: ~40%
+**進度：** Phase 1: 90%, Overall: ~45%
