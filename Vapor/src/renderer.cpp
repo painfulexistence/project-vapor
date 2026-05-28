@@ -3,9 +3,11 @@
 #include "rhi_metal.hpp"
 #include "helper.hpp"
 #include <SDL3/SDL_video.h>
+#include <fmt/core.h>
 #include <map>
 #include <algorithm>
 #include <cstring>
+#include <cstddef>
 #include <memory>
 #include "imgui.h"
 #include "backends/imgui_impl_sdl3.h"
@@ -1319,10 +1321,10 @@ void Renderer::setImGuiCallback(std::function<void()> callback) {
 
 void Renderer::initBatchRendering() {
     // Initialize batch2D
-    batch2D.init(rhi.get(), false, defaultWhiteTexture);
+    batch2D.init(rhi.get(), backend, false, defaultWhiteTexture);
 
     // Initialize batch3D
-    batch3D.init(rhi.get(), true, defaultWhiteTexture);
+    batch3D.init(rhi.get(), backend, true, defaultWhiteTexture);
 }
 
 void Renderer::shutdownBatchRendering() {
@@ -1671,7 +1673,7 @@ TextureHandle Renderer::createTexture(const std::shared_ptr<Image>& img) {
 // BatchRenderer Implementation
 // ============================================================================
 
-void Renderer::BatchRenderer::init(RHI* rhi, bool is3D, TextureHandle defaultTex) {
+void Renderer::BatchRenderer::init(RHI* rhi, GraphicsBackend backend, bool is3D, TextureHandle defaultTex) {
     whiteTexture = defaultTex;
 
     // Create vertex buffer
@@ -1705,7 +1707,65 @@ void Renderer::BatchRenderer::init(RHI* rhi, bool is3D, TextureHandle defaultTex
     vertices.reserve(MaxVertices);
     indices.reserve(MaxIndices);
 
-    // TODO: Create batch rendering shaders and pipeline
+    // Load and create shaders
+    std::string vertShaderCode;
+    std::string fragShaderCode;
+
+    if (backend == GraphicsBackend::Vulkan) {
+        // Load SPIR-V shaders
+        vertShaderCode = readFile("assets/shaders/Batch2D.vert.spv");
+        fragShaderCode = readFile("assets/shaders/Batch2D.frag.spv");
+    } else if (backend == GraphicsBackend::Metal) {
+        // Load Metal shader library
+        vertShaderCode = readFile("assets/shaders/2d_batch.metal");
+        fragShaderCode = vertShaderCode;  // Same file for Metal
+    }
+
+    if (vertShaderCode.empty() || fragShaderCode.empty()) {
+        fmt::print("Warning: Failed to load batch2D shaders\n");
+        return;
+    }
+
+    // Create vertex shader
+    ShaderDesc vertShaderDesc;
+    vertShaderDesc.stage = ShaderStage::Vertex;
+    vertShaderDesc.code = vertShaderCode.data();
+    vertShaderDesc.codeSize = vertShaderCode.size();
+    vertShaderDesc.entryPoint = (backend == GraphicsBackend::Metal) ? "batch2d_vertex" : "main";
+    vertexShader = rhi->createShader(vertShaderDesc);
+
+    // Create fragment shader
+    ShaderDesc fragShaderDesc;
+    fragShaderDesc.stage = ShaderStage::Fragment;
+    fragShaderDesc.code = fragShaderCode.data();
+    fragShaderDesc.codeSize = fragShaderCode.size();
+    fragShaderDesc.entryPoint = (backend == GraphicsBackend::Metal) ? "batch2d_fragment" : "main";
+    fragmentShader = rhi->createShader(fragShaderDesc);
+
+    // Create pipeline
+    PipelineDesc pipelineDesc;
+    pipelineDesc.vertexShader = vertexShader;
+    pipelineDesc.fragmentShader = fragmentShader;
+
+    // Vertex layout (matches Vertex2D struct)
+    pipelineDesc.vertexLayout.stride = sizeof(Vertex2D);
+    pipelineDesc.vertexLayout.attributes = {
+        {0, PixelFormat::RGBA32_FLOAT, offsetof(Vertex2D, position)},   // vec3 position (using RGBA32 for vec3)
+        {1, PixelFormat::RGBA32_FLOAT, offsetof(Vertex2D, color)},      // vec4 color
+        {2, PixelFormat::RGBA32_FLOAT, offsetof(Vertex2D, texCoord)},   // vec2 texCoord (using RGBA32, only xy used)
+        {3, PixelFormat::R32_FLOAT, offsetof(Vertex2D, texIndex)},      // float texIndex
+        {4, PixelFormat::R32_FLOAT, offsetof(Vertex2D, entityID)},      // int entityID (as float)
+    };
+
+    pipelineDesc.topology = PrimitiveTopology::TriangleList;
+    pipelineDesc.blendMode = BlendMode::AlphaBlend;
+    pipelineDesc.depthTest = is3D;  // Enable depth test for 3D, disable for 2D
+    pipelineDesc.depthWrite = is3D;
+    pipelineDesc.cullMode = CullMode::None;  // No culling for 2D quads
+
+    pipeline = rhi->createPipeline(pipelineDesc);
+
+    fmt::print("BatchRenderer initialized ({} mode)\n", is3D ? "3D" : "2D");
 }
 
 void Renderer::BatchRenderer::shutdown(RHI* rhi) {
@@ -1732,12 +1792,23 @@ void Renderer::BatchRenderer::flush(RHI* rhi, const glm::mat4& viewProj) {
     // Upload vertex data
     rhi->updateBuffer(vertexBuffer, vertices.data(), 0, sizeof(Vertex2D) * vertices.size());
 
-    // TODO: Bind pipeline, set uniforms, draw
-    // rhi->bindPipeline(pipeline);
-    // rhi->setVertexBytes(&viewProj, sizeof(glm::mat4), 0);
-    // rhi->bindVertexBuffer(vertexBuffer);
-    // rhi->bindIndexBuffer(indexBuffer);
-    // rhi->drawIndexed(quadCount * 6);
+    // Bind pipeline
+    rhi->bindPipeline(pipeline);
+
+    // Set projection matrix uniform (set 0, binding 0)
+    rhi->setVertexBytes(&viewProj, sizeof(glm::mat4), 0);
+
+    // Bind vertex and index buffers
+    rhi->bindVertexBuffer(vertexBuffer, 0, 0);
+    rhi->bindIndexBuffer(indexBuffer, 0);
+
+    // TODO: Bind textures (set 1, binding 0 - texture array)
+    // For now, we'll just use the white texture
+    // rhi->setTexture(1, 0, whiteTexture, defaultSampler);
+
+    // Draw indexed
+    uint32_t indexCount = quadCount * 6;  // 6 indices per quad
+    rhi->drawIndexed(indexCount, 1, 0, 0, 0);
 
     drawCalls++;
     totalQuads += quadCount;

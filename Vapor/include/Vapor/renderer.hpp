@@ -483,7 +483,7 @@ private:
         uint32_t drawCalls = 0;
         uint32_t totalQuads = 0;
 
-        void init(RHI* rhi, bool is3D, TextureHandle defaultTex);
+        void init(RHI* rhi, GraphicsBackend backend, bool is3D, TextureHandle defaultTex);
         void shutdown(RHI* rhi);
         void flush(RHI* rhi, const glm::mat4& viewProj);
         void reset();
