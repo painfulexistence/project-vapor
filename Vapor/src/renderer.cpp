@@ -2003,10 +2003,81 @@ void Renderer::renderToTexture(
     Camera& camera,
     const glm::vec4& clearColor
 ) {
-    // TODO: Implement render-to-texture
-    // 1. Begin render pass with target textures
-    // 2. Draw scene
-    // 3. End render pass
+    if (target.id >= renderTextures.size()) {
+        return; // Invalid handle
+    }
+
+    auto& resource = renderTextures[target.id];
+
+    // Save current camera state
+    CameraRenderData previousCamera = currentCamera;
+
+    // Set up camera for this render
+    CameraRenderData rtCamera;
+    rtCamera.view = camera.getView();
+    rtCamera.projection = camera.getProjection();
+    rtCamera.viewProj = rtCamera.projection * rtCamera.view;
+    rtCamera.position = camera.position;
+    rtCamera.near = camera.zNear;
+    rtCamera.far = camera.zFar;
+    currentCamera = rtCamera;
+
+    // Begin render pass with render texture as target
+    RenderPassDesc passDesc;
+    passDesc.colorAttachments.push_back(resource.colorTexture);
+    passDesc.clearColors.push_back(clearColor);
+    passDesc.loadColor.push_back(false); // Clear, don't load
+
+    if (resource.hasDepth && resource.depthTexture.isValid()) {
+        passDesc.depthAttachment = resource.depthTexture;
+        passDesc.clearDepth = 1.0f;
+        passDesc.loadDepth = false; // Clear depth
+    }
+
+    rhi->beginRenderPass(passDesc);
+
+    // Collect drawables from scene
+    frameDrawables.clear();
+    visibleDrawables.clear();
+    collectDrawables(scene);
+
+    // Perform rendering
+    if (!visibleDrawables.empty()) {
+        performCulling();
+        sortDrawables();
+        updateBuffers();
+
+        // Bind pipeline and render
+        rhi->bindPipeline(mainPipeline);
+
+        for (uint32_t drawableIdx : visibleDrawables) {
+            const Drawable& drawable = frameDrawables[drawableIdx];
+            const RenderMesh& mesh = meshes[drawable.mesh];
+
+            // Bind material
+            bindMaterial(drawable.material);
+
+            // Bind instance data (transform, color, etc.)
+            uint32_t instanceID = drawableToInstanceID[drawableIdx];
+            rhi->setVertexBytes(&instanceID, sizeof(uint32_t), 1);
+
+            // Bind mesh buffers
+            rhi->bindVertexBuffer(mesh.vertexBuffer, 0, 0);
+            rhi->bindIndexBuffer(mesh.indexBuffer, 0);
+
+            // Draw
+            rhi->drawIndexed(mesh.indexCount, 1, 0, 0, 0);
+        }
+    }
+
+    // Flush any batched draws
+    flush2D();
+    flush3D();
+
+    rhi->endRenderPass();
+
+    // Restore previous camera state
+    currentCamera = previousCamera;
 }
 
 glm::uvec2 Renderer::getRenderTextureSize(RenderTextureHandle handle) {
