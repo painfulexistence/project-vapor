@@ -1948,9 +1948,12 @@ auto Renderer_Vulkan::draw(std::shared_ptr<Scene> scene, Camera& camera) -> void
     vkCmdDispatch(cmd, clusterGridSizeX, clusterGridSizeY, 1);
 
     // Particle simulation (compute pass)
+    // Use the first ECS-sourced attractor when available; fall back to a
+    // camera-forward point so the system still runs without any emitter entity.
     float deltaTime = 1.0f / 60.0f;// TODO: pass actual delta time
-    glm::vec3 attractorPos =
-        camPos + glm::normalize(glm::vec3(glm::inverse(view) * glm::vec4(0.0f, 0.0f, -1.0f, 0.0f))) * 3.0f;
+    glm::vec3 attractorPos = m_particleAttractors.empty()
+        ? camPos + glm::normalize(glm::vec3(glm::inverse(view) * glm::vec4(0.0f, 0.0f, -1.0f, 0.0f))) * 3.0f
+        : m_particleAttractors[0].position;
     updateParticleSimulation(cmd, deltaTime, attractorPos);
 
     vkCmdBeginRenderPass(cmd, &renderPassInfo, VK_SUBPASS_CONTENTS_INLINE);

@@ -247,4 +247,26 @@ namespace Vapor {
         }
     };
 
+    // ============================================================================
+    // 粒子發射系統 - 將 ECS 位置映射為 GPU 粒子吸引子
+    // ============================================================================
+    class ParticleEmitterSystem {
+    public:
+        // Call once per frame before renderer->draw().
+        // Collects world positions from all active ParticleEmitterComponents and
+        // forwards them to the renderer so the GPU simulation can use them as
+        // attractors. Requires TransformSystem to have already run this frame.
+        static void update(entt::registry& registry, Renderer* renderer) {
+            std::vector<ParticleAttractorData> attractors;
+            auto view = registry.view<Vapor::TransformComponent, Vapor::ParticleEmitterComponent>();
+            for (auto entity : view) {
+                auto& t = view.get<Vapor::TransformComponent>(entity);
+                auto& emitter = view.get<Vapor::ParticleEmitterComponent>(entity);
+                if (!emitter.enabled) continue;
+                attractors.push_back({ .position = t.position, .strength = emitter.strength });
+            }
+            renderer->setParticleAttractors(attractors);
+        }
+    };
+
 }// namespace Vapor

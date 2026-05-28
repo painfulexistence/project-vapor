@@ -152,6 +152,14 @@ namespace Vapor {
         bool visible = true;
     };
 
+    // ============================================================================
+    // Particle Emitter (ECS bridge to GPU particle attractor)
+    // ============================================================================
+    struct ParticleEmitterComponent {
+        float strength = 5.0f;  // Attractor pull strength fed to GPU simulation
+        bool enabled = true;
+    };
+
     // Flipbook animation component (drives any frame-based animation)
     struct FlipbookComponent {
         std::vector<uint16_t> frameIndices;

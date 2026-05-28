@@ -194,6 +194,13 @@ public:
     // Apply vignette effect
     virtual void applyVignette(RenderTextureHandle target, float strength = 0.3f, float radius = 0.8f) {}
 
+    // ===== Particle System API =====
+    // Called each frame by ParticleEmitterSystem before draw(); renderer uses
+    // the first entry as the GPU attractor position for the next simulation step.
+    virtual void setParticleAttractors(const std::vector<ParticleAttractorData>& attractors) {
+        m_particleAttractors = attractors;
+    }
+
     // ===== Font Rendering API =====
     // Load a font from file path with specified base size
     virtual FontHandle loadFont(const std::string& path, float baseSize) {
@@ -230,6 +237,8 @@ public:
     }
 
 protected:
+    std::vector<ParticleAttractorData> m_particleAttractors;
+
     const Uint32 MAX_FRAMES_IN_FLIGHT = 3;
     const Uint32 MSAA_SAMPLE_COUNT = 4;
     const Uint32 MAX_INSTANCES = 5000;// Increased for large scenes like Bistro (2911 instances)
