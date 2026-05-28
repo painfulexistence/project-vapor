@@ -356,8 +356,18 @@ git rm Vapor/src/renderer_vulkan.cpp
 ## 🎯 當前進度
 
 - [x] 階段 0：準備工作
-- [ ] 階段 1：架構統一
-- [ ] 階段 2：批次渲染
+- [🔨] 階段 1：架構統一（進行中）
+  - [x] 擴展 renderer.hpp API（所有方法簽名）
+  - [x] 新增資料結構（BatchRenderer, RenderTextureResource, etc.）
+  - [x] 實作基本 stub（所有方法都有框架）
+  - [x] BatchRenderer::addQuad() 完整實作
+  - [x] createRenderTexture/destroyRenderTexture 完整實作
+  - [x] FontManager 整合框架
+  - [ ] 實作 batch rendering shaders
+  - [ ] 實作 BatchRenderer::flush()
+  - [ ] 實作 collectDrawables() 場景遍歷
+  - [ ] 實作 ImGui 整合（已有基礎）
+- [ ] 階段 2：批次渲染（完善實作）
 - [ ] 階段 3：字型渲染
 - [ ] 階段 4：RTT
 - [ ] 階段 5：後處理
@@ -366,4 +376,10 @@ git rm Vapor/src/renderer_vulkan.cpp
 
 ## 📝 下一步
 
-**立即開始階段 1：** 擴展 Renderer API 並實作 Scene/ECS 整合
+**當前任務：** 完成階段 1 剩餘工作
+1. 創建 batch2D/batch3D shaders (GLSL + Metal)
+2. 實作 BatchRenderer::flush() 使用 RHI
+3. 實作場景遍歷邏輯 collectDrawables()
+4. 測試基本 batch rendering 運作
+
+**進度：** 3/8 tasks completed (37.5%)
