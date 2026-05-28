@@ -1764,7 +1764,67 @@ void Renderer::drawText2D(
     float scale,
     const glm::vec4& color
 ) {
-    // TODO: Use fontManager to get glyph quads, then batch render them
+    if (!fontManager) return;
+
+    Font* fontData = fontManager->getFont(font);
+    if (!fontData) return;
+
+    TextureHandle fontTexture = fontManager->getFontTexture(font);
+    if (!fontTexture.isValid()) {
+        // Need to create texture from atlas data
+        const FontManager::AtlasData* atlasData = fontManager->getAtlasData(font);
+        if (atlasData && !atlasData->rgbaData.empty()) {
+            TextureDesc texDesc;
+            texDesc.width = atlasData->width;
+            texDesc.height = atlasData->height;
+            texDesc.format = PixelFormat::RGBA8_UNORM;
+            texDesc.usage = TextureUsage::Sampled;
+            fontTexture = rhi->createTexture(texDesc);
+            rhi->updateTexture(fontTexture, atlasData->rgbaData.data(), atlasData->rgbaData.size());
+            fontManager->setFontTextureHandle(font, fontTexture);
+        } else {
+            return; // No atlas data available
+        }
+    }
+
+    // Draw each character as a textured quad
+    float cursorX = position.x;
+    float cursorY = position.y;
+
+    for (char c : text) {
+        if (c == '\n') {
+            cursorX = position.x;
+            cursorY += fontData->lineHeight * scale;
+            continue;
+        }
+
+        const Glyph* glyph = fontManager->getGlyph(font, static_cast<int>(c));
+        if (!glyph) continue;
+
+        // Calculate glyph quad position and size
+        float xPos = cursorX + glyph->xOffset * scale;
+        float yPos = cursorY + glyph->yOffset * scale;
+        float width = glyph->width * scale;
+        float height = glyph->height * scale;
+
+        // Build transform matrix for this glyph
+        glm::mat4 transform = glm::translate(glm::mat4(1.0f), glm::vec3(xPos + width * 0.5f, yPos + height * 0.5f, 0.0f));
+        transform = glm::scale(transform, glm::vec3(width, height, 1.0f));
+
+        // UV coordinates from glyph
+        glm::vec2 texCoords[4] = {
+            glm::vec2(glyph->u0, glyph->v0),
+            glm::vec2(glyph->u1, glyph->v0),
+            glm::vec2(glyph->u1, glyph->v1),
+            glm::vec2(glyph->u0, glyph->v1)
+        };
+
+        // Draw the glyph quad with texture coordinates
+        batch2D.addQuad(transform, texCoords, color);
+
+        // Advance cursor
+        cursorX += glyph->advance * scale;
+    }
 }
 
 void Renderer::drawText3D(
@@ -1774,7 +1834,92 @@ void Renderer::drawText3D(
     float scale,
     const glm::vec4& color
 ) {
-    // TODO: Billboard text in 3D space
+    if (!fontManager) return;
+
+    Font* fontData = fontManager->getFont(font);
+    if (!fontData) return;
+
+    TextureHandle fontTexture = fontManager->getFontTexture(font);
+    if (!fontTexture.isValid()) {
+        // Need to create texture from atlas data
+        const FontManager::AtlasData* atlasData = fontManager->getAtlasData(font);
+        if (atlasData && !atlasData->rgbaData.empty()) {
+            TextureDesc texDesc;
+            texDesc.width = atlasData->width;
+            texDesc.height = atlasData->height;
+            texDesc.format = PixelFormat::RGBA8_UNORM;
+            texDesc.usage = TextureUsage::Sampled;
+            fontTexture = rhi->createTexture(texDesc);
+            rhi->updateTexture(fontTexture, atlasData->rgbaData.data(), atlasData->rgbaData.size());
+            fontManager->setFontTextureHandle(font, fontTexture);
+        } else {
+            return;
+        }
+    }
+
+    // Calculate text width for centering
+    float textWidth = 0.0f;
+    for (char c : text) {
+        const Glyph* glyph = fontManager->getGlyph(font, static_cast<int>(c));
+        if (glyph) {
+            textWidth += glyph->advance * scale;
+        }
+    }
+
+    // Create billboard matrix (faces camera)
+    // Extract camera right and up vectors from view matrix
+    glm::vec3 cameraRight = glm::vec3(currentCamera.view[0][0], currentCamera.view[1][0], currentCamera.view[2][0]);
+    glm::vec3 cameraUp = glm::vec3(currentCamera.view[0][1], currentCamera.view[1][1], currentCamera.view[2][1]);
+
+    // Draw each character as a billboard
+    float cursorX = -textWidth * 0.5f; // Center the text
+    float cursorY = 0.0f;
+
+    for (char c : text) {
+        if (c == '\n') {
+            cursorX = -textWidth * 0.5f;
+            cursorY -= fontData->lineHeight * scale;
+            continue;
+        }
+
+        const Glyph* glyph = fontManager->getGlyph(font, static_cast<int>(c));
+        if (!glyph) continue;
+
+        // Calculate glyph position in billboard space
+        float xOffset = glyph->xOffset * scale;
+        float yOffset = glyph->yOffset * scale;
+        float width = glyph->width * scale;
+        float height = glyph->height * scale;
+
+        // Calculate world position for this glyph
+        glm::vec3 glyphCenter = worldPosition
+            + cameraRight * (cursorX + xOffset + width * 0.5f)
+            + cameraUp * (cursorY + yOffset + height * 0.5f);
+
+        // Build billboard transform
+        glm::mat4 transform = glm::translate(glm::mat4(1.0f), glyphCenter);
+        // Add right and up vectors to create billboard orientation
+        glm::mat4 billboardRotation(1.0f);
+        billboardRotation[0] = glm::vec4(cameraRight, 0.0f);
+        billboardRotation[1] = glm::vec4(cameraUp, 0.0f);
+        billboardRotation[2] = glm::vec4(glm::cross(cameraRight, cameraUp), 0.0f);
+        transform = transform * billboardRotation;
+        transform = glm::scale(transform, glm::vec3(width, height, 1.0f));
+
+        // UV coordinates from glyph
+        glm::vec2 texCoords[4] = {
+            glm::vec2(glyph->u0, glyph->v0),
+            glm::vec2(glyph->u1, glyph->v0),
+            glm::vec2(glyph->u1, glyph->v1),
+            glm::vec2(glyph->u0, glyph->v1)
+        };
+
+        // Draw the glyph quad with texture coordinates
+        batch3D.addQuad(transform, texCoords, color);
+
+        // Advance cursor
+        cursorX += glyph->advance * scale;
+    }
 }
 
 glm::vec2 Renderer::measureText(FontHandle font, const std::string& text, float scale) {
@@ -1786,7 +1931,10 @@ glm::vec2 Renderer::measureText(FontHandle font, const std::string& text, float 
 
 float Renderer::getFontLineHeight(FontHandle font, float scale) {
     if (fontManager) {
-        return fontManager->getLineHeight(font, scale);
+        Font* fontData = fontManager->getFont(font);
+        if (fontData) {
+            return fontData->lineHeight * scale;
+        }
     }
     return 0.0f;
 }
@@ -2157,6 +2305,32 @@ void Renderer::BatchRenderer::addQuad(
     const glm::vec4& tint,
     int entityID
 ) {
-    // TODO: Implement textured quad with custom tex coords
-    addQuad(transform, tint, entityID);
+    if (quadCount >= MaxQuads) {
+        // Auto-flush when full
+        if (canAutoFlush && currentRHI) {
+            flush(currentRHI, currentViewProj);
+        } else {
+            return; // Can't flush, skip this quad
+        }
+    }
+
+    // Extract quad corners from transform matrix
+    glm::vec4 positions[4] = {
+        transform * glm::vec4(-0.5f, -0.5f, 0.0f, 1.0f),
+        transform * glm::vec4( 0.5f, -0.5f, 0.0f, 1.0f),
+        transform * glm::vec4( 0.5f,  0.5f, 0.0f, 1.0f),
+        transform * glm::vec4(-0.5f,  0.5f, 0.0f, 1.0f),
+    };
+
+    for (int i = 0; i < 4; i++) {
+        Vertex2D v;
+        v.position = glm::vec3(positions[i]) / positions[i].w;
+        v.color = tint;
+        v.texCoord = texCoords ? texCoords[i] : glm::vec2((i & 1), (i >> 1));
+        v.texIndex = 0.0f; // TODO: Support multiple textures
+        v.entityID = entityID;
+        vertices.push_back(v);
+    }
+
+    quadCount++;
 }
