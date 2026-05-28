@@ -603,7 +603,7 @@ auto main(int argc, char* args[]) -> int {
         SubtitleInputSystem::update(registry);
         SubtitlePageSensorSystem::update(registry);
         SubtitleTimerSystem::update(registry, deltaTime);
-        Vapor::updateFSMSystem(registry, deltaTime);
+        Vapor::FSMSystem::update(registry, deltaTime);
         SubtitleActionSystem::update(registry);
         ScrollTextQueueSystem::update(registry);
         ChapterTitleTriggerSystem::update(registry);

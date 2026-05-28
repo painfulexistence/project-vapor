@@ -225,7 +225,7 @@ inline SceneResources buildScene(
         };
         // FSM components for subtitle state machine
         registry.emplace<Vapor::FSMDefinition>(navEntity, createSubtitleFSM());
-        Vapor::initFSM(registry, navEntity, registry.get<Vapor::FSMDefinition>(navEntity));
+        Vapor::FSMSystem::init(registry, navEntity, registry.get<Vapor::FSMDefinition>(navEntity));
         registry.emplace<Vapor::FSMEventQueue>(navEntity);
     }
     {

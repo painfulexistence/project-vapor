@@ -89,7 +89,7 @@
 
     <h3>Data Flow</h3>
     <pre><code>┌─────────────────┐    ┌──────────────┐    ┌─────────────────┐    ┌──────────────────┐
-│  Sensor Systems │ →  │ FSMEventQueue│ →  │  updateFSMSystem│ →  │FSMStateChangeEvent│
+│  Sensor Systems │ →  │ FSMEventQueue│ →  │  FSMSystem::update│ →  │FSMStateChangeEvent│
 │ (push events)   │    │              │    │  (process queue)│    │ (consumed by      │
 └─────────────────┘    └──────────────┘    └─────────────────┘    │  action systems)  │
                                                                    └──────────────────┘</code></pre>
@@ -112,7 +112,7 @@
 };</code></pre>
 
     <h3>FSMStateChangeEvent</h3>
-    <p>Emitted by <code>updateFSMSystem</code> when a state transition occurs. Game systems read this component to trigger effects.</p>
+    <p>Emitted by <code>FSMSystem::update</code> when a state transition occurs. Game systems read this component to trigger effects.</p>
     <pre><code>struct FSMStateChangeEvent {
     uint32_t fromState;
     uint32_t toState;
@@ -189,7 +189,7 @@ namespace SubtitleStates {
 SubtitleInputSystem::update(registry);
 SubtitlePageSensorSystem::update(registry);
 SubtitleTimerSystem::update(registry, deltaTime);
-Vapor::updateFSMSystem(registry, deltaTime);  // Process events, emit FSMStateChangeEvent
+Vapor::FSMSystem::update(registry, deltaTime);  // Process events, emit FSMStateChangeEvent
 SubtitleActionSystem::update(registry);        // React to state changes</code></pre>
 
     <h2>UI Page System Relationship</h2>
@@ -275,7 +275,7 @@ inline Vapor::FSMDefinition createSubtitleFSM() {
     <table>
       <tr><th>File</th><th>Change</th></tr>
       <tr><td><code>Vapor/include/Vapor/fsm.hpp</code></td><td>New — FSM components + builder</td></tr>
-      <tr><td><code>Vapor/include/Vapor/fsm_system.hpp</code></td><td>New — updateFSMSystem, helpers</td></tr>
+      <tr><td><code>Vapor/include/Vapor/fsm_system.hpp</code></td><td>New — FSMSystem::update, helpers</td></tr>
       <tr><td><code>Vapor/include/Vapor/components.hpp</code></td><td>TriggerVolumeComponent: removed callbacks, added event types</td></tr>
       <tr><td><code>Vaporware/src/components.hpp</code></td><td>Added state namespaces, FSM factory functions</td></tr>
       <tr><td><code>Vaporware/src/systems.hpp</code></td><td>Split SubtitleQueueSystem into 4 systems</td></tr>

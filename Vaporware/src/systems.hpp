@@ -341,7 +341,7 @@ public:
 //   1. SubtitleInputSystem      - detect advance request, send "ShowSubtitle"
 //   2. SubtitlePageSensorSystem - detect page animation, send "PageVisible"/"PageHidden"
 //   3. SubtitleTimerSystem      - update display timer, send "HideSubtitle"
-//   4. updateFSMSystem          - process events, emit FSMStateChangeEvent
+//   4. FSMSystem::update        - process events, emit FSMStateChangeEvent
 //   5. SubtitleActionSystem     - respond to FSMStateChangeEvent, call PageSystem
 
 // Detects advance requests and triggers showing next subtitle

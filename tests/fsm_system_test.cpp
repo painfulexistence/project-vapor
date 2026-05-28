@@ -1,4 +1,4 @@
-// Unit tests for the FSM System (FSMDefinitionBuilder, updateFSMSystem, state transitions).
+// Unit tests for the FSM System (FSMDefinitionBuilder, FSMSystem, state transitions).
 #include <Vapor/fsm.hpp>
 #include <Vapor/fsm_system.hpp>
 #include <catch2/catch_approx.hpp>
@@ -81,10 +81,10 @@ TEST_CASE("FSMDefinition::getStateName 邊界檢查", "[fsm][definition]") {
 }
 
 // ============================================================
-// initFSM
+// FSMSystem::init
 // ============================================================
 
-TEST_CASE("initFSM 初始化狀態", "[fsm][init]") {
+TEST_CASE("FSMSystem::init 初始化狀態", "[fsm][init]") {
     entt::registry reg;
     auto entity = reg.create();
 
@@ -95,7 +95,7 @@ TEST_CASE("initFSM 初始化狀態", "[fsm][init]") {
         .build();
     reg.emplace<FSMDefinition>(entity, def);
 
-    initFSM(reg, entity, def);
+    FSMSystem::init(reg, entity, def);
 
     auto& state = reg.get<FSMStateComponent>(entity);
     REQUIRE(state.currentState == 0);
@@ -109,7 +109,7 @@ TEST_CASE("initFSM 初始化狀態", "[fsm][init]") {
     REQUIRE(event.toState == 0);
 }
 
-TEST_CASE("initFSM 使用非零初始狀態", "[fsm][init]") {
+TEST_CASE("FSMSystem::init 使用非零初始狀態", "[fsm][init]") {
     entt::registry reg;
     auto entity = reg.create();
 
@@ -120,17 +120,17 @@ TEST_CASE("initFSM 使用非零初始狀態", "[fsm][init]") {
         .build();
     reg.emplace<FSMDefinition>(entity, def);
 
-    initFSM(reg, entity, def);
+    FSMSystem::init(reg, entity, def);
 
     auto& state = reg.get<FSMStateComponent>(entity);
     REQUIRE(state.currentState == 1);
 }
 
 // ============================================================
-// updateFSMSystem - Event Transitions
+// FSMSystem::update - Event Transitions
 // ============================================================
 
-TEST_CASE("updateFSMSystem 事件觸發狀態轉換", "[fsm][update]") {
+TEST_CASE("FSMSystem::update 事件觸發狀態轉換", "[fsm][update]") {
     entt::registry reg;
     auto entity = reg.create();
 
@@ -141,7 +141,7 @@ TEST_CASE("updateFSMSystem 事件觸發狀態轉換", "[fsm][update]") {
         .initialState("Idle")
         .build();
     reg.emplace<FSMDefinition>(entity, def);
-    initFSM(reg, entity, def);
+    FSMSystem::init(reg, entity, def);
 
     // Clear initial state change event
     reg.clear<FSMStateChangeEvent>();
@@ -150,7 +150,7 @@ TEST_CASE("updateFSMSystem 事件觸發狀態轉換", "[fsm][update]") {
     auto& events = reg.get_or_emplace<FSMEventQueue>(entity);
     events.push("StartWalk");
 
-    updateFSMSystem(reg, 0.016f);
+    FSMSystem::update(reg, 0.016f);
 
     auto& state = reg.get<FSMStateComponent>(entity);
     REQUIRE(state.currentState == 1);
@@ -163,7 +163,7 @@ TEST_CASE("updateFSMSystem 事件觸發狀態轉換", "[fsm][update]") {
     REQUIRE(changeEvent.toState == 1);
 }
 
-TEST_CASE("updateFSMSystem 無效事件不觸發轉換", "[fsm][update]") {
+TEST_CASE("FSMSystem::update 無效事件不觸發轉換", "[fsm][update]") {
     entt::registry reg;
     auto entity = reg.create();
 
@@ -174,20 +174,20 @@ TEST_CASE("updateFSMSystem 無效事件不觸發轉換", "[fsm][update]") {
         .initialState("Idle")
         .build();
     reg.emplace<FSMDefinition>(entity, def);
-    initFSM(reg, entity, def);
+    FSMSystem::init(reg, entity, def);
     reg.clear<FSMStateChangeEvent>();
 
     auto& events = reg.get_or_emplace<FSMEventQueue>(entity);
     events.push("InvalidEvent");
 
-    updateFSMSystem(reg, 0.016f);
+    FSMSystem::update(reg, 0.016f);
 
     auto& state = reg.get<FSMStateComponent>(entity);
     REQUIRE(state.currentState == 0);
     REQUIRE_FALSE(reg.all_of<FSMStateChangeEvent>(entity));
 }
 
-TEST_CASE("updateFSMSystem 事件隊列在處理後清空", "[fsm][update]") {
+TEST_CASE("FSMSystem::update 事件隊列在處理後清空", "[fsm][update]") {
     entt::registry reg;
     auto entity = reg.create();
 
@@ -196,19 +196,19 @@ TEST_CASE("updateFSMSystem 事件隊列在處理後清空", "[fsm][update]") {
         .initialState("Idle")
         .build();
     reg.emplace<FSMDefinition>(entity, def);
-    initFSM(reg, entity, def);
+    FSMSystem::init(reg, entity, def);
 
     auto& events = reg.get_or_emplace<FSMEventQueue>(entity);
     events.push("Event1");
     events.push("Event2");
     REQUIRE(events.events.size() == 2);
 
-    updateFSMSystem(reg, 0.016f);
+    FSMSystem::update(reg, 0.016f);
 
     REQUIRE(events.empty());
 }
 
-TEST_CASE("updateFSMSystem minStateTime 限制轉換", "[fsm][update]") {
+TEST_CASE("FSMSystem::update minStateTime 限制轉換", "[fsm][update]") {
     entt::registry reg;
     auto entity = reg.create();
 
@@ -218,14 +218,14 @@ TEST_CASE("updateFSMSystem minStateTime 限制轉換", "[fsm][update]") {
         .build();
     def.eventTransitions.emplace_back(0, 1, "StartWalk", 0.5f);  // minStateTime = 0.5s
     reg.emplace<FSMDefinition>(entity, def);
-    initFSM(reg, entity, def);
+    FSMSystem::init(reg, entity, def);
     reg.clear<FSMStateChangeEvent>();
 
     auto& events = reg.get_or_emplace<FSMEventQueue>(entity);
 
     SECTION("stateTime < minStateTime: 不轉換") {
         events.push("StartWalk");
-        updateFSMSystem(reg, 0.1f);  // stateTime = 0.1s < 0.5s
+        FSMSystem::update(reg, 0.1f);  // stateTime = 0.1s < 0.5s
 
         auto& state = reg.get<FSMStateComponent>(entity);
         REQUIRE(state.currentState == 0);
@@ -233,10 +233,10 @@ TEST_CASE("updateFSMSystem minStateTime 限制轉換", "[fsm][update]") {
 
     SECTION("stateTime >= minStateTime: 轉換") {
         // Advance time first
-        updateFSMSystem(reg, 0.5f);
+        FSMSystem::update(reg, 0.5f);
 
         events.push("StartWalk");
-        updateFSMSystem(reg, 0.016f);
+        FSMSystem::update(reg, 0.016f);
 
         auto& state = reg.get<FSMStateComponent>(entity);
         REQUIRE(state.currentState == 1);
@@ -244,10 +244,10 @@ TEST_CASE("updateFSMSystem minStateTime 限制轉換", "[fsm][update]") {
 }
 
 // ============================================================
-// updateFSMSystem - Timed Transitions
+// FSMSystem::update - Timed Transitions
 // ============================================================
 
-TEST_CASE("updateFSMSystem 時間轉換", "[fsm][update][timed]") {
+TEST_CASE("FSMSystem::update 時間轉換", "[fsm][update][timed]") {
     entt::registry reg;
     auto entity = reg.create();
 
@@ -258,11 +258,11 @@ TEST_CASE("updateFSMSystem 時間轉換", "[fsm][update][timed]") {
         .initialState("Attack")
         .build();
     reg.emplace<FSMDefinition>(entity, def);
-    initFSM(reg, entity, def);
+    FSMSystem::init(reg, entity, def);
     reg.clear<FSMStateChangeEvent>();
 
     SECTION("時間未到: 不轉換") {
-        updateFSMSystem(reg, 0.3f);
+        FSMSystem::update(reg, 0.3f);
 
         auto& state = reg.get<FSMStateComponent>(entity);
         REQUIRE(state.currentState == 0);
@@ -273,8 +273,8 @@ TEST_CASE("updateFSMSystem 時間轉換", "[fsm][update][timed]") {
         // Timer check happens BEFORE timer update, so need two frames:
         // Frame 1: stateTime=0 (check fails), then stateTime becomes 0.5
         // Frame 2: stateTime=0.5 (check succeeds), transition happens
-        updateFSMSystem(reg, 0.5f);  // Accumulate time
-        updateFSMSystem(reg, 0.01f); // Trigger transition
+        FSMSystem::update(reg, 0.5f);  // Accumulate time
+        FSMSystem::update(reg, 0.01f); // Trigger transition
 
         auto& state = reg.get<FSMStateComponent>(entity);
         REQUIRE(state.currentState == 1);
@@ -282,23 +282,23 @@ TEST_CASE("updateFSMSystem 時間轉換", "[fsm][update][timed]") {
     }
 
     SECTION("跨多幀累積時間") {
-        updateFSMSystem(reg, 0.2f);  // stateTime = 0.2
-        updateFSMSystem(reg, 0.2f);  // stateTime = 0.4
+        FSMSystem::update(reg, 0.2f);  // stateTime = 0.2
+        FSMSystem::update(reg, 0.2f);  // stateTime = 0.4
         REQUIRE(reg.get<FSMStateComponent>(entity).currentState == 0);
 
-        updateFSMSystem(reg, 0.2f);  // stateTime = 0.6, check: 0.4 >= 0.5? No
+        FSMSystem::update(reg, 0.2f);  // stateTime = 0.6, check: 0.4 >= 0.5? No
         REQUIRE(reg.get<FSMStateComponent>(entity).currentState == 0);
 
-        updateFSMSystem(reg, 0.01f); // check: 0.6 >= 0.5? Yes, transition!
+        FSMSystem::update(reg, 0.01f); // check: 0.6 >= 0.5? Yes, transition!
         REQUIRE(reg.get<FSMStateComponent>(entity).currentState == 1);
     }
 }
 
 // ============================================================
-// updateFSMSystem - Timer Updates
+// FSMSystem::update - Timer Updates
 // ============================================================
 
-TEST_CASE("updateFSMSystem 更新計時器", "[fsm][update][timer]") {
+TEST_CASE("FSMSystem::update 更新計時器", "[fsm][update][timer]") {
     entt::registry reg;
     auto entity = reg.create();
 
@@ -307,18 +307,18 @@ TEST_CASE("updateFSMSystem 更新計時器", "[fsm][update][timer]") {
         .initialState("Idle")
         .build();
     reg.emplace<FSMDefinition>(entity, def);
-    initFSM(reg, entity, def);
+    FSMSystem::init(reg, entity, def);
 
-    updateFSMSystem(reg, 0.1f);
-    updateFSMSystem(reg, 0.2f);
-    updateFSMSystem(reg, 0.3f);
+    FSMSystem::update(reg, 0.1f);
+    FSMSystem::update(reg, 0.2f);
+    FSMSystem::update(reg, 0.3f);
 
     auto& state = reg.get<FSMStateComponent>(entity);
     REQUIRE(state.stateTime == Approx(0.6f));
     REQUIRE(state.totalTime == Approx(0.6f));
 }
 
-TEST_CASE("updateFSMSystem 轉換後重置 stateTime", "[fsm][update][timer]") {
+TEST_CASE("FSMSystem::update 轉換後重置 stateTime", "[fsm][update][timer]") {
     entt::registry reg;
     auto entity = reg.create();
 
@@ -329,15 +329,15 @@ TEST_CASE("updateFSMSystem 轉換後重置 stateTime", "[fsm][update][timer]") {
         .initialState("Idle")
         .build();
     reg.emplace<FSMDefinition>(entity, def);
-    initFSM(reg, entity, def);
+    FSMSystem::init(reg, entity, def);
 
     // Accumulate time in Idle state
-    updateFSMSystem(reg, 1.0f);
+    FSMSystem::update(reg, 1.0f);
     REQUIRE(reg.get<FSMStateComponent>(entity).stateTime == Approx(1.0f));
 
     // Trigger transition
     reg.get_or_emplace<FSMEventQueue>(entity).push("StartWalk");
-    updateFSMSystem(reg, 0.1f);
+    FSMSystem::update(reg, 0.1f);
 
     auto& state = reg.get<FSMStateComponent>(entity);
     REQUIRE(state.currentState == 1);
@@ -346,10 +346,10 @@ TEST_CASE("updateFSMSystem 轉換後重置 stateTime", "[fsm][update][timer]") {
 }
 
 // ============================================================
-// updateFSMSystem - FSMStateChangeEvent Lifecycle
+// FSMSystem::update - FSMStateChangeEvent Lifecycle
 // ============================================================
 
-TEST_CASE("updateFSMSystem 每幀清除舊的 FSMStateChangeEvent", "[fsm][update][event]") {
+TEST_CASE("FSMSystem::update 每幀清除舊的 FSMStateChangeEvent", "[fsm][update][event]") {
     entt::registry reg;
     auto entity = reg.create();
 
@@ -358,17 +358,17 @@ TEST_CASE("updateFSMSystem 每幀清除舊的 FSMStateChangeEvent", "[fsm][updat
         .initialState("Idle")
         .build();
     reg.emplace<FSMDefinition>(entity, def);
-    initFSM(reg, entity, def);
+    FSMSystem::init(reg, entity, def);
 
-    // initFSM emits initial event
+    // FSMSystem::init emits initial event
     REQUIRE(reg.all_of<FSMStateChangeEvent>(entity));
 
     // Next frame should clear it
-    updateFSMSystem(reg, 0.016f);
+    FSMSystem::update(reg, 0.016f);
     REQUIRE_FALSE(reg.all_of<FSMStateChangeEvent>(entity));
 }
 
-TEST_CASE("updateFSMSystem FSMStateChangeEvent 包含正確資訊", "[fsm][update][event]") {
+TEST_CASE("FSMSystem::update FSMStateChangeEvent 包含正確資訊", "[fsm][update][event]") {
     entt::registry reg;
     auto entity = reg.create();
 
@@ -379,16 +379,16 @@ TEST_CASE("updateFSMSystem FSMStateChangeEvent 包含正確資訊", "[fsm][updat
         .initialState("Idle")
         .build();
     reg.emplace<FSMDefinition>(entity, def);
-    initFSM(reg, entity, def);
+    FSMSystem::init(reg, entity, def);
     reg.clear<FSMStateChangeEvent>();
 
     // Accumulate some time
-    updateFSMSystem(reg, 0.5f);
-    updateFSMSystem(reg, 0.3f);
+    FSMSystem::update(reg, 0.5f);
+    FSMSystem::update(reg, 0.3f);
 
     // Trigger transition
     reg.get_or_emplace<FSMEventQueue>(entity).push("StartWalk");
-    updateFSMSystem(reg, 0.016f);
+    FSMSystem::update(reg, 0.016f);
 
     REQUIRE(reg.all_of<FSMStateChangeEvent>(entity));
     auto& event = reg.get<FSMStateChangeEvent>(entity);
@@ -401,7 +401,7 @@ TEST_CASE("updateFSMSystem FSMStateChangeEvent 包含正確資訊", "[fsm][updat
 // Multiple Entities
 // ============================================================
 
-TEST_CASE("updateFSMSystem 處理多個實體", "[fsm][update][multi]") {
+TEST_CASE("FSMSystem::update 處理多個實體", "[fsm][update][multi]") {
     entt::registry reg;
 
     auto def1 = FSMDefinitionBuilder()
@@ -418,18 +418,18 @@ TEST_CASE("updateFSMSystem 處理多個實體", "[fsm][update][multi]") {
 
     auto e1 = reg.create();
     reg.emplace<FSMDefinition>(e1, def1);
-    initFSM(reg, e1, def1);
+    FSMSystem::init(reg, e1, def1);
 
     auto e2 = reg.create();
     reg.emplace<FSMDefinition>(e2, def2);
-    initFSM(reg, e2, def2);
+    FSMSystem::init(reg, e2, def2);
 
     reg.clear<FSMStateChangeEvent>();
 
     // Only trigger e1
     reg.get_or_emplace<FSMEventQueue>(e1).push("GoB");
 
-    updateFSMSystem(reg, 0.016f);
+    FSMSystem::update(reg, 0.016f);
 
     REQUIRE(reg.get<FSMStateComponent>(e1).currentState == 1);
     REQUIRE(reg.get<FSMStateComponent>(e2).currentState == 0);
@@ -441,11 +441,11 @@ TEST_CASE("updateFSMSystem 處理多個實體", "[fsm][update][multi]") {
 // Helper Functions
 // ============================================================
 
-TEST_CASE("sendFSMEvent 推送事件到隊列", "[fsm][helper]") {
+TEST_CASE("FSMSystem::sendEvent 推送事件到隊列", "[fsm][helper]") {
     entt::registry reg;
     auto entity = reg.create();
 
-    sendFSMEvent(reg, entity, "TestEvent");
+    FSMSystem::sendEvent(reg, entity, "TestEvent");
 
     REQUIRE(reg.all_of<FSMEventQueue>(entity));
     auto& events = reg.get<FSMEventQueue>(entity);
@@ -453,7 +453,7 @@ TEST_CASE("sendFSMEvent 推送事件到隊列", "[fsm][helper]") {
     REQUIRE(events.events[0] == "TestEvent");
 }
 
-TEST_CASE("broadcastFSMEvent 廣播事件到所有隊列", "[fsm][helper]") {
+TEST_CASE("FSMSystem::broadcastEvent 廣播事件到所有隊列", "[fsm][helper]") {
     entt::registry reg;
 
     auto e1 = reg.create();
@@ -463,7 +463,7 @@ TEST_CASE("broadcastFSMEvent 廣播事件到所有隊列", "[fsm][helper]") {
     reg.emplace<FSMEventQueue>(e1);
     reg.emplace<FSMEventQueue>(e2);
 
-    broadcastFSMEvent(reg, "GlobalEvent");
+    FSMSystem::broadcastEvent(reg, "GlobalEvent");
 
     REQUIRE(reg.get<FSMEventQueue>(e1).events.size() == 1);
     REQUIRE(reg.get<FSMEventQueue>(e1).events[0] == "GlobalEvent");
