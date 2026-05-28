@@ -1267,26 +1267,109 @@ std::unique_ptr<Renderer> createRenderer(GraphicsBackend backend, SDL_Window* wi
 // ============================================================================
 
 void Renderer::stage(std::shared_ptr<Scene> scene) {
-    // TODO: Implement scene staging
-    // This should extract and upload all meshes, materials, textures from the scene
+    if (!scene) return;
+
+    // TODO: Implement full scene staging
+    // For now, this is a placeholder that would:
+    // 1. Extract all meshes from scene and register them
+    // 2. Extract all materials and register them
+    // 3. Extract all textures and register them
+
+    fmt::print("Scene staging not yet fully implemented\n");
 }
 
 void Renderer::draw(std::shared_ptr<Scene> scene, Camera& camera) {
-    // TODO: Implement scene drawing
-    // Collect drawables from scene, then use existing render() method
+    if (!scene) return;
+
+    // Prepare camera data
+    CameraRenderData camData;
+    camData.view = camera.getViewMatrix();
+    camData.projection = camera.getProjectionMatrix();
+    camData.position = camera.position;
+    camData.near = camera.nearPlane;
+    camData.far = camera.farPlane;
+
+    // Begin frame
+    beginFrame(camData);
+
+    // Collect drawables from scene
+    collectDrawables(scene);
+
+    // TODO: Collect lights from scene
+    // scene->collectLights(directionalLights, pointLights);
+
+    // Render
+    render();
+
+    // End frame
+    endFrame();
 }
 
 void Renderer::draw(entt::registry& registry, std::shared_ptr<Scene> scene, Camera& camera) {
-    // TODO: Implement ECS drawing
-    // Collect drawables from ECS registry, then use existing render() method
+    if (!scene) return;
+
+    // Prepare camera data
+    CameraRenderData camData;
+    camData.view = camera.getViewMatrix();
+    camData.projection = camera.getProjectionMatrix();
+    camData.position = camera.position;
+    camData.near = camera.nearPlane;
+    camData.far = camera.farPlane;
+
+    // Begin frame
+    beginFrame(camData);
+
+    // Collect drawables from ECS
+    collectDrawables(registry, scene);
+
+    // TODO: Collect lights from ECS
+    // collectLights(registry);
+
+    // Render
+    render();
+
+    // End frame
+    endFrame();
 }
 
 void Renderer::collectDrawables(std::shared_ptr<Scene> scene) {
-    // TODO: Traverse scene graph and collect renderables
+    // TODO: Implement scene graph traversal
+    // This would traverse the scene's node hierarchy and:
+    // 1. Check visibility
+    // 2. Compute world transforms
+    // 3. Submit drawables for each renderable node
+
+    // Placeholder: iterate over staged meshes if they exist
+    // for (auto& mesh : scene->stagedMeshes) {
+    //     Drawable drawable;
+    //     drawable.meshId = mesh->id;
+    //     drawable.materialId = mesh->materialId;
+    //     drawable.transform = mesh->worldTransform;
+    //     submitDrawable(drawable);
+    // }
 }
 
 void Renderer::collectDrawables(entt::registry& registry, std::shared_ptr<Scene> scene) {
-    // TODO: Query ECS for entities with renderable components
+    // TODO: Implement ECS entity collection
+    // This would query the registry for entities with renderable components:
+    //
+    // auto view = registry.view<TransformComponent, MeshRendererComponent>();
+    // for (auto entity : view) {
+    //     auto& transform = view.get<TransformComponent>(entity);
+    //     auto& meshRenderer = view.get<MeshRendererComponent>(entity);
+    //
+    //     if (!meshRenderer.visible) continue;
+    //
+    //     for (auto& mesh : meshRenderer.meshes) {
+    //         Drawable drawable;
+    //         drawable.meshId = mesh->id;
+    //         drawable.materialId = mesh->materialId;
+    //         drawable.transform = transform.worldTransform;
+    //         submitDrawable(drawable);
+    //     }
+    // }
+
+    fmt::print("ECS drawable collection not yet implemented\n");
 }
 
 // ============================================================================
