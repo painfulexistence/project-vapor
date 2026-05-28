@@ -2,6 +2,7 @@
 #include "rhi_vulkan.hpp"
 #include "rhi_metal.hpp"
 #include "helper.hpp"
+#include "components.hpp"
 #include <SDL3/SDL_video.h>
 #include <fmt/core.h>
 #include <map>
@@ -1350,26 +1351,49 @@ void Renderer::collectDrawables(std::shared_ptr<Scene> scene) {
 }
 
 void Renderer::collectDrawables(entt::registry& registry, std::shared_ptr<Scene> scene) {
-    // TODO: Implement ECS entity collection
-    // This would query the registry for entities with renderable components:
-    //
-    // auto view = registry.view<TransformComponent, MeshRendererComponent>();
-    // for (auto entity : view) {
-    //     auto& transform = view.get<TransformComponent>(entity);
-    //     auto& meshRenderer = view.get<MeshRendererComponent>(entity);
-    //
-    //     if (!meshRenderer.visible) continue;
-    //
-    //     for (auto& mesh : meshRenderer.meshes) {
-    //         Drawable drawable;
-    //         drawable.meshId = mesh->id;
-    //         drawable.materialId = mesh->materialId;
-    //         drawable.transform = transform.worldTransform;
-    //         submitDrawable(drawable);
-    //     }
-    // }
+    // Collect renderables from ECS
+    auto view = registry.view<Vapor::TransformComponent, Vapor::MeshRendererComponent>();
 
-    fmt::print("ECS drawable collection not yet implemented\n");
+    for (auto entity : view) {
+        auto& transform = view.get<Vapor::TransformComponent>(entity);
+        auto& meshRenderer = view.get<Vapor::MeshRendererComponent>(entity);
+
+        if (!meshRenderer.visible) continue;
+
+        for (auto& mesh : meshRenderer.meshes) {
+            if (!mesh) continue;
+
+            // Create drawable from mesh
+            Drawable drawable;
+            // TODO: Map mesh to registered MeshId
+            // drawable.meshId = getMeshId(mesh);
+            // drawable.materialId = mesh->materialId;
+            // drawable.transform = transform.worldTransform;
+
+            // For now, just skip since we need mesh registration
+            // submitDrawable(drawable);
+        }
+    }
+
+    // TODO: Collect sprites
+    auto spriteView = registry.view<Vapor::TransformComponent, Vapor::SpriteComponent>();
+    for (auto entity : spriteView) {
+        auto& transform = spriteView.get<Vapor::TransformComponent>(entity);
+        auto& sprite = spriteView.get<Vapor::SpriteComponent>(entity);
+
+        if (!sprite.visible) continue;
+
+        // Use batch rendering for sprites
+        glm::vec2 position(transform.position.x, transform.position.y);
+        glm::vec4 color = sprite.tint;
+
+        // TODO: Get texture from atlas
+        // TextureHandle tex = getAtlasTexture(sprite.atlas);
+        // drawQuad2D(position, sprite.size, tex, color);
+
+        // For now, just draw colored quads
+        drawQuad2D(position, sprite.size, color);
+    }
 }
 
 // ============================================================================
