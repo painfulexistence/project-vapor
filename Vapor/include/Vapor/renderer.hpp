@@ -479,6 +479,11 @@ private:
 
         TextureHandle whiteTexture;  // Default white texture for colored quads
 
+        // Store RHI and current view-projection for auto-flush
+        RHI* currentRHI = nullptr;
+        glm::mat4 currentViewProj = glm::mat4(1.0f);
+        bool canAutoFlush = false;
+
         // Stats
         uint32_t drawCalls = 0;
         uint32_t totalQuads = 0;
@@ -486,6 +491,7 @@ private:
         void init(RHI* rhi, GraphicsBackend backend, bool is3D, TextureHandle defaultTex);
         void shutdown(RHI* rhi);
         void flush(RHI* rhi, const glm::mat4& viewProj);
+        void beginBatch(RHI* rhi, const glm::mat4& viewProj);
         void reset();
         void addQuad(const glm::vec3& position, const glm::vec2& size, const glm::vec4& color, int entityID = -1);
         void addQuad(const glm::mat4& transform, const glm::vec4& color, int entityID = -1);

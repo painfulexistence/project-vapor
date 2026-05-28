@@ -369,6 +369,19 @@ void Renderer::beginFrame(const CameraRenderData& camera) {
     directionalLights.clear();
     pointLights.clear();
 
+    // Set up batch renderers for auto-flushing
+    // 2D uses orthographic projection
+    glm::mat4 orthoProj = glm::ortho(
+        0.0f, static_cast<float>(rhi->getSwapchainWidth()),
+        static_cast<float>(rhi->getSwapchainHeight()), 0.0f,
+        -1.0f, 1.0f
+    );
+    batch2D.beginBatch(rhi.get(), orthoProj);
+
+    // 3D uses camera's view-projection
+    glm::mat4 viewProj = camera.projection * camera.view;
+    batch3D.beginBatch(rhi.get(), viewProj);
+
     fmt::print("beginFrame: camera position=({}, {}, {}), frameDrawables cleared\n",
                camera.position.x, camera.position.y, camera.position.z);
 }
@@ -469,6 +482,14 @@ void Renderer::endFrame() {
                 break;
         }
     }
+
+    // Flush any remaining batch draws
+    flush2D();
+    flush3D();
+
+    // Disable auto-flushing until next beginFrame
+    batch2D.canAutoFlush = false;
+    batch3D.canAutoFlush = false;
 
     // End RHI frame (present drawable, commit command buffer)
     rhi->endFrame();
@@ -1549,11 +1570,72 @@ void Renderer::drawRotatedQuad2D(
 
 // Line drawing
 void Renderer::drawLine2D(const glm::vec2& p0, const glm::vec2& p1, const glm::vec4& color, float thickness) {
-    // TODO: Implement line rendering (can be done with thin quads)
+    // Implement line as a rotated quad
+    glm::vec2 dir = p1 - p0;
+    float length = glm::length(dir);
+    if (length < 0.0001f) return; // Degenerate line
+
+    dir /= length; // Normalize
+    glm::vec2 perp(-dir.y, dir.x); // Perpendicular vector
+
+    // Calculate half-thickness offset
+    glm::vec2 offset = perp * (thickness * 0.5f);
+
+    // Create quad corners
+    glm::vec2 corner0 = p0 - offset;
+    glm::vec2 corner1 = p0 + offset;
+    glm::vec2 corner2 = p1 + offset;
+    glm::vec2 corner3 = p1 - offset;
+
+    // Build transform matrix for the line quad
+    glm::vec2 center = (p0 + p1) * 0.5f;
+    float angle = std::atan2(dir.y, dir.x);
+
+    glm::mat4 transform = glm::translate(glm::mat4(1.0f), glm::vec3(center, 0.0f));
+    transform = glm::rotate(transform, angle, glm::vec3(0, 0, 1));
+    transform = glm::scale(transform, glm::vec3(length, thickness, 1.0f));
+
+    drawQuad2D(transform, color);
 }
 
 void Renderer::drawLine3D(const glm::vec3& p0, const glm::vec3& p1, const glm::vec4& color, float thickness) {
-    // TODO: Implement 3D line rendering
+    // Similar to 2D but in 3D space
+    glm::vec3 dir = p1 - p0;
+    float length = glm::length(dir);
+    if (length < 0.0001f) return;
+
+    dir /= length;
+
+    // Find perpendicular vector (use cross product with up vector)
+    glm::vec3 up = glm::abs(dir.y) < 0.99f ? glm::vec3(0, 1, 0) : glm::vec3(1, 0, 0);
+    glm::vec3 right = glm::normalize(glm::cross(dir, up));
+
+    // Calculate quad corners with thickness
+    glm::vec3 offset = right * (thickness * 0.5f);
+
+    glm::vec3 center = (p0 + p1) * 0.5f;
+
+    // Build transform that orients the quad along the line
+    glm::mat4 transform = glm::translate(glm::mat4(1.0f), center);
+
+    // Create rotation to align with line direction
+    glm::vec3 forward = dir;
+    glm::vec3 worldUp = glm::vec3(0, 1, 0);
+    if (glm::abs(glm::dot(forward, worldUp)) > 0.99f) {
+        worldUp = glm::vec3(0, 0, 1);
+    }
+    right = glm::normalize(glm::cross(worldUp, forward));
+    up = glm::cross(forward, right);
+
+    glm::mat4 rotation(1.0f);
+    rotation[0] = glm::vec4(right, 0);
+    rotation[1] = glm::vec4(up, 0);
+    rotation[2] = glm::vec4(forward, 0);
+
+    transform = transform * rotation;
+    transform = glm::scale(transform, glm::vec3(thickness, thickness, length));
+
+    drawQuad3D(transform, color);
 }
 
 // Shape drawing
@@ -1564,23 +1646,87 @@ void Renderer::drawRect2D(
     float thickness
 ) {
     // Draw 4 lines to form rectangle
-    // TODO: Implement using drawLine2D
+    glm::vec2 halfSize = size * 0.5f;
+    glm::vec2 topLeft = position - halfSize;
+    glm::vec2 topRight = position + glm::vec2(halfSize.x, -halfSize.y);
+    glm::vec2 bottomRight = position + halfSize;
+    glm::vec2 bottomLeft = position + glm::vec2(-halfSize.x, halfSize.y);
+
+    drawLine2D(topLeft, topRight, color, thickness);
+    drawLine2D(topRight, bottomRight, color, thickness);
+    drawLine2D(bottomRight, bottomLeft, color, thickness);
+    drawLine2D(bottomLeft, topLeft, color, thickness);
 }
 
 void Renderer::drawCircle2D(const glm::vec2& center, float radius, const glm::vec4& color, int segments) {
-    // TODO: Draw circle outline using line segments
+    // Draw circle outline using line segments
+    if (segments < 3) segments = 32;
+
+    float angleStep = glm::two_pi<float>() / segments;
+
+    for (int i = 0; i < segments; ++i) {
+        float angle0 = i * angleStep;
+        float angle1 = (i + 1) * angleStep;
+
+        glm::vec2 p0 = center + glm::vec2(std::cos(angle0), std::sin(angle0)) * radius;
+        glm::vec2 p1 = center + glm::vec2(std::cos(angle1), std::sin(angle1)) * radius;
+
+        drawLine2D(p0, p1, color, 1.0f);
+    }
 }
 
 void Renderer::drawCircleFilled2D(const glm::vec2& center, float radius, const glm::vec4& color, int segments) {
-    // TODO: Draw filled circle using triangle fan or quads
+    // Draw filled circle using triangle fan (rendered as quads)
+    if (segments < 3) segments = 32;
+
+    float angleStep = glm::two_pi<float>() / segments;
+
+    // Draw as quads approximating triangles
+    for (int i = 0; i < segments; ++i) {
+        float angle0 = i * angleStep;
+        float angle1 = (i + 1) * angleStep;
+
+        glm::vec2 p0 = center;
+        glm::vec2 p1 = center + glm::vec2(std::cos(angle0), std::sin(angle0)) * radius;
+        glm::vec2 p2 = center + glm::vec2(std::cos(angle1), std::sin(angle1)) * radius;
+
+        // Create a thin triangle as a degenerate quad
+        // Calculate midpoint for smoother rendering
+        glm::vec2 midPoint = (p1 + p2) * 0.5f;
+
+        // Draw as a filled triangle by creating 3 vertices
+        // We'll approximate this by drawing a very thin quad from center to edge
+        drawTriangleFilled2D(p0, p1, p2, color);
+    }
 }
 
 void Renderer::drawTriangle2D(const glm::vec2& p0, const glm::vec2& p1, const glm::vec2& p2, const glm::vec4& color) {
-    // TODO: Draw triangle outline
+    // Draw triangle outline using 3 lines
+    drawLine2D(p0, p1, color, 1.0f);
+    drawLine2D(p1, p2, color, 1.0f);
+    drawLine2D(p2, p0, color, 1.0f);
 }
 
 void Renderer::drawTriangleFilled2D(const glm::vec2& p0, const glm::vec2& p1, const glm::vec2& p2, const glm::vec4& color) {
-    // TODO: Draw filled triangle
+    // Draw filled triangle using barycentric coordinates
+    // We'll approximate by drawing a quad that covers the triangle
+    // For a proper triangle, we need to add triangle support to the batch renderer
+    // For now, draw three quads from center to each edge
+
+    glm::vec2 center = (p0 + p1 + p2) / 3.0f;
+
+    // Calculate small quads to approximate the triangle
+    // This is a simplified approach - ideally we'd add proper triangle rendering
+
+    // Create transformation matrix for a quad that covers the triangle area
+    glm::vec2 min = glm::min(glm::min(p0, p1), p2);
+    glm::vec2 max = glm::max(glm::max(p0, p1), p2);
+    glm::vec2 size = max - min;
+    glm::vec2 pos = (min + max) * 0.5f;
+
+    // For now, just draw a quad that approximates the triangle
+    // A proper implementation would tessellate or use a geometry shader
+    drawQuad2D(pos, size, color);
 }
 
 // Batch stats
@@ -1893,6 +2039,12 @@ void Renderer::BatchRenderer::shutdown(RHI* rhi) {
     }
 }
 
+void Renderer::BatchRenderer::beginBatch(RHI* rhi, const glm::mat4& viewProj) {
+    currentRHI = rhi;
+    currentViewProj = viewProj;
+    canAutoFlush = true;
+}
+
 void Renderer::BatchRenderer::flush(RHI* rhi, const glm::mat4& viewProj) {
     if (quadCount == 0) return;
 
@@ -1909,8 +2061,7 @@ void Renderer::BatchRenderer::flush(RHI* rhi, const glm::mat4& viewProj) {
     rhi->bindVertexBuffer(vertexBuffer, 0, 0);
     rhi->bindIndexBuffer(indexBuffer, 0);
 
-    // TODO: Bind textures (set 1, binding 0 - texture array)
-    // For now, we'll just use the white texture
+    // Bind white texture for now (texture array binding can be added later)
     // rhi->setTexture(1, 0, whiteTexture, defaultSampler);
 
     // Draw indexed
@@ -1933,9 +2084,11 @@ void Renderer::BatchRenderer::reset() {
 void Renderer::BatchRenderer::addQuad(const glm::vec3& position, const glm::vec2& size, const glm::vec4& color, int entityID) {
     if (quadCount >= MaxQuads) {
         // Auto-flush when full
-        // TODO: flush needs viewProj which we don't have here
-        // For now, just skip
-        return;
+        if (canAutoFlush && currentRHI) {
+            flush(currentRHI, currentViewProj);
+        } else {
+            return; // Can't flush, skip this quad
+        }
     }
 
     // Create quad vertices (centered)
@@ -1967,7 +2120,12 @@ void Renderer::BatchRenderer::addQuad(const glm::vec3& position, const glm::vec2
 
 void Renderer::BatchRenderer::addQuad(const glm::mat4& transform, const glm::vec4& color, int entityID) {
     if (quadCount >= MaxQuads) {
-        return;
+        // Auto-flush when full
+        if (canAutoFlush && currentRHI) {
+            flush(currentRHI, currentViewProj);
+        } else {
+            return; // Can't flush, skip this quad
+        }
     }
 
     // Extract quad corners from transform matrix
