@@ -112,28 +112,4 @@ public:
     }
 };
 
-// ============================================================
-// Backward-compatible free functions (deprecated)
-// ============================================================
-
-[[deprecated("Use FSMSystem::init instead")]]
-inline void initFSM(entt::registry& registry, entt::entity entity, const FSMDefinition& def) {
-    FSMSystem::init(registry, entity, def);
-}
-
-[[deprecated("Use FSMSystem::update instead")]]
-inline void updateFSMSystem(entt::registry& registry, float deltaTime) {
-    FSMSystem::update(registry, deltaTime);
-}
-
-[[deprecated("Use FSMSystem::sendEvent instead")]]
-inline void sendFSMEvent(entt::registry& registry, entt::entity entity, const std::string& event) {
-    FSMSystem::sendEvent(registry, entity, event);
-}
-
-[[deprecated("Use FSMSystem::broadcastEvent instead")]]
-inline void broadcastFSMEvent(entt::registry& registry, const std::string& event) {
-    FSMSystem::broadcastEvent(registry, event);
-}
-
 } // namespace Vapor
