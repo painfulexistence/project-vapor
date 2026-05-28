@@ -3,8 +3,22 @@
 #include "render_data.hpp"
 #include "camera.hpp"
 #include "graphics.hpp"
+#include "font_manager.hpp"
+#include "scene.hpp"
+#include <SDL3/SDL_video.h>
+#include <entt/entt.hpp>
+#include <functional>
 #include <vector>
 #include <memory>
+
+// Forward declarations
+namespace Rml {
+    class Context;
+}
+
+namespace Vapor {
+    class DebugDraw;
+}
 
 // ============================================================================
 // Renderer - High-level renderer that uses RHI
@@ -29,6 +43,39 @@ enum class RenderPath {
     Forward,    // Simple forward rendering
     Deferred,   // Deferred rendering
     Clustered   // Clustered forward/deferred with tiled light culling
+};
+
+// Screenshot callback
+struct GpuImageData {
+    std::vector<uint8_t> data;
+    uint32_t width;
+    uint32_t height;
+    uint32_t channelCount;
+};
+
+using ScreenshotCallback = std::function<void(const GpuImageData&)>;
+
+// Batch rendering stats
+struct Batch2DStats {
+    uint32_t drawCalls = 0;
+    uint32_t quadCount = 0;
+    uint32_t vertexCount = 0;
+};
+
+// Render texture descriptor
+struct RenderTextureDesc {
+    uint32_t width = 1920;
+    uint32_t height = 1080;
+    PixelFormat format = PixelFormat::RGBA8_UNORM;
+    bool isHDR = false;
+    bool hasDepth = true;
+    uint32_t sampleCount = 1;
+};
+
+// Render texture handle
+struct RenderTextureHandle {
+    uint32_t id = UINT32_MAX;
+    bool isValid() const { return id != UINT32_MAX; }
 };
 
 class Renderer {
@@ -87,6 +134,174 @@ public:
     RenderPath getRenderPath() const { return currentRenderPath; }
 
     // ========================================================================
+    // Scene/ECS Integration
+    // ========================================================================
+
+    // Stage a scene (upload meshes, materials, textures)
+    void stage(std::shared_ptr<Scene> scene);
+
+    // Draw a scene with Scene object
+    void draw(std::shared_ptr<Scene> scene, Camera& camera);
+
+    // Draw with ECS registry
+    void draw(entt::registry& registry, std::shared_ptr<Scene> scene, Camera& camera);
+
+    // ========================================================================
+    // Screenshot API
+    // ========================================================================
+
+    void readPixelsAsync(ScreenshotCallback callback);
+
+    // ========================================================================
+    // UI Integration
+    // ========================================================================
+
+    // Initialize RmlUI rendering
+    bool initUI();
+
+    // Get debug draw interface
+    std::shared_ptr<Vapor::DebugDraw> getDebugDraw();
+
+    // Set ImGui callback (called between NewFrame and Render)
+    void setImGuiCallback(std::function<void()> callback);
+
+    // ========================================================================
+    // 2D/3D Batch Rendering API
+    // ========================================================================
+
+    // Manual flush (for controlling draw order)
+    void flush2D();
+    void flush3D();
+
+    // Quad drawing (2D)
+    void drawQuad2D(const glm::vec2& position, const glm::vec2& size, const glm::vec4& color);
+    void drawQuad2D(const glm::vec3& position, const glm::vec2& size, const glm::vec4& color);
+    void drawQuad2D(
+        const glm::vec2& position,
+        const glm::vec2& size,
+        TextureHandle texture,
+        const glm::vec4& tintColor = glm::vec4(1.0f)
+    );
+    void drawQuad2D(const glm::mat4& transform, const glm::vec4& color, int entityID = -1);
+    void drawQuad2D(
+        const glm::mat4& transform,
+        TextureHandle texture,
+        const glm::vec2* texCoords,
+        const glm::vec4& tintColor = glm::vec4(1.0f),
+        int entityID = -1
+    );
+
+    // Quad drawing (3D - world space with depth)
+    void drawQuad3D(const glm::vec3& position, const glm::vec2& size, const glm::vec4& color);
+    void drawQuad3D(
+        const glm::vec3& position,
+        const glm::vec2& size,
+        TextureHandle texture,
+        const glm::vec4& tintColor = glm::vec4(1.0f)
+    );
+    void drawQuad3D(const glm::mat4& transform, const glm::vec4& color, int entityID = -1);
+    void drawQuad3D(
+        const glm::mat4& transform,
+        TextureHandle texture,
+        const glm::vec2* texCoords,
+        const glm::vec4& tintColor = glm::vec4(1.0f),
+        int entityID = -1
+    );
+
+    // Rotated quad (2D)
+    void drawRotatedQuad2D(
+        const glm::vec2& position,
+        const glm::vec2& size,
+        float rotation,
+        const glm::vec4& color
+    );
+    void drawRotatedQuad2D(
+        const glm::vec2& position,
+        const glm::vec2& size,
+        float rotation,
+        TextureHandle texture,
+        const glm::vec4& tintColor = glm::vec4(1.0f)
+    );
+
+    // Line drawing
+    void drawLine2D(const glm::vec2& p0, const glm::vec2& p1, const glm::vec4& color, float thickness = 1.0f);
+    void drawLine3D(const glm::vec3& p0, const glm::vec3& p1, const glm::vec4& color, float thickness = 1.0f);
+
+    // Shape drawing
+    void drawRect2D(
+        const glm::vec2& position,
+        const glm::vec2& size,
+        const glm::vec4& color,
+        float thickness = 1.0f
+    );
+    void drawCircle2D(const glm::vec2& center, float radius, const glm::vec4& color, int segments = 32);
+    void drawCircleFilled2D(const glm::vec2& center, float radius, const glm::vec4& color, int segments = 32);
+    void drawTriangle2D(const glm::vec2& p0, const glm::vec2& p1, const glm::vec2& p2, const glm::vec4& color);
+    void drawTriangleFilled2D(
+        const glm::vec2& p0,
+        const glm::vec2& p1,
+        const glm::vec2& p2,
+        const glm::vec4& color
+    );
+
+    // Batch statistics
+    Batch2DStats getBatch2DStats() const;
+    void resetBatch2DStats();
+
+    // ========================================================================
+    // Font Rendering API
+    // ========================================================================
+
+    FontHandle loadFont(const std::string& path, float baseSize);
+    void unloadFont(FontHandle handle);
+    void drawText2D(
+        FontHandle font,
+        const std::string& text,
+        const glm::vec2& position,
+        float scale = 1.0f,
+        const glm::vec4& color = glm::vec4(1.0f)
+    );
+    void drawText3D(
+        FontHandle font,
+        const std::string& text,
+        const glm::vec3& worldPosition,
+        float scale = 1.0f,
+        const glm::vec4& color = glm::vec4(1.0f)
+    );
+    glm::vec2 measureText(FontHandle font, const std::string& text, float scale = 1.0f);
+    float getFontLineHeight(FontHandle font, float scale = 1.0f);
+
+    // ========================================================================
+    // Render-to-Texture API
+    // ========================================================================
+
+    RenderTextureHandle createRenderTexture(const RenderTextureDesc& desc);
+    void destroyRenderTexture(RenderTextureHandle handle);
+    TextureHandle getRenderTextureAsTexture(RenderTextureHandle handle);
+    void renderToTexture(
+        RenderTextureHandle target,
+        std::shared_ptr<Scene> scene,
+        Camera& camera,
+        const glm::vec4& clearColor = glm::vec4(0.0f, 0.0f, 0.0f, 1.0f)
+    );
+    glm::uvec2 getRenderTextureSize(RenderTextureHandle handle);
+    Uint64 registerRenderTextureForUI(RenderTextureHandle handle);
+
+    // ========================================================================
+    // Post-Processing API
+    // ========================================================================
+
+    void applyBloom(RenderTextureHandle target, float threshold = 1.0f, float strength = 0.5f);
+    void applyToneMapping(RenderTextureHandle target, float exposure = 1.0f);
+    void applyVignette(RenderTextureHandle target, float strength = 0.3f, float radius = 0.8f);
+
+    // ========================================================================
+    // Texture Creation (for sprites/batch rendering)
+    // ========================================================================
+
+    TextureHandle createTexture(const std::shared_ptr<Image>& img);
+
+    // ========================================================================
     // Getters
     // ========================================================================
 
@@ -129,6 +344,18 @@ private:
     Frustum extractFrustum(const glm::mat4& viewProj);
     TextureId getOrCreateTexture(const std::shared_ptr<Image>& image);
     void bindMaterial(MaterialId materialId);
+
+    // Scene/ECS helpers
+    void collectDrawables(std::shared_ptr<Scene> scene);
+    void collectDrawables(entt::registry& registry, std::shared_ptr<Scene> scene);
+
+    // Batch rendering helpers
+    void initBatchRendering();
+    void shutdownBatchRendering();
+
+    // Post-processing helpers
+    void initPostProcessing();
+    void shutdownPostProcessing();
 
     // ========================================================================
     // RHI Ownership
@@ -222,6 +449,107 @@ private:
     // Acceleration structures (for ray tracing)
     std::vector<AccelStructHandle> BLASs;  // Bottom-level acceleration structures (one per mesh)
     AccelStructHandle TLAS;                 // Top-level acceleration structure
+
+    // ========================================================================
+    // Batch Rendering Resources
+    // ========================================================================
+
+    struct Vertex2D {
+        glm::vec3 position;   // vec3 for 2D/3D compatibility
+        glm::vec4 color;
+        glm::vec2 texCoord;
+        float texIndex;       // Texture array index (future: batching textures)
+        int entityID;         // For editor picking
+    };
+
+    struct BatchRenderer {
+        static constexpr uint32_t MaxQuads = 10000;
+        static constexpr uint32_t MaxVertices = MaxQuads * 4;
+        static constexpr uint32_t MaxIndices = MaxQuads * 6;
+
+        BufferHandle vertexBuffer;
+        BufferHandle indexBuffer;
+        PipelineHandle pipeline;
+        ShaderHandle vertexShader;
+        ShaderHandle fragmentShader;
+
+        std::vector<Vertex2D> vertices;
+        std::vector<uint32_t> indices;
+        uint32_t quadCount = 0;
+
+        TextureHandle whiteTexture;  // Default white texture for colored quads
+
+        // Stats
+        uint32_t drawCalls = 0;
+        uint32_t totalQuads = 0;
+
+        void init(RHI* rhi, bool is3D, TextureHandle defaultTex);
+        void shutdown(RHI* rhi);
+        void flush(RHI* rhi, const glm::mat4& viewProj);
+        void reset();
+        void addQuad(const glm::vec3& position, const glm::vec2& size, const glm::vec4& color, int entityID = -1);
+        void addQuad(const glm::mat4& transform, const glm::vec4& color, int entityID = -1);
+        void addQuad(
+            const glm::mat4& transform,
+            const glm::vec2* texCoords,
+            const glm::vec4& tint,
+            int entityID = -1
+        );
+    };
+
+    BatchRenderer batch2D;
+    BatchRenderer batch3D;
+    Batch2DStats batch2DStats;
+
+    // ========================================================================
+    // Font Rendering Resources
+    // ========================================================================
+
+    std::unique_ptr<FontManager> fontManager;
+
+    // ========================================================================
+    // Render Texture Resources
+    // ========================================================================
+
+    struct RenderTextureResource {
+        TextureHandle colorTexture;
+        TextureHandle depthTexture;
+        uint32_t width;
+        uint32_t height;
+        PixelFormat format;
+        bool isHDR;
+        bool hasDepth;
+    };
+
+    std::vector<RenderTextureResource> renderTextures;
+
+    // ========================================================================
+    // Post-Processing Resources
+    // ========================================================================
+
+    // Bloom
+    std::vector<TextureHandle> bloomMips;
+    ComputePipelineHandle bloomDownsamplePipeline;
+    ComputePipelineHandle bloomUpsamplePipeline;
+    ShaderHandle bloomDownsampleShader;
+    ShaderHandle bloomUpsampleShader;
+
+    // Tone mapping
+    ComputePipelineHandle toneMappingPipeline;
+    ShaderHandle toneMappingShader;
+
+    // Vignette
+    ComputePipelineHandle vignettePipeline;
+    ShaderHandle vignetteShader;
+
+    // ========================================================================
+    // UI & Debug Resources
+    // ========================================================================
+
+    std::function<void()> imGuiCallback;
+    std::shared_ptr<Vapor::DebugDraw> debugDraw;
+    ScreenshotCallback screenshotCallback;
+    bool screenshotRequested = false;
 
     // ========================================================================
     // Configuration
