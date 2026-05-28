@@ -1,6 +1,6 @@
 #include <catch2/catch_approx.hpp>
 #include <catch2/catch_test_macros.hpp>
-#include "Vapor/model_serializer.hpp"
+#include "Vapor/asset_serializer.hpp"
 #include "Vapor/graphics.hpp"
 #include "Vapor/scene.hpp"
 #include <glm/glm.hpp>
@@ -14,7 +14,7 @@
 
 using namespace Vapor;
 
-TEST_CASE("ModelSerializer - Scene Serialization", "[model][serializer]") {
+TEST_CASE("AssetSerializer - Scene Serialization", "[model][serializer]") {
     // Create a test scene
     auto scene = std::make_shared<Scene>("TestScene");
 
@@ -66,10 +66,10 @@ TEST_CASE("ModelSerializer - Scene Serialization", "[model][serializer]") {
 
     // Test serialization
     std::string testPath = "test_scene.bin";
-    ModelSerializer::serializeScene(scene, testPath);
+    AssetSerializer::serializeScene(scene, testPath);
 
     // Test deserialization
-    auto loadedScene = ModelSerializer::deserializeScene(testPath);
+    auto loadedScene = AssetSerializer::deserializeScene(testPath);
 
     REQUIRE(loadedScene != nullptr);
     CHECK(loadedScene->name == "TestScene");
@@ -92,7 +92,7 @@ struct TestData {
     }
 };
 
-TEST_CASE("ModelSerializer - Simple Cereal Test", "[model][serializer][cereal]") {
+TEST_CASE("AssetSerializer - Simple Cereal Test", "[model][serializer][cereal]") {
     TestData data;
     data.name = "Test";
     data.position = glm::vec3(1.0f, 2.0f, 3.0f);
@@ -120,7 +120,7 @@ TEST_CASE("ModelSerializer - Simple Cereal Test", "[model][serializer][cereal]")
     std::remove(testPath.c_str());
 }
 
-TEST_CASE("ModelSerializer - round-trip preserves stagedMeshTransforms", "[asset][serializer]") {
+TEST_CASE("AssetSerializer - round-trip preserves stagedMeshTransforms", "[asset][serializer]") {
     auto scene = std::make_shared<Scene>("RoundTripScene");
 
     auto mesh = std::make_shared<Mesh>();
@@ -138,9 +138,9 @@ TEST_CASE("ModelSerializer - round-trip preserves stagedMeshTransforms", "[asset
     scene->addMesh(mesh, worldTransform);
 
     std::string testPath = "test_staged_mesh.bin";
-    ModelSerializer::serializeScene(scene, testPath);
+    AssetSerializer::serializeScene(scene, testPath);
 
-    auto loaded = ModelSerializer::deserializeScene(testPath);
+    auto loaded = AssetSerializer::deserializeScene(testPath);
     std::remove(testPath.c_str());
 
     REQUIRE(loaded != nullptr);
@@ -153,7 +153,7 @@ TEST_CASE("ModelSerializer - round-trip preserves stagedMeshTransforms", "[asset
             CHECK(lt[col][row] == Catch::Approx(worldTransform[col][row]).epsilon(1e-5f));
 }
 
-TEST_CASE("ModelSerializer - version mismatch throws", "[asset][serializer]") {
+TEST_CASE("AssetSerializer - version mismatch throws", "[asset][serializer]") {
     std::string testPath = "test_version_mismatch.bin";
     {
         std::ofstream file(testPath, std::ios::binary);
@@ -165,14 +165,14 @@ TEST_CASE("ModelSerializer - version mismatch throws", "[asset][serializer]") {
         archive(fakeName);
     }
 
-    REQUIRE_THROWS_AS(ModelSerializer::deserializeScene(testPath), std::runtime_error);
+    REQUIRE_THROWS_AS(AssetSerializer::deserializeScene(testPath), std::runtime_error);
     std::remove(testPath.c_str());
 }
 
-TEST_CASE("ModelSerializer - correct version passes", "[asset][serializer]") {
+TEST_CASE("AssetSerializer - correct version passes", "[asset][serializer]") {
     auto scene = std::make_shared<Scene>("VersionOK");
     std::string testPath = "test_version_ok.bin";
-    ModelSerializer::serializeScene(scene, testPath);
-    REQUIRE_NOTHROW(ModelSerializer::deserializeScene(testPath));
+    AssetSerializer::serializeScene(scene, testPath);
+    REQUIRE_NOTHROW(AssetSerializer::deserializeScene(testPath));
     std::remove(testPath.c_str());
 }

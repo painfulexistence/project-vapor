@@ -23,7 +23,7 @@ set(SOURCES
     src/file_system.cpp
     src/input_manager.cpp
     src/asset_manager.cpp
-    src/model_serializer.cpp
+    src/asset_serializer.cpp
     src/camera.cpp
     src/debug_draw.cpp
     src/atlas_baker.cpp

@@ -42,7 +42,7 @@ namespace cereal {
     }
 }// namespace cereal
 
-class ModelSerializer {
+class AssetSerializer {
 public:
     static constexpr uint32_t SCENE_FORMAT_VERSION = 2;
 
