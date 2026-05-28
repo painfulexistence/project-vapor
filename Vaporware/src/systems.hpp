@@ -19,6 +19,7 @@
 
 
 
+
 class CleanupSystem {
 public:
     static void update(entt::registry& reg) {
@@ -207,29 +208,6 @@ public:
     }
 };
 
-class TransformSystem {
-public:
-    static void update(entt::registry& registry) {
-        auto view = registry.view<Vapor::TransformComponent>();
-        for (auto entity : view) {
-            auto& t = view.get<Vapor::TransformComponent>(entity);
-            if (!t.isDirty) continue;
-            glm::mat4 local = glm::translate(glm::mat4(1.0f), t.position)
-                            * glm::mat4_cast(t.rotation)
-                            * glm::scale(glm::mat4(1.0f), t.scale);
-            if (t.parent != entt::null) {
-                if (auto* parentT = registry.try_get<Vapor::TransformComponent>(t.parent)) {
-                    t.worldTransform = parentT->worldTransform * local;
-                } else {
-                    t.worldTransform = local;
-                }
-            } else {
-                t.worldTransform = local;
-            }
-            t.isDirty = false;
-        }
-    }
-};
 
 class AutoRotateSystem {
 public:

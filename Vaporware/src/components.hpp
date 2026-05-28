@@ -178,3 +178,5 @@ struct SceneTransitionComponent {
 
 struct PersistentTag {};
 struct DeadTag {};
+// Marks entities auto-spawned from a GLTF scene; excluded from level serialization.
+struct SceneGeometryTag {};
