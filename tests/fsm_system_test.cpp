@@ -441,11 +441,11 @@ TEST_CASE("FSMSystem::update 處理多個實體", "[fsm][update][multi]") {
 // Helper Functions
 // ============================================================
 
-TEST_CASE("FSMSystem::sendEvent 推送事件到隊列", "[fsm][helper]") {
+TEST_CASE("FSMEventHelper::send 推送事件到隊列", "[fsm][helper]") {
     entt::registry reg;
     auto entity = reg.create();
 
-    FSMSystem::sendEvent(reg, entity, "TestEvent");
+    FSMEventHelper::send(reg, entity, "TestEvent");
 
     REQUIRE(reg.all_of<FSMEventQueue>(entity));
     auto& events = reg.get<FSMEventQueue>(entity);
@@ -453,7 +453,7 @@ TEST_CASE("FSMSystem::sendEvent 推送事件到隊列", "[fsm][helper]") {
     REQUIRE(events.events[0] == "TestEvent");
 }
 
-TEST_CASE("FSMSystem::broadcastEvent 廣播事件到所有隊列", "[fsm][helper]") {
+TEST_CASE("FSMEventHelper::broadcast 廣播事件到所有隊列", "[fsm][helper]") {
     entt::registry reg;
 
     auto e1 = reg.create();
@@ -463,7 +463,7 @@ TEST_CASE("FSMSystem::broadcastEvent 廣播事件到所有隊列", "[fsm][helper
     reg.emplace<FSMEventQueue>(e1);
     reg.emplace<FSMEventQueue>(e2);
 
-    FSMSystem::broadcastEvent(reg, "GlobalEvent");
+    FSMEventHelper::broadcast(reg, "GlobalEvent");
 
     REQUIRE(reg.get<FSMEventQueue>(e1).events.size() == 1);
     REQUIRE(reg.get<FSMEventQueue>(e1).events[0] == "GlobalEvent");

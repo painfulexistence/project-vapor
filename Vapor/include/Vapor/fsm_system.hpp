@@ -6,7 +6,7 @@
 namespace Vapor {
 
 // ============================================================
-// FSM System - follows static void update pattern
+// FSM System - state machine update logic
 // ============================================================
 
 class FSMSystem {
@@ -92,19 +92,25 @@ public:
             state.totalTime += deltaTime;
         }
     }
+};
 
+// ============================================================
+// FSM Event Helper - convenience functions for sending events
+// ============================================================
+
+class FSMEventHelper {
+public:
     /**
      * Send an event to a specific entity's FSM.
      */
-    static void sendEvent(entt::registry& registry, entt::entity entity, const std::string& event) {
-        auto& events = registry.get_or_emplace<FSMEventQueue>(entity);
-        events.push(event);
+    static void send(entt::registry& registry, entt::entity entity, const std::string& event) {
+        registry.get_or_emplace<FSMEventQueue>(entity).push(event);
     }
 
     /**
      * Broadcast an event to all entities with FSMEventQueue.
      */
-    static void broadcastEvent(entt::registry& registry, const std::string& event) {
+    static void broadcast(entt::registry& registry, const std::string& event) {
         auto view = registry.view<FSMEventQueue>();
         for (auto entity : view) {
             view.get<FSMEventQueue>(entity).push(event);

@@ -5,6 +5,7 @@
 #include "fsm.hpp"
 #include "fsm_system.hpp"
 #include "input_manager.hpp"
+#include "trigger_system.hpp"
 #include "resource_manager.hpp"
 #include "task_scheduler.hpp"
 #include <memory>
