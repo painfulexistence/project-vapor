@@ -14,7 +14,7 @@
 
 using namespace Vapor;
 
-TEST_CASE("AssetSerializer - Scene Serialization", "[asset][serializer]") {
+TEST_CASE("AssetSerializer - Scene Serialization", "[model][serializer]") {
     // Create a test scene
     auto scene = std::make_shared<Scene>("TestScene");
 
@@ -92,7 +92,7 @@ struct TestData {
     }
 };
 
-TEST_CASE("AssetSerializer - Simple Cereal Test", "[asset][serializer][cereal]") {
+TEST_CASE("AssetSerializer - Simple Cereal Test", "[model][serializer][cereal]") {
     TestData data;
     data.name = "Test";
     data.position = glm::vec3(1.0f, 2.0f, 3.0f);
