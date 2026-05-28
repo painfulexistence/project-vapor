@@ -737,11 +737,17 @@ public:
         auto time = (float)SDL_GetTicks() / 1000.0f;
         float deltaTime = 1.0f / 60.0f;// Use fixed timestep to avoid issues
 
-        // Compute attractor position (in front of camera)
+        // Use the first ECS-sourced attractor when available; fall back to a
+        // camera-forward point so the system still runs without any emitter entity.
         glm::vec3 camPos = r.currentCamera->getEye();
-        glm::mat4 view = r.currentCamera->getViewMatrix();
-        glm::vec3 forward = -glm::vec3(view[0][2], view[1][2], view[2][2]);
-        glm::vec3 attractorPos = camPos + forward * 3.0f;
+        glm::vec3 attractorPos;
+        if (!r.m_particleAttractors.empty()) {
+            attractorPos = r.m_particleAttractors[0].position;
+        } else {
+            glm::mat4 view = r.currentCamera->getViewMatrix();
+            glm::vec3 forward = -glm::vec3(view[0][2], view[1][2], view[2][2]);
+            attractorPos = camPos + forward * 3.0f;
+        }
 
         // Update simulation params buffer
         struct ParticleSimParams {
@@ -771,7 +777,7 @@ public:
         } attractor;
 
         attractor.position = attractorPos;
-        attractor.strength = 50.0f;// Increased strength
+        attractor.strength = r.m_particleAttractors.empty() ? 50.0f : r.m_particleAttractors[0].strength;
 
         memcpy(r.particleAttractorBuffers[r.currentFrameInFlight]->contents(), &attractor, sizeof(ParticleAttractor));
         r.particleAttractorBuffers[r.currentFrameInFlight]->didModifyRange(NS::Range::Make(0, sizeof(ParticleAttractor))
