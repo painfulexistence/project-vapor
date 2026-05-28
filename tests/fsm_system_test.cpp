@@ -270,7 +270,11 @@ TEST_CASE("updateFSMSystem 時間轉換", "[fsm][update][timed]") {
     }
 
     SECTION("時間到達: 轉換") {
-        updateFSMSystem(reg, 0.5f);
+        // Timer check happens BEFORE timer update, so need two frames:
+        // Frame 1: stateTime=0 (check fails), then stateTime becomes 0.5
+        // Frame 2: stateTime=0.5 (check succeeds), transition happens
+        updateFSMSystem(reg, 0.5f);  // Accumulate time
+        updateFSMSystem(reg, 0.01f); // Trigger transition
 
         auto& state = reg.get<FSMStateComponent>(entity);
         REQUIRE(state.currentState == 1);
@@ -278,11 +282,14 @@ TEST_CASE("updateFSMSystem 時間轉換", "[fsm][update][timed]") {
     }
 
     SECTION("跨多幀累積時間") {
-        updateFSMSystem(reg, 0.2f);
-        updateFSMSystem(reg, 0.2f);
+        updateFSMSystem(reg, 0.2f);  // stateTime = 0.2
+        updateFSMSystem(reg, 0.2f);  // stateTime = 0.4
         REQUIRE(reg.get<FSMStateComponent>(entity).currentState == 0);
 
-        updateFSMSystem(reg, 0.2f);  // Total: 0.6f >= 0.5f
+        updateFSMSystem(reg, 0.2f);  // stateTime = 0.6, check: 0.4 >= 0.5? No
+        REQUIRE(reg.get<FSMStateComponent>(entity).currentState == 0);
+
+        updateFSMSystem(reg, 0.01f); // check: 0.6 >= 0.5? Yes, transition!
         REQUIRE(reg.get<FSMStateComponent>(entity).currentState == 1);
     }
 }
