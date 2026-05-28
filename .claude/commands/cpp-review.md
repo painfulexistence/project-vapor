@@ -1,5 +1,5 @@
 ---
-description: "Strict C++ codebase review. Accepts style flags to control focus areas. Usage: /cpp-review [styles] [--output <file>]"
+description: "Strict C++ codebase review. Accepts style flags to control focus areas. Usage: /cpp-review [styles] [--output <file>] [--fix]"
 ---
 
 # C++ Codebase Review
@@ -29,13 +29,15 @@ Perform a strict, structured code review of the C++ codebase based on the reques
 | `--output <filename>` | Write the report to `<filename>` instead of printing to chat |
 | `--lang <ext>` | Override file extension to scan (default: `cpp,hpp,h`) |
 | `--dir <path>` | Limit scan to a subdirectory (default: entire repo) |
+| `--fix` | After review, automatically apply all safe mechanical fixes. Issues that require human judgment are left in the report as `[manual]`. |
 
 **Examples:**
 ```
 /cpp-review
 /cpp-review naming cpp
+/cpp-review cpp --fix
 /cpp-review design legacy --output design_report.md
-/cpp-review all --output review_report.md
+/cpp-review all --output review_report.md --fix
 /cpp-review duplicates --dir Vapor/src
 ```
 
@@ -50,8 +52,9 @@ Read `$ARGUMENTS`. Extract:
 - `--output` path (if given)
 - `--dir` scope (if given, restrict all searches to that directory)
 - `--lang` extensions (default `cpp,hpp,h`)
+- `--fix` flag (boolean, default false)
 
-Print a one-line summary: "Reviewing: [active styles] | Scope: [dir] | Output: [file or chat]"
+Print a one-line summary: "Reviewing: [active styles] | Scope: [dir] | Output: [file or chat] | Fix: [yes/no]"
 
 ---
 
@@ -294,12 +297,106 @@ Severity definitions:
 
 ---
 
-### Step 4 — Output
+### Step 4 — Auto-fix (only if `--fix` was given)
+
+If `--fix` was **not** given, skip this step entirely and go to Step 5.
+
+#### 4.1 — Classify every issue
+
+For each issue in the severity table, assign one of two labels:
+
+- **`[auto]`** — Mechanical, local change. Safe to apply without human judgment.
+- **`[manual]`** — Requires design decision, cross-file rename, or architectural understanding. Do NOT touch.
+
+Use the tables below to classify:
+
+##### Auto-fixable (`[auto]`)
+
+These changes are contained within a single expression or declaration and cannot break callers:
+
+| Pattern | Fix |
+|---------|-----|
+| Missing `[[nodiscard]]` on getter/query method | Prepend `[[nodiscard]]` to the declaration |
+| Missing `noexcept` on a trivial const method that has no throw-path | Append `noexcept` to the declaration |
+| Missing `const` on a getter that does not modify any member | Append `const` to the declaration |
+| Uninitialized plain-old-data member (`float x;`, `int n;`, `bool b;`, `T* p;`) | Append `= 0`, `= false`, or `= nullptr` as appropriate |
+| `NULL` used instead of `nullptr` | Replace `NULL` with `nullptr` |
+| `M_PI` used instead of a C++ constant | Replace with `std::numbers::pi_v<float>` (add `#include <numbers>` if absent) or `glm::pi<float>()` if glm is already included |
+| Raw C array `T arr[N]` in a header or .cpp that doesn't interface with C | Replace with `std::array<T, N> arr` (add `#include <array>` if absent) |
+| Signed/unsigned comparison: `int x < container.size()` | Cast the signed variable: `static_cast<size_t>(x) < container.size()` — only when the value is provably non-negative in context |
+| Missing `= default` on a declared-but-empty destructor body `~T() {}` | Replace body with `= default` |
+| `strncpy(dst, src, N)` where dst is `char[N]` and N is a compile-time constant | Replace with `std::string` copy or `std::copy_n` — only if the surrounding code already uses `std::string`; otherwise leave as `[manual]` |
+
+##### NOT auto-fixable (`[manual]`)
+
+Do not attempt these automatically. Leave them in the report with the `[manual]` label and a one-line reason.
+
+| Pattern | Reason |
+|---------|--------|
+| Renaming a function, variable, type, or enum value | Ripple effect across multiple files; requires project-wide search and possible ABI/API break |
+| Changing a raw owning pointer to `unique_ptr` or `shared_ptr` | Ownership semantics must be verified at every call site |
+| Unifying error handling strategy (exceptions vs bool vs enum) | Requires deciding on the canonical approach first |
+| Removing a duplicate component or class definition | Must verify which definition is canonical and update all includes |
+| Refactoring a singleton implementation | Changes observable initialization order |
+| Extracting duplicated loops into a helper function | Function signature design requires human judgment |
+| Removing legacy/transitional code | Must verify no caller still depends on the old path |
+| Moving `void*` to a typed alternative | Requires knowing the intended type at every usage site |
+| Fixing an incomplete/stub implementation | Requires understanding the intended behavior |
+| Architectural changes (pipeline ownership, UI layer coupling, etc.) | Design-level decisions |
+
+#### 4.2 — Apply `[auto]` fixes
+
+For each `[auto]` issue:
+
+1. **Read** the exact file and lines again to get the current source (do not guess from memory).
+2. **Apply** the fix using the Edit tool with a minimal, targeted old_string/new_string pair.
+3. **Verify** the fix didn't accidentally affect the surrounding context (re-read ±3 lines).
+4. If the fix requires a new `#include`, add it at the top of the file's include block in alphabetical order.
+5. Record the fix: `✅ fixed — file:line — what was done`.
+
+If a fix attempt would change more than 3 lines at once, or if the surrounding code makes the change ambiguous, reclassify it as `[manual]` and skip it.
+
+#### 4.3 — Compile fix summary
+
+After all edits, produce a summary:
+
+```
+## Auto-fix Summary
+
+Applied N fixes:
+✅ `file.hpp:12`  — added [[nodiscard]] to getViewMatrix()
+✅ `file.hpp:34`  — initialized `float timeAccum = 0.0f`
+✅ `file.cpp:88`  — replaced NULL with nullptr
+...
+
+Skipped M issues (manual intervention required):
+⚠️  `renderer.hpp:20`  — class rename Renderer_Vulkan → RendererVulkan  [ripple effect]
+⚠️  `components.hpp:56` — Material owns PipelineHandle [architectural decision]
+...
+```
+
+#### 4.4 — Commit the fixes
+
+After all edits are done, run:
+```bash
+git diff --stat
+```
+to verify only the intended files were changed. Then commit with:
+```
+git commit -m "fix: apply auto-fixes from /cpp-review --fix
+
+<bullet list of what was changed, max 8 items>"
+```
+Then push to the current branch.
+
+---
+
+### Step 5 — Output
 
 If `--output <file>` was given:
-- Write the report to that file
-- Print to chat: "Report written to `<file>` — N issues found (CRITICAL: N, HIGH: N, MEDIUM: N, LOW: N)"
-- Commit and push the file to the current branch
+- Write the full report (including fix summary if `--fix` was used) to that file
+- Print to chat: "Report written to `<file>` — N issues found (CRITICAL: N, HIGH: N, MEDIUM: N, LOW: N) | Fixed: N | Manual: N"
+- Commit and push the report file to the current branch (as a separate commit from the fixes)
 
 If no `--output`:
 - Print the full report to chat
@@ -308,4 +405,6 @@ If no `--output`:
 
 ## Wrap up
 
-End with one sentence: what the single highest-priority fix would be and why.
+End with:
+- If `--fix` was used: "Fixed N issues automatically. N issues remain and require manual attention — the most important is: [single highest-priority manual issue and why]."
+- If `--fix` was not used: "The single highest-priority fix is: [issue and why]."
