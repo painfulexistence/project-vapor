@@ -67,6 +67,12 @@ void Renderer::initialize(std::unique_ptr<RHI> rhiPtr, GraphicsBackend backendTy
     // Create render pipeline
     createRenderPipeline();
 
+    // Initialize batch rendering
+    initBatchRendering();
+
+    // Initialize post-processing
+    initPostProcessing();
+
     // Reserve space for per-frame data
     frameDrawables.reserve(MAX_INSTANCES);
     visibleDrawables.reserve(MAX_INSTANCES);
@@ -151,12 +157,29 @@ void Renderer::shutdown() {
         if (mainPipeline.isValid()) {
             rhi->destroyPipeline(mainPipeline);
         }
+
+        // Shutdown batch rendering
+        shutdownBatchRendering();
+
+        // Shutdown post-processing
+        shutdownPostProcessing();
+
+        // Destroy render textures
+        for (auto& rt : renderTextures) {
+            if (rt.colorTexture.isValid()) {
+                rhi->destroyTexture(rt.colorTexture);
+            }
+            if (rt.depthTexture.isValid()) {
+                rhi->destroyTexture(rt.depthTexture);
+            }
+        }
     }
 
     meshes.clear();
     materials.clear();
     textures.clear();
     textureCache.clear();
+    renderTextures.clear();
 }
 
 // ============================================================================
@@ -1235,4 +1258,569 @@ std::unique_ptr<Renderer> createRenderer(GraphicsBackend backend, SDL_Window* wi
     renderer->initialize(std::move(rhi), backend);
 
     return renderer;
+}
+
+// ============================================================================
+// Scene/ECS Integration
+// ============================================================================
+
+void Renderer::stage(std::shared_ptr<Scene> scene) {
+    // TODO: Implement scene staging
+    // This should extract and upload all meshes, materials, textures from the scene
+}
+
+void Renderer::draw(std::shared_ptr<Scene> scene, Camera& camera) {
+    // TODO: Implement scene drawing
+    // Collect drawables from scene, then use existing render() method
+}
+
+void Renderer::draw(entt::registry& registry, std::shared_ptr<Scene> scene, Camera& camera) {
+    // TODO: Implement ECS drawing
+    // Collect drawables from ECS registry, then use existing render() method
+}
+
+void Renderer::collectDrawables(std::shared_ptr<Scene> scene) {
+    // TODO: Traverse scene graph and collect renderables
+}
+
+void Renderer::collectDrawables(entt::registry& registry, std::shared_ptr<Scene> scene) {
+    // TODO: Query ECS for entities with renderable components
+}
+
+// ============================================================================
+// Screenshot API
+// ============================================================================
+
+void Renderer::readPixelsAsync(ScreenshotCallback callback) {
+    screenshotCallback = callback;
+    screenshotRequested = true;
+}
+
+// ============================================================================
+// UI Integration
+// ============================================================================
+
+bool Renderer::initUI() {
+    // TODO: Initialize RmlUI rendering
+    return false;
+}
+
+std::shared_ptr<Vapor::DebugDraw> Renderer::getDebugDraw() {
+    return debugDraw;
+}
+
+void Renderer::setImGuiCallback(std::function<void()> callback) {
+    imGuiCallback = std::move(callback);
+}
+
+// ============================================================================
+// Batch Rendering Implementation
+// ============================================================================
+
+void Renderer::initBatchRendering() {
+    // Initialize batch2D
+    batch2D.init(rhi.get(), false, defaultWhiteTexture);
+
+    // Initialize batch3D
+    batch3D.init(rhi.get(), true, defaultWhiteTexture);
+}
+
+void Renderer::shutdownBatchRendering() {
+    batch2D.shutdown(rhi.get());
+    batch3D.shutdown(rhi.get());
+}
+
+void Renderer::flush2D() {
+    if (batch2D.quadCount > 0) {
+        // TODO: Get view-projection matrix for 2D (orthographic)
+        glm::mat4 viewProj = glm::ortho(
+            0.0f, static_cast<float>(rhi->getSwapchainWidth()),
+            static_cast<float>(rhi->getSwapchainHeight()), 0.0f,
+            -1.0f, 1.0f
+        );
+        batch2D.flush(rhi.get(), viewProj);
+    }
+}
+
+void Renderer::flush3D() {
+    if (batch3D.quadCount > 0) {
+        // Use current camera's view-projection
+        glm::mat4 viewProj = currentCamera.projection * currentCamera.view;
+        batch3D.flush(rhi.get(), viewProj);
+    }
+}
+
+// 2D Quad drawing implementations
+void Renderer::drawQuad2D(const glm::vec2& position, const glm::vec2& size, const glm::vec4& color) {
+    batch2D.addQuad(glm::vec3(position, 0.0f), size, color);
+}
+
+void Renderer::drawQuad2D(const glm::vec3& position, const glm::vec2& size, const glm::vec4& color) {
+    batch2D.addQuad(position, size, color);
+}
+
+void Renderer::drawQuad2D(
+    const glm::vec2& position,
+    const glm::vec2& size,
+    TextureHandle texture,
+    const glm::vec4& tintColor
+) {
+    // TODO: Support textured quads
+    drawQuad2D(position, size, tintColor);
+}
+
+void Renderer::drawQuad2D(const glm::mat4& transform, const glm::vec4& color, int entityID) {
+    batch2D.addQuad(transform, color, entityID);
+}
+
+void Renderer::drawQuad2D(
+    const glm::mat4& transform,
+    TextureHandle texture,
+    const glm::vec2* texCoords,
+    const glm::vec4& tintColor,
+    int entityID
+) {
+    // TODO: Support textured quads with custom tex coords
+    batch2D.addQuad(transform, tintColor, entityID);
+}
+
+// 3D Quad drawing implementations
+void Renderer::drawQuad3D(const glm::vec3& position, const glm::vec2& size, const glm::vec4& color) {
+    batch3D.addQuad(position, size, color);
+}
+
+void Renderer::drawQuad3D(
+    const glm::vec3& position,
+    const glm::vec2& size,
+    TextureHandle texture,
+    const glm::vec4& tintColor
+) {
+    // TODO: Support textured quads
+    drawQuad3D(position, size, tintColor);
+}
+
+void Renderer::drawQuad3D(const glm::mat4& transform, const glm::vec4& color, int entityID) {
+    batch3D.addQuad(transform, color, entityID);
+}
+
+void Renderer::drawQuad3D(
+    const glm::mat4& transform,
+    TextureHandle texture,
+    const glm::vec2* texCoords,
+    const glm::vec4& tintColor,
+    int entityID
+) {
+    // TODO: Support textured quads with custom tex coords
+    batch3D.addQuad(transform, tintColor, entityID);
+}
+
+// Rotated quad
+void Renderer::drawRotatedQuad2D(
+    const glm::vec2& position,
+    const glm::vec2& size,
+    float rotation,
+    const glm::vec4& color
+) {
+    glm::mat4 transform = glm::translate(glm::mat4(1.0f), glm::vec3(position, 0.0f));
+    transform = glm::rotate(transform, rotation, glm::vec3(0, 0, 1));
+    transform = glm::scale(transform, glm::vec3(size, 1.0f));
+    batch2D.addQuad(transform, color);
+}
+
+void Renderer::drawRotatedQuad2D(
+    const glm::vec2& position,
+    const glm::vec2& size,
+    float rotation,
+    TextureHandle texture,
+    const glm::vec4& tintColor
+) {
+    // TODO: Support textured rotated quads
+    drawRotatedQuad2D(position, size, rotation, tintColor);
+}
+
+// Line drawing
+void Renderer::drawLine2D(const glm::vec2& p0, const glm::vec2& p1, const glm::vec4& color, float thickness) {
+    // TODO: Implement line rendering (can be done with thin quads)
+}
+
+void Renderer::drawLine3D(const glm::vec3& p0, const glm::vec3& p1, const glm::vec4& color, float thickness) {
+    // TODO: Implement 3D line rendering
+}
+
+// Shape drawing
+void Renderer::drawRect2D(
+    const glm::vec2& position,
+    const glm::vec2& size,
+    const glm::vec4& color,
+    float thickness
+) {
+    // Draw 4 lines to form rectangle
+    // TODO: Implement using drawLine2D
+}
+
+void Renderer::drawCircle2D(const glm::vec2& center, float radius, const glm::vec4& color, int segments) {
+    // TODO: Draw circle outline using line segments
+}
+
+void Renderer::drawCircleFilled2D(const glm::vec2& center, float radius, const glm::vec4& color, int segments) {
+    // TODO: Draw filled circle using triangle fan or quads
+}
+
+void Renderer::drawTriangle2D(const glm::vec2& p0, const glm::vec2& p1, const glm::vec2& p2, const glm::vec4& color) {
+    // TODO: Draw triangle outline
+}
+
+void Renderer::drawTriangleFilled2D(const glm::vec2& p0, const glm::vec2& p1, const glm::vec2& p2, const glm::vec4& color) {
+    // TODO: Draw filled triangle
+}
+
+// Batch stats
+Batch2DStats Renderer::getBatch2DStats() const {
+    return batch2DStats;
+}
+
+void Renderer::resetBatch2DStats() {
+    batch2DStats = {};
+    batch2D.drawCalls = 0;
+    batch2D.totalQuads = 0;
+}
+
+// ============================================================================
+// Font Rendering
+// ============================================================================
+
+FontHandle Renderer::loadFont(const std::string& path, float baseSize) {
+    if (!fontManager) {
+        fontManager = std::make_unique<FontManager>();
+    }
+    return fontManager->loadFont(path, baseSize);
+}
+
+void Renderer::unloadFont(FontHandle handle) {
+    if (fontManager) {
+        fontManager->unloadFont(handle);
+    }
+}
+
+void Renderer::drawText2D(
+    FontHandle font,
+    const std::string& text,
+    const glm::vec2& position,
+    float scale,
+    const glm::vec4& color
+) {
+    // TODO: Use fontManager to get glyph quads, then batch render them
+}
+
+void Renderer::drawText3D(
+    FontHandle font,
+    const std::string& text,
+    const glm::vec3& worldPosition,
+    float scale,
+    const glm::vec4& color
+) {
+    // TODO: Billboard text in 3D space
+}
+
+glm::vec2 Renderer::measureText(FontHandle font, const std::string& text, float scale) {
+    if (fontManager) {
+        return fontManager->measureText(font, text, scale);
+    }
+    return glm::vec2(0.0f);
+}
+
+float Renderer::getFontLineHeight(FontHandle font, float scale) {
+    if (fontManager) {
+        return fontManager->getLineHeight(font, scale);
+    }
+    return 0.0f;
+}
+
+// ============================================================================
+// Render-to-Texture
+// ============================================================================
+
+RenderTextureHandle Renderer::createRenderTexture(const RenderTextureDesc& desc) {
+    RenderTextureResource resource;
+    resource.width = desc.width;
+    resource.height = desc.height;
+    resource.format = desc.format;
+    resource.isHDR = desc.isHDR;
+    resource.hasDepth = desc.hasDepth;
+
+    // Create color texture
+    TextureDesc colorDesc;
+    colorDesc.width = desc.width;
+    colorDesc.height = desc.height;
+    colorDesc.format = desc.format;
+    colorDesc.usage = TextureUsage::RenderTarget;
+    colorDesc.sampleCount = desc.sampleCount;
+    resource.colorTexture = rhi->createTexture(colorDesc);
+
+    // Create depth texture if needed
+    if (desc.hasDepth) {
+        TextureDesc depthDesc;
+        depthDesc.width = desc.width;
+        depthDesc.height = desc.height;
+        depthDesc.format = PixelFormat::Depth32Float;
+        depthDesc.usage = TextureUsage::DepthStencil;
+        depthDesc.sampleCount = desc.sampleCount;
+        resource.depthTexture = rhi->createTexture(depthDesc);
+    }
+
+    // Add to storage
+    uint32_t id = static_cast<uint32_t>(renderTextures.size());
+    renderTextures.push_back(resource);
+
+    return RenderTextureHandle{id};
+}
+
+void Renderer::destroyRenderTexture(RenderTextureHandle handle) {
+    if (handle.id < renderTextures.size()) {
+        auto& resource = renderTextures[handle.id];
+        if (resource.colorTexture.isValid()) {
+            rhi->destroyTexture(resource.colorTexture);
+        }
+        if (resource.depthTexture.isValid()) {
+            rhi->destroyTexture(resource.depthTexture);
+        }
+    }
+}
+
+TextureHandle Renderer::getRenderTextureAsTexture(RenderTextureHandle handle) {
+    if (handle.id < renderTextures.size()) {
+        return renderTextures[handle.id].colorTexture;
+    }
+    return TextureHandle{};
+}
+
+void Renderer::renderToTexture(
+    RenderTextureHandle target,
+    std::shared_ptr<Scene> scene,
+    Camera& camera,
+    const glm::vec4& clearColor
+) {
+    // TODO: Implement render-to-texture
+    // 1. Begin render pass with target textures
+    // 2. Draw scene
+    // 3. End render pass
+}
+
+glm::uvec2 Renderer::getRenderTextureSize(RenderTextureHandle handle) {
+    if (handle.id < renderTextures.size()) {
+        auto& resource = renderTextures[handle.id];
+        return glm::uvec2(resource.width, resource.height);
+    }
+    return glm::uvec2(0);
+}
+
+Uint64 Renderer::registerRenderTextureForUI(RenderTextureHandle handle) {
+    // TODO: Register with RmlUI
+    return 0;
+}
+
+// ============================================================================
+// Post-Processing
+// ============================================================================
+
+void Renderer::initPostProcessing() {
+    // TODO: Create compute pipelines for post-processing effects
+}
+
+void Renderer::shutdownPostProcessing() {
+    // TODO: Destroy post-processing resources
+}
+
+void Renderer::applyBloom(RenderTextureHandle target, float threshold, float strength) {
+    // TODO: Implement bloom effect
+    // 1. Downsample with threshold
+    // 2. Blur
+    // 3. Upsample and combine
+}
+
+void Renderer::applyToneMapping(RenderTextureHandle target, float exposure) {
+    // TODO: Implement tone mapping (ACES, Reinhard, etc.)
+}
+
+void Renderer::applyVignette(RenderTextureHandle target, float strength, float radius) {
+    // TODO: Implement vignette effect
+}
+
+// ============================================================================
+// Texture Creation (for sprites)
+// ============================================================================
+
+TextureHandle Renderer::createTexture(const std::shared_ptr<Image>& img) {
+    TextureDesc desc;
+    desc.width = img->width;
+    desc.height = img->height;
+    desc.format = PixelFormat::RGBA8_UNORM;
+    desc.usage = TextureUsage::Sampled;
+    desc.mipLevels = 1;
+
+    TextureHandle handle = rhi->createTexture(desc);
+
+    // Upload data
+    size_t dataSize = img->width * img->height * img->channels;
+    rhi->updateTexture(handle, img->data.data(), dataSize);
+
+    return handle;
+}
+
+// ============================================================================
+// BatchRenderer Implementation
+// ============================================================================
+
+void Renderer::BatchRenderer::init(RHI* rhi, bool is3D, TextureHandle defaultTex) {
+    whiteTexture = defaultTex;
+
+    // Create vertex buffer
+    BufferDesc vbDesc;
+    vbDesc.size = sizeof(Vertex2D) * MaxVertices;
+    vbDesc.usage = BufferUsage::Vertex;
+    vbDesc.memoryUsage = MemoryUsage::CPUtoGPU;
+    vertexBuffer = rhi->createBuffer(vbDesc);
+
+    // Create index buffer with quad indices (0,1,2, 2,3,0 pattern)
+    std::vector<uint32_t> quadIndices;
+    quadIndices.reserve(MaxIndices);
+    for (uint32_t i = 0; i < MaxQuads; i++) {
+        uint32_t offset = i * 4;
+        quadIndices.push_back(offset + 0);
+        quadIndices.push_back(offset + 1);
+        quadIndices.push_back(offset + 2);
+        quadIndices.push_back(offset + 2);
+        quadIndices.push_back(offset + 3);
+        quadIndices.push_back(offset + 0);
+    }
+
+    BufferDesc ibDesc;
+    ibDesc.size = sizeof(uint32_t) * MaxIndices;
+    ibDesc.usage = BufferUsage::Index;
+    ibDesc.memoryUsage = MemoryUsage::GPU;
+    indexBuffer = rhi->createBuffer(ibDesc);
+    rhi->updateBuffer(indexBuffer, quadIndices.data(), 0, ibDesc.size);
+
+    // Reserve vertex storage
+    vertices.reserve(MaxVertices);
+    indices.reserve(MaxIndices);
+
+    // TODO: Create batch rendering shaders and pipeline
+}
+
+void Renderer::BatchRenderer::shutdown(RHI* rhi) {
+    if (vertexBuffer.isValid()) {
+        rhi->destroyBuffer(vertexBuffer);
+    }
+    if (indexBuffer.isValid()) {
+        rhi->destroyBuffer(indexBuffer);
+    }
+    if (pipeline.isValid()) {
+        rhi->destroyPipeline(pipeline);
+    }
+    if (vertexShader.isValid()) {
+        rhi->destroyShader(vertexShader);
+    }
+    if (fragmentShader.isValid()) {
+        rhi->destroyShader(fragmentShader);
+    }
+}
+
+void Renderer::BatchRenderer::flush(RHI* rhi, const glm::mat4& viewProj) {
+    if (quadCount == 0) return;
+
+    // Upload vertex data
+    rhi->updateBuffer(vertexBuffer, vertices.data(), 0, sizeof(Vertex2D) * vertices.size());
+
+    // TODO: Bind pipeline, set uniforms, draw
+    // rhi->bindPipeline(pipeline);
+    // rhi->setVertexBytes(&viewProj, sizeof(glm::mat4), 0);
+    // rhi->bindVertexBuffer(vertexBuffer);
+    // rhi->bindIndexBuffer(indexBuffer);
+    // rhi->drawIndexed(quadCount * 6);
+
+    drawCalls++;
+    totalQuads += quadCount;
+
+    // Reset for next batch
+    reset();
+}
+
+void Renderer::BatchRenderer::reset() {
+    vertices.clear();
+    indices.clear();
+    quadCount = 0;
+}
+
+void Renderer::BatchRenderer::addQuad(const glm::vec3& position, const glm::vec2& size, const glm::vec4& color, int entityID) {
+    if (quadCount >= MaxQuads) {
+        // Auto-flush when full
+        // TODO: flush needs viewProj which we don't have here
+        // For now, just skip
+        return;
+    }
+
+    // Create quad vertices (centered)
+    glm::vec2 halfSize = size * 0.5f;
+
+    Vertex2D v0, v1, v2, v3;
+    v0.position = position + glm::vec3(-halfSize.x, -halfSize.y, 0.0f);
+    v1.position = position + glm::vec3( halfSize.x, -halfSize.y, 0.0f);
+    v2.position = position + glm::vec3( halfSize.x,  halfSize.y, 0.0f);
+    v3.position = position + glm::vec3(-halfSize.x,  halfSize.y, 0.0f);
+
+    v0.color = v1.color = v2.color = v3.color = color;
+
+    v0.texCoord = glm::vec2(0, 0);
+    v1.texCoord = glm::vec2(1, 0);
+    v2.texCoord = glm::vec2(1, 1);
+    v3.texCoord = glm::vec2(0, 1);
+
+    v0.texIndex = v1.texIndex = v2.texIndex = v3.texIndex = 0.0f;
+    v0.entityID = v1.entityID = v2.entityID = v3.entityID = entityID;
+
+    vertices.push_back(v0);
+    vertices.push_back(v1);
+    vertices.push_back(v2);
+    vertices.push_back(v3);
+
+    quadCount++;
+}
+
+void Renderer::BatchRenderer::addQuad(const glm::mat4& transform, const glm::vec4& color, int entityID) {
+    if (quadCount >= MaxQuads) {
+        return;
+    }
+
+    // Extract quad corners from transform matrix
+    glm::vec4 positions[4] = {
+        transform * glm::vec4(-0.5f, -0.5f, 0.0f, 1.0f),
+        transform * glm::vec4( 0.5f, -0.5f, 0.0f, 1.0f),
+        transform * glm::vec4( 0.5f,  0.5f, 0.0f, 1.0f),
+        transform * glm::vec4(-0.5f,  0.5f, 0.0f, 1.0f),
+    };
+
+    for (int i = 0; i < 4; i++) {
+        Vertex2D v;
+        v.position = glm::vec3(positions[i]) / positions[i].w;
+        v.color = color;
+        v.texCoord = (i == 0) ? glm::vec2(0, 0) :
+                     (i == 1) ? glm::vec2(1, 0) :
+                     (i == 2) ? glm::vec2(1, 1) : glm::vec2(0, 1);
+        v.texIndex = 0.0f;
+        v.entityID = entityID;
+        vertices.push_back(v);
+    }
+
+    quadCount++;
+}
+
+void Renderer::BatchRenderer::addQuad(
+    const glm::mat4& transform,
+    const glm::vec2* texCoords,
+    const glm::vec4& tint,
+    int entityID
+) {
+    // TODO: Implement textured quad with custom tex coords
+    addQuad(transform, tint, entityID);
 }
