@@ -249,7 +249,52 @@ namespace Vapor {
     };
 
     // ============================================================================
-    // 粒子發射系統
+    // 粒子力場系統 — attractors + wind → renderer uniforms
+    // ============================================================================
+    // Call BEFORE renderer->draw(), after TransformSystem::update().
+    // Collects ParticleAttractorComponent entities (and emitter entities that
+    // flag attractorStrength > 0) and the first ParticleWindComponent, then
+    // uploads them to the renderer so the GPU force kernel can use them.
+    class ParticleForceFieldSystem {
+    public:
+        static void update(entt::registry& registry, Renderer* renderer) {
+            std::vector<ParticleAttractorData> attractors;
+
+            // Dedicated attractor entities
+            auto aView = registry.view<Vapor::TransformComponent, Vapor::ParticleAttractorComponent>();
+            for (auto entity : aView) {
+                auto& t = aView.get<Vapor::TransformComponent>(entity);
+                auto& a = aView.get<Vapor::ParticleAttractorComponent>(entity);
+                if (!a.enabled) continue;
+                if (attractors.size() >= MAX_PARTICLE_ATTRACTORS) break;
+                attractors.push_back({ .position = t.position, .strength = a.strength });
+            }
+
+            // Emitter entities also act as attractors (pull particles toward spawn)
+            auto eView = registry.view<Vapor::TransformComponent, Vapor::ParticleEmitterComponent>();
+            for (auto entity : eView) {
+                auto& t = eView.get<Vapor::TransformComponent>(entity);
+                auto& e = eView.get<Vapor::ParticleEmitterComponent>(entity);
+                if (!e.enabled || e.attractorStrength == 0.0f) continue;
+                if (attractors.size() >= MAX_PARTICLE_ATTRACTORS) break;
+                attractors.push_back({ .position = t.position, .strength = e.attractorStrength });
+            }
+
+            renderer->setParticleAttractors(attractors);
+
+            // Wind — first enabled ParticleWindComponent wins
+            auto wView = registry.view<Vapor::ParticleWindComponent>();
+            for (auto entity : wView) {
+                auto& w = wView.get<Vapor::ParticleWindComponent>(entity);
+                if (!w.enabled) continue;
+                renderer->setParticleWind(w.direction, w.strength);
+                break;
+            }
+        }
+    };
+
+    // ============================================================================
+    // 粒子發射系統 — CPU spawn logic → GPU particle slots
     // ============================================================================
     // Call update() once per frame, after TransformSystem::update() and BEFORE
     // renderer->draw().  The system drives CPU-side spawn logic and uploads
@@ -309,6 +354,8 @@ namespace Vapor {
                     p.velocity = dir * emitter.initialSpeed;
                     p.force    = glm::vec3(0.0f);
                     p.color    = emitter.color;
+                    p.lifetime = emitter.particleLifetime;
+                    p.age      = 0.0f;
 
                     spawns.push_back(p);
                 }
@@ -323,14 +370,35 @@ namespace Vapor {
                         (emitter._ringCursor + (uint32_t)spawns.size()) % emitter._slotCount;
                 }
 
-                // --- Register as attractor so GPU forces pull toward this entity ---
-                attractors.push_back({
-                    .position = t.position,
-                    .strength = emitter.attractorStrength,
-                });
             }
+        }
+    };
 
-            renderer->setParticleAttractors(attractors);
+    // ============================================================================
+    // 情緒調製系統 — skeleton（行為留待後續填入）
+    // ============================================================================
+    // Reads a global EmotionState (stored as a singleton component) and tweaks
+    // EmitterModulatorComponent values on all emitter entities each frame.
+    class EmitterModulatorSystem {
+    public:
+        static void update(entt::registry& /*registry*/, EmotionState /*state*/) {
+            // TODO: iterate EmitterModulatorComponent, adjust rateMultiplier/
+            // colorTint based on state. EmitterModulatorSystem should then
+            // be read by ParticleEmitterSystem before it calculates spawn counts.
+        }
+    };
+
+    // ============================================================================
+    // 粒子爆發系統 — skeleton
+    // ============================================================================
+    // Consumes ParticleBurstRequest tags, fires a one-shot spawn, then removes
+    // the component so it only fires once per attachment.
+    class ParticleBurstSystem {
+    public:
+        static void update(entt::registry& /*registry*/, Renderer* /*renderer*/) {
+            // TODO: view<TransformComponent, ParticleBurstRequest>, spawn
+            // `count` particles in a sphere with `speed` and `spread`, then
+            // registry.remove<ParticleBurstRequest>(entity).
         }
     };
 

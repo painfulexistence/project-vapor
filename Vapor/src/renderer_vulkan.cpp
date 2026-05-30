@@ -1947,14 +1947,10 @@ auto Renderer_Vulkan::draw(std::shared_ptr<Scene> scene, Camera& camera) -> void
     );
     vkCmdDispatch(cmd, clusterGridSizeX, clusterGridSizeY, 1);
 
-    // Particle simulation (compute pass)
-    // Use the first ECS-sourced attractor when available; fall back to a
-    // camera-forward point so the system still runs without any emitter entity.
+    // Particle simulation (compute pass) — attractor data comes from
+    // ParticleForceFieldSystem via setParticleAttractors() each frame.
     float deltaTime = 1.0f / 60.0f;// TODO: pass actual delta time
-    glm::vec3 attractorPos = m_particleAttractors.empty()
-        ? camPos + glm::normalize(glm::vec3(glm::inverse(view) * glm::vec4(0.0f, 0.0f, -1.0f, 0.0f))) * 3.0f
-        : m_particleAttractors[0].position;
-    updateParticleSimulation(cmd, deltaTime, attractorPos);
+    updateParticleSimulation(cmd, deltaTime, glm::vec3(0.0f));
 
     vkCmdBeginRenderPass(cmd, &renderPassInfo, VK_SUBPASS_CONTENTS_INLINE);
     vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, renderPipeline);
@@ -3347,12 +3343,15 @@ void Renderer_Vulkan::initParticleSystem() {
         );
     }
 
-    // Create attractor buffers
+    // Create attractor buffers (array of MAX_PARTICLE_ATTRACTORS entries)
     particleAttractorBuffers.resize(MAX_FRAMES_IN_FLIGHT);
     particleAttractorBuffersMapped.resize(MAX_FRAMES_IN_FLIGHT);
     for (size_t i = 0; i < MAX_FRAMES_IN_FLIGHT; i++) {
-        particleAttractorBuffers[i] =
-            createBufferMapped(BufferUsage::UNIFORM, sizeof(ParticleAttractorData), &particleAttractorBuffersMapped[i]);
+        particleAttractorBuffers[i] = createBufferMapped(
+            BufferUsage::UNIFORM,
+            MAX_PARTICLE_ATTRACTORS * sizeof(ParticleAttractorData),
+            &particleAttractorBuffersMapped[i]
+        );
     }
 
     // Initialize particles with random positions and colors
@@ -3501,24 +3500,32 @@ void Renderer_Vulkan::initParticleSystem() {
     fmt::print("Particle system initialized with {} particles\n", MAX_PARTICLES);
 }
 
-void Renderer_Vulkan::updateParticleSimulation(VkCommandBuffer cmd, float deltaTime, const glm::vec3& attractorPos) {
+void Renderer_Vulkan::updateParticleSimulation(VkCommandBuffer cmd, float deltaTime, const glm::vec3& /*attractorPos*/) {
     if (!particleSystemEnabled) return;
 
-    // Update simulation parameters
+    uint32_t attractorCount = static_cast<uint32_t>(
+        std::min(m_particleAttractors.size(), static_cast<size_t>(MAX_PARTICLE_ATTRACTORS))
+    );
+
     ParticleSimulationParams simParams = {
-        .resolution = glm::vec2(swapchainExtent.width, swapchainExtent.height),
-        .mousePosition = glm::vec2(0.0f),
-        .time = static_cast<float>(SDL_GetTicks()) / 1000.0f,
-        .deltaTime = deltaTime,
+        .resolution     = glm::vec2(swapchainExtent.width, swapchainExtent.height),
+        .mousePosition  = glm::vec2(0.0f),
+        .time           = static_cast<float>(SDL_GetTicks()) / 1000.0f,
+        .deltaTime      = deltaTime,
+        .particleCount  = particleCount,
+        .attractorCount = attractorCount,
+        .wind           = m_particleWind,
     };
     memcpy(particleSimParamsBuffersMapped[currentFrameInFlight], &simParams, sizeof(ParticleSimulationParams));
 
-    // Update attractor
-    ParticleAttractorData attractor = {
-        .position = attractorPos,
-        .strength = 5.0f,
-    };
-    memcpy(particleAttractorBuffersMapped[currentFrameInFlight], &attractor, sizeof(ParticleAttractorData));
+    // Upload attractor array
+    if (attractorCount > 0) {
+        memcpy(
+            particleAttractorBuffersMapped[currentFrameInFlight],
+            m_particleAttractors.data(),
+            attractorCount * sizeof(ParticleAttractorData)
+        );
+    }
 
     // Memory barrier before compute
     VkMemoryBarrier memoryBarrier = {

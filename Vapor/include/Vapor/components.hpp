@@ -153,16 +153,57 @@ namespace Vapor {
     };
 
     // ============================================================================
+    // Particle Force Fields
+    // ============================================================================
+
+    // Attracts (or repels with negative strength) the global GPU particle pool.
+    // Any entity with a TransformComponent can become an attractor.
+    struct ParticleAttractorComponent {
+        float strength = 5.0f;
+        bool  enabled  = true;
+    };
+
+    // Singleton-like: the first enabled instance in the registry wins.
+    struct ParticleWindComponent {
+        glm::vec3 direction = {1.0f, 0.0f, 0.0f};
+        float     strength  = 0.0f;
+        bool      enabled   = true;
+    };
+
+    // ============================================================================
+    // Particle Expression — skeletons (behavior filled in later)
+    // ============================================================================
+
+    enum class EmotionState { Calm, Tense, Sacred, Triumphant };
+
+    // Attach alongside ParticleEmitterComponent to drive its parameters from
+    // the current EmotionState or any external signal.
+    struct EmitterModulatorComponent {
+        float     rateMultiplier  = 1.0f;
+        float     speedMultiplier = 1.0f;
+        glm::vec4 colorTint       = {1.0f, 1.0f, 1.0f, 1.0f};
+    };
+
+    // Add this tag to trigger a one-shot particle burst.
+    // ParticleBurstSystem consumes and removes it the same frame.
+    struct ParticleBurstRequest {
+        uint32_t count  = 50;
+        float    speed  = 3.0f;
+        float    spread = 3.14159f; // full sphere by default
+    };
+
+    // ============================================================================
     // Particle Emitter
     // ============================================================================
     struct ParticleEmitterComponent {
         // --- Emission config (set by user) ---
         float     emissionRate    = 20.0f;               // particles / second
+        float     particleLifetime = 4.0f;              // seconds; 0 = immortal
         float     initialSpeed    = 2.0f;                // m/s
         glm::vec3 emitDirection   = {0.0f, 1.0f, 0.0f}; // local-space axis
         float     spread          = 0.5f;                // cone half-angle, radians
         glm::vec4 color           = {1.0f, 1.0f, 1.0f, 1.0f};
-        float     attractorStrength = 5.0f;              // GPU attractor pull
+        float     attractorStrength = 5.0f;              // GPU attractor pull (0 = no pull)
         uint32_t  maxParticles    = 256;                 // pool size; set before first use
         bool      enabled         = true;
 

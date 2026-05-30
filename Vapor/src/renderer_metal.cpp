@@ -737,51 +737,33 @@ public:
         auto time = (float)SDL_GetTicks() / 1000.0f;
         float deltaTime = 1.0f / 60.0f;// Use fixed timestep to avoid issues
 
-        // Use the first ECS-sourced attractor when available; fall back to a
-        // camera-forward point so the system still runs without any emitter entity.
-        glm::vec3 camPos = r.currentCamera->getEye();
-        glm::vec3 attractorPos;
-        if (!r.m_particleAttractors.empty()) {
-            attractorPos = r.m_particleAttractors[0].position;
-        } else {
-            glm::mat4 view = r.currentCamera->getViewMatrix();
-            glm::vec3 forward = -glm::vec3(view[0][2], view[1][2], view[2][2]);
-            attractorPos = camPos + forward * 3.0f;
-        }
+        // Simulation params — attractor data comes from ParticleForceFieldSystem.
+        uint32_t attractorCount = static_cast<uint32_t>(
+            std::min(r.m_particleAttractors.size(), static_cast<size_t>(MAX_PARTICLE_ATTRACTORS))
+        );
 
-        // Update simulation params buffer
-        struct ParticleSimParams {
-            glm::vec2 resolution;
-            glm::vec2 mousePosition;
-            float time;
-            float deltaTime;
-            Uint32 particleCount;
-            float _pad1;
-        } simParams;
-
+        ParticleSimulationParams simParams = {
+            .mousePosition  = glm::vec2(0.0f),
+            .time           = time,
+            .deltaTime      = deltaTime,
+            .particleCount  = r.particleCount,
+            .attractorCount = attractorCount,
+            .wind           = r.m_particleWind,
+        };
         auto drawableSize = r.swapchain->drawableSize();
         simParams.resolution = glm::vec2(drawableSize.width, drawableSize.height);
-        simParams.mousePosition = glm::vec2(0.0f);
-        simParams.time = time;
-        simParams.deltaTime = deltaTime;
-        simParams.particleCount = r.particleCount;
 
-        memcpy(r.particleSimParamsBuffers[r.currentFrameInFlight]->contents(), &simParams, sizeof(ParticleSimParams));
-        r.particleSimParamsBuffers[r.currentFrameInFlight]->didModifyRange(NS::Range::Make(0, sizeof(ParticleSimParams))
-        );
+        size_t simParamsBytes = sizeof(ParticleSimulationParams);
+        memcpy(r.particleSimParamsBuffers[r.currentFrameInFlight]->contents(), &simParams, simParamsBytes);
+        r.particleSimParamsBuffers[r.currentFrameInFlight]->didModifyRange(NS::Range::Make(0, simParamsBytes));
 
-        // Update attractor buffer
-        struct ParticleAttractor {
-            glm::vec3 position;
-            float strength;
-        } attractor;
-
-        attractor.position = attractorPos;
-        attractor.strength = r.m_particleAttractors.empty() ? 50.0f : r.m_particleAttractors[0].strength;
-
-        memcpy(r.particleAttractorBuffers[r.currentFrameInFlight]->contents(), &attractor, sizeof(ParticleAttractor));
-        r.particleAttractorBuffers[r.currentFrameInFlight]->didModifyRange(NS::Range::Make(0, sizeof(ParticleAttractor))
-        );
+        // Attractor array (packed as ParticleAttractorData = vec4: xyz pos, w strength)
+        if (attractorCount > 0) {
+            size_t attractorBytes = attractorCount * sizeof(ParticleAttractorData);
+            memcpy(r.particleAttractorBuffers[r.currentFrameInFlight]->contents(),
+                   r.m_particleAttractors.data(), attractorBytes);
+            r.particleAttractorBuffers[r.currentFrameInFlight]->didModifyRange(NS::Range::Make(0, attractorBytes));
+        }
 
         // Compute passes (single particle buffer - persistent state)
         {
@@ -3737,8 +3719,9 @@ auto Renderer_Metal::createResources() -> void {
     for (size_t i = 0; i < MAX_FRAMES_IN_FLIGHT; i++) {
         particleSimParamsBuffers[i] =
             NS::TransferPtr(device->newBuffer(sizeof(ParticleSimulationParams), MTL::ResourceStorageModeShared));
-        particleAttractorBuffers[i] =
-            NS::TransferPtr(device->newBuffer(sizeof(ParticleAttractorData), MTL::ResourceStorageModeShared));
+        particleAttractorBuffers[i] = NS::TransferPtr(device->newBuffer(
+            MAX_PARTICLE_ATTRACTORS * sizeof(ParticleAttractorData), MTL::ResourceStorageModeShared
+        ));
     }
 
     // Initialize particles with random positions and colors

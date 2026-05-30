@@ -201,6 +201,11 @@ public:
         m_particleAttractors = attractors;
     }
 
+    // Set global wind applied to all particles each frame.
+    virtual void setParticleWind(const glm::vec3& direction, float strength) {
+        m_particleWind = glm::vec4(direction, strength);
+    }
+
     // Reserve a contiguous range of slots from the global GPU particle pool.
     // Returns the start index, or ~0u if capacity is exhausted.
     // Slots are permanent for the lifetime of the emitter.
@@ -248,7 +253,8 @@ public:
 
 protected:
     std::vector<ParticleAttractorData> m_particleAttractors;
-    uint32_t m_particleSlotsAllocated = 0; // high-water mark for slot claims
+    glm::vec4 m_particleWind = glm::vec4(0.0f); // xyz = direction, w = strength
+    uint32_t  m_particleSlotsAllocated = 0;     // high-water mark for slot claims
 
     const Uint32 MAX_FRAMES_IN_FLIGHT = 3;
     const Uint32 MSAA_SAMPLE_COUNT = 4;

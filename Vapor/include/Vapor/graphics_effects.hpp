@@ -214,29 +214,38 @@ struct alignas(16) SunFlareData {
 
 // ── Particles ─────────────────────────────────────────────────────────────
 
+constexpr uint32_t MAX_PARTICLE_ATTRACTORS = 8;
+
+// Layout matches GLSL std430 and Metal device-buffer rules:
+//   float3/vec3 = 12 bytes (device), padded to 16 by the following float.
+// _pad1 → lifetime, _pad2 → age (no struct size change).
 struct alignas(16) GPUParticle {
     glm::vec3 position = glm::vec3(0.0f);
-    float _pad1 = 0.0f;
+    float lifetime = 0.0f;   // seconds; 0 = immortal
     glm::vec3 velocity = glm::vec3(0.0f);
-    float _pad2 = 0.0f;
+    float age = 0.0f;        // seconds; incremented by GPU integrate kernel
     glm::vec3 force = glm::vec3(0.0f);
     float _pad3 = 0.0f;
     glm::vec4 color = glm::vec4(1.0f);
 };
 
-// TODO: check alignment
+// Matches GLSL std140 layout exactly (verified offset-by-offset):
+//   vec2(8) vec2(8) float(4) float(4) uint(4) uint(4) vec4(16) = 48 bytes.
 struct alignas(16) ParticleSimulationParams {
-    glm::vec2 resolution = glm::vec2(1280.0f, 720.0f);
+    glm::vec2 resolution    = glm::vec2(1280.0f, 720.0f);
     glm::vec2 mousePosition = glm::vec2(0.0f);
-    float time = 0.0f;
-    float deltaTime = 0.0f;
-    Uint32 particleCount = 0;
+    float     time          = 0.0f;
+    float     deltaTime     = 0.0f;
+    uint32_t  particleCount = 0;
+    uint32_t  attractorCount = 0;
+    glm::vec4 wind          = glm::vec4(0.0f); // xyz = direction, w = strength
 };
 
+// Packed as 16 bytes so arrays of this map to vec4[] in GLSL/Metal.
+// xyz = position, w = strength.  No spurious padding field.
 struct alignas(16) ParticleAttractorData {
     glm::vec3 position = glm::vec3(0.0f);
-    float _pad1;
-    float strength = 1.0f;
+    float     strength = 1.0f;
 };
 
 struct ParticlePushConstants {
