@@ -44,8 +44,8 @@ public:
             if (flipbook.timer >= flipbook.frameTime) {
                 flipbook.timer -= flipbook.frameTime;
                 flipbook.currentIndex++;
-                if (flipbook.currentIndex >= flipbook.frameIndices.size()) {
-                    flipbook.currentIndex = flipbook.loop ? 0 : flipbook.frameIndices.size() - 1;
+                if (static_cast<size_t>(flipbook.currentIndex) >= flipbook.frameIndices.size()) {
+                    flipbook.currentIndex = flipbook.loop ? 0 : static_cast<int>(flipbook.frameIndices.size()) - 1;
                     if (!flipbook.loop) flipbook.playing = false;
                 }
                 sprite.frameIndex = flipbook.frameIndices[flipbook.currentIndex];
@@ -159,7 +159,7 @@ public:
             auto& ref = pointLightView.get<ScenePointLightReferenceComponent>(entity);
             auto& logic = pointLightView.get<LightMovementLogicComponent>(entity);
 
-            if (ref.lightIndex < 0 || ref.lightIndex >= scene->pointLights.size()) continue;
+            if (ref.lightIndex < 0 || ref.lightIndex >= static_cast<int>(scene->pointLights.size())) continue;
 
             auto& light = scene->pointLights[ref.lightIndex];
             logic.timer += deltaTime * logic.speed;
@@ -197,7 +197,7 @@ public:
         for (auto entity : directionalLightView) {
             auto& ref = directionalLightView.get<SceneDirectionalLightReferenceComponent>(entity);
             auto& logic = directionalLightView.get<DirectionalLightLogicComponent>(entity);
-            if (ref.lightIndex >= 0 && ref.lightIndex < scene->directionalLights.size()) {
+            if (ref.lightIndex >= 0 && ref.lightIndex < static_cast<int>(scene->directionalLights.size())) {
                 logic.timer += deltaTime * logic.speed;
                 // Simple oscillation on Z axis relative to base direction
                 glm::vec3 newDir = logic.baseDirection;
@@ -327,11 +327,11 @@ public:
             switch (q.state) {
             case SubtitleQueueState::Idle:
                 if (page->isFullyHidden()) {
-                    bool advance = q.advanceRequested || (q.autoAdvance && q.currentIndex < (int)q.queue.size() - 1);
+                    bool advance = q.advanceRequested || (q.autoAdvance && q.currentIndex < static_cast<int>(q.queue.size()) - 1);
                     if (advance) {
                         q.advanceRequested = false;
                         q.currentIndex++;
-                        if (q.currentIndex < (int)q.queue.size()) {
+                        if (q.currentIndex < static_cast<int>(q.queue.size())) {
                             auto& entry = q.queue[q.currentIndex];
                             page->setContent(entry.speaker, entry.text);
                             PageSystem::show(reg, PageID::Subtitle);
@@ -354,7 +354,7 @@ public:
                 q.displayTimer += dt;
                 {
                     bool done = q.advanceRequested
-                                || (q.autoAdvance && q.currentIndex < (int)q.queue.size()
+                                || (q.autoAdvance && q.currentIndex < static_cast<int>(q.queue.size())
                                     && q.displayTimer >= q.queue[q.currentIndex].duration);
                     if (done) {
                         q.advanceRequested = false;
@@ -405,7 +405,7 @@ public:
             }
             q.advanceRequested = false;
 
-            if (q.currentIndex >= (int)q.lines.size() - 1) {
+            if (q.currentIndex >= static_cast<int>(q.lines.size()) - 1) {
                 q.currentIndex = 0;
                 page->setLine(q.lines[0]);
             } else {
