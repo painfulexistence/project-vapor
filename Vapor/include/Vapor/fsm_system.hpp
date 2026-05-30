@@ -105,22 +105,4 @@ public:
     }
 };
 
-// ============================================================
-// FSM Event Helper - convenience functions for sending events
-// ============================================================
-
-class FSMEventHelper {
-public:
-    static void send(entt::registry& registry, entt::entity entity, const std::string& event) {
-        registry.get_or_emplace<FSMEventQueue>(entity).push(event);
-    }
-
-    static void broadcast(entt::registry& registry, const std::string& event) {
-        auto view = registry.view<FSMEventQueue>();
-        for (auto entity : view) {
-            view.get<FSMEventQueue>(entity).push(event);
-        }
-    }
-};
-
 } // namespace Vapor
