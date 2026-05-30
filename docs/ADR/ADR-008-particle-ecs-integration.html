@@ -285,10 +285,10 @@ layout(set=0, binding=2) readonly buffer AttractorBuffer {
     <!-- ================================================================== -->
     <h2>Known Issues</h2>
 
-    <div class="danger-box">
+    <div class="ok-box">
       <div class="issue-row">
-        <span class="label"><strong>CRITICAL</strong></span>
-        <span>Metal <code>uploadParticles()</code> only writes to the current frame's buffer. Vulkan correctly writes to all <code>MAX_FRAMES_IN_FLIGHT</code> buffers. On Metal, particles uploaded in frame N will be invisible (stale data) in frames N+1 and N+2. Fix: iterate over all Metal particle buffers the same way Vulkan does.</span>
+        <span class="label"><strong>RETRACTED</strong></span>
+        <span>Earlier review flagged Metal <code>uploadParticles()</code> as CRITICAL for only writing a single buffer. This was wrong. Metal uses a <em>single</em> <code>StorageModeShared</code> particle buffer — not a per-frame array like Vulkan. On Apple Silicon unified memory, a CPU write to a <code>StorageModeShared</code> buffer is immediately visible to the GPU; there are no per-frame copies to synchronize. Vulkan's triple-write is necessary because it has three physically separate buffers, one per frame-in-flight. Metal does not, so writing once is correct.</span>
       </div>
     </div>
     <div class="warn-box">
@@ -365,7 +365,7 @@ renderer->draw(registry, scene, camera);</code></pre>
     <ul>
       <li>Implement <code>EmitterModulatorSystem</code>: map <code>EmotionState</code> to per-emitter parameter curves. The scaffolding is in place; the lookup table / curve data structure is the remaining design question.</li>
       <li>Implement <code>ParticleBurstSystem</code>: sphere-sampled one-shot spawns, tag removal.</li>
-      <li>Fix the three known issues above (Metal multi-frame upload, damping unification, slot release).</li>
+      <li>Fix the two remaining known issues: damping coefficient unification, slot release free-list.</li>
       <li>Consider a free-list allocator for <code>claimParticleSlots</code> / <code>releaseParticleSlots</code> if dynamic emitter create/destroy becomes a real use case.</li>
       <li>Per-particle texture atlas support: the <code>GPUParticle</code> struct has one spare float (<code>_pad3</code>) that could encode a frame index.</li>
     </ul>
