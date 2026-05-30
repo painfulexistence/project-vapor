@@ -1,0 +1,350 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>ADR-007: The FSM + ECS Integration Journey — Project Vapor</title>
+  <style>
+    :root {
+      --bg: #0d0d0f; --bg-surface: #141418; --bg-raised: #1c1c22;
+      --border: #2a2a33; --text: #e2e2e8; --text-muted: #7a7a8c;
+      --accent: #7c6af7; --warn: #c97a2f; --ok: #4a9e6a; --danger: #9e4a4a;
+    }
+    * { box-sizing: border-box; margin: 0; padding: 0; }
+    body { background: var(--bg); color: var(--text); font-family: 'Berkeley Mono','JetBrains Mono','Fira Code','Cascadia Code',monospace; font-size: 15px; line-height: 1.75; }
+    nav { background: var(--bg-surface); border-bottom: 1px solid var(--border); padding: 16px 24px; display: flex; align-items: center; justify-content: space-between; }
+    nav .site-title { color: var(--text-muted); text-decoration: none; font-size: 14px; }
+    nav .links { display: flex; gap: 24px; }
+    nav .links a { color: var(--text-muted); text-decoration: none; font-size: 13px; }
+    nav .links a:hover { color: var(--accent); }
+    nav .links a.active { color: var(--accent); }
+    main { max-width: 860px; margin: 0 auto; padding: 48px 24px; }
+    .page-header { margin-bottom: 32px; }
+    .page-header .eyebrow { font-size: 12px; color: var(--text-muted); margin-bottom: 10px; }
+    .page-header .eyebrow a { color: var(--text-muted); text-decoration: none; }
+    .page-header .eyebrow a:hover { color: var(--accent); }
+    .page-header h1 { font-size: 20px; font-weight: 600; margin-bottom: 12px; }
+    .meta-row { display: flex; gap: 24px; font-size: 13px; color: var(--text-muted); }
+    .badge { display: inline-block; font-size: 11px; border-radius: 3px; padding: 2px 8px; }
+    .badge-ok { background: rgba(74,158,106,0.15); color: var(--ok); }
+    h2 { font-size: 16px; font-weight: 600; margin: 40px 0 14px; border-top: 1px solid var(--border); padding-top: 32px; }
+    h2:first-of-type { border-top: none; padding-top: 0; }
+    h3 { font-size: 14px; font-weight: 600; color: var(--text); margin: 24px 0 10px; }
+    p { margin-bottom: 14px; }
+    pre { background: var(--bg-raised); border: 1px solid var(--border); border-radius: 3px; padding: 16px; font-size: 13px; overflow-x: auto; margin-bottom: 16px; line-height: 1.6; }
+    pre code { background: none; padding: 0; }
+    code { background: var(--bg-raised); border-radius: 3px; padding: 2px 6px; font-size: 13px; }
+    ul, ol { padding-left: 20px; margin-bottom: 14px; }
+    ul li, ol li { margin-bottom: 6px; }
+    .warn-box { background: rgba(201,122,47,0.08); border: 1px solid rgba(201,122,47,0.3); border-radius: 4px; padding: 14px 18px; font-size: 13px; color: var(--warn); margin-bottom: 20px; }
+    .info-box { background: rgba(124,106,247,0.08); border: 1px solid rgba(124,106,247,0.3); border-radius: 4px; padding: 14px 18px; font-size: 13px; color: var(--accent); margin-bottom: 20px; }
+    .success-box { background: rgba(74,158,106,0.08); border: 1px solid rgba(74,158,106,0.3); border-radius: 4px; padding: 14px 18px; font-size: 13px; color: var(--ok); margin-bottom: 20px; }
+    blockquote { border-left: 3px solid var(--accent); padding-left: 16px; margin: 20px 0; color: var(--text-muted); font-style: italic; }
+    .pitfall { background: rgba(158,74,74,0.08); border: 1px solid rgba(158,74,74,0.3); border-radius: 4px; padding: 14px 18px; font-size: 13px; margin-bottom: 20px; }
+    .pitfall strong { color: var(--danger); }
+    @media (max-width: 640px) { main { padding: 24px 16px; } }
+  </style>
+</head>
+<body>
+  <nav>
+    <a class="site-title" href="../index.html">Project Vapor</a>
+    <div class="links">
+      <a href="../architecture.html">Architecture</a>
+      <a href="../features.html">Features</a>
+      <a href="../techstack.html">Tech Stack</a>
+      <a href="../roadmap.html">Roadmap</a>
+      <a href="index.html" class="active">ADRs</a>
+    </div>
+  </nav>
+  <main>
+    <div class="page-header">
+      <div class="eyebrow"><a href="index.html">ADRs</a> / ADR-007</div>
+      <h1>ADR-007: The FSM + ECS Integration Journey</h1>
+      <div class="meta-row">
+        <span>2026-05-30</span>
+        <span><span class="badge badge-ok">Adopted</span></span>
+      </div>
+    </div>
+
+    <p>This document chronicles the iterative process of building a Playmaker-style Finite State Machine system that actually fits ECS principles. It took three major rewrites to get right. Here's what we learned.</p>
+
+    <h2>The Problem: FSM and ECS Don't Mix Naturally</h2>
+
+    <p>Traditional FSM implementations are inherently object-oriented. A state machine typically looks like this:</p>
+
+    <pre><code>class PlayerStateMachine {
+    State* currentState;
+    void onEnter() { currentState->enter(); }
+    void onExit() { currentState->exit(); }
+    void update() { currentState->update(); }
+};</code></pre>
+
+    <p>This is fundamentally at odds with ECS, where:</p>
+    <ul>
+      <li>Components are <strong>pure data</strong> — no methods, no callbacks</li>
+      <li>Systems are <strong>stateless functions</strong> that iterate over components</li>
+      <li>Behavior emerges from the <strong>composition of systems</strong>, not inheritance</li>
+    </ul>
+
+    <p>The challenge: how do you represent state transitions, enter/exit callbacks, and conditional logic without polluting your components with behavior?</p>
+
+    <h2>Attempt #1: The OOP Trap (Rejected)</h2>
+
+    <p>The first implementation looked reasonable at first glance:</p>
+
+    <pre><code>struct FSMComponent {
+    uint32_t currentState;
+    std::function&lt;void()&gt; onEnter;  // Callback
+    std::function&lt;void()&gt; onExit;   // Callback
+    std::vector&lt;Transition&gt; transitions;
+};</code></pre>
+
+    <div class="pitfall">
+      <strong>Pitfall #1: Callbacks break serialization.</strong><br>
+      You can't serialize <code>std::function</code>. This makes save/load impossible and debugging a nightmare — you can't inspect what a callback does from the component data alone.
+    </div>
+
+    <div class="pitfall">
+      <strong>Pitfall #2: Callbacks create hidden dependencies.</strong><br>
+      A callback might capture a pointer to another system, creating coupling that's invisible to the ECS. When that system is destroyed, you get dangling references with no compile-time safety net.
+    </div>
+
+    <p>This approach was scrapped within hours. Back to the drawing board.</p>
+
+    <h2>Attempt #2: Event-Driven, But Wrong Abstraction (Rejected)</h2>
+
+    <p>The second attempt moved callbacks out of components into "Request" components:</p>
+
+    <pre><code>// Engine layer
+struct FSMStateChangeRequest {
+    uint32_t targetState;
+    std::function&lt;void()&gt; onComplete;  // Still a callback!
+};</code></pre>
+
+    <div class="pitfall">
+      <strong>Pitfall #3: Request components in the engine layer are too opinionated.</strong><br>
+      The engine shouldn't know what "requests" the game wants to make. <code>ShowSubtitleRequest</code> is game logic, not engine infrastructure.
+    </div>
+
+    <p>We were conflating two concerns:</p>
+    <ol>
+      <li><strong>FSM mechanics</strong> (state, transitions, timers) — belongs in engine</li>
+      <li><strong>What to do on state change</strong> (show UI, play sound) — belongs in game</li>
+    </ol>
+
+    <h2>Attempt #3: Pure Data + Event Components (Adopted)</h2>
+
+    <p>The breakthrough came from asking: <em>what if state changes are just another component?</em></p>
+
+    <pre><code>// Engine emits this when a transition occurs
+struct FSMStateChangeEvent {
+    uint32_t fromState;
+    uint32_t toState;
+    float previousStateTime;
+};
+
+// Game systems react to it
+class SubtitleActionSystem {
+    static void update(entt::registry& reg) {
+        auto view = reg.view&lt;SubtitleQueueComponent, FSMStateChangeEvent&gt;();
+        for (auto entity : view) {
+            auto& event = view.get&lt;FSMStateChangeEvent&gt;(entity);
+            if (event.toState == SubtitleStates::WaitingForVisible) {
+                // Trigger the action here — game logic, not engine
+                PageSystem::show(reg, PageID::Subtitle);
+            }
+        }
+    }
+};</code></pre>
+
+    <div class="success-box">
+      <strong>Key insight:</strong> The FSM system's only job is to manage state and emit <code>FSMStateChangeEvent</code>. What happens in response is entirely the game's responsibility.
+    </div>
+
+    <h2>The Final Architecture</h2>
+
+    <h3>Data Flow</h3>
+    <pre><code>Sensor Systems → FSMEventQueue → FSMSystem → FSMStateChangeEvent → Action Systems
+     (input)        (pending)      (process)      (output)           (react)</code></pre>
+
+    <h3>Components (Engine Layer)</h3>
+    <pre><code>FSMDefinition      // States, transitions, timed transitions
+FSMStateComponent  // Current state, timers
+FSMEventQueue      // Pending events to process
+FSMStateChangeEvent // Output: "state just changed from X to Y"</code></pre>
+
+    <h3>Systems</h3>
+    <pre><code>FSMInitSystem::update()  // Auto-initialize entities with FSMDefinition
+FSMSystem::update()      // Process events, check timers, emit FSMStateChangeEvent
+TriggerSystem::update()  // Convert physics triggers to ECS events</code></pre>
+
+    <h2>Pitfalls We Hit Along the Way</h2>
+
+    <div class="pitfall">
+      <strong>Pitfall #4: Systems with multiple static methods.</strong><br>
+      We initially had <code>FSMSystem::init()</code> and <code>FSMSystem::update()</code>. This broke the "one system, one update" principle from Bevy. Solution: split into <code>FSMInitSystem</code> (reactive initialization) and <code>FSMSystem</code> (per-frame update).
+    </div>
+
+    <div class="pitfall">
+      <strong>Pitfall #5: Helper classes that hide component manipulation.</strong><br>
+      <code>FSMEventHelper::send()</code> looked convenient but was just wrapping <code>reg.get_or_emplace&lt;FSMEventQueue&gt;(e).push(event)</code>. We deleted it — callers should see the component manipulation explicitly.
+    </div>
+
+    <div class="pitfall">
+      <strong>Pitfall #6: Timed transitions checked before timer update.</strong><br>
+      The FSM system checks <code>stateTime >= duration</code> then updates <code>stateTime += dt</code>. This means a timed transition fires on the <em>next</em> frame after the duration is reached, not the same frame. Our tests initially got this wrong.
+    </div>
+
+    <div class="pitfall">
+      <strong>Pitfall #7: TriggerVolumeComponent had callbacks.</strong><br>
+      The existing trigger system used <code>std::function&lt;void(Entity)&gt; onEnter</code>. We replaced it with <code>TriggerEnterEvent</code> / <code>TriggerExitEvent</code> components that game systems can query.
+    </div>
+
+    <h2>How to Use It</h2>
+
+    <h3>1. Define Your FSM</h3>
+    <pre><code>namespace PlayerStates {
+    constexpr uint32_t Idle = 0;
+    constexpr uint32_t Walking = 1;
+    constexpr uint32_t Jumping = 2;
+}
+
+Vapor::FSMDefinition createPlayerFSM() {
+    return Vapor::FSMDefinitionBuilder()
+        .state("Idle")
+        .state("Walking")
+        .state("Jumping")
+        .transition("Idle", "Walking", "StartWalk")
+        .transition("Walking", "Idle", "Stop")
+        .transition("Idle", "Jumping", "Jump")
+        .timedTransition("Jumping", "Idle", 0.5f)  // Auto-land after 0.5s
+        .initialState("Idle")
+        .build();
+}</code></pre>
+
+    <h3>2. Attach Components</h3>
+    <pre><code>auto player = registry.create();
+registry.emplace&lt;Vapor::FSMDefinition&gt;(player, createPlayerFSM());
+registry.emplace&lt;Vapor::FSMEventQueue&gt;(player);
+// FSMInitSystem will auto-add FSMStateComponent on next frame</code></pre>
+
+    <h3>3. Send Events</h3>
+    <pre><code>// From input system or game logic:
+registry.get&lt;Vapor::FSMEventQueue&gt;(player).push("StartWalk");</code></pre>
+
+    <h3>4. React to State Changes</h3>
+    <pre><code>class PlayerAnimationSystem {
+    static void update(entt::registry& reg) {
+        auto view = reg.view&lt;PlayerComponent, Vapor::FSMStateChangeEvent&gt;();
+        for (auto [entity, player, event] : view.each()) {
+            if (event.toState == PlayerStates::Walking) {
+                player.animator.play("walk");
+            } else if (event.toState == PlayerStates::Jumping) {
+                player.animator.play("jump");
+                // Spawn dust particles, play sound, etc.
+            }
+        }
+    }
+};</code></pre>
+
+    <h2>Extending: Hierarchical FSM</h2>
+
+    <p>To support nested state machines (e.g., <code>Combat.Attacking.Slash</code>), extend the components:</p>
+
+    <pre><code>struct HierarchicalFSMComponent {
+    std::vector&lt;uint32_t&gt; stateStack;  // [Combat, Attacking, Slash]
+
+    uint32_t currentLeafState() const { return stateStack.back(); }
+    bool isInState(uint32_t state) const {
+        return std::find(stateStack.begin(), stateStack.end(), state) != stateStack.end();
+    }
+};
+
+// Transitions can now target parent states
+struct HierarchicalTransition {
+    std::vector&lt;uint32_t&gt; fromPath;  // Match prefix
+    std::vector&lt;uint32_t&gt; toPath;    // New state path
+    std::string event;
+};</code></pre>
+
+    <p>The system remains the same — it just operates on paths instead of single state IDs.</p>
+
+    <h2>Extending: Actions on Transition</h2>
+
+    <p>For "fire-and-forget" actions (particles, sounds), use action request components:</p>
+
+    <pre><code>// Define action request components
+struct PlaySoundRequest { std::string soundId; };
+struct SpawnParticlesRequest { std::string effectId; glm::vec3 position; };
+
+// Action system reacts to state changes and emits requests
+class PlayerEffectsSystem {
+    static void update(entt::registry& reg) {
+        auto view = reg.view&lt;Vapor::FSMStateChangeEvent, TransformComponent&gt;();
+        for (auto [entity, event, transform] : view.each()) {
+            if (event.toState == PlayerStates::Jumping) {
+                reg.emplace&lt;PlaySoundRequest&gt;(entity, PlaySoundRequest{"jump"});
+                reg.emplace&lt;SpawnParticlesRequest&gt;(entity,
+                    SpawnParticlesRequest{"dust", transform.position});
+            }
+        }
+    }
+};
+
+// Separate systems consume the requests
+class SoundSystem {
+    static void update(entt::registry& reg, AudioEngine* audio) {
+        auto view = reg.view&lt;PlaySoundRequest&gt;();
+        for (auto [entity, request] : view.each()) {
+            audio->play(request.soundId);
+        }
+        reg.clear&lt;PlaySoundRequest&gt;();  // Consume all requests
+    }
+};</code></pre>
+
+    <div class="info-box">
+      <strong>Pattern:</strong> State change → Effect system emits Request components → Dedicated systems consume requests. This keeps effects decoupled from state logic.
+    </div>
+
+    <h2>What We Shipped</h2>
+
+    <table style="width:100%; border-collapse: collapse; margin: 20px 0; font-size: 13px;">
+      <tr style="border-bottom: 1px solid var(--border);">
+        <th style="text-align:left; padding: 8px;">File</th>
+        <th style="text-align:left; padding: 8px;">Purpose</th>
+      </tr>
+      <tr style="border-bottom: 1px solid var(--border);">
+        <td style="padding: 8px;"><code>fsm.hpp</code></td>
+        <td style="padding: 8px;">Components + FSMDefinitionBuilder</td>
+      </tr>
+      <tr style="border-bottom: 1px solid var(--border);">
+        <td style="padding: 8px;"><code>fsm_system.hpp</code></td>
+        <td style="padding: 8px;">FSMInitSystem, FSMSystem</td>
+      </tr>
+      <tr style="border-bottom: 1px solid var(--border);">
+        <td style="padding: 8px;"><code>trigger_system.hpp</code></td>
+        <td style="padding: 8px;">TriggerSystem (physics → ECS events)</td>
+      </tr>
+      <tr style="border-bottom: 1px solid var(--border);">
+        <td style="padding: 8px;"><code>fsm_system_test.cpp</code></td>
+        <td style="padding: 8px;">22 test cases covering all FSM behavior</td>
+      </tr>
+    </table>
+
+    <h2>Lessons Learned</h2>
+
+    <ol>
+      <li><strong>Callbacks are poison in ECS.</strong> If you need behavior on state change, emit an event component. Let another system handle it.</li>
+      <li><strong>Keep engine and game concerns separate.</strong> The engine provides FSM mechanics. The game decides what those states mean.</li>
+      <li><strong>One system, one update.</strong> If you have <code>init()</code> and <code>update()</code>, split them into two systems.</li>
+      <li><strong>Helper classes hide the truth.</strong> Let callers see the component manipulation. It's not that much more code, and it's infinitely more debuggable.</li>
+      <li><strong>Test the timing.</strong> FSM timing is subtle. Write tests that check exactly when transitions fire relative to timer updates.</li>
+    </ol>
+
+    <blockquote>
+      "The best FSM is one where you can look at the components and understand the entire state of the system without reading any code."
+    </blockquote>
+
+  </main>
+</body>
+</html>
