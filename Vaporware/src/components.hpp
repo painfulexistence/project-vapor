@@ -21,9 +21,9 @@ struct CharacterIntent {
     glm::vec2 lookVector = glm::vec2(0.0f);
     glm::vec2 moveVector = glm::vec2(0.0f);
     float moveVerticalAxis = 0.0f;
-    bool jump;
-    bool sprint;
-    bool interact;
+    bool jump     = false;
+    bool sprint   = false;
+    bool interact = false;
 };
 
 struct CharacterControllerComponent {
@@ -55,7 +55,7 @@ struct GrabberComponent {
 enum class MovementPattern { Circle, Figure8, Linear, Spiral };
 
 struct LightMovementLogicComponent {
-    MovementPattern pattern;
+    MovementPattern pattern = MovementPattern::Circle;
     float speed = 1.0f;
     float timer = 0.0f;
 

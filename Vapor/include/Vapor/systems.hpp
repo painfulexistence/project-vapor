@@ -178,7 +178,7 @@ namespace Vapor {
             }
         }
 
-        static entt::entity getActiveCamera(entt::registry& registry) {
+        [[nodiscard]] static entt::entity getActiveCamera(entt::registry& registry) {
             auto view = registry.view<Vapor::VirtualCameraComponent>();
             for (auto entity : view) {
                 if (view.get<Vapor::VirtualCameraComponent>(entity).isActive) {

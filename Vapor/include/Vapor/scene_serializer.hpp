@@ -73,7 +73,7 @@ public:
 
     // Serialize only the entities in `entities`.
     // The caller is responsible for filtering (e.g. exclude SceneGeometryTag).
-    SaveResult save(
+    [[nodiscard]] SaveResult save(
         entt::registry&               registry,
         std::span<const entt::entity> entities,
         const std::string&            gltfPath,

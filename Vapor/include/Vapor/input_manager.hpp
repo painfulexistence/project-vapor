@@ -56,29 +56,29 @@ namespace Vapor {
         /**
          * Check if action is currently held down.
          */
-        bool isHeld(InputAction action) const {
+        [[nodiscard]] bool isHeld(InputAction action) const {
             return heldActions.find(action) != heldActions.end();
         }
 
         /**
          * Check if action was just pressed this frame.
          */
-        bool isPressed(InputAction action) const {
+        [[nodiscard]] bool isPressed(InputAction action) const {
             return pressedActions.find(action) != pressedActions.end();
         }
 
         /**
          * Check if action was just released this frame.
          */
-        bool isReleased(InputAction action) const {
+        [[nodiscard]] bool isReleased(InputAction action) const {
             return releasedActions.find(action) != releasedActions.end();
         }
 
-        auto getAxis(InputAction neg, InputAction pos) const -> float {
+        [[nodiscard]] auto getAxis(InputAction neg, InputAction pos) const -> float {
             return (isHeld(pos) ? 1.0f : 0.0f) - (isHeld(neg) ? 1.0f : 0.0f);
         }
 
-        auto getVector(InputAction left, InputAction right, InputAction down, InputAction up) const -> glm::vec2 {
+        [[nodiscard]] auto getVector(InputAction left, InputAction right, InputAction down, InputAction up) const -> glm::vec2 {
             return glm::vec2(getAxis(left, right), getAxis(down, up));
         }
 

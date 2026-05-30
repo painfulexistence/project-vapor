@@ -43,7 +43,7 @@ namespace Vapor {
         }
 
         // Get the underlying resource data (blocks if loading)
-        std::shared_ptr<T> get() {
+        [[nodiscard]] std::shared_ptr<T> get() {
             // Wait for loading to complete
             std::unique_lock<std::mutex> lock(m_mutex);
             while (m_state == ResourceState::Loading) {
@@ -53,38 +53,38 @@ namespace Vapor {
         }
 
         // Try to get resource without blocking
-        std::shared_ptr<T> tryGet() const {
+        [[nodiscard]] std::shared_ptr<T> tryGet() const {
             std::lock_guard<std::mutex> lock(m_mutex);
             return m_data;
         }
 
         // Check if resource is ready
-        bool isReady() const {
+        [[nodiscard]] bool isReady() const {
             return m_state.load() == ResourceState::Ready;
         }
 
         // Check if resource failed to load
-        bool isFailed() const {
+        [[nodiscard]] bool isFailed() const {
             return m_state.load() == ResourceState::Failed;
         }
 
         // Check if resource is currently loading
-        bool isLoading() const {
+        [[nodiscard]] bool isLoading() const {
             return m_state.load() == ResourceState::Loading;
         }
 
         // Get current state
-        ResourceState getState() const {
+        [[nodiscard]] ResourceState getState() const {
             return m_state.load();
         }
 
         // Get resource path
-        const std::string& getPath() const {
+        [[nodiscard]] const std::string& getPath() const {
             return m_path;
         }
 
         // Get error message (if failed)
-        const std::string& getError() const {
+        [[nodiscard]] const std::string& getError() const {
             std::lock_guard<std::mutex> lock(m_mutex);
             return m_error;
         }
