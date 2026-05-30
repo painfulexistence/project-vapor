@@ -153,11 +153,24 @@ namespace Vapor {
     };
 
     // ============================================================================
-    // Particle Emitter (ECS bridge to GPU particle attractor)
+    // Particle Emitter
     // ============================================================================
     struct ParticleEmitterComponent {
-        float strength = 5.0f;  // Attractor pull strength fed to GPU simulation
-        bool enabled = true;
+        // --- Emission config (set by user) ---
+        float     emissionRate    = 20.0f;               // particles / second
+        float     initialSpeed    = 2.0f;                // m/s
+        glm::vec3 emitDirection   = {0.0f, 1.0f, 0.0f}; // local-space axis
+        float     spread          = 0.5f;                // cone half-angle, radians
+        glm::vec4 color           = {1.0f, 1.0f, 1.0f, 1.0f};
+        float     attractorStrength = 5.0f;              // GPU attractor pull
+        uint32_t  maxParticles    = 256;                 // pool size; set before first use
+        bool      enabled         = true;
+
+        // --- Runtime state (managed by ParticleEmitterSystem, do not set manually) ---
+        float     _accumulator    = 0.0f;
+        uint32_t  _slotBegin      = ~0u;  // first slot in global GPU particle pool
+        uint32_t  _slotCount      = 0;    // number of slots allocated
+        uint32_t  _ringCursor     = 0;    // next slot to overwrite (ring buffer)
     };
 
     // Flipbook animation component (drives any frame-based animation)

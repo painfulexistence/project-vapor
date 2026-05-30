@@ -201,6 +201,16 @@ public:
         m_particleAttractors = attractors;
     }
 
+    // Reserve a contiguous range of slots from the global GPU particle pool.
+    // Returns the start index, or ~0u if capacity is exhausted.
+    // Slots are permanent for the lifetime of the emitter.
+    virtual uint32_t claimParticleSlots(uint32_t count) { return ~0u; }
+    virtual void releaseParticleSlots(uint32_t slotBegin, uint32_t count) {}
+
+    // Write CPU-computed initial particle state into the GPU buffer.
+    // Must be called before draw() so the GPU sees fresh data this frame.
+    virtual void uploadParticles(uint32_t slotBegin, const std::vector<GPUParticle>& particles) {}
+
     // ===== Font Rendering API =====
     // Load a font from file path with specified base size
     virtual FontHandle loadFont(const std::string& path, float baseSize) {
@@ -238,6 +248,7 @@ public:
 
 protected:
     std::vector<ParticleAttractorData> m_particleAttractors;
+    uint32_t m_particleSlotsAllocated = 0; // high-water mark for slot claims
 
     const Uint32 MAX_FRAMES_IN_FLIGHT = 3;
     const Uint32 MSAA_SAMPLE_COUNT = 4;

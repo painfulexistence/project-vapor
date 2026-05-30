@@ -3330,11 +3330,12 @@ void Renderer_Vulkan::initParticleSystem() {
     vkDestroyShaderModule(device, vertShaderModule, nullptr);
     vkDestroyShaderModule(device, fragShaderModule, nullptr);
 
-    // Create particle buffers
+    // Create particle buffers (persistently mapped so the CPU can spawn particles)
     VkDeviceSize particleBufferSize = sizeof(GPUParticle) * MAX_PARTICLES;
     particleBuffers.resize(MAX_FRAMES_IN_FLIGHT);
+    particleBuffersMapped.resize(MAX_FRAMES_IN_FLIGHT);
     for (size_t i = 0; i < MAX_FRAMES_IN_FLIGHT; i++) {
-        particleBuffers[i] = createBuffer(BufferUsage::STORAGE, particleBufferSize);
+        particleBuffers[i] = createBufferMapped(BufferUsage::STORAGE, particleBufferSize, &particleBuffersMapped[i]);
     }
 
     // Create simulation params buffers
@@ -3381,13 +3382,9 @@ void Renderer_Vulkan::initParticleSystem() {
         initialParticles[i].color = glm::vec4(color, 1.0f);
     }
 
-    // Upload initial particle data
+    // Upload initial particle data via the persistent mapping acquired above
     for (size_t i = 0; i < MAX_FRAMES_IN_FLIGHT; i++) {
-        VkDeviceMemory bufferMemory = getBufferMemory(particleBuffers[i]);
-        void* data;
-        vkMapMemory(device, bufferMemory, 0, particleBufferSize, 0, &data);
-        memcpy(data, initialParticles.data(), particleBufferSize);
-        vkUnmapMemory(device, bufferMemory);
+        memcpy(particleBuffersMapped[i], initialParticles.data(), particleBufferSize);
     }
 
     // Create descriptor pool for particles
@@ -3616,6 +3613,29 @@ void Renderer_Vulkan::renderParticles(VkCommandBuffer cmd) {
 
     // Draw 6 vertices per particle (2 triangles = 1 quad), instanced
     vkCmdDraw(cmd, 6, particleCount, 0, 0);
+}
+
+uint32_t Renderer_Vulkan::claimParticleSlots(uint32_t count) {
+    if (!particleSystemEnabled || count == 0) return ~0u;
+    if (m_particleSlotsAllocated + count > MAX_PARTICLES) return ~0u;
+    uint32_t begin = m_particleSlotsAllocated;
+    m_particleSlotsAllocated += count;
+    return begin;
+}
+
+void Renderer_Vulkan::releaseParticleSlots(uint32_t /*slotBegin*/, uint32_t /*count*/) {
+    // Slot compaction not implemented; pool resets on restart.
+}
+
+void Renderer_Vulkan::uploadParticles(uint32_t slotBegin, const std::vector<GPUParticle>& particles) {
+    if (!particleSystemEnabled || particles.empty()) return;
+    if (slotBegin + particles.size() > MAX_PARTICLES) return;
+    // Write to all frame buffers so every in-flight frame sees the spawn.
+    size_t bytes = particles.size() * sizeof(GPUParticle);
+    for (size_t i = 0; i < MAX_FRAMES_IN_FLIGHT; i++) {
+        auto* dst = static_cast<GPUParticle*>(particleBuffersMapped[i]) + slotBegin;
+        memcpy(dst, particles.data(), bytes);
+    }
 }
 
 void Renderer_Vulkan::cleanupParticleSystem() {

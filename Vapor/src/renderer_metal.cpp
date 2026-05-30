@@ -5960,3 +5960,23 @@ void Renderer_Metal::draw(entt::registry& registry, std::shared_ptr<Scene> scene
     pendingEcsBatches.clear();
     pendingEcsAccelInstances.clear();
 }
+
+uint32_t Renderer_Metal::claimParticleSlots(uint32_t count) {
+    if (!particleSystemEnabled || count == 0) return ~0u;
+    if (m_particleSlotsAllocated + count > MAX_PARTICLES) return ~0u;
+    uint32_t begin = m_particleSlotsAllocated;
+    m_particleSlotsAllocated += count;
+    return begin;
+}
+
+void Renderer_Metal::releaseParticleSlots(uint32_t /*slotBegin*/, uint32_t /*count*/) {
+    // Slot compaction not implemented; pool resets on restart.
+}
+
+void Renderer_Metal::uploadParticles(uint32_t slotBegin, const std::vector<GPUParticle>& particles) {
+    if (!particleSystemEnabled || particles.empty() || !particleBuffer) return;
+    if (slotBegin + particles.size() > MAX_PARTICLES) return;
+    // particleBuffer uses StorageModeShared so contents() is always CPU-writable.
+    auto* dst = static_cast<GPUParticle*>(particleBuffer->contents()) + slotBegin;
+    memcpy(dst, particles.data(), particles.size() * sizeof(GPUParticle));
+}

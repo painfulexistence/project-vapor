@@ -7,6 +7,7 @@
 #include "scene.hpp"
 #include <entt/entt.hpp>
 #include <memory>
+#include <random>
 
 namespace Vapor {
 
@@ -248,23 +249,87 @@ namespace Vapor {
     };
 
     // ============================================================================
-    // 粒子發射系統 - 將 ECS 位置映射為 GPU 粒子吸引子
+    // 粒子發射系統
     // ============================================================================
+    // Call update() once per frame, after TransformSystem::update() and BEFORE
+    // renderer->draw().  The system drives CPU-side spawn logic and uploads
+    // initial particle state to the GPU; the existing compute shader then takes
+    // over velocity integration and attractor forces.
     class ParticleEmitterSystem {
     public:
-        // Call once per frame before renderer->draw().
-        // Collects world positions from all active ParticleEmitterComponents and
-        // forwards them to the renderer so the GPU simulation can use them as
-        // attractors. Requires TransformSystem to have already run this frame.
-        static void update(entt::registry& registry, Renderer* renderer) {
+        static void update(entt::registry& registry, Renderer* renderer, float dt) {
+            static std::mt19937 rng{ std::random_device{}() };
+            static std::uniform_real_distribution<float> unit{ 0.0f, 1.0f };
+
             std::vector<ParticleAttractorData> attractors;
             auto view = registry.view<Vapor::TransformComponent, Vapor::ParticleEmitterComponent>();
+
             for (auto entity : view) {
-                auto& t = view.get<Vapor::TransformComponent>(entity);
+                auto& t       = view.get<Vapor::TransformComponent>(entity);
                 auto& emitter = view.get<Vapor::ParticleEmitterComponent>(entity);
                 if (!emitter.enabled) continue;
-                attractors.push_back({ .position = t.position, .strength = emitter.strength });
+
+                // --- Claim GPU slots on first use ---
+                if (emitter._slotBegin == ~0u) {
+                    emitter._slotCount = emitter.maxParticles;
+                    emitter._slotBegin = renderer->claimParticleSlots(emitter._slotCount);
+                    if (emitter._slotBegin == ~0u) continue; // pool exhausted
+                    emitter._ringCursor = 0;
+                }
+
+                // --- Spawn particles this frame ---
+                emitter._accumulator += dt;
+                float interval = 1.0f / emitter.emissionRate;
+
+                std::vector<GPUParticle> spawns;
+                while (emitter._accumulator >= interval) {
+                    emitter._accumulator -= interval;
+
+                    // Random velocity inside a cone around emitDirection
+                    // using the local-space direction rotated by the entity's world transform.
+                    glm::vec3 worldDir = glm::normalize(
+                        glm::vec3(t.worldTransform * glm::vec4(emitter.emitDirection, 0.0f))
+                    );
+
+                    // Perpendicular basis
+                    glm::vec3 perp = std::abs(worldDir.x) < 0.9f
+                        ? glm::vec3(1, 0, 0) : glm::vec3(0, 1, 0);
+                    glm::vec3 u = glm::normalize(glm::cross(worldDir, perp));
+                    glm::vec3 v = glm::cross(worldDir, u);
+
+                    float theta = unit(rng) * 2.0f * 3.14159265f;
+                    float phi   = unit(rng) * emitter.spread;
+                    glm::vec3 dir = glm::normalize(
+                        worldDir * std::cos(phi)
+                        + (u * std::cos(theta) + v * std::sin(theta)) * std::sin(phi)
+                    );
+
+                    GPUParticle p;
+                    p.position = t.position;
+                    p.velocity = dir * emitter.initialSpeed;
+                    p.force    = glm::vec3(0.0f);
+                    p.color    = emitter.color;
+
+                    spawns.push_back(p);
+                }
+
+                if (!spawns.empty()) {
+                    // Write into the emitter's ring buffer slice starting at the
+                    // current cursor. Ring wrap mid-batch is not split here; it
+                    // causes at most one frame of visual glitch at typical rates.
+                    uint32_t writeSlot = emitter._slotBegin + emitter._ringCursor;
+                    renderer->uploadParticles(writeSlot, spawns);
+                    emitter._ringCursor =
+                        (emitter._ringCursor + (uint32_t)spawns.size()) % emitter._slotCount;
+                }
+
+                // --- Register as attractor so GPU forces pull toward this entity ---
+                attractors.push_back({
+                    .position = t.position,
+                    .strength = emitter.attractorStrength,
+                });
             }
+
             renderer->setParticleAttractors(attractors);
         }
     };

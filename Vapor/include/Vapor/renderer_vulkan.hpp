@@ -349,16 +349,21 @@ private:
     VkPipelineLayout particleRenderPipelineLayout;
     VkPipeline particleRenderPipeline;
 
-    std::vector<BufferHandle> particleBuffers;// Double buffered for compute
-    std::vector<BufferHandle> particleSimParamsBuffers;// Simulation parameters
+    std::vector<BufferHandle> particleBuffers;
+    std::vector<void*> particleBuffersMapped;           // Persistently mapped for CPU spawn writes
+    std::vector<BufferHandle> particleSimParamsBuffers;
     std::vector<void*> particleSimParamsBuffersMapped;
-    std::vector<BufferHandle> particleAttractorBuffers;// Attractor data
+    std::vector<BufferHandle> particleAttractorBuffers;
     std::vector<void*> particleAttractorBuffersMapped;
 
     void initParticleSystem();
     void updateParticleSimulation(VkCommandBuffer cmd, float deltaTime, const glm::vec3& attractorPos);
     void renderParticles(VkCommandBuffer cmd);
     void cleanupParticleSystem();
+
+    uint32_t claimParticleSlots(uint32_t count) override;
+    void releaseParticleSlots(uint32_t slotBegin, uint32_t count) override;
+    void uploadParticles(uint32_t slotBegin, const std::vector<GPUParticle>& particles) override;
 
     void createResources();
 
