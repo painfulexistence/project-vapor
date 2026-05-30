@@ -282,10 +282,10 @@ namespace Vapor {
 
             renderer->setParticleAttractors(attractors);
 
-            // Wind — first enabled ParticleWindComponent wins
-            auto wView = registry.view<Vapor::ParticleWindComponent>();
+            // Wind — first enabled WindFieldComponent wins
+            auto wView = registry.view<Vapor::WindFieldComponent>();
             for (auto entity : wView) {
-                auto& w = wView.get<Vapor::ParticleWindComponent>(entity);
+                auto& w = wView.get<Vapor::WindFieldComponent>(entity);
                 if (!w.enabled) continue;
                 renderer->setParticleWind(w.direction, w.strength);
                 break;

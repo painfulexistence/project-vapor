@@ -163,8 +163,10 @@ namespace Vapor {
         bool  enabled  = true;
     };
 
-    // Singleton-like: the first enabled instance in the registry wins.
-    struct ParticleWindComponent {
+    // Represents ambient wind in world space. Any system that cares about wind
+    // (particles, vegetation, cloth, audio occlusion…) reads from this.
+    // Singleton-style: attach to one "world" entity; first enabled instance wins.
+    struct WindFieldComponent {
         glm::vec3 direction = {1.0f, 0.0f, 0.0f};
         float     strength  = 0.0f;
         bool      enabled   = true;
