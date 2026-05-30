@@ -152,7 +152,7 @@ static void setupCustomDrawers(Vapor::SceneInspector& inspector) {
         }
     });
 
-    // 11. SubtitleQueueComponent
+    // 11. SubtitleQueueComponent + FSM
     inspector.registerCustomDrawer([](entt::registry& reg, entt::entity e) {
         if (auto* c = reg.try_get<SubtitleQueueComponent>(e)) {
             if (ImGui::CollapsingHeader("Subtitle Queue Component")) {
@@ -160,8 +160,11 @@ static void setupCustomDrawers(Vapor::SceneInspector& inspector) {
                 ImGui::LabelText("Current Index", "%d", c->currentIndex);
                 ImGui::Checkbox("Advance Requested", &c->advanceRequested);
                 ImGui::Checkbox("Auto Advance", &c->autoAdvance);
-                const char* states[] = { "Idle", "WaitingForVisible", "Displaying", "WaitingForHidden" };
-                ImGui::LabelText("State", "%s", states[static_cast<int>(c->state)]);
+                if (auto* fsm = reg.try_get<Vapor::FSMStateComponent>(e)) {
+                    const char* states[] = { "Idle", "WaitingForVisible", "Displaying", "WaitingForHidden" };
+                    ImGui::LabelText("State", "%s", states[fsm->currentState]);
+                    ImGui::LabelText("State Time", "%.2f", fsm->stateTime);
+                }
                 ImGui::LabelText("Display Timer", "%.2f", c->displayTimer);
             }
         }
@@ -189,13 +192,15 @@ static void setupCustomDrawers(Vapor::SceneInspector& inspector) {
         }
     });
 
-    // 14. SceneTransitionComponent
+    // 14. SceneTransitionComponent + FSM
     inspector.registerCustomDrawer([](entt::registry& reg, entt::entity e) {
         if (auto* c = reg.try_get<SceneTransitionComponent>(e)) {
             if (ImGui::CollapsingHeader("Scene Transition")) {
                 ImGui::LabelText("Target Scene", "%s", c->targetScene.c_str());
-                const char* states[] = { "Idle", "FadingInLoadingScreen", "UnloadingScene", "LoadingAssets", "BuildingScene", "FadingOutLoadingScreen" };
-                ImGui::LabelText("State", "%s", states[static_cast<int>(c->state)]);
+                if (auto* fsm = reg.try_get<Vapor::FSMStateComponent>(e)) {
+                    const char* states[] = { "Idle", "FadingInLoadingScreen", "UnloadingScene", "LoadingAssets", "BuildingScene", "FadingOutLoadingScreen" };
+                    ImGui::LabelText("State", "%s", states[fsm->currentState]);
+                }
                 ImGui::ProgressBar(c->progress);
             }
         }
@@ -539,7 +544,7 @@ auto main(int argc, char* args[]) -> int {
                     fmt::print("Physics Debug Renderer: {}\n", physics->isDebugEnabled() ? "Enabled" : "Disabled");
                 }
                 if (e.key.scancode == SDL_SCANCODE_RETURN) {
-                    ScrollTextQueueSystem::advance(registry);
+                    registry.view<ScrollTextQueueComponent>().each([](auto& q) { q.advanceRequested = true; });
                 }
                 if (e.key.scancode == SDL_SCANCODE_F6) {
                     auto* lb = PageSystem::getPage<LetterboxPage>(registry, PageID::Letterbox);
@@ -553,19 +558,24 @@ auto main(int argc, char* args[]) -> int {
                     }
                 }
                 if (e.key.scancode == SDL_SCANCODE_F7) {
-                    auto view = registry.view<SubtitleQueueComponent>();
+                    auto view = registry.view<SubtitleQueueComponent, Vapor::FSMStateComponent>();
                     for (auto entity : view) {
                         auto& q = view.get<SubtitleQueueComponent>(entity);
-                        if (q.currentIndex >= (int)q.queue.size() - 1 && q.state == SubtitleQueueState::Idle) {
-                            SubtitleQueueSystem::restart(registry);
+                        auto& fsm = view.get<Vapor::FSMStateComponent>(entity);
+                        if (q.currentIndex >= (int)q.queue.size() - 1 && fsm.currentState == SubtitleStates::Idle) {
+                            q.restartRequested = true;
                             fmt::print("Subtitles restarted\n");
                         } else {
-                            SubtitleQueueSystem::advance(registry);
+                            q.advanceRequested = true;
                         }
                     }
                 }
                 if (e.key.scancode == SDL_SCANCODE_F8) {
-                    ChapterTitleTriggerSystem::request(registry, "Chapter I", "The Beginning");
+                    registry.view<ChapterTitleTriggerComponent>().each([](auto& t) {
+                        t.number = "Chapter I";
+                        t.title = "The Beginning";
+                        t.showRequested = true;
+                    });
                     fmt::print("Chapter title requested\n");
                 }
                 break;
@@ -616,7 +626,13 @@ auto main(int argc, char* args[]) -> int {
         CameraSystem::update(registry, deltaTime);
         AutoRotateSystem::update(registry, deltaTime);
         LightMovementSystem::update(registry, scene.get(), deltaTime);
-        SubtitleQueueSystem::update(registry, deltaTime);
+        // Subtitle systems (split into single-responsibility)
+        SubtitleInputSystem::update(registry);
+        SubtitlePageSensorSystem::update(registry);
+        SubtitleTimerSystem::update(registry, deltaTime);
+        Vapor::FSMInitSystem::update(registry);
+        Vapor::FSMSystem::update(registry, deltaTime);
+        SubtitleActionSystem::update(registry);
         ScrollTextQueueSystem::update(registry);
         ChapterTitleTriggerSystem::update(registry);
         PageSystem::update(registry, engineCore->getRmlUiManager(), deltaTime);

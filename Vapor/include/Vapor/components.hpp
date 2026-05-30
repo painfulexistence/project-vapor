@@ -120,12 +120,21 @@ namespace Vapor {
     };
 
     // ============================================================================
-    // Trigger Volume (ECS-owned)
+    // Trigger Volume (ECS-owned) - Pure data, no callbacks
     // ============================================================================
     struct TriggerVolumeComponent {
         TriggerHandle trigger;
-        std::function<void(entt::entity)> onEnter;
-        std::function<void(entt::entity)> onExit;
+    };
+
+    // Event components emitted by TriggerSystem when entities enter/exit triggers
+    struct TriggerEnterEvent {
+        entt::entity triggerEntity;  // The trigger volume entity
+        entt::entity otherEntity;    // The entity that entered
+    };
+
+    struct TriggerExitEvent {
+        entt::entity triggerEntity;  // The trigger volume entity
+        entt::entity otherEntity;    // The entity that exited
     };
 
     // 2D Sprite rendering component
