@@ -544,7 +544,7 @@ auto main(int argc, char* args[]) -> int {
                     fmt::print("Physics Debug Renderer: {}\n", physics->isDebugEnabled() ? "Enabled" : "Disabled");
                 }
                 if (e.key.scancode == SDL_SCANCODE_RETURN) {
-                    ScrollTextQueueSystem::advance(registry);
+                    registry.view<ScrollTextQueueComponent>().each([](auto& q) { q.advanceRequested = true; });
                 }
                 if (e.key.scancode == SDL_SCANCODE_F6) {
                     auto* lb = PageSystem::getPage<LetterboxPage>(registry, PageID::Letterbox);
@@ -563,15 +563,19 @@ auto main(int argc, char* args[]) -> int {
                         auto& q = view.get<SubtitleQueueComponent>(entity);
                         auto& fsm = view.get<Vapor::FSMStateComponent>(entity);
                         if (q.currentIndex >= (int)q.queue.size() - 1 && fsm.currentState == SubtitleStates::Idle) {
-                            SubtitleQueueHelper::restart(registry);
+                            q.restartRequested = true;
                             fmt::print("Subtitles restarted\n");
                         } else {
-                            SubtitleQueueHelper::advance(registry);
+                            q.advanceRequested = true;
                         }
                     }
                 }
                 if (e.key.scancode == SDL_SCANCODE_F8) {
-                    ChapterTitleTriggerSystem::request(registry, "Chapter I", "The Beginning");
+                    registry.view<ChapterTitleTriggerComponent>().each([](auto& t) {
+                        t.number = "Chapter I";
+                        t.title = "The Beginning";
+                        t.showRequested = true;
+                    });
                     fmt::print("Chapter title requested\n");
                 }
                 break;
@@ -626,6 +630,7 @@ auto main(int argc, char* args[]) -> int {
         SubtitleInputSystem::update(registry);
         SubtitlePageSensorSystem::update(registry);
         SubtitleTimerSystem::update(registry, deltaTime);
+        Vapor::FSMInitSystem::update(registry);
         Vapor::FSMSystem::update(registry, deltaTime);
         SubtitleActionSystem::update(registry);
         ScrollTextQueueSystem::update(registry);

@@ -117,6 +117,7 @@ struct SubtitleQueueComponent {
     std::vector<SubtitleEntry> queue;
     int currentIndex = -1;
     bool advanceRequested = false;
+    bool restartRequested = false;  // New: handled by SubtitleInputSystem
     bool autoAdvance = true;
     float displayTimer = 0.0f;
 };

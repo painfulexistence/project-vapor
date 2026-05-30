@@ -322,7 +322,7 @@ public:
 //   4. FSMSystem::update        - process events, emit FSMStateChangeEvent
 //   5. SubtitleActionSystem     - respond to FSMStateChangeEvent, call PageSystem
 
-// Detects advance requests and triggers showing next subtitle
+// Detects advance/restart requests and triggers showing next subtitle
 class SubtitleInputSystem {
 public:
     static void update(entt::registry& reg) {
@@ -331,6 +331,15 @@ public:
             auto& q = view.get<SubtitleQueueComponent>(entity);
             auto& fsm = view.get<Vapor::FSMStateComponent>(entity);
             auto& events = view.get<Vapor::FSMEventQueue>(entity);
+
+            // Handle restart request
+            if (q.restartRequested) {
+                q.restartRequested = false;
+                q.currentIndex = -1;
+                q.advanceRequested = true;
+                fsm.currentState = SubtitleStates::Idle;
+                fsm.stateTime = 0.0f;
+            }
 
             if (fsm.currentState != SubtitleStates::Idle) continue;
 
@@ -426,28 +435,6 @@ public:
     }
 };
 
-// Helper class for restart/advance operations
-class SubtitleQueueHelper {
-public:
-    static void restart(entt::registry& reg) {
-        auto view = reg.view<SubtitleQueueComponent, Vapor::FSMStateComponent>();
-        for (auto entity : view) {
-            auto& q = view.get<SubtitleQueueComponent>(entity);
-            auto& fsm = view.get<Vapor::FSMStateComponent>(entity);
-            q.currentIndex = -1;
-            q.advanceRequested = true;
-            fsm.currentState = SubtitleStates::Idle;
-            fsm.stateTime = 0.0f;
-        }
-    }
-
-    static void advance(entt::registry& reg) {
-        auto view = reg.view<SubtitleQueueComponent>();
-        for (auto entity : view)
-            view.get<SubtitleQueueComponent>(entity).advanceRequested = true;
-    }
-};
-
 class ScrollTextQueueSystem {
 public:
     static void update(entt::registry& reg) {
@@ -472,12 +459,6 @@ public:
             }
         }
     }
-
-    static void advance(entt::registry& reg) {
-        auto view = reg.view<ScrollTextQueueComponent>();
-        for (auto entity : view)
-            view.get<ScrollTextQueueComponent>(entity).advanceRequested = true;
-    }
 };
 
 class ChapterTitleTriggerSystem {
@@ -493,16 +474,6 @@ public:
                 t.showRequested = false;
                 page->display(t.number, t.title);
             }
-        }
-    }
-
-    static void request(entt::registry& reg, const std::string& number, const std::string& title) {
-        auto view = reg.view<ChapterTitleTriggerComponent>();
-        for (auto entity : view) {
-            auto& t = view.get<ChapterTitleTriggerComponent>(entity);
-            t.number = number;
-            t.title = title;
-            t.showRequested = true;
         }
     }
 };

@@ -6,25 +6,36 @@
 namespace Vapor {
 
 // ============================================================
+// FSM Init System - automatically initializes FSM for entities
+// ============================================================
+// Detects entities with FSMDefinition but no FSMStateComponent,
+// and initializes them. Run before FSMSystem::update().
+
+class FSMInitSystem {
+public:
+    static void update(entt::registry& registry) {
+        auto view = registry.view<FSMDefinition>(entt::exclude<FSMStateComponent>);
+
+        for (auto entity : view) {
+            auto& def = view.get<FSMDefinition>(entity);
+            auto& state = registry.emplace<FSMStateComponent>(entity);
+            state.currentState = def.initialState;
+            state.stateTime = 0.0f;
+            state.totalTime = 0.0f;
+
+            // Emit initial state enter event
+            registry.emplace_or_replace<FSMStateChangeEvent>(entity,
+                FSMStateChangeEvent{ def.initialState, def.initialState, 0.0f });
+        }
+    }
+};
+
+// ============================================================
 // FSM System - state machine update logic
 // ============================================================
 
 class FSMSystem {
 public:
-    /**
-     * Initialize FSM for an entity.
-     */
-    static void init(entt::registry& registry, entt::entity entity, const FSMDefinition& def) {
-        auto& state = registry.get_or_emplace<FSMStateComponent>(entity);
-        state.currentState = def.initialState;
-        state.stateTime = 0.0f;
-        state.totalTime = 0.0f;
-
-        // Emit initial state enter event
-        registry.emplace_or_replace<FSMStateChangeEvent>(entity,
-            FSMStateChangeEvent{ def.initialState, def.initialState, 0.0f });
-    }
-
     /**
      * Main FSM update system.
      *
@@ -100,16 +111,10 @@ public:
 
 class FSMEventHelper {
 public:
-    /**
-     * Send an event to a specific entity's FSM.
-     */
     static void send(entt::registry& registry, entt::entity entity, const std::string& event) {
         registry.get_or_emplace<FSMEventQueue>(entity).push(event);
     }
 
-    /**
-     * Broadcast an event to all entities with FSMEventQueue.
-     */
     static void broadcast(entt::registry& registry, const std::string& event) {
         auto view = registry.view<FSMEventQueue>();
         for (auto entity : view) {

@@ -15,32 +15,26 @@ namespace Vapor {
 //     physics->setBodyUserData(body, static_cast<Uint64>(entt::to_integral(entity)));
 //
 // This system will:
-//   1. Pop trigger events from Physics3D
-//   2. Resolve BodyHandle → entity via getBodyUserData
-//   3. Emit TriggerEnterEvent / TriggerExitEvent components
+//   1. Clear previous frame's trigger events
+//   2. Pop trigger events from Physics3D
+//   3. Resolve BodyHandle → entity via getBodyUserData
+//   4. Emit TriggerEnterEvent / TriggerExitEvent components
 //
 
 class TriggerSystem {
 public:
-    /**
-     * Clear previous frame's trigger events.
-     * Call at the start of the frame before update().
-     */
-    static void clearEvents(entt::registry& registry) {
+    static void update(entt::registry& registry, Physics3D* physics) {
+        // 1. Clear previous frame's events
         registry.clear<TriggerEnterEvent>();
         registry.clear<TriggerExitEvent>();
-    }
 
-    /**
-     * Process physics trigger events and emit ECS event components.
-     */
-    static void update(entt::registry& registry, Physics3D* physics) {
         if (!physics) return;
 
+        // 2. Pop trigger events from physics
         auto events = physics->popTriggerEvents();
 
         for (const auto& evt : events) {
-            // Resolve handles to entities via userData
+            // 3. Resolve handles to entities via userData
             auto triggerEntityRaw = physics->getBodyUserData(evt.triggerBody);
             auto otherEntityRaw = physics->getBodyUserData(evt.otherBody);
 
@@ -53,8 +47,8 @@ public:
             // Validate entities still exist
             if (!registry.valid(triggerEntity) || !registry.valid(otherEntity)) continue;
 
+            // 4. Emit event components
             if (evt.isEnter) {
-                // Create event entity to hold the TriggerEnterEvent
                 auto eventEntity = registry.create();
                 registry.emplace<TriggerEnterEvent>(eventEntity,
                     TriggerEnterEvent{ triggerEntity, otherEntity });
