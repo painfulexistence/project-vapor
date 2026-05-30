@@ -1,70 +1,82 @@
 #include "asset_serializer.hpp"
-#include <fmt/core.h>
 #include <SDL3/SDL_stdinc.h>
 #include <SDL3/SDL_timer.h>
+#include <fmt/core.h>
 #include <fstream>
-#include <unordered_map>
 #include <stdexcept>
+#include <unordered_map>
 
+using namespace Vapor;
 
 void AssetSerializer::serializeScene(const std::shared_ptr<Scene>& scene, const std::string& path) {
     auto start = SDL_GetTicks();
 
-    std::ofstream file(path, std::ios::binary);
-    if (!file.is_open()) {
-        throw std::runtime_error(fmt::format("Failed to open file for writing: {}", path));
-    }
-
-    cereal::BinaryOutputArchive archive(file);
-    
-    // Write format version
-    const Uint32 FORMAT_VERSION = 2; // Increment when format changes
-    archive(FORMAT_VERSION);
-    
-    // archive(scene.name);
-    // Note: vertices and indices are now stored per-mesh, not in Scene
-
-    std::unordered_map<std::shared_ptr<Image>, Uint32> imageIDs;
-    Uint32 nextImageID = 0;
-    archive(static_cast<Uint32>(scene->images.size()));
-    for (const auto& image : scene->images) {
-        if (image && imageIDs.find(image) == imageIDs.end()) {
-            archive(nextImageID);
-            serializeImage(archive, image);
-            imageIDs[image] = nextImageID++;
+    {
+        std::ofstream file(path, std::ios::binary);
+        if (!file.is_open()) {
+            throw std::runtime_error(fmt::format("Failed to open file for writing: {}", path));
         }
-    }
 
-    std::unordered_map<std::shared_ptr<Material>, Uint32> materialIDs;
-    Uint32 nextMaterialID = 0;
-    archive(static_cast<Uint32>(scene->materials.size()));
-    for (const auto& material : scene->materials) {
-        if (material && materialIDs.find(material) == materialIDs.end()) {
-            archive(nextMaterialID);
-            serializeMaterial(archive, material, imageIDs);
-            materialIDs[material] = nextMaterialID++;
+        cereal::BinaryOutputArchive archive(file);
+        archive(SCENE_FORMAT_VERSION);
+        archive(scene->name);
+        archive(scene->vertices);
+        archive(scene->indices);
+
+        std::unordered_map<std::shared_ptr<Image>, Uint32> imageIDs;
+        std::vector<std::shared_ptr<Image>> uniqueImages;
+        for (const auto& img : scene->images) {
+            if (img && imageIDs.find(img) == imageIDs.end()) {
+                imageIDs[img] = static_cast<Uint32>(uniqueImages.size());
+                uniqueImages.push_back(img);
+            }
         }
-    }
 
-    archive(static_cast<Uint32>(scene->directionalLights.size()));
-    for (const auto& light : scene->directionalLights) {
-        serializeDirectionalLight(archive, light);
-    }
+        archive(static_cast<Uint32>(uniqueImages.size()));
+        for (Uint32 i = 0; i < uniqueImages.size(); ++i) {
+            archive(i);
+            serializeImage(archive, uniqueImages[i]);
+        }
 
-    archive(static_cast<Uint32>(scene->pointLights.size()));
-    for (const auto& light : scene->pointLights) {
-        serializePointLight(archive, light);
-    }
+        std::unordered_map<std::shared_ptr<Material>, Uint32> materialIDs;
+        std::vector<std::shared_ptr<Material>> uniqueMaterials;
+        for (const auto& mat : scene->materials) {
+            if (mat && materialIDs.find(mat) == materialIDs.end()) {
+                materialIDs[mat] = static_cast<Uint32>(uniqueMaterials.size());
+                uniqueMaterials.push_back(mat);
+            }
+        }
 
-    archive(static_cast<Uint32>(scene->nodes.size()));
-    for (const auto& node : scene->nodes) {
-        serializeNode(archive, node, materialIDs);
-    }
+        archive(static_cast<Uint32>(uniqueMaterials.size()));
+        for (Uint32 i = 0; i < uniqueMaterials.size(); ++i) {
+            archive(i);
+            serializeMaterial(archive, uniqueMaterials[i], imageIDs);
+        }
 
+        archive(static_cast<Uint32>(scene->directionalLights.size()));
+        for (const auto& light : scene->directionalLights) {
+            serializeDirectionalLight(archive, light);
+        }
+
+        archive(static_cast<Uint32>(scene->pointLights.size()));
+        for (const auto& light : scene->pointLights) {
+            serializePointLight(archive, light);
+        }
+
+        archive(static_cast<Uint32>(scene->stagedMeshes.size()));
+        for (size_t i = 0; i < scene->stagedMeshes.size(); ++i) {
+            serializeMesh(archive, scene->stagedMeshes[i], materialIDs);
+            glm::mat4 t = i < scene->stagedMeshTransforms.size()
+                ? scene->stagedMeshTransforms[i]
+                : glm::identity<glm::mat4>();
+            archive(t);
+        }
+
+    }// Ensure archive is flushed
     fmt::print("Scene serialized to: {} in {} ms\n", path, SDL_GetTicks() - start);
 }
 
-std::shared_ptr<Scene> AssetSerializer::deserializeScene(const std::string& path) {
+auto AssetSerializer::deserializeScene(const std::string& path) -> std::shared_ptr<Scene> {
     auto start = SDL_GetTicks();
 
     std::ifstream file(path, std::ios::binary);
@@ -72,29 +84,25 @@ std::shared_ptr<Scene> AssetSerializer::deserializeScene(const std::string& path
         throw std::runtime_error(fmt::format("Failed to open file for reading: {}", path));
     }
 
+    cereal::BinaryInputArchive archive(file);
+    uint32_t version = 0;
     try {
-        cereal::BinaryInputArchive archive(file);
-        
-        // Read format version
-        Uint32 formatVersion = 0;
-        try {
-            archive(formatVersion);
-        } catch (...) {
-            // Old format files don't have version - treat as version 1
-            formatVersion = 1;
-            // Reset file position if possible (though cereal doesn't support this easily)
-            // Instead, we'll throw a clear error
-            throw std::runtime_error("Old format file detected (no version header). Please delete .vscene and .vscene_optimized cache files and reload.");
-        }
-        
-        if (formatVersion < 2) {
-            throw std::runtime_error(fmt::format("Unsupported file format version: {} (current: 2). Please delete .vscene and .vscene_optimized cache files and reload.", formatVersion));
-        }
-        
-        auto scene = std::make_shared<Scene>();
-        // archive(scene->name);
-        // Note: vertices and indices are now stored per-mesh, not in Scene
-        // Old format files had these fields - they are no longer serialized
+        archive(version);
+    } catch (...) {
+        throw std::runtime_error(fmt::format(
+            "Failed to read scene format version from: {}. Delete the cache file and re-run.", path
+        ));
+    }
+    if (version != SCENE_FORMAT_VERSION) {
+        throw std::runtime_error(fmt::format(
+            "Scene cache version mismatch in {}: expected {}, got {}. Delete the cache file and re-run.",
+            path, SCENE_FORMAT_VERSION, version
+        ));
+    }
+    auto scene = std::make_shared<Scene>();
+    archive(scene->name);
+    archive(scene->vertices);
+    archive(scene->indices);
 
     Uint32 imageCount;
     archive(imageCount);
@@ -140,83 +148,26 @@ std::shared_ptr<Scene> AssetSerializer::deserializeScene(const std::string& path
         scene->pointLights.push_back(light);
     }
 
-    Uint32 nodeCount;
-    archive(nodeCount);
-    scene->nodes.reserve(nodeCount);
-    for (Uint32 i = 0; i < nodeCount; ++i) {
-        scene->nodes.push_back(deserializeNode(archive, materials));
+    Uint32 meshCount;
+    archive(meshCount);
+    scene->stagedMeshes.reserve(meshCount);
+    scene->stagedMeshTransforms.reserve(meshCount);
+    for (Uint32 i = 0; i < meshCount; ++i) {
+        scene->stagedMeshes.push_back(deserializeMesh(archive, materials));
+        glm::mat4 t;
+        archive(t);
+        scene->stagedMeshTransforms.push_back(t);
     }
 
-        scene->update(0.0f); // making sure world transform is updated
-
-        fmt::print("Scene deserialized from: {} in {} ms\n", path, SDL_GetTicks() - start);
-        return scene;
-    } catch (const std::exception& e) {
-        throw std::runtime_error(fmt::format("Failed to deserialize scene from {}: {}. The file may be in an old format or corrupted. Please delete .vscene and .vscene_optimized cache files and reload the scene.", path, e.what()));
-    }
+    fmt::print("Scene deserialized from: {} in {} ms\n", path, SDL_GetTicks() - start);
+    return scene;
 }
 
-void AssetSerializer::serializeNode(cereal::BinaryOutputArchive& archive, const std::shared_ptr<Node>& node,
-                                                  const std::unordered_map<std::shared_ptr<Material>, Uint32>& materialIDs) {
-    if (!node) {
-        archive(false);
-        return;
-    }
-    archive(true);
-    // archive(node->name);
-    archive(node->localTransform);
-    if (!node->meshGroup) {
-        archive(false);
-    } else {
-        archive(true);
-        // archive(node->meshGroup->name);
-        archive(static_cast<Uint32>(node->meshGroup->meshes.size()));
-        for (const auto& mesh : node->meshGroup->meshes) {
-            serializeMesh(archive, mesh, materialIDs);
-        }
-    }
-    archive(static_cast<Uint32>(node->children.size()));
-    for (const auto& child : node->children) {
-        serializeNode(archive, child, materialIDs);
-    }
-}
-
-std::shared_ptr<Node> AssetSerializer::deserializeNode(cereal::BinaryInputArchive& archive,
-                                                                     const std::unordered_map<Uint32, std::shared_ptr<Material>>& materials) {
-    bool isNotNull;
-    archive(isNotNull);
-    if (!isNotNull) {
-        return nullptr;
-    }
-    auto node = std::make_shared<Node>();
-    // archive(node->name);
-    archive(node->localTransform);
-    bool hasMeshGroup;
-    archive(hasMeshGroup);
-    if (!hasMeshGroup) {
-        node->meshGroup = nullptr;
-    } else {
-        // archive(node->meshGroup->name);
-        auto meshGroup = std::make_shared<MeshGroup>();
-        Uint32 meshCount;
-        archive(meshCount);
-        meshGroup->meshes.reserve(meshCount);
-        for (Uint32 i = 0; i < meshCount; ++i) {
-            meshGroup->meshes.push_back(deserializeMesh(archive, materials));
-        }
-        node->meshGroup = meshGroup;
-    }
-    Uint32 childCount;
-    archive(childCount);
-    node->children.reserve(childCount);
-    for (Uint32 i = 0; i < childCount; ++i) {
-        node->children.push_back(deserializeNode(archive, materials));
-    }
-    return node;
-}
-
-void AssetSerializer::serializeMaterial(cereal::BinaryOutputArchive& archive, const std::shared_ptr<Material>& material,
-                                                   const std::unordered_map<std::shared_ptr<Image>, Uint32>& imageIDs) {
+void AssetSerializer::serializeMaterial(
+    cereal::BinaryOutputArchive& archive,
+    const std::shared_ptr<Material>& material,
+    const std::unordered_map<std::shared_ptr<Image>, Uint32>& imageIDs
+) {
     if (!material) {
         archive(false);
         return;
@@ -242,7 +193,7 @@ void AssetSerializer::serializeMaterial(cereal::BinaryOutputArchive& archive, co
     archive(material->clearcoat);
     archive(material->clearcoatGloss);
 
-    auto serializeImageID = [&](const std::shared_ptr<Image>& image) {
+    auto serializeImageID = [&](const std::shared_ptr<Image>& image) -> void {
         if (!image) {
             archive(static_cast<Uint32>(-1));
         } else {
@@ -264,8 +215,9 @@ void AssetSerializer::serializeMaterial(cereal::BinaryOutputArchive& archive, co
     // serializeImageID(material->displacementMap);
 }
 
-std::shared_ptr<Material> AssetSerializer::deserializeMaterial(cereal::BinaryInputArchive& archive,
-                                                                          const std::unordered_map<Uint32, std::shared_ptr<Image>>& images) {
+auto AssetSerializer::deserializeMaterial(
+    cereal::BinaryInputArchive& archive, const std::unordered_map<Uint32, std::shared_ptr<Image>>& images
+) -> std::shared_ptr<Material> {
     bool isNotNull;
     archive(isNotNull);
     if (!isNotNull) {
@@ -334,7 +286,7 @@ void AssetSerializer::serializeImage(cereal::BinaryOutputArchive& archive, const
     archive(image->byteArray);
 }
 
-std::shared_ptr<Image> AssetSerializer::deserializeImage(cereal::BinaryInputArchive& archive) {
+auto AssetSerializer::deserializeImage(cereal::BinaryInputArchive& archive) -> std::shared_ptr<Image> {
     bool isNotNull;
     archive(isNotNull);
     if (!isNotNull) {
@@ -342,45 +294,20 @@ std::shared_ptr<Image> AssetSerializer::deserializeImage(cereal::BinaryInputArch
     }
     auto image = std::make_shared<Image>();
 
-    try {
-        archive(image->uri);
-        
-        // Validate URI size (sanity check)
-        if (image->uri.size() > 4096) {
-            throw std::runtime_error(fmt::format("Invalid URI size: {} (file may be corrupted or in old format). Please delete .vscene cache files and reload.", image->uri.size()));
-        }
-        
-        archive(image->width);
-        archive(image->height);
-        archive(image->channelCount);
-        
-        // Validate dimensions before reading byteArray
-        if (image->width == 0 || image->height == 0 || image->channelCount == 0 || 
-            image->width > 65536 || image->height > 65536 || image->channelCount > 16) {
-            throw std::runtime_error(fmt::format("Invalid image dimensions: {}x{}x{} (file may be corrupted or in old format). Please delete .vscene cache files and reload.", 
-                image->width, image->height, image->channelCount));
-        }
-        
-        archive(image->byteArray);
-        
-        // Validate byteArray size matches expected size
-        size_t expectedSize = static_cast<size_t>(image->width) * image->height * image->channelCount;
-        if (image->byteArray.size() != expectedSize && image->byteArray.size() > 0) {
-            // Allow some tolerance for padding, but not huge differences
-            if (image->byteArray.size() > expectedSize * 2 || image->byteArray.size() < expectedSize / 2) {
-                throw std::runtime_error(fmt::format("Image byteArray size mismatch: expected {}, got {} (file may be corrupted). Please delete .vscene cache files and reload.", 
-                    expectedSize, image->byteArray.size()));
-            }
-        }
-    } catch (const std::exception& e) {
-        throw std::runtime_error(fmt::format("Failed to deserialize image: {}. The serialized file may be in an old format or corrupted. Please delete .vscene and .vscene_optimized cache files and reload the scene.", e.what()));
-    }
+    archive(image->uri);
+    archive(image->width);
+    archive(image->height);
+    archive(image->channelCount);
+    archive(image->byteArray);
 
     return image;
 }
 
-void AssetSerializer::serializeMesh(cereal::BinaryOutputArchive& archive, const std::shared_ptr<Mesh>& mesh,
-                                                   const std::unordered_map<std::shared_ptr<Material>, Uint32>& materialIDs) {
+void AssetSerializer::serializeMesh(
+    cereal::BinaryOutputArchive& archive,
+    const std::shared_ptr<Mesh>& mesh,
+    const std::unordered_map<std::shared_ptr<Material>, Uint32>& materialIDs
+) {
     if (!mesh) {
         archive(false);
         return;
@@ -395,9 +322,13 @@ void AssetSerializer::serializeMesh(cereal::BinaryOutputArchive& archive, const 
     archive(mesh->vertices);
     archive(mesh->indices);
     archive(static_cast<int>(mesh->primitiveMode));
+
+    archive(mesh->vertexOffset);
+    archive(mesh->indexOffset);
+    archive(mesh->vertexCount);
+    archive(mesh->indexCount);
     archive(mesh->localAABBMin);
     archive(mesh->localAABBMax);
-    // Note: vertexOffset, indexOffset, vertexCount, indexCount are now managed by Renderer layer
 
     if (mesh->material) {
         auto it = materialIDs.find(mesh->material);
@@ -412,8 +343,9 @@ void AssetSerializer::serializeMesh(cereal::BinaryOutputArchive& archive, const 
     }
 }
 
-std::shared_ptr<Mesh> AssetSerializer::deserializeMesh(cereal::BinaryInputArchive& archive,
-                                                                     const std::unordered_map<Uint32, std::shared_ptr<Material>>& materials) {
+auto AssetSerializer::deserializeMesh(
+    cereal::BinaryInputArchive& archive, const std::unordered_map<Uint32, std::shared_ptr<Material>>& materials
+) -> std::shared_ptr<Mesh> {
     bool isNotNull;
     archive(isNotNull);
     if (!isNotNull) {
@@ -433,13 +365,14 @@ std::shared_ptr<Mesh> AssetSerializer::deserializeMesh(cereal::BinaryInputArchiv
     int primitiveModeInt;
     archive(primitiveModeInt);
     mesh->primitiveMode = static_cast<PrimitiveMode>(primitiveModeInt);
-    
-    // Note: vertexOffset, indexOffset, vertexCount, indexCount are no longer serialized
-    // They are now managed by Renderer layer at runtime
-    // Old format files will need to be regenerated
-    
+
+    archive(mesh->vertexOffset);
+    archive(mesh->indexOffset);
+    archive(mesh->vertexCount);
+    archive(mesh->indexCount);
     archive(mesh->localAABBMin);
     archive(mesh->localAABBMax);
+    mesh->isGeometryDirty = false;// prevent AABB updating
 
     bool hasMaterial;
     archive(hasMaterial);
@@ -463,7 +396,7 @@ void AssetSerializer::serializeDirectionalLight(cereal::BinaryOutputArchive& arc
     archive(light.intensity);
 }
 
-DirectionalLight AssetSerializer::deserializeDirectionalLight(cereal::BinaryInputArchive& archive) {
+auto AssetSerializer::deserializeDirectionalLight(cereal::BinaryInputArchive& archive) -> DirectionalLight {
     DirectionalLight light;
     archive(light.direction);
     archive(light.color);
@@ -478,7 +411,7 @@ void AssetSerializer::serializePointLight(cereal::BinaryOutputArchive& archive, 
     archive(light.radius);
 }
 
-PointLight AssetSerializer::deserializePointLight(cereal::BinaryInputArchive& archive) {
+auto AssetSerializer::deserializePointLight(cereal::BinaryInputArchive& archive) -> PointLight {
     PointLight light;
     archive(light.position);
     archive(light.color);

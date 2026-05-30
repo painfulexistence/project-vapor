@@ -15,13 +15,23 @@
       ]
     },
     "enkits",
-    "sdl3",
+    "tracy",
+    {
+      "name": "sdl3",
+      "features": [
+        "vulkan"
+      ]
+    },
     "vulkan",
     {
       "name": "glslang",
       "features": [
         "tools"
       ]
-    }
+    },
+    "rmlui",
+    "entt",
+    "catch2",
+    "nlohmann-json"
   ]
 }

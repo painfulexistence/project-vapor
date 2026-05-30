@@ -1,31 +1,18 @@
 #include "scene.hpp"
+#include "fluid_volume.hpp"
+
+using namespace Vapor;
 
 #include <SDL3/SDL_log.h>
 #include <fmt/core.h>
-#include <functional>
+
+using namespace Vapor;
 
 void Scene::print() {
     fmt::print("Scene {}\n", name);
     fmt::print(" Images: {}\n", images.size());
     fmt::print(" Materials: {}\n", materials.size());
-    // Note: Scene no longer stores vertices/indices - calculate from meshes
-    size_t totalVertices = 0;
-    size_t totalIndices = 0;
-    const std::function<void(const std::shared_ptr<Node>&)> countGeometry = [&](const std::shared_ptr<Node>& node) {
-        if (node->meshGroup) {
-            for (const auto& mesh : node->meshGroup->meshes) {
-                totalVertices += mesh->vertices.size();
-                totalIndices += mesh->indices.size();
-            }
-        }
-        for (const auto& child : node->children) {
-            countGeometry(child);
-        }
-    };
-    for (const auto& node : nodes) {
-        countGeometry(node);
-    }
-    fmt::print(" Total vertices: {}, total indices: {}\n", totalVertices, totalIndices);
+    fmt::print(" Total vertices: {}, total indices: {}\n", vertices.size(), indices.size());
     fmt::print("--------------------------------\n");
     for (const auto& node : nodes) {
         printNode(node);
@@ -39,11 +26,22 @@ void Scene::printNode(const std::shared_ptr<Node>& node) {
         fmt::print("   Mesh group {} ({} meshes)\n", node->meshGroup->name, node->meshGroup->meshes.size());
         for (const auto& mesh : node->meshGroup->meshes) {
             fmt::print("    Mesh\n");
-            fmt::print("     vertexCount={}, indexCount={}\n",
-                mesh->vertices.size(), mesh->indices.size());
-            fmt::print("     AABB: min=({}, {}, {}), max=({}, {}, {})\n",
-                mesh->worldAABBMin.x, mesh->worldAABBMin.y, mesh->worldAABBMin.z,
-                mesh->worldAABBMax.x, mesh->worldAABBMax.y, mesh->worldAABBMax.z);
+            fmt::print(
+                "     vertexOffset={}, indexOffset={}, vertexCount={}, indexCount={}\n",
+                mesh->vertexOffset,
+                mesh->indexOffset,
+                mesh->vertexCount,
+                mesh->indexCount
+            );
+            fmt::print(
+                "     AABB: min=({}, {}, {}), max=({}, {}, {})\n",
+                mesh->worldAABBMin.x,
+                mesh->worldAABBMin.y,
+                mesh->worldAABBMin.z,
+                mesh->worldAABBMax.x,
+                mesh->worldAABBMax.y,
+                mesh->worldAABBMax.z
+            );
             // SDL_Log("Vertex count: %zu", mesh->vertices.size());
             // if (mesh->indices.size() > 0) {
             //     SDL_Log("Index count: %zu", mesh->indices.size());
@@ -70,7 +68,7 @@ void Scene::printNode(const std::shared_ptr<Node>& node) {
     }
 }
 
-std::shared_ptr<Node> Scene::createNode(const std::string& name, const glm::mat4& transform) {
+auto Scene::createNode(const std::string& name, const glm::mat4& transform) -> std::shared_ptr<Node> {
     auto node = std::make_shared<Node>();
     node->name = name;
     node->localTransform = transform;
@@ -82,7 +80,7 @@ void Scene::addNode(std::shared_ptr<Node> node) {
     nodes.push_back(node);
 }
 
-std::shared_ptr<Node> Scene::findNode(const std::string& name) {
+auto Scene::findNode(const std::string& name) -> std::shared_ptr<Node> {
     for (const auto& node : nodes) {
         auto result = findNodeInHierarchy(name, node);
         if (result) {
@@ -92,7 +90,7 @@ std::shared_ptr<Node> Scene::findNode(const std::string& name) {
     return nullptr;
 }
 
-std::shared_ptr<Node> Scene::findNodeInHierarchy(const std::string& name, const std::shared_ptr<Node>& node) {
+auto Scene::findNodeInHierarchy(const std::string& name, const std::shared_ptr<Node>& node) -> std::shared_ptr<Node> {
     if (node->name == name) {
         return node;
     }
@@ -112,40 +110,60 @@ void Scene::update(float dt) {
     }
 }
 
-void Scene::updateNode(const std::shared_ptr<Node>& node, const glm::mat4& parentTransform) {
-    // Always update worldTransform (optimization: only update if dirty can be done later)
-    // For now, always update to ensure worldTransform is correct
-    node->worldTransform = parentTransform * node->localTransform;
-
-    if (node->meshGroup) {
-        for (const auto& mesh : node->meshGroup->meshes) {
-            // update local AABB if needed
-            // Note: Mesh no longer has isGeometryDirty flag - always recalculate if needed
-            // For now, we'll recalculate AABB each frame (can be optimized later)
-            mesh->calculateLocalAABB();
-            std::array<glm::vec3, 8> corners = {
-                glm::vec3(mesh->localAABBMin.x, mesh->localAABBMin.y, mesh->localAABBMin.z),
-                glm::vec3(mesh->localAABBMin.x, mesh->localAABBMin.y, mesh->localAABBMax.z),
-                glm::vec3(mesh->localAABBMin.x, mesh->localAABBMax.y, mesh->localAABBMin.z),
-                glm::vec3(mesh->localAABBMax.x, mesh->localAABBMin.y, mesh->localAABBMin.z),
-                glm::vec3(mesh->localAABBMin.x, mesh->localAABBMax.y, mesh->localAABBMax.z),
-                glm::vec3(mesh->localAABBMax.x, mesh->localAABBMin.y, mesh->localAABBMax.z),
-                glm::vec3(mesh->localAABBMax.x, mesh->localAABBMax.y, mesh->localAABBMin.z),
-                glm::vec3(mesh->localAABBMax.x, mesh->localAABBMax.y, mesh->localAABBMax.z)
-            };
-            mesh->worldAABBMin = glm::vec3(FLT_MAX);
-            mesh->worldAABBMax = glm::vec3(-FLT_MAX);
-            for (const auto& corner : corners) {
-                glm::vec3 transformed = node->worldTransform * glm::vec4(corner, 1.0f);
-                mesh->worldAABBMin = glm::min(mesh->worldAABBMin, transformed);
-                mesh->worldAABBMax = glm::max(mesh->worldAABBMax, transformed);
+void Scene::updateNode(const std::shared_ptr<Node>& node, const glm::mat4& parentTransform, bool parentDirty) {
+    bool dirty = node->isTransformDirty || parentDirty;
+    if (dirty) {
+        node->worldTransform = parentTransform * node->localTransform;
+        if (node->meshGroup) {
+            for (const auto& mesh : node->meshGroup->meshes) {
+                // update local AABB if geometry is new or changed
+                if (mesh->isGeometryDirty) {
+                    mesh->calculateLocalAABB();
+                    mesh->isGeometryDirty = false;
+                }
+                std::array<glm::vec3, 8> corners = {
+                    glm::vec3(mesh->localAABBMin.x, mesh->localAABBMin.y, mesh->localAABBMin.z),
+                    glm::vec3(mesh->localAABBMin.x, mesh->localAABBMin.y, mesh->localAABBMax.z),
+                    glm::vec3(mesh->localAABBMin.x, mesh->localAABBMax.y, mesh->localAABBMin.z),
+                    glm::vec3(mesh->localAABBMax.x, mesh->localAABBMin.y, mesh->localAABBMin.z),
+                    glm::vec3(mesh->localAABBMin.x, mesh->localAABBMax.y, mesh->localAABBMax.z),
+                    glm::vec3(mesh->localAABBMax.x, mesh->localAABBMin.y, mesh->localAABBMax.z),
+                    glm::vec3(mesh->localAABBMax.x, mesh->localAABBMax.y, mesh->localAABBMin.z),
+                    glm::vec3(mesh->localAABBMax.x, mesh->localAABBMax.y, mesh->localAABBMax.z)
+                };
+                mesh->worldAABBMin = glm::vec3(FLT_MAX);
+                mesh->worldAABBMax = glm::vec3(-FLT_MAX);
+                for (const auto& corner : corners) {
+                    glm::vec3 transformed = node->worldTransform * glm::vec4(corner, 1.0f);
+                    mesh->worldAABBMin = glm::min(mesh->worldAABBMin, transformed);
+                    mesh->worldAABBMax = glm::max(mesh->worldAABBMax, transformed);
+                }
             }
         }
+        node->isTransformDirty = false;
     }
-    node->isTransformDirty = false;
-
     for (const auto& child : node->children) {
-        updateNode(child, node->worldTransform);
+        updateNode(child, node->worldTransform, dirty);
+    }
+}
+
+void Scene::addMesh(std::shared_ptr<Mesh> mesh, const glm::mat4& transform) {
+    mesh->vertexOffset = vertices.size();
+    mesh->indexOffset = indices.size();
+    mesh->vertexCount = mesh->vertices.size();
+    mesh->indexCount = mesh->indices.size();
+    vertices.insert(vertices.end(), mesh->vertices.begin(), mesh->vertices.end());
+    indices.insert(indices.end(), mesh->indices.begin(), mesh->indices.end());
+    stagedMeshes.push_back(mesh);
+    stagedMeshTransforms.push_back(transform);
+    if (mesh->material) {
+        materials.push_back(mesh->material);
+        if (mesh->material->albedoMap) images.push_back(mesh->material->albedoMap);
+        if (mesh->material->normalMap) images.push_back(mesh->material->normalMap);
+        if (mesh->material->metallicMap) images.push_back(mesh->material->metallicMap);
+        if (mesh->material->roughnessMap) images.push_back(mesh->material->roughnessMap);
+        if (mesh->material->occlusionMap) images.push_back(mesh->material->occlusionMap);
+        if (mesh->material->displacementMap) images.push_back(mesh->material->displacementMap);
     }
 }
 
@@ -154,10 +172,17 @@ void Scene::addMeshToNode(std::shared_ptr<Node> node, std::shared_ptr<Mesh> mesh
         node->meshGroup = std::make_shared<MeshGroup>();
         node->meshGroup->name = node->name;
     }
-    // Note: Scene no longer stores merged vertices/indices
-    // Mesh keeps its own geometry data, GPU resource management is handled by Renderer layer
+    mesh->vertexOffset = vertices.size();
+    mesh->indexOffset = indices.size();
+    mesh->vertexCount = mesh->vertices.size();
+    mesh->indexCount = mesh->indices.size();
+    vertices.insert(vertices.end(), mesh->vertices.begin(), mesh->vertices.end());
+    indices.insert(indices.end(), mesh->indices.begin(), mesh->indices.end());
+    // TODO: clean up
+    // mesh->vertices.clear();
+    // mesh->indices.clear();
     node->meshGroup->meshes.push_back(mesh);
-    if (mesh->material) { // TODO: check if material & images are already in the scene
+    if (mesh->material) {// TODO: check if material & images are already in the scene
         materials.push_back(mesh->material);
         if (mesh->material->albedoMap) {
             images.push_back(mesh->material->albedoMap);
@@ -190,3 +215,13 @@ void Scene::addMeshToNode(std::shared_ptr<Node> node, std::shared_ptr<Mesh> mesh
 // auto scene = Scene();
 // auto entity = scene.createNode("Cube", glm::identity<glm::mat4>());
 // scene.addMeshToNode(entity, MeshBuilder::buildCube(1.0f));
+
+auto Scene::createFluidVolume(Physics3D* physics, const FluidVolumeSettings& settings) -> std::shared_ptr<FluidVolume> {
+    auto fluidVolume = std::make_shared<FluidVolume>(physics, settings);
+    fluidVolumes.push_back(fluidVolume);
+    return fluidVolume;
+}
+
+void Scene::addFluidVolume(std::shared_ptr<FluidVolume> fluidVolume) {
+    fluidVolumes.push_back(fluidVolume);
+}

@@ -1,0 +1,106 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>ADR-001: Test Framework — Project Vapor</title>
+  <style>
+    :root {
+      --bg: #0d0d0f; --bg-surface: #141418; --bg-raised: #1c1c22;
+      --border: #2a2a33; --text: #e2e2e8; --text-muted: #7a7a8c;
+      --accent: #7c6af7; --warn: #c97a2f; --ok: #4a9e6a; --danger: #9e4a4a;
+    }
+    * { box-sizing: border-box; margin: 0; padding: 0; }
+    body { background: var(--bg); color: var(--text); font-family: 'Berkeley Mono','JetBrains Mono','Fira Code','Cascadia Code',monospace; font-size: 15px; line-height: 1.75; }
+    nav { background: var(--bg-surface); border-bottom: 1px solid var(--border); padding: 16px 24px; display: flex; align-items: center; justify-content: space-between; }
+    nav .site-title { color: var(--text-muted); text-decoration: none; font-size: 14px; }
+    nav .links { display: flex; gap: 24px; }
+    nav .links a { color: var(--text-muted); text-decoration: none; font-size: 13px; }
+    nav .links a:hover { color: var(--accent); }
+    nav .links a.active { color: var(--accent); }
+    main { max-width: 860px; margin: 0 auto; padding: 48px 24px; }
+    .page-header { margin-bottom: 32px; }
+    .page-header .eyebrow { font-size: 12px; color: var(--text-muted); margin-bottom: 10px; }
+    .page-header .eyebrow a { color: var(--text-muted); text-decoration: none; }
+    .page-header .eyebrow a:hover { color: var(--accent); }
+    .page-header h1 { font-size: 20px; font-weight: 600; margin-bottom: 12px; }
+    .meta-row { display: flex; gap: 24px; font-size: 13px; color: var(--text-muted); margin-bottom: 8px; }
+    .badge { display: inline-block; font-size: 11px; border-radius: 3px; padding: 2px 8px; }
+    .badge-ok { background: rgba(74,158,106,0.15); color: var(--ok); }
+    h2 { font-size: 16px; font-weight: 600; margin: 36px 0 14px; }
+    p { margin-bottom: 14px; }
+    hr { border: none; border-top: 1px solid var(--border); margin: 36px 0; }
+    code { background: var(--bg-raised); border-radius: 3px; padding: 2px 6px; font-size: 13px; }
+    table { width: 100%; border-collapse: collapse; margin-bottom: 20px; font-size: 14px; }
+    thead th { background: var(--bg-raised); color: var(--text-muted); font-size: 11px; text-transform: uppercase; letter-spacing: 0.08em; padding: 10px 14px; text-align: left; border: 1px solid var(--border); }
+    tbody td { padding: 10px 14px; border: 1px solid var(--border); vertical-align: top; }
+    tbody tr:nth-child(even) td { background: var(--bg-raised); }
+    ul { padding-left: 20px; margin-bottom: 14px; }
+    ul li { margin-bottom: 4px; }
+    @media (max-width: 640px) { main { padding: 24px 16px; } }
+  </style>
+</head>
+<body>
+  <nav>
+    <a class="site-title" href="../index.html">Project Vapor</a>
+    <div class="links">
+      <a href="../architecture.html">Architecture</a>
+      <a href="../features.html">Features</a>
+      <a href="../techstack.html">Tech Stack</a>
+      <a href="../roadmap.html">Roadmap</a>
+      <a href="index.html" class="active">ADRs</a>
+    </div>
+  </nav>
+  <main>
+    <div class="page-header">
+      <div class="eyebrow">
+      <a href="index.html">ADRs</a> / ADR-001</div>
+      <h1>ADR-001: Test Framework Selection</h1>
+      <div class="meta-row">
+        <span>2026-04-29</span>
+        <span><span class="badge badge-ok">Adopted</span></span>
+      </div>
+    </div>
+
+    <h2>Context</h2>
+    <p>Project Vapor had no automated tests. The demo application (<code>Vaporware/src/main.cpp</code>, ~25k LOC) was the only validation mechanism. Any refactor had no safety net; correctness could only be verified by manually building and running the demo.</p>
+    <p>The Phoenix Workflow Phase 2 required characterization tests for core engine paths.</p>
+
+    <h2>Decision</h2>
+    <p>Adopt <strong>Catch2 v3</strong> as the test framework.</p>
+
+    <h2>Options Considered</h2>
+    <table>
+      <thead><tr><th>Option</th><th>Pros</th><th>Cons</th></tr></thead>
+      <tbody>
+        <tr><td>GoogleTest</td><td>Widely used, strong fixture support</td><td>Extra install step, slightly more complex CMake integration</td></tr>
+        <tr><td>Catch2 v3</td><td>Simple CMake integration, <code>catch_discover_tests</code> for automatic CTest registration, available via vcpkg</td><td>Slightly different fixture syntax</td></tr>
+        <tr><td>Hand-rolled assertions</td><td>Zero dependencies</td><td>No test report, no CI integration</td></tr>
+      </tbody>
+    </table>
+
+    <h2>Rationale</h2>
+    <ul>
+      <li><code>vcpkg.json</code> requires a single <code>"catch2"</code> entry</li>
+      <li><code>Catch2::Catch2WithMain</code> target eliminates hand-written <code>main()</code></li>
+      <li><code>catch_discover_tests()</code> makes each <code>TEST_CASE</code> a separate CTest entry automatically</li>
+      <li>Test binaries run standalone without CTest</li>
+    </ul>
+
+    <h2>Constraints</h2>
+    <ul>
+      <li>Test targets do <strong>not</strong> link the Vapor library — avoids triggering Metal/Vulkan/Jolt/miniaudio initialization</li>
+      <li>GPU-dependent systems are tested through stubs or not tested in CI</li>
+      <li>Test binaries must run on headless GitHub Actions runners (macos-15)</li>
+    </ul>
+
+    <h2>Consequences</h2>
+    <ul>
+      <li><code>vcpkg.json</code> gains a <code>"catch2"</code> dependency</li>
+      <li>Root <code>CMakeLists.txt</code> gains <code>enable_testing()</code> and <code>add_subdirectory(tests)</code></li>
+      <li><code>tests/CMakeLists.txt</code> defines independent test executables</li>
+      <li><code>CMakePresets.json</code> gains a <code>ci</code> preset for GitHub Actions</li>
+    </ul>
+  </main>
+</body>
+</html>

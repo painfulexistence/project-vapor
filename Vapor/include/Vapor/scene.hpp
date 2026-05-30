@@ -1,30 +1,45 @@
 #pragma once
 #include <SDL3/SDL_stdinc.h>
-#include <glm/mat4x4.hpp>
 #include <glm/gtc/matrix_transform.hpp>
 #include <glm/gtc/quaternion.hpp>
+#include <glm/mat4x4.hpp>
 #define GLM_ENABLE_EXPERIMENTAL
 #include <glm/gtx/quaternion.hpp>
+#include <memory>
 #include <string>
 #include <vector>
-#include <memory>
 
 #include "graphics.hpp"
 #include "physics_3d.hpp"
 
+class FluidVolume;
+struct FluidVolumeSettings;
+
 struct MeshGroup {
     std::string name;
-    std::vector<std::shared_ptr<Mesh>> meshes;
+    std::vector<std::shared_ptr<Vapor::Mesh>> meshes;
 };
 
 struct Node {
     std::string name;
     std::vector<std::shared_ptr<Node>> children;
     glm::mat4 localTransform = glm::identity<glm::mat4>();
-    glm::mat4 worldTransform = glm::identity<glm::mat4>(); // calculated from localTransform and parent's worldTransform
+    glm::mat4 worldTransform = glm::identity<glm::mat4>();// calculated from localTransform and parent's worldTransform
     std::shared_ptr<MeshGroup> meshGroup = nullptr;
     BodyHandle body;
+    TriggerHandle trigger;
     bool isTransformDirty = true;
+
+    // Virtual callbacks for physics events (can be overridden in subclasses)
+    virtual ~Node() = default;
+    virtual void onTriggerEnter(Node* other) {
+    }
+    virtual void onTriggerExit(Node* other) {
+    }
+    virtual void onCollisionEnter(Node* other) {
+    }
+    virtual void onCollisionExit(Node* other) {
+    }
 
     glm::vec3 getLocalPosition() const {
         return glm::vec3(localTransform[3]);
@@ -75,14 +90,16 @@ struct Node {
         glm::vec3 currScale = getLocalScale();
         glm::quat currRotation = getLocalRotation();
 
-        localTransform = glm::translate(glm::mat4(1.0f), position) * glm::mat4_cast(currRotation) * glm::scale(glm::mat4(1.0f), currScale);
+        localTransform = glm::translate(glm::mat4(1.0f), position) * glm::mat4_cast(currRotation)
+                         * glm::scale(glm::mat4(1.0f), currScale);
         isTransformDirty = true;
     }
     void setLocalRotation(const glm::quat& rotation) {
         glm::vec3 currPosition = getLocalPosition();
         glm::vec3 currScale = getLocalScale();
 
-        localTransform = glm::translate(glm::mat4(1.0f), currPosition) * glm::mat4_cast(rotation) * glm::scale(glm::mat4(1.0f), currScale);
+        localTransform = glm::translate(glm::mat4(1.0f), currPosition) * glm::mat4_cast(rotation)
+                         * glm::scale(glm::mat4(1.0f), currScale);
         isTransformDirty = true;
     }
     void setLocalEulerAngles(const glm::vec3& eulerAngles) {
@@ -95,7 +112,8 @@ struct Node {
         glm::vec3 currPosition = getLocalPosition();
         glm::quat currRotation = getLocalRotation();
 
-        localTransform = glm::translate(glm::mat4(1.0f), currPosition) * glm::mat4_cast(currRotation) * glm::scale(glm::mat4(1.0f), scale);
+        localTransform = glm::translate(glm::mat4(1.0f), currPosition) * glm::mat4_cast(currRotation)
+                         * glm::scale(glm::mat4(1.0f), scale);
         isTransformDirty = true;
     }
     void rotateAroundLocalAxis(const glm::vec3& axis, float angle) {
@@ -128,10 +146,10 @@ struct Node {
         setLocalPosition(localPos);
     }
 
-    std::shared_ptr<Node> createChild(const std::string& name, const glm::mat4& localTransform) {
+    std::shared_ptr<Node> createChild(const std::string& childName, const glm::mat4& childTransform) {
         auto child = std::make_shared<Node>();
-        child->name = name;
-        child->localTransform = localTransform;
+        child->name = childName;
+        child->localTransform = childTransform;
         child->isTransformDirty = true;
         children.push_back(child);
         return child;
@@ -145,17 +163,25 @@ struct Node {
 class Scene {
 public:
     std::string name;
-    std::vector<std::shared_ptr<Image>> images;
-    std::vector<std::shared_ptr<Material>> materials;
+    std::vector<std::shared_ptr<Vapor::Image>> images;
+    std::vector<std::shared_ptr<Vapor::Material>> materials;
     std::vector<std::shared_ptr<Node>> nodes;
     std::vector<DirectionalLight> directionalLights;
     std::vector<PointLight> pointLights;
+    std::vector<std::shared_ptr<FluidVolume>> fluidVolumes;
 
-    // Note: GPU-driven rendering data has been moved to Renderer layer
-    // Scene no longer holds GPU resources directly
+    // GPU-driven rendering
+    std::vector<Vapor::VertexData> vertices;
+    std::vector<Uint32> indices;
+    BufferHandle vertexBuffer;
+    BufferHandle indexBuffer;
+    std::vector<std::shared_ptr<Vapor::Mesh>> stagedMeshes;
+    std::vector<glm::mat4> stagedMeshTransforms;
+
+    bool isGeometryDirty = true;
 
     Scene() = default;
-    Scene(const std::string& name) : name(name) {};
+    Scene(const std::string& sceneName) : name(sceneName) {};
     ~Scene() = default;
 
     void print();
@@ -166,10 +192,14 @@ public:
     std::shared_ptr<Node> findNode(const std::string& name);
     std::shared_ptr<Node> findNodeInHierarchy(const std::string& name, const std::shared_ptr<Node>& node);
 
-    void addMeshToNode(std::shared_ptr<Node> node, std::shared_ptr<Mesh> mesh);
+    std::shared_ptr<FluidVolume> createFluidVolume(Physics3D* physics, const FluidVolumeSettings& settings);
+    void addFluidVolume(std::shared_ptr<FluidVolume> fluidVolume);
+
+    void addMesh(std::shared_ptr<Vapor::Mesh> mesh, const glm::mat4& transform = glm::identity<glm::mat4>());
+    void addMeshToNode(std::shared_ptr<Node> node, std::shared_ptr<Vapor::Mesh> mesh);
     // void AddLightToNode(std::shared_ptr<Node> node, std::shared_ptr<Light> light);
 
 private:
     void printNode(const std::shared_ptr<Node>& node);
-    void updateNode(const std::shared_ptr<Node>& node, const glm::mat4& parentTransform);
+    void updateNode(const std::shared_ptr<Node>& node, const glm::mat4& parentTransform, bool parentDirty = false);
 };

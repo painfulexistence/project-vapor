@@ -1,6 +1,6 @@
 cmake_minimum_required(VERSION 3.20)
 
-project(vapor LANGUAGES CXX)
+project(vapor VERSION 0.0.1 LANGUAGES CXX)
 
 include(GNUInstallDirs)
 
@@ -11,5 +11,9 @@ find_package(SDL3 CONFIG REQUIRED)
 
 add_subdirectory(Vapor)
 add_subdirectory(Vaporware)
+
+enable_testing()
+add_subdirectory(tests)
+add_subdirectory(benchmarks)
 
 # install(FILES LICENSE DESTINATION "share/${PROJECT_NAME}")

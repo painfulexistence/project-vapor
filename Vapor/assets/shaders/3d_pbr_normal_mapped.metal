@@ -1,6 +1,6 @@
 #include <metal_stdlib>
 using namespace metal;
-#include "assets/shaders/3d_common.metal" // TODO: use more robust include path
+#include "Res/shaders/3d_common.metal" // TODO: use more robust include path
 
 
 struct RasterizerData {
@@ -9,6 +9,8 @@ struct RasterizerData {
     float4 worldPosition;
     float4 worldNormal;
     float4 worldTangent;
+    float3 scaledLocalPos;
+    float3 localNormal;
     MaterialData material;
 };
 
@@ -139,6 +141,53 @@ float3 CalculatePointLight(PointLight light, float3 norm, float3 tangent, float3
     return CookTorranceBRDF(norm, tangent, bitangent, lightDir, viewDir, surf) * radiance * clamp(dot(norm, lightDir), 0.0, 1.0);
 }
 
+// Fresnel-Schlick approximation with roughness for IBL
+float3 FresnelSchlickRoughness(float cosTheta, float3 F0, float roughness) {
+    return F0 + (max(float3(1.0 - roughness), F0) - F0) * pow(clamp(1.0 - cosTheta, 0.0, 1.0), 5.0);
+}
+
+// Calculate IBL (Image-Based Lighting) contribution
+float3 CalculateIBL(
+    float3 norm,
+    float3 viewDir,
+    Surface surf,
+    texturecube<float, access::sample> irradianceMap,
+    texturecube<float, access::sample> prefilterMap,
+    texture2d<float, access::sample> brdfLUT
+) {
+    constexpr sampler cubeSampler(filter::linear, mip_filter::linear);
+    constexpr sampler lutSampler(filter::linear, address::clamp_to_edge);
+
+    float NdotV = max(dot(norm, viewDir), 0.0);
+
+    // Calculate F0 (reflectance at normal incidence)
+    float3 F0 = float3(0.04);
+    F0 = mix(F0, surf.color, surf.metallic);
+
+    // Fresnel term with roughness
+    float3 F = FresnelSchlickRoughness(NdotV, F0, surf.roughness);
+
+    // Diffuse and specular weights
+    float3 kS = F;
+    float3 kD = (1.0 - kS) * (1.0 - surf.metallic);
+
+    // Diffuse IBL: sample irradiance map
+    float3 irradiance = irradianceMap.sample(cubeSampler, norm).rgb;
+    float3 diffuseIBL = irradiance * surf.color * kD;
+
+    // Specular IBL: sample pre-filtered environment map
+    float3 R = reflect(-viewDir, norm);
+    const float MAX_REFLECTION_LOD = 4.0;
+    float mipLevel = surf.roughness * MAX_REFLECTION_LOD;
+    float3 prefilteredColor = prefilterMap.sample(cubeSampler, R, level(mipLevel)).rgb;
+
+    // BRDF lookup
+    float2 brdf = brdfLUT.sample(lutSampler, float2(NdotV, surf.roughness)).rg;
+    float3 specularIBL = prefilteredColor * (F * brdf.x + brdf.y);
+
+    return (diffuseIBL + specularIBL) * surf.ao;
+}
+
 vertex RasterizerData vertexMain(
     uint vertexID [[vertex_id]],
     constant CameraData& camera [[buffer(0)]],
@@ -162,6 +211,12 @@ vertex RasterizerData vertexMain(
     vert.position = camera.proj * camera.view * vert.worldPosition;
     vert.uv = in[actualVertexID].uv;
     vert.material = materials[instances[instanceID].materialID];
+    
+    // Pass scaled local position and local normal for Object Space Triplanar
+    float3 scale = float3(length(model[0].xyz), length(model[1].xyz), length(model[2].xyz));
+    vert.scaledLocalPos = float3(in[actualVertexID].position) * scale;
+    vert.localNormal = float3(in[actualVertexID].normal);
+    
     return vert;
 }
 
@@ -174,6 +229,9 @@ fragment float4 fragmentMain(
     texture2d<float, access::sample> texOcclusion [[texture(4)]],
     texture2d<float, access::sample> texEmissive [[texture(5)]],
     texture2d<float, access::sample> texShadow [[texture(7)]],
+    texturecube<float, access::sample> irradianceMap [[texture(8)]],
+    texturecube<float, access::sample> prefilterMap [[texture(9)]],
+    texture2d<float, access::sample> brdfLUT [[texture(10)]],
     const device DirLight* directionalLights [[buffer(0)]],
     const device PointLight* pointLights [[buffer(1)]],
     const device Cluster* clusters [[buffer(2)]],
@@ -185,6 +243,32 @@ fragment float4 fragmentMain(
     constexpr sampler s(address::repeat, filter::linear, mip_filter::linear);
 
     MaterialData material = in.material;
+
+    // Prototype UV: triplanar mapping with world space or object space
+    // Mode: 0 = Off, 1 = World Space (static objects), 2 = Object Space (dynamic objects)
+    if (material.prototypeUVMode > 0.5) {
+        float3 pos;
+        float3 n;
+        if (material.prototypeUVMode > 1.5) {
+            // Object Space: position and normal in local space (texture follows object rotation)
+            pos = in.scaledLocalPos;
+            n = abs(normalize(in.localNormal));
+        } else {
+            // World Space: position and normal in world space (texture fixed in world)
+            pos = in.worldPosition.xyz;
+            n = abs(normalize(in.worldNormal.xyz));
+        }
+
+        // Select projection plane based on dominant normal axis
+        if (n.x > n.y && n.x > n.z) {
+            in.uv = pos.yz * material.uvScale;
+        } else if (n.y > n.z) {
+            in.uv = pos.xz * material.uvScale;
+        } else {
+            in.uv = pos.xy * material.uvScale;
+        }
+    }
+
     float4 baseColor = texAlbedo.sample(s, in.uv);
     if (baseColor.a * material.baseColorFactor.a < 0.5) {
         discard_fragment();
@@ -274,6 +358,8 @@ fragment float4 fragmentMain(
     }
 
     result += float3(0.2) * surf.ao * surf.color;
+    // TODO: IBL
+    // result += CalculateIBL(norm, viewDir, surf, irradianceMap, prefilterMap, brdfLUT);
 
     result += surf.emission;
 
