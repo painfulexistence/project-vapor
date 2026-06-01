@@ -4,6 +4,7 @@
 #include "graphics.hpp"
 #include "scene.hpp"
 #include <SDL3/SDL_video.h>
+#include <algorithm>
 #include <entt/entt.hpp>
 #include <functional>
 #include <memory>
@@ -254,7 +255,46 @@ public:
 protected:
     std::vector<ParticleAttractorData> m_particleAttractors;
     glm::vec4 m_particleWind = glm::vec4(0.0f); // xyz = direction, w = strength
-    uint32_t  m_particleSlotsAllocated = 0;     // high-water mark for slot claims
+    uint32_t  m_particleSlotsAllocated = 0;
+
+    struct ParticleSlotRange { uint32_t begin = 0, count = 0; };
+    std::vector<ParticleSlotRange> m_particleSlotFreeList;
+
+    uint32_t allocParticleSlots(uint32_t count, uint32_t maxParticles) {
+        for (auto it = m_particleSlotFreeList.begin(); it != m_particleSlotFreeList.end(); ++it) {
+            if (it->count >= count) {
+                uint32_t begin = it->begin;
+                if (it->count == count) {
+                    m_particleSlotFreeList.erase(it);
+                } else {
+                    it->begin += count;
+                    it->count -= count;
+                }
+                return begin;
+            }
+        }
+        if (m_particleSlotsAllocated + count > maxParticles) return ~0u;
+        uint32_t begin = m_particleSlotsAllocated;
+        m_particleSlotsAllocated += count;
+        return begin;
+    }
+
+    void freeParticleSlots(uint32_t slotBegin, uint32_t count) {
+        if (slotBegin == ~0u || count == 0) return;
+        m_particleSlotFreeList.push_back({ slotBegin, count });
+        std::sort(m_particleSlotFreeList.begin(), m_particleSlotFreeList.end(),
+            [](const ParticleSlotRange& a, const ParticleSlotRange& b) { return a.begin < b.begin; });
+        for (size_t i = 0; i + 1 < m_particleSlotFreeList.size(); ) {
+            auto& cur = m_particleSlotFreeList[i];
+            const auto& nxt = m_particleSlotFreeList[i + 1];
+            if (cur.begin + cur.count == nxt.begin) {
+                cur.count += nxt.count;
+                m_particleSlotFreeList.erase(m_particleSlotFreeList.begin() + i + 1);
+            } else {
+                ++i;
+            }
+        }
+    }
 
     const Uint32 MAX_FRAMES_IN_FLIGHT = 3;
     const Uint32 MSAA_SAMPLE_COUNT = 4;

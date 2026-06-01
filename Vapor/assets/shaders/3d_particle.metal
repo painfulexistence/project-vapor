@@ -55,7 +55,7 @@ kernel void particleForce(
         float3 toA       = aPos - p.position;
         float  dist      = length(toA);
         if (dist > 0.001) {
-            float forceMag = aStrength / (dist * dist + 0.5);
+            float forceMag = aStrength / (dist * dist + 0.1);
             p.force += (toA / dist) * forceMag;
         }
     }
@@ -64,7 +64,7 @@ kernel void particleForce(
     p.force += params.wind.xyz * params.wind.w;
 
     // Damping
-    p.force -= p.velocity * 0.1;
+    p.force -= p.velocity * 0.5;
 
     particles[id] = p;
 }

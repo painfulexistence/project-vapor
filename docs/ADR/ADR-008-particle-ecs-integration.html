@@ -291,20 +291,18 @@ layout(set=0, binding=2) readonly buffer AttractorBuffer {
         <span>Earlier review flagged Metal <code>uploadParticles()</code> as CRITICAL for only writing a single buffer. This was wrong. Metal uses a <em>single</em> <code>StorageModeShared</code> particle buffer — not a per-frame array like Vulkan. On Apple Silicon unified memory, a CPU write to a <code>StorageModeShared</code> buffer is immediately visible to the GPU; there are no per-frame copies to synchronize. Vulkan's triple-write is necessary because it has three physically separate buffers, one per frame-in-flight. Metal does not, so writing once is correct.</span>
       </div>
     </div>
-    <div class="warn-box">
+    <div class="ok-box">
       <div class="issue-row">
-        <span class="label"><strong>MEDIUM</strong></span>
-        <span>Damping coefficient mismatch: Metal uses 0.1, Vulkan uses 0.5. Particles decelerate at different rates across backends. Both values should be unified in a shared constant.</span>
+        <span class="label"><strong>FIXED</strong></span>
+        <span>Damping coefficient unified to 0.5 on both backends. Softening factor (attractor force denominator) unified to 0.1. Both values are now identical in <code>ParticleForce.comp</code> and <code>3d_particle.metal</code>.</span>
       </div>
       <div class="issue-row">
-        <span class="label"><strong>MEDIUM</strong></span>
-        <span><code>releaseParticleSlots()</code> is a no-op. If an entity with a <code>ParticleEmitterComponent</code> is destroyed at runtime, its GPU slots are never returned to the pool. Long-running sessions that create and destroy many emitters will exhaust <code>MAX_PARTICLES</code>. A free-list allocator would fix this.</span>
+        <span class="label"><strong>FIXED</strong></span>
+        <span><code>releaseParticleSlots()</code> now returns slots to a first-fit free list with adjacent-range coalescing. Logic lives in <code>Renderer::allocParticleSlots()</code> and <code>Renderer::freeParticleSlots()</code> (base class protected helpers); both backends delegate to them.</span>
       </div>
-    </div>
-    <div class="warn-box">
       <div class="issue-row">
-        <span class="label"><strong>LOW</strong></span>
-        <span>The overflow guard in <code>uploadParticles()</code> (<code>slotBegin + particles.size() &gt; MAX_PARTICLES</code>) does not handle the case where <code>slotBegin == ~0u</code> — unsigned arithmetic wraps and the check passes spuriously. Guard should be <code>slotBegin == ~0u || slotBegin + particles.size() &gt; MAX_PARTICLES</code>.</span>
+        <span class="label"><strong>FIXED</strong></span>
+        <span><code>uploadParticles()</code> overflow guard updated to <code>slotBegin == ~0u || slotBegin + particles.size() &gt; MAX_PARTICLES</code> on both backends, preventing unsigned wrap-around false-pass.</span>
       </div>
     </div>
 
@@ -365,7 +363,7 @@ renderer->draw(registry, scene, camera);</code></pre>
     <ul>
       <li>Implement <code>EmitterModulatorSystem</code>: map <code>EmotionState</code> to per-emitter parameter curves. The scaffolding is in place; the lookup table / curve data structure is the remaining design question.</li>
       <li>Implement <code>ParticleBurstSystem</code>: sphere-sampled one-shot spawns, tag removal.</li>
-      <li>Fix the two remaining known issues: damping coefficient unification, slot release free-list.</li>
+      <li>All three issues (damping, slot free-list, overflow guard) resolved in the same branch.</li>
       <li>Consider a free-list allocator for <code>claimParticleSlots</code> / <code>releaseParticleSlots</code> if dynamic emitter create/destroy becomes a real use case.</li>
       <li>Per-particle texture atlas support: the <code>GPUParticle</code> struct has one spare float (<code>_pad3</code>) that could encode a frame index.</li>
     </ul>

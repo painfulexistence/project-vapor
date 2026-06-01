@@ -3624,19 +3624,16 @@ void Renderer_Vulkan::renderParticles(VkCommandBuffer cmd) {
 
 uint32_t Renderer_Vulkan::claimParticleSlots(uint32_t count) {
     if (!particleSystemEnabled || count == 0) return ~0u;
-    if (m_particleSlotsAllocated + count > MAX_PARTICLES) return ~0u;
-    uint32_t begin = m_particleSlotsAllocated;
-    m_particleSlotsAllocated += count;
-    return begin;
+    return allocParticleSlots(count, MAX_PARTICLES);
 }
 
-void Renderer_Vulkan::releaseParticleSlots(uint32_t /*slotBegin*/, uint32_t /*count*/) {
-    // Slot compaction not implemented; pool resets on restart.
+void Renderer_Vulkan::releaseParticleSlots(uint32_t slotBegin, uint32_t count) {
+    freeParticleSlots(slotBegin, count);
 }
 
 void Renderer_Vulkan::uploadParticles(uint32_t slotBegin, const std::vector<GPUParticle>& particles) {
     if (!particleSystemEnabled || particles.empty()) return;
-    if (slotBegin + particles.size() > MAX_PARTICLES) return;
+    if (slotBegin == ~0u || slotBegin + particles.size() > MAX_PARTICLES) return;
     // Write to all frame buffers so every in-flight frame sees the spawn.
     size_t bytes = particles.size() * sizeof(GPUParticle);
     for (size_t i = 0; i < MAX_FRAMES_IN_FLIGHT; i++) {
