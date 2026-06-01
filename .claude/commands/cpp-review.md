@@ -1,5 +1,6 @@
 ---
 description: "Strict C++ codebase review. Accepts style flags to control focus areas. Usage: /cpp-review [styles] [--output <file>] [--fix]"
+# Styles: naming | design | legacy | duplicates | cpp | security | slop | all
 ---
 
 # C++ Codebase Review
@@ -20,7 +21,8 @@ Perform a strict, structured code review of the C++ codebase based on the reques
 | `duplicates` | Duplicate or near-duplicate code (components, logic, system implementations) |
 | `cpp` | Bad or outdated C++ patterns (raw pointers, missing [[nodiscard]]/noexcept/const, uninitialized members, C-style APIs, etc.) |
 | `security` | Safety issues (UB, uninitialized reads, unchecked array access, signed/unsigned, dangling refs) |
-| `all` | All of the above (default when no flags given) |
+| `slop` | Deslopification — cognitive load, dead code, magic numbers, low-signal comments, stub accountability, name clarity |
+| `all` | All of the above including `slop` (default when no flags given) |
 
 ### Options
 
@@ -36,6 +38,8 @@ Perform a strict, structured code review of the C++ codebase based on the reques
 /cpp-review
 /cpp-review naming cpp
 /cpp-review cpp --fix
+/cpp-review slop
+/cpp-review slop --fix
 /cpp-review design legacy --output design_report.md
 /cpp-review all --output review_report.md --fix
 /cpp-review duplicates --dir Vapor/src
@@ -59,6 +63,8 @@ Read `$ARGUMENTS`. Extract:
 - `--fix` flag (boolean, default false)
 
 Print a one-line summary: "Reviewing: [active styles] | Scope: [dir] | Output: [file or chat] | Fix: [yes/no]"
+
+> **Note on `slop`:** This style measures **cognitive load**, not correctness. The question for every finding is: *would a new engineer be confused or slowed down by this?* Precision matters more than recall here — do not flag things just because they could be written differently.
 
 ---
 
@@ -233,6 +239,46 @@ Search for evidence of incomplete migrations:
 
 ---
 
+#### Style: `slop`
+
+Goal: reduce **cognitive load** — the effort a new engineer needs to understand, trace, and modify the code. Ask for every finding: *would this confuse or slow down a competent reader who hasn't seen this code?*
+
+**A. Dead code**
+- Commented-out code blocks: 3+ consecutive lines of `//`-prefixed code (not explanatory prose)
+- `#if 0` / `#ifdef DISABLED` blocks
+- Private methods or fields with zero call sites anywhere in the visible codebase
+- Permanently-dead branches: `if (false)`, `if (0)`, conditions that are structurally always true/false
+
+**B. Stubs without accountability**
+- Methods whose entire body is `return;`, `return {};`, `return nullptr;`, or `{}` with no `TODO`, `// not implemented`, or `assert(false)` — a reader cannot tell if this is intentional no-op or forgotten implementation
+- Methods whose name promises behavior (`processX`, `buildY`, `handleZ`) but the body is empty or a stub
+
+**C. Magic constants**
+- Numeric literals in non-trivial positions (anything other than `0`, `1`, `-1`, `2`, `0.5f`, `1.0f`) without a named constant or inline comment explaining the unit and intent
+- The same non-trivial numeric literal appearing 2+ times at different call sites with the same semantic meaning (candidate for a named constant)
+
+**D. Low signal-to-noise comments**
+- Comments that restate what the code or identifier already says: `// Calculate view matrix` directly above `calculateViewMatrix()` — delete these
+- Commented-out debug output left in headers or source files (e.g., commented `fmt::print`, `std::cout` blocks)
+- Section-header comments that repeat the surrounding function name
+
+**E. Name vs. behavior mismatch**
+- A function or type name that implies X but does Y (broken semantic contract) — name the behavior, not the implementation
+- Type names > 28 characters where a shorter name is unambiguous in context (e.g., `SceneDirectionalLightReferenceComponent` → `DirectionalLightRef`)
+- Abbreviations that require domain knowledge to decode, with no nearby documentation
+
+**F. Unexplained asymmetry**
+- Two systems handling the same concept with incompatible interfaces where no comment explains which is the current path and which is the legacy/alternate path — flag both locations and note that the difference is unexplained
+- A parameter or constant that appears identical at every call site (candidate to become a default argument or compile-time constant)
+
+**G. Unused infrastructure**
+- Classes, fields, or private methods that exist but are never read or called within the codebase
+- Entire abstraction layers (base classes, interfaces, manager types) with only one implementation and no extensibility requirement visible in the codebase
+
+For each finding, quote the exact file:line, a one-sentence explanation of *why* it adds cognitive load (not just *what* it is), and a concrete suggested improvement.
+
+---
+
 ### Step 3 — Compile report
 
 Structure the report as follows. Omit sections for styles not requested.
@@ -281,6 +327,29 @@ Structure the report as follows. Omit sections for styles not requested.
 ## [Style: Security] (if active)
 ...
 
+## [Style: Slop / Deslopification] (if active)
+
+### A. Dead code
+...
+
+### B. Stubs without accountability
+...
+
+### C. Magic constants
+...
+
+### D. Low signal-to-noise comments
+...
+
+### E. Name vs. behavior mismatch
+...
+
+### F. Unexplained asymmetry
+...
+
+### G. Unused infrastructure
+...
+
 ---
 
 ## Severity Table
@@ -314,6 +383,8 @@ For each issue in the severity table, assign one of two labels:
 
 Use the tables below to classify:
 
+> **Slop issues are almost always `[manual]`** — they require judgment about intent (is the empty method a stub or intentional no-op? is the comment worth keeping?). The only slop patterns that are `[auto]` are listed below.
+
 ##### Auto-fixable (`[auto]`)
 
 These changes are contained within a single expression or declaration and cannot break callers:
@@ -330,6 +401,9 @@ These changes are contained within a single expression or declaration and cannot
 | Signed/unsigned comparison: `int x < container.size()` | Cast the signed variable: `static_cast<size_t>(x) < container.size()` — only when the value is provably non-negative in context |
 | Missing `= default` on a declared-but-empty destructor body `~T() {}` | Replace body with `= default` |
 | `strncpy(dst, src, N)` where dst is `char[N]` and N is a compile-time constant | Replace with `std::string` copy or `std::copy_n` — only if the surrounding code already uses `std::string`; otherwise leave as `[manual]` |
+| **[slop]** Commented-out debug output block (3+ consecutive `//`-prefixed code lines, clearly `printf`/`cout`/logging — not prose explanation) | Delete the lines entirely |
+| **[slop]** Low-signal comment that merely restates the line below it (`// Update position` above `position = newPos`) | Delete the comment line |
+| **[slop]** Empty stub body with no marker — add accountability | Append `// TODO: not implemented` inside the body (do NOT guess the implementation) |
 
 ##### NOT auto-fixable (`[manual]`)
 
@@ -347,6 +421,11 @@ Do not attempt these automatically. Leave them in the report with the `[manual]`
 | Moving `void*` to a typed alternative | Requires knowing the intended type at every usage site |
 | Fixing an incomplete/stub implementation | Requires understanding the intended behavior |
 | Architectural changes (pipeline ownership, UI layer coupling, etc.) | Design-level decisions |
+| **[slop]** Renaming a type/method for name clarity | Cross-file ripple; requires human to verify call sites |
+| **[slop]** Extracting a magic number into a named constant | Requires deciding the constant's name, scope, and correct type |
+| **[slop]** Removing dead private method | Requires confirming no call sites exist outside the visible codebase |
+| **[slop]** Explaining an unexplained asymmetry | Requires understanding the design intent before adding any comment |
+| **[slop]** Removing or implementing a stub method | Requires understanding the intended behavior |
 
 #### 4.2 — Apply `[auto]` fixes
 
