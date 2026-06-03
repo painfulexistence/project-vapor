@@ -9,6 +9,8 @@
 #include <vector>
 #include <array>
 
+namespace Vapor {
+
 enum class AlphaMode {
     OPAQUE,
     MASK,
@@ -215,3 +217,11 @@ struct Mesh {
     // Note: GPU resources moved to Renderer layer
     // Mesh now only holds CPU-side geometry data
 };
+
+} // namespace Vapor
+
+// Forward declarations for RHI types (defined in rhi.hpp)
+// These are needed by scene.hpp but defined outside Vapor namespace
+struct BufferHandle;
+struct TextureHandle;
+struct PipelineHandle;
