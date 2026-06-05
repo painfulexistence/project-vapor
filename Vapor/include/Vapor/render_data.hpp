@@ -116,7 +116,7 @@ struct RenderMaterial {
 
     // Metadata
     MaterialFlags flags = static_cast<MaterialFlags>(0);
-    AlphaMode alphaMode = AlphaMode::OPAQUE;
+    Vapor::AlphaMode alphaMode = Vapor::AlphaMode::OPAQUE;
     float alphaCutoff = 0.5f;
     bool doubleSided = false;
 };
@@ -206,14 +206,14 @@ struct MaterialDataInput {
     float clearcoatGloss = 1.0f;
 
     // Texture data (from Application's Image objects)
-    std::shared_ptr<Image> albedoMap;
-    std::shared_ptr<Image> normalMap;
-    std::shared_ptr<Image> metallicMap;
-    std::shared_ptr<Image> roughnessMap;
-    std::shared_ptr<Image> occlusionMap;
-    std::shared_ptr<Image> emissiveMap;
+    std::shared_ptr<Vapor::Image> albedoMap;
+    std::shared_ptr<Vapor::Image> normalMap;
+    std::shared_ptr<Vapor::Image> metallicMap;
+    std::shared_ptr<Vapor::Image> roughnessMap;
+    std::shared_ptr<Vapor::Image> occlusionMap;
+    std::shared_ptr<Vapor::Image> emissiveMap;
 
-    AlphaMode alphaMode = AlphaMode::OPAQUE;
+    Vapor::AlphaMode alphaMode = Vapor::AlphaMode::OPAQUE;
     float alphaCutoff = 0.5f;
     bool doubleSided = false;
 };
