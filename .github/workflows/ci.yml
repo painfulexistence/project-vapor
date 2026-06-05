@@ -67,7 +67,7 @@ jobs:
   build:
     runs-on: ${{ matrix.os }}
     env:
-      VCPKG_BINARY_SOURCES: "clear;x-gha,readwrite"
+      VCPKG_BINARY_SOURCES: "clear"
 
     strategy:
       fail-fast: false
@@ -108,7 +108,7 @@ jobs:
         if: matrix.os == 'ubuntu-latest'
         run: |
           sudo apt-get update
-          sudo apt-get install -y cmake ccache libxmu-dev libxi-dev libgl-dev libxinerama-dev libxcursor-dev xorg-dev libglu1-mesa-dev pkg-config
+          sudo apt-get install -y cmake ccache libxmu-dev libxi-dev libgl-dev libxinerama-dev libxcursor-dev xorg-dev libglu1-mesa-dev pkg-config autoconf autoconf-archive automake libtool
 
       - name: Install system dependencies on macOS
         if: matrix.os == 'macos-latest'
