@@ -108,7 +108,7 @@ jobs:
         if: matrix.os == 'ubuntu-latest'
         run: |
           sudo apt-get update
-          sudo apt-get install -y cmake ccache libxmu-dev libxi-dev libgl-dev libxinerama-dev libxcursor-dev xorg-dev libglu1-mesa-dev pkg-config
+          sudo apt-get install -y cmake ccache libxmu-dev libxi-dev libgl-dev libxinerama-dev libxcursor-dev xorg-dev libglu1-mesa-dev pkg-config autoconf autoconf-archive automake libtool glslang-tools
 
       - name: Install system dependencies on macOS
         if: matrix.os == 'macos-latest'
