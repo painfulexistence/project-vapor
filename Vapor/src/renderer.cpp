@@ -326,7 +326,7 @@ MaterialId Renderer::registerMaterial(const MaterialDataInput& materialData) {
     return id;
 }
 
-TextureId Renderer::registerTexture(const std::shared_ptr<Image>& image) {
+TextureId Renderer::registerTexture(const std::shared_ptr<Vapor::Image>& image) {
     return getOrCreateTexture(image);
 }
 
@@ -379,7 +379,7 @@ void Renderer::beginFrame(const CameraRenderData& camera) {
     batch2D.beginBatch(rhi.get(), orthoProj);
 
     // 3D uses camera's view-projection
-    glm::mat4 viewProj = camera.projection * camera.view;
+    glm::mat4 viewProj = camera.proj * camera.view;
     batch3D.beginBatch(rhi.get(), viewProj);
 
     fmt::print("beginFrame: camera position=({}, {}, {}), frameDrawables cleared\n",
@@ -599,7 +599,7 @@ void Renderer::updateBuffers() {
         instance.vertexCount = mesh.vertexCount;
         instance.indexCount = mesh.indexCount;
         instance.materialID = drawable.material;
-        instance.primitiveMode = PrimitiveMode::TRIANGLES;
+        instance.primitiveMode = Vapor::PrimitiveMode::TRIANGLES;
         instance.AABBMin = drawable.aabbMin;
         instance.AABBMax = drawable.aabbMax;
         instance.boundingSphere = glm::vec4(
@@ -1105,10 +1105,10 @@ void Renderer::createRenderPipeline() {
     VertexLayout vertexLayout;
     vertexLayout.stride = sizeof(Vapor::VertexData);
     vertexLayout.attributes = {
-        {0, PixelFormat::RGBA32_FLOAT, offsetof(VertexData, position)},  // Position (vec3)
-        {1, PixelFormat::RGBA32_FLOAT, offsetof(VertexData, uv)},        // UV (vec2)
-        {2, PixelFormat::RGBA32_FLOAT, offsetof(VertexData, normal)},    // Normal (vec3)
-        {3, PixelFormat::RGBA32_FLOAT, offsetof(VertexData, tangent)}   // Tangent (vec4)
+        {0, PixelFormat::RGBA32_FLOAT, offsetof(Vapor::VertexData, position)},  // Position (vec3)
+        {1, PixelFormat::RGBA32_FLOAT, offsetof(Vapor::VertexData, uv)},        // UV (vec2)
+        {2, PixelFormat::RGBA32_FLOAT, offsetof(Vapor::VertexData, normal)},    // Normal (vec3)
+        {3, PixelFormat::RGBA32_FLOAT, offsetof(Vapor::VertexData, tangent)}   // Tangent (vec4)
     };
 
     // Create pipeline
@@ -1128,7 +1128,7 @@ void Renderer::createRenderPipeline() {
     mainPipeline = rhi->createPipeline(pipelineDesc);
 }
 
-TextureId Renderer::getOrCreateTexture(const std::shared_ptr<Image>& image) {
+TextureId Renderer::getOrCreateTexture(const std::shared_ptr<Vapor::Image>& image) {
     if (!image || image->uri.empty()) {
         return defaultWhiteTexture;
     }
@@ -1306,10 +1306,10 @@ void Renderer::draw(std::shared_ptr<Scene> scene, Camera& camera) {
     // Prepare camera data
     CameraRenderData camData;
     camData.view = camera.getViewMatrix();
-    camData.projection = camera.getProjectionMatrix();
-    camData.position = camera.position;
-    camData.near = camera.nearPlane;
-    camData.far = camera.farPlane;
+    camData.proj = camera.getProjMatrix();
+    camData.position = camera.getEye();
+    camData.nearPlane = camera.near();
+    camData.farPlane = camera.far();
 
     // Begin frame
     beginFrame(camData);
@@ -1333,10 +1333,10 @@ void Renderer::draw(entt::registry& registry, std::shared_ptr<Scene> scene, Came
     // Prepare camera data
     CameraRenderData camData;
     camData.view = camera.getViewMatrix();
-    camData.projection = camera.getProjectionMatrix();
-    camData.position = camera.position;
-    camData.near = camera.nearPlane;
-    camData.far = camera.farPlane;
+    camData.proj = camera.getProjMatrix();
+    camData.position = camera.getEye();
+    camData.nearPlane = camera.near();
+    camData.farPlane = camera.far();
 
     // Begin frame
     beginFrame(camData);
@@ -2014,12 +2014,12 @@ void Renderer::renderToTexture(
 
     // Set up camera for this render
     CameraRenderData rtCamera;
-    rtCamera.view = camera.getView();
-    rtCamera.projection = camera.getProjection();
-    rtCamera.viewProj = rtCamera.projection * rtCamera.view;
-    rtCamera.position = camera.position;
-    rtCamera.near = camera.zNear;
-    rtCamera.far = camera.zFar;
+    rtCamera.view = camera.getViewMatrix();
+    rtCamera.proj = camera.getProjMatrix();
+    rtCamera.viewProj = rtCamera.proj * rtCamera.view;
+    rtCamera.position = camera.getEye();
+    rtCamera.nearPlane = camera.near();
+    rtCamera.farPlane = camera.far();
     currentCamera = rtCamera;
 
     // Begin render pass with render texture as target
