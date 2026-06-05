@@ -14,11 +14,6 @@ namespace Vapor {
             _floatDist = std::uniform_real_distribution<float>(0.0f, 1.0f);
             _intDist = std::uniform_int_distribution<int>(0, 1);
         }
-        RNG(uint32_t seed) {
-            _rng = std::mt19937(seed);
-            _floatDist = std::uniform_real_distribution<float>(0.0f, 1.0f);
-            _intDist = std::uniform_int_distribution<int>(0, 1);
-        }
         ~RNG() {
         }
 
