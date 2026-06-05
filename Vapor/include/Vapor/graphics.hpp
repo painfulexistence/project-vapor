@@ -211,6 +211,13 @@ struct Mesh {
     glm::vec3 worldAABBMin;
     glm::vec3 worldAABBMax;
 
+    // Mesh optimization fields (used by SceneOptimizer)
+    Uint32 vertexOffset = 0;
+    Uint32 indexOffset = 0;
+    Uint32 vertexCount = 0;
+    Uint32 indexCount = 0;
+    bool isGeometryDirty = true;
+
     // Renderer-assigned ID (assigned during registration)
     Uint32 rendererMeshId = UINT32_MAX;
 
