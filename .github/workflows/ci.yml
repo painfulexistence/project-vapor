@@ -145,5 +145,14 @@ jobs:
       - name: CMake Build
         run: cmake --build ${{ steps.strings.outputs.build-dir }} --parallel $(nproc 2>/dev/null || sysctl -n hw.logicalcpu)
 
+      - name: Install
+        run: cmake --install ${{ steps.strings.outputs.build-dir }} --prefix ${{ steps.strings.outputs.build-dir }}/install
+
+      - name: Upload VaporCAPI artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: VaporCAPI-${{ matrix.os }}-${{ matrix.build-type }}
+          path: ${{ steps.strings.outputs.build-dir }}/install
+
       - name: Print ccache stats
         run: ccache --show-stats
