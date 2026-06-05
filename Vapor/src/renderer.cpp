@@ -38,7 +38,7 @@ void Renderer::initialize(std::unique_ptr<RHI> rhiPtr, GraphicsBackend backendTy
 
     // Material data buffer - stores array of all materials (used by shader at binding 1)
     BufferDesc materialBufferDesc;
-    materialBufferDesc.size = sizeof(MaterialData) * MAX_INSTANCES;  // Reserve space for max materials
+    materialBufferDesc.size = sizeof(Vapor::MaterialData) * MAX_INSTANCES;  // Reserve space for max materials
     materialBufferDesc.usage = BufferUsage::Uniform;
     materialBufferDesc.memoryUsage = MemoryUsage::CPUtoGPU;
     materialUniformBuffer = rhi->createBuffer(materialBufferDesc);
@@ -56,7 +56,7 @@ void Renderer::initialize(std::unique_ptr<RHI> rhiPtr, GraphicsBackend backendTy
     pointLightBuffer = rhi->createBuffer(pointLightBufferDesc);
 
     BufferDesc instanceDataBufferDesc;
-    instanceDataBufferDesc.size = sizeof(InstanceData) * MAX_INSTANCES;
+    instanceDataBufferDesc.size = sizeof(Vapor::InstanceData) * MAX_INSTANCES;
     instanceDataBufferDesc.usage = BufferUsage::Uniform;
     instanceDataBufferDesc.memoryUsage = MemoryUsage::CPUtoGPU;
     instanceDataBuffer = rhi->createBuffer(instanceDataBufferDesc);
@@ -189,13 +189,13 @@ void Renderer::shutdown() {
 // Resource Registration
 // ============================================================================
 
-MeshId Renderer::registerMesh(const std::vector<VertexData>& vertices,
+MeshId Renderer::registerMesh(const std::vector<Vapor::VertexData>& vertices,
                                     const std::vector<Uint32>& indices) {
     RenderMesh mesh;
 
     // Create vertex buffer
     BufferDesc vbDesc;
-    vbDesc.size = vertices.size() * sizeof(VertexData);
+    vbDesc.size = vertices.size() * sizeof(Vapor::VertexData);
     vbDesc.usage = BufferUsage::Vertex;
     vbDesc.memoryUsage = MemoryUsage::GPU;
     mesh.vertexBuffer = rhi->createBuffer(vbDesc);
@@ -284,7 +284,7 @@ MaterialId Renderer::registerMaterial(const MaterialDataInput& materialData) {
         material.emissiveTexture = defaultBlackTexture;
     }
 
-    if (materialData.alphaMode == AlphaMode::BLEND) {
+    if (materialData.alphaMode == Vapor::AlphaMode::BLEND) {
         flags |= ALPHA_BLEND;
     }
 
@@ -296,13 +296,13 @@ MaterialId Renderer::registerMaterial(const MaterialDataInput& materialData) {
 
     // Create parameter buffer
     BufferDesc paramBufferDesc;
-    paramBufferDesc.size = sizeof(MaterialData);
+    paramBufferDesc.size = sizeof(Vapor::MaterialData);
     paramBufferDesc.usage = BufferUsage::Uniform;
     paramBufferDesc.memoryUsage = MemoryUsage::CPUtoGPU;
     material.parameterBuffer = rhi->createBuffer(paramBufferDesc);
 
     // Upload initial parameters
-    MaterialData params;
+    Vapor::MaterialData params;
     params.baseColorFactor = material.baseColorFactor;
     params.normalScale = material.normalScale;
     params.metallicFactor = material.metallicFactor;
@@ -319,7 +319,7 @@ MaterialId Renderer::registerMaterial(const MaterialDataInput& materialData) {
     params.clearcoat = material.clearcoat;
     params.clearcoatGloss = material.clearcoatGloss;
 
-    rhi->updateBuffer(material.parameterBuffer, &params, 0, sizeof(MaterialData));
+    rhi->updateBuffer(material.parameterBuffer, &params, 0, sizeof(Vapor::MaterialData));
 
     MaterialId id = static_cast<MaterialId>(materials.size());
     materials.push_back(material);
@@ -543,10 +543,10 @@ void Renderer::updateBuffers() {
 
     // Update material data buffer (array of all materials for shader binding 1)
     if (!materials.empty()) {
-        std::vector<MaterialData> materialDataArray;
+        std::vector<Vapor::MaterialData> materialDataArray;
         materialDataArray.reserve(materials.size());
         for (const auto& mat : materials) {
-            MaterialData data;
+            Vapor::MaterialData data;
             data.baseColorFactor = mat.baseColorFactor;
             data.normalScale = mat.normalScale;
             data.metallicFactor = mat.metallicFactor;
@@ -565,7 +565,7 @@ void Renderer::updateBuffers() {
             materialDataArray.push_back(data);
         }
         rhi->updateBuffer(materialUniformBuffer, materialDataArray.data(), 0,
-                          materialDataArray.size() * sizeof(MaterialData));
+                          materialDataArray.size() * sizeof(Vapor::MaterialData));
     }
 
     // Update directional lights
@@ -583,7 +583,7 @@ void Renderer::updateBuffers() {
     // Update instance data
     // Create a map from drawable index to instance ID for correct indexing
     drawableToInstanceID.clear();
-    std::vector<InstanceData> instanceData;
+    std::vector<Vapor::InstanceData> instanceData;
     instanceData.reserve(visibleDrawables.size());
     Uint32 nonIdentityCount = 0;
     Uint32 instanceID = 0;
@@ -591,7 +591,7 @@ void Renderer::updateBuffers() {
         const Drawable& drawable = frameDrawables[drawableIdx];
         const RenderMesh& mesh = meshes[drawable.mesh];
 
-        InstanceData instance;
+        Vapor::InstanceData instance;
         instance.model = drawable.transform;
         instance.color = drawable.color;
         instance.vertexOffset = 0;  // Each mesh has its own buffer
@@ -621,7 +621,7 @@ void Renderer::updateBuffers() {
 
     if (!instanceData.empty()) {
         rhi->updateBuffer(instanceDataBuffer, instanceData.data(), 0,
-                          instanceData.size() * sizeof(InstanceData));
+                          instanceData.size() * sizeof(Vapor::InstanceData));
     }
 }
 
@@ -681,10 +681,10 @@ void Renderer::mainRenderPass() {
     // Binding 0: CameraData
     rhi->setUniformBuffer(0, 0, cameraUniformBuffer, 0, sizeof(CameraRenderData));
     // Binding 1: MaterialData array (all materials)
-    rhi->setUniformBuffer(0, 1, materialUniformBuffer, 0, sizeof(MaterialData) * MAX_INSTANCES);
+    rhi->setUniformBuffer(0, 1, materialUniformBuffer, 0, sizeof(Vapor::MaterialData) * MAX_INSTANCES);
     // Binding 2: InstanceData array
     // Note: We only update the buffer with visible drawables, so the size is visibleDrawables.size()
-    rhi->setUniformBuffer(0, 2, instanceDataBuffer, 0, sizeof(InstanceData) * visibleDrawables.size());
+    rhi->setUniformBuffer(0, 2, instanceDataBuffer, 0, sizeof(Vapor::InstanceData) * visibleDrawables.size());
 
     // Fragment buffers (matching old renderer - these are separate from vertex bindings):
     // Fragment binding 0: DirectionalLights
@@ -1103,7 +1103,7 @@ void Renderer::createRenderPipeline() {
 
     // Create vertex layout
     VertexLayout vertexLayout;
-    vertexLayout.stride = sizeof(VertexData);
+    vertexLayout.stride = sizeof(Vapor::VertexData);
     vertexLayout.attributes = {
         {0, PixelFormat::RGBA32_FLOAT, offsetof(VertexData, position)},  // Position (vec3)
         {1, PixelFormat::RGBA32_FLOAT, offsetof(VertexData, uv)},        // UV (vec2)

@@ -97,14 +97,14 @@ public:
     // ========================================================================
 
     // Register a mesh and return its ID
-    MeshId registerMesh(const std::vector<VertexData>& vertices,
+    MeshId registerMesh(const std::vector<Vapor::VertexData>& vertices,
                         const std::vector<Uint32>& indices);
 
     // Register a material and return its ID
     MaterialId registerMaterial(const MaterialDataInput& materialData);
 
     // Register a texture and return its ID
-    TextureId registerTexture(const std::shared_ptr<Image>& image);
+    TextureId registerTexture(const std::shared_ptr<Vapor::Image>& image);
 
     // ========================================================================
     // Frame Rendering
@@ -299,7 +299,7 @@ public:
     // Texture Creation (for sprites/batch rendering)
     // ========================================================================
 
-    TextureHandle createTexture(const std::shared_ptr<Image>& img);
+    TextureHandle createTexture(const std::shared_ptr<Vapor::Image>& img);
 
     // ========================================================================
     // Getters
@@ -342,7 +342,7 @@ private:
     // ========================================================================
 
     Frustum extractFrustum(const glm::mat4& viewProj);
-    TextureId getOrCreateTexture(const std::shared_ptr<Image>& image);
+    TextureId getOrCreateTexture(const std::shared_ptr<Vapor::Image>& image);
     void bindMaterial(MaterialId materialId);
 
     // Scene/ECS helpers
