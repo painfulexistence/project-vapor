@@ -10,6 +10,7 @@
 #include <vector>
 
 #include "graphics.hpp"
+#include "rhi.hpp"
 #include "physics_3d.hpp"
 
 class FluidVolume;
