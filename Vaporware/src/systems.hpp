@@ -155,19 +155,15 @@ public:
 
 class LightMovementSystem {
 public:
-    static void update(entt::registry& reg, Scene* scene, float deltaTime) {
-        auto pointLightView = reg.view<ScenePointLightReferenceComponent, LightMovementLogicComponent>();
-        for (auto entity : pointLightView) {
-            auto& ref = pointLightView.get<ScenePointLightReferenceComponent>(entity);
-            auto& logic = pointLightView.get<LightMovementLogicComponent>(entity);
+    static void update(entt::registry& reg, float deltaTime) {
+        auto pointView = reg.view<PointLightComponent, Vapor::TransformComponent, LightMovementLogicComponent>();
+        for (auto entity : pointView) {
+            auto& transform = pointView.get<Vapor::TransformComponent>(entity);
+            auto& logic     = pointView.get<LightMovementLogicComponent>(entity);
 
-            if (ref.lightIndex < 0 || ref.lightIndex >= scene->pointLights.size()) continue;
-
-            auto& light = scene->pointLights[ref.lightIndex];
             logic.timer += deltaTime * logic.speed;
 
             float x = 0.0f, y = 0.0f, z = 0.0f;
-
             switch (logic.pattern) {
             case MovementPattern::Circle:
                 x = cos(logic.timer) * logic.radius;
@@ -191,21 +187,48 @@ public:
                 break;
             }
 
-            light.position = glm::vec3(x, y, z);
-            // Optional: intensity modulation
-            // light.intensity = 5.0f + sin(logic.timer * 2.0f) * 2.0f;
+            transform.position = glm::vec3(x, y, z);
+            transform.isDirty  = true;
         }
-        auto directionalLightView = reg.view<SceneDirectionalLightReferenceComponent, DirectionalLightLogicComponent>();
-        for (auto entity : directionalLightView) {
-            auto& ref = directionalLightView.get<SceneDirectionalLightReferenceComponent>(entity);
-            auto& logic = directionalLightView.get<DirectionalLightLogicComponent>(entity);
-            if (ref.lightIndex >= 0 && ref.lightIndex < scene->directionalLights.size()) {
-                logic.timer += deltaTime * logic.speed;
-                // Simple oscillation on Z axis relative to base direction
-                glm::vec3 newDir = logic.baseDirection;
-                newDir.z += logic.magnitude * sin(logic.timer);
-                scene->directionalLights[ref.lightIndex].direction = glm::normalize(newDir);
-            }
+
+        auto dirView = reg.view<DirectionalLightComponent, DirectionalLightLogicComponent>();
+        for (auto entity : dirView) {
+            auto& light = dirView.get<DirectionalLightComponent>(entity);
+            auto& logic = dirView.get<DirectionalLightLogicComponent>(entity);
+
+            logic.timer += deltaTime * logic.speed;
+            glm::vec3 newDir = logic.baseDirection;
+            newDir.z += logic.magnitude * sin(logic.timer);
+            light.direction = glm::normalize(newDir);
+        }
+    }
+};
+
+class LightGatherSystem {
+public:
+    static void update(entt::registry& reg, Scene* scene) {
+        scene->pointLights.clear();
+        auto pointView = reg.view<PointLightComponent, Vapor::TransformComponent>();
+        for (auto entity : pointView) {
+            auto& light     = pointView.get<PointLightComponent>(entity);
+            auto& transform = pointView.get<Vapor::TransformComponent>(entity);
+            scene->pointLights.push_back({
+                .position  = transform.position,
+                .color     = light.color,
+                .intensity = light.intensity,
+                .radius    = light.radius,
+            });
+        }
+
+        scene->directionalLights.clear();
+        auto dirView = reg.view<DirectionalLightComponent>();
+        for (auto entity : dirView) {
+            auto& light = dirView.get<DirectionalLightComponent>(entity);
+            scene->directionalLights.push_back({
+                .direction = light.direction,
+                .color     = light.color,
+                .intensity = light.intensity,
+            });
         }
     }
 };

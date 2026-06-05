@@ -36,20 +36,24 @@
 #include "systems.hpp"
 
 static void setupCustomDrawers(Vapor::SceneInspector& inspector) {
-    // 1. ScenePointLightReferenceComponent
+    // 1. PointLightComponent
     inspector.registerCustomDrawer([](entt::registry& reg, entt::entity e) {
-        if (auto* c = reg.try_get<ScenePointLightReferenceComponent>(e)) {
-            if (ImGui::CollapsingHeader("Scene Point Light Ref")) {
-                ImGui::LabelText("Light Index", "%d", c->lightIndex);
+        if (auto* c = reg.try_get<PointLightComponent>(e)) {
+            if (ImGui::CollapsingHeader("Point Light")) {
+                ImGui::ColorEdit3("Color", &c->color.x);
+                ImGui::DragFloat("Intensity", &c->intensity, 0.1f, 0.0f, 100.0f);
+                ImGui::DragFloat("Radius", &c->radius, 0.05f, 0.01f, 50.0f);
             }
         }
     });
 
-    // 2. SceneDirectionalLightReferenceComponent
+    // 2. DirectionalLightComponent
     inspector.registerCustomDrawer([](entt::registry& reg, entt::entity e) {
-        if (auto* c = reg.try_get<SceneDirectionalLightReferenceComponent>(e)) {
-            if (ImGui::CollapsingHeader("Scene Directional Light Ref")) {
-                ImGui::LabelText("Light Index", "%d", c->lightIndex);
+        if (auto* c = reg.try_get<DirectionalLightComponent>(e)) {
+            if (ImGui::CollapsingHeader("Directional Light")) {
+                ImGui::DragFloat3("Direction", &c->direction.x, 0.01f, -1.0f, 1.0f);
+                ImGui::ColorEdit3("Color", &c->color.x);
+                ImGui::DragFloat("Intensity", &c->intensity, 0.1f, 0.0f, 100.0f);
             }
         }
     });
@@ -625,7 +629,7 @@ auto main(int argc, char* args[]) -> int {
         CameraSwitchSystem::update(registry, global);
         CameraSystem::update(registry, deltaTime);
         AutoRotateSystem::update(registry, deltaTime);
-        LightMovementSystem::update(registry, scene.get(), deltaTime);
+        LightMovementSystem::update(registry, deltaTime);
         // Subtitle systems (split into single-responsibility)
         SubtitleInputSystem::update(registry);
         SubtitlePageSensorSystem::update(registry);
@@ -642,6 +646,7 @@ auto main(int argc, char* args[]) -> int {
 
         physics->process(registry, deltaTime);
         Vapor::TransformSystem::update(registry);
+        LightGatherSystem::update(registry, scene.get());
         FlipbookSystem::update(registry, deltaTime);
         SpriteRenderSystem::update(registry, renderer.get(), &resourceManager);
 
