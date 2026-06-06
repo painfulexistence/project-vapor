@@ -5,12 +5,8 @@
 #include "physics_3d.hpp"
 #include "renderer.hpp"
 #include "scene.hpp"
-// #include "world.hpp"  // TODO: world.hpp not found - ECS World class may be needed
 #include <entt/entt.hpp>
 #include <memory>
-
-// Temporary alias for compatibility - replace with actual World class when available
-using World = entt::registry;
 
 namespace Vapor {
 
@@ -19,29 +15,28 @@ namespace Vapor {
     // ============================================================================
     class TransformSystem {
     public:
-        static void update(World& world) {
-            auto* transformPool = world.GetPool<TransformComponent>();
+        static void update(entt::registry& registry) {
+            auto view = registry.view<TransformComponent>();
 
             // 第一遍：標記所有需要更新的實體
-            for (size_t i = 0; i < transformPool->components.size(); ++i) {
-                Entity e = transformPool->denseToEntity[i];
-                auto& transform = transformPool->components[i];
+            for (auto entity : view) {
+                auto& transform = view.get<TransformComponent>(entity);
 
-                if (transform.isDirty || transform.parent != NULL_ENTITY) {
+                if (transform.isDirty || transform.parent != entt::null) {
                     // 需要重新計算世界變換
-                    updateWorldTransform(world, e, transform);
+                    updateWorldTransform(registry, entity, transform);
                 }
             }
         }
 
     private:
-        static void updateWorldTransform(World& world, Entity e, TransformComponent& transform) {
+        static void updateWorldTransform(entt::registry& registry, entt::entity e, TransformComponent& transform) {
             glm::mat4 localTransform = glm::translate(glm::mat4(1.0f), transform.position)
                                        * glm::mat4_cast(transform.rotation)
                                        * glm::scale(glm::mat4(1.0f), transform.scale);
 
-            if (transform.parent != NULL_ENTITY) {
-                auto* parentTransform = world.TryGetComponent<TransformComponent>(transform.parent);
+            if (transform.parent != entt::null) {
+                auto* parentTransform = registry.try_get<TransformComponent>(transform.parent);
                 if (parentTransform) {
                     transform.worldTransform = parentTransform->worldTransform * localTransform;
                 } else {
@@ -74,33 +69,31 @@ namespace Vapor {
         };
 
         static void collectInstances(
-            World& world,
+            entt::registry& registry,
             std::vector<RenderInstance>& instances,
             std::unordered_map<std::shared_ptr<Material>, std::vector<std::shared_ptr<Mesh>>>& instanceBatches
         ) {
-            auto* transformPool = world.GetPool<TransformComponent>();
-            auto* renderPool = world.GetPool<MeshComponent>();
+            auto view = registry.view<MeshRendererComponent>();
 
-            for (size_t i = 0; i < renderPool->components.size(); ++i) {
-                Entity e = renderPool->denseToEntity[i];
-                auto& render = renderPool->components[i];
+            for (auto entity : view) {
+                auto& render = view.get<MeshRendererComponent>(entity);
 
-                if (!render.visible || !render.meshGroup) {
+                if (!render.visible || render.meshes.empty()) {
                     continue;
                 }
 
-                auto* transform = world.TryGetComponent<TransformComponent>(e);
+                auto* transform = registry.try_get<TransformComponent>(entity);
                 if (!transform) {
                     continue;
                 }
 
                 const glm::mat4& modelMatrix = transform->worldTransform;
 
-                for (const auto& mesh : render.meshGroup->meshes) {
+                for (const auto& mesh : render.meshes) {
                     instances.push_back(
                         {
                             .model = modelMatrix,
-                            .color = render.color,
+                            .color = glm::vec4(1.0f), // Default white color since MeshRendererComponent doesn't have color field
                             .vertexOffset = mesh->vertexOffset,
                             .indexOffset = mesh->indexOffset,
                             .vertexCount = mesh->vertexCount,
@@ -126,19 +119,17 @@ namespace Vapor {
     class PhysicsSyncSystem {
     public:
         // Scene → Physics: 同步 Kinematic/Static 物體
-        static void syncToPhysics(World& world, Physics3D* physics) {
-            auto* transformPool = world.GetPool<TransformComponent>();
-            auto* physicsPool = world.GetPool<RigidbodyComponent>();
+        static void syncToPhysics(entt::registry& registry, Physics3D* physics) {
+            auto view = registry.view<RigidbodyComponent>();
 
-            for (size_t i = 0; i < physicsPool->components.size(); ++i) {
-                Entity e = physicsPool->denseToEntity[i];
-                auto& phys = physicsPool->components[i];
+            for (auto entity : view) {
+                auto& phys = view.get<RigidbodyComponent>(entity);
 
                 if (!phys.body.valid() || !phys.syncToPhysics) {
                     continue;
                 }
 
-                auto* transform = world.TryGetComponent<TransformComponent>(e);
+                auto* transform = registry.try_get<TransformComponent>(entity);
                 if (!transform) {
                     continue;
                 }
@@ -153,19 +144,17 @@ namespace Vapor {
         }
 
         // Physics → Scene: 同步 Dynamic 物體
-        static void syncFromPhysics(World& world, Physics3D* physics) {
-            auto* transformPool = world.GetPool<TransformComponent>();
-            auto* physicsPool = world.GetPool<RigidbodyComponent>();
+        static void syncFromPhysics(entt::registry& registry, Physics3D* physics) {
+            auto view = registry.view<RigidbodyComponent>();
 
-            for (size_t i = 0; i < physicsPool->components.size(); ++i) {
-                Entity e = physicsPool->denseToEntity[i];
-                auto& phys = physicsPool->components[i];
+            for (auto entity : view) {
+                auto& phys = view.get<RigidbodyComponent>(entity);
 
                 if (!phys.body.valid() || !phys.syncFromPhysics) {
                     continue;
                 }
 
-                auto* transform = world.TryGetComponent<TransformComponent>(e);
+                auto* transform = registry.try_get<TransformComponent>(entity);
                 if (!transform) {
                     continue;
                 }
@@ -187,9 +176,9 @@ namespace Vapor {
     class GrabSystem {
     public:
         static bool
-            tryPickup(World& world, Entity grabber, Physics3D* physics, Camera* camera, float pickupRange = 5.0f) {
-            auto* grabberComp = world.TryGetComponent<GrabberComponent>(grabber);
-            if (!grabberComp || grabberComp->heldEntity != NULL_ENTITY) {
+            tryPickup(entt::registry& registry, entt::entity grabber, Physics3D* physics, Camera* camera, float pickupRange = 5.0f) {
+            auto* grabberComp = registry.try_get<GrabberComponent>(grabber);
+            if (!grabberComp || grabberComp->heldEntity != entt::null) {
                 return false;// 已經抓著東西了
             }
 
@@ -207,18 +196,18 @@ namespace Vapor {
             // 暫時假設可以通過某種方式找到 Entity
 
             // 檢查是否有 GrabbableComponent
-            // Entity hitEntity = findEntityFromNode(hit.node);
-            // if (!world.HasComponent<GrabbableComponent>(hitEntity)) {
+            // entt::entity hitEntity = findEntityFromNode(hit.node);
+            // if (!registry.all_of<GrabbableComponent>(hitEntity)) {
             //     return false;
             // }
 
             // 添加 HeldComponent
-            // auto& held = world.AddComponent<HeldComponent>(hitEntity);
+            // auto& held = registry.emplace<HeldComponent>(hitEntity);
             // held.holder = grabber;
             // held.originalGravityFactor = ...;
 
             // 更新 PhysicsComponent
-            // auto* phys = world.TryGetComponent<PhysicsComponent>(hitEntity);
+            // auto* phys = registry.try_get<PhysicsComponent>(hitEntity);
             // if (phys) {
             //     physics->setMotionType(phys->body, BodyMotionType::Kinematic);
             //     physics->setGravityFactor(phys->body, 0.0f);
@@ -229,20 +218,18 @@ namespace Vapor {
             return true;
         }
 
-        static void update(World& world, Physics3D* physics, Camera* camera, float deltaTime) {
-            auto* heldPool = world.GetPool<HeldComponent>();
-            auto* transformPool = world.GetPool<TransformComponent>();
+        static void update(entt::registry& registry, Physics3D* physics, Camera* camera, float deltaTime) {
+            auto view = registry.view<HeldByComponent>();
 
-            for (size_t i = 0; i < heldPool->components.size(); ++i) {
-                Entity e = heldPool->denseToEntity[i];
-                auto& held = heldPool->components[i];
+            for (auto entity : view) {
+                auto& held = view.get<HeldByComponent>(entity);
 
-                if (held.holder == NULL_ENTITY) {
+                if (held.holder == entt::null) {
                     continue;
                 }
 
                 // 獲取抓取者的變換
-                auto* holderTransform = world.TryGetComponent<TransformComponent>(held.holder);
+                auto* holderTransform = registry.try_get<TransformComponent>(held.holder);
                 if (!holderTransform) {
                     continue;
                 }
@@ -251,7 +238,7 @@ namespace Vapor {
                 glm::vec3 targetPos = camera->getEye() + camera->getForward() * held.holdDistance;
 
                 // 更新物理體位置
-                auto* phys = world.TryGetComponent<RigidbodyComponent>(e);
+                auto* phys = registry.try_get<RigidbodyComponent>(entity);
                 if (phys && phys->body.valid()) {
                     glm::vec3 currentPos = physics->getPosition(phys->body);
                     glm::vec3 velocity = (targetPos - currentPos) / deltaTime;
@@ -264,7 +251,7 @@ namespace Vapor {
                     physics->setLinearVelocity(phys->body, velocity);
 
                     // 同步到 Transform
-                    auto* transform = world.TryGetComponent<TransformComponent>(e);
+                    auto* transform = registry.try_get<TransformComponent>(entity);
                     if (transform) {
                         transform->position = currentPos;
                         transform->isDirty = true;
@@ -279,15 +266,13 @@ namespace Vapor {
     // ============================================================================
     class LightMovementSystem {
     public:
-        static void update(World& world, Scene* scene, float deltaTime) {
-            auto* logicPool = world.GetPool<LightMovementLogicComponent>();
-            auto* refPool = world.GetPool<SceneLightReferenceComponent>();
+        static void update(entt::registry& registry, Scene* scene, float deltaTime) {
+            auto view = registry.view<LightMovementLogicComponent>();
 
-            for (size_t i = 0; i < logicPool->components.size(); ++i) {
-                Entity e = logicPool->denseToEntity[i];
-                auto& logic = logicPool->components[i];
+            for (auto entity : view) {
+                auto& logic = view.get<LightMovementLogicComponent>(entity);
 
-                auto* ref = world.TryGetComponent<SceneLightReferenceComponent>(e);
+                auto* ref = registry.try_get<SceneLightReferenceComponent>(entity);
                 if (!ref || ref->lightIndex < 0 || ref->lightIndex >= scene->pointLights.size()) {
                     continue;
                 }
@@ -340,24 +325,23 @@ namespace Vapor {
     // ============================================================================
     class CameraSystem {
     public:
-        static void update(World& world, InputManager& inputManager, float deltaTime) {
-            auto* cameraPool = world.GetPool<VirtualCameraComponent>();
+        static void update(entt::registry& registry, InputManager& inputManager, float deltaTime) {
+            auto view = registry.view<VirtualCameraComponent>();
             const auto& inputState = inputManager.getInputState();
 
-            for (size_t i = 0; i < cameraPool->components.size(); ++i) {
-                Entity e = cameraPool->denseToEntity[i];
-                auto& cam = cameraPool->components[i];
+            for (auto entity : view) {
+                auto& cam = view.get<VirtualCameraComponent>(entity);
 
                 if (!cam.isActive) continue;
 
                 // 1. Handle Fly Camera Logic
-                if (auto* fly = world.TryGetComponent<FlyCameraComponent>(e)) {
+                if (auto* fly = registry.try_get<FlyCameraComponent>(entity)) {
                     handleFlyCamera(cam, fly, inputState, deltaTime);
                 }
 
                 // 2. Handle Follow Camera Logic
-                if (auto* follow = world.TryGetComponent<FollowCameraComponent>(e)) {
-                    handleFollowCamera(cam, follow, deltaTime);
+                if (auto* follow = registry.try_get<FollowCameraComponent>(entity)) {
+                    handleFollowCamera(cam, follow, deltaTime, registry);
                 }
 
                 // 3. Update Matrices
@@ -365,14 +349,14 @@ namespace Vapor {
             }
         }
 
-        static Entity getActiveCamera(World& world) {
-            auto* cameraPool = world.GetPool<VirtualCameraComponent>();
-            for (size_t i = 0; i < cameraPool->components.size(); ++i) {
-                if (cameraPool->components[i].isActive) {
-                    return cameraPool->denseToEntity[i];
+        static entt::entity getActiveCamera(entt::registry& registry) {
+            auto view = registry.view<VirtualCameraComponent>();
+            for (auto entity : view) {
+                if (view.get<VirtualCameraComponent>(entity).isActive) {
+                    return entity;
                 }
             }
-            return NULL_ENTITY;
+            return entt::null;
         }
 
     private:
@@ -407,12 +391,15 @@ namespace Vapor {
             if (inputState.isPressed(InputAction::MoveDown)) cam.position -= up * speed;
         }
 
-        static void handleFollowCamera(VirtualCameraComponent& cam, FollowCameraComponent* follow, float deltaTime) {
-            if (!follow->targetNode) return;
+        static void handleFollowCamera(VirtualCameraComponent& cam, FollowCameraComponent* follow, float deltaTime, entt::registry& registry) {
+            if (follow->target == entt::null || !registry.valid(follow->target)) return;
+
+            // Get target's transform component
+            auto* targetTransform = registry.try_get<TransformComponent>(follow->target);
+            if (!targetTransform) return;
 
             // Simple follow logic: Target Position + Offset
-            // We use the Node's world position directly
-            glm::vec3 targetPos = follow->targetNode->getWorldPosition();
+            glm::vec3 targetPos = targetTransform->position;
             glm::vec3 desiredPos = targetPos + follow->offset;
 
             // Smooth lerp
