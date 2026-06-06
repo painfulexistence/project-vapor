@@ -5,8 +5,12 @@
 #include "physics_3d.hpp"
 #include "renderer.hpp"
 #include "scene.hpp"
-#include "world.hpp"
+// #include "world.hpp"  // TODO: world.hpp not found - ECS World class may be needed
+#include <entt/entt.hpp>
 #include <memory>
+
+// Temporary alias for compatibility - replace with actual World class when available
+using World = entt::registry;
 
 namespace Vapor {
 
