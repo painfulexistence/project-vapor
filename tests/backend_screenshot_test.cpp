@@ -25,9 +25,9 @@ TEST_CASE("Renderer - Screenshot Capture", "[backend][screenshot]") {
     ImGui::CreateContext();
 
 #if defined(__APPLE__)
-    auto renderer = createRenderer(GraphicsBackend::Metal);
+    auto renderer = createRenderer(GraphicsBackend::Metal, window);
 #else
-    auto renderer = createRenderer(GraphicsBackend::Vulkan);
+    auto renderer = createRenderer(GraphicsBackend::Vulkan, window);
 #endif
     try {
         renderer->init(window);
