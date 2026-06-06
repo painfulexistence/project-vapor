@@ -1449,10 +1449,10 @@ void Renderer::setImGuiCallback(std::function<void()> callback) {
 
 void Renderer::initBatchRendering() {
     // Initialize batch2D
-    batch2D.init(rhi.get(), backend, false, defaultWhiteTexture);
+    batch2D.init(rhi.get(), backend, false, textures[defaultWhiteTexture].handle);
 
     // Initialize batch3D
-    batch3D.init(rhi.get(), backend, true, defaultWhiteTexture);
+    batch3D.init(rhi.get(), backend, true, textures[defaultWhiteTexture].handle);
 }
 
 void Renderer::shutdownBatchRendering() {
@@ -1475,7 +1475,7 @@ void Renderer::flush2D() {
 void Renderer::flush3D() {
     if (batch3D.quadCount > 0) {
         // Use current camera's view-projection
-        glm::mat4 viewProj = currentCamera.projection * currentCamera.view;
+        glm::mat4 viewProj = currentCamera.proj * currentCamera.view;
         batch3D.flush(rhi.get(), viewProj);
     }
 }
@@ -2124,7 +2124,7 @@ void Renderer::applyVignette(RenderTextureHandle target, float strength, float r
 // Texture Creation (for sprites)
 // ============================================================================
 
-TextureHandle Renderer::createTexture(const std::shared_ptr<Image>& img) {
+TextureHandle Renderer::createTexture(const std::shared_ptr<Vapor::Image>& img) {
     TextureDesc desc;
     desc.width = img->width;
     desc.height = img->height;
