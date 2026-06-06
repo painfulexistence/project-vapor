@@ -264,6 +264,11 @@ namespace Vapor {
     // ============================================================================
     // 光照移動系統 - Logic Driver
     // ============================================================================
+    // NOTE: This system is commented out because it uses game-specific component types
+    // (LightMovementLogicComponent, SceneLightReferenceComponent, MovementPattern) that
+    // are not defined in the engine. The game provides its own LightMovementSystem in
+    // Vaporware/src/systems.hpp that handles light movement.
+    /*
     class LightMovementSystem {
     public:
         static void update(entt::registry& registry, Scene* scene, float deltaTime) {
@@ -319,6 +324,7 @@ namespace Vapor {
             }
         }
     };
+    */
 
     // ============================================================================
     // 相機系統
