@@ -13,7 +13,7 @@ struct Particle {
     vec4  color;
 };
 
-// Matches ParticleSimulationParams (std140, 48 bytes)
+// Matches ParticleSimulationParams (std140, 64 bytes)
 layout(std140, set = 0, binding = 0) uniform SimulationParams {
     vec2     resolution;
     vec2     mousePosition;
@@ -21,7 +21,8 @@ layout(std140, set = 0, binding = 0) uniform SimulationParams {
     float    deltaTime;
     uint     particleCount;
     uint     attractorCount;
-    vec4     wind;             // xyz = direction, w = strength
+    vec4     wind;       // xyz = direction, w = strength
+    vec4     turbulence; // w = strength (xyz reserved)
 };
 
 // Attractor array packed as vec4: xyz = position, w = strength
@@ -33,13 +34,44 @@ layout(std430, set = 0, binding = 2) buffer ParticleBuffer {
     Particle particles[];
 };
 
+// ---- Curl noise ----
+float hash(float n) { return fract(sin(n) * 43758.5453123); }
+
+float vnoise(vec3 p) {
+    vec3 i = floor(p); vec3 f = fract(p);
+    f = f * f * (3.0 - 2.0 * f);
+    float n = i.x + i.y * 57.0 + i.z * 113.0;
+    return mix(
+        mix(mix(hash(n),      hash(n+1.0),   f.x),
+            mix(hash(n+57.0), hash(n+58.0),  f.x), f.y),
+        mix(mix(hash(n+113.0),hash(n+114.0), f.x),
+            mix(hash(n+170.0),hash(n+171.0), f.x), f.y), f.z);
+}
+
+// True curl of a 3-component potential field (divergence-free by construction).
+// 12 vnoise calls; spatial scale 0.5x, slow time drift at 0.07x.
+vec3 curlNoise(vec3 p, float t) {
+    const float e  = 0.1;
+    const vec3  o1 = vec3(1.7, 9.2, 3.5);
+    const vec3  o2 = vec3(5.4, 2.1, 7.8);
+    vec3 q = p * 0.5 + vec3(t * 0.07);
+
+    float dFzdy = vnoise(q+o2+vec3(0,e,0)) - vnoise(q+o2-vec3(0,e,0));
+    float dFydz = vnoise(q+o1+vec3(0,0,e)) - vnoise(q+o1-vec3(0,0,e));
+    float dFxdz = vnoise(q   +vec3(0,0,e)) - vnoise(q   -vec3(0,0,e));
+    float dFzdx = vnoise(q+o2+vec3(e,0,0)) - vnoise(q+o2-vec3(e,0,0));
+    float dFydx = vnoise(q+o1+vec3(e,0,0)) - vnoise(q+o1-vec3(e,0,0));
+    float dFxdy = vnoise(q   +vec3(0,e,0)) - vnoise(q   -vec3(0,e,0));
+
+    return vec3(dFzdy - dFydz, dFxdz - dFzdx, dFydx - dFxdy) / (2.0 * e);
+}
+
 void main() {
     uint idx = gl_GlobalInvocationID.x;
-    if (idx >= particles.length()) return;
+    if (idx >= particleCount) return;
 
     Particle p = particles[idx];
 
-    // Skip dead particles (lifetime > 0 means finite lifetime)
     if (p.lifetime > 0.0 && p.age >= p.lifetime) {
         particles[idx] = p;
         return;
@@ -59,8 +91,12 @@ void main() {
         }
     }
 
-    // Wind force
+    // Wind
     p.force += wind.xyz * wind.w;
+
+    // Curl-noise turbulence
+    if (turbulence.w > 0.0)
+        p.force += curlNoise(p.position, time) * turbulence.w;
 
     // Velocity damping
     p.force -= p.velocity * 0.5;

@@ -749,6 +749,7 @@ public:
             .particleCount  = r.particleCount,
             .attractorCount = attractorCount,
             .wind           = r.m_particleWind,
+            .turbulence     = glm::vec4(0.0f, 0.0f, 0.0f, r.m_particleTurbulence),
         };
         auto drawableSize = r.swapchain->drawableSize();
         simParams.resolution = glm::vec2(drawableSize.width, drawableSize.height);

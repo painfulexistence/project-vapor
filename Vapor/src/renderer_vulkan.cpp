@@ -3515,6 +3515,7 @@ void Renderer_Vulkan::updateParticleSimulation(VkCommandBuffer cmd, float deltaT
         .particleCount  = particleCount,
         .attractorCount = attractorCount,
         .wind           = m_particleWind,
+        .turbulence     = glm::vec4(0.0f, 0.0f, 0.0f, m_particleTurbulence),
     };
     memcpy(particleSimParamsBuffersMapped[currentFrameInFlight], &simParams, sizeof(ParticleSimulationParams));
 

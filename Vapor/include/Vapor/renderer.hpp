@@ -207,6 +207,11 @@ public:
         m_particleWind = glm::vec4(direction, strength);
     }
 
+    // Set global curl-noise turbulence strength (0 = off).
+    virtual void setParticleTurbulence(float strength) {
+        m_particleTurbulence = strength;
+    }
+
     // Reserve a contiguous range of slots from the global GPU particle pool.
     // Returns the start index, or ~0u if capacity is exhausted.
     // Slots are permanent for the lifetime of the emitter.
@@ -254,7 +259,8 @@ public:
 
 protected:
     std::vector<ParticleAttractorData> m_particleAttractors;
-    glm::vec4 m_particleWind = glm::vec4(0.0f); // xyz = direction, w = strength
+    glm::vec4 m_particleWind        = glm::vec4(0.0f); // xyz = direction, w = strength
+    float     m_particleTurbulence  = 0.0f;
     uint32_t  m_particleSlotsAllocated = 0;
 
     struct ParticleSlotRange { uint32_t begin = 0, count = 0; };

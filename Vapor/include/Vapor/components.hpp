@@ -189,9 +189,26 @@ namespace Vapor {
     // Add this tag to trigger a one-shot particle burst.
     // ParticleBurstSystem consumes and removes it the same frame.
     struct ParticleBurstRequest {
-        uint32_t count  = 50;
-        float    speed  = 3.0f;
-        float    spread = 3.14159f; // full sphere by default
+        uint32_t  count    = 50;
+        float     speed    = 3.0f;
+        float     spread   = 3.14159f; // full sphere by default
+        float     lifetime = 1.0f;
+        glm::vec4 color    = {1.0f, 1.0f, 1.0f, 1.0f};
+    };
+
+    // ============================================================================
+    // Spell Bolt
+    // ============================================================================
+    // Attach alongside ParticleEmitterComponent. SpellBoltSystem moves the
+    // entity's TransformComponent along a quadratic Bezier arc from origin to
+    // target each frame, updating emitDirection to match the tangent.
+    // On arrival: disables emitter, fires a ParticleBurstRequest, removes itself.
+    struct SpellBoltComponent {
+        glm::vec3 origin;
+        glm::vec3 target;
+        float     speed      = 15.0f; // world units / second
+        float     arcHeight  = 0.5f;  // upward arc at the midpoint (0 = straight line)
+        float     _progress  = 0.0f;  // [0,1], managed by SpellBoltSystem
     };
 
     // ============================================================================

@@ -230,7 +230,7 @@ struct alignas(16) GPUParticle {
 };
 
 // Matches GLSL std140 layout exactly (verified offset-by-offset):
-//   vec2(8) vec2(8) float(4) float(4) uint(4) uint(4) vec4(16) = 48 bytes.
+//   vec2(8) vec2(8) float(4) float(4) uint(4) uint(4) vec4(16) vec4(16) = 64 bytes.
 struct alignas(16) ParticleSimulationParams {
     glm::vec2 resolution    = glm::vec2(1280.0f, 720.0f);
     glm::vec2 mousePosition = glm::vec2(0.0f);
@@ -239,6 +239,7 @@ struct alignas(16) ParticleSimulationParams {
     uint32_t  particleCount = 0;
     uint32_t  attractorCount = 0;
     glm::vec4 wind          = glm::vec4(0.0f); // xyz = direction, w = strength
+    glm::vec4 turbulence    = glm::vec4(0.0f); // w = strength (xyz reserved)
 };
 
 // Packed as 16 bytes so arrays of this map to vec4[] in GLSL/Metal.

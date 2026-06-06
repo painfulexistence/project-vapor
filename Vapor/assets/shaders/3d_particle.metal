@@ -14,8 +14,8 @@ struct Particle {
     float4 color;
 };
 
-// Matches ParticleSimulationParams (CPU, 48 bytes).
-// In Metal constant address space float3 is 16 bytes, so wind uses float4.
+// Matches ParticleSimulationParams (CPU, 64 bytes).
+// In Metal constant address space float3 is 16 bytes, so wind/turbulence use float4.
 struct ParticleSimParams {
     float2 resolution;
     float2 mousePosition;
@@ -23,8 +23,39 @@ struct ParticleSimParams {
     float  deltaTime;
     uint   particleCount;
     uint   attractorCount;
-    float4 wind;           // xyz = direction, w = strength
+    float4 wind;       // xyz = direction, w = strength
+    float4 turbulence; // w = strength (xyz reserved)
 };
+
+// ---- Curl noise ----
+float hash(float n) { return fract(sin(n) * 43758.5453123f); }
+
+float vnoise(float3 p) {
+    float3 i = floor(p); float3 f = fract(p);
+    f = f * f * (3.0f - 2.0f * f);
+    float n = i.x + i.y * 57.0f + i.z * 113.0f;
+    return mix(
+        mix(mix(hash(n),       hash(n+1.0f),   f.x),
+            mix(hash(n+57.0f), hash(n+58.0f),  f.x), f.y),
+        mix(mix(hash(n+113.0f),hash(n+114.0f), f.x),
+            mix(hash(n+170.0f),hash(n+171.0f), f.x), f.y), f.z);
+}
+
+float3 curlNoise(float3 p, float t) {
+    const float e  = 0.1f;
+    const float3 o1 = float3(1.7f, 9.2f, 3.5f);
+    const float3 o2 = float3(5.4f, 2.1f, 7.8f);
+    float3 q = p * 0.5f + float3(t * 0.07f);
+
+    float dFzdy = vnoise(q+o2+float3(0,e,0)) - vnoise(q+o2-float3(0,e,0));
+    float dFydz = vnoise(q+o1+float3(0,0,e)) - vnoise(q+o1-float3(0,0,e));
+    float dFxdz = vnoise(q   +float3(0,0,e)) - vnoise(q   -float3(0,0,e));
+    float dFzdx = vnoise(q+o2+float3(e,0,0)) - vnoise(q+o2-float3(e,0,0));
+    float dFydx = vnoise(q+o1+float3(e,0,0)) - vnoise(q+o1-float3(e,0,0));
+    float dFxdy = vnoise(q   +float3(0,e,0)) - vnoise(q   -float3(0,e,0));
+
+    return float3(dFzdy-dFydz, dFxdz-dFzdx, dFydx-dFxdy) / (2.0f * e);
+}
 
 // ============================================================================
 // Compute Kernels
@@ -63,8 +94,12 @@ kernel void particleForce(
     // Wind force
     p.force += params.wind.xyz * params.wind.w;
 
+    // Curl-noise turbulence
+    if (params.turbulence.w > 0.0f)
+        p.force += curlNoise(p.position, params.time) * params.turbulence.w;
+
     // Damping
-    p.force -= p.velocity * 0.5;
+    p.force -= p.velocity * 0.5f;
 
     particles[id] = p;
 }
