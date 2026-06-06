@@ -5,8 +5,12 @@ namespace Vapor {
 
     class RNG {
     public:
-        RNG() {
-            _rng = std::mt19937(_r());
+        RNG(unsigned int seed = 0) {
+            if (seed == 0) {
+                _rng = std::mt19937(_r());
+            } else {
+                _rng = std::mt19937(seed);
+            }
             _floatDist = std::uniform_real_distribution<float>(0.0f, 1.0f);
             _intDist = std::uniform_int_distribution<int>(0, 1);
         }

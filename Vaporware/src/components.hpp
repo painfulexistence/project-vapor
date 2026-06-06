@@ -1,29 +1,48 @@
 #pragma once
 
 #include "Vapor/components.hpp"
+#include "Vapor/fsm.hpp"
 #include <RmlUi/Core/ElementDocument.h>
 #include <entt/entt.hpp>
 #include <glm/vec2.hpp>
+#include <glm/vec3.hpp>
 #include <memory>
 #include <string>
 #include <vector>
 
-struct ScenePointLightReferenceComponent {
-    int lightIndex = -1;// Index into Scene::pointLights
+// ============================================================================
+// Use engine-layer components directly (avoid duplication)
+// ============================================================================
+using Vapor::FlyCameraComponent;
+using Vapor::FollowCameraComponent;
+using Vapor::GrabberComponent;
+using Vapor::HeldByComponent;
+
+// ============================================================================
+// Light Components
+// ============================================================================
+struct PointLightComponent {
+    glm::vec3 color    = glm::vec3(1.0f);
+    float     intensity = 1.0f;
+    float     radius   = 0.5f;
 };
 
-struct SceneDirectionalLightReferenceComponent {
-    int lightIndex = -1;// Index into Scene::directionalLights
+struct DirectionalLightComponent {
+    glm::vec3 direction = glm::vec3(0.0f, -1.0f, 0.0f);
+    glm::vec3 color     = glm::vec3(1.0f);
+    float     intensity = 1.0f;
 };
 
+// ============================================================================
 // Character Logic
+// ============================================================================
 struct CharacterIntent {
     glm::vec2 lookVector = glm::vec2(0.0f);
     glm::vec2 moveVector = glm::vec2(0.0f);
     float moveVerticalAxis = 0.0f;
-    bool jump;
-    bool sprint;
-    bool interact;
+    bool jump = false;
+    bool sprint = false;
+    bool interact = false;
 };
 
 struct CharacterControllerComponent {
@@ -31,8 +50,9 @@ struct CharacterControllerComponent {
     float rotateSpeed = 90.0f;
 };
 
-
-// Grabbable / Interaction
+// ============================================================================
+// Grabbable (game-specific, extends engine GrabberComponent pattern)
+// ============================================================================
 struct GrabbableComponent {
     float pickupRange = 5.0f;
     float holdOffset = 3.0f;
@@ -40,54 +60,27 @@ struct GrabbableComponent {
     bool isHeld = false;
 };
 
-struct HeldByComponent {
-    entt::entity holder = entt::null;
-    float originalGravityFactor = 1.0f;
-    float holdDistance = 3.0f;
-};
-
-struct GrabberComponent {
-    entt::entity heldEntity = entt::null;
-    float maxPickupRange = 5.0f;
-};
-
+// ============================================================================
 // Light Logic
+// ============================================================================
 enum class MovementPattern { Circle, Figure8, Linear, Spiral };
 
 struct LightMovementLogicComponent {
-    MovementPattern pattern;
+    MovementPattern pattern = MovementPattern::Circle;
     float speed = 1.0f;
     float timer = 0.0f;
-
-    // Parameters
     float radius = 3.0f;
     float height = 1.5f;
     float parameter1 = 0.0f;
     float parameter2 = 0.0f;
 };
 
-
-// Camera Logic
-struct FlyCameraComponent {
-    float moveSpeed = 5.0f;
-    float rotateSpeed = 90.0f;
-
-    float yaw = -90.0f;
-    float pitch = 0.0f;
-};
-
-struct FollowCameraComponent {
-    entt::entity target = entt::null;
-
-    glm::vec3 offset = glm::vec3(0.0f, 2.0f, 5.0f);
-    float smoothFactor = 0.1f;
-    float deadzone = 0.1f;
-};
-
+// ============================================================================
+// Camera Logic (game-specific additions)
+// ============================================================================
 struct FirstPersonCameraComponent {
     float moveSpeed = 5.0f;
     float rotateSpeed = 90.0f;
-
     float yaw = -90.0f;
     float pitch = 0.0f;
 };
@@ -108,10 +101,15 @@ struct DirectionalLightLogicComponent {
     float timer = 0.0f;
 };
 
-
-// --- UI Trigger Components ---
-// These hold content/timing data. The visual presentation lives in the
-// corresponding Page subclass. Systems here drive the pages via PageSystem.
+// ============================================================================
+// Subtitle System (uses FSM)
+// ============================================================================
+namespace SubtitleStates {
+    constexpr uint32_t Idle = 0;
+    constexpr uint32_t WaitingForVisible = 1;
+    constexpr uint32_t Displaying = 2;
+    constexpr uint32_t WaitingForHidden = 3;
+}
 
 struct SubtitleEntry {
     std::string speaker;
@@ -119,37 +117,46 @@ struct SubtitleEntry {
     float duration = 3.0f;
 };
 
-enum class SubtitleQueueState { Idle, WaitingForVisible, Displaying, WaitingForHidden };
-
 struct SubtitleQueueComponent {
     std::vector<SubtitleEntry> queue;
     int currentIndex = -1;
     bool advanceRequested = false;
+    bool restartRequested = false;  // New: handled by SubtitleInputSystem
     bool autoAdvance = true;
-    SubtitleQueueState state = SubtitleQueueState::Idle;
     float displayTimer = 0.0f;
 };
 
-struct ScrollTextQueueComponent {
-    std::vector<std::string> lines;
-    int currentIndex = 0;
-    bool advanceRequested = false;
-};
+inline Vapor::FSMDefinition createSubtitleFSM() {
+    return Vapor::FSMDefinitionBuilder()
+        .state("Idle")
+        .state("WaitingForVisible")
+        .state("Displaying")
+        .state("WaitingForHidden")
+        .transition("Idle", "WaitingForVisible", "ShowSubtitle")
+        .transition("WaitingForVisible", "Displaying", "PageVisible")
+        .transition("Displaying", "WaitingForHidden", "HideSubtitle")
+        .transition("WaitingForHidden", "Idle", "PageHidden")
+        .transition("WaitingForHidden", "WaitingForVisible", "ShowSubtitle")
+        .initialState("Idle")
+        .build();
+}
 
-// Chapter Title Card
-enum class ChapterTitleState { Hidden, FadingIn, Visible, FadingOut };
+// ============================================================================
+// Chapter Title System (uses FSM)
+// ============================================================================
+namespace ChapterTitleStates {
+    constexpr uint32_t Hidden = 0;
+    constexpr uint32_t FadingIn = 1;
+    constexpr uint32_t Visible = 2;
+    constexpr uint32_t FadingOut = 3;
+}
 
 struct ChapterTitleComponent {
     std::string documentPath;
     Rml::ElementDocument* document = nullptr;
-
-    std::string chapterNumber;// "Chapter 1" or "I"
-    std::string chapterTitle;// "The Beginning"
+    std::string chapterNumber;
+    std::string chapterTitle;
     bool showRequested = false;
-
-    // Animation state
-    ChapterTitleState state = ChapterTitleState::Hidden;
-    float timer = 0.0f;
     float fadeDuration = 0.8f;
     float displayDuration = 2.5f;
 };
@@ -160,22 +167,67 @@ struct ChapterTitleTriggerComponent {
     bool showRequested = false;
 };
 
-// Scene transition (see SCENE_TRANSITIONS.md)
-enum class SceneTransitionState {
-    Idle,
-    FadingInLoadingScreen,
-    UnloadingScene,
-    LoadingAssets,
-    BuildingScene,
-    FadingOutLoadingScreen,
-};
+inline Vapor::FSMDefinition createChapterTitleFSM() {
+    return Vapor::FSMDefinitionBuilder()
+        .state("Hidden")
+        .state("FadingIn")
+        .state("Visible")
+        .state("FadingOut")
+        .transition("Hidden", "FadingIn", "Show")
+        .timedTransition("FadingIn", "Visible", 0.8f)
+        .timedTransition("Visible", "FadingOut", 2.5f)
+        .timedTransition("FadingOut", "Hidden", 0.8f)
+        .initialState("Hidden")
+        .build();
+}
+
+// ============================================================================
+// Scene Transition System (uses FSM)
+// ============================================================================
+namespace SceneTransitionStates {
+    constexpr uint32_t Idle = 0;
+    constexpr uint32_t FadingInLoadingScreen = 1;
+    constexpr uint32_t UnloadingScene = 2;
+    constexpr uint32_t LoadingAssets = 3;
+    constexpr uint32_t BuildingScene = 4;
+    constexpr uint32_t FadingOutLoadingScreen = 5;
+}
 
 struct SceneTransitionComponent {
     std::string targetScene;
-    SceneTransitionState state = SceneTransitionState::Idle;
     float progress = 0.0f;
 };
 
+inline Vapor::FSMDefinition createSceneTransitionFSM() {
+    return Vapor::FSMDefinitionBuilder()
+        .state("Idle")
+        .state("FadingInLoadingScreen")
+        .state("UnloadingScene")
+        .state("LoadingAssets")
+        .state("BuildingScene")
+        .state("FadingOutLoadingScreen")
+        .transition("Idle", "FadingInLoadingScreen", "StartTransition")
+        .transition("FadingInLoadingScreen", "UnloadingScene", "FadeInComplete")
+        .transition("UnloadingScene", "LoadingAssets", "UnloadComplete")
+        .transition("LoadingAssets", "BuildingScene", "AssetsLoaded")
+        .transition("BuildingScene", "FadingOutLoadingScreen", "SceneBuilt")
+        .transition("FadingOutLoadingScreen", "Idle", "FadeOutComplete")
+        .initialState("Idle")
+        .build();
+}
+
+// ============================================================================
+// Scroll Text
+// ============================================================================
+struct ScrollTextQueueComponent {
+    std::vector<std::string> lines;
+    int currentIndex = 0;
+    bool advanceRequested = false;
+};
+
+// ============================================================================
+// Tags
+// ============================================================================
 struct PersistentTag {};
 struct DeadTag {};
 // Marks entities auto-spawned from a GLTF scene; excluded from level serialization.
