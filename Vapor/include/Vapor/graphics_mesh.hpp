@@ -14,13 +14,3 @@ namespace Vapor {
         glm::vec2 uv1;
     };
 }
-        Uint32 vertexCount = 0;
-        Uint32 indexCount = 0;
-
-        std::vector<BufferHandle> vbos;
-        BufferHandle ebo;
-        Uint32 instanceID = UINT32_MAX;
-        Uint32 materialID = UINT32_MAX;
-    };
-
-};// namespace Vapor
