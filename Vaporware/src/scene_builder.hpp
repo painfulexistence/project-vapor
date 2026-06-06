@@ -91,59 +91,51 @@ inline SceneResources buildScene(
         physics.addBody(rb.body, false);
     }
 
-    scene->directionalLights.push_back(
-        {
-            .direction = glm::vec3(0.5, -1.0, 0.0),
-            .color = glm::vec3(1.0, 1.0, 1.0),
-            .intensity = 10.0,
-        }
-    );
-    auto sunLight = registry.create();
     {
-        auto& ref = registry.emplace<SceneDirectionalLightReferenceComponent>(sunLight);
-        ref.lightIndex = 0;
+        auto sunLight = registry.create();
+        auto& dl      = registry.emplace<DirectionalLightComponent>(sunLight);
+        dl.direction  = glm::normalize(glm::vec3(0.5f, -1.0f, 0.0f));
+        dl.color      = glm::vec3(1.0f, 1.0f, 1.0f);
+        dl.intensity  = 10.0f;
 
-        auto& logic = registry.emplace<DirectionalLightLogicComponent>(sunLight);
-        logic.baseDirection = glm::vec3(0.5, -1.0, 0.0);
-        logic.speed = 0.5f;
-        logic.magnitude = 0.05f;
+        auto& logic         = registry.emplace<DirectionalLightLogicComponent>(sunLight);
+        logic.baseDirection = glm::vec3(0.5f, -1.0f, 0.0f);
+        logic.speed         = 0.5f;
+        logic.magnitude     = 0.05f;
     }
 
     for (int i = 0; i < 8; i++) {
-        scene->pointLights.push_back(
-            { .position = glm::vec3(
-                  rng.RandomFloatInRange(-5.0f, 5.0f),
-                  rng.RandomFloatInRange(0.0f, 5.0f),
-                  rng.RandomFloatInRange(-5.0f, 5.0f)
-              ),
-              .color = glm::vec3(rng.RandomFloat(), rng.RandomFloat(), rng.RandomFloat()),
-              .intensity = 5.0f * rng.RandomFloat(),
-              .radius = 0.5f }
+        auto e         = registry.create();
+        auto& tc       = registry.emplace<Vapor::TransformComponent>(e);
+        tc.position    = glm::vec3(
+            rng.RandomFloatInRange(-5.0f, 5.0f),
+            rng.RandomFloatInRange(0.0f, 5.0f),
+            rng.RandomFloatInRange(-5.0f, 5.0f)
         );
-    }
-    for (int i = 0; i < (int)scene->pointLights.size(); ++i) {
-        auto e = registry.create();
+        tc.isDirty     = true;
 
-        auto& ref = registry.emplace<ScenePointLightReferenceComponent>(e);
-        ref.lightIndex = i;
+        auto& pl       = registry.emplace<PointLightComponent>(e);
+        pl.color       = glm::vec3(rng.RandomFloat(), rng.RandomFloat(), rng.RandomFloat());
+        pl.intensity   = 5.0f * rng.RandomFloat();
+        pl.radius      = 0.5f;
 
-        auto& logic = registry.emplace<LightMovementLogicComponent>(e);
-        logic.speed = 0.5f;
-        logic.timer = i * 0.1f;
+        auto& logic    = registry.emplace<LightMovementLogicComponent>(e);
+        logic.speed    = 0.5f;
+        logic.timer    = i * 0.1f;
 
         switch (i % 4) {
         case 0:
             logic.pattern = MovementPattern::Circle;
-            logic.radius = 3.0f;
-            logic.height = 1.5f;
+            logic.radius  = 3.0f;
+            logic.height  = 1.5f;
             break;
         case 1:
             logic.pattern = MovementPattern::Figure8;
-            logic.radius = 3.0f;
+            logic.radius  = 3.0f;
             break;
         case 2:
             logic.pattern = MovementPattern::Linear;
-            logic.radius = 3.0f;
+            logic.radius  = 3.0f;
             break;
         case 3:
             logic.pattern = MovementPattern::Spiral;

@@ -19,14 +19,18 @@ using Vapor::GrabberComponent;
 using Vapor::HeldByComponent;
 
 // ============================================================================
-// Scene References
+// Light Components
 // ============================================================================
-struct ScenePointLightReferenceComponent {
-    int lightIndex = -1;
+struct PointLightComponent {
+    glm::vec3 color    = glm::vec3(1.0f);
+    float     intensity = 1.0f;
+    float     radius   = 0.5f;
 };
 
-struct SceneDirectionalLightReferenceComponent {
-    int lightIndex = -1;
+struct DirectionalLightComponent {
+    glm::vec3 direction = glm::vec3(0.0f, -1.0f, 0.0f);
+    glm::vec3 color     = glm::vec3(1.0f);
+    float     intensity = 1.0f;
 };
 
 // ============================================================================
