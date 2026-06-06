@@ -2,22 +2,23 @@
 layout(local_size_x = 256, local_size_y = 1, local_size_z = 1) in;
 
 struct Particle {
-    vec3 position;
-    float _pad1;
-    vec3 velocity;
-    float _pad2;
-    vec3 force;
+    vec3  position;
+    float lifetime;
+    vec3  velocity;
+    float age;
+    vec3  force;
     float _pad3;
-    vec4 color;
+    vec4  color;
 };
 
 layout(std140, set = 0, binding = 0) uniform SimulationParams {
-    vec2 resolution;
-    vec2 mousePosition;
-    float time;
-    float deltaTime;
-    float _pad1;
-    float _pad2;
+    vec2     resolution;
+    vec2     mousePosition;
+    float    time;
+    float    deltaTime;
+    uint     particleCount;
+    uint     attractorCount;
+    vec4     wind;
 };
 
 layout(std430, set = 0, binding = 2) buffer ParticleBuffer {
@@ -26,24 +27,35 @@ layout(std430, set = 0, binding = 2) buffer ParticleBuffer {
 
 void main() {
     uint idx = gl_GlobalInvocationID.x;
-    if (idx >= particles.length()) {
-        return;
-    }
+    if (idx >= particles.length()) return;
 
     Particle p = particles[idx];
 
-    // Semi-implicit Euler integration
+    // Dead: hide and stop
+    if (p.lifetime > 0.0 && p.age >= p.lifetime) {
+        p.color.a = 0.0;
+        particles[idx] = p;
+        return;
+    }
+
+    p.age += deltaTime;
+
+    // Fade alpha in the last 30% of lifetime
+    if (p.lifetime > 0.0) {
+        float t = p.age / p.lifetime;
+        p.color.a = clamp(1.0 - smoothstep(0.7, 1.0, t), 0.0, 1.0);
+    }
+
+    // Semi-implicit Euler
     p.velocity += p.force * deltaTime;
     p.position += p.velocity * deltaTime;
 
-    // Boundary conditions (keep particles in a sphere)
+    // Soft boundary sphere
     float maxDist = 20.0;
-    float dist = length(p.position);
-    if (dist > maxDist) {
+    float d = length(p.position);
+    if (d > maxDist) {
         p.position = normalize(p.position) * maxDist;
-        // Reflect velocity
-        vec3 normal = normalize(p.position);
-        p.velocity = reflect(p.velocity, normal) * 0.5;
+        p.velocity = reflect(p.velocity, normalize(p.position)) * 0.5;
     }
 
     particles[idx] = p;

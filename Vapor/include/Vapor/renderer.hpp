@@ -4,6 +4,7 @@
 #include "graphics.hpp"
 #include "scene.hpp"
 #include <SDL3/SDL_video.h>
+#include <algorithm>
 #include <entt/entt.hpp>
 #include <functional>
 #include <memory>
@@ -194,6 +195,33 @@ public:
     // Apply vignette effect
     virtual void applyVignette(RenderTextureHandle target, float strength = 0.3f, float radius = 0.8f) {}
 
+    // ===== Particle System API =====
+    // Called each frame by ParticleEmitterSystem before draw(); renderer uses
+    // the first entry as the GPU attractor position for the next simulation step.
+    virtual void setParticleAttractors(const std::vector<ParticleAttractorData>& attractors) {
+        m_particleAttractors = attractors;
+    }
+
+    // Set global wind applied to all particles each frame.
+    virtual void setParticleWind(const glm::vec3& direction, float strength) {
+        m_particleWind = glm::vec4(direction, strength);
+    }
+
+    // Set global curl-noise turbulence strength (0 = off).
+    virtual void setParticleTurbulence(float strength) {
+        m_particleTurbulence = strength;
+    }
+
+    // Reserve a contiguous range of slots from the global GPU particle pool.
+    // Returns the start index, or ~0u if capacity is exhausted.
+    // Slots are permanent for the lifetime of the emitter.
+    virtual uint32_t claimParticleSlots(uint32_t count) { return ~0u; }
+    virtual void releaseParticleSlots(uint32_t slotBegin, uint32_t count) {}
+
+    // Write CPU-computed initial particle state into the GPU buffer.
+    // Must be called before draw() so the GPU sees fresh data this frame.
+    virtual void uploadParticles(uint32_t slotBegin, const std::vector<GPUParticle>& particles) {}
+
     // ===== Font Rendering API =====
     // Load a font from file path with specified base size
     virtual FontHandle loadFont(const std::string& path, float baseSize) {
@@ -230,6 +258,50 @@ public:
     }
 
 protected:
+    std::vector<ParticleAttractorData> m_particleAttractors;
+    glm::vec4 m_particleWind        = glm::vec4(0.0f); // xyz = direction, w = strength
+    float     m_particleTurbulence  = 0.0f;
+    uint32_t  m_particleSlotsAllocated = 0;
+
+    struct ParticleSlotRange { uint32_t begin = 0, count = 0; };
+    std::vector<ParticleSlotRange> m_particleSlotFreeList;
+
+    uint32_t allocParticleSlots(uint32_t count, uint32_t maxParticles) {
+        for (auto it = m_particleSlotFreeList.begin(); it != m_particleSlotFreeList.end(); ++it) {
+            if (it->count >= count) {
+                uint32_t begin = it->begin;
+                if (it->count == count) {
+                    m_particleSlotFreeList.erase(it);
+                } else {
+                    it->begin += count;
+                    it->count -= count;
+                }
+                return begin;
+            }
+        }
+        if (m_particleSlotsAllocated + count > maxParticles) return ~0u;
+        uint32_t begin = m_particleSlotsAllocated;
+        m_particleSlotsAllocated += count;
+        return begin;
+    }
+
+    void freeParticleSlots(uint32_t slotBegin, uint32_t count) {
+        if (slotBegin == ~0u || count == 0) return;
+        m_particleSlotFreeList.push_back({ slotBegin, count });
+        std::sort(m_particleSlotFreeList.begin(), m_particleSlotFreeList.end(),
+            [](const ParticleSlotRange& a, const ParticleSlotRange& b) { return a.begin < b.begin; });
+        for (size_t i = 0; i + 1 < m_particleSlotFreeList.size(); ) {
+            auto& cur = m_particleSlotFreeList[i];
+            const auto& nxt = m_particleSlotFreeList[i + 1];
+            if (cur.begin + cur.count == nxt.begin) {
+                cur.count += nxt.count;
+                m_particleSlotFreeList.erase(m_particleSlotFreeList.begin() + i + 1);
+            } else {
+                ++i;
+            }
+        }
+    }
+
     const Uint32 MAX_FRAMES_IN_FLIGHT = 3;
     const Uint32 MSAA_SAMPLE_COUNT = 4;
     const Uint32 MAX_INSTANCES = 5000;// Increased for large scenes like Bistro (2911 instances)

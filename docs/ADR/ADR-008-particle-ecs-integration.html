@@ -1,0 +1,373 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>ADR-008: Particle ECS Integration — Project Vapor</title>
+  <style>
+    :root {
+      --bg: #0d0d0f; --bg-surface: #141418; --bg-raised: #1c1c22;
+      --border: #2a2a33; --text: #e2e2e8; --text-muted: #7a7a8c;
+      --accent: #7c6af7; --warn: #c97a2f; --ok: #4a9e6a; --danger: #9e4a4a;
+    }
+    * { box-sizing: border-box; margin: 0; padding: 0; }
+    body { background: var(--bg); color: var(--text); font-family: 'Berkeley Mono','JetBrains Mono','Fira Code','Cascadia Code',monospace; font-size: 15px; line-height: 1.75; }
+    nav { background: var(--bg-surface); border-bottom: 1px solid var(--border); padding: 16px 24px; display: flex; align-items: center; justify-content: space-between; }
+    nav .site-title { color: var(--text-muted); text-decoration: none; font-size: 14px; }
+    nav .links { display: flex; gap: 24px; }
+    nav .links a { color: var(--text-muted); text-decoration: none; font-size: 13px; }
+    nav .links a:hover { color: var(--accent); }
+    nav .links a.active { color: var(--accent); }
+    main { max-width: 860px; margin: 0 auto; padding: 48px 24px; }
+    .page-header { margin-bottom: 32px; }
+    .page-header .eyebrow { font-size: 12px; color: var(--text-muted); margin-bottom: 10px; }
+    .page-header .eyebrow a { color: var(--text-muted); text-decoration: none; }
+    .page-header .eyebrow a:hover { color: var(--accent); }
+    .page-header h1 { font-size: 20px; font-weight: 600; margin-bottom: 12px; }
+    .meta-row { display: flex; gap: 24px; font-size: 13px; color: var(--text-muted); flex-wrap: wrap; }
+    .badge { display: inline-block; font-size: 11px; border-radius: 3px; padding: 2px 8px; }
+    .badge-ok { background: rgba(74,158,106,0.15); color: var(--ok); }
+    .badge-warn { background: rgba(201,122,47,0.12); color: var(--warn); }
+    .badge-danger { background: rgba(158,74,74,0.15); color: var(--danger); }
+    h2 { font-size: 16px; font-weight: 600; margin: 40px 0 14px; border-top: 1px solid var(--border); padding-top: 32px; }
+    h2:first-of-type { border-top: none; padding-top: 0; }
+    h3 { font-size: 13px; font-weight: 600; color: var(--text-muted); margin: 20px 0 8px; text-transform: uppercase; letter-spacing: 0.06em; }
+    p { margin-bottom: 14px; }
+    pre { background: var(--bg-raised); border: 1px solid var(--border); border-radius: 3px; padding: 16px; font-size: 13px; overflow-x: auto; margin-bottom: 16px; line-height: 1.6; }
+    pre code { background: none; padding: 0; }
+    code { background: var(--bg-raised); border-radius: 3px; padding: 2px 6px; font-size: 13px; }
+    ul { padding-left: 20px; margin-bottom: 14px; }
+    ul li { margin-bottom: 4px; }
+    ol { padding-left: 20px; margin-bottom: 14px; }
+    ol li { margin-bottom: 6px; }
+    .warn-box { background: rgba(201,122,47,0.08); border: 1px solid rgba(201,122,47,0.3); border-radius: 4px; padding: 14px 18px; font-size: 13px; color: var(--warn); margin-bottom: 20px; }
+    .danger-box { background: rgba(158,74,74,0.08); border: 1px solid rgba(158,74,74,0.3); border-radius: 4px; padding: 14px 18px; font-size: 13px; color: var(--danger); margin-bottom: 20px; }
+    .ok-box { background: rgba(74,158,106,0.08); border: 1px solid rgba(74,158,106,0.3); border-radius: 4px; padding: 14px 18px; font-size: 13px; color: var(--ok); margin-bottom: 20px; }
+    .issue-row { display: flex; align-items: baseline; gap: 10px; margin-bottom: 10px; font-size: 14px; }
+    .issue-row .label { flex-shrink: 0; }
+    table { width: 100%; border-collapse: collapse; margin-bottom: 20px; font-size: 13px; }
+    th { text-align: left; border-bottom: 1px solid var(--border); padding: 8px 12px; color: var(--text-muted); font-weight: 600; font-size: 11px; text-transform: uppercase; letter-spacing: 0.05em; }
+    td { padding: 8px 12px; border-bottom: 1px solid var(--border); }
+    tr:last-child td { border-bottom: none; }
+    @media (max-width: 640px) { main { padding: 24px 16px; } }
+  </style>
+</head>
+<body>
+  <nav>
+    <a class="site-title" href="../index.html">Project Vapor</a>
+    <div class="links">
+      <a href="../architecture.html">Architecture</a>
+      <a href="../features.html">Features</a>
+      <a href="../techstack.html">Tech Stack</a>
+      <a href="../roadmap.html">Roadmap</a>
+      <a href="index.html" class="active">ADRs</a>
+    </div>
+  </nav>
+  <main>
+    <div class="page-header">
+      <div class="eyebrow"><a href="index.html">ADRs</a> / ADR-008</div>
+      <h1>ADR-008: Particle ECS Integration — CPU Spawn Logic, Per-Emitter GPU Slots, and Force Field Architecture</h1>
+      <div class="meta-row">
+        <span>2026-05-30</span>
+        <span><span class="badge badge-ok">Adopted</span></span>
+        <span>Branch: <code>claude/entity-particle-emitter-gpu-RrV6m</code></span>
+      </div>
+    </div>
+
+    <p>This record covers the design and implementation of ECS-driven particle emission in Project Vapor — connecting the <code>entt::registry</code> entity layer to the existing GPU compute-based particle simulation — and the sequence of decisions made along the way. It is written in devlog style: roughly in the order things were discovered, not in the order a polished spec would present them.</p>
+
+    <!-- ================================================================== -->
+    <h2>Context — The Situation Before</h2>
+
+    <p>The Vulkan and Metal renderers already had a working GPU particle system: a global fixed-size pool of <code>GPUParticle</code> structs living in a storage buffer, a compute pass that ran a force-integration kernel (<code>ParticleForce.comp</code> / <code>particleForce</code>) and an Euler integrator (<code>ParticleIntegrate.comp</code> / <code>particleIntegrate</code>), and a billboard vertex shader that rendered whatever lived in the pool.</p>
+
+    <p>The problem: no ECS entity could control any of this. The attractor that pulled particles was hardcoded to the camera-forward direction. Spawning new particles meant calling low-level renderer internals directly — which bypassed the whole scene graph. An entity in the world could not say "emit particles from my position."</p>
+
+    <p>The goal was to close that gap without dismantling the renderer's GPU pipeline. The computation stays on the GPU; the ECS drives what gets written into the GPU buffer and where forces come from.</p>
+
+    <!-- ================================================================== -->
+    <h2>Why Not PR #6?</h2>
+
+    <p>There was a prior attempt at this (unmerged PR #6) that I had to be careful around. That PR introduced a parallel particle entity with its own naming conventions — it did not follow the <code>*Component</code> / <code>*System</code> suffix pattern used everywhere else in the codebase, and it created new files rather than extending <code>components.hpp</code> and <code>systems.hpp</code>. The surface area was also much larger than necessary at the time.</p>
+
+    <p>The decision here was to add directly inside the existing <code>components.hpp</code> and <code>systems.hpp</code>, following the established naming and file structure. No new parallel entity files. PR #6's ideas about a ring buffer were sound; the execution approach was what differed.</p>
+
+    <!-- ================================================================== -->
+    <h2>Iteration 1 — The Bridge Approach (Discarded)</h2>
+
+    <p>The first instinct was a minimal bridge: iterate emitter entities, read their world position, and call <code>renderer->setParticleAttractors()</code> with a single entry. The renderer already accepted an attractor position — it just wasn't wired to any entity. This would let an emitter entity act as a gravity well for the existing GPU simulation.</p>
+
+    <p>This worked in about 30 lines. But it was fundamentally not ECS. The "emitter" component was not actually emitting anything — particles were spawned by whatever initialization code set initial positions in the GPU buffer, not driven by any entity lifecycle. Calling it an emitter was misleading. The attractor coupling also capped at one entity, which made scenes with multiple emitter sources impossible.</p>
+
+    <p>I threw it away and started over with a proper ECS design.</p>
+
+    <!-- ================================================================== -->
+    <h2>Iteration 2 — True ECS: CPU Spawn Logic + Per-Emitter Slots</h2>
+
+    <h3>Design</h3>
+    <p>The core insight is a division of labor:</p>
+    <ul>
+      <li><strong>CPU (ECS system):</strong> decides <em>when</em> to spawn, <em>where</em> (world position), and <em>how</em> (initial velocity, color, lifetime). Writes initial particle state into GPU memory.</li>
+      <li><strong>GPU (compute shaders):</strong> integrates forces each frame. It does not know or care about entities — it just sees an array of particles and applies physics.</li>
+    </ul>
+    <p>Each <code>ParticleEmitterComponent</code> claims a contiguous range of slots from the global GPU particle pool on first use. The pool is a static array; slots are permanent for the lifetime of the emitter (no dynamic reallocation). Within its range, the emitter maintains a ring cursor and overwrites the oldest slot when a new particle spawns — classic ring buffer behaviour.</p>
+
+    <h3>Slot Claiming</h3>
+    <pre><code>// In ParticleEmitterSystem::update(), first frame for this emitter:
+if (emitter._slotBegin == ~0u) {
+    emitter._slotCount = emitter.maxParticles;
+    emitter._slotBegin = renderer->claimParticleSlots(emitter._slotCount);
+    if (emitter._slotBegin == ~0u) continue; // pool exhausted
+    emitter._ringCursor = 0;
+}</code></pre>
+    <p><code>claimParticleSlots()</code> is a high-water-mark allocator: it returns the current <code>m_particleSlotsAllocated</code>, then advances it by <code>count</code>. If the resulting value would exceed <code>MAX_PARTICLES</code>, it returns <code>~0u</code>. Simple, no fragmentation, no bookkeeping. The trade-off — there is no real <code>releaseParticleSlots()</code> yet — is documented as a known issue below.</p>
+
+    <h3>Emission Rate and Accumulator</h3>
+    <p>Spawn timing uses an accumulator rather than a per-frame count, which is standard practice for rate-based systems and handles low frame rates correctly:</p>
+    <pre><code>emitter._accumulator += dt;
+float interval = 1.0f / emitter.emissionRate;
+while (emitter._accumulator >= interval) {
+    emitter._accumulator -= interval;
+    // ... spawn one particle
+}</code></pre>
+    <p>At 20 particles/s and 60 fps the accumulator naturally batches at most one particle per frame. At 200/s it batches up to ~3. The spawned particles are collected into a <code>std::vector&lt;GPUParticle&gt;</code> and flushed to the GPU in a single call.</p>
+
+    <h3>Ring Buffer Write — A Subtle Bug Fixed</h3>
+    <p>The first ring buffer implementation had the cursor in the wrong order:</p>
+    <pre><code>// BUG: cursor was advanced first, then used as the write target
+emitter._ringCursor = (emitter._ringCursor + spawns.size()) % emitter._slotCount;
+uint32_t writeSlot = emitter._slotBegin + emitter._ringCursor; // wrong slot</code></pre>
+    <p>The fixed version records the write position <em>before</em> advancing:</p>
+    <pre><code>// CORRECT: record position first, then advance
+uint32_t writeSlot = emitter._slotBegin + emitter._ringCursor;
+renderer->uploadParticles(writeSlot, spawns);
+emitter._ringCursor = (emitter._ringCursor + (uint32_t)spawns.size()) % emitter._slotCount;</code></pre>
+
+    <h3>Cone-Sampled Velocity</h3>
+    <p>Initial velocity is sampled uniformly inside a cone around <code>emitDirection</code> (local-space, rotated by the entity's world transform). The perpendicular basis construction handles the degenerate case where <code>worldDir</code> is nearly aligned with the X axis:</p>
+    <pre><code>glm::vec3 perp = std::abs(worldDir.x) < 0.9f
+    ? glm::vec3(1, 0, 0) : glm::vec3(0, 1, 0);
+glm::vec3 u = glm::normalize(glm::cross(worldDir, perp));
+glm::vec3 v = glm::cross(worldDir, u);
+float theta = unit(rng) * 2.0f * 3.14159265f;
+float phi   = unit(rng) * emitter.spread;
+glm::vec3 dir = glm::normalize(
+    worldDir * std::cos(phi) + (u * std::cos(theta) + v * std::sin(theta)) * std::sin(phi)
+);</code></pre>
+
+    <!-- ================================================================== -->
+    <h2>GPU Struct Alignment — The <code>_pad</code> Repurposing</h2>
+
+    <p>The existing <code>GPUParticle</code> struct had two mystery padding fields:</p>
+    <pre><code>struct alignas(16) GPUParticle {
+    glm::vec3 position; float _pad1; // after vec3 (12 bytes) → pad to 16
+    glm::vec3 velocity; float _pad2;
+    glm::vec3 force;    float _pad3;
+    glm::vec4 color;
+}; // 64 bytes</code></pre>
+    <p>These pads existed because GLSL std430 (and Metal <code>device</code> address space) require <code>float3</code> to be 12 bytes but the next field must still land on a 4-byte boundary — and the overall struct must be a multiple of the largest member alignment (16). The pads had always been there and always been zero.</p>
+    <p>Repurposing <code>_pad1</code> → <code>lifetime</code> and <code>_pad2</code> → <code>age</code> is a zero-cost change: same layout, same binary size, same alignment. The CPU initializes them during spawn; the GPU integrator increments <code>age</code> each frame and uses both to compute a fade factor and cull dead particles. <code>_pad3</code> stays as padding since there is no obvious semantic use for it yet.</p>
+    <pre><code>struct alignas(16) GPUParticle {
+    glm::vec3 position; float lifetime; // seconds; 0 = immortal
+    glm::vec3 velocity; float age;      // incremented by GPU integrator
+    glm::vec3 force;    float _pad3;
+    glm::vec4 color;
+};</code></pre>
+
+    <!-- ================================================================== -->
+    <h2>The Attractor Array Bug — A Nasty Alignment Trap</h2>
+
+    <p>This one took a moment to spot. The original <code>ParticleAttractorData</code> had a spurious padding field that looked innocuous:</p>
+    <pre><code>struct alignas(16) ParticleAttractorData {
+    glm::vec3 position; // offset 0
+    float     _pad1;    // offset 12
+    float     strength; // offset 16
+}; // 20 bytes on CPU, but GLSL struct was different</code></pre>
+    <p>The GLSL attractor struct in the compute shader was:</p>
+    <pre><code>struct AttractorData { vec3 position; float strength; }; // std430: 16 bytes</code></pre>
+    <p>GLSL std430 packs <code>vec3</code> as 12 bytes + 4 bytes padding = 16 before the next field. So GLSL's <code>strength</code> was at byte offset 12 within the struct — but the CPU was writing the actual <code>strength</code> float at offset 16 (after <code>_pad1</code>). The GPU was reading offset 12, which was <code>_pad1 = 0.0f</code>. Every attractor had zero strength. The particles moved as if there were no attractor at all.</p>
+    <p>The fix: remove <code>_pad1</code>. The struct becomes exactly 16 bytes (12 for <code>vec3</code> + 4 for <code>float</code>), which matches the GLSL layout perfectly. As a bonus, it maps cleanly to a <code>vec4</code> in GLSL (xyz=position, w=strength), which is how the multi-attractor array is expressed in the final shader to avoid std140 ambiguity entirely:</p>
+    <pre><code>// GLSL — avoid struct padding confusion, use vec4 directly
+layout(set=0, binding=2) readonly buffer AttractorBuffer {
+    vec4 attractors[MAX_ATTRACTORS]; // xyz=position, w=strength
+};</code></pre>
+
+    <!-- ================================================================== -->
+    <h2>Multi-Attractor Architecture</h2>
+
+    <h3>Decision</h3>
+    <p>Expand the single hardcoded attractor to an array of up to <code>MAX_PARTICLE_ATTRACTORS = 8</code> attractors, populated each frame by a dedicated <code>ParticleForceFieldSystem</code>.</p>
+
+    <h3>Two Sources of Attractors</h3>
+    <p><code>ParticleForceFieldSystem::update()</code> collects attractors from two sources:</p>
+    <ol>
+      <li><strong>Dedicated attractor entities</strong> — any entity with <code>TransformComponent + ParticleAttractorComponent</code>. These exist solely to pull particles toward a point in space, decoupled from any emitter.</li>
+      <li><strong>Emitter entities</strong> — any <code>ParticleEmitterComponent</code> with <code>attractorStrength > 0</code> also registers itself as an attractor. This lets emitters pull their own particles back toward the spawn point (a common artistic effect).</li>
+    </ol>
+    <p>Separating <code>ParticleForceFieldSystem</code> from <code>ParticleEmitterSystem</code> was a deliberate ECS choice: force fields and emission are orthogonal concerns. An attractor entity has no emission logic; an emitter entity may or may not act as a force field. The split also makes it easy to add new force types (repulsors, vortices) without touching the emitter system.</p>
+
+    <h3>Capacity</h3>
+    <p>Eight attractors covers the expected artistic use cases (main emitter + a few environmental pulls) without bloating the uniform buffer. The GPU loop is cheap for small N; if we ever need more, <code>MAX_PARTICLE_ATTRACTORS</code> is a single constant.</p>
+
+    <!-- ================================================================== -->
+    <h2>Wind — The Naming Decision</h2>
+
+    <p>The first draft of the wind component was called <code>ParticleWindComponent</code>. That name is wrong. Wind is a world-space phenomenon — vegetation sways in it, cloth sims read from it, audio occlusion varies with it, and particles react to it. Naming it after particles ties a world-concept to a single subsystem.</p>
+    <p>It was renamed to <code>WindFieldComponent</code> and placed in the general components section alongside other world-state concepts. The particle system reads it; other systems can read it independently without any coupling to particle code.</p>
+    <pre><code>struct WindFieldComponent {
+    glm::vec3 direction = {1.0f, 0.0f, 0.0f};
+    float     strength  = 0.0f;
+    bool      enabled   = true;
+};</code></pre>
+    <p>Singleton-style: attach to one "world settings" entity. First enabled instance wins. If no wind entity exists, strength stays 0 and the GPU wind term is a no-op.</p>
+
+    <!-- ================================================================== -->
+    <h2>Persistent GPU Buffer Mapping (Vulkan)</h2>
+
+    <p>The original Vulkan particle buffer was mapped with <code>vkMapMemory</code> / <code>vkUnmapMemory</code> every time a CPU write was needed. That is fine for infrequent updates but wrong for a system that uploads particle data every frame.</p>
+    <p>The particle buffers were switched to <code>createBufferMapped()</code>, which maps the memory at allocation time and keeps it mapped for the lifetime of the buffer. <code>uploadParticles()</code> becomes a plain <code>memcpy</code>:</p>
+    <pre><code>void Renderer_Vulkan::uploadParticles(uint32_t slotBegin, const std::vector&lt;GPUParticle&gt;& particles) {
+    if (!particleSystemEnabled || particles.empty()) return;
+    if (slotBegin + particles.size() > MAX_PARTICLES) return;
+    size_t bytes = particles.size() * sizeof(GPUParticle);
+    for (size_t i = 0; i &lt; MAX_FRAMES_IN_FLIGHT; i++) {
+        auto* dst = static_cast&lt;GPUParticle*&gt;(particleBuffersMapped[i]) + slotBegin;
+        memcpy(dst, particles.data(), bytes);
+    }
+}</code></pre>
+    <p>Writing to <em>all</em> <code>MAX_FRAMES_IN_FLIGHT</code> (3) buffers on spawn is important. The renderer is triple-buffered: at any moment the GPU is reading frame N-1 while the CPU is preparing frame N. If we only wrote to the current frame's buffer, the next frame's buffer would still contain stale (or zeroed) particle state. Writing to all three on spawn means the initial state is consistent across the entire pipeline regardless of which frame slot is active when the first compute pass runs.</p>
+
+    <!-- ================================================================== -->
+    <h2>Particle Expression Skeletons</h2>
+
+    <p>The Ghost of Tsushima talk on particles-as-cinematic-language was the inspiration here. The idea: particles are not just visual effects — they carry emotional meaning. A scene in the "Calm" state has slow-drifting, widely-spaced emitters; "Tense" compresses them, increases rate, shifts color toward red. These are not gameplay mechanics, they are cinematography tools.</p>
+    <p>The full implementation is deferred, but the scaffolding is in place:</p>
+    <table>
+      <thead><tr><th>Component</th><th>Purpose</th><th>Status</th></tr></thead>
+      <tbody>
+        <tr><td><code>EmotionState</code> (enum)</td><td>Global scene mood: Calm / Tense / Sacred / Triumphant</td><td>Defined</td></tr>
+        <tr><td><code>EmitterModulatorComponent</code></td><td>Per-emitter multipliers driven by EmotionState</td><td>Defined, unread</td></tr>
+        <tr><td><code>EmitterModulatorSystem</code></td><td>Iterates modulators, adjusts emitter params</td><td>Skeleton (TODO)</td></tr>
+        <tr><td><code>ParticleBurstRequest</code></td><td>Tag: triggers a one-shot particle burst</td><td>Defined</td></tr>
+        <tr><td><code>ParticleBurstSystem</code></td><td>Consumes burst tags, spawns in sphere, removes tag</td><td>Skeleton (TODO)</td></tr>
+      </tbody>
+    </table>
+    <p>The skeletons are present so future work can fill in behavior without changing the API surface. <code>EmitterModulatorSystem</code> is intended to run between the emotion state update and <code>ParticleEmitterSystem</code> — it reads the global state and adjusts <code>rateMultiplier</code> / <code>colorTint</code> so the emitter system picks them up naturally in the same frame.</p>
+
+    <!-- ================================================================== -->
+    <h2>SimulationParams Layout — std140 Verification</h2>
+
+    <p>Adding <code>attractorCount</code> and <code>wind</code> to <code>ParticleSimulationParams</code> required verifying the struct's std140 layout carefully, since a single wrong padding assumption means the GPU reads garbage.</p>
+    <pre><code>struct alignas(16) ParticleSimulationParams {
+    glm::vec2 resolution;     // offset  0, size 8
+    glm::vec2 mousePosition;  // offset  8, size 8
+    float     time;           // offset 16, size 4
+    float     deltaTime;      // offset 20, size 4
+    uint32_t  particleCount;  // offset 24, size 4
+    uint32_t  attractorCount; // offset 28, size 4
+    glm::vec4 wind;           // offset 32, size 16
+}; // total: 48 bytes — multiple of 16 ✓</code></pre>
+    <p>No padding holes anywhere: two <code>vec2</code>s fill the first 16 bytes, two floats + two uints fill the next 16, and the final <code>vec4</code> is naturally 16-byte aligned. The GLSL uniform block uses the same layout. This was verified by offset arithmetic, not assumed.</p>
+
+    <!-- ================================================================== -->
+    <h2>Metal vs. Vulkan Shader Parity</h2>
+
+    <p>The Metal shaders in <code>3d_particle.metal</code> and the Vulkan GLSL shaders were rewritten in parallel to maintain feature parity:</p>
+    <ul>
+      <li>Both have an attractor loop over up to <code>MAX_ATTRACTORS</code> entries.</li>
+      <li>Both apply inverse-square-law attraction with a softening term to avoid singularities at near-zero distance.</li>
+      <li>Both apply wind as a constant velocity bias scaled by <code>params.wind.w</code>.</li>
+      <li>Both increment <code>age</code> per frame and compute a fade-out in the last 30% of lifetime.</li>
+      <li>Both hide dead particles (age &gt; lifetime) by setting alpha to 0 and moving the billboard off-screen.</li>
+    </ul>
+    <p>One inconsistency found in review: the damping coefficient is <strong>0.1</strong> in Metal and <strong>0.5</strong> in Vulkan. This is a medium-priority bug — particles decelerate at different rates on the two backends. Not tracked as a separate ADR decision since it was an oversight, not a deliberate choice.</p>
+
+    <!-- ================================================================== -->
+    <h2>Known Issues</h2>
+
+    <div class="ok-box">
+      <div class="issue-row">
+        <span class="label"><strong>RETRACTED</strong></span>
+        <span>Earlier review flagged Metal <code>uploadParticles()</code> as CRITICAL for only writing a single buffer. This was wrong. Metal uses a <em>single</em> <code>StorageModeShared</code> particle buffer — not a per-frame array like Vulkan. On Apple Silicon unified memory, a CPU write to a <code>StorageModeShared</code> buffer is immediately visible to the GPU; there are no per-frame copies to synchronize. Vulkan's triple-write is necessary because it has three physically separate buffers, one per frame-in-flight. Metal does not, so writing once is correct.</span>
+      </div>
+    </div>
+    <div class="ok-box">
+      <div class="issue-row">
+        <span class="label"><strong>FIXED</strong></span>
+        <span>Damping coefficient unified to 0.5 on both backends. Softening factor (attractor force denominator) unified to 0.1. Both values are now identical in <code>ParticleForce.comp</code> and <code>3d_particle.metal</code>.</span>
+      </div>
+      <div class="issue-row">
+        <span class="label"><strong>FIXED</strong></span>
+        <span><code>releaseParticleSlots()</code> now returns slots to a first-fit free list with adjacent-range coalescing. Logic lives in <code>Renderer::allocParticleSlots()</code> and <code>Renderer::freeParticleSlots()</code> (base class protected helpers); both backends delegate to them.</span>
+      </div>
+      <div class="issue-row">
+        <span class="label"><strong>FIXED</strong></span>
+        <span><code>uploadParticles()</code> overflow guard updated to <code>slotBegin == ~0u || slotBegin + particles.size() &gt; MAX_PARTICLES</code> on both backends, preventing unsigned wrap-around false-pass.</span>
+      </div>
+    </div>
+
+    <!-- ================================================================== -->
+    <h2>Alternatives Considered and Rejected</h2>
+
+    <table>
+      <thead><tr><th>Option</th><th>Why Rejected</th></tr></thead>
+      <tbody>
+        <tr>
+          <td>Pure GPU spawning (spawn compute shader reads from entity buffer)</td>
+          <td>Requires uploading the entire ECS entity state to the GPU each frame. The spawning rules (cone angle, spread, emission rate accumulator) would need to be reimplemented in GLSL. CPU logic is simpler, easier to debug, and fast enough for the particle counts we target.</td>
+        </tr>
+        <tr>
+          <td>Per-emitter triple-buffered sub-pools</td>
+          <td>Avoids writing to all frame buffers on spawn, but requires the ring cursor to advance independently per frame. Significantly more complex bookkeeping for a gain that matters only when spawn rates approach the pool size boundary. Deferred.</td>
+        </tr>
+        <tr>
+          <td>Single global attractor (camera-forward hardcoded)</td>
+          <td>Original design. Cannot support scenes with multiple emitter sources; artistically limiting.</td>
+        </tr>
+        <tr>
+          <td>Attractor as part of ParticleEmitterSystem (no ForceFieldSystem)</td>
+          <td>Conflates emission with force field application. Non-emitter entities could not be attractors. <code>WindFieldComponent</code> would have no natural home.</td>
+        </tr>
+        <tr>
+          <td>PR #6 approach (new parallel entity files, non-standard naming)</td>
+          <td>Did not follow established <code>*Component</code> / <code>*System</code> naming, introduced parallel file structure, was larger in scope than needed at the time. Would have been harder to review and merge cleanly.</td>
+        </tr>
+      </tbody>
+    </table>
+
+    <!-- ================================================================== -->
+    <h2>Call Order</h2>
+
+    <p>The correct system call order each frame, from earliest to latest:</p>
+    <pre><code>// 1. Update world transforms
+TransformSystem::update(registry);
+
+// 2. Upload force fields to renderer (reads transform positions)
+ParticleForceFieldSystem::update(registry, renderer);
+
+// 3. Spawn new particles (reads transform positions, writes GPU buffer)
+ParticleEmitterSystem::update(registry, renderer, dt);
+
+// 4. (Future) Modulate emitter parameters from EmotionState
+// EmitterModulatorSystem::update(registry, state);
+
+// 5. GPU compute passes run inside renderer->draw():
+//    a. ParticleForce.comp / particleForce — apply attractors + wind
+//    b. ParticleIntegrate.comp / particleIntegrate — Euler step, age, fade
+//    c. Particle.vert + billboard draw call
+renderer->draw(registry, scene, camera);</code></pre>
+
+    <!-- ================================================================== -->
+    <h2>Future Work</h2>
+
+    <ul>
+      <li>Implement <code>EmitterModulatorSystem</code>: map <code>EmotionState</code> to per-emitter parameter curves. The scaffolding is in place; the lookup table / curve data structure is the remaining design question.</li>
+      <li>Implement <code>ParticleBurstSystem</code>: sphere-sampled one-shot spawns, tag removal.</li>
+      <li>All three issues (damping, slot free-list, overflow guard) resolved in the same branch.</li>
+      <li>Consider a free-list allocator for <code>claimParticleSlots</code> / <code>releaseParticleSlots</code> if dynamic emitter create/destroy becomes a real use case.</li>
+      <li>Per-particle texture atlas support: the <code>GPUParticle</code> struct has one spare float (<code>_pad3</code>) that could encode a frame index.</li>
+    </ul>
+
+  </main>
+</body>
+</html>

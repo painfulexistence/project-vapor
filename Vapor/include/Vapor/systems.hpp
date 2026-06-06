@@ -7,6 +7,7 @@
 #include "scene.hpp"
 #include <entt/entt.hpp>
 #include <memory>
+#include <random>
 
 namespace Vapor {
 
@@ -244,6 +245,265 @@ namespace Vapor {
 
             // Projection Matrix
             cam.projectionMatrix = glm::perspective(cam.fov, cam.aspect, cam.near, cam.far);
+        }
+    };
+
+    // ============================================================================
+    // 粒子力場系統 — attractors + wind → renderer uniforms
+    // ============================================================================
+    // Call BEFORE renderer->draw(), after TransformSystem::update().
+    // Collects ParticleAttractorComponent entities (and emitter entities that
+    // flag attractorStrength > 0) and the first ParticleWindComponent, then
+    // uploads them to the renderer so the GPU force kernel can use them.
+    class ParticleForceFieldSystem {
+    public:
+        static void update(entt::registry& registry, Renderer* renderer) {
+            std::vector<ParticleAttractorData> attractors;
+
+            // Dedicated attractor entities
+            auto aView = registry.view<Vapor::TransformComponent, Vapor::ParticleAttractorComponent>();
+            for (auto entity : aView) {
+                auto& t = aView.get<Vapor::TransformComponent>(entity);
+                auto& a = aView.get<Vapor::ParticleAttractorComponent>(entity);
+                if (!a.enabled) continue;
+                if (attractors.size() >= MAX_PARTICLE_ATTRACTORS) break;
+                attractors.push_back({ .position = t.position, .strength = a.strength });
+            }
+
+            // Emitter entities also act as attractors (pull particles toward spawn)
+            auto eView = registry.view<Vapor::TransformComponent, Vapor::ParticleEmitterComponent>();
+            for (auto entity : eView) {
+                auto& t = eView.get<Vapor::TransformComponent>(entity);
+                auto& e = eView.get<Vapor::ParticleEmitterComponent>(entity);
+                if (!e.enabled || e.attractorStrength == 0.0f) continue;
+                if (attractors.size() >= MAX_PARTICLE_ATTRACTORS) break;
+                attractors.push_back({ .position = t.position, .strength = e.attractorStrength });
+            }
+
+            renderer->setParticleAttractors(attractors);
+
+            // Wind — first enabled WindFieldComponent wins
+            auto wView = registry.view<Vapor::WindFieldComponent>();
+            for (auto entity : wView) {
+                auto& w = wView.get<Vapor::WindFieldComponent>(entity);
+                if (!w.enabled) continue;
+                renderer->setParticleWind(w.direction, w.strength);
+                break;
+            }
+        }
+    };
+
+    // ============================================================================
+    // 粒子發射系統 — CPU spawn logic → GPU particle slots
+    // ============================================================================
+    // Call update() once per frame, after TransformSystem::update() and BEFORE
+    // renderer->draw().  The system drives CPU-side spawn logic and uploads
+    // initial particle state to the GPU; the existing compute shader then takes
+    // over velocity integration and attractor forces.
+    class ParticleEmitterSystem {
+    public:
+        static void update(entt::registry& registry, Renderer* renderer, float dt) {
+            static std::mt19937 rng{ std::random_device{}() };
+            static std::uniform_real_distribution<float> unit{ 0.0f, 1.0f };
+
+            std::vector<ParticleAttractorData> attractors;
+            auto view = registry.view<Vapor::TransformComponent, Vapor::ParticleEmitterComponent>();
+
+            for (auto entity : view) {
+                auto& t       = view.get<Vapor::TransformComponent>(entity);
+                auto& emitter = view.get<Vapor::ParticleEmitterComponent>(entity);
+                if (!emitter.enabled) continue;
+
+                // --- Claim GPU slots on first use ---
+                if (emitter._slotBegin == ~0u) {
+                    emitter._slotCount = emitter.maxParticles;
+                    emitter._slotBegin = renderer->claimParticleSlots(emitter._slotCount);
+                    if (emitter._slotBegin == ~0u) continue; // pool exhausted
+                    emitter._ringCursor = 0;
+                }
+
+                // --- Spawn particles this frame ---
+                emitter._accumulator += dt;
+                float interval = 1.0f / emitter.emissionRate;
+
+                std::vector<GPUParticle> spawns;
+                while (emitter._accumulator >= interval) {
+                    emitter._accumulator -= interval;
+
+                    // Random velocity inside a cone around emitDirection
+                    // using the local-space direction rotated by the entity's world transform.
+                    glm::vec3 worldDir = glm::normalize(
+                        glm::vec3(t.worldTransform * glm::vec4(emitter.emitDirection, 0.0f))
+                    );
+
+                    // Perpendicular basis
+                    glm::vec3 perp = std::abs(worldDir.x) < 0.9f
+                        ? glm::vec3(1, 0, 0) : glm::vec3(0, 1, 0);
+                    glm::vec3 u = glm::normalize(glm::cross(worldDir, perp));
+                    glm::vec3 v = glm::cross(worldDir, u);
+
+                    float theta = unit(rng) * 2.0f * 3.14159265f;
+                    float phi   = unit(rng) * emitter.spread;
+                    glm::vec3 dir = glm::normalize(
+                        worldDir * std::cos(phi)
+                        + (u * std::cos(theta) + v * std::sin(theta)) * std::sin(phi)
+                    );
+
+                    GPUParticle p;
+                    p.position = t.position;
+                    p.velocity = dir * emitter.initialSpeed;
+                    p.force    = glm::vec3(0.0f);
+                    p.color    = emitter.color;
+                    p.lifetime = emitter.particleLifetime;
+                    p.age      = 0.0f;
+
+                    spawns.push_back(p);
+                }
+
+                if (!spawns.empty()) {
+                    // Write into the emitter's ring buffer slice starting at the
+                    // current cursor. Ring wrap mid-batch is not split here; it
+                    // causes at most one frame of visual glitch at typical rates.
+                    uint32_t writeSlot = emitter._slotBegin + emitter._ringCursor;
+                    renderer->uploadParticles(writeSlot, spawns);
+                    emitter._ringCursor =
+                        (emitter._ringCursor + (uint32_t)spawns.size()) % emitter._slotCount;
+                }
+
+            }
+        }
+    };
+
+    // ============================================================================
+    // 情緒調製系統 — skeleton（行為留待後續填入）
+    // ============================================================================
+    class EmitterModulatorSystem {
+    public:
+        static void update(entt::registry& /*registry*/, EmotionState /*state*/) {
+            // TODO: iterate EmitterModulatorComponent, adjust rateMultiplier/
+            // colorTint based on state.
+        }
+    };
+
+    // ============================================================================
+    // 粒子爆發系統 — one-shot sphere burst
+    // ============================================================================
+    class ParticleBurstSystem {
+    public:
+        static void update(entt::registry& registry, Renderer* renderer) {
+            static std::mt19937 rng{ std::random_device{}() };
+            static std::uniform_real_distribution<float> unit{ 0.0f, 1.0f };
+
+            auto view = registry.view<Vapor::TransformComponent, Vapor::ParticleBurstRequest>();
+            for (auto entity : view) {
+                auto& t     = view.get<Vapor::TransformComponent>(entity);
+                auto& burst = view.get<Vapor::ParticleBurstRequest>(entity);
+
+                uint32_t slotBegin = ~0u;
+                uint32_t slotCount = burst.count;
+
+                // Prefer reusing the disabled emitter's existing slots.
+                if (auto* em = registry.try_get<Vapor::ParticleEmitterComponent>(entity)) {
+                    if (em->_slotBegin != ~0u) {
+                        slotBegin = em->_slotBegin;
+                        slotCount = std::min(burst.count, em->_slotCount);
+                    }
+                }
+                if (slotBegin == ~0u)
+                    slotBegin = renderer->claimParticleSlots(slotCount);
+                if (slotBegin == ~0u) {
+                    registry.remove<Vapor::ParticleBurstRequest>(entity);
+                    continue;
+                }
+
+                std::vector<GPUParticle> spawns;
+                spawns.reserve(slotCount);
+                for (uint32_t i = 0; i < slotCount; i++) {
+                    // Uniform sphere direction
+                    float cosT = 1.0f - 2.0f * unit(rng);
+                    float sinT = std::sqrt(std::max(0.0f, 1.0f - cosT * cosT));
+                    float phi  = unit(rng) * 2.0f * 3.14159265f;
+                    glm::vec3 dir = { sinT * std::cos(phi), cosT, sinT * std::sin(phi) };
+
+                    // Restrict to cone if spread < π
+                    if (burst.spread < 3.14159f) {
+                        float half = unit(rng) * burst.spread;
+                        float sH   = std::sin(half);
+                        float cH   = std::cos(half);
+                        float az   = unit(rng) * 2.0f * 3.14159265f;
+                        dir = { sH * std::cos(az), cH, sH * std::sin(az) };
+                    }
+
+                    GPUParticle p;
+                    p.position = t.position;
+                    p.velocity = dir * burst.speed;
+                    p.force    = glm::vec3(0.0f);
+                    p.color    = burst.color;
+                    p.lifetime = burst.lifetime;
+                    p.age      = 0.0f;
+                    spawns.push_back(p);
+                }
+                renderer->uploadParticles(slotBegin, spawns);
+                registry.remove<Vapor::ParticleBurstRequest>(entity);
+            }
+        }
+    };
+
+    // ============================================================================
+    // 法術飛彈系統 — moves a bolt entity along a Bezier arc
+    // ============================================================================
+    // Call update() after TransformSystem but before ParticleEmitterSystem.
+    // Expects the entity to also carry ParticleEmitterComponent (enabled=true).
+    // On arrival: emitter disabled → ParticleBurstRequest fired → SpellBoltComponent removed.
+    class SpellBoltSystem {
+    public:
+        static void update(entt::registry& registry, float dt) {
+            auto view = registry.view<
+                Vapor::TransformComponent,
+                Vapor::SpellBoltComponent,
+                Vapor::ParticleEmitterComponent>();
+
+            for (auto entity : view) {
+                auto& t    = view.get<Vapor::TransformComponent>(entity);
+                auto& bolt = view.get<Vapor::SpellBoltComponent>(entity);
+                auto& emit = view.get<Vapor::ParticleEmitterComponent>(entity);
+
+                float dist = glm::distance(bolt.origin, bolt.target);
+                if (dist < 0.0001f) {
+                    registry.remove<Vapor::SpellBoltComponent>(entity);
+                    continue;
+                }
+
+                bolt._progress = glm::min(bolt._progress + dt * bolt.speed / dist, 1.0f);
+                float s = bolt._progress;
+
+                // Quadratic Bezier: midpoint lifted by arcHeight along world up
+                glm::vec3 mid = (bolt.origin + bolt.target) * 0.5f
+                              + glm::vec3(0.0f, bolt.arcHeight, 0.0f);
+
+                t.position = (1-s)*(1-s)*bolt.origin
+                           +  2*(1-s)*s *mid
+                           +       s*s  *bolt.target;
+
+                // Tangent = derivative of Bezier, normalized
+                glm::vec3 tan = glm::normalize(
+                    2*(1-s)*(mid - bolt.origin) + 2*s*(bolt.target - mid));
+                emit.emitDirection = tan;
+                t.isDirty = true;
+
+                if (bolt._progress >= 1.0f) {
+                    emit.enabled = false;
+                    registry.emplace_or_replace<Vapor::ParticleBurstRequest>(entity,
+                        Vapor::ParticleBurstRequest{
+                            .count    = 80,
+                            .speed    = 4.0f,
+                            .spread   = 3.14159f,
+                            .lifetime = 0.8f,
+                            .color    = emit.color,
+                        });
+                    registry.remove<Vapor::SpellBoltComponent>(entity);
+                }
+            }
         }
     };
 

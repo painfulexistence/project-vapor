@@ -252,6 +252,11 @@ public:
     void applyToneMapping(RenderTextureHandle target, float exposure = 1.0f) override;
     void applyVignette(RenderTextureHandle target, float strength = 0.3f, float radius = 0.8f) override;
 
+    // Particle slot management
+    uint32_t claimParticleSlots(uint32_t count) override;
+    void releaseParticleSlots(uint32_t slotBegin, uint32_t count) override;
+    void uploadParticles(uint32_t slotBegin, const std::vector<GPUParticle>& particles) override;
+
     // ===== Font Rendering API =====
     FontHandle loadFont(const std::string& path, float baseSize) override;
     void unloadFont(FontHandle handle) override;

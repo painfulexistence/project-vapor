@@ -20,13 +20,13 @@ const vec2 quadUVs[6] = vec2[](
 );
 
 struct Particle {
-    vec3 position;
-    float _pad1;
-    vec3 velocity;
-    float _pad2;
-    vec3 force;
+    vec3  position;
+    float lifetime;
+    vec3  velocity;
+    float age;
+    vec3  force;
     float _pad3;
-    vec4 color;
+    vec4  color;
 };
 
 layout(std140, set = 0, binding = 0) uniform CameraData {

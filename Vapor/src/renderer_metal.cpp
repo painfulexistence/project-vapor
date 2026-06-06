@@ -737,45 +737,34 @@ public:
         auto time = (float)SDL_GetTicks() / 1000.0f;
         float deltaTime = 1.0f / 60.0f;// Use fixed timestep to avoid issues
 
-        // Compute attractor position (in front of camera)
-        glm::vec3 camPos = r.currentCamera->getEye();
-        glm::mat4 view = r.currentCamera->getViewMatrix();
-        glm::vec3 forward = -glm::vec3(view[0][2], view[1][2], view[2][2]);
-        glm::vec3 attractorPos = camPos + forward * 3.0f;
+        // Simulation params — attractor data comes from ParticleForceFieldSystem.
+        uint32_t attractorCount = static_cast<uint32_t>(
+            std::min(r.m_particleAttractors.size(), static_cast<size_t>(MAX_PARTICLE_ATTRACTORS))
+        );
 
-        // Update simulation params buffer
-        struct ParticleSimParams {
-            glm::vec2 resolution;
-            glm::vec2 mousePosition;
-            float time;
-            float deltaTime;
-            Uint32 particleCount;
-            float _pad1;
-        } simParams;
-
+        ParticleSimulationParams simParams = {
+            .mousePosition  = glm::vec2(0.0f),
+            .time           = time,
+            .deltaTime      = deltaTime,
+            .particleCount  = r.particleCount,
+            .attractorCount = attractorCount,
+            .wind           = r.m_particleWind,
+            .turbulence     = glm::vec4(0.0f, 0.0f, 0.0f, r.m_particleTurbulence),
+        };
         auto drawableSize = r.swapchain->drawableSize();
         simParams.resolution = glm::vec2(drawableSize.width, drawableSize.height);
-        simParams.mousePosition = glm::vec2(0.0f);
-        simParams.time = time;
-        simParams.deltaTime = deltaTime;
-        simParams.particleCount = r.particleCount;
 
-        memcpy(r.particleSimParamsBuffers[r.currentFrameInFlight]->contents(), &simParams, sizeof(ParticleSimParams));
-        r.particleSimParamsBuffers[r.currentFrameInFlight]->didModifyRange(NS::Range::Make(0, sizeof(ParticleSimParams))
-        );
+        size_t simParamsBytes = sizeof(ParticleSimulationParams);
+        memcpy(r.particleSimParamsBuffers[r.currentFrameInFlight]->contents(), &simParams, simParamsBytes);
+        r.particleSimParamsBuffers[r.currentFrameInFlight]->didModifyRange(NS::Range::Make(0, simParamsBytes));
 
-        // Update attractor buffer
-        struct ParticleAttractor {
-            glm::vec3 position;
-            float strength;
-        } attractor;
-
-        attractor.position = attractorPos;
-        attractor.strength = 50.0f;// Increased strength
-
-        memcpy(r.particleAttractorBuffers[r.currentFrameInFlight]->contents(), &attractor, sizeof(ParticleAttractor));
-        r.particleAttractorBuffers[r.currentFrameInFlight]->didModifyRange(NS::Range::Make(0, sizeof(ParticleAttractor))
-        );
+        // Attractor array (packed as ParticleAttractorData = vec4: xyz pos, w strength)
+        if (attractorCount > 0) {
+            size_t attractorBytes = attractorCount * sizeof(ParticleAttractorData);
+            memcpy(r.particleAttractorBuffers[r.currentFrameInFlight]->contents(),
+                   r.m_particleAttractors.data(), attractorBytes);
+            r.particleAttractorBuffers[r.currentFrameInFlight]->didModifyRange(NS::Range::Make(0, attractorBytes));
+        }
 
         // Compute passes (single particle buffer - persistent state)
         {
@@ -3731,8 +3720,9 @@ auto Renderer_Metal::createResources() -> void {
     for (size_t i = 0; i < MAX_FRAMES_IN_FLIGHT; i++) {
         particleSimParamsBuffers[i] =
             NS::TransferPtr(device->newBuffer(sizeof(ParticleSimulationParams), MTL::ResourceStorageModeShared));
-        particleAttractorBuffers[i] =
-            NS::TransferPtr(device->newBuffer(sizeof(ParticleAttractorData), MTL::ResourceStorageModeShared));
+        particleAttractorBuffers[i] = NS::TransferPtr(device->newBuffer(
+            MAX_PARTICLE_ATTRACTORS * sizeof(ParticleAttractorData), MTL::ResourceStorageModeShared
+        ));
     }
 
     // Initialize particles with random positions and colors
@@ -5953,4 +5943,21 @@ void Renderer_Metal::draw(entt::registry& registry, std::shared_ptr<Scene> scene
     pendingEcsInstances.clear();
     pendingEcsBatches.clear();
     pendingEcsAccelInstances.clear();
+}
+
+uint32_t Renderer_Metal::claimParticleSlots(uint32_t count) {
+    if (!particleSystemEnabled || count == 0) return ~0u;
+    return allocParticleSlots(count, MAX_PARTICLES);
+}
+
+void Renderer_Metal::releaseParticleSlots(uint32_t slotBegin, uint32_t count) {
+    freeParticleSlots(slotBegin, count);
+}
+
+void Renderer_Metal::uploadParticles(uint32_t slotBegin, const std::vector<GPUParticle>& particles) {
+    if (!particleSystemEnabled || particles.empty() || !particleBuffer) return;
+    if (slotBegin == ~0u || slotBegin + particles.size() > MAX_PARTICLES) return;
+    // particleBuffer uses StorageModeShared so contents() is always CPU-writable.
+    auto* dst = static_cast<GPUParticle*>(particleBuffer->contents()) + slotBegin;
+    memcpy(dst, particles.data(), particles.size() * sizeof(GPUParticle));
 }

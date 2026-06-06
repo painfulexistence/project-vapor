@@ -152,6 +152,87 @@ namespace Vapor {
         bool visible = true;
     };
 
+    // ============================================================================
+    // Particle Force Fields
+    // ============================================================================
+
+    // Attracts (or repels with negative strength) the global GPU particle pool.
+    // Any entity with a TransformComponent can become an attractor.
+    struct ParticleAttractorComponent {
+        float strength = 5.0f;
+        bool  enabled  = true;
+    };
+
+    // Represents ambient wind in world space. Any system that cares about wind
+    // (particles, vegetation, cloth, audio occlusion…) reads from this.
+    // Singleton-style: attach to one "world" entity; first enabled instance wins.
+    struct WindFieldComponent {
+        glm::vec3 direction = {1.0f, 0.0f, 0.0f};
+        float     strength  = 0.0f;
+        bool      enabled   = true;
+    };
+
+    // ============================================================================
+    // Particle Expression — skeletons (behavior filled in later)
+    // ============================================================================
+
+    enum class EmotionState { Calm, Tense, Sacred, Triumphant };
+
+    // Attach alongside ParticleEmitterComponent to drive its parameters from
+    // the current EmotionState or any external signal.
+    struct EmitterModulatorComponent {
+        float     rateMultiplier  = 1.0f;
+        float     speedMultiplier = 1.0f;
+        glm::vec4 colorTint       = {1.0f, 1.0f, 1.0f, 1.0f};
+    };
+
+    // Add this tag to trigger a one-shot particle burst.
+    // ParticleBurstSystem consumes and removes it the same frame.
+    struct ParticleBurstRequest {
+        uint32_t  count    = 50;
+        float     speed    = 3.0f;
+        float     spread   = 3.14159f; // full sphere by default
+        float     lifetime = 1.0f;
+        glm::vec4 color    = {1.0f, 1.0f, 1.0f, 1.0f};
+    };
+
+    // ============================================================================
+    // Spell Bolt
+    // ============================================================================
+    // Attach alongside ParticleEmitterComponent. SpellBoltSystem moves the
+    // entity's TransformComponent along a quadratic Bezier arc from origin to
+    // target each frame, updating emitDirection to match the tangent.
+    // On arrival: disables emitter, fires a ParticleBurstRequest, removes itself.
+    struct SpellBoltComponent {
+        glm::vec3 origin;
+        glm::vec3 target;
+        float     speed      = 15.0f; // world units / second
+        float     arcHeight  = 0.5f;  // upward arc at the midpoint (0 = straight line)
+        float     _progress  = 0.0f;  // [0,1], managed by SpellBoltSystem
+    };
+
+    // ============================================================================
+    // Particle Emitter
+    // ============================================================================
+    struct ParticleEmitterComponent {
+        // --- Emission config (set by user) ---
+        float     emissionRate    = 20.0f;               // particles / second
+        float     particleLifetime = 4.0f;              // seconds; 0 = immortal
+        float     initialSpeed    = 2.0f;                // m/s
+        glm::vec3 emitDirection   = {0.0f, 1.0f, 0.0f}; // local-space axis
+        float     spread          = 0.5f;                // cone half-angle, radians
+        glm::vec4 color           = {1.0f, 1.0f, 1.0f, 1.0f};
+        float     attractorStrength = 5.0f;              // GPU attractor pull (0 = no pull)
+        uint32_t  maxParticles    = 256;                 // pool size; set before first use
+        bool      enabled         = true;
+
+        // --- Runtime state (managed by ParticleEmitterSystem, do not set manually) ---
+        float     _accumulator    = 0.0f;
+        uint32_t  _slotBegin      = ~0u;  // first slot in global GPU particle pool
+        uint32_t  _slotCount      = 0;    // number of slots allocated
+        uint32_t  _ringCursor     = 0;    // next slot to overwrite (ring buffer)
+    };
+
     // Flipbook animation component (drives any frame-based animation)
     struct FlipbookComponent {
         std::vector<uint16_t> frameIndices;
