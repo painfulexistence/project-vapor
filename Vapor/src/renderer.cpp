@@ -2135,8 +2135,8 @@ TextureHandle Renderer::createTexture(const std::shared_ptr<Vapor::Image>& img) 
     TextureHandle handle = rhi->createTexture(desc);
 
     // Upload data
-    size_t dataSize = img->width * img->height * img->channels;
-    rhi->updateTexture(handle, img->data.data(), dataSize);
+    size_t dataSize = img->width * img->height * img->channelCount;
+    rhi->updateTexture(handle, img->byteArray.data(), dataSize);
 
     return handle;
 }
