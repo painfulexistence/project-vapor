@@ -99,7 +99,9 @@ struct PSSMData {
     // view-space depths: x = RT shadow end, y = cascade1 end, z = cascade2 end, w = cascade3 end (far)
     float4 cascadeSplits;
     float blendRange;
-    float3 _pad;
+    float _pad0;
+    float _pad1;
+    float _pad2;
 };
 
 float3x3 inverse(float3x3 const m) {

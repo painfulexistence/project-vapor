@@ -321,18 +321,30 @@ public:
         gpuData.cascadeSplits = glm::vec4(splits[0], splits[1], splits[2], splits[3]);
         gpuData.blendRange    = blendRange;
 
-        for (int ci = 0; ci < 3; ci++) {
-            float nearFrac = (splits[ci]     - nearClip) / (farClip - nearClip);
-            float farFrac  = (splits[ci + 1] - nearClip) / (farClip - nearClip);
-            nearFrac = glm::clamp(nearFrac, 0.0f, 1.0f);
-            farFrac  = glm::clamp(farFrac,  0.0f, 1.0f);
+        // Convert a view-space depth to NDC z under the current LH ZO projection.
+        // For glm LH ZO perspective: z_ndc = (P[2][2]*d + P[3][2]) / d
+        // where P is column-major (P[col][row]).
+        auto viewDepthToNDCz = [&](float d) -> float {
+            return (proj[2][2] * d + proj[3][2]) / d;
+        };
 
-            // Sub-frustum corners for this cascade
+        for (int ci = 0; ci < 3; ci++) {
+            // Clamp split depths to valid [near, far] range before converting to NDC
+            float splitNear = glm::clamp(splits[ci],     nearClip, farClip);
+            float splitFar  = glm::clamp(splits[ci + 1], nearClip, farClip);
+
+            float nearNDCz = viewDepthToNDCz(splitNear);
+            float farNDCz  = viewDepthToNDCz(splitFar);
+
+            // Sub-frustum corners: unproject 8 NDC corners at exact cascade z values
+            const glm::vec4 cascadeNDC[8] = {
+                {-1,-1,nearNDCz,1}, {1,-1,nearNDCz,1}, {-1,1,nearNDCz,1}, {1,1,nearNDCz,1},
+                {-1,-1,farNDCz, 1}, {1,-1,farNDCz, 1}, {-1,1,farNDCz, 1}, {1,1,farNDCz, 1},
+            };
             glm::vec3 corners[8];
-            for (int i = 0; i < 4; i++) {
-                glm::vec3 ray = worldCorners[i + 4] - worldCorners[i];
-                corners[i]     = worldCorners[i] + ray * nearFrac;
-                corners[i + 4] = worldCorners[i] + ray * farFrac;
+            for (int i = 0; i < 8; i++) {
+                glm::vec4 w = invVP * cascadeNDC[i];
+                corners[i] = glm::vec3(w) / w.w;
             }
 
             // Bounding sphere center for stable (rotation-invariant) shadow map
@@ -362,8 +374,9 @@ public:
                 minZ = glm::min(minZ, z);
                 maxZ = glm::max(maxZ, z);
             }
-            // Pull near plane back to capture shadow casters behind the view frustum
-            minZ -= (maxZ - minZ);
+            // Pull near plane back to capture shadow casters behind the view frustum.
+            // Keep near ≥ 0.01 so glm::ortho always receives a valid (near < far) range.
+            minZ = glm::max(minZ - (maxZ - minZ), 0.01f);
 
             glm::mat4 lightProj = glm::ortho(
                 -sphereRadius,  sphereRadius,
@@ -744,6 +757,7 @@ public:
         encoder->setFragmentBytes(&screenSize, sizeof(glm::vec2), 4);
         encoder->setFragmentBytes(&gridSize, sizeof(glm::uvec3), 5);
         encoder->setFragmentBytes(&time, sizeof(float), 6);
+        encoder->setFragmentBuffer(r.pssmDataBuffers[r.currentFrameInFlight].get(), 0, 7);
 
         for (const auto& [material, draws] : r.instanceBatches) {
             encoder->setFragmentTexture(
@@ -771,9 +785,8 @@ public:
             encoder->setFragmentTexture(r.prefilterMap.get(), 9);
             encoder->setFragmentTexture(r.brdfLUT.get(), 10);
 
-            // PSSM shadow maps and data
+            // PSSM shadow maps (data buffer bound once before this loop, at buffer 7)
             encoder->setFragmentTexture(r.pssmShadowMaps.get(), 11);
-            encoder->setFragmentBuffer(r.pssmDataBuffers[r.currentFrameInFlight].get(), 0, 7);
 
             for (const auto& draw : draws) {
                 if (!r.currentCamera->isVisible(r.instances[draw.instanceIndex].boundingSphere)) {
@@ -5191,6 +5204,7 @@ void Renderer_Metal::renderToTexture(
     encoder->setFragmentBytes(&screenSize, sizeof(glm::vec2), 4);
     encoder->setFragmentBytes(&gridSize, sizeof(glm::uvec3), 5);
     encoder->setFragmentBytes(&time, sizeof(float), 6);
+    encoder->setFragmentBuffer(pssmDataBuffers[currentFrameInFlight].get(), 0, 7);
 
     // Render using instance batches (same as MainRenderPass)
     for (const auto& [material, meshes] : instanceBatches) {
@@ -5220,9 +5234,8 @@ void Renderer_Metal::renderToTexture(
         encoder->setFragmentTexture(prefilterMap.get(), 9);
         encoder->setFragmentTexture(brdfLUT.get(), 10);
 
-        // PSSM shadow maps and data
+        // PSSM shadow maps (data buffer bound once before this loop, at buffer 7)
         encoder->setFragmentTexture(pssmShadowMaps.get(), 11);
-        encoder->setFragmentBuffer(pssmDataBuffers[currentFrameInFlight].get(), 0, 7);
 
         for (const auto& draw : meshes) {
             // Frustum culling with render texture camera
