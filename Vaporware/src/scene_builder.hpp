@@ -62,6 +62,17 @@ inline SceneResources buildScene(
     }
     res.cube1 = cube1;
 
+    // Iridescent cube: electroplated PBR material with thin-film interference
+    auto iridescentMaterial = std::make_shared<Vapor::Material>(Vapor::Material{
+        .baseColorFactor  = glm::vec4(0.72f, 0.72f, 0.78f, 1.0f), // silvery-white base
+        .metallicFactor   = 1.0f,
+        .roughnessFactor  = 0.08f,
+        .clearcoat        = 0.9f,   // iridescence strength (reused field)
+        .clearcoatGloss   = 0.45f,  // film thickness factor → ~480 nm (blue-green dominant)
+        .materialType     = Vapor::MaterialType::Iridescent,
+        .useIBL           = true,
+    });
+
     auto cube2 = registry.create();
     {
         auto& transform = registry.emplace<Vapor::TransformComponent>(cube2);
@@ -73,7 +84,7 @@ inline SceneResources buildScene(
         rb.body = physics.createBoxBody(col.halfSize, transform.position, transform.rotation, rb.motionType);
         physics.addBody(rb.body, true);
 
-        auto cubeMesh2 = MeshBuilder::buildCube(1.0f, material);
+        auto cubeMesh2 = MeshBuilder::buildCube(1.0f, iridescentMaterial);
         scene->addMesh(cubeMesh2);
         auto& meshRenderer = registry.emplace<Vapor::MeshRendererComponent>(cube2);
         meshRenderer.meshes.push_back(cubeMesh2);

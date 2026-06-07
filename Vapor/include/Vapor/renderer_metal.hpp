@@ -90,6 +90,8 @@ private:
 };
 
 
+class EquirectToCubemapPass;
+
 class Renderer_Metal final : public Renderer {// Must be public or factory function won't work
     friend class PrePass;
     friend class TLASBuildPass;
@@ -122,6 +124,7 @@ class Renderer_Metal final : public Renderer {// Must be public or factory funct
     friend class DebugDrawPass;
     friend class CanvasPass;
     friend class WorldCanvasPass;
+    friend class EquirectToCubemapPass;
 
 public:
     Renderer_Metal();
@@ -138,6 +141,11 @@ public:
     virtual void draw(entt::registry& registry, std::shared_ptr<Scene> scene, Camera& camera) override;
 
     virtual void readPixelsAsync(ScreenshotCallback callback) override;
+
+    // IBL source: load an equirectangular .hdr file as the environment map.
+    // After calling this the sky atmosphere is no longer used for IBL.
+    // Place your .hdr files under: <assets>/textures/env/
+    void loadHDRI(const std::string& path);
 
     virtual void setRenderPath(RenderPath path) override {
         currentRenderPath = path;
@@ -298,8 +306,13 @@ protected:
 
     // Pipeline states
     NS::SharedPtr<MTL::DepthStencilState> depthStencilState;
+    enum class IBLSource { Sky, HDRI };
+    IBLSource iblSource = IBLSource::Sky;
+
     NS::SharedPtr<MTL::RenderPipelineState> prePassPipeline;
     NS::SharedPtr<MTL::RenderPipelineState> drawPipeline;
+    NS::SharedPtr<MTL::RenderPipelineState> iridescentPipeline;
+    NS::SharedPtr<MTL::RenderPipelineState> equirectToCubemapPipeline;
     NS::SharedPtr<MTL::RenderPipelineState> postProcessPipeline;
 
     NS::SharedPtr<MTL::ComputePipelineState> buildClustersPipeline;
@@ -481,11 +494,12 @@ protected:
     SunFlareData sunFlareSettings;
 
     // IBL textures
-    NS::SharedPtr<MTL::Texture> environmentCubemap;// Captured sky cubemap
-    NS::SharedPtr<MTL::Texture> irradianceMap;// Diffuse irradiance cubemap
-    NS::SharedPtr<MTL::Texture> prefilterMap;// Pre-filtered specular cubemap (with mipmaps)
-    NS::SharedPtr<MTL::Texture> brdfLUT;// BRDF integration LUT
-    bool iblNeedsUpdate = true;// Flag to trigger IBL update
+    NS::SharedPtr<MTL::Texture> environmentCubemap;  // Captured sky cubemap (or converted HDRI)
+    NS::SharedPtr<MTL::Texture> equirectHDRITexture; // Loaded equirectangular HDRI (2D, RGBA32Float)
+    NS::SharedPtr<MTL::Texture> irradianceMap;       // Diffuse irradiance cubemap
+    NS::SharedPtr<MTL::Texture> prefilterMap;        // Pre-filtered specular cubemap (with mipmaps)
+    NS::SharedPtr<MTL::Texture> brdfLUT;             // BRDF integration LUT
+    bool iblNeedsUpdate = true;
     std::vector<NS::SharedPtr<MTL::Buffer>> accelInstanceBuffers;
     std::vector<NS::SharedPtr<MTL::Buffer>> TLASScratchBuffers;
     std::vector<NS::SharedPtr<MTL::AccelerationStructure>> TLASBuffers;
