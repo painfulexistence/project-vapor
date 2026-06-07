@@ -93,10 +93,12 @@ void Renderer::shutdown() {
     if (rhi) {
         // Shutdown ImGui backend
         switch (backend) {
+#ifdef __APPLE__
             case GraphicsBackend::Metal:
                 ImGui_ImplMetal_Shutdown();
                 ImGui_ImplSDL3_Shutdown();
                 break;
+#endif
             case GraphicsBackend::Vulkan:
                 ImGui_ImplVulkan_Shutdown();
                 ImGui_ImplSDL3_Shutdown();
@@ -347,6 +349,7 @@ void Renderer::beginFrame(const CameraRenderData& camera) {
     // Call ImGui backend NewFrame (matching old renderer behavior)
     // This must be called before ImGui::NewFrame() in main.cpp
     // We need to create a render pass descriptor with swapchain texture
+#ifdef __APPLE__
     if (backend == GraphicsBackend::Metal) {
         RHI_Metal* metalRHI = dynamic_cast<RHI_Metal*>(rhi.get());
         if (metalRHI) {
@@ -368,6 +371,7 @@ void Renderer::beginFrame(const CameraRenderData& camera) {
             }
         }
     }
+#endif
 
     currentCamera = camera;
     frameDrawables.clear();
@@ -451,6 +455,7 @@ void Renderer::endFrame() {
         // Render ImGui using backend-specific implementation
         // Matching old renderer: create render pass, then render ImGui
         switch (backend) {
+#ifdef __APPLE__
             case GraphicsBackend::Metal: {
                 void* cmdBuffer = rhi->getBackendCommandBuffer();
                 if (cmdBuffer) {
@@ -478,6 +483,7 @@ void Renderer::endFrame() {
                 }
                 break;
             }
+#endif
             case GraphicsBackend::Vulkan: {
                 // Vulkan ImGui rendering
                 ImGui_ImplVulkan_RenderDrawData(ImGui::GetDrawData(),
