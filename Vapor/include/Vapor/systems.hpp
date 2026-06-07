@@ -53,6 +53,10 @@ namespace Vapor {
     // ============================================================================
     // 渲染系統 - 收集渲染實例
     // ============================================================================
+    // NOTE: This system is commented out because it uses an outdated Mesh structure.
+    // The current Mesh struct doesn't have materialID field, and the rendering
+    // is handled directly by the Renderer class, not through this system.
+    /*
     class RenderSystem {
     public:
         struct RenderInstance {
@@ -112,6 +116,7 @@ namespace Vapor {
             }
         }
     };
+    */
 
     // ============================================================================
     // 物理同步系統 - 同步 Transform 和 Physics
@@ -391,8 +396,8 @@ namespace Vapor {
             float speed = fly->moveSpeed * deltaTime;
             if (inputState.isPressed(InputAction::MoveForward)) cam.position += front * speed;
             if (inputState.isPressed(InputAction::MoveBackward)) cam.position -= front * speed;
-            if (inputState.isPressed(InputAction::MoveLeft)) cam.position -= right * speed;
-            if (inputState.isPressed(InputAction::MoveRight)) cam.position += right * speed;
+            if (inputState.isPressed(InputAction::StrafeLeft)) cam.position -= right * speed;
+            if (inputState.isPressed(InputAction::StrafeRight)) cam.position += right * speed;
             if (inputState.isPressed(InputAction::MoveUp)) cam.position += up * speed;
             if (inputState.isPressed(InputAction::MoveDown)) cam.position -= up * speed;
         }

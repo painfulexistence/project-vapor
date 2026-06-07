@@ -322,7 +322,7 @@ auto main(int argc, char* args[]) -> int {
 
     Vapor::RNG rng;
 
-    auto renderer = createRenderer(gfxBackend);
+    auto renderer = createRenderer(gfxBackend, window);
     renderer->init(window);
 
     // Scene serializer — engine pre-registers transform/meshRenderer;
@@ -365,7 +365,7 @@ auto main(int argc, char* args[]) -> int {
     rtDesc.width = 512;
     rtDesc.height = 512;
     rtDesc.hasDepth = true;
-    rtDesc.hdr = true;// HDR for post-processing effects
+    rtDesc.isHDR = true;// HDR for post-processing effects
     RenderTextureHandle renderTexture = renderer->createRenderTexture(rtDesc);
     fmt::print("Render texture created: {}x{}\n", rtDesc.width, rtDesc.height);
 
@@ -738,7 +738,7 @@ auto main(int argc, char* args[]) -> int {
             );
 
             // Draw the render texture on a 3D quad (like a TV screen in the world)
-            if (rtTexHandle.valid()) {
+            if (rtTexHandle.isValid()) {
                 // Create a transform for the "TV screen"
                 glm::mat4 tvTransform = glm::mat4(1.0f);
                 tvTransform = glm::translate(tvTransform, glm::vec3(-3.0f, 2.0f, 0.0f));
