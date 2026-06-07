@@ -1,20 +1,22 @@
 #pragma once
-#include "renderer.hpp"
+#include "renderer_legacy.hpp"
 
-#include <SDL3/SDL_stdinc.h>
 #include <SDL3/SDL_video.h>
+#include <SDL3/SDL_stdinc.h>
 #include <SDL3/SDL_vulkan.h>
-#include <glm/mat4x4.hpp>
-#include <glm/vec2.hpp>
-#include <glm/vec3.hpp>
-#include <glm/vec4.hpp>
-#include <memory>
-#include <string>
-#include <unordered_map>
 #include <vulkan/vulkan.h>
 #include <vulkan/vulkan_beta.h>
+#include <glm/mat4x4.hpp>
+#include <unordered_map>
+#include <memory>
 
 #include "graphics.hpp"
+
+// Handle types (compatible with rhi.hpp but defined locally to avoid BufferUsage conflict)
+struct TextureHandle { Uint32 id = UINT32_MAX; };
+struct BufferHandle { Uint32 id = UINT32_MAX; };
+struct PipelineHandle { Uint32 id = UINT32_MAX; };
+struct RenderTargetHandle { Uint32 id = UINT32_MAX; };
 
 
 class Renderer_Vulkan final : public Renderer {
@@ -30,10 +32,6 @@ public:
     virtual void stage(std::shared_ptr<Scene> scene) override;
 
     virtual void draw(std::shared_ptr<Scene> scene, Camera& camera) override;
-
-    virtual void draw(entt::registry& registry, std::shared_ptr<Scene> scene, Camera& camera) override;
-
-    virtual void readPixelsAsync(ScreenshotCallback callback) override;
 
     virtual void setRenderPath(RenderPath path) override {
         currentRenderPath = path;
@@ -53,135 +51,13 @@ public:
 
     RenderTargetHandle createRenderTarget(RenderTargetUsage usage, VkFormat format);
 
-    TextureHandle createTexture(const std::shared_ptr<Vapor::Image>& img) override;
-
-    // ===== Interface parity stubs (no functional implementation) =====
-
-    bool initUI() override;
-    std::shared_ptr<Vapor::DebugDraw> getDebugDraw() override {
-        return nullptr;
-    }
-
-    Rml::Context* m_uiContext = nullptr;
-
-    void flush2D() override {
-    }
-    void flush3D() override {
-    }
-
-    void drawQuad2D(const glm::vec2& position, const glm::vec2& size, const glm::vec4& color) override {
-    }
-    void drawQuad2D(const glm::vec3& position, const glm::vec2& size, const glm::vec4& color) override {
-    }
-    void drawQuad2D(
-        const glm::vec2& position,
-        const glm::vec2& size,
-        TextureHandle texture,
-        const glm::vec4& tintColor = glm::vec4(1.0f)
-    ) override {
-    }
-    void drawQuad2D(const glm::mat4& transform, const glm::vec4& color, int entityID = -1) override {
-    }
-    void drawQuad2D(
-        const glm::mat4& transform,
-        TextureHandle texture,
-        const glm::vec2* texCoords,
-        const glm::vec4& tintColor = glm::vec4(1.0f),
-        int entityID = -1
-    ) override {
-    }
-
-    void drawQuad3D(const glm::vec3& position, const glm::vec2& size, const glm::vec4& color) override {
-    }
-    void drawQuad3D(
-        const glm::vec3& position,
-        const glm::vec2& size,
-        TextureHandle texture,
-        const glm::vec4& tintColor = glm::vec4(1.0f)
-    ) override {
-    }
-    void drawQuad3D(const glm::mat4& transform, const glm::vec4& color, int entityID = -1) override {
-    }
-    void drawQuad3D(
-        const glm::mat4& transform,
-        TextureHandle texture,
-        const glm::vec2* texCoords,
-        const glm::vec4& tintColor = glm::vec4(1.0f),
-        int entityID = -1
-    ) override {
-    }
-
-    void drawRotatedQuad2D(const glm::vec2& position, const glm::vec2& size, float rotation, const glm::vec4& color)
-        override {
-    }
-    void drawRotatedQuad2D(
-        const glm::vec2& position,
-        const glm::vec2& size,
-        float rotation,
-        TextureHandle texture,
-        const glm::vec4& tintColor = glm::vec4(1.0f)
-    ) override {
-    }
-
-    void drawLine2D(const glm::vec2& p0, const glm::vec2& p1, const glm::vec4& color, float thickness = 1.0f) override {
-    }
-    void drawLine3D(const glm::vec3& p0, const glm::vec3& p1, const glm::vec4& color, float thickness = 1.0f) override {
-    }
-
-    void drawRect2D(const glm::vec2& position, const glm::vec2& size, const glm::vec4& color, float thickness = 1.0f)
-        override {
-    }
-    void drawCircle2D(const glm::vec2& center, float radius, const glm::vec4& color, int segments = 32) override {
-    }
-    void drawCircleFilled2D(const glm::vec2& center, float radius, const glm::vec4& color, int segments = 32) override {
-    }
-    void
-        drawTriangle2D(const glm::vec2& p0, const glm::vec2& p1, const glm::vec2& p2, const glm::vec4& color) override {
-    }
-    void drawTriangleFilled2D(const glm::vec2& p0, const glm::vec2& p1, const glm::vec2& p2, const glm::vec4& color)
-        override {
-    }
-
-    Batch2DStats getBatch2DStats() const override {
-        return {};
-    }
-    void resetBatch2DStats() override {
-    }
-
-    FontHandle loadFont(const std::string& path, float baseSize) override {
-        return {};
-    }
-    void unloadFont(FontHandle handle) override {
-    }
-    void drawText2D(
-        FontHandle font,
-        const std::string& text,
-        const glm::vec2& position,
-        float scale = 1.0f,
-        const glm::vec4& color = glm::vec4(1.0f)
-    ) override {
-    }
-    void drawText3D(
-        FontHandle font,
-        const std::string& text,
-        const glm::vec3& worldPosition,
-        float scale = 1.0f,
-        const glm::vec4& color = glm::vec4(1.0f)
-    ) override {
-    }
-    glm::vec2 measureText(FontHandle font, const std::string& text, float scale = 1.0f) override {
-        return {};
-    }
-    float getFontLineHeight(FontHandle font, float scale = 1.0f) override {
-        return 0.0f;
-    }
+    TextureHandle createTexture(std::shared_ptr<Image> img);
 
     BufferHandle createBuffer(BufferUsage usage, VkDeviceSize size);
 
     BufferHandle createBufferMapped(BufferUsage usage, VkDeviceSize size, void** mappedDataPtr);
-    void destroyBuffer(BufferHandle handle);
 
-    BufferHandle createVertexBuffer(std::vector<Vapor::VertexData> vertices);
+    BufferHandle createVertexBuffer(std::vector<VertexData> vertices);
 
     BufferHandle createIndexBuffer(std::vector<Uint32> indices);
 
@@ -198,42 +74,7 @@ public:
 
     VkPipeline getPipeline(PipelineHandle handle) const;
 
-    VkPipeline getUiPipeline() const {
-        return uiPipeline;
-    }
-    VkDescriptorPool getUiDescriptorPool() const {
-        return uiDescriptorPool;
-    }
-    VkDescriptorSetLayout getUiDescriptorSetLayout() const {
-        return uiDescriptorSetLayout;
-    }
-    VkPipelineLayout getUiPipelineLayout() const {
-        return uiPipelineLayout;
-    }
-
-    VkSampler getDefaultSampler() const {
-        return defaultSampler;
-    }
-
-    VkCommandBuffer beginSingleTimeCommands();
-    void endSingleTimeCommands(VkCommandBuffer commandBuffer);
-
-    uint32_t findMemoryType(uint32_t typeFilter, VkMemoryPropertyFlags properties) const;
-
-    VkDevice getDevice() const {
-        return device;
-    }
-    VkPhysicalDevice getPhysicalDevice() const {
-        return physicalDevice;
-    }
-
 private:
-    void createUiResources();
-    void destroyUiResources();
-    VkPipeline createUiPipeline(const std::string& vertShader, const std::string& fragShader);
-
-private:
-    SDL_Window* window = nullptr;
     VkInstance instance;
     VkSurfaceKHR surface;
     VkPhysicalDevice physicalDevice;
@@ -264,12 +105,6 @@ private:
     VkPipeline prePassPipeline;
     VkPipeline postProcessPipeline;
 
-    VkPipelineLayout uiPipelineLayout;
-    VkPipeline uiPipeline;
-    VkDescriptorSetLayout uiDescriptorSetLayout;
-    VkDescriptorPool uiDescriptorPool;
-    std::unique_ptr<class RmlUiRendererVulkan> uiRenderer;
-
     VkPipelineLayout tileCullingPipelineLayout;
     VkPipeline tileCullingPipeline;
 
@@ -283,12 +118,12 @@ private:
     VkDescriptorPool set0DescriptorPool;
     VkDescriptorPool set1DescriptorPool;
     VkDescriptorPool set2DescriptorPool;
-    VkDescriptorSetLayout emptySetLayout;// required because VK_EXT_graphics_pipeline_library not supported
+    VkDescriptorSetLayout emptySetLayout; // required because VK_EXT_graphics_pipeline_library not supported
     VkDescriptorSetLayout set0Layout;
     VkDescriptorSetLayout set1Layout;
     VkDescriptorSetLayout set2Layout;
-    std::vector<VkDescriptorSet> set0s;// global
-    std::vector<VkDescriptorSet> set1s;// 1 set per material
+    std::vector<VkDescriptorSet> set0s; // global
+    std::vector<VkDescriptorSet> set1s; // 1 set per material
     std::vector<VkDescriptorSet> set2s;
 
     RenderTargetHandle msaaColorImage;
@@ -326,56 +161,24 @@ private:
     std::unordered_map<Uint32, VkDeviceMemory> imageMemories;
     std::unordered_map<Uint32, VkImageView> imageViews;
     std::unordered_map<Uint32, VkPipeline> pipelines;
-    std::unordered_map<std::shared_ptr<Vapor::Material>, VkDescriptorSet> materialTextureSets;
-    std::unordered_map<std::shared_ptr<Vapor::Material>, Uint32> materialIDs;
+    std::unordered_map<std::shared_ptr<Material>, VkDescriptorSet> materialTextureSets;
+    std::unordered_map<std::shared_ptr<Material>, Uint32> materialIDs;
+    // Temporary mapping for Image to TextureHandle (until full refactor to new Renderer interface)
+    std::unordered_map<std::shared_ptr<Image>, TextureHandle> imageToTextureMap;
+    // Temporary storage for mesh GPU resources (until full refactor to new Renderer interface)
+    struct MeshGPUResources {
+        std::vector<BufferHandle> vbos;
+        BufferHandle ebo;
+        Uint32 materialID = UINT32_MAX;
+        Uint32 instanceID = UINT32_MAX;
+        Uint32 vertexOffset = 0;
+        Uint32 indexOffset = 0;
+        Uint32 vertexCount = 0;
+        Uint32 indexCount = 0;
+    };
+    std::unordered_map<std::shared_ptr<Mesh>, MeshGPUResources> meshGPUResources;
 
     RenderPath currentRenderPath = RenderPath::Forward;
 
-    // Particle system
-    static constexpr Uint32 MAX_PARTICLES = 50000;
-    bool particleSystemEnabled = true;
-    Uint32 particleCount = MAX_PARTICLES;
-
-    VkDescriptorPool particleDescriptorPool;
-    VkDescriptorSetLayout particleComputeSetLayout;
-    VkDescriptorSetLayout particleRenderSetLayout;
-    std::vector<VkDescriptorSet> particleComputeSets;
-    std::vector<VkDescriptorSet> particleRenderSets;
-
-    VkPipelineLayout particleComputePipelineLayout;
-    VkPipeline particleForcePipeline;
-    VkPipeline particleIntegratePipeline;
-
-    VkPipelineLayout particleRenderPipelineLayout;
-    VkPipeline particleRenderPipeline;
-
-    std::vector<BufferHandle> particleBuffers;// Double buffered for compute
-    std::vector<BufferHandle> particleSimParamsBuffers;// Simulation parameters
-    std::vector<void*> particleSimParamsBuffersMapped;
-    std::vector<BufferHandle> particleAttractorBuffers;// Attractor data
-    std::vector<void*> particleAttractorBuffersMapped;
-
-    void initParticleSystem();
-    void updateParticleSimulation(VkCommandBuffer cmd, float deltaTime, const glm::vec3& attractorPos);
-    void renderParticles(VkCommandBuffer cmd);
-    void cleanupParticleSystem();
-
     void createResources();
-
-private:
-    struct PendingScreenshot {
-        BufferHandle buffer;
-        ScreenshotCallback callback;
-        uint32_t width;
-        uint32_t height;
-        VkFence fence;
-    };
-    std::vector<PendingScreenshot> pendingScreenshots;
-    std::vector<ScreenshotCallback> m_pendingScreenshotRequests;
-
-    void cleanupResources();
-    void processPendingScreenshots();
-
-    PFN_vkCmdBeginRenderingKHR vkCmdBeginRendering_ptr = nullptr;
-    PFN_vkCmdEndRenderingKHR vkCmdEndRendering_ptr = nullptr;
 };

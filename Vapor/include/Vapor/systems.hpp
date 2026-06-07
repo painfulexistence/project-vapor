@@ -11,37 +11,52 @@
 namespace Vapor {
 
     // ============================================================================
-    // 變換系統 - 計算世界變換矩陣 (EnTT 版)
+    // 變換系統 - 計算世界變換矩陣
     // ============================================================================
     class TransformSystem {
     public:
         static void update(entt::registry& registry) {
-            auto view = registry.view<Vapor::TransformComponent>();
+            auto view = registry.view<TransformComponent>();
+
+            // 第一遍：標記所有需要更新的實體
             for (auto entity : view) {
-                auto& t = view.get<Vapor::TransformComponent>(entity);
-                if (!t.isDirty) continue;
+                auto& transform = view.get<TransformComponent>(entity);
 
-                glm::mat4 local = glm::translate(glm::mat4(1.0f), t.position)
-                                * glm::mat4_cast(t.rotation)
-                                * glm::scale(glm::mat4(1.0f), t.scale);
-
-                if (t.parent != entt::null) {
-                    if (auto* parentT = registry.try_get<Vapor::TransformComponent>(t.parent)) {
-                        t.worldTransform = parentT->worldTransform * local;
-                    } else {
-                        t.worldTransform = local;
-                    }
-                } else {
-                    t.worldTransform = local;
+                if (transform.isDirty || transform.parent != entt::null) {
+                    // 需要重新計算世界變換
+                    updateWorldTransform(registry, entity, transform);
                 }
-                t.isDirty = false;
             }
+        }
+
+    private:
+        static void updateWorldTransform(entt::registry& registry, entt::entity e, TransformComponent& transform) {
+            glm::mat4 localTransform = glm::translate(glm::mat4(1.0f), transform.position)
+                                       * glm::mat4_cast(transform.rotation)
+                                       * glm::scale(glm::mat4(1.0f), transform.scale);
+
+            if (transform.parent != entt::null) {
+                auto* parentTransform = registry.try_get<TransformComponent>(transform.parent);
+                if (parentTransform) {
+                    transform.worldTransform = parentTransform->worldTransform * localTransform;
+                } else {
+                    transform.worldTransform = localTransform;
+                }
+            } else {
+                transform.worldTransform = localTransform;
+            }
+
+            transform.isDirty = false;
         }
     };
 
     // ============================================================================
-    // 渲染系統 - 收集渲染實例 (EnTT 版)
+    // 渲染系統 - 收集渲染實例
     // ============================================================================
+    // NOTE: This system is commented out because it uses an outdated Mesh structure.
+    // The current Mesh struct doesn't have materialID field, and the rendering
+    // is handled directly by the Renderer class, not through this system.
+    /*
     class RenderSystem {
     public:
         struct RenderInstance {
@@ -62,25 +77,27 @@ namespace Vapor {
             std::vector<RenderInstance>& instances,
             std::unordered_map<std::shared_ptr<Material>, std::vector<std::shared_ptr<Mesh>>>& instanceBatches
         ) {
-            auto view = registry.view<Vapor::TransformComponent, Vapor::MeshRendererComponent>();
+            auto view = registry.view<MeshRendererComponent>();
 
             for (auto entity : view) {
-                auto& transform = view.get<Vapor::TransformComponent>(entity);
-                auto& render = view.get<Vapor::MeshRendererComponent>(entity);
+                auto& render = view.get<MeshRendererComponent>(entity);
 
-                if (!render.visible) {
+                if (!render.visible || render.meshes.empty()) {
                     continue;
                 }
 
-                const glm::mat4& modelMatrix = transform.worldTransform;
+                auto* transform = registry.try_get<TransformComponent>(entity);
+                if (!transform) {
+                    continue;
+                }
+
+                const glm::mat4& modelMatrix = transform->worldTransform;
 
                 for (const auto& mesh : render.meshes) {
-                    if (!mesh) continue;
-                    
                     instances.push_back(
                         {
                             .model = modelMatrix,
-                            .color = glm::vec4(1.0f), // Default color if not in MeshRendererComponent
+                            .color = glm::vec4(1.0f), // Default white color since MeshRendererComponent doesn't have color field
                             .vertexOffset = mesh->vertexOffset,
                             .indexOffset = mesh->indexOffset,
                             .vertexCount = mesh->vertexCount,
@@ -99,67 +116,232 @@ namespace Vapor {
             }
         }
     };
+    */
 
     // ============================================================================
-    // 物理同步系統 - 同步 Transform 和 Physics (EnTT 版)
+    // 物理同步系統 - 同步 Transform 和 Physics
     // ============================================================================
     class PhysicsSyncSystem {
     public:
         // Scene → Physics: 同步 Kinematic/Static 物體
         static void syncToPhysics(entt::registry& registry, Physics3D* physics) {
-            auto view = registry.view<Vapor::TransformComponent, Vapor::RigidbodyComponent>();
+            auto view = registry.view<RigidbodyComponent>();
 
             for (auto entity : view) {
-                auto& transform = view.get<Vapor::TransformComponent>(entity);
-                auto& phys = view.get<Vapor::RigidbodyComponent>(entity);
+                auto& phys = view.get<RigidbodyComponent>(entity);
 
                 if (!phys.body.valid() || !phys.syncToPhysics) {
+                    continue;
+                }
+
+                auto* transform = registry.try_get<TransformComponent>(entity);
+                if (!transform) {
                     continue;
                 }
 
                 // 檢查運動類型
                 auto motionType = physics->getMotionType(phys.body);
                 if (motionType == BodyMotionType::Kinematic || motionType == BodyMotionType::Static) {
-                    physics->setPosition(phys.body, transform.position);
-                    physics->setRotation(phys.body, transform.rotation);
+                    physics->setPosition(phys.body, transform->position);
+                    physics->setRotation(phys.body, transform->rotation);
                 }
             }
         }
 
         // Physics → Scene: 同步 Dynamic 物體
         static void syncFromPhysics(entt::registry& registry, Physics3D* physics) {
-            auto view = registry.view<Vapor::TransformComponent, Vapor::RigidbodyComponent>();
+            auto view = registry.view<RigidbodyComponent>();
 
             for (auto entity : view) {
-                auto& transform = view.get<Vapor::TransformComponent>(entity);
-                auto& phys = view.get<Vapor::RigidbodyComponent>(entity);
+                auto& phys = view.get<RigidbodyComponent>(entity);
 
                 if (!phys.body.valid() || !phys.syncFromPhysics) {
+                    continue;
+                }
+
+                auto* transform = registry.try_get<TransformComponent>(entity);
+                if (!transform) {
                     continue;
                 }
 
                 // 檢查運動類型
                 auto motionType = physics->getMotionType(phys.body);
                 if (motionType == BodyMotionType::Dynamic) {
-                    transform.position = physics->getPosition(phys.body);
-                    transform.rotation = physics->getRotation(phys.body);
-                    transform.isDirty = true;// 標記需要重新計算世界變換
+                    transform->position = physics->getPosition(phys.body);
+                    transform->rotation = physics->getRotation(phys.body);
+                    transform->isDirty = true;// 標記需要重新計算世界變換
                 }
             }
         }
     };
 
     // ============================================================================
-    // 相機系統 (EnTT 版)
+    // 抓取系統 - 使用 ECS 設計
+    // ============================================================================
+    class GrabSystem {
+    public:
+        static bool
+            tryPickup(entt::registry& registry, entt::entity grabber, Physics3D* physics, Camera* camera, float pickupRange = 5.0f) {
+            auto* grabberComp = registry.try_get<GrabberComponent>(grabber);
+            if (!grabberComp || grabberComp->heldEntity != entt::null) {
+                return false;// 已經抓著東西了
+            }
+
+            glm::vec3 rayStart = camera->getEye();
+            glm::vec3 rayDir = camera->getForward();
+            glm::vec3 rayEnd = rayStart + rayDir * pickupRange;
+
+            RaycastHit hit;
+            if (!physics->raycast(rayStart, rayEnd, hit)) {
+                return false;
+            }
+
+            // 從 hit.node 找到對應的 Entity
+            // 這需要一個 Node -> Entity 的映射（可以存儲在 Node 中）
+            // 暫時假設可以通過某種方式找到 Entity
+
+            // 檢查是否有 GrabbableComponent
+            // entt::entity hitEntity = findEntityFromNode(hit.node);
+            // if (!registry.all_of<GrabbableComponent>(hitEntity)) {
+            //     return false;
+            // }
+
+            // 添加 HeldComponent
+            // auto& held = registry.emplace<HeldComponent>(hitEntity);
+            // held.holder = grabber;
+            // held.originalGravityFactor = ...;
+
+            // 更新 PhysicsComponent
+            // auto* phys = registry.try_get<PhysicsComponent>(hitEntity);
+            // if (phys) {
+            //     physics->setMotionType(phys->body, BodyMotionType::Kinematic);
+            //     physics->setGravityFactor(phys->body, 0.0f);
+            // }
+
+            // grabberComp->heldEntity = hitEntity;
+
+            return true;
+        }
+
+        static void update(entt::registry& registry, Physics3D* physics, Camera* camera, float deltaTime) {
+            auto view = registry.view<HeldByComponent>();
+
+            for (auto entity : view) {
+                auto& held = view.get<HeldByComponent>(entity);
+
+                if (held.holder == entt::null) {
+                    continue;
+                }
+
+                // 獲取抓取者的變換
+                auto* holderTransform = registry.try_get<TransformComponent>(held.holder);
+                if (!holderTransform) {
+                    continue;
+                }
+
+                // 計算目標位置（相機前方）
+                glm::vec3 targetPos = camera->getEye() + camera->getForward() * held.holdDistance;
+
+                // 更新物理體位置
+                auto* phys = registry.try_get<RigidbodyComponent>(entity);
+                if (phys && phys->body.valid()) {
+                    glm::vec3 currentPos = physics->getPosition(phys->body);
+                    glm::vec3 velocity = (targetPos - currentPos) / deltaTime;
+
+                    float maxSpeed = 20.0f;
+                    if (glm::length(velocity) > maxSpeed) {
+                        velocity = glm::normalize(velocity) * maxSpeed;
+                    }
+
+                    physics->setLinearVelocity(phys->body, velocity);
+
+                    // 同步到 Transform
+                    auto* transform = registry.try_get<TransformComponent>(entity);
+                    if (transform) {
+                        transform->position = currentPos;
+                        transform->isDirty = true;
+                    }
+                }
+            }
+        }
+    };
+
+    // ============================================================================
+    // 光照移動系統 - Logic Driver
+    // ============================================================================
+    // NOTE: This system is commented out because it uses game-specific component types
+    // (LightMovementLogicComponent, SceneLightReferenceComponent, MovementPattern) that
+    // are not defined in the engine. The game provides its own LightMovementSystem in
+    // Vaporware/src/systems.hpp that handles light movement.
+    /*
+    class LightMovementSystem {
+    public:
+        static void update(entt::registry& registry, Scene* scene, float deltaTime) {
+            auto view = registry.view<LightMovementLogicComponent>();
+
+            for (auto entity : view) {
+                auto& logic = view.get<LightMovementLogicComponent>(entity);
+
+                auto* ref = registry.try_get<SceneLightReferenceComponent>(entity);
+                if (!ref || ref->lightIndex < 0 || ref->lightIndex >= scene->pointLights.size()) {
+                    continue;
+                }
+
+                // Update timer
+                logic.timer += deltaTime * logic.speed;
+                float t = logic.timer;
+
+                glm::vec3 newPos(0.0f);
+
+                switch (logic.pattern) {
+                case MovementPattern::Circle:
+                    newPos.x = logic.radius * cos(t);
+                    newPos.z = logic.radius * sin(t);
+                    newPos.y = logic.height + 0.5f * sin(t * 0.5f);
+                    break;
+
+                case MovementPattern::Figure8:
+                    newPos.x = (logic.radius + 1.0f) * sin(t * 0.7f);
+                    newPos.z = (logic.radius + 1.0f) * sin(t * 0.7f) * cos(t * 0.7f);
+                    newPos.y = 1.0f + 1.0f * cos(t * 0.3f);
+                    break;
+
+                case MovementPattern::Linear:
+                    newPos.x = (logic.radius + 1.0f) * sin(t * 0.6f);
+                    newPos.z = 2.0f * cos(t * 0.8f);
+                    newPos.y = 0.5f + 2.0f * abs(sin(t * 0.4f));
+                    break;
+
+                case MovementPattern::Spiral: {
+                    float spiralRadius = 2.0f + 1.0f * sin(t * 0.2f);
+                    newPos.x = spiralRadius * cos(t * 0.5f);
+                    newPos.z = spiralRadius * sin(t * 0.5f);
+                    newPos.y = 0.5f + 2.5f * (1.0f - cos(t * 0.3f));
+                    break;
+                }
+                }
+
+                // Direct write to Scene
+                scene->pointLights[ref->lightIndex].position = newPos;
+
+                // Optional: Update intensity logic if needed (keeping it simple for now)
+                scene->pointLights[ref->lightIndex].intensity = 3.0f + 2.0f * (0.5f + 0.5f * sin(t * 0.3f));
+            }
+        }
+    };
+    */
+
+    // ============================================================================
+    // 相機系統
     // ============================================================================
     class CameraSystem {
     public:
         static void update(entt::registry& registry, InputManager& inputManager, float deltaTime) {
-            auto view = registry.view<Vapor::VirtualCameraComponent>();
+            auto view = registry.view<VirtualCameraComponent>();
             const auto& inputState = inputManager.getInputState();
 
             for (auto entity : view) {
-                auto& cam = view.get<Vapor::VirtualCameraComponent>(entity);
+                auto& cam = view.get<VirtualCameraComponent>(entity);
 
                 if (!cam.isActive) continue;
 
@@ -170,7 +352,7 @@ namespace Vapor {
 
                 // 2. Handle Follow Camera Logic
                 if (auto* follow = registry.try_get<FollowCameraComponent>(entity)) {
-                    handleFollowCamera(registry, cam, follow, deltaTime);
+                    handleFollowCamera(cam, follow, deltaTime, registry);
                 }
 
                 // 3. Update Matrices
@@ -179,9 +361,9 @@ namespace Vapor {
         }
 
         static entt::entity getActiveCamera(entt::registry& registry) {
-            auto view = registry.view<Vapor::VirtualCameraComponent>();
+            auto view = registry.view<VirtualCameraComponent>();
             for (auto entity : view) {
-                if (view.get<Vapor::VirtualCameraComponent>(entity).isActive) {
+                if (view.get<VirtualCameraComponent>(entity).isActive) {
                     return entity;
                 }
             }
@@ -202,10 +384,11 @@ namespace Vapor {
             fly->pitch = glm::clamp(fly->pitch, -89.0f, 89.0f);
 
             // Update rotation quaternion from yaw/pitch
+            // Simple Euler to Quat:
             cam.rotation = glm::quat(glm::vec3(glm::radians(-fly->pitch), glm::radians(fly->yaw - 90.0f), 0.0f));
 
             // Calculate Front/Right/Up vectors from rotation
-            glm::vec3 front = cam.rotation * glm::vec3(0, 0, -1);
+            glm::vec3 front = cam.rotation * glm::vec3(0, 0, -1);// Assuming -Z is forward
             glm::vec3 right = cam.rotation * glm::vec3(1, 0, 0);
             glm::vec3 up = cam.rotation * glm::vec3(0, 1, 0);
 
@@ -219,13 +402,14 @@ namespace Vapor {
             if (inputState.isPressed(InputAction::MoveDown)) cam.position -= up * speed;
         }
 
-        static void handleFollowCamera(entt::registry& registry, VirtualCameraComponent& cam, FollowCameraComponent* follow, float deltaTime) {
-            if (follow->target == entt::null) return;
+        static void handleFollowCamera(VirtualCameraComponent& cam, FollowCameraComponent* follow, float deltaTime, entt::registry& registry) {
+            if (follow->target == entt::null || !registry.valid(follow->target)) return;
 
-            // Simple follow logic: Target Position + Offset
+            // Get target's transform component
             auto* targetTransform = registry.try_get<TransformComponent>(follow->target);
             if (!targetTransform) return;
 
+            // Simple follow logic: Target Position + Offset
             glm::vec3 targetPos = targetTransform->position;
             glm::vec3 desiredPos = targetPos + follow->offset;
 

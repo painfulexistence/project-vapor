@@ -35,7 +35,9 @@ set(SOURCES
     src/character_controller.cpp
     src/vehicle_controller.cpp
     src/fluid_volume.cpp
-    src/renderer_vulkan.cpp
+    # RHI architecture files (replacing renderer_metal.cpp and renderer_vulkan.cpp)
+    src/renderer.cpp
+    src/rhi_vulkan.cpp
     src/scene.cpp
     src/task_scheduler.cpp
     src/resource_manager.cpp
@@ -54,7 +56,7 @@ set(SOURCES
 
 if(APPLE)
     list(APPEND SOURCES
-        src/renderer_metal.cpp
+        src/rhi_metal.cpp
         src/rml_renderer_metal.cpp
         src/ui_renderer_metal.cpp
         imgui/backends/imgui_impl_metal.mm
@@ -107,7 +109,7 @@ if(APPLE)
 endif()
 
 find_program(GLSL_VALIDATOR "glslangValidator" REQUIRED)
-file(GLOB_RECURSE SHADER_SOURCES 
+file(GLOB_RECURSE SHADER_SOURCES
     "${CMAKE_CURRENT_SOURCE_DIR}/assets/shaders/*.vert"
     "${CMAKE_CURRENT_SOURCE_DIR}/assets/shaders/*.frag"
     "${CMAKE_CURRENT_SOURCE_DIR}/assets/shaders/*.comp"
@@ -116,7 +118,7 @@ file(GLOB_RECURSE SHADER_SOURCES
 foreach(GLSL ${SHADER_SOURCES})
     get_filename_component(SOURCE_NAME ${GLSL} NAME)
     set(SPIRV "${CMAKE_CURRENT_SOURCE_DIR}/assets/shaders/${SOURCE_NAME}.spv")
-    
+
     add_custom_command(
         OUTPUT ${SPIRV}
         COMMAND ${CMAKE_COMMAND} -E make_directory "${CMAKE_CURRENT_BINARY_DIR}/assets/shaders"
@@ -154,35 +156,39 @@ configure_package_config_file(
 
 if(APPLE)
     set(PLATFORM_LIBS metal)
+else()
+    set(PLATFORM_LIBS "")
 endif()
-install(TARGETS Vapor ${PLATFORM_LIBS} mikktspace
-    EXPORT VaporTargets
+
+install(TARGETS Vapor mikktspace ${PLATFORM_LIBS}
+    EXPORT vapor-targets
     LIBRARY DESTINATION ${CMAKE_INSTALL_LIBDIR}
     ARCHIVE DESTINATION ${CMAKE_INSTALL_LIBDIR}
     RUNTIME DESTINATION ${CMAKE_INSTALL_BINDIR}
 )
 
-install(EXPORT VaporTargets
-    FILE VaporTargets.cmake
+install(DIRECTORY include/
+    DESTINATION ${CMAKE_INSTALL_INCLUDEDIR}
+    FILES_MATCHING PATTERN "*.hpp"
+)
+
+install(DIRECTORY imgui/
+    DESTINATION ${CMAKE_INSTALL_INCLUDEDIR}/imgui
+    FILES_MATCHING PATTERN "*.h"
+)
+
+install(DIRECTORY assets/
+    DESTINATION ${CMAKE_INSTALL_DATADIR}/vapor/assets
+)
+
+install(EXPORT vapor-targets
+    FILE vapor-targets.cmake
     NAMESPACE Vapor::
-    DESTINATION "${CMAKE_INSTALL_DATADIR}/vapor"
+    DESTINATION ${CMAKE_INSTALL_DATADIR}/vapor
 )
 
 install(FILES
     "${CMAKE_CURRENT_BINARY_DIR}/vapor-config.cmake"
     "${CMAKE_CURRENT_BINARY_DIR}/vapor-config-version.cmake"
-    "${CMAKE_CURRENT_SOURCE_DIR}/../cmake/VaporMacros.cmake"
-    DESTINATION "${CMAKE_INSTALL_DATADIR}/vapor"
+    DESTINATION ${CMAKE_INSTALL_DATADIR}/vapor
 )
-
-install(DIRECTORY include/ DESTINATION ${CMAKE_INSTALL_INCLUDEDIR})
-install(DIRECTORY imgui/ DESTINATION ${CMAKE_INSTALL_INCLUDEDIR}/imgui
-    FILES_MATCHING PATTERN "*.h"
-)
-install(DIRECTORY assets/ DESTINATION "${CMAKE_INSTALL_DATADIR}/vapor/assets")
-
-install(DIRECTORY "${CMAKE_CURRENT_BINARY_DIR}/assets/shaders"
-    DESTINATION "${CMAKE_INSTALL_DATADIR}/vapor/assets"
-)
-
-add_subdirectory(capi)

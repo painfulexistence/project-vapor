@@ -10,6 +10,7 @@
 #include <vector>
 
 #include "graphics.hpp"
+#include "rhi.hpp"
 #include "physics_3d.hpp"
 
 class FluidVolume;
@@ -166,8 +167,8 @@ public:
     std::vector<std::shared_ptr<Vapor::Image>> images;
     std::vector<std::shared_ptr<Vapor::Material>> materials;
     std::vector<std::shared_ptr<Node>> nodes;
-    std::vector<DirectionalLight> directionalLights;
-    std::vector<PointLight> pointLights;
+    std::vector<Vapor::DirectionalLight> directionalLights;
+    std::vector<Vapor::PointLight> pointLights;
     std::vector<std::shared_ptr<FluidVolume>> fluidVolumes;
 
     // GPU-driven rendering
