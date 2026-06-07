@@ -29,16 +29,11 @@ TEST_CASE("Renderer - Screenshot Capture", "[backend][screenshot]") {
 #else
     auto renderer = createRenderer(GraphicsBackend::Vulkan, window);
 #endif
-    try {
-        renderer->init(window);
-    } catch (const std::exception& e) {
-        std::string reason = e.what();
-        renderer->deinit();
-        renderer.reset();
+    if (!renderer) {
         ImGui::DestroyContext();
         SDL_DestroyWindow(window);
         SDL_Quit();
-        SKIP("Renderer init failed: " << reason);
+        SKIP("Renderer creation failed");
     }
 
     SECTION("Capture current frame") {
@@ -75,7 +70,7 @@ TEST_CASE("Renderer - Screenshot Capture", "[backend][screenshot]") {
                        capturedImage.width * capturedImage.channelCount);
     }
 
-    renderer->deinit();
+    renderer->shutdown();
     ImGui::DestroyContext();
     SDL_DestroyWindow(window);
     SDL_Quit();

@@ -1,6 +1,8 @@
 #include "renderer.hpp"
 #include "rhi_vulkan.hpp"
+#ifdef __APPLE__
 #include "rhi_metal.hpp"
+#endif
 #include "helper.hpp"
 #include "components.hpp"
 #include <SDL3/SDL_video.h>
@@ -12,14 +14,18 @@
 #include <memory>
 #include "imgui.h"
 #include "backends/imgui_impl_sdl3.h"
+#ifdef __APPLE__
 #include "backends/imgui_impl_metal.h"
+#endif
 #include "backends/imgui_impl_vulkan.h"
 #include <vulkan/vulkan.h>
 
+#ifdef __APPLE__
 // Metal headers for ImGui initialization
 #define NS_PRIVATE_IMPLEMENTATION
 #define MTL_PRIVATE_IMPLEMENTATION
 #include <Metal/Metal.hpp>
+#endif
 
 // ============================================================================
 // Initialization
@@ -1214,9 +1220,11 @@ std::unique_ptr<Renderer> createRenderer(GraphicsBackend backend, SDL_Window* wi
     std::unique_ptr<RHI> rhi;
 
     switch (backend) {
+#ifdef __APPLE__
         case GraphicsBackend::Metal:
             rhi = std::unique_ptr<RHI>(createRHIMetal());
             break;
+#endif
         case GraphicsBackend::Vulkan:
             rhi = std::unique_ptr<RHI>(createRHIVulkan());
             break;
@@ -1235,6 +1243,7 @@ std::unique_ptr<Renderer> createRenderer(GraphicsBackend backend, SDL_Window* wi
 
     // Initialize ImGui backend based on graphics backend
     switch (backend) {
+#ifdef __APPLE__
         case GraphicsBackend::Metal: {
             ImGui_ImplSDL3_InitForMetal(window);
             void* device = rhi->getBackendDevice();
@@ -1243,6 +1252,7 @@ std::unique_ptr<Renderer> createRenderer(GraphicsBackend backend, SDL_Window* wi
             }
             break;
         }
+#endif
         case GraphicsBackend::Vulkan: {
             ImGui_ImplSDL3_InitForVulkan(window);
             void* instance = rhi->getBackendInstance();
