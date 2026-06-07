@@ -323,7 +323,7 @@ auto main(int argc, char* args[]) -> int {
     Vapor::RNG rng;
 
     auto renderer = createRenderer(gfxBackend, window);
-    renderer->init(window);
+    // Renderer is already initialized by createRenderer()
 
     // Scene serializer — engine pre-registers transform/meshRenderer;
     // game registers game-specific component writers.
@@ -758,7 +758,7 @@ auto main(int argc, char* args[]) -> int {
     // Shutdown subsystems
     physics->deinit();
     engineCore->shutdown();
-    renderer->deinit();
+    renderer->shutdown();
 
     ImGui::DestroyContext();
 
