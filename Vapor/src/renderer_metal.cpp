@@ -577,6 +577,11 @@ public:
         encoder->setFragmentBytes(&time, sizeof(float), 6);
 
         for (const auto& [material, draws] : r.instanceBatches) {
+            if (material->materialType == Vapor::MaterialType::Iridescent) {
+                encoder->setRenderPipelineState(r.iridescentPipeline.get());
+            } else {
+                encoder->setRenderPipelineState(r.drawPipeline.get());
+            }
             encoder->setFragmentTexture(
                 r.getTexture(material->albedoMap ? material->albedoMap->texture : r.defaultAlbedoTexture).get(), 0
             );
@@ -2237,6 +2242,7 @@ void Renderer_Metal::renderUI() {
 auto Renderer_Metal::createResources() -> void {
     // Create pipelines
     drawPipeline = createPipeline("shaders/3d_pbr_normal_mapped.metal", true, false, MSAA_SAMPLE_COUNT);
+    iridescentPipeline = createPipeline("shaders/3d_pbr_iridescent.metal", true, false, MSAA_SAMPLE_COUNT);
     prePassPipeline = createPipeline("shaders/3d_depth_only.metal", true, false, MSAA_SAMPLE_COUNT);
     postProcessPipeline = createPipeline("shaders/3d_post_process.metal", false, true, 1);
     buildClustersPipeline = createComputePipeline("shaders/3d_cluster_build.metal");
@@ -3948,7 +3954,8 @@ auto Renderer_Metal::draw(std::shared_ptr<Scene> scene, Camera& camera) -> void 
                                         .clearcoat = mat->clearcoat,
                                         .clearcoatGloss = mat->clearcoatGloss,
                                         .prototypeUVMode = static_cast<float>(mat->prototypeUVMode),
-                                        .uvScale = mat->uvScale };
+                                        .uvScale = mat->uvScale,
+                                        .iblEnabled = mat->useIBL ? 1.0f : 0.0f };
     }
     materialDataBuffer->didModifyRange(NS::Range::Make(0, materialDataBuffer->length()));
 

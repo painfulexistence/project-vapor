@@ -35,6 +35,7 @@ struct alignas(16) MaterialData {
     float clearcoatGloss;
     float prototypeUVMode;
     float uvScale;
+    float iblEnabled; // 1.0 = use IBL, 0.0 = ambient approximation
 };
 
 struct alignas(16) DirectionalLight {

@@ -300,6 +300,7 @@ protected:
     NS::SharedPtr<MTL::DepthStencilState> depthStencilState;
     NS::SharedPtr<MTL::RenderPipelineState> prePassPipeline;
     NS::SharedPtr<MTL::RenderPipelineState> drawPipeline;
+    NS::SharedPtr<MTL::RenderPipelineState> iridescentPipeline;
     NS::SharedPtr<MTL::RenderPipelineState> postProcessPipeline;
 
     NS::SharedPtr<MTL::ComputePipelineState> buildClustersPipeline;

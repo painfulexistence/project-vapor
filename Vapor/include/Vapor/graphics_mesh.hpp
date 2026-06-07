@@ -14,6 +14,8 @@ namespace Vapor {
 
     enum class AlphaMode { OPAQUE, MASK, BLEND };
 
+    enum class MaterialType { PBR, Iridescent };
+
     struct Image {
         std::string uri;
         Uint32 width;
@@ -53,6 +55,8 @@ namespace Vapor {
         // Prototype UV Mode: 0 = Off, 1 = World Space, 2 = Object Space
         int prototypeUVMode = 0;
         float uvScale = 1.0f;
+        MaterialType materialType = MaterialType::PBR;
+        bool useIBL = false;
         PipelineHandle pipeline;
     };
 

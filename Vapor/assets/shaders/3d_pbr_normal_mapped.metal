@@ -357,9 +357,11 @@ fragment float4 fragmentMain(
         result += CalculatePointLight(pointLights[lightIndex], norm, T, B, viewDir, surf, in.worldPosition.xyz);
     }
 
-    result += float3(0.2) * surf.ao * surf.color;
-    // TODO: IBL
-    // result += CalculateIBL(norm, viewDir, surf, irradianceMap, prefilterMap, brdfLUT);
+    if (material.iblEnabled > 0.5) {
+        result += CalculateIBL(norm, viewDir, surf, irradianceMap, prefilterMap, brdfLUT);
+    } else {
+        result += float3(0.03) * surf.ao * surf.color; // minimal ambient fallback
+    }
 
     result += surf.emission;
 
