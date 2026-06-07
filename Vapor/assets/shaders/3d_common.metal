@@ -92,6 +92,16 @@ struct Cluster {
     uint lightIndices[MAX_LIGHTS_PER_CLUSTER];
 };
 
+constant int PSSM_NUM_CASCADES = 3;
+
+struct PSSMData {
+    float4x4 lightSpaceMatrices[3];
+    // view-space depths: x = RT shadow end, y = cascade1 end, z = cascade2 end, w = cascade3 end (far)
+    float4 cascadeSplits;
+    float blendRange;
+    float3 _pad;
+};
+
 float3x3 inverse(float3x3 const m) {
     float const A = m[1][1] * m[2][2] - m[2][1] * m[1][2];
     float const B = -(m[0][1] * m[2][2] - m[2][1] * m[0][2]);

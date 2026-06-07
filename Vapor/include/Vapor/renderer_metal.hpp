@@ -53,6 +53,8 @@ class DebugDrawPass;
 class CanvasPass;
 class WorldCanvasPass;
 
+class PSSMShadowPass;
+
 class RenderPass {
 public:
     explicit RenderPass(Renderer_Metal* renderer) : renderer(renderer) {
@@ -122,6 +124,7 @@ class Renderer_Metal final : public Renderer {// Must be public or factory funct
     friend class DebugDrawPass;
     friend class CanvasPass;
     friend class WorldCanvasPass;
+    friend class PSSMShadowPass;
 
 public:
     Renderer_Metal();
@@ -308,6 +311,8 @@ protected:
     NS::SharedPtr<MTL::ComputePipelineState> normalResolvePipeline;
     NS::SharedPtr<MTL::ComputePipelineState> raytraceShadowPipeline;
     NS::SharedPtr<MTL::ComputePipelineState> raytraceAOPipeline;
+    NS::SharedPtr<MTL::RenderPipelineState> pssmShadowPipeline;
+    NS::SharedPtr<MTL::DepthStencilState> pssmDepthStencilState;
     NS::SharedPtr<MTL::RenderPipelineState> atmospherePipeline;
     NS::SharedPtr<MTL::RenderPipelineState> skyCapturePipeline;
     NS::SharedPtr<MTL::RenderPipelineState> irradianceConvolutionPipeline;
@@ -510,6 +515,13 @@ protected:
     NS::SharedPtr<MTL::Texture> normalRT;
     NS::SharedPtr<MTL::Texture> shadowRT;
     NS::SharedPtr<MTL::Texture> aoRT;
+
+    // PSSM shadow maps: 2D texture array, 3 cascades × 4096×4096 Depth32
+    NS::SharedPtr<MTL::Texture> pssmShadowMaps;
+    std::vector<NS::SharedPtr<MTL::Buffer>> pssmDataBuffers;
+    static constexpr uint32_t PSSM_CASCADE_COUNT = 3;
+    static constexpr uint32_t PSSM_SHADOW_MAP_SIZE = 4096;
+    float pssmRTMaxDist = 50.0f; // view-space depth where RT shadow ends and PSSM begins
 
     // Bloom render targets
     NS::SharedPtr<MTL::Texture> bloomBrightnessRT;// Half-res brightness extraction
