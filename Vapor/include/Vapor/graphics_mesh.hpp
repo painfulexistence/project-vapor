@@ -25,6 +25,14 @@ namespace Vapor {
         TextureHandle texture;
     };
 
+    // Floating-point image for HDR equirectangular environment maps (.hdr / .exr)
+    struct HDRImage {
+        std::string uri;
+        Uint32 width;
+        Uint32 height;
+        std::vector<float> floatArray; // 4 floats per pixel (RGBA, linear)
+    };
+
     struct Material {
         std::string name;
         AlphaMode alphaMode;

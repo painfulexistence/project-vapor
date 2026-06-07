@@ -325,6 +325,11 @@ auto main(int argc, char* args[]) -> int {
     auto renderer = createRenderer(gfxBackend);
     renderer->init(window);
 
+    // Optional: load an external HDRI for IBL instead of the procedural sky.
+    // Place your .hdr file at:  <assets>/textures/env/sky.hdr
+    // and uncomment the line below:
+    // renderer->loadHDRI("textures/env/sky.hdr");
+
     // Scene serializer — engine pre-registers transform/meshRenderer;
     // game registers game-specific component writers.
     Vapor::SceneSerializer sceneSerializer;
