@@ -8,6 +8,8 @@
 #include <cstddef>
 #include <vector>
 #include <array>
+#include <string>
+#include <memory>
 
 namespace Vapor {
 
