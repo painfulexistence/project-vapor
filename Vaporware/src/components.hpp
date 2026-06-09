@@ -232,3 +232,5 @@ struct PersistentTag {};
 struct DeadTag {};
 // Marks entities auto-spawned from a GLTF scene; excluded from level serialization.
 struct SceneGeometryTag {};
+// Marks the currently selected entity (at most one at a time).
+struct SelectionTag {};

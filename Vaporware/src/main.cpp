@@ -584,6 +584,16 @@ auto main(int argc, char* args[]) -> int {
                 }
                 break;
             }
+            case SDL_EVENT_MOUSE_BUTTON_DOWN: {
+                if (e.button.button == SDL_BUTTON_LEFT && !ImGui::GetIO().WantCaptureMouse) {
+                    SelectionSystem::handlePick(
+                        registry, physics.get(),
+                        glm::vec2(e.button.x, e.button.y),
+                        windowWidth, windowHeight
+                    );
+                }
+                break;
+            }
             case SDL_EVENT_WINDOW_RESIZED: {
                 windowWidth = e.window.data1;
                 windowHeight = e.window.data2;
@@ -628,6 +638,7 @@ auto main(int argc, char* args[]) -> int {
         // Gameplay updates
         CameraSwitchSystem::update(registry, global);
         CameraSystem::update(registry, deltaTime);
+        SelectionSystem::update(registry, windowWidth, windowHeight);
         AutoRotateSystem::update(registry, deltaTime);
         LightMovementSystem::update(registry, deltaTime);
         // Subtitle systems (split into single-responsibility)

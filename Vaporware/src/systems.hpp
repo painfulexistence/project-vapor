@@ -14,9 +14,11 @@
 #include "pages/chapter_title_page.hpp"
 #include "pages/page_system.hpp"
 #include "pages/scroll_text_page.hpp"
+#include "pages/selection_overlay_page.hpp"
 #include "pages/subtitle_page.hpp"
 #include <algorithm>
 #include <fmt/core.h>
+#include <glm/gtc/matrix_inverse.hpp>
 #include <glm/gtc/matrix_transform.hpp>
 
 
@@ -481,6 +483,97 @@ public:
                 page->scrollToNext(q.lines[q.currentIndex]);
             }
         }
+    }
+};
+
+class SelectionSystem {
+public:
+    // Call on left mouse click from the SDL event loop.
+    static void handlePick(
+        entt::registry& reg,
+        Physics3D* physics,
+        glm::vec2 mousePos,
+        int viewportWidth,
+        int viewportHeight
+    ) {
+        glm::mat4 viewMat, projMat;
+        glm::vec3 camPos;
+        bool foundCam = false;
+        reg.view<Vapor::VirtualCameraComponent>().each([&](auto, auto& cam) {
+            if (cam.isActive) {
+                viewMat  = cam.viewMatrix;
+                projMat  = cam.projectionMatrix;
+                camPos   = cam.position;
+                foundCam = true;
+            }
+        });
+        if (!foundCam) return;
+
+        float ndcX = (mousePos.x / viewportWidth)  * 2.0f - 1.0f;
+        float ndcY = 1.0f - (mousePos.y / viewportHeight) * 2.0f;
+        glm::mat4 invVP = glm::inverse(projMat * viewMat);
+        glm::vec4 worldFar = invVP * glm::vec4(ndcX, ndcY, 1.0f, 1.0f);
+        worldFar /= worldFar.w;
+        glm::vec3 rayDir = glm::normalize(glm::vec3(worldFar) - camPos);
+
+        // Clear previous selection
+        reg.clear<SelectionTag>();
+
+        RaycastHit hit{};
+        if (physics->raycast(camPos, camPos + rayDir * 500.0f, hit)) {
+            if (reg.valid(hit.entity)) {
+                reg.emplace_or_replace<SelectionTag>(hit.entity);
+            }
+        }
+    }
+
+    // Call every frame after CameraSystem to keep the overlay positioned.
+    static void update(entt::registry& reg, int viewportWidth, int viewportHeight) {
+        auto* page = PageSystem::getPage<SelectionOverlayPage>(reg, PageID::SelectionOverlay);
+        if (!page) return;
+
+        entt::entity selected = entt::null;
+        reg.view<SelectionTag>().each([&](auto e) { selected = e; });
+
+        if (selected == entt::null) {
+            page->hidePanel();
+            return;
+        }
+
+        auto* transform = reg.try_get<Vapor::TransformComponent>(selected);
+        if (!transform) {
+            page->hidePanel();
+            return;
+        }
+
+        glm::mat4 viewMat, projMat;
+        bool foundCam = false;
+        reg.view<Vapor::VirtualCameraComponent>().each([&](auto, auto& cam) {
+            if (cam.isActive) {
+                viewMat  = cam.viewMatrix;
+                projMat  = cam.projectionMatrix;
+                foundCam = true;
+            }
+        });
+        if (!foundCam) { page->hidePanel(); return; }
+
+        glm::vec4 clip = projMat * viewMat * glm::vec4(transform->position, 1.0f);
+        if (clip.w <= 0.0f) { page->hidePanel(); return; }
+
+        glm::vec3 ndc = glm::vec3(clip) / clip.w;
+        if (ndc.x < -1.0f || ndc.x > 1.0f || ndc.y < -1.0f || ndc.y > 1.0f) {
+            page->hidePanel();
+            return;
+        }
+
+        float screenX = (ndc.x + 1.0f) * 0.5f * viewportWidth;
+        float screenY = (1.0f - ndc.y) * 0.5f * viewportHeight;
+
+        std::string name = "Entity";
+        if (auto* nc = reg.try_get<Vapor::NameComponent>(selected))
+            name = nc->name;
+
+        page->showAt(screenX, screenY, name);
     }
 };
 

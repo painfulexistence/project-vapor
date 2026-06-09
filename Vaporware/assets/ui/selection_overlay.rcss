@@ -1,0 +1,28 @@
+body {
+    pointer-events: none;
+    width: 100%;
+    height: 100%;
+    font-family: "Arial Black";
+}
+
+#selection-panel {
+    position: absolute;
+    width: 160dp;
+    padding: 8dp 12dp;
+    background-color: rgba(0, 0, 0, 0.78);
+    border: 1dp #44aaff;
+
+    opacity: 0;
+    transition: opacity 0.15s sine-in-out;
+}
+
+#selection-panel.visible {
+    opacity: 1;
+}
+
+#selection-name {
+    font-size: 14dp;
+    font-weight: bold;
+    color: #44aaff;
+    font-effect: outline(1dp #000000);
+}

@@ -20,6 +20,7 @@ namespace Vapor {
         PauseMenu,
         Settings,
         LoadingScreen,
+        SelectionOverlay,
     };
 
     // Tag: always-on overlay, not part of the menu stack

@@ -12,10 +12,11 @@
 #include "pages/subtitle_page.hpp"
 #include "pages/scroll_text_page.hpp"
 #include "pages/chapter_title_page.hpp"
+#include "pages/loading_screen_page.hpp"
 #include "pages/main_menu_page.hpp"
 #include "pages/pause_menu_page.hpp"
+#include "pages/selection_overlay_page.hpp"
 #include "pages/settings_page.hpp"
-#include "pages/loading_screen_page.hpp"
 #include <entt/entt.hpp>
 #include <glm/vec3.hpp>
 #include <memory>
@@ -184,11 +185,12 @@ inline SceneResources buildScene(
     };
 
     // Overlay pages — eager-loaded, always resident
-    addPage(PageID::HUD,          "ui/hud.rml",           std::make_shared<HUDPage>(),          false, true);
-    addPage(PageID::Letterbox,    "ui/letterbox.rml",     std::make_shared<LetterboxPage>(),    false, true);
-    addPage(PageID::Subtitle,     "ui/subtitle.rml",      std::make_shared<SubtitlePage>(),     false, true);
-    addPage(PageID::ScrollText,   "ui/scroll_text.rml",   std::make_shared<ScrollTextPage>(),   false, true);
-    addPage(PageID::ChapterTitle, "ui/chapter_title.rml", std::make_shared<ChapterTitlePage>(), false, true);
+    addPage(PageID::HUD,             "ui/hud.rml",                std::make_shared<HUDPage>(),             false, true);
+    addPage(PageID::Letterbox,       "ui/letterbox.rml",          std::make_shared<LetterboxPage>(),       false, true);
+    addPage(PageID::Subtitle,        "ui/subtitle.rml",           std::make_shared<SubtitlePage>(),        false, true);
+    addPage(PageID::ScrollText,      "ui/scroll_text.rml",        std::make_shared<ScrollTextPage>(),      false, true);
+    addPage(PageID::ChapterTitle,    "ui/chapter_title.rml",      std::make_shared<ChapterTitlePage>(),    false, true);
+    addPage(PageID::SelectionOverlay,"ui/selection_overlay.rml",  std::make_shared<SelectionOverlayPage>(),false, true);
 
     // Menu pages — lazy-loaded (document created only when first shown)
     addPage(PageID::MainMenu, "ui/menus/main_menu.rml", std::make_shared<MainMenuPage>(

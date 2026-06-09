@@ -1,0 +1,11 @@
+<rml>
+<head>
+    <title>Selection Overlay</title>
+    <link type="text/rcss" href="selection_overlay.rcss"/>
+</head>
+<body>
+    <div id="selection-panel">
+        <div id="selection-name">Object</div>
+    </div>
+</body>
+</rml>
