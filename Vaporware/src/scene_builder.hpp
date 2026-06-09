@@ -146,7 +146,7 @@ inline SceneResources buildScene(
     auto flyCam = registry.create();
     {
         auto& cam = registry.emplace<Vapor::VirtualCameraComponent>(flyCam);
-        cam.isActive = true;
+        cam.isActive = false;
         cam.fov = glm::radians(60.0f);
         cam.aspect = (float)windowWidth / (float)windowHeight;
         cam.position = glm::vec3(0.0f, 0.0f, 3.0f);
@@ -155,6 +155,30 @@ inline SceneResources buildScene(
         fly.moveSpeed = 5.0f;
 
         registry.emplace<CharacterIntent>(flyCam);
+    }
+
+    // Player character with first-person physics camera
+    auto player = registry.create();
+    {
+        auto& transform = registry.emplace<Vapor::TransformComponent>(player);
+        // Start at y=0.9 so feet rest on floor surface (floor top is at y=0, capsule half-height=0.9)
+        transform.position = glm::vec3(0.0f, 0.9f, 3.0f);
+
+        registry.emplace<Vapor::CharacterBodyComponent>(player);
+
+        auto& cc = registry.emplace<CharacterControllerComponent>(player);
+        cc.moveSpeed = 5.0f;
+
+        registry.emplace<CharacterIntent>(player);
+
+        auto& cam = registry.emplace<Vapor::VirtualCameraComponent>(player);
+        cam.isActive = true;
+        cam.fov = glm::radians(70.0f);
+        cam.aspect = (float)windowWidth / (float)windowHeight;
+
+        auto& fp = registry.emplace<FirstPersonCameraComponent>(player);
+        fp.yaw = -90.0f;
+        fp.rotateSpeed = 90.0f;
     }
 
     auto followCam = registry.create();

@@ -2,6 +2,7 @@
 #include "physics_3d.hpp"
 
 #include <Jolt/Jolt.h>
+#include <algorithm>
 
 #include <Jolt/Core/Factory.h>
 #include <Jolt/Physics/Character/CharacterVirtual.h>
@@ -89,13 +90,21 @@ void CharacterController::moveAlong(const glm::vec2& inputVector, const glm::vec
 
 void CharacterController::jump(float jumpSpeed) {
     if (isOnGround() && !isJumping) {
-        // Get current velocity to preserve horizontal movement
         JPH::Vec3 currentVel = character->GetLinearVelocity();
         currentVel.SetY(jumpSpeed);
         character->SetLinearVelocity(currentVel);
-        // Mark as jumping to disable stick-to-floor in update
         isJumping = true;
+    } else if (!isOnGround() && !isFloating) {
+        startFloat();
     }
+}
+
+void CharacterController::startFloat() {
+    isFloating = true;
+    // Bleed off vertical velocity for a smooth float entry
+    JPH::Vec3 vel = character->GetLinearVelocity();
+    vel.SetY(-0.3f);
+    character->SetLinearVelocity(vel);
 }
 
 void CharacterController::warp(const glm::vec3& position) {
@@ -169,7 +178,13 @@ void CharacterController::update(float deltaTime, const glm::vec3& gravity) {
         JPH::Vec3 up = character->GetUp();
         float verticalSpeed = currentVel.Dot(up);
 
-        verticalSpeed += gravity.y * deltaTime;
+        if (isFloating) {
+            // Near-weightless float: 8% of normal gravity, slow drift downward
+            verticalSpeed += gravity.y * 0.08f * deltaTime;
+            verticalSpeed = std::max(verticalSpeed, -0.8f);  // cap fall speed during float
+        } else {
+            verticalSpeed += gravity.y * deltaTime;
+        }
 
         newVelocity = JPH::Vec3(desiredHorizontalVelocity.x, verticalSpeed, desiredHorizontalVelocity.z);
     }
@@ -180,8 +195,8 @@ void CharacterController::update(float deltaTime, const glm::vec3& gravity) {
     JPH::CharacterVirtual::ExtendedUpdateSettings updateSettings;
 
     // Configure update settings to prevent sticking and improve movement
-    if (isJumping) {
-        // When jumping, disable stick-to-floor completely to allow leaving the ground
+    if (isJumping || isFloating) {
+        // Disable stick-to-floor during jump and float
         updateSettings.mStickToFloorStepDown = JPH::Vec3::sZero();
     } else {
         // Normal movement: small step down to stay grounded on slopes
@@ -210,8 +225,9 @@ void CharacterController::update(float deltaTime, const glm::vec3& gravity) {
     JPH::RVec3 pos = character->GetPosition();
     currentPosition = glm::vec3(pos.GetX(), pos.GetY(), pos.GetZ());
 
-    // Reset jumping state when we land
-    if (isJumping && isOnGround()) {
+    // Reset jump/float state when we land
+    if ((isJumping || isFloating) && isOnGround()) {
         isJumping = false;
+        isFloating = false;
     }
 }

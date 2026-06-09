@@ -278,11 +278,28 @@ public:
 class CharacterMovementSystem {
 public:
     static void update(entt::registry& reg, float deltaTime) {
-        auto view = reg.view<CharacterControllerComponent, CharacterIntent>();
+        auto view = reg.view<CharacterControllerComponent, CharacterIntent, Vapor::CharacterBodyComponent>();
         for (auto entity : view) {
             auto& intent = view.get<CharacterIntent>(entity);
-            auto& controller = view.get<CharacterControllerComponent>(entity);
+            auto& cc = view.get<CharacterControllerComponent>(entity);
+            auto& body = view.get<Vapor::CharacterBodyComponent>(entity);
+
+            // Camera-relative horizontal movement
+            glm::vec3 forward(0.0f, 0.0f, -1.0f);
+            if (auto* cam = reg.try_get<Vapor::VirtualCameraComponent>(entity)) {
+                glm::vec3 f = cam->rotation * glm::vec3(0.0f, 0.0f, -1.0f);
+                forward = glm::normalize(glm::vec3(f.x, 0.0f, f.z));
+            }
+            glm::vec3 right = glm::normalize(glm::cross(forward, glm::vec3(0.0f, 1.0f, 0.0f)));
+
+            glm::vec3 desiredVel = forward * intent.moveVector.y + right * intent.moveVector.x;
+            float len = glm::length(desiredVel);
+            if (len > 1.0f) desiredVel /= len;
+            desiredVel *= cc.moveSpeed;
+            body.desiredVelocity = desiredVel;
+
             if (intent.jump) {
+                body.jumpRequested = true;
             }
         }
     }
@@ -314,6 +331,16 @@ public:
                     cam.position += intent->moveVector.y * front * fly->moveSpeed * deltaTime;
                 if (intent->moveVerticalAxis != 0.0f)
                     cam.position += intent->moveVerticalAxis * up * fly->moveSpeed * deltaTime;
+            }
+
+            if (auto [fp, intent, transform] = reg.try_get<FirstPersonCameraComponent, CharacterIntent, Vapor::TransformComponent>(entity); fp && intent && transform) {
+                fp->pitch -= intent->lookVector.y * fp->rotateSpeed * deltaTime;
+                fp->yaw -= intent->lookVector.x * fp->rotateSpeed * deltaTime;
+                fp->pitch = glm::clamp(fp->pitch, -89.0f, 89.0f);
+
+                cam.rotation = glm::quat(glm::vec3(glm::radians(-fp->pitch), glm::radians(fp->yaw - 90.0f), 0.0f));
+                // Eye height: character center is at transform position, eyes ~0.8m above center
+                cam.position = transform->position + glm::vec3(0.0f, 0.8f, 0.0f);
             }
 
             if (auto* follow = reg.try_get<FollowCameraComponent>(entity)) {

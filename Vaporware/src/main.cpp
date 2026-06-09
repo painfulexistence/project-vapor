@@ -607,6 +607,10 @@ auto main(int argc, char* args[]) -> int {
             auto& request = registry.emplace_or_replace<CameraSwitchRequest>(global);
             request.mode = CameraSwitchRequest::Mode::Follow;
         }
+        if (inputState.isPressed(Vapor::InputAction::Hotkey3)) {
+            auto& request = registry.emplace_or_replace<CameraSwitchRequest>(global);
+            request.mode = CameraSwitchRequest::Mode::FirstPerson;
+        }
         registry.view<CharacterIntent>().each([&](auto& intent) -> auto {
             intent.lookVector = inputState.getVector(
                 Vapor::InputAction::LookLeft,
@@ -627,6 +631,7 @@ auto main(int argc, char* args[]) -> int {
 
         // Gameplay updates
         CameraSwitchSystem::update(registry, global);
+        CharacterMovementSystem::update(registry, deltaTime);
         CameraSystem::update(registry, deltaTime);
         AutoRotateSystem::update(registry, deltaTime);
         LightMovementSystem::update(registry, deltaTime);

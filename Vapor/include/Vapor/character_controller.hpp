@@ -51,6 +51,9 @@ public:
     void setMaxSpeed(float speed);
     void setGravity(const glm::vec3& gravity);
 
+    // State queries
+    bool getIsFloating() const { return isFloating; }
+
     // Internal update (called by Physics3D)
     void update(float deltaTime, const glm::vec3& gravity);
 
@@ -60,17 +63,19 @@ public:
     }
 
 private:
+    void startFloat();
+
     Physics3D* physics;
     std::unique_ptr<JPH::CharacterVirtual> character;
     CharacterControllerSettings settings;
     glm::vec3 currentGravity;
     float maxSpeed = 10.0f;
-    glm::vec3 desiredHorizontalVelocity = glm::vec3(0.0f);// Desired horizontal movement
+    glm::vec3 desiredHorizontalVelocity = glm::vec3(0.0f);
 
     // For interpolation
     glm::vec3 previousPosition = glm::vec3(0.0f);
     glm::vec3 currentPosition = glm::vec3(0.0f);
 
-    // Jump state - when true, disable stick-to-floor to allow jumping
     bool isJumping = false;
+    bool isFloating = false;
 };
