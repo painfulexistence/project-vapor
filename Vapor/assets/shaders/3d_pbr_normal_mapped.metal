@@ -232,13 +232,15 @@ fragment float4 fragmentMain(
     texturecube<float, access::sample> irradianceMap [[texture(8)]],
     texturecube<float, access::sample> prefilterMap [[texture(9)]],
     texture2d<float, access::sample> brdfLUT [[texture(10)]],
+    depth2d_array<float, access::compare> pssmShadowMaps [[texture(11)]],
     const device DirLight* directionalLights [[buffer(0)]],
     const device PointLight* pointLights [[buffer(1)]],
     const device Cluster* clusters [[buffer(2)]],
     constant CameraData& camera [[buffer(3)]],
     constant float2& screenSize [[buffer(4)]],
     constant packed_uint3& gridSize [[buffer(5)]],
-    constant float& time [[buffer(6)]]
+    constant float& time [[buffer(6)]],
+    constant PSSMData& pssmData [[buffer(7)]]
 ) {
     constexpr sampler s(address::repeat, filter::linear, mip_filter::linear);
 
@@ -298,9 +300,58 @@ fragment float4 fragmentMain(
 
     float2 screenUV = in.position.xy / screenSize;
 
+    // --- Shadow factor: RT shadow for near region, PSSM for mid/far ---
+    constexpr sampler shadowCmpSampler(
+        address::clamp_to_edge,
+        filter::linear,
+        compare_func::less_equal
+    );
+    constexpr float PSSM_TEXEL = 1.0 / 4096.0;
+    constexpr float PSSM_BIAS  = 0.002;
+
+    float viewDepth = (camera.view * in.worldPosition).z;
+
+    float shadowFactor;
+    if (viewDepth <= pssmData.cascadeSplits.x) {
+        // Cascade 0: RT ray-traced shadow
+        shadowFactor = texShadow.sample(s, screenUV).r;
+    } else {
+        // Select PSSM cascade (index 0-2 = cascade 1-3)
+        int ci = 0;
+        if      (viewDepth > pssmData.cascadeSplits.z) ci = 2;
+        else if (viewDepth > pssmData.cascadeSplits.y) ci = 1;
+
+        float4 lsPos = pssmData.lightSpaceMatrices[ci] * in.worldPosition;
+        float3 proj  = lsPos.xyz / lsPos.w;
+
+        // NDC → texture UV (Metal: y=+1 at top → v=0)
+        float2 shadowUV = float2(proj.x * 0.5 + 0.5, 0.5 - proj.y * 0.5);
+        float  refDepth = proj.z - PSSM_BIAS;
+
+        // 3×3 PCF (each tap uses hardware bilinear comparison)
+        float pcf = 0.0;
+        for (int px = -1; px <= 1; px++) {
+            for (int py = -1; py <= 1; py++) {
+                pcf += pssmShadowMaps.sample_compare(
+                    shadowCmpSampler,
+                    shadowUV + float2(px, py) * PSSM_TEXEL,
+                    ci, refDepth
+                );
+            }
+        }
+        shadowFactor = pcf / 9.0;
+
+        // Blend zone between RT (cascade 0) and PSSM cascade 1
+        float blendEnd = pssmData.cascadeSplits.x + pssmData.blendRange;
+        if (viewDepth < blendEnd) {
+            float rtShadow = texShadow.sample(s, screenUV).r;
+            float t = (viewDepth - pssmData.cascadeSplits.x) / pssmData.blendRange;
+            shadowFactor = mix(rtShadow, shadowFactor, t);
+        }
+    }
+
     float3 result = float3(0.0);
-    float shadowFactor = texShadow.sample(s, screenUV).r;
-    result += CalculateDirectionalLight(directionalLights[0], norm, T, B, viewDir, surf) * shadowFactor; // result += CookTorranceBRDF(norm, lightDir, viewDir, surf) * (mainLight.color * mainLight.intensity) * clamp(dot(norm, lightDir), 0.0, 1.0);
+    result += CalculateDirectionalLight(directionalLights[0], norm, T, B, viewDir, surf) * shadowFactor;
 
     uint tileX = uint(screenUV.x * float(gridSize.x));
     uint tileY = uint((1.0 - screenUV.y) * float(gridSize.y));
