@@ -2992,6 +2992,18 @@ auto Renderer_Metal::createResources() -> void {
         pssmShadowMaps = NS::TransferPtr(device->newTexture(pssmDesc));
         pssmDesc->release();
 
+        // Per-slice texture2d views for ImGui display (depth2d_array can't be shown directly)
+        for (uint32_t i = 0; i < PSSM_CASCADE_COUNT; i++) {
+            pssmShadowMapViews[i] = NS::TransferPtr(
+                pssmShadowMaps->newTextureView(
+                    MTL::PixelFormatDepth32Float,
+                    MTL::TextureType2D,
+                    NS::Range::Make(0, 1),
+                    NS::Range::Make(i, 1)
+                )
+            );
+        }
+
         // Triple-buffered uniform buffers for PSSM data
         constexpr size_t pssmDataSize = sizeof(glm::mat4) * 3 + sizeof(glm::vec4) + sizeof(float) * 4;
         pssmDataBuffers.resize(MAX_FRAMES_IN_FLIGHT);
@@ -4291,6 +4303,14 @@ auto Renderer_Metal::draw(std::shared_ptr<Scene> scene, Camera& camera) -> void 
             if (ImGui::TreeNode(fmt::format("Raytraced Shadow").c_str())) {
                 ImGui::Image((ImTextureID)(intptr_t)shadowRT.get(), ImVec2(64, 64));
                 ImGui::TreePop();
+            }
+            for (uint32_t i = 0; i < PSSM_CASCADE_COUNT; i++) {
+                if (pssmShadowMapViews[i]) {
+                    if (ImGui::TreeNode(fmt::format("PSSM Shadow Cascade {}", i + 1).c_str())) {
+                        ImGui::Image((ImTextureID)(intptr_t)pssmShadowMapViews[i].get(), ImVec2(128, 128));
+                        ImGui::TreePop();
+                    }
+                }
             }
             if (ImGui::TreeNode(fmt::format("Raytraced AO").c_str())) {
                 ImGui::Image((ImTextureID)(intptr_t)aoRT.get(), ImVec2(64, 64));

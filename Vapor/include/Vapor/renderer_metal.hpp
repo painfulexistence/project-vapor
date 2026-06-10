@@ -518,6 +518,8 @@ protected:
 
     // PSSM shadow maps: 2D texture array, 3 cascades × 4096×4096 Depth32
     NS::SharedPtr<MTL::Texture> pssmShadowMaps;
+    // Per-slice texture2d views used only for ImGui display
+    std::array<NS::SharedPtr<MTL::Texture>, 3> pssmShadowMapViews;
     std::vector<NS::SharedPtr<MTL::Buffer>> pssmDataBuffers;
     static constexpr uint32_t PSSM_CASCADE_COUNT = 3;
     static constexpr uint32_t PSSM_SHADOW_MAP_SIZE = 4096;

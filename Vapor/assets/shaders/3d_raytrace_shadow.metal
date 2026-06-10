@@ -50,9 +50,9 @@ kernel void computeMain(
         DirLight light = directionalLights[0];
 
         raytracing::ray r;
-        r.origin = worldPos + worldNormal * 0.001;
+        r.origin = worldPos + worldNormal * 0.005;
         r.direction = normalize(-light.direction);
-        r.min_distance = 0.1;
+        r.min_distance = 0.001;
         r.max_distance = 10000.0;
 
         raytracing::intersector<raytracing::instancing, raytracing::triangle_data> inter;
