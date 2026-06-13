@@ -23,7 +23,7 @@ namespace Vapor {
 class VideoRecorder {
 public:
     struct Config {
-        std::string outputPath = "recording.mkv";
+        std::string outputPath = "recording.mp4";
         int fps = 60;
         // AV1 CRF quality (0=lossless, 63=worst). Lower = better quality.
         int crf = 35;
