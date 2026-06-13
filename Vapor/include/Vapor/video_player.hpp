@@ -15,16 +15,24 @@ namespace Vapor {
 // material.  Frame data is delivered as RGBA pixels — the caller is
 // responsible for uploading to the GPU each time update() returns true.
 //
-// Typical usage:
+// Typical usage (allocate the GPU texture once, then re-upload in place):
 //   VideoPlayer player;
 //   player.open("cutscene.mkv");
 //   player.play();
 //
+//   TextureHandle texture;   // created lazily from the first frame
+//   auto img = std::make_shared<Image>();
+//
 //   // game loop:
 //   if (player.update(deltaTime)) {
-//       auto* f = player.getCurrentFrame();
-//       GpuImageData img{f->pixels, f->width, f->height, 4};
-//       texture = renderer->createTexture(std::make_shared<Image>(img));
+//       const auto* f = player.getCurrentFrame();
+//       img->width = f->width; img->height = f->height; img->channelCount = 4;
+//       img->byteArray = f->pixels;
+//       if (!texture.valid()) {
+//           texture = renderer->createTexture(img);
+//       } else {
+//           renderer->updateTexture(texture, img); // no reallocation
+//       }
 //   }
 //   renderer->drawQuad2D(pos, size, texture);
 class VideoPlayer {

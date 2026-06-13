@@ -165,6 +165,13 @@ public:
         return {};
     }
 
+    // Update an existing texture's contents in place. The image dimensions and
+    // channel count must match those used when the texture was created.
+    // Intended for streaming sources (e.g. video playback) that re-upload pixel
+    // data every frame without reallocating the GPU texture.
+    virtual void updateTexture(TextureHandle handle, const std::shared_ptr<Vapor::Image>& img) {
+    }
+
     // ===== Render-to-Texture API =====
     // Create a render texture that can be rendered to
     virtual RenderTextureHandle createRenderTexture(const RenderTextureDesc& desc) { return {}; }

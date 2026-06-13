@@ -4780,6 +4780,46 @@ auto Renderer_Metal::createTexture(const std::shared_ptr<Image>& img) -> Texture
     }
 }
 
+void Renderer_Metal::updateTexture(TextureHandle handle, const std::shared_ptr<Image>& img) {
+    if (!img) {
+        return;
+    }
+    auto it = textures.find(handle.rid);
+    if (it == textures.end() || !it->second) {
+        fmt::print(stderr, "[Metal] updateTexture: invalid texture handle {}\n", handle.rid);
+        return;
+    }
+    MTL::Texture* texture = it->second.get();
+
+    if (img->channelCount == 3) {
+        // Convert RGB to RGBA by adding an opaque alpha channel.
+        std::vector<Uint8> rgbaData;
+        rgbaData.reserve(static_cast<size_t>(img->width) * img->height * 4);
+        for (size_t i = 0; i + 2 < img->byteArray.size(); i += 3) {
+            rgbaData.push_back(img->byteArray[i]);
+            rgbaData.push_back(img->byteArray[i + 1]);
+            rgbaData.push_back(img->byteArray[i + 2]);
+            rgbaData.push_back(255);
+        }
+        texture->replaceRegion(
+            MTL::Region(0, 0, 0, img->width, img->height, 1), 0, rgbaData.data(), img->width * 4
+        );
+    } else {
+        size_t bytesPerPixel = img->channelCount;
+        texture->replaceRegion(
+            MTL::Region(0, 0, 0, img->width, img->height, 1), 0, img->byteArray.data(), img->width * bytesPerPixel
+        );
+    }
+
+    if (texture->mipmapLevelCount() > 1) {
+        auto cmdBlit = NS::TransferPtr(queue->commandBuffer());
+        auto enc = NS::TransferPtr(cmdBlit->blitCommandEncoder());
+        enc->generateMipmaps(texture);
+        enc->endEncoding();
+        cmdBlit->commit();
+    }
+}
+
 // ===== Render-to-Texture Implementation =====
 
 RenderTextureHandle Renderer_Metal::createRenderTexture(const RenderTextureDesc& desc) {
