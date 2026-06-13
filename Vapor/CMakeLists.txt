@@ -61,6 +61,7 @@ set(SOURCES
     src/rmlui_manager.cpp
     src/rmlui_system.cpp
     src/video_recorder.cpp
+    src/video_player.cpp
     imgui/imgui.cpp
     imgui/imgui_draw.cpp
     imgui/imgui_tables.cpp
