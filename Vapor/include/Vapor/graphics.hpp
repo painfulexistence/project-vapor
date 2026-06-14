@@ -9,9 +9,11 @@
 //   graphics_effects.hpp   — WaterData, AtmosphereData, VolumetricFogData, VolumetricCloudData,
 //                            LightScatteringData, SunFlareData, GPUParticle, Particle
 //   graphics_sprite.hpp    — SpriteFrame, SpriteAtlas
+//   graphics_gibs.hpp      — Surfel, SurfelCell, GIBSData, GIBSQuality, GIBS params
 
 #include "graphics_batch2d.hpp"
 #include "graphics_effects.hpp"
+#include "graphics_gibs.hpp"
 #include "graphics_gpu_structs.hpp"
 #include "graphics_handles.hpp"
 #include "graphics_mesh.hpp"

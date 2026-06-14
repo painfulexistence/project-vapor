@@ -57,6 +57,8 @@ if(APPLE)
         src/renderer_metal.cpp
         src/rml_renderer_metal.cpp
         src/ui_renderer_metal.cpp
+        src/gibs_manager.cpp
+        src/gibs_passes.cpp
         imgui/backends/imgui_impl_metal.mm
     )
 else()

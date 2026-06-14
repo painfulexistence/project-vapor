@@ -40,6 +40,10 @@ using namespace Vapor;
 #include <glm/gtc/matrix_transform.hpp>
 #include <glm/gtc/type_ptr.hpp>
 
+// GIBS (Global Illumination Based on Surfels)
+#include "Vapor/gibs_manager.hpp"
+#include "Vapor/gibs_passes.hpp"
+
 // Pre-pass: Renders depth and normals
 class PrePass : public RenderPass {
 public:
@@ -55,11 +59,21 @@ public:
 
         // Create render pass descriptor
         auto prePassDesc = NS::TransferPtr(MTL::RenderPassDescriptor::renderPassDescriptor());
+
+        // Color attachment 0: Normal
         auto prePassNormalRT = prePassDesc->colorAttachments()->object(0);
         prePassNormalRT->setClearColor(MTL::ClearColor(0.0, 0.0, 0.0, 1.0));
         prePassNormalRT->setLoadAction(MTL::LoadActionClear);
         prePassNormalRT->setStoreAction(MTL::StoreActionStore);
         prePassNormalRT->setTexture(r.normalRT_MS.get());
+
+        // Color attachment 1: Albedo (for GIBS)
+        auto prePassAlbedoRT = prePassDesc->colorAttachments()->object(1);
+        prePassAlbedoRT->setClearColor(MTL::ClearColor(0.0, 0.0, 0.0, 1.0));
+        prePassAlbedoRT->setLoadAction(MTL::LoadActionClear);
+        prePassAlbedoRT->setStoreAction(MTL::StoreActionMultisampleResolve);
+        prePassAlbedoRT->setTexture(r.albedoRT_MS.get());
+        prePassAlbedoRT->setResolveTexture(r.albedoRT.get());
 
         auto prePassDepthRT = prePassDesc->depthAttachment();
         prePassDepthRT->setClearDepth(r.clearDepth);
@@ -601,6 +615,13 @@ public:
             encoder->setFragmentTexture(r.irradianceMap.get(), 8);
             encoder->setFragmentTexture(r.prefilterMap.get(), 9);
             encoder->setFragmentTexture(r.brdfLUT.get(), 10);
+
+            // GIBS (Global Illumination Based on Surfels)
+            if (r.gibsEnabled && r.gibsManager && r.gibsManager->getGIResultTexture()) {
+                encoder->setFragmentTexture(r.gibsManager->getGIResultTexture(), 11);
+            }
+            Uint32 gibsEnabledFlag = (r.gibsEnabled && r.gibsManager) ? 1 : 0;
+            encoder->setFragmentBytes(&gibsEnabledFlag, sizeof(Uint32), 7);
 
             for (const auto& draw : draws) {
                 if (!r.currentCamera->isVisible(r.instances[draw.instanceIndex].boundingSphere)) {
@@ -2082,6 +2103,16 @@ auto Renderer_Metal::init(SDL_Window* window) -> void {
     graph.addPass(std::make_unique<TileCullingPass>(this));
     if (m_supportsRaytracing) graph.addPass(std::make_unique<RaytraceShadowPass>(this));
     if (m_supportsRaytracing) graph.addPass(std::make_unique<RaytraceAOPass>(this));
+
+    // GIBS (Global Illumination Based on Surfels) passes
+    if (gibsEnabled && gibsManager) {
+        graph.addPass(std::make_unique<Vapor::SurfelGenerationPass>(this, gibsManager.get()));
+        graph.addPass(std::make_unique<Vapor::SurfelHashBuildPass>(this, gibsManager.get()));
+        graph.addPass(std::make_unique<Vapor::SurfelRaytracingPass>(this, gibsManager.get()));
+        graph.addPass(std::make_unique<Vapor::GIBSTemporalPass>(this, gibsManager.get()));
+        graph.addPass(std::make_unique<Vapor::GIBSSamplePass>(this, gibsManager.get()));
+    }
+
     graph.addPass(std::make_unique<MainRenderPass>(this));
     graph.addPass(std::make_unique<SkyAtmospherePass>(this));
     // graph.addPass(std::make_unique<WaterPass>(this));
@@ -2237,7 +2268,47 @@ void Renderer_Metal::renderUI() {
 auto Renderer_Metal::createResources() -> void {
     // Create pipelines
     drawPipeline = createPipeline("shaders/3d_pbr_normal_mapped.metal", true, false, MSAA_SAMPLE_COUNT);
-    prePassPipeline = createPipeline("shaders/3d_depth_only.metal", true, false, MSAA_SAMPLE_COUNT);
+
+    // PrePass pipeline with MRT (normal + albedo for GIBS)
+    {
+        auto shaderSrc = readFile("shaders/3d_depth_only.metal");
+        auto code = NS::String::string(shaderSrc.data(), NS::StringEncoding::UTF8StringEncoding);
+        NS::Error* error = nullptr;
+        MTL::Library* library = device->newLibrary(code, nullptr, &error);
+        if (!library) {
+            throw std::runtime_error(fmt::format("PrePass shader compile error: {}\n", error->localizedDescription()->utf8String()));
+        }
+
+        auto vertexMain = library->newFunction(NS::String::string("vertexMain", NS::UTF8StringEncoding));
+        auto fragmentMain = library->newFunction(NS::String::string("fragmentMain", NS::UTF8StringEncoding));
+
+        auto pipelineDesc = MTL::RenderPipelineDescriptor::alloc()->init();
+        pipelineDesc->setVertexFunction(vertexMain);
+        pipelineDesc->setFragmentFunction(fragmentMain);
+
+        // Color attachment 0: Normal (HDR)
+        auto colorAttachment0 = pipelineDesc->colorAttachments()->object(0);
+        colorAttachment0->setPixelFormat(MTL::PixelFormatRGBA16Float);
+
+        // Color attachment 1: Albedo (LDR)
+        auto colorAttachment1 = pipelineDesc->colorAttachments()->object(1);
+        colorAttachment1->setPixelFormat(MTL::PixelFormatRGBA8Unorm);
+
+        pipelineDesc->setDepthAttachmentPixelFormat(MTL::PixelFormatDepth32Float);
+        pipelineDesc->setSampleCount(NS::UInteger(MSAA_SAMPLE_COUNT));
+
+        prePassPipeline = NS::TransferPtr(device->newRenderPipelineState(pipelineDesc, &error));
+        if (!prePassPipeline) {
+            throw std::runtime_error(fmt::format("PrePass pipeline error: {}\n", error->localizedDescription()->utf8String()));
+        }
+
+        pipelineDesc->release();
+        vertexMain->release();
+        fragmentMain->release();
+        library->release();
+        code->release();
+    }
+
     postProcessPipeline = createPipeline("shaders/3d_post_process.metal", false, true, 1);
     buildClustersPipeline = createComputePipeline("shaders/3d_cluster_build.metal");
     cullLightsPipeline = createComputePipeline("shaders/3d_light_cull.metal");
@@ -2252,6 +2323,26 @@ auto Renderer_Metal::createResources() -> void {
     prefilterEnvMapPipeline = createPipeline("shaders/3d_prefilter_envmap.metal", true, true, 1);
     brdfLUTPipeline = createPipeline("shaders/3d_brdf_lut.metal", false, true, 1);
     lightScatteringPipeline = createPipeline("shaders/3d_light_scattering.metal", true, true, 1);
+
+    // GIBS (Global Illumination Based on Surfels) pipelines
+    if (m_supportsRaytracing) {
+        surfelGenerationPipeline = createComputePipeline("shaders/gibs_surfel_generation.metal", "surfelGeneration");
+        surfelClearCellsPipeline = createComputePipeline("shaders/gibs_spatial_hash.metal", "clearCellCounts");
+        surfelCountPerCellPipeline = createComputePipeline("shaders/gibs_spatial_hash.metal", "countSurfelsPerCell");
+        surfelPrefixSumPipeline = createComputePipeline("shaders/gibs_spatial_hash.metal", "prefixSumCellsSerial");
+        surfelScatterPipeline = createComputePipeline("shaders/gibs_spatial_hash.metal", "scatterSurfels");
+        surfelRaytracingPipeline = createComputePipeline("shaders/gibs_raytracing.metal", "surfelRaytracing");
+        surfelRaytracingSimplePipeline = createComputePipeline("shaders/gibs_raytracing.metal", "surfelRaytracingSimple");
+        gibsTemporalPipeline = createComputePipeline("shaders/gibs_temporal.metal", "surfelTemporalSmooth");
+        gibsSamplePipeline = createComputePipeline("shaders/gibs_sample.metal", "giSample");
+        gibsUpsamplePipeline = createComputePipeline("shaders/gibs_sample.metal", "giBilateralUpsample");
+        gibsCompositePipeline = createComputePipeline("shaders/gibs_sample.metal", "giComposite");
+
+        // Initialize GIBS Manager
+        gibsManager = std::make_unique<Vapor::GIBSManager>(this);
+        gibsManager->setQuality(gibsQuality);
+        gibsManager->init();
+    }
 
     // Create debug draw pipeline
     {
@@ -2742,6 +2833,21 @@ auto Renderer_Metal::createResources() -> void {
     normalTextureDesc->setUsage(MTL::TextureUsageShaderRead | MTL::TextureUsageShaderWrite);
     normalRT = NS::TransferPtr(device->newTexture(normalTextureDesc));
     normalTextureDesc->release();
+
+    // Albedo RT for GIBS (stores albedo color from PrePass)
+    MTL::TextureDescriptor* albedoTextureDesc = MTL::TextureDescriptor::alloc()->init();
+    albedoTextureDesc->setTextureType(MTL::TextureType2DMultisample);
+    albedoTextureDesc->setPixelFormat(MTL::PixelFormatRGBA8Unorm);
+    albedoTextureDesc->setWidth(swapchain->drawableSize().width);
+    albedoTextureDesc->setHeight(swapchain->drawableSize().height);
+    albedoTextureDesc->setSampleCount(NS::UInteger(MSAA_SAMPLE_COUNT));
+    albedoTextureDesc->setUsage(MTL::TextureUsageRenderTarget | MTL::TextureUsageShaderRead);
+    albedoRT_MS = NS::TransferPtr(device->newTexture(albedoTextureDesc));
+    albedoTextureDesc->setTextureType(MTL::TextureType2D);
+    albedoTextureDesc->setSampleCount(1);
+    albedoTextureDesc->setUsage(MTL::TextureUsageShaderRead | MTL::TextureUsageShaderWrite);
+    albedoRT = NS::TransferPtr(device->newTexture(albedoTextureDesc));
+    albedoTextureDesc->release();
 
     MTL::TextureDescriptor* shadowTextureDesc = MTL::TextureDescriptor::alloc()->init();
     shadowTextureDesc->setTextureType(MTL::TextureType2D);
@@ -3994,6 +4100,36 @@ auto Renderer_Metal::draw(std::shared_ptr<Scene> scene, Camera& camera) -> void 
     drawCount = 0;
 
     // ==========================================================================
+    // Update GIBS (Global Illumination Based on Surfels)
+    // ==========================================================================
+    if (gibsEnabled && gibsManager) {
+        // Initialize GI textures if needed (or resize on window resize)
+        Uint32 screenW = static_cast<Uint32>(surface->texture()->width());
+        Uint32 screenH = static_cast<Uint32>(surface->texture()->height());
+        gibsManager->initTextures(screenW, screenH);
+
+        // Begin frame for GIBS
+        gibsManager->beginFrame(currentFrameInFlight);
+
+        // Update GIBS data with camera and lighting info
+        glm::mat4 viewProj = proj * view;
+        glm::mat4 invViewProj = glm::inverse(viewProj);
+
+        // Get sun direction and color from first directional light
+        glm::vec3 sunDir = glm::vec3(0.0f, -1.0f, 0.0f);
+        glm::vec3 sunColor = glm::vec3(1.0f);
+        float sunIntensity = 1.0f;
+        if (!scene->directionalLights.empty()) {
+            const auto& sunLight = scene->directionalLights[0];
+            sunDir = glm::normalize(sunLight.direction);
+            sunColor = sunLight.color;
+            sunIntensity = sunLight.intensity;
+        }
+
+        gibsManager->updateGIBSData(viewProj, invViewProj, camPos, sunDir, sunColor, sunIntensity);
+    }
+
+    // ==========================================================================
     // Initialize RmlUI if not already initialized (delayed initialization)
     // ==========================================================================
     auto* engineCore = Vapor::EngineCore::Get();
@@ -4681,27 +4817,39 @@ auto Renderer_Metal::createPipeline(const std::string& filename, bool isHDR, boo
 }
 
 auto Renderer_Metal::createComputePipeline(const std::string& filename) -> NS::SharedPtr<MTL::ComputePipelineState> {
+    return createComputePipeline(filename, "computeMain");
+}
+
+auto Renderer_Metal::createComputePipeline(const std::string& filename, const std::string& functionName) -> NS::SharedPtr<MTL::ComputePipelineState> {
     auto shaderSrc = readFile(filename);
 
     auto code = NS::String::string(shaderSrc.data(), NS::StringEncoding::UTF8StringEncoding);
     NS::Error* error = nullptr;
-    MTL::CompileOptions* options = nullptr;
-    MTL::Library* library = device->newLibrary(code, options, &error);
+    MTL::Library* library = device->newLibrary(code, nullptr, &error);
     if (!library) {
         throw std::runtime_error(
             fmt::format("Could not compile shader! Error: {}\n", error->localizedDescription()->utf8String())
         );
     }
-    // fmt::print("Shader compiled successfully. Shader: {}\n", code->cString(NS::StringEncoding::UTF8StringEncoding));
 
-    auto computeFuncName = NS::String::string("computeMain", NS::StringEncoding::UTF8StringEncoding);
-    auto computeMain = library->newFunction(computeFuncName);
+    auto computeFuncName = NS::String::string(functionName.c_str(), NS::StringEncoding::UTF8StringEncoding);
+    auto computeFunc = library->newFunction(computeFuncName);
+    if (!computeFunc) {
+        throw std::runtime_error(
+            fmt::format("Could not find compute function '{}' in shader '{}'\n", functionName, filename)
+        );
+    }
 
-    auto pipeline = NS::TransferPtr(device->newComputePipelineState(computeMain, &error));
+    auto pipeline = NS::TransferPtr(device->newComputePipelineState(computeFunc, &error));
+    if (!pipeline) {
+        throw std::runtime_error(
+            fmt::format("Could not create compute pipeline for '{}': {}\n", functionName, error->localizedDescription()->utf8String())
+        );
+    }
 
     code->release();
     library->release();
-    computeMain->release();
+    computeFunc->release();
 
     return pipeline;
 }
