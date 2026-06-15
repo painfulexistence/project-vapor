@@ -149,10 +149,10 @@ float3 IridescentBRDF(
 
 float3 CalculateDirectionalLightIrid(DirLight light, float3 norm, float3 T, float3 B,
                                       float3 viewDir, Surface surf, float NdotV, float3 iridF) {
-    float3 lightDir  = normalize(-light.direction);
-    float3 radiance  = light.color * light.intensity;
-    return IridescentBRDF(norm, T, B, lightDir, viewDir, surf, NdotV, iridF)
-           * radiance * clamp(dot(norm, lightDir), 0.0, 1.0);
+    float3 lightDir = normalize(-light.direction);
+    float3 radiance = light.color * light.intensity;
+    // IridescentBRDF already multiplies by nl (N·L), so no extra NdotL factor here
+    return IridescentBRDF(norm, T, B, lightDir, viewDir, surf, NdotV, iridF) * radiance;
 }
 
 float3 CalculatePointLightIrid(PointLight light, float3 norm, float3 T, float3 B,
@@ -162,8 +162,7 @@ float3 CalculatePointLightIrid(PointLight light, float3 norm, float3 T, float3 B
     float  attenuation = 1.0 / (dist * dist);
     attenuation       *= 1.0 - smoothstep(light.radius * 0.8, light.radius, dist);
     float3 radiance    = attenuation * light.color * light.intensity;
-    return IridescentBRDF(norm, T, B, lightDir, viewDir, surf, NdotV, iridF)
-           * radiance * clamp(dot(norm, lightDir), 0.0, 1.0);
+    return IridescentBRDF(norm, T, B, lightDir, viewDir, surf, NdotV, iridF) * radiance;
 }
 
 // Fresnel-Schlick with roughness (for IBL)

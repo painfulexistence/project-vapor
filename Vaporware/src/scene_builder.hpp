@@ -66,7 +66,7 @@ inline SceneResources buildScene(
     auto iridescentMaterial = std::make_shared<Vapor::Material>(Vapor::Material{
         .baseColorFactor  = glm::vec4(0.72f, 0.72f, 0.78f, 1.0f), // silvery-white base
         .metallicFactor   = 1.0f,
-        .roughnessFactor  = 0.08f,
+        .roughnessFactor  = 0.25f,
         .clearcoat        = 0.9f,   // iridescence strength (reused field)
         .clearcoatGloss   = 0.45f,  // film thickness factor → ~480 nm (blue-green dominant)
         .materialType     = Vapor::MaterialType::Iridescent,

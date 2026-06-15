@@ -4179,6 +4179,14 @@ auto Renderer_Metal::draw(std::shared_ptr<Scene> scene, Camera& camera) -> void 
                     ImGui::DragFloat("Sheen Tint", &m->sheenTint, .01f, 0.0f, 1.0f);
                     ImGui::DragFloat("Clearcoat", &m->clearcoat, .01f, 0.0f, 1.0f);
                     ImGui::DragFloat("Clearcoat Gloss", &m->clearcoatGloss, .01f, 0.0f, 1.0f);
+                    ImGui::Separator();
+                    // Material type (read-only: determines which shader pipeline is used)
+                    const char* typeLabel = (m->materialType == Vapor::MaterialType::Iridescent)
+                        ? "Iridescent (electroplating)"
+                        : "PBR";
+                    ImGui::LabelText("Material Type", "%s", typeLabel);
+                    // useIBL is editable: changes take effect next frame via materialDataBuffer upload
+                    ImGui::Checkbox("Use IBL", &m->useIBL);
                     ImGui::TreePop();
                 }
                 ImGui::PopID();
