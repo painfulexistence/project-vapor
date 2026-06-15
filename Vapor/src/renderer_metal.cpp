@@ -3957,6 +3957,19 @@ auto Renderer_Metal::draw(std::shared_ptr<Scene> scene, Camera& camera) -> void 
         NS::Range::Make(0, cameraDataBuffers[currentFrameInFlight]->length())
     );
 
+    // Reallocate light buffers if the ECS has added lights since stage() was called
+    // (LightGatherSystem populates scene->directionalLights / pointLights after staging)
+    const size_t dirLightBytes   = std::max(scene->directionalLights.size(), (size_t)1) * sizeof(DirectionalLight);
+    const size_t pointLightBytes = std::max(scene->pointLights.size(),       (size_t)1) * sizeof(PointLight);
+    if (!directionalLightBuffer || directionalLightBuffer->length() < dirLightBytes) {
+        directionalLightBuffer = NS::TransferPtr(
+            device->newBuffer(dirLightBytes, MTL::ResourceStorageModeManaged));
+    }
+    if (!pointLightBuffer || pointLightBuffer->length() < pointLightBytes) {
+        pointLightBuffer = NS::TransferPtr(
+            device->newBuffer(pointLightBytes, MTL::ResourceStorageModeManaged));
+    }
+
     auto* dirLights = reinterpret_cast<DirectionalLight*>(directionalLightBuffer->contents());
     for (size_t i = 0; i < scene->directionalLights.size(); ++i) {
         dirLights[i].direction = scene->directionalLights[i].direction;
