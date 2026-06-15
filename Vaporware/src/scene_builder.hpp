@@ -73,7 +73,7 @@ inline SceneResources buildScene(
         .clearcoat        = 0.9f,   // iridescence strength (reused field)
         .clearcoatGloss   = 0.45f,  // film thickness factor → ~480 nm (blue-green dominant)
         .materialType     = Vapor::MaterialType::Iridescent,
-        .useIBL           = true,
+        .useIBL           = false,
     });
 
     auto cube2 = registry.create();
