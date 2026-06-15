@@ -436,6 +436,36 @@ public:
     }
 };
 
+// PSSM resolve pass (debug): writes the directional shadow factor into a
+// camera-aligned screen-space texture so it can be inspected like RT shadow.
+class PSSMResolvePass : public RenderPass {
+public:
+    explicit PSSMResolvePass(Renderer_Metal* renderer) : RenderPass(renderer) {}
+    auto getName() const -> const char* override { return "PSSMResolvePass"; }
+
+    void execute() override {
+        auto& r = *renderer;
+        if (!r.currentScene || r.currentScene->directionalLights.empty()) return;
+
+        auto drawableSize = r.swapchain->drawableSize();
+        glm::vec2 screenSize = glm::vec2(drawableSize.width, drawableSize.height);
+
+        auto encoder = r.currentCommandBuffer->computeCommandEncoder();
+        encoder->setComputePipelineState(r.pssmResolvePipeline.get());
+        encoder->setTexture(r.depthStencilRT.get(), 0);
+        encoder->setTexture(r.pssmShadowMaps.get(), 1);
+        encoder->setTexture(r.pssmShadowScreenRT.get(), 2);
+        encoder->setBuffer(r.cameraDataBuffers[r.currentFrameInFlight].get(), 0, 0);
+        encoder->setBuffer(r.pssmDataBuffers[r.currentFrameInFlight].get(), 0, 1);
+        encoder->setBytes(&screenSize, sizeof(glm::vec2), 2);
+        encoder->dispatchThreadgroups(
+            MTL::Size((uint32_t(screenSize.x) + 7) / 8, (uint32_t(screenSize.y) + 7) / 8, 1),
+            MTL::Size(8, 8, 1)
+        );
+        encoder->endEncoding();
+    }
+};
+
 // Motion vector pass: depth-reprojection screen-space motion vectors
 class MotionVectorPass : public RenderPass {
 public:
@@ -2358,6 +2388,7 @@ auto Renderer_Metal::init(SDL_Window* window) -> void {
     graph.addPass(std::make_unique<NormalResolvePass>(this));
     graph.addPass(std::make_unique<TileCullingPass>(this));
     graph.addPass(std::make_unique<PSSMShadowPass>(this));
+    graph.addPass(std::make_unique<PSSMResolvePass>(this));
     if (m_supportsRaytracing) graph.addPass(std::make_unique<RaytraceShadowPass>(this));
     if (m_supportsRaytracing) graph.addPass(std::make_unique<RaytraceAOPass>(this));
     graph.addPass(std::make_unique<MotionVectorPass>(this));
@@ -2529,6 +2560,7 @@ auto Renderer_Metal::createResources() -> void {
     motionVectorPipeline = createComputePipeline("shaders/3d_motion_vector.metal");
     if (m_supportsRaytracing) stochasticPointShadowPipeline = createComputePipeline("shaders/3d_stochastic_point_shadow.metal");
     pointShadowTemporalPipeline = createComputePipeline("shaders/3d_point_shadow_temporal.metal");
+    pssmResolvePipeline = createComputePipeline("shaders/3d_pssm_resolve.metal");
 
     // PSSM depth-only pipeline
     {
@@ -3132,6 +3164,18 @@ auto Renderer_Metal::createResources() -> void {
         pointShadowRT         = NS::TransferPtr(device->newTexture(desc));
         pointShadowDenoisedRT = NS::TransferPtr(device->newTexture(desc));
         pointShadowHistoryRT  = NS::TransferPtr(device->newTexture(desc));
+        desc->release();
+    }
+
+    // Screen-space resolved PSSM shadow (camera-aligned, debug display)
+    {
+        auto* desc = MTL::TextureDescriptor::alloc()->init();
+        desc->setTextureType(MTL::TextureType2D);
+        desc->setPixelFormat(MTL::PixelFormatR8Unorm);
+        desc->setWidth(swapchain->drawableSize().width);
+        desc->setHeight(swapchain->drawableSize().height);
+        desc->setUsage(MTL::TextureUsageShaderRead | MTL::TextureUsageShaderWrite);
+        pssmShadowScreenRT = NS::TransferPtr(device->newTexture(desc));
         desc->release();
     }
 
@@ -4464,9 +4508,17 @@ auto Renderer_Metal::draw(std::shared_ptr<Scene> scene, Camera& camera) -> void 
                     ImGui::TreePop();
                 }
             }
+            // Camera-aligned screen-space PSSM shadow (intuitive, like RT shadow)
+            if (pssmShadowScreenRT) {
+                if (ImGui::TreeNode(fmt::format("PSSM Shadow (screen-space)").c_str())) {
+                    ImGui::Image((ImTextureID)(intptr_t)pssmShadowScreenRT.get(), ImVec2(128, 128));
+                    ImGui::TreePop();
+                }
+            }
+            // Raw light-space cascade depth maps (for shadow-map debugging)
             for (uint32_t i = 0; i < PSSM_CASCADE_COUNT; i++) {
                 if (pssmShadowMapViews[i]) {
-                    if (ImGui::TreeNode(fmt::format("PSSM Shadow Cascade {}", i + 1).c_str())) {
+                    if (ImGui::TreeNode(fmt::format("PSSM Cascade {} (light-space depth)", i + 1).c_str())) {
                         ImGui::Image((ImTextureID)(intptr_t)pssmShadowMapViews[i].get(), ImVec2(128, 128));
                         ImGui::TreePop();
                     }

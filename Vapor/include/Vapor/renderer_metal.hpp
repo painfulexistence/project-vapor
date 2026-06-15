@@ -54,6 +54,7 @@ class CanvasPass;
 class WorldCanvasPass;
 
 class PSSMShadowPass;
+class PSSMResolvePass;
 class MotionVectorPass;
 class StochasticPointShadowPass;
 class PointShadowTemporalPass;
@@ -128,6 +129,7 @@ class Renderer_Metal final : public Renderer {// Must be public or factory funct
     friend class CanvasPass;
     friend class WorldCanvasPass;
     friend class PSSMShadowPass;
+    friend class PSSMResolvePass;
     friend class MotionVectorPass;
     friend class StochasticPointShadowPass;
     friend class PointShadowTemporalPass;
@@ -320,6 +322,7 @@ protected:
     NS::SharedPtr<MTL::ComputePipelineState> motionVectorPipeline;
     NS::SharedPtr<MTL::ComputePipelineState> stochasticPointShadowPipeline;
     NS::SharedPtr<MTL::ComputePipelineState> pointShadowTemporalPipeline;
+    NS::SharedPtr<MTL::ComputePipelineState> pssmResolvePipeline;
     NS::SharedPtr<MTL::RenderPipelineState> pssmShadowPipeline;
     NS::SharedPtr<MTL::DepthStencilState> pssmDepthStencilState;
     NS::SharedPtr<MTL::RenderPipelineState> atmospherePipeline;
@@ -537,6 +540,8 @@ protected:
     NS::SharedPtr<MTL::Texture> pssmShadowMaps;
     // Per-slice texture2d views used only for ImGui display
     std::array<NS::SharedPtr<MTL::Texture>, 3> pssmShadowMapViews;
+    // Screen-space resolved PSSM shadow (camera-aligned, for intuitive debug display)
+    NS::SharedPtr<MTL::Texture> pssmShadowScreenRT;
     std::vector<NS::SharedPtr<MTL::Buffer>> pssmDataBuffers;
     static constexpr uint32_t PSSM_CASCADE_COUNT = 3;
     static constexpr uint32_t PSSM_SHADOW_MAP_SIZE = 4096;
