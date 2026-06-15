@@ -4446,6 +4446,24 @@ auto Renderer_Metal::draw(std::shared_ptr<Scene> scene, Camera& camera) -> void 
                 ImGui::Image((ImTextureID)(intptr_t)shadowRT.get(), ImVec2(64, 64));
                 ImGui::TreePop();
             }
+            if (pointShadowRT) {
+                if (ImGui::TreeNode(fmt::format("Point Shadow (raw)").c_str())) {
+                    ImGui::Image((ImTextureID)(intptr_t)pointShadowRT.get(), ImVec2(128, 128));
+                    ImGui::TreePop();
+                }
+            }
+            if (pointShadowDenoisedRT) {
+                if (ImGui::TreeNode(fmt::format("Point Shadow (denoised)").c_str())) {
+                    ImGui::Image((ImTextureID)(intptr_t)pointShadowDenoisedRT.get(), ImVec2(128, 128));
+                    ImGui::TreePop();
+                }
+            }
+            if (motionVectorRT) {
+                if (ImGui::TreeNode(fmt::format("Motion Vectors").c_str())) {
+                    ImGui::Image((ImTextureID)(intptr_t)motionVectorRT.get(), ImVec2(128, 128));
+                    ImGui::TreePop();
+                }
+            }
             for (uint32_t i = 0; i < PSSM_CASCADE_COUNT; i++) {
                 if (pssmShadowMapViews[i]) {
                     if (ImGui::TreeNode(fmt::format("PSSM Shadow Cascade {}", i + 1).c_str())) {
