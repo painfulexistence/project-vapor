@@ -28,6 +28,7 @@
 
 #include "Vapor/scene_inspector.hpp"
 #include "Vapor/scene_serializer.hpp"
+#include "Vapor/video_recorder.hpp"
 #include "components.hpp"
 #include "pages/hud_page.hpp"
 #include "pages/letterbox_page.hpp"
@@ -334,6 +335,8 @@ auto main(int argc, char* args[]) -> int {
                 out = { {"axis", Vapor::toJson(c->axis)}, {"speed", c->speed} };
         });
 
+    Vapor::VideoRecorder videoRecorder;
+
     Vapor::SceneInspector sceneInspector;
     sceneInspector.attachSerializer(sceneSerializer);
     sceneInspector.setGltfPath("models/Sponza/Sponza.gltf", /*optimized=*/true);
@@ -433,6 +436,14 @@ auto main(int argc, char* args[]) -> int {
     });
 
     entt::registry registry;
+    {
+        // SDL_GetBasePath() returns the exe directory with a trailing separator.
+        // Recordings go into <exe_dir>/output/.
+        char* basePath = SDL_GetBasePath();
+        std::string outputDir = basePath ? std::string(basePath) + "output" : "output";
+        SDL_free(basePath);
+        sceneInspector.attachVideoRecorder(videoRecorder, *renderer, outputDir);
+    }
     renderer->setImGuiCallback([&]() { sceneInspector.draw(registry); });
 
     auto [sceneBuilt, materialBuilt, cube1, global] =
