@@ -64,12 +64,12 @@ inline SceneResources buildScene(
 
     // Iridescent cube: same wood textures as cube1, thin-film iridescence on top
     auto iridescentMaterial = std::make_shared<Vapor::Material>(Vapor::Material{
-        .albedoMap        = material->albedoMap,
-        .normalMap        = material->normalMap,
-        .roughnessMap     = material->roughnessMap,
         .baseColorFactor  = glm::vec4(1.0f, 1.0f, 1.0f, 1.0f),
         .metallicFactor   = 0.0f,
         .roughnessFactor  = 1.0f,
+        .albedoMap        = material->albedoMap,
+        .normalMap        = material->normalMap,
+        .roughnessMap     = material->roughnessMap,
         .clearcoat        = 0.9f,   // iridescence strength (reused field)
         .clearcoatGloss   = 0.45f,  // film thickness factor → ~480 nm (blue-green dominant)
         .materialType     = Vapor::MaterialType::Iridescent,
