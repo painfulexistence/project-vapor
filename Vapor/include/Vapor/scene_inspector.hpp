@@ -146,13 +146,15 @@ private:
             drawSaveSection(registry);
         }
 
+        ImGui::End();
+
         // --- Recording section (only if recorder attached) ---
         if (m_videoRecorder) {
+            ImGui::Begin("Engine");
             ImGui::Separator();
             drawRecordingSection();
+            ImGui::End();
         }
-
-        ImGui::End();
     }
 
     // -------------------------------------------------------------------------

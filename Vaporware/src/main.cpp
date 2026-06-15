@@ -22,6 +22,7 @@
 #include "Vapor/systems.hpp"
 #include "Vapor/rng.hpp"
 #include "Vapor/scene.hpp"
+#include "Vapor/video_recorder.hpp"
 #include <RmlUi/Core/ElementDocument.h>
 #include <entt/entt.hpp>
 
@@ -436,15 +437,18 @@ auto main(int argc, char* args[]) -> int {
     });
 
     entt::registry registry;
+
     {
         // SDL_GetBasePath() returns the exe directory with a trailing separator.
         // Recordings go into <exe_dir>/output/.
-        char* basePath = SDL_GetBasePath();
+        const char* basePath = SDL_GetBasePath();
         std::string outputDir = basePath ? std::string(basePath) + "output" : "output";
-        SDL_free(basePath);
         sceneInspector.attachVideoRecorder(videoRecorder, *renderer, outputDir);
     }
-    renderer->setImGuiCallback([&]() { sceneInspector.draw(registry); });
+    
+    renderer->setImGuiCallback([&]() { 
+        sceneInspector.draw(registry); 
+    });
 
     auto [sceneBuilt, materialBuilt, cube1, global] =
         buildScene(registry, *physics, scene, material, windowWidth, windowHeight, rng);

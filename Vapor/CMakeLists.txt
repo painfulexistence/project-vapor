@@ -106,6 +106,7 @@ target_include_directories(Vapor PRIVATE
 if(FFMPEG_FOUND)
     target_compile_definitions(Vapor PUBLIC VAPOR_HAS_FFMPEG)
     target_include_directories(Vapor PRIVATE ${FFMPEG_INCLUDE_DIRS})
+    target_link_directories(Vapor PUBLIC ${FFMPEG_LIBRARY_DIRS})
     target_link_libraries(Vapor PRIVATE ${FFMPEG_LIBRARIES})
 endif()
 
