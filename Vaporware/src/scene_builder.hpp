@@ -62,11 +62,14 @@ inline SceneResources buildScene(
     }
     res.cube1 = cube1;
 
-    // Iridescent cube: electroplated PBR material with thin-film interference
+    // Iridescent cube: same wood textures as cube1, thin-film iridescence on top
     auto iridescentMaterial = std::make_shared<Vapor::Material>(Vapor::Material{
-        .baseColorFactor  = glm::vec4(0.72f, 0.72f, 0.78f, 1.0f), // silvery-white base
-        .metallicFactor   = 1.0f,
-        .roughnessFactor  = 0.25f,
+        .albedoMap        = material->albedoMap,
+        .normalMap        = material->normalMap,
+        .roughnessMap     = material->roughnessMap,
+        .baseColorFactor  = glm::vec4(1.0f, 1.0f, 1.0f, 1.0f),
+        .metallicFactor   = 0.0f,
+        .roughnessFactor  = 1.0f,
         .clearcoat        = 0.9f,   // iridescence strength (reused field)
         .clearcoatGloss   = 0.45f,  // film thickness factor → ~480 nm (blue-green dominant)
         .materialType     = Vapor::MaterialType::Iridescent,
