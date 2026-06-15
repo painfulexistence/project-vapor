@@ -39,7 +39,7 @@ kernel void computeMain(
     float variance = max(sq / 9.0 - mean * mean, 0.0);
     float stddev = sqrt(variance);
 
-    constexpr sampler s(coord::normalized, address::clamp_to_edge, filter::bilinear);
+    constexpr sampler s(coord::normalized, address::clamp_to_edge, filter::linear);
     float history = historyShadow.sample(s, prevUV).r;
 
     // Clamp history into current neighbourhood bbox

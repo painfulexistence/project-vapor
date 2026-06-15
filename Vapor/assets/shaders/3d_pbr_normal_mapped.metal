@@ -81,7 +81,7 @@ float3 CookTorranceBRDF(float3 norm, float3 tangent, float3 bitangent, float3 li
     float nv = max(dot(norm, viewDir), 0.0);
     float nl = max(dot(norm, lightDir), 0.0);
     float nh = max(dot(norm, halfway), 0.0);
-    float vh = max(dot(viewDir, halfway), 0.0);
+    // float vh = max(dot(viewDir, halfway), 0.0);
     float lh = max(dot(lightDir, halfway), 0.0);
     float lum = luminance(surf.color);
     float3 tint = lum > 0.0 ? surf.color / lum : float3(1);
@@ -232,7 +232,7 @@ fragment float4 fragmentMain(
     texturecube<float, access::sample> irradianceMap [[texture(8)]],
     texturecube<float, access::sample> prefilterMap [[texture(9)]],
     texture2d<float, access::sample> brdfLUT [[texture(10)]],
-    depth2d_array<float, access::compare> pssmShadowMaps [[texture(11)]],
+    depth2d_array<float, access::sample> pssmShadowMaps [[texture(11)]],
     texture2d<float, access::sample> texPointShadow [[texture(12)]],
     const device DirLight* directionalLights [[buffer(0)]],
     const device PointLight* pointLights [[buffer(1)]],
