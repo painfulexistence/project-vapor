@@ -474,7 +474,7 @@ public:
 
         auto drawableSize = r.swapchain->drawableSize();
         glm::vec2 screenSize = glm::vec2(drawableSize.width, drawableSize.height);
-        glm::vec3 gridDims = glm::vec3(r.clusterGridSizeX, r.clusterGridSizeY, r.clusterGridSizeZ);
+        glm::uvec3 gridDims = glm::uvec3(r.clusterGridSizeX, r.clusterGridSizeY, r.clusterGridSizeZ);
         uint32_t fi = r.frameNumber;
 
         auto encoder = r.currentCommandBuffer->computeCommandEncoder();
@@ -486,7 +486,7 @@ public:
         encoder->setBuffer(r.pointLightBuffer.get(), 0, 1);
         encoder->setBuffer(r.clusterBuffers[r.currentFrameInFlight].get(), 0, 2);
         encoder->setBytes(&screenSize, sizeof(glm::vec2), 3);
-        encoder->setBytes(&gridDims, sizeof(glm::vec3), 4);
+        encoder->setBytes(&gridDims, sizeof(glm::uvec3), 4);
         encoder->setBytes(&fi, sizeof(uint32_t), 5);
         encoder->setAccelerationStructure(r.TLASBuffers[r.currentFrameInFlight].get(), 6);
         encoder->dispatchThreadgroups(

@@ -17,7 +17,7 @@ kernel void computeMain(
     const device PointLight*      pointLights     [[buffer(1)]],
     const device Cluster*         clusters        [[buffer(2)]],
     constant float2&              screenSize      [[buffer(3)]],
-    constant float3&              gridDims        [[buffer(4)]],
+    constant uint3&               gridDims        [[buffer(4)]],
     constant uint&                frameIndex      [[buffer(5)]],
     instance_acceleration_structure TLAS          [[buffer(6)]],
     uint2 tid [[thread_position_in_grid]]
@@ -41,20 +41,13 @@ kernel void computeMain(
     float3 worldPos = (camera.invView * viewPos).xyz;
     float3 worldNormal = normalize(normalTexture.read(tid).xyz);
 
-    // Find tile cluster
-    uint gridX = uint(gridDims.x);
-    uint gridY = uint(gridDims.y);
-    uint gridZ = uint(gridDims.z);
+    // Find tile cluster — match PBR shader convention exactly (2D tile, Y flipped)
+    uint gridX = gridDims.x;
+    uint gridY = gridDims.y;
     uint tileX = uint(uv.x * float(gridX));
-    uint tileY = uint(uv.y * float(gridY));
+    uint tileY = uint((1.0 - uv.y) * float(gridY));
 
-    // View-space z for slice
-    float viewZ = abs(viewPos.z);
-    float logFar  = log(camera.far);
-    float logNear = log(max(camera.near, 0.01));
-    uint sliceZ = uint(clamp((log(viewZ) - logNear) / (logFar - logNear) * float(gridZ), 0.0, float(gridZ - 1)));
-
-    uint clusterIdx = tileX + tileY * gridX + sliceZ * gridX * gridY;
+    uint clusterIdx = tileX + tileY * gridX;
     const device Cluster& cluster = clusters[clusterIdx];
     uint lightCount = cluster.lightCount;
 

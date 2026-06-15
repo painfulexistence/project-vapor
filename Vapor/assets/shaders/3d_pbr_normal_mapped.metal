@@ -232,7 +232,7 @@ fragment float4 fragmentMain(
     texturecube<float, access::sample> irradianceMap [[texture(8)]],
     texturecube<float, access::sample> prefilterMap [[texture(9)]],
     texture2d<float, access::sample> brdfLUT [[texture(10)]],
-    depth2d_array<float, access::sample> pssmShadowMaps [[texture(11)]],
+    depth2d_array<float, access::compare> pssmShadowMaps [[texture(11)]],
     texture2d<float, access::sample> texPointShadow [[texture(12)]],
     const device DirLight* directionalLights [[buffer(0)]],
     const device PointLight* pointLights [[buffer(1)]],
