@@ -35,7 +35,13 @@ public:
     ~VideoRecorder();
 
     // Start recording. Returns false if already recording or FFmpeg unavailable.
-    bool startRecording(Renderer* renderer, const Config& config = {});
+    // (Config is a nested type with default member initializers, so we use an
+    // overload rather than a `= {}` default argument, which is ill-formed inside
+    // the enclosing class definition.)
+    bool startRecording(Renderer* renderer, const Config& config);
+    bool startRecording(Renderer* renderer) {
+        return startRecording(renderer, Config{});
+    }
 
     // Stop recording and flush remaining frames to disk.
     void stopRecording();
