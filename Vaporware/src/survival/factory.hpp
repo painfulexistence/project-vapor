@@ -118,7 +118,7 @@ namespace Survival::Factory {
         auto& pl = reg.emplace<PointLightComponent>(light);
         pl.color     = glm::vec3(1.0f, 0.65f, 0.30f);
         pl.intensity = 8.0f;
-        pl.radius    = 0.8f;
+        pl.radius    = 8.0f;
     }
 
     inline void buildTree(entt::registry& reg, std::shared_ptr<Scene> scene, Palette& pal, const glm::vec3& pos) {
@@ -168,7 +168,7 @@ namespace Survival::Factory {
         auto& pl = reg.emplace<PointLightComponent>(e);
         pl.color     = glm::vec3(1.0f, 0.7f, 0.4f);
         pl.intensity = 6.0f;
-        pl.radius    = 0.7f;
+        pl.radius    = 7.0f;
 
         return e;
     }

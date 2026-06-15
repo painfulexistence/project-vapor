@@ -226,7 +226,7 @@ namespace Survival {
                 cam.viewMatrix   = glm::lookAt(eye, iso.focus, glm::vec3(0, 1, 0));
                 float h = iso.orthoSize;
                 float w = h * aspect;
-                cam.projectionMatrix = glm::ortho(-w, w, -h, h, 0.1f, iso.distance * 3.0f);
+                cam.projectionMatrix = glm::orthoZO(-w, w, -h, h, 0.1f, iso.distance * 3.0f);
                 cam.aspect = aspect;
             }
         }

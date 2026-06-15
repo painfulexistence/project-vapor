@@ -209,6 +209,9 @@ int main(int argc, char* args[]) {
 
     Survival::GameWorld world = Survival::buildWorld(registry, scene, *physics, windowWidth, windowHeight, rng);
 
+    // Gather lights into the scene so the renderer knows how many to allocate buffers for.
+    Survival::LightGatherSystem::update(registry, scene.get());
+
     // Stage everything once. After staging assigns material/instance IDs, clear
     // stagedMeshes so the ECS draw path is the single source of truth (otherwise
     // each mesh would be drawn twice). The geometry stays in the scene buffers.

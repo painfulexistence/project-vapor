@@ -3782,20 +3782,26 @@ auto Renderer_Metal::stage(std::shared_ptr<Scene> scene) -> void {
     ZoneScoped;
 
     // Lights
+    size_t directionalLightsSize = std::max((size_t)1, scene->directionalLights.size());
     directionalLightBuffer = NS::TransferPtr(
-        device->newBuffer(scene->directionalLights.size() * sizeof(DirectionalLight), MTL::ResourceStorageModeManaged)
+        device->newBuffer(directionalLightsSize * sizeof(DirectionalLight), MTL::ResourceStorageModeManaged)
     );
-    memcpy(
-        directionalLightBuffer->contents(),
-        scene->directionalLights.data(),
-        scene->directionalLights.size() * sizeof(DirectionalLight)
-    );
+    if (!scene->directionalLights.empty()) {
+        memcpy(
+            directionalLightBuffer->contents(),
+            scene->directionalLights.data(),
+            scene->directionalLights.size() * sizeof(DirectionalLight)
+        );
+    }
     directionalLightBuffer->didModifyRange(NS::Range::Make(0, directionalLightBuffer->length()));
 
+    size_t pointLightsSize = std::max((size_t)1, scene->pointLights.size());
     pointLightBuffer = NS::TransferPtr(
-        device->newBuffer(scene->pointLights.size() * sizeof(PointLight), MTL::ResourceStorageModeManaged)
+        device->newBuffer(pointLightsSize * sizeof(PointLight), MTL::ResourceStorageModeManaged)
     );
-    memcpy(pointLightBuffer->contents(), scene->pointLights.data(), scene->pointLights.size() * sizeof(PointLight));
+    if (!scene->pointLights.empty()) {
+        memcpy(pointLightBuffer->contents(), scene->pointLights.data(), scene->pointLights.size() * sizeof(PointLight));
+    }
     pointLightBuffer->didModifyRange(NS::Range::Make(0, pointLightBuffer->length()));
 
     // Textures
@@ -3811,8 +3817,9 @@ auto Renderer_Metal::stage(std::shared_ptr<Scene> scene) -> void {
         // pipelines[mat->pipeline] = createPipeline();
         materialIDs[mat] = nextMaterialID++;
     }
+    size_t materialsSize = std::max((size_t)1, scene->materials.size());
     materialDataBuffer = NS::TransferPtr(
-        device->newBuffer(scene->materials.size() * sizeof(MaterialData), MTL::ResourceStorageModeManaged)
+        device->newBuffer(materialsSize * sizeof(MaterialData), MTL::ResourceStorageModeManaged)
     );
 
     // Buffers
