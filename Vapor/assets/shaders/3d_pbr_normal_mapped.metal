@@ -233,6 +233,7 @@ fragment float4 fragmentMain(
     texturecube<float, access::sample> prefilterMap [[texture(9)]],
     texture2d<float, access::sample> brdfLUT [[texture(10)]],
     depth2d_array<float, access::compare> pssmShadowMaps [[texture(11)]],
+    texture2d<float, access::sample> texPointShadow [[texture(12)]],
     const device DirLight* directionalLights [[buffer(0)]],
     const device PointLight* pointLights [[buffer(1)]],
     const device Cluster* clusters [[buffer(2)]],
@@ -403,9 +404,10 @@ fragment float4 fragmentMain(
     uint tileIndex = tileX + tileY * gridSize.x;
     Cluster tile = clusters[tileIndex];
     uint lightCount = tile.lightCount;
+    float pointShadow = texPointShadow.sample(s, screenUV).r;
     for (uint i = 0; i < lightCount; i++) {
         uint lightIndex = tile.lightIndices[i];
-        result += CalculatePointLight(pointLights[lightIndex], norm, T, B, viewDir, surf, in.worldPosition.xyz);
+        result += CalculatePointLight(pointLights[lightIndex], norm, T, B, viewDir, surf, in.worldPosition.xyz) * pointShadow;
     }
 
     result += float3(0.2) * surf.ao * surf.color;

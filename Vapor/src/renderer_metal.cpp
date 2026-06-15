@@ -436,6 +436,96 @@ public:
     }
 };
 
+// Motion vector pass: depth-reprojection screen-space motion vectors
+class MotionVectorPass : public RenderPass {
+public:
+    explicit MotionVectorPass(Renderer_Metal* renderer) : RenderPass(renderer) {}
+    auto getName() const -> const char* override { return "MotionVectorPass"; }
+
+    void execute() override {
+        auto& r = *renderer;
+        auto drawableSize = r.swapchain->drawableSize();
+        glm::vec2 screenSize = glm::vec2(drawableSize.width, drawableSize.height);
+
+        auto encoder = r.currentCommandBuffer->computeCommandEncoder();
+        encoder->setComputePipelineState(r.motionVectorPipeline.get());
+        encoder->setTexture(r.depthStencilRT.get(), 0);
+        encoder->setTexture(r.motionVectorRT.get(), 1);
+        encoder->setBuffer(r.cameraDataBuffers[r.currentFrameInFlight].get(), 0, 0);
+        encoder->setBuffer(r.prevVPBuffers[r.currentFrameInFlight].get(), 0, 1);
+        encoder->setBytes(&screenSize, sizeof(glm::vec2), 2);
+        encoder->dispatchThreadgroups(
+            MTL::Size((uint32_t(screenSize.x) + 7) / 8, (uint32_t(screenSize.y) + 7) / 8, 1),
+            MTL::Size(8, 8, 1)
+        );
+        encoder->endEncoding();
+    }
+};
+
+// Stochastic point shadow pass: MegaLights-style 2-ray shadow for clustered point lights
+class StochasticPointShadowPass : public RenderPass {
+public:
+    explicit StochasticPointShadowPass(Renderer_Metal* renderer) : RenderPass(renderer) {}
+    auto getName() const -> const char* override { return "StochasticPointShadowPass"; }
+
+    void execute() override {
+        auto& r = *renderer;
+        if (!r.m_supportsRaytracing || !r.TLASBuffers[r.currentFrameInFlight]) return;
+
+        auto drawableSize = r.swapchain->drawableSize();
+        glm::vec2 screenSize = glm::vec2(drawableSize.width, drawableSize.height);
+        glm::vec3 gridDims = glm::vec3(r.clusterGridSizeX, r.clusterGridSizeY, r.clusterGridSizeZ);
+        uint32_t fi = r.frameNumber;
+
+        auto encoder = r.currentCommandBuffer->computeCommandEncoder();
+        encoder->setComputePipelineState(r.stochasticPointShadowPipeline.get());
+        encoder->setTexture(r.depthStencilRT.get(), 0);
+        encoder->setTexture(r.normalRT.get(), 1);
+        encoder->setTexture(r.pointShadowRT.get(), 2);
+        encoder->setBuffer(r.cameraDataBuffers[r.currentFrameInFlight].get(), 0, 0);
+        encoder->setBuffer(r.pointLightBuffer.get(), 0, 1);
+        encoder->setBuffer(r.clusterBuffers[r.currentFrameInFlight].get(), 0, 2);
+        encoder->setBytes(&screenSize, sizeof(glm::vec2), 3);
+        encoder->setBytes(&gridDims, sizeof(glm::vec3), 4);
+        encoder->setBytes(&fi, sizeof(uint32_t), 5);
+        encoder->setAccelerationStructure(r.TLASBuffers[r.currentFrameInFlight].get(), 6);
+        encoder->dispatchThreadgroups(
+            MTL::Size((uint32_t(screenSize.x) + 7) / 8, (uint32_t(screenSize.y) + 7) / 8, 1),
+            MTL::Size(8, 8, 1)
+        );
+        encoder->endEncoding();
+    }
+};
+
+// Point shadow temporal pass: motion-vector reprojection + variance clamping denoiser
+class PointShadowTemporalPass : public RenderPass {
+public:
+    explicit PointShadowTemporalPass(Renderer_Metal* renderer) : RenderPass(renderer) {}
+    auto getName() const -> const char* override { return "PointShadowTemporalPass"; }
+
+    void execute() override {
+        auto& r = *renderer;
+        auto drawableSize = r.swapchain->drawableSize();
+
+        auto encoder = r.currentCommandBuffer->computeCommandEncoder();
+        encoder->setComputePipelineState(r.pointShadowTemporalPipeline.get());
+        encoder->setTexture(r.pointShadowRT.get(), 0);
+        encoder->setTexture(r.pointShadowHistoryRT.get(), 1);
+        encoder->setTexture(r.motionVectorRT.get(), 2);
+        encoder->setTexture(r.pointShadowDenoisedRT.get(), 3);
+        encoder->dispatchThreadgroups(
+            MTL::Size((uint32_t(drawableSize.width) + 7) / 8, (uint32_t(drawableSize.height) + 7) / 8, 1),
+            MTL::Size(8, 8, 1)
+        );
+        encoder->endEncoding();
+
+        // Copy denoised result into history for next frame via blit
+        auto blit = NS::TransferPtr(r.currentCommandBuffer->blitCommandEncoder());
+        blit->copyFromTexture(r.pointShadowDenoisedRT.get(), r.pointShadowHistoryRT.get());
+        blit->endEncoding();
+    }
+};
+
 // Raytrace AO pass: Computes ray-traced ambient occlusion
 class RaytraceAOPass : public RenderPass {
 public:
@@ -787,6 +877,7 @@ public:
 
             // PSSM shadow maps (data buffer bound once before this loop, at buffer 7)
             encoder->setFragmentTexture(r.pssmShadowMaps.get(), 11);
+            encoder->setFragmentTexture(r.pointShadowDenoisedRT.get(), 12);
 
             for (const auto& draw : draws) {
                 if (!r.currentCamera->isVisible(r.instances[draw.instanceIndex].boundingSphere)) {
@@ -2269,6 +2360,9 @@ auto Renderer_Metal::init(SDL_Window* window) -> void {
     graph.addPass(std::make_unique<PSSMShadowPass>(this));
     if (m_supportsRaytracing) graph.addPass(std::make_unique<RaytraceShadowPass>(this));
     if (m_supportsRaytracing) graph.addPass(std::make_unique<RaytraceAOPass>(this));
+    graph.addPass(std::make_unique<MotionVectorPass>(this));
+    if (m_supportsRaytracing) graph.addPass(std::make_unique<StochasticPointShadowPass>(this));
+    graph.addPass(std::make_unique<PointShadowTemporalPass>(this));
     graph.addPass(std::make_unique<MainRenderPass>(this));
     graph.addPass(std::make_unique<SkyAtmospherePass>(this));
     // graph.addPass(std::make_unique<WaterPass>(this));
@@ -2432,6 +2526,9 @@ auto Renderer_Metal::createResources() -> void {
     normalResolvePipeline = createComputePipeline("shaders/3d_normal_resolve.metal");
     if (m_supportsRaytracing) raytraceShadowPipeline = createComputePipeline("shaders/3d_raytrace_shadow.metal");
     if (m_supportsRaytracing) raytraceAOPipeline = createComputePipeline("shaders/3d_ssao.metal");
+    motionVectorPipeline = createComputePipeline("shaders/3d_motion_vector.metal");
+    if (m_supportsRaytracing) stochasticPointShadowPipeline = createComputePipeline("shaders/3d_stochastic_point_shadow.metal");
+    pointShadowTemporalPipeline = createComputePipeline("shaders/3d_point_shadow_temporal.metal");
 
     // PSSM depth-only pipeline
     {
@@ -3010,6 +3107,38 @@ auto Renderer_Metal::createResources() -> void {
         for (auto& buf : pssmDataBuffers) {
             buf = NS::TransferPtr(device->newBuffer(pssmDataSize, MTL::ResourceStorageModeShared));
         }
+    }
+
+    // Motion vector RT: RG16F, screen-space (currentUV - prevUV)
+    {
+        auto* desc = MTL::TextureDescriptor::alloc()->init();
+        desc->setTextureType(MTL::TextureType2D);
+        desc->setPixelFormat(MTL::PixelFormatRG16Float);
+        desc->setWidth(swapchain->drawableSize().width);
+        desc->setHeight(swapchain->drawableSize().height);
+        desc->setUsage(MTL::TextureUsageShaderRead | MTL::TextureUsageShaderWrite);
+        motionVectorRT = NS::TransferPtr(device->newTexture(desc));
+        desc->release();
+    }
+
+    // Stochastic point shadow RTs: R16F (raw + denoised + history)
+    {
+        auto* desc = MTL::TextureDescriptor::alloc()->init();
+        desc->setTextureType(MTL::TextureType2D);
+        desc->setPixelFormat(MTL::PixelFormatR16Float);
+        desc->setWidth(swapchain->drawableSize().width);
+        desc->setHeight(swapchain->drawableSize().height);
+        desc->setUsage(MTL::TextureUsageShaderRead | MTL::TextureUsageShaderWrite);
+        pointShadowRT         = NS::TransferPtr(device->newTexture(desc));
+        pointShadowDenoisedRT = NS::TransferPtr(device->newTexture(desc));
+        pointShadowHistoryRT  = NS::TransferPtr(device->newTexture(desc));
+        desc->release();
+    }
+
+    // Previous view-projection buffers (triple-buffered mat4)
+    prevVPBuffers.resize(MAX_FRAMES_IN_FLIGHT);
+    for (auto& buf : prevVPBuffers) {
+        buf = NS::TransferPtr(device->newBuffer(sizeof(glm::mat4), MTL::ResourceStorageModeShared));
     }
 
     MTL::TextureDescriptor* aoTextureDesc = MTL::TextureDescriptor::alloc()->init();
@@ -4161,6 +4290,12 @@ auto Renderer_Metal::draw(std::shared_ptr<Scene> scene, Camera& camera) -> void 
         NS::Range::Make(0, cameraDataBuffers[currentFrameInFlight]->length())
     );
 
+    // Upload previous-frame view-projection for motion vectors / temporal passes
+    glm::mat4 currentVP = proj * view;
+    memcpy(prevVPBuffers[currentFrameInFlight]->contents(), &prevViewProj, sizeof(glm::mat4));
+    prevVPBuffers[currentFrameInFlight]->didModifyRange(NS::Range::Make(0, sizeof(glm::mat4)));
+    prevViewProj = currentVP; // save for next frame
+
     auto* dirLights = reinterpret_cast<DirectionalLight*>(directionalLightBuffer->contents());
     for (size_t i = 0; i < scene->directionalLights.size(); ++i) {
         dirLights[i].direction = scene->directionalLights[i].direction;
@@ -5256,6 +5391,7 @@ void Renderer_Metal::renderToTexture(
 
         // PSSM shadow maps (data buffer bound once before this loop, at buffer 7)
         encoder->setFragmentTexture(pssmShadowMaps.get(), 11);
+        encoder->setFragmentTexture(pointShadowDenoisedRT.get(), 12);
 
         for (const auto& draw : meshes) {
             // Frustum culling with render texture camera
