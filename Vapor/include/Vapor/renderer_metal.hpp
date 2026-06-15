@@ -53,6 +53,12 @@ class DebugDrawPass;
 class CanvasPass;
 class WorldCanvasPass;
 
+class PSSMShadowPass;
+class PSSMResolvePass;
+class MotionVectorPass;
+class StochasticPointShadowPass;
+class PointShadowTemporalPass;
+
 class RenderPass {
 public:
     explicit RenderPass(Renderer_Metal* renderer) : renderer(renderer) {
@@ -122,6 +128,11 @@ class Renderer_Metal final : public Renderer {// Must be public or factory funct
     friend class DebugDrawPass;
     friend class CanvasPass;
     friend class WorldCanvasPass;
+    friend class PSSMShadowPass;
+    friend class PSSMResolvePass;
+    friend class MotionVectorPass;
+    friend class StochasticPointShadowPass;
+    friend class PointShadowTemporalPass;
 
 public:
     Renderer_Metal();
@@ -308,6 +319,12 @@ protected:
     NS::SharedPtr<MTL::ComputePipelineState> normalResolvePipeline;
     NS::SharedPtr<MTL::ComputePipelineState> raytraceShadowPipeline;
     NS::SharedPtr<MTL::ComputePipelineState> raytraceAOPipeline;
+    NS::SharedPtr<MTL::ComputePipelineState> motionVectorPipeline;
+    NS::SharedPtr<MTL::ComputePipelineState> stochasticPointShadowPipeline;
+    NS::SharedPtr<MTL::ComputePipelineState> pointShadowTemporalPipeline;
+    NS::SharedPtr<MTL::ComputePipelineState> pssmResolvePipeline;
+    NS::SharedPtr<MTL::RenderPipelineState> pssmShadowPipeline;
+    NS::SharedPtr<MTL::DepthStencilState> pssmDepthStencilState;
     NS::SharedPtr<MTL::RenderPipelineState> atmospherePipeline;
     NS::SharedPtr<MTL::RenderPipelineState> skyCapturePipeline;
     NS::SharedPtr<MTL::RenderPipelineState> irradianceConvolutionPipeline;
@@ -509,7 +526,26 @@ protected:
     NS::SharedPtr<MTL::Texture> normalRT_MS;
     NS::SharedPtr<MTL::Texture> normalRT;
     NS::SharedPtr<MTL::Texture> shadowRT;
+    NS::SharedPtr<MTL::Texture> motionVectorRT;      // RG16F, screen-space motion vectors
+    NS::SharedPtr<MTL::Texture> pointShadowRT;       // R16F, raw stochastic point shadow
+    NS::SharedPtr<MTL::Texture> pointShadowDenoisedRT; // R16F, temporally denoised
+    NS::SharedPtr<MTL::Texture> pointShadowHistoryRT;  // R16F, history for temporal
     NS::SharedPtr<MTL::Texture> aoRT;
+
+    // Previous-frame view-projection for motion vectors / temporal passes
+    glm::mat4 prevViewProj = glm::mat4(1.0f);
+    std::vector<NS::SharedPtr<MTL::Buffer>> prevVPBuffers; // triple-buffered
+
+    // PSSM shadow maps: 2D texture array, 3 cascades × 4096×4096 Depth32
+    NS::SharedPtr<MTL::Texture> pssmShadowMaps;
+    // Per-slice texture2d views used only for ImGui display
+    std::array<NS::SharedPtr<MTL::Texture>, 3> pssmShadowMapViews;
+    // Screen-space resolved PSSM shadow (camera-aligned, for intuitive debug display)
+    NS::SharedPtr<MTL::Texture> pssmShadowScreenRT;
+    std::vector<NS::SharedPtr<MTL::Buffer>> pssmDataBuffers;
+    static constexpr uint32_t PSSM_CASCADE_COUNT = 3;
+    static constexpr uint32_t PSSM_SHADOW_MAP_SIZE = 4096;
+    float pssmRTMaxDist = 50.0f; // view-space depth where RT shadow ends and PSSM begins
 
     // Bloom render targets
     NS::SharedPtr<MTL::Texture> bloomBrightnessRT;// Half-res brightness extraction
