@@ -14,6 +14,8 @@ namespace Vapor {
 
     enum class AlphaMode { OPAQUE, MASK, BLEND };
 
+    enum class MaterialType { PBR, Iridescent };
+
     struct Image {
         std::string uri;
         Uint32 width;
@@ -21,6 +23,14 @@ namespace Vapor {
         Uint32 channelCount;
         std::vector<Uint8> byteArray;
         TextureHandle texture;
+    };
+
+    // Floating-point image for HDR equirectangular environment maps (.hdr / .exr)
+    struct HDRImage {
+        std::string uri;
+        Uint32 width;
+        Uint32 height;
+        std::vector<float> floatArray; // 4 floats per pixel (RGBA, linear)
     };
 
     struct Material {
@@ -53,6 +63,8 @@ namespace Vapor {
         // Prototype UV Mode: 0 = Off, 1 = World Space, 2 = Object Space
         int prototypeUVMode = 0;
         float uvScale = 1.0f;
+        MaterialType materialType = MaterialType::PBR;
+        bool useIBL = false;
         PipelineHandle pipeline;
     };
 

@@ -64,6 +64,24 @@ auto AssetManager::loadImage(const std::string& filename) -> std::shared_ptr<Ima
     }
 }
 
+auto AssetManager::loadHDRI(const std::string& filename) -> std::shared_ptr<Vapor::HDRImage> {
+    std::string fullPath = FileSystem::instance().resolvePathOrThrow(filename);
+    int width, height, numChannels;
+    // stbi_loadf decodes RGBE/HDR to linear float RGB(A)
+    float* data = stbi_loadf(fullPath.c_str(), &width, &height, &numChannels, 4);
+    if (!data) {
+        throw std::runtime_error(fmt::format("Failed to load HDRI at {}: {}\n", filename, stbi_failure_reason()));
+    }
+    auto img = std::make_shared<Vapor::HDRImage>(Vapor::HDRImage{
+        .uri       = filename,
+        .width     = static_cast<Uint32>(width),
+        .height    = static_cast<Uint32>(height),
+        .floatArray = std::vector<float>(data, data + width * height * 4),
+    });
+    stbi_image_free(data);
+    return img;
+}
+
 // TODO: use Scene instead of Mesh
 auto AssetManager::loadOBJ(const std::string& filename, const std::string& mtl_basedir) -> std::shared_ptr<Mesh> {
     std::vector<VertexData> vertices;

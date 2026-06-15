@@ -336,6 +336,50 @@ public:
     }
 };
 
+// Equirect-to-cubemap pass: Converts a loaded equirectangular HDRI texture to environmentCubemap
+class EquirectToCubemapPass : public RenderPass {
+public:
+    explicit EquirectToCubemapPass(Renderer_Metal* renderer) : RenderPass(renderer) {}
+    auto getName() const -> const char* override { return "EquirectToCubemapPass"; }
+
+    void execute() override {
+        auto& r = *renderer;
+
+        if (r.iblSource != Renderer_Metal::IBLSource::HDRI) return;
+        if (!r.iblNeedsUpdate) return;
+        if (!r.equirectHDRITexture) return;
+
+        for (uint32_t face = 0; face < 6; ++face) {
+            auto* captureData = reinterpret_cast<IBLCaptureData*>(r.iblCaptureDataBuffer->contents());
+            captureData->faceIndex = face;
+            captureData->roughness = 0.0f;
+            r.iblCaptureDataBuffer->didModifyRange(NS::Range::Make(0, r.iblCaptureDataBuffer->length()));
+
+            auto passDesc = NS::TransferPtr(MTL::RenderPassDescriptor::renderPassDescriptor());
+            auto colorAttachment = passDesc->colorAttachments()->object(0);
+            colorAttachment->setLoadAction(MTL::LoadActionClear);
+            colorAttachment->setStoreAction(MTL::StoreActionStore);
+            colorAttachment->setClearColor(MTL::ClearColor(0.0, 0.0, 0.0, 1.0));
+            colorAttachment->setTexture(r.environmentCubemap.get());
+            colorAttachment->setSlice(face);
+            colorAttachment->setLevel(0);
+
+            auto encoder = r.currentCommandBuffer->renderCommandEncoder(passDesc.get());
+            encoder->setRenderPipelineState(r.equirectToCubemapPipeline.get());
+            encoder->setCullMode(MTL::CullModeNone);
+            encoder->setVertexBuffer(r.iblCaptureDataBuffer.get(), 0, 0);
+            encoder->setFragmentTexture(r.equirectHDRITexture.get(), 0);
+            encoder->drawPrimitives(MTL::PrimitiveType::PrimitiveTypeTriangle, 0, 3, 1);
+            encoder->endEncoding();
+        }
+
+        // Generate mipmaps for prefiltering
+        auto blitEncoder = r.currentCommandBuffer->blitCommandEncoder();
+        blitEncoder->generateMipmaps(r.environmentCubemap.get());
+        blitEncoder->endEncoding();
+    }
+};
+
 // Sky capture pass: Captures atmosphere to environment cubemap for IBL
 class SkyCapturePass : public RenderPass {
 public:
@@ -350,6 +394,7 @@ public:
         auto& r = *renderer;
 
         if (!r.iblNeedsUpdate) return;
+        if (r.iblSource != Renderer_Metal::IBLSource::Sky) return;
 
         // Cubemap face view matrices (looking outward from origin)
         const glm::mat4 captureViews[6] = {
@@ -577,6 +622,11 @@ public:
         encoder->setFragmentBytes(&time, sizeof(float), 6);
 
         for (const auto& [material, draws] : r.instanceBatches) {
+            if (material->materialType == Vapor::MaterialType::Iridescent) {
+                encoder->setRenderPipelineState(r.iridescentPipeline.get());
+            } else {
+                encoder->setRenderPipelineState(r.drawPipeline.get());
+            }
             encoder->setFragmentTexture(
                 r.getTexture(material->albedoMap ? material->albedoMap->texture : r.defaultAlbedoTexture).get(), 0
             );
@@ -2070,6 +2120,7 @@ auto Renderer_Metal::init(SDL_Window* window) -> void {
 
     // Initialize render graph with all passes
     // IBL passes (run conditionally when iblNeedsUpdate is true)
+    graph.addPass(std::make_unique<EquirectToCubemapPass>(this));
     graph.addPass(std::make_unique<SkyCapturePass>(this));
     graph.addPass(std::make_unique<IrradianceConvolutionPass>(this));
     graph.addPass(std::make_unique<PrefilterEnvMapPass>(this));
@@ -2237,6 +2288,8 @@ void Renderer_Metal::renderUI() {
 auto Renderer_Metal::createResources() -> void {
     // Create pipelines
     drawPipeline = createPipeline("shaders/3d_pbr_normal_mapped.metal", true, false, MSAA_SAMPLE_COUNT);
+    iridescentPipeline = createPipeline("shaders/3d_pbr_iridescent.metal", true, false, MSAA_SAMPLE_COUNT);
+    equirectToCubemapPipeline = createPipeline("shaders/3d_equirect_to_cubemap.metal", false, true, 1);
     prePassPipeline = createPipeline("shaders/3d_depth_only.metal", true, false, MSAA_SAMPLE_COUNT);
     postProcessPipeline = createPipeline("shaders/3d_post_process.metal", false, true, 1);
     buildClustersPipeline = createComputePipeline("shaders/3d_cluster_build.metal");
@@ -3904,6 +3957,19 @@ auto Renderer_Metal::draw(std::shared_ptr<Scene> scene, Camera& camera) -> void 
         NS::Range::Make(0, cameraDataBuffers[currentFrameInFlight]->length())
     );
 
+    // Reallocate light buffers if the ECS has added lights since stage() was called
+    // (LightGatherSystem populates scene->directionalLights / pointLights after staging)
+    const size_t dirLightBytes   = std::max(scene->directionalLights.size(), (size_t)1) * sizeof(DirectionalLight);
+    const size_t pointLightBytes = std::max(scene->pointLights.size(),       (size_t)1) * sizeof(PointLight);
+    if (!directionalLightBuffer || directionalLightBuffer->length() < dirLightBytes) {
+        directionalLightBuffer = NS::TransferPtr(
+            device->newBuffer(dirLightBytes, MTL::ResourceStorageModeManaged));
+    }
+    if (!pointLightBuffer || pointLightBuffer->length() < pointLightBytes) {
+        pointLightBuffer = NS::TransferPtr(
+            device->newBuffer(pointLightBytes, MTL::ResourceStorageModeManaged));
+    }
+
     auto* dirLights = reinterpret_cast<DirectionalLight*>(directionalLightBuffer->contents());
     for (size_t i = 0; i < scene->directionalLights.size(); ++i) {
         dirLights[i].direction = scene->directionalLights[i].direction;
@@ -3948,7 +4014,8 @@ auto Renderer_Metal::draw(std::shared_ptr<Scene> scene, Camera& camera) -> void 
                                         .clearcoat = mat->clearcoat,
                                         .clearcoatGloss = mat->clearcoatGloss,
                                         .prototypeUVMode = static_cast<float>(mat->prototypeUVMode),
-                                        .uvScale = mat->uvScale };
+                                        .uvScale = mat->uvScale,
+                                        .iblEnabled = mat->useIBL ? 1.0f : 0.0f };
     }
     materialDataBuffer->didModifyRange(NS::Range::Make(0, materialDataBuffer->length()));
 
@@ -4112,6 +4179,14 @@ auto Renderer_Metal::draw(std::shared_ptr<Scene> scene, Camera& camera) -> void 
                     ImGui::DragFloat("Sheen Tint", &m->sheenTint, .01f, 0.0f, 1.0f);
                     ImGui::DragFloat("Clearcoat", &m->clearcoat, .01f, 0.0f, 1.0f);
                     ImGui::DragFloat("Clearcoat Gloss", &m->clearcoatGloss, .01f, 0.0f, 1.0f);
+                    ImGui::Separator();
+                    // Material type (read-only: determines which shader pipeline is used)
+                    const char* typeLabel = (m->materialType == Vapor::MaterialType::Iridescent)
+                        ? "Iridescent (electroplating)"
+                        : "PBR";
+                    ImGui::LabelText("Material Type", "%s", typeLabel);
+                    // useIBL is editable: changes take effect next frame via materialDataBuffer upload
+                    ImGui::Checkbox("Use IBL", &m->useIBL);
                     ImGui::TreePop();
                 }
                 ImGui::PopID();
@@ -5953,4 +6028,31 @@ void Renderer_Metal::draw(entt::registry& registry, std::shared_ptr<Scene> scene
     pendingEcsInstances.clear();
     pendingEcsBatches.clear();
     pendingEcsAccelInstances.clear();
+}
+
+auto Renderer_Metal::loadHDRI(const std::string& path) -> void {
+    // Load equirectangular HDR image on the CPU
+    auto img = AssetManager::loadHDRI(path);
+
+    // Create (or recreate) the 2D RGBA32Float texture for the equirect data
+    auto texDesc = NS::TransferPtr(MTL::TextureDescriptor::alloc()->init());
+    texDesc->setTextureType(MTL::TextureType2D);
+    texDesc->setPixelFormat(MTL::PixelFormatRGBA32Float);
+    texDesc->setWidth(img->width);
+    texDesc->setHeight(img->height);
+    texDesc->setMipmapLevelCount(1);
+    texDesc->setUsage(MTL::TextureUsageShaderRead);
+    texDesc->setStorageMode(MTL::StorageModeManaged);
+
+    equirectHDRITexture = NS::TransferPtr(device->newTexture(texDesc.get()));
+    equirectHDRITexture->replaceRegion(
+        MTL::Region(0, 0, img->width, img->height),
+        0,
+        img->floatArray.data(),
+        img->width * 4 * sizeof(float)
+    );
+
+    iblSource = IBLSource::HDRI;
+    iblNeedsUpdate = true;
+    fmt::print("HDRI loaded: {} ({}x{})\n", path, img->width, img->height);
 }
