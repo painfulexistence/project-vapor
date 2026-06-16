@@ -52,7 +52,9 @@ kernel void computeMain(
     uint lightCount = cluster.lightCount;
 
     if (lightCount == 0) {
-        shadowTexture.write(float4(1.0), tid);
+        // Debug: write 0.5 (grey) when no lights found in tile
+        // vs 1.0 (white/lit) from ray miss — distinguishes "no lights" from "unoccluded"
+        shadowTexture.write(float4(0.5), tid);
         return;
     }
 
