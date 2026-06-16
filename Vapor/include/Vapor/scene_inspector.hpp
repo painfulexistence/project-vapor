@@ -27,18 +27,40 @@ public:
     using EntityProvider   = std::function<std::vector<entt::entity>(entt::registry&)>;
 
     void draw(entt::registry& registry) {
+#ifndef NDEBUG
         if (m_videoRecorder && m_videoRecorder->isRecording())
             m_videoRecorder->captureFrame();
-        drawEntityList(registry);
-        drawInspector(registry);
 
-        // --- Recording section (only if recorder attached) ---
+        if (ImGui::IsKeyPressed(ImGuiKey_F1))
+            m_visible = !m_visible;
+        if (!m_visible) return;
+
+        ImGui::SetNextWindowSize(ImVec2(680, 580), ImGuiCond_FirstUseEver);
+        ImGui::SetNextWindowPos(ImVec2(10, 30),   ImGuiCond_FirstUseEver);
+        if (!ImGui::Begin("Application##debug_ui")) { ImGui::End(); return; }
+
+        // Left panel — entity list + save + recording
+        ImGui::BeginChild("##scene_panel", ImVec2(280, 0), true);
+        drawEntityListContent(registry);
+        if (m_serializer) {
+            ImGui::Separator();
+            drawSaveSection(registry);
+        }
         if (m_videoRecorder) {
-            ImGui::Begin("Engine");
             ImGui::Separator();
             drawRecordingSection();
-            ImGui::End();
         }
+        ImGui::EndChild();
+
+        ImGui::SameLine();
+
+        // Right panel — component inspector
+        ImGui::BeginChild("##inspector_panel", ImVec2(0, 0), true);
+        drawInspectorContent(registry);
+        ImGui::EndChild();
+
+        ImGui::End();
+#endif
     }
 
     void registerCustomDrawer(CustomDrawer drawer) {
@@ -82,6 +104,7 @@ public:
     entt::entity getSelectedEntity() const  { return m_selected; }
 
 private:
+    bool         m_visible  = true;
     entt::entity m_selected = entt::null;
     char m_searchBuf[128]   = {};
     std::vector<CustomDrawer>     m_customDrawers;
@@ -105,14 +128,10 @@ private:
     std::chrono::steady_clock::time_point m_recordingStartTime;
 
     // -------------------------------------------------------------------------
-    // Left panel — entity list + save section
+    // Left panel — entity list content (no Begin/End; called inside a child)
     // -------------------------------------------------------------------------
-    void drawEntityList(entt::registry& registry) {
-        ImGui::SetNextWindowSize(ImVec2(280, 560), ImGuiCond_FirstUseEver);
-        ImGui::SetNextWindowPos(ImVec2(10, 30),  ImGuiCond_FirstUseEver);
-        if (!ImGui::Begin("Scene##inspector_list")) { ImGui::End(); return; }
-
-        // --- Search ---
+    void drawEntityListContent(entt::registry& registry) {
+        ImGui::TextDisabled("Scene");
         ImGui::InputText("Search", m_searchBuf, sizeof(m_searchBuf));
         ImGui::Separator();
 
@@ -147,14 +166,6 @@ private:
             }
             ImGui::PopStyleColor();
         }
-
-        // --- Save section (only if serializer attached) ---
-        if (m_serializer) {
-            ImGui::Separator();
-            drawSaveSection(registry);
-        }
-
-        ImGui::End();
     }
 
     // -------------------------------------------------------------------------
@@ -196,16 +207,14 @@ private:
     }
 
     // -------------------------------------------------------------------------
-    // Right panel — component inspector for selected entity
+    // Right panel — inspector content (no Begin/End; called inside a child)
     // -------------------------------------------------------------------------
-    void drawInspector(entt::registry& registry) {
-        ImGui::SetNextWindowSize(ImVec2(380, 500), ImGuiCond_FirstUseEver);
-        ImGui::SetNextWindowPos(ImVec2(300, 30),  ImGuiCond_FirstUseEver);
-        if (!ImGui::Begin("Inspector##inspector_detail")) { ImGui::End(); return; }
+    void drawInspectorContent(entt::registry& registry) {
+        ImGui::TextDisabled("Inspector");
+        ImGui::Separator();
 
         if (m_selected == entt::null || !registry.valid(m_selected)) {
             ImGui::TextDisabled("No entity selected");
-            ImGui::End();
             return;
         }
 
@@ -246,8 +255,6 @@ private:
 
         ImGui::Separator();
         drawAddComponentMenu(registry);
-
-        ImGui::End();
     }
 
     // =========================================================================
