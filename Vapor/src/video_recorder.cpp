@@ -23,7 +23,6 @@ struct VideoRecorder::FFmpegContext {
     AVPacket* packet = nullptr;
     AVFrame* frame = nullptr;
     SwsContext* swsCtx = nullptr;
-    int64_t pts = 0;
 #endif
 };
 
@@ -49,6 +48,7 @@ bool VideoRecorder::startRecording(Renderer* renderer, const Config& config) {
     m_renderer = renderer;
     m_config = config;
     m_ffmpeg = std::make_unique<FFmpegContext>();
+    m_recordingStart = std::chrono::steady_clock::now();
     m_stop = false;
     m_recording = true;
 
@@ -85,15 +85,22 @@ void VideoRecorder::captureFrame() {
         }
     }
 
-    m_renderer->readPixelsAsync([this](const GpuImageData& data) {
+    // Capture wall-clock time before the async readback so it reflects the
+    // moment this frame was presented, not when the callback fires.
+    auto captureTime = std::chrono::steady_clock::now();
+
+    m_renderer->readPixelsAsync([this, captureTime](const GpuImageData& data) {
         if (!m_recording) {
             return;
         }
+
+        double timestamp = std::chrono::duration<double>(captureTime - m_recordingStart).count();
 
         RawFrame frame;
         frame.pixels = data.data;
         frame.width = data.width;
         frame.height = data.height;
+        frame.timestamp = timestamp;
 
         {
             std::lock_guard<std::mutex> lock(m_mutex);
@@ -152,6 +159,14 @@ bool VideoRecorder::initEncoder(uint32_t width, uint32_t height) {
 #else
     auto& ff = *m_ffmpeg;
 
+    // AV1 requires even-numbered dimensions; crop one pixel if needed.
+    width  &= ~1u;
+    height &= ~1u;
+    if (width == 0 || height == 0) {
+        fmt::print(stderr, "[VideoRecorder] Frame dimensions too small after alignment\n");
+        return false;
+    }
+
     // Try configured encoder, then fallbacks
     const AVCodec* codec = avcodec_find_encoder_by_name(m_config.encoder.c_str());
     if (!codec) {
@@ -177,7 +192,9 @@ bool VideoRecorder::initEncoder(uint32_t width, uint32_t height) {
 
     ff.codecCtx->width = static_cast<int>(width);
     ff.codecCtx->height = static_cast<int>(height);
-    ff.codecCtx->time_base = AVRational{1, m_config.fps};
+    // Microsecond time base → pts values are real elapsed microseconds.
+    // Framerate hint is still useful for the encoder's GOP and rate control.
+    ff.codecCtx->time_base = AVRational{1, 1'000'000};
     ff.codecCtx->framerate = AVRational{m_config.fps, 1};
     ff.codecCtx->pix_fmt = AV_PIX_FMT_YUV420P;
     ff.codecCtx->gop_size = m_config.fps; // one keyframe per second
@@ -260,13 +277,16 @@ bool VideoRecorder::encodeFrame(const RawFrame& rawFrame) {
         return false;
     }
 
-    // Convert RGBA input to YUV420P
+    // Convert RGBA input to YUV420P (clamp src height to encoder height in case
+    // a frame arrived before the even-dimension crop was applied to frame.height)
     const uint8_t* srcPlanes[1] = {rawFrame.pixels.data()};
     int srcStrides[1] = {static_cast<int>(rawFrame.width) * 4};
-    sws_scale(ff.swsCtx, srcPlanes, srcStrides, 0, static_cast<int>(rawFrame.height),
+    int srcHeight = std::min(static_cast<int>(rawFrame.height), ff.codecCtx->height);
+    sws_scale(ff.swsCtx, srcPlanes, srcStrides, 0, srcHeight,
               ff.frame->data, ff.frame->linesize);
 
-    ff.frame->pts = ff.pts++;
+    // Wall-clock pts in microseconds so playback speed matches actual game speed.
+    ff.frame->pts = static_cast<int64_t>(rawFrame.timestamp * 1'000'000.0);
 
     if (avcodec_send_frame(ff.codecCtx, ff.frame) < 0) {
         return false;

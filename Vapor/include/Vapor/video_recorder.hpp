@@ -2,6 +2,7 @@
 
 #include "renderer.hpp"
 #include <atomic>
+#include <chrono>
 #include <condition_variable>
 #include <memory>
 #include <mutex>
@@ -57,6 +58,7 @@ private:
         std::vector<uint8_t> pixels;
         uint32_t width;
         uint32_t height;
+        double timestamp; // seconds since recording started (wall-clock)
     };
 
     // FFmpegContext hides all FFmpeg types from this header.
@@ -70,6 +72,7 @@ private:
 
     Renderer* m_renderer = nullptr;
     Config m_config;
+    std::chrono::steady_clock::time_point m_recordingStart;
 
     std::unique_ptr<FFmpegContext> m_ffmpeg;
 
