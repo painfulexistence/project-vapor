@@ -31,6 +31,14 @@ public:
             m_videoRecorder->captureFrame();
         drawEntityList(registry);
         drawInspector(registry);
+
+        // --- Recording section (only if recorder attached) ---
+        if (m_videoRecorder) {
+            ImGui::Begin("Engine");
+            ImGui::Separator();
+            drawRecordingSection();
+            ImGui::End();
+        }
     }
 
     void registerCustomDrawer(CustomDrawer drawer) {
@@ -147,14 +155,6 @@ private:
         }
 
         ImGui::End();
-
-        // --- Recording section (only if recorder attached) ---
-        if (m_videoRecorder) {
-            ImGui::Begin("Engine");
-            ImGui::Separator();
-            drawRecordingSection();
-            ImGui::End();
-        }
     }
 
     // -------------------------------------------------------------------------
