@@ -27,6 +27,12 @@ enum class PrimitiveMode {
     TRIANGLE_STRIP,
 };
 
+// High-level material shading model (selects the render pipeline downstream).
+enum class MaterialType {
+    PBR,
+    Iridescent,
+};
+
 // Note: PipelineHandle, BufferHandle, TextureHandle are now defined in rhi.hpp
 // RenderTargetHandle is no longer used (replaced by RHI's RenderPassDesc)
 
@@ -39,6 +45,14 @@ struct Image {
 
     // Note: TextureHandle moved to Renderer layer
     // Image now only holds CPU-side image data
+};
+
+// Floating-point image for HDR equirectangular environment maps (.hdr / .exr)
+struct HDRImage {
+    std::string uri;
+    Uint32 width;
+    Uint32 height;
+    std::vector<float> floatArray; // 4 floats per pixel (RGBA, linear)
 };
 
 struct Material {
@@ -68,6 +82,12 @@ struct Material {
     float sheenTint = 0.5f;
     float clearcoat = 0.0f;
     float clearcoatGloss = 1.0f;
+
+    // Prototype UV Mode: 0 = Off, 1 = World Space, 2 = Object Space
+    int prototypeUVMode = 0;
+    float uvScale = 1.0f;
+    MaterialType materialType = MaterialType::PBR;
+    bool useIBL = false;
 
     // Renderer-assigned ID (assigned during registration)
     Uint32 rendererMaterialId = UINT32_MAX;

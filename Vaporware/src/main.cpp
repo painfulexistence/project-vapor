@@ -22,12 +22,14 @@
 #include "Vapor/systems.hpp"
 #include "Vapor/rng.hpp"
 #include "Vapor/scene.hpp"
+#include "Vapor/video_recorder.hpp"
 #include <RmlUi/Core/ElementDocument.h>
 #include <entt/entt.hpp>
 
 
 #include "Vapor/scene_inspector.hpp"
 #include "Vapor/scene_serializer.hpp"
+#include "Vapor/video_recorder.hpp"
 #include "components.hpp"
 #include "pages/hud_page.hpp"
 #include "pages/letterbox_page.hpp"
@@ -325,6 +327,11 @@ auto main(int argc, char* args[]) -> int {
     auto renderer = createRenderer(gfxBackend, window);
     // Renderer is already initialized by createRenderer()
 
+    // Optional: load an external HDRI for IBL instead of the procedural sky.
+    // Place your .hdr file at:  <assets>/textures/env/sky.hdr
+    // and uncomment the line below:
+    // renderer->loadHDRI("textures/env/sky.hdr");
+
     // Scene serializer — engine pre-registers transform/meshRenderer;
     // game registers game-specific component writers.
     Vapor::SceneSerializer sceneSerializer;
@@ -333,6 +340,8 @@ auto main(int argc, char* args[]) -> int {
             if (auto* c = reg.try_get<AutoRotateComponent>(e))
                 out = { {"axis", Vapor::toJson(c->axis)}, {"speed", c->speed} };
         });
+
+    Vapor::VideoRecorder videoRecorder;
 
     Vapor::SceneInspector sceneInspector;
     sceneInspector.attachSerializer(sceneSerializer);
@@ -433,7 +442,18 @@ auto main(int argc, char* args[]) -> int {
     });
 
     entt::registry registry;
-    renderer->setImGuiCallback([&]() { sceneInspector.draw(registry); });
+
+    {
+        // SDL_GetBasePath() returns the exe directory with a trailing separator.
+        // Recordings go into <exe_dir>/output/.
+        const char* basePath = SDL_GetBasePath();
+        std::string outputDir = basePath ? std::string(basePath) + "output" : "output";
+        sceneInspector.attachVideoRecorder(videoRecorder, *renderer, outputDir);
+    }
+    
+    renderer->setImGuiCallback([&]() { 
+        sceneInspector.draw(registry); 
+    });
 
     auto [sceneBuilt, materialBuilt, cube1, global] =
         buildScene(registry, *physics, scene, material, windowWidth, windowHeight, rng);

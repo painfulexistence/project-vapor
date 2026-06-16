@@ -2157,6 +2157,15 @@ TextureHandle Renderer::createTexture(const std::shared_ptr<Vapor::Image>& img) 
     return handle;
 }
 
+void Renderer::updateTexture(TextureHandle handle, const std::shared_ptr<Vapor::Image>& img) {
+    if (!handle.isValid() || !img) return;
+
+    // Re-upload pixel data in place (no GPU reallocation). Caller guarantees the
+    // dimensions/channel count match the original createTexture() call.
+    size_t dataSize = img->width * img->height * img->channelCount;
+    rhi->updateTexture(handle, img->byteArray.data(), dataSize);
+}
+
 // ============================================================================
 // BatchRenderer Implementation
 // ============================================================================

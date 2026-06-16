@@ -68,6 +68,7 @@ struct MaterialData {
     float clearcoatGloss;
     float prototypeUVMode; // 0 = Off, 1 = World Space, 2 = Object Space
     float uvScale;
+    float iblEnabled; // 1.0 = use IBL, 0.0 = ambient approximation
 };
 
 struct DirLight {

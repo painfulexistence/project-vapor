@@ -301,6 +301,12 @@ public:
 
     TextureHandle createTexture(const std::shared_ptr<Vapor::Image>& img);
 
+    // Update an existing texture's contents in place. The image dimensions and
+    // channel count must match those used when the texture was created.
+    // Intended for streaming sources (e.g. video playback) that re-upload pixel
+    // data every frame without reallocating the GPU texture.
+    void updateTexture(TextureHandle handle, const std::shared_ptr<Vapor::Image>& img);
+
     // ========================================================================
     // Getters
     // ========================================================================

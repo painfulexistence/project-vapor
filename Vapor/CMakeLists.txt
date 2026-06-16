@@ -12,6 +12,23 @@ find_package(RmlUi CONFIG REQUIRED)
 find_package(EnTT CONFIG REQUIRED)
 find_package(nlohmann_json CONFIG REQUIRED)
 
+# Optional: FFmpeg for AV1 video recording
+find_package(PkgConfig)
+if(PkgConfig_FOUND)
+    pkg_check_modules(FFMPEG
+        libavcodec
+        libavformat
+        libavutil
+        libswscale
+        libswresample
+    )
+endif()
+if(FFMPEG_FOUND)
+    message(STATUS "FFmpeg found — video recording (AV1) enabled")
+else()
+    message(STATUS "FFmpeg not found — video recording disabled")
+endif()
+
 if(APPLE)
     add_subdirectory(metal)
 endif()
@@ -45,6 +62,8 @@ set(SOURCES
     src/engine_core.cpp
     src/rmlui_manager.cpp
     src/rmlui_system.cpp
+    src/video_recorder.cpp
+    src/video_player.cpp
     imgui/imgui.cpp
     imgui/imgui_draw.cpp
     imgui/imgui_tables.cpp
@@ -85,6 +104,13 @@ target_include_directories(Vapor PRIVATE
     ${CMAKE_CURRENT_SOURCE_DIR}
     ${CMAKE_CURRENT_SOURCE_DIR}/miniaudio
 )
+
+if(FFMPEG_FOUND)
+    target_compile_definitions(Vapor PUBLIC VAPOR_HAS_FFMPEG)
+    target_include_directories(Vapor PRIVATE ${FFMPEG_INCLUDE_DIRS})
+    target_link_directories(Vapor PUBLIC ${FFMPEG_LIBRARY_DIRS})
+    target_link_libraries(Vapor PRIVATE ${FFMPEG_LIBRARIES})
+endif()
 
 target_link_libraries(Vapor PUBLIC
     fmt::fmt
