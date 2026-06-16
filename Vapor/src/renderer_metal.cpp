@@ -3835,20 +3835,26 @@ auto Renderer_Metal::stage(std::shared_ptr<Scene> scene) -> void {
     ZoneScoped;
 
     // Lights
+    size_t directionalLightsSize = std::max((size_t)1, scene->directionalLights.size());
     directionalLightBuffer = NS::TransferPtr(
-        device->newBuffer(scene->directionalLights.size() * sizeof(DirectionalLight), MTL::ResourceStorageModeManaged)
+        device->newBuffer(directionalLightsSize * sizeof(DirectionalLight), MTL::ResourceStorageModeManaged)
     );
-    memcpy(
-        directionalLightBuffer->contents(),
-        scene->directionalLights.data(),
-        scene->directionalLights.size() * sizeof(DirectionalLight)
-    );
+    if (!scene->directionalLights.empty()) {
+        memcpy(
+            directionalLightBuffer->contents(),
+            scene->directionalLights.data(),
+            scene->directionalLights.size() * sizeof(DirectionalLight)
+        );
+    }
     directionalLightBuffer->didModifyRange(NS::Range::Make(0, directionalLightBuffer->length()));
 
+    size_t pointLightsSize = std::max((size_t)1, scene->pointLights.size());
     pointLightBuffer = NS::TransferPtr(
-        device->newBuffer(scene->pointLights.size() * sizeof(PointLight), MTL::ResourceStorageModeManaged)
+        device->newBuffer(pointLightsSize * sizeof(PointLight), MTL::ResourceStorageModeManaged)
     );
-    memcpy(pointLightBuffer->contents(), scene->pointLights.data(), scene->pointLights.size() * sizeof(PointLight));
+    if (!scene->pointLights.empty()) {
+        memcpy(pointLightBuffer->contents(), scene->pointLights.data(), scene->pointLights.size() * sizeof(PointLight));
+    }
     pointLightBuffer->didModifyRange(NS::Range::Make(0, pointLightBuffer->length()));
 
     // Textures
@@ -3864,8 +3870,9 @@ auto Renderer_Metal::stage(std::shared_ptr<Scene> scene) -> void {
         // pipelines[mat->pipeline] = createPipeline();
         materialIDs[mat] = nextMaterialID++;
     }
+    size_t materialsSize = std::max((size_t)1, scene->materials.size());
     materialDataBuffer = NS::TransferPtr(
-        device->newBuffer(scene->materials.size() * sizeof(MaterialData), MTL::ResourceStorageModeManaged)
+        device->newBuffer(materialsSize * sizeof(MaterialData), MTL::ResourceStorageModeManaged)
     );
 
     // Buffers
@@ -4090,6 +4097,8 @@ auto Renderer_Metal::draw(std::shared_ptr<Scene> scene, Camera& camera) -> void 
     ImGui::NewFrame();
 
     // ImGui::DockSpaceOverViewport();
+
+    ImGui::Begin("Engine");
 
     if (ImGui::CollapsingHeader("Graphics", ImGuiTreeNodeFlags_DefaultOpen)) {
         // ImGui::Text("Frame rate: %.3f ms/frame (%.1f FPS)", 1000.0f * deltaTime, 1.0f / deltaTime);
@@ -4596,6 +4605,8 @@ auto Renderer_Metal::draw(std::shared_ptr<Scene> scene, Camera& camera) -> void 
             ImGui::TreePop();
         }
     }
+    
+    ImGui::End();
 
     if (m_imGuiCallback) {
         m_imGuiCallback();
@@ -4852,6 +4863,46 @@ auto Renderer_Metal::createTexture(const std::shared_ptr<Image>& img) -> Texture
         return TextureHandle{ nextTextureID++ };
     } else {
         throw std::runtime_error(fmt::format("Failed to create texture at {}!\n", img->uri));
+    }
+}
+
+void Renderer_Metal::updateTexture(TextureHandle handle, const std::shared_ptr<Image>& img) {
+    if (!img) {
+        return;
+    }
+    auto it = textures.find(handle.rid);
+    if (it == textures.end() || !it->second) {
+        fmt::print(stderr, "[Metal] updateTexture: invalid texture handle {}\n", handle.rid);
+        return;
+    }
+    MTL::Texture* texture = it->second.get();
+
+    if (img->channelCount == 3) {
+        // Convert RGB to RGBA by adding an opaque alpha channel.
+        std::vector<Uint8> rgbaData;
+        rgbaData.reserve(static_cast<size_t>(img->width) * img->height * 4);
+        for (size_t i = 0; i + 2 < img->byteArray.size(); i += 3) {
+            rgbaData.push_back(img->byteArray[i]);
+            rgbaData.push_back(img->byteArray[i + 1]);
+            rgbaData.push_back(img->byteArray[i + 2]);
+            rgbaData.push_back(255);
+        }
+        texture->replaceRegion(
+            MTL::Region(0, 0, 0, img->width, img->height, 1), 0, rgbaData.data(), img->width * 4
+        );
+    } else {
+        size_t bytesPerPixel = img->channelCount;
+        texture->replaceRegion(
+            MTL::Region(0, 0, 0, img->width, img->height, 1), 0, img->byteArray.data(), img->width * bytesPerPixel
+        );
+    }
+
+    if (texture->mipmapLevelCount() > 1) {
+        auto cmdBlit = NS::TransferPtr(queue->commandBuffer());
+        auto enc = NS::TransferPtr(cmdBlit->blitCommandEncoder());
+        enc->generateMipmaps(texture);
+        enc->endEncoding();
+        cmdBlit->commit();
     }
 }
 

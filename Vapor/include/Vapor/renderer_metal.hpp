@@ -241,6 +241,7 @@ public:
     NS::SharedPtr<MTL::ComputePipelineState> createComputePipeline(const std::string& filename);
 
     TextureHandle createTexture(const std::shared_ptr<Vapor::Image>& img) override;
+    void updateTexture(TextureHandle handle, const std::shared_ptr<Vapor::Image>& img) override;
 
     // ===== Render-to-Texture API =====
     RenderTextureHandle createRenderTexture(const RenderTextureDesc& desc) override;

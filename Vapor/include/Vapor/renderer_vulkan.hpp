@@ -54,6 +54,7 @@ public:
     RenderTargetHandle createRenderTarget(RenderTargetUsage usage, VkFormat format);
 
     TextureHandle createTexture(const std::shared_ptr<Vapor::Image>& img) override;
+    void updateTexture(TextureHandle handle, const std::shared_ptr<Vapor::Image>& img) override;
 
     // ===== Interface parity stubs (no functional implementation) =====
 
