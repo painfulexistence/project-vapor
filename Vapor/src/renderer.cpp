@@ -1089,11 +1089,11 @@ void Renderer::createRenderPipeline() {
     std::string fragShaderCode;
 
     if (backend == GraphicsBackend::Vulkan) {
-        vertShaderCode = readFile("assets/shaders/TBN.vert.spv");
-        fragShaderCode = readFile("assets/shaders/PBRNormalMapped.frag.spv");
+        vertShaderCode = readFile("shaders/TBN.vert.spv");
+        fragShaderCode = readFile("shaders/PBRNormalMapped.frag.spv");
     } else if (backend == GraphicsBackend::Metal) {
-        vertShaderCode = readFile("assets/shaders/3d_pbr_normal_mapped.metal");
-        fragShaderCode = readFile("assets/shaders/3d_pbr_normal_mapped.metal");
+        vertShaderCode = readFile("shaders/3d_pbr_normal_mapped.metal");
+        fragShaderCode = readFile("shaders/3d_pbr_normal_mapped.metal");
     } else {
         return;  // Unknown backend
     }
@@ -2210,11 +2210,11 @@ void Renderer::BatchRenderer::init(RHI* rhi, GraphicsBackend backend, bool is3D,
 
     if (backend == GraphicsBackend::Vulkan) {
         // Load SPIR-V shaders
-        vertShaderCode = readFile("assets/shaders/Batch2D.vert.spv");
-        fragShaderCode = readFile("assets/shaders/Batch2D.frag.spv");
+        vertShaderCode = readFile("shaders/Batch2D.vert.spv");
+        fragShaderCode = readFile("shaders/Batch2D.frag.spv");
     } else if (backend == GraphicsBackend::Metal) {
         // Load Metal shader library
-        vertShaderCode = readFile("assets/shaders/2d_batch.metal");
+        vertShaderCode = readFile("shaders/2d_batch.metal");
         fragShaderCode = vertShaderCode;  // Same file for Metal
     }
 
