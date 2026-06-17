@@ -61,6 +61,10 @@ public:
     void updateBuffer(BufferHandle handle, const void* data, size_t offset, size_t size) override;
     void updateTexture(TextureHandle handle, const void* data, size_t size) override;
 
+    BufferHandle copySwapchainToBuffer(Uint32& outWidth, Uint32& outHeight) override;
+    void* mapBuffer(BufferHandle handle) override;
+    void unmapBuffer(BufferHandle handle) override;
+
     // ========================================================================
     // Frame Operations
     // ========================================================================

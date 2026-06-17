@@ -563,6 +563,18 @@ private:
     ScreenshotCallback screenshotCallback;
     bool screenshotRequested = false;
 
+    // Screenshot state
+    struct PendingScreenshot {
+        BufferHandle buffer;
+        ScreenshotCallback callback;
+        Uint32 width;
+        Uint32 height;
+        Uint32 frameIndex; // Frame index when captured
+    };
+    std::vector<PendingScreenshot> pendingScreenshots;
+
+    void processPendingScreenshots();
+
     // ========================================================================
     // Configuration
     // ========================================================================

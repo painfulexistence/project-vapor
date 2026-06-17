@@ -343,6 +343,9 @@ TextureId Renderer::registerTexture(const std::shared_ptr<Vapor::Image>& image) 
 // ============================================================================
 
 void Renderer::beginFrame(const CameraRenderData& camera) {
+    // Process any pending screenshots from previous frames
+    processPendingScreenshots();
+
     // Begin RHI frame (get drawable, create command buffer)
     rhi->beginFrame();
 
@@ -502,6 +505,25 @@ void Renderer::endFrame() {
     // Disable auto-flushing until next beginFrame
     batch2D.canAutoFlush = false;
     batch3D.canAutoFlush = false;
+
+    // Process screenshot request (before ending frame so command buffer is still active)
+    if (screenshotRequested) {
+        Uint32 width, height;
+        BufferHandle screenshotBuffer = rhi->copySwapchainToBuffer(width, height);
+
+        if (screenshotBuffer.isValid()) {
+            PendingScreenshot pending;
+            pending.buffer = screenshotBuffer;
+            pending.callback = screenshotCallback;
+            pending.width = width;
+            pending.height = height;
+            pending.frameIndex = frameNumber;
+            pendingScreenshots.push_back(pending);
+        }
+
+        screenshotRequested = false;
+        screenshotCallback = nullptr;
+    }
 
     // End RHI frame (present drawable, commit command buffer)
     rhi->endFrame();
@@ -1440,6 +1462,42 @@ void Renderer::collectDrawables(entt::registry& registry, std::shared_ptr<Scene>
 void Renderer::readPixelsAsync(ScreenshotCallback callback) {
     screenshotCallback = callback;
     screenshotRequested = true;
+}
+
+void Renderer::processPendingScreenshots() {
+    // Wait for GPU to finish (ensures screenshot buffer is ready)
+    // In a production implementation, we'd use per-frame fences
+    // For now, simple wait ensures correctness
+    if (!pendingScreenshots.empty()) {
+        rhi->waitIdle();
+    }
+
+    for (auto it = pendingScreenshots.begin(); it != pendingScreenshots.end();) {
+        PendingScreenshot& pending = *it;
+
+        // Map buffer and read pixels
+        void* data = rhi->mapBuffer(pending.buffer);
+        if (data) {
+            GpuImageData imageData;
+            imageData.width = pending.width;
+            imageData.height = pending.height;
+            imageData.channelCount = 4; // RGBA/BGRA
+            size_t dataSize = pending.width * pending.height * 4;
+            imageData.data.resize(dataSize);
+            std::memcpy(imageData.data.data(), data, dataSize);
+
+            rhi->unmapBuffer(pending.buffer);
+
+            // Call callback
+            if (pending.callback) {
+                pending.callback(imageData);
+            }
+        }
+
+        // Cleanup
+        rhi->destroyBuffer(pending.buffer);
+        it = pendingScreenshots.erase(it);
+    }
 }
 
 // ============================================================================

@@ -489,6 +489,89 @@ void RHI_Metal::updateTexture(TextureHandle handle, const void* data, size_t siz
     }
 }
 
+BufferHandle RHI_Metal::copySwapchainToBuffer(Uint32& outWidth, Uint32& outHeight) {
+    if (!currentDrawable) {
+        fmt::print(stderr, "No current drawable for screenshot\n");
+        return BufferHandle{};
+    }
+
+    MTL::Texture* texture = currentDrawable->texture();
+    outWidth = static_cast<Uint32>(texture->width());
+    outHeight = static_cast<Uint32>(texture->height());
+
+    Uint32 bytesPerPixel = 4; // RGBA8 or BGRA8
+    Uint32 bytesPerRow = outWidth * bytesPerPixel;
+    size_t bufferSize = bytesPerRow * outHeight;
+
+    // Create CPU-readable buffer (Shared storage mode)
+    auto buffer = NS::TransferPtr(device->newBuffer(bufferSize, MTL::ResourceStorageModeShared));
+    if (!buffer) {
+        fmt::print(stderr, "Failed to create screenshot buffer\n");
+        return BufferHandle{};
+    }
+
+    // Create blit encoder to copy texture to buffer
+    auto blitEncoder = currentCommandBuffer->blitCommandEncoder();
+    if (!blitEncoder) {
+        fmt::print(stderr, "Failed to create blit encoder for screenshot\n");
+        return BufferHandle{};
+    }
+
+    // Copy texture to buffer
+    blitEncoder->copyFromTexture(
+        texture,                               // sourceTexture
+        0,                                     // sourceSlice
+        0,                                     // sourceLevel
+        MTL::Origin::Make(0, 0, 0),           // sourceOrigin
+        MTL::Size::Make(outWidth, outHeight, 1), // sourceSize
+        buffer.get(),                         // destinationBuffer
+        0,                                     // destinationOffset
+        bytesPerRow,                          // destinationBytesPerRow
+        bytesPerRow * outHeight               // destinationBytesPerImage
+    );
+
+    blitEncoder->endEncoding();
+
+    // Store in buffers map
+    Uint32 id = nextBufferId++;
+    buffers[id] = {buffer, bufferSize, false};
+
+    return BufferHandle{id};
+}
+
+void* RHI_Metal::mapBuffer(BufferHandle handle) {
+    auto it = buffers.find(handle.id);
+    if (it == buffers.end()) {
+        return nullptr;
+    }
+
+    BufferResource& bufferRes = it->second;
+    if (bufferRes.isMapped) {
+        return bufferRes.mappedPointer;
+    }
+
+    // For Metal, buffers with Shared storage mode are always CPU-accessible
+    void* contents = bufferRes.buffer->contents();
+    if (contents) {
+        bufferRes.isMapped = true;
+        bufferRes.mappedPointer = contents;
+    }
+
+    return contents;
+}
+
+void RHI_Metal::unmapBuffer(BufferHandle handle) {
+    auto it = buffers.find(handle.id);
+    if (it == buffers.end()) {
+        return;
+    }
+
+    // For Metal Shared storage, no explicit unmap needed
+    // Just mark as unmapped for consistency
+    it->second.isMapped = false;
+    it->second.mappedPointer = nullptr;
+}
+
 // ============================================================================
 // Frame Operations
 // ============================================================================

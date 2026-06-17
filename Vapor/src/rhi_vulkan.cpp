@@ -728,6 +728,145 @@ void RHI_Vulkan::updateTexture(TextureHandle handle, const void* data, size_t si
     vkFreeMemory(device, stagingMemory, nullptr);
 }
 
+BufferHandle RHI_Vulkan::copySwapchainToBuffer(Uint32& outWidth, Uint32& outHeight) {
+    outWidth = swapchainExtent.width;
+    outHeight = swapchainExtent.height;
+    VkDeviceSize imageSize = outWidth * outHeight * 4; // RGBA8
+
+    // Create staging buffer with HOST_VISIBLE memory for CPU readback
+    VkBufferCreateInfo bufferInfo{};
+    bufferInfo.sType = VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO;
+    bufferInfo.size = imageSize;
+    bufferInfo.usage = VK_BUFFER_USAGE_TRANSFER_DST_BIT;
+    bufferInfo.sharingMode = VK_SHARING_MODE_EXCLUSIVE;
+
+    VkBuffer stagingBuffer;
+    if (vkCreateBuffer(device, &bufferInfo, nullptr, &stagingBuffer) != VK_SUCCESS) {
+        fmt::print(stderr, "Failed to create screenshot staging buffer\n");
+        return BufferHandle{};
+    }
+
+    VkMemoryRequirements memRequirements;
+    vkGetBufferMemoryRequirements(device, stagingBuffer, &memRequirements);
+
+    VkMemoryAllocateInfo allocInfo{};
+    allocInfo.sType = VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO;
+    allocInfo.allocationSize = memRequirements.size;
+    allocInfo.memoryTypeIndex = findMemoryType(memRequirements.memoryTypeBits,
+                                                VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT |
+                                                VK_MEMORY_PROPERTY_HOST_COHERENT_BIT);
+
+    VkDeviceMemory stagingMemory;
+    if (vkAllocateMemory(device, &allocInfo, nullptr, &stagingMemory) != VK_SUCCESS) {
+        vkDestroyBuffer(device, stagingBuffer, nullptr);
+        fmt::print(stderr, "Failed to allocate screenshot staging buffer memory\n");
+        return BufferHandle{};
+    }
+
+    vkBindBufferMemory(device, stagingBuffer, stagingMemory, 0);
+
+    // Transition swapchain image for transfer
+    VkImageMemoryBarrier barrier{};
+    barrier.sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER;
+    barrier.oldLayout = VK_IMAGE_LAYOUT_PRESENT_SRC_KHR;
+    barrier.newLayout = VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL;
+    barrier.srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+    barrier.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+    barrier.image = swapchainImages[currentSwapchainImageIndex];
+    barrier.subresourceRange.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
+    barrier.subresourceRange.baseMipLevel = 0;
+    barrier.subresourceRange.levelCount = 1;
+    barrier.subresourceRange.baseArrayLayer = 0;
+    barrier.subresourceRange.layerCount = 1;
+    barrier.srcAccessMask = VK_ACCESS_MEMORY_READ_BIT;
+    barrier.dstAccessMask = VK_ACCESS_TRANSFER_READ_BIT;
+
+    vkCmdPipelineBarrier(
+        currentCommandBuffer,
+        VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT,
+        VK_PIPELINE_STAGE_TRANSFER_BIT,
+        0,
+        0, nullptr,
+        0, nullptr,
+        1, &barrier
+    );
+
+    // Copy image to buffer
+    VkBufferImageCopy region{};
+    region.bufferOffset = 0;
+    region.bufferRowLength = 0;
+    region.bufferImageHeight = 0;
+    region.imageSubresource.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
+    region.imageSubresource.mipLevel = 0;
+    region.imageSubresource.baseArrayLayer = 0;
+    region.imageSubresource.layerCount = 1;
+    region.imageOffset = {0, 0, 0};
+    region.imageExtent = {outWidth, outHeight, 1};
+
+    vkCmdCopyImageToBuffer(
+        currentCommandBuffer,
+        swapchainImages[currentSwapchainImageIndex],
+        VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
+        stagingBuffer,
+        1,
+        &region
+    );
+
+    // Transition back to present
+    barrier.oldLayout = VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL;
+    barrier.newLayout = VK_IMAGE_LAYOUT_PRESENT_SRC_KHR;
+    barrier.srcAccessMask = VK_ACCESS_TRANSFER_READ_BIT;
+    barrier.dstAccessMask = VK_ACCESS_MEMORY_READ_BIT;
+
+    vkCmdPipelineBarrier(
+        currentCommandBuffer,
+        VK_PIPELINE_STAGE_TRANSFER_BIT,
+        VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT,
+        0,
+        0, nullptr,
+        0, nullptr,
+        1, &barrier
+    );
+
+    // Store in buffers map
+    Uint32 id = nextBufferId++;
+    buffers[id] = {stagingBuffer, stagingMemory, imageSize, false, nullptr};
+
+    return BufferHandle{id};
+}
+
+void* RHI_Vulkan::mapBuffer(BufferHandle handle) {
+    auto it = buffers.find(handle.id);
+    if (it == buffers.end()) {
+        return nullptr;
+    }
+
+    BufferResource& bufferRes = it->second;
+    if (bufferRes.isMapped) {
+        return bufferRes.mappedData;
+    }
+
+    void* data = nullptr;
+    if (vkMapMemory(device, bufferRes.memory, 0, bufferRes.size, 0, &data) == VK_SUCCESS) {
+        bufferRes.isMapped = true;
+        bufferRes.mappedData = data;
+        return data;
+    }
+
+    return nullptr;
+}
+
+void RHI_Vulkan::unmapBuffer(BufferHandle handle) {
+    auto it = buffers.find(handle.id);
+    if (it == buffers.end() || !it->second.isMapped) {
+        return;
+    }
+
+    vkUnmapMemory(device, it->second.memory);
+    it->second.isMapped = false;
+    it->second.mappedData = nullptr;
+}
+
 // ============================================================================
 // Frame Operations
 // ============================================================================

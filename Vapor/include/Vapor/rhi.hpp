@@ -336,6 +336,14 @@ public:
     virtual void updateBuffer(BufferHandle handle, const void* data, size_t offset, size_t size) = 0;
     virtual void updateTexture(TextureHandle handle, const void* data, size_t size) = 0;
 
+    // Copy swapchain/texture to CPU-readable buffer for screenshot
+    // Returns a buffer handle that can be mapped after the copy completes
+    virtual BufferHandle copySwapchainToBuffer(Uint32& outWidth, Uint32& outHeight) = 0;
+
+    // Map buffer memory for CPU read (returns nullptr on failure)
+    virtual void* mapBuffer(BufferHandle handle) = 0;
+    virtual void unmapBuffer(BufferHandle handle) = 0;
+
     // ========================================================================
     // Frame Operations
     // ========================================================================
