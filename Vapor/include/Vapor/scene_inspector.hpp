@@ -59,20 +59,17 @@ public:
             m_visible = !m_visible;
         if (!m_visible) return;
 
+        // Main Application window: Scene (left) + Inspector (right)
         ImGui::SetNextWindowSize(ImVec2(680, 580), ImGuiCond_FirstUseEver);
         ImGui::SetNextWindowPos(ImVec2(10, 30),   ImGuiCond_FirstUseEver);
         if (!ImGui::Begin("Application##debug_ui")) { ImGui::End(); return; }
 
-        // Left panel — entity list + save + recording
+        // Left panel — entity list + save
         ImGui::BeginChild("##scene_panel", ImVec2(280, 0), true);
         drawEntityListContent(registry);
         if (m_serializer) {
             ImGui::Separator();
             drawSaveSection(registry);
-        }
-        if (m_videoRecorder) {
-            ImGui::Separator();
-            drawRecordingSection();
         }
         ImGui::EndChild();
 
@@ -84,6 +81,15 @@ public:
         ImGui::EndChild();
 
         ImGui::End();
+
+        // Recording panel — standalone window, dockable near Graphics
+        if (m_videoRecorder) {
+            ImGui::SetNextWindowSize(ImVec2(300, 120), ImGuiCond_FirstUseEver);
+            ImGui::SetNextWindowPos(ImVec2(700, 30),  ImGuiCond_FirstUseEver);
+            if (ImGui::Begin("Recording##rec_panel"))
+                drawRecordingSection();
+            ImGui::End();
+        }
 #endif
     }
 
