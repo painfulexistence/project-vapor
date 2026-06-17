@@ -329,16 +329,25 @@ auto main(int argc, char* args[]) -> int {
 
     entt::registry registry;
 
+    // Wire recording UI into the Engine window via the engine-window callback.
+    // captureFrame() is called here each frame so recording continues even
+    // when the inspector overlay is hidden (F1 toggled off).
     {
-        // SDL_GetBasePath() returns the exe directory with a trailing separator.
-        // Recordings go into <exe_dir>/output/.
         const char* basePath = SDL_GetBasePath();
         std::string outputDir = basePath ? std::string(basePath) + "output" : "output";
-        sceneInspector.attachVideoRecorder(videoRecorder, *renderer, outputDir);
+        videoRecorder.setBaseOutputDir(outputDir);
     }
-    
-    renderer->setImGuiCallback([&]() { 
-        sceneInspector.draw(registry); 
+    renderer->setEngineWindowCallback([&]() {
+#ifndef NDEBUG
+        if (videoRecorder.isRecording())
+            videoRecorder.captureFrame();
+        if (ImGui::CollapsingHeader("Recording", ImGuiTreeNodeFlags_DefaultOpen))
+            videoRecorder.drawImGui(*renderer);
+#endif
+    });
+
+    renderer->setImGuiCallback([&]() {
+        sceneInspector.draw(registry);
     });
 
     auto [sceneBuilt, materialBuilt, cube1, global] =

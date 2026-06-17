@@ -69,6 +69,13 @@ public:
         m_imGuiCallback = std::move(callback);
     }
 
+    // Register a callback invoked inside the Engine ImGui window each frame,
+    // after the built-in Graphics section. Use this to append engine-level
+    // panels (e.g. Recording) without re-opening the window from outside.
+    virtual void setEngineWindowCallback(std::function<void()> callback) {
+        m_engineWindowCallback = std::move(callback);
+    }
+
     // ===== 2D/3D Batch Rendering API =====
     // Manual flush (for controlling draw order)
     virtual void flush2D() {
@@ -252,6 +259,7 @@ protected:
     Uint32 frameNumber = 0;
     bool isInitialized = false;
     std::function<void()> m_imGuiCallback;
+    std::function<void()> m_engineWindowCallback;
 
     int calculateMipmapLevelCount(Uint32 width, Uint32 height) const {
         return static_cast<int>(std::floor(std::log2(std::max(width, height))) + 1);

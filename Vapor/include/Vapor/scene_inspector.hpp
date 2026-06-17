@@ -4,14 +4,11 @@
 #include "Vapor/components.hpp"
 #include "Vapor/physics_3d.hpp"
 #include "Vapor/scene_serializer.hpp"
-#include "Vapor/video_recorder.hpp"
 #include "imgui.h"
 #include <entt/entt.hpp>
 #include <fmt/core.h>
 #include <glm/gtc/quaternion.hpp>
 #include <glm/gtx/euler_angles.hpp>
-#include <chrono>
-#include <filesystem>
 #include <functional>
 #include <string>
 #include <unordered_map>
@@ -52,14 +49,10 @@ public:
     // -------------------------------------------------------------------------
     void draw(entt::registry& registry) {
 #ifndef NDEBUG
-        if (m_videoRecorder && m_videoRecorder->isRecording())
-            m_videoRecorder->captureFrame();
-
         if (ImGui::IsKeyPressed(ImGuiKey_F1))
             m_visible = !m_visible;
         if (!m_visible) return;
 
-        // Main Application window: Scene (left) + Inspector (right)
         ImGui::SetNextWindowSize(ImVec2(680, 580), ImGuiCond_FirstUseEver);
         ImGui::SetNextWindowPos(ImVec2(10, 30),   ImGuiCond_FirstUseEver);
         if (!ImGui::Begin("Application##debug_ui")) { ImGui::End(); return; }
@@ -81,16 +74,6 @@ public:
         ImGui::EndChild();
 
         ImGui::End();
-
-        // Append Recording section into the Engine window (alongside Graphics).
-        // ImGui allows multiple Begin("Engine") calls per frame — content merges.
-        if (m_videoRecorder) {
-            if (ImGui::Begin("Engine")) {
-                if (ImGui::CollapsingHeader("Recording", ImGuiTreeNodeFlags_DefaultOpen))
-                    drawRecordingSection();
-            }
-            ImGui::End();
-        }
 #endif
     }
 
@@ -149,14 +132,6 @@ public:
         m_gltfOptimized = optimized;
     }
 
-    void attachVideoRecorder(VideoRecorder& recorder, Renderer& renderer,
-                             const std::string& baseOutputDir = "output") {
-        m_videoRecorder    = &recorder;
-        m_recorderRenderer = &renderer;
-        m_recordingBaseDir = baseOutputDir;
-        refreshRecordingPath();
-    }
-
     void selectEntity(entt::entity entity) { m_selected = entity; }
     entt::entity getSelectedEntity() const  { return m_selected; }
 
@@ -188,14 +163,6 @@ private:
     bool m_gltfOptimized            = true;
     std::string m_saveStatus;
     bool m_saveOk                   = true;
-
-    // Recording section state
-    VideoRecorder* m_videoRecorder          = nullptr;
-    Renderer*      m_recorderRenderer       = nullptr;
-    std::string    m_recordingBaseDir       = "output";
-    char           m_recordingOutputBuf[256] = {};
-    std::string    m_recordingStatus;
-    std::chrono::steady_clock::time_point m_recordingStartTime;
 
     // -------------------------------------------------------------------------
     // Left panel — entity list content
@@ -320,62 +287,6 @@ private:
 
     // -------------------------------------------------------------------------
     // Recording section
-    // -------------------------------------------------------------------------
-    void refreshRecordingPath() {
-        auto now = std::chrono::system_clock::now();
-        std::time_t t = std::chrono::system_clock::to_time_t(now);
-        std::tm tm{};
-#ifdef _WIN32
-        localtime_s(&tm, &t);
-#else
-        localtime_r(&t, &tm);
-#endif
-        char filename[64];
-        std::strftime(filename, sizeof(filename), "recording_%Y%m%d_%H%M%S.mp4", &tm);
-        std::string path = (std::filesystem::path(m_recordingBaseDir) / filename).string();
-        strncpy(m_recordingOutputBuf, path.c_str(), sizeof(m_recordingOutputBuf) - 1);
-        m_recordingOutputBuf[sizeof(m_recordingOutputBuf) - 1] = '\0';
-    }
-
-    void drawRecordingSection() {
-        ImGui::TextDisabled("Recording");
-        ImGui::SetNextItemWidth(-1.0f);
-        ImGui::InputText("##recpath", m_recordingOutputBuf, sizeof(m_recordingOutputBuf));
-
-        const bool isRecording = m_videoRecorder->isRecording();
-        if (!isRecording) {
-            ImGui::PushStyleColor(ImGuiCol_Button, ImVec4(0.15f, 0.55f, 0.15f, 1.0f));
-            if (ImGui::Button("Start##rec", ImVec2(-1.0f, 0.0f))) {
-                std::error_code ec;
-                std::filesystem::create_directories(
-                    std::filesystem::path(m_recordingOutputBuf).parent_path(), ec);
-                VideoRecorder::Config cfg;
-                cfg.outputPath = m_recordingOutputBuf;
-                if (m_videoRecorder->startRecording(m_recorderRenderer, cfg)) {
-                    m_recordingStartTime = std::chrono::steady_clock::now();
-                    m_recordingStatus.clear();
-                } else {
-                    m_recordingStatus = "Failed to start (FFmpeg unavailable?)";
-                }
-            }
-            ImGui::PopStyleColor();
-        } else {
-            ImGui::PushStyleColor(ImGuiCol_Button, ImVec4(0.7f, 0.1f, 0.1f, 1.0f));
-            if (ImGui::Button("Stop##rec", ImVec2(-1.0f, 0.0f))) {
-                m_videoRecorder->stopRecording();
-                m_recordingStatus = fmt::format("Saved: {}", m_recordingOutputBuf);
-                refreshRecordingPath();
-            }
-            ImGui::PopStyleColor();
-            auto elapsed = std::chrono::steady_clock::now() - m_recordingStartTime;
-            auto secs    = std::chrono::duration_cast<std::chrono::seconds>(elapsed).count();
-            ImGui::TextColored(ImVec4(1.0f, 0.35f, 0.35f, 1.0f),
-                               "REC  %02lld:%02lld", secs / 60, secs % 60);
-        }
-        if (!m_recordingStatus.empty())
-            ImGui::TextDisabled("%s", m_recordingStatus.c_str());
-    }
-
     // -------------------------------------------------------------------------
     // Helpers
     // -------------------------------------------------------------------------
