@@ -26,9 +26,9 @@ namespace Vapor {
         glm::vec3 position = glm::vec3(0.0f);
         glm::quat rotation = glm::quat(1.0f, 0.0f, 0.0f, 0.0f);
         glm::vec3 scale = glm::vec3(1.0f);
-        Hidden<glm::mat4> worldTransform = {glm::mat4(1.0f)}; // computed by TransformSystem
-        entt::entity      parent = entt::null;                 // shown read-only in inspector
-        Hidden<bool>      isDirty = {true};                    // internal dirty flag
+        glm::mat4    worldTransform = glm::mat4(1.0f);  // computed; mat4 skipped by inspector
+        entt::entity parent = entt::null;               // shown read-only in inspector
+        Hidden<bool> isDirty = {true};                  // internal bool hidden from inspector
     };
 
     struct Mesh;
