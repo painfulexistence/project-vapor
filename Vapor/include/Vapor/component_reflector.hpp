@@ -1,4 +1,5 @@
 #pragma once
+#include "Vapor/hidden.hpp"
 #include "Vapor/physics_3d.hpp"
 #include "imgui.h"
 #include <boost/pfr.hpp>
@@ -24,7 +25,10 @@ template<typename T>
 bool drawField(std::string_view name, T& value) {
     using V = std::remove_cvref_t<T>;
 
-    if constexpr (std::is_same_v<V, float>) {
+    if constexpr (is_hidden_v<V>) {
+        return false; // Hidden<T> — skip silently
+
+    } else if constexpr (std::is_same_v<V, float>) {
         return ImGui::DragFloat(name.data(), &value, 0.01f);
 
     } else if constexpr (std::is_same_v<V, double>) {
