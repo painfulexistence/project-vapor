@@ -12,6 +12,9 @@
 
 namespace Vapor {
 
+// Forward declaration for mutual recursion between drawField and drawComponentFields.
+template<typename T> bool drawComponentFields(T& comp);
+
 // ---------------------------------------------------------------------------
 // drawField — draw one named field with an appropriate ImGui widget.
 // Returns true if the value was modified.
@@ -80,8 +83,17 @@ bool drawField(std::string_view name, T& value) {
         if (ImGui::DragInt(name.data(), &i)) { value = static_cast<V>(i); return true; }
         return false;
 
+    } else if constexpr (std::is_aggregate_v<V> && !std::is_array_v<V>) {
+        // Nested aggregate struct — recurse into its fields under a tree node.
+        bool changed = false;
+        if (ImGui::TreeNodeEx(name.data(), ImGuiTreeNodeFlags_DefaultOpen))  {
+            changed = drawComponentFields(value);
+            ImGui::TreePop();
+        }
+        return changed;
+
     } else {
-        // Pointer, vector, unique_ptr, mat4, etc. — skip silently.
+        // Pointer, vector, unique_ptr, etc. — skip silently.
         (void)name; (void)value;
         return false;
     }
@@ -94,16 +106,19 @@ bool drawField(std::string_view name, T& value) {
 // guarded by std::is_aggregate_v and produce no output.
 // ---------------------------------------------------------------------------
 template<typename T>
-void drawComponentFields(T& comp) {
+bool drawComponentFields(T& comp) {
     if constexpr (std::is_aggregate_v<T> && !std::is_array_v<T>) {
         constexpr size_t N = boost::pfr::tuple_size_v<T>;
+        bool changed = false;
         [&]<size_t... Is>(std::index_sequence<Is...>) {
-            (drawField(
+            ((changed |= drawField(
                 boost::pfr::get_name<Is, T>(),
                 boost::pfr::get<Is>(comp)
-            ), ...);
+            )), ...);
         }(std::make_index_sequence<N>{});
+        return changed;
     }
+    return false;
 }
 
 } // namespace Vapor
