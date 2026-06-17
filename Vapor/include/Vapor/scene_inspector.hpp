@@ -82,12 +82,13 @@ public:
 
         ImGui::End();
 
-        // Recording panel — standalone window, dockable near Graphics
+        // Append Recording section into the Engine window (alongside Graphics).
+        // ImGui allows multiple Begin("Engine") calls per frame — content merges.
         if (m_videoRecorder) {
-            ImGui::SetNextWindowSize(ImVec2(300, 120), ImGuiCond_FirstUseEver);
-            ImGui::SetNextWindowPos(ImVec2(700, 30),  ImGuiCond_FirstUseEver);
-            if (ImGui::Begin("Recording##rec_panel"))
-                drawRecordingSection();
+            if (ImGui::Begin("Engine")) {
+                if (ImGui::CollapsingHeader("Recording", ImGuiTreeNodeFlags_DefaultOpen))
+                    drawRecordingSection();
+            }
             ImGui::End();
         }
 #endif
