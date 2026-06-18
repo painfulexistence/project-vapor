@@ -4605,7 +4605,10 @@ auto Renderer_Metal::draw(std::shared_ptr<Scene> scene, Camera& camera) -> void 
             ImGui::TreePop();
         }
     }
-    
+
+    if (m_engineWindowCallback)
+        m_engineWindowCallback();
+
     ImGui::End();
 
     if (m_imGuiCallback) {
