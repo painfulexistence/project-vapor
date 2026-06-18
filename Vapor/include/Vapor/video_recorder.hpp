@@ -1,9 +1,12 @@
 #pragma once
 
 #include "renderer.hpp"
+#include "imgui.h"
 #include <atomic>
 #include <chrono>
 #include <condition_variable>
+#include <filesystem>
+#include <fmt/core.h>
 #include <memory>
 #include <mutex>
 #include <queue>
@@ -53,6 +56,48 @@ public:
     // Drops frames silently if the encoder queue is full.
     void captureFrame();
 
+    // Set the directory where timestamped recordings are saved.
+    void setBaseOutputDir(const std::string& dir) {
+        m_baseOutputDir = dir;
+        refreshOutputPath();
+    }
+
+    // Draw the recording section inside whatever ImGui window is currently open.
+    void drawImGui(Renderer& renderer) {
+        ImGui::SetNextItemWidth(-1.0f);
+        ImGui::InputText("##recpath", m_outputBuf, sizeof(m_outputBuf));
+
+        if (!isRecording()) {
+            ImGui::PushStyleColor(ImGuiCol_Button, ImVec4(0.15f, 0.55f, 0.15f, 1.0f));
+            if (ImGui::Button("Start##rec", ImVec2(-1.0f, 0.0f))) {
+                std::error_code ec;
+                std::filesystem::create_directories(
+                    std::filesystem::path(m_outputBuf).parent_path(), ec);
+                Config cfg;
+                cfg.outputPath = m_outputBuf;
+                if (startRecording(&renderer, cfg))
+                    m_status.clear();
+                else
+                    m_status = "Failed to start (FFmpeg unavailable?)";
+            }
+            ImGui::PopStyleColor();
+        } else {
+            ImGui::PushStyleColor(ImGuiCol_Button, ImVec4(0.7f, 0.1f, 0.1f, 1.0f));
+            if (ImGui::Button("Stop##rec", ImVec2(-1.0f, 0.0f))) {
+                stopRecording();
+                m_status = fmt::format("Saved: {}", m_outputBuf);
+                refreshOutputPath();
+            }
+            ImGui::PopStyleColor();
+            auto elapsed = std::chrono::steady_clock::now() - m_recordingStart;
+            auto secs    = std::chrono::duration_cast<std::chrono::seconds>(elapsed).count();
+            ImGui::TextColored(ImVec4(1.0f, 0.35f, 0.35f, 1.0f),
+                               "REC  %02d:%02d", (int)(secs / 60), (int)(secs % 60));
+        }
+        if (!m_status.empty())
+            ImGui::TextDisabled("%s", m_status.c_str());
+    }
+
 private:
     struct RawFrame {
         std::vector<uint8_t> pixels;
@@ -69,6 +114,27 @@ private:
     void flushEncoder();
     void cleanup();
     void encoderThreadFunc();
+
+    // UI state (only used when drawImGui() is called)
+    std::string m_baseOutputDir = "output";
+    char        m_outputBuf[256] = {};
+    std::string m_status;
+
+    void refreshOutputPath() {
+        auto now  = std::chrono::system_clock::now();
+        auto t    = std::chrono::system_clock::to_time_t(now);
+        std::tm tm{};
+#ifdef _WIN32
+        localtime_s(&tm, &t);
+#else
+        localtime_r(&t, &tm);
+#endif
+        char filename[64];
+        std::strftime(filename, sizeof(filename), "recording_%Y%m%d_%H%M%S.mp4", &tm);
+        auto path = (std::filesystem::path(m_baseOutputDir) / filename).string();
+        strncpy(m_outputBuf, path.c_str(), sizeof(m_outputBuf) - 1);
+        m_outputBuf[sizeof(m_outputBuf) - 1] = '\0';
+    }
 
     Renderer* m_renderer = nullptr;
     Config m_config;

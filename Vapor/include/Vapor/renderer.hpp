@@ -169,6 +169,13 @@ public:
     // 2D/3D Batch Rendering API
     // ========================================================================
 
+    // Register a callback invoked inside the Engine ImGui window each frame,
+    // after the built-in Graphics section. Use this to append engine-level
+    // panels (e.g. Recording) without re-opening the window from outside.
+    void setEngineWindowCallback(std::function<void()> callback) {
+        m_engineWindowCallback = std::move(callback);
+    }
+
     // Manual flush (for controlling draw order)
     void flush2D();
     void flush3D();
@@ -598,8 +605,14 @@ private:
     // Frame state
     Uint32 currentFrameInFlight = 0;
     Uint32 frameNumber = 0;
+<<<<<<< HEAD
     float time = 0.0f;
     float deltaTime = 0.016f;
+=======
+    bool isInitialized = false;
+    std::function<void()> m_imGuiCallback;
+    std::function<void()> m_engineWindowCallback;
+>>>>>>> origin/main
 
     // Stats
     Uint32 drawCount = 0;

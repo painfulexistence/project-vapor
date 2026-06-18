@@ -38,210 +38,96 @@
 #include "systems.hpp"
 
 static void setupCustomDrawers(Vapor::SceneInspector& inspector) {
-    // 1. PointLightComponent
-    inspector.registerCustomDrawer([](entt::registry& reg, entt::entity e) {
-        if (auto* c = reg.try_get<PointLightComponent>(e)) {
-            if (ImGui::CollapsingHeader("Point Light")) {
-                ImGui::ColorEdit3("Color", &c->color.x);
-                ImGui::DragFloat("Intensity", &c->intensity, 0.1f, 0.0f, 100.0f);
-                ImGui::DragFloat("Radius", &c->radius, 0.05f, 0.01f, 50.0f);
-            }
-        }
-    });
+    // Register app-specific components for auto field-by-field drawing.
+    inspector.registerComponent<PointLightComponent>("Point Light");
+    inspector.registerComponent<DirectionalLightComponent>("Directional Light");
+    inspector.registerComponent<CharacterIntent>("Character Intent");
+    inspector.registerComponent<CharacterControllerComponent>("Character Controller");
+    inspector.registerComponent<GrabbableComponent>("Grabbable");
+    inspector.registerComponent<FirstPersonCameraComponent>("First Person Camera");
+    inspector.registerComponent<AutoRotateComponent>("Auto Rotate");
+    inspector.registerComponent<DirectionalLightLogicComponent>("Directional Light Logic");
+    inspector.registerComponent<ChapterTitleComponent>("Chapter Title");
+    inspector.registerComponent<ChapterTitleTriggerComponent>("Chapter Title Trigger");
+    inspector.registerComponent<SceneTransitionComponent>("Scene Transition");
+    inspector.registerComponent<ScrollTextQueueComponent>("Scroll Text Queue");
 
-    // 2. DirectionalLightComponent
-    inspector.registerCustomDrawer([](entt::registry& reg, entt::entity e) {
-        if (auto* c = reg.try_get<DirectionalLightComponent>(e)) {
-            if (ImGui::CollapsingHeader("Directional Light")) {
-                ImGui::DragFloat3("Direction", &c->direction.x, 0.01f, -1.0f, 1.0f);
-                ImGui::ColorEdit3("Color", &c->color.x);
-                ImGui::DragFloat("Intensity", &c->intensity, 0.1f, 0.0f, 100.0f);
-            }
-        }
-    });
-
-    // 3. CharacterIntent
-    inspector.registerCustomDrawer([](entt::registry& reg, entt::entity e) {
-        if (auto* c = reg.try_get<CharacterIntent>(e)) {
-            if (ImGui::CollapsingHeader("Character Intent")) {
-                ImGui::LabelText("Look Vector", "(%.2f, %.2f)", c->lookVector.x, c->lookVector.y);
-                ImGui::LabelText("Move Vector", "(%.2f, %.2f)", c->moveVector.x, c->moveVector.y);
-                ImGui::LabelText("Vertical Axis", "%.2f", c->moveVerticalAxis);
-                ImGui::LabelText("Jump", c->jump ? "true" : "false");
-                ImGui::LabelText("Sprint", c->sprint ? "true" : "false");
-                ImGui::LabelText("Interact", c->interact ? "true" : "false");
-            }
-        }
-    });
-
-    // 4. CharacterControllerComponent
-    inspector.registerCustomDrawer([](entt::registry& reg, entt::entity e) {
-        if (auto* c = reg.try_get<CharacterControllerComponent>(e)) {
-            if (ImGui::CollapsingHeader("Character Controller")) {
-                ImGui::DragFloat("Move Speed", &c->moveSpeed, 0.1f, 0.1f, 50.0f);
-                ImGui::DragFloat("Rotate Speed", &c->rotateSpeed, 1.0f, 1.0f, 360.0f);
-            }
-        }
-    });
-
-    // 5. GrabbableComponent
-    inspector.registerCustomDrawer([](entt::registry& reg, entt::entity e) {
-        if (auto* c = reg.try_get<GrabbableComponent>(e)) {
-            if (ImGui::CollapsingHeader("Grabbable")) {
-                ImGui::DragFloat("Pickup Range", &c->pickupRange, 0.1f, 0.0f, 50.0f);
-                ImGui::DragFloat("Hold Offset", &c->holdOffset, 0.1f, 0.0f, 20.0f);
-                ImGui::DragFloat("Throw Force", &c->throwForce, 10.0f, 0.0f, 5000.0f);
-                ImGui::Checkbox("Is Held", &c->isHeld);
-            }
-        }
-    });
-
-    // 6. LightMovementLogicComponent
+    // LightMovementLogicComponent — keep custom drawer for the named Pattern combo.
     inspector.registerCustomDrawer([](entt::registry& reg, entt::entity e) {
         if (auto* c = reg.try_get<LightMovementLogicComponent>(e)) {
-            if (ImGui::CollapsingHeader("Light Movement Logic")) {
+            if (ImGui::CollapsingHeader("Light Movement Logic", ImGuiTreeNodeFlags_DefaultOpen)) {
                 const char* patterns[] = { "Circle", "Figure8", "Linear", "Spiral" };
                 int p = static_cast<int>(c->pattern);
-                if (ImGui::Combo("Pattern", &p, patterns, 4))
+                if (ImGui::Combo("pattern", &p, patterns, 4))
                     c->pattern = static_cast<MovementPattern>(p);
-                ImGui::DragFloat("Speed", &c->speed, 0.01f);
-                ImGui::DragFloat("Radius", &c->radius, 0.1f, 0.0f, 100.0f);
-                ImGui::DragFloat("Height", &c->height, 0.1f, -50.0f, 50.0f);
-                ImGui::LabelText("Timer", "%.2f", c->timer);
+                ImGui::DragFloat("speed",      &c->speed,  0.01f);
+                ImGui::DragFloat("radius",     &c->radius, 0.1f, 0.0f, 100.0f);
+                ImGui::DragFloat("height",     &c->height, 0.1f, -50.0f, 50.0f);
+                ImGui::LabelText("timer", "%.2f", c->timer);
             }
         }
     });
 
-    // 7. FirstPersonCameraComponent
-    inspector.registerCustomDrawer([](entt::registry& reg, entt::entity e) {
-        if (auto* c = reg.try_get<FirstPersonCameraComponent>(e)) {
-            if (ImGui::CollapsingHeader("First Person Camera")) {
-                ImGui::DragFloat("Move Speed", &c->moveSpeed, 0.1f, 0.1f, 50.0f);
-                ImGui::DragFloat("Rotate Speed", &c->rotateSpeed, 1.0f, 1.0f, 360.0f);
-                ImGui::DragFloat("Yaw", &c->yaw, 0.5f);
-                ImGui::DragFloat("Pitch", &c->pitch, 0.5f, -89.0f, 89.0f);
-            }
-        }
-    });
-
-    // 8. CameraSwitchRequest
+    // CameraSwitchRequest — named combo for mode enum.
     inspector.registerCustomDrawer([](entt::registry& reg, entt::entity e) {
         if (auto* c = reg.try_get<CameraSwitchRequest>(e)) {
-            if (ImGui::CollapsingHeader("Camera Switch Request")) {
+            if (ImGui::CollapsingHeader("Camera Switch Request", ImGuiTreeNodeFlags_DefaultOpen)) {
                 const char* modes[] = { "Free", "Follow", "FirstPerson" };
                 int m = static_cast<int>(c->mode);
-                if (ImGui::Combo("Mode", &m, modes, 3))
+                if (ImGui::Combo("mode", &m, modes, 3))
                     c->mode = static_cast<CameraSwitchRequest::Mode>(m);
             }
         }
     });
 
-    // 9. AutoRotateComponent
-    inspector.registerCustomDrawer([](entt::registry& reg, entt::entity e) {
-        if (auto* c = reg.try_get<AutoRotateComponent>(e)) {
-            if (ImGui::CollapsingHeader("Auto Rotate")) {
-                ImGui::DragFloat3("Axis", &c->axis.x, 0.01f, -1.0f, 1.0f);
-                ImGui::DragFloat("Speed", &c->speed, 0.05f);
-            }
-        }
-    });
-
-    // 10. DirectionalLightLogicComponent
-    inspector.registerCustomDrawer([](entt::registry& reg, entt::entity e) {
-        if (auto* c = reg.try_get<DirectionalLightLogicComponent>(e)) {
-            if (ImGui::CollapsingHeader("Directional Light Logic")) {
-                ImGui::DragFloat3("Base Dir", &c->baseDirection.x, 0.01f, -1.0f, 1.0f);
-                ImGui::DragFloat("Speed", &c->speed, 0.05f);
-                ImGui::DragFloat("Magnitude", &c->magnitude, 0.005f, 0.0f, 1.0f);
-                ImGui::LabelText("Timer", "%.2f", c->timer);
-            }
-        }
-    });
-
-    // 11. SubtitleQueueComponent + FSM
+    // SubtitleQueueComponent — cross-component FSM state lookup.
     inspector.registerCustomDrawer([](entt::registry& reg, entt::entity e) {
         if (auto* c = reg.try_get<SubtitleQueueComponent>(e)) {
-            if (ImGui::CollapsingHeader("Subtitle Queue Component")) {
-                ImGui::LabelText("Queue Size", "%zu", c->queue.size());
-                ImGui::LabelText("Current Index", "%d", c->currentIndex);
-                ImGui::Checkbox("Advance Requested", &c->advanceRequested);
-                ImGui::Checkbox("Auto Advance", &c->autoAdvance);
+            if (ImGui::CollapsingHeader("Subtitle Queue", ImGuiTreeNodeFlags_DefaultOpen)) {
+                ImGui::LabelText("queue size",       "%zu", c->queue.size());
+                ImGui::LabelText("currentIndex",     "%d",  c->currentIndex);
+                ImGui::Checkbox("advanceRequested",  &c->advanceRequested);
+                ImGui::Checkbox("autoAdvance",       &c->autoAdvance);
+                ImGui::LabelText("displayTimer",     "%.2f", c->displayTimer);
                 if (auto* fsm = reg.try_get<Vapor::FSMStateComponent>(e)) {
-                    const char* states[] = { "Idle", "WaitingForVisible", "Displaying", "WaitingForHidden" };
-                    ImGui::LabelText("State", "%s", states[fsm->currentState]);
-                    ImGui::LabelText("State Time", "%.2f", fsm->stateTime);
+                    const char* states[] = {
+                        "Idle", "WaitingForVisible", "Displaying", "WaitingForHidden"
+                    };
+                    ImGui::LabelText("FSM state", "%s", states[fsm->currentState]);
+                    ImGui::LabelText("FSM time",  "%.2f", fsm->stateTime);
                 }
-                ImGui::LabelText("Display Timer", "%.2f", c->displayTimer);
             }
         }
     });
 
-    // 12. ScrollTextQueueComponent
-    inspector.registerCustomDrawer([](entt::registry& reg, entt::entity e) {
-        if (auto* c = reg.try_get<ScrollTextQueueComponent>(e)) {
-            if (ImGui::CollapsingHeader("Scroll Text Queue")) {
-                ImGui::LabelText("Lines Count", "%zu", c->lines.size());
-                ImGui::LabelText("Current Index", "%d", c->currentIndex);
-                ImGui::Checkbox("Advance Requested", &c->advanceRequested);
-            }
-        }
-    });
-
-    // 13. ChapterTitleTriggerComponent
-    inspector.registerCustomDrawer([](entt::registry& reg, entt::entity e) {
-        if (auto* c = reg.try_get<ChapterTitleTriggerComponent>(e)) {
-            if (ImGui::CollapsingHeader("Chapter Title Trigger")) {
-                ImGui::LabelText("Num", "%s", c->number.c_str());
-                ImGui::LabelText("Title", "%s", c->title.c_str());
-                ImGui::Checkbox("Show Requested", &c->showRequested);
-            }
-        }
-    });
-
-    // 14. SceneTransitionComponent + FSM
+    // SceneTransitionComponent — FSM state + progress bar.
     inspector.registerCustomDrawer([](entt::registry& reg, entt::entity e) {
         if (auto* c = reg.try_get<SceneTransitionComponent>(e)) {
-            if (ImGui::CollapsingHeader("Scene Transition")) {
-                ImGui::LabelText("Target Scene", "%s", c->targetScene.c_str());
+            if (ImGui::CollapsingHeader("Scene Transition (FSM)", ImGuiTreeNodeFlags_DefaultOpen)) {
                 if (auto* fsm = reg.try_get<Vapor::FSMStateComponent>(e)) {
-                    const char* states[] = { "Idle", "FadingInLoadingScreen", "UnloadingScene", "LoadingAssets", "BuildingScene", "FadingOutLoadingScreen" };
-                    ImGui::LabelText("State", "%s", states[fsm->currentState]);
+                    const char* states[] = {
+                        "Idle", "FadingInLoadingScreen", "UnloadingScene",
+                        "LoadingAssets", "BuildingScene", "FadingOutLoadingScreen"
+                    };
+                    ImGui::LabelText("state", "%s", states[fsm->currentState]);
                 }
                 ImGui::ProgressBar(c->progress);
             }
         }
     });
 
-    // 15. PersistentTag
+    // Tag components — colored bullet headers (no fields).
     inspector.registerCustomDrawer([](entt::registry& reg, entt::entity e) {
         if (reg.all_of<PersistentTag>(e)) {
             ImGui::PushStyleColor(ImGuiCol_Header, ImVec4(0.2f, 0.4f, 0.2f, 1.0f));
             ImGui::CollapsingHeader("PersistentTag", ImGuiTreeNodeFlags_Leaf | ImGuiTreeNodeFlags_Bullet);
             ImGui::PopStyleColor();
         }
-    });
-
-    // 16. DeadTag
-    inspector.registerCustomDrawer([](entt::registry& reg, entt::entity e) {
         if (reg.all_of<DeadTag>(e)) {
             ImGui::PushStyleColor(ImGuiCol_Header, ImVec4(0.5f, 0.1f, 0.1f, 1.0f));
             ImGui::CollapsingHeader("DeadTag", ImGuiTreeNodeFlags_Leaf | ImGuiTreeNodeFlags_Bullet);
             ImGui::PopStyleColor();
         }
-    });
-
-    // Custom menu drawers
-    inspector.registerCustomMenuDrawer([](entt::registry& reg, entt::entity e) {
-        auto tryAdd = [&]<typename T>(const char* label) {
-            if (!reg.all_of<T>(e) && ImGui::MenuItem(label)) {
-                reg.emplace<T>(e);
-                ImGui::CloseCurrentPopup();
-            }
-        };
-        tryAdd.operator()<AutoRotateComponent>("Auto Rotate");
-        tryAdd.operator()<GrabbableComponent>("Grabbable");
-        tryAdd.operator()<CharacterControllerComponent>("Character Controller");
-        tryAdd.operator()<CharacterIntent>("Character Intent");
     });
 }
 
@@ -443,16 +329,25 @@ auto main(int argc, char* args[]) -> int {
 
     entt::registry registry;
 
+    // Wire recording UI into the Engine window via the engine-window callback.
+    // captureFrame() is called here each frame so recording continues even
+    // when the inspector overlay is hidden (F1 toggled off).
     {
-        // SDL_GetBasePath() returns the exe directory with a trailing separator.
-        // Recordings go into <exe_dir>/output/.
         const char* basePath = SDL_GetBasePath();
         std::string outputDir = basePath ? std::string(basePath) + "output" : "output";
-        sceneInspector.attachVideoRecorder(videoRecorder, *renderer, outputDir);
+        videoRecorder.setBaseOutputDir(outputDir);
     }
-    
-    renderer->setImGuiCallback([&]() { 
-        sceneInspector.draw(registry); 
+    renderer->setEngineWindowCallback([&]() {
+#ifndef NDEBUG
+        if (videoRecorder.isRecording())
+            videoRecorder.captureFrame();
+        if (ImGui::CollapsingHeader("Recording", ImGuiTreeNodeFlags_DefaultOpen))
+            videoRecorder.drawImGui(*renderer);
+#endif
+    });
+
+    renderer->setImGuiCallback([&]() {
+        sceneInspector.draw(registry);
     });
 
     auto [sceneBuilt, materialBuilt, cube1, global] =
