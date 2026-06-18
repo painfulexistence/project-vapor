@@ -70,11 +70,20 @@ bool RHI_Metal::initialize(SDL_Window* window) {
         return false;
     }
 
-    // Get swapchain dimensions
+    // Get swapchain dimensions in PIXELS (not logical points).
+    // On HiDPI/Retina displays the backing scale is >1, so the window's pixel
+    // size is larger than its logical size. The Metal drawable works in pixels;
+    // using logical points here would size the drawable to a fraction of the
+    // layer (e.g. 1/4 on a 2x display), rendering only the top-left corner and
+    // leaving the rest showing stale/garbage content.
     int width, height;
-    SDL_GetWindowSize(window, &width, &height);
+    SDL_GetWindowSizeInPixels(window, &width, &height);
     swapchainWidth = static_cast<Uint32>(width);
     swapchainHeight = static_cast<Uint32>(height);
+
+    // Pin the layer's drawable size to the pixel dimensions so the drawable,
+    // viewport and render targets all agree.
+    swapchain->setDrawableSize(CGSize{ static_cast<CGFloat>(width), static_cast<CGFloat>(height) });
 
     return true;
 }
