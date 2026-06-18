@@ -50,6 +50,11 @@ bool RHI_Metal::initialize(SDL_Window* window) {
     // Configure swapchain
     swapchain->setPixelFormat(MTL::PixelFormatRGBA8Unorm_sRGB);
     swapchain->setColorspace(CGColorSpaceCreateWithName(kCGColorSpaceSRGB));
+    // Allow reading back the drawable (e.g. screenshot blit). CAMetalLayer
+    // drawables default to framebufferOnly=YES, which forbids using them as a
+    // blit/copy source and triggers a Metal validation assertion (crash) in
+    // copySwapchainToBuffer().
+    swapchain->setFramebufferOnly(false);
 
     // Get device from swapchain
     device = swapchain->device();
@@ -508,6 +513,18 @@ BufferHandle RHI_Metal::copySwapchainToBuffer(Uint32& outWidth, Uint32& outHeigh
     if (!buffer) {
         fmt::print(stderr, "Failed to create screenshot buffer\n");
         return BufferHandle{};
+    }
+
+    // A command buffer may only have one active encoder at a time. End any
+    // render/compute encoder still open before creating the blit encoder,
+    // otherwise Metal raises a validation assertion (crash).
+    if (currentRenderEncoder) {
+        currentRenderEncoder->endEncoding();
+        currentRenderEncoder = nullptr;
+    }
+    if (currentComputeEncoder) {
+        currentComputeEncoder->endEncoding();
+        currentComputeEncoder = nullptr;
     }
 
     // Create blit encoder to copy texture to buffer
