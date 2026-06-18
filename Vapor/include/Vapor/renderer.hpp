@@ -605,14 +605,11 @@ private:
     // Frame state
     Uint32 currentFrameInFlight = 0;
     Uint32 frameNumber = 0;
-<<<<<<< HEAD
     float time = 0.0f;
     float deltaTime = 0.016f;
-=======
     bool isInitialized = false;
     std::function<void()> m_imGuiCallback;
     std::function<void()> m_engineWindowCallback;
->>>>>>> origin/main
 
     // Stats
     Uint32 drawCount = 0;
