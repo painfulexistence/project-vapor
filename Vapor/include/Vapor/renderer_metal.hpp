@@ -460,7 +460,7 @@ protected:
     // Light scattering (God Rays) resources
     std::vector<NS::SharedPtr<MTL::Buffer>> lightScatteringDataBuffers;
     NS::SharedPtr<MTL::Texture> lightScatteringRT;// Half-resolution scattering texture
-    bool lightScatteringEnabled = true;
+    bool lightScatteringEnabled = false;
     LightScatteringData lightScatteringSettings;
 
     // Volumetric Fog resources
@@ -471,7 +471,7 @@ protected:
     std::vector<NS::SharedPtr<MTL::Buffer>> volumetricFogDataBuffers;
     NS::SharedPtr<MTL::Texture> fogFroxelGrid;// 3D froxel data texture
     NS::SharedPtr<MTL::Texture> fogIntegratedVolume;// 3D integrated scattering
-    bool volumetricFogEnabled = true;
+    bool volumetricFogEnabled = false;
     VolumetricFogData volumetricFogSettings;
 
     // Volumetric Cloud resources
