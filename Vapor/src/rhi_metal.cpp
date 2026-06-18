@@ -770,6 +770,20 @@ void RHI_Metal::setStorageBuffer(Uint32 set, Uint32 binding, BufferHandle buffer
     }
 }
 
+void RHI_Metal::setVertexBuffer(Uint32 binding, BufferHandle buffer, size_t offset, size_t range) {
+    auto it = buffers.find(buffer.id);
+    if (it != buffers.end() && currentRenderEncoder) {
+        currentRenderEncoder->setVertexBuffer(it->second.buffer.get(), offset, binding);
+    }
+}
+
+void RHI_Metal::setFragmentBuffer(Uint32 binding, BufferHandle buffer, size_t offset, size_t range) {
+    auto it = buffers.find(buffer.id);
+    if (it != buffers.end() && currentRenderEncoder) {
+        currentRenderEncoder->setFragmentBuffer(it->second.buffer.get(), offset, binding);
+    }
+}
+
 void RHI_Metal::setTexture(Uint32 set, Uint32 binding, TextureHandle texture, SamplerHandle sampler) {
     auto texIt = textures.find(texture.id);
     auto samplerIt = samplers.find(sampler.id);

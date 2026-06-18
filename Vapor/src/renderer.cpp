@@ -714,28 +714,33 @@ void Renderer::mainRenderPass() {
     // Bind pipeline
     rhi->bindPipeline(mainPipeline);
 
-    // Bind common buffers (same for all drawables)
-    // Vertex buffers (matching old renderer):
+    // Bind common buffers (same for all drawables).
+    // IMPORTANT: vertex and fragment shaders have INDEPENDENT buffer index
+    // namespaces (Metal). We must bind per-stage, otherwise a fragment binding
+    // would clobber the vertex binding at the same index (e.g. fragment lights
+    // at index 0 overwriting the vertex camera at index 0), corrupting the
+    // vertex transform and producing scattered-line artifacts.
+    // Vertex buffers:
     // Binding 0: CameraData
-    rhi->setUniformBuffer(0, 0, cameraUniformBuffer, 0, sizeof(CameraRenderData));
+    rhi->setVertexBuffer(0, cameraUniformBuffer, 0, sizeof(CameraRenderData));
     // Binding 1: MaterialData array (all materials)
-    rhi->setUniformBuffer(0, 1, materialUniformBuffer, 0, sizeof(Vapor::MaterialData) * MAX_INSTANCES);
+    rhi->setVertexBuffer(1, materialUniformBuffer, 0, sizeof(Vapor::MaterialData) * MAX_INSTANCES);
     // Binding 2: InstanceData array
     // Note: We only update the buffer with visible drawables, so the size is visibleDrawables.size()
-    rhi->setUniformBuffer(0, 2, instanceDataBuffer, 0, sizeof(Vapor::InstanceData) * visibleDrawables.size());
+    rhi->setVertexBuffer(2, instanceDataBuffer, 0, sizeof(Vapor::InstanceData) * visibleDrawables.size());
 
-    // Fragment buffers (matching old renderer - these are separate from vertex bindings):
+    // Fragment buffers (separate index namespace from vertex bindings):
     // Fragment binding 0: DirectionalLights
     if (directionalLightBuffer.isValid() && !directionalLights.empty()) {
-        rhi->setUniformBuffer(0, 0, directionalLightBuffer, 0, sizeof(DirectionalLightData) * maxDirectionalLights);
+        rhi->setFragmentBuffer(0, directionalLightBuffer, 0, sizeof(DirectionalLightData) * maxDirectionalLights);
     }
     // Fragment binding 1: PointLights
     if (pointLightBuffer.isValid() && !pointLights.empty()) {
-        rhi->setUniformBuffer(0, 1, pointLightBuffer, 0, sizeof(PointLightData) * maxPointLights);
+        rhi->setFragmentBuffer(1, pointLightBuffer, 0, sizeof(PointLightData) * maxPointLights);
     }
     // Fragment binding 2: Clusters (if we have cluster buffer - skip for now)
     // Fragment binding 3: CameraData (for fragment shader)
-    rhi->setUniformBuffer(0, 3, cameraUniformBuffer, 0, sizeof(CameraRenderData));
+    rhi->setFragmentBuffer(3, cameraUniformBuffer, 0, sizeof(CameraRenderData));
 
     // Fragment bytes (matching old renderer):
     glm::vec2 screenSize(static_cast<float>(width), static_cast<float>(height));

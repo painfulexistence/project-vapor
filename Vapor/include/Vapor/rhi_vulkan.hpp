@@ -84,6 +84,9 @@ public:
     void setStorageBuffer(Uint32 set, Uint32 binding, BufferHandle buffer, size_t offset, size_t range) override;
     void setTexture(Uint32 set, Uint32 binding, TextureHandle texture, SamplerHandle sampler) override;
 
+    void setVertexBuffer(Uint32 binding, BufferHandle buffer, size_t offset, size_t range) override;
+    void setFragmentBuffer(Uint32 binding, BufferHandle buffer, size_t offset, size_t range) override;
+
     void setVertexBytes(const void* data, size_t size, Uint32 binding) override;
     void setFragmentBytes(const void* data, size_t size, Uint32 binding) override;
 

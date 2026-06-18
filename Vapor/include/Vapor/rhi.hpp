@@ -367,6 +367,14 @@ public:
     virtual void setStorageBuffer(Uint32 set, Uint32 binding, BufferHandle buffer, size_t offset = 0, size_t range = 0) = 0;
     virtual void setTexture(Uint32 set, Uint32 binding, TextureHandle texture, SamplerHandle sampler) = 0;
 
+    // Stage-specific buffer binding.
+    // Required for backends (e.g. Metal) where vertex and fragment shaders have
+    // independent buffer index namespaces. setUniformBuffer() binds to BOTH stages
+    // at the same index, which collides when a binding means different things per
+    // stage (e.g. vertex buffer(0)=camera vs fragment buffer(0)=lights).
+    virtual void setVertexBuffer(Uint32 binding, BufferHandle buffer, size_t offset = 0, size_t range = 0) = 0;
+    virtual void setFragmentBuffer(Uint32 binding, BufferHandle buffer, size_t offset = 0, size_t range = 0) = 0;
+
     // Direct data binding (for small constants like instanceID)
     virtual void setVertexBytes(const void* data, size_t size, Uint32 binding) = 0;
     virtual void setFragmentBytes(const void* data, size_t size, Uint32 binding) = 0;

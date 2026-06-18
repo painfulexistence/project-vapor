@@ -1045,6 +1045,15 @@ void RHI_Vulkan::setStorageBuffer(Uint32 set, Uint32 binding, BufferHandle buffe
     // TODO: Implement descriptor set binding
 }
 
+void RHI_Vulkan::setVertexBuffer(Uint32 binding, BufferHandle buffer, size_t offset, size_t range) {
+    // TODO: Implement descriptor set binding (Vulkan uses unified descriptor sets;
+    // stage visibility is declared in the pipeline layout, not at bind time)
+}
+
+void RHI_Vulkan::setFragmentBuffer(Uint32 binding, BufferHandle buffer, size_t offset, size_t range) {
+    // TODO: Implement descriptor set binding
+}
+
 void RHI_Vulkan::setVertexBytes(const void* data, size_t size, Uint32 binding) {
     if (currentCommandBuffer && data && size > 0 && currentPipeline.isValid()) {
         auto it = pipelines.find(currentPipeline.id);
