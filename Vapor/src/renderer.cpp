@@ -409,9 +409,6 @@ void Renderer::beginFrame(const CameraRenderData& camera) {
 
 void Renderer::submitDrawable(const Drawable& drawable) {
     frameDrawables.push_back(drawable);
-    fmt::print("submitDrawable: mesh={}, material={}, transform=[{}, {}, {}]\n",
-               drawable.mesh, drawable.material,
-               drawable.transform[3][0], drawable.transform[3][1], drawable.transform[3][2]);
 }
 
 void Renderer::submitDirectionalLight(const DirectionalLightData& light) {
@@ -547,8 +544,6 @@ void Renderer::endFrame() {
 void Renderer::performCulling() {
     Frustum frustum = extractFrustum(currentCamera.proj * currentCamera.view);
 
-    fmt::print("performCulling: frameDrawables.size()={}\n", frameDrawables.size());
-
     Uint32 culledCount = 0;
     for (Uint32 i = 0; i < frameDrawables.size(); ++i) {
         const Drawable& d = frameDrawables[i];
@@ -556,18 +551,8 @@ void Renderer::performCulling() {
             visibleDrawables.push_back(i);
         } else {
             culledCount++;
-            // Debug: print first few culled drawables
-            if (culledCount <= 3) {
-                glm::vec3 pos = glm::vec3(d.transform[3]);
-                fmt::print("Culled drawable {}: mesh={}, transform=[{}, {}, {}], AABB=[({}, {}, {}), ({}, {}, {})]\n",
-                           i, d.mesh, pos.x, pos.y, pos.z,
-                           d.aabbMin.x, d.aabbMin.y, d.aabbMin.z,
-                           d.aabbMax.x, d.aabbMax.y, d.aabbMax.z);
-            }
         }
     }
-
-    fmt::print("performCulling: visibleDrawables.size()={}, culled={}\n", visibleDrawables.size(), culledCount);
 }
 
 void Renderer::sortDrawables() {
