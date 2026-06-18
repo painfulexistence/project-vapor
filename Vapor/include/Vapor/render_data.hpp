@@ -126,14 +126,15 @@ struct RenderMaterial {
 // ============================================================================
 
 struct CameraRenderData {
-    glm::mat4 view;
     glm::mat4 proj;
-    glm::mat4 viewProj;
-    glm::mat4 invView;
+    glm::mat4 view;
     glm::mat4 invProj;
-    glm::vec3 position;
+    glm::mat4 invView;
     float nearPlane;
     float farPlane;
+    float _pad[2];
+    glm::vec3 position;
+    float _pad2;
     glm::vec4 frustumPlanes[6];
 };
 

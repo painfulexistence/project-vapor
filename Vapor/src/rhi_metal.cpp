@@ -624,6 +624,9 @@ void RHI_Metal::beginRenderPass(const RenderPassDesc& desc) {
     // Create render pass descriptor
     auto renderPassDesc = MTL::RenderPassDescriptor::alloc()->init();
 
+    fmt::print("beginRenderPass: currentCommandBuffer={}\n", (void*)currentCommandBuffer.get());
+    fmt::print("beginRenderPass: colorAttachments.size()={}, depthAttachment.id={}\n", desc.colorAttachments.size(), desc.depthAttachment.id);
+
     // Setup color attachments
     for (size_t i = 0; i < desc.colorAttachments.size(); i++) {
         auto colorAttachment = renderPassDesc->colorAttachments()->object(i);
@@ -637,7 +640,10 @@ void RHI_Metal::beginRenderPass(const RenderPassDesc& desc) {
                 renderPassDesc->release();
                 throw std::runtime_error(fmt::format("Failed to find color attachment texture with id {}", desc.colorAttachments[i].id));
             }
-            colorAttachment->setTexture(it->second.texture.get());
+            auto tex = it->second.texture.get();
+            colorAttachment->setTexture(tex);
+            fmt::print("Color Attachment {}: size={}x{}, format={}, usage={}, loadAction={}\n",
+                i, tex->width(), tex->height(), (int)tex->pixelFormat(), (int)tex->usage(), (int)desc.loadColor[i]);
         }
 
         // Load/store operations
@@ -667,6 +673,9 @@ void RHI_Metal::beginRenderPass(const RenderPassDesc& desc) {
             throw std::runtime_error(fmt::format("Failed to find depth attachment texture with id {}", desc.depthAttachment.id));
         }
         depthAttachment->setTexture(it->second.texture.get());
+        auto tex = it->second.texture.get();
+        fmt::print("Depth Attachment: size={}x{}, format={}, usage={}, loadAction={}\n",
+            tex->width(), tex->height(), (int)tex->pixelFormat(), (int)tex->usage(), (int)desc.loadDepth);
 
         if (desc.loadDepth) {
             depthAttachment->setLoadAction(MTL::LoadActionLoad);

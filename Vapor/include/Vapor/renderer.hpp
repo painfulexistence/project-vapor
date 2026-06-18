@@ -164,6 +164,7 @@ public:
 
     // Set ImGui callback (called between NewFrame and Render)
     void setImGuiCallback(std::function<void()> callback);
+    void invokeImGuiCallback() const { if (imGuiCallback) imGuiCallback(); }
 
     // ========================================================================
     // 2D/3D Batch Rendering API

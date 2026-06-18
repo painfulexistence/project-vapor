@@ -227,6 +227,8 @@ struct Mesh {
     std::vector<VertexData> vertices; // interleaved vertex data
     std::vector<Uint32> indices;
     std::shared_ptr<Material> material = nullptr;
+    Uint32 renderMeshId = UINT32_MAX;
+    Uint32 renderMaterialId = UINT32_MAX;
     PrimitiveMode primitiveMode;
     glm::vec3 localAABBMin;
     glm::vec3 localAABBMax;

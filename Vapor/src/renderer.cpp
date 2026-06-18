@@ -202,20 +202,24 @@ MeshId Renderer::registerMesh(const std::vector<Vapor::VertexData>& vertices,
     RenderMesh mesh;
 
     // Create vertex buffer
-    BufferDesc vbDesc;
-    vbDesc.size = vertices.size() * sizeof(Vapor::VertexData);
-    vbDesc.usage = BufferUsage::Vertex;
-    vbDesc.memoryUsage = MemoryUsage::GPU;
-    mesh.vertexBuffer = rhi->createBuffer(vbDesc);
-    rhi->updateBuffer(mesh.vertexBuffer, vertices.data(), 0, vbDesc.size);
+    if (!vertices.empty()) {
+        BufferDesc vbDesc;
+        vbDesc.size = vertices.size() * sizeof(Vapor::VertexData);
+        vbDesc.usage = BufferUsage::Vertex;
+        vbDesc.memoryUsage = MemoryUsage::GPU;
+        mesh.vertexBuffer = rhi->createBuffer(vbDesc);
+        rhi->updateBuffer(mesh.vertexBuffer, vertices.data(), 0, vbDesc.size);
+    }
 
     // Create index buffer
-    BufferDesc ibDesc;
-    ibDesc.size = indices.size() * sizeof(Uint32);
-    ibDesc.usage = BufferUsage::Index;
-    ibDesc.memoryUsage = MemoryUsage::GPU;
-    mesh.indexBuffer = rhi->createBuffer(ibDesc);
-    rhi->updateBuffer(mesh.indexBuffer, indices.data(), 0, ibDesc.size);
+    if (!indices.empty()) {
+        BufferDesc ibDesc;
+        ibDesc.size = indices.size() * sizeof(Uint32);
+        ibDesc.usage = BufferUsage::Index;
+        ibDesc.memoryUsage = MemoryUsage::GPU;
+        mesh.indexBuffer = rhi->createBuffer(ibDesc);
+        rhi->updateBuffer(mesh.indexBuffer, indices.data(), 0, ibDesc.size);
+    }
 
     mesh.indexCount = static_cast<Uint32>(indices.size());
     mesh.vertexCount = static_cast<Uint32>(vertices.size());
@@ -351,6 +355,7 @@ void Renderer::beginFrame(const CameraRenderData& camera) {
 
     // Call ImGui backend NewFrame (matching old renderer behavior)
     // This must be called before ImGui::NewFrame() in main.cpp
+    ImGui_ImplSDL3_NewFrame();
     // We need to create a render pass descriptor with swapchain texture
 #ifdef __APPLE__
     if (backend == GraphicsBackend::Metal) {
@@ -375,6 +380,9 @@ void Renderer::beginFrame(const CameraRenderData& camera) {
         }
     }
 #endif
+    if (backend == GraphicsBackend::Vulkan) {
+        ImGui_ImplVulkan_NewFrame();
+    }
 
     currentCamera = camera;
     frameDrawables.clear();
@@ -469,7 +477,9 @@ void Renderer::endFrame() {
                     imguiPassDesc.depthAttachment = TextureHandle{0};  // Use default depth
                     imguiPassDesc.loadDepth = true;  // Load (don't clear)
 
+                    fmt::print("About to begin ImGui render pass\n");
                     rhi->beginRenderPass(imguiPassDesc);
+                    fmt::print("ImGui render pass begun\n");
 
                     // Get the current render encoder from RHI_Metal
                     RHI_Metal* metalRHI = dynamic_cast<RHI_Metal*>(rhi.get());
@@ -498,10 +508,7 @@ void Renderer::endFrame() {
         }
     }
 
-    // Flush any remaining batch draws
-    flush2D();
-    flush3D();
-
+    // Batch draws are now flushed at the end of mainRenderPass
     // Disable auto-flushing until next beginFrame
     batch2D.canAutoFlush = false;
     batch3D.canAutoFlush = false;
@@ -538,7 +545,7 @@ void Renderer::endFrame() {
 // ============================================================================
 
 void Renderer::performCulling() {
-    Frustum frustum = extractFrustum(currentCamera.viewProj);
+    Frustum frustum = extractFrustum(currentCamera.proj * currentCamera.view);
 
     fmt::print("performCulling: frameDrawables.size()={}\n", frameDrawables.size());
 
@@ -663,14 +670,9 @@ void Renderer::mainRenderPass() {
     fmt::print("mainRenderPass: visibleDrawables.size()={}, mainPipeline.isValid()={}\n",
                visibleDrawables.size(), mainPipeline.isValid());
 
-    if (visibleDrawables.empty() || !mainPipeline.isValid()) {
-        if (visibleDrawables.empty()) {
-            fmt::print("mainRenderPass: No visible drawables, skipping draw\n");
-        }
-        if (!mainPipeline.isValid()) {
-            fmt::print("mainRenderPass: Invalid pipeline, skipping draw\n");
-        }
-        return;  // Nothing to draw or no pipeline
+    if (!mainPipeline.isValid()) {
+        fmt::print("mainRenderPass: Invalid pipeline, skipping draw\n");
+        return;
     }
 
     // Check if colorRT is valid (should be created in createRenderTargets)
@@ -705,7 +707,9 @@ void Renderer::mainRenderPass() {
     renderPassDesc.loadDepth = false;  // Clear (first frame) or Load (subsequent frames)
 
     // Begin render pass
-    rhi->beginRenderPass(renderPassDesc);
+        fmt::print("About to begin geometry render pass\n");
+        rhi->beginRenderPass(renderPassDesc);
+        fmt::print("Geometry render pass begun\n");
 
     // Bind pipeline
     rhi->bindPipeline(mainPipeline);
@@ -777,18 +781,26 @@ void Renderer::mainRenderPass() {
             }
 
             // Bind vertex buffer (binding 3 for Metal shader)
-            rhi->bindVertexBuffer(mesh.vertexBuffer, 3, 0);
-
-            // Bind index buffer
-            rhi->bindIndexBuffer(mesh.indexBuffer, 0);
+            if (mesh.vertexBuffer.isValid()) {
+                rhi->bindVertexBuffer(mesh.vertexBuffer, 3, 0);
+            }
 
             // Set instance ID (binding 4 for Metal shader)
             rhi->setVertexBytes(&correctInstanceID, sizeof(Uint32), 4);
 
-            // Draw indexed
-            rhi->drawIndexed(mesh.indexCount, 1, 0, 0, 0);
+            // Draw
+            if (mesh.indexBuffer.isValid()) {
+                rhi->bindIndexBuffer(mesh.indexBuffer, 0);
+                rhi->drawIndexed(mesh.indexCount, 1, 0, 0, 0);
+            } else if (mesh.vertexBuffer.isValid()) {
+                rhi->draw(mesh.vertexCount, 1, 0, 0);
+            }
         }
     }
+
+    // Flush batch renders (2D/3D quads, lines) before ending the pass
+    flush3D();
+    flush2D();
 
     // End render pass
     rhi->endRenderPass();
@@ -843,7 +855,9 @@ void Renderer::postProcessPass() {
     renderPassDesc.loadColor.push_back(false);  // Clear
 
     // Begin render pass
+    fmt::print("About to begin main/post-process render pass\n");
     rhi->beginRenderPass(renderPassDesc);
+    fmt::print("Main/post-process render pass begun\n");
 
     // Bind post-process pipeline
     rhi->bindPipeline(postProcessPipeline);
@@ -1329,28 +1343,65 @@ std::unique_ptr<Renderer> createRenderer(GraphicsBackend backend, SDL_Window* wi
 void Renderer::stage(std::shared_ptr<Scene> scene) {
     if (!scene) return;
 
-    // TODO: Implement full scene staging
-    // For now, this is a placeholder that would:
-    // 1. Extract all meshes from scene and register them
-    // 2. Extract all materials and register them
-    // 3. Extract all textures and register them
-
-    fmt::print("Scene staging not yet fully implemented\n");
+    for (auto& mesh : scene->stagedMeshes) {
+        if (!mesh) continue;
+        
+        // Register mesh if not already registered
+        if (mesh->renderMeshId == UINT32_MAX) {
+            mesh->renderMeshId = registerMesh(mesh->vertices, mesh->indices);
+        }
+        
+        // Register material if not already registered
+        if (mesh->material) {
+            if (mesh->material->rendererMaterialId == UINT32_MAX) {
+                MaterialDataInput matData;
+                matData.baseColorFactor = mesh->material->baseColorFactor;
+                matData.normalScale = mesh->material->normalScale;
+                matData.metallicFactor = mesh->material->metallicFactor;
+                matData.roughnessFactor = mesh->material->roughnessFactor;
+                matData.occlusionStrength = mesh->material->occlusionStrength;
+                matData.emissiveFactor = mesh->material->emissiveFactor;
+                matData.emissiveStrength = mesh->material->emissiveStrength;
+                matData.subsurface = mesh->material->subsurface;
+                matData.specular = mesh->material->specular;
+                matData.specularTint = mesh->material->specularTint;
+                matData.anisotropic = mesh->material->anisotropic;
+                matData.sheen = mesh->material->sheen;
+                matData.sheenTint = mesh->material->sheenTint;
+                matData.clearcoat = mesh->material->clearcoat;
+                matData.clearcoatGloss = mesh->material->clearcoatGloss;
+                matData.alphaMode = mesh->material->alphaMode;
+                matData.alphaCutoff = mesh->material->alphaCutoff;
+                matData.doubleSided = mesh->material->doubleSided;
+                
+                matData.albedoMap = mesh->material->albedoMap;
+                matData.normalMap = mesh->material->normalMap;
+                matData.metallicMap = mesh->material->metallicMap;
+                matData.roughnessMap = mesh->material->roughnessMap;
+                matData.emissiveMap = mesh->material->emissiveMap;
+                matData.occlusionMap = mesh->material->occlusionMap;
+                
+                mesh->material->rendererMaterialId = registerMaterial(matData);
+            }
+            mesh->renderMaterialId = mesh->material->rendererMaterialId;
+        } else {
+            mesh->renderMaterialId = INVALID_MATERIAL_ID;
+        }
+    }
+    
+    fmt::print("Scene staged with {} meshes\n", scene->stagedMeshes.size());
 }
 
 void Renderer::draw(std::shared_ptr<Scene> scene, Camera& camera) {
     if (!scene) return;
 
-    // Prepare camera data
-    CameraRenderData camData;
-    camData.view = camera.getViewMatrix();
-    camData.proj = camera.getProjMatrix();
-    camData.position = camera.getEye();
-    camData.nearPlane = camera.near();
-    camData.farPlane = camera.far();
-
-    // Begin frame
-    beginFrame(camData);
+    currentCamera.proj = camera.getProjMatrix();
+    currentCamera.view = camera.getViewMatrix();
+    currentCamera.invProj = glm::inverse(currentCamera.proj);
+    currentCamera.invView = glm::inverse(currentCamera.view);
+    currentCamera.nearPlane = camera.near();
+    currentCamera.farPlane = camera.far();
+    currentCamera.position = camera.getEye();
 
     // Collect drawables from scene
     collectDrawables(scene);
@@ -1360,24 +1411,18 @@ void Renderer::draw(std::shared_ptr<Scene> scene, Camera& camera) {
 
     // Render
     render();
-
-    // End frame
-    endFrame();
 }
 
 void Renderer::draw(entt::registry& registry, std::shared_ptr<Scene> scene, Camera& camera) {
     if (!scene) return;
 
-    // Prepare camera data
-    CameraRenderData camData;
-    camData.view = camera.getViewMatrix();
-    camData.proj = camera.getProjMatrix();
-    camData.position = camera.getEye();
-    camData.nearPlane = camera.near();
-    camData.farPlane = camera.far();
-
-    // Begin frame
-    beginFrame(camData);
+    currentCamera.proj = camera.getProjMatrix();
+    currentCamera.view = camera.getViewMatrix();
+    currentCamera.invProj = glm::inverse(currentCamera.proj);
+    currentCamera.invView = glm::inverse(currentCamera.view);
+    currentCamera.nearPlane = camera.near();
+    currentCamera.farPlane = camera.far();
+    currentCamera.position = camera.getEye();
 
     // Collect drawables from ECS
     collectDrawables(registry, scene);
@@ -1387,26 +1432,11 @@ void Renderer::draw(entt::registry& registry, std::shared_ptr<Scene> scene, Came
 
     // Render
     render();
-
-    // End frame
-    endFrame();
 }
 
 void Renderer::collectDrawables(std::shared_ptr<Scene> scene) {
-    // TODO: Implement scene graph traversal
-    // This would traverse the scene's node hierarchy and:
-    // 1. Check visibility
-    // 2. Compute world transforms
-    // 3. Submit drawables for each renderable node
-
-    // Placeholder: iterate over staged meshes if they exist
-    // for (auto& mesh : scene->stagedMeshes) {
-    //     Drawable drawable;
-    //     drawable.meshId = mesh->id;
-    //     drawable.materialId = mesh->materialId;
-    //     drawable.transform = mesh->worldTransform;
-    //     submitDrawable(drawable);
-    // }
+    // Only used for backwards compatibility or manual staging
+    // Usually collectDrawables(registry, scene) is used for ECS
 }
 
 void Renderer::collectDrawables(entt::registry& registry, std::shared_ptr<Scene> scene) {
@@ -1420,17 +1450,43 @@ void Renderer::collectDrawables(entt::registry& registry, std::shared_ptr<Scene>
         if (!meshRenderer.visible) continue;
 
         for (auto& mesh : meshRenderer.meshes) {
-            if (!mesh) continue;
+            if (!mesh || mesh->renderMeshId == UINT32_MAX) continue;
 
             // Create drawable from mesh
             Drawable drawable;
-            // TODO: Map mesh to registered MeshId
-            // drawable.meshId = getMeshId(mesh);
-            // drawable.materialId = mesh->materialId;
-            // drawable.transform = transform.worldTransform;
+            drawable.mesh = mesh->renderMeshId;
+            drawable.material = mesh->renderMaterialId;
+            drawable.transform = transform.worldTransform;
+            
+            // Transform AABB to world space
+            glm::vec3 minAABB = mesh->localAABBMin;
+            glm::vec3 maxAABB = mesh->localAABBMax;
+            
+            glm::vec3 corners[8] = {
+                glm::vec3(minAABB.x, minAABB.y, minAABB.z),
+                glm::vec3(maxAABB.x, minAABB.y, minAABB.z),
+                glm::vec3(minAABB.x, maxAABB.y, minAABB.z),
+                glm::vec3(maxAABB.x, maxAABB.y, minAABB.z),
+                glm::vec3(minAABB.x, minAABB.y, maxAABB.z),
+                glm::vec3(maxAABB.x, minAABB.y, maxAABB.z),
+                glm::vec3(minAABB.x, maxAABB.y, maxAABB.z),
+                glm::vec3(maxAABB.x, maxAABB.y, maxAABB.z)
+            };
+            
+            glm::vec3 worldMin(std::numeric_limits<float>::max());
+            glm::vec3 worldMax(std::numeric_limits<float>::lowest());
+            
+            for (int i = 0; i < 8; i++) {
+                glm::vec4 worldPos = transform.worldTransform * glm::vec4(corners[i], 1.0f);
+                glm::vec3 p = glm::vec3(worldPos) / worldPos.w;
+                worldMin = glm::min(worldMin, p);
+                worldMax = glm::max(worldMax, p);
+            }
+            
+            drawable.aabbMin = worldMin;
+            drawable.aabbMax = worldMax;
 
-            // For now, just skip since we need mesh registration
-            // submitDrawable(drawable);
+            submitDrawable(drawable);
         }
     }
 
@@ -1537,7 +1593,7 @@ void Renderer::shutdownBatchRendering() {
 void Renderer::flush2D() {
     if (batch2D.quadCount > 0) {
         // TODO: Get view-projection matrix for 2D (orthographic)
-        glm::mat4 viewProj = glm::ortho(
+        glm::mat4 viewProj = glm::orthoZO(
             0.0f, static_cast<float>(rhi->getSwapchainWidth()),
             static_cast<float>(rhi->getSwapchainHeight()), 0.0f,
             -1.0f, 1.0f
@@ -2088,12 +2144,13 @@ void Renderer::renderToTexture(
 
     // Set up camera for this render
     CameraRenderData rtCamera;
-    rtCamera.view = camera.getViewMatrix();
     rtCamera.proj = camera.getProjMatrix();
-    rtCamera.viewProj = rtCamera.proj * rtCamera.view;
-    rtCamera.position = camera.getEye();
+    rtCamera.view = camera.getViewMatrix();
+    rtCamera.invProj = glm::inverse(rtCamera.proj);
+    rtCamera.invView = glm::inverse(rtCamera.view);
     rtCamera.nearPlane = camera.near();
     rtCamera.farPlane = camera.far();
+    rtCamera.position = camera.getEye();
     currentCamera = rtCamera;
 
     // Begin render pass with render texture as target
@@ -2107,8 +2164,9 @@ void Renderer::renderToTexture(
         passDesc.clearDepth = 1.0f;
         passDesc.loadDepth = false; // Clear depth
     }
-
+    fmt::print("About to begin render pass passDesc, depthAttachment.id={}\n", passDesc.depthAttachment.id);
     rhi->beginRenderPass(passDesc);
+    fmt::print("Render pass passDesc begun\n");
 
     // Collect drawables from scene
     frameDrawables.clear();

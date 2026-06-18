@@ -95,9 +95,9 @@ public:
     glm::mat4 getProjMatrix() {
         if (_isProjDirty) {
             if (_isOrthographic) {
-                _projMatrix = glm::ortho(_orthoLeft, _orthoRight, _orthoBottom, _orthoTop, _near, _far);
+                _projMatrix = glm::orthoZO(_orthoLeft, _orthoRight, _orthoBottom, _orthoTop, _near, _far);
             } else {
-                _projMatrix = glm::perspective(_fov, _aspect, _near, _far);
+                _projMatrix = glm::perspectiveZO(_fov, _aspect, _near, _far);
             }
             _isProjDirty = false;
         }

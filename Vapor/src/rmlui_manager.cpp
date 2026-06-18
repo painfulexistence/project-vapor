@@ -84,7 +84,11 @@ namespace Vapor {
             m_context = nullptr;
         }
 
-        Rml::Shutdown();
+        // Only shutdown Rml if we actually successfully initialized it (in FinalizeInitialization)
+        // If m_context is null, it means we probably never got far enough to initialize Rml Core.
+        if (Rml::GetRenderInterface() != nullptr) {
+            Rml::Shutdown();
+        }
 
         m_system.reset();
 
