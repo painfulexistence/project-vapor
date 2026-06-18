@@ -534,7 +534,7 @@ BufferHandle RHI_Metal::copySwapchainToBuffer(Uint32& outWidth, Uint32& outHeigh
 
     // Store in buffers map
     Uint32 id = nextBufferId++;
-    buffers[id] = {buffer, bufferSize, false};
+    buffers[id] = {buffer, bufferSize, false, nullptr};
 
     return BufferHandle{id};
 }
