@@ -1334,11 +1334,19 @@ std::unique_ptr<Renderer> createRenderer(GraphicsBackend backend, SDL_Window* wi
             break;
     }
 
-    // Create Renderer and transfer RHI ownership
-    auto renderer = std::make_unique<Renderer>();
-    renderer->initialize(std::move(rhi), backend);
-
-    return renderer;
+    // Create Renderer and transfer RHI ownership.
+    // initialize() may throw if GPU resource setup fails (shader compilation,
+    // render-target creation, unsupported formats). Honor createRenderer()'s
+    // nullptr-on-failure contract instead of letting the exception escape, so
+    // callers (and headless CI tests) can degrade gracefully.
+    try {
+        auto renderer = std::make_unique<Renderer>();
+        renderer->initialize(std::move(rhi), backend);
+        return renderer;
+    } catch (const std::exception& e) {
+        fmt::print(stderr, "createRenderer: initialization failed: {}\n", e.what());
+        return nullptr;
+    }
 }
 
 // ============================================================================
