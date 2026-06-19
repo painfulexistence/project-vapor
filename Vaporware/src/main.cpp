@@ -228,6 +228,8 @@ auto main(int argc, char* args[]) -> int {
         });
 
     Vapor::VideoRecorder videoRecorder;
+    // Record the engine's mixed audio into the video file alongside the frames.
+    videoRecorder.setAudioManager(&engineCore->getAudioManager());
 
     Vapor::SceneInspector sceneInspector;
     sceneInspector.attachSerializer(sceneSerializer);

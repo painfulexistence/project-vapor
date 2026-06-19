@@ -1,6 +1,8 @@
 #pragma once
 
 #include <array>
+#include <atomic>
+#include <cstdint>
 #include <functional>
 #include <glm/glm.hpp>
 #include <mutex>
@@ -10,6 +12,7 @@
 // Forward declare miniaudio types
 struct ma_engine;
 struct ma_sound;
+struct ma_device;
 
 namespace Vapor {
 
@@ -17,6 +20,24 @@ namespace Vapor {
     using AudioID = int;
     constexpr AudioID AUDIO_ID_INVALID = -1;
     constexpr int MAX_AUDIO_INSTANCES = 32;
+
+    // ============================================================
+    // Audio Capture Sink
+    // ============================================================
+
+    /**
+     * Receives the engine's final mixed output, in real time, on the audio
+     * thread. Implementations must be quick and non-blocking — they run inside
+     * the device callback. Used by VideoRecorder to mux audio into recordings.
+     *
+     * The data is interleaved 32-bit float at the engine's sample rate and
+     * channel count (query AudioManager::getSampleRate()/getChannels()).
+     */
+    struct AudioCaptureSink {
+        virtual ~AudioCaptureSink() = default;
+        // `frames` holds frameCount * channels interleaved float samples.
+        virtual void writeAudio(const float* frames, uint32_t frameCount) = 0;
+    };
 
     // ============================================================
     // Audio State
@@ -203,6 +224,24 @@ namespace Vapor {
         void setDopplerFactor(float factor);
 
         // ============================================================
+        // Output Capture (recording)
+        // ============================================================
+
+        // Register a sink that receives the final mixed output on the audio
+        // thread. Pass nullptr (or call clearCaptureSink) to stop capturing.
+        // Only one sink is supported at a time.
+        void setCaptureSink(AudioCaptureSink* sink);
+        void clearCaptureSink();
+
+        // Engine output format — valid after init().
+        uint32_t getSampleRate() const {
+            return m_sampleRate;
+        }
+        uint32_t getChannels() const {
+            return m_channels;
+        }
+
+        // ============================================================
         // Callbacks
         // ============================================================
 
@@ -232,9 +271,18 @@ namespace Vapor {
         AudioID allocateInstance();
         void cleanupInstance(AudioInstance& inst);
 
+        // Pulls the next mixed block from the engine and forwards it to the
+        // capture sink (if any). Runs on the audio thread.
+        void onDeviceData(void* output, uint32_t frameCount);
+
         ma_engine* m_engine = nullptr;
+        ma_device* m_device = nullptr;
         std::array<AudioInstance, MAX_AUDIO_INSTANCES> m_instances;
         AudioID m_nextID = 0;
+
+        uint32_t m_sampleRate = 44100;
+        uint32_t m_channels = 2;
+        std::atomic<AudioCaptureSink*> m_captureSink{ nullptr };
 
         AudioListener m_listener;
         float m_masterVolume = 1.0f;

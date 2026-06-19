@@ -1,10 +1,12 @@
 #pragma once
 
+#include "audio_engine.hpp"
 #include "renderer.hpp"
 #include "imgui.h"
 #include <atomic>
 #include <chrono>
 #include <condition_variable>
+#include <deque>
 #include <filesystem>
 #include <fmt/core.h>
 #include <memory>
@@ -16,15 +18,22 @@
 
 namespace Vapor {
 
-// Records rendered frames to an AV1 video file via FFmpeg.
+// Records rendered frames to an AV1 video file via FFmpeg, optionally muxing
+// the engine's mixed audio output into an AAC track.
+//
 // Usage:
 //   VideoRecorder rec;
-//   rec.startRecording(renderer, {.outputPath = "output.mkv", .fps = 60});
+//   rec.setAudioManager(&engineCore.getAudioManager()); // optional, for audio
+//   rec.startRecording(renderer, {.outputPath = "output.mp4", .fps = 60});
 //   // each frame:
 //   rec.captureFrame();
 //   // when done:
 //   rec.stopRecording();
-class VideoRecorder {
+//
+// Audio is captured by registering as an AudioCaptureSink on the AudioManager,
+// which delivers the final mixed PCM on the audio thread. The encoder thread
+// resamples it to the AAC encoder format and interleaves it with the video.
+class VideoRecorder : public AudioCaptureSink {
 public:
     struct Config {
         std::string outputPath = "recording.mp4";
@@ -33,10 +42,21 @@ public:
         int crf = 35;
         // FFmpeg encoder name. "libsvtav1" is fastest; fallback to "libaom-av1".
         std::string encoder = "libsvtav1";
+        // Capture the engine's mixed audio into an AAC track. Requires an
+        // AudioManager to be set via setAudioManager(); silently video-only
+        // otherwise.
+        bool captureAudio = true;
+        // AAC bitrate in bits/sec.
+        int audioBitrate = 128000;
     };
 
     VideoRecorder();
-    ~VideoRecorder();
+    ~VideoRecorder() override;
+
+    // Provide the AudioManager whose mixed output should be recorded. Must be
+    // called before startRecording() for audio capture to take effect. Pass
+    // nullptr to disable audio capture.
+    void setAudioManager(AudioManager* audioManager) { m_audioManager = audioManager; }
 
     // Start recording. Returns false if already recording or FFmpeg unavailable.
     // (Config is a nested type with default member initializers, so we use an
@@ -55,6 +75,10 @@ public:
     // Schedule capture of the current rendered frame. Call once per frame.
     // Drops frames silently if the encoder queue is full.
     void captureFrame();
+
+    // AudioCaptureSink — called on the audio thread with the engine's mixed
+    // output while recording. Buffers PCM for the encoder thread to consume.
+    void writeAudio(const float* frames, uint32_t frameCount) override;
 
     // Set the directory where timestamped recordings are saved.
     void setBaseOutputDir(const std::string& dir) {
@@ -115,6 +139,12 @@ private:
     void cleanup();
     void encoderThreadFunc();
 
+    // Audio pipeline (no-ops when audio capture is inactive).
+    bool initAudioEncoder();     // called from initEncoder, before write_header
+    void drainAudio(bool flush); // resample queued PCM → AAC → mux
+    void encodeAudioFrame(int nbSamples);
+    void flushAudioEncoder();
+
     // UI state (only used when drawImGui() is called)
     std::string m_baseOutputDir = "output";
     char        m_outputBuf[256] = {};
@@ -151,6 +181,17 @@ private:
     std::atomic<bool> m_stop{false};
 
     static constexpr size_t MAX_QUEUE_FRAMES = 16;
+
+    // ── Audio capture state ──────────────────────────────────────────────────
+    AudioManager* m_audioManager = nullptr;
+    bool m_audioActive = false; // audio track is being recorded this session
+    int  m_audioSampleRate = 44100;
+    int  m_audioChannels = 2;
+
+    // Interleaved float PCM produced by the audio thread, consumed by the
+    // encoder thread. Guarded by m_audioMutex; bounded to a few seconds.
+    std::deque<float> m_audioQueue;
+    std::mutex        m_audioMutex;
 };
 
 } // namespace Vapor
