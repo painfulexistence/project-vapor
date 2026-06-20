@@ -6,6 +6,7 @@ extern "C" {
 #include <libavcodec/avcodec.h>
 #include <libavformat/avformat.h>
 #include <libavutil/channel_layout.h>
+#include <libavutil/hwcontext.h>
 #include <libavutil/imgutils.h>
 #include <libavutil/opt.h>
 #include <libswresample/swresample.h>
@@ -28,9 +29,14 @@ struct VideoPlayer::FFmpegDecodeContext {
     AVCodecContext*  codecCtx       = nullptr;
     SwsContext*      swsCtx         = nullptr;
     AVFrame*         frame          = nullptr;
+    AVFrame*         hwFrame        = nullptr; // CPU staging frame for HW transfer
     AVPacket*        packet         = nullptr;
     int              videoStreamIdx = -1;
     double           timeBase       = 0.0;
+
+    // Hardware acceleration
+    AVBufferRef*  hwDeviceCtx = nullptr;
+    AVPixelFormat hwPixFmt    = AV_PIX_FMT_NONE; // the HW pixel format this session uses
 
     // Audio decode
     AVCodecContext*  audioCodecCtx   = nullptr;
@@ -325,23 +331,72 @@ bool VideoPlayer::initDecoder(const std::string& path) {
         return false;
     }
     avcodec_parameters_to_context(ff.codecCtx, vstream->codecpar);
+
+    // ── Hardware acceleration probe ─────────────────────────────────────────
+    // Try each HW type in priority order; first one that succeeds is used.
+    // All fall through gracefully to pure software if nothing works.
+    static constexpr AVHWDeviceType kHwPriority[] = {
+        AV_HWDEVICE_TYPE_VIDEOTOOLBOX, // macOS
+        AV_HWDEVICE_TYPE_CUDA,         // NVIDIA
+        AV_HWDEVICE_TYPE_VAAPI,        // Linux / Intel
+        AV_HWDEVICE_TYPE_D3D11VA,      // Windows
+        AV_HWDEVICE_TYPE_NONE,
+    };
+    for (const AVHWDeviceType hwType : kHwPriority) {
+        if (hwType == AV_HWDEVICE_TYPE_NONE) {
+            break;
+        }
+
+        // Does the selected software codec advertise support for this HW type?
+        AVPixelFormat hwPix = AV_PIX_FMT_NONE;
+        for (int i = 0; ; ++i) {
+            const AVCodecHWConfig* cfg = avcodec_get_hw_config(codec, i);
+            if (!cfg) { break; }
+            if ((cfg->methods & AV_CODEC_HW_CONFIG_METHOD_HW_DEVICE_CTX)
+                && cfg->device_type == hwType) {
+                hwPix = cfg->pix_fmt;
+                break;
+            }
+        }
+        if (hwPix == AV_PIX_FMT_NONE) { continue; }
+
+        if (av_hwdevice_ctx_create(&ff.hwDeviceCtx, hwType,
+                                   nullptr, nullptr, 0) < 0) {
+            continue; // this HW isn't available on this machine
+        }
+
+        ff.hwPixFmt = hwPix;
+        ff.codecCtx->hw_device_ctx = av_buffer_ref(ff.hwDeviceCtx);
+
+        // Captureless lambda — convertible to C function pointer.
+        ff.codecCtx->opaque = &ff.hwPixFmt;
+        ff.codecCtx->get_format = [](AVCodecContext* ctx,
+                                     const AVPixelFormat* fmts) -> AVPixelFormat {
+            const auto target = *static_cast<AVPixelFormat*>(ctx->opaque);
+            for (const AVPixelFormat* f = fmts; *f != AV_PIX_FMT_NONE; ++f) {
+                if (*f == target) { return *f; }
+            }
+            return fmts[0]; // codec didn't offer HW fmt — accept software fallback
+        };
+
+        fmt::print("[VideoPlayer] HW decode: {} ({})\n",
+                   av_hwdevice_get_type_name(hwType),
+                   av_get_pix_fmt_name(hwPix));
+        break;
+    }
+
     if (avcodec_open2(ff.codecCtx, codec, nullptr) < 0) {
         fmt::print(stderr, "[VideoPlayer] Failed to open video decoder for '{}'\n", path);
         return false;
     }
 
-    ff.frame  = av_frame_alloc();
-    ff.packet = av_packet_alloc();
+    ff.frame   = av_frame_alloc();
+    ff.hwFrame = av_frame_alloc(); // CPU staging frame for HW→CPU transfer
+    ff.packet  = av_packet_alloc();
 
-    int w = ff.codecCtx->width;
-    int h = ff.codecCtx->height;
-    ff.swsCtx = sws_getContext(w, h, ff.codecCtx->pix_fmt,
-                               w, h, AV_PIX_FMT_RGBA,
-                               SWS_BILINEAR, nullptr, nullptr, nullptr);
-    if (!ff.swsCtx) {
-        fmt::print(stderr, "[VideoPlayer] Failed to create colour converter\n");
-        return false;
-    }
+    // swsCtx is created lazily in convertAndEnqueue() once we know the actual
+    // pixel format — software decoders report it at open time, but hardware
+    // decoders give us the real CPU format only after the first transfer.
 
     // ── Audio stream (optional) ─────────────────────────────────────────────
     const AVCodec* acodec = nullptr;
@@ -420,20 +475,44 @@ bool VideoPlayer::convertAndEnqueue(void* avframe_ptr) {
     auto& ff      = *m_ffmpeg;
     auto* avframe = static_cast<AVFrame*>(avframe_ptr);
 
-    int w = avframe->width;
-    int h = avframe->height;
+    // If the frame is in hardware memory, transfer it to a CPU frame first.
+    AVFrame* swFrame = avframe;
+    if (ff.hwPixFmt != AV_PIX_FMT_NONE
+        && avframe->format == static_cast<int>(ff.hwPixFmt)) {
+        av_frame_unref(ff.hwFrame);
+        if (av_hwframe_transfer_data(ff.hwFrame, avframe, 0) < 0) {
+            return true; // skip this frame rather than hard-failing
+        }
+        ff.hwFrame->pts = avframe->pts;
+        swFrame = ff.hwFrame;
+    }
+
+    int w = swFrame->width;
+    int h = swFrame->height;
+
+    // Lazy swsCtx init: format is unknown until after the first HW transfer.
+    if (!ff.swsCtx) {
+        ff.swsCtx = sws_getContext(
+            w, h, static_cast<AVPixelFormat>(swFrame->format),
+            w, h, AV_PIX_FMT_RGBA,
+            SWS_BILINEAR, nullptr, nullptr, nullptr);
+        if (!ff.swsCtx) {
+            fmt::print(stderr, "[VideoPlayer] Failed to create colour converter\n");
+            return false;
+        }
+    }
 
     Frame decoded;
     decoded.pixels.resize(static_cast<size_t>(w) * h * 4);
     decoded.width  = static_cast<uint32_t>(w);
     decoded.height = static_cast<uint32_t>(h);
-    decoded.pts    = (avframe->pts != AV_NOPTS_VALUE)
-                         ? static_cast<double>(avframe->pts) * ff.timeBase
+    decoded.pts    = (swFrame->pts != AV_NOPTS_VALUE)
+                         ? static_cast<double>(swFrame->pts) * ff.timeBase
                          : 0.0;
 
     uint8_t* dstPlanes[1]  = {decoded.pixels.data()};
     int      dstStrides[1] = {w * 4};
-    sws_scale(ff.swsCtx, avframe->data, avframe->linesize, 0, h, dstPlanes, dstStrides);
+    sws_scale(ff.swsCtx, swFrame->data, swFrame->linesize, 0, h, dstPlanes, dstStrides);
 
     {
         std::unique_lock<std::mutex> lock(m_mutex);
@@ -472,6 +551,9 @@ void VideoPlayer::cleanup() {
         sws_freeContext(ff.swsCtx);
         ff.swsCtx = nullptr;
     }
+    if (ff.hwFrame) {
+        av_frame_free(&ff.hwFrame);
+    }
     if (ff.frame) {
         av_frame_free(&ff.frame);
     }
@@ -480,6 +562,9 @@ void VideoPlayer::cleanup() {
     }
     if (ff.codecCtx) {
         avcodec_free_context(&ff.codecCtx);
+    }
+    if (ff.hwDeviceCtx) {
+        av_buffer_unref(&ff.hwDeviceCtx);
     }
     if (ff.fmtCtx) {
         avformat_close_input(&ff.fmtCtx);
