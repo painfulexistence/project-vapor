@@ -254,6 +254,11 @@ namespace Vapor {
         int getPlayingCount() const;
         std::string getFilePath(AudioID id) const;
 
+        // Called by the static miniaudio device callback to pull the next mixed
+        // block and forward it to any registered capture sink. Public so the
+        // file-scope C callback in audio_engine.cpp can reach it.
+        void onDeviceData(void* output, uint32_t frameCount);
+
     private:
         struct AudioInstance {
             ma_sound* sound = nullptr;
@@ -270,10 +275,6 @@ namespace Vapor {
         const AudioInstance* getInstance(AudioID id) const;
         AudioID allocateInstance();
         void cleanupInstance(AudioInstance& inst);
-
-        // Pulls the next mixed block from the engine and forwards it to the
-        // capture sink (if any). Runs on the audio thread.
-        void onDeviceData(void* output, uint32_t frameCount);
 
         ma_engine* m_engine = nullptr;
         ma_device* m_device = nullptr;
