@@ -4,99 +4,14 @@
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
   <title>Project Vapor</title>
+  <link rel="stylesheet" href="styles/global.css">
   <style>
-    :root {
-      --bg: #0d0d0f;
-      --bg-surface: #141418;
-      --bg-raised: #1c1c22;
-      --border: #2a2a33;
-      --text: #e2e2e8;
-      --text-muted: #7a7a8c;
-      --accent: #7c6af7;
-      --accent-dim: #3d3570;
-      --warn: #c97a2f;
-      --ok: #4a9e6a;
-      --danger: #9e4a4a;
-    }
-    * { box-sizing: border-box; margin: 0; padding: 0; }
-    body {
-      background: var(--bg);
-      color: var(--text);
-      font-family: 'Berkeley Mono', 'JetBrains Mono', 'Fira Code', 'Cascadia Code', monospace;
-      font-size: 15px;
-      line-height: 1.75;
-    }
-    nav {
-      background: var(--bg-surface);
-      border-bottom: 1px solid var(--border);
-      padding: 16px 24px;
-      display: flex;
-      align-items: center;
-      justify-content: space-between;
-    }
-    nav .site-title { color: var(--text-muted); text-decoration: none; font-size: 14px; }
-    nav .links { display: flex; gap: 24px; }
-    nav .links a { color: var(--text-muted); text-decoration: none; font-size: 13px; }
-    nav .links a:hover { color: var(--accent); }
-    nav .links a.active { color: var(--accent); }
-    main { max-width: 860px; margin: 0 auto; padding: 48px 24px; }
     .hero { margin-bottom: 56px; }
     .hero h1 { font-size: 26px; font-weight: 600; margin-bottom: 12px; }
     .hero p { color: var(--text-muted); font-size: 14px; max-width: 560px; }
-    .section-label {
-      font-size: 11px;
-      color: var(--text-muted);
-      letter-spacing: 0.1em;
-      text-transform: uppercase;
-      margin-bottom: 16px;
-    }
-    .card-grid {
-      display: grid;
-      grid-template-columns: 1fr 1fr;
-      gap: 16px;
-      margin-bottom: 48px;
-    }
-    .card {
-      background: var(--bg-surface);
-      border: 1px solid var(--border);
-      border-radius: 4px;
-      padding: 24px;
-      text-decoration: none;
-      display: block;
-      transition: border-color 0.15s;
-    }
-    .card:hover { border-color: var(--accent); }
-    .card h2 { font-size: 15px; font-weight: 600; color: var(--text); margin-bottom: 8px; }
-    .card p { font-size: 13px; color: var(--text-muted); line-height: 1.6; }
-    .card .tag {
-      display: inline-block;
-      font-size: 11px;
-      color: var(--accent);
-      margin-bottom: 10px;
-    }
-    .divider { border: none; border-top: 1px solid var(--border); margin: 40px 0; }
-    .adr-list { list-style: none; }
-    .adr-list li {
-      border-bottom: 1px solid var(--border);
-      padding: 14px 0;
-    }
-    .adr-list li:first-child { border-top: 1px solid var(--border); }
     .adr-list a { color: var(--text); text-decoration: none; font-size: 14px; }
     .adr-list a:hover { color: var(--accent); }
     .adr-list .meta { font-size: 12px; color: var(--text-muted); margin-top: 2px; }
-    .badge {
-      display: inline-block;
-      font-size: 11px;
-      border-radius: 3px;
-      padding: 2px 8px;
-      margin-left: 10px;
-      vertical-align: middle;
-    }
-    .badge-ok { background: rgba(74,158,106,0.15); color: var(--ok); }
-    @media (max-width: 640px) {
-      main { padding: 24px 16px; }
-      .card-grid { grid-template-columns: 1fr; }
-    }
   </style>
 </head>
 <body>

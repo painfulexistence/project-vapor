@@ -4,76 +4,7 @@
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
   <title>Tech Stack — Project Vapor</title>
-  <style>
-    :root {
-      --bg: #0d0d0f;
-      --bg-surface: #141418;
-      --bg-raised: #1c1c22;
-      --border: #2a2a33;
-      --text: #e2e2e8;
-      --text-muted: #7a7a8c;
-      --accent: #7c6af7;
-      --warn: #c97a2f;
-      --ok: #4a9e6a;
-      --danger: #9e4a4a;
-    }
-    * { box-sizing: border-box; margin: 0; padding: 0; }
-    body {
-      background: var(--bg);
-      color: var(--text);
-      font-family: 'Berkeley Mono', 'JetBrains Mono', 'Fira Code', 'Cascadia Code', monospace;
-      font-size: 15px;
-      line-height: 1.75;
-    }
-    nav {
-      background: var(--bg-surface);
-      border-bottom: 1px solid var(--border);
-      padding: 16px 24px;
-      display: flex;
-      align-items: center;
-      justify-content: space-between;
-    }
-    nav .site-title { color: var(--text-muted); text-decoration: none; font-size: 14px; }
-    nav .links { display: flex; gap: 24px; }
-    nav .links a { color: var(--text-muted); text-decoration: none; font-size: 13px; }
-    nav .links a:hover { color: var(--accent); }
-    nav .links a.active { color: var(--accent); }
-    main { max-width: 860px; margin: 0 auto; padding: 48px 24px; }
-    .page-header { margin-bottom: 40px; }
-    .page-header h1 { font-size: 22px; font-weight: 600; margin-bottom: 8px; }
-    .page-header .muted { font-size: 13px; color: var(--text-muted); }
-    h2 { font-size: 17px; font-weight: 600; margin: 40px 0 16px; }
-    p { margin-bottom: 16px; }
-    hr { border: none; border-top: 1px solid var(--border); margin: 40px 0; }
-    code {
-      background: var(--bg-raised);
-      border-radius: 3px;
-      padding: 2px 6px;
-      font-size: 13px;
-    }
-    table { width: 100%; border-collapse: collapse; margin-bottom: 24px; font-size: 14px; }
-    thead th {
-      background: var(--bg-raised);
-      color: var(--text-muted);
-      font-size: 11px;
-      text-transform: uppercase;
-      letter-spacing: 0.08em;
-      padding: 10px 14px;
-      text-align: left;
-      border: 1px solid var(--border);
-    }
-    tbody td { padding: 10px 14px; border: 1px solid var(--border); vertical-align: top; }
-    tbody tr:nth-child(even) td { background: var(--bg-raised); }
-    .status {
-      display: inline-block;
-      font-size: 11px;
-      border-radius: 3px;
-      padding: 2px 8px;
-    }
-    .status-live { background: rgba(74,158,106,0.15); color: var(--ok); }
-    .status-planned { background: rgba(201,122,47,0.15); color: var(--warn); }
-    @media (max-width: 640px) { main { padding: 24px 16px; } }
-  </style>
+  <link rel="stylesheet" href="styles/global.css">
 </head>
 <body>
   <nav>
