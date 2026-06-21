@@ -55,7 +55,7 @@ All pages under `docs/` follow this system. When updating or adding a page, matc
 Every page includes the same top nav:
 
 ```
-Project Vapor  ·  Architecture  Features  Tech Stack  ADRs
+Project Vapor  ·  Docs  Devlog  Demo  GitHub ↗
 ```
 
 - Left: site title linking to `index.html`, dimmed (`--text-muted`)
