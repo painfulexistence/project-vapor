@@ -6,7 +6,23 @@
   <title>Demo — Project Vapor</title>
   <link rel="stylesheet" href="../styles/global.css">
   <style>
-    .notice { color: var(--text-muted); font-size: 14px; max-width: 520px; margin-top: 16px; }
+    .video-wrap {
+      position: relative;
+      width: 100%;
+      padding-top: 56.25%;
+      margin-bottom: 24px;
+      background: var(--bg-raised);
+      border: 1px solid var(--border);
+      border-radius: 4px;
+      overflow: hidden;
+    }
+    .video-wrap iframe {
+      position: absolute;
+      top: 0; left: 0;
+      width: 100%; height: 100%;
+      border: none;
+    }
+    .notice { color: var(--text-muted); font-size: 13px; margin-top: 8px; }
     .notice code { color: var(--text); }
   </style>
 </head>
@@ -26,9 +42,11 @@
       <p class="muted">Interactive demo of the Vapor engine.</p>
     </div>
 
+    <div class="video-wrap">
+      <iframe src="https://www.youtube.com/embed/noTxlZo_WLc" allow="accelerometer; autoplay; clipboard-write; encrypted-media; gyroscope; picture-in-picture" allowfullscreen></iframe>
+    </div>
     <p class="notice">
-      No browser demo is available yet. Vapor targets <code>Metal</code> (macOS) and <code>Vulkan</code> (cross-platform) natively — there is no WebAssembly build, and none is currently planned.<br><br>
-      To run the demo locally, build <code>Vaporware</code> from source. See the <a href="../documentation/architecture.html">Architecture</a> page for project structure and the <a href="https://github.com/painfulexistence/project-vapor" target="_blank">GitHub repo ↗</a> for build instructions.
+      To run locally, build <code>Vaporware</code> from source. See <a href="../documentation/architecture.html">Architecture</a> or the <a href="https://github.com/painfulexistence/project-vapor" target="_blank">GitHub repo ↗</a>.
     </p>
   </main>
 </body>
