@@ -168,6 +168,7 @@ public:
     std::vector<std::shared_ptr<Node>> nodes;
     std::vector<DirectionalLight> directionalLights;
     std::vector<PointLight> pointLights;
+    std::vector<RectLight> rectLights;
     std::vector<std::shared_ptr<FluidVolume>> fluidVolumes;
 
     // GPU-driven rendering

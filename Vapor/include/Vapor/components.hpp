@@ -138,6 +138,17 @@ namespace Vapor {
         entt::entity otherEntity;    // The entity that exited
     };
 
+    // ============================================================================
+    // Lighting
+    // ============================================================================
+
+    struct RectLightComponent {
+        glm::vec2 size = {1.0f, 1.0f};         // total width × height (world units)
+        glm::vec3 color = {1.0f, 1.0f, 1.0f};
+        float intensity = 1.0f;
+        bool useVideoTexture = false;
+    };
+
     // 2D Sprite rendering component
     struct SpriteComponent {
         AtlasHandle atlas;

@@ -621,6 +621,14 @@ public:
         encoder->setFragmentBytes(&gridSize, sizeof(glm::uvec3), 5);
         encoder->setFragmentBytes(&time, sizeof(float), 6);
 
+        encoder->setFragmentBuffer(r.rectLightBuffer.get(), 0, 7);
+        uint32_t rectLightCount = static_cast<uint32_t>(r.currentScene->rectLights.size());
+        encoder->setFragmentBytes(&rectLightCount, sizeof(uint32_t), 8);
+        auto* vidTex = r.rectLightVideoTexture
+                           ? r.rectLightVideoTexture.get()
+                           : r.getTexture(r.defaultAlbedoTexture).get();
+        encoder->setFragmentTexture(vidTex, 11);
+
         for (const auto& [material, draws] : r.instanceBatches) {
             if (material->materialType == Vapor::MaterialType::Iridescent) {
                 encoder->setRenderPipelineState(r.iridescentPipeline.get());
@@ -3857,6 +3865,15 @@ auto Renderer_Metal::stage(std::shared_ptr<Scene> scene) -> void {
     }
     pointLightBuffer->didModifyRange(NS::Range::Make(0, pointLightBuffer->length()));
 
+    size_t rectLightsSize = std::max((size_t)1, scene->rectLights.size());
+    rectLightBuffer = NS::TransferPtr(
+        device->newBuffer(rectLightsSize * sizeof(RectLight), MTL::ResourceStorageModeManaged)
+    );
+    if (!scene->rectLights.empty()) {
+        memcpy(rectLightBuffer->contents(), scene->rectLights.data(), scene->rectLights.size() * sizeof(RectLight));
+    }
+    rectLightBuffer->didModifyRange(NS::Range::Make(0, rectLightBuffer->length()));
+
     // Textures
     for (auto& img : scene->images) {
         img->texture = createTexture(img);
@@ -4001,6 +4018,15 @@ auto Renderer_Metal::draw(std::shared_ptr<Scene> scene, Camera& camera) -> void 
         pointLights[i].radius = scene->pointLights[i].radius;
     }
     pointLightBuffer->didModifyRange(NS::Range::Make(0, pointLightBuffer->length()));
+
+    const size_t rectLightBytes = std::max(scene->rectLights.size(), (size_t)1) * sizeof(RectLight);
+    if (!rectLightBuffer || rectLightBuffer->length() < rectLightBytes) {
+        rectLightBuffer = NS::TransferPtr(device->newBuffer(rectLightBytes, MTL::ResourceStorageModeManaged));
+    }
+    if (!scene->rectLights.empty()) {
+        memcpy(rectLightBuffer->contents(), scene->rectLights.data(), scene->rectLights.size() * sizeof(RectLight));
+        rectLightBuffer->didModifyRange(NS::Range::Make(0, rectLightBytes));
+    }
 
     auto* materialData = reinterpret_cast<MaterialData*>(materialDataBuffer->contents());
     for (size_t i = 0; i < scene->materials.size(); ++i) {
@@ -5974,6 +6000,25 @@ void Renderer_Metal::drawTriangleFilled2D(
 
 void Renderer_Metal::readPixelsAsync(ScreenshotCallback callback) {
     m_pendingScreenshots.push_back(callback);
+}
+
+void Renderer_Metal::uploadRectLightVideoTexture(const uint8_t* rgba, uint32_t width, uint32_t height) {
+    if (!rgba || width == 0 || height == 0) return;
+
+    if (!rectLightVideoTexture
+        || rectLightVideoTexture->width()  != width
+        || rectLightVideoTexture->height() != height) {
+        auto desc = NS::TransferPtr(MTL::TextureDescriptor::texture2DDescriptorWithPixelFormat(
+            MTL::PixelFormatRGBA8Unorm, width, height, false));
+        desc->setUsage(MTL::TextureUsageShaderRead);
+        desc->setStorageMode(MTL::StorageModeManaged);
+        rectLightVideoTexture = NS::TransferPtr(device->newTexture(desc.get()));
+    }
+    rectLightVideoTexture->replaceRegion(
+        MTL::Region::Make2D(0, 0, width, height),
+        /*mipmapLevel=*/0,
+        rgba,
+        /*bytesPerRow=*/static_cast<NS::UInteger>(width * 4));
 }
 
 extern "C" auto getMetalDevice(void* renderer) -> void* {

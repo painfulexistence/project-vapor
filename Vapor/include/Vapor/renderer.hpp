@@ -76,6 +76,10 @@ public:
         m_engineWindowCallback = std::move(callback);
     }
 
+    // Upload RGBA pixel data as the video texture sampled by rect lights marked
+    // with useVideoTexture = true. Call once per frame after VideoPlayer::update().
+    virtual void uploadRectLightVideoTexture(const uint8_t* /*rgba*/, uint32_t /*width*/, uint32_t /*height*/) {}
+
     // ===== 2D/3D Batch Rendering API =====
     // Manual flush (for controlling draw order)
     virtual void flush2D() {
@@ -249,6 +253,7 @@ protected:
     const Uint32 MAX_INSTANCES = 5000;// Increased for large scenes like Bistro (2911 instances)
     const Uint32 MAX_DIRECTIONAL_LIGHTS = 4;
     const Uint32 MAX_POINT_LIGHTS = 1024;
+    const Uint32 MAX_RECT_LIGHTS = 32;
     glm::vec4 clearColor = glm::vec4(0.0f, 0.5f, 1.0f, 1.0f);
     double clearDepth = 1.0;
     Uint32 clusterGridSizeX = 16;
