@@ -11,13 +11,13 @@ extern "C" {
 #include <libavutil/opt.h>
 #include <libavutil/samplefmt.h>
 #include <libswresample/swresample.h>
-#include <libswscale/swscale.h>
+#include <libswscale/libswscale.h>
 }
 #endif
 
 namespace Vapor {
 
-// ─── FFmpegContext ────────────────────────────────────────────────────────────
+// ─── FFmpegContext ────────────────────────────────────────────────────────────────────────────────
 
 struct VideoRecorder::FFmpegContext {
 #ifdef VAPOR_HAS_FFMPEG
@@ -39,7 +39,7 @@ struct VideoRecorder::FFmpegContext {
 #endif
 };
 
-// ─── Lifecycle ────────────────────────────────────────────────────────────────
+// ─── Lifecycle ────────────────────────────────────────────────────────────────────────────────
 
 VideoRecorder::VideoRecorder() = default;
 
@@ -153,7 +153,7 @@ void VideoRecorder::captureFrame() {
     });
 }
 
-// ─── Audio capture (audio thread) ─────────────────────────────────────────────
+// ─── Audio capture (audio thread) ─────────────────────────────────────────────────────────
 
 void VideoRecorder::writeAudio(const float* frames, uint32_t frameCount) {
     if (!m_audioActive || !m_recording.load() || frameCount == 0) {
@@ -173,7 +173,7 @@ void VideoRecorder::writeAudio(const float* frames, uint32_t frameCount) {
     m_audioQueue.insert(m_audioQueue.end(), frames, frames + incoming);
 }
 
-// ─── Encoder thread ───────────────────────────────────────────────────────────
+// ─── Encoder thread ─────────────────────────────────────────────────────────────────────────────
 
 void VideoRecorder::encoderThreadFunc() {
     bool encoderInitialized = false;
@@ -216,7 +216,7 @@ void VideoRecorder::encoderThreadFunc() {
     cleanup();
 }
 
-// ─── FFmpeg implementation ────────────────────────────────────────────────────
+// ─── FFmpeg implementation ────────────────────────────────────────────────────────────────────────
 
 bool VideoRecorder::initEncoder(uint32_t width, uint32_t height) {
 #ifndef VAPOR_HAS_FFMPEG
@@ -224,7 +224,7 @@ bool VideoRecorder::initEncoder(uint32_t width, uint32_t height) {
 #else
     auto& ff = *m_ffmpeg;
 
-    // AV1 requires even-numbered dimensions; crop one pixel if needed.
+    // Even-numbered dimensions required by most video codecs.
     width  &= ~1u;
     height &= ~1u;
     if (width == 0 || height == 0) {
@@ -232,13 +232,36 @@ bool VideoRecorder::initEncoder(uint32_t width, uint32_t height) {
         return false;
     }
 
-    // Try configured encoder, then fallbacks
-    const AVCodec* codec = avcodec_find_encoder_by_name(m_config.encoder.c_str());
-    if (!codec) {
-        codec = avcodec_find_encoder_by_name("libaom-av1");
+    // Probe order: HW encoders first (lowest CPU overhead), then SW fallbacks.
+    static constexpr const char* kEncoderCandidates[] = {
+        "h264_videotoolbox", // macOS VideoToolbox (always available on Mac)
+        "h264_nvenc",        // NVIDIA GPU
+        "libsvtav1",         // SW AV1, fastest
+        "libaom-av1",        // SW AV1
+        "librav1e",          // SW AV1
+        "libx264",           // SW H.264, widest compatibility
+        nullptr
+    };
+    const AVCodec* codec = nullptr;
+    std::string usedEncoder;
+    if (!m_config.encoder.empty()) {
+        codec = avcodec_find_encoder_by_name(m_config.encoder.c_str());
+        if (codec) usedEncoder = m_config.encoder;
     }
     if (!codec) {
-        fmt::print(stderr, "[VideoRecorder] No AV1 encoder found (tried '{}', 'libaom-av1')\n",
+        for (int i = 0; kEncoderCandidates[i]; ++i) {
+            if (m_config.encoder == kEncoderCandidates[i]) continue;
+            codec = avcodec_find_encoder_by_name(kEncoderCandidates[i]);
+            if (codec) {
+                usedEncoder = kEncoderCandidates[i];
+                fmt::print("[VideoRecorder] Encoder '{}' not found, using '{}'\n",
+                           m_config.encoder, usedEncoder);
+                break;
+            }
+        }
+    }
+    if (!codec) {
+        fmt::print(stderr, "[VideoRecorder] No video encoder found (tried '{}' and all fallbacks)\n",
                    m_config.encoder);
         return false;
     }
@@ -262,19 +285,28 @@ bool VideoRecorder::initEncoder(uint32_t width, uint32_t height) {
     ff.codecCtx->time_base = AVRational{1, 1'000'000};
     ff.codecCtx->framerate = AVRational{m_config.fps, 1};
     ff.codecCtx->pix_fmt = AV_PIX_FMT_YUV420P;
-    ff.codecCtx->gop_size = m_config.fps; // one keyframe per second
+    ff.codecCtx->gop_size = m_config.fps;
 
-    av_opt_set_int(ff.codecCtx->priv_data, "crf", m_config.crf, 0);
-
-    // Speed presets: libsvtav1 uses "preset", libaom-av1 uses "cpu-used"
-    const std::string enc = m_config.encoder;
-    if (enc == "libsvtav1") {
+    // Per-encoder quality settings. HW encoders use bitrate/CQ; SW AV1 uses CRF.
+    if (usedEncoder == "h264_videotoolbox") {
+        ff.codecCtx->bit_rate = 8'000'000; // 8 Mbps — good quality at 30fps 1080p
+    } else if (usedEncoder == "h264_nvenc") {
+        av_opt_set(ff.codecCtx->priv_data, "preset", "p4", 0);  // balanced speed/quality
+        av_opt_set(ff.codecCtx->priv_data, "rc", "vbr", 0);
+        av_opt_set_int(ff.codecCtx->priv_data, "cq", 23, 0);
+    } else if (usedEncoder == "libsvtav1") {
+        av_opt_set_int(ff.codecCtx->priv_data, "crf", m_config.crf, 0);
         av_opt_set_int(ff.codecCtx->priv_data, "preset", 8, 0);
-    } else if (enc == "libaom-av1") {
+    } else if (usedEncoder == "libaom-av1") {
+        av_opt_set_int(ff.codecCtx->priv_data, "crf", m_config.crf, 0);
         av_opt_set_int(ff.codecCtx->priv_data, "cpu-used", 6, 0);
         av_opt_set(ff.codecCtx->priv_data, "usage", "realtime", 0);
-    } else if (enc == "librav1e") {
+    } else if (usedEncoder == "librav1e") {
+        av_opt_set_int(ff.codecCtx->priv_data, "crf", m_config.crf, 0);
         av_opt_set_int(ff.codecCtx->priv_data, "speed", 8, 0);
+    } else if (usedEncoder == "libx264") {
+        av_opt_set(ff.codecCtx->priv_data, "preset", "fast", 0);
+        av_opt_set_int(ff.codecCtx->priv_data, "crf", 23, 0); // x264 scale: 0-51
     }
 
     if (ff.fmtCtx->oformat->flags & AVFMT_GLOBALHEADER) {
@@ -282,7 +314,7 @@ bool VideoRecorder::initEncoder(uint32_t width, uint32_t height) {
     }
 
     if (avcodec_open2(ff.codecCtx, codec, nullptr) < 0) {
-        fmt::print(stderr, "[VideoRecorder] Failed to open AV1 codec\n");
+        fmt::print(stderr, "[VideoRecorder] Failed to open codec '{}'\n", usedEncoder);
         return false;
     }
 
@@ -338,8 +370,9 @@ bool VideoRecorder::initEncoder(uint32_t width, uint32_t height) {
         return false;
     }
 
-    fmt::print("[VideoRecorder] Started: {} ({}x{} @ {} fps, encoder: {})\n",
-               m_config.outputPath, width, height, m_config.fps, enc);
+    fmt::print("[VideoRecorder] Started: {} ({}x{} @ {} fps, encoder: {}{}\n",
+               m_config.outputPath, width, height, m_config.fps, usedEncoder,
+               m_audioActive ? ", AAC audio)" : ")");
     return true;
 #endif
 }
@@ -414,7 +447,7 @@ void VideoRecorder::flushEncoder() {
 #endif
 }
 
-// ─── Audio encoding ───────────────────────────────────────────────────────────
+// ─── Audio encoding ─────────────────────────────────────────────────────────────────────────────
 
 bool VideoRecorder::initAudioEncoder() {
 #ifndef VAPOR_HAS_FFMPEG
@@ -471,7 +504,7 @@ bool VideoRecorder::initAudioEncoder() {
         return false;
     }
 
-    ff.audioFifo = av_audio_fifo_alloc(AV_SAMPLE_FMT_FLTP, m_audioChannels, 1);
+    ff.audioFifo  = av_audio_fifo_alloc(AV_SAMPLE_FMT_FLTP, m_audioChannels, 1);
     ff.audioFrame  = av_frame_alloc();
     ff.audioPacket = av_packet_alloc();
     if (!ff.audioFifo || !ff.audioFrame || !ff.audioPacket) {

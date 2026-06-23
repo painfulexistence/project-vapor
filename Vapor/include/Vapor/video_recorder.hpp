@@ -18,13 +18,13 @@
 
 namespace Vapor {
 
-// Records rendered frames to an AV1 video file via FFmpeg, optionally muxing
-// the engine's mixed audio output into an AAC track.
+// Records rendered frames to an H.264/AV1 video file via FFmpeg, optionally
+// muxing the engine's mixed audio output into an AAC track.
 //
 // Usage:
 //   VideoRecorder rec;
 //   rec.setAudioManager(&engineCore.getAudioManager()); // optional, for audio
-//   rec.startRecording(renderer, {.outputPath = "output.mp4", .fps = 60});
+//   rec.startRecording(renderer, {.outputPath = "output.mp4", .fps = 30});
 //   // each frame:
 //   rec.captureFrame();
 //   // when done:
@@ -37,11 +37,13 @@ class VideoRecorder : public AudioCaptureSink {
 public:
     struct Config {
         std::string outputPath = "recording.mp4";
-        int fps = 60;
-        // AV1 CRF quality (0=lossless, 63=worst). Lower = better quality.
+        int fps = 30;
+        // CRF quality for SW AV1 encoders (0=lossless, 63=worst). Lower = better.
+        // Ignored for HW encoders (VideoToolbox, NVENC), which use fixed quality.
         int crf = 35;
-        // FFmpeg encoder name. "libsvtav1" is fastest; fallback to "libaom-av1".
-        std::string encoder = "libsvtav1";
+        // Encoder probe order: h264_videotoolbox → h264_nvenc → libsvtav1 →
+        // libaom-av1 → libx264. Set to empty string to use the probe order directly.
+        std::string encoder = "h264_videotoolbox";
         // Capture the engine's mixed audio into an AAC track. Requires an
         // AudioManager to be set via setAudioManager(); silently video-only
         // otherwise.
@@ -182,7 +184,7 @@ private:
 
     static constexpr size_t MAX_QUEUE_FRAMES = 16;
 
-    // ── Audio capture state ──────────────────────────────────────────────────
+    // ── Audio capture state ──────────────────────────────────────────────
     AudioManager* m_audioManager = nullptr;
     bool m_audioActive = false; // audio track is being recorded this session
     int  m_audioSampleRate = 44100;
