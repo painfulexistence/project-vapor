@@ -11,7 +11,7 @@ extern "C" {
 #include <libavutil/opt.h>
 #include <libavutil/samplefmt.h>
 #include <libswresample/swresample.h>
-#include <libswscale/libswscale.h>
+#include <libswscale/swscale.h>
 }
 #endif
 
@@ -64,10 +64,6 @@ bool VideoRecorder::startRecording(Renderer* renderer, const Config& config) {
     m_recordingStart = std::chrono::steady_clock::now();
     m_stop = false;
 
-    // Decide up front whether this session records audio. The audio encoder is
-    // initialised lazily (in initEncoder, once the first video frame fixes the
-    // dimensions), but the capture sink is attached now so PCM buffers from the
-    // very start of recording.
     m_audioActive = false;
     if (m_config.captureAudio && m_audioManager && m_audioManager->isInitialized()) {
         m_audioSampleRate = static_cast<int>(m_audioManager->getSampleRate());
@@ -81,7 +77,6 @@ bool VideoRecorder::startRecording(Renderer* renderer, const Config& config) {
 
     m_recording = true;
 
-    // Attach the sink only after m_recording is set so writeAudio() accepts data.
     if (m_audioActive) {
         m_audioManager->setCaptureSink(this);
     }
@@ -96,8 +91,6 @@ void VideoRecorder::stopRecording() {
         return;
     }
 
-    // Stop feeding new audio first; whatever is already queued will be drained
-    // and flushed by the encoder thread before it exits.
     if (m_audioActive && m_audioManager) {
         m_audioManager->clearCaptureSink();
     }
@@ -122,12 +115,10 @@ void VideoRecorder::captureFrame() {
     {
         std::lock_guard<std::mutex> lock(m_mutex);
         if (m_frameQueue.size() >= MAX_QUEUE_FRAMES) {
-            return; // encoder is lagging; drop this frame
+            return;
         }
     }
 
-    // Capture wall-clock time before the async readback so it reflects the
-    // moment this frame was presented, not when the callback fires.
     auto captureTime = std::chrono::steady_clock::now();
 
     m_renderer->readPixelsAsync([this, captureTime](const GpuImageData& data) {
@@ -161,8 +152,6 @@ void VideoRecorder::writeAudio(const float* frames, uint32_t frameCount) {
     }
 
     const size_t incoming = static_cast<size_t>(frameCount) * m_audioChannels;
-    // Cap the backlog at ~5 seconds so a lagging encoder can't grow this without
-    // bound. Dropping the oldest samples keeps the most recent audio.
     const size_t cap = static_cast<size_t>(m_audioSampleRate) * m_audioChannels * 5;
 
     std::lock_guard<std::mutex> lock(m_audioMutex);
@@ -183,11 +172,10 @@ void VideoRecorder::encoderThreadFunc() {
 
         {
             std::unique_lock<std::mutex> lock(m_mutex);
-            // Wake on new frame OR stop; keep running until the queue is drained.
             m_cv.wait(lock, [this] { return !m_frameQueue.empty() || m_stop.load(); });
 
             if (m_frameQueue.empty()) {
-                break; // stop signalled and queue is empty
+                break;
             }
 
             frame = std::move(m_frameQueue.front());
@@ -204,12 +192,11 @@ void VideoRecorder::encoderThreadFunc() {
         }
 
         encodeFrame(frame);
-        // Interleave audio: drain whatever PCM has accumulated since last frame.
         drainAudio(/*flush=*/false);
     }
 
     if (encoderInitialized) {
-        drainAudio(/*flush=*/true); // resample + encode remaining audio
+        drainAudio(/*flush=*/true);
         flushAudioEncoder();
         flushEncoder();
     }
@@ -224,7 +211,6 @@ bool VideoRecorder::initEncoder(uint32_t width, uint32_t height) {
 #else
     auto& ff = *m_ffmpeg;
 
-    // Even-numbered dimensions required by most video codecs.
     width  &= ~1u;
     height &= ~1u;
     if (width == 0 || height == 0) {
@@ -280,8 +266,6 @@ bool VideoRecorder::initEncoder(uint32_t width, uint32_t height) {
 
     ff.codecCtx->width = static_cast<int>(width);
     ff.codecCtx->height = static_cast<int>(height);
-    // Microsecond time base → pts values are real elapsed microseconds.
-    // Framerate hint is still useful for the encoder's GOP and rate control.
     ff.codecCtx->time_base = AVRational{1, 1'000'000};
     ff.codecCtx->framerate = AVRational{m_config.fps, 1};
     ff.codecCtx->pix_fmt = AV_PIX_FMT_YUV420P;
@@ -291,7 +275,7 @@ bool VideoRecorder::initEncoder(uint32_t width, uint32_t height) {
     if (usedEncoder == "h264_videotoolbox") {
         ff.codecCtx->bit_rate = 8'000'000; // 8 Mbps — good quality at 30fps 1080p
     } else if (usedEncoder == "h264_nvenc") {
-        av_opt_set(ff.codecCtx->priv_data, "preset", "p4", 0);  // balanced speed/quality
+        av_opt_set(ff.codecCtx->priv_data, "preset", "p4", 0);
         av_opt_set(ff.codecCtx->priv_data, "rc", "vbr", 0);
         av_opt_set_int(ff.codecCtx->priv_data, "cq", 23, 0);
     } else if (usedEncoder == "libsvtav1") {
@@ -306,7 +290,7 @@ bool VideoRecorder::initEncoder(uint32_t width, uint32_t height) {
         av_opt_set_int(ff.codecCtx->priv_data, "speed", 8, 0);
     } else if (usedEncoder == "libx264") {
         av_opt_set(ff.codecCtx->priv_data, "preset", "fast", 0);
-        av_opt_set_int(ff.codecCtx->priv_data, "crf", 23, 0); // x264 scale: 0-51
+        av_opt_set_int(ff.codecCtx->priv_data, "crf", 23, 0);
     }
 
     if (ff.fmtCtx->oformat->flags & AVFMT_GLOBALHEADER) {
@@ -325,8 +309,6 @@ bool VideoRecorder::initEncoder(uint32_t width, uint32_t height) {
     ff.stream->time_base = ff.codecCtx->time_base;
     avcodec_parameters_from_context(ff.stream->codecpar, ff.codecCtx);
 
-    // Set up the audio stream before writing the header so both tracks are
-    // declared in the container. Failure here downgrades to video-only.
     if (m_audioActive) {
         if (!initAudioEncoder()) {
             fmt::print(stderr, "[VideoRecorder] Audio encoder init failed — recording video only\n");
@@ -387,15 +369,12 @@ bool VideoRecorder::encodeFrame(const RawFrame& rawFrame) {
         return false;
     }
 
-    // Convert RGBA input to YUV420P (clamp src height to encoder height in case
-    // a frame arrived before the even-dimension crop was applied to frame.height)
     const uint8_t* srcPlanes[1] = {rawFrame.pixels.data()};
     int srcStrides[1] = {static_cast<int>(rawFrame.width) * 4};
     int srcHeight = std::min(static_cast<int>(rawFrame.height), ff.codecCtx->height);
     sws_scale(ff.swsCtx, srcPlanes, srcStrides, 0, srcHeight,
               ff.frame->data, ff.frame->linesize);
 
-    // Wall-clock pts in microseconds so playback speed matches actual game speed.
     ff.frame->pts = static_cast<int64_t>(rawFrame.timestamp * 1'000'000.0);
 
     if (avcodec_send_frame(ff.codecCtx, ff.frame) < 0) {
@@ -466,7 +445,7 @@ bool VideoRecorder::initAudioEncoder() {
         return false;
     }
 
-    ff.audioCodecCtx->sample_fmt  = AV_SAMPLE_FMT_FLTP; // native AAC encoder format
+    ff.audioCodecCtx->sample_fmt  = AV_SAMPLE_FMT_FLTP;
     ff.audioCodecCtx->sample_rate = m_audioSampleRate;
     ff.audioCodecCtx->bit_rate    = m_config.audioBitrate;
     av_channel_layout_default(&ff.audioCodecCtx->ch_layout, m_audioChannels);
@@ -488,8 +467,6 @@ bool VideoRecorder::initAudioEncoder() {
     ff.audioStream->time_base = ff.audioCodecCtx->time_base;
     avcodec_parameters_from_context(ff.audioStream->codecpar, ff.audioCodecCtx);
 
-    // Resampler: engine output (interleaved float) → encoder format (FLTP).
-    // Sample rate and channel count are unchanged; this is a layout conversion.
     AVChannelLayout inLayout, outLayout;
     av_channel_layout_default(&inLayout, m_audioChannels);
     av_channel_layout_default(&outLayout, m_audioChannels);
@@ -524,7 +501,6 @@ void VideoRecorder::drainAudio(bool flush) {
     }
     auto& ff = *m_ffmpeg;
 
-    // Move queued interleaved PCM out under the lock; resample outside it.
     std::vector<float> input;
     {
         std::lock_guard<std::mutex> lock(m_audioMutex);
@@ -548,9 +524,7 @@ void VideoRecorder::drainAudio(bool flush) {
                 if (converted > 0) {
                     av_audio_fifo_write(ff.audioFifo, reinterpret_cast<void**>(outData), converted);
                 }
-                if (outData) {
-                    av_freep(&outData[0]);
-                }
+                if (outData) av_freep(&outData[0]);
                 av_freep(&outData);
             }
         }
@@ -563,7 +537,6 @@ void VideoRecorder::drainAudio(bool flush) {
     }
 
     if (flush) {
-        // Flush the resampler's internal delay buffer.
         int outCount = swr_get_out_samples(ff.swrCtx, 0);
         if (outCount > 0) {
             uint8_t** outData = nullptr;
@@ -574,9 +547,7 @@ void VideoRecorder::drainAudio(bool flush) {
                 if (converted > 0) {
                     av_audio_fifo_write(ff.audioFifo, reinterpret_cast<void**>(outData), converted);
                 }
-                if (outData) {
-                    av_freep(&outData[0]);
-                }
+                if (outData) av_freep(&outData[0]);
                 av_freep(&outData);
             }
         }
@@ -585,7 +556,7 @@ void VideoRecorder::drainAudio(bool flush) {
         }
         int remaining = av_audio_fifo_size(ff.audioFifo);
         if (remaining > 0) {
-            encodeAudioFrame(remaining); // final, possibly short, frame
+            encodeAudioFrame(remaining);
         }
     }
 #else
@@ -608,7 +579,6 @@ void VideoRecorder::encodeAudioFrame(int nbSamples) {
 
     av_audio_fifo_read(ff.audioFifo, reinterpret_cast<void**>(ff.audioFrame->data), nbSamples);
 
-    // Sample-accurate pts keeps audio gap-free and in sync with the video.
     ff.audioFrame->pts = ff.audioNextPts;
     ff.audioNextPts += nbSamples;
 
@@ -673,36 +643,21 @@ void VideoRecorder::cleanup() {
             av_write_trailer(ff.fmtCtx);
             avio_closep(&ff.fmtCtx->pb);
         }
-        avformat_free_context(ff.fmtCtx); // also frees the stream objects
+        avformat_free_context(ff.fmtCtx);
         ff.fmtCtx = nullptr;
     }
-    if (ff.frame) {
-        av_frame_free(&ff.frame);
-    }
-    if (ff.packet) {
-        av_packet_free(&ff.packet);
-    }
-    if (ff.codecCtx) {
-        avcodec_free_context(&ff.codecCtx);
-    }
+    if (ff.frame)     av_frame_free(&ff.frame);
+    if (ff.packet)    av_packet_free(&ff.packet);
+    if (ff.codecCtx)  avcodec_free_context(&ff.codecCtx);
     if (ff.swsCtx) {
         sws_freeContext(ff.swsCtx);
         ff.swsCtx = nullptr;
     }
 
-    // Audio resources
-    if (ff.audioFrame) {
-        av_frame_free(&ff.audioFrame);
-    }
-    if (ff.audioPacket) {
-        av_packet_free(&ff.audioPacket);
-    }
-    if (ff.audioCodecCtx) {
-        avcodec_free_context(&ff.audioCodecCtx);
-    }
-    if (ff.swrCtx) {
-        swr_free(&ff.swrCtx);
-    }
+    if (ff.audioFrame)    av_frame_free(&ff.audioFrame);
+    if (ff.audioPacket)   av_packet_free(&ff.audioPacket);
+    if (ff.audioCodecCtx) avcodec_free_context(&ff.audioCodecCtx);
+    if (ff.swrCtx)        swr_free(&ff.swrCtx);
     if (ff.audioFifo) {
         av_audio_fifo_free(ff.audioFifo);
         ff.audioFifo = nullptr;
