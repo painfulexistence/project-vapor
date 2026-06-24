@@ -6008,8 +6008,12 @@ void Renderer_Metal::uploadRectLightVideoTexture(const uint8_t* rgba, uint32_t w
     if (!rectLightVideoTexture
         || rectLightVideoTexture->width()  != width
         || rectLightVideoTexture->height() != height) {
-        auto desc = NS::TransferPtr(MTL::TextureDescriptor::texture2DDescriptorWithPixelFormat(
-            MTL::PixelFormatRGBA8Unorm, width, height, false));
+        auto desc = NS::TransferPtr(MTL::TextureDescriptor::alloc()->init());
+        desc->setTextureType(MTL::TextureType2D);
+        desc->setPixelFormat(MTL::PixelFormatRGBA8Unorm);
+        desc->setWidth(width);
+        desc->setHeight(height);
+        desc->setMipmapLevelCount(1);
         desc->setUsage(MTL::TextureUsageShaderRead);
         desc->setStorageMode(MTL::StorageModeManaged);
         rectLightVideoTexture = NS::TransferPtr(device->newTexture(desc.get()));
