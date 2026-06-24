@@ -16,7 +16,7 @@ public:
         auto mesh = std::make_shared<Vapor::Mesh>();
         mesh->hasPosition = true;
         mesh->hasUV0 = true;
-        mesh->primitiveMode = PrimitiveMode::TRIANGLES;
+        mesh->primitiveMode = Vapor::PrimitiveMode::TRIANGLES;
         mesh->initialize(verts, 6, indices, 6);
 
         return mesh;
@@ -61,7 +61,7 @@ public:
         mesh->hasPosition = true;
         mesh->hasUV0 = true;
         mesh->hasNormal = true;
-        mesh->primitiveMode = PrimitiveMode::TRIANGLES;
+        mesh->primitiveMode = Vapor::PrimitiveMode::TRIANGLES;
         mesh->initialize(verts.data(), verts.size(), tris.data(), tris.size());
 
         if (material) {
@@ -218,7 +218,7 @@ public:
         mesh->hasPosition = true;
         mesh->hasUV0 = true;
         mesh->hasNormal = true;
-        mesh->primitiveMode = PrimitiveMode::TRIANGLES;
+        mesh->primitiveMode = Vapor::PrimitiveMode::TRIANGLES;
         mesh->initialize(verts.data(), verts.size(), indices.data(), indices.size());
 
         if (material) {
@@ -334,7 +334,7 @@ public:
         mesh->hasPosition = true;
         mesh->hasUV0 = true;
         mesh->hasNormal = true;
-        mesh->primitiveMode = PrimitiveMode::TRIANGLES;
+        mesh->primitiveMode = Vapor::PrimitiveMode::TRIANGLES;
         mesh->initialize(verts.data(), verts.size(), indices.data(), indices.size());
 
         if (material) {
