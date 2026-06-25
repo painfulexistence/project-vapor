@@ -11,7 +11,7 @@ find_package(Tracy CONFIG REQUIRED)
 find_package(RmlUi CONFIG REQUIRED)
 find_package(EnTT CONFIG REQUIRED)
 find_package(nlohmann_json CONFIG REQUIRED)
-find_package(Boost REQUIRED COMPONENTS pfr)
+find_package(Boost QUIET COMPONENTS pfr)
 
 # Optional: FFmpeg for AV1 video recording
 find_package(PkgConfig)
@@ -119,8 +119,14 @@ target_link_libraries(Vapor PUBLIC
     RmlUi::RmlUi
     EnTT::EnTT
     nlohmann_json::nlohmann_json
-    Boost::pfr
 )
+if(Boost_FOUND)
+    message(STATUS "Boost.PFR found — component auto-reflection enabled")
+    target_link_libraries(Vapor PUBLIC Boost::pfr)
+    target_compile_definitions(Vapor PUBLIC VAPOR_HAS_BOOST_PFR)
+else()
+    message(STATUS "Boost.PFR not found — component auto-reflection disabled")
+endif()
 target_link_libraries(Vapor PRIVATE
     Vulkan::Vulkan
     taywee::args
