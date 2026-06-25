@@ -9,10 +9,13 @@
 #include "resource_manager.hpp"
 #include "task_scheduler.hpp"
 #include <memory>
+#include <string>
 
 namespace Vapor {
 
     class RmlUiManager;
+    class Renderer;
+    class VideoRecorder;
 
     class EngineCore {
     public:
@@ -50,6 +53,14 @@ namespace Vapor {
             return *_audioManager;
         }
 
+        // Wire the renderer into the engine: registers the built-in engine
+        // ImGui window (recording controls) and sets the recording output dir
+        // to <basePath>/output. Call once after the renderer is created.
+        void attachRenderer(Renderer* renderer, const std::string& outputBasePath = "output");
+
+        // Access the engine-owned video recorder (always valid after init()).
+        VideoRecorder& getVideoRecorder();
+
         // Initialize RmlUI
         bool initRmlUI(int width, int height);
 
@@ -85,6 +96,7 @@ namespace Vapor {
         std::unique_ptr<ActionManager> _actionManager;
         std::unique_ptr<InputManager> _inputManager;
         std::unique_ptr<AudioManager> _audioManager;
+        std::unique_ptr<VideoRecorder> _videoRecorder;
         std::unique_ptr<RmlUiManager> _rmluiManager;
 
         bool _initialized{ false };

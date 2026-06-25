@@ -1,6 +1,9 @@
 #include "engine_core.hpp"
 #include "Vapor/file_system.hpp"
+#include "Vapor/renderer.hpp"
+#include "Vapor/video_recorder.hpp"
 #include "rmlui_manager.hpp"
+#include "imgui.h"
 #include <fmt/core.h>
 #include <fmt/format.h>
 #include <thread>
@@ -66,6 +69,11 @@ namespace Vapor {
         _audioManager = std::make_unique<AudioManager>();
         _audioManager->init();
 
+        // Initialize video recorder and wire it to the audio manager so
+        // recordings automatically include the engine's mixed audio output.
+        _videoRecorder = std::make_unique<VideoRecorder>();
+        _videoRecorder->setAudioManager(_audioManager.get());
+
         _initialized = true;
 
         fmt::print("EngineCore initialized successfully\n");
@@ -84,6 +92,11 @@ namespace Vapor {
         _taskScheduler->waitForAll();
 
         _actionManager->stopAll();
+
+        // Stop any in-progress recording before teardown.
+        if (_videoRecorder && _videoRecorder->isRecording())
+            _videoRecorder->stopRecording();
+        _videoRecorder.reset();
 
         // Cleanup subsystems in reverse order
         if (_rmluiManager) {
@@ -125,6 +138,23 @@ namespace Vapor {
         // Future: Handle async task completion callbacks
         // Future: Manage render command buffer submission
         // Future: Coordinate physics-render synchronization
+    }
+
+    void EngineCore::attachRenderer(Renderer* renderer, const std::string& outputBasePath) {
+        _videoRecorder->setBaseOutputDir(outputBasePath);
+
+        renderer->setEngineWindowCallback([this, renderer]() {
+            if (_videoRecorder->isRecording())
+                _videoRecorder->captureFrame();
+#ifndef NDEBUG
+            if (ImGui::CollapsingHeader("Recording", ImGuiTreeNodeFlags_DefaultOpen))
+                _videoRecorder->drawImGui(*renderer);
+#endif
+        });
+    }
+
+    VideoRecorder& EngineCore::getVideoRecorder() {
+        return *_videoRecorder;
     }
 
     auto EngineCore::initRmlUI(int width, int height) -> bool {
