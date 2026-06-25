@@ -330,7 +330,7 @@ auto main(int argc, char* args[]) -> int {
     {
         const char* basePath = SDL_GetBasePath();
         std::string outputDir = basePath ? std::string(basePath) + "output" : "output";
-        engineCore->attachRenderer(renderer, outputDir);
+        engineCore->attachRenderer(renderer.get(), outputDir);
     }
 
     renderer->setImGuiCallback([&]() {
