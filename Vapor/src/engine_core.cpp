@@ -1,7 +1,7 @@
 #include "engine_core.hpp"
-#include "Vapor/file_system.hpp"
-#include "Vapor/renderer.hpp"
-#include "Vapor/video_recorder.hpp"
+#include "file_system.hpp"
+#include "renderer.hpp"
+#include "video_recorder.hpp"
 #include "rmlui_manager.hpp"
 #include "imgui.h"
 #include <fmt/core.h>
