@@ -41,7 +41,9 @@ struct VideoRecorder::FFmpegContext {
 
 // ─── Lifecycle ────────────────────────────────────────────────────────────────────────────────
 
-VideoRecorder::VideoRecorder() = default;
+VideoRecorder::VideoRecorder() {
+    refreshOutputPath();
+}
 
 VideoRecorder::~VideoRecorder() {
     if (m_recording) {

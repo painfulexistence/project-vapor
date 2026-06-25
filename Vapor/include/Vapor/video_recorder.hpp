@@ -55,9 +55,9 @@ public:
     VideoRecorder();
     ~VideoRecorder() override;
 
-    // Provide the AudioManager whose mixed output should be recorded. Must be
-    // called before startRecording() for audio capture to take effect. Pass
-    // nullptr to disable audio capture.
+    // Provide the AudioManager whose mixed output should be recorded. Required
+    // for audio capture — without this, captureAudio in Config has no effect.
+    // Call once after construction, before startRecording().
     void setAudioManager(AudioManager* audioManager) { m_audioManager = audioManager; }
 
     // Start recording. Returns false if already recording or FFmpeg unavailable.
