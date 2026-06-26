@@ -59,7 +59,7 @@ TaskScheduler           ResourceManager        ActionManager
        │
        ├─────────────────────────────┐
        ▼                             ▼
-InputManager                   AudioManager
+InputManager                   AudioEngine
 (SDL event → action mapping)   (miniaudio, 2D/3D spatial)
                                      │
                                RmlUiManager (optional)
@@ -83,7 +83,7 @@ VehicleController              ├── RendererMetal
 
 EngineCore::update(dt)
       ├─→ ActionManager::update(dt)       // advance tweens/timers
-      ├─→ AudioManager::update(dt)        // fire completion callbacks
+      ├─→ AudioEngine::update(dt)        // fire completion callbacks
       └─→ ResourceManager                 // async tasks on TaskScheduler
 
 Physics3D::process(scene, dt)            // fixed 60Hz step
@@ -195,7 +195,7 @@ Renderer::draw(scene, camera)
         <tr><td><code>test_resource_manager</code></td><td>2</td><td>Async loading, cache deduplication</td></tr>
       </tbody>
     </table>
-    <p>GPU/Renderer, AudioManager, and RmlUI are not tested — they require hardware initialization unavailable in headless CI.</p>
+    <p>GPU/Renderer, AudioEngine, and RmlUI are not tested — they require hardware initialization unavailable in headless CI.</p>
 
     <hr>
 

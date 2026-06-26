@@ -25,17 +25,17 @@ namespace Vapor {
         }
     }
 
-    // AudioManager Implementation
+    // AudioEngine Implementation
 
-    AudioManager::AudioManager() = default;
+    AudioEngine::AudioEngine() = default;
 
-    AudioManager::~AudioManager() {
+    AudioEngine::~AudioEngine() {
         if (m_initialized) {
             shutdown();
         }
     }
 
-    auto AudioManager::init() -> bool {
+    auto AudioEngine::init() -> bool {
         std::lock_guard<std::mutex> lock(m_mutex);
 
         if (m_initialized) {
@@ -57,11 +57,11 @@ namespace Vapor {
         }
 
         m_initialized = true;
-        fmt::print("AudioManager initialized\n");
+        fmt::print("AudioEngine initialized\n");
         return true;
     }
 
-    void AudioManager::shutdown() {
+    void AudioEngine::shutdown() {
         std::lock_guard<std::mutex> lock(m_mutex);
 
         if (!m_initialized) {
@@ -89,10 +89,10 @@ namespace Vapor {
         }
 
         m_initialized = false;
-        fmt::print("AudioManager shutdown\n");
+        fmt::print("AudioEngine shutdown\n");
     }
 
-    void AudioManager::update(float deltaTime) {
+    void AudioEngine::update(float deltaTime) {
         // Collect finished sounds and their callbacks (under lock)
         {
             std::lock_guard<std::mutex> lock(m_mutex);
@@ -116,7 +116,7 @@ namespace Vapor {
             }
         }
 
-        // Invoke callbacks outside the lock (safe for user to call AudioManager methods)
+        // Invoke callbacks outside the lock (safe for user to call AudioEngine methods)
         for (auto& pending : m_pendingCallbacks) {
             if (pending.callback) {
                 pending.callback(pending.id, pending.filePath);
@@ -125,7 +125,7 @@ namespace Vapor {
         m_pendingCallbacks.clear();
     }
 
-    void AudioManager::cleanupInstance(AudioInstance& inst) {
+    void AudioEngine::cleanupInstance(AudioInstance& inst) {
         // Must be called with lock held
         if (inst.sound) {
             ma_sound_uninit(inst.sound);
@@ -136,7 +136,7 @@ namespace Vapor {
 
     // Playback
 
-    auto AudioManager::play2d(const std::string& filename, bool loop, float volume) -> AudioID {
+    auto AudioEngine::play2d(const std::string& filename, bool loop, float volume) -> AudioID {
         std::lock_guard<std::mutex> lock(m_mutex);
 
         if (!m_initialized) return AUDIO_ID_INVALID;
@@ -176,12 +176,12 @@ namespace Vapor {
         return id;
     }
 
-    auto AudioManager::play3d(const std::string& filename, const glm::vec3& position, bool loop, float volume)
+    auto AudioEngine::play3d(const std::string& filename, const glm::vec3& position, bool loop, float volume)
         -> AudioID {
         return play3d(filename, Audio3DConfig(position), loop, volume);
     }
 
-    auto AudioManager::play3d(const std::string& filename, const Audio3DConfig& config, bool loop, float volume)
+    auto AudioEngine::play3d(const std::string& filename, const Audio3DConfig& config, bool loop, float volume)
         -> AudioID {
         std::lock_guard<std::mutex> lock(m_mutex);
 
@@ -242,7 +242,7 @@ namespace Vapor {
 
     // Playback Control
 
-    void AudioManager::stop(AudioID id) {
+    void AudioEngine::stop(AudioID id) {
         std::lock_guard<std::mutex> lock(m_mutex);
 
         auto* inst = getInstance(id);
@@ -254,7 +254,7 @@ namespace Vapor {
         cleanupInstance(*inst);
     }
 
-    void AudioManager::stopAll() {
+    void AudioEngine::stopAll() {
         std::lock_guard<std::mutex> lock(m_mutex);
 
         for (auto& inst : m_instances) {
@@ -267,7 +267,7 @@ namespace Vapor {
         }
     }
 
-    void AudioManager::pause(AudioID id) {
+    void AudioEngine::pause(AudioID id) {
         std::lock_guard<std::mutex> lock(m_mutex);
 
         auto* inst = getInstance(id);
@@ -277,7 +277,7 @@ namespace Vapor {
         inst->state = AudioState::Paused;
     }
 
-    void AudioManager::pauseAll() {
+    void AudioEngine::pauseAll() {
         std::lock_guard<std::mutex> lock(m_mutex);
 
         for (auto& inst : m_instances) {
@@ -288,7 +288,7 @@ namespace Vapor {
         }
     }
 
-    void AudioManager::resume(AudioID id) {
+    void AudioEngine::resume(AudioID id) {
         std::lock_guard<std::mutex> lock(m_mutex);
 
         auto* inst = getInstance(id);
@@ -298,7 +298,7 @@ namespace Vapor {
         inst->state = AudioState::Playing;
     }
 
-    void AudioManager::resumeAll() {
+    void AudioEngine::resumeAll() {
         std::lock_guard<std::mutex> lock(m_mutex);
 
         for (auto& inst : m_instances) {
@@ -311,7 +311,7 @@ namespace Vapor {
 
     // Audio Properties
 
-    void AudioManager::setVolume(AudioID id, float volume) {
+    void AudioEngine::setVolume(AudioID id, float volume) {
         std::lock_guard<std::mutex> lock(m_mutex);
 
         auto* inst = getInstance(id);
@@ -321,42 +321,42 @@ namespace Vapor {
         ma_sound_set_volume(inst->sound, volume * m_masterVolume);
     }
 
-    auto AudioManager::getVolume(AudioID id) const -> float {
+    auto AudioEngine::getVolume(AudioID id) const -> float {
         std::lock_guard<std::mutex> lock(m_mutex);
 
         auto* inst = getInstance(id);
         return inst ? inst->volume : 0.0f;
     }
 
-    void AudioManager::setLoop(AudioID id, bool loop) {
+    void AudioEngine::setLoop(AudioID id, bool loop) {
         std::lock_guard<std::mutex> lock(m_mutex);
 
         auto* inst = getInstance(id);
         if (inst) ma_sound_set_looping(inst->sound, loop);
     }
 
-    auto AudioManager::isLoop(AudioID id) const -> bool {
+    auto AudioEngine::isLoop(AudioID id) const -> bool {
         std::lock_guard<std::mutex> lock(m_mutex);
 
         auto* inst = getInstance(id);
         return inst ? ma_sound_is_looping(inst->sound) : false;
     }
 
-    void AudioManager::setPitch(AudioID id, float pitch) {
+    void AudioEngine::setPitch(AudioID id, float pitch) {
         std::lock_guard<std::mutex> lock(m_mutex);
 
         auto* inst = getInstance(id);
         if (inst) ma_sound_set_pitch(inst->sound, pitch);
     }
 
-    auto AudioManager::getPitch(AudioID id) const -> float {
+    auto AudioEngine::getPitch(AudioID id) const -> float {
         std::lock_guard<std::mutex> lock(m_mutex);
 
         auto* inst = getInstance(id);
         return inst ? ma_sound_get_pitch(inst->sound) : 1.0f;
     }
 
-    auto AudioManager::getCurrentTime(AudioID id) const -> float {
+    auto AudioEngine::getCurrentTime(AudioID id) const -> float {
         std::lock_guard<std::mutex> lock(m_mutex);
 
         auto* inst = getInstance(id);
@@ -367,7 +367,7 @@ namespace Vapor {
         return static_cast<float>(cursor) / ma_engine_get_sample_rate(m_engine);
     }
 
-    void AudioManager::setCurrentTime(AudioID id, float time) {
+    void AudioEngine::setCurrentTime(AudioID id, float time) {
         std::lock_guard<std::mutex> lock(m_mutex);
 
         auto* inst = getInstance(id);
@@ -377,7 +377,7 @@ namespace Vapor {
         ma_sound_seek_to_pcm_frame(inst->sound, frame);
     }
 
-    auto AudioManager::getDuration(AudioID id) const -> float {
+    auto AudioEngine::getDuration(AudioID id) const -> float {
         std::lock_guard<std::mutex> lock(m_mutex);
 
         auto* inst = getInstance(id);
@@ -388,7 +388,7 @@ namespace Vapor {
         return length;
     }
 
-    auto AudioManager::getState(AudioID id) const -> AudioState {
+    auto AudioEngine::getState(AudioID id) const -> AudioState {
         std::lock_guard<std::mutex> lock(m_mutex);
 
         auto* inst = getInstance(id);
@@ -397,7 +397,7 @@ namespace Vapor {
 
     // 3D Audio Source Control
 
-    void AudioManager::setPosition3d(AudioID id, const glm::vec3& position) {
+    void AudioEngine::setPosition3d(AudioID id, const glm::vec3& position) {
         std::lock_guard<std::mutex> lock(m_mutex);
 
         auto* inst = getInstance(id);
@@ -407,14 +407,14 @@ namespace Vapor {
         ma_sound_set_position(inst->sound, position.x, position.y, position.z);
     }
 
-    auto AudioManager::getPosition3d(AudioID id) const -> glm::vec3 {
+    auto AudioEngine::getPosition3d(AudioID id) const -> glm::vec3 {
         std::lock_guard<std::mutex> lock(m_mutex);
 
         auto* inst = getInstance(id);
         return inst ? inst->config3D.position : glm::vec3(0.0f);
     }
 
-    void AudioManager::setVelocity3d(AudioID id, const glm::vec3& velocity) {
+    void AudioEngine::setVelocity3d(AudioID id, const glm::vec3& velocity) {
         std::lock_guard<std::mutex> lock(m_mutex);
 
         auto* inst = getInstance(id);
@@ -424,7 +424,7 @@ namespace Vapor {
         ma_sound_set_velocity(inst->sound, velocity.x, velocity.y, velocity.z);
     }
 
-    void AudioManager::setDirection3d(AudioID id, const glm::vec3& direction) {
+    void AudioEngine::setDirection3d(AudioID id, const glm::vec3& direction) {
         std::lock_guard<std::mutex> lock(m_mutex);
 
         auto* inst = getInstance(id);
@@ -434,7 +434,7 @@ namespace Vapor {
         ma_sound_set_direction(inst->sound, direction.x, direction.y, direction.z);
     }
 
-    void AudioManager::setDistanceParameters(AudioID id, float minDist, float maxDist, float rolloff) {
+    void AudioEngine::setDistanceParameters(AudioID id, float minDist, float maxDist, float rolloff) {
         std::lock_guard<std::mutex> lock(m_mutex);
 
         auto* inst = getInstance(id);
@@ -449,7 +449,7 @@ namespace Vapor {
         ma_sound_set_rolloff(inst->sound, rolloff);
     }
 
-    void AudioManager::setDistanceModel(AudioID id, DistanceModel model) {
+    void AudioEngine::setDistanceModel(AudioID id, DistanceModel model) {
         std::lock_guard<std::mutex> lock(m_mutex);
 
         auto* inst = getInstance(id);
@@ -459,7 +459,7 @@ namespace Vapor {
         ma_sound_set_attenuation_model(inst->sound, toMiniaudioModel(model));
     }
 
-    void AudioManager::setCone(AudioID id, float innerAngle, float outerAngle, float outerGain) {
+    void AudioEngine::setCone(AudioID id, float innerAngle, float outerAngle, float outerGain) {
         std::lock_guard<std::mutex> lock(m_mutex);
 
         auto* inst = getInstance(id);
@@ -472,7 +472,7 @@ namespace Vapor {
         ma_sound_set_cone(inst->sound, innerAngle * (MA_PI / 180.0f), outerAngle * (MA_PI / 180.0f), outerGain);
     }
 
-    void AudioManager::set3DConfig(AudioID id, const Audio3DConfig& config) {
+    void AudioEngine::set3DConfig(AudioID id, const Audio3DConfig& config) {
         std::lock_guard<std::mutex> lock(m_mutex);
 
         auto* inst = getInstance(id);
@@ -499,7 +499,7 @@ namespace Vapor {
 
     // Listener Control
 
-    void AudioManager::setListenerPosition(const glm::vec3& position) {
+    void AudioEngine::setListenerPosition(const glm::vec3& position) {
         std::lock_guard<std::mutex> lock(m_mutex);
 
         if (!m_initialized) return;
@@ -507,7 +507,7 @@ namespace Vapor {
         ma_engine_listener_set_position(m_engine, 0, position.x, position.y, position.z);
     }
 
-    void AudioManager::setListenerVelocity(const glm::vec3& velocity) {
+    void AudioEngine::setListenerVelocity(const glm::vec3& velocity) {
         std::lock_guard<std::mutex> lock(m_mutex);
 
         if (!m_initialized) return;
@@ -515,7 +515,7 @@ namespace Vapor {
         ma_engine_listener_set_velocity(m_engine, 0, velocity.x, velocity.y, velocity.z);
     }
 
-    void AudioManager::setListenerOrientation(const glm::vec3& forward, const glm::vec3& up) {
+    void AudioEngine::setListenerOrientation(const glm::vec3& forward, const glm::vec3& up) {
         std::lock_guard<std::mutex> lock(m_mutex);
 
         if (!m_initialized) return;
@@ -525,7 +525,7 @@ namespace Vapor {
         ma_engine_listener_set_world_up(m_engine, 0, up.x, up.y, up.z);
     }
 
-    void AudioManager::setListener(const AudioListener& listener) {
+    void AudioEngine::setListener(const AudioListener& listener) {
         std::lock_guard<std::mutex> lock(m_mutex);
 
         if (!m_initialized) return;
@@ -538,7 +538,7 @@ namespace Vapor {
 
     // Global Settings
 
-    void AudioManager::setMasterVolume(float volume) {
+    void AudioEngine::setMasterVolume(float volume) {
         std::lock_guard<std::mutex> lock(m_mutex);
 
         m_masterVolume = volume;
@@ -547,7 +547,7 @@ namespace Vapor {
         }
     }
 
-    void AudioManager::setDopplerFactor(float factor) {
+    void AudioEngine::setDopplerFactor(float factor) {
         std::lock_guard<std::mutex> lock(m_mutex);
 
         if (!m_initialized) return;
@@ -560,14 +560,14 @@ namespace Vapor {
 
     // Callbacks & Utility
 
-    void AudioManager::setFinishCallback(AudioID id, std::function<void(AudioID, const std::string&)> callback) {
+    void AudioEngine::setFinishCallback(AudioID id, std::function<void(AudioID, const std::string&)> callback) {
         std::lock_guard<std::mutex> lock(m_mutex);
 
         auto* inst = getInstance(id);
         if (inst) inst->finishCallback = std::move(callback);
     }
 
-    auto AudioManager::getPlayingCount() const -> int {
+    auto AudioEngine::getPlayingCount() const -> int {
         std::lock_guard<std::mutex> lock(m_mutex);
 
         int count = 0;
@@ -577,7 +577,7 @@ namespace Vapor {
         return count;
     }
 
-    auto AudioManager::getFilePath(AudioID id) const -> std::string {
+    auto AudioEngine::getFilePath(AudioID id) const -> std::string {
         std::lock_guard<std::mutex> lock(m_mutex);
 
         auto* inst = getInstance(id);
@@ -586,19 +586,19 @@ namespace Vapor {
 
     // Private helpers (must be called with lock held)
 
-    auto AudioManager::getInstance(AudioID id) -> AudioManager::AudioInstance* {
+    auto AudioEngine::getInstance(AudioID id) -> AudioEngine::AudioInstance* {
         if (id == AUDIO_ID_INVALID) return nullptr;
         auto& inst = m_instances[id % MAX_AUDIO_INSTANCES];
         return (inst.sound && inst.id == id) ? &inst : nullptr;
     }
 
-    auto AudioManager::getInstance(AudioID id) const -> const AudioManager::AudioInstance* {
+    auto AudioEngine::getInstance(AudioID id) const -> const AudioEngine::AudioInstance* {
         if (id == AUDIO_ID_INVALID) return nullptr;
         const auto& inst = m_instances[id % MAX_AUDIO_INSTANCES];
         return (inst.sound && inst.id == id) ? &inst : nullptr;
     }
 
-    auto AudioManager::allocateInstance() -> AudioID {
+    auto AudioEngine::allocateInstance() -> AudioID {
         // Must be called with lock held
         for (int i = 0; i < MAX_AUDIO_INSTANCES; i++) {
             int idx = (m_nextID + i) % MAX_AUDIO_INSTANCES;

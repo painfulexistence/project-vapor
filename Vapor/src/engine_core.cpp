@@ -63,8 +63,8 @@ namespace Vapor {
         _inputManager = std::make_unique<InputManager>();
 
         // Initialize audio manager
-        _audioManager = std::make_unique<AudioManager>();
-        _audioManager->init();
+        _audioEngine = std::make_unique<AudioEngine>();
+        _audioEngine->init();
 
         _initialized = true;
 
@@ -90,8 +90,8 @@ namespace Vapor {
             _rmluiManager->Shutdown();
             _rmluiManager.reset();
         }
-        _audioManager->shutdown();
-        _audioManager.reset();
+        _audioEngine->shutdown();
+        _audioEngine.reset();
         _inputManager.reset();
         _actionManager.reset();
         _resourceManager.reset();
@@ -115,7 +115,7 @@ namespace Vapor {
         _actionManager->update(deltaTime);
 
         // Update audio manager (cleanup finished sounds, invoke callbacks)
-        _audioManager->update(deltaTime);
+        _audioEngine->update(deltaTime);
 
         // Update RmlUI
         if (_rmluiManager) {

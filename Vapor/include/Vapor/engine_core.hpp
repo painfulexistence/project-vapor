@@ -46,8 +46,8 @@ namespace Vapor {
         }
 
         // Get the audio manager
-        AudioManager& getAudioManager() {
-            return *_audioManager;
+        AudioEngine& getAudioEngine() {
+            return *_audioEngine;
         }
 
         // Initialize RmlUI
@@ -84,7 +84,7 @@ namespace Vapor {
         std::unique_ptr<ResourceManager> _resourceManager;
         std::unique_ptr<ActionManager> _actionManager;
         std::unique_ptr<InputManager> _inputManager;
-        std::unique_ptr<AudioManager> _audioManager;
+        std::unique_ptr<AudioEngine> _audioEngine;
         std::unique_ptr<RmlUiManager> _rmluiManager;
 
         bool _initialized{ false };
