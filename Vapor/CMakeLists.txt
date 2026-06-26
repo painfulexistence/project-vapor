@@ -141,7 +141,7 @@ if(APPLE)
 endif()
 
 include("${CMAKE_CURRENT_SOURCE_DIR}/../cmake/helpers/AssetPipeline.cmake")
-vapor_compile_shaders(Vapor "${CMAKE_CURRENT_SOURCE_DIR}/assets/shaders")
+vapor_compile_glsl_shaders(Vapor "${CMAKE_CURRENT_SOURCE_DIR}/assets/shaders")
 
 set(VAPOR_ASSETS_DIR "${CMAKE_CURRENT_SOURCE_DIR}/assets" PARENT_SCOPE)
 

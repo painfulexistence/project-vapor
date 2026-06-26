@@ -1,7 +1,7 @@
 # AssetPipeline.cmake
 # Functions for compiling shaders and copying assets to build output.
 #
-# vapor_compile_shaders(TARGET SHADER_DIR)
+# vapor_compile_glsl_shaders(TARGET SHADER_DIR)
 #   Compile all GLSL shaders under SHADER_DIR to SPIR-V and add as a
 #   dependency of TARGET.
 #
@@ -12,7 +12,7 @@
 # vapor_copy_game_assets(TARGET ASSETS_DIR)
 #   Copy a game's own assets to TARGET's output directory under Res/.
 
-function(vapor_compile_shaders TARGET SHADER_DIR)
+function(vapor_compile_glsl_shaders TARGET SHADER_DIR)
     find_program(GLSL_VALIDATOR "glslangValidator" REQUIRED)
 
     file(GLOB_RECURSE _sources
