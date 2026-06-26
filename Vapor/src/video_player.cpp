@@ -463,7 +463,7 @@ bool VideoPlayer::initDecoder(const std::string& path) {
     }
 
     fmt::print("[VideoPlayer] Opened '{}' — {}x{} {:.1f}s ({})\n",
-               path, w, h, m_duration, codec->name);
+               path, ff.codecCtx->width, ff.codecCtx->height, m_duration, codec->name);
     return true;
 #endif
 }

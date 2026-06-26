@@ -37,6 +37,11 @@ namespace Vapor {
 //   renderer->drawQuad2D(pos, size, texture);
 class VideoPlayer {
 public:
+    // Forward-declared here so file-scope FFmpeg callbacks in video_player.cpp
+    // can cast to it without accessing a private name. The full definition
+    // (with all FFmpeg fields) lives in video_player.cpp under VAPOR_HAS_FFMPEG.
+    struct FFmpegDecodeContext;
+
     struct Frame {
         std::vector<uint8_t> pixels; // RGBA, width*height*4 bytes
         uint32_t width = 0;
@@ -69,7 +74,6 @@ public:
     double getCurrentTime() const { return m_currentTime; }
 
 private:
-    struct FFmpegDecodeContext;
 
     void decodeThreadFunc();
     bool initDecoder(const std::string& path);
