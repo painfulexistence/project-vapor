@@ -4,57 +4,29 @@
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
   <title>ADR-001: Test Framework — Project Vapor</title>
+  <link rel="stylesheet" href="../styles/global.css">
   <style>
-    :root {
-      --bg: #0d0d0f; --bg-surface: #141418; --bg-raised: #1c1c22;
-      --border: #2a2a33; --text: #e2e2e8; --text-muted: #7a7a8c;
-      --accent: #7c6af7; --warn: #c97a2f; --ok: #4a9e6a; --danger: #9e4a4a;
-    }
-    * { box-sizing: border-box; margin: 0; padding: 0; }
-    body { background: var(--bg); color: var(--text); font-family: 'Berkeley Mono','JetBrains Mono','Fira Code','Cascadia Code',monospace; font-size: 15px; line-height: 1.75; }
-    nav { background: var(--bg-surface); border-bottom: 1px solid var(--border); padding: 16px 24px; display: flex; align-items: center; justify-content: space-between; }
-    nav .site-title { color: var(--text-muted); text-decoration: none; font-size: 14px; }
-    nav .links { display: flex; gap: 24px; }
-    nav .links a { color: var(--text-muted); text-decoration: none; font-size: 13px; }
-    nav .links a:hover { color: var(--accent); }
-    nav .links a.active { color: var(--accent); }
-    main { max-width: 860px; margin: 0 auto; padding: 48px 24px; }
     .page-header { margin-bottom: 32px; }
-    .page-header .eyebrow { font-size: 12px; color: var(--text-muted); margin-bottom: 10px; }
-    .page-header .eyebrow a { color: var(--text-muted); text-decoration: none; }
-    .page-header .eyebrow a:hover { color: var(--accent); }
-    .page-header h1 { font-size: 20px; font-weight: 600; margin-bottom: 12px; }
-    .meta-row { display: flex; gap: 24px; font-size: 13px; color: var(--text-muted); margin-bottom: 8px; }
-    .badge { display: inline-block; font-size: 11px; border-radius: 3px; padding: 2px 8px; }
-    .badge-ok { background: rgba(74,158,106,0.15); color: var(--ok); }
-    h2 { font-size: 16px; font-weight: 600; margin: 36px 0 14px; }
+    .page-header h1 { font-size: 20px; }
+    h2 { font-size: 16px; margin: 36px 0 14px; }
     p { margin-bottom: 14px; }
-    hr { border: none; border-top: 1px solid var(--border); margin: 36px 0; }
-    code { background: var(--bg-raised); border-radius: 3px; padding: 2px 6px; font-size: 13px; }
-    table { width: 100%; border-collapse: collapse; margin-bottom: 20px; font-size: 14px; }
-    thead th { background: var(--bg-raised); color: var(--text-muted); font-size: 11px; text-transform: uppercase; letter-spacing: 0.08em; padding: 10px 14px; text-align: left; border: 1px solid var(--border); }
-    tbody td { padding: 10px 14px; border: 1px solid var(--border); vertical-align: top; }
-    tbody tr:nth-child(even) td { background: var(--bg-raised); }
-    ul { padding-left: 20px; margin-bottom: 14px; }
-    ul li { margin-bottom: 4px; }
-    @media (max-width: 640px) { main { padding: 24px 16px; } }
+    hr { margin: 36px 0; }
   </style>
 </head>
 <body>
   <nav>
     <a class="site-title" href="../index.html">Project Vapor</a>
     <div class="links">
-      <a href="../architecture.html">Architecture</a>
-      <a href="../features.html">Features</a>
-      <a href="../techstack.html">Tech Stack</a>
-      <a href="../roadmap.html">Roadmap</a>
-      <a href="index.html" class="active">ADRs</a>
+      <a href="../documentation/index.html">Docs</a>
+      <a href="index.html" class="active">Devlog</a>
+      <a href="../demo/index.html">Demo</a>
+      <a href="https://github.com/painfulexistence/project-vapor" target="_blank">GitHub ↗</a>
     </div>
   </nav>
   <main>
     <div class="page-header">
       <div class="eyebrow">
-      <a href="index.html">ADRs</a> / ADR-001</div>
+      <a href="index.html">Devlog</a> / ADR-001</div>
       <h1>ADR-001: Test Framework Selection</h1>
       <div class="meta-row">
         <span>2026-04-29</span>

@@ -66,13 +66,13 @@ namespace Vapor {
         _inputManager = std::make_unique<InputManager>();
 
         // Initialize audio manager
-        _audioManager = std::make_unique<AudioManager>();
-        _audioManager->init();
+        _audioEngine = std::make_unique<AudioEngine>();
+        _audioEngine->init();
 
         // Initialize video recorder and wire it to the audio manager so
         // recordings automatically include the engine's mixed audio output.
         _videoRecorder = std::make_unique<VideoRecorder>();
-        _videoRecorder->setAudioManager(_audioManager.get());
+        _videoRecorder->setAudioEngine(_audioEngine.get());
 
         _initialized = true;
 
@@ -103,8 +103,8 @@ namespace Vapor {
             _rmluiManager->Shutdown();
             _rmluiManager.reset();
         }
-        _audioManager->shutdown();
-        _audioManager.reset();
+        _audioEngine->shutdown();
+        _audioEngine.reset();
         _inputManager.reset();
         _actionManager.reset();
         _resourceManager.reset();
@@ -128,7 +128,7 @@ namespace Vapor {
         _actionManager->update(deltaTime);
 
         // Update audio manager (cleanup finished sounds, invoke callbacks)
-        _audioManager->update(deltaTime);
+        _audioEngine->update(deltaTime);
 
         // Update RmlUI
         if (_rmluiManager) {

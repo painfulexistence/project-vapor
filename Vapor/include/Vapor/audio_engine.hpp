@@ -93,7 +93,7 @@ namespace Vapor {
     };
 
     // ============================================================
-    // AudioManager - High-level Audio API with Spatial Audio
+    // AudioEngine - High-level Audio API with Spatial Audio
     // ============================================================
 
     /**
@@ -101,7 +101,7 @@ namespace Vapor {
      * Supports 2D and 3D spatial audio playback.
      *
      * Usage:
-     *     auto& audio = engineCore.getAudioManager();
+     *     auto& audio = engineCore.getAudioEngine();
      *
      *     // 2D audio
      *     AudioID id = audio.play2d("music.wav", true, 0.8f);
@@ -114,14 +114,14 @@ namespace Vapor {
      *     audio.setListenerPosition(cameraPos);
      *     audio.setListenerOrientation(forward, up);
      */
-    class AudioManager {
+    class AudioEngine {
     public:
-        AudioManager();
-        ~AudioManager();
+        AudioEngine();
+        ~AudioEngine();
 
         // Non-copyable
-        AudioManager(const AudioManager&) = delete;
-        AudioManager& operator=(const AudioManager&) = delete;
+        AudioEngine(const AudioEngine&) = delete;
+        AudioEngine& operator=(const AudioEngine&) = delete;
 
         // ============================================================
         // Lifecycle

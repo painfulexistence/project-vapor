@@ -23,14 +23,14 @@ namespace Vapor {
 //
 // Usage:
 //   VideoRecorder rec;
-//   rec.setAudioManager(&engineCore.getAudioManager()); // optional, for audio
+//   rec.setAudioEngine(&engineCore.getAudioEngine()); // optional, for audio
 //   rec.startRecording(renderer, {.outputPath = "output.mp4", .fps = 30});
 //   // each frame:
 //   rec.captureFrame();
 //   // when done:
 //   rec.stopRecording();
 //
-// Audio is captured by registering as an AudioCaptureSink on the AudioManager,
+// Audio is captured by registering as an AudioCaptureSink on the AudioEngine,
 // which delivers the final mixed PCM on the audio thread. The encoder thread
 // resamples it to the AAC encoder format and interleaves it with the video.
 class VideoRecorder : public AudioCaptureSink {
@@ -45,7 +45,7 @@ public:
         // libaom-av1 → libx264. Set to empty string to use the probe order directly.
         std::string encoder = "h264_videotoolbox";
         // Capture the engine's mixed audio into an AAC track. Requires an
-        // AudioManager to be set via setAudioManager(); silently video-only
+        // AudioEngine to be set via setAudioEngine(); silently video-only
         // otherwise.
         bool captureAudio = true;
         // AAC bitrate in bits/sec.
@@ -55,10 +55,10 @@ public:
     VideoRecorder();
     ~VideoRecorder() override;
 
-    // Provide the AudioManager whose mixed output should be recorded. Required
+    // Provide the AudioEngine whose mixed output should be recorded. Required
     // for audio capture — without this, captureAudio in Config has no effect.
     // Call once after construction, before startRecording().
-    void setAudioManager(AudioManager* audioManager) { m_audioManager = audioManager; }
+    void setAudioEngine(AudioEngine* audioEngine) { m_audioEngine = audioEngine; }
 
     // Start recording. Returns false if already recording or FFmpeg unavailable.
     // (Config is a nested type with default member initializers, so we use an
@@ -185,7 +185,7 @@ private:
     static constexpr size_t MAX_QUEUE_FRAMES = 16;
 
     // ── Audio capture state ──────────────────────────────────────────────
-    AudioManager* m_audioManager = nullptr;
+    AudioEngine* m_audioEngine = nullptr;
     bool m_audioActive = false; // audio track is being recorded this session
     int  m_audioSampleRate = 44100;
     int  m_audioChannels = 2;

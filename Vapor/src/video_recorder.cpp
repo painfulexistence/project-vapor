@@ -67,9 +67,9 @@ bool VideoRecorder::startRecording(Renderer* renderer, const Config& config) {
     m_stop = false;
 
     m_audioActive = false;
-    if (m_config.captureAudio && m_audioManager && m_audioManager->isInitialized()) {
-        m_audioSampleRate = static_cast<int>(m_audioManager->getSampleRate());
-        m_audioChannels   = static_cast<int>(m_audioManager->getChannels());
+    if (m_config.captureAudio && m_audioEngine && m_audioEngine->isInitialized()) {
+        m_audioSampleRate = static_cast<int>(m_audioEngine->getSampleRate());
+        m_audioChannels   = static_cast<int>(m_audioEngine->getChannels());
         m_audioActive     = true;
         {
             std::lock_guard<std::mutex> lock(m_audioMutex);
@@ -80,7 +80,7 @@ bool VideoRecorder::startRecording(Renderer* renderer, const Config& config) {
     m_recording = true;
 
     if (m_audioActive) {
-        m_audioManager->setCaptureSink(this);
+        m_audioEngine->setCaptureSink(this);
     }
 
     m_encoderThread = std::thread(&VideoRecorder::encoderThreadFunc, this);
@@ -93,8 +93,8 @@ void VideoRecorder::stopRecording() {
         return;
     }
 
-    if (m_audioActive && m_audioManager) {
-        m_audioManager->clearCaptureSink();
+    if (m_audioActive && m_audioEngine) {
+        m_audioEngine->clearCaptureSink();
     }
 
     m_stop = true;
@@ -315,8 +315,8 @@ bool VideoRecorder::initEncoder(uint32_t width, uint32_t height) {
         if (!initAudioEncoder()) {
             fmt::print(stderr, "[VideoRecorder] Audio encoder init failed — recording video only\n");
             m_audioActive = false;
-            if (m_audioManager) {
-                m_audioManager->clearCaptureSink();
+            if (m_audioEngine) {
+                m_audioEngine->clearCaptureSink();
             }
         }
     }

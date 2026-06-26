@@ -50,8 +50,8 @@ namespace Vapor {
         }
 
         // Get the audio manager
-        AudioManager& getAudioManager() {
-            return *_audioManager;
+        AudioEngine& getAudioEngine() {
+            return *_audioEngine;
         }
 
         // Wire the renderer into the engine: registers the built-in engine
@@ -96,7 +96,7 @@ namespace Vapor {
         std::unique_ptr<ResourceManager> _resourceManager;
         std::unique_ptr<ActionManager> _actionManager;
         std::unique_ptr<InputManager> _inputManager;
-        std::unique_ptr<AudioManager> _audioManager;
+        std::unique_ptr<AudioEngine> _audioEngine;
         std::unique_ptr<VideoRecorder> _videoRecorder;
         std::unique_ptr<RmlUiManager> _rmluiManager;
 
