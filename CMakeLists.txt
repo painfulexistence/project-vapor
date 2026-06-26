@@ -7,6 +7,8 @@ include(GNUInstallDirs)
 set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 
+list(APPEND CMAKE_MODULE_PATH "${CMAKE_CURRENT_SOURCE_DIR}/cmake/helpers")
+
 add_subdirectory(Vapor)
 
 # Vaporware (demo app), tests, and benchmarks are only built when Vapor is

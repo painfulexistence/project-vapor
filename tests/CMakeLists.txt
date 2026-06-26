@@ -2,7 +2,7 @@ find_package(Catch2 3 CONFIG REQUIRED)
 find_package(glm CONFIG REQUIRED)
 find_package(fmt CONFIG REQUIRED)
 
-include("${CMAKE_SOURCE_DIR}/cmake/helpers/AssetPipeline.cmake")
+include(AssetPipeline)
 
 # Strict warnings for all test targets — keep tests warning-free
 set(TEST_WARNING_FLAGS

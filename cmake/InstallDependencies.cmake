@@ -11,6 +11,9 @@
 
 set(_VAPOR_ROOT "${CMAKE_CURRENT_LIST_DIR}/..")
 
+# Expose cmake/helpers/ so downstream games can include(AssetPipeline) etc.
+list(APPEND CMAKE_MODULE_PATH "${CMAKE_CURRENT_LIST_DIR}/helpers")
+
 # Auto-set vcpkg toolchain if not already configured.
 # Must be set before project() for the toolchain to take effect.
 if(NOT DEFINED CMAKE_TOOLCHAIN_FILE)
