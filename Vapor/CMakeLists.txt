@@ -13,21 +13,24 @@ find_package(EnTT CONFIG REQUIRED)
 find_package(nlohmann_json CONFIG REQUIRED)
 find_package(Boost QUIET COMPONENTS pfr)
 
-# Optional: FFmpeg for AV1 video recording
-find_package(PkgConfig)
-if(PkgConfig_FOUND)
-    pkg_check_modules(FFMPEG
-        libavcodec
-        libavformat
-        libavutil
-        libswscale
-        libswresample
-    )
+# Optional: FFmpeg for AV1 video recording/playback
+option(VAPOR_ENABLE_FFMPEG "Enable FFmpeg for video recording and playback" ON)
+if(VAPOR_ENABLE_FFMPEG)
+    find_package(PkgConfig)
+    if(PkgConfig_FOUND)
+        pkg_check_modules(FFMPEG
+            libavcodec
+            libavformat
+            libavutil
+            libswscale
+            libswresample
+        )
+    endif()
 endif()
 if(FFMPEG_FOUND)
-    message(STATUS "FFmpeg found — video recording (AV1) enabled")
+    message(STATUS "FFmpeg found — video recording/playback enabled")
 else()
-    message(STATUS "FFmpeg not found — video recording disabled")
+    message(STATUS "FFmpeg not found — video recording/playback disabled")
 endif()
 
 if(APPLE)
