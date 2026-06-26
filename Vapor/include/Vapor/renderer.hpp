@@ -72,9 +72,22 @@ public:
     // Register a callback invoked inside the Engine ImGui window each frame,
     // after the built-in Graphics section. Use this to append engine-level
     // panels (e.g. Recording) without re-opening the window from outside.
+    // Only runs while the engine overlay is visible (see setImGuiVisible).
     virtual void setEngineWindowCallback(std::function<void()> callback) {
         m_engineWindowCallback = std::move(callback);
     }
+
+    // Register a callback invoked every frame right after ImGui::NewFrame(),
+    // before any window is opened and regardless of overlay visibility. Use for
+    // per-frame engine logic that must keep running with the UI hidden — e.g.
+    // recording frame capture and the F2 start/stop hotkey.
+    virtual void setImGuiFrameCallback(std::function<void()> callback) {
+        m_imGuiFrameCallback = std::move(callback);
+    }
+
+    // Engine ImGui overlay visibility, toggled at runtime with F1.
+    bool isImGuiVisible() const { return m_imGuiVisible; }
+    void setImGuiVisible(bool visible) { m_imGuiVisible = visible; }
 
     // Upload RGBA pixel data as the video texture sampled by rect lights marked
     // with useVideoTexture = true. Call once per frame after VideoPlayer::update().
@@ -265,6 +278,8 @@ protected:
     bool isInitialized = false;
     std::function<void()> m_imGuiCallback;
     std::function<void()> m_engineWindowCallback;
+    std::function<void()> m_imGuiFrameCallback;
+    bool m_imGuiVisible = true;
 
     int calculateMipmapLevelCount(Uint32 width, Uint32 height) const {
         return static_cast<int>(std::floor(std::log2(std::max(width, height))) + 1);

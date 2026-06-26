@@ -4122,8 +4122,18 @@ auto Renderer_Metal::draw(std::shared_ptr<Scene> scene, Camera& camera) -> void 
     ImGui_ImplSDL3_NewFrame();
     ImGui::NewFrame();
 
+    // F1 toggles the engine ImGui overlay on/off.
+    if (ImGui::IsKeyPressed(ImGuiKey_F1))
+        m_imGuiVisible = !m_imGuiVisible;
+
+    // Per-frame engine hook (recording capture + F2 hotkey). Runs whether or not
+    // the overlay is visible so recording keeps working with the UI hidden.
+    if (m_imGuiFrameCallback)
+        m_imGuiFrameCallback();
+
     // ImGui::DockSpaceOverViewport();
 
+    if (m_imGuiVisible) {
     ImGui::Begin("Engine");
 
     if (ImGui::CollapsingHeader("Graphics", ImGuiTreeNodeFlags_DefaultOpen)) {
@@ -4640,6 +4650,7 @@ auto Renderer_Metal::draw(std::shared_ptr<Scene> scene, Camera& camera) -> void 
     if (m_imGuiCallback) {
         m_imGuiCallback();
     }
+    } // if (m_imGuiVisible)
 
     // ==========================================================================
     // Execute all render passes

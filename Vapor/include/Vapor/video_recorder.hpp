@@ -74,6 +74,29 @@ public:
 
     bool isRecording() const { return m_recording.load(); }
 
+    // Start if stopped, stop if recording, using the current timestamped output
+    // path. Shared by the F2 hotkey and the ImGui Start/Stop buttons so both
+    // paths behave identically. Returns the new recording state.
+    bool toggleRecording(Renderer& renderer) {
+        if (isRecording()) {
+            stopRecording();
+            m_status = fmt::format("Saved: {}", m_outputBuf);
+            refreshOutputPath();
+            return false;
+        }
+        std::error_code ec;
+        std::filesystem::create_directories(
+            std::filesystem::path(m_outputBuf).parent_path(), ec);
+        Config cfg;
+        cfg.outputPath = m_outputBuf;
+        if (startRecording(&renderer, cfg)) {
+            m_status.clear();
+            return true;
+        }
+        m_status = "Failed to start (FFmpeg unavailable?)";
+        return false;
+    }
+
     // Schedule capture of the current rendered frame. Call once per frame.
     // Drops frames silently if the encoder queue is full.
     void captureFrame();
@@ -95,25 +118,13 @@ public:
 
         if (!isRecording()) {
             ImGui::PushStyleColor(ImGuiCol_Button, ImVec4(0.15f, 0.55f, 0.15f, 1.0f));
-            if (ImGui::Button("Start##rec", ImVec2(-1.0f, 0.0f))) {
-                std::error_code ec;
-                std::filesystem::create_directories(
-                    std::filesystem::path(m_outputBuf).parent_path(), ec);
-                Config cfg;
-                cfg.outputPath = m_outputBuf;
-                if (startRecording(&renderer, cfg))
-                    m_status.clear();
-                else
-                    m_status = "Failed to start (FFmpeg unavailable?)";
-            }
+            if (ImGui::Button("Start##rec", ImVec2(-1.0f, 0.0f)))
+                toggleRecording(renderer);
             ImGui::PopStyleColor();
         } else {
             ImGui::PushStyleColor(ImGuiCol_Button, ImVec4(0.7f, 0.1f, 0.1f, 1.0f));
-            if (ImGui::Button("Stop##rec", ImVec2(-1.0f, 0.0f))) {
-                stopRecording();
-                m_status = fmt::format("Saved: {}", m_outputBuf);
-                refreshOutputPath();
-            }
+            if (ImGui::Button("Stop##rec", ImVec2(-1.0f, 0.0f)))
+                toggleRecording(renderer);
             ImGui::PopStyleColor();
             auto elapsed = std::chrono::steady_clock::now() - m_recordingStart;
             auto secs    = std::chrono::duration_cast<std::chrono::seconds>(elapsed).count();

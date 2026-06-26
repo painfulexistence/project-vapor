@@ -143,13 +143,21 @@ namespace Vapor {
     void EngineCore::attachRenderer(::Renderer* renderer, const std::string& outputBasePath) {
         _videoRecorder->setBaseOutputDir(outputBasePath);
 
-        renderer->setEngineWindowCallback([this, renderer]() {
+        // Per-frame hook: capture the rendered frame while recording and handle
+        // the F2 start/stop hotkey. Runs regardless of overlay visibility so
+        // recording keeps working (and can be stopped) with the UI hidden (F1).
+        renderer->setImGuiFrameCallback([this, renderer]() {
             if (_videoRecorder->isRecording())
                 _videoRecorder->captureFrame();
-#ifndef NDEBUG
-            if (ImGui::CollapsingHeader("Recording", ImGuiTreeNodeFlags_DefaultOpen))
+            if (ImGui::IsKeyPressed(ImGuiKey_F2))
+                _videoRecorder->toggleRecording(*renderer);
+        });
+
+        // Recording panel, drawn inside the Engine window when the overlay is
+        // visible. Shown in all build configs (no NDEBUG gate).
+        renderer->setEngineWindowCallback([this, renderer]() {
+            if (ImGui::CollapsingHeader("Recording (F2)", ImGuiTreeNodeFlags_DefaultOpen))
                 _videoRecorder->drawImGui(*renderer);
-#endif
         });
     }
 
