@@ -2,7 +2,9 @@
 #include "Vapor/hidden.hpp"
 #include "Vapor/physics_3d.hpp"
 #include "imgui.h"
+#ifdef VAPOR_HAS_BOOST_PFR
 #include <boost/pfr.hpp>
+#endif
 #include <entt/entt.hpp>
 #include <glm/glm.hpp>
 #include <glm/gtc/quaternion.hpp>
@@ -108,9 +110,11 @@ bool drawField(std::string_view name, T& value) {
 // Boost.PFR and call drawField for each one.
 // Non-aggregate types (e.g. those with user-provided constructors) are
 // guarded by std::is_aggregate_v and produce no output.
+// Without Boost.PFR the function is a no-op (returns false).
 // ---------------------------------------------------------------------------
 template<typename T>
 bool drawComponentFields(T& comp) {
+#ifdef VAPOR_HAS_BOOST_PFR
     if constexpr (std::is_aggregate_v<T> && !std::is_array_v<T>) {
         constexpr size_t N = boost::pfr::tuple_size_v<T>;
         bool changed = false;
@@ -122,6 +126,9 @@ bool drawComponentFields(T& comp) {
         }(std::make_index_sequence<N>{});
         return changed;
     }
+#else
+    (void)comp;
+#endif
     return false;
 }
 

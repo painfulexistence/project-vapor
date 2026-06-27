@@ -1,10 +1,12 @@
 #pragma once
 
+#include "audio_engine.hpp"
 #include "renderer.hpp"
 #include "imgui.h"
 #include <atomic>
 #include <chrono>
 #include <condition_variable>
+#include <deque>
 #include <filesystem>
 #include <fmt/core.h>
 #include <memory>
@@ -16,27 +18,47 @@
 
 namespace Vapor {
 
-// Records rendered frames to an AV1 video file via FFmpeg.
+// Records rendered frames to an H.264/AV1 video file via FFmpeg, optionally
+// muxing the engine's mixed audio output into an AAC track.
+//
 // Usage:
 //   VideoRecorder rec;
-//   rec.startRecording(renderer, {.outputPath = "output.mkv", .fps = 60});
+//   rec.setAudioEngine(&engineCore.getAudioEngine()); // optional, for audio
+//   rec.startRecording(renderer, {.outputPath = "output.mp4", .fps = 30});
 //   // each frame:
 //   rec.captureFrame();
 //   // when done:
 //   rec.stopRecording();
-class VideoRecorder {
+//
+// Audio is captured by registering as an AudioCaptureSink on the AudioEngine,
+// which delivers the final mixed PCM on the audio thread. The encoder thread
+// resamples it to the AAC encoder format and interleaves it with the video.
+class VideoRecorder : public AudioCaptureSink {
 public:
     struct Config {
         std::string outputPath = "recording.mp4";
-        int fps = 60;
-        // AV1 CRF quality (0=lossless, 63=worst). Lower = better quality.
+        int fps = 30;
+        // CRF quality for SW AV1 encoders (0=lossless, 63=worst). Lower = better.
+        // Ignored for HW encoders (VideoToolbox, NVENC), which use fixed quality.
         int crf = 35;
-        // FFmpeg encoder name. "libsvtav1" is fastest; fallback to "libaom-av1".
-        std::string encoder = "libsvtav1";
+        // Encoder probe order: h264_videotoolbox → h264_nvenc → libsvtav1 →
+        // libaom-av1 → libx264. Set to empty string to use the probe order directly.
+        std::string encoder = "h264_videotoolbox";
+        // Capture the engine's mixed audio into an AAC track. Requires an
+        // AudioEngine to be set via setAudioEngine(); silently video-only
+        // otherwise.
+        bool captureAudio = true;
+        // AAC bitrate in bits/sec.
+        int audioBitrate = 128000;
     };
 
     VideoRecorder();
-    ~VideoRecorder();
+    ~VideoRecorder() override;
+
+    // Provide the AudioEngine whose mixed output should be recorded. Required
+    // for audio capture — without this, captureAudio in Config has no effect.
+    // Call once after construction, before startRecording().
+    void setAudioEngine(AudioEngine* audioEngine) { m_audioEngine = audioEngine; }
 
     // Start recording. Returns false if already recording or FFmpeg unavailable.
     // (Config is a nested type with default member initializers, so we use an
@@ -52,9 +74,36 @@ public:
 
     bool isRecording() const { return m_recording.load(); }
 
+    // Start if stopped, stop if recording, using the current timestamped output
+    // path. Shared by the F2 hotkey and the ImGui Start/Stop buttons so both
+    // paths behave identically. Returns the new recording state.
+    bool toggleRecording(Renderer& renderer) {
+        if (isRecording()) {
+            stopRecording();
+            m_status = fmt::format("Saved: {}", m_outputBuf);
+            refreshOutputPath();
+            return false;
+        }
+        std::error_code ec;
+        std::filesystem::create_directories(
+            std::filesystem::path(m_outputBuf).parent_path(), ec);
+        Config cfg;
+        cfg.outputPath = m_outputBuf;
+        if (startRecording(&renderer, cfg)) {
+            m_status.clear();
+            return true;
+        }
+        m_status = "Failed to start (FFmpeg unavailable?)";
+        return false;
+    }
+
     // Schedule capture of the current rendered frame. Call once per frame.
     // Drops frames silently if the encoder queue is full.
     void captureFrame();
+
+    // AudioCaptureSink — called on the audio thread with the engine's mixed
+    // output while recording. Buffers PCM for the encoder thread to consume.
+    void writeAudio(const float* frames, uint32_t frameCount) override;
 
     // Set the directory where timestamped recordings are saved.
     void setBaseOutputDir(const std::string& dir) {
@@ -69,25 +118,13 @@ public:
 
         if (!isRecording()) {
             ImGui::PushStyleColor(ImGuiCol_Button, ImVec4(0.15f, 0.55f, 0.15f, 1.0f));
-            if (ImGui::Button("Start##rec", ImVec2(-1.0f, 0.0f))) {
-                std::error_code ec;
-                std::filesystem::create_directories(
-                    std::filesystem::path(m_outputBuf).parent_path(), ec);
-                Config cfg;
-                cfg.outputPath = m_outputBuf;
-                if (startRecording(&renderer, cfg))
-                    m_status.clear();
-                else
-                    m_status = "Failed to start (FFmpeg unavailable?)";
-            }
+            if (ImGui::Button("Start##rec", ImVec2(-1.0f, 0.0f)))
+                toggleRecording(renderer);
             ImGui::PopStyleColor();
         } else {
             ImGui::PushStyleColor(ImGuiCol_Button, ImVec4(0.7f, 0.1f, 0.1f, 1.0f));
-            if (ImGui::Button("Stop##rec", ImVec2(-1.0f, 0.0f))) {
-                stopRecording();
-                m_status = fmt::format("Saved: {}", m_outputBuf);
-                refreshOutputPath();
-            }
+            if (ImGui::Button("Stop##rec", ImVec2(-1.0f, 0.0f)))
+                toggleRecording(renderer);
             ImGui::PopStyleColor();
             auto elapsed = std::chrono::steady_clock::now() - m_recordingStart;
             auto secs    = std::chrono::duration_cast<std::chrono::seconds>(elapsed).count();
@@ -114,6 +151,12 @@ private:
     void flushEncoder();
     void cleanup();
     void encoderThreadFunc();
+
+    // Audio pipeline (no-ops when audio capture is inactive).
+    bool initAudioEncoder();     // called from initEncoder, before write_header
+    void drainAudio(bool flush); // resample queued PCM → AAC → mux
+    void encodeAudioFrame(int nbSamples);
+    void flushAudioEncoder();
 
     // UI state (only used when drawImGui() is called)
     std::string m_baseOutputDir = "output";
@@ -151,6 +194,17 @@ private:
     std::atomic<bool> m_stop{false};
 
     static constexpr size_t MAX_QUEUE_FRAMES = 16;
+
+    // ── Audio capture state ──────────────────────────────────────────────
+    AudioEngine* m_audioEngine = nullptr;
+    bool m_audioActive = false; // audio track is being recorded this session
+    int  m_audioSampleRate = 44100;
+    int  m_audioChannels = 2;
+
+    // Interleaved float PCM produced by the audio thread, consumed by the
+    // encoder thread. Guarded by m_audioMutex; bounded to a few seconds.
+    std::deque<float> m_audioQueue;
+    std::mutex        m_audioMutex;
 };
 
 } // namespace Vapor

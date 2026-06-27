@@ -25,6 +25,14 @@ namespace Vapor {
         }
     }
 
+    // Device callback trampoline — forwards to the owning AudioEngine.
+    // Runs on the high-priority audio thread.
+    static void audioDeviceDataCallback(ma_device* device, void* output, const void* /*input*/,
+                                        ma_uint32 frameCount) {
+        auto* self = static_cast<AudioEngine*>(device->pUserData);
+        self->onDeviceData(output, static_cast<uint32_t>(frameCount));
+    }
+
     // AudioEngine Implementation
 
     AudioEngine::AudioEngine() = default;
@@ -42,12 +50,20 @@ namespace Vapor {
             return true;
         }
 
+        m_sampleRate = 44100;
+        m_channels = 2;
+
+        // Run the engine in "no device" mode and drive it through a device we
+        // own. This lets us tap the final mixed output for recording without
+        // disturbing playback — the engine still mixes exactly as before, we
+        // just pull its frames ourselves and forward a copy to any capture sink.
         m_engine = new ma_engine();
 
         ma_engine_config config = ma_engine_config_init();
-        config.channels = 2;
-        config.sampleRate = 44100;
+        config.channels = m_channels;
+        config.sampleRate = m_sampleRate;
         config.listenerCount = 1;
+        config.noDevice = MA_TRUE;
 
         if (ma_engine_init(&config, m_engine) != MA_SUCCESS) {
             fmt::print("Failed to initialize audio engine\n");
@@ -56,9 +72,58 @@ namespace Vapor {
             return false;
         }
 
+        ma_device_config deviceConfig = ma_device_config_init(ma_device_type_playback);
+        deviceConfig.playback.format = ma_format_f32;
+        deviceConfig.playback.channels = m_channels;
+        deviceConfig.sampleRate = m_sampleRate;
+        deviceConfig.dataCallback = &audioDeviceDataCallback;
+        deviceConfig.pUserData = this;
+
+        m_device = new ma_device();
+        if (ma_device_init(nullptr, &deviceConfig, m_device) != MA_SUCCESS) {
+            fmt::print("Failed to initialize audio device\n");
+            ma_engine_uninit(m_engine);
+            delete m_engine;
+            m_engine = nullptr;
+            delete m_device;
+            m_device = nullptr;
+            return false;
+        }
+
+        if (ma_device_start(m_device) != MA_SUCCESS) {
+            fmt::print("Failed to start audio device\n");
+            ma_device_uninit(m_device);
+            delete m_device;
+            m_device = nullptr;
+            ma_engine_uninit(m_engine);
+            delete m_engine;
+            m_engine = nullptr;
+            return false;
+        }
+
         m_initialized = true;
         fmt::print("AudioEngine initialized\n");
         return true;
+    }
+
+    void AudioEngine::onDeviceData(void* output, uint32_t frameCount) {
+        // Pull the next mixed block from the engine into the device buffer.
+        if (m_engine) {
+            ma_engine_read_pcm_frames(m_engine, output, frameCount, nullptr);
+        }
+        // Forward a copy to the capture sink (recording), if one is attached.
+        AudioCaptureSink* sink = m_captureSink.load(std::memory_order_acquire);
+        if (sink) {
+            sink->writeAudio(static_cast<const float*>(output), frameCount);
+        }
+    }
+
+    void AudioEngine::setCaptureSink(AudioCaptureSink* sink) {
+        m_captureSink.store(sink, std::memory_order_release);
+    }
+
+    void AudioEngine::clearCaptureSink() {
+        m_captureSink.store(nullptr, std::memory_order_release);
     }
 
     void AudioEngine::shutdown() {
@@ -81,6 +146,14 @@ namespace Vapor {
         }
 
         m_pendingCallbacks.clear();
+
+        // Stop pulling from the engine before tearing it down.
+        m_captureSink.store(nullptr, std::memory_order_release);
+        if (m_device) {
+            ma_device_uninit(m_device);
+            delete m_device;
+            m_device = nullptr;
+        }
 
         if (m_engine) {
             ma_engine_uninit(m_engine);

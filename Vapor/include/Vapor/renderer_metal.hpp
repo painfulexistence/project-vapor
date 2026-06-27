@@ -141,6 +141,7 @@ public:
     virtual void draw(entt::registry& registry, std::shared_ptr<Scene> scene, Camera& camera) override;
 
     virtual void readPixelsAsync(ScreenshotCallback callback) override;
+    void uploadRectLightVideoTexture(const uint8_t* rgba, uint32_t width, uint32_t height) override;
 
     // IBL source: load an equirectangular .hdr file as the environment map.
     // After calling this the sky atmosphere is no longer used for IBL.
@@ -452,6 +453,8 @@ protected:
     NS::SharedPtr<MTL::Buffer> testStorageBuffer;
     NS::SharedPtr<MTL::Buffer> directionalLightBuffer;
     NS::SharedPtr<MTL::Buffer> pointLightBuffer;
+    NS::SharedPtr<MTL::Buffer> rectLightBuffer;
+    NS::SharedPtr<MTL::Texture> rectLightVideoTexture; // updated each frame via uploadRectLightVideoTexture
     NS::SharedPtr<MTL::Buffer> materialDataBuffer;
     NS::SharedPtr<MTL::Buffer> atmosphereDataBuffer;
     NS::SharedPtr<MTL::Buffer> iblCaptureDataBuffer;
