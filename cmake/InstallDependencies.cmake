@@ -31,9 +31,9 @@ if(NOT DEFINED VCPKG_MANIFEST_DIR)
     message(STATUS "[Vapor] Using engine vcpkg manifest at: ${VCPKG_MANIFEST_DIR}/vcpkg.json")
 endif()
 
-# Install packages inside the engine tree so they are shared across downstream
-# builds and don't have to be re-downloaded per game project.
+# Install packages inside the build directory by default, so each build
+# has its own self-contained dependencies.
 if(NOT DEFINED VCPKG_INSTALLED_DIR)
-    set(VCPKG_INSTALLED_DIR "${_VAPOR_ROOT}/vcpkg_installed"
+    set(VCPKG_INSTALLED_DIR "${CMAKE_BINARY_DIR}/vcpkg_installed"
         CACHE STRING "[Vapor] vcpkg installed packages directory")
 endif()
