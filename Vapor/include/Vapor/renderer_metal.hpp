@@ -9,8 +9,10 @@
 #include <SDL3/SDL_video.h>
 #include <array>
 #include <memory>
+#include <mutex>
 #include <string>
 #include <unordered_map>
+#include <vector>
 
 #include "debug_draw.hpp"
 #include "graphics.hpp"
@@ -53,6 +55,11 @@ class DebugDrawPass;
 class CanvasPass;
 class WorldCanvasPass;
 
+struct GpuPassTiming {
+    std::string name;
+    double gpuTimeMs = 0.0;
+};
+
 class RenderPass {
 public:
     explicit RenderPass(Renderer_Metal* renderer) : renderer(renderer) {
@@ -69,21 +76,42 @@ protected:
 
 class RenderGraph {
 public:
+    struct PassSampleInfo {
+        std::string name;
+        NS::UInteger beginIdx;
+        NS::UInteger endIdx;
+    };
+
     void addPass(std::unique_ptr<RenderPass> pass) {
         passes.push_back(std::move(pass));
     }
 
-    void execute() {
+    void execute(MTL::CommandBuffer* cmd = nullptr, MTL::CounterSampleBuffer* sampleBuf = nullptr) {
+        passTimingInfo.clear();
+        NS::UInteger sampleIdx = 0;
         for (auto& pass : passes) {
-            if (pass->enabled) {
-                pass->execute();
+            if (!pass->enabled) continue;
+            if (cmd && sampleBuf) {
+                auto enc = NS::TransferPtr(cmd->blitCommandEncoder());
+                enc->sampleCountersInBuffer(sampleBuf, sampleIdx, false);
+                enc->endEncoding();
             }
+            pass->execute();
+            if (cmd && sampleBuf) {
+                auto enc = NS::TransferPtr(cmd->blitCommandEncoder());
+                enc->sampleCountersInBuffer(sampleBuf, sampleIdx + 1, true);
+                enc->endEncoding();
+                passTimingInfo.push_back({pass->getName(), sampleIdx, sampleIdx + 1});
+            }
+            sampleIdx += 2;
         }
     }
 
     void clear() {
         passes.clear();
     }
+
+    std::vector<PassSampleInfo> passTimingInfo;
 
 private:
     std::vector<std::unique_ptr<RenderPass>> passes;
@@ -292,6 +320,14 @@ public:
 
 protected:
     RenderGraph graph;
+
+    // GPU pass timing (Apple Silicon, MTLCounterSampleBuffer timestamps)
+    static constexpr NS::UInteger GPU_TIMER_SAMPLE_COUNT = 64;
+    NS::SharedPtr<MTL::CounterSampleBuffer> gpuTimerSampleBuffer;
+    std::vector<GpuPassTiming> gpuPassTimings;
+    std::mutex gpuTimingMutex;
+    bool gpuTimingSupported = false;
+    bool gpuTimingEnabled = false;
 
     // Per-frame rendering context
     MTL::CommandBuffer* currentCommandBuffer = nullptr;

@@ -2118,6 +2118,26 @@ auto Renderer_Metal::init(SDL_Window* window) -> void {
     m_supportsRaytracing = device->supportsRaytracing();
     if (std::getenv("GITHUB_ACTIONS")) m_supportsRaytracing = false;
 
+    // GPU pass timing: find timestamp counter set and create sample buffer
+    {
+        auto counterSets = device->counterSets();
+        for (NS::UInteger i = 0; counterSets && i < counterSets->count(); ++i) {
+            auto cs = static_cast<MTL::CounterSet*>(counterSets->object(i));
+            if (cs->name()->isEqualToString(MTL::CommonCounterSetTimestamp)) {
+                auto desc = NS::TransferPtr(MTL::CounterSampleBufferDescriptor::alloc()->init());
+                desc->setCounterSet(cs);
+                desc->setSampleCount(GPU_TIMER_SAMPLE_COUNT);
+                desc->setStorageMode(MTL::StorageModeShared);
+                NS::Error* err = nullptr;
+                gpuTimerSampleBuffer = NS::TransferPtr(device->newCounterSampleBuffer(desc.get(), &err));
+                if (gpuTimerSampleBuffer && !err) {
+                    gpuTimingSupported = true;
+                }
+                break;
+            }
+        }
+    }
+
     // ImGui init
     ImGui_ImplSDL3_InitForMetal(window);
     ImGui_ImplMetal_Init(device);
@@ -4642,6 +4662,46 @@ auto Renderer_Metal::draw(std::shared_ptr<Scene> scene, Camera& camera) -> void 
         }
     }
 
+    if (ImGui::CollapsingHeader("GPU Pass Timings")) {
+        if (!gpuTimingSupported) {
+            ImGui::TextDisabled("Not supported on this device");
+        } else {
+            ImGui::Checkbox("Enable##gpu_timing", &gpuTimingEnabled);
+            if (gpuTimingEnabled) {
+                std::lock_guard<std::mutex> lock(gpuTimingMutex);
+                double totalMs = 0.0;
+                double maxMs = 0.001;
+                for (auto& t : gpuPassTimings) {
+                    totalMs += t.gpuTimeMs;
+                    if (t.gpuTimeMs > maxMs) maxMs = t.gpuTimeMs;
+                }
+                ImGui::Text("Total GPU: %.3f ms", totalMs);
+                ImGui::Separator();
+                if (ImGui::BeginTable(
+                        "##gpu_pass_timings", 3,
+                        ImGuiTableFlags_Borders | ImGuiTableFlags_RowBg | ImGuiTableFlags_SizingFixedFit
+                    )) {
+                    ImGui::TableSetupColumn("Pass", ImGuiTableColumnFlags_WidthStretch);
+                    ImGui::TableSetupColumn("ms", ImGuiTableColumnFlags_WidthFixed, 60.0f);
+                    ImGui::TableSetupColumn("", ImGuiTableColumnFlags_WidthStretch);
+                    ImGui::TableHeadersRow();
+                    for (auto& t : gpuPassTimings) {
+                        ImGui::TableNextRow();
+                        ImGui::TableSetColumnIndex(0);
+                        ImGui::TextUnformatted(t.name.c_str());
+                        ImGui::TableSetColumnIndex(1);
+                        ImGui::Text("%.3f", t.gpuTimeMs);
+                        ImGui::TableSetColumnIndex(2);
+                        ImGui::ProgressBar(
+                            static_cast<float>(t.gpuTimeMs / maxMs), ImVec2(-1.0f, 0.0f), ""
+                        );
+                    }
+                    ImGui::EndTable();
+                }
+            }
+        }
+    }
+
     if (m_engineWindowCallback)
         m_engineWindowCallback();
 
@@ -4655,7 +4715,10 @@ auto Renderer_Metal::draw(std::shared_ptr<Scene> scene, Camera& camera) -> void 
     // ==========================================================================
     // Execute all render passes
     // ==========================================================================
-    graph.execute();
+    graph.execute(
+        currentCommandBuffer,
+        (gpuTimingEnabled && gpuTimerSampleBuffer) ? gpuTimerSampleBuffer.get() : nullptr
+    );
 
     // ==========================================================================
     // Present and cleanup
@@ -4698,6 +4761,27 @@ auto Renderer_Metal::draw(std::shared_ptr<Scene> scene, Camera& camera) -> void 
             });
         }
         m_pendingScreenshots.clear();
+    }
+
+    // Resolve GPU pass timings asynchronously after the command buffer completes
+    if (gpuTimingEnabled && gpuTimerSampleBuffer && !graph.passTimingInfo.empty()) {
+        auto capturedInfo = graph.passTimingInfo;
+        auto capturedBuf  = gpuTimerSampleBuffer; // retain via SharedPtr copy
+        NS::UInteger sampleCount = static_cast<NS::UInteger>(capturedInfo.size() * 2);
+        cmd->addCompletedHandler([this, capturedInfo, capturedBuf, sampleCount](MTL::CommandBuffer*) {
+            auto data = NS::TransferPtr(capturedBuf->resolveCounterRange(NS::Range::Make(0, sampleCount)));
+            if (!data) return;
+            auto* timestamps = reinterpret_cast<const MTL::CounterResultTimestamp*>(data->bytes());
+            std::lock_guard<std::mutex> lock(gpuTimingMutex);
+            gpuPassTimings.clear();
+            gpuPassTimings.reserve(capturedInfo.size());
+            for (auto& info : capturedInfo) {
+                uint64_t begin = timestamps[info.beginIdx].timestamp;
+                uint64_t end   = timestamps[info.endIdx].timestamp;
+                double ms = (end >= begin) ? static_cast<double>(end - begin) / 1e6 : 0.0;
+                gpuPassTimings.push_back({info.name, ms});
+            }
+        });
     }
 
     cmd->presentDrawable(surface);
