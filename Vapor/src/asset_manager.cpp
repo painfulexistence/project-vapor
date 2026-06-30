@@ -339,10 +339,11 @@ auto AssetManager::loadGLTF(const std::string& filename) -> std::shared_ptr<Scen
                 const auto& accessor = model.accessors[primitive.attributes.at("POSITION")];
                 const auto& bufferView = model.bufferViews[accessor.bufferView];
                 const auto& buffer = model.buffers[bufferView.buffer];
-                const auto* data =
-                    reinterpret_cast<const float*>(&buffer.data[bufferView.byteOffset + accessor.byteOffset]);
+                const size_t stride = bufferView.byteStride ? bufferView.byteStride : sizeof(float) * 3;
+                const uint8_t* base = &buffer.data[bufferView.byteOffset + accessor.byteOffset];
                 for (size_t i = 0; i < vertexCount; i++) {
-                    mesh->vertices[i].position = glm::vec3(data[i * 3 + 0], data[i * 3 + 1], data[i * 3 + 2]);
+                    const auto* v = reinterpret_cast<const float*>(base + i * stride);
+                    mesh->vertices[i].position = glm::vec3(v[0], v[1], v[2]);
                 }
                 if (accessor.minValues.size() > 0 && accessor.maxValues.size() > 0) {
                     mesh->localAABBMin = glm::vec3(accessor.minValues[0], accessor.minValues[1], accessor.minValues[2]);
@@ -356,31 +357,57 @@ auto AssetManager::loadGLTF(const std::string& filename) -> std::shared_ptr<Scen
                 const auto& accessor = model.accessors[primitive.attributes.at("NORMAL")];
                 const auto& bufferView = model.bufferViews[accessor.bufferView];
                 const auto& buffer = model.buffers[bufferView.buffer];
-                const auto* data =
-                    reinterpret_cast<const float*>(&buffer.data[bufferView.byteOffset + accessor.byteOffset]);
+                const size_t stride = bufferView.byteStride ? bufferView.byteStride : sizeof(float) * 3;
+                const uint8_t* base = &buffer.data[bufferView.byteOffset + accessor.byteOffset];
                 for (size_t i = 0; i < vertexCount; i++) {
-                    mesh->vertices[i].normal = glm::vec3(data[i * 3 + 0], data[i * 3 + 1], data[i * 3 + 2]);
+                    const auto* v = reinterpret_cast<const float*>(base + i * stride);
+                    mesh->vertices[i].normal = glm::vec3(v[0], v[1], v[2]);
                 }
             }
             if (mesh->hasTangent) {
                 const auto& accessor = model.accessors[primitive.attributes.at("TANGENT")];
                 const auto& bufferView = model.bufferViews[accessor.bufferView];
                 const auto& buffer = model.buffers[bufferView.buffer];
-                const auto* data =
-                    reinterpret_cast<const float*>(&buffer.data[bufferView.byteOffset + accessor.byteOffset]);
+                const size_t stride = bufferView.byteStride ? bufferView.byteStride : sizeof(float) * 4;
+                const uint8_t* base = &buffer.data[bufferView.byteOffset + accessor.byteOffset];
                 for (size_t i = 0; i < vertexCount; i++) {
-                    mesh->vertices[i].tangent =
-                        glm::vec4(data[i * 4 + 0], data[i * 4 + 1], data[i * 4 + 2], data[i * 4 + 3]);
+                    const auto* v = reinterpret_cast<const float*>(base + i * stride);
+                    mesh->vertices[i].tangent = glm::vec4(v[0], v[1], v[2], v[3]);
                 }
             }
             if (mesh->hasUV0) {
                 const auto& accessor = model.accessors[primitive.attributes.at("TEXCOORD_0")];
                 const auto& bufferView = model.bufferViews[accessor.bufferView];
                 const auto& buffer = model.buffers[bufferView.buffer];
-                const auto* data =
-                    reinterpret_cast<const float*>(&buffer.data[bufferView.byteOffset + accessor.byteOffset]);
-                for (size_t i = 0; i < vertexCount; i++) {
-                    mesh->vertices[i].uv = glm::vec2(data[i * 2 + 0], data[i * 2 + 1]);
+                const uint8_t* base = &buffer.data[bufferView.byteOffset + accessor.byteOffset];
+                switch (accessor.componentType) {
+                case TINYGLTF_COMPONENT_TYPE_FLOAT: {
+                    const size_t stride = bufferView.byteStride ? bufferView.byteStride : sizeof(float) * 2;
+                    for (size_t i = 0; i < vertexCount; i++) {
+                        const auto* v = reinterpret_cast<const float*>(base + i * stride);
+                        mesh->vertices[i].uv = glm::vec2(v[0], v[1]);
+                    }
+                    break;
+                }
+                case TINYGLTF_COMPONENT_TYPE_UNSIGNED_BYTE: {
+                    const size_t stride = bufferView.byteStride ? bufferView.byteStride : sizeof(Uint8) * 2;
+                    for (size_t i = 0; i < vertexCount; i++) {
+                        const Uint8* v = base + i * stride;
+                        mesh->vertices[i].uv = glm::vec2(v[0] / 255.0f, v[1] / 255.0f);
+                    }
+                    break;
+                }
+                case TINYGLTF_COMPONENT_TYPE_UNSIGNED_SHORT: {
+                    const size_t stride = bufferView.byteStride ? bufferView.byteStride : sizeof(Uint16) * 2;
+                    for (size_t i = 0; i < vertexCount; i++) {
+                        const auto* v = reinterpret_cast<const Uint16*>(base + i * stride);
+                        mesh->vertices[i].uv = glm::vec2(v[0] / 65535.0f, v[1] / 65535.0f);
+                    }
+                    break;
+                }
+                default:
+                    fmt::print("Unsupported TEXCOORD_0 component type: {}\n", accessor.componentType);
+                    break;
                 }
             }
             // TODO: implement vertex color (COLOR_0 accessor)
