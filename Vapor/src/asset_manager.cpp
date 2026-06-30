@@ -760,9 +760,6 @@ auto AssetManager::loadGLTFOptimized(const std::string& filename) -> std::shared
         return meshCache.at(meshIdx);
     };
 
-    scene->images    = std::move(images);
-    scene->materials = std::move(materials);
-
     const auto& srcScene = model.defaultScene >= 0 ? model.scenes[model.defaultScene] : model.scenes[0];
     scene->name = srcScene.name;
 
@@ -784,6 +781,11 @@ auto AssetManager::loadGLTFOptimized(const std::string& filename) -> std::shared
 
     for (int nodeIdx : srcScene.nodes)
         processNode(nodeIdx, glm::identity<glm::mat4>());
+
+    // materials/images are referenced (by index) by processMesh above — move
+    // into scene only after the traversal is done with them.
+    scene->images    = std::move(images);
+    scene->materials = std::move(materials);
 
     fmt::print("Optimized scene: {} vertices, {} indices, {} draw calls\n",
         scene->vertices.size(), scene->indices.size(), scene->stagedMeshes.size());
