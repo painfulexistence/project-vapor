@@ -2118,8 +2118,9 @@ auto Renderer_Metal::init(SDL_Window* window) -> void {
     m_supportsRaytracing = device->supportsRaytracing();
     if (std::getenv("GITHUB_ACTIONS")) m_supportsRaytracing = false;
 
-    // GPU pass timing: find timestamp counter set and create sample buffer
-    {
+    // GPU pass timing: find timestamp counter set and create sample buffer.
+    // We use blit encoders as bookends around each pass, so AtBlitBoundary must be supported.
+    if (device->supportsCounterSampling(MTL::CounterSamplingPointAtBlitBoundary)) {
         auto counterSets = device->counterSets();
         for (NS::UInteger i = 0; counterSets && i < counterSets->count(); ++i) {
             auto cs = static_cast<MTL::CounterSet*>(counterSets->object(i));
