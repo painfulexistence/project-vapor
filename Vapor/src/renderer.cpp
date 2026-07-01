@@ -402,9 +402,6 @@ void Renderer::beginFrame(const CameraRenderData& camera) {
     // 3D uses camera's view-projection
     glm::mat4 viewProj = camera.proj * camera.view;
     batch3D.beginBatch(rhi.get(), viewProj);
-
-    fmt::print("beginFrame: camera position=({}, {}, {}), frameDrawables cleared\n",
-               camera.position.x, camera.position.y, camera.position.z);
 }
 
 void Renderer::submitDrawable(const Drawable& drawable) {
@@ -450,16 +447,11 @@ void Renderer::render() {
 }
 
 void Renderer::endFrame() {
-    fmt::print("endFrame(): ImGui::GetDrawData()={}, CmdListsCount={}\n",
-               (void*)ImGui::GetDrawData(),
-               ImGui::GetDrawData() ? ImGui::GetDrawData()->CmdListsCount : 0);
-
     // Render ImGui (matching old renderer behavior)
     // Note: ImGui::NewFrame() and ImGui::Render() should be called by user code
     // We only handle the backend rendering here
 
     if (ImGui::GetDrawData() && ImGui::GetDrawData()->CmdListsCount > 0) {
-        fmt::print("Rendering ImGui with {} command lists\n", ImGui::GetDrawData()->CmdListsCount);
         // Render ImGui using backend-specific implementation
         // Matching old renderer: create render pass, then render ImGui
         switch (backend) {
@@ -469,14 +461,12 @@ void Renderer::endFrame() {
                 if (cmdBuffer) {
                     // Create ImGui render pass (load existing content, don't clear)
                     RenderPassDesc imguiPassDesc;
+                    imguiPassDesc.name = "ImGui";
                     imguiPassDesc.colorAttachments.push_back(TextureHandle{0});  // Use swapchain
                     imguiPassDesc.loadColor.push_back(true);  // Load (don't clear, render on top)
-                    imguiPassDesc.depthAttachment = TextureHandle{0};  // Use default depth
-                    imguiPassDesc.loadDepth = true;  // Load (don't clear)
+                    // No depth attachment for the UI pass
 
-                    fmt::print("About to begin ImGui render pass\n");
                     rhi->beginRenderPass(imguiPassDesc);
-                    fmt::print("ImGui render pass begun\n");
 
                     // Get the current render encoder from RHI_Metal
                     RHI_Metal* metalRHI = dynamic_cast<RHI_Metal*>(rhi.get());
@@ -544,13 +534,10 @@ void Renderer::endFrame() {
 void Renderer::performCulling() {
     Frustum frustum = extractFrustum(currentCamera.proj * currentCamera.view);
 
-    Uint32 culledCount = 0;
     for (Uint32 i = 0; i < frameDrawables.size(); ++i) {
         const Drawable& d = frameDrawables[i];
         if (frustum.isBoxVisible(d.aabbMin, d.aabbMax)) {
             visibleDrawables.push_back(i);
-        } else {
-            culledCount++;
         }
     }
 }
@@ -611,7 +598,6 @@ void Renderer::updateBuffers() {
     drawableToInstanceID.clear();
     std::vector<Vapor::InstanceData> instanceData;
     instanceData.reserve(visibleDrawables.size());
-    Uint32 nonIdentityCount = 0;
     Uint32 instanceID = 0;
     for (Uint32 drawableIdx : visibleDrawables) {
         const Drawable& drawable = frameDrawables[drawableIdx];
@@ -635,15 +621,7 @@ void Renderer::updateBuffers() {
         instanceData.push_back(instance);
         drawableToInstanceID[drawableIdx] = instanceID;
         instanceID++;
-
-        // Debug: count non-identity transforms
-        glm::vec3 pos = glm::vec3(drawable.transform[3]);
-        if (glm::length(pos) > 0.001f) {
-            nonIdentityCount++;
-        }
     }
-    fmt::print("updateBuffers: {} visible drawables, {} with non-identity transform\n",
-               visibleDrawables.size(), nonIdentityCount);
 
     if (!instanceData.empty()) {
         rhi->updateBuffer(instanceDataBuffer, instanceData.data(), 0,
@@ -652,20 +630,8 @@ void Renderer::updateBuffers() {
 }
 
 void Renderer::mainRenderPass() {
-    fmt::print("mainRenderPass: visibleDrawables.size()={}, mainPipeline.isValid()={}\n",
-               visibleDrawables.size(), mainPipeline.isValid());
-
     if (!mainPipeline.isValid()) {
-        fmt::print("mainRenderPass: Invalid pipeline, skipping draw\n");
         return;
-    }
-
-    // Check if colorRT is valid (should be created in createRenderTargets)
-    // If render targets don't exist, fallback to rendering directly to swapchain
-    bool useRenderTargets = colorRT_MSAA.isValid() && colorRT.isValid() && depthStencilRT_MSAA.isValid();
-
-    if (!useRenderTargets) {
-        fmt::print("mainRenderPass: Render targets not valid, rendering directly to swapchain\n");
     }
 
     // Get swapchain dimensions for render pass
@@ -674,13 +640,17 @@ void Renderer::mainRenderPass() {
 
     // Create render pass descriptor
     RenderPassDesc renderPassDesc;
-    // If post-process pipeline exists, render to colorRT; otherwise render directly to swapchain
-    bool usePostProcess = postProcessPipeline.isValid() && colorRT.isValid();
-    if (useRenderTargets && usePostProcess) {
-        // Render to colorRT (MSAA with resolve) for post-processing
-        renderPassDesc.colorAttachments.push_back(colorRT_MSAA);  // Render to MSAA color RT
-        renderPassDesc.resolveAttachments.push_back(colorRT);  // Resolve to non-MSAA color RT
-        renderPassDesc.depthAttachment = depthStencilRT_MSAA;  // Use MSAA depth RT
+    renderPassDesc.name = "Main";
+    // If post-process pipeline exists, render to colorRT; otherwise render directly to swapchain.
+    // Note: single-sampled colorRT/depthStencilRT are used (not the MSAA
+    // variants) because every pipeline is currently created with
+    // sampleCount = 1; a pipeline/pass sample-count mismatch is a Metal
+    // validation error. Re-enable the MSAA path together with pipeline
+    // sampleCount once the MSAA pipeline variants exist.
+    bool usePostProcess = postProcessPipeline.isValid() && colorRT.isValid() && depthStencilRT.isValid();
+    if (usePostProcess) {
+        renderPassDesc.colorAttachments.push_back(colorRT);
+        renderPassDesc.depthAttachment = depthStencilRT;
     } else {
         // Fallback: render directly to swapchain
         renderPassDesc.colorAttachments.push_back(TextureHandle{0});  // Use swapchain (handle 0 is special)
@@ -689,12 +659,10 @@ void Renderer::mainRenderPass() {
     renderPassDesc.clearColors.push_back(glm::vec4(0.2f, 0.2f, 0.3f, 1.0f));
     renderPassDesc.loadColor.push_back(false);  // Clear
     renderPassDesc.clearDepth = 1.0f;
-    renderPassDesc.loadDepth = false;  // Clear (first frame) or Load (subsequent frames)
+    renderPassDesc.loadDepth = false;  // Clear
 
     // Begin render pass
-        fmt::print("About to begin geometry render pass\n");
-        rhi->beginRenderPass(renderPassDesc);
-        fmt::print("Geometry render pass begun\n");
+    rhi->beginRenderPass(renderPassDesc);
 
     // Bind pipeline
     rhi->bindPipeline(mainPipeline);
@@ -763,13 +731,6 @@ void Renderer::mainRenderPass() {
             }
             Uint32 correctInstanceID = it->second;
 
-            // Debug: print first few drawables' transform and instance ID
-            if (correctInstanceID < 5) {
-                glm::vec3 pos = glm::vec3(drawable.transform[3]);
-                fmt::print("Drawing drawable {}: instanceID={}, mesh={}, transform=[{}, {}, {}]\n",
-                           drawableIdx, correctInstanceID, drawable.mesh, pos.x, pos.y, pos.z);
-            }
-
             // Bind vertex buffer (binding 3 for Metal shader)
             if (mesh.vertexBuffer.isValid()) {
                 rhi->bindVertexBuffer(mesh.vertexBuffer, 3, 0);
@@ -830,8 +791,6 @@ void Renderer::postProcessPass() {
     // Post-process pass: render from colorRT to swapchain (fullscreen triangle)
     if (!postProcessPipeline.isValid() || !colorRT.isValid()) {
         // If no post-process pipeline, just skip (or could do a simple copy)
-        fmt::print("postProcessPass: Skipping (pipeline valid={}, colorRT valid={})\n",
-                   postProcessPipeline.isValid(), colorRT.isValid());
         return;
     }
 
@@ -840,14 +799,13 @@ void Renderer::postProcessPass() {
 
     // Create render pass descriptor for swapchain
     RenderPassDesc renderPassDesc;
+    renderPassDesc.name = "PostProcess";
     renderPassDesc.colorAttachments.push_back(TextureHandle{0});  // Use swapchain (handle 0 is special)
     renderPassDesc.clearColors.push_back(glm::vec4(0.2f, 0.2f, 0.3f, 1.0f));
     renderPassDesc.loadColor.push_back(false);  // Clear
 
     // Begin render pass
-    fmt::print("About to begin main/post-process render pass\n");
     rhi->beginRenderPass(renderPassDesc);
-    fmt::print("Main/post-process render pass begun\n");
 
     // Bind post-process pipeline
     rhi->bindPipeline(postProcessPipeline);
@@ -1029,12 +987,12 @@ void Renderer::createRenderTargets() {
         desc.width = width;
         desc.height = height;
         desc.format = PixelFormat::Depth32Float;
-        desc.usage = TextureUsage::RenderTarget;
+        desc.usage = TextureUsage::DepthStencil;
         desc.sampleCount = MSAA_SAMPLE_COUNT;
         depthStencilRT_MSAA = rhi->createTexture(desc);
 
         desc.sampleCount = 1;
-        desc.usage = TextureUsage::RenderTarget;  // Can be sampled later if needed
+        desc.usage = TextureUsage::DepthStencil | TextureUsage::Sampled;  // Sampled by later passes
         depthStencilRT = rhi->createTexture(desc);
     }
 
@@ -1049,7 +1007,7 @@ void Renderer::createRenderTargets() {
         colorRT_MSAA = rhi->createTexture(desc);
 
         desc.sampleCount = 1;
-        desc.usage = TextureUsage::RenderTarget;  // Can be sampled in post-process
+        desc.usage = TextureUsage::RenderTarget | TextureUsage::Sampled;  // Sampled in post-process
         colorRT = rhi->createTexture(desc);
     }
 
@@ -1064,7 +1022,7 @@ void Renderer::createRenderTargets() {
         normalRT_MSAA = rhi->createTexture(desc);
 
         desc.sampleCount = 1;
-        desc.usage = TextureUsage::Storage;  // For compute shaders
+        desc.usage = TextureUsage::Storage | TextureUsage::Sampled;  // Written by compute, sampled in post
         normalRT = rhi->createTexture(desc);
     }
 
@@ -1074,7 +1032,7 @@ void Renderer::createRenderTargets() {
         desc.width = width;
         desc.height = height;
         desc.format = PixelFormat::RGBA8_UNORM;
-        desc.usage = TextureUsage::Storage;  // For compute shaders
+        desc.usage = TextureUsage::Storage | TextureUsage::Sampled;
         desc.mipLevels = static_cast<Uint32>(std::floor(std::log2(std::max(width, height))) + 1);
         shadowRT = rhi->createTexture(desc);
     }
@@ -1085,7 +1043,7 @@ void Renderer::createRenderTargets() {
         desc.width = width;
         desc.height = height;
         desc.format = PixelFormat::R16_FLOAT;  // Single channel float
-        desc.usage = TextureUsage::Storage;  // For compute shaders
+        desc.usage = TextureUsage::Storage | TextureUsage::Sampled;
         aoRT = rhi->createTexture(desc);
     }
 
@@ -1095,7 +1053,7 @@ void Renderer::createRenderTargets() {
         desc.width = width;
         desc.height = height;
         desc.format = PixelFormat::Depth32Float;
-        desc.usage = TextureUsage::RenderTarget;
+        desc.usage = TextureUsage::DepthStencil;
         desc.sampleCount = 1;  // No MSAA for swapchain depth
         swapchainDepthBuffer = rhi->createTexture(desc);
     }
@@ -1587,10 +1545,56 @@ void Renderer::invokeImGuiCallback() {
     if (imGuiCallback)
         imGuiCallback();
 
-    if (m_engineWindowCallback) {
-        ImGui::Begin("Engine");
+    ImGui::Begin("Engine");
+
+    drawGpuTimingsImGui();
+
+    if (m_engineWindowCallback)
         m_engineWindowCallback();
-        ImGui::End();
+
+    ImGui::End();
+}
+
+void Renderer::drawGpuTimingsImGui() {
+    if (!ImGui::CollapsingHeader("GPU Pass Timings"))
+        return;
+
+    if (!rhi->isGpuTimingSupported()) {
+        ImGui::TextDisabled("Not supported on this device");
+        return;
+    }
+
+    bool enabled = rhi->isGpuTimingEnabled();
+    if (ImGui::Checkbox("Enable##gpu_timing", &enabled))
+        rhi->setGpuTimingEnabled(enabled);
+    if (!enabled)
+        return;
+
+    auto timings = rhi->getGpuPassTimings();
+    double totalMs = 0.0;
+    double maxMs = 0.001;
+    for (const auto& t : timings) {
+        totalMs += t.gpuTimeMs;
+        maxMs = std::max(maxMs, t.gpuTimeMs);
+    }
+    ImGui::Text("Total GPU: %.3f ms", totalMs);
+    ImGui::Separator();
+    if (ImGui::BeginTable("##gpu_pass_timings", 3,
+                          ImGuiTableFlags_Borders | ImGuiTableFlags_RowBg | ImGuiTableFlags_SizingFixedFit)) {
+        ImGui::TableSetupColumn("Pass", ImGuiTableColumnFlags_WidthStretch);
+        ImGui::TableSetupColumn("ms", ImGuiTableColumnFlags_WidthFixed, 60.0f);
+        ImGui::TableSetupColumn("", ImGuiTableColumnFlags_WidthStretch);
+        ImGui::TableHeadersRow();
+        for (const auto& t : timings) {
+            ImGui::TableNextRow();
+            ImGui::TableSetColumnIndex(0);
+            ImGui::TextUnformatted(t.name.c_str());
+            ImGui::TableSetColumnIndex(1);
+            ImGui::Text("%.3f", t.gpuTimeMs);
+            ImGui::TableSetColumnIndex(2);
+            ImGui::ProgressBar(static_cast<float>(t.gpuTimeMs / maxMs), ImVec2(-1.0f, 0.0f), "");
+        }
+        ImGui::EndTable();
     }
 }
 
@@ -2107,7 +2111,7 @@ RenderTextureHandle Renderer::createRenderTexture(const RenderTextureDesc& desc)
     colorDesc.width = desc.width;
     colorDesc.height = desc.height;
     colorDesc.format = desc.format;
-    colorDesc.usage = TextureUsage::RenderTarget;
+    colorDesc.usage = TextureUsage::RenderTarget | TextureUsage::Sampled;  // Drawn as a texture afterwards
     colorDesc.sampleCount = desc.sampleCount;
     resource.colorTexture = rhi->createTexture(colorDesc);
 
@@ -2176,6 +2180,7 @@ void Renderer::renderToTexture(
 
     // Begin render pass with render texture as target
     RenderPassDesc passDesc;
+    passDesc.name = "RenderToTexture";
     passDesc.colorAttachments.push_back(resource.colorTexture);
     passDesc.clearColors.push_back(clearColor);
     passDesc.loadColor.push_back(false); // Clear, don't load
@@ -2185,9 +2190,7 @@ void Renderer::renderToTexture(
         passDesc.clearDepth = 1.0f;
         passDesc.loadDepth = false; // Clear depth
     }
-    fmt::print("About to begin render pass passDesc, depthAttachment.id={}\n", passDesc.depthAttachment.id);
     rhi->beginRenderPass(passDesc);
-    fmt::print("Render pass passDesc begun\n");
 
     // Collect drawables from scene
     frameDrawables.clear();

@@ -1,6 +1,7 @@
 #pragma once
 #include <SDL3/SDL_stdinc.h>
 #include <cstdint>
+#include <string>
 #include <vector>
 #include <glm/vec4.hpp>  // Full definition needed for RenderPassDesc::clearColors (std::vector<glm::vec4>)
 #include <glm/mat4x4.hpp>  // Full definition needed for AccelStructInstance::transform
@@ -18,6 +19,12 @@ struct SDL_Window;
 
 // ============================================================================
 // Handle Types
+//
+// Conventions:
+//  - A default-constructed handle (id == UINT32_MAX) is INVALID ("none").
+//  - Backend resource ids start at 1; id 0 is reserved.
+//  - For RenderPassDesc color attachments, TextureHandle{0} means "the current
+//    swapchain drawable". An invalid depth attachment means "no depth".
 // ============================================================================
 
 struct BufferHandle {
@@ -99,12 +106,22 @@ enum class PixelFormat {
     Depth24Stencil8,
 };
 
-enum class TextureUsage {
-    Sampled,
-    Storage,
-    RenderTarget,
-    DepthStencil,
+// Bitmask — combine with operator| (e.g. RenderTarget | Sampled for a render
+// target that is later sampled by a post-process pass).
+enum class TextureUsage : Uint32 {
+    Sampled      = 1 << 0,
+    Storage      = 1 << 1,
+    RenderTarget = 1 << 2,
+    DepthStencil = 1 << 3,
 };
+
+inline TextureUsage operator|(TextureUsage a, TextureUsage b) {
+    return static_cast<TextureUsage>(static_cast<Uint32>(a) | static_cast<Uint32>(b));
+}
+
+inline bool hasUsage(TextureUsage value, TextureUsage flag) {
+    return (static_cast<Uint32>(value) & static_cast<Uint32>(flag)) != 0;
+}
 
 enum class FilterMode {
     Nearest,
@@ -217,21 +234,37 @@ struct PipelineDesc {
     VertexLayout vertexLayout;
     PrimitiveTopology topology = PrimitiveTopology::TriangleList;
     BlendMode blendMode = BlendMode::Opaque;
+    // Depth state. depthWrite only takes effect while depthTest is enabled
+    // (matching Vulkan semantics; Metal is made to match in the backend).
     bool depthTest = true;
     bool depthWrite = true;
     CompareOp depthCompareOp = CompareOp::Less;
+    // Whether the render pass this pipeline draws into has a depth attachment.
+    // Both Metal and Vulkan bake attachment formats into the pipeline object,
+    // and a mismatch with the actual pass is a validation error. Set false for
+    // passes without depth (e.g. fullscreen post-process to swapchain).
+    bool hasDepthAttachment = true;
     CullMode cullMode = CullMode::Back;
     bool frontFaceCounterClockwise = true;
     Uint32 sampleCount = 1;
-    // TODO: Add descriptor set layouts when needed
+    // TODO: Add explicit color attachment formats (currently assumed to be the
+    // swapchain format) and descriptor set layouts when needed.
 };
 
 struct RenderPassDesc {
-    // Color attachments
+    // Debug/profiling label for this pass (shown in GPU timings and captures).
+    // Must point to storage that outlives the beginRenderPass() call (a string
+    // literal is the expected use).
+    const char* name = nullptr;
+
+    // Color attachments. TextureHandle{0} = current swapchain drawable.
     std::vector<TextureHandle> colorAttachments;
+    // Optional per-color-attachment MSAA resolve targets. When set (valid) for
+    // index i, colorAttachments[i] is expected to be multisampled and is
+    // resolved into resolveAttachments[i] at the end of the pass.
     std::vector<TextureHandle> resolveAttachments;
 
-    // Depth attachment
+    // Depth attachment. Invalid handle = no depth.
     TextureHandle depthAttachment;
 
     // Clear values
@@ -284,6 +317,15 @@ struct AccelStructDesc {
 
     bool allowUpdate = false;
     bool preferFastBuild = false;
+};
+
+// ============================================================================
+// GPU Profiling
+// ============================================================================
+
+struct GpuPassTiming {
+    std::string name;
+    double gpuTimeMs = 0.0;
 };
 
 // ============================================================================
@@ -401,6 +443,18 @@ public:
     virtual Uint32 getSwapchainWidth() const = 0;
     virtual Uint32 getSwapchainHeight() const = 0;
     virtual PixelFormat getSwapchainFormat() const = 0;
+
+    // ========================================================================
+    // GPU Profiling (optional; default no-op)
+    // ========================================================================
+    // Per-pass GPU timestamps. Passes are identified by RenderPassDesc::name.
+    // Results lag the submitted frame by at least one frame (resolved on
+    // command-buffer completion).
+
+    virtual bool isGpuTimingSupported() const { return false; }
+    virtual void setGpuTimingEnabled(bool /*enabled*/) {}
+    virtual bool isGpuTimingEnabled() const { return false; }
+    virtual std::vector<GpuPassTiming> getGpuPassTimings() { return {}; }
 
     // ========================================================================
     // Backend Query Interface (for backend-specific operations)

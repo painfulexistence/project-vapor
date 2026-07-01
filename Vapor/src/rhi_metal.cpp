@@ -85,7 +85,82 @@ bool RHI_Metal::initialize(SDL_Window* window) {
     // viewport and render targets all agree.
     swapchain->setDrawableSize(CGSize{ static_cast<CGFloat>(width), static_cast<CGFloat>(height) });
 
+    initGpuTiming();
+
     return true;
+}
+
+// ============================================================================
+// GPU Pass Timing
+// ============================================================================
+
+void RHI_Metal::initGpuTiming() {
+    // Timestamp sampling at stage boundaries (Apple Silicon). Each pass embeds
+    // begin/end samples via descriptor-level sampleBufferAttachments.
+    if (!device->supportsCounterSampling(MTL::CounterSamplingPointAtStageBoundary)) {
+        return;
+    }
+
+    auto counterSets = device->counterSets();
+    for (NS::UInteger i = 0; counterSets && i < counterSets->count(); ++i) {
+        auto cs = static_cast<MTL::CounterSet*>(counterSets->object(i));
+        if (cs->name()->isEqualToString(MTL::CommonCounterSetTimestamp)) {
+            auto desc = NS::TransferPtr(MTL::CounterSampleBufferDescriptor::alloc()->init());
+            desc->setCounterSet(cs);
+            desc->setSampleCount(GPU_TIMER_SAMPLE_COUNT);
+            desc->setStorageMode(MTL::StorageModeShared);
+            NS::Error* err = nullptr;
+            gpuTimerSampleBuffer = NS::TransferPtr(device->newCounterSampleBuffer(desc.get(), &err));
+            if (gpuTimerSampleBuffer && !err) {
+                gpuTimingSupported = true;
+            }
+            break;
+        }
+    }
+}
+
+bool RHI_Metal::allocateTimingSlots(const char* passName, NS::UInteger& outBegin, NS::UInteger& outEnd) {
+    if (!gpuTimingActiveThisFrame || !gpuTimerSampleBuffer) {
+        return false;
+    }
+    if (nextTimingSlot + 2 > GPU_TIMER_SAMPLE_COUNT) {
+        return false;  // per-frame slot budget exhausted; pass simply goes untimed
+    }
+    outBegin = nextTimingSlot;
+    outEnd = nextTimingSlot + 1;
+    nextTimingSlot += 2;
+    framePassSamples.push_back({passName ? passName : "(unnamed pass)", outBegin, outEnd});
+    return true;
+}
+
+void RHI_Metal::resolveGpuTimings() {
+    if (framePassSamples.empty() || !gpuTimerSampleBuffer || !currentCommandBuffer) {
+        return;
+    }
+
+    // Capture by value: the handler runs after endFrame() has reset frame state.
+    auto capturedInfo = framePassSamples;
+    auto capturedBuf = gpuTimerSampleBuffer;  // retain via SharedPtr copy
+    NS::UInteger sampleCount = capturedInfo.back().endIdx + 1;
+    currentCommandBuffer->addCompletedHandler([this, capturedInfo, capturedBuf, sampleCount](MTL::CommandBuffer*) {
+        NS::Data* data = capturedBuf->resolveCounterRange(NS::Range::Make(0, sampleCount));
+        if (!data) return;
+        auto* timestamps = reinterpret_cast<const MTL::CounterResultTimestamp*>(data->mutableBytes());
+        std::lock_guard<std::mutex> lock(gpuTimingMutex);
+        gpuPassTimings.clear();
+        gpuPassTimings.reserve(capturedInfo.size());
+        for (const auto& info : capturedInfo) {
+            uint64_t begin = timestamps[info.beginIdx].timestamp;
+            uint64_t end = timestamps[info.endIdx].timestamp;
+            double ms = (end >= begin) ? static_cast<double>(end - begin) / 1e6 : 0.0;
+            gpuPassTimings.push_back({info.name, ms});
+        }
+    });
+}
+
+std::vector<GpuPassTiming> RHI_Metal::getGpuPassTimings() {
+    std::lock_guard<std::mutex> lock(gpuTimingMutex);
+    return gpuPassTimings;
 }
 
 void RHI_Metal::shutdown() {
@@ -99,6 +174,9 @@ void RHI_Metal::shutdown() {
         shaders.clear();
         samplers.clear();
         pipelines.clear();
+        computePipelines.clear();
+        accelStructs.clear();
+        gpuTimerSampleBuffer = nullptr;
 
         // Release command queue
         commandQueue = nullptr;
@@ -357,8 +435,9 @@ PipelineHandle RHI_Metal::createPipeline(const PipelineDesc& desc) {
             break;
     }
 
-    // Depth attachment
-    if (desc.depthTest) {
+    // Depth attachment format must match the render pass this pipeline is
+    // used in, regardless of whether depth testing is enabled.
+    if (desc.hasDepthAttachment) {
         pipelineDesc->setDepthAttachmentPixelFormat(MTL::PixelFormatDepth32Float);
     }
 
@@ -378,8 +457,27 @@ PipelineHandle RHI_Metal::createPipeline(const PipelineDesc& desc) {
         throw std::runtime_error("Failed to create render pipeline");
     }
 
+    // Depth-stencil state (Metal keeps this separate from the PSO; we bake it
+    // into our pipeline object so bindPipeline() can apply everything at once).
+    // Depth writes only apply while depth testing is enabled, matching Vulkan.
+    NS::SharedPtr<MTL::DepthStencilState> depthStencilState;
+    if (desc.hasDepthAttachment) {
+        auto dsDesc = NS::TransferPtr(MTL::DepthStencilDescriptor::alloc()->init());
+        dsDesc->setDepthCompareFunction(
+            desc.depthTest ? convertCompareOp(desc.depthCompareOp) : MTL::CompareFunctionAlways);
+        dsDesc->setDepthWriteEnabled(desc.depthTest && desc.depthWrite);
+        depthStencilState = NS::TransferPtr(device->newDepthStencilState(dsDesc.get()));
+    }
+
     Uint32 id = nextPipelineId++;
-    pipelines[id] = {pipeline, nullptr, false};
+    PipelineResource resource;
+    resource.renderPipeline = pipeline;
+    resource.isCompute = false;
+    resource.depthStencilState = depthStencilState;
+    resource.cullMode = convertCullMode(desc.cullMode);
+    resource.winding = convertFrontFace(desc.frontFaceCounterClockwise);
+    resource.primitiveType = convertPrimitiveTopology(desc.topology);
+    pipelines[id] = resource;
 
     return PipelineHandle{id};
 }
@@ -614,6 +712,12 @@ void RHI_Metal::beginFrame() {
     if (!currentCommandBuffer) {
         throw std::runtime_error("Failed to create command buffer");
     }
+
+    // Latch GPU timing for this frame (the flag may be toggled mid-frame from
+    // the UI; slot bookkeeping must stay consistent within a frame).
+    gpuTimingActiveThisFrame = gpuTimingEnabled && gpuTimingSupported;
+    nextTimingSlot = 0;
+    framePassSamples.clear();
 }
 
 void RHI_Metal::endFrame() {
@@ -626,6 +730,9 @@ void RHI_Metal::endFrame() {
         currentComputeEncoder->endEncoding();
         currentComputeEncoder = nullptr;
     }
+
+    // Schedule GPU timing resolution for when this command buffer completes
+    resolveGpuTimings();
 
     // Present drawable
     if (currentDrawable) {
@@ -650,9 +757,6 @@ void RHI_Metal::beginRenderPass(const RenderPassDesc& desc) {
     // Create render pass descriptor
     auto renderPassDesc = MTL::RenderPassDescriptor::alloc()->init();
 
-    fmt::print("beginRenderPass: currentCommandBuffer={}\n", (void*)currentCommandBuffer.get());
-    fmt::print("beginRenderPass: colorAttachments.size()={}, depthAttachment.id={}\n", desc.colorAttachments.size(), desc.depthAttachment.id);
-
     // Setup color attachments
     for (size_t i = 0; i < desc.colorAttachments.size(); i++) {
         auto colorAttachment = renderPassDesc->colorAttachments()->object(i);
@@ -666,10 +770,7 @@ void RHI_Metal::beginRenderPass(const RenderPassDesc& desc) {
                 renderPassDesc->release();
                 throw std::runtime_error(fmt::format("Failed to find color attachment texture with id {}", desc.colorAttachments[i].id));
             }
-            auto tex = it->second.texture.get();
-            colorAttachment->setTexture(tex);
-            fmt::print("Color Attachment {}: size={}x{}, format={}, usage={}, loadAction={}\n",
-                i, tex->width(), tex->height(), (int)tex->pixelFormat(), (int)tex->usage(), (int)desc.loadColor[i]);
+            colorAttachment->setTexture(it->second.texture.get());
         }
 
         // Load/store operations
@@ -683,25 +784,31 @@ void RHI_Metal::beginRenderPass(const RenderPassDesc& desc) {
                 colorAttachment->setClearColor(cc);
             }
         }
-        colorAttachment->setStoreAction(MTL::StoreActionStore);
+
+        // Optional MSAA resolve target for this attachment
+        if (i < desc.resolveAttachments.size() && desc.resolveAttachments[i].isValid()) {
+            auto resolveIt = textures.find(desc.resolveAttachments[i].id);
+            if (resolveIt == textures.end()) {
+                renderPassDesc->release();
+                throw std::runtime_error(fmt::format("Failed to find resolve attachment texture with id {}", desc.resolveAttachments[i].id));
+            }
+            colorAttachment->setResolveTexture(resolveIt->second.texture.get());
+            colorAttachment->setStoreAction(MTL::StoreActionStoreAndMultisampleResolve);
+        } else {
+            colorAttachment->setStoreAction(MTL::StoreActionStore);
+        }
     }
 
-    // Setup depth attachment
-    if (desc.depthAttachment.id != 0) {
+    // Setup depth attachment. An invalid handle means "no depth".
+    // (Handle id 0 is the swapchain sentinel and never a depth texture.)
+    if (desc.depthAttachment.isValid() && desc.depthAttachment.id != 0) {
         auto depthAttachment = renderPassDesc->depthAttachment();
         auto it = textures.find(desc.depthAttachment.id);
         if (it == textures.end()) {
             renderPassDesc->release();
-            // Check if it's an invalid handle
-            if (desc.depthAttachment.id == UINT32_MAX) {
-                throw std::runtime_error("Depth attachment texture handle is invalid (UINT32_MAX). Render targets may not have been created.");
-            }
             throw std::runtime_error(fmt::format("Failed to find depth attachment texture with id {}", desc.depthAttachment.id));
         }
         depthAttachment->setTexture(it->second.texture.get());
-        auto tex = it->second.texture.get();
-        fmt::print("Depth Attachment: size={}x{}, format={}, usage={}, loadAction={}\n",
-            tex->width(), tex->height(), (int)tex->pixelFormat(), (int)tex->usage(), (int)desc.loadDepth);
 
         if (desc.loadDepth) {
             depthAttachment->setLoadAction(MTL::LoadActionLoad);
@@ -710,10 +817,15 @@ void RHI_Metal::beginRenderPass(const RenderPassDesc& desc) {
             depthAttachment->setClearDepth(desc.clearDepth);
         }
         depthAttachment->setStoreAction(MTL::StoreActionStore);
-    } else if (desc.depthAttachment.id == 0 && currentDrawable) {
-        // Use default depth buffer (swapchain doesn't have depth, so we skip it)
-        // In Metal, we need to create a separate depth texture for swapchain rendering
-        // For now, skip depth attachment when rendering to swapchain
+    }
+
+    // Attach GPU timestamp sampling for this pass (no-op when timing is off)
+    NS::UInteger timingBegin, timingEnd;
+    if (allocateTimingSlots(desc.name, timingBegin, timingEnd)) {
+        auto* sampleAttachment = renderPassDesc->sampleBufferAttachments()->object(0);
+        sampleAttachment->setSampleBuffer(gpuTimerSampleBuffer.get());
+        sampleAttachment->setStartOfVertexSampleIndex(timingBegin);
+        sampleAttachment->setEndOfFragmentSampleIndex(timingEnd);
     }
 
     // Create render command encoder
@@ -724,12 +836,23 @@ void RHI_Metal::beginRenderPass(const RenderPassDesc& desc) {
         throw std::runtime_error("Failed to create render command encoder");
     }
 
-    // Set viewport and scissor rect (required for rendering)
+    // Set viewport and scissor to the actual attachment size (falls back to
+    // the swapchain size when the first color attachment is the drawable).
+    Uint32 passWidth = swapchainWidth;
+    Uint32 passHeight = swapchainHeight;
+    if (!desc.colorAttachments.empty() && desc.colorAttachments[0].id != 0) {
+        auto it = textures.find(desc.colorAttachments[0].id);
+        if (it != textures.end()) {
+            passWidth = it->second.width;
+            passHeight = it->second.height;
+        }
+    }
+
     MTL::Viewport viewport;
     viewport.originX = 0.0;
     viewport.originY = 0.0;
-    viewport.width = static_cast<double>(swapchainWidth);
-    viewport.height = static_cast<double>(swapchainHeight);
+    viewport.width = static_cast<double>(passWidth);
+    viewport.height = static_cast<double>(passHeight);
     viewport.znear = 0.0;
     viewport.zfar = 1.0;
     currentRenderEncoder->setViewport(viewport);
@@ -737,8 +860,8 @@ void RHI_Metal::beginRenderPass(const RenderPassDesc& desc) {
     MTL::ScissorRect scissorRect;
     scissorRect.x = 0;
     scissorRect.y = 0;
-    scissorRect.width = swapchainWidth;
-    scissorRect.height = swapchainHeight;
+    scissorRect.width = passWidth;
+    scissorRect.height = passHeight;
     currentRenderEncoder->setScissorRect(scissorRect);
 }
 
@@ -758,11 +881,16 @@ void RHI_Metal::bindPipeline(PipelineHandle pipeline) {
 
     auto it = pipelines.find(pipeline.id);
     if (it != pipelines.end() && currentRenderEncoder && it->second.renderPipeline) {
-        currentRenderEncoder->setRenderPipelineState(it->second.renderPipeline.get());
+        const PipelineResource& res = it->second;
+        currentRenderEncoder->setRenderPipelineState(res.renderPipeline.get());
 
-        // Set default cull mode and winding
-        currentRenderEncoder->setCullMode(MTL::CullModeBack);
-        currentRenderEncoder->setFrontFacingWinding(MTL::WindingCounterClockwise);
+        // Apply the fixed-function state captured from PipelineDesc
+        currentRenderEncoder->setCullMode(res.cullMode);
+        currentRenderEncoder->setFrontFacingWinding(res.winding);
+        if (res.depthStencilState) {
+            currentRenderEncoder->setDepthStencilState(res.depthStencilState.get());
+        }
+        currentPrimitiveType = res.primitiveType;
     }
 }
 
@@ -838,7 +966,7 @@ void RHI_Metal::setFragmentBytes(const void* data, size_t size, Uint32 binding) 
 void RHI_Metal::draw(Uint32 vertexCount, Uint32 instanceCount, Uint32 firstVertex, Uint32 firstInstance) {
     if (currentRenderEncoder) {
         currentRenderEncoder->drawPrimitives(
-            MTL::PrimitiveTypeTriangle,
+            currentPrimitiveType,
             firstVertex,
             vertexCount,
             instanceCount,
@@ -851,7 +979,7 @@ void RHI_Metal::drawIndexed(Uint32 indexCount, Uint32 instanceCount, Uint32 firs
     auto it = buffers.find(currentIndexBuffer.id);
     if (it != buffers.end() && currentRenderEncoder) {
         currentRenderEncoder->drawIndexedPrimitives(
-            MTL::PrimitiveTypeTriangle,
+            currentPrimitiveType,
             indexCount,
             MTL::IndexTypeUInt32,
             it->second.buffer.get(),
@@ -876,7 +1004,8 @@ Uint32 RHI_Metal::getSwapchainHeight() const {
 }
 
 PixelFormat RHI_Metal::getSwapchainFormat() const {
-    return PixelFormat::BGRA8_SRGB;
+    // Must match the format configured on the CAMetalLayer in initialize()
+    return PixelFormat::RGBA8_SRGB;
 }
 
 // ============================================================================
@@ -927,18 +1056,17 @@ MTL::PixelFormat RHI_Metal::convertPixelFormat(PixelFormat format) {
 MTL::TextureUsage RHI_Metal::convertTextureUsage(TextureUsage usage) {
     MTL::TextureUsage metalUsage = MTL::TextureUsageUnknown;
 
-    // TextureUsage is an enum class, check each value
-    Uint32 usageFlags = static_cast<Uint32>(usage);
-    if (usageFlags & static_cast<Uint32>(TextureUsage::Sampled)) {
+    if (hasUsage(usage, TextureUsage::Sampled)) {
         metalUsage |= MTL::TextureUsageShaderRead;
     }
-    if (usageFlags & static_cast<Uint32>(TextureUsage::Storage)) {
-        metalUsage |= MTL::TextureUsageShaderWrite;
+    if (hasUsage(usage, TextureUsage::Storage)) {
+        // Storage textures are read-write in compute shaders
+        metalUsage |= MTL::TextureUsageShaderRead | MTL::TextureUsageShaderWrite;
     }
-    if (usageFlags & static_cast<Uint32>(TextureUsage::RenderTarget)) {
+    if (hasUsage(usage, TextureUsage::RenderTarget)) {
         metalUsage |= MTL::TextureUsageRenderTarget;
     }
-    if (usageFlags & static_cast<Uint32>(TextureUsage::DepthStencil)) {
+    if (hasUsage(usage, TextureUsage::DepthStencil)) {
         metalUsage |= MTL::TextureUsageRenderTarget;
     }
 
@@ -1142,7 +1270,17 @@ void RHI_Metal::beginComputePass() {
 
     // Create compute encoder
     if (currentCommandBuffer && !currentComputeEncoder) {
-        currentComputeEncoder = currentCommandBuffer->computeCommandEncoder();
+        NS::UInteger timingBegin, timingEnd;
+        if (allocateTimingSlots("Compute", timingBegin, timingEnd)) {
+            auto passDesc = NS::TransferPtr(MTL::ComputePassDescriptor::computePassDescriptor());
+            auto* sampleAttachment = passDesc->sampleBufferAttachments()->object(0);
+            sampleAttachment->setSampleBuffer(gpuTimerSampleBuffer.get());
+            sampleAttachment->setStartOfEncoderSampleIndex(timingBegin);
+            sampleAttachment->setEndOfEncoderSampleIndex(timingEnd);
+            currentComputeEncoder = currentCommandBuffer->computeCommandEncoder(passDesc.get());
+        } else {
+            currentComputeEncoder = currentCommandBuffer->computeCommandEncoder();
+        }
     }
 }
 

@@ -7,6 +7,8 @@
 #include <Foundation/Foundation.hpp>
 #include <Metal/Metal.hpp>
 #include <QuartzCore/QuartzCore.hpp>
+#include <mutex>
+#include <string>
 #include <unordered_map>
 #include <vector>
 
@@ -117,6 +119,15 @@ public:
     PixelFormat getSwapchainFormat() const override;
 
     // ========================================================================
+    // GPU Profiling
+    // ========================================================================
+
+    bool isGpuTimingSupported() const override { return gpuTimingSupported; }
+    void setGpuTimingEnabled(bool enabled) override { gpuTimingEnabled = enabled; }
+    bool isGpuTimingEnabled() const override { return gpuTimingEnabled; }
+    std::vector<GpuPassTiming> getGpuPassTimings() override;
+
+    // ========================================================================
     // Backend Query Interface
     // ========================================================================
 
@@ -183,7 +194,13 @@ private:
     struct PipelineResource {
         NS::SharedPtr<MTL::RenderPipelineState> renderPipeline;
         NS::SharedPtr<MTL::ComputePipelineState> computePipeline;
-        bool isCompute;
+        bool isCompute = false;
+        // Fixed-function state captured from PipelineDesc. Metal has no single
+        // pipeline-state object for these, so they are applied at bind time.
+        NS::SharedPtr<MTL::DepthStencilState> depthStencilState;
+        MTL::CullMode cullMode = MTL::CullModeBack;
+        MTL::Winding winding = MTL::WindingCounterClockwise;
+        MTL::PrimitiveType primitiveType = MTL::PrimitiveTypeTriangle;
     };
 
     struct ComputePipelineResource {
@@ -215,11 +232,32 @@ private:
     std::unordered_map<Uint32, ComputePipelineResource> computePipelines;
     std::unordered_map<Uint32, AccelStructResource> accelStructs;
 
-    // Current binding state
-    PipelineHandle currentPipeline = {0};
-    ComputePipelineHandle currentComputePipeline = {0};
-    BufferHandle currentVertexBuffer = {0};
-    BufferHandle currentIndexBuffer = {0};
+    // Current binding state (invalid = nothing bound)
+    PipelineHandle currentPipeline;
+    ComputePipelineHandle currentComputePipeline;
+    BufferHandle currentVertexBuffer;
+    BufferHandle currentIndexBuffer;
+    MTL::PrimitiveType currentPrimitiveType = MTL::PrimitiveTypeTriangle;
+
+    // ========================================================================
+    // GPU Pass Timing (MTLCounterSampleBuffer timestamps, AtStageBoundary)
+    // ========================================================================
+
+    struct PassSampleInfo {
+        std::string name;
+        NS::UInteger beginIdx;
+        NS::UInteger endIdx;
+    };
+
+    static constexpr NS::UInteger GPU_TIMER_SAMPLE_COUNT = 64;
+    NS::SharedPtr<MTL::CounterSampleBuffer> gpuTimerSampleBuffer;
+    std::vector<PassSampleInfo> framePassSamples;   // passes recorded this frame
+    NS::UInteger nextTimingSlot = 0;                // next free slot pair
+    std::vector<GpuPassTiming> gpuPassTimings;      // last resolved results
+    std::mutex gpuTimingMutex;                      // guards gpuPassTimings
+    bool gpuTimingSupported = false;
+    bool gpuTimingEnabled = false;
+    bool gpuTimingActiveThisFrame = false;          // latched at beginFrame
 
     // ========================================================================
     // Internal Helpers
@@ -234,9 +272,14 @@ private:
     MTL::PrimitiveType convertPrimitiveTopology(PrimitiveTopology topology);
     MTL::CullMode convertCullMode(CullMode mode);
     MTL::Winding convertFrontFace(bool counterClockwise);
-    MTL::BlendFactor convertBlendFactor(BlendMode mode, bool isSource, bool isAlpha);
-    MTL::BlendOperation convertBlendOp();
 
     NS::SharedPtr<MTL::Function> createShaderFunction(const std::string& source, ShaderStage stage);
     NS::SharedPtr<MTL::RenderPipelineState> createRenderPipeline(const PipelineDesc& desc);
+
+    // GPU timing helpers
+    void initGpuTiming();
+    // Reserves a slot pair and records the pass; returns false when timing is
+    // off or the per-frame slot budget is exhausted.
+    bool allocateTimingSlots(const char* passName, NS::UInteger& outBegin, NS::UInteger& outEnd);
+    void resolveGpuTimings();  // installs completion handler on current command buffer
 };

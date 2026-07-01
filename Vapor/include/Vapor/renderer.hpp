@@ -353,6 +353,7 @@ private:
     // ========================================================================
 
     void performCulling();
+    void drawGpuTimingsImGui();
     void sortDrawables();
     void updateBuffers();
     void createDefaultResources();

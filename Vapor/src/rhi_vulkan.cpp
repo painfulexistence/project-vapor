@@ -221,7 +221,7 @@ TextureHandle RHI_Vulkan::createTexture(const TextureDesc& desc) {
     imageInfo.tiling = VK_IMAGE_TILING_OPTIMAL;
     imageInfo.initialLayout = VK_IMAGE_LAYOUT_UNDEFINED;
     imageInfo.usage = convertTextureUsage(desc.usage);
-    imageInfo.samples = VK_SAMPLE_COUNT_1_BIT;
+    imageInfo.samples = static_cast<VkSampleCountFlagBits>(desc.sampleCount);
     imageInfo.sharingMode = VK_SHARING_MODE_EXCLUSIVE;
 
     VkImage image;
@@ -252,7 +252,11 @@ TextureHandle RHI_Vulkan::createTexture(const TextureDesc& desc) {
     viewInfo.image = image;
     viewInfo.viewType = VK_IMAGE_VIEW_TYPE_2D;
     viewInfo.format = convertPixelFormat(desc.format);
-    viewInfo.subresourceRange.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
+    // Depth formats need the depth aspect, not color
+    const bool isDepthFormat =
+        desc.format == PixelFormat::Depth32Float || desc.format == PixelFormat::Depth24Stencil8;
+    viewInfo.subresourceRange.aspectMask =
+        isDepthFormat ? VK_IMAGE_ASPECT_DEPTH_BIT : VK_IMAGE_ASPECT_COLOR_BIT;
     viewInfo.subresourceRange.baseMipLevel = 0;
     viewInfo.subresourceRange.levelCount = desc.mipLevels;
     viewInfo.subresourceRange.baseArrayLayer = 0;
@@ -527,7 +531,7 @@ PipelineHandle RHI_Vulkan::createPipeline(const PipelineDesc& desc) {
     pipelineRenderingInfo.sType = VK_STRUCTURE_TYPE_PIPELINE_RENDERING_CREATE_INFO;
     pipelineRenderingInfo.colorAttachmentCount = 1;
     pipelineRenderingInfo.pColorAttachmentFormats = &colorAttachmentFormat;
-    if (desc.depthTest) {
+    if (desc.hasDepthAttachment) {
         pipelineRenderingInfo.depthAttachmentFormat = VK_FORMAT_D32_SFLOAT;
     }
 
@@ -907,7 +911,7 @@ void RHI_Vulkan::endFrame() {
     submitInfo.commandBufferCount = 1;
     submitInfo.pCommandBuffers = &currentCommandBuffer;
 
-    VkSemaphore signalSemaphores[] = {renderFinishedSemaphores[currentFrameInFlight]};
+    VkSemaphore signalSemaphores[] = {renderFinishedSemaphores[currentSwapchainImageIndex]};
     submitInfo.signalSemaphoreCount = 1;
     submitInfo.pSignalSemaphores = signalSemaphores;
 
@@ -1460,7 +1464,10 @@ void RHI_Vulkan::createCommandBuffers() {
 
 void RHI_Vulkan::createSyncObjects() {
     imageAvailableSemaphores.resize(MAX_FRAMES_IN_FLIGHT);
-    renderFinishedSemaphores.resize(MAX_FRAMES_IN_FLIGHT);
+    // Present-wait semaphores must be per swapchain image, not per frame in
+    // flight: the semaphore passed to vkQueuePresentKHR for an image may still
+    // be in use when a frame-indexed slot comes around again.
+    renderFinishedSemaphores.resize(swapchainImages.size());
     inFlightFences.resize(MAX_FRAMES_IN_FLIGHT);
 
     VkSemaphoreCreateInfo semaphoreInfo{};
@@ -1472,8 +1479,12 @@ void RHI_Vulkan::createSyncObjects() {
 
     for (size_t i = 0; i < MAX_FRAMES_IN_FLIGHT; i++) {
         if (vkCreateSemaphore(device, &semaphoreInfo, nullptr, &imageAvailableSemaphores[i]) != VK_SUCCESS ||
-            vkCreateSemaphore(device, &semaphoreInfo, nullptr, &renderFinishedSemaphores[i]) != VK_SUCCESS ||
             vkCreateFence(device, &fenceInfo, nullptr, &inFlightFences[i]) != VK_SUCCESS) {
+            throw std::runtime_error("Failed to create sync objects");
+        }
+    }
+    for (size_t i = 0; i < renderFinishedSemaphores.size(); i++) {
+        if (vkCreateSemaphore(device, &semaphoreInfo, nullptr, &renderFinishedSemaphores[i]) != VK_SUCCESS) {
             throw std::runtime_error("Failed to create sync objects");
         }
     }
@@ -1579,13 +1590,20 @@ VkBufferUsageFlags RHI_Vulkan::convertBufferUsage(BufferUsage usage) {
 }
 
 VkImageUsageFlags RHI_Vulkan::convertTextureUsage(TextureUsage usage) {
-    switch (usage) {
-        case TextureUsage::Sampled: return VK_IMAGE_USAGE_SAMPLED_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT;
-        case TextureUsage::Storage: return VK_IMAGE_USAGE_STORAGE_BIT;
-        case TextureUsage::RenderTarget: return VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT;
-        case TextureUsage::DepthStencil: return VK_IMAGE_USAGE_DEPTH_STENCIL_ATTACHMENT_BIT;
-        default: return VK_IMAGE_USAGE_SAMPLED_BIT;
+    VkImageUsageFlags flags = 0;
+    if (hasUsage(usage, TextureUsage::Sampled)) {
+        flags |= VK_IMAGE_USAGE_SAMPLED_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT;
     }
+    if (hasUsage(usage, TextureUsage::Storage)) {
+        flags |= VK_IMAGE_USAGE_STORAGE_BIT;
+    }
+    if (hasUsage(usage, TextureUsage::RenderTarget)) {
+        flags |= VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT;
+    }
+    if (hasUsage(usage, TextureUsage::DepthStencil)) {
+        flags |= VK_IMAGE_USAGE_DEPTH_STENCIL_ATTACHMENT_BIT;
+    }
+    return flags != 0 ? flags : VK_IMAGE_USAGE_SAMPLED_BIT;
 }
 
 // ============================================================================
