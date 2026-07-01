@@ -70,6 +70,7 @@ public:
         prePassDepthRT->setResolveTexture(r.depthStencilRT.get());
 
         // Execute the pass
+        applyTimingToRenderDesc(prePassDesc.get(), true, true);
         auto encoder = r.currentCommandBuffer->renderCommandEncoder(prePassDesc.get());
         encoder->setRenderPipelineState(r.prePassPipeline.get());
         encoder->setCullMode(MTL::CullModeBack);
@@ -150,7 +151,8 @@ public:
 
         // Build TLAS
         // TODO: only build TLAS if it's dirty
-        auto accelEncoder = r.currentCommandBuffer->accelerationStructureCommandEncoder();
+        auto timedAccelDesc = makeTimedAccelDesc(true, true);
+        auto accelEncoder = r.currentCommandBuffer->accelerationStructureCommandEncoder(timedAccelDesc.get());
         accelEncoder->buildAccelerationStructure(
             r.TLASBuffers[r.currentFrameInFlight].get(),
             tlasDesc.get(),
@@ -177,7 +179,8 @@ public:
         auto drawableSize = r.swapchain->drawableSize();
         glm::vec2 screenSize = glm::vec2(drawableSize.width, drawableSize.height);
 
-        auto encoder = r.currentCommandBuffer->computeCommandEncoder();
+        auto timedComputeDesc = makeTimedComputeDesc(true, true);
+        auto encoder = r.currentCommandBuffer->computeCommandEncoder(timedComputeDesc.get());
         encoder->setComputePipelineState(r.normalResolvePipeline.get());
         encoder->setTexture(r.normalRT_MS.get(), 0);
         encoder->setTexture(r.normalRT.get(), 1);
@@ -205,7 +208,8 @@ public:
         glm::uvec3 gridSize = glm::uvec3(r.clusterGridSizeX, r.clusterGridSizeY, r.clusterGridSizeZ);
         uint pointLightCount = r.currentScene->pointLights.size();
 
-        auto encoder = r.currentCommandBuffer->computeCommandEncoder();
+        auto timedComputeDesc = makeTimedComputeDesc(true, true);
+        auto encoder = r.currentCommandBuffer->computeCommandEncoder(timedComputeDesc.get());
         encoder->setComputePipelineState(r.tileCullingPipeline.get());
         encoder->setBuffer(r.clusterBuffers[r.currentFrameInFlight].get(), 0, 0);
         encoder->setBuffer(r.pointLightBuffer.get(), 0, 1);
@@ -234,7 +238,8 @@ public:
         auto drawableSize = r.swapchain->drawableSize();
         glm::vec2 screenSize = glm::vec2(drawableSize.width, drawableSize.height);
 
-        auto encoder = r.currentCommandBuffer->computeCommandEncoder();
+        auto timedComputeDesc = makeTimedComputeDesc(true, false);
+        auto encoder = r.currentCommandBuffer->computeCommandEncoder(timedComputeDesc.get());
         encoder->setComputePipelineState(r.raytraceShadowPipeline.get());
         encoder->setTexture(r.depthStencilRT.get(), 0);
         encoder->setTexture(r.normalRT.get(), 1);
@@ -248,7 +253,8 @@ public:
         encoder->endEncoding();
 
         // Generate mipmaps for shadow texture
-        auto mipmapEncoder = NS::TransferPtr(r.currentCommandBuffer->blitCommandEncoder());
+        auto shadowBlitDesc = makeTimedBlitDesc(false, true);
+        auto mipmapEncoder = NS::TransferPtr(r.currentCommandBuffer->blitCommandEncoder(shadowBlitDesc.get()));
         mipmapEncoder->generateMipmaps(r.shadowRT.get());
         mipmapEncoder->endEncoding();
     }
@@ -270,7 +276,8 @@ public:
         auto drawableSize = r.swapchain->drawableSize();
         glm::vec2 screenSize = glm::vec2(drawableSize.width, drawableSize.height);
 
-        auto encoder = r.currentCommandBuffer->computeCommandEncoder();
+        auto timedComputeDesc = makeTimedComputeDesc(true, true);
+        auto encoder = r.currentCommandBuffer->computeCommandEncoder(timedComputeDesc.get());
         encoder->setComputePipelineState(r.raytraceAOPipeline.get());
         encoder->setTexture(r.depthStencilRT.get(), 0);
         encoder->setTexture(r.normalRT.get(), 1);
@@ -310,6 +317,7 @@ public:
         skyPassDepthRT->setTexture(r.depthStencilRT.get());
 
         // Execute the pass
+        applyTimingToRenderDesc(skyPassDesc.get(), true, true);
         auto encoder = r.currentCommandBuffer->renderCommandEncoder(skyPassDesc.get());
         encoder->setRenderPipelineState(r.atmospherePipeline.get());
         encoder->setCullMode(MTL::CullModeNone);
@@ -364,6 +372,7 @@ public:
             colorAttachment->setSlice(face);
             colorAttachment->setLevel(0);
 
+            applyTimingToRenderDesc(passDesc.get(), face == 0, false);
             auto encoder = r.currentCommandBuffer->renderCommandEncoder(passDesc.get());
             encoder->setRenderPipelineState(r.equirectToCubemapPipeline.get());
             encoder->setCullMode(MTL::CullModeNone);
@@ -374,7 +383,8 @@ public:
         }
 
         // Generate mipmaps for prefiltering
-        auto blitEncoder = r.currentCommandBuffer->blitCommandEncoder();
+        auto equirectBlitDesc = makeTimedBlitDesc(false, true);
+        auto blitEncoder = r.currentCommandBuffer->blitCommandEncoder(equirectBlitDesc.get());
         blitEncoder->generateMipmaps(r.environmentCubemap.get());
         blitEncoder->endEncoding();
     }
@@ -426,6 +436,7 @@ public:
             colorAttachment->setSlice(face);
             colorAttachment->setLevel(0);
 
+            applyTimingToRenderDesc(passDesc.get(), face == 0, false);
             auto encoder = r.currentCommandBuffer->renderCommandEncoder(passDesc.get());
             encoder->setRenderPipelineState(r.skyCapturePipeline.get());
             encoder->setCullMode(MTL::CullModeNone);
@@ -436,7 +447,8 @@ public:
         }
 
         // Generate mipmaps for environment cubemap
-        auto blitEncoder = r.currentCommandBuffer->blitCommandEncoder();
+        auto skyBlitDesc = makeTimedBlitDesc(false, true);
+        auto blitEncoder = r.currentCommandBuffer->blitCommandEncoder(skyBlitDesc.get());
         blitEncoder->generateMipmaps(r.environmentCubemap.get());
         blitEncoder->endEncoding();
     }
@@ -473,6 +485,7 @@ public:
             colorAttachment->setSlice(face);
             colorAttachment->setLevel(0);
 
+            applyTimingToRenderDesc(passDesc.get(), face == 0, face == 5);
             auto encoder = r.currentCommandBuffer->renderCommandEncoder(passDesc.get());
             encoder->setRenderPipelineState(r.irradianceConvolutionPipeline.get());
             encoder->setCullMode(MTL::CullModeNone);
@@ -521,6 +534,9 @@ public:
                 colorAttachment->setSlice(face);
                 colorAttachment->setLevel(mip);
 
+                bool pfIsFirst = (mip == 0 && face == 0);
+                bool pfIsLast  = (mip == maxMipLevels - 1 && face == 5);
+                applyTimingToRenderDesc(passDesc.get(), pfIsFirst, pfIsLast);
                 auto encoder = r.currentCommandBuffer->renderCommandEncoder(passDesc.get());
                 encoder->setRenderPipelineState(r.prefilterEnvMapPipeline.get());
                 encoder->setCullMode(MTL::CullModeNone);
@@ -556,6 +572,7 @@ public:
         colorAttachment->setClearColor(MTL::ClearColor(0.0, 0.0, 0.0, 1.0));
         colorAttachment->setTexture(r.brdfLUT.get());
 
+        applyTimingToRenderDesc(passDesc.get(), true, true);
         auto encoder = r.currentCommandBuffer->renderCommandEncoder(passDesc.get());
         encoder->setRenderPipelineState(r.brdfLUTPipeline.get());
         encoder->setCullMode(MTL::CullModeNone);
@@ -600,6 +617,7 @@ public:
         renderPassDepthRT->setTexture(r.depthStencilRT_MS.get());
 
         // Execute the pass
+        applyTimingToRenderDesc(renderPassDesc.get(), true, true);
         auto encoder = r.currentCommandBuffer->renderCommandEncoder(renderPassDesc.get());
         encoder->setRenderPipelineState(r.drawPipeline.get());
         encoder->setCullMode(MTL::CullModeBack);
@@ -730,6 +748,7 @@ public:
         waterPassDepthRT->setTexture(r.depthStencilRT.get());
 
         // Execute the pass
+        applyTimingToRenderDesc(waterPassDesc.get(), true, true);
         auto encoder = r.currentCommandBuffer->renderCommandEncoder(waterPassDesc.get());
         encoder->setRenderPipelineState(r.waterPipeline.get());
         encoder->setCullMode(MTL::CullModeNone);// Water is double-sided
@@ -837,7 +856,8 @@ public:
 
         // Compute passes (single particle buffer - persistent state)
         {
-            auto computeEncoder = r.currentCommandBuffer->computeCommandEncoder();
+            auto timedComputeDesc = makeTimedComputeDesc(true, false);
+            auto computeEncoder = r.currentCommandBuffer->computeCommandEncoder(timedComputeDesc.get());
 
             // Force calculation
             computeEncoder->setComputePipelineState(r.particleForcePipeline.get());
@@ -871,6 +891,7 @@ public:
             depthAttachment->setStoreAction(MTL::StoreActionDontCare);
             depthAttachment->setTexture(r.depthStencilRT.get());
 
+            applyTimingToRenderDesc(renderPassDesc.get(), false, true);
             auto encoder = r.currentCommandBuffer->renderCommandEncoder(renderPassDesc.get());
             encoder->setRenderPipelineState(r.particleRenderPipeline.get());
             encoder->setDepthStencilState(r.particleDepthStencilState.get());
@@ -965,6 +986,7 @@ public:
         lsPassColorRT->setTexture(r.lightScatteringRT.get());
 
         // Execute the pass
+        applyTimingToRenderDesc(lsPassDesc.get(), true, true);
         auto encoder = r.currentCommandBuffer->renderCommandEncoder(lsPassDesc.get());
         encoder->setRenderPipelineState(r.lightScatteringPipeline.get());
         encoder->setCullMode(MTL::CullModeNone);
@@ -1045,6 +1067,7 @@ public:
         colorAttach->setStoreAction(MTL::StoreActionStore);
         colorAttach->setTexture(r.tempColorRT.get());// Write to temp
 
+        applyTimingToRenderDesc(passDesc.get(), true, true);
         auto encoder = r.currentCommandBuffer->renderCommandEncoder(passDesc.get());
         encoder->setRenderPipelineState(r.fogSimplePipeline.get());
         encoder->setCullMode(MTL::CullModeNone);
@@ -1152,6 +1175,7 @@ public:
                 colorAttach->setStoreAction(MTL::StoreActionStore);
                 colorAttach->setTexture(r.cloudRT.get());
 
+                applyTimingToRenderDesc(passDesc.get(), true, false);
                 auto encoder = r.currentCommandBuffer->renderCommandEncoder(passDesc.get());
                 encoder->setRenderPipelineState(r.cloudLowResPipeline.get());
                 encoder->setCullMode(MTL::CullModeNone);
@@ -1184,6 +1208,7 @@ public:
                 colorAttach->setStoreAction(MTL::StoreActionStore);
                 colorAttach->setTexture(r.cloudHistoryRT.get());
 
+                // no timing — this is a middle encoder
                 auto encoder = r.currentCommandBuffer->renderCommandEncoder(passDesc.get());
                 encoder->setRenderPipelineState(r.cloudTemporalResolvePipeline.get());
                 encoder->setCullMode(MTL::CullModeNone);
@@ -1224,6 +1249,7 @@ public:
                 colorAttach->setStoreAction(MTL::StoreActionStore);
                 colorAttach->setTexture(r.tempColorRT.get());// Write to temp
 
+                applyTimingToRenderDesc(passDesc.get(), false, true);
                 auto encoder = r.currentCommandBuffer->renderCommandEncoder(passDesc.get());
                 encoder->setRenderPipelineState(r.cloudCompositePipeline.get());
                 encoder->setCullMode(MTL::CullModeNone);
@@ -1250,6 +1276,7 @@ public:
             colorAttach->setStoreAction(MTL::StoreActionStore);
             colorAttach->setTexture(r.tempColorRT.get());// Write to temp
 
+            applyTimingToRenderDesc(passDesc.get(), true, true);
             auto encoder = r.currentCommandBuffer->renderCommandEncoder(passDesc.get());
             encoder->setRenderPipelineState(r.cloudRenderPipeline.get());
             encoder->setCullMode(MTL::CullModeNone);
@@ -1363,6 +1390,7 @@ public:
         colorAttach->setStoreAction(MTL::StoreActionStore);
         colorAttach->setTexture(r.bloomResultRT.get());
 
+        applyTimingToRenderDesc(passDesc.get(), true, true);
         auto encoder = r.currentCommandBuffer->renderCommandEncoder(passDesc.get());
         encoder->setRenderPipelineState(r.sunFlarePipeline.get());
         encoder->setCullMode(MTL::CullModeNone);
@@ -1397,6 +1425,7 @@ public:
         colorRT->setStoreAction(MTL::StoreActionStore);
         colorRT->setTexture(r.bloomBrightnessRT.get());
 
+        applyTimingToRenderDesc(passDesc.get(), true, true);
         auto encoder = r.currentCommandBuffer->renderCommandEncoder(passDesc.get());
         encoder->setRenderPipelineState(r.bloomBrightnessPipeline.get());
         encoder->setCullMode(MTL::CullModeBack);
@@ -1430,6 +1459,7 @@ public:
             colorRT->setStoreAction(MTL::StoreActionStore);
             colorRT->setTexture(r.bloomPyramidRTs[0].get());
 
+            applyTimingToRenderDesc(passDesc.get(), true, r.BLOOM_PYRAMID_LEVELS == 1);
             auto encoder = r.currentCommandBuffer->renderCommandEncoder(passDesc.get());
             encoder->setRenderPipelineState(r.bloomDownsamplePipeline.get());
             encoder->setCullMode(MTL::CullModeBack);
@@ -1448,6 +1478,7 @@ public:
             colorRT->setStoreAction(MTL::StoreActionStore);
             colorRT->setTexture(r.bloomPyramidRTs[i].get());
 
+            applyTimingToRenderDesc(passDesc.get(), false, i == r.BLOOM_PYRAMID_LEVELS - 1);
             auto encoder = r.currentCommandBuffer->renderCommandEncoder(passDesc.get());
             encoder->setRenderPipelineState(r.bloomDownsamplePipeline.get());
             encoder->setCullMode(MTL::CullModeBack);
@@ -1480,6 +1511,8 @@ public:
             colorRT->setStoreAction(MTL::StoreActionStore);
             colorRT->setTexture(r.bloomPyramidRTs[i].get());
 
+            bool upIsFirst = (i == static_cast<int>(r.BLOOM_PYRAMID_LEVELS) - 2);
+            applyTimingToRenderDesc(passDesc.get(), upIsFirst, i == 0);
             auto encoder = r.currentCommandBuffer->renderCommandEncoder(passDesc.get());
             encoder->setRenderPipelineState(r.bloomUpsamplePipeline.get());
             encoder->setCullMode(MTL::CullModeBack);
@@ -1512,6 +1545,7 @@ public:
         colorRT->setStoreAction(MTL::StoreActionStore);
         colorRT->setTexture(r.bloomResultRT.get());
 
+        applyTimingToRenderDesc(passDesc.get(), true, true);
         auto encoder = r.currentCommandBuffer->renderCommandEncoder(passDesc.get());
         encoder->setRenderPipelineState(r.bloomCompositePipeline.get());
         encoder->setCullMode(MTL::CullModeBack);
@@ -1567,6 +1601,7 @@ public:
         colorRT->setStoreAction(MTL::StoreActionStore);
         colorRT->setTexture(r.dofCoCRT.get());
 
+        applyTimingToRenderDesc(passDesc.get(), true, true);
         auto encoder = r.currentCommandBuffer->renderCommandEncoder(passDesc.get());
         encoder->setRenderPipelineState(r.dofCoCPipeline.get());
         encoder->setCullMode(MTL::CullModeBack);
@@ -1606,6 +1641,7 @@ public:
         colorRT->setStoreAction(MTL::StoreActionStore);
         colorRT->setTexture(r.dofBlurRT.get());
 
+        applyTimingToRenderDesc(passDesc.get(), true, true);
         auto encoder = r.currentCommandBuffer->renderCommandEncoder(passDesc.get());
         encoder->setRenderPipelineState(r.dofBlurPipeline.get());
         encoder->setCullMode(MTL::CullModeBack);
@@ -1637,6 +1673,7 @@ public:
         colorRT->setStoreAction(MTL::StoreActionStore);
         colorRT->setTexture(r.dofResultRT.get());
 
+        applyTimingToRenderDesc(passDesc.get(), true, true);
         auto encoder = r.currentCommandBuffer->renderCommandEncoder(passDesc.get());
         encoder->setRenderPipelineState(r.dofCompositePipeline.get());
         encoder->setCullMode(MTL::CullModeBack);
@@ -1696,6 +1733,7 @@ public:
         postPassColorRT->setTexture(r.currentDrawable->texture());
 
         // Execute the pass
+        applyTimingToRenderDesc(postPassDesc.get(), true, true);
         auto encoder = r.currentCommandBuffer->renderCommandEncoder(postPassDesc.get());
         encoder->setRenderPipelineState(r.postProcessPipeline.get());
         encoder->setCullMode(MTL::CullModeBack);
@@ -1767,6 +1805,7 @@ public:
         depthAttachment->setLoadAction(MTL::LoadActionLoad);
         depthAttachment->setStoreAction(MTL::StoreActionStore);
 
+        applyTimingToRenderDesc(passDesc.get(), true, true);
         auto encoder = r.currentCommandBuffer->renderCommandEncoder(passDesc.get());
 
         // Set viewport
@@ -1835,6 +1874,7 @@ public:
         imguiPassColorRT->setStoreAction(MTL::StoreActionStore);
         imguiPassColorRT->setTexture(r.currentDrawable->texture());
 
+        applyTimingToRenderDesc(imguiPassDesc.get(), true, true);
         auto encoder = r.currentCommandBuffer->renderCommandEncoder(imguiPassDesc.get());
         ImGui_ImplMetal_RenderDrawData(ImGui::GetDrawData(), r.currentCommandBuffer, encoder);
         encoder->endEncoding();
@@ -1904,6 +1944,7 @@ public:
             depthAttachment->setStoreAction(MTL::StoreActionStore);
         }
 
+        applyTimingToRenderDesc(passDesc.get(), true, true);
         auto encoder = r.currentCommandBuffer->renderCommandEncoder(passDesc.get());
 
         auto drawableWidth = r.colorRT->width();
@@ -2042,6 +2083,7 @@ public:
         colorAttachment->setLoadAction(MTL::LoadActionLoad);
         colorAttachment->setStoreAction(MTL::StoreActionStore);
 
+        applyTimingToRenderDesc(passDesc.get(), true, true);
         auto encoder = r.currentCommandBuffer->renderCommandEncoder(passDesc.get());
         auto rtWidth  = r.colorRT->width();
         auto rtHeight = r.colorRT->height();
@@ -2119,8 +2161,8 @@ auto Renderer_Metal::init(SDL_Window* window) -> void {
     if (std::getenv("GITHUB_ACTIONS")) m_supportsRaytracing = false;
 
     // GPU pass timing: find timestamp counter set and create sample buffer.
-    // We use blit encoders as bookends around each pass, so AtBlitBoundary must be supported.
-    if (device->supportsCounterSampling(MTL::CounterSamplingPointAtBlitBoundary)) {
+    // Each pass embeds samples via descriptor-level sampleBufferAttachments (AtStageBoundary).
+    if (device->supportsCounterSampling(MTL::CounterSamplingPointAtStageBoundary)) {
         auto counterSets = device->counterSets();
         for (NS::UInteger i = 0; counterSets && i < counterSets->count(); ++i) {
             auto cs = static_cast<MTL::CounterSet*>(counterSets->object(i));
