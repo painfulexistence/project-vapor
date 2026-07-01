@@ -22,14 +22,12 @@
 #include "Vapor/systems.hpp"
 #include "Vapor/rng.hpp"
 #include "Vapor/scene.hpp"
-#include "Vapor/video_recorder.hpp"
 #include <RmlUi/Core/ElementDocument.h>
 #include <entt/entt.hpp>
 
 
 #include "Vapor/scene_inspector.hpp"
 #include "Vapor/scene_serializer.hpp"
-#include "Vapor/video_recorder.hpp"
 #include "components.hpp"
 #include "pages/hud_page.hpp"
 #include "pages/letterbox_page.hpp"
@@ -227,8 +225,6 @@ auto main(int argc, char* args[]) -> int {
                 out = { {"axis", Vapor::toJson(c->axis)}, {"speed", c->speed} };
         });
 
-    Vapor::VideoRecorder videoRecorder;
-
     Vapor::SceneInspector sceneInspector;
     sceneInspector.attachSerializer(sceneSerializer);
     sceneInspector.setGltfPath("models/Sponza/Sponza.gltf", /*optimized=*/true);
@@ -329,22 +325,13 @@ auto main(int argc, char* args[]) -> int {
 
     entt::registry registry;
 
-    // Wire recording UI into the Engine window via the engine-window callback.
-    // captureFrame() is called here each frame so recording continues even
-    // when the inspector overlay is hidden (F1 toggled off).
+    // Wire the recorder into the renderer: registers the engine ImGui window
+    // (recording controls) and sets the output directory.
     {
         const char* basePath = SDL_GetBasePath();
         std::string outputDir = basePath ? std::string(basePath) + "output" : "output";
-        videoRecorder.setBaseOutputDir(outputDir);
+        engineCore->attachRenderer(renderer.get(), outputDir);
     }
-    renderer->setEngineWindowCallback([&]() {
-#ifndef NDEBUG
-        if (videoRecorder.isRecording())
-            videoRecorder.captureFrame();
-        if (ImGui::CollapsingHeader("Recording", ImGuiTreeNodeFlags_DefaultOpen))
-            videoRecorder.drawImGui(*renderer);
-#endif
-    });
 
     renderer->setImGuiCallback([&]() {
         sceneInspector.draw(registry);

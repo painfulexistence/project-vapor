@@ -1571,6 +1571,29 @@ void Renderer::setImGuiCallback(std::function<void()> callback) {
     imGuiCallback = std::move(callback);
 }
 
+void Renderer::invokeImGuiCallback() {
+    // F1 toggles the engine ImGui overlay on/off.
+    if (ImGui::IsKeyPressed(ImGuiKey_F1))
+        m_imGuiVisible = !m_imGuiVisible;
+
+    // Per-frame engine hook (recording capture + F2 hotkey). Runs whether or not
+    // the overlay is visible so recording keeps working with the UI hidden.
+    if (m_imGuiFrameCallback)
+        m_imGuiFrameCallback();
+
+    if (!m_imGuiVisible)
+        return;
+
+    if (imGuiCallback)
+        imGuiCallback();
+
+    if (m_engineWindowCallback) {
+        ImGui::Begin("Engine");
+        m_engineWindowCallback();
+        ImGui::End();
+    }
+}
+
 // ============================================================================
 // Batch Rendering Implementation
 // ============================================================================

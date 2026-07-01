@@ -164,7 +164,10 @@ public:
 
     // Set ImGui callback (called between NewFrame and Render)
     void setImGuiCallback(std::function<void()> callback);
-    void invokeImGuiCallback() const { if (imGuiCallback) imGuiCallback(); }
+    // Drives the engine ImGui frame: F1 visibility toggle, the always-on frame
+    // callback (recording/F2), then — if visible — the app callback and the
+    // Engine window (with the engine-window callback). Call after ImGui::NewFrame().
+    void invokeImGuiCallback();
 
     // ========================================================================
     // 2D/3D Batch Rendering API
@@ -173,9 +176,27 @@ public:
     // Register a callback invoked inside the Engine ImGui window each frame,
     // after the built-in Graphics section. Use this to append engine-level
     // panels (e.g. Recording) without re-opening the window from outside.
+    // Only runs while the engine overlay is visible (see setImGuiVisible).
     void setEngineWindowCallback(std::function<void()> callback) {
         m_engineWindowCallback = std::move(callback);
     }
+
+    // Register a callback invoked every frame right after ImGui::NewFrame(),
+    // before any window is opened and regardless of overlay visibility. Use for
+    // per-frame engine logic that must keep running with the UI hidden — e.g.
+    // recording frame capture and the F2 start/stop hotkey.
+    void setImGuiFrameCallback(std::function<void()> callback) {
+        m_imGuiFrameCallback = std::move(callback);
+    }
+
+    // Engine ImGui overlay visibility, toggled at runtime with F1.
+    bool isImGuiVisible() const { return m_imGuiVisible; }
+    void setImGuiVisible(bool visible) { m_imGuiVisible = visible; }
+
+    // Upload RGBA pixel data as the video texture sampled by rect lights marked
+    // with useVideoTexture = true. Call once per frame after VideoPlayer::update().
+    // TODO(RHI): implement via RHI texture upload once rect-light shading is ported.
+    void uploadRectLightVideoTexture(const uint8_t* /*rgba*/, uint32_t /*width*/, uint32_t /*height*/) {}
 
     // Manual flush (for controlling draw order)
     void flush2D();
@@ -587,11 +608,12 @@ private:
     // Configuration
     // ========================================================================
 
-    const Uint32 MAX_INSTANCES = 1000;
+    const Uint32 MAX_INSTANCES = 5000;// Increased for large scenes like Bistro (2911 instances)
     const Uint32 MAX_FRAMES_IN_FLIGHT = 3;
     const Uint32 MSAA_SAMPLE_COUNT = 4;
     Uint32 maxDirectionalLights = 4;
-    Uint32 maxPointLights = 256;
+    Uint32 maxPointLights = 1024;
+    Uint32 maxRectLights = 32;
 
     // Clustering configuration
     Uint32 clusterGridSizeX = 16;
@@ -609,8 +631,9 @@ private:
     float time = 0.0f;
     float deltaTime = 0.016f;
     bool isInitialized = false;
-    std::function<void()> m_imGuiCallback;
     std::function<void()> m_engineWindowCallback;
+    std::function<void()> m_imGuiFrameCallback;
+    bool m_imGuiVisible = true;
 
     // Stats
     Uint32 drawCount = 0;

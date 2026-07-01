@@ -49,8 +49,10 @@ public:
     // -------------------------------------------------------------------------
     void draw(entt::registry& registry) {
 #ifndef NDEBUG
-        if (ImGui::IsKeyPressed(ImGuiKey_F1))
-            m_visible = !m_visible;
+        // F1 visibility is owned globally by the renderer (m_imGuiVisible),
+        // which gates the whole engine overlay including this inspector. Do not
+        // toggle on F1 here too, or the same key press flips both states in the
+        // frame the overlay re-appears. m_visible stays for programmatic hiding.
         if (!m_visible) return;
 
         ImGui::SetNextWindowSize(ImVec2(680, 580), ImGuiCond_FirstUseEver);

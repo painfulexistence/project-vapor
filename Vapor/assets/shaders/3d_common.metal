@@ -86,6 +86,19 @@ struct PointLight {
     // float _pad[2];
 };
 
+// Rectangular area light.  right and up are orthonormal axes of the light face;
+// halfWidth/halfHeight give half-extents in those directions.
+struct RectLight {
+    float3 position;
+    float  halfWidth;
+    float3 right;           // normalized
+    float  halfHeight;
+    float3 up;              // normalized
+    float  intensity;
+    float3 color;
+    uint   useVideoTexture; // 0 = solid color, 1 = sample video texture
+};
+
 struct Cluster {
     float4 min;
     float4 max;
