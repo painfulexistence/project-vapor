@@ -4812,7 +4812,7 @@ auto Renderer_Metal::draw(std::shared_ptr<Scene> scene, Camera& camera) -> void 
         auto capturedBuf  = gpuTimerSampleBuffer; // retain via SharedPtr copy
         NS::UInteger sampleCount = static_cast<NS::UInteger>(capturedInfo.size() * 2);
         cmd->addCompletedHandler([this, capturedInfo, capturedBuf, sampleCount](MTL::CommandBuffer*) {
-            auto data = NS::TransferPtr(capturedBuf->resolveCounterRange(NS::Range::Make(0, sampleCount)));
+            NS::Data* data = capturedBuf->resolveCounterRange(NS::Range::Make(0, sampleCount));
             if (!data) return;
             auto* timestamps = reinterpret_cast<const MTL::CounterResultTimestamp*>(data->mutableBytes());
             std::lock_guard<std::mutex> lock(gpuTimingMutex);
