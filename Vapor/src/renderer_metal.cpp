@@ -185,7 +185,7 @@ public:
         encoder->setTexture(r.normalRT_MS.get(), 0);
         encoder->setTexture(r.normalRT.get(), 1);
         encoder->setBytes(&r.MSAA_SAMPLE_COUNT, sizeof(Uint32), 0);
-        encoder->dispatchThreadgroups(MTL::Size(screenSize.x, screenSize.y, 1), MTL::Size(1, 1, 1));
+        encoder->dispatchThreads(MTL::Size(drawableSize.width, drawableSize.height, 1), MTL::Size(8, 8, 1));
         encoder->endEncoding();
     }
 };
@@ -217,7 +217,7 @@ public:
         encoder->setBytes(&pointLightCount, sizeof(uint), 3);
         encoder->setBytes(&gridSize, sizeof(glm::uvec3), 4);
         encoder->setBytes(&screenSize, sizeof(glm::vec2), 5);
-        encoder->dispatchThreadgroups(MTL::Size(r.clusterGridSizeX, r.clusterGridSizeY, 1), MTL::Size(1, 1, 1));
+        encoder->dispatchThreads(MTL::Size(r.clusterGridSizeX, r.clusterGridSizeY, 1), MTL::Size(8, 8, 1));
         encoder->endEncoding();
     }
 };
@@ -249,7 +249,7 @@ public:
         encoder->setBuffer(r.pointLightBuffer.get(), 0, 2);
         encoder->setBytes(&screenSize, sizeof(glm::vec2), 3);
         encoder->setAccelerationStructure(r.TLASBuffers[r.currentFrameInFlight].get(), 4);
-        encoder->dispatchThreadgroups(MTL::Size(screenSize.x, screenSize.y, 1), MTL::Size(1, 1, 1));
+        encoder->dispatchThreads(MTL::Size(drawableSize.width, drawableSize.height, 1), MTL::Size(8, 8, 1));
         encoder->endEncoding();
 
         // Generate mipmaps for shadow texture
@@ -285,7 +285,7 @@ public:
         encoder->setBuffer(r.frameDataBuffers[r.currentFrameInFlight].get(), 0, 0);
         encoder->setBuffer(r.cameraDataBuffers[r.currentFrameInFlight].get(), 0, 1);
         encoder->setAccelerationStructure(r.TLASBuffers[r.currentFrameInFlight].get(), 2);
-        encoder->dispatchThreadgroups(MTL::Size(screenSize.x, screenSize.y, 1), MTL::Size(1, 1, 1));
+        encoder->dispatchThreads(MTL::Size(drawableSize.width, drawableSize.height, 1), MTL::Size(8, 8, 1));
         encoder->endEncoding();
     }
 };

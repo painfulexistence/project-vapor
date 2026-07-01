@@ -1,0 +1,199 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>ADR-008: Ray Tracing Optimization Notes — Project Vapor</title>
+  <link rel="stylesheet" href="../styles/global.css">
+  <style>
+    .page-header { margin-bottom: 32px; }
+    .page-header h1 { font-size: 20px; }
+    h2 { font-size: 16px; margin: 36px 0 14px; }
+    h3 { font-size: 14px; margin: 24px 0 10px; }
+    p { margin-bottom: 14px; }
+    hr { margin: 36px 0; }
+    .pipeline { font-family: monospace; white-space: pre; line-height: 1.5; padding: 16px; overflow-x: auto; }
+  </style>
+</head>
+<body>
+  <nav>
+    <div class="nav-inner">
+      <a class="nav-logo" href="../index.html">Project Vapor</a>
+      <a href="../documentation/index.html">Docs</a>
+      <a href="index.html" class="active">Devlog</a>
+      <a href="../demo/index.html">Demo</a>
+      <a href="https://github.com/painfulexistence/project-vapor" target="_blank">GitHub ↗</a>
+    </div>
+  </nav>
+  <main>
+    <div class="page-header">
+      <div class="eyebrow">
+      <a href="index.html">Devlog</a> / ADR-008</div>
+      <h1>ADR-008: Ray Tracing Optimization Notes</h1>
+      <div class="meta-row">
+        <span>2026-07-01</span>
+        <span><span class="badge badge-ok">Adopted</span></span>
+      </div>
+    </div>
+
+    <h2>Context</h2>
+    <p>The new per-pass GPU timing panel (PR #56) made per-encoder costs visible for the first time, and two numbers stood out immediately: <code>RaytraceShadowPass</code> at ~7.4&nbsp;ms and <code>RaytraceAOPass</code> at ~6.6&nbsp;ms — together nearly a full 60&nbsp;fps frame budget for two secondary effects.</p>
+    <p>Investigating those numbers uncovered a dispatch mistake shared by four compute passes, and prompted a broader writeup: what actually costs time in GPU ray tracing, which mistakes silently destroy performance, and what a production-shaped RT effect pipeline (with denoising) looks like. The last section uses RT AO as a concrete implementation plan, since the pass currently named <code>RaytraceAOPass</code> is in fact a screen-space AO kernel that never casts a ray.</p>
+
+    <h2>Background: how compute-based ray tracing executes on Apple Silicon</h2>
+    <p>Metal has no separate ray tracing pipeline stage (no raygen/miss/hit shader tables like DXR or Vulkan RT). Ray tracing is done from ordinary compute (or fragment) kernels via the <code>intersector&lt;&gt;</code> API against acceleration structures:</p>
+    <ul>
+      <li><strong>BLAS</strong> (primitive acceleration structure) — one per unique geometry; built once, rebuilt only when geometry changes.</li>
+      <li><strong>TLAS</strong> (instance acceleration structure) — references BLASs with per-instance transforms; cheap to rebuild or <em>refit</em> per frame when only transforms change.</li>
+      <li><strong>Intersection</strong> — on M3 and later, ray/box and ray/triangle tests run on dedicated hardware; on M1/M2 the same API runs a software traversal on the shader cores. Either way the query is issued from a plain compute thread.</li>
+    </ul>
+    <p>Because the entry point is a normal compute kernel, <strong>every rule of compute shader performance applies to ray tracing kernels too</strong> — and that is exactly where things went wrong.</p>
+    <h3>SIMD execution in one paragraph</h3>
+    <p>Apple GPUs execute threads in SIMD-groups of 32. A threadgroup is carved into SIMD-groups; a SIMD-group always occupies all 32 lanes of hardware whether or not there are 32 live threads in it. Occupancy (how many SIMD-groups are resident per shader core) is what hides memory and intersection latency — RT kernels are latency-heavy, so they depend on it more than most.</p>
+
+    <h2>The mistake: 1×1 threadgroups</h2>
+    <p>All four screen-space compute passes dispatched like this:</p>
+    <pre><code>// one threadgroup per pixel, ONE THREAD per threadgroup
+encoder-&gt;dispatchThreadgroups(MTL::Size(screenSize.x, screenSize.y, 1),
+                              MTL::Size(1, 1, 1));</code></pre>
+    <p>A threadgroup with a single thread still occupies an entire 32-lane SIMD-group: <strong>31 of 32 lanes idle, 1/32 of theoretical throughput</strong>, plus per-threadgroup scheduling overhead multiplied by two million (one threadgroup per pixel at full res). This is the single most expensive "silent" mistake available in a compute dispatch — nothing renders incorrectly, no validation layer complains, the kernel is just ~4–30× slower than it should be.</p>
+    <p>The fix is one line per call site. Since all of these kernels index by <code>[[thread_position_in_grid]]</code>, <code>dispatchThreads</code> keeps the semantics (one thread per pixel) while packing threads into real threadgroups. Apple-family GPUs support non-uniform threadgroup sizes, so no edge-tile bounds handling is needed on the host side:</p>
+    <pre><code>// one thread per pixel, 64 threads (two SIMD-groups) per threadgroup
+encoder-&gt;dispatchThreads(MTL::Size(drawableSize.width, drawableSize.height, 1),
+                         MTL::Size(8, 8, 1));</code></pre>
+    <p>Fixed call sites:</p>
+    <table>
+      <thead><tr><th>Pass</th><th>Grid</th><th>Note</th></tr></thead>
+      <tbody>
+        <tr><td><code>RaytraceShadowPass</code></td><td>full-res</td><td>shader unchanged</td></tr>
+        <tr><td><code>RaytraceAOPass</code></td><td>full-res</td><td>shader unchanged</td></tr>
+        <tr><td><code>NormalResolvePass</code></td><td>full-res</td><td>shader unchanged</td></tr>
+        <tr><td><code>TileCullingPass</code></td><td>tile grid</td><td>shader index attribute changed from <code>threadgroup_position_in_grid</code> to <code>thread_position_in_grid</code> — its tile coordinate was previously the <em>threadgroup</em> id, which only worked because groups were 1×1</td></tr>
+      </tbody>
+    </table>
+    <p>An 8×8 (64-thread) group is a good default for RT and other register-heavy kernels; 16×16 can be better for light kernels, but larger groups increase register pressure and can reduce occupancy. Measure with the timing panel before tuning further.</p>
+
+    <h2>Checklist: mistakes that silently eat RT performance</h2>
+    <ul>
+      <li><strong>1×1 threadgroups</strong> — see above. Grep for <code>MTL::Size(1, 1, 1)</code> as the second argument of any dispatch.</li>
+      <li><strong>Rebuilding the TLAS from scratch every frame</strong> — <code>TLASBuildPass</code> currently does this (it carries a <code>TODO</code>). At ~0.2&nbsp;ms for the current scene it is tolerable, but cost scales with instance count. The fix has two tiers: skip the build entirely when no transform changed, and use <em>refit</em> (<code>refitAccelerationStructure</code>) instead of a full rebuild when only transforms changed. Full rebuilds are only needed on instance add/remove.</li>
+      <li><strong>Tracing at full resolution by default</strong> — soft, low-frequency effects (AO, diffuse GI, even soft shadows) can be traced at half resolution and upsampled with an edge-aware filter. Half res = 4× fewer rays.</li>
+      <li><strong>Too many rays per pixel instead of reusing rays across time</strong> — 32 samples per pixel per frame (what the current AO kernel does in screen space) is the brute-force answer. The production answer is 1–2 samples per pixel plus temporal accumulation: after ~16 frames of history you have effectively 16–32 spp at 1/16 the per-frame cost.</li>
+      <li><strong>White-noise sampling</strong> — <code>random(index + frame * 19)</code> style hashes produce high-frequency noise that denoisers struggle with. Blue-noise textures (tiled 128×128, animated by frame index) give error that is much easier to filter both spatially and temporally.</li>
+      <li><strong>Fat ray payloads / long ray extents</strong> — for occlusion-type queries (shadows, AO), use <code>accept_any_intersection(true)</code> so traversal stops at the first hit instead of finding the closest one, and cap <code>max_distance</code> aggressively (AO rays rarely need to travel more than a meter or two).</li>
+      <li><strong>Divergent traversal</strong> — rays within one SIMD-group should be coherent when possible. Screen-space-ordered dispatch is already decent; avoid randomly permuting pixel-to-thread assignment.</li>
+    </ul>
+
+    <h2>Anatomy of a denoised RT effect</h2>
+    <p>Any stochastic RT effect (AO, shadows from area lights, diffuse GI, reflections) converges to the same pass skeleton. The insight is that <em>the ray tracing pass is the cheap part</em> — you deliberately undersample it and spend the savings on filtering:</p>
+    <div class="pipeline">G-buffer (depth, normal, motion vectors)
+        │
+        ▼
+[1] RayGen            1–2 rays/px, blue noise, any-hit, short rays
+        │                  → noisy scalar/color target
+        ▼
+[2] Temporal accumulate    reproject with motion vectors,
+        │                  blend with history (α ≈ 0.05–0.2),
+        │                  clamp/reject on disocclusion
+        ▼
+[3] Spatial filter         edge-aware blur (à-trous bilateral),
+        │                  2–3 widening iterations,
+        │                  edge stops on depth + normal
+        ▼
+[4] Composite              apply to ambient/indirect terms only</div>
+    <p>Notes on each stage:</p>
+    <ul>
+      <li><strong>RayGen</strong> writes to a dedicated RT (for AO: single-channel <code>R8Unorm</code> or <code>R16Float</code>). Optionally half resolution.</li>
+      <li><strong>Temporal accumulation</strong> needs motion vectors (or camera-only reprojection using previous frame's view-projection and depth — sufficient for static scenes) plus the previous frame's result and depth. Disocclusion detection compares reprojected depth/normal against history; on mismatch, reset the history weight rather than ghosting.</li>
+      <li><strong>Spatial filter</strong>: the à-trous wavelet form samples a 5×5 kernel with a stride that doubles per iteration (1, 2, 4), giving a large effective radius for 3 × 25 taps. Bilateral weights from depth and normal differences keep edges crisp. This is the SVGF family recipe, minus the variance guidance — variance can be added later.</li>
+      <li><strong>Composite</strong>: AO should attenuate ambient/IBL and diffuse indirect lighting only. Multiplying direct sunlight by AO is physically wrong and visibly dirties lit surfaces.</li>
+    </ul>
+    <p>In this engine, each stage maps to one <code>RenderPass</code> subclass in the render graph, so every stage shows up individually in the GPU timing panel — which is exactly what the panel was built for.</p>
+
+    <h2>Case study: the road to real RT AO</h2>
+    <p>Current state: <code>RaytraceAOPass</code> dispatches <code>3d_ssao.metal</code>, which is a 32-sample <em>screen-space</em> AO — it marches the depth buffer and never issues a ray. The host binds the TLAS at buffer index 2, but the kernel does not declare it; the binding is dead. SSAO's characteristic failure modes (halos at silhouettes, missing occlusion from off-screen or depth-occluded geometry) apply.</p>
+    <p>Implementation plan, in commit-sized steps:</p>
+
+    <h3>Step 1 — replace the kernel with a true ray-traced version</h3>
+    <p>New shader <code>3d_raytrace_ao.metal</code>, reusing the world-position/normal reconstruction already present in <code>3d_raytrace_shadow.metal</code>:</p>
+    <pre><code>#include &lt;metal_stdlib&gt;
+#include &lt;metal_raytracing&gt;
+using namespace metal;
+using namespace metal::raytracing;
+
+constant uint  RAYS_PER_PIXEL = 2;      // temporal accumulation supplies the rest
+constant float AO_RAY_LENGTH  = 1.5;    // meters; also the falloff range
+
+kernel void computeMain(/* depth, normal, aoOut, FrameData, CameraData, */
+                        instance_acceleration_structure TLAS [[buffer(2)]],
+                        uint2 tid [[thread_position_in_grid]]) {
+    // reconstruct worldPos, worldNormal from depth + normal RTs (as today)
+
+    intersector&lt;instancing&gt; isect;
+    isect.accept_any_intersection(true);   // occlusion query: first hit wins
+    isect.assume_geometry_type(geometry_type::triangle);
+
+    float occlusion = 0.0;
+    for (uint i = 0; i &lt; RAYS_PER_PIXEL; i++) {
+        float2 xi  = blueNoise(tid, frame.frameNumber, i);   // not white noise
+        float3 dir = cosineSampleHemisphere(xi, worldNormal);
+
+        ray r;
+        r.origin       = worldPos + worldNormal * 1e-3;
+        r.direction    = dir;
+        r.min_distance = 0.0;
+        r.max_distance = AO_RAY_LENGTH;
+
+        auto hit = isect.intersect(r, TLAS);
+        if (hit.type != intersection_type::none) {
+            // distance falloff: nearby occluders matter more
+            occlusion += 1.0 - saturate(hit.distance / AO_RAY_LENGTH);
+        }
+    }
+    aoOut.write(1.0 - occlusion / float(RAYS_PER_PIXEL), tid);
+}</code></pre>
+    <p>Key differences from the shadow kernel: cosine-weighted hemisphere directions (importance-samples the AO integrand), short capped rays, and any-hit acceptance. With 2 rays/px this pass should land well under the current 6.6&nbsp;ms — the rays are short and coherent.</p>
+
+    <h3>Step 2 — temporal accumulation pass</h3>
+    <p>New <code>AOTemporalPass</code> (compute) with new resources: <code>aoHistoryRT</code> (ping-pong pair) and previous-frame depth. Until the engine has per-object motion vectors, camera-only reprojection is enough:</p>
+    <pre><code>float2 prevUV   = project(prevViewProj, worldPos);      // reproject
+float  prevAO   = aoHistory.sample(s, prevUV).r;
+float  prevDepth= prevDepthTex.sample(s, prevUV).r;
+bool   valid    = all(prevUV == saturate(prevUV))
+               &amp;&amp; abs(linearize(prevDepth) - linearize(expectedDepth)) &lt; eps;
+float  alpha    = valid ? 0.1 : 1.0;                    // reset on disocclusion
+out = mix(prevAO, currentAO, alpha);</code></pre>
+    <p>This multiplies effective sample count by ~10× for one cheap full-screen pass.</p>
+
+    <h3>Step 3 — spatial à-trous filter</h3>
+    <p>New <code>AODenoisePass</code> running 2–3 iterations of a 5×5 bilateral kernel with doubling stride, edge-stopping on depth and normal:</p>
+    <pre><code>w = gaussian[tap]
+  * exp(-abs(depthC - depthT) / sigmaD)
+  * pow(max(0.0, dot(normalC, normalT)), sigmaN);</code></pre>
+    <p>Iterations ping-pong between <code>aoRT</code> and a scratch RT. Each iteration is a trivial compute pass — three more rows in the timing panel.</p>
+
+    <h3>Step 4 — composite correctly</h3>
+    <p>Today <code>aoRT</code> is consumed in <code>PostProcessPass</code> as a whole-image multiply. Move the AO application into the lighting path so it attenuates only the ambient/IBL contribution, not direct light.</p>
+
+    <h3>Expected budget</h3>
+    <table>
+      <thead><tr><th>Pass</th><th>Target (M3, 1440p)</th></tr></thead>
+      <tbody>
+        <tr><td>RayGen (2 rays/px, short rays)</td><td>~1.5–2.5 ms</td></tr>
+        <tr><td>Temporal accumulate</td><td>~0.2 ms</td></tr>
+        <tr><td>Spatial filter ×3</td><td>~0.6 ms</td></tr>
+        <tr><td><strong>Total</strong></td><td><strong>~2.5–3.5 ms</strong>, vs 6.6 ms today — with dramatically better quality (no halos, off-screen occlusion, temporal stability)</td></tr>
+      </tbody>
+    </table>
+    <p>If the budget needs to shrink further, the first lever is half-resolution raygen + edge-aware upsample in the composite (roughly halves the total again).</p>
+
+    <h2>Consequences</h2>
+    <ul>
+      <li>Four dispatch call sites converted from 1×1 threadgroups to <code>dispatchThreads</code> with 8×8 groups; <code>3d_tile_light_cull.metal</code> now indexes by thread position.</li>
+      <li>RT shadow and AO pass costs are expected to drop severalfold; verify with the GPU timing panel and update this page with measured numbers.</li>
+      <li>True RT AO is specced as a four-step plan (raygen → temporal → spatial → composite) with new resources: <code>aoHistoryRT</code> ping-pong pair, previous-frame depth, blue-noise texture.</li>
+      <li>TLAS refit/skip remains an open TODO, tracked in <code>TLASBuildPass</code>.</li>
+    </ul>
+  </main>
+</body>
+</html>
