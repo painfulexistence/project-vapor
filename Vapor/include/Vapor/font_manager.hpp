@@ -1,5 +1,6 @@
 #pragma once
 #include "graphics.hpp"
+#include "rhi.hpp"
 #include <SDL3/SDL_stdinc.h>
 #include <glm/vec2.hpp>
 #include <string>

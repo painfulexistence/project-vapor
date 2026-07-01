@@ -56,7 +56,9 @@ set(SOURCES
     src/character_controller.cpp
     src/vehicle_controller.cpp
     src/fluid_volume.cpp
-    src/renderer_vulkan.cpp
+    # RHI architecture files (replacing renderer_metal.cpp and renderer_vulkan.cpp)
+    src/renderer.cpp
+    src/rhi_vulkan.cpp
     src/scene.cpp
     src/task_scheduler.cpp
     src/resource_manager.cpp
@@ -77,7 +79,7 @@ set(SOURCES
 
 if(APPLE)
     list(APPEND SOURCES
-        src/renderer_metal.cpp
+        src/rhi_metal.cpp
         src/rml_renderer_metal.cpp
         src/ui_renderer_metal.cpp
         imgui/backends/imgui_impl_metal.mm
