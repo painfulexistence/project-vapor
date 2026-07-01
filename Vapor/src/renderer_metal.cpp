@@ -4810,7 +4810,9 @@ auto Renderer_Metal::draw(std::shared_ptr<Scene> scene, Camera& camera) -> void 
     if (gpuTimingEnabled && gpuTimerSampleBuffer && !graph.passTimingInfo.empty()) {
         auto capturedInfo = graph.passTimingInfo;
         auto capturedBuf  = gpuTimerSampleBuffer; // retain via SharedPtr copy
-        NS::UInteger sampleCount = static_cast<NS::UInteger>(capturedInfo.size() * 2);
+        // Slots are laid out as: [frame-start, end0, end1, ..., endN-1].
+        // beginIdx[K] == endIdx[K-1] by construction, so a plain end-begin delta is correct.
+        NS::UInteger sampleCount = static_cast<NS::UInteger>(capturedInfo.back().endIdx + 1);
         cmd->addCompletedHandler([this, capturedInfo, capturedBuf, sampleCount](MTL::CommandBuffer*) {
             NS::Data* data = capturedBuf->resolveCounterRange(NS::Range::Make(0, sampleCount));
             if (!data) return;
@@ -4818,17 +4820,10 @@ auto Renderer_Metal::draw(std::shared_ptr<Scene> scene, Camera& camera) -> void 
             std::lock_guard<std::mutex> lock(gpuTimingMutex);
             gpuPassTimings.clear();
             gpuPassTimings.reserve(capturedInfo.size());
-            // Apple Silicon TBDR: consecutive render encoders on the same framebuffer share one
-            // "vertex stage start" timestamp, so startOfVertexSampleIndex is stuck at the first
-            // render encoder's begin for all subsequent render encoders. Clamp each pass's begin
-            // to max(begin, prevEnd) to recover the correct exclusive-execution time.
-            uint64_t prevEnd = 0;
             for (auto& info : capturedInfo) {
                 uint64_t begin = timestamps[info.beginIdx].timestamp;
                 uint64_t end   = timestamps[info.endIdx].timestamp;
-                uint64_t effectiveBegin = (begin > prevEnd) ? begin : prevEnd;
-                double ms = (end >= effectiveBegin) ? static_cast<double>(end - effectiveBegin) / 1e6 : 0.0;
-                prevEnd = end;
+                double ms = (end >= begin) ? static_cast<double>(end - begin) / 1e6 : 0.0;
                 gpuPassTimings.push_back({info.name, ms});
             }
         });
