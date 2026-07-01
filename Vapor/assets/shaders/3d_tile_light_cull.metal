@@ -51,7 +51,7 @@ kernel void computeMain(
     constant uint& lightCount [[buffer(3)]],
     constant packed_uint3& gridSize [[buffer(4)]],
     constant float2& screenSize [[buffer(5)]],
-    uint3 gid [[threadgroup_position_in_grid]]
+    uint3 gid [[thread_position_in_grid]] // one thread per tile (host uses dispatchThreads)
 ) {
     uint tileIndex = gid.x + gid.y * gridSize.x;
     Cluster tile = tiles[tileIndex];
