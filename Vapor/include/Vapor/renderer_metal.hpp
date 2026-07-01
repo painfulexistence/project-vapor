@@ -73,48 +73,54 @@ public:
     MTL::CounterSampleBuffer* m_timingSampleBuf = nullptr;
     NS::UInteger m_timingBeginIdx = MTL::CounterDontSample;
     NS::UInteger m_timingEndIdx   = MTL::CounterDontSample;
+    // Set to true by timing helpers when an encoder is actually created; stays false on early-return.
+    bool m_didWriteTimingSamples = false;
 
     // Add counter-sample endpoints to an existing MTLRenderPassDescriptor.
-    void applyTimingToRenderDesc(MTL::RenderPassDescriptor* desc, bool wantBegin, bool wantEnd) const {
+    void applyTimingToRenderDesc(MTL::RenderPassDescriptor* desc, bool wantBegin, bool wantEnd) {
         if (!m_timingSampleBuf) return;
         auto* att = desc->sampleBufferAttachments()->object(0);
         att->setSampleBuffer(m_timingSampleBuf);
         att->setStartOfVertexSampleIndex(wantBegin ? m_timingBeginIdx : MTL::CounterDontSample);
         att->setEndOfFragmentSampleIndex(wantEnd   ? m_timingEndIdx   : MTL::CounterDontSample);
+        m_didWriteTimingSamples = true;
     }
 
     // Return a new MTLComputePassDescriptor with optional counter-sample endpoints.
-    NS::SharedPtr<MTL::ComputePassDescriptor> makeTimedComputeDesc(bool wantBegin, bool wantEnd) const {
+    NS::SharedPtr<MTL::ComputePassDescriptor> makeTimedComputeDesc(bool wantBegin, bool wantEnd) {
         auto desc = NS::TransferPtr(MTL::ComputePassDescriptor::computePassDescriptor());
         if (m_timingSampleBuf) {
             auto* att = desc->sampleBufferAttachments()->object(0);
             att->setSampleBuffer(m_timingSampleBuf);
             att->setStartOfEncoderSampleIndex(wantBegin ? m_timingBeginIdx : MTL::CounterDontSample);
             att->setEndOfEncoderSampleIndex(wantEnd     ? m_timingEndIdx   : MTL::CounterDontSample);
+            m_didWriteTimingSamples = true;
         }
         return desc;
     }
 
     // Return a new MTLBlitPassDescriptor with optional counter-sample endpoints.
-    NS::SharedPtr<MTL::BlitPassDescriptor> makeTimedBlitDesc(bool wantBegin, bool wantEnd) const {
+    NS::SharedPtr<MTL::BlitPassDescriptor> makeTimedBlitDesc(bool wantBegin, bool wantEnd) {
         auto desc = NS::TransferPtr(MTL::BlitPassDescriptor::blitPassDescriptor());
         if (m_timingSampleBuf) {
             auto* att = desc->sampleBufferAttachments()->object(0);
             att->setSampleBuffer(m_timingSampleBuf);
             att->setStartOfEncoderSampleIndex(wantBegin ? m_timingBeginIdx : MTL::CounterDontSample);
             att->setEndOfEncoderSampleIndex(wantEnd     ? m_timingEndIdx   : MTL::CounterDontSample);
+            m_didWriteTimingSamples = true;
         }
         return desc;
     }
 
     // Return a new MTLAccelerationStructurePassDescriptor with optional counter-sample endpoints.
-    NS::SharedPtr<MTL::AccelerationStructurePassDescriptor> makeTimedAccelDesc(bool wantBegin, bool wantEnd) const {
+    NS::SharedPtr<MTL::AccelerationStructurePassDescriptor> makeTimedAccelDesc(bool wantBegin, bool wantEnd) {
         auto desc = NS::TransferPtr(MTL::AccelerationStructurePassDescriptor::accelerationStructurePassDescriptor());
         if (m_timingSampleBuf) {
             auto* att = desc->sampleBufferAttachments()->object(0);
             att->setSampleBuffer(m_timingSampleBuf);
             att->setStartOfEncoderSampleIndex(wantBegin ? m_timingBeginIdx : MTL::CounterDontSample);
             att->setEndOfEncoderSampleIndex(wantEnd     ? m_timingEndIdx   : MTL::CounterDontSample);
+            m_didWriteTimingSamples = true;
         }
         return desc;
     }
@@ -141,13 +147,15 @@ public:
         for (auto& pass : passes) {
             if (!pass->enabled) continue;
             if (cmd && sampleBuf) {
-                pass->m_timingSampleBuf = sampleBuf;
-                pass->m_timingBeginIdx  = sampleIdx;
-                pass->m_timingEndIdx    = sampleIdx + 1;
+                pass->m_timingSampleBuf        = sampleBuf;
+                pass->m_timingBeginIdx         = sampleIdx;
+                pass->m_timingEndIdx           = sampleIdx + 1;
+                pass->m_didWriteTimingSamples  = false;
             }
             pass->execute();
             if (cmd && sampleBuf) {
-                passTimingInfo.push_back({pass->getName(), sampleIdx, sampleIdx + 1});
+                if (pass->m_didWriteTimingSamples)
+                    passTimingInfo.push_back({pass->getName(), sampleIdx, sampleIdx + 1});
                 pass->m_timingSampleBuf = nullptr;
             }
             sampleIdx += 2;
