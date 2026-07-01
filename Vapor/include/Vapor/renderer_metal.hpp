@@ -9,8 +9,10 @@
 #include <SDL3/SDL_video.h>
 #include <array>
 #include <memory>
+#include <mutex>
 #include <string>
 #include <unordered_map>
+#include <vector>
 
 #include "debug_draw.hpp"
 #include "graphics.hpp"
@@ -53,15 +55,79 @@ class DebugDrawPass;
 class CanvasPass;
 class WorldCanvasPass;
 
+struct GpuPassTiming {
+    std::string name;
+    double gpuTimeMs = 0.0;
+};
+
 class RenderPass {
 public:
-    explicit RenderPass(Renderer_Metal* renderer) : renderer(renderer) {
-    }
+    explicit RenderPass(Renderer_Metal* renderer) : renderer(renderer) {}
     virtual ~RenderPass() = default;
     virtual void execute() = 0;
     virtual const char* getName() const = 0;
 
     bool enabled = true;
+
+    // Timing context — set by RenderGraph before each execute().
+    // Slot layout: beginIdx = end slot of previous pass (or frame-start slot for first pass).
+    //              endIdx   = end slot of this pass.
+    // beginIdx[N] == endIdx[N-1], guaranteed by RenderGraph — no prevEnd heuristic needed.
+    MTL::CounterSampleBuffer* m_timingSampleBuf = nullptr;
+    NS::UInteger m_timingBeginIdx = MTL::CounterDontSample;
+    NS::UInteger m_timingEndIdx   = MTL::CounterDontSample;
+    // True only for the first pass that actually runs; it is responsible for sampling the frame-start slot.
+    bool m_sampleBegin = false;
+    // Set to true by a timing helper when wantEnd=true (end slot written); stays false on early-return.
+    bool m_didWriteTimingSamples = false;
+
+    // Attach counter-sample endpoints to an existing MTLRenderPassDescriptor.
+    // wantBegin: first encoder of a multi-encoder pass (suppressed automatically for non-first passes).
+    // wantEnd:   last encoder of this pass; setting this marks the pass as having written samples.
+    void applyTimingToRenderDesc(MTL::RenderPassDescriptor* desc, bool wantBegin, bool wantEnd) {
+        if (!m_timingSampleBuf) return;
+        auto* att = desc->sampleBufferAttachments()->object(0);
+        att->setSampleBuffer(m_timingSampleBuf);
+        att->setStartOfVertexSampleIndex((wantBegin && m_sampleBegin) ? m_timingBeginIdx : MTL::CounterDontSample);
+        att->setEndOfFragmentSampleIndex(wantEnd ? m_timingEndIdx : MTL::CounterDontSample);
+        if (wantEnd) m_didWriteTimingSamples = true;
+    }
+
+    NS::SharedPtr<MTL::ComputePassDescriptor> makeTimedComputeDesc(bool wantBegin, bool wantEnd) {
+        auto desc = NS::TransferPtr(MTL::ComputePassDescriptor::computePassDescriptor());
+        if (m_timingSampleBuf) {
+            auto* att = desc->sampleBufferAttachments()->object(0);
+            att->setSampleBuffer(m_timingSampleBuf);
+            att->setStartOfEncoderSampleIndex((wantBegin && m_sampleBegin) ? m_timingBeginIdx : MTL::CounterDontSample);
+            att->setEndOfEncoderSampleIndex(wantEnd ? m_timingEndIdx : MTL::CounterDontSample);
+            if (wantEnd) m_didWriteTimingSamples = true;
+        }
+        return desc;
+    }
+
+    NS::SharedPtr<MTL::BlitPassDescriptor> makeTimedBlitDesc(bool wantBegin, bool wantEnd) {
+        auto desc = NS::TransferPtr(MTL::BlitPassDescriptor::blitPassDescriptor());
+        if (m_timingSampleBuf) {
+            auto* att = desc->sampleBufferAttachments()->object(0);
+            att->setSampleBuffer(m_timingSampleBuf);
+            att->setStartOfEncoderSampleIndex((wantBegin && m_sampleBegin) ? m_timingBeginIdx : MTL::CounterDontSample);
+            att->setEndOfEncoderSampleIndex(wantEnd ? m_timingEndIdx : MTL::CounterDontSample);
+            if (wantEnd) m_didWriteTimingSamples = true;
+        }
+        return desc;
+    }
+
+    NS::SharedPtr<MTL::AccelerationStructurePassDescriptor> makeTimedAccelDesc(bool wantBegin, bool wantEnd) {
+        auto desc = NS::TransferPtr(MTL::AccelerationStructurePassDescriptor::accelerationStructurePassDescriptor());
+        if (m_timingSampleBuf) {
+            auto* att = desc->sampleBufferAttachments()->object(0);
+            att->setSampleBuffer(m_timingSampleBuf);
+            att->setStartOfEncoderSampleIndex((wantBegin && m_sampleBegin) ? m_timingBeginIdx : MTL::CounterDontSample);
+            att->setEndOfEncoderSampleIndex(wantEnd ? m_timingEndIdx : MTL::CounterDontSample);
+            if (wantEnd) m_didWriteTimingSamples = true;
+        }
+        return desc;
+    }
 
 protected:
     Renderer_Metal* renderer;
@@ -69,14 +135,43 @@ protected:
 
 class RenderGraph {
 public:
+    struct PassSampleInfo {
+        std::string name;
+        NS::UInteger beginIdx;
+        NS::UInteger endIdx;
+    };
+
     void addPass(std::unique_ptr<RenderPass> pass) {
         passes.push_back(std::move(pass));
     }
 
-    void execute() {
+    void execute(MTL::CommandBuffer* cmd = nullptr, MTL::CounterSampleBuffer* sampleBuf = nullptr) {
+        passTimingInfo.clear();
+        // nextSlot starts at 0 (frame-start slot).
+        // It advances by 1 only when a pass actually writes its end sample, so:
+        //   slot 0        = frame start (written by the first pass via wantBegin && m_sampleBegin)
+        //   slot K        = end of the K-th pass that ran (= begin of the K+1-th pass)
+        // PassSampleInfo stores (beginIdx=K, endIdx=K+1), so beginIdx[N] == endIdx[N-1] by construction.
+        // The completion handler can therefore compute end-begin directly with no heuristics.
+        NS::UInteger nextSlot = 0;
+        bool needFrameStart = true;
         for (auto& pass : passes) {
-            if (pass->enabled) {
-                pass->execute();
+            if (!pass->enabled) continue;
+            if (cmd && sampleBuf) {
+                pass->m_timingSampleBuf       = sampleBuf;
+                pass->m_timingBeginIdx        = nextSlot;
+                pass->m_timingEndIdx          = nextSlot + 1;
+                pass->m_sampleBegin           = needFrameStart;
+                pass->m_didWriteTimingSamples = false;
+            }
+            pass->execute();
+            if (cmd && sampleBuf) {
+                if (pass->m_didWriteTimingSamples) {
+                    passTimingInfo.push_back({pass->getName(), nextSlot, nextSlot + 1});
+                    nextSlot++;            // this pass's end slot becomes next pass's begin slot
+                    needFrameStart = false;
+                }
+                pass->m_timingSampleBuf = nullptr;
             }
         }
     }
@@ -84,6 +179,8 @@ public:
     void clear() {
         passes.clear();
     }
+
+    std::vector<PassSampleInfo> passTimingInfo;
 
 private:
     std::vector<std::unique_ptr<RenderPass>> passes;
@@ -292,6 +389,14 @@ public:
 
 protected:
     RenderGraph graph;
+
+    // GPU pass timing (Apple Silicon, MTLCounterSampleBuffer timestamps)
+    static constexpr NS::UInteger GPU_TIMER_SAMPLE_COUNT = 64;
+    NS::SharedPtr<MTL::CounterSampleBuffer> gpuTimerSampleBuffer;
+    std::vector<GpuPassTiming> gpuPassTimings;
+    std::mutex gpuTimingMutex;
+    bool gpuTimingSupported = false;
+    bool gpuTimingEnabled = false;
 
     // Per-frame rendering context
     MTL::CommandBuffer* currentCommandBuffer = nullptr;
