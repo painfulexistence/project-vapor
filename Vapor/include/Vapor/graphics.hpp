@@ -138,6 +138,19 @@ struct alignas(16) PointLight { // Note that alignas(16) is not enough to ensure
     // Uint8 _pad4[3];
 };
 
+// Rectangular area light driven by an optional video texture.
+// right and up must be orthonormal; halfWidth/halfHeight are in world units.
+struct alignas(16) RectLight {
+    glm::vec3 position;
+    float halfWidth;
+    glm::vec3 right;           // normalized right axis
+    float halfHeight;
+    glm::vec3 up;              // normalized up axis
+    float intensity;
+    glm::vec3 color;
+    Uint32 useVideoTexture;    // 0 = solid color, 1 = sample rectLightVideo texture
+};
+
 struct alignas(16) FrameData {
     Uint32 frameNumber;
     float time;

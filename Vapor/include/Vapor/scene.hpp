@@ -10,7 +10,6 @@
 #include <vector>
 
 #include "graphics.hpp"
-#include "graphics_gpu_structs.hpp"// RectLight
 #include "rhi.hpp"
 #include "physics_3d.hpp"
 
@@ -170,7 +169,7 @@ public:
     std::vector<std::shared_ptr<Node>> nodes;
     std::vector<Vapor::DirectionalLight> directionalLights;
     std::vector<Vapor::PointLight> pointLights;
-    std::vector<RectLight> rectLights;
+    std::vector<Vapor::RectLight> rectLights;
     std::vector<std::shared_ptr<FluidVolume>> fluidVolumes;
 
     // GPU-driven rendering
