@@ -312,7 +312,9 @@ fragment float4 fragmentMain(
     uint tileX = uint(screenUV.x * float(gridSize.x));
     uint tileY = uint((1.0 - screenUV.y) * float(gridSize.y));
     uint tileIndex = tileX + tileY * gridSize.x;
-    Cluster tile = clusters[tileIndex];
+    // Reference, not copy: Cluster is ~1KB (lightIndices[256]); copying it per
+    // fragment spills to stack and reads the whole struct from device memory.
+    const device Cluster& tile = clusters[tileIndex];
     for (uint i = 0; i < tile.lightCount; i++) {
         uint li = tile.lightIndices[i];
         result += CalculatePointLightIrid(

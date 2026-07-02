@@ -468,7 +468,9 @@ fragment float4 fragmentMain(
     // }
 
     uint tileIndex = tileX + tileY * gridSize.x;
-    Cluster tile = clusters[tileIndex];
+    // Reference, not copy: Cluster is ~1KB (lightIndices[256]); copying it per
+    // fragment spills to stack and reads the whole struct from device memory.
+    const device Cluster& tile = clusters[tileIndex];
     uint lightCount = tile.lightCount;
     for (uint i = 0; i < lightCount; i++) {
         uint lightIndex = tile.lightIndices[i];
