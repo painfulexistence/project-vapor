@@ -38,7 +38,14 @@ using ScreenshotCallback = std::function<void(const GpuImageData&)>;
 
 class Renderer {
 public:
+    Renderer() = default;
     virtual ~Renderer() = default;
+
+    // Polymorphic base: copying through a base reference would slice off the
+    // derived backend's state, so copying is disabled (Core Guidelines C.67).
+    Renderer(const Renderer&) = delete;
+    Renderer& operator=(const Renderer&) = delete;
+
     virtual void init(SDL_Window* window) = 0;
 
     virtual void deinit() = 0;
