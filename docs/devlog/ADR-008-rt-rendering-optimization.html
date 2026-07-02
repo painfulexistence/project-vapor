@@ -56,7 +56,7 @@
     <pre><code>// one threadgroup per pixel, ONE THREAD per threadgroup
 encoder-&gt;dispatchThreadgroups(MTL::Size(screenSize.x, screenSize.y, 1),
                               MTL::Size(1, 1, 1));</code></pre>
-    <p>A threadgroup with a single thread still occupies an entire 32-lane SIMD-group: <strong>31 of 32 lanes idle, 1/32 of theoretical throughput</strong>, plus per-threadgroup scheduling overhead multiplied by two million (one threadgroup per pixel at full res). This is the single most expensive "silent" mistake available in a compute dispatch — nothing renders incorrectly, no validation layer complains, the kernel is just ~4–30× slower than it should be.</p>
+    <p>A threadgroup with a single thread still occupies an entire 32-lane SIMD-group: <strong>31 of 32 lanes idle, 1/32 of theoretical instruction-issue throughput</strong>, plus per-threadgroup scheduling overhead multiplied by two million (one threadgroup per pixel at full res). Nothing renders incorrectly and no validation layer complains — the kernel just issues ALU work up to 32× slower than it could. How much that costs in wall-clock time depends entirely on whether the kernel is ALU-bound; see the measured outcome below.</p>
     <p>The fix is one line per call site. Since all of these kernels index by <code>[[thread_position_in_grid]]</code>, <code>dispatchThreads</code> keeps the semantics (one thread per pixel) while packing threads into real threadgroups. Apple-family GPUs support non-uniform threadgroup sizes, so no edge-tile bounds handling is needed on the host side:</p>
     <pre><code>// one thread per pixel, 64 threads (two SIMD-groups) per threadgroup
 encoder-&gt;dispatchThreads(MTL::Size(drawableSize.width, drawableSize.height, 1),
@@ -72,6 +72,23 @@ encoder-&gt;dispatchThreads(MTL::Size(drawableSize.width, drawableSize.height, 1
       </tbody>
     </table>
     <p>An 8×8 (64-thread) group is a good default for RT and other register-heavy kernels; 16×16 can be better for light kernels, but larger groups increase register pressure and can reduce occupancy. Measure with the timing panel before tuning further.</p>
+
+    <h3>Measured outcome — and what it actually teaches</h3>
+    <p><strong>On M3, the RT shadow pass time did not measurably change after the fix.</strong> The prediction of a severalfold speedup was wrong, and the reason is instructive:</p>
+    <p>SIMD lane packing buys <em>instruction-issue throughput</em>. The shadow kernel has almost no instructions to issue — a dozen ALU ops to reconstruct the world position, then a single <code>intersect()</code> that executes on the M3's dedicated ray tracing hardware, then one texture write. The pass is bound by ray traversal throughput and BVH memory traffic, neither of which cares how threads were packed into SIMD-groups. Latency hiding comes from the <em>number</em> of resident SIMD-groups, and even 1-thread groups provided enough of them to keep the RT unit fed. Apple's per-threadgroup launch overhead is evidently also cheap enough not to dominate, even at two million threadgroups per dispatch.</p>
+    <p>The general lesson: <strong>classify the kernel before predicting the win.</strong> Lane utilization is a multiplier on ALU-bound work only. Where 1×1 threadgroups genuinely hurt:</p>
+    <ul>
+      <li>ALU-heavy kernels — long per-thread loops of arithmetic (the 32-sample SSAO loop is a candidate; filtering and denoising kernels are too).</li>
+      <li>M1/M2, where <code>intersect()</code> compiles to a software traversal loop <em>inside the kernel</em> — there the traversal itself is ALU work and lane occupancy multiplies straight through.</li>
+      <li>Kernels using SIMD-scope operations (<code>simd_sum</code>, <code>simd_shuffle</code>) or threadgroup memory, which are meaningless at group size 1.</li>
+    </ul>
+    <p>The fix stays — it is free, correct, and portable — but it is not where the shadow pass's milliseconds live. Reading the kernel with that in mind, the real levers are:</p>
+    <ul>
+      <li><strong>Closest-hit vs any-hit</strong>: the kernel uses the default closest-hit semantics but only checks hit/none. <code>accept_any_intersection(true)</code> lets traversal stop at the first occluder — the standard shadow-ray optimization.</li>
+      <li><strong>Payload</strong>: <code>intersector&lt;instancing, triangle_data&gt;</code> requests per-triangle data (barycentrics) that is never read; plain <code>intersector&lt;instancing&gt;</code> suffices.</li>
+      <li><strong>Ray extent</strong>: <code>max_distance = 10000</code> traverses the whole scene for every miss.</li>
+      <li><strong>Resolution and sample reuse</strong>: the half-res + temporal machinery described below applies to shadows as much as to AO.</li>
+    </ul>
 
     <h2>Checklist: mistakes that silently eat RT performance</h2>
     <ul>
@@ -190,7 +207,7 @@ out = mix(prevAO, currentAO, alpha);</code></pre>
     <h2>Consequences</h2>
     <ul>
       <li>Four dispatch call sites converted from 1×1 threadgroups to <code>dispatchThreads</code> with 8×8 groups; <code>3d_tile_light_cull.metal</code> now indexes by thread position.</li>
-      <li>RT shadow and AO pass costs are expected to drop severalfold; verify with the GPU timing panel and update this page with measured numbers.</li>
+      <li>Measured on M3: <strong>no significant change for the RT shadow pass</strong> — it is traversal-bound on RT hardware, not issue-bound. The fix is kept as correct-by-default practice; the expected wins are on ALU-bound kernels and on M1/M2 software traversal. The shadow pass's actual levers are any-hit acceptance, payload reduction, and ray extent (see above).</li>
       <li>True RT AO is specced as a four-step plan (raygen → temporal → spatial → composite) with new resources: <code>aoHistoryRT</code> ping-pong pair, previous-frame depth, blue-noise texture.</li>
       <li>TLAS refit/skip remains an open TODO, tracked in <code>TLASBuildPass</code>.</li>
     </ul>
