@@ -187,6 +187,10 @@ public:
         encoder->setBytes(&r.MSAA_SAMPLE_COUNT, sizeof(Uint32), 0);
         encoder->dispatchThreads(MTL::Size(drawableSize.width, drawableSize.height, 1), MTL::Size(8, 8, 1));
         encoder->endEncoding();
+
+        // Traffic: read all MS normal samples, write resolved normal (both RGBA16F)
+        uint64_t px = uint64_t(drawableSize.width) * drawableSize.height;
+        addTrafficEstimate(px * 8 * (r.MSAA_SAMPLE_COUNT + 1));
     }
 };
 
@@ -257,6 +261,11 @@ public:
         auto mipmapEncoder = NS::TransferPtr(r.currentCommandBuffer->blitCommandEncoder(shadowBlitDesc.get()));
         mipmapEncoder->generateMipmaps(r.shadowRT.get());
         mipmapEncoder->endEncoding();
+
+        // Traffic: kernel reads depth (4B) + normal (8B) and writes shadow (RGBA8, 4B)
+        // per pixel; mipmap gen reads ~4/3 and writes ~1/3 of the base level (4B).
+        uint64_t px = uint64_t(drawableSize.width) * drawableSize.height;
+        addTrafficEstimate(px * (4 + 8 + 4) + px * 4 * 5 / 3);
     }
 };
 
@@ -287,6 +296,11 @@ public:
         encoder->setAccelerationStructure(r.TLASBuffers[r.currentFrameInFlight].get(), 2);
         encoder->dispatchThreads(MTL::Size(drawableSize.width, drawableSize.height, 1), MTL::Size(8, 8, 1));
         encoder->endEncoding();
+
+        // Traffic: 1 depth + 32 SSAO-loop depth reads (4B each) + normal (8B) + AO write (4B)
+        // per pixel. Issued reads — cache hits will make the real DRAM traffic lower.
+        uint64_t px = uint64_t(drawableSize.width) * drawableSize.height;
+        addTrafficEstimate(px * (33 * 4 + 8 + 4));
     }
 };
 
@@ -4721,11 +4735,12 @@ auto Renderer_Metal::draw(std::shared_ptr<Scene> scene, Camera& camera) -> void 
                 ImGui::Text("Total GPU: %.3f ms", totalMs);
                 ImGui::Separator();
                 if (ImGui::BeginTable(
-                        "##gpu_pass_timings", 3,
+                        "##gpu_pass_timings", 4,
                         ImGuiTableFlags_Borders | ImGuiTableFlags_RowBg | ImGuiTableFlags_SizingFixedFit
                     )) {
                     ImGui::TableSetupColumn("Pass", ImGuiTableColumnFlags_WidthStretch);
                     ImGui::TableSetupColumn("ms", ImGuiTableColumnFlags_WidthFixed, 60.0f);
+                    ImGui::TableSetupColumn("~GB/s", ImGuiTableColumnFlags_WidthFixed, 55.0f);
                     ImGui::TableSetupColumn("", ImGuiTableColumnFlags_WidthStretch);
                     ImGui::TableHeadersRow();
                     for (auto& t : gpuPassTimings) {
@@ -4735,6 +4750,17 @@ auto Renderer_Metal::draw(std::shared_ptr<Scene> scene, Camera& camera) -> void 
                         ImGui::TableSetColumnIndex(1);
                         ImGui::Text("%.3f", t.gpuTimeMs);
                         ImGui::TableSetColumnIndex(2);
+                        // Effective bandwidth = estimated minimum traffic / measured time.
+                        // Compare against the device's peak; a pass near peak is bandwidth-bound.
+                        if (t.estimatedBytes > 0 && t.gpuTimeMs > 0.0) {
+                            ImGui::Text("%.0f", static_cast<double>(t.estimatedBytes) / (t.gpuTimeMs * 1e6));
+                            if (ImGui::IsItemHovered()) {
+                                ImGui::SetTooltip("~%.1f MB attachment/reported traffic", t.estimatedBytes / 1e6);
+                            }
+                        } else {
+                            ImGui::TextDisabled("-");
+                        }
+                        ImGui::TableSetColumnIndex(3);
                         ImGui::ProgressBar(
                             static_cast<float>(t.gpuTimeMs / maxMs), ImVec2(-1.0f, 0.0f), ""
                         );
@@ -4824,7 +4850,7 @@ auto Renderer_Metal::draw(std::shared_ptr<Scene> scene, Camera& camera) -> void 
                 uint64_t begin = timestamps[info.beginIdx].timestamp;
                 uint64_t end   = timestamps[info.endIdx].timestamp;
                 double ms = (end >= begin) ? static_cast<double>(end - begin) / 1e6 : 0.0;
-                gpuPassTimings.push_back({info.name, ms});
+                gpuPassTimings.push_back({info.name, ms, info.estimatedBytes});
             }
         });
     }

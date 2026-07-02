@@ -10,6 +10,7 @@
 #include <array>
 #include <memory>
 #include <mutex>
+#include <os/signpost.h>
 #include <string>
 #include <unordered_map>
 #include <vector>
@@ -58,7 +59,42 @@ class WorldCanvasPass;
 struct GpuPassTiming {
     std::string name;
     double gpuTimeMs = 0.0;
+    uint64_t estimatedBytes = 0; // estimated minimum memory traffic (attachment load/store + pass-reported)
 };
+
+// Signpost log for render pass intervals — shows up in Instruments' Points of
+// Interest track so passes can be matched by name against the GPU timeline.
+inline os_log_t vaporRenderGraphLog() {
+    static os_log_t log = os_log_create("com.projectvapor.rendergraph", OS_LOG_CATEGORY_POINTS_OF_INTEREST);
+    return log;
+}
+
+inline uint64_t vaporPixelFormatBytes(MTL::PixelFormat fmt) {
+    switch (fmt) {
+        case MTL::PixelFormatR8Unorm: return 1;
+        case MTL::PixelFormatR16Float:
+        case MTL::PixelFormatRG8Unorm: return 2;
+        case MTL::PixelFormatDepth32Float_Stencil8: return 5;
+        case MTL::PixelFormatRG16Float:
+        case MTL::PixelFormatRGBA16Float: return 8;
+        case MTL::PixelFormatRG32Float: return 8;
+        case MTL::PixelFormatRGBA32Float: return 16;
+        default: return 4; // RGBA8/BGRA8(+sRGB), R32Float, RG11B10, RGB10A2, Depth32Float, ...
+    }
+}
+
+// Minimum bytes an attachment moves between tile and device memory, given its
+// load/store actions. MS textures load/store sampleCount layers; a resolve
+// writes one.
+inline uint64_t vaporAttachmentTrafficBytes(const MTL::Texture* tex, MTL::LoadAction load, MTL::StoreAction store) {
+    uint64_t bytes1x = static_cast<uint64_t>(tex->width()) * tex->height() * vaporPixelFormatBytes(tex->pixelFormat());
+    uint64_t sc = tex->sampleCount();
+    uint64_t total = 0;
+    if (load == MTL::LoadActionLoad) total += bytes1x * sc;
+    if (store == MTL::StoreActionStore || store == MTL::StoreActionStoreAndMultisampleResolve) total += bytes1x * sc;
+    if (store == MTL::StoreActionMultisampleResolve || store == MTL::StoreActionStoreAndMultisampleResolve) total += bytes1x;
+    return total;
+}
 
 class RenderPass {
 public:
@@ -80,6 +116,15 @@ public:
     bool m_sampleBegin = false;
     // Set to true by a timing helper when wantEnd=true (end slot written); stays false on early-return.
     bool m_didWriteTimingSamples = false;
+    // Estimated minimum memory traffic this frame. Render passes accumulate attachment
+    // load/store traffic automatically via applyTimingToRenderDesc; compute/blit passes
+    // report their texture/buffer traffic manually via addTrafficEstimate. Reset by
+    // RenderGraph before each execute(). Excludes texture sampling unless reported.
+    uint64_t m_estimatedBytes = 0;
+
+    void addTrafficEstimate(uint64_t bytes) {
+        m_estimatedBytes += bytes;
+    }
 
     // Attach counter-sample endpoints to an existing MTLRenderPassDescriptor.
     // wantBegin: first encoder of a multi-encoder pass (suppressed automatically for non-first passes).
@@ -91,6 +136,15 @@ public:
         att->setStartOfVertexSampleIndex((wantBegin && m_sampleBegin) ? m_timingBeginIdx : MTL::CounterDontSample);
         att->setEndOfFragmentSampleIndex(wantEnd ? m_timingEndIdx : MTL::CounterDontSample);
         if (wantEnd) m_didWriteTimingSamples = true;
+        for (int i = 0; i < 8; ++i) {
+            auto* color = desc->colorAttachments()->object(i);
+            if (!color->texture()) continue;
+            m_estimatedBytes += vaporAttachmentTrafficBytes(color->texture(), color->loadAction(), color->storeAction());
+        }
+        auto* depth = desc->depthAttachment();
+        if (depth->texture()) {
+            m_estimatedBytes += vaporAttachmentTrafficBytes(depth->texture(), depth->loadAction(), depth->storeAction());
+        }
     }
 
     NS::SharedPtr<MTL::ComputePassDescriptor> makeTimedComputeDesc(bool wantBegin, bool wantEnd) {
@@ -139,6 +193,7 @@ public:
         std::string name;
         NS::UInteger beginIdx;
         NS::UInteger endIdx;
+        uint64_t estimatedBytes;
     };
 
     void addPass(std::unique_ptr<RenderPass> pass) {
@@ -155,6 +210,7 @@ public:
         // The completion handler can therefore compute end-begin directly with no heuristics.
         NS::UInteger nextSlot = 0;
         bool needFrameStart = true;
+        os_log_t spLog = vaporRenderGraphLog();
         for (auto& pass : passes) {
             if (!pass->enabled) continue;
             if (cmd && sampleBuf) {
@@ -163,11 +219,21 @@ public:
                 pass->m_timingEndIdx          = nextSlot + 1;
                 pass->m_sampleBegin           = needFrameStart;
                 pass->m_didWriteTimingSamples = false;
+                pass->m_estimatedBytes        = 0;
             }
+            const char* passName = pass->getName();
+            // Debug group: names this pass's encoders in Xcode GPU captures.
+            if (cmd) cmd->pushDebugGroup(NS::String::string(passName, NS::UTF8StringEncoding));
+            // Signpost: names this pass in Instruments (Points of Interest track).
+            // Marks CPU encode time; match against the GPU track via the debug groups.
+            os_signpost_id_t spid = os_signpost_id_make_with_pointer(spLog, pass.get());
+            os_signpost_interval_begin(spLog, spid, "RenderPass", "%{public}s", passName);
             pass->execute();
+            os_signpost_interval_end(spLog, spid, "RenderPass");
+            if (cmd) cmd->popDebugGroup();
             if (cmd && sampleBuf) {
                 if (pass->m_didWriteTimingSamples) {
-                    passTimingInfo.push_back({pass->getName(), nextSlot, nextSlot + 1});
+                    passTimingInfo.push_back({passName, nextSlot, nextSlot + 1, pass->m_estimatedBytes});
                     nextSlot++;            // this pass's end slot becomes next pass's begin slot
                     needFrameStart = false;
                 }
