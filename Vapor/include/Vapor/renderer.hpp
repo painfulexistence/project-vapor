@@ -53,6 +53,11 @@ public:
     Renderer() = default;
     ~Renderer() override = default;
 
+    // Polymorphic base: copying through a base reference would slice off the
+    // derived backend's state, so copying is disabled (Core Guidelines C.67).
+    Renderer(const Renderer&) = delete;
+    Renderer& operator=(const Renderer&) = delete;
+
     // ========================================================================
     // Initialization
     // ========================================================================
