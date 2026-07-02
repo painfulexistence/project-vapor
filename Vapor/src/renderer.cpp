@@ -35,6 +35,11 @@ void Renderer::initialize(std::unique_ptr<RHI> rhiPtr, GraphicsBackend backendTy
     rhi = std::move(rhiPtr);
     backend = backendType;
 
+    // Snapshot backend capabilities; the render graph uses them to skip
+    // passes the backend can't run (e.g. raytracing passes on Vulkan).
+    capabilities = rhi->getCapabilities();
+    setupDefaultRenderGraph();
+
     // Create uniform buffers
     BufferDesc cameraBufferDesc;
     cameraBufferDesc.size = sizeof(CameraRenderData);
@@ -425,25 +430,43 @@ void Renderer::render() {
     sortDrawables();
     updateBuffers();
 
-    // Multi-pass rendering (matching old renderer order)
-    if (backend == GraphicsBackend::Metal) {
-        buildAccelerationStructures();
-        prePass();
-        normalResolvePass();
-        tileCullingPass();
-        raytraceShadowPass();
-        raytraceAOPass();
-    }
+    // Execute the frame's passes. Which passes run is decided by the graph:
+    // disabled passes and passes whose capability requirements the backend
+    // doesn't meet (PassFlags vs RHICapabilities) are skipped — no backend
+    // checks here.
+    renderGraph.execute(*this, capabilities);
+}
 
-    // If post-process pipeline exists, render to colorRT then post-process to swapchain
-    // Otherwise, render directly to swapchain
-    if (postProcessPipeline.isValid() && colorRT.isValid()) {
-        mainRenderPass();  // Render to colorRT
-        postProcessPass();  // Render from colorRT to swapchain (fullscreen pass)
-    } else {
-        // Fallback: render directly to swapchain
-        mainRenderPass();  // This will render to swapchain if render targets don't exist
-    }
+// The engine's default frame composition. Gameplay code is free to modify
+// this through getRenderGraph(): append custom CallbackPass lambdas, remove
+// or reorder built-ins, or clear() and rebuild the frame from scratch.
+void Renderer::setupDefaultRenderGraph() {
+    renderGraph.clear();
+
+    // Geometry prep + lighting passes (raytraced passes only run on backends
+    // that report RHICapabilities::raytracing — i.e. Metal today).
+    renderGraph.addPass("BuildAccelStructures",
+        [](Renderer& r) { r.buildAccelerationStructures(); }, PassFlags::RequiresRaytracing);
+    renderGraph.addPass("PrePass",
+        [](Renderer& r) { r.prePass(); });
+    renderGraph.addPass("NormalResolve",
+        [](Renderer& r) { r.normalResolvePass(); }, PassFlags::RequiresCompute);
+    renderGraph.addPass("TileCulling",
+        [](Renderer& r) { r.tileCullingPass(); }, PassFlags::RequiresCompute);
+    renderGraph.addPass("RaytraceShadow",
+        [](Renderer& r) { r.raytraceShadowPass(); }, PassFlags::RequiresRaytracing);
+    renderGraph.addPass("RaytraceAO",
+        [](Renderer& r) { r.raytraceAOPass(); }, PassFlags::RequiresRaytracing);
+
+    // Main geometry pass: renders to colorRT when a post-process pipeline
+    // exists, directly to the swapchain otherwise (decided inside the pass).
+    renderGraph.addPass("Main",
+        [](Renderer& r) { r.mainRenderPass(); });
+
+    // Fullscreen post-process to swapchain; no-op until a post-process
+    // pipeline is created.
+    renderGraph.addPass("PostProcess",
+        [](Renderer& r) { r.postProcessPass(); });
 }
 
 void Renderer::endFrame() {
@@ -485,9 +508,12 @@ void Renderer::endFrame() {
             }
 #endif
             case GraphicsBackend::Vulkan: {
-                // Vulkan ImGui rendering
-                ImGui_ImplVulkan_RenderDrawData(ImGui::GetDrawData(),
-                    static_cast<VkCommandBuffer>(rhi->getBackendCommandBuffer()));
+                // Vulkan ImGui rendering (skip if the frame was skipped)
+                void* cmdBuffer = rhi->getBackendCommandBuffer();
+                if (cmdBuffer) {
+                    ImGui_ImplVulkan_RenderDrawData(ImGui::GetDrawData(),
+                        static_cast<VkCommandBuffer>(cmdBuffer));
+                }
                 break;
             }
             default:
@@ -1547,12 +1573,36 @@ void Renderer::invokeImGuiCallback() {
 
     ImGui::Begin("Engine");
 
+    drawRenderGraphImGui();
     drawGpuTimingsImGui();
 
     if (m_engineWindowCallback)
         m_engineWindowCallback();
 
     ImGui::End();
+}
+
+void Renderer::drawRenderGraphImGui() {
+    if (!ImGui::CollapsingHeader("Render Passes"))
+        return;
+
+    ImGui::Text("Backend features: raytracing=%s, compute=%s",
+                capabilities.raytracing ? "yes" : "no",
+                capabilities.computeShaders ? "yes" : "no");
+    ImGui::Separator();
+
+    for (const auto& pass : renderGraph.getPasses()) {
+        if (!pass->isSupported(capabilities)) {
+            ImGui::BeginDisabled();
+            bool off = false;
+            ImGui::Checkbox(pass->getName().c_str(), &off);
+            ImGui::SameLine();
+            ImGui::TextDisabled("(unsupported on this backend)");
+            ImGui::EndDisabled();
+        } else {
+            ImGui::Checkbox(pass->getName().c_str(), &pass->enabled);
+        }
+    }
 }
 
 void Renderer::drawGpuTimingsImGui() {

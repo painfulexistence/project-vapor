@@ -320,6 +320,21 @@ struct AccelStructDesc {
 };
 
 // ============================================================================
+// Capabilities
+// ============================================================================
+
+// Hardware/backend feature support, queried once at initialization.
+// The renderer's RenderGraph uses this to skip passes whose declared
+// requirements (PassFlags) the active backend cannot satisfy — this is how
+// single-backend features (e.g. raytracing on Metal) are expressed without
+// backend checks in rendering code.
+struct RHICapabilities {
+    bool raytracing = false;     // acceleration structures + ray queries
+    bool computeShaders = false; // compute pipelines with resource binding
+    bool gpuTimestamps = false;  // per-pass GPU timing (see GPU Profiling)
+};
+
+// ============================================================================
 // GPU Profiling
 // ============================================================================
 
@@ -343,6 +358,9 @@ public:
     virtual bool initialize(SDL_Window* window) = 0;
     virtual void shutdown() = 0;
     virtual void waitIdle() = 0;
+
+    // Feature support of this backend/device. Valid after initialize().
+    virtual const RHICapabilities& getCapabilities() const = 0;
 
     // ========================================================================
     // Resource Creation

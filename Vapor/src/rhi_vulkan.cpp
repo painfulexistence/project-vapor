@@ -733,6 +733,10 @@ void RHI_Vulkan::updateTexture(TextureHandle handle, const void* data, size_t si
 }
 
 BufferHandle RHI_Vulkan::copySwapchainToBuffer(Uint32& outWidth, Uint32& outHeight) {
+    if (currentCommandBuffer == VK_NULL_HANDLE) {
+        return BufferHandle{};  // frame was skipped
+    }
+
     outWidth = swapchainExtent.width;
     outHeight = swapchainExtent.height;
     VkDeviceSize imageSize = outWidth * outHeight * 4; // RGBA8
@@ -876,6 +880,10 @@ void RHI_Vulkan::unmapBuffer(BufferHandle handle) {
 // ============================================================================
 
 void RHI_Vulkan::beginFrame() {
+    // Null until a frame is successfully begun; every command-recording call
+    // and endFrame() no-op while it stays null (skipped frame).
+    currentCommandBuffer = VK_NULL_HANDLE;
+
     vkWaitForFences(device, 1, &inFlightFences[currentFrameInFlight], VK_TRUE, UINT64_MAX);
 
     VkResult result = vkAcquireNextImageKHR(device, swapchain, UINT64_MAX,
@@ -883,7 +891,9 @@ void RHI_Vulkan::beginFrame() {
                                             VK_NULL_HANDLE, &currentSwapchainImageIndex);
 
     if (result == VK_ERROR_OUT_OF_DATE_KHR) {
-        // Swapchain needs recreation
+        // Swapchain needs recreation; skip this frame. The fence was not
+        // reset, so the next beginFrame() passes the wait immediately.
+        // TODO: recreate the swapchain here (and on VK_SUBOPTIMAL_KHR).
         return;
     }
 
@@ -898,6 +908,11 @@ void RHI_Vulkan::beginFrame() {
 }
 
 void RHI_Vulkan::endFrame() {
+    // Frame was skipped (e.g. out-of-date swapchain in beginFrame)
+    if (currentCommandBuffer == VK_NULL_HANDLE) {
+        return;
+    }
+
     vkEndCommandBuffer(currentCommandBuffer);
 
     VkSubmitInfo submitInfo{};
@@ -933,6 +948,10 @@ void RHI_Vulkan::endFrame() {
 }
 
 void RHI_Vulkan::beginRenderPass(const RenderPassDesc& desc) {
+    if (currentCommandBuffer == VK_NULL_HANDLE) {
+        return;  // frame was skipped
+    }
+
     // Setup color attachments
     std::vector<VkRenderingAttachmentInfo> colorAttachments;
     for (size_t i = 0; i < desc.colorAttachments.size(); ++i) {
@@ -1014,6 +1033,9 @@ void RHI_Vulkan::beginRenderPass(const RenderPassDesc& desc) {
 }
 
 void RHI_Vulkan::endRenderPass() {
+    if (currentCommandBuffer == VK_NULL_HANDLE) {
+        return;  // frame was skipped
+    }
     vkCmdEndRenderingKHR(currentCommandBuffer);
 }
 
@@ -1023,7 +1045,11 @@ void RHI_Vulkan::endRenderPass() {
 
 void RHI_Vulkan::bindPipeline(PipelineHandle pipeline) {
     currentPipeline = pipeline;
-    // TODO: Implement
+
+    auto it = pipelines.find(pipeline.id);
+    if (it != pipelines.end() && currentCommandBuffer != VK_NULL_HANDLE) {
+        vkCmdBindPipeline(currentCommandBuffer, VK_PIPELINE_BIND_POINT_GRAPHICS, it->second.pipeline);
+    }
 }
 
 void RHI_Vulkan::bindVertexBuffer(BufferHandle buffer, Uint32 binding, size_t offset) {

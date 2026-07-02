@@ -24,6 +24,11 @@ public:
     void shutdown() override;
     void waitIdle() override;
 
+    // Raytracing (VK_KHR_acceleration_structure) is not implemented, and
+    // compute is unusable until descriptor-set binding lands — passes that
+    // require either are skipped by the RenderGraph on this backend.
+    const RHICapabilities& getCapabilities() const override { return capabilities; }
+
     // ========================================================================
     // Resource Creation
     // ========================================================================
@@ -129,6 +134,7 @@ private:
     // ========================================================================
 
     SDL_Window* window = nullptr;
+    RHICapabilities capabilities;  // all false: no RT, no usable compute yet
     VkInstance instance = VK_NULL_HANDLE;
     VkSurfaceKHR surface = VK_NULL_HANDLE;
     VkPhysicalDevice physicalDevice = VK_NULL_HANDLE;

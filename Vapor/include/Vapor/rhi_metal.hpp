@@ -29,6 +29,8 @@ public:
     void shutdown() override;
     void waitIdle() override;
 
+    const RHICapabilities& getCapabilities() const override { return capabilities; }
+
     // ========================================================================
     // Resource Creation
     // ========================================================================
@@ -160,6 +162,9 @@ private:
     Uint32 swapchainWidth = 0;
     Uint32 swapchainHeight = 0;
     MTL::PixelFormat swapchainFormat = MTL::PixelFormatRGBA8Unorm_sRGB;
+
+    // Device feature support, filled in initialize()
+    RHICapabilities capabilities;
 
     // ========================================================================
     // Resource Storage

@@ -5,6 +5,7 @@
 #include "rhi_metal.hpp"
 #include <fmt/core.h>
 #include <stdexcept>
+#include <cstdlib>
 #include <cstring>
 
 // ============================================================================
@@ -86,6 +87,13 @@ bool RHI_Metal::initialize(SDL_Window* window) {
     swapchain->setDrawableSize(CGSize{ static_cast<CGFloat>(width), static_cast<CGFloat>(height) });
 
     initGpuTiming();
+
+    // Device capabilities. Raytracing is force-disabled on CI runners: the
+    // virtualized GPU advertises support but acceleration-structure builds
+    // fail there (matching the old renderer's behavior).
+    capabilities.raytracing = device->supportsRaytracing() && !std::getenv("GITHUB_ACTIONS");
+    capabilities.computeShaders = true;
+    capabilities.gpuTimestamps = gpuTimingSupported;
 
     return true;
 }
@@ -701,10 +709,13 @@ void RHI_Metal::unmapBuffer(BufferHandle handle) {
 // ============================================================================
 
 void RHI_Metal::beginFrame() {
-    // Get next drawable
+    // Get next drawable. This legitimately fails when the window is occluded
+    // or minimized — skip the frame instead of crashing; endFrame() and every
+    // command-recording call no-op while currentCommandBuffer is null.
     currentDrawable = swapchain->nextDrawable();
     if (!currentDrawable) {
-        throw std::runtime_error("Failed to get next drawable");
+        currentCommandBuffer = nullptr;
+        return;
     }
 
     // Create command buffer
@@ -721,6 +732,12 @@ void RHI_Metal::beginFrame() {
 }
 
 void RHI_Metal::endFrame() {
+    // Frame was skipped (no drawable available in beginFrame)
+    if (!currentCommandBuffer) {
+        currentDrawable = nullptr;
+        return;
+    }
+
     // End any active encoder
     if (currentRenderEncoder) {
         currentRenderEncoder->endEncoding();
@@ -748,6 +765,10 @@ void RHI_Metal::endFrame() {
 }
 
 void RHI_Metal::beginRenderPass(const RenderPassDesc& desc) {
+    if (!currentCommandBuffer) {
+        return;  // frame was skipped
+    }
+
     // End any existing encoder
     if (currentRenderEncoder) {
         currentRenderEncoder->endEncoding();

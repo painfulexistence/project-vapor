@@ -1,6 +1,7 @@
 #pragma once
 #include "rhi.hpp"
 #include "render_data.hpp"
+#include "render_graph.hpp"
 #include "camera.hpp"
 #include "graphics.hpp"
 #include "font_manager.hpp"
@@ -120,11 +121,24 @@ public:
     void submitDirectionalLight(const DirectionalLightData& light);
     void submitPointLight(const PointLightData& light);
 
-    // Execute rendering (culling, sorting, draw calls)
+    // Execute rendering: culling, sorting, then the RenderGraph passes
     void render();
 
     // End the frame
     void endFrame();
+
+    // ========================================================================
+    // Render Graph / Capabilities
+    // ========================================================================
+
+    // The frame's pass list. Gameplay code may append CallbackPass lambdas,
+    // insert custom RenderPass subclasses, remove built-ins, or toggle
+    // passes. Passes whose PassFlags requirements the active backend cannot
+    // satisfy (e.g. raytracing on Vulkan) are skipped automatically.
+    RenderGraph& getRenderGraph() { return renderGraph; }
+
+    // Feature support of the active backend (raytracing, compute, ...).
+    const RHICapabilities& getCapabilities() const { return capabilities; }
 
     // ========================================================================
     // Render Path Management
@@ -353,7 +367,9 @@ private:
     // ========================================================================
 
     void performCulling();
+    void setupDefaultRenderGraph();
     void drawGpuTimingsImGui();
+    void drawRenderGraphImGui();
     void sortDrawables();
     void updateBuffers();
     void createDefaultResources();
@@ -404,6 +420,13 @@ private:
     // ========================================================================
 
     GraphicsBackend backend;  // Store backend for ImGui shutdown
+
+    // ========================================================================
+    // Render Graph
+    // ========================================================================
+
+    RenderGraph renderGraph;
+    RHICapabilities capabilities;  // copied from the RHI at initialize()
 
     // ========================================================================
     // Registered Resources
