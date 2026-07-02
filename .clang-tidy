@@ -7,11 +7,18 @@ Checks: >
   modernize-use-trailing-return-type,
   bugprone-use-after-move,
   performance-unnecessary-copy-initialization,
+  google-readability-casting,
+  cppcoreguidelines-virtual-class-destructor,
+  cppcoreguidelines-special-member-functions,
   -readability-magic-numbers,
   -readability-braces-around-statements,
   -readability-misleading-indentation
 
 CheckOptions:
+  # cppcoreguidelines-special-member-functions: allow Rule of Zero — classes
+  # whose members already handle everything don't need the full five spelled out.
+  cppcoreguidelines-special-member-functions.AllowSoleDefaultDtor: true
+  cppcoreguidelines-special-member-functions.AllowMissingMoveFunctionsWhenCopyIsDeleted: true
   readability-identifier-naming.VariableCase: camelBack
   readability-identifier-naming.FunctionCase: camelBack
   readability-identifier-naming.TypeCase: CamelCase

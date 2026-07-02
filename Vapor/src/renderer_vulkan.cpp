@@ -247,7 +247,7 @@ void RmlUiRendererVulkan::RenderGeometry(
     vkCmdBindPipeline(m_cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, m_renderer->getUiPipeline());
 
     RmlUiUniforms uniforms;
-    uniforms.projection = glm::ortho(0.0f, (float)m_width, (float)m_height, 0.0f, -1.0f, 1.0f);
+    uniforms.projection = glm::ortho(0.0f, static_cast<float>(m_width), static_cast<float>(m_height), 0.0f, -1.0f, 1.0f);
     glm::mat4 model = glm::translate(m_transform, glm::vec3(translation.x, translation.y, 0.0f));
 
     struct PushConstants {
@@ -269,24 +269,24 @@ void RmlUiRendererVulkan::RenderGeometry(
     // Set dynamic state
     VkViewport viewport{};
     viewport.x = 0;
-    viewport.y = (float)m_fbHeight;
-    viewport.width = (float)m_fbWidth;
-    viewport.height = -(float)m_fbHeight;
+    viewport.y = static_cast<float>(m_fbHeight);
+    viewport.width = static_cast<float>(m_fbWidth);
+    viewport.height = -static_cast<float>(m_fbHeight);
     viewport.minDepth = 0.0f;
     viewport.maxDepth = 1.0f;
     vkCmdSetViewport(m_cmd, 0, 1, &viewport);
 
     if (m_scissor.enabled) {
-        float scaleX = (float)m_fbWidth / m_width;
-        float scaleY = (float)m_fbHeight / m_height;
+        float scaleX = static_cast<float>(m_fbWidth) / m_width;
+        float scaleY = static_cast<float>(m_fbHeight) / m_height;
         VkRect2D scissor{};
         scissor.offset = { (int32_t)(m_scissor.x * scaleX), (int32_t)(m_scissor.y * scaleY) };
-        scissor.extent = { (uint32_t)(m_scissor.width * scaleX), (uint32_t)(m_scissor.height * scaleY) };
+        scissor.extent = { static_cast<uint32_t>(m_scissor.width * scaleX), static_cast<uint32_t>(m_scissor.height * scaleY) };
         vkCmdSetScissor(m_cmd, 0, 1, &scissor);
     } else {
         VkRect2D scissor{};
         scissor.offset = { 0, 0 };
-        scissor.extent = { (uint32_t)m_fbWidth, (uint32_t)m_fbHeight };
+        scissor.extent = { static_cast<uint32_t>(m_fbWidth), static_cast<uint32_t>(m_fbHeight) };
         vkCmdSetScissor(m_cmd, 0, 1, &scissor);
     }
 
@@ -353,7 +353,7 @@ auto RmlUiRendererVulkan::GenerateTexture(Rml::Span<const Rml::byte> source, Rml
     if (source.empty()) return 0;
 
     VkFormat format = VK_FORMAT_R8G8B8A8_UNORM;
-    if (source.size() == (size_t)source_dimensions.x * source_dimensions.y) {
+    if (source.size() == static_cast<size_t>(source_dimensions.x) * source_dimensions.y) {
         format = VK_FORMAT_R8_UNORM;
     }
 
@@ -386,7 +386,7 @@ auto RmlUiRendererVulkan::GenerateTexture(Rml::Span<const Rml::byte> source, Rml
 
     void* data;
     vkMapMemory(device, stagingBufferMemory, 0, imageSize, 0, &data);
-    memcpy(data, source.data(), (size_t)imageSize);
+    memcpy(data, source.data(), static_cast<size_t>(imageSize));
     vkUnmapMemory(device, stagingBufferMemory);
 
     // Create image
@@ -445,7 +445,7 @@ auto RmlUiRendererVulkan::GenerateTexture(Rml::Span<const Rml::byte> source, Rml
     region.imageSubresource.baseArrayLayer = 0;
     region.imageSubresource.layerCount = 1;
     region.imageOffset = { 0, 0, 0 };
-    region.imageExtent = { (uint32_t)source_dimensions.x, (uint32_t)source_dimensions.y, 1 };
+    region.imageExtent = { static_cast<uint32_t>(source_dimensions.x), static_cast<uint32_t>(source_dimensions.y), 1 };
 
     vkCmdCopyBufferToImage(cmd, stagingBuffer, image, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 1, &region);
 
@@ -2043,7 +2043,7 @@ auto Renderer_Vulkan::draw(std::shared_ptr<Scene> scene, Camera& camera) -> void
         if (uiRenderer && m_uiContext) {
             int winW, winH;
             SDL_GetWindowSize(window, &winW, &winH);
-            uiRenderer->beginFrame(cmd, (uint32_t)winW, (uint32_t)winH, swapchainExtent.width, swapchainExtent.height);
+            uiRenderer->beginFrame(cmd, static_cast<uint32_t>(winW), static_cast<uint32_t>(winH), swapchainExtent.width, swapchainExtent.height);
             m_uiContext->Render();
             uiRenderer->endFrame();
         }
@@ -2304,9 +2304,9 @@ auto Renderer_Vulkan::createRenderPipeline(const std::string& vertShader, const 
     // Viewport state
     VkViewport viewport = {};
     viewport.x = 0.0f;
-    viewport.y = (float)swapchainExtent.height;
-    viewport.width = (float)swapchainExtent.width;
-    viewport.height = -(float)swapchainExtent.height;
+    viewport.y = static_cast<float>(swapchainExtent.height);
+    viewport.width = static_cast<float>(swapchainExtent.width);
+    viewport.height = -static_cast<float>(swapchainExtent.height);
     viewport.minDepth = 0.0f;
     viewport.maxDepth = 1.0f;
     VkRect2D scissor = {};
@@ -2438,9 +2438,9 @@ auto Renderer_Vulkan::createPrePassPipeline(const std::string& vertShader, const
     // Viewport state
     VkViewport viewport = {};
     viewport.x = 0.0f;
-    viewport.y = (float)swapchainExtent.height;
-    viewport.width = (float)swapchainExtent.width;
-    viewport.height = -(float)swapchainExtent.height;
+    viewport.y = static_cast<float>(swapchainExtent.height);
+    viewport.width = static_cast<float>(swapchainExtent.width);
+    viewport.height = -static_cast<float>(swapchainExtent.height);
     viewport.minDepth = 0.0f;
     viewport.maxDepth = 1.0f;
     VkRect2D scissor = {};
@@ -2561,9 +2561,9 @@ auto Renderer_Vulkan::createPostProcessPipeline(const std::string& vertShader, c
     // Viewport state
     VkViewport viewport = {};
     viewport.x = 0.0f;
-    viewport.y = (float)swapchainExtent.height;
-    viewport.width = (float)swapchainExtent.width;
-    viewport.height = -(float)swapchainExtent.height;
+    viewport.y = static_cast<float>(swapchainExtent.height);
+    viewport.width = static_cast<float>(swapchainExtent.width);
+    viewport.height = -static_cast<float>(swapchainExtent.height);
     viewport.minDepth = 0.0f;
     viewport.maxDepth = 1.0f;
     VkRect2D scissor = {};
@@ -3080,7 +3080,7 @@ auto Renderer_Vulkan::createIndexBuffer(std::vector<Uint32> indices) -> BufferHa
 
 auto Renderer_Vulkan::createBuffer(BufferUsage usage, VkDeviceSize size) -> BufferHandle {
     if (size == 0) {
-        fmt::print(stderr, "[Vulkan] Warning: createBuffer called with size 0, usage: {}\n", (int)usage);
+        fmt::print(stderr, "[Vulkan] Warning: createBuffer called with size 0, usage: {}\n", static_cast<int>(usage));
         size = 1;
     }
     VkBufferCreateInfo bufferInfo{};
@@ -3850,8 +3850,8 @@ VkPipeline Renderer_Vulkan::createUiPipeline(const std::string& vertShader, cons
     VkViewport viewport{};
     viewport.x = 0.0f;
     viewport.y = 0.0f;
-    viewport.width = (float)swapchainExtent.width;
-    viewport.height = (float)swapchainExtent.height;
+    viewport.width = static_cast<float>(swapchainExtent.width);
+    viewport.height = static_cast<float>(swapchainExtent.height);
     viewport.minDepth = 0.0f;
     viewport.maxDepth = 1.0f;
 

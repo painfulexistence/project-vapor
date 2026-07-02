@@ -516,7 +516,7 @@ public:
 
         // For each mip level (roughness level)
         for (uint32_t mip = 0; mip < maxMipLevels; ++mip) {
-            float roughness = (float)mip / (float)(maxMipLevels - 1);
+            float roughness = static_cast<float>(mip) / static_cast<float>(maxMipLevels - 1);
 
             // For each face
             for (uint32_t face = 0; face < 6; ++face) {
@@ -600,7 +600,7 @@ public:
         auto drawableSize = r.swapchain->drawableSize();
         glm::vec2 screenSize = glm::vec2(drawableSize.width, drawableSize.height);
         glm::uvec3 gridSize = glm::uvec3(r.clusterGridSizeX, r.clusterGridSizeY, r.clusterGridSizeZ);
-        auto time = (float)SDL_GetTicks() / 1000.0f;
+        auto time = static_cast<float>(SDL_GetTicks()) / 1000.0f;
 
         // Create render pass descriptor
         auto renderPassDesc = NS::TransferPtr(MTL::RenderPassDescriptor::renderPassDescriptor());
@@ -719,7 +719,7 @@ public:
 
         auto drawableSize = r.swapchain->drawableSize();
         glm::vec2 screenSize = glm::vec2(drawableSize.width, drawableSize.height);
-        auto time = (float)SDL_GetTicks() / 1000.0f;
+        auto time = static_cast<float>(SDL_GetTicks()) / 1000.0f;
 
         // Build model matrix from transform
         auto modelMatrix = glm::mat4(1.0f);
@@ -811,7 +811,7 @@ public:
             return;
         }
 
-        auto time = (float)SDL_GetTicks() / 1000.0f;
+        auto time = static_cast<float>(SDL_GetTicks()) / 1000.0f;
         float deltaTime = 1.0f / 60.0f;// Use fixed timestep to avoid issues
 
         // Compute attractor position (in front of camera)
@@ -4015,7 +4015,7 @@ auto Renderer_Metal::draw(std::shared_ptr<Scene> scene, Camera& camera) -> void 
     // ==========================================================================
     // Prepare frame data
     // ==========================================================================
-    auto time = (float)SDL_GetTicks() / 1000.0f;
+    auto time = static_cast<float>(SDL_GetTicks()) / 1000.0f;
 
     auto* frameData = reinterpret_cast<FrameData*>(frameDataBuffers[currentFrameInFlight]->contents());
     frameData->frameNumber = frameNumber;
@@ -5343,7 +5343,7 @@ void Renderer_Metal::applyBloom(RenderTextureHandle target, float threshold, flo
         auto encoder = cmdBuffer->renderCommandEncoder(passDesc.get());
         encoder->setRenderPipelineState(bloomBrightnessPipeline.get());
 
-        MTL::Viewport viewport = { 0, 0, (double)rtData.width, (double)rtData.height, 0, 1 };
+        MTL::Viewport viewport = { 0, 0, static_cast<double>(rtData.width), static_cast<double>(rtData.height), 0, 1 };
         encoder->setViewport(viewport);
 
         // Bind source texture and uniforms
@@ -5366,7 +5366,7 @@ void Renderer_Metal::applyBloom(RenderTextureHandle target, float threshold, flo
         auto encoder = cmdBuffer->renderCommandEncoder(passDesc.get());
         encoder->setRenderPipelineState(bloomCompositePipeline.get());
 
-        MTL::Viewport viewport = { 0, 0, (double)rtData.width, (double)rtData.height, 0, 1 };
+        MTL::Viewport viewport = { 0, 0, static_cast<double>(rtData.width), static_cast<double>(rtData.height), 0, 1 };
         encoder->setViewport(viewport);
 
         encoder->setFragmentTexture(rtData.tempTexture.get(), 0);
@@ -5417,7 +5417,7 @@ void Renderer_Metal::applyToneMapping(RenderTextureHandle target, float exposure
         auto encoder = cmdBuffer->renderCommandEncoder(passDesc.get());
         encoder->setRenderPipelineState(postProcessPipeline.get());
 
-        MTL::Viewport viewport = { 0, 0, (double)rtData.width, (double)rtData.height, 0, 1 };
+        MTL::Viewport viewport = { 0, 0, static_cast<double>(rtData.width), static_cast<double>(rtData.height), 0, 1 };
         encoder->setViewport(viewport);
 
         struct GPUPostProcessParams {
@@ -5494,7 +5494,7 @@ void Renderer_Metal::applyVignette(RenderTextureHandle target, float strength, f
         auto encoder = cmdBuffer->renderCommandEncoder(passDesc.get());
         encoder->setRenderPipelineState(postProcessPipeline.get());
 
-        MTL::Viewport viewport = { 0, 0, (double)rtData.width, (double)rtData.height, 0, 1 };
+        MTL::Viewport viewport = { 0, 0, static_cast<double>(rtData.width), static_cast<double>(rtData.height), 0, 1 };
         encoder->setViewport(viewport);
 
         struct GPUPostProcessParams {
