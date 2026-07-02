@@ -1,6 +1,9 @@
 #include "engine_core.hpp"
-#include "Vapor/file_system.hpp"
+#include "file_system.hpp"
+#include "renderer.hpp"
+#include "video_recorder.hpp"
 #include "rmlui_manager.hpp"
+#include "imgui.h"
 #include <fmt/core.h>
 #include <fmt/format.h>
 #include <thread>
@@ -63,8 +66,13 @@ namespace Vapor {
         _inputManager = std::make_unique<InputManager>();
 
         // Initialize audio manager
-        _audioManager = std::make_unique<AudioManager>();
-        _audioManager->init();
+        _audioEngine = std::make_unique<AudioEngine>();
+        _audioEngine->init();
+
+        // Initialize video recorder and wire it to the audio manager so
+        // recordings automatically include the engine's mixed audio output.
+        _videoRecorder = std::make_unique<VideoRecorder>();
+        _videoRecorder->setAudioEngine(_audioEngine.get());
 
         _initialized = true;
 
@@ -85,13 +93,18 @@ namespace Vapor {
 
         _actionManager->stopAll();
 
+        // Stop any in-progress recording before teardown.
+        if (_videoRecorder && _videoRecorder->isRecording())
+            _videoRecorder->stopRecording();
+        _videoRecorder.reset();
+
         // Cleanup subsystems in reverse order
         if (_rmluiManager) {
             _rmluiManager->Shutdown();
             _rmluiManager.reset();
         }
-        _audioManager->shutdown();
-        _audioManager.reset();
+        _audioEngine->shutdown();
+        _audioEngine.reset();
         _inputManager.reset();
         _actionManager.reset();
         _resourceManager.reset();
@@ -115,7 +128,7 @@ namespace Vapor {
         _actionManager->update(deltaTime);
 
         // Update audio manager (cleanup finished sounds, invoke callbacks)
-        _audioManager->update(deltaTime);
+        _audioEngine->update(deltaTime);
 
         // Update RmlUI
         if (_rmluiManager) {
@@ -125,6 +138,31 @@ namespace Vapor {
         // Future: Handle async task completion callbacks
         // Future: Manage render command buffer submission
         // Future: Coordinate physics-render synchronization
+    }
+
+    void EngineCore::attachRenderer(::Renderer* renderer, const std::string& outputBasePath) {
+        _videoRecorder->setBaseOutputDir(outputBasePath);
+
+        // Per-frame hook: capture the rendered frame while recording and handle
+        // the F2 start/stop hotkey. Runs regardless of overlay visibility so
+        // recording keeps working (and can be stopped) with the UI hidden (F1).
+        renderer->setImGuiFrameCallback([this, renderer]() {
+            if (_videoRecorder->isRecording())
+                _videoRecorder->captureFrame();
+            if (ImGui::IsKeyPressed(ImGuiKey_F2))
+                _videoRecorder->toggleRecording(*renderer);
+        });
+
+        // Recording panel, drawn inside the Engine window when the overlay is
+        // visible. Shown in all build configs (no NDEBUG gate).
+        renderer->setEngineWindowCallback([this, renderer]() {
+            if (ImGui::CollapsingHeader("Recording (F2)", ImGuiTreeNodeFlags_DefaultOpen))
+                _videoRecorder->drawImGui(*renderer);
+        });
+    }
+
+    VideoRecorder& EngineCore::getVideoRecorder() {
+        return *_videoRecorder;
     }
 
     auto EngineCore::initRmlUI(int width, int height) -> bool {

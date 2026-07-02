@@ -62,6 +62,20 @@ inline SceneResources buildScene(
     }
     res.cube1 = cube1;
 
+    // Iridescent cube: same wood textures as cube1, thin-film iridescence on top
+    auto iridescentMaterial = std::make_shared<Vapor::Material>(Vapor::Material{
+        .baseColorFactor  = glm::vec4(1.0f, 1.0f, 1.0f, 1.0f),
+        .metallicFactor   = 0.0f,
+        .roughnessFactor  = 1.0f,
+        .albedoMap        = material->albedoMap,
+        .normalMap        = material->normalMap,
+        .roughnessMap     = material->roughnessMap,
+        .clearcoat        = 0.9f,   // iridescence strength (reused field)
+        .clearcoatGloss   = 0.45f,  // film thickness factor → ~480 nm (blue-green dominant)
+        .materialType     = Vapor::MaterialType::Iridescent,
+        .useIBL           = false,
+    });
+
     auto cube2 = registry.create();
     {
         auto& transform = registry.emplace<Vapor::TransformComponent>(cube2);
@@ -73,7 +87,7 @@ inline SceneResources buildScene(
         rb.body = physics.createBoxBody(col.halfSize, transform.position, transform.rotation, rb.motionType);
         physics.addBody(rb.body, true);
 
-        auto cubeMesh2 = MeshBuilder::buildCube(1.0f, material);
+        auto cubeMesh2 = MeshBuilder::buildCube(1.0f, iridescentMaterial);
         scene->addMesh(cubeMesh2);
         auto& meshRenderer = registry.emplace<Vapor::MeshRendererComponent>(cube2);
         meshRenderer.meshes.push_back(cubeMesh2);

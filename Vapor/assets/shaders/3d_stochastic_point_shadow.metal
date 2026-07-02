@@ -20,6 +20,7 @@ kernel void computeMain(
     constant uint3&               gridDims        [[buffer(4)]],
     constant uint&                frameIndex      [[buffer(5)]],
     instance_acceleration_structure TLAS          [[buffer(6)]],
+    constant uint&                debugMode       [[buffer(7)]], // 0=visibility, 1=tile light-count heatmap
     uint2 tid [[thread_position_in_grid]]
 ) {
     uint w = shadowTexture.get_width();
@@ -28,7 +29,7 @@ kernel void computeMain(
 
     float depth = depthTexture.read(tid).r;
     if (depth >= 1.0 || is_null_instance_acceleration_structure(TLAS)) {
-        shadowTexture.write(float4(1.0), tid);
+        shadowTexture.write(float4(debugMode == 1 ? 0.0 : 1.0), tid);
         return;
     }
 
@@ -51,10 +52,14 @@ kernel void computeMain(
     const device Cluster& cluster = clusters[clusterIdx];
     uint lightCount = cluster.lightCount;
 
+    // Debug: visualize per-tile light count (0 lights = black, 8+ = white)
+    if (debugMode == 1) {
+        shadowTexture.write(float4(float(lightCount) / 8.0), tid);
+        return;
+    }
+
     if (lightCount == 0) {
-        // Debug: write 0.5 (grey) when no lights found in tile
-        // vs 1.0 (white/lit) from ray miss — distinguishes "no lights" from "unoccluded"
-        shadowTexture.write(float4(0.5), tid);
+        shadowTexture.write(float4(1.0), tid);
         return;
     }
 

@@ -55,7 +55,7 @@ All pages under `docs/` follow this system. When updating or adding a page, matc
 Every page includes the same top nav:
 
 ```
-Project Vapor  ·  Architecture  Features  Tech Stack  ADRs
+Project Vapor  ·  Docs  Devlog  Demo  GitHub ↗
 ```
 
 - Left: site title linking to `index.html`, dimmed (`--text-muted`)
@@ -127,7 +127,9 @@ Every page follows this structure exactly:
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
   <title>[Page Title] — Project Vapor</title>
-  <style>/* inline CSS — no external stylesheets */</style>
+  <link rel="stylesheet" href="styles/global.css">       <!-- root pages -->
+  <!-- <link rel="stylesheet" href="../styles/global.css"> for ADR/ pages -->
+  <style>/* page-specific overrides only */</style>
 </head>
 <body>
   <nav>...</nav>
@@ -142,10 +144,11 @@ Every page follows this structure exactly:
 </html>
 ```
 
-- All CSS is inline in `<style>` — no external files, no CDN
+- Shared tokens and base styles live in `styles/global.css` — this is the source of truth
+- Page-specific styles go in a `<style>` block after the `<link>` tag
 - No JavaScript
 - No images or icons
-- Self-contained: each HTML file works when opened directly from the filesystem
+- No CDN — fonts fall through the local stack
 
 ---
 

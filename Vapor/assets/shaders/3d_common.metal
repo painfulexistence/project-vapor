@@ -68,6 +68,7 @@ struct MaterialData {
     float clearcoatGloss;
     float prototypeUVMode; // 0 = Off, 1 = World Space, 2 = Object Space
     float uvScale;
+    float iblEnabled; // 1.0 = use IBL, 0.0 = ambient approximation
 };
 
 struct DirLight {
@@ -83,6 +84,19 @@ struct PointLight {
     float intensity;
     float radius;
     // float _pad[2];
+};
+
+// Rectangular area light.  right and up are orthonormal axes of the light face;
+// halfWidth/halfHeight give half-extents in those directions.
+struct RectLight {
+    float3 position;
+    float  halfWidth;
+    float3 right;           // normalized
+    float  halfHeight;
+    float3 up;              // normalized
+    float  intensity;
+    float3 color;
+    uint   useVideoTexture; // 0 = solid color, 1 = sample video texture
 };
 
 struct Cluster {

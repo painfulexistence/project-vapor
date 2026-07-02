@@ -35,6 +35,7 @@ struct alignas(16) MaterialData {
     float clearcoatGloss;
     float prototypeUVMode;
     float uvScale;
+    float iblEnabled; // 1.0 = use IBL, 0.0 = ambient approximation
 };
 
 struct alignas(16) DirectionalLight {
@@ -52,6 +53,19 @@ struct alignas(16) PointLight {
     float _pad2;
     float intensity = 1.0f;
     float radius = 0.5f;
+};
+
+// Rectangular area light driven by an optional video texture.
+// right and up must be orthonormal; halfWidth/halfHeight are in world units.
+struct alignas(16) RectLight {
+    glm::vec3 position;
+    float halfWidth;
+    glm::vec3 right;           // normalized right axis
+    float halfHeight;
+    glm::vec3 up;              // normalized up axis
+    float intensity;
+    glm::vec3 color;
+    uint32_t useVideoTexture;  // 0 = solid color, 1 = sample rectLightVideo texture
 };
 
 struct alignas(16) FrameData {

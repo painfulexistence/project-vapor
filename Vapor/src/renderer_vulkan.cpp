@@ -2942,6 +2942,114 @@ auto Renderer_Vulkan::createTexture(const std::shared_ptr<Image>& img) -> Textur
     return TextureHandle{ nextImageID++ };
 }
 
+void Renderer_Vulkan::updateTexture(TextureHandle handle, const std::shared_ptr<Image>& img) {
+    if (!img) {
+        return;
+    }
+    auto it = images.find(handle.rid);
+    if (it == images.end()) {
+        fmt::print(stderr, "[Vulkan] updateTexture: invalid texture handle {}\n", handle.rid);
+        return;
+    }
+    VkImage image = it->second;
+
+    int numLevels = calculateMipmapLevelCount(img->width, img->height);
+
+    VkDeviceSize bufferSize = img->byteArray.size();
+    auto stagingBufferHandle = createBuffer(BufferUsage::COPY_SRC, bufferSize);
+    VkBuffer stagingBuffer = getBuffer(stagingBufferHandle);
+    VkDeviceMemory stagingBufferMemory = getBufferMemory(stagingBufferHandle);
+
+    void* data;
+    vkMapMemory(device, stagingBufferMemory, 0, bufferSize, 0, &data);
+    memcpy(data, img->byteArray.data(), static_cast<size_t>(bufferSize));
+    vkUnmapMemory(device, stagingBufferMemory);
+
+    VkCommandBuffer cmd = beginSingleTimeCommands();
+
+    // Existing texture is in SHADER_READ_ONLY layout; move all levels to TRANSFER_DST.
+    insertImageMemoryBarrier(
+        cmd,
+        image,
+        VK_ACCESS_SHADER_READ_BIT,
+        VK_ACCESS_TRANSFER_WRITE_BIT,
+        VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
+        VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
+        VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT,
+        VK_PIPELINE_STAGE_TRANSFER_BIT,
+        { VK_IMAGE_ASPECT_COLOR_BIT, 0, static_cast<uint32_t>(numLevels), 0, 1 }
+    );
+
+    VkBufferImageCopy copyRegion = {};
+    copyRegion.bufferOffset = 0;
+    copyRegion.bufferRowLength = 0;
+    copyRegion.bufferImageHeight = 0;
+    copyRegion.imageSubresource = { VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1 };
+    copyRegion.imageOffset = { 0, 0, 0 };
+    copyRegion.imageExtent = { static_cast<uint32_t>(img->width), static_cast<uint32_t>(img->height), 1 };
+    vkCmdCopyBufferToImage(cmd, stagingBuffer, image, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 1, &copyRegion);
+
+    insertImageMemoryBarrier(
+        cmd,
+        image,
+        VK_ACCESS_TRANSFER_WRITE_BIT,
+        VK_ACCESS_TRANSFER_READ_BIT,
+        VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
+        VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
+        VK_PIPELINE_STAGE_TRANSFER_BIT,
+        VK_PIPELINE_STAGE_TRANSFER_BIT,
+        { VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1 }
+    );
+    for (int i = 1; i < numLevels; i++) {
+        VkImageBlit blit = {};
+        blit.srcSubresource = { VK_IMAGE_ASPECT_COLOR_BIT, static_cast<uint32_t>(i - 1), 0, 1 };
+        blit.srcOffsets[0] = { 0, 0, 0 };
+        blit.srcOffsets[1] = { static_cast<int32_t>(img->width >> (i - 1)),
+                               static_cast<int32_t>(img->height >> (i - 1)),
+                               1 };
+        blit.dstSubresource = { VK_IMAGE_ASPECT_COLOR_BIT, static_cast<uint32_t>(i), 0, 1 };
+        blit.dstOffsets[0] = { 0, 0, 0 };
+        blit.dstOffsets[1] = { static_cast<int32_t>(img->width >> i), static_cast<int32_t>(img->height >> i), 1 };
+        vkCmdBlitImage(
+            cmd,
+            image,
+            VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
+            image,
+            VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
+            1,
+            &blit,
+            VK_FILTER_LINEAR
+        );
+        insertImageMemoryBarrier(
+            cmd,
+            image,
+            VK_ACCESS_TRANSFER_WRITE_BIT,
+            VK_ACCESS_TRANSFER_READ_BIT,
+            VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
+            VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
+            VK_PIPELINE_STAGE_TRANSFER_BIT,
+            VK_PIPELINE_STAGE_TRANSFER_BIT,
+            { VK_IMAGE_ASPECT_COLOR_BIT, static_cast<uint32_t>(i), 1, 0, 1 }
+        );
+    }
+
+    insertImageMemoryBarrier(
+        cmd,
+        image,
+        VK_ACCESS_TRANSFER_READ_BIT,
+        VK_ACCESS_SHADER_READ_BIT,
+        VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
+        VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
+        VK_PIPELINE_STAGE_TRANSFER_BIT,
+        VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT,
+        { VK_IMAGE_ASPECT_COLOR_BIT, 0, static_cast<uint32_t>(numLevels), 0, 1 }
+    );
+
+    endSingleTimeCommands(cmd);
+
+    destroyBuffer(stagingBufferHandle);
+}
+
 auto Renderer_Vulkan::createVertexBuffer(std::vector<VertexData> vertices) -> BufferHandle {
     if (vertices.empty()) return {};
     VkDeviceSize bufferSize = sizeof(VertexData) * vertices.size();

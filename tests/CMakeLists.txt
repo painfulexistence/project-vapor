@@ -2,6 +2,8 @@ find_package(Catch2 3 CONFIG REQUIRED)
 find_package(glm CONFIG REQUIRED)
 find_package(fmt CONFIG REQUIRED)
 
+include(AssetPipeline)
+
 # Strict warnings for all test targets — keep tests warning-free
 set(TEST_WARNING_FLAGS
     $<$<CXX_COMPILER_ID:Clang,AppleClang,GNU>:-Wall -Wextra -Wshadow -Wno-unused-parameter>
@@ -155,11 +157,11 @@ target_link_libraries(test_file_system PRIVATE
 target_compile_features(test_file_system PRIVATE cxx_std_20)
 target_compile_options(test_file_system PRIVATE ${TEST_WARNING_FLAGS})
 
-vapor_copy_assets(test_physics)
-vapor_copy_assets(test_resource_manager)
-vapor_copy_assets(test_asset_management)
-vapor_copy_assets(test_backend_support)
-vapor_copy_assets(test_ui_system)
+vapor_copy_engine_assets(test_physics)
+vapor_copy_engine_assets(test_resource_manager)
+vapor_copy_engine_assets(test_asset_management)
+vapor_copy_engine_assets(test_backend_support)
+vapor_copy_engine_assets(test_ui_system)
 
 include(CTest)
 include(Catch)
