@@ -499,15 +499,37 @@ fragment float4 fragmentMain(
         return samplePSSMShadow(ci, shadowUV, refDepth);
     };
 
+    // Crisp, non-repeating fetch for the screen-space RT shadow. Reusing the
+    // material sampler `s` (address::repeat, mip_filter::linear) can pull a
+    // blurred mip / wrap at screen edges, softening the RT shadow right where it
+    // has to line up with PSSM.
+    constexpr sampler rtShadowSampler(
+        address::clamp_to_edge,
+        filter::linear,
+        mip_filter::none
+    );
+
+    // RT↔PSSM cross-fade is centred on rtEnd instead of starting there. The RT
+    // shadow has crisp, contact-accurate edges; PSSM is slightly offset
+    // (peter-panning from the depth bias + widened ortho range). A one-sided
+    // fade lets the accurate RT shadow end abruptly at rtEnd, exposing a lit
+    // sliver where the offset PSSM edge has not caught up yet — the bright line.
+    // Centring the window keeps RT dominant across the contact region and only
+    // hands off to PSSM well past the seam.
+    float rtEnd     = pssmData.cascadeSplits.x;
+    float halfBlend = pssmData.blendRange * 0.5;
+    float blendLo   = rtEnd - halfBlend;
+    float blendHi   = rtEnd + halfBlend;
+
     float shadowFactor;
     int debugCascade = -1; // -1 = RT, 0-2 = PSSM cascades
 
-    if (viewDepth <= pssmData.cascadeSplits.x) {
-        // Cascade 0: RT ray-traced shadow
-        shadowFactor = texShadow.sample(s, screenUV).r;
+    if (viewDepth < blendLo) {
+        // Fully inside the RT region
+        shadowFactor = texShadow.sample(rtShadowSampler, screenUV).r;
         debugCascade = -1;
     } else {
-        // Select PSSM cascade (index 0-2 = cascade 1-3)
+        // At or past the RT boundary: evaluate the PSSM cascade
         int ci = 0;
         if      (viewDepth > pssmData.cascadeSplits.z) ci = 2;
         else if (viewDepth > pssmData.cascadeSplits.y) ci = 1;
@@ -527,12 +549,12 @@ fragment float4 fragmentMain(
             }
         }
 
-        // Blend zone between RT (cascade 0) and PSSM cascade 1
-        float blendEnd = pssmData.cascadeSplits.x + pssmData.blendRange;
-        if (viewDepth < blendEnd) {
-            float rtShadow = texShadow.sample(s, screenUV).r;
-            float t = (viewDepth - pssmData.cascadeSplits.x) / pssmData.blendRange;
+        // Symmetric RT↔PSSM cross-fade window [blendLo, blendHi] around rtEnd
+        if (viewDepth < blendHi && pssmData.blendRange > 0.0) {
+            float rtShadow = texShadow.sample(rtShadowSampler, screenUV).r;
+            float t = (viewDepth - blendLo) / pssmData.blendRange; // 0 at blendLo → 1 at blendHi
             shadowFactor = mix(rtShadow, shadowFactor, smoothstep(0.0, 1.0, t));
+            if (t < 0.5) debugCascade = -1; // RT-dominant half shows as RT in debug view
         }
     }
 
