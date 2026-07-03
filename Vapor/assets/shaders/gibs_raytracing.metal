@@ -15,26 +15,22 @@ using namespace metal;
 // See GIBS_DESIGN.md Decision #4
 // ============================================================================
 
-using raytracing::instance_acceleration_structure;
-using raytracing::intersector;
-using raytracing::intersection_result;
-using raytracing::ray;
-
 // Compute direct lighting for a surfel
 float3 computeDirectLight(float3 position, float3 normal, float3 albedo,
                            float3 sunDir, float3 sunColor, float sunIntensity,
-                           instance_acceleration_structure accelStruct) {
+                           raytracing::instance_acceleration_structure accelStruct) {
     // Shadow ray to sun
-    ray shadowRay;
+    raytracing::ray shadowRay;
     shadowRay.origin = position + normal * 0.001; // Bias to avoid self-intersection
     shadowRay.direction = sunDir;
     shadowRay.min_distance = 0.001;
     shadowRay.max_distance = 10000.0;
 
-    intersector<> shadowIntersector;
+    raytracing::intersector<raytracing::instancing> shadowIntersector;
+    shadowIntersector.assume_geometry_type(raytracing::geometry_type::triangle);
     shadowIntersector.accept_any_intersection(true); // Early out on any hit
 
-    auto shadowResult = shadowIntersector.intersect(shadowRay, accelStruct);
+    auto shadowResult = shadowIntersector.intersect(shadowRay, accelStruct, 0xFF);
 
     float shadow = (shadowResult.type == raytracing::intersection_type::none) ? 1.0 : 0.0;
 
@@ -98,7 +94,7 @@ kernel void surfelRaytracing(
     device const SurfelCell* cells [[buffer(1)]],
     constant GIBSData& gibs [[buffer(2)]],
     constant SurfelRaytracingParams& params [[buffer(3)]],
-    instance_acceleration_structure accelStruct [[buffer(4)]],
+    raytracing::instance_acceleration_structure accelStruct [[buffer(4)]],
     texture2d<float, access::read> environmentMap [[texture(0)]],
     uint gid [[thread_position_in_grid]]
 ) {
@@ -137,15 +133,16 @@ kernel void surfelRaytracing(
         float3 rayDir = sampleCosineHemisphere(u, surfel.normal);
 
         // Create ray
-        ray r;
+        raytracing::ray r;
         r.origin = surfel.position + surfel.normal * params.rayBias;
         r.direction = rayDir;
         r.min_distance = 0.001;
         r.max_distance = params.rayMaxDistance;
 
         // Trace ray
-        intersector<raytracing::triangle_data> inter;
-        auto result = inter.intersect(r, accelStruct);
+        raytracing::intersector<raytracing::instancing, raytracing::triangle_data> inter;
+        inter.assume_geometry_type(raytracing::geometry_type::triangle);
+        auto result = inter.intersect(r, accelStruct, 0xFF);
 
         if (result.type == raytracing::intersection_type::triangle) {
             // Hit geometry - sample surfel at hit point
