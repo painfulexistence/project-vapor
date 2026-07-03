@@ -24,6 +24,7 @@ using namespace Vapor;
 #include <cstring>
 #include <ctime>
 #include <functional>
+#include <thread>
 #include <glm/ext/matrix_clip_space.hpp>
 #include <glm/ext/matrix_transform.hpp>
 #include <imgui.h>
@@ -1030,7 +1031,7 @@ public:
     void execute() override {
         auto& r = *renderer;
 
-        if (!r.voxelRenderingEnabled || !r.voxelRaymarchPipeline || !r.voxelGridBuffer) return;
+        if (!r.voxelRenderingEnabled || !r.voxelRaymarchPipeline || !r.voxelBrickIndexBuffer) return;
 
         // Update per-frame uniforms (sun follows the atmosphere settings)
         auto* atmos = reinterpret_cast<AtmosphereData*>(r.atmosphereDataBuffer->contents());
@@ -1063,8 +1064,8 @@ public:
         encoder->setDepthStencilState(r.depthStencilState.get());
         encoder->setFragmentBuffer(r.voxelDataBuffers[r.currentFrameInFlight].get(), 0, 0);
         encoder->setFragmentBuffer(r.cameraDataBuffers[r.currentFrameInFlight].get(), 0, 1);
-        encoder->setFragmentBuffer(r.voxelGridBuffer.get(), 0, 2);
-        encoder->setFragmentBuffer(r.voxelBrickMaskBuffer.get(), 0, 3);
+        encoder->setFragmentBuffer(r.voxelBrickPoolBuffer.get(), 0, 2);
+        encoder->setFragmentBuffer(r.voxelBrickIndexBuffer.get(), 0, 3);
         encoder->setFragmentBuffer(r.voxelPaletteBuffer.get(), 0, 4);
         encoder->drawPrimitives(MTL::PrimitiveType::PrimitiveTypeTriangle, 0, 3, 1);
         encoder->endEncoding();
@@ -2734,14 +2735,14 @@ auto Renderer_Metal::createResources() -> void {
     // ========================================================================
     // Micro voxel volume buffers and initialization
     // ========================================================================
-    // Only the small per-frame uniform buffers are allocated here; the volume
-    // itself (~17 MB) is generated lazily by generateVoxelDemoVolume() when
-    // voxel rendering is first enabled.
+    // Only the small per-frame uniform buffers are allocated here; the
+    // brickmap itself is built lazily by generateVoxelDemoVolume() when voxel
+    // rendering is first enabled.
     voxelDataBuffers.resize(MAX_FRAMES_IN_FLIGHT);
     for (auto& voxelBuffer : voxelDataBuffers) {
         voxelBuffer = NS::TransferPtr(device->newBuffer(sizeof(VoxelVolumeData), MTL::ResourceStorageModeManaged));
     }
-    voxelSettings.gridDim = glm::uvec3(VOXEL_GRID_DIM);
+    voxelSettings.gridDim = glm::uvec3(voxelGridDim);
     voxelSettings.brickDim = VOXEL_BRICK_DIM;
 
     // ========================================================================
@@ -4022,28 +4023,24 @@ static float voxelFbm3(glm::vec3 p, int octaves, Uint32 seed) {
     return sum;// ~[0, 1)
 }
 
-// Fills the voxel grid with a procedural terrain (heightfield + caves + ore
-// speckles + floating crystal spheres) and rebuilds the brick occupancy mask.
+// Fills a dense CPU scratch grid with a procedural terrain (heightfield +
+// caves + ore speckles + floating crystal spheres), then compacts it into the
+// sparse brickmap (empty / uniform / stored bricks) and uploads the result.
 // Regenerating while a frame is in flight can produce a one-frame glitch;
 // acceptable for this debug/demo volume.
 void Renderer_Metal::generateVoxelDemoVolume() {
-    constexpr Uint32 N = VOXEL_GRID_DIM;
     constexpr Uint32 B = VOXEL_BRICK_DIM;
-    constexpr Uint32 BG = N / B;
-    static_assert(N % B == 0, "voxel grid must be divisible into whole bricks");
+    voxelGridDim -= voxelGridDim % B;// Guard against non-brick-aligned sizes
+    const Uint32 N = voxelGridDim;
+    const Uint32 BG = N / B;
 
-    if (!voxelGridBuffer) {
-        voxelGridBuffer = NS::TransferPtr(device->newBuffer(N * N * N, MTL::ResourceStorageModeManaged));
-        voxelBrickMaskBuffer = NS::TransferPtr(device->newBuffer(BG * BG * BG, MTL::ResourceStorageModeManaged));
+    const Uint64 startTicks = SDL_GetTicks();
+
+    if (!voxelPaletteBuffer) {
         voxelPaletteBuffer =
             NS::TransferPtr(device->newBuffer(256 * sizeof(glm::vec4), MTL::ResourceStorageModeManaged));
     }
-
-    auto* voxels = static_cast<Uint8*>(voxelGridBuffer->contents());
-    auto* bricks = static_cast<Uint8*>(voxelBrickMaskBuffer->contents());
     auto* palette = static_cast<glm::vec4*>(voxelPaletteBuffer->contents());
-    std::memset(voxels, 0, N * N * N);
-    std::memset(bricks, 0, BG * BG * BG);
 
     // Material palette (index 0 = empty)
     enum : Uint8 { MatGrass = 1, MatDirt = 2, MatStone = 3, MatSnow = 4, MatSand = 5, MatOre = 6, MatCrystal = 7 };
@@ -4057,9 +4054,13 @@ void Renderer_Metal::generateVoxelDemoVolume() {
     palette[MatCrystal] = glm::vec4(0.45f, 0.75f, 0.95f, 1.0f);
 
     const Uint32 seed = voxelSeed;
-    voxelSolidCount = 0;
 
-    auto voxelAt = [&](Uint32 x, Uint32 y, Uint32 z) -> Uint8& { return voxels[(z * N + y) * N + x]; };
+    // Dense CPU scratch grid, compacted into the brickmap below and freed on
+    // return (transient N^3 bytes; 128 MB at 512^3).
+    std::vector<Uint8> scratch(static_cast<size_t>(N) * N * N, 0);
+    auto voxelAt = [&scratch, N](Uint32 x, Uint32 y, Uint32 z) -> Uint8& {
+        return scratch[(static_cast<size_t>(z) * N + y) * N + x];
+    };
 
     // Terrain heightfield
     std::vector<float> heights(N * N);
@@ -4072,30 +4073,46 @@ void Renderer_Metal::generateVoxelDemoVolume() {
         }
     }
 
-    for (Uint32 z = 0; z < N; z++) {
-        for (Uint32 x = 0; x < N; x++) {
-            const float h = heights[z * N + x];
-            const auto top = static_cast<Uint32>(h);
-            for (Uint32 y = 0; y <= top && y < N; y++) {
-                // Carve caves below the surface crust
-                if (y + 4 < top) {
-                    float cave = voxelFbm3(glm::vec3(x, y, z) * 0.045f, 3, seed + 7u);
-                    if (cave > 0.62f) continue;
+    // Column fill, parallelized over z slices (cells are disjoint per thread)
+    const Uint32 threadCount = std::max(1u, std::thread::hardware_concurrency());
+    std::vector<Uint32> threadSolidCounts(threadCount, 0);
+    {
+        std::vector<std::thread> workers;
+        workers.reserve(threadCount);
+        for (Uint32 ti = 0; ti < threadCount; ti++) {
+            workers.emplace_back([&, ti]() {
+                Uint32 localSolid = 0;
+                for (Uint32 z = ti; z < N; z += threadCount) {
+                    for (Uint32 x = 0; x < N; x++) {
+                        const float h = heights[z * N + x];
+                        const auto top = static_cast<Uint32>(h);
+                        for (Uint32 y = 0; y <= top && y < N; y++) {
+                            // Carve caves below the surface crust
+                            if (y + 4 < top) {
+                                float cave = voxelFbm3(glm::vec3(x, y, z) * 0.045f, 3, seed + 7u);
+                                if (cave > 0.62f) continue;
+                            }
+                            Uint8 mat = MatStone;
+                            const Uint32 depth = top - y;
+                            if (depth == 0) {
+                                mat = (h > 0.62f * N) ? MatSnow : ((h < 0.22f * N) ? MatSand : MatGrass);
+                            } else if (depth <= 3) {
+                                mat = (h < 0.22f * N) ? MatSand : MatDirt;
+                            } else if (voxelHashNoise(x, y, z, seed + 13u) > 0.995f) {
+                                mat = MatOre;
+                            }
+                            voxelAt(x, y, z) = mat;
+                            localSolid++;
+                        }
+                    }
                 }
-                Uint8 mat = MatStone;
-                const Uint32 depth = top - y;
-                if (depth == 0) {
-                    mat = (h > 0.62f * N) ? MatSnow : ((h < 0.22f * N) ? MatSand : MatGrass);
-                } else if (depth <= 3) {
-                    mat = (h < 0.22f * N) ? MatSand : MatDirt;
-                } else if (voxelHashNoise(x, y, z, seed + 13u) > 0.995f) {
-                    mat = MatOre;
-                }
-                voxelAt(x, y, z) = mat;
-                voxelSolidCount++;
-            }
+                threadSolidCounts[ti] = localSolid;
+            });
         }
+        for (auto& w : workers) w.join();
     }
+    voxelSolidCount = 0;
+    for (Uint32 c : threadSolidCounts) voxelSolidCount += c;
 
     // A few floating crystal spheres to show the volume is truly 3D
     for (int s = 0; s < 4; s++) {
@@ -4122,41 +4139,83 @@ void Renderer_Metal::generateVoxelDemoVolume() {
         }
     }
 
-    // Brick occupancy mask
+    // Compact the dense scratch grid into the sparse brickmap: bricks that
+    // are entirely empty or entirely one material become sentinel entries in
+    // the index grid; only mixed (surface) bricks are copied into the pool.
+    constexpr Uint32 BRICK_BYTES = B * B * B;
+    std::vector<Uint32> indexGrid(static_cast<size_t>(BG) * BG * BG, VOXEL_BRICK_EMPTY);
+    std::vector<Uint8> pool;
+    voxelStoredBrickCount = 0;
+    voxelUniformBrickCount = 0;
+
+    Uint8 brickData[BRICK_BYTES];
     for (Uint32 bz = 0; bz < BG; bz++) {
         for (Uint32 by = 0; by < BG; by++) {
             for (Uint32 bx = 0; bx < BG; bx++) {
-                bool occupied = false;
-                for (Uint32 z = bz * B; z < (bz + 1) * B && !occupied; z++) {
-                    for (Uint32 y = by * B; y < (by + 1) * B && !occupied; y++) {
-                        for (Uint32 x = bx * B; x < (bx + 1) * B; x++) {
-                            if (voxelAt(x, y, z) != 0) {
-                                occupied = true;
-                                break;
-                            }
+                bool anySolid = false;
+                bool allSame = true;
+                const Uint8 first = voxelAt(bx * B, by * B, bz * B);
+                for (Uint32 z = 0; z < B; z++) {
+                    for (Uint32 y = 0; y < B; y++) {
+                        for (Uint32 x = 0; x < B; x++) {
+                            const Uint8 v = voxelAt(bx * B + x, by * B + y, bz * B + z);
+                            brickData[(z * B + y) * B + x] = v;
+                            anySolid |= (v != 0);
+                            allSame &= (v == first);
                         }
                     }
                 }
-                bricks[(bz * BG + by) * BG + bx] = occupied ? 1 : 0;
+                if (!anySolid) continue;// Stays VOXEL_BRICK_EMPTY
+                Uint32& entry = indexGrid[(static_cast<size_t>(bz) * BG + by) * BG + bx];
+                if (allSame) {
+                    entry = VOXEL_BRICK_UNIFORM_FLAG | first;
+                    voxelUniformBrickCount++;
+                } else {
+                    entry = voxelStoredBrickCount++;
+                    pool.insert(pool.end(), brickData, brickData + BRICK_BYTES);
+                }
             }
         }
     }
+    if (pool.empty()) pool.resize(BRICK_BYTES, 0);// Metal disallows zero-length buffers
 
-    voxelGridBuffer->didModifyRange(NS::Range::Make(0, voxelGridBuffer->length()));
-    voxelBrickMaskBuffer->didModifyRange(NS::Range::Make(0, voxelBrickMaskBuffer->length()));
+    // (Re)create GPU buffers when sizes change and upload
+    const size_t indexBytes = indexGrid.size() * sizeof(Uint32);
+    if (!voxelBrickIndexBuffer || voxelBrickIndexBuffer->length() != indexBytes) {
+        voxelBrickIndexBuffer = NS::TransferPtr(device->newBuffer(indexBytes, MTL::ResourceStorageModeManaged));
+    }
+    if (!voxelBrickPoolBuffer || voxelBrickPoolBuffer->length() != pool.size()) {
+        voxelBrickPoolBuffer = NS::TransferPtr(device->newBuffer(pool.size(), MTL::ResourceStorageModeManaged));
+    }
+    std::memcpy(voxelBrickIndexBuffer->contents(), indexGrid.data(), indexBytes);
+    std::memcpy(voxelBrickPoolBuffer->contents(), pool.data(), pool.size());
+    voxelBrickIndexBuffer->didModifyRange(NS::Range::Make(0, indexBytes));
+    voxelBrickPoolBuffer->didModifyRange(NS::Range::Make(0, pool.size()));
     voxelPaletteBuffer->didModifyRange(NS::Range::Make(0, voxelPaletteBuffer->length()));
 
+    voxelSettings.gridDim = glm::uvec3(N);
+    voxelSettings.brickDim = B;
+
+    const float poolMB = static_cast<float>(pool.size() + indexBytes) / (1024.0f * 1024.0f);
+    const float denseMB = static_cast<float>(static_cast<size_t>(N) * N * N) / (1024.0f * 1024.0f);
     fmt::print(
-        "Voxel demo volume generated: {}^3 grid, {} solid voxels ({:.1f}% fill)\n",
+        "Voxel demo volume generated in {} ms: {}^3 grid, {} solid voxels ({:.1f}% fill), "
+        "{} stored + {} uniform of {} bricks, {:.1f} MB (dense equivalent {:.1f} MB)\n",
+        SDL_GetTicks() - startTicks,
         N,
         voxelSolidCount,
-        100.0f * static_cast<float>(voxelSolidCount) / static_cast<float>(N * N * N)
+        100.0f * static_cast<float>(voxelSolidCount) / static_cast<float>(static_cast<size_t>(N) * N * N),
+        voxelStoredBrickCount,
+        voxelUniformBrickCount,
+        BG * BG * BG,
+        poolMB,
+        denseMB
     );
 }
 
 void Renderer_Metal::setVoxelRenderingEnabled(bool enabled) {
     voxelRenderingEnabled = enabled;
-    if (enabled && !voxelGridBuffer) {
+    if (enabled && !voxelBrickIndexBuffer) {
         generateVoxelDemoVolume();
     }
 }
@@ -4922,6 +4981,12 @@ auto Renderer_Metal::draw(std::shared_ptr<Scene> scene, Camera& camera) -> void 
                 if (ImGui::DragInt("Max Ray Steps", &maxSteps, 1, 32, 1024)) {
                     voxelSettings.maxRaySteps = static_cast<Uint32>(maxSteps);
                 }
+                static const Uint32 kGridDims[] = {128, 256, 512};
+                int gridIdx = (voxelGridDim == 128) ? 0 : ((voxelGridDim == 512) ? 2 : 1);
+                if (ImGui::Combo("Grid Size", &gridIdx, "128^3\0" "256^3\0" "512^3\0")) {
+                    voxelGridDim = kGridDims[gridIdx];
+                    generateVoxelDemoVolume();
+                }
 
                 ImGui::Separator();
                 ImGui::Text("Lighting");
@@ -4936,16 +5001,38 @@ auto Renderer_Metal::draw(std::shared_ptr<Scene> scene, Camera& camera) -> void 
                     voxelSeed++;
                     generateVoxelDemoVolume();
                 }
-                if (voxelGridBuffer) {
-                    const float sizeMB =
-                        static_cast<float>(voxelGridBuffer->length() + voxelBrickMaskBuffer->length()) / (1024.0f * 1024.0f);
+                ImGui::SameLine();
+                if (ImGui::Button("Reload Shader")) {
+                    // Re-reads the deployed shader file (edit the copy under
+                    // the app's assets output, or rebuild assets first).
+                    try {
+                        voxelRaymarchPipeline = createPipeline("shaders/3d_voxel_raymarch.metal", true, false, 1);
+                        fmt::print("Voxel raymarch shader reloaded\n");
+                    } catch (const std::exception& e) {
+                        fmt::print("Voxel raymarch shader reload failed: {}\n", e.what());
+                    }
+                }
+                if (voxelBrickIndexBuffer) {
+                    const float gpuMB =
+                        static_cast<float>(voxelBrickPoolBuffer->length() + voxelBrickIndexBuffer->length())
+                        / (1024.0f * 1024.0f);
+                    const float denseMB = static_cast<float>(
+                                              static_cast<size_t>(voxelGridDim) * voxelGridDim * voxelGridDim
+                                          )
+                                        / (1024.0f * 1024.0f);
                     ImGui::Text(
-                        "%u^3 voxels, %u solid (%.1f%%), %.1f MB",
-                        VOXEL_GRID_DIM,
+                        "%u^3 voxels, %u solid (%.1f%% fill)",
+                        voxelGridDim,
                         voxelSolidCount,
                         100.0f * static_cast<float>(voxelSolidCount)
-                            / static_cast<float>(VOXEL_GRID_DIM * VOXEL_GRID_DIM * VOXEL_GRID_DIM),
-                        sizeMB
+                            / static_cast<float>(static_cast<size_t>(voxelGridDim) * voxelGridDim * voxelGridDim)
+                    );
+                    ImGui::Text(
+                        "%u stored + %u uniform bricks, %.1f MB GPU (dense: %.1f MB)",
+                        voxelStoredBrickCount,
+                        voxelUniformBrickCount,
+                        gpuMB,
+                        denseMB
                     );
                 }
             }

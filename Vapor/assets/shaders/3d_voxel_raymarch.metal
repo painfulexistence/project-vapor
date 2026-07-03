@@ -5,18 +5,28 @@ using namespace metal;
 // ============================================================================
 // Micro Voxel Raymarch (experimental)
 // ============================================================================
-// Fullscreen-triangle pass that raymarches a dense voxel grid with a two-level
-// DDA: a coarse pass over 8^3-voxel bricks (skipping empty bricks in one step)
-// and a fine pass over individual voxels inside occupied bricks. Hits output
-// hardware depth so voxels composite correctly with rasterized geometry, the
-// sky pass, and all downstream post-processing (fog, bloom, tone mapping).
+// Fullscreen-triangle pass that raymarches a sparse brickmap with a two-level
+// DDA: a coarse pass over 8^3-voxel bricks and a fine pass over individual
+// voxels inside stored bricks. Hits output hardware depth so voxels composite
+// correctly with rasterized geometry, the sky pass, and all downstream
+// post-processing (fog, bloom, tone mapping).
+//
+// Brickmap layout: the coarse grid holds one uint32 per brick cell —
+//   0xFFFFFFFF            empty brick (skipped in one coarse DDA step)
+//   0x80000000 | material uniform solid brick (immediate hit, no fine data)
+//   otherwise             index of a 512-byte brick in the brick pool
+// Only mixed (surface) bricks occupy pool memory; fully-buried terrain
+// collapses to uniform entries.
 //
 // Buffers:
 //   0 = VoxelVolumeData (per-frame uniforms)
 //   1 = CameraData
-//   2 = voxel grid   (uint8 per voxel, palette index, 0 = empty)
-//   3 = brick mask   (uint8 per brick, nonzero = brick contains voxels)
-//   4 = palette      (256 x float4 albedo)
+//   2 = brick pool       (brickDim^3 uint8 palette indices per stored brick)
+//   3 = brick index grid (uint32 per brick cell, see layout above)
+//   4 = palette          (256 x float4 albedo)
+
+constant uint VOXEL_BRICK_EMPTY = 0xFFFFFFFFu;
+constant uint VOXEL_BRICK_UNIFORM_FLAG = 0x80000000u;
 
 struct VoxelVolumeData {
     float4x4 invViewProj;
@@ -52,18 +62,19 @@ static float voxelHash(int3 c) {
     return float(h & 0xFFFFu) / 65535.0;
 }
 
-// Fine DDA over individual voxels inside one brick. Traverses from tStart
-// until leaving the brick's cell range. enterNormal is the surface normal to
-// report if the very first voxel tested is already solid.
+// Fine DDA over individual voxels inside one stored brick. Traverses from
+// tStart until leaving the brick's cell range. enterNormal is the surface
+// normal to report if the very first voxel tested is already solid.
 static RayHit traverseBrick(
     float3 ro,
     float3 rd,
     float3 invDir,
     float tStart,
     int3 brickCell,
+    uint brickIndex,
     float3 enterNormal,
     constant VoxelVolumeData& data,
-    const device uchar* voxels
+    const device uchar* brickPool
 ) {
     RayHit result;
     result.hit = false;
@@ -88,9 +99,11 @@ static RayHit traverseBrick(
 
     float t = tStart;
     float3 normal = enterNormal;
+    const device uchar* brick = brickPool + brickIndex * uint(bd * bd * bd);
 
     for (int i = 0; i < 3 * bd + 1; i++) {
-        uchar mat = voxels[voxelIndex(cell, data.gridDim)];
+        int3 local = cell - lo;
+        uchar mat = brick[(uint(local.z) * uint(bd) + uint(local.y)) * uint(bd) + uint(local.x)];
         if (mat != 0) {
             result.hit = true;
             result.t = t;
@@ -121,13 +134,14 @@ static RayHit traverseBrick(
     return result;
 }
 
-// Coarse DDA over bricks; descends into traverseBrick for occupied bricks.
+// Coarse DDA over bricks; uniform bricks hit immediately, stored bricks
+// descend into traverseBrick.
 static RayHit raycastVoxels(
     float3 ro,
     float3 rd,
     constant VoxelVolumeData& data,
-    const device uchar* voxels,
-    const device uchar* bricks,
+    const device uchar* brickPool,
+    const device uint* brickIndexGrid,
     uint maxSteps
 ) {
     RayHit result;
@@ -190,8 +204,17 @@ static RayHit raycastVoxels(
     uint3 bgDim = uint3(brickGrid);
 
     for (uint i = 0; i < maxSteps; i++) {
-        if (bricks[voxelIndex(cell, bgDim)] != 0) {
-            RayHit hit = traverseBrick(ro, rd, invDir, t, cell, normal, data, voxels);
+        uint entry = brickIndexGrid[voxelIndex(cell, bgDim)];
+        if (entry != VOXEL_BRICK_EMPTY) {
+            if ((entry & VOXEL_BRICK_UNIFORM_FLAG) != 0) {
+                // Fully solid brick: the ray hits its entry face directly.
+                result.hit = true;
+                result.t = t;
+                result.normal = normal;
+                result.material = entry & 0xFFu;
+                return result;
+            }
+            RayHit hit = traverseBrick(ro, rd, invDir, t, cell, entry, normal, data, brickPool);
             if (hit.hit) return hit;
         }
         if (tMax.x < tMax.y && tMax.x < tMax.z) {
@@ -246,8 +269,8 @@ fragment FragmentOut fragmentMain(
     VertexOut in [[stage_in]],
     constant VoxelVolumeData& data [[buffer(0)]],
     constant CameraData& camera [[buffer(1)]],
-    const device uchar* voxels [[buffer(2)]],
-    const device uchar* bricks [[buffer(3)]],
+    const device uchar* brickPool [[buffer(2)]],
+    const device uint* brickIndexGrid [[buffer(3)]],
     constant float4* palette [[buffer(4)]]
 ) {
     FragmentOut out;
@@ -258,7 +281,7 @@ fragment FragmentOut fragmentMain(
     float3 ro = data.cameraPosition;
     float3 rd = normalize(farH.xyz / farH.w - ro);
 
-    RayHit hit = raycastVoxels(ro, rd, data, voxels, bricks, data.maxRaySteps);
+    RayHit hit = raycastVoxels(ro, rd, data, brickPool, brickIndexGrid, data.maxRaySteps);
     if (!hit.hit) {
         discard_fragment();
         out.color = float4(0.0);
@@ -280,7 +303,7 @@ fragment FragmentOut fragmentMain(
     float shadow = 1.0;
     if (data.shadowEnabled != 0 && ndl > 0.0) {
         float3 shadowOrigin = hitPos + hit.normal * data.voxelSize * 0.51;
-        RayHit shadowHit = raycastVoxels(shadowOrigin, L, data, voxels, bricks, data.maxRaySteps);
+        RayHit shadowHit = raycastVoxels(shadowOrigin, L, data, brickPool, brickIndexGrid, data.maxRaySteps);
         if (shadowHit.hit) shadow = 0.0;
     }
 

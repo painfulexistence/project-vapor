@@ -581,19 +581,25 @@ protected:
     LightScatteringData lightScatteringSettings;
 
     // Micro voxel volume (experimental) resources
-    // A dense 256^3 uint8 grid + 8^3 brick occupancy mask, raymarched by a
-    // fullscreen pass between MainRenderPass and SkyAtmospherePass. Volume
-    // buffers are allocated lazily on first enable (~17 MB when active).
-    static constexpr Uint32 VOXEL_GRID_DIM = 256;
+    // Sparse brickmap raymarched by a fullscreen pass between MainRenderPass
+    // and SkyAtmospherePass: a coarse uint32 index grid (one entry per 8^3
+    // brick — empty sentinel, uniform-material sentinel, or brick pool index)
+    // plus a compacted pool holding only mixed (surface) bricks. Buffers are
+    // built lazily on first enable.
     static constexpr Uint32 VOXEL_BRICK_DIM = 8;
+    static constexpr Uint32 VOXEL_BRICK_EMPTY = 0xFFFFFFFFu;
+    static constexpr Uint32 VOXEL_BRICK_UNIFORM_FLAG = 0x80000000u;
     NS::SharedPtr<MTL::RenderPipelineState> voxelRaymarchPipeline;
     std::vector<NS::SharedPtr<MTL::Buffer>> voxelDataBuffers;// Per-frame uniforms
-    NS::SharedPtr<MTL::Buffer> voxelGridBuffer;// uint8 per voxel, palette index, 0 = empty
-    NS::SharedPtr<MTL::Buffer> voxelBrickMaskBuffer;// uint8 per brick, nonzero = occupied
+    NS::SharedPtr<MTL::Buffer> voxelBrickPoolBuffer;// brickDim^3 uint8 palette indices per stored brick
+    NS::SharedPtr<MTL::Buffer> voxelBrickIndexBuffer;// uint32 per brick cell (empty/uniform/pool index)
     NS::SharedPtr<MTL::Buffer> voxelPaletteBuffer;// 256 x vec4 albedo
     bool voxelRenderingEnabled = false;
     VoxelVolumeData voxelSettings;
+    Uint32 voxelGridDim = 256;// Voxels per volume edge (must be a multiple of VOXEL_BRICK_DIM)
     Uint32 voxelSolidCount = 0;
+    Uint32 voxelStoredBrickCount = 0;
+    Uint32 voxelUniformBrickCount = 0;
     Uint32 voxelSeed = 1337;
     void generateVoxelDemoVolume();
 
