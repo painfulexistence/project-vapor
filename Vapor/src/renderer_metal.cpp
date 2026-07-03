@@ -2627,9 +2627,9 @@ public:
     const char* getName() const override { return "SurfelGenerationPass"; }
 
     void execute() override {
-        if (!gibsManager) return;
-
         auto& r = *renderer;
+        if (!r.gibsEnabled || !gibsManager) return;
+
         auto drawableSize = r.swapchain->drawableSize();
         glm::vec2 screenSize(drawableSize.width, drawableSize.height);
 
@@ -2672,9 +2672,8 @@ public:
     const char* getName() const override { return "SurfelHashBuildPass"; }
 
     void execute() override {
-        if (!gibsManager) return;
-
         auto& r = *renderer;
+        if (!r.gibsEnabled || !gibsManager) return;
         uint32_t totalCells = gibsManager->getTotalCells();
         uint32_t activeSurfels = gibsManager->getActiveSurfelCount();
         if (activeSurfels == 0) activeSurfels = 1;
@@ -2744,9 +2743,8 @@ public:
     const char* getName() const override { return "SurfelRaytracingPass"; }
 
     void execute() override {
-        if (!gibsManager) return;
-
         auto& r = *renderer;
+        if (!r.gibsEnabled || !gibsManager) return;
         const auto& gibsData = gibsManager->getGIBSData();
 
         SurfelRaytracingParams params;
@@ -2792,9 +2790,8 @@ public:
     const char* getName() const override { return "GIBSTemporalPass"; }
 
     void execute() override {
-        if (!gibsManager) return;
-
         auto& r = *renderer;
+        if (!r.gibsEnabled || !gibsManager) return;
         uint32_t activeSurfels = gibsManager->getActiveSurfelCount();
         if (activeSurfels == 0) return;
 
@@ -2824,9 +2821,8 @@ public:
     const char* getName() const override { return "GIBSSamplePass"; }
 
     void execute() override {
-        if (!gibsManager) return;
-
         auto& r = *renderer;
+        if (!r.gibsEnabled || !gibsManager) return;
         const auto& gibsData = gibsManager->getGIBSData();
 
         auto drawableSize = r.swapchain->drawableSize();
@@ -2965,7 +2961,8 @@ auto Renderer_Metal::init(SDL_Window* window) -> void {
     if (m_supportsRaytracing) graph.addPass(std::make_unique<PointShadowTemporalPass>(this));
 
     // GIBS (Global Illumination Based on Surfels) passes
-    if (gibsEnabled && gibsManager) {
+    // Always add passes; they check gibsEnabled in execute() for runtime toggle
+    if (gibsManager) {
         graph.addPass(std::make_unique<SurfelGenerationPass>(this, gibsManager.get()));
         graph.addPass(std::make_unique<SurfelHashBuildPass>(this, gibsManager.get()));
         graph.addPass(std::make_unique<SurfelRaytracingPass>(this, gibsManager.get()));
@@ -5637,6 +5634,24 @@ auto Renderer_Metal::draw(std::shared_ptr<Scene> scene, Camera& camera) -> void 
                 ImGui::Combo("Method", &aoMethod, "Ray Traced\0Screen Space\0");
             }
             ImGui::TextDisabled("Attenuates IBL/ambient only; both methods share the denoise chain");
+            ImGui::TreePop();
+        }
+
+        if (ImGui::TreeNode("Global Illumination (GIBS)")) {
+            ImGui::Separator();
+            ImGui::Checkbox("Enabled", &gibsEnabled);
+            if (gibsEnabled && gibsManager) {
+                ImGui::Text("Active Surfels: %u / %u", gibsManager->getActiveSurfelCount(), gibsManager->getMaxSurfels());
+                ImGui::Text("Rays/Surfel: %u", gibsManager->getRaysPerSurfel());
+                ImGui::Text("Resolution Scale: %.2fx", gibsManager->getResolutionScale());
+
+                int qualityIdx = static_cast<int>(gibsQuality);
+                if (ImGui::Combo("Quality", &qualityIdx, "Low\0Medium\0High\0Ultra\0")) {
+                    gibsQuality = static_cast<GIBSQuality>(qualityIdx);
+                    gibsManager->setQuality(gibsQuality);
+                }
+            }
+            ImGui::TextDisabled("Surfel-based indirect diffuse lighting");
             ImGui::TreePop();
         }
 
