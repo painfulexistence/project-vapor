@@ -1,0 +1,83 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>ADR-002: CI Pipeline — Project Vapor</title>
+  <link rel="stylesheet" href="../styles/global.css">
+  <style>
+    .page-header { margin-bottom: 32px; }
+    .page-header h1 { font-size: 20px; }
+    h2 { font-size: 16px; margin: 36px 0 14px; }
+    h3 { color: var(--text-muted); }
+    p { margin-bottom: 14px; }
+    hr { margin: 36px 0; }
+  </style>
+</head>
+<body>
+  <nav>
+    <div class="nav-inner">
+      <a class="nav-logo" href="../index.html">Project Vapor</a>
+      <a href="../documentation/index.html">Docs</a>
+      <a href="index.html" class="active">Devlog</a>
+      <a href="../demo/index.html">Demo</a>
+      <a href="https://github.com/painfulexistence/project-vapor" target="_blank">GitHub ↗</a>
+    </div>
+  </nav>
+  <main>
+    <div class="page-header">
+      <div class="eyebrow">
+      <a href="index.html">Devlog</a> / ADR-002</div>
+      <h1>ADR-002: CI Pipeline Design</h1>
+      <div class="meta-row">
+        <span>2026-04-29</span>
+        <span><span class="badge badge-ok">Adopted</span></span>
+      </div>
+    </div>
+
+    <h2>Context</h2>
+    <p>No CI/CD pipeline existed. Merges had no automatic verification — breaking changes were only caught when someone manually built and ran the demo.</p>
+
+    <h2>Decision</h2>
+    <p>Create a two-job pipeline in <code>.github/workflows/ci.yml</code>:</p>
+    <ul>
+      <li><strong>test</strong> — compile and run unit test binaries only (no GPU, no demo app)</li>
+      <li><strong>build-check</strong> — runs after test passes; compiles the full Vapor library</li>
+    </ul>
+
+    <h2>Rationale</h2>
+
+    <h3>Why two jobs?</h3>
+    <p>Unit tests are much faster than a full build — test binaries have no Metal/Vulkan shader compilation. Putting tests first means logic errors are caught before waiting for the full build.</p>
+
+    <h3>Why macos-15?</h3>
+    <p>The primary development platform is macOS (Metal backend). The <code>macos-15</code> runner uses Apple Silicon (M1), matching the development environment. Linux/Vulkan CI requires a software renderer (SwiftShader/lavapipe) and is deferred.</p>
+
+    <h3>Why ccache?</h3>
+    <p>Metal shader compilation and vcpkg dependency builds are slow. ccache with <code>actions/cache</code> persists the compiler cache across runs, significantly reducing CI time on subsequent pushes.</p>
+
+    <h3>Why exclude Vaporware?</h3>
+    <p><code>main.cpp</code> requires a window system and Metal context. Neither is available on headless CI runners. CI compiles only to the Vapor library boundary.</p>
+
+    <h2>Constraints</h2>
+    <ul>
+      <li>No demo execution in CI</li>
+      <li>No GPU-dependent tests (Renderer, Physics3D require a device)</li>
+      <li>Vulkan CI deferred pending SwiftShader/lavapipe verification</li>
+    </ul>
+
+    <h2>Future Work</h2>
+    <ul>
+      <li>Linux runner for Vulkan backend build check</li>
+      <li>clang-tidy / clang-format lint job</li>
+      <li>Address sanitizer run (<code>-fsanitize=address</code> exists in dev preset but not CI)</li>
+    </ul>
+
+    <h2>Consequences</h2>
+    <ul>
+      <li><code>.github/workflows/ci.yml</code> created</li>
+      <li><code>CMakePresets.json</code> gains a <code>ci</code> preset inheriting <code>global-vcpkg</code>, using <code>$VCPKG_ROOT</code> env var</li>
+    </ul>
+  </main>
+</body>
+</html>

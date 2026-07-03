@@ -12,8 +12,8 @@ Checks: >
   -readability-misleading-indentation
 
 CheckOptions:
-  readability-identifier-naming.VariableCase: camelCase
-  readability-identifier-naming.FunctionCase: camelCase
+  readability-identifier-naming.VariableCase: camelBack
+  readability-identifier-naming.FunctionCase: camelBack
   readability-identifier-naming.TypeCase: CamelCase
   readability-identifier-naming.NamespaceCase: CamelCase
   readability-identifier-naming.ClassCase: CamelCase

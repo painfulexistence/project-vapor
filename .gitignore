@@ -1,8 +1,11 @@
 bin/
 build/
 build*/
+Testing/
 *.spv
 *.ini
+
+tmp/
 
 .vs/*
 .vscode/*
@@ -18,3 +21,5 @@ CMakeDoxyfile.in
 CMakeDoxygenDefaults.cmake
 cmake_install.cmake
 cmake_uninstall.cmake
+
+www/

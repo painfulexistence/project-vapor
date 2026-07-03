@@ -1,5 +1,6 @@
 #include "physics_debug_renderer.hpp"
 #include <Jolt/Jolt.h>
+
 #include <Jolt/Physics/Body/Body.h>
 #include <Jolt/Physics/Body/BodyLockInterface.h>
 #include <Jolt/Physics/Collision/Shape/BoxShape.h>
@@ -118,32 +119,32 @@ namespace Vapor {
 
         switch (shape->GetSubType()) {
         case JPH::EShapeSubType::Box: {
-            const JPH::BoxShape* box = static_cast<const JPH::BoxShape*>(shape);
+            const auto* box = static_cast<const JPH::BoxShape*>(shape);
             JPH::Vec3 half = box->GetHalfExtent();
             debugDraw->addBox(position, glm::vec3(half.GetX(), half.GetY(), half.GetZ()), rotation, color);
             break;
         }
 
         case JPH::EShapeSubType::Sphere: {
-            const JPH::SphereShape* sphere = static_cast<const JPH::SphereShape*>(shape);
+            const auto* sphere = static_cast<const JPH::SphereShape*>(shape);
             debugDraw->addSphere(position, sphere->GetRadius(), color);
             break;
         }
 
         case JPH::EShapeSubType::Capsule: {
-            const JPH::CapsuleShape* capsule = static_cast<const JPH::CapsuleShape*>(shape);
+            const auto* capsule = static_cast<const JPH::CapsuleShape*>(shape);
             debugDraw->addCapsule(position, capsule->GetHalfHeightOfCylinder(), capsule->GetRadius(), rotation, color);
             break;
         }
 
         case JPH::EShapeSubType::Cylinder: {
-            const JPH::CylinderShape* cylinder = static_cast<const JPH::CylinderShape*>(shape);
+            const auto* cylinder = static_cast<const JPH::CylinderShape*>(shape);
             debugDraw->addCylinder(position, cylinder->GetHalfHeight(), cylinder->GetRadius(), rotation, color);
             break;
         }
 
         case JPH::EShapeSubType::ConvexHull: {
-            const JPH::ConvexHullShape* hull = static_cast<const JPH::ConvexHullShape*>(shape);
+            const auto* hull = static_cast<const JPH::ConvexHullShape*>(shape);
 
             // Draw convex hull edges
             uint numFaces = hull->GetNumFaces();
@@ -192,7 +193,7 @@ namespace Vapor {
         }
 
         case JPH::EShapeSubType::RotatedTranslated: {
-            const JPH::RotatedTranslatedShape* rts = static_cast<const JPH::RotatedTranslatedShape*>(shape);
+            const auto* rts = static_cast<const JPH::RotatedTranslatedShape*>(shape);
             JPH::Vec3 localPos = rts->GetPosition();
             JPH::Quat localRot = rts->GetRotation();
 
@@ -204,21 +205,21 @@ namespace Vapor {
         }
 
         case JPH::EShapeSubType::Scaled: {
-            const JPH::ScaledShape* scaled = static_cast<const JPH::ScaledShape*>(shape);
+            const auto* scaled = static_cast<const JPH::ScaledShape*>(shape);
             // For simplicity, just draw the inner shape (scale handling would be complex)
             drawShape(scaled->GetInnerShape(), position, rotation, color);
             break;
         }
 
         case JPH::EShapeSubType::OffsetCenterOfMass: {
-            const JPH::OffsetCenterOfMassShape* offset = static_cast<const JPH::OffsetCenterOfMassShape*>(shape);
+            const auto* offset = static_cast<const JPH::OffsetCenterOfMassShape*>(shape);
             drawShape(offset->GetInnerShape(), position, rotation, color);
             break;
         }
 
         case JPH::EShapeSubType::StaticCompound:
         case JPH::EShapeSubType::MutableCompound: {
-            const JPH::CompoundShape* compound = static_cast<const JPH::CompoundShape*>(shape);
+            const auto* compound = static_cast<const JPH::CompoundShape*>(shape);
 
             for (uint i = 0; i < compound->GetNumSubShapes(); ++i) {
                 const JPH::CompoundShape::SubShape& sub = compound->GetSubShape(i);
@@ -253,7 +254,7 @@ namespace Vapor {
         }
     }
 
-    glm::vec4 PhysicsDebugRenderer::getBodyColor(const JPH::Body& body) const {
+    auto PhysicsDebugRenderer::getBodyColor(const JPH::Body& body) const -> glm::vec4 {
         if (!config.colorByState) {
             return config.defaultColor;
         }

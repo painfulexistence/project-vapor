@@ -1,0 +1,82 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Project Vapor</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Syne:wght@400;700;800&family=Plus+Jakarta+Sans:wght@300;400;500;600&family=Space+Mono:wght@400;700&display=swap" rel="stylesheet">
+  <link rel="stylesheet" href="styles/global.css">
+  <style>
+    .hero {
+      margin-bottom: 64px;
+      padding-top: 16px;
+    }
+    .hero h1 {
+      font-family: var(--font-display);
+      font-size: clamp(36px, 5vw, 64px);
+      font-weight: 800;
+      letter-spacing: 0.02em;
+      color: var(--text);
+      margin-bottom: 20px;
+      line-height: 1.1;
+    }
+    .hero p {
+      font-family: var(--font-body);
+      font-size: 15px;
+      color: var(--text-muted);
+      max-width: 580px;
+      line-height: 1.6;
+      margin-bottom: 0;
+    }
+  </style>
+</head>
+<body>
+  <nav>
+    <div class="nav-inner">
+      <a class="nav-logo" href="index.html">Project Vapor</a>
+      <a href="documentation/index.html">Documentation</a>
+      <a href="demo/index.html">Demo</a>
+      <a href="devlog/index.html">Devlog</a>
+      <a href="https://github.com/painfulexistence/project-vapor" target="_blank">GitHub ↗</a>
+    </div>
+  </nav>
+
+  <main>
+    <div class="hero">
+      <h1>Project Vapor</h1>
+      <p>A modern 3D game engine built from scratch in C++, targeting Metal and Vulkan. Solo project — GPU-driven rendering, ECS, physics integration, and a working demo game as the proving ground.</p>
+    </div>
+
+    <p class="section-label">// 01 · Explore</p>
+    <div class="card-grid">
+      <a class="card-outer" href="documentation/index.html">
+        <div class="card-inner">
+          <div class="card-tag">// reference</div>
+          <h2>Documentation</h2>
+          <p>Architecture, features, tech stack, and roadmap for the Vapor engine.</p>
+        </div>
+      </a>
+      <a class="card-outer" href="demo/index.html">
+        <div class="card-inner">
+          <div class="card-tag">// demo</div>
+          <h2>Demo</h2>
+          <p>Interactive demo of the engine in action. Native Metal/Vulkan — no WASM build yet.</p>
+        </div>
+      </a>
+      <a class="card-outer" href="devlog/index.html">
+        <div class="card-inner">
+          <div class="card-tag">// decisions</div>
+          <h2>Devlog</h2>
+          <p>Architecture Decision Records — what was chosen, what was rejected, and why.</p>
+        </div>
+      </a>
+    </div>
+  </main>
+
+  <footer>
+    <p>Project Vapor &mdash; MIT License &mdash; <a href="https://github.com/painfulexistence/project-vapor" target="_blank">GitHub</a></p>
+  </footer>
+</body>
+</html>

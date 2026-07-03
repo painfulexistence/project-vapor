@@ -1,0 +1,84 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>ADR-004: Graphics Header Split — Project Vapor</title>
+  <link rel="stylesheet" href="../styles/global.css">
+  <style>
+    .page-header { margin-bottom: 32px; }
+    .page-header h1 { font-size: 20px; }
+    h2 { font-size: 16px; margin: 36px 0 14px; }
+    p { margin-bottom: 14px; }
+    hr { margin: 36px 0; }
+  </style>
+</head>
+<body>
+  <nav>
+    <div class="nav-inner">
+      <a class="nav-logo" href="../index.html">Project Vapor</a>
+      <a href="../documentation/index.html">Docs</a>
+      <a href="index.html" class="active">Devlog</a>
+      <a href="../demo/index.html">Demo</a>
+      <a href="https://github.com/painfulexistence/project-vapor" target="_blank">GitHub ↗</a>
+    </div>
+  </nav>
+  <main>
+    <div class="page-header">
+      <div class="eyebrow">
+      <a href="index.html">Devlog</a> / ADR-004</div>
+      <h1>ADR-004: Graphics Header Split</h1>
+      <div class="meta-row">
+        <span>2026-04-29</span>
+        <span><span class="badge badge-ok">Adopted</span></span>
+      </div>
+    </div>
+
+    <h2>Context</h2>
+    <p><code>Vapor/include/Vapor/graphics.hpp</code> was a 543 LOC god header containing GPU handles, 2D batch structures, GPU layout structs, CPU-side mesh/material data, and visual effect structs — 40+ types in one file.</p>
+    <p>Any change to any struct triggered recompilation across all 14 files that included the header, regardless of which section actually changed.</p>
+
+    <h2>Decision</h2>
+    <p>Split <code>graphics.hpp</code> into five semantic sub-headers, keeping <code>graphics.hpp</code> as a zero-breakage umbrella include.</p>
+
+    <table>
+      <thead><tr><th>Sub-header</th><th>Contents</th></tr></thead>
+      <tbody>
+        <tr><td><code>graphics_handles.hpp</code></td><td><code>GPUHandle&lt;Tag&gt;</code> template + all handle typedefs</td></tr>
+        <tr><td><code>graphics_batch2d.hpp</code></td><td><code>BlendMode</code>, <code>Batch2DVertex</code>, <code>Batch2DUniforms</code>, <code>Batch2DStats</code></td></tr>
+        <tr><td><code>graphics_gpu_structs.hpp</code></td><td><code>MaterialData</code>, lights, <code>CameraData</code>, <code>InstanceData</code>, <code>Cluster</code>, <code>LightCullData</code>, <code>IBLCaptureData</code></td></tr>
+        <tr><td><code>graphics_mesh.hpp</code></td><td><code>AlphaMode</code>, <code>Image</code>, <code>Material</code>, <code>VertexData</code>, <code>Mesh</code></td></tr>
+        <tr><td><code>graphics_effects.hpp</code></td><td>Water, Atmosphere, VolumetricFog/Cloud, LightScattering, SunFlare, GPU particles</td></tr>
+      </tbody>
+    </table>
+
+    <h2>Additional Decision: Handle Type Safety</h2>
+    <p>The original four GPU handles (<code>PipelineHandle</code>, <code>BufferHandle</code>, <code>TextureHandle</code>, <code>RenderTargetHandle</code>) were structurally identical bare structs. The type system provided no protection against passing a <code>BufferHandle</code> where a <code>TextureHandle</code> was expected.</p>
+    <p>Replaced with a <code>GPUHandle&lt;Tag&gt;</code> template:</p>
+    <pre><code>template&lt;typename Tag&gt;
+struct GPUHandle {
+    Uint32 rid = UINT32_MAX;
+    bool valid() const { return rid != UINT32_MAX; }
+};
+using BufferHandle  = GPUHandle&lt;BufferHandleTag&gt;;
+using TextureHandle = GPUHandle&lt;TextureHandleTag&gt;;
+// ...</code></pre>
+    <p>Passing a <code>BufferHandle</code> where a <code>TextureHandle</code> is expected is now a compile error, at zero runtime cost.</p>
+
+    <h2>Migration</h2>
+    <ul>
+      <li>All existing <code>#include "graphics.hpp"</code> sites require no changes — the umbrella re-exports everything</li>
+      <li><code>graphics.cpp</code> switches to <code>#include "graphics_mesh.hpp"</code> (only needs <code>Mesh</code> implementation)</li>
+      <li>New files should include the most specific sub-header needed</li>
+    </ul>
+
+    <h2>Consequences</h2>
+    <ul>
+      <li>5 new header files</li>
+      <li><code>graphics.hpp</code> reduced to 15 lines</li>
+      <li>Handle types are no longer interchangeable in the GPU layer</li>
+      <li>New effect structs have a clear home (<code>graphics_effects.hpp</code>)</li>
+    </ul>
+  </main>
+</body>
+</html>

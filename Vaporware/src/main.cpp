@@ -19,16 +19,117 @@
 #include "Vapor/physics_3d.hpp"
 #include "Vapor/renderer.hpp"
 #include "Vapor/rmlui_manager.hpp"
+#include "Vapor/systems.hpp"
 #include "Vapor/rng.hpp"
 #include "Vapor/scene.hpp"
 #include <RmlUi/Core/ElementDocument.h>
 #include <entt/entt.hpp>
 
 
+#include "Vapor/scene_inspector.hpp"
+#include "Vapor/scene_serializer.hpp"
 #include "components.hpp"
+#include "pages/hud_page.hpp"
+#include "pages/letterbox_page.hpp"
+#include "pages/page_system.hpp"
+#include "scene_builder.hpp"
 #include "systems.hpp"
 
-entt::entity getActiveCamera(entt::registry& registry) {
+static void setupCustomDrawers(Vapor::SceneInspector& inspector) {
+    // Register app-specific components for auto field-by-field drawing.
+    inspector.registerComponent<PointLightComponent>("Point Light");
+    inspector.registerComponent<DirectionalLightComponent>("Directional Light");
+    inspector.registerComponent<CharacterIntent>("Character Intent");
+    inspector.registerComponent<CharacterControllerComponent>("Character Controller");
+    inspector.registerComponent<GrabbableComponent>("Grabbable");
+    inspector.registerComponent<FirstPersonCameraComponent>("First Person Camera");
+    inspector.registerComponent<AutoRotateComponent>("Auto Rotate");
+    inspector.registerComponent<DirectionalLightLogicComponent>("Directional Light Logic");
+    inspector.registerComponent<ChapterTitleComponent>("Chapter Title");
+    inspector.registerComponent<ChapterTitleTriggerComponent>("Chapter Title Trigger");
+    inspector.registerComponent<SceneTransitionComponent>("Scene Transition");
+    inspector.registerComponent<ScrollTextQueueComponent>("Scroll Text Queue");
+
+    // LightMovementLogicComponent — keep custom drawer for the named Pattern combo.
+    inspector.registerCustomDrawer([](entt::registry& reg, entt::entity e) {
+        if (auto* c = reg.try_get<LightMovementLogicComponent>(e)) {
+            if (ImGui::CollapsingHeader("Light Movement Logic", ImGuiTreeNodeFlags_DefaultOpen)) {
+                const char* patterns[] = { "Circle", "Figure8", "Linear", "Spiral" };
+                int p = static_cast<int>(c->pattern);
+                if (ImGui::Combo("pattern", &p, patterns, 4))
+                    c->pattern = static_cast<MovementPattern>(p);
+                ImGui::DragFloat("speed",      &c->speed,  0.01f);
+                ImGui::DragFloat("radius",     &c->radius, 0.1f, 0.0f, 100.0f);
+                ImGui::DragFloat("height",     &c->height, 0.1f, -50.0f, 50.0f);
+                ImGui::LabelText("timer", "%.2f", c->timer);
+            }
+        }
+    });
+
+    // CameraSwitchRequest — named combo for mode enum.
+    inspector.registerCustomDrawer([](entt::registry& reg, entt::entity e) {
+        if (auto* c = reg.try_get<CameraSwitchRequest>(e)) {
+            if (ImGui::CollapsingHeader("Camera Switch Request", ImGuiTreeNodeFlags_DefaultOpen)) {
+                const char* modes[] = { "Free", "Follow", "FirstPerson" };
+                int m = static_cast<int>(c->mode);
+                if (ImGui::Combo("mode", &m, modes, 3))
+                    c->mode = static_cast<CameraSwitchRequest::Mode>(m);
+            }
+        }
+    });
+
+    // SubtitleQueueComponent — cross-component FSM state lookup.
+    inspector.registerCustomDrawer([](entt::registry& reg, entt::entity e) {
+        if (auto* c = reg.try_get<SubtitleQueueComponent>(e)) {
+            if (ImGui::CollapsingHeader("Subtitle Queue", ImGuiTreeNodeFlags_DefaultOpen)) {
+                ImGui::LabelText("queue size",       "%zu", c->queue.size());
+                ImGui::LabelText("currentIndex",     "%d",  c->currentIndex);
+                ImGui::Checkbox("advanceRequested",  &c->advanceRequested);
+                ImGui::Checkbox("autoAdvance",       &c->autoAdvance);
+                ImGui::LabelText("displayTimer",     "%.2f", c->displayTimer);
+                if (auto* fsm = reg.try_get<Vapor::FSMStateComponent>(e)) {
+                    const char* states[] = {
+                        "Idle", "WaitingForVisible", "Displaying", "WaitingForHidden"
+                    };
+                    ImGui::LabelText("FSM state", "%s", states[fsm->currentState]);
+                    ImGui::LabelText("FSM time",  "%.2f", fsm->stateTime);
+                }
+            }
+        }
+    });
+
+    // SceneTransitionComponent — FSM state + progress bar.
+    inspector.registerCustomDrawer([](entt::registry& reg, entt::entity e) {
+        if (auto* c = reg.try_get<SceneTransitionComponent>(e)) {
+            if (ImGui::CollapsingHeader("Scene Transition (FSM)", ImGuiTreeNodeFlags_DefaultOpen)) {
+                if (auto* fsm = reg.try_get<Vapor::FSMStateComponent>(e)) {
+                    const char* states[] = {
+                        "Idle", "FadingInLoadingScreen", "UnloadingScene",
+                        "LoadingAssets", "BuildingScene", "FadingOutLoadingScreen"
+                    };
+                    ImGui::LabelText("state", "%s", states[fsm->currentState]);
+                }
+                ImGui::ProgressBar(c->progress);
+            }
+        }
+    });
+
+    // Tag components — colored bullet headers (no fields).
+    inspector.registerCustomDrawer([](entt::registry& reg, entt::entity e) {
+        if (reg.all_of<PersistentTag>(e)) {
+            ImGui::PushStyleColor(ImGuiCol_Header, ImVec4(0.2f, 0.4f, 0.2f, 1.0f));
+            ImGui::CollapsingHeader("PersistentTag", ImGuiTreeNodeFlags_Leaf | ImGuiTreeNodeFlags_Bullet);
+            ImGui::PopStyleColor();
+        }
+        if (reg.all_of<DeadTag>(e)) {
+            ImGui::PushStyleColor(ImGuiCol_Header, ImVec4(0.5f, 0.1f, 0.1f, 1.0f));
+            ImGui::CollapsingHeader("DeadTag", ImGuiTreeNodeFlags_Leaf | ImGuiTreeNodeFlags_Bullet);
+            ImGui::PopStyleColor();
+        }
+    });
+}
+
+auto getActiveCamera(entt::registry& registry) -> entt::entity {
     auto view = registry.view<Vapor::VirtualCameraComponent>();
     for (auto entity : view) {
         if (view.get<Vapor::VirtualCameraComponent>(entity).isActive) {
@@ -38,7 +139,7 @@ entt::entity getActiveCamera(entt::registry& registry) {
     return entt::null;
 }
 
-int main(int argc, char* args[]) {
+auto main(int argc, char* args[]) -> int {
     args::ArgumentParser parser{ "This is Project Vapor." };
     args::Group windowGroup(parser, "Window:");
     args::ValueFlag<Uint32> width(windowGroup, "number", "Window width", { 'w', "width" }, 1280);
@@ -90,12 +191,15 @@ int main(int argc, char* args[]) {
 #endif
 
     auto window = SDL_CreateWindow(winTitle, width.Get(), height.Get(), winFlags);
+    if (!window) {
+        fmt::print(stderr, "Failed to create SDL_Window: {}\n", SDL_GetError());
+        return 1;
+    }
     int windowWidth, windowHeight;
     SDL_GetWindowSize(window, &windowWidth, &windowHeight);
 
     IMGUI_CHECKVERSION();
     ImGui::CreateContext();
-    // ImGui::StyleColorsDark();
     ImGui::GetIO().ConfigFlags |= ImGuiConfigFlags_DockingEnable;
 
     // Initialization
@@ -107,8 +211,35 @@ int main(int argc, char* args[]) {
     auto renderer = createRenderer(gfxBackend);
     renderer->init(window);
 
+    // Optional: load an external HDRI for IBL instead of the procedural sky.
+    // Place your .hdr file at:  <assets>/textures/env/sky.hdr
+    // and uncomment the line below:
+    // renderer->loadHDRI("textures/env/sky.hdr");
+
+    // Scene serializer — engine pre-registers transform/meshRenderer;
+    // game registers game-specific component writers.
+    Vapor::SceneSerializer sceneSerializer;
+    sceneSerializer.registerComponent("autoRotate",
+        [](Vapor::json& out, entt::registry& reg, entt::entity e) {
+            if (auto* c = reg.try_get<AutoRotateComponent>(e))
+                out = { {"axis", Vapor::toJson(c->axis)}, {"speed", c->speed} };
+        });
+
+    Vapor::SceneInspector sceneInspector;
+    sceneInspector.attachSerializer(sceneSerializer);
+    sceneInspector.setGltfPath("models/Sponza/Sponza.gltf", /*optimized=*/true);
+    // Exclude GLTF-spawned geometry — the inspector decides what to serialize,
+    // not the serializer.
+    sceneInspector.setEntityProvider([](entt::registry& reg) {
+        std::vector<entt::entity> out;
+        for (auto e : reg.storage<entt::entity>())
+            if (!reg.all_of<SceneGeometryTag>(e)) out.push_back(e);
+        return out;
+    });
+    setupCustomDrawers(sceneInspector);
+
     // Load a font for text rendering
-    FontHandle gameFont = renderer->loadFont("assets/fonts/Arial Black.ttf", 48.0f);
+    FontHandle gameFont = renderer->loadFont("fonts/Arial Black.ttf", 48.0f);
     if (gameFont.isValid()) {
         fmt::print("Font loaded successfully\n");
     } else {
@@ -116,9 +247,29 @@ int main(int argc, char* args[]) {
     }
 
     // Load a sprite texture for 2D/3D batch rendering demo
-    auto spriteImage = AssetManager::loadImage("assets/textures/default_albedo.png");
+    auto spriteImage = AssetManager::loadImage("textures/default_albedo.png");
     TextureHandle spriteTexture = renderer->createTexture(spriteImage);
     fmt::print("Sprite texture loaded\n");
+
+    // Create a render texture for render-to-texture demo
+    RenderTextureDesc rtDesc;
+    rtDesc.width = 512;
+    rtDesc.height = 512;
+    rtDesc.hasDepth = true;
+    rtDesc.hdr = true;// HDR for post-processing effects
+    RenderTextureHandle renderTexture = renderer->createRenderTexture(rtDesc);
+    fmt::print("Render texture created: {}x{}\n", rtDesc.width, rtDesc.height);
+
+    // Camera for the render texture (different angle from main camera)
+    Camera rtCamera(
+        glm::vec3(5.0f, 3.0f, 5.0f),// Eye position
+        glm::vec3(0.0f, 0.0f, 0.0f),// Look at origin
+        glm::vec3(0.0f, 1.0f, 0.0f),// Up
+        glm::radians(60.0f),// FOV
+        1.0f,// Aspect (square)
+        0.1f,// Near
+        100.0f// Far
+    );
 
     if (engineCore->initRmlUI(windowWidth, windowHeight) && renderer->initUI()) {
         fmt::print("RmlUI System Initialized\n");
@@ -133,27 +284,40 @@ int main(int argc, char* args[]) {
     // Resource loading
     auto& resourceManager = engineCore->getResourceManager();
 
+    // Register single-frame atlas for the demo sprite texture
+    SpriteAtlas demoAtlas;
+    demoAtlas.name    = "demo_sprite";
+    demoAtlas.texture = spriteTexture;
+    demoAtlas.size    = glm::vec2(1.0f, 1.0f);
+    demoAtlas.frames.push_back(SpriteFrame{
+        "default", {0.0f, 0.0f, 1.0f, 1.0f}, {1.0f, 1.0f}, {0.0f, 0.0f}, {0.5f, 0.5f}, false
+    });
+    demoAtlas.nameToIndex["default"] = 0;
+    AtlasHandle demoAtlasHandle = resourceManager.registerAtlas("demo_sprite", std::move(demoAtlas));
+
     fmt::print("Loading scene asynchronously...\n");
     auto sceneResource = resourceManager.loadScene(
-        std::string("assets/models/Sponza/Sponza.gltf"),
+        std::string("models/Sponza/Sponza.gltf"),
         true,// optimized
         Vapor::LoadMode::Async,
-        [](std::shared_ptr<Scene> loadedScene) {
-            fmt::print("Scene loaded with {} nodes\n", loadedScene->nodes.size());
+        [](std::shared_ptr<Scene> loadedScene) -> void {
+            fmt::print("Scene loaded with {} staged meshes\n", loadedScene->stagedMeshes.size());
         }
     );
     auto albedoResource =
-        resourceManager.loadImage(std::string("assets/textures/american_walnut_albedo.png"), Vapor::LoadMode::Async);
+        resourceManager.loadImage(std::string("textures/american_walnut_albedo.png"), Vapor::LoadMode::Async);
     auto normalResource =
-        resourceManager.loadImage(std::string("assets/textures/american_walnut_normal.png"), Vapor::LoadMode::Async);
+        resourceManager.loadImage(std::string("textures/american_walnut_normal.png"), Vapor::LoadMode::Async);
     auto roughnessResource =
-        resourceManager.loadImage(std::string("assets/textures/american_walnut_roughness.png"), Vapor::LoadMode::Async);
+        resourceManager.loadImage(std::string("textures/american_walnut_roughness.png"), Vapor::LoadMode::Async);
 
     // NOTES: optionally call resourceManager.waitForAll();
 
     auto scene = sceneResource->get();
+    // Record how many meshes the GLTF scene contributes before buildScene adds more
+    const size_t sponzaMeshCount = scene->stagedMeshes.size();
 
-    auto material = std::make_shared<Material>(Material{
+    auto material = std::make_shared<Vapor::Material>(Vapor::Material{
         .albedoMap = albedoResource->get(),
         .normalMap = normalResource->get(),
         .roughnessMap = roughnessResource->get(),
@@ -161,161 +325,78 @@ int main(int argc, char* args[]) {
 
     entt::registry registry;
 
-    auto cube1 = registry.create();
+    // Wire the recorder into the renderer: registers the engine ImGui window
+    // (recording controls) and sets the output directory.
     {
-        auto& transform = registry.emplace<Vapor::TransformComponent>(cube1);
-        transform.position = glm::vec3(-2.0f, 0.5f, 0.0f);
-        auto& col = registry.emplace<Vapor::BoxColliderComponent>(cube1);
-        col.halfSize = glm::vec3(.5f, .5f, .5f);
-        auto& rb = registry.emplace<Vapor::RigidbodyComponent>(cube1);
-        rb.motionType = BodyMotionType::Dynamic;
-
-        auto node = scene->createNode("Cube 1");
-        scene->addMeshToNode(node, MeshBuilder::buildCube(1.0f, material));
-        node->setPosition(transform.position);
-        node->body = physics->createBoxBody(col.halfSize, transform.position, transform.rotation, rb.motionType);
-        physics->addBody(node->body, true);
-
-        auto& nodeRef = registry.emplace<SceneNodeReferenceComponent>(cube1);
-        nodeRef.node = node;
-
-        auto& rotateComp = registry.emplace<AutoRotateComponent>(cube1);
-        rotateComp.axis = glm::vec3(0.0f, 1.0f, -1.0f);
-        rotateComp.speed = 1.5f;
+        const char* basePath = SDL_GetBasePath();
+        std::string outputDir = basePath ? std::string(basePath) + "output" : "output";
+        engineCore->attachRenderer(renderer.get(), outputDir);
     }
 
-    auto cube2 = registry.create();
-    {
-        auto& transform = registry.emplace<Vapor::TransformComponent>(cube2);
-        transform.position = glm::vec3(2.0f, 0.5f, 0.0f);
-        auto& col = registry.emplace<Vapor::BoxColliderComponent>(cube2);
-        col.halfSize = glm::vec3(.5f, .5f, .5f);
-        auto& rb = registry.emplace<Vapor::RigidbodyComponent>(cube2);
-        rb.motionType = BodyMotionType::Dynamic;
-
-        auto node = scene->createNode("Cube 2");
-        scene->addMeshToNode(node, MeshBuilder::buildCube(1.0f, material));
-        node->setPosition(transform.position);
-        node->body = physics->createBoxBody(col.halfSize, transform.position, transform.rotation, rb.motionType);
-        physics->addBody(node->body, true);
-
-        auto& nodeRef = registry.emplace<SceneNodeReferenceComponent>(cube2);
-        nodeRef.node = node;
-    }
-
-    auto floor = registry.create();
-    {
-        auto& transform = registry.emplace<Vapor::TransformComponent>(floor);
-        transform.position = glm::vec3(0.0f, -0.5f, 0.0f);
-        auto& col = registry.emplace<Vapor::BoxColliderComponent>(floor);
-        col.halfSize = glm::vec3(50.0f, .5f, 50.0f);
-        auto& rb = registry.emplace<Vapor::RigidbodyComponent>(floor);
-        rb.motionType = BodyMotionType::Static;
-
-        auto node = scene->createNode("Floor");
-        node->setPosition(transform.position);
-        node->body = physics->createBoxBody(col.halfSize, transform.position, transform.rotation, rb.motionType);
-        physics->addBody(node->body, false);
-
-        auto& nodeRef = registry.emplace<SceneNodeReferenceComponent>(floor);
-        nodeRef.node = node;
-    }
-
-    scene->directionalLights.push_back({
-        .direction = glm::vec3(0.5, -1.0, 0.0),
-        .color = glm::vec3(1.0, 1.0, 1.0),
-        .intensity = 10.0,
+    renderer->setImGuiCallback([&]() {
+        sceneInspector.draw(registry);
     });
-    auto sunLight = registry.create();
-    {
-        auto& ref = registry.emplace<SceneDirectionalLightReferenceComponent>(sunLight);
-        ref.lightIndex = 0;
 
-        auto& logic = registry.emplace<DirectionalLightLogicComponent>(sunLight);
-        logic.baseDirection = glm::vec3(0.5, -1.0, 0.0);
-        logic.speed = 0.5f;
-        logic.magnitude = 0.05f;
-    }
+    auto [sceneBuilt, materialBuilt, cube1, global] =
+        buildScene(registry, *physics, scene, material, windowWidth, windowHeight, rng);
 
-    for (int i = 0; i < 8; i++) {
-        scene->pointLights.push_back({ .position = glm::vec3(
-                                           rng.RandomFloatInRange(-5.0f, 5.0f),
-                                           rng.RandomFloatInRange(0.0f, 5.0f),
-                                           rng.RandomFloatInRange(-5.0f, 5.0f)
-                                       ),
-                                       .color = glm::vec3(rng.RandomFloat(), rng.RandomFloat(), rng.RandomFloat()),
-                                       .intensity = 5.0f * rng.RandomFloat(),
-                                       .radius = 0.5f });
-    }
-    for (int i = 0; i < scene->pointLights.size(); ++i) {
-        auto e = registry.create();
-
-        auto& ref = registry.emplace<ScenePointLightReferenceComponent>(e);
-        ref.lightIndex = i;
-
-        auto& logic = registry.emplace<LightMovementLogicComponent>(e);
-        logic.speed = 0.5f;
-        logic.timer = i * 0.1f;// Offset start time
-
-        switch (i % 4) {
-        case 0:
-            logic.pattern = MovementPattern::Circle;
-            logic.radius = 3.0f;
-            logic.height = 1.5f;
-            break;
-        case 1:
-            logic.pattern = MovementPattern::Figure8;
-            logic.radius = 3.0f;// Base radius, logic adds 1.0
-            break;
-        case 2:
-            logic.pattern = MovementPattern::Linear;
-            logic.radius = 3.0f;// Base radius
-            break;
-        case 3:
-            logic.pattern = MovementPattern::Spiral;
-            break;
-        }
-    }
-
-    auto flyCam = registry.create();
-    {
-        auto& cam = registry.emplace<Vapor::VirtualCameraComponent>(flyCam);
-        cam.isActive = true;// Start active
-        cam.fov = glm::radians(60.0f);
-        cam.aspect = (float)windowWidth / (float)windowHeight;
-        cam.position = glm::vec3(0.0f, 0.0f, 3.0f);// Set initial position directly
-
-        auto& fly = registry.emplace<FlyCameraComponent>(flyCam);
-        fly.moveSpeed = 5.0f;
-
-        registry.emplace<CharacterIntent>(flyCam);
-    }
-
-    auto followCam = registry.create();
-    {
-        auto& cam = registry.emplace<Vapor::VirtualCameraComponent>(followCam);
-        cam.isActive = false;
-        cam.aspect = (float)windowWidth / (float)windowHeight;
-        cam.position = glm::vec3(0.0f, 2.0f, 5.0f);// Initial pos
-
-        auto& follow = registry.emplace<FollowCameraComponent>(followCam);
-        follow.target = cube1;
-        follow.offset = glm::vec3(0.0f, 2.0f, 5.0f);
-    }
-
-    auto hud = registry.create();
-    {
-        auto& hudState = registry.emplace<HUDComponent>(hud);
-        hudState.documentPath = "assets/ui/hud.rml";
-        hudState.isVisible = false;
-    }
-
-    auto global = registry.create();
-
-    scene->update(0.0f);
-    // TODO: migrate to body create system (remember to use body destroy system, too)
-    // BodyCreateSystem::update(registry, physics.get());
     renderer->stage(scene);
+
+    // Convert GLTF scene meshes to ECS entities so they appear in the inspector
+    // and are rendered through the unified registry draw path.
+    for (size_t i = 0; i < sponzaMeshCount && i < scene->stagedMeshes.size(); ++i) {
+        auto& mesh = scene->stagedMeshes[i];
+        const glm::mat4& worldMat =
+            i < scene->stagedMeshTransforms.size() ? scene->stagedMeshTransforms[i] : glm::identity<glm::mat4>();
+
+        auto e = registry.create();
+        registry.emplace<Vapor::NameComponent>(e, Vapor::NameComponent{ fmt::format("Sponza_{}", i) });
+        auto& tc = registry.emplace<Vapor::TransformComponent>(e);
+        // Decompose baked world matrix so the inspector shows meaningful values
+        tc.position = glm::vec3(worldMat[3]);
+        tc.scale = glm::vec3(
+            glm::length(glm::vec3(worldMat[0])),
+            glm::length(glm::vec3(worldMat[1])),
+            glm::length(glm::vec3(worldMat[2]))
+        );
+        if (tc.scale.x > 0.0f && tc.scale.y > 0.0f && tc.scale.z > 0.0f) {
+            glm::mat3 rotMat(
+                glm::vec3(worldMat[0]) / tc.scale.x,
+                glm::vec3(worldMat[1]) / tc.scale.y,
+                glm::vec3(worldMat[2]) / tc.scale.z
+            );
+            tc.rotation = glm::quat_cast(rotMat);
+        }
+        tc.worldTransform = worldMat;
+        tc.isDirty = false;// worldTransform already correct; skip TransformSystem
+        auto& mrc = registry.emplace<Vapor::MeshRendererComponent>(e);
+        mrc.meshes.push_back(mesh);
+        registry.emplace<SceneGeometryTag>(e);// marks GLTF-spawned geometry for serializer
+    }
+    // Clear stagedMeshes: GLTF meshes are now ECS entities; manually built
+    // meshes (cubes, floor) are already in MeshRendererComponent and were
+    // staged (materialID/instanceID set) so their mesh objects remain valid.
+    scene->stagedMeshes.clear();
+    scene->stagedMeshTransforms.clear();
+
+    // Demo sprite entity — replaces the old drawRotatedQuad2D(spriteTexture) call
+    {
+        auto spriteEntity = registry.create();
+        registry.emplace<Vapor::NameComponent>(spriteEntity, Vapor::NameComponent{"DemoSprite"});
+        auto& tc = registry.emplace<Vapor::TransformComponent>(spriteEntity);
+        tc.position = glm::vec3(650.0f, 100.0f, 0.0f);
+        tc.isDirty  = true;
+        auto& sc    = registry.emplace<Vapor::SpriteComponent>(spriteEntity);
+        sc.atlas      = demoAtlasHandle;
+        sc.frameIndex = 0;
+        sc.size       = glm::vec2(40.0f, 40.0f);
+        sc.tint       = glm::vec4(1.0f);
+        registry.emplace<AutoRotateComponent>(spriteEntity, AutoRotateComponent{
+            .axis  = glm::vec3(0.0f, 0.0f, 1.0f),
+            .speed = 2.0f
+        });
+    }
+
 
     Uint32 frameCount = 0;
     float time = SDL_GetTicks() / 1000.0f;
@@ -345,31 +426,72 @@ int main(int argc, char* args[]) {
             }
             case SDL_EVENT_KEY_DOWN: {
                 if (e.key.scancode == SDL_SCANCODE_ESCAPE) {
-                    quit = true;
+                    if (PageSystem::isTopOfStack(registry, PageID::PauseMenu)) {
+                        PageSystem::pop(registry);
+                    } else if (PageSystem::isStackEmpty(registry)) {
+                        PageSystem::push(registry, PageID::PauseMenu);
+                    } else {
+                        quit = true;
+                    }
                 }
-                if (e.key.scancode == SDL_SCANCODE_H) {
-                    auto view = registry.view<HUDComponent>();
-                    for (auto entity : view) {
-                        auto& hud = view.get<HUDComponent>(entity);
-                        hud.isVisible = !hud.isVisible;
-                        fmt::print("HUD Visibility toggled: {}\n", hud.isVisible);
+                if (e.key.scancode == SDL_SCANCODE_F5) {
+                    auto* hudPage = PageSystem::getPage<HUDPage>(registry, PageID::HUD);
+                    if (hudPage) {
+                        bool nowVisible = !hudPage->isFullyVisible();
+                        if (nowVisible)
+                            PageSystem::show(registry, PageID::HUD);
+                        else
+                            PageSystem::hide(registry, PageID::HUD);
+                        fmt::print("HUD toggled: {}\n", nowVisible ? "on" : "off");
                     }
                 }
                 if (e.key.scancode == SDL_SCANCODE_F3) {
                     physics->setDebugEnabled(!physics->isDebugEnabled());
                     fmt::print("Physics Debug Renderer: {}\n", physics->isDebugEnabled() ? "Enabled" : "Disabled");
                 }
+                if (e.key.scancode == SDL_SCANCODE_RETURN) {
+                    registry.view<ScrollTextQueueComponent>().each([](auto& q) { q.advanceRequested = true; });
+                }
+                if (e.key.scancode == SDL_SCANCODE_F6) {
+                    auto* lb = PageSystem::getPage<LetterboxPage>(registry, PageID::Letterbox);
+                    if (lb) {
+                        bool open = !lb->isOpen();
+                        if (open)
+                            PageSystem::show(registry, PageID::Letterbox);
+                        else
+                            PageSystem::hide(registry, PageID::Letterbox);
+                        fmt::print("Letterbox toggled: {}\n", open ? "opening" : "closing");
+                    }
+                }
+                if (e.key.scancode == SDL_SCANCODE_F7) {
+                    auto view = registry.view<SubtitleQueueComponent, Vapor::FSMStateComponent>();
+                    for (auto entity : view) {
+                        auto& q = view.get<SubtitleQueueComponent>(entity);
+                        auto& fsm = view.get<Vapor::FSMStateComponent>(entity);
+                        if (q.currentIndex >= (int)q.queue.size() - 1 && fsm.currentState == SubtitleStates::Idle) {
+                            q.restartRequested = true;
+                            fmt::print("Subtitles restarted\n");
+                        } else {
+                            q.advanceRequested = true;
+                        }
+                    }
+                }
+                if (e.key.scancode == SDL_SCANCODE_F8) {
+                    registry.view<ChapterTitleTriggerComponent>().each([](auto& t) {
+                        t.number = "Chapter I";
+                        t.title = "The Beginning";
+                        t.showRequested = true;
+                    });
+                    fmt::print("Chapter title requested\n");
+                }
                 break;
             }
             case SDL_EVENT_WINDOW_RESIZED: {
                 windowWidth = e.window.data1;
                 windowHeight = e.window.data2;
-                // renderer->resize(windowWidth, windowHeight);
-                // engineCore->onWindowResize(windowWidth, windowHeight);
-
                 // Update Camera Aspect Ratio
                 auto view = registry.view<Vapor::VirtualCameraComponent>();
-                view.each([&](auto& cam) { cam.aspect = (float)windowWidth / (float)windowHeight; });
+                view.each([&](auto& cam) -> auto { cam.aspect = (float)windowWidth / (float)windowHeight; });
                 break;
             }
             default:
@@ -387,7 +509,7 @@ int main(int argc, char* args[]) {
             auto& request = registry.emplace_or_replace<CameraSwitchRequest>(global);
             request.mode = CameraSwitchRequest::Mode::Follow;
         }
-        registry.view<CharacterIntent>().each([&](auto& intent) {
+        registry.view<CharacterIntent>().each([&](auto& intent) -> auto {
             intent.lookVector = inputState.getVector(
                 Vapor::InputAction::LookLeft,
                 Vapor::InputAction::LookRight,
@@ -407,17 +529,28 @@ int main(int argc, char* args[]) {
 
         // Gameplay updates
         CameraSwitchSystem::update(registry, global);
-        updateCameraSystem(registry, deltaTime);
-        updateAutoRotateSystem(registry, deltaTime);
-        updateLightMovementSystem(registry, scene.get(), deltaTime);
-        updateHUDSystem(registry, engineCore->getRmlUiManager(), deltaTime);
+        CameraSystem::update(registry, deltaTime);
+        AutoRotateSystem::update(registry, deltaTime);
+        LightMovementSystem::update(registry, deltaTime);
+        // Subtitle systems (split into single-responsibility)
+        SubtitleInputSystem::update(registry);
+        SubtitlePageSensorSystem::update(registry);
+        SubtitleTimerSystem::update(registry, deltaTime);
+        Vapor::FSMInitSystem::update(registry);
+        Vapor::FSMSystem::update(registry, deltaTime);
+        SubtitleActionSystem::update(registry);
+        ScrollTextQueueSystem::update(registry);
+        ChapterTitleTriggerSystem::update(registry);
+        PageSystem::update(registry, engineCore->getRmlUiManager(), deltaTime);
 
         // Engine updates
         engineCore->update(deltaTime);
 
-        scene->update(deltaTime);
-        physics->process(scene, deltaTime);
-        scene->update(deltaTime);
+        physics->process(registry, deltaTime);
+        Vapor::TransformSystem::update(registry);
+        LightGatherSystem::update(registry, scene.get());
+        FlipbookSystem::update(registry, deltaTime);
+        SpriteRenderSystem::update(registry, renderer.get(), &resourceManager);
 
         // Rendering
         entt::entity activeCamEntity = getActiveCamera(registry);
@@ -460,14 +593,6 @@ int main(int argc, char* args[]) {
                 glm::vec2(580.0f, 70.0f),
                 glm::vec4(0.5f, 0.0f, 1.0f, 1.0f)
             );
-            renderer->drawRotatedQuad2D(
-                glm::vec2(650.0f, 100.0f),
-                glm::vec2(40.0f, 40.0f),
-                time * 2.0f,// rotation in radians
-                spriteTexture,
-                glm::vec4(1.0f, 1.0f, 1.0f, 1.0f)
-            );
-
             // ===== Text Rendering Demo (Screen Space) =====
             if (gameFont.isValid()) {
                 // Draw text at screen positions (pixel coordinates)
@@ -476,7 +601,11 @@ int main(int argc, char* args[]) {
                 );
 
                 renderer->drawText2D(
-                    gameFont, "Press H to toggle HUD", glm::vec2(50.0f, 250.0f), 0.5f, glm::vec4(0.8f, 0.8f, 0.8f, 1.0f)
+                    gameFont,
+                    "F5: HUD | F6: Letterbox | F7: Subtitles",
+                    glm::vec2(50.0f, 250.0f),
+                    0.5f,
+                    glm::vec4(0.8f, 0.8f, 0.8f, 1.0f)
                 );
 
                 // Show FPS
@@ -489,15 +618,40 @@ int main(int argc, char* args[]) {
                 );
             }
 
+            // ===== Render-to-Texture Demo =====
+            // Update RT camera to orbit around the scene
+            float rtAngle = time * 0.5f;
+            rtCamera.setEye(glm::vec3(sin(rtAngle) * 8.0f, 4.0f, cos(rtAngle) * 8.0f));
+            rtCamera.setCenter(glm::vec3(0.0f, 0.0f, 0.0f));
+
+            // Render scene to texture with different camera angle
+            renderer->renderToTexture(renderTexture, scene, rtCamera, glm::vec4(0.1f, 0.1f, 0.15f, 1.0f));
+
+            // Apply post-processing effects to the render texture
+            renderer->applyBloom(renderTexture, 0.8f, 0.3f);
+            renderer->applyToneMapping(renderTexture, 1.2f);
+
+            // Get the render texture as a regular texture for drawing
+            TextureHandle rtTexHandle = renderer->getRenderTextureAsTexture(renderTexture);
+
             // ===== 3D Batch Demo =====
             renderer->drawQuad3D(
                 glm::vec3(0.0f, 2.0f, 0.0f), glm::vec2(1.0f, 1.0f), spriteTexture, glm::vec4(1.0f, 0.5f, 0.5f, 1.0f)
             );
 
-            renderer->draw(scene, tempCamera);
-        } else {
-            // Fallback camera or warning
-            // fmt::print(stderr, "Warning: No active camera found for rendering.\n");
+            // Draw the render texture on a 3D quad (like a TV screen in the world)
+            if (rtTexHandle.valid()) {
+                // Create a transform for the "TV screen"
+                glm::mat4 tvTransform = glm::mat4(1.0f);
+                tvTransform = glm::translate(tvTransform, glm::vec3(-3.0f, 2.0f, 0.0f));
+                tvTransform = glm::rotate(tvTransform, glm::radians(30.0f), glm::vec3(0.0f, 1.0f, 0.0f));
+                tvTransform = glm::scale(tvTransform, glm::vec3(2.0f, 2.0f, 1.0f));
+
+                renderer->drawQuad3D(tvTransform, rtTexHandle, nullptr, glm::vec4(1.0f));
+            }
+
+
+            renderer->draw(registry, scene, tempCamera);
         }
 
         frameCount++;

@@ -9,8 +9,11 @@
 #include <SDL3/SDL_video.h>
 #include <array>
 #include <memory>
+#include <mutex>
+#include <os/signpost.h>
 #include <string>
 #include <unordered_map>
+#include <vector>
 
 #include "debug_draw.hpp"
 #include "graphics.hpp"
@@ -24,11 +27,14 @@ class Renderer_Metal;
 class PrePass;
 class TLASBuildPass;
 class NormalResolvePass;
+class VelocityPass;
 class TileCullingPass;
 class CSMDepthPass;
 class RaytraceShadowPass;
 class HybridShadowPass;
 class RaytraceAOPass;
+class AOTemporalPass;
+class AODenoisePass;
 class SkyAtmospherePass;
 class SkyCapturePass;
 class IrradianceConvolutionPass;
@@ -55,15 +61,153 @@ class DebugDrawPass;
 class CanvasPass;
 class WorldCanvasPass;
 
+class PSSMShadowPass;
+class PSSMResolvePass;
+class StochasticPointShadowPass;
+class PointShadowTemporalPass;
+
+struct GpuPassTiming {
+    std::string name;
+    double gpuTimeMs = 0.0;
+    uint64_t estimatedBytes = 0; // estimated minimum memory traffic (attachment load/store + pass-reported)
+};
+
+// Signpost log for render pass intervals — shows up in Instruments' Points of
+// Interest track so passes can be matched by name against the GPU timeline.
+inline os_log_t vaporRenderGraphLog() {
+    static os_log_t log = os_log_create("com.projectvapor.rendergraph", OS_LOG_CATEGORY_POINTS_OF_INTEREST);
+    return log;
+}
+
+inline uint64_t vaporPixelFormatBytes(MTL::PixelFormat fmt) {
+    switch (fmt) {
+        case MTL::PixelFormatR8Unorm: return 1;
+        case MTL::PixelFormatR16Float:
+        case MTL::PixelFormatRG8Unorm: return 2;
+        case MTL::PixelFormatDepth32Float_Stencil8: return 5;
+        case MTL::PixelFormatRG16Float:
+        case MTL::PixelFormatRGBA16Float: return 8;
+        case MTL::PixelFormatRG32Float: return 8;
+        case MTL::PixelFormatRGBA32Float: return 16;
+        default: return 4; // RGBA8/BGRA8(+sRGB), R32Float, RG11B10, RGB10A2, Depth32Float, ...
+    }
+}
+
+// Minimum bytes an attachment moves between tile and device memory, given its
+// load/store actions. MS textures load/store sampleCount layers; a resolve
+// writes one.
+inline uint64_t vaporAttachmentTrafficBytes(const MTL::Texture* tex, MTL::LoadAction load, MTL::StoreAction store) {
+    uint64_t bytes1x = static_cast<uint64_t>(tex->width()) * tex->height() * vaporPixelFormatBytes(tex->pixelFormat());
+    uint64_t sc = tex->sampleCount();
+    uint64_t total = 0;
+    if (load == MTL::LoadActionLoad) total += bytes1x * sc;
+    if (store == MTL::StoreActionStore || store == MTL::StoreActionStoreAndMultisampleResolve) total += bytes1x * sc;
+    if (store == MTL::StoreActionMultisampleResolve || store == MTL::StoreActionStoreAndMultisampleResolve) total += bytes1x;
+    return total;
+}
+
 class RenderPass {
 public:
-    explicit RenderPass(Renderer_Metal* renderer) : renderer(renderer) {
-    }
+    explicit RenderPass(Renderer_Metal* renderer) : renderer(renderer) {}
     virtual ~RenderPass() = default;
     virtual void execute() = 0;
     virtual const char* getName() const = 0;
 
     bool enabled = true;
+
+    // Timing context — set by RenderGraph before each execute().
+    // Slot layout: beginIdx = end slot of previous pass (or frame-start slot for first pass).
+    //              endIdx   = end slot of this pass.
+    // beginIdx[N] == endIdx[N-1], guaranteed by RenderGraph — no prevEnd heuristic needed.
+    MTL::CounterSampleBuffer* m_timingSampleBuf = nullptr;
+    NS::UInteger m_timingBeginIdx = MTL::CounterDontSample;
+    NS::UInteger m_timingEndIdx   = MTL::CounterDontSample;
+    // True only for the first pass that actually runs; it is responsible for sampling the frame-start slot.
+    bool m_sampleBegin = false;
+    // Set to true by a timing helper when wantEnd=true (end slot written); stays false on early-return.
+    bool m_didWriteTimingSamples = false;
+    // Estimated minimum memory traffic this frame. Render passes accumulate attachment
+    // load/store traffic automatically via applyTimingToRenderDesc; compute/blit passes
+    // report their texture/buffer traffic manually via addTrafficEstimate. Reset by
+    // RenderGraph before each execute(). Excludes texture sampling unless reported.
+    uint64_t m_estimatedBytes = 0;
+
+    void addTrafficEstimate(uint64_t bytes) {
+        m_estimatedBytes += bytes;
+    }
+
+    // Attach counter-sample endpoints to an existing MTLRenderPassDescriptor.
+    // wantBegin: first encoder of a multi-encoder pass (suppressed automatically for non-first passes).
+    // wantEnd:   last encoder of this pass; setting this marks the pass as having written samples.
+    void applyTimingToRenderDesc(MTL::RenderPassDescriptor* desc, bool wantBegin, bool wantEnd) {
+        if (!m_timingSampleBuf) return;
+        NS::UInteger startIdx = (wantBegin && m_sampleBegin) ? m_timingBeginIdx : MTL::CounterDontSample;
+        NS::UInteger endIdx   = wantEnd ? m_timingEndIdx : MTL::CounterDontSample;
+        if (startIdx != MTL::CounterDontSample || endIdx != MTL::CounterDontSample) {
+            auto* att = desc->sampleBufferAttachments()->object(0);
+            att->setSampleBuffer(m_timingSampleBuf);
+            att->setStartOfVertexSampleIndex(startIdx);
+            att->setEndOfFragmentSampleIndex(endIdx);
+        }
+        if (wantEnd) m_didWriteTimingSamples = true;
+        for (int i = 0; i < 8; ++i) {
+            auto* color = desc->colorAttachments()->object(i);
+            if (!color->texture()) continue;
+            m_estimatedBytes += vaporAttachmentTrafficBytes(color->texture(), color->loadAction(), color->storeAction());
+        }
+        auto* depth = desc->depthAttachment();
+        if (depth->texture()) {
+            m_estimatedBytes += vaporAttachmentTrafficBytes(depth->texture(), depth->loadAction(), depth->storeAction());
+        }
+    }
+
+    NS::SharedPtr<MTL::ComputePassDescriptor> makeTimedComputeDesc(bool wantBegin, bool wantEnd) {
+        auto desc = NS::TransferPtr(MTL::ComputePassDescriptor::computePassDescriptor());
+        if (m_timingSampleBuf) {
+            NS::UInteger startIdx = (wantBegin && m_sampleBegin) ? m_timingBeginIdx : MTL::CounterDontSample;
+            NS::UInteger endIdx   = wantEnd ? m_timingEndIdx : MTL::CounterDontSample;
+            if (startIdx != MTL::CounterDontSample || endIdx != MTL::CounterDontSample) {
+                auto* att = desc->sampleBufferAttachments()->object(0);
+                att->setSampleBuffer(m_timingSampleBuf);
+                att->setStartOfEncoderSampleIndex(startIdx);
+                att->setEndOfEncoderSampleIndex(endIdx);
+            }
+            if (wantEnd) m_didWriteTimingSamples = true;
+        }
+        return desc;
+    }
+
+    NS::SharedPtr<MTL::BlitPassDescriptor> makeTimedBlitDesc(bool wantBegin, bool wantEnd) {
+        auto desc = NS::TransferPtr(MTL::BlitPassDescriptor::blitPassDescriptor());
+        if (m_timingSampleBuf) {
+            NS::UInteger startIdx = (wantBegin && m_sampleBegin) ? m_timingBeginIdx : MTL::CounterDontSample;
+            NS::UInteger endIdx   = wantEnd ? m_timingEndIdx : MTL::CounterDontSample;
+            if (startIdx != MTL::CounterDontSample || endIdx != MTL::CounterDontSample) {
+                auto* att = desc->sampleBufferAttachments()->object(0);
+                att->setSampleBuffer(m_timingSampleBuf);
+                att->setStartOfEncoderSampleIndex(startIdx);
+                att->setEndOfEncoderSampleIndex(endIdx);
+            }
+            if (wantEnd) m_didWriteTimingSamples = true;
+        }
+        return desc;
+    }
+
+    NS::SharedPtr<MTL::AccelerationStructurePassDescriptor> makeTimedAccelDesc(bool wantBegin, bool wantEnd) {
+        auto desc = NS::TransferPtr(MTL::AccelerationStructurePassDescriptor::accelerationStructurePassDescriptor());
+        if (m_timingSampleBuf) {
+            NS::UInteger startIdx = (wantBegin && m_sampleBegin) ? m_timingBeginIdx : MTL::CounterDontSample;
+            NS::UInteger endIdx   = wantEnd ? m_timingEndIdx : MTL::CounterDontSample;
+            if (startIdx != MTL::CounterDontSample || endIdx != MTL::CounterDontSample) {
+                auto* att = desc->sampleBufferAttachments()->object(0);
+                att->setSampleBuffer(m_timingSampleBuf);
+                att->setStartOfEncoderSampleIndex(startIdx);
+                att->setEndOfEncoderSampleIndex(endIdx);
+            }
+            if (wantEnd) m_didWriteTimingSamples = true;
+        }
+        return desc;
+    }
 
 protected:
     Renderer_Metal* renderer;
@@ -71,14 +215,55 @@ protected:
 
 class RenderGraph {
 public:
+    struct PassSampleInfo {
+        std::string name;
+        NS::UInteger beginIdx;
+        NS::UInteger endIdx;
+        uint64_t estimatedBytes;
+    };
+
     void addPass(std::unique_ptr<RenderPass> pass) {
         passes.push_back(std::move(pass));
     }
 
-    void execute() {
+    void execute(MTL::CommandBuffer* cmd = nullptr, MTL::CounterSampleBuffer* sampleBuf = nullptr) {
+        passTimingInfo.clear();
+        // nextSlot starts at 0 (frame-start slot).
+        // It advances by 1 only when a pass actually writes its end sample, so:
+        //   slot 0        = frame start (written by the first pass via wantBegin && m_sampleBegin)
+        //   slot K        = end of the K-th pass that ran (= begin of the K+1-th pass)
+        // PassSampleInfo stores (beginIdx=K, endIdx=K+1), so beginIdx[N] == endIdx[N-1] by construction.
+        // The completion handler can therefore compute end-begin directly with no heuristics.
+        NS::UInteger nextSlot = 0;
+        bool needFrameStart = true;
+        os_log_t spLog = vaporRenderGraphLog();
         for (auto& pass : passes) {
-            if (pass->enabled) {
-                pass->execute();
+            if (!pass->enabled) continue;
+            if (cmd && sampleBuf) {
+                pass->m_timingSampleBuf       = sampleBuf;
+                pass->m_timingBeginIdx        = nextSlot;
+                pass->m_timingEndIdx          = nextSlot + 1;
+                pass->m_sampleBegin           = needFrameStart;
+                pass->m_didWriteTimingSamples = false;
+                pass->m_estimatedBytes        = 0;
+            }
+            const char* passName = pass->getName();
+            // Debug group: names this pass's encoders in Xcode GPU captures.
+            if (cmd) cmd->pushDebugGroup(NS::String::string(passName, NS::UTF8StringEncoding));
+            // Signpost: names this pass in Instruments (Points of Interest track).
+            // Marks CPU encode time; match against the GPU track via the debug groups.
+            os_signpost_id_t spid = os_signpost_id_make_with_pointer(spLog, pass.get());
+            os_signpost_interval_begin(spLog, spid, "RenderPass", "%{public}s", passName);
+            pass->execute();
+            os_signpost_interval_end(spLog, spid, "RenderPass");
+            if (cmd) cmd->popDebugGroup();
+            if (cmd && sampleBuf) {
+                if (pass->m_didWriteTimingSamples) {
+                    passTimingInfo.push_back({passName, nextSlot, nextSlot + 1, pass->m_estimatedBytes});
+                    nextSlot++;            // this pass's end slot becomes next pass's begin slot
+                    needFrameStart = false;
+                }
+                pass->m_timingSampleBuf = nullptr;
             }
         }
     }
@@ -87,20 +272,27 @@ public:
         passes.clear();
     }
 
+    std::vector<PassSampleInfo> passTimingInfo;
+
 private:
     std::vector<std::unique_ptr<RenderPass>> passes;
 };
 
 
+class EquirectToCubemapPass;
+
 class Renderer_Metal final : public Renderer {// Must be public or factory function won't work
     friend class PrePass;
     friend class TLASBuildPass;
     friend class NormalResolvePass;
+    friend class VelocityPass;
     friend class TileCullingPass;
     friend class CSMDepthPass;
     friend class RaytraceShadowPass;
     friend class HybridShadowPass;
     friend class RaytraceAOPass;
+    friend class AOTemporalPass;
+    friend class AODenoisePass;
     friend class SkyAtmospherePass;
     friend class SkyCapturePass;
     friend class IrradianceConvolutionPass;
@@ -126,6 +318,11 @@ class Renderer_Metal final : public Renderer {// Must be public or factory funct
     friend class DebugDrawPass;
     friend class CanvasPass;
     friend class WorldCanvasPass;
+    friend class PSSMShadowPass;
+    friend class PSSMResolvePass;
+    friend class StochasticPointShadowPass;
+    friend class PointShadowTemporalPass;
+    friend class EquirectToCubemapPass;
 
 public:
     Renderer_Metal();
@@ -139,6 +336,15 @@ public:
     virtual void stage(std::shared_ptr<Scene> scene) override;
 
     virtual void draw(std::shared_ptr<Scene> scene, Camera& camera) override;
+    virtual void draw(entt::registry& registry, std::shared_ptr<Scene> scene, Camera& camera) override;
+
+    virtual void readPixelsAsync(ScreenshotCallback callback) override;
+    void uploadRectLightVideoTexture(const uint8_t* rgba, uint32_t width, uint32_t height) override;
+
+    // IBL source: load an equirectangular .hdr file as the environment map.
+    // After calling this the sky atmosphere is no longer used for IBL.
+    // Place your .hdr files under: <assets>/textures/env/
+    void loadHDRI(const std::string& path);
 
     virtual void setRenderPath(RenderPath path) override {
         currentRenderPath = path;
@@ -233,7 +439,26 @@ public:
         createPipeline(const std::string& filename, bool isHDR, bool isColorOnly, Uint32 sampleCount);
     NS::SharedPtr<MTL::ComputePipelineState> createComputePipeline(const std::string& filename);
 
-    TextureHandle createTexture(const std::shared_ptr<Image>& img) override;
+    TextureHandle createTexture(const std::shared_ptr<Vapor::Image>& img) override;
+    void updateTexture(TextureHandle handle, const std::shared_ptr<Vapor::Image>& img) override;
+
+    // ===== Render-to-Texture API =====
+    RenderTextureHandle createRenderTexture(const RenderTextureDesc& desc) override;
+    void destroyRenderTexture(RenderTextureHandle handle) override;
+    TextureHandle getRenderTextureAsTexture(RenderTextureHandle handle) override;
+    void renderToTexture(
+        RenderTextureHandle target,
+        std::shared_ptr<Scene> scene,
+        Camera& camera,
+        const glm::vec4& clearColor = glm::vec4(0.0f, 0.0f, 0.0f, 1.0f)
+    ) override;
+    glm::uvec2 getRenderTextureSize(RenderTextureHandle handle) override;
+    Uint64 registerRenderTextureForUI(RenderTextureHandle handle) override;
+
+    // Render texture post-processing
+    void applyBloom(RenderTextureHandle target, float threshold = 1.0f, float strength = 0.5f) override;
+    void applyToneMapping(RenderTextureHandle target, float exposure = 1.0f) override;
+    void applyVignette(RenderTextureHandle target, float strength = 0.3f, float radius = 0.8f) override;
 
     // ===== Font Rendering API =====
     FontHandle loadFont(const std::string& path, float baseSize) override;
@@ -255,9 +480,9 @@ public:
     glm::vec2 measureText(FontHandle font, const std::string& text, float scale = 1.0f) override;
     float getFontLineHeight(FontHandle font, float scale = 1.0f) override;
 
-    BufferHandle createVertexBuffer(const std::vector<VertexData>& vertices);
+    BufferHandle createVertexBuffer(const std::vector<Vapor::VertexData>& vertices);
     BufferHandle createIndexBuffer(const std::vector<Uint32>& indices);
-    BufferHandle createStorageBuffer(const std::vector<VertexData>& vertices);
+    BufferHandle createStorageBuffer(const std::vector<Vapor::VertexData>& vertices);
 
     NS::SharedPtr<MTL::Buffer> getBuffer(BufferHandle handle) const;
     NS::SharedPtr<MTL::Texture> getTexture(TextureHandle handle) const;
@@ -265,6 +490,14 @@ public:
 
 protected:
     RenderGraph graph;
+
+    // GPU pass timing (Apple Silicon, MTLCounterSampleBuffer timestamps)
+    static constexpr NS::UInteger GPU_TIMER_SAMPLE_COUNT = 64;
+    NS::SharedPtr<MTL::CounterSampleBuffer> gpuTimerSampleBuffer;
+    std::vector<GpuPassTiming> gpuPassTimings;
+    std::mutex gpuTimingMutex;
+    bool gpuTimingSupported = false;
+    bool gpuTimingEnabled = false;
 
     // Per-frame rendering context
     MTL::CommandBuffer* currentCommandBuffer = nullptr;
@@ -281,16 +514,30 @@ protected:
 
     // Pipeline states
     NS::SharedPtr<MTL::DepthStencilState> depthStencilState;
+    enum class IBLSource { Sky, HDRI };
+    IBLSource iblSource = IBLSource::Sky;
+
     NS::SharedPtr<MTL::RenderPipelineState> prePassPipeline;
     NS::SharedPtr<MTL::RenderPipelineState> drawPipeline;
+    NS::SharedPtr<MTL::RenderPipelineState> iridescentPipeline;
+    NS::SharedPtr<MTL::RenderPipelineState> equirectToCubemapPipeline;
     NS::SharedPtr<MTL::RenderPipelineState> postProcessPipeline;
 
     NS::SharedPtr<MTL::ComputePipelineState> buildClustersPipeline;
     NS::SharedPtr<MTL::ComputePipelineState> cullLightsPipeline;
     NS::SharedPtr<MTL::ComputePipelineState> tileCullingPipeline;
     NS::SharedPtr<MTL::ComputePipelineState> normalResolvePipeline;
+    NS::SharedPtr<MTL::ComputePipelineState> velocityPipeline;
     NS::SharedPtr<MTL::ComputePipelineState> raytraceShadowPipeline;
-    NS::SharedPtr<MTL::ComputePipelineState> raytraceAOPipeline;
+    NS::SharedPtr<MTL::ComputePipelineState> raytraceAOPipeline; // 3d_raytrace_ao.metal
+    NS::SharedPtr<MTL::ComputePipelineState> ssaoPipeline;       // 3d_ssao.metal (same bindings, no TLAS)
+    NS::SharedPtr<MTL::ComputePipelineState> aoTemporalPipeline;
+    NS::SharedPtr<MTL::ComputePipelineState> aoDenoisePipeline;
+    NS::SharedPtr<MTL::ComputePipelineState> stochasticPointShadowPipeline;
+    NS::SharedPtr<MTL::ComputePipelineState> pointShadowTemporalPipeline;
+    NS::SharedPtr<MTL::ComputePipelineState> pssmResolvePipeline;
+    NS::SharedPtr<MTL::RenderPipelineState> pssmShadowPipeline;
+    NS::SharedPtr<MTL::DepthStencilState> pssmDepthStencilState;
     NS::SharedPtr<MTL::RenderPipelineState> atmospherePipeline;
     NS::SharedPtr<MTL::RenderPipelineState> skyCapturePipeline;
     NS::SharedPtr<MTL::RenderPipelineState> irradianceConvolutionPipeline;
@@ -339,6 +586,15 @@ protected:
     static constexpr Uint32 BatchMaxTextureSlots = 16;
 
     // 2D Batch CPU-side state (screen space, no depth)
+    // When texture slots overflow (>16 unique textures), the current batch is
+    // saved to batch2DSubBatches and a new batch starts automatically.
+    struct Batch2DSubBatch {
+        std::vector<Batch2DVertex>      vertices;
+        std::vector<Uint32>             indices;
+        std::array<TextureHandle, 16>   textureSlots;
+        Uint32                          textureSlotCount = 1;
+    };
+    std::vector<Batch2DSubBatch> batch2DSubBatches;
     std::vector<Batch2DVertex> batch2DVertices;
     std::vector<Uint32> batch2DIndices;
     std::array<TextureHandle, 16> batch2DTextureSlots;
@@ -347,6 +603,8 @@ protected:
     BlendMode batch2DBlendMode = BlendMode::Alpha;
     Batch2DStats batch2DStats;
     bool batch2DActive = false;
+
+    void splitBatch2D(); // flush current batch into sub-batches, reset slots
 
     // 3D Batch CPU-side state (world space, with depth)
     std::vector<Batch2DVertex> batch3DVertices;
@@ -410,6 +668,8 @@ protected:
     NS::SharedPtr<MTL::Buffer> testStorageBuffer;
     NS::SharedPtr<MTL::Buffer> directionalLightBuffer;
     NS::SharedPtr<MTL::Buffer> pointLightBuffer;
+    NS::SharedPtr<MTL::Buffer> rectLightBuffer;
+    NS::SharedPtr<MTL::Texture> rectLightVideoTexture; // updated each frame via uploadRectLightVideoTexture
     NS::SharedPtr<MTL::Buffer> materialDataBuffer;
     NS::SharedPtr<MTL::Buffer> atmosphereDataBuffer;
     NS::SharedPtr<MTL::Buffer> iblCaptureDataBuffer;
@@ -419,6 +679,10 @@ protected:
     std::vector<NS::SharedPtr<MTL::Buffer>> lightScatteringDataBuffers;
     NS::SharedPtr<MTL::Texture> lightScatteringRT;// Half-resolution scattering texture
     bool lightScatteringEnabled = true;
+    // AO toggle: skips the whole AO chain and binds a white texture in its place
+    bool aoEnabled = true;
+    // Raygen method for the AO chain: 0 = ray traced, 1 = screen space (see AO ImGui section)
+    int aoMethod = 0;
     LightScatteringData lightScatteringSettings;
 
     // Volumetric Fog resources
@@ -441,6 +705,7 @@ protected:
     NS::SharedPtr<MTL::Texture> cloudRT;// Cloud render target (quarter res)
     NS::SharedPtr<MTL::Texture> cloudHistoryRT;// Previous frame clouds (for TAA)
     bool volumetricCloudsEnabled = false;
+    bool m_supportsRaytracing = false;
     VolumetricCloudData volumetricCloudSettings;
 
     // Sun Flare resources
@@ -452,19 +717,25 @@ protected:
     SunFlareData sunFlareSettings;
 
     // IBL textures
-    NS::SharedPtr<MTL::Texture> environmentCubemap;// Captured sky cubemap
-    NS::SharedPtr<MTL::Texture> irradianceMap;// Diffuse irradiance cubemap
-    NS::SharedPtr<MTL::Texture> prefilterMap;// Pre-filtered specular cubemap (with mipmaps)
-    NS::SharedPtr<MTL::Texture> brdfLUT;// BRDF integration LUT
-    bool iblNeedsUpdate = true;// Flag to trigger IBL update
+    NS::SharedPtr<MTL::Texture> environmentCubemap;  // Captured sky cubemap (or converted HDRI)
+    NS::SharedPtr<MTL::Texture> equirectHDRITexture; // Loaded equirectangular HDRI (2D, RGBA32Float)
+    NS::SharedPtr<MTL::Texture> irradianceMap;       // Diffuse irradiance cubemap
+    NS::SharedPtr<MTL::Texture> prefilterMap;        // Pre-filtered specular cubemap (with mipmaps)
+    NS::SharedPtr<MTL::Texture> brdfLUT;             // BRDF integration LUT
+    bool iblNeedsUpdate = true;
     std::vector<NS::SharedPtr<MTL::Buffer>> accelInstanceBuffers;
     std::vector<NS::SharedPtr<MTL::Buffer>> TLASScratchBuffers;
     std::vector<NS::SharedPtr<MTL::AccelerationStructure>> TLASBuffers;
 
     // Instance data
+    // instanceBatches: material → list of (mesh, instanceArrayIndex) for rasterization draw calls
+    struct MeshDraw { std::shared_ptr<Vapor::Mesh> mesh; uint32_t instanceIndex; };
     std::vector<InstanceData> instances;
+    std::vector<InstanceData> pendingEcsInstances;
+    std::unordered_map<std::shared_ptr<Vapor::Material>, std::vector<MeshDraw>> pendingEcsBatches;
+    std::vector<MTL::AccelerationStructureInstanceDescriptor> pendingEcsAccelInstances;
     std::vector<MTL::AccelerationStructureInstanceDescriptor> accelInstances;
-    std::unordered_map<std::shared_ptr<Material>, std::vector<std::shared_ptr<Mesh>>> instanceBatches;
+    std::unordered_map<std::shared_ptr<Vapor::Material>, std::vector<MeshDraw>> instanceBatches;
 
     // Render targets
     NS::SharedPtr<MTL::Texture> colorRT_MS;
@@ -475,7 +746,41 @@ protected:
     NS::SharedPtr<MTL::Texture> normalRT_MS;
     NS::SharedPtr<MTL::Texture> normalRT;
     NS::SharedPtr<MTL::Texture> shadowRT;
+    NS::SharedPtr<MTL::Texture> shadowRTGrayView; // swizzle view (r,r,r,1) for ImGui preview
+    NS::SharedPtr<MTL::Texture> pointShadowRT;       // R16F, raw stochastic point shadow
+    NS::SharedPtr<MTL::Texture> pointShadowDenoisedRT; // R16F, temporally denoised
+    NS::SharedPtr<MTL::Texture> pointShadowHistoryRT;  // R16F, history for temporal
+    NS::SharedPtr<MTL::Texture> pointShadowRTGrayView;        // swizzle (r,r,r,1) for ImGui
+    NS::SharedPtr<MTL::Texture> pointShadowDenoisedRTGrayView; // swizzle (r,r,r,1) for ImGui
     NS::SharedPtr<MTL::Texture> aoRT;
+    NS::SharedPtr<MTL::Texture> velocityRT; // RG16Float camera-motion vectors (see 3d_velocity.metal)
+    glm::mat4 prevViewProj = glm::mat4(1.0f);
+    bool prevViewProjValid = false;
+
+    NS::SharedPtr<MTL::Texture> aoRTGrayView;     // swizzle view (r,r,r,1) of aoRT for ImGui preview
+    // AO denoise chain (raygen → temporal → à-trous → aoRT), full res for now (ADR-008)
+    NS::SharedPtr<MTL::Texture> aoRawRT;          // R16Float, noisy raygen output
+    NS::SharedPtr<MTL::Texture> aoHistoryRT[2];   // RGBA16F ping-pong: (ao, view-space depth, oct normal)
+    NS::SharedPtr<MTL::Texture> aoScratchRT;      // RGBA16F, à-trous intermediate
+    uint32_t aoHistoryIndex = 0;                  // aoHistoryRT[aoHistoryIndex] holds the latest history
+    bool aoHistoryValid = false;
+    glm::mat4 prevView = glm::mat4(1.0f);
+    bool prevViewValid = false;
+
+    // PSSM shadow maps: 2D texture array, 3 cascades × 4096×4096 Depth32
+    NS::SharedPtr<MTL::Texture> pssmShadowMaps;
+    // Per-slice texture2d views used only for ImGui display
+    std::array<NS::SharedPtr<MTL::Texture>, 3> pssmShadowMapViews;
+    // Screen-space resolved PSSM shadow (camera-aligned, for intuitive debug display)
+    NS::SharedPtr<MTL::Texture> pssmShadowScreenRT;
+    NS::SharedPtr<MTL::Texture> pssmShadowScreenRTGrayView; // swizzle (r,r,r,1) for ImGui
+    std::vector<NS::SharedPtr<MTL::Buffer>> pssmDataBuffers;
+    static constexpr uint32_t PSSM_CASCADE_COUNT = 3;
+    static constexpr uint32_t PSSM_SHADOW_MAP_SIZE = 4096;
+    float pssmRTMaxDist = 50.0f; // view-space depth where RT shadow ends and PSSM begins
+
+    // Stochastic point shadow debug: 0 = visibility, 1 = tile light-count heatmap
+    uint32_t pointShadowDebugMode = 0;
 
     // Cascaded Shadow Map resources
     NS::SharedPtr<MTL::RenderPipelineState> csmDepthPipeline;
@@ -585,13 +890,28 @@ private:
     std::unordered_map<Uint32, NS::SharedPtr<MTL::Buffer>> buffers;
     std::unordered_map<Uint32, NS::SharedPtr<MTL::Texture>> textures;
     std::unordered_map<Uint32, NS::SharedPtr<MTL::RenderPipelineState>> pipelines;
-    std::unordered_map<std::shared_ptr<Material>, Uint32> materialIDs;
+    std::unordered_map<std::shared_ptr<Vapor::Material>, Uint32> materialIDs;
+
+    // Render texture internal data
+    struct RenderTextureData {
+        NS::SharedPtr<MTL::Texture> colorTexture;
+        NS::SharedPtr<MTL::Texture> tempTexture;// For ping-pong post-processing
+        NS::SharedPtr<MTL::Texture> depthTexture;
+        TextureHandle textureHandle;// Handle for using as sampler texture
+        Uint32 width = 0;
+        Uint32 height = 0;
+        bool hdr = false;
+        Uint32 sampleCount = 1;
+    };
+    Uint32 nextRenderTextureID = 0;
+    std::unordered_map<Uint32, RenderTextureData> renderTextures;
 
     RenderPath currentRenderPath = RenderPath::Forward;
 
     // UI rendering (using void* for pimpl idiom to hide implementation)
     void* m_uiRenderer = nullptr;
     Rml::Context* m_uiContext = nullptr;
+    std::vector<ScreenshotCallback> m_pendingScreenshots;
 
     // Font rendering
     FontManager m_fontManager;

@@ -1,0 +1,262 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>ADR-006: Playmaker-style FSM System — Project Vapor</title>
+  <link rel="stylesheet" href="../styles/global.css">
+  <style>
+    .page-header { margin-bottom: 32px; }
+    .page-header h1 { font-size: 20px; }
+    h2 { font-size: 16px; margin: 40px 0 14px; border-top: 1px solid var(--border); padding-top: 32px; }
+    h2:first-of-type { border-top: none; padding-top: 0; }
+    h3 { font-size: 13px; color: var(--text-muted); margin: 20px 0 8px; text-transform: uppercase; letter-spacing: 0.06em; }
+    p { margin-bottom: 14px; }
+    ol { padding-left: 20px; margin-bottom: 14px; }
+    ol li { margin-bottom: 4px; }
+    table { font-size: 13px; }
+    th, td { border: 1px solid var(--border); padding: 10px 12px; text-align: left; }
+    th { background: var(--bg-surface); font-weight: 600; }
+  </style>
+</head>
+<body>
+  <nav>
+    <div class="nav-inner">
+      <a class="nav-logo" href="../index.html">Project Vapor</a>
+      <a href="../documentation/index.html">Docs</a>
+      <a href="index.html" class="active">Devlog</a>
+      <a href="../demo/index.html">Demo</a>
+      <a href="https://github.com/painfulexistence/project-vapor" target="_blank">GitHub ↗</a>
+    </div>
+  </nav>
+  <main>
+    <div class="page-header">
+      <div class="eyebrow">
+      <a href="index.html">Devlog</a> / ADR-006</div>
+      <h1>ADR-006: Playmaker-style FSM System</h1>
+      <div class="meta-row">
+        <span>2026-05-27</span>
+        <span><span class="badge badge-ok">Adopted</span></span>
+      </div>
+    </div>
+
+    <p>Introduced a pure data-driven finite state machine (FSM) system inspired by Unity Playmaker. The design strictly follows ECS principles: no callbacks, no OOP inheritance in state logic, communication via event components only.</p>
+
+    <h2>Core Architecture</h2>
+
+    <h3>Design Principles</h3>
+    <ul>
+      <li><strong>Pure data components</strong> — FSM state is stored in components with no behavior</li>
+      <li><strong>Event-driven communication</strong> — systems communicate via event components, not callbacks</li>
+      <li><strong>Single-responsibility systems</strong> — each system does one thing (sense, decide, or act)</li>
+      <li><strong>Request/Event pattern</strong> — sensors emit events, FSM processes them, action systems respond</li>
+    </ul>
+
+    <h3>Component Overview</h3>
+    <table>
+      <tr><th>Component</th><th>Purpose</th><th>Layer</th></tr>
+      <tr><td><code>FSMStateComponent</code></td><td>Current state index + timers</td><td>Engine</td></tr>
+      <tr><td><code>FSMDefinition</code></td><td>State names, transition rules</td><td>Engine</td></tr>
+      <tr><td><code>FSMEventQueue</code></td><td>Pending events to process</td><td>Engine</td></tr>
+      <tr><td><code>FSMStateChangeEvent</code></td><td>Output: state transition occurred</td><td>Engine</td></tr>
+    </table>
+
+    <h3>Data Flow</h3>
+    <pre><code>┌─────────────────┐    ┌──────────────┐    ┌─────────────────┐    ┌──────────────────┐
+│  Sensor Systems │ →  │ FSMEventQueue│ →  │  FSMSystem::update│ →  │FSMStateChangeEvent│
+│ (push events)   │    │              │    │  (process queue)│    │ (consumed by      │
+└─────────────────┘    └──────────────┘    └─────────────────┘    │  action systems)  │
+                                                                   └──────────────────┘</code></pre>
+
+    <h2>FSM Components (Engine Layer)</h2>
+
+    <h3>FSMStateComponent</h3>
+    <pre><code>struct FSMStateComponent {
+    uint32_t currentState = 0;  // Index into FSMDefinition::stateNames
+    float stateTime = 0.0f;     // Time in current state
+    float totalTime = 0.0f;     // Total FSM runtime
+};</code></pre>
+
+    <h3>FSMDefinition</h3>
+    <pre><code>struct FSMDefinition {
+    std::vector&lt;std::string&gt; stateNames;
+    std::vector&lt;FSMTransitionRule&gt; eventTransitions;
+    std::vector&lt;FSMTimedTransition&gt; timedTransitions;
+    uint32_t initialState = 0;
+};</code></pre>
+
+    <h3>FSMStateChangeEvent</h3>
+    <p>Emitted by <code>FSMSystem::update</code> when a state transition occurs. Game systems read this component to trigger effects.</p>
+    <pre><code>struct FSMStateChangeEvent {
+    uint32_t fromState;
+    uint32_t toState;
+    float previousStateTime;
+};</code></pre>
+
+    <h3>Builder API</h3>
+    <pre><code>auto def = FSMDefinitionBuilder()
+    .state("Idle")
+    .state("WaitingForVisible")
+    .state("Displaying")
+    .state("WaitingForHidden")
+    .transition("Idle", "WaitingForVisible", "ShowSubtitle")
+    .transition("WaitingForVisible", "Displaying", "PageVisible")
+    .transition("Displaying", "WaitingForHidden", "HideSubtitle")
+    .transition("WaitingForHidden", "Idle", "PageHidden")
+    .initialState("Idle")
+    .build();</code></pre>
+
+    <h2>Migration: Existing Components</h2>
+
+    <h3>TriggerVolumeComponent — Callbacks to Events</h3>
+    <p>Before: callbacks stored directly in component</p>
+    <pre><code>// OLD - OOP style with callbacks
+struct TriggerVolumeComponent {
+    TriggerHandle trigger;
+    std::function&lt;void(Entity, Entity)&gt; onEnter;
+    std::function&lt;void(Entity, Entity)&gt; onExit;
+};</code></pre>
+
+    <p>After: pure data component + separate event components</p>
+    <pre><code>// NEW - Pure data + event pattern
+struct TriggerVolumeComponent {
+    TriggerHandle trigger;
+};
+
+struct TriggerEnterEvent {
+    entt::entity triggerEntity;
+    entt::entity otherEntity;
+};
+
+struct TriggerExitEvent {
+    entt::entity triggerEntity;
+    entt::entity otherEntity;
+};</code></pre>
+
+    <p>Game systems now react to <code>TriggerEnterEvent</code>/<code>TriggerExitEvent</code> instead of having callbacks invoked.</p>
+
+    <h3>State Constants</h3>
+    <p>Hand-written enums converted to namespaced <code>constexpr uint32_t</code> for FSM state indices:</p>
+    <pre><code>// Game layer (Vaporware/src/components.hpp)
+namespace SubtitleStates {
+    constexpr uint32_t Idle = 0;
+    constexpr uint32_t WaitingForVisible = 1;
+    constexpr uint32_t Displaying = 2;
+    constexpr uint32_t WaitingForHidden = 3;
+}</code></pre>
+
+    <h2>Migration: Monolithic to Single-Responsibility Systems</h2>
+
+    <h3>SubtitleQueueSystem Split</h3>
+    <p>The original <code>SubtitleQueueSystem::update()</code> handled input detection, page animation sensing, timer management, and page actions in one function. Split into four focused systems:</p>
+
+    <table>
+      <tr><th>System</th><th>Responsibility</th><th>Emits/Consumes</th></tr>
+      <tr><td><code>SubtitleInputSystem</code></td><td>Detect advance request</td><td>→ "ShowSubtitle" event</td></tr>
+      <tr><td><code>SubtitlePageSensorSystem</code></td><td>Monitor page animation state</td><td>→ "PageVisible"/"PageHidden"</td></tr>
+      <tr><td><code>SubtitleTimerSystem</code></td><td>Update display timer</td><td>→ "HideSubtitle" event</td></tr>
+      <tr><td><code>SubtitleActionSystem</code></td><td>Respond to state changes</td><td>← FSMStateChangeEvent</td></tr>
+    </table>
+
+    <h3>Execution Order</h3>
+    <pre><code>// main.cpp game loop
+SubtitleInputSystem::update(registry);
+SubtitlePageSensorSystem::update(registry);
+SubtitleTimerSystem::update(registry, deltaTime);
+Vapor::FSMSystem::update(registry, deltaTime);  // Process events, emit FSMStateChangeEvent
+SubtitleActionSystem::update(registry);        // React to state changes</code></pre>
+
+    <h2>UI Page System Relationship</h2>
+
+    <div class="info-box">
+      <strong>Page architecture unchanged.</strong> The FSM system complements the existing Page architecture — it doesn't replace it.
+    </div>
+
+    <p>The UI system uses a hybrid approach:</p>
+    <ul>
+      <li><code>Page</code> subclasses (e.g., <code>SubtitlePage</code>, <code>ChapterTitlePage</code>) own behavior: element references, animation state, fade timers</li>
+      <li>ECS components control <em>when</em> pages show/hide: <code>UIVisibleTag</code>, <code>SubtitleQueueComponent</code></li>
+      <li>FSM manages the state machine logic for complex sequences (show → wait for visible → display → wait for hidden → idle)</li>
+    </ul>
+
+    <h3>Architecture Diagram</h3>
+    <pre><code>┌─────────────────────────────────────────────────────────────┐
+│                     ECS (entt::registry)                    │
+│  ┌────────────────┐  ┌────────────────┐  ┌───────────────┐  │
+│  │SubtitleQueue   │  │FSMStateComponent│  │FSMEventQueue  │  │
+│  │Component       │  │ currentState=2 │  │ events: []    │  │
+│  │ queue: [...]   │  │ stateTime=1.5  │  │               │  │
+│  └────────────────┘  └────────────────┘  └───────────────┘  │
+│                              │                              │
+│                              ▼                              │
+│                    FSMStateChangeEvent                      │
+│                     (when state changes)                    │
+└─────────────────────────────────────────────────────────────┘
+                               │
+                               ▼
+┌─────────────────────────────────────────────────────────────┐
+│                 PageSystem + Page Subclasses                │
+│  ┌────────────────────────────────────────────────────────┐ │
+│  │ SubtitlePage                                           │ │
+│  │   - doc_: RmlUI document pointer                       │ │
+│  │   - speakerEl_, textEl_: element references            │ │
+│  │   - fadeState_: animation state machine                │ │
+│  │   - isFullyVisible(), isFullyHidden(): state queries   │ │
+│  └────────────────────────────────────────────────────────┘ │
+└─────────────────────────────────────────────────────────────┘</code></pre>
+
+    <h2>Factory Functions</h2>
+
+    <p>FSM definitions are created via factory functions in the game layer:</p>
+    <pre><code>// Vaporware/src/components.hpp
+inline Vapor::FSMDefinition createSubtitleFSM() {
+    return Vapor::FSMDefinitionBuilder()
+        .state("Idle")
+        .state("WaitingForVisible")
+        .state("Displaying")
+        .state("WaitingForHidden")
+        .transition("Idle", "WaitingForVisible", "ShowSubtitle")
+        .transition("WaitingForVisible", "Displaying", "PageVisible")
+        .transition("Displaying", "WaitingForHidden", "HideSubtitle")
+        .transition("WaitingForHidden", "Idle", "PageHidden")
+        .initialState("Idle")
+        .build();
+}</code></pre>
+
+    <h2>Why This Design</h2>
+
+    <h3>Rejected: Callback-based FSM</h3>
+    <p>Initial implementation used <code>std::function</code> callbacks for <code>onEnter</code>/<code>onExit</code>. Rejected because:</p>
+    <ul>
+      <li>Breaks pure-data ECS principle</li>
+      <li>Callbacks capture mutable state, making serialization impossible</li>
+      <li>Testing requires mocking function objects</li>
+    </ul>
+
+    <h3>Rejected: Request components in engine layer</h3>
+    <p>Game-specific requests (e.g., <code>ShowSubtitleRequest</code>) belong in game layer, not engine. Engine provides generic <code>FSMEventQueue</code> + <code>FSMStateChangeEvent</code>; game decides what those mean.</p>
+
+    <h3>Chosen: Event-driven single-responsibility systems</h3>
+    <ul>
+      <li>Each system does exactly one thing — easy to test, debug, reorder</li>
+      <li>Communication is explicit via event components</li>
+      <li>No hidden state transitions in callbacks</li>
+      <li>FSM logic is visible in data, not buried in code</li>
+    </ul>
+
+    <h2>Files Changed</h2>
+
+    <table>
+      <tr><th>File</th><th>Change</th></tr>
+      <tr><td><code>Vapor/include/Vapor/fsm.hpp</code></td><td>New — FSM components + builder</td></tr>
+      <tr><td><code>Vapor/include/Vapor/fsm_system.hpp</code></td><td>New — FSMSystem::update, helpers</td></tr>
+      <tr><td><code>Vapor/include/Vapor/components.hpp</code></td><td>TriggerVolumeComponent: removed callbacks, added event types</td></tr>
+      <tr><td><code>Vaporware/src/components.hpp</code></td><td>Added state namespaces, FSM factory functions</td></tr>
+      <tr><td><code>Vaporware/src/systems.hpp</code></td><td>Split SubtitleQueueSystem into 4 systems</td></tr>
+      <tr><td><code>Vaporware/src/main.cpp</code></td><td>Updated system call order</td></tr>
+      <tr><td><code>Vaporware/src/scene_builder.hpp</code></td><td>Initialize FSM components for subtitle entity</td></tr>
+    </table>
+
+  </main>
+</body>
+</html>

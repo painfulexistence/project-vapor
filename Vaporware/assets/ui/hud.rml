@@ -1,0 +1,90 @@
+<rml>
+<head>
+    <title>Game HUD</title>
+    <link type="text/rcss" href="style.rcss"/>
+    <style>
+        body {
+    pointer-events: none;
+            width: 100%;
+            height: 100%;
+        }
+
+        #hud-container {
+            position: absolute;
+            width: 100%;
+            height: 100%;
+            pointer-events: none;
+        }
+
+        .content {
+            opacity: 0.0;
+            transition: opacity 0.5s;
+        }
+
+        .content.visible {
+            opacity: 1.0;
+        }
+
+        #health-bar {
+            position: absolute;
+            bottom: 20dp;
+            left: 20dp;
+            width: 200dp;
+            height: 30dp;
+            background-color: #222;
+            border: 2dp #888;
+            padding: 3dp;
+        }
+
+        #health-fill {
+            width: 100%;
+            height: 100%;
+            background-color: #e74c3c;
+        }
+
+        #compass {
+            position: absolute;
+            top: 20dp;
+            left: 50%;
+            margin-left: -50dp;
+            width: 100dp;
+            height: 100dp;
+            background-color: rgba(0, 0, 0, 0.5);
+            border: 2dp #888;
+            border-radius: 50dp;
+            text-align: center;
+            line-height: 100dp;
+            color: #fff;
+            font-size: 24dp;
+        }
+
+        #objective-text {
+            position: absolute;
+            top: 20dp;
+            right: 20dp;
+            width: 250dp;
+            padding: 10dp;
+            background-color: rgba(0, 0, 0, 0.7);
+            border: 1dp #888;
+            color: #fff;
+        }
+    </style>
+</head>
+<body>
+    <div id="hud-container" class="content">
+        <!-- Health Bar -->
+        <div id="health-bar">
+            <div id="health-fill"></div>
+        </div>
+
+        <!-- Compass/Direction Indicator -->
+        <div id="compass">N</div>
+
+        <!-- Objective Text -->
+        <div id="objective-text">
+            <p>Current Objective:</p>
+            <p>Explore the ancient ruins</p>
+        </div>
+    </div>
+</body>
+</rml>

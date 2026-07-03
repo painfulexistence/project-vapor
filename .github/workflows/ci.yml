@@ -1,0 +1,158 @@
+name: CI
+
+on:
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+
+jobs:
+  # ── Unit tests (no GPU required) ─────────────────────────────────────────
+  test:
+    name: Unit Tests (macOS / Clang)
+    runs-on: macos-15
+    env:
+      VCPKG_BINARY_SOURCES: "clear"
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          submodules: false
+
+      - name: Initialize vcpkg submodule
+        run: git submodule update --init --depth 1 vcpkg
+
+      - name: Install system dependencies
+        env:
+          HOMEBREW_NO_AUTO_UPDATE: "1"
+        run: brew install ninja ccache glslang
+
+      - name: Set ccache dir
+        run: echo "CCACHE_DIR=$(ccache --get-config cache_dir)" >> $GITHUB_ENV
+
+      - name: Restore ccache
+        uses: actions/cache@v4
+        with:
+          path: ${{ env.CCACHE_DIR }}
+          key: ccache-macos-${{ github.sha }}
+          restore-keys: |
+            ccache-macos-
+
+      - name: Cache vcpkg packages
+        uses: actions/cache@v4
+        with:
+          path: build/vcpkg_installed
+          key: vcpkg-macos-15-${{ hashFiles('vcpkg.json', '.gitmodules') }}
+          restore-keys: |
+            vcpkg-macos-15-
+
+      - name: Configure (vcpkg + Ninja)
+        run: |
+          cmake --preset ninja-local-vcpkg \
+            -DCMAKE_BUILD_TYPE=Release \
+            -DCMAKE_CXX_COMPILER_LAUNCHER=ccache
+        env:
+          VCPKG_ROOT: ${{ github.workspace }}/vcpkg
+
+      - name: Build tests only
+        run: |
+          cmake --build build --config Release \
+            --target test_action_system test_scene_transform test_ecs_transform test_fsm_system test_camera test_physics test_asset_management test_resource_manager test_backend_support test_ui_system test_file_system benchmark_example \
+            -- -j$(sysctl -n hw.logicalcpu)
+
+      - name: Run tests
+        working-directory: build
+        run: ctest -C Release --output-on-failure --timeout 60 -j$(sysctl -n hw.logicalcpu)
+
+      - name: Print ccache stats
+        run: ccache --show-stats
+
+  # ── Multi-OS Build ───────────────────────────────────────────────────────
+  build:
+    runs-on: ${{ matrix.os }}
+    env:
+      VCPKG_BINARY_SOURCES: "clear"
+
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [macos-latest, ubuntu-latest]
+        build-type: [Debug, Release, MinSizeRel]
+
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: false
+
+      - name: Initialize vcpkg submodule
+        run: git submodule update --init --depth 1 vcpkg
+
+      - uses: rlalik/setup-cpp-compiler@master
+        with:
+          compiler: latest
+
+      - uses: seanmiddleditch/gha-setup-ninja@master
+
+      - name: Set strings
+        id: strings
+        shell: bash
+        run: echo "build-dir=${{ github.workspace }}/build" >> "$GITHUB_OUTPUT"
+
+      - name: Install system dependencies on Ubuntu
+        if: matrix.os == 'ubuntu-latest'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y cmake ccache libxmu-dev libxi-dev libgl-dev libxinerama-dev libxcursor-dev xorg-dev libglu1-mesa-dev pkg-config autoconf autoconf-archive automake libtool libltdl-dev
+
+      - name: Install system dependencies on macOS
+        if: matrix.os == 'macos-latest'
+        env:
+          HOMEBREW_NO_AUTO_UPDATE: "1"
+        run: brew install cmake ccache
+
+      - name: Set ccache dir
+        run: echo "CCACHE_DIR=$(ccache --get-config cache_dir)" >> $GITHUB_ENV
+
+      - name: Restore ccache
+        uses: actions/cache@v4
+        with:
+          path: ${{ env.CCACHE_DIR }}
+          key: ccache-${{ matrix.os }}-${{ matrix.build-type }}-${{ github.sha }}
+          restore-keys: |
+            ccache-${{ matrix.os }}-${{ matrix.build-type }}-
+
+      - name: Cache vcpkg packages
+        uses: actions/cache@v4
+        with:
+          path: ${{ steps.strings.outputs.build-dir }}/vcpkg_installed
+          key: vcpkg-${{ matrix.os }}-${{ hashFiles('vcpkg.json', '.gitmodules') }}
+          restore-keys: |
+            vcpkg-${{ matrix.os }}-
+
+      - name: Bootstrap vcpkg
+        shell: bash
+        run: ${{ github.workspace }}/vcpkg/bootstrap-vcpkg.sh
+
+      - name: CMake Configure
+        run: >
+          cmake -G Ninja
+          -B ${{ steps.strings.outputs.build-dir }}
+          -DCMAKE_TOOLCHAIN_FILE=${{ github.workspace }}/vcpkg/scripts/buildsystems/vcpkg.cmake
+          -DCMAKE_BUILD_TYPE=${{ matrix.build-type }}
+          -DCMAKE_CXX_COMPILER_LAUNCHER=ccache
+          -S ${{ github.workspace }}
+
+      - name: CMake Build
+        run: cmake --build ${{ steps.strings.outputs.build-dir }} --parallel $(nproc 2>/dev/null || sysctl -n hw.logicalcpu)
+
+      - name: Install
+        run: cmake --install ${{ steps.strings.outputs.build-dir }} --prefix ${{ steps.strings.outputs.build-dir }}/install
+
+      - name: Upload VaporCAPI artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: VaporCAPI-${{ matrix.os }}-${{ matrix.build-type }}
+          path: ${{ steps.strings.outputs.build-dir }}/install
+
+      - name: Print ccache stats
+        run: ccache --show-stats

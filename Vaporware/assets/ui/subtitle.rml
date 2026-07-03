@@ -1,0 +1,12 @@
+<rml>
+<head>
+    <title>Subtitles</title>
+    <link type="text/rcss" href="subtitle.rcss"/>
+</head>
+<body>
+    <div id="subtitle-container">
+        <div id="subtitle-speaker"></div>
+        <div id="subtitle-text"></div>
+    </div>
+</body>
+</rml>

@@ -1,0 +1,78 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>ADR-001: Test Framework — Project Vapor</title>
+  <link rel="stylesheet" href="../styles/global.css">
+  <style>
+    .page-header { margin-bottom: 32px; }
+    .page-header h1 { font-size: 20px; }
+    h2 { font-size: 16px; margin: 36px 0 14px; }
+    p { margin-bottom: 14px; }
+    hr { margin: 36px 0; }
+  </style>
+</head>
+<body>
+  <nav>
+    <div class="nav-inner">
+      <a class="nav-logo" href="../index.html">Project Vapor</a>
+      <a href="../documentation/index.html">Docs</a>
+      <a href="index.html" class="active">Devlog</a>
+      <a href="../demo/index.html">Demo</a>
+      <a href="https://github.com/painfulexistence/project-vapor" target="_blank">GitHub ↗</a>
+    </div>
+  </nav>
+  <main>
+    <div class="page-header">
+      <div class="eyebrow">
+      <a href="index.html">Devlog</a> / ADR-001</div>
+      <h1>ADR-001: Test Framework Selection</h1>
+      <div class="meta-row">
+        <span>2026-04-29</span>
+        <span><span class="badge badge-ok">Adopted</span></span>
+      </div>
+    </div>
+
+    <h2>Context</h2>
+    <p>Project Vapor had no automated tests. The demo application (<code>Vaporware/src/main.cpp</code>, ~25k LOC) was the only validation mechanism. Any refactor had no safety net; correctness could only be verified by manually building and running the demo.</p>
+    <p>The Phoenix Workflow Phase 2 required characterization tests for core engine paths.</p>
+
+    <h2>Decision</h2>
+    <p>Adopt <strong>Catch2 v3</strong> as the test framework.</p>
+
+    <h2>Options Considered</h2>
+    <table>
+      <thead><tr><th>Option</th><th>Pros</th><th>Cons</th></tr></thead>
+      <tbody>
+        <tr><td>GoogleTest</td><td>Widely used, strong fixture support</td><td>Extra install step, slightly more complex CMake integration</td></tr>
+        <tr><td>Catch2 v3</td><td>Simple CMake integration, <code>catch_discover_tests</code> for automatic CTest registration, available via vcpkg</td><td>Slightly different fixture syntax</td></tr>
+        <tr><td>Hand-rolled assertions</td><td>Zero dependencies</td><td>No test report, no CI integration</td></tr>
+      </tbody>
+    </table>
+
+    <h2>Rationale</h2>
+    <ul>
+      <li><code>vcpkg.json</code> requires a single <code>"catch2"</code> entry</li>
+      <li><code>Catch2::Catch2WithMain</code> target eliminates hand-written <code>main()</code></li>
+      <li><code>catch_discover_tests()</code> makes each <code>TEST_CASE</code> a separate CTest entry automatically</li>
+      <li>Test binaries run standalone without CTest</li>
+    </ul>
+
+    <h2>Constraints</h2>
+    <ul>
+      <li>Test targets do <strong>not</strong> link the Vapor library — avoids triggering Metal/Vulkan/Jolt/miniaudio initialization</li>
+      <li>GPU-dependent systems are tested through stubs or not tested in CI</li>
+      <li>Test binaries must run on headless GitHub Actions runners (macos-15)</li>
+    </ul>
+
+    <h2>Consequences</h2>
+    <ul>
+      <li><code>vcpkg.json</code> gains a <code>"catch2"</code> dependency</li>
+      <li>Root <code>CMakeLists.txt</code> gains <code>enable_testing()</code> and <code>add_subdirectory(tests)</code></li>
+      <li><code>tests/CMakeLists.txt</code> defines independent test executables</li>
+      <li><code>CMakePresets.json</code> gains a <code>ci</code> preset for GitHub Actions</li>
+    </ul>
+  </main>
+</body>
+</html>

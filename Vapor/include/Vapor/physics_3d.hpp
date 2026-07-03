@@ -1,10 +1,13 @@
 #pragma once
 #include <SDL3/SDL_stdinc.h>
+#include <entt/entt.hpp>
 #include <glm/gtc/quaternion.hpp>
 #include <glm/vec3.hpp>
+#include <memory>
+#include <mutex>
 #include <unordered_map>
+#include <vector>
 
-class Node;
 class Scene;
 
 namespace JPH {
@@ -36,40 +39,54 @@ enum class PhysicsDebugMode {
     WIREFRAME = 1,
 };
 
-struct RaycastHit {
-    glm::vec3 point;
-    glm::vec3 normal;
-    Node* node;
-    float hitDistance;
-    float hitFraction;
-};
-
 enum class BodyMotionType {
     Static,
     Dynamic,
     Kinematic,
 };
 
-struct BodyHandle {
+template<typename Tag> struct PhysicsHandle {
     Uint32 rid = UINT32_MAX;
-
     bool valid() const {
         return rid != UINT32_MAX;
     }
+    bool operator==(const PhysicsHandle&) const = default;
 };
 
-struct TriggerHandle {
-    Uint32 rid = UINT32_MAX;
+struct BodyTag {};
+struct TriggerTag {};
+using BodyHandle = PhysicsHandle<BodyTag>;
+using TriggerHandle = PhysicsHandle<TriggerTag>;
 
-    bool valid() const {
-        return rid != UINT32_MAX;
-    }
+struct RaycastHit {
+    glm::vec3 point;
+    glm::vec3 normal;
+    BodyHandle body;
+    entt::entity entity = entt::null;
+    float hitDistance;
+    float hitFraction;
 };
 
 struct OverlapResult {
-    std::vector<Node*> nodes;
     std::vector<BodyHandle> bodies;
+    std::vector<entt::entity> entities;
 };
+
+// ECS-mode collision events: bodies are identified by BodyHandle (resolve entity via getBodyUserData)
+struct CollisionEvent {
+    BodyHandle body1;
+    BodyHandle body2;
+    bool isEnter;
+};
+
+struct TriggerEvent {
+    BodyHandle triggerBody;
+    BodyHandle otherBody;
+    bool isEnter;
+};
+
+class CharacterController;
+class VehicleController;
 
 class Physics3D {
 private:
@@ -84,7 +101,14 @@ public:
     ~Physics3D();
 
     void init(Vapor::TaskScheduler& taskScheduler, std::shared_ptr<Vapor::DebugDraw> debugDraw = nullptr);
-    void process(const std::shared_ptr<Scene>& scene, float dt);
+    void process(float dt);
+    void attach(entt::registry& reg);
+    void process(entt::registry& reg, float dt);
+
+    void registerCharacterController(CharacterController* ctrl);
+    void unregisterCharacterController(CharacterController* ctrl);
+    void registerVehicleController(VehicleController* ctrl);
+    void unregisterVehicleController(VehicleController* ctrl);
 
     void setDebugEnabled(bool enabled);
     bool isDebugEnabled() const;
@@ -129,6 +153,10 @@ public:
     bool raycast(const glm::vec3& from, const glm::vec3& to, RaycastHit& hit, BodyHandle ignoreBody = BodyHandle{});
     void setGravity(const glm::vec3& acc);
     glm::vec3 getGravity() const;
+
+    // ====== ECS 碰撞事件（每幀 process() 後可取用，取完即清空） ======
+    std::vector<CollisionEvent> popCollisionEvents();
+    std::vector<TriggerEvent> popTriggerEvents();
 
     // ====== Trigger 創建 ======
     TriggerHandle createBoxTrigger(
@@ -240,23 +268,31 @@ private:
     };
 
     std::unordered_map<Uint32, JPH::BodyID> bodies;
+    std::unordered_map<Uint32, Uint32> bodyIDToRid; // JPH::BodyID.GetIndexAndSequenceNumber() -> rid
     Uint32 nextBodyID = 0;
+
+    std::vector<CollisionEvent> pendingCollisionEvents;
+    std::vector<TriggerEvent> pendingTriggerEvents;
+    std::mutex popMutex; // protects pendingCollisionEvents / pendingTriggerEvents
 
     std::unordered_map<Uint32, JPH::BodyID> triggers;
     Uint32 nextTriggerID = 0;
 
     std::unique_ptr<JPH::TempAllocatorImpl> tempAllocator;
-    std::unique_ptr<Vapor::JoltEnkiJobSystem> jobSystem;// Owned by Physics3D
+    std::unique_ptr<JPH::JobSystem> jobSystem;// Owned by Physics3D
     std::unique_ptr<JPH::PhysicsSystem> physicsSystem;
-    std::unique_ptr<BPLayerInterfaceImpl> broad_phase_layer_interface;
-    std::unique_ptr<ObjectVsBroadPhaseLayerFilterImpl> object_vs_broadphase_layer_filter;
-    std::unique_ptr<ObjectLayerPairFilterImpl> object_vs_object_layer_filter;
+    std::unique_ptr<BPLayerInterfaceImpl> broadPhaseLayerInterface;
+    std::unique_ptr<ObjectVsBroadPhaseLayerFilterImpl> objectVsBroadphaseLayerFilter;
+    std::unique_ptr<ObjectLayerPairFilterImpl> objectVsObjectLayerFilter;
     std::unique_ptr<JPH::ContactListener> contactListener;
     std::unique_ptr<JPH::BodyActivationListener> bodyActivationListener;
     std::unique_ptr<Vapor::PhysicsDebugRenderer> debugRenderer;
     bool debugDrawEnabled = false;
 
     JPH::BodyInterface* bodyInterface;
+
+    std::vector<CharacterController*> characterControllers;
+    std::vector<VehicleController*>   vehicleControllers;
 
     float timeAccum;
     Uint32 step;

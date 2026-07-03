@@ -16,7 +16,12 @@
     },
     "enkits",
     "tracy",
-    "sdl3",
+    {
+      "name": "sdl3",
+      "features": [
+        "vulkan"
+      ]
+    },
     "vulkan",
     {
       "name": "glslang",
@@ -25,6 +30,9 @@
       ]
     },
     "rmlui",
-    "entt"
+    "entt",
+    "catch2",
+    "nlohmann-json",
+    "boost-pfr"
   ]
 }

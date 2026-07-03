@@ -1,5 +1,9 @@
 #include "engine_core.hpp"
+#include "file_system.hpp"
+#include "renderer.hpp"
+#include "video_recorder.hpp"
 #include "rmlui_manager.hpp"
+#include "imgui.h"
 #include <fmt/core.h>
 #include <fmt/format.h>
 #include <thread>
@@ -45,6 +49,9 @@ namespace Vapor {
 
         fmt::print("Initializing EngineCore with {} threads\n", _numThreads);
 
+        // Initialize file system search paths before any asset loading
+        FileSystem::instance().initialize();
+
         // Initialize task scheduler
         _taskScheduler = std::make_unique<TaskScheduler>();
         _taskScheduler->init(_numThreads);
@@ -59,8 +66,13 @@ namespace Vapor {
         _inputManager = std::make_unique<InputManager>();
 
         // Initialize audio manager
-        _audioManager = std::make_unique<AudioManager>();
-        _audioManager->init();
+        _audioEngine = std::make_unique<AudioEngine>();
+        _audioEngine->init();
+
+        // Initialize video recorder and wire it to the audio manager so
+        // recordings automatically include the engine's mixed audio output.
+        _videoRecorder = std::make_unique<VideoRecorder>();
+        _videoRecorder->setAudioEngine(_audioEngine.get());
 
         _initialized = true;
 
@@ -81,13 +93,18 @@ namespace Vapor {
 
         _actionManager->stopAll();
 
+        // Stop any in-progress recording before teardown.
+        if (_videoRecorder && _videoRecorder->isRecording())
+            _videoRecorder->stopRecording();
+        _videoRecorder.reset();
+
         // Cleanup subsystems in reverse order
         if (_rmluiManager) {
             _rmluiManager->Shutdown();
             _rmluiManager.reset();
         }
-        _audioManager->shutdown();
-        _audioManager.reset();
+        _audioEngine->shutdown();
+        _audioEngine.reset();
         _inputManager.reset();
         _actionManager.reset();
         _resourceManager.reset();
@@ -100,6 +117,7 @@ namespace Vapor {
     }
 
     void EngineCore::update(float deltaTime) {
+        _taskScheduler->processMainThreadTasks();
         ZoneScoped;
 
         if (!_initialized) {
@@ -110,7 +128,7 @@ namespace Vapor {
         _actionManager->update(deltaTime);
 
         // Update audio manager (cleanup finished sounds, invoke callbacks)
-        _audioManager->update(deltaTime);
+        _audioEngine->update(deltaTime);
 
         // Update RmlUI
         if (_rmluiManager) {
@@ -122,7 +140,32 @@ namespace Vapor {
         // Future: Coordinate physics-render synchronization
     }
 
-    bool EngineCore::initRmlUI(int width, int height) {
+    void EngineCore::attachRenderer(::Renderer* renderer, const std::string& outputBasePath) {
+        _videoRecorder->setBaseOutputDir(outputBasePath);
+
+        // Per-frame hook: capture the rendered frame while recording and handle
+        // the F2 start/stop hotkey. Runs regardless of overlay visibility so
+        // recording keeps working (and can be stopped) with the UI hidden (F1).
+        renderer->setImGuiFrameCallback([this, renderer]() {
+            if (_videoRecorder->isRecording())
+                _videoRecorder->captureFrame();
+            if (ImGui::IsKeyPressed(ImGuiKey_F2))
+                _videoRecorder->toggleRecording(*renderer);
+        });
+
+        // Recording panel, drawn inside the Engine window when the overlay is
+        // visible. Shown in all build configs (no NDEBUG gate).
+        renderer->setEngineWindowCallback([this, renderer]() {
+            if (ImGui::CollapsingHeader("Recording (F2)", ImGuiTreeNodeFlags_DefaultOpen))
+                _videoRecorder->drawImGui(*renderer);
+        });
+    }
+
+    VideoRecorder& EngineCore::getVideoRecorder() {
+        return *_videoRecorder;
+    }
+
+    auto EngineCore::initRmlUI(int width, int height) -> bool {
         if (_rmluiManager) {
             fmt::print("RmlUI already initialized\n");
             return true;
@@ -145,7 +188,7 @@ namespace Vapor {
         }
     }
 
-    bool EngineCore::processRmlUIEvent(const SDL_Event& event) {
+    auto EngineCore::processRmlUIEvent(const SDL_Event& event) -> bool {
         if (_rmluiManager && _rmluiManager->IsInitialized()) {
             return _rmluiManager->ProcessEvent(event);
         }

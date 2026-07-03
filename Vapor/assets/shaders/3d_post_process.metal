@@ -1,6 +1,6 @@
 #include <metal_stdlib>
 using namespace metal;
-#include "assets/shaders/3d_common.metal" // TODO: use more robust include path
+#include "Res/shaders/3d_common.metal" // TODO: use more robust include path
 
 constant float2 ndcVerts[3] = {
     float2(-1.0, -1.0),
@@ -111,8 +111,8 @@ fragment float4 fragmentMain(
     color.g = texScreen.sample(s, uv).g + texGodRays.sample(s, uv).g;
     color.b = texScreen.sample(s, uvB).b + texGodRays.sample(s, uvB).b;
 
-    // Get AO
-    float ao = texAO.sample(s, uv).r;
+    // (AO is applied to the ambient/IBL term in the lighting pass, not here —
+    // a whole-image multiply would darken direct light too.)
 
     // ========================================================================
     // Color Grading (in HDR space, before tone mapping)

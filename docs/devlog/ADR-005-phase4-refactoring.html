@@ -1,0 +1,101 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>ADR-005: Phase 4 Refactoring — Project Vapor</title>
+  <link rel="stylesheet" href="../styles/global.css">
+  <style>
+    .page-header { margin-bottom: 32px; }
+    .page-header h1 { font-size: 20px; }
+    h2 { font-size: 16px; margin: 40px 0 14px; border-top: 1px solid var(--border); padding-top: 32px; }
+    h2:first-of-type { border-top: none; padding-top: 0; }
+    h3 { font-size: 13px; color: var(--text-muted); margin: 20px 0 8px; text-transform: uppercase; letter-spacing: 0.06em; }
+    p { margin-bottom: 14px; }
+  </style>
+</head>
+<body>
+  <nav>
+    <div class="nav-inner">
+      <a class="nav-logo" href="../index.html">Project Vapor</a>
+      <a href="../documentation/index.html">Docs</a>
+      <a href="index.html" class="active">Devlog</a>
+      <a href="../demo/index.html">Demo</a>
+      <a href="https://github.com/painfulexistence/project-vapor" target="_blank">GitHub ↗</a>
+    </div>
+  </nav>
+  <main>
+    <div class="page-header">
+      <div class="eyebrow">
+      <a href="index.html">Devlog</a> / ADR-005</div>
+      <h1>ADR-005: Phase 4 Refactoring</h1>
+      <div class="meta-row">
+        <span>2026-05-01</span>
+        <span><span class="badge badge-ok">Adopted</span></span>
+      </div>
+    </div>
+
+    <p>Phase 4 targeted surgical cleanup of the highest-value technical debt in the demo layer (<code>Vaporware/</code>), without touching engine internals that lack test coverage. Four changes were made: T1 (PhysicsHandle type safety), T2 (SceneBuilder extraction), T3 (ECS systems naming), T4 (RmlUI helpers).</p>
+
+    <h2>T1 — PhysicsHandle&lt;Tag&gt; Template</h2>
+
+    <h3>Decision</h3>
+    <p>Replace the two structurally identical <code>BodyHandle</code>/<code>TriggerHandle</code> bare structs with a tag-template:</p>
+    <pre><code>template&lt;typename Tag&gt;
+struct PhysicsHandle {
+    Uint32 rid = UINT32_MAX;
+    bool valid() const { return rid != UINT32_MAX; }
+    bool operator==(const PhysicsHandle&amp;) const = default;
+};
+using BodyHandle    = PhysicsHandle&lt;BodyTag&gt;;
+using TriggerHandle = PhysicsHandle&lt;TriggerTag&gt;;</code></pre>
+
+    <h3>Rationale</h3>
+    <p>The original bare structs were structurally identical — <code>physics.destroyBody(triggerHandle)</code> compiled without error. The template makes accidental cross-type assignment a compile error at zero runtime cost. This mirrors the <code>GPUHandle&lt;Tag&gt;</code> pattern from ADR-004.</p>
+
+    <h3>Impact</h3>
+    <p>Pure type-alias change. All call sites keep the same names and no logic changes. Forward declarations of <code>BodyHandle</code> as a struct had to be replaced with full includes, since type aliases cannot be forward-declared.</p>
+
+    <h2>T2 — SceneBuilder Extraction</h2>
+
+    <h3>Decision</h3>
+    <p>Extract the 195-LOC entity-creation block from <code>main()</code> into <code>Vaporware/src/scene_builder.hpp</code> as a single <code>buildScene(...)</code> free function returning a <code>SceneResources</code> struct.</p>
+
+    <h3>Why a free function, not a class?</h3>
+    <p>The scene builder has no persistent state — it runs once, populates the registry, and returns handles. A class would add boilerplate with no benefit. The <code>SceneResources</code> return struct carries the two cross-cutting handles <code>main()</code> needs: <code>cube1</code> (referenced by <code>FollowCameraComponent::target</code>) and <code>global</code> (the singleton entity for switch requests).</p>
+
+    <h3>Impact</h3>
+    <p><code>main()</code> reduced from 627 to 435 lines. No new dependencies; <code>scene_builder.hpp</code> includes only headers already present in <code>main.cpp</code>.</p>
+
+    <h2>T3 — ECS Systems Naming Normalization</h2>
+
+    <h3>Decision</h3>
+    <p>Convert all 8 free functions in <code>systems.hpp</code> from <code>updateXSystem(...)</code> to <code>XSystem::update(...)</code> static-class form, matching the 3 classes already present.</p>
+
+    <h3>Rationale</h3>
+    <p>The mixed convention required two grep patterns to find all systems. A single <code>*System::update</code> pattern now covers everything. Static-class form also makes it easier to add per-system state later without changing call sites.</p>
+
+    <h3>Impact</h3>
+    <p>Pure rename. No logic changes. All call sites in <code>main.cpp</code> updated.</p>
+
+    <h2>T4 — RmlUI Helper Functions</h2>
+
+    <h3>Decision</h3>
+    <p>Extract two helpers into <code>namespace RmlUIHelpers</code> at the top of <code>systems.hpp</code>:</p>
+    <ul>
+      <li><code>ensureDocument(docPtr, rml, path)</code> — loads a document once, returns the pointer</li>
+      <li><code>tickTimer(timer, dt, duration)</code> — advances a timer and returns true when it fires</li>
+    </ul>
+
+    <h3>Why not a base class?</h3>
+    <p>The 5 RmlUI systems (HUD, ScrollText, Letterbox, Subtitle, ChapterTitle) have different state enums, different element lookups, and different transition logic. A base class would require virtual dispatch and shared state that doesn't cleanly unify. Two free helpers eliminate ~60 lines of copy-paste without introducing coupling.</p>
+    <p><code>tickTimer</code> was applied only where the pattern was a simple <code>timer += dt; if (timer >= duration)</code> with no interrupt check between them. Interrupt-checked states were left as-is to avoid semantic drift.</p>
+
+    <h2>Known Remaining Debt</h2>
+    <div class="warn-box">
+      <strong>ECS / SceneGraph dual model</strong>: Vaporware uses both EnTT components and <code>Scene</code> nodes for the same objects. Unification would require touching engine internals without test coverage. Deferred.<br><br>
+      <strong>Vulkan backend parity</strong>: 28 Metal render passes have no Vulkan counterpart. Tracked separately. Deferred to a dedicated graphics sprint.
+    </div>
+  </main>
+</body>
+</html>

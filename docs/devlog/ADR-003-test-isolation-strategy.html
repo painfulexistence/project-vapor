@@ -1,0 +1,65 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>ADR-003: Test Isolation Strategy — Project Vapor</title>
+  <link rel="stylesheet" href="../styles/global.css">
+  <style>
+    .page-header { margin-bottom: 32px; }
+    .page-header h1 { font-size: 20px; }
+    h2 { font-size: 16px; margin: 36px 0 14px; }
+    p { margin-bottom: 14px; }
+    hr { margin: 36px 0; }
+  </style>
+</head>
+<body>
+  <nav>
+    <div class="nav-inner">
+      <a class="nav-logo" href="../index.html">Project Vapor</a>
+      <a href="../documentation/index.html">Docs</a>
+      <a href="index.html" class="active">Devlog</a>
+      <a href="../demo/index.html">Demo</a>
+      <a href="https://github.com/painfulexistence/project-vapor" target="_blank">GitHub ↗</a>
+    </div>
+  </nav>
+  <main>
+    <div class="page-header">
+      <div class="eyebrow">
+      <a href="index.html">Devlog</a> / ADR-003</div>
+      <h1>ADR-003: Test Isolation Strategy</h1>
+      <div class="meta-row">
+        <span>2026-04-29</span>
+        <span><span class="badge badge-ok">Adopted</span></span>
+      </div>
+    </div>
+
+    <h2>Context</h2>
+    <p>Initializing the Vapor library requires a graphics device (Metal/Vulkan context), a physics engine (Jolt, requiring SSE/AVX CPU features), and an audio device (miniaudio). None of these are available on headless CI runners.</p>
+    <p>If test binaries link the full Vapor library, any <code>#include &lt;Vapor/scene.hpp&gt;</code> pulls in Physics3D, CharacterController, and VehicleController declarations — and their implementations require Jolt dynamic linking, even if the test never calls a physics function.</p>
+
+    <h2>Decision</h2>
+    <p>Test binaries do <strong>not</strong> link the <code>Vapor</code> CMake target. Instead:</p>
+    <ul>
+      <li>Directly <code>#include</code> pure header logic (e.g., <code>action_manager.hpp</code>, <code>camera.hpp</code>) where the implementation is fully inline</li>
+      <li>Use stubs or partial reimplementations for classes with external dependencies (e.g., a <code>MinimalNode</code> stub replicating only the pure logic of <code>Node</code>)</li>
+      <li>Link only: <code>Catch2::Catch2WithMain</code>, <code>glm::glm</code>, <code>fmt::fmt</code></li>
+    </ul>
+
+    <h2>Rationale</h2>
+    <p>This strategy allows tests to run on any CI runner without GPU or audio hardware, complete in milliseconds, and test only the logic under examination — not the entire subsystem stack.</p>
+
+    <h2>Trade-offs</h2>
+    <div class="warn-box">Stubs must precisely replicate the source logic. Any drift between a stub and its source removes the characterization guarantee. Stub synchronization is currently enforced by code review.</div>
+    <ul>
+      <li>When <code>Node</code> or other stubbed classes change, stubs must be updated manually</li>
+      <li>Integration tests (real ResourceManager loads, real Physics3D simulation) require a separate environment with appropriate hardware</li>
+    </ul>
+
+    <h2>Future Work</h2>
+    <ul>
+      <li>For Physics3D testing: consider a dedicated integration test suite on a GPU-capable runner, or verify Jolt's headless mode (CPU-only, no GPU required)</li>
+    </ul>
+  </main>
+</body>
+</html>

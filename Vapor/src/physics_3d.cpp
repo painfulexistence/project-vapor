@@ -1,14 +1,16 @@
 #include "physics_3d.hpp"
+#include "Vapor/components.hpp"
 #include "character_controller.hpp"
 #include "fluid_volume.hpp"
 #include "jolt_enki_job_system.hpp"
 #include "physics_debug_renderer.hpp"
 #include "task_scheduler.hpp"
 #include "vehicle_controller.hpp"
+#include <Jolt/Jolt.h>
+
 #include <Jolt/Core/Factory.h>
 #include <Jolt/Core/JobSystemThreadPool.h>
 #include <Jolt/Core/TempAllocator.h>
-#include <Jolt/Jolt.h>
 #include <Jolt/Physics/Body/BodyActivationListener.h>
 #include <Jolt/Physics/Body/BodyCreationSettings.h>
 #include <Jolt/Physics/Body/BodyFilter.h>
@@ -31,16 +33,17 @@
 #include <Jolt/RegisterTypes.h>
 #include <SDL3/SDL_stdinc.h>
 #include <fmt/core.h>
+#include <algorithm>
 #include <thread>
+#include <mutex>
 
 // #include "physics_debug_drawer.hpp"
-#include "scene.hpp"
 
 JPH_SUPPRESS_WARNINGS
 
 using namespace JPH::literals;// for real value _r suffix
 
-static void TraceImpl(const char* inFMT, ...) {
+static void traceImpl(const char* inFMT, ...) {
     va_list list;
     va_start(list, inFMT);
     char buffer[1024];
@@ -50,7 +53,7 @@ static void TraceImpl(const char* inFMT, ...) {
     fmt::print("{}", buffer);
 }
 
-static constexpr JPH::EMotionType convertMotionType(BodyMotionType motionType) {
+static constexpr auto convertMotionType(BodyMotionType motionType) -> JPH::EMotionType {
     switch (motionType) {
     case BodyMotionType::Static:
         return JPH::EMotionType::Static;
@@ -64,22 +67,22 @@ static constexpr JPH::EMotionType convertMotionType(BodyMotionType motionType) {
 }
 
 namespace Layers {
-    static constexpr JPH::ObjectLayer NON_MOVING = 0;
-    static constexpr JPH::ObjectLayer MOVING = 1;
-    static constexpr JPH::ObjectLayer TRIGGER = 2;
-    static constexpr JPH::ObjectLayer NUM_LAYERS = 3;
+    static constexpr JPH::ObjectLayer nonMoving = 0;
+    static constexpr JPH::ObjectLayer moving = 1;
+    static constexpr JPH::ObjectLayer trigger = 2;
+    static constexpr JPH::ObjectLayer numLayers = 3;
 };// namespace Layers
 
 class ObjectLayerPairFilterImpl : public JPH::ObjectLayerPairFilter {
 public:
-    virtual bool ShouldCollide(JPH::ObjectLayer inObject1, JPH::ObjectLayer inObject2) const override {
+    virtual auto ShouldCollide(JPH::ObjectLayer inObject1, JPH::ObjectLayer inObject2) const -> bool override {
         switch (inObject1) {
-        case Layers::NON_MOVING:
-            return inObject2 == Layers::MOVING;// Static only collides with Dynamic
-        case Layers::MOVING:
+        case Layers::nonMoving:
+            return inObject2 == Layers::moving;// Static only collides with Dynamic
+        case Layers::moving:
             return true;// Dynamic collides with all layers (including Trigger)
-        case Layers::TRIGGER:
-            return inObject2 == Layers::MOVING;// Trigger only detects Dynamic objects
+        case Layers::trigger:
+            return inObject2 == Layers::moving;// Trigger only detects Dynamic objects
         default:
             JPH_ASSERT(false);
             return false;
@@ -88,37 +91,37 @@ public:
 };
 
 namespace BroadPhaseLayers {
-    static constexpr JPH::BroadPhaseLayer NON_MOVING(0);
-    static constexpr JPH::BroadPhaseLayer MOVING(1);
-    static constexpr JPH::BroadPhaseLayer TRIGGER(2);
-    static constexpr uint NUM_LAYERS(3);
+    static constexpr JPH::BroadPhaseLayer nonMoving(0);
+    static constexpr JPH::BroadPhaseLayer moving(1);
+    static constexpr JPH::BroadPhaseLayer trigger(2);
+    static constexpr uint numLayers(3);
 };// namespace BroadPhaseLayers
 
 class BPLayerInterfaceImpl final : public JPH::BroadPhaseLayerInterface {
 public:
     BPLayerInterfaceImpl() {
-        mObjectToBroadPhase[Layers::NON_MOVING] = BroadPhaseLayers::NON_MOVING;
-        mObjectToBroadPhase[Layers::MOVING] = BroadPhaseLayers::MOVING;
-        mObjectToBroadPhase[Layers::TRIGGER] = BroadPhaseLayers::TRIGGER;
+        mObjectToBroadPhase[Layers::nonMoving] = BroadPhaseLayers::nonMoving;
+        mObjectToBroadPhase[Layers::moving] = BroadPhaseLayers::moving;
+        mObjectToBroadPhase[Layers::trigger] = BroadPhaseLayers::trigger;
     }
 
-    virtual uint GetNumBroadPhaseLayers() const override {
-        return BroadPhaseLayers::NUM_LAYERS;
+    virtual auto GetNumBroadPhaseLayers() const -> uint override {
+        return BroadPhaseLayers::numLayers;
     }
 
-    virtual JPH::BroadPhaseLayer GetBroadPhaseLayer(JPH::ObjectLayer inLayer) const override {
-        JPH_ASSERT(inLayer < Layers::NUM_LAYERS);
+    virtual auto GetBroadPhaseLayer(JPH::ObjectLayer inLayer) const -> JPH::BroadPhaseLayer override {
+        JPH_ASSERT(inLayer < Layers::numLayers);
         return mObjectToBroadPhase[inLayer];
     }
 
 #if defined(JPH_EXTERNAL_PROFILE) || defined(JPH_PROFILE_ENABLED)
     virtual const char* GetBroadPhaseLayerName(JPH::BroadPhaseLayer inLayer) const override {
         switch ((JPH::BroadPhaseLayer::Type)inLayer) {
-        case (JPH::BroadPhaseLayer::Type)BroadPhaseLayers::NON_MOVING:
+        case (JPH::BroadPhaseLayer::Type)BroadPhaseLayers::nonMoving:
             return "NON_MOVING";
-        case (JPH::BroadPhaseLayer::Type)BroadPhaseLayers::MOVING:
+        case (JPH::BroadPhaseLayer::Type)BroadPhaseLayers::moving:
             return "MOVING";
-        case (JPH::BroadPhaseLayer::Type)BroadPhaseLayers::TRIGGER:
+        case (JPH::BroadPhaseLayer::Type)BroadPhaseLayers::trigger:
             return "TRIGGER";
         default:
             JPH_ASSERT(false);
@@ -128,19 +131,19 @@ public:
 #endif
 
 private:
-    JPH::BroadPhaseLayer mObjectToBroadPhase[Layers::NUM_LAYERS];
+    JPH::BroadPhaseLayer mObjectToBroadPhase[Layers::numLayers];
 };
 
 class ObjectVsBroadPhaseLayerFilterImpl : public JPH::ObjectVsBroadPhaseLayerFilter {
 public:
-    virtual bool ShouldCollide(JPH::ObjectLayer inLayer1, JPH::BroadPhaseLayer inLayer2) const override {
+    virtual auto ShouldCollide(JPH::ObjectLayer inLayer1, JPH::BroadPhaseLayer inLayer2) const -> bool override {
         switch (inLayer1) {
-        case Layers::NON_MOVING:
-            return inLayer2 == BroadPhaseLayers::MOVING;
-        case Layers::MOVING:
+        case Layers::nonMoving:
+            return inLayer2 == BroadPhaseLayers::moving;
+        case Layers::moving:
             return true;
-        case Layers::TRIGGER:
-            return inLayer2 == BroadPhaseLayers::MOVING;
+        case Layers::trigger:
+            return inLayer2 == BroadPhaseLayers::moving;
         default:
             JPH_ASSERT(false);
             return false;
@@ -150,36 +153,30 @@ public:
 
 class MyContactListener : public JPH::ContactListener {
 public:
-    struct TriggerEvent {
-        Node* triggerNode;
-        Node* otherNode;
-        bool isEnter;// true = Enter, false = Exit
-    };
-
-    struct CollisionEvent {
-        Node* node1;
-        Node* node2;
+    // Store raw Jolt BodyIDs; Physics3D::process() converts to BodyHandles via bodyIDToRid
+    struct RawCollisionEvent {
+        JPH::BodyID id1;
+        JPH::BodyID id2;
+        bool isTrigger;
         bool isEnter;
     };
 
-    std::vector<TriggerEvent> triggerEvents;
-    std::vector<CollisionEvent> collisionEvents;
-    std::unordered_map<uint64_t, bool> activeContacts;// Track active contacts for exit detection
+    std::vector<RawCollisionEvent> rawEvents;
+    std::mutex eventMutex;
 
-    // Helper to create unique contact ID
-    uint64_t makeContactID(JPH::BodyID id1, JPH::BodyID id2) const {
+    auto makeContactID(JPH::BodyID id1, JPH::BodyID id2) const -> uint64_t {
         uint32_t a = id1.GetIndexAndSequenceNumber();
         uint32_t b = id2.GetIndexAndSequenceNumber();
         if (a > b) std::swap(a, b);
         return (uint64_t(a) << 32) | uint64_t(b);
     }
 
-    virtual JPH::ValidateResult OnContactValidate(
+    virtual auto OnContactValidate(
         const JPH::Body& inBody1,
         const JPH::Body& inBody2,
         JPH::RVec3Arg inBaseOffset,
         const JPH::CollideShapeResult& inCollisionResult
-    ) override {
+    ) -> JPH::ValidateResult override {
         return JPH::ValidateResult::AcceptAllContactsForThisBodyPair;
     }
 
@@ -189,26 +186,9 @@ public:
         const JPH::ContactManifold& inManifold,
         JPH::ContactSettings& ioSettings
     ) override {
-        auto node1 = reinterpret_cast<Node*>(inBody1.GetUserData());
-        auto node2 = reinterpret_cast<Node*>(inBody2.GetUserData());
-
-        if (!node1 || !node2) return;
-
-        bool isSensor1 = inBody1.IsSensor();
-        bool isSensor2 = inBody2.IsSensor();
-
-        uint64_t contactID = makeContactID(inBody1.GetID(), inBody2.GetID());
-        activeContacts[contactID] = true;
-
-        // Trigger event (one or both are sensors)
-        if (isSensor1 || isSensor2) {
-            Node* triggerNode = isSensor1 ? node1 : node2;
-            Node* otherNode = isSensor1 ? node2 : node1;
-            triggerEvents.push_back({ triggerNode, otherNode, true });
-        } else {
-            // Regular collision event
-            collisionEvents.push_back({ node1, node2, true });
-        }
+        bool isTrigger = inBody1.IsSensor() || inBody2.IsSensor();
+        std::lock_guard<std::mutex> lock(eventMutex);
+        rawEvents.push_back({ inBody1.GetID(), inBody2.GetID(), isTrigger, true });
     }
 
     virtual void OnContactPersisted(
@@ -216,19 +196,9 @@ public:
         const JPH::Body& inBody2,
         const JPH::ContactManifold& inManifold,
         JPH::ContactSettings& ioSettings
-    ) override {
-        // Contact still active, no need to add event
-    }
+    ) override {}
 
-    virtual void OnContactRemoved(const JPH::SubShapeIDPair& inSubShapePair) override {
-        // Note: We can't get UserData here directly, so we need to handle this differently
-        // We'll mark the contact as removed and process it in the next physics update
-    }
-
-    void clearEvents() {
-        triggerEvents.clear();
-        collisionEvents.clear();
-    }
+    virtual void OnContactRemoved(const JPH::SubShapeIDPair& inSubShapePair) override {}
 };
 
 class MyBodyActivationListener : public JPH::BodyActivationListener {
@@ -256,37 +226,46 @@ Physics3D::~Physics3D() {
     deinit();
 }
 
-void Physics3D::init(Vapor::TaskScheduler& taskScheduler, std::shared_ptr<Vapor::DebugDraw> debugDraw) {
-    JPH::RegisterDefaultAllocator();
-    JPH::Trace = TraceImpl;
+static int sPhysicsInstances = 0;
 
-    JPH::Factory::sInstance = new JPH::Factory();
-    JPH::RegisterTypes();
+void Physics3D::init(Vapor::TaskScheduler& taskScheduler, std::shared_ptr<Vapor::DebugDraw> debugDraw) {
+    if (sPhysicsInstances == 0) {
+        JPH::RegisterDefaultAllocator();
+        JPH::Trace = traceImpl;
+#ifdef JPH_ENABLE_ASSERTS
+        JPH::AssertFailed = [](const char* expr, const char* msg, const char* file, JPH::uint line) -> bool {
+            fmt::print(stderr, "JPH_ASSERT FAILED: {} ({}) at {}:{}\n", expr, msg ? msg : "", file, line);
+            fflush(stderr);
+            return true;
+        };
+#endif
+        JPH::Factory::sInstance = new JPH::Factory();
+        JPH::RegisterTypes();
+    }
+    sPhysicsInstances++;
 
     tempAllocator = std::make_unique<JPH::TempAllocatorImpl>(10 * 1024 * 1024);
 
-    // Create JoltEnkiJobSystem using the provided task scheduler
-    jobSystem = std::make_unique<Vapor::JoltEnkiJobSystem>(taskScheduler, 2048);
-    // jobSystem = std::make_unique<JPH::JobSystemThreadPool>(
-    //   JPH::cMaxPhysicsJobs, JPH::cMaxPhysicsBarriers, std::thread::hardware_concurrency() - 1
-    // );
+    jobSystem = std::make_unique<JPH::JobSystemThreadPool>(
+        JPH::cMaxPhysicsJobs, JPH::cMaxPhysicsBarriers, std::thread::hardware_concurrency() - 1
+    );
 
     const uint cMaxBodies = 1024;
     const uint cNumBodyMutexes = 0;
     const uint cMaxBodyPairs = 1024;
     const uint cMaxContactConstraints = 1024;
-    broad_phase_layer_interface = std::make_unique<BPLayerInterfaceImpl>();
-    object_vs_broadphase_layer_filter = std::make_unique<ObjectVsBroadPhaseLayerFilterImpl>();
-    object_vs_object_layer_filter = std::make_unique<ObjectLayerPairFilterImpl>();
+    broadPhaseLayerInterface = std::make_unique<BPLayerInterfaceImpl>();
+    objectVsBroadphaseLayerFilter = std::make_unique<ObjectVsBroadPhaseLayerFilterImpl>();
+    objectVsObjectLayerFilter = std::make_unique<ObjectLayerPairFilterImpl>();
     physicsSystem = std::make_unique<JPH::PhysicsSystem>();
     physicsSystem->Init(
         cMaxBodies,
         cNumBodyMutexes,
         cMaxBodyPairs,
         cMaxContactConstraints,
-        *broad_phase_layer_interface.get(),
-        *object_vs_broadphase_layer_filter.get(),
-        *object_vs_object_layer_filter.get()
+        *broadPhaseLayerInterface.get(),
+        *objectVsBroadphaseLayerFilter.get(),
+        *objectVsObjectLayerFilter.get()
     );
 
     bodyActivationListener = std::make_unique<MyBodyActivationListener>();
@@ -317,8 +296,8 @@ void Physics3D::deinit() {
         return;
     }
 
-    for (auto body : bodies) {
-        bodyInterface->RemoveBody(body.second);
+    for (auto& body : bodies) {
+        if (bodyInterface->IsAdded(body.second)) bodyInterface->RemoveBody(body.second);
         bodyInterface->DestroyBody(body.second);
     }
     bodies.clear();
@@ -332,264 +311,330 @@ void Physics3D::deinit() {
     timeAccum = 0.0f;
     step = 0;
 
-    JPH::UnregisterTypes();
-    delete JPH::Factory::sInstance;
-    JPH::Factory::sInstance = nullptr;
+    sPhysicsInstances--;
+
+    characterControllers.clear();
+    vehicleControllers.clear();
 
     isInitialized = false;
 }
 
-void Physics3D::process(const std::shared_ptr<Scene>& scene, float dt) {
-    // sync physics world with scene data (Scene → Physics)
-    // Collect nodes that need syncing first to avoid lock conflicts
-    struct SyncData {
-        JPH::BodyID bodyID;
-        glm::vec3 position;
-        glm::quat rotation;
-    };
-    std::vector<SyncData> nodesToSync;
+void Physics3D::registerCharacterController(CharacterController* ctrl) {
+    characterControllers.push_back(ctrl);
+}
 
-    // First pass: collect motion types and positions/rotations
-    for (auto& node : scene->nodes) {
-        if (node->body.valid()) {
-            auto bodyID = bodies[node->body.rid];
-            JPH::BodyLockRead lock(physicsSystem->GetBodyLockInterface(), bodyID);
-            if (!lock.Succeeded()) {
-                continue;
+void Physics3D::unregisterCharacterController(CharacterController* ctrl) {
+    characterControllers.erase(
+        std::remove(characterControllers.begin(), characterControllers.end(), ctrl),
+        characterControllers.end()
+    );
+}
+
+void Physics3D::registerVehicleController(VehicleController* ctrl) {
+    vehicleControllers.push_back(ctrl);
+}
+
+void Physics3D::unregisterVehicleController(VehicleController* ctrl) {
+    vehicleControllers.erase(
+        std::remove(vehicleControllers.begin(), vehicleControllers.end(), ctrl),
+        vehicleControllers.end()
+    );
+}
+
+void Physics3D::attach(entt::registry& reg) {
+    reg.on_destroy<Vapor::CharacterBodyComponent>().connect<[](entt::registry& r, entt::entity e) {
+        auto& comp = r.get<Vapor::CharacterBodyComponent>(e);
+        if (comp.controller) {
+            auto* self = Physics3D::Get();
+            if (self) {
+                auto& v = self->characterControllers;
+                v.erase(std::remove(v.begin(), v.end(), comp.controller.get()), v.end());
             }
-            const JPH::Body& body = lock.GetBody();
-            auto motionType = body.GetMotionType();
+        }
+    }>();
 
-            // Only sync Kinematic and Static bodies from scene to physics
-            if (motionType != JPH::EMotionType::Dynamic) {
-                nodesToSync.push_back({ bodyID, node->getWorldPosition(), node->getWorldRotation() });
+    reg.on_destroy<Vapor::VehicleBodyComponent>().connect<[](entt::registry& r, entt::entity e) {
+        auto& comp = r.get<Vapor::VehicleBodyComponent>(e);
+        if (comp.controller) {
+            auto* self = Physics3D::Get();
+            if (self) {
+                auto& v = self->vehicleControllers;
+                v.erase(std::remove(v.begin(), v.end(), comp.controller.get()), v.end());
+            }
+        }
+    }>();
+}
+
+void Physics3D::process(entt::registry& reg, float dt) {
+    if (!isInitialized) return;
+
+    // 1. Instantiate controllers for newly added components (controller == nullptr)
+    {
+        auto charView = reg.view<Vapor::CharacterBodyComponent, Vapor::TransformComponent>();
+        for (auto entity : charView) {
+            auto& comp = charView.get<Vapor::CharacterBodyComponent>(entity);
+            if (!comp.controller) {
+                auto& t = charView.get<Vapor::TransformComponent>(entity);
+                comp.controller = std::make_unique<CharacterController>(this, comp.settings);
+                comp.controller->warp(t.position);
+                characterControllers.push_back(comp.controller.get());
+            }
+        }
+        auto vehView = reg.view<Vapor::VehicleBodyComponent, Vapor::TransformComponent>();
+        for (auto entity : vehView) {
+            auto& comp = vehView.get<Vapor::VehicleBodyComponent>(entity);
+            if (!comp.controller) {
+                auto& t = vehView.get<Vapor::TransformComponent>(entity);
+                comp.controller = std::make_unique<VehicleController>(
+                    this, comp.settings, t.position, t.rotation
+                );
+                vehicleControllers.push_back(comp.controller.get());
             }
         }
     }
 
-    // Second pass: sync positions and rotations (BodyInterface handles locking)
-    for (const auto& syncData : nodesToSync) {
-        bodyInterface->SetPosition(
-            syncData.bodyID,
-            JPH::RVec3(syncData.position.x, syncData.position.y, syncData.position.z),
-            JPH::EActivation::DontActivate
-        );
-        bodyInterface->SetRotation(
-            syncData.bodyID,
-            JPH::Quat(syncData.rotation.x, syncData.rotation.y, syncData.rotation.z, syncData.rotation.w),
-            JPH::EActivation::DontActivate
-        );
+    // 2. Apply input to vehicle controllers
+    {
+        auto view = reg.view<Vapor::VehicleBodyComponent>();
+        for (auto entity : view) {
+            auto& comp = view.get<Vapor::VehicleBodyComponent>(entity);
+            if (!comp.controller) continue;
+            comp.controller->setThrottle(comp.throttle);
+            comp.controller->setSteering(comp.steering);
+            comp.controller->setBrake(comp.brake);
+            comp.controller->setHandbrake(comp.handbrake);
+        }
     }
 
-    // TODO: fix trace trap
-    // Apply fluid forces before physics update
-    // for (auto& fluidVolume : scene->fluidVolumes) {
-    //     if (fluidVolume) {
-    //         fluidVolume->applyForcesToBodies(dt);
-    //     }
-    // }
+    // 3. Apply input to character controllers
+    {
+        auto view = reg.view<Vapor::CharacterBodyComponent>();
+        for (auto entity : view) {
+            auto& comp = view.get<Vapor::CharacterBodyComponent>(entity);
+            if (!comp.controller) continue;
+            comp.controller->move(comp.desiredVelocity, dt);
+            if (comp.jumpRequested) {
+                comp.controller->jump(5.0f);
+                comp.jumpRequested = false;
+            }
+        }
+    }
 
-    // update physics world
+    // 4. Fixed-step physics
+    for (auto* ctrl : characterControllers) {
+        ctrl->storePreviousPosition();
+    }
+
     timeAccum += dt;
-
-    // Store previous positions BEFORE any physics updates (for interpolation)
-    // This ensures that even if we do multiple physics steps (catch-up),
-    // we interpolate from the position at the start of this frame
-    std::function<void(const std::shared_ptr<Node>&)> storePreviousPositions = [&](const std::shared_ptr<Node>& node) {
-        if (node->characterController) {
-            node->characterController->storePreviousPosition();
-        }
-        for (const auto& child : node->children) {
-            storePreviousPositions(child);
-        }
-    };
-    for (auto& node : scene->nodes) {
-        storePreviousPositions(node);
-    }
-
-    while (timeAccum >= FIXED_TIME_STEP) {
+    constexpr int MAX_PHYSICS_STEPS_PER_FRAME = 4;
+    int stepsThisFrame = 0;
+    while (timeAccum >= FIXED_TIME_STEP && stepsThisFrame < MAX_PHYSICS_STEPS_PER_FRAME) {
         ++step;
-
-        // Update vehicle controllers
-        std::function<void(const std::shared_ptr<Node>&)> updateVehicleControllers =
-            [&](const std::shared_ptr<Node>& node) {
-                if (node->vehicleController) {
-                    node->vehicleController->update(FIXED_TIME_STEP);
-                }
-                for (const auto& child : node->children) {
-                    updateVehicleControllers(child);
-                }
-            };
-        for (auto& node : scene->nodes) {
-            updateVehicleControllers(node);
-        }
-
-        // Update character controllers
-        std::function<void(const std::shared_ptr<Node>&)> updateCharacterControllers =
-            [&](const std::shared_ptr<Node>& node) {
-                if (node->characterController) {
-                    node->characterController->update(FIXED_TIME_STEP, getGravity());
-                }
-                for (const auto& child : node->children) {
-                    updateCharacterControllers(child);
-                }
-            };
-        for (auto& node : scene->nodes) {
-            updateCharacterControllers(node);
-        }
-
-        // Update physics (after controller updates)
+        ++stepsThisFrame;
+        for (auto* ctrl : vehicleControllers) ctrl->update(FIXED_TIME_STEP);
+        for (auto* ctrl : characterControllers) ctrl->update(FIXED_TIME_STEP, getGravity());
         physicsSystem->Update(FIXED_TIME_STEP, 1, tempAllocator.get(), jobSystem.get());
-
         timeAccum -= FIXED_TIME_STEP;
+    }
+    if (timeAccum > FIXED_TIME_STEP * MAX_PHYSICS_STEPS_PER_FRAME) {
+        timeAccum = FIXED_TIME_STEP;
     }
 
     if (debugDrawEnabled && debugRenderer) {
         debugRenderer->update();
     }
 
-    // sync scene data with physics world (Physics → Scene)
-    // Use explicit locks to avoid lock conflicts when calling multiple BodyInterface methods
-    for (auto& node : scene->nodes) {
-        if (node->body.valid()) {
-            auto bodyID = bodies[node->body.rid];
+    // 5. Drain collision/trigger events
+    auto* listener = static_cast<MyContactListener*>(contactListener.get());
+    std::vector<MyContactListener::RawCollisionEvent> rawEvents;
+    {
+        std::lock_guard<std::mutex> lock(listener->eventMutex);
+        rawEvents.swap(listener->rawEvents);
+    }
 
-            // Use BodyLockRead to safely read body properties
-            JPH::BodyLockRead lock(physicsSystem->GetBodyLockInterface(), bodyID);
-            if (!lock.Succeeded()) {
-                continue;// Body was removed, skip it
+    {
+        std::lock_guard<std::mutex> popLock(popMutex);
+        pendingCollisionEvents.clear();
+        pendingTriggerEvents.clear();
+
+        for (auto& raw : rawEvents) {
+            Uint32 ridA = UINT32_MAX, ridB = UINT32_MAX;
+            auto itA = bodyIDToRid.find(raw.id1.GetIndexAndSequenceNumber());
+            auto itB = bodyIDToRid.find(raw.id2.GetIndexAndSequenceNumber());
+            if (itA != bodyIDToRid.end()) ridA = itA->second;
+            if (itB != bodyIDToRid.end()) ridB = itB->second;
+            BodyHandle ha{ ridA }, hb{ ridB };
+
+            if (raw.isTrigger) {
+                pendingTriggerEvents.push_back({ ha, hb, raw.isEnter });
+            } else {
+                pendingCollisionEvents.push_back({ ha, hb, raw.isEnter });
             }
+        }
+    }
+
+    // 6. Sync character positions back to TransformComponent
+    {
+        auto view = reg.view<Vapor::CharacterBodyComponent, Vapor::TransformComponent>();
+        for (auto entity : view) {
+            auto& comp = view.get<Vapor::CharacterBodyComponent>(entity);
+            if (!comp.controller) continue;
+            auto& t = view.get<Vapor::TransformComponent>(entity);
+            t.position = comp.controller->getPosition();
+            t.isDirty  = true;
+        }
+    }
+
+    // 7. Sync vehicle positions/rotations back to TransformComponent
+    {
+        auto view = reg.view<Vapor::VehicleBodyComponent, Vapor::TransformComponent>();
+        for (auto entity : view) {
+            auto& comp = view.get<Vapor::VehicleBodyComponent>(entity);
+            if (!comp.controller) continue;
+            auto& t = view.get<Vapor::TransformComponent>(entity);
+            t.position = comp.controller->getPosition();
+            t.rotation = comp.controller->getRotation();
+            t.isDirty  = true;
+        }
+    }
+
+    // 8. Sync dynamic RigidbodyComponent positions/rotations → TransformComponent
+    {
+        auto view = reg.view<Vapor::RigidbodyComponent, Vapor::TransformComponent>();
+        for (auto entity : view) {
+            auto& rb = view.get<Vapor::RigidbodyComponent>(entity);
+            if (!rb.syncFromPhysics) continue;
+            if (!rb.body.valid()) continue;
+
+            auto it = bodies.find(rb.body.rid);
+            if (it == bodies.end()) continue;
+
+            JPH::BodyLockRead lock(physicsSystem->GetBodyLockInterface(), it->second);
+            if (!lock.Succeeded()) continue;
 
             const JPH::Body& body = lock.GetBody();
-            auto motionType = body.GetMotionType();
+            if (body.GetMotionType() != JPH::EMotionType::Dynamic) continue;
 
-            // Only sync Dynamic bodies from physics to scene
-            if (motionType == JPH::EMotionType::Dynamic) {
-                // Sync position and rotation using the locked body
-                auto pos = body.GetPosition();
-                node->setPosition(glm::vec3(pos.GetX(), pos.GetY(), pos.GetZ()));
+            auto& t = view.get<Vapor::TransformComponent>(entity);
+            auto pos = body.GetPosition();
+            auto rot = body.GetRotation();
+            t.position = glm::vec3(pos.GetX(), pos.GetY(), pos.GetZ());
+            t.rotation = glm::quat(rot.GetW(), rot.GetX(), rot.GetY(), rot.GetZ());
+            t.isDirty  = true;
+        }
+    }
+}
 
-                auto rot = body.GetRotation();
-                node->setLocalRotation(glm::quat(rot.GetW(), rot.GetX(), rot.GetY(), rot.GetZ()));
+void Physics3D::process(float dt) {
+    timeAccum += dt;
 
-                node->isTransformDirty = true;
+    // Store previous positions for interpolation (CharacterController only)
+    for (auto* ctrl : characterControllers) {
+        ctrl->storePreviousPosition();
+    }
+
+    constexpr int MAX_PHYSICS_STEPS_PER_FRAME = 4;
+    int stepsThisFrame = 0;
+    while (timeAccum >= FIXED_TIME_STEP && stepsThisFrame < MAX_PHYSICS_STEPS_PER_FRAME) {
+        ++step;
+        ++stepsThisFrame;
+
+        // Update vehicle controllers BEFORE physics step (Jolt requirement)
+        for (auto* ctrl : vehicleControllers) {
+            ctrl->update(FIXED_TIME_STEP);
+        }
+
+        // Update character controllers BEFORE physics step (Jolt requirement)
+        for (auto* ctrl : characterControllers) {
+            ctrl->update(FIXED_TIME_STEP, getGravity());
+        }
+
+        physicsSystem->Update(FIXED_TIME_STEP, 1, tempAllocator.get(), jobSystem.get());
+
+        timeAccum -= FIXED_TIME_STEP;
+    }
+    if (timeAccum > FIXED_TIME_STEP * MAX_PHYSICS_STEPS_PER_FRAME) {
+        timeAccum = FIXED_TIME_STEP;
+    }
+
+    if (debugDrawEnabled && debugRenderer) {
+        debugRenderer->update();
+    }
+
+    // Drain raw contact events from listener and convert to ECS BodyHandle events
+    auto* listener = static_cast<MyContactListener*>(contactListener.get());
+    std::vector<MyContactListener::RawCollisionEvent> rawEvents;
+    {
+        std::lock_guard<std::mutex> lock(listener->eventMutex);
+        rawEvents.swap(listener->rawEvents);
+    }
+
+    {
+        std::lock_guard<std::mutex> popLock(popMutex);
+        pendingCollisionEvents.clear();
+        pendingTriggerEvents.clear();
+
+        for (auto& raw : rawEvents) {
+            Uint32 ridA = UINT32_MAX, ridB = UINT32_MAX;
+            auto itA = bodyIDToRid.find(raw.id1.GetIndexAndSequenceNumber());
+            auto itB = bodyIDToRid.find(raw.id2.GetIndexAndSequenceNumber());
+            if (itA != bodyIDToRid.end()) ridA = itA->second;
+            if (itB != bodyIDToRid.end()) ridB = itB->second;
+            BodyHandle ha{ ridA }, hb{ ridB };
+
+            if (raw.isTrigger) {
+                pendingTriggerEvents.push_back({ ha, hb, raw.isEnter });
+            } else {
+                pendingCollisionEvents.push_back({ ha, hb, raw.isEnter });
             }
         }
     }
-
-    // Sync character controller positions back to nodes (with interpolation)
-    // Calculate interpolation alpha: how far we are between physics steps
-    float alpha = timeAccum / FIXED_TIME_STEP;
-
-    std::function<void(const std::shared_ptr<Node>&)> syncCharacterControllers = [&](const std::shared_ptr<Node>& node
-                                                                                 ) {
-        if (node->characterController) {
-            // Use interpolated position for smooth rendering
-            glm::vec3 charPos = node->characterController->getInterpolatedPosition(alpha);
-            node->setPosition(charPos);
-            node->isTransformDirty = true;
-        }
-        for (const auto& child : node->children) {
-            syncCharacterControllers(child);
-        }
-    };
-    for (auto& node : scene->nodes) {
-        syncCharacterControllers(node);
-    }
-
-    // Sync vehicle controller positions/rotations back to nodes
-    std::function<void(const std::shared_ptr<Node>&)> syncVehicleControllers = [&](const std::shared_ptr<Node>& node) {
-        if (node->vehicleController) {
-            glm::vec3 vehiclePos = node->vehicleController->getPosition();
-            glm::quat vehicleRot = node->vehicleController->getRotation();
-            node->setPosition(vehiclePos);
-            node->setLocalRotation(vehicleRot);
-            node->isTransformDirty = true;
-        }
-        for (const auto& child : node->children) {
-            syncVehicleControllers(child);
-        }
-    };
-    for (auto& node : scene->nodes) {
-        syncVehicleControllers(node);
-    }
-
-    // Process physics events (triggers and collisions)
-    auto* listener = static_cast<MyContactListener*>(contactListener.get());
-
-    // Process trigger events
-    for (auto& event : listener->triggerEvents) {
-        if (event.isEnter) {
-            event.triggerNode->onTriggerEnter(event.otherNode);
-            event.otherNode->onTriggerEnter(event.triggerNode);// Bidirectional notification
-        } else {
-            event.triggerNode->onTriggerExit(event.otherNode);
-            event.otherNode->onTriggerExit(event.triggerNode);
-        }
-    }
-
-    // Process collision events
-    for (auto& event : listener->collisionEvents) {
-        if (event.isEnter) {
-            event.node1->onCollisionEnter(event.node2);
-            event.node2->onCollisionEnter(event.node1);
-        } else {
-            event.node1->onCollisionExit(event.node2);
-            event.node2->onCollisionExit(event.node1);
-        }
-    }
-
-    // Clear events for next frame
-    listener->clearEvents();
-
-    // draw debug UI
-    if (isDebugUIEnabled) {
-        // TODO: physics debug UI
-    }
-
-    // debug output
-    // static int debugCounter = 0;
-    // if (++debugCounter % 60 == 0) { // print every 60 frames
-    //     for (auto& node : scene->nodes) {
-    //         if (node->body.valid()) {
-    //             auto body = bodies[node->body.rid];
-    //             auto pos = bodyInterface->GetPosition(body);
-    //             auto motionType = bodyInterface->GetMotionType(body);
-    //             fmt::print(
-    //                 "Node: {}, Pos: ({:.2f}, {:.2f}, {:.2f}), Motion: {}\n",
-    //                 node->name, pos.GetX(), pos.GetY(), pos.GetZ(),
-    //                 motionType == JPH::EMotionType::Dynamic ? "Dynamic" : "Static"
-    //             );
-    //         }
-    //     }
-    // }
 }
 
 void Physics3D::drawImGui(float dt) {
 }
 
-BodyHandle Physics3D::createSphereBody(
+auto Physics3D::popCollisionEvents() -> std::vector<CollisionEvent> {
+    std::lock_guard<std::mutex> lock(popMutex);
+    return std::move(pendingCollisionEvents);
+}
+
+auto Physics3D::popTriggerEvents() -> std::vector<TriggerEvent> {
+    std::lock_guard<std::mutex> lock(popMutex);
+    return std::move(pendingTriggerEvents);
+}
+
+auto Physics3D::createSphereBody(
     float radius, const glm::vec3& position, const glm::quat& rotation, BodyMotionType motionType
-) {
+) -> BodyHandle {
+    JPH::SphereShapeSettings shapeSettings(radius);
+    shapeSettings.SetEmbedded();
+    JPH::ShapeSettings::ShapeResult shapeResult = shapeSettings.Create();
+    if (shapeResult.HasError()) {
+        throw std::runtime_error("Failed to create sphere shape");
+    }
+    JPH::ShapeRefC shape = shapeResult.Get();
+
     JPH::BodyCreationSettings bodySettings(
-        new JPH::SphereShape(radius),
+        shape,
         JPH::RVec3(position.x, position.y, position.z),
         JPH::Quat(rotation.x, rotation.y, rotation.z, rotation.w),
         convertMotionType(motionType),
-        motionType == BodyMotionType::Static ? Layers::NON_MOVING : Layers::MOVING
+        motionType == BodyMotionType::Static ? Layers::nonMoving : Layers::moving
     );
     JPH::Body* body = bodyInterface->CreateBody(bodySettings);
     if (!body) {
         throw std::runtime_error("Failed to create body");
     }
     bodies[nextBodyID] = body->GetID();
+    bodyIDToRid[body->GetID().GetIndexAndSequenceNumber()] = nextBodyID;
 
     return BodyHandle{ nextBodyID++ };
 }
 
-BodyHandle Physics3D::createBoxBody(
+auto Physics3D::createBoxBody(
     const glm::vec3& halfSize, const glm::vec3& position, const glm::quat& rotation, BodyMotionType motionType
-) {
+) -> BodyHandle {
     JPH::BoxShapeSettings shapeSettings(JPH::Vec3(halfSize.x, halfSize.y, halfSize.z));
     shapeSettings.SetEmbedded();
     JPH::ShapeSettings::ShapeResult shapeResult = shapeSettings.Create();
@@ -603,13 +648,14 @@ BodyHandle Physics3D::createBoxBody(
         JPH::RVec3(position.x, position.y, position.z),
         JPH::Quat(rotation.x, rotation.y, rotation.z, rotation.w),
         convertMotionType(motionType),
-        motionType == BodyMotionType::Static ? Layers::NON_MOVING : Layers::MOVING
+        motionType == BodyMotionType::Static ? Layers::nonMoving : Layers::moving
     );
     JPH::Body* body = bodyInterface->CreateBody(bodySettings);
     if (!body) {
         throw std::runtime_error("Failed to create body");
     }
     bodies[nextBodyID] = body->GetID();
+    bodyIDToRid[body->GetID().GetIndexAndSequenceNumber()] = nextBodyID;
 
     return BodyHandle{ nextBodyID++ };
 }
@@ -626,10 +672,12 @@ void Physics3D::removeBody(BodyHandle handle) {
 
 void Physics3D::destroyBody(BodyHandle handle) {
     auto id = bodies.at(handle.rid);
+    if (bodyInterface->IsAdded(id)) bodyInterface->RemoveBody(id);
     bodyInterface->DestroyBody(id);
+    bodies.erase(handle.rid);
 }
 
-bool Physics3D::raycast(const glm::vec3& from, const glm::vec3& to, RaycastHit& hit, BodyHandle ignoreBody) {
+auto Physics3D::raycast(const glm::vec3& from, const glm::vec3& to, RaycastHit& hit, BodyHandle ignoreBody) -> bool {
     JPH::RRayCast ray(JPH::RVec3(from.x, from.y, from.z), JPH::RVec3(to.x - from.x, to.y - from.y, to.z - from.z));
     JPH::RayCastResult result;
 
@@ -650,9 +698,8 @@ bool Physics3D::raycast(const glm::vec3& from, const glm::vec3& to, RaycastHit& 
         hit.hitDistance = result.mFraction * glm::distance(from, to);
         hit.hitFraction = result.mFraction;
 
-        // Get Node from UserData
         Uint64 userData = bodyInterface->GetUserData(hitBodyID);
-        hit.node = reinterpret_cast<Node*>(userData);
+        hit.entity = userData != 0 ? static_cast<entt::entity>(static_cast<Uint32>(userData)) : entt::null;
 
         // Get surface normal at hit point
         JPH::BodyLockRead lock(physicsSystem->GetBodyLockInterface(), hitBodyID);
@@ -675,7 +722,7 @@ void Physics3D::setGravity(const glm::vec3& acc) {
     physicsSystem->SetGravity(JPH::Vec3(acc.x, acc.y, acc.z));
 }
 
-glm::vec3 Physics3D::getGravity() const {
+auto Physics3D::getGravity() const -> glm::vec3 {
     return currentGravity;
 }
 
@@ -748,7 +795,7 @@ void Physics3D::setLinearVelocity(BodyHandle handle, const glm::vec3& vel) {
     bodyInterface->SetLinearVelocity(bodyID, JPH::Vec3(vel.x, vel.y, vel.z));
 }
 
-glm::vec3 Physics3D::getLinearVelocity(BodyHandle handle) const {
+auto Physics3D::getLinearVelocity(BodyHandle handle) const -> glm::vec3 {
     if (!handle.valid() || bodies.find(handle.rid) == bodies.end()) return glm::vec3(0.0f);
 
     JPH::BodyID bodyID = bodies.at(handle.rid);
@@ -763,7 +810,7 @@ void Physics3D::setAngularVelocity(BodyHandle handle, const glm::vec3& vel) {
     bodyInterface->SetAngularVelocity(bodyID, JPH::Vec3(vel.x, vel.y, vel.z));
 }
 
-glm::vec3 Physics3D::getAngularVelocity(BodyHandle handle) const {
+auto Physics3D::getAngularVelocity(BodyHandle handle) const -> glm::vec3 {
     if (!handle.valid() || bodies.find(handle.rid) == bodies.end()) return glm::vec3(0.0f);
 
     JPH::BodyID bodyID = bodies.at(handle.rid);
@@ -785,7 +832,7 @@ void Physics3D::setMass(BodyHandle handle, float mass) {
     }
 }
 
-float Physics3D::getMass(BodyHandle handle) const {
+auto Physics3D::getMass(BodyHandle handle) const -> float {
     if (!handle.valid() || bodies.find(handle.rid) == bodies.end()) return 0.0f;
 
     JPH::BodyID bodyID = bodies.at(handle.rid);
@@ -806,7 +853,7 @@ void Physics3D::setFriction(BodyHandle handle, float friction) {
     bodyInterface->SetFriction(bodyID, friction);
 }
 
-float Physics3D::getFriction(BodyHandle handle) const {
+auto Physics3D::getFriction(BodyHandle handle) const -> float {
     if (!handle.valid() || bodies.find(handle.rid) == bodies.end()) return 0.0f;
 
     JPH::BodyID bodyID = bodies.at(handle.rid);
@@ -820,7 +867,7 @@ void Physics3D::setRestitution(BodyHandle handle, float restitution) {
     bodyInterface->SetRestitution(bodyID, restitution);
 }
 
-float Physics3D::getRestitution(BodyHandle handle) const {
+auto Physics3D::getRestitution(BodyHandle handle) const -> float {
     if (!handle.valid() || bodies.find(handle.rid) == bodies.end()) return 0.0f;
 
     JPH::BodyID bodyID = bodies.at(handle.rid);
@@ -840,7 +887,7 @@ void Physics3D::setLinearDamping(BodyHandle handle, float damping) {
     }
 }
 
-float Physics3D::getLinearDamping(BodyHandle handle) const {
+auto Physics3D::getLinearDamping(BodyHandle handle) const -> float {
     if (!handle.valid() || bodies.find(handle.rid) == bodies.end()) return 0.0f;
 
     JPH::BodyID bodyID = bodies.at(handle.rid);
@@ -867,7 +914,7 @@ void Physics3D::setAngularDamping(BodyHandle handle, float damping) {
     }
 }
 
-float Physics3D::getAngularDamping(BodyHandle handle) const {
+auto Physics3D::getAngularDamping(BodyHandle handle) const -> float {
     if (!handle.valid() || bodies.find(handle.rid) == bodies.end()) return 0.0f;
 
     JPH::BodyID bodyID = bodies.at(handle.rid);
@@ -889,7 +936,7 @@ void Physics3D::setMotionType(BodyHandle handle, BodyMotionType type) {
     bodyInterface->SetMotionType(bodyID, convertMotionType(type), JPH::EActivation::Activate);
 }
 
-BodyMotionType Physics3D::getMotionType(BodyHandle handle) const {
+auto Physics3D::getMotionType(BodyHandle handle) const -> BodyMotionType {
     if (!handle.valid() || bodies.find(handle.rid) == bodies.end()) return BodyMotionType::Static;
 
     JPH::BodyID bodyID = bodies.at(handle.rid);
@@ -920,7 +967,7 @@ void Physics3D::setGravityFactor(BodyHandle handle, float factor) {
     }
 }
 
-float Physics3D::getGravityFactor(BodyHandle handle) const {
+auto Physics3D::getGravityFactor(BodyHandle handle) const -> float {
     if (!handle.valid() || bodies.find(handle.rid) == bodies.end()) return 1.0f;
 
     JPH::BodyID bodyID = bodies.at(handle.rid);
@@ -949,7 +996,7 @@ void Physics3D::deactivateBody(BodyHandle handle) {
     bodyInterface->DeactivateBody(bodyID);
 }
 
-bool Physics3D::isActive(BodyHandle handle) const {
+auto Physics3D::isActive(BodyHandle handle) const -> bool {
     if (!handle.valid() || bodies.find(handle.rid) == bodies.end()) return false;
 
     JPH::BodyID bodyID = bodies.at(handle.rid);
@@ -957,7 +1004,7 @@ bool Physics3D::isActive(BodyHandle handle) const {
 }
 
 // ====== 位置與旋轉 ======
-glm::vec3 Physics3D::getPosition(BodyHandle handle) const {
+auto Physics3D::getPosition(BodyHandle handle) const -> glm::vec3 {
     if (!handle.valid() || bodies.find(handle.rid) == bodies.end()) return glm::vec3(0.0f);
 
     JPH::BodyID bodyID = bodies.at(handle.rid);
@@ -972,7 +1019,7 @@ void Physics3D::setPosition(BodyHandle handle, const glm::vec3& position) {
     bodyInterface->SetPosition(bodyID, JPH::RVec3(position.x, position.y, position.z), JPH::EActivation::Activate);
 }
 
-glm::quat Physics3D::getRotation(BodyHandle handle) const {
+auto Physics3D::getRotation(BodyHandle handle) const -> glm::quat {
     if (!handle.valid() || bodies.find(handle.rid) == bodies.end()) return glm::quat(1, 0, 0, 0);
 
     JPH::BodyID bodyID = bodies.at(handle.rid);
@@ -997,7 +1044,7 @@ void Physics3D::setBodyUserData(BodyHandle handle, Uint64 userData) {
     bodyInterface->SetUserData(bodyID, userData);
 }
 
-Uint64 Physics3D::getBodyUserData(BodyHandle handle) const {
+auto Physics3D::getBodyUserData(BodyHandle handle) const -> Uint64 {
     if (!handle.valid() || bodies.find(handle.rid) == bodies.end()) return 0;
 
     JPH::BodyID bodyID = bodies.at(handle.rid);
@@ -1005,9 +1052,9 @@ Uint64 Physics3D::getBodyUserData(BodyHandle handle) const {
 }
 
 // ====== 新形狀創建方法 ======
-BodyHandle Physics3D::createCapsuleBody(
+auto Physics3D::createCapsuleBody(
     float halfHeight, float radius, const glm::vec3& position, const glm::quat& rotation, BodyMotionType motionType
-) {
+) -> BodyHandle {
     JPH::CapsuleShapeSettings shapeSettings(halfHeight, radius);
     shapeSettings.SetEmbedded();
     JPH::ShapeSettings::ShapeResult shapeResult = shapeSettings.Create();
@@ -1021,7 +1068,7 @@ BodyHandle Physics3D::createCapsuleBody(
         JPH::RVec3(position.x, position.y, position.z),
         JPH::Quat(rotation.x, rotation.y, rotation.z, rotation.w),
         convertMotionType(motionType),
-        motionType == BodyMotionType::Static ? Layers::NON_MOVING : Layers::MOVING
+        motionType == BodyMotionType::Static ? Layers::nonMoving : Layers::moving
     );
 
     JPH::Body* body = bodyInterface->CreateBody(bodySettings);
@@ -1029,13 +1076,14 @@ BodyHandle Physics3D::createCapsuleBody(
         throw std::runtime_error("Failed to create capsule body");
     }
     bodies[nextBodyID] = body->GetID();
+    bodyIDToRid[body->GetID().GetIndexAndSequenceNumber()] = nextBodyID;
 
     return BodyHandle{ nextBodyID++ };
 }
 
-BodyHandle Physics3D::createCylinderBody(
+auto Physics3D::createCylinderBody(
     float halfHeight, float radius, const glm::vec3& position, const glm::quat& rotation, BodyMotionType motionType
-) {
+) -> BodyHandle {
     JPH::CylinderShapeSettings shapeSettings(halfHeight, radius);
     shapeSettings.SetEmbedded();
     JPH::ShapeSettings::ShapeResult shapeResult = shapeSettings.Create();
@@ -1049,7 +1097,7 @@ BodyHandle Physics3D::createCylinderBody(
         JPH::RVec3(position.x, position.y, position.z),
         JPH::Quat(rotation.x, rotation.y, rotation.z, rotation.w),
         convertMotionType(motionType),
-        motionType == BodyMotionType::Static ? Layers::NON_MOVING : Layers::MOVING
+        motionType == BodyMotionType::Static ? Layers::nonMoving : Layers::moving
     );
 
     JPH::Body* body = bodyInterface->CreateBody(bodySettings);
@@ -1057,17 +1105,18 @@ BodyHandle Physics3D::createCylinderBody(
         throw std::runtime_error("Failed to create cylinder body");
     }
     bodies[nextBodyID] = body->GetID();
+    bodyIDToRid[body->GetID().GetIndexAndSequenceNumber()] = nextBodyID;
 
     return BodyHandle{ nextBodyID++ };
 }
 
-BodyHandle Physics3D::createMeshBody(
+auto Physics3D::createMeshBody(
     const std::vector<glm::vec3>& vertices,
     const std::vector<Uint32>& indices,
     const glm::vec3& position,
     const glm::quat& rotation,
     BodyMotionType motionType
-) {
+) -> BodyHandle {
     // Convert vertices to Jolt format
     JPH::VertexList joltVertices;
     joltVertices.reserve(vertices.size());
@@ -1101,7 +1150,7 @@ BodyHandle Physics3D::createMeshBody(
         JPH::RVec3(position.x, position.y, position.z),
         JPH::Quat(rotation.x, rotation.y, rotation.z, rotation.w),
         convertMotionType(motionType),
-        Layers::NON_MOVING// Mesh shapes should be static
+        Layers::nonMoving// Mesh shapes should be static
     );
 
     JPH::Body* body = bodyInterface->CreateBody(bodySettings);
@@ -1109,16 +1158,17 @@ BodyHandle Physics3D::createMeshBody(
         throw std::runtime_error("Failed to create mesh body");
     }
     bodies[nextBodyID] = body->GetID();
+    bodyIDToRid[body->GetID().GetIndexAndSequenceNumber()] = nextBodyID;
 
     return BodyHandle{ nextBodyID++ };
 }
 
-BodyHandle Physics3D::createConvexHullBody(
+auto Physics3D::createConvexHullBody(
     const std::vector<glm::vec3>& points,
     const glm::vec3& position,
     const glm::quat& rotation,
     BodyMotionType motionType
-) {
+) -> BodyHandle {
     // Convert points to Jolt format
     JPH::Array<JPH::Vec3> joltPoints;
     joltPoints.reserve(points.size());
@@ -1140,7 +1190,7 @@ BodyHandle Physics3D::createConvexHullBody(
         JPH::RVec3(position.x, position.y, position.z),
         JPH::Quat(rotation.x, rotation.y, rotation.z, rotation.w),
         convertMotionType(motionType),
-        motionType == BodyMotionType::Static ? Layers::NON_MOVING : Layers::MOVING
+        motionType == BodyMotionType::Static ? Layers::nonMoving : Layers::moving
     );
 
     JPH::Body* body = bodyInterface->CreateBody(bodySettings);
@@ -1148,13 +1198,14 @@ BodyHandle Physics3D::createConvexHullBody(
         throw std::runtime_error("Failed to create convex hull body");
     }
     bodies[nextBodyID] = body->GetID();
+    bodyIDToRid[body->GetID().GetIndexAndSequenceNumber()] = nextBodyID;
 
     return BodyHandle{ nextBodyID++ };
 }
 
 // ====== Trigger 創建方法 ======
-TriggerHandle
-    Physics3D::createBoxTrigger(const glm::vec3& halfSize, const glm::vec3& position, const glm::quat& rotation) {
+auto Physics3D::createBoxTrigger(const glm::vec3& halfSize, const glm::vec3& position, const glm::quat& rotation)
+    -> TriggerHandle {
     JPH::BoxShapeSettings shapeSettings(JPH::Vec3(halfSize.x, halfSize.y, halfSize.z));
     shapeSettings.SetEmbedded();
     JPH::ShapeSettings::ShapeResult shapeResult = shapeSettings.Create();
@@ -1168,7 +1219,7 @@ TriggerHandle
         JPH::RVec3(position.x, position.y, position.z),
         JPH::Quat(rotation.x, rotation.y, rotation.z, rotation.w),
         JPH::EMotionType::Static,// Triggers are usually static
-        Layers::TRIGGER
+        Layers::trigger
     );
 
     bodySettings.mIsSensor = true;// Critical: Set as sensor (no physical collision)
@@ -1184,7 +1235,8 @@ TriggerHandle
     return TriggerHandle{ nextTriggerID++ };
 }
 
-TriggerHandle Physics3D::createSphereTrigger(float radius, const glm::vec3& position, const glm::quat& rotation) {
+auto Physics3D::createSphereTrigger(float radius, const glm::vec3& position, const glm::quat& rotation)
+    -> TriggerHandle {
     JPH::SphereShapeSettings shapeSettings(radius);
     shapeSettings.SetEmbedded();
     JPH::ShapeSettings::ShapeResult shapeResult = shapeSettings.Create();
@@ -1198,7 +1250,7 @@ TriggerHandle Physics3D::createSphereTrigger(float radius, const glm::vec3& posi
         JPH::RVec3(position.x, position.y, position.z),
         JPH::Quat(rotation.x, rotation.y, rotation.z, rotation.w),
         JPH::EMotionType::Static,
-        Layers::TRIGGER
+        Layers::trigger
     );
 
     bodySettings.mIsSensor = true;
@@ -1214,9 +1266,9 @@ TriggerHandle Physics3D::createSphereTrigger(float radius, const glm::vec3& posi
     return TriggerHandle{ nextTriggerID++ };
 }
 
-TriggerHandle Physics3D::createCapsuleTrigger(
+auto Physics3D::createCapsuleTrigger(
     float halfHeight, float radius, const glm::vec3& position, const glm::quat& rotation
-) {
+) -> TriggerHandle {
     JPH::CapsuleShapeSettings shapeSettings(halfHeight, radius);
     shapeSettings.SetEmbedded();
     JPH::ShapeSettings::ShapeResult shapeResult = shapeSettings.Create();
@@ -1230,7 +1282,7 @@ TriggerHandle Physics3D::createCapsuleTrigger(
         JPH::RVec3(position.x, position.y, position.z),
         JPH::Quat(rotation.x, rotation.y, rotation.z, rotation.w),
         JPH::EMotionType::Static,
-        Layers::TRIGGER
+        Layers::trigger
     );
 
     bodySettings.mIsSensor = true;
@@ -1269,14 +1321,14 @@ void Physics3D::setTriggerUserData(TriggerHandle handle, Uint64 userData) {
     bodyInterface->SetUserData(bodyID, userData);
 }
 
-Uint64 Physics3D::getTriggerUserData(TriggerHandle handle) const {
+auto Physics3D::getTriggerUserData(TriggerHandle handle) const -> Uint64 {
     if (!handle.valid() || triggers.find(handle.rid) == triggers.end()) return 0;
 
     JPH::BodyID bodyID = triggers.at(handle.rid);
     return bodyInterface->GetUserData(bodyID);
 }
 // ====== 重疊測試方法 ======
-OverlapResult Physics3D::overlapSphere(const glm::vec3& center, float radius) {
+auto Physics3D::overlapSphere(const glm::vec3& center, float radius) -> OverlapResult {
     OverlapResult result;
 
     // Create query shape
@@ -1312,8 +1364,7 @@ OverlapResult Physics3D::overlapSphere(const glm::vec3& center, float radius) {
                 // Get Node from UserData
                 Uint64 userData = bodyInterface->GetUserData(hitBodyID);
                 if (userData != 0) {
-                    Node* node = reinterpret_cast<Node*>(userData);
-                    result.nodes.push_back(node);
+                    result.entities.push_back(static_cast<entt::entity>(static_cast<Uint32>(userData)));
                 }
                 break;
             }
@@ -1323,7 +1374,8 @@ OverlapResult Physics3D::overlapSphere(const glm::vec3& center, float radius) {
     return result;
 }
 
-OverlapResult Physics3D::overlapBox(const glm::vec3& center, const glm::vec3& halfExtents, const glm::quat& rotation) {
+auto Physics3D::overlapBox(const glm::vec3& center, const glm::vec3& halfExtents, const glm::quat& rotation)
+    -> OverlapResult {
     OverlapResult result;
 
     // Create query shape
@@ -1352,8 +1404,7 @@ OverlapResult Physics3D::overlapBox(const glm::vec3& center, const glm::vec3& ha
 
                 Uint64 userData = bodyInterface->GetUserData(hitBodyID);
                 if (userData != 0) {
-                    Node* node = reinterpret_cast<Node*>(userData);
-                    result.nodes.push_back(node);
+                    result.entities.push_back(static_cast<entt::entity>(static_cast<Uint32>(userData)));
                 }
                 break;
             }
@@ -1363,7 +1414,7 @@ OverlapResult Physics3D::overlapBox(const glm::vec3& center, const glm::vec3& ha
     return result;
 }
 
-OverlapResult Physics3D::overlapCapsule(const glm::vec3& point1, const glm::vec3& point2, float radius) {
+auto Physics3D::overlapCapsule(const glm::vec3& point1, const glm::vec3& point2, float radius) -> OverlapResult {
     OverlapResult result;
 
     // Calculate capsule parameters
@@ -1412,8 +1463,7 @@ OverlapResult Physics3D::overlapCapsule(const glm::vec3& point1, const glm::vec3
 
                 Uint64 userData = bodyInterface->GetUserData(hitBodyID);
                 if (userData != 0) {
-                    Node* node = reinterpret_cast<Node*>(userData);
-                    result.nodes.push_back(node);
+                    result.entities.push_back(static_cast<entt::entity>(static_cast<Uint32>(userData)));
                 }
                 break;
             }
@@ -1423,7 +1473,7 @@ OverlapResult Physics3D::overlapCapsule(const glm::vec3& point1, const glm::vec3
     return result;
 }
 
-JPH::BodyID Physics3D::getBodyID(BodyHandle handle) const {
+auto Physics3D::getBodyID(BodyHandle handle) const -> JPH::BodyID {
     auto it = bodies.find(handle.rid);
     return it != bodies.end() ? it->second : JPH::BodyID();
 }
@@ -1435,6 +1485,6 @@ void Physics3D::setDebugEnabled(bool enabled) {
     }
 }
 
-bool Physics3D::isDebugEnabled() const {
+auto Physics3D::isDebugEnabled() const -> bool {
     return debugDrawEnabled;
 }

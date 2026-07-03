@@ -1,7 +1,6 @@
 #include <metal_stdlib>
 using namespace metal;
-#include "assets/shaders/3d_common.metal" // TODO: use more robust include path
-#include "assets/shaders/3d_shadow_common.metal"
+#include "Res/shaders/3d_common.metal" // TODO: use more robust include path
 
 
 struct RasterizerData {
@@ -82,7 +81,7 @@ float3 CookTorranceBRDF(float3 norm, float3 tangent, float3 bitangent, float3 li
     float nv = max(dot(norm, viewDir), 0.0);
     float nl = max(dot(norm, lightDir), 0.0);
     float nh = max(dot(norm, halfway), 0.0);
-    float vh = max(dot(viewDir, halfway), 0.0);
+    // float vh = max(dot(viewDir, halfway), 0.0);
     float lh = max(dot(lightDir, halfway), 0.0);
     float lum = luminance(surf.color);
     float3 tint = lum > 0.0 ? surf.color / lum : float3(1);
@@ -140,6 +139,121 @@ float3 CalculatePointLight(PointLight light, float3 norm, float3 tangent, float3
     float3 radiance = attenuation * light.color * light.intensity;
 
     return CookTorranceBRDF(norm, tangent, bitangent, lightDir, viewDir, surf) * radiance * clamp(dot(norm, lightDir), 0.0, 1.0);
+}
+
+// ── Rect area light (diffuse + specular) ─────────────────────────────────────
+
+// Exact diffuse irradiance from a quad via the polygon solid-angle edge formula
+// (Baum et al. 1989 / Arvo 1994).  Returns irradiance ∈ [0, 1/2].
+float EvalRectLightDiffuse(float3 N, float3 fragPos, RectLight light) {
+    float3 corners[4] = {
+        light.position + light.right * light.halfWidth + light.up * light.halfHeight,
+        light.position - light.right * light.halfWidth + light.up * light.halfHeight,
+        light.position - light.right * light.halfWidth - light.up * light.halfHeight,
+        light.position + light.right * light.halfWidth - light.up * light.halfHeight,
+    };
+    float3 sum = float3(0.0);
+    for (int i = 0; i < 4; i++) {
+        float3 v0  = normalize(corners[i]       - fragPos);
+        float3 v1  = normalize(corners[(i+1)%4] - fragPos);
+        float3 c   = cross(v0, v1);
+        float  len = length(c);
+        if (len < 1e-6) continue;
+        float theta = atan2(len, dot(v0, v1));
+        sum += (theta / len) * c;
+    }
+    return max(0.0f, dot(sum, N)) / (2.0f * PI);
+}
+
+// Specular contribution via Most Representative Point (Karis, SIGGRAPH 2013).
+// Finds the closest point on the rect to the reflection ray and evaluates GGX
+// with an area-corrected roughness for energy conservation.
+float3 EvalRectLightSpecular(float3 N, float3 fragPos, float3 viewDir, RectLight light, Surface surf) {
+    float3 refl       = reflect(-viewDir, N);
+    float3 lightNorm  = cross(light.right, light.up); // unnormalized plane normal
+
+    float denom   = dot(lightNorm, refl);
+    float3 repPt  = light.position;
+    if (abs(denom) > 1e-5) {
+        float t = dot(light.position - fragPos, lightNorm) / denom;
+        if (t > 0.0) {
+            float3 hit = fragPos + refl * t;
+            float3 rel = hit - light.position;
+            float u    = clamp(dot(rel, light.right), -light.halfWidth,  light.halfWidth);
+            float v    = clamp(dot(rel, light.up),    -light.halfHeight, light.halfHeight);
+            repPt = light.position + light.right * u + light.up * v;
+        }
+    }
+
+    float3 lightDir = normalize(repPt - fragPos);
+    float  nDotL    = max(dot(N, lightDir), 0.0f);
+    if (nDotL <= 0.0f) return float3(0.0);
+
+    float dist  = length(repPt - fragPos);
+    float area  = 4.0f * light.halfWidth * light.halfHeight;
+    float alpha = surf.roughness * surf.roughness;
+    float alphaPrime = saturate(alpha + area / max(2.0f * PI * dist * dist, 1e-6f));
+    float r = sqrt(alphaPrime);
+
+    float3 halfway = normalize(lightDir + viewDir);
+    float  nh  = max(dot(N, halfway),    0.0f);
+    float  vh  = max(dot(viewDir, halfway), 0.0f);
+    float  nv  = max(dot(N, viewDir),    1e-4f);
+    float  D   = TrowbridgeReitzGGX(nh, r);
+    float  G   = SmithsSchlickGGX(nv, nDotL, r);
+    float  lum = luminance(surf.color);
+    float3 tint = lum > 0.0f ? surf.color / lum : float3(1.0f);
+    float3 F0   = mix(surf.specular * 0.08f * mix(float3(1.0f), tint, surf.specular_tint), surf.color, surf.metallic);
+    float3 F    = F0 + (1.0f - F0) * pow(1.0f - vh, 5.0f);
+
+    return D * G * F / (4.0f * nv * nDotL + 1e-6f);
+}
+
+// UV of a world-space position projected onto the rect light face [0,1]².
+float2 RectLightUV(RectLight light, float3 worldPos) {
+    float3 rel = worldPos - light.position;
+    float u = dot(rel, light.right)  / light.halfWidth  * 0.5f + 0.5f;
+    float v = dot(rel, light.up)     / light.halfHeight * 0.5f + 0.5f;
+    return saturate(float2(u, v));
+}
+
+// Effective radiance colour of the light.  For solid-colour lights this is just
+// light.color.  For video lights, five representative points are sampled across
+// the rect and averaged, giving a spatially-weighted diffuse colour.
+float3 RectLightColor(RectLight light, float3 fragPos,
+                      texture2d<float, access::sample> videoTex) {
+    if (light.useVideoTexture == 0) {
+        return light.color;
+    }
+    constexpr sampler clampS(address::clamp_to_edge, filter::linear);
+    // 5-point stratified sample across the rect face
+    float3 pts[5] = {
+        light.position,
+        light.position + light.right * light.halfWidth  * 0.5f,
+        light.position - light.right * light.halfWidth  * 0.5f,
+        light.position + light.up    * light.halfHeight * 0.5f,
+        light.position - light.up    * light.halfHeight * 0.5f,
+    };
+    float3 col = float3(0.0f);
+    for (int i = 0; i < 5; i++) {
+        col += srgbToLinear(videoTex.sample(clampS, RectLightUV(light, pts[i])).rgb);
+    }
+    return col / 5.0f;
+}
+
+float3 CalculateRectLight(RectLight light, float3 N, float3 fragPos, float3 viewDir,
+                          Surface surf, texture2d<float, access::sample> videoTex) {
+    float3 emissive = RectLightColor(light, fragPos, videoTex);
+    float3 radiance = emissive * light.intensity;
+
+    float  diffuseGeo = EvalRectLightDiffuse(N, fragPos, light);
+    float3 specular   = EvalRectLightSpecular(N, fragPos, viewDir, light, surf);
+
+    // Fresnel-based kD/kS split (metals have no diffuse)
+    float3 F0  = mix(surf.specular * 0.08f * float3(1.0f), surf.color, surf.metallic);
+    float3 kD  = (float3(1.0f) - F0) * (1.0f - surf.metallic);
+
+    return (kD * surf.color / PI * diffuseGeo + specular) * radiance;
 }
 
 // Fresnel-Schlick approximation with roughness for IBL
@@ -229,11 +343,14 @@ fragment float4 fragmentMain(
     texture2d<float, access::sample> texRoughness [[texture(3)]],
     texture2d<float, access::sample> texOcclusion [[texture(4)]],
     texture2d<float, access::sample> texEmissive [[texture(5)]],
+    texture2d<float, access::sample> texAO [[texture(6)]],
     texture2d<float, access::sample> texShadow [[texture(7)]],
     texturecube<float, access::sample> irradianceMap [[texture(8)]],
     texturecube<float, access::sample> prefilterMap [[texture(9)]],
     texture2d<float, access::sample> brdfLUT [[texture(10)]],
-    depth2d_array<float, access::sample> csmShadowMap [[texture(11)]],
+    texture2d<float, access::sample> rectLightVideo [[texture(11)]],
+    depth2d_array<float, access::sample> pssmShadowMaps [[texture(12)]],
+    texture2d<float, access::sample> texPointShadow [[texture(13)]],
     const device DirLight* directionalLights [[buffer(0)]],
     const device PointLight* pointLights [[buffer(1)]],
     const device Cluster* clusters [[buffer(2)]],
@@ -241,22 +358,36 @@ fragment float4 fragmentMain(
     constant float2& screenSize [[buffer(4)]],
     constant packed_uint3& gridSize [[buffer(5)]],
     constant float& time [[buffer(6)]],
-    constant CascadeShadowData& csmData [[buffer(7)]],
-    constant HybridShadowData& hybridData [[buffer(8)]],
-    constant uint& shadowMode [[buffer(9)]]
+    const device RectLight* rectLights [[buffer(7)]],
+    constant uint& rectLightCount [[buffer(8)]],
+    constant PSSMData& pssmData [[buffer(9)]]
 ) {
     constexpr sampler s(address::repeat, filter::linear, mip_filter::linear);
 
     MaterialData material = in.material;
 
-    if (material.usePrototypeUV > 0.5) {
-        float3 n = abs(normalize(in.localNormal));
-        if (n.x > n.y && n.x > n.z) {
-            in.uv = in.scaledLocalPos.yz;
-        } else if (n.y > n.z) {
-            in.uv = in.scaledLocalPos.xz;
+    // Prototype UV: triplanar mapping with world space or object space
+    // Mode: 0 = Off, 1 = World Space (static objects), 2 = Object Space (dynamic objects)
+    if (material.prototypeUVMode > 0.5) {
+        float3 pos;
+        float3 n;
+        if (material.prototypeUVMode > 1.5) {
+            // Object Space: position and normal in local space (texture follows object rotation)
+            pos = in.scaledLocalPos;
+            n = abs(normalize(in.localNormal));
         } else {
-            in.uv = in.scaledLocalPos.xy;
+            // World Space: position and normal in world space (texture fixed in world)
+            pos = in.worldPosition.xyz;
+            n = abs(normalize(in.worldNormal.xyz));
+        }
+
+        // Select projection plane based on dominant normal axis
+        if (n.x > n.y && n.x > n.z) {
+            in.uv = pos.yz * material.uvScale;
+        } else if (n.y > n.z) {
+            in.uv = pos.xz * material.uvScale;
+        } else {
+            in.uv = pos.xy * material.uvScale;
         }
     }
 
@@ -289,73 +420,58 @@ fragment float4 fragmentMain(
 
     float2 screenUV = in.position.xy / screenSize;
 
-    // Calculate view-space depth for cascade selection
-    float4 viewPos = camera.view * in.worldPosition;
-    float viewDepth = -viewPos.z;
-
-    // Shadow sampler for CSM
-    constexpr sampler shadowSampler(
+    // --- Shadow factor: RT shadow for near region, PSSM for mid/far ---
+    constexpr sampler shadowCmpSampler(
         address::clamp_to_edge,
         filter::linear,
-        compare_func::less
+        compare_func::less_equal
     );
+    constexpr float PSSM_TEXEL = 1.0 / 4096.0;
+    constexpr float PSSM_BIAS  = 0.002;
 
-    float3 result = float3(0.0);
+    // abs(): view matrix is RH (visible z is negative); splits are positive distances
+    float viewDepth = abs((camera.view * in.worldPosition).z);
 
-    // Calculate shadow factor based on shadow mode
-    // shadowMode: 0 = None, 1 = RayTraced, 2 = CSM, 3 = Hybrid
-    float shadowFactor = 1.0;
-    if (shadowMode == 1) {
-        // Ray-traced shadow (from pre-computed shadow texture)
+    float shadowFactor;
+    if (viewDepth <= pssmData.cascadeSplits.x) {
+        // Cascade 0: RT ray-traced shadow
         shadowFactor = texShadow.sample(s, screenUV).r;
-    } else if (shadowMode == 2) {
-        // Cascaded Shadow Map
-        shadowFactor = calculateCSMShadow(
-            in.worldPosition.xyz,
-            norm,
-            viewDepth,
-            in.position.xy,
-            csmData,
-            csmShadowMap,
-            shadowSampler
-        );
+    } else {
+        // Select PSSM cascade (index 0-2 = cascade 1-3)
+        int ci = 0;
+        if      (viewDepth > pssmData.cascadeSplits.z) ci = 2;
+        else if (viewDepth > pssmData.cascadeSplits.y) ci = 1;
 
-        // Debug: visualize cascades
-        if (csmData.cascadeVisualization > 0) {
-            uint cascade = selectCascade(viewDepth, csmData.cascadeSplits, csmData.cascadeCount);
-            float3 cascadeColor = getCascadeDebugColor(cascade);
-            return float4(mix(cascadeColor, float3(shadowFactor), 0.7), 1.0);
+        float4 lsPos = pssmData.lightSpaceMatrices[ci] * in.worldPosition;
+        float3 proj  = lsPos.xyz / lsPos.w;
+
+        // NDC → texture UV (Metal: y=+1 at top → v=0)
+        float2 shadowUV = float2(proj.x * 0.5 + 0.5, 0.5 - proj.y * 0.5);
+        float  refDepth = proj.z - PSSM_BIAS;
+
+        // 3×3 PCF (each tap uses hardware bilinear comparison)
+        float pcf = 0.0;
+        for (int px = -1; px <= 1; px++) {
+            for (int py = -1; py <= 1; py++) {
+                pcf += pssmShadowMaps.sample_compare(
+                    shadowCmpSampler,
+                    shadowUV + float2(px, py) * PSSM_TEXEL,
+                    ci, refDepth
+                );
+            }
         }
-    } else if (shadowMode == 3) {
-        // Hybrid: CSM base + RT refinement in penumbra regions
-        float csmShadow = calculateCSMShadow(
-            in.worldPosition.xyz,
-            norm,
-            viewDepth,
-            in.position.xy,
-            csmData,
-            csmShadowMap,
-            shadowSampler
-        );
+        shadowFactor = pcf / 9.0;
 
-        // Check if we're in a penumbra region (partial shadow)
-        if (hybridData.hybridEnabled > 0 &&
-            csmShadow > hybridData.penumbraThresholdLow &&
-            csmShadow < hybridData.penumbraThresholdHigh) {
-            // In penumbra region - use RT shadow for refinement
+        // Blend zone between RT (cascade 0) and PSSM cascade 1
+        float blendEnd = pssmData.cascadeSplits.x + pssmData.blendRange;
+        if (viewDepth < blendEnd) {
             float rtShadow = texShadow.sample(s, screenUV).r;
-            // Blend CSM with RT based on penumbra region
-            float penumbraFactor = smoothstep(
-                hybridData.penumbraThresholdLow,
-                hybridData.penumbraThresholdHigh,
-                csmShadow
-            );
-            shadowFactor = mix(csmShadow, rtShadow, 0.5);
-        } else {
-            shadowFactor = csmShadow;
+            float t = (viewDepth - pssmData.cascadeSplits.x) / pssmData.blendRange;
+            shadowFactor = mix(rtShadow, shadowFactor, t);
         }
     }
 
+    float3 result = float3(0.0);
     result += CalculateDirectionalLight(directionalLights[0], norm, T, B, viewDir, surf) * shadowFactor;
 
     uint tileX = uint(screenUV.x * float(gridSize.x));
@@ -406,16 +522,28 @@ fragment float4 fragmentMain(
     // }
 
     uint tileIndex = tileX + tileY * gridSize.x;
-    Cluster tile = clusters[tileIndex];
+    // Reference, not copy: Cluster is ~1KB (lightIndices[256]); copying it per
+    // fragment spills to stack and reads the whole struct from device memory.
+    const device Cluster& tile = clusters[tileIndex];
     uint lightCount = tile.lightCount;
+    float pointShadow = texPointShadow.sample(s, screenUV).r;
     for (uint i = 0; i < lightCount; i++) {
         uint lightIndex = tile.lightIndices[i];
-        result += CalculatePointLight(pointLights[lightIndex], norm, T, B, viewDir, surf, in.worldPosition.xyz);
+        result += CalculatePointLight(pointLights[lightIndex], norm, T, B, viewDir, surf, in.worldPosition.xyz) * pointShadow;
     }
 
-    result += float3(0.2) * surf.ao * surf.color;
-    // TODO: IBL
-    // result += CalculateIBL(norm, viewDir, surf, irradianceMap, prefilterMap, brdfLUT);
+    for (uint i = 0; i < rectLightCount; i++) {
+        result += CalculateRectLight(rectLights[i], norm, in.worldPosition.xyz, viewDir, surf, rectLightVideo);
+    }
+
+    // Screen-space AO attenuates ambient/indirect light only — multiplying
+    // direct light by AO is physically wrong and dirties lit surfaces
+    float screenAO = texAO.sample(s, screenUV).r;
+    if (material.iblEnabled > 0.5) {
+        result += CalculateIBL(norm, viewDir, surf, irradianceMap, prefilterMap, brdfLUT) * screenAO;
+    } else {
+        result += float3(0.03) * surf.ao * surf.color * screenAO; // minimal ambient fallback
+    }
 
     result += surf.emission;
 
