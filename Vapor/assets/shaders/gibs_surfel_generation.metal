@@ -14,6 +14,8 @@ using namespace metal;
 // ============================================================================
 
 // Counter indices
+// [0] = per-frame generation budget (reset by CPU each frame in beginFrame)
+// [1] = persistent pool allocation cursor (read back by CPU as active surfel count)
 constant uint COUNTER_NEW_SURFELS = 0;
 constant uint COUNTER_TOTAL_SURFELS = 1;
 
@@ -91,11 +93,21 @@ kernel void surfelGeneration(
         return;
     }
 
-    // Allocate surfel index atomically
-    uint surfelIndex = atomic_fetch_add_explicit(&counters[COUNTER_NEW_SURFELS], 1, memory_order_relaxed);
+    // Cheap pool-full early-out (racy read is fine; bounds check below is authoritative)
+    if (atomic_load_explicit(&counters[COUNTER_TOTAL_SURFELS], memory_order_relaxed) >= gibs.maxSurfels) {
+        return;
+    }
 
-    // Check capacity
-    if (surfelIndex >= params.maxNewSurfels || surfelIndex >= gibs.maxSurfels) {
+    // Per-frame generation budget
+    uint newIndex = atomic_fetch_add_explicit(&counters[COUNTER_NEW_SURFELS], 1, memory_order_relaxed);
+    if (newIndex >= params.maxNewSurfels) {
+        return;
+    }
+
+    // Allocate from the persistent pool; the cursor survives across frames and
+    // is read back by the CPU as the active surfel count
+    uint surfelIndex = atomic_fetch_add_explicit(&counters[COUNTER_TOTAL_SURFELS], 1, memory_order_relaxed);
+    if (surfelIndex >= gibs.maxSurfels) {
         return;
     }
 

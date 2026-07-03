@@ -83,6 +83,7 @@ private:
     float resolutionScale = 0.5f;
 
     // Runtime state
+    Uint32 allocatedMaxSurfels = 0; // Buffer capacity fixed at init; quality changes clamp to this
     Uint32 activeSurfelCount = 0;
     Uint32 currentFrameIndex = 0;
     glm::mat4 prevViewProj = glm::mat4(1.0f);

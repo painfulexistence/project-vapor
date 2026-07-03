@@ -89,13 +89,16 @@ float3 sampleSurfelAtPosition(float3 hitPos, float3 hitNormal,
 }
 
 // Main surfel raytracing kernel
+// surfels: canonical buffer (read/write) — irradiance accumulates here across frames.
+// sortedSurfels + cells: last frame's spatial hash for neighbor irradiance lookup
+// (cell offsets index into the SORTED buffer, so it must be bound separately).
 kernel void surfelRaytracing(
     device Surfel* surfels [[buffer(0)]],
     device const SurfelCell* cells [[buffer(1)]],
     constant GIBSData& gibs [[buffer(2)]],
     constant SurfelRaytracingParams& params [[buffer(3)]],
     raytracing::instance_acceleration_structure accelStruct [[buffer(4)]],
-    texture2d<float, access::read> environmentMap [[texture(0)]],
+    device const Surfel* sortedSurfels [[buffer(5)]],
     uint gid [[thread_position_in_grid]]
 ) {
     uint surfelIndex = params.surfelOffset + gid;
@@ -106,12 +109,7 @@ kernel void surfelRaytracing(
 
     Surfel surfel = surfels[surfelIndex];
 
-    // Skip invalid or surfels that don't need update
     if (!(surfel.flags & SURFEL_FLAG_VALID)) {
-        return;
-    }
-
-    if (!(surfel.flags & SURFEL_FLAG_NEEDS_UPDATE)) {
         return;
     }
 
@@ -152,8 +150,8 @@ kernel void surfelRaytracing(
             // For now, use a simple heuristic or assume facing camera
             float3 hitNormal = -r.direction;
 
-            // Get irradiance from surfel at hit position
-            float3 hitRadiance = sampleSurfelAtPosition(hitPos, hitNormal, surfels, cells, gibs);
+            // Get irradiance from surfel at hit position (last frame's sorted hash)
+            float3 hitRadiance = sampleSurfelAtPosition(hitPos, hitNormal, sortedSurfels, cells, gibs);
 
             // Cosine term already included in importance sampling
             indirectSum += hitRadiance * surfel.albedo;
@@ -176,11 +174,9 @@ kernel void surfelRaytracing(
     // Temporal blending with previous irradiance
     // Design Decision: Temporal accumulation for noise reduction
     surfel.irradiance = mix(surfel.irradiance, newIndirect, gibs.temporalBlend);
+    surfel.age += 1.0;
 
-    // Clear needs update flag
-    surfel.flags &= ~SURFEL_FLAG_NEEDS_UPDATE;
-
-    // Write back
+    // Write back to the canonical buffer so accumulation persists across frames
     surfels[surfelIndex] = surfel;
 }
 
@@ -211,7 +207,7 @@ kernel void surfelRaytracingSimple(
     // Simple ambient indirect (placeholder until RT works)
     float3 ambient = float3(0.1, 0.12, 0.15);
     surfel.irradiance = mix(surfel.irradiance, ambient * surfel.albedo, gibs.temporalBlend);
+    surfel.age += 1.0;
 
-    surfel.flags &= ~SURFEL_FLAG_NEEDS_UPDATE;
     surfels[surfelIndex] = surfel;
 }

@@ -72,6 +72,7 @@ void GIBSManager::createBuffers() {
 
     // Surfel buffer - main storage
     // Design Decision: 128 bytes per surfel for balance of info and memory
+    allocatedMaxSurfels = maxSurfels;
     size_t surfelBufferSize = maxSurfels * sizeof(Surfel);
     surfelBuffer = NS::TransferPtr(device->newBuffer(surfelBufferSize, MTL::ResourceStorageModePrivate));
     surfelBuffer->setLabel(NS::String::string("GIBS Surfel Buffer", NS::UTF8StringEncoding));
@@ -173,6 +174,12 @@ void GIBSManager::setQuality(GIBSQuality quality) {
     currentQuality = quality;
     getGIBSQualitySettings(quality, maxSurfels, raysPerSurfel, resolutionScale);
 
+    // Buffers are sized once at init; clamp to allocated capacity so a runtime
+    // quality change never lets GPU kernels write past the allocated pool
+    if (allocatedMaxSurfels > 0) {
+        maxSurfels = std::min(maxSurfels, allocatedMaxSurfels);
+    }
+
     // Update GIBS data
     gibsData.maxSurfels = maxSurfels;
     gibsData.raysPerSurfel = raysPerSurfel;
@@ -200,19 +207,13 @@ void GIBSManager::onSceneLoaded(std::shared_ptr<Scene> scene) {
 void GIBSManager::beginFrame(Uint32 frameIndex) {
     currentFrameIndex = frameIndex % MAX_FRAMES_IN_FLIGHT;
 
-    // Read surfel count from previous frame's GPU work (1 frame latency, no sync stall)
+    // Read surfel count from previous frame's GPU work (1 frame latency, no sync stall).
+    // counter[1] is the persistent pool allocation cursor incremented by the
+    // generation kernel; it may slightly overshoot maxSurfels (racy budget check), so clamp.
     Uint32* counterPtr = static_cast<Uint32*>(counterBuffer->contents());
+    activeSurfelCount = std::min(counterPtr[1], maxSurfels);
 
-    // Update active surfel count from counter[1] (set by GPU in surfel generation)
-    // Use a blend to smooth transitions
-    Uint32 gpuSurfelCount = counterPtr[1];
-    if (gpuSurfelCount > 0) {
-        // Gradually blend towards GPU count for stability
-        activeSurfelCount = activeSurfelCount * 0.9f + gpuSurfelCount * 0.1f;
-        activeSurfelCount = std::min(activeSurfelCount, maxSurfels);
-    }
-
-    // Reset new surfel allocation counter for this frame
+    // Reset the per-frame generation budget counter (counter[1] is never reset)
     counterPtr[0] = 0;
 }
 

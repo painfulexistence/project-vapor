@@ -2628,7 +2628,7 @@ public:
 
     void execute() override {
         auto& r = *renderer;
-        if (!r.gibsEnabled || !gibsManager) return;
+        if (!r.gibsEnabled || !gibsManager || !r.surfelGenerationPipeline) return;
 
         auto drawableSize = r.swapchain->drawableSize();
         glm::vec2 screenSize(drawableSize.width, drawableSize.height);
@@ -2641,7 +2641,8 @@ public:
         params.maxNewSurfels = gibsManager->getMaxSurfels() / 10;
         params.frameIndex = r.frameNumber;
 
-        auto encoder = r.currentCommandBuffer->computeCommandEncoder();
+        auto timedDesc = makeTimedComputeDesc(true, true);
+        auto encoder = r.currentCommandBuffer->computeCommandEncoder(timedDesc.get());
         encoder->setLabel(NS::String::string("Surfel Generation", NS::UTF8StringEncoding));
         encoder->setComputePipelineState(r.surfelGenerationPipeline.get());
 
@@ -2673,14 +2674,15 @@ public:
 
     void execute() override {
         auto& r = *renderer;
-        if (!r.gibsEnabled || !gibsManager) return;
+        if (!r.gibsEnabled || !gibsManager || !r.surfelClearCellsPipeline) return;
         uint32_t totalCells = gibsManager->getTotalCells();
         uint32_t activeSurfels = gibsManager->getActiveSurfelCount();
         if (activeSurfels == 0) activeSurfels = 1;
 
         // Step 1: Clear cell counts
         {
-            auto encoder = r.currentCommandBuffer->computeCommandEncoder();
+            auto timedDesc = makeTimedComputeDesc(true, false);
+            auto encoder = r.currentCommandBuffer->computeCommandEncoder(timedDesc.get());
             encoder->setLabel(NS::String::string("Clear Cell Counts", NS::UTF8StringEncoding));
             encoder->setComputePipelineState(r.surfelClearCellsPipeline.get());
             encoder->setBuffer(gibsManager->getCellCountBuffer(), 0, 0);
@@ -2692,7 +2694,8 @@ public:
 
         // Step 2: Count surfels per cell
         {
-            auto encoder = r.currentCommandBuffer->computeCommandEncoder();
+            auto timedDesc = makeTimedComputeDesc(false, false);
+            auto encoder = r.currentCommandBuffer->computeCommandEncoder(timedDesc.get());
             encoder->setLabel(NS::String::string("Count Surfels Per Cell", NS::UTF8StringEncoding));
             encoder->setComputePipelineState(r.surfelCountPerCellPipeline.get());
             encoder->setBuffer(gibsManager->getSurfelBuffer(), 0, 0);
@@ -2705,7 +2708,8 @@ public:
 
         // Step 3: Prefix sum
         {
-            auto encoder = r.currentCommandBuffer->computeCommandEncoder();
+            auto timedDesc = makeTimedComputeDesc(false, false);
+            auto encoder = r.currentCommandBuffer->computeCommandEncoder(timedDesc.get());
             encoder->setLabel(NS::String::string("Prefix Sum Cells", NS::UTF8StringEncoding));
             encoder->setComputePipelineState(r.surfelPrefixSumPipeline.get());
             encoder->setBuffer(gibsManager->getCellCountBuffer(), 0, 0);
@@ -2717,7 +2721,8 @@ public:
 
         // Step 4: Scatter surfels
         {
-            auto encoder = r.currentCommandBuffer->computeCommandEncoder();
+            auto timedDesc = makeTimedComputeDesc(false, true);
+            auto encoder = r.currentCommandBuffer->computeCommandEncoder(timedDesc.get());
             encoder->setLabel(NS::String::string("Scatter Surfels", NS::UTF8StringEncoding));
             encoder->setComputePipelineState(r.surfelScatterPipeline.get());
             encoder->setBuffer(gibsManager->getSurfelBuffer(), 0, 0);
@@ -2729,6 +2734,8 @@ public:
             encoder->dispatchThreadgroups(MTL::Size(threadGroups, 1, 1), MTL::Size(256, 1, 1));
             encoder->endEncoding();
         }
+
+        addTrafficEstimate(uint64_t(activeSurfels) * sizeof(Surfel) * 2 + uint64_t(totalCells) * (4 + sizeof(SurfelCell)));
     }
 
 private:
@@ -2744,7 +2751,7 @@ public:
 
     void execute() override {
         auto& r = *renderer;
-        if (!r.gibsEnabled || !gibsManager) return;
+        if (!r.gibsEnabled || !gibsManager || !r.surfelRaytracingSimplePipeline) return;
         const auto& gibsData = gibsManager->getGIBSData();
 
         SurfelRaytracingParams params;
@@ -2757,25 +2764,32 @@ public:
 
         if (params.surfelCount == 0) return;
 
-        auto encoder = r.currentCommandBuffer->computeCommandEncoder();
+        auto timedDesc = makeTimedComputeDesc(true, true);
+        auto encoder = r.currentCommandBuffer->computeCommandEncoder(timedDesc.get());
         encoder->setLabel(NS::String::string("Surfel Raytracing", NS::UTF8StringEncoding));
 
-        bool useRT = r.m_supportsRaytracing && r.TLASBuffers[r.currentFrameInFlight];
+        bool useRT = r.m_supportsRaytracing && r.TLASBuffers[r.currentFrameInFlight] && r.surfelRaytracingPipeline;
         encoder->setComputePipelineState(useRT ? r.surfelRaytracingPipeline.get()
                                                 : r.surfelRaytracingSimplePipeline.get());
 
-        encoder->setBuffer(gibsManager->getSurfelBufferSorted(), 0, 0);
+        // Canonical buffer at 0: irradiance accumulates here across frames.
+        // The sorted copy (rebuilt each frame before this pass) is only for
+        // neighbor lookup via the cell hash, whose offsets index the sorted order.
+        encoder->setBuffer(gibsManager->getSurfelBuffer(), 0, 0);
         encoder->setBuffer(gibsManager->getCellBuffer(), 0, 1);
         encoder->setBuffer(gibsManager->getGIBSDataBuffer(r.currentFrameInFlight), 0, 2);
         encoder->setBytes(&params, sizeof(params), 3);
 
         if (useRT) {
             encoder->setAccelerationStructure(r.TLASBuffers[r.currentFrameInFlight].get(), 4);
+            encoder->setBuffer(gibsManager->getSurfelBufferSorted(), 0, 5);
         }
 
         uint32_t threadGroups = (params.surfelCount + 63) / 64;
         encoder->dispatchThreadgroups(MTL::Size(threadGroups, 1, 1), MTL::Size(64, 1, 1));
         encoder->endEncoding();
+
+        addTrafficEstimate(uint64_t(params.surfelCount) * sizeof(Surfel) * 2);
     }
 
 private:
@@ -2791,22 +2805,22 @@ public:
 
     void execute() override {
         auto& r = *renderer;
-        if (!r.gibsEnabled || !gibsManager) return;
+        if (!r.gibsEnabled || !gibsManager || !r.gibsTemporalPipeline) return;
         uint32_t activeSurfels = gibsManager->getActiveSurfelCount();
         if (activeSurfels == 0) return;
 
-        auto encoder = r.currentCommandBuffer->computeCommandEncoder();
+        auto timedDesc = makeTimedComputeDesc(true, true);
+        auto encoder = r.currentCommandBuffer->computeCommandEncoder(timedDesc.get());
         encoder->setLabel(NS::String::string("GIBS Temporal", NS::UTF8StringEncoding));
         encoder->setComputePipelineState(r.gibsTemporalPipeline.get());
 
-        encoder->setBuffer(gibsManager->getSurfelBufferSorted(), 0, 0);
+        // Canonical buffer: smoothing must persist, the sorted copy is rebuilt each frame
+        encoder->setBuffer(gibsManager->getSurfelBuffer(), 0, 0);
         encoder->setBuffer(gibsManager->getGIBSDataBuffer(r.currentFrameInFlight), 0, 1);
 
         uint32_t threadGroups = (activeSurfels + 255) / 256;
         encoder->dispatchThreadgroups(MTL::Size(threadGroups, 1, 1), MTL::Size(256, 1, 1));
         encoder->endEncoding();
-
-        gibsManager->swapHistoryBuffers();
     }
 
 private:
@@ -2822,13 +2836,13 @@ public:
 
     void execute() override {
         auto& r = *renderer;
-        if (!r.gibsEnabled || !gibsManager) return;
+        if (!r.gibsEnabled || !gibsManager || !r.gibsSamplePipeline) return;
+        if (!gibsManager->getGIResultTexture()) return; // textures created lazily in draw()
         const auto& gibsData = gibsManager->getGIBSData();
 
         auto drawableSize = r.swapchain->drawableSize();
         glm::vec2 screenSize(drawableSize.width, drawableSize.height);
-        float scale = gibsManager->getResolutionScale();
-        glm::vec2 giResolution = screenSize * scale;
+        glm::vec2 giResolution = screenSize * gibsManager->getResolutionScale();
 
         GIBSSampleParams params;
         params.invViewProj = gibsData.invViewProj;
@@ -2839,44 +2853,27 @@ public:
         params.normalWeight = 1.0f;
         params.distanceWeight = 1.0f;
 
-        // Sample at GI resolution
-        {
-            auto encoder = r.currentCommandBuffer->computeCommandEncoder();
-            encoder->setLabel(NS::String::string("GIBS Sample", NS::UTF8StringEncoding));
-            encoder->setComputePipelineState(r.gibsSamplePipeline.get());
+        // Sample at GI resolution; the main pass upsamples for free via bilinear sampling
+        auto timedDesc = makeTimedComputeDesc(true, true);
+        auto encoder = r.currentCommandBuffer->computeCommandEncoder(timedDesc.get());
+        encoder->setLabel(NS::String::string("GIBS Sample", NS::UTF8StringEncoding));
+        encoder->setComputePipelineState(r.gibsSamplePipeline.get());
 
-            encoder->setTexture(r.depthStencilRT.get(), 0);
-            encoder->setTexture(r.normalRT.get(), 1);
-            encoder->setTexture(gibsManager->getGIResultTexture(), 2);
+        encoder->setTexture(r.depthStencilRT.get(), 0);
+        encoder->setTexture(r.normalRT.get(), 1);
+        encoder->setTexture(gibsManager->getGIResultTexture(), 2);
 
-            encoder->setBuffer(gibsManager->getSurfelBufferSorted(), 0, 0);
-            encoder->setBuffer(gibsManager->getCellBuffer(), 0, 1);
-            encoder->setBuffer(gibsManager->getGIBSDataBuffer(r.currentFrameInFlight), 0, 2);
-            encoder->setBytes(&params, sizeof(params), 3);
+        encoder->setBuffer(gibsManager->getSurfelBufferSorted(), 0, 0);
+        encoder->setBuffer(gibsManager->getCellBuffer(), 0, 1);
+        encoder->setBuffer(gibsManager->getGIBSDataBuffer(r.currentFrameInFlight), 0, 2);
+        encoder->setBytes(&params, sizeof(params), 3);
 
-            uint32_t dispatchX = (static_cast<uint32_t>(giResolution.x) + 7) / 8;
-            uint32_t dispatchY = (static_cast<uint32_t>(giResolution.y) + 7) / 8;
-            encoder->dispatchThreadgroups(MTL::Size(dispatchX, dispatchY, 1), MTL::Size(8, 8, 1));
-            encoder->endEncoding();
-        }
+        uint32_t dispatchX = (static_cast<uint32_t>(giResolution.x) + 7) / 8;
+        uint32_t dispatchY = (static_cast<uint32_t>(giResolution.y) + 7) / 8;
+        encoder->dispatchThreadgroups(MTL::Size(dispatchX, dispatchY, 1), MTL::Size(8, 8, 1));
+        encoder->endEncoding();
 
-        // Upsample if needed
-        if (scale < 1.0f) {
-            auto encoder = r.currentCommandBuffer->computeCommandEncoder();
-            encoder->setLabel(NS::String::string("GIBS Bilateral Upsample", NS::UTF8StringEncoding));
-            encoder->setComputePipelineState(r.gibsUpsamplePipeline.get());
-
-            encoder->setTexture(gibsManager->getGIResultTexture(), 0);
-            encoder->setTexture(r.depthStencilRT.get(), 1);
-            encoder->setTexture(r.normalRT.get(), 2);
-            encoder->setTexture(gibsManager->getGIHistoryTexture(), 3);
-            encoder->setBytes(&params, sizeof(params), 0);
-
-            uint32_t dispatchX = (static_cast<uint32_t>(screenSize.x) + 7) / 8;
-            uint32_t dispatchY = (static_cast<uint32_t>(screenSize.y) + 7) / 8;
-            encoder->dispatchThreadgroups(MTL::Size(dispatchX, dispatchY, 1), MTL::Size(8, 8, 1));
-            encoder->endEncoding();
-        }
+        addTrafficEstimate(uint64_t(giResolution.x) * uint64_t(giResolution.y) * (4 + 8 + 8));
     }
 
 private:
