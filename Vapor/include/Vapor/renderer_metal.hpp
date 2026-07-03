@@ -780,6 +780,7 @@ protected:
     float pssmRTMaxDist = 50.0f; // view-space depth where RT shadow ends and PSSM begins
 
     // PSSM PCF and blend settings
+    float pssmRTBlendScale = 0.05f;       // RT↔PSSM cross-fade width as a fraction of (far - rtEnd)
     float pssmCascadeBlendRange = 10.0f;  // blend range between PSSM cascades (view-space units)
     uint32_t pssmPcfSampleCount = 16;     // PCF sample count: 4, 8, 16, or 32
     bool pssmDebugVisualize = false;      // visualize cascade regions with colors

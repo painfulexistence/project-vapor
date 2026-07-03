@@ -334,7 +334,7 @@ public:
         const float nearClip  = r.currentCamera->near();
         const float farClip   = r.currentCamera->far();
         const float rtEnd     = r.m_supportsRaytracing ? r.pssmRTMaxDist : nearClip;
-        const float blendRange = (farClip - rtEnd) * 0.05f; // 5% of remaining range
+        const float blendRange = (farClip - rtEnd) * r.pssmRTBlendScale; // fraction of remaining range
 
         // ----- Cascade split depths (practical split: blend of log + uniform) -----
         // splits[0] = rtEnd, splits[1..3] = cascade ends, splits[3] = farClip
@@ -4922,6 +4922,19 @@ auto Renderer_Metal::draw(std::shared_ptr<Scene> scene, Camera& camera) -> void 
                     splits.x, splits.y, splits.z, splits.w);
             }
             ImGui::SliderFloat("RT shadow max dist", &pssmRTMaxDist, 5.0f, 200.0f);
+
+            // --- PSSM PCF & blend controls ---
+            const char* pcfCounts[] = { "4", "8", "16", "32" };
+            const uint32_t pcfValues[] = { 4u, 8u, 16u, 32u };
+            int pcfIdx = 2; // default 16
+            for (int i = 0; i < 4; i++) if (pssmPcfSampleCount == pcfValues[i]) pcfIdx = i;
+            if (ImGui::Combo("PCF samples", &pcfIdx, pcfCounts, 4)) {
+                pssmPcfSampleCount = pcfValues[pcfIdx];
+            }
+            ImGui::SliderFloat("RT<->PSSM blend", &pssmRTBlendScale, 0.0f, 0.25f, "%.3f");
+            ImGui::SliderFloat("Cascade blend range", &pssmCascadeBlendRange, 0.0f, 30.0f);
+            ImGui::Checkbox("Visualize cascades", &pssmDebugVisualize);
+            ImGui::TextWrapped("Cascade colors: green = RT, red = C1, blue = C2, yellow = C3");
 
             // --- Stochastic point shadow debug mode ---
             const char* psDebugModes[] = { "Visibility (normal)", "Tile light-count heatmap" };
