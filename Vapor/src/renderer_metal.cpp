@@ -3041,15 +3041,17 @@ auto Renderer_Metal::createResources() -> void {
     normalRT = NS::TransferPtr(device->newTexture(normalTextureDesc));
     normalTextureDesc->release();
 
-    // RGBA8 + mip chain (both restored while bisecting a visual regression;
-    // see RaytraceShadowPass for the mip regeneration)
+    // Half resolution: 4x fewer (miss-dominated, expensive) shadow rays; consumers
+    // sample at screen UVs with a bilinear sampler, which upsamples for free and
+    // softens the 1-ray hard edges by ~2px. The kernel is resolution-agnostic, so
+    // switching back to full res is just this size change.
     MTL::TextureDescriptor* shadowTextureDesc = MTL::TextureDescriptor::alloc()->init();
     shadowTextureDesc->setTextureType(MTL::TextureType2D);
     shadowTextureDesc->setPixelFormat(MTL::PixelFormatRGBA8Unorm);
-    shadowTextureDesc->setWidth(swapchain->drawableSize().width);
-    shadowTextureDesc->setHeight(swapchain->drawableSize().height);
+    shadowTextureDesc->setWidth((swapchain->drawableSize().width + 1) / 2);
+    shadowTextureDesc->setHeight((swapchain->drawableSize().height + 1) / 2);
     shadowTextureDesc->setMipmapLevelCount(
-        calculateMipmapLevelCount(swapchain->drawableSize().width, swapchain->drawableSize().height)
+        calculateMipmapLevelCount((swapchain->drawableSize().width + 1) / 2, (swapchain->drawableSize().height + 1) / 2)
     );
     shadowTextureDesc->setUsage(MTL::TextureUsageShaderRead | MTL::TextureUsageShaderWrite);
     shadowRT = NS::TransferPtr(device->newTexture(shadowTextureDesc));
