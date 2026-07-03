@@ -20,10 +20,12 @@ using namespace Vapor;
 #define GLM_FORCE_LEFT_HANDED
 #include "backends/imgui_impl_metal.h"
 #include "backends/imgui_impl_sdl3.h"
+#include <cmath>
 #include <cstdlib>
 #include <cstring>
 #include <ctime>
 #include <functional>
+#include <set>
 #include <thread>
 #include <glm/ext/matrix_clip_space.hpp>
 #include <glm/ext/matrix_transform.hpp>
@@ -133,32 +135,33 @@ public:
             r.currentScene->isGeometryDirty = false;
         }
 
-        // Create TLAS descriptor
+        auto slot = r.currentFrameInFlight;
+
+        // Create TLAS descriptor (built every frame, matching mainline behavior;
+        // skip/refit optimizations were backed out to shrink this change set)
         auto tlasDesc = NS::TransferPtr(MTL::InstanceAccelerationStructureDescriptor::alloc()->init());
         tlasDesc->setInstanceCount(r.accelInstances.size());
         tlasDesc->setInstancedAccelerationStructures(r.BLASArray.get());
-        tlasDesc->setInstanceDescriptorBuffer(r.accelInstanceBuffers[r.currentFrameInFlight].get());
+        tlasDesc->setInstanceDescriptorBuffer(r.accelInstanceBuffers[slot].get());
 
         auto tlasSizes = r.device->accelerationStructureSizes(tlasDesc.get());
-        if (!r.TLASScratchBuffers[r.currentFrameInFlight]
-            || r.TLASScratchBuffers[r.currentFrameInFlight]->length() < tlasSizes.buildScratchBufferSize) {
-            r.TLASScratchBuffers[r.currentFrameInFlight] =
-                NS::TransferPtr(r.device->newBuffer(tlasSizes.buildScratchBufferSize, MTL::ResourceStorageModePrivate));
+        if (!r.TLASScratchBuffers[slot]
+            || r.TLASScratchBuffers[slot]->length() < tlasSizes.buildScratchBufferSize) {
+            r.TLASScratchBuffers[slot] = NS::TransferPtr(
+                r.device->newBuffer(tlasSizes.buildScratchBufferSize, MTL::ResourceStorageModePrivate)
+            );
         }
-        if (!r.TLASBuffers[r.currentFrameInFlight]
-            || r.TLASBuffers[r.currentFrameInFlight]->size() < tlasSizes.accelerationStructureSize) {
-            r.TLASBuffers[r.currentFrameInFlight] =
+        if (!r.TLASBuffers[slot] || r.TLASBuffers[slot]->size() < tlasSizes.accelerationStructureSize) {
+            r.TLASBuffers[slot] =
                 NS::TransferPtr(r.device->newAccelerationStructure(tlasSizes.accelerationStructureSize));
         }
 
-        // Build TLAS
-        // TODO: only build TLAS if it's dirty
         auto timedAccelDesc = makeTimedAccelDesc(true, true);
         auto accelEncoder = r.currentCommandBuffer->accelerationStructureCommandEncoder(timedAccelDesc.get());
         accelEncoder->buildAccelerationStructure(
-            r.TLASBuffers[r.currentFrameInFlight].get(),
+            r.TLASBuffers[slot].get(),
             tlasDesc.get(),
-            r.TLASScratchBuffers[r.currentFrameInFlight].get(),
+            r.TLASScratchBuffers[slot].get(),
             0
         );
         accelEncoder->endEncoding();
@@ -178,8 +181,8 @@ public:
     void execute() override {
         auto& r = *renderer;
 
-        auto drawableSize = r.swapchain->drawableSize();
-        glm::vec2 screenSize = glm::vec2(drawableSize.width, drawableSize.height);
+        auto w = r.normalRT->width();
+        auto h = r.normalRT->height();
 
         auto timedComputeDesc = makeTimedComputeDesc(true, true);
         auto encoder = r.currentCommandBuffer->computeCommandEncoder(timedComputeDesc.get());
@@ -187,8 +190,54 @@ public:
         encoder->setTexture(r.normalRT_MS.get(), 0);
         encoder->setTexture(r.normalRT.get(), 1);
         encoder->setBytes(&r.MSAA_SAMPLE_COUNT, sizeof(Uint32), 0);
-        encoder->dispatchThreadgroups(MTL::Size(screenSize.x, screenSize.y, 1), MTL::Size(1, 1, 1));
+        encoder->dispatchThreadgroups(MTL::Size(w, h, 1), MTL::Size(1, 1, 1));
         encoder->endEncoding();
+
+        // Traffic: read all MS normal samples, write resolved normal (both RGBA16F)
+        uint64_t px = uint64_t(w) * h;
+        addTrafficEstimate(px * 8 * (r.MSAA_SAMPLE_COUNT + 1));
+    }
+};
+
+// Velocity pass: camera-motion vectors from the depth buffer (see 3d_velocity.metal).
+// Feeds every temporal technique (RT AO temporal accumulation, TAA).
+class VelocityPass : public RenderPass {
+public:
+    explicit VelocityPass(Renderer_Metal* renderer) : RenderPass(renderer) {
+    }
+
+    auto getName() const -> const char* override {
+        return "VelocityPass";
+    }
+
+    void execute() override {
+        auto& r = *renderer;
+
+        if (!r.velocityPipeline || !r.velocityRT) return;
+
+        glm::mat4 curViewProj = r.currentCamera->getProjMatrix() * r.currentCamera->getViewMatrix();
+        if (!r.prevViewProjValid) {
+            r.prevViewProj = curViewProj; // first frame: zero velocity
+            r.prevViewProjValid = true;
+        }
+
+        auto timedComputeDesc = makeTimedComputeDesc(true, true);
+        auto encoder = r.currentCommandBuffer->computeCommandEncoder(timedComputeDesc.get());
+        encoder->setComputePipelineState(r.velocityPipeline.get());
+        encoder->setTexture(r.depthStencilRT.get(), 0);
+        encoder->setTexture(r.velocityRT.get(), 1);
+        encoder->setBuffer(r.cameraDataBuffers[r.currentFrameInFlight].get(), 0, 0);
+        encoder->setBytes(&r.prevViewProj, sizeof(glm::mat4), 1);
+        auto w = r.velocityRT->width();
+        auto h = r.velocityRT->height();
+        encoder->dispatchThreads(MTL::Size(w, h, 1), MTL::Size(8, 8, 1));
+        encoder->endEncoding();
+
+        // Traffic: depth read (4B) + velocity write (4B) per pixel
+        addTrafficEstimate(uint64_t(w) * h * 8);
+
+        // setBytes copied prevViewProj into the command stream, so it's safe to roll forward now
+        r.prevViewProj = curViewProj;
     }
 };
 
@@ -205,8 +254,7 @@ public:
     void execute() override {
         auto& r = *renderer;
 
-        auto drawableSize = r.swapchain->drawableSize();
-        glm::vec2 screenSize = glm::vec2(drawableSize.width, drawableSize.height);
+        glm::vec2 screenSize = glm::vec2(r.colorRT->width(), r.colorRT->height());
         glm::uvec3 gridSize = glm::uvec3(r.clusterGridSizeX, r.clusterGridSizeY, r.clusterGridSizeZ);
         uint pointLightCount = r.currentScene->pointLights.size();
 
@@ -237,8 +285,9 @@ public:
     void execute() override {
         auto& r = *renderer;
 
-        auto drawableSize = r.swapchain->drawableSize();
-        glm::vec2 screenSize = glm::vec2(drawableSize.width, drawableSize.height);
+        auto w = r.shadowRT->width();
+        auto h = r.shadowRT->height();
+        glm::vec2 screenSize = glm::vec2(w, h);
 
         auto timedComputeDesc = makeTimedComputeDesc(true, false);
         auto encoder = r.currentCommandBuffer->computeCommandEncoder(timedComputeDesc.get());
@@ -251,14 +300,308 @@ public:
         encoder->setBuffer(r.pointLightBuffer.get(), 0, 2);
         encoder->setBytes(&screenSize, sizeof(glm::vec2), 3);
         encoder->setAccelerationStructure(r.TLASBuffers[r.currentFrameInFlight].get(), 4);
-        encoder->dispatchThreadgroups(MTL::Size(screenSize.x, screenSize.y, 1), MTL::Size(1, 1, 1));
+        encoder->dispatchThreadgroups(MTL::Size(w, h, 1), MTL::Size(1, 1, 1));
         encoder->endEncoding();
 
-        // Generate mipmaps for shadow texture
+        // Generate mipmaps for shadow texture (restored while bisecting the
+        // shadow visual regression)
         auto shadowBlitDesc = makeTimedBlitDesc(false, true);
         auto mipmapEncoder = NS::TransferPtr(r.currentCommandBuffer->blitCommandEncoder(shadowBlitDesc.get()));
         mipmapEncoder->generateMipmaps(r.shadowRT.get());
         mipmapEncoder->endEncoding();
+
+        // Traffic: depth read (4B) + normal read (8B) + shadow write (4B) per pixel,
+        // plus mip chain regeneration (~5/3 of the base level)
+        uint64_t px = uint64_t(w) * h;
+        addTrafficEstimate(px * (4 + 8 + 4) + px * 4 * 5 / 3);
+    }
+};
+
+// PSSM shadow pass: renders scene depth into a 3-slice texture array for cascades 1-3
+class PSSMShadowPass : public RenderPass {
+public:
+    explicit PSSMShadowPass(Renderer_Metal* renderer) : RenderPass(renderer) {
+    }
+
+    auto getName() const -> const char* override {
+        return "PSSMShadowPass";
+    }
+
+    void execute() override {
+        auto& r = *renderer;
+
+        if (!r.currentScene || r.currentScene->directionalLights.empty()) return;
+
+        const auto& sunLight = r.currentScene->directionalLights[0];
+        const float nearClip  = r.currentCamera->near();
+        const float farClip   = r.currentCamera->far();
+        const float rtEnd     = r.m_supportsRaytracing ? r.pssmRTMaxDist : nearClip;
+        const float blendRange = (farClip - rtEnd) * 0.05f; // 5% of remaining range
+
+        // ----- Cascade split depths (practical split: blend of log + uniform) -----
+        // splits[0] = rtEnd, splits[1..3] = cascade ends, splits[3] = farClip
+        float splits[4];
+        splits[0] = rtEnd;
+        const float lambda = 0.7f;
+        for (int i = 1; i <= 3; i++) {
+            float p = float(i) / 3.0f;
+            float logS = rtEnd * std::pow(farClip / std::max(rtEnd, 0.1f), p);
+            float uniS = rtEnd + (farClip - rtEnd) * p;
+            splits[i] = lambda * logS + (1.0f - lambda) * uniS;
+        }
+
+        // ----- Light direction (direction light travels, toward scene) -----
+        glm::vec3 lightDir = glm::normalize(sunLight.direction);
+        glm::vec3 up = (std::abs(glm::dot(lightDir, glm::vec3(0, 1, 0))) < 0.99f)
+                     ? glm::vec3(0, 1, 0)
+                     : glm::vec3(0, 0, 1);
+
+        // ----- Frustum corners in world space -----
+        glm::mat4 view      = r.currentCamera->getViewMatrix();
+        glm::mat4 proj      = r.currentCamera->getProjMatrix();
+        glm::mat4 invVP     = glm::inverse(proj * view);
+
+        // NDC corners (LH ZO: z in [0,1], y in [-1,+1])
+        const glm::vec4 ndcCorners[8] = {
+            {-1,-1,0,1},{1,-1,0,1},{-1,1,0,1},{1,1,0,1},
+            {-1,-1,1,1},{1,-1,1,1},{-1,1,1,1},{1,1,1,1},
+        };
+        glm::vec3 worldCorners[8];
+        for (int i = 0; i < 8; i++) {
+            glm::vec4 w = invVP * ndcCorners[i];
+            worldCorners[i] = glm::vec3(w) / w.w;
+        }
+
+        // ----- Build GPU data struct -----
+        struct PSSMGPUData {
+            glm::mat4 lightSpaceMatrices[3];
+            glm::vec4 cascadeSplits;
+            float blendRange;
+            float _pad[3];
+        };
+
+        PSSMGPUData gpuData{};
+        gpuData.cascadeSplits = glm::vec4(splits[0], splits[1], splits[2], splits[3]);
+        gpuData.blendRange    = blendRange;
+
+        // Convert a forward view-space distance to NDC z by projecting an actual
+        // view-space point. Handedness-aware: RH projections (glm default; the
+        // GLM_FORCE_LEFT_HANDED define never took effect because glm is included
+        // transitively before it) have proj[2][3] == -1 and put visible geometry
+        // at negative view z; LH puts it at positive z.
+        const float zSign = (proj[2][3] < 0.0f) ? -1.0f : 1.0f;
+        auto viewDepthToNDCz = [&](float d) -> float {
+            glm::vec4 clip = proj * glm::vec4(0.0f, 0.0f, zSign * d, 1.0f);
+            return clip.z / clip.w;
+        };
+
+        for (int ci = 0; ci < 3; ci++) {
+            // Clamp split depths to valid [near, far] range before converting to NDC
+            float splitNear = glm::clamp(splits[ci],     nearClip, farClip);
+            float splitFar  = glm::clamp(splits[ci + 1], nearClip, farClip);
+
+            float nearNDCz = viewDepthToNDCz(splitNear);
+            float farNDCz  = viewDepthToNDCz(splitFar);
+
+            // Sub-frustum corners: unproject 8 NDC corners at exact cascade z values
+            const glm::vec4 cascadeNDC[8] = {
+                {-1,-1,nearNDCz,1}, {1,-1,nearNDCz,1}, {-1,1,nearNDCz,1}, {1,1,nearNDCz,1},
+                {-1,-1,farNDCz, 1}, {1,-1,farNDCz, 1}, {-1,1,farNDCz, 1}, {1,1,farNDCz, 1},
+            };
+            glm::vec3 corners[8];
+            for (int i = 0; i < 8; i++) {
+                glm::vec4 w = invVP * cascadeNDC[i];
+                corners[i] = glm::vec3(w) / w.w;
+            }
+
+            // Bounding sphere center for stable (rotation-invariant) shadow map
+            glm::vec3 sphereCenter(0.0f);
+            for (auto& c : corners) sphereCenter += c;
+            sphereCenter /= 8.0f;
+
+            float sphereRadius = 0.0f;
+            for (auto& c : corners)
+                sphereRadius = glm::max(sphereRadius, glm::length(c - sphereCenter));
+
+            // Light view: eye pulled back far enough that the whole bounding
+            // sphere sits in front of it (RH lookAt: forward is -z, so points in
+            // front have negative view z; distance from eye = -z).
+            const float lightDist = sphereRadius * 2.0f + 1.0f;
+            glm::mat4 lightView = glm::lookAt(sphereCenter - lightDir * lightDist, sphereCenter, up);
+
+            // Snap sphere center to texel grid in light space to stop shimmering
+            float texelSize = (2.0f * sphereRadius) / float(r.PSSM_SHADOW_MAP_SIZE);
+            glm::vec4 lsCenter = lightView * glm::vec4(sphereCenter, 1.0f);
+            lsCenter.x = std::floor(lsCenter.x / texelSize) * texelSize;
+            lsCenter.y = std::floor(lsCenter.y / texelSize) * texelSize;
+            glm::vec3 snappedCenter = glm::vec3(glm::inverse(lightView) * lsCenter);
+            lightView = glm::lookAt(snappedCenter - lightDir * lightDist, snappedCenter, up);
+
+            // Depth extents as positive distances in front of the light eye
+            float minDist = 1e38f, maxDist = -1e38f;
+            for (auto& c : corners) {
+                float dist = -(lightView * glm::vec4(c, 1.0f)).z; // RH: -z is forward
+                minDist = glm::min(minDist, dist);
+                maxDist = glm::max(maxDist, dist);
+            }
+            // Pull the near plane back to capture shadow casters outside the sub-frustum
+            // (a negative near just extends the ortho volume behind the eye — valid).
+            minDist -= (maxDist - minDist);
+
+            glm::mat4 lightProj = glm::ortho(
+                -sphereRadius,  sphereRadius,
+                -sphereRadius,  sphereRadius,
+                minDist, maxDist
+            );
+            gpuData.lightSpaceMatrices[ci] = lightProj * lightView;
+        }
+
+        // Upload PSSM data to triple-buffered GPU buffer
+        memcpy(r.pssmDataBuffers[r.currentFrameInFlight]->contents(), &gpuData, sizeof(gpuData));
+        r.pssmDataBuffers[r.currentFrameInFlight]->didModifyRange(
+            NS::Range::Make(0, sizeof(gpuData))
+        );
+
+        // ----- Render scene into each cascade shadow map slice -----
+        for (int ci = 0; ci < 3; ci++) {
+            auto passDesc = NS::TransferPtr(MTL::RenderPassDescriptor::renderPassDescriptor());
+            auto depthAtt = passDesc->depthAttachment();
+            depthAtt->setTexture(r.pssmShadowMaps.get());
+            depthAtt->setSlice(NS::UInteger(ci));
+            depthAtt->setLoadAction(MTL::LoadActionClear);
+            depthAtt->setStoreAction(MTL::StoreActionStore);
+            depthAtt->setClearDepth(1.0);
+
+            auto encoder = r.currentCommandBuffer->renderCommandEncoder(passDesc.get());
+            encoder->setRenderPipelineState(r.pssmShadowPipeline.get());
+            encoder->setDepthStencilState(r.pssmDepthStencilState.get());
+            encoder->setCullMode(MTL::CullModeBack);
+            encoder->setFrontFacingWinding(MTL::WindingCounterClockwise);
+            // Slope-scale depth bias to prevent shadow acne
+            encoder->setDepthBias(0.005f, 2.0f, 0.01f);
+
+            glm::mat4 lsm = gpuData.lightSpaceMatrices[ci];
+            encoder->setVertexBytes(&lsm, sizeof(glm::mat4), 0);
+            encoder->setVertexBuffer(r.materialDataBuffer.get(), 0, 1);
+            encoder->setVertexBuffer(r.instanceDataBuffers[r.currentFrameInFlight].get(), 0, 2);
+            encoder->setVertexBuffer(r.getBuffer(r.currentScene->vertexBuffer).get(), 0, 3);
+
+            for (const auto& [material, draws] : r.instanceBatches) {
+                encoder->setFragmentTexture(
+                    r.getTexture(material->albedoMap ? material->albedoMap->texture : r.defaultAlbedoTexture).get(), 0
+                );
+                for (const auto& draw : draws) {
+                    encoder->setVertexBytes(&draw.instanceIndex, sizeof(Uint32), 4);
+                    encoder->drawIndexedPrimitives(
+                        MTL::PrimitiveTypeTriangle,
+                        draw.mesh->indexCount,
+                        MTL::IndexTypeUInt32,
+                        r.getBuffer(r.currentScene->indexBuffer).get(),
+                        draw.mesh->indexOffset * sizeof(Uint32)
+                    );
+                }
+            }
+            encoder->endEncoding();
+        }
+    }
+};
+
+// PSSM resolve pass (debug): writes the directional shadow factor into a
+// camera-aligned screen-space texture so it can be inspected like RT shadow.
+class PSSMResolvePass : public RenderPass {
+public:
+    explicit PSSMResolvePass(Renderer_Metal* renderer) : RenderPass(renderer) {}
+    auto getName() const -> const char* override { return "PSSMResolvePass"; }
+
+    void execute() override {
+        auto& r = *renderer;
+        if (!r.currentScene || r.currentScene->directionalLights.empty()) return;
+
+        auto drawableSize = r.swapchain->drawableSize();
+        glm::vec2 screenSize = glm::vec2(drawableSize.width, drawableSize.height);
+
+        auto timedDesc = makeTimedComputeDesc(true, true);
+        auto encoder = r.currentCommandBuffer->computeCommandEncoder(timedDesc.get());
+        encoder->setComputePipelineState(r.pssmResolvePipeline.get());
+        encoder->setTexture(r.depthStencilRT.get(), 0);
+        encoder->setTexture(r.pssmShadowMaps.get(), 1);
+        encoder->setTexture(r.pssmShadowScreenRT.get(), 2);
+        encoder->setBuffer(r.cameraDataBuffers[r.currentFrameInFlight].get(), 0, 0);
+        encoder->setBuffer(r.pssmDataBuffers[r.currentFrameInFlight].get(), 0, 1);
+        encoder->setBytes(&screenSize, sizeof(glm::vec2), 2);
+        encoder->dispatchThreadgroups(
+            MTL::Size((uint32_t(screenSize.x) + 7) / 8, (uint32_t(screenSize.y) + 7) / 8, 1),
+            MTL::Size(8, 8, 1)
+        );
+        encoder->endEncoding();
+    }
+};
+
+// Stochastic point shadow pass: MegaLights-style 2-ray shadow for clustered point lights
+class StochasticPointShadowPass : public RenderPass {
+public:
+    explicit StochasticPointShadowPass(Renderer_Metal* renderer) : RenderPass(renderer) {}
+    auto getName() const -> const char* override { return "StochasticPointShadowPass"; }
+
+    void execute() override {
+        auto& r = *renderer;
+        if (!r.m_supportsRaytracing || !r.TLASBuffers[r.currentFrameInFlight]) return;
+
+        auto drawableSize = r.swapchain->drawableSize();
+        glm::vec2 screenSize = glm::vec2(drawableSize.width, drawableSize.height);
+        glm::uvec3 gridDims = glm::uvec3(r.clusterGridSizeX, r.clusterGridSizeY, r.clusterGridSizeZ);
+        uint32_t fi = r.frameNumber;
+
+        auto timedDesc = makeTimedComputeDesc(true, true);
+        auto encoder = r.currentCommandBuffer->computeCommandEncoder(timedDesc.get());
+        encoder->setComputePipelineState(r.stochasticPointShadowPipeline.get());
+        encoder->setTexture(r.depthStencilRT.get(), 0);
+        encoder->setTexture(r.normalRT.get(), 1);
+        encoder->setTexture(r.pointShadowRT.get(), 2);
+        encoder->setBuffer(r.cameraDataBuffers[r.currentFrameInFlight].get(), 0, 0);
+        encoder->setBuffer(r.pointLightBuffer.get(), 0, 1);
+        encoder->setBuffer(r.clusterBuffers[r.currentFrameInFlight].get(), 0, 2);
+        encoder->setBytes(&screenSize, sizeof(glm::vec2), 3);
+        encoder->setBytes(&gridDims, sizeof(glm::uvec3), 4);
+        encoder->setBytes(&fi, sizeof(uint32_t), 5);
+        encoder->setAccelerationStructure(r.TLASBuffers[r.currentFrameInFlight].get(), 6);
+        encoder->setBytes(&r.pointShadowDebugMode, sizeof(uint32_t), 7);
+        encoder->dispatchThreadgroups(
+            MTL::Size((uint32_t(screenSize.x) + 7) / 8, (uint32_t(screenSize.y) + 7) / 8, 1),
+            MTL::Size(8, 8, 1)
+        );
+        encoder->endEncoding();
+    }
+};
+
+// Point shadow temporal pass: motion-vector reprojection + variance clamping denoiser
+class PointShadowTemporalPass : public RenderPass {
+public:
+    explicit PointShadowTemporalPass(Renderer_Metal* renderer) : RenderPass(renderer) {}
+    auto getName() const -> const char* override { return "PointShadowTemporalPass"; }
+
+    void execute() override {
+        auto& r = *renderer;
+        auto drawableSize = r.swapchain->drawableSize();
+
+        auto timedDesc = makeTimedComputeDesc(true, false);
+        auto encoder = r.currentCommandBuffer->computeCommandEncoder(timedDesc.get());
+        encoder->setComputePipelineState(r.pointShadowTemporalPipeline.get());
+        encoder->setTexture(r.pointShadowRT.get(), 0);
+        encoder->setTexture(r.pointShadowHistoryRT.get(), 1);
+        encoder->setTexture(r.velocityRT.get(), 2);
+        encoder->setTexture(r.pointShadowDenoisedRT.get(), 3);
+        encoder->dispatchThreadgroups(
+            MTL::Size((uint32_t(drawableSize.width) + 7) / 8, (uint32_t(drawableSize.height) + 7) / 8, 1),
+            MTL::Size(8, 8, 1)
+        );
+        encoder->endEncoding();
+
+        // Copy denoised result into history for next frame via blit
+        auto blitDesc = makeTimedBlitDesc(false, true);
+        auto blit = NS::TransferPtr(r.currentCommandBuffer->blitCommandEncoder(blitDesc.get()));
+        blit->copyFromTexture(r.pointShadowDenoisedRT.get(), r.pointShadowHistoryRT.get());
+        blit->endEncoding();
     }
 };
 
@@ -275,20 +618,127 @@ public:
     void execute() override {
         auto& r = *renderer;
 
-        auto drawableSize = r.swapchain->drawableSize();
-        glm::vec2 screenSize = glm::vec2(drawableSize.width, drawableSize.height);
+        if (!r.aoEnabled) return;
+
+        // Both raygen kernels share the binding interface (SSAO ignores the TLAS slot)
+        auto* pipeline = (r.aoMethod == 0 && r.raytraceAOPipeline) ? r.raytraceAOPipeline.get() : r.ssaoPipeline.get();
+        if (!pipeline) return;
 
         auto timedComputeDesc = makeTimedComputeDesc(true, true);
         auto encoder = r.currentCommandBuffer->computeCommandEncoder(timedComputeDesc.get());
-        encoder->setComputePipelineState(r.raytraceAOPipeline.get());
+        encoder->setComputePipelineState(pipeline);
         encoder->setTexture(r.depthStencilRT.get(), 0);
         encoder->setTexture(r.normalRT.get(), 1);
-        encoder->setTexture(r.aoRT.get(), 2);
+        encoder->setTexture(r.aoRawRT.get(), 2); // noisy output; temporal + à-trous passes produce aoRT
         encoder->setBuffer(r.frameDataBuffers[r.currentFrameInFlight].get(), 0, 0);
         encoder->setBuffer(r.cameraDataBuffers[r.currentFrameInFlight].get(), 0, 1);
         encoder->setAccelerationStructure(r.TLASBuffers[r.currentFrameInFlight].get(), 2);
-        encoder->dispatchThreadgroups(MTL::Size(screenSize.x, screenSize.y, 1), MTL::Size(1, 1, 1));
+        auto w = r.aoRT->width();
+        auto h = r.aoRT->height();
+        encoder->dispatchThreadgroups(MTL::Size(w, h, 1), MTL::Size(1, 1, 1));
         encoder->endEncoding();
+
+        // Traffic: depth read (4B) + normal read (8B) + AO write (2B) per half-res pixel.
+        // BVH traversal traffic is not estimable here.
+        addTrafficEstimate(uint64_t(w) * h * (4 + 8 + 2));
+    }
+};
+
+// AO temporal accumulation: reprojects last frame's AO with the velocity
+// buffer and blends it with the raygen output (ADR-008 step 2).
+class AOTemporalPass : public RenderPass {
+public:
+    explicit AOTemporalPass(Renderer_Metal* renderer) : RenderPass(renderer) {
+    }
+
+    auto getName() const -> const char* override {
+        return "AOTemporalPass";
+    }
+
+    void execute() override {
+        auto& r = *renderer;
+
+        if (!r.aoTemporalPipeline || !r.aoEnabled) return;
+
+        glm::mat4 curView = r.currentCamera->getViewMatrix();
+        if (!r.prevViewValid) {
+            r.prevView = curView;
+            r.prevViewValid = true;
+        }
+        uint32_t historyValid = r.aoHistoryValid ? 1u : 0u;
+        uint32_t inIdx = r.aoHistoryIndex;
+        uint32_t outIdx = inIdx ^ 1u;
+
+        auto timedComputeDesc = makeTimedComputeDesc(true, true);
+        auto encoder = r.currentCommandBuffer->computeCommandEncoder(timedComputeDesc.get());
+        encoder->setComputePipelineState(r.aoTemporalPipeline.get());
+        encoder->setTexture(r.aoRawRT.get(), 0);
+        encoder->setTexture(r.aoHistoryRT[inIdx].get(), 1);
+        encoder->setTexture(r.aoHistoryRT[outIdx].get(), 2);
+        encoder->setTexture(r.velocityRT.get(), 3);
+        encoder->setTexture(r.depthStencilRT.get(), 4);
+        encoder->setTexture(r.normalRT.get(), 5);
+        encoder->setBuffer(r.cameraDataBuffers[r.currentFrameInFlight].get(), 0, 0);
+        encoder->setBytes(&r.prevView, sizeof(glm::mat4), 1);
+        encoder->setBytes(&historyValid, sizeof(uint32_t), 2);
+        auto w = r.aoRawRT->width();
+        auto h = r.aoRawRT->height();
+        encoder->dispatchThreads(MTL::Size(w, h, 1), MTL::Size(8, 8, 1));
+        encoder->endEncoding();
+
+        // Traffic: raw AO (2B) + history in/out (8B each) + velocity (4B) + depth (4B) + normal (8B)
+        addTrafficEstimate(uint64_t(w) * h * (2 + 8 + 8 + 4 + 4 + 8));
+
+        r.aoHistoryIndex = outIdx;
+        r.aoHistoryValid = true;
+        r.prevView = curView; // setBytes copied the old value into the command stream
+    }
+};
+
+// AO spatial denoise: edge-aware à-trous iterations, history → scratch → aoRT
+// (ADR-008 step 3). aoRT is what the lighting/post passes consume. One serial
+// compute encoder for all iterations: successive dispatches are ordered and
+// their writes visible to each other.
+class AODenoisePass : public RenderPass {
+public:
+    explicit AODenoisePass(Renderer_Metal* renderer) : RenderPass(renderer) {
+    }
+
+    auto getName() const -> const char* override {
+        return "AODenoisePass";
+    }
+
+    void execute() override {
+        auto& r = *renderer;
+
+        if (!r.aoDenoisePipeline || !r.aoEnabled) return;
+
+        auto w = r.aoRT->width();
+        auto h = r.aoRT->height();
+        struct Iteration {
+            MTL::Texture* src;
+            MTL::Texture* dst;
+            uint32_t stride;
+        };
+        const Iteration iterations[] = {
+            { r.aoHistoryRT[r.aoHistoryIndex].get(), r.aoScratchRT.get(), 1u },
+            { r.aoScratchRT.get(), r.aoRT.get(), 2u }, // final target is single-channel; extras dropped here
+        };
+        constexpr size_t iterationCount = sizeof(iterations) / sizeof(iterations[0]);
+        auto timedComputeDesc = makeTimedComputeDesc(true, true);
+        auto encoder = r.currentCommandBuffer->computeCommandEncoder(timedComputeDesc.get());
+        encoder->setComputePipelineState(r.aoDenoisePipeline.get());
+        for (size_t i = 0; i < iterationCount; i++) {
+            encoder->setTexture(iterations[i].src, 0);
+            encoder->setTexture(iterations[i].dst, 1);
+            encoder->setBytes(&iterations[i].stride, sizeof(uint32_t), 0);
+            encoder->dispatchThreads(MTL::Size(w, h, 1), MTL::Size(8, 8, 1));
+        }
+        encoder->endEncoding();
+
+        // Traffic per iteration: 25 src taps (8B) + write (8B),
+        // issued reads — caches make real DRAM traffic much lower
+        addTrafficEstimate(uint64_t(w) * h * (25 * 8 + 8) * iterationCount);
     }
 };
 
@@ -599,8 +1049,12 @@ public:
     void execute() override {
         auto& r = *renderer;
 
-        auto drawableSize = r.swapchain->drawableSize();
-        glm::vec2 screenSize = glm::vec2(drawableSize.width, drawableSize.height);
+        // screenUV in the fragment shader is position / screenSize; position is in
+        // framebuffer pixels, so screenSize must be the framebuffer's size — NOT the
+        // live drawable size, which can drift after a window resize/DPI change and
+        // then mismaps every screen-space texture lookup (shadow, AO, cluster tiles):
+        // with a repeat sampler that shows up as tiled/compressed shadows.
+        glm::vec2 screenSize = glm::vec2(r.colorRT->width(), r.colorRT->height());
         glm::uvec3 gridSize = glm::uvec3(r.clusterGridSizeX, r.clusterGridSizeY, r.clusterGridSizeZ);
         auto time = (float)SDL_GetTicks() / 1000.0f;
 
@@ -640,10 +1094,12 @@ public:
         encoder->setFragmentBytes(&screenSize, sizeof(glm::vec2), 4);
         encoder->setFragmentBytes(&gridSize, sizeof(glm::uvec3), 5);
         encoder->setFragmentBytes(&time, sizeof(float), 6);
-
         encoder->setFragmentBuffer(r.rectLightBuffer.get(), 0, 7);
         uint32_t rectLightCount = static_cast<uint32_t>(r.currentScene->rectLights.size());
         encoder->setFragmentBytes(&rectLightCount, sizeof(uint32_t), 8);
+        encoder->setFragmentBuffer(r.pssmDataBuffers[r.currentFrameInFlight].get(), 0, 9);
+        // Denoised AO attenuates the IBL/ambient term; white = AO off
+        encoder->setFragmentTexture(r.aoEnabled ? r.aoRT.get() : r.batch2DWhiteTexture.get(), 6);
         auto* vidTex = r.rectLightVideoTexture
                            ? r.rectLightVideoTexture.get()
                            : r.getTexture(r.defaultAlbedoTexture).get();
@@ -679,6 +1135,10 @@ public:
             encoder->setFragmentTexture(r.irradianceMap.get(), 8);
             encoder->setFragmentTexture(r.prefilterMap.get(), 9);
             encoder->setFragmentTexture(r.brdfLUT.get(), 10);
+
+            // PSSM shadow maps (data buffer bound once before this loop, at buffer 9)
+            encoder->setFragmentTexture(r.pssmShadowMaps.get(), 12);
+            encoder->setFragmentTexture(r.pointShadowDenoisedRT.get(), 13);
 
             for (const auto& draw : draws) {
                 if (!r.currentCamera->isVisible(r.instances[draw.instanceIndex].boundingSphere)) {
@@ -2264,9 +2724,16 @@ auto Renderer_Metal::init(SDL_Window* window) -> void {
     if (m_supportsRaytracing) graph.addPass(std::make_unique<TLASBuildPass>(this));
     graph.addPass(std::make_unique<PrePass>(this));
     graph.addPass(std::make_unique<NormalResolvePass>(this));
+    graph.addPass(std::make_unique<VelocityPass>(this));
     graph.addPass(std::make_unique<TileCullingPass>(this));
+    graph.addPass(std::make_unique<PSSMShadowPass>(this));
+    graph.addPass(std::make_unique<PSSMResolvePass>(this));
     if (m_supportsRaytracing) graph.addPass(std::make_unique<RaytraceShadowPass>(this));
     if (m_supportsRaytracing) graph.addPass(std::make_unique<RaytraceAOPass>(this));
+    if (m_supportsRaytracing) graph.addPass(std::make_unique<AOTemporalPass>(this));
+    if (m_supportsRaytracing) graph.addPass(std::make_unique<AODenoisePass>(this));
+    if (m_supportsRaytracing) graph.addPass(std::make_unique<StochasticPointShadowPass>(this));
+    if (m_supportsRaytracing) graph.addPass(std::make_unique<PointShadowTemporalPass>(this));
     graph.addPass(std::make_unique<MainRenderPass>(this));
     graph.addPass(std::make_unique<VoxelRaymarchPass>(this));// Before sky: voxels write depth so the sky's equal-test skips them
     graph.addPass(std::make_unique<SkyAtmospherePass>(this));
@@ -2431,8 +2898,56 @@ auto Renderer_Metal::createResources() -> void {
     cullLightsPipeline = createComputePipeline("shaders/3d_light_cull.metal");
     tileCullingPipeline = createComputePipeline("shaders/3d_tile_light_cull.metal");
     normalResolvePipeline = createComputePipeline("shaders/3d_normal_resolve.metal");
+    velocityPipeline = createComputePipeline("shaders/3d_velocity.metal");
     if (m_supportsRaytracing) raytraceShadowPipeline = createComputePipeline("shaders/3d_raytrace_shadow.metal");
-    if (m_supportsRaytracing) raytraceAOPipeline = createComputePipeline("shaders/3d_ssao.metal");
+    // AO raygen: 3d_ssao.metal (screen-space) and 3d_raytrace_ao.metal (ray-traced)
+    // are drop-in interchangeable here; both feed the temporal + à-trous chain.
+    // RT AO: 2 cosine-weighted any-hit rays/px, 1.5m cap (the visibility knob —
+    // open areas correctly read as unoccluded; corners/contact darken).
+    if (m_supportsRaytracing) raytraceAOPipeline = createComputePipeline("shaders/3d_raytrace_ao.metal");
+    if (m_supportsRaytracing) ssaoPipeline = createComputePipeline("shaders/3d_ssao.metal");
+    if (m_supportsRaytracing) aoTemporalPipeline = createComputePipeline("shaders/3d_ao_temporal.metal");
+    if (m_supportsRaytracing) aoDenoisePipeline = createComputePipeline("shaders/3d_ao_denoise.metal");
+    if (m_supportsRaytracing) stochasticPointShadowPipeline = createComputePipeline("shaders/3d_stochastic_point_shadow.metal");
+    pointShadowTemporalPipeline = createComputePipeline("shaders/3d_point_shadow_temporal.metal");
+    pssmResolvePipeline = createComputePipeline("shaders/3d_pssm_resolve.metal");
+
+    // PSSM depth-only pipeline
+    {
+        auto shaderSrc = readFile("shaders/3d_pssm_shadow_depth.metal");
+        auto code = NS::String::string(shaderSrc.data(), NS::StringEncoding::UTF8StringEncoding);
+        NS::Error* error = nullptr;
+        MTL::Library* library = device->newLibrary(code, nullptr, &error);
+        if (!library) {
+            fmt::print("Warning: Could not compile PSSM shadow shader: {}\n",
+                       error ? error->localizedDescription()->utf8String() : "unknown");
+        } else {
+            auto vFn = library->newFunction(NS::String::string("vertexMain", NS::StringEncoding::UTF8StringEncoding));
+            auto fFn = library->newFunction(NS::String::string("fragmentMain", NS::StringEncoding::UTF8StringEncoding));
+
+            auto desc = NS::TransferPtr(MTL::RenderPipelineDescriptor::alloc()->init());
+            desc->setVertexFunction(vFn);
+            desc->setFragmentFunction(fFn);
+            desc->setDepthAttachmentPixelFormat(MTL::PixelFormatDepth32Float);
+            // No colour attachments — depth only
+
+            pssmShadowPipeline = NS::TransferPtr(device->newRenderPipelineState(desc.get(), &error));
+            if (!pssmShadowPipeline) {
+                fmt::print("Warning: Could not create PSSM shadow pipeline: {}\n",
+                           error ? error->localizedDescription()->utf8String() : "unknown");
+            }
+            vFn->release();
+            fFn->release();
+            library->release();
+        }
+
+        // Depth stencil state for PSSM shadow pass
+        MTL::DepthStencilDescriptor* dsDesc = MTL::DepthStencilDescriptor::alloc()->init();
+        dsDesc->setDepthCompareFunction(MTL::CompareFunctionLessEqual);
+        dsDesc->setDepthWriteEnabled(true);
+        pssmDepthStencilState = NS::TransferPtr(device->newDepthStencilState(dsDesc));
+        dsDesc->release();
+    }
     atmospherePipeline =
         createPipeline("shaders/3d_atmosphere.metal", true, false, 1);// No MSAA for sky (full-screen triangle)
     skyCapturePipeline = createPipeline("shaders/3d_sky_capture.metal", true, true, 1);
@@ -2950,26 +3465,174 @@ auto Renderer_Metal::createResources() -> void {
     normalRT = NS::TransferPtr(device->newTexture(normalTextureDesc));
     normalTextureDesc->release();
 
+    // Half resolution: 4x fewer (miss-dominated, expensive) shadow rays; consumers
+    // sample at screen UVs with a bilinear sampler, which upsamples for free and
+    // softens the 1-ray hard edges by ~2px. The kernel is resolution-agnostic, so
+    // switching back to full res is just this size change.
     MTL::TextureDescriptor* shadowTextureDesc = MTL::TextureDescriptor::alloc()->init();
     shadowTextureDesc->setTextureType(MTL::TextureType2D);
     shadowTextureDesc->setPixelFormat(MTL::PixelFormatRGBA8Unorm);
-    shadowTextureDesc->setWidth(swapchain->drawableSize().width);
-    shadowTextureDesc->setHeight(swapchain->drawableSize().height);
+    shadowTextureDesc->setWidth((swapchain->drawableSize().width + 1) / 2);
+    shadowTextureDesc->setHeight((swapchain->drawableSize().height + 1) / 2);
     shadowTextureDesc->setMipmapLevelCount(
-        calculateMipmapLevelCount(swapchain->drawableSize().width, swapchain->drawableSize().height)
+        calculateMipmapLevelCount((swapchain->drawableSize().width + 1) / 2, (swapchain->drawableSize().height + 1) / 2)
     );
     shadowTextureDesc->setUsage(MTL::TextureUsageShaderRead | MTL::TextureUsageShaderWrite);
     shadowRT = NS::TransferPtr(device->newTexture(shadowTextureDesc));
+    shadowRTGrayView = NS::TransferPtr(shadowRT->newTextureView(
+        MTL::PixelFormatRGBA8Unorm,
+        MTL::TextureType2D,
+        NS::Range::Make(0, 1),
+        NS::Range::Make(0, 1),
+        MTL::TextureSwizzleChannels::Make(
+            MTL::TextureSwizzleRed, MTL::TextureSwizzleRed, MTL::TextureSwizzleRed, MTL::TextureSwizzleOne
+        )
+    ));
     shadowTextureDesc->release();
 
+    // PSSM shadow maps: 2D texture array, 3 cascades × 4096×4096 Depth32
+    {
+        MTL::TextureDescriptor* pssmDesc = MTL::TextureDescriptor::alloc()->init();
+        pssmDesc->setTextureType(MTL::TextureType2DArray);
+        pssmDesc->setPixelFormat(MTL::PixelFormatDepth32Float);
+        pssmDesc->setWidth(PSSM_SHADOW_MAP_SIZE);
+        pssmDesc->setHeight(PSSM_SHADOW_MAP_SIZE);
+        pssmDesc->setArrayLength(PSSM_CASCADE_COUNT);
+        pssmDesc->setMipmapLevelCount(1);
+        pssmDesc->setUsage(MTL::TextureUsageRenderTarget | MTL::TextureUsageShaderRead);
+        pssmShadowMaps = NS::TransferPtr(device->newTexture(pssmDesc));
+        pssmDesc->release();
+
+        // Per-slice texture2d views for ImGui display (depth2d_array can't be shown directly)
+        for (uint32_t i = 0; i < PSSM_CASCADE_COUNT; i++) {
+            pssmShadowMapViews[i] = NS::TransferPtr(
+                pssmShadowMaps->newTextureView(
+                    MTL::PixelFormatDepth32Float,
+                    MTL::TextureType2D,
+                    NS::Range::Make(0, 1),
+                    NS::Range::Make(i, 1)
+                )
+            );
+        }
+
+        // Triple-buffered uniform buffers for PSSM data
+        constexpr size_t pssmDataSize = sizeof(glm::mat4) * 3 + sizeof(glm::vec4) + sizeof(float) * 4;
+        pssmDataBuffers.resize(MAX_FRAMES_IN_FLIGHT);
+        for (auto& buf : pssmDataBuffers) {
+            buf = NS::TransferPtr(device->newBuffer(pssmDataSize, MTL::ResourceStorageModeShared));
+        }
+    }
+
+    // Stochastic point shadow RTs: R16F (raw + denoised + history)
+    {
+        auto* desc = MTL::TextureDescriptor::alloc()->init();
+        desc->setTextureType(MTL::TextureType2D);
+        desc->setPixelFormat(MTL::PixelFormatR16Float);
+        desc->setWidth(swapchain->drawableSize().width);
+        desc->setHeight(swapchain->drawableSize().height);
+        desc->setUsage(MTL::TextureUsageShaderRead | MTL::TextureUsageShaderWrite);
+        pointShadowRT         = NS::TransferPtr(device->newTexture(desc));
+        pointShadowDenoisedRT = NS::TransferPtr(device->newTexture(desc));
+        pointShadowHistoryRT  = NS::TransferPtr(device->newTexture(desc));
+        desc->release();
+
+        // Grayscale swizzle views for the ImGui previews (raw R16F renders red)
+        auto grayView = [](MTL::Texture* tex) {
+            return NS::TransferPtr(tex->newTextureView(
+                MTL::PixelFormatR16Float,
+                MTL::TextureType2D,
+                NS::Range::Make(0, 1),
+                NS::Range::Make(0, 1),
+                MTL::TextureSwizzleChannels::Make(
+                    MTL::TextureSwizzleRed, MTL::TextureSwizzleRed, MTL::TextureSwizzleRed, MTL::TextureSwizzleOne
+                )
+            ));
+        };
+        pointShadowRTGrayView         = grayView(pointShadowRT.get());
+        pointShadowDenoisedRTGrayView = grayView(pointShadowDenoisedRT.get());
+
+        // Initialize all three to 1.0 (fully lit). Prevents garbage in the first
+        // frame's temporal history, and keeps point lights unshadowed when
+        // raytracing is unsupported (the passes never write these textures).
+        {
+            const uint32_t texW = pointShadowRT->width();
+            const uint32_t texH = pointShadowRT->height();
+            std::vector<uint16_t> ones(size_t(texW) * texH, 0x3C00); // 1.0 in half-float
+            for (auto* tex : { pointShadowRT.get(), pointShadowDenoisedRT.get(), pointShadowHistoryRT.get() }) {
+                tex->replaceRegion(MTL::Region::Make2D(0, 0, texW, texH), 0, ones.data(), texW * sizeof(uint16_t));
+            }
+        }
+    }
+
+    // Screen-space resolved PSSM shadow (camera-aligned, debug display)
+    {
+        auto* desc = MTL::TextureDescriptor::alloc()->init();
+        desc->setTextureType(MTL::TextureType2D);
+        desc->setPixelFormat(MTL::PixelFormatR8Unorm);
+        desc->setWidth(swapchain->drawableSize().width);
+        desc->setHeight(swapchain->drawableSize().height);
+        desc->setUsage(MTL::TextureUsageShaderRead | MTL::TextureUsageShaderWrite);
+        pssmShadowScreenRT = NS::TransferPtr(device->newTexture(desc));
+        desc->release();
+
+        pssmShadowScreenRTGrayView = NS::TransferPtr(pssmShadowScreenRT->newTextureView(
+            MTL::PixelFormatR8Unorm,
+            MTL::TextureType2D,
+            NS::Range::Make(0, 1),
+            NS::Range::Make(0, 1),
+            MTL::TextureSwizzleChannels::Make(
+                MTL::TextureSwizzleRed, MTL::TextureSwizzleRed, MTL::TextureSwizzleRed, MTL::TextureSwizzleOne
+            )
+        ));
+    }
+
+    // Half resolution: the AO chain kernels are resolution-agnostic and consumers
+    // sample aoRT bilinearly at screen UVs, so this size is the only change needed
     MTL::TextureDescriptor* aoTextureDesc = MTL::TextureDescriptor::alloc()->init();
     aoTextureDesc->setTextureType(MTL::TextureType2D);
     aoTextureDesc->setPixelFormat(MTL::PixelFormatR16Float);
-    aoTextureDesc->setWidth(swapchain->drawableSize().width);
-    aoTextureDesc->setHeight(swapchain->drawableSize().height);
+    aoTextureDesc->setWidth((swapchain->drawableSize().width + 1) / 2);
+    aoTextureDesc->setHeight((swapchain->drawableSize().height + 1) / 2);
     aoTextureDesc->setUsage(MTL::TextureUsageShaderRead | MTL::TextureUsageShaderWrite);
     aoRT = NS::TransferPtr(device->newTexture(aoTextureDesc));
     aoTextureDesc->release();
+
+    MTL::TextureDescriptor* velocityTextureDesc = MTL::TextureDescriptor::alloc()->init();
+    velocityTextureDesc->setTextureType(MTL::TextureType2D);
+    velocityTextureDesc->setPixelFormat(MTL::PixelFormatRG16Float);
+    velocityTextureDesc->setWidth(swapchain->drawableSize().width);
+    velocityTextureDesc->setHeight(swapchain->drawableSize().height);
+    velocityTextureDesc->setUsage(MTL::TextureUsageShaderRead | MTL::TextureUsageShaderWrite);
+    velocityRT = NS::TransferPtr(device->newTexture(velocityTextureDesc));
+    velocityTextureDesc->release();
+
+    // AO denoise chain targets (raygen → temporal history ping-pong → à-trous scratch).
+    // Full resolution; the kernels are resolution-agnostic, so half-res later is
+    // purely a size change here (ADR-008).
+    MTL::TextureDescriptor* aoChainDesc = MTL::TextureDescriptor::alloc()->init();
+    aoChainDesc->setTextureType(MTL::TextureType2D);
+    aoChainDesc->setWidth((swapchain->drawableSize().width + 1) / 2);
+    aoChainDesc->setHeight((swapchain->drawableSize().height + 1) / 2);
+    aoChainDesc->setUsage(MTL::TextureUsageShaderRead | MTL::TextureUsageShaderWrite);
+    aoChainDesc->setPixelFormat(MTL::PixelFormatR16Float);
+    aoRawRT = NS::TransferPtr(device->newTexture(aoChainDesc));
+    // RGBA16F: (ao, view-space depth, octahedral normal) — see 3d_ao_temporal.metal
+    aoChainDesc->setPixelFormat(MTL::PixelFormatRGBA16Float);
+    aoHistoryRT[0] = NS::TransferPtr(device->newTexture(aoChainDesc));
+    aoHistoryRT[1] = NS::TransferPtr(device->newTexture(aoChainDesc));
+    aoScratchRT = NS::TransferPtr(device->newTexture(aoChainDesc));
+    aoChainDesc->release();
+
+    // Grayscale swizzle view of the single-channel AO target for the ImGui preview
+    aoRTGrayView = NS::TransferPtr(aoRT->newTextureView(
+        MTL::PixelFormatR16Float,
+        MTL::TextureType2D,
+        NS::Range::Make(0, 1),
+        NS::Range::Make(0, 1),
+        MTL::TextureSwizzleChannels::Make(
+            MTL::TextureSwizzleRed, MTL::TextureSwizzleRed, MTL::TextureSwizzleRed, MTL::TextureSwizzleOne
+        )
+    ));
 
     // Create light scattering render target (HDR format for god rays)
     MTL::TextureDescriptor* lightScatteringTextureDesc = MTL::TextureDescriptor::alloc()->init();
@@ -4526,33 +5189,69 @@ auto Renderer_Metal::draw(std::shared_ptr<Scene> scene, Camera& camera) -> void 
 
         ImGui::Separator();
 
+        // Aspect-correct preview sized for actually diagnosing content issues
+        auto rtPreview = [](const char* label, MTL::Texture* tex) {
+            if (!tex) return;
+            if (ImGui::TreeNode(label)) {
+                float aspect = tex->height() > 0 ? float(tex->width()) / float(tex->height()) : 1.0f;
+                ImGui::Text("%llu x %llu", (unsigned long long)tex->width(), (unsigned long long)tex->height());
+                ImGui::Image((ImTextureID)(intptr_t)tex, ImVec2(320, 320 / aspect));
+                ImGui::TreePop();
+            }
+        };
+
         if (ImGui::TreeNode("RTs")) {
             ImGui::Separator();
-            if (ImGui::TreeNode(fmt::format("Scene Color RT").c_str())) {
-                ImGui::Image((ImTextureID)(intptr_t)colorRT.get(), ImVec2(64, 64));
-                ImGui::TreePop();
+            rtPreview("Scene Color RT", colorRT.get());
+            rtPreview("Scene Depth RT", depthStencilRT.get());
+            // Shadow results consumed by the PBR shader (all screen-space)
+            rtPreview("Raytraced Shadow", shadowRTGrayView.get());
+            rtPreview("Point Shadow", pointShadowDenoisedRTGrayView.get());
+            rtPreview("PSSM Shadow", pssmShadowScreenRTGrayView.get());
+            rtPreview("Raytraced AO", aoRTGrayView.get()); // grayscale swizzle view (raw R16F renders red)
+            rtPreview("Scene Normal RT", normalRT.get());
+            rtPreview("Velocity RT", velocityRT.get());
+            rtPreview("Light Scattering RT", lightScatteringRT.get());
+            ImGui::TreePop();
+        }
+
+        if (ImGui::TreeNode("Shadow Debug")) {
+            ImGui::Separator();
+
+            // --- Light gathering status (answers: did lights reach the renderer?) ---
+            ImGui::Text("Scene lights:  dir %zu | point %zu | rect %zu",
+                scene->directionalLights.size(), scene->pointLights.size(), scene->rectLights.size());
+            ImGui::Text("Raytracing: %s | TLAS: %s",
+                m_supportsRaytracing ? "supported" : "OFF",
+                (m_supportsRaytracing && TLASBuffers[currentFrameInFlight]) ? "built" : "null");
+            ImGui::Text("Frame: %u", frameNumber);
+
+            // --- PSSM cascade splits (read back from shared GPU buffer) ---
+            if (pssmDataBuffers[currentFrameInFlight]) {
+                const auto* pssmGPU = reinterpret_cast<const uint8_t*>(pssmDataBuffers[currentFrameInFlight]->contents());
+                glm::vec4 splits;
+                memcpy(&splits, pssmGPU + sizeof(glm::mat4) * 3, sizeof(glm::vec4));
+                ImGui::Text("Cascade splits (view depth): RT<%.1f | C1<%.1f | C2<%.1f | C3<%.1f",
+                    splits.x, splits.y, splits.z, splits.w);
             }
-            if (ImGui::TreeNode(fmt::format("Scene Depth RT").c_str())) {
-                ImGui::Image((ImTextureID)(intptr_t)depthStencilRT.get(), ImVec2(64, 64));
-                ImGui::TreePop();
+            ImGui::SliderFloat("RT shadow max dist", &pssmRTMaxDist, 5.0f, 200.0f);
+
+            // --- Stochastic point shadow debug mode ---
+            const char* psDebugModes[] = { "Visibility (normal)", "Tile light-count heatmap" };
+            int psMode = static_cast<int>(pointShadowDebugMode);
+            if (ImGui::Combo("Point shadow view", &psMode, psDebugModes, 2)) {
+                pointShadowDebugMode = static_cast<uint32_t>(psMode);
             }
-            if (ImGui::TreeNode(fmt::format("Raytraced Shadow").c_str())) {
-                ImGui::Image((ImTextureID)(intptr_t)shadowRT.get(), ImVec2(64, 64));
-                ImGui::TreePop();
+            if (pointShadowDebugMode == 1) {
+                ImGui::TextWrapped("Heatmap: black = tile has 0 lights (culling problem if lights exist), brighter = more lights (8+ = white). Shown in 'Point Shadow (raw / heatmap)' below.");
             }
-            if (ImGui::TreeNode(fmt::format("Raytraced AO").c_str())) {
-                ImGui::Image((ImTextureID)(intptr_t)aoRT.get(), ImVec2(64, 64));
-                ImGui::TreePop();
-            }
-            if (ImGui::TreeNode(fmt::format("Scene Normal RT").c_str())) {
-                ImGui::Image((ImTextureID)(intptr_t)normalRT.get(), ImVec2(64, 64));
-                ImGui::TreePop();
-            }
-            if (lightScatteringRT) {
-                if (ImGui::TreeNode(fmt::format("Light Scattering RT").c_str())) {
-                    ImGui::Image((ImTextureID)(intptr_t)lightScatteringRT.get(), ImVec2(64, 64));
-                    ImGui::TreePop();
-                }
+
+            // --- Intermediate shadow textures ---
+            // Raw = pre-temporal (also shows the tile heatmap in debug mode)
+            rtPreview("Point Shadow (raw / heatmap)", pointShadowRTGrayView.get());
+            // Light-space cascade depth maps
+            for (uint32_t i = 0; i < PSSM_CASCADE_COUNT; i++) {
+                rtPreview(fmt::format("PSSM Cascade {} (light-space depth)", i + 1).c_str(), pssmShadowMapViews[i].get());
             }
             ImGui::TreePop();
         }
@@ -4842,6 +5541,16 @@ auto Renderer_Metal::draw(std::shared_ptr<Scene> scene, Camera& camera) -> void 
             ImGui::TreePop();
         }
 
+        if (ImGui::TreeNode("Ambient Occlusion")) {
+            ImGui::Separator();
+            ImGui::Checkbox("Enabled", &aoEnabled);
+            if (aoEnabled) {
+                ImGui::Combo("Method", &aoMethod, "Ray Traced\0Screen Space\0");
+            }
+            ImGui::TextDisabled("Attenuates IBL/ambient only; both methods share the denoise chain");
+            ImGui::TreePop();
+        }
+
         if (ImGui::TreeNode("Light Scattering (God Rays)")) {
             ImGui::Separator();
             ImGui::Checkbox("Enabled", &lightScatteringEnabled);
@@ -5113,11 +5822,12 @@ auto Renderer_Metal::draw(std::shared_ptr<Scene> scene, Camera& camera) -> void 
                 ImGui::Text("Total GPU: %.3f ms", totalMs);
                 ImGui::Separator();
                 if (ImGui::BeginTable(
-                        "##gpu_pass_timings", 3,
+                        "##gpu_pass_timings", 4,
                         ImGuiTableFlags_Borders | ImGuiTableFlags_RowBg | ImGuiTableFlags_SizingFixedFit
                     )) {
                     ImGui::TableSetupColumn("Pass", ImGuiTableColumnFlags_WidthStretch);
                     ImGui::TableSetupColumn("ms", ImGuiTableColumnFlags_WidthFixed, 60.0f);
+                    ImGui::TableSetupColumn("~GB/s", ImGuiTableColumnFlags_WidthFixed, 55.0f);
                     ImGui::TableSetupColumn("", ImGuiTableColumnFlags_WidthStretch);
                     ImGui::TableHeadersRow();
                     for (auto& t : gpuPassTimings) {
@@ -5127,6 +5837,21 @@ auto Renderer_Metal::draw(std::shared_ptr<Scene> scene, Camera& camera) -> void 
                         ImGui::TableSetColumnIndex(1);
                         ImGui::Text("%.3f", t.gpuTimeMs);
                         ImGui::TableSetColumnIndex(2);
+                        // Effective bandwidth = estimated minimum traffic / measured time.
+                        // Compare against the device's peak; a pass near peak is bandwidth-bound.
+                        // Hide when the measured time is too small to divide meaningfully or
+                        // the result exceeds any plausible device bandwidth (bad timestamp).
+                        double gbps = (t.estimatedBytes > 0 && t.gpuTimeMs > 0.005)
+                            ? static_cast<double>(t.estimatedBytes) / (t.gpuTimeMs * 1e6) : 0.0;
+                        if (gbps > 0.0 && gbps < 2000.0) {
+                            ImGui::Text("%.0f", gbps);
+                            if (ImGui::IsItemHovered()) {
+                                ImGui::SetTooltip("~%.1f MB attachment/reported traffic", t.estimatedBytes / 1e6);
+                            }
+                        } else {
+                            ImGui::TextDisabled("-");
+                        }
+                        ImGui::TableSetColumnIndex(3);
                         ImGui::ProgressBar(
                             static_cast<float>(t.gpuTimeMs / maxMs), ImVec2(-1.0f, 0.0f), ""
                         );
@@ -5212,11 +5937,30 @@ auto Renderer_Metal::draw(std::shared_ptr<Scene> scene, Camera& camera) -> void 
             std::lock_guard<std::mutex> lock(gpuTimingMutex);
             gpuPassTimings.clear();
             gpuPassTimings.reserve(capturedInfo.size());
-            for (auto& info : capturedInfo) {
+            for (size_t i = 0; i < capturedInfo.size(); i++) {
+                auto& info = capturedInfo[i];
                 uint64_t begin = timestamps[info.beginIdx].timestamp;
                 uint64_t end   = timestamps[info.endIdx].timestamp;
-                double ms = (end >= begin) ? static_cast<double>(end - begin) / 1e6 : 0.0;
-                gpuPassTimings.push_back({info.name, ms});
+                // 0 or MTLCounterErrorValue (~0) means the GPU never wrote the sample —
+                // typically an encoder type that doesn't support stage-boundary sampling.
+                // Without this check, an unwritten begin slot makes the delta look like a
+                // raw absolute timestamp (nanosecond-scale garbage in the panel).
+                bool beginValid = begin != 0 && begin != ~0ull;
+                bool endValid   = end != 0 && end != ~0ull;
+                double ms = (beginValid && endValid && end >= begin)
+                    ? static_cast<double>(end - begin) / 1e6 : 0.0;
+                if (!endValid) {
+                    // The pass that failed to write is THIS one (its end slot is empty);
+                    // log once per pass name so the culprit encoder is identifiable.
+                    static std::mutex logMutex;
+                    static std::set<std::string> reported;
+                    std::lock_guard<std::mutex> logLock(logMutex);
+                    if (reported.insert(info.name).second) {
+                        fmt::print("[gpu-timing] pass '{}' did not write its end timestamp (slot {})\n",
+                                   info.name, static_cast<uint64_t>(info.endIdx));
+                    }
+                }
+                gpuPassTimings.push_back({info.name, ms, info.estimatedBytes});
             }
         });
     }
@@ -5646,6 +6390,16 @@ void Renderer_Metal::renderToTexture(
     encoder->setFragmentBytes(&screenSize, sizeof(glm::vec2), 4);
     encoder->setFragmentBytes(&gridSize, sizeof(glm::uvec3), 5);
     encoder->setFragmentBytes(&time, sizeof(float), 6);
+    encoder->setFragmentBuffer(rectLightBuffer.get(), 0, 7);
+    uint32_t rtRectLightCount = static_cast<uint32_t>(scene->rectLights.size());
+    encoder->setFragmentBytes(&rtRectLightCount, sizeof(uint32_t), 8);
+    encoder->setFragmentBuffer(pssmDataBuffers[currentFrameInFlight].get(), 0, 9);
+    // Main-view AO is the wrong view for a render texture, but the shader
+    // requires the binding; misaligned ambient attenuation is acceptable here
+    encoder->setFragmentTexture(aoEnabled ? aoRT.get() : batch2DWhiteTexture.get(), 6);
+    encoder->setFragmentTexture(
+        rectLightVideoTexture ? rectLightVideoTexture.get() : getTexture(defaultAlbedoTexture).get(), 11
+    );
 
     // Render using instance batches (same as MainRenderPass)
     for (const auto& [material, meshes] : instanceBatches) {
@@ -5674,6 +6428,10 @@ void Renderer_Metal::renderToTexture(
         encoder->setFragmentTexture(irradianceMap.get(), 8);
         encoder->setFragmentTexture(prefilterMap.get(), 9);
         encoder->setFragmentTexture(brdfLUT.get(), 10);
+
+        // PSSM shadow maps (data buffer bound once before this loop, at buffer 9)
+        encoder->setFragmentTexture(pssmShadowMaps.get(), 12);
+        encoder->setFragmentTexture(pointShadowDenoisedRT.get(), 13);
 
         for (const auto& draw : meshes) {
             // Frustum culling with render texture camera
@@ -6564,6 +7322,8 @@ extern "C" auto getMetalDevice(void* renderer) -> void* {
     }
     return nullptr;
 }
+
+
 void Renderer_Metal::draw(entt::registry& registry, std::shared_ptr<Scene> scene, Camera& camera) {
     // Build ECS instance data; draw(scene, camera) will clear instances/instanceBatches from Nodes,
     // so store them here and inject after Node traversal via pendingEcsInstances.
@@ -6613,12 +7373,21 @@ void Renderer_Metal::draw(entt::registry& registry, std::shared_ptr<Scene> scene
             }
 
             if (m_supportsRaytracing) {
-                MTL::AccelerationStructureInstanceDescriptor accelDesc;
+                // Zero-initialize: options and intersectionFunctionTableOffset were
+                // previously stack garbage. Garbage options bits (e.g. NonOpaque,
+                // winding/culling flags) make rays miss or misclassify whole
+                // instances — visible as shadows losing coverage with bright bands —
+                // and nondeterministically, since stack contents change run to run.
+                // Garbage bytes also destabilized the change-detection memcmp that
+                // drives the TLAS rebuild/skip logic.
+                MTL::AccelerationStructureInstanceDescriptor accelDesc{};
                 for (int i = 0; i < 4; ++i)
                     for (int j = 0; j < 3; ++j)
                         accelDesc.transformationMatrix.columns[i][j] = worldMat[i][j];
                 accelDesc.accelerationStructureIndex = mesh->instanceID;
                 accelDesc.mask = 0xFF;
+                accelDesc.options = MTL::AccelerationStructureInstanceOptionOpaque;
+                accelDesc.intersectionFunctionTableOffset = 0;
                 pendingEcsAccelInstances.push_back(accelDesc);
             }
         }
