@@ -23,6 +23,7 @@ using namespace Vapor;
 #include <cstdlib>
 #include <ctime>
 #include <functional>
+#include <set>
 #include <glm/ext/matrix_clip_space.hpp>
 #include <glm/ext/matrix_transform.hpp>
 #include <imgui.h>
@@ -4961,8 +4962,12 @@ auto Renderer_Metal::draw(std::shared_ptr<Scene> scene, Camera& camera) -> void 
                         ImGui::TableSetColumnIndex(2);
                         // Effective bandwidth = estimated minimum traffic / measured time.
                         // Compare against the device's peak; a pass near peak is bandwidth-bound.
-                        if (t.estimatedBytes > 0 && t.gpuTimeMs > 0.0) {
-                            ImGui::Text("%.0f", static_cast<double>(t.estimatedBytes) / (t.gpuTimeMs * 1e6));
+                        // Hide when the measured time is too small to divide meaningfully or
+                        // the result exceeds any plausible device bandwidth (bad timestamp).
+                        double gbps = (t.estimatedBytes > 0 && t.gpuTimeMs > 0.005)
+                            ? static_cast<double>(t.estimatedBytes) / (t.gpuTimeMs * 1e6) : 0.0;
+                        if (gbps > 0.0 && gbps < 2000.0) {
+                            ImGui::Text("%.0f", gbps);
                             if (ImGui::IsItemHovered()) {
                                 ImGui::SetTooltip("~%.1f MB attachment/reported traffic", t.estimatedBytes / 1e6);
                             }
@@ -5055,10 +5060,29 @@ auto Renderer_Metal::draw(std::shared_ptr<Scene> scene, Camera& camera) -> void 
             std::lock_guard<std::mutex> lock(gpuTimingMutex);
             gpuPassTimings.clear();
             gpuPassTimings.reserve(capturedInfo.size());
-            for (auto& info : capturedInfo) {
+            for (size_t i = 0; i < capturedInfo.size(); i++) {
+                auto& info = capturedInfo[i];
                 uint64_t begin = timestamps[info.beginIdx].timestamp;
                 uint64_t end   = timestamps[info.endIdx].timestamp;
-                double ms = (end >= begin) ? static_cast<double>(end - begin) / 1e6 : 0.0;
+                // 0 or MTLCounterErrorValue (~0) means the GPU never wrote the sample —
+                // typically an encoder type that doesn't support stage-boundary sampling.
+                // Without this check, an unwritten begin slot makes the delta look like a
+                // raw absolute timestamp (nanosecond-scale garbage in the panel).
+                bool beginValid = begin != 0 && begin != ~0ull;
+                bool endValid   = end != 0 && end != ~0ull;
+                double ms = (beginValid && endValid && end >= begin)
+                    ? static_cast<double>(end - begin) / 1e6 : 0.0;
+                if (!endValid) {
+                    // The pass that failed to write is THIS one (its end slot is empty);
+                    // log once per pass name so the culprit encoder is identifiable.
+                    static std::mutex logMutex;
+                    static std::set<std::string> reported;
+                    std::lock_guard<std::mutex> logLock(logMutex);
+                    if (reported.insert(info.name).second) {
+                        fmt::print("[gpu-timing] pass '{}' did not write its end timestamp (slot {})\n",
+                                   info.name, static_cast<uint64_t>(info.endIdx));
+                    }
+                }
                 gpuPassTimings.push_back({info.name, ms, info.estimatedBytes});
             }
         });
