@@ -6511,12 +6511,21 @@ void Renderer_Metal::draw(entt::registry& registry, std::shared_ptr<Scene> scene
             }
 
             if (m_supportsRaytracing) {
-                MTL::AccelerationStructureInstanceDescriptor accelDesc;
+                // Zero-initialize: options and intersectionFunctionTableOffset were
+                // previously stack garbage. Garbage options bits (e.g. NonOpaque,
+                // winding/culling flags) make rays miss or misclassify whole
+                // instances — visible as shadows losing coverage with bright bands —
+                // and nondeterministically, since stack contents change run to run.
+                // Garbage bytes also destabilized the change-detection memcmp that
+                // drives the TLAS rebuild/skip logic.
+                MTL::AccelerationStructureInstanceDescriptor accelDesc{};
                 for (int i = 0; i < 4; ++i)
                     for (int j = 0; j < 3; ++j)
                         accelDesc.transformationMatrix.columns[i][j] = worldMat[i][j];
                 accelDesc.accelerationStructureIndex = mesh->instanceID;
                 accelDesc.mask = 0xFF;
+                accelDesc.options = MTL::AccelerationStructureInstanceOptionOpaque;
+                accelDesc.intersectionFunctionTableOffset = 0;
                 pendingEcsAccelInstances.push_back(accelDesc);
             }
         }
