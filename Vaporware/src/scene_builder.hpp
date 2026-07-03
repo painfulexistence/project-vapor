@@ -136,8 +136,8 @@ inline SceneResources buildScene(
             0.3f + 0.7f * rng.RandomFloat(),
             0.3f + 0.7f * rng.RandomFloat()
         );
-        pl.intensity   = 5.0f + 10.0f * rng.RandomFloat();
-        pl.radius      = 4.0f + 3.0f * rng.RandomFloat();
+        pl.intensity   = 5.0f * rng.RandomFloat();
+        pl.radius      = 0.5f;
 
         auto& logic    = registry.emplace<LightMovementLogicComponent>(e);
         logic.speed    = 0.5f;
