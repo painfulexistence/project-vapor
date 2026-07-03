@@ -21,6 +21,7 @@ using namespace Vapor;
 #include "backends/imgui_impl_metal.h"
 #include "backends/imgui_impl_sdl3.h"
 #include <cstdlib>
+#include <cstring>
 #include <ctime>
 #include <functional>
 #include <glm/ext/matrix_clip_space.hpp>
@@ -1008,6 +1009,67 @@ public:
 // ============================================================================
 // Volumetric Fog Pass: Height-based fog with scattering
 // ============================================================================
+
+// ============================================================================
+// Voxel Raymarch Pass (experimental micro voxel rendering)
+// ============================================================================
+// Fullscreen two-level DDA raymarch over a dense voxel grid. Runs after
+// MainRenderPass on the resolved color/depth targets and writes hardware
+// depth, so voxels depth-test against rasterized geometry and later passes
+// (sky, fog, bloom) composite them like any other opaque surface.
+
+class VoxelRaymarchPass : public RenderPass {
+public:
+    explicit VoxelRaymarchPass(Renderer_Metal* renderer) : RenderPass(renderer) {
+    }
+
+    auto getName() const -> const char* override {
+        return "VoxelRaymarchPass";
+    }
+
+    void execute() override {
+        auto& r = *renderer;
+
+        if (!r.voxelRenderingEnabled || !r.voxelRaymarchPipeline || !r.voxelGridBuffer) return;
+
+        // Update per-frame uniforms (sun follows the atmosphere settings)
+        auto* atmos = reinterpret_cast<AtmosphereData*>(r.atmosphereDataBuffer->contents());
+        auto* data = reinterpret_cast<VoxelVolumeData*>(r.voxelDataBuffers[r.currentFrameInFlight]->contents());
+        *data = r.voxelSettings;
+        data->invViewProj = glm::inverse(r.currentCamera->getProjMatrix() * r.currentCamera->getViewMatrix());
+        data->cameraPosition = r.currentCamera->getEye();
+        data->sunDirection = glm::normalize(atmos->sunDirection);
+        data->sunColor = atmos->sunColor;
+        data->sunIntensity = atmos->sunIntensity;
+        r.voxelDataBuffers[r.currentFrameInFlight]->didModifyRange(
+            NS::Range::Make(0, r.voxelDataBuffers[r.currentFrameInFlight]->length())
+        );
+
+        auto passDesc = NS::TransferPtr(MTL::RenderPassDescriptor::renderPassDescriptor());
+        auto colorAttach = passDesc->colorAttachments()->object(0);
+        colorAttach->setLoadAction(MTL::LoadActionLoad);
+        colorAttach->setStoreAction(MTL::StoreActionStore);
+        colorAttach->setTexture(r.colorRT.get());
+
+        auto depthAttach = passDesc->depthAttachment();
+        depthAttach->setLoadAction(MTL::LoadActionLoad);
+        depthAttach->setStoreAction(MTL::StoreActionStore);// Sky/fog read voxel depth afterwards
+        depthAttach->setTexture(r.depthStencilRT.get());
+
+        applyTimingToRenderDesc(passDesc.get(), true, true);
+        auto encoder = r.currentCommandBuffer->renderCommandEncoder(passDesc.get());
+        encoder->setRenderPipelineState(r.voxelRaymarchPipeline.get());
+        encoder->setCullMode(MTL::CullModeNone);
+        encoder->setDepthStencilState(r.depthStencilState.get());
+        encoder->setFragmentBuffer(r.voxelDataBuffers[r.currentFrameInFlight].get(), 0, 0);
+        encoder->setFragmentBuffer(r.cameraDataBuffers[r.currentFrameInFlight].get(), 0, 1);
+        encoder->setFragmentBuffer(r.voxelGridBuffer.get(), 0, 2);
+        encoder->setFragmentBuffer(r.voxelBrickMaskBuffer.get(), 0, 3);
+        encoder->setFragmentBuffer(r.voxelPaletteBuffer.get(), 0, 4);
+        encoder->drawPrimitives(MTL::PrimitiveType::PrimitiveTypeTriangle, 0, 3, 1);
+        encoder->endEncoding();
+    }
+};
 
 class VolumetricFogPass : public RenderPass {
 public:
@@ -2205,6 +2267,7 @@ auto Renderer_Metal::init(SDL_Window* window) -> void {
     if (m_supportsRaytracing) graph.addPass(std::make_unique<RaytraceShadowPass>(this));
     if (m_supportsRaytracing) graph.addPass(std::make_unique<RaytraceAOPass>(this));
     graph.addPass(std::make_unique<MainRenderPass>(this));
+    graph.addPass(std::make_unique<VoxelRaymarchPass>(this));// Before sky: voxels write depth so the sky's equal-test skips them
     graph.addPass(std::make_unique<SkyAtmospherePass>(this));
     // graph.addPass(std::make_unique<WaterPass>(this));
     graph.addPass(std::make_unique<ParticlePass>(this));
@@ -2376,6 +2439,12 @@ auto Renderer_Metal::createResources() -> void {
     prefilterEnvMapPipeline = createPipeline("shaders/3d_prefilter_envmap.metal", true, true, 1);
     brdfLUTPipeline = createPipeline("shaders/3d_brdf_lut.metal", false, true, 1);
     lightScatteringPipeline = createPipeline("shaders/3d_light_scattering.metal", true, true, 1);
+    try {
+        // Renders to resolved colorRT with depth writes into depthStencilRT (no MSAA)
+        voxelRaymarchPipeline = createPipeline("shaders/3d_voxel_raymarch.metal", true, false, 1);
+    } catch (const std::exception& e) {
+        fmt::print("Warning: Could not create voxel raymarch pipeline: {}\n", e.what());
+    }
 
     // Create debug draw pipeline
     {
@@ -2661,6 +2730,19 @@ auto Renderer_Metal::createResources() -> void {
     volumetricFogSettings.windSpeed = 1.0f;
     volumetricFogSettings.windDirection = glm::vec3(1.0f, 0.0f, 0.0f);
     volumetricFogSettings.temporalBlend = 0.1f;
+
+    // ========================================================================
+    // Micro voxel volume buffers and initialization
+    // ========================================================================
+    // Only the small per-frame uniform buffers are allocated here; the volume
+    // itself (~17 MB) is generated lazily by generateVoxelDemoVolume() when
+    // voxel rendering is first enabled.
+    voxelDataBuffers.resize(MAX_FRAMES_IN_FLIGHT);
+    for (auto& voxelBuffer : voxelDataBuffers) {
+        voxelBuffer = NS::TransferPtr(device->newBuffer(sizeof(VoxelVolumeData), MTL::ResourceStorageModeManaged));
+    }
+    voxelSettings.gridDim = glm::uvec3(VOXEL_GRID_DIM);
+    voxelSettings.brickDim = VOXEL_BRICK_DIM;
 
     // ========================================================================
     // Volumetric Cloud buffers and initialization
@@ -3902,6 +3984,183 @@ auto Renderer_Metal::createResources() -> void {
     fmt::print("Particle system initialized with {} particles\n", MAX_PARTICLES);
 }
 
+// ============================================================================
+// Micro voxel volume generation (experimental)
+// ============================================================================
+
+// Deterministic hash noise used for the procedural demo volume.
+static float voxelHashNoise(int x, int y, int z, Uint32 seed) {
+    Uint32 h = static_cast<Uint32>(x) * 374761393u + static_cast<Uint32>(y) * 668265263u
+             + static_cast<Uint32>(z) * 2246822519u + seed * 3266489917u;
+    h = (h ^ (h >> 13)) * 1274126177u;
+    h ^= h >> 16;
+    return static_cast<float>(h & 0xFFFFu) / 65535.0f;
+}
+
+static float voxelValueNoise3(glm::vec3 p, Uint32 seed) {
+    glm::vec3 pf = glm::floor(p);
+    glm::vec3 f = p - pf;
+    f = f * f * (3.0f - 2.0f * f);// smoothstep
+    int xi = static_cast<int>(pf.x), yi = static_cast<int>(pf.y), zi = static_cast<int>(pf.z);
+
+    auto corner = [&](int dx, int dy, int dz) { return voxelHashNoise(xi + dx, yi + dy, zi + dz, seed); };
+    float c000 = corner(0, 0, 0), c100 = corner(1, 0, 0), c010 = corner(0, 1, 0), c110 = corner(1, 1, 0);
+    float c001 = corner(0, 0, 1), c101 = corner(1, 0, 1), c011 = corner(0, 1, 1), c111 = corner(1, 1, 1);
+
+    float x00 = glm::mix(c000, c100, f.x), x10 = glm::mix(c010, c110, f.x);
+    float x01 = glm::mix(c001, c101, f.x), x11 = glm::mix(c011, c111, f.x);
+    return glm::mix(glm::mix(x00, x10, f.y), glm::mix(x01, x11, f.y), f.z);
+}
+
+static float voxelFbm3(glm::vec3 p, int octaves, Uint32 seed) {
+    float sum = 0.0f, amp = 0.5f;
+    for (int i = 0; i < octaves; i++) {
+        sum += amp * voxelValueNoise3(p, seed + static_cast<Uint32>(i) * 101u);
+        p *= 2.0f;
+        amp *= 0.5f;
+    }
+    return sum;// ~[0, 1)
+}
+
+// Fills the voxel grid with a procedural terrain (heightfield + caves + ore
+// speckles + floating crystal spheres) and rebuilds the brick occupancy mask.
+// Regenerating while a frame is in flight can produce a one-frame glitch;
+// acceptable for this debug/demo volume.
+void Renderer_Metal::generateVoxelDemoVolume() {
+    constexpr Uint32 N = VOXEL_GRID_DIM;
+    constexpr Uint32 B = VOXEL_BRICK_DIM;
+    constexpr Uint32 BG = N / B;
+    static_assert(N % B == 0, "voxel grid must be divisible into whole bricks");
+
+    if (!voxelGridBuffer) {
+        voxelGridBuffer = NS::TransferPtr(device->newBuffer(N * N * N, MTL::ResourceStorageModeManaged));
+        voxelBrickMaskBuffer = NS::TransferPtr(device->newBuffer(BG * BG * BG, MTL::ResourceStorageModeManaged));
+        voxelPaletteBuffer =
+            NS::TransferPtr(device->newBuffer(256 * sizeof(glm::vec4), MTL::ResourceStorageModeManaged));
+    }
+
+    auto* voxels = static_cast<Uint8*>(voxelGridBuffer->contents());
+    auto* bricks = static_cast<Uint8*>(voxelBrickMaskBuffer->contents());
+    auto* palette = static_cast<glm::vec4*>(voxelPaletteBuffer->contents());
+    std::memset(voxels, 0, N * N * N);
+    std::memset(bricks, 0, BG * BG * BG);
+
+    // Material palette (index 0 = empty)
+    enum : Uint8 { MatGrass = 1, MatDirt = 2, MatStone = 3, MatSnow = 4, MatSand = 5, MatOre = 6, MatCrystal = 7 };
+    for (int i = 0; i < 256; i++) palette[i] = glm::vec4(0.5f, 0.5f, 0.5f, 1.0f);
+    palette[MatGrass] = glm::vec4(0.25f, 0.55f, 0.18f, 1.0f);
+    palette[MatDirt] = glm::vec4(0.42f, 0.30f, 0.18f, 1.0f);
+    palette[MatStone] = glm::vec4(0.48f, 0.48f, 0.50f, 1.0f);
+    palette[MatSnow] = glm::vec4(0.92f, 0.94f, 0.98f, 1.0f);
+    palette[MatSand] = glm::vec4(0.80f, 0.72f, 0.48f, 1.0f);
+    palette[MatOre] = glm::vec4(0.95f, 0.75f, 0.25f, 1.0f);
+    palette[MatCrystal] = glm::vec4(0.45f, 0.75f, 0.95f, 1.0f);
+
+    const Uint32 seed = voxelSeed;
+    voxelSolidCount = 0;
+
+    auto voxelAt = [&](Uint32 x, Uint32 y, Uint32 z) -> Uint8& { return voxels[(z * N + y) * N + x]; };
+
+    // Terrain heightfield
+    std::vector<float> heights(N * N);
+    for (Uint32 z = 0; z < N; z++) {
+        for (Uint32 x = 0; x < N; x++) {
+            glm::vec3 p = glm::vec3(x, 0.0f, z) * 0.013f;
+            float h = voxelFbm3(p, 5, seed);
+            h = h * h * 1.4f;// Sharpen peaks
+            heights[z * N + x] = glm::clamp(0.12f + h, 0.0f, 0.92f) * static_cast<float>(N);
+        }
+    }
+
+    for (Uint32 z = 0; z < N; z++) {
+        for (Uint32 x = 0; x < N; x++) {
+            const float h = heights[z * N + x];
+            const auto top = static_cast<Uint32>(h);
+            for (Uint32 y = 0; y <= top && y < N; y++) {
+                // Carve caves below the surface crust
+                if (y + 4 < top) {
+                    float cave = voxelFbm3(glm::vec3(x, y, z) * 0.045f, 3, seed + 7u);
+                    if (cave > 0.62f) continue;
+                }
+                Uint8 mat = MatStone;
+                const Uint32 depth = top - y;
+                if (depth == 0) {
+                    mat = (h > 0.62f * N) ? MatSnow : ((h < 0.22f * N) ? MatSand : MatGrass);
+                } else if (depth <= 3) {
+                    mat = (h < 0.22f * N) ? MatSand : MatDirt;
+                } else if (voxelHashNoise(x, y, z, seed + 13u) > 0.995f) {
+                    mat = MatOre;
+                }
+                voxelAt(x, y, z) = mat;
+                voxelSolidCount++;
+            }
+        }
+    }
+
+    // A few floating crystal spheres to show the volume is truly 3D
+    for (int s = 0; s < 4; s++) {
+        glm::vec3 center(
+            (0.15f + 0.7f * voxelHashNoise(s, 1, 0, seed + 23u)) * N,
+            (0.70f + 0.22f * voxelHashNoise(s, 2, 0, seed + 23u)) * N,
+            (0.15f + 0.7f * voxelHashNoise(s, 3, 0, seed + 23u)) * N
+        );
+        float radius = (0.02f + 0.03f * voxelHashNoise(s, 4, 0, seed + 23u)) * N;
+        int r = static_cast<int>(radius) + 1;
+        for (int dz = -r; dz <= r; dz++) {
+            for (int dy = -r; dy <= r; dy++) {
+                for (int dx = -r; dx <= r; dx++) {
+                    if (glm::length(glm::vec3(dx, dy, dz)) > radius) continue;
+                    int x = static_cast<int>(center.x) + dx;
+                    int y = static_cast<int>(center.y) + dy;
+                    int z = static_cast<int>(center.z) + dz;
+                    if (x < 0 || y < 0 || z < 0 || x >= (int)N || y >= (int)N || z >= (int)N) continue;
+                    Uint8& v = voxelAt(x, y, z);
+                    if (v == 0) voxelSolidCount++;
+                    v = MatCrystal;
+                }
+            }
+        }
+    }
+
+    // Brick occupancy mask
+    for (Uint32 bz = 0; bz < BG; bz++) {
+        for (Uint32 by = 0; by < BG; by++) {
+            for (Uint32 bx = 0; bx < BG; bx++) {
+                bool occupied = false;
+                for (Uint32 z = bz * B; z < (bz + 1) * B && !occupied; z++) {
+                    for (Uint32 y = by * B; y < (by + 1) * B && !occupied; y++) {
+                        for (Uint32 x = bx * B; x < (bx + 1) * B; x++) {
+                            if (voxelAt(x, y, z) != 0) {
+                                occupied = true;
+                                break;
+                            }
+                        }
+                    }
+                }
+                bricks[(bz * BG + by) * BG + bx] = occupied ? 1 : 0;
+            }
+        }
+    }
+
+    voxelGridBuffer->didModifyRange(NS::Range::Make(0, voxelGridBuffer->length()));
+    voxelBrickMaskBuffer->didModifyRange(NS::Range::Make(0, voxelBrickMaskBuffer->length()));
+    voxelPaletteBuffer->didModifyRange(NS::Range::Make(0, voxelPaletteBuffer->length()));
+
+    fmt::print(
+        "Voxel demo volume generated: {}^3 grid, {} solid voxels ({:.1f}% fill)\n",
+        N,
+        voxelSolidCount,
+        100.0f * static_cast<float>(voxelSolidCount) / static_cast<float>(N * N * N)
+    );
+}
+
+void Renderer_Metal::setVoxelRenderingEnabled(bool enabled) {
+    voxelRenderingEnabled = enabled;
+    if (enabled && !voxelGridBuffer) {
+        generateVoxelDemoVolume();
+    }
+}
+
 auto Renderer_Metal::stage(std::shared_ptr<Scene> scene) -> void {
     ZoneScoped;
 
@@ -4643,6 +4902,52 @@ auto Renderer_Metal::draw(std::shared_ptr<Scene> scene, Camera& camera) -> void 
                 ImGui::Text("Lighting");
                 ImGui::DragFloat("Ambient", &volumetricCloudSettings.ambientIntensity, 0.01f, 0.0f, 1.0f);
                 ImGui::DragFloat("Silver Lining", &volumetricCloudSettings.silverLiningIntensity, 0.01f, 0.0f, 2.0f);
+            }
+            ImGui::TreePop();
+        }
+
+        if (ImGui::TreeNode("Micro Voxels (Experimental)")) {
+            ImGui::Separator();
+            bool voxelEnabled = voxelRenderingEnabled;
+            if (ImGui::Checkbox("Enabled", &voxelEnabled)) {
+                setVoxelRenderingEnabled(voxelEnabled);// Generates the demo volume on first enable
+            }
+
+            if (voxelRenderingEnabled) {
+                ImGui::Separator();
+                ImGui::Text("Volume");
+                ImGui::DragFloat3("Origin", &voxelSettings.volumeOrigin[0], 0.1f);
+                ImGui::DragFloat("Voxel Size (m)", &voxelSettings.voxelSize, 0.005f, 0.02f, 1.0f);
+                int maxSteps = static_cast<int>(voxelSettings.maxRaySteps);
+                if (ImGui::DragInt("Max Ray Steps", &maxSteps, 1, 32, 1024)) {
+                    voxelSettings.maxRaySteps = static_cast<Uint32>(maxSteps);
+                }
+
+                ImGui::Separator();
+                ImGui::Text("Lighting");
+                bool sunShadow = voxelSettings.shadowEnabled != 0;
+                if (ImGui::Checkbox("Sun Shadow (voxel raycast)", &sunShadow)) {
+                    voxelSettings.shadowEnabled = sunShadow ? 1 : 0;
+                }
+                ImGui::DragFloat("Ambient Intensity", &voxelSettings.ambientIntensity, 0.01f, 0.0f, 2.0f);
+
+                ImGui::Separator();
+                if (ImGui::Button("Regenerate Volume")) {
+                    voxelSeed++;
+                    generateVoxelDemoVolume();
+                }
+                if (voxelGridBuffer) {
+                    const float sizeMB =
+                        static_cast<float>(voxelGridBuffer->length() + voxelBrickMaskBuffer->length()) / (1024.0f * 1024.0f);
+                    ImGui::Text(
+                        "%u^3 voxels, %u solid (%.1f%%), %.1f MB",
+                        VOXEL_GRID_DIM,
+                        voxelSolidCount,
+                        100.0f * static_cast<float>(voxelSolidCount)
+                            / static_cast<float>(VOXEL_GRID_DIM * VOXEL_GRID_DIM * VOXEL_GRID_DIM),
+                        sizeMB
+                    );
+                }
             }
             ImGui::TreePop();
         }
