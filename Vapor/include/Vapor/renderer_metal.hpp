@@ -31,6 +31,8 @@ class VelocityPass;
 class TileCullingPass;
 class RaytraceShadowPass;
 class RaytraceAOPass;
+class AOTemporalPass;
+class AODenoisePass;
 class SkyAtmospherePass;
 class SkyCapturePass;
 class IrradianceConvolutionPass;
@@ -496,6 +498,8 @@ protected:
     NS::SharedPtr<MTL::ComputePipelineState> velocityPipeline;
     NS::SharedPtr<MTL::ComputePipelineState> raytraceShadowPipeline;
     NS::SharedPtr<MTL::ComputePipelineState> raytraceAOPipeline;
+    NS::SharedPtr<MTL::ComputePipelineState> aoTemporalPipeline;
+    NS::SharedPtr<MTL::ComputePipelineState> aoDenoisePipeline;
     NS::SharedPtr<MTL::RenderPipelineState> atmospherePipeline;
     NS::SharedPtr<MTL::RenderPipelineState> skyCapturePipeline;
     NS::SharedPtr<MTL::RenderPipelineState> irradianceConvolutionPipeline;
@@ -711,6 +715,15 @@ protected:
     NS::SharedPtr<MTL::Texture> velocityRT; // RG16Float camera-motion vectors (see 3d_velocity.metal)
     glm::mat4 prevViewProj = glm::mat4(1.0f);
     bool prevViewProjValid = false;
+
+    // RT AO denoise chain (raygen → temporal → à-trous → aoRT), see ADR-008
+    NS::SharedPtr<MTL::Texture> aoRawRT;          // R16Float, noisy raygen output
+    NS::SharedPtr<MTL::Texture> aoHistoryRT[2];   // RG16Float ping-pong: (accumulated AO, view-space depth)
+    NS::SharedPtr<MTL::Texture> aoScratchRT;      // RG16Float, à-trous intermediate
+    uint32_t aoHistoryIndex = 0;                  // aoHistoryRT[aoHistoryIndex] holds the latest history
+    bool aoHistoryValid = false;
+    glm::mat4 prevView = glm::mat4(1.0f);
+    bool prevViewValid = false;
 
     // Bloom render targets
     NS::SharedPtr<MTL::Texture> bloomBrightnessRT;// Half-res brightness extraction
