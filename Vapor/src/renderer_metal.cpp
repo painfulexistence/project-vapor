@@ -2724,7 +2724,6 @@ auto Renderer_Metal::init(SDL_Window* window) -> void {
     if (m_supportsRaytracing) graph.addPass(std::make_unique<TLASBuildPass>(this));
     graph.addPass(std::make_unique<PrePass>(this));
     graph.addPass(std::make_unique<NormalResolvePass>(this));
-    graph.addPass(std::make_unique<VelocityPass>(this));
     graph.addPass(std::make_unique<TileCullingPass>(this));
     graph.addPass(std::make_unique<PSSMShadowPass>(this));
     graph.addPass(std::make_unique<PSSMResolvePass>(this));
@@ -2736,6 +2735,13 @@ auto Renderer_Metal::init(SDL_Window* window) -> void {
     if (m_supportsRaytracing) graph.addPass(std::make_unique<PointShadowTemporalPass>(this));
     graph.addPass(std::make_unique<MainRenderPass>(this));
     graph.addPass(std::make_unique<VoxelRaymarchPass>(this));// Before sky: voxels write depth so the sky's equal-test skips them
+    // VelocityPass runs here, after all opaque depth (triangles + voxels) is
+    // resolved into depthStencilRT, so motion vectors are correct for voxel
+    // pixels too. The RT temporal denoisers (AO / point shadow) above read
+    // this buffer one frame stale as a result — acceptable because they trace
+    // triangle-only geometry (no voxels) and are low-frequency + forgiving of
+    // stale velocity under smooth camera motion.
+    graph.addPass(std::make_unique<VelocityPass>(this));
     graph.addPass(std::make_unique<SkyAtmospherePass>(this));
     // graph.addPass(std::make_unique<WaterPass>(this));
     graph.addPass(std::make_unique<ParticlePass>(this));
