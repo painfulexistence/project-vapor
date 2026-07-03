@@ -746,6 +746,8 @@ protected:
     NS::SharedPtr<MTL::Texture> pointShadowRT;       // R16F, raw stochastic point shadow
     NS::SharedPtr<MTL::Texture> pointShadowDenoisedRT; // R16F, temporally denoised
     NS::SharedPtr<MTL::Texture> pointShadowHistoryRT;  // R16F, history for temporal
+    NS::SharedPtr<MTL::Texture> pointShadowRTGrayView;        // swizzle (r,r,r,1) for ImGui
+    NS::SharedPtr<MTL::Texture> pointShadowDenoisedRTGrayView; // swizzle (r,r,r,1) for ImGui
     NS::SharedPtr<MTL::Texture> aoRT;
     NS::SharedPtr<MTL::Texture> velocityRT; // RG16Float camera-motion vectors (see 3d_velocity.metal)
     glm::mat4 prevViewProj = glm::mat4(1.0f);
@@ -767,6 +769,7 @@ protected:
     std::array<NS::SharedPtr<MTL::Texture>, 3> pssmShadowMapViews;
     // Screen-space resolved PSSM shadow (camera-aligned, for intuitive debug display)
     NS::SharedPtr<MTL::Texture> pssmShadowScreenRT;
+    NS::SharedPtr<MTL::Texture> pssmShadowScreenRTGrayView; // swizzle (r,r,r,1) for ImGui
     std::vector<NS::SharedPtr<MTL::Buffer>> pssmDataBuffers;
     static constexpr uint32_t PSSM_CASCADE_COUNT = 3;
     static constexpr uint32_t PSSM_SHADOW_MAP_SIZE = 4096;

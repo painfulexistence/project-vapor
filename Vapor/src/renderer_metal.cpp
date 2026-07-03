@@ -3446,6 +3446,21 @@ auto Renderer_Metal::createResources() -> void {
         pointShadowHistoryRT  = NS::TransferPtr(device->newTexture(desc));
         desc->release();
 
+        // Grayscale swizzle views for the ImGui previews (raw R16F renders red)
+        auto grayView = [](MTL::Texture* tex) {
+            return NS::TransferPtr(tex->newTextureView(
+                MTL::PixelFormatR16Float,
+                MTL::TextureType2D,
+                NS::Range::Make(0, 1),
+                NS::Range::Make(0, 1),
+                MTL::TextureSwizzleChannels::Make(
+                    MTL::TextureSwizzleRed, MTL::TextureSwizzleRed, MTL::TextureSwizzleRed, MTL::TextureSwizzleOne
+                )
+            ));
+        };
+        pointShadowRTGrayView         = grayView(pointShadowRT.get());
+        pointShadowDenoisedRTGrayView = grayView(pointShadowDenoisedRT.get());
+
         // Initialize all three to 1.0 (fully lit). Prevents garbage in the first
         // frame's temporal history, and keeps point lights unshadowed when
         // raytracing is unsupported (the passes never write these textures).
@@ -3469,6 +3484,16 @@ auto Renderer_Metal::createResources() -> void {
         desc->setUsage(MTL::TextureUsageShaderRead | MTL::TextureUsageShaderWrite);
         pssmShadowScreenRT = NS::TransferPtr(device->newTexture(desc));
         desc->release();
+
+        pssmShadowScreenRTGrayView = NS::TransferPtr(pssmShadowScreenRT->newTextureView(
+            MTL::PixelFormatR8Unorm,
+            MTL::TextureType2D,
+            NS::Range::Make(0, 1),
+            NS::Range::Make(0, 1),
+            MTL::TextureSwizzleChannels::Make(
+                MTL::TextureSwizzleRed, MTL::TextureSwizzleRed, MTL::TextureSwizzleRed, MTL::TextureSwizzleOne
+            )
+        ));
     }
 
     // Half resolution: the AO chain kernels are resolution-agnostic and consumers
@@ -4858,13 +4883,18 @@ auto Renderer_Metal::draw(std::shared_ptr<Scene> scene, Camera& camera) -> void 
             rtPreview("Scene Normal RT", normalRT.get());
             rtPreview("Velocity RT", velocityRT.get());
             rtPreview("Light Scattering RT", lightScatteringRT.get());
-            rtPreview("Point Shadow (raw)", pointShadowRT.get());
-            rtPreview("Point Shadow (denoised)", pointShadowDenoisedRT.get());
-            // Camera-aligned screen-space PSSM shadow (intuitive, like RT shadow)
-            rtPreview("PSSM Shadow (screen-space)", pssmShadowScreenRT.get());
-            // Raw light-space cascade depth maps (for shadow-map debugging)
-            for (uint32_t i = 0; i < PSSM_CASCADE_COUNT; i++) {
-                rtPreview(fmt::format("PSSM Cascade {} (light-space depth)", i + 1).c_str(), pssmShadowMapViews[i].get());
+            // The two shadow results actually consumed by the PBR shader
+            rtPreview("Point Shadow (denoised)", pointShadowDenoisedRTGrayView.get());
+            rtPreview("PSSM Shadow (screen-space)", pssmShadowScreenRTGrayView.get());
+            // Intermediate shadow textures, only needed when debugging the pipeline itself
+            if (ImGui::TreeNode("Shadow internals")) {
+                // Raw = pre-temporal (also shows the tile heatmap in debug mode)
+                rtPreview("Point Shadow (raw / heatmap)", pointShadowRTGrayView.get());
+                // Light-space cascade depth maps
+                for (uint32_t i = 0; i < PSSM_CASCADE_COUNT; i++) {
+                    rtPreview(fmt::format("PSSM Cascade {} (light-space depth)", i + 1).c_str(), pssmShadowMapViews[i].get());
+                }
+                ImGui::TreePop();
             }
             ImGui::TreePop();
         }
