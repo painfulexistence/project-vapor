@@ -2638,7 +2638,11 @@ public:
         params.screenSize = screenSize;
         params.surfelRadius = gibsManager->getGIBSData().surfelRadius;
         params.densityThreshold = 0.01f;
-        params.maxNewSurfels = gibsManager->getMaxSurfels() / 10;
+        // Small per-frame budget: coverage dedup only sees LAST frame's surfels,
+        // so same-frame duplicates are invisible to each other. A large budget
+        // floods the pool with duplicates before the hash catches up; a small
+        // one converges in ~1-2s with dedup effective from frame 2 onward.
+        params.maxNewSurfels = std::max(gibsManager->getMaxSurfels() / 100, 1000u);
         params.frameIndex = r.frameNumber;
 
         auto timedDesc = makeTimedComputeDesc(true, true);
@@ -5630,6 +5634,9 @@ auto Renderer_Metal::draw(std::shared_ptr<Scene> scene, Camera& camera) -> void 
                 // 0 the CPU readback is broken.
                 glm::uvec2 rawCounters = gibsManager->getRawCounters();
                 ImGui::Text("GPU counters: budget=%u pool=%u", rawCounters.x, rawCounters.y);
+                if (ImGui::Button("Reset Surfels")) {
+                    gibsManager->resetSurfels();
+                }
 
                 int qualityIdx = static_cast<int>(gibsQuality);
                 if (ImGui::Combo("Quality", &qualityIdx, "Low\0Medium\0High\0Ultra\0")) {

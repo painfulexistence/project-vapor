@@ -72,6 +72,16 @@ public:
         return { p[0], p[1] };
     }
 
+    // Debug: discard all surfels and let generation repopulate from scratch.
+    // Stale surfels beyond the new count stay in the buffer but every consumer
+    // gates on activeSurfelCount, so they are never read.
+    void resetSurfels() {
+        Uint32* p = static_cast<Uint32*>(counterBuffer->contents());
+        p[0] = 0;
+        p[1] = 0;
+        activeSurfelCount = 0;
+    }
+
     // Swap history buffers (called after temporal pass)
     void swapHistoryBuffers();
 
