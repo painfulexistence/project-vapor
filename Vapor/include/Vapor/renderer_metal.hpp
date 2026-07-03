@@ -845,8 +845,10 @@ protected:
 
     // ===== GIBS (Global Illumination Based on Surfels) =====
     std::unique_ptr<Vapor::GIBSManager> gibsManager;
-    bool gibsEnabled = true;
-    GIBSQuality gibsQuality = GIBSQuality::Medium;
+    // Experimental — off by default; toggle at runtime via the ImGui
+    // "Global Illumination (GIBS)" section. See docs/GIBS_DESIGN.md.
+    bool gibsEnabled = false;
+    GIBSQuality gibsQuality = GIBSQuality::Low;
 
     // GIBS Compute Pipelines
     NS::SharedPtr<MTL::ComputePipelineState> surfelGenerationPipeline;
