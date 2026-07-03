@@ -4871,18 +4871,19 @@ auto Renderer_Metal::draw(std::shared_ptr<Scene> scene, Camera& camera) -> void 
 
         ImGui::Separator();
 
+        // Aspect-correct preview sized for actually diagnosing content issues
+        auto rtPreview = [](const char* label, MTL::Texture* tex) {
+            if (!tex) return;
+            if (ImGui::TreeNode(label)) {
+                float aspect = tex->height() > 0 ? float(tex->width()) / float(tex->height()) : 1.0f;
+                ImGui::Text("%llu x %llu", (unsigned long long)tex->width(), (unsigned long long)tex->height());
+                ImGui::Image((ImTextureID)(intptr_t)tex, ImVec2(320, 320 / aspect));
+                ImGui::TreePop();
+            }
+        };
+
         if (ImGui::TreeNode("RTs")) {
             ImGui::Separator();
-            // Aspect-correct preview sized for actually diagnosing content issues
-            auto rtPreview = [](const char* label, MTL::Texture* tex) {
-                if (!tex) return;
-                if (ImGui::TreeNode(label)) {
-                    float aspect = tex->height() > 0 ? float(tex->width()) / float(tex->height()) : 1.0f;
-                    ImGui::Text("%llu x %llu", (unsigned long long)tex->width(), (unsigned long long)tex->height());
-                    ImGui::Image((ImTextureID)(intptr_t)tex, ImVec2(320, 320 / aspect));
-                    ImGui::TreePop();
-                }
-            };
             rtPreview("Scene Color RT", colorRT.get());
             rtPreview("Scene Depth RT", depthStencilRT.get());
             rtPreview("Raytraced Shadow", shadowRTGrayView.get());
@@ -4893,16 +4894,6 @@ auto Renderer_Metal::draw(std::shared_ptr<Scene> scene, Camera& camera) -> void 
             // The two shadow results actually consumed by the PBR shader
             rtPreview("Point Shadow (denoised)", pointShadowDenoisedRTGrayView.get());
             rtPreview("PSSM Shadow (screen-space)", pssmShadowScreenRTGrayView.get());
-            // Intermediate shadow textures, only needed when debugging the pipeline itself
-            if (ImGui::TreeNode("Shadow internals")) {
-                // Raw = pre-temporal (also shows the tile heatmap in debug mode)
-                rtPreview("Point Shadow (raw / heatmap)", pointShadowRTGrayView.get());
-                // Light-space cascade depth maps
-                for (uint32_t i = 0; i < PSSM_CASCADE_COUNT; i++) {
-                    rtPreview(fmt::format("PSSM Cascade {} (light-space depth)", i + 1).c_str(), pssmShadowMapViews[i].get());
-                }
-                ImGui::TreePop();
-            }
             ImGui::TreePop();
         }
 
@@ -4934,25 +4925,15 @@ auto Renderer_Metal::draw(std::shared_ptr<Scene> scene, Camera& camera) -> void 
                 pointShadowDebugMode = static_cast<uint32_t>(psMode);
             }
             if (pointShadowDebugMode == 1) {
-                ImGui::TextWrapped("Heatmap: black = tile has 0 lights (culling problem if lights exist), brighter = more lights (8+ = white). Shown in 'Point Shadow (raw)' image above.");
+                ImGui::TextWrapped("Heatmap: black = tile has 0 lights (culling problem if lights exist), brighter = more lights (8+ = white). Shown in 'Point Shadow (raw / heatmap)' below.");
             }
 
-            // --- Point light detail (position/radius sanity check) ---
-            if (!scene->pointLights.empty() && ImGui::TreeNode(fmt::format("Point lights ({})", scene->pointLights.size()).c_str())) {
-                size_t shown = std::min(scene->pointLights.size(), (size_t)8);
-                for (size_t i = 0; i < shown; i++) {
-                    const auto& pl = scene->pointLights[i];
-                    ImGui::Text("#%zu pos(%.1f, %.1f, %.1f) r=%.2f int=%.2f",
-                        i, pl.position.x, pl.position.y, pl.position.z, pl.radius, pl.intensity);
-                    if (pl.radius <= 1.0f) {
-                        ImGui::SameLine();
-                        ImGui::TextColored(ImVec4(1, 0.5f, 0, 1), "(radius small!)");
-                    }
-                }
-                if (scene->pointLights.size() > shown) {
-                    ImGui::Text("... and %zu more", scene->pointLights.size() - shown);
-                }
-                ImGui::TreePop();
+            // --- Intermediate shadow textures ---
+            // Raw = pre-temporal (also shows the tile heatmap in debug mode)
+            rtPreview("Point Shadow (raw / heatmap)", pointShadowRTGrayView.get());
+            // Light-space cascade depth maps
+            for (uint32_t i = 0; i < PSSM_CASCADE_COUNT; i++) {
+                rtPreview(fmt::format("PSSM Cascade {} (light-space depth)", i + 1).c_str(), pssmShadowMapViews[i].get());
             }
             ImGui::TreePop();
         }
