@@ -262,9 +262,12 @@ class Renderer_Metal final : public Renderer {// Must be public or factory funct
     friend class PrePass;
     friend class TLASBuildPass;
     friend class NormalResolvePass;
+    friend class VelocityPass;
     friend class TileCullingPass;
     friend class RaytraceShadowPass;
     friend class RaytraceAOPass;
+    friend class AOTemporalPass;
+    friend class AODenoisePass;
     friend class SkyAtmospherePass;
     friend class SkyCapturePass;
     friend class IrradianceConvolutionPass;
