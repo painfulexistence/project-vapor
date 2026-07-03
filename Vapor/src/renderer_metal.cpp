@@ -129,37 +129,67 @@ public:
             }
             r.BLASArray = NS::TransferPtr(NS::Array::array(blasObjects.data(), blasObjects.size()));
             r.currentScene->isGeometryDirty = false;
+            // A changed BLAS set invalidates every in-flight TLAS (refit can't change topology)
+            r.tlasBuiltInstanceCount.fill(SIZE_MAX);
+            r.accelGeneration++;
         }
 
-        // Create TLAS descriptor
+        auto slot = r.currentFrameInFlight;
+
+        // Skip: this slot's TLAS already reflects the current instance set
+        if (r.TLASBuffers[slot] && r.tlasBuiltGeneration[slot] == r.accelGeneration
+            && r.tlasBuiltInstanceCount[slot] == r.accelInstances.size()) {
+            return;
+        }
+
+        // Create TLAS descriptor (UsageRefit so the structure can be refit in later frames)
         auto tlasDesc = NS::TransferPtr(MTL::InstanceAccelerationStructureDescriptor::alloc()->init());
+        tlasDesc->setUsage(MTL::AccelerationStructureUsageRefit);
         tlasDesc->setInstanceCount(r.accelInstances.size());
         tlasDesc->setInstancedAccelerationStructures(r.BLASArray.get());
-        tlasDesc->setInstanceDescriptorBuffer(r.accelInstanceBuffers[r.currentFrameInFlight].get());
+        tlasDesc->setInstanceDescriptorBuffer(r.accelInstanceBuffers[slot].get());
 
         auto tlasSizes = r.device->accelerationStructureSizes(tlasDesc.get());
-        if (!r.TLASScratchBuffers[r.currentFrameInFlight]
-            || r.TLASScratchBuffers[r.currentFrameInFlight]->length() < tlasSizes.buildScratchBufferSize) {
-            r.TLASScratchBuffers[r.currentFrameInFlight] =
-                NS::TransferPtr(r.device->newBuffer(tlasSizes.buildScratchBufferSize, MTL::ResourceStorageModePrivate));
+        auto scratchSize = std::max(tlasSizes.buildScratchBufferSize, tlasSizes.refitScratchBufferSize);
+        if (scratchSize > 0
+            && (!r.TLASScratchBuffers[slot] || r.TLASScratchBuffers[slot]->length() < scratchSize)) {
+            r.TLASScratchBuffers[slot] =
+                NS::TransferPtr(r.device->newBuffer(scratchSize, MTL::ResourceStorageModePrivate));
         }
-        if (!r.TLASBuffers[r.currentFrameInFlight]
-            || r.TLASBuffers[r.currentFrameInFlight]->size() < tlasSizes.accelerationStructureSize) {
-            r.TLASBuffers[r.currentFrameInFlight] =
+
+        // Refit in place when this slot's TLAS has the same topology (same instance count,
+        // same BLAS set) and only transforms changed; otherwise full build.
+        bool canRefit = r.TLASBuffers[slot]
+            && r.tlasBuiltInstanceCount[slot] == r.accelInstances.size()
+            && r.TLASBuffers[slot]->size() >= tlasSizes.accelerationStructureSize;
+        if (!canRefit
+            && (!r.TLASBuffers[slot] || r.TLASBuffers[slot]->size() < tlasSizes.accelerationStructureSize)) {
+            r.TLASBuffers[slot] =
                 NS::TransferPtr(r.device->newAccelerationStructure(tlasSizes.accelerationStructureSize));
         }
 
-        // Build TLAS
-        // TODO: only build TLAS if it's dirty
         auto timedAccelDesc = makeTimedAccelDesc(true, true);
         auto accelEncoder = r.currentCommandBuffer->accelerationStructureCommandEncoder(timedAccelDesc.get());
-        accelEncoder->buildAccelerationStructure(
-            r.TLASBuffers[r.currentFrameInFlight].get(),
-            tlasDesc.get(),
-            r.TLASScratchBuffers[r.currentFrameInFlight].get(),
-            0
-        );
+        if (canRefit) {
+            accelEncoder->refitAccelerationStructure(
+                r.TLASBuffers[slot].get(),
+                tlasDesc.get(),
+                nullptr, // in place
+                r.TLASScratchBuffers[slot].get(),
+                0
+            );
+        } else {
+            accelEncoder->buildAccelerationStructure(
+                r.TLASBuffers[slot].get(),
+                tlasDesc.get(),
+                r.TLASScratchBuffers[slot].get(),
+                0
+            );
+        }
         accelEncoder->endEncoding();
+
+        r.tlasBuiltGeneration[slot] = r.accelGeneration;
+        r.tlasBuiltInstanceCount[slot] = r.accelInstances.size();
     }
 };
 
@@ -4159,6 +4189,17 @@ auto Renderer_Metal::draw(std::shared_ptr<Scene> scene, Camera& camera) -> void 
     accelInstanceBuffers[currentFrameInFlight]->didModifyRange(
         NS::Range::Make(0, accelInstanceBuffers[currentFrameInFlight]->length())
     );
+    // Bump the TLAS generation only when the instance set actually changed, so
+    // TLASBuildPass can skip (unchanged), refit (transforms only), or rebuild (topology).
+    if (accelInstances.size() != lastAccelInstances.size()
+        || (!accelInstances.empty()
+            && memcmp(
+                   accelInstances.data(), lastAccelInstances.data(),
+                   accelInstances.size() * sizeof(MTL::AccelerationStructureInstanceDescriptor)
+               ) != 0)) {
+        lastAccelInstances = accelInstances;
+        accelGeneration++;
+    }
 
     // ==========================================================================
     // Set up rendering context for passes

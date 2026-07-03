@@ -678,6 +678,13 @@ protected:
     std::vector<NS::SharedPtr<MTL::Buffer>> accelInstanceBuffers;
     std::vector<NS::SharedPtr<MTL::Buffer>> TLASScratchBuffers;
     std::vector<NS::SharedPtr<MTL::AccelerationStructure>> TLASBuffers;
+    // TLAS rebuild/refit/skip tracking:
+    // accelGeneration bumps whenever the uploaded instance set changes (compared in draw());
+    // each in-flight TLAS slot records the generation and instance count it was last built for.
+    std::vector<MTL::AccelerationStructureInstanceDescriptor> lastAccelInstances;
+    uint64_t accelGeneration = 1; // starts above the slots' 0 so the first frame always builds
+    std::array<uint64_t, 8> tlasBuiltGeneration = {};
+    std::array<size_t, 8> tlasBuiltInstanceCount = {}; // SIZE_MAX marks a slot as needing a full rebuild
 
     // Instance data
     // instanceBatches: material → list of (mesh, instanceArrayIndex) for rasterization draw calls
