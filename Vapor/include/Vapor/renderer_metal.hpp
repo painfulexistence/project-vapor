@@ -739,6 +739,7 @@ protected:
     NS::SharedPtr<MTL::Texture> aoRawRT;          // R16Float, noisy raygen output
     NS::SharedPtr<MTL::Texture> aoHistoryRT[2];   // RG16Float ping-pong: (accumulated AO, view-space depth)
     NS::SharedPtr<MTL::Texture> aoScratchRT;      // RG16Float, à-trous intermediate
+    NS::SharedPtr<MTL::Texture> aoRTGrayView;     // swizzle view (r,r,r,1) of aoRT for ImGui preview
     uint32_t aoHistoryIndex = 0;                  // aoHistoryRT[aoHistoryIndex] holds the latest history
     bool aoHistoryValid = false;
     glm::mat4 prevView = glm::mat4(1.0f);

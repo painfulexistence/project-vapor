@@ -144,50 +144,37 @@ public:
             return;
         }
 
-        // Create TLAS descriptor (UsageRefit so the structure can be refit in later frames)
+        // Create TLAS descriptor. Note: deliberately NOT UsageRefit — refit-capable
+        // acceleration structures trade traversal performance for updatability, and
+        // that cost is paid by every RT pass (measured ~+5ms on the shadow pass).
+        // A full instance-level rebuild is ~0.2ms; the skip above removes even that
+        // for static scenes.
         auto tlasDesc = NS::TransferPtr(MTL::InstanceAccelerationStructureDescriptor::alloc()->init());
-        tlasDesc->setUsage(MTL::AccelerationStructureUsageRefit);
         tlasDesc->setInstanceCount(r.accelInstances.size());
         tlasDesc->setInstancedAccelerationStructures(r.BLASArray.get());
         tlasDesc->setInstanceDescriptorBuffer(r.accelInstanceBuffers[slot].get());
 
         auto tlasSizes = r.device->accelerationStructureSizes(tlasDesc.get());
-        auto scratchSize = std::max(tlasSizes.buildScratchBufferSize, tlasSizes.refitScratchBufferSize);
-        if (scratchSize > 0
-            && (!r.TLASScratchBuffers[slot] || r.TLASScratchBuffers[slot]->length() < scratchSize)) {
-            r.TLASScratchBuffers[slot] =
-                NS::TransferPtr(r.device->newBuffer(scratchSize, MTL::ResourceStorageModePrivate));
+        if (tlasSizes.buildScratchBufferSize > 0
+            && (!r.TLASScratchBuffers[slot]
+                || r.TLASScratchBuffers[slot]->length() < tlasSizes.buildScratchBufferSize)) {
+            r.TLASScratchBuffers[slot] = NS::TransferPtr(
+                r.device->newBuffer(tlasSizes.buildScratchBufferSize, MTL::ResourceStorageModePrivate)
+            );
         }
-
-        // Refit in place when this slot's TLAS has the same topology (same instance count,
-        // same BLAS set) and only transforms changed; otherwise full build.
-        bool canRefit = r.TLASBuffers[slot]
-            && r.tlasBuiltInstanceCount[slot] == r.accelInstances.size()
-            && r.TLASBuffers[slot]->size() >= tlasSizes.accelerationStructureSize;
-        if (!canRefit
-            && (!r.TLASBuffers[slot] || r.TLASBuffers[slot]->size() < tlasSizes.accelerationStructureSize)) {
+        if (!r.TLASBuffers[slot] || r.TLASBuffers[slot]->size() < tlasSizes.accelerationStructureSize) {
             r.TLASBuffers[slot] =
                 NS::TransferPtr(r.device->newAccelerationStructure(tlasSizes.accelerationStructureSize));
         }
 
         auto timedAccelDesc = makeTimedAccelDesc(true, true);
         auto accelEncoder = r.currentCommandBuffer->accelerationStructureCommandEncoder(timedAccelDesc.get());
-        if (canRefit) {
-            accelEncoder->refitAccelerationStructure(
-                r.TLASBuffers[slot].get(),
-                tlasDesc.get(),
-                nullptr, // in place
-                r.TLASScratchBuffers[slot].get(),
-                0
-            );
-        } else {
-            accelEncoder->buildAccelerationStructure(
-                r.TLASBuffers[slot].get(),
-                tlasDesc.get(),
-                r.TLASScratchBuffers[slot].get(),
-                0
-            );
-        }
+        accelEncoder->buildAccelerationStructure(
+            r.TLASBuffers[slot].get(),
+            tlasDesc.get(),
+            r.TLASScratchBuffers[slot].get(),
+            0
+        );
         accelEncoder->endEncoding();
 
         r.tlasBuiltGeneration[slot] = r.accelGeneration;
@@ -3104,6 +3091,17 @@ auto Renderer_Metal::createResources() -> void {
     aoScratchRT = NS::TransferPtr(device->newTexture(aoChainDesc));
     aoChainDesc->release();
 
+    // Grayscale swizzle view of the single-channel AO target for the ImGui preview
+    aoRTGrayView = NS::TransferPtr(aoRT->newTextureView(
+        MTL::PixelFormatR16Float,
+        MTL::TextureType2D,
+        NS::Range::Make(0, 1),
+        NS::Range::Make(0, 1),
+        MTL::TextureSwizzleChannels::Make(
+            MTL::TextureSwizzleRed, MTL::TextureSwizzleRed, MTL::TextureSwizzleRed, MTL::TextureSwizzleOne
+        )
+    ));
+
     // Create light scattering render target (HDR format for god rays)
     MTL::TextureDescriptor* lightScatteringTextureDesc = MTL::TextureDescriptor::alloc()->init();
     lightScatteringTextureDesc->setTextureType(MTL::TextureType2D);
@@ -4362,7 +4360,7 @@ auto Renderer_Metal::draw(std::shared_ptr<Scene> scene, Camera& camera) -> void 
         NS::Range::Make(0, accelInstanceBuffers[currentFrameInFlight]->length())
     );
     // Bump the TLAS generation only when the instance set actually changed, so
-    // TLASBuildPass can skip (unchanged), refit (transforms only), or rebuild (topology).
+    // TLASBuildPass can skip unchanged frames and rebuild only on a real change.
     if (accelInstances.size() != lastAccelInstances.size()
         || (!accelInstances.empty()
             && memcmp(
@@ -4450,7 +4448,8 @@ auto Renderer_Metal::draw(std::shared_ptr<Scene> scene, Camera& camera) -> void 
                 ImGui::TreePop();
             }
             if (ImGui::TreeNode(fmt::format("Raytraced AO").c_str())) {
-                ImGui::Image((ImTextureID)(intptr_t)aoRT.get(), ImVec2(64, 64));
+                // Grayscale swizzle view — the raw R16Float target renders red in ImGui
+                ImGui::Image((ImTextureID)(intptr_t)aoRTGrayView.get(), ImVec2(64, 64));
                 ImGui::TreePop();
             }
             if (ImGui::TreeNode(fmt::format("Scene Normal RT").c_str())) {
