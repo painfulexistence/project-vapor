@@ -9,7 +9,7 @@ struct RasterizerData {
     float4 worldPosition;
     float4 worldNormal;
     float4 worldTangent;
-    uint materialID [[flat]]; // material fetched in fragment stage; don't interpolate ~21 floats
+    MaterialData material;
 };
 
 vertex RasterizerData vertexMain(
@@ -23,27 +23,26 @@ vertex RasterizerData vertexMain(
     RasterizerData vert;
     uint actualVertexID = instances[instanceID].vertexOffset + vertexID;
     float4x4 model = instances[instanceID].model;
-    float4x4 nm = instances[instanceID].normalMatrix;
-    float3x3 normalMatrix = float3x3(nm[0].xyz, nm[1].xyz, nm[2].xyz);
+    float3x3 model33 = float3x3(model[0].xyz, model[1].xyz, model[2].xyz);
+    float3x3 normalMatrix = transpose(inverse(model33));
     // Caution: worldNormal and worldTangent are not normalized yet, and they can be affected by model scaling
     vert.worldNormal = float4(normalMatrix * float3(in[actualVertexID].normal.xyz), 0.0);
     vert.worldTangent = float4(normalMatrix * in[actualVertexID].tangent.xyz, in[actualVertexID].tangent.w);
     vert.worldPosition = model * float4(in[actualVertexID].position, 1.0);
     vert.position = camera.proj * camera.view * vert.worldPosition;
     vert.uv = float2(in[actualVertexID].uv);
-    vert.materialID = instances[instanceID].materialID;
+    vert.material = materials[instances[instanceID].materialID];
     return vert;
 }
 
 fragment float4 fragmentMain(
     RasterizerData in [[stage_in]],
     texture2d<float, access::sample> texAlbedo [[texture(0)]],
-    texture2d<float, access::sample> texNormal [[texture(1)]],
-    constant MaterialData* materials [[buffer(0)]]
+    texture2d<float, access::sample> texNormal [[texture(1)]]
 ) {
     constexpr sampler s(address::repeat, filter::linear, mip_filter::linear);
 
-    MaterialData material = materials[in.materialID];
+    MaterialData material = in.material;
     float4 baseColor = texAlbedo.sample(s, in.uv);
     if (baseColor.a * material.baseColorFactor.a < 0.5) {
         discard_fragment();

@@ -1860,7 +1860,6 @@ auto Renderer_Vulkan::draw(std::shared_ptr<Scene> scene, Camera& camera) -> void
         glm::vec3 center = (mesh->localAABBMin + mesh->localAABBMax) * 0.5f;
         glm::vec3 extent = mesh->localAABBMax - center;
         instances.push_back({ .model = glm::identity<glm::mat4>(),
-                              .normalMatrix = glm::identity<glm::mat4>(),
                               .vertexOffset = mesh->vertexOffset,
                               .indexOffset = mesh->indexOffset,
                               .vertexCount = mesh->vertexCount,

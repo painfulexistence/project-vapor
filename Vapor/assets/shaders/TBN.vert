@@ -23,7 +23,6 @@ layout(binding = 0) uniform CameraData {
 };
 struct InstanceData {
     mat4 model;
-    mat4 normalMatrix; // inverse-transpose of model's upper 3x3, precomputed on CPU
     vec4 color;
     uint vertexOffset;
     uint indexOffset;
@@ -42,7 +41,7 @@ layout(set = 0, binding = 1) uniform InstanceBuffer {
 void main() {
     mat4 model = instances[instanceID].model;
     // Caution: world normal and tangent are not normalized here
-    mat3 normalMatrix = mat3(instances[instanceID].normalMatrix);
+    mat3 normalMatrix = transpose(inverse(mat3(model)));
     world_normal = vec3(normalMatrix * normal);
     world_tangent = vec4(vec3(normalMatrix * tangent.xyz), tangent.w);
 

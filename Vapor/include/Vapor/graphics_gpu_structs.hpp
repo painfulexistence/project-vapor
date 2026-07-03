@@ -88,7 +88,6 @@ struct alignas(16) CameraData {
 
 struct alignas(16) InstanceData {
     glm::mat4 model;
-    glm::mat4 normalMatrix; // inverse-transpose of model's upper 3x3, precomputed on CPU
     glm::vec4 color;
     Uint32 vertexOffset;
     Uint32 indexOffset;

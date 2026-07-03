@@ -31,8 +31,6 @@ class VelocityPass;
 class TileCullingPass;
 class RaytraceShadowPass;
 class RaytraceAOPass;
-class AOTemporalPass;
-class AODenoisePass;
 class SkyAtmospherePass;
 class SkyCapturePass;
 class IrradianceConvolutionPass;
@@ -282,8 +280,6 @@ class Renderer_Metal final : public Renderer {// Must be public or factory funct
     friend class TileCullingPass;
     friend class RaytraceShadowPass;
     friend class RaytraceAOPass;
-    friend class AOTemporalPass;
-    friend class AODenoisePass;
     friend class SkyAtmospherePass;
     friend class SkyCapturePass;
     friend class IrradianceConvolutionPass;
@@ -517,8 +513,6 @@ protected:
     NS::SharedPtr<MTL::ComputePipelineState> velocityPipeline;
     NS::SharedPtr<MTL::ComputePipelineState> raytraceShadowPipeline;
     NS::SharedPtr<MTL::ComputePipelineState> raytraceAOPipeline;
-    NS::SharedPtr<MTL::ComputePipelineState> aoTemporalPipeline;
-    NS::SharedPtr<MTL::ComputePipelineState> aoDenoisePipeline;
     NS::SharedPtr<MTL::RenderPipelineState> atmospherePipeline;
     NS::SharedPtr<MTL::RenderPipelineState> skyCapturePipeline;
     NS::SharedPtr<MTL::RenderPipelineState> irradianceConvolutionPipeline;
@@ -703,13 +697,6 @@ protected:
     std::vector<NS::SharedPtr<MTL::Buffer>> accelInstanceBuffers;
     std::vector<NS::SharedPtr<MTL::Buffer>> TLASScratchBuffers;
     std::vector<NS::SharedPtr<MTL::AccelerationStructure>> TLASBuffers;
-    // TLAS rebuild/refit/skip tracking:
-    // accelGeneration bumps whenever the uploaded instance set changes (compared in draw());
-    // each in-flight TLAS slot records the generation and instance count it was last built for.
-    std::vector<MTL::AccelerationStructureInstanceDescriptor> lastAccelInstances;
-    uint64_t accelGeneration = 1; // starts above the slots' 0 so the first frame always builds
-    std::array<uint64_t, 8> tlasBuiltGeneration = {};
-    std::array<size_t, 8> tlasBuiltInstanceCount = {}; // SIZE_MAX marks a slot as needing a full rebuild
 
     // Instance data
     // instanceBatches: material → list of (mesh, instanceArrayIndex) for rasterization draw calls
@@ -736,15 +723,7 @@ protected:
     glm::mat4 prevViewProj = glm::mat4(1.0f);
     bool prevViewProjValid = false;
 
-    // RT AO denoise chain (raygen → temporal → à-trous → aoRT), see ADR-008
-    NS::SharedPtr<MTL::Texture> aoRawRT;          // R16Float, noisy raygen output
-    NS::SharedPtr<MTL::Texture> aoHistoryRT[2];   // RG16Float ping-pong: (accumulated AO, view-space depth)
-    NS::SharedPtr<MTL::Texture> aoScratchRT;      // RG16Float, à-trous intermediate
     NS::SharedPtr<MTL::Texture> aoRTGrayView;     // swizzle view (r,r,r,1) of aoRT for ImGui preview
-    uint32_t aoHistoryIndex = 0;                  // aoHistoryRT[aoHistoryIndex] holds the latest history
-    bool aoHistoryValid = false;
-    glm::mat4 prevView = glm::mat4(1.0f);
-    bool prevViewValid = false;
 
     // Bloom render targets
     NS::SharedPtr<MTL::Texture> bloomBrightnessRT;// Half-res brightness extraction

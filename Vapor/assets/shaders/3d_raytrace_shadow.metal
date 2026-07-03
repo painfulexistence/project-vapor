@@ -55,11 +55,8 @@ kernel void computeMain(
         r.min_distance = 0.1;
         r.max_distance = 10000.0;
 
-        // Occlusion query: any hit terminates traversal, and no per-triangle
-        // data (barycentrics etc.) is needed — the result is only hit/none.
-        raytracing::intersector<raytracing::instancing> inter;
+        raytracing::intersector<raytracing::instancing, raytracing::triangle_data> inter;
         inter.assume_geometry_type(raytracing::geometry_type::triangle);
-        inter.accept_any_intersection(true);
         auto intersection = inter.intersect(r, TLAS, 0xFF);
         if (intersection.type == raytracing::intersection_type::triangle) {
             finalColor = float4(0.0, 0.0, 0.0, 1.0);

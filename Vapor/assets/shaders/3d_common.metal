@@ -38,7 +38,6 @@ struct CameraData {
 
 struct InstanceData {
     float4x4 model;
-    float4x4 normalMatrix; // inverse-transpose of model's upper 3x3, precomputed on CPU
     float4 color;
     uint vertexOffset;
     uint indexOffset;

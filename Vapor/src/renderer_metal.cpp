@@ -83,7 +83,6 @@ public:
         encoder->setVertexBuffer(r.materialDataBuffer.get(), 0, 1);
         encoder->setVertexBuffer(r.instanceDataBuffers[r.currentFrameInFlight].get(), 0, 2);
         encoder->setVertexBuffer(r.getBuffer(r.currentScene->vertexBuffer).get(), 0, 3);
-        encoder->setFragmentBuffer(r.materialDataBuffer.get(), 0, 0);
 
         for (const auto& [material, draws] : r.instanceBatches) {
             encoder->setFragmentTexture(
@@ -132,33 +131,20 @@ public:
             }
             r.BLASArray = NS::TransferPtr(NS::Array::array(blasObjects.data(), blasObjects.size()));
             r.currentScene->isGeometryDirty = false;
-            // A changed BLAS set invalidates every in-flight TLAS (refit can't change topology)
-            r.tlasBuiltInstanceCount.fill(SIZE_MAX);
-            r.accelGeneration++;
         }
 
         auto slot = r.currentFrameInFlight;
 
-        // Skip: this slot's TLAS already reflects the current instance set
-        if (r.TLASBuffers[slot] && r.tlasBuiltGeneration[slot] == r.accelGeneration
-            && r.tlasBuiltInstanceCount[slot] == r.accelInstances.size()) {
-            return;
-        }
-
-        // Create TLAS descriptor. Note: deliberately NOT UsageRefit — refit-capable
-        // acceleration structures trade traversal performance for updatability, and
-        // that cost is paid by every RT pass (measured ~+5ms on the shadow pass).
-        // A full instance-level rebuild is ~0.2ms; the skip above removes even that
-        // for static scenes.
+        // Create TLAS descriptor (built every frame, matching mainline behavior;
+        // skip/refit optimizations were backed out to shrink this change set)
         auto tlasDesc = NS::TransferPtr(MTL::InstanceAccelerationStructureDescriptor::alloc()->init());
         tlasDesc->setInstanceCount(r.accelInstances.size());
         tlasDesc->setInstancedAccelerationStructures(r.BLASArray.get());
         tlasDesc->setInstanceDescriptorBuffer(r.accelInstanceBuffers[slot].get());
 
         auto tlasSizes = r.device->accelerationStructureSizes(tlasDesc.get());
-        if (tlasSizes.buildScratchBufferSize > 0
-            && (!r.TLASScratchBuffers[slot]
-                || r.TLASScratchBuffers[slot]->length() < tlasSizes.buildScratchBufferSize)) {
+        if (!r.TLASScratchBuffers[slot]
+            || r.TLASScratchBuffers[slot]->length() < tlasSizes.buildScratchBufferSize) {
             r.TLASScratchBuffers[slot] = NS::TransferPtr(
                 r.device->newBuffer(tlasSizes.buildScratchBufferSize, MTL::ResourceStorageModePrivate)
             );
@@ -177,9 +163,6 @@ public:
             0
         );
         accelEncoder->endEncoding();
-
-        r.tlasBuiltGeneration[slot] = r.accelGeneration;
-        r.tlasBuiltInstanceCount[slot] = r.accelInstances.size();
     }
 };
 
@@ -350,117 +333,18 @@ public:
         encoder->setComputePipelineState(r.raytraceAOPipeline.get());
         encoder->setTexture(r.depthStencilRT.get(), 0);
         encoder->setTexture(r.normalRT.get(), 1);
-        encoder->setTexture(r.aoRawRT.get(), 2); // noisy output; temporal + à-trous passes produce aoRT
+        encoder->setTexture(r.aoRT.get(), 2);
         encoder->setBuffer(r.frameDataBuffers[r.currentFrameInFlight].get(), 0, 0);
         encoder->setBuffer(r.cameraDataBuffers[r.currentFrameInFlight].get(), 0, 1);
         encoder->setAccelerationStructure(r.TLASBuffers[r.currentFrameInFlight].get(), 2);
-        auto w = r.aoRawRT->width(); // half resolution — see AO chain creation
-        auto h = r.aoRawRT->height();
+        auto w = r.aoRT->width();
+        auto h = r.aoRT->height();
         encoder->dispatchThreads(MTL::Size(w, h, 1), MTL::Size(8, 8, 1));
         encoder->endEncoding();
 
         // Traffic: depth read (4B) + normal read (8B) + AO write (2B) per half-res pixel.
         // BVH traversal traffic is not estimable here.
         addTrafficEstimate(uint64_t(w) * h * (4 + 8 + 2));
-    }
-};
-
-// AO temporal accumulation: reprojects last frame's AO with the velocity
-// buffer and blends it with the raygen output (ADR-008 step 2).
-class AOTemporalPass : public RenderPass {
-public:
-    explicit AOTemporalPass(Renderer_Metal* renderer) : RenderPass(renderer) {
-    }
-
-    auto getName() const -> const char* override {
-        return "AOTemporalPass";
-    }
-
-    void execute() override {
-        auto& r = *renderer;
-
-        if (!r.aoTemporalPipeline) return;
-
-        glm::mat4 curView = r.currentCamera->getViewMatrix();
-        if (!r.prevViewValid) {
-            r.prevView = curView;
-            r.prevViewValid = true;
-        }
-        uint32_t historyValid = r.aoHistoryValid ? 1u : 0u;
-        uint32_t inIdx = r.aoHistoryIndex;
-        uint32_t outIdx = inIdx ^ 1u;
-
-        auto timedComputeDesc = makeTimedComputeDesc(true, true);
-        auto encoder = r.currentCommandBuffer->computeCommandEncoder(timedComputeDesc.get());
-        encoder->setComputePipelineState(r.aoTemporalPipeline.get());
-        encoder->setTexture(r.aoRawRT.get(), 0);
-        encoder->setTexture(r.aoHistoryRT[inIdx].get(), 1);
-        encoder->setTexture(r.aoHistoryRT[outIdx].get(), 2);
-        encoder->setTexture(r.velocityRT.get(), 3);
-        encoder->setTexture(r.depthStencilRT.get(), 4);
-        encoder->setTexture(r.normalRT.get(), 5);
-        encoder->setBuffer(r.cameraDataBuffers[r.currentFrameInFlight].get(), 0, 0);
-        encoder->setBytes(&r.prevView, sizeof(glm::mat4), 1);
-        encoder->setBytes(&historyValid, sizeof(uint32_t), 2);
-        auto w = r.aoRawRT->width();
-        auto h = r.aoRawRT->height();
-        encoder->dispatchThreads(MTL::Size(w, h, 1), MTL::Size(8, 8, 1));
-        encoder->endEncoding();
-
-        // Traffic: raw AO (2B) + history in/out (8B each) + velocity (4B) + depth (4B) + normal (8B)
-        addTrafficEstimate(uint64_t(w) * h * (2 + 8 + 8 + 4 + 4 + 8));
-
-        r.aoHistoryIndex = outIdx;
-        r.aoHistoryValid = true;
-        r.prevView = curView; // setBytes copied the old value into the command stream
-    }
-};
-
-// AO spatial denoise: edge-aware à-trous iterations, history → scratch → aoRT
-// (ADR-008 step 3). aoRT is what the lighting/post passes consume.
-class AODenoisePass : public RenderPass {
-public:
-    explicit AODenoisePass(Renderer_Metal* renderer) : RenderPass(renderer) {
-    }
-
-    auto getName() const -> const char* override {
-        return "AODenoisePass";
-    }
-
-    void execute() override {
-        auto& r = *renderer;
-
-        if (!r.aoDenoisePipeline) return;
-
-        auto w = r.aoRT->width();
-        auto h = r.aoRT->height();
-        struct Iteration {
-            MTL::Texture* src;
-            MTL::Texture* dst;
-            uint32_t stride;
-        };
-        const Iteration iterations[] = {
-            { r.aoHistoryRT[r.aoHistoryIndex].get(), r.aoScratchRT.get(), 1u },
-            { r.aoScratchRT.get(), r.aoRT.get(), 2u }, // final target is single-channel; depth rides in G until here
-        };
-        constexpr size_t iterationCount = sizeof(iterations) / sizeof(iterations[0]);
-        // One serial compute encoder for all iterations: successive dispatches are
-        // ordered and their writes visible to each other, and the timing samples
-        // follow the same single-encoder pattern as every other compute pass.
-        auto timedComputeDesc = makeTimedComputeDesc(true, true);
-        auto encoder = r.currentCommandBuffer->computeCommandEncoder(timedComputeDesc.get());
-        encoder->setComputePipelineState(r.aoDenoisePipeline.get());
-        for (size_t i = 0; i < iterationCount; i++) {
-            encoder->setTexture(iterations[i].src, 0);
-            encoder->setTexture(iterations[i].dst, 1);
-            encoder->setBytes(&iterations[i].stride, sizeof(uint32_t), 0);
-            encoder->dispatchThreads(MTL::Size(w, h, 1), MTL::Size(8, 8, 1));
-        }
-        encoder->endEncoding();
-
-        // Traffic per iteration: 25 src taps (8B) + write (8B),
-        // issued reads — caches make real DRAM traffic much lower
-        addTrafficEstimate(uint64_t(w) * h * (25 * 8 + 8) * iterationCount);
     }
 };
 
@@ -820,7 +704,6 @@ public:
         encoder->setFragmentBuffer(r.rectLightBuffer.get(), 0, 7);
         uint32_t rectLightCount = static_cast<uint32_t>(r.currentScene->rectLights.size());
         encoder->setFragmentBytes(&rectLightCount, sizeof(uint32_t), 8);
-        encoder->setFragmentBuffer(r.materialDataBuffer.get(), 0, 9);
         auto* vidTex = r.rectLightVideoTexture
                            ? r.rectLightVideoTexture.get()
                            : r.getTexture(r.defaultAlbedoTexture).get();
@@ -2384,8 +2267,6 @@ auto Renderer_Metal::init(SDL_Window* window) -> void {
     graph.addPass(std::make_unique<TileCullingPass>(this));
     if (m_supportsRaytracing) graph.addPass(std::make_unique<RaytraceShadowPass>(this));
     if (m_supportsRaytracing) graph.addPass(std::make_unique<RaytraceAOPass>(this));
-    if (m_supportsRaytracing) graph.addPass(std::make_unique<AOTemporalPass>(this));
-    if (m_supportsRaytracing) graph.addPass(std::make_unique<AODenoisePass>(this));
     graph.addPass(std::make_unique<MainRenderPass>(this));
     graph.addPass(std::make_unique<SkyAtmospherePass>(this));
     // graph.addPass(std::make_unique<WaterPass>(this));
@@ -2556,8 +2437,6 @@ auto Renderer_Metal::createResources() -> void {
     // SSAO is the current default — RT AO works but reads as near-blank in this
     // scene (1.5m ray cap rarely hits anything outside tight corners).
     if (m_supportsRaytracing) raytraceAOPipeline = createComputePipeline("shaders/3d_ssao.metal");
-    if (m_supportsRaytracing) aoTemporalPipeline = createComputePipeline("shaders/3d_ao_temporal.metal");
-    if (m_supportsRaytracing) aoDenoisePipeline = createComputePipeline("shaders/3d_ao_denoise.metal");
     atmospherePipeline =
         createPipeline("shaders/3d_atmosphere.metal", true, false, 1);// No MSAA for sky (full-screen triangle)
     skyCapturePipeline = createPipeline("shaders/3d_sky_capture.metal", true, true, 1);
@@ -3096,24 +2975,6 @@ auto Renderer_Metal::createResources() -> void {
     velocityTextureDesc->setUsage(MTL::TextureUsageShaderRead | MTL::TextureUsageShaderWrite);
     velocityRT = NS::TransferPtr(device->newTexture(velocityTextureDesc));
     velocityTextureDesc->release();
-
-    // RT AO denoise chain targets (raygen → temporal history ping-pong → à-trous scratch).
-    // Full resolution for now (half-res reverted during shadow debugging); the kernels
-    // are resolution-agnostic, so flipping these dimensions back to half is enough to
-    // re-enable the cheaper half-res chain (ADR-008).
-    MTL::TextureDescriptor* aoChainDesc = MTL::TextureDescriptor::alloc()->init();
-    aoChainDesc->setTextureType(MTL::TextureType2D);
-    aoChainDesc->setWidth(swapchain->drawableSize().width);
-    aoChainDesc->setHeight(swapchain->drawableSize().height);
-    aoChainDesc->setUsage(MTL::TextureUsageShaderRead | MTL::TextureUsageShaderWrite);
-    aoChainDesc->setPixelFormat(MTL::PixelFormatR16Float);
-    aoRawRT = NS::TransferPtr(device->newTexture(aoChainDesc));
-    // RGBA16F: (ao, view-space depth, octahedral normal) — see 3d_ao_temporal.metal
-    aoChainDesc->setPixelFormat(MTL::PixelFormatRGBA16Float);
-    aoHistoryRT[0] = NS::TransferPtr(device->newTexture(aoChainDesc));
-    aoHistoryRT[1] = NS::TransferPtr(device->newTexture(aoChainDesc));
-    aoScratchRT = NS::TransferPtr(device->newTexture(aoChainDesc));
-    aoChainDesc->release();
 
     // Grayscale swizzle view of the single-channel AO target for the ImGui preview
     aoRTGrayView = NS::TransferPtr(aoRT->newTextureView(
@@ -4383,17 +4244,6 @@ auto Renderer_Metal::draw(std::shared_ptr<Scene> scene, Camera& camera) -> void 
     accelInstanceBuffers[currentFrameInFlight]->didModifyRange(
         NS::Range::Make(0, accelInstanceBuffers[currentFrameInFlight]->length())
     );
-    // Bump the TLAS generation only when the instance set actually changed, so
-    // TLASBuildPass can skip unchanged frames and rebuild only on a real change.
-    if (accelInstances.size() != lastAccelInstances.size()
-        || (!accelInstances.empty()
-            && memcmp(
-                   accelInstances.data(), lastAccelInstances.data(),
-                   accelInstances.size() * sizeof(MTL::AccelerationStructureInstanceDescriptor)
-               ) != 0)) {
-        lastAccelInstances = accelInstances;
-        accelGeneration++;
-    }
 
     // ==========================================================================
     // Set up rendering context for passes
@@ -5532,7 +5382,6 @@ void Renderer_Metal::renderToTexture(
     encoder->setFragmentBuffer(rectLightBuffer.get(), 0, 7);
     uint32_t rtRectLightCount = static_cast<uint32_t>(scene->rectLights.size());
     encoder->setFragmentBytes(&rtRectLightCount, sizeof(uint32_t), 8);
-    encoder->setFragmentBuffer(materialDataBuffer.get(), 0, 9);
     encoder->setFragmentTexture(
         rectLightVideoTexture ? rectLightVideoTexture.get() : getTexture(defaultAlbedoTexture).get(), 11
     );
@@ -6455,20 +6304,6 @@ extern "C" auto getMetalDevice(void* renderer) -> void* {
     return nullptr;
 }
 
-// Inverse-transpose of the model's upper 3x3 for transforming normals.
-// Must guard against singular matrices (e.g. a cube flattened to a plane by a
-// zero scale on one axis): glm::inverse would emit inf/NaN, which poisons the
-// normal RT and in turn every consumer — shadow ray origins become NaN and
-// whole instances lose their shadows. The old in-shader inverse() helper had
-// this guard (det < 1e-6 → identity); the CPU precompute must keep it.
-static glm::mat4 computeNormalMatrix(const glm::mat4& model) {
-    glm::mat3 m3(model);
-    float det = glm::determinant(m3);
-    if (std::abs(det) < 1e-6f) {
-        return glm::mat4(1.0f);
-    }
-    return glm::mat4(glm::transpose(glm::inverse(m3)));
-}
 
 void Renderer_Metal::draw(entt::registry& registry, std::shared_ptr<Scene> scene, Camera& camera) {
     // Build ECS instance data; draw(scene, camera) will clear instances/instanceBatches from Nodes,
@@ -6503,7 +6338,6 @@ void Renderer_Metal::draw(entt::registry& registry, std::shared_ptr<Scene> scene
             auto instanceIdx = static_cast<uint32_t>(pendingEcsInstances.size());
             pendingEcsInstances.push_back({
                 .model = worldMat,
-                .normalMatrix = computeNormalMatrix(worldMat),
                 .color = glm::vec4(1.0f),
                 .vertexOffset = mesh->vertexOffset,
                 .indexOffset = mesh->indexOffset,
@@ -6560,7 +6394,6 @@ void Renderer_Metal::draw(entt::registry& registry, std::shared_ptr<Scene> scene
         auto instanceIdx = static_cast<uint32_t>(pendingEcsInstances.size());
         pendingEcsInstances.push_back({
             .model = worldMat,
-            .normalMatrix = computeNormalMatrix(worldMat),
             .color = glm::vec4(1.0f),
             .vertexOffset = mesh->vertexOffset,
             .indexOffset = mesh->indexOffset,

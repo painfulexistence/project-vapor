@@ -11,7 +11,7 @@ struct RasterizerData {
     float4 worldTangent;
     float3 scaledLocalPos;
     float3 localNormal;
-    uint materialID [[flat]]; // material fetched in fragment stage; don't interpolate ~21 floats
+    MaterialData material;
 };
 
 struct Surface {
@@ -314,15 +314,18 @@ vertex RasterizerData vertexMain(
     RasterizerData vert;
     uint actualVertexID = instances[instanceID].vertexOffset + vertexID;
     float4x4 model = instances[instanceID].model;
-    float4x4 nm = instances[instanceID].normalMatrix;
-    float3x3 normalMatrix = float3x3(nm[0].xyz, nm[1].xyz, nm[2].xyz);
+    float3x3 normalMatrix = transpose(inverse(float3x3(
+        model[0].xyz,
+        model[1].xyz,
+        model[2].xyz
+    )));
     // Caution: worldNormal and worldTangent are not normalized yet, and they can be affected by model scaling
     vert.worldNormal = float4(normalMatrix * float3(in[actualVertexID].normal), 0.0);
     vert.worldTangent = float4(normalMatrix * in[actualVertexID].tangent.xyz, in[actualVertexID].tangent.w);
     vert.worldPosition = model * float4(in[actualVertexID].position, 1.0);
     vert.position = camera.proj * camera.view * vert.worldPosition;
     vert.uv = in[actualVertexID].uv;
-    vert.materialID = instances[instanceID].materialID;
+    vert.material = materials[instances[instanceID].materialID];
     
     // Pass scaled local position and local normal for Object Space Triplanar
     float3 scale = float3(length(model[0].xyz), length(model[1].xyz), length(model[2].xyz));
@@ -353,12 +356,11 @@ fragment float4 fragmentMain(
     constant packed_uint3& gridSize [[buffer(5)]],
     constant float& time [[buffer(6)]],
     const device RectLight* rectLights [[buffer(7)]],
-    constant uint& rectLightCount [[buffer(8)]],
-    constant MaterialData* materials [[buffer(9)]]
+    constant uint& rectLightCount [[buffer(8)]]
 ) {
     constexpr sampler s(address::repeat, filter::linear, mip_filter::linear);
 
-    MaterialData material = materials[in.materialID];
+    MaterialData material = in.material;
 
     // Prototype UV: triplanar mapping with world space or object space
     // Mode: 0 = Off, 1 = World Space (static objects), 2 = Object Space (dynamic objects)
