@@ -303,7 +303,7 @@ public:
         auto drawableSize = r.swapchain->drawableSize();
         glm::vec2 screenSize = glm::vec2(drawableSize.width, drawableSize.height);
 
-        auto timedComputeDesc = makeTimedComputeDesc(true, true);
+        auto timedComputeDesc = makeTimedComputeDesc(true, false);
         auto encoder = r.currentCommandBuffer->computeCommandEncoder(timedComputeDesc.get());
         encoder->setComputePipelineState(r.raytraceShadowPipeline.get());
         encoder->setTexture(r.depthStencilRT.get(), 0);
@@ -316,12 +316,18 @@ public:
         encoder->setAccelerationStructure(r.TLASBuffers[r.currentFrameInFlight].get(), 4);
         encoder->dispatchThreads(MTL::Size(drawableSize.width, drawableSize.height, 1), MTL::Size(8, 8, 1));
         encoder->endEncoding();
-        // (The former per-frame mipmap generation was dead work: no consumer ever
-        // sampled beyond LOD 0, all reads are screen-space 1:1.)
 
-        // Traffic: depth read (4B) + normal read (8B) + shadow write (R8, 1B) per pixel
+        // Generate mipmaps for shadow texture (restored while bisecting the
+        // shadow visual regression)
+        auto shadowBlitDesc = makeTimedBlitDesc(false, true);
+        auto mipmapEncoder = NS::TransferPtr(r.currentCommandBuffer->blitCommandEncoder(shadowBlitDesc.get()));
+        mipmapEncoder->generateMipmaps(r.shadowRT.get());
+        mipmapEncoder->endEncoding();
+
+        // Traffic: depth read (4B) + normal read (8B) + shadow write (4B) per pixel,
+        // plus mip chain regeneration (~5/3 of the base level)
         uint64_t px = uint64_t(drawableSize.width) * drawableSize.height;
-        addTrafficEstimate(px * (4 + 8 + 1));
+        addTrafficEstimate(px * (4 + 8 + 4) + px * 4 * 5 / 3);
     }
 };
 
@@ -3045,13 +3051,16 @@ auto Renderer_Metal::createResources() -> void {
     normalRT = NS::TransferPtr(device->newTexture(normalTextureDesc));
     normalTextureDesc->release();
 
-    // RGBA8 (reverted from R8 while bisecting a visual regression), no mips:
-    // every consumer samples only .r at LOD 0 (screen-space 1:1)
+    // RGBA8 + mip chain (both restored while bisecting a visual regression;
+    // see RaytraceShadowPass for the mip regeneration)
     MTL::TextureDescriptor* shadowTextureDesc = MTL::TextureDescriptor::alloc()->init();
     shadowTextureDesc->setTextureType(MTL::TextureType2D);
     shadowTextureDesc->setPixelFormat(MTL::PixelFormatRGBA8Unorm);
     shadowTextureDesc->setWidth(swapchain->drawableSize().width);
     shadowTextureDesc->setHeight(swapchain->drawableSize().height);
+    shadowTextureDesc->setMipmapLevelCount(
+        calculateMipmapLevelCount(swapchain->drawableSize().width, swapchain->drawableSize().height)
+    );
     shadowTextureDesc->setUsage(MTL::TextureUsageShaderRead | MTL::TextureUsageShaderWrite);
     shadowRT = NS::TransferPtr(device->newTexture(shadowTextureDesc));
     shadowRTGrayView = NS::TransferPtr(shadowRT->newTextureView(
