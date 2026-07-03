@@ -118,7 +118,8 @@ struct SurfelRaytracingParams {
     uint frameIndex;
     float rayBias;
     float rayMaxDistance;
-    float2 _pad;
+    uint updateInterval;    // Trace 1/N of surfels per frame (staggered round-robin)
+    uint _pad;
 };
 
 // Screen-space sampling parameters

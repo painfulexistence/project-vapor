@@ -29,6 +29,8 @@ kernel void surfelGeneration(
     device atomic_uint* counters [[buffer(1)]],
     constant GIBSData& gibs [[buffer(2)]],
     constant SurfelGenerationParams& params [[buffer(3)]],
+    device const Surfel* sortedSurfels [[buffer(4)]],
+    device const SurfelCell* cells [[buffer(5)]],
     uint2 gid [[thread_position_in_grid]],
     uint2 gridSize [[threads_per_grid]]
 ) {
@@ -95,6 +97,29 @@ kernel void surfelGeneration(
     // Cheap pool-full early-out (racy read is fine; bounds check below is authoritative)
     if (atomic_load_explicit(&counters[COUNTER_TOTAL_SURFELS], memory_order_relaxed) >= gibs.maxSurfels) {
         return;
+    }
+
+    // Coverage check: reject if an existing surfel already covers this point.
+    // The hash build pass runs BEFORE generation, so cells/sortedSurfels reflect
+    // last frame's surfel pool. Without this the pool fills with duplicates of
+    // the same surfaces and raytracing cost explodes.
+    // Only reached by stochastically accepted pixels (~1%), so the cell scan is cheap.
+    {
+        uint coverageCell = computeCellHash(worldPos, gibs);
+        SurfelCell cell = cells[coverageCell];
+        uint checkCount = min(cell.surfelCount, 64u);
+        for (uint i = 0; i < checkCount; i++) {
+            Surfel existing = sortedSurfels[cell.surfelOffset + i];
+            if (!(existing.flags & SURFEL_FLAG_VALID)) {
+                continue;
+            }
+            float dist = length(float3(existing.position) - worldPos);
+            bool covered = dist < existing.radius * 2.0
+                        && dot(float3(existing.normal), normal) > 0.7;
+            if (covered) {
+                return; // surface already represented here
+            }
+        }
     }
 
     // Per-frame generation budget

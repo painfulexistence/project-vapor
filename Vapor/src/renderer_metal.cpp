@@ -2654,6 +2654,9 @@ public:
         encoder->setBuffer(gibsManager->getCounterBuffer(), 0, 1);
         encoder->setBuffer(gibsManager->getGIBSDataBuffer(r.currentFrameInFlight), 0, 2);
         encoder->setBytes(&params, sizeof(params), 3);
+        // Fresh spatial hash (hash build runs before this pass) for coverage rejection
+        encoder->setBuffer(gibsManager->getSurfelBufferSorted(), 0, 4);
+        encoder->setBuffer(gibsManager->getCellBuffer(), 0, 5);
 
         uint32_t dispatchX = (static_cast<uint32_t>(screenSize.x) + 7) / 8;
         uint32_t dispatchY = (static_cast<uint32_t>(screenSize.y) + 7) / 8;
@@ -2738,6 +2741,10 @@ public:
         if (!r.gibsEnabled || !gibsManager || !r.surfelRaytracingSimplePipeline) return;
         const auto& gibsData = gibsManager->getGIBSData();
 
+        // Staggered updates: refresh 1/4 of the surfel pool per frame; temporal
+        // blending integrates the rest. Cuts per-frame ray cost by 4x.
+        constexpr uint32_t UPDATE_INTERVAL = 4;
+
         SurfelRaytracingParams params;
         params.surfelOffset = 0;
         params.surfelCount = gibsManager->getActiveSurfelCount();
@@ -2745,6 +2752,7 @@ public:
         params.frameIndex = r.frameNumber;
         params.rayBias = gibsData.rayBias;
         params.rayMaxDistance = gibsData.rayMaxDistance;
+        params.updateInterval = UPDATE_INTERVAL;
 
         if (params.surfelCount == 0) return;
 
@@ -2769,11 +2777,13 @@ public:
             encoder->setBuffer(gibsManager->getSurfelBufferSorted(), 0, 5);
         }
 
-        uint32_t threadGroups = (params.surfelCount + 63) / 64;
+        // Only dispatch threads for this frame's residue class of surfels
+        uint32_t surfelsThisFrame = (params.surfelCount + UPDATE_INTERVAL - 1) / UPDATE_INTERVAL;
+        uint32_t threadGroups = (surfelsThisFrame + 63) / 64;
         encoder->dispatchThreadgroups(MTL::Size(threadGroups, 1, 1), MTL::Size(64, 1, 1));
         encoder->endEncoding();
 
-        addTrafficEstimate(uint64_t(params.surfelCount) * sizeof(Surfel) * 2);
+        addTrafficEstimate(uint64_t(surfelsThisFrame) * sizeof(Surfel) * 2);
     }
 
 private:
@@ -2942,10 +2952,13 @@ auto Renderer_Metal::init(SDL_Window* window) -> void {
     if (m_supportsRaytracing) graph.addPass(std::make_unique<PointShadowTemporalPass>(this));
 
     // GIBS (Global Illumination Based on Surfels) passes
-    // Always add passes; they check gibsEnabled in execute() for runtime toggle
+    // Always add passes; they check gibsEnabled in execute() for runtime toggle.
+    // Hash build runs FIRST so generation can coverage-check against the fresh
+    // spatial hash (built from last frame's pool) and raytracing/sampling get
+    // up-to-date cells.
     if (gibsManager) {
-        graph.addPass(std::make_unique<SurfelGenerationPass>(this, gibsManager.get()));
         graph.addPass(std::make_unique<SurfelHashBuildPass>(this, gibsManager.get()));
+        graph.addPass(std::make_unique<SurfelGenerationPass>(this, gibsManager.get()));
         graph.addPass(std::make_unique<SurfelRaytracingPass>(this, gibsManager.get()));
         graph.addPass(std::make_unique<GIBSTemporalPass>(this, gibsManager.get()));
         graph.addPass(std::make_unique<GIBSSamplePass>(this, gibsManager.get()));

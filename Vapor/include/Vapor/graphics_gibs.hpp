@@ -171,7 +171,8 @@ struct alignas(16) SurfelRaytracingParams {
     Uint32 frameIndex;
     float rayBias;
     float rayMaxDistance;
-    glm::vec2 _pad;
+    Uint32 updateInterval;        // Trace 1/N of surfels per frame (staggered round-robin)
+    Uint32 _pad;
 };
 
 // Screen-space GI sampling parameters

@@ -101,7 +101,11 @@ kernel void surfelRaytracing(
     device const Surfel* sortedSurfels [[buffer(5)]],
     uint gid [[thread_position_in_grid]]
 ) {
-    uint surfelIndex = params.surfelOffset + gid;
+    // Staggered updates: each frame traces one residue class of surfel indices,
+    // so 1/updateInterval of the pool refreshes per frame and temporal blending
+    // integrates the rest. The dispatch is sized to surfelCount/updateInterval.
+    uint interval = max(params.updateInterval, 1u);
+    uint surfelIndex = params.surfelOffset + gid * interval + (params.frameIndex % interval);
 
     if (surfelIndex >= gibs.activeSurfelCount) {
         return;
@@ -189,7 +193,8 @@ kernel void surfelRaytracingSimple(
     constant SurfelRaytracingParams& params [[buffer(3)]],
     uint gid [[thread_position_in_grid]]
 ) {
-    uint surfelIndex = params.surfelOffset + gid;
+    uint interval = max(params.updateInterval, 1u);
+    uint surfelIndex = params.surfelOffset + gid * interval + (params.frameIndex % interval);
 
     if (surfelIndex >= gibs.activeSurfelCount) {
         return;
