@@ -374,13 +374,18 @@ public:
         struct PSSMGPUData {
             glm::mat4 lightSpaceMatrices[3];
             glm::vec4 cascadeSplits;
-            float blendRange;
-            float _pad[3];
+            float blendRange;          // RT↔PSSM blend range
+            float cascadeBlendRange;   // cascade↔cascade blend range
+            uint32_t pcfSampleCount;   // 4, 8, 16, or 32
+            uint32_t debugVisualize;   // 0 = off, 1 = visualize cascades
         };
 
         PSSMGPUData gpuData{};
         gpuData.cascadeSplits = glm::vec4(splits[0], splits[1], splits[2], splits[3]);
-        gpuData.blendRange    = blendRange;
+        gpuData.blendRange         = blendRange;
+        gpuData.cascadeBlendRange  = r.pssmCascadeBlendRange;
+        gpuData.pcfSampleCount     = r.pssmPcfSampleCount;
+        gpuData.debugVisualize     = r.pssmDebugVisualize ? 1 : 0;
 
         // Convert a forward view-space distance to NDC z by projecting an actual
         // view-space point. Handedness-aware: RH projections (glm default; the

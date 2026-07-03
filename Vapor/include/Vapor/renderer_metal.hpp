@@ -779,6 +779,11 @@ protected:
     static constexpr uint32_t PSSM_SHADOW_MAP_SIZE = 4096;
     float pssmRTMaxDist = 50.0f; // view-space depth where RT shadow ends and PSSM begins
 
+    // PSSM PCF and blend settings
+    float pssmCascadeBlendRange = 10.0f;  // blend range between PSSM cascades (view-space units)
+    uint32_t pssmPcfSampleCount = 16;     // PCF sample count: 4, 8, 16, or 32
+    bool pssmDebugVisualize = false;      // visualize cascade regions with colors
+
     // Stochastic point shadow debug: 0 = visibility, 1 = tile light-count heatmap
     uint32_t pointShadowDebugMode = 0;
 

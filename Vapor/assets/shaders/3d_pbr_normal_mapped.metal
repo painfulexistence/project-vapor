@@ -432,43 +432,120 @@ fragment float4 fragmentMain(
     // abs(): view matrix is RH (visible z is negative); splits are positive distances
     float viewDepth = abs((camera.view * in.worldPosition).z);
 
+    // Helper: sample PSSM shadow with configurable PCF
+    auto samplePSSMShadow = [&](int cascadeIndex, float2 shadowUV, float refDepth) -> float {
+        float pcf = 0.0;
+        uint sampleCount = pssmData.pcfSampleCount;
+
+        if (sampleCount <= 4) {
+            // 4-tap Poisson disk
+            for (int i = 0; i < 4; i++) {
+                pcf += pssmShadowMaps.sample_compare(
+                    shadowCmpSampler,
+                    shadowUV + poissonDisk4[i] * PSSM_TEXEL * 2.0,
+                    cascadeIndex, refDepth
+                );
+            }
+            return pcf / 4.0;
+        } else if (sampleCount <= 8) {
+            // 8-tap Poisson disk
+            for (int i = 0; i < 8; i++) {
+                pcf += pssmShadowMaps.sample_compare(
+                    shadowCmpSampler,
+                    shadowUV + poissonDisk8[i] * PSSM_TEXEL * 2.0,
+                    cascadeIndex, refDepth
+                );
+            }
+            return pcf / 8.0;
+        } else if (sampleCount <= 16) {
+            // 16-tap Poisson disk
+            for (int i = 0; i < 16; i++) {
+                pcf += pssmShadowMaps.sample_compare(
+                    shadowCmpSampler,
+                    shadowUV + poissonDisk16[i] * PSSM_TEXEL * 2.0,
+                    cascadeIndex, refDepth
+                );
+            }
+            return pcf / 16.0;
+        } else {
+            // 32-tap: 16-tap Poisson + 16-tap rotated
+            for (int i = 0; i < 16; i++) {
+                pcf += pssmShadowMaps.sample_compare(
+                    shadowCmpSampler,
+                    shadowUV + poissonDisk16[i] * PSSM_TEXEL * 2.0,
+                    cascadeIndex, refDepth
+                );
+                // Rotated samples for better coverage
+                float2 rotated = float2(
+                    poissonDisk16[i].x * 0.7071 - poissonDisk16[i].y * 0.7071,
+                    poissonDisk16[i].x * 0.7071 + poissonDisk16[i].y * 0.7071
+                ) * 1.5;
+                pcf += pssmShadowMaps.sample_compare(
+                    shadowCmpSampler,
+                    shadowUV + rotated * PSSM_TEXEL * 2.0,
+                    cascadeIndex, refDepth
+                );
+            }
+            return pcf / 32.0;
+        }
+    };
+
+    // Helper: sample a specific cascade
+    auto sampleCascade = [&](int ci) -> float {
+        float4 lsPos = pssmData.lightSpaceMatrices[ci] * in.worldPosition;
+        float3 proj  = lsPos.xyz / lsPos.w;
+        float2 shadowUV = float2(proj.x * 0.5 + 0.5, 0.5 - proj.y * 0.5);
+        float refDepth = proj.z - PSSM_BIAS;
+        return samplePSSMShadow(ci, shadowUV, refDepth);
+    };
+
     float shadowFactor;
+    int debugCascade = -1; // -1 = RT, 0-2 = PSSM cascades
+
     if (viewDepth <= pssmData.cascadeSplits.x) {
         // Cascade 0: RT ray-traced shadow
         shadowFactor = texShadow.sample(s, screenUV).r;
+        debugCascade = -1;
     } else {
         // Select PSSM cascade (index 0-2 = cascade 1-3)
         int ci = 0;
         if      (viewDepth > pssmData.cascadeSplits.z) ci = 2;
         else if (viewDepth > pssmData.cascadeSplits.y) ci = 1;
+        debugCascade = ci;
 
-        float4 lsPos = pssmData.lightSpaceMatrices[ci] * in.worldPosition;
-        float3 proj  = lsPos.xyz / lsPos.w;
+        shadowFactor = sampleCascade(ci);
 
-        // NDC → texture UV (Metal: y=+1 at top → v=0)
-        float2 shadowUV = float2(proj.x * 0.5 + 0.5, 0.5 - proj.y * 0.5);
-        float  refDepth = proj.z - PSSM_BIAS;
-
-        // 3×3 PCF (each tap uses hardware bilinear comparison)
-        float pcf = 0.0;
-        for (int px = -1; px <= 1; px++) {
-            for (int py = -1; py <= 1; py++) {
-                pcf += pssmShadowMaps.sample_compare(
-                    shadowCmpSampler,
-                    shadowUV + float2(px, py) * PSSM_TEXEL,
-                    ci, refDepth
-                );
+        // Cascade blend: smooth transition between cascades
+        float cascadeBlend = pssmData.cascadeBlendRange;
+        if (cascadeBlend > 0.0 && ci < 2) {
+            float cascadeEnd = (ci == 0) ? pssmData.cascadeSplits.y : pssmData.cascadeSplits.z;
+            float blendStart = cascadeEnd - cascadeBlend;
+            if (viewDepth > blendStart && viewDepth < cascadeEnd) {
+                float nextShadow = sampleCascade(ci + 1);
+                float t = (viewDepth - blendStart) / cascadeBlend;
+                shadowFactor = mix(shadowFactor, nextShadow, smoothstep(0.0, 1.0, t));
             }
         }
-        shadowFactor = pcf / 9.0;
 
         // Blend zone between RT (cascade 0) and PSSM cascade 1
         float blendEnd = pssmData.cascadeSplits.x + pssmData.blendRange;
         if (viewDepth < blendEnd) {
             float rtShadow = texShadow.sample(s, screenUV).r;
             float t = (viewDepth - pssmData.cascadeSplits.x) / pssmData.blendRange;
-            shadowFactor = mix(rtShadow, shadowFactor, t);
+            shadowFactor = mix(rtShadow, shadowFactor, smoothstep(0.0, 1.0, t));
         }
+    }
+
+    // Debug visualization: show cascade colors
+    if (pssmData.debugVisualize > 0) {
+        float3 cascadeColors[4] = {
+            float3(0.2, 0.8, 0.2), // RT = green
+            float3(0.8, 0.2, 0.2), // Cascade 0 = red
+            float3(0.2, 0.2, 0.8), // Cascade 1 = blue
+            float3(0.8, 0.8, 0.2)  // Cascade 2 = yellow
+        };
+        float3 cascadeColor = cascadeColors[debugCascade + 1];
+        return float4(cascadeColor * shadowFactor, 1.0);
     }
 
     float3 result = float3(0.0);
