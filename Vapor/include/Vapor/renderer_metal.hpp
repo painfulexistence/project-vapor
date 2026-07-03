@@ -31,6 +31,8 @@ class VelocityPass;
 class TileCullingPass;
 class RaytraceShadowPass;
 class RaytraceAOPass;
+class AOTemporalPass;
+class AODenoisePass;
 class SkyAtmospherePass;
 class SkyCapturePass;
 class IrradianceConvolutionPass;
@@ -280,6 +282,8 @@ class Renderer_Metal final : public Renderer {// Must be public or factory funct
     friend class TileCullingPass;
     friend class RaytraceShadowPass;
     friend class RaytraceAOPass;
+    friend class AOTemporalPass;
+    friend class AODenoisePass;
     friend class SkyAtmospherePass;
     friend class SkyCapturePass;
     friend class IrradianceConvolutionPass;
@@ -513,6 +517,8 @@ protected:
     NS::SharedPtr<MTL::ComputePipelineState> velocityPipeline;
     NS::SharedPtr<MTL::ComputePipelineState> raytraceShadowPipeline;
     NS::SharedPtr<MTL::ComputePipelineState> raytraceAOPipeline;
+    NS::SharedPtr<MTL::ComputePipelineState> aoTemporalPipeline;
+    NS::SharedPtr<MTL::ComputePipelineState> aoDenoisePipeline;
     NS::SharedPtr<MTL::RenderPipelineState> atmospherePipeline;
     NS::SharedPtr<MTL::RenderPipelineState> skyCapturePipeline;
     NS::SharedPtr<MTL::RenderPipelineState> irradianceConvolutionPipeline;
@@ -724,6 +730,14 @@ protected:
     bool prevViewProjValid = false;
 
     NS::SharedPtr<MTL::Texture> aoRTGrayView;     // swizzle view (r,r,r,1) of aoRT for ImGui preview
+    // AO denoise chain (raygen → temporal → à-trous → aoRT), full res for now (ADR-008)
+    NS::SharedPtr<MTL::Texture> aoRawRT;          // R16Float, noisy raygen output
+    NS::SharedPtr<MTL::Texture> aoHistoryRT[2];   // RGBA16F ping-pong: (ao, view-space depth, oct normal)
+    NS::SharedPtr<MTL::Texture> aoScratchRT;      // RGBA16F, à-trous intermediate
+    uint32_t aoHistoryIndex = 0;                  // aoHistoryRT[aoHistoryIndex] holds the latest history
+    bool aoHistoryValid = false;
+    glm::mat4 prevView = glm::mat4(1.0f);
+    bool prevViewValid = false;
 
     // Bloom render targets
     NS::SharedPtr<MTL::Texture> bloomBrightnessRT;// Half-res brightness extraction

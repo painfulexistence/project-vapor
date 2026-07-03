@@ -333,7 +333,7 @@ public:
         encoder->setComputePipelineState(r.raytraceAOPipeline.get());
         encoder->setTexture(r.depthStencilRT.get(), 0);
         encoder->setTexture(r.normalRT.get(), 1);
-        encoder->setTexture(r.aoRT.get(), 2);
+        encoder->setTexture(r.aoRawRT.get(), 2); // noisy output; temporal + à-trous passes produce aoRT
         encoder->setBuffer(r.frameDataBuffers[r.currentFrameInFlight].get(), 0, 0);
         encoder->setBuffer(r.cameraDataBuffers[r.currentFrameInFlight].get(), 0, 1);
         encoder->setAccelerationStructure(r.TLASBuffers[r.currentFrameInFlight].get(), 2);
@@ -345,6 +345,104 @@ public:
         // Traffic: depth read (4B) + normal read (8B) + AO write (2B) per half-res pixel.
         // BVH traversal traffic is not estimable here.
         addTrafficEstimate(uint64_t(w) * h * (4 + 8 + 2));
+    }
+};
+
+// AO temporal accumulation: reprojects last frame's AO with the velocity
+// buffer and blends it with the raygen output (ADR-008 step 2).
+class AOTemporalPass : public RenderPass {
+public:
+    explicit AOTemporalPass(Renderer_Metal* renderer) : RenderPass(renderer) {
+    }
+
+    auto getName() const -> const char* override {
+        return "AOTemporalPass";
+    }
+
+    void execute() override {
+        auto& r = *renderer;
+
+        if (!r.aoTemporalPipeline) return;
+
+        glm::mat4 curView = r.currentCamera->getViewMatrix();
+        if (!r.prevViewValid) {
+            r.prevView = curView;
+            r.prevViewValid = true;
+        }
+        uint32_t historyValid = r.aoHistoryValid ? 1u : 0u;
+        uint32_t inIdx = r.aoHistoryIndex;
+        uint32_t outIdx = inIdx ^ 1u;
+
+        auto timedComputeDesc = makeTimedComputeDesc(true, true);
+        auto encoder = r.currentCommandBuffer->computeCommandEncoder(timedComputeDesc.get());
+        encoder->setComputePipelineState(r.aoTemporalPipeline.get());
+        encoder->setTexture(r.aoRawRT.get(), 0);
+        encoder->setTexture(r.aoHistoryRT[inIdx].get(), 1);
+        encoder->setTexture(r.aoHistoryRT[outIdx].get(), 2);
+        encoder->setTexture(r.velocityRT.get(), 3);
+        encoder->setTexture(r.depthStencilRT.get(), 4);
+        encoder->setTexture(r.normalRT.get(), 5);
+        encoder->setBuffer(r.cameraDataBuffers[r.currentFrameInFlight].get(), 0, 0);
+        encoder->setBytes(&r.prevView, sizeof(glm::mat4), 1);
+        encoder->setBytes(&historyValid, sizeof(uint32_t), 2);
+        auto w = r.aoRawRT->width();
+        auto h = r.aoRawRT->height();
+        encoder->dispatchThreads(MTL::Size(w, h, 1), MTL::Size(8, 8, 1));
+        encoder->endEncoding();
+
+        // Traffic: raw AO (2B) + history in/out (8B each) + velocity (4B) + depth (4B) + normal (8B)
+        addTrafficEstimate(uint64_t(w) * h * (2 + 8 + 8 + 4 + 4 + 8));
+
+        r.aoHistoryIndex = outIdx;
+        r.aoHistoryValid = true;
+        r.prevView = curView; // setBytes copied the old value into the command stream
+    }
+};
+
+// AO spatial denoise: edge-aware à-trous iterations, history → scratch → aoRT
+// (ADR-008 step 3). aoRT is what the lighting/post passes consume. One serial
+// compute encoder for all iterations: successive dispatches are ordered and
+// their writes visible to each other.
+class AODenoisePass : public RenderPass {
+public:
+    explicit AODenoisePass(Renderer_Metal* renderer) : RenderPass(renderer) {
+    }
+
+    auto getName() const -> const char* override {
+        return "AODenoisePass";
+    }
+
+    void execute() override {
+        auto& r = *renderer;
+
+        if (!r.aoDenoisePipeline) return;
+
+        auto w = r.aoRT->width();
+        auto h = r.aoRT->height();
+        struct Iteration {
+            MTL::Texture* src;
+            MTL::Texture* dst;
+            uint32_t stride;
+        };
+        const Iteration iterations[] = {
+            { r.aoHistoryRT[r.aoHistoryIndex].get(), r.aoScratchRT.get(), 1u },
+            { r.aoScratchRT.get(), r.aoRT.get(), 2u }, // final target is single-channel; extras dropped here
+        };
+        constexpr size_t iterationCount = sizeof(iterations) / sizeof(iterations[0]);
+        auto timedComputeDesc = makeTimedComputeDesc(true, true);
+        auto encoder = r.currentCommandBuffer->computeCommandEncoder(timedComputeDesc.get());
+        encoder->setComputePipelineState(r.aoDenoisePipeline.get());
+        for (size_t i = 0; i < iterationCount; i++) {
+            encoder->setTexture(iterations[i].src, 0);
+            encoder->setTexture(iterations[i].dst, 1);
+            encoder->setBytes(&iterations[i].stride, sizeof(uint32_t), 0);
+            encoder->dispatchThreads(MTL::Size(w, h, 1), MTL::Size(8, 8, 1));
+        }
+        encoder->endEncoding();
+
+        // Traffic per iteration: 25 src taps (8B) + write (8B),
+        // issued reads — caches make real DRAM traffic much lower
+        addTrafficEstimate(uint64_t(w) * h * (25 * 8 + 8) * iterationCount);
     }
 };
 
@@ -2267,6 +2365,8 @@ auto Renderer_Metal::init(SDL_Window* window) -> void {
     graph.addPass(std::make_unique<TileCullingPass>(this));
     if (m_supportsRaytracing) graph.addPass(std::make_unique<RaytraceShadowPass>(this));
     if (m_supportsRaytracing) graph.addPass(std::make_unique<RaytraceAOPass>(this));
+    if (m_supportsRaytracing) graph.addPass(std::make_unique<AOTemporalPass>(this));
+    if (m_supportsRaytracing) graph.addPass(std::make_unique<AODenoisePass>(this));
     graph.addPass(std::make_unique<MainRenderPass>(this));
     graph.addPass(std::make_unique<SkyAtmospherePass>(this));
     // graph.addPass(std::make_unique<WaterPass>(this));
@@ -2437,6 +2537,8 @@ auto Renderer_Metal::createResources() -> void {
     // SSAO is the current default — RT AO works but reads as near-blank in this
     // scene (1.5m ray cap rarely hits anything outside tight corners).
     if (m_supportsRaytracing) raytraceAOPipeline = createComputePipeline("shaders/3d_ssao.metal");
+    if (m_supportsRaytracing) aoTemporalPipeline = createComputePipeline("shaders/3d_ao_temporal.metal");
+    if (m_supportsRaytracing) aoDenoisePipeline = createComputePipeline("shaders/3d_ao_denoise.metal");
     atmospherePipeline =
         createPipeline("shaders/3d_atmosphere.metal", true, false, 1);// No MSAA for sky (full-screen triangle)
     skyCapturePipeline = createPipeline("shaders/3d_sky_capture.metal", true, true, 1);
@@ -2975,6 +3077,23 @@ auto Renderer_Metal::createResources() -> void {
     velocityTextureDesc->setUsage(MTL::TextureUsageShaderRead | MTL::TextureUsageShaderWrite);
     velocityRT = NS::TransferPtr(device->newTexture(velocityTextureDesc));
     velocityTextureDesc->release();
+
+    // AO denoise chain targets (raygen → temporal history ping-pong → à-trous scratch).
+    // Full resolution; the kernels are resolution-agnostic, so half-res later is
+    // purely a size change here (ADR-008).
+    MTL::TextureDescriptor* aoChainDesc = MTL::TextureDescriptor::alloc()->init();
+    aoChainDesc->setTextureType(MTL::TextureType2D);
+    aoChainDesc->setWidth(swapchain->drawableSize().width);
+    aoChainDesc->setHeight(swapchain->drawableSize().height);
+    aoChainDesc->setUsage(MTL::TextureUsageShaderRead | MTL::TextureUsageShaderWrite);
+    aoChainDesc->setPixelFormat(MTL::PixelFormatR16Float);
+    aoRawRT = NS::TransferPtr(device->newTexture(aoChainDesc));
+    // RGBA16F: (ao, view-space depth, octahedral normal) — see 3d_ao_temporal.metal
+    aoChainDesc->setPixelFormat(MTL::PixelFormatRGBA16Float);
+    aoHistoryRT[0] = NS::TransferPtr(device->newTexture(aoChainDesc));
+    aoHistoryRT[1] = NS::TransferPtr(device->newTexture(aoChainDesc));
+    aoScratchRT = NS::TransferPtr(device->newTexture(aoChainDesc));
+    aoChainDesc->release();
 
     // Grayscale swizzle view of the single-channel AO target for the ImGui preview
     aoRTGrayView = NS::TransferPtr(aoRT->newTextureView(
