@@ -6272,6 +6272,7 @@ void Renderer_Metal::draw(entt::registry& registry, std::shared_ptr<Scene> scene
             auto instanceIdx = static_cast<uint32_t>(pendingEcsInstances.size());
             pendingEcsInstances.push_back({
                 .model = worldMat,
+                .normalMatrix = glm::mat4(glm::transpose(glm::inverse(glm::mat3(worldMat)))),
                 .color = glm::vec4(1.0f),
                 .vertexOffset = mesh->vertexOffset,
                 .indexOffset = mesh->indexOffset,
@@ -6319,6 +6320,7 @@ void Renderer_Metal::draw(entt::registry& registry, std::shared_ptr<Scene> scene
         auto instanceIdx = static_cast<uint32_t>(pendingEcsInstances.size());
         pendingEcsInstances.push_back({
             .model = worldMat,
+            .normalMatrix = glm::mat4(glm::transpose(glm::inverse(glm::mat3(worldMat)))),
             .color = glm::vec4(1.0f),
             .vertexOffset = mesh->vertexOffset,
             .indexOffset = mesh->indexOffset,

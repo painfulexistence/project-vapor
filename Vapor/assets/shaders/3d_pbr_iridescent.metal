@@ -214,7 +214,8 @@ vertex RasterizerData vertexMain(
     RasterizerData vert;
     uint actual    = instances[instanceID].vertexOffset + vertexID;
     float4x4 model = instances[instanceID].model;
-    float3x3 N     = transpose(inverse(float3x3(model[0].xyz, model[1].xyz, model[2].xyz)));
+    float4x4 nm    = instances[instanceID].normalMatrix;
+    float3x3 N     = float3x3(nm[0].xyz, nm[1].xyz, nm[2].xyz);
     vert.worldNormal   = float4(N * float3(in[actual].normal), 0.0);
     vert.worldTangent  = float4(N * in[actual].tangent.xyz, in[actual].tangent.w);
     vert.worldPosition = model * float4(in[actual].position, 1.0);

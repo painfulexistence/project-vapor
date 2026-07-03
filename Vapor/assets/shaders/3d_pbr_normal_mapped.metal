@@ -314,11 +314,8 @@ vertex RasterizerData vertexMain(
     RasterizerData vert;
     uint actualVertexID = instances[instanceID].vertexOffset + vertexID;
     float4x4 model = instances[instanceID].model;
-    float3x3 normalMatrix = transpose(inverse(float3x3(
-        model[0].xyz,
-        model[1].xyz,
-        model[2].xyz
-    )));
+    float4x4 nm = instances[instanceID].normalMatrix;
+    float3x3 normalMatrix = float3x3(nm[0].xyz, nm[1].xyz, nm[2].xyz);
     // Caution: worldNormal and worldTangent are not normalized yet, and they can be affected by model scaling
     vert.worldNormal = float4(normalMatrix * float3(in[actualVertexID].normal), 0.0);
     vert.worldTangent = float4(normalMatrix * in[actualVertexID].tangent.xyz, in[actualVertexID].tangent.w);
