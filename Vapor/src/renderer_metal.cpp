@@ -4457,33 +4457,23 @@ auto Renderer_Metal::draw(std::shared_ptr<Scene> scene, Camera& camera) -> void 
 
         if (ImGui::TreeNode("RTs")) {
             ImGui::Separator();
-            if (ImGui::TreeNode(fmt::format("Scene Color RT").c_str())) {
-                ImGui::Image((ImTextureID)(intptr_t)colorRT.get(), ImVec2(64, 64));
-                ImGui::TreePop();
-            }
-            if (ImGui::TreeNode(fmt::format("Scene Depth RT").c_str())) {
-                ImGui::Image((ImTextureID)(intptr_t)depthStencilRT.get(), ImVec2(64, 64));
-                ImGui::TreePop();
-            }
-            if (ImGui::TreeNode(fmt::format("Raytraced Shadow").c_str())) {
-                ImGui::Image((ImTextureID)(intptr_t)shadowRTGrayView.get(), ImVec2(64, 64));
-                ImGui::TreePop();
-            }
-            if (ImGui::TreeNode(fmt::format("Raytraced AO").c_str())) {
-                // Grayscale swizzle view — the raw R16Float target renders red in ImGui
-                ImGui::Image((ImTextureID)(intptr_t)aoRTGrayView.get(), ImVec2(64, 64));
-                ImGui::TreePop();
-            }
-            if (ImGui::TreeNode(fmt::format("Scene Normal RT").c_str())) {
-                ImGui::Image((ImTextureID)(intptr_t)normalRT.get(), ImVec2(64, 64));
-                ImGui::TreePop();
-            }
-            if (lightScatteringRT) {
-                if (ImGui::TreeNode(fmt::format("Light Scattering RT").c_str())) {
-                    ImGui::Image((ImTextureID)(intptr_t)lightScatteringRT.get(), ImVec2(64, 64));
+            // Aspect-correct preview sized for actually diagnosing content issues
+            auto rtPreview = [](const char* label, MTL::Texture* tex) {
+                if (!tex) return;
+                if (ImGui::TreeNode(label)) {
+                    float aspect = tex->height() > 0 ? float(tex->width()) / float(tex->height()) : 1.0f;
+                    ImGui::Text("%llu x %llu", (unsigned long long)tex->width(), (unsigned long long)tex->height());
+                    ImGui::Image((ImTextureID)(intptr_t)tex, ImVec2(320, 320 / aspect));
                     ImGui::TreePop();
                 }
-            }
+            };
+            rtPreview("Scene Color RT", colorRT.get());
+            rtPreview("Scene Depth RT", depthStencilRT.get());
+            rtPreview("Raytraced Shadow", shadowRTGrayView.get());
+            rtPreview("Raytraced AO", aoRTGrayView.get()); // grayscale swizzle view (raw R16F renders red)
+            rtPreview("Scene Normal RT", normalRT.get());
+            rtPreview("Velocity RT", velocityRT.get());
+            rtPreview("Light Scattering RT", lightScatteringRT.get());
             ImGui::TreePop();
         }
 
