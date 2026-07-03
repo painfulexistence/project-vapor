@@ -3045,17 +3045,17 @@ auto Renderer_Metal::createResources() -> void {
     normalRT = NS::TransferPtr(device->newTexture(normalTextureDesc));
     normalTextureDesc->release();
 
-    // R8Unorm, no mips: every consumer samples only .r at LOD 0 (screen-space 1:1)
+    // RGBA8 (reverted from R8 while bisecting a visual regression), no mips:
+    // every consumer samples only .r at LOD 0 (screen-space 1:1)
     MTL::TextureDescriptor* shadowTextureDesc = MTL::TextureDescriptor::alloc()->init();
     shadowTextureDesc->setTextureType(MTL::TextureType2D);
-    shadowTextureDesc->setPixelFormat(MTL::PixelFormatR8Unorm);
+    shadowTextureDesc->setPixelFormat(MTL::PixelFormatRGBA8Unorm);
     shadowTextureDesc->setWidth(swapchain->drawableSize().width);
     shadowTextureDesc->setHeight(swapchain->drawableSize().height);
     shadowTextureDesc->setUsage(MTL::TextureUsageShaderRead | MTL::TextureUsageShaderWrite);
     shadowRT = NS::TransferPtr(device->newTexture(shadowTextureDesc));
-    // Grayscale swizzle view for the ImGui preview (single-channel renders red otherwise)
     shadowRTGrayView = NS::TransferPtr(shadowRT->newTextureView(
-        MTL::PixelFormatR8Unorm,
+        MTL::PixelFormatRGBA8Unorm,
         MTL::TextureType2D,
         NS::Range::Make(0, 1),
         NS::Range::Make(0, 1),
