@@ -102,29 +102,34 @@ phase's input, and each item should land with a row in the GPU timing panel.
 4. Motion vectors in the prepass — every temporal technique downstream
    (TAA, all RT denoisers) needs them; build once, reuse everywhere.
 
-### Phase 1 — Bindless foundation
-5. Global texture heap + material table in argument buffers
+### Phase 1 — RT AO and the bindless foundation
+5. RT AO with the full denoise chain (raygen → temporal → à-trous →
+   composite) per the ADR-008 plan. Promoted ahead of bindless because AO is
+   a visibility-only query — no hit shading, so no bindless dependency; its
+   only prerequisites are the TLAS and phase-0 motion vectors. It replaces a
+   more expensive SSAO pass (returning ~3 ms of budget while improving
+   quality) and validates the denoiser infrastructure that soft shadows and
+   reflections will reuse. SSAO stays as the non-RT-hardware fallback.
+6. Global texture heap + material table in argument buffers
    (Metal 3 residency sets). All material textures resident; shaders index by
    material ID. Kills the per-draw `setFragmentTexture` loop.
-6. TAA (consumes phase-0 motion vectors). Once stable, retire 4×MSAA — it
+7. TAA (consumes phase-0 motion vectors). Once stable, retire 4×MSAA — it
    returns bandwidth across the whole pipeline and removes the MS/resolve
    split that complicates every fullscreen pass.
 
 ### Phase 2 — GPU-driven geometry
-7. ECS → GPU instance extraction: transform/mesh/material components written
+8. ECS → GPU instance extraction: transform/mesh/material components written
    straight into a persistent instance buffer with dirty tracking.
-8. GPU frustum culling in compute → indirect draw of the whole opaque pass
+9. GPU frustum culling in compute → indirect draw of the whole opaque pass
    (one `drawIndexedPrimitives` indirect per pipeline, no per-instance CPU
    loop, no `setVertexBytes`).
-9. Depth-pyramid occlusion culling (two-phase: draw last frame's visible set,
-   build pyramid, cull and draw the rest).
+10. Depth-pyramid occlusion culling (two-phase: draw last frame's visible
+    set, build pyramid, cull and draw the rest).
 
-### Phase 3 — RT effects on the foundation
-10. RT AO with the full denoise chain (raygen → temporal → à-trous →
-    composite) per the ADR-008 plan — the cheapest RT effect, and it
-    validates the shared denoiser infrastructure everything else reuses.
+### Phase 3 — RT effects that need the foundation
 11. RT soft shadows: replace the 1-ray hard shadow with cone-sampled area
-    light rays + the same denoiser; delete the shadow mip-gen blit.
+    light rays + the denoiser validated by RT AO; delete the shadow mip-gen
+    blit.
 12. RT reflections: needs bindless hit shading (phase 1) to evaluate
     materials at hit points. Half-res, roughness-cutoff, SSR fallback.
 13. RT GI (probe-based first — DDGI-style irradiance volumes fed by the same
