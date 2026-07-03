@@ -20,6 +20,8 @@ constant uint SURFEL_FLAG_VALID = 1 << 3;
 constant float GIBS_PI = 3.14159265359;
 constant float GIBS_INV_PI = 0.31830988618;
 constant float GIBS_EPSILON = 1e-6;
+constant uint GIBS_INVALID_INDEX = 0xFFFFFFFFu;
+constant uint GIBS_MAX_CHAIN_LENGTH = 64; // Safety cap when walking cell linked lists
 
 // ============================================================================
 // Data Structures (must match C++ side exactly)

@@ -56,10 +56,9 @@ void GIBSManager::initTextures(Uint32 screenWidth, Uint32 screenHeight) {
 
 void GIBSManager::deinit() {
     surfelBuffer.reset();
-    surfelBufferSorted.reset();
-    cellBuffer.reset();
+    cellHeadBuffer.reset();
+    surfelNextBuffer.reset();
     counterBuffer.reset();
-    cellCountBuffer.reset();
     gibsDataBuffers.clear();
     giResultTexture.reset();
     giHistoryTexture.reset();
@@ -77,24 +76,20 @@ void GIBSManager::createBuffers() {
     surfelBuffer = NS::TransferPtr(device->newBuffer(surfelBufferSize, MTL::ResourceStorageModePrivate));
     surfelBuffer->setLabel(NS::String::string("GIBS Surfel Buffer", NS::UTF8StringEncoding));
 
-    // Sorted surfel buffer (for spatial hash ordering)
-    surfelBufferSorted = NS::TransferPtr(device->newBuffer(surfelBufferSize, MTL::ResourceStorageModePrivate));
-    surfelBufferSorted->setLabel(NS::String::string("GIBS Surfel Buffer Sorted", NS::UTF8StringEncoding));
+    // Linked-list spatial hash: head index per cell + next index per surfel.
+    // Replaces the counting-sort layout (sorted copy + prefix sum) whose serial
+    // scan over every cell dominated frame time.
+    size_t cellHeadBufferSize = totalCells * sizeof(Uint32);
+    cellHeadBuffer = NS::TransferPtr(device->newBuffer(cellHeadBufferSize, MTL::ResourceStorageModePrivate));
+    cellHeadBuffer->setLabel(NS::String::string("GIBS Cell Head Buffer", NS::UTF8StringEncoding));
 
-    // Cell buffer - spatial hash cells
-    size_t cellBufferSize = totalCells * sizeof(SurfelCell);
-    cellBuffer = NS::TransferPtr(device->newBuffer(cellBufferSize, MTL::ResourceStorageModePrivate));
-    cellBuffer->setLabel(NS::String::string("GIBS Cell Buffer", NS::UTF8StringEncoding));
+    surfelNextBuffer = NS::TransferPtr(device->newBuffer(maxSurfels * sizeof(Uint32), MTL::ResourceStorageModePrivate));
+    surfelNextBuffer->setLabel(NS::String::string("GIBS Surfel Next Buffer", NS::UTF8StringEncoding));
 
     // Counter buffer - atomic counters for surfel allocation
     counterBuffer = NS::TransferPtr(device->newBuffer(COUNTER_BUFFER_SIZE * sizeof(Uint32),
                                                        MTL::ResourceStorageModeShared));
     counterBuffer->setLabel(NS::String::string("GIBS Counter Buffer", NS::UTF8StringEncoding));
-
-    // Cell count buffer - per-cell surfel counts for prefix sum
-    cellCountBuffer = NS::TransferPtr(device->newBuffer(totalCells * sizeof(Uint32),
-                                                         MTL::ResourceStorageModePrivate));
-    cellCountBuffer->setLabel(NS::String::string("GIBS Cell Count Buffer", NS::UTF8StringEncoding));
 
     // Per-frame GIBS data buffers (triple buffered)
     gibsDataBuffers.resize(MAX_FRAMES_IN_FLIGHT);
@@ -110,9 +105,9 @@ void GIBSManager::createBuffers() {
         counterPtr[i] = 0;
     }
 
-    SDL_Log("[GIBS] Buffers created: Surfels=%.1fMB, Cells=%.1fMB",
+    SDL_Log("[GIBS] Buffers created: Surfels=%.1fMB, CellHeads=%.1fMB",
             surfelBufferSize / (1024.0f * 1024.0f),
-            cellBufferSize / (1024.0f * 1024.0f));
+            cellHeadBufferSize / (1024.0f * 1024.0f));
 }
 
 void GIBSManager::createTextures(Uint32 screenWidth, Uint32 screenHeight) {
@@ -190,9 +185,9 @@ void GIBSManager::setWorldBounds(const glm::vec3& min, const glm::vec3& max) {
     worldMax = max;
 
     // Recalculate grid if already initialized
-    if (cellBuffer) {
+    if (cellHeadBuffer) {
         calculateGridSize();
-        // Note: Would need to recreate cell buffer if size changed significantly
+        // Note: Would need to recreate the cell head buffer if size changed significantly
     }
 }
 
@@ -231,7 +226,9 @@ void GIBSManager::updateGIBSData(const glm::mat4& viewProj, const glm::mat4& inv
 
     gibsData.maxSurfels = maxSurfels;
     gibsData.activeSurfelCount = activeSurfelCount;
-    gibsData.surfelRadius = 0.1f; // 10cm default radius
+    // 25cm radius: coverage need per area scales with 1/r², so this is ~6x
+    // fewer surfels than the previous 10cm for the same coverage
+    gibsData.surfelRadius = 0.25f;
     gibsData.surfelDensity = 4.0f; // 4 surfels per m²
 
     gibsData.worldMin = worldMin;
@@ -249,7 +246,7 @@ void GIBSManager::updateGIBSData(const glm::mat4& viewProj, const glm::mat4& inv
     gibsData.hysteresis = 0.95f;
     gibsData.frameIndex = currentFrameIndex;
 
-    gibsData.sampleRadius = 2; // Search 2 cells radius
+    gibsData.sampleRadius = 1; // Neighbor cell search radius IN CELLS (3^3 = 27 cells)
     gibsData.maxSurfelsPerPixel = 8;
 
     // Copy to GPU buffer

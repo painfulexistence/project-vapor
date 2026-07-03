@@ -850,10 +850,8 @@ protected:
 
     // GIBS Compute Pipelines
     NS::SharedPtr<MTL::ComputePipelineState> surfelGenerationPipeline;
-    NS::SharedPtr<MTL::ComputePipelineState> surfelClearCellsPipeline;
-    NS::SharedPtr<MTL::ComputePipelineState> surfelCountPerCellPipeline;
-    NS::SharedPtr<MTL::ComputePipelineState> surfelPrefixSumPipeline;
-    NS::SharedPtr<MTL::ComputePipelineState> surfelScatterPipeline;
+    NS::SharedPtr<MTL::ComputePipelineState> surfelClearCellHeadsPipeline;
+    NS::SharedPtr<MTL::ComputePipelineState> surfelInsertPipeline;
     NS::SharedPtr<MTL::ComputePipelineState> surfelRaytracingPipeline;
     NS::SharedPtr<MTL::ComputePipelineState> surfelRaytracingSimplePipeline;
     NS::SharedPtr<MTL::ComputePipelineState> gibsTemporalPipeline;

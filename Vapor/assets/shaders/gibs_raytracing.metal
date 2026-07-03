@@ -39,11 +39,12 @@ float3 computeDirectLight(float3 position, float3 normal, float3 albedo,
     return albedo * sunColor * sunIntensity * NdotL * shadow * GIBS_INV_PI;
 }
 
-// Find nearest surfel at hit position using spatial hash
+// Find nearest surfel at hit position using the cell linked list
 // Returns irradiance from that surfel
 float3 sampleSurfelAtPosition(float3 hitPos, float3 hitNormal,
                                 device const Surfel* surfels,
-                                device const SurfelCell* cells,
+                                device const uint* cellHeads,
+                                device const uint* surfelNext,
                                 constant GIBSData& gibs) {
     // Get cell for hit position
     if (!isInWorldBounds(hitPos, gibs)) {
@@ -55,21 +56,13 @@ float3 sampleSurfelAtPosition(float3 hitPos, float3 hitNormal,
         return float3(0);
     }
 
-    SurfelCell cell = cells[cellHash];
-
-    if (cell.surfelCount == 0) {
-        return float3(0);
-    }
-
     // Find best matching surfel in this cell
     float bestWeight = 0.0;
     float3 bestIrradiance = float3(0);
 
-    uint maxCheck = min(cell.surfelCount, 16u); // Limit iterations
-
-    for (uint i = 0; i < maxCheck; i++) {
-        uint surfelIndex = cell.surfelOffset + i;
-        Surfel surfel = surfels[surfelIndex];
+    uint iter = 0;
+    for (uint j = cellHeads[cellHash]; j != GIBS_INVALID_INDEX && iter < GIBS_MAX_CHAIN_LENGTH; j = surfelNext[j], iter++) {
+        Surfel surfel = surfels[j];
 
         if (!(surfel.flags & SURFEL_FLAG_VALID)) {
             continue;
@@ -89,16 +82,15 @@ float3 sampleSurfelAtPosition(float3 hitPos, float3 hitNormal,
 }
 
 // Main surfel raytracing kernel
-// surfels: canonical buffer (read/write) — irradiance accumulates here across frames.
-// sortedSurfels + cells: last frame's spatial hash for neighbor irradiance lookup
-// (cell offsets index into the SORTED buffer, so it must be bound separately).
+// surfels: canonical buffer (read/write) — irradiance accumulates here across
+// frames and neighbor lookups walk the cell linked lists over the same buffer.
 kernel void surfelRaytracing(
     device Surfel* surfels [[buffer(0)]],
-    device const SurfelCell* cells [[buffer(1)]],
+    device const uint* cellHeads [[buffer(1)]],
     constant GIBSData& gibs [[buffer(2)]],
     constant SurfelRaytracingParams& params [[buffer(3)]],
     raytracing::instance_acceleration_structure accelStruct [[buffer(4)]],
-    device const Surfel* sortedSurfels [[buffer(5)]],
+    device const uint* surfelNext [[buffer(5)]],
     uint gid [[thread_position_in_grid]]
 ) {
     // Staggered updates: each frame traces one residue class of surfel indices,
@@ -155,8 +147,8 @@ kernel void surfelRaytracing(
             // For now, use a simple heuristic or assume facing camera
             float3 hitNormal = -r.direction;
 
-            // Get irradiance from surfel at hit position (last frame's sorted hash)
-            float3 hitRadiance = sampleSurfelAtPosition(hitPos, hitNormal, sortedSurfels, cells, gibs);
+            // Get irradiance from surfel at hit position (this frame's cell lists)
+            float3 hitRadiance = sampleSurfelAtPosition(hitPos, hitNormal, surfels, cellHeads, surfelNext, gibs);
 
             // Cosine term already included in importance sampling
             indirectSum += hitRadiance * float3(surfel.albedo);
@@ -188,7 +180,7 @@ kernel void surfelRaytracing(
 // Simplified version without acceleration structure (for debugging)
 kernel void surfelRaytracingSimple(
     device Surfel* surfels [[buffer(0)]],
-    device const SurfelCell* cells [[buffer(1)]],
+    device const uint* cellHeads [[buffer(1)]],
     constant GIBSData& gibs [[buffer(2)]],
     constant SurfelRaytracingParams& params [[buffer(3)]],
     uint gid [[thread_position_in_grid]]

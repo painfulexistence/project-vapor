@@ -19,7 +19,8 @@ float3 sampleGIFromSurfels(
     float3 worldPos,
     float3 normal,
     device const Surfel* surfels,
-    device const SurfelCell* cells,
+    device const uint* cellHeads,
+    device const uint* surfelNext,
     constant GIBSData& gibs,
     constant GIBSSampleParams& params
 ) {
@@ -29,13 +30,16 @@ float3 sampleGIFromSurfels(
     }
 
     // Get cell for this position
-    uint3 baseCell = worldToCell(worldPos, gibs.worldMin, gibs.cellSize);
+    uint3 grid = uint3(gibs.gridSize);
+    uint3 baseCell = worldToCell(worldPos, float3(gibs.worldMin), gibs.cellSize);
 
     float3 irradianceSum = float3(0);
     float weightSum = 0.0;
 
-    // Search in neighboring cells
-    int searchRadius = int(params.sampleRadius);
+    // Search radius is in CELLS (gibs.sampleRadius); the surfel influence
+    // radius (params.sampleRadius) is in world units. These were previously
+    // conflated, producing a 15^3-cell search per pixel.
+    int searchRadius = int(gibs.sampleRadius);
 
     for (int dz = -searchRadius; dz <= searchRadius; dz++) {
         for (int dy = -searchRadius; dy <= searchRadius; dy++) {
@@ -43,40 +47,36 @@ float3 sampleGIFromSurfels(
                 int3 cellCoord = int3(baseCell) + int3(dx, dy, dz);
 
                 // Bounds check
-                if (any(cellCoord < 0) || any(uint3(cellCoord) >= gibs.gridSize)) {
+                if (any(cellCoord < 0) || any(uint3(cellCoord) >= grid)) {
                     continue;
                 }
 
-                uint cellIndex = cellToIndex(uint3(cellCoord), gibs.gridSize);
+                uint cellIndex = cellToIndex(uint3(cellCoord), grid);
                 if (cellIndex >= gibs.totalCells) {
                     continue;
                 }
 
-                SurfelCell cell = cells[cellIndex];
-
-                if (cell.surfelCount == 0) {
-                    continue;
-                }
-
-                // Sample surfels in this cell
-                uint maxSamples = min(cell.surfelCount, params.maxSamples);
-
-                for (uint i = 0; i < maxSamples; i++) {
-                    uint surfelIndex = cell.surfelOffset + i;
-                    Surfel surfel = surfels[surfelIndex];
+                // Walk this cell's surfel list
+                uint sampled = 0;
+                uint iter = 0;
+                for (uint j = cellHeads[cellIndex];
+                     j != GIBS_INVALID_INDEX && iter < GIBS_MAX_CHAIN_LENGTH && sampled < params.maxSamples;
+                     j = surfelNext[j], iter++) {
+                    Surfel surfel = surfels[j];
 
                     if (!(surfel.flags & SURFEL_FLAG_VALID)) {
                         continue;
                     }
 
-                    // Compute weight
-                    float weight = computeSurfelWeight(worldPos, normal, surfel, params.sampleRadius * gibs.cellSize);
+                    // Compute weight (influence radius in world units)
+                    float weight = computeSurfelWeight(worldPos, normal, surfel, params.sampleRadius);
 
                     if (weight > GIBS_EPSILON) {
                         // Accumulate irradiance (direct + indirect)
                         float3 surfelRadiance = float3(surfel.irradiance) + float3(surfel.directLight);
                         irradianceSum += surfelRadiance * weight;
                         weightSum += weight;
+                        sampled++;
                     }
                 }
             }
@@ -97,9 +97,10 @@ kernel void giSample(
     texture2d<float, access::read> normalTexture [[texture(1)]],
     texture2d<float, access::write> giOutput [[texture(2)]],
     device const Surfel* surfels [[buffer(0)]],
-    device const SurfelCell* cells [[buffer(1)]],
+    device const uint* cellHeads [[buffer(1)]],
     constant GIBSData& gibs [[buffer(2)]],
     constant GIBSSampleParams& params [[buffer(3)]],
+    device const uint* surfelNext [[buffer(4)]],
     uint2 gid [[thread_position_in_grid]]
 ) {
     if (gid.x >= uint(params.giResolution.x) || gid.y >= uint(params.giResolution.y)) {
@@ -126,7 +127,7 @@ kernel void giSample(
     float3 normal = normalize(normalTexture.read(depthCoord).xyz);
 
     // Sample GI from surfels
-    float3 gi = sampleGIFromSurfels(worldPos, normal, surfels, cells, gibs, params);
+    float3 gi = sampleGIFromSurfels(worldPos, normal, surfels, cellHeads, surfelNext, gibs, params);
 
     giOutput.write(float4(gi, 1.0), gid);
 }

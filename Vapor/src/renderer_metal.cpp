@@ -2655,8 +2655,8 @@ public:
         encoder->setBuffer(gibsManager->getGIBSDataBuffer(r.currentFrameInFlight), 0, 2);
         encoder->setBytes(&params, sizeof(params), 3);
         // Fresh spatial hash (hash build runs before this pass) for coverage rejection
-        encoder->setBuffer(gibsManager->getSurfelBufferSorted(), 0, 4);
-        encoder->setBuffer(gibsManager->getCellBuffer(), 0, 5);
+        encoder->setBuffer(gibsManager->getCellHeadBuffer(), 0, 4);
+        encoder->setBuffer(gibsManager->getSurfelNextBuffer(), 0, 5);
 
         uint32_t dispatchX = (static_cast<uint32_t>(screenSize.x) + 7) / 8;
         uint32_t dispatchY = (static_cast<uint32_t>(screenSize.y) + 7) / 8;
@@ -2677,52 +2677,37 @@ public:
 
     void execute() override {
         auto& r = *renderer;
-        if (!r.gibsEnabled || !gibsManager || !r.surfelClearCellsPipeline) return;
+        if (!r.gibsEnabled || !gibsManager || !r.surfelClearCellHeadsPipeline) return;
         uint32_t totalCells = gibsManager->getTotalCells();
         uint32_t activeSurfels = gibsManager->getActiveSurfelCount();
         if (activeSurfels == 0) activeSurfels = 1;
 
         MTL::Buffer* gibsData = gibsManager->getGIBSDataBuffer(r.currentFrameInFlight);
 
-        // Single serial compute encoder for all four steps (same pattern as
-        // AODenoisePass): dispatches within a serial encoder are hazard-tracked
-        // in order, and a single encoder samples its GPU timestamps reliably.
+        // Linked-list spatial hash: two fully parallel dispatches (clear heads,
+        // then atomic-push each surfel onto its cell's list). Replaces the
+        // counting sort whose single-threaded prefix sum walked every cell.
         auto timedDesc = makeTimedComputeDesc(true, true);
         auto encoder = r.currentCommandBuffer->computeCommandEncoder(timedDesc.get());
         encoder->setLabel(NS::String::string("Surfel Hash Build", NS::UTF8StringEncoding));
 
-        // Step 1: Clear cell counts
-        encoder->setComputePipelineState(r.surfelClearCellsPipeline.get());
-        encoder->setBuffer(gibsManager->getCellCountBuffer(), 0, 0);
+        // Step 1: Reset cell list heads
+        encoder->setComputePipelineState(r.surfelClearCellHeadsPipeline.get());
+        encoder->setBuffer(gibsManager->getCellHeadBuffer(), 0, 0);
         encoder->setBuffer(gibsData, 0, 1);
         encoder->dispatchThreadgroups(MTL::Size((totalCells + 255) / 256, 1, 1), MTL::Size(256, 1, 1));
 
-        // Step 2: Count surfels per cell
-        encoder->setComputePipelineState(r.surfelCountPerCellPipeline.get());
+        // Step 2: Insert surfels into their cell lists
+        encoder->setComputePipelineState(r.surfelInsertPipeline.get());
         encoder->setBuffer(gibsManager->getSurfelBuffer(), 0, 0);
-        encoder->setBuffer(gibsManager->getCellCountBuffer(), 0, 1);
-        encoder->setBuffer(gibsData, 0, 2);
-        encoder->dispatchThreadgroups(MTL::Size((activeSurfels + 255) / 256, 1, 1), MTL::Size(256, 1, 1));
-
-        // Step 3: Prefix sum (serial, single thread)
-        encoder->setComputePipelineState(r.surfelPrefixSumPipeline.get());
-        encoder->setBuffer(gibsManager->getCellCountBuffer(), 0, 0);
-        encoder->setBuffer(gibsManager->getCellBuffer(), 0, 1);
-        encoder->setBuffer(gibsData, 0, 2);
-        encoder->dispatchThreadgroups(MTL::Size(1, 1, 1), MTL::Size(1, 1, 1));
-
-        // Step 4: Scatter surfels into sorted order
-        encoder->setComputePipelineState(r.surfelScatterPipeline.get());
-        encoder->setBuffer(gibsManager->getSurfelBuffer(), 0, 0);
-        encoder->setBuffer(gibsManager->getSurfelBufferSorted(), 0, 1);
-        encoder->setBuffer(gibsManager->getCellBuffer(), 0, 2);
-        encoder->setBuffer(gibsManager->getCellCountBuffer(), 0, 3);
-        encoder->setBuffer(gibsData, 0, 4);
+        encoder->setBuffer(gibsManager->getCellHeadBuffer(), 0, 1);
+        encoder->setBuffer(gibsManager->getSurfelNextBuffer(), 0, 2);
+        encoder->setBuffer(gibsData, 0, 3);
         encoder->dispatchThreadgroups(MTL::Size((activeSurfels + 255) / 256, 1, 1), MTL::Size(256, 1, 1));
 
         encoder->endEncoding();
 
-        addTrafficEstimate(uint64_t(activeSurfels) * sizeof(Surfel) * 2 + uint64_t(totalCells) * (4 + sizeof(SurfelCell)));
+        addTrafficEstimate(uint64_t(totalCells) * 4 + uint64_t(activeSurfels) * (sizeof(Surfel) + 8));
     }
 
 private:
@@ -2765,16 +2750,15 @@ public:
                                                 : r.surfelRaytracingSimplePipeline.get());
 
         // Canonical buffer at 0: irradiance accumulates here across frames.
-        // The sorted copy (rebuilt each frame before this pass) is only for
-        // neighbor lookup via the cell hash, whose offsets index the sorted order.
+        // Neighbor lookups walk the cell linked lists over the same buffer.
         encoder->setBuffer(gibsManager->getSurfelBuffer(), 0, 0);
-        encoder->setBuffer(gibsManager->getCellBuffer(), 0, 1);
+        encoder->setBuffer(gibsManager->getCellHeadBuffer(), 0, 1);
         encoder->setBuffer(gibsManager->getGIBSDataBuffer(r.currentFrameInFlight), 0, 2);
         encoder->setBytes(&params, sizeof(params), 3);
 
         if (useRT) {
             encoder->setAccelerationStructure(r.TLASBuffers[r.currentFrameInFlight].get(), 4);
-            encoder->setBuffer(gibsManager->getSurfelBufferSorted(), 0, 5);
+            encoder->setBuffer(gibsManager->getSurfelNextBuffer(), 0, 5);
         }
 
         // Only dispatch threads for this frame's residue class of surfels
@@ -2842,7 +2826,9 @@ public:
         params.invViewProj = gibsData.invViewProj;
         params.screenSize = screenSize;
         params.giResolution = giResolution;
-        params.sampleRadius = static_cast<float>(gibsData.sampleRadius) * gibsData.cellSize;
+        // Surfel influence radius in WORLD units; the cell search radius
+        // (gibs.sampleRadius, in cells) is a separate parameter in the kernel
+        params.sampleRadius = gibsData.cellSize;
         params.maxSamples = gibsData.maxSurfelsPerPixel;
         params.normalWeight = 1.0f;
         params.distanceWeight = 1.0f;
@@ -2857,10 +2843,11 @@ public:
         encoder->setTexture(r.normalRT.get(), 1);
         encoder->setTexture(gibsManager->getGIResultTexture(), 2);
 
-        encoder->setBuffer(gibsManager->getSurfelBufferSorted(), 0, 0);
-        encoder->setBuffer(gibsManager->getCellBuffer(), 0, 1);
+        encoder->setBuffer(gibsManager->getSurfelBuffer(), 0, 0);
+        encoder->setBuffer(gibsManager->getCellHeadBuffer(), 0, 1);
         encoder->setBuffer(gibsManager->getGIBSDataBuffer(r.currentFrameInFlight), 0, 2);
         encoder->setBytes(&params, sizeof(params), 3);
+        encoder->setBuffer(gibsManager->getSurfelNextBuffer(), 0, 4);
 
         uint32_t dispatchX = (static_cast<uint32_t>(giResolution.x) + 7) / 8;
         uint32_t dispatchY = (static_cast<uint32_t>(giResolution.y) + 7) / 8;
@@ -3228,10 +3215,8 @@ auto Renderer_Metal::createResources() -> void {
     // GIBS (Global Illumination Based on Surfels) pipelines
     if (m_supportsRaytracing) {
         surfelGenerationPipeline = createComputePipeline("shaders/gibs_surfel_generation.metal", "surfelGeneration");
-        surfelClearCellsPipeline = createComputePipeline("shaders/gibs_spatial_hash.metal", "clearCellCounts");
-        surfelCountPerCellPipeline = createComputePipeline("shaders/gibs_spatial_hash.metal", "countSurfelsPerCell");
-        surfelPrefixSumPipeline = createComputePipeline("shaders/gibs_spatial_hash.metal", "prefixSumCellsSerial");
-        surfelScatterPipeline = createComputePipeline("shaders/gibs_spatial_hash.metal", "scatterSurfels");
+        surfelClearCellHeadsPipeline = createComputePipeline("shaders/gibs_spatial_hash.metal", "clearCellHeads");
+        surfelInsertPipeline = createComputePipeline("shaders/gibs_spatial_hash.metal", "insertSurfels");
         surfelRaytracingPipeline = createComputePipeline("shaders/gibs_raytracing.metal", "surfelRaytracing");
         surfelRaytracingSimplePipeline = createComputePipeline("shaders/gibs_raytracing.metal", "surfelRaytracingSimple");
         gibsTemporalPipeline = createComputePipeline("shaders/gibs_temporal.metal", "surfelTemporalSmooth");

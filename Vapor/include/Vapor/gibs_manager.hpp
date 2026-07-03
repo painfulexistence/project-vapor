@@ -47,10 +47,9 @@ public:
 
     // Buffer access for render passes
     MTL::Buffer* getSurfelBuffer() const { return surfelBuffer.get(); }
-    MTL::Buffer* getSurfelBufferSorted() const { return surfelBufferSorted.get(); }
-    MTL::Buffer* getCellBuffer() const { return cellBuffer.get(); }
+    MTL::Buffer* getCellHeadBuffer() const { return cellHeadBuffer.get(); }
+    MTL::Buffer* getSurfelNextBuffer() const { return surfelNextBuffer.get(); }
     MTL::Buffer* getCounterBuffer() const { return counterBuffer.get(); }
-    MTL::Buffer* getCellCountBuffer() const { return cellCountBuffer.get(); }
     MTL::Buffer* getGIBSDataBuffer(Uint32 frameIndex) const;
     MTL::Texture* getGIResultTexture() const { return giResultTexture.get(); }
     MTL::Texture* getGIHistoryTexture() const { return giHistoryTexture.get(); }
@@ -95,21 +94,22 @@ private:
     glm::mat4 prevViewProj = glm::mat4(1.0f);
 
     // World bounds and spatial hash
-    glm::vec3 worldMin = glm::vec3(-500.0f);
-    glm::vec3 worldMax = glm::vec3(500.0f);
-    float cellSize = 2.0f;
+    // Bounds cover the GI-relevant area around the play space, NOT the whole
+    // world: cell count grows cubically and the hash clear touches every cell.
+    glm::vec3 worldMin = glm::vec3(-64.0f);
+    glm::vec3 worldMax = glm::vec3(64.0f);
+    float cellSize = 1.0f;
     glm::uvec3 gridSize;
     Uint32 totalCells = 0;
 
     // GIBS uniform data
     GIBSData gibsData;
 
-    // GPU Buffers
-    NS::SharedPtr<MTL::Buffer> surfelBuffer;        // Main surfel array
-    NS::SharedPtr<MTL::Buffer> surfelBufferSorted;  // Sorted by cell hash
-    NS::SharedPtr<MTL::Buffer> cellBuffer;          // Spatial hash cells
+    // GPU Buffers (linked-list spatial hash: head index per cell + next index per surfel)
+    NS::SharedPtr<MTL::Buffer> surfelBuffer;        // Canonical surfel array
+    NS::SharedPtr<MTL::Buffer> cellHeadBuffer;      // First surfel index per cell (u32)
+    NS::SharedPtr<MTL::Buffer> surfelNextBuffer;    // Next surfel index per surfel (u32)
     NS::SharedPtr<MTL::Buffer> counterBuffer;       // Atomic counters
-    NS::SharedPtr<MTL::Buffer> cellCountBuffer;     // Per-cell surfel counts
     std::vector<NS::SharedPtr<MTL::Buffer>> gibsDataBuffers; // Per-frame uniform
 
     // GI result textures (ping-pong for temporal)

@@ -29,8 +29,8 @@ kernel void surfelGeneration(
     device atomic_uint* counters [[buffer(1)]],
     constant GIBSData& gibs [[buffer(2)]],
     constant SurfelGenerationParams& params [[buffer(3)]],
-    device const Surfel* sortedSurfels [[buffer(4)]],
-    device const SurfelCell* cells [[buffer(5)]],
+    device const uint* cellHeads [[buffer(4)]],
+    device const uint* surfelNext [[buffer(5)]],
     uint2 gid [[thread_position_in_grid]],
     uint2 gridSize [[threads_per_grid]]
 ) {
@@ -100,16 +100,15 @@ kernel void surfelGeneration(
     }
 
     // Coverage check: reject if an existing surfel already covers this point.
-    // The hash build pass runs BEFORE generation, so cells/sortedSurfels reflect
-    // last frame's surfel pool. Without this the pool fills with duplicates of
-    // the same surfaces and raytracing cost explodes.
-    // Only reached by stochastically accepted pixels (~1%), so the cell scan is cheap.
+    // The hash build pass runs BEFORE generation, so the cell linked lists
+    // reflect last frame's surfel pool. Without this the pool fills with
+    // duplicates of the same surfaces and raytracing cost explodes.
+    // Only reached by stochastically accepted pixels (~1%), so the chain walk is cheap.
     {
         uint coverageCell = computeCellHash(worldPos, gibs);
-        SurfelCell cell = cells[coverageCell];
-        uint checkCount = min(cell.surfelCount, 64u);
-        for (uint i = 0; i < checkCount; i++) {
-            Surfel existing = sortedSurfels[cell.surfelOffset + i];
+        uint iter = 0;
+        for (uint j = cellHeads[coverageCell]; j != GIBS_INVALID_INDEX && iter < GIBS_MAX_CHAIN_LENGTH; j = surfelNext[j], iter++) {
+            Surfel existing = surfels[j];
             if (!(existing.flags & SURFEL_FLAG_VALID)) {
                 continue;
             }
