@@ -516,7 +516,8 @@ protected:
     NS::SharedPtr<MTL::ComputePipelineState> normalResolvePipeline;
     NS::SharedPtr<MTL::ComputePipelineState> velocityPipeline;
     NS::SharedPtr<MTL::ComputePipelineState> raytraceShadowPipeline;
-    NS::SharedPtr<MTL::ComputePipelineState> raytraceAOPipeline;
+    NS::SharedPtr<MTL::ComputePipelineState> raytraceAOPipeline; // 3d_raytrace_ao.metal
+    NS::SharedPtr<MTL::ComputePipelineState> ssaoPipeline;       // 3d_ssao.metal (same bindings, no TLAS)
     NS::SharedPtr<MTL::ComputePipelineState> aoTemporalPipeline;
     NS::SharedPtr<MTL::ComputePipelineState> aoDenoisePipeline;
     NS::SharedPtr<MTL::RenderPipelineState> atmospherePipeline;
@@ -662,6 +663,8 @@ protected:
     bool lightScatteringEnabled = true;
     // AO toggle: skips the whole AO chain and binds a white texture in its place
     bool aoEnabled = true;
+    // Raygen method for the AO chain: 0 = ray traced, 1 = screen space (see AO ImGui section)
+    int aoMethod = 0;
     LightScatteringData lightScatteringSettings;
 
     // Volumetric Fog resources

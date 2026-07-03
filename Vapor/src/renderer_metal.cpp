@@ -330,9 +330,13 @@ public:
 
         if (!r.aoEnabled) return;
 
+        // Both raygen kernels share the binding interface (SSAO ignores the TLAS slot)
+        auto* pipeline = (r.aoMethod == 0 && r.raytraceAOPipeline) ? r.raytraceAOPipeline.get() : r.ssaoPipeline.get();
+        if (!pipeline) return;
+
         auto timedComputeDesc = makeTimedComputeDesc(true, true);
         auto encoder = r.currentCommandBuffer->computeCommandEncoder(timedComputeDesc.get());
-        encoder->setComputePipelineState(r.raytraceAOPipeline.get());
+        encoder->setComputePipelineState(pipeline);
         encoder->setTexture(r.depthStencilRT.get(), 0);
         encoder->setTexture(r.normalRT.get(), 1);
         encoder->setTexture(r.aoRawRT.get(), 2); // noisy output; temporal + à-trous passes produce aoRT
@@ -2538,9 +2542,10 @@ auto Renderer_Metal::createResources() -> void {
     if (m_supportsRaytracing) raytraceShadowPipeline = createComputePipeline("shaders/3d_raytrace_shadow.metal");
     // AO raygen: 3d_ssao.metal (screen-space) and 3d_raytrace_ao.metal (ray-traced)
     // are drop-in interchangeable here; both feed the temporal + à-trous chain.
-    // SSAO is the current default — RT AO works but reads as near-blank in this
-    // scene (1.5m ray cap rarely hits anything outside tight corners).
-    if (m_supportsRaytracing) raytraceAOPipeline = createComputePipeline("shaders/3d_ssao.metal");
+    // RT AO: 2 cosine-weighted any-hit rays/px, 1.5m cap (the visibility knob —
+    // open areas correctly read as unoccluded; corners/contact darken).
+    if (m_supportsRaytracing) raytraceAOPipeline = createComputePipeline("shaders/3d_raytrace_ao.metal");
+    if (m_supportsRaytracing) ssaoPipeline = createComputePipeline("shaders/3d_ssao.metal");
     if (m_supportsRaytracing) aoTemporalPipeline = createComputePipeline("shaders/3d_ao_temporal.metal");
     if (m_supportsRaytracing) aoDenoisePipeline = createComputePipeline("shaders/3d_ao_denoise.metal");
     atmospherePipeline =
@@ -3066,11 +3071,13 @@ auto Renderer_Metal::createResources() -> void {
     ));
     shadowTextureDesc->release();
 
+    // Half resolution: the AO chain kernels are resolution-agnostic and consumers
+    // sample aoRT bilinearly at screen UVs, so this size is the only change needed
     MTL::TextureDescriptor* aoTextureDesc = MTL::TextureDescriptor::alloc()->init();
     aoTextureDesc->setTextureType(MTL::TextureType2D);
     aoTextureDesc->setPixelFormat(MTL::PixelFormatR16Float);
-    aoTextureDesc->setWidth(swapchain->drawableSize().width);
-    aoTextureDesc->setHeight(swapchain->drawableSize().height);
+    aoTextureDesc->setWidth((swapchain->drawableSize().width + 1) / 2);
+    aoTextureDesc->setHeight((swapchain->drawableSize().height + 1) / 2);
     aoTextureDesc->setUsage(MTL::TextureUsageShaderRead | MTL::TextureUsageShaderWrite);
     aoRT = NS::TransferPtr(device->newTexture(aoTextureDesc));
     aoTextureDesc->release();
@@ -3089,8 +3096,8 @@ auto Renderer_Metal::createResources() -> void {
     // purely a size change here (ADR-008).
     MTL::TextureDescriptor* aoChainDesc = MTL::TextureDescriptor::alloc()->init();
     aoChainDesc->setTextureType(MTL::TextureType2D);
-    aoChainDesc->setWidth(swapchain->drawableSize().width);
-    aoChainDesc->setHeight(swapchain->drawableSize().height);
+    aoChainDesc->setWidth((swapchain->drawableSize().width + 1) / 2);
+    aoChainDesc->setHeight((swapchain->drawableSize().height + 1) / 2);
     aoChainDesc->setUsage(MTL::TextureUsageShaderRead | MTL::TextureUsageShaderWrite);
     aoChainDesc->setPixelFormat(MTL::PixelFormatR16Float);
     aoRawRT = NS::TransferPtr(device->newTexture(aoChainDesc));
@@ -4742,7 +4749,10 @@ auto Renderer_Metal::draw(std::shared_ptr<Scene> scene, Camera& camera) -> void 
         if (ImGui::TreeNode("Ambient Occlusion")) {
             ImGui::Separator();
             ImGui::Checkbox("Enabled", &aoEnabled);
-            ImGui::TextDisabled("Attenuates IBL/ambient only; raygen kernel set at pipeline creation");
+            if (aoEnabled) {
+                ImGui::Combo("Method", &aoMethod, "Ray Traced\0Screen Space\0");
+            }
+            ImGui::TextDisabled("Attenuates IBL/ambient only; both methods share the denoise chain");
             ImGui::TreePop();
         }
 
