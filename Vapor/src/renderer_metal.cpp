@@ -315,6 +315,294 @@ public:
     }
 };
 
+// PSSM shadow pass: renders scene depth into a 3-slice texture array for cascades 1-3
+class PSSMShadowPass : public RenderPass {
+public:
+    explicit PSSMShadowPass(Renderer_Metal* renderer) : RenderPass(renderer) {
+    }
+
+    auto getName() const -> const char* override {
+        return "PSSMShadowPass";
+    }
+
+    void execute() override {
+        auto& r = *renderer;
+
+        if (!r.currentScene || r.currentScene->directionalLights.empty()) return;
+
+        const auto& sunLight = r.currentScene->directionalLights[0];
+        const float nearClip  = r.currentCamera->near();
+        const float farClip   = r.currentCamera->far();
+        const float rtEnd     = r.m_supportsRaytracing ? r.pssmRTMaxDist : nearClip;
+        const float blendRange = (farClip - rtEnd) * 0.05f; // 5% of remaining range
+
+        // ----- Cascade split depths (practical split: blend of log + uniform) -----
+        // splits[0] = rtEnd, splits[1..3] = cascade ends, splits[3] = farClip
+        float splits[4];
+        splits[0] = rtEnd;
+        const float lambda = 0.7f;
+        for (int i = 1; i <= 3; i++) {
+            float p = float(i) / 3.0f;
+            float logS = rtEnd * std::pow(farClip / std::max(rtEnd, 0.1f), p);
+            float uniS = rtEnd + (farClip - rtEnd) * p;
+            splits[i] = lambda * logS + (1.0f - lambda) * uniS;
+        }
+
+        // ----- Light direction (direction light travels, toward scene) -----
+        glm::vec3 lightDir = glm::normalize(sunLight.direction);
+        glm::vec3 up = (std::abs(glm::dot(lightDir, glm::vec3(0, 1, 0))) < 0.99f)
+                     ? glm::vec3(0, 1, 0)
+                     : glm::vec3(0, 0, 1);
+
+        // ----- Frustum corners in world space -----
+        glm::mat4 view      = r.currentCamera->getViewMatrix();
+        glm::mat4 proj      = r.currentCamera->getProjMatrix();
+        glm::mat4 invVP     = glm::inverse(proj * view);
+
+        // NDC corners (LH ZO: z in [0,1], y in [-1,+1])
+        const glm::vec4 ndcCorners[8] = {
+            {-1,-1,0,1},{1,-1,0,1},{-1,1,0,1},{1,1,0,1},
+            {-1,-1,1,1},{1,-1,1,1},{-1,1,1,1},{1,1,1,1},
+        };
+        glm::vec3 worldCorners[8];
+        for (int i = 0; i < 8; i++) {
+            glm::vec4 w = invVP * ndcCorners[i];
+            worldCorners[i] = glm::vec3(w) / w.w;
+        }
+
+        // ----- Build GPU data struct -----
+        struct PSSMGPUData {
+            glm::mat4 lightSpaceMatrices[3];
+            glm::vec4 cascadeSplits;
+            float blendRange;
+            float _pad[3];
+        };
+
+        PSSMGPUData gpuData{};
+        gpuData.cascadeSplits = glm::vec4(splits[0], splits[1], splits[2], splits[3]);
+        gpuData.blendRange    = blendRange;
+
+        // Convert a forward view-space distance to NDC z by projecting an actual
+        // view-space point. Handedness-aware: RH projections (glm default; the
+        // GLM_FORCE_LEFT_HANDED define never took effect because glm is included
+        // transitively before it) have proj[2][3] == -1 and put visible geometry
+        // at negative view z; LH puts it at positive z.
+        const float zSign = (proj[2][3] < 0.0f) ? -1.0f : 1.0f;
+        auto viewDepthToNDCz = [&](float d) -> float {
+            glm::vec4 clip = proj * glm::vec4(0.0f, 0.0f, zSign * d, 1.0f);
+            return clip.z / clip.w;
+        };
+
+        for (int ci = 0; ci < 3; ci++) {
+            // Clamp split depths to valid [near, far] range before converting to NDC
+            float splitNear = glm::clamp(splits[ci],     nearClip, farClip);
+            float splitFar  = glm::clamp(splits[ci + 1], nearClip, farClip);
+
+            float nearNDCz = viewDepthToNDCz(splitNear);
+            float farNDCz  = viewDepthToNDCz(splitFar);
+
+            // Sub-frustum corners: unproject 8 NDC corners at exact cascade z values
+            const glm::vec4 cascadeNDC[8] = {
+                {-1,-1,nearNDCz,1}, {1,-1,nearNDCz,1}, {-1,1,nearNDCz,1}, {1,1,nearNDCz,1},
+                {-1,-1,farNDCz, 1}, {1,-1,farNDCz, 1}, {-1,1,farNDCz, 1}, {1,1,farNDCz, 1},
+            };
+            glm::vec3 corners[8];
+            for (int i = 0; i < 8; i++) {
+                glm::vec4 w = invVP * cascadeNDC[i];
+                corners[i] = glm::vec3(w) / w.w;
+            }
+
+            // Bounding sphere center for stable (rotation-invariant) shadow map
+            glm::vec3 sphereCenter(0.0f);
+            for (auto& c : corners) sphereCenter += c;
+            sphereCenter /= 8.0f;
+
+            float sphereRadius = 0.0f;
+            for (auto& c : corners)
+                sphereRadius = glm::max(sphereRadius, glm::length(c - sphereCenter));
+
+            // Light view: eye pulled back far enough that the whole bounding
+            // sphere sits in front of it (RH lookAt: forward is -z, so points in
+            // front have negative view z; distance from eye = -z).
+            const float lightDist = sphereRadius * 2.0f + 1.0f;
+            glm::mat4 lightView = glm::lookAt(sphereCenter - lightDir * lightDist, sphereCenter, up);
+
+            // Snap sphere center to texel grid in light space to stop shimmering
+            float texelSize = (2.0f * sphereRadius) / float(r.PSSM_SHADOW_MAP_SIZE);
+            glm::vec4 lsCenter = lightView * glm::vec4(sphereCenter, 1.0f);
+            lsCenter.x = std::floor(lsCenter.x / texelSize) * texelSize;
+            lsCenter.y = std::floor(lsCenter.y / texelSize) * texelSize;
+            glm::vec3 snappedCenter = glm::vec3(glm::inverse(lightView) * lsCenter);
+            lightView = glm::lookAt(snappedCenter - lightDir * lightDist, snappedCenter, up);
+
+            // Depth extents as positive distances in front of the light eye
+            float minDist = 1e38f, maxDist = -1e38f;
+            for (auto& c : corners) {
+                float dist = -(lightView * glm::vec4(c, 1.0f)).z; // RH: -z is forward
+                minDist = glm::min(minDist, dist);
+                maxDist = glm::max(maxDist, dist);
+            }
+            // Pull the near plane back to capture shadow casters outside the sub-frustum
+            // (a negative near just extends the ortho volume behind the eye — valid).
+            minDist -= (maxDist - minDist);
+
+            glm::mat4 lightProj = glm::ortho(
+                -sphereRadius,  sphereRadius,
+                -sphereRadius,  sphereRadius,
+                minDist, maxDist
+            );
+            gpuData.lightSpaceMatrices[ci] = lightProj * lightView;
+        }
+
+        // Upload PSSM data to triple-buffered GPU buffer
+        memcpy(r.pssmDataBuffers[r.currentFrameInFlight]->contents(), &gpuData, sizeof(gpuData));
+        r.pssmDataBuffers[r.currentFrameInFlight]->didModifyRange(
+            NS::Range::Make(0, sizeof(gpuData))
+        );
+
+        // ----- Render scene into each cascade shadow map slice -----
+        for (int ci = 0; ci < 3; ci++) {
+            auto passDesc = NS::TransferPtr(MTL::RenderPassDescriptor::renderPassDescriptor());
+            auto depthAtt = passDesc->depthAttachment();
+            depthAtt->setTexture(r.pssmShadowMaps.get());
+            depthAtt->setSlice(NS::UInteger(ci));
+            depthAtt->setLoadAction(MTL::LoadActionClear);
+            depthAtt->setStoreAction(MTL::StoreActionStore);
+            depthAtt->setClearDepth(1.0);
+
+            auto encoder = r.currentCommandBuffer->renderCommandEncoder(passDesc.get());
+            encoder->setRenderPipelineState(r.pssmShadowPipeline.get());
+            encoder->setDepthStencilState(r.pssmDepthStencilState.get());
+            encoder->setCullMode(MTL::CullModeBack);
+            encoder->setFrontFacingWinding(MTL::WindingCounterClockwise);
+            // Slope-scale depth bias to prevent shadow acne
+            encoder->setDepthBias(0.005f, 2.0f, 0.01f);
+
+            glm::mat4 lsm = gpuData.lightSpaceMatrices[ci];
+            encoder->setVertexBytes(&lsm, sizeof(glm::mat4), 0);
+            encoder->setVertexBuffer(r.materialDataBuffer.get(), 0, 1);
+            encoder->setVertexBuffer(r.instanceDataBuffers[r.currentFrameInFlight].get(), 0, 2);
+            encoder->setVertexBuffer(r.getBuffer(r.currentScene->vertexBuffer).get(), 0, 3);
+
+            for (const auto& [material, draws] : r.instanceBatches) {
+                encoder->setFragmentTexture(
+                    r.getTexture(material->albedoMap ? material->albedoMap->texture : r.defaultAlbedoTexture).get(), 0
+                );
+                for (const auto& draw : draws) {
+                    encoder->setVertexBytes(&draw.instanceIndex, sizeof(Uint32), 4);
+                    encoder->drawIndexedPrimitives(
+                        MTL::PrimitiveTypeTriangle,
+                        draw.mesh->indexCount,
+                        MTL::IndexTypeUInt32,
+                        r.getBuffer(r.currentScene->indexBuffer).get(),
+                        draw.mesh->indexOffset * sizeof(Uint32)
+                    );
+                }
+            }
+            encoder->endEncoding();
+        }
+    }
+};
+
+// PSSM resolve pass (debug): writes the directional shadow factor into a
+// camera-aligned screen-space texture so it can be inspected like RT shadow.
+class PSSMResolvePass : public RenderPass {
+public:
+    explicit PSSMResolvePass(Renderer_Metal* renderer) : RenderPass(renderer) {}
+    auto getName() const -> const char* override { return "PSSMResolvePass"; }
+
+    void execute() override {
+        auto& r = *renderer;
+        if (!r.currentScene || r.currentScene->directionalLights.empty()) return;
+
+        auto drawableSize = r.swapchain->drawableSize();
+        glm::vec2 screenSize = glm::vec2(drawableSize.width, drawableSize.height);
+
+        auto timedDesc = makeTimedComputeDesc(true, true);
+        auto encoder = r.currentCommandBuffer->computeCommandEncoder(timedDesc.get());
+        encoder->setComputePipelineState(r.pssmResolvePipeline.get());
+        encoder->setTexture(r.depthStencilRT.get(), 0);
+        encoder->setTexture(r.pssmShadowMaps.get(), 1);
+        encoder->setTexture(r.pssmShadowScreenRT.get(), 2);
+        encoder->setBuffer(r.cameraDataBuffers[r.currentFrameInFlight].get(), 0, 0);
+        encoder->setBuffer(r.pssmDataBuffers[r.currentFrameInFlight].get(), 0, 1);
+        encoder->setBytes(&screenSize, sizeof(glm::vec2), 2);
+        encoder->dispatchThreadgroups(
+            MTL::Size((uint32_t(screenSize.x) + 7) / 8, (uint32_t(screenSize.y) + 7) / 8, 1),
+            MTL::Size(8, 8, 1)
+        );
+        encoder->endEncoding();
+    }
+};
+
+// Stochastic point shadow pass: MegaLights-style 2-ray shadow for clustered point lights
+class StochasticPointShadowPass : public RenderPass {
+public:
+    explicit StochasticPointShadowPass(Renderer_Metal* renderer) : RenderPass(renderer) {}
+    auto getName() const -> const char* override { return "StochasticPointShadowPass"; }
+
+    void execute() override {
+        auto& r = *renderer;
+        if (!r.m_supportsRaytracing || !r.TLASBuffers[r.currentFrameInFlight]) return;
+
+        auto drawableSize = r.swapchain->drawableSize();
+        glm::vec2 screenSize = glm::vec2(drawableSize.width, drawableSize.height);
+        glm::uvec3 gridDims = glm::uvec3(r.clusterGridSizeX, r.clusterGridSizeY, r.clusterGridSizeZ);
+        uint32_t fi = r.frameNumber;
+
+        auto timedDesc = makeTimedComputeDesc(true, true);
+        auto encoder = r.currentCommandBuffer->computeCommandEncoder(timedDesc.get());
+        encoder->setComputePipelineState(r.stochasticPointShadowPipeline.get());
+        encoder->setTexture(r.depthStencilRT.get(), 0);
+        encoder->setTexture(r.normalRT.get(), 1);
+        encoder->setTexture(r.pointShadowRT.get(), 2);
+        encoder->setBuffer(r.cameraDataBuffers[r.currentFrameInFlight].get(), 0, 0);
+        encoder->setBuffer(r.pointLightBuffer.get(), 0, 1);
+        encoder->setBuffer(r.clusterBuffers[r.currentFrameInFlight].get(), 0, 2);
+        encoder->setBytes(&screenSize, sizeof(glm::vec2), 3);
+        encoder->setBytes(&gridDims, sizeof(glm::uvec3), 4);
+        encoder->setBytes(&fi, sizeof(uint32_t), 5);
+        encoder->setAccelerationStructure(r.TLASBuffers[r.currentFrameInFlight].get(), 6);
+        encoder->setBytes(&r.pointShadowDebugMode, sizeof(uint32_t), 7);
+        encoder->dispatchThreadgroups(
+            MTL::Size((uint32_t(screenSize.x) + 7) / 8, (uint32_t(screenSize.y) + 7) / 8, 1),
+            MTL::Size(8, 8, 1)
+        );
+        encoder->endEncoding();
+    }
+};
+
+// Point shadow temporal pass: motion-vector reprojection + variance clamping denoiser
+class PointShadowTemporalPass : public RenderPass {
+public:
+    explicit PointShadowTemporalPass(Renderer_Metal* renderer) : RenderPass(renderer) {}
+    auto getName() const -> const char* override { return "PointShadowTemporalPass"; }
+
+    void execute() override {
+        auto& r = *renderer;
+        auto drawableSize = r.swapchain->drawableSize();
+
+        auto timedDesc = makeTimedComputeDesc(true, false);
+        auto encoder = r.currentCommandBuffer->computeCommandEncoder(timedDesc.get());
+        encoder->setComputePipelineState(r.pointShadowTemporalPipeline.get());
+        encoder->setTexture(r.pointShadowRT.get(), 0);
+        encoder->setTexture(r.pointShadowHistoryRT.get(), 1);
+        encoder->setTexture(r.velocityRT.get(), 2);
+        encoder->setTexture(r.pointShadowDenoisedRT.get(), 3);
+        encoder->dispatchThreadgroups(
+            MTL::Size((uint32_t(drawableSize.width) + 7) / 8, (uint32_t(drawableSize.height) + 7) / 8, 1),
+            MTL::Size(8, 8, 1)
+        );
+        encoder->endEncoding();
+
+        // Copy denoised result into history for next frame via blit
+        auto blitDesc = makeTimedBlitDesc(false, true);
+        auto blit = NS::TransferPtr(r.currentCommandBuffer->blitCommandEncoder(blitDesc.get()));
+        blit->copyFromTexture(r.pointShadowDenoisedRT.get(), r.pointShadowHistoryRT.get());
+        blit->endEncoding();
+    }
+};
+
 // Raytrace AO pass: Computes ray-traced ambient occlusion
 class RaytraceAOPass : public RenderPass {
 public:
@@ -804,10 +1092,10 @@ public:
         encoder->setFragmentBytes(&screenSize, sizeof(glm::vec2), 4);
         encoder->setFragmentBytes(&gridSize, sizeof(glm::uvec3), 5);
         encoder->setFragmentBytes(&time, sizeof(float), 6);
-
         encoder->setFragmentBuffer(r.rectLightBuffer.get(), 0, 7);
         uint32_t rectLightCount = static_cast<uint32_t>(r.currentScene->rectLights.size());
         encoder->setFragmentBytes(&rectLightCount, sizeof(uint32_t), 8);
+        encoder->setFragmentBuffer(r.pssmDataBuffers[r.currentFrameInFlight].get(), 0, 9);
         // Denoised AO attenuates the IBL/ambient term; white = AO off
         encoder->setFragmentTexture(r.aoEnabled ? r.aoRT.get() : r.batch2DWhiteTexture.get(), 6);
         auto* vidTex = r.rectLightVideoTexture
@@ -845,6 +1133,10 @@ public:
             encoder->setFragmentTexture(r.irradianceMap.get(), 8);
             encoder->setFragmentTexture(r.prefilterMap.get(), 9);
             encoder->setFragmentTexture(r.brdfLUT.get(), 10);
+
+            // PSSM shadow maps (data buffer bound once before this loop, at buffer 9)
+            encoder->setFragmentTexture(r.pssmShadowMaps.get(), 12);
+            encoder->setFragmentTexture(r.pointShadowDenoisedRT.get(), 13);
 
             for (const auto& draw : draws) {
                 if (!r.currentCamera->isVisible(r.instances[draw.instanceIndex].boundingSphere)) {
@@ -2371,10 +2663,14 @@ auto Renderer_Metal::init(SDL_Window* window) -> void {
     graph.addPass(std::make_unique<NormalResolvePass>(this));
     graph.addPass(std::make_unique<VelocityPass>(this));
     graph.addPass(std::make_unique<TileCullingPass>(this));
+    graph.addPass(std::make_unique<PSSMShadowPass>(this));
+    graph.addPass(std::make_unique<PSSMResolvePass>(this));
     if (m_supportsRaytracing) graph.addPass(std::make_unique<RaytraceShadowPass>(this));
     if (m_supportsRaytracing) graph.addPass(std::make_unique<RaytraceAOPass>(this));
     if (m_supportsRaytracing) graph.addPass(std::make_unique<AOTemporalPass>(this));
     if (m_supportsRaytracing) graph.addPass(std::make_unique<AODenoisePass>(this));
+    if (m_supportsRaytracing) graph.addPass(std::make_unique<StochasticPointShadowPass>(this));
+    if (m_supportsRaytracing) graph.addPass(std::make_unique<PointShadowTemporalPass>(this));
     graph.addPass(std::make_unique<MainRenderPass>(this));
     graph.addPass(std::make_unique<SkyAtmospherePass>(this));
     // graph.addPass(std::make_unique<WaterPass>(this));
@@ -2548,6 +2844,46 @@ auto Renderer_Metal::createResources() -> void {
     if (m_supportsRaytracing) ssaoPipeline = createComputePipeline("shaders/3d_ssao.metal");
     if (m_supportsRaytracing) aoTemporalPipeline = createComputePipeline("shaders/3d_ao_temporal.metal");
     if (m_supportsRaytracing) aoDenoisePipeline = createComputePipeline("shaders/3d_ao_denoise.metal");
+    if (m_supportsRaytracing) stochasticPointShadowPipeline = createComputePipeline("shaders/3d_stochastic_point_shadow.metal");
+    pointShadowTemporalPipeline = createComputePipeline("shaders/3d_point_shadow_temporal.metal");
+    pssmResolvePipeline = createComputePipeline("shaders/3d_pssm_resolve.metal");
+
+    // PSSM depth-only pipeline
+    {
+        auto shaderSrc = readFile("shaders/3d_pssm_shadow_depth.metal");
+        auto code = NS::String::string(shaderSrc.data(), NS::StringEncoding::UTF8StringEncoding);
+        NS::Error* error = nullptr;
+        MTL::Library* library = device->newLibrary(code, nullptr, &error);
+        if (!library) {
+            fmt::print("Warning: Could not compile PSSM shadow shader: {}\n",
+                       error ? error->localizedDescription()->utf8String() : "unknown");
+        } else {
+            auto vFn = library->newFunction(NS::String::string("vertexMain", NS::StringEncoding::UTF8StringEncoding));
+            auto fFn = library->newFunction(NS::String::string("fragmentMain", NS::StringEncoding::UTF8StringEncoding));
+
+            auto desc = NS::TransferPtr(MTL::RenderPipelineDescriptor::alloc()->init());
+            desc->setVertexFunction(vFn);
+            desc->setFragmentFunction(fFn);
+            desc->setDepthAttachmentPixelFormat(MTL::PixelFormatDepth32Float);
+            // No colour attachments — depth only
+
+            pssmShadowPipeline = NS::TransferPtr(device->newRenderPipelineState(desc.get(), &error));
+            if (!pssmShadowPipeline) {
+                fmt::print("Warning: Could not create PSSM shadow pipeline: {}\n",
+                           error ? error->localizedDescription()->utf8String() : "unknown");
+            }
+            vFn->release();
+            fFn->release();
+            library->release();
+        }
+
+        // Depth stencil state for PSSM shadow pass
+        MTL::DepthStencilDescriptor* dsDesc = MTL::DepthStencilDescriptor::alloc()->init();
+        dsDesc->setDepthCompareFunction(MTL::CompareFunctionLessEqual);
+        dsDesc->setDepthWriteEnabled(true);
+        pssmDepthStencilState = NS::TransferPtr(device->newDepthStencilState(dsDesc));
+        dsDesc->release();
+    }
     atmospherePipeline =
         createPipeline("shaders/3d_atmosphere.metal", true, false, 1);// No MSAA for sky (full-screen triangle)
     skyCapturePipeline = createPipeline("shaders/3d_sky_capture.metal", true, true, 1);
@@ -3070,6 +3406,102 @@ auto Renderer_Metal::createResources() -> void {
         )
     ));
     shadowTextureDesc->release();
+
+    // PSSM shadow maps: 2D texture array, 3 cascades × 4096×4096 Depth32
+    {
+        MTL::TextureDescriptor* pssmDesc = MTL::TextureDescriptor::alloc()->init();
+        pssmDesc->setTextureType(MTL::TextureType2DArray);
+        pssmDesc->setPixelFormat(MTL::PixelFormatDepth32Float);
+        pssmDesc->setWidth(PSSM_SHADOW_MAP_SIZE);
+        pssmDesc->setHeight(PSSM_SHADOW_MAP_SIZE);
+        pssmDesc->setArrayLength(PSSM_CASCADE_COUNT);
+        pssmDesc->setMipmapLevelCount(1);
+        pssmDesc->setUsage(MTL::TextureUsageRenderTarget | MTL::TextureUsageShaderRead);
+        pssmShadowMaps = NS::TransferPtr(device->newTexture(pssmDesc));
+        pssmDesc->release();
+
+        // Per-slice texture2d views for ImGui display (depth2d_array can't be shown directly)
+        for (uint32_t i = 0; i < PSSM_CASCADE_COUNT; i++) {
+            pssmShadowMapViews[i] = NS::TransferPtr(
+                pssmShadowMaps->newTextureView(
+                    MTL::PixelFormatDepth32Float,
+                    MTL::TextureType2D,
+                    NS::Range::Make(0, 1),
+                    NS::Range::Make(i, 1)
+                )
+            );
+        }
+
+        // Triple-buffered uniform buffers for PSSM data
+        constexpr size_t pssmDataSize = sizeof(glm::mat4) * 3 + sizeof(glm::vec4) + sizeof(float) * 4;
+        pssmDataBuffers.resize(MAX_FRAMES_IN_FLIGHT);
+        for (auto& buf : pssmDataBuffers) {
+            buf = NS::TransferPtr(device->newBuffer(pssmDataSize, MTL::ResourceStorageModeShared));
+        }
+    }
+
+    // Stochastic point shadow RTs: R16F (raw + denoised + history)
+    {
+        auto* desc = MTL::TextureDescriptor::alloc()->init();
+        desc->setTextureType(MTL::TextureType2D);
+        desc->setPixelFormat(MTL::PixelFormatR16Float);
+        desc->setWidth(swapchain->drawableSize().width);
+        desc->setHeight(swapchain->drawableSize().height);
+        desc->setUsage(MTL::TextureUsageShaderRead | MTL::TextureUsageShaderWrite);
+        pointShadowRT         = NS::TransferPtr(device->newTexture(desc));
+        pointShadowDenoisedRT = NS::TransferPtr(device->newTexture(desc));
+        pointShadowHistoryRT  = NS::TransferPtr(device->newTexture(desc));
+        desc->release();
+
+        // Grayscale swizzle views for the ImGui previews (raw R16F renders red)
+        auto grayView = [](MTL::Texture* tex) {
+            return NS::TransferPtr(tex->newTextureView(
+                MTL::PixelFormatR16Float,
+                MTL::TextureType2D,
+                NS::Range::Make(0, 1),
+                NS::Range::Make(0, 1),
+                MTL::TextureSwizzleChannels::Make(
+                    MTL::TextureSwizzleRed, MTL::TextureSwizzleRed, MTL::TextureSwizzleRed, MTL::TextureSwizzleOne
+                )
+            ));
+        };
+        pointShadowRTGrayView         = grayView(pointShadowRT.get());
+        pointShadowDenoisedRTGrayView = grayView(pointShadowDenoisedRT.get());
+
+        // Initialize all three to 1.0 (fully lit). Prevents garbage in the first
+        // frame's temporal history, and keeps point lights unshadowed when
+        // raytracing is unsupported (the passes never write these textures).
+        {
+            const uint32_t texW = pointShadowRT->width();
+            const uint32_t texH = pointShadowRT->height();
+            std::vector<uint16_t> ones(size_t(texW) * texH, 0x3C00); // 1.0 in half-float
+            for (auto* tex : { pointShadowRT.get(), pointShadowDenoisedRT.get(), pointShadowHistoryRT.get() }) {
+                tex->replaceRegion(MTL::Region::Make2D(0, 0, texW, texH), 0, ones.data(), texW * sizeof(uint16_t));
+            }
+        }
+    }
+
+    // Screen-space resolved PSSM shadow (camera-aligned, debug display)
+    {
+        auto* desc = MTL::TextureDescriptor::alloc()->init();
+        desc->setTextureType(MTL::TextureType2D);
+        desc->setPixelFormat(MTL::PixelFormatR8Unorm);
+        desc->setWidth(swapchain->drawableSize().width);
+        desc->setHeight(swapchain->drawableSize().height);
+        desc->setUsage(MTL::TextureUsageShaderRead | MTL::TextureUsageShaderWrite);
+        pssmShadowScreenRT = NS::TransferPtr(device->newTexture(desc));
+        desc->release();
+
+        pssmShadowScreenRTGrayView = NS::TransferPtr(pssmShadowScreenRT->newTextureView(
+            MTL::PixelFormatR8Unorm,
+            MTL::TextureType2D,
+            NS::Range::Make(0, 1),
+            NS::Range::Make(0, 1),
+            MTL::TextureSwizzleChannels::Make(
+                MTL::TextureSwizzleRed, MTL::TextureSwizzleRed, MTL::TextureSwizzleRed, MTL::TextureSwizzleOne
+            )
+        ));
+    }
 
     // Half resolution: the AO chain kernels are resolution-agnostic and consumers
     // sample aoRT bilinearly at screen UVs, so this size is the only change needed
@@ -4439,25 +4871,70 @@ auto Renderer_Metal::draw(std::shared_ptr<Scene> scene, Camera& camera) -> void 
 
         ImGui::Separator();
 
+        // Aspect-correct preview sized for actually diagnosing content issues
+        auto rtPreview = [](const char* label, MTL::Texture* tex) {
+            if (!tex) return;
+            if (ImGui::TreeNode(label)) {
+                float aspect = tex->height() > 0 ? float(tex->width()) / float(tex->height()) : 1.0f;
+                ImGui::Text("%llu x %llu", (unsigned long long)tex->width(), (unsigned long long)tex->height());
+                ImGui::Image((ImTextureID)(intptr_t)tex, ImVec2(320, 320 / aspect));
+                ImGui::TreePop();
+            }
+        };
+
         if (ImGui::TreeNode("RTs")) {
             ImGui::Separator();
-            // Aspect-correct preview sized for actually diagnosing content issues
-            auto rtPreview = [](const char* label, MTL::Texture* tex) {
-                if (!tex) return;
-                if (ImGui::TreeNode(label)) {
-                    float aspect = tex->height() > 0 ? float(tex->width()) / float(tex->height()) : 1.0f;
-                    ImGui::Text("%llu x %llu", (unsigned long long)tex->width(), (unsigned long long)tex->height());
-                    ImGui::Image((ImTextureID)(intptr_t)tex, ImVec2(320, 320 / aspect));
-                    ImGui::TreePop();
-                }
-            };
             rtPreview("Scene Color RT", colorRT.get());
             rtPreview("Scene Depth RT", depthStencilRT.get());
+            // Shadow results consumed by the PBR shader (all screen-space)
             rtPreview("Raytraced Shadow", shadowRTGrayView.get());
+            rtPreview("Point Shadow", pointShadowDenoisedRTGrayView.get());
+            rtPreview("PSSM Shadow", pssmShadowScreenRTGrayView.get());
             rtPreview("Raytraced AO", aoRTGrayView.get()); // grayscale swizzle view (raw R16F renders red)
             rtPreview("Scene Normal RT", normalRT.get());
             rtPreview("Velocity RT", velocityRT.get());
             rtPreview("Light Scattering RT", lightScatteringRT.get());
+            ImGui::TreePop();
+        }
+
+        if (ImGui::TreeNode("Shadow Debug")) {
+            ImGui::Separator();
+
+            // --- Light gathering status (answers: did lights reach the renderer?) ---
+            ImGui::Text("Scene lights:  dir %zu | point %zu | rect %zu",
+                scene->directionalLights.size(), scene->pointLights.size(), scene->rectLights.size());
+            ImGui::Text("Raytracing: %s | TLAS: %s",
+                m_supportsRaytracing ? "supported" : "OFF",
+                (m_supportsRaytracing && TLASBuffers[currentFrameInFlight]) ? "built" : "null");
+            ImGui::Text("Frame: %u", frameNumber);
+
+            // --- PSSM cascade splits (read back from shared GPU buffer) ---
+            if (pssmDataBuffers[currentFrameInFlight]) {
+                const auto* pssmGPU = reinterpret_cast<const uint8_t*>(pssmDataBuffers[currentFrameInFlight]->contents());
+                glm::vec4 splits;
+                memcpy(&splits, pssmGPU + sizeof(glm::mat4) * 3, sizeof(glm::vec4));
+                ImGui::Text("Cascade splits (view depth): RT<%.1f | C1<%.1f | C2<%.1f | C3<%.1f",
+                    splits.x, splits.y, splits.z, splits.w);
+            }
+            ImGui::SliderFloat("RT shadow max dist", &pssmRTMaxDist, 5.0f, 200.0f);
+
+            // --- Stochastic point shadow debug mode ---
+            const char* psDebugModes[] = { "Visibility (normal)", "Tile light-count heatmap" };
+            int psMode = static_cast<int>(pointShadowDebugMode);
+            if (ImGui::Combo("Point shadow view", &psMode, psDebugModes, 2)) {
+                pointShadowDebugMode = static_cast<uint32_t>(psMode);
+            }
+            if (pointShadowDebugMode == 1) {
+                ImGui::TextWrapped("Heatmap: black = tile has 0 lights (culling problem if lights exist), brighter = more lights (8+ = white). Shown in 'Point Shadow (raw / heatmap)' below.");
+            }
+
+            // --- Intermediate shadow textures ---
+            // Raw = pre-temporal (also shows the tile heatmap in debug mode)
+            rtPreview("Point Shadow (raw / heatmap)", pointShadowRTGrayView.get());
+            // Light-space cascade depth maps
+            for (uint32_t i = 0; i < PSSM_CASCADE_COUNT; i++) {
+                rtPreview(fmt::format("PSSM Cascade {} (light-space depth)", i + 1).c_str(), pssmShadowMapViews[i].get());
+            }
             ImGui::TreePop();
         }
 
@@ -5524,6 +6001,7 @@ void Renderer_Metal::renderToTexture(
     encoder->setFragmentBuffer(rectLightBuffer.get(), 0, 7);
     uint32_t rtRectLightCount = static_cast<uint32_t>(scene->rectLights.size());
     encoder->setFragmentBytes(&rtRectLightCount, sizeof(uint32_t), 8);
+    encoder->setFragmentBuffer(pssmDataBuffers[currentFrameInFlight].get(), 0, 9);
     // Main-view AO is the wrong view for a render texture, but the shader
     // requires the binding; misaligned ambient attenuation is acceptable here
     encoder->setFragmentTexture(aoEnabled ? aoRT.get() : batch2DWhiteTexture.get(), 6);
@@ -5558,6 +6036,10 @@ void Renderer_Metal::renderToTexture(
         encoder->setFragmentTexture(irradianceMap.get(), 8);
         encoder->setFragmentTexture(prefilterMap.get(), 9);
         encoder->setFragmentTexture(brdfLUT.get(), 10);
+
+        // PSSM shadow maps (data buffer bound once before this loop, at buffer 9)
+        encoder->setFragmentTexture(pssmShadowMaps.get(), 12);
+        encoder->setFragmentTexture(pointShadowDenoisedRT.get(), 13);
 
         for (const auto& draw : meshes) {
             // Frustum culling with render texture camera
