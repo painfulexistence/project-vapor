@@ -166,17 +166,24 @@ void SurfelRaytracingPass::execute() {
     auto encoder = r.currentCommandBuffer->computeCommandEncoder();
     encoder->setLabel(NS::String::string("Surfel Raytracing", NS::UTF8StringEncoding));
 
-    // Use simple version without acceleration structure for now
-    // TODO: Switch to full raytracing version when acceleration structure is ready
-    encoder->setComputePipelineState(r.surfelRaytracingSimplePipeline.get());
+    // Use full raytracing when TLAS is available, otherwise fallback to simple version
+    bool useRaytracing = r.m_supportsRaytracing && r.TLASBuffers[r.currentFrameInFlight];
+
+    if (useRaytracing) {
+        encoder->setComputePipelineState(r.surfelRaytracingPipeline.get());
+    } else {
+        encoder->setComputePipelineState(r.surfelRaytracingSimplePipeline.get());
+    }
 
     encoder->setBuffer(gibsManager->getSurfelBufferSorted(), 0, 0);
     encoder->setBuffer(gibsManager->getCellBuffer(), 0, 1);
     encoder->setBuffer(gibsManager->getGIBSDataBuffer(r.currentFrameInFlight), 0, 2);
     encoder->setBytes(&params, sizeof(params), 3);
 
-    // Optionally set acceleration structure for full raytracing
-    // encoder->setAccelerationStructure(r.TLASBuffers[r.currentFrameInFlight].get(), 4);
+    // Bind acceleration structure for full raytracing (reuse existing TLAS)
+    if (useRaytracing) {
+        encoder->setAccelerationStructure(r.TLASBuffers[r.currentFrameInFlight].get(), 4);
+    }
 
     uint32_t threadGroupSize = 64;
     uint32_t threadGroups = (params.surfelCount + threadGroupSize - 1) / threadGroupSize;
