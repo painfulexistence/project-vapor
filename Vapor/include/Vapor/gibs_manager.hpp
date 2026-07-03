@@ -67,6 +67,12 @@ public:
     // Manual surfel count update (called by generation pass)
     void setActiveSurfelCount(Uint32 count) { activeSurfelCount = count; }
 
+    // Debug: raw GPU counter values (x = per-frame budget cursor, y = persistent pool cursor)
+    glm::uvec2 getRawCounters() const {
+        const Uint32* p = static_cast<const Uint32*>(counterBuffer->contents());
+        return { p[0], p[1] };
+    }
+
     // Swap history buffers (called after temporal pass)
     void swapHistoryBuffers();
 

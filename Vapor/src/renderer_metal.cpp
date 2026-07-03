@@ -3749,7 +3749,8 @@ auto Renderer_Metal::createResources() -> void {
     albedoRT_MS = NS::TransferPtr(device->newTexture(albedoTextureDesc));
     albedoTextureDesc->setTextureType(MTL::TextureType2D);
     albedoTextureDesc->setSampleCount(1);
-    albedoTextureDesc->setUsage(MTL::TextureUsageShaderRead | MTL::TextureUsageShaderWrite);
+    // RenderTarget usage is REQUIRED: this texture is the MSAA resolve target of PrePass
+    albedoTextureDesc->setUsage(MTL::TextureUsageRenderTarget | MTL::TextureUsageShaderRead | MTL::TextureUsageShaderWrite);
     albedoRT = NS::TransferPtr(device->newTexture(albedoTextureDesc));
     albedoTextureDesc->release();
 
@@ -5641,6 +5642,12 @@ auto Renderer_Metal::draw(std::shared_ptr<Scene> scene, Camera& camera) -> void 
                 ImGui::Text("Active Surfels: %u / %u", gibsManager->getActiveSurfelCount(), gibsManager->getMaxSurfels());
                 ImGui::Text("Rays/Surfel: %u", gibsManager->getRaysPerSurfel());
                 ImGui::Text("Resolution Scale: %.2fx", gibsManager->getResolutionScale());
+                // Raw GPU counters: [0] = this frame's generation budget cursor (reset each
+                // frame), [1] = persistent pool cursor. If both stay 0 the generation kernel
+                // is not producing surfels (check depth/bounds); if [1] > 0 but Active stays
+                // 0 the CPU readback is broken.
+                glm::uvec2 rawCounters = gibsManager->getRawCounters();
+                ImGui::Text("GPU counters: budget=%u pool=%u", rawCounters.x, rawCounters.y);
 
                 int qualityIdx = static_cast<int>(gibsQuality);
                 if (ImGui::Combo("Quality", &qualityIdx, "Low\0Medium\0High\0Ultra\0")) {
@@ -5976,6 +5983,21 @@ auto Renderer_Metal::draw(std::shared_ptr<Scene> scene, Camera& camera) -> void 
                 bool endValid   = end != 0 && end != ~0ull;
                 double ms = (beginValid && endValid && end >= begin)
                     ? static_cast<double>(end - begin) / 1e6 : 0.0;
+                // A slot that stopped being refreshed (encoder no longer writes its
+                // sample) holds a stale absolute timestamp; the delta then grows by
+                // one frame time per frame and reads as seconds. No real pass takes
+                // over a second — treat it as a stale-slot artifact, not a timing.
+                if (ms > 1000.0) {
+                    static std::mutex staleMutex;
+                    static std::set<std::string> staleReported;
+                    std::lock_guard<std::mutex> staleLock(staleMutex);
+                    if (staleReported.insert(info.name).second) {
+                        fmt::print("[gpu-timing] pass '{}' delta {:.0f}ms — begin slot {} is stale "
+                                   "(previous pass stopped refreshing its end sample)\n",
+                                   info.name, ms, static_cast<uint64_t>(info.beginIdx));
+                    }
+                    ms = 0.0;
+                }
                 if (!endValid) {
                     // The pass that failed to write is THIS one (its end slot is empty);
                     // log once per pass name so the culprit encoder is identifiable.

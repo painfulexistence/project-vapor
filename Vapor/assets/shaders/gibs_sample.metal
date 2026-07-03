@@ -122,9 +122,8 @@ kernel void giSample(
     // Reconstruct world position
     float3 worldPos = reconstructWorldPosition(uv, depth, params.invViewProj);
 
-    // Read normal
-    float3 normal = normalTexture.read(depthCoord).xyz * 2.0 - 1.0;
-    normal = normalize(normal);
+    // Read normal (normalRT stores signed world-space normals)
+    float3 normal = normalize(normalTexture.read(depthCoord).xyz);
 
     // Sample GI from surfels
     float3 gi = sampleGIFromSurfels(worldPos, normal, surfels, cells, gibs, params);
@@ -148,7 +147,7 @@ kernel void giBilateralUpsample(
 
     // Read center pixel properties
     float centerDepth = depthTexture.read(gid).r;
-    float3 centerNormal = normalTexture.read(gid).xyz * 2.0 - 1.0;
+    float3 centerNormal = normalize(normalTexture.read(gid).xyz);
 
     // Skip sky
     if (centerDepth > 0.9999) {
@@ -184,7 +183,7 @@ kernel void giBilateralUpsample(
             sampleFullRes = clamp(sampleFullRes, uint2(0), uint2(params.screenSize) - 1);
 
             float sampleDepth = depthTexture.read(sampleFullRes).r;
-            float3 sampleNormal = normalTexture.read(sampleFullRes).xyz * 2.0 - 1.0;
+            float3 sampleNormal = normalize(normalTexture.read(sampleFullRes).xyz);
 
             // Depth weight (penalize large depth differences)
             float depthDiff = abs(centerDepth - sampleDepth);

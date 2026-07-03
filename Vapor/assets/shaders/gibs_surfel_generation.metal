@@ -53,14 +53,12 @@ kernel void surfelGeneration(
         return;
     }
 
-    // Read normal (stored as [0,1], convert to [-1,1])
-    float3 normal = normalTexture.read(gid).xyz * 2.0 - 1.0;
-    normal = normalize(normal);
-
-    // Skip invalid normals
-    if (length(normal) < 0.5) {
-        return;
+    // Read normal (normalRT stores signed world-space normals, same as the AO kernels)
+    float3 rawNormal = normalTexture.read(gid).xyz;
+    if (length(rawNormal) < 0.5) {
+        return; // cleared / invalid pixel
     }
+    float3 normal = normalize(rawNormal);
 
     // Read albedo
     float4 albedoSample = albedoTexture.read(gid);
