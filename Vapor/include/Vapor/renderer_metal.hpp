@@ -329,11 +329,11 @@ class Renderer_Metal final : public Renderer {// Must be public or factory funct
     friend class EquirectToCubemapPass;
 
     // GIBS (Global Illumination Based on Surfels) passes
-    friend class Vapor::SurfelGenerationPass;
-    friend class Vapor::SurfelHashBuildPass;
-    friend class Vapor::SurfelRaytracingPass;
-    friend class Vapor::GIBSTemporalPass;
-    friend class Vapor::GIBSSamplePass;
+    friend class SurfelGenerationPass;
+    friend class SurfelHashBuildPass;
+    friend class SurfelRaytracingPass;
+    friend class GIBSTemporalPass;
+    friend class GIBSSamplePass;
 
 public:
     Renderer_Metal();
