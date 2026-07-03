@@ -4886,14 +4886,14 @@ auto Renderer_Metal::draw(std::shared_ptr<Scene> scene, Camera& camera) -> void 
             ImGui::Separator();
             rtPreview("Scene Color RT", colorRT.get());
             rtPreview("Scene Depth RT", depthStencilRT.get());
+            // Shadow results consumed by the PBR shader (all screen-space)
             rtPreview("Raytraced Shadow", shadowRTGrayView.get());
+            rtPreview("Point Shadow", pointShadowDenoisedRTGrayView.get());
+            rtPreview("PSSM Shadow", pssmShadowScreenRTGrayView.get());
             rtPreview("Raytraced AO", aoRTGrayView.get()); // grayscale swizzle view (raw R16F renders red)
             rtPreview("Scene Normal RT", normalRT.get());
             rtPreview("Velocity RT", velocityRT.get());
             rtPreview("Light Scattering RT", lightScatteringRT.get());
-            // The two shadow results actually consumed by the PBR shader
-            rtPreview("Point Shadow (denoised)", pointShadowDenoisedRTGrayView.get());
-            rtPreview("PSSM Shadow (screen-space)", pssmShadowScreenRTGrayView.get());
             ImGui::TreePop();
         }
 
