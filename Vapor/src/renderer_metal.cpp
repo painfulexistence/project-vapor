@@ -330,9 +330,13 @@ public:
 
         if (!r.aoEnabled) return;
 
+        // Both raygen kernels share the binding interface (SSAO ignores the TLAS slot)
+        auto* pipeline = (r.aoMethod == 0 && r.raytraceAOPipeline) ? r.raytraceAOPipeline.get() : r.ssaoPipeline.get();
+        if (!pipeline) return;
+
         auto timedComputeDesc = makeTimedComputeDesc(true, true);
         auto encoder = r.currentCommandBuffer->computeCommandEncoder(timedComputeDesc.get());
-        encoder->setComputePipelineState(r.raytraceAOPipeline.get());
+        encoder->setComputePipelineState(pipeline);
         encoder->setTexture(r.depthStencilRT.get(), 0);
         encoder->setTexture(r.normalRT.get(), 1);
         encoder->setTexture(r.aoRawRT.get(), 2); // noisy output; temporal + à-trous passes produce aoRT
@@ -2541,6 +2545,7 @@ auto Renderer_Metal::createResources() -> void {
     // RT AO: 2 cosine-weighted any-hit rays/px, 1.5m cap (the visibility knob —
     // open areas correctly read as unoccluded; corners/contact darken).
     if (m_supportsRaytracing) raytraceAOPipeline = createComputePipeline("shaders/3d_raytrace_ao.metal");
+    if (m_supportsRaytracing) ssaoPipeline = createComputePipeline("shaders/3d_ssao.metal");
     if (m_supportsRaytracing) aoTemporalPipeline = createComputePipeline("shaders/3d_ao_temporal.metal");
     if (m_supportsRaytracing) aoDenoisePipeline = createComputePipeline("shaders/3d_ao_denoise.metal");
     atmospherePipeline =
@@ -4744,7 +4749,10 @@ auto Renderer_Metal::draw(std::shared_ptr<Scene> scene, Camera& camera) -> void 
         if (ImGui::TreeNode("Ambient Occlusion")) {
             ImGui::Separator();
             ImGui::Checkbox("Enabled", &aoEnabled);
-            ImGui::TextDisabled("Attenuates IBL/ambient only; raygen kernel set at pipeline creation");
+            if (aoEnabled) {
+                ImGui::Combo("Method", &aoMethod, "Ray Traced\0Screen Space\0");
+            }
+            ImGui::TextDisabled("Attenuates IBL/ambient only; both methods share the denoise chain");
             ImGui::TreePop();
         }
 
