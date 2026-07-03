@@ -32,6 +32,7 @@
     "rmlui",
     "entt",
     "catch2",
-    "nlohmann-json"
+    "nlohmann-json",
+    "boost-pfr"
   ]
 }

@@ -2,14 +2,21 @@
 
 #include "action_manager.hpp"
 #include "audio_engine.hpp"
+#include "fsm.hpp"
+#include "fsm_system.hpp"
 #include "input_manager.hpp"
+#include "trigger_system.hpp"
 #include "resource_manager.hpp"
 #include "task_scheduler.hpp"
 #include <memory>
+#include <string>
+
+class Renderer; // global namespace — defined in renderer.hpp
 
 namespace Vapor {
 
     class RmlUiManager;
+    class VideoRecorder;
 
     class EngineCore {
     public:
@@ -43,9 +50,17 @@ namespace Vapor {
         }
 
         // Get the audio manager
-        AudioManager& getAudioManager() {
-            return *_audioManager;
+        AudioEngine& getAudioEngine() {
+            return *_audioEngine;
         }
+
+        // Wire the renderer into the engine: registers the built-in engine
+        // ImGui window (recording controls) and sets the recording output dir
+        // to <basePath>/output. Call once after the renderer is created.
+        void attachRenderer(::Renderer* renderer, const std::string& outputBasePath = "output");
+
+        // Access the engine-owned video recorder (always valid after init()).
+        VideoRecorder& getVideoRecorder();
 
         // Initialize RmlUI
         bool initRmlUI(int width, int height);
@@ -81,7 +96,8 @@ namespace Vapor {
         std::unique_ptr<ResourceManager> _resourceManager;
         std::unique_ptr<ActionManager> _actionManager;
         std::unique_ptr<InputManager> _inputManager;
-        std::unique_ptr<AudioManager> _audioManager;
+        std::unique_ptr<AudioEngine> _audioEngine;
+        std::unique_ptr<VideoRecorder> _videoRecorder;
         std::unique_ptr<RmlUiManager> _rmluiManager;
 
         bool _initialized{ false };

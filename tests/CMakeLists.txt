@@ -2,6 +2,8 @@ find_package(Catch2 3 CONFIG REQUIRED)
 find_package(glm CONFIG REQUIRED)
 find_package(fmt CONFIG REQUIRED)
 
+include(AssetPipeline)
+
 # Strict warnings for all test targets — keep tests warning-free
 set(TEST_WARNING_FLAGS
     $<$<CXX_COMPILER_ID:Clang,AppleClang,GNU>:-Wall -Wextra -Wshadow -Wno-unused-parameter>
@@ -46,6 +48,20 @@ target_link_libraries(test_ecs_transform PRIVATE
 )
 target_compile_features(test_ecs_transform PRIVATE cxx_std_20)
 target_compile_options(test_ecs_transform PRIVATE ${TEST_WARNING_FLAGS})
+
+# ── FSM System tests (pure logic, no GPU/Physics) ─────────────────────────
+add_executable(test_fsm_system
+    fsm_system_test.cpp
+)
+target_include_directories(test_fsm_system PRIVATE
+    ${CMAKE_SOURCE_DIR}/Vapor/include
+)
+target_link_libraries(test_fsm_system PRIVATE
+    Catch2::Catch2WithMain
+    EnTT::EnTT
+)
+target_compile_features(test_fsm_system PRIVATE cxx_std_20)
+target_compile_options(test_fsm_system PRIVATE ${TEST_WARNING_FLAGS})
 
 # ── Camera frustum tests (pure logic, no GPU) ──────────────────────────────
 add_executable(test_camera
@@ -141,11 +157,11 @@ target_link_libraries(test_file_system PRIVATE
 target_compile_features(test_file_system PRIVATE cxx_std_20)
 target_compile_options(test_file_system PRIVATE ${TEST_WARNING_FLAGS})
 
-vapor_copy_assets(test_physics)
-vapor_copy_assets(test_resource_manager)
-vapor_copy_assets(test_asset_management)
-vapor_copy_assets(test_backend_support)
-vapor_copy_assets(test_ui_system)
+vapor_copy_engine_assets(test_physics)
+vapor_copy_engine_assets(test_resource_manager)
+vapor_copy_engine_assets(test_asset_management)
+vapor_copy_engine_assets(test_backend_support)
+vapor_copy_engine_assets(test_ui_system)
 
 include(CTest)
 include(Catch)
@@ -154,6 +170,7 @@ include(Catch)
 catch_discover_tests(test_action_system   WORKING_DIRECTORY "$<TARGET_FILE_DIR:test_action_system>")
 catch_discover_tests(test_scene_transform WORKING_DIRECTORY "$<TARGET_FILE_DIR:test_scene_transform>")
 catch_discover_tests(test_ecs_transform   WORKING_DIRECTORY "$<TARGET_FILE_DIR:test_ecs_transform>")
+catch_discover_tests(test_fsm_system      WORKING_DIRECTORY "$<TARGET_FILE_DIR:test_fsm_system>")
 catch_discover_tests(test_camera          WORKING_DIRECTORY "$<TARGET_FILE_DIR:test_camera>")
 catch_discover_tests(test_physics         WORKING_DIRECTORY "$<TARGET_FILE_DIR:test_physics>")
 catch_discover_tests(test_asset_management   WORKING_DIRECTORY "$<TARGET_FILE_DIR:test_asset_management>")

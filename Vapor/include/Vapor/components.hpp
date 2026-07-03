@@ -1,4 +1,5 @@
 #pragma once
+#include "Vapor/hidden.hpp"
 #include "character_controller.hpp"
 #include "graphics_handles.hpp"
 #include "graphics_sprite.hpp"
@@ -25,9 +26,9 @@ namespace Vapor {
         glm::vec3 position = glm::vec3(0.0f);
         glm::quat rotation = glm::quat(1.0f, 0.0f, 0.0f, 0.0f);
         glm::vec3 scale = glm::vec3(1.0f);
-        glm::mat4 worldTransform = glm::mat4(1.0f);
-        entt::entity parent = entt::null;
-        bool isDirty = true;
+        glm::mat4    worldTransform = glm::mat4(1.0f);  // computed; mat4 skipped by inspector
+        entt::entity parent = entt::null;               // shown read-only in inspector
+        Hidden<bool> isDirty = {true};                  // internal bool hidden from inspector
     };
 
     struct Mesh;
@@ -120,12 +121,32 @@ namespace Vapor {
     };
 
     // ============================================================================
-    // Trigger Volume (ECS-owned)
+    // Trigger Volume (ECS-owned) - Pure data, no callbacks
     // ============================================================================
     struct TriggerVolumeComponent {
         TriggerHandle trigger;
-        std::function<void(entt::entity)> onEnter;
-        std::function<void(entt::entity)> onExit;
+    };
+
+    // Event components emitted by TriggerSystem when entities enter/exit triggers
+    struct TriggerEnterEvent {
+        entt::entity triggerEntity;  // The trigger volume entity
+        entt::entity otherEntity;    // The entity that entered
+    };
+
+    struct TriggerExitEvent {
+        entt::entity triggerEntity;  // The trigger volume entity
+        entt::entity otherEntity;    // The entity that exited
+    };
+
+    // ============================================================================
+    // Lighting
+    // ============================================================================
+
+    struct RectLightComponent {
+        glm::vec2 size = {1.0f, 1.0f};         // total width × height (world units)
+        glm::vec3 color = {1.0f, 1.0f, 1.0f};
+        float intensity = 1.0f;
+        bool useVideoTexture = false;
     };
 
     // 2D Sprite rendering component

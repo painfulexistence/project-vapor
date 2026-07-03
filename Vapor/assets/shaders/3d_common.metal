@@ -68,6 +68,7 @@ struct MaterialData {
     float clearcoatGloss;
     float prototypeUVMode; // 0 = Off, 1 = World Space, 2 = Object Space
     float uvScale;
+    float iblEnabled; // 1.0 = use IBL, 0.0 = ambient approximation
 };
 
 struct DirLight {
@@ -85,11 +86,36 @@ struct PointLight {
     // float _pad[2];
 };
 
+// Rectangular area light.  right and up are orthonormal axes of the light face;
+// halfWidth/halfHeight give half-extents in those directions.
+struct RectLight {
+    float3 position;
+    float  halfWidth;
+    float3 right;           // normalized
+    float  halfHeight;
+    float3 up;              // normalized
+    float  intensity;
+    float3 color;
+    uint   useVideoTexture; // 0 = solid color, 1 = sample video texture
+};
+
 struct Cluster {
     float4 min;
     float4 max;
     uint lightCount;
     uint lightIndices[MAX_LIGHTS_PER_CLUSTER];
+};
+
+constant int PSSM_NUM_CASCADES = 3;
+
+struct PSSMData {
+    float4x4 lightSpaceMatrices[3];
+    // view-space depths: x = RT shadow end, y = cascade1 end, z = cascade2 end, w = cascade3 end (far)
+    float4 cascadeSplits;
+    float blendRange;
+    float _pad0;
+    float _pad1;
+    float _pad2;
 };
 
 float3x3 inverse(float3x3 const m) {
@@ -148,6 +174,25 @@ float3 sampleCosineWeightedHemisphere(float2 s, float3 normal) {
     float3 tangent = normalize(cross(axis, normal));
     float3 bitangent = cross(normal, tangent);
     return tangent * x + bitangent * y + normal * z;
+}
+
+// Octahedral unit-vector encoding — packs a normal into 2 floats so denoise
+// chains can carry it in a texture channel instead of re-reading a normal RT.
+float2 octEncode(float3 n) {
+    n /= (abs(n.x) + abs(n.y) + abs(n.z));
+    float2 e = n.xy;
+    if (n.z < 0.0) {
+        e = (1.0 - abs(n.yx)) * select(float2(-1.0), float2(1.0), e >= 0.0);
+    }
+    return e;
+}
+
+float3 octDecode(float2 e) {
+    float3 n = float3(e, 1.0 - abs(e.x) - abs(e.y));
+    if (n.z < 0.0) {
+        n.xy = (1.0 - abs(n.yx)) * select(float2(-1.0), float2(1.0), n.xy >= 0.0);
+    }
+    return normalize(n);
 }
 
 float3 linearToSRGB(float3 color) {

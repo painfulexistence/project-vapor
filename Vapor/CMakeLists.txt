@@ -11,6 +11,27 @@ find_package(Tracy CONFIG REQUIRED)
 find_package(RmlUi CONFIG REQUIRED)
 find_package(EnTT CONFIG REQUIRED)
 find_package(nlohmann_json CONFIG REQUIRED)
+find_package(Boost QUIET COMPONENTS pfr)
+
+# Optional: FFmpeg for AV1 video recording/playback
+option(VAPOR_ENABLE_FFMPEG "Enable FFmpeg for video recording and playback" ON)
+if(VAPOR_ENABLE_FFMPEG)
+    find_package(PkgConfig)
+    if(PkgConfig_FOUND)
+        pkg_check_modules(FFMPEG
+            libavcodec
+            libavformat
+            libavutil
+            libswscale
+            libswresample
+        )
+    endif()
+endif()
+if(FFMPEG_FOUND)
+    message(STATUS "FFmpeg found — video recording/playback enabled")
+else()
+    message(STATUS "FFmpeg not found — video recording/playback disabled")
+endif()
 
 if(APPLE)
     add_subdirectory(metal)
@@ -43,6 +64,8 @@ set(SOURCES
     src/engine_core.cpp
     src/rmlui_manager.cpp
     src/rmlui_system.cpp
+    src/video_recorder.cpp
+    src/video_player.cpp
     imgui/imgui.cpp
     imgui/imgui_draw.cpp
     imgui/imgui_tables.cpp
@@ -86,6 +109,13 @@ target_include_directories(Vapor PRIVATE
     ${CMAKE_CURRENT_SOURCE_DIR}/miniaudio
 )
 
+if(FFMPEG_FOUND)
+    target_compile_definitions(Vapor PUBLIC VAPOR_HAS_FFMPEG)
+    target_include_directories(Vapor PRIVATE ${FFMPEG_INCLUDE_DIRS})
+    target_link_directories(Vapor PUBLIC ${FFMPEG_LIBRARY_DIRS})
+    target_link_libraries(Vapor PRIVATE ${FFMPEG_LIBRARIES})
+endif()
+
 target_link_libraries(Vapor PUBLIC
     fmt::fmt
     glm::glm
@@ -95,6 +125,13 @@ target_link_libraries(Vapor PUBLIC
     EnTT::EnTT
     nlohmann_json::nlohmann_json
 )
+if(Boost_FOUND)
+    message(STATUS "Boost.PFR found — component auto-reflection enabled")
+    target_link_libraries(Vapor PUBLIC Boost::pfr)
+    target_compile_definitions(Vapor PUBLIC VAPOR_HAS_BOOST_PFR)
+else()
+    message(STATUS "Boost.PFR not found — component auto-reflection disabled")
+endif()
 target_link_libraries(Vapor PRIVATE
     Vulkan::Vulkan
     taywee::args
@@ -108,29 +145,8 @@ if(APPLE)
     target_link_libraries(Vapor PRIVATE metal)
 endif()
 
-find_program(GLSL_VALIDATOR "glslangValidator" REQUIRED)
-file(GLOB_RECURSE SHADER_SOURCES 
-    "${CMAKE_CURRENT_SOURCE_DIR}/assets/shaders/*.vert"
-    "${CMAKE_CURRENT_SOURCE_DIR}/assets/shaders/*.frag"
-    "${CMAKE_CURRENT_SOURCE_DIR}/assets/shaders/*.comp"
-)
-
-foreach(GLSL ${SHADER_SOURCES})
-    get_filename_component(SOURCE_NAME ${GLSL} NAME)
-    set(SPIRV "${CMAKE_CURRENT_SOURCE_DIR}/assets/shaders/${SOURCE_NAME}.spv")
-    
-    add_custom_command(
-        OUTPUT ${SPIRV}
-        COMMAND ${CMAKE_COMMAND} -E make_directory "${CMAKE_CURRENT_BINARY_DIR}/assets/shaders"
-        COMMAND ${GLSL_VALIDATOR} -V ${GLSL} -o ${SPIRV}
-        DEPENDS ${GLSL}
-        COMMENT "Compiling ${SOURCE_NAME} to SPIR-V"
-    )
-    list(APPEND SPIRV_BINARY_FILES ${SPIRV})
-endforeach()
-
-add_custom_target(Vapor_compile_shaders ALL DEPENDS ${SPIRV_BINARY_FILES})
-add_dependencies(Vapor Vapor_compile_shaders)
+include(AssetPipeline)
+vapor_compile_glsl_shaders(Vapor "${CMAKE_CURRENT_SOURCE_DIR}/assets/shaders")
 
 set(VAPOR_ASSETS_DIR "${CMAKE_CURRENT_SOURCE_DIR}/assets" PARENT_SCOPE)
 
@@ -173,7 +189,7 @@ install(EXPORT VaporTargets
 install(FILES
     "${CMAKE_CURRENT_BINARY_DIR}/vapor-config.cmake"
     "${CMAKE_CURRENT_BINARY_DIR}/vapor-config-version.cmake"
-    "${CMAKE_CURRENT_SOURCE_DIR}/../cmake/VaporMacros.cmake"
+    "${CMAKE_CURRENT_SOURCE_DIR}/../cmake/helpers/AssetPipeline.cmake"
     DESTINATION "${CMAKE_INSTALL_DATADIR}/vapor"
 )
 

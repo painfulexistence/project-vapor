@@ -1,0 +1,87 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Devlog — Project Vapor</title>
+  <link rel="stylesheet" href="../styles/global.css">
+  <style>
+    p { color: var(--text-muted); font-size: 14px; }
+    .adr-list { margin-top: 24px; }
+  </style>
+</head>
+<body>
+  <nav>
+    <div class="nav-inner">
+      <a class="nav-logo" href="../index.html">Project Vapor</a>
+      <a href="../documentation/index.html">Docs</a>
+      <a href="index.html" class="active">Devlog</a>
+      <a href="../demo/index.html">Demo</a>
+      <a href="https://github.com/painfulexistence/project-vapor" target="_blank">GitHub ↗</a>
+    </div>
+  </nav>
+  <main>
+    <div class="page-header">
+      <h1>Devlog</h1>
+      <p class="muted">Point-in-time records of significant design decisions — what was chosen, what was rejected, and why.</p>
+    </div>
+
+    <ul class="adr-list">
+      <li>
+        <a href="ADR-001-test-framework.html">
+          <div class="title">ADR-001 — Test Framework Selection <span class="badge badge-ok">Adopted</span></div>
+          <div class="meta">2026-04-29 · Catch2 v3 chosen over GoogleTest and hand-rolled assertions</div>
+        </a>
+      </li>
+      <li>
+        <a href="ADR-002-ci-pipeline.html">
+          <div class="title">ADR-002 — CI Pipeline Design <span class="badge badge-ok">Adopted</span></div>
+          <div class="meta">2026-04-29 · GitHub Actions, two-job pipeline, ccache, macos-15 runner</div>
+        </a>
+      </li>
+      <li>
+        <a href="ADR-003-test-isolation-strategy.html">
+          <div class="title">ADR-003 — Test Isolation Strategy <span class="badge badge-ok">Adopted</span></div>
+          <div class="meta">2026-04-29 · Unit tests do not link the full Vapor library</div>
+        </a>
+      </li>
+      <li>
+        <a href="ADR-004-graphics-header-split.html">
+          <div class="title">ADR-004 — Graphics Header Split <span class="badge badge-ok">Adopted</span></div>
+          <div class="meta">2026-04-29 · graphics.hpp split into 5 focused sub-headers, GPUHandle&lt;Tag&gt; type safety</div>
+        </a>
+      </li>
+      <li>
+        <a href="ADR-005-phase4-refactoring.html">
+          <div class="title">ADR-005 — Phase 4 Refactoring <span class="badge badge-ok">Adopted</span></div>
+          <div class="meta">2026-05-01 · PhysicsHandle&lt;Tag&gt;, ECS systems naming, RmlUI helpers, SceneBuilder extraction</div>
+        </a>
+      </li>
+      <li>
+        <a href="ADR-006-playmaker-fsm-system.html">
+          <div class="title">ADR-006 — Playmaker-style FSM System <span class="badge badge-ok">Adopted</span></div>
+          <div class="meta">2026-05-27 · Pure data FSM, event-driven communication, single-responsibility systems</div>
+        </a>
+      </li>
+      <li>
+        <a href="ADR-007-fsm-ecs-integration-journey.html">
+          <div class="title">ADR-007 — FSM+ECS Integration Journey <span class="badge badge-ok">Adopted</span></div>
+          <div class="meta">2026-05-30 · Devlog: pitfalls, solutions, and extension patterns for FSM in ECS</div>
+        </a>
+      </li>
+      <li>
+        <a href="ADR-008-rt-rendering-optimization.html">
+          <div class="title">ADR-008 — Ray Tracing Optimization Notes <span class="badge badge-ok">Adopted</span></div>
+          <div class="meta">2026-07-01 · The 1×1 threadgroup mistake, denoised RT effect anatomy, and a plan for true RT AO</div>
+        </a>
+      </li>
+      <li>
+        <a href="ADR-009-shadow-regression-postmortem.html">
+          <div class="title">ADR-009 — Shadow Regression Postmortem <span class="badge badge-ok">Adopted</span></div>
+          <div class="meta">2026-07-03 · NaN normal matrices, uninitialized descriptors, dead AO code — and the one-visual-change-per-checkpoint rule</div>
+        </a>
+      </li>
+    </ul>
+  </main>
+</body>
+</html>

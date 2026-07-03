@@ -62,6 +62,20 @@ inline SceneResources buildScene(
     }
     res.cube1 = cube1;
 
+    // Iridescent cube: same wood textures as cube1, thin-film iridescence on top
+    auto iridescentMaterial = std::make_shared<Vapor::Material>(Vapor::Material{
+        .baseColorFactor  = glm::vec4(1.0f, 1.0f, 1.0f, 1.0f),
+        .metallicFactor   = 0.0f,
+        .roughnessFactor  = 1.0f,
+        .albedoMap        = material->albedoMap,
+        .normalMap        = material->normalMap,
+        .roughnessMap     = material->roughnessMap,
+        .clearcoat        = 0.9f,   // iridescence strength (reused field)
+        .clearcoatGloss   = 0.45f,  // film thickness factor → ~480 nm (blue-green dominant)
+        .materialType     = Vapor::MaterialType::Iridescent,
+        .useIBL           = false,
+    });
+
     auto cube2 = registry.create();
     {
         auto& transform = registry.emplace<Vapor::TransformComponent>(cube2);
@@ -73,7 +87,7 @@ inline SceneResources buildScene(
         rb.body = physics.createBoxBody(col.halfSize, transform.position, transform.rotation, rb.motionType);
         physics.addBody(rb.body, true);
 
-        auto cubeMesh2 = MeshBuilder::buildCube(1.0f, material);
+        auto cubeMesh2 = MeshBuilder::buildCube(1.0f, iridescentMaterial);
         scene->addMesh(cubeMesh2);
         auto& meshRenderer = registry.emplace<Vapor::MeshRendererComponent>(cube2);
         meshRenderer.meshes.push_back(cubeMesh2);
@@ -91,59 +105,57 @@ inline SceneResources buildScene(
         physics.addBody(rb.body, false);
     }
 
-    scene->directionalLights.push_back(
-        {
-            .direction = glm::vec3(0.5, -1.0, 0.0),
-            .color = glm::vec3(1.0, 1.0, 1.0),
-            .intensity = 10.0,
-        }
-    );
-    auto sunLight = registry.create();
     {
-        auto& ref = registry.emplace<SceneDirectionalLightReferenceComponent>(sunLight);
-        ref.lightIndex = 0;
+        auto sunLight = registry.create();
+        auto& dl      = registry.emplace<DirectionalLightComponent>(sunLight);
+        dl.direction  = glm::normalize(glm::vec3(0.5f, -1.0f, 0.0f));
+        dl.color      = glm::vec3(1.0f, 1.0f, 1.0f);
+        dl.intensity  = 10.0f;
 
-        auto& logic = registry.emplace<DirectionalLightLogicComponent>(sunLight);
-        logic.baseDirection = glm::vec3(0.5, -1.0, 0.0);
-        logic.speed = 0.5f;
-        logic.magnitude = 0.05f;
+        auto& logic         = registry.emplace<DirectionalLightLogicComponent>(sunLight);
+        logic.baseDirection = glm::vec3(0.5f, -1.0f, 0.0f);
+        logic.speed         = 0.5f;
+        logic.magnitude     = 0.05f;
     }
 
-    for (int i = 0; i < 8; i++) {
-        scene->pointLights.push_back(
-            { .position = glm::vec3(
-                  rng.RandomFloatInRange(-5.0f, 5.0f),
-                  rng.RandomFloatInRange(0.0f, 5.0f),
-                  rng.RandomFloatInRange(-5.0f, 5.0f)
-              ),
-              .color = glm::vec3(rng.RandomFloat(), rng.RandomFloat(), rng.RandomFloat()),
-              .intensity = 5.0f * rng.RandomFloat(),
-              .radius = 0.5f }
+    // Enough lights to exercise tiled light culling and to lift the ambient
+    // level so screen-space AO is visible (radius 0.5 made them near-invisible)
+    for (int i = 0; i < 128; i++) {
+        auto e         = registry.create();
+        auto& tc       = registry.emplace<Vapor::TransformComponent>(e);
+        tc.position    = glm::vec3(
+            rng.RandomFloatInRange(-10.0f, 10.0f),
+            rng.RandomFloatInRange(0.5f, 4.0f),
+            rng.RandomFloatInRange(-10.0f, 10.0f)
         );
-    }
-    for (int i = 0; i < (int)scene->pointLights.size(); ++i) {
-        auto e = registry.create();
+        tc.isDirty     = true;
 
-        auto& ref = registry.emplace<ScenePointLightReferenceComponent>(e);
-        ref.lightIndex = i;
+        auto& pl       = registry.emplace<PointLightComponent>(e);
+        pl.color       = glm::vec3(
+            0.3f + 0.7f * rng.RandomFloat(),
+            0.3f + 0.7f * rng.RandomFloat(),
+            0.3f + 0.7f * rng.RandomFloat()
+        );
+        pl.intensity   = 5.0f * rng.RandomFloat();
+        pl.radius      = 0.5f;
 
-        auto& logic = registry.emplace<LightMovementLogicComponent>(e);
-        logic.speed = 0.5f;
-        logic.timer = i * 0.1f;
+        auto& logic    = registry.emplace<LightMovementLogicComponent>(e);
+        logic.speed    = 0.5f;
+        logic.timer    = i * 0.1f;
 
         switch (i % 4) {
         case 0:
             logic.pattern = MovementPattern::Circle;
-            logic.radius = 3.0f;
-            logic.height = 1.5f;
+            logic.radius  = 3.0f;
+            logic.height  = 1.5f;
             break;
         case 1:
             logic.pattern = MovementPattern::Figure8;
-            logic.radius = 3.0f;
+            logic.radius  = 3.0f;
             break;
         case 2:
             logic.pattern = MovementPattern::Linear;
-            logic.radius = 3.0f;
+            logic.radius  = 3.0f;
             break;
         case 3:
             logic.pattern = MovementPattern::Spiral;
@@ -223,6 +235,9 @@ inline SceneResources buildScene(
             { "DEVELOPER", "Welcome to Project Vapor.",                 2.5f },
             { "",          "(End of subtitle demo)",                    2.0f },
         };
+        // FSM components for subtitle state machine (FSMInitSystem auto-initializes)
+        registry.emplace<Vapor::FSMDefinition>(navEntity, createSubtitleFSM());
+        registry.emplace<Vapor::FSMEventQueue>(navEntity);
     }
     {
         auto& stq = registry.emplace<ScrollTextQueueComponent>(navEntity);
