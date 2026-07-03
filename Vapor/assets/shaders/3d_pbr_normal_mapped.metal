@@ -429,7 +429,8 @@ fragment float4 fragmentMain(
     constexpr float PSSM_TEXEL = 1.0 / 4096.0;
     constexpr float PSSM_BIAS  = 0.002;
 
-    float viewDepth = (camera.view * in.worldPosition).z;
+    // abs(): view matrix is RH (visible z is negative); splits are positive distances
+    float viewDepth = abs((camera.view * in.worldPosition).z);
 
     float shadowFactor;
     if (viewDepth <= pssmData.cascadeSplits.x) {

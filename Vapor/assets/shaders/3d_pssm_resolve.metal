@@ -41,7 +41,8 @@ kernel void computeMain(
     constexpr float PSSM_TEXEL = 1.0 / 4096.0;
     constexpr float PSSM_BIAS  = 0.002;
 
-    float viewDepth = (camera.view * worldPos).z;
+    // abs(): view matrix is RH (visible z is negative); splits are positive distances
+    float viewDepth = abs((camera.view * worldPos).z);
 
     float shadowFactor = 1.0;
     if (viewDepth > pssmData.cascadeSplits.x) {

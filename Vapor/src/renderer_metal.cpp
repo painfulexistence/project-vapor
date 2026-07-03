@@ -382,11 +382,15 @@ public:
         gpuData.cascadeSplits = glm::vec4(splits[0], splits[1], splits[2], splits[3]);
         gpuData.blendRange    = blendRange;
 
-        // Convert a view-space depth to NDC z under the current LH ZO projection.
-        // For glm LH ZO perspective: z_ndc = (P[2][2]*d + P[3][2]) / d
-        // where P is column-major (P[col][row]).
+        // Convert a forward view-space distance to NDC z by projecting an actual
+        // view-space point. Handedness-aware: RH projections (glm default; the
+        // GLM_FORCE_LEFT_HANDED define never took effect because glm is included
+        // transitively before it) have proj[2][3] == -1 and put visible geometry
+        // at negative view z; LH puts it at positive z.
+        const float zSign = (proj[2][3] < 0.0f) ? -1.0f : 1.0f;
         auto viewDepthToNDCz = [&](float d) -> float {
-            return (proj[2][2] * d + proj[3][2]) / d;
+            glm::vec4 clip = proj * glm::vec4(0.0f, 0.0f, zSign * d, 1.0f);
+            return clip.z / clip.w;
         };
 
         for (int ci = 0; ci < 3; ci++) {
@@ -417,8 +421,11 @@ public:
             for (auto& c : corners)
                 sphereRadius = glm::max(sphereRadius, glm::length(c - sphereCenter));
 
-            // Light view: eye behind the scene along light direction
-            glm::mat4 lightView = glm::lookAt(sphereCenter - lightDir, sphereCenter, up);
+            // Light view: eye pulled back far enough that the whole bounding
+            // sphere sits in front of it (RH lookAt: forward is -z, so points in
+            // front have negative view z; distance from eye = -z).
+            const float lightDist = sphereRadius * 2.0f + 1.0f;
+            glm::mat4 lightView = glm::lookAt(sphereCenter - lightDir * lightDist, sphereCenter, up);
 
             // Snap sphere center to texel grid in light space to stop shimmering
             float texelSize = (2.0f * sphereRadius) / float(r.PSSM_SHADOW_MAP_SIZE);
@@ -426,23 +433,23 @@ public:
             lsCenter.x = std::floor(lsCenter.x / texelSize) * texelSize;
             lsCenter.y = std::floor(lsCenter.y / texelSize) * texelSize;
             glm::vec3 snappedCenter = glm::vec3(glm::inverse(lightView) * lsCenter);
-            lightView = glm::lookAt(snappedCenter - lightDir, snappedCenter, up);
+            lightView = glm::lookAt(snappedCenter - lightDir * lightDist, snappedCenter, up);
 
-            // Find Z extents in light space
-            float minZ =  1e38f, maxZ = -1e38f;
+            // Depth extents as positive distances in front of the light eye
+            float minDist = 1e38f, maxDist = -1e38f;
             for (auto& c : corners) {
-                float z = (lightView * glm::vec4(c, 1.0f)).z;
-                minZ = glm::min(minZ, z);
-                maxZ = glm::max(maxZ, z);
+                float dist = -(lightView * glm::vec4(c, 1.0f)).z; // RH: -z is forward
+                minDist = glm::min(minDist, dist);
+                maxDist = glm::max(maxDist, dist);
             }
-            // Pull near plane back to capture shadow casters behind the view frustum.
-            // Keep near ≥ 0.01 so glm::ortho always receives a valid (near < far) range.
-            minZ = glm::max(minZ - (maxZ - minZ), 0.01f);
+            // Pull the near plane back to capture shadow casters outside the sub-frustum
+            // (a negative near just extends the ortho volume behind the eye — valid).
+            minDist -= (maxDist - minDist);
 
             glm::mat4 lightProj = glm::ortho(
                 -sphereRadius,  sphereRadius,
                 -sphereRadius,  sphereRadius,
-                minZ, maxZ
+                minDist, maxDist
             );
             gpuData.lightSpaceMatrices[ci] = lightProj * lightView;
         }
