@@ -134,10 +134,14 @@ public:
     // wantEnd:   last encoder of this pass; setting this marks the pass as having written samples.
     void applyTimingToRenderDesc(MTL::RenderPassDescriptor* desc, bool wantBegin, bool wantEnd) {
         if (!m_timingSampleBuf) return;
-        auto* att = desc->sampleBufferAttachments()->object(0);
-        att->setSampleBuffer(m_timingSampleBuf);
-        att->setStartOfVertexSampleIndex((wantBegin && m_sampleBegin) ? m_timingBeginIdx : MTL::CounterDontSample);
-        att->setEndOfFragmentSampleIndex(wantEnd ? m_timingEndIdx : MTL::CounterDontSample);
+        NS::UInteger startIdx = (wantBegin && m_sampleBegin) ? m_timingBeginIdx : MTL::CounterDontSample;
+        NS::UInteger endIdx   = wantEnd ? m_timingEndIdx : MTL::CounterDontSample;
+        if (startIdx != MTL::CounterDontSample || endIdx != MTL::CounterDontSample) {
+            auto* att = desc->sampleBufferAttachments()->object(0);
+            att->setSampleBuffer(m_timingSampleBuf);
+            att->setStartOfVertexSampleIndex(startIdx);
+            att->setEndOfFragmentSampleIndex(endIdx);
+        }
         if (wantEnd) m_didWriteTimingSamples = true;
         for (int i = 0; i < 8; ++i) {
             auto* color = desc->colorAttachments()->object(i);
@@ -153,10 +157,14 @@ public:
     NS::SharedPtr<MTL::ComputePassDescriptor> makeTimedComputeDesc(bool wantBegin, bool wantEnd) {
         auto desc = NS::TransferPtr(MTL::ComputePassDescriptor::computePassDescriptor());
         if (m_timingSampleBuf) {
-            auto* att = desc->sampleBufferAttachments()->object(0);
-            att->setSampleBuffer(m_timingSampleBuf);
-            att->setStartOfEncoderSampleIndex((wantBegin && m_sampleBegin) ? m_timingBeginIdx : MTL::CounterDontSample);
-            att->setEndOfEncoderSampleIndex(wantEnd ? m_timingEndIdx : MTL::CounterDontSample);
+            NS::UInteger startIdx = (wantBegin && m_sampleBegin) ? m_timingBeginIdx : MTL::CounterDontSample;
+            NS::UInteger endIdx   = wantEnd ? m_timingEndIdx : MTL::CounterDontSample;
+            if (startIdx != MTL::CounterDontSample || endIdx != MTL::CounterDontSample) {
+                auto* att = desc->sampleBufferAttachments()->object(0);
+                att->setSampleBuffer(m_timingSampleBuf);
+                att->setStartOfEncoderSampleIndex(startIdx);
+                att->setEndOfEncoderSampleIndex(endIdx);
+            }
             if (wantEnd) m_didWriteTimingSamples = true;
         }
         return desc;
@@ -165,10 +173,14 @@ public:
     NS::SharedPtr<MTL::BlitPassDescriptor> makeTimedBlitDesc(bool wantBegin, bool wantEnd) {
         auto desc = NS::TransferPtr(MTL::BlitPassDescriptor::blitPassDescriptor());
         if (m_timingSampleBuf) {
-            auto* att = desc->sampleBufferAttachments()->object(0);
-            att->setSampleBuffer(m_timingSampleBuf);
-            att->setStartOfEncoderSampleIndex((wantBegin && m_sampleBegin) ? m_timingBeginIdx : MTL::CounterDontSample);
-            att->setEndOfEncoderSampleIndex(wantEnd ? m_timingEndIdx : MTL::CounterDontSample);
+            NS::UInteger startIdx = (wantBegin && m_sampleBegin) ? m_timingBeginIdx : MTL::CounterDontSample;
+            NS::UInteger endIdx   = wantEnd ? m_timingEndIdx : MTL::CounterDontSample;
+            if (startIdx != MTL::CounterDontSample || endIdx != MTL::CounterDontSample) {
+                auto* att = desc->sampleBufferAttachments()->object(0);
+                att->setSampleBuffer(m_timingSampleBuf);
+                att->setStartOfEncoderSampleIndex(startIdx);
+                att->setEndOfEncoderSampleIndex(endIdx);
+            }
             if (wantEnd) m_didWriteTimingSamples = true;
         }
         return desc;
@@ -177,10 +189,14 @@ public:
     NS::SharedPtr<MTL::AccelerationStructurePassDescriptor> makeTimedAccelDesc(bool wantBegin, bool wantEnd) {
         auto desc = NS::TransferPtr(MTL::AccelerationStructurePassDescriptor::accelerationStructurePassDescriptor());
         if (m_timingSampleBuf) {
-            auto* att = desc->sampleBufferAttachments()->object(0);
-            att->setSampleBuffer(m_timingSampleBuf);
-            att->setStartOfEncoderSampleIndex((wantBegin && m_sampleBegin) ? m_timingBeginIdx : MTL::CounterDontSample);
-            att->setEndOfEncoderSampleIndex(wantEnd ? m_timingEndIdx : MTL::CounterDontSample);
+            NS::UInteger startIdx = (wantBegin && m_sampleBegin) ? m_timingBeginIdx : MTL::CounterDontSample;
+            NS::UInteger endIdx   = wantEnd ? m_timingEndIdx : MTL::CounterDontSample;
+            if (startIdx != MTL::CounterDontSample || endIdx != MTL::CounterDontSample) {
+                auto* att = desc->sampleBufferAttachments()->object(0);
+                att->setSampleBuffer(m_timingSampleBuf);
+                att->setStartOfEncoderSampleIndex(startIdx);
+                att->setEndOfEncoderSampleIndex(endIdx);
+            }
             if (wantEnd) m_didWriteTimingSamples = true;
         }
         return desc;

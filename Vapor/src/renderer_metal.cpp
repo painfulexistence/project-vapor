@@ -455,17 +455,20 @@ public:
             { r.aoScratchRT.get(), r.aoRT.get(), 2u }, // final target is single-channel; depth rides in G until here
         };
         constexpr size_t iterationCount = sizeof(iterations) / sizeof(iterations[0]);
+        // One serial compute encoder for all iterations: successive dispatches are
+        // ordered and their writes visible to each other, and the timing samples
+        // follow the same single-encoder pattern as every other compute pass.
+        auto timedComputeDesc = makeTimedComputeDesc(true, true);
+        auto encoder = r.currentCommandBuffer->computeCommandEncoder(timedComputeDesc.get());
+        encoder->setComputePipelineState(r.aoDenoisePipeline.get());
+        encoder->setTexture(r.normalRT.get(), 2);
         for (size_t i = 0; i < iterationCount; i++) {
-            auto timedComputeDesc = makeTimedComputeDesc(i == 0, i == iterationCount - 1);
-            auto encoder = r.currentCommandBuffer->computeCommandEncoder(timedComputeDesc.get());
-            encoder->setComputePipelineState(r.aoDenoisePipeline.get());
             encoder->setTexture(iterations[i].src, 0);
             encoder->setTexture(iterations[i].dst, 1);
-            encoder->setTexture(r.normalRT.get(), 2);
             encoder->setBytes(&iterations[i].stride, sizeof(uint32_t), 0);
             encoder->dispatchThreads(MTL::Size(w, h, 1), MTL::Size(8, 8, 1));
-            encoder->endEncoding();
         }
+        encoder->endEncoding();
 
         // Traffic per iteration: 25 src taps (4B) + 25 normal taps (8B) + write (4B),
         // issued reads — caches make real DRAM traffic much lower
