@@ -30,8 +30,10 @@ kernel void computeMain(
         return;
     }
 
-    // The AO chain runs at half resolution; depth/normal are full-res
-    uint2 fullTid = min(tid * 2, uint2(depthTexture.get_width() - 1, depthTexture.get_height() - 1));
+    // Resolution-agnostic: depth/normal may be higher-res than the AO target
+    uint2 fullDim = uint2(depthTexture.get_width(), depthTexture.get_height());
+    uint2 scale = max(fullDim / uint2(w, h), 1u);
+    uint2 fullTid = min(tid * scale, fullDim - 1);
 
     float depth = depthTexture.read(fullTid).r;
     // Sky / far plane: fully unoccluded, no rays

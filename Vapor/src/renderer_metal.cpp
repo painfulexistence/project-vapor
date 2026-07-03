@@ -3079,13 +3079,11 @@ auto Renderer_Metal::createResources() -> void {
     ));
     shadowTextureDesc->release();
 
-    // Half resolution: final target of the half-res RT AO chain; consumers sample
-    // it with a bilinear sampler at screen UVs, which upsamples for free
     MTL::TextureDescriptor* aoTextureDesc = MTL::TextureDescriptor::alloc()->init();
     aoTextureDesc->setTextureType(MTL::TextureType2D);
     aoTextureDesc->setPixelFormat(MTL::PixelFormatR16Float);
-    aoTextureDesc->setWidth((swapchain->drawableSize().width + 1) / 2);
-    aoTextureDesc->setHeight((swapchain->drawableSize().height + 1) / 2);
+    aoTextureDesc->setWidth(swapchain->drawableSize().width);
+    aoTextureDesc->setHeight(swapchain->drawableSize().height);
     aoTextureDesc->setUsage(MTL::TextureUsageShaderRead | MTL::TextureUsageShaderWrite);
     aoRT = NS::TransferPtr(device->newTexture(aoTextureDesc));
     aoTextureDesc->release();
@@ -3100,13 +3098,13 @@ auto Renderer_Metal::createResources() -> void {
     velocityTextureDesc->release();
 
     // RT AO denoise chain targets (raygen → temporal history ping-pong → à-trous scratch).
-    // The whole chain runs at HALF resolution: 4x fewer (incoherent, expensive) rays and
-    // 4x cheaper temporal/denoise; PostProcess upsamples bilinearly when sampling aoRT.
-    // AO is low-frequency, so this is the standard trade (ADR-008).
+    // Full resolution for now (half-res reverted during shadow debugging); the kernels
+    // are resolution-agnostic, so flipping these dimensions back to half is enough to
+    // re-enable the cheaper half-res chain (ADR-008).
     MTL::TextureDescriptor* aoChainDesc = MTL::TextureDescriptor::alloc()->init();
     aoChainDesc->setTextureType(MTL::TextureType2D);
-    aoChainDesc->setWidth((swapchain->drawableSize().width + 1) / 2);
-    aoChainDesc->setHeight((swapchain->drawableSize().height + 1) / 2);
+    aoChainDesc->setWidth(swapchain->drawableSize().width);
+    aoChainDesc->setHeight(swapchain->drawableSize().height);
     aoChainDesc->setUsage(MTL::TextureUsageShaderRead | MTL::TextureUsageShaderWrite);
     aoChainDesc->setPixelFormat(MTL::PixelFormatR16Float);
     aoRawRT = NS::TransferPtr(device->newTexture(aoChainDesc));
