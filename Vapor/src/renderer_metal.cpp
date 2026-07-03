@@ -3066,11 +3066,13 @@ auto Renderer_Metal::createResources() -> void {
     ));
     shadowTextureDesc->release();
 
+    // Half resolution: the AO chain kernels are resolution-agnostic and consumers
+    // sample aoRT bilinearly at screen UVs, so this size is the only change needed
     MTL::TextureDescriptor* aoTextureDesc = MTL::TextureDescriptor::alloc()->init();
     aoTextureDesc->setTextureType(MTL::TextureType2D);
     aoTextureDesc->setPixelFormat(MTL::PixelFormatR16Float);
-    aoTextureDesc->setWidth(swapchain->drawableSize().width);
-    aoTextureDesc->setHeight(swapchain->drawableSize().height);
+    aoTextureDesc->setWidth((swapchain->drawableSize().width + 1) / 2);
+    aoTextureDesc->setHeight((swapchain->drawableSize().height + 1) / 2);
     aoTextureDesc->setUsage(MTL::TextureUsageShaderRead | MTL::TextureUsageShaderWrite);
     aoRT = NS::TransferPtr(device->newTexture(aoTextureDesc));
     aoTextureDesc->release();
@@ -3089,8 +3091,8 @@ auto Renderer_Metal::createResources() -> void {
     // purely a size change here (ADR-008).
     MTL::TextureDescriptor* aoChainDesc = MTL::TextureDescriptor::alloc()->init();
     aoChainDesc->setTextureType(MTL::TextureType2D);
-    aoChainDesc->setWidth(swapchain->drawableSize().width);
-    aoChainDesc->setHeight(swapchain->drawableSize().height);
+    aoChainDesc->setWidth((swapchain->drawableSize().width + 1) / 2);
+    aoChainDesc->setHeight((swapchain->drawableSize().height + 1) / 2);
     aoChainDesc->setUsage(MTL::TextureUsageShaderRead | MTL::TextureUsageShaderWrite);
     aoChainDesc->setPixelFormat(MTL::PixelFormatR16Float);
     aoRawRT = NS::TransferPtr(device->newTexture(aoChainDesc));
