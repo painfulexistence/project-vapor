@@ -18,7 +18,7 @@ struct RasterizerData {
     float4 worldTangent;
     float3 scaledLocalPos;
     float3 localNormal;
-    MaterialData material;
+    uint materialID [[flat]]; // material fetched in fragment stage; don't interpolate ~21 floats
 };
 
 struct Surface {
@@ -221,7 +221,7 @@ vertex RasterizerData vertexMain(
     vert.worldPosition = model * float4(in[actual].position, 1.0);
     vert.position      = camera.proj * camera.view * vert.worldPosition;
     vert.uv            = in[actual].uv;
-    vert.material      = materials[instances[instanceID].materialID];
+    vert.materialID    = instances[instanceID].materialID;
     float3 scale       = float3(length(model[0].xyz), length(model[1].xyz), length(model[2].xyz));
     vert.scaledLocalPos = float3(in[actual].position) * scale;
     vert.localNormal    = float3(in[actual].normal);
@@ -248,11 +248,12 @@ fragment float4 fragmentMain(
     constant CameraData&     camera            [[buffer(3)]],
     constant float2&         screenSize        [[buffer(4)]],
     constant packed_uint3&   gridSize          [[buffer(5)]],
-    constant float&          time              [[buffer(6)]]
+    constant float&          time              [[buffer(6)]],
+    constant MaterialData*   materials         [[buffer(9)]]
 ) {
     constexpr sampler s(address::repeat, filter::linear, mip_filter::linear);
 
-    MaterialData material = in.material;
+    MaterialData material = materials[in.materialID];
 
     // Triplanar UV (same as PBR shader)
     if (material.prototypeUVMode > 0.5) {

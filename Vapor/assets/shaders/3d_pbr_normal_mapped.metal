@@ -11,7 +11,7 @@ struct RasterizerData {
     float4 worldTangent;
     float3 scaledLocalPos;
     float3 localNormal;
-    MaterialData material;
+    uint materialID [[flat]]; // material fetched in fragment stage; don't interpolate ~21 floats
 };
 
 struct Surface {
@@ -322,7 +322,7 @@ vertex RasterizerData vertexMain(
     vert.worldPosition = model * float4(in[actualVertexID].position, 1.0);
     vert.position = camera.proj * camera.view * vert.worldPosition;
     vert.uv = in[actualVertexID].uv;
-    vert.material = materials[instances[instanceID].materialID];
+    vert.materialID = instances[instanceID].materialID;
     
     // Pass scaled local position and local normal for Object Space Triplanar
     float3 scale = float3(length(model[0].xyz), length(model[1].xyz), length(model[2].xyz));
@@ -353,11 +353,12 @@ fragment float4 fragmentMain(
     constant packed_uint3& gridSize [[buffer(5)]],
     constant float& time [[buffer(6)]],
     const device RectLight* rectLights [[buffer(7)]],
-    constant uint& rectLightCount [[buffer(8)]]
+    constant uint& rectLightCount [[buffer(8)]],
+    constant MaterialData* materials [[buffer(9)]]
 ) {
     constexpr sampler s(address::repeat, filter::linear, mip_filter::linear);
 
-    MaterialData material = in.material;
+    MaterialData material = materials[in.materialID];
 
     // Prototype UV: triplanar mapping with world space or object space
     // Mode: 0 = Off, 1 = World Space (static objects), 2 = Object Space (dynamic objects)

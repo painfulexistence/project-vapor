@@ -81,6 +81,7 @@ public:
         encoder->setVertexBuffer(r.materialDataBuffer.get(), 0, 1);
         encoder->setVertexBuffer(r.instanceDataBuffers[r.currentFrameInFlight].get(), 0, 2);
         encoder->setVertexBuffer(r.getBuffer(r.currentScene->vertexBuffer).get(), 0, 3);
+        encoder->setFragmentBuffer(r.materialDataBuffer.get(), 0, 0);
 
         for (const auto& [material, draws] : r.instanceBatches) {
             encoder->setFragmentTexture(
@@ -686,6 +687,7 @@ public:
         encoder->setFragmentBuffer(r.rectLightBuffer.get(), 0, 7);
         uint32_t rectLightCount = static_cast<uint32_t>(r.currentScene->rectLights.size());
         encoder->setFragmentBytes(&rectLightCount, sizeof(uint32_t), 8);
+        encoder->setFragmentBuffer(r.materialDataBuffer.get(), 0, 9);
         auto* vidTex = r.rectLightVideoTexture
                            ? r.rectLightVideoTexture.get()
                            : r.getTexture(r.defaultAlbedoTexture).get();
@@ -5321,6 +5323,13 @@ void Renderer_Metal::renderToTexture(
     encoder->setFragmentBytes(&screenSize, sizeof(glm::vec2), 4);
     encoder->setFragmentBytes(&gridSize, sizeof(glm::uvec3), 5);
     encoder->setFragmentBytes(&time, sizeof(float), 6);
+    encoder->setFragmentBuffer(rectLightBuffer.get(), 0, 7);
+    uint32_t rtRectLightCount = static_cast<uint32_t>(scene->rectLights.size());
+    encoder->setFragmentBytes(&rtRectLightCount, sizeof(uint32_t), 8);
+    encoder->setFragmentBuffer(materialDataBuffer.get(), 0, 9);
+    encoder->setFragmentTexture(
+        rectLightVideoTexture ? rectLightVideoTexture.get() : getTexture(defaultAlbedoTexture).get(), 11
+    );
 
     // Render using instance batches (same as MainRenderPass)
     for (const auto& [material, meshes] : instanceBatches) {
