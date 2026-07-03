@@ -356,7 +356,6 @@ public:
         auto& r = *renderer;
 
         auto drawableSize = r.swapchain->drawableSize();
-        glm::vec2 screenSize = glm::vec2(drawableSize.width, drawableSize.height);
 
         auto timedComputeDesc = makeTimedComputeDesc(true, true);
         auto encoder = r.currentCommandBuffer->computeCommandEncoder(timedComputeDesc.get());
