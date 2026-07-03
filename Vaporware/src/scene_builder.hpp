@@ -118,18 +118,24 @@ inline SceneResources buildScene(
         logic.magnitude     = 0.05f;
     }
 
-    for (int i = 0; i < 8; i++) {
+    // Enough lights to exercise tiled light culling and to lift the ambient
+    // level so screen-space AO is visible (radius 0.5 made them near-invisible)
+    for (int i = 0; i < 128; i++) {
         auto e         = registry.create();
         auto& tc       = registry.emplace<Vapor::TransformComponent>(e);
         tc.position    = glm::vec3(
-            rng.RandomFloatInRange(-5.0f, 5.0f),
-            rng.RandomFloatInRange(0.0f, 5.0f),
-            rng.RandomFloatInRange(-5.0f, 5.0f)
+            rng.RandomFloatInRange(-10.0f, 10.0f),
+            rng.RandomFloatInRange(0.5f, 4.0f),
+            rng.RandomFloatInRange(-10.0f, 10.0f)
         );
         tc.isDirty     = true;
 
         auto& pl       = registry.emplace<PointLightComponent>(e);
-        pl.color       = glm::vec3(rng.RandomFloat(), rng.RandomFloat(), rng.RandomFloat());
+        pl.color       = glm::vec3(
+            0.3f + 0.7f * rng.RandomFloat(),
+            0.3f + 0.7f * rng.RandomFloat(),
+            0.3f + 0.7f * rng.RandomFloat()
+        );
         pl.intensity   = 5.0f * rng.RandomFloat();
         pl.radius      = 0.5f;
 

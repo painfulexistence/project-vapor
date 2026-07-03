@@ -10,6 +10,7 @@
 #include <array>
 #include <memory>
 #include <mutex>
+#include <os/signpost.h>
 #include <string>
 #include <unordered_map>
 #include <vector>
@@ -26,9 +27,12 @@ class Renderer_Metal;
 class PrePass;
 class TLASBuildPass;
 class NormalResolvePass;
+class VelocityPass;
 class TileCullingPass;
 class RaytraceShadowPass;
 class RaytraceAOPass;
+class AOTemporalPass;
+class AODenoisePass;
 class SkyAtmospherePass;
 class SkyCapturePass;
 class IrradianceConvolutionPass;
@@ -58,7 +62,42 @@ class WorldCanvasPass;
 struct GpuPassTiming {
     std::string name;
     double gpuTimeMs = 0.0;
+    uint64_t estimatedBytes = 0; // estimated minimum memory traffic (attachment load/store + pass-reported)
 };
+
+// Signpost log for render pass intervals — shows up in Instruments' Points of
+// Interest track so passes can be matched by name against the GPU timeline.
+inline os_log_t vaporRenderGraphLog() {
+    static os_log_t log = os_log_create("com.projectvapor.rendergraph", OS_LOG_CATEGORY_POINTS_OF_INTEREST);
+    return log;
+}
+
+inline uint64_t vaporPixelFormatBytes(MTL::PixelFormat fmt) {
+    switch (fmt) {
+        case MTL::PixelFormatR8Unorm: return 1;
+        case MTL::PixelFormatR16Float:
+        case MTL::PixelFormatRG8Unorm: return 2;
+        case MTL::PixelFormatDepth32Float_Stencil8: return 5;
+        case MTL::PixelFormatRG16Float:
+        case MTL::PixelFormatRGBA16Float: return 8;
+        case MTL::PixelFormatRG32Float: return 8;
+        case MTL::PixelFormatRGBA32Float: return 16;
+        default: return 4; // RGBA8/BGRA8(+sRGB), R32Float, RG11B10, RGB10A2, Depth32Float, ...
+    }
+}
+
+// Minimum bytes an attachment moves between tile and device memory, given its
+// load/store actions. MS textures load/store sampleCount layers; a resolve
+// writes one.
+inline uint64_t vaporAttachmentTrafficBytes(const MTL::Texture* tex, MTL::LoadAction load, MTL::StoreAction store) {
+    uint64_t bytes1x = static_cast<uint64_t>(tex->width()) * tex->height() * vaporPixelFormatBytes(tex->pixelFormat());
+    uint64_t sc = tex->sampleCount();
+    uint64_t total = 0;
+    if (load == MTL::LoadActionLoad) total += bytes1x * sc;
+    if (store == MTL::StoreActionStore || store == MTL::StoreActionStoreAndMultisampleResolve) total += bytes1x * sc;
+    if (store == MTL::StoreActionMultisampleResolve || store == MTL::StoreActionStoreAndMultisampleResolve) total += bytes1x;
+    return total;
+}
 
 class RenderPass {
 public:
@@ -80,26 +119,52 @@ public:
     bool m_sampleBegin = false;
     // Set to true by a timing helper when wantEnd=true (end slot written); stays false on early-return.
     bool m_didWriteTimingSamples = false;
+    // Estimated minimum memory traffic this frame. Render passes accumulate attachment
+    // load/store traffic automatically via applyTimingToRenderDesc; compute/blit passes
+    // report their texture/buffer traffic manually via addTrafficEstimate. Reset by
+    // RenderGraph before each execute(). Excludes texture sampling unless reported.
+    uint64_t m_estimatedBytes = 0;
+
+    void addTrafficEstimate(uint64_t bytes) {
+        m_estimatedBytes += bytes;
+    }
 
     // Attach counter-sample endpoints to an existing MTLRenderPassDescriptor.
     // wantBegin: first encoder of a multi-encoder pass (suppressed automatically for non-first passes).
     // wantEnd:   last encoder of this pass; setting this marks the pass as having written samples.
     void applyTimingToRenderDesc(MTL::RenderPassDescriptor* desc, bool wantBegin, bool wantEnd) {
         if (!m_timingSampleBuf) return;
-        auto* att = desc->sampleBufferAttachments()->object(0);
-        att->setSampleBuffer(m_timingSampleBuf);
-        att->setStartOfVertexSampleIndex((wantBegin && m_sampleBegin) ? m_timingBeginIdx : MTL::CounterDontSample);
-        att->setEndOfFragmentSampleIndex(wantEnd ? m_timingEndIdx : MTL::CounterDontSample);
+        NS::UInteger startIdx = (wantBegin && m_sampleBegin) ? m_timingBeginIdx : MTL::CounterDontSample;
+        NS::UInteger endIdx   = wantEnd ? m_timingEndIdx : MTL::CounterDontSample;
+        if (startIdx != MTL::CounterDontSample || endIdx != MTL::CounterDontSample) {
+            auto* att = desc->sampleBufferAttachments()->object(0);
+            att->setSampleBuffer(m_timingSampleBuf);
+            att->setStartOfVertexSampleIndex(startIdx);
+            att->setEndOfFragmentSampleIndex(endIdx);
+        }
         if (wantEnd) m_didWriteTimingSamples = true;
+        for (int i = 0; i < 8; ++i) {
+            auto* color = desc->colorAttachments()->object(i);
+            if (!color->texture()) continue;
+            m_estimatedBytes += vaporAttachmentTrafficBytes(color->texture(), color->loadAction(), color->storeAction());
+        }
+        auto* depth = desc->depthAttachment();
+        if (depth->texture()) {
+            m_estimatedBytes += vaporAttachmentTrafficBytes(depth->texture(), depth->loadAction(), depth->storeAction());
+        }
     }
 
     NS::SharedPtr<MTL::ComputePassDescriptor> makeTimedComputeDesc(bool wantBegin, bool wantEnd) {
         auto desc = NS::TransferPtr(MTL::ComputePassDescriptor::computePassDescriptor());
         if (m_timingSampleBuf) {
-            auto* att = desc->sampleBufferAttachments()->object(0);
-            att->setSampleBuffer(m_timingSampleBuf);
-            att->setStartOfEncoderSampleIndex((wantBegin && m_sampleBegin) ? m_timingBeginIdx : MTL::CounterDontSample);
-            att->setEndOfEncoderSampleIndex(wantEnd ? m_timingEndIdx : MTL::CounterDontSample);
+            NS::UInteger startIdx = (wantBegin && m_sampleBegin) ? m_timingBeginIdx : MTL::CounterDontSample;
+            NS::UInteger endIdx   = wantEnd ? m_timingEndIdx : MTL::CounterDontSample;
+            if (startIdx != MTL::CounterDontSample || endIdx != MTL::CounterDontSample) {
+                auto* att = desc->sampleBufferAttachments()->object(0);
+                att->setSampleBuffer(m_timingSampleBuf);
+                att->setStartOfEncoderSampleIndex(startIdx);
+                att->setEndOfEncoderSampleIndex(endIdx);
+            }
             if (wantEnd) m_didWriteTimingSamples = true;
         }
         return desc;
@@ -108,10 +173,14 @@ public:
     NS::SharedPtr<MTL::BlitPassDescriptor> makeTimedBlitDesc(bool wantBegin, bool wantEnd) {
         auto desc = NS::TransferPtr(MTL::BlitPassDescriptor::blitPassDescriptor());
         if (m_timingSampleBuf) {
-            auto* att = desc->sampleBufferAttachments()->object(0);
-            att->setSampleBuffer(m_timingSampleBuf);
-            att->setStartOfEncoderSampleIndex((wantBegin && m_sampleBegin) ? m_timingBeginIdx : MTL::CounterDontSample);
-            att->setEndOfEncoderSampleIndex(wantEnd ? m_timingEndIdx : MTL::CounterDontSample);
+            NS::UInteger startIdx = (wantBegin && m_sampleBegin) ? m_timingBeginIdx : MTL::CounterDontSample;
+            NS::UInteger endIdx   = wantEnd ? m_timingEndIdx : MTL::CounterDontSample;
+            if (startIdx != MTL::CounterDontSample || endIdx != MTL::CounterDontSample) {
+                auto* att = desc->sampleBufferAttachments()->object(0);
+                att->setSampleBuffer(m_timingSampleBuf);
+                att->setStartOfEncoderSampleIndex(startIdx);
+                att->setEndOfEncoderSampleIndex(endIdx);
+            }
             if (wantEnd) m_didWriteTimingSamples = true;
         }
         return desc;
@@ -120,10 +189,14 @@ public:
     NS::SharedPtr<MTL::AccelerationStructurePassDescriptor> makeTimedAccelDesc(bool wantBegin, bool wantEnd) {
         auto desc = NS::TransferPtr(MTL::AccelerationStructurePassDescriptor::accelerationStructurePassDescriptor());
         if (m_timingSampleBuf) {
-            auto* att = desc->sampleBufferAttachments()->object(0);
-            att->setSampleBuffer(m_timingSampleBuf);
-            att->setStartOfEncoderSampleIndex((wantBegin && m_sampleBegin) ? m_timingBeginIdx : MTL::CounterDontSample);
-            att->setEndOfEncoderSampleIndex(wantEnd ? m_timingEndIdx : MTL::CounterDontSample);
+            NS::UInteger startIdx = (wantBegin && m_sampleBegin) ? m_timingBeginIdx : MTL::CounterDontSample;
+            NS::UInteger endIdx   = wantEnd ? m_timingEndIdx : MTL::CounterDontSample;
+            if (startIdx != MTL::CounterDontSample || endIdx != MTL::CounterDontSample) {
+                auto* att = desc->sampleBufferAttachments()->object(0);
+                att->setSampleBuffer(m_timingSampleBuf);
+                att->setStartOfEncoderSampleIndex(startIdx);
+                att->setEndOfEncoderSampleIndex(endIdx);
+            }
             if (wantEnd) m_didWriteTimingSamples = true;
         }
         return desc;
@@ -139,6 +212,7 @@ public:
         std::string name;
         NS::UInteger beginIdx;
         NS::UInteger endIdx;
+        uint64_t estimatedBytes;
     };
 
     void addPass(std::unique_ptr<RenderPass> pass) {
@@ -155,6 +229,7 @@ public:
         // The completion handler can therefore compute end-begin directly with no heuristics.
         NS::UInteger nextSlot = 0;
         bool needFrameStart = true;
+        os_log_t spLog = vaporRenderGraphLog();
         for (auto& pass : passes) {
             if (!pass->enabled) continue;
             if (cmd && sampleBuf) {
@@ -163,11 +238,21 @@ public:
                 pass->m_timingEndIdx          = nextSlot + 1;
                 pass->m_sampleBegin           = needFrameStart;
                 pass->m_didWriteTimingSamples = false;
+                pass->m_estimatedBytes        = 0;
             }
+            const char* passName = pass->getName();
+            // Debug group: names this pass's encoders in Xcode GPU captures.
+            if (cmd) cmd->pushDebugGroup(NS::String::string(passName, NS::UTF8StringEncoding));
+            // Signpost: names this pass in Instruments (Points of Interest track).
+            // Marks CPU encode time; match against the GPU track via the debug groups.
+            os_signpost_id_t spid = os_signpost_id_make_with_pointer(spLog, pass.get());
+            os_signpost_interval_begin(spLog, spid, "RenderPass", "%{public}s", passName);
             pass->execute();
+            os_signpost_interval_end(spLog, spid, "RenderPass");
+            if (cmd) cmd->popDebugGroup();
             if (cmd && sampleBuf) {
                 if (pass->m_didWriteTimingSamples) {
-                    passTimingInfo.push_back({pass->getName(), nextSlot, nextSlot + 1});
+                    passTimingInfo.push_back({passName, nextSlot, nextSlot + 1, pass->m_estimatedBytes});
                     nextSlot++;            // this pass's end slot becomes next pass's begin slot
                     needFrameStart = false;
                 }
@@ -193,9 +278,12 @@ class Renderer_Metal final : public Renderer {// Must be public or factory funct
     friend class PrePass;
     friend class TLASBuildPass;
     friend class NormalResolvePass;
+    friend class VelocityPass;
     friend class TileCullingPass;
     friend class RaytraceShadowPass;
     friend class RaytraceAOPass;
+    friend class AOTemporalPass;
+    friend class AODenoisePass;
     friend class SkyAtmospherePass;
     friend class SkyCapturePass;
     friend class IrradianceConvolutionPass;
@@ -426,8 +514,11 @@ protected:
     NS::SharedPtr<MTL::ComputePipelineState> cullLightsPipeline;
     NS::SharedPtr<MTL::ComputePipelineState> tileCullingPipeline;
     NS::SharedPtr<MTL::ComputePipelineState> normalResolvePipeline;
+    NS::SharedPtr<MTL::ComputePipelineState> velocityPipeline;
     NS::SharedPtr<MTL::ComputePipelineState> raytraceShadowPipeline;
     NS::SharedPtr<MTL::ComputePipelineState> raytraceAOPipeline;
+    NS::SharedPtr<MTL::ComputePipelineState> aoTemporalPipeline;
+    NS::SharedPtr<MTL::ComputePipelineState> aoDenoisePipeline;
     NS::SharedPtr<MTL::RenderPipelineState> atmospherePipeline;
     NS::SharedPtr<MTL::RenderPipelineState> skyCapturePipeline;
     NS::SharedPtr<MTL::RenderPipelineState> irradianceConvolutionPipeline;
@@ -569,6 +660,8 @@ protected:
     std::vector<NS::SharedPtr<MTL::Buffer>> lightScatteringDataBuffers;
     NS::SharedPtr<MTL::Texture> lightScatteringRT;// Half-resolution scattering texture
     bool lightScatteringEnabled = true;
+    // AO toggle: skips the whole AO chain and binds a white texture in its place
+    bool aoEnabled = true;
     LightScatteringData lightScatteringSettings;
 
     // Volumetric Fog resources
@@ -632,7 +725,21 @@ protected:
     NS::SharedPtr<MTL::Texture> normalRT_MS;
     NS::SharedPtr<MTL::Texture> normalRT;
     NS::SharedPtr<MTL::Texture> shadowRT;
+    NS::SharedPtr<MTL::Texture> shadowRTGrayView; // swizzle view (r,r,r,1) for ImGui preview
     NS::SharedPtr<MTL::Texture> aoRT;
+    NS::SharedPtr<MTL::Texture> velocityRT; // RG16Float camera-motion vectors (see 3d_velocity.metal)
+    glm::mat4 prevViewProj = glm::mat4(1.0f);
+    bool prevViewProjValid = false;
+
+    NS::SharedPtr<MTL::Texture> aoRTGrayView;     // swizzle view (r,r,r,1) of aoRT for ImGui preview
+    // AO denoise chain (raygen → temporal → à-trous → aoRT), full res for now (ADR-008)
+    NS::SharedPtr<MTL::Texture> aoRawRT;          // R16Float, noisy raygen output
+    NS::SharedPtr<MTL::Texture> aoHistoryRT[2];   // RGBA16F ping-pong: (ao, view-space depth, oct normal)
+    NS::SharedPtr<MTL::Texture> aoScratchRT;      // RGBA16F, à-trous intermediate
+    uint32_t aoHistoryIndex = 0;                  // aoHistoryRT[aoHistoryIndex] holds the latest history
+    bool aoHistoryValid = false;
+    glm::mat4 prevView = glm::mat4(1.0f);
+    bool prevViewValid = false;
 
     // Bloom render targets
     NS::SharedPtr<MTL::Texture> bloomBrightnessRT;// Half-res brightness extraction
