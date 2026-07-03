@@ -188,7 +188,7 @@ public:
         encoder->setTexture(r.normalRT_MS.get(), 0);
         encoder->setTexture(r.normalRT.get(), 1);
         encoder->setBytes(&r.MSAA_SAMPLE_COUNT, sizeof(Uint32), 0);
-        encoder->dispatchThreads(MTL::Size(w, h, 1), MTL::Size(8, 8, 1));
+        encoder->dispatchThreadgroups(MTL::Size(w, h, 1), MTL::Size(1, 1, 1));
         encoder->endEncoding();
 
         // Traffic: read all MS normal samples, write resolved normal (both RGBA16F)
@@ -265,7 +265,7 @@ public:
         encoder->setBytes(&pointLightCount, sizeof(uint), 3);
         encoder->setBytes(&gridSize, sizeof(glm::uvec3), 4);
         encoder->setBytes(&screenSize, sizeof(glm::vec2), 5);
-        encoder->dispatchThreads(MTL::Size(r.clusterGridSizeX, r.clusterGridSizeY, 1), MTL::Size(8, 8, 1));
+        encoder->dispatchThreadgroups(MTL::Size(r.clusterGridSizeX, r.clusterGridSizeY, 1), MTL::Size(1, 1, 1));
         encoder->endEncoding();
     }
 };
@@ -298,7 +298,7 @@ public:
         encoder->setBuffer(r.pointLightBuffer.get(), 0, 2);
         encoder->setBytes(&screenSize, sizeof(glm::vec2), 3);
         encoder->setAccelerationStructure(r.TLASBuffers[r.currentFrameInFlight].get(), 4);
-        encoder->dispatchThreads(MTL::Size(w, h, 1), MTL::Size(8, 8, 1));
+        encoder->dispatchThreadgroups(MTL::Size(w, h, 1), MTL::Size(1, 1, 1));
         encoder->endEncoding();
 
         // Generate mipmaps for shadow texture (restored while bisecting the
@@ -341,7 +341,7 @@ public:
         encoder->setAccelerationStructure(r.TLASBuffers[r.currentFrameInFlight].get(), 2);
         auto w = r.aoRT->width();
         auto h = r.aoRT->height();
-        encoder->dispatchThreads(MTL::Size(w, h, 1), MTL::Size(8, 8, 1));
+        encoder->dispatchThreadgroups(MTL::Size(w, h, 1), MTL::Size(1, 1, 1));
         encoder->endEncoding();
 
         // Traffic: depth read (4B) + normal read (8B) + AO write (2B) per half-res pixel.
