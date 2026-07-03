@@ -303,7 +303,7 @@ public:
         auto drawableSize = r.swapchain->drawableSize();
         glm::vec2 screenSize = glm::vec2(drawableSize.width, drawableSize.height);
 
-        auto timedComputeDesc = makeTimedComputeDesc(true, false);
+        auto timedComputeDesc = makeTimedComputeDesc(true, true);
         auto encoder = r.currentCommandBuffer->computeCommandEncoder(timedComputeDesc.get());
         encoder->setComputePipelineState(r.raytraceShadowPipeline.get());
         encoder->setTexture(r.depthStencilRT.get(), 0);
@@ -316,17 +316,12 @@ public:
         encoder->setAccelerationStructure(r.TLASBuffers[r.currentFrameInFlight].get(), 4);
         encoder->dispatchThreads(MTL::Size(drawableSize.width, drawableSize.height, 1), MTL::Size(8, 8, 1));
         encoder->endEncoding();
+        // (The former per-frame mipmap generation was dead work: no consumer ever
+        // sampled beyond LOD 0, all reads are screen-space 1:1.)
 
-        // Generate mipmaps for shadow texture
-        auto shadowBlitDesc = makeTimedBlitDesc(false, true);
-        auto mipmapEncoder = NS::TransferPtr(r.currentCommandBuffer->blitCommandEncoder(shadowBlitDesc.get()));
-        mipmapEncoder->generateMipmaps(r.shadowRT.get());
-        mipmapEncoder->endEncoding();
-
-        // Traffic: kernel reads depth (4B) + normal (8B) and writes shadow (RGBA8, 4B)
-        // per pixel; mipmap gen reads ~4/3 and writes ~1/3 of the base level (4B).
+        // Traffic: depth read (4B) + normal read (8B) + shadow write (R8, 1B) per pixel
         uint64_t px = uint64_t(drawableSize.width) * drawableSize.height;
-        addTrafficEstimate(px * (4 + 8 + 4) + px * 4 * 5 / 3);
+        addTrafficEstimate(px * (4 + 8 + 1));
     }
 };
 
@@ -396,6 +391,7 @@ public:
         encoder->setTexture(r.aoHistoryRT[outIdx].get(), 2);
         encoder->setTexture(r.velocityRT.get(), 3);
         encoder->setTexture(r.depthStencilRT.get(), 4);
+        encoder->setTexture(r.normalRT.get(), 5);
         encoder->setBuffer(r.cameraDataBuffers[r.currentFrameInFlight].get(), 0, 0);
         encoder->setBytes(&r.prevView, sizeof(glm::mat4), 1);
         encoder->setBytes(&historyValid, sizeof(uint32_t), 2);
@@ -404,8 +400,8 @@ public:
         encoder->dispatchThreads(MTL::Size(w, h, 1), MTL::Size(8, 8, 1));
         encoder->endEncoding();
 
-        // Traffic: raw AO (2B) + history in/out (4B each) + velocity (4B) + depth (4B)
-        addTrafficEstimate(uint64_t(w) * h * (2 + 4 + 4 + 4 + 4));
+        // Traffic: raw AO (2B) + history in/out (8B each) + velocity (4B) + depth (4B) + normal (8B)
+        addTrafficEstimate(uint64_t(w) * h * (2 + 8 + 8 + 4 + 4 + 8));
 
         r.aoHistoryIndex = outIdx;
         r.aoHistoryValid = true;
@@ -447,7 +443,6 @@ public:
         auto timedComputeDesc = makeTimedComputeDesc(true, true);
         auto encoder = r.currentCommandBuffer->computeCommandEncoder(timedComputeDesc.get());
         encoder->setComputePipelineState(r.aoDenoisePipeline.get());
-        encoder->setTexture(r.normalRT.get(), 2);
         for (size_t i = 0; i < iterationCount; i++) {
             encoder->setTexture(iterations[i].src, 0);
             encoder->setTexture(iterations[i].dst, 1);
@@ -456,9 +451,9 @@ public:
         }
         encoder->endEncoding();
 
-        // Traffic per iteration: 25 src taps (4B) + 25 normal taps (8B) + write (4B),
+        // Traffic per iteration: 25 src taps (8B) + write (8B),
         // issued reads — caches make real DRAM traffic much lower
-        addTrafficEstimate(uint64_t(w) * h * (25 * 12 + 4) * iterationCount);
+        addTrafficEstimate(uint64_t(w) * h * (25 * 8 + 8) * iterationCount);
     }
 };
 
@@ -3046,16 +3041,24 @@ auto Renderer_Metal::createResources() -> void {
     normalRT = NS::TransferPtr(device->newTexture(normalTextureDesc));
     normalTextureDesc->release();
 
+    // R8Unorm, no mips: every consumer samples only .r at LOD 0 (screen-space 1:1)
     MTL::TextureDescriptor* shadowTextureDesc = MTL::TextureDescriptor::alloc()->init();
     shadowTextureDesc->setTextureType(MTL::TextureType2D);
-    shadowTextureDesc->setPixelFormat(MTL::PixelFormatRGBA8Unorm);
+    shadowTextureDesc->setPixelFormat(MTL::PixelFormatR8Unorm);
     shadowTextureDesc->setWidth(swapchain->drawableSize().width);
     shadowTextureDesc->setHeight(swapchain->drawableSize().height);
-    shadowTextureDesc->setMipmapLevelCount(
-        calculateMipmapLevelCount(swapchain->drawableSize().width, swapchain->drawableSize().height)
-    );
     shadowTextureDesc->setUsage(MTL::TextureUsageShaderRead | MTL::TextureUsageShaderWrite);
     shadowRT = NS::TransferPtr(device->newTexture(shadowTextureDesc));
+    // Grayscale swizzle view for the ImGui preview (single-channel renders red otherwise)
+    shadowRTGrayView = NS::TransferPtr(shadowRT->newTextureView(
+        MTL::PixelFormatR8Unorm,
+        MTL::TextureType2D,
+        NS::Range::Make(0, 1),
+        NS::Range::Make(0, 1),
+        MTL::TextureSwizzleChannels::Make(
+            MTL::TextureSwizzleRed, MTL::TextureSwizzleRed, MTL::TextureSwizzleRed, MTL::TextureSwizzleOne
+        )
+    ));
     shadowTextureDesc->release();
 
     // Half resolution: final target of the half-res RT AO chain; consumers sample
@@ -3089,7 +3092,8 @@ auto Renderer_Metal::createResources() -> void {
     aoChainDesc->setUsage(MTL::TextureUsageShaderRead | MTL::TextureUsageShaderWrite);
     aoChainDesc->setPixelFormat(MTL::PixelFormatR16Float);
     aoRawRT = NS::TransferPtr(device->newTexture(aoChainDesc));
-    aoChainDesc->setPixelFormat(MTL::PixelFormatRG16Float);
+    // RGBA16F: (ao, view-space depth, octahedral normal) — see 3d_ao_temporal.metal
+    aoChainDesc->setPixelFormat(MTL::PixelFormatRGBA16Float);
     aoHistoryRT[0] = NS::TransferPtr(device->newTexture(aoChainDesc));
     aoHistoryRT[1] = NS::TransferPtr(device->newTexture(aoChainDesc));
     aoScratchRT = NS::TransferPtr(device->newTexture(aoChainDesc));
@@ -4448,7 +4452,7 @@ auto Renderer_Metal::draw(std::shared_ptr<Scene> scene, Camera& camera) -> void 
                 ImGui::TreePop();
             }
             if (ImGui::TreeNode(fmt::format("Raytraced Shadow").c_str())) {
-                ImGui::Image((ImTextureID)(intptr_t)shadowRT.get(), ImVec2(64, 64));
+                ImGui::Image((ImTextureID)(intptr_t)shadowRTGrayView.get(), ImVec2(64, 64));
                 ImGui::TreePop();
             }
             if (ImGui::TreeNode(fmt::format("Raytraced AO").c_str())) {

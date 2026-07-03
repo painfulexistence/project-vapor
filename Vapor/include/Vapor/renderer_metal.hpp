@@ -730,6 +730,7 @@ protected:
     NS::SharedPtr<MTL::Texture> normalRT_MS;
     NS::SharedPtr<MTL::Texture> normalRT;
     NS::SharedPtr<MTL::Texture> shadowRT;
+    NS::SharedPtr<MTL::Texture> shadowRTGrayView; // swizzle view (r,r,r,1) for ImGui preview
     NS::SharedPtr<MTL::Texture> aoRT;
     NS::SharedPtr<MTL::Texture> velocityRT; // RG16Float camera-motion vectors (see 3d_velocity.metal)
     glm::mat4 prevViewProj = glm::mat4(1.0f);

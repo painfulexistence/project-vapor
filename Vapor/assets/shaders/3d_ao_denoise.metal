@@ -5,14 +5,14 @@ using namespace metal;
 constant float kAtrousKernel1D[5] = { 1.0 / 16.0, 4.0 / 16.0, 6.0 / 16.0, 4.0 / 16.0, 1.0 / 16.0 };
 
 // Edge-aware à-trous wavelet filter for RT AO (ADR-008 step 3).
-// src is RG16F (ao, view-space depth); the depth channel rides along so each
-// iteration can edge-stop without re-reading the depth buffer. Run iteratively
+// src is RGBA16F (ao, view-space depth, octahedral normal) — everything the
+// edge stops need rides in one texture, so each tap is a single read instead
+// of an extra scattered fetch from the full-res normal RT. Run iteratively
 // with stride 1, 2, (4, ...); the final iteration may write to a single-channel
-// target — the depth channel is simply dropped.
+// target — the extra channels are simply dropped.
 kernel void computeMain(
     texture2d<float> src [[texture(0)]],
     texture2d<float, access::write> dst [[texture(1)]],
-    texture2d<float> normalTexture [[texture(2)]],
     constant uint& stride [[buffer(0)]],
     uint2 tid [[thread_position_in_grid]]
 ) {
@@ -22,12 +22,9 @@ kernel void computeMain(
         return;
     }
 
-    // AO chain is half-res; the normal texture is full-res (coords * 2)
-    uint2 normalMax = uint2(normalTexture.get_width() - 1, normalTexture.get_height() - 1);
-
-    float2 center = src.read(tid).rg;
+    float4 center = src.read(tid);
     float centerZ = center.g;
-    float3 centerN = normalize(normalTexture.read(min(tid * 2, normalMax)).xyz);
+    float3 centerN = octDecode(center.ba);
 
     float sum = 0.0;
     float weightSum = 0.0;
@@ -36,8 +33,8 @@ kernel void computeMain(
             int2 tap = int2(tid) + int2(dx, dy) * int(stride);
             if (tap.x < 0 || tap.y < 0 || tap.x >= int(w) || tap.y >= int(h)) continue;
 
-            float2 s = src.read(uint2(tap)).rg;
-            float3 n = normalize(normalTexture.read(min(uint2(tap) * 2, normalMax)).xyz);
+            float4 s = src.read(uint2(tap));
+            float3 n = octDecode(s.ba);
 
             float wKernel = kAtrousKernel1D[dx + 2] * kAtrousKernel1D[dy + 2];
             float wZ = exp(-abs(s.g - centerZ) / (0.05 * max(abs(centerZ), 1.0)));
@@ -49,5 +46,5 @@ kernel void computeMain(
         }
     }
     float ao = weightSum > 1e-6 ? sum / weightSum : center.r;
-    dst.write(float4(ao, centerZ, 0.0, 0.0), tid);
+    dst.write(float4(ao, centerZ, center.ba), tid);
 }
