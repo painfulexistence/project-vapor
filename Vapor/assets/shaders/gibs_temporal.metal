@@ -146,8 +146,7 @@ kernel void surfelTemporalSmooth(
     // Hysteresis: gradually reduce irradiance if not updated
     // This handles surfels that are no longer visible
     if (!(surfel.flags & SURFEL_FLAG_NEEDS_UPDATE)) {
-        float decayFactor = gibs.hysteresis;
-        surfel.irradiance *= decayFactor;
+        surfel.irradiance = float3(surfel.irradiance) * gibs.hysteresis;
     }
 
     surfels[gid] = surfel;

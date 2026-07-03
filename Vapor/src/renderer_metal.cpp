@@ -2679,61 +2679,45 @@ public:
         uint32_t activeSurfels = gibsManager->getActiveSurfelCount();
         if (activeSurfels == 0) activeSurfels = 1;
 
+        MTL::Buffer* gibsData = gibsManager->getGIBSDataBuffer(r.currentFrameInFlight);
+
+        // Single serial compute encoder for all four steps (same pattern as
+        // AODenoisePass): dispatches within a serial encoder are hazard-tracked
+        // in order, and a single encoder samples its GPU timestamps reliably.
+        auto timedDesc = makeTimedComputeDesc(true, true);
+        auto encoder = r.currentCommandBuffer->computeCommandEncoder(timedDesc.get());
+        encoder->setLabel(NS::String::string("Surfel Hash Build", NS::UTF8StringEncoding));
+
         // Step 1: Clear cell counts
-        {
-            auto timedDesc = makeTimedComputeDesc(true, false);
-            auto encoder = r.currentCommandBuffer->computeCommandEncoder(timedDesc.get());
-            encoder->setLabel(NS::String::string("Clear Cell Counts", NS::UTF8StringEncoding));
-            encoder->setComputePipelineState(r.surfelClearCellsPipeline.get());
-            encoder->setBuffer(gibsManager->getCellCountBuffer(), 0, 0);
-            encoder->setBuffer(gibsManager->getGIBSDataBuffer(r.currentFrameInFlight), 0, 1);
-            uint32_t threadGroups = (totalCells + 255) / 256;
-            encoder->dispatchThreadgroups(MTL::Size(threadGroups, 1, 1), MTL::Size(256, 1, 1));
-            encoder->endEncoding();
-        }
+        encoder->setComputePipelineState(r.surfelClearCellsPipeline.get());
+        encoder->setBuffer(gibsManager->getCellCountBuffer(), 0, 0);
+        encoder->setBuffer(gibsData, 0, 1);
+        encoder->dispatchThreadgroups(MTL::Size((totalCells + 255) / 256, 1, 1), MTL::Size(256, 1, 1));
 
         // Step 2: Count surfels per cell
-        {
-            auto timedDesc = makeTimedComputeDesc(false, false);
-            auto encoder = r.currentCommandBuffer->computeCommandEncoder(timedDesc.get());
-            encoder->setLabel(NS::String::string("Count Surfels Per Cell", NS::UTF8StringEncoding));
-            encoder->setComputePipelineState(r.surfelCountPerCellPipeline.get());
-            encoder->setBuffer(gibsManager->getSurfelBuffer(), 0, 0);
-            encoder->setBuffer(gibsManager->getCellCountBuffer(), 0, 1);
-            encoder->setBuffer(gibsManager->getGIBSDataBuffer(r.currentFrameInFlight), 0, 2);
-            uint32_t threadGroups = (activeSurfels + 255) / 256;
-            encoder->dispatchThreadgroups(MTL::Size(threadGroups, 1, 1), MTL::Size(256, 1, 1));
-            encoder->endEncoding();
-        }
+        encoder->setComputePipelineState(r.surfelCountPerCellPipeline.get());
+        encoder->setBuffer(gibsManager->getSurfelBuffer(), 0, 0);
+        encoder->setBuffer(gibsManager->getCellCountBuffer(), 0, 1);
+        encoder->setBuffer(gibsData, 0, 2);
+        encoder->dispatchThreadgroups(MTL::Size((activeSurfels + 255) / 256, 1, 1), MTL::Size(256, 1, 1));
 
-        // Step 3: Prefix sum
-        {
-            auto timedDesc = makeTimedComputeDesc(false, false);
-            auto encoder = r.currentCommandBuffer->computeCommandEncoder(timedDesc.get());
-            encoder->setLabel(NS::String::string("Prefix Sum Cells", NS::UTF8StringEncoding));
-            encoder->setComputePipelineState(r.surfelPrefixSumPipeline.get());
-            encoder->setBuffer(gibsManager->getCellCountBuffer(), 0, 0);
-            encoder->setBuffer(gibsManager->getCellBuffer(), 0, 1);
-            encoder->setBuffer(gibsManager->getGIBSDataBuffer(r.currentFrameInFlight), 0, 2);
-            encoder->dispatchThreadgroups(MTL::Size(1, 1, 1), MTL::Size(1, 1, 1));
-            encoder->endEncoding();
-        }
+        // Step 3: Prefix sum (serial, single thread)
+        encoder->setComputePipelineState(r.surfelPrefixSumPipeline.get());
+        encoder->setBuffer(gibsManager->getCellCountBuffer(), 0, 0);
+        encoder->setBuffer(gibsManager->getCellBuffer(), 0, 1);
+        encoder->setBuffer(gibsData, 0, 2);
+        encoder->dispatchThreadgroups(MTL::Size(1, 1, 1), MTL::Size(1, 1, 1));
 
-        // Step 4: Scatter surfels
-        {
-            auto timedDesc = makeTimedComputeDesc(false, true);
-            auto encoder = r.currentCommandBuffer->computeCommandEncoder(timedDesc.get());
-            encoder->setLabel(NS::String::string("Scatter Surfels", NS::UTF8StringEncoding));
-            encoder->setComputePipelineState(r.surfelScatterPipeline.get());
-            encoder->setBuffer(gibsManager->getSurfelBuffer(), 0, 0);
-            encoder->setBuffer(gibsManager->getSurfelBufferSorted(), 0, 1);
-            encoder->setBuffer(gibsManager->getCellBuffer(), 0, 2);
-            encoder->setBuffer(gibsManager->getCellCountBuffer(), 0, 3);
-            encoder->setBuffer(gibsManager->getGIBSDataBuffer(r.currentFrameInFlight), 0, 4);
-            uint32_t threadGroups = (activeSurfels + 255) / 256;
-            encoder->dispatchThreadgroups(MTL::Size(threadGroups, 1, 1), MTL::Size(256, 1, 1));
-            encoder->endEncoding();
-        }
+        // Step 4: Scatter surfels into sorted order
+        encoder->setComputePipelineState(r.surfelScatterPipeline.get());
+        encoder->setBuffer(gibsManager->getSurfelBuffer(), 0, 0);
+        encoder->setBuffer(gibsManager->getSurfelBufferSorted(), 0, 1);
+        encoder->setBuffer(gibsManager->getCellBuffer(), 0, 2);
+        encoder->setBuffer(gibsManager->getCellCountBuffer(), 0, 3);
+        encoder->setBuffer(gibsData, 0, 4);
+        encoder->dispatchThreadgroups(MTL::Size((activeSurfels + 255) / 256, 1, 1), MTL::Size(256, 1, 1));
+
+        encoder->endEncoding();
 
         addTrafficEstimate(uint64_t(activeSurfels) * sizeof(Surfel) * 2 + uint64_t(totalCells) * (4 + sizeof(SurfelCell)));
     }

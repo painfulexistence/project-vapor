@@ -1,5 +1,6 @@
 #pragma once
 #include <SDL3/SDL_stdinc.h>
+#include <cstddef>
 #include <glm/glm.hpp>
 
 // ===== GIBS (Global Illumination Based on Surfels) =====
@@ -106,6 +107,16 @@ struct alignas(16) GIBSData {
     Uint32 maxSurfelsPerPixel;    // Max surfels to sample per pixel
     glm::vec2 _pad5;
 };
+// These offsets must match the packed_float3-based layout in gibs_common.metal.
+// glm::vec3 is 12 bytes / 4-aligned = MSL packed_float3; a non-packed MSL float3
+// (16 bytes / 16-aligned) would silently shift everything after cameraPosition.
+static_assert(offsetof(GIBSData, cameraPosition) == 128, "GIBSData layout mismatch vs Metal");
+static_assert(offsetof(GIBSData, maxSurfels) == 176, "GIBSData layout mismatch vs Metal");
+static_assert(offsetof(GIBSData, worldMin) == 192, "GIBSData layout mismatch vs Metal");
+static_assert(offsetof(GIBSData, totalCells) == 220, "GIBSData layout mismatch vs Metal");
+static_assert(offsetof(GIBSData, rayMaxDistance) == 252, "GIBSData layout mismatch vs Metal");
+static_assert(offsetof(GIBSData, sampleRadius) == 288, "GIBSData layout mismatch vs Metal");
+static_assert(sizeof(GIBSData) == 304, "GIBSData must be 304 bytes to match Metal");
 
 // GIBS quality presets
 enum class GIBSQuality {

@@ -27,23 +27,26 @@ constant float GIBS_EPSILON = 1e-6;
 
 // Single Surfel - 128 bytes
 // Design Decision: 128 bytes for balance between info and memory efficiency
+// IMPORTANT: packed_float3 (12 bytes) is required to match the C++ glm::vec3
+// layout. A non-packed MSL float3 is 16 bytes / 16-byte aligned and would
+// shift every field after it, silently corrupting the whole struct.
 struct Surfel {
-    float3 position;        // World space position (12 bytes)
-    float radius;           // Surfel coverage radius (4 bytes) = 16
-    float3 normal;          // Surface normal (normalized) (12 bytes)
-    float _pad1;            // (4 bytes) = 32
-    float3 albedo;          // Surface reflectance (diffuse color) (12 bytes)
-    float _pad2;            // (4 bytes) = 48
-    float3 irradiance;      // Accumulated indirect irradiance (RGB) (12 bytes)
-    float _pad3;            // (4 bytes) = 64
-    float3 directLight;     // Direct lighting contribution (12 bytes)
-    float age;              // Frame age for temporal stability (4 bytes) = 80
-    uint cellHash;          // Spatial hash cell ID (4 bytes)
-    uint flags;             // SurfelFlags bitmask (4 bytes)
-    uint instanceID;        // Source mesh instance (4 bytes)
-    uint _pad4;             // (4 bytes) = 96
-    float4 _reserved1;      // Reserved for future use (16 bytes) = 112
-    float4 _reserved2;      // Reserved for future use (16 bytes) = 128
+    packed_float3 position;   // World space position (12 bytes)
+    float radius;             // Surfel coverage radius (4 bytes) = 16
+    packed_float3 normal;     // Surface normal (normalized) (12 bytes)
+    float _pad1;              // (4 bytes) = 32
+    packed_float3 albedo;     // Surface reflectance (diffuse color) (12 bytes)
+    float _pad2;              // (4 bytes) = 48
+    packed_float3 irradiance; // Accumulated indirect irradiance (RGB) (12 bytes)
+    float _pad3;              // (4 bytes) = 64
+    packed_float3 directLight;// Direct lighting contribution (12 bytes)
+    float age;                // Frame age for temporal stability (4 bytes) = 80
+    uint cellHash;            // Spatial hash cell ID (4 bytes)
+    uint flags;               // SurfelFlags bitmask (4 bytes)
+    uint instanceID;          // Source mesh instance (4 bytes)
+    uint _pad4;               // (4 bytes) = 96
+    float4 _reserved1;        // Reserved for future use (16 bytes) = 112
+    float4 _reserved2;        // Reserved for future use (16 bytes) = 128
 };
 
 // Spatial hash cell for fast surfel lookup
@@ -54,15 +57,16 @@ struct SurfelCell {
 };
 
 // GIBS global parameters
+// packed_float3/packed_uint3 match glm::vec3/uvec3 (12 bytes, 4-byte aligned)
 struct GIBSData {
     float4x4 invViewProj;
     float4x4 prevViewProj;
-    float3 cameraPosition;
+    packed_float3 cameraPosition;
     float _pad1;
 
-    float3 sunDirection;
+    packed_float3 sunDirection;
     float _pad2;
-    float3 sunColor;
+    packed_float3 sunColor;
     float sunIntensity;
 
     uint maxSurfels;
@@ -70,11 +74,11 @@ struct GIBSData {
     float surfelRadius;
     float surfelDensity;
 
-    float3 worldMin;
+    packed_float3 worldMin;
     float cellSize;
-    float3 worldMax;
+    packed_float3 worldMax;
     uint totalCells;
-    uint3 gridSize;
+    packed_uint3 gridSize;
     float _pad3;
 
     uint raysPerSurfel;
@@ -146,15 +150,16 @@ inline uint cellToIndex(uint3 cell, uint3 gridSize) {
 
 // Compute cell hash from world position
 inline uint computeCellHash(float3 worldPos, constant GIBSData& gibs) {
-    uint3 cell = worldToCell(worldPos, gibs.worldMin, gibs.cellSize);
+    uint3 grid = uint3(gibs.gridSize);
+    uint3 cell = worldToCell(worldPos, float3(gibs.worldMin), gibs.cellSize);
     // Clamp to grid bounds
-    cell = min(cell, gibs.gridSize - 1);
-    return cellToIndex(cell, gibs.gridSize);
+    cell = min(cell, grid - 1);
+    return cellToIndex(cell, grid);
 }
 
 // Check if position is within world bounds
 inline bool isInWorldBounds(float3 pos, constant GIBSData& gibs) {
-    return all(pos >= gibs.worldMin) && all(pos <= gibs.worldMax);
+    return all(pos >= float3(gibs.worldMin)) && all(pos <= float3(gibs.worldMax));
 }
 
 // ============================================================================
@@ -277,7 +282,7 @@ inline float normalWeight(float3 n1, float3 n2) {
 // Combined surfel weight for sampling
 inline float computeSurfelWeight(float3 samplePos, float3 sampleNormal,
                                    Surfel surfel, float maxDistance) {
-    float3 toSurfel = surfel.position - samplePos;
+    float3 toSurfel = float3(surfel.position) - samplePos;
     float dist = length(toSurfel);
 
     if (dist > maxDistance || dist < GIBS_EPSILON) {
@@ -285,7 +290,7 @@ inline float computeSurfelWeight(float3 samplePos, float3 sampleNormal,
     }
 
     float dw = distanceWeight(dist, maxDistance);
-    float nw = normalWeight(sampleNormal, surfel.normal);
+    float nw = normalWeight(sampleNormal, float3(surfel.normal));
 
     return dw * nw;
 }

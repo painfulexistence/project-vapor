@@ -74,7 +74,7 @@ float3 sampleGIFromSurfels(
 
                     if (weight > GIBS_EPSILON) {
                         // Accumulate irradiance (direct + indirect)
-                        float3 surfelRadiance = surfel.irradiance + surfel.directLight;
+                        float3 surfelRadiance = float3(surfel.irradiance) + float3(surfel.directLight);
                         irradianceSum += surfelRadiance * weight;
                         weightSum += weight;
                     }
@@ -266,7 +266,7 @@ kernel void debugVisualizeSurfels(
         }
 
         // Project surfel to screen
-        float4 clip = camera.proj * camera.view * float4(surfel.position, 1.0);
+        float4 clip = camera.proj * camera.view * float4(float3(surfel.position), 1.0);
         float3 ndc = clip.xyz / clip.w;
 
         // Check if visible
@@ -284,7 +284,7 @@ kernel void debugVisualizeSurfels(
         if (dist < screenRadius) {
             // Draw surfel color (irradiance)
             float alpha = 1.0 - dist / screenRadius;
-            float3 surfelColor = surfel.irradiance + surfel.directLight;
+            float3 surfelColor = float3(surfel.irradiance) + float3(surfel.directLight);
             surfelColor = max(surfelColor, debugSurfelColor(surfel.flags) * 0.5);
             result = mix(result, surfelColor, alpha * 0.8);
         }

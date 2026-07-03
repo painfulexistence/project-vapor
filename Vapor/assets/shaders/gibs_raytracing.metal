@@ -81,7 +81,7 @@ float3 sampleSurfelAtPosition(float3 hitPos, float3 hitNormal,
         if (weight > bestWeight) {
             bestWeight = weight;
             // Return surfel's outgoing radiance (irradiance * albedo for diffuse)
-            bestIrradiance = surfel.irradiance + surfel.directLight;
+            bestIrradiance = float3(surfel.irradiance) + float3(surfel.directLight);
         }
     }
 
@@ -115,8 +115,8 @@ kernel void surfelRaytracing(
 
     // Compute direct lighting first
     surfel.directLight = computeDirectLight(
-        surfel.position, surfel.normal, surfel.albedo,
-        gibs.sunDirection, gibs.sunColor, gibs.sunIntensity,
+        float3(surfel.position), float3(surfel.normal), float3(surfel.albedo),
+        float3(gibs.sunDirection), float3(gibs.sunColor), gibs.sunIntensity,
         accelStruct
     );
 
@@ -128,11 +128,12 @@ kernel void surfelRaytracing(
         // Generate random direction (cosine-weighted hemisphere)
         uint seed = surfelIndex * 1000 + rayIndex + params.frameIndex * 100000;
         float2 u = randomFloat2(seed);
-        float3 rayDir = sampleCosineHemisphere(u, surfel.normal);
+        float3 surfelNormal = float3(surfel.normal);
+        float3 rayDir = sampleCosineHemisphere(u, surfelNormal);
 
         // Create ray
         raytracing::ray r;
-        r.origin = surfel.position + surfel.normal * params.rayBias;
+        r.origin = float3(surfel.position) + surfelNormal * params.rayBias;
         r.direction = rayDir;
         r.min_distance = 0.001;
         r.max_distance = params.rayMaxDistance;
@@ -154,13 +155,13 @@ kernel void surfelRaytracing(
             float3 hitRadiance = sampleSurfelAtPosition(hitPos, hitNormal, sortedSurfels, cells, gibs);
 
             // Cosine term already included in importance sampling
-            indirectSum += hitRadiance * surfel.albedo;
+            indirectSum += hitRadiance * float3(surfel.albedo);
             validRays++;
         } else {
             // Hit sky - sample environment (simplified)
             // In production, sample from environment cubemap
             float3 skyColor = float3(0.5, 0.7, 1.0) * 0.3; // Simple sky color
-            indirectSum += skyColor * surfel.albedo;
+            indirectSum += skyColor * float3(surfel.albedo);
             validRays++;
         }
     }
@@ -173,7 +174,7 @@ kernel void surfelRaytracing(
 
     // Temporal blending with previous irradiance
     // Design Decision: Temporal accumulation for noise reduction
-    surfel.irradiance = mix(surfel.irradiance, newIndirect, gibs.temporalBlend);
+    surfel.irradiance = mix(float3(surfel.irradiance), newIndirect, gibs.temporalBlend);
     surfel.age += 1.0;
 
     // Write back to the canonical buffer so accumulation persists across frames
@@ -201,12 +202,12 @@ kernel void surfelRaytracingSimple(
     }
 
     // Simple direct lighting without shadows
-    float NdotL = max(0.0, dot(surfel.normal, gibs.sunDirection));
-    surfel.directLight = surfel.albedo * gibs.sunColor * gibs.sunIntensity * NdotL * GIBS_INV_PI;
+    float NdotL = max(0.0, dot(float3(surfel.normal), float3(gibs.sunDirection)));
+    surfel.directLight = float3(surfel.albedo) * float3(gibs.sunColor) * gibs.sunIntensity * NdotL * GIBS_INV_PI;
 
     // Simple ambient indirect (placeholder until RT works)
     float3 ambient = float3(0.1, 0.12, 0.15);
-    surfel.irradiance = mix(surfel.irradiance, ambient * surfel.albedo, gibs.temporalBlend);
+    surfel.irradiance = mix(float3(surfel.irradiance), ambient * float3(surfel.albedo), gibs.temporalBlend);
     surfel.age += 1.0;
 
     surfels[surfelIndex] = surfel;

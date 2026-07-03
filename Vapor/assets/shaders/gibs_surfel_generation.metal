@@ -73,8 +73,9 @@ kernel void surfelGeneration(
     // 1. Base density parameter
     // 2. Distance to camera (fewer surfels far away)
     // 3. Surface angle to camera (fewer on grazing angles)
-    float3 toCamera = normalize(gibs.cameraPosition - worldPos);
-    float distToCamera = length(gibs.cameraPosition - worldPos);
+    float3 cameraPos = float3(gibs.cameraPosition);
+    float3 toCamera = normalize(cameraPos - worldPos);
+    float distToCamera = length(cameraPos - worldPos);
 
     // Distance-based density falloff
     float distanceFactor = saturate(1.0 - distToCamera / gibs.rayMaxDistance);
