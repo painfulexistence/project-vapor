@@ -27,6 +27,7 @@ class Renderer_Metal;
 class PrePass;
 class TLASBuildPass;
 class NormalResolvePass;
+class VelocityPass;
 class TileCullingPass;
 class RaytraceShadowPass;
 class RaytraceAOPass;
@@ -492,6 +493,7 @@ protected:
     NS::SharedPtr<MTL::ComputePipelineState> cullLightsPipeline;
     NS::SharedPtr<MTL::ComputePipelineState> tileCullingPipeline;
     NS::SharedPtr<MTL::ComputePipelineState> normalResolvePipeline;
+    NS::SharedPtr<MTL::ComputePipelineState> velocityPipeline;
     NS::SharedPtr<MTL::ComputePipelineState> raytraceShadowPipeline;
     NS::SharedPtr<MTL::ComputePipelineState> raytraceAOPipeline;
     NS::SharedPtr<MTL::RenderPipelineState> atmospherePipeline;
@@ -706,6 +708,9 @@ protected:
     NS::SharedPtr<MTL::Texture> normalRT;
     NS::SharedPtr<MTL::Texture> shadowRT;
     NS::SharedPtr<MTL::Texture> aoRT;
+    NS::SharedPtr<MTL::Texture> velocityRT; // RG16Float camera-motion vectors (see 3d_velocity.metal)
+    glm::mat4 prevViewProj = glm::mat4(1.0f);
+    bool prevViewProjValid = false;
 
     // Bloom render targets
     NS::SharedPtr<MTL::Texture> bloomBrightnessRT;// Half-res brightness extraction

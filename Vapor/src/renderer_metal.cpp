@@ -225,6 +225,48 @@ public:
     }
 };
 
+// Velocity pass: camera-motion vectors from the depth buffer (see 3d_velocity.metal).
+// Feeds every temporal technique (RT AO temporal accumulation, TAA).
+class VelocityPass : public RenderPass {
+public:
+    explicit VelocityPass(Renderer_Metal* renderer) : RenderPass(renderer) {
+    }
+
+    auto getName() const -> const char* override {
+        return "VelocityPass";
+    }
+
+    void execute() override {
+        auto& r = *renderer;
+
+        if (!r.velocityPipeline || !r.velocityRT) return;
+
+        glm::mat4 curViewProj = r.currentCamera->getProjMatrix() * r.currentCamera->getViewMatrix();
+        if (!r.prevViewProjValid) {
+            r.prevViewProj = curViewProj; // first frame: zero velocity
+            r.prevViewProjValid = true;
+        }
+
+        auto timedComputeDesc = makeTimedComputeDesc(true, true);
+        auto encoder = r.currentCommandBuffer->computeCommandEncoder(timedComputeDesc.get());
+        encoder->setComputePipelineState(r.velocityPipeline.get());
+        encoder->setTexture(r.depthStencilRT.get(), 0);
+        encoder->setTexture(r.velocityRT.get(), 1);
+        encoder->setBuffer(r.cameraDataBuffers[r.currentFrameInFlight].get(), 0, 0);
+        encoder->setBytes(&r.prevViewProj, sizeof(glm::mat4), 1);
+        auto w = r.velocityRT->width();
+        auto h = r.velocityRT->height();
+        encoder->dispatchThreads(MTL::Size(w, h, 1), MTL::Size(8, 8, 1));
+        encoder->endEncoding();
+
+        // Traffic: depth read (4B) + velocity write (4B) per pixel
+        addTrafficEstimate(uint64_t(w) * h * 8);
+
+        // setBytes copied prevViewProj into the command stream, so it's safe to roll forward now
+        r.prevViewProj = curViewProj;
+    }
+};
+
 // Tile culling pass: Performs light culling for tiled rendering
 class TileCullingPass : public RenderPass {
 public:
@@ -2247,6 +2289,7 @@ auto Renderer_Metal::init(SDL_Window* window) -> void {
     if (m_supportsRaytracing) graph.addPass(std::make_unique<TLASBuildPass>(this));
     graph.addPass(std::make_unique<PrePass>(this));
     graph.addPass(std::make_unique<NormalResolvePass>(this));
+    graph.addPass(std::make_unique<VelocityPass>(this));
     graph.addPass(std::make_unique<TileCullingPass>(this));
     if (m_supportsRaytracing) graph.addPass(std::make_unique<RaytraceShadowPass>(this));
     if (m_supportsRaytracing) graph.addPass(std::make_unique<RaytraceAOPass>(this));
@@ -2413,6 +2456,7 @@ auto Renderer_Metal::createResources() -> void {
     cullLightsPipeline = createComputePipeline("shaders/3d_light_cull.metal");
     tileCullingPipeline = createComputePipeline("shaders/3d_tile_light_cull.metal");
     normalResolvePipeline = createComputePipeline("shaders/3d_normal_resolve.metal");
+    velocityPipeline = createComputePipeline("shaders/3d_velocity.metal");
     if (m_supportsRaytracing) raytraceShadowPipeline = createComputePipeline("shaders/3d_raytrace_shadow.metal");
     if (m_supportsRaytracing) raytraceAOPipeline = createComputePipeline("shaders/3d_ssao.metal");
     atmospherePipeline =
@@ -2933,6 +2977,15 @@ auto Renderer_Metal::createResources() -> void {
     aoTextureDesc->setUsage(MTL::TextureUsageShaderRead | MTL::TextureUsageShaderWrite);
     aoRT = NS::TransferPtr(device->newTexture(aoTextureDesc));
     aoTextureDesc->release();
+
+    MTL::TextureDescriptor* velocityTextureDesc = MTL::TextureDescriptor::alloc()->init();
+    velocityTextureDesc->setTextureType(MTL::TextureType2D);
+    velocityTextureDesc->setPixelFormat(MTL::PixelFormatRG16Float);
+    velocityTextureDesc->setWidth(swapchain->drawableSize().width);
+    velocityTextureDesc->setHeight(swapchain->drawableSize().height);
+    velocityTextureDesc->setUsage(MTL::TextureUsageShaderRead | MTL::TextureUsageShaderWrite);
+    velocityRT = NS::TransferPtr(device->newTexture(velocityTextureDesc));
+    velocityTextureDesc->release();
 
     // Create light scattering render target (HDR format for god rays)
     MTL::TextureDescriptor* lightScatteringTextureDesc = MTL::TextureDescriptor::alloc()->init();
