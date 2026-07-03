@@ -370,10 +370,10 @@ public:
         encoder->dispatchThreads(MTL::Size(drawableSize.width, drawableSize.height, 1), MTL::Size(8, 8, 1));
         encoder->endEncoding();
 
-        // Traffic: 1 depth + 32 SSAO-loop depth reads (4B each) + normal (8B) + AO write (4B)
-        // per pixel. Issued reads — cache hits will make the real DRAM traffic lower.
+        // Traffic: depth read (4B) + normal read (8B) + AO write (2B) per pixel.
+        // BVH traversal traffic is not estimable here.
         uint64_t px = uint64_t(drawableSize.width) * drawableSize.height;
-        addTrafficEstimate(px * (33 * 4 + 8 + 4));
+        addTrafficEstimate(px * (4 + 8 + 2));
     }
 };
 
@@ -2458,7 +2458,7 @@ auto Renderer_Metal::createResources() -> void {
     normalResolvePipeline = createComputePipeline("shaders/3d_normal_resolve.metal");
     velocityPipeline = createComputePipeline("shaders/3d_velocity.metal");
     if (m_supportsRaytracing) raytraceShadowPipeline = createComputePipeline("shaders/3d_raytrace_shadow.metal");
-    if (m_supportsRaytracing) raytraceAOPipeline = createComputePipeline("shaders/3d_ssao.metal");
+    if (m_supportsRaytracing) raytraceAOPipeline = createComputePipeline("shaders/3d_raytrace_ao.metal");
     atmospherePipeline =
         createPipeline("shaders/3d_atmosphere.metal", true, false, 1);// No MSAA for sky (full-screen triangle)
     skyCapturePipeline = createPipeline("shaders/3d_sky_capture.metal", true, true, 1);
