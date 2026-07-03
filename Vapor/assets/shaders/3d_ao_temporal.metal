@@ -23,8 +23,11 @@ kernel void computeMain(
         return;
     }
 
+    // AO chain is half-res; depth and velocity are full-res
+    uint2 fullTid = min(tid * 2, uint2(depthTexture.get_width() - 1, depthTexture.get_height() - 1));
+
     float ao = aoRaw.read(tid).r;
-    float depth = depthTexture.read(tid).r;
+    float depth = depthTexture.read(fullTid).r;
 
     // Sky: unoccluded, park the history at far depth
     if (depth >= 0.999999) {
@@ -43,7 +46,7 @@ kernel void computeMain(
 
     float blended = ao;
     if (historyValid != 0) {
-        float2 vel = velocityTexture.read(tid).rg;          // y-up NDC*0.5 units
+        float2 vel = velocityTexture.read(fullTid).rg;      // y-up NDC*0.5 units
         float2 prevUVyUp = uvYUp - vel;
         float2 prevTexUV = float2(prevUVyUp.x, 1.0 - prevUVyUp.y);
 

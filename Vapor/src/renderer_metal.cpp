@@ -343,8 +343,6 @@ public:
     void execute() override {
         auto& r = *renderer;
 
-        auto drawableSize = r.swapchain->drawableSize();
-
         auto timedComputeDesc = makeTimedComputeDesc(true, true);
         auto encoder = r.currentCommandBuffer->computeCommandEncoder(timedComputeDesc.get());
         encoder->setComputePipelineState(r.raytraceAOPipeline.get());
@@ -354,13 +352,14 @@ public:
         encoder->setBuffer(r.frameDataBuffers[r.currentFrameInFlight].get(), 0, 0);
         encoder->setBuffer(r.cameraDataBuffers[r.currentFrameInFlight].get(), 0, 1);
         encoder->setAccelerationStructure(r.TLASBuffers[r.currentFrameInFlight].get(), 2);
-        encoder->dispatchThreads(MTL::Size(drawableSize.width, drawableSize.height, 1), MTL::Size(8, 8, 1));
+        auto w = r.aoRawRT->width(); // half resolution — see AO chain creation
+        auto h = r.aoRawRT->height();
+        encoder->dispatchThreads(MTL::Size(w, h, 1), MTL::Size(8, 8, 1));
         encoder->endEncoding();
 
-        // Traffic: depth read (4B) + normal read (8B) + AO write (2B) per pixel.
+        // Traffic: depth read (4B) + normal read (8B) + AO write (2B) per half-res pixel.
         // BVH traversal traffic is not estimable here.
-        uint64_t px = uint64_t(drawableSize.width) * drawableSize.height;
-        addTrafficEstimate(px * (4 + 8 + 2));
+        addTrafficEstimate(uint64_t(w) * h * (4 + 8 + 2));
     }
 };
 
@@ -3059,11 +3058,13 @@ auto Renderer_Metal::createResources() -> void {
     shadowRT = NS::TransferPtr(device->newTexture(shadowTextureDesc));
     shadowTextureDesc->release();
 
+    // Half resolution: final target of the half-res RT AO chain; consumers sample
+    // it with a bilinear sampler at screen UVs, which upsamples for free
     MTL::TextureDescriptor* aoTextureDesc = MTL::TextureDescriptor::alloc()->init();
     aoTextureDesc->setTextureType(MTL::TextureType2D);
     aoTextureDesc->setPixelFormat(MTL::PixelFormatR16Float);
-    aoTextureDesc->setWidth(swapchain->drawableSize().width);
-    aoTextureDesc->setHeight(swapchain->drawableSize().height);
+    aoTextureDesc->setWidth((swapchain->drawableSize().width + 1) / 2);
+    aoTextureDesc->setHeight((swapchain->drawableSize().height + 1) / 2);
     aoTextureDesc->setUsage(MTL::TextureUsageShaderRead | MTL::TextureUsageShaderWrite);
     aoRT = NS::TransferPtr(device->newTexture(aoTextureDesc));
     aoTextureDesc->release();
@@ -3077,11 +3078,14 @@ auto Renderer_Metal::createResources() -> void {
     velocityRT = NS::TransferPtr(device->newTexture(velocityTextureDesc));
     velocityTextureDesc->release();
 
-    // RT AO denoise chain targets (raygen → temporal history ping-pong → à-trous scratch)
+    // RT AO denoise chain targets (raygen → temporal history ping-pong → à-trous scratch).
+    // The whole chain runs at HALF resolution: 4x fewer (incoherent, expensive) rays and
+    // 4x cheaper temporal/denoise; PostProcess upsamples bilinearly when sampling aoRT.
+    // AO is low-frequency, so this is the standard trade (ADR-008).
     MTL::TextureDescriptor* aoChainDesc = MTL::TextureDescriptor::alloc()->init();
     aoChainDesc->setTextureType(MTL::TextureType2D);
-    aoChainDesc->setWidth(swapchain->drawableSize().width);
-    aoChainDesc->setHeight(swapchain->drawableSize().height);
+    aoChainDesc->setWidth((swapchain->drawableSize().width + 1) / 2);
+    aoChainDesc->setHeight((swapchain->drawableSize().height + 1) / 2);
     aoChainDesc->setUsage(MTL::TextureUsageShaderRead | MTL::TextureUsageShaderWrite);
     aoChainDesc->setPixelFormat(MTL::PixelFormatR16Float);
     aoRawRT = NS::TransferPtr(device->newTexture(aoChainDesc));

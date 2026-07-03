@@ -22,9 +22,12 @@ kernel void computeMain(
         return;
     }
 
+    // AO chain is half-res; the normal texture is full-res (coords * 2)
+    uint2 normalMax = uint2(normalTexture.get_width() - 1, normalTexture.get_height() - 1);
+
     float2 center = src.read(tid).rg;
     float centerZ = center.g;
-    float3 centerN = normalize(normalTexture.read(tid).xyz);
+    float3 centerN = normalize(normalTexture.read(min(tid * 2, normalMax)).xyz);
 
     float sum = 0.0;
     float weightSum = 0.0;
@@ -34,7 +37,7 @@ kernel void computeMain(
             if (tap.x < 0 || tap.y < 0 || tap.x >= int(w) || tap.y >= int(h)) continue;
 
             float2 s = src.read(uint2(tap)).rg;
-            float3 n = normalize(normalTexture.read(uint2(tap)).xyz);
+            float3 n = normalize(normalTexture.read(min(uint2(tap) * 2, normalMax)).xyz);
 
             float wKernel = kAtrousKernel1D[dx + 2] * kAtrousKernel1D[dy + 2];
             float wZ = exp(-abs(s.g - centerZ) / (0.05 * max(abs(centerZ), 1.0)));

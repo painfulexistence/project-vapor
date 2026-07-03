@@ -30,20 +30,23 @@ kernel void computeMain(
         return;
     }
 
-    float depth = depthTexture.read(tid).r;
+    // The AO chain runs at half resolution; depth/normal are full-res
+    uint2 fullTid = min(tid * 2, uint2(depthTexture.get_width() - 1, depthTexture.get_height() - 1));
+
+    float depth = depthTexture.read(fullTid).r;
     // Sky / far plane: fully unoccluded, no rays
     if (depth >= 0.999999 || is_null_instance_acceleration_structure(TLAS)) {
         aoTexture.write(float4(1.0), tid);
         return;
     }
 
-    float2 uv = float2(tid) / float2(w, h);
+    float2 uv = (float2(tid) + 0.5) / float2(w, h);
     uv.y = 1.0 - uv.y;
     float4 ndc = float4(uv * 2.0 - 1.0, depth, 1.0);
     float4 viewPos = camera.invProj * ndc;
     viewPos /= viewPos.w;
     float3 worldPos = (camera.invView * viewPos).xyz;
-    float3 worldNormal = normalize(normalTexture.read(tid).xyz);
+    float3 worldNormal = normalize(normalTexture.read(fullTid).xyz);
 
     // Occlusion query: any hit terminates traversal; no per-triangle data needed
     raytracing::intersector<raytracing::instancing> isect;
