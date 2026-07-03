@@ -196,8 +196,8 @@ public:
     void execute() override {
         auto& r = *renderer;
 
-        auto drawableSize = r.swapchain->drawableSize();
-        glm::vec2 screenSize = glm::vec2(drawableSize.width, drawableSize.height);
+        auto w = r.normalRT->width();
+        auto h = r.normalRT->height();
 
         auto timedComputeDesc = makeTimedComputeDesc(true, true);
         auto encoder = r.currentCommandBuffer->computeCommandEncoder(timedComputeDesc.get());
@@ -205,11 +205,11 @@ public:
         encoder->setTexture(r.normalRT_MS.get(), 0);
         encoder->setTexture(r.normalRT.get(), 1);
         encoder->setBytes(&r.MSAA_SAMPLE_COUNT, sizeof(Uint32), 0);
-        encoder->dispatchThreads(MTL::Size(drawableSize.width, drawableSize.height, 1), MTL::Size(8, 8, 1));
+        encoder->dispatchThreads(MTL::Size(w, h, 1), MTL::Size(8, 8, 1));
         encoder->endEncoding();
 
         // Traffic: read all MS normal samples, write resolved normal (both RGBA16F)
-        uint64_t px = uint64_t(drawableSize.width) * drawableSize.height;
+        uint64_t px = uint64_t(w) * h;
         addTrafficEstimate(px * 8 * (r.MSAA_SAMPLE_COUNT + 1));
     }
 };
@@ -269,8 +269,7 @@ public:
     void execute() override {
         auto& r = *renderer;
 
-        auto drawableSize = r.swapchain->drawableSize();
-        glm::vec2 screenSize = glm::vec2(drawableSize.width, drawableSize.height);
+        glm::vec2 screenSize = glm::vec2(r.colorRT->width(), r.colorRT->height());
         glm::uvec3 gridSize = glm::uvec3(r.clusterGridSizeX, r.clusterGridSizeY, r.clusterGridSizeZ);
         uint pointLightCount = r.currentScene->pointLights.size();
 
@@ -301,8 +300,9 @@ public:
     void execute() override {
         auto& r = *renderer;
 
-        auto drawableSize = r.swapchain->drawableSize();
-        glm::vec2 screenSize = glm::vec2(drawableSize.width, drawableSize.height);
+        auto w = r.shadowRT->width();
+        auto h = r.shadowRT->height();
+        glm::vec2 screenSize = glm::vec2(w, h);
 
         auto timedComputeDesc = makeTimedComputeDesc(true, false);
         auto encoder = r.currentCommandBuffer->computeCommandEncoder(timedComputeDesc.get());
@@ -315,7 +315,7 @@ public:
         encoder->setBuffer(r.pointLightBuffer.get(), 0, 2);
         encoder->setBytes(&screenSize, sizeof(glm::vec2), 3);
         encoder->setAccelerationStructure(r.TLASBuffers[r.currentFrameInFlight].get(), 4);
-        encoder->dispatchThreads(MTL::Size(drawableSize.width, drawableSize.height, 1), MTL::Size(8, 8, 1));
+        encoder->dispatchThreads(MTL::Size(w, h, 1), MTL::Size(8, 8, 1));
         encoder->endEncoding();
 
         // Generate mipmaps for shadow texture (restored while bisecting the
@@ -327,7 +327,7 @@ public:
 
         // Traffic: depth read (4B) + normal read (8B) + shadow write (4B) per pixel,
         // plus mip chain regeneration (~5/3 of the base level)
-        uint64_t px = uint64_t(drawableSize.width) * drawableSize.height;
+        uint64_t px = uint64_t(w) * h;
         addTrafficEstimate(px * (4 + 8 + 4) + px * 4 * 5 / 3);
     }
 };
@@ -771,8 +771,12 @@ public:
     void execute() override {
         auto& r = *renderer;
 
-        auto drawableSize = r.swapchain->drawableSize();
-        glm::vec2 screenSize = glm::vec2(drawableSize.width, drawableSize.height);
+        // screenUV in the fragment shader is position / screenSize; position is in
+        // framebuffer pixels, so screenSize must be the framebuffer's size — NOT the
+        // live drawable size, which can drift after a window resize/DPI change and
+        // then mismaps every screen-space texture lookup (shadow, AO, cluster tiles):
+        // with a repeat sampler that shows up as tiled/compressed shadows.
+        glm::vec2 screenSize = glm::vec2(r.colorRT->width(), r.colorRT->height());
         glm::uvec3 gridSize = glm::uvec3(r.clusterGridSizeX, r.clusterGridSizeY, r.clusterGridSizeZ);
         auto time = (float)SDL_GetTicks() / 1000.0f;
 
