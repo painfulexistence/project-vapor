@@ -1,7 +1,7 @@
 #include <metal_stdlib>
 #include <metal_raytracing>
-#include "gibs_common.metal"
-#include "3d_common.metal"
+#include "Res/shaders/gibs_common.metal"
+#include "Res/shaders/3d_common.metal"
 using namespace metal;
 
 // ============================================================================

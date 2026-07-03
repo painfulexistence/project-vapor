@@ -1,5 +1,5 @@
 #include <metal_stdlib>
-#include "gibs_common.metal"
+#include "Res/shaders/gibs_common.metal"
 using namespace metal;
 
 // ============================================================================
