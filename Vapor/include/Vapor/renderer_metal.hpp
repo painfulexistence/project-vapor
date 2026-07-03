@@ -316,7 +316,7 @@ class Renderer_Metal final : public Renderer {// Must be public or factory funct
     friend class WorldCanvasPass;
     friend class PSSMShadowPass;
     friend class PSSMResolvePass;
-    friend     friend class StochasticPointShadowPass;
+    friend class StochasticPointShadowPass;
     friend class PointShadowTemporalPass;
     friend class EquirectToCubemapPass;
 
