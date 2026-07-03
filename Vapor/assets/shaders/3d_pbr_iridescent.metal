@@ -321,12 +321,13 @@ fragment float4 fragmentMain(
             pointLights[li], norm, T, B, viewDir, surf, in.worldPosition.xyz, NdotV, iridF);
     }
 
-    // IBL
+    // IBL — screen-space AO attenuates ambient/indirect light only
+    float screenAO = texAO.sample(s, screenUV).r;
     if (material.iblEnabled > 0.5) {
         result += CalculateIBL_ir(norm, viewDir, surf, iridF,
-                                   irradianceMap, prefilterMap, brdfLUT);
+                                   irradianceMap, prefilterMap, brdfLUT) * screenAO;
     } else {
-        result += float3(0.03) * surf.ao * surf.color;
+        result += float3(0.03) * surf.ao * surf.color * screenAO;
     }
 
     result += surf.emission;

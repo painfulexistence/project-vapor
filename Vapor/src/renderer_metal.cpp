@@ -802,6 +802,7 @@ public:
         encoder->setFragmentBuffer(r.rectLightBuffer.get(), 0, 7);
         uint32_t rectLightCount = static_cast<uint32_t>(r.currentScene->rectLights.size());
         encoder->setFragmentBytes(&rectLightCount, sizeof(uint32_t), 8);
+        encoder->setFragmentTexture(r.aoRT.get(), 6); // denoised AO, attenuates the IBL/ambient term
         auto* vidTex = r.rectLightVideoTexture
                            ? r.rectLightVideoTexture.get()
                            : r.getTexture(r.defaultAlbedoTexture).get();
@@ -5501,6 +5502,9 @@ void Renderer_Metal::renderToTexture(
     encoder->setFragmentBuffer(rectLightBuffer.get(), 0, 7);
     uint32_t rtRectLightCount = static_cast<uint32_t>(scene->rectLights.size());
     encoder->setFragmentBytes(&rtRectLightCount, sizeof(uint32_t), 8);
+    // Main-view AO is the wrong view for a render texture, but the shader
+    // requires the binding; misaligned ambient attenuation is acceptable here
+    encoder->setFragmentTexture(aoRT.get(), 6);
     encoder->setFragmentTexture(
         rectLightVideoTexture ? rectLightVideoTexture.get() : getTexture(defaultAlbedoTexture).get(), 11
     );
