@@ -2662,9 +2662,11 @@ public:
         encoder->setBuffer(gibsManager->getCellHeadBuffer(), 0, 4);
         encoder->setBuffer(gibsManager->getSurfelNextBuffer(), 0, 5);
 
-        uint32_t dispatchX = (static_cast<uint32_t>(screenSize.x) + 7) / 8;
-        uint32_t dispatchY = (static_cast<uint32_t>(screenSize.y) + 7) / 8;
-        encoder->dispatchThreadgroups(MTL::Size(dispatchX, dispatchY, 1), MTL::Size(8, 8, 1));
+        // Half-res dispatch; the kernel's per-frame 2x2 jitter covers the full
+        // screen every 4 frames (quarter-rate generation)
+        uint32_t halfW = (static_cast<uint32_t>(screenSize.x) + 1) / 2;
+        uint32_t halfH = (static_cast<uint32_t>(screenSize.y) + 1) / 2;
+        encoder->dispatchThreadgroups(MTL::Size((halfW + 7) / 8, (halfH + 7) / 8, 1), MTL::Size(8, 8, 1));
         encoder->endEncoding();
     }
 
@@ -2730,9 +2732,11 @@ public:
         if (!r.gibsEnabled || !gibsManager || !r.surfelRaytracingSimplePipeline) return;
         const auto& gibsData = gibsManager->getGIBSData();
 
-        // Staggered updates: refresh 1/4 of the surfel pool per frame; temporal
-        // blending integrates the rest. Cuts per-frame ray cost by 4x.
-        constexpr uint32_t UPDATE_INTERVAL = 4;
+        // Staggered updates: refresh 1/8 of the surfel pool per frame; temporal
+        // blending integrates the rest. GI reacts over ~8 frames (~130ms), which
+        // is imperceptible for mostly-static lighting and halves the ray cost
+        // versus interval 4.
+        constexpr uint32_t UPDATE_INTERVAL = 8;
 
         SurfelRaytracingParams params;
         params.surfelOffset = 0;

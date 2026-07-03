@@ -34,13 +34,18 @@ kernel void surfelGeneration(
     uint2 gid [[thread_position_in_grid]],
     uint2 gridSize [[threads_per_grid]]
 ) {
+    // Quarter-rate generation: the dispatch is half-res in each dimension and a
+    // per-frame 2x2 jitter walks the remaining pixels, covering the full screen
+    // every 4 frames at 1/4 the per-frame cost.
+    uint2 pixel = gid * 2 + uint2(params.frameIndex & 1u, (params.frameIndex >> 1) & 1u);
+
     // Bounds check
-    if (gid.x >= uint(params.screenSize.x) || gid.y >= uint(params.screenSize.y)) {
+    if (pixel.x >= uint(params.screenSize.x) || pixel.y >= uint(params.screenSize.y)) {
         return;
     }
 
     // Read depth
-    float depth = depthTexture.read(gid).r;
+    float depth = depthTexture.read(pixel).r;
 
     // Skip sky pixels (depth = 1.0 or very close)
     if (depth > 0.9999) {
@@ -48,7 +53,7 @@ kernel void surfelGeneration(
     }
 
     // Reconstruct world position
-    float3 worldPos = reconstructWorldPositionFromPixel(gid, depth, params.screenSize, params.invViewProj);
+    float3 worldPos = reconstructWorldPositionFromPixel(pixel, depth, params.screenSize, params.invViewProj);
 
     // Check world bounds
     if (!isInWorldBounds(worldPos, gibs)) {
@@ -56,19 +61,19 @@ kernel void surfelGeneration(
     }
 
     // Read normal (normalRT stores signed world-space normals, same as the AO kernels)
-    float3 rawNormal = normalTexture.read(gid).xyz;
+    float3 rawNormal = normalTexture.read(pixel).xyz;
     if (length(rawNormal) < 0.5) {
         return; // cleared / invalid pixel
     }
     float3 normal = normalize(rawNormal);
 
     // Read albedo
-    float4 albedoSample = albedoTexture.read(gid);
+    float4 albedoSample = albedoTexture.read(pixel);
     float3 albedo = albedoSample.rgb;
 
     // Stochastic acceptance based on density
     // Design Decision: Probabilistic generation for uniform distribution
-    uint seed = temporalSeed(gid, params.frameIndex);
+    uint seed = temporalSeed(pixel, params.frameIndex);
     float rand = randomFloat(seed);
 
     // Density modulation based on:
