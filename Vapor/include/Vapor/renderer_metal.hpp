@@ -64,15 +64,13 @@ class PSSMResolvePass;
 class StochasticPointShadowPass;
 class PointShadowTemporalPass;
 
-// GIBS (Global Illumination Based on Surfels) forward declarations
-namespace Vapor {
-    class GIBSManager;
-    class SurfelGenerationPass;
-    class SurfelHashBuildPass;
-    class SurfelRaytracingPass;
-    class GIBSTemporalPass;
-    class GIBSSamplePass;
-}
+// GIBS forward declarations
+namespace Vapor { class GIBSManager; }
+class SurfelGenerationPass;
+class SurfelHashBuildPass;
+class SurfelRaytracingPass;
+class GIBSTemporalPass;
+class GIBSSamplePass;
 
 struct GpuPassTiming {
     std::string name;

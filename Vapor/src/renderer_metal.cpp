@@ -44,7 +44,6 @@ using namespace Vapor;
 
 // GIBS (Global Illumination Based on Surfels)
 #include "Vapor/gibs_manager.hpp"
-#include "Vapor/gibs_passes.hpp"
 
 // Pre-pass: Renders depth and normals
 class PrePass : public RenderPass {
@@ -2616,6 +2615,278 @@ public:
     }
 };
 
+// ============================================================================
+// GIBS (Global Illumination Based on Surfels) Passes
+// ============================================================================
+
+class SurfelGenerationPass : public RenderPass {
+public:
+    SurfelGenerationPass(Renderer_Metal* renderer, Vapor::GIBSManager* gm)
+        : RenderPass(renderer), gibsManager(gm) {}
+
+    const char* getName() const override { return "SurfelGenerationPass"; }
+
+    void execute() override {
+        if (!gibsManager) return;
+
+        auto& r = *renderer;
+        auto drawableSize = r.swapchain->drawableSize();
+        glm::vec2 screenSize(drawableSize.width, drawableSize.height);
+
+        SurfelGenerationParams params;
+        params.invViewProj = gibsManager->getGIBSData().invViewProj;
+        params.screenSize = screenSize;
+        params.surfelRadius = gibsManager->getGIBSData().surfelRadius;
+        params.densityThreshold = 0.01f;
+        params.maxNewSurfels = gibsManager->getMaxSurfels() / 10;
+        params.frameIndex = r.frameNumber;
+
+        auto encoder = r.currentCommandBuffer->computeCommandEncoder();
+        encoder->setLabel(NS::String::string("Surfel Generation", NS::UTF8StringEncoding));
+        encoder->setComputePipelineState(r.surfelGenerationPipeline.get());
+
+        encoder->setTexture(r.depthStencilRT.get(), 0);
+        encoder->setTexture(r.normalRT.get(), 1);
+        encoder->setTexture(r.albedoRT.get(), 2);
+
+        encoder->setBuffer(gibsManager->getSurfelBuffer(), 0, 0);
+        encoder->setBuffer(gibsManager->getCounterBuffer(), 0, 1);
+        encoder->setBuffer(gibsManager->getGIBSDataBuffer(r.currentFrameInFlight), 0, 2);
+        encoder->setBytes(&params, sizeof(params), 3);
+
+        uint32_t dispatchX = (static_cast<uint32_t>(screenSize.x) + 7) / 8;
+        uint32_t dispatchY = (static_cast<uint32_t>(screenSize.y) + 7) / 8;
+        encoder->dispatchThreadgroups(MTL::Size(dispatchX, dispatchY, 1), MTL::Size(8, 8, 1));
+        encoder->endEncoding();
+    }
+
+private:
+    Vapor::GIBSManager* gibsManager;
+};
+
+class SurfelHashBuildPass : public RenderPass {
+public:
+    SurfelHashBuildPass(Renderer_Metal* renderer, Vapor::GIBSManager* gm)
+        : RenderPass(renderer), gibsManager(gm) {}
+
+    const char* getName() const override { return "SurfelHashBuildPass"; }
+
+    void execute() override {
+        if (!gibsManager) return;
+
+        auto& r = *renderer;
+        uint32_t totalCells = gibsManager->getTotalCells();
+        uint32_t activeSurfels = gibsManager->getActiveSurfelCount();
+        if (activeSurfels == 0) activeSurfels = 1;
+
+        // Step 1: Clear cell counts
+        {
+            auto encoder = r.currentCommandBuffer->computeCommandEncoder();
+            encoder->setLabel(NS::String::string("Clear Cell Counts", NS::UTF8StringEncoding));
+            encoder->setComputePipelineState(r.surfelClearCellsPipeline.get());
+            encoder->setBuffer(gibsManager->getCellCountBuffer(), 0, 0);
+            encoder->setBuffer(gibsManager->getGIBSDataBuffer(r.currentFrameInFlight), 0, 1);
+            uint32_t threadGroups = (totalCells + 255) / 256;
+            encoder->dispatchThreadgroups(MTL::Size(threadGroups, 1, 1), MTL::Size(256, 1, 1));
+            encoder->endEncoding();
+        }
+
+        // Step 2: Count surfels per cell
+        {
+            auto encoder = r.currentCommandBuffer->computeCommandEncoder();
+            encoder->setLabel(NS::String::string("Count Surfels Per Cell", NS::UTF8StringEncoding));
+            encoder->setComputePipelineState(r.surfelCountPerCellPipeline.get());
+            encoder->setBuffer(gibsManager->getSurfelBuffer(), 0, 0);
+            encoder->setBuffer(gibsManager->getCellCountBuffer(), 0, 1);
+            encoder->setBuffer(gibsManager->getGIBSDataBuffer(r.currentFrameInFlight), 0, 2);
+            uint32_t threadGroups = (activeSurfels + 255) / 256;
+            encoder->dispatchThreadgroups(MTL::Size(threadGroups, 1, 1), MTL::Size(256, 1, 1));
+            encoder->endEncoding();
+        }
+
+        // Step 3: Prefix sum
+        {
+            auto encoder = r.currentCommandBuffer->computeCommandEncoder();
+            encoder->setLabel(NS::String::string("Prefix Sum Cells", NS::UTF8StringEncoding));
+            encoder->setComputePipelineState(r.surfelPrefixSumPipeline.get());
+            encoder->setBuffer(gibsManager->getCellCountBuffer(), 0, 0);
+            encoder->setBuffer(gibsManager->getCellBuffer(), 0, 1);
+            encoder->setBuffer(gibsManager->getGIBSDataBuffer(r.currentFrameInFlight), 0, 2);
+            encoder->dispatchThreadgroups(MTL::Size(1, 1, 1), MTL::Size(1, 1, 1));
+            encoder->endEncoding();
+        }
+
+        // Step 4: Scatter surfels
+        {
+            auto encoder = r.currentCommandBuffer->computeCommandEncoder();
+            encoder->setLabel(NS::String::string("Scatter Surfels", NS::UTF8StringEncoding));
+            encoder->setComputePipelineState(r.surfelScatterPipeline.get());
+            encoder->setBuffer(gibsManager->getSurfelBuffer(), 0, 0);
+            encoder->setBuffer(gibsManager->getSurfelBufferSorted(), 0, 1);
+            encoder->setBuffer(gibsManager->getCellBuffer(), 0, 2);
+            encoder->setBuffer(gibsManager->getCellCountBuffer(), 0, 3);
+            encoder->setBuffer(gibsManager->getGIBSDataBuffer(r.currentFrameInFlight), 0, 4);
+            uint32_t threadGroups = (activeSurfels + 255) / 256;
+            encoder->dispatchThreadgroups(MTL::Size(threadGroups, 1, 1), MTL::Size(256, 1, 1));
+            encoder->endEncoding();
+        }
+    }
+
+private:
+    Vapor::GIBSManager* gibsManager;
+};
+
+class SurfelRaytracingPass : public RenderPass {
+public:
+    SurfelRaytracingPass(Renderer_Metal* renderer, Vapor::GIBSManager* gm)
+        : RenderPass(renderer), gibsManager(gm) {}
+
+    const char* getName() const override { return "SurfelRaytracingPass"; }
+
+    void execute() override {
+        if (!gibsManager) return;
+
+        auto& r = *renderer;
+        const auto& gibsData = gibsManager->getGIBSData();
+
+        SurfelRaytracingParams params;
+        params.surfelOffset = 0;
+        params.surfelCount = gibsManager->getActiveSurfelCount();
+        params.raysPerSurfel = gibsManager->getRaysPerSurfel();
+        params.frameIndex = r.frameNumber;
+        params.rayBias = gibsData.rayBias;
+        params.rayMaxDistance = gibsData.rayMaxDistance;
+
+        if (params.surfelCount == 0) return;
+
+        auto encoder = r.currentCommandBuffer->computeCommandEncoder();
+        encoder->setLabel(NS::String::string("Surfel Raytracing", NS::UTF8StringEncoding));
+
+        bool useRT = r.m_supportsRaytracing && r.TLASBuffers[r.currentFrameInFlight];
+        encoder->setComputePipelineState(useRT ? r.surfelRaytracingPipeline.get()
+                                                : r.surfelRaytracingSimplePipeline.get());
+
+        encoder->setBuffer(gibsManager->getSurfelBufferSorted(), 0, 0);
+        encoder->setBuffer(gibsManager->getCellBuffer(), 0, 1);
+        encoder->setBuffer(gibsManager->getGIBSDataBuffer(r.currentFrameInFlight), 0, 2);
+        encoder->setBytes(&params, sizeof(params), 3);
+
+        if (useRT) {
+            encoder->setAccelerationStructure(r.TLASBuffers[r.currentFrameInFlight].get(), 4);
+        }
+
+        uint32_t threadGroups = (params.surfelCount + 63) / 64;
+        encoder->dispatchThreadgroups(MTL::Size(threadGroups, 1, 1), MTL::Size(64, 1, 1));
+        encoder->endEncoding();
+    }
+
+private:
+    Vapor::GIBSManager* gibsManager;
+};
+
+class GIBSTemporalPass : public RenderPass {
+public:
+    GIBSTemporalPass(Renderer_Metal* renderer, Vapor::GIBSManager* gm)
+        : RenderPass(renderer), gibsManager(gm) {}
+
+    const char* getName() const override { return "GIBSTemporalPass"; }
+
+    void execute() override {
+        if (!gibsManager) return;
+
+        auto& r = *renderer;
+        uint32_t activeSurfels = gibsManager->getActiveSurfelCount();
+        if (activeSurfels == 0) return;
+
+        auto encoder = r.currentCommandBuffer->computeCommandEncoder();
+        encoder->setLabel(NS::String::string("GIBS Temporal", NS::UTF8StringEncoding));
+        encoder->setComputePipelineState(r.gibsTemporalPipeline.get());
+
+        encoder->setBuffer(gibsManager->getSurfelBufferSorted(), 0, 0);
+        encoder->setBuffer(gibsManager->getGIBSDataBuffer(r.currentFrameInFlight), 0, 1);
+
+        uint32_t threadGroups = (activeSurfels + 255) / 256;
+        encoder->dispatchThreadgroups(MTL::Size(threadGroups, 1, 1), MTL::Size(256, 1, 1));
+        encoder->endEncoding();
+
+        gibsManager->swapHistoryBuffers();
+    }
+
+private:
+    Vapor::GIBSManager* gibsManager;
+};
+
+class GIBSSamplePass : public RenderPass {
+public:
+    GIBSSamplePass(Renderer_Metal* renderer, Vapor::GIBSManager* gm)
+        : RenderPass(renderer), gibsManager(gm) {}
+
+    const char* getName() const override { return "GIBSSamplePass"; }
+
+    void execute() override {
+        if (!gibsManager) return;
+
+        auto& r = *renderer;
+        const auto& gibsData = gibsManager->getGIBSData();
+
+        auto drawableSize = r.swapchain->drawableSize();
+        glm::vec2 screenSize(drawableSize.width, drawableSize.height);
+        float scale = gibsManager->getResolutionScale();
+        glm::vec2 giResolution = screenSize * scale;
+
+        GIBSSampleParams params;
+        params.invViewProj = gibsData.invViewProj;
+        params.screenSize = screenSize;
+        params.giResolution = giResolution;
+        params.sampleRadius = static_cast<float>(gibsData.sampleRadius) * gibsData.cellSize;
+        params.maxSamples = gibsData.maxSurfelsPerPixel;
+        params.normalWeight = 1.0f;
+        params.distanceWeight = 1.0f;
+
+        // Sample at GI resolution
+        {
+            auto encoder = r.currentCommandBuffer->computeCommandEncoder();
+            encoder->setLabel(NS::String::string("GIBS Sample", NS::UTF8StringEncoding));
+            encoder->setComputePipelineState(r.gibsSamplePipeline.get());
+
+            encoder->setTexture(r.depthStencilRT.get(), 0);
+            encoder->setTexture(r.normalRT.get(), 1);
+            encoder->setTexture(gibsManager->getGIResultTexture(), 2);
+
+            encoder->setBuffer(gibsManager->getSurfelBufferSorted(), 0, 0);
+            encoder->setBuffer(gibsManager->getCellBuffer(), 0, 1);
+            encoder->setBuffer(gibsManager->getGIBSDataBuffer(r.currentFrameInFlight), 0, 2);
+            encoder->setBytes(&params, sizeof(params), 3);
+
+            uint32_t dispatchX = (static_cast<uint32_t>(giResolution.x) + 7) / 8;
+            uint32_t dispatchY = (static_cast<uint32_t>(giResolution.y) + 7) / 8;
+            encoder->dispatchThreadgroups(MTL::Size(dispatchX, dispatchY, 1), MTL::Size(8, 8, 1));
+            encoder->endEncoding();
+        }
+
+        // Upsample if needed
+        if (scale < 1.0f) {
+            auto encoder = r.currentCommandBuffer->computeCommandEncoder();
+            encoder->setLabel(NS::String::string("GIBS Bilateral Upsample", NS::UTF8StringEncoding));
+            encoder->setComputePipelineState(r.gibsUpsamplePipeline.get());
+
+            encoder->setTexture(gibsManager->getGIResultTexture(), 0);
+            encoder->setTexture(r.depthStencilRT.get(), 1);
+            encoder->setTexture(r.normalRT.get(), 2);
+            encoder->setTexture(gibsManager->getGIHistoryTexture(), 3);
+            encoder->setBytes(&params, sizeof(params), 0);
+
+            uint32_t dispatchX = (static_cast<uint32_t>(screenSize.x) + 7) / 8;
+            uint32_t dispatchY = (static_cast<uint32_t>(screenSize.y) + 7) / 8;
+            encoder->dispatchThreadgroups(MTL::Size(dispatchX, dispatchY, 1), MTL::Size(8, 8, 1));
+            encoder->endEncoding();
+        }
+    }
+
+private:
+    Vapor::GIBSManager* gibsManager;
+};
+
 auto createRendererMetal() -> std::unique_ptr<Renderer> {
     return std::make_unique<Renderer_Metal>();
 }
@@ -2695,11 +2966,11 @@ auto Renderer_Metal::init(SDL_Window* window) -> void {
 
     // GIBS (Global Illumination Based on Surfels) passes
     if (gibsEnabled && gibsManager) {
-        graph.addPass(std::make_unique<Vapor::SurfelGenerationPass>(this, gibsManager.get()));
-        graph.addPass(std::make_unique<Vapor::SurfelHashBuildPass>(this, gibsManager.get()));
-        graph.addPass(std::make_unique<Vapor::SurfelRaytracingPass>(this, gibsManager.get()));
-        graph.addPass(std::make_unique<Vapor::GIBSTemporalPass>(this, gibsManager.get()));
-        graph.addPass(std::make_unique<Vapor::GIBSSamplePass>(this, gibsManager.get()));
+        graph.addPass(std::make_unique<SurfelGenerationPass>(this, gibsManager.get()));
+        graph.addPass(std::make_unique<SurfelHashBuildPass>(this, gibsManager.get()));
+        graph.addPass(std::make_unique<SurfelRaytracingPass>(this, gibsManager.get()));
+        graph.addPass(std::make_unique<GIBSTemporalPass>(this, gibsManager.get()));
+        graph.addPass(std::make_unique<GIBSSamplePass>(this, gibsManager.get()));
     }
 
     graph.addPass(std::make_unique<MainRenderPass>(this));
