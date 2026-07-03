@@ -2540,7 +2540,11 @@ auto Renderer_Metal::createResources() -> void {
     normalResolvePipeline = createComputePipeline("shaders/3d_normal_resolve.metal");
     velocityPipeline = createComputePipeline("shaders/3d_velocity.metal");
     if (m_supportsRaytracing) raytraceShadowPipeline = createComputePipeline("shaders/3d_raytrace_shadow.metal");
-    if (m_supportsRaytracing) raytraceAOPipeline = createComputePipeline("shaders/3d_raytrace_ao.metal");
+    // AO raygen: 3d_ssao.metal (screen-space) and 3d_raytrace_ao.metal (ray-traced)
+    // are drop-in interchangeable here; both feed the temporal + à-trous chain.
+    // SSAO is the current default — RT AO works but reads as near-blank in this
+    // scene (1.5m ray cap rarely hits anything outside tight corners).
+    if (m_supportsRaytracing) raytraceAOPipeline = createComputePipeline("shaders/3d_ssao.metal");
     if (m_supportsRaytracing) aoTemporalPipeline = createComputePipeline("shaders/3d_ao_temporal.metal");
     if (m_supportsRaytracing) aoDenoisePipeline = createComputePipeline("shaders/3d_ao_denoise.metal");
     atmospherePipeline =
