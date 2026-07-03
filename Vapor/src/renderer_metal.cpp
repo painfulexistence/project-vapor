@@ -20,6 +20,7 @@ using namespace Vapor;
 #define GLM_FORCE_LEFT_HANDED
 #include "backends/imgui_impl_metal.h"
 #include "backends/imgui_impl_sdl3.h"
+#include <cmath>
 #include <cstdlib>
 #include <ctime>
 #include <functional>
@@ -6461,6 +6462,22 @@ extern "C" auto getMetalDevice(void* renderer) -> void* {
     }
     return nullptr;
 }
+
+// Inverse-transpose of the model's upper 3x3 for transforming normals.
+// Must guard against singular matrices (e.g. a cube flattened to a plane by a
+// zero scale on one axis): glm::inverse would emit inf/NaN, which poisons the
+// normal RT and in turn every consumer — shadow ray origins become NaN and
+// whole instances lose their shadows. The old in-shader inverse() helper had
+// this guard (det < 1e-6 → identity); the CPU precompute must keep it.
+static glm::mat4 computeNormalMatrix(const glm::mat4& model) {
+    glm::mat3 m3(model);
+    float det = glm::determinant(m3);
+    if (std::abs(det) < 1e-6f) {
+        return glm::mat4(1.0f);
+    }
+    return glm::mat4(glm::transpose(glm::inverse(m3)));
+}
+
 void Renderer_Metal::draw(entt::registry& registry, std::shared_ptr<Scene> scene, Camera& camera) {
     // Build ECS instance data; draw(scene, camera) will clear instances/instanceBatches from Nodes,
     // so store them here and inject after Node traversal via pendingEcsInstances.
@@ -6494,7 +6511,7 @@ void Renderer_Metal::draw(entt::registry& registry, std::shared_ptr<Scene> scene
             auto instanceIdx = static_cast<uint32_t>(pendingEcsInstances.size());
             pendingEcsInstances.push_back({
                 .model = worldMat,
-                .normalMatrix = glm::mat4(glm::transpose(glm::inverse(glm::mat3(worldMat)))),
+                .normalMatrix = computeNormalMatrix(worldMat),
                 .color = glm::vec4(1.0f),
                 .vertexOffset = mesh->vertexOffset,
                 .indexOffset = mesh->indexOffset,
@@ -6551,7 +6568,7 @@ void Renderer_Metal::draw(entt::registry& registry, std::shared_ptr<Scene> scene
         auto instanceIdx = static_cast<uint32_t>(pendingEcsInstances.size());
         pendingEcsInstances.push_back({
             .model = worldMat,
-            .normalMatrix = glm::mat4(glm::transpose(glm::inverse(glm::mat3(worldMat)))),
+            .normalMatrix = computeNormalMatrix(worldMat),
             .color = glm::vec4(1.0f),
             .vertexOffset = mesh->vertexOffset,
             .indexOffset = mesh->indexOffset,
