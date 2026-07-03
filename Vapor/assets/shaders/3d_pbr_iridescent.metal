@@ -237,6 +237,7 @@ fragment float4 fragmentMain(
     texture2d<float, access::sample> texRoughness [[texture(3)]],
     texture2d<float, access::sample> texOcclusion [[texture(4)]],
     texture2d<float, access::sample> texEmissive  [[texture(5)]],
+    texture2d<float, access::sample> texAO        [[texture(6)]],
     texture2d<float, access::sample> texShadow    [[texture(7)]],
     texturecube<float, access::sample> irradianceMap [[texture(8)]],
     texturecube<float, access::sample> prefilterMap  [[texture(9)]],
