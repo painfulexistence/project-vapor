@@ -660,6 +660,8 @@ protected:
     std::vector<NS::SharedPtr<MTL::Buffer>> lightScatteringDataBuffers;
     NS::SharedPtr<MTL::Texture> lightScatteringRT;// Half-resolution scattering texture
     bool lightScatteringEnabled = true;
+    // AO toggle: skips the whole AO chain and binds a white texture in its place
+    bool aoEnabled = true;
     LightScatteringData lightScatteringSettings;
 
     // Volumetric Fog resources

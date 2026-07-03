@@ -328,6 +328,8 @@ public:
     void execute() override {
         auto& r = *renderer;
 
+        if (!r.aoEnabled) return;
+
         auto timedComputeDesc = makeTimedComputeDesc(true, true);
         auto encoder = r.currentCommandBuffer->computeCommandEncoder(timedComputeDesc.get());
         encoder->setComputePipelineState(r.raytraceAOPipeline.get());
@@ -362,7 +364,7 @@ public:
     void execute() override {
         auto& r = *renderer;
 
-        if (!r.aoTemporalPipeline) return;
+        if (!r.aoTemporalPipeline || !r.aoEnabled) return;
 
         glm::mat4 curView = r.currentCamera->getViewMatrix();
         if (!r.prevViewValid) {
@@ -415,7 +417,7 @@ public:
     void execute() override {
         auto& r = *renderer;
 
-        if (!r.aoDenoisePipeline) return;
+        if (!r.aoDenoisePipeline || !r.aoEnabled) return;
 
         auto w = r.aoRT->width();
         auto h = r.aoRT->height();
@@ -802,7 +804,8 @@ public:
         encoder->setFragmentBuffer(r.rectLightBuffer.get(), 0, 7);
         uint32_t rectLightCount = static_cast<uint32_t>(r.currentScene->rectLights.size());
         encoder->setFragmentBytes(&rectLightCount, sizeof(uint32_t), 8);
-        encoder->setFragmentTexture(r.aoRT.get(), 6); // denoised AO, attenuates the IBL/ambient term
+        // Denoised AO attenuates the IBL/ambient term; white = AO off
+        encoder->setFragmentTexture(r.aoEnabled ? r.aoRT.get() : r.batch2DWhiteTexture.get(), 6);
         auto* vidTex = r.rectLightVideoTexture
                            ? r.rectLightVideoTexture.get()
                            : r.getTexture(r.defaultAlbedoTexture).get();
@@ -4734,6 +4737,13 @@ auto Renderer_Metal::draw(std::shared_ptr<Scene> scene, Camera& camera) -> void 
             ImGui::TreePop();
         }
 
+        if (ImGui::TreeNode("Ambient Occlusion")) {
+            ImGui::Separator();
+            ImGui::Checkbox("Enabled", &aoEnabled);
+            ImGui::TextDisabled("Attenuates IBL/ambient only; raygen kernel set at pipeline creation");
+            ImGui::TreePop();
+        }
+
         if (ImGui::TreeNode("Light Scattering (God Rays)")) {
             ImGui::Separator();
             ImGui::Checkbox("Enabled", &lightScatteringEnabled);
@@ -5504,7 +5514,7 @@ void Renderer_Metal::renderToTexture(
     encoder->setFragmentBytes(&rtRectLightCount, sizeof(uint32_t), 8);
     // Main-view AO is the wrong view for a render texture, but the shader
     // requires the binding; misaligned ambient attenuation is acceptable here
-    encoder->setFragmentTexture(aoRT.get(), 6);
+    encoder->setFragmentTexture(aoEnabled ? aoRT.get() : batch2DWhiteTexture.get(), 6);
     encoder->setFragmentTexture(
         rectLightVideoTexture ? rectLightVideoTexture.get() : getTexture(defaultAlbedoTexture).get(), 11
     );
