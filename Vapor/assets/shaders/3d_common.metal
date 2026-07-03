@@ -176,6 +176,25 @@ float3 sampleCosineWeightedHemisphere(float2 s, float3 normal) {
     return tangent * x + bitangent * y + normal * z;
 }
 
+// Octahedral unit-vector encoding — packs a normal into 2 floats so denoise
+// chains can carry it in a texture channel instead of re-reading a normal RT.
+float2 octEncode(float3 n) {
+    n /= (abs(n.x) + abs(n.y) + abs(n.z));
+    float2 e = n.xy;
+    if (n.z < 0.0) {
+        e = (1.0 - abs(n.yx)) * select(float2(-1.0), float2(1.0), e >= 0.0);
+    }
+    return e;
+}
+
+float3 octDecode(float2 e) {
+    float3 n = float3(e, 1.0 - abs(e.x) - abs(e.y));
+    if (n.z < 0.0) {
+        n.xy = (1.0 - abs(n.yx)) * select(float2(-1.0), float2(1.0), n.xy >= 0.0);
+    }
+    return normalize(n);
+}
+
 float3 linearToSRGB(float3 color) {
     // return pow(linear, float3(INV_GAMMA));
     return mix(

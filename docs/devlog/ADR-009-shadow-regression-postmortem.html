@@ -1,0 +1,76 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>ADR-009: Shadow Regression Postmortem — Project Vapor</title>
+  <link rel="stylesheet" href="../styles/global.css">
+  <style>
+    .page-header { margin-bottom: 32px; }
+    .page-header h1 { font-size: 20px; }
+    h2 { font-size: 16px; margin: 36px 0 14px; }
+    h3 { font-size: 14px; margin: 24px 0 10px; }
+    p { margin-bottom: 14px; }
+    hr { margin: 36px 0; }
+  </style>
+</head>
+<body>
+  <nav>
+    <div class="nav-inner">
+      <a class="nav-logo" href="../index.html">Project Vapor</a>
+      <a href="../documentation/index.html">Docs</a>
+      <a href="index.html" class="active">Devlog</a>
+      <a href="../demo/index.html">Demo</a>
+      <a href="https://github.com/painfulexistence/project-vapor" target="_blank">GitHub ↗</a>
+    </div>
+  </nav>
+  <main>
+    <div class="page-header">
+      <div class="eyebrow">
+      <a href="index.html">Devlog</a> / ADR-009</div>
+      <h1>ADR-009: Shadow Regression Postmortem &amp; Verification Discipline</h1>
+      <div class="meta-row">
+        <span>2026-07-03</span>
+        <span><span class="badge badge-ok">Adopted</span></span>
+      </div>
+    </div>
+
+    <h2>What happened</h2>
+    <p>A batch of rendering changes landed together on one branch: per-instance normal-matrix precompute, material-ID varyings, TLAS rebuild skipping, any-hit shadow rays, a temporal + à-trous AO denoise chain at half resolution, and shadow texture format/mip changes. Some time later, ray-traced shadows broke: coverage shrank, unexplained bright bands appeared, and the shadow map content looked compressed.</p>
+    <p>The debugging that followed consumed far more time than the features had. Suspects were reverted one at a time — shadow texture format, mip chain, TLAS refit — with no effect, because <strong>the artifact had multiple contributing causes stacked on top of each other</strong>, and every revert tested only one variable against a background of five other changed ones.</p>
+
+    <h2>What was actually wrong</h2>
+    <h3>Real bugs found along the way</h3>
+    <ul>
+      <li><strong>Unguarded CPU normal-matrix inverse.</strong> The in-shader <code>inverse()</code> helper returns identity when <code>|det| &lt; 1e-6</code>; the CPU precompute that replaced it called <code>glm::inverse</code> unguarded. Any instance with a degenerate model matrix (a cube flattened into a floor by a zero scale axis) produced inf/NaN normals, which poisoned the normal RT and made shadow-ray origins NaN — whole instances lost their shadows. <em>Lesson: when moving a computation across the CPU/GPU boundary, move its guards with it.</em></li>
+      <li><strong>Uninitialized <code>MTLAccelerationStructureInstanceDescriptor</code> fields.</strong> Only transform, index, and mask were assigned; <code>options</code> and <code>intersectionFunctionTableOffset</code> carried stack garbage since the RT code was first written. Garbage option bits (NonOpaque, winding flags) can make the intersector misclassify whole instances — nondeterministically, since stack contents shift between builds. This is why the artifact appeared "suddenly" after an unrelated rebuild. <em>Lesson: zero-initialize every GPU-facing struct; a POD stack local is not zeroed.</em></li>
+      <li><strong>The AO pipeline had never been visible.</strong> The post-process shader sampled <code>texAO</code> and never used the value — dead code from an old experiment. Every AO change was invisible until the sample was wired to the IBL/ambient term.</li>
+    </ul>
+    <h3>Falsely accused</h3>
+    <ul>
+      <li>shadowRT's R8 format and mip-chain removal (all consumers read <code>.r</code> at LOD 0 — reverted during bisection, exonerated)</li>
+      <li>1×1-threadgroup dispatch fixes (semantically identical thread grids)</li>
+      <li>Shadow coverage "shrinking" under a near-vertical sun — physically correct behavior misread as a bug while other things were genuinely broken</li>
+    </ul>
+
+    <h2>Resolution</h2>
+    <p>The branch was reset to visual parity with mainline: every rendering-behavior change was backed out in one commit, keeping only tooling, docs, and provably-safe fixes. Shadows immediately verified correct. Features were then reintroduced <strong>one at a time, each verified visually before the next</strong>: any-hit rays, the AO chain (full res), AO application to the ambient term, half-res shadows. Every step survived.</p>
+
+    <h2>Discipline adopted</h2>
+    <ul>
+      <li><strong>One visual change per verification point.</strong> Multiple rendering-path changes may share a branch, but never share an unverified interval. The bisect space between checkpoints must stay size one.</li>
+      <li><strong>When stacked changes break, reset to baseline — don't bisect in place.</strong> Reverting suspects one at a time against a still-changed background tests nothing. Going back to a known-good state and re-adding is faster than it feels.</li>
+      <li><strong>Make effects observable before iterating on them.</strong> The AO work was tuned and re-tuned while its output was disconnected. First verify the wire reaches the screen (the runtime toggle now makes this a one-click A/B).</li>
+      <li><strong>Debug views are prerequisites, not conveniences.</strong> The aspect-correct RT previews and per-pass timing rows turned "the shadow looks weird" into "the shadow map's content is wrong, its inputs are right" — the single most useful narrowing step of the hunt.</li>
+      <li><strong>Physically-correct results can look like bugs.</strong> Before debugging a visual, check whether the light/camera setup makes the observation expected (vertical sun ⇒ small shadows).</li>
+    </ul>
+
+    <h2>Consequences</h2>
+    <ul>
+      <li>The merged branch contains tooling, the AO pipeline (SSAO raygen + temporal + à-trous, applied to ambient only), any-hit half-res shadows, and the bug fixes above — each individually verified.</li>
+      <li>Backed-out perf items (normal-matrix precompute with its guard, material-ID varyings, TLAS rebuild skipping, half-res AO) return as separate single-topic PRs.</li>
+      <li>RT soft shadows + RT AO raygen come next on one branch with three verification checkpoints: denoiser generalization (no visual change), cone-sampled shadows, then the AO raygen swap (see ADR-008's plan).</li>
+    </ul>
+  </main>
+</body>
+</html>

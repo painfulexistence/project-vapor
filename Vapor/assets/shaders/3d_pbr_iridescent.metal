@@ -237,6 +237,7 @@ fragment float4 fragmentMain(
     texture2d<float, access::sample> texRoughness [[texture(3)]],
     texture2d<float, access::sample> texOcclusion [[texture(4)]],
     texture2d<float, access::sample> texEmissive  [[texture(5)]],
+    texture2d<float, access::sample> texAO        [[texture(6)]],
     texture2d<float, access::sample> texShadow    [[texture(7)]],
     texturecube<float, access::sample> irradianceMap [[texture(8)]],
     texturecube<float, access::sample> prefilterMap  [[texture(9)]],
@@ -312,19 +313,22 @@ fragment float4 fragmentMain(
     uint tileX = uint(screenUV.x * float(gridSize.x));
     uint tileY = uint((1.0 - screenUV.y) * float(gridSize.y));
     uint tileIndex = tileX + tileY * gridSize.x;
-    Cluster tile = clusters[tileIndex];
+    // Reference, not copy: Cluster is ~1KB (lightIndices[256]); copying it per
+    // fragment spills to stack and reads the whole struct from device memory.
+    const device Cluster& tile = clusters[tileIndex];
     for (uint i = 0; i < tile.lightCount; i++) {
         uint li = tile.lightIndices[i];
         result += CalculatePointLightIrid(
             pointLights[li], norm, T, B, viewDir, surf, in.worldPosition.xyz, NdotV, iridF);
     }
 
-    // IBL
+    // IBL — screen-space AO attenuates ambient/indirect light only
+    float screenAO = texAO.sample(s, screenUV).r;
     if (material.iblEnabled > 0.5) {
         result += CalculateIBL_ir(norm, viewDir, surf, iridF,
-                                   irradianceMap, prefilterMap, brdfLUT);
+                                   irradianceMap, prefilterMap, brdfLUT) * screenAO;
     } else {
-        result += float3(0.03) * surf.ao * surf.color;
+        result += float3(0.03) * surf.ao * surf.color * screenAO;
     }
 
     result += surf.emission;

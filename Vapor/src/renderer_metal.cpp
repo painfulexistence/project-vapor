@@ -20,9 +20,11 @@ using namespace Vapor;
 #define GLM_FORCE_LEFT_HANDED
 #include "backends/imgui_impl_metal.h"
 #include "backends/imgui_impl_sdl3.h"
+#include <cmath>
 #include <cstdlib>
 #include <ctime>
 #include <functional>
+#include <set>
 #include <glm/ext/matrix_clip_space.hpp>
 #include <glm/ext/matrix_transform.hpp>
 #include <imgui.h>
@@ -131,32 +133,33 @@ public:
             r.currentScene->isGeometryDirty = false;
         }
 
-        // Create TLAS descriptor
+        auto slot = r.currentFrameInFlight;
+
+        // Create TLAS descriptor (built every frame, matching mainline behavior;
+        // skip/refit optimizations were backed out to shrink this change set)
         auto tlasDesc = NS::TransferPtr(MTL::InstanceAccelerationStructureDescriptor::alloc()->init());
         tlasDesc->setInstanceCount(r.accelInstances.size());
         tlasDesc->setInstancedAccelerationStructures(r.BLASArray.get());
-        tlasDesc->setInstanceDescriptorBuffer(r.accelInstanceBuffers[r.currentFrameInFlight].get());
+        tlasDesc->setInstanceDescriptorBuffer(r.accelInstanceBuffers[slot].get());
 
         auto tlasSizes = r.device->accelerationStructureSizes(tlasDesc.get());
-        if (!r.TLASScratchBuffers[r.currentFrameInFlight]
-            || r.TLASScratchBuffers[r.currentFrameInFlight]->length() < tlasSizes.buildScratchBufferSize) {
-            r.TLASScratchBuffers[r.currentFrameInFlight] =
-                NS::TransferPtr(r.device->newBuffer(tlasSizes.buildScratchBufferSize, MTL::ResourceStorageModePrivate));
+        if (!r.TLASScratchBuffers[slot]
+            || r.TLASScratchBuffers[slot]->length() < tlasSizes.buildScratchBufferSize) {
+            r.TLASScratchBuffers[slot] = NS::TransferPtr(
+                r.device->newBuffer(tlasSizes.buildScratchBufferSize, MTL::ResourceStorageModePrivate)
+            );
         }
-        if (!r.TLASBuffers[r.currentFrameInFlight]
-            || r.TLASBuffers[r.currentFrameInFlight]->size() < tlasSizes.accelerationStructureSize) {
-            r.TLASBuffers[r.currentFrameInFlight] =
+        if (!r.TLASBuffers[slot] || r.TLASBuffers[slot]->size() < tlasSizes.accelerationStructureSize) {
+            r.TLASBuffers[slot] =
                 NS::TransferPtr(r.device->newAccelerationStructure(tlasSizes.accelerationStructureSize));
         }
 
-        // Build TLAS
-        // TODO: only build TLAS if it's dirty
         auto timedAccelDesc = makeTimedAccelDesc(true, true);
         auto accelEncoder = r.currentCommandBuffer->accelerationStructureCommandEncoder(timedAccelDesc.get());
         accelEncoder->buildAccelerationStructure(
-            r.TLASBuffers[r.currentFrameInFlight].get(),
+            r.TLASBuffers[slot].get(),
             tlasDesc.get(),
-            r.TLASScratchBuffers[r.currentFrameInFlight].get(),
+            r.TLASScratchBuffers[slot].get(),
             0
         );
         accelEncoder->endEncoding();
@@ -176,8 +179,8 @@ public:
     void execute() override {
         auto& r = *renderer;
 
-        auto drawableSize = r.swapchain->drawableSize();
-        glm::vec2 screenSize = glm::vec2(drawableSize.width, drawableSize.height);
+        auto w = r.normalRT->width();
+        auto h = r.normalRT->height();
 
         auto timedComputeDesc = makeTimedComputeDesc(true, true);
         auto encoder = r.currentCommandBuffer->computeCommandEncoder(timedComputeDesc.get());
@@ -185,8 +188,54 @@ public:
         encoder->setTexture(r.normalRT_MS.get(), 0);
         encoder->setTexture(r.normalRT.get(), 1);
         encoder->setBytes(&r.MSAA_SAMPLE_COUNT, sizeof(Uint32), 0);
-        encoder->dispatchThreadgroups(MTL::Size(screenSize.x, screenSize.y, 1), MTL::Size(1, 1, 1));
+        encoder->dispatchThreadgroups(MTL::Size(w, h, 1), MTL::Size(1, 1, 1));
         encoder->endEncoding();
+
+        // Traffic: read all MS normal samples, write resolved normal (both RGBA16F)
+        uint64_t px = uint64_t(w) * h;
+        addTrafficEstimate(px * 8 * (r.MSAA_SAMPLE_COUNT + 1));
+    }
+};
+
+// Velocity pass: camera-motion vectors from the depth buffer (see 3d_velocity.metal).
+// Feeds every temporal technique (RT AO temporal accumulation, TAA).
+class VelocityPass : public RenderPass {
+public:
+    explicit VelocityPass(Renderer_Metal* renderer) : RenderPass(renderer) {
+    }
+
+    auto getName() const -> const char* override {
+        return "VelocityPass";
+    }
+
+    void execute() override {
+        auto& r = *renderer;
+
+        if (!r.velocityPipeline || !r.velocityRT) return;
+
+        glm::mat4 curViewProj = r.currentCamera->getProjMatrix() * r.currentCamera->getViewMatrix();
+        if (!r.prevViewProjValid) {
+            r.prevViewProj = curViewProj; // first frame: zero velocity
+            r.prevViewProjValid = true;
+        }
+
+        auto timedComputeDesc = makeTimedComputeDesc(true, true);
+        auto encoder = r.currentCommandBuffer->computeCommandEncoder(timedComputeDesc.get());
+        encoder->setComputePipelineState(r.velocityPipeline.get());
+        encoder->setTexture(r.depthStencilRT.get(), 0);
+        encoder->setTexture(r.velocityRT.get(), 1);
+        encoder->setBuffer(r.cameraDataBuffers[r.currentFrameInFlight].get(), 0, 0);
+        encoder->setBytes(&r.prevViewProj, sizeof(glm::mat4), 1);
+        auto w = r.velocityRT->width();
+        auto h = r.velocityRT->height();
+        encoder->dispatchThreads(MTL::Size(w, h, 1), MTL::Size(8, 8, 1));
+        encoder->endEncoding();
+
+        // Traffic: depth read (4B) + velocity write (4B) per pixel
+        addTrafficEstimate(uint64_t(w) * h * 8);
+
+        // setBytes copied prevViewProj into the command stream, so it's safe to roll forward now
+        r.prevViewProj = curViewProj;
     }
 };
 
@@ -203,8 +252,7 @@ public:
     void execute() override {
         auto& r = *renderer;
 
-        auto drawableSize = r.swapchain->drawableSize();
-        glm::vec2 screenSize = glm::vec2(drawableSize.width, drawableSize.height);
+        glm::vec2 screenSize = glm::vec2(r.colorRT->width(), r.colorRT->height());
         glm::uvec3 gridSize = glm::uvec3(r.clusterGridSizeX, r.clusterGridSizeY, r.clusterGridSizeZ);
         uint pointLightCount = r.currentScene->pointLights.size();
 
@@ -235,8 +283,9 @@ public:
     void execute() override {
         auto& r = *renderer;
 
-        auto drawableSize = r.swapchain->drawableSize();
-        glm::vec2 screenSize = glm::vec2(drawableSize.width, drawableSize.height);
+        auto w = r.shadowRT->width();
+        auto h = r.shadowRT->height();
+        glm::vec2 screenSize = glm::vec2(w, h);
 
         auto timedComputeDesc = makeTimedComputeDesc(true, false);
         auto encoder = r.currentCommandBuffer->computeCommandEncoder(timedComputeDesc.get());
@@ -249,14 +298,20 @@ public:
         encoder->setBuffer(r.pointLightBuffer.get(), 0, 2);
         encoder->setBytes(&screenSize, sizeof(glm::vec2), 3);
         encoder->setAccelerationStructure(r.TLASBuffers[r.currentFrameInFlight].get(), 4);
-        encoder->dispatchThreadgroups(MTL::Size(screenSize.x, screenSize.y, 1), MTL::Size(1, 1, 1));
+        encoder->dispatchThreadgroups(MTL::Size(w, h, 1), MTL::Size(1, 1, 1));
         encoder->endEncoding();
 
-        // Generate mipmaps for shadow texture
+        // Generate mipmaps for shadow texture (restored while bisecting the
+        // shadow visual regression)
         auto shadowBlitDesc = makeTimedBlitDesc(false, true);
         auto mipmapEncoder = NS::TransferPtr(r.currentCommandBuffer->blitCommandEncoder(shadowBlitDesc.get()));
         mipmapEncoder->generateMipmaps(r.shadowRT.get());
         mipmapEncoder->endEncoding();
+
+        // Traffic: depth read (4B) + normal read (8B) + shadow write (4B) per pixel,
+        // plus mip chain regeneration (~5/3 of the base level)
+        uint64_t px = uint64_t(w) * h;
+        addTrafficEstimate(px * (4 + 8 + 4) + px * 4 * 5 / 3);
     }
 };
 
@@ -473,33 +528,6 @@ public:
     }
 };
 
-// Motion vector pass: depth-reprojection screen-space motion vectors
-class MotionVectorPass : public RenderPass {
-public:
-    explicit MotionVectorPass(Renderer_Metal* renderer) : RenderPass(renderer) {}
-    auto getName() const -> const char* override { return "MotionVectorPass"; }
-
-    void execute() override {
-        auto& r = *renderer;
-        auto drawableSize = r.swapchain->drawableSize();
-        glm::vec2 screenSize = glm::vec2(drawableSize.width, drawableSize.height);
-
-        auto timedDesc = makeTimedComputeDesc(true, true);
-        auto encoder = r.currentCommandBuffer->computeCommandEncoder(timedDesc.get());
-        encoder->setComputePipelineState(r.motionVectorPipeline.get());
-        encoder->setTexture(r.depthStencilRT.get(), 0);
-        encoder->setTexture(r.motionVectorRT.get(), 1);
-        encoder->setBuffer(r.cameraDataBuffers[r.currentFrameInFlight].get(), 0, 0);
-        encoder->setBuffer(r.prevVPBuffers[r.currentFrameInFlight].get(), 0, 1);
-        encoder->setBytes(&screenSize, sizeof(glm::vec2), 2);
-        encoder->dispatchThreadgroups(
-            MTL::Size((uint32_t(screenSize.x) + 7) / 8, (uint32_t(screenSize.y) + 7) / 8, 1),
-            MTL::Size(8, 8, 1)
-        );
-        encoder->endEncoding();
-    }
-};
-
 // Stochastic point shadow pass: MegaLights-style 2-ray shadow for clustered point lights
 class StochasticPointShadowPass : public RenderPass {
 public:
@@ -552,7 +580,7 @@ public:
         encoder->setComputePipelineState(r.pointShadowTemporalPipeline.get());
         encoder->setTexture(r.pointShadowRT.get(), 0);
         encoder->setTexture(r.pointShadowHistoryRT.get(), 1);
-        encoder->setTexture(r.motionVectorRT.get(), 2);
+        encoder->setTexture(r.velocityRT.get(), 2);
         encoder->setTexture(r.pointShadowDenoisedRT.get(), 3);
         encoder->dispatchThreadgroups(
             MTL::Size((uint32_t(drawableSize.width) + 7) / 8, (uint32_t(drawableSize.height) + 7) / 8, 1),
@@ -581,20 +609,127 @@ public:
     void execute() override {
         auto& r = *renderer;
 
-        auto drawableSize = r.swapchain->drawableSize();
-        glm::vec2 screenSize = glm::vec2(drawableSize.width, drawableSize.height);
+        if (!r.aoEnabled) return;
+
+        // Both raygen kernels share the binding interface (SSAO ignores the TLAS slot)
+        auto* pipeline = (r.aoMethod == 0 && r.raytraceAOPipeline) ? r.raytraceAOPipeline.get() : r.ssaoPipeline.get();
+        if (!pipeline) return;
 
         auto timedComputeDesc = makeTimedComputeDesc(true, true);
         auto encoder = r.currentCommandBuffer->computeCommandEncoder(timedComputeDesc.get());
-        encoder->setComputePipelineState(r.raytraceAOPipeline.get());
+        encoder->setComputePipelineState(pipeline);
         encoder->setTexture(r.depthStencilRT.get(), 0);
         encoder->setTexture(r.normalRT.get(), 1);
-        encoder->setTexture(r.aoRT.get(), 2);
+        encoder->setTexture(r.aoRawRT.get(), 2); // noisy output; temporal + à-trous passes produce aoRT
         encoder->setBuffer(r.frameDataBuffers[r.currentFrameInFlight].get(), 0, 0);
         encoder->setBuffer(r.cameraDataBuffers[r.currentFrameInFlight].get(), 0, 1);
         encoder->setAccelerationStructure(r.TLASBuffers[r.currentFrameInFlight].get(), 2);
-        encoder->dispatchThreadgroups(MTL::Size(screenSize.x, screenSize.y, 1), MTL::Size(1, 1, 1));
+        auto w = r.aoRT->width();
+        auto h = r.aoRT->height();
+        encoder->dispatchThreadgroups(MTL::Size(w, h, 1), MTL::Size(1, 1, 1));
         encoder->endEncoding();
+
+        // Traffic: depth read (4B) + normal read (8B) + AO write (2B) per half-res pixel.
+        // BVH traversal traffic is not estimable here.
+        addTrafficEstimate(uint64_t(w) * h * (4 + 8 + 2));
+    }
+};
+
+// AO temporal accumulation: reprojects last frame's AO with the velocity
+// buffer and blends it with the raygen output (ADR-008 step 2).
+class AOTemporalPass : public RenderPass {
+public:
+    explicit AOTemporalPass(Renderer_Metal* renderer) : RenderPass(renderer) {
+    }
+
+    auto getName() const -> const char* override {
+        return "AOTemporalPass";
+    }
+
+    void execute() override {
+        auto& r = *renderer;
+
+        if (!r.aoTemporalPipeline || !r.aoEnabled) return;
+
+        glm::mat4 curView = r.currentCamera->getViewMatrix();
+        if (!r.prevViewValid) {
+            r.prevView = curView;
+            r.prevViewValid = true;
+        }
+        uint32_t historyValid = r.aoHistoryValid ? 1u : 0u;
+        uint32_t inIdx = r.aoHistoryIndex;
+        uint32_t outIdx = inIdx ^ 1u;
+
+        auto timedComputeDesc = makeTimedComputeDesc(true, true);
+        auto encoder = r.currentCommandBuffer->computeCommandEncoder(timedComputeDesc.get());
+        encoder->setComputePipelineState(r.aoTemporalPipeline.get());
+        encoder->setTexture(r.aoRawRT.get(), 0);
+        encoder->setTexture(r.aoHistoryRT[inIdx].get(), 1);
+        encoder->setTexture(r.aoHistoryRT[outIdx].get(), 2);
+        encoder->setTexture(r.velocityRT.get(), 3);
+        encoder->setTexture(r.depthStencilRT.get(), 4);
+        encoder->setTexture(r.normalRT.get(), 5);
+        encoder->setBuffer(r.cameraDataBuffers[r.currentFrameInFlight].get(), 0, 0);
+        encoder->setBytes(&r.prevView, sizeof(glm::mat4), 1);
+        encoder->setBytes(&historyValid, sizeof(uint32_t), 2);
+        auto w = r.aoRawRT->width();
+        auto h = r.aoRawRT->height();
+        encoder->dispatchThreads(MTL::Size(w, h, 1), MTL::Size(8, 8, 1));
+        encoder->endEncoding();
+
+        // Traffic: raw AO (2B) + history in/out (8B each) + velocity (4B) + depth (4B) + normal (8B)
+        addTrafficEstimate(uint64_t(w) * h * (2 + 8 + 8 + 4 + 4 + 8));
+
+        r.aoHistoryIndex = outIdx;
+        r.aoHistoryValid = true;
+        r.prevView = curView; // setBytes copied the old value into the command stream
+    }
+};
+
+// AO spatial denoise: edge-aware à-trous iterations, history → scratch → aoRT
+// (ADR-008 step 3). aoRT is what the lighting/post passes consume. One serial
+// compute encoder for all iterations: successive dispatches are ordered and
+// their writes visible to each other.
+class AODenoisePass : public RenderPass {
+public:
+    explicit AODenoisePass(Renderer_Metal* renderer) : RenderPass(renderer) {
+    }
+
+    auto getName() const -> const char* override {
+        return "AODenoisePass";
+    }
+
+    void execute() override {
+        auto& r = *renderer;
+
+        if (!r.aoDenoisePipeline || !r.aoEnabled) return;
+
+        auto w = r.aoRT->width();
+        auto h = r.aoRT->height();
+        struct Iteration {
+            MTL::Texture* src;
+            MTL::Texture* dst;
+            uint32_t stride;
+        };
+        const Iteration iterations[] = {
+            { r.aoHistoryRT[r.aoHistoryIndex].get(), r.aoScratchRT.get(), 1u },
+            { r.aoScratchRT.get(), r.aoRT.get(), 2u }, // final target is single-channel; extras dropped here
+        };
+        constexpr size_t iterationCount = sizeof(iterations) / sizeof(iterations[0]);
+        auto timedComputeDesc = makeTimedComputeDesc(true, true);
+        auto encoder = r.currentCommandBuffer->computeCommandEncoder(timedComputeDesc.get());
+        encoder->setComputePipelineState(r.aoDenoisePipeline.get());
+        for (size_t i = 0; i < iterationCount; i++) {
+            encoder->setTexture(iterations[i].src, 0);
+            encoder->setTexture(iterations[i].dst, 1);
+            encoder->setBytes(&iterations[i].stride, sizeof(uint32_t), 0);
+            encoder->dispatchThreads(MTL::Size(w, h, 1), MTL::Size(8, 8, 1));
+        }
+        encoder->endEncoding();
+
+        // Traffic per iteration: 25 src taps (8B) + write (8B),
+        // issued reads — caches make real DRAM traffic much lower
+        addTrafficEstimate(uint64_t(w) * h * (25 * 8 + 8) * iterationCount);
     }
 };
 
@@ -905,8 +1040,12 @@ public:
     void execute() override {
         auto& r = *renderer;
 
-        auto drawableSize = r.swapchain->drawableSize();
-        glm::vec2 screenSize = glm::vec2(drawableSize.width, drawableSize.height);
+        // screenUV in the fragment shader is position / screenSize; position is in
+        // framebuffer pixels, so screenSize must be the framebuffer's size — NOT the
+        // live drawable size, which can drift after a window resize/DPI change and
+        // then mismaps every screen-space texture lookup (shadow, AO, cluster tiles):
+        // with a repeat sampler that shows up as tiled/compressed shadows.
+        glm::vec2 screenSize = glm::vec2(r.colorRT->width(), r.colorRT->height());
         glm::uvec3 gridSize = glm::uvec3(r.clusterGridSizeX, r.clusterGridSizeY, r.clusterGridSizeZ);
         auto time = (float)SDL_GetTicks() / 1000.0f;
 
@@ -950,6 +1089,8 @@ public:
         uint32_t rectLightCount = static_cast<uint32_t>(r.currentScene->rectLights.size());
         encoder->setFragmentBytes(&rectLightCount, sizeof(uint32_t), 8);
         encoder->setFragmentBuffer(r.pssmDataBuffers[r.currentFrameInFlight].get(), 0, 9);
+        // Denoised AO attenuates the IBL/ambient term; white = AO off
+        encoder->setFragmentTexture(r.aoEnabled ? r.aoRT.get() : r.batch2DWhiteTexture.get(), 6);
         auto* vidTex = r.rectLightVideoTexture
                            ? r.rectLightVideoTexture.get()
                            : r.getTexture(r.defaultAlbedoTexture).get();
@@ -2513,12 +2654,14 @@ auto Renderer_Metal::init(SDL_Window* window) -> void {
     if (m_supportsRaytracing) graph.addPass(std::make_unique<TLASBuildPass>(this));
     graph.addPass(std::make_unique<PrePass>(this));
     graph.addPass(std::make_unique<NormalResolvePass>(this));
+    graph.addPass(std::make_unique<VelocityPass>(this));
     graph.addPass(std::make_unique<TileCullingPass>(this));
     graph.addPass(std::make_unique<PSSMShadowPass>(this));
     graph.addPass(std::make_unique<PSSMResolvePass>(this));
     if (m_supportsRaytracing) graph.addPass(std::make_unique<RaytraceShadowPass>(this));
     if (m_supportsRaytracing) graph.addPass(std::make_unique<RaytraceAOPass>(this));
-    graph.addPass(std::make_unique<MotionVectorPass>(this));
+    if (m_supportsRaytracing) graph.addPass(std::make_unique<AOTemporalPass>(this));
+    if (m_supportsRaytracing) graph.addPass(std::make_unique<AODenoisePass>(this));
     if (m_supportsRaytracing) graph.addPass(std::make_unique<StochasticPointShadowPass>(this));
     if (m_supportsRaytracing) graph.addPass(std::make_unique<PointShadowTemporalPass>(this));
     graph.addPass(std::make_unique<MainRenderPass>(this));
@@ -2684,9 +2827,16 @@ auto Renderer_Metal::createResources() -> void {
     cullLightsPipeline = createComputePipeline("shaders/3d_light_cull.metal");
     tileCullingPipeline = createComputePipeline("shaders/3d_tile_light_cull.metal");
     normalResolvePipeline = createComputePipeline("shaders/3d_normal_resolve.metal");
+    velocityPipeline = createComputePipeline("shaders/3d_velocity.metal");
     if (m_supportsRaytracing) raytraceShadowPipeline = createComputePipeline("shaders/3d_raytrace_shadow.metal");
-    if (m_supportsRaytracing) raytraceAOPipeline = createComputePipeline("shaders/3d_ssao.metal");
-    motionVectorPipeline = createComputePipeline("shaders/3d_motion_vector.metal");
+    // AO raygen: 3d_ssao.metal (screen-space) and 3d_raytrace_ao.metal (ray-traced)
+    // are drop-in interchangeable here; both feed the temporal + à-trous chain.
+    // RT AO: 2 cosine-weighted any-hit rays/px, 1.5m cap (the visibility knob —
+    // open areas correctly read as unoccluded; corners/contact darken).
+    if (m_supportsRaytracing) raytraceAOPipeline = createComputePipeline("shaders/3d_raytrace_ao.metal");
+    if (m_supportsRaytracing) ssaoPipeline = createComputePipeline("shaders/3d_ssao.metal");
+    if (m_supportsRaytracing) aoTemporalPipeline = createComputePipeline("shaders/3d_ao_temporal.metal");
+    if (m_supportsRaytracing) aoDenoisePipeline = createComputePipeline("shaders/3d_ao_denoise.metal");
     if (m_supportsRaytracing) stochasticPointShadowPipeline = createComputePipeline("shaders/3d_stochastic_point_shadow.metal");
     pointShadowTemporalPipeline = createComputePipeline("shaders/3d_point_shadow_temporal.metal");
     pssmResolvePipeline = createComputePipeline("shaders/3d_pssm_resolve.metal");
@@ -3225,16 +3375,29 @@ auto Renderer_Metal::createResources() -> void {
     normalRT = NS::TransferPtr(device->newTexture(normalTextureDesc));
     normalTextureDesc->release();
 
+    // Half resolution: 4x fewer (miss-dominated, expensive) shadow rays; consumers
+    // sample at screen UVs with a bilinear sampler, which upsamples for free and
+    // softens the 1-ray hard edges by ~2px. The kernel is resolution-agnostic, so
+    // switching back to full res is just this size change.
     MTL::TextureDescriptor* shadowTextureDesc = MTL::TextureDescriptor::alloc()->init();
     shadowTextureDesc->setTextureType(MTL::TextureType2D);
     shadowTextureDesc->setPixelFormat(MTL::PixelFormatRGBA8Unorm);
-    shadowTextureDesc->setWidth(swapchain->drawableSize().width);
-    shadowTextureDesc->setHeight(swapchain->drawableSize().height);
+    shadowTextureDesc->setWidth((swapchain->drawableSize().width + 1) / 2);
+    shadowTextureDesc->setHeight((swapchain->drawableSize().height + 1) / 2);
     shadowTextureDesc->setMipmapLevelCount(
-        calculateMipmapLevelCount(swapchain->drawableSize().width, swapchain->drawableSize().height)
+        calculateMipmapLevelCount((swapchain->drawableSize().width + 1) / 2, (swapchain->drawableSize().height + 1) / 2)
     );
     shadowTextureDesc->setUsage(MTL::TextureUsageShaderRead | MTL::TextureUsageShaderWrite);
     shadowRT = NS::TransferPtr(device->newTexture(shadowTextureDesc));
+    shadowRTGrayView = NS::TransferPtr(shadowRT->newTextureView(
+        MTL::PixelFormatRGBA8Unorm,
+        MTL::TextureType2D,
+        NS::Range::Make(0, 1),
+        NS::Range::Make(0, 1),
+        MTL::TextureSwizzleChannels::Make(
+            MTL::TextureSwizzleRed, MTL::TextureSwizzleRed, MTL::TextureSwizzleRed, MTL::TextureSwizzleOne
+        )
+    ));
     shadowTextureDesc->release();
 
     // PSSM shadow maps: 2D texture array, 3 cascades × 4096×4096 Depth32
@@ -3268,18 +3431,6 @@ auto Renderer_Metal::createResources() -> void {
         for (auto& buf : pssmDataBuffers) {
             buf = NS::TransferPtr(device->newBuffer(pssmDataSize, MTL::ResourceStorageModeShared));
         }
-    }
-
-    // Motion vector RT: RG16F, screen-space (currentUV - prevUV)
-    {
-        auto* desc = MTL::TextureDescriptor::alloc()->init();
-        desc->setTextureType(MTL::TextureType2D);
-        desc->setPixelFormat(MTL::PixelFormatRG16Float);
-        desc->setWidth(swapchain->drawableSize().width);
-        desc->setHeight(swapchain->drawableSize().height);
-        desc->setUsage(MTL::TextureUsageShaderRead | MTL::TextureUsageShaderWrite);
-        motionVectorRT = NS::TransferPtr(device->newTexture(desc));
-        desc->release();
     }
 
     // Stochastic point shadow RTs: R16F (raw + denoised + history)
@@ -3320,20 +3471,53 @@ auto Renderer_Metal::createResources() -> void {
         desc->release();
     }
 
-    // Previous view-projection buffers (triple-buffered mat4)
-    prevVPBuffers.resize(MAX_FRAMES_IN_FLIGHT);
-    for (auto& buf : prevVPBuffers) {
-        buf = NS::TransferPtr(device->newBuffer(sizeof(glm::mat4), MTL::ResourceStorageModeShared));
-    }
-
+    // Half resolution: the AO chain kernels are resolution-agnostic and consumers
+    // sample aoRT bilinearly at screen UVs, so this size is the only change needed
     MTL::TextureDescriptor* aoTextureDesc = MTL::TextureDescriptor::alloc()->init();
     aoTextureDesc->setTextureType(MTL::TextureType2D);
     aoTextureDesc->setPixelFormat(MTL::PixelFormatR16Float);
-    aoTextureDesc->setWidth(swapchain->drawableSize().width);
-    aoTextureDesc->setHeight(swapchain->drawableSize().height);
+    aoTextureDesc->setWidth((swapchain->drawableSize().width + 1) / 2);
+    aoTextureDesc->setHeight((swapchain->drawableSize().height + 1) / 2);
     aoTextureDesc->setUsage(MTL::TextureUsageShaderRead | MTL::TextureUsageShaderWrite);
     aoRT = NS::TransferPtr(device->newTexture(aoTextureDesc));
     aoTextureDesc->release();
+
+    MTL::TextureDescriptor* velocityTextureDesc = MTL::TextureDescriptor::alloc()->init();
+    velocityTextureDesc->setTextureType(MTL::TextureType2D);
+    velocityTextureDesc->setPixelFormat(MTL::PixelFormatRG16Float);
+    velocityTextureDesc->setWidth(swapchain->drawableSize().width);
+    velocityTextureDesc->setHeight(swapchain->drawableSize().height);
+    velocityTextureDesc->setUsage(MTL::TextureUsageShaderRead | MTL::TextureUsageShaderWrite);
+    velocityRT = NS::TransferPtr(device->newTexture(velocityTextureDesc));
+    velocityTextureDesc->release();
+
+    // AO denoise chain targets (raygen → temporal history ping-pong → à-trous scratch).
+    // Full resolution; the kernels are resolution-agnostic, so half-res later is
+    // purely a size change here (ADR-008).
+    MTL::TextureDescriptor* aoChainDesc = MTL::TextureDescriptor::alloc()->init();
+    aoChainDesc->setTextureType(MTL::TextureType2D);
+    aoChainDesc->setWidth((swapchain->drawableSize().width + 1) / 2);
+    aoChainDesc->setHeight((swapchain->drawableSize().height + 1) / 2);
+    aoChainDesc->setUsage(MTL::TextureUsageShaderRead | MTL::TextureUsageShaderWrite);
+    aoChainDesc->setPixelFormat(MTL::PixelFormatR16Float);
+    aoRawRT = NS::TransferPtr(device->newTexture(aoChainDesc));
+    // RGBA16F: (ao, view-space depth, octahedral normal) — see 3d_ao_temporal.metal
+    aoChainDesc->setPixelFormat(MTL::PixelFormatRGBA16Float);
+    aoHistoryRT[0] = NS::TransferPtr(device->newTexture(aoChainDesc));
+    aoHistoryRT[1] = NS::TransferPtr(device->newTexture(aoChainDesc));
+    aoScratchRT = NS::TransferPtr(device->newTexture(aoChainDesc));
+    aoChainDesc->release();
+
+    // Grayscale swizzle view of the single-channel AO target for the ImGui preview
+    aoRTGrayView = NS::TransferPtr(aoRT->newTextureView(
+        MTL::PixelFormatR16Float,
+        MTL::TextureType2D,
+        NS::Range::Make(0, 1),
+        NS::Range::Make(0, 1),
+        MTL::TextureSwizzleChannels::Make(
+            MTL::TextureSwizzleRed, MTL::TextureSwizzleRed, MTL::TextureSwizzleRed, MTL::TextureSwizzleOne
+        )
+    ));
 
     // Create light scattering render target (HDR format for god rays)
     MTL::TextureDescriptor* lightScatteringTextureDesc = MTL::TextureDescriptor::alloc()->init();
@@ -4491,12 +4675,6 @@ auto Renderer_Metal::draw(std::shared_ptr<Scene> scene, Camera& camera) -> void 
         NS::Range::Make(0, cameraDataBuffers[currentFrameInFlight]->length())
     );
 
-    // Upload previous-frame view-projection for motion vectors / temporal passes
-    glm::mat4 currentVP = proj * view;
-    memcpy(prevVPBuffers[currentFrameInFlight]->contents(), &prevViewProj, sizeof(glm::mat4));
-    prevVPBuffers[currentFrameInFlight]->didModifyRange(NS::Range::Make(0, sizeof(glm::mat4)));
-    prevViewProj = currentVP; // save for next frame
-
     // Reallocate light buffers if the ECS has added lights since stage() was called
     // (LightGatherSystem populates scene->directionalLights / pointLights after staging)
     const size_t dirLightBytes   = std::max(scene->directionalLights.size(), (size_t)1) * sizeof(DirectionalLight);
@@ -4663,65 +4841,30 @@ auto Renderer_Metal::draw(std::shared_ptr<Scene> scene, Camera& camera) -> void 
 
         if (ImGui::TreeNode("RTs")) {
             ImGui::Separator();
-            if (ImGui::TreeNode(fmt::format("Scene Color RT").c_str())) {
-                ImGui::Image((ImTextureID)(intptr_t)colorRT.get(), ImVec2(64, 64));
-                ImGui::TreePop();
-            }
-            if (ImGui::TreeNode(fmt::format("Scene Depth RT").c_str())) {
-                ImGui::Image((ImTextureID)(intptr_t)depthStencilRT.get(), ImVec2(64, 64));
-                ImGui::TreePop();
-            }
-            if (ImGui::TreeNode(fmt::format("Raytraced Shadow").c_str())) {
-                ImGui::Image((ImTextureID)(intptr_t)shadowRT.get(), ImVec2(64, 64));
-                ImGui::TreePop();
-            }
-            if (pointShadowRT) {
-                if (ImGui::TreeNode(fmt::format("Point Shadow (raw)").c_str())) {
-                    ImGui::Image((ImTextureID)(intptr_t)pointShadowRT.get(), ImVec2(128, 128));
+            // Aspect-correct preview sized for actually diagnosing content issues
+            auto rtPreview = [](const char* label, MTL::Texture* tex) {
+                if (!tex) return;
+                if (ImGui::TreeNode(label)) {
+                    float aspect = tex->height() > 0 ? float(tex->width()) / float(tex->height()) : 1.0f;
+                    ImGui::Text("%llu x %llu", (unsigned long long)tex->width(), (unsigned long long)tex->height());
+                    ImGui::Image((ImTextureID)(intptr_t)tex, ImVec2(320, 320 / aspect));
                     ImGui::TreePop();
                 }
-            }
-            if (pointShadowDenoisedRT) {
-                if (ImGui::TreeNode(fmt::format("Point Shadow (denoised)").c_str())) {
-                    ImGui::Image((ImTextureID)(intptr_t)pointShadowDenoisedRT.get(), ImVec2(128, 128));
-                    ImGui::TreePop();
-                }
-            }
-            if (motionVectorRT) {
-                if (ImGui::TreeNode(fmt::format("Motion Vectors").c_str())) {
-                    ImGui::Image((ImTextureID)(intptr_t)motionVectorRT.get(), ImVec2(128, 128));
-                    ImGui::TreePop();
-                }
-            }
+            };
+            rtPreview("Scene Color RT", colorRT.get());
+            rtPreview("Scene Depth RT", depthStencilRT.get());
+            rtPreview("Raytraced Shadow", shadowRTGrayView.get());
+            rtPreview("Raytraced AO", aoRTGrayView.get()); // grayscale swizzle view (raw R16F renders red)
+            rtPreview("Scene Normal RT", normalRT.get());
+            rtPreview("Velocity RT", velocityRT.get());
+            rtPreview("Light Scattering RT", lightScatteringRT.get());
+            rtPreview("Point Shadow (raw)", pointShadowRT.get());
+            rtPreview("Point Shadow (denoised)", pointShadowDenoisedRT.get());
             // Camera-aligned screen-space PSSM shadow (intuitive, like RT shadow)
-            if (pssmShadowScreenRT) {
-                if (ImGui::TreeNode(fmt::format("PSSM Shadow (screen-space)").c_str())) {
-                    ImGui::Image((ImTextureID)(intptr_t)pssmShadowScreenRT.get(), ImVec2(128, 128));
-                    ImGui::TreePop();
-                }
-            }
+            rtPreview("PSSM Shadow (screen-space)", pssmShadowScreenRT.get());
             // Raw light-space cascade depth maps (for shadow-map debugging)
             for (uint32_t i = 0; i < PSSM_CASCADE_COUNT; i++) {
-                if (pssmShadowMapViews[i]) {
-                    if (ImGui::TreeNode(fmt::format("PSSM Cascade {} (light-space depth)", i + 1).c_str())) {
-                        ImGui::Image((ImTextureID)(intptr_t)pssmShadowMapViews[i].get(), ImVec2(128, 128));
-                        ImGui::TreePop();
-                    }
-                }
-            }
-            if (ImGui::TreeNode(fmt::format("Raytraced AO").c_str())) {
-                ImGui::Image((ImTextureID)(intptr_t)aoRT.get(), ImVec2(64, 64));
-                ImGui::TreePop();
-            }
-            if (ImGui::TreeNode(fmt::format("Scene Normal RT").c_str())) {
-                ImGui::Image((ImTextureID)(intptr_t)normalRT.get(), ImVec2(64, 64));
-                ImGui::TreePop();
-            }
-            if (lightScatteringRT) {
-                if (ImGui::TreeNode(fmt::format("Light Scattering RT").c_str())) {
-                    ImGui::Image((ImTextureID)(intptr_t)lightScatteringRT.get(), ImVec2(64, 64));
-                    ImGui::TreePop();
-                }
+                rtPreview(fmt::format("PSSM Cascade {} (light-space depth)", i + 1).c_str(), pssmShadowMapViews[i].get());
             }
             ImGui::TreePop();
         }
@@ -5062,6 +5205,16 @@ auto Renderer_Metal::draw(std::shared_ptr<Scene> scene, Camera& camera) -> void 
             ImGui::TreePop();
         }
 
+        if (ImGui::TreeNode("Ambient Occlusion")) {
+            ImGui::Separator();
+            ImGui::Checkbox("Enabled", &aoEnabled);
+            if (aoEnabled) {
+                ImGui::Combo("Method", &aoMethod, "Ray Traced\0Screen Space\0");
+            }
+            ImGui::TextDisabled("Attenuates IBL/ambient only; both methods share the denoise chain");
+            ImGui::TreePop();
+        }
+
         if (ImGui::TreeNode("Light Scattering (God Rays)")) {
             ImGui::Separator();
             ImGui::Checkbox("Enabled", &lightScatteringEnabled);
@@ -5259,11 +5412,12 @@ auto Renderer_Metal::draw(std::shared_ptr<Scene> scene, Camera& camera) -> void 
                 ImGui::Text("Total GPU: %.3f ms", totalMs);
                 ImGui::Separator();
                 if (ImGui::BeginTable(
-                        "##gpu_pass_timings", 3,
+                        "##gpu_pass_timings", 4,
                         ImGuiTableFlags_Borders | ImGuiTableFlags_RowBg | ImGuiTableFlags_SizingFixedFit
                     )) {
                     ImGui::TableSetupColumn("Pass", ImGuiTableColumnFlags_WidthStretch);
                     ImGui::TableSetupColumn("ms", ImGuiTableColumnFlags_WidthFixed, 60.0f);
+                    ImGui::TableSetupColumn("~GB/s", ImGuiTableColumnFlags_WidthFixed, 55.0f);
                     ImGui::TableSetupColumn("", ImGuiTableColumnFlags_WidthStretch);
                     ImGui::TableHeadersRow();
                     for (auto& t : gpuPassTimings) {
@@ -5273,6 +5427,21 @@ auto Renderer_Metal::draw(std::shared_ptr<Scene> scene, Camera& camera) -> void 
                         ImGui::TableSetColumnIndex(1);
                         ImGui::Text("%.3f", t.gpuTimeMs);
                         ImGui::TableSetColumnIndex(2);
+                        // Effective bandwidth = estimated minimum traffic / measured time.
+                        // Compare against the device's peak; a pass near peak is bandwidth-bound.
+                        // Hide when the measured time is too small to divide meaningfully or
+                        // the result exceeds any plausible device bandwidth (bad timestamp).
+                        double gbps = (t.estimatedBytes > 0 && t.gpuTimeMs > 0.005)
+                            ? static_cast<double>(t.estimatedBytes) / (t.gpuTimeMs * 1e6) : 0.0;
+                        if (gbps > 0.0 && gbps < 2000.0) {
+                            ImGui::Text("%.0f", gbps);
+                            if (ImGui::IsItemHovered()) {
+                                ImGui::SetTooltip("~%.1f MB attachment/reported traffic", t.estimatedBytes / 1e6);
+                            }
+                        } else {
+                            ImGui::TextDisabled("-");
+                        }
+                        ImGui::TableSetColumnIndex(3);
                         ImGui::ProgressBar(
                             static_cast<float>(t.gpuTimeMs / maxMs), ImVec2(-1.0f, 0.0f), ""
                         );
@@ -5358,11 +5527,30 @@ auto Renderer_Metal::draw(std::shared_ptr<Scene> scene, Camera& camera) -> void 
             std::lock_guard<std::mutex> lock(gpuTimingMutex);
             gpuPassTimings.clear();
             gpuPassTimings.reserve(capturedInfo.size());
-            for (auto& info : capturedInfo) {
+            for (size_t i = 0; i < capturedInfo.size(); i++) {
+                auto& info = capturedInfo[i];
                 uint64_t begin = timestamps[info.beginIdx].timestamp;
                 uint64_t end   = timestamps[info.endIdx].timestamp;
-                double ms = (end >= begin) ? static_cast<double>(end - begin) / 1e6 : 0.0;
-                gpuPassTimings.push_back({info.name, ms});
+                // 0 or MTLCounterErrorValue (~0) means the GPU never wrote the sample —
+                // typically an encoder type that doesn't support stage-boundary sampling.
+                // Without this check, an unwritten begin slot makes the delta look like a
+                // raw absolute timestamp (nanosecond-scale garbage in the panel).
+                bool beginValid = begin != 0 && begin != ~0ull;
+                bool endValid   = end != 0 && end != ~0ull;
+                double ms = (beginValid && endValid && end >= begin)
+                    ? static_cast<double>(end - begin) / 1e6 : 0.0;
+                if (!endValid) {
+                    // The pass that failed to write is THIS one (its end slot is empty);
+                    // log once per pass name so the culprit encoder is identifiable.
+                    static std::mutex logMutex;
+                    static std::set<std::string> reported;
+                    std::lock_guard<std::mutex> logLock(logMutex);
+                    if (reported.insert(info.name).second) {
+                        fmt::print("[gpu-timing] pass '{}' did not write its end timestamp (slot {})\n",
+                                   info.name, static_cast<uint64_t>(info.endIdx));
+                    }
+                }
+                gpuPassTimings.push_back({info.name, ms, info.estimatedBytes});
             }
         });
     }
@@ -5793,9 +5981,12 @@ void Renderer_Metal::renderToTexture(
     encoder->setFragmentBytes(&gridSize, sizeof(glm::uvec3), 5);
     encoder->setFragmentBytes(&time, sizeof(float), 6);
     encoder->setFragmentBuffer(rectLightBuffer.get(), 0, 7);
-    uint32_t rttRectLightCount = static_cast<uint32_t>(scene->rectLights.size());
-    encoder->setFragmentBytes(&rttRectLightCount, sizeof(uint32_t), 8);
+    uint32_t rtRectLightCount = static_cast<uint32_t>(scene->rectLights.size());
+    encoder->setFragmentBytes(&rtRectLightCount, sizeof(uint32_t), 8);
     encoder->setFragmentBuffer(pssmDataBuffers[currentFrameInFlight].get(), 0, 9);
+    // Main-view AO is the wrong view for a render texture, but the shader
+    // requires the binding; misaligned ambient attenuation is acceptable here
+    encoder->setFragmentTexture(aoEnabled ? aoRT.get() : batch2DWhiteTexture.get(), 6);
     encoder->setFragmentTexture(
         rectLightVideoTexture ? rectLightVideoTexture.get() : getTexture(defaultAlbedoTexture).get(), 11
     );
@@ -6721,6 +6912,8 @@ extern "C" auto getMetalDevice(void* renderer) -> void* {
     }
     return nullptr;
 }
+
+
 void Renderer_Metal::draw(entt::registry& registry, std::shared_ptr<Scene> scene, Camera& camera) {
     // Build ECS instance data; draw(scene, camera) will clear instances/instanceBatches from Nodes,
     // so store them here and inject after Node traversal via pendingEcsInstances.
@@ -6770,12 +6963,21 @@ void Renderer_Metal::draw(entt::registry& registry, std::shared_ptr<Scene> scene
             }
 
             if (m_supportsRaytracing) {
-                MTL::AccelerationStructureInstanceDescriptor accelDesc;
+                // Zero-initialize: options and intersectionFunctionTableOffset were
+                // previously stack garbage. Garbage options bits (e.g. NonOpaque,
+                // winding/culling flags) make rays miss or misclassify whole
+                // instances — visible as shadows losing coverage with bright bands —
+                // and nondeterministically, since stack contents change run to run.
+                // Garbage bytes also destabilized the change-detection memcmp that
+                // drives the TLAS rebuild/skip logic.
+                MTL::AccelerationStructureInstanceDescriptor accelDesc{};
                 for (int i = 0; i < 4; ++i)
                     for (int j = 0; j < 3; ++j)
                         accelDesc.transformationMatrix.columns[i][j] = worldMat[i][j];
                 accelDesc.accelerationStructureIndex = mesh->instanceID;
                 accelDesc.mask = 0xFF;
+                accelDesc.options = MTL::AccelerationStructureInstanceOptionOpaque;
+                accelDesc.intersectionFunctionTableOffset = 0;
                 pendingEcsAccelInstances.push_back(accelDesc);
             }
         }

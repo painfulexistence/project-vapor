@@ -3,11 +3,11 @@ using namespace metal;
 #include "Res/shaders/3d_common.metal"
 
 // Temporal accumulation denoiser for stochastic point light shadows.
-// Motion-vector reprojection + variance clamping + 15%/85% blend.
+// Velocity reprojection + variance clamping + 15%/85% blend.
 kernel void computeMain(
     texture2d<float>              currentShadow   [[texture(0)]],
     texture2d<float>              historyShadow   [[texture(1)]],
-    texture2d<float>              motionTexture   [[texture(2)]],
+    texture2d<float>              velocityTexture [[texture(2)]],
     texture2d<float, access::write> outputShadow  [[texture(3)]],
     uint2 tid [[thread_position_in_grid]]
 ) {
@@ -20,9 +20,10 @@ kernel void computeMain(
 
     float current = currentShadow.read(tid).r;
 
-    // Read motion vector (currentUV - prevUV)
-    float2 motion = motionTexture.read(tid).rg;
-    float2 prevUV = uv - motion;
+    // Velocity from 3d_velocity.metal is (currNDC - prevNDC) * 0.5 in y-up NDC
+    // space; convert to y-down texture UV by negating the y component.
+    float2 velocity = velocityTexture.read(tid).rg;
+    float2 prevUV = uv - float2(velocity.x, -velocity.y);
 
     // Variance clamping neighbourhood (3x3)
     float mean = 0.0;
