@@ -649,7 +649,7 @@ protected:
     std::array<TextureHandle, 16> batch2DTextureSlots;
     Uint32 batch2DTextureSlotIndex = 1;// 0 = white texture
     glm::mat4 batch2DProjection = glm::mat4(1.0f);
-    BlendMode batch2DBlendMode = BlendMode::Alpha;
+    Batch2DBlendMode batch2DBlendMode = Batch2DBlendMode::Alpha;
     Batch2DStats batch2DStats;
     bool batch2DActive = false;
 
@@ -661,7 +661,7 @@ protected:
     std::array<TextureHandle, 16> batch3DTextureSlots;
     Uint32 batch3DTextureSlotIndex = 1;
     glm::mat4 batch3DProjection = glm::mat4(1.0f);
-    BlendMode batch3DBlendMode = BlendMode::Alpha;
+    Batch2DBlendMode batch3DBlendMode = Batch2DBlendMode::Alpha;
     Batch2DStats batch3DStats;
     bool batch3DActive = false;
 

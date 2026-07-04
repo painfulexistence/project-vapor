@@ -37,7 +37,7 @@ using namespace Vapor;
 // The branch's graphics.hpp is a monolith (not an umbrella), so pull in the
 // effect/batch/gibs sub-headers the native Metal renderer needs directly.
 #include "graphics_effects.hpp"   // AtmosphereData, WaterData, GPUParticle, Particle, …
-#include "graphics_batch2d.hpp"   // Batch2DVertex, BlendMode
+#include "graphics_batch2d.hpp"   // Batch2DVertex, Batch2DBlendMode
 #include "graphics_gibs.hpp"      // Surfel, SurfelCell, GIBSData
 #include "helper.hpp"
 #include "mesh_builder.hpp"
