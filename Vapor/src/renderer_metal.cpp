@@ -5296,9 +5296,14 @@ auto Renderer_Metal::draw(std::shared_ptr<Scene> scene, Camera& camera) -> void 
     if (engineCore) {
         auto* rmluiManager = engineCore->getRmlUiManager();
         if (!rmluiManager) {
-            // Initialize RmlUI with current window size
-            int width = static_cast<int>(surface->texture()->width());
-            int height = static_cast<int>(surface->texture()->height());
+            // Initialize RmlUI with the LOGICAL window size (points), not the
+            // drawable size. RmlUi lays out in logical coordinates and the
+            // render projection is logical too (RmlRendererMetal::SetViewport),
+            // while the physical framebuffer viewport handles Retina upscaling.
+            // Using the drawable (physical, 2x on Retina) here doubled every
+            // UI element.
+            int width = 0, height = 0;
+            SDL_GetWindowSize(window, &width, &height);
             if (engineCore->initRmlUI(width, height)) {
                 // Initialize renderer UI support (sets RenderInterface and finalizes RmlUI)
                 initUI();
