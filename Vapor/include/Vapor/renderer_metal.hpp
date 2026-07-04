@@ -29,9 +29,7 @@ class TLASBuildPass;
 class NormalResolvePass;
 class VelocityPass;
 class TileCullingPass;
-class CSMDepthPass;
 class RaytraceShadowPass;
-class HybridShadowPass;
 class RaytraceAOPass;
 class AOTemporalPass;
 class AODenoisePass;
@@ -295,9 +293,7 @@ class Renderer_Metal final : public Renderer {// Must be public or factory funct
     friend class NormalResolvePass;
     friend class VelocityPass;
     friend class TileCullingPass;
-    friend class CSMDepthPass;
     friend class RaytraceShadowPass;
-    friend class HybridShadowPass;
     friend class RaytraceAOPass;
     friend class AOTemporalPass;
     friend class AODenoisePass;
@@ -805,40 +801,6 @@ protected:
 
     // Stochastic point shadow debug: 0 = visibility, 1 = tile light-count heatmap
     uint32_t pointShadowDebugMode = 0;
-
-    // Cascaded Shadow Map resources
-    NS::SharedPtr<MTL::RenderPipelineState> csmDepthPipeline;
-    NS::SharedPtr<MTL::RenderPipelineState> csmDepthAlphaTestPipeline;
-    NS::SharedPtr<MTL::DepthStencilState> csmDepthStencilState;
-    NS::SharedPtr<MTL::Texture> csmShadowMapArray;// Depth2DArray for cascades
-    std::vector<NS::SharedPtr<MTL::Buffer>> csmDataBuffers;// Per-frame CSM data
-    std::vector<NS::SharedPtr<MTL::Buffer>> hybridShadowDataBuffers;// Per-frame hybrid data
-
-    // Shadow mode and settings
-    ShadowMode shadowMode = ShadowMode::RayTraced;// Default to RT shadow
-    CascadeShadowData csmSettings = {
-        .shadowBias = 0.0005f,
-        .normalBias = 0.001f,
-        .pcfRadius = 2.0f,
-        .cascadeCount = CSM_CASCADE_COUNT,
-        .pcfSampleCount = 16,
-        .cascadeBlendRange = 0.1f,
-        .maxShadowDistance = 500.0f,
-        .softShadowEnabled = 1,
-        .cascadeVisualization = 0
-    };
-    HybridShadowData hybridSettings = {
-        .penumbraThresholdLow = 0.05f,
-        .penumbraThresholdHigh = 0.95f,
-        .rtSampleRadius = 0.01f,
-        .rtSampleCount = 4,
-        .contactShadowLength = 0.5f,
-        .contactShadowThickness = 0.05f,
-        .hybridEnabled = 0
-    };
-
-    // CSM cascade split distances (logarithmic/practical split)
-    float csmCascadeSplitLambda = 0.5f;// 0 = uniform, 1 = logarithmic
 
     // Bloom render targets
     NS::SharedPtr<MTL::Texture> bloomBrightnessRT;// Half-res brightness extraction
