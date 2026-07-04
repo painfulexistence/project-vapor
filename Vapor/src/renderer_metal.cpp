@@ -3019,10 +3019,8 @@ auto Renderer_Metal::deinit() -> void {
 
     // UI cleanup
     if (m_uiRenderer) {
-        auto* uiRenderer = static_cast<Vapor::RmlRendererMetal*>(m_uiRenderer);
-        uiRenderer->shutdown();
-        delete uiRenderer;
-        m_uiRenderer = nullptr;
+        m_uiRenderer->shutdown();
+        m_uiRenderer.reset();
     }
 
     // ImGui deinit
@@ -3049,23 +3047,20 @@ auto Renderer_Metal::initUI() -> bool {
     }
 
     // Create Metal UI renderer (shared implementation)
-    auto* uiRenderer = new Vapor::RmlRendererMetal(device);
+    auto uiRenderer = std::make_unique<Vapor::RmlRendererMetal>(device);
     if (!uiRenderer->initialize()) {
         fmt::print("Renderer_Metal::initUI: Failed to initialize Metal UI renderer\n");
-        delete uiRenderer;
-        return false;
+        return false;// uiRenderer frees itself
     }
 
-    m_uiRenderer = uiRenderer;
-
-    // Set as RmlUI's render interface
-    Rml::SetRenderInterface(uiRenderer);
+    // Set as RmlUI's render interface, then take ownership.
+    Rml::SetRenderInterface(uiRenderer.get());
+    m_uiRenderer = std::move(uiRenderer);
 
     // Now finalize RmlUI initialization (creates context, loads fonts, etc.)
     if (!rmluiManager->FinalizeInitialization()) {
         fmt::print("Renderer_Metal::initUI: Failed to finalize RmlUI\n");
-        delete uiRenderer;
-        m_uiRenderer = nullptr;
+        m_uiRenderer.reset();
         return false;
     }
 
@@ -3081,7 +3076,7 @@ void Renderer_Metal::renderUI() {
         return;
     }
 
-    auto* uiRenderer = static_cast<Vapor::RmlRendererMetal*>(m_uiRenderer);
+    auto* uiRenderer = m_uiRenderer.get();
 
     auto surface = currentDrawable;
     if (!surface) return;
@@ -6517,7 +6512,7 @@ Uint64 Renderer_Metal::registerRenderTextureForUI(RenderTextureHandle handle) {
         return 0;
     }
 
-    auto* uiRenderer = static_cast<Vapor::RmlRendererMetal*>(m_uiRenderer);
+    auto* uiRenderer = m_uiRenderer.get();
     return uiRenderer->registerExternalTexture(it->second.colorTexture.get(), it->second.width, it->second.height);
 }
 
