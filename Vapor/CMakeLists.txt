@@ -79,6 +79,11 @@ set(SOURCES
 
 if(APPLE)
     list(APPEND SOURCES
+        # Native full-feature Metal renderer (45 passes, RT/GIBS/water/clouds/…).
+        # createRenderer() routes the Metal backend here; Vulkan uses the RHI
+        # renderer (src/renderer.cpp) on every platform.
+        src/renderer_metal.cpp
+        src/gibs_manager.cpp
         src/rhi_metal.cpp
         src/rml_renderer_metal.cpp
         src/ui_renderer_metal.cpp

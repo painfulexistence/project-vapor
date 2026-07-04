@@ -23,13 +23,21 @@ namespace Vapor {
     class DebugDraw;
 }
 
+// Batch rendering stats for the RHI renderer. (graphics_batch2d.hpp has a
+// richer Batch2DStats but it cannot be included here — it redefines BlendMode,
+// which rhi.hpp also defines. getBatch2DStats() is not polymorphic.)
+struct Batch2DStats {
+    uint32_t drawCalls = 0;
+    uint32_t quadCount = 0;
+    uint32_t vertexCount = 0;
+};
+
 // ============================================================================
 // Renderer - High-level renderer that uses RHI (implements IRenderer)
 //
 // This is the RHI-backed renderer used by the Vulkan backend. The shared
 // backend-agnostic types (GraphicsBackend, RenderPath, GpuImageData,
-// Batch2DStats, RenderTextureDesc/Handle) and the polymorphic interface live
-// in irenderer.hpp.
+// RenderTextureDesc/Handle) and the polymorphic interface live in irenderer.hpp.
 //
 // Responsibilities:
 // - Manage rendering resources (meshes, materials, textures)

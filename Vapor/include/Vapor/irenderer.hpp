@@ -26,7 +26,7 @@
 #include "rhi.hpp"            // TextureHandle, PixelFormat
 #include "render_data.hpp"    // CameraRenderData
 #include "camera.hpp"
-#include "graphics.hpp"       // Image, Batch2DStats (Vapor namespace), FontHandle via font_manager
+#include "graphics.hpp"       // Image, FontHandle via font_manager
 #include "font_manager.hpp"   // FontHandle
 #include "scene.hpp"
 #include <SDL3/SDL_video.h>
@@ -66,12 +66,10 @@ struct GpuImageData {
 
 using ScreenshotCallback = std::function<void(const GpuImageData&)>;
 
-// Batch rendering stats
-struct Batch2DStats {
-    uint32_t drawCalls = 0;
-    uint32_t quadCount = 0;
-    uint32_t vertexCount = 0;
-};
+// Batch rendering stats. NOTE: graphics_batch2d.hpp defines a richer global
+// Batch2DStats but cannot be included here (it redefines BlendMode, which is
+// also in graphics.hpp). getBatch2DStats() is not part of IRenderer (never
+// called polymorphically); each renderer exposes its own stats type.
 
 // Render texture descriptor
 struct RenderTextureDesc {
@@ -177,8 +175,8 @@ public:
     virtual void drawTriangle2D(const glm::vec2& p0, const glm::vec2& p1, const glm::vec2& p2, const glm::vec4& color) {}
     virtual void drawTriangleFilled2D(const glm::vec2& p0, const glm::vec2& p1, const glm::vec2& p2, const glm::vec4& color) {}
 
-    virtual Batch2DStats getBatch2DStats() const { return {}; }
-    virtual void resetBatch2DStats() {}
+    // getBatch2DStats()/resetBatch2DStats() are intentionally NOT here — the
+    // stats type differs per renderer and is never queried polymorphically.
 
     // ---- Fonts / text ----------------------------------------------------
     virtual FontHandle loadFont(const std::string& path, float baseSize) { return {}; }

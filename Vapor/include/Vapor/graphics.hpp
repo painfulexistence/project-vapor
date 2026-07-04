@@ -1,4 +1,5 @@
 #pragma once
+#include "rhi.hpp"  // TextureHandle (value member on Image; used by the native Metal renderer)
 #include <SDL3/SDL_stdinc.h>
 #include <glm/geometric.hpp>
 #include <glm/vec2.hpp>
@@ -43,8 +44,10 @@ struct Image {
     Uint32 channelCount;
     std::vector<Uint8> byteArray;
 
-    // Note: TextureHandle moved to Renderer layer
-    // Image now only holds CPU-side image data
+    // GPU texture handle. The RHI renderer keeps its own path→TextureId cache
+    // and ignores this; the native Metal renderer stores the uploaded texture
+    // here (main's data model). Harmless/unused on the RHI path.
+    TextureHandle texture;
 };
 
 // Floating-point image for HDR equirectangular environment maps (.hdr / .exr)
@@ -258,8 +261,10 @@ struct Mesh {
     // Renderer-assigned ID (assigned during registration)
     Uint32 rendererMeshId = UINT32_MAX;
 
-    // Note: GPU resources moved to Renderer layer
-    // Mesh now only holds CPU-side geometry data
+    // Native Metal renderer bookkeeping (main's data model). The RHI renderer
+    // uses renderMeshId/renderMaterialId instead and ignores these.
+    Uint32 materialID = UINT32_MAX;
+    Uint32 instanceID = UINT32_MAX;
 };
 
 } // namespace Vapor
