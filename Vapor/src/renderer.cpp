@@ -566,7 +566,7 @@ void Renderer::endFrame() {
     rhi->endFrame();
 
     // Update frame state
-    currentFrameInFlight = (currentFrameInFlight + 1) % MAX_FRAMES_IN_FLIGHT;
+    currentFrameInFlight = (currentFrameInFlight + 1) % rhi->getMaxFramesInFlight();
     frameNumber++;
 }
 
@@ -2578,18 +2578,16 @@ void Renderer::BatchRenderer::flush(RHI* rhi, const glm::mat4& viewProj) {
     rhi->bindVertexBuffer(vertexBuffer, 0, 0);
     rhi->bindIndexBuffer(indexBuffer, 0);
 
-    // Bind the batch texture (white when untextured). One texture per batch;
-    // setTexture() flushes when it changes.
-    TextureHandle tex = currentTexture.isValid() ? currentTexture : whiteTexture;
-    if (tex.isValid() && sampler.isValid()) {
-        rhi->setTexture(0, 0, tex, sampler);
+    // One draw per texture segment (6 indices per quad, shared vertex data)
+    for (const Segment& seg : segments) {
+        if (seg.quadCount == 0) continue;
+        TextureHandle tex = seg.texture.isValid() ? seg.texture : whiteTexture;
+        if (tex.isValid() && sampler.isValid()) {
+            rhi->setTexture(0, 0, tex, sampler);
+        }
+        rhi->drawIndexed(seg.quadCount * 6, 1, seg.quadStart * 6, 0, 0);
+        drawCalls++;
     }
-
-    // Draw indexed
-    uint32_t indexCount = quadCount * 6;  // 6 indices per quad
-    rhi->drawIndexed(indexCount, 1, 0, 0, 0);
-
-    drawCalls++;
     totalQuads += quadCount;
 
     // Reset for next batch
@@ -2600,20 +2598,23 @@ void Renderer::BatchRenderer::reset() {
     vertices.clear();
     indices.clear();
     quadCount = 0;
+    segments.clear();
+}
+
+// Extend the current texture segment (or open a new one) to cover the quad
+// that is about to be added.
+void Renderer::BatchRenderer::accountQuadSegment() {
+    TextureHandle want = pendingTexture.isValid() ? pendingTexture : whiteTexture;
+    if (segments.empty() || segments.back().texture.id != want.id) {
+        segments.push_back({ want, quadCount, 0 });
+    }
+    segments.back().quadCount++;
 }
 
 void Renderer::BatchRenderer::setTexture(TextureHandle texture) {
-    // Normalize "no texture" to the white texture so comparisons are stable
-    TextureHandle wanted = texture.isValid() ? texture : whiteTexture;
-    TextureHandle current = currentTexture.isValid() ? currentTexture : whiteTexture;
-    if (wanted.id == current.id) {
-        return;
-    }
-    // Texture switch: draw the pending quads with the old texture first
-    if (quadCount > 0 && canAutoFlush && currentRHI) {
-        flush(currentRHI, currentViewProj);
-    }
-    currentTexture = wanted;
+    // Normalize "no texture" to the white texture so comparisons are stable.
+    // Only recorded — the segment split happens when the next quad arrives.
+    pendingTexture = texture.isValid() ? texture : whiteTexture;
 }
 
 void Renderer::BatchRenderer::addQuad(const glm::vec3& position, const glm::vec2& size, const glm::vec4& color, int entityID) {
@@ -2650,6 +2651,7 @@ void Renderer::BatchRenderer::addQuad(const glm::vec3& position, const glm::vec2
     vertices.push_back(v2);
     vertices.push_back(v3);
 
+    accountQuadSegment();
     quadCount++;
 }
 
@@ -2683,6 +2685,7 @@ void Renderer::BatchRenderer::addQuad(const glm::mat4& transform, const glm::vec
         vertices.push_back(v);
     }
 
+    accountQuadSegment();
     quadCount++;
 }
 
@@ -2719,5 +2722,6 @@ void Renderer::BatchRenderer::addQuad(
         vertices.push_back(v);
     }
 
+    accountQuadSegment();
     quadCount++;
 }

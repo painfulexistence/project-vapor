@@ -548,9 +548,16 @@ private:
 
         TextureHandle whiteTexture;  // Default white texture for colored quads
         SamplerHandle sampler;       // Sampler used for the batch texture
-        // Texture for the quads batched since the last flush. One texture per
-        // batch: switching textures flushes the pending quads first.
-        TextureHandle currentTexture;
+        // Quads are grouped into segments by texture; flush() issues one draw
+        // per segment. Texture switches therefore never force a mid-frame
+        // flush (draws are only legal inside a render pass).
+        struct Segment {
+            TextureHandle texture;
+            uint32_t quadStart = 0;
+            uint32_t quadCount = 0;
+        };
+        std::vector<Segment> segments;
+        TextureHandle pendingTexture;  // texture for the next quad added
 
         // Store RHI and current view-projection for auto-flush
         RHI* currentRHI = nullptr;
@@ -562,9 +569,10 @@ private:
         uint32_t totalQuads = 0;
 
         void init(RHI* rhi, GraphicsBackend backend, bool is3D, TextureHandle defaultTex, SamplerHandle samplerHandle);
-        // Set the texture for subsequent quads (invalid = white). Flushes the
-        // pending batch when the texture changes.
+        // Set the texture for subsequent quads (invalid = white). Recorded as
+        // a segment split; the actual draws happen in flush().
         void setTexture(TextureHandle texture);
+        void accountQuadSegment();
         void shutdown(RHI* rhi);
         void flush(RHI* rhi, const glm::mat4& viewProj);
         void beginBatch(RHI* rhi, const glm::mat4& viewProj);
@@ -650,7 +658,7 @@ private:
     // ========================================================================
 
     const Uint32 MAX_INSTANCES = 5000;// Increased for large scenes like Bistro (2911 instances)
-    const Uint32 MAX_FRAMES_IN_FLIGHT = 3;
+    // Frames-in-flight comes from the RHI: rhi->getMaxFramesInFlight()
     const Uint32 MSAA_SAMPLE_COUNT = 4;
     Uint32 maxDirectionalLights = 4;
     Uint32 maxPointLights = 1024;

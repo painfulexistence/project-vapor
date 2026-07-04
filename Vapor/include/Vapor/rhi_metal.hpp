@@ -31,6 +31,9 @@ public:
 
     const RHICapabilities& getCapabilities() const override { return capabilities; }
 
+    // CAMetalLayer's drawable pool (3 drawables) provides the CPU throttle
+    Uint32 getMaxFramesInFlight() const override { return 3; }
+
     // ========================================================================
     // Resource Creation
     // ========================================================================
@@ -63,7 +66,11 @@ public:
     // ========================================================================
 
     void updateBuffer(BufferHandle handle, const void* data, size_t offset, size_t size) override;
-    void updateTexture(TextureHandle handle, const void* data, size_t size) override;
+    void updateTexture(TextureHandle handle, const void* data, size_t size,
+                       Uint32 mipLevel, Uint32 arrayLayer) override;
+    using RHI::updateTexture;
+    void generateMipmaps(TextureHandle handle) override;
+    void flushUploads() override;
 
     BufferHandle copySwapchainToBuffer(Uint32& outWidth, Uint32& outHeight) override;
     void* mapBuffer(BufferHandle handle) override;
@@ -183,6 +190,7 @@ private:
         Uint32 height;
         Uint32 depth;
         Uint32 mipLevels;
+        Uint32 bytesPerPixel = 4;
         MTL::PixelFormat format;
     };
 
@@ -280,6 +288,35 @@ private:
 
     NS::SharedPtr<MTL::Function> createShaderFunction(const std::string& source, ShaderStage stage);
     NS::SharedPtr<MTL::RenderPipelineState> createRenderPipeline(const PipelineDesc& desc);
+
+    // ========================================================================
+    // Batched Upload Stream
+    // ------------------------------------------------------------------------
+    // Uploads to GPU-only resources are recorded into a dedicated command
+    // buffer through a shared staging ring and committed lazily: at
+    // beginFrame (queue submission order makes the data visible to that
+    // frame), on flushUploads(), or when the ring wraps (which waits on
+    // prior upload command buffers to reclaim space).
+    //
+    // Note on destruction: Metal needs no retirement queue — a committed
+    // MTLCommandBuffer retains every resource it references until it
+    // completes, so dropping our NS::SharedPtr on destroyX() is safe even
+    // with frames in flight.
+    // ========================================================================
+
+    static constexpr size_t STAGING_RING_SIZE = 32ull * 1024 * 1024;
+    NS::SharedPtr<MTL::Buffer> stagingRingBuffer;
+    size_t stagingRingOffset = 0;
+    NS::SharedPtr<MTL::CommandBuffer> uploadCmdBuffer;     // open while recording
+    MTL::BlitCommandEncoder* uploadBlitEncoder = nullptr;  // open while recording
+    std::vector<NS::SharedPtr<MTL::CommandBuffer>> pendingUploadCmds;
+
+    MTL::BlitCommandEncoder* ensureUploadBlit();
+    void* allocStaging(size_t size, size_t& outOffset);
+    // Copy `data` into staging memory: the ring for normal sizes, a dedicated
+    // one-shot buffer (retained by the upload command buffer) when oversize.
+    MTL::Buffer* stageData(const void* data, size_t size, size_t& outOffset);
+    void submitUploads(bool waitForCompletion);
 
     // GPU timing helpers
     void initGpuTiming();

@@ -4,6 +4,10 @@
 #include <SDL3/SDL_vulkan.h>
 #include <vulkan/vulkan.h>
 #include <vulkan/vulkan_beta.h>
+#include <deque>
+#include <functional>
+#include <mutex>
+#include <string>
 #include <vector>
 #include <unordered_map>
 
@@ -27,6 +31,15 @@ public:
     // Raytracing (VK_KHR_acceleration_structure) is not implemented — passes
     // that require it are skipped by the RenderGraph on this backend.
     const RHICapabilities& getCapabilities() const override { return capabilities; }
+
+    Uint32 getMaxFramesInFlight() const override { return MAX_FRAMES_IN_FLIGHT; }
+
+    // GPU per-pass timing via vkCmdWriteTimestamp (see Metal backend for the
+    // shared semantics: results lag by MAX_FRAMES_IN_FLIGHT frames)
+    bool isGpuTimingSupported() const override { return gpuTimingSupported; }
+    void setGpuTimingEnabled(bool enabled) override { gpuTimingEnabled = enabled; }
+    bool isGpuTimingEnabled() const override { return gpuTimingEnabled; }
+    std::vector<GpuPassTiming> getGpuPassTimings() override;
 
     // ========================================================================
     // Resource Creation
@@ -60,7 +73,11 @@ public:
     // ========================================================================
 
     void updateBuffer(BufferHandle handle, const void* data, size_t offset, size_t size) override;
-    void updateTexture(TextureHandle handle, const void* data, size_t size) override;
+    void updateTexture(TextureHandle handle, const void* data, size_t size,
+                       Uint32 mipLevel, Uint32 arrayLayer) override;
+    using RHI::updateTexture;
+    void generateMipmaps(TextureHandle handle) override;
+    void flushUploads() override;
 
     BufferHandle copySwapchainToBuffer(Uint32& outWidth, Uint32& outHeight) override;
     void* mapBuffer(BufferHandle handle) override;
@@ -183,6 +200,7 @@ private:
         VkFormat format;
         Uint32 width;
         Uint32 height;
+        Uint32 arrayLayers = 1;
         VkImageUsageFlags usage = 0;
         VkImageLayout currentLayout = VK_IMAGE_LAYOUT_UNDEFINED;
     };
@@ -286,6 +304,85 @@ private:
     VkImageView boundComputeImages[BINDINGS_PER_SET] = {};
     bool computeDescriptorsDirty = true;
     void flushComputeDescriptors();
+
+    // ========================================================================
+    // Batched Upload Stream
+    // ------------------------------------------------------------------------
+    // Uploads to GPU-only resources are recorded into a dedicated command
+    // buffer through a persistently-mapped staging ring and submitted lazily:
+    // at beginFrame (same-queue submission order makes the data visible to
+    // that frame without a CPU wait), on flushUploads(), or when the ring
+    // wraps (which waits for prior upload submissions to reclaim space).
+    // ========================================================================
+
+    static constexpr VkDeviceSize STAGING_RING_SIZE = 32ull * 1024 * 1024;
+    VkBuffer stagingRingBuffer = VK_NULL_HANDLE;
+    VkDeviceMemory stagingRingMemory = VK_NULL_HANDLE;
+    void* stagingRingPtr = nullptr;
+    VkDeviceSize stagingRingOffset = 0;
+    VkCommandBuffer uploadCmd = VK_NULL_HANDLE;   // valid while recording
+    std::vector<VkFence> pendingUploadFences;     // one per in-flight upload submit
+
+    void createUploadStream();
+    void destroyUploadStream();
+    // Begin/continue recording; returns the open upload command buffer.
+    VkCommandBuffer ensureUploadCmd();
+    // Reserve `size` staging bytes; returns mapped pointer + buffer offset.
+    // May flush (and wait) when the ring wraps.
+    void* allocStaging(VkDeviceSize size, VkDeviceSize& outOffset);
+    // Copy `data` into staging memory: the ring for normal sizes, a dedicated
+    // one-shot buffer (deferred-destroyed) when larger than the whole ring.
+    VkBuffer stageData(const void* data, VkDeviceSize size, VkDeviceSize& outOffset);
+    // Submit recorded uploads. waitForCompletion also reclaims ring space.
+    void submitUploads(bool waitForCompletion);
+
+    // ========================================================================
+    // Deferred Destruction
+    // ------------------------------------------------------------------------
+    // destroyX() removes the handle immediately but the Vulkan objects are
+    // destroyed only once every frame that could reference them has finished
+    // (frameCounter advances at endFrame; entries retire after
+    // MAX_FRAMES_IN_FLIGHT further frames complete).
+    // ========================================================================
+
+    Uint64 frameCounter = 0;
+    std::deque<std::pair<Uint64, std::function<void()>>> retirementQueue;
+    void deferDestroy(std::function<void()> destroy);
+    void processRetirements(bool force);
+
+    // ========================================================================
+    // GPU Pass Timing (vkCmdWriteTimestamp, per frame-in-flight query pools)
+    // ========================================================================
+
+    static constexpr Uint32 TIMESTAMP_QUERIES_PER_POOL = 64;
+    struct PassTimestampInfo {
+        std::string name;
+        Uint32 beginQuery;
+        Uint32 endQuery;
+    };
+    std::vector<VkQueryPool> timestampPools;                    // per frame in flight
+    std::vector<std::vector<PassTimestampInfo>> slotTimestamps; // per frame in flight
+    Uint32 nextTimestampQuery = 0;
+    float timestampPeriodNs = 0.0f;
+    bool gpuTimingSupported = false;
+    bool gpuTimingEnabled = false;
+    bool gpuTimingActiveThisFrame = false;
+    std::mutex gpuTimingMutex;
+    std::vector<GpuPassTiming> gpuPassTimings;
+    void createTimestampPools();
+    void collectTimestamps(Uint32 slot);  // read completed results for a slot
+    bool allocateTimestampPair(const char* passName, Uint32& outBegin, Uint32& outEnd);
+
+    // ========================================================================
+    // Debug Labels (VK_EXT_debug_utils, optional)
+    // ========================================================================
+
+    PFN_vkCmdBeginDebugUtilsLabelEXT pfnCmdBeginDebugLabel = nullptr;
+    PFN_vkCmdEndDebugUtilsLabelEXT pfnCmdEndDebugLabel = nullptr;
+    bool renderPassLabelOpen = false;
+    Uint32 currentPassEndQuery = UINT32_MAX;  // pending end-timestamp for the open pass
+    void beginDebugLabel(VkCommandBuffer cmd, const char* name);
+    void endDebugLabel(VkCommandBuffer cmd);
 
     // Swapchain image layout tracking (reset each frame)
     VkImageLayout swapchainImageLayout = VK_IMAGE_LAYOUT_UNDEFINED;

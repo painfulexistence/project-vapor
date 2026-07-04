@@ -25,6 +25,11 @@ struct SDL_Window;
 //  - Backend resource ids start at 1; id 0 is reserved.
 //  - For RenderPassDesc color attachments, TextureHandle{0} means "the current
 //    swapchain drawable". An invalid depth attachment means "no depth".
+//  - Ids are monotonically increasing and NEVER reused within a session, so a
+//    stale handle (resource destroyed) can never alias a newer resource — it
+//    simply misses the backend's lookup and the call becomes a no-op. This
+//    gives the safety property of generational handles; explicit generation
+//    bits only become necessary if storage moves to dense free-list arrays.
 // ============================================================================
 
 struct BufferHandle {
@@ -108,7 +113,31 @@ enum class PixelFormat {
     RGB32_FLOAT,
     Depth32Float,
     Depth24Stencil8,
+    // Sentinel: "whatever the swapchain format is". Only valid in
+    // PipelineDesc attachment formats; resolved by the backend.
+    Swapchain,
 };
+
+// Bytes per pixel for CPU<->GPU copies (tightly packed).
+inline Uint32 pixelFormatBytesPerPixel(PixelFormat format) {
+    switch (format) {
+        case PixelFormat::R8_UNORM: return 1;
+        case PixelFormat::R16_FLOAT: return 2;
+        case PixelFormat::R32_FLOAT: return 4;
+        case PixelFormat::RG32_FLOAT: return 8;
+        case PixelFormat::RGB32_FLOAT: return 12;
+        case PixelFormat::RGBA16_FLOAT: return 8;
+        case PixelFormat::RGBA32_FLOAT: return 16;
+        case PixelFormat::Depth32Float: return 4;
+        case PixelFormat::Depth24Stencil8: return 4;
+        case PixelFormat::RGBA8_UNORM:
+        case PixelFormat::RGBA8_SRGB:
+        case PixelFormat::BGRA8_UNORM:
+        case PixelFormat::BGRA8_SRGB:
+        case PixelFormat::Swapchain:
+        default: return 4;
+    }
+}
 
 // Bitmask — combine with operator| (e.g. RenderTarget | Sampled for a render
 // target that is later sampled by a post-process pass).
@@ -192,8 +221,9 @@ struct TextureDesc {
     Uint32 height = 1;
     Uint32 depth = 1;
     Uint32 mipLevels = 1;
-    Uint32 arrayLayers = 1;
+    Uint32 arrayLayers = 1;  // 6 for cubemaps; >1 (non-cube) = 2D array
     Uint32 sampleCount = 1;  // For MSAA render targets
+    bool isCube = false;     // Requires arrayLayers == 6
     PixelFormat format = PixelFormat::RGBA8_UNORM;
     TextureUsage usage = TextureUsage::Sampled;
 };
@@ -251,8 +281,12 @@ struct PipelineDesc {
     CullMode cullMode = CullMode::Back;
     bool frontFaceCounterClockwise = true;
     Uint32 sampleCount = 1;
-    // TODO: Add explicit color attachment formats (currently assumed to be the
-    // swapchain format) and descriptor set layouts when needed.
+    // Attachment formats this pipeline renders into. Both Metal and Vulkan
+    // bake these into the pipeline object; they must match the render pass.
+    // PixelFormat::Swapchain resolves to the actual swapchain format.
+    std::vector<PixelFormat> colorAttachmentFormats = { PixelFormat::Swapchain };
+    PixelFormat depthAttachmentFormat = PixelFormat::Depth32Float;  // when hasDepthAttachment
+    // TODO: Add descriptor set layouts when needed.
 };
 
 struct RenderPassDesc {
@@ -366,6 +400,10 @@ public:
     // Feature support of this backend/device. Valid after initialize().
     virtual const RHICapabilities& getCapabilities() const = 0;
 
+    // How many frames the CPU may record ahead of the GPU. Per-frame
+    // resources (upload rings, per-frame buffers) must be sized by this.
+    virtual Uint32 getMaxFramesInFlight() const = 0;
+
     // ========================================================================
     // Resource Creation
     // ========================================================================
@@ -398,7 +436,25 @@ public:
     // ========================================================================
 
     virtual void updateBuffer(BufferHandle handle, const void* data, size_t offset, size_t size) = 0;
-    virtual void updateTexture(TextureHandle handle, const void* data, size_t size) = 0;
+
+    // Upload tightly-packed pixel data to one mip level of one array layer.
+    virtual void updateTexture(TextureHandle handle, const void* data, size_t size,
+                               Uint32 mipLevel, Uint32 arrayLayer) = 0;
+    // Convenience: level 0, layer 0.
+    void updateTexture(TextureHandle handle, const void* data, size_t size) {
+        updateTexture(handle, data, size, 0, 0);
+    }
+
+    // Generate the full mip chain from level 0 (all array layers).
+    // Recorded into the batched upload stream like updateTexture.
+    virtual void generateMipmaps(TextureHandle handle) = 0;
+
+    // Uploads to GPU-only resources are recorded into a shared upload command
+    // stream and submitted automatically before the next frame's rendering
+    // (or when the staging ring fills). Call this to force an immediate
+    // submit + wait — e.g. before reading back, or at the end of a loading
+    // phase when you want the transfer cost accounted there.
+    virtual void flushUploads() = 0;
 
     // Copy swapchain/texture to CPU-readable buffer for screenshot
     // Returns a buffer handle that can be mapped after the copy completes

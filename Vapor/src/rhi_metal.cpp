@@ -5,6 +5,7 @@
 #include "rhi_metal.hpp"
 #include <fmt/core.h>
 #include <stdexcept>
+#include <algorithm>
 #include <cstdlib>
 #include <cstring>
 
@@ -127,6 +128,70 @@ void RHI_Metal::initGpuTiming() {
     }
 }
 
+// ============================================================================
+// Batched Upload Stream
+// ============================================================================
+
+MTL::BlitCommandEncoder* RHI_Metal::ensureUploadBlit() {
+    if (!stagingRingBuffer) {
+        stagingRingBuffer = NS::TransferPtr(device->newBuffer(STAGING_RING_SIZE, MTL::ResourceStorageModeShared));
+    }
+    if (!uploadCmdBuffer) {
+        uploadCmdBuffer = NS::TransferPtr(commandQueue->commandBuffer());
+        uploadBlitEncoder = uploadCmdBuffer->blitCommandEncoder();
+        uploadBlitEncoder->setLabel(NS::String::string("Uploads", NS::UTF8StringEncoding));
+    }
+    return uploadBlitEncoder;
+}
+
+void* RHI_Metal::allocStaging(size_t size, size_t& outOffset) {
+    size_t aligned = (stagingRingOffset + 15) & ~size_t(15);
+    if (aligned + size > STAGING_RING_SIZE) {
+        submitUploads(true);  // wraps: wait so the space is reusable
+        aligned = 0;
+    }
+    ensureUploadBlit();  // ring buffer must exist before we hand out pointers
+    outOffset = aligned;
+    stagingRingOffset = aligned + size;
+    return static_cast<char*>(stagingRingBuffer->contents()) + aligned;
+}
+
+MTL::Buffer* RHI_Metal::stageData(const void* data, size_t size, size_t& outOffset) {
+    if (size <= STAGING_RING_SIZE) {
+        void* dst = allocStaging(size, outOffset);
+        std::memcpy(dst, data, size);
+        return stagingRingBuffer.get();
+    }
+    // Oversize: dedicated one-shot buffer. The upload command buffer retains
+    // it until completion, so dropping our reference at return is safe.
+    auto big = NS::TransferPtr(device->newBuffer(size, MTL::ResourceStorageModeShared));
+    std::memcpy(big->contents(), data, size);
+    outOffset = 0;
+    ensureUploadBlit();
+    return big.get();
+}
+
+void RHI_Metal::submitUploads(bool waitForCompletion) {
+    if (uploadCmdBuffer) {
+        uploadBlitEncoder->endEncoding();
+        uploadBlitEncoder = nullptr;
+        uploadCmdBuffer->commit();
+        pendingUploadCmds.push_back(uploadCmdBuffer);
+        uploadCmdBuffer = nullptr;
+    }
+    if (waitForCompletion) {
+        for (auto& cmd : pendingUploadCmds) {
+            cmd->waitUntilCompleted();
+        }
+        pendingUploadCmds.clear();
+        stagingRingOffset = 0;
+    }
+}
+
+void RHI_Metal::flushUploads() {
+    submitUploads(true);
+}
+
 bool RHI_Metal::allocateTimingSlots(const char* passName, NS::UInteger& outBegin, NS::UInteger& outEnd) {
     if (!gpuTimingActiveThisFrame || !gpuTimerSampleBuffer) {
         return false;
@@ -173,7 +238,9 @@ std::vector<GpuPassTiming> RHI_Metal::getGpuPassTimings() {
 
 void RHI_Metal::shutdown() {
     if (renderer) {
-        // Wait for GPU to finish
+        // Flush and drain outstanding uploads, then wait for the GPU
+        submitUploads(true);
+        stagingRingBuffer = nullptr;
         waitIdle();
 
         // Clear all resources
@@ -254,9 +321,13 @@ void RHI_Metal::destroyBuffer(BufferHandle handle) {
 TextureHandle RHI_Metal::createTexture(const TextureDesc& desc) {
     auto textureDesc = MTL::TextureDescriptor::alloc()->init();
 
-    // Set texture type based on sample count (MSAA uses multisample type)
+    // Texture type: MSAA / cube / 2D array / plain 2D
     if (desc.sampleCount > 1) {
         textureDesc->setTextureType(MTL::TextureType2DMultisample);
+    } else if (desc.isCube) {
+        textureDesc->setTextureType(MTL::TextureTypeCube);
+    } else if (desc.arrayLayers > 1) {
+        textureDesc->setTextureType(MTL::TextureType2DArray);
     } else {
         textureDesc->setTextureType(MTL::TextureType2D);
     }
@@ -265,7 +336,8 @@ TextureHandle RHI_Metal::createTexture(const TextureDesc& desc) {
     textureDesc->setHeight(desc.height);
     textureDesc->setDepth(desc.depth);
     textureDesc->setMipmapLevelCount(desc.mipLevels);
-    textureDesc->setArrayLength(desc.arrayLayers);
+    // Metal: cube textures use arrayLength 1 (the 6 faces are implicit)
+    textureDesc->setArrayLength(desc.isCube ? 1 : desc.arrayLayers);
     textureDesc->setSampleCount(desc.sampleCount);
     textureDesc->setPixelFormat(convertPixelFormat(desc.format));
     textureDesc->setUsage(convertTextureUsage(desc.usage));
@@ -285,6 +357,7 @@ TextureHandle RHI_Metal::createTexture(const TextureDesc& desc) {
         desc.height,
         desc.depth,
         desc.mipLevels,
+        pixelFormatBytesPerPixel(desc.format),
         convertPixelFormat(desc.format)
     };
 
@@ -407,9 +480,17 @@ PipelineHandle RHI_Metal::createPipeline(const PipelineDesc& desc) {
     pipelineDesc->setVertexFunction(vsIt->second.function.get());
     pipelineDesc->setFragmentFunction(fsIt->second.function.get());
 
-    // Color attachment
+    // Color attachments: formats are baked into the PSO and must match the
+    // render pass (PixelFormat::Swapchain resolves to the layer's format).
+    // The same blend mode is applied to every attachment.
+    for (size_t i = 0; i < std::max<size_t>(1, desc.colorAttachmentFormats.size()); i++) {
+        auto attachment = pipelineDesc->colorAttachments()->object(i);
+        PixelFormat fmt = i < desc.colorAttachmentFormats.size()
+            ? desc.colorAttachmentFormats[i] : PixelFormat::Swapchain;
+        attachment->setPixelFormat(fmt == PixelFormat::Swapchain ? swapchainFormat
+                                                                 : convertPixelFormat(fmt));
+    }
     auto colorAttachment = pipelineDesc->colorAttachments()->object(0);
-    colorAttachment->setPixelFormat(swapchainFormat);
 
     // Blending
     switch (desc.blendMode) {
@@ -446,7 +527,7 @@ PipelineHandle RHI_Metal::createPipeline(const PipelineDesc& desc) {
     // Depth attachment format must match the render pass this pipeline is
     // used in, regardless of whether depth testing is enabled.
     if (desc.hasDepthAttachment) {
-        pipelineDesc->setDepthAttachmentPixelFormat(MTL::PixelFormatDepth32Float);
+        pipelineDesc->setDepthAttachmentPixelFormat(convertPixelFormat(desc.depthAttachmentFormat));
     }
 
     // Sample count
@@ -508,29 +589,11 @@ void RHI_Metal::updateBuffer(BufferHandle handle, const void* data, size_t offse
     MTL::StorageMode storageMode = buffer->storageMode();
 
     if (storageMode == MTL::StorageModePrivate) {
-        // GPU-only buffer: use staging buffer and blit encoder
-        auto stagingBuffer = NS::TransferPtr(device->newBuffer(size, MTL::ResourceStorageModeShared));
-        if (!stagingBuffer) {
-            throw std::runtime_error("Failed to create staging buffer for updateBuffer");
-        }
-
-        std::memcpy(stagingBuffer->contents(), data, size);
-
-        // Create a temporary command buffer for the copy
-        auto cmdBuffer = NS::TransferPtr(commandQueue->commandBuffer());
-        if (!cmdBuffer) {
-            throw std::runtime_error("Failed to create command buffer for updateBuffer");
-        }
-
-        auto blitEncoder = cmdBuffer->blitCommandEncoder();
-        if (!blitEncoder) {
-            throw std::runtime_error("Failed to create blit encoder for updateBuffer");
-        }
-
-        blitEncoder->copyFromBuffer(stagingBuffer.get(), 0, buffer, offset, size);
-        blitEncoder->endEncoding();
-        cmdBuffer->commit();
-        cmdBuffer->waitUntilCompleted();
+        // GPU-only buffer: copy through the staging ring into the batched
+        // upload stream (committed at beginFrame / flushUploads() / wrap)
+        size_t srcOffset;
+        MTL::Buffer* srcBuf = stageData(data, size, srcOffset);
+        ensureUploadBlit()->copyFromBuffer(srcBuf, srcOffset, buffer, offset, size);
     } else {
         // CPU-accessible buffer: direct write
         void* bufferData = buffer->contents();
@@ -546,7 +609,8 @@ void RHI_Metal::updateBuffer(BufferHandle handle, const void* data, size_t offse
     }
 }
 
-void RHI_Metal::updateTexture(TextureHandle handle, const void* data, size_t size) {
+void RHI_Metal::updateTexture(TextureHandle handle, const void* data, size_t size,
+                              Uint32 mipLevel, Uint32 arrayLayer) {
     auto it = textures.find(handle.id);
     if (it == textures.end()) {
         return;
@@ -555,58 +619,33 @@ void RHI_Metal::updateTexture(TextureHandle handle, const void* data, size_t siz
     const TextureResource& texRes = it->second;
     MTL::Texture* texture = texRes.texture.get();
 
-    // Check storage mode - Private textures need staging buffer
+    Uint32 mipWidth = std::max(1u, texRes.width >> mipLevel);
+    Uint32 mipHeight = std::max(1u, texRes.height >> mipLevel);
+    Uint32 bytesPerRow = mipWidth * texRes.bytesPerPixel;
+    Uint32 bytesPerImage = bytesPerRow * mipHeight;
+
     if (texture->storageMode() == MTL::StorageModePrivate) {
-        // GPU-only texture: use staging buffer and blit encoder
-        Uint32 bytesPerPixel = 4; // Assume RGBA8 for now
-        Uint32 bytesPerRow = texRes.width * bytesPerPixel;
-        Uint32 bytesPerImage = bytesPerRow * texRes.height;
-
-        // Create staging buffer
-        auto stagingBuffer = NS::TransferPtr(device->newBuffer(size, MTL::ResourceStorageModeShared));
-        if (!stagingBuffer) {
-            throw std::runtime_error("Failed to create staging buffer for updateTexture");
-        }
-
-        std::memcpy(stagingBuffer->contents(), data, size);
-
-        // Create a temporary command buffer for the copy
-        auto cmdBuffer = NS::TransferPtr(commandQueue->commandBuffer());
-        if (!cmdBuffer) {
-            throw std::runtime_error("Failed to create command buffer for updateTexture");
-        }
-
-        auto blitEncoder = cmdBuffer->blitCommandEncoder();
-        if (!blitEncoder) {
-            throw std::runtime_error("Failed to create blit encoder for updateTexture");
-        }
-
-        // Copy from staging buffer to texture
-        // API: copyFromBuffer(sourceBuffer, sourceOffset, sourceBytesPerRow, sourceBytesPerImage, sourceSize,
-        //                     destinationTexture, destinationSlice, destinationLevel, destinationOrigin)
-        blitEncoder->copyFromBuffer(
-            stagingBuffer.get(),                    // sourceBuffer
-            0,                                      // sourceOffset
-            bytesPerRow,                           // sourceBytesPerRow
-            bytesPerImage,                         // sourceBytesPerImage
-            MTL::Size::Make(texRes.width, texRes.height, 1),  // sourceSize
-            texture,                               // destinationTexture
-            0,                                     // destinationSlice
-            0,                                     // destinationLevel
-            MTL::Origin::Make(0, 0, 0)             // destinationOrigin
-        );
-
-        blitEncoder->endEncoding();
-        cmdBuffer->commit();
-        cmdBuffer->waitUntilCompleted();
+        // GPU-only texture: copy through the staging ring into the batched
+        // upload stream
+        size_t srcOffset;
+        MTL::Buffer* srcBuf = stageData(data, size, srcOffset);
+        ensureUploadBlit()->copyFromBuffer(
+            srcBuf, srcOffset, bytesPerRow, bytesPerImage,
+            MTL::Size::Make(mipWidth, mipHeight, 1),
+            texture, arrayLayer, mipLevel, MTL::Origin::Make(0, 0, 0));
     } else {
         // CPU-accessible texture: direct write
-        Uint32 bytesPerPixel = 4; // Assume RGBA8 for now
-        Uint32 bytesPerRow = texRes.width * bytesPerPixel;
-
-        MTL::Region region(0, 0, 0, texRes.width, texRes.height, 1);
-        texture->replaceRegion(region, 0, data, bytesPerRow);
+        MTL::Region region(0, 0, 0, mipWidth, mipHeight, 1);
+        texture->replaceRegion(region, mipLevel, arrayLayer, data, bytesPerRow, 0);
     }
+}
+
+void RHI_Metal::generateMipmaps(TextureHandle handle) {
+    auto it = textures.find(handle.id);
+    if (it == textures.end()) {
+        return;
+    }
+    ensureUploadBlit()->generateMipmaps(it->second.texture.get());
 }
 
 BufferHandle RHI_Metal::copySwapchainToBuffer(Uint32& outWidth, Uint32& outHeight) {
@@ -709,6 +748,21 @@ void RHI_Metal::unmapBuffer(BufferHandle handle) {
 // ============================================================================
 
 void RHI_Metal::beginFrame() {
+    // Commit pending uploads first: queue submission order makes the data
+    // visible to this frame's commands without a CPU wait. Completed upload
+    // command buffers are dropped opportunistically to bound the list.
+    submitUploads(false);
+    for (size_t i = 0; i < pendingUploadCmds.size();) {
+        if (pendingUploadCmds[i]->status() == MTL::CommandBufferStatusCompleted) {
+            pendingUploadCmds.erase(pendingUploadCmds.begin() + i);
+        } else {
+            ++i;
+        }
+    }
+    if (pendingUploadCmds.empty() && !uploadCmdBuffer) {
+        stagingRingOffset = 0;
+    }
+
     // Get next drawable. This legitimately fails when the window is occluded
     // or minimized — skip the frame instead of crashing; endFrame() and every
     // command-recording call no-op while currentCommandBuffer is null.
@@ -855,6 +909,11 @@ void RHI_Metal::beginRenderPass(const RenderPassDesc& desc) {
 
     if (!currentRenderEncoder) {
         throw std::runtime_error("Failed to create render command encoder");
+    }
+
+    // Pass name shows up in Xcode captures / Instruments
+    if (desc.name) {
+        currentRenderEncoder->setLabel(NS::String::string(desc.name, NS::UTF8StringEncoding));
     }
 
     // Set viewport and scissor to the actual attachment size (falls back to
@@ -1304,6 +1363,9 @@ void RHI_Metal::beginComputePass() {
             currentComputeEncoder = currentCommandBuffer->computeCommandEncoder(passDesc.get());
         } else {
             currentComputeEncoder = currentCommandBuffer->computeCommandEncoder();
+        }
+        if (currentComputeEncoder) {
+            currentComputeEncoder->setLabel(NS::String::string("Compute", NS::UTF8StringEncoding));
         }
     }
 }
