@@ -42,6 +42,9 @@ using namespace Vapor;
 #include <glm/gtc/matrix_transform.hpp>
 #include <glm/gtc/type_ptr.hpp>
 
+// GIBS (Global Illumination Based on Surfels)
+#include "Vapor/gibs_manager.hpp"
+
 // Pre-pass: Renders depth and normals
 class PrePass : public RenderPass {
 public:
@@ -57,11 +60,21 @@ public:
 
         // Create render pass descriptor
         auto prePassDesc = NS::TransferPtr(MTL::RenderPassDescriptor::renderPassDescriptor());
+
+        // Color attachment 0: Normal
         auto prePassNormalRT = prePassDesc->colorAttachments()->object(0);
         prePassNormalRT->setClearColor(MTL::ClearColor(0.0, 0.0, 0.0, 1.0));
         prePassNormalRT->setLoadAction(MTL::LoadActionClear);
         prePassNormalRT->setStoreAction(MTL::StoreActionStore);
         prePassNormalRT->setTexture(r.normalRT_MS.get());
+
+        // Color attachment 1: Albedo (for GIBS)
+        auto prePassAlbedoRT = prePassDesc->colorAttachments()->object(1);
+        prePassAlbedoRT->setClearColor(MTL::ClearColor(0.0, 0.0, 0.0, 1.0));
+        prePassAlbedoRT->setLoadAction(MTL::LoadActionClear);
+        prePassAlbedoRT->setStoreAction(MTL::StoreActionMultisampleResolve);
+        prePassAlbedoRT->setTexture(r.albedoRT_MS.get());
+        prePassAlbedoRT->setResolveTexture(r.albedoRT.get());
 
         auto prePassDepthRT = prePassDesc->depthAttachment();
         prePassDepthRT->setClearDepth(r.clearDepth);
@@ -1142,6 +1155,13 @@ public:
             // PSSM shadow maps (data buffer bound once before this loop, at buffer 9)
             encoder->setFragmentTexture(r.pssmShadowMaps.get(), 12);
             encoder->setFragmentTexture(r.pointShadowDenoisedRT.get(), 13);
+
+            // GIBS (Global Illumination Based on Surfels)
+            if (r.gibsEnabled && r.gibsManager && r.gibsManager->getGIResultTexture()) {
+                encoder->setFragmentTexture(r.gibsManager->getGIResultTexture(), 14);
+            }
+            Uint32 gibsEnabledFlag = (r.gibsEnabled && r.gibsManager) ? 1 : 0;
+            encoder->setFragmentBytes(&gibsEnabledFlag, sizeof(Uint32), 10);
 
             for (const auto& draw : draws) {
                 if (!r.currentCamera->isVisible(r.instances[draw.instanceIndex].boundingSphere)) {
@@ -2600,6 +2620,256 @@ public:
     }
 };
 
+// ============================================================================
+// GIBS (Global Illumination Based on Surfels) Passes
+// ============================================================================
+
+class SurfelGenerationPass : public RenderPass {
+public:
+    SurfelGenerationPass(Renderer_Metal* renderer, Vapor::GIBSManager* gm)
+        : RenderPass(renderer), gibsManager(gm) {}
+
+    const char* getName() const override { return "SurfelGenerationPass"; }
+
+    void execute() override {
+        auto& r = *renderer;
+        if (!r.gibsEnabled || !gibsManager || !r.surfelGenerationPipeline) return;
+
+        auto drawableSize = r.swapchain->drawableSize();
+        glm::vec2 screenSize(drawableSize.width, drawableSize.height);
+
+        SurfelGenerationParams params;
+        params.invViewProj = gibsManager->getGIBSData().invViewProj;
+        params.screenSize = screenSize;
+        params.surfelRadius = gibsManager->getGIBSData().surfelRadius;
+        params.densityThreshold = 0.01f;
+        // Small per-frame budget: coverage dedup only sees LAST frame's surfels,
+        // so same-frame duplicates are invisible to each other. A large budget
+        // floods the pool with duplicates before the hash catches up; a small
+        // one converges in ~1-2s with dedup effective from frame 2 onward.
+        params.maxNewSurfels = std::max(gibsManager->getMaxSurfels() / 100, 1000u);
+        params.frameIndex = r.frameNumber;
+
+        auto timedDesc = makeTimedComputeDesc(true, true);
+        auto encoder = r.currentCommandBuffer->computeCommandEncoder(timedDesc.get());
+        encoder->setLabel(NS::String::string("Surfel Generation", NS::UTF8StringEncoding));
+        encoder->setComputePipelineState(r.surfelGenerationPipeline.get());
+
+        encoder->setTexture(r.depthStencilRT.get(), 0);
+        encoder->setTexture(r.normalRT.get(), 1);
+        encoder->setTexture(r.albedoRT.get(), 2);
+
+        encoder->setBuffer(gibsManager->getSurfelBuffer(), 0, 0);
+        encoder->setBuffer(gibsManager->getCounterBuffer(), 0, 1);
+        encoder->setBuffer(gibsManager->getGIBSDataBuffer(r.currentFrameInFlight), 0, 2);
+        encoder->setBytes(&params, sizeof(params), 3);
+        // Fresh spatial hash (hash build runs before this pass) for coverage rejection
+        encoder->setBuffer(gibsManager->getCellHeadBuffer(), 0, 4);
+        encoder->setBuffer(gibsManager->getSurfelNextBuffer(), 0, 5);
+
+        uint32_t dispatchX = (static_cast<uint32_t>(screenSize.x) + 7) / 8;
+        uint32_t dispatchY = (static_cast<uint32_t>(screenSize.y) + 7) / 8;
+        encoder->dispatchThreadgroups(MTL::Size(dispatchX, dispatchY, 1), MTL::Size(8, 8, 1));
+        encoder->endEncoding();
+    }
+
+private:
+    Vapor::GIBSManager* gibsManager;
+};
+
+class SurfelHashBuildPass : public RenderPass {
+public:
+    SurfelHashBuildPass(Renderer_Metal* renderer, Vapor::GIBSManager* gm)
+        : RenderPass(renderer), gibsManager(gm) {}
+
+    const char* getName() const override { return "SurfelHashBuildPass"; }
+
+    void execute() override {
+        auto& r = *renderer;
+        if (!r.gibsEnabled || !gibsManager || !r.surfelClearCellHeadsPipeline) return;
+        uint32_t totalCells = gibsManager->getTotalCells();
+        uint32_t activeSurfels = gibsManager->getActiveSurfelCount();
+        if (activeSurfels == 0) activeSurfels = 1;
+
+        MTL::Buffer* gibsData = gibsManager->getGIBSDataBuffer(r.currentFrameInFlight);
+
+        // Linked-list spatial hash: two fully parallel dispatches (clear heads,
+        // then atomic-push each surfel onto its cell's list). Replaces the
+        // counting sort whose single-threaded prefix sum walked every cell.
+        auto timedDesc = makeTimedComputeDesc(true, true);
+        auto encoder = r.currentCommandBuffer->computeCommandEncoder(timedDesc.get());
+        encoder->setLabel(NS::String::string("Surfel Hash Build", NS::UTF8StringEncoding));
+
+        // Step 1: Reset cell list heads
+        encoder->setComputePipelineState(r.surfelClearCellHeadsPipeline.get());
+        encoder->setBuffer(gibsManager->getCellHeadBuffer(), 0, 0);
+        encoder->setBuffer(gibsData, 0, 1);
+        encoder->dispatchThreadgroups(MTL::Size((totalCells + 255) / 256, 1, 1), MTL::Size(256, 1, 1));
+
+        // Step 2: Insert surfels into their cell lists
+        encoder->setComputePipelineState(r.surfelInsertPipeline.get());
+        encoder->setBuffer(gibsManager->getSurfelBuffer(), 0, 0);
+        encoder->setBuffer(gibsManager->getCellHeadBuffer(), 0, 1);
+        encoder->setBuffer(gibsManager->getSurfelNextBuffer(), 0, 2);
+        encoder->setBuffer(gibsData, 0, 3);
+        encoder->dispatchThreadgroups(MTL::Size((activeSurfels + 255) / 256, 1, 1), MTL::Size(256, 1, 1));
+
+        encoder->endEncoding();
+
+        addTrafficEstimate(uint64_t(totalCells) * 4 + uint64_t(activeSurfels) * (sizeof(Surfel) + 8));
+    }
+
+private:
+    Vapor::GIBSManager* gibsManager;
+};
+
+class SurfelRaytracingPass : public RenderPass {
+public:
+    SurfelRaytracingPass(Renderer_Metal* renderer, Vapor::GIBSManager* gm)
+        : RenderPass(renderer), gibsManager(gm) {}
+
+    const char* getName() const override { return "SurfelRaytracingPass"; }
+
+    void execute() override {
+        auto& r = *renderer;
+        if (!r.gibsEnabled || !gibsManager || !r.surfelRaytracingSimplePipeline) return;
+        const auto& gibsData = gibsManager->getGIBSData();
+
+        // Staggered updates: refresh 1/4 of the surfel pool per frame; temporal
+        // blending integrates the rest. Cuts per-frame ray cost by 4x.
+        constexpr uint32_t UPDATE_INTERVAL = 4;
+
+        SurfelRaytracingParams params;
+        params.surfelOffset = 0;
+        params.surfelCount = gibsManager->getActiveSurfelCount();
+        params.raysPerSurfel = gibsManager->getRaysPerSurfel();
+        params.frameIndex = r.frameNumber;
+        params.rayBias = gibsData.rayBias;
+        params.rayMaxDistance = gibsData.rayMaxDistance;
+        params.updateInterval = UPDATE_INTERVAL;
+
+        if (params.surfelCount == 0) return;
+
+        auto timedDesc = makeTimedComputeDesc(true, true);
+        auto encoder = r.currentCommandBuffer->computeCommandEncoder(timedDesc.get());
+        encoder->setLabel(NS::String::string("Surfel Raytracing", NS::UTF8StringEncoding));
+
+        bool useRT = r.m_supportsRaytracing && r.TLASBuffers[r.currentFrameInFlight] && r.surfelRaytracingPipeline;
+        encoder->setComputePipelineState(useRT ? r.surfelRaytracingPipeline.get()
+                                                : r.surfelRaytracingSimplePipeline.get());
+
+        // Canonical buffer at 0: irradiance accumulates here across frames.
+        // Neighbor lookups walk the cell linked lists over the same buffer.
+        encoder->setBuffer(gibsManager->getSurfelBuffer(), 0, 0);
+        encoder->setBuffer(gibsManager->getCellHeadBuffer(), 0, 1);
+        encoder->setBuffer(gibsManager->getGIBSDataBuffer(r.currentFrameInFlight), 0, 2);
+        encoder->setBytes(&params, sizeof(params), 3);
+
+        if (useRT) {
+            encoder->setAccelerationStructure(r.TLASBuffers[r.currentFrameInFlight].get(), 4);
+            encoder->setBuffer(gibsManager->getSurfelNextBuffer(), 0, 5);
+        }
+
+        // Only dispatch threads for this frame's residue class of surfels
+        uint32_t surfelsThisFrame = (params.surfelCount + UPDATE_INTERVAL - 1) / UPDATE_INTERVAL;
+        uint32_t threadGroups = (surfelsThisFrame + 63) / 64;
+        encoder->dispatchThreadgroups(MTL::Size(threadGroups, 1, 1), MTL::Size(64, 1, 1));
+        encoder->endEncoding();
+
+        addTrafficEstimate(uint64_t(surfelsThisFrame) * sizeof(Surfel) * 2);
+    }
+
+private:
+    Vapor::GIBSManager* gibsManager;
+};
+
+class GIBSTemporalPass : public RenderPass {
+public:
+    GIBSTemporalPass(Renderer_Metal* renderer, Vapor::GIBSManager* gm)
+        : RenderPass(renderer), gibsManager(gm) {}
+
+    const char* getName() const override { return "GIBSTemporalPass"; }
+
+    void execute() override {
+        auto& r = *renderer;
+        if (!r.gibsEnabled || !gibsManager || !r.gibsTemporalPipeline) return;
+        uint32_t activeSurfels = gibsManager->getActiveSurfelCount();
+        if (activeSurfels == 0) return;
+
+        auto timedDesc = makeTimedComputeDesc(true, true);
+        auto encoder = r.currentCommandBuffer->computeCommandEncoder(timedDesc.get());
+        encoder->setLabel(NS::String::string("GIBS Temporal", NS::UTF8StringEncoding));
+        encoder->setComputePipelineState(r.gibsTemporalPipeline.get());
+
+        // Canonical buffer: smoothing must persist, the sorted copy is rebuilt each frame
+        encoder->setBuffer(gibsManager->getSurfelBuffer(), 0, 0);
+        encoder->setBuffer(gibsManager->getGIBSDataBuffer(r.currentFrameInFlight), 0, 1);
+
+        uint32_t threadGroups = (activeSurfels + 255) / 256;
+        encoder->dispatchThreadgroups(MTL::Size(threadGroups, 1, 1), MTL::Size(256, 1, 1));
+        encoder->endEncoding();
+    }
+
+private:
+    Vapor::GIBSManager* gibsManager;
+};
+
+class GIBSSamplePass : public RenderPass {
+public:
+    GIBSSamplePass(Renderer_Metal* renderer, Vapor::GIBSManager* gm)
+        : RenderPass(renderer), gibsManager(gm) {}
+
+    const char* getName() const override { return "GIBSSamplePass"; }
+
+    void execute() override {
+        auto& r = *renderer;
+        if (!r.gibsEnabled || !gibsManager || !r.gibsSamplePipeline) return;
+        if (!gibsManager->getGIResultTexture()) return; // textures created lazily in draw()
+        const auto& gibsData = gibsManager->getGIBSData();
+
+        auto drawableSize = r.swapchain->drawableSize();
+        glm::vec2 screenSize(drawableSize.width, drawableSize.height);
+        glm::vec2 giResolution = screenSize * gibsManager->getResolutionScale();
+
+        GIBSSampleParams params;
+        params.invViewProj = gibsData.invViewProj;
+        params.screenSize = screenSize;
+        params.giResolution = giResolution;
+        // Surfel influence radius in WORLD units; the cell search radius
+        // (gibs.sampleRadius, in cells) is a separate parameter in the kernel
+        params.sampleRadius = gibsData.cellSize;
+        params.maxSamples = gibsData.maxSurfelsPerPixel;
+        params.normalWeight = 1.0f;
+        params.distanceWeight = 1.0f;
+
+        // Sample at GI resolution; the main pass upsamples for free via bilinear sampling
+        auto timedDesc = makeTimedComputeDesc(true, true);
+        auto encoder = r.currentCommandBuffer->computeCommandEncoder(timedDesc.get());
+        encoder->setLabel(NS::String::string("GIBS Sample", NS::UTF8StringEncoding));
+        encoder->setComputePipelineState(r.gibsSamplePipeline.get());
+
+        encoder->setTexture(r.depthStencilRT.get(), 0);
+        encoder->setTexture(r.normalRT.get(), 1);
+        encoder->setTexture(gibsManager->getGIResultTexture(), 2);
+
+        encoder->setBuffer(gibsManager->getSurfelBuffer(), 0, 0);
+        encoder->setBuffer(gibsManager->getCellHeadBuffer(), 0, 1);
+        encoder->setBuffer(gibsManager->getGIBSDataBuffer(r.currentFrameInFlight), 0, 2);
+        encoder->setBytes(&params, sizeof(params), 3);
+        encoder->setBuffer(gibsManager->getSurfelNextBuffer(), 0, 4);
+
+        uint32_t dispatchX = (static_cast<uint32_t>(giResolution.x) + 7) / 8;
+        uint32_t dispatchY = (static_cast<uint32_t>(giResolution.y) + 7) / 8;
+        encoder->dispatchThreadgroups(MTL::Size(dispatchX, dispatchY, 1), MTL::Size(8, 8, 1));
+        encoder->endEncoding();
+
+        addTrafficEstimate(uint64_t(giResolution.x) * uint64_t(giResolution.y) * (4 + 8 + 8));
+    }
+
+private:
+    Vapor::GIBSManager* gibsManager;
+};
+
 auto createRendererMetal() -> std::unique_ptr<Renderer> {
     return std::make_unique<Renderer_Metal>();
 }
@@ -2676,6 +2946,20 @@ auto Renderer_Metal::init(SDL_Window* window) -> void {
     if (m_supportsRaytracing) graph.addPass(std::make_unique<AODenoisePass>(this));
     if (m_supportsRaytracing) graph.addPass(std::make_unique<StochasticPointShadowPass>(this));
     if (m_supportsRaytracing) graph.addPass(std::make_unique<PointShadowTemporalPass>(this));
+
+    // GIBS (Global Illumination Based on Surfels) passes
+    // Always add passes; they check gibsEnabled in execute() for runtime toggle.
+    // Hash build runs FIRST so generation can coverage-check against the fresh
+    // spatial hash (built from last frame's pool) and raytracing/sampling get
+    // up-to-date cells.
+    if (gibsManager) {
+        graph.addPass(std::make_unique<SurfelHashBuildPass>(this, gibsManager.get()));
+        graph.addPass(std::make_unique<SurfelGenerationPass>(this, gibsManager.get()));
+        graph.addPass(std::make_unique<SurfelRaytracingPass>(this, gibsManager.get()));
+        graph.addPass(std::make_unique<GIBSTemporalPass>(this, gibsManager.get()));
+        graph.addPass(std::make_unique<GIBSSamplePass>(this, gibsManager.get()));
+    }
+
     graph.addPass(std::make_unique<MainRenderPass>(this));
     graph.addPass(std::make_unique<SkyAtmospherePass>(this));
     // graph.addPass(std::make_unique<WaterPass>(this));
@@ -2833,7 +3117,47 @@ auto Renderer_Metal::createResources() -> void {
     drawPipeline = createPipeline("shaders/3d_pbr_normal_mapped.metal", true, false, MSAA_SAMPLE_COUNT);
     iridescentPipeline = createPipeline("shaders/3d_pbr_iridescent.metal", true, false, MSAA_SAMPLE_COUNT);
     equirectToCubemapPipeline = createPipeline("shaders/3d_equirect_to_cubemap.metal", false, true, 1);
-    prePassPipeline = createPipeline("shaders/3d_depth_only.metal", true, false, MSAA_SAMPLE_COUNT);
+
+    // PrePass pipeline with MRT (normal + albedo for GIBS)
+    {
+        auto shaderSrc = readFile("shaders/3d_depth_only.metal");
+        auto code = NS::String::string(shaderSrc.data(), NS::StringEncoding::UTF8StringEncoding);
+        NS::Error* error = nullptr;
+        MTL::Library* library = device->newLibrary(code, nullptr, &error);
+        if (!library) {
+            throw std::runtime_error(fmt::format("PrePass shader compile error: {}\n", error->localizedDescription()->utf8String()));
+        }
+
+        auto vertexMain = library->newFunction(NS::String::string("vertexMain", NS::UTF8StringEncoding));
+        auto fragmentMain = library->newFunction(NS::String::string("fragmentMain", NS::UTF8StringEncoding));
+
+        auto pipelineDesc = MTL::RenderPipelineDescriptor::alloc()->init();
+        pipelineDesc->setVertexFunction(vertexMain);
+        pipelineDesc->setFragmentFunction(fragmentMain);
+
+        // Color attachment 0: Normal (HDR)
+        auto colorAttachment0 = pipelineDesc->colorAttachments()->object(0);
+        colorAttachment0->setPixelFormat(MTL::PixelFormatRGBA16Float);
+
+        // Color attachment 1: Albedo (LDR)
+        auto colorAttachment1 = pipelineDesc->colorAttachments()->object(1);
+        colorAttachment1->setPixelFormat(MTL::PixelFormatRGBA8Unorm);
+
+        pipelineDesc->setDepthAttachmentPixelFormat(MTL::PixelFormatDepth32Float);
+        pipelineDesc->setSampleCount(NS::UInteger(MSAA_SAMPLE_COUNT));
+
+        prePassPipeline = NS::TransferPtr(device->newRenderPipelineState(pipelineDesc, &error));
+        if (!prePassPipeline) {
+            throw std::runtime_error(fmt::format("PrePass pipeline error: {}\n", error->localizedDescription()->utf8String()));
+        }
+
+        pipelineDesc->release();
+        vertexMain->release();
+        fragmentMain->release();
+        library->release();
+        code->release();
+    }
+
     postProcessPipeline = createPipeline("shaders/3d_post_process.metal", false, true, 1);
     buildClustersPipeline = createComputePipeline("shaders/3d_cluster_build.metal");
     cullLightsPipeline = createComputePipeline("shaders/3d_light_cull.metal");
@@ -2896,6 +3220,24 @@ auto Renderer_Metal::createResources() -> void {
     prefilterEnvMapPipeline = createPipeline("shaders/3d_prefilter_envmap.metal", true, true, 1);
     brdfLUTPipeline = createPipeline("shaders/3d_brdf_lut.metal", false, true, 1);
     lightScatteringPipeline = createPipeline("shaders/3d_light_scattering.metal", true, true, 1);
+
+    // GIBS (Global Illumination Based on Surfels) pipelines
+    if (m_supportsRaytracing) {
+        surfelGenerationPipeline = createComputePipeline("shaders/gibs_surfel_generation.metal", "surfelGeneration");
+        surfelClearCellHeadsPipeline = createComputePipeline("shaders/gibs_spatial_hash.metal", "clearCellHeads");
+        surfelInsertPipeline = createComputePipeline("shaders/gibs_spatial_hash.metal", "insertSurfels");
+        surfelRaytracingPipeline = createComputePipeline("shaders/gibs_raytracing.metal", "surfelRaytracing");
+        surfelRaytracingSimplePipeline = createComputePipeline("shaders/gibs_raytracing.metal", "surfelRaytracingSimple");
+        gibsTemporalPipeline = createComputePipeline("shaders/gibs_temporal.metal", "surfelTemporalSmooth");
+        gibsSamplePipeline = createComputePipeline("shaders/gibs_sample.metal", "giSample");
+        gibsUpsamplePipeline = createComputePipeline("shaders/gibs_sample.metal", "giBilateralUpsample");
+        gibsCompositePipeline = createComputePipeline("shaders/gibs_sample.metal", "giComposite");
+
+        // Initialize GIBS Manager
+        gibsManager = std::make_unique<Vapor::GIBSManager>(this);
+        gibsManager->setQuality(gibsQuality);
+        gibsManager->init();
+    }
 
     // Create debug draw pipeline
     {
@@ -3386,6 +3728,22 @@ auto Renderer_Metal::createResources() -> void {
     normalTextureDesc->setUsage(MTL::TextureUsageShaderRead | MTL::TextureUsageShaderWrite);
     normalRT = NS::TransferPtr(device->newTexture(normalTextureDesc));
     normalTextureDesc->release();
+
+    // Albedo RT for GIBS (stores albedo color from PrePass)
+    MTL::TextureDescriptor* albedoTextureDesc = MTL::TextureDescriptor::alloc()->init();
+    albedoTextureDesc->setTextureType(MTL::TextureType2DMultisample);
+    albedoTextureDesc->setPixelFormat(MTL::PixelFormatRGBA8Unorm);
+    albedoTextureDesc->setWidth(swapchain->drawableSize().width);
+    albedoTextureDesc->setHeight(swapchain->drawableSize().height);
+    albedoTextureDesc->setSampleCount(NS::UInteger(MSAA_SAMPLE_COUNT));
+    albedoTextureDesc->setUsage(MTL::TextureUsageRenderTarget | MTL::TextureUsageShaderRead);
+    albedoRT_MS = NS::TransferPtr(device->newTexture(albedoTextureDesc));
+    albedoTextureDesc->setTextureType(MTL::TextureType2D);
+    albedoTextureDesc->setSampleCount(1);
+    // RenderTarget usage is REQUIRED: this texture is the MSAA resolve target of PrePass
+    albedoTextureDesc->setUsage(MTL::TextureUsageRenderTarget | MTL::TextureUsageShaderRead | MTL::TextureUsageShaderWrite);
+    albedoRT = NS::TransferPtr(device->newTexture(albedoTextureDesc));
+    albedoTextureDesc->release();
 
     // Half resolution: 4x fewer (miss-dominated, expensive) shadow rays; consumers
     // sample at screen UVs with a bilinear sampler, which upsamples for free and
@@ -4825,6 +5183,36 @@ auto Renderer_Metal::draw(std::shared_ptr<Scene> scene, Camera& camera) -> void 
     drawCount = 0;
 
     // ==========================================================================
+    // Update GIBS (Global Illumination Based on Surfels)
+    // ==========================================================================
+    if (gibsEnabled && gibsManager) {
+        // Initialize GI textures if needed (or resize on window resize)
+        Uint32 screenW = static_cast<Uint32>(surface->texture()->width());
+        Uint32 screenH = static_cast<Uint32>(surface->texture()->height());
+        gibsManager->initTextures(screenW, screenH);
+
+        // Begin frame for GIBS
+        gibsManager->beginFrame(currentFrameInFlight);
+
+        // Update GIBS data with camera and lighting info
+        glm::mat4 viewProj = proj * view;
+        glm::mat4 invViewProj = glm::inverse(viewProj);
+
+        // Get sun direction and color from first directional light
+        glm::vec3 sunDir = glm::vec3(0.0f, -1.0f, 0.0f);
+        glm::vec3 sunColor = glm::vec3(1.0f);
+        float sunIntensity = 1.0f;
+        if (!scene->directionalLights.empty()) {
+            const auto& sunLight = scene->directionalLights[0];
+            sunDir = glm::normalize(sunLight.direction);
+            sunColor = sunLight.color;
+            sunIntensity = sunLight.intensity;
+        }
+
+        gibsManager->updateGIBSData(viewProj, invViewProj, camPos, sunDir, sunColor, sunIntensity);
+    }
+
+    // ==========================================================================
     // Initialize RmlUI if not already initialized (delayed initialization)
     // ==========================================================================
     auto* engineCore = Vapor::EngineCore::Get();
@@ -5251,6 +5639,33 @@ auto Renderer_Metal::draw(std::shared_ptr<Scene> scene, Camera& camera) -> void 
             ImGui::TreePop();
         }
 
+        if (ImGui::TreeNode("Global Illumination (GIBS)")) {
+            ImGui::Separator();
+            ImGui::Checkbox("Enabled", &gibsEnabled);
+            if (gibsEnabled && gibsManager) {
+                ImGui::Text("Active Surfels: %u / %u", gibsManager->getActiveSurfelCount(), gibsManager->getMaxSurfels());
+                ImGui::Text("Rays/Surfel: %u", gibsManager->getRaysPerSurfel());
+                ImGui::Text("Resolution Scale: %.2fx", gibsManager->getResolutionScale());
+                // Raw GPU counters: [0] = this frame's generation budget cursor (reset each
+                // frame), [1] = persistent pool cursor. If both stay 0 the generation kernel
+                // is not producing surfels (check depth/bounds); if [1] > 0 but Active stays
+                // 0 the CPU readback is broken.
+                glm::uvec2 rawCounters = gibsManager->getRawCounters();
+                ImGui::Text("GPU counters: budget=%u pool=%u", rawCounters.x, rawCounters.y);
+                if (ImGui::Button("Reset Surfels")) {
+                    gibsManager->resetSurfels();
+                }
+
+                int qualityIdx = static_cast<int>(gibsQuality);
+                if (ImGui::Combo("Quality", &qualityIdx, "Low\0Medium\0High\0Ultra\0")) {
+                    gibsQuality = static_cast<GIBSQuality>(qualityIdx);
+                    gibsManager->setQuality(gibsQuality);
+                }
+            }
+            ImGui::TextDisabled("Surfel-based indirect diffuse lighting");
+            ImGui::TreePop();
+        }
+
         if (ImGui::TreeNode("Light Scattering (God Rays)")) {
             ImGui::Separator();
             ImGui::Checkbox("Enabled", &lightScatteringEnabled);
@@ -5575,6 +5990,21 @@ auto Renderer_Metal::draw(std::shared_ptr<Scene> scene, Camera& camera) -> void 
                 bool endValid   = end != 0 && end != ~0ull;
                 double ms = (beginValid && endValid && end >= begin)
                     ? static_cast<double>(end - begin) / 1e6 : 0.0;
+                // A slot that stopped being refreshed (encoder no longer writes its
+                // sample) holds a stale absolute timestamp; the delta then grows by
+                // one frame time per frame and reads as seconds. No real pass takes
+                // over a second — treat it as a stale-slot artifact, not a timing.
+                if (ms > 1000.0) {
+                    static std::mutex staleMutex;
+                    static std::set<std::string> staleReported;
+                    std::lock_guard<std::mutex> staleLock(staleMutex);
+                    if (staleReported.insert(info.name).second) {
+                        fmt::print("[gpu-timing] pass '{}' delta {:.0f}ms — begin slot {} is stale "
+                                   "(previous pass stopped refreshing its end sample)\n",
+                                   info.name, ms, static_cast<uint64_t>(info.beginIdx));
+                    }
+                    ms = 0.0;
+                }
                 if (!endValid) {
                     // The pass that failed to write is THIS one (its end slot is empty);
                     // log once per pass name so the culprit encoder is identifiable.
@@ -5698,27 +6128,39 @@ auto Renderer_Metal::createPipeline(const std::string& filename, bool isHDR, boo
 }
 
 auto Renderer_Metal::createComputePipeline(const std::string& filename) -> NS::SharedPtr<MTL::ComputePipelineState> {
+    return createComputePipeline(filename, "computeMain");
+}
+
+auto Renderer_Metal::createComputePipeline(const std::string& filename, const std::string& functionName) -> NS::SharedPtr<MTL::ComputePipelineState> {
     auto shaderSrc = readFile(filename);
 
     auto code = NS::String::string(shaderSrc.data(), NS::StringEncoding::UTF8StringEncoding);
     NS::Error* error = nullptr;
-    MTL::CompileOptions* options = nullptr;
-    MTL::Library* library = device->newLibrary(code, options, &error);
+    MTL::Library* library = device->newLibrary(code, nullptr, &error);
     if (!library) {
         throw std::runtime_error(
             fmt::format("Could not compile shader! Error: {}\n", error->localizedDescription()->utf8String())
         );
     }
-    // fmt::print("Shader compiled successfully. Shader: {}\n", code->cString(NS::StringEncoding::UTF8StringEncoding));
 
-    auto computeFuncName = NS::String::string("computeMain", NS::StringEncoding::UTF8StringEncoding);
-    auto computeMain = library->newFunction(computeFuncName);
+    auto computeFuncName = NS::String::string(functionName.c_str(), NS::StringEncoding::UTF8StringEncoding);
+    auto computeFunc = library->newFunction(computeFuncName);
+    if (!computeFunc) {
+        throw std::runtime_error(
+            fmt::format("Could not find compute function '{}' in shader '{}'\n", functionName, filename)
+        );
+    }
 
-    auto pipeline = NS::TransferPtr(device->newComputePipelineState(computeMain, &error));
+    auto pipeline = NS::TransferPtr(device->newComputePipelineState(computeFunc, &error));
+    if (!pipeline) {
+        throw std::runtime_error(
+            fmt::format("Could not create compute pipeline for '{}': {}\n", functionName, error->localizedDescription()->utf8String())
+        );
+    }
 
     code->release();
     library->release();
-    computeMain->release();
+    computeFunc->release();
 
     return pipeline;
 }
