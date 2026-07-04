@@ -20,6 +20,8 @@
 #include "debug_draw.hpp"
 #include "graphics.hpp"
 #include "graphics_batch2d.hpp"  // Batch2DStats, Batch2DVertex, Batch2DBlendMode
+#include "graphics_effects.hpp"  // WaterData, VolumetricFogData, VolumetricCloudData, LightScatteringData, SunFlareData, Particle
+#include "graphics_gibs.hpp"     // GIBSQuality, GIBSData, Surfel
 
 // Forward declarations
 namespace Rml {
