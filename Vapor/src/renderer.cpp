@@ -21,9 +21,10 @@
 #include <vulkan/vulkan.h>
 
 #ifdef __APPLE__
-// Metal headers for ImGui initialization
-#define NS_PRIVATE_IMPLEMENTATION
-#define MTL_PRIVATE_IMPLEMENTATION
+// Metal headers for ImGui initialization (declarations only). The metal-cpp
+// implementation is emitted by exactly ONE translation unit — renderer_metal.cpp.
+// Defining *_PRIVATE_IMPLEMENTATION here too made three TUs emit it → duplicate
+// symbols at link. Keep only the include for declarations.
 #include <Metal/Metal.hpp>
 #endif
 

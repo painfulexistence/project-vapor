@@ -1,7 +1,7 @@
-#define NS_PRIVATE_IMPLEMENTATION
-#define MTL_PRIVATE_IMPLEMENTATION
-#define CA_PRIVATE_IMPLEMENTATION
-
+// NOTE: The metal-cpp implementation (*_PRIVATE_IMPLEMENTATION) is emitted by
+// exactly ONE translation unit — renderer_metal.cpp. This TU only uses the
+// declarations, so it must NOT define those macros (doing so made multiple TUs
+// emit the implementation → duplicate symbols at link).
 #include "rhi_metal.hpp"
 #include <fmt/core.h>
 #include <stdexcept>
