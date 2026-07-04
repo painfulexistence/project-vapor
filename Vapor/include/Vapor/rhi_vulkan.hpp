@@ -174,6 +174,7 @@ private:
         VkDeviceSize size;
         bool isMapped;
         void* mappedData;
+        bool hostVisible = true;
     };
 
     struct TextureResource {
@@ -183,6 +184,8 @@ private:
         VkFormat format;
         Uint32 width;
         Uint32 height;
+        VkImageUsageFlags usage = 0;
+        VkImageLayout currentLayout = VK_IMAGE_LAYOUT_UNDEFINED;
     };
 
     struct ShaderResource {
@@ -235,6 +238,56 @@ private:
     // Dynamic rendering extension functions
     PFN_vkCmdBeginRenderingKHR vkCmdBeginRenderingKHR = nullptr;
     PFN_vkCmdEndRenderingKHR vkCmdEndRenderingKHR = nullptr;
+
+    // ========================================================================
+    // Descriptor Binding Model
+    // ------------------------------------------------------------------------
+    // The RHI exposes Metal-style stage-indexed bindings. On Vulkan they map
+    // onto one global pipeline layout shared by every graphics pipeline:
+    //   set 0 = vertex-stage buffers   (setVertexBuffer)    — SSBO, 8 slots
+    //   set 1 = fragment-stage buffers (setFragmentBuffer)  — SSBO, 8 slots
+    //   set 2 = fragment textures      (setTexture)         — sampler, 8 slots
+    //   push constants (128 B): vertex bytes at (binding%4)*16 in [0,64),
+    //                           fragment bytes at 64+(binding%4)*16 in [64,128)
+    // Bindings accumulate in CPU-side state; a fresh descriptor set trio is
+    // allocated from the per-frame pool and (re)bound whenever a draw happens
+    // after a binding change.
+    // ========================================================================
+
+    static constexpr Uint32 BINDINGS_PER_SET = 8;
+
+    struct BufferBinding {
+        VkBuffer buffer = VK_NULL_HANDLE;
+        VkDeviceSize offset = 0;
+        VkDeviceSize range = VK_WHOLE_SIZE;
+    };
+    struct TextureBinding {
+        VkImageView view = VK_NULL_HANDLE;
+        VkSampler sampler = VK_NULL_HANDLE;
+    };
+
+    VkDescriptorSetLayout vertexBufferSetLayout = VK_NULL_HANDLE;   // set 0
+    VkDescriptorSetLayout fragmentBufferSetLayout = VK_NULL_HANDLE; // set 1
+    VkDescriptorSetLayout textureSetLayout = VK_NULL_HANDLE;        // set 2
+    VkPipelineLayout globalPipelineLayout = VK_NULL_HANDLE;
+    std::vector<VkDescriptorPool> descriptorPools;  // one per frame in flight
+
+    BufferBinding boundVertexBuffers[BINDINGS_PER_SET];
+    BufferBinding boundFragmentBuffers[BINDINGS_PER_SET];
+    TextureBinding boundTextures[BINDINGS_PER_SET];
+    bool descriptorsDirty = true;
+
+    // Swapchain image layout tracking (reset each frame)
+    VkImageLayout swapchainImageLayout = VK_IMAGE_LAYOUT_UNDEFINED;
+
+    // Attachments of the render pass currently being recorded (for the
+    // attachment -> shader-read transition at endRenderPass)
+    std::vector<Uint32> currentPassColorTextures;
+
+    void createDescriptorInfrastructure();
+    void destroyDescriptorInfrastructure();
+    void flushDescriptors();
+    void transitionImage(VkImage image, VkImageLayout from, VkImageLayout to, VkImageAspectFlags aspect);
 
     // ========================================================================
     // Internal Helpers

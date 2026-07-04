@@ -209,6 +209,12 @@ auto main(int argc, char* args[]) -> int {
     Vapor::RNG rng;
 
     auto renderer = createRenderer(gfxBackend, window);
+    if (!renderer) {
+        fmt::print(stderr, "Failed to create renderer (backend unavailable?)\n");
+        SDL_DestroyWindow(window);
+        SDL_Quit();
+        return 1;
+    }
     // Renderer is already initialized by createRenderer()
 
     // Optional: load an external HDRI for IBL instead of the procedural sky.

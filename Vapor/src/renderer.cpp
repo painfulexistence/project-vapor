@@ -96,6 +96,10 @@ void Renderer::initialize(std::unique_ptr<RHI> rhiPtr, GraphicsBackend backendTy
 
 void Renderer::shutdown() {
     if (rhi) {
+        // GPU may still be executing the last frame; ImGui backend shutdown
+        // and resource destruction below require it to be finished.
+        rhi->waitIdle();
+
         // Shutdown ImGui backend
         switch (backend) {
 #ifdef __APPLE__
@@ -508,11 +512,18 @@ void Renderer::endFrame() {
             }
 #endif
             case GraphicsBackend::Vulkan: {
-                // Vulkan ImGui rendering (skip if the frame was skipped)
+                // Vulkan ImGui rendering (skip if the frame was skipped).
+                // Must happen inside a render pass (dynamic rendering).
                 void* cmdBuffer = rhi->getBackendCommandBuffer();
                 if (cmdBuffer) {
+                    RenderPassDesc imguiPassDesc;
+                    imguiPassDesc.name = "ImGui";
+                    imguiPassDesc.colorAttachments.push_back(TextureHandle{0});  // swapchain
+                    imguiPassDesc.loadColor.push_back(true);  // draw on top
+                    rhi->beginRenderPass(imguiPassDesc);
                     ImGui_ImplVulkan_RenderDrawData(ImGui::GetDrawData(),
                         static_cast<VkCommandBuffer>(cmdBuffer));
+                    rhi->endRenderPass();
                 }
                 break;
             }
@@ -728,6 +739,10 @@ void Renderer::mainRenderPass() {
     rhi->setFragmentBytes(&gridSize, sizeof(glm::uvec3), 5);
     float time = 0.0f;  // TODO: Get actual time
     rhi->setFragmentBytes(&time, sizeof(float), 6);
+    // Light counts for backends without cluster culling (Vulkan RHIMain.frag)
+    glm::uvec2 lightCounts(static_cast<Uint32>(directionalLights.size()),
+                           static_cast<Uint32>(pointLights.size()));
+    rhi->setFragmentBytes(&lightCounts, sizeof(glm::uvec2), 7);
 
     // Group drawables by material to reduce state changes
     std::map<MaterialId, std::vector<Uint32>> materialBatches;
@@ -1099,8 +1114,8 @@ void Renderer::createRenderPipeline() {
     std::string fragShaderCode;
 
     if (backend == GraphicsBackend::Vulkan) {
-        vertShaderCode = readFile("shaders/TBN.vert.spv");
-        fragShaderCode = readFile("shaders/PBRNormalMapped.frag.spv");
+        vertShaderCode = readFile("shaders/RHIMain.vert.spv");
+        fragShaderCode = readFile("shaders/RHIMain.frag.spv");
     } else if (backend == GraphicsBackend::Metal) {
         vertShaderCode = readFile("shaders/3d_pbr_normal_mapped.metal");
         fragShaderCode = readFile("shaders/3d_pbr_normal_mapped.metal");
@@ -1127,10 +1142,10 @@ void Renderer::createRenderPipeline() {
     VertexLayout vertexLayout;
     vertexLayout.stride = sizeof(Vapor::VertexData);
     vertexLayout.attributes = {
-        {0, PixelFormat::RGBA32_FLOAT, offsetof(Vapor::VertexData, position)},  // Position (vec3)
-        {1, PixelFormat::RGBA32_FLOAT, offsetof(Vapor::VertexData, uv)},        // UV (vec2)
-        {2, PixelFormat::RGBA32_FLOAT, offsetof(Vapor::VertexData, normal)},    // Normal (vec3)
-        {3, PixelFormat::RGBA32_FLOAT, offsetof(Vapor::VertexData, tangent)}   // Tangent (vec4)
+        {0, PixelFormat::RGB32_FLOAT, offsetof(Vapor::VertexData, position)},  // Position (vec3)
+        {1, PixelFormat::RG32_FLOAT, offsetof(Vapor::VertexData, uv)},          // UV (vec2)
+        {2, PixelFormat::RGB32_FLOAT, offsetof(Vapor::VertexData, normal)},     // Normal (vec3)
+        {3, PixelFormat::RGBA32_FLOAT, offsetof(Vapor::VertexData, tangent)}    // Tangent (vec4)
     };
 
     // Create pipeline
@@ -1281,6 +1296,17 @@ std::unique_ptr<Renderer> createRenderer(GraphicsBackend backend, SDL_Window* wi
                 // For now, use a reasonable default (2-3 images)
                 Uint32 imageCount = 2;
 
+                // Dynamic rendering: ImGui bakes the attachment format into
+                // its pipeline, so it must match the swapchain format.
+                static VkFormat imguiColorFormat;
+                imguiColorFormat = (rhi->getSwapchainFormat() == PixelFormat::BGRA8_SRGB)
+                    ? VK_FORMAT_B8G8R8A8_SRGB
+                    : VK_FORMAT_B8G8R8A8_UNORM;
+                VkPipelineRenderingCreateInfo renderingInfo = {};
+                renderingInfo.sType = VK_STRUCTURE_TYPE_PIPELINE_RENDERING_CREATE_INFO;
+                renderingInfo.colorAttachmentCount = 1;
+                renderingInfo.pColorAttachmentFormats = &imguiColorFormat;
+
                 ImGui_ImplVulkan_InitInfo initInfo = {};
                 initInfo.Instance = static_cast<VkInstance>(instance);
                 initInfo.PhysicalDevice = static_cast<VkPhysicalDevice>(physicalDevice);
@@ -1293,6 +1319,7 @@ std::unique_ptr<Renderer> createRenderer(GraphicsBackend backend, SDL_Window* wi
                 initInfo.PipelineCache = VK_NULL_HANDLE;
                 initInfo.DescriptorPoolSize = 1000;
                 initInfo.UseDynamicRendering = true;
+                initInfo.PipelineRenderingCreateInfo = renderingInfo;
                 initInfo.Allocator = nullptr;
                 initInfo.CheckVkResultFn = nullptr;
                 ImGui_ImplVulkan_Init(&initInfo);
@@ -2400,8 +2427,8 @@ void Renderer::BatchRenderer::init(RHI* rhi, GraphicsBackend backend, bool is3D,
 
     if (backend == GraphicsBackend::Vulkan) {
         // Load SPIR-V shaders
-        vertShaderCode = readFile("shaders/Batch2D.vert.spv");
-        fragShaderCode = readFile("shaders/Batch2D.frag.spv");
+        vertShaderCode = readFile("shaders/RHIBatch.vert.spv");
+        fragShaderCode = readFile("shaders/RHIBatch.frag.spv");
     } else if (backend == GraphicsBackend::Metal) {
         // Load Metal shader library
         vertShaderCode = readFile("shaders/2d_batch.metal");
@@ -2437,9 +2464,9 @@ void Renderer::BatchRenderer::init(RHI* rhi, GraphicsBackend backend, bool is3D,
     // Vertex layout (matches Vertex2D struct)
     pipelineDesc.vertexLayout.stride = sizeof(Vertex2D);
     pipelineDesc.vertexLayout.attributes = {
-        {0, PixelFormat::RGBA32_FLOAT, offsetof(Vertex2D, position)},   // vec3 position (using RGBA32 for vec3)
+        {0, PixelFormat::RGB32_FLOAT, offsetof(Vertex2D, position)},    // vec3 position
         {1, PixelFormat::RGBA32_FLOAT, offsetof(Vertex2D, color)},      // vec4 color
-        {2, PixelFormat::RGBA32_FLOAT, offsetof(Vertex2D, texCoord)},   // vec2 texCoord (using RGBA32, only xy used)
+        {2, PixelFormat::RG32_FLOAT, offsetof(Vertex2D, texCoord)},     // vec2 texCoord
         {3, PixelFormat::R32_FLOAT, offsetof(Vertex2D, texIndex)},      // float texIndex
         {4, PixelFormat::R32_FLOAT, offsetof(Vertex2D, entityID)},      // int entityID (as float)
     };

@@ -1068,6 +1068,9 @@ MTL::PixelFormat RHI_Metal::convertPixelFormat(PixelFormat format) {
         case PixelFormat::R8_UNORM: return MTL::PixelFormatR8Unorm;
         case PixelFormat::R16_FLOAT: return MTL::PixelFormatR16Float;
         case PixelFormat::R32_FLOAT: return MTL::PixelFormatR32Float;
+        case PixelFormat::RG32_FLOAT: return MTL::PixelFormatRG32Float;
+        // RGB32 has no Metal texture equivalent (vertex-attribute-only format)
+        case PixelFormat::RGB32_FLOAT: return MTL::PixelFormatRGBA32Float;
         case PixelFormat::Depth32Float: return MTL::PixelFormatDepth32Float;
         case PixelFormat::Depth24Stencil8: return MTL::PixelFormatDepth24Unorm_Stencil8;
         default: return MTL::PixelFormatRGBA8Unorm;

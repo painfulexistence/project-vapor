@@ -102,6 +102,10 @@ enum class PixelFormat {
     R8_UNORM,
     R16_FLOAT,
     R32_FLOAT,
+    // Vertex-attribute-only formats (vec2/vec3 inputs). Not valid as texture
+    // formats on Metal (RGB32 is not renderable there).
+    RG32_FLOAT,
+    RGB32_FLOAT,
     Depth32Float,
     Depth24Stencil8,
 };
