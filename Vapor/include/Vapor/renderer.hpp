@@ -60,7 +60,7 @@ public:
     // Initialize with RHI ownership
     // Note: Use createRenderer() factory function instead of calling initialize() directly
     void initialize(std::unique_ptr<RHI> rhiPtr, GraphicsBackend backend);
-    void shutdown();
+    void shutdown() override;
 
     // ========================================================================
     // Resource Registration (called during scene loading/staging)
@@ -81,7 +81,7 @@ public:
     // ========================================================================
 
     // Begin a frame with camera data
-    void beginFrame(const CameraRenderData& camera);
+    void beginFrame(const CameraRenderData& camera) override;
 
     // Submit a drawable to be rendered this frame
     void submitDrawable(const Drawable& drawable);
@@ -94,7 +94,7 @@ public:
     void render();
 
     // End the frame
-    void endFrame();
+    void endFrame() override;
 
     // ========================================================================
     // Render Graph / Capabilities
@@ -121,36 +121,36 @@ public:
     // ========================================================================
 
     // Stage a scene (upload meshes, materials, textures)
-    void stage(std::shared_ptr<Scene> scene);
+    void stage(std::shared_ptr<Scene> scene) override;
 
     // Draw a scene with Scene object
-    void draw(std::shared_ptr<Scene> scene, Camera& camera);
+    void draw(std::shared_ptr<Scene> scene, Camera& camera) override;
 
     // Draw with ECS registry
-    void draw(entt::registry& registry, std::shared_ptr<Scene> scene, Camera& camera);
+    void draw(entt::registry& registry, std::shared_ptr<Scene> scene, Camera& camera) override;
 
     // ========================================================================
     // Screenshot API
     // ========================================================================
 
-    void readPixelsAsync(ScreenshotCallback callback);
+    void readPixelsAsync(ScreenshotCallback callback) override;
 
     // ========================================================================
     // UI Integration
     // ========================================================================
 
     // Initialize RmlUI rendering
-    bool initUI();
+    bool initUI() override;
 
     // Get debug draw interface
-    std::shared_ptr<Vapor::DebugDraw> getDebugDraw();
+    std::shared_ptr<Vapor::DebugDraw> getDebugDraw() override;
 
     // Set ImGui callback (called between NewFrame and Render)
-    void setImGuiCallback(std::function<void()> callback);
+    void setImGuiCallback(std::function<void()> callback) override;
     // Drives the engine ImGui frame: F1 visibility toggle, the always-on frame
     // callback (recording/F2), then — if visible — the app callback and the
     // Engine window (with the engine-window callback). Call after ImGui::NewFrame().
-    void invokeImGuiCallback();
+    void invokeImGuiCallback() override;
 
     // ========================================================================
     // 2D/3D Batch Rendering API
@@ -165,43 +165,43 @@ public:
     void uploadRectLightVideoTexture(const uint8_t* /*rgba*/, uint32_t /*width*/, uint32_t /*height*/) {}
 
     // Manual flush (for controlling draw order)
-    void flush2D();
-    void flush3D();
+    void flush2D() override;
+    void flush3D() override;
 
     // Quad drawing (2D)
-    void drawQuad2D(const glm::vec2& position, const glm::vec2& size, const glm::vec4& color);
-    void drawQuad2D(const glm::vec3& position, const glm::vec2& size, const glm::vec4& color);
+    void drawQuad2D(const glm::vec2& position, const glm::vec2& size, const glm::vec4& color) override;
+    void drawQuad2D(const glm::vec3& position, const glm::vec2& size, const glm::vec4& color) override;
     void drawQuad2D(
         const glm::vec2& position,
         const glm::vec2& size,
         TextureHandle texture,
         const glm::vec4& tintColor = glm::vec4(1.0f)
-    );
-    void drawQuad2D(const glm::mat4& transform, const glm::vec4& color, int entityID = -1);
+    ) override;
+    void drawQuad2D(const glm::mat4& transform, const glm::vec4& color, int entityID = -1) override;
     void drawQuad2D(
         const glm::mat4& transform,
         TextureHandle texture,
         const glm::vec2* texCoords,
         const glm::vec4& tintColor = glm::vec4(1.0f),
         int entityID = -1
-    );
+    ) override;
 
     // Quad drawing (3D - world space with depth)
-    void drawQuad3D(const glm::vec3& position, const glm::vec2& size, const glm::vec4& color);
+    void drawQuad3D(const glm::vec3& position, const glm::vec2& size, const glm::vec4& color) override;
     void drawQuad3D(
         const glm::vec3& position,
         const glm::vec2& size,
         TextureHandle texture,
         const glm::vec4& tintColor = glm::vec4(1.0f)
-    );
-    void drawQuad3D(const glm::mat4& transform, const glm::vec4& color, int entityID = -1);
+    ) override;
+    void drawQuad3D(const glm::mat4& transform, const glm::vec4& color, int entityID = -1) override;
     void drawQuad3D(
         const glm::mat4& transform,
         TextureHandle texture,
         const glm::vec2* texCoords,
         const glm::vec4& tintColor = glm::vec4(1.0f),
         int entityID = -1
-    );
+    ) override;
 
     // Rotated quad (2D)
     void drawRotatedQuad2D(
@@ -209,18 +209,18 @@ public:
         const glm::vec2& size,
         float rotation,
         const glm::vec4& color
-    );
+    ) override;
     void drawRotatedQuad2D(
         const glm::vec2& position,
         const glm::vec2& size,
         float rotation,
         TextureHandle texture,
         const glm::vec4& tintColor = glm::vec4(1.0f)
-    );
+    ) override;
 
     // Line drawing
-    void drawLine2D(const glm::vec2& p0, const glm::vec2& p1, const glm::vec4& color, float thickness = 1.0f);
-    void drawLine3D(const glm::vec3& p0, const glm::vec3& p1, const glm::vec4& color, float thickness = 1.0f);
+    void drawLine2D(const glm::vec2& p0, const glm::vec2& p1, const glm::vec4& color, float thickness = 1.0f) override;
+    void drawLine3D(const glm::vec3& p0, const glm::vec3& p1, const glm::vec4& color, float thickness = 1.0f) override;
 
     // Shape drawing
     void drawRect2D(
@@ -228,16 +228,16 @@ public:
         const glm::vec2& size,
         const glm::vec4& color,
         float thickness = 1.0f
-    );
-    void drawCircle2D(const glm::vec2& center, float radius, const glm::vec4& color, int segments = 32);
-    void drawCircleFilled2D(const glm::vec2& center, float radius, const glm::vec4& color, int segments = 32);
-    void drawTriangle2D(const glm::vec2& p0, const glm::vec2& p1, const glm::vec2& p2, const glm::vec4& color);
+    ) override;
+    void drawCircle2D(const glm::vec2& center, float radius, const glm::vec4& color, int segments = 32) override;
+    void drawCircleFilled2D(const glm::vec2& center, float radius, const glm::vec4& color, int segments = 32) override;
+    void drawTriangle2D(const glm::vec2& p0, const glm::vec2& p1, const glm::vec2& p2, const glm::vec4& color) override;
     void drawTriangleFilled2D(
         const glm::vec2& p0,
         const glm::vec2& p1,
         const glm::vec2& p2,
         const glm::vec4& color
-    );
+    ) override;
 
     // Batch statistics
     RHIBatch2DStats getBatch2DStats() const;
@@ -247,60 +247,60 @@ public:
     // Font Rendering API
     // ========================================================================
 
-    FontHandle loadFont(const std::string& path, float baseSize);
-    void unloadFont(FontHandle handle);
+    FontHandle loadFont(const std::string& path, float baseSize) override;
+    void unloadFont(FontHandle handle) override;
     void drawText2D(
         FontHandle font,
         const std::string& text,
         const glm::vec2& position,
         float scale = 1.0f,
         const glm::vec4& color = glm::vec4(1.0f)
-    );
+    ) override;
     void drawText3D(
         FontHandle font,
         const std::string& text,
         const glm::vec3& worldPosition,
         float scale = 1.0f,
         const glm::vec4& color = glm::vec4(1.0f)
-    );
-    glm::vec2 measureText(FontHandle font, const std::string& text, float scale = 1.0f);
-    float getFontLineHeight(FontHandle font, float scale = 1.0f);
+    ) override;
+    glm::vec2 measureText(FontHandle font, const std::string& text, float scale = 1.0f) override;
+    float getFontLineHeight(FontHandle font, float scale = 1.0f) override;
 
     // ========================================================================
     // Render-to-Texture API
     // ========================================================================
 
-    RenderTextureHandle createRenderTexture(const RenderTextureDesc& desc);
-    void destroyRenderTexture(RenderTextureHandle handle);
-    TextureHandle getRenderTextureAsTexture(RenderTextureHandle handle);
+    RenderTextureHandle createRenderTexture(const RenderTextureDesc& desc) override;
+    void destroyRenderTexture(RenderTextureHandle handle) override;
+    TextureHandle getRenderTextureAsTexture(RenderTextureHandle handle) override;
     void renderToTexture(
         RenderTextureHandle target,
         std::shared_ptr<Scene> scene,
         Camera& camera,
         const glm::vec4& clearColor = glm::vec4(0.0f, 0.0f, 0.0f, 1.0f)
-    );
-    glm::uvec2 getRenderTextureSize(RenderTextureHandle handle);
-    Uint64 registerRenderTextureForUI(RenderTextureHandle handle);
+    ) override;
+    glm::uvec2 getRenderTextureSize(RenderTextureHandle handle) override;
+    Uint64 registerRenderTextureForUI(RenderTextureHandle handle) override;
 
     // ========================================================================
     // Post-Processing API
     // ========================================================================
 
-    void applyBloom(RenderTextureHandle target, float threshold = 1.0f, float strength = 0.5f);
-    void applyToneMapping(RenderTextureHandle target, float exposure = 1.0f);
-    void applyVignette(RenderTextureHandle target, float strength = 0.3f, float radius = 0.8f);
+    void applyBloom(RenderTextureHandle target, float threshold = 1.0f, float strength = 0.5f) override;
+    void applyToneMapping(RenderTextureHandle target, float exposure = 1.0f) override;
+    void applyVignette(RenderTextureHandle target, float strength = 0.3f, float radius = 0.8f) override;
 
     // ========================================================================
     // Texture Creation (for sprites/batch rendering)
     // ========================================================================
 
-    TextureHandle createTexture(const std::shared_ptr<Vapor::Image>& img);
+    TextureHandle createTexture(const std::shared_ptr<Vapor::Image>& img) override;
 
     // Update an existing texture's contents in place. The image dimensions and
     // channel count must match those used when the texture was created.
     // Intended for streaming sources (e.g. video playback) that re-upload pixel
     // data every frame without reallocating the GPU texture.
-    void updateTexture(TextureHandle handle, const std::shared_ptr<Vapor::Image>& img);
+    void updateTexture(TextureHandle handle, const std::shared_ptr<Vapor::Image>& img) override;
 
     // ========================================================================
     // Getters
