@@ -439,6 +439,12 @@ void Renderer::render() {
     // doesn't meet (PassFlags vs RHICapabilities) are skipped — no backend
     // checks here.
     renderGraph.execute(*this, capabilities);
+
+    // Frame stats for the Engine window (read next frame, before the clear)
+    lastFrameStats.totalDrawables = static_cast<Uint32>(frameDrawables.size());
+    lastFrameStats.visibleDrawables = static_cast<Uint32>(visibleDrawables.size());
+    lastFrameStats.directionalLights = static_cast<Uint32>(directionalLights.size());
+    lastFrameStats.pointLights = static_cast<Uint32>(pointLights.size());
 }
 
 // The engine's default frame composition. Gameplay code is free to modify
@@ -1357,7 +1363,25 @@ void Renderer::stage(std::shared_ptr<Scene> scene) {
         
         // Register mesh if not already registered
         if (mesh->renderMeshId == UINT32_MAX) {
-            mesh->renderMeshId = registerMesh(mesh->vertices, mesh->indices);
+            if (!mesh->vertices.empty()) {
+                mesh->renderMeshId = registerMesh(mesh->vertices, mesh->indices);
+            } else if (mesh->vertexCount > 0 && mesh->indexCount > 0 &&
+                       mesh->vertexOffset + mesh->vertexCount <= scene->vertices.size() &&
+                       mesh->indexOffset + mesh->indexCount <= scene->indices.size()) {
+                // Memory-optimized scenes keep geometry only in the scene-level
+                // flat buffers (per-mesh arrays stay empty); slice this mesh's
+                // range out. Index values in the flat buffer are mesh-local, so
+                // no rebasing is needed.
+                // TODO: share one scene-wide vertex/index buffer and draw with
+                // firstIndex/vertexOffset instead of copying per mesh.
+                std::vector<Vapor::VertexData> verts(
+                    scene->vertices.begin() + mesh->vertexOffset,
+                    scene->vertices.begin() + mesh->vertexOffset + mesh->vertexCount);
+                std::vector<Uint32> inds(
+                    scene->indices.begin() + mesh->indexOffset,
+                    scene->indices.begin() + mesh->indexOffset + mesh->indexCount);
+                mesh->renderMeshId = registerMesh(verts, inds);
+            }
         }
         
         // Register material if not already registered
@@ -1415,8 +1439,7 @@ void Renderer::draw(std::shared_ptr<Scene> scene, Camera& camera) {
     // Collect drawables from scene
     collectDrawables(scene);
 
-    // TODO: Collect lights from scene
-    // scene->collectLights(directionalLights, pointLights);
+    submitSceneLights(scene);
 
     // Render
     render();
@@ -1436,11 +1459,32 @@ void Renderer::draw(entt::registry& registry, std::shared_ptr<Scene> scene, Came
     // Collect drawables from ECS
     collectDrawables(registry, scene);
 
-    // TODO: Collect lights from ECS
-    // collectLights(registry);
+    // Lights were gathered into the scene by the game's LightGatherSystem
+    submitSceneLights(scene);
 
     // Render
     render();
+}
+
+void Renderer::submitSceneLights(const std::shared_ptr<Scene>& scene) {
+    if (!scene) {
+        return;
+    }
+    for (const auto& l : scene->directionalLights) {
+        DirectionalLightData data{};
+        data.direction = l.direction;
+        data.color = l.color;
+        data.intensity = l.intensity;
+        submitDirectionalLight(data);
+    }
+    for (const auto& l : scene->pointLights) {
+        PointLightData data{};
+        data.position = l.position;
+        data.color = l.color;
+        data.intensity = l.intensity;
+        data.radius = l.radius;
+        submitPointLight(data);
+    }
 }
 
 void Renderer::collectDrawables(std::shared_ptr<Scene> scene) {
@@ -1600,6 +1644,11 @@ void Renderer::invokeImGuiCallback() {
 
     ImGui::Begin("Engine");
 
+    ImGui::Text("Drawables: %u / %u visible | Lights: %u dir, %u point",
+                lastFrameStats.visibleDrawables, lastFrameStats.totalDrawables,
+                lastFrameStats.directionalLights, lastFrameStats.pointLights);
+    ImGui::Separator();
+
     drawRenderGraphImGui();
     drawGpuTimingsImGui();
 
@@ -1681,10 +1730,10 @@ void Renderer::drawGpuTimingsImGui() {
 
 void Renderer::initBatchRendering() {
     // Initialize batch2D
-    batch2D.init(rhi.get(), backend, false, textures[defaultWhiteTexture].handle);
+    batch2D.init(rhi.get(), backend, false, textures[defaultWhiteTexture].handle, defaultSampler);
 
     // Initialize batch3D
-    batch3D.init(rhi.get(), backend, true, textures[defaultWhiteTexture].handle);
+    batch3D.init(rhi.get(), backend, true, textures[defaultWhiteTexture].handle, defaultSampler);
 }
 
 void Renderer::shutdownBatchRendering() {
@@ -1727,8 +1776,9 @@ void Renderer::drawQuad2D(
     TextureHandle texture,
     const glm::vec4& tintColor
 ) {
-    // TODO: Support textured quads
-    drawQuad2D(position, size, tintColor);
+    batch2D.setTexture(texture);
+    batch2D.addQuad(glm::vec3(position, 0.0f), size, tintColor);
+    batch2D.setTexture(TextureHandle{});
 }
 
 void Renderer::drawQuad2D(const glm::mat4& transform, const glm::vec4& color, int entityID) {
@@ -1742,8 +1792,10 @@ void Renderer::drawQuad2D(
     const glm::vec4& tintColor,
     int entityID
 ) {
-    // TODO: Support textured quads with custom tex coords
+    // TODO: custom tex coords are not applied yet
+    batch2D.setTexture(texture);
     batch2D.addQuad(transform, tintColor, entityID);
+    batch2D.setTexture(TextureHandle{});
 }
 
 // 3D Quad drawing implementations
@@ -1757,8 +1809,9 @@ void Renderer::drawQuad3D(
     TextureHandle texture,
     const glm::vec4& tintColor
 ) {
-    // TODO: Support textured quads
-    drawQuad3D(position, size, tintColor);
+    batch3D.setTexture(texture);
+    batch3D.addQuad(position, size, tintColor);
+    batch3D.setTexture(TextureHandle{});
 }
 
 void Renderer::drawQuad3D(const glm::mat4& transform, const glm::vec4& color, int entityID) {
@@ -1772,8 +1825,10 @@ void Renderer::drawQuad3D(
     const glm::vec4& tintColor,
     int entityID
 ) {
-    // TODO: Support textured quads with custom tex coords
+    // TODO: custom tex coords are not applied yet
+    batch3D.setTexture(texture);
     batch3D.addQuad(transform, tintColor, entityID);
+    batch3D.setTexture(TextureHandle{});
 }
 
 // Rotated quad
@@ -2387,8 +2442,9 @@ void Renderer::updateTexture(TextureHandle handle, const std::shared_ptr<Vapor::
 // BatchRenderer Implementation
 // ============================================================================
 
-void Renderer::BatchRenderer::init(RHI* rhi, GraphicsBackend backend, bool is3D, TextureHandle defaultTex) {
+void Renderer::BatchRenderer::init(RHI* rhi, GraphicsBackend backend, bool is3D, TextureHandle defaultTex, SamplerHandle samplerHandle) {
     whiteTexture = defaultTex;
+    sampler = samplerHandle;
 
     // Create vertex buffer
     BufferDesc vbDesc;
@@ -2522,8 +2578,12 @@ void Renderer::BatchRenderer::flush(RHI* rhi, const glm::mat4& viewProj) {
     rhi->bindVertexBuffer(vertexBuffer, 0, 0);
     rhi->bindIndexBuffer(indexBuffer, 0);
 
-    // Bind white texture for now (texture array binding can be added later)
-    // rhi->setTexture(1, 0, whiteTexture, defaultSampler);
+    // Bind the batch texture (white when untextured). One texture per batch;
+    // setTexture() flushes when it changes.
+    TextureHandle tex = currentTexture.isValid() ? currentTexture : whiteTexture;
+    if (tex.isValid() && sampler.isValid()) {
+        rhi->setTexture(0, 0, tex, sampler);
+    }
 
     // Draw indexed
     uint32_t indexCount = quadCount * 6;  // 6 indices per quad
@@ -2540,6 +2600,20 @@ void Renderer::BatchRenderer::reset() {
     vertices.clear();
     indices.clear();
     quadCount = 0;
+}
+
+void Renderer::BatchRenderer::setTexture(TextureHandle texture) {
+    // Normalize "no texture" to the white texture so comparisons are stable
+    TextureHandle wanted = texture.isValid() ? texture : whiteTexture;
+    TextureHandle current = currentTexture.isValid() ? currentTexture : whiteTexture;
+    if (wanted.id == current.id) {
+        return;
+    }
+    // Texture switch: draw the pending quads with the old texture first
+    if (quadCount > 0 && canAutoFlush && currentRHI) {
+        flush(currentRHI, currentViewProj);
+    }
+    currentTexture = wanted;
 }
 
 void Renderer::BatchRenderer::addQuad(const glm::vec3& position, const glm::vec2& size, const glm::vec4& color, int entityID) {

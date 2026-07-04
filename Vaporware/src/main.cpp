@@ -359,12 +359,15 @@ auto main(int argc, char* args[]) -> int {
         registry.emplace<Vapor::NameComponent>(e, Vapor::NameComponent{ fmt::format("Sponza_{}", i) });
         auto& tc = registry.emplace<Vapor::TransformComponent>(e);
         // Extract scale correctly from world matrix and scale down by 0.01 for Sponza
+        // The Khronos Sponza GLTF is authored in meters (~30m across) — use
+        // its world transforms as-is. (An earlier 0.01 scale shrank the whole
+        // scene to a 30cm dollhouse the camera flew straight past.)
         tc.scale = glm::vec3(
             glm::length(glm::vec3(worldMat[0])),
             glm::length(glm::vec3(worldMat[1])),
             glm::length(glm::vec3(worldMat[2]))
-        ) * 0.01f;
-        tc.position = glm::vec3(worldMat[3]) * 0.01f;
+        );
+        tc.position = glm::vec3(worldMat[3]);
         if (tc.scale.x > 0.0f && tc.scale.y > 0.0f && tc.scale.z > 0.0f) {
             glm::mat3 rotMat(
                 glm::vec3(worldMat[0]) / tc.scale.x,

@@ -24,9 +24,8 @@ public:
     void shutdown() override;
     void waitIdle() override;
 
-    // Raytracing (VK_KHR_acceleration_structure) is not implemented, and
-    // compute is unusable until descriptor-set binding lands — passes that
-    // require either are skipped by the RenderGraph on this backend.
+    // Raytracing (VK_KHR_acceleration_structure) is not implemented — passes
+    // that require it are skipped by the RenderGraph on this backend.
     const RHICapabilities& getCapabilities() const override { return capabilities; }
 
     // ========================================================================
@@ -134,7 +133,7 @@ private:
     // ========================================================================
 
     SDL_Window* window = nullptr;
-    RHICapabilities capabilities;  // all false: no RT, no usable compute yet
+    RHICapabilities capabilities;  // filled in initialize(); raytracing stays false
     VkInstance instance = VK_NULL_HANDLE;
     VkSurfaceKHR surface = VK_NULL_HANDLE;
     VkPhysicalDevice physicalDevice = VK_NULL_HANDLE;
@@ -276,6 +275,17 @@ private:
     BufferBinding boundFragmentBuffers[BINDINGS_PER_SET];
     TextureBinding boundTextures[BINDINGS_PER_SET];
     bool descriptorsDirty = true;
+
+    // Compute follows the same model with its own global layout:
+    //   set 0 = storage buffers (setComputeBuffer)
+    //   set 1 = storage images  (setComputeTexture, transitioned to GENERAL)
+    VkDescriptorSetLayout computeBufferSetLayout = VK_NULL_HANDLE;
+    VkDescriptorSetLayout computeImageSetLayout = VK_NULL_HANDLE;
+    VkPipelineLayout computePipelineLayout = VK_NULL_HANDLE;
+    BufferBinding boundComputeBuffers[BINDINGS_PER_SET];
+    VkImageView boundComputeImages[BINDINGS_PER_SET] = {};
+    bool computeDescriptorsDirty = true;
+    void flushComputeDescriptors();
 
     // Swapchain image layout tracking (reset each frame)
     VkImageLayout swapchainImageLayout = VK_IMAGE_LAYOUT_UNDEFINED;

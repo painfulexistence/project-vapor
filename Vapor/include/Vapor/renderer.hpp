@@ -400,6 +400,8 @@ private:
     // Scene/ECS helpers
     void collectDrawables(std::shared_ptr<Scene> scene);
     void collectDrawables(entt::registry& registry, std::shared_ptr<Scene> scene);
+    // Submit the scene's gathered lights (filled by the game's light systems)
+    void submitSceneLights(const std::shared_ptr<Scene>& scene);
 
     // Batch rendering helpers
     void initBatchRendering();
@@ -427,6 +429,14 @@ private:
 
     RenderGraph renderGraph;
     RHICapabilities capabilities;  // copied from the RHI at initialize()
+
+    // Last completed frame's numbers, shown in the Engine window
+    struct FrameStats {
+        Uint32 totalDrawables = 0;
+        Uint32 visibleDrawables = 0;
+        Uint32 directionalLights = 0;
+        Uint32 pointLights = 0;
+    } lastFrameStats;
 
     // ========================================================================
     // Registered Resources
@@ -537,6 +547,10 @@ private:
         uint32_t quadCount = 0;
 
         TextureHandle whiteTexture;  // Default white texture for colored quads
+        SamplerHandle sampler;       // Sampler used for the batch texture
+        // Texture for the quads batched since the last flush. One texture per
+        // batch: switching textures flushes the pending quads first.
+        TextureHandle currentTexture;
 
         // Store RHI and current view-projection for auto-flush
         RHI* currentRHI = nullptr;
@@ -547,7 +561,10 @@ private:
         uint32_t drawCalls = 0;
         uint32_t totalQuads = 0;
 
-        void init(RHI* rhi, GraphicsBackend backend, bool is3D, TextureHandle defaultTex);
+        void init(RHI* rhi, GraphicsBackend backend, bool is3D, TextureHandle defaultTex, SamplerHandle samplerHandle);
+        // Set the texture for subsequent quads (invalid = white). Flushes the
+        // pending batch when the texture changes.
+        void setTexture(TextureHandle texture);
         void shutdown(RHI* rhi);
         void flush(RHI* rhi, const glm::mat4& viewProj);
         void beginBatch(RHI* rhi, const glm::mat4& viewProj);

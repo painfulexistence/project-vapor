@@ -39,6 +39,10 @@ bool RHI_Vulkan::initialize(SDL_Window* windowPtr) {
         return false;
     }
 
+    // Compute pipelines + resource binding are implemented; raytracing
+    // (VK_KHR_acceleration_structure) and GPU timestamps are not yet.
+    capabilities.computeShaders = true;
+
     return true;
 }
 
@@ -107,17 +111,58 @@ void RHI_Vulkan::createDescriptorInfrastructure() {
         throw std::runtime_error("Failed to create global pipeline layout");
     }
 
+    // Compute set layouts + layout (same model, compute stage)
+    {
+        VkDescriptorSetLayoutBinding bindings[BINDINGS_PER_SET];
+        for (Uint32 i = 0; i < BINDINGS_PER_SET; i++) {
+            bindings[i] = {};
+            bindings[i].binding = i;
+            bindings[i].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
+            bindings[i].descriptorCount = 1;
+            bindings[i].stageFlags = VK_SHADER_STAGE_COMPUTE_BIT;
+        }
+        VkDescriptorSetLayoutCreateInfo info{};
+        info.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO;
+        info.bindingCount = BINDINGS_PER_SET;
+        info.pBindings = bindings;
+        if (vkCreateDescriptorSetLayout(device, &info, nullptr, &computeBufferSetLayout) != VK_SUCCESS) {
+            throw std::runtime_error("Failed to create compute buffer set layout");
+        }
+        for (Uint32 i = 0; i < BINDINGS_PER_SET; i++) {
+            bindings[i].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_IMAGE;
+        }
+        if (vkCreateDescriptorSetLayout(device, &info, nullptr, &computeImageSetLayout) != VK_SUCCESS) {
+            throw std::runtime_error("Failed to create compute image set layout");
+        }
+
+        VkDescriptorSetLayout computeSets[2] = { computeBufferSetLayout, computeImageSetLayout };
+        VkPushConstantRange computePush{};
+        computePush.stageFlags = VK_SHADER_STAGE_COMPUTE_BIT;
+        computePush.offset = 0;
+        computePush.size = 128;
+        VkPipelineLayoutCreateInfo computeLayoutInfo{};
+        computeLayoutInfo.sType = VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO;
+        computeLayoutInfo.setLayoutCount = 2;
+        computeLayoutInfo.pSetLayouts = computeSets;
+        computeLayoutInfo.pushConstantRangeCount = 1;
+        computeLayoutInfo.pPushConstantRanges = &computePush;
+        if (vkCreatePipelineLayout(device, &computeLayoutInfo, nullptr, &computePipelineLayout) != VK_SUCCESS) {
+            throw std::runtime_error("Failed to create compute pipeline layout");
+        }
+    }
+
     // Per-frame descriptor pools, reset wholesale each frame
     descriptorPools.resize(MAX_FRAMES_IN_FLIGHT);
     for (auto& pool : descriptorPools) {
-        VkDescriptorPoolSize sizes[2] = {
+        VkDescriptorPoolSize sizes[3] = {
             { VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, 8192 },
             { VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, 4096 },
+            { VK_DESCRIPTOR_TYPE_STORAGE_IMAGE, 1024 },
         };
         VkDescriptorPoolCreateInfo poolInfo{};
         poolInfo.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO;
         poolInfo.maxSets = 4096;
-        poolInfo.poolSizeCount = 2;
+        poolInfo.poolSizeCount = 3;
         poolInfo.pPoolSizes = sizes;
         if (vkCreateDescriptorPool(device, &poolInfo, nullptr, &pool) != VK_SUCCESS) {
             throw std::runtime_error("Failed to create descriptor pool");
@@ -134,7 +179,12 @@ void RHI_Vulkan::destroyDescriptorInfrastructure() {
         vkDestroyPipelineLayout(device, globalPipelineLayout, nullptr);
         globalPipelineLayout = VK_NULL_HANDLE;
     }
-    for (VkDescriptorSetLayout* layout : { &vertexBufferSetLayout, &fragmentBufferSetLayout, &textureSetLayout }) {
+    if (computePipelineLayout != VK_NULL_HANDLE) {
+        vkDestroyPipelineLayout(device, computePipelineLayout, nullptr);
+        computePipelineLayout = VK_NULL_HANDLE;
+    }
+    for (VkDescriptorSetLayout* layout : { &vertexBufferSetLayout, &fragmentBufferSetLayout, &textureSetLayout,
+                                           &computeBufferSetLayout, &computeImageSetLayout }) {
         if (*layout != VK_NULL_HANDLE) {
             vkDestroyDescriptorSetLayout(device, *layout, nullptr);
             *layout = VK_NULL_HANDLE;
@@ -1164,6 +1214,7 @@ void RHI_Vulkan::beginFrame() {
         vkResetDescriptorPool(device, descriptorPools[currentFrameInFlight], 0);
     }
     descriptorsDirty = true;
+    computeDescriptorsDirty = true;
 
     // The acquired swapchain image's previous content is irrelevant (the
     // first pass clears); treat its layout as undefined for transitions.
@@ -1310,12 +1361,17 @@ void RHI_Vulkan::beginRenderPass(const RenderPassDesc& desc) {
 
     vkCmdBeginRenderingKHR(currentCommandBuffer, &renderingInfo);
 
-    // Set viewport and scissor (attachment-sized, matching the render area)
+    // Set viewport and scissor (attachment-sized, matching the render area).
+    // Negative-height viewport (core since Vulkan 1.1): the engine's
+    // projection matrices follow the GL convention (NDC +Y up) while Vulkan's
+    // NDC +Y points down. Flipping here fixes both the vertical mirroring and
+    // the winding order — without it, CCW front faces rasterize as CW and
+    // get backface-culled.
     VkViewport viewport{};
     viewport.x = 0.0f;
-    viewport.y = 0.0f;
+    viewport.y = static_cast<float>(passExtent.height);
     viewport.width = static_cast<float>(passExtent.width);
-    viewport.height = static_cast<float>(passExtent.height);
+    viewport.height = -static_cast<float>(passExtent.height);
     viewport.minDepth = 0.0f;
     viewport.maxDepth = 1.0f;
     vkCmdSetViewport(currentCommandBuffer, 0, 1, &viewport);
@@ -2010,26 +2066,16 @@ ComputePipelineHandle RHI_Vulkan::createComputePipeline(const ComputePipelineDes
     pipelineInfo.stage.stage = VK_SHADER_STAGE_COMPUTE_BIT;
     pipelineInfo.stage.module = it->second.module;
     pipelineInfo.stage.pName = "main";
-
-    // Create empty pipeline layout (TODO: add descriptor sets)
-    VkPipelineLayoutCreateInfo layoutInfo{};
-    layoutInfo.sType = VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO;
-
-    VkPipelineLayout layout;
-    if (vkCreatePipelineLayout(device, &layoutInfo, nullptr, &layout) != VK_SUCCESS) {
-        throw std::runtime_error("Failed to create compute pipeline layout");
-    }
-
-    pipelineInfo.layout = layout;
+    // All compute pipelines share the global compute layout
+    pipelineInfo.layout = computePipelineLayout;
 
     VkPipeline pipeline;
     if (vkCreateComputePipelines(device, VK_NULL_HANDLE, 1, &pipelineInfo, nullptr, &pipeline) != VK_SUCCESS) {
-        vkDestroyPipelineLayout(device, layout, nullptr);
         throw std::runtime_error("Failed to create compute pipeline");
     }
 
     Uint32 id = nextComputePipelineId++;
-    computePipelines[id] = {pipeline, layout};
+    computePipelines[id] = {pipeline, VK_NULL_HANDLE};
 
     return ComputePipelineHandle{id};
 }
@@ -2040,9 +2086,7 @@ void RHI_Vulkan::destroyComputePipeline(ComputePipelineHandle handle) {
         if (it->second.pipeline != VK_NULL_HANDLE) {
             vkDestroyPipeline(device, it->second.pipeline, nullptr);
         }
-        if (it->second.layout != VK_NULL_HANDLE) {
-            vkDestroyPipelineLayout(device, it->second.layout, nullptr);
-        }
+        // layout is the shared compute pipeline layout — not owned per pipeline
         computePipelines.erase(it);
     }
 }
@@ -2095,13 +2139,83 @@ void RHI_Vulkan::bindComputePipeline(ComputePipelineHandle pipeline) {
 }
 
 void RHI_Vulkan::setComputeBuffer(Uint32 binding, BufferHandle buffer, size_t offset, size_t range) {
-    // TODO: Implement descriptor set binding for compute
-    // For now, this is a stub
+    auto it = buffers.find(buffer.id);
+    if (it == buffers.end() || binding >= BINDINGS_PER_SET) {
+        return;
+    }
+    boundComputeBuffers[binding] = { it->second.buffer, offset, range > 0 ? range : VK_WHOLE_SIZE };
+    computeDescriptorsDirty = true;
 }
 
 void RHI_Vulkan::setComputeTexture(Uint32 binding, TextureHandle texture) {
-    // TODO: Implement descriptor set binding for compute
-    // For now, this is a stub
+    auto it = textures.find(texture.id);
+    if (it == textures.end() || binding >= BINDINGS_PER_SET) {
+        return;
+    }
+    // Storage images are read/written in GENERAL layout. This runs outside
+    // any render pass (compute passes), so a barrier here is legal.
+    transitionImage(it->second.image, it->second.currentLayout,
+                    VK_IMAGE_LAYOUT_GENERAL, VK_IMAGE_ASPECT_COLOR_BIT);
+    it->second.currentLayout = VK_IMAGE_LAYOUT_GENERAL;
+    boundComputeImages[binding] = it->second.view;
+    computeDescriptorsDirty = true;
+}
+
+void RHI_Vulkan::flushComputeDescriptors() {
+    if (!computeDescriptorsDirty || currentCommandBuffer == VK_NULL_HANDLE) {
+        return;
+    }
+    computeDescriptorsDirty = false;
+
+    VkDescriptorSetLayout layouts[2] = { computeBufferSetLayout, computeImageSetLayout };
+    VkDescriptorSet sets[2];
+    VkDescriptorSetAllocateInfo allocInfo{};
+    allocInfo.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO;
+    allocInfo.descriptorPool = descriptorPools[currentFrameInFlight];
+    allocInfo.descriptorSetCount = 2;
+    allocInfo.pSetLayouts = layouts;
+    if (vkAllocateDescriptorSets(device, &allocInfo, sets) != VK_SUCCESS) {
+        fmt::print(stderr, "flushComputeDescriptors: descriptor pool exhausted\n");
+        return;
+    }
+
+    VkWriteDescriptorSet writes[BINDINGS_PER_SET * 2];
+    VkDescriptorBufferInfo bufferInfos[BINDINGS_PER_SET];
+    VkDescriptorImageInfo imageInfos[BINDINGS_PER_SET];
+    Uint32 writeCount = 0, bufferCount = 0, imageCount = 0;
+
+    for (Uint32 i = 0; i < BINDINGS_PER_SET; i++) {
+        if (boundComputeBuffers[i].buffer == VK_NULL_HANDLE) continue;
+        VkDescriptorBufferInfo& info = bufferInfos[bufferCount++];
+        info = { boundComputeBuffers[i].buffer, boundComputeBuffers[i].offset, boundComputeBuffers[i].range };
+        VkWriteDescriptorSet& w = writes[writeCount++];
+        w = {};
+        w.sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
+        w.dstSet = sets[0];
+        w.dstBinding = i;
+        w.descriptorCount = 1;
+        w.descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
+        w.pBufferInfo = &info;
+    }
+    for (Uint32 i = 0; i < BINDINGS_PER_SET; i++) {
+        if (boundComputeImages[i] == VK_NULL_HANDLE) continue;
+        VkDescriptorImageInfo& info = imageInfos[imageCount++];
+        info = { VK_NULL_HANDLE, boundComputeImages[i], VK_IMAGE_LAYOUT_GENERAL };
+        VkWriteDescriptorSet& w = writes[writeCount++];
+        w = {};
+        w.sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
+        w.dstSet = sets[1];
+        w.dstBinding = i;
+        w.descriptorCount = 1;
+        w.descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_IMAGE;
+        w.pImageInfo = &info;
+    }
+
+    if (writeCount > 0) {
+        vkUpdateDescriptorSets(device, writeCount, writes, 0, nullptr);
+    }
+    vkCmdBindDescriptorSets(currentCommandBuffer, VK_PIPELINE_BIND_POINT_COMPUTE,
+                            computePipelineLayout, 0, 2, sets, 0, nullptr);
 }
 
 void RHI_Vulkan::setAccelerationStructure(Uint32 binding, AccelStructHandle accelStruct) {
@@ -2111,6 +2225,7 @@ void RHI_Vulkan::setAccelerationStructure(Uint32 binding, AccelStructHandle acce
 
 void RHI_Vulkan::dispatch(Uint32 groupCountX, Uint32 groupCountY, Uint32 groupCountZ) {
     if (currentCommandBuffer) {
+        flushComputeDescriptors();
         vkCmdDispatch(currentCommandBuffer, groupCountX, groupCountY, groupCountZ);
     }
 }
