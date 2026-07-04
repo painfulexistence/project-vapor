@@ -19,6 +19,7 @@
 
 #include "debug_draw.hpp"
 #include "graphics.hpp"
+#include "graphics_gpu_structs.hpp"  // global GPU-layout structs (InstanceData, …) matching the .metal shaders
 #include "graphics_batch2d.hpp"  // Batch2DStats, Batch2DVertex, Batch2DBlendMode
 #include "graphics_effects.hpp"  // WaterData, VolumetricFogData, VolumetricCloudData, LightScatteringData, SunFlareData, Particle
 #include "graphics_gibs.hpp"     // GIBSQuality, GIBSData, Surfel
@@ -77,7 +78,7 @@ class SurfelRaytracingPass;
 class GIBSTemporalPass;
 class GIBSSamplePass;
 
-struct GpuPassTiming {
+struct MetalGpuPassTiming {
     std::string name;
     double gpuTimeMs = 0.0;
     uint64_t estimatedBytes = 0; // estimated minimum memory traffic (attachment load/store + pass-reported)
@@ -546,7 +547,7 @@ protected:
     // GPU pass timing (Apple Silicon, MTLCounterSampleBuffer timestamps)
     static constexpr NS::UInteger GPU_TIMER_SAMPLE_COUNT = 64;
     NS::SharedPtr<MTL::CounterSampleBuffer> gpuTimerSampleBuffer;
-    std::vector<GpuPassTiming> gpuPassTimings;
+    std::vector<MetalGpuPassTiming> gpuPassTimings;
     std::mutex gpuTimingMutex;
     bool gpuTimingSupported = false;
     bool gpuTimingEnabled = false;
@@ -782,8 +783,8 @@ protected:
     // Instance data
     // instanceBatches: material → list of (mesh, instanceArrayIndex) for rasterization draw calls
     struct MeshDraw { std::shared_ptr<Vapor::Mesh> mesh; uint32_t instanceIndex; };
-    std::vector<InstanceData> instances;
-    std::vector<InstanceData> pendingEcsInstances;
+    std::vector<::InstanceData> instances;
+    std::vector<::InstanceData> pendingEcsInstances;
     std::unordered_map<std::shared_ptr<Vapor::Material>, std::vector<MeshDraw>> pendingEcsBatches;
     std::vector<MTL::AccelerationStructureInstanceDescriptor> pendingEcsAccelInstances;
     std::vector<MTL::AccelerationStructureInstanceDescriptor> accelInstances;

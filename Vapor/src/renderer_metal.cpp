@@ -4,7 +4,11 @@
 #define CA_PRIVATE_IMPLEMENTATION
 #include "components.hpp"
 
-using namespace Vapor;
+// NOTE: `using namespace Vapor;` is intentionally placed AFTER all includes
+// (see below). The branch's graphics.hpp defines Vapor:: copies of the GPU
+// structs that also exist at global scope in graphics_gpu_structs.hpp; if the
+// using-directive were active while those headers parse, their own unqualified
+// references (e.g. InstanceData::primitiveMode) would be ambiguous.
 #include "debug_draw.hpp"
 #include "graphics_mesh.hpp"
 #include "renderer_metal.hpp"
@@ -49,6 +53,12 @@ using namespace Vapor;
 
 // GIBS (Global Illumination Based on Surfels)
 #include "Vapor/gibs_manager.hpp"
+
+// All headers are parsed above with no using-directive active, so their own
+// unqualified references bind to the intended (global gpu_structs) types. The
+// renderer body below uses Vapor:: types unqualified; GPU-struct names are
+// qualified with :: where the global versions are required.
+using namespace Vapor;
 
 // Pre-pass: Renders depth and normals
 class PrePass : public MetalRenderPass {
