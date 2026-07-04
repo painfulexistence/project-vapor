@@ -35,7 +35,13 @@ vertex RasterizerData vertexMain(
     return vert;
 }
 
-fragment float4 fragmentMain(
+// MRT output for PrePass
+struct PrePassOutput {
+    float4 normal [[color(0)]];
+    float4 albedo [[color(1)]];
+};
+
+fragment PrePassOutput fragmentMain(
     RasterizerData in [[stage_in]],
     texture2d<float, access::sample> texAlbedo [[texture(0)]],
     texture2d<float, access::sample> texNormal [[texture(1)]]
@@ -56,5 +62,9 @@ fragment float4 fragmentMain(
     float3 normal = texAlbedo.sample(s, in.uv).rgb * 2.0 - 1.0;
     normal.y = 1.0 - normal.y;
     float3 norm = normalize(TBN * normal);
-    return float4(N, 1.0);
+
+    PrePassOutput out;
+    out.normal = float4(N, 1.0);
+    out.albedo = baseColor * material.baseColorFactor;
+    return out;
 }
