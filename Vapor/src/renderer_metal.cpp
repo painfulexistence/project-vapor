@@ -34,6 +34,7 @@ using namespace Vapor;
 #include "asset_manager.hpp"
 #include "engine_core.hpp"
 #include "graphics.hpp"
+#include "rng.hpp"
 #include "helper.hpp"
 #include "mesh_builder.hpp"
 #include "rmlui_manager.hpp"
@@ -4882,14 +4883,14 @@ auto Renderer_Metal::createResources() -> void {
 
     // Initialize particles with random positions and colors
     {
-        std::srand(static_cast<unsigned>(std::time(nullptr)));
+        Vapor::RNG rng;
 
         auto* particles = reinterpret_cast<GPUParticle*>(particleBuffer->contents());
         for (size_t i = 0; i < MAX_PARTICLES; i++) {
             // Minimum radius of 0.5 to avoid particles at origin
-            float r = 0.5f + std::sqrt(static_cast<float>(std::rand()) / RAND_MAX) * 4.5f;
-            float theta = static_cast<float>(std::rand()) / RAND_MAX * 2.0f * 3.14159265f;
-            float phi = static_cast<float>(std::rand()) / RAND_MAX * 3.14159265f;
+            float r = 0.5f + std::sqrt(rng.RandomFloat()) * 4.5f;
+            float theta = rng.RandomFloat() * 2.0f * 3.14159265f;
+            float phi = rng.RandomFloat() * 3.14159265f;
 
             particles[i].position =
                 glm::vec3(r * std::sin(phi) * std::cos(theta), r * std::sin(phi) * std::sin(theta), r * std::cos(phi));

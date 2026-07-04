@@ -24,6 +24,7 @@ using namespace Vapor;
 
 #include "asset_manager.hpp"
 #include "graphics.hpp"
+#include "rng.hpp"
 #include "helper.hpp"
 #define ENABLE_VALIDATION 1
 
@@ -3461,12 +3462,12 @@ void Renderer_Vulkan::initParticleSystem() {
 
     // Initialize particles with random positions and colors
     std::vector<GPUParticle> initialParticles(MAX_PARTICLES);
-    std::srand(static_cast<unsigned>(std::time(nullptr)));
+    Vapor::RNG rng;
 
     for (size_t i = 0; i < MAX_PARTICLES; i++) {
-        float r = std::sqrt(static_cast<float>(std::rand()) / RAND_MAX) * 5.0f;
-        float theta = static_cast<float>(std::rand()) / RAND_MAX * 2.0f * 3.14159265f;
-        float phi = static_cast<float>(std::rand()) / RAND_MAX * 3.14159265f;
+        float r = std::sqrt(rng.RandomFloat()) * 5.0f;
+        float theta = rng.RandomFloat() * 2.0f * 3.14159265f;
+        float phi = rng.RandomFloat() * 3.14159265f;
 
         initialParticles[i].position =
             glm::vec3(r * std::sin(phi) * std::cos(theta), r * std::sin(phi) * std::sin(theta), r * std::cos(phi));
