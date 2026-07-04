@@ -24,9 +24,9 @@ namespace Vapor {
 }
 
 // Batch rendering stats for the RHI renderer. (graphics_batch2d.hpp has a
-// richer Batch2DStats but it cannot be included here — it redefines BlendMode,
+// richer RHIBatch2DStats but it cannot be included here — it redefines BlendMode,
 // which rhi.hpp also defines. getBatch2DStats() is not polymorphic.)
-struct Batch2DStats {
+struct RHIBatch2DStats {
     uint32_t drawCalls = 0;
     uint32_t quadCount = 0;
     uint32_t vertexCount = 0;
@@ -240,7 +240,7 @@ public:
     );
 
     // Batch statistics
-    Batch2DStats getBatch2DStats() const;
+    RHIBatch2DStats getBatch2DStats() const;
     void resetBatch2DStats();
 
     // ========================================================================
@@ -563,7 +563,7 @@ private:
 
     BatchRenderer batch2D;
     BatchRenderer batch3D;
-    Batch2DStats batch2DStats;
+    RHIBatch2DStats batch2DStats;
 
     // ========================================================================
     // Font Rendering Resources

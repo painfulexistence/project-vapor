@@ -2216,7 +2216,7 @@ void Renderer::drawTriangleFilled2D(const glm::vec2& p0, const glm::vec2& p1, co
 }
 
 // Batch stats
-Batch2DStats Renderer::getBatch2DStats() const {
+RHIBatch2DStats Renderer::getBatch2DStats() const {
     return batch2DStats;
 }
 

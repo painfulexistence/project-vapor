@@ -19,6 +19,7 @@
 
 #include "debug_draw.hpp"
 #include "graphics.hpp"
+#include "graphics_batch2d.hpp"  // Batch2DStats, Batch2DVertex, Batch2DBlendMode
 
 // Forward declarations
 namespace Rml {

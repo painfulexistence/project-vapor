@@ -36,7 +36,7 @@ using namespace Vapor;
 #include "graphics.hpp"
 // The branch's graphics.hpp is a monolith (not an umbrella), so pull in the
 // effect/batch/gibs sub-headers the native Metal renderer needs directly.
-#include "graphics_effects.hpp"   // AtmosphereData, WaterData, GPUParticle, Particle, …
+#include "graphics_effects.hpp"   // AtmosphereData, WaterData, GPUParticle, ::Particle, …
 #include "graphics_batch2d.hpp"   // Batch2DVertex, Batch2DBlendMode
 #include "graphics_gibs.hpp"      // Surfel, SurfelCell, GIBSData
 #include "helper.hpp"
@@ -3469,10 +3469,10 @@ auto Renderer_Metal::createResources() -> void {
             NS::TransferPtr(device->newBuffer(sizeof(::InstanceData) * MAX_INSTANCES, MTL::ResourceStorageModeManaged));
     }
 
-    std::vector<Particle> particles{ 1000 };
+    std::vector<::Particle> particles{ 1000 };
     testStorageBuffer =
-        NS::TransferPtr(device->newBuffer(particles.size() * sizeof(Particle), MTL::ResourceStorageModeManaged));
-    memcpy(testStorageBuffer->contents(), particles.data(), particles.size() * sizeof(Particle));
+        NS::TransferPtr(device->newBuffer(particles.size() * sizeof(::Particle), MTL::ResourceStorageModeManaged));
+    memcpy(testStorageBuffer->contents(), particles.data(), particles.size() * sizeof(::Particle));
     testStorageBuffer->didModifyRange(NS::Range::Make(0, testStorageBuffer->length()));
 
     clusterBuffers.resize(MAX_FRAMES_IN_FLIGHT);
