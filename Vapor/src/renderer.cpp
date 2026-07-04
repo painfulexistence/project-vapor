@@ -1356,15 +1356,17 @@ void Renderer::bindMaterial(MaterialId materialId) {
 // Factory Functions
 // ============================================================================
 
-std::unique_ptr<Renderer> createRenderer(GraphicsBackend backend, SDL_Window* window) {
+std::unique_ptr<IRenderer> createRenderer(GraphicsBackend backend, SDL_Window* window) {
+#ifdef __APPLE__
+    // Metal uses the full-feature native renderer (45 passes, RT/GIBS/water/…).
+    if (backend == GraphicsBackend::Metal) {
+        return createRendererMetal(window);
+    }
+#endif
+
     std::unique_ptr<RHI> rhi;
 
     switch (backend) {
-#ifdef __APPLE__
-        case GraphicsBackend::Metal:
-            rhi = std::unique_ptr<RHI>(createRHIMetal());
-            break;
-#endif
         case GraphicsBackend::Vulkan:
             rhi = std::unique_ptr<RHI>(createRHIVulkan());
             break;

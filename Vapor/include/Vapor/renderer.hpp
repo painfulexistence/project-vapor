@@ -1,4 +1,5 @@
 #pragma once
+#include "irenderer.hpp"
 #include "rhi.hpp"
 #include "render_data.hpp"
 #include "render_graph.hpp"
@@ -23,7 +24,12 @@ namespace Vapor {
 }
 
 // ============================================================================
-// Renderer - High-level renderer that uses RHI
+// Renderer - High-level renderer that uses RHI (implements IRenderer)
+//
+// This is the RHI-backed renderer used by the Vulkan backend. The shared
+// backend-agnostic types (GraphicsBackend, RenderPath, GpuImageData,
+// Batch2DStats, RenderTextureDesc/Handle) and the polymorphic interface live
+// in irenderer.hpp.
 //
 // Responsibilities:
 // - Manage rendering resources (meshes, materials, textures)
@@ -34,56 +40,10 @@ namespace Vapor {
 // - Clustered lighting and ray tracing
 // ============================================================================
 
-// Graphics backend selection
-enum class GraphicsBackend {
-    Metal,
-    Vulkan
-};
-
-// Render path selection
-enum class RenderPath {
-    Forward,    // Simple forward rendering
-    Deferred,   // Deferred rendering
-    Clustered   // Clustered forward/deferred with tiled light culling
-};
-
-// Screenshot callback
-struct GpuImageData {
-    std::vector<uint8_t> data;
-    uint32_t width;
-    uint32_t height;
-    uint32_t channelCount;
-};
-
-using ScreenshotCallback = std::function<void(const GpuImageData&)>;
-
-// Batch rendering stats
-struct Batch2DStats {
-    uint32_t drawCalls = 0;
-    uint32_t quadCount = 0;
-    uint32_t vertexCount = 0;
-};
-
-// Render texture descriptor
-struct RenderTextureDesc {
-    uint32_t width = 1920;
-    uint32_t height = 1080;
-    PixelFormat format = PixelFormat::RGBA8_UNORM;
-    bool isHDR = false;
-    bool hasDepth = true;
-    uint32_t sampleCount = 1;
-};
-
-// Render texture handle
-struct RenderTextureHandle {
-    uint32_t id = UINT32_MAX;
-    bool isValid() const { return id != UINT32_MAX; }
-};
-
-class Renderer {
+class Renderer : public IRenderer {
 public:
     Renderer() = default;
-    ~Renderer() = default;
+    ~Renderer() override = default;
 
     // ========================================================================
     // Initialization
@@ -145,8 +105,8 @@ public:
     // Render Path Management
     // ========================================================================
 
-    void setRenderPath(RenderPath path);
-    RenderPath getRenderPath() const { return currentRenderPath; }
+    void setRenderPath(RenderPath path) override { currentRenderPath = path; }
+    RenderPath getRenderPath() const override { return currentRenderPath; }
 
     // ========================================================================
     // Scene/ECS Integration
@@ -188,25 +148,8 @@ public:
     // 2D/3D Batch Rendering API
     // ========================================================================
 
-    // Register a callback invoked inside the Engine ImGui window each frame,
-    // after the built-in Graphics section. Use this to append engine-level
-    // panels (e.g. Recording) without re-opening the window from outside.
-    // Only runs while the engine overlay is visible (see setImGuiVisible).
-    void setEngineWindowCallback(std::function<void()> callback) {
-        m_engineWindowCallback = std::move(callback);
-    }
-
-    // Register a callback invoked every frame right after ImGui::NewFrame(),
-    // before any window is opened and regardless of overlay visibility. Use for
-    // per-frame engine logic that must keep running with the UI hidden — e.g.
-    // recording frame capture and the F2 start/stop hotkey.
-    void setImGuiFrameCallback(std::function<void()> callback) {
-        m_imGuiFrameCallback = std::move(callback);
-    }
-
-    // Engine ImGui overlay visibility, toggled at runtime with F1.
-    bool isImGuiVisible() const { return m_imGuiVisible; }
-    void setImGuiVisible(bool visible) { m_imGuiVisible = visible; }
+    // setEngineWindowCallback / setImGuiFrameCallback / isImGuiVisible /
+    // setImGuiVisible and the m_* callback members are inherited from IRenderer.
 
     // Upload RGBA pixel data as the video texture sampled by rect lights marked
     // with useVideoTexture = true. Call once per frame after VideoPlayer::update().
@@ -703,9 +646,8 @@ private:
     float time = 0.0f;
     float deltaTime = 0.016f;
     bool isInitialized = false;
-    std::function<void()> m_engineWindowCallback;
-    std::function<void()> m_imGuiFrameCallback;
-    bool m_imGuiVisible = true;
+    // ImGui callbacks/visibility (m_imGuiCallback, m_engineWindowCallback,
+    // m_imGuiFrameCallback, m_imGuiVisible) are inherited from IRenderer.
 
     // Stats
     Uint32 drawCount = 0;
@@ -713,10 +655,5 @@ private:
     Uint32 culledInstanceCount = 0;
 };
 
-// ============================================================================
-// Factory Functions
-// ============================================================================
-
-// Create a Renderer with the specified backend
-// The RHI is created internally and owned by the Renderer
-std::unique_ptr<Renderer> createRenderer(GraphicsBackend backend, SDL_Window* window);
+// The createRenderer() factory is declared in irenderer.hpp and returns a
+// std::unique_ptr<IRenderer> (Renderer for Vulkan, Renderer_Metal for Metal).
