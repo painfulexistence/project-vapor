@@ -1102,6 +1102,11 @@ void* RHI_Metal::getBackendDevice() const {
     return (void*)device;
 }
 
+void* RHI_Metal::getBackendTexture(TextureHandle handle) const {
+    auto it = textures.find(handle.id);
+    return it != textures.end() ? (void*)it->second.texture.get() : nullptr;
+}
+
 void* RHI_Metal::getBackendQueue() const {
     return (void*)commandQueue.get();
 }

@@ -72,6 +72,32 @@ void Renderer::initialize(std::unique_ptr<RHI> rhiPtr, GraphicsBackend backendTy
     instanceDataBufferDesc.memoryUsage = MemoryUsage::CPUtoGPU;
     instanceDataBuffer = rhi->createBuffer(instanceDataBufferDesc);
 
+    // Shader-contract buffers (clusters / rect lights / PSSM), neutral-filled.
+    // See the "Full PBR shader contract" note in renderer.hpp.
+    {
+        BufferDesc clusterDesc;
+        clusterDesc.size = sizeof(Vapor::Cluster) * clusterGridSizeX * clusterGridSizeY * clusterGridSizeZ;
+        clusterDesc.usage = BufferUsage::Storage;
+        clusterDesc.memoryUsage = MemoryUsage::CPUtoGPU;
+        clusterBuffer = rhi->createBuffer(clusterDesc);
+
+        BufferDesc rectDesc;
+        rectDesc.size = sizeof(Vapor::RectLight) * maxRectLights;
+        rectDesc.usage = BufferUsage::Storage;
+        rectDesc.memoryUsage = MemoryUsage::CPUtoGPU;
+        rectLightBuffer = rhi->createBuffer(rectDesc);
+        std::vector<Vapor::RectLight> zeroRects(maxRectLights, Vapor::RectLight{});
+        rhi->updateBuffer(rectLightBuffer, zeroRects.data(), 0, rectDesc.size);
+
+        BufferDesc pssmDesc;
+        pssmDesc.size = sizeof(PSSMRenderData);
+        pssmDesc.usage = BufferUsage::Uniform;
+        pssmDesc.memoryUsage = MemoryUsage::CPUtoGPU;
+        pssmDataBuffer = rhi->createBuffer(pssmDesc);
+        PSSMRenderData neutralPSSM;
+        rhi->updateBuffer(pssmDataBuffer, &neutralPSSM, 0, sizeof(neutralPSSM));
+    }
+
     // Create default resources
     createDefaultResources();
 
@@ -398,6 +424,7 @@ void Renderer::beginFrame(const CameraRenderData& camera) {
     visibleDrawables.clear();
     directionalLights.clear();
     pointLights.clear();
+    rectLights.clear();
 
     // Set up batch renderers for auto-flushing
     // 2D uses orthographic projection
@@ -670,6 +697,28 @@ void Renderer::updateBuffers() {
         rhi->updateBuffer(instanceDataBuffer, instanceData.data(), 0,
                           instanceData.size() * sizeof(Vapor::InstanceData));
     }
+
+    // Clusters: until the TileCulling compute pass is ported, every cluster
+    // lists every point light (correct, just unculled). Refilled only when
+    // the light count changes — the buffer is ~6MB.
+    Uint32 clusterLightCount = static_cast<Uint32>(std::min<size_t>(pointLights.size(), 256));
+    if (clusterLightCount != lastClusterLightCount) {
+        lastClusterLightCount = clusterLightCount;
+        Vapor::Cluster tpl{};
+        tpl.lightCount = clusterLightCount;
+        for (Uint32 i = 0; i < clusterLightCount; i++) {
+            tpl.lightIndices[i] = i;
+        }
+        std::vector<Vapor::Cluster> clusters(
+            static_cast<size_t>(clusterGridSizeX) * clusterGridSizeY * clusterGridSizeZ, tpl);
+        rhi->updateBuffer(clusterBuffer, clusters.data(), 0,
+                          clusters.size() * sizeof(Vapor::Cluster));
+    }
+
+    if (!rectLights.empty()) {
+        rhi->updateBuffer(rectLightBuffer, rectLights.data(), 0,
+                          rectLights.size() * sizeof(Vapor::RectLight));
+    }
 }
 
 void Renderer::mainRenderPass() {
@@ -699,9 +748,9 @@ void Renderer::mainRenderPass() {
         renderPassDesc.colorAttachments.push_back(TextureHandle{0});  // Use swapchain (handle 0 is special)
         renderPassDesc.depthAttachment = swapchainDepthBuffer;  // Use swapchain depth buffer
     }
-    renderPassDesc.clearColors.push_back(glm::vec4(0.2f, 0.2f, 0.3f, 1.0f));
+    renderPassDesc.clearColors.push_back(clearColor);  // editable in the Engine window
     renderPassDesc.loadColor.push_back(false);  // Clear
-    renderPassDesc.clearDepth = 1.0f;
+    renderPassDesc.clearDepth = static_cast<float>(clearDepth);
     renderPassDesc.loadDepth = false;  // Clear
 
     // Begin render pass
@@ -725,30 +774,55 @@ void Renderer::mainRenderPass() {
     // Note: We only update the buffer with visible drawables, so the size is visibleDrawables.size()
     rhi->setVertexBuffer(2, instanceDataBuffer, 0, sizeof(Vapor::InstanceData) * visibleDrawables.size());
 
-    // Fragment buffers (separate index namespace from vertex bindings):
-    // Fragment binding 0: DirectionalLights
-    if (directionalLightBuffer.isValid() && !directionalLights.empty()) {
-        rhi->setFragmentBuffer(0, directionalLightBuffer, 0, sizeof(DirectionalLightData) * maxDirectionalLights);
-    }
-    // Fragment binding 1: PointLights
-    if (pointLightBuffer.isValid() && !pointLights.empty()) {
-        rhi->setFragmentBuffer(1, pointLightBuffer, 0, sizeof(PointLightData) * maxPointLights);
-    }
-    // Fragment binding 2: Clusters (if we have cluster buffer - skip for now)
-    // Fragment binding 3: CameraData (for fragment shader)
+    // Fragment bindings — the FULL contract of 3d_pbr_normal_mapped.metal.
+    // Every slot the shader declares must be bound (Metal reads several of
+    // them unconditionally; an unbound buffer/texture is undefined behavior).
+    // Slots whose passes aren't ported yet get neutral defaults.
+    // The shader (fragment buffer table):
+    //   0 dirLights  1 pointLights  2 clusters  3 camera
+    //   4 screenSize 5 gridSize     6 time      7 rectLights
+    //   8 rectLightCount  9 pssmData  10 gibsEnabled
+    rhi->setFragmentBuffer(0, directionalLightBuffer, 0, sizeof(DirectionalLightData) * maxDirectionalLights);
+    rhi->setFragmentBuffer(1, pointLightBuffer, 0, sizeof(PointLightData) * maxPointLights);
+    rhi->setFragmentBuffer(2, clusterBuffer);
     rhi->setFragmentBuffer(3, cameraUniformBuffer, 0, sizeof(CameraRenderData));
 
-    // Fragment bytes (matching old renderer):
     glm::vec2 screenSize(static_cast<float>(width), static_cast<float>(height));
     rhi->setFragmentBytes(&screenSize, sizeof(glm::vec2), 4);
     glm::uvec3 gridSize(clusterGridSizeX, clusterGridSizeY, clusterGridSizeZ);
     rhi->setFragmentBytes(&gridSize, sizeof(glm::uvec3), 5);
     float time = 0.0f;  // TODO: Get actual time
     rhi->setFragmentBytes(&time, sizeof(float), 6);
-    // Light counts for backends without cluster culling (Vulkan RHIMain.frag)
+
+    rhi->setFragmentBuffer(7, rectLightBuffer);
+    Uint32 rectLightCount = static_cast<Uint32>(rectLights.size());
+    rhi->setFragmentBytes(&rectLightCount, sizeof(Uint32), 8);
+    rhi->setFragmentBuffer(9, pssmDataBuffer, 0, sizeof(PSSMRenderData));
+    Uint32 gibsEnabled = 0;  // GIBS not ported to the RHI renderer yet
+    rhi->setFragmentBytes(&gibsEnabled, sizeof(Uint32), 10);
+
+    // Light counts for the Vulkan shader (no cluster culling there yet).
+    // Binding 11: free on Metal, and maps to push-constant offset 112 on
+    // Vulkan — exactly where RHIMain.frag reads it.
     glm::uvec2 lightCounts(static_cast<Uint32>(directionalLights.size()),
                            static_cast<Uint32>(pointLights.size()));
-    rhi->setFragmentBytes(&lightCounts, sizeof(glm::uvec2), 7);
+    rhi->setFragmentBytes(&lightCounts, sizeof(glm::uvec2), 11);
+
+    // Default textures for the shadow/AO/IBL slots (texture table 6-14):
+    //   6 texAO  7 texShadow  8 irradiance  9 prefilter  10 brdfLUT
+    //   11 rectLightVideo  12 pssmShadowMaps  13 texPointShadow  14 gibsGI
+    // White = neutral shadow/AO (fully lit); black = zero IBL/GI contribution.
+    TextureHandle whiteTex = textures[defaultWhiteTexture].handle;
+    TextureHandle blackTex = textures[defaultBlackTexture].handle;
+    rhi->setTexture(0, 6, whiteTex, defaultSampler);
+    rhi->setTexture(0, 7, whiteTex, defaultSampler);
+    rhi->setTexture(0, 8, defaultBlackCubemapTex, defaultSampler);
+    rhi->setTexture(0, 9, defaultBlackCubemapTex, defaultSampler);
+    rhi->setTexture(0, 10, blackTex, defaultSampler);
+    rhi->setTexture(0, 11, whiteTex, defaultSampler);
+    rhi->setTexture(0, 12, pssmShadowArrayTexture, defaultSampler);
+    rhi->setTexture(0, 13, whiteTex, defaultSampler);
+    rhi->setTexture(0, 14, blackTex, defaultSampler);
 
     // Group drawables by material to reduce state changes
     std::map<MaterialId, std::vector<Uint32>> materialBatches;
@@ -956,6 +1030,35 @@ void Renderer::createDefaultResources() {
 
         defaultBlackTexture = static_cast<TextureId>(textures.size());
         textures.push_back(tex);
+    }
+
+    // Neutral defaults for the PBR shader's shadow/IBL bindings (see the
+    // "Full PBR shader contract" note in renderer.hpp)
+    {
+        // Black 1x1 cubemap: IBL irradiance/prefilter contribute nothing
+        TextureDesc cubeDesc;
+        cubeDesc.width = 1;
+        cubeDesc.height = 1;
+        cubeDesc.arrayLayers = 6;
+        cubeDesc.isCube = true;
+        cubeDesc.format = PixelFormat::RGBA8_UNORM;
+        cubeDesc.usage = TextureUsage::Sampled;
+        defaultBlackCubemapTex = rhi->createTexture(cubeDesc);
+        Uint32 blackPixel = 0xFF000000;
+        for (Uint32 face = 0; face < 6; face++) {
+            rhi->updateTexture(defaultBlackCubemapTex, &blackPixel, sizeof(Uint32), 0, face);
+        }
+
+        // 1x1x3 depth array for the PSSM cascade slot. Its content is never
+        // reached (neutral cascade splits keep every pixel in the RT-shadow
+        // branch) but the binding must be a valid depth2d_array.
+        TextureDesc pssmDesc;
+        pssmDesc.width = 1;
+        pssmDesc.height = 1;
+        pssmDesc.arrayLayers = 3;
+        pssmDesc.format = PixelFormat::Depth32Float;
+        pssmDesc.usage = TextureUsage::Sampled;
+        pssmShadowArrayTexture = rhi->createTexture(pssmDesc);
     }
 }
 
@@ -1485,6 +1588,10 @@ void Renderer::submitSceneLights(const std::shared_ptr<Scene>& scene) {
         data.radius = l.radius;
         submitPointLight(data);
     }
+    for (const auto& l : scene->rectLights) {
+        if (rectLights.size() >= maxRectLights) break;
+        rectLights.push_back(l);
+    }
 }
 
 void Renderer::collectDrawables(std::shared_ptr<Scene> scene) {
@@ -1644,11 +1751,7 @@ void Renderer::invokeImGuiCallback() {
 
     ImGui::Begin("Engine");
 
-    ImGui::Text("Drawables: %u / %u visible | Lights: %u dir, %u point",
-                lastFrameStats.visibleDrawables, lastFrameStats.totalDrawables,
-                lastFrameStats.directionalLights, lastFrameStats.pointLights);
-    ImGui::Separator();
-
+    drawGraphicsImGui();
     drawRenderGraphImGui();
     drawGpuTimingsImGui();
 
@@ -1656,6 +1759,100 @@ void Renderer::invokeImGuiCallback() {
         m_engineWindowCallback();
 
     ImGui::End();
+}
+
+void* Renderer::getImGuiTextureID(TextureHandle handle) {
+    if (!handle.isValid()) {
+        return nullptr;
+    }
+#ifdef __APPLE__
+    if (backend == GraphicsBackend::Metal) {
+        // ImGui's Metal backend takes the MTLTexture pointer directly
+        return rhi->getBackendTexture(handle);
+    }
+#endif
+    if (backend == GraphicsBackend::Vulkan) {
+        auto it = imguiTextureCache.find(handle.id);
+        if (it != imguiTextureCache.end()) {
+            return it->second;
+        }
+        void* view = rhi->getBackendTexture(handle);
+        void* sampler = rhi->getBackendSampler(defaultSampler);
+        if (!view || !sampler) {
+            return nullptr;
+        }
+        VkDescriptorSet ds = ImGui_ImplVulkan_AddTexture(
+            (VkSampler)sampler, (VkImageView)view, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL);
+        imguiTextureCache[handle.id] = (void*)ds;
+        return (void*)ds;
+    }
+    return nullptr;
+}
+
+// The Graphics section of the Engine window — restored from the pre-RHI
+// renderer: framerate, clear color, scene stats, render-target viewer and
+// texture thumbnails. Sections tied to still-unported passes (shadow
+// cascades, cloud/water/bloom tuning, GIBS) return with those ports.
+void Renderer::drawGraphicsImGui() {
+    if (!ImGui::CollapsingHeader("Graphics", ImGuiTreeNodeFlags_DefaultOpen)) {
+        return;
+    }
+
+    ImGui::Text("Average frame rate: %.3f ms/frame (%.1f FPS)",
+                1000.0f / ImGui::GetIO().Framerate, ImGui::GetIO().Framerate);
+    ImGui::ColorEdit3("Clear color", (float*)&clearColor);
+    ImGui::Text("Drawables: %u / %u visible",
+                lastFrameStats.visibleDrawables, lastFrameStats.totalDrawables);
+    ImGui::Text("Scene lights: dir %u | point %u | rect %zu",
+                lastFrameStats.directionalLights, lastFrameStats.pointLights, rectLights.size());
+    ImGui::Text("Raytracing: %s | Compute: %s | GPU timestamps: %s",
+                capabilities.raytracing ? "yes" : "no",
+                capabilities.computeShaders ? "yes" : "no",
+                capabilities.gpuTimestamps ? "yes" : "no");
+    ImGui::Text("Frame: %u", frameNumber);
+
+    // Render-target viewer
+    if (ImGui::TreeNode("RTs")) {
+        Uint32 w = rhi->getSwapchainWidth();
+        Uint32 h = rhi->getSwapchainHeight();
+        float aspect = h > 0 ? static_cast<float>(w) / static_cast<float>(h) : 1.0f;
+        auto preview = [&](const char* label, TextureHandle tex) {
+            if (!tex.isValid()) return;
+            if (ImGui::TreeNode(label)) {
+                ImGui::Text("%u x %u", w, h);
+                if (void* id = getImGuiTextureID(tex)) {
+                    ImGui::Image((ImTextureID)(intptr_t)id, ImVec2(320, 320 / aspect));
+                } else {
+                    ImGui::TextDisabled("(preview unavailable on this backend)");
+                }
+                ImGui::TreePop();
+            }
+        };
+        preview("Color RT", colorRT);
+        preview("Normal RT", normalRT);
+        preview("Shadow RT", shadowRT);
+        preview("AO RT", aoRT);
+        ImGui::TreePop();
+    }
+
+    // Registered texture thumbnails (material maps etc.)
+    if (ImGui::TreeNode("Textures")) {
+        int shown = 0;
+        for (size_t i = 0; i < textures.size() && shown < 64; i++) {
+            const RenderTexture& tex = textures[i];
+            if (!tex.handle.isValid()) continue;
+            if (void* id = getImGuiTextureID(tex.handle)) {
+                ImGui::Image((ImTextureID)(intptr_t)id, ImVec2(64, 64));
+                if (ImGui::IsItemHovered()) {
+                    ImGui::SetTooltip("#%zu  %u x %u", i, tex.width, tex.height);
+                }
+                shown++;
+                if (shown % 8 != 0) ImGui::SameLine();
+            }
+        }
+        ImGui::NewLine();
+        ImGui::TreePop();
+    }
 }
 
 void Renderer::drawRenderGraphImGui() {

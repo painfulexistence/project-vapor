@@ -141,6 +141,7 @@ public:
     // ========================================================================
 
     void* getBackendDevice() const override;
+    void* getBackendTexture(TextureHandle handle) const override;
     void* getBackendPhysicalDevice() const override { return nullptr; } // N/A for Metal
     void* getBackendInstance() const override { return nullptr; } // N/A for Metal
     void* getBackendQueue() const override;

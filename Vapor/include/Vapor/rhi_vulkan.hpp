@@ -139,6 +139,8 @@ public:
     // ========================================================================
 
     void* getBackendDevice() const override;
+    void* getBackendTexture(TextureHandle handle) const override;
+    void* getBackendSampler(SamplerHandle handle) const override;
     void* getBackendPhysicalDevice() const override;
     void* getBackendInstance() const override;
     void* getBackendQueue() const override;

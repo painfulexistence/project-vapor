@@ -542,6 +542,11 @@ public:
     // Returns nullptr for non-matching backends
 
     virtual void* getBackendDevice() const { return nullptr; }
+    // Backend texture object for third-party integration (ImGui previews):
+    // MTL::Texture* on Metal, VkImageView on Vulkan.
+    virtual void* getBackendTexture(TextureHandle /*handle*/) const { return nullptr; }
+    // VkSampler on Vulkan (ImGui_ImplVulkan_AddTexture); null on Metal.
+    virtual void* getBackendSampler(SamplerHandle /*handle*/) const { return nullptr; }
     virtual void* getBackendPhysicalDevice() const { return nullptr; }
     virtual void* getBackendInstance() const { return nullptr; }
     virtual void* getBackendQueue() const { return nullptr; }

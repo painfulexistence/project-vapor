@@ -9,6 +9,7 @@
 #include <SDL3/SDL_video.h>
 #include <entt/entt.hpp>
 #include <functional>
+#include <unordered_map>
 #include <vector>
 #include <memory>
 
@@ -429,6 +430,28 @@ private:
 
     RenderGraph renderGraph;
     RHICapabilities capabilities;  // copied from the RHI at initialize()
+
+    // ========================================================================
+    // Full PBR shader contract (matches 3d_pbr_normal_mapped.metal)
+    // ------------------------------------------------------------------------
+    // The shader consumes clusters, rect lights, PSSM cascades and a set of
+    // shadow/AO/IBL textures. Until the corresponding passes are ported to
+    // the RHI renderer these are bound with NEUTRAL defaults (white shadow =
+    // unshadowed, black IBL = no contribution, +inf cascade splits = RT-shadow
+    // branch) so the shader runs correctly with every binding satisfied.
+    // ========================================================================
+
+    BufferHandle rectLightBuffer;    // fragment buffer(7)
+    BufferHandle pssmDataBuffer;     // fragment buffer(9): neutral cascades
+    TextureHandle defaultBlackCubemapTex;   // IBL irradiance/prefilter default
+    TextureHandle pssmShadowArrayTexture;   // texture(12): 1x1x3 depth array
+    Uint32 lastClusterLightCount = UINT32_MAX;  // cluster refill tracking
+    std::vector<Vapor::RectLight> rectLights;   // gathered from the scene
+
+    // ImGui texture previews (RT viewer / material thumbnails)
+    void* getImGuiTextureID(TextureHandle handle);
+    std::unordered_map<Uint32, void*> imguiTextureCache;  // Vulkan descriptor sets
+    void drawGraphicsImGui();
 
     // Last completed frame's numbers, shown in the Engine window
     struct FrameStats {

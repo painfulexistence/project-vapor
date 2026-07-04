@@ -161,6 +161,17 @@ struct PointLightData {
     float _pad3[2];
 };
 
+// PSSM cascade data consumed by the PBR fragment shader (matches the Metal
+// shader's PSSMData). The neutral default (cascadeSplits = +inf) keeps every
+// pixel in the "RT shadow" branch, which samples the (white) shadow texture —
+// i.e. fully lit until the shadow passes are ported.
+struct alignas(16) PSSMRenderData {
+    glm::mat4 lightSpaceMatrices[3] = { glm::mat4(1.0f), glm::mat4(1.0f), glm::mat4(1.0f) };
+    glm::vec4 cascadeSplits = glm::vec4(3.0e38f);
+    float blendRange = 1.0f;
+    float _pad[3] = {};
+};
+
 // ============================================================================
 // Frustum for Culling
 // ============================================================================

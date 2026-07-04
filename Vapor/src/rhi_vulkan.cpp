@@ -1873,6 +1873,16 @@ void* RHI_Vulkan::getBackendDevice() const {
     return (void*)device;
 }
 
+void* RHI_Vulkan::getBackendTexture(TextureHandle handle) const {
+    auto it = textures.find(handle.id);
+    return it != textures.end() ? (void*)it->second.view : nullptr;
+}
+
+void* RHI_Vulkan::getBackendSampler(SamplerHandle handle) const {
+    auto it = samplers.find(handle.id);
+    return it != samplers.end() ? (void*)it->second.sampler : nullptr;
+}
+
 void* RHI_Vulkan::getBackendPhysicalDevice() const {
     return (void*)physicalDevice;
 }
