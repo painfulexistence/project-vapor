@@ -162,12 +162,16 @@ MTL::Buffer* RHI_Metal::stageData(const void* data, size_t size, size_t& outOffs
         std::memcpy(dst, data, size);
         return stagingRingBuffer.get();
     }
-    // Oversize: dedicated one-shot buffer. The upload command buffer retains
-    // it until completion, so dropping our reference at return is safe.
+    // Oversize: dedicated one-shot buffer. It must be kept alive by US until
+    // the upload batch completes — the encoder retains buffers at encode
+    // time, which happens only after this function returns. (Returning the
+    // bare pointer from a temporary SharedPtr here was a use-after-free that
+    // crashed inside Metal's copyFromBuffer on real hardware.)
     auto big = NS::TransferPtr(device->newBuffer(size, MTL::ResourceStorageModeShared));
     std::memcpy(big->contents(), data, size);
     outOffset = 0;
     ensureUploadBlit();
+    oversizeStaging.push_back(big);
     return big.get();
 }
 
@@ -184,6 +188,7 @@ void RHI_Metal::submitUploads(bool waitForCompletion) {
             cmd->waitUntilCompleted();
         }
         pendingUploadCmds.clear();
+        oversizeStaging.clear();
         stagingRingOffset = 0;
     }
 }
@@ -761,6 +766,7 @@ void RHI_Metal::beginFrame() {
     }
     if (pendingUploadCmds.empty() && !uploadCmdBuffer) {
         stagingRingOffset = 0;
+        oversizeStaging.clear();
     }
 
     // Get next drawable. This legitimately fails when the window is occluded

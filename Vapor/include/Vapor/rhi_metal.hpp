@@ -310,6 +310,10 @@ private:
     NS::SharedPtr<MTL::CommandBuffer> uploadCmdBuffer;     // open while recording
     MTL::BlitCommandEncoder* uploadBlitEncoder = nullptr;  // open while recording
     std::vector<NS::SharedPtr<MTL::CommandBuffer>> pendingUploadCmds;
+    // Oversize (> ring) staging buffers must stay alive until their upload
+    // batch completes: the encoder only retains a buffer when the copy is
+    // ENCODED, which happens after stageData() returns.
+    std::vector<NS::SharedPtr<MTL::Buffer>> oversizeStaging;
 
     MTL::BlitCommandEncoder* ensureUploadBlit();
     void* allocStaging(size_t size, size_t& outOffset);
