@@ -174,9 +174,8 @@ void main() {
     color += albedo * 0.03 * occlusion;
     color += emissive;
 
-    // Tone map + gamma (rendering straight to an sRGB swapchain would double-
-    // correct; swapchain format is BGRA8_SRGB so output linear here)
-    color = color / (color + vec3(1.0));
-
+    // Output LINEAR HDR into the RGBA16F colorRT. Tone mapping (ACES) and the
+    // sRGB encode happen in the PostProcess pass, so bloom and other effects
+    // can operate on the HDR image beforehand.
     outColor = vec4(color, baseSample.a * mat.baseColorFactor.a * instanceColor.a);
 }

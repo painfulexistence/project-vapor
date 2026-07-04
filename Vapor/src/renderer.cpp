@@ -1271,8 +1271,56 @@ void Renderer::createRenderPipeline() {
     pipelineDesc.cullMode = CullMode::Back;
     pipelineDesc.frontFaceCounterClockwise = true;
     pipelineDesc.sampleCount = 1;
+    // Main geometry renders into the HDR colorRT (RGBA16F); the PostProcess pass
+    // tone-maps it to the swapchain. Bake the matching color format into the PSO.
+    pipelineDesc.colorAttachmentFormats = { PixelFormat::RGBA16_FLOAT };
+    pipelineDesc.hasDepthAttachment = true;
+    pipelineDesc.depthAttachmentFormat = PixelFormat::Depth32Float;
 
     mainPipeline = rhi->createPipeline(pipelineDesc);
+
+    // ------------------------------------------------------------------------
+    // Post-process pipeline: fullscreen triangle sampling colorRT, ACES tone
+    // map + sRGB encode to the swapchain. Vulkan only (the Metal backend uses
+    // the native renderer). Activating this makes mainRenderPass() route to
+    // colorRT and postProcessPass() composite to the swapchain.
+    // ------------------------------------------------------------------------
+    if (backend == GraphicsBackend::Vulkan) {
+        std::string ppVertCode = readFile("shaders/FullScreen.vert.spv");
+        std::string ppFragCode = readFile("shaders/PostProcess.frag.spv");
+        if (!ppVertCode.empty() && !ppFragCode.empty()) {
+            ShaderDesc ppVertDesc;
+            ppVertDesc.stage = ShaderStage::Vertex;
+            ppVertDesc.code = ppVertCode.data();
+            ppVertDesc.codeSize = ppVertCode.size();
+            ppVertDesc.entryPoint = "main";
+            postProcessVertexShader = rhi->createShader(ppVertDesc);
+
+            ShaderDesc ppFragDesc;
+            ppFragDesc.stage = ShaderStage::Fragment;
+            ppFragDesc.code = ppFragCode.data();
+            ppFragDesc.codeSize = ppFragCode.size();
+            ppFragDesc.entryPoint = "main";
+            postProcessFragmentShader = rhi->createShader(ppFragDesc);
+
+            PipelineDesc ppDesc;
+            ppDesc.vertexShader = postProcessVertexShader;
+            ppDesc.fragmentShader = postProcessFragmentShader;
+            // Fullscreen triangle generates its own vertices from gl_VertexIndex;
+            // no vertex buffer / attributes.
+            ppDesc.vertexLayout.stride = 0;
+            ppDesc.vertexLayout.attributes = {};
+            ppDesc.topology = PrimitiveTopology::TriangleList;
+            ppDesc.blendMode = BlendMode::Opaque;
+            ppDesc.depthTest = false;
+            ppDesc.depthWrite = false;
+            ppDesc.cullMode = CullMode::None;
+            ppDesc.sampleCount = 1;
+            ppDesc.hasDepthAttachment = false;
+            ppDesc.colorAttachmentFormats = { PixelFormat::Swapchain };
+            postProcessPipeline = rhi->createPipeline(ppDesc);
+        }
+    }
 }
 
 TextureId Renderer::getOrCreateTexture(const std::shared_ptr<Vapor::Image>& image) {
