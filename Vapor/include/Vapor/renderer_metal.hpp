@@ -454,11 +454,11 @@ public:
     void drawTriangleFilled2D(const glm::vec2& p0, const glm::vec2& p1, const glm::vec2& p2, const glm::vec4& color)
         override;
 
-    // Batch statistics
-    Batch2DStats getBatch2DStats() const override {
+    // Batch statistics (native Metal renderer's own type; not part of IRenderer).
+    Batch2DStats getBatch2DStats() const {
         return batch2DStats;
     }
-    void resetBatch2DStats() override {
+    void resetBatch2DStats() {
         batch2DStats = {};
     }
 
