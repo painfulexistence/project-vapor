@@ -73,6 +73,7 @@ class PointShadowTemporalPass;
 
 // GIBS forward declarations
 namespace Vapor { class GIBSManager; }
+namespace Vapor { class RmlRendererMetal; }
 class SurfelGenerationPass;
 class SurfelHashBuildPass;
 class SurfelRaytracingPass;
@@ -989,8 +990,9 @@ private:
 
     RenderPath currentRenderPath = RenderPath::Forward;
 
-    // UI rendering (using void* for pimpl idiom to hide implementation)
-    void* m_uiRenderer = nullptr;
+    // UI renderer (forward-declared; the complete type lives in the .cpp, which
+    // is where ~Renderer_Metal is defined so the unique_ptr can free it).
+    std::unique_ptr<Vapor::RmlRendererMetal> m_uiRenderer;
     Rml::Context* m_uiContext = nullptr;
     std::vector<ScreenshotCallback> m_pendingScreenshots;
 
