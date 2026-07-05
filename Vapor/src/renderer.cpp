@@ -120,6 +120,14 @@ void Renderer::initialize(std::unique_ptr<RHI> rhiPtr, GraphicsBackend backendTy
         fogDataBuffer = rhi->createBuffer(fogDesc);
         FogRenderData fogDefaults;
         rhi->updateBuffer(fogDataBuffer, &fogDefaults, 0, sizeof(fogDefaults));
+
+        BufferDesc prevVPDesc;
+        prevVPDesc.size = sizeof(glm::mat4);
+        prevVPDesc.usage = BufferUsage::Uniform;
+        prevVPDesc.memoryUsage = MemoryUsage::CPUtoGPU;
+        prevViewProjBuffer = rhi->createBuffer(prevVPDesc);
+        glm::mat4 identityVP(1.0f);
+        rhi->updateBuffer(prevViewProjBuffer, &identityVP, 0, sizeof(identityVP));
     }
 
     // Create default resources
@@ -533,6 +541,10 @@ void Renderer::setupDefaultRenderGraph() {
     // exists, directly to the swapchain otherwise (decided inside the pass).
     renderGraph.addPass("Main",
         [](Renderer& r) { r.mainRenderPass(); });
+
+    // Camera-motion velocity (motion vectors) from scene depth — TAA infra.
+    renderGraph.addPass("Velocity",
+        [](Renderer& r) { r.velocityPass(); });
 
     // Sky/atmosphere fills the background (depth == far) before bloom, so the
     // bright sky and sun disk feed the bloom pyramid.
@@ -1254,6 +1266,33 @@ void Renderer::volumetricFogPass() {
     std::swap(colorRT, tempColorRT);  // colorRT now holds the fogged scene
 }
 
+// Camera-motion velocity (motion vectors) from the depth buffer. Standalone
+// infrastructure for a future TAA / motion-blur consumer; produces velocityRT.
+void Renderer::velocityPass() {
+    if (!velocityPipeline.isValid() || !velocityRT.isValid() ||
+        !depthStencilRT.isValid() || !prevViewProjBuffer.isValid()) {
+        return;
+    }
+    glm::mat4 curViewProj = currentCamera.proj * currentCamera.view;
+    if (!prevViewProjValid) { prevViewProj = curViewProj; prevViewProjValid = true; }
+    rhi->updateBuffer(prevViewProjBuffer, &prevViewProj, 0, sizeof(glm::mat4));
+
+    RenderPassDesc rp;
+    rp.name = "Velocity";
+    rp.colorAttachments.push_back(velocityRT);
+    rp.clearColors.push_back(glm::vec4(0.0f));
+    rp.loadColor.push_back(false);  // clear
+    rhi->beginRenderPass(rp);
+    rhi->bindPipeline(velocityPipeline);
+    rhi->setTexture(0, 0, depthStencilRT, clampSampler);
+    rhi->setFragmentBuffer(0, prevViewProjBuffer, 0, sizeof(glm::mat4));
+    rhi->setFragmentBuffer(3, cameraUniformBuffer, 0, sizeof(CameraRenderData));
+    rhi->draw(3, 1, 0, 0);
+    rhi->endRenderPass();
+
+    prevViewProj = curViewProj;  // roll forward for next frame
+}
+
 void Renderer::postProcessPass() {
     // Post-process pass: render from colorRT to swapchain (fullscreen triangle)
     if (!postProcessPipeline.isValid() || !colorRT.isValid()) {
@@ -1596,6 +1635,17 @@ void Renderer::createRenderTargets() {
         lightScatteringRT = rhi->createTexture(desc);
     }
 
+    // Velocity (motion vectors), full resolution, signed HDR for +/- vectors.
+    {
+        TextureDesc desc;
+        desc.width = width;
+        desc.height = height;
+        desc.format = PixelFormat::RGBA16_FLOAT;
+        desc.usage = TextureUsage::RenderTarget | TextureUsage::Sampled;
+        desc.sampleCount = 1;
+        velocityRT = rhi->createTexture(desc);
+    }
+
     // Create default depth buffer for swapchain rendering (when not using render targets)
     {
         TextureDesc desc;
@@ -1786,6 +1836,10 @@ void Renderer::createRenderPipeline() {
             // Simple height/distance fog: fullscreen color+depth -> tempColorRT.
             volumetricFogPipeline = makeFullscreenFragPipeline(
                 "shaders/VolumetricFog.frag.spv", volumetricFogShader, BlendMode::Opaque);
+
+            // Camera-motion velocity (motion vectors) from depth.
+            velocityPipeline = makeFullscreenFragPipeline(
+                "shaders/Velocity.frag.spv", velocityShader, BlendMode::Opaque);
         }
 
         // Directional shadow depth pipeline: renders scene geometry into the

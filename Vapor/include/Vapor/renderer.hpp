@@ -346,6 +346,7 @@ private:
     void skyAtmospherePass();
     void lightScatteringPass();
     void volumetricFogPass();
+    void velocityPass();
     void shadowPass();
 
     // ========================================================================
@@ -508,6 +509,12 @@ private:
     PipelineHandle volumetricFogPipeline;
     TextureHandle tempColorRT;  // ping-pong target for fog (swapped with colorRT)
     bool volumetricFogEnabled = true;
+    // Camera-motion velocity (motion vectors) — infrastructure for future TAA.
+    PipelineHandle velocityPipeline;
+    TextureHandle velocityRT;
+    BufferHandle prevViewProjBuffer;
+    glm::mat4 prevViewProj = glm::mat4(1.0f);
+    bool prevViewProjValid = false;
     PipelineHandle shadowPipeline;
     ShaderHandle vertexShader;
     ShaderHandle fragmentShader;
@@ -523,6 +530,7 @@ private:
     ShaderHandle lightScatteringShader;
     ShaderHandle volumetricFogShader;
     BufferHandle fogDataBuffer;
+    ShaderHandle velocityShader;
     ShaderHandle shadowVertexShader;
     ShaderHandle shadowFragmentShader;
     static constexpr Uint32 SHADOW_MAP_SIZE = 2048;
