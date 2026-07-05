@@ -4400,9 +4400,14 @@ void Renderer::renderToTexture(
         }
     }
 
-    // Flush any batched draws
-    flush2D();
-    flush3D();
+    // Deliberately NOT flushing the global 2D/3D batches here: they hold quads
+    // queued for the MAIN view (HUD sprites, world canvas). Flushing them into
+    // this offscreen target both stole them from the main pass (the "Vulkan has
+    // the render texture but no UI, Metal has UI but no render texture"
+    // asymmetry) and drew screen-space HUD into a world-space TV, which is
+    // semantically wrong. The render texture shows the scene from its own
+    // camera via the mesh loop above; if batch content inside an RTT is ever
+    // wanted, it needs an explicit scoped API, not the shared queues.
 
     rhi->endRenderPass();
 
