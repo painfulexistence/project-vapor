@@ -9,7 +9,7 @@
 #include "Vapor/renderer.hpp"
 #include "Vapor/resource_manager.hpp"
 #include "Vapor/rmlui_manager.hpp"
-#include "Vapor/scene.hpp"
+#include "Vapor/render_scene.hpp"
 #include "components.hpp"
 #include "pages/chapter_title_page.hpp"
 #include "pages/page_system.hpp"
@@ -206,7 +206,7 @@ public:
 
 class LightGatherSystem {
 public:
-    static void update(entt::registry& reg, Scene* scene) {
+    static void update(entt::registry& reg, RenderScene* scene) {
         scene->pointLights.clear();
         auto pointView = reg.view<PointLightComponent, Vapor::TransformComponent>();
         for (auto entity : pointView) {

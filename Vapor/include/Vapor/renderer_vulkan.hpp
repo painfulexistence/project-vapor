@@ -27,11 +27,11 @@ public:
 
     virtual void deinit() override;
 
-    virtual void stage(std::shared_ptr<Scene> scene) override;
+    virtual void stage(std::shared_ptr<RenderScene> scene) override;
 
-    virtual void draw(std::shared_ptr<Scene> scene, Camera& camera) override;
+    virtual void draw(std::shared_ptr<RenderScene> scene, Camera& camera) override;
 
-    virtual void draw(entt::registry& registry, std::shared_ptr<Scene> scene, Camera& camera) override;
+    virtual void draw(entt::registry& registry, std::shared_ptr<RenderScene> scene, Camera& camera) override;
 
     virtual void readPixelsAsync(ScreenshotCallback callback) override;
 

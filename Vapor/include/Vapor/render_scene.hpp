@@ -20,7 +20,7 @@ struct FluidVolumeSettings;
 // live in the entt registry (TransformComponent + systems); this class only
 // holds what the renderer consumes. The old OOP Node tree that used to live
 // here was retired once the ECS took over those roles.
-class Scene {
+class RenderScene {
 public:
     std::string name;
     std::vector<std::shared_ptr<Vapor::Image>> images;
@@ -42,9 +42,9 @@ public:
 
     bool isGeometryDirty = true;
 
-    Scene() = default;
-    Scene(const std::string& sceneName) : name(sceneName){};
-    ~Scene() = default;
+    RenderScene() = default;
+    RenderScene(const std::string& sceneName) : name(sceneName){};
+    ~RenderScene() = default;
 
     // Append a mesh to the geometry pool with a baked world transform.
     void addMesh(std::shared_ptr<Vapor::Mesh> mesh, const glm::mat4& transform = glm::identity<glm::mat4>());

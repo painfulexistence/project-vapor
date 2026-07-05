@@ -1559,7 +1559,7 @@ auto Renderer_Vulkan::createResources() -> void {
     }
 }
 
-auto Renderer_Vulkan::stage(std::shared_ptr<Scene> scene) -> void {
+auto Renderer_Vulkan::stage(std::shared_ptr<RenderScene> scene) -> void {
     ZoneScoped;
 
     // Initial data copy for lights
@@ -1802,7 +1802,7 @@ auto Renderer_Vulkan::stage(std::shared_ptr<Scene> scene) -> void {
     initParticleSystem();
 }
 
-auto Renderer_Vulkan::draw(std::shared_ptr<Scene> scene, Camera& camera) -> void {
+auto Renderer_Vulkan::draw(std::shared_ptr<RenderScene> scene, Camera& camera) -> void {
     processPendingScreenshots();
     ZoneScoped;
     FrameMark;
@@ -3992,5 +3992,5 @@ void Renderer_Vulkan::processPendingScreenshots() {
         }
     }
 }
-void Renderer_Vulkan::draw(entt::registry& registry, std::shared_ptr<Scene> scene, Camera& camera) { /* TODO */
+void Renderer_Vulkan::draw(entt::registry& registry, std::shared_ptr<RenderScene> scene, Camera& camera) { /* TODO */
 }

@@ -4,7 +4,7 @@
 #include "Vapor/mesh_builder.hpp"
 #include "Vapor/physics_3d.hpp"
 #include "Vapor/rng.hpp"
-#include "Vapor/scene.hpp"
+#include "Vapor/render_scene.hpp"
 #include "components.hpp"
 #include "pages/page_system.hpp"
 #include "pages/hud_page.hpp"
@@ -21,7 +21,7 @@
 #include <memory>
 
 struct SceneResources {
-    std::shared_ptr<Scene> scene;
+    std::shared_ptr<RenderScene> scene;
     std::shared_ptr<Vapor::Material> material;
     entt::entity cube1 = entt::null;
     entt::entity global = entt::null;
@@ -30,7 +30,7 @@ struct SceneResources {
 inline SceneResources buildScene(
     entt::registry& registry,
     Physics3D& physics,
-    std::shared_ptr<Scene> scene,
+    std::shared_ptr<RenderScene> scene,
     std::shared_ptr<Vapor::Material> material,
     int windowWidth,
     int windowHeight,

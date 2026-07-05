@@ -1,9 +1,9 @@
-#include "scene.hpp"
+#include "render_scene.hpp"
 #include "fluid_volume.hpp"
 
 using namespace Vapor;
 
-void Scene::addMesh(std::shared_ptr<Mesh> mesh, const glm::mat4& transform) {
+void RenderScene::addMesh(std::shared_ptr<Mesh> mesh, const glm::mat4& transform) {
     mesh->vertexOffset = vertices.size();
     mesh->indexOffset = indices.size();
     mesh->vertexCount = mesh->vertices.size();
@@ -23,12 +23,13 @@ void Scene::addMesh(std::shared_ptr<Mesh> mesh, const glm::mat4& transform) {
     }
 }
 
-auto Scene::createFluidVolume(Physics3D* physics, const FluidVolumeSettings& settings) -> std::shared_ptr<FluidVolume> {
+auto RenderScene::createFluidVolume(Physics3D* physics, const FluidVolumeSettings& settings)
+    -> std::shared_ptr<FluidVolume> {
     auto fluidVolume = std::make_shared<FluidVolume>(physics, settings);
     fluidVolumes.push_back(fluidVolume);
     return fluidVolume;
 }
 
-void Scene::addFluidVolume(std::shared_ptr<FluidVolume> fluidVolume) {
+void RenderScene::addFluidVolume(std::shared_ptr<FluidVolume> fluidVolume) {
     fluidVolumes.push_back(fluidVolume);
 }

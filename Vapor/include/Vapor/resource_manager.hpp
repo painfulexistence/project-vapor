@@ -2,8 +2,8 @@
 
 #include "atlas_baker.hpp"
 #include "graphics.hpp"
+#include "render_scene.hpp"
 #include "renderer.hpp"
-#include "scene.hpp"
 #include "task_scheduler.hpp"
 #include <atomic>
 #include <condition_variable>
@@ -33,7 +33,7 @@ namespace Vapor {
     /**
      * Generic resource container with loading state tracking
      *
-     * Template parameter T should be the resource type (Image, Scene, Mesh, etc.)
+     * Template parameter T should be the resource type (Image, RenderScene, Mesh, etc.)
      */
     template<typename T> class Resource {
     public:
@@ -233,10 +233,10 @@ namespace Vapor {
 
         // === Scene Loading ===
 
-        std::shared_ptr<Resource<Scene>> loadScene(
+        std::shared_ptr<Resource<RenderScene>> loadScene(
             const std::string& path,
             LoadMode mode = LoadMode::Async,
-            std::function<void(std::shared_ptr<Scene>)> onComplete = nullptr
+            std::function<void(std::shared_ptr<RenderScene>)> onComplete = nullptr
         );
 
         // === OBJ Loading ===
@@ -322,7 +322,7 @@ namespace Vapor {
 
         // Resource caches
         ResourceCache<Image> m_imageCache;
-        ResourceCache<Scene> m_sceneCache;
+        ResourceCache<RenderScene> m_sceneCache;
         ResourceCache<Mesh> m_meshCache;
         ResourceCache<std::string> m_textCache;
 
@@ -336,7 +336,7 @@ namespace Vapor {
 
         // Internal loading functions (static, called on worker threads)
         static std::shared_ptr<Image> loadImageInternal(const std::string& path);
-        static std::shared_ptr<Scene> loadSceneInternal(const std::string& path);
+        static std::shared_ptr<RenderScene> loadSceneInternal(const std::string& path);
         static std::shared_ptr<Mesh> loadMeshInternal(const std::string& path, const std::string& mtlBasedir);
         static std::shared_ptr<std::string> loadTextInternal(const std::string& path);
 

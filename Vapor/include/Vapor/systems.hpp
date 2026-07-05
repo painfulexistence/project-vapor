@@ -4,7 +4,7 @@
 #include "input_manager.hpp"
 #include "physics_3d.hpp"
 #include "renderer.hpp"
-#include "scene.hpp"
+#include "render_scene.hpp"
 #include <entt/entt.hpp>
 #include <memory>
 

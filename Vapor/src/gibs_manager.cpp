@@ -191,7 +191,7 @@ void GIBSManager::setWorldBounds(const glm::vec3& min, const glm::vec3& max) {
     }
 }
 
-void GIBSManager::onSceneLoaded(std::shared_ptr<Scene> scene) {
+void GIBSManager::onSceneLoaded(std::shared_ptr<RenderScene> scene) {
     // Calculate world bounds from scene
     // This could iterate through all meshes to find actual bounds
     // For now, use default large bounds

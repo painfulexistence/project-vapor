@@ -1,6 +1,6 @@
 #include "Vapor/asset_serializer.hpp"
 #include "Vapor/graphics.hpp"
-#include "Vapor/scene.hpp"
+#include "Vapor/render_scene.hpp"
 #include <catch2/catch_approx.hpp>
 #include <catch2/catch_test_macros.hpp>
 #include <cereal/archives/binary.hpp>
@@ -16,7 +16,7 @@ using namespace Vapor;
 
 TEST_CASE("AssetSerializer - Scene Serialization", "[model][serializer]") {
     // Create a test scene
-    auto scene = std::make_shared<Scene>("TestScene");
+    auto scene = std::make_shared<RenderScene>("TestScene");
 
     // Create a test image
     auto image = std::make_shared<Image>();
@@ -121,7 +121,7 @@ TEST_CASE("AssetSerializer - Simple Cereal Test", "[model][serializer][cereal]")
 }
 
 TEST_CASE("AssetSerializer - round-trip preserves stagedMeshTransforms", "[asset][serializer]") {
-    auto scene = std::make_shared<Scene>("RoundTripScene");
+    auto scene = std::make_shared<RenderScene>("RoundTripScene");
 
     auto mesh = std::make_shared<Mesh>();
     mesh->vertices = {
@@ -170,7 +170,7 @@ TEST_CASE("AssetSerializer - version mismatch throws", "[asset][serializer]") {
 }
 
 TEST_CASE("AssetSerializer - correct version passes", "[asset][serializer]") {
-    auto scene = std::make_shared<Scene>("VersionOK");
+    auto scene = std::make_shared<RenderScene>("VersionOK");
     std::string testPath = "test_version_ok.bin";
     AssetSerializer::serializeScene(scene, testPath);
     REQUIRE_NOTHROW(AssetSerializer::deserializeScene(testPath));

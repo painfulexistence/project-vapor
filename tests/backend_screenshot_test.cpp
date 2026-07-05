@@ -1,7 +1,7 @@
 #include <catch2/catch_test_macros.hpp>
 #include "Vapor/file_system.hpp"
 #include "Vapor/renderer.hpp"
-#include "Vapor/scene.hpp"
+#include "Vapor/render_scene.hpp"
 #include <SDL3/SDL.h>
 #include <imgui.h>
 #include <stb_image_write.h>
@@ -53,7 +53,7 @@ TEST_CASE("Renderer - Screenshot Capture", "[backend][screenshot]") {
         // Run dummy frames to trigger capture
         int timeout = 0;
         while (!captured && timeout < 300) {
-            auto scene = std::make_shared<Scene>("CaptureTest");
+            auto scene = std::make_shared<RenderScene>("CaptureTest");
             Camera cam;
             renderer->draw(scene, cam);
             SDL_Delay(10);

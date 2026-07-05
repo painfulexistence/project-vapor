@@ -8,7 +8,7 @@
 #include <unordered_map>
 #include <vector>
 
-class Scene;
+class RenderScene;
 
 namespace JPH {
     class TempAllocatorImpl;

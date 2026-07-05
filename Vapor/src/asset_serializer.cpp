@@ -8,7 +8,7 @@
 
 using namespace Vapor;
 
-void AssetSerializer::serializeScene(const std::shared_ptr<Scene>& scene, const std::string& path) {
+void AssetSerializer::serializeScene(const std::shared_ptr<RenderScene>& scene, const std::string& path) {
     auto start = SDL_GetTicks();
 
     {
@@ -76,7 +76,7 @@ void AssetSerializer::serializeScene(const std::shared_ptr<Scene>& scene, const 
     fmt::print("Scene serialized to: {} in {} ms\n", path, SDL_GetTicks() - start);
 }
 
-auto AssetSerializer::deserializeScene(const std::string& path) -> std::shared_ptr<Scene> {
+auto AssetSerializer::deserializeScene(const std::string& path) -> std::shared_ptr<RenderScene> {
     auto start = SDL_GetTicks();
 
     std::ifstream file(path, std::ios::binary);
@@ -99,7 +99,7 @@ auto AssetSerializer::deserializeScene(const std::string& path) -> std::shared_p
             path, SCENE_FORMAT_VERSION, version
         ));
     }
-    auto scene = std::make_shared<Scene>();
+    auto scene = std::make_shared<RenderScene>();
     archive(scene->name);
     archive(scene->vertices);
     archive(scene->indices);

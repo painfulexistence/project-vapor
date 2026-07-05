@@ -162,7 +162,7 @@ auto AssetManager::loadOBJ(const std::string& filename, const std::string& mtl_b
     return mesh;
 }
 
-auto AssetManager::loadGLTF(const std::string& filename) -> std::shared_ptr<Scene> {
+auto AssetManager::loadGLTF(const std::string& filename) -> std::shared_ptr<RenderScene> {
     auto resolved = FileSystem::instance().resolvePath(filename);
     if (!resolved) {
         fmt::print("GLTF not found in any search path: {}\n", filename);
@@ -186,7 +186,7 @@ auto AssetManager::loadGLTF(const std::string& filename) -> std::shared_ptr<Scen
         return nullptr;
     }
 
-    auto scene = std::make_shared<Scene>();
+    auto scene = std::make_shared<RenderScene>();
 
     // Move tinygltf's decoded image buffers — no copy
     std::vector<std::shared_ptr<Image>> images;

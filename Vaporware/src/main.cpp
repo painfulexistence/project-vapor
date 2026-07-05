@@ -20,7 +20,7 @@
 #include "Vapor/renderer.hpp"
 #include "Vapor/rmlui_manager.hpp"
 #include "Vapor/rng.hpp"
-#include "Vapor/scene.hpp"
+#include "Vapor/render_scene.hpp"
 #include "Vapor/systems.hpp"
 #include <RmlUi/Core/ElementDocument.h>
 #include <entt/entt.hpp>
@@ -291,7 +291,7 @@ auto main(int argc, char* args[]) -> int {
     auto sceneResource = resourceManager.loadScene(
         std::string("models/Sponza/Sponza.gltf"),
         Vapor::LoadMode::Async,
-        [](std::shared_ptr<Scene> loadedScene) -> void {
+        [](std::shared_ptr<RenderScene> loadedScene) -> void {
             fmt::print("Scene loaded with {} staged meshes\n", loadedScene->stagedMeshes.size());
         }
     );

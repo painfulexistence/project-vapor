@@ -57,7 +57,7 @@ set(SOURCES
     src/vehicle_controller.cpp
     src/fluid_volume.cpp
     src/renderer_vulkan.cpp
-    src/scene.cpp
+    src/render_scene.cpp
     src/task_scheduler.cpp
     src/resource_manager.cpp
     src/jolt_enki_job_system.cpp

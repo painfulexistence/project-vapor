@@ -2,7 +2,7 @@
 #include "camera.hpp"
 #include "font_manager.hpp"
 #include "graphics.hpp"
-#include "scene.hpp"
+#include "render_scene.hpp"
 #include <SDL3/SDL_video.h>
 #include <entt/entt.hpp>
 #include <functional>
@@ -50,10 +50,10 @@ public:
 
     virtual void deinit() = 0;
 
-    virtual void stage(std::shared_ptr<Scene> scene) = 0;
+    virtual void stage(std::shared_ptr<RenderScene> scene) = 0;
 
-    virtual void draw(std::shared_ptr<Scene> scene, Camera& camera) = 0;
-    virtual void draw(entt::registry& registry, std::shared_ptr<Scene> scene, Camera& camera) = 0;
+    virtual void draw(std::shared_ptr<RenderScene> scene, Camera& camera) = 0;
+    virtual void draw(entt::registry& registry, std::shared_ptr<RenderScene> scene, Camera& camera) = 0;
     virtual void readPixelsAsync(ScreenshotCallback callback) = 0;
 
     virtual void setRenderPath(RenderPath path) = 0;
@@ -214,7 +214,7 @@ public:
     // The callback should call draw commands that will be rendered to the texture
     virtual void renderToTexture(
         RenderTextureHandle target,
-        std::shared_ptr<Scene> scene,
+        std::shared_ptr<RenderScene> scene,
         Camera& camera,
         const glm::vec4& clearColor = glm::vec4(0.0f, 0.0f, 0.0f, 1.0f)
     ) {}

@@ -27,10 +27,10 @@ namespace Vapor {
     // === Scene Loading ===
 
     auto ResourceManager::loadScene(
-        const std::string& path, LoadMode mode, std::function<void(std::shared_ptr<Scene>)> onComplete
-    ) -> std::shared_ptr<Resource<Scene>> {
+        const std::string& path, LoadMode mode, std::function<void(std::shared_ptr<RenderScene>)> onComplete
+    ) -> std::shared_ptr<Resource<RenderScene>> {
 
-        return loadResource<Scene>(
+        return loadResource<RenderScene>(
             path, m_sceneCache, [path]() -> auto { return loadSceneInternal(path); }, mode, onComplete
         );
     }
@@ -132,7 +132,7 @@ namespace Vapor {
         return AssetManager::loadImage(path);
     }
 
-    auto ResourceManager::loadSceneInternal(const std::string& path) -> std::shared_ptr<Scene> {
+    auto ResourceManager::loadSceneInternal(const std::string& path) -> std::shared_ptr<RenderScene> {
         ZoneScoped;
         ZoneName(path.c_str(), path.size());
 
@@ -231,8 +231,8 @@ namespace Vapor {
     template std::shared_ptr<Resource<Image>> ResourceManager::
         loadResource(const std::string&, ResourceCache<Image>&, std::function<std::shared_ptr<Image>()>, LoadMode, std::function<void(std::shared_ptr<Image>)>);
 
-    template std::shared_ptr<Resource<Scene>> ResourceManager::
-        loadResource(const std::string&, ResourceCache<Scene>&, std::function<std::shared_ptr<Scene>()>, LoadMode, std::function<void(std::shared_ptr<Scene>)>);
+    template std::shared_ptr<Resource<RenderScene>> ResourceManager::
+        loadResource(const std::string&, ResourceCache<RenderScene>&, std::function<std::shared_ptr<RenderScene>()>, LoadMode, std::function<void(std::shared_ptr<RenderScene>)>);
 
     template std::shared_ptr<Resource<Mesh>> ResourceManager::
         loadResource(const std::string&, ResourceCache<Mesh>&, std::function<std::shared_ptr<Mesh>()>, LoadMode, std::function<void(std::shared_ptr<Mesh>)>);
