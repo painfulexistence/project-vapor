@@ -50,6 +50,7 @@ void Vapor::Mesh::initialize(const std::vector<Vapor::VertexData>& vertices, con
     this->indices = std::move(indices);
     // recalculateNormals();
     calculateTangents();
+    calculateLocalAABB();  // needed for frustum culling; otherwise localAABB is garbage
 };
 
 void Vapor::Mesh::initialize(Vapor::VertexData* vertexData, size_t vertexCount, Uint32* indexData, size_t indexCount){
@@ -63,6 +64,7 @@ void Vapor::Mesh::initialize(Vapor::VertexData* vertexData, size_t vertexCount, 
     }
     // calculateNormals();
     calculateTangents();
+    calculateLocalAABB();  // needed for frustum culling; otherwise localAABB is garbage
 };
 
 void Vapor::Mesh::calculateNormals(){

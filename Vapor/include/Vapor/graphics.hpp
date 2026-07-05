@@ -246,10 +246,13 @@ struct Mesh {
     Uint32 renderMeshId = UINT32_MAX;
     Uint32 renderMaterialId = UINT32_MAX;
     PrimitiveMode primitiveMode;
-    glm::vec3 localAABBMin;
-    glm::vec3 localAABBMax;
-    glm::vec3 worldAABBMin;
-    glm::vec3 worldAABBMax;
+    // Default to a large box so a mesh whose AABB was never computed is treated
+    // as "always visible" rather than culled (a zero/uninitialized AABB collapses
+    // to a point and gets frustum-culled the moment its origin leaves view).
+    glm::vec3 localAABBMin = glm::vec3(-1e4f);
+    glm::vec3 localAABBMax = glm::vec3(1e4f);
+    glm::vec3 worldAABBMin = glm::vec3(-1e4f);
+    glm::vec3 worldAABBMax = glm::vec3(1e4f);
 
     // Mesh optimization fields (used by SceneOptimizer)
     Uint32 vertexOffset = 0;
