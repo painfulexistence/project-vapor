@@ -571,6 +571,16 @@ void RHI_Vulkan::shutdown() {
     }
     if (device != VK_NULL_HANDLE) {
         vkDeviceWaitIdle(device);
+
+        // Flush any pending uploads FIRST, while the textures/buffers they copy
+        // into are still alive. A failed initialize() (or any teardown before a
+        // frame completes) can leave an unsubmitted upload command buffer with
+        // buffer->image copies recorded; submitting it after the images are
+        // destroyed copies into freed memory — tolerated by lavapipe but a hard
+        // crash on MoltenVK. Reclaim deferred/staging resources here too.
+        submitUploads(true);
+        processRetirements(true);
+        destroyUploadStream();
     }
 
     // Destroy all resources
@@ -587,6 +597,11 @@ void RHI_Vulkan::shutdown() {
     for (auto& [id, texture] : textures) {
         if (texture.view != VK_NULL_HANDLE) {
             vkDestroyImageView(device, texture.view, nullptr);
+        }
+        // Lazily-created per-array-layer views (render-to-layer) must be freed
+        // too, or they leak past vkDestroyDevice.
+        for (auto& [layer, lv] : texture.layerViews) {
+            if (lv != VK_NULL_HANDLE) vkDestroyImageView(device, lv, nullptr);
         }
         if (texture.image != VK_NULL_HANDLE) {
             vkDestroyImage(device, texture.image, nullptr);
@@ -615,16 +630,14 @@ void RHI_Vulkan::shutdown() {
         if (pipeline.pipeline != VK_NULL_HANDLE) {
             vkDestroyPipeline(device, pipeline.pipeline, nullptr);
         }
-        if (pipeline.layout != VK_NULL_HANDLE) {
-            vkDestroyPipelineLayout(device, pipeline.layout, nullptr);
-        }
+        // pipeline.layout is the shared globalPipelineLayout, destroyed exactly
+        // once in destroyDescriptorInfrastructure() — destroying it per pipeline
+        // here would free the same handle N times (Invalid VkPipelineLayout).
     }
     pipelines.clear();
 
-    // Everything below requires the GPU to be idle
-    submitUploads(true);
-    processRetirements(true);
-    destroyUploadStream();
+    // Uploads/retirements/staging were already flushed right after waitIdle
+    // (before resource destruction), so nothing to do for them here.
     for (auto& pool : timestampPools) {
         if (pool != VK_NULL_HANDLE) vkDestroyQueryPool(device, pool, nullptr);
     }
@@ -636,9 +649,8 @@ void RHI_Vulkan::shutdown() {
         if (pipeline.pipeline != VK_NULL_HANDLE) {
             vkDestroyPipeline(device, pipeline.pipeline, nullptr);
         }
-        if (pipeline.layout != VK_NULL_HANDLE) {
-            vkDestroyPipelineLayout(device, pipeline.layout, nullptr);
-        }
+        // pipeline.layout is the shared computePipelineLayout, destroyed exactly
+        // once in destroyDescriptorInfrastructure() — see the graphics loop above.
     }
     computePipelines.clear();
 
