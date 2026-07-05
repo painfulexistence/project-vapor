@@ -348,6 +348,7 @@ private:
     void volumetricFogPass();
     void velocityPass();
     void particlePass();
+    void volumetricCloudPass();
     void shadowPass();
 
     // ========================================================================
@@ -516,6 +517,20 @@ private:
     BufferHandle prevViewProjBuffer;
     glm::mat4 prevViewProj = glm::mat4(1.0f);
     bool prevViewProjValid = false;
+    // Volumetric clouds (quarter-res raymarch -> temporal resolve -> composite).
+    // Off by default; parameters mirror the Metal-tested VolumetricCloudData.
+    PipelineHandle cloudRaymarchPipeline;
+    PipelineHandle cloudTemporalPipeline;
+    PipelineHandle cloudCompositePipeline;
+    TextureHandle cloudRT;          // quarter-res current raymarch
+    TextureHandle cloudHistoryRT;   // previous resolved frame
+    TextureHandle cloudResolvedRT;  // temporal output (swapped with history)
+    BufferHandle cloudDataBuffer;
+    VolumetricCloudRenderData cloudSettings;  // CPU copy (tunables + wind/time accumulation)
+    glm::mat4 cloudPrevViewProj = glm::mat4(1.0f);
+    bool cloudPrevViewProjValid = false;
+    bool volumetricCloudsEnabled = false;  // default OFF (enable when verifying)
+
     // GPU particle system (self-contained orbital demo).
     static constexpr Uint32 MAX_PARTICLES = 8192;
     ComputePipelineHandle particleForcePipeline;
@@ -546,6 +561,9 @@ private:
     ShaderHandle particleIntegrateShader;
     ShaderHandle particleVertexShader;
     ShaderHandle particleFragmentShader;
+    ShaderHandle cloudRaymarchShader;
+    ShaderHandle cloudTemporalShader;
+    ShaderHandle cloudCompositeShader;
     ShaderHandle shadowVertexShader;
     ShaderHandle shadowFragmentShader;
     static constexpr Uint32 SHADOW_MAP_SIZE = 2048;

@@ -229,6 +229,53 @@ struct alignas(16) FogRenderData {
     float ambientIntensity = 0.3f;
 };
 
+// Volumetric clouds. Field-for-field mirror of the Metal backend's
+// VolumetricCloudData (graphics_effects.hpp) — the defaults below are the
+// values already tuned/tested on the Metal renderer.
+struct alignas(16) VolumetricCloudRenderData {
+    glm::mat4 invViewProj = glm::mat4(1.0f);
+    glm::mat4 prevViewProj = glm::mat4(1.0f);
+    glm::vec3 cameraPosition = glm::vec3(0.0f);
+    float _pad1 = 0.0f;
+    glm::vec3 sunDirection = glm::normalize(glm::vec3(0.5f, 0.5f, 0.5f));
+    float _pad2 = 0.0f;
+    glm::vec3 sunColor = glm::vec3(1.0f);
+    float _pad3 = 0.0f;
+    float sunIntensity = 22.0f;
+    float cloudLayerBottom = 1500.0f;
+    float cloudLayerTop = 4000.0f;
+    float cloudLayerThickness = 2500.0f;
+    float cloudCoverage = 0.5f;
+    float cloudDensity = 0.3f;
+    float cloudType = 0.5f;
+    float erosionStrength = 0.3f;
+    float shapeNoiseScale = 1.0f;
+    float detailNoiseScale = 5.0f;
+    float curlNoiseScale = 1.0f;
+    float curlNoiseStrength = 0.1f;
+    float ambientIntensity = 0.3f;
+    float silverLiningIntensity = 0.5f;
+    float silverLiningSpread = 2.0f;
+    float phaseG1 = 0.8f;
+    float phaseG2 = -0.3f;
+    float phaseBlend = 0.3f;
+    float powderStrength = 0.5f;
+    float _pad4 = 0.0f;
+    glm::vec3 windDirection = glm::vec3(1.0f, 0.0f, 0.0f);
+    float _pad5 = 0.0f;
+    glm::vec3 windOffset = glm::vec3(0.0f);
+    float _pad6 = 0.0f;
+    float windSpeed = 10.0f;
+    float time = 0.0f;
+    Uint32 primarySteps = 64;
+    Uint32 lightSteps = 6;
+    glm::vec2 screenSize = glm::vec2(1.0f);
+    glm::vec2 _pad7 = glm::vec2(0.0f);
+    Uint32 frameIndex = 0;
+    float temporalBlend = 0.05f;
+    glm::vec2 _pad8 = glm::vec2(0.0f);
+};
+
 // GPU particle (matches the Particle struct in ParticleForce/Integrate.comp and
 // Particle.vert).
 struct alignas(16) GPUParticleData {

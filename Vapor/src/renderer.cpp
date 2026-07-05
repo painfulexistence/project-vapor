@@ -129,6 +129,13 @@ void Renderer::initialize(std::unique_ptr<RHI> rhiPtr, GraphicsBackend backendTy
         prevViewProjBuffer = rhi->createBuffer(prevVPDesc);
         glm::mat4 identityVP(1.0f);
         rhi->updateBuffer(prevViewProjBuffer, &identityVP, 0, sizeof(identityVP));
+
+        BufferDesc cloudDesc;
+        cloudDesc.size = sizeof(VolumetricCloudRenderData);
+        cloudDesc.usage = BufferUsage::Uniform;
+        cloudDesc.memoryUsage = MemoryUsage::CPUtoGPU;
+        cloudDataBuffer = rhi->createBuffer(cloudDesc);
+        rhi->updateBuffer(cloudDataBuffer, &cloudSettings, 0, sizeof(cloudSettings));
     }
 
     // Create default resources
@@ -561,6 +568,11 @@ void Renderer::setupDefaultRenderGraph() {
     // rays); swaps colorRT with tempColorRT internally.
     renderGraph.addPass("VolumetricFog",
         [](Renderer& r) { r.volumetricFogPass(); });
+
+    // Volumetric clouds (quarter-res raymarch + temporal + composite), after
+    // fog and before bloom, matching the Metal graph. Off by default.
+    renderGraph.addPass("VolumetricClouds",
+        [](Renderer& r) { r.volumetricCloudPass(); });
 
     // Pyramid bloom: brightness extract -> downsample chain -> tent-filter
     // upsample chain (accumulates into pyramid[0]); composited in PostProcess.
@@ -1356,6 +1368,94 @@ void Renderer::particlePass() {
     rhi->endRenderPass();
 }
 
+// Volumetric clouds (port of the Metal quarter-res path): raymarch into a
+// quarter-res RT, temporally resolve against the previous frame's result
+// (prevViewProj reprojection + neighborhood clamp), then upscale-composite
+// over the scene with a colorRT/tempColorRT swap. Parameters live in
+// cloudSettings (Metal-tested defaults). Off by default.
+void Renderer::volumetricCloudPass() {
+    if (!volumetricCloudsEnabled) return;
+    if (!cloudRaymarchPipeline.isValid() || !cloudTemporalPipeline.isValid() ||
+        !cloudCompositePipeline.isValid() || !cloudRT.isValid() ||
+        !cloudHistoryRT.isValid() || !cloudResolvedRT.isValid() ||
+        !colorRT.isValid() || !tempColorRT.isValid() || !depthStencilRT.isValid() ||
+        !cloudDataBuffer.isValid()) {
+        return;
+    }
+
+    glm::mat4 curViewProj = currentCamera.proj * currentCamera.view;
+    if (!cloudPrevViewProjValid) { cloudPrevViewProj = curViewProj; cloudPrevViewProjValid = true; }
+
+    // Per-frame data: camera/sun, accumulated wind, temporal state. screenSize
+    // is the quarter-res cloud RT size (only the temporal neighborhood uses it).
+    cloudSettings.invViewProj = glm::inverse(curViewProj);
+    cloudSettings.prevViewProj = cloudPrevViewProj;
+    cloudSettings.cameraPosition = currentCamera.position;
+    cloudSettings.sunDirection = glm::normalize(atmosphereData.sunDirection);
+    cloudSettings.sunColor = atmosphereData.sunColor;
+    cloudSettings.windOffset += cloudSettings.windDirection * cloudSettings.windSpeed * 0.016f;
+    cloudSettings.time += 1.0f / 60.0f;
+    cloudSettings.frameIndex = frameCounter;
+    cloudSettings.screenSize = glm::vec2(std::max(1u, rhi->getSwapchainWidth() / 4),
+                                         std::max(1u, rhi->getSwapchainHeight() / 4));
+    cloudSettings.cloudLayerThickness = cloudSettings.cloudLayerTop - cloudSettings.cloudLayerBottom;
+    rhi->updateBuffer(cloudDataBuffer, &cloudSettings, 0, sizeof(cloudSettings));
+
+    // Pass 1: quarter-res raymarch -> cloudRT.
+    {
+        RenderPassDesc rp;
+        rp.name = "CloudRaymarch";
+        rp.colorAttachments.push_back(cloudRT);
+        rp.clearColors.push_back(glm::vec4(0.0f, 0.0f, 0.0f, 1.0f));
+        rp.loadColor.push_back(false);
+        rhi->beginRenderPass(rp);
+        rhi->bindPipeline(cloudRaymarchPipeline);
+        rhi->setTexture(0, 0, depthStencilRT, clampSampler);
+        rhi->setFragmentBuffer(0, cloudDataBuffer, 0, sizeof(VolumetricCloudRenderData));
+        rhi->setFragmentBuffer(3, cameraUniformBuffer, 0, sizeof(CameraRenderData));
+        rhi->draw(3, 1, 0, 0);
+        rhi->endRenderPass();
+    }
+
+    // Pass 2: temporal resolve (current + history -> resolved), then the
+    // resolved RT becomes next frame's history.
+    {
+        RenderPassDesc rp;
+        rp.name = "CloudTemporal";
+        rp.colorAttachments.push_back(cloudResolvedRT);
+        rp.clearColors.push_back(glm::vec4(0.0f));
+        rp.loadColor.push_back(false);
+        rhi->beginRenderPass(rp);
+        rhi->bindPipeline(cloudTemporalPipeline);
+        rhi->setTexture(0, 0, cloudRT, clampSampler);
+        rhi->setTexture(0, 1, cloudHistoryRT, clampSampler);
+        rhi->setTexture(0, 2, depthStencilRT, clampSampler);
+        rhi->setTexture(0, 3, velocityRT, clampSampler);  // bound for future MV reprojection
+        rhi->setFragmentBuffer(0, cloudDataBuffer, 0, sizeof(VolumetricCloudRenderData));
+        rhi->draw(3, 1, 0, 0);
+        rhi->endRenderPass();
+        std::swap(cloudHistoryRT, cloudResolvedRT);  // history <- resolved
+    }
+
+    // Pass 3: upscale + composite over the scene (ping-pong like fog).
+    {
+        RenderPassDesc rp;
+        rp.name = "CloudComposite";
+        rp.colorAttachments.push_back(tempColorRT);
+        rp.loadColor.push_back(false);  // every pixel written
+        rhi->beginRenderPass(rp);
+        rhi->bindPipeline(cloudCompositePipeline);
+        rhi->setTexture(0, 0, colorRT, clampSampler);
+        rhi->setTexture(0, 1, cloudHistoryRT, clampSampler);  // resolved clouds
+        rhi->setTexture(0, 2, depthStencilRT, clampSampler);
+        rhi->draw(3, 1, 0, 0);
+        rhi->endRenderPass();
+        std::swap(colorRT, tempColorRT);
+    }
+
+    cloudPrevViewProj = curViewProj;
+}
+
 void Renderer::postProcessPass() {
     // Post-process pass: render from colorRT to swapchain (fullscreen triangle)
     if (!postProcessPipeline.isValid() || !colorRT.isValid()) {
@@ -1749,6 +1849,22 @@ void Renderer::createRenderTargets() {
         velocityRT = rhi->createTexture(desc);
     }
 
+    // Volumetric cloud targets (quarter resolution, matching Metal): current
+    // raymarch, previous resolved frame (history), and the temporal output.
+    // Three RTs instead of Metal's two because Vulkan cannot sample the
+    // attachment being rendered (Metal read+wrote history in one pass).
+    {
+        TextureDesc desc;
+        desc.width = std::max(1u, width / 4);
+        desc.height = std::max(1u, height / 4);
+        desc.format = PixelFormat::RGBA16_FLOAT;
+        desc.usage = TextureUsage::RenderTarget | TextureUsage::Sampled;
+        desc.sampleCount = 1;
+        cloudRT = rhi->createTexture(desc);
+        cloudHistoryRT = rhi->createTexture(desc);
+        cloudResolvedRT = rhi->createTexture(desc);
+    }
+
     // Create default depth buffer for swapchain rendering (when not using render targets)
     {
         TextureDesc desc;
@@ -1943,6 +2059,15 @@ void Renderer::createRenderPipeline() {
             // Camera-motion velocity (motion vectors) from depth.
             velocityPipeline = makeFullscreenFragPipeline(
                 "shaders/Velocity.frag.spv", velocityShader, BlendMode::Opaque);
+
+            // Volumetric clouds: quarter-res raymarch, temporal resolve, and
+            // full-res composite — all fullscreen RGBA16F passes.
+            cloudRaymarchPipeline = makeFullscreenFragPipeline(
+                "shaders/CloudRaymarch.frag.spv", cloudRaymarchShader, BlendMode::Opaque);
+            cloudTemporalPipeline = makeFullscreenFragPipeline(
+                "shaders/CloudTemporal.frag.spv", cloudTemporalShader, BlendMode::Opaque);
+            cloudCompositePipeline = makeFullscreenFragPipeline(
+                "shaders/CloudComposite.frag.spv", cloudCompositeShader, BlendMode::Opaque);
 
             // GPU particles: two compute stages + an instanced-billboard render.
             auto makeCompute = [&](const char* spv, ShaderHandle& sh) -> ComputePipelineHandle {
