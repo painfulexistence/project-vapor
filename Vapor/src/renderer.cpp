@@ -97,6 +97,14 @@ void Renderer::initialize(std::unique_ptr<RHI> rhiPtr, GraphicsBackend backendTy
         pssmDataBuffer = rhi->createBuffer(pssmDesc);
         PSSMRenderData neutralPSSM;
         rhi->updateBuffer(pssmDataBuffer, &neutralPSSM, 0, sizeof(neutralPSSM));
+
+        BufferDesc atmoDesc;
+        atmoDesc.size = sizeof(AtmosphereRenderData);
+        atmoDesc.usage = BufferUsage::Uniform;
+        atmoDesc.memoryUsage = MemoryUsage::CPUtoGPU;
+        atmosphereDataBuffer = rhi->createBuffer(atmoDesc);
+        AtmosphereRenderData atmoDefaults;
+        rhi->updateBuffer(atmosphereDataBuffer, &atmoDefaults, 0, sizeof(atmoDefaults));
     }
 
     // Create default resources
@@ -510,6 +518,11 @@ void Renderer::setupDefaultRenderGraph() {
     // exists, directly to the swapchain otherwise (decided inside the pass).
     renderGraph.addPass("Main",
         [](Renderer& r) { r.mainRenderPass(); });
+
+    // Sky/atmosphere fills the background (depth == far) before bloom, so the
+    // bright sky and sun disk feed the bloom pyramid.
+    renderGraph.addPass("SkyAtmosphere",
+        [](Renderer& r) { r.skyAtmospherePass(); });
 
     // Pyramid bloom: brightness extract -> downsample chain -> tent-filter
     // upsample chain (accumulates into pyramid[0]); composited in PostProcess.
@@ -1120,6 +1133,29 @@ void Renderer::bloomUpsamplePass() {
     }
 }
 
+// Sky/atmosphere pass: physically-based Rayleigh/Mie scattering rendered into
+// the HDR colorRT, depth-tested so it only fills background pixels (where the
+// main pass left depth at the far plane). Runs after Main, before bloom, so the
+// bright sky/sun participate in bloom.
+void Renderer::skyAtmospherePass() {
+    if (!atmospherePipeline.isValid() || !colorRT.isValid() || !depthStencilRT.isValid() ||
+        !atmosphereDataBuffer.isValid()) {
+        return;
+    }
+    RenderPassDesc rp;
+    rp.name = "SkyAtmosphere";
+    rp.colorAttachments.push_back(colorRT);
+    rp.loadColor.push_back(true);      // preserve the rendered scene
+    rp.depthAttachment = depthStencilRT;
+    rp.loadDepth = true;               // test against the scene depth (no writes)
+    rhi->beginRenderPass(rp);
+    rhi->bindPipeline(atmospherePipeline);
+    rhi->setFragmentBuffer(0, atmosphereDataBuffer, 0, sizeof(AtmosphereRenderData));
+    rhi->setFragmentBuffer(3, cameraUniformBuffer, 0, sizeof(CameraRenderData));
+    rhi->draw(3, 1, 0, 0);
+    rhi->endRenderPass();
+}
+
 void Renderer::postProcessPass() {
     // Post-process pass: render from colorRT to swapchain (fullscreen triangle)
     if (!postProcessPipeline.isValid() || !colorRT.isValid()) {
@@ -1598,6 +1634,35 @@ void Renderer::createRenderPipeline() {
             bloomBrightPipeline      = makeFullscreenFragPipeline("shaders/BloomBright.frag.spv",     bloomBrightShader,     BlendMode::Opaque);
             bloomDownsamplePipeline  = makeFullscreenFragPipeline("shaders/BloomDownsample.frag.spv", bloomDownsampleShader, BlendMode::Opaque);
             bloomUpsamplePipeline    = makeFullscreenFragPipeline("shaders/BloomUpsample.frag.spv",   bloomUpsampleShader,   BlendMode::Additive);
+
+            // Sky/atmosphere: fullscreen into the HDR colorRT, depth-tested
+            // (LessOrEqual at z=1.0) so it only fills background pixels; no
+            // depth write. Its own vertex shader (z=1.0), so not the lambda.
+            std::string skyVertCode = readFile("shaders/Sky.vert.spv");
+            std::string atmoFragCode = readFile("shaders/Atmosphere.frag.spv");
+            if (!skyVertCode.empty() && !atmoFragCode.empty()) {
+                ShaderDesc svd; svd.stage = ShaderStage::Vertex;   svd.code = skyVertCode.data();  svd.codeSize = skyVertCode.size();  svd.entryPoint = "main";
+                atmosphereVertexShader = rhi->createShader(svd);
+                ShaderDesc afd; afd.stage = ShaderStage::Fragment; afd.code = atmoFragCode.data(); afd.codeSize = atmoFragCode.size(); afd.entryPoint = "main";
+                atmosphereFragmentShader = rhi->createShader(afd);
+
+                PipelineDesc ad;
+                ad.vertexShader = atmosphereVertexShader;
+                ad.fragmentShader = atmosphereFragmentShader;
+                ad.vertexLayout.stride = 0;
+                ad.vertexLayout.attributes = {};
+                ad.topology = PrimitiveTopology::TriangleList;
+                ad.blendMode = BlendMode::Opaque;
+                ad.depthTest = true;
+                ad.depthWrite = false;
+                ad.depthCompareOp = CompareOp::LessOrEqual;
+                ad.cullMode = CullMode::None;
+                ad.sampleCount = 1;
+                ad.hasDepthAttachment = true;
+                ad.depthAttachmentFormat = PixelFormat::Depth32Float;
+                ad.colorAttachmentFormats = { PixelFormat::RGBA16_FLOAT };
+                atmospherePipeline = rhi->createPipeline(ad);
+            }
         }
 
         // Directional shadow depth pipeline: renders scene geometry into the

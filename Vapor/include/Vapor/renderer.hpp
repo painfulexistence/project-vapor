@@ -343,6 +343,7 @@ private:
     void bloomBrightnessPass();
     void bloomDownsamplePass();
     void bloomUpsamplePass();
+    void skyAtmospherePass();
     void shadowPass();
 
     // ========================================================================
@@ -398,6 +399,7 @@ private:
 
     BufferHandle rectLightBuffer;    // fragment buffer(7)
     BufferHandle pssmDataBuffer;     // PSSM cascade data (Vulkan: set1 b2)
+    BufferHandle atmosphereDataBuffer;  // sky/atmosphere params (Vulkan: set1 b0 in sky pass)
     TextureHandle defaultBlackCubemapTex;   // IBL irradiance/prefilter default
     TextureHandle pssmShadowArrayTexture;   // 3-cascade depth array (Vulkan: set2 b6)
     Uint32 lastClusterLightCount = UINT32_MAX;  // cluster refill tracking
@@ -495,6 +497,7 @@ private:
     PipelineHandle bloomBrightPipeline;
     PipelineHandle bloomDownsamplePipeline;
     PipelineHandle bloomUpsamplePipeline;
+    PipelineHandle atmospherePipeline;
     PipelineHandle shadowPipeline;
     ShaderHandle vertexShader;
     ShaderHandle fragmentShader;
@@ -505,6 +508,8 @@ private:
     ShaderHandle bloomBrightShader;
     ShaderHandle bloomDownsampleShader;
     ShaderHandle bloomUpsampleShader;
+    ShaderHandle atmosphereVertexShader;
+    ShaderHandle atmosphereFragmentShader;
     ShaderHandle shadowVertexShader;
     ShaderHandle shadowFragmentShader;
     static constexpr Uint32 SHADOW_MAP_SIZE = 2048;

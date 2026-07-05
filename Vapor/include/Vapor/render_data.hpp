@@ -172,6 +172,28 @@ struct alignas(16) PSSMRenderData {
     float _pad[3] = {};
 };
 
+// Physically-based atmosphere (Rayleigh/Mie/Ozone) consumed by Atmosphere.frag.
+// Layout matches the Metal backend's AtmosphereData (graphics_effects.hpp), with
+// Earth-like defaults.
+struct alignas(16) AtmosphereRenderData {
+    glm::vec3 sunDirection = glm::normalize(glm::vec3(0.5f, 0.5f, 0.5f));
+    float _pad1 = 0.0f;
+    glm::vec3 sunColor = glm::vec3(1.0f);
+    float _pad2 = 0.0f;
+    float sunIntensity = 12.0f;
+    float planetRadius = 6371e3f;
+    float atmosphereRadius = 6471e3f;
+    float exposure = 1.0f;
+    glm::vec3 rayleighCoefficients = glm::vec3(5.8e-6f, 13.5e-6f, 33.1e-6f);
+    float _pad3 = 0.0f;
+    float rayleighScaleHeight = 8500.0f;
+    float mieCoefficient = 21e-6f;
+    float mieScaleHeight = 1200.0f;
+    float miePreferredDirection = 0.758f;
+    glm::vec3 groundColor = glm::vec3(0.015f, 0.015f, 0.02f);
+    float _pad4 = 0.0f;
+};
+
 // ============================================================================
 // Frustum for Culling
 // ============================================================================
