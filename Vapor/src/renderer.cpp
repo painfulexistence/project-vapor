@@ -112,6 +112,14 @@ void Renderer::initialize(std::unique_ptr<RHI> rhiPtr, GraphicsBackend backendTy
         lightScatteringDataBuffer = rhi->createBuffer(lsDesc);
         LightScatteringRenderData lsDefaults;
         rhi->updateBuffer(lightScatteringDataBuffer, &lsDefaults, 0, sizeof(lsDefaults));
+
+        BufferDesc fogDesc;
+        fogDesc.size = sizeof(FogRenderData);
+        fogDesc.usage = BufferUsage::Uniform;
+        fogDesc.memoryUsage = MemoryUsage::CPUtoGPU;
+        fogDataBuffer = rhi->createBuffer(fogDesc);
+        FogRenderData fogDefaults;
+        rhi->updateBuffer(fogDataBuffer, &fogDefaults, 0, sizeof(fogDefaults));
     }
 
     // Create default resources
@@ -530,6 +538,11 @@ void Renderer::setupDefaultRenderGraph() {
     // bright sky and sun disk feed the bloom pyramid.
     renderGraph.addPass("SkyAtmosphere",
         [](Renderer& r) { r.skyAtmospherePass(); });
+
+    // Height/distance fog before bloom (so the fogged scene feeds bloom/god
+    // rays); swaps colorRT with tempColorRT internally.
+    renderGraph.addPass("VolumetricFog",
+        [](Renderer& r) { r.volumetricFogPass(); });
 
     // Pyramid bloom: brightness extract -> downsample chain -> tent-filter
     // upsample chain (accumulates into pyramid[0]); composited in PostProcess.
@@ -1209,6 +1222,38 @@ void Renderer::lightScatteringPass() {
     rhi->endRenderPass();
 }
 
+// Simple height/distance fog: read colorRT + depth, write the fogged result to
+// tempColorRT, then swap so downstream passes (bloom/god rays/post) see it.
+void Renderer::volumetricFogPass() {
+    if (!volumetricFogEnabled || !volumetricFogPipeline.isValid() ||
+        !colorRT.isValid() || !tempColorRT.isValid() || !depthStencilRT.isValid() ||
+        !fogDataBuffer.isValid()) {
+        return;
+    }
+
+    FogRenderData fog;  // defaults (density/height falloff/anisotropy/ambient)
+    fog.invViewProj = glm::inverse(currentCamera.proj * currentCamera.view);
+    fog.cameraPosition = currentCamera.position;
+    fog.sunDirection = glm::normalize(atmosphereData.sunDirection);
+    fog.sunColor = atmosphereData.sunColor;
+    fog.sunIntensity = atmosphereData.sunIntensity;
+    rhi->updateBuffer(fogDataBuffer, &fog, 0, sizeof(fog));
+
+    RenderPassDesc rp;
+    rp.name = "VolumetricFog";
+    rp.colorAttachments.push_back(tempColorRT);
+    rp.loadColor.push_back(false);  // every pixel written
+    rhi->beginRenderPass(rp);
+    rhi->bindPipeline(volumetricFogPipeline);
+    rhi->setTexture(0, 0, colorRT, clampSampler);
+    rhi->setTexture(0, 1, depthStencilRT, clampSampler);
+    rhi->setFragmentBuffer(0, fogDataBuffer, 0, sizeof(FogRenderData));
+    rhi->draw(3, 1, 0, 0);
+    rhi->endRenderPass();
+
+    std::swap(colorRT, tempColorRT);  // colorRT now holds the fogged scene
+}
+
 void Renderer::postProcessPass() {
     // Post-process pass: render from colorRT to swapchain (fullscreen triangle)
     if (!postProcessPipeline.isValid() || !colorRT.isValid()) {
@@ -1479,6 +1524,9 @@ void Renderer::createRenderTargets() {
         desc.sampleCount = 1;
         desc.usage = TextureUsage::RenderTarget | TextureUsage::Sampled;  // Sampled in post-process
         colorRT = rhi->createTexture(desc);
+        // Ping-pong twin for the fog pass (read colorRT -> write tempColorRT ->
+        // swap, so downstream passes transparently see the fogged result).
+        tempColorRT = rhi->createTexture(desc);
     }
 
     // Create normal RT (MSAA and resolved)
@@ -1734,6 +1782,10 @@ void Renderer::createRenderPipeline() {
             // God rays: fullscreen light-scattering march into the half-res RT.
             lightScatteringPipeline = makeFullscreenFragPipeline(
                 "shaders/LightScattering.frag.spv", lightScatteringShader, BlendMode::Opaque);
+
+            // Simple height/distance fog: fullscreen color+depth -> tempColorRT.
+            volumetricFogPipeline = makeFullscreenFragPipeline(
+                "shaders/VolumetricFog.frag.spv", volumetricFogShader, BlendMode::Opaque);
         }
 
         // Directional shadow depth pipeline: renders scene geometry into the

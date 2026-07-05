@@ -214,6 +214,21 @@ struct alignas(16) LightScatteringRenderData {
     glm::vec2 _pad2 = glm::vec2(0.0f);
 };
 
+// Simple screen-space height/distance fog (the Metal backend's simpleFog path).
+struct alignas(16) FogRenderData {
+    glm::mat4 invViewProj = glm::mat4(1.0f);
+    glm::vec3 cameraPosition = glm::vec3(0.0f);
+    float _p0 = 0.0f;
+    glm::vec3 sunDirection = glm::normalize(glm::vec3(0.5f, 0.5f, 0.5f));
+    float _p1 = 0.0f;
+    glm::vec3 sunColor = glm::vec3(1.0f);
+    float sunIntensity = 12.0f;
+    float fogDensity = 0.02f;
+    float fogHeightFalloff = 0.1f;
+    float anisotropy = 0.6f;
+    float ambientIntensity = 0.3f;
+};
+
 // ============================================================================
 // Frustum for Culling
 // ============================================================================

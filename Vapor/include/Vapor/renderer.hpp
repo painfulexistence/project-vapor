@@ -345,6 +345,7 @@ private:
     void bloomUpsamplePass();
     void skyAtmospherePass();
     void lightScatteringPass();
+    void volumetricFogPass();
     void shadowPass();
 
     // ========================================================================
@@ -504,6 +505,9 @@ private:
     PipelineHandle atmospherePipeline;
     PipelineHandle lightScatteringPipeline;
     TextureHandle lightScatteringRT;  // half-res god rays
+    PipelineHandle volumetricFogPipeline;
+    TextureHandle tempColorRT;  // ping-pong target for fog (swapped with colorRT)
+    bool volumetricFogEnabled = true;
     PipelineHandle shadowPipeline;
     ShaderHandle vertexShader;
     ShaderHandle fragmentShader;
@@ -517,6 +521,8 @@ private:
     ShaderHandle atmosphereVertexShader;
     ShaderHandle atmosphereFragmentShader;
     ShaderHandle lightScatteringShader;
+    ShaderHandle volumetricFogShader;
+    BufferHandle fogDataBuffer;
     ShaderHandle shadowVertexShader;
     ShaderHandle shadowFragmentShader;
     static constexpr Uint32 SHADOW_MAP_SIZE = 2048;
