@@ -1231,6 +1231,7 @@ void Renderer::skyAtmospherePass() {
 // position, marching over the scene color/depth and accumulating sky luminance.
 // Rendered into the half-res lightScatteringRT and composited in PostProcess.
 void Renderer::lightScatteringPass() {
+    if (!lightScatteringEnabled) return;
     if (!lightScatteringPipeline.isValid() || !lightScatteringRT.isValid() ||
         !colorRT.isValid() || !depthStencilRT.isValid() || !lightScatteringDataBuffer.isValid()) {
         return;
@@ -1521,6 +1522,9 @@ bool Renderer::initUI() {
 // Draw the RmlUI context over the swapchain at the end of the frame graph.
 void Renderer::renderUI() {
     if (!m_uiRenderer || !m_uiContext) return;
+    // Debug escape hatch: draw everything except the UI overlay.
+    static const bool uiDisabled = std::getenv("VAPOR_DISABLE_RMLUI") != nullptr;
+    if (uiDisabled) return;
     auto* uiRenderer = static_cast<Vapor::RmlRendererRHI*>(m_uiRenderer);
 
     // Logical UI size = the Rml context dimensions (set from the window size);
@@ -1567,8 +1571,12 @@ void Renderer::postProcessPass() {
     if (bloomPyramid[0].isValid() && clampSampler.isValid()) {
         rhi->setTexture(0, 1, bloomPyramid[0], clampSampler);
     }
-    if (lightScatteringRT.isValid() && clampSampler.isValid()) {
-        rhi->setTexture(0, 2, lightScatteringRT, clampSampler);
+    if (clampSampler.isValid()) {
+        // When god rays are disabled their RT is never written — bind black
+        // (adds nothing) instead of sampling uninitialized memory.
+        TextureHandle godRays = (lightScatteringEnabled && lightScatteringRT.isValid())
+            ? lightScatteringRT : textures[defaultBlackTexture].handle;
+        rhi->setTexture(0, 2, godRays, clampSampler);
     }
 
     // Draw fullscreen triangle (3 vertices, 1 instance)
@@ -2795,6 +2803,28 @@ void Renderer::drawGraphicsImGui() {
         preview("Normal RT", normalRT);
         preview("Shadow RT", shadowRT);
         preview("AO RT", aoRT);
+        preview("Velocity RT", velocityRT);
+        preview("God Rays RT", lightScatteringRT);
+        preview("Cloud RT", cloudHistoryRT);
+        ImGui::TreePop();
+    }
+
+    // Effect toggles + key tunables for the RHI pass chain.
+    if (ImGui::TreeNode("Effects")) {
+        ImGui::Checkbox("God rays", &lightScatteringEnabled);
+        ImGui::Checkbox("Height fog", &volumetricFogEnabled);
+        ImGui::Checkbox("Particles", &particleSystemEnabled);
+        ImGui::Checkbox("Volumetric clouds", &volumetricCloudsEnabled);
+        if (volumetricCloudsEnabled) {
+            ImGui::SliderFloat("Cloud coverage", &cloudSettings.cloudCoverage, 0.0f, 1.0f);
+            ImGui::SliderFloat("Cloud density", &cloudSettings.cloudDensity, 0.0f, 1.0f);
+            ImGui::SliderFloat("Cloud type", &cloudSettings.cloudType, 0.0f, 1.0f);
+            ImGui::SliderFloat("Temporal blend", &cloudSettings.temporalBlend, 0.01f, 1.0f);
+            int steps = static_cast<int>(cloudSettings.primarySteps);
+            if (ImGui::SliderInt("Primary steps", &steps, 8, 128)) {
+                cloudSettings.primarySteps = static_cast<Uint32>(steps);
+            }
+        }
         ImGui::TreePop();
     }
 
@@ -3398,11 +3428,15 @@ RenderTextureHandle Renderer::createRenderTexture(const RenderTextureDesc& desc)
     resource.isHDR = desc.isHDR;
     resource.hasDepth = desc.hasDepth;
 
-    // Create color texture
+    // Create color texture. Always RGBA16F: renderToTexture() draws with the
+    // main/batch pipelines, whose color format is baked as RGBA16F — a
+    // different RTT format is a Vulkan validation error (dynamic-rendering
+    // pipelines must match their attachment formats exactly). HDR also means
+    // isHDR render textures need no special casing, and sampling is identical.
     TextureDesc colorDesc;
     colorDesc.width = desc.width;
     colorDesc.height = desc.height;
-    colorDesc.format = desc.format;
+    colorDesc.format = PixelFormat::RGBA16_FLOAT;
     colorDesc.usage = TextureUsage::RenderTarget | TextureUsage::Sampled;  // Drawn as a texture afterwards
     colorDesc.sampleCount = desc.sampleCount;
     resource.colorTexture = rhi->createTexture(colorDesc);
@@ -3692,6 +3726,12 @@ void Renderer::BatchRenderer::init(RHI* rhi, GraphicsBackend backend, bool is3D,
     pipelineDesc.depthTest = is3D;  // Enable depth test for 3D, disable for 2D
     pipelineDesc.depthWrite = is3D;
     pipelineDesc.cullMode = CullMode::None;  // No culling for 2D quads
+    // Batches flush inside the main pass (HDR colorRT) and renderToTexture
+    // (also RGBA16F) — bake the matching format, not the swapchain default
+    // (mismatch = VUID-...-dynamicRenderingUnusedAttachments-08910 per draw).
+    pipelineDesc.colorAttachmentFormats = { PixelFormat::RGBA16_FLOAT };
+    pipelineDesc.hasDepthAttachment = true;
+    pipelineDesc.depthAttachmentFormat = PixelFormat::Depth32Float;
 
     pipeline = rhi->createPipeline(pipelineDesc);
 

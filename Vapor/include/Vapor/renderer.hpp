@@ -516,6 +516,7 @@ private:
     PipelineHandle atmospherePipeline;
     PipelineHandle lightScatteringPipeline;
     TextureHandle lightScatteringRT;  // half-res god rays
+    bool lightScatteringEnabled = true;
     PipelineHandle volumetricFogPipeline;
     TextureHandle tempColorRT;  // ping-pong target for fog (swapped with colorRT)
     bool volumetricFogEnabled = true;
