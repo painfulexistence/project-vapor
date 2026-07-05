@@ -19,9 +19,9 @@
 #include "Vapor/physics_3d.hpp"
 #include "Vapor/renderer.hpp"
 #include "Vapor/rmlui_manager.hpp"
-#include "Vapor/systems.hpp"
 #include "Vapor/rng.hpp"
 #include "Vapor/scene.hpp"
+#include "Vapor/systems.hpp"
 #include <RmlUi/Core/ElementDocument.h>
 #include <entt/entt.hpp>
 
@@ -56,11 +56,10 @@ static void setupCustomDrawers(Vapor::SceneInspector& inspector) {
             if (ImGui::CollapsingHeader("Light Movement Logic", ImGuiTreeNodeFlags_DefaultOpen)) {
                 const char* patterns[] = { "Circle", "Figure8", "Linear", "Spiral" };
                 int p = static_cast<int>(c->pattern);
-                if (ImGui::Combo("pattern", &p, patterns, 4))
-                    c->pattern = static_cast<MovementPattern>(p);
-                ImGui::DragFloat("speed",      &c->speed,  0.01f);
-                ImGui::DragFloat("radius",     &c->radius, 0.1f, 0.0f, 100.0f);
-                ImGui::DragFloat("height",     &c->height, 0.1f, -50.0f, 50.0f);
+                if (ImGui::Combo("pattern", &p, patterns, 4)) c->pattern = static_cast<MovementPattern>(p);
+                ImGui::DragFloat("speed", &c->speed, 0.01f);
+                ImGui::DragFloat("radius", &c->radius, 0.1f, 0.0f, 100.0f);
+                ImGui::DragFloat("height", &c->height, 0.1f, -50.0f, 50.0f);
                 ImGui::LabelText("timer", "%.2f", c->timer);
             }
         }
@@ -72,8 +71,7 @@ static void setupCustomDrawers(Vapor::SceneInspector& inspector) {
             if (ImGui::CollapsingHeader("Camera Switch Request", ImGuiTreeNodeFlags_DefaultOpen)) {
                 const char* modes[] = { "Free", "Follow", "FirstPerson" };
                 int m = static_cast<int>(c->mode);
-                if (ImGui::Combo("mode", &m, modes, 3))
-                    c->mode = static_cast<CameraSwitchRequest::Mode>(m);
+                if (ImGui::Combo("mode", &m, modes, 3)) c->mode = static_cast<CameraSwitchRequest::Mode>(m);
             }
         }
     });
@@ -82,17 +80,15 @@ static void setupCustomDrawers(Vapor::SceneInspector& inspector) {
     inspector.registerCustomDrawer([](entt::registry& reg, entt::entity e) {
         if (auto* c = reg.try_get<SubtitleQueueComponent>(e)) {
             if (ImGui::CollapsingHeader("Subtitle Queue", ImGuiTreeNodeFlags_DefaultOpen)) {
-                ImGui::LabelText("queue size",       "%zu", c->queue.size());
-                ImGui::LabelText("currentIndex",     "%d",  c->currentIndex);
-                ImGui::Checkbox("advanceRequested",  &c->advanceRequested);
-                ImGui::Checkbox("autoAdvance",       &c->autoAdvance);
-                ImGui::LabelText("displayTimer",     "%.2f", c->displayTimer);
+                ImGui::LabelText("queue size", "%zu", c->queue.size());
+                ImGui::LabelText("currentIndex", "%d", c->currentIndex);
+                ImGui::Checkbox("advanceRequested", &c->advanceRequested);
+                ImGui::Checkbox("autoAdvance", &c->autoAdvance);
+                ImGui::LabelText("displayTimer", "%.2f", c->displayTimer);
                 if (auto* fsm = reg.try_get<Vapor::FSMStateComponent>(e)) {
-                    const char* states[] = {
-                        "Idle", "WaitingForVisible", "Displaying", "WaitingForHidden"
-                    };
+                    const char* states[] = { "Idle", "WaitingForVisible", "Displaying", "WaitingForHidden" };
                     ImGui::LabelText("FSM state", "%s", states[fsm->currentState]);
-                    ImGui::LabelText("FSM time",  "%.2f", fsm->stateTime);
+                    ImGui::LabelText("FSM time", "%.2f", fsm->stateTime);
                 }
             }
         }
@@ -103,10 +99,8 @@ static void setupCustomDrawers(Vapor::SceneInspector& inspector) {
         if (auto* c = reg.try_get<SceneTransitionComponent>(e)) {
             if (ImGui::CollapsingHeader("Scene Transition (FSM)", ImGuiTreeNodeFlags_DefaultOpen)) {
                 if (auto* fsm = reg.try_get<Vapor::FSMStateComponent>(e)) {
-                    const char* states[] = {
-                        "Idle", "FadingInLoadingScreen", "UnloadingScene",
-                        "LoadingAssets", "BuildingScene", "FadingOutLoadingScreen"
-                    };
+                    const char* states[] = { "Idle",          "FadingInLoadingScreen", "UnloadingScene",
+                                             "LoadingAssets", "BuildingScene",         "FadingOutLoadingScreen" };
                     ImGui::LabelText("state", "%s", states[fsm->currentState]);
                 }
                 ImGui::ProgressBar(c->progress);
@@ -219,15 +213,14 @@ auto main(int argc, char* args[]) -> int {
     // Scene serializer — engine pre-registers transform/meshRenderer;
     // game registers game-specific component writers.
     Vapor::SceneSerializer sceneSerializer;
-    sceneSerializer.registerComponent("autoRotate",
-        [](Vapor::json& out, entt::registry& reg, entt::entity e) {
-            if (auto* c = reg.try_get<AutoRotateComponent>(e))
-                out = { {"axis", Vapor::toJson(c->axis)}, {"speed", c->speed} };
-        });
+    sceneSerializer.registerComponent("autoRotate", [](Vapor::json& out, entt::registry& reg, entt::entity e) {
+        if (auto* c = reg.try_get<AutoRotateComponent>(e))
+            out = { { "axis", Vapor::toJson(c->axis) }, { "speed", c->speed } };
+    });
 
     Vapor::SceneInspector sceneInspector;
     sceneInspector.attachSerializer(sceneSerializer);
-    sceneInspector.setGltfPath("models/Sponza/Sponza.gltf", /*optimized=*/true);
+    sceneInspector.setGltfPath("models/Sponza/Sponza.gltf");
     // Exclude GLTF-spawned geometry — the inspector decides what to serialize,
     // not the serializer.
     sceneInspector.setEntityProvider([](entt::registry& reg) {
@@ -286,19 +279,17 @@ auto main(int argc, char* args[]) -> int {
 
     // Register single-frame atlas for the demo sprite texture
     SpriteAtlas demoAtlas;
-    demoAtlas.name    = "demo_sprite";
+    demoAtlas.name = "demo_sprite";
     demoAtlas.texture = spriteTexture;
-    demoAtlas.size    = glm::vec2(1.0f, 1.0f);
+    demoAtlas.size = glm::vec2(1.0f, 1.0f);
     demoAtlas.frames.push_back(SpriteFrame{
-        "default", {0.0f, 0.0f, 1.0f, 1.0f}, {1.0f, 1.0f}, {0.0f, 0.0f}, {0.5f, 0.5f}, false
-    });
+        "default", { 0.0f, 0.0f, 1.0f, 1.0f }, { 1.0f, 1.0f }, { 0.0f, 0.0f }, { 0.5f, 0.5f }, false });
     demoAtlas.nameToIndex["default"] = 0;
     AtlasHandle demoAtlasHandle = resourceManager.registerAtlas("demo_sprite", std::move(demoAtlas));
 
     fmt::print("Loading scene asynchronously...\n");
     auto sceneResource = resourceManager.loadScene(
         std::string("models/Sponza/Sponza.gltf"),
-        true,// optimized
         Vapor::LoadMode::Async,
         [](std::shared_ptr<Scene> loadedScene) -> void {
             fmt::print("Scene loaded with {} staged meshes\n", loadedScene->stagedMeshes.size());
@@ -333,9 +324,7 @@ auto main(int argc, char* args[]) -> int {
         engineCore->attachRenderer(renderer.get(), outputDir);
     }
 
-    renderer->setImGuiCallback([&]() {
-        sceneInspector.draw(registry);
-    });
+    renderer->setImGuiCallback([&]() { sceneInspector.draw(registry); });
 
     auto [sceneBuilt, materialBuilt, cube1, global] =
         buildScene(registry, *physics, scene, material, windowWidth, windowHeight, rng);
@@ -382,19 +371,18 @@ auto main(int argc, char* args[]) -> int {
     // Demo sprite entity — replaces the old drawRotatedQuad2D(spriteTexture) call
     {
         auto spriteEntity = registry.create();
-        registry.emplace<Vapor::NameComponent>(spriteEntity, Vapor::NameComponent{"DemoSprite"});
+        registry.emplace<Vapor::NameComponent>(spriteEntity, Vapor::NameComponent{ "DemoSprite" });
         auto& tc = registry.emplace<Vapor::TransformComponent>(spriteEntity);
         tc.position = glm::vec3(650.0f, 100.0f, 0.0f);
-        tc.isDirty  = true;
-        auto& sc    = registry.emplace<Vapor::SpriteComponent>(spriteEntity);
-        sc.atlas      = demoAtlasHandle;
+        tc.isDirty = true;
+        auto& sc = registry.emplace<Vapor::SpriteComponent>(spriteEntity);
+        sc.atlas = demoAtlasHandle;
         sc.frameIndex = 0;
-        sc.size       = glm::vec2(40.0f, 40.0f);
-        sc.tint       = glm::vec4(1.0f);
-        registry.emplace<AutoRotateComponent>(spriteEntity, AutoRotateComponent{
-            .axis  = glm::vec3(0.0f, 0.0f, 1.0f),
-            .speed = 2.0f
-        });
+        sc.size = glm::vec2(40.0f, 40.0f);
+        sc.tint = glm::vec4(1.0f);
+        registry.emplace<AutoRotateComponent>(
+            spriteEntity, AutoRotateComponent{ .axis = glm::vec3(0.0f, 0.0f, 1.0f), .speed = 2.0f }
+        );
     }
 
 

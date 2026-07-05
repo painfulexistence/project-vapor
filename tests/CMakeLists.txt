@@ -21,21 +21,6 @@ target_link_libraries(test_action_system PRIVATE
 target_compile_features(test_action_system PRIVATE cxx_std_20)
 target_compile_options(test_action_system PRIVATE ${TEST_WARNING_FLAGS})
 
-# ── Node / Scene transform tests (pure logic, no GPU/Physics) ──────────────
-add_executable(test_scene_transform
-    scene_transform_test.cpp
-)
-target_include_directories(test_scene_transform PRIVATE
-    ${CMAKE_SOURCE_DIR}/Vapor/include
-    ${CMAKE_SOURCE_DIR}/Vapor/include/Vapor
-)
-target_link_libraries(test_scene_transform PRIVATE
-    Catch2::Catch2WithMain
-    glm::glm
-)
-target_compile_features(test_scene_transform PRIVATE cxx_std_20)
-target_compile_options(test_scene_transform PRIVATE ${TEST_WARNING_FLAGS})
-
 # ── ECS TransformSystem tests (pure logic, no GPU/Physics) ────────────────
 add_executable(test_ecs_transform
     ecs_transform_test.cpp
@@ -168,7 +153,6 @@ include(Catch)
 # Run each test from its executable's directory so that SDL_GetBasePath()
 # (used by readFile) resolves asset paths correctly.
 catch_discover_tests(test_action_system   WORKING_DIRECTORY "$<TARGET_FILE_DIR:test_action_system>")
-catch_discover_tests(test_scene_transform WORKING_DIRECTORY "$<TARGET_FILE_DIR:test_scene_transform>")
 catch_discover_tests(test_ecs_transform   WORKING_DIRECTORY "$<TARGET_FILE_DIR:test_ecs_transform>")
 catch_discover_tests(test_fsm_system      WORKING_DIRECTORY "$<TARGET_FILE_DIR:test_fsm_system>")
 catch_discover_tests(test_camera          WORKING_DIRECTORY "$<TARGET_FILE_DIR:test_camera>")

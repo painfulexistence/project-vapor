@@ -27,18 +27,11 @@ namespace Vapor {
     // === Scene Loading ===
 
     auto ResourceManager::loadScene(
-        const std::string& path, bool optimized, LoadMode mode, std::function<void(std::shared_ptr<Scene>)> onComplete
+        const std::string& path, LoadMode mode, std::function<void(std::shared_ptr<Scene>)> onComplete
     ) -> std::shared_ptr<Resource<Scene>> {
 
-        // Include optimization flag in cache key
-        std::string cacheKey = path + (optimized ? ":optimized" : ":standard");
-
         return loadResource<Scene>(
-            cacheKey,
-            m_sceneCache,
-            [path, optimized]() -> auto { return loadSceneInternal(path, optimized); },
-            mode,
-            onComplete
+            path, m_sceneCache, [path]() -> auto { return loadSceneInternal(path); }, mode, onComplete
         );
     }
 
@@ -139,15 +132,11 @@ namespace Vapor {
         return AssetManager::loadImage(path);
     }
 
-    auto ResourceManager::loadSceneInternal(const std::string& path, bool optimized) -> std::shared_ptr<Scene> {
+    auto ResourceManager::loadSceneInternal(const std::string& path) -> std::shared_ptr<Scene> {
         ZoneScoped;
         ZoneName(path.c_str(), path.size());
 
-        if (optimized) {
-            return AssetManager::loadGLTFOptimized(path);
-        } else {
-            return AssetManager::loadGLTF(path);
-        }
+        return AssetManager::loadGLTF(path);
     }
 
     auto ResourceManager::loadMeshInternal(const std::string& path, const std::string& mtlBasedir)
@@ -239,37 +228,17 @@ namespace Vapor {
     }
 
     // Explicit template instantiations
-    template std::shared_ptr<Resource<Image>> ResourceManager::loadResource(
-        const std::string&,
-        ResourceCache<Image>&,
-        std::function<std::shared_ptr<Image>()>,
-        LoadMode,
-        std::function<void(std::shared_ptr<Image>)>
-    );
+    template std::shared_ptr<Resource<Image>> ResourceManager::
+        loadResource(const std::string&, ResourceCache<Image>&, std::function<std::shared_ptr<Image>()>, LoadMode, std::function<void(std::shared_ptr<Image>)>);
 
-    template std::shared_ptr<Resource<Scene>> ResourceManager::loadResource(
-        const std::string&,
-        ResourceCache<Scene>&,
-        std::function<std::shared_ptr<Scene>()>,
-        LoadMode,
-        std::function<void(std::shared_ptr<Scene>)>
-    );
+    template std::shared_ptr<Resource<Scene>> ResourceManager::
+        loadResource(const std::string&, ResourceCache<Scene>&, std::function<std::shared_ptr<Scene>()>, LoadMode, std::function<void(std::shared_ptr<Scene>)>);
 
-    template std::shared_ptr<Resource<Mesh>> ResourceManager::loadResource(
-        const std::string&,
-        ResourceCache<Mesh>&,
-        std::function<std::shared_ptr<Mesh>()>,
-        LoadMode,
-        std::function<void(std::shared_ptr<Mesh>)>
-    );
+    template std::shared_ptr<Resource<Mesh>> ResourceManager::
+        loadResource(const std::string&, ResourceCache<Mesh>&, std::function<std::shared_ptr<Mesh>()>, LoadMode, std::function<void(std::shared_ptr<Mesh>)>);
 
-    template std::shared_ptr<Resource<std::string>> ResourceManager::loadResource(
-        const std::string&,
-        ResourceCache<std::string>&,
-        std::function<std::shared_ptr<std::string>()>,
-        LoadMode,
-        std::function<void(std::shared_ptr<std::string>)>
-    );
+    template std::shared_ptr<Resource<std::string>> ResourceManager::
+        loadResource(const std::string&, ResourceCache<std::string>&, std::function<std::shared_ptr<std::string>()>, LoadMode, std::function<void(std::shared_ptr<std::string>)>);
 
     // === Atlas Management ===
 
@@ -337,7 +306,7 @@ namespace Vapor {
         Renderer* renderer,
         Uint32 maxSize,
         Uint32 padding,
-        bool   trim
+        bool trim
     ) {
         auto result = AtlasBaker::pack(sprites, maxSize, padding, trim);
         if (!result.success || !result.atlasImage) return AtlasHandle{};

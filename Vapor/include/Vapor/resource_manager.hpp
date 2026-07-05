@@ -6,10 +6,10 @@
 #include "scene.hpp"
 #include "task_scheduler.hpp"
 #include <atomic>
+#include <condition_variable>
 #include <functional>
 #include <memory>
 #include <mutex>
-#include <condition_variable>
 #include <string>
 #include <unordered_map>
 
@@ -235,7 +235,6 @@ namespace Vapor {
 
         std::shared_ptr<Resource<Scene>> loadScene(
             const std::string& path,
-            bool optimized = true,
             LoadMode mode = LoadMode::Async,
             std::function<void(std::shared_ptr<Scene>)> onComplete = nullptr
         );
@@ -299,7 +298,7 @@ namespace Vapor {
             Renderer* renderer,
             Uint32 maxSize = 4096,
             Uint32 padding = 1,
-            bool   trim    = true
+            bool trim = true
         );
 
         // Get atlas by handle (returns nullptr if not found)
@@ -337,7 +336,7 @@ namespace Vapor {
 
         // Internal loading functions (static, called on worker threads)
         static std::shared_ptr<Image> loadImageInternal(const std::string& path);
-        static std::shared_ptr<Scene> loadSceneInternal(const std::string& path, bool optimized);
+        static std::shared_ptr<Scene> loadSceneInternal(const std::string& path);
         static std::shared_ptr<Mesh> loadMeshInternal(const std::string& path, const std::string& mtlBasedir);
         static std::shared_ptr<std::string> loadTextInternal(const std::string& path);
 

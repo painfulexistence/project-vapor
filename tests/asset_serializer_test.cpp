@@ -1,16 +1,16 @@
-#include <catch2/catch_approx.hpp>
-#include <catch2/catch_test_macros.hpp>
 #include "Vapor/asset_serializer.hpp"
 #include "Vapor/graphics.hpp"
 #include "Vapor/scene.hpp"
+#include <catch2/catch_approx.hpp>
+#include <catch2/catch_test_macros.hpp>
+#include <cereal/archives/binary.hpp>
+#include <cereal/types/string.hpp>
+#include <cereal/types/vector.hpp>
+#include <fstream>
 #include <glm/glm.hpp>
 #include <glm/gtc/matrix_transform.hpp>
 #include <iostream>
 #include <memory>
-#include <fstream>
-#include <cereal/archives/binary.hpp>
-#include <cereal/types/string.hpp>
-#include <cereal/types/vector.hpp>
 
 using namespace Vapor;
 
@@ -25,7 +25,6 @@ TEST_CASE("AssetSerializer - Scene Serialization", "[model][serializer]") {
     image->height = 256;
     image->channelCount = 4;
     image->byteArray = std::vector<Uint8>(256 * 256 * 4, 128);
-    scene->images.push_back(image);
 
     // Create a test material
     auto material = std::make_shared<Material>();
@@ -40,7 +39,6 @@ TEST_CASE("AssetSerializer - Scene Serialization", "[model][serializer]") {
     material->occlusionStrength = 1.0f;
     material->emissiveFactor = glm::vec3(0.0f);
     material->albedoMap = image;
-    scene->materials.push_back(material);
 
     // Create a test mesh
     auto mesh = std::make_shared<Mesh>();
@@ -53,9 +51,10 @@ TEST_CASE("AssetSerializer - Scene Serialization", "[model][serializer]") {
     mesh->material = material;
     mesh->primitiveMode = PrimitiveMode::TRIANGLES;
 
-    // Create a test node
-    auto node = scene->createNode("TestNode", glm::translate(glm::mat4(1.0f), glm::vec3(0.0f, 0.0f, -5.0f)));
-    scene->addMeshToNode(node, mesh);
+    // Stage the mesh with a baked world transform. addMesh feeds stagedMeshes
+    // (which is what serializeScene writes) and registers the mesh's material
+    // and texture maps on the scene.
+    scene->addMesh(mesh, glm::translate(glm::mat4(1.0f), glm::vec3(0.0f, 0.0f, -5.0f)));
 
     // Add a directional light
     DirectionalLight dirLight;
@@ -76,7 +75,8 @@ TEST_CASE("AssetSerializer - Scene Serialization", "[model][serializer]") {
     CHECK(loadedScene->images.size() == 1);
     CHECK(loadedScene->materials.size() == 1);
     CHECK(loadedScene->directionalLights.size() == 1);
-    
+    CHECK(loadedScene->stagedMeshes.size() == 1);
+
     // Cleanup
     std::remove(testPath.c_str());
 }
@@ -126,8 +126,8 @@ TEST_CASE("AssetSerializer - round-trip preserves stagedMeshTransforms", "[asset
     auto mesh = std::make_shared<Mesh>();
     mesh->vertices = {
         { { -1.0f, -1.0f, 0.0f }, { 0.0f, 0.0f }, { 0.0f, 0.0f, 1.0f }, { 1.0f, 0.0f, 0.0f, 1.0f } },
-        { {  1.0f, -1.0f, 0.0f }, { 1.0f, 0.0f }, { 0.0f, 0.0f, 1.0f }, { 1.0f, 0.0f, 0.0f, 1.0f } },
-        { {  0.0f,  1.0f, 0.0f }, { 0.5f, 1.0f }, { 0.0f, 0.0f, 1.0f }, { 1.0f, 0.0f, 0.0f, 1.0f } },
+        { { 1.0f, -1.0f, 0.0f }, { 1.0f, 0.0f }, { 0.0f, 0.0f, 1.0f }, { 1.0f, 0.0f, 0.0f, 1.0f } },
+        { { 0.0f, 1.0f, 0.0f }, { 0.5f, 1.0f }, { 0.0f, 0.0f, 1.0f }, { 1.0f, 0.0f, 0.0f, 1.0f } },
     };
     mesh->indices = { 0, 1, 2 };
     mesh->vertexCount = 3;
