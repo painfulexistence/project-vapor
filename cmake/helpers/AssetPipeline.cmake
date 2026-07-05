@@ -44,6 +44,12 @@ function(vapor_compile_glsl_shaders TARGET SHADER_DIR)
         set(_shader_target "compile_shaders_${_hash}")
         add_custom_target(${_shader_target} ALL DEPENDS ${_spirv_outputs})
         add_dependencies(${TARGET} ${_shader_target})
+        # Record for the asset-copy targets: they copy the .spv out of the
+        # source tree, so they MUST run after compilation. Without this edge the
+        # copy (a sibling dependency of the executable) can race ahead of
+        # glslangValidator and publish a Res/ dir missing the freshly-added
+        # .spv — the renderer then aborts with "Asset not found: shaders/<x>".
+        set_property(GLOBAL APPEND PROPERTY VAPOR_SHADER_COMPILE_TARGETS ${_shader_target})
     endif()
 endfunction()
 
@@ -68,6 +74,11 @@ function(vapor_copy_engine_assets TARGET)
                     "$<TARGET_FILE_DIR:${TARGET}>/Res"
             COMMENT "Copying engine assets to $<TARGET_FILE_DIR:${TARGET}>/Res"
         )
+        # Copy only after shaders are compiled (the .spv live in the asset tree).
+        get_property(_shader_targets GLOBAL PROPERTY VAPOR_SHADER_COMPILE_TARGETS)
+        if(_shader_targets)
+            add_dependencies(${_copy_target} ${_shader_targets})
+        endif()
     endif()
 
     add_dependencies(${TARGET} ${_copy_target})
@@ -88,6 +99,12 @@ function(vapor_copy_game_assets TARGET ASSETS_DIR)
                     "$<TARGET_FILE_DIR:${TARGET}>/Res"
             COMMENT "Copying game assets to $<TARGET_FILE_DIR:${TARGET}>/Res"
         )
+        # Same ordering guard as engine assets: never publish Res/ before the
+        # shaders it references have been compiled.
+        get_property(_shader_targets GLOBAL PROPERTY VAPOR_SHADER_COMPILE_TARGETS)
+        if(_shader_targets)
+            add_dependencies(${_copy_target} ${_shader_targets})
+        endif()
     endif()
 
     add_dependencies(${TARGET} ${_copy_target})
