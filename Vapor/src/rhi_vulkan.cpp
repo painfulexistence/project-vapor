@@ -1504,15 +1504,27 @@ void RHI_Vulkan::beginFrame() {
         collectTimestamps(currentFrameInFlight);
     }
 
+    // Deferred swapchain recreation (resize / OUT_OF_DATE / SUBOPTIMAL flagged
+    // by a previous acquire or present). Done before this frame's acquire so
+    // the whole frame renders at the new size.
+    if (swapchainDirty) {
+        recreateSwapchain();
+        swapchainDirty = false;
+    }
+
     VkResult result = vkAcquireNextImageKHR(device, swapchain, UINT64_MAX,
                                             imageAvailableSemaphores[currentFrameInFlight],
                                             VK_NULL_HANDLE, &currentSwapchainImageIndex);
 
     if (result == VK_ERROR_OUT_OF_DATE_KHR) {
-        // Swapchain needs recreation; skip this frame. The fence was not
-        // reset, so the next beginFrame() passes the wait immediately.
-        // TODO: recreate the swapchain here (and on VK_SUBOPTIMAL_KHR).
+        // Unusable swapchain: recreate next frame and skip this one. The fence
+        // was not reset, so the next beginFrame() passes the wait immediately.
+        swapchainDirty = true;
         return;
+    }
+    if (result == VK_SUBOPTIMAL_KHR) {
+        // Acquire succeeded — render this frame, refresh the swapchain next.
+        swapchainDirty = true;
     }
 
     vkResetFences(device, 1, &inFlightFences[currentFrameInFlight]);
@@ -1585,7 +1597,10 @@ void RHI_Vulkan::endFrame() {
     presentInfo.pSwapchains = swapchains;
     presentInfo.pImageIndices = &currentSwapchainImageIndex;
 
-    vkQueuePresentKHR(presentQueue, &presentInfo);
+    VkResult presentResult = vkQueuePresentKHR(presentQueue, &presentInfo);
+    if (presentResult == VK_ERROR_OUT_OF_DATE_KHR || presentResult == VK_SUBOPTIMAL_KHR) {
+        swapchainDirty = true;  // recreate at the top of the next beginFrame
+    }
 
     frameCounter++;  // retirement clock: this frame's work is now "in flight"
     currentFrameInFlight = (currentFrameInFlight + 1) % MAX_FRAMES_IN_FLIGHT;
@@ -2193,6 +2208,28 @@ void RHI_Vulkan::createLogicalDevice() {
     if (!vkCmdBeginRenderingKHR || !vkCmdEndRenderingKHR) {
         throw std::runtime_error("Failed to load dynamic rendering extension functions");
     }
+}
+
+// Tear down and rebuild the swapchain at the surface's current extent.
+// createSwapchain() re-queries capabilities/formats itself, so this is a
+// full-idle destroy + fresh create; renderers detect the extent change via
+// getSwapchainWidth/Height and rebuild their own targets.
+void RHI_Vulkan::recreateSwapchain() {
+    if (device == VK_NULL_HANDLE) return;
+    vkDeviceWaitIdle(device);
+
+    for (auto& view : swapchainImageViews) {
+        if (view != VK_NULL_HANDLE) vkDestroyImageView(device, view, nullptr);
+    }
+    swapchainImageViews.clear();
+    swapchainImages.clear();
+    if (swapchain != VK_NULL_HANDLE) {
+        vkDestroySwapchainKHR(device, swapchain, nullptr);
+        swapchain = VK_NULL_HANDLE;
+    }
+
+    createSwapchain();
+    swapchainImageLayout = VK_IMAGE_LAYOUT_UNDEFINED;
 }
 
 void RHI_Vulkan::createSwapchain() {

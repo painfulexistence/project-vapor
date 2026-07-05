@@ -330,6 +330,10 @@ private:
     void createDefaultResources();
     void createRenderPipeline();
     void createRenderTargets();
+    // Destroy every swapchain-sized target so createRenderTargets() can be
+    // re-run after a resize (destruction is deferred inside the backends).
+    void destroyRenderTargets();
+    Uint32 lastRTWidth = 0, lastRTHeight = 0;  // resize detection
     void createComputePipelines();
 
     // Multi-pass rendering

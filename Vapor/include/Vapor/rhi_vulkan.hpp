@@ -408,6 +408,11 @@ private:
     VkImageView getSubresourceView(TextureResource& tex, Uint32 layer, Uint32 mip,
                                    VkImageAspectFlags aspect);
 
+    // Swapchain recreation (window resize / OUT_OF_DATE / SUBOPTIMAL). Marked
+    // dirty by acquire/present results, executed at the top of beginFrame.
+    bool swapchainDirty = false;
+    void recreateSwapchain();
+
     void createDescriptorInfrastructure();
     void destroyDescriptorInfrastructure();
     void flushDescriptors();

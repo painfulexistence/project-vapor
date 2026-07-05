@@ -556,8 +556,26 @@ void Renderer::beginFrame(const CameraRenderData& camera) {
     // Process any pending screenshots from previous frames
     processPendingScreenshots();
 
-    // Begin RHI frame (get drawable, create command buffer)
+    // Begin RHI frame (get drawable, create command buffer). The Vulkan
+    // backend recreates an out-of-date/resized swapchain here.
     rhi->beginFrame();
+
+    // Window resized: the swapchain extent changed under us — rebuild every
+    // swapchain-sized render target before anything records against them.
+    // (Old targets are destroy-deferred; nothing has been recorded yet this
+    // frame beyond the upload stream.)
+    Uint32 sw = rhi->getSwapchainWidth();
+    Uint32 sh = rhi->getSwapchainHeight();
+    if (sw != lastRTWidth || sh != lastRTHeight) {
+        if (lastRTWidth != 0) {  // skip the very first frame (initialize() built them)
+            rhi->waitIdle();
+            destroyRenderTargets();
+            createRenderTargets();
+            fmt::print("createRenderTargets: resized to {}x{}\n", sw, sh);
+        }
+        lastRTWidth = sw;
+        lastRTHeight = sh;
+    }
 
     // Call ImGui backend NewFrame (matching old renderer behavior)
     // This must be called before ImGui::NewFrame() in main.cpp
@@ -2461,6 +2479,32 @@ Frustum Renderer::extractFrustum(const glm::mat4& viewProj) {
     }
 
     return frustum;
+}
+
+void Renderer::destroyRenderTargets() {
+    auto kill = [&](TextureHandle& t) {
+        if (t.isValid()) { rhi->destroyTexture(t); t = {}; }
+    };
+    kill(depthStencilRT_MSAA); kill(depthStencilRT);
+    kill(colorRT_MSAA); kill(colorRT); kill(tempColorRT);
+    kill(normalRT_MSAA); kill(normalRT); kill(albedoRT);
+    kill(shadowRT); kill(aoRT);
+    kill(aoRawRT); kill(aoScratchRT); kill(aoHistoryRT[0]); kill(aoHistoryRT[1]);
+    kill(pointShadowRT); kill(pointShadowHistoryRT); kill(pointShadowDenoisedRT);
+    kill(giResultTexture);
+    kill(bloomBrightness);
+    for (Uint32 i = 0; i < BLOOM_PYRAMID_LEVELS; i++) kill(bloomPyramid[i]);
+    kill(lightScatteringRT);
+    kill(velocityRT);
+    kill(cloudRT); kill(cloudHistoryRT); kill(cloudResolvedRT);
+    kill(swapchainDepthBuffer);
+
+    // History/reprojection state is stale at the new resolution.
+    aoHistoryValid = false;
+    aoHistoryIndex = 0;
+    prevViewValid = false;
+    prevViewProjValid = false;
+    cloudPrevViewProjValid = false;
 }
 
 void Renderer::createRenderTargets() {
