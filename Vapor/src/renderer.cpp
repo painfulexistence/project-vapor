@@ -95,6 +95,13 @@ void Renderer::initialize(std::unique_ptr<RHI> rhiPtr, GraphicsBackend backendTy
         clusterDesc.usage = BufferUsage::Storage;
         clusterDesc.memoryUsage = MemoryUsage::CPUtoGPU;
         clusterBuffer = rhi->createBuffer(clusterDesc);
+        // Zero-fill: the PBR shaders read cluster lightCounts before the first
+        // TileCulling dispatch lands — garbage counts loop garbage lights
+        // (NaN-black frames on Metal).
+        {
+            std::vector<Uint8> clusterZeros(clusterDesc.size, 0);
+            rhi->updateBuffer(clusterBuffer, clusterZeros.data(), 0, clusterDesc.size);
+        }
 
         BufferDesc rectDesc;
         rectDesc.size = sizeof(Vapor::RectLight) * maxRectLights;
@@ -762,6 +769,20 @@ void Renderer::setupDefaultRenderGraph() {
     renderGraph.addPass("PostProcess",
         [](Renderer& r) { r.postProcessPass(); });
 
+    // 2D screen-space canvas (HUD sprites/quads) onto the swapchain, after
+    // tonemapping — sky/fog/bloom never touch it.
+    renderGraph.addPass("Canvas2D",
+        [](Renderer& r) {
+            if (r.batch2D.quadCount == 0) return;
+            RenderPassDesc rp;
+            rp.name = "Canvas2D";
+            rp.colorAttachments.push_back(TextureHandle{0});
+            rp.loadColor.push_back(true);
+            r.rhi->beginRenderPass(rp);
+            r.flush2D();
+            r.rhi->endRenderPass();
+        });
+
     // RmlUI overlay onto the swapchain (no-op until initUI() succeeds).
     // ImGui renders after the graph, in endFrame().
     renderGraph.addPass("RmlUi",
@@ -1163,9 +1184,10 @@ void Renderer::mainRenderPass() {
         }
     }
 
-    // Flush batch renders (2D/3D quads, lines) before ending the pass
+    // Flush world-space batch quads (3D canvas) inside the scene pass. The 2D
+    // screen-space batch renders after PostProcess (Canvas2D pass) so the sky
+    // can't overwrite it and the tonemapper doesn't touch UI colors.
     flush3D();
-    flush2D();
 
     // End render pass
     rhi->endRenderPass();
@@ -3858,7 +3880,7 @@ void Renderer::flush2D() {
             static_cast<float>(rhi->getSwapchainHeight()), 0.0f,
             -1.0f, 1.0f
         );
-        batch2D.flush(rhi.get(), viewProj);
+        batch2D.flush(rhi.get(), viewProj, batch2D.uiPipeline);
     }
 }
 
@@ -4659,6 +4681,14 @@ void Renderer::BatchRenderer::init(RHI* rhi, GraphicsBackend backend, bool is3D,
 
     pipeline = rhi->createPipeline(pipelineDesc);
 
+    // Swapchain variant for post-tonemap screen-space UI (Canvas2D pass):
+    // drawn after PostProcess, no depth, so the sky/tonemap never touch it.
+    pipelineDesc.colorAttachmentFormats = { PixelFormat::Swapchain };
+    pipelineDesc.hasDepthAttachment = false;
+    pipelineDesc.depthTest = false;
+    pipelineDesc.depthWrite = false;
+    uiPipeline = rhi->createPipeline(pipelineDesc);
+
     fmt::print("BatchRenderer initialized ({} mode)\n", is3D ? "3D" : "2D");
 }
 
@@ -4686,14 +4716,14 @@ void Renderer::BatchRenderer::beginBatch(RHI* rhi, const glm::mat4& viewProj) {
     canAutoFlush = true;
 }
 
-void Renderer::BatchRenderer::flush(RHI* rhi, const glm::mat4& viewProj) {
+void Renderer::BatchRenderer::flush(RHI* rhi, const glm::mat4& viewProj, PipelineHandle overridePipeline) {
     if (quadCount == 0) return;
 
     // Upload vertex data
     rhi->updateBuffer(vertexBuffer, vertices.data(), 0, sizeof(Vertex2D) * vertices.size());
 
-    // Bind pipeline
-    rhi->bindPipeline(pipeline);
+    // Bind pipeline (override = the swapchain/UI variant)
+    rhi->bindPipeline(overridePipeline.isValid() ? overridePipeline : pipeline);
 
     // Set projection matrix uniform (set 0, binding 0)
     rhi->setVertexBytes(&viewProj, sizeof(glm::mat4), 0);

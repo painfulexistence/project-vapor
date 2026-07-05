@@ -696,7 +696,8 @@ private:
 
         BufferHandle vertexBuffer;
         BufferHandle indexBuffer;
-        PipelineHandle pipeline;
+        PipelineHandle pipeline;    // HDR colorRT variant (in-scene batches)
+        PipelineHandle uiPipeline;  // swapchain variant (post-tonemap 2D UI)
         ShaderHandle vertexShader;
         ShaderHandle fragmentShader;
 
@@ -732,7 +733,7 @@ private:
         void setTexture(TextureHandle texture);
         void accountQuadSegment();
         void shutdown(RHI* rhi);
-        void flush(RHI* rhi, const glm::mat4& viewProj);
+        void flush(RHI* rhi, const glm::mat4& viewProj, PipelineHandle overridePipeline = {});
         void beginBatch(RHI* rhi, const glm::mat4& viewProj);
         void reset();
         void addQuad(const glm::vec3& position, const glm::vec2& size, const glm::vec4& color, int entityID = -1);
