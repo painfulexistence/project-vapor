@@ -142,6 +142,9 @@ public:
     // Initialize RmlUI rendering
     bool initUI() override;
 
+    // SDL window (logical-size queries for RmlUI/HiDPI); set by createRenderer.
+    void setWindow(SDL_Window* w) { window = w; }
+
     // Get debug draw interface
     std::shared_ptr<Vapor::DebugDraw> getDebugDraw() override;
 
@@ -349,6 +352,11 @@ private:
     void velocityPass();
     void particlePass();
     void volumetricCloudPass();
+
+    // RmlUI on the RHI (cross-backend): initUI() (declared above with the
+    // IRenderer overrides) creates an RmlRendererRHI and registers it as Rml's
+    // render interface; renderUI() draws the context at the end of the graph.
+    void renderUI();
     void shadowPass();
 
     // ========================================================================
@@ -517,6 +525,11 @@ private:
     BufferHandle prevViewProjBuffer;
     glm::mat4 prevViewProj = glm::mat4(1.0f);
     bool prevViewProjValid = false;
+    // RmlUI (cross-backend RHI render interface; owned, see initUI()).
+    void* m_uiRenderer = nullptr;
+    Rml::Context* m_uiContext = nullptr;
+    SDL_Window* window = nullptr;
+
     // Volumetric clouds (quarter-res raymarch -> temporal resolve -> composite).
     // Off by default; parameters mirror the Metal-tested VolumetricCloudData.
     PipelineHandle cloudRaymarchPipeline;

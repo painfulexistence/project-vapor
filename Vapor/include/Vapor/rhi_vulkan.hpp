@@ -126,6 +126,7 @@ public:
     void setAccelerationStructure(Uint32 binding, AccelStructHandle accelStruct) override;
     void dispatch(Uint32 groupCountX, Uint32 groupCountY, Uint32 groupCountZ) override;
     void computeBarrier() override;
+    void setScissor(int32_t x, int32_t y, Uint32 width, Uint32 height) override;
 
     // ========================================================================
     // Utility

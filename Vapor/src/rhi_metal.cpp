@@ -955,6 +955,20 @@ void RHI_Metal::beginRenderPass(const RenderPassDesc& desc) {
     currentRenderEncoder->setScissorRect(scissorRect);
 }
 
+void RHI_Metal::setScissor(int32_t x, int32_t y, Uint32 width, Uint32 height) {
+    if (!currentRenderEncoder) return;
+    // Clamp to non-negative offsets; callers clamp extents to the pass size
+    // (Metal validation rejects scissors beyond the attachment bounds).
+    if (x < 0) { width += x; x = 0; }
+    if (y < 0) { height += y; y = 0; }
+    MTL::ScissorRect rect;
+    rect.x = static_cast<NS::UInteger>(x);
+    rect.y = static_cast<NS::UInteger>(y);
+    rect.width = width;
+    rect.height = height;
+    currentRenderEncoder->setScissorRect(rect);
+}
+
 void RHI_Metal::endRenderPass() {
     if (currentRenderEncoder) {
         currentRenderEncoder->endEncoding();

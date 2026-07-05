@@ -59,6 +59,7 @@ set(SOURCES
     # RHI architecture files (replacing renderer_metal.cpp and renderer_vulkan.cpp)
     src/renderer.cpp
     src/rhi_vulkan.cpp
+    src/rml_renderer_rhi.cpp
     src/scene.cpp
     src/task_scheduler.cpp
     src/resource_manager.cpp

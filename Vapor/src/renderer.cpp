@@ -5,11 +5,16 @@
 #endif
 #include "helper.hpp"
 #include "components.hpp"
+#include "engine_core.hpp"
+#include "rmlui_manager.hpp"
+#include "Vapor/rml_renderer_rhi.hpp"
+#include <RmlUi/Core.h>
 #include <SDL3/SDL_video.h>
 #include <fmt/core.h>
 #include <map>
 #include <algorithm>
 #include <cstring>
+#include <cstdlib>
 #include <random>
 #include <cstddef>
 #include <memory>
@@ -165,6 +170,13 @@ void Renderer::shutdown() {
         // GPU may still be executing the last frame; ImGui backend shutdown
         // and resource destruction below require it to be finished.
         rhi->waitIdle();
+
+        // RmlUI renderer (RmlUi itself was already shut down by EngineCore).
+        if (m_uiRenderer) {
+            delete static_cast<Vapor::RmlRendererRHI*>(m_uiRenderer);
+            m_uiRenderer = nullptr;
+            m_uiContext = nullptr;
+        }
 
         // Shutdown ImGui backend
         switch (backend) {
@@ -592,6 +604,11 @@ void Renderer::setupDefaultRenderGraph() {
     // pipeline is created.
     renderGraph.addPass("PostProcess",
         [](Renderer& r) { r.postProcessPass(); });
+
+    // RmlUI overlay onto the swapchain (no-op until initUI() succeeds).
+    // ImGui renders after the graph, in endFrame().
+    renderGraph.addPass("RmlUi",
+        [](Renderer& r) { r.renderUI(); });
 }
 
 void Renderer::endFrame() {
@@ -1456,6 +1473,73 @@ void Renderer::volumetricCloudPass() {
     cloudPrevViewProj = curViewProj;
 }
 
+// RmlUI bring-up on the RHI path — mirrors Renderer_Metal::initUI(), but with
+// the cross-backend RmlRendererRHI so it works on Vulkan (and Metal via the
+// RHI routing).
+bool Renderer::initUI() {
+    auto* engineCore = Vapor::EngineCore::Get();
+    if (!engineCore) {
+        fmt::print("Renderer::initUI: EngineCore not available\n");
+        return false;
+    }
+    // Bootstrap the manager if nothing did yet (native Metal does this from
+    // its ImGui section). RmlUi lays out in LOGICAL window coordinates — the
+    // physical framebuffer scaling happens in the render interface (Retina).
+    auto* rmluiManager = engineCore->getRmlUiManager();
+    if (!rmluiManager && window) {
+        int w = 0, h = 0;
+        SDL_GetWindowSize(window, &w, &h);
+        if (engineCore->initRmlUI(w, h)) {
+            rmluiManager = engineCore->getRmlUiManager();
+        }
+    }
+    if (!rmluiManager || !rmluiManager->IsInitialized()) {
+        fmt::print("Renderer::initUI: RmlUiManager not initialized\n");
+        return false;
+    }
+
+    auto* uiRenderer = new Vapor::RmlRendererRHI(rhi.get(), backend);
+    if (!uiRenderer->initialize()) {
+        fmt::print("Renderer::initUI: Failed to initialize RHI UI renderer\n");
+        delete uiRenderer;
+        return false;
+    }
+    m_uiRenderer = uiRenderer;
+
+    Rml::SetRenderInterface(uiRenderer);
+    if (!rmluiManager->FinalizeInitialization()) {
+        fmt::print("Renderer::initUI: Failed to finalize RmlUI\n");
+        delete uiRenderer;
+        m_uiRenderer = nullptr;
+        return false;
+    }
+    m_uiContext = rmluiManager->GetContext();
+    fmt::print("Renderer::initUI: RHI UI renderer initialized successfully\n");
+    return true;
+}
+
+// Draw the RmlUI context over the swapchain at the end of the frame graph.
+void Renderer::renderUI() {
+    if (!m_uiRenderer || !m_uiContext) return;
+    auto* uiRenderer = static_cast<Vapor::RmlRendererRHI*>(m_uiRenderer);
+
+    // Logical UI size = the Rml context dimensions (set from the window size);
+    // framebuffer size = the swapchain (physical pixels, HiDPI-aware).
+    Rml::Vector2i dims = m_uiContext->GetDimensions();
+    int fbWidth = static_cast<int>(rhi->getSwapchainWidth());
+    int fbHeight = static_cast<int>(rhi->getSwapchainHeight());
+
+    RenderPassDesc rp;
+    rp.name = "RmlUi";
+    rp.colorAttachments.push_back(TextureHandle{0});  // swapchain
+    rp.loadColor.push_back(true);                     // draw on top
+    rhi->beginRenderPass(rp);
+    uiRenderer->beginFrame(dims.x, dims.y, fbWidth, fbHeight);
+    m_uiContext->Render();
+    uiRenderer->endFrame();
+    rhi->endRenderPass();
+}
+
 void Renderer::postProcessPass() {
     // Post-process pass: render from colorRT to swapchain (fullscreen triangle)
     if (!postProcessPipeline.isValid() || !colorRT.isValid()) {
@@ -2230,8 +2314,12 @@ void Renderer::bindMaterial(MaterialId materialId) {
 
 std::unique_ptr<IRenderer> createRenderer(GraphicsBackend backend, SDL_Window* window) {
 #ifdef __APPLE__
-    // Metal uses the full-feature native renderer (45 passes, RT/GIBS/water/…).
-    if (backend == GraphicsBackend::Metal) {
+    // Metal uses the full-feature native renderer (45 passes, RT/GIBS/water/…)
+    // by default. Set VAPOR_METAL_RHI=1 to route Metal through the RHI renderer
+    // instead — the bring-up path for the target architecture
+    // (renderer -> RHI -> {rhi_metal, rhi_vulkan}); passes not yet ported to
+    // the RHI renderer are missing there.
+    if (backend == GraphicsBackend::Metal && !std::getenv("VAPOR_METAL_RHI")) {
         return createRendererMetal(window);
     }
 #endif
@@ -2242,6 +2330,11 @@ std::unique_ptr<IRenderer> createRenderer(GraphicsBackend backend, SDL_Window* w
         case GraphicsBackend::Vulkan:
             rhi = std::unique_ptr<RHI>(createRHIVulkan());
             break;
+#ifdef __APPLE__
+        case GraphicsBackend::Metal:
+            rhi = std::unique_ptr<RHI>(createRHIMetal());
+            break;
+#endif
         default:
             return nullptr;
     }
@@ -2320,6 +2413,7 @@ std::unique_ptr<IRenderer> createRenderer(GraphicsBackend backend, SDL_Window* w
     // callers (and headless CI tests) can degrade gracefully.
     try {
         auto renderer = std::make_unique<Renderer>();
+        renderer->setWindow(window);
         renderer->initialize(std::move(rhi), backend);
         return renderer;
     } catch (const std::exception& e) {
@@ -2593,11 +2687,6 @@ void Renderer::processPendingScreenshots() {
 // ============================================================================
 // UI Integration
 // ============================================================================
-
-bool Renderer::initUI() {
-    // TODO: Initialize RmlUI rendering
-    return false;
-}
 
 std::shared_ptr<Vapor::DebugDraw> Renderer::getDebugDraw() {
     return debugDraw;

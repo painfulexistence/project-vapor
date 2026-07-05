@@ -2683,6 +2683,17 @@ void RHI_Vulkan::dispatch(Uint32 groupCountX, Uint32 groupCountY, Uint32 groupCo
     }
 }
 
+void RHI_Vulkan::setScissor(int32_t x, int32_t y, Uint32 width, Uint32 height) {
+    if (currentCommandBuffer == VK_NULL_HANDLE) return;
+    // Clamp to non-negative offsets (Vulkan requires offset >= 0).
+    if (x < 0) { width += x; x = 0; }
+    if (y < 0) { height += y; y = 0; }
+    VkRect2D scissor{};
+    scissor.offset = { x, y };
+    scissor.extent = { width, height };
+    vkCmdSetScissor(currentCommandBuffer, 0, 1, &scissor);
+}
+
 void RHI_Vulkan::computeBarrier() {
     if (currentCommandBuffer == VK_NULL_HANDLE) return;
     VkMemoryBarrier b{};

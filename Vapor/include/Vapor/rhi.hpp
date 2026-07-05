@@ -523,6 +523,11 @@ public:
     // Default no-op: Metal's tracked hazard mode inserts these automatically.
     virtual void computeBarrier() {}
 
+    // Set the scissor rectangle for subsequent draws, in framebuffer pixels
+    // (top-left origin). Only valid inside a render pass; beginRenderPass
+    // resets it to the full render area. Used by UI clipping (RmlUI).
+    virtual void setScissor(int32_t /*x*/, int32_t /*y*/, Uint32 /*width*/, Uint32 /*height*/) {}
+
     // ========================================================================
     // Utility
     // ========================================================================
