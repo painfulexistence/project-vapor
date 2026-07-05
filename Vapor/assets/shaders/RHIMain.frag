@@ -83,6 +83,11 @@ layout(std430, set = 1, binding = 1) readonly buffer PointLightBuf {
 layout(std430, set = 1, binding = 3) readonly buffer CameraBuf {
     CameraData cam;
 };
+// Directional shadow light-space matrix (single cascade). Identity when no
+// shadow pass ran, in which case sampling stays fully lit.
+layout(std430, set = 1, binding = 2) readonly buffer ShadowBuf {
+    mat4 shadowLightSpace;
+};
 
 layout(set = 2, binding = 0) uniform sampler2D albedoMap;
 layout(set = 2, binding = 1) uniform sampler2D normalMap;
@@ -90,6 +95,31 @@ layout(set = 2, binding = 2) uniform sampler2D metallicMap;
 layout(set = 2, binding = 3) uniform sampler2D roughnessMap;
 layout(set = 2, binding = 4) uniform sampler2D occlusionMap;
 layout(set = 2, binding = 5) uniform sampler2D emissiveMap;
+layout(set = 2, binding = 6) uniform sampler2D shadowMap;  // directional depth map
+
+// PCF directional shadow. Returns 1.0 = lit, 0.0 = fully shadowed.
+float sampleShadow(vec3 worldPos, vec3 N, vec3 L) {
+    vec4 lp = shadowLightSpace * vec4(worldPos, 1.0);
+    vec3 proj = lp.xyz / lp.w;
+    // Vulkan clip space: z in [0,1]; xy in [-1,1] -> map xy to [0,1] UV.
+    vec2 uv = proj.xy * 0.5 + 0.5;
+    float curDepth = proj.z;
+    // Outside the shadow frustum (or behind) -> treat as lit.
+    if (uv.x < 0.0 || uv.x > 1.0 || uv.y < 0.0 || uv.y > 1.0 || curDepth > 1.0) {
+        return 1.0;
+    }
+    // Slope-scaled bias to reduce acne.
+    float bias = max(0.0015 * (1.0 - dot(N, L)), 0.0004);
+    vec2 texel = 1.0 / vec2(textureSize(shadowMap, 0));
+    float lit = 0.0;
+    for (int y = -1; y <= 1; ++y) {
+        for (int x = -1; x <= 1; ++x) {
+            float d = texture(shadowMap, uv + vec2(x, y) * texel).r;
+            lit += (curDepth - bias) <= d ? 1.0 : 0.0;
+        }
+    }
+    return lit / 9.0;
+}
 
 // RHI::setFragmentBytes(&lightCounts, 8, /*binding=*/7) -> offset 64+(7%4)*16 = 112
 layout(push_constant) uniform PushConstants {
@@ -160,7 +190,11 @@ void main() {
     vec3 color = vec3(0.0);
     for (uint i = 0u; i < lightCounts.x; ++i) {
         DirLight l = dirLights[i];
-        color += shade(N, V, normalize(-l.direction), l.color * l.intensity, albedo, metallic, roughness);
+        vec3 Ldir = normalize(-l.direction);
+        vec3 contrib = shade(N, V, Ldir, l.color * l.intensity, albedo, metallic, roughness);
+        // Only the first (sun) directional light casts the single-cascade shadow.
+        if (i == 0u) contrib *= sampleShadow(fragPos, N, Ldir);
+        color += contrib;
     }
     for (uint i = 0u; i < lightCounts.y; ++i) {
         PointLight l = pointLights[i];

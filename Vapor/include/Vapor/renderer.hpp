@@ -342,6 +342,7 @@ private:
     void postProcessPass();
     void bloomExtractPass();
     void bloomBlurPass();
+    void shadowPass();
 
     // ========================================================================
     // Internal Helpers
@@ -470,6 +471,7 @@ private:
     TextureHandle aoRT;
     TextureHandle bloomRTA;  // half-res bright extract
     TextureHandle bloomRTB;  // half-res blurred
+    TextureHandle shadowMap;  // directional shadow depth map
 
     // Default depth buffer for swapchain rendering (when not using render targets)
     TextureHandle swapchainDepthBuffer;
@@ -480,6 +482,7 @@ private:
     PipelineHandle postProcessPipeline;
     PipelineHandle bloomBrightPipeline;
     PipelineHandle bloomBlurPipeline;
+    PipelineHandle shadowPipeline;
     ShaderHandle vertexShader;
     ShaderHandle fragmentShader;
     ShaderHandle prePassVertexShader;
@@ -488,6 +491,10 @@ private:
     ShaderHandle postProcessFragmentShader;
     ShaderHandle bloomBrightShader;
     ShaderHandle bloomBlurShader;
+    ShaderHandle shadowVertexShader;
+    ShaderHandle shadowFragmentShader;
+    BufferHandle shadowMatrixBuffer;
+    static constexpr Uint32 SHADOW_MAP_SIZE = 2048;
 
     // Compute pipelines
     ComputePipelineHandle buildClustersPipeline;

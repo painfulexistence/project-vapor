@@ -35,6 +35,11 @@ void main() {
     const float bloomStrength = 0.5;
     color += texture(texBloom, tex_uv).rgb * bloomStrength;
 
+    // Exposure before tone mapping (the scene is lit with high-intensity direct
+    // sun; without this the ACES curve saturates everything to white).
+    const float exposure = 0.5;
+    color *= exposure;
+
     color = aces(color);
 
     // color = linearToSRGB(color); // Already handled by swapchain

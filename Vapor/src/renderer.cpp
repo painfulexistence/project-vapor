@@ -497,6 +497,10 @@ void Renderer::setupDefaultRenderGraph() {
         [](Renderer& r) { r.raytraceAOPass(); }, PassFlags::RequiresRaytracing);
 
     // Main geometry pass: renders to colorRT when a post-process pipeline
+    // Directional shadow depth (single cascade) before the main lighting pass.
+    renderGraph.addPass("Shadow",
+        [](Renderer& r) { r.shadowPass(); });
+
     // exists, directly to the swapchain otherwise (decided inside the pass).
     renderGraph.addPass("Main",
         [](Renderer& r) { r.mainRenderPass(); });
@@ -832,6 +836,12 @@ void Renderer::mainRenderPass() {
     rhi->setTexture(0, 13, whiteTex, defaultSampler);
     rhi->setTexture(0, 14, blackTex, defaultSampler);
 
+    // Directional shadow (single cascade): light-space matrix (set1 b2) + depth
+    // map (set2 b6). Overrides the neutral binding-6 texture for the Vulkan
+    // shader; the Metal contract slots (7-14) above are ignored by RHIMain.frag.
+    if (shadowMatrixBuffer.isValid()) rhi->setFragmentBuffer(2, shadowMatrixBuffer, 0, sizeof(glm::mat4));
+    if (shadowMap.isValid()) rhi->setTexture(0, 6, shadowMap, defaultSampler);
+
     // Group drawables by material to reduce state changes
     std::map<MaterialId, std::vector<Uint32>> materialBatches;
     for (Uint32 drawableIdx : visibleDrawables) {
@@ -914,6 +924,87 @@ void Renderer::raytraceShadowPass() {
 void Renderer::raytraceAOPass() {
     // TODO: Implement raytrace AO pass for Metal
     // For now, this is a placeholder
+}
+
+// Directional shadow pass: fit a single ortho cascade to the whole camera
+// frustum (bounding-sphere method, texel-snapped for stability) and render the
+// scene depth into the shadow map. On Vulkan (no RT) this single cascade covers
+// the full range that Metal would split between an RT near-region and PSSM.
+void Renderer::shadowPass() {
+    if (!shadowPipeline.isValid() || !shadowMap.isValid() || directionalLights.empty()) return;
+
+    glm::vec3 lightDir = glm::normalize(directionalLights[0].direction);
+    glm::vec3 up = (std::abs(glm::dot(lightDir, glm::vec3(0, 1, 0))) < 0.99f)
+                 ? glm::vec3(0, 1, 0) : glm::vec3(0, 0, 1);
+
+    // Full camera frustum corners in world space (Vulkan/ZO NDC: z in [0,1]).
+    glm::mat4 invVP = glm::inverse(currentCamera.proj * currentCamera.view);
+    const glm::vec4 ndc[8] = {
+        {-1,-1,0,1},{1,-1,0,1},{-1,1,0,1},{1,1,0,1},
+        {-1,-1,1,1},{1,-1,1,1},{-1,1,1,1},{1,1,1,1},
+    };
+    glm::vec3 corners[8];
+    glm::vec3 sphereCenter(0.0f);
+    for (int i = 0; i < 8; i++) {
+        glm::vec4 w = invVP * ndc[i];
+        corners[i] = glm::vec3(w) / w.w;
+        sphereCenter += corners[i];
+    }
+    sphereCenter /= 8.0f;
+    float sphereRadius = 0.0f;
+    for (auto& c : corners) sphereRadius = glm::max(sphereRadius, glm::length(c - sphereCenter));
+
+    const float lightDist = sphereRadius * 2.0f + 1.0f;
+    glm::mat4 lightView = glm::lookAt(sphereCenter - lightDir * lightDist, sphereCenter, up);
+
+    // Snap the sphere center to the texel grid in light space (anti-shimmer).
+    float texelSize = (2.0f * sphereRadius) / float(SHADOW_MAP_SIZE);
+    glm::vec4 lsCenter = lightView * glm::vec4(sphereCenter, 1.0f);
+    lsCenter.x = std::floor(lsCenter.x / texelSize) * texelSize;
+    lsCenter.y = std::floor(lsCenter.y / texelSize) * texelSize;
+    glm::vec3 snapped = glm::vec3(glm::inverse(lightView) * lsCenter);
+    lightView = glm::lookAt(snapped - lightDir * lightDist, snapped, up);
+
+    float minDist = std::numeric_limits<float>::max();
+    float maxDist = -minDist;
+    for (auto& c : corners) {
+        float d = -(lightView * glm::vec4(c, 1.0f)).z;  // RH: -z is forward
+        minDist = glm::min(minDist, d);
+        maxDist = glm::max(maxDist, d);
+    }
+    minDist -= (maxDist - minDist);  // extend near to catch casters outside the frustum
+
+    glm::mat4 lightProj = glm::orthoZO(-sphereRadius, sphereRadius, -sphereRadius, sphereRadius, minDist, maxDist);
+    glm::mat4 lightSpace = lightProj * lightView;
+    rhi->updateBuffer(shadowMatrixBuffer, &lightSpace, 0, sizeof(lightSpace));
+
+    // Render scene depth into the shadow map (depth only).
+    RenderPassDesc rp;
+    rp.name = "Shadow";
+    rp.depthAttachment = shadowMap;
+    rp.loadDepth = false;  // clear
+    rp.clearDepth = 1.0f;
+    rhi->beginRenderPass(rp);
+    rhi->bindPipeline(shadowPipeline);
+    rhi->setVertexBuffer(0, shadowMatrixBuffer, 0, sizeof(glm::mat4));
+    rhi->setVertexBuffer(2, instanceDataBuffer, 0, sizeof(Vapor::InstanceData) * std::max<size_t>(1, visibleDrawables.size()));
+
+    for (Uint32 drawableIdx : visibleDrawables) {
+        const Drawable& drawable = frameDrawables[drawableIdx];
+        const RenderMesh& mesh = meshes[drawable.mesh];
+        auto it = drawableToInstanceID.find(drawableIdx);
+        if (it == drawableToInstanceID.end()) continue;
+        Uint32 iid = it->second;
+        if (mesh.vertexBuffer.isValid()) rhi->bindVertexBuffer(mesh.vertexBuffer, 3, 0);
+        rhi->setVertexBytes(&iid, sizeof(Uint32), 4);
+        if (mesh.indexBuffer.isValid()) {
+            rhi->bindIndexBuffer(mesh.indexBuffer, 0);
+            rhi->drawIndexed(mesh.indexCount, 1, 0, 0, 0);
+        } else if (mesh.vertexBuffer.isValid()) {
+            rhi->draw(mesh.vertexCount, 1, 0, 0);
+        }
+    }
+    rhi->endRenderPass();
 }
 
 // Bloom bright-pass: extract HDR pixels above threshold from colorRT into the
@@ -1239,6 +1330,25 @@ void Renderer::createRenderTargets() {
         bloomRTB = rhi->createTexture(desc);
     }
 
+    // Directional shadow map (single cascade) + its light-space matrix buffer.
+    {
+        TextureDesc desc;
+        desc.width = SHADOW_MAP_SIZE;
+        desc.height = SHADOW_MAP_SIZE;
+        desc.format = PixelFormat::Depth32Float;
+        desc.usage = TextureUsage::DepthStencil | TextureUsage::Sampled;
+        desc.sampleCount = 1;
+        shadowMap = rhi->createTexture(desc);
+
+        BufferDesc bd;
+        bd.size = sizeof(glm::mat4);
+        bd.usage = BufferUsage::Uniform;  // read as std430 SSBO on Vulkan
+        bd.memoryUsage = MemoryUsage::CPUtoGPU;
+        shadowMatrixBuffer = rhi->createBuffer(bd);
+        glm::mat4 identity(1.0f);
+        rhi->updateBuffer(shadowMatrixBuffer, &identity, 0, sizeof(identity));
+    }
+
     // Create default depth buffer for swapchain rendering (when not using render targets)
     {
         TextureDesc desc;
@@ -1389,6 +1499,41 @@ void Renderer::createRenderPipeline() {
             };
             bloomBrightPipeline = makeFullscreenFragPipeline("shaders/BloomBright.frag.spv", bloomBrightShader);
             bloomBlurPipeline   = makeFullscreenFragPipeline("shaders/BloomBlur.frag.spv", bloomBlurShader);
+        }
+
+        // Directional shadow depth pipeline: renders scene geometry into the
+        // shadow map (depth only, no color attachment).
+        std::string svCode = readFile("shaders/ShadowDepth.vert.spv");
+        std::string sfCode = readFile("shaders/ShadowDepth.frag.spv");
+        if (!svCode.empty() && !sfCode.empty()) {
+            ShaderDesc vd; vd.stage = ShaderStage::Vertex;   vd.code = svCode.data(); vd.codeSize = svCode.size(); vd.entryPoint = "main";
+            shadowVertexShader = rhi->createShader(vd);
+            ShaderDesc fd; fd.stage = ShaderStage::Fragment; fd.code = sfCode.data(); fd.codeSize = sfCode.size(); fd.entryPoint = "main";
+            shadowFragmentShader = rhi->createShader(fd);
+
+            PipelineDesc sd;
+            sd.vertexShader = shadowVertexShader;
+            sd.fragmentShader = shadowFragmentShader;
+            sd.vertexLayout.stride = sizeof(Vapor::VertexData);
+            sd.vertexLayout.attributes = {
+                {0, PixelFormat::RGB32_FLOAT, offsetof(Vapor::VertexData, position)},
+                {1, PixelFormat::RG32_FLOAT,  offsetof(Vapor::VertexData, uv)},
+                {2, PixelFormat::RGB32_FLOAT, offsetof(Vapor::VertexData, normal)},
+                {3, PixelFormat::RGBA32_FLOAT, offsetof(Vapor::VertexData, tangent)},
+            };
+            sd.topology = PrimitiveTopology::TriangleList;
+            sd.blendMode = BlendMode::Opaque;
+            sd.depthTest = true;
+            sd.depthWrite = true;
+            sd.depthCompareOp = CompareOp::Less;
+            // Cull front faces in the shadow pass to reduce peter-panning/acne.
+            sd.cullMode = CullMode::Front;
+            sd.frontFaceCounterClockwise = true;
+            sd.sampleCount = 1;
+            sd.hasDepthAttachment = true;
+            sd.depthAttachmentFormat = PixelFormat::Depth32Float;
+            sd.colorAttachmentFormats = {};  // depth-only, no color
+            shadowPipeline = rhi->createPipeline(sd);
         }
     }
 }
