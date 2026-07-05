@@ -622,6 +622,10 @@ private:
     // Sun/lens flare (Metal MSL for now; GLSL twin lands with the IBL round).
     // (tileCullingPipeline is declared with the other compute pipelines above.)
     ShaderHandle tileCullingShader;
+    // Vulkan tile culling twin (TileLightCull.comp) + its params buffer.
+    ComputePipelineHandle vkTileCullPipeline;
+    ShaderHandle vkTileCullShader;
+    BufferHandle lightCullDataBuffer;
     PipelineHandle sunFlarePipeline;
     ShaderHandle sunFlareVertexShader, sunFlareFragmentShader;
     BufferHandle sunFlareDataBuffer;
@@ -641,6 +645,24 @@ private:
     bool iblNeedsUpdate = true;
     static constexpr Uint32 PREFILTER_MIP_LEVELS = 5;
     void iblCapturePass();
+
+    // GIBS surfel GI (RequiresRaytracing; Metal MSL kernels via RHI compute).
+    // GIBSData itself lives in graphics_gibs.hpp (included in renderer.cpp only
+    // to keep this header clear of the split-header landmines).
+    ComputePipelineHandle surfelGenPipeline, surfelClearPipeline, surfelInsertPipeline,
+                          surfelRTPipeline, surfelTemporalPipeline, giSamplePipeline;
+    ShaderHandle gibsShaders[6];
+    BufferHandle surfelBuffer, cellHeadBuffer, surfelNextBuffer, surfelCounterBuffer, gibsDataBuffer;
+    TextureHandle giResultTexture;
+    glm::mat4 gibsPrevViewProj = glm::mat4(1.0f);
+    Uint32 gibsActiveSurfels = 0;
+    Uint32 gibsMaxSurfels = 500000;   // Medium quality (native default)
+    Uint32 gibsRaysPerSurfel = 4;
+    float gibsResolutionScale = 0.5f;
+    glm::vec3 gibsWorldMin = glm::vec3(-60.0f);
+    glm::vec3 gibsWorldMax = glm::vec3(60.0f);
+    bool gibsEnabled = false;  // bring-up default off
+    void gibsPass();
 
     void aoTemporalPass();
     void aoDenoisePass();

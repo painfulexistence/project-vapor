@@ -124,14 +124,10 @@ void RmlRendererRHI::beginFrame(int logicalWidth, int logicalHeight, int fbWidth
     m_scaleX = logicalWidth > 0 ? float(fbWidth) / logicalWidth : 1.0f;
     m_scaleY = logicalHeight > 0 ? float(fbHeight) / logicalHeight : 1.0f;
 
-    // UI projection, y-down in Rml coordinates. The Vulkan RHI renders with a
-    // negative-height viewport (GL convention), so counter-flip Y there; the
-    // Metal backend matches the native RmlRendererMetal projection.
-    if (m_backend == GraphicsBackend::Vulkan) {
-        m_projection = glm::orthoZO(0.0f, float(m_logicalWidth), 0.0f, float(m_logicalHeight), -1.0f, 1.0f);
-    } else {
-        m_projection = glm::ortho(0.0f, float(m_logicalWidth), float(m_logicalHeight), 0.0f, -1.0f, 1.0f);
-    }
+    // UI projection, y-down in Rml coordinates (0,0 = top-left), identical on
+    // both backends — device-tested: the Vulkan negative-height viewport does
+    // NOT need a counter-flip here (flipping rendered the UI upside down).
+    m_projection = glm::ortho(0.0f, float(m_logicalWidth), float(m_logicalHeight), 0.0f, -1.0f, 1.0f);
     m_inFrame = true;
 }
 

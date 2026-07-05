@@ -1,80 +1,78 @@
 #version 450
+// Screen-space tile light culling (Vulkan RHI). One invocation per 2D tile;
+// fills the Cluster buffer consumed by RHIMain.frag's point-light loop.
+// SSBOs throughout (the RHI compute descriptor set is storage-buffer only),
+// and the PointLight layout matches Vapor::PointLightData (48-byte stride).
+
 layout(local_size_x = 1, local_size_y = 1, local_size_z = 1) in;
 
-const uint MAX_LIGHTS_PER_TILE = 256; // Must match the definition in graphics.hpp
+const uint MAX_LIGHTS_PER_TILE = 256; // must match graphics.hpp
 
 struct Cluster {
-    vec4 min;
-    vec4 max;
+    vec4 mn;
+    vec4 mx;
     uint lightCount;
     uint lightIndices[MAX_LIGHTS_PER_TILE];
 };
 
+// Must match Vapor::PointLightData (stride 48).
 struct PointLight {
     vec3 position;
+    float _pad1;
     vec3 color;
+    float _pad2;
     float intensity;
     float radius;
+    vec2 _pad3;
 };
 
-layout(std140, set = 0, binding = 0) uniform CameraData {
-    mat4 proj;
-    mat4 view;
-    mat4 invProj;
-    mat4 invView;
-    float near;
-    float far;
+// Must match Vapor::CameraRenderData.
+struct CameraData {
+    mat4 proj; mat4 view; mat4 invProj; mat4 invView;
+    float nearPlane; float farPlane; vec2 _pad;
+    vec3 position; float _pad2;
+    vec4 frustumPlanes[6];
 };
-layout(std430, set = 0, binding = 3) readonly buffer PointLightBuffer {
-    PointLight pointLights[];
-};
-layout(std140, set = 0, binding = 4) uniform LightCullData {
+
+layout(std430, set = 0, binding = 0) readonly buffer CameraBuf { CameraData cam; };
+layout(std430, set = 0, binding = 3) readonly buffer PointLightBuffer { PointLight pointLights[]; };
+// Must match Vapor::LightCullData.
+layout(std430, set = 0, binding = 4) readonly buffer LightCullBuf {
     vec2 screenSize;
     vec2 _pad1;
     uvec3 gridSize;
     uint lightCount;
 };
-layout(std430, set = 0, binding = 5) restrict buffer ClusterBuffer {
-    Cluster tiles[];
-};
+layout(std430, set = 0, binding = 5) restrict buffer ClusterBuffer { Cluster tiles[]; };
 
-bool sphereTileIntersection(vec3 center, float radius, mat4 viewProj, vec2 tileMin, vec2 tileMax, vec2 screenSize) {
+bool sphereTileIntersection(vec3 center, float radius, mat4 viewProj, vec2 tileMin, vec2 tileMax) {
     vec4 clipPos = viewProj * vec4(center, 1.0);
-    // if (clipPos.w <= 0.0) { // lights behind camera (but these lights can still affect the pixel if their radius is large enough)
-    //     return false;
-    // }
+    if (clipPos.w <= 0.0) return false;  // behind the camera
     vec3 ndc = clipPos.xyz / clipPos.w;
     vec2 screenUV = ndc.xy * 0.5 + 0.5;
-    // screenUV.y = 1.0 - screenUV.y;
-
     vec2 centerSS = screenUV * screenSize;
-    float radiusSS = radius * 2.0 * min(screenSize.x, screenSize.y) / abs(clipPos.w * 2.0); // approximation
+    float radiusSS = radius * 2.0 * min(screenSize.x, screenSize.y) / abs(clipPos.w * 2.0);
     vec2 sphereMin = centerSS - radiusSS;
     vec2 sphereMax = centerSS + radiusSS;
-
     return !(sphereMax.x < tileMin.x || sphereMin.x > tileMax.x ||
              sphereMax.y < tileMin.y || sphereMin.y > tileMax.y);
 }
 
 void main() {
     uint tileIndex = gl_WorkGroupID.x + gl_WorkGroupID.y * gridSize.x;
-    Cluster tile = tiles[tileIndex];
-    tile.lightCount = 0; // reset counter every frame
+    uint count = 0u;
 
-    // Calculate tile bounding box in screen space
-    // Tile(0, 0) is bottom-left
     vec2 tileSize = screenSize / vec2(gridSize.xy);
     vec2 tileMin = vec2(gl_WorkGroupID.xy) * tileSize;
-    vec2 tileMax = vec2(gl_WorkGroupID.xy + 1) * tileSize;
+    vec2 tileMax = vec2(gl_WorkGroupID.xy + uvec2(1)) * tileSize;
 
-    mat4 viewProj = proj * view;
-    for (uint i = 0; i < lightCount; i++) {
-        PointLight light = pointLights[i];
-        if (sphereTileIntersection(light.position, light.radius, proj * view, tileMin, tileMax, screenSize) && tile.lightCount < MAX_LIGHTS_PER_TILE) {
-            tile.lightIndices[tile.lightCount] = i;
-            tile.lightCount++;
+    mat4 viewProj = cam.proj * cam.view;
+    for (uint i = 0u; i < lightCount; i++) {
+        if (count >= MAX_LIGHTS_PER_TILE) break;
+        if (sphereTileIntersection(pointLights[i].position, pointLights[i].radius, viewProj, tileMin, tileMax)) {
+            tiles[tileIndex].lightIndices[count] = i;
+            count++;
         }
     }
-
-    tiles[tileIndex] = tile;
+    tiles[tileIndex].lightCount = count;
 }

@@ -7,6 +7,7 @@
 #include "components.hpp"
 #include "engine_core.hpp"
 #include "rmlui_manager.hpp"
+#include "graphics_gibs.hpp"  // Surfel/GIBSData/param structs (Metal-layout asserted)
 #include "Vapor/rml_renderer_rhi.hpp"
 #include <RmlUi/Core.h>
 #include <SDL3/SDL_video.h>
@@ -150,6 +151,14 @@ void Renderer::initialize(std::unique_ptr<RHI> rhiPtr, GraphicsBackend backendTy
         FrameData fdInit{};
         rhi->updateBuffer(frameDataBuffer, &fdInit, 0, sizeof(fdInit));
 
+        BufferDesc lcDesc;
+        lcDesc.size = sizeof(Vapor::LightCullData);
+        lcDesc.usage = BufferUsage::Storage;
+        lcDesc.memoryUsage = MemoryUsage::CPUtoGPU;
+        lightCullDataBuffer = rhi->createBuffer(lcDesc);
+        Vapor::LightCullData lcInit{};
+        rhi->updateBuffer(lightCullDataBuffer, &lcInit, 0, sizeof(lcInit));
+
         BufferDesc sfDesc;
         sfDesc.size = sizeof(SunFlareRenderData);
         sfDesc.usage = BufferUsage::Uniform;
@@ -201,6 +210,32 @@ void Renderer::initialize(std::unique_ptr<RHI> rhiPtr, GraphicsBackend backendTy
         td.type = AccelStructType::TopLevel;
         td.allowUpdate = true;
         sceneTLAS = rhi->createAccelerationStructure(td);
+
+        // GIBS surfel pool + spatial hash + counters + per-frame data. Only on
+        // RT backends (the surfel pool alone is 64MB at Medium quality).
+        BufferDesc bd;
+        bd.usage = BufferUsage::Storage;
+        bd.memoryUsage = MemoryUsage::GPU;
+        bd.size = size_t(gibsMaxSurfels) * sizeof(Surfel);
+        surfelBuffer = rhi->createBuffer(bd);
+        bd.size = size_t(64 * 64 * 64) * sizeof(Uint32);   // 64^3 hash cells
+        cellHeadBuffer = rhi->createBuffer(bd);
+        bd.size = size_t(gibsMaxSurfels) * sizeof(Uint32);
+        surfelNextBuffer = rhi->createBuffer(bd);
+
+        BufferDesc cb;
+        cb.usage = BufferUsage::Storage;
+        cb.memoryUsage = MemoryUsage::CPUtoGPU;  // CPU reads active count back
+        cb.size = 4 * sizeof(Uint32);
+        surfelCounterBuffer = rhi->createBuffer(cb);
+        Uint32 zeros[4] = {};
+        rhi->updateBuffer(surfelCounterBuffer, zeros, 0, sizeof(zeros));
+
+        BufferDesc gd;
+        gd.usage = BufferUsage::Uniform;
+        gd.memoryUsage = MemoryUsage::CPUtoGPU;
+        gd.size = sizeof(GIBSData);
+        gibsDataBuffer = rhi->createBuffer(gd);
     }
 
     // Create default resources
@@ -646,6 +681,9 @@ void Renderer::setupDefaultRenderGraph() {
         [](Renderer& r) { r.stochasticPointShadowPass(); }, PassFlags::RequiresRaytracing);
     renderGraph.addPass("PointShadowTemporal",
         [](Renderer& r) { r.pointShadowTemporalPass(); }, PassFlags::RequiresRaytracing);
+    // GIBS surfel GI (generation -> hash -> RT -> temporal -> gather).
+    renderGraph.addPass("GIBS",
+        [](Renderer& r) { r.gibsPass(); }, PassFlags::RequiresRaytracing);
 
     // Main geometry pass: renders to colorRT when a post-process pipeline
     // Directional shadow depth (single cascade) before the main lighting pass.
@@ -997,8 +1035,8 @@ void Renderer::mainRenderPass() {
     Uint32 rectLightCount = static_cast<Uint32>(rectLights.size());
     rhi->setFragmentBytes(&rectLightCount, sizeof(Uint32), 8);
     rhi->setFragmentBuffer(9, pssmDataBuffer, 0, sizeof(PSSMRenderData));
-    Uint32 gibsEnabled = 0;  // GIBS not ported to the RHI renderer yet
-    rhi->setFragmentBytes(&gibsEnabled, sizeof(Uint32), 10);
+    Uint32 gibsOn = (gibsEnabled && capabilities.raytracing && giResultTexture.isValid()) ? 1u : 0u;
+    rhi->setFragmentBytes(&gibsOn, sizeof(Uint32), 10);
 
     // Light counts for the Vulkan shader (no cluster culling there yet).
     // Binding 11: free on Metal, and maps to push-constant offset 112 on
@@ -1033,6 +1071,9 @@ void Renderer::mainRenderPass() {
         // uses slot 6 for texAO — don't clobber it there; the cascade array is
         // already bound at the Metal contract slot 12 above.)
         if (pssmShadowArrayTexture.isValid()) rhi->setTexture(0, 6, pssmShadowArrayTexture, shadowSampler);
+        // Tiled point-light culling inputs (set1 b4 clusters, b5 dimensions).
+        if (clusterBuffer.isValid()) rhi->setFragmentBuffer(4, clusterBuffer);
+        if (lightCullDataBuffer.isValid()) rhi->setFragmentBuffer(5, lightCullDataBuffer, 0, sizeof(Vapor::LightCullData));
     } else {
         // Metal-via-RHI: real IBL outputs replace the neutral blacks —
         // irradiance(8), prefilter(9), brdfLUT(10).
@@ -1043,10 +1084,11 @@ void Renderer::mainRenderPass() {
         }
         if (capabilities.raytracing) {
             // RT kernel outputs replace the neutral whites — texAO(6),
-            // texShadow(7), texPointShadow(13).
+            // texShadow(7), texPointShadow(13), gibsGI(14).
             if (aoEnabled && aoRT.isValid()) rhi->setTexture(0, 6, aoRT, clampSampler);
             if (shadowRT.isValid()) rhi->setTexture(0, 7, shadowRT, clampSampler);
             if (pointShadowHistoryRT.isValid()) rhi->setTexture(0, 13, pointShadowHistoryRT, clampSampler);
+            if (gibsEnabled && giResultTexture.isValid()) rhi->setTexture(0, 14, giResultTexture, clampSampler);
         }
     }
 
@@ -1247,25 +1289,43 @@ void Renderer::normalResolvePass() {
     // For now, this is a placeholder
 }
 
-// Clustered point-light culling. Fills the cluster buffer the Metal PBR shader
-// consumes (buffer 2/9 contract); RHIMain.frag on Vulkan loops lights directly,
-// so this only runs on the Metal backend.
+// Clustered point-light culling on both backends: the Metal branch fills the
+// Metal PBR shader's cluster contract (3d_tile_light_cull.metal), the Vulkan
+// branch runs TileLightCull.comp for RHIMain.frag's tiled point-light loop.
 void Renderer::tileCullingPass() {
-    if (backend != GraphicsBackend::Metal) return;
-    if (!tileCullingPipeline.isValid() || !clusterBuffer.isValid()) return;
+    if (!clusterBuffer.isValid()) return;
     glm::vec2 screenSize(rhi->getSwapchainWidth(), rhi->getSwapchainHeight());
     glm::uvec3 gridSize(clusterGridSizeX, clusterGridSizeY, clusterGridSizeZ);
     Uint32 pointLightCount = static_cast<Uint32>(pointLights.size());
-    rhi->beginComputePass();
-    rhi->bindComputePipeline(tileCullingPipeline);
-    rhi->setComputeBuffer(0, clusterBuffer);
-    rhi->setComputeBuffer(1, pointLightBuffer, 0, sizeof(PointLightData) * maxPointLights);
-    rhi->setComputeBuffer(2, cameraUniformBuffer, 0, sizeof(CameraRenderData));
-    rhi->setComputeBytes(&pointLightCount, sizeof(Uint32), 3);
-    rhi->setComputeBytes(&gridSize, sizeof(glm::uvec3), 4);
-    rhi->setComputeBytes(&screenSize, sizeof(glm::vec2), 5);
-    rhi->dispatch(clusterGridSizeX, clusterGridSizeY, 1);
-    rhi->endComputePass();
+
+    if (backend == GraphicsBackend::Metal) {
+        if (!tileCullingPipeline.isValid()) return;
+        rhi->beginComputePass();
+        rhi->bindComputePipeline(tileCullingPipeline);
+        rhi->setComputeBuffer(0, clusterBuffer);
+        rhi->setComputeBuffer(1, pointLightBuffer, 0, sizeof(PointLightData) * maxPointLights);
+        rhi->setComputeBuffer(2, cameraUniformBuffer, 0, sizeof(CameraRenderData));
+        rhi->setComputeBytes(&pointLightCount, sizeof(Uint32), 3);
+        rhi->setComputeBytes(&gridSize, sizeof(glm::uvec3), 4);
+        rhi->setComputeBytes(&screenSize, sizeof(glm::vec2), 5);
+        rhi->dispatch(clusterGridSizeX, clusterGridSizeY, 1);
+        rhi->endComputePass();
+    } else {
+        if (!vkTileCullPipeline.isValid() || !lightCullDataBuffer.isValid()) return;
+        Vapor::LightCullData lc{};
+        lc.screenSize = screenSize;
+        lc.gridSize = gridSize;
+        lc.lightCount = pointLightCount;
+        rhi->updateBuffer(lightCullDataBuffer, &lc, 0, sizeof(lc));
+        rhi->beginComputePass();
+        rhi->bindComputePipeline(vkTileCullPipeline);
+        rhi->setComputeBuffer(0, cameraUniformBuffer, 0, sizeof(CameraRenderData));
+        rhi->setComputeBuffer(3, pointLightBuffer, 0, sizeof(PointLightData) * maxPointLights);
+        rhi->setComputeBuffer(4, lightCullDataBuffer, 0, sizeof(Vapor::LightCullData));
+        rhi->setComputeBuffer(5, clusterBuffer);
+        rhi->dispatch(clusterGridSizeX, clusterGridSizeY, 1);
+        rhi->endComputePass();
+    }
     rhi->computeBarrier();  // cluster writes -> fragment reads in Main
 }
 
@@ -1429,6 +1489,160 @@ void Renderer::stochasticPointShadowPass() {
     rhi->setComputeBytes(&debugMode, sizeof(Uint32), 7);
     rhi->dispatch((w + 7) / 8, (h + 7) / 8, 1);
     rhi->endComputePass();
+}
+
+// GIBS surfel GI (RequiresRaytracing): generate surfels from the pre-pass
+// G-buffer, rebuild the spatial hash, ray-trace surfel irradiance against the
+// TLAS, temporally smooth, then gather per-pixel GI into giResultTexture. One
+// graph pass chaining the five native kernels with compute barriers.
+void Renderer::gibsPass() {
+    if (!gibsEnabled || !sceneTLAS.isValid() || !surfelGenPipeline.isValid() ||
+        !surfelClearPipeline.isValid() || !surfelInsertPipeline.isValid() ||
+        !surfelRTPipeline.isValid() || !surfelTemporalPipeline.isValid() ||
+        !giSamplePipeline.isValid() || !giResultTexture.isValid()) {
+        return;
+    }
+
+    // Counter readback: p[1] = allocated surfels (one frame latent, like the
+    // native shared-memory read); p[0] = per-frame new-surfel budget counter.
+    if (Uint32* p = static_cast<Uint32*>(rhi->mapBuffer(surfelCounterBuffer))) {
+        gibsActiveSurfels = std::min(p[1], gibsMaxSurfels);
+        p[0] = 0;
+        rhi->unmapBuffer(surfelCounterBuffer);
+    }
+
+    Uint32 w = rhi->getSwapchainWidth();
+    Uint32 h = rhi->getSwapchainHeight();
+    glm::vec2 screenSize(w, h);
+    glm::vec2 giResolution = screenSize * gibsResolutionScale;
+
+    // Grid: 64^3 cells over the world bounds (matches the buffer allocation).
+    glm::vec3 worldSize = gibsWorldMax - gibsWorldMin;
+    float cellSize = std::max({worldSize.x, worldSize.y, worldSize.z}) / 64.0f;
+    glm::uvec3 gridSize(64, 64, 64);
+    Uint32 totalCells = 64 * 64 * 64;
+
+    GIBSData gd{};
+    gd.invViewProj = glm::inverse(currentCamera.proj * currentCamera.view);
+    gd.prevViewProj = gibsPrevViewProj;
+    gd.cameraPosition = currentCamera.position;
+    gd.sunDirection = glm::normalize(atmosphereData.sunDirection);
+    gd.sunColor = atmosphereData.sunColor;
+    gd.sunIntensity = atmosphereData.sunIntensity;
+    gd.maxSurfels = gibsMaxSurfels;
+    gd.activeSurfelCount = gibsActiveSurfels;
+    gd.surfelRadius = 0.25f;
+    gd.surfelDensity = 4.0f;
+    gd.worldMin = gibsWorldMin;
+    gd.cellSize = cellSize;
+    gd.worldMax = gibsWorldMax;
+    gd.totalCells = totalCells;
+    gd.gridSize = gridSize;
+    gd.raysPerSurfel = gibsRaysPerSurfel;
+    gd.maxBounces = 1;
+    gd.rayBias = 0.001f;
+    gd.rayMaxDistance = 100.0f;
+    gd.temporalBlend = 0.1f;
+    gd.hysteresis = 0.95f;
+    gd.frameIndex = frameCounter;
+    gd.screenSize = screenSize;
+    gd.giResolution = giResolution;
+    gd.sampleRadius = 1;
+    gd.maxSurfelsPerPixel = 8;
+    rhi->updateBuffer(gibsDataBuffer, &gd, 0, sizeof(gd));
+    gibsPrevViewProj = currentCamera.proj * currentCamera.view;
+
+    const size_t surfelBytes = size_t(gibsMaxSurfels) * sizeof(Surfel);
+    Uint32 active = std::max(gibsActiveSurfels, 1u);
+
+    rhi->beginComputePass();
+
+    // 1) Surfel generation from the pre-pass G-buffer.
+    SurfelGenerationParams gp{};
+    gp.invViewProj = gd.invViewProj;
+    gp.screenSize = screenSize;
+    gp.surfelRadius = gd.surfelRadius;
+    gp.densityThreshold = 0.01f;
+    gp.maxNewSurfels = std::max(gibsMaxSurfels / 100, 1000u);
+    gp.frameIndex = frameCounter;
+    rhi->bindComputePipeline(surfelGenPipeline);
+    rhi->setComputeTexture(0, depthStencilRT);
+    rhi->setComputeTexture(1, normalRT);
+    rhi->setComputeTexture(2, albedoRT);
+    rhi->setComputeBuffer(0, surfelBuffer, 0, surfelBytes);
+    rhi->setComputeBuffer(1, surfelCounterBuffer, 0, 4 * sizeof(Uint32));
+    rhi->setComputeBuffer(2, gibsDataBuffer, 0, sizeof(GIBSData));
+    rhi->setComputeBytes(&gp, sizeof(gp), 3);
+    rhi->setComputeBuffer(4, cellHeadBuffer);
+    rhi->setComputeBuffer(5, surfelNextBuffer);
+    rhi->dispatch((w + 7) / 8, (h + 7) / 8, 1);
+    rhi->computeBarrier();
+
+    // 2) Spatial hash: clear cell heads, then insert surfels.
+    rhi->bindComputePipeline(surfelClearPipeline);
+    rhi->setComputeBuffer(0, cellHeadBuffer);
+    rhi->setComputeBuffer(1, gibsDataBuffer, 0, sizeof(GIBSData));
+    rhi->dispatch((totalCells + 255) / 256, 1, 1);
+    rhi->computeBarrier();
+    rhi->bindComputePipeline(surfelInsertPipeline);
+    rhi->setComputeBuffer(0, surfelBuffer, 0, surfelBytes);
+    rhi->setComputeBuffer(1, cellHeadBuffer);
+    rhi->setComputeBuffer(2, surfelNextBuffer);
+    rhi->setComputeBuffer(3, gibsDataBuffer, 0, sizeof(GIBSData));
+    rhi->dispatch((active + 255) / 256, 1, 1);
+    rhi->computeBarrier();
+
+    // 3) Surfel ray tracing (interval-staggered like native).
+    constexpr Uint32 UPDATE_INTERVAL = 4;
+    SurfelRaytracingParams rp{};
+    rp.surfelOffset = 0;
+    rp.surfelCount = gibsActiveSurfels;
+    rp.raysPerSurfel = gibsRaysPerSurfel;
+    rp.frameIndex = frameCounter;
+    rp.rayBias = gd.rayBias;
+    rp.rayMaxDistance = gd.rayMaxDistance;
+    rp.updateInterval = UPDATE_INTERVAL;
+    if (rp.surfelCount > 0) {
+        rhi->bindComputePipeline(surfelRTPipeline);
+        rhi->setComputeBuffer(0, surfelBuffer, 0, surfelBytes);
+        rhi->setComputeBuffer(1, cellHeadBuffer);
+        rhi->setComputeBuffer(2, gibsDataBuffer, 0, sizeof(GIBSData));
+        rhi->setComputeBytes(&rp, sizeof(rp), 3);
+        rhi->setAccelerationStructure(4, sceneTLAS);
+        rhi->setComputeBuffer(5, surfelNextBuffer);
+        Uint32 perFrame = (rp.surfelCount + UPDATE_INTERVAL - 1) / UPDATE_INTERVAL;
+        rhi->dispatch((perFrame + 63) / 64, 1, 1);
+        rhi->computeBarrier();
+
+        // 4) Temporal smoothing over surfel irradiance.
+        rhi->bindComputePipeline(surfelTemporalPipeline);
+        rhi->setComputeBuffer(0, surfelBuffer, 0, surfelBytes);
+        rhi->setComputeBuffer(1, gibsDataBuffer, 0, sizeof(GIBSData));
+        rhi->dispatch((active + 255) / 256, 1, 1);
+        rhi->computeBarrier();
+    }
+
+    // 5) Per-pixel GI gather into giResultTexture.
+    GIBSSampleParams sp{};
+    sp.invViewProj = gd.invViewProj;
+    sp.screenSize = screenSize;
+    sp.giResolution = giResolution;
+    sp.sampleRadius = gd.cellSize;
+    sp.maxSamples = gd.maxSurfelsPerPixel;
+    sp.normalWeight = 1.0f;
+    sp.distanceWeight = 1.0f;
+    rhi->bindComputePipeline(giSamplePipeline);
+    rhi->setComputeTexture(0, depthStencilRT);
+    rhi->setComputeTexture(1, normalRT);
+    rhi->setComputeTexture(2, giResultTexture);
+    rhi->setComputeBuffer(0, surfelBuffer, 0, surfelBytes);
+    rhi->setComputeBuffer(1, cellHeadBuffer);
+    rhi->setComputeBuffer(2, gibsDataBuffer, 0, sizeof(GIBSData));
+    rhi->setComputeBytes(&sp, sizeof(sp), 3);
+    rhi->setComputeBuffer(4, surfelNextBuffer);
+    rhi->dispatch((Uint32(giResolution.x) + 7) / 8, (Uint32(giResolution.y) + 7) / 8, 1);
+    rhi->endComputePass();
+    rhi->computeBarrier();  // GI writes -> fragment reads in Main
 }
 
 // Temporal point-shadow resolve. Native copies denoised->history with a blit;
@@ -2351,6 +2565,17 @@ void Renderer::createRenderTargets() {
         pointShadowRT = rhi->createTexture(desc);
         pointShadowHistoryRT = rhi->createTexture(desc);
         pointShadowDenoisedRT = rhi->createTexture(desc);
+
+        // GIBS GI result at resolutionScale (compute-written, PBR-sampled).
+        if (capabilities.raytracing) {
+            TextureDesc gi;
+            gi.width = std::max(1u, Uint32(width * gibsResolutionScale));
+            gi.height = std::max(1u, Uint32(height * gibsResolutionScale));
+            gi.format = PixelFormat::RGBA16_FLOAT;
+            gi.usage = TextureUsage::Storage | TextureUsage::Sampled;
+            gi.sampleCount = 1;
+            giResultTexture = rhi->createTexture(gi);
+        }
     }
 
     // Bloom pyramid targets (HDR). Brightness extract at half res, then a chain
@@ -2606,6 +2831,16 @@ void Renderer::createRenderPipeline() {
             velocityPipeline = makeFullscreenFragPipeline(
                 "shaders/Velocity.frag.spv", velocityShader, BlendMode::Opaque);
 
+            // Tile light culling (fills the cluster buffer RHIMain.frag reads).
+            std::string tlcCode = readFile("shaders/TileLightCull.comp.spv");
+            if (!tlcCode.empty()) {
+                ShaderDesc td; td.stage = ShaderStage::Compute; td.code = tlcCode.data();
+                td.codeSize = tlcCode.size(); td.entryPoint = "main";
+                vkTileCullShader = rhi->createShader(td);
+                ComputePipelineDesc tcd; tcd.computeShader = vkTileCullShader;
+                vkTileCullPipeline = rhi->createComputePipeline(tcd);
+            }
+
             // Volumetric clouds: quarter-res raymarch, temporal resolve, and
             // full-res composite — all fullscreen RGBA16F passes.
             cloudRaymarchPipeline = makeFullscreenFragPipeline(
@@ -2762,6 +2997,23 @@ void Renderer::createRenderPipeline() {
         aoDenoisePipeline             = makeMetalCompute("shaders/3d_ao_denoise.metal", aoDenoiseShader);
         stochasticPointShadowPipeline = makeMetalCompute("shaders/3d_stochastic_point_shadow.metal", pointShadowShader);
         pointShadowTemporalPipeline   = makeMetalCompute("shaders/3d_point_shadow_temporal.metal", pointShadowTemporalShader);
+
+        // GIBS surfel GI kernels (entry points differ per file).
+        auto makeNamedCompute = [&](const char* path, const char* entry, ShaderHandle& sh) -> ComputePipelineHandle {
+            std::string code = readFile(path);
+            if (code.empty()) return {};
+            ShaderDesc d; d.stage = ShaderStage::Compute; d.code = code.data();
+            d.codeSize = code.size(); d.entryPoint = entry;
+            sh = rhi->createShader(d);
+            ComputePipelineDesc cd; cd.computeShader = sh;
+            return rhi->createComputePipeline(cd);
+        };
+        surfelGenPipeline      = makeNamedCompute("shaders/gibs_surfel_generation.metal", "surfelGeneration", gibsShaders[0]);
+        surfelClearPipeline    = makeNamedCompute("shaders/gibs_spatial_hash.metal", "clearCellHeads", gibsShaders[1]);
+        surfelInsertPipeline   = makeNamedCompute("shaders/gibs_spatial_hash.metal", "insertSurfels", gibsShaders[2]);
+        surfelRTPipeline       = makeNamedCompute("shaders/gibs_raytracing.metal", "surfelRaytracing", gibsShaders[3]);
+        surfelTemporalPipeline = makeNamedCompute("shaders/gibs_temporal.metal", "surfelTemporalSmooth", gibsShaders[4]);
+        giSamplePipeline       = makeNamedCompute("shaders/gibs_sample.metal", "giSample", gibsShaders[5]);
     }
 
     // ------------------------------------------------------------------------
@@ -3409,6 +3661,7 @@ void Renderer::drawGraphicsImGui() {
         ImGui::Checkbox("Particles", &particleSystemEnabled);
         ImGui::Checkbox("AO (RT)", &aoEnabled);
         ImGui::Checkbox("Sun flare", &sunFlareEnabled);
+        ImGui::Checkbox("GIBS GI (RT)", &gibsEnabled);
         ImGui::Checkbox("Volumetric clouds", &volumetricCloudsEnabled);
         if (volumetricCloudsEnabled) {
             ImGui::SliderFloat("Cloud coverage", &cloudSettings.cloudCoverage, 0.0f, 1.0f);

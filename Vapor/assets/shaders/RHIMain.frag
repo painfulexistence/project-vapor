@@ -83,6 +83,21 @@ layout(std430, set = 1, binding = 1) readonly buffer PointLightBuf {
 layout(std430, set = 1, binding = 3) readonly buffer CameraBuf {
     CameraData cam;
 };
+// Tile light culling output (TileLightCull.comp) + its dimensions.
+const uint MAX_LIGHTS_PER_TILE = 256;
+struct Cluster {
+    vec4 mn;
+    vec4 mx;
+    uint lightCount;
+    uint lightIndices[MAX_LIGHTS_PER_TILE];
+};
+layout(std430, set = 1, binding = 4) readonly buffer ClusterBuf { Cluster tiles[]; };
+layout(std430, set = 1, binding = 5) readonly buffer LightCullBuf {
+    vec2 cullScreenSize;
+    vec2 _cpad1;
+    uvec3 cullGridSize;
+    uint cullLightCount;
+};
 // PSSM cascaded directional shadow data. Must match Vapor::PSSMRenderData
 // (std430). The neutral default (cascadeSplits = +inf) keeps every pixel in the
 // nearest cascade sampling the identity matrix, i.e. fully lit until the shadow
@@ -217,12 +232,22 @@ void main() {
         if (i == 0u) contrib *= sampleShadow(fragPos, N, Ldir, viewDepth);
         color += contrib;
     }
-    for (uint i = 0u; i < lightCounts.y; ++i) {
-        PointLight l = pointLights[i];
-        vec3 toLight = l.position - fragPos;
-        float dist2 = max(dot(toLight, toLight), 1e-4);
-        vec3 radiance = l.color * l.intensity / dist2;
-        color += shade(N, V, normalize(toLight), radiance, albedo, metallic, roughness);
+    // Point lights via the culled tile list. The tile is selected with the
+    // exact projection math the culling shader uses, so screen-space
+    // conventions cancel out by construction.
+    {
+        vec4 clip = cam.proj * cam.view * vec4(fragPos, 1.0);
+        vec2 suv = clamp((clip.xy / max(clip.w, 1e-4)) * 0.5 + 0.5, vec2(0.0), vec2(0.9999));
+        uvec2 tile = uvec2(suv * vec2(cullGridSize.xy));
+        uint tileIndex = tile.x + tile.y * cullGridSize.x;
+        uint count = min(tiles[tileIndex].lightCount, MAX_LIGHTS_PER_TILE);
+        for (uint t = 0u; t < count; ++t) {
+            PointLight l = pointLights[tiles[tileIndex].lightIndices[t]];
+            vec3 toLight = l.position - fragPos;
+            float dist2 = max(dot(toLight, toLight), 1e-4);
+            vec3 radiance = l.color * l.intensity / dist2;
+            color += shade(N, V, normalize(toLight), radiance, albedo, metallic, roughness);
+        }
     }
 
     // Flat ambient so unlit scenes are never pure black
