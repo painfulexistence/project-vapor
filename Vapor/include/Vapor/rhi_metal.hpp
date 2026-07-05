@@ -221,6 +221,9 @@ private:
 
     struct ComputePipelineResource {
         NS::SharedPtr<MTL::ComputePipelineState> pipeline;
+        // Threadgroup shape from ComputePipelineDesc — Metal sets it at
+        // dispatch time (SPIR-V bakes local_size; MSL does not).
+        Uint32 tgX = 1, tgY = 1, tgZ = 1;
     };
 
     struct AccelStructResource {

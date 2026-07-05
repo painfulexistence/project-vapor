@@ -1284,7 +1284,12 @@ ComputePipelineHandle RHI_Metal::createComputePipeline(const ComputePipelineDesc
     }
 
     Uint32 id = nextComputePipelineId++;
-    computePipelines[id] = {pipeline};
+    ComputePipelineResource res;
+    res.pipeline = pipeline;
+    res.tgX = std::max(1u, desc.threadGroupSizeX);
+    res.tgY = std::max(1u, desc.threadGroupSizeY);
+    res.tgZ = std::max(1u, desc.threadGroupSizeZ);
+    computePipelines[id] = res;
 
     return ComputePipelineHandle{id};
 }
@@ -1514,13 +1519,36 @@ void RHI_Metal::setAccelerationStructure(Uint32 binding, AccelStructHandle accel
     auto it = accelStructs.find(accelStruct.id);
     if (it != accelStructs.end() && currentComputeEncoder && it->second.accelStruct) {
         currentComputeEncoder->setAccelerationStructure(it->second.accelStruct.get(), binding);
+        // Residency: binding a TLAS does NOT make its indirectly-referenced
+        // BLASes (or the instance buffer) resident. Rays hitting non-resident
+        // structures fault the GPU — the command buffer never completes, the
+        // drawable pool drains and nextDrawable() blocks forever.
+        if (it->second.type == AccelStructType::TopLevel) {
+            if (it->second.blasArray) {
+                NS::Array* arr = it->second.blasArray.get();
+                for (NS::UInteger i = 0; i < arr->count(); i++) {
+                    currentComputeEncoder->useResource(
+                        static_cast<MTL::Resource*>(arr->object(i)), MTL::ResourceUsageRead);
+                }
+            }
+            if (it->second.instanceBuffer) {
+                currentComputeEncoder->useResource(it->second.instanceBuffer.get(), MTL::ResourceUsageRead);
+            }
+        }
     }
 }
 
 void RHI_Metal::dispatch(Uint32 groupCountX, Uint32 groupCountY, Uint32 groupCountZ) {
     if (currentComputeEncoder) {
+        // Threadgroup shape comes from the bound pipeline's desc (SPIR-V bakes
+        // local_size into the shader; MSL supplies it at dispatch). The old
+        // hardcoded 1x1x1 silently ran 1/64th of every 8x8 kernel.
+        MTL::Size threadsPerGroup(1, 1, 1);
+        auto it = computePipelines.find(currentComputePipeline.id);
+        if (it != computePipelines.end()) {
+            threadsPerGroup = MTL::Size(it->second.tgX, it->second.tgY, it->second.tgZ);
+        }
         MTL::Size threadgroups(groupCountX, groupCountY, groupCountZ);
-        MTL::Size threadsPerGroup(1, 1, 1); // Should be configured based on shader
         currentComputeEncoder->dispatchThreadgroups(threadgroups, threadsPerGroup);
     }
 }

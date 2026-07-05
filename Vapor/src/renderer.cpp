@@ -46,6 +46,13 @@ void Renderer::initialize(std::unique_ptr<RHI> rhiPtr, GraphicsBackend backendTy
     // Snapshot backend capabilities; the render graph uses them to skip
     // passes the backend can't run (e.g. raytracing passes on Vulkan).
     capabilities = rhi->getCapabilities();
+    // Bisect switch: VAPOR_DISABLE_RT=1 forces the non-RT path (no BLAS/TLAS,
+    // no RT pipelines, every RequiresRaytracing pass auto-skips) — for
+    // isolating RT-chain issues from the rest of the frame on RT hardware.
+    if (std::getenv("VAPOR_DISABLE_RT")) {
+        capabilities.raytracing = false;
+        fmt::print("VAPOR_DISABLE_RT set: forcing raytracing off\n");
+    }
     setupDefaultRenderGraph();
 
     // Create uniform buffers
@@ -2897,6 +2904,7 @@ void Renderer::createRenderPipeline() {
                 d.codeSize = code.size(); d.entryPoint = "main";
                 sh = rhi->createShader(d);
                 ComputePipelineDesc cd; cd.computeShader = sh;
+                cd.threadGroupSizeX = 256;  // matches local_size_x in the .comp
                 return rhi->createComputePipeline(cd);
             };
             particleForcePipeline     = makeCompute("shaders/ParticleForce.comp.spv", particleForceShader);
@@ -3021,38 +3029,43 @@ void Renderer::createRenderPipeline() {
     // temporal. Vulkan skips these passes, so no SPIR-V is needed.
     // ------------------------------------------------------------------------
     if (backend == GraphicsBackend::Metal && capabilities.raytracing) {
-        auto makeMetalCompute = [&](const char* path, ShaderHandle& sh) -> ComputePipelineHandle {
+        auto makeMetalCompute = [&](const char* path, ShaderHandle& sh,
+                                    Uint32 tgX, Uint32 tgY, Uint32 tgZ) -> ComputePipelineHandle {
             std::string code = readFile(path);
             if (code.empty()) return {};
             ShaderDesc d; d.stage = ShaderStage::Compute; d.code = code.data();
             d.codeSize = code.size(); d.entryPoint = "computeMain";
             sh = rhi->createShader(d);
             ComputePipelineDesc cd; cd.computeShader = sh;
+            cd.threadGroupSizeX = tgX; cd.threadGroupSizeY = tgY; cd.threadGroupSizeZ = tgZ;
             return rhi->createComputePipeline(cd);
         };
-        raytraceShadowPipeline        = makeMetalCompute("shaders/3d_raytrace_shadow.metal", rtShadowShader);
-        raytraceAOPipeline            = makeMetalCompute("shaders/3d_raytrace_ao.metal", rtAOShader);
-        aoTemporalPipeline            = makeMetalCompute("shaders/3d_ao_temporal.metal", aoTemporalShader);
-        aoDenoisePipeline             = makeMetalCompute("shaders/3d_ao_denoise.metal", aoDenoiseShader);
-        stochasticPointShadowPipeline = makeMetalCompute("shaders/3d_stochastic_point_shadow.metal", pointShadowShader);
-        pointShadowTemporalPipeline   = makeMetalCompute("shaders/3d_point_shadow_temporal.metal", pointShadowTemporalShader);
+        // Threadgroup shapes mirror the native dispatches exactly.
+        raytraceShadowPipeline        = makeMetalCompute("shaders/3d_raytrace_shadow.metal", rtShadowShader, 1, 1, 1);
+        raytraceAOPipeline            = makeMetalCompute("shaders/3d_raytrace_ao.metal", rtAOShader, 1, 1, 1);
+        aoTemporalPipeline            = makeMetalCompute("shaders/3d_ao_temporal.metal", aoTemporalShader, 8, 8, 1);
+        aoDenoisePipeline             = makeMetalCompute("shaders/3d_ao_denoise.metal", aoDenoiseShader, 8, 8, 1);
+        stochasticPointShadowPipeline = makeMetalCompute("shaders/3d_stochastic_point_shadow.metal", pointShadowShader, 8, 8, 1);
+        pointShadowTemporalPipeline   = makeMetalCompute("shaders/3d_point_shadow_temporal.metal", pointShadowTemporalShader, 8, 8, 1);
 
         // GIBS surfel GI kernels (entry points differ per file).
-        auto makeNamedCompute = [&](const char* path, const char* entry, ShaderHandle& sh) -> ComputePipelineHandle {
+        auto makeNamedCompute = [&](const char* path, const char* entry, ShaderHandle& sh,
+                                    Uint32 tgX, Uint32 tgY, Uint32 tgZ) -> ComputePipelineHandle {
             std::string code = readFile(path);
             if (code.empty()) return {};
             ShaderDesc d; d.stage = ShaderStage::Compute; d.code = code.data();
             d.codeSize = code.size(); d.entryPoint = entry;
             sh = rhi->createShader(d);
             ComputePipelineDesc cd; cd.computeShader = sh;
+            cd.threadGroupSizeX = tgX; cd.threadGroupSizeY = tgY; cd.threadGroupSizeZ = tgZ;
             return rhi->createComputePipeline(cd);
         };
-        surfelGenPipeline      = makeNamedCompute("shaders/gibs_surfel_generation.metal", "surfelGeneration", gibsShaders[0]);
-        surfelClearPipeline    = makeNamedCompute("shaders/gibs_spatial_hash.metal", "clearCellHeads", gibsShaders[1]);
-        surfelInsertPipeline   = makeNamedCompute("shaders/gibs_spatial_hash.metal", "insertSurfels", gibsShaders[2]);
-        surfelRTPipeline       = makeNamedCompute("shaders/gibs_raytracing.metal", "surfelRaytracing", gibsShaders[3]);
-        surfelTemporalPipeline = makeNamedCompute("shaders/gibs_temporal.metal", "surfelTemporalSmooth", gibsShaders[4]);
-        giSamplePipeline       = makeNamedCompute("shaders/gibs_sample.metal", "giSample", gibsShaders[5]);
+        surfelGenPipeline      = makeNamedCompute("shaders/gibs_surfel_generation.metal", "surfelGeneration", gibsShaders[0], 8, 8, 1);
+        surfelClearPipeline    = makeNamedCompute("shaders/gibs_spatial_hash.metal", "clearCellHeads", gibsShaders[1], 256, 1, 1);
+        surfelInsertPipeline   = makeNamedCompute("shaders/gibs_spatial_hash.metal", "insertSurfels", gibsShaders[2], 256, 1, 1);
+        surfelRTPipeline       = makeNamedCompute("shaders/gibs_raytracing.metal", "surfelRaytracing", gibsShaders[3], 64, 1, 1);
+        surfelTemporalPipeline = makeNamedCompute("shaders/gibs_temporal.metal", "surfelTemporalSmooth", gibsShaders[4], 256, 1, 1);
+        giSamplePipeline       = makeNamedCompute("shaders/gibs_sample.metal", "giSample", gibsShaders[5], 8, 8, 1);
     }
 
     // ------------------------------------------------------------------------
