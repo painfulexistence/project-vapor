@@ -156,6 +156,42 @@ void Renderer::initialize(std::unique_ptr<RHI> rhiPtr, GraphicsBackend backendTy
         sfDesc.memoryUsage = MemoryUsage::CPUtoGPU;
         sunFlareDataBuffer = rhi->createBuffer(sfDesc);
         rhi->updateBuffer(sunFlareDataBuffer, &sunFlareSettings, 0, sizeof(sunFlareSettings));
+
+        // IBL capture slots: 6 sky faces + 6 irradiance + 5x6 prefilter = 42
+        // entries, each draw binds its own offset (a single rewritten buffer
+        // would race — host-visible updates are immediate, the GPU runs later).
+        BufferDesc iblDesc;
+        iblDesc.size = sizeof(IBLCaptureRenderData) * 42;
+        iblDesc.usage = BufferUsage::Uniform;
+        iblDesc.memoryUsage = MemoryUsage::CPUtoGPU;
+        iblCaptureDataBuffer = rhi->createBuffer(iblDesc);
+    }
+
+    // IBL cubemaps + BRDF LUT (RGBA16F; sizes match the native chain).
+    {
+        TextureDesc cd;
+        cd.format = PixelFormat::RGBA16_FLOAT;
+        cd.usage = TextureUsage::RenderTarget | TextureUsage::Sampled;
+        cd.isCube = true;
+        cd.arrayLayers = 6;
+
+        cd.width = cd.height = 512;
+        cd.mipLevels = 10;  // full chain for prefilter source sampling
+        environmentCubemap = rhi->createTexture(cd);
+
+        cd.width = cd.height = 32;
+        cd.mipLevels = 1;
+        irradianceMap = rhi->createTexture(cd);
+
+        cd.width = cd.height = 128;
+        cd.mipLevels = PREFILTER_MIP_LEVELS;
+        prefilterMap = rhi->createTexture(cd);
+
+        TextureDesc bd;
+        bd.width = bd.height = 512;
+        bd.format = PixelFormat::RGBA16_FLOAT;
+        bd.usage = TextureUsage::RenderTarget | TextureUsage::Sampled;
+        brdfLUTTex = rhi->createTexture(bd);
     }
 
     // Empty TLAS on RT-capable backends; instances are refit/rebuilt per frame
@@ -582,6 +618,10 @@ void Renderer::setupDefaultRenderGraph() {
 
     // Geometry prep + lighting passes (raytraced passes only run on backends
     // that report RHICapabilities::raytracing — i.e. Metal today).
+    // IBL-from-sky capture (runs once, refreshed via iblNeedsUpdate).
+    renderGraph.addPass("IBLCapture",
+        [](Renderer& r) { r.iblCapturePass(); });
+
     renderGraph.addPass("BuildAccelStructures",
         [](Renderer& r) { r.buildAccelerationStructures(); }, PassFlags::RequiresRaytracing);
     renderGraph.addPass("PrePass",
@@ -993,12 +1033,21 @@ void Renderer::mainRenderPass() {
         // uses slot 6 for texAO — don't clobber it there; the cascade array is
         // already bound at the Metal contract slot 12 above.)
         if (pssmShadowArrayTexture.isValid()) rhi->setTexture(0, 6, pssmShadowArrayTexture, shadowSampler);
-    } else if (capabilities.raytracing) {
-        // Metal-via-RHI with RT: the real kernel outputs replace the neutral
-        // whites — texAO(6), texShadow(7), texPointShadow(13).
-        if (aoEnabled && aoRT.isValid()) rhi->setTexture(0, 6, aoRT, clampSampler);
-        if (shadowRT.isValid()) rhi->setTexture(0, 7, shadowRT, clampSampler);
-        if (pointShadowHistoryRT.isValid()) rhi->setTexture(0, 13, pointShadowHistoryRT, clampSampler);
+    } else {
+        // Metal-via-RHI: real IBL outputs replace the neutral blacks —
+        // irradiance(8), prefilter(9), brdfLUT(10).
+        if (!iblNeedsUpdate) {
+            if (irradianceMap.isValid()) rhi->setTexture(0, 8, irradianceMap, clampSampler);
+            if (prefilterMap.isValid()) rhi->setTexture(0, 9, prefilterMap, clampSampler);
+            if (brdfLUTTex.isValid()) rhi->setTexture(0, 10, brdfLUTTex, clampSampler);
+        }
+        if (capabilities.raytracing) {
+            // RT kernel outputs replace the neutral whites — texAO(6),
+            // texShadow(7), texPointShadow(13).
+            if (aoEnabled && aoRT.isValid()) rhi->setTexture(0, 6, aoRT, clampSampler);
+            if (shadowRT.isValid()) rhi->setTexture(0, 7, shadowRT, clampSampler);
+            if (pointShadowHistoryRT.isValid()) rhi->setTexture(0, 13, pointShadowHistoryRT, clampSampler);
+        }
     }
 
     // Group drawables by material to reduce state changes
@@ -1053,6 +1102,82 @@ void Renderer::mainRenderPass() {
 
     // End render pass
     rhi->endRenderPass();
+}
+
+// IBL-from-sky: capture the atmosphere into a cubemap, convolve irradiance,
+// prefilter specular mips, integrate the BRDF LUT. Runs once (iblNeedsUpdate),
+// Metal MSL for now (the Vulkan PBR path uses the atmosphere directly).
+void Renderer::iblCapturePass() {
+    if (!iblNeedsUpdate) return;
+    if (!skyCapturePipeline.isValid() || !irradiancePipeline.isValid() ||
+        !prefilterPipeline.isValid() || !brdfLUTPipeline.isValid()) {
+        return;
+    }
+
+    // Fill all 42 capture slots up front (race-free per-draw offsets).
+    const glm::mat4 captureViews[6] = {
+        glm::lookAt(glm::vec3(0), glm::vec3(1, 0, 0),  glm::vec3(0, -1, 0)),
+        glm::lookAt(glm::vec3(0), glm::vec3(-1, 0, 0), glm::vec3(0, -1, 0)),
+        glm::lookAt(glm::vec3(0), glm::vec3(0, 1, 0),  glm::vec3(0, 0, 1)),
+        glm::lookAt(glm::vec3(0), glm::vec3(0, -1, 0), glm::vec3(0, 0, -1)),
+        glm::lookAt(glm::vec3(0), glm::vec3(0, 0, 1),  glm::vec3(0, -1, 0)),
+        glm::lookAt(glm::vec3(0), glm::vec3(0, 0, -1), glm::vec3(0, -1, 0)),
+    };
+    const glm::mat4 captureProj = glm::perspective(glm::radians(90.0f), 1.0f, 0.1f, 10.0f);
+    IBLCaptureRenderData slots[42];
+    for (Uint32 f = 0; f < 6; f++) {
+        slots[f].viewProj = captureProj * captureViews[f];
+        slots[f].faceIndex = f;
+        slots[6 + f].faceIndex = f;  // irradiance
+    }
+    for (Uint32 m = 0; m < PREFILTER_MIP_LEVELS; m++) {
+        for (Uint32 f = 0; f < 6; f++) {
+            auto& s = slots[12 + m * 6 + f];
+            s.faceIndex = f;
+            s.roughness = float(m) / float(PREFILTER_MIP_LEVELS - 1);
+        }
+    }
+    rhi->updateBuffer(iblCaptureDataBuffer, slots, 0, sizeof(slots));
+    const size_t stride = sizeof(IBLCaptureRenderData);
+
+    auto faceDraw = [&](const char* name, PipelineHandle pipe, TextureHandle target,
+                        Uint32 slot, Uint32 face, Uint32 mip, bool bindEnv, bool bindAtmo) {
+        RenderPassDesc rp;
+        rp.name = name;
+        rp.colorAttachments.push_back(target);
+        rp.clearColors.push_back(glm::vec4(0, 0, 0, 1));
+        rp.loadColor.push_back(false);
+        rp.colorArrayLayer = face;
+        rp.colorMipLevel = mip;
+        rhi->beginRenderPass(rp);
+        rhi->bindPipeline(pipe);
+        rhi->setVertexBuffer(0, iblCaptureDataBuffer, slot * stride, stride);
+        if (bindAtmo) rhi->setFragmentBuffer(0, atmosphereDataBuffer, 0, sizeof(AtmosphereRenderData));
+        if (bindEnv) rhi->setTexture(0, 0, environmentCubemap, clampSampler);
+        rhi->draw(3, 1, 0, 0);
+        rhi->endRenderPass();
+    };
+
+    for (Uint32 f = 0; f < 6; f++)
+        faceDraw("SkyCapture", skyCapturePipeline, environmentCubemap, f, f, 0, false, true);
+    rhi->generateMipmaps(environmentCubemap);
+    for (Uint32 f = 0; f < 6; f++)
+        faceDraw("IrradianceConv", irradiancePipeline, irradianceMap, 6 + f, f, 0, true, false);
+    for (Uint32 m = 0; m < PREFILTER_MIP_LEVELS; m++)
+        for (Uint32 f = 0; f < 6; f++)
+            faceDraw("PrefilterEnv", prefilterPipeline, prefilterMap, 12 + m * 6 + f, f, m, true, false);
+    {
+        RenderPassDesc rp;
+        rp.name = "BRDFLUT";
+        rp.colorAttachments.push_back(brdfLUTTex);
+        rp.clearColors.push_back(glm::vec4(0, 0, 0, 1));
+        rp.loadColor.push_back(false);
+        rhi->beginRenderPass(rp);
+        rhi->bindPipeline(brdfLUTPipeline);
+        rhi->draw(3, 1, 0, 0);
+        rhi->endRenderPass();
+    }
+    iblNeedsUpdate = false;
 }
 
 // Depth + normal (+ albedo) pre-pass. Feeds the RT shadow/AO kernels (and,
@@ -2645,6 +2770,34 @@ void Renderer::createRenderPipeline() {
     // Vulkan backend land with the IBL round.
     // ------------------------------------------------------------------------
     if (backend == GraphicsBackend::Metal) {
+        // IBL-from-sky chain (fullscreen-ish per-face captures into cubemaps).
+        auto makeIblPipeline = [&](const char* path, ShaderHandle& vs, ShaderHandle& fs) -> PipelineHandle {
+            std::string code = readFile(path);
+            if (code.empty()) return {};
+            ShaderDesc vd; vd.stage = ShaderStage::Vertex;   vd.code = code.data(); vd.codeSize = code.size(); vd.entryPoint = "vertexMain";
+            vs = rhi->createShader(vd);
+            ShaderDesc fd; fd.stage = ShaderStage::Fragment; fd.code = code.data(); fd.codeSize = code.size(); fd.entryPoint = "fragmentMain";
+            fs = rhi->createShader(fd);
+            PipelineDesc d;
+            d.vertexShader = vs;
+            d.fragmentShader = fs;
+            d.vertexLayout.stride = 0;
+            d.vertexLayout.attributes = {};
+            d.topology = PrimitiveTopology::TriangleList;
+            d.blendMode = BlendMode::Opaque;
+            d.depthTest = false;
+            d.depthWrite = false;
+            d.cullMode = CullMode::None;
+            d.sampleCount = 1;
+            d.hasDepthAttachment = false;
+            d.colorAttachmentFormats = { PixelFormat::RGBA16_FLOAT };
+            return rhi->createPipeline(d);
+        };
+        skyCapturePipeline = makeIblPipeline("shaders/3d_sky_capture.metal", skyCaptureVS, skyCaptureFS);
+        irradiancePipeline = makeIblPipeline("shaders/3d_irradiance_convolution.metal", irradianceVS, irradianceFS);
+        prefilterPipeline  = makeIblPipeline("shaders/3d_prefilter_envmap.metal", prefilterVS, prefilterFS);
+        brdfLUTPipeline    = makeIblPipeline("shaders/3d_brdf_lut.metal", brdfVS, brdfFS);
+
         std::string tcCode = readFile("shaders/3d_tile_light_cull.metal");
         if (!tcCode.empty()) {
             ShaderDesc d; d.stage = ShaderStage::Compute; d.code = tcCode.data();

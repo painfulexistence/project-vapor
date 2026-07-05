@@ -404,6 +404,9 @@ private:
 
     // Get (or lazily create) a single-array-layer depth view for render-to-layer.
     VkImageView getDepthLayerView(TextureResource& tex, Uint32 layer);
+    // Generalized single-layer/mip view (color or depth) for render-to-layer.
+    VkImageView getSubresourceView(TextureResource& tex, Uint32 layer, Uint32 mip,
+                                   VkImageAspectFlags aspect);
 
     void createDescriptorInfrastructure();
     void destroyDescriptorInfrastructure();

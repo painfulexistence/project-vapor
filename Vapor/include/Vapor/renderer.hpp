@@ -629,6 +629,19 @@ private:
     bool sunFlareEnabled = false;  // native default
     void sunFlarePass();
 
+    // IBL-from-sky chain (Metal MSL; runs once, re-runs when iblNeedsUpdate).
+    TextureHandle environmentCubemap;   // 512 cube, mips (sky capture)
+    TextureHandle irradianceMap;        // 32 cube
+    TextureHandle prefilterMap;         // 128 cube, 5 mips
+    TextureHandle brdfLUTTex;           // 512 2D
+    BufferHandle iblCaptureDataBuffer;  // per-draw face/roughness (36 variants)
+    PipelineHandle skyCapturePipeline, irradiancePipeline, prefilterPipeline, brdfLUTPipeline;
+    ShaderHandle skyCaptureVS, skyCaptureFS, irradianceVS, irradianceFS,
+                 prefilterVS, prefilterFS, brdfVS, brdfFS;
+    bool iblNeedsUpdate = true;
+    static constexpr Uint32 PREFILTER_MIP_LEVELS = 5;
+    void iblCapturePass();
+
     void aoTemporalPass();
     void aoDenoisePass();
     void stochasticPointShadowPass();

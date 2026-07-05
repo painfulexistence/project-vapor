@@ -1592,7 +1592,16 @@ void RHI_Vulkan::endFrame() {
 }
 
 VkImageView RHI_Vulkan::getDepthLayerView(TextureResource& tex, Uint32 layer) {
-    auto found = tex.layerViews.find(layer);
+    return getSubresourceView(tex, layer, 0, VK_IMAGE_ASPECT_DEPTH_BIT);
+}
+
+// Lazily-created single-layer/mip views for render-to-layer passes (cascaded
+// shadows, cube-face IBL capture, prefilter mip chains). Keyed so depth and
+// color views of the same texture never collide.
+VkImageView RHI_Vulkan::getSubresourceView(TextureResource& tex, Uint32 layer, Uint32 mip,
+                                           VkImageAspectFlags aspect) {
+    Uint32 key = (mip << 20) | ((layer + 1) << 1) | (aspect == VK_IMAGE_ASPECT_DEPTH_BIT ? 1u : 0u);
+    auto found = tex.layerViews.find(key);
     if (found != tex.layerViews.end()) return found->second;
 
     VkImageViewCreateInfo viewInfo{};
@@ -1600,8 +1609,8 @@ VkImageView RHI_Vulkan::getDepthLayerView(TextureResource& tex, Uint32 layer) {
     viewInfo.image = tex.image;
     viewInfo.viewType = VK_IMAGE_VIEW_TYPE_2D;
     viewInfo.format = tex.format;
-    viewInfo.subresourceRange.aspectMask = VK_IMAGE_ASPECT_DEPTH_BIT;
-    viewInfo.subresourceRange.baseMipLevel = 0;
+    viewInfo.subresourceRange.aspectMask = aspect;
+    viewInfo.subresourceRange.baseMipLevel = mip;
     viewInfo.subresourceRange.levelCount = 1;
     viewInfo.subresourceRange.baseArrayLayer = layer;
     viewInfo.subresourceRange.layerCount = 1;
@@ -1610,7 +1619,7 @@ VkImageView RHI_Vulkan::getDepthLayerView(TextureResource& tex, Uint32 layer) {
     if (vkCreateImageView(device, &viewInfo, nullptr, &view) != VK_SUCCESS) {
         return VK_NULL_HANDLE;
     }
-    tex.layerViews[layer] = view;
+    tex.layerViews[key] = view;
     return view;
 }
 
@@ -1640,7 +1649,15 @@ void RHI_Vulkan::beginRenderPass(const RenderPassDesc& desc) {
         } else {
             auto it = textures.find(colorAttachmentHandle.id);
             if (it != textures.end()) {
-                attachmentInfo.imageView = it->second.view;
+                // Attachment 0 may target a single cube face / array layer and
+                // mip (IBL capture, prefilter chains).
+                if (i == 0 && (desc.colorArrayLayer != ~0u || desc.colorMipLevel != 0)) {
+                    Uint32 layer = (desc.colorArrayLayer != ~0u) ? desc.colorArrayLayer : 0;
+                    attachmentInfo.imageView =
+                        getSubresourceView(it->second, layer, desc.colorMipLevel, VK_IMAGE_ASPECT_COLOR_BIT);
+                } else {
+                    attachmentInfo.imageView = it->second.view;
+                }
                 transitionImage(it->second.image, it->second.currentLayout,
                                 VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL, VK_IMAGE_ASPECT_COLOR_BIT);
                 it->second.currentLayout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL;

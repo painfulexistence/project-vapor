@@ -276,6 +276,14 @@ struct alignas(16) VolumetricCloudRenderData {
     glm::vec2 _pad8 = glm::vec2(0.0f);
 };
 
+// IBL capture parameters (mirror of the Metal IBLCaptureData).
+struct alignas(16) IBLCaptureRenderData {
+    glm::mat4 viewProj = glm::mat4(1.0f);
+    Uint32 faceIndex = 0;
+    float roughness = 0.0f;
+    float _pad[2] = {};
+};
+
 // Sun/lens flare parameters — mirror of the Metal SunFlareData with its tuned
 // defaults. sunScreenPos/screenSize/aspect/visibility are filled per frame.
 struct alignas(16) SunFlareRenderData {

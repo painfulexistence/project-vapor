@@ -309,6 +309,11 @@ struct RenderPassDesc {
     // texture's default view (the normal 2D case). Backends build a per-layer
     // view (Vulkan) / set the render-target slice (Metal).
     Uint32 depthArrayLayer = ~0u;
+    // Same for color attachment 0: render into one cube face / array layer
+    // and/or one mip level (IBL capture, prefilter chains). UINT32_MAX layer =
+    // whole-texture view; mip defaults to 0.
+    Uint32 colorArrayLayer = ~0u;
+    Uint32 colorMipLevel = 0;
 
     // Clear values
     std::vector<glm::vec4> clearColors;

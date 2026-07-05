@@ -852,6 +852,14 @@ void RHI_Metal::beginRenderPass(const RenderPassDesc& desc) {
                 throw std::runtime_error(fmt::format("Failed to find color attachment texture with id {}", desc.colorAttachments[i].id));
             }
             colorAttachment->setTexture(it->second.texture.get());
+            // Attachment 0 may target one cube face / array layer and mip
+            // (IBL capture, prefilter chains).
+            if (i == 0 && desc.colorArrayLayer != ~0u) {
+                colorAttachment->setSlice(desc.colorArrayLayer);
+            }
+            if (i == 0 && desc.colorMipLevel != 0) {
+                colorAttachment->setLevel(desc.colorMipLevel);
+            }
         }
 
         // Load/store operations
