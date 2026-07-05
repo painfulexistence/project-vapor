@@ -4,7 +4,8 @@ layout(location = 0) in vec2 tex_uv;
 layout(location = 0) out vec4 Color;
 
 layout(set = 2, binding = 0) uniform sampler2D texScreen;
-layout(set = 2, binding = 1) uniform sampler2D texBloom;  // half-res blurred bright pass
+layout(set = 2, binding = 1) uniform sampler2D texBloom;    // accumulated bloom pyramid
+layout(set = 2, binding = 2) uniform sampler2D texGodRays;  // half-res light scattering
 
 const float GAMMA = 2.2;
 const float INV_GAMMA = 1.0 / GAMMA;
@@ -35,6 +36,9 @@ void main() {
     // matching the Metal bloom composite (bloomStrength = 0.8).
     const float bloomStrength = 0.8;
     color += texture(texBloom, tex_uv).rgb * bloomStrength;
+
+    // Additive god rays (screen-space light scattering).
+    color += texture(texGodRays, tex_uv).rgb;
 
     // Exposure before tone mapping (the scene is lit with high-intensity direct
     // sun; without this the ACES curve saturates everything to white).

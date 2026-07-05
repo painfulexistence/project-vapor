@@ -194,6 +194,26 @@ struct alignas(16) AtmosphereRenderData {
     float _pad4 = 0.0f;
 };
 
+// Screen-space light scattering (god rays). Layout matches the Metal backend's
+// LightScatteringData. sunScreenPos/screenSize are filled per frame.
+struct alignas(16) LightScatteringRenderData {
+    glm::vec2 sunScreenPos = glm::vec2(0.5f);
+    glm::vec2 screenSize = glm::vec2(1.0f);
+    float density = 1.0f;
+    float weight = 0.01f;
+    float decay = 0.97f;
+    float exposure = 0.3f;
+    uint32_t numSamples = 64;
+    float maxDistance = 1.0f;
+    float sunIntensity = 1.0f;
+    float mieG = 0.76f;
+    glm::vec3 sunColor = glm::vec3(1.0f);
+    float _pad1 = 0.0f;
+    float depthThreshold = 0.9999f;
+    float jitter = 0.5f;
+    glm::vec2 _pad2 = glm::vec2(0.0f);
+};
+
 // ============================================================================
 // Frustum for Culling
 // ============================================================================

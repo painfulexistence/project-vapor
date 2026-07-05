@@ -103,8 +103,15 @@ void Renderer::initialize(std::unique_ptr<RHI> rhiPtr, GraphicsBackend backendTy
         atmoDesc.usage = BufferUsage::Uniform;
         atmoDesc.memoryUsage = MemoryUsage::CPUtoGPU;
         atmosphereDataBuffer = rhi->createBuffer(atmoDesc);
-        AtmosphereRenderData atmoDefaults;
-        rhi->updateBuffer(atmosphereDataBuffer, &atmoDefaults, 0, sizeof(atmoDefaults));
+        rhi->updateBuffer(atmosphereDataBuffer, &atmosphereData, 0, sizeof(atmosphereData));
+
+        BufferDesc lsDesc;
+        lsDesc.size = sizeof(LightScatteringRenderData);
+        lsDesc.usage = BufferUsage::Uniform;
+        lsDesc.memoryUsage = MemoryUsage::CPUtoGPU;
+        lightScatteringDataBuffer = rhi->createBuffer(lsDesc);
+        LightScatteringRenderData lsDefaults;
+        rhi->updateBuffer(lightScatteringDataBuffer, &lsDefaults, 0, sizeof(lsDefaults));
     }
 
     // Create default resources
@@ -533,6 +540,10 @@ void Renderer::setupDefaultRenderGraph() {
         [](Renderer& r) { r.bloomDownsamplePass(); });
     renderGraph.addPass("BloomUpsample",
         [](Renderer& r) { r.bloomUpsamplePass(); });
+
+    // God rays (screen-space light scattering), composited in PostProcess.
+    renderGraph.addPass("LightScattering",
+        [](Renderer& r) { r.lightScatteringPass(); });
 
     // Fullscreen post-process to swapchain; no-op until a post-process
     // pipeline is created.
@@ -1156,6 +1167,48 @@ void Renderer::skyAtmospherePass() {
     rhi->endRenderPass();
 }
 
+// God rays: screen-space radial light scattering from the sun's projected
+// position, marching over the scene color/depth and accumulating sky luminance.
+// Rendered into the half-res lightScatteringRT and composited in PostProcess.
+void Renderer::lightScatteringPass() {
+    if (!lightScatteringPipeline.isValid() || !lightScatteringRT.isValid() ||
+        !colorRT.isValid() || !depthStencilRT.isValid() || !lightScatteringDataBuffer.isValid()) {
+        return;
+    }
+
+    // Project the sun (at infinity along sunDirection) to screen UV.
+    LightScatteringRenderData ls;  // defaults (density/decay/weight/etc.)
+    ls.sunColor = atmosphereData.sunColor;
+    ls.screenSize = glm::vec2(std::max(1u, rhi->getSwapchainWidth() / 2),
+                              std::max(1u, rhi->getSwapchainHeight() / 2));
+    glm::vec3 sunDir = glm::normalize(atmosphereData.sunDirection);
+    glm::vec3 sunWorldPos = currentCamera.position + sunDir * 10000.0f;
+    glm::vec4 sunClip = (currentCamera.proj * currentCamera.view) * glm::vec4(sunWorldPos, 1.0f);
+    if (sunClip.w > 0.0f) {
+        glm::vec2 ndc = glm::vec2(sunClip) / sunClip.w;
+        ls.sunScreenPos = ndc * 0.5f + 0.5f;
+        ls.sunScreenPos.y = 1.0f - ls.sunScreenPos.y;  // match FullScreen.vert Y-down UV
+    } else {
+        ls.sunScreenPos = glm::vec2(-10.0f);  // behind camera -> shader outputs 0
+    }
+    rhi->updateBuffer(lightScatteringDataBuffer, &ls, 0, sizeof(ls));
+
+    RenderPassDesc rp;
+    rp.name = "LightScattering";
+    rp.colorAttachments.push_back(lightScatteringRT);
+    rp.clearColors.push_back(glm::vec4(0.0f));
+    rp.loadColor.push_back(false);  // clear
+    rhi->beginRenderPass(rp);
+    rhi->bindPipeline(lightScatteringPipeline);
+    rhi->setTexture(0, 0, colorRT, clampSampler);
+    rhi->setTexture(0, 1, depthStencilRT, clampSampler);
+    rhi->setFragmentBuffer(0, lightScatteringDataBuffer, 0, sizeof(LightScatteringRenderData));
+    rhi->setFragmentBytes(&frameCounter, sizeof(Uint32), 7);  // push offset 112
+    frameCounter++;
+    rhi->draw(3, 1, 0, 0);
+    rhi->endRenderPass();
+}
+
 void Renderer::postProcessPass() {
     // Post-process pass: render from colorRT to swapchain (fullscreen triangle)
     if (!postProcessPipeline.isValid() || !colorRT.isValid()) {
@@ -1182,6 +1235,9 @@ void Renderer::postProcessPass() {
     }
     if (bloomPyramid[0].isValid() && clampSampler.isValid()) {
         rhi->setTexture(0, 1, bloomPyramid[0], clampSampler);
+    }
+    if (lightScatteringRT.isValid() && clampSampler.isValid()) {
+        rhi->setTexture(0, 2, lightScatteringRT, clampSampler);
     }
 
     // Draw fullscreen triangle (3 vertices, 1 instance)
@@ -1481,6 +1537,17 @@ void Renderer::createRenderTargets() {
         }
     }
 
+    // God-ray (light scattering) target, half resolution.
+    {
+        TextureDesc desc;
+        desc.width = std::max(1u, width / 2);
+        desc.height = std::max(1u, height / 2);
+        desc.format = PixelFormat::RGBA16_FLOAT;
+        desc.usage = TextureUsage::RenderTarget | TextureUsage::Sampled;
+        desc.sampleCount = 1;
+        lightScatteringRT = rhi->createTexture(desc);
+    }
+
     // Create default depth buffer for swapchain rendering (when not using render targets)
     {
         TextureDesc desc;
@@ -1663,6 +1730,10 @@ void Renderer::createRenderPipeline() {
                 ad.colorAttachmentFormats = { PixelFormat::RGBA16_FLOAT };
                 atmospherePipeline = rhi->createPipeline(ad);
             }
+
+            // God rays: fullscreen light-scattering march into the half-res RT.
+            lightScatteringPipeline = makeFullscreenFragPipeline(
+                "shaders/LightScattering.frag.spv", lightScatteringShader, BlendMode::Opaque);
         }
 
         // Directional shadow depth pipeline: renders scene geometry into the

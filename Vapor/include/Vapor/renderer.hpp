@@ -344,6 +344,7 @@ private:
     void bloomDownsamplePass();
     void bloomUpsamplePass();
     void skyAtmospherePass();
+    void lightScatteringPass();
     void shadowPass();
 
     // ========================================================================
@@ -400,6 +401,9 @@ private:
     BufferHandle rectLightBuffer;    // fragment buffer(7)
     BufferHandle pssmDataBuffer;     // PSSM cascade data (Vulkan: set1 b2)
     BufferHandle atmosphereDataBuffer;  // sky/atmosphere params (Vulkan: set1 b0 in sky pass)
+    AtmosphereRenderData atmosphereData;  // CPU copy (sun direction for god rays, etc.)
+    BufferHandle lightScatteringDataBuffer;  // god-ray params (Vulkan: set1 b0 in LS pass)
+    Uint32 frameCounter = 0;  // for temporal jitter
     TextureHandle defaultBlackCubemapTex;   // IBL irradiance/prefilter default
     TextureHandle pssmShadowArrayTexture;   // 3-cascade depth array (Vulkan: set2 b6)
     Uint32 lastClusterLightCount = UINT32_MAX;  // cluster refill tracking
@@ -498,6 +502,8 @@ private:
     PipelineHandle bloomDownsamplePipeline;
     PipelineHandle bloomUpsamplePipeline;
     PipelineHandle atmospherePipeline;
+    PipelineHandle lightScatteringPipeline;
+    TextureHandle lightScatteringRT;  // half-res god rays
     PipelineHandle shadowPipeline;
     ShaderHandle vertexShader;
     ShaderHandle fragmentShader;
@@ -510,6 +516,7 @@ private:
     ShaderHandle bloomUpsampleShader;
     ShaderHandle atmosphereVertexShader;
     ShaderHandle atmosphereFragmentShader;
+    ShaderHandle lightScatteringShader;
     ShaderHandle shadowVertexShader;
     ShaderHandle shadowFragmentShader;
     static constexpr Uint32 SHADOW_MAP_SIZE = 2048;
