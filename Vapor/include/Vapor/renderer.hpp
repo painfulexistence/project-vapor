@@ -396,9 +396,9 @@ private:
     // ========================================================================
 
     BufferHandle rectLightBuffer;    // fragment buffer(7)
-    BufferHandle pssmDataBuffer;     // fragment buffer(9): neutral cascades
+    BufferHandle pssmDataBuffer;     // PSSM cascade data (Vulkan: set1 b2)
     TextureHandle defaultBlackCubemapTex;   // IBL irradiance/prefilter default
-    TextureHandle pssmShadowArrayTexture;   // texture(12): 1x1x3 depth array
+    TextureHandle pssmShadowArrayTexture;   // 3-cascade depth array (Vulkan: set2 b6)
     Uint32 lastClusterLightCount = UINT32_MAX;  // cluster refill tracking
     std::vector<Vapor::RectLight> rectLights;   // gathered from the scene
 
@@ -471,7 +471,6 @@ private:
     TextureHandle aoRT;
     TextureHandle bloomRTA;  // half-res bright extract
     TextureHandle bloomRTB;  // half-res blurred
-    TextureHandle shadowMap;  // directional shadow depth map
 
     // Default depth buffer for swapchain rendering (when not using render targets)
     TextureHandle swapchainDepthBuffer;
@@ -493,7 +492,6 @@ private:
     ShaderHandle bloomBlurShader;
     ShaderHandle shadowVertexShader;
     ShaderHandle shadowFragmentShader;
-    BufferHandle shadowMatrixBuffer;
     static constexpr Uint32 SHADOW_MAP_SIZE = 2048;
 
     // Compute pipelines

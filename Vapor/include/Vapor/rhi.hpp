@@ -304,6 +304,11 @@ struct RenderPassDesc {
 
     // Depth attachment. Invalid handle = no depth.
     TextureHandle depthAttachment;
+    // When the depth attachment is an array texture (e.g. a cascaded shadow
+    // map), render into this single array layer. UINT32_MAX = use the whole
+    // texture's default view (the normal 2D case). Backends build a per-layer
+    // view (Vulkan) / set the render-target slice (Metal).
+    Uint32 depthArrayLayer = ~0u;
 
     // Clear values
     std::vector<glm::vec4> clearColors;

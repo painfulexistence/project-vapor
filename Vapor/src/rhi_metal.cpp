@@ -890,6 +890,10 @@ void RHI_Metal::beginRenderPass(const RenderPassDesc& desc) {
             throw std::runtime_error(fmt::format("Failed to find depth attachment texture with id {}", desc.depthAttachment.id));
         }
         depthAttachment->setTexture(it->second.texture.get());
+        // Render into a single array slice (cascaded shadow maps, cube faces).
+        if (desc.depthArrayLayer != ~0u) {
+            depthAttachment->setSlice(desc.depthArrayLayer);
+        }
 
         if (desc.loadDepth) {
             depthAttachment->setLoadAction(MTL::LoadActionLoad);

@@ -836,11 +836,12 @@ void Renderer::mainRenderPass() {
     rhi->setTexture(0, 13, whiteTex, defaultSampler);
     rhi->setTexture(0, 14, blackTex, defaultSampler);
 
-    // Directional shadow (single cascade): light-space matrix (set1 b2) + depth
-    // map (set2 b6). Overrides the neutral binding-6 texture for the Vulkan
-    // shader; the Metal contract slots (7-14) above are ignored by RHIMain.frag.
-    if (shadowMatrixBuffer.isValid()) rhi->setFragmentBuffer(2, shadowMatrixBuffer, 0, sizeof(glm::mat4));
-    if (shadowMap.isValid()) rhi->setTexture(0, 6, shadowMap, defaultSampler);
+    // PSSM cascaded shadow (Vulkan binding budget is 8 slots/set, so the Metal
+    // contract slots 9/12 above are no-ops here): cascade data at set1 b2 and
+    // the 3-layer depth array at set2 b6. RHIMain.frag reads a sampler2DArray at
+    // b6 and the PSSMBuf at b2; the neutral binding-6 texture is overridden.
+    if (pssmDataBuffer.isValid()) rhi->setFragmentBuffer(2, pssmDataBuffer, 0, sizeof(PSSMRenderData));
+    if (pssmShadowArrayTexture.isValid()) rhi->setTexture(0, 6, pssmShadowArrayTexture, defaultSampler);
 
     // Group drawables by material to reduce state changes
     std::map<MaterialId, std::vector<Uint32>> materialBatches;
@@ -926,85 +927,133 @@ void Renderer::raytraceAOPass() {
     // For now, this is a placeholder
 }
 
-// Directional shadow pass: fit a single ortho cascade to the whole camera
-// frustum (bounding-sphere method, texel-snapped for stability) and render the
-// scene depth into the shadow map. On Vulkan (no RT) this single cascade covers
-// the full range that Metal would split between an RT near-region and PSSM.
+// Directional shadow pass (PSSM, 3 cascades): split the camera frustum by a
+// practical (log/uniform blend) scheme, fit a texel-snapped ortho box to each
+// cascade's bounding sphere, and render scene depth into one layer of the
+// shadow array per cascade. All three light-space matrices are uploaded once to
+// pssmDataBuffer and the cascade being drawn is selected by a vertex push
+// constant (a per-cascade buffer rewrite would race — host-visible updates are
+// immediate while the GPU executes the whole frame later). On Vulkan there is
+// no RT near-region, so the cascades cover the full [near, far] range.
 void Renderer::shadowPass() {
-    if (!shadowPipeline.isValid() || !shadowMap.isValid() || directionalLights.empty()) return;
+    if (!shadowPipeline.isValid() || !pssmShadowArrayTexture.isValid() ||
+        !pssmDataBuffer.isValid() || directionalLights.empty()) {
+        return;
+    }
+
+    const float nearClip = currentCamera.nearPlane;
+    const float farClip  = currentCamera.farPlane;
+    // No ray-traced near cascade on Vulkan: cascade 0 starts at the near plane.
+    const float rtEnd = nearClip;
+
+    // Cascade split distances (view space). splits[0] = near end, splits[3] = far.
+    float splits[4];
+    splits[0] = rtEnd;
+    const float lambda = 0.7f;  // 0 = uniform, 1 = logarithmic
+    for (int i = 1; i <= 3; i++) {
+        float p = float(i) / 3.0f;
+        float logS = rtEnd * std::pow(farClip / glm::max(rtEnd, 0.1f), p);
+        float uniS = rtEnd + (farClip - rtEnd) * p;
+        splits[i] = lambda * logS + (1.0f - lambda) * uniS;
+    }
 
     glm::vec3 lightDir = glm::normalize(directionalLights[0].direction);
     glm::vec3 up = (std::abs(glm::dot(lightDir, glm::vec3(0, 1, 0))) < 0.99f)
                  ? glm::vec3(0, 1, 0) : glm::vec3(0, 0, 1);
 
-    // Full camera frustum corners in world space (Vulkan/ZO NDC: z in [0,1]).
     glm::mat4 invVP = glm::inverse(currentCamera.proj * currentCamera.view);
-    const glm::vec4 ndc[8] = {
-        {-1,-1,0,1},{1,-1,0,1},{-1,1,0,1},{1,1,0,1},
-        {-1,-1,1,1},{1,-1,1,1},{-1,1,1,1},{1,1,1,1},
+    // View-space forward distance -> NDC z, using the actual (ZO) projection so
+    // handedness and near/far are respected. RH proj has proj[2][3] == -1.
+    const float zSign = (currentCamera.proj[2][3] < 0.0f) ? -1.0f : 1.0f;
+    auto viewDepthToNDCz = [&](float d) -> float {
+        glm::vec4 clip = currentCamera.proj * glm::vec4(0.0f, 0.0f, zSign * d, 1.0f);
+        return clip.z / clip.w;
     };
-    glm::vec3 corners[8];
-    glm::vec3 sphereCenter(0.0f);
-    for (int i = 0; i < 8; i++) {
-        glm::vec4 w = invVP * ndc[i];
-        corners[i] = glm::vec3(w) / w.w;
-        sphereCenter += corners[i];
-    }
-    sphereCenter /= 8.0f;
-    float sphereRadius = 0.0f;
-    for (auto& c : corners) sphereRadius = glm::max(sphereRadius, glm::length(c - sphereCenter));
 
-    const float lightDist = sphereRadius * 2.0f + 1.0f;
-    glm::mat4 lightView = glm::lookAt(sphereCenter - lightDir * lightDist, sphereCenter, up);
+    PSSMRenderData gpuData;
+    gpuData.cascadeSplits = glm::vec4(splits[0], splits[1], splits[2], splits[3]);
+    gpuData.blendRange = (farClip - rtEnd) * 0.05f;
 
-    // Snap the sphere center to the texel grid in light space (anti-shimmer).
-    float texelSize = (2.0f * sphereRadius) / float(SHADOW_MAP_SIZE);
-    glm::vec4 lsCenter = lightView * glm::vec4(sphereCenter, 1.0f);
-    lsCenter.x = std::floor(lsCenter.x / texelSize) * texelSize;
-    lsCenter.y = std::floor(lsCenter.y / texelSize) * texelSize;
-    glm::vec3 snapped = glm::vec3(glm::inverse(lightView) * lsCenter);
-    lightView = glm::lookAt(snapped - lightDir * lightDist, snapped, up);
+    for (int ci = 0; ci < 3; ci++) {
+        float splitNear = glm::clamp(splits[ci],     nearClip, farClip);
+        float splitFar  = glm::clamp(splits[ci + 1], nearClip, farClip);
+        float nearNDCz = viewDepthToNDCz(splitNear);
+        float farNDCz  = viewDepthToNDCz(splitFar);
 
-    float minDist = std::numeric_limits<float>::max();
-    float maxDist = -minDist;
-    for (auto& c : corners) {
-        float d = -(lightView * glm::vec4(c, 1.0f)).z;  // RH: -z is forward
-        minDist = glm::min(minDist, d);
-        maxDist = glm::max(maxDist, d);
-    }
-    minDist -= (maxDist - minDist);  // extend near to catch casters outside the frustum
-
-    glm::mat4 lightProj = glm::orthoZO(-sphereRadius, sphereRadius, -sphereRadius, sphereRadius, minDist, maxDist);
-    glm::mat4 lightSpace = lightProj * lightView;
-    rhi->updateBuffer(shadowMatrixBuffer, &lightSpace, 0, sizeof(lightSpace));
-
-    // Render scene depth into the shadow map (depth only).
-    RenderPassDesc rp;
-    rp.name = "Shadow";
-    rp.depthAttachment = shadowMap;
-    rp.loadDepth = false;  // clear
-    rp.clearDepth = 1.0f;
-    rhi->beginRenderPass(rp);
-    rhi->bindPipeline(shadowPipeline);
-    rhi->setVertexBuffer(0, shadowMatrixBuffer, 0, sizeof(glm::mat4));
-    rhi->setVertexBuffer(2, instanceDataBuffer, 0, sizeof(Vapor::InstanceData) * std::max<size_t>(1, visibleDrawables.size()));
-
-    for (Uint32 drawableIdx : visibleDrawables) {
-        const Drawable& drawable = frameDrawables[drawableIdx];
-        const RenderMesh& mesh = meshes[drawable.mesh];
-        auto it = drawableToInstanceID.find(drawableIdx);
-        if (it == drawableToInstanceID.end()) continue;
-        Uint32 iid = it->second;
-        if (mesh.vertexBuffer.isValid()) rhi->bindVertexBuffer(mesh.vertexBuffer, 3, 0);
-        rhi->setVertexBytes(&iid, sizeof(Uint32), 4);
-        if (mesh.indexBuffer.isValid()) {
-            rhi->bindIndexBuffer(mesh.indexBuffer, 0);
-            rhi->drawIndexed(mesh.indexCount, 1, 0, 0, 0);
-        } else if (mesh.vertexBuffer.isValid()) {
-            rhi->draw(mesh.vertexCount, 1, 0, 0);
+        // Sub-frustum corners at this cascade's exact z slice (world space).
+        const glm::vec4 cascadeNDC[8] = {
+            {-1,-1,nearNDCz,1},{1,-1,nearNDCz,1},{-1,1,nearNDCz,1},{1,1,nearNDCz,1},
+            {-1,-1,farNDCz, 1},{1,-1,farNDCz, 1},{-1,1,farNDCz, 1},{1,1,farNDCz, 1},
+        };
+        glm::vec3 corners[8];
+        glm::vec3 sphereCenter(0.0f);
+        for (int i = 0; i < 8; i++) {
+            glm::vec4 w = invVP * cascadeNDC[i];
+            corners[i] = glm::vec3(w) / w.w;
+            sphereCenter += corners[i];
         }
+        sphereCenter /= 8.0f;
+        float sphereRadius = 0.0f;
+        for (auto& c : corners) sphereRadius = glm::max(sphereRadius, glm::length(c - sphereCenter));
+
+        const float lightDist = sphereRadius * 2.0f + 1.0f;
+        glm::mat4 lightView = glm::lookAt(sphereCenter - lightDir * lightDist, sphereCenter, up);
+
+        // Snap the sphere center to the texel grid in light space (anti-shimmer).
+        float texelSize = (2.0f * sphereRadius) / float(SHADOW_MAP_SIZE);
+        glm::vec4 lsCenter = lightView * glm::vec4(sphereCenter, 1.0f);
+        lsCenter.x = std::floor(lsCenter.x / texelSize) * texelSize;
+        lsCenter.y = std::floor(lsCenter.y / texelSize) * texelSize;
+        glm::vec3 snapped = glm::vec3(glm::inverse(lightView) * lsCenter);
+        lightView = glm::lookAt(snapped - lightDir * lightDist, snapped, up);
+
+        float minDist = std::numeric_limits<float>::max();
+        float maxDist = -minDist;
+        for (auto& c : corners) {
+            float d = -(lightView * glm::vec4(c, 1.0f)).z;  // RH: -z is forward
+            minDist = glm::min(minDist, d);
+            maxDist = glm::max(maxDist, d);
+        }
+        minDist -= (maxDist - minDist);  // extend near to catch casters behind the cascade
+
+        glm::mat4 lightProj = glm::orthoZO(-sphereRadius, sphereRadius, -sphereRadius, sphereRadius, minDist, maxDist);
+        gpuData.lightSpaceMatrices[ci] = lightProj * lightView;
     }
-    rhi->endRenderPass();
+
+    // Upload all cascade matrices once; the shadow VS indexes by cascadeIndex.
+    rhi->updateBuffer(pssmDataBuffer, &gpuData, 0, sizeof(gpuData));
+
+    // Render scene depth into each cascade layer (depth only).
+    for (Uint32 ci = 0; ci < 3; ci++) {
+        RenderPassDesc rp;
+        rp.name = "ShadowCascade";
+        rp.depthAttachment = pssmShadowArrayTexture;
+        rp.depthArrayLayer = ci;
+        rp.loadDepth = false;  // clear
+        rp.clearDepth = 1.0f;
+        rhi->beginRenderPass(rp);
+        rhi->bindPipeline(shadowPipeline);
+        rhi->setVertexBuffer(0, pssmDataBuffer, 0, sizeof(PSSMRenderData));
+        rhi->setVertexBuffer(2, instanceDataBuffer, 0, sizeof(Vapor::InstanceData) * std::max<size_t>(1, visibleDrawables.size()));
+        rhi->setVertexBytes(&ci, sizeof(Uint32), 5);  // cascadeIndex -> push offset 16
+
+        for (Uint32 drawableIdx : visibleDrawables) {
+            const Drawable& drawable = frameDrawables[drawableIdx];
+            const RenderMesh& mesh = meshes[drawable.mesh];
+            auto it = drawableToInstanceID.find(drawableIdx);
+            if (it == drawableToInstanceID.end()) continue;
+            Uint32 iid = it->second;
+            if (mesh.vertexBuffer.isValid()) rhi->bindVertexBuffer(mesh.vertexBuffer, 3, 0);
+            rhi->setVertexBytes(&iid, sizeof(Uint32), 4);  // instanceID -> push offset 0
+            if (mesh.indexBuffer.isValid()) {
+                rhi->bindIndexBuffer(mesh.indexBuffer, 0);
+                rhi->drawIndexed(mesh.indexCount, 1, 0, 0, 0);
+            } else if (mesh.vertexBuffer.isValid()) {
+                rhi->draw(mesh.vertexCount, 1, 0, 0);
+            }
+        }
+        rhi->endRenderPass();
+    }
 }
 
 // Bloom bright-pass: extract HDR pixels above threshold from colorRT into the
@@ -1170,15 +1219,16 @@ void Renderer::createDefaultResources() {
             rhi->updateTexture(defaultBlackCubemapTex, &blackPixel, sizeof(Uint32), 0, face);
         }
 
-        // 1x1x3 depth array for the PSSM cascade slot. Its content is never
-        // reached (neutral cascade splits keep every pixel in the RT-shadow
-        // branch) but the binding must be a valid depth2d_array.
+        // PSSM cascaded shadow map: a 3-layer depth array, each layer rendered
+        // by the shadow pass and sampled as a sampler2DArray in the PBR shader.
+        // Fixed-size (independent of the swapchain), so it lives here rather than
+        // in createRenderTargets. DepthStencil = render target, Sampled = read.
         TextureDesc pssmDesc;
-        pssmDesc.width = 1;
-        pssmDesc.height = 1;
+        pssmDesc.width = SHADOW_MAP_SIZE;
+        pssmDesc.height = SHADOW_MAP_SIZE;
         pssmDesc.arrayLayers = 3;
         pssmDesc.format = PixelFormat::Depth32Float;
-        pssmDesc.usage = TextureUsage::Sampled;
+        pssmDesc.usage = TextureUsage::DepthStencil | TextureUsage::Sampled;
         pssmShadowArrayTexture = rhi->createTexture(pssmDesc);
     }
 }
@@ -1328,25 +1378,6 @@ void Renderer::createRenderTargets() {
         desc.sampleCount = 1;
         bloomRTA = rhi->createTexture(desc);
         bloomRTB = rhi->createTexture(desc);
-    }
-
-    // Directional shadow map (single cascade) + its light-space matrix buffer.
-    {
-        TextureDesc desc;
-        desc.width = SHADOW_MAP_SIZE;
-        desc.height = SHADOW_MAP_SIZE;
-        desc.format = PixelFormat::Depth32Float;
-        desc.usage = TextureUsage::DepthStencil | TextureUsage::Sampled;
-        desc.sampleCount = 1;
-        shadowMap = rhi->createTexture(desc);
-
-        BufferDesc bd;
-        bd.size = sizeof(glm::mat4);
-        bd.usage = BufferUsage::Uniform;  // read as std430 SSBO on Vulkan
-        bd.memoryUsage = MemoryUsage::CPUtoGPU;
-        shadowMatrixBuffer = rhi->createBuffer(bd);
-        glm::mat4 identity(1.0f);
-        rhi->updateBuffer(shadowMatrixBuffer, &identity, 0, sizeof(identity));
     }
 
     // Create default depth buffer for swapchain rendering (when not using render targets)

@@ -83,10 +83,15 @@ layout(std430, set = 1, binding = 1) readonly buffer PointLightBuf {
 layout(std430, set = 1, binding = 3) readonly buffer CameraBuf {
     CameraData cam;
 };
-// Directional shadow light-space matrix (single cascade). Identity when no
-// shadow pass ran, in which case sampling stays fully lit.
-layout(std430, set = 1, binding = 2) readonly buffer ShadowBuf {
-    mat4 shadowLightSpace;
+// PSSM cascaded directional shadow data. Must match Vapor::PSSMRenderData
+// (std430). The neutral default (cascadeSplits = +inf) keeps every pixel in the
+// nearest cascade sampling the identity matrix, i.e. fully lit until the shadow
+// pass runs. cascadeSplits holds view-space forward distances: x = near end,
+// w = far end; the three cascades span [x,y], [y,z], [z,w].
+layout(std430, set = 1, binding = 2) readonly buffer PSSMBuf {
+    mat4 shadowLightSpaceMatrices[3];
+    vec4 cascadeSplits;
+    float shadowBlendRange;
 };
 
 layout(set = 2, binding = 0) uniform sampler2D albedoMap;
@@ -95,30 +100,43 @@ layout(set = 2, binding = 2) uniform sampler2D metallicMap;
 layout(set = 2, binding = 3) uniform sampler2D roughnessMap;
 layout(set = 2, binding = 4) uniform sampler2D occlusionMap;
 layout(set = 2, binding = 5) uniform sampler2D emissiveMap;
-layout(set = 2, binding = 6) uniform sampler2D shadowMap;  // directional depth map
+layout(set = 2, binding = 6) uniform sampler2DArray shadowMap;  // 3-cascade depth array
 
-// PCF directional shadow. Returns 1.0 = lit, 0.0 = fully shadowed.
-float sampleShadow(vec3 worldPos, vec3 N, vec3 L) {
-    vec4 lp = shadowLightSpace * vec4(worldPos, 1.0);
+// PCF sample of one cascade. Returns 1.0 = lit, 0.0 = fully shadowed, or -1.0
+// when the world position falls outside this cascade's frustum.
+float sampleCascade(int ci, vec3 worldPos, float bias) {
+    vec4 lp = shadowLightSpaceMatrices[ci] * vec4(worldPos, 1.0);
     vec3 proj = lp.xyz / lp.w;
-    // Vulkan clip space: z in [0,1]; xy in [-1,1] -> map xy to [0,1] UV.
-    vec2 uv = proj.xy * 0.5 + 0.5;
+    vec2 uv = proj.xy * 0.5 + 0.5;  // Vulkan: z in [0,1], xy [-1,1] -> UV [0,1]
     float curDepth = proj.z;
-    // Outside the shadow frustum (or behind) -> treat as lit.
     if (uv.x < 0.0 || uv.x > 1.0 || uv.y < 0.0 || uv.y > 1.0 || curDepth > 1.0) {
-        return 1.0;
+        return -1.0;
     }
-    // Slope-scaled bias to reduce acne.
-    float bias = max(0.0015 * (1.0 - dot(N, L)), 0.0004);
-    vec2 texel = 1.0 / vec2(textureSize(shadowMap, 0));
+    vec2 texel = 1.0 / vec2(textureSize(shadowMap, 0).xy);
     float lit = 0.0;
     for (int y = -1; y <= 1; ++y) {
         for (int x = -1; x <= 1; ++x) {
-            float d = texture(shadowMap, uv + vec2(x, y) * texel).r;
+            float d = texture(shadowMap, vec3(uv + vec2(x, y) * texel, float(ci))).r;
             lit += (curDepth - bias) <= d ? 1.0 : 0.0;
         }
     }
     return lit / 9.0;
+}
+
+// Select the cascade by the fragment's view-space depth, then PCF-sample it.
+// Returns 1.0 = lit, 0.0 = fully shadowed.
+float sampleShadow(vec3 worldPos, vec3 N, vec3 L, float viewDepth) {
+    // Pick the first cascade whose far split still contains this fragment.
+    int ci = 2;
+    if (viewDepth <= cascadeSplits.y)      ci = 0;
+    else if (viewDepth <= cascadeSplits.z) ci = 1;
+    // Slightly slacker bias for the coarser (farther) cascades.
+    float bias = max(0.0015 * (1.0 - dot(N, L)), 0.0004) * float(ci + 1);
+    float lit = sampleCascade(ci, worldPos, bias);
+    // Fall through to farther cascades if the fragment left this one's frustum.
+    if (lit < 0.0 && ci < 1) lit = sampleCascade(1, worldPos, bias);
+    if (lit < 0.0 && ci < 2) lit = sampleCascade(2, worldPos, bias);
+    return lit < 0.0 ? 1.0 : lit;  // outside all cascades -> lit
 }
 
 // RHI::setFragmentBytes(&lightCounts, 8, /*binding=*/7) -> offset 64+(7%4)*16 = 112
@@ -187,13 +205,16 @@ void main() {
 
     vec3 V = normalize(cam.position - fragPos);
 
+    // View-space forward distance selects the shadow cascade (RH: forward = -z).
+    float viewDepth = -(cam.view * vec4(fragPos, 1.0)).z;
+
     vec3 color = vec3(0.0);
     for (uint i = 0u; i < lightCounts.x; ++i) {
         DirLight l = dirLights[i];
         vec3 Ldir = normalize(-l.direction);
         vec3 contrib = shade(N, V, Ldir, l.color * l.intensity, albedo, metallic, roughness);
-        // Only the first (sun) directional light casts the single-cascade shadow.
-        if (i == 0u) contrib *= sampleShadow(fragPos, N, Ldir);
+        // Only the first (sun) directional light casts the cascaded shadow.
+        if (i == 0u) contrib *= sampleShadow(fragPos, N, Ldir, viewDepth);
         color += contrib;
     }
     for (uint i = 0u; i < lightCounts.y; ++i) {

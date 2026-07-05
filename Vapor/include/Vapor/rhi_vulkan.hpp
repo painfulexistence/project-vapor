@@ -205,6 +205,9 @@ private:
         Uint32 arrayLayers = 1;
         VkImageUsageFlags usage = 0;
         VkImageLayout currentLayout = VK_IMAGE_LAYOUT_UNDEFINED;
+        // Lazily-created single-layer views for render-to-array-layer passes
+        // (keyed by array layer). Freed alongside the main view.
+        std::unordered_map<Uint32, VkImageView> layerViews;
     };
 
     struct ShaderResource {
@@ -392,6 +395,12 @@ private:
     // Attachments of the render pass currently being recorded (for the
     // attachment -> shader-read transition at endRenderPass)
     std::vector<Uint32> currentPassColorTextures;
+    // Depth attachment of the current pass, if it is sampleable (moved to
+    // shader-read at endRenderPass so a later pass can sample it, e.g. shadows).
+    Uint32 currentPassDepthTexture = 0;
+
+    // Get (or lazily create) a single-array-layer depth view for render-to-layer.
+    VkImageView getDepthLayerView(TextureResource& tex, Uint32 layer);
 
     void createDescriptorInfrastructure();
     void destroyDescriptorInfrastructure();

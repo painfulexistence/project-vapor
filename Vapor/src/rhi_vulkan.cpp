@@ -866,8 +866,13 @@ void RHI_Vulkan::destroyTexture(TextureHandle handle) {
         VkImageView view = it->second.view;
         VkImage image = it->second.image;
         VkDeviceMemory mem = it->second.memory;
-        deferDestroy([dev, view, image, mem]() {
+        std::vector<VkImageView> extraViews;
+        for (auto& lv : it->second.layerViews) extraViews.push_back(lv.second);
+        deferDestroy([dev, view, image, mem, extraViews]() {
             if (view != VK_NULL_HANDLE) vkDestroyImageView(dev, view, nullptr);
+            for (VkImageView lv : extraViews) {
+                if (lv != VK_NULL_HANDLE) vkDestroyImageView(dev, lv, nullptr);
+            }
             if (image != VK_NULL_HANDLE) vkDestroyImage(dev, image, nullptr);
             if (mem != VK_NULL_HANDLE) vkFreeMemory(dev, mem, nullptr);
         });
@@ -1574,12 +1579,36 @@ void RHI_Vulkan::endFrame() {
     currentFrameInFlight = (currentFrameInFlight + 1) % MAX_FRAMES_IN_FLIGHT;
 }
 
+VkImageView RHI_Vulkan::getDepthLayerView(TextureResource& tex, Uint32 layer) {
+    auto found = tex.layerViews.find(layer);
+    if (found != tex.layerViews.end()) return found->second;
+
+    VkImageViewCreateInfo viewInfo{};
+    viewInfo.sType = VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO;
+    viewInfo.image = tex.image;
+    viewInfo.viewType = VK_IMAGE_VIEW_TYPE_2D;
+    viewInfo.format = tex.format;
+    viewInfo.subresourceRange.aspectMask = VK_IMAGE_ASPECT_DEPTH_BIT;
+    viewInfo.subresourceRange.baseMipLevel = 0;
+    viewInfo.subresourceRange.levelCount = 1;
+    viewInfo.subresourceRange.baseArrayLayer = layer;
+    viewInfo.subresourceRange.layerCount = 1;
+
+    VkImageView view = VK_NULL_HANDLE;
+    if (vkCreateImageView(device, &viewInfo, nullptr, &view) != VK_SUCCESS) {
+        return VK_NULL_HANDLE;
+    }
+    tex.layerViews[layer] = view;
+    return view;
+}
+
 void RHI_Vulkan::beginRenderPass(const RenderPassDesc& desc) {
     if (currentCommandBuffer == VK_NULL_HANDLE) {
         return;  // frame was skipped
     }
 
     currentPassColorTextures.clear();
+    currentPassDepthTexture = 0;
 
     // Setup color attachments
     std::vector<VkRenderingAttachmentInfo> colorAttachments;
@@ -1632,10 +1661,21 @@ void RHI_Vulkan::beginRenderPass(const RenderPassDesc& desc) {
         depthAttachment.sType = VK_STRUCTURE_TYPE_RENDERING_ATTACHMENT_INFO;
         auto it = textures.find(desc.depthAttachment.id);
         if (it != textures.end()) {
-            depthAttachment.imageView = it->second.view;
+            // Render into a single array layer (cascaded shadow maps, cube
+            // faces, ...) when requested; otherwise the whole-texture view.
+            if (desc.depthArrayLayer != ~0u && it->second.arrayLayers > 1) {
+                depthAttachment.imageView = getDepthLayerView(it->second, desc.depthArrayLayer);
+            } else {
+                depthAttachment.imageView = it->second.view;
+            }
             transitionImage(it->second.image, it->second.currentLayout,
                             VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL, VK_IMAGE_ASPECT_DEPTH_BIT);
             it->second.currentLayout = VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL;
+            // Sampleable depth (shadow maps) needs a shader-read transition once
+            // the pass ends; remember it for endRenderPass.
+            if (it->second.usage & VK_IMAGE_USAGE_SAMPLED_BIT) {
+                currentPassDepthTexture = desc.depthAttachment.id;
+            }
         }
         depthAttachment.imageLayout = VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL;
         // Load/store operations (loadDepth: true = load, false = clear)
@@ -1655,6 +1695,13 @@ void RHI_Vulkan::beginRenderPass(const RenderPassDesc& desc) {
     VkExtent2D passExtent = swapchainExtent;
     if (!desc.colorAttachments.empty() && desc.colorAttachments[0].id != 0) {
         auto it = textures.find(desc.colorAttachments[0].id);
+        if (it != textures.end()) {
+            passExtent = { it->second.width, it->second.height };
+        }
+    } else if (hasDepth) {
+        // Depth-only passes (e.g. shadow maps) size to the depth attachment,
+        // which is usually not the swapchain resolution.
+        auto it = textures.find(desc.depthAttachment.id);
         if (it != textures.end()) {
             passExtent = { it->second.width, it->second.height };
         }
@@ -1732,6 +1779,17 @@ void RHI_Vulkan::endRenderPass() {
         }
     }
     currentPassColorTextures.clear();
+
+    // Sampleable depth (shadow maps) -> shader-read so a later pass can sample it.
+    if (currentPassDepthTexture != 0) {
+        auto it = textures.find(currentPassDepthTexture);
+        if (it != textures.end() && (it->second.usage & VK_IMAGE_USAGE_SAMPLED_BIT)) {
+            transitionImage(it->second.image, it->second.currentLayout,
+                            VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL, VK_IMAGE_ASPECT_DEPTH_BIT);
+            it->second.currentLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
+        }
+        currentPassDepthTexture = 0;
+    }
 }
 
 // ============================================================================
