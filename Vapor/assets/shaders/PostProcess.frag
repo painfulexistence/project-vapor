@@ -4,6 +4,7 @@ layout(location = 0) in vec2 tex_uv;
 layout(location = 0) out vec4 Color;
 
 layout(set = 2, binding = 0) uniform sampler2D texScreen;
+layout(set = 2, binding = 1) uniform sampler2D texBloom;  // half-res blurred bright pass
 
 const float GAMMA = 2.2;
 const float INV_GAMMA = 1.0 / GAMMA;
@@ -29,6 +30,10 @@ vec3 linearToSRGB(vec3 linear) {
 
 void main() {
     vec3 color = texture(texScreen, tex_uv).rgb;
+
+    // Additive bloom (bilinearly upsampled from the half-res blur).
+    const float bloomStrength = 0.5;
+    color += texture(texBloom, tex_uv).rgb * bloomStrength;
 
     color = aces(color);
 

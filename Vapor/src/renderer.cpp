@@ -501,6 +501,13 @@ void Renderer::setupDefaultRenderGraph() {
     renderGraph.addPass("Main",
         [](Renderer& r) { r.mainRenderPass(); });
 
+    // Bloom: extract bright HDR pixels, blur, composited in PostProcess.
+    // No-ops until the bloom pipelines/targets exist.
+    renderGraph.addPass("BloomExtract",
+        [](Renderer& r) { r.bloomExtractPass(); });
+    renderGraph.addPass("BloomBlur",
+        [](Renderer& r) { r.bloomBlurPass(); });
+
     // Fullscreen post-process to swapchain; no-op until a post-process
     // pipeline is created.
     renderGraph.addPass("PostProcess",
@@ -909,15 +916,43 @@ void Renderer::raytraceAOPass() {
     // For now, this is a placeholder
 }
 
+// Bloom bright-pass: extract HDR pixels above threshold from colorRT into the
+// half-res bloomRTA.
+void Renderer::bloomExtractPass() {
+    if (!bloomBrightPipeline.isValid() || !colorRT.isValid() || !bloomRTA.isValid()) return;
+    RenderPassDesc rp;
+    rp.name = "BloomExtract";
+    rp.colorAttachments.push_back(bloomRTA);
+    rp.clearColors.push_back(glm::vec4(0.0f));
+    rp.loadColor.push_back(false);  // clear
+    rhi->beginRenderPass(rp);
+    rhi->bindPipeline(bloomBrightPipeline);
+    if (defaultSampler.isValid()) rhi->setTexture(0, 0, colorRT, defaultSampler);
+    rhi->draw(3, 1, 0, 0);
+    rhi->endRenderPass();
+}
+
+// Bloom blur: gaussian blur bloomRTA -> bloomRTB (half res).
+void Renderer::bloomBlurPass() {
+    if (!bloomBlurPipeline.isValid() || !bloomRTA.isValid() || !bloomRTB.isValid()) return;
+    RenderPassDesc rp;
+    rp.name = "BloomBlur";
+    rp.colorAttachments.push_back(bloomRTB);
+    rp.clearColors.push_back(glm::vec4(0.0f));
+    rp.loadColor.push_back(false);  // clear
+    rhi->beginRenderPass(rp);
+    rhi->bindPipeline(bloomBlurPipeline);
+    if (defaultSampler.isValid()) rhi->setTexture(0, 0, bloomRTA, defaultSampler);
+    rhi->draw(3, 1, 0, 0);
+    rhi->endRenderPass();
+}
+
 void Renderer::postProcessPass() {
     // Post-process pass: render from colorRT to swapchain (fullscreen triangle)
     if (!postProcessPipeline.isValid() || !colorRT.isValid()) {
         // If no post-process pipeline, just skip (or could do a simple copy)
         return;
     }
-
-    Uint32 width = rhi->getSwapchainWidth();
-    Uint32 height = rhi->getSwapchainHeight();
 
     // Create render pass descriptor for swapchain
     RenderPassDesc renderPassDesc;
@@ -932,18 +967,12 @@ void Renderer::postProcessPass() {
     // Bind post-process pipeline
     rhi->bindPipeline(postProcessPipeline);
 
-    // Bind colorRT, aoRT, normalRT as fragment textures (matching old renderer)
-    // Fragment binding 0: colorRT
+    // Fragment texture 0: HDR colorRT; texture 1: half-res blurred bloom.
     if (colorRT.isValid() && defaultSampler.isValid()) {
         rhi->setTexture(0, 0, colorRT, defaultSampler);
     }
-    // Fragment binding 1: aoRT (if available)
-    if (aoRT.isValid() && defaultSampler.isValid()) {
-        rhi->setTexture(0, 1, aoRT, defaultSampler);
-    }
-    // Fragment binding 2: normalRT (if available)
-    if (normalRT.isValid() && defaultSampler.isValid()) {
-        rhi->setTexture(0, 2, normalRT, defaultSampler);
+    if (bloomRTB.isValid() && defaultSampler.isValid()) {
+        rhi->setTexture(0, 1, bloomRTB, defaultSampler);
     }
 
     // Draw fullscreen triangle (3 vertices, 1 instance)
@@ -1198,6 +1227,18 @@ void Renderer::createRenderTargets() {
         aoRT = rhi->createTexture(desc);
     }
 
+    // Bloom ping-pong targets (half resolution, HDR).
+    {
+        TextureDesc desc;
+        desc.width = std::max(1u, width / 2);
+        desc.height = std::max(1u, height / 2);
+        desc.format = PixelFormat::RGBA16_FLOAT;
+        desc.usage = TextureUsage::RenderTarget | TextureUsage::Sampled;
+        desc.sampleCount = 1;
+        bloomRTA = rhi->createTexture(desc);
+        bloomRTB = rhi->createTexture(desc);
+    }
+
     // Create default depth buffer for swapchain rendering (when not using render targets)
     {
         TextureDesc desc;
@@ -1319,6 +1360,35 @@ void Renderer::createRenderPipeline() {
             ppDesc.hasDepthAttachment = false;
             ppDesc.colorAttachmentFormats = { PixelFormat::Swapchain };
             postProcessPipeline = rhi->createPipeline(ppDesc);
+
+            // Bloom pipelines: fullscreen (reusing FullScreen.vert), rendering
+            // into the half-res RGBA16F ping-pong targets.
+            auto makeFullscreenFragPipeline = [&](const char* fragSpv, ShaderHandle& outShader) -> PipelineHandle {
+                std::string code = readFile(fragSpv);
+                if (code.empty()) return {};
+                ShaderDesc fd;
+                fd.stage = ShaderStage::Fragment;
+                fd.code = code.data();
+                fd.codeSize = code.size();
+                fd.entryPoint = "main";
+                outShader = rhi->createShader(fd);
+                PipelineDesc d;
+                d.vertexShader = postProcessVertexShader;
+                d.fragmentShader = outShader;
+                d.vertexLayout.stride = 0;
+                d.vertexLayout.attributes = {};
+                d.topology = PrimitiveTopology::TriangleList;
+                d.blendMode = BlendMode::Opaque;
+                d.depthTest = false;
+                d.depthWrite = false;
+                d.cullMode = CullMode::None;
+                d.sampleCount = 1;
+                d.hasDepthAttachment = false;
+                d.colorAttachmentFormats = { PixelFormat::RGBA16_FLOAT };
+                return rhi->createPipeline(d);
+            };
+            bloomBrightPipeline = makeFullscreenFragPipeline("shaders/BloomBright.frag.spv", bloomBrightShader);
+            bloomBlurPipeline   = makeFullscreenFragPipeline("shaders/BloomBlur.frag.spv", bloomBlurShader);
         }
     }
 }

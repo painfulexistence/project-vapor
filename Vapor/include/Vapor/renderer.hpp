@@ -340,6 +340,8 @@ private:
     void raytraceAOPass();
     void mainRenderPass();
     void postProcessPass();
+    void bloomExtractPass();
+    void bloomBlurPass();
 
     // ========================================================================
     // Internal Helpers
@@ -466,6 +468,8 @@ private:
     TextureHandle normalRT;
     TextureHandle shadowRT;
     TextureHandle aoRT;
+    TextureHandle bloomRTA;  // half-res bright extract
+    TextureHandle bloomRTB;  // half-res blurred
 
     // Default depth buffer for swapchain rendering (when not using render targets)
     TextureHandle swapchainDepthBuffer;
@@ -474,12 +478,16 @@ private:
     PipelineHandle mainPipeline;
     PipelineHandle prePassPipeline;
     PipelineHandle postProcessPipeline;
+    PipelineHandle bloomBrightPipeline;
+    PipelineHandle bloomBlurPipeline;
     ShaderHandle vertexShader;
     ShaderHandle fragmentShader;
     ShaderHandle prePassVertexShader;
     ShaderHandle prePassFragmentShader;
     ShaderHandle postProcessVertexShader;
     ShaderHandle postProcessFragmentShader;
+    ShaderHandle bloomBrightShader;
+    ShaderHandle bloomBlurShader;
 
     // Compute pipelines
     ComputePipelineHandle buildClustersPipeline;
