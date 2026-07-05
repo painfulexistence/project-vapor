@@ -10,6 +10,7 @@
 #include <map>
 #include <algorithm>
 #include <cstring>
+#include <random>
 #include <cstddef>
 #include <memory>
 #include "imgui.h"
@@ -550,6 +551,11 @@ void Renderer::setupDefaultRenderGraph() {
     // bright sky and sun disk feed the bloom pyramid.
     renderGraph.addPass("SkyAtmosphere",
         [](Renderer& r) { r.skyAtmospherePass(); });
+
+    // GPU particles (simulate + instanced billboards) into colorRT, after sky
+    // so they composite over it and get fogged like the rest of the scene.
+    renderGraph.addPass("Particles",
+        [](Renderer& r) { r.particlePass(); });
 
     // Height/distance fog before bloom (so the fogged scene feeds bloom/god
     // rays); swaps colorRT with tempColorRT internally.
@@ -1293,6 +1299,63 @@ void Renderer::velocityPass() {
     prevViewProj = curViewProj;  // roll forward for next frame
 }
 
+// GPU particle system: simulate (force -> integrate compute) then render as
+// instanced additive billboards into colorRT. A self-contained orbital demo.
+void Renderer::particlePass() {
+    if (!particleSystemEnabled || particleCount == 0) return;
+    if (!particleForcePipeline.isValid() || !particleIntegratePipeline.isValid() ||
+        !particleRenderPipeline.isValid() || !particleBuffer.isValid()) {
+        return;
+    }
+
+    // Per-frame sim params + attractor (attractor sits in front of the camera).
+    ParticleSimParams sp;
+    sp.resolution = glm::vec2(rhi->getSwapchainWidth(), rhi->getSwapchainHeight());
+    sp.time = float(frameCounter) / 60.0f;
+    sp.deltaTime = 1.0f / 60.0f;
+    rhi->updateBuffer(particleSimParamsBuffer, &sp, 0, sizeof(sp));
+
+    ParticleAttractor attr;
+    glm::vec3 forward = -glm::vec3(currentCamera.view[0][2], currentCamera.view[1][2], currentCamera.view[2][2]);
+    attr.position = currentCamera.position + forward * 3.0f;
+    attr.strength = 50.0f;
+    rhi->updateBuffer(particleAttractorBuffer, &attr, 0, sizeof(attr));
+
+    const size_t bufBytes = sizeof(GPUParticleData) * particleCount;
+    const Uint32 groups = (particleCount + 255) / 256;
+
+    // Compute: force writes p.force, then integrate reads it -> barrier between.
+    rhi->beginComputePass();
+    rhi->bindComputePipeline(particleForcePipeline);
+    rhi->setComputeBuffer(0, particleSimParamsBuffer, 0, sizeof(ParticleSimParams));
+    rhi->setComputeBuffer(1, particleAttractorBuffer, 0, sizeof(ParticleAttractor));
+    rhi->setComputeBuffer(2, particleBuffer, 0, bufBytes);
+    rhi->dispatch(groups, 1, 1);
+    rhi->computeBarrier();
+    rhi->bindComputePipeline(particleIntegratePipeline);
+    rhi->setComputeBuffer(0, particleSimParamsBuffer, 0, sizeof(ParticleSimParams));
+    rhi->setComputeBuffer(2, particleBuffer, 0, bufBytes);
+    rhi->dispatch(groups, 1, 1);
+    rhi->endComputePass();
+    rhi->computeBarrier();  // sim writes -> vertex reads
+
+    // Render: instanced billboards (6 verts x particleCount) into colorRT+depth.
+    RenderPassDesc rp;
+    rp.name = "Particles";
+    rp.colorAttachments.push_back(colorRT);
+    rp.loadColor.push_back(true);
+    rp.depthAttachment = depthStencilRT;
+    rp.loadDepth = true;
+    rhi->beginRenderPass(rp);
+    rhi->bindPipeline(particleRenderPipeline);
+    rhi->setVertexBuffer(0, cameraUniformBuffer, 0, sizeof(CameraRenderData));   // set0 b0
+    rhi->setFragmentBuffer(0, particleBuffer, 0, bufBytes);                       // set1 b0 (read in VS)
+    float particleSize = 0.1f;
+    rhi->setVertexBytes(&particleSize, sizeof(float), 0);                         // push offset 0
+    rhi->draw(6, particleCount, 0, 0);
+    rhi->endRenderPass();
+}
+
 void Renderer::postProcessPass() {
     // Post-process pass: render from colorRT to swapchain (fullscreen triangle)
     if (!postProcessPipeline.isValid() || !colorRT.isValid()) {
@@ -1463,6 +1526,46 @@ void Renderer::createDefaultResources() {
         pssmDesc.format = PixelFormat::Depth32Float;
         pssmDesc.usage = TextureUsage::DepthStencil | TextureUsage::Sampled;
         pssmShadowArrayTexture = rhi->createTexture(pssmDesc);
+    }
+
+    // GPU particle system: a self-contained orbital demo. The particle buffer
+    // holds persistent state; the sim/attractor buffers are updated per frame.
+    {
+        BufferDesc pbDesc;
+        pbDesc.size = sizeof(GPUParticleData) * MAX_PARTICLES;
+        pbDesc.usage = BufferUsage::Storage;
+        pbDesc.memoryUsage = MemoryUsage::CPUtoGPU;
+        particleBuffer = rhi->createBuffer(pbDesc);
+
+        std::vector<GPUParticleData> particles(MAX_PARTICLES);
+        std::mt19937 rng(1337u);  // fixed seed -> deterministic layout
+        std::uniform_real_distribution<float> u01(0.0f, 1.0f);
+        for (Uint32 i = 0; i < MAX_PARTICLES; i++) {
+            float r = 0.5f + std::sqrt(u01(rng)) * 4.5f;
+            float theta = u01(rng) * 2.0f * 3.14159265f;
+            float phi = u01(rng) * 3.14159265f;
+            glm::vec3 pos(r * std::sin(phi) * std::cos(theta),
+                          r * std::sin(phi) * std::sin(theta),
+                          r * std::cos(phi));
+            particles[i].position = pos;
+            glm::vec3 tangent = glm::cross(pos, glm::vec3(0.0f, 1.0f, 0.0f));
+            tangent = (glm::length(tangent) < 0.001f) ? glm::vec3(1.0f, 0.0f, 0.0f)
+                                                      : glm::normalize(tangent);
+            particles[i].velocity = tangent * (1.5f / std::sqrt(r + 0.1f));
+            particles[i].force = glm::vec3(0.0f);
+            float b = 1.0f - (r / 5.0f);
+            particles[i].color = glm::vec4(0.5f + 0.5f * b, 0.3f + 0.4f * b, 0.9f, 1.0f);
+        }
+        rhi->updateBuffer(particleBuffer, particles.data(), 0, pbDesc.size);
+        particleCount = MAX_PARTICLES;
+
+        BufferDesc uDesc;
+        uDesc.usage = BufferUsage::Storage;
+        uDesc.memoryUsage = MemoryUsage::CPUtoGPU;
+        uDesc.size = sizeof(ParticleSimParams);
+        particleSimParamsBuffer = rhi->createBuffer(uDesc);
+        uDesc.size = sizeof(ParticleAttractor);
+        particleAttractorBuffer = rhi->createBuffer(uDesc);
     }
 }
 
@@ -1840,6 +1943,45 @@ void Renderer::createRenderPipeline() {
             // Camera-motion velocity (motion vectors) from depth.
             velocityPipeline = makeFullscreenFragPipeline(
                 "shaders/Velocity.frag.spv", velocityShader, BlendMode::Opaque);
+
+            // GPU particles: two compute stages + an instanced-billboard render.
+            auto makeCompute = [&](const char* spv, ShaderHandle& sh) -> ComputePipelineHandle {
+                std::string code = readFile(spv);
+                if (code.empty()) return {};
+                ShaderDesc d; d.stage = ShaderStage::Compute; d.code = code.data();
+                d.codeSize = code.size(); d.entryPoint = "main";
+                sh = rhi->createShader(d);
+                ComputePipelineDesc cd; cd.computeShader = sh;
+                return rhi->createComputePipeline(cd);
+            };
+            particleForcePipeline     = makeCompute("shaders/ParticleForce.comp.spv", particleForceShader);
+            particleIntegratePipeline = makeCompute("shaders/ParticleIntegrate.comp.spv", particleIntegrateShader);
+
+            std::string pvCode = readFile("shaders/Particle.vert.spv");
+            std::string pfCode = readFile("shaders/Particle.frag.spv");
+            if (!pvCode.empty() && !pfCode.empty()) {
+                ShaderDesc pvd; pvd.stage = ShaderStage::Vertex;   pvd.code = pvCode.data(); pvd.codeSize = pvCode.size(); pvd.entryPoint = "main";
+                particleVertexShader = rhi->createShader(pvd);
+                ShaderDesc pfd; pfd.stage = ShaderStage::Fragment; pfd.code = pfCode.data(); pfd.codeSize = pfCode.size(); pfd.entryPoint = "main";
+                particleFragmentShader = rhi->createShader(pfd);
+
+                PipelineDesc pd;
+                pd.vertexShader = particleVertexShader;
+                pd.fragmentShader = particleFragmentShader;
+                pd.vertexLayout.stride = 0;   // billboard verts generated in-shader
+                pd.vertexLayout.attributes = {};
+                pd.topology = PrimitiveTopology::TriangleList;
+                pd.blendMode = BlendMode::Additive;  // glowing particles
+                pd.depthTest = true;
+                pd.depthWrite = false;               // additive, don't occlude
+                pd.depthCompareOp = CompareOp::LessOrEqual;
+                pd.cullMode = CullMode::None;
+                pd.sampleCount = 1;
+                pd.hasDepthAttachment = true;
+                pd.depthAttachmentFormat = PixelFormat::Depth32Float;
+                pd.colorAttachmentFormats = { PixelFormat::RGBA16_FLOAT };
+                particleRenderPipeline = rhi->createPipeline(pd);
+            }
         }
 
         // Directional shadow depth pipeline: renders scene geometry into the

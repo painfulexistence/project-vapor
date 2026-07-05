@@ -11,7 +11,8 @@ struct Particle {
     vec4 color;
 };
 
-layout(std140, set = 0, binding = 0) uniform SimulationParams {
+// SSBO (not UBO): the RHI compute descriptor set is all storage buffers.
+layout(std430, set = 0, binding = 0) readonly buffer SimulationParams {
     vec2 resolution;
     vec2 mousePosition;
     float time;

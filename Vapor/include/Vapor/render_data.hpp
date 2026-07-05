@@ -229,6 +229,34 @@ struct alignas(16) FogRenderData {
     float ambientIntensity = 0.3f;
 };
 
+// GPU particle (matches the Particle struct in ParticleForce/Integrate.comp and
+// Particle.vert).
+struct alignas(16) GPUParticleData {
+    glm::vec3 position = glm::vec3(0.0f);
+    float _pad1 = 0.0f;
+    glm::vec3 velocity = glm::vec3(0.0f);
+    float _pad2 = 0.0f;
+    glm::vec3 force = glm::vec3(0.0f);
+    float _pad3 = 0.0f;
+    glm::vec4 color = glm::vec4(1.0f);
+};
+
+// Particle simulation params / attractor (bound as SSBOs; the RHI compute set is
+// storage-buffer only, so these are std430 buffers in the shaders).
+struct alignas(16) ParticleSimParams {
+    glm::vec2 resolution = glm::vec2(1280.0f, 720.0f);
+    glm::vec2 mousePosition = glm::vec2(0.0f);
+    float time = 0.0f;
+    float deltaTime = 1.0f / 60.0f;
+    float _pad1 = 0.0f;
+    float _pad2 = 0.0f;
+};
+
+struct alignas(16) ParticleAttractor {
+    glm::vec3 position = glm::vec3(0.0f);
+    float strength = 50.0f;
+};
+
 // ============================================================================
 // Frustum for Culling
 // ============================================================================

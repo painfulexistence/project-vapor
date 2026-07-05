@@ -347,6 +347,7 @@ private:
     void lightScatteringPass();
     void volumetricFogPass();
     void velocityPass();
+    void particlePass();
     void shadowPass();
 
     // ========================================================================
@@ -515,6 +516,16 @@ private:
     BufferHandle prevViewProjBuffer;
     glm::mat4 prevViewProj = glm::mat4(1.0f);
     bool prevViewProjValid = false;
+    // GPU particle system (self-contained orbital demo).
+    static constexpr Uint32 MAX_PARTICLES = 8192;
+    ComputePipelineHandle particleForcePipeline;
+    ComputePipelineHandle particleIntegratePipeline;
+    PipelineHandle particleRenderPipeline;     // instanced billboards
+    BufferHandle particleBuffer;
+    BufferHandle particleSimParamsBuffer;
+    BufferHandle particleAttractorBuffer;
+    Uint32 particleCount = 0;
+    bool particleSystemEnabled = true;
     PipelineHandle shadowPipeline;
     ShaderHandle vertexShader;
     ShaderHandle fragmentShader;
@@ -531,6 +542,10 @@ private:
     ShaderHandle volumetricFogShader;
     BufferHandle fogDataBuffer;
     ShaderHandle velocityShader;
+    ShaderHandle particleForceShader;
+    ShaderHandle particleIntegrateShader;
+    ShaderHandle particleVertexShader;
+    ShaderHandle particleFragmentShader;
     ShaderHandle shadowVertexShader;
     ShaderHandle shadowFragmentShader;
     static constexpr Uint32 SHADOW_MAP_SIZE = 2048;

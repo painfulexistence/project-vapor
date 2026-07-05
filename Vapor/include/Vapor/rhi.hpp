@@ -518,6 +518,10 @@ public:
     virtual void setComputeTexture(Uint32 binding, TextureHandle texture) = 0;
     virtual void setAccelerationStructure(Uint32 binding, AccelStructHandle accelStruct) = 0;
     virtual void dispatch(Uint32 groupCountX, Uint32 groupCountY = 1, Uint32 groupCountZ = 1) = 0;
+    // Barrier so compute-shader writes to a buffer are visible to subsequent
+    // compute/vertex/fragment reads (e.g. GPU particle sim -> instanced draw).
+    // Default no-op: Metal's tracked hazard mode inserts these automatically.
+    virtual void computeBarrier() {}
 
     // ========================================================================
     // Utility

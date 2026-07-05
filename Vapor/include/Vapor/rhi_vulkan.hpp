@@ -125,6 +125,7 @@ public:
     void setComputeTexture(Uint32 binding, TextureHandle texture) override;
     void setAccelerationStructure(Uint32 binding, AccelStructHandle accelStruct) override;
     void dispatch(Uint32 groupCountX, Uint32 groupCountY, Uint32 groupCountZ) override;
+    void computeBarrier() override;
 
     // ========================================================================
     // Utility
