@@ -15,7 +15,11 @@
 function(vapor_compile_glsl_shaders TARGET SHADER_DIR)
     find_program(GLSL_VALIDATOR "glslangValidator" REQUIRED)
 
-    file(GLOB_RECURSE _sources
+    # CONFIGURE_DEPENDS re-globs at build time and auto-reconfigures when the
+    # set of shader sources changes. Without it, a shader added after the last
+    # `cmake` configure is silently never compiled to .spv (and the renderer
+    # then aborts at load with "Asset not found: shaders/<x>.spv").
+    file(GLOB_RECURSE _sources CONFIGURE_DEPENDS
         "${SHADER_DIR}/*.vert"
         "${SHADER_DIR}/*.frag"
         "${SHADER_DIR}/*.comp"
