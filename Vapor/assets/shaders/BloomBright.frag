@@ -1,17 +1,25 @@
 #version 450
-// Bloom bright-pass: extract HDR pixels above a soft luminance threshold.
-// Runs at half resolution, sampling the linear-HDR colorRT.
+// Bloom brightness extraction (matches Metal 3d_bloom_brightness.metal).
+// Extracts pixels above a luminance threshold with a soft knee, at half res.
 
 layout(location = 0) in vec2 tex_uv;
 layout(location = 0) out vec4 outColor;
 
 layout(set = 2, binding = 0) uniform sampler2D texScreen;
 
+const float threshold = 1.0;  // matches Renderer::bloomThreshold
+
 void main() {
-    vec3 c = texture(texScreen, tex_uv).rgb;
-    float l = dot(c, vec3(0.2126, 0.7152, 0.0722));
-    const float threshold = 1.0;
-    // Soft knee: fade in contribution above the threshold instead of a hard cut.
-    float contrib = max(l - threshold, 0.0) / max(l, 1e-4);
-    outColor = vec4(c * contrib, 1.0);
+    vec3 color = texture(texScreen, tex_uv).rgb;
+
+    float brightness = dot(color, vec3(0.2126, 0.7152, 0.0722));
+
+    float softThreshold = threshold * 0.8;
+    float contribution = max(0.0, brightness - softThreshold) / max(brightness, 0.0001);
+
+    if (brightness > threshold) {
+        outColor = vec4(color * contribution, 1.0);
+    } else {
+        outColor = vec4(0.0, 0.0, 0.0, 1.0);
+    }
 }

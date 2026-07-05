@@ -202,6 +202,9 @@ void Renderer::shutdown() {
         if (shadowSampler.isValid()) {
             rhi->destroySampler(shadowSampler);
         }
+        if (clampSampler.isValid()) {
+            rhi->destroySampler(clampSampler);
+        }
 
         // Destroy pipeline
         if (mainPipeline.isValid()) {
@@ -508,12 +511,15 @@ void Renderer::setupDefaultRenderGraph() {
     renderGraph.addPass("Main",
         [](Renderer& r) { r.mainRenderPass(); });
 
-    // Bloom: extract bright HDR pixels, blur, composited in PostProcess.
+    // Pyramid bloom: brightness extract -> downsample chain -> tent-filter
+    // upsample chain (accumulates into pyramid[0]); composited in PostProcess.
     // No-ops until the bloom pipelines/targets exist.
-    renderGraph.addPass("BloomExtract",
-        [](Renderer& r) { r.bloomExtractPass(); });
-    renderGraph.addPass("BloomBlur",
-        [](Renderer& r) { r.bloomBlurPass(); });
+    renderGraph.addPass("BloomBrightness",
+        [](Renderer& r) { r.bloomBrightnessPass(); });
+    renderGraph.addPass("BloomDownsample",
+        [](Renderer& r) { r.bloomDownsamplePass(); });
+    renderGraph.addPass("BloomUpsample",
+        [](Renderer& r) { r.bloomUpsamplePass(); });
 
     // Fullscreen post-process to swapchain; no-op until a post-process
     // pipeline is created.
@@ -1059,35 +1065,59 @@ void Renderer::shadowPass() {
     }
 }
 
-// Bloom bright-pass: extract HDR pixels above threshold from colorRT into the
-// half-res bloomRTA.
-void Renderer::bloomExtractPass() {
-    if (!bloomBrightPipeline.isValid() || !colorRT.isValid() || !bloomRTA.isValid()) return;
+// Bloom brightness: soft-threshold extract from colorRT into the half-res
+// bloomBrightness target.
+void Renderer::bloomBrightnessPass() {
+    if (!bloomBrightPipeline.isValid() || !colorRT.isValid() || !bloomBrightness.isValid()) return;
     RenderPassDesc rp;
-    rp.name = "BloomExtract";
-    rp.colorAttachments.push_back(bloomRTA);
+    rp.name = "BloomBrightness";
+    rp.colorAttachments.push_back(bloomBrightness);
     rp.clearColors.push_back(glm::vec4(0.0f));
     rp.loadColor.push_back(false);  // clear
     rhi->beginRenderPass(rp);
     rhi->bindPipeline(bloomBrightPipeline);
-    if (defaultSampler.isValid()) rhi->setTexture(0, 0, colorRT, defaultSampler);
+    rhi->setTexture(0, 0, colorRT, clampSampler);
     rhi->draw(3, 1, 0, 0);
     rhi->endRenderPass();
 }
 
-// Bloom blur: gaussian blur bloomRTA -> bloomRTB (half res).
-void Renderer::bloomBlurPass() {
-    if (!bloomBlurPipeline.isValid() || !bloomRTA.isValid() || !bloomRTB.isValid()) return;
-    RenderPassDesc rp;
-    rp.name = "BloomBlur";
-    rp.colorAttachments.push_back(bloomRTB);
-    rp.clearColors.push_back(glm::vec4(0.0f));
-    rp.loadColor.push_back(false);  // clear
-    rhi->beginRenderPass(rp);
-    rhi->bindPipeline(bloomBlurPipeline);
-    if (defaultSampler.isValid()) rhi->setTexture(0, 0, bloomRTA, defaultSampler);
-    rhi->draw(3, 1, 0, 0);
-    rhi->endRenderPass();
+// Bloom downsample: build the pyramid. brightness -> pyramid[0], then
+// pyramid[i-1] -> pyramid[i], each a 3x3 gaussian at decreasing resolution.
+void Renderer::bloomDownsamplePass() {
+    if (!bloomDownsamplePipeline.isValid() || !bloomBrightness.isValid()) return;
+    for (Uint32 i = 0; i < BLOOM_PYRAMID_LEVELS; i++) {
+        if (!bloomPyramid[i].isValid()) return;
+        TextureHandle src = (i == 0) ? bloomBrightness : bloomPyramid[i - 1];
+        RenderPassDesc rp;
+        rp.name = "BloomDownsample";
+        rp.colorAttachments.push_back(bloomPyramid[i]);
+        rp.clearColors.push_back(glm::vec4(0.0f));
+        rp.loadColor.push_back(false);  // clear
+        rhi->beginRenderPass(rp);
+        rhi->bindPipeline(bloomDownsamplePipeline);
+        rhi->setTexture(0, 0, src, clampSampler);
+        rhi->draw(3, 1, 0, 0);
+        rhi->endRenderPass();
+    }
+}
+
+// Bloom upsample: from the bottom of the pyramid up to pyramid[0], tent-filter
+// the lower level and ADD it (additive blend) onto the current level, so
+// pyramid[0] ends up holding the fully accumulated bloom.
+void Renderer::bloomUpsamplePass() {
+    if (!bloomUpsamplePipeline.isValid()) return;
+    for (int i = static_cast<int>(BLOOM_PYRAMID_LEVELS) - 2; i >= 0; i--) {
+        if (!bloomPyramid[i].isValid() || !bloomPyramid[i + 1].isValid()) continue;
+        RenderPassDesc rp;
+        rp.name = "BloomUpsample";
+        rp.colorAttachments.push_back(bloomPyramid[i]);
+        rp.loadColor.push_back(true);   // keep this level's downsampled content
+        rhi->beginRenderPass(rp);
+        rhi->bindPipeline(bloomUpsamplePipeline);
+        rhi->setTexture(0, 0, bloomPyramid[i + 1], clampSampler);
+        rhi->draw(3, 1, 0, 0);
+        rhi->endRenderPass();
+    }
 }
 
 void Renderer::postProcessPass() {
@@ -1110,12 +1140,12 @@ void Renderer::postProcessPass() {
     // Bind post-process pipeline
     rhi->bindPipeline(postProcessPipeline);
 
-    // Fragment texture 0: HDR colorRT; texture 1: half-res blurred bloom.
-    if (colorRT.isValid() && defaultSampler.isValid()) {
-        rhi->setTexture(0, 0, colorRT, defaultSampler);
+    // Fragment texture 0: HDR colorRT; texture 1: accumulated bloom (pyramid[0]).
+    if (colorRT.isValid() && clampSampler.isValid()) {
+        rhi->setTexture(0, 0, colorRT, clampSampler);
     }
-    if (bloomRTB.isValid() && defaultSampler.isValid()) {
-        rhi->setTexture(0, 1, bloomRTB, defaultSampler);
+    if (bloomPyramid[0].isValid() && clampSampler.isValid()) {
+        rhi->setTexture(0, 1, bloomPyramid[0], clampSampler);
     }
 
     // Draw fullscreen triangle (3 vertices, 1 instance)
@@ -1149,6 +1179,16 @@ void Renderer::createDefaultResources() {
     shadowSamplerDesc.addressModeV = AddressMode::ClampToEdge;
     shadowSamplerDesc.addressModeW = AddressMode::ClampToEdge;
     shadowSampler = rhi->createSampler(shadowSamplerDesc);
+
+    // Linear + clamp sampler for fullscreen/bloom sampling (avoids edge wrap).
+    SamplerDesc clampSamplerDesc;
+    clampSamplerDesc.minFilter = FilterMode::Linear;
+    clampSamplerDesc.magFilter = FilterMode::Linear;
+    clampSamplerDesc.mipFilter = FilterMode::Linear;
+    clampSamplerDesc.addressModeU = AddressMode::ClampToEdge;
+    clampSamplerDesc.addressModeV = AddressMode::ClampToEdge;
+    clampSamplerDesc.addressModeW = AddressMode::ClampToEdge;
+    clampSampler = rhi->createSampler(clampSamplerDesc);
 
     // Create default white texture (1x1 white pixel)
     {
@@ -1385,16 +1425,24 @@ void Renderer::createRenderTargets() {
         aoRT = rhi->createTexture(desc);
     }
 
-    // Bloom ping-pong targets (half resolution, HDR).
+    // Bloom pyramid targets (HDR). Brightness extract at half res, then a chain
+    // of progressively-halved levels (matches the Metal backend's sizing:
+    // pyramid[i] = swapchain / 2^(i+1)).
     {
         TextureDesc desc;
-        desc.width = std::max(1u, width / 2);
-        desc.height = std::max(1u, height / 2);
         desc.format = PixelFormat::RGBA16_FLOAT;
         desc.usage = TextureUsage::RenderTarget | TextureUsage::Sampled;
         desc.sampleCount = 1;
-        bloomRTA = rhi->createTexture(desc);
-        bloomRTB = rhi->createTexture(desc);
+
+        desc.width = std::max(1u, width / 2);
+        desc.height = std::max(1u, height / 2);
+        bloomBrightness = rhi->createTexture(desc);
+
+        for (Uint32 i = 0; i < BLOOM_PYRAMID_LEVELS; i++) {
+            desc.width = std::max(1u, width >> (i + 1));
+            desc.height = std::max(1u, height >> (i + 1));
+            bloomPyramid[i] = rhi->createTexture(desc);
+        }
     }
 
     // Create default depth buffer for swapchain rendering (when not using render targets)
@@ -1519,9 +1567,11 @@ void Renderer::createRenderPipeline() {
             ppDesc.colorAttachmentFormats = { PixelFormat::Swapchain };
             postProcessPipeline = rhi->createPipeline(ppDesc);
 
-            // Bloom pipelines: fullscreen (reusing FullScreen.vert), rendering
-            // into the half-res RGBA16F ping-pong targets.
-            auto makeFullscreenFragPipeline = [&](const char* fragSpv, ShaderHandle& outShader) -> PipelineHandle {
+            // Pyramid bloom pipelines: fullscreen (reusing FullScreen.vert),
+            // rendering into RGBA16F pyramid levels. The upsample pass uses
+            // additive blending to accumulate onto the level it targets.
+            auto makeFullscreenFragPipeline = [&](const char* fragSpv, ShaderHandle& outShader,
+                                                  BlendMode blend) -> PipelineHandle {
                 std::string code = readFile(fragSpv);
                 if (code.empty()) return {};
                 ShaderDesc fd;
@@ -1536,7 +1586,7 @@ void Renderer::createRenderPipeline() {
                 d.vertexLayout.stride = 0;
                 d.vertexLayout.attributes = {};
                 d.topology = PrimitiveTopology::TriangleList;
-                d.blendMode = BlendMode::Opaque;
+                d.blendMode = blend;
                 d.depthTest = false;
                 d.depthWrite = false;
                 d.cullMode = CullMode::None;
@@ -1545,8 +1595,9 @@ void Renderer::createRenderPipeline() {
                 d.colorAttachmentFormats = { PixelFormat::RGBA16_FLOAT };
                 return rhi->createPipeline(d);
             };
-            bloomBrightPipeline = makeFullscreenFragPipeline("shaders/BloomBright.frag.spv", bloomBrightShader);
-            bloomBlurPipeline   = makeFullscreenFragPipeline("shaders/BloomBlur.frag.spv", bloomBlurShader);
+            bloomBrightPipeline      = makeFullscreenFragPipeline("shaders/BloomBright.frag.spv",     bloomBrightShader,     BlendMode::Opaque);
+            bloomDownsamplePipeline  = makeFullscreenFragPipeline("shaders/BloomDownsample.frag.spv", bloomDownsampleShader, BlendMode::Opaque);
+            bloomUpsamplePipeline    = makeFullscreenFragPipeline("shaders/BloomUpsample.frag.spv",   bloomUpsampleShader,   BlendMode::Additive);
         }
 
         // Directional shadow depth pipeline: renders scene geometry into the

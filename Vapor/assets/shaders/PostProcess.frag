@@ -31,8 +31,9 @@ vec3 linearToSRGB(vec3 linear) {
 void main() {
     vec3 color = texture(texScreen, tex_uv).rgb;
 
-    // Additive bloom (bilinearly upsampled from the half-res blur).
-    const float bloomStrength = 0.5;
+    // Additive bloom from the accumulated pyramid top level (pyramid[0]),
+    // matching the Metal bloom composite (bloomStrength = 0.8).
+    const float bloomStrength = 0.8;
     color += texture(texBloom, tex_uv).rgb * bloomStrength;
 
     // Exposure before tone mapping (the scene is lit with high-intensity direct

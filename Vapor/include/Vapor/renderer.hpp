@@ -340,8 +340,9 @@ private:
     void raytraceAOPass();
     void mainRenderPass();
     void postProcessPass();
-    void bloomExtractPass();
-    void bloomBlurPass();
+    void bloomBrightnessPass();
+    void bloomDownsamplePass();
+    void bloomUpsamplePass();
     void shadowPass();
 
     // ========================================================================
@@ -462,6 +463,9 @@ private:
     // Point/clamp sampler for depth maps (shadows). Linear filtering of a depth
     // texture is wrong for manual PCF and a slow/emulated path on Metal/MoltenVK.
     SamplerHandle shadowSampler;
+    // Linear + clamp-to-edge sampler for fullscreen/bloom passes (repeat would
+    // wrap at screen edges; the bloom pyramid needs clamped bilinear taps).
+    SamplerHandle clampSampler;
 
     // Render targets
     TextureHandle colorRT_MSAA;
@@ -472,8 +476,14 @@ private:
     TextureHandle normalRT;
     TextureHandle shadowRT;
     TextureHandle aoRT;
-    TextureHandle bloomRTA;  // half-res bright extract
-    TextureHandle bloomRTB;  // half-res blurred
+    // Physically-based pyramid bloom (matches the Metal backend): brightness
+    // extract -> progressive downsample chain -> tent-filter upsample chain that
+    // accumulates back into pyramid[0] -> composited in PostProcess.
+    static constexpr Uint32 BLOOM_PYRAMID_LEVELS = 5;
+    TextureHandle bloomBrightness;                    // half-res bright extract
+    TextureHandle bloomPyramid[BLOOM_PYRAMID_LEVELS]; // progressively halved
+    float bloomThreshold = 1.0f;
+    float bloomStrength = 0.8f;
 
     // Default depth buffer for swapchain rendering (when not using render targets)
     TextureHandle swapchainDepthBuffer;
@@ -483,7 +493,8 @@ private:
     PipelineHandle prePassPipeline;
     PipelineHandle postProcessPipeline;
     PipelineHandle bloomBrightPipeline;
-    PipelineHandle bloomBlurPipeline;
+    PipelineHandle bloomDownsamplePipeline;
+    PipelineHandle bloomUpsamplePipeline;
     PipelineHandle shadowPipeline;
     ShaderHandle vertexShader;
     ShaderHandle fragmentShader;
@@ -492,7 +503,8 @@ private:
     ShaderHandle postProcessVertexShader;
     ShaderHandle postProcessFragmentShader;
     ShaderHandle bloomBrightShader;
-    ShaderHandle bloomBlurShader;
+    ShaderHandle bloomDownsampleShader;
+    ShaderHandle bloomUpsampleShader;
     ShaderHandle shadowVertexShader;
     ShaderHandle shadowFragmentShader;
     static constexpr Uint32 SHADOW_MAP_SIZE = 2048;
@@ -607,16 +619,9 @@ private:
     // Post-Processing Resources
     // ========================================================================
 
-    // Bloom
-    std::vector<TextureHandle> bloomMips;
-    ComputePipelineHandle bloomDownsamplePipeline;
-    ComputePipelineHandle bloomUpsamplePipeline;
-    ShaderHandle bloomDownsampleShader;
-    ShaderHandle bloomUpsampleShader;
-
-    // Tone mapping
-    ComputePipelineHandle toneMappingPipeline;
-    ShaderHandle toneMappingShader;
+    // (Pyramid bloom pipelines/shaders are declared with the other graphics
+    // pipelines above; the earlier compute-bloom / tone-mapping scaffolding was
+    // never implemented and has been removed.)
 
     // Vignette
     ComputePipelineHandle vignettePipeline;
