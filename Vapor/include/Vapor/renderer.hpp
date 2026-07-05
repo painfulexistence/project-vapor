@@ -459,6 +459,9 @@ private:
 
     // Default sampler
     SamplerHandle defaultSampler;
+    // Point/clamp sampler for depth maps (shadows). Linear filtering of a depth
+    // texture is wrong for manual PCF and a slow/emulated path on Metal/MoltenVK.
+    SamplerHandle shadowSampler;
 
     // Render targets
     TextureHandle colorRT_MSAA;

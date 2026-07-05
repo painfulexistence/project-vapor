@@ -199,6 +199,9 @@ void Renderer::shutdown() {
         if (defaultSampler.isValid()) {
             rhi->destroySampler(defaultSampler);
         }
+        if (shadowSampler.isValid()) {
+            rhi->destroySampler(shadowSampler);
+        }
 
         // Destroy pipeline
         if (mainPipeline.isValid()) {
@@ -841,7 +844,7 @@ void Renderer::mainRenderPass() {
     // the 3-layer depth array at set2 b6. RHIMain.frag reads a sampler2DArray at
     // b6 and the PSSMBuf at b2; the neutral binding-6 texture is overridden.
     if (pssmDataBuffer.isValid()) rhi->setFragmentBuffer(2, pssmDataBuffer, 0, sizeof(PSSMRenderData));
-    if (pssmShadowArrayTexture.isValid()) rhi->setTexture(0, 6, pssmShadowArrayTexture, defaultSampler);
+    if (pssmShadowArrayTexture.isValid()) rhi->setTexture(0, 6, pssmShadowArrayTexture, shadowSampler);
 
     // Group drawables by material to reduce state changes
     std::map<MaterialId, std::vector<Uint32>> materialBatches;
@@ -1132,6 +1135,20 @@ void Renderer::createDefaultResources() {
     samplerDesc.addressModeV = AddressMode::Repeat;
     samplerDesc.addressModeW = AddressMode::Repeat;
     defaultSampler = rhi->createSampler(samplerDesc);
+
+    // Shadow-map sampler: nearest + clamp. Manual PCF does its own 3x3 filtering,
+    // so point sampling is both correct (no bilinear blending of depth values)
+    // and the fast hardware path; clamp-to-edge avoids wrap artifacts at cascade
+    // borders. (Linear depth sampling is emulated in-shader on MoltenVK — a
+    // large per-pixel cost for the main pass's PCF loop.)
+    SamplerDesc shadowSamplerDesc;
+    shadowSamplerDesc.minFilter = FilterMode::Nearest;
+    shadowSamplerDesc.magFilter = FilterMode::Nearest;
+    shadowSamplerDesc.mipFilter = FilterMode::Nearest;
+    shadowSamplerDesc.addressModeU = AddressMode::ClampToEdge;
+    shadowSamplerDesc.addressModeV = AddressMode::ClampToEdge;
+    shadowSamplerDesc.addressModeW = AddressMode::ClampToEdge;
+    shadowSampler = rhi->createSampler(shadowSamplerDesc);
 
     // Create default white texture (1x1 white pixel)
     {
