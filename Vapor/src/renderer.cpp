@@ -149,6 +149,13 @@ void Renderer::initialize(std::unique_ptr<RHI> rhiPtr, GraphicsBackend backendTy
         frameDataBuffer = rhi->createBuffer(fdDesc);
         FrameData fdInit{};
         rhi->updateBuffer(frameDataBuffer, &fdInit, 0, sizeof(fdInit));
+
+        BufferDesc sfDesc;
+        sfDesc.size = sizeof(SunFlareRenderData);
+        sfDesc.usage = BufferUsage::Uniform;
+        sfDesc.memoryUsage = MemoryUsage::CPUtoGPU;
+        sunFlareDataBuffer = rhi->createBuffer(sfDesc);
+        rhi->updateBuffer(sunFlareDataBuffer, &sunFlareSettings, 0, sizeof(sunFlareSettings));
     }
 
     // Empty TLAS on RT-capable backends; instances are refit/rebuilt per frame
@@ -643,6 +650,10 @@ void Renderer::setupDefaultRenderGraph() {
     renderGraph.addPass("LightScattering",
         [](Renderer& r) { r.lightScatteringPass(); });
 
+    // Sun/lens flare, additive over the HDR scene (off by default, like native).
+    renderGraph.addPass("SunFlare",
+        [](Renderer& r) { r.sunFlarePass(); });
+
     // Fullscreen post-process to swapchain; no-op until a post-process
     // pipeline is created.
     renderGraph.addPass("PostProcess",
@@ -1111,9 +1122,66 @@ void Renderer::normalResolvePass() {
     // For now, this is a placeholder
 }
 
+// Clustered point-light culling. Fills the cluster buffer the Metal PBR shader
+// consumes (buffer 2/9 contract); RHIMain.frag on Vulkan loops lights directly,
+// so this only runs on the Metal backend.
 void Renderer::tileCullingPass() {
-    // TODO: Implement tile culling pass
-    // For now, this is a placeholder
+    if (backend != GraphicsBackend::Metal) return;
+    if (!tileCullingPipeline.isValid() || !clusterBuffer.isValid()) return;
+    glm::vec2 screenSize(rhi->getSwapchainWidth(), rhi->getSwapchainHeight());
+    glm::uvec3 gridSize(clusterGridSizeX, clusterGridSizeY, clusterGridSizeZ);
+    Uint32 pointLightCount = static_cast<Uint32>(pointLights.size());
+    rhi->beginComputePass();
+    rhi->bindComputePipeline(tileCullingPipeline);
+    rhi->setComputeBuffer(0, clusterBuffer);
+    rhi->setComputeBuffer(1, pointLightBuffer, 0, sizeof(PointLightData) * maxPointLights);
+    rhi->setComputeBuffer(2, cameraUniformBuffer, 0, sizeof(CameraRenderData));
+    rhi->setComputeBytes(&pointLightCount, sizeof(Uint32), 3);
+    rhi->setComputeBytes(&gridSize, sizeof(glm::uvec3), 4);
+    rhi->setComputeBytes(&screenSize, sizeof(glm::vec2), 5);
+    rhi->dispatch(clusterGridSizeX, clusterGridSizeY, 1);
+    rhi->endComputePass();
+    rhi->computeBarrier();  // cluster writes -> fragment reads in Main
+}
+
+// Sun/lens flare: procedural glow/halo/ghosts/starburst added over the HDR
+// scene (native draws onto the pre-tonemap bloom result; here colorRT before
+// PostProcess — same stage of the chain). Metal MSL only for now.
+void Renderer::sunFlarePass() {
+    if (!sunFlareEnabled || !sunFlarePipeline.isValid() || !colorRT.isValid() ||
+        !sunFlareDataBuffer.isValid()) {
+        return;
+    }
+    glm::vec2 screenSize(rhi->getSwapchainWidth(), rhi->getSwapchainHeight());
+    glm::vec3 sunDir = glm::normalize(atmosphereData.sunDirection);
+    glm::vec3 sunWorldPos = currentCamera.position + sunDir * 10000.0f;
+    glm::vec4 sunClip = (currentCamera.proj * currentCamera.view) * glm::vec4(sunWorldPos, 1.0f);
+    if (sunClip.w <= 0.0f) return;
+    glm::vec2 sunNDC = glm::vec2(sunClip) / sunClip.w;
+    glm::vec2 sunScreenPos = sunNDC * 0.5f + 0.5f;
+    sunScreenPos.y = 1.0f - sunScreenPos.y;
+
+    sunFlareSettings.sunScreenPos = sunScreenPos;
+    sunFlareSettings.screenSize = screenSize;
+    sunFlareSettings.screenCenter = glm::vec2(0.5f);
+    sunFlareSettings.aspectRatio = glm::vec2(screenSize.x / screenSize.y, 1.0f);
+    sunFlareSettings.sunColor = atmosphereData.sunColor;
+    sunFlareSettings.visibility =
+        (sunScreenPos.x < 0.0f || sunScreenPos.x > 1.0f ||
+         sunScreenPos.y < 0.0f || sunScreenPos.y > 1.0f) ? 0.0f : 1.0f;
+    sunFlareSettings.time = float(frameCounter) / 60.0f;
+    rhi->updateBuffer(sunFlareDataBuffer, &sunFlareSettings, 0, sizeof(sunFlareSettings));
+
+    RenderPassDesc rp;
+    rp.name = "SunFlare";
+    rp.colorAttachments.push_back(colorRT);
+    rp.loadColor.push_back(true);  // additive over the scene
+    rhi->beginRenderPass(rp);
+    rhi->bindPipeline(sunFlarePipeline);
+    rhi->setTexture(0, 1, depthStencilRT, clampSampler);  // texture(1) occlusion depth
+    rhi->setFragmentBuffer(0, sunFlareDataBuffer, 0, sizeof(SunFlareRenderData));
+    rhi->draw(3, 1, 0, 0);
+    rhi->endRenderPass();
 }
 
 // Ray-traced near-field directional shadow into shadowRT (mips regenerated for
@@ -2570,6 +2638,44 @@ void Renderer::createRenderPipeline() {
         stochasticPointShadowPipeline = makeMetalCompute("shaders/3d_stochastic_point_shadow.metal", pointShadowShader);
         pointShadowTemporalPipeline   = makeMetalCompute("shaders/3d_point_shadow_temporal.metal", pointShadowTemporalShader);
     }
+
+    // ------------------------------------------------------------------------
+    // Metal-only (non-RT) pipelines: clustered light culling (the Metal PBR
+    // shader's cluster contract) and the sun/lens flare. GLSL twins for the
+    // Vulkan backend land with the IBL round.
+    // ------------------------------------------------------------------------
+    if (backend == GraphicsBackend::Metal) {
+        std::string tcCode = readFile("shaders/3d_tile_light_cull.metal");
+        if (!tcCode.empty()) {
+            ShaderDesc d; d.stage = ShaderStage::Compute; d.code = tcCode.data();
+            d.codeSize = tcCode.size(); d.entryPoint = "computeMain";
+            tileCullingShader = rhi->createShader(d);
+            ComputePipelineDesc cd; cd.computeShader = tileCullingShader;
+            tileCullingPipeline = rhi->createComputePipeline(cd);
+        }
+
+        std::string sfCode = readFile("shaders/3d_sun_flare.metal");
+        if (!sfCode.empty()) {
+            ShaderDesc vd; vd.stage = ShaderStage::Vertex;   vd.code = sfCode.data(); vd.codeSize = sfCode.size(); vd.entryPoint = "sunFlareVertex";
+            sunFlareVertexShader = rhi->createShader(vd);
+            ShaderDesc fd; fd.stage = ShaderStage::Fragment; fd.code = sfCode.data(); fd.codeSize = sfCode.size(); fd.entryPoint = "sunFlareFragment";
+            sunFlareFragmentShader = rhi->createShader(fd);
+            PipelineDesc pd;
+            pd.vertexShader = sunFlareVertexShader;
+            pd.fragmentShader = sunFlareFragmentShader;
+            pd.vertexLayout.stride = 0;
+            pd.vertexLayout.attributes = {};
+            pd.topology = PrimitiveTopology::TriangleList;
+            pd.blendMode = BlendMode::Additive;
+            pd.depthTest = false;
+            pd.depthWrite = false;
+            pd.cullMode = CullMode::None;
+            pd.sampleCount = 1;
+            pd.hasDepthAttachment = false;
+            pd.colorAttachmentFormats = { PixelFormat::RGBA16_FLOAT };
+            sunFlarePipeline = rhi->createPipeline(pd);
+        }
+    }
 }
 
 TextureId Renderer::getOrCreateTexture(const std::shared_ptr<Vapor::Image>& image) {
@@ -3148,6 +3254,8 @@ void Renderer::drawGraphicsImGui() {
         ImGui::Checkbox("God rays", &lightScatteringEnabled);
         ImGui::Checkbox("Height fog", &volumetricFogEnabled);
         ImGui::Checkbox("Particles", &particleSystemEnabled);
+        ImGui::Checkbox("AO (RT)", &aoEnabled);
+        ImGui::Checkbox("Sun flare", &sunFlareEnabled);
         ImGui::Checkbox("Volumetric clouds", &volumetricCloudsEnabled);
         if (volumetricCloudsEnabled) {
             ImGui::SliderFloat("Cloud coverage", &cloudSettings.cloudCoverage, 0.0f, 1.0f);

@@ -619,6 +619,16 @@ private:
     // (frameDataBuffer for the RT kernels' random seeds is declared above.)
     bool aoEnabled = true;
 
+    // Sun/lens flare (Metal MSL for now; GLSL twin lands with the IBL round).
+    // (tileCullingPipeline is declared with the other compute pipelines above.)
+    ShaderHandle tileCullingShader;
+    PipelineHandle sunFlarePipeline;
+    ShaderHandle sunFlareVertexShader, sunFlareFragmentShader;
+    BufferHandle sunFlareDataBuffer;
+    SunFlareRenderData sunFlareSettings;
+    bool sunFlareEnabled = false;  // native default
+    void sunFlarePass();
+
     void aoTemporalPass();
     void aoDenoisePass();
     void stochasticPointShadowPass();
