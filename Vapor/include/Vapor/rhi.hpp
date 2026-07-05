@@ -517,6 +517,9 @@ public:
     virtual void setComputeBuffer(Uint32 binding, BufferHandle buffer, size_t offset = 0, size_t range = 0) = 0;
     virtual void setComputeTexture(Uint32 binding, TextureHandle texture) = 0;
     virtual void setAccelerationStructure(Uint32 binding, AccelStructHandle accelStruct) = 0;
+    // Small inline constants for compute (Metal: setBytes at the given buffer
+    // index; Vulkan: compute push constants at (binding%4)*16, 16 bytes/slot).
+    virtual void setComputeBytes(const void* /*data*/, size_t /*size*/, Uint32 /*binding*/) {}
     virtual void dispatch(Uint32 groupCountX, Uint32 groupCountY = 1, Uint32 groupCountZ = 1) = 0;
     // Barrier so compute-shader writes to a buffer are visible to subsequent
     // compute/vertex/fragment reads (e.g. GPU particle sim -> instanced draw).

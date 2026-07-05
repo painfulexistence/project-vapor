@@ -117,6 +117,7 @@ public:
     void setComputeBuffer(Uint32 binding, BufferHandle buffer, size_t offset, size_t range) override;
     void setComputeTexture(Uint32 binding, TextureHandle texture) override;
     void setAccelerationStructure(Uint32 binding, AccelStructHandle accelStruct) override;
+    void setComputeBytes(const void* data, size_t size, Uint32 binding) override;
     void dispatch(Uint32 groupCountX, Uint32 groupCountY, Uint32 groupCountZ) override;
     void setScissor(int32_t x, int32_t y, Uint32 width, Uint32 height) override;
 

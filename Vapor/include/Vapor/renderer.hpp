@@ -589,6 +589,40 @@ private:
     ComputePipelineHandle normalResolvePipeline;
     ComputePipelineHandle raytraceShadowPipeline;
     ComputePipelineHandle raytraceAOPipeline;
+    // RT denoising chain (RequiresRaytracing-gated; Metal MSL kernels via RHI)
+    ComputePipelineHandle aoTemporalPipeline;
+    ComputePipelineHandle aoDenoisePipeline;
+    ComputePipelineHandle stochasticPointShadowPipeline;
+    ComputePipelineHandle pointShadowTemporalPipeline;
+    ShaderHandle rtShadowShader, rtAOShader, aoTemporalShader, aoDenoiseShader,
+                 pointShadowShader, pointShadowTemporalShader;
+    ShaderHandle prePassMetalVertexShader, prePassMetalFragmentShader;
+
+    // Acceleration structures: one BLAS per registered mesh (index-aligned with
+    // `meshes`), a TLAS rebuilt each frame from the visible drawables.
+    std::vector<AccelStructHandle> meshBLAS;
+    AccelStructHandle sceneTLAS;
+    std::vector<AccelStructInstance> tlasInstances;
+
+    // RT AO / point-shadow working set
+    TextureHandle albedoRT;          // prepass MRT output 1 (GIBS later)
+    TextureHandle aoRawRT;           // noisy RT AO
+    TextureHandle aoScratchRT;       // à-trous intermediate
+    TextureHandle aoHistoryRT[2];    // temporal ping-pong
+    Uint32 aoHistoryIndex = 0;
+    bool aoHistoryValid = false;
+    glm::mat4 prevView = glm::mat4(1.0f);
+    bool prevViewValid = false;
+    TextureHandle pointShadowRT;         // stochastic raw
+    TextureHandle pointShadowHistoryRT;  // temporal history (post-swap = latest)
+    TextureHandle pointShadowDenoisedRT; // temporal output (swapped with history)
+    // (frameDataBuffer for the RT kernels' random seeds is declared above.)
+    bool aoEnabled = true;
+
+    void aoTemporalPass();
+    void aoDenoisePass();
+    void stochasticPointShadowPass();
+    void pointShadowTemporalPass();
 
     // Acceleration structures (for ray tracing)
     std::vector<AccelStructHandle> BLASs;  // Bottom-level acceleration structures (one per mesh)

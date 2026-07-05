@@ -141,6 +141,23 @@ void Renderer::initialize(std::unique_ptr<RHI> rhiPtr, GraphicsBackend backendTy
         cloudDesc.memoryUsage = MemoryUsage::CPUtoGPU;
         cloudDataBuffer = rhi->createBuffer(cloudDesc);
         rhi->updateBuffer(cloudDataBuffer, &cloudSettings, 0, sizeof(cloudSettings));
+
+        BufferDesc fdDesc;
+        fdDesc.size = sizeof(FrameData);
+        fdDesc.usage = BufferUsage::Uniform;
+        fdDesc.memoryUsage = MemoryUsage::CPUtoGPU;
+        frameDataBuffer = rhi->createBuffer(fdDesc);
+        FrameData fdInit{};
+        rhi->updateBuffer(frameDataBuffer, &fdInit, 0, sizeof(fdInit));
+    }
+
+    // Empty TLAS on RT-capable backends; instances are refit/rebuilt per frame
+    // by buildAccelerationStructures() from the visible drawables.
+    if (capabilities.raytracing) {
+        AccelStructDesc td;
+        td.type = AccelStructType::TopLevel;
+        td.allowUpdate = true;
+        sceneTLAS = rhi->createAccelerationStructure(td);
     }
 
     // Create default resources
@@ -319,6 +336,24 @@ MeshId Renderer::registerMesh(const std::vector<Vapor::VertexData>& vertices,
 
     MeshId id = static_cast<MeshId>(meshes.size());
     meshes.push_back(mesh);
+
+    // One BLAS per mesh on RT-capable backends. VertexData begins with the
+    // position, so the buffer can be consumed directly at stride sizeof(VertexData).
+    AccelStructHandle blas;
+    if (capabilities.raytracing && mesh.vertexBuffer.isValid() && mesh.indexBuffer.isValid()) {
+        AccelStructDesc bd;
+        bd.type = AccelStructType::BottomLevel;
+        AccelStructGeometry geom;
+        geom.vertexBuffer = mesh.vertexBuffer;
+        geom.vertexCount = mesh.vertexCount;
+        geom.vertexStride = sizeof(Vapor::VertexData);
+        geom.indexBuffer = mesh.indexBuffer;
+        geom.indexCount = mesh.indexCount;
+        bd.geometries.push_back(geom);
+        blas = rhi->createAccelerationStructure(bd);
+        if (blas.isValid()) rhi->buildAccelerationStructure(blas);
+    }
+    meshBLAS.push_back(blas);  // index-aligned with `meshes` (invalid when no RT)
     return id;
 }
 
@@ -544,6 +579,10 @@ void Renderer::setupDefaultRenderGraph() {
         [](Renderer& r) { r.buildAccelerationStructures(); }, PassFlags::RequiresRaytracing);
     renderGraph.addPass("PrePass",
         [](Renderer& r) { r.prePass(); });
+    // Camera-motion velocity from the pre-pass depth — consumed by the RT
+    // temporal denoisers below (and future TAA).
+    renderGraph.addPass("Velocity",
+        [](Renderer& r) { r.velocityPass(); });
     renderGraph.addPass("NormalResolve",
         [](Renderer& r) { r.normalResolvePass(); }, PassFlags::RequiresCompute);
     renderGraph.addPass("TileCulling",
@@ -552,6 +591,14 @@ void Renderer::setupDefaultRenderGraph() {
         [](Renderer& r) { r.raytraceShadowPass(); }, PassFlags::RequiresRaytracing);
     renderGraph.addPass("RaytraceAO",
         [](Renderer& r) { r.raytraceAOPass(); }, PassFlags::RequiresRaytracing);
+    renderGraph.addPass("AOTemporal",
+        [](Renderer& r) { r.aoTemporalPass(); }, PassFlags::RequiresRaytracing);
+    renderGraph.addPass("AODenoise",
+        [](Renderer& r) { r.aoDenoisePass(); }, PassFlags::RequiresRaytracing);
+    renderGraph.addPass("StochasticPointShadow",
+        [](Renderer& r) { r.stochasticPointShadowPass(); }, PassFlags::RequiresRaytracing);
+    renderGraph.addPass("PointShadowTemporal",
+        [](Renderer& r) { r.pointShadowTemporalPass(); }, PassFlags::RequiresRaytracing);
 
     // Main geometry pass: renders to colorRT when a post-process pipeline
     // Directional shadow depth (single cascade) before the main lighting pass.
@@ -561,10 +608,6 @@ void Renderer::setupDefaultRenderGraph() {
     // exists, directly to the swapchain otherwise (decided inside the pass).
     renderGraph.addPass("Main",
         [](Renderer& r) { r.mainRenderPass(); });
-
-    // Camera-motion velocity (motion vectors) from scene depth — TAA infra.
-    renderGraph.addPass("Velocity",
-        [](Renderer& r) { r.velocityPass(); });
 
     // Sky/atmosphere fills the background (depth == far) before bloom, so the
     // bright sky and sun disk feed the bloom pyramid.
@@ -934,7 +977,18 @@ void Renderer::mainRenderPass() {
     // the 3-layer depth array at set2 b6. RHIMain.frag reads a sampler2DArray at
     // b6 and the PSSMBuf at b2; the neutral binding-6 texture is overridden.
     if (pssmDataBuffer.isValid()) rhi->setFragmentBuffer(2, pssmDataBuffer, 0, sizeof(PSSMRenderData));
-    if (pssmShadowArrayTexture.isValid()) rhi->setTexture(0, 6, pssmShadowArrayTexture, shadowSampler);
+    if (backend == GraphicsBackend::Vulkan) {
+        // RHIMain.frag reads the cascade array at set2 b6. (Metal's PBR shader
+        // uses slot 6 for texAO — don't clobber it there; the cascade array is
+        // already bound at the Metal contract slot 12 above.)
+        if (pssmShadowArrayTexture.isValid()) rhi->setTexture(0, 6, pssmShadowArrayTexture, shadowSampler);
+    } else if (capabilities.raytracing) {
+        // Metal-via-RHI with RT: the real kernel outputs replace the neutral
+        // whites — texAO(6), texShadow(7), texPointShadow(13).
+        if (aoEnabled && aoRT.isValid()) rhi->setTexture(0, 6, aoRT, clampSampler);
+        if (shadowRT.isValid()) rhi->setTexture(0, 7, shadowRT, clampSampler);
+        if (pointShadowHistoryRT.isValid()) rhi->setTexture(0, 13, pointShadowHistoryRT, clampSampler);
+    }
 
     // Group drawables by material to reduce state changes
     std::map<MaterialId, std::vector<Uint32>> materialBatches;
@@ -990,14 +1044,66 @@ void Renderer::mainRenderPass() {
     rhi->endRenderPass();
 }
 
+// Depth + normal (+ albedo) pre-pass. Feeds the RT shadow/AO kernels (and,
+// later, SSAO/GIBS). The main pass re-clears depth and redraws — command-
+// buffer order guarantees the RT passes read the pre-pass results first.
 void Renderer::prePass() {
-    // TODO: Implement pre-pass (depth + normal) for Metal
-    // For now, this is a placeholder
+    if (!prePassPipeline.isValid() || !normalRT.isValid() || !albedoRT.isValid() ||
+        !depthStencilRT.isValid()) {
+        return;
+    }
+    RenderPassDesc rp;
+    rp.name = "PrePass";
+    rp.colorAttachments = { normalRT, albedoRT };
+    rp.clearColors = { glm::vec4(0.0f), glm::vec4(0.0f) };
+    rp.loadColor = { false, false };
+    rp.depthAttachment = depthStencilRT;
+    rp.loadDepth = false;
+    rp.clearDepth = 1.0f;
+    rhi->beginRenderPass(rp);
+    rhi->bindPipeline(prePassPipeline);
+    rhi->setVertexBuffer(0, cameraUniformBuffer, 0, sizeof(CameraRenderData));
+    rhi->setVertexBuffer(1, materialUniformBuffer, 0, sizeof(Vapor::MaterialData) * MAX_INSTANCES);
+    rhi->setVertexBuffer(2, instanceDataBuffer, 0, sizeof(Vapor::InstanceData) * std::max<size_t>(1, visibleDrawables.size()));
+    for (Uint32 drawableIdx : visibleDrawables) {
+        const Drawable& drawable = frameDrawables[drawableIdx];
+        const RenderMesh& mesh = meshes[drawable.mesh];
+        auto it = drawableToInstanceID.find(drawableIdx);
+        if (it == drawableToInstanceID.end()) continue;
+        Uint32 iid = it->second;
+        bindMaterial(drawable.material);  // albedo/normal maps for the MRT frag
+        if (mesh.vertexBuffer.isValid()) rhi->bindVertexBuffer(mesh.vertexBuffer, 3, 0);
+        rhi->setVertexBytes(&iid, sizeof(Uint32), 4);
+        if (mesh.indexBuffer.isValid()) {
+            rhi->bindIndexBuffer(mesh.indexBuffer, 0);
+            rhi->drawIndexed(mesh.indexCount, 1, 0, 0, 0);
+        } else if (mesh.vertexBuffer.isValid()) {
+            rhi->draw(mesh.vertexCount, 1, 0, 0);
+        }
+    }
+    rhi->endRenderPass();
 }
 
+// Rebuild the TLAS from this frame's visible drawables (RequiresRaytracing).
 void Renderer::buildAccelerationStructures() {
-    // TODO: Implement acceleration structure building for Metal
-    // For now, this is a placeholder
+    if (!capabilities.raytracing || !sceneTLAS.isValid()) return;
+    tlasInstances.clear();
+    tlasInstances.reserve(visibleDrawables.size());
+    for (Uint32 drawableIdx : visibleDrawables) {
+        const Drawable& drawable = frameDrawables[drawableIdx];
+        if (drawable.mesh >= meshBLAS.size() || !meshBLAS[drawable.mesh].isValid()) continue;
+        auto it = drawableToInstanceID.find(drawableIdx);
+        if (it == drawableToInstanceID.end()) continue;
+        AccelStructInstance inst;
+        inst.blas = meshBLAS[drawable.mesh];
+        inst.transform = drawable.transform;
+        inst.instanceID = it->second;
+        inst.mask = 0xFF;
+        tlasInstances.push_back(inst);
+    }
+    if (!tlasInstances.empty()) {
+        rhi->updateAccelerationStructure(sceneTLAS, tlasInstances);  // rebuilds
+    }
 }
 
 void Renderer::normalResolvePass() {
@@ -1010,14 +1116,144 @@ void Renderer::tileCullingPass() {
     // For now, this is a placeholder
 }
 
+// Ray-traced near-field directional shadow into shadowRT (mips regenerated for
+// the PBR shader's soft lookup). Mirrors the native RaytraceShadowPass 1:1.
 void Renderer::raytraceShadowPass() {
-    // TODO: Implement raytrace shadow pass for Metal
-    // For now, this is a placeholder
+    if (!raytraceShadowPipeline.isValid() || !sceneTLAS.isValid() || !shadowRT.isValid()) return;
+    Uint32 w = rhi->getSwapchainWidth();
+    Uint32 h = rhi->getSwapchainHeight();
+    glm::vec2 screenSize(w, h);
+    rhi->beginComputePass();
+    rhi->bindComputePipeline(raytraceShadowPipeline);
+    rhi->setComputeTexture(0, depthStencilRT);
+    rhi->setComputeTexture(1, normalRT);
+    rhi->setComputeTexture(2, shadowRT);
+    rhi->setComputeBuffer(0, cameraUniformBuffer, 0, sizeof(CameraRenderData));
+    rhi->setComputeBuffer(1, directionalLightBuffer, 0, sizeof(DirectionalLightData) * maxDirectionalLights);
+    rhi->setComputeBuffer(2, pointLightBuffer, 0, sizeof(PointLightData) * maxPointLights);
+    rhi->setComputeBytes(&screenSize, sizeof(glm::vec2), 3);
+    rhi->setAccelerationStructure(4, sceneTLAS);
+    rhi->dispatch(w, h, 1);  // native dispatches w*h groups of 1x1
+    rhi->endComputePass();
+    rhi->generateMipmaps(shadowRT);
 }
 
+// Ray-traced AO into the noisy aoRawRT; the temporal + à-trous passes below
+// produce the final aoRT the PBR shader samples.
 void Renderer::raytraceAOPass() {
-    // TODO: Implement raytrace AO pass for Metal
-    // For now, this is a placeholder
+    if (!aoEnabled || !raytraceAOPipeline.isValid() || !sceneTLAS.isValid() || !aoRawRT.isValid()) return;
+    FrameData fd{};
+    fd.frameNumber = frameCounter;
+    fd.time = float(frameCounter) / 60.0f;
+    fd.deltaTime = 1.0f / 60.0f;
+    rhi->updateBuffer(frameDataBuffer, &fd, 0, sizeof(fd));
+
+    Uint32 w = rhi->getSwapchainWidth();
+    Uint32 h = rhi->getSwapchainHeight();
+    rhi->beginComputePass();
+    rhi->bindComputePipeline(raytraceAOPipeline);
+    rhi->setComputeTexture(0, depthStencilRT);
+    rhi->setComputeTexture(1, normalRT);
+    rhi->setComputeTexture(2, aoRawRT);
+    rhi->setComputeBuffer(0, frameDataBuffer, 0, sizeof(FrameData));
+    rhi->setComputeBuffer(1, cameraUniformBuffer, 0, sizeof(CameraRenderData));
+    rhi->setAccelerationStructure(2, sceneTLAS);
+    rhi->dispatch(w, h, 1);
+    rhi->endComputePass();
+}
+
+// Temporal AO accumulation (view reprojection + velocity), aoHistory ping-pong.
+void Renderer::aoTemporalPass() {
+    if (!aoEnabled || !aoTemporalPipeline.isValid() || !aoRawRT.isValid()) return;
+    glm::mat4 curView = currentCamera.view;
+    if (!prevViewValid) { prevView = curView; prevViewValid = true; }
+    Uint32 historyValid = aoHistoryValid ? 1u : 0u;
+    Uint32 inIdx = aoHistoryIndex;
+    Uint32 outIdx = inIdx ^ 1u;
+    Uint32 w = rhi->getSwapchainWidth();
+    Uint32 h = rhi->getSwapchainHeight();
+    rhi->beginComputePass();
+    rhi->bindComputePipeline(aoTemporalPipeline);
+    rhi->setComputeTexture(0, aoRawRT);
+    rhi->setComputeTexture(1, aoHistoryRT[inIdx]);
+    rhi->setComputeTexture(2, aoHistoryRT[outIdx]);
+    rhi->setComputeTexture(3, velocityRT);
+    rhi->setComputeTexture(4, depthStencilRT);
+    rhi->setComputeTexture(5, normalRT);
+    rhi->setComputeBuffer(0, cameraUniformBuffer, 0, sizeof(CameraRenderData));
+    rhi->setComputeBytes(&prevView, sizeof(glm::mat4), 1);
+    rhi->setComputeBytes(&historyValid, sizeof(Uint32), 2);
+    rhi->dispatch((w + 7) / 8, (h + 7) / 8, 1);
+    rhi->endComputePass();
+    aoHistoryIndex = outIdx;
+    aoHistoryValid = true;
+    prevView = curView;
+}
+
+// À-trous denoise: history -> scratch (stride 1) -> aoRT (stride 2).
+void Renderer::aoDenoisePass() {
+    if (!aoEnabled || !aoDenoisePipeline.isValid() || !aoRT.isValid()) return;
+    Uint32 w = rhi->getSwapchainWidth();
+    Uint32 h = rhi->getSwapchainHeight();
+    struct Iter { TextureHandle src, dst; Uint32 stride; };
+    const Iter iters[] = {
+        { aoHistoryRT[aoHistoryIndex], aoScratchRT, 1u },
+        { aoScratchRT, aoRT, 2u },
+    };
+    rhi->beginComputePass();
+    rhi->bindComputePipeline(aoDenoisePipeline);
+    for (const Iter& it : iters) {
+        rhi->setComputeTexture(0, it.src);
+        rhi->setComputeTexture(1, it.dst);
+        rhi->setComputeBytes(&it.stride, sizeof(Uint32), 0);
+        rhi->dispatch((w + 7) / 8, (h + 7) / 8, 1);
+        rhi->computeBarrier();  // iteration 2 reads what iteration 1 wrote
+    }
+    rhi->endComputePass();
+}
+
+// Stochastic ray-traced point-light shadows (clustered light sampling).
+void Renderer::stochasticPointShadowPass() {
+    if (!stochasticPointShadowPipeline.isValid() || !sceneTLAS.isValid() || !pointShadowRT.isValid()) return;
+    Uint32 w = rhi->getSwapchainWidth();
+    Uint32 h = rhi->getSwapchainHeight();
+    glm::vec2 screenSize(w, h);
+    glm::uvec3 gridDims(clusterGridSizeX, clusterGridSizeY, clusterGridSizeZ);
+    Uint32 fi = frameCounter;
+    Uint32 debugMode = 0;
+    rhi->beginComputePass();
+    rhi->bindComputePipeline(stochasticPointShadowPipeline);
+    rhi->setComputeTexture(0, depthStencilRT);
+    rhi->setComputeTexture(1, normalRT);
+    rhi->setComputeTexture(2, pointShadowRT);
+    rhi->setComputeBuffer(0, cameraUniformBuffer, 0, sizeof(CameraRenderData));
+    rhi->setComputeBuffer(1, pointLightBuffer, 0, sizeof(PointLightData) * maxPointLights);
+    rhi->setComputeBuffer(2, clusterBuffer);
+    rhi->setComputeBytes(&screenSize, sizeof(glm::vec2), 3);
+    rhi->setComputeBytes(&gridDims, sizeof(glm::uvec3), 4);
+    rhi->setComputeBytes(&fi, sizeof(Uint32), 5);
+    rhi->setAccelerationStructure(6, sceneTLAS);
+    rhi->setComputeBytes(&debugMode, sizeof(Uint32), 7);
+    rhi->dispatch((w + 7) / 8, (h + 7) / 8, 1);
+    rhi->endComputePass();
+}
+
+// Temporal point-shadow resolve. Native copies denoised->history with a blit;
+// here the handles are swapped instead (post-swap, history holds the latest
+// denoised result and is what the PBR shader binds).
+void Renderer::pointShadowTemporalPass() {
+    if (!pointShadowTemporalPipeline.isValid() || !pointShadowRT.isValid()) return;
+    Uint32 w = rhi->getSwapchainWidth();
+    Uint32 h = rhi->getSwapchainHeight();
+    rhi->beginComputePass();
+    rhi->bindComputePipeline(pointShadowTemporalPipeline);
+    rhi->setComputeTexture(0, pointShadowRT);
+    rhi->setComputeTexture(1, pointShadowHistoryRT);
+    rhi->setComputeTexture(2, velocityRT);
+    rhi->setComputeTexture(3, pointShadowDenoisedRT);
+    rhi->dispatch((w + 7) / 8, (h + 7) / 8, 1);
+    rhi->endComputePass();
+    std::swap(pointShadowDenoisedRT, pointShadowHistoryRT);
 }
 
 // Directional shadow pass (PSSM, 3 cascades): split the camera frustum by a
@@ -1874,7 +2110,9 @@ void Renderer::createRenderTargets() {
         normalRT_MSAA = rhi->createTexture(desc);
 
         desc.sampleCount = 1;
-        desc.usage = TextureUsage::Storage | TextureUsage::Sampled;  // Written by compute, sampled in post
+        // PrePass renders into it (RenderTarget), RT kernels read it (Sampled),
+        // and the legacy resolve path may write it via compute (Storage).
+        desc.usage = TextureUsage::RenderTarget | TextureUsage::Storage | TextureUsage::Sampled;
         normalRT = rhi->createTexture(desc);
     }
 
@@ -1897,6 +2135,29 @@ void Renderer::createRenderTargets() {
         desc.format = PixelFormat::R16_FLOAT;  // Single channel float
         desc.usage = TextureUsage::Storage | TextureUsage::Sampled;
         aoRT = rhi->createTexture(desc);
+    }
+
+    // RT AO / point-shadow working set + prepass albedo (RT-capable backends;
+    // cheap enough to create unconditionally, only written when RT passes run).
+    {
+        TextureDesc desc;
+        desc.width = width;
+        desc.height = height;
+        desc.sampleCount = 1;
+
+        desc.format = PixelFormat::RGBA8_UNORM;
+        desc.usage = TextureUsage::RenderTarget | TextureUsage::Sampled;
+        albedoRT = rhi->createTexture(desc);
+
+        desc.format = PixelFormat::R16_FLOAT;
+        desc.usage = TextureUsage::Storage | TextureUsage::Sampled;
+        aoRawRT = rhi->createTexture(desc);
+        aoScratchRT = rhi->createTexture(desc);
+        aoHistoryRT[0] = rhi->createTexture(desc);
+        aoHistoryRT[1] = rhi->createTexture(desc);
+        pointShadowRT = rhi->createTexture(desc);
+        pointShadowHistoryRT = rhi->createTexture(desc);
+        pointShadowDenoisedRT = rhi->createTexture(desc);
     }
 
     // Bloom pyramid targets (HDR). Brightness extract at half res, then a chain
@@ -2235,6 +2496,79 @@ void Renderer::createRenderPipeline() {
             sd.colorAttachmentFormats = {};  // depth-only, no color
             shadowPipeline = rhi->createPipeline(sd);
         }
+    }
+
+    // ------------------------------------------------------------------------
+    // PrePass pipeline (both backends): depth + normal + albedo MRT.
+    // Vulkan: RHIMain.vert + PrePass.frag; Metal: 3d_depth_only.metal (same
+    // binding convention as the main pass: camera 0 / materials 1 /
+    // instances 2 / vertices 3 / instanceID bytes 4).
+    // ------------------------------------------------------------------------
+    {
+        std::string ppv, ppf;
+        const char* entryV = "main";
+        const char* entryF = "main";
+        if (backend == GraphicsBackend::Vulkan) {
+            ppv = readFile("shaders/RHIMain.vert.spv");
+            ppf = readFile("shaders/PrePass.frag.spv");
+        } else if (backend == GraphicsBackend::Metal) {
+            ppv = readFile("shaders/3d_depth_only.metal");
+            ppf = ppv;
+            entryV = "vertexMain";
+            entryF = "fragmentMain";
+        }
+        if (!ppv.empty() && !ppf.empty()) {
+            ShaderDesc vd; vd.stage = ShaderStage::Vertex;   vd.code = ppv.data(); vd.codeSize = ppv.size(); vd.entryPoint = entryV;
+            prePassVertexShader = rhi->createShader(vd);
+            ShaderDesc fd; fd.stage = ShaderStage::Fragment; fd.code = ppf.data(); fd.codeSize = ppf.size(); fd.entryPoint = entryF;
+            prePassFragmentShader = rhi->createShader(fd);
+
+            PipelineDesc pd;
+            pd.vertexShader = prePassVertexShader;
+            pd.fragmentShader = prePassFragmentShader;
+            pd.vertexLayout.stride = sizeof(Vapor::VertexData);
+            pd.vertexLayout.attributes = {
+                {0, PixelFormat::RGB32_FLOAT, offsetof(Vapor::VertexData, position)},
+                {1, PixelFormat::RG32_FLOAT,  offsetof(Vapor::VertexData, uv)},
+                {2, PixelFormat::RGB32_FLOAT, offsetof(Vapor::VertexData, normal)},
+                {3, PixelFormat::RGBA32_FLOAT, offsetof(Vapor::VertexData, tangent)},
+            };
+            pd.topology = PrimitiveTopology::TriangleList;
+            pd.blendMode = BlendMode::Opaque;
+            pd.depthTest = true;
+            pd.depthWrite = true;
+            pd.depthCompareOp = CompareOp::Less;
+            pd.cullMode = CullMode::Back;
+            pd.frontFaceCounterClockwise = true;
+            pd.sampleCount = 1;
+            pd.hasDepthAttachment = true;
+            pd.depthAttachmentFormat = PixelFormat::Depth32Float;
+            pd.colorAttachmentFormats = { PixelFormat::RGBA16_FLOAT, PixelFormat::RGBA8_UNORM };
+            prePassPipeline = rhi->createPipeline(pd);
+        }
+    }
+
+    // ------------------------------------------------------------------------
+    // RT compute pipelines (Metal MSL, RequiresRaytracing-gated at the graph):
+    // shadow / AO / AO temporal / AO denoise / stochastic point shadow +
+    // temporal. Vulkan skips these passes, so no SPIR-V is needed.
+    // ------------------------------------------------------------------------
+    if (backend == GraphicsBackend::Metal && capabilities.raytracing) {
+        auto makeMetalCompute = [&](const char* path, ShaderHandle& sh) -> ComputePipelineHandle {
+            std::string code = readFile(path);
+            if (code.empty()) return {};
+            ShaderDesc d; d.stage = ShaderStage::Compute; d.code = code.data();
+            d.codeSize = code.size(); d.entryPoint = "computeMain";
+            sh = rhi->createShader(d);
+            ComputePipelineDesc cd; cd.computeShader = sh;
+            return rhi->createComputePipeline(cd);
+        };
+        raytraceShadowPipeline        = makeMetalCompute("shaders/3d_raytrace_shadow.metal", rtShadowShader);
+        raytraceAOPipeline            = makeMetalCompute("shaders/3d_raytrace_ao.metal", rtAOShader);
+        aoTemporalPipeline            = makeMetalCompute("shaders/3d_ao_temporal.metal", aoTemporalShader);
+        aoDenoisePipeline             = makeMetalCompute("shaders/3d_ao_denoise.metal", aoDenoiseShader);
+        stochasticPointShadowPipeline = makeMetalCompute("shaders/3d_stochastic_point_shadow.metal", pointShadowShader);
+        pointShadowTemporalPipeline   = makeMetalCompute("shaders/3d_point_shadow_temporal.metal", pointShadowTemporalShader);
     }
 }
 

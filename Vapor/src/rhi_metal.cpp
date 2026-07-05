@@ -955,6 +955,12 @@ void RHI_Metal::beginRenderPass(const RenderPassDesc& desc) {
     currentRenderEncoder->setScissorRect(scissorRect);
 }
 
+void RHI_Metal::setComputeBytes(const void* data, size_t size, Uint32 binding) {
+    if (currentComputeEncoder && data && size > 0) {
+        currentComputeEncoder->setBytes(data, size, binding);
+    }
+}
+
 void RHI_Metal::setScissor(int32_t x, int32_t y, Uint32 width, Uint32 height) {
     if (!currentRenderEncoder) return;
     // Clamp to non-negative offsets; callers clamp extents to the pass size

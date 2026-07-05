@@ -2600,6 +2600,16 @@ void RHI_Vulkan::setComputeBuffer(Uint32 binding, BufferHandle buffer, size_t of
     computeDescriptorsDirty = true;
 }
 
+void RHI_Vulkan::setComputeBytes(const void* data, size_t size, Uint32 binding) {
+    // Compute push constants, mirroring the graphics-bytes convention:
+    // 16-byte slot at (binding % 4) * 16 within the compute push range.
+    if (currentCommandBuffer == VK_NULL_HANDLE || !data || size == 0) return;
+    Uint32 offset = (binding % 4) * 16;
+    Uint32 clamped = static_cast<Uint32>(std::min<size_t>(size, 64 - offset));
+    vkCmdPushConstants(currentCommandBuffer, computePipelineLayout,
+                       VK_SHADER_STAGE_COMPUTE_BIT, offset, clamped, data);
+}
+
 void RHI_Vulkan::setComputeTexture(Uint32 binding, TextureHandle texture) {
     auto it = textures.find(texture.id);
     if (it == textures.end() || binding >= BINDINGS_PER_SET) {

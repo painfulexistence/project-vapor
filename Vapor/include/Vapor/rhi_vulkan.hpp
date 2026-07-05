@@ -123,6 +123,7 @@ public:
     void bindComputePipeline(ComputePipelineHandle pipeline) override;
     void setComputeBuffer(Uint32 binding, BufferHandle buffer, size_t offset, size_t range) override;
     void setComputeTexture(Uint32 binding, TextureHandle texture) override;
+    void setComputeBytes(const void* data, size_t size, Uint32 binding) override;
     void setAccelerationStructure(Uint32 binding, AccelStructHandle accelStruct) override;
     void dispatch(Uint32 groupCountX, Uint32 groupCountY, Uint32 groupCountZ) override;
     void computeBarrier() override;
