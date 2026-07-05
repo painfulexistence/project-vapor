@@ -284,43 +284,19 @@ struct alignas(16) IBLCaptureRenderData {
     float _pad[2] = {};
 };
 
-// Sun/lens flare parameters — mirror of the Metal SunFlareData with its tuned
-// defaults. sunScreenPos/screenSize/aspect/visibility are filled per frame.
+// Sun/lens flare parameters (clean-room redesign shared by SunFlare.frag and
+// sunflare_rhi.metal — the old 30-knob procedural flare was scrapped). Sun
+// occlusion is sampled from scene depth in-shader; sunScreenPos/aspect are
+// filled per frame.
 struct alignas(16) SunFlareRenderData {
-    glm::vec2 sunScreenPos = glm::vec2(0.5f);
-    glm::vec2 screenSize = glm::vec2(1.0f);
-    glm::vec2 screenCenter = glm::vec2(0.5f);
-    glm::vec2 aspectRatio = glm::vec2(1.0f);
-    float sunIntensity = 1.0f;
-    float visibility = 1.0f;
-    float fadeEdge = 0.8f;
-    float _pad1 = 0.0f;
-    glm::vec3 sunColor = glm::vec3(1.0f, 0.95f, 0.8f);
-    float _pad2 = 0.0f;
-    float glowIntensity = 0.5f;
-    float glowFalloff = 8.0f;
-    float glowSize = 0.15f;
-    float haloIntensity = 0.3f;
-    float haloRadius = 0.25f;
-    float haloWidth = 0.03f;
-    float haloFalloff = 0.01f;
-    Uint32 ghostCount = 6;
-    float ghostSpacing = 0.3f;
-    float ghostIntensity = 0.15f;
-    float ghostSize = 0.05f;
-    float ghostChromaticOffset = 0.005f;
-    float ghostFalloff = 1.5f;
-    float streakIntensity = 0.2f;
-    float streakLength = 0.3f;
-    float streakFalloff = 50.0f;
-    float starburstIntensity = 0.15f;
-    float starburstSize = 0.4f;
-    Uint32 starburstPoints = 6;
-    float starburstRotation = 0.0f;
-    float dirtIntensity = 0.0f;
-    float dirtScale = 10.0f;
-    float time = 0.0f;
-    float _pad3 = 0.0f;
+    glm::vec2 sunScreenPos = glm::vec2(0.5f);   // uv, y-down
+    glm::vec2 aspectRatio = glm::vec2(1.0f);    // (w/h, 1)
+    glm::vec3 sunColor = glm::vec3(1.0f, 0.95f, 0.85f);
+    float intensity = 0.5f;        // overall flare radiance scale (pre-tonemap)
+    float glowSize = 0.06f;        // gaussian core radius (aspect-corrected uv)
+    float haloRadius = 0.22f;      // thin ring radius around the sun
+    float ghostSpacing = 0.30f;    // ghost step along the sun->center axis
+    float streakIntensity = 0.35f; // anamorphic horizontal streak strength
 };
 
 // GPU particle (matches the Particle struct in ParticleForce/Integrate.comp and

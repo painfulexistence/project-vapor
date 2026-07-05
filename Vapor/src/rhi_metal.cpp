@@ -1362,9 +1362,76 @@ void RHI_Metal::buildAccelerationStructure(AccelStructHandle handle) {
             cmdBuffer->waitUntilCompleted();
         }
     } else {
-        // Build TLAS from instances
-        // This will be implemented when needed
-        fmt::print("Warning: TLAS building not yet fully implemented\n");
+        // Build the TLAS from the instance list (rebuilt whenever
+        // updateAccelerationStructure() supplies new instances).
+        if (resource.instances.empty()) return;
+
+        // Deduped BLAS array; each instance descriptor indexes into it.
+        std::vector<NS::Object*> blasObjects;
+        std::unordered_map<Uint32, Uint32> blasIndex;
+        std::vector<MTL::AccelerationStructureInstanceDescriptor> descriptors;
+        descriptors.reserve(resource.instances.size());
+        for (const auto& inst : resource.instances) {
+            auto blasIt = accelStructs.find(inst.blas.id);
+            if (blasIt == accelStructs.end() || !blasIt->second.accelStruct) continue;
+            auto [mapIt, inserted] = blasIndex.try_emplace(
+                inst.blas.id, static_cast<Uint32>(blasObjects.size()));
+            if (inserted) {
+                blasObjects.push_back(static_cast<NS::Object*>(blasIt->second.accelStruct.get()));
+            }
+            // Zero-initialize: garbage options bits (NonOpaque, winding flags)
+            // make rays miss whole instances — the native renderer learned this
+            // the hard way (see its accel-instance fill).
+            MTL::AccelerationStructureInstanceDescriptor d{};
+            for (int c = 0; c < 4; ++c)
+                for (int r = 0; r < 3; ++r)
+                    d.transformationMatrix.columns[c][r] = inst.transform[c][r];
+            d.accelerationStructureIndex = mapIt->second;
+            d.mask = inst.mask;
+            d.options = MTL::AccelerationStructureInstanceOptionOpaque;
+            d.intersectionFunctionTableOffset = 0;
+            descriptors.push_back(d);
+        }
+        if (descriptors.empty()) return;
+
+        // Fresh instance buffer every build: the previous frame's build/trace
+        // may still be reading the old one (command buffers retain it).
+        size_t bytes = descriptors.size() * sizeof(MTL::AccelerationStructureInstanceDescriptor);
+        resource.instanceBuffer = NS::TransferPtr(device->newBuffer(bytes, MTL::ResourceStorageModeShared));
+        std::memcpy(resource.instanceBuffer->contents(), descriptors.data(), bytes);
+        resource.blasArray = NS::TransferPtr(NS::Array::array(blasObjects.data(), blasObjects.size()));
+
+        auto tlasDesc = NS::TransferPtr(MTL::InstanceAccelerationStructureDescriptor::alloc()->init());
+        tlasDesc->setInstancedAccelerationStructures(resource.blasArray.get());
+        tlasDesc->setInstanceCount(descriptors.size());
+        tlasDesc->setInstanceDescriptorBuffer(resource.instanceBuffer.get());
+
+        auto sizes = device->accelerationStructureSizes(tlasDesc.get());
+        if (!resource.scratchBuffer || resource.scratchBuffer->length() < sizes.buildScratchBufferSize) {
+            resource.scratchBuffer = NS::TransferPtr(
+                device->newBuffer(sizes.buildScratchBufferSize, MTL::ResourceStorageModePrivate));
+        }
+        if (!resource.accelStruct || resource.accelStruct->size() < sizes.accelerationStructureSize) {
+            resource.accelStruct = NS::TransferPtr(
+                device->newAccelerationStructure(sizes.accelerationStructureSize));
+        }
+
+        // Prefer the frame's command buffer so the build is ordered before this
+        // frame's RT dispatches; fall back to a synchronous one-off build.
+        if (currentCommandBuffer) {
+            auto encoder = currentCommandBuffer->accelerationStructureCommandEncoder();
+            encoder->buildAccelerationStructure(resource.accelStruct.get(), tlasDesc.get(),
+                                                resource.scratchBuffer.get(), 0);
+            encoder->endEncoding();
+        } else {
+            auto cmd = commandQueue->commandBuffer();
+            auto encoder = cmd->accelerationStructureCommandEncoder();
+            encoder->buildAccelerationStructure(resource.accelStruct.get(), tlasDesc.get(),
+                                                resource.scratchBuffer.get(), 0);
+            encoder->endEncoding();
+            cmd->commit();
+            cmd->waitUntilCompleted();
+        }
     }
 }
 

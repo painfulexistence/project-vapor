@@ -1347,14 +1347,9 @@ void Renderer::sunFlarePass() {
     sunScreenPos.y = 1.0f - sunScreenPos.y;
 
     sunFlareSettings.sunScreenPos = sunScreenPos;
-    sunFlareSettings.screenSize = screenSize;
-    sunFlareSettings.screenCenter = glm::vec2(0.5f);
     sunFlareSettings.aspectRatio = glm::vec2(screenSize.x / screenSize.y, 1.0f);
     sunFlareSettings.sunColor = atmosphereData.sunColor;
-    sunFlareSettings.visibility =
-        (sunScreenPos.x < 0.0f || sunScreenPos.x > 1.0f ||
-         sunScreenPos.y < 0.0f || sunScreenPos.y > 1.0f) ? 0.0f : 1.0f;
-    sunFlareSettings.time = float(frameCounter) / 60.0f;
+    // Occlusion + edge fade are computed in-shader (smooth depth-disk test).
     rhi->updateBuffer(sunFlareDataBuffer, &sunFlareSettings, 0, sizeof(sunFlareSettings));
 
     RenderPassDesc rp;
@@ -1363,7 +1358,7 @@ void Renderer::sunFlarePass() {
     rp.loadColor.push_back(true);  // additive over the scene
     rhi->beginRenderPass(rp);
     rhi->bindPipeline(sunFlarePipeline);
-    rhi->setTexture(0, 1, depthStencilRT, clampSampler);  // texture(1) occlusion depth
+    rhi->setTexture(0, 0, depthStencilRT, clampSampler);  // occlusion depth
     rhi->setFragmentBuffer(0, sunFlareDataBuffer, 0, sizeof(SunFlareRenderData));
     rhi->draw(3, 1, 0, 0);
     rhi->endRenderPass();
@@ -3059,11 +3054,30 @@ void Renderer::createRenderPipeline() {
             tileCullingPipeline = rhi->createComputePipeline(cd);
         }
 
-        std::string sfCode = readFile("shaders/3d_sun_flare.metal");
-        if (!sfCode.empty()) {
-            ShaderDesc vd; vd.stage = ShaderStage::Vertex;   vd.code = sfCode.data(); vd.codeSize = sfCode.size(); vd.entryPoint = "sunFlareVertex";
+    }
+
+    // ------------------------------------------------------------------------
+    // Sun/lens flare (clean-room redesign, both backends): SunFlare.frag on
+    // Vulkan, sunflare_rhi.metal on Metal — the same algorithm twice. Additive
+    // over the HDR colorRT; occlusion sampled from scene depth in-shader.
+    // ------------------------------------------------------------------------
+    {
+        std::string sfv, sff;
+        const char* entryV = "main";
+        const char* entryF = "main";
+        if (backend == GraphicsBackend::Vulkan) {
+            sfv = readFile("shaders/FullScreen.vert.spv");
+            sff = readFile("shaders/SunFlare.frag.spv");
+        } else if (backend == GraphicsBackend::Metal) {
+            sfv = readFile("shaders/sunflare_rhi.metal");
+            sff = sfv;
+            entryV = "vertexMain";
+            entryF = "fragmentMain";
+        }
+        if (!sfv.empty() && !sff.empty()) {
+            ShaderDesc vd; vd.stage = ShaderStage::Vertex;   vd.code = sfv.data(); vd.codeSize = sfv.size(); vd.entryPoint = entryV;
             sunFlareVertexShader = rhi->createShader(vd);
-            ShaderDesc fd; fd.stage = ShaderStage::Fragment; fd.code = sfCode.data(); fd.codeSize = sfCode.size(); fd.entryPoint = "sunFlareFragment";
+            ShaderDesc fd; fd.stage = ShaderStage::Fragment; fd.code = sff.data(); fd.codeSize = sff.size(); fd.entryPoint = entryF;
             sunFlareFragmentShader = rhi->createShader(fd);
             PipelineDesc pd;
             pd.vertexShader = sunFlareVertexShader;

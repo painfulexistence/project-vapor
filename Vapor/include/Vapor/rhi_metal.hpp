@@ -229,6 +229,9 @@ private:
         AccelStructType type;
         std::vector<AccelStructGeometry> geometries;
         std::vector<AccelStructInstance> instances;
+        // TLAS-only: instance descriptors + the BLAS array they index into.
+        NS::SharedPtr<MTL::Buffer> instanceBuffer;
+        NS::SharedPtr<NS::Array> blasArray;
     };
 
     // Resource maps
