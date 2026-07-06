@@ -697,7 +697,6 @@ private:
         BufferHandle vertexBuffer;
         BufferHandle indexBuffer;
         PipelineHandle pipeline;    // HDR colorRT variant (in-scene batches)
-        PipelineHandle uiPipeline;  // swapchain variant (post-tonemap 2D UI)
         ShaderHandle vertexShader;
         ShaderHandle fragmentShader;
 

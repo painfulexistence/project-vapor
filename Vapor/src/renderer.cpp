@@ -746,6 +746,47 @@ void Renderer::setupDefaultRenderGraph() {
     renderGraph.addPass("VolumetricClouds",
         [](Renderer& r) { r.volumetricCloudPass(); });
 
+    // God rays (screen-space light scattering), composited in PostProcess.
+    // Runs before the canvas passes (native order) so HUD sprites never feed
+    // the scattering, but before bloom below so the scene result is ready.
+    renderGraph.addPass("LightScattering",
+        [](Renderer& r) { r.lightScatteringPass(); });
+
+    // World-space batch quads (3D canvas) into the HDR scene, depth-tested
+    // against the scene, after sky/fog/scattering — native WorldCanvasPass.
+    renderGraph.addPass("WorldCanvas",
+        [](Renderer& r) {
+            if (r.batch3D.quadCount == 0 || !r.colorRT.isValid() || !r.depthStencilRT.isValid()) return;
+            RenderPassDesc rp;
+            rp.name = "WorldCanvas";
+            rp.colorAttachments.push_back(r.colorRT);
+            rp.loadColor.push_back(true);
+            rp.depthAttachment = r.depthStencilRT;
+            rp.loadDepth = true;
+            r.rhi->beginRenderPass(rp);
+            r.flush3D();
+            r.rhi->endRenderPass();
+        });
+
+    // 2D screen-space canvas (HUD sprites/quads) into the HDR scene, before
+    // bloom — native CanvasPass: sprites get bloom/tonemap/post effects, and
+    // the sky can't overwrite them because it already rendered. Depth is
+    // attached only to satisfy the pipeline's format contract (test/write
+    // are disabled on the 2D pipeline).
+    renderGraph.addPass("Canvas2D",
+        [](Renderer& r) {
+            if (r.batch2D.quadCount == 0 || !r.colorRT.isValid() || !r.depthStencilRT.isValid()) return;
+            RenderPassDesc rp;
+            rp.name = "Canvas2D";
+            rp.colorAttachments.push_back(r.colorRT);
+            rp.loadColor.push_back(true);
+            rp.depthAttachment = r.depthStencilRT;
+            rp.loadDepth = true;
+            r.rhi->beginRenderPass(rp);
+            r.flush2D();
+            r.rhi->endRenderPass();
+        });
+
     // Pyramid bloom: brightness extract -> downsample chain -> tent-filter
     // upsample chain (accumulates into pyramid[0]); composited in PostProcess.
     // No-ops until the bloom pipelines/targets exist.
@@ -756,10 +797,6 @@ void Renderer::setupDefaultRenderGraph() {
     renderGraph.addPass("BloomUpsample",
         [](Renderer& r) { r.bloomUpsamplePass(); });
 
-    // God rays (screen-space light scattering), composited in PostProcess.
-    renderGraph.addPass("LightScattering",
-        [](Renderer& r) { r.lightScatteringPass(); });
-
     // Sun/lens flare, additive over the HDR scene (off by default, like native).
     renderGraph.addPass("SunFlare",
         [](Renderer& r) { r.sunFlarePass(); });
@@ -768,20 +805,6 @@ void Renderer::setupDefaultRenderGraph() {
     // pipeline is created.
     renderGraph.addPass("PostProcess",
         [](Renderer& r) { r.postProcessPass(); });
-
-    // 2D screen-space canvas (HUD sprites/quads) onto the swapchain, after
-    // tonemapping — sky/fog/bloom never touch it.
-    renderGraph.addPass("Canvas2D",
-        [](Renderer& r) {
-            if (r.batch2D.quadCount == 0) return;
-            RenderPassDesc rp;
-            rp.name = "Canvas2D";
-            rp.colorAttachments.push_back(TextureHandle{0});
-            rp.loadColor.push_back(true);
-            r.rhi->beginRenderPass(rp);
-            r.flush2D();
-            r.rhi->endRenderPass();
-        });
 
     // RmlUI overlay onto the swapchain (no-op until initUI() succeeds).
     // ImGui renders after the graph, in endFrame().
@@ -1184,10 +1207,9 @@ void Renderer::mainRenderPass() {
         }
     }
 
-    // Flush world-space batch quads (3D canvas) inside the scene pass. The 2D
-    // screen-space batch renders after PostProcess (Canvas2D pass) so the sky
-    // can't overwrite it and the tonemapper doesn't touch UI colors.
-    flush3D();
+    // World-space batch quads are NOT flushed here: they render in the
+    // WorldCanvas pass after sky/fog/scattering (native graph order), so the
+    // sky can't overwrite them and they still feed bloom + post-processing.
 
     // End render pass
     rhi->endRenderPass();
@@ -3874,7 +3896,7 @@ void Renderer::flush2D() {
         glm::mat4 viewProj = glm::orthoZO(
             0.0f, static_cast<float>(w), static_cast<float>(h), 0.0f, -1.0f, 1.0f
         );
-        batch2D.flush(rhi.get(), viewProj, batch2D.uiPipeline);
+        batch2D.flush(rhi.get(), viewProj);
     }
 }
 
@@ -4668,14 +4690,6 @@ void Renderer::BatchRenderer::init(RHI* rhi, GraphicsBackend backend, bool is3D,
     pipelineDesc.depthAttachmentFormat = PixelFormat::Depth32Float;
 
     pipeline = rhi->createPipeline(pipelineDesc);
-
-    // Swapchain variant for post-tonemap screen-space UI (Canvas2D pass):
-    // drawn after PostProcess, no depth, so the sky/tonemap never touch it.
-    pipelineDesc.colorAttachmentFormats = { PixelFormat::Swapchain };
-    pipelineDesc.hasDepthAttachment = false;
-    pipelineDesc.depthTest = false;
-    pipelineDesc.depthWrite = false;
-    uiPipeline = rhi->createPipeline(pipelineDesc);
 
     fmt::print("BatchRenderer initialized ({} mode)\n", is3D ? "3D" : "2D");
 }
