@@ -164,10 +164,10 @@ struct alignas(16) VoxelVolumeData {
     float _pad2;
     glm::vec3 sunColor;
     float _pad3;
-    glm::vec3 volumeOrigin = glm::vec3(-12.8f, 0.0f, -12.8f);
+    glm::vec3 volumeOrigin = glm::vec3(-6.4f, 0.0f, -6.4f);
     float _pad4;
     float sunIntensity = 1.0f;
-    float voxelSize = 0.1f;// 10 cm voxels
+    float voxelSize = 0.05f;// 5 cm voxels (256^3 => a 12.8m diorama)
     Uint32 brickDim = 8;
     Uint32 maxRaySteps = 256;
     glm::uvec3 gridDim = glm::uvec3(256);
