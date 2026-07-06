@@ -1570,6 +1570,14 @@ void RHI_Vulkan::endFrame() {
 
     vkEndCommandBuffer(currentCommandBuffer);
 
+    // Textures created mid-frame (e.g. RmlUI glyphs generated during
+    // Context::Render) record their copy + layout transitions on the upload
+    // stream. Submit it ahead of this frame's command buffer — same-queue
+    // submission order guarantees the transitions execute before the frame
+    // samples those textures. Without this the uploads only ran at the NEXT
+    // beginFrame, so the current frame sampled them in UNDEFINED layout.
+    submitUploads(false);
+
     VkSubmitInfo submitInfo{};
     submitInfo.sType = VK_STRUCTURE_TYPE_SUBMIT_INFO;
 

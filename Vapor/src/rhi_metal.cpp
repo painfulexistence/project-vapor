@@ -816,6 +816,12 @@ void RHI_Metal::endFrame() {
         currentCommandBuffer->presentDrawable(currentDrawable);
     }
 
+    // Commit any pending mid-frame uploads (e.g. RmlUI glyph textures created
+    // during UI rendering) ahead of the frame's command buffer — same-queue
+    // commit order guarantees the blits complete before the frame samples
+    // those textures. Otherwise they'd only run at the next beginFrame.
+    submitUploads(false);
+
     // Commit command buffer
     currentCommandBuffer->commit();
 
