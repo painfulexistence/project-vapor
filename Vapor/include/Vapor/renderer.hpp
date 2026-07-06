@@ -746,6 +746,9 @@ private:
         RHI* currentRHI = nullptr;
         glm::mat4 currentViewProj = glm::mat4(1.0f);
         bool canAutoFlush = false;
+        // Backend decides the flush() binding contract (Metal buffer indices
+        // vs Vulkan push constants / vertex input).
+        GraphicsBackend rhiBackend = GraphicsBackend::Vulkan;
 
         // Stats
         uint32_t drawCalls = 0;

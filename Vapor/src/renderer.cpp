@@ -4622,6 +4622,7 @@ void Renderer::updateTexture(TextureHandle handle, const std::shared_ptr<Vapor::
 void Renderer::BatchRenderer::init(RHI* rhi, GraphicsBackend backend, bool is3D, TextureHandle defaultTex, SamplerHandle samplerHandle) {
     whiteTexture = defaultTex;
     sampler = samplerHandle;
+    rhiBackend = backend;
 
     // Create vertex buffers — one per frame slot (data is rewritten every
     // frame; a single buffer would race the in-flight frames' draws).
@@ -4767,8 +4768,17 @@ void Renderer::BatchRenderer::flush(RHI* rhi, const glm::mat4& viewProj, Pipelin
     // Bind pipeline (override = the swapchain/UI variant)
     rhi->bindPipeline(overridePipeline.isValid() ? overridePipeline : pipeline);
 
-    // Set projection matrix uniform (set 0, binding 0)
-    rhi->setVertexBytes(&viewProj, sizeof(glm::mat4), 0);
+    // View-projection: 2d_batch.metal declares vertices at buffer(0) and the
+    // uniforms at buffer(1) — sending the matrix to index 0 on Metal left
+    // buffer(1) UNBOUND (the vertex-buffer bind below overwrote index 0), so
+    // every batch draw read an unbound buffer: repeated GPU faults until the
+    // OS ignored the whole queue. Vulkan's contract is push constants [0,64)
+    // + vertex input binding 0 — separate namespaces, so index 0 for both.
+    if (rhiBackend == GraphicsBackend::Metal) {
+        rhi->setVertexBytes(&viewProj, sizeof(glm::mat4), 1);
+    } else {
+        rhi->setVertexBytes(&viewProj, sizeof(glm::mat4), 0);
+    }
 
     // Bind vertex and index buffers
     rhi->bindVertexBuffer(vertexBuffer, 0, 0);
