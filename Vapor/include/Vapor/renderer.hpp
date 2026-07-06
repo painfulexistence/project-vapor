@@ -536,6 +536,31 @@ private:
     PipelineHandle bloomBrightPipeline;
     PipelineHandle bloomDownsamplePipeline;
     PipelineHandle bloomUpsamplePipeline;
+    // Metal-only: native composites bloom in its own pass (colorRT +
+    // pyramid[0] -> tempColorRT, then swap); the Vulkan twin composites
+    // inside PostProcess.frag instead.
+    PipelineHandle bloomCompositePipeline;
+    // Metal-only: native velocity is a compute kernel (3d_velocity.metal);
+    // the Vulkan path uses the fullscreen-fragment velocityPipeline below.
+    ComputePipelineHandle velocityComputePipeline;
+    // Shader handles created for the Metal pass chain (kept for shutdown).
+    std::vector<ShaderHandle> metalPassShaders;
+    // Post-process tunables (contract of 3d_post_process.metal — the Vulkan
+    // PostProcess.frag currently bakes its own constants).
+    struct alignas(16) PostProcessParams {
+        float chromaticAberrationStrength = 0.01f;
+        float chromaticAberrationFalloff = 2.0f;
+        float vignetteStrength = 0.3f;
+        float vignetteRadius = 0.8f;
+        float vignetteSoftness = 0.5f;
+        float saturation = 1.0f;
+        float contrast = 1.0f;
+        float brightness = 0.0f;
+        float temperature = 0.0f;
+        float tint = 0.0f;
+        float exposure = 1.0f;
+    };
+    PostProcessParams postProcessParams;
     PipelineHandle atmospherePipeline;
     PipelineHandle lightScatteringPipeline;
     TextureHandle lightScatteringRT;  // half-res god rays

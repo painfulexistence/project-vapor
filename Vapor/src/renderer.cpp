@@ -1863,9 +1863,17 @@ void Renderer::shadowPass() {
         rp.clearDepth = 1.0f;
         rhi->beginRenderPass(rp);
         rhi->bindPipeline(shadowPipeline);
-        rhi->setVertexBuffer(0, pssmDataBuffer, 0, sizeof(PSSMRenderData));
+        if (backend == GraphicsBackend::Metal) {
+            // 3d_pssm_shadow_depth.metal: this cascade's matrix at buffer(0)
+            // (no cascadeIndex — one matrix per pass), materials at buffer(1)
+            // for the alpha-test UV path, instances at buffer(2).
+            rhi->setVertexBytes(&gpuData.lightSpaceMatrices[ci], sizeof(glm::mat4), 0);
+            rhi->setVertexBuffer(1, materialUniformBuffer, 0, sizeof(Vapor::MaterialData) * MAX_INSTANCES);
+        } else {
+            rhi->setVertexBuffer(0, pssmDataBuffer, 0, sizeof(PSSMRenderData));
+            rhi->setVertexBytes(&ci, sizeof(Uint32), 5);  // cascadeIndex -> push offset 16
+        }
         rhi->setVertexBuffer(2, instanceDataBuffer, 0, sizeof(Vapor::InstanceData) * std::max<size_t>(1, visibleDrawables.size()));
-        rhi->setVertexBytes(&ci, sizeof(Uint32), 5);  // cascadeIndex -> push offset 16
 
         for (Uint32 drawableIdx : visibleDrawables) {
             const Drawable& drawable = frameDrawables[drawableIdx];
@@ -1873,6 +1881,10 @@ void Renderer::shadowPass() {
             auto it = drawableToInstanceID.find(drawableIdx);
             if (it == drawableToInstanceID.end()) continue;
             Uint32 iid = it->second;
+            if (backend == GraphicsBackend::Metal) {
+                // texAlbedo at fragment texture(0) for alpha-tested cutouts.
+                bindMaterial(drawable.material);
+            }
             if (mesh.vertexBuffer.isValid()) rhi->bindVertexBuffer(mesh.vertexBuffer, 3, 0);
             rhi->setVertexBytes(&iid, sizeof(Uint32), 4);  // instanceID -> push offset 0
             if (mesh.indexBuffer.isValid()) {
@@ -1898,6 +1910,11 @@ void Renderer::bloomBrightnessPass() {
     rhi->beginRenderPass(rp);
     rhi->bindPipeline(bloomBrightPipeline);
     rhi->setTexture(0, 0, colorRT, clampSampler);
+    if (backend == GraphicsBackend::Metal) {
+        // 3d_bloom_brightness.metal takes the threshold at buffer(0); the
+        // Vulkan twin bakes it (and its pipeline has no push range for it).
+        rhi->setFragmentBytes(&bloomThreshold, sizeof(float), 0);
+    }
     rhi->draw(3, 1, 0, 0);
     rhi->endRenderPass();
 }
@@ -1936,8 +1953,34 @@ void Renderer::bloomUpsamplePass() {
         rhi->beginRenderPass(rp);
         rhi->bindPipeline(bloomUpsamplePipeline);
         rhi->setTexture(0, 0, bloomPyramid[i + 1], clampSampler);
+        if (backend == GraphicsBackend::Metal) {
+            // 3d_bloom_upsample.metal blends in-shader: texBlend at texture(1)
+            // is the level being written (same feedback the native pass uses).
+            rhi->setTexture(0, 1, bloomPyramid[i], clampSampler);
+        }
         rhi->draw(3, 1, 0, 0);
         rhi->endRenderPass();
+    }
+
+    // Metal-only: composite the accumulated bloom over the scene now
+    // (native BloomCompositePass) — colorRT + pyramid[0] -> tempColorRT,
+    // then swap so downstream passes see the composited scene. The Vulkan
+    // twin composites inside PostProcess.frag instead.
+    if (backend == GraphicsBackend::Metal && bloomCompositePipeline.isValid() &&
+        colorRT.isValid() && tempColorRT.isValid() && bloomPyramid[0].isValid()) {
+        RenderPassDesc rp;
+        rp.name = "BloomComposite";
+        rp.colorAttachments.push_back(tempColorRT);
+        rp.clearColors.push_back(glm::vec4(0.0f));
+        rp.loadColor.push_back(false);
+        rhi->beginRenderPass(rp);
+        rhi->bindPipeline(bloomCompositePipeline);
+        rhi->setTexture(0, 0, colorRT, clampSampler);
+        rhi->setTexture(0, 1, bloomPyramid[0], clampSampler);
+        rhi->setFragmentBytes(&bloomStrength, sizeof(float), 0);
+        rhi->draw(3, 1, 0, 0);
+        rhi->endRenderPass();
+        std::swap(colorRT, tempColorRT);
     }
 }
 
@@ -1958,8 +2001,14 @@ void Renderer::skyAtmospherePass() {
     rp.loadDepth = true;               // test against the scene depth (no writes)
     rhi->beginRenderPass(rp);
     rhi->bindPipeline(atmospherePipeline);
-    rhi->setFragmentBuffer(0, atmosphereDataBuffer, 0, sizeof(AtmosphereRenderData));
-    rhi->setFragmentBuffer(3, cameraUniformBuffer, 0, sizeof(CameraRenderData));
+    if (backend == GraphicsBackend::Metal) {
+        // 3d_atmosphere.metal: camera at buffer(0), atmosphere at buffer(1).
+        rhi->setFragmentBuffer(0, cameraUniformBuffer, 0, sizeof(CameraRenderData));
+        rhi->setFragmentBuffer(1, atmosphereDataBuffer, 0, sizeof(AtmosphereRenderData));
+    } else {
+        rhi->setFragmentBuffer(0, atmosphereDataBuffer, 0, sizeof(AtmosphereRenderData));
+        rhi->setFragmentBuffer(3, cameraUniformBuffer, 0, sizeof(CameraRenderData));
+    }
     rhi->draw(3, 1, 0, 0);
     rhi->endRenderPass();
 }
@@ -2001,7 +2050,12 @@ void Renderer::lightScatteringPass() {
     rhi->setTexture(0, 0, colorRT, clampSampler);
     rhi->setTexture(0, 1, depthStencilRT, clampSampler);
     rhi->setFragmentBuffer(0, lightScatteringDataBuffer, 0, sizeof(LightScatteringRenderData));
-    rhi->setFragmentBytes(&frameCounter, sizeof(Uint32), 7);  // push offset 112
+    if (backend == GraphicsBackend::Metal) {
+        // 3d_light_scattering.metal reads FrameData at buffer(1) for jitter.
+        rhi->setFragmentBuffer(1, frameDataBuffer, 0, sizeof(FrameData));
+    } else {
+        rhi->setFragmentBytes(&frameCounter, sizeof(Uint32), 7);  // push offset 112
+    }
     frameCounter++;
     rhi->draw(3, 1, 0, 0);
     rhi->endRenderPass();
@@ -2032,7 +2086,55 @@ void Renderer::volumetricFogPass() {
     rhi->bindPipeline(volumetricFogPipeline);
     rhi->setTexture(0, 0, colorRT, clampSampler);
     rhi->setTexture(0, 1, depthStencilRT, clampSampler);
-    rhi->setFragmentBuffer(0, fogDataBuffer, 0, sizeof(FogRenderData));
+    if (backend == GraphicsBackend::Metal) {
+        // simpleFogFragment reads the full VolumetricFogData layout at
+        // buffer(0) (MSL float3 = 16 bytes) plus CameraData at buffer(1).
+        // Mirror the MSL struct exactly; only the fields the simple fog path
+        // reads are meaningful, the froxel/temporal tail just pads the size.
+        struct alignas(16) MetalFogData {
+            glm::mat4 invViewProj{1.0f};
+            glm::mat4 prevViewProj{1.0f};
+            glm::vec4 cameraPosition{0.0f};
+            glm::vec4 sunDirection{0.0f};
+            glm::vec4 sunColorPad{1.0f};   // float3 slot; intensity follows
+            float sunIntensity = 1.0f;
+            float fogDensity = 0.0f;
+            float fogHeightFalloff = 0.0f;
+            float fogBaseHeight = 0.0f;
+            float fogMaxHeight = 100.0f;
+            float scatteringCoeff = 0.0f;
+            float extinctionCoeff = 0.0f;
+            float anisotropy = 0.0f;
+            float ambientIntensity = 0.0f;
+            float nearPlane = 0.1f;
+            float farPlane = 1000.0f;
+            float _align0 = 0.0f;          // aligns screenSize to 8
+            glm::vec2 screenSize{1.0f};
+            Uint32 frameIndex = 0;
+            float temporalBlend = 0.0f;
+            float noiseScale = 0.0f;
+            float noiseIntensity = 0.0f;
+            float windSpeed = 0.0f;
+            float time = 0.0f;
+            glm::vec4 windDirection{0.0f};
+        } mfd;
+        mfd.invViewProj = fog.invViewProj;
+        mfd.cameraPosition = glm::vec4(fog.cameraPosition, 0.0f);
+        mfd.sunDirection = glm::vec4(fog.sunDirection, 0.0f);
+        mfd.sunColorPad = glm::vec4(fog.sunColor, 0.0f);
+        mfd.sunIntensity = fog.sunIntensity;
+        mfd.fogDensity = fog.fogDensity;
+        mfd.fogHeightFalloff = fog.fogHeightFalloff;
+        mfd.anisotropy = fog.anisotropy;
+        mfd.ambientIntensity = fog.ambientIntensity;
+        mfd.nearPlane = currentCamera.nearPlane;
+        mfd.farPlane = currentCamera.farPlane;
+        mfd.screenSize = glm::vec2(rhi->getSwapchainWidth(), rhi->getSwapchainHeight());
+        rhi->setFragmentBytes(&mfd, sizeof(mfd), 0);
+        rhi->setFragmentBuffer(1, cameraUniformBuffer, 0, sizeof(CameraRenderData));
+    } else {
+        rhi->setFragmentBuffer(0, fogDataBuffer, 0, sizeof(FogRenderData));
+    }
     rhi->draw(3, 1, 0, 0);
     rhi->endRenderPass();
 
@@ -2042,6 +2144,32 @@ void Renderer::volumetricFogPass() {
 // Camera-motion velocity (motion vectors) from the depth buffer. Standalone
 // infrastructure for a future TAA / motion-blur consumer; produces velocityRT.
 void Renderer::velocityPass() {
+    // Metal: the native velocity is a compute kernel (3d_velocity.metal —
+    // depth at texture(0), velocityRT written at texture(1), camera buffer(0),
+    // prevViewProj buffer(1), 8x8 threadgroups with in-kernel bounds checks).
+    if (backend == GraphicsBackend::Metal) {
+        if (!velocityComputePipeline.isValid() || !velocityRT.isValid() ||
+            !depthStencilRT.isValid() || !prevViewProjBuffer.isValid()) {
+            return;
+        }
+        glm::mat4 curViewProj = currentCamera.proj * currentCamera.view;
+        if (!prevViewProjValid) { prevViewProj = curViewProj; prevViewProjValid = true; }
+        rhi->updateBuffer(prevViewProjBuffer, &prevViewProj, 0, sizeof(glm::mat4));
+
+        rhi->beginComputePass();
+        rhi->bindComputePipeline(velocityComputePipeline);
+        rhi->setComputeTexture(0, depthStencilRT);
+        rhi->setComputeTexture(1, velocityRT);
+        rhi->setComputeBuffer(0, cameraUniformBuffer, 0, sizeof(CameraRenderData));
+        rhi->setComputeBuffer(1, prevViewProjBuffer, 0, sizeof(glm::mat4));
+        Uint32 w = rhi->getSwapchainWidth(), h = rhi->getSwapchainHeight();
+        rhi->dispatch((w + 7) / 8, (h + 7) / 8, 1);
+        rhi->endComputePass();
+
+        prevViewProj = curViewProj;
+        return;
+    }
+
     if (!velocityPipeline.isValid() || !velocityRT.isValid() ||
         !depthStencilRT.isValid() || !prevViewProjBuffer.isValid()) {
         return;
@@ -2300,6 +2428,25 @@ void Renderer::postProcessPass() {
 
     // Bind post-process pipeline
     rhi->bindPipeline(postProcessPipeline);
+
+    if (backend == GraphicsBackend::Metal) {
+        // 3d_post_process.metal: screen(0) — bloom was already composited
+        // into colorRT by the BloomComposite step — AO(1), normal(2, for the
+        // deband dither), god rays(3), params at buffer(0).
+        TextureHandle whiteTex = textures[defaultWhiteTexture].handle;
+        TextureHandle blackTex = textures[defaultBlackTexture].handle;
+        rhi->setTexture(0, 0, colorRT, clampSampler);
+        TextureHandle ao = (capabilities.raytracing && aoEnabled && aoRT.isValid()) ? aoRT : whiteTex;
+        rhi->setTexture(0, 1, ao, clampSampler);
+        rhi->setTexture(0, 2, normalRT.isValid() ? normalRT : blackTex, clampSampler);
+        TextureHandle godRays = (lightScatteringEnabled && lightScatteringRT.isValid())
+            ? lightScatteringRT : blackTex;
+        rhi->setTexture(0, 3, godRays, clampSampler);
+        rhi->setFragmentBytes(&postProcessParams, sizeof(postProcessParams), 0);
+        rhi->draw(3, 1, 0, 0);
+        rhi->endRenderPass();
+        return;
+    }
 
     // Fragment texture 0: HDR colorRT; texture 1: accumulated bloom (pyramid[0]).
     if (colorRT.isValid() && clampSampler.isValid()) {
@@ -3185,6 +3332,104 @@ void Renderer::createRenderPipeline() {
             tileCullingPipeline = rhi->createComputePipeline(cd);
         }
 
+        // --------------------------------------------------------------------
+        // Post/effect chain from the native MSL files. The generic creation
+        // below this block reads SPIR-V, which RHI_Metal can't build — without
+        // these the Metal frame fell back to Main-direct-to-swapchain with no
+        // sky, shadow, bloom, fog, god rays or post-processing.
+        // --------------------------------------------------------------------
+        auto makeMetalPass = [&](const char* path, const char* vsEntry, const char* fsEntry,
+                                 BlendMode blend, std::vector<PixelFormat> colorFmts,
+                                 bool depthTest, CompareOp depthCmp) -> PipelineHandle {
+            std::string code = readFile(path);
+            if (code.empty()) return {};
+            ShaderDesc vd; vd.stage = ShaderStage::Vertex;   vd.code = code.data(); vd.codeSize = code.size(); vd.entryPoint = vsEntry;
+            ShaderHandle vs = rhi->createShader(vd);
+            ShaderDesc fdd; fdd.stage = ShaderStage::Fragment; fdd.code = code.data(); fdd.codeSize = code.size(); fdd.entryPoint = fsEntry;
+            ShaderHandle fs = rhi->createShader(fdd);
+            metalPassShaders.push_back(vs);
+            metalPassShaders.push_back(fs);
+            PipelineDesc d;
+            d.vertexShader = vs;
+            d.fragmentShader = fs;
+            d.vertexLayout.stride = 0;
+            d.vertexLayout.attributes = {};
+            d.topology = PrimitiveTopology::TriangleList;
+            d.blendMode = blend;
+            d.depthTest = depthTest;
+            d.depthWrite = false;
+            d.depthCompareOp = depthCmp;
+            d.cullMode = CullMode::None;
+            d.sampleCount = 1;
+            d.hasDepthAttachment = depthTest;
+            if (depthTest) d.depthAttachmentFormat = PixelFormat::Depth32Float;
+            d.colorAttachmentFormats = colorFmts;
+            return rhi->createPipeline(d);
+        };
+
+        postProcessPipeline = makeMetalPass("shaders/3d_post_process.metal", "vertexMain", "fragmentMain",
+                                            BlendMode::Opaque, { PixelFormat::Swapchain }, false, CompareOp::Less);
+        bloomBrightPipeline = makeMetalPass("shaders/3d_bloom_brightness.metal", "vertexMain", "fragmentMain",
+                                            BlendMode::Opaque, { PixelFormat::RGBA16_FLOAT }, false, CompareOp::Less);
+        bloomDownsamplePipeline = makeMetalPass("shaders/3d_bloom_downsample.metal", "vertexMain", "fragmentMain",
+                                                BlendMode::Opaque, { PixelFormat::RGBA16_FLOAT }, false, CompareOp::Less);
+        // Native upsample blends in-shader (texBlend at texture(1)) — Opaque,
+        // unlike the Vulkan twin's additive-blend pipeline.
+        bloomUpsamplePipeline = makeMetalPass("shaders/3d_bloom_upsample.metal", "vertexMain", "fragmentMain",
+                                              BlendMode::Opaque, { PixelFormat::RGBA16_FLOAT }, false, CompareOp::Less);
+        bloomCompositePipeline = makeMetalPass("shaders/3d_bloom_composite.metal", "vertexMain", "fragmentMain",
+                                               BlendMode::Opaque, { PixelFormat::RGBA16_FLOAT }, false, CompareOp::Less);
+        atmospherePipeline = makeMetalPass("shaders/3d_atmosphere.metal", "vertexMain", "fragmentMain",
+                                           BlendMode::Opaque, { PixelFormat::RGBA16_FLOAT }, true, CompareOp::LessOrEqual);
+        lightScatteringPipeline = makeMetalPass("shaders/3d_light_scattering.metal", "vertexMain", "fragmentMain",
+                                                BlendMode::Opaque, { PixelFormat::RGBA16_FLOAT }, false, CompareOp::Less);
+        volumetricFogPipeline = makeMetalPass("shaders/3d_volumetric_fog.metal", "volumetricFogVertex", "simpleFogFragment",
+                                              BlendMode::Opaque, { PixelFormat::RGBA16_FLOAT }, false, CompareOp::Less);
+
+        // PSSM shadow depth (3d_pssm_shadow_depth.metal): raw-fetched vertices,
+        // depth-only with front-face culling, alpha-tested via texAlbedo.
+        {
+            std::string code = readFile("shaders/3d_pssm_shadow_depth.metal");
+            if (!code.empty()) {
+                ShaderDesc vd; vd.stage = ShaderStage::Vertex;   vd.code = code.data(); vd.codeSize = code.size(); vd.entryPoint = "vertexMain";
+                ShaderHandle vs = rhi->createShader(vd);
+                ShaderDesc fdd; fdd.stage = ShaderStage::Fragment; fdd.code = code.data(); fdd.codeSize = code.size(); fdd.entryPoint = "fragmentMain";
+                ShaderHandle fs = rhi->createShader(fdd);
+                metalPassShaders.push_back(vs);
+                metalPassShaders.push_back(fs);
+                PipelineDesc d;
+                d.vertexShader = vs;
+                d.fragmentShader = fs;
+                d.vertexLayout.stride = 0;
+                d.vertexLayout.attributes = {};
+                d.topology = PrimitiveTopology::TriangleList;
+                d.blendMode = BlendMode::Opaque;
+                d.depthTest = true;
+                d.depthWrite = true;
+                d.depthCompareOp = CompareOp::Less;
+                d.cullMode = CullMode::Front;
+                d.frontFaceCounterClockwise = true;
+                d.sampleCount = 1;
+                d.hasDepthAttachment = true;
+                d.depthAttachmentFormat = PixelFormat::Depth32Float;
+                d.colorAttachmentFormats = {};
+                shadowPipeline = rhi->createPipeline(d);
+            }
+        }
+
+        // Velocity: native compute kernel (8x8 threadgroups, bounds-checked).
+        {
+            std::string code = readFile("shaders/3d_velocity.metal");
+            if (!code.empty()) {
+                ShaderDesc d; d.stage = ShaderStage::Compute; d.code = code.data();
+                d.codeSize = code.size(); d.entryPoint = "computeMain";
+                ShaderHandle sh = rhi->createShader(d);
+                metalPassShaders.push_back(sh);
+                ComputePipelineDesc cd; cd.computeShader = sh;
+                cd.threadGroupSizeX = 8; cd.threadGroupSizeY = 8; cd.threadGroupSizeZ = 1;
+                velocityComputePipeline = rhi->createComputePipeline(cd);
+            }
+        }
     }
 
     // ------------------------------------------------------------------------
