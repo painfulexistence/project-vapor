@@ -6,6 +6,7 @@
 #include <fmt/core.h>
 #include <stdexcept>
 #include <algorithm>
+#include <cstdio>
 #include <cstdlib>
 #include <cstring>
 
@@ -778,10 +779,49 @@ void RHI_Metal::beginFrame() {
         return;
     }
 
-    // Create command buffer
-    currentCommandBuffer = NS::TransferPtr(commandQueue->commandBuffer());
+    // Create command buffer. VAPOR_METAL_DEBUG=1 requests per-encoder
+    // execution status so a GPU fault names the pass that caused it (the
+    // completed handler below prints Completed/Affected/Pending per encoder;
+    // "Affected" is the faulting one).
+    static const bool debugCB = std::getenv("VAPOR_METAL_DEBUG") != nullptr;
+    if (debugCB) {
+        auto cbDesc = NS::TransferPtr(MTL::CommandBufferDescriptor::alloc()->init());
+        cbDesc->setErrorOptions(MTL::CommandBufferErrorOptionEncoderExecutionStatus);
+        currentCommandBuffer = NS::TransferPtr(commandQueue->commandBuffer(cbDesc.get()));
+    } else {
+        currentCommandBuffer = NS::TransferPtr(commandQueue->commandBuffer());
+    }
     if (!currentCommandBuffer) {
         throw std::runtime_error("Failed to create command buffer");
+    }
+    if (debugCB) {
+        currentCommandBuffer->addCompletedHandler([](MTL::CommandBuffer* cb) {
+            if (cb->status() != MTL::CommandBufferStatusError) return;
+            NS::Error* err = cb->error();
+            fprintf(stderr, "[RHI_Metal] COMMAND BUFFER FAULT: %s\n",
+                    err && err->localizedDescription() ? err->localizedDescription()->utf8String()
+                                                       : "(no description)");
+            if (err && err->userInfo()) {
+                auto* infos = static_cast<NS::Array*>(
+                    err->userInfo()->object(MTL::CommandBufferEncoderInfoErrorKey));
+                if (infos) {
+                    for (NS::UInteger i = 0; i < infos->count(); i++) {
+                        auto* info = static_cast<MTL::CommandBufferEncoderInfo*>(infos->object(i));
+                        const char* state = "?";
+                        switch (info->errorState()) {
+                            case MTL::CommandEncoderErrorStateCompleted: state = "Completed"; break;
+                            case MTL::CommandEncoderErrorStateAffected:  state = "AFFECTED";  break;
+                            case MTL::CommandEncoderErrorStatePending:   state = "Pending";   break;
+                            case MTL::CommandEncoderErrorStateFaulted:   state = "FAULTED";   break;
+                            default: break;
+                        }
+                        fprintf(stderr, "  encoder '%s': %s\n",
+                                info->label() ? info->label()->utf8String() : "(unnamed)", state);
+                    }
+                }
+            }
+            fflush(stderr);
+        });
     }
 
     // Latch GPU timing for this frame (the flag may be toggled mid-frame from
@@ -825,6 +865,15 @@ void RHI_Metal::endFrame() {
     // Commit command buffer
     currentCommandBuffer->commit();
 
+    {
+        static const char* dbgEnv = std::getenv("VAPOR_METAL_DEBUG");
+        if (dbgEnv && dbgEnv[0] == '2') {
+            static uint64_t dbgFrame = 0;
+            fprintf(stderr, "[frame %llu committed]\n", (unsigned long long)dbgFrame++);
+            fflush(stderr);
+        }
+    }
+
     // Reset frame state
     currentDrawable = nullptr;
     currentCommandBuffer = nullptr;
@@ -833,6 +882,16 @@ void RHI_Metal::endFrame() {
 void RHI_Metal::beginRenderPass(const RenderPassDesc& desc) {
     if (!currentCommandBuffer) {
         return;  // frame was skipped
+    }
+
+    // Hang localization (VAPOR_METAL_DEBUG=2): on a hard GPU hang nothing
+    // completes and no fault handler fires — but a terminal (or SSH session)
+    // keeps the last line printed before the machine froze: that names the
+    // pass being encoded when it happened.
+    static const char* dbgEnv = std::getenv("VAPOR_METAL_DEBUG");
+    if (dbgEnv && dbgEnv[0] == '2') {
+        fprintf(stderr, "[pass] %s\n", desc.name ? desc.name : "(unnamed)");
+        fflush(stderr);
     }
 
     // End any existing encoder
@@ -1483,6 +1542,12 @@ void RHI_Metal::beginComputePass() {
     if (currentRenderEncoder) {
         currentRenderEncoder->endEncoding();
         currentRenderEncoder = nullptr;
+    }
+
+    static const char* dbgEnv = std::getenv("VAPOR_METAL_DEBUG");
+    if (dbgEnv && dbgEnv[0] == '2') {
+        fprintf(stderr, "[pass] Compute\n");
+        fflush(stderr);
     }
 
     // Create compute encoder
