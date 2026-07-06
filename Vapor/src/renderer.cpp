@@ -4205,7 +4205,11 @@ void Renderer::drawText2D(
         }
     }
 
-    // Draw each character as a textured quad
+    // Draw each character as a textured quad, all in the atlas segment (the
+    // segment texture is what flush() samples — without this the glyphs land
+    // in the previous segment and render as solid blocks).
+    batch2D.setTexture(fontTexture);
+
     float cursorX = position.x;
     float cursorY = position.y;
 
@@ -4219,9 +4223,11 @@ void Renderer::drawText2D(
         const Glyph* glyph = fontManager->getGlyph(font, static_cast<int>(c));
         if (!glyph) continue;
 
-        // Calculate glyph quad position and size
+        // Glyph quad position: yOffset is relative to the baseline, which sits
+        // ascent below the caller's top-of-line position (matches the native
+        // Metal renderer).
         float xPos = cursorX + glyph->xOffset * scale;
-        float yPos = cursorY + glyph->yOffset * scale;
+        float yPos = cursorY + (glyph->yOffset + fontData->ascent) * scale;
         float width = glyph->width * scale;
         float height = glyph->height * scale;
 
@@ -4243,6 +4249,8 @@ void Renderer::drawText2D(
         // Advance cursor
         cursorX += glyph->advance * scale;
     }
+
+    batch2D.setTexture(TextureHandle{});
 }
 
 void Renderer::drawText3D(
@@ -4289,7 +4297,9 @@ void Renderer::drawText3D(
     glm::vec3 cameraRight = glm::vec3(currentCamera.view[0][0], currentCamera.view[1][0], currentCamera.view[2][0]);
     glm::vec3 cameraUp = glm::vec3(currentCamera.view[0][1], currentCamera.view[1][1], currentCamera.view[2][1]);
 
-    // Draw each character as a billboard
+    // Draw each character as a billboard, all in the atlas texture segment.
+    batch3D.setTexture(fontTexture);
+
     float cursorX = -textWidth * 0.5f; // Center the text
     float cursorY = 0.0f;
 
@@ -4338,6 +4348,8 @@ void Renderer::drawText3D(
         // Advance cursor
         cursorX += glyph->advance * scale;
     }
+
+    batch3D.setTexture(TextureHandle{});
 }
 
 glm::vec2 Renderer::measureText(FontHandle font, const std::string& text, float scale) {
