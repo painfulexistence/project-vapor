@@ -90,7 +90,12 @@ vec3 computeAtmosphere(vec3 ro, vec3 rd, vec3 sunDir) {
 
     for (int i = 0; i < PRIMARY_STEPS; i++) {
         vec3 sp = ro + rd * (rayStart + stepSize * (float(i) + 0.5));
-        float h = length(sp - planetCenter) - atmo.planetRadius;
+        // Clamp to the surface: samples below it (camera under the ground
+        // plane, or precision dips on grazing rays) make exp(-h/H) explode to
+        // Inf, and Inf * exp(-Inf) = NaN. Metal's fast-math flushed this; the
+        // SPIR-V path keeps IEEE semantics and rendered a giant NaN-black disc
+        // that also ate every alpha-blended pass on top (NaN * anything = NaN).
+        float h = max(length(sp - planetCenter) - atmo.planetRadius, 0.0);
 
         float rD = exp(-h / atmo.rayleighScaleHeight) * stepSize;
         float mD = exp(-h / atmo.mieScaleHeight) * stepSize;
@@ -134,10 +139,13 @@ void main() {
 
     vec3 sunDir = normalize(atmo.sunDirection);
 
-    // Below the horizon -> simple lit ground color.
+    // Below the horizon -> simple lit ground color. Also taken when the
+    // camera itself is under the ground plane (inside the planet sphere:
+    // planetHit.x < 0 < planetHit.y) — marching the atmosphere from inside
+    // the planet produces NaNs on the IEEE-strict Vulkan path.
     vec3 planetCenter = vec3(0.0, -atmo.planetRadius, 0.0);
     vec2 planetHit = raySphereIntersect(rayOrigin, rayDir, planetCenter, atmo.planetRadius);
-    if (planetHit.x > 0.0) {
+    if (planetHit.x > 0.0 || (planetHit.x < 0.0 && planetHit.y > 0.0)) {
         float sunDot = max(0.0, dot(vec3(0.0, 1.0, 0.0), sunDir));
         vec3 g = atmo.groundColor * atmo.sunColor * atmo.sunIntensity * sunDot * 0.1;
         g = 1.0 - exp(-atmo.exposure * g);
