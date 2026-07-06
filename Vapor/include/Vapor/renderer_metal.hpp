@@ -65,6 +65,14 @@ class PSSMResolvePass;
 class StochasticPointShadowPass;
 class PointShadowTemporalPass;
 
+// GIBS forward declarations
+namespace Vapor { class GIBSManager; }
+class SurfelGenerationPass;
+class SurfelHashBuildPass;
+class SurfelRaytracingPass;
+class GIBSTemporalPass;
+class GIBSSamplePass;
+
 struct GpuPassTiming {
     std::string name;
     double gpuTimeMs = 0.0;
@@ -322,6 +330,13 @@ class Renderer_Metal final : public Renderer {// Must be public or factory funct
     friend class PointShadowTemporalPass;
     friend class EquirectToCubemapPass;
 
+    // GIBS (Global Illumination Based on Surfels) passes
+    friend class SurfelGenerationPass;
+    friend class SurfelHashBuildPass;
+    friend class SurfelRaytracingPass;
+    friend class GIBSTemporalPass;
+    friend class GIBSSamplePass;
+
 public:
     Renderer_Metal();
 
@@ -443,6 +458,7 @@ public:
     NS::SharedPtr<MTL::RenderPipelineState>
         createPipeline(const std::string& filename, bool isHDR, bool isColorOnly, Uint32 sampleCount);
     NS::SharedPtr<MTL::ComputePipelineState> createComputePipeline(const std::string& filename);
+    NS::SharedPtr<MTL::ComputePipelineState> createComputePipeline(const std::string& filename, const std::string& functionName);
 
     TextureHandle createTexture(const std::shared_ptr<Vapor::Image>& img) override;
     void updateTexture(TextureHandle handle, const std::shared_ptr<Vapor::Image>& img) override;
@@ -773,6 +789,8 @@ protected:
     NS::SharedPtr<MTL::Texture> depthStencilRT;
     NS::SharedPtr<MTL::Texture> normalRT_MS;
     NS::SharedPtr<MTL::Texture> normalRT;
+    NS::SharedPtr<MTL::Texture> albedoRT_MS;  // PrePass albedo output (for GIBS)
+    NS::SharedPtr<MTL::Texture> albedoRT;
     NS::SharedPtr<MTL::Texture> shadowRT;
     NS::SharedPtr<MTL::Texture> shadowRTGrayView; // swizzle view (r,r,r,1) for ImGui preview
     NS::SharedPtr<MTL::Texture> pointShadowRT;       // R16F, raw stochastic point shadow
@@ -856,6 +874,24 @@ protected:
         // Tone Mapping
         float exposure = 1.0f;// Exposure multiplier
     } postProcessParams;
+
+    // ===== GIBS (Global Illumination Based on Surfels) =====
+    std::unique_ptr<Vapor::GIBSManager> gibsManager;
+    // Experimental — off by default; toggle at runtime via the ImGui
+    // "Global Illumination (GIBS)" section. See docs/GIBS_DESIGN.md.
+    bool gibsEnabled = false;
+    GIBSQuality gibsQuality = GIBSQuality::Low;
+
+    // GIBS Compute Pipelines
+    NS::SharedPtr<MTL::ComputePipelineState> surfelGenerationPipeline;
+    NS::SharedPtr<MTL::ComputePipelineState> surfelClearCellHeadsPipeline;
+    NS::SharedPtr<MTL::ComputePipelineState> surfelInsertPipeline;
+    NS::SharedPtr<MTL::ComputePipelineState> surfelRaytracingPipeline;
+    NS::SharedPtr<MTL::ComputePipelineState> surfelRaytracingSimplePipeline;
+    NS::SharedPtr<MTL::ComputePipelineState> gibsTemporalPipeline;
+    NS::SharedPtr<MTL::ComputePipelineState> gibsSamplePipeline;
+    NS::SharedPtr<MTL::ComputePipelineState> gibsUpsamplePipeline;
+    NS::SharedPtr<MTL::ComputePipelineState> gibsCompositePipeline;
 
     // Acceleration structures for ray tracing
     std::vector<NS::SharedPtr<MTL::AccelerationStructure>> BLASs;

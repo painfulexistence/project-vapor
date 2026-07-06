@@ -351,6 +351,7 @@ fragment float4 fragmentMain(
     texture2d<float, access::sample> rectLightVideo [[texture(11)]],
     depth2d_array<float, access::sample> pssmShadowMaps [[texture(12)]],
     texture2d<float, access::sample> texPointShadow [[texture(13)]],
+    texture2d<float, access::sample> gibsGI [[texture(14)]], // GIBS indirect lighting
     const device DirLight* directionalLights [[buffer(0)]],
     const device PointLight* pointLights [[buffer(1)]],
     const device Cluster* clusters [[buffer(2)]],
@@ -360,7 +361,8 @@ fragment float4 fragmentMain(
     constant float& time [[buffer(6)]],
     const device RectLight* rectLights [[buffer(7)]],
     constant uint& rectLightCount [[buffer(8)]],
-    constant PSSMData& pssmData [[buffer(9)]]
+    constant PSSMData& pssmData [[buffer(9)]],
+    constant uint& gibsEnabled [[buffer(10)]] // GIBS enable flag
 ) {
     constexpr sampler s(address::repeat, filter::linear, mip_filter::linear);
 
@@ -539,7 +541,14 @@ fragment float4 fragmentMain(
     // Screen-space AO attenuates ambient/indirect light only — multiplying
     // direct light by AO is physically wrong and dirties lit surfaces
     float screenAO = texAO.sample(s, screenUV).r;
-    if (material.iblEnabled > 0.5) {
+
+    // GIBS Global Illumination or IBL fallback
+    if (gibsEnabled > 0) {
+        // Sample GIBS indirect lighting at screen position
+        float3 giContribution = gibsGI.sample(s, screenUV).rgb;
+        // Apply ambient occlusion to indirect lighting
+        result += giContribution * surf.ao * screenAO;
+    } else if (material.iblEnabled > 0.5) {
         result += CalculateIBL(norm, viewDir, surf, irradianceMap, prefilterMap, brdfLUT) * screenAO;
     } else {
         result += float3(0.03) * surf.ao * surf.color * screenAO; // minimal ambient fallback
