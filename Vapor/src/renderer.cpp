@@ -4079,12 +4079,12 @@ void Renderer::drawRect2D(
     const glm::vec4& color,
     float thickness
 ) {
-    // Draw 4 lines to form rectangle
-    glm::vec2 halfSize = size * 0.5f;
-    glm::vec2 topLeft = position - halfSize;
-    glm::vec2 topRight = position + glm::vec2(halfSize.x, -halfSize.y);
-    glm::vec2 bottomRight = position + halfSize;
-    glm::vec2 bottomLeft = position + glm::vec2(-halfSize.x, halfSize.y);
+    // `position` is the TOP-LEFT corner (native Metal renderer convention —
+    // the centered variant here rendered rects offset up-left by size/2).
+    glm::vec2 topLeft = position;
+    glm::vec2 topRight = position + glm::vec2(size.x, 0.0f);
+    glm::vec2 bottomRight = position + size;
+    glm::vec2 bottomLeft = position + glm::vec2(0.0f, size.y);
 
     drawLine2D(topLeft, topRight, color, thickness);
     drawLine2D(topRight, bottomRight, color, thickness);

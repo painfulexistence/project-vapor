@@ -1014,10 +1014,17 @@ PipelineHandle RHI_Vulkan::createPipeline(const PipelineDesc& desc) {
     bindingDescription.stride = desc.vertexLayout.stride;
     bindingDescription.inputRate = VK_VERTEX_INPUT_RATE_VERTEX;
 
+    // Only declare the vertex stream when the layout actually has attributes.
+    // Declaring an empty binding 0 on fullscreen/bufferless pipelines makes
+    // every vkCmdDraw without a bound vertex buffer undefined behavior
+    // (VUID-vkCmdDraw-None-04008 spam, and occasional dropped draws on
+    // MoltenVK).
+    const bool hasVertexInput = !attributeDescriptions.empty();
+
     VkPipelineVertexInputStateCreateInfo vertexInputInfo{};
     vertexInputInfo.sType = VK_STRUCTURE_TYPE_PIPELINE_VERTEX_INPUT_STATE_CREATE_INFO;
-    vertexInputInfo.vertexBindingDescriptionCount = 1;
-    vertexInputInfo.pVertexBindingDescriptions = &bindingDescription;
+    vertexInputInfo.vertexBindingDescriptionCount = hasVertexInput ? 1 : 0;
+    vertexInputInfo.pVertexBindingDescriptions = hasVertexInput ? &bindingDescription : nullptr;
     vertexInputInfo.vertexAttributeDescriptionCount = static_cast<uint32_t>(attributeDescriptions.size());
     vertexInputInfo.pVertexAttributeDescriptions = attributeDescriptions.data();
 
