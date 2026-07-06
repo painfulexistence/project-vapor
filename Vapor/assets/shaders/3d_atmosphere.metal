@@ -122,7 +122,11 @@ float3 computeAtmosphere(
     // March along the primary ray
     for (int i = 0; i < PRIMARY_STEPS; i++) {
         float3 samplePos = rayOrigin + rayDir * (rayStart + stepSize * (float(i) + 0.5));
-        float sampleHeight = length(samplePos - planetCenter) - planetRadius;
+        // Clamp to the surface: samples below it (camera under the ground
+        // plane, or precision dips on grazing rays) make exp(-h/H) explode —
+        // with fast-math the Inf/NaN gets flushed to arbitrary values
+        // (subtle artifacts); the Vulkan twin renders a NaN-black disc.
+        float sampleHeight = max(length(samplePos - planetCenter) - planetRadius, 0.0);
 
         // Calculate optical depth at this sample
         float rayleighDensity = exp(-sampleHeight / rayleighScale) * stepSize;
@@ -220,8 +224,11 @@ fragment float4 fragmentMain(
     float2 planetHit = raySphereIntersect(rayOrigin, rayDir, planetCenter, atmosphere.planetRadius);
 
     // If ray hits planet surface (below horizon), compute ground color
-    // This provides fallback ground color for IBL and areas without geometry
-    if (planetHit.x > 0.0) {
+    // This provides fallback ground color for IBL and areas without geometry.
+    // Also taken when the camera itself is under the ground plane (inside the
+    // planet sphere: planetHit.x < 0 < planetHit.y) — marching the atmosphere
+    // from inside the planet is undefined (Inf/NaN in the density terms).
+    if (planetHit.x > 0.0 || (planetHit.x < 0.0 && planetHit.y > 0.0)) {
         // Calculate simple ground color based on sun angle (Lambertian lighting)
         float3 groundNormal = float3(0.0, 1.0, 0.0); // Ground normal points up
         float3 sunDir = normalize(atmosphere.sunDirection);
