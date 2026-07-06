@@ -1282,7 +1282,8 @@ void Renderer::iblCapturePass() {
     const size_t stride = sizeof(IBLCaptureRenderData);
 
     auto faceDraw = [&](const char* name, PipelineHandle pipe, TextureHandle target,
-                        Uint32 slot, Uint32 face, Uint32 mip, bool bindEnv, bool bindAtmo) {
+                        Uint32 slot, Uint32 face, Uint32 mip, bool bindEnv, bool bindAtmo,
+                        bool bindCaptureFrag) {
         RenderPassDesc rp;
         rp.name = name;
         rp.colorAttachments.push_back(target);
@@ -1294,19 +1295,23 @@ void Renderer::iblCapturePass() {
         rhi->bindPipeline(pipe);
         rhi->setVertexBuffer(0, iblCaptureDataBuffer, slot * stride, stride);
         if (bindAtmo) rhi->setFragmentBuffer(0, atmosphereDataBuffer, 0, sizeof(AtmosphereRenderData));
+        // 3d_prefilter_envmap.metal's FRAGMENT stage also reads the capture
+        // slot (roughness) at buffer(0) — vertex/fragment buffer tables are
+        // separate namespaces on Metal, so it needs its own bind.
+        if (bindCaptureFrag) rhi->setFragmentBuffer(0, iblCaptureDataBuffer, slot * stride, stride);
         if (bindEnv) rhi->setTexture(0, 0, environmentCubemap, clampSampler);
         rhi->draw(3, 1, 0, 0);
         rhi->endRenderPass();
     };
 
     for (Uint32 f = 0; f < 6; f++)
-        faceDraw("SkyCapture", skyCapturePipeline, environmentCubemap, f, f, 0, false, true);
+        faceDraw("SkyCapture", skyCapturePipeline, environmentCubemap, f, f, 0, false, true, false);
     rhi->generateMipmaps(environmentCubemap);
     for (Uint32 f = 0; f < 6; f++)
-        faceDraw("IrradianceConv", irradiancePipeline, irradianceMap, 6 + f, f, 0, true, false);
+        faceDraw("IrradianceConv", irradiancePipeline, irradianceMap, 6 + f, f, 0, true, false, false);
     for (Uint32 m = 0; m < PREFILTER_MIP_LEVELS; m++)
         for (Uint32 f = 0; f < 6; f++)
-            faceDraw("PrefilterEnv", prefilterPipeline, prefilterMap, 12 + m * 6 + f, f, m, true, false);
+            faceDraw("PrefilterEnv", prefilterPipeline, prefilterMap, 12 + m * 6 + f, f, m, true, false, true);
     {
         RenderPassDesc rp;
         rp.name = "BRDFLUT";
