@@ -2300,7 +2300,13 @@ void Renderer::volumetricCloudPass() {
         rhi->bindPipeline(cloudRaymarchPipeline);
         rhi->setTexture(0, 0, depthStencilRT, clampSampler);
         rhi->setFragmentBuffer(0, cloudDataBuffer, 0, sizeof(VolumetricCloudRenderData));
-        rhi->setFragmentBuffer(3, cameraUniformBuffer, 0, sizeof(CameraRenderData));
+        // cloudFragmentLowRes reads the camera at buffer(1) on Metal; the
+        // GLSL twin declares it at set-relative binding 3.
+        if (backend == GraphicsBackend::Metal) {
+            rhi->setFragmentBuffer(1, cameraUniformBuffer, 0, sizeof(CameraRenderData));
+        } else {
+            rhi->setFragmentBuffer(3, cameraUniformBuffer, 0, sizeof(CameraRenderData));
+        }
         rhi->draw(3, 1, 0, 0);
         rhi->endRenderPass();
     }
@@ -3390,6 +3396,14 @@ void Renderer::createRenderPipeline() {
                                                 BlendMode::Opaque, { PixelFormat::RGBA16_FLOAT }, false, CompareOp::Less);
         volumetricFogPipeline = makeMetalPass("shaders/3d_volumetric_fog.metal", "volumetricFogVertex", "simpleFogFragment",
                                               BlendMode::Opaque, { PixelFormat::RGBA16_FLOAT }, false, CompareOp::Less);
+        // Volumetric clouds (off by default): quarter-res raymarch ->
+        // temporal resolve -> upscale composite, all from the native file.
+        cloudRaymarchPipeline = makeMetalPass("shaders/3d_volumetric_clouds.metal", "cloudVertex", "cloudFragmentLowRes",
+                                              BlendMode::Opaque, { PixelFormat::RGBA16_FLOAT }, false, CompareOp::Less);
+        cloudTemporalPipeline = makeMetalPass("shaders/3d_volumetric_clouds.metal", "cloudVertex", "cloudTemporalResolve",
+                                              BlendMode::Opaque, { PixelFormat::RGBA16_FLOAT }, false, CompareOp::Less);
+        cloudCompositePipeline = makeMetalPass("shaders/3d_volumetric_clouds.metal", "cloudVertex", "cloudUpscaleComposite",
+                                               BlendMode::Opaque, { PixelFormat::RGBA16_FLOAT }, false, CompareOp::Less);
 
         // PSSM shadow depth (3d_pssm_shadow_depth.metal): raw-fetched vertices,
         // depth-only with front-face culling, alpha-tested via texAlbedo.
