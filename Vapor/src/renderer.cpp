@@ -1570,7 +1570,9 @@ void Renderer::stochasticPointShadowPass() {
     Uint32 w = rhi->getSwapchainWidth();
     Uint32 h = rhi->getSwapchainHeight();
     glm::vec2 screenSize(w, h);
-    glm::uvec3 gridDims(clusterGridSizeX, clusterGridSizeY, clusterGridSizeZ);
+    // The kernel declares a NON-packed `constant uint3&` (16 bytes in MSL,
+    // unlike the packed_uint3 the other kernels use) — push a uvec4.
+    glm::uvec4 gridDims(clusterGridSizeX, clusterGridSizeY, clusterGridSizeZ, 0u);
     Uint32 fi = frameCounter;
     Uint32 debugMode = 0;
     rhi->beginComputePass();
@@ -1582,7 +1584,7 @@ void Renderer::stochasticPointShadowPass() {
     rhi->setComputeBuffer(1, pointLightBuffer, 0, sizeof(PointLightData) * maxPointLights);
     rhi->setComputeBuffer(2, clusterBuffer);
     rhi->setComputeBytes(&screenSize, sizeof(glm::vec2), 3);
-    rhi->setComputeBytes(&gridDims, sizeof(glm::uvec3), 4);
+    rhi->setComputeBytes(&gridDims, sizeof(glm::uvec4), 4);
     rhi->setComputeBytes(&fi, sizeof(Uint32), 5);
     rhi->setAccelerationStructure(6, sceneTLAS);
     rhi->setComputeBytes(&debugMode, sizeof(Uint32), 7);
