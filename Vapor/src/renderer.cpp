@@ -55,14 +55,16 @@ void Renderer::initialize(std::unique_ptr<RHI> rhiPtr, GraphicsBackend backendTy
     }
     setupDefaultRenderGraph();
 
-    // Create uniform buffers
+    // Create uniform buffers. Everything rewritten per frame goes through
+    // createFrameSlottedBuffer (see renderer.hpp: frames-in-flight slotting).
     BufferDesc cameraBufferDesc;
     cameraBufferDesc.size = sizeof(CameraRenderData);
     cameraBufferDesc.usage = BufferUsage::Uniform;
     cameraBufferDesc.memoryUsage = MemoryUsage::CPUtoGPU;
-    cameraUniformBuffer = rhi->createBuffer(cameraBufferDesc);
+    createFrameSlottedBuffer(cameraUniformBuffer, cameraBufferDesc);
 
-    // Material data buffer - stores array of all materials (used by shader at binding 1)
+    // Material data buffer - stores array of all materials (used by shader at
+    // binding 1). Load-time content, not rewritten per frame — unslotted.
     BufferDesc materialBufferDesc;
     materialBufferDesc.size = sizeof(Vapor::MaterialData) * MAX_INSTANCES;  // Reserve space for max materials
     materialBufferDesc.usage = BufferUsage::Uniform;
@@ -73,19 +75,19 @@ void Renderer::initialize(std::unique_ptr<RHI> rhiPtr, GraphicsBackend backendTy
     dirLightBufferDesc.size = sizeof(DirectionalLightData) * maxDirectionalLights;
     dirLightBufferDesc.usage = BufferUsage::Uniform;
     dirLightBufferDesc.memoryUsage = MemoryUsage::CPUtoGPU;
-    directionalLightBuffer = rhi->createBuffer(dirLightBufferDesc);
+    createFrameSlottedBuffer(directionalLightBuffer, dirLightBufferDesc);
 
     BufferDesc pointLightBufferDesc;
     pointLightBufferDesc.size = sizeof(PointLightData) * maxPointLights;
     pointLightBufferDesc.usage = BufferUsage::Uniform;
     pointLightBufferDesc.memoryUsage = MemoryUsage::CPUtoGPU;
-    pointLightBuffer = rhi->createBuffer(pointLightBufferDesc);
+    createFrameSlottedBuffer(pointLightBuffer, pointLightBufferDesc);
 
     BufferDesc instanceDataBufferDesc;
     instanceDataBufferDesc.size = sizeof(Vapor::InstanceData) * MAX_INSTANCES;
     instanceDataBufferDesc.usage = BufferUsage::Uniform;
     instanceDataBufferDesc.memoryUsage = MemoryUsage::CPUtoGPU;
-    instanceDataBuffer = rhi->createBuffer(instanceDataBufferDesc);
+    createFrameSlottedBuffer(instanceDataBuffer, instanceDataBufferDesc);
 
     // Shader-contract buffers (clusters / rect lights / PSSM), neutral-filled.
     // See the "Full PBR shader contract" note in renderer.hpp.
@@ -94,31 +96,33 @@ void Renderer::initialize(std::unique_ptr<RHI> rhiPtr, GraphicsBackend backendTy
         clusterDesc.size = sizeof(Vapor::Cluster) * clusterGridSizeX * clusterGridSizeY * clusterGridSizeZ;
         clusterDesc.usage = BufferUsage::Storage;
         clusterDesc.memoryUsage = MemoryUsage::CPUtoGPU;
-        clusterBuffer = rhi->createBuffer(clusterDesc);
         // Zero-fill: the PBR shaders read cluster lightCounts before the first
         // TileCulling dispatch lands — garbage counts loop garbage lights
-        // (NaN-black frames on Metal).
+        // (NaN-black frames on Metal). GPU-written per frame by TileCulling —
+        // slotted like native's clusterBuffers[frameInFlight].
         {
             std::vector<Uint8> clusterZeros(clusterDesc.size, 0);
-            rhi->updateBuffer(clusterBuffer, clusterZeros.data(), 0, clusterDesc.size);
+            createFrameSlottedBuffer(clusterBuffer, clusterDesc, clusterZeros.data(), clusterDesc.size);
         }
 
         BufferDesc rectDesc;
         rectDesc.size = sizeof(Vapor::RectLight) * maxRectLights;
         rectDesc.usage = BufferUsage::Storage;
         rectDesc.memoryUsage = MemoryUsage::CPUtoGPU;
-        rectLightBuffer = rhi->createBuffer(rectDesc);
-        std::vector<Vapor::RectLight> zeroRects(maxRectLights, Vapor::RectLight{});
-        rhi->updateBuffer(rectLightBuffer, zeroRects.data(), 0, rectDesc.size);
+        {
+            std::vector<Vapor::RectLight> zeroRects(maxRectLights, Vapor::RectLight{});
+            createFrameSlottedBuffer(rectLightBuffer, rectDesc, zeroRects.data(), rectDesc.size);
+        }
 
         BufferDesc pssmDesc;
         pssmDesc.size = sizeof(PSSMRenderData);
         pssmDesc.usage = BufferUsage::Uniform;
         pssmDesc.memoryUsage = MemoryUsage::CPUtoGPU;
-        pssmDataBuffer = rhi->createBuffer(pssmDesc);
         PSSMRenderData neutralPSSM;
-        rhi->updateBuffer(pssmDataBuffer, &neutralPSSM, 0, sizeof(neutralPSSM));
+        createFrameSlottedBuffer(pssmDataBuffer, pssmDesc, &neutralPSSM, sizeof(neutralPSSM));
 
+        // Written once here (runtime atmosphere params travel via push bytes);
+        // unslotted.
         BufferDesc atmoDesc;
         atmoDesc.size = sizeof(AtmosphereRenderData);
         atmoDesc.usage = BufferUsage::Uniform;
@@ -130,55 +134,48 @@ void Renderer::initialize(std::unique_ptr<RHI> rhiPtr, GraphicsBackend backendTy
         lsDesc.size = sizeof(LightScatteringRenderData);
         lsDesc.usage = BufferUsage::Uniform;
         lsDesc.memoryUsage = MemoryUsage::CPUtoGPU;
-        lightScatteringDataBuffer = rhi->createBuffer(lsDesc);
         LightScatteringRenderData lsDefaults;
-        rhi->updateBuffer(lightScatteringDataBuffer, &lsDefaults, 0, sizeof(lsDefaults));
+        createFrameSlottedBuffer(lightScatteringDataBuffer, lsDesc, &lsDefaults, sizeof(lsDefaults));
 
         BufferDesc fogDesc;
         fogDesc.size = sizeof(FogRenderData);
         fogDesc.usage = BufferUsage::Uniform;
         fogDesc.memoryUsage = MemoryUsage::CPUtoGPU;
-        fogDataBuffer = rhi->createBuffer(fogDesc);
         FogRenderData fogDefaults;
-        rhi->updateBuffer(fogDataBuffer, &fogDefaults, 0, sizeof(fogDefaults));
+        createFrameSlottedBuffer(fogDataBuffer, fogDesc, &fogDefaults, sizeof(fogDefaults));
 
         BufferDesc prevVPDesc;
         prevVPDesc.size = sizeof(glm::mat4);
         prevVPDesc.usage = BufferUsage::Uniform;
         prevVPDesc.memoryUsage = MemoryUsage::CPUtoGPU;
-        prevViewProjBuffer = rhi->createBuffer(prevVPDesc);
         glm::mat4 identityVP(1.0f);
-        rhi->updateBuffer(prevViewProjBuffer, &identityVP, 0, sizeof(identityVP));
+        createFrameSlottedBuffer(prevViewProjBuffer, prevVPDesc, &identityVP, sizeof(identityVP));
 
         BufferDesc cloudDesc;
         cloudDesc.size = sizeof(VolumetricCloudRenderData);
         cloudDesc.usage = BufferUsage::Uniform;
         cloudDesc.memoryUsage = MemoryUsage::CPUtoGPU;
-        cloudDataBuffer = rhi->createBuffer(cloudDesc);
-        rhi->updateBuffer(cloudDataBuffer, &cloudSettings, 0, sizeof(cloudSettings));
+        createFrameSlottedBuffer(cloudDataBuffer, cloudDesc, &cloudSettings, sizeof(cloudSettings));
 
         BufferDesc fdDesc;
         fdDesc.size = sizeof(FrameData);
         fdDesc.usage = BufferUsage::Uniform;
         fdDesc.memoryUsage = MemoryUsage::CPUtoGPU;
-        frameDataBuffer = rhi->createBuffer(fdDesc);
         FrameData fdInit{};
-        rhi->updateBuffer(frameDataBuffer, &fdInit, 0, sizeof(fdInit));
+        createFrameSlottedBuffer(frameDataBuffer, fdDesc, &fdInit, sizeof(fdInit));
 
         BufferDesc lcDesc;
         lcDesc.size = sizeof(Vapor::LightCullData);
         lcDesc.usage = BufferUsage::Storage;
         lcDesc.memoryUsage = MemoryUsage::CPUtoGPU;
-        lightCullDataBuffer = rhi->createBuffer(lcDesc);
         Vapor::LightCullData lcInit{};
-        rhi->updateBuffer(lightCullDataBuffer, &lcInit, 0, sizeof(lcInit));
+        createFrameSlottedBuffer(lightCullDataBuffer, lcDesc, &lcInit, sizeof(lcInit));
 
         BufferDesc sfDesc;
         sfDesc.size = sizeof(SunFlareRenderData);
         sfDesc.usage = BufferUsage::Uniform;
         sfDesc.memoryUsage = MemoryUsage::CPUtoGPU;
-        sunFlareDataBuffer = rhi->createBuffer(sfDesc);
-        rhi->updateBuffer(sunFlareDataBuffer, &sunFlareSettings, 0, sizeof(sunFlareSettings));
+        createFrameSlottedBuffer(sunFlareDataBuffer, sfDesc, &sunFlareSettings, sizeof(sunFlareSettings));
 
         // IBL capture slots: 6 sky faces + 6 irradiance + 5x6 prefilter = 42
         // entries, each draw binds its own offset (a single rewritten buffer
@@ -249,7 +246,7 @@ void Renderer::initialize(std::unique_ptr<RHI> rhiPtr, GraphicsBackend backendTy
         gd.usage = BufferUsage::Uniform;
         gd.memoryUsage = MemoryUsage::CPUtoGPU;
         gd.size = sizeof(GIBSData);
-        gibsDataBuffer = rhi->createBuffer(gd);
+        createFrameSlottedBuffer(gibsDataBuffer, gd);  // rewritten each GIBS frame
     }
 
     // Create default resources
@@ -272,6 +269,25 @@ void Renderer::initialize(std::unique_ptr<RHI> rhiPtr, GraphicsBackend backendTy
     visibleDrawables.reserve(MAX_INSTANCES);
     directionalLights.reserve(maxDirectionalLights);
     pointLights.reserve(maxPointLights);
+}
+
+// One GPU buffer per frame slot; `alias` always names the current frame's
+// slot (rotated in beginFrame), so bind/update sites read like a single
+// buffer while in-flight frames keep their own copy.
+void Renderer::createFrameSlottedBuffer(BufferHandle& alias, const BufferDesc& desc,
+                                        const void* initData, size_t initSize) {
+    FrameSlottedBuffer sb;
+    sb.alias = &alias;
+    for (Uint32 i = 0; i < kFrameSlots; i++) {
+        sb.slots[i] = rhi->createBuffer(desc);
+        if (initData && initSize > 0) {
+            rhi->updateBuffer(sb.slots[i], initData, 0, initSize);
+        }
+    }
+    // Lazily-created buffers (e.g. particles) join mid-run: start on the
+    // current frame's slot so the first rotation doesn't reuse it.
+    alias = sb.slots[frameSlotIndex];
+    frameSlottedBuffers.push_back(sb);
 }
 
 void Renderer::shutdown() {
@@ -303,18 +319,19 @@ void Renderer::shutdown() {
                 break;
         }
 
-        // Destroy buffers
-        if (cameraUniformBuffer.isValid()) {
-            rhi->destroyBuffer(cameraUniformBuffer);
+        // Destroy buffers. Slotted buffers own kFrameSlots handles each — the
+        // alias members point at one of them, so only the registry is walked.
+        for (auto& sb : frameSlottedBuffers) {
+            for (Uint32 i = 0; i < kFrameSlots; i++) {
+                if (sb.slots[i].isValid()) {
+                    rhi->destroyBuffer(sb.slots[i]);
+                }
+            }
+            *sb.alias = {};
         }
+        frameSlottedBuffers.clear();
         if (materialUniformBuffer.isValid()) {
             rhi->destroyBuffer(materialUniformBuffer);
-        }
-        if (directionalLightBuffer.isValid()) {
-            rhi->destroyBuffer(directionalLightBuffer);
-        }
-        if (pointLightBuffer.isValid()) {
-            rhi->destroyBuffer(pointLightBuffer);
         }
 
         // Destroy meshes
@@ -569,6 +586,16 @@ TextureId Renderer::registerTexture(const std::shared_ptr<Vapor::Image>& image) 
 void Renderer::beginFrame(const CameraRenderData& camera) {
     // Process any pending screenshots from previous frames
     processPendingScreenshots();
+
+    // Rotate every frames-in-flight buffer slot BEFORE anything writes frame
+    // data: all named aliases (cameraUniformBuffer, instanceDataBuffer, ...)
+    // now point at a buffer no in-flight frame reads.
+    frameSlotIndex = (frameSlotIndex + 1) % kFrameSlots;
+    for (auto& sb : frameSlottedBuffers) {
+        *sb.alias = sb.slots[frameSlotIndex];
+    }
+    batch2D.nextFrame();
+    batch3D.nextFrame();
 
     // Begin RHI frame (get drawable, create command buffer). The Vulkan
     // backend recreates an out-of-date/resized swapchain here.
@@ -2462,9 +2489,9 @@ void Renderer::createDefaultResources() {
         uDesc.usage = BufferUsage::Storage;
         uDesc.memoryUsage = MemoryUsage::CPUtoGPU;
         uDesc.size = sizeof(ParticleSimParams);
-        particleSimParamsBuffer = rhi->createBuffer(uDesc);
+        createFrameSlottedBuffer(particleSimParamsBuffer, uDesc);  // rewritten per sim step
         uDesc.size = sizeof(ParticleAttractor);
-        particleAttractorBuffer = rhi->createBuffer(uDesc);
+        createFrameSlottedBuffer(particleAttractorBuffer, uDesc);
     }
 }
 
@@ -4596,12 +4623,16 @@ void Renderer::BatchRenderer::init(RHI* rhi, GraphicsBackend backend, bool is3D,
     whiteTexture = defaultTex;
     sampler = samplerHandle;
 
-    // Create vertex buffer
+    // Create vertex buffers — one per frame slot (data is rewritten every
+    // frame; a single buffer would race the in-flight frames' draws).
     BufferDesc vbDesc;
     vbDesc.size = sizeof(Vertex2D) * MaxVertices;
     vbDesc.usage = BufferUsage::Vertex;
     vbDesc.memoryUsage = MemoryUsage::CPUtoGPU;
-    vertexBuffer = rhi->createBuffer(vbDesc);
+    for (uint32_t i = 0; i < kSlots; i++) {
+        vertexBufferSlots[i] = rhi->createBuffer(vbDesc);
+    }
+    vertexBuffer = vertexBufferSlots[0];
 
     // Create index buffer with quad indices (0,1,2, 2,3,0 pattern)
     std::vector<uint32_t> quadIndices;
@@ -4694,10 +4725,19 @@ void Renderer::BatchRenderer::init(RHI* rhi, GraphicsBackend backend, bool is3D,
     fmt::print("BatchRenderer initialized ({} mode)\n", is3D ? "3D" : "2D");
 }
 
+void Renderer::BatchRenderer::nextFrame() {
+    slotIndex = (slotIndex + 1) % kSlots;
+    vertexBuffer = vertexBufferSlots[slotIndex];
+}
+
 void Renderer::BatchRenderer::shutdown(RHI* rhi) {
-    if (vertexBuffer.isValid()) {
-        rhi->destroyBuffer(vertexBuffer);
+    for (uint32_t i = 0; i < kSlots; i++) {
+        if (vertexBufferSlots[i].isValid()) {
+            rhi->destroyBuffer(vertexBufferSlots[i]);
+            vertexBufferSlots[i] = {};
+        }
     }
+    vertexBuffer = {};
     if (indexBuffer.isValid()) {
         rhi->destroyBuffer(indexBuffer);
     }

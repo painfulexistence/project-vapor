@@ -475,6 +475,25 @@ private:
     BufferHandle instanceDataBuffer;
     BufferHandle clusterBuffer;
 
+    // ------------------------------------------------------------------------
+    // Frames-in-flight buffer slotting (native renderer parity — its
+    // cameraDataBuffers[currentFrameInFlight] et al.). Host-visible
+    // updateBuffer() is an immediate memcpy, so rewriting a buffer the GPU may
+    // still read from an in-flight frame is a data race. Every buffer that is
+    // rewritten per frame is created once per slot; beginFrame() repoints the
+    // named alias member (e.g. cameraUniformBuffer) at the current slot so
+    // all bind/update sites stay unchanged.
+    // ------------------------------------------------------------------------
+    static constexpr Uint32 kFrameSlots = 3;  // >= max frames in flight on any backend
+    struct FrameSlottedBuffer {
+        BufferHandle* alias;
+        BufferHandle slots[kFrameSlots];
+    };
+    std::vector<FrameSlottedBuffer> frameSlottedBuffers;
+    Uint32 frameSlotIndex = 0;
+    void createFrameSlottedBuffer(BufferHandle& alias, const BufferDesc& desc,
+                                  const void* initData = nullptr, size_t initSize = 0);
+
     // Default textures
     TextureId defaultWhiteTexture = INVALID_TEXTURE_ID;
     TextureId defaultNormalTexture = INVALID_TEXTURE_ID;
@@ -694,8 +713,14 @@ private:
         static constexpr uint32_t MaxVertices = MaxQuads * 4;
         static constexpr uint32_t MaxIndices = MaxQuads * 6;
 
-        BufferHandle vertexBuffer;
-        BufferHandle indexBuffer;
+        BufferHandle vertexBuffer;  // current frame's slot (see nextFrame())
+        BufferHandle indexBuffer;   // static quad index pattern — write-once, unslotted
+        // Vertex data is rewritten every frame; per-frame slots keep the CPU
+        // from overwriting a buffer an in-flight frame's draw still reads
+        // (native parity: batch2DVertexBuffers[currentFrameInFlight]).
+        static constexpr uint32_t kSlots = 3;
+        BufferHandle vertexBufferSlots[kSlots];
+        uint32_t slotIndex = 0;
         PipelineHandle pipeline;    // HDR colorRT variant (in-scene batches)
         ShaderHandle vertexShader;
         ShaderHandle fragmentShader;
@@ -727,6 +752,8 @@ private:
         uint32_t totalQuads = 0;
 
         void init(RHI* rhi, GraphicsBackend backend, bool is3D, TextureHandle defaultTex, SamplerHandle samplerHandle);
+        // Advance to the next vertex-buffer slot; call once per frame.
+        void nextFrame();
         // Set the texture for subsequent quads (invalid = white). Recorded as
         // a segment split; the actual draws happen in flush().
         void setTexture(TextureHandle texture);
