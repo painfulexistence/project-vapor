@@ -6170,6 +6170,7 @@ auto Renderer_Metal::draw(std::shared_ptr<Scene> scene, Camera& camera) -> void 
                     voxelSettings.shadowEnabled = sunShadow ? 1 : 0;
                 }
                 ImGui::DragFloat("Ambient Intensity", &voxelSettings.ambientIntensity, 0.01f, 0.0f, 2.0f);
+                ImGui::DragFloat("AO Strength", &voxelSettings.aoStrength, 0.01f, 0.0f, 1.0f);
 
                 ImGui::Separator();
                 if (ImGui::Button("Regenerate Volume")) {

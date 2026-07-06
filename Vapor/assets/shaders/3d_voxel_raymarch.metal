@@ -41,7 +41,8 @@ struct VoxelVolumeData {
     uint3 gridDim;              // voxels per volume edge
     uint shadowEnabled;
     float ambientIntensity;
-    float2 _pad;
+    float aoStrength;// 0 disables corner AO
+    float _pad;
 };
 
 struct RayHit {
@@ -54,6 +55,69 @@ struct RayHit {
 static uint voxelIndex(int3 c, uint3 dim) {
     return (uint(c.z) * dim.y + uint(c.y)) * dim.x + uint(c.x);
 }
+
+// ── Minecraft-style per-pixel corner AO ─────────────────────────────────────
+// Darkens hit points near solid neighbors of the hit face: the classic trick
+// that makes micro voxel scenes read as detailed. 8 extra brickmap lookups,
+// only on primary hits.
+
+static float voxelSolidAt(
+    int3 c,
+    constant VoxelVolumeData& data,
+    const device uchar* brickPool,
+    const device uint* brickIndexGrid
+) {
+    if (any(c < int3(0)) || any(c >= int3(data.gridDim))) return 0.0;
+    int bd = int(data.brickDim);
+    int3 bc = c / bd;
+    uint entry = brickIndexGrid[voxelIndex(bc, data.gridDim / data.brickDim)];
+    if (entry == VOXEL_BRICK_EMPTY) return 0.0;
+    if ((entry & VOXEL_BRICK_UNIFORM_FLAG) != 0) return 1.0;
+    int3 local = c - bc * bd;
+    uchar mat = brickPool[entry * uint(bd * bd * bd) + (uint(local.z) * uint(bd) + uint(local.y)) * uint(bd) + uint(local.x)];
+    return mat != 0 ? 1.0 : 0.0;
+}
+
+static float cornerAO(float side1, float side2, float corner) {
+    if (side1 > 0.5 && side2 > 0.5) return 0.0;
+    return 1.0 - (side1 + side2 + corner) / 3.0;
+}
+
+static float faceAO(
+    int3 cell,
+    float3 normal,
+    float3 hitPos,
+    constant VoxelVolumeData& data,
+    const device uchar* brickPool,
+    const device uint* brickIndexGrid
+) {
+    int3 n = int3(round(normal));
+    int3 outside = cell + n;
+    // The two axes spanning the hit face
+    int3 t1 = (n.x != 0) ? int3(0, 1, 0) : int3(1, 0, 0);
+    int3 t2 = (n.z != 0) ? int3(0, 1, 0) : int3(0, 0, 1);
+
+    // Fractional position within the face
+    float3 f = (hitPos - data.volumeOrigin) / data.voxelSize - float3(cell);
+    float u = clamp(dot(f, float3(t1)), 0.0, 1.0);
+    float v = clamp(dot(f, float3(t2)), 0.0, 1.0);
+
+    float sP1 = voxelSolidAt(outside + t1, data, brickPool, brickIndexGrid);
+    float sM1 = voxelSolidAt(outside - t1, data, brickPool, brickIndexGrid);
+    float sP2 = voxelSolidAt(outside + t2, data, brickPool, brickIndexGrid);
+    float sM2 = voxelSolidAt(outside - t2, data, brickPool, brickIndexGrid);
+    float cPP = voxelSolidAt(outside + t1 + t2, data, brickPool, brickIndexGrid);
+    float cPM = voxelSolidAt(outside + t1 - t2, data, brickPool, brickIndexGrid);
+    float cMP = voxelSolidAt(outside - t1 + t2, data, brickPool, brickIndexGrid);
+    float cMM = voxelSolidAt(outside - t1 - t2, data, brickPool, brickIndexGrid);
+
+    float ao00 = cornerAO(sM1, sM2, cMM);
+    float ao10 = cornerAO(sP1, sM2, cPM);
+    float ao01 = cornerAO(sM1, sP2, cMP);
+    float ao11 = cornerAO(sP1, sP2, cPP);
+    return mix(mix(ao00, ao10, u), mix(ao01, ao11, u), v);
+}
+
 
 // Small deterministic hash for per-voxel albedo variation.
 static float voxelHash(int3 c) {
@@ -307,10 +371,17 @@ fragment FragmentOut fragmentMain(
         if (shadowHit.hit) shadow = 0.0;
     }
 
+    float ao = 1.0;
+    if (data.aoStrength > 0.0) {
+        ao = mix(1.0, faceAO(cell, hit.normal, hitPos, data, brickPool, brickIndexGrid), data.aoStrength);
+    }
+
     // Simple hemisphere ambient: sky-tinted from above, ground bounce below.
     float3 skyAmbient = mix(float3(0.20, 0.22, 0.28), float3(0.45, 0.55, 0.75), hit.normal.y * 0.5 + 0.5);
     float3 direct = data.sunColor * data.sunIntensity * (1.0 / PI) * ndl * shadow;
-    float3 color = albedo * (direct + skyAmbient * data.ambientIntensity);
+    // AO fully attenuates ambient; a stylized 30% also darkens direct so
+    // corners stay readable in full sun.
+    float3 color = albedo * (direct * (0.7 + 0.3 * ao) + skyAmbient * data.ambientIntensity * ao);
 
     out.color = float4(color, 1.0);
 

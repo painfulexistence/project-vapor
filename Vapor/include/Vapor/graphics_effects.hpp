@@ -174,7 +174,8 @@ struct alignas(16) VoxelVolumeData {
     Uint32 _pad5;
     Uint32 shadowEnabled = 1;
     float ambientIntensity = 0.6f;
-    glm::vec2 _pad6;
+    float aoStrength = 0.7f;// Minecraft-style corner AO; 0 disables
+    float _pad6;
 };
 
 // ── Light Scattering (God Rays) ───────────────────────────────────────────
