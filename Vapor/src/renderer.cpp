@@ -1157,12 +1157,15 @@ void Renderer::mainRenderPass() {
     rhi->setTexture(0, 13, whiteTex, defaultSampler);
     rhi->setTexture(0, 14, blackTex, defaultSampler);
 
-    // PSSM cascaded shadow (Vulkan binding budget is 8 slots/set, so the Metal
-    // contract slots 9/12 above are no-ops here): cascade data at set1 b2 and
-    // the 3-layer depth array at set2 b6. RHIMain.frag reads a sampler2DArray at
-    // b6 and the PSSMBuf at b2; the neutral binding-6 texture is overridden.
-    if (pssmDataBuffer.isValid()) rhi->setFragmentBuffer(2, pssmDataBuffer, 0, sizeof(PSSMRenderData));
     if (backend == GraphicsBackend::Vulkan) {
+        // PSSM cascaded shadow (Vulkan binding budget is 8 slots/set, so the
+        // Metal contract slots 9/12 above are no-ops here): cascade data at
+        // set1 b2, cascade depth array at set2 b6. Vulkan ONLY — on Metal,
+        // fragment buffer(2) is the CLUSTER buffer: rebinding PSSM data there
+        // made the PBR shader read shadow matrices as tile light counts
+        // (billions of loop iterations per pixel -> GPU hang in the Main pass,
+        // machine-freezing on repeat).
+        if (pssmDataBuffer.isValid()) rhi->setFragmentBuffer(2, pssmDataBuffer, 0, sizeof(PSSMRenderData));
         // RHIMain.frag reads the cascade array at set2 b6. (Metal's PBR shader
         // uses slot 6 for texAO — don't clobber it there; the cascade array is
         // already bound at the Metal contract slot 12 above.)
