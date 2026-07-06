@@ -2893,7 +2893,9 @@ void Renderer::createRenderTargets() {
         desc.width = width;
         desc.height = height;
         desc.format = PixelFormat::RGBA16_FLOAT;
-        desc.usage = TextureUsage::RenderTarget | TextureUsage::Sampled;
+        // RenderTarget for the Vulkan fragment path, Storage for the Metal
+        // compute kernel that writes it (MTLTextureUsageShaderWrite).
+        desc.usage = TextureUsage::RenderTarget | TextureUsage::Sampled | TextureUsage::Storage;
         desc.sampleCount = 1;
         velocityRT = rhi->createTexture(desc);
     }
