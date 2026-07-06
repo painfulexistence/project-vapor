@@ -245,7 +245,14 @@ void main() {
             PointLight l = pointLights[tiles[tileIndex].lightIndices[t]];
             vec3 toLight = l.position - fragPos;
             float dist2 = max(dot(toLight, toLight), 1e-4);
-            vec3 radiance = l.color * l.intensity / dist2;
+            // Inverse-square falloff windowed to the light radius (same as the
+            // native Metal PBR shader). The cutoff must match the culling
+            // radius: without it the light's influence extends past the tiles
+            // the culler assigned it to, and every light shows up as a hard
+            // bright rectangle.
+            float dist = sqrt(dist2);
+            float attenuation = (1.0 - smoothstep(l.radius * 0.8, l.radius, dist)) / dist2;
+            vec3 radiance = l.color * l.intensity * attenuation;
             color += shade(N, V, normalize(toLight), radiance, albedo, metallic, roughness);
         }
     }
