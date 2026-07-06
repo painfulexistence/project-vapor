@@ -3564,25 +3564,10 @@ void Renderer::collectDrawables(entt::registry& registry, std::shared_ptr<Scene>
         }
     }
 
-    // TODO: Collect sprites
-    auto spriteView = registry.view<Vapor::TransformComponent, Vapor::SpriteComponent>();
-    for (auto entity : spriteView) {
-        auto& transform = spriteView.get<Vapor::TransformComponent>(entity);
-        auto& sprite = spriteView.get<Vapor::SpriteComponent>(entity);
-
-        if (!sprite.visible) continue;
-
-        // Use batch rendering for sprites
-        glm::vec2 position(transform.position.x, transform.position.y);
-        glm::vec4 color = sprite.tint;
-
-        // TODO: Get texture from atlas
-        // TextureHandle tex = getAtlasTexture(sprite.atlas);
-        // drawQuad2D(position, sprite.size, tex, color);
-
-        // For now, just draw colored quads
-        drawQuad2D(position, sprite.size, color);
-    }
+    // Sprites are NOT collected here: the game's SpriteRenderSystem submits
+    // them via drawQuad2D with the atlas texture and full world transform.
+    // (A leftover placeholder here used to draw every SpriteComponent a second
+    // time as an axis-aligned white quad — ghost sprite on top of the real one.)
 }
 
 // ============================================================================
@@ -3874,11 +3859,20 @@ void Renderer::shutdownBatchRendering() {
 
 void Renderer::flush2D() {
     if (batch2D.quadCount > 0) {
-        // TODO: Get view-projection matrix for 2D (orthographic)
+        // 2D canvas coordinates are LOGICAL window units, like the native
+        // Metal CanvasPass (SDL_GetWindowSize). On high-DPI displays the
+        // swapchain is larger than the window; projecting with the swapchain
+        // extent would shrink and shift every sprite by the DPI scale.
+        int w = 0, h = 0;
+        if (window) {
+            SDL_GetWindowSize(window, &w, &h);
+        }
+        if (w <= 0 || h <= 0) {
+            w = static_cast<int>(rhi->getSwapchainWidth());
+            h = static_cast<int>(rhi->getSwapchainHeight());
+        }
         glm::mat4 viewProj = glm::orthoZO(
-            0.0f, static_cast<float>(rhi->getSwapchainWidth()),
-            static_cast<float>(rhi->getSwapchainHeight()), 0.0f,
-            -1.0f, 1.0f
+            0.0f, static_cast<float>(w), static_cast<float>(h), 0.0f, -1.0f, 1.0f
         );
         batch2D.flush(rhi.get(), viewProj, batch2D.uiPipeline);
     }
@@ -4126,25 +4120,7 @@ void Renderer::drawTriangle2D(const glm::vec2& p0, const glm::vec2& p1, const gl
 }
 
 void Renderer::drawTriangleFilled2D(const glm::vec2& p0, const glm::vec2& p1, const glm::vec2& p2, const glm::vec4& color) {
-    // Draw filled triangle using barycentric coordinates
-    // We'll approximate by drawing a quad that covers the triangle
-    // For a proper triangle, we need to add triangle support to the batch renderer
-    // For now, draw three quads from center to each edge
-
-    glm::vec2 center = (p0 + p1 + p2) / 3.0f;
-
-    // Calculate small quads to approximate the triangle
-    // This is a simplified approach - ideally we'd add proper triangle rendering
-
-    // Create transformation matrix for a quad that covers the triangle area
-    glm::vec2 min = glm::min(glm::min(p0, p1), p2);
-    glm::vec2 max = glm::max(glm::max(p0, p1), p2);
-    glm::vec2 size = max - min;
-    glm::vec2 pos = (min + max) * 0.5f;
-
-    // For now, just draw a quad that approximates the triangle
-    // A proper implementation would tessellate or use a geometry shader
-    drawQuad2D(pos, size, color);
+    batch2D.addTriangle(p0, p1, p2, color);
 }
 
 // Batch stats
@@ -4846,6 +4822,36 @@ void Renderer::BatchRenderer::addQuad(const glm::mat4& transform, const glm::vec
         v.texCoord = (i == 0) ? glm::vec2(0, 0) :
                      (i == 1) ? glm::vec2(1, 0) :
                      (i == 2) ? glm::vec2(1, 1) : glm::vec2(0, 1);
+        v.texIndex = 0.0f;
+        v.entityID = entityID;
+        vertices.push_back(v);
+    }
+
+    accountQuadSegment();
+    quadCount++;
+}
+
+void Renderer::BatchRenderer::addTriangle(
+    const glm::vec2& p0, const glm::vec2& p1, const glm::vec2& p2,
+    const glm::vec4& color, int entityID
+) {
+    if (quadCount >= MaxQuads) {
+        if (canAutoFlush && currentRHI) {
+            flush(currentRHI, currentViewProj);
+        } else {
+            return;
+        }
+    }
+
+    // Shares the quad index pattern (0,1,2, 2,3,0): duplicating p2 into the
+    // fourth vertex makes the second triangle zero-area, so exactly the
+    // requested triangle is rasterized.
+    const glm::vec2 corners[4] = { p0, p1, p2, p2 };
+    for (int i = 0; i < 4; i++) {
+        Vertex2D v;
+        v.position = glm::vec3(corners[i], 0.0f);
+        v.color = color;
+        v.texCoord = glm::vec2(0.0f, 0.0f);
         v.texIndex = 0.0f;
         v.entityID = entityID;
         vertices.push_back(v);

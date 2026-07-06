@@ -744,6 +744,12 @@ private:
             const glm::vec4& tint,
             int entityID = -1
         );
+        // Filled triangle as a degenerate quad (v3 duplicates v2, so the
+        // second triangle of the quad's 0,1,2 / 2,3,0 indices is zero-area).
+        void addTriangle(
+            const glm::vec2& p0, const glm::vec2& p1, const glm::vec2& p2,
+            const glm::vec4& color, int entityID = -1
+        );
     };
 
     BatchRenderer batch2D;
