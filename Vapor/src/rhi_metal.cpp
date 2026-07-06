@@ -1008,6 +1008,21 @@ void RHI_Metal::beginRenderPass(const RenderPassDesc& desc) {
         if (it != textures.end()) {
             passWidth = it->second.width;
             passHeight = it->second.height;
+            // Rendering into a mip level: the pass extent is the MIP's size,
+            // not the base size (IBL prefilter mips asserted on scissor).
+            if (desc.colorMipLevel > 0) {
+                passWidth = std::max(1u, passWidth >> desc.colorMipLevel);
+                passHeight = std::max(1u, passHeight >> desc.colorMipLevel);
+            }
+        }
+    } else if (desc.colorAttachments.empty() &&
+               desc.depthAttachment.isValid() && desc.depthAttachment.id != 0) {
+        // Depth-only pass (shadow cascades): size from the depth attachment,
+        // not the swapchain — the fallback mis-placed the viewport.
+        auto it = textures.find(desc.depthAttachment.id);
+        if (it != textures.end()) {
+            passWidth = it->second.width;
+            passHeight = it->second.height;
         }
     }
 

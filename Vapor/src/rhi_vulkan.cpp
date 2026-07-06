@@ -1756,6 +1756,11 @@ void RHI_Vulkan::beginRenderPass(const RenderPassDesc& desc) {
         auto it = textures.find(desc.colorAttachments[0].id);
         if (it != textures.end()) {
             passExtent = { it->second.width, it->second.height };
+            // Rendering into a mip level: the render area is the mip's size.
+            if (desc.colorMipLevel > 0) {
+                passExtent.width  = std::max(1u, passExtent.width  >> desc.colorMipLevel);
+                passExtent.height = std::max(1u, passExtent.height >> desc.colorMipLevel);
+            }
         }
     } else if (hasDepth) {
         // Depth-only passes (e.g. shadow maps) size to the depth attachment,
