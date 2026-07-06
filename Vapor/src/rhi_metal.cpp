@@ -1405,40 +1405,53 @@ void RHI_Metal::buildAccelerationStructure(AccelStructHandle handle) {
         }
         if (descriptors.empty()) return;
 
-        // Fresh instance buffer every build: the previous frame's build/trace
-        // may still be reading the old one (command buffers retain it).
+        // Per-frame TLAS/scratch/instance-buffer rotation (native renderer's
+        // TLASBuffers[frameInFlight] scheme): never rebuild into the structure
+        // an in-flight frame's ray dispatches may still be traversing — that
+        // in-place rewrite is a GPU-level race that hard-hangs Apple GPUs.
+        const Uint32 slot = resource.nextSlot;
+        resource.nextSlot = (resource.nextSlot + 1) % AccelStructResource::kTlasSlots;
+
         size_t bytes = descriptors.size() * sizeof(MTL::AccelerationStructureInstanceDescriptor);
-        resource.instanceBuffer = NS::TransferPtr(device->newBuffer(bytes, MTL::ResourceStorageModeShared));
-        std::memcpy(resource.instanceBuffer->contents(), descriptors.data(), bytes);
+        auto& instBuf = resource.instanceSlots[slot];
+        if (!instBuf || instBuf->length() < bytes) {
+            instBuf = NS::TransferPtr(device->newBuffer(bytes, MTL::ResourceStorageModeShared));
+        }
+        std::memcpy(instBuf->contents(), descriptors.data(), bytes);
+        resource.instanceBuffer = instBuf;
         resource.blasArray = NS::TransferPtr(NS::Array::array(blasObjects.data(), blasObjects.size()));
 
         auto tlasDesc = NS::TransferPtr(MTL::InstanceAccelerationStructureDescriptor::alloc()->init());
         tlasDesc->setInstancedAccelerationStructures(resource.blasArray.get());
         tlasDesc->setInstanceCount(descriptors.size());
-        tlasDesc->setInstanceDescriptorBuffer(resource.instanceBuffer.get());
+        tlasDesc->setInstanceDescriptorBuffer(instBuf.get());
 
         auto sizes = device->accelerationStructureSizes(tlasDesc.get());
-        if (!resource.scratchBuffer || resource.scratchBuffer->length() < sizes.buildScratchBufferSize) {
-            resource.scratchBuffer = NS::TransferPtr(
+        auto& scratch = resource.scratchSlots[slot];
+        if (!scratch || scratch->length() < sizes.buildScratchBufferSize) {
+            scratch = NS::TransferPtr(
                 device->newBuffer(sizes.buildScratchBufferSize, MTL::ResourceStorageModePrivate));
         }
-        if (!resource.accelStruct || resource.accelStruct->size() < sizes.accelerationStructureSize) {
-            resource.accelStruct = NS::TransferPtr(
+        auto& tlas = resource.accelSlots[slot];
+        if (!tlas || tlas->size() < sizes.accelerationStructureSize) {
+            tlas = NS::TransferPtr(
                 device->newAccelerationStructure(sizes.accelerationStructureSize));
         }
+        // Consumers (setAccelerationStructure) always bind the slot built for
+        // this frame.
+        resource.accelStruct = tlas;
+        resource.scratchBuffer = scratch;
 
         // Prefer the frame's command buffer so the build is ordered before this
         // frame's RT dispatches; fall back to a synchronous one-off build.
         if (currentCommandBuffer) {
             auto encoder = currentCommandBuffer->accelerationStructureCommandEncoder();
-            encoder->buildAccelerationStructure(resource.accelStruct.get(), tlasDesc.get(),
-                                                resource.scratchBuffer.get(), 0);
+            encoder->buildAccelerationStructure(tlas.get(), tlasDesc.get(), scratch.get(), 0);
             encoder->endEncoding();
         } else {
             auto cmd = commandQueue->commandBuffer();
             auto encoder = cmd->accelerationStructureCommandEncoder();
-            encoder->buildAccelerationStructure(resource.accelStruct.get(), tlasDesc.get(),
-                                                resource.scratchBuffer.get(), 0);
+            encoder->buildAccelerationStructure(tlas.get(), tlasDesc.get(), scratch.get(), 0);
             encoder->endEncoding();
             cmd->commit();
             cmd->waitUntilCompleted();

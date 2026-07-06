@@ -235,6 +235,16 @@ private:
         // TLAS-only: instance descriptors + the BLAS array they index into.
         NS::SharedPtr<MTL::Buffer> instanceBuffer;
         NS::SharedPtr<NS::Array> blasArray;
+        // TLAS-only: per-frame rotation slots (mirrors the native renderer's
+        // TLASBuffers[frameInFlight]). Rebuilding a single TLAS in place while
+        // an in-flight frame's ray dispatches still traverse it is a GPU-level
+        // race (hard-hangs Apple GPUs). accelStruct / scratchBuffer /
+        // instanceBuffer above always alias the most recently built slot.
+        static constexpr Uint32 kTlasSlots = 3;  // >= max frames in flight
+        NS::SharedPtr<MTL::AccelerationStructure> accelSlots[kTlasSlots];
+        NS::SharedPtr<MTL::Buffer> scratchSlots[kTlasSlots];
+        NS::SharedPtr<MTL::Buffer> instanceSlots[kTlasSlots];
+        Uint32 nextSlot = 0;
     };
 
     // Resource maps
