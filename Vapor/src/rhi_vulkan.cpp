@@ -1998,8 +1998,17 @@ void RHI_Vulkan::setVertexBuffer(Uint32 binding, BufferHandle buffer, size_t off
     if (it == buffers.end() || binding >= BINDINGS_PER_SET) {
         return;
     }
-    boundVertexBuffers[binding] = { it->second.buffer, offset, range > 0 ? range : VK_WHOLE_SIZE };
-    descriptorsDirty = true;
+    // Skip redundant re-binds: the renderer re-binds the same frame/instance
+    // buffers for nearly every draw, and each spurious dirty forces a fresh
+    // 3-set allocation at the next flush (~45k sets/sec through MoltenVK).
+    // Deferred destruction guarantees a VkBuffer value can't be recycled
+    // within the frame, so value equality means the binding truly is current.
+    BufferBinding nb = { it->second.buffer, offset, range > 0 ? range : VK_WHOLE_SIZE };
+    BufferBinding& cur = boundVertexBuffers[binding];
+    if (cur.buffer != nb.buffer || cur.offset != nb.offset || cur.range != nb.range) {
+        cur = nb;
+        descriptorsDirty = true;
+    }
 }
 
 void RHI_Vulkan::setFragmentBuffer(Uint32 binding, BufferHandle buffer, size_t offset, size_t range) {
@@ -2007,8 +2016,12 @@ void RHI_Vulkan::setFragmentBuffer(Uint32 binding, BufferHandle buffer, size_t o
     if (it == buffers.end() || binding >= BINDINGS_PER_SET) {
         return;
     }
-    boundFragmentBuffers[binding] = { it->second.buffer, offset, range > 0 ? range : VK_WHOLE_SIZE };
-    descriptorsDirty = true;
+    BufferBinding nb = { it->second.buffer, offset, range > 0 ? range : VK_WHOLE_SIZE };
+    BufferBinding& cur = boundFragmentBuffers[binding];
+    if (cur.buffer != nb.buffer || cur.offset != nb.offset || cur.range != nb.range) {
+        cur = nb;
+        descriptorsDirty = true;
+    }
 }
 
 void RHI_Vulkan::setVertexBytes(const void* data, size_t size, Uint32 binding) {
@@ -2041,8 +2054,11 @@ void RHI_Vulkan::setTexture(Uint32 set, Uint32 binding, TextureHandle texture, S
     if (texIt == textures.end() || samplerIt == samplers.end() || binding >= BINDINGS_PER_SET) {
         return;
     }
-    boundTextures[binding] = { texIt->second.view, samplerIt->second.sampler };
-    descriptorsDirty = true;
+    TextureBinding& cur = boundTextures[binding];
+    if (cur.view != texIt->second.view || cur.sampler != samplerIt->second.sampler) {
+        cur = { texIt->second.view, samplerIt->second.sampler };
+        descriptorsDirty = true;
+    }
 }
 
 void RHI_Vulkan::draw(Uint32 vertexCount, Uint32 instanceCount, Uint32 firstVertex, Uint32 firstInstance) {
@@ -2765,8 +2781,12 @@ void RHI_Vulkan::setComputeBuffer(Uint32 binding, BufferHandle buffer, size_t of
     if (it == buffers.end() || binding >= BINDINGS_PER_SET) {
         return;
     }
-    boundComputeBuffers[binding] = { it->second.buffer, offset, range > 0 ? range : VK_WHOLE_SIZE };
-    computeDescriptorsDirty = true;
+    BufferBinding nb = { it->second.buffer, offset, range > 0 ? range : VK_WHOLE_SIZE };
+    BufferBinding& cur = boundComputeBuffers[binding];
+    if (cur.buffer != nb.buffer || cur.offset != nb.offset || cur.range != nb.range) {
+        cur = nb;
+        computeDescriptorsDirty = true;
+    }
 }
 
 void RHI_Vulkan::setComputeBytes(const void* data, size_t size, Uint32 binding) {
@@ -2789,8 +2809,10 @@ void RHI_Vulkan::setComputeTexture(Uint32 binding, TextureHandle texture) {
     transitionImage(it->second.image, it->second.currentLayout,
                     VK_IMAGE_LAYOUT_GENERAL, VK_IMAGE_ASPECT_COLOR_BIT);
     it->second.currentLayout = VK_IMAGE_LAYOUT_GENERAL;
-    boundComputeImages[binding] = it->second.view;
-    computeDescriptorsDirty = true;
+    if (boundComputeImages[binding] != it->second.view) {
+        boundComputeImages[binding] = it->second.view;
+        computeDescriptorsDirty = true;
+    }
 }
 
 void RHI_Vulkan::flushComputeDescriptors() {
