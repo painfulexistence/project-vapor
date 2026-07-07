@@ -447,14 +447,18 @@ void RHI_Vulkan::createDescriptorInfrastructure() {
     // Per-frame descriptor pools, reset wholesale each frame
     descriptorPools.resize(MAX_FRAMES_IN_FLIGHT);
     for (auto& pool : descriptorPools) {
+        // Each graphics flush allocates 3 sets consuming up to 16 storage-buffer
+        // slots (2 buffer sets x 8 bindings). The old 8192 ceiling capped a frame
+        // at ~512 draws before vkAllocateDescriptorSets failed — reachable with a
+        // full scene + RmlUI geometry churn. 4x the headroom (~2048 draws/frame).
         VkDescriptorPoolSize sizes[3] = {
-            { VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, 8192 },
-            { VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, 4096 },
-            { VK_DESCRIPTOR_TYPE_STORAGE_IMAGE, 1024 },
+            { VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, 32768 },
+            { VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, 16384 },
+            { VK_DESCRIPTOR_TYPE_STORAGE_IMAGE, 4096 },
         };
         VkDescriptorPoolCreateInfo poolInfo{};
         poolInfo.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO;
-        poolInfo.maxSets = 4096;
+        poolInfo.maxSets = 16384;
         poolInfo.poolSizeCount = 3;
         poolInfo.pPoolSizes = sizes;
         if (vkCreateDescriptorPool(device, &poolInfo, nullptr, &pool) != VK_SUCCESS) {
@@ -492,6 +496,9 @@ void RHI_Vulkan::flushDescriptors() {
     descriptorsDirty = false;
 
     VkDescriptorSetLayout layouts[3] = { vertexBufferSetLayout, fragmentBufferSetLayout, textureSetLayout };
+    static_assert(sizeof(layouts) / sizeof(layouts[0]) == 3,
+                  "writes[]/bufferInfos[] below are sized for 3 sets; keep the "
+                  "multiplier in sync with the set count to avoid a silent overflow");
     VkDescriptorSet sets[3];
     VkDescriptorSetAllocateInfo allocInfo{};
     allocInfo.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO;
@@ -499,11 +506,23 @@ void RHI_Vulkan::flushDescriptors() {
     allocInfo.descriptorSetCount = 3;
     allocInfo.pSetLayouts = layouts;
     if (vkAllocateDescriptorSets(device, &allocInfo, sets) != VK_SUCCESS) {
-        fmt::print(stderr, "flushDescriptors: descriptor pool exhausted\n");
+        // Skipping the draw is the safe choice (binding stale/unbound sets is
+        // worse), but do NOT skip silently — a dropped draw means visible
+        // corruption this frame. Throttle to once per frame so an exhausted
+        // pool doesn't spam ~900 lines/frame across every remaining draw.
+        if (frameCounter != lastDescExhaustFrame) {
+            lastDescExhaustFrame = frameCounter;
+            fmt::print(stderr,
+                "[VK] descriptor pool exhausted (graphics) f={}: draw skipped, "
+                "frame will be corrupt. Raise pool maxSets/sizes.\n", frameCounter);
+        }
         return;
     }
     statsDescriptorSets += 3;
 
+    // writeCount is bounded by 3 sets x BINDINGS_PER_SET; the arrays below are
+    // sized to exactly that. static_assert keeps them in sync if a 4th set is
+    // added or BINDINGS_PER_SET changes (else vkUpdateDescriptorSets corrupts).
     // Write only the slots that have been bound; untouched slots stay
     // undefined, which is fine as long as no bound shader statically uses them.
     VkWriteDescriptorSet writes[BINDINGS_PER_SET * 3];
@@ -2781,6 +2800,9 @@ void RHI_Vulkan::flushComputeDescriptors() {
     computeDescriptorsDirty = false;
 
     VkDescriptorSetLayout layouts[2] = { computeBufferSetLayout, computeImageSetLayout };
+    static_assert(sizeof(layouts) / sizeof(layouts[0]) == 2,
+                  "writes[] below is sized for 2 sets; keep the multiplier in sync "
+                  "with the set count to avoid a silent overflow");
     VkDescriptorSet sets[2];
     VkDescriptorSetAllocateInfo allocInfo{};
     allocInfo.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO;
@@ -2788,7 +2810,12 @@ void RHI_Vulkan::flushComputeDescriptors() {
     allocInfo.descriptorSetCount = 2;
     allocInfo.pSetLayouts = layouts;
     if (vkAllocateDescriptorSets(device, &allocInfo, sets) != VK_SUCCESS) {
-        fmt::print(stderr, "flushComputeDescriptors: descriptor pool exhausted\n");
+        if (frameCounter != lastDescExhaustFrame) {
+            lastDescExhaustFrame = frameCounter;
+            fmt::print(stderr,
+                "[VK] descriptor pool exhausted (compute) f={}: dispatch skipped. "
+                "Raise pool maxSets/sizes.\n", frameCounter);
+        }
         return;
     }
     statsDescriptorSets += 2;

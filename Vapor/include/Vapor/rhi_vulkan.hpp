@@ -371,6 +371,9 @@ private:
     // ========================================================================
 
     Uint64 frameCounter = 0;
+    // Throttles the descriptor-pool-exhausted warning to once per frame (else a
+    // saturated pool spams every remaining draw). ~0 = never warned.
+    Uint64 lastDescExhaustFrame = ~0ull;
     std::deque<std::pair<Uint64, std::function<void()>>> retirementQueue;
     void deferDestroy(std::function<void()> destroy);
     void processRetirements(bool force);
