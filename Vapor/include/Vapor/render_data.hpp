@@ -330,13 +330,22 @@ struct alignas(16) ParticleSimParams {
     glm::vec2 mousePosition = glm::vec2(0.0f);
     float time = 0.0f;
     float deltaTime = 1.0f / 60.0f;
-    float _pad1 = 0.0f;
+    // The Metal kernels bounds-check `id >= particleCount`; leaving this a pad
+    // read as 0 and skipped every particle on Metal. (The Vulkan .comp names
+    // this slot _pad1 and ignores it — same offset/size, so the binary layout
+    // is identical either way.)
+    Uint32 particleCount = 0;
     float _pad2 = 0.0f;
 };
 
+// MSL's float3 occupies 16 bytes, so position must be padded to 16 and the
+// struct rounds to 32 (strength at offset 16). The GLSL twin gets the same
+// explicit pad; without this Metal asserted "attractor needs 32, got 16".
 struct alignas(16) ParticleAttractor {
     glm::vec3 position = glm::vec3(0.0f);
+    float _pad0 = 0.0f;
     float strength = 50.0f;
+    float _pad1[3] = {0.0f, 0.0f, 0.0f};
 };
 
 // ============================================================================

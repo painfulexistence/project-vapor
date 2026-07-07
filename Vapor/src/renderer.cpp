@@ -2223,6 +2223,7 @@ void Renderer::particlePass() {
     sp.resolution = glm::vec2(rhi->getSwapchainWidth(), rhi->getSwapchainHeight());
     sp.time = float(frameCounter) / 60.0f;
     sp.deltaTime = 1.0f / 60.0f;
+    sp.particleCount = particleCount;  // Metal kernels bounds-check on this
     rhi->updateBuffer(particleSimParamsBuffer, &sp, 0, sizeof(sp));
 
     ParticleAttractor attr;

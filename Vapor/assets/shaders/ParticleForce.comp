@@ -23,6 +23,7 @@ layout(std430, set = 0, binding = 0) readonly buffer SimulationParams {
 
 layout(std430, set = 0, binding = 1) readonly buffer AttractorData {
     vec3 attractorPos;
+    float _pad0;              // matches MSL float3 padding (strength at offset 16)
     float attractorStrength;
 };
 
