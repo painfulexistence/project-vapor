@@ -2228,17 +2228,32 @@ void Renderer::particlePass() {
     const size_t bufBytes = sizeof(GPUParticleData) * particleCount;
     const Uint32 groups = (particleCount + 255) / 256;
 
+    const bool metal = (backend == GraphicsBackend::Metal);
+
     // Compute: force writes p.force, then integrate reads it -> barrier between.
+    // 3d_particle.metal orders the kernel buffers particles(0)/params(1)/
+    // attractor(2); the Vulkan .comp uses params(0)/attractor(1)/particles(2).
     rhi->beginComputePass();
     rhi->bindComputePipeline(particleForcePipeline);
-    rhi->setComputeBuffer(0, particleSimParamsBuffer, 0, sizeof(ParticleSimParams));
-    rhi->setComputeBuffer(1, particleAttractorBuffer, 0, sizeof(ParticleAttractor));
-    rhi->setComputeBuffer(2, particleBuffer, 0, bufBytes);
+    if (metal) {
+        rhi->setComputeBuffer(0, particleBuffer, 0, bufBytes);
+        rhi->setComputeBuffer(1, particleSimParamsBuffer, 0, sizeof(ParticleSimParams));
+        rhi->setComputeBuffer(2, particleAttractorBuffer, 0, sizeof(ParticleAttractor));
+    } else {
+        rhi->setComputeBuffer(0, particleSimParamsBuffer, 0, sizeof(ParticleSimParams));
+        rhi->setComputeBuffer(1, particleAttractorBuffer, 0, sizeof(ParticleAttractor));
+        rhi->setComputeBuffer(2, particleBuffer, 0, bufBytes);
+    }
     rhi->dispatch(groups, 1, 1);
     rhi->computeBarrier();
     rhi->bindComputePipeline(particleIntegratePipeline);
-    rhi->setComputeBuffer(0, particleSimParamsBuffer, 0, sizeof(ParticleSimParams));
-    rhi->setComputeBuffer(2, particleBuffer, 0, bufBytes);
+    if (metal) {
+        rhi->setComputeBuffer(0, particleBuffer, 0, bufBytes);
+        rhi->setComputeBuffer(1, particleSimParamsBuffer, 0, sizeof(ParticleSimParams));
+    } else {
+        rhi->setComputeBuffer(0, particleSimParamsBuffer, 0, sizeof(ParticleSimParams));
+        rhi->setComputeBuffer(2, particleBuffer, 0, bufBytes);
+    }
     rhi->dispatch(groups, 1, 1);
     rhi->endComputePass();
     rhi->computeBarrier();  // sim writes -> vertex reads
@@ -2252,10 +2267,18 @@ void Renderer::particlePass() {
     rp.loadDepth = true;
     rhi->beginRenderPass(rp);
     rhi->bindPipeline(particleRenderPipeline);
-    rhi->setVertexBuffer(0, cameraUniformBuffer, 0, sizeof(CameraRenderData));   // set0 b0
-    rhi->setFragmentBuffer(0, particleBuffer, 0, bufBytes);                       // set1 b0 (read in VS)
-    float particleSize = 0.1f;
-    rhi->setVertexBytes(&particleSize, sizeof(float), 0);                         // push offset 0
+    if (metal) {
+        // particleVertex: camera(0), ParticlePushConstants(1), particles(2).
+        rhi->setVertexBuffer(0, cameraUniformBuffer, 0, sizeof(CameraRenderData));
+        struct { float particleSize; float _pad[3]; } pc{ 0.1f, {0,0,0} };
+        rhi->setVertexBytes(&pc, sizeof(pc), 1);
+        rhi->setVertexBuffer(2, particleBuffer, 0, bufBytes);
+    } else {
+        rhi->setVertexBuffer(0, cameraUniformBuffer, 0, sizeof(CameraRenderData));   // set0 b0
+        rhi->setFragmentBuffer(0, particleBuffer, 0, bufBytes);                       // set1 b0 (read in VS)
+        float particleSize = 0.1f;
+        rhi->setVertexBytes(&particleSize, sizeof(float), 0);                         // push offset 0
+    }
     rhi->draw(6, particleCount, 0, 0);
     rhi->endRenderPass();
 }
@@ -3480,6 +3503,51 @@ void Renderer::createRenderPipeline() {
                 ComputePipelineDesc cd; cd.computeShader = sh;
                 cd.threadGroupSizeX = 8; cd.threadGroupSizeY = 8; cd.threadGroupSizeZ = 1;
                 velocityComputePipeline = rhi->createComputePipeline(cd);
+            }
+        }
+
+        // GPU particles from 3d_particle.metal: two compute kernels
+        // (particleForce / particleIntegrate, 256-wide) + an instanced
+        // billboard render (particleVertex / particleFragment). Only the
+        // Vulkan block created these before, so Metal-RHI showed no particles.
+        {
+            std::string code = readFile("shaders/3d_particle.metal");
+            if (!code.empty()) {
+                auto makePC = [&](const char* entry) -> ComputePipelineHandle {
+                    ShaderDesc d; d.stage = ShaderStage::Compute; d.code = code.data();
+                    d.codeSize = code.size(); d.entryPoint = entry;
+                    ShaderHandle sh = rhi->createShader(d);
+                    metalPassShaders.push_back(sh);
+                    ComputePipelineDesc cd; cd.computeShader = sh;
+                    cd.threadGroupSizeX = 256; cd.threadGroupSizeY = 1; cd.threadGroupSizeZ = 1;
+                    return rhi->createComputePipeline(cd);
+                };
+                particleForcePipeline     = makePC("particleForce");
+                particleIntegratePipeline = makePC("particleIntegrate");
+
+                ShaderDesc pvd; pvd.stage = ShaderStage::Vertex;   pvd.code = code.data(); pvd.codeSize = code.size(); pvd.entryPoint = "particleVertex";
+                particleVertexShader = rhi->createShader(pvd);
+                ShaderDesc pfd; pfd.stage = ShaderStage::Fragment; pfd.code = code.data(); pfd.codeSize = code.size(); pfd.entryPoint = "particleFragment";
+                particleFragmentShader = rhi->createShader(pfd);
+                metalPassShaders.push_back(particleVertexShader);
+                metalPassShaders.push_back(particleFragmentShader);
+
+                PipelineDesc pd;
+                pd.vertexShader = particleVertexShader;
+                pd.fragmentShader = particleFragmentShader;
+                pd.vertexLayout.stride = 0;   // billboard verts generated in-shader
+                pd.vertexLayout.attributes = {};
+                pd.topology = PrimitiveTopology::TriangleList;
+                pd.blendMode = BlendMode::Additive;
+                pd.depthTest = true;
+                pd.depthWrite = false;
+                pd.depthCompareOp = CompareOp::LessOrEqual;
+                pd.cullMode = CullMode::None;
+                pd.sampleCount = 1;
+                pd.hasDepthAttachment = true;
+                pd.depthAttachmentFormat = PixelFormat::Depth32Float;
+                pd.colorAttachmentFormats = { PixelFormat::RGBA16_FLOAT };
+                particleRenderPipeline = rhi->createPipeline(pd);
             }
         }
     }
