@@ -259,6 +259,13 @@ private:
     std::unordered_map<Uint32, ComputePipelineResource> computePipelines;
     std::unordered_map<Uint32, AccelStructResource> accelStructs;
 
+    // VAPOR_RHI_STATS=1 leak-hunt instrumentation (see beginFrame): per-frame
+    // counters reported every ~120 frames, then reset.
+    Uint32 statsDescriptorSets = 0;   // sets allocated since last report
+    Uint32 statsBufferCreates = 0;    // createBuffer calls since last report
+    Uint32 statsTextureCreates = 0;   // createTexture calls since last report
+    VkDeviceSize statsStagingHighWater = 0;
+
     // ========================================================================
     // Vulkan Extension Function Pointers
     // ========================================================================

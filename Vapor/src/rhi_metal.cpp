@@ -783,6 +783,21 @@ void RHI_Metal::beginFrame() {
         submitUploads(true);
     }
 
+    // VAPOR_RHI_STATS=1: leak-hunt telemetry, one line every ~120 frames
+    // (pairs with the renderer's [RSTATS] line). Whatever climbs across lines
+    // is the leak; flat lines mean the decay is a stall, not memory.
+    static const bool rhiStats = std::getenv("VAPOR_RHI_STATS") != nullptr;
+    static Uint32 statsFrame = 0;
+    if (rhiStats && (statsFrame++ % 120) == 0) {
+        fprintf(stderr,
+            "[MTLSTATS] f=%u buf=%zu tex=%zu smp=%zu shd=%zu pso=%zu cpso=%zu "
+            "pendingUpCmds=%zu oversize=%zu stagingOff=%zuKB\n",
+            statsFrame - 1, buffers.size(), textures.size(), samplers.size(),
+            shaders.size(), pipelines.size(), computePipelines.size(),
+            pendingUploadCmds.size(), oversizeStaging.size(),
+            stagingRingOffset / 1024);
+    }
+
     // Get next drawable. This legitimately fails when the window is occluded
     // or minimized — skip the frame instead of crashing; endFrame() and every
     // command-recording call no-op while currentCommandBuffer is null.

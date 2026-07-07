@@ -647,6 +647,18 @@ void Renderer::beginFrame(const CameraRenderData& camera) {
     // backend recreates an out-of-date/resized swapchain here.
     rhi->beginFrame();
 
+    // VAPOR_RHI_STATS=1: renderer-side leak-hunt telemetry (pairs with the
+    // backend's [VKSTATS]/[MTLSTATS] line — these maps live above the RHI).
+    static const bool rhiStats = std::getenv("VAPOR_RHI_STATS") != nullptr;
+    if (rhiStats && (frameNumber % 120) == 0) {
+        fmt::print(stderr,
+            "[RSTATS] f={} textures={} texCache={} imguiTexCache={} meshes={} "
+            "materials={} renderTextures={} drawables={} instances={}\n",
+            frameNumber, textures.size(), textureCache.size(),
+            imguiTextureCache.size(), meshes.size(), materials.size(),
+            renderTextures.size(), frameDrawables.size(), totalInstanceCount);
+    }
+
     // Window resized: the swapchain extent changed under us — rebuild every
     // swapchain-sized render target before anything records against them.
     // (Old targets are destroy-deferred; nothing has been recorded yet this

@@ -124,6 +124,7 @@ void* RHI_Vulkan::allocStaging(VkDeviceSize size, VkDeviceSize& outOffset) {
     }
     outOffset = stagingRegionBase + aligned;
     stagingRingOffset = aligned + size;
+    statsStagingHighWater = std::max(statsStagingHighWater, stagingRingOffset);
     return static_cast<char*>(stagingRingPtr) + stagingRegionBase + aligned;
 }
 
@@ -501,6 +502,7 @@ void RHI_Vulkan::flushDescriptors() {
         fmt::print(stderr, "flushDescriptors: descriptor pool exhausted\n");
         return;
     }
+    statsDescriptorSets += 3;
 
     // Write only the slots that have been bound; untouched slots stay
     // undefined, which is fine as long as no bound shader statically uses them.
@@ -727,6 +729,7 @@ void RHI_Vulkan::waitIdle() {
 // ============================================================================
 
 BufferHandle RHI_Vulkan::createBuffer(const BufferDesc& desc) {
+    statsBufferCreates++;
     VkBufferCreateInfo bufferInfo{};
     bufferInfo.sType = VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO;
     bufferInfo.size = desc.size;
@@ -798,6 +801,7 @@ void RHI_Vulkan::destroyBuffer(BufferHandle handle) {
 // ============================================================================
 
 TextureHandle RHI_Vulkan::createTexture(const TextureDesc& desc) {
+    statsTextureCreates++;
     // Create image
     VkImageCreateInfo imageInfo{};
     imageInfo.sType = VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO;
@@ -1555,6 +1559,27 @@ void RHI_Vulkan::beginFrame() {
     // is therefore free — reset with no wait, no stall, no unbounded growth.
     stagingRegionBase = currentFrameInFlight * (STAGING_RING_SIZE / MAX_FRAMES_IN_FLIGHT);
     stagingRingOffset = 0;
+
+    // VAPOR_RHI_STATS=1: leak-hunt telemetry. One line every ~120 frames with
+    // every live-object count and the per-window churn counters — whatever
+    // climbs monotonically across lines is the leak (or proves there is none
+    // and the decay is a stall). Negligible cost when the env var is unset.
+    static const bool rhiStats = std::getenv("VAPOR_RHI_STATS") != nullptr;
+    if (rhiStats && (frameCounter % 120) == 0) {
+        fmt::print(stderr,
+            "[VKSTATS] f={} buf={} tex={} smp={} shd={} pso={} cpso={} "
+            "pendingUpFences={} retireQ={} descSets/120f={} bufCreates/120f={} "
+            "texCreates/120f={} stagingHW={}KB\n",
+            frameCounter, buffers.size(), textures.size(), samplers.size(),
+            shaders.size(), pipelines.size(), computePipelines.size(),
+            pendingUploadFences.size(), retirementQueue.size(),
+            statsDescriptorSets, statsBufferCreates, statsTextureCreates,
+            statsStagingHighWater / 1024);
+        statsDescriptorSets = 0;
+        statsBufferCreates = 0;
+        statsTextureCreates = 0;
+        statsStagingHighWater = 0;
+    }
     if (gpuTimingSupported) {
         collectTimestamps(currentFrameInFlight);
     }
@@ -2766,6 +2791,7 @@ void RHI_Vulkan::flushComputeDescriptors() {
         fmt::print(stderr, "flushComputeDescriptors: descriptor pool exhausted\n");
         return;
     }
+    statsDescriptorSets += 2;
 
     VkWriteDescriptorSet writes[BINDINGS_PER_SET * 2];
     VkDescriptorBufferInfo bufferInfos[BINDINGS_PER_SET];
