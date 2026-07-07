@@ -1423,6 +1423,26 @@ void Renderer::buildAccelerationStructures() {
     if (!tlasInstances.empty()) {
         rhi->updateAccelerationStructure(sceneTLAS, tlasInstances);  // rebuilds
     }
+
+    // VAPOR_RT_DEBUG: pinpoint why RT shadow/AO produce the "no hit" default
+    // (uniform white / R=1). Logs once and again only when the counts change, so
+    // it never spams the hot path. Distinguishes: RT off / no BLAS built /
+    // empty visible set / empty TLAS.
+    if (std::getenv("VAPOR_RT_DEBUG")) {
+        Uint32 validBLAS = 0;
+        for (const auto& b : meshBLAS) if (b.isValid()) ++validBLAS;
+        static Uint32 lastVis = ~0u, lastInst = ~0u, lastBLAS = ~0u;
+        Uint32 vis = static_cast<Uint32>(visibleDrawables.size());
+        Uint32 inst = static_cast<Uint32>(tlasInstances.size());
+        if (vis != lastVis || inst != lastInst || validBLAS != lastBLAS) {
+            fmt::print(stderr,
+                "[RT] raytracing={} sceneTLAS.valid={} meshBLAS(valid/total)={}/{} "
+                "visibleDrawables={} tlasInstances={}\n",
+                capabilities.raytracing, sceneTLAS.isValid(), validBLAS,
+                static_cast<Uint32>(meshBLAS.size()), vis, inst);
+            lastVis = vis; lastInst = inst; lastBLAS = validBLAS;
+        }
+    }
 }
 
 void Renderer::normalResolvePass() {

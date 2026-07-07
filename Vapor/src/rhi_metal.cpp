@@ -1496,7 +1496,12 @@ void RHI_Metal::buildAccelerationStructure(AccelStructHandle handle) {
             d.intersectionFunctionTableOffset = 0;
             descriptors.push_back(d);
         }
-        if (descriptors.empty()) return;
+        if (descriptors.empty()) {
+            if (std::getenv("VAPOR_RT_DEBUG"))
+                fprintf(stderr, "[RT] TLAS build: 0 valid descriptors (BLAS not built?) "
+                                "-> accelStruct stays null -> rays miss\n");
+            return;
+        }
 
         // Per-frame TLAS/scratch/instance-buffer rotation (native renderer's
         // TLASBuffers[frameInFlight] scheme): never rebuild into the structure
@@ -1636,6 +1641,13 @@ void RHI_Metal::setComputeTexture(Uint32 binding, TextureHandle texture) {
 
 void RHI_Metal::setAccelerationStructure(Uint32 binding, AccelStructHandle accelStruct) {
     auto it = accelStructs.find(accelStruct.id);
+    if (std::getenv("VAPOR_RT_DEBUG")) {
+        bool found = it != accelStructs.end();
+        fprintf(stderr, "[RT] setAccelerationStructure(bind=%u): found=%d encoder=%d accelStruct=%d%s\n",
+                binding, found ? 1 : 0, currentComputeEncoder ? 1 : 0,
+                (found && it->second.accelStruct) ? 1 : 0,
+                (found && currentComputeEncoder && it->second.accelStruct) ? "" : "  <-- BIND SKIPPED (kernel sees null TLAS)");
+    }
     if (it != accelStructs.end() && currentComputeEncoder && it->second.accelStruct) {
         currentComputeEncoder->setAccelerationStructure(it->second.accelStruct.get(), binding);
         // Residency: binding a TLAS does NOT make its indirectly-referenced
