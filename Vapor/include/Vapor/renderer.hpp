@@ -422,7 +422,6 @@ private:
     Uint32 frameCounter = 0;  // for temporal jitter
     TextureHandle defaultBlackCubemapTex;   // IBL irradiance/prefilter default
     TextureHandle pssmShadowArrayTexture;   // 3-cascade depth array (Vulkan: set2 b6)
-    Uint32 lastClusterLightCount = UINT32_MAX;  // cluster refill tracking
     std::vector<Vapor::RectLight> rectLights;   // gathered from the scene
 
     // ImGui texture previews (RT viewer / material thumbnails)

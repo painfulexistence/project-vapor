@@ -1042,22 +1042,12 @@ void Renderer::updateBuffers() {
                           instanceData.size() * sizeof(Vapor::InstanceData));
     }
 
-    // Clusters: until the TileCulling compute pass is ported, every cluster
-    // lists every point light (correct, just unculled). Refilled only when
-    // the light count changes — the buffer is ~6MB.
-    Uint32 clusterLightCount = static_cast<Uint32>(std::min<size_t>(pointLights.size(), 256));
-    if (clusterLightCount != lastClusterLightCount) {
-        lastClusterLightCount = clusterLightCount;
-        Vapor::Cluster tpl{};
-        tpl.lightCount = clusterLightCount;
-        for (Uint32 i = 0; i < clusterLightCount; i++) {
-            tpl.lightIndices[i] = i;
-        }
-        std::vector<Vapor::Cluster> clusters(
-            static_cast<size_t>(clusterGridSizeX) * clusterGridSizeY * clusterGridSizeZ, tpl);
-        rhi->updateBuffer(clusterBuffer, clusters.data(), 0,
-                          clusters.size() * sizeof(Vapor::Cluster));
-    }
+    // (No CPU-side cluster upload: the TileCulling compute pass produces the
+    // whole cluster buffer on the GPU every frame — like the native renderer,
+    // which never touches cluster data from the CPU. The old "fill every tile
+    // with every light" path here predated that compute port; it uploaded a
+    // ~6MB buffer whenever the light count changed and only fought the GPU
+    // cull that immediately overwrote it.)
 
     if (!rectLights.empty()) {
         rhi->updateBuffer(rectLightBuffer, rectLights.data(), 0,
