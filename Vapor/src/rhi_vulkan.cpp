@@ -1350,7 +1350,12 @@ void RHI_Vulkan::generateMipmaps(TextureHandle handle) {
         b.subresourceRange.layerCount = VK_REMAINING_ARRAY_LAYERS;
         b.srcAccessMask = srcAccess;
         b.dstAccessMask = dstAccess;
-        vkCmdPipelineBarrier(cmd, VK_PIPELINE_STAGE_ALL_COMMANDS_BIT, VK_PIPELINE_STAGE_TRANSFER_BIT,
+        // dstStage = ALL_COMMANDS (not TRANSFER): the final barriers transition
+        // to SHADER_READ_ONLY with dstAccessMask = SHADER_READ, which the
+        // TRANSFER stage does not support (VUID-vkCmdPipelineBarrier-dstAccessMask-02816).
+        // ALL_COMMANDS is valid for both the transfer and shader-read access
+        // masks; this is an upload-time op, so the conservative scope is fine.
+        vkCmdPipelineBarrier(cmd, VK_PIPELINE_STAGE_ALL_COMMANDS_BIT, VK_PIPELINE_STAGE_ALL_COMMANDS_BIT,
                              0, 0, nullptr, 0, nullptr, 1, &b);
     };
 

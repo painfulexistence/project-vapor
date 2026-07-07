@@ -3674,16 +3674,27 @@ TextureId Renderer::getOrCreateTexture(const std::shared_ptr<Vapor::Image>& imag
         return it->second;
     }
 
-    // Create new texture
+    // Create new texture with a full mip chain. Native (renderer_metal.cpp
+    // createTexture) sizes material textures to calculateMipmapLevelCount =
+    // floor(log2(max(w,h))) + 1 and blits the chain with generateMipmaps; the
+    // RHI path previously left mipLevels at 1, so minified surfaces sampled
+    // only the base level and shimmered/aliased. Match native exactly.
+    Uint32 mipLevels = static_cast<Uint32>(
+        std::floor(std::log2(std::max(image->width, image->height)))) + 1u;
     TextureDesc texDesc;
     texDesc.width = image->width;
     texDesc.height = image->height;
     texDesc.format = PixelFormat::RGBA8_UNORM;
     texDesc.usage = TextureUsage::Sampled;
+    texDesc.mipLevels = mipLevels;
     TextureHandle texHandle = rhi->createTexture(texDesc);
 
     if (!image->byteArray.empty()) {
+        // Uploads the base level (mip 0); generateMipmaps fills the rest.
         rhi->updateTexture(texHandle, image->byteArray.data(), image->byteArray.size());
+        if (mipLevels > 1) {
+            rhi->generateMipmaps(texHandle);
+        }
     }
 
     RenderTexture tex;
