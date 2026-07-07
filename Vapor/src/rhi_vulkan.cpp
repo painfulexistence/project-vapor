@@ -560,10 +560,9 @@ void RHI_Vulkan::invalidateDescriptorCache() {
     descriptorEpoch++;
 }
 
-void RHI_Vulkan::flushDescriptors() {
-    if (!descriptorsDirty || currentCommandBuffer == VK_NULL_HANDLE) {
-        return;
-    }
+bool RHI_Vulkan::flushDescriptors() {
+    if (currentCommandBuffer == VK_NULL_HANDLE) return false;
+    if (!descriptorsDirty) return true;  // already bound this state — draw may proceed
     descriptorsDirty = false;
 
     // Cache hit: the exact binding combination has a set already written — just
@@ -574,7 +573,7 @@ void RHI_Vulkan::flushDescriptors() {
     if (auto it = cache.find(key); it != cache.end()) {
         vkCmdBindDescriptorSets(currentCommandBuffer, VK_PIPELINE_BIND_POINT_GRAPHICS,
                                 globalPipelineLayout, 0, 3, it->second.data(), 0, nullptr);
-        return;
+        return true;
     }
 
     VkDescriptorSetLayout layouts[3] = { vertexBufferSetLayout, fragmentBufferSetLayout, textureSetLayout };
@@ -586,11 +585,12 @@ void RHI_Vulkan::flushDescriptors() {
     allocInfo.pSetLayouts = layouts;
     // No mid-frame reset fallback: the pool is reset only at beginFrame. If it
     // ever overflows within one epoch (thousands of distinct combos in a single
-    // frame slot — not expected) we simply skip binding this draw rather than
-    // reset a pool the command buffer already references.
+    // frame slot — not expected once churn is gated), return false so the caller
+    // skips the draw entirely — binding a pipeline with no descriptor sets is a
+    // hard error (set-N-out-of-bounds VUID + a Metal validation assert).
     if (vkAllocateDescriptorSets(device, &allocInfo, sets) != VK_SUCCESS) {
         fmt::print(stderr, "flushDescriptors: cache pool overflow (skipping draw)\n");
-        return;
+        return false;
     }
     statsDescriptorSets += 3;
 
@@ -640,6 +640,7 @@ void RHI_Vulkan::flushDescriptors() {
     cache.emplace(key, std::array<VkDescriptorSet, 3>{ sets[0], sets[1], sets[2] });
     vkCmdBindDescriptorSets(currentCommandBuffer, VK_PIPELINE_BIND_POINT_GRAPHICS,
                             globalPipelineLayout, 0, 3, sets, 0, nullptr);
+    return true;
 }
 
 void RHI_Vulkan::transitionImage(VkImage image, VkImageLayout from, VkImageLayout to, VkImageAspectFlags aspect) {
@@ -867,7 +868,7 @@ BufferHandle RHI_Vulkan::createBuffer(const BufferDesc& desc) {
 
     Uint32 id = nextBufferId++;
     const bool hostVisible = desc.memoryUsage != MemoryUsage::GPU;
-    buffers[id] = {buffer, memory, desc.size, false, nullptr, hostVisible};
+    buffers[id] = {buffer, memory, desc.size, false, nullptr, hostVisible, desc.usage};
 
     return BufferHandle{id};
 }
@@ -875,10 +876,18 @@ BufferHandle RHI_Vulkan::createBuffer(const BufferDesc& desc) {
 void RHI_Vulkan::destroyBuffer(BufferHandle handle) {
     auto it = buffers.find(handle.id);
     if (it != buffers.end()) {
-        // Drop any cached descriptor sets referencing this buffer so no future
-        // bind points at a dying VkBuffer. (Rare: destroys happen on resize /
-        // scene load, never per frame.)
-        invalidateDescriptorCache();
+        // Only Uniform/Storage buffers can appear in a descriptor set, so only
+        // those can invalidate the cache. Vertex/Index buffers bind via
+        // vkCmdBindVertexBuffers/BindIndexBuffer — NEVER descriptors — so
+        // destroying them (RmlUI recompiles its geometry EVERY frame as the HUD
+        // text changes) must not touch the cache. Bumping the epoch on those
+        // was nuking the whole scene cache every frame -> allocations never
+        // collapsed, the pool grew until it overflowed, and skipped draws left
+        // pipelines with no descriptor sets bound (the set-2-out-of-bounds
+        // VUID + Metal assert).
+        if (it->second.usage == BufferUsage::Uniform || it->second.usage == BufferUsage::Storage) {
+            invalidateDescriptorCache();
+        }
         // The handle dies now; the Vulkan objects retire once every frame
         // that could still reference them has completed.
         VkDevice dev = device;
@@ -2139,15 +2148,13 @@ void RHI_Vulkan::setTexture(Uint32 set, Uint32 binding, TextureHandle texture, S
 }
 
 void RHI_Vulkan::draw(Uint32 vertexCount, Uint32 instanceCount, Uint32 firstVertex, Uint32 firstInstance) {
-    if (currentCommandBuffer != VK_NULL_HANDLE) {
-        flushDescriptors();
+    if (currentCommandBuffer != VK_NULL_HANDLE && flushDescriptors()) {
         vkCmdDraw(currentCommandBuffer, vertexCount, instanceCount, firstVertex, firstInstance);
     }
 }
 
 void RHI_Vulkan::drawIndexed(Uint32 indexCount, Uint32 instanceCount, Uint32 firstIndex, int32_t vertexOffset, Uint32 firstInstance) {
-    if (currentCommandBuffer != VK_NULL_HANDLE) {
-        flushDescriptors();
+    if (currentCommandBuffer != VK_NULL_HANDLE && flushDescriptors()) {
         vkCmdDrawIndexed(currentCommandBuffer, indexCount, instanceCount, firstIndex, vertexOffset, firstInstance);
     }
 }
@@ -2886,10 +2893,9 @@ void RHI_Vulkan::setComputeTexture(Uint32 binding, TextureHandle texture) {
     computeDescriptorsDirty = true;
 }
 
-void RHI_Vulkan::flushComputeDescriptors() {
-    if (!computeDescriptorsDirty || currentCommandBuffer == VK_NULL_HANDLE) {
-        return;
-    }
+bool RHI_Vulkan::flushComputeDescriptors() {
+    if (currentCommandBuffer == VK_NULL_HANDLE) return false;
+    if (!computeDescriptorsDirty) return true;  // already bound — dispatch may proceed
     computeDescriptorsDirty = false;
 
     auto& cache = computeDescriptorCache[currentFrameInFlight];
@@ -2897,7 +2903,7 @@ void RHI_Vulkan::flushComputeDescriptors() {
     if (auto it = cache.find(key); it != cache.end()) {
         vkCmdBindDescriptorSets(currentCommandBuffer, VK_PIPELINE_BIND_POINT_COMPUTE,
                                 computePipelineLayout, 0, 2, it->second.data(), 0, nullptr);
-        return;
+        return true;
     }
 
     VkDescriptorSetLayout layouts[2] = { computeBufferSetLayout, computeImageSetLayout };
@@ -2909,7 +2915,7 @@ void RHI_Vulkan::flushComputeDescriptors() {
     allocInfo.pSetLayouts = layouts;
     if (vkAllocateDescriptorSets(device, &allocInfo, sets) != VK_SUCCESS) {
         fmt::print(stderr, "flushComputeDescriptors: cache pool overflow (skipping dispatch)\n");
-        return;
+        return false;
     }
     statsDescriptorSets += 2;
 
@@ -2951,6 +2957,7 @@ void RHI_Vulkan::flushComputeDescriptors() {
     cache.emplace(key, std::array<VkDescriptorSet, 2>{ sets[0], sets[1] });
     vkCmdBindDescriptorSets(currentCommandBuffer, VK_PIPELINE_BIND_POINT_COMPUTE,
                             computePipelineLayout, 0, 2, sets, 0, nullptr);
+    return true;
 }
 
 void RHI_Vulkan::setAccelerationStructure(Uint32 binding, AccelStructHandle accelStruct) {
@@ -2959,8 +2966,7 @@ void RHI_Vulkan::setAccelerationStructure(Uint32 binding, AccelStructHandle acce
 }
 
 void RHI_Vulkan::dispatch(Uint32 groupCountX, Uint32 groupCountY, Uint32 groupCountZ) {
-    if (currentCommandBuffer) {
-        flushComputeDescriptors();
+    if (currentCommandBuffer && flushComputeDescriptors()) {
         vkCmdDispatch(currentCommandBuffer, groupCountX, groupCountY, groupCountZ);
     }
 }

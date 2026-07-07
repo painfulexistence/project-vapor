@@ -200,6 +200,7 @@ private:
         bool isMapped;
         void* mappedData;
         bool hostVisible = true;
+        BufferUsage usage = BufferUsage::Storage;  // gates descriptor-cache invalidation
     };
 
     struct TextureResource {
@@ -345,7 +346,7 @@ private:
     BufferBinding boundComputeBuffers[BINDINGS_PER_SET];
     VkImageView boundComputeImages[BINDINGS_PER_SET] = {};
     bool computeDescriptorsDirty = true;
-    void flushComputeDescriptors();
+    bool flushComputeDescriptors();  // false = could not bind, caller must skip the dispatch
 
     // ========================================================================
     // Batched Upload Stream
@@ -456,7 +457,7 @@ private:
 
     void createDescriptorInfrastructure();
     void destroyDescriptorInfrastructure();
-    void flushDescriptors();
+    bool flushDescriptors();  // false = could not bind, caller must skip the draw
     void transitionImage(VkImage image, VkImageLayout from, VkImageLayout to, VkImageAspectFlags aspect);
 
     // ========================================================================
