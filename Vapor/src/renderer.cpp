@@ -3758,12 +3758,12 @@ void Renderer::bindMaterial(MaterialId materialId) {
 
 std::unique_ptr<IRenderer> createRenderer(GraphicsBackend backend, SDL_Window* window) {
 #ifdef __APPLE__
-    // Metal uses the full-feature native renderer (45 passes, RT/GIBS/water/…)
-    // by default. Set VAPOR_METAL_RHI=1 to route Metal through the RHI renderer
-    // instead — the bring-up path for the target architecture
-    // (renderer -> RHI -> {rhi_metal, rhi_vulkan}); passes not yet ported to
-    // the RHI renderer are missing there.
-    if (backend == GraphicsBackend::Metal && !std::getenv("VAPOR_METAL_RHI")) {
+    // Metal now routes through the RHI renderer by default (the target
+    // architecture: renderer -> RHI -> {rhi_metal, rhi_vulkan}). Set
+    // VAPOR_METAL_NATIVE=1 to fall back to the legacy full-feature native
+    // renderer (45 passes) — kept for A/B comparison and for the handful of
+    // passes not yet on the RHI path.
+    if (backend == GraphicsBackend::Metal && std::getenv("VAPOR_METAL_NATIVE")) {
         return createRendererMetal(window);
     }
 #endif
