@@ -100,6 +100,7 @@ struct RenderMaterial {
     float sheenTint = 0.5f;
     float clearcoat = 0.0f;
     float clearcoatGloss = 1.0f;
+    bool useIBL = false;  // native Material::useIBL default (graphics.hpp)
 
     // Texture references (IDs, not handles)
     TextureId albedoTexture = INVALID_TEXTURE_ID;

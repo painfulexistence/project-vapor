@@ -1028,10 +1028,18 @@ void Renderer::updateBuffers() {
             data.sheenTint = mat.sheenTint;
             data.clearcoat = mat.clearcoat;
             data.clearcoatGloss = mat.clearcoatGloss;
+            data.iblEnabled = mat.useIBL ? 1.0f : 0.0f;  // panel "Use IBL"
             materialDataArray.push_back(data);
         }
         rhi->updateBuffer(materialUniformBuffer, materialDataArray.data(), 0,
                           materialDataArray.size() * sizeof(Vapor::MaterialData));
+    }
+
+    // Atmosphere tunables are panel-editable; re-upload every frame so edits
+    // reach the sky/fog/IBL consumers (the buffer is tiny; staged-ring cost
+    // is negligible, and it keeps every frame slot coherent).
+    if (atmosphereDataBuffer.isValid()) {
+        rhi->updateBuffer(atmosphereDataBuffer, &atmosphereData, 0, sizeof(atmosphereData));
     }
 
     // Update directional lights
@@ -1731,7 +1739,7 @@ void Renderer::stochasticPointShadowPass() {
     // unlike the packed_uint3 the other kernels use) — push a uvec4.
     glm::uvec4 gridDims(clusterGridSizeX, clusterGridSizeY, clusterGridSizeZ, 0u);
     Uint32 fi = frameCounter;
-    Uint32 debugMode = 0;
+    Uint32 debugMode = pointShadowDebugMode;  // panel "Point shadow view"
     rhi->beginComputePass("StochasticPointShadow");
     rhi->bindComputePipeline(stochasticPointShadowPipeline);
     rhi->setComputeTexture(0, depthStencilRT);
@@ -1763,9 +1771,19 @@ void Renderer::gibsPass() {
 
     // Counter readback: p[1] = allocated surfels (one frame latent, like the
     // native shared-memory read); p[0] = per-frame new-surfel budget counter.
+    // A panel-requested reset zeroes both cursors (native resetSurfels());
+    // stale surfels beyond the count stay in the buffer but every consumer
+    // gates on activeSurfelCount, so they are never read.
     if (Uint32* p = static_cast<Uint32*>(rhi->mapBuffer(surfelCounterBuffer))) {
-        gibsActiveSurfels = std::min(p[1], gibsMaxSurfels);
-        p[0] = 0;
+        if (gibsResetRequested) {
+            p[0] = 0;
+            p[1] = 0;
+            gibsActiveSurfels = 0;
+            gibsResetRequested = false;
+        } else {
+            gibsActiveSurfels = std::min(p[1], gibsMaxSurfels);
+            p[0] = 0;
+        }
         rhi->unmapBuffer(surfelCounterBuffer);
     }
 
@@ -4384,25 +4402,229 @@ void Renderer::drawGraphicsImGui() {
         ImGui::TreePop();
     }
 
-    // Effect toggles + key tunables for the RHI pass chain.
-    if (ImGui::TreeNode("Effects")) {
-        ImGui::Checkbox("God rays", &lightScatteringEnabled);
-        ImGui::Checkbox("Height fog", &volumetricFogEnabled);
-        ImGui::Checkbox("Particles", &particleSystemEnabled);
-        ImGui::Checkbox("AO (RT)", &aoEnabled);
-        ImGui::Checkbox("Sun flare", &sunFlareEnabled);
-        ImGui::Checkbox("GIBS GI (RT)", &gibsEnabled);
-        ImGui::Checkbox("Volumetric clouds", &volumetricCloudsEnabled);
-        if (volumetricCloudsEnabled) {
-            ImGui::SliderFloat("Cloud coverage", &cloudSettings.cloudCoverage, 0.0f, 1.0f);
-            ImGui::SliderFloat("Cloud density", &cloudSettings.cloudDensity, 0.0f, 1.0f);
-            ImGui::SliderFloat("Cloud type", &cloudSettings.cloudType, 0.0f, 1.0f);
-            ImGui::SliderFloat("Temporal blend", &cloudSettings.temporalBlend, 0.01f, 1.0f);
-            int steps = static_cast<int>(cloudSettings.primarySteps);
-            if (ImGui::SliderInt("Primary steps", &steps, 8, 128)) {
-                cloudSettings.primarySteps = static_cast<Uint32>(steps);
-            }
+    // ------------------------------------------------------------------------
+    // Per-pass parameter sections — native drawDebugImGui parity (grouping and
+    // labels match renderer_metal.cpp so users find the same knobs).
+    // ------------------------------------------------------------------------
+
+    if (ImGui::TreeNode("Shadow Debug")) {
+        ImGui::SliderFloat("RT shadow max dist", &pssmRTMaxDist, 5.0f, 200.0f);
+        int psd = static_cast<int>(pointShadowDebugMode);
+        if (ImGui::Combo("Point shadow view", &psd, "Visibility (normal)\0Tile light-count heatmap\0")) {
+            pointShadowDebugMode = static_cast<Uint32>(psd);
         }
+        ImGui::TreePop();
+    }
+
+    // Scene material editor — edits the renderer's live copies; updateBuffers()
+    // re-uploads MaterialData every frame, so changes apply immediately.
+    if (ImGui::TreeNode("Scene Materials")) {
+        for (size_t i = 0; i < materials.size(); i++) {
+            RenderMaterial& m = materials[i];
+            ImGui::PushID(static_cast<int>(i));
+            if (ImGui::TreeNode("", "Material %zu", i)) {
+                ImGui::ColorEdit4("Base Color Factor", &m.baseColorFactor.x);
+                ImGui::DragFloat("Normal Scale", &m.normalScale, 0.05f, 0.0f, 5.0f);
+                ImGui::DragFloat("Roughness Factor", &m.roughnessFactor, 0.05f, 0.0f, 5.0f);
+                ImGui::DragFloat("Metallic Factor", &m.metallicFactor, 0.05f, 0.0f, 5.0f);
+                ImGui::DragFloat("Occlusion Strength", &m.occlusionStrength, 0.05f, 0.0f, 5.0f);
+                ImGui::ColorEdit3("Emissive Color Factor", &m.emissiveFactor.x);
+                ImGui::DragFloat("Emissive Strength", &m.emissiveStrength, 0.05f, 0.0f, 5.0f);
+                ImGui::DragFloat("Subsurface", &m.subsurface, 0.01f, 0.0f, 1.0f);
+                ImGui::DragFloat("Specular", &m.specular, 0.01f, 0.0f, 1.0f);
+                ImGui::DragFloat("Specular Tint", &m.specularTint, 0.01f, 0.0f, 1.0f);
+                ImGui::DragFloat("Anisotropic", &m.anisotropic, 0.01f, 0.0f, 1.0f);
+                ImGui::DragFloat("Sheen", &m.sheen, 0.01f, 0.0f, 1.0f);
+                ImGui::DragFloat("Sheen Tint", &m.sheenTint, 0.01f, 0.0f, 1.0f);
+                ImGui::DragFloat("Clearcoat", &m.clearcoat, 0.01f, 0.0f, 1.0f);
+                ImGui::DragFloat("Clearcoat Gloss", &m.clearcoatGloss, 0.01f, 0.0f, 1.0f);
+                ImGui::Checkbox("Use IBL", &m.useIBL);
+                ImGui::TreePop();
+            }
+            ImGui::PopID();
+        }
+        ImGui::TreePop();
+    }
+
+    // Scene light editor — edits the shared Scene light lists, which
+    // submitSceneLights() re-reads every frame (same flow as native).
+    if (currentScene && ImGui::TreeNode("Scene Lights")) {
+        int lid = 0;
+        for (auto& l : currentScene->directionalLights) {
+            ImGui::PushID(lid++);
+            if (ImGui::TreeNode("", "Directional %d", lid)) {
+                ImGui::DragFloat3("Direction", &l.direction.x, 0.1f);
+                ImGui::ColorEdit3("Color", &l.color.x);
+                ImGui::DragFloat("Intensity", &l.intensity, 0.1f, 0.0001f, 10000.0f);
+                ImGui::TreePop();
+            }
+            ImGui::PopID();
+        }
+        for (auto& l : currentScene->pointLights) {
+            ImGui::PushID(lid++);
+            if (ImGui::TreeNode("", "Point %d", lid)) {
+                ImGui::DragFloat3("Position", &l.position.x, 0.1f);
+                ImGui::ColorEdit3("Color", &l.color.x);
+                ImGui::DragFloat("Intensity", &l.intensity, 0.1f, 0.0001f, 10000.0f);
+                ImGui::DragFloat("Radius", &l.radius, 0.1f, 0.0001f, 1000.0f);
+                ImGui::TreePop();
+            }
+            ImGui::PopID();
+        }
+        ImGui::TreePop();
+    }
+
+    // Atmosphere — edits atmosphereData (re-uploaded every frame in
+    // updateBuffers). Changing it refreshes the sky-derived IBL like native.
+    if (ImGui::TreeNode("Atmosphere")) {
+        bool ch = false;
+        ch |= ImGui::DragFloat3("Sun Direction", &atmosphereData.sunDirection.x, 0.01f, -1.0f, 1.0f);
+        ch |= ImGui::DragFloat("Sun Intensity", &atmosphereData.sunIntensity, 0.5f, 0.0f, 100.0f);
+        ch |= ImGui::ColorEdit3("Sun Color", &atmosphereData.sunColor.x);
+        ch |= ImGui::DragFloat("Exposure", &atmosphereData.exposure, 0.01f, 0.01f, 10.0f);
+        ch |= ImGui::ColorEdit3("Ground Color", &atmosphereData.groundColor.x);
+        if (ImGui::TreeNode("Advanced")) {
+            ch |= ImGui::DragFloat("Planet Radius (m)", &atmosphereData.planetRadius, 1000.0f, 1e3f, 1e8f);
+            ch |= ImGui::DragFloat("Atmosphere Radius (m)", &atmosphereData.atmosphereRadius, 1000.0f, 1e3f, 1e8f);
+            ch |= ImGui::DragFloat("Rayleigh Scale Height", &atmosphereData.rayleighScaleHeight, 100.0f, 100.0f, 50000.0f);
+            ch |= ImGui::DragFloat("Mie Scale Height", &atmosphereData.mieScaleHeight, 100.0f, 100.0f, 10000.0f);
+            ch |= ImGui::DragFloat("Mie Direction (g)", &atmosphereData.miePreferredDirection, 0.01f, -0.999f, 0.999f);
+            glm::vec3 rayleighScaled = atmosphereData.rayleighCoefficients * 1e6f;
+            if (ImGui::DragFloat3("Rayleigh R/G/B (x1e-6)", &rayleighScaled.x, 0.1f, 0.0f, 100.0f)) {
+                atmosphereData.rayleighCoefficients = rayleighScaled * 1e-6f;
+                ch = true;
+            }
+            float mieScaled = atmosphereData.mieCoefficient * 1e6f;
+            if (ImGui::DragFloat("Mie Coeff (x1e-6)", &mieScaled, 0.1f, 0.0f, 100.0f)) {
+                atmosphereData.mieCoefficient = mieScaled * 1e-6f;
+                ch = true;
+            }
+            if (ImGui::Button("Reset to Earth Defaults")) {
+                glm::vec3 keepDir = atmosphereData.sunDirection;
+                glm::vec3 keepCol = atmosphereData.sunColor;
+                float keepInt = atmosphereData.sunIntensity;
+                atmosphereData = AtmosphereRenderData{};
+                atmosphereData.sunDirection = keepDir;
+                atmosphereData.sunColor = keepCol;
+                atmosphereData.sunIntensity = keepInt;
+                ch = true;
+            }
+            ImGui::TreePop();
+        }
+        if (ImGui::Button("Refresh IBL")) iblNeedsUpdate = true;
+        if (ch) iblNeedsUpdate = true;  // sky changed -> recapture IBL (native behavior)
+        ImGui::TreePop();
+    }
+
+    if (ImGui::TreeNode("Water Settings")) {
+        ImGui::TextDisabled("(water pass not ported to the RHI renderer yet)");
+        ImGui::TreePop();
+    }
+
+    if (ImGui::TreeNode("Ambient Occlusion")) {
+        ImGui::Checkbox("Enabled", &aoEnabled);
+        if (capabilities.raytracing) {
+            ImGui::Combo("Method", &aoMethod, "Ray Traced\0Screen Space\0");
+        } else {
+            ImGui::BeginDisabled();
+            int forced = 1;
+            ImGui::Combo("Method", &forced, "Ray Traced\0Screen Space\0");
+            ImGui::EndDisabled();
+            ImGui::SameLine();
+            ImGui::TextDisabled("(no RT: SSAO forced)");
+        }
+        ImGui::TreePop();
+    }
+
+    if (ImGui::TreeNode("Global Illumination (GIBS)")) {
+        if (!capabilities.raytracing) ImGui::TextDisabled("(requires raytracing)");
+        ImGui::Checkbox("Enabled", &gibsEnabled);
+        ImGui::Text("Active surfels: %u / %u", gibsActiveSurfels, gibsMaxSurfels);
+        if (ImGui::Button("Reset Surfels")) gibsResetRequested = true;
+        if (ImGui::Combo("Quality", &gibsQuality, "Low\0Medium\0High\0Ultra\0")) {
+            Uint32 newMax; Uint32 newRays; float newScale;
+            getGIBSQualitySettings(static_cast<GIBSQuality>(gibsQuality), newMax, newRays, newScale);
+            // Buffers were sized at init for the default (Medium) preset; clamp
+            // like native so kernels never write past the allocated pool.
+            gibsMaxSurfels = std::min(newMax, 500000u);
+            gibsRaysPerSurfel = newRays;
+            if (newScale != gibsResolutionScale) {
+                gibsResolutionScale = newScale;
+                // Force a render-target rebuild next beginFrame so the GI
+                // texture is recreated at the new scale (UINT32_MAX, not 0 —
+                // zero means "first frame, targets already built").
+                lastRTWidth = UINT32_MAX;
+            }
+            gibsResetRequested = true;  // surfel pool contents are preset-dependent
+        }
+        ImGui::TreePop();
+    }
+
+    if (ImGui::TreeNode("Light Scattering (God Rays)")) {
+        ImGui::Checkbox("Enabled", &lightScatteringEnabled);
+        int samples = static_cast<int>(lightScatteringSettings.numSamples);
+        if (ImGui::SliderInt("Samples", &samples, 8, 128))
+            lightScatteringSettings.numSamples = static_cast<Uint32>(samples);
+        ImGui::DragFloat("Max Distance", &lightScatteringSettings.maxDistance, 0.01f, 0.1f, 2.0f);
+        ImGui::DragFloat("Density", &lightScatteringSettings.density, 0.01f, 0.0f, 5.0f);
+        ImGui::DragFloat("Weight", &lightScatteringSettings.weight, 0.001f, 0.001f, 0.1f);
+        ImGui::DragFloat("Decay", &lightScatteringSettings.decay, 0.001f, 0.9f, 1.0f);
+        ImGui::DragFloat("Exposure", &lightScatteringSettings.exposure, 0.01f, 0.0f, 2.0f);
+        ImGui::DragFloat("Sun Intensity", &lightScatteringSettings.sunIntensity, 0.1f, 0.0f, 10.0f);
+        ImGui::DragFloat("Mie G (Phase)", &lightScatteringSettings.mieG, 0.01f, -0.99f, 0.99f);
+        ImGui::DragFloat("Depth Threshold", &lightScatteringSettings.depthThreshold, 0.0001f, 0.99f, 1.0f, "%.4f");
+        ImGui::DragFloat("Temporal Jitter", &lightScatteringSettings.jitter, 0.01f, 0.0f, 1.0f);
+        if (ImGui::Button("Reset to Defaults")) lightScatteringSettings = LightScatteringRenderData{};
+        ImGui::TreePop();
+    }
+
+    if (ImGui::TreeNode("Height Fog")) {
+        ImGui::Checkbox("Enabled", &volumetricFogEnabled);
+        ImGui::DragFloat("Density", &fogSettings.fogDensity, 0.001f, 0.0f, 0.5f);
+        ImGui::DragFloat("Height Falloff", &fogSettings.fogHeightFalloff, 0.01f, 0.001f, 1.0f);
+        ImGui::DragFloat("Base Height", &fogSettings.fogBaseHeight, 1.0f, -100.0f, 100.0f);
+        ImGui::DragFloat("Max Height", &fogSettings.fogMaxHeight, 10.0f, 0.0f, 500.0f);
+        ImGui::DragFloat("Anisotropy", &fogSettings.anisotropy, 0.01f, -0.99f, 0.99f);
+        ImGui::DragFloat("Ambient Intensity", &fogSettings.ambientIntensity, 0.01f, 0.0f, 2.0f);
+        if (ImGui::Button("Reset to Defaults")) fogSettings = FogRenderData{};
+        ImGui::TreePop();
+    }
+
+    if (ImGui::TreeNode("Volumetric Clouds")) {
+        ImGui::Checkbox("Enabled", &volumetricCloudsEnabled);
+        if (ImGui::DragFloat("Bottom (m)", &cloudSettings.cloudLayerBottom, 100.0f, 0.0f, 10000.0f) |
+            ImGui::DragFloat("Top (m)", &cloudSettings.cloudLayerTop, 100.0f, 0.0f, 15000.0f)) {
+            cloudSettings.cloudLayerThickness =
+                std::max(1.0f, cloudSettings.cloudLayerTop - cloudSettings.cloudLayerBottom);
+        }
+        ImGui::DragFloat("Coverage", &cloudSettings.cloudCoverage, 0.01f, 0.0f, 1.0f);
+        ImGui::DragFloat("Density", &cloudSettings.cloudDensity, 0.01f, 0.0f, 1.0f);
+        ImGui::DragFloat("Type (Stratus-Cumulus)", &cloudSettings.cloudType, 0.01f, 0.0f, 1.0f);
+        ImGui::DragFloat("Ambient", &cloudSettings.ambientIntensity, 0.01f, 0.0f, 1.0f);
+        ImGui::DragFloat("Silver Lining", &cloudSettings.silverLiningIntensity, 0.01f, 0.0f, 2.0f);
+        // RHI-only extras (kept from the original Effects panel)
+        ImGui::SliderFloat("Temporal blend", &cloudSettings.temporalBlend, 0.01f, 1.0f);
+        int steps = static_cast<int>(cloudSettings.primarySteps);
+        if (ImGui::SliderInt("Primary steps", &steps, 8, 128))
+            cloudSettings.primarySteps = static_cast<Uint32>(steps);
+        ImGui::TreePop();
+    }
+
+    // The RHI sun flare is a clean-room redesign with a reduced knob set;
+    // the native controls that map onto existing fields are exposed here.
+    if (ImGui::TreeNode("Sun Flare (Lens Flare)")) {
+        ImGui::Checkbox("Enabled", &sunFlareEnabled);
+        ImGui::DragFloat("Intensity", &sunFlareSettings.intensity, 0.01f, 0.0f, 4.0f);
+        ImGui::ColorEdit3("Sun Color", &sunFlareSettings.sunColor.x);
+        ImGui::DragFloat("Glow Size", &sunFlareSettings.glowSize, 0.005f, 0.0f, 2.0f);
+        ImGui::DragFloat("Halo Radius", &sunFlareSettings.haloRadius, 0.005f, 0.0f, 1.0f);
+        ImGui::DragFloat("Ghost Spacing", &sunFlareSettings.ghostSpacing, 0.01f, -1.0f, 1.0f);
+        ImGui::DragFloat("Streak Intensity", &sunFlareSettings.streakIntensity, 0.01f, 0.0f, 1.0f);
+        ImGui::TreePop();
+    }
+
+    if (ImGui::TreeNode("Effects")) {
+        ImGui::Checkbox("Particles", &particleSystemEnabled);
         ImGui::TreePop();
     }
 

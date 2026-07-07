@@ -698,6 +698,9 @@ private:
     // PSSM: distance where RT near-field shadows hand over to the cascades
     // (native pssmRTMaxDist, panel-tunable 5..200).
     float pssmRTMaxDist = 50.0f;
+    // Stochastic point-shadow debug view (native pointShadowDebugMode):
+    // 0 = visibility, 1 = tile light-count heatmap.
+    Uint32 pointShadowDebugMode = 0;
 
     // Sun/lens flare (Metal MSL for now; GLSL twin lands with the IBL round).
     // (tileCullingPipeline is declared with the other compute pipelines above.)
