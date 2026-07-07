@@ -2659,14 +2659,15 @@ void RHI_Vulkan::updateAccelerationStructure(AccelStructHandle handle, const std
 // Compute Commands
 // ============================================================================
 
-void RHI_Vulkan::beginComputePass() {
+void RHI_Vulkan::beginComputePass(const char* name) {
     // Compute shares the frame command buffer; just instrument the region
     if (currentCommandBuffer == VK_NULL_HANDLE) {
         return;
     }
-    beginDebugLabel(currentCommandBuffer, "Compute");
+    if (!name) name = "Compute";
+    beginDebugLabel(currentCommandBuffer, name);
     Uint32 tsBegin, tsEnd;
-    if (allocateTimestampPair("Compute", tsBegin, tsEnd)) {
+    if (allocateTimestampPair(name, tsBegin, tsEnd)) {
         vkCmdWriteTimestamp(currentCommandBuffer, VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT,
                             timestampPools[currentFrameInFlight], tsBegin);
         currentPassEndQuery = tsEnd;

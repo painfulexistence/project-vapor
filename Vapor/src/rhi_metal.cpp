@@ -1571,23 +1571,24 @@ void RHI_Metal::updateAccelerationStructure(AccelStructHandle handle, const std:
 // Compute Commands
 // ============================================================================
 
-void RHI_Metal::beginComputePass() {
+void RHI_Metal::beginComputePass(const char* name) {
     // End any active render encoder
     if (currentRenderEncoder) {
         currentRenderEncoder->endEncoding();
         currentRenderEncoder = nullptr;
     }
+    if (!name) name = "Compute";
 
     static const char* dbgEnv = std::getenv("VAPOR_METAL_DEBUG");
     if (dbgEnv && dbgEnv[0] == '2') {
-        fprintf(stderr, "[pass] Compute\n");
+        fprintf(stderr, "[pass] %s\n", name);
         fflush(stderr);
     }
 
     // Create compute encoder
     if (currentCommandBuffer && !currentComputeEncoder) {
         NS::UInteger timingBegin, timingEnd;
-        if (allocateTimingSlots("Compute", timingBegin, timingEnd)) {
+        if (allocateTimingSlots(name, timingBegin, timingEnd)) {
             auto passDesc = NS::TransferPtr(MTL::ComputePassDescriptor::computePassDescriptor());
             auto* sampleAttachment = passDesc->sampleBufferAttachments()->object(0);
             sampleAttachment->setSampleBuffer(gpuTimerSampleBuffer.get());
@@ -1598,7 +1599,7 @@ void RHI_Metal::beginComputePass() {
             currentComputeEncoder = currentCommandBuffer->computeCommandEncoder();
         }
         if (currentComputeEncoder) {
-            currentComputeEncoder->setLabel(NS::String::string("Compute", NS::UTF8StringEncoding));
+            currentComputeEncoder->setLabel(NS::String::string(name, NS::UTF8StringEncoding));
         }
     }
 }

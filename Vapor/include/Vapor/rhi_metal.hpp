@@ -111,7 +111,7 @@ public:
     // Compute Commands
     // ========================================================================
 
-    void beginComputePass() override;
+    void beginComputePass(const char* name = "Compute") override;
     void endComputePass() override;
     void bindComputePipeline(ComputePipelineHandle pipeline) override;
     void setComputeBuffer(Uint32 binding, BufferHandle buffer, size_t offset, size_t range) override;

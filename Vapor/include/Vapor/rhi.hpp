@@ -516,7 +516,10 @@ public:
     // Compute Commands
     // ========================================================================
 
-    virtual void beginComputePass() = 0;
+    // `name` labels the pass in GPU timings / captures (default keeps the old
+    // generic "Compute" — pass the real pass name so profilers can tell the
+    // RT / AO / tile-cull dispatches apart).
+    virtual void beginComputePass(const char* name = "Compute") = 0;
     virtual void endComputePass() = 0;
     virtual void bindComputePipeline(ComputePipelineHandle pipeline) = 0;
     virtual void setComputeBuffer(Uint32 binding, BufferHandle buffer, size_t offset = 0, size_t range = 0) = 0;

@@ -1405,7 +1405,7 @@ void Renderer::tileCullingPass() {
 
     if (backend == GraphicsBackend::Metal) {
         if (!tileCullingPipeline.isValid()) return;
-        rhi->beginComputePass();
+        rhi->beginComputePass("TileCulling");
         rhi->bindComputePipeline(tileCullingPipeline);
         rhi->setComputeBuffer(0, clusterBuffer);
         rhi->setComputeBuffer(1, pointLightBuffer, 0, sizeof(PointLightData) * maxPointLights);
@@ -1422,7 +1422,7 @@ void Renderer::tileCullingPass() {
         lc.gridSize = gridSize;
         lc.lightCount = pointLightCount;
         rhi->updateBuffer(lightCullDataBuffer, &lc, 0, sizeof(lc));
-        rhi->beginComputePass();
+        rhi->beginComputePass("TileCulling");
         rhi->bindComputePipeline(vkTileCullPipeline);
         rhi->setComputeBuffer(0, cameraUniformBuffer, 0, sizeof(CameraRenderData));
         rhi->setComputeBuffer(3, pointLightBuffer, 0, sizeof(PointLightData) * maxPointLights);
@@ -1476,7 +1476,7 @@ void Renderer::raytraceShadowPass() {
     Uint32 w = rhi->getSwapchainWidth();
     Uint32 h = rhi->getSwapchainHeight();
     glm::vec2 screenSize(w, h);
-    rhi->beginComputePass();
+    rhi->beginComputePass("RaytraceShadow");
     rhi->bindComputePipeline(raytraceShadowPipeline);
     rhi->setComputeTexture(0, depthStencilRT);
     rhi->setComputeTexture(1, normalRT);
@@ -1503,7 +1503,7 @@ void Renderer::raytraceAOPass() {
 
     Uint32 w = rhi->getSwapchainWidth();
     Uint32 h = rhi->getSwapchainHeight();
-    rhi->beginComputePass();
+    rhi->beginComputePass("RaytraceAO");
     rhi->bindComputePipeline(raytraceAOPipeline);
     rhi->setComputeTexture(0, depthStencilRT);
     rhi->setComputeTexture(1, normalRT);
@@ -1525,7 +1525,7 @@ void Renderer::aoTemporalPass() {
     Uint32 outIdx = inIdx ^ 1u;
     Uint32 w = rhi->getSwapchainWidth();
     Uint32 h = rhi->getSwapchainHeight();
-    rhi->beginComputePass();
+    rhi->beginComputePass("AOTemporal");
     rhi->bindComputePipeline(aoTemporalPipeline);
     rhi->setComputeTexture(0, aoRawRT);
     rhi->setComputeTexture(1, aoHistoryRT[inIdx]);
@@ -1553,7 +1553,7 @@ void Renderer::aoDenoisePass() {
         { aoHistoryRT[aoHistoryIndex], aoScratchRT, 1u },
         { aoScratchRT, aoRT, 2u },
     };
-    rhi->beginComputePass();
+    rhi->beginComputePass("AODenoise");
     rhi->bindComputePipeline(aoDenoisePipeline);
     for (const Iter& it : iters) {
         rhi->setComputeTexture(0, it.src);
@@ -1576,7 +1576,7 @@ void Renderer::stochasticPointShadowPass() {
     glm::uvec4 gridDims(clusterGridSizeX, clusterGridSizeY, clusterGridSizeZ, 0u);
     Uint32 fi = frameCounter;
     Uint32 debugMode = 0;
-    rhi->beginComputePass();
+    rhi->beginComputePass("StochasticPointShadow");
     rhi->bindComputePipeline(stochasticPointShadowPipeline);
     rhi->setComputeTexture(0, depthStencilRT);
     rhi->setComputeTexture(1, normalRT);
@@ -1657,7 +1657,7 @@ void Renderer::gibsPass() {
     const size_t surfelBytes = size_t(gibsMaxSurfels) * sizeof(Surfel);
     Uint32 active = std::max(gibsActiveSurfels, 1u);
 
-    rhi->beginComputePass();
+    rhi->beginComputePass("GIBS");
 
     // 1) Surfel generation from the pre-pass G-buffer.
     SurfelGenerationParams gp{};
@@ -1754,7 +1754,7 @@ void Renderer::pointShadowTemporalPass() {
     if (!pointShadowTemporalPipeline.isValid() || !pointShadowRT.isValid()) return;
     Uint32 w = rhi->getSwapchainWidth();
     Uint32 h = rhi->getSwapchainHeight();
-    rhi->beginComputePass();
+    rhi->beginComputePass("PointShadowTemporal");
     rhi->bindComputePipeline(pointShadowTemporalPipeline);
     rhi->setComputeTexture(0, pointShadowRT);
     rhi->setComputeTexture(1, pointShadowHistoryRT);
@@ -2171,7 +2171,7 @@ void Renderer::velocityPass() {
         if (!prevViewProjValid) { prevViewProj = curViewProj; prevViewProjValid = true; }
         rhi->updateBuffer(prevViewProjBuffer, &prevViewProj, 0, sizeof(glm::mat4));
 
-        rhi->beginComputePass();
+        rhi->beginComputePass("Velocity");
         rhi->bindComputePipeline(velocityComputePipeline);
         rhi->setComputeTexture(0, depthStencilRT);
         rhi->setComputeTexture(1, velocityRT);
@@ -2240,7 +2240,7 @@ void Renderer::particlePass() {
     // Compute: force writes p.force, then integrate reads it -> barrier between.
     // 3d_particle.metal orders the kernel buffers particles(0)/params(1)/
     // attractor(2); the Vulkan .comp uses params(0)/attractor(1)/particles(2).
-    rhi->beginComputePass();
+    rhi->beginComputePass("ParticleSim");
     rhi->bindComputePipeline(particleForcePipeline);
     if (metal) {
         rhi->setComputeBuffer(0, particleBuffer, 0, bufBytes);
