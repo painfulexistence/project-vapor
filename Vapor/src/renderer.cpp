@@ -1054,13 +1054,18 @@ void Renderer::updateBuffers() {
                           pointLights.size() * sizeof(PointLightData));
     }
 
-    // Update instance data
-    // Create a map from drawable index to instance ID for correct indexing
+    // Update instance data — for EVERY submitted drawable, not just the
+    // camera-visible set. Shadow consumers (PSSM cascade draws, the TLAS the
+    // RT kernels trace) must include casters OUTSIDE the camera frustum, or
+    // objects lose their shadows the moment they leave the screen. Visible
+    // drawables are packed FIRST (ids 0..V-1) so the main/pre-pass indexing
+    // and buffer-range binds keep their existing meaning; culled drawables'
+    // instances follow after.
     drawableToInstanceID.clear();
     std::vector<Vapor::InstanceData> instanceData;
-    instanceData.reserve(visibleDrawables.size());
+    instanceData.reserve(frameDrawables.size());
     Uint32 instanceID = 0;
-    for (Uint32 drawableIdx : visibleDrawables) {
+    auto appendInstance = [&](Uint32 drawableIdx) {
         const Drawable& drawable = frameDrawables[drawableIdx];
         const RenderMesh& mesh = meshes[drawable.mesh];
 
@@ -1082,7 +1087,12 @@ void Renderer::updateBuffers() {
         instanceData.push_back(instance);
         drawableToInstanceID[drawableIdx] = instanceID;
         instanceID++;
+    };
+    for (Uint32 drawableIdx : visibleDrawables) appendInstance(drawableIdx);
+    for (Uint32 i = 0; i < frameDrawables.size() && instanceID < MAX_INSTANCES; i++) {
+        if (drawableToInstanceID.find(i) == drawableToInstanceID.end()) appendInstance(i);
     }
+    totalInstanceCount = instanceID;
 
     if (!instanceData.empty()) {
         rhi->updateBuffer(instanceDataBuffer, instanceData.data(), 0,
@@ -1427,20 +1437,23 @@ void Renderer::prePass() {
     rhi->endRenderPass();
 }
 
-// Rebuild the TLAS from this frame's visible drawables (RequiresRaytracing).
+// Rebuild the TLAS from ALL of this frame's drawables (RequiresRaytracing).
+// NOT the camera-culled visible set: rays need to hit casters OUTSIDE the
+// view frustum (native builds its instance list from the whole scene too) —
+// building from visibleDrawables made objects lose RT shadows/AO/GI the
+// moment they left the screen.
 void Renderer::buildAccelerationStructures() {
     if (!capabilities.raytracing || !sceneTLAS.isValid()) return;
     tlasInstances.clear();
-    tlasInstances.reserve(visibleDrawables.size());
-    for (Uint32 drawableIdx : visibleDrawables) {
+    tlasInstances.reserve(frameDrawables.size());
+    for (Uint32 drawableIdx = 0; drawableIdx < frameDrawables.size(); drawableIdx++) {
         const Drawable& drawable = frameDrawables[drawableIdx];
         if (drawable.mesh >= meshBLAS.size() || !meshBLAS[drawable.mesh].isValid()) continue;
         auto it = drawableToInstanceID.find(drawableIdx);
-        if (it == drawableToInstanceID.end()) continue;
         AccelStructInstance inst;
         inst.blas = meshBLAS[drawable.mesh];
         inst.transform = drawable.transform;
-        inst.instanceID = it->second;
+        inst.instanceID = it != drawableToInstanceID.end() ? it->second : 0;
         inst.mask = 0xFF;
         tlasInstances.push_back(inst);
     }
@@ -2062,9 +2075,13 @@ void Renderer::shadowPass() {
             rhi->setVertexBuffer(0, pssmDataBuffer, 0, sizeof(PSSMRenderData));
             rhi->setVertexBytes(&ci, sizeof(Uint32), 5);  // cascadeIndex -> push offset 16
         }
-        rhi->setVertexBuffer(2, instanceDataBuffer, 0, sizeof(Vapor::InstanceData) * std::max<size_t>(1, visibleDrawables.size()));
+        rhi->setVertexBuffer(2, instanceDataBuffer, 0, sizeof(Vapor::InstanceData) * std::max<Uint32>(1, totalInstanceCount));
 
-        for (Uint32 drawableIdx : visibleDrawables) {
+        // ALL drawables, not the camera-visible set: casters outside the view
+        // frustum must still render into the cascades or their shadows vanish
+        // when they leave the screen. (updateBuffers uploads instance data for
+        // every drawable — culled ones follow the visible prefix.)
+        for (Uint32 drawableIdx = 0; drawableIdx < frameDrawables.size(); drawableIdx++) {
             const Drawable& drawable = frameDrawables[drawableIdx];
             const RenderMesh& mesh = meshes[drawable.mesh];
             auto it = drawableToInstanceID.find(drawableIdx);

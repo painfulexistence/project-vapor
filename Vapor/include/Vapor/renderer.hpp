@@ -454,6 +454,10 @@ private:
 
     // Mapping from drawable index to instance ID (for correct instance data indexing)
     std::unordered_map<Uint32, Uint32> drawableToInstanceID;
+    // Instances uploaded this frame: visible drawables first (ids 0..V-1),
+    // then camera-culled ones (shadow casters). Shadow passes bind/draw the
+    // full range; main/pre passes keep using only the visible prefix.
+    Uint32 totalInstanceCount = 0;
 
     // ========================================================================
     // Per-Frame Data
