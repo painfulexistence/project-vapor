@@ -1791,8 +1791,15 @@ void Renderer::shadowPass() {
 
     const float nearClip = currentCamera.nearPlane;
     const float farClip  = currentCamera.farPlane;
-    // No ray-traced near cascade on Vulkan: cascade 0 starts at the near plane.
-    const float rtEnd = nearClip;
+    // cascadeSplits.x is the view-space depth where the ray-traced near-field
+    // shadow ends and the PSSM cascades begin (the PBR shader uses texShadow
+    // for viewDepth <= splits.x). On RT backends the RT shadow owns the near
+    // 0..pssmRTMaxDist metres — hardcoding nearClip here (as before) shrank
+    // that region to ~0, so the RT shadow never applied and only the softer
+    // PSSM showed, matching the "weak RT shadow" report. Vulkan has no RT
+    // shadow, so it keeps nearClip (cascade 0 starts at the near plane).
+    const float pssmRTMaxDist = 50.0f;  // native default (renderer_metal.hpp)
+    const float rtEnd = capabilities.raytracing ? pssmRTMaxDist : nearClip;
 
     // Cascade split distances (view space). splits[0] = near end, splits[3] = far.
     float splits[4];
