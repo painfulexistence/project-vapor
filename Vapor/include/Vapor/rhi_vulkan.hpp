@@ -10,7 +10,6 @@
 #include <string>
 #include <vector>
 #include <unordered_map>
-#include <array>
 
 // ============================================================================
 // RHI_Vulkan - Vulkan implementation of RHI interface
@@ -200,7 +199,6 @@ private:
         bool isMapped;
         void* mappedData;
         bool hostVisible = true;
-        BufferUsage usage = BufferUsage::Storage;  // gates descriptor-cache invalidation
     };
 
     struct TextureResource {
@@ -309,29 +307,6 @@ private:
     VkPipelineLayout globalPipelineLayout = VK_NULL_HANDLE;
     std::vector<VkDescriptorPool> descriptorPools;  // one per frame in flight
 
-    // Descriptor-set cache. Allocating fresh sets per draw is the #1 MoltenVK
-    // perf cliff (hundreds of vkAllocateDescriptorSets per frame, whose backing
-    // argument buffers the driver ratchets up to the peak load and never
-    // releases). Instead: hash the binding state and reuse the set if seen.
-    //
-    // Lifetime is per-frame-slot with an epoch: each frame-in-flight slot owns
-    // its own pool + cache. A slot's pool is reset (and cache cleared) ONLY at
-    // that slot's beginFrame, after vkWaitForFences proves its last use N
-    // frames ago finished — never mid-recording (resetting a pool whose sets
-    // the current command buffer already bound is what triggered
-    // VUID-vkEndCommandBuffer-00059). In steady state the epoch is stable, so
-    // each slot's cache survives across its turns -> all hits, zero allocations
-    // after warmup. Destroying any referenced buffer/texture bumps the epoch;
-    // each slot then rebuilds its cache once, safely, on its next beginFrame.
-    std::vector<VkDescriptorPool> cacheDescriptorPools;  // one per frame-in-flight
-    std::vector<std::unordered_map<uint64_t, std::array<VkDescriptorSet, 3>>> descriptorCache;
-    std::vector<std::unordered_map<uint64_t, std::array<VkDescriptorSet, 2>>> computeDescriptorCache;
-    uint64_t descriptorEpoch = 0;      // bumped when a referenced resource dies
-    std::vector<uint64_t> cacheEpoch;  // epoch each slot's cache was built for
-    uint64_t hashGraphicsBindings() const;
-    uint64_t hashComputeBindings() const;
-    void invalidateDescriptorCache();  // bump epoch: slots rebuild on their next beginFrame
-
     BufferBinding boundVertexBuffers[BINDINGS_PER_SET];
     BufferBinding boundFragmentBuffers[BINDINGS_PER_SET];
     TextureBinding boundTextures[BINDINGS_PER_SET];
@@ -346,7 +321,7 @@ private:
     BufferBinding boundComputeBuffers[BINDINGS_PER_SET];
     VkImageView boundComputeImages[BINDINGS_PER_SET] = {};
     bool computeDescriptorsDirty = true;
-    bool flushComputeDescriptors();  // false = could not bind, caller must skip the dispatch
+    void flushComputeDescriptors();
 
     // ========================================================================
     // Batched Upload Stream
@@ -457,7 +432,7 @@ private:
 
     void createDescriptorInfrastructure();
     void destroyDescriptorInfrastructure();
-    bool flushDescriptors();  // false = could not bind, caller must skip the draw
+    void flushDescriptors();
     void transitionImage(VkImage image, VkImageLayout from, VkImageLayout to, VkImageAspectFlags aspect);
 
     // ========================================================================
