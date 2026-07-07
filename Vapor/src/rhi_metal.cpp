@@ -488,46 +488,49 @@ PipelineHandle RHI_Metal::createPipeline(const PipelineDesc& desc) {
 
     // Color attachments: formats are baked into the PSO and must match the
     // render pass (PixelFormat::Swapchain resolves to the layer's format).
-    // The same blend mode is applied to every attachment.
-    for (size_t i = 0; i < std::max<size_t>(1, desc.colorAttachmentFormats.size()); i++) {
+    // The same blend mode is applied to every attachment. An EMPTY format
+    // list means a depth-only pipeline (e.g. shadow cascades) — declaring a
+    // default swapchain attachment here made the debug layer assert when the
+    // pass has no color texture.
+    for (size_t i = 0; i < desc.colorAttachmentFormats.size(); i++) {
         auto attachment = pipelineDesc->colorAttachments()->object(i);
-        PixelFormat fmt = i < desc.colorAttachmentFormats.size()
-            ? desc.colorAttachmentFormats[i] : PixelFormat::Swapchain;
+        PixelFormat fmt = desc.colorAttachmentFormats[i];
         attachment->setPixelFormat(fmt == PixelFormat::Swapchain ? swapchainFormat
                                                                  : convertPixelFormat(fmt));
     }
-    auto colorAttachment = pipelineDesc->colorAttachments()->object(0);
-
-    // Blending
-    switch (desc.blendMode) {
-        case BlendMode::Opaque:
-            colorAttachment->setBlendingEnabled(false);
-            break;
-        case BlendMode::AlphaBlend:
-            colorAttachment->setBlendingEnabled(true);
-            colorAttachment->setSourceRGBBlendFactor(MTL::BlendFactorSourceAlpha);
-            colorAttachment->setDestinationRGBBlendFactor(MTL::BlendFactorOneMinusSourceAlpha);
-            colorAttachment->setRgbBlendOperation(MTL::BlendOperationAdd);
-            colorAttachment->setSourceAlphaBlendFactor(MTL::BlendFactorOne);
-            colorAttachment->setDestinationAlphaBlendFactor(MTL::BlendFactorZero);
-            break;
-        case BlendMode::Additive:
-            colorAttachment->setBlendingEnabled(true);
-            colorAttachment->setSourceRGBBlendFactor(MTL::BlendFactorOne);
-            colorAttachment->setDestinationRGBBlendFactor(MTL::BlendFactorOne);
-            colorAttachment->setRgbBlendOperation(MTL::BlendOperationAdd);
-            colorAttachment->setSourceAlphaBlendFactor(MTL::BlendFactorOne);
-            colorAttachment->setDestinationAlphaBlendFactor(MTL::BlendFactorOne);
-            break;
-        case BlendMode::Multiply:
-            colorAttachment->setBlendingEnabled(true);
-            colorAttachment->setSourceRGBBlendFactor(MTL::BlendFactorDestinationColor);
-            colorAttachment->setDestinationRGBBlendFactor(MTL::BlendFactorZero);
-            colorAttachment->setRgbBlendOperation(MTL::BlendOperationAdd);
-            colorAttachment->setSourceAlphaBlendFactor(MTL::BlendFactorOne);
-            colorAttachment->setDestinationAlphaBlendFactor(MTL::BlendFactorZero);
-            colorAttachment->setAlphaBlendOperation(MTL::BlendOperationAdd);
-            break;
+    // Blending (only meaningful when a color attachment exists).
+    if (!desc.colorAttachmentFormats.empty()) {
+        auto colorAttachment = pipelineDesc->colorAttachments()->object(0);
+        switch (desc.blendMode) {
+            case BlendMode::Opaque:
+                colorAttachment->setBlendingEnabled(false);
+                break;
+            case BlendMode::AlphaBlend:
+                colorAttachment->setBlendingEnabled(true);
+                colorAttachment->setSourceRGBBlendFactor(MTL::BlendFactorSourceAlpha);
+                colorAttachment->setDestinationRGBBlendFactor(MTL::BlendFactorOneMinusSourceAlpha);
+                colorAttachment->setRgbBlendOperation(MTL::BlendOperationAdd);
+                colorAttachment->setSourceAlphaBlendFactor(MTL::BlendFactorOne);
+                colorAttachment->setDestinationAlphaBlendFactor(MTL::BlendFactorZero);
+                break;
+            case BlendMode::Additive:
+                colorAttachment->setBlendingEnabled(true);
+                colorAttachment->setSourceRGBBlendFactor(MTL::BlendFactorOne);
+                colorAttachment->setDestinationRGBBlendFactor(MTL::BlendFactorOne);
+                colorAttachment->setRgbBlendOperation(MTL::BlendOperationAdd);
+                colorAttachment->setSourceAlphaBlendFactor(MTL::BlendFactorOne);
+                colorAttachment->setDestinationAlphaBlendFactor(MTL::BlendFactorOne);
+                break;
+            case BlendMode::Multiply:
+                colorAttachment->setBlendingEnabled(true);
+                colorAttachment->setSourceRGBBlendFactor(MTL::BlendFactorDestinationColor);
+                colorAttachment->setDestinationRGBBlendFactor(MTL::BlendFactorZero);
+                colorAttachment->setRgbBlendOperation(MTL::BlendOperationAdd);
+                colorAttachment->setSourceAlphaBlendFactor(MTL::BlendFactorOne);
+                colorAttachment->setDestinationAlphaBlendFactor(MTL::BlendFactorZero);
+                colorAttachment->setAlphaBlendOperation(MTL::BlendOperationAdd);
+                break;
+        }
     }
 
     // Depth attachment format must match the render pass this pipeline is
