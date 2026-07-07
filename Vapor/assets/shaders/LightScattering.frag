@@ -21,10 +21,14 @@ layout(std430, set = 1, binding = 0) readonly buffer LSBuf {
     float maxDistance;
     float sunIntensity;
     float mieG;
+    // Field offsets mirror the MSL LightScatteringData (float3 = 16 bytes
+    // there): explicit lane-4 pad after sunColor keeps both backends aligned.
     vec3 sunColor;
+    float _sunColorPad;
     float _pad1;
     float depthThreshold;
     float jitter;
+    float _pad3;
     vec2 _pad2;
 };
 

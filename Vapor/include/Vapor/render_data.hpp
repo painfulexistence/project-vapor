@@ -207,10 +207,15 @@ struct alignas(16) LightScatteringRenderData {
     float maxDistance = 1.0f;
     float sunIntensity = 1.0f;
     float mieG = 0.76f;
+    // Layout matches the MSL LightScatteringData: float3 occupies 16 bytes
+    // there, so an explicit lane-4 pad keeps every following field at the
+    // same offset on both backends (total size 96).
     glm::vec3 sunColor = glm::vec3(1.0f);
+    float _sunColorPad = 0.0f;
     float _pad1 = 0.0f;
     float depthThreshold = 0.9999f;
     float jitter = 0.5f;
+    float _pad3 = 0.0f;
     glm::vec2 _pad2 = glm::vec2(0.0f);
 };
 
