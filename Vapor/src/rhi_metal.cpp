@@ -1430,6 +1430,16 @@ void RHI_Metal::buildAccelerationStructure(AccelStructHandle handle) {
     auto& resource = it->second;
 
     if (resource.type == AccelStructType::BottomLevel) {
+        // CRITICAL: vertex/index data uploaded via updateBuffer() sits in the
+        // batched upload stream (uploadCmdBuffer), which is only committed at
+        // submitUploads()/endFrame. The BLAS build below runs on its OWN
+        // command buffer, committed immediately — without flushing first it
+        // reads the buffers BEFORE the copies execute, building the BLAS over
+        // zeroed vertex data. Every triangle degenerates at the origin, every
+        // ray misses, and RT shadow/AO silently output their no-hit defaults
+        // (uniform white / R=1) while TLAS/bind diagnostics all look valid.
+        submitUploads(true);
+
         // Build BLAS from geometries
         for (const auto& geom : resource.geometries) {
             auto vertexBufIt = buffers.find(geom.vertexBuffer.id);

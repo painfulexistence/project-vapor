@@ -7,7 +7,10 @@ layout(location = 0) out vec4 outColor;
 
 layout(set = 2, binding = 0) uniform sampler2D texScreen;
 
-const float threshold = 1.0;  // matches Renderer::bloomThreshold
+// Renderer::bloomThreshold via setFragmentBytes(binding=0) -> offset 64+(0%4)*16
+layout(push_constant) uniform BloomPC {
+    layout(offset = 64) float threshold;
+};
 
 void main() {
     vec3 color = texture(texScreen, tex_uv).rgb;

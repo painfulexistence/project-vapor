@@ -1982,11 +1982,10 @@ void Renderer::bloomBrightnessPass() {
     rhi->beginRenderPass(rp);
     rhi->bindPipeline(bloomBrightPipeline);
     rhi->setTexture(0, 0, colorRT, clampSampler);
-    if (backend == GraphicsBackend::Metal) {
-        // 3d_bloom_brightness.metal takes the threshold at buffer(0); the
-        // Vulkan twin bakes it (and its pipeline has no push range for it).
-        rhi->setFragmentBytes(&bloomThreshold, sizeof(float), 0);
-    }
+    // Threshold is dynamic on BOTH backends: Metal 3d_bloom_brightness.metal
+    // reads buffer(0); Vulkan BloomBright.frag reads push-constant offset 64
+    // (the setFragmentBytes(binding=0) slot).
+    rhi->setFragmentBytes(&bloomThreshold, sizeof(float), 0);
     rhi->draw(3, 1, 0, 0);
     rhi->endRenderPass();
 }
