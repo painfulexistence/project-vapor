@@ -731,6 +731,11 @@ private:
         glm::vec2 texCoord;
         float texIndex;       // Texture array index (future: batching textures)
         int entityID;         // For editor picking
+        // Stride pad: 2d_batch.metal raw-fetches Batch2DVertexIn at a 48-byte
+        // stride (its layout ends in a float _pad). Without this the Metal
+        // vertex fetch walked off-stride after the first vertex and every
+        // batch quad/sprite rendered as garbage or not at all.
+        float _pad0 = 0.0f;
     };
 
     struct BatchRenderer {

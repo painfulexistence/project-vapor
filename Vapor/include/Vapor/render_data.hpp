@@ -296,12 +296,19 @@ struct alignas(16) IBLCaptureRenderData {
 struct alignas(16) SunFlareRenderData {
     glm::vec2 sunScreenPos = glm::vec2(0.5f);   // uv, y-down
     glm::vec2 aspectRatio = glm::vec2(1.0f);    // (w/h, 1)
+    // Explicit lane-4 pad after the vec3: the MSL FlareData float3 occupies
+    // 16 bytes, so every following field sits 4 bytes later than std430
+    // would place it. Total size 64 on both backends.
     glm::vec3 sunColor = glm::vec3(1.0f, 0.95f, 0.85f);
+    float _sunColorPad = 0.0f;
     float intensity = 0.5f;        // overall flare radiance scale (pre-tonemap)
     float glowSize = 0.06f;        // gaussian core radius (aspect-corrected uv)
     float haloRadius = 0.22f;      // thin ring radius around the sun
     float ghostSpacing = 0.30f;    // ghost step along the sun->center axis
     float streakIntensity = 0.35f; // anamorphic horizontal streak strength
+    float _pad0 = 0.0f;
+    float _pad1 = 0.0f;
+    float _pad2 = 0.0f;
 };
 
 // GPU particle (matches the Particle struct in ParticleForce/Integrate.comp and

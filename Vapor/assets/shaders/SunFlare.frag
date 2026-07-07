@@ -15,12 +15,17 @@ layout(set = 2, binding = 0) uniform sampler2D sceneDepth;
 layout(std430, set = 1, binding = 0) readonly buffer FlareBuf {
     vec2 sunScreenPos;
     vec2 aspectRatio;
+    // Offsets mirror the MSL FlareData (float3 = 16 bytes there).
     vec3 sunColor;
+    float _sunColorPad;
     float intensity;
     float glowSize;
     float haloRadius;
     float ghostSpacing;
     float streakIntensity;
+    float _pad0;
+    float _pad1;
+    float _pad2;
 };
 
 float softDisk(vec2 p, vec2 c, float r) {
