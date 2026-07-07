@@ -232,6 +232,11 @@ struct alignas(16) FogRenderData {
     float fogHeightFalloff = 0.1f;
     float anisotropy = 0.6f;
     float ambientIntensity = 0.3f;
+    // Panel-tunable like native (native's simpleFogFragment doesn't read them
+    // either — they only affect the froxel path; kept for parity/forward-compat).
+    float fogBaseHeight = 0.0f;
+    float fogMaxHeight = 100.0f;
+    glm::vec2 _tailPad = glm::vec2(0.0f);  // keep 16-byte struct size multiple
 };
 
 // Volumetric clouds. Field-for-field mirror of the Metal backend's

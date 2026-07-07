@@ -1540,6 +1540,16 @@ void RHI_Vulkan::beginFrame() {
     }
     if (pendingUploadFences.empty() && uploadCmd == VK_NULL_HANDLE) {
         stagingRingOffset = 0;
+    } else if (stagingRingOffset > STAGING_RING_SIZE / 2) {
+        // Ratchet guard: with uploads submitted every frame, at least one fence
+        // is often still pending here, so the opportunistic rewind above never
+        // fires and the offset climbs monotonically across frames. Once the
+        // ring fills, EVERY allocStaging() wraps into submitUploads(true) — a
+        // full CPU-GPU sync per updateBuffer call, mid-frame — and the frame
+        // rate decays over minutes (looks exactly like a memory leak). Drain
+        // here instead: these fences are from previous frames, so the wait is
+        // near-zero, and the ring provably rewinds at least once per frame.
+        submitUploads(true);
     }
     if (gpuTimingSupported) {
         collectTimestamps(currentFrameInFlight);

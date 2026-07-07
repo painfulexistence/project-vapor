@@ -771,6 +771,16 @@ void RHI_Metal::beginFrame() {
     if (pendingUploadCmds.empty() && !uploadCmdBuffer) {
         stagingRingOffset = 0;
         oversizeStaging.clear();
+    } else if (stagingRingOffset > STAGING_RING_SIZE / 2) {
+        // Ratchet guard (same bug as the Vulkan backend): with uploads
+        // submitted every frame, one still-running upload command buffer here
+        // keeps the opportunistic rewind above from ever firing; the offset
+        // climbs across frames until the ring is full and every allocStaging()
+        // wraps into submitUploads(true) — a mid-frame waitUntilCompleted per
+        // updateBuffer call, decaying the frame rate over minutes. Drain here
+        // instead: these command buffers are from previous frames, so the wait
+        // is near-zero, and the ring provably rewinds once per frame.
+        submitUploads(true);
     }
 
     // Get next drawable. This legitimately fails when the window is occluded

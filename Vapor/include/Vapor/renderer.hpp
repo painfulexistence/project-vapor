@@ -445,6 +445,10 @@ private:
     std::vector<RenderMaterial> materials;
     std::vector<RenderTexture> textures;
 
+    // Last staged/drawn scene — kept for the ImGui Scene Materials / Scene
+    // Lights editors (the panels edit shared Scene data, like native).
+    std::shared_ptr<Scene> currentScene;
+
     // Texture cache (path -> TextureId)
     std::unordered_map<std::string, TextureId> textureCache;
 
@@ -570,9 +574,16 @@ private:
     PipelineHandle lightScatteringPipeline;
     TextureHandle lightScatteringRT;  // half-res god rays
     bool lightScatteringEnabled = true;
+    // Persistent god-rays tunables (ImGui-editable, defaults match native).
+    // lightScatteringPass() copies this and overwrites the per-frame fields
+    // (sunScreenPos/screenSize/sunColor).
+    LightScatteringRenderData lightScatteringSettings;
     PipelineHandle volumetricFogPipeline;
     TextureHandle tempColorRT;  // ping-pong target for fog (swapped with colorRT)
     bool volumetricFogEnabled = true;
+    // Persistent fog tunables (ImGui-editable). volumetricFogPass() copies this
+    // and overwrites the per-frame fields (invViewProj/camera/sun).
+    FogRenderData fogSettings;
     // Camera-motion velocity (motion vectors) — infrastructure for future TAA.
     PipelineHandle velocityPipeline;
     TextureHandle velocityRT;
@@ -671,6 +682,14 @@ private:
     TextureHandle pointShadowDenoisedRT; // temporal output (swapped with history)
     // (frameDataBuffer for the RT kernels' random seeds is declared above.)
     bool aoEnabled = true;
+    // AO method (native aoMethod): 0 = ray traced, 1 = screen space (SSAO).
+    // On non-RT backends SSAO is the only option and is used regardless.
+    int aoMethod = 0;
+    ComputePipelineHandle ssaoPipeline;  // 3d_ssao.metal / SSAO.comp
+    ShaderHandle ssaoShader;
+    // PSSM: distance where RT near-field shadows hand over to the cascades
+    // (native pssmRTMaxDist, panel-tunable 5..200).
+    float pssmRTMaxDist = 50.0f;
 
     // Sun/lens flare (Metal MSL for now; GLSL twin lands with the IBL round).
     // (tileCullingPipeline is declared with the other compute pipelines above.)
@@ -715,6 +734,11 @@ private:
     glm::vec3 gibsWorldMin = glm::vec3(-64.0f);  // native GIBSManager default
     glm::vec3 gibsWorldMax = glm::vec3(64.0f);
     bool gibsEnabled = false;  // bring-up default off
+    // Panel state: quality preset combo (native gibsQuality; 1 = Medium, the
+    // values gibsMaxSurfels/RaysPerSurfel/ResolutionScale default to) and a
+    // deferred surfel reset (applied at the top of gibsPass, never mid-frame).
+    int gibsQuality = 1;
+    bool gibsResetRequested = false;
     void gibsPass();
 
     void aoTemporalPass();

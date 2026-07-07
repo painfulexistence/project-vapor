@@ -1845,7 +1845,7 @@ void Renderer::shadowPass() {
     // that region to ~0, so the RT shadow never applied and only the softer
     // PSSM showed, matching the "weak RT shadow" report. Vulkan has no RT
     // shadow, so it keeps nearClip (cascade 0 starts at the near plane).
-    const float pssmRTMaxDist = 50.0f;  // native default (renderer_metal.hpp)
+    // pssmRTMaxDist is a member now (panel slider "RT shadow max dist", 5..200).
     const float rtEnd = capabilities.raytracing ? pssmRTMaxDist : nearClip;
 
     // Cascade split distances (view space). splits[0] = near end, splits[3] = far.
@@ -2095,7 +2095,9 @@ void Renderer::lightScatteringPass() {
     }
 
     // Project the sun (at infinity along sunDirection) to screen UV.
-    LightScatteringRenderData ls;  // defaults (density/decay/weight/etc.)
+    // Tunables come from the persistent, panel-editable settings; only the
+    // per-frame fields below are overwritten.
+    LightScatteringRenderData ls = lightScatteringSettings;
     ls.sunColor = atmosphereData.sunColor;
     ls.screenSize = glm::vec2(std::max(1u, rhi->getSwapchainWidth() / 2),
                               std::max(1u, rhi->getSwapchainHeight() / 2));
@@ -2141,7 +2143,9 @@ void Renderer::volumetricFogPass() {
         return;
     }
 
-    FogRenderData fog;  // defaults (density/height falloff/anisotropy/ambient)
+    // Tunables from the persistent panel-editable settings; per-frame fields
+    // (matrices/camera/sun) overwritten below.
+    FogRenderData fog = fogSettings;
     fog.invViewProj = glm::inverse(currentCamera.proj * currentCamera.view);
     fog.cameraPosition = currentCamera.position;
     fog.sunDirection = glm::normalize(atmosphereData.sunDirection);
@@ -2196,6 +2200,8 @@ void Renderer::volumetricFogPass() {
         mfd.sunIntensity = fog.sunIntensity;
         mfd.fogDensity = fog.fogDensity;
         mfd.fogHeightFalloff = fog.fogHeightFalloff;
+        mfd.fogBaseHeight = fog.fogBaseHeight;
+        mfd.fogMaxHeight = fog.fogMaxHeight;
         mfd.anisotropy = fog.anisotropy;
         mfd.ambientIntensity = fog.ambientIntensity;
         mfd.nearPlane = currentCamera.nearPlane;
@@ -3891,6 +3897,7 @@ std::unique_ptr<IRenderer> createRenderer(GraphicsBackend backend, SDL_Window* w
 
 void Renderer::stage(std::shared_ptr<Scene> scene) {
     if (!scene) return;
+    currentScene = scene;  // for the ImGui Scene Materials/Lights editors
 
     for (auto& mesh : scene->stagedMeshes) {
         if (!mesh) continue;
