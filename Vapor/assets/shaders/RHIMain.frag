@@ -8,6 +8,16 @@
 //   set 2 = fragment textures
 //   push constants: fragment bytes at offset 64+(binding%4)*16 in [64,128)
 
+// FORCE early depth testing. The main pass loads the pre-pass depth and tests
+// LessEqual, so every occluded fragment should be rejected BEFORE this
+// (expensive PBR) shader runs. The hand-written Metal PBR shader gets that
+// early-Z automatically; MoltenVK's translation of this shader does NOT unless
+// the SPIR-V carries the EarlyFragmentTests execution mode — without it the
+// Vulkan Main pass pays full overdraw (measured ~25ms vs ~7ms on Metal for the
+// identical algorithm on the same GPU). Safe here: the shader writes only
+// color, never discards, never writes gl_FragDepth.
+layout(early_fragment_tests) in;
+
 layout(location = 0) in vec3 fragPos;
 layout(location = 1) in vec2 fragUV;
 layout(location = 2) in vec3 worldNormal;
