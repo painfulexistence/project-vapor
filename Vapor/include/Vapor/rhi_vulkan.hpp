@@ -330,7 +330,14 @@ private:
     VkBuffer stagingRingBuffer = VK_NULL_HANDLE;
     VkDeviceMemory stagingRingMemory = VK_NULL_HANDLE;
     void* stagingRingPtr = nullptr;
-    VkDeviceSize stagingRingOffset = 0;
+    // Frame-partitioned staging: the ring is split into MAX_FRAMES_IN_FLIGHT
+    // equal regions. Each frame allocates only within its own region [base,
+    // base+regionSize); the region is reset at beginFrame right after
+    // inFlightFences[slot] is waited, which provably completes that slot's
+    // previous upload copies. This makes the ring reuse deterministic and
+    // stall-free (no dependency on ALL upload fences draining).
+    VkDeviceSize stagingRegionBase = 0;   // this frame's region start
+    VkDeviceSize stagingRingOffset = 0;   // offset WITHIN the current region
     VkCommandBuffer uploadCmd = VK_NULL_HANDLE;   // valid while recording
     std::vector<VkFence> pendingUploadFences;     // one per in-flight upload submit
 

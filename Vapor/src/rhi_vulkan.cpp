@@ -110,20 +110,29 @@ VkCommandBuffer RHI_Vulkan::ensureUploadCmd() {
 }
 
 void* RHI_Vulkan::allocStaging(VkDeviceSize size, VkDeviceSize& outOffset) {
-    // bufferOffset for image copies must be texel-aligned; 16 covers all formats
+    // Allocate within THIS frame's region only. bufferOffset for image copies
+    // must be texel-aligned; 16 covers all formats.
+    const VkDeviceSize regionSize = STAGING_RING_SIZE / MAX_FRAMES_IN_FLIGHT;
     VkDeviceSize aligned = (stagingRingOffset + 15) & ~VkDeviceSize(15);
-    if (aligned + size > STAGING_RING_SIZE) {
-        // Ring exhausted: submit what we have and wait so the space is free
+    if (aligned + size > regionSize) {
+        // A single frame staged more than its region (regionSize is ~16MB, so
+        // this is rare — a huge burst of uploads). Fall back to draining all
+        // uploads and reusing from the region start; this stalls, but only in
+        // that exceptional case, not on the steady-state per-frame path.
         submitUploads(true);
         aligned = 0;
     }
-    outOffset = aligned;
+    outOffset = stagingRegionBase + aligned;
     stagingRingOffset = aligned + size;
-    return static_cast<char*>(stagingRingPtr) + aligned;
+    return static_cast<char*>(stagingRingPtr) + stagingRegionBase + aligned;
 }
 
 VkBuffer RHI_Vulkan::stageData(const void* data, VkDeviceSize size, VkDeviceSize& outOffset) {
-    if (size <= STAGING_RING_SIZE) {
+    // Threshold is the per-frame REGION size, not the whole ring: a single
+    // upload larger than one region can't fit even after a drain, so it must
+    // take the dedicated-buffer path below (else it overruns its region into
+    // the next frame's).
+    if (size <= STAGING_RING_SIZE / MAX_FRAMES_IN_FLIGHT) {
         void* dst = allocStaging(size, outOffset);
         std::memcpy(dst, data, size);
         return stagingRingBuffer;
@@ -1528,8 +1537,9 @@ void RHI_Vulkan::beginFrame() {
     // This slot's previous frame has now provably completed
     processRetirements(false);
 
-    // Reap completed upload submissions; when none remain in flight the
-    // staging ring can rewind to the start.
+    // Reap completed upload submissions (fence-object cleanup only — the ring
+    // reuse is handled by the frame-partitioned reset below, not by draining
+    // all fences).
     for (size_t i = 0; i < pendingUploadFences.size();) {
         if (vkGetFenceStatus(device, pendingUploadFences[i]) == VK_SUCCESS) {
             vkDestroyFence(device, pendingUploadFences[i], nullptr);
@@ -1538,19 +1548,13 @@ void RHI_Vulkan::beginFrame() {
             ++i;
         }
     }
-    if (pendingUploadFences.empty() && uploadCmd == VK_NULL_HANDLE) {
-        stagingRingOffset = 0;
-    } else if (stagingRingOffset > STAGING_RING_SIZE / 2) {
-        // Ratchet guard: with uploads submitted every frame, at least one fence
-        // is often still pending here, so the opportunistic rewind above never
-        // fires and the offset climbs monotonically across frames. Once the
-        // ring fills, EVERY allocStaging() wraps into submitUploads(true) — a
-        // full CPU-GPU sync per updateBuffer call, mid-frame — and the frame
-        // rate decays over minutes (looks exactly like a memory leak). Drain
-        // here instead: these fences are from previous frames, so the wait is
-        // near-zero, and the ring provably rewinds at least once per frame.
-        submitUploads(true);
-    }
+    // Reset THIS frame's staging region. The vkWaitForFences above guarantees
+    // the frame that last used this slot (MAX_FRAMES_IN_FLIGHT frames ago) has
+    // fully completed on the GPU; its upload copies were submitted on the same
+    // queue BEFORE its frame command buffer, so they are done too. The region
+    // is therefore free — reset with no wait, no stall, no unbounded growth.
+    stagingRegionBase = currentFrameInFlight * (STAGING_RING_SIZE / MAX_FRAMES_IN_FLIGHT);
+    stagingRingOffset = 0;
     if (gpuTimingSupported) {
         collectTimestamps(currentFrameInFlight);
     }
