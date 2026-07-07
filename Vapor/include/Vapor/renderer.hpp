@@ -712,8 +712,8 @@ private:
     Uint32 gibsMaxSurfels = 500000;   // Medium quality (native default)
     Uint32 gibsRaysPerSurfel = 4;
     float gibsResolutionScale = 0.5f;
-    glm::vec3 gibsWorldMin = glm::vec3(-60.0f);
-    glm::vec3 gibsWorldMax = glm::vec3(60.0f);
+    glm::vec3 gibsWorldMin = glm::vec3(-64.0f);  // native GIBSManager default
+    glm::vec3 gibsWorldMax = glm::vec3(64.0f);
     bool gibsEnabled = false;  // bring-up default off
     void gibsPass();
 

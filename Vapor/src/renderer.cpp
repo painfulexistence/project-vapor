@@ -17,6 +17,7 @@
 #include <cstring>
 #include <cstdlib>
 #include <random>
+#include <cmath>
 #include <cstddef>
 #include <memory>
 #include "imgui.h"
@@ -34,6 +35,28 @@
 // symbols at link. Keep only the include for declarations.
 #include <Metal/Metal.hpp>
 #endif
+
+namespace {
+// GIBS spatial-hash grid derivation, matching native GIBSManager::calculateGridSize
+// (gibs_manager.cpp) EXACTLY so the RHI surfel hash resolves at the same cell
+// granularity: start from a 1m cell, take ceil(worldSize / cell) per axis,
+// clamp to 256, then snap the cell size back to the resulting grid. With the
+// native ±64 default bounds this yields a 128^3 grid at 1.0m cells (NOT the
+// 64^3 the RHI previously hardcoded). Returned by reference to keep the buffer
+// allocation and the per-frame gibsPass() in lockstep.
+inline void computeGibsGrid(const glm::vec3& worldMin, const glm::vec3& worldMax,
+                            glm::uvec3& gridSize, Uint32& totalCells, float& cellSize) {
+    glm::vec3 worldSize = worldMax - worldMin;
+    cellSize = 1.0f;  // native's member default before recompute
+    gridSize.x = std::min(static_cast<Uint32>(std::ceil(worldSize.x / cellSize)), 256u);
+    gridSize.y = std::min(static_cast<Uint32>(std::ceil(worldSize.y / cellSize)), 256u);
+    gridSize.z = std::min(static_cast<Uint32>(std::ceil(worldSize.z / cellSize)), 256u);
+    totalCells = gridSize.x * gridSize.y * gridSize.z;
+    cellSize = std::max({worldSize.x / gridSize.x,
+                         worldSize.y / gridSize.y,
+                         worldSize.z / gridSize.z});
+}
+}  // namespace
 
 // ============================================================================
 // Initialization
@@ -238,7 +261,12 @@ void Renderer::initialize(std::unique_ptr<RHI> rhiPtr, GraphicsBackend backendTy
         bd.memoryUsage = MemoryUsage::GPU;
         bd.size = size_t(gibsMaxSurfels) * sizeof(Surfel);
         surfelBuffer = rhi->createBuffer(bd);
-        bd.size = size_t(64 * 64 * 64) * sizeof(Uint32);   // 64^3 hash cells
+        // Spatial-hash cell heads: one u32 per grid cell. Sized from native's
+        // grid derivation (128^3 at the ±64 default) so the buffer, GIBSData,
+        // and the surfelClear dispatch in gibsPass() all agree on totalCells.
+        glm::uvec3 gibsGrid; Uint32 gibsTotalCells; float gibsCellSize;
+        computeGibsGrid(gibsWorldMin, gibsWorldMax, gibsGrid, gibsTotalCells, gibsCellSize);
+        bd.size = size_t(gibsTotalCells) * sizeof(Uint32);
         cellHeadBuffer = rhi->createBuffer(bd);
         bd.size = size_t(gibsMaxSurfels) * sizeof(Uint32);
         surfelNextBuffer = rhi->createBuffer(bd);
@@ -1085,7 +1113,15 @@ void Renderer::mainRenderPass() {
     renderPassDesc.clearColors.push_back(clearColor);  // editable in the Engine window
     renderPassDesc.loadColor.push_back(false);  // Clear
     renderPassDesc.clearDepth = static_cast<float>(clearDepth);
-    renderPassDesc.loadDepth = false;  // Clear
+    // Early-Z from the pre-pass: when rendering into colorRT we share the
+    // pre-pass's depthStencilRT, so LOAD its depth (LoadActionLoad) instead of
+    // re-clearing. Paired with the main pipeline's CompareOp::LessOrEqual, the
+    // occluded fragments the pre-pass already resolved are rejected before the
+    // (expensive) PBR fragment shader runs — no overdraw, matching native's
+    // LoadActionLoad + CompareFunctionLessEqual. The swapchain-fallback path
+    // uses swapchainDepthBuffer, which the pre-pass never wrote, so it must
+    // still clear.
+    renderPassDesc.loadDepth = usePostProcess;
 
     // Begin render pass
     rhi->beginRenderPass(renderPassDesc);
@@ -1619,11 +1655,11 @@ void Renderer::gibsPass() {
     glm::vec2 screenSize(w, h);
     glm::vec2 giResolution = screenSize * gibsResolutionScale;
 
-    // Grid: 64^3 cells over the world bounds (matches the buffer allocation).
-    glm::vec3 worldSize = gibsWorldMax - gibsWorldMin;
-    float cellSize = std::max({worldSize.x, worldSize.y, worldSize.z}) / 64.0f;
-    glm::uvec3 gridSize(64, 64, 64);
-    Uint32 totalCells = 64 * 64 * 64;
+    // Grid over the world bounds, derived exactly like native's
+    // GIBSManager::calculateGridSize (128^3 at 1.0m cells for the ±64 default).
+    // Must match the cellHeadBuffer allocation in initialize().
+    glm::uvec3 gridSize; Uint32 totalCells; float cellSize;
+    computeGibsGrid(gibsWorldMin, gibsWorldMax, gridSize, totalCells, cellSize);
 
     GIBSData gd{};
     gd.invViewProj = glm::inverse(currentCamera.proj * currentCamera.view);
@@ -2930,8 +2966,9 @@ void Renderer::createRenderTargets() {
         // GIBS GI result at resolutionScale (compute-written, PBR-sampled).
         if (capabilities.raytracing) {
             TextureDesc gi;
-            gi.width = std::max(1u, Uint32(width * gibsResolutionScale));
-            gi.height = std::max(1u, Uint32(height * gibsResolutionScale));
+            // native clamps the GI texture to a 64px floor (GIBSManager::createTextures)
+            gi.width = std::max(64u, Uint32(width * gibsResolutionScale));
+            gi.height = std::max(64u, Uint32(height * gibsResolutionScale));
             gi.format = PixelFormat::RGBA16_FLOAT;
             gi.usage = TextureUsage::Storage | TextureUsage::Sampled;
             gi.sampleCount = 1;
@@ -3068,7 +3105,11 @@ void Renderer::createRenderPipeline() {
     pipelineDesc.blendMode = BlendMode::Opaque;
     pipelineDesc.depthTest = true;
     pipelineDesc.depthWrite = true;
-    pipelineDesc.depthCompareOp = CompareOp::Less;
+    // LessOrEqual (not Less): the main pass loads the pre-pass depth and redraws
+    // the SAME geometry, so fragments arrive at exactly the stored depth and
+    // must pass the test (Less would reject every fragment). Matches native's
+    // CompareFunctionLessEqual.
+    pipelineDesc.depthCompareOp = CompareOp::LessOrEqual;
     pipelineDesc.cullMode = CullMode::Back;
     pipelineDesc.frontFaceCounterClockwise = true;
     pipelineDesc.sampleCount = 1;
