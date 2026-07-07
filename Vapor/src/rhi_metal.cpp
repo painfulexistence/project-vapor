@@ -81,11 +81,27 @@ bool RHI_Metal::initialize(SDL_Window* window) {
     // leaving the rest showing stale/garbage content.
     int width, height;
     SDL_GetWindowSizeInPixels(window, &width, &height);
+
+    // Optional render-resolution scale (VAPOR_RENDER_SCALE, default 1.0). The
+    // whole pipeline is sized from getSwapchainWidth/Height, so scaling the
+    // drawable here renders every pass at a fraction of the native pixel count
+    // and Metal upscales the smaller drawable to fill the layer on present —
+    // a quick 1/scale^2 fill-rate win to test whether the native renderer's
+    // apparent speed advantage is just a lower effective resolution. 1.0 is a
+    // no-op; 0.5 quarters the pixels.
+    float renderScale = 1.0f;
+    if (const char* s = std::getenv("VAPOR_RENDER_SCALE")) {
+        renderScale = std::clamp(static_cast<float>(atof(s)), 0.25f, 1.0f);
+    }
+    width  = std::max(1, static_cast<int>(width  * renderScale));
+    height = std::max(1, static_cast<int>(height * renderScale));
+
     swapchainWidth = static_cast<Uint32>(width);
     swapchainHeight = static_cast<Uint32>(height);
 
-    // Pin the layer's drawable size to the pixel dimensions so the drawable,
-    // viewport and render targets all agree.
+    // Pin the layer's drawable size to the (scaled) pixel dimensions so the
+    // drawable, viewport and render targets all agree; a drawable smaller than
+    // the layer is magnified to fit on present.
     swapchain->setDrawableSize(CGSize{ static_cast<CGFloat>(width), static_cast<CGFloat>(height) });
 
     initGpuTiming();
