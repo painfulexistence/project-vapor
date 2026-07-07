@@ -566,6 +566,7 @@ private:
         float exposure = 1.0f;
     };
     PostProcessParams postProcessParams;
+    BufferHandle postProcessParamsBuffer;  // Vulkan PostProcess.frag set1 b0
     PipelineHandle atmospherePipeline;
     PipelineHandle lightScatteringPipeline;
     TextureHandle lightScatteringRT;  // half-res god rays

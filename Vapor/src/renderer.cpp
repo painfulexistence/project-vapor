@@ -177,6 +177,15 @@ void Renderer::initialize(std::unique_ptr<RHI> rhiPtr, GraphicsBackend backendTy
         sfDesc.memoryUsage = MemoryUsage::CPUtoGPU;
         createFrameSlottedBuffer(sunFlareDataBuffer, sfDesc, &sunFlareSettings, sizeof(sunFlareSettings));
 
+        // Post-process tunables (chromatic aberration / vignette / color grade
+        // / exposure). The Vulkan PostProcess.frag reads them at set1 b0; Metal
+        // pushes the same struct via setFragmentBytes.
+        BufferDesc pppDesc;
+        pppDesc.size = sizeof(PostProcessParams);
+        pppDesc.usage = BufferUsage::Storage;
+        pppDesc.memoryUsage = MemoryUsage::CPUtoGPU;
+        createFrameSlottedBuffer(postProcessParamsBuffer, pppDesc, &postProcessParams, sizeof(postProcessParams));
+
         // IBL capture slots: 6 sky faces + 6 irradiance + 5x6 prefilter = 42
         // entries, each draw binds its own offset (a single rewritten buffer
         // would race — host-visible updates are immediate, the GPU runs later).
@@ -2499,6 +2508,11 @@ void Renderer::postProcessPass() {
         TextureHandle godRays = (lightScatteringEnabled && lightScatteringRT.isValid())
             ? lightScatteringRT : textures[defaultBlackTexture].handle;
         rhi->setTexture(0, 2, godRays, clampSampler);
+    }
+    // Chromatic aberration / vignette / color grade params (set1 b0).
+    if (postProcessParamsBuffer.isValid()) {
+        rhi->updateBuffer(postProcessParamsBuffer, &postProcessParams, 0, sizeof(postProcessParams));
+        rhi->setFragmentBuffer(0, postProcessParamsBuffer, 0, sizeof(PostProcessParams));
     }
 
     // Draw fullscreen triangle (3 vertices, 1 instance)
