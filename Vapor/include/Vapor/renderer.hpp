@@ -498,6 +498,11 @@ private:
     TextureId defaultWhiteTexture = INVALID_TEXTURE_ID;
     TextureId defaultNormalTexture = INVALID_TEXTURE_ID;
     TextureId defaultBlackTexture = INVALID_TEXTURE_ID;
+    // Neutral ORM (occlusion=1, roughness=1, metallic=0) — the default for
+    // materials lacking a metallic/roughness/occlusion map. Using white here
+    // (metallic .b = 1.0) rendered every such surface as fully metallic:
+    // flat and dark. Matches the native default_orm.png.
+    TextureId defaultORMTexture = INVALID_TEXTURE_ID;
 
     // Default sampler
     SamplerHandle defaultSampler;

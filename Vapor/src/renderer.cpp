@@ -509,21 +509,23 @@ MaterialId Renderer::registerMaterial(const MaterialDataInput& materialData) {
         material.metallicTexture = getOrCreateTexture(materialData.metallicMap);
         flags |= HAS_METALLIC_MAP;
     } else {
-        material.metallicTexture = defaultWhiteTexture;
+        // Neutral ORM (metallic .b = 0), NOT white (which reads metallic = 1
+        // and turns every un-mapped surface into flat, diffuse-less metal).
+        material.metallicTexture = defaultORMTexture;
     }
 
     if (materialData.roughnessMap) {
         material.roughnessTexture = getOrCreateTexture(materialData.roughnessMap);
         flags |= HAS_ROUGHNESS_MAP;
     } else {
-        material.roughnessTexture = defaultWhiteTexture;
+        material.roughnessTexture = defaultORMTexture;
     }
 
     if (materialData.occlusionMap) {
         material.occlusionTexture = getOrCreateTexture(materialData.occlusionMap);
         flags |= HAS_OCCLUSION_MAP;
     } else {
-        material.occlusionTexture = defaultWhiteTexture;
+        material.occlusionTexture = defaultORMTexture;
     }
 
     if (materialData.emissiveMap) {
@@ -2584,6 +2586,33 @@ void Renderer::createDefaultResources() {
         tex.format = PixelFormat::RGBA8_UNORM;
 
         defaultBlackTexture = static_cast<TextureId>(textures.size());
+        textures.push_back(tex);
+    }
+
+    // Create default ORM texture: occlusion=1, roughness=1, metallic=0. The
+    // PBR shaders read occlusion from .r, roughness from .g, metallic from .b,
+    // so a material with no ORM map shades as a fully-rough dielectric (not a
+    // mirror-metal, which the old white default produced). Matches the native
+    // default_orm.png byte-for-byte.
+    {
+        TextureDesc texDesc;
+        texDesc.width = 1;
+        texDesc.height = 1;
+        texDesc.format = PixelFormat::RGBA8_UNORM;
+        texDesc.usage = TextureUsage::Sampled;
+        TextureHandle texHandle = rhi->createTexture(texDesc);
+
+        Uint32 ormPixel = 0xFF00FFFF;  // RGBA8: R=255 G=255 B=0 A=255
+        rhi->updateTexture(texHandle, &ormPixel, sizeof(Uint32));
+
+        RenderTexture tex;
+        tex.handle = texHandle;
+        tex.sampler = defaultSampler;
+        tex.width = 1;
+        tex.height = 1;
+        tex.format = PixelFormat::RGBA8_UNORM;
+
+        defaultORMTexture = static_cast<TextureId>(textures.size());
         textures.push_back(tex);
     }
 
