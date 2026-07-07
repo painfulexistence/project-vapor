@@ -461,6 +461,26 @@ void RHI_Vulkan::createDescriptorInfrastructure() {
             throw std::runtime_error("Failed to create descriptor pool");
         }
     }
+
+    // Persistent pool for the descriptor cache: not reset per frame. Sized for
+    // the (bounded) universe of distinct binding combinations across all
+    // passes and frame slots, with generous headroom; if it ever fills, the
+    // cache does a waitIdle + reset (see flushDescriptors).
+    {
+        VkDescriptorPoolSize sizes[3] = {
+            { VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, 65536 },
+            { VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, 32768 },
+            { VK_DESCRIPTOR_TYPE_STORAGE_IMAGE, 8192 },
+        };
+        VkDescriptorPoolCreateInfo poolInfo{};
+        poolInfo.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO;
+        poolInfo.maxSets = 16384;
+        poolInfo.poolSizeCount = 3;
+        poolInfo.pPoolSizes = sizes;
+        if (vkCreateDescriptorPool(device, &poolInfo, nullptr, &persistentDescriptorPool) != VK_SUCCESS) {
+            throw std::runtime_error("Failed to create persistent descriptor pool");
+        }
+    }
 }
 
 void RHI_Vulkan::destroyDescriptorInfrastructure() {
@@ -468,6 +488,12 @@ void RHI_Vulkan::destroyDescriptorInfrastructure() {
         if (pool != VK_NULL_HANDLE) vkDestroyDescriptorPool(device, pool, nullptr);
     }
     descriptorPools.clear();
+    if (persistentDescriptorPool != VK_NULL_HANDLE) {
+        vkDestroyDescriptorPool(device, persistentDescriptorPool, nullptr);
+        persistentDescriptorPool = VK_NULL_HANDLE;
+    }
+    descriptorCache.clear();
+    computeDescriptorCache.clear();
     if (globalPipelineLayout != VK_NULL_HANDLE) {
         vkDestroyPipelineLayout(device, globalPipelineLayout, nullptr);
         globalPipelineLayout = VK_NULL_HANDLE;
@@ -485,21 +511,86 @@ void RHI_Vulkan::destroyDescriptorInfrastructure() {
     }
 }
 
+// FNV-1a-seeded splitmix combine — 64-bit, cheap, good avalanche for the
+// pointer/offset values we feed it.
+static inline void hashCombine64(uint64_t& h, uint64_t v) {
+    h ^= v + 0x9e3779b97f4a7c15ull + (h << 6) + (h >> 2);
+}
+
+uint64_t RHI_Vulkan::hashGraphicsBindings() const {
+    uint64_t h = 1469598103934665603ull;
+    auto mixBuf = [&](const BufferBinding* b) {
+        for (Uint32 i = 0; i < BINDINGS_PER_SET; i++) {
+            hashCombine64(h, reinterpret_cast<uint64_t>(b[i].buffer));
+            hashCombine64(h, static_cast<uint64_t>(b[i].offset));
+            hashCombine64(h, static_cast<uint64_t>(b[i].range));
+        }
+    };
+    mixBuf(boundVertexBuffers);
+    mixBuf(boundFragmentBuffers);
+    for (Uint32 i = 0; i < BINDINGS_PER_SET; i++) {
+        hashCombine64(h, reinterpret_cast<uint64_t>(boundTextures[i].view));
+        hashCombine64(h, reinterpret_cast<uint64_t>(boundTextures[i].sampler));
+    }
+    return h;
+}
+
+uint64_t RHI_Vulkan::hashComputeBindings() const {
+    uint64_t h = 1469598103934665603ull;
+    for (Uint32 i = 0; i < BINDINGS_PER_SET; i++) {
+        hashCombine64(h, reinterpret_cast<uint64_t>(boundComputeBuffers[i].buffer));
+        hashCombine64(h, static_cast<uint64_t>(boundComputeBuffers[i].offset));
+        hashCombine64(h, static_cast<uint64_t>(boundComputeBuffers[i].range));
+    }
+    for (Uint32 i = 0; i < BINDINGS_PER_SET; i++)
+        hashCombine64(h, reinterpret_cast<uint64_t>(boundComputeImages[i]));
+    return h;
+}
+
+void RHI_Vulkan::invalidateDescriptorCache() {
+    // Drop cached hash->set mappings so no future bind references a set whose
+    // buffer/view is being destroyed. The VkDescriptorSet objects themselves
+    // stay allocated in the persistent pool (harmless dead entries) until the
+    // pool is reset — which only happens if it fills (see flushDescriptors).
+    descriptorCache.clear();
+    computeDescriptorCache.clear();
+}
+
 void RHI_Vulkan::flushDescriptors() {
     if (!descriptorsDirty || currentCommandBuffer == VK_NULL_HANDLE) {
         return;
     }
     descriptorsDirty = false;
 
+    // Cache hit: the exact binding combination has a set already written — just
+    // bind it, no allocation, no vkUpdateDescriptorSets. This is the common
+    // path after warmup (materials/passes/frame-slots are a small fixed set).
+    uint64_t key = hashGraphicsBindings();
+    if (auto it = descriptorCache.find(key); it != descriptorCache.end()) {
+        vkCmdBindDescriptorSets(currentCommandBuffer, VK_PIPELINE_BIND_POINT_GRAPHICS,
+                                globalPipelineLayout, 0, 3, it->second.data(), 0, nullptr);
+        return;
+    }
+
     VkDescriptorSetLayout layouts[3] = { vertexBufferSetLayout, fragmentBufferSetLayout, textureSetLayout };
     VkDescriptorSet sets[3];
     VkDescriptorSetAllocateInfo allocInfo{};
     allocInfo.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO;
-    allocInfo.descriptorPool = descriptorPools[currentFrameInFlight];
+    allocInfo.descriptorPool = persistentDescriptorPool;
     allocInfo.descriptorSetCount = 3;
     allocInfo.pSetLayouts = layouts;
-    if (vkAllocateDescriptorSets(device, &allocInfo, sets) != VK_SUCCESS) {
-        fmt::print(stderr, "flushDescriptors: descriptor pool exhausted\n");
+    VkResult ar = vkAllocateDescriptorSets(device, &allocInfo, sets);
+    if (ar == VK_ERROR_OUT_OF_POOL_MEMORY || ar == VK_ERROR_FRAGMENTED_POOL) {
+        // Pool full (many resizes accumulated dead cached sets). Reclaim: no
+        // in-flight frame may use these sets during reset, so drain first.
+        vkDeviceWaitIdle(device);
+        vkResetDescriptorPool(device, persistentDescriptorPool, 0);
+        descriptorCache.clear();
+        computeDescriptorCache.clear();
+        ar = vkAllocateDescriptorSets(device, &allocInfo, sets);
+    }
+    if (ar != VK_SUCCESS) {
+        fmt::print(stderr, "flushDescriptors: descriptor allocation failed ({})\n", (int)ar);
         return;
     }
     statsDescriptorSets += 3;
@@ -546,6 +637,8 @@ void RHI_Vulkan::flushDescriptors() {
     if (writeCount > 0) {
         vkUpdateDescriptorSets(device, writeCount, writes, 0, nullptr);
     }
+    // Cache under the binding hash so the next identical combination is a hit.
+    descriptorCache.emplace(key, std::array<VkDescriptorSet, 3>{ sets[0], sets[1], sets[2] });
     vkCmdBindDescriptorSets(currentCommandBuffer, VK_PIPELINE_BIND_POINT_GRAPHICS,
                             globalPipelineLayout, 0, 3, sets, 0, nullptr);
 }
@@ -783,6 +876,10 @@ BufferHandle RHI_Vulkan::createBuffer(const BufferDesc& desc) {
 void RHI_Vulkan::destroyBuffer(BufferHandle handle) {
     auto it = buffers.find(handle.id);
     if (it != buffers.end()) {
+        // Drop any cached descriptor sets referencing this buffer so no future
+        // bind points at a dying VkBuffer. (Rare: destroys happen on resize /
+        // scene load, never per frame.)
+        invalidateDescriptorCache();
         // The handle dies now; the Vulkan objects retire once every frame
         // that could still reference them has completed.
         VkDevice dev = device;
@@ -916,6 +1013,8 @@ TextureHandle RHI_Vulkan::createTexture(const TextureDesc& desc) {
 void RHI_Vulkan::destroyTexture(TextureHandle handle) {
     auto it = textures.find(handle.id);
     if (it != textures.end()) {
+        // Drop cached descriptor sets referencing this texture's view(s).
+        invalidateDescriptorCache();
         VkDevice dev = device;
         VkImageView view = it->second.view;
         VkImage image = it->second.image;
@@ -1568,12 +1667,13 @@ void RHI_Vulkan::beginFrame() {
     if (rhiStats && (frameCounter % 120) == 0) {
         fmt::print(stderr,
             "[VKSTATS] f={} buf={} tex={} smp={} shd={} pso={} cpso={} "
-            "pendingUpFences={} retireQ={} descSets/120f={} bufCreates/120f={} "
-            "texCreates/120f={} stagingHW={}KB\n",
+            "pendingUpFences={} retireQ={} descSets/win={} descCache={} cCache={} "
+            "bufCreates/win={} texCreates/win={} stagingHW={}KB\n",
             frameCounter, buffers.size(), textures.size(), samplers.size(),
             shaders.size(), pipelines.size(), computePipelines.size(),
             pendingUploadFences.size(), retirementQueue.size(),
-            statsDescriptorSets, statsBufferCreates, statsTextureCreates,
+            statsDescriptorSets, descriptorCache.size(), computeDescriptorCache.size(),
+            statsBufferCreates, statsTextureCreates,
             statsStagingHighWater / 1024);
         statsDescriptorSets = 0;
         statsBufferCreates = 0;
@@ -2780,15 +2880,30 @@ void RHI_Vulkan::flushComputeDescriptors() {
     }
     computeDescriptorsDirty = false;
 
+    uint64_t key = hashComputeBindings();
+    if (auto it = computeDescriptorCache.find(key); it != computeDescriptorCache.end()) {
+        vkCmdBindDescriptorSets(currentCommandBuffer, VK_PIPELINE_BIND_POINT_COMPUTE,
+                                computePipelineLayout, 0, 2, it->second.data(), 0, nullptr);
+        return;
+    }
+
     VkDescriptorSetLayout layouts[2] = { computeBufferSetLayout, computeImageSetLayout };
     VkDescriptorSet sets[2];
     VkDescriptorSetAllocateInfo allocInfo{};
     allocInfo.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO;
-    allocInfo.descriptorPool = descriptorPools[currentFrameInFlight];
+    allocInfo.descriptorPool = persistentDescriptorPool;
     allocInfo.descriptorSetCount = 2;
     allocInfo.pSetLayouts = layouts;
-    if (vkAllocateDescriptorSets(device, &allocInfo, sets) != VK_SUCCESS) {
-        fmt::print(stderr, "flushComputeDescriptors: descriptor pool exhausted\n");
+    VkResult ar = vkAllocateDescriptorSets(device, &allocInfo, sets);
+    if (ar == VK_ERROR_OUT_OF_POOL_MEMORY || ar == VK_ERROR_FRAGMENTED_POOL) {
+        vkDeviceWaitIdle(device);
+        vkResetDescriptorPool(device, persistentDescriptorPool, 0);
+        descriptorCache.clear();
+        computeDescriptorCache.clear();
+        ar = vkAllocateDescriptorSets(device, &allocInfo, sets);
+    }
+    if (ar != VK_SUCCESS) {
+        fmt::print(stderr, "flushComputeDescriptors: descriptor allocation failed ({})\n", (int)ar);
         return;
     }
     statsDescriptorSets += 2;
@@ -2828,6 +2943,7 @@ void RHI_Vulkan::flushComputeDescriptors() {
     if (writeCount > 0) {
         vkUpdateDescriptorSets(device, writeCount, writes, 0, nullptr);
     }
+    computeDescriptorCache.emplace(key, std::array<VkDescriptorSet, 2>{ sets[0], sets[1] });
     vkCmdBindDescriptorSets(currentCommandBuffer, VK_PIPELINE_BIND_POINT_COMPUTE,
                             computePipelineLayout, 0, 2, sets, 0, nullptr);
 }

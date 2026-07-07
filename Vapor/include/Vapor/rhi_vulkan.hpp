@@ -10,6 +10,7 @@
 #include <string>
 #include <vector>
 #include <unordered_map>
+#include <array>
 
 // ============================================================================
 // RHI_Vulkan - Vulkan implementation of RHI interface
@@ -306,6 +307,24 @@ private:
     VkDescriptorSetLayout textureSetLayout = VK_NULL_HANDLE;        // set 2
     VkPipelineLayout globalPipelineLayout = VK_NULL_HANDLE;
     std::vector<VkDescriptorPool> descriptorPools;  // one per frame in flight
+
+    // Persistent descriptor-set cache. Allocating fresh sets per draw is the
+    // #1 MoltenVK perf cliff (hundreds of vkAllocateDescriptorSets per frame,
+    // whose backing argument buffers the driver ratchets up to the peak load
+    // and never releases). Instead: hash the current binding state, reuse the
+    // set if we've seen it, only allocate on a genuine miss. The set of
+    // distinct binding combinations is bounded (materials x passes x frame
+    // slots), so after warmup this is all hits and zero allocations. Cached
+    // sets are NEVER rewritten (a miss always allocates a brand-new set), so
+    // there is no in-flight-write hazard; the cache is cleared when any
+    // referenced buffer/texture is destroyed, and the pool is reset (after a
+    // waitIdle) only if it ever fills.
+    VkDescriptorPool persistentDescriptorPool = VK_NULL_HANDLE;
+    std::unordered_map<uint64_t, std::array<VkDescriptorSet, 3>> descriptorCache;
+    std::unordered_map<uint64_t, std::array<VkDescriptorSet, 2>> computeDescriptorCache;
+    uint64_t hashGraphicsBindings() const;
+    uint64_t hashComputeBindings() const;
+    void invalidateDescriptorCache();  // drop cached sets (referenced views/buffers dying)
 
     BufferBinding boundVertexBuffers[BINDINGS_PER_SET];
     BufferBinding boundFragmentBuffers[BINDINGS_PER_SET];
