@@ -26,7 +26,7 @@ using namespace Vapor;
 #include <ctime>
 #include <functional>
 #include <set>
-#include <thread>
+#include <atomic>
 #include <glm/ext/matrix_clip_space.hpp>
 #include <glm/ext/matrix_transform.hpp>
 #include <imgui.h>
@@ -5145,46 +5145,49 @@ void Renderer_Metal::generateVoxelDemoVolume() {
         }
     }
 
-    // Column fill, parallelized over z slices (cells are disjoint per thread)
-    const Uint32 threadCount = std::max(1u, std::thread::hardware_concurrency());
-    std::vector<Uint32> threadSolidCounts(threadCount, 0);
-    {
-        std::vector<std::thread> workers;
-        workers.reserve(threadCount);
-        for (Uint32 ti = 0; ti < threadCount; ti++) {
-            workers.emplace_back([&, ti]() {
-                Uint32 localSolid = 0;
-                for (Uint32 z = ti; z < N; z += threadCount) {
-                    for (Uint32 x = 0; x < N; x++) {
-                        const float h = heights[z * N + x];
-                        const auto top = static_cast<Uint32>(h);
-                        for (Uint32 y = 0; y <= top && y < N; y++) {
-                            // Carve caves below the surface crust
-                            if (y + 4 < top) {
-                                float cave = voxelFbm3(glm::vec3(x, y, z) * 0.045f, 3, seed + 7u);
-                                if (cave > 0.62f) continue;
-                            }
-                            Uint8 mat = MatStone;
-                            const Uint32 depth = top - y;
-                            if (depth == 0) {
-                                mat = (h > snowLine) ? MatSnow : ((h < sandLine) ? MatSand : MatGrass);
-                            } else if (depth <= 3) {
-                                mat = (h < sandLine) ? MatSand : MatDirt;
-                            } else if (voxelHashNoise(x, y, z, seed + 13u) > 0.995f) {
-                                mat = MatOre;
-                            }
-                            voxelAt(x, y, z) = mat;
-                            localSolid++;
-                        }
-                    }
+    // Column fill, parallelized over z slices via the engine's enkiTS scheduler
+    // (cells are disjoint per z-slice, so no locking). A TaskSet auto-splits
+    // [0, N) across worker threads and load-balances the partitions.
+    std::atomic<Uint32> solidAtomic{ 0 };
+    auto fillSlice = [&](Uint32 z) {
+        Uint32 localSolid = 0;
+        for (Uint32 x = 0; x < N; x++) {
+            const float h = heights[z * N + x];
+            const auto top = static_cast<Uint32>(h);
+            for (Uint32 y = 0; y <= top && y < N; y++) {
+                // Carve caves below the surface crust
+                if (y + 4 < top) {
+                    float cave = voxelFbm3(glm::vec3(x, y, z) * 0.045f, 3, seed + 7u);
+                    if (cave > 0.62f) continue;
                 }
-                threadSolidCounts[ti] = localSolid;
-            });
+                Uint8 mat = MatStone;
+                const Uint32 depth = top - y;
+                if (depth == 0) {
+                    mat = (h > snowLine) ? MatSnow : ((h < sandLine) ? MatSand : MatGrass);
+                } else if (depth <= 3) {
+                    mat = (h < sandLine) ? MatSand : MatDirt;
+                } else if (voxelHashNoise(x, y, z, seed + 13u) > 0.995f) {
+                    mat = MatOre;
+                }
+                voxelAt(x, y, z) = mat;
+                localSolid++;
+            }
         }
-        for (auto& w : workers) w.join();
+        solidAtomic.fetch_add(localSolid, std::memory_order_relaxed);
+    };
+
+    auto* engineCore = Vapor::EngineCore::Get();
+    auto* scheduler = engineCore ? engineCore->getTaskScheduler().getScheduler() : nullptr;
+    if (scheduler) {
+        enki::TaskSet fillTask(N, [&](enki::TaskSetPartition range, Uint32 /*threadnum*/) {
+            for (Uint32 z = range.start; z < range.end; z++) fillSlice(z);
+        });
+        scheduler->AddTaskSetToPipe(&fillTask);
+        scheduler->WaitforTask(&fillTask);
+    } else {
+        for (Uint32 z = 0; z < N; z++) fillSlice(z);
     }
-    voxelSolidCount = 0;
-    for (Uint32 c : threadSolidCounts) voxelSolidCount += c;
+    voxelSolidCount = solidAtomic.load();
 
     // A few floating crystal spheres to show the volume is truly 3D
     for (int s = 0; s < 4; s++) {
