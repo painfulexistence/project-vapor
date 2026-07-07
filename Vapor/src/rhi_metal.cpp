@@ -1045,6 +1045,13 @@ void RHI_Metal::beginRenderPass(const RenderPassDesc& desc) {
         }
     }
 
+    // Remember the pass extent so setScissor can clamp to it — callers pass
+    // scissors in their own coordinate space (e.g. RmlUI's framebuffer size),
+    // which need not match the attachment (mismatched under VAPOR_RENDER_SCALE,
+    // where the drawable is smaller than the UI's pixel size).
+    currentPassWidth = passWidth;
+    currentPassHeight = passHeight;
+
     MTL::Viewport viewport;
     viewport.originX = 0.0;
     viewport.originY = 0.0;
@@ -1074,6 +1081,15 @@ void RHI_Metal::setScissor(int32_t x, int32_t y, Uint32 width, Uint32 height) {
     // (Metal validation rejects scissors beyond the attachment bounds).
     if (x < 0) { width += x; x = 0; }
     if (y < 0) { height += y; y = 0; }
+    // Clamp to the current pass extent (Metal asserts on scissors past the
+    // attachment bounds).
+    if (currentPassWidth > 0 && Uint32(x) < currentPassWidth) {
+        width = std::min(width, currentPassWidth - Uint32(x));
+    } else if (currentPassWidth > 0) { width = 0; }
+    if (currentPassHeight > 0 && Uint32(y) < currentPassHeight) {
+        height = std::min(height, currentPassHeight - Uint32(y));
+    } else if (currentPassHeight > 0) { height = 0; }
+    if (width == 0 || height == 0) { width = std::max(1u, width); height = std::max(1u, height); x = 0; y = 0; }
     MTL::ScissorRect rect;
     rect.x = static_cast<NS::UInteger>(x);
     rect.y = static_cast<NS::UInteger>(y);

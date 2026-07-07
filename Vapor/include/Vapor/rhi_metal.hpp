@@ -172,6 +172,9 @@ private:
     Uint32 swapchainWidth = 0;
     Uint32 swapchainHeight = 0;
     MTL::PixelFormat swapchainFormat = MTL::PixelFormatRGBA8Unorm_sRGB;
+    // Extent of the render pass currently being encoded (for scissor clamping).
+    Uint32 currentPassWidth = 0;
+    Uint32 currentPassHeight = 0;
 
     // Device feature support, filled in initialize()
     RHICapabilities capabilities;

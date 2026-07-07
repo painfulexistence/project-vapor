@@ -168,6 +168,9 @@ private:
     VkSwapchainKHR swapchain = VK_NULL_HANDLE;
     VkFormat swapchainImageFormat;
     VkExtent2D swapchainExtent;
+    // Extent of the render pass currently being encoded (for scissor clamping).
+    Uint32 currentPassWidth = 0;
+    Uint32 currentPassHeight = 0;
     std::vector<VkImage> swapchainImages;
     std::vector<VkImageView> swapchainImageViews;
 

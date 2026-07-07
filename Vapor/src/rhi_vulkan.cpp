@@ -1800,6 +1800,8 @@ void RHI_Vulkan::beginRenderPass(const RenderPassDesc& desc) {
         }
     }
     renderingInfo.renderArea.extent = passExtent;
+    currentPassWidth = passExtent.width;    // for setScissor clamping
+    currentPassHeight = passExtent.height;
     renderingInfo.layerCount = 1;
     renderingInfo.colorAttachmentCount = static_cast<uint32_t>(colorAttachments.size());
     renderingInfo.pColorAttachments = colorAttachments.data();
@@ -2802,6 +2804,16 @@ void RHI_Vulkan::setScissor(int32_t x, int32_t y, Uint32 width, Uint32 height) {
     // Clamp to non-negative offsets (Vulkan requires offset >= 0).
     if (x < 0) { width += x; x = 0; }
     if (y < 0) { height += y; y = 0; }
+    // Clamp to the current pass extent (a scissor past the render area is a
+    // validation error; caller-space sizes need not match the attachment,
+    // e.g. under VAPOR_RENDER_SCALE).
+    if (currentPassWidth > 0) {
+        width = (Uint32(x) < currentPassWidth) ? std::min(width, currentPassWidth - Uint32(x)) : 0;
+    }
+    if (currentPassHeight > 0) {
+        height = (Uint32(y) < currentPassHeight) ? std::min(height, currentPassHeight - Uint32(y)) : 0;
+    }
+    if (width == 0 || height == 0) { x = 0; y = 0; width = std::max(1u, width); height = std::max(1u, height); }
     VkRect2D scissor{};
     scissor.offset = { x, y };
     scissor.extent = { width, height };
