@@ -219,6 +219,13 @@ struct alignas(16) LightScatteringRenderData {
     glm::vec2 _pad2 = glm::vec2(0.0f);
 };
 
+// AO temporal reprojection params (Vulkan AOTemporal.frag, set1 b0).
+struct alignas(16) AOTemporalRenderData {
+    glm::mat4 prevView = glm::mat4(1.0f);
+    uint32_t historyValid = 0;
+    uint32_t _pad[3] = {0, 0, 0};
+};
+
 // Simple screen-space height/distance fog (the Metal backend's simpleFog path).
 struct alignas(16) FogRenderData {
     glm::mat4 invViewProj = glm::mat4(1.0f);

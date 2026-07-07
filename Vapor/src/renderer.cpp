@@ -174,6 +174,13 @@ void Renderer::initialize(std::unique_ptr<RHI> rhiPtr, GraphicsBackend backendTy
         glm::mat4 identityVP(1.0f);
         createFrameSlottedBuffer(prevViewProjBuffer, prevVPDesc, &identityVP, sizeof(identityVP));
 
+        BufferDesc aoTemporalDesc;
+        aoTemporalDesc.size = sizeof(AOTemporalRenderData);
+        aoTemporalDesc.usage = BufferUsage::Uniform;
+        aoTemporalDesc.memoryUsage = MemoryUsage::CPUtoGPU;
+        AOTemporalRenderData aoTemporalDefaults;
+        createFrameSlottedBuffer(aoTemporalDataBuffer, aoTemporalDesc, &aoTemporalDefaults, sizeof(aoTemporalDefaults));
+
         BufferDesc cloudDesc;
         cloudDesc.size = sizeof(VolumetricCloudRenderData);
         cloudDesc.usage = BufferUsage::Uniform;
@@ -769,12 +776,16 @@ void Renderer::setupDefaultRenderGraph() {
         [](Renderer& r) { r.tileCullingPass(); }, PassFlags::RequiresCompute);
     renderGraph.addPass("RaytraceShadow",
         [](Renderer& r) { r.raytraceShadowPass(); }, PassFlags::RequiresRaytracing);
+    // AO chain runs on BOTH backends now: the raygen stage picks RT AO or SSAO
+    // by aoMethod/capability (Metal compute; Vulkan fullscreen fragment twins),
+    // so the passes gate on compute, not raytracing. Internal pipeline-validity
+    // guards keep them no-ops where the pipelines don't exist.
     renderGraph.addPass("RaytraceAO",
-        [](Renderer& r) { r.raytraceAOPass(); }, PassFlags::RequiresRaytracing);
+        [](Renderer& r) { r.raytraceAOPass(); }, PassFlags::RequiresCompute);
     renderGraph.addPass("AOTemporal",
-        [](Renderer& r) { r.aoTemporalPass(); }, PassFlags::RequiresRaytracing);
+        [](Renderer& r) { r.aoTemporalPass(); }, PassFlags::RequiresCompute);
     renderGraph.addPass("AODenoise",
-        [](Renderer& r) { r.aoDenoisePass(); }, PassFlags::RequiresRaytracing);
+        [](Renderer& r) { r.aoDenoisePass(); }, PassFlags::RequiresCompute);
     renderGraph.addPass("StochasticPointShadow",
         [](Renderer& r) { r.stochasticPointShadowPass(); }, PassFlags::RequiresRaytracing);
     renderGraph.addPass("PointShadowTemporal",
@@ -1210,6 +1221,9 @@ void Renderer::mainRenderPass() {
         // Tiled point-light culling inputs (set1 b4 clusters, b5 dimensions).
         if (clusterBuffer.isValid()) rhi->setFragmentBuffer(4, clusterBuffer);
         if (lightCullDataBuffer.isValid()) rhi->setFragmentBuffer(5, lightCullDataBuffer, 0, sizeof(Vapor::LightCullData));
+        // SSAO chain output at set2 b7 (RHIMain.frag texAO; whiteTex = neutral
+        // when AO is off — the defaults loop above already bound white there).
+        if (aoEnabled && aoRT.isValid()) rhi->setTexture(0, 7, aoRT, clampSampler);
     } else {
         // Metal-via-RHI: real IBL outputs replace the neutral blacks —
         // irradiance(8), prefilter(9), brdfLUT(10).
@@ -1218,10 +1232,12 @@ void Renderer::mainRenderPass() {
             if (prefilterMap.isValid()) rhi->setTexture(0, 9, prefilterMap, clampSampler);
             if (brdfLUTTex.isValid()) rhi->setTexture(0, 10, brdfLUTTex, clampSampler);
         }
+        // AO output replaces the neutral white at texAO(6) whenever the AO
+        // chain ran — with RT (RTAO) or without (SSAO shares the chain).
+        if (aoEnabled && aoRT.isValid()) rhi->setTexture(0, 6, aoRT, clampSampler);
         if (capabilities.raytracing) {
-            // RT kernel outputs replace the neutral whites — texAO(6),
+            // RT kernel outputs replace the neutral whites —
             // texShadow(7), texPointShadow(13), gibsGI(14).
-            if (aoEnabled && aoRT.isValid()) rhi->setTexture(0, 6, aoRT, clampSampler);
             if (shadowRT.isValid()) rhi->setTexture(0, 7, shadowRT, clampSampler);
             if (pointShadowHistoryRT.isValid()) rhi->setTexture(0, 13, pointShadowHistoryRT, clampSampler);
             if (gibsEnabled && giResultTexture.isValid()) rhi->setTexture(0, 14, giResultTexture, clampSampler);
@@ -1548,53 +1564,110 @@ void Renderer::raytraceShadowPass() {
     rhi->generateMipmaps(shadowRT);
 }
 
-// Ray-traced AO into the noisy aoRawRT; the temporal + à-trous passes below
-// produce the final aoRT the PBR shader samples.
+// AO raygen into the noisy aoRawRT; the temporal + à-trous passes below
+// produce the final aoRT the lighting samples. The kernel is chosen by
+// aoMethod exactly like native RaytraceAOPass: 0 = ray traced (needs TLAS),
+// 1 = SSAO (same bindings minus the TLAS). On Vulkan (no RT) the SSAO
+// fullscreen-fragment twin runs instead.
 void Renderer::raytraceAOPass() {
-    if (!aoEnabled || !raytraceAOPipeline.isValid() || !sceneTLAS.isValid() || !aoRawRT.isValid()) return;
-    FrameData fd{};
-    fd.frameNumber = frameCounter;
-    fd.time = float(frameCounter) / 60.0f;
-    fd.deltaTime = 1.0f / 60.0f;
-    rhi->updateBuffer(frameDataBuffer, &fd, 0, sizeof(fd));
+    if (!aoEnabled || !aoRawRT.isValid()) return;
 
-    Uint32 w = (rhi->getSwapchainWidth() + 1) / 2;   // aoRawRT is half-res
-    Uint32 h = (rhi->getSwapchainHeight() + 1) / 2;
-    rhi->beginComputePass("RaytraceAO");
-    rhi->bindComputePipeline(raytraceAOPipeline);
-    rhi->setComputeTexture(0, depthStencilRT);
-    rhi->setComputeTexture(1, normalRT);
-    rhi->setComputeTexture(2, aoRawRT);
-    rhi->setComputeBuffer(0, frameDataBuffer, 0, sizeof(FrameData));
-    rhi->setComputeBuffer(1, cameraUniformBuffer, 0, sizeof(CameraRenderData));
-    rhi->setAccelerationStructure(2, sceneTLAS);
-    rhi->dispatch(w, h, 1);
-    rhi->endComputePass();
+    if (backend == GraphicsBackend::Metal) {
+        bool useRT = aoMethod == 0 && capabilities.raytracing &&
+                     raytraceAOPipeline.isValid() && sceneTLAS.isValid();
+        ComputePipelineHandle pipe = useRT ? raytraceAOPipeline : ssaoPipeline;
+        if (!pipe.isValid()) return;
+
+        FrameData fd{};
+        fd.frameNumber = frameCounter;
+        fd.time = float(frameCounter) / 60.0f;
+        fd.deltaTime = 1.0f / 60.0f;
+        rhi->updateBuffer(frameDataBuffer, &fd, 0, sizeof(fd));
+
+        Uint32 w = (rhi->getSwapchainWidth() + 1) / 2;   // aoRawRT is half-res
+        Uint32 h = (rhi->getSwapchainHeight() + 1) / 2;
+        rhi->beginComputePass("RaytraceAO");
+        rhi->bindComputePipeline(pipe);
+        rhi->setComputeTexture(0, depthStencilRT);
+        rhi->setComputeTexture(1, normalRT);
+        rhi->setComputeTexture(2, aoRawRT);
+        rhi->setComputeBuffer(0, frameDataBuffer, 0, sizeof(FrameData));
+        rhi->setComputeBuffer(1, cameraUniformBuffer, 0, sizeof(CameraRenderData));
+        if (useRT) rhi->setAccelerationStructure(2, sceneTLAS);
+        rhi->dispatch(w, h, 1);
+        rhi->endComputePass();
+    } else {
+        // Vulkan: SSAO.frag into aoRawRT (frameNumber via push-constant slot 0).
+        if (!vkSsaoPipeline.isValid() || !depthStencilRT.isValid() || !normalRT.isValid()) return;
+        RenderPassDesc rp;
+        rp.name = "RaytraceAO";  // keep the pass name stable in the timings panel
+        rp.colorAttachments.push_back(aoRawRT);
+        rp.clearColors.push_back(glm::vec4(1.0f));
+        rp.loadColor.push_back(false);
+        rhi->beginRenderPass(rp);
+        rhi->bindPipeline(vkSsaoPipeline);
+        rhi->setTexture(0, 0, depthStencilRT, clampSampler);
+        rhi->setTexture(0, 1, normalRT, clampSampler);
+        rhi->setFragmentBuffer(3, cameraUniformBuffer, 0, sizeof(CameraRenderData));
+        rhi->setFragmentBytes(&frameCounter, sizeof(Uint32), 0);
+        rhi->draw(3, 1, 0, 0);
+        rhi->endRenderPass();
+    }
 }
 
 // Temporal AO accumulation (view reprojection + velocity), aoHistory ping-pong.
 void Renderer::aoTemporalPass() {
-    if (!aoEnabled || !aoTemporalPipeline.isValid() || !aoRawRT.isValid()) return;
+    if (!aoEnabled || !aoRawRT.isValid()) return;
     glm::mat4 curView = currentCamera.view;
     if (!prevViewValid) { prevView = curView; prevViewValid = true; }
     Uint32 historyValid = aoHistoryValid ? 1u : 0u;
     Uint32 inIdx = aoHistoryIndex;
     Uint32 outIdx = inIdx ^ 1u;
-    Uint32 w = (rhi->getSwapchainWidth() + 1) / 2;   // AO chain is half-res
-    Uint32 h = (rhi->getSwapchainHeight() + 1) / 2;
-    rhi->beginComputePass("AOTemporal");
-    rhi->bindComputePipeline(aoTemporalPipeline);
-    rhi->setComputeTexture(0, aoRawRT);
-    rhi->setComputeTexture(1, aoHistoryRT[inIdx]);
-    rhi->setComputeTexture(2, aoHistoryRT[outIdx]);
-    rhi->setComputeTexture(3, velocityRT);
-    rhi->setComputeTexture(4, depthStencilRT);
-    rhi->setComputeTexture(5, normalRT);
-    rhi->setComputeBuffer(0, cameraUniformBuffer, 0, sizeof(CameraRenderData));
-    rhi->setComputeBytes(&prevView, sizeof(glm::mat4), 1);
-    rhi->setComputeBytes(&historyValid, sizeof(Uint32), 2);
-    rhi->dispatch((w + 7) / 8, (h + 7) / 8, 1);
-    rhi->endComputePass();
+
+    if (backend == GraphicsBackend::Metal) {
+        if (!aoTemporalPipeline.isValid()) return;
+        Uint32 w = (rhi->getSwapchainWidth() + 1) / 2;   // AO chain is half-res
+        Uint32 h = (rhi->getSwapchainHeight() + 1) / 2;
+        rhi->beginComputePass("AOTemporal");
+        rhi->bindComputePipeline(aoTemporalPipeline);
+        rhi->setComputeTexture(0, aoRawRT);
+        rhi->setComputeTexture(1, aoHistoryRT[inIdx]);
+        rhi->setComputeTexture(2, aoHistoryRT[outIdx]);
+        rhi->setComputeTexture(3, velocityRT);
+        rhi->setComputeTexture(4, depthStencilRT);
+        rhi->setComputeTexture(5, normalRT);
+        rhi->setComputeBuffer(0, cameraUniformBuffer, 0, sizeof(CameraRenderData));
+        rhi->setComputeBytes(&prevView, sizeof(glm::mat4), 1);
+        rhi->setComputeBytes(&historyValid, sizeof(Uint32), 2);
+        rhi->dispatch((w + 7) / 8, (h + 7) / 8, 1);
+        rhi->endComputePass();
+    } else {
+        // Vulkan: AOTemporal.frag into the history target.
+        if (!vkAoTemporalPipeline.isValid() || !velocityRT.isValid() ||
+            !aoTemporalDataBuffer.isValid()) return;
+        AOTemporalRenderData td;
+        td.prevView = prevView;
+        td.historyValid = historyValid;
+        rhi->updateBuffer(aoTemporalDataBuffer, &td, 0, sizeof(td));
+
+        RenderPassDesc rp;
+        rp.name = "AOTemporal";
+        rp.colorAttachments.push_back(aoHistoryRT[outIdx]);
+        rp.clearColors.push_back(glm::vec4(0.0f));
+        rp.loadColor.push_back(false);
+        rhi->beginRenderPass(rp);
+        rhi->bindPipeline(vkAoTemporalPipeline);
+        rhi->setTexture(0, 0, aoRawRT, clampSampler);
+        rhi->setTexture(0, 1, aoHistoryRT[inIdx], clampSampler);
+        rhi->setTexture(0, 2, velocityRT, clampSampler);
+        rhi->setTexture(0, 3, depthStencilRT, clampSampler);
+        rhi->setTexture(0, 4, normalRT, clampSampler);
+        rhi->setFragmentBuffer(0, aoTemporalDataBuffer, 0, sizeof(AOTemporalRenderData));
+        rhi->setFragmentBuffer(3, cameraUniformBuffer, 0, sizeof(CameraRenderData));
+        rhi->draw(3, 1, 0, 0);
+        rhi->endRenderPass();
+    }
+
     aoHistoryIndex = outIdx;
     aoHistoryValid = true;
     prevView = curView;
@@ -1602,24 +1675,50 @@ void Renderer::aoTemporalPass() {
 
 // À-trous denoise: history -> scratch (stride 1) -> aoRT (stride 2).
 void Renderer::aoDenoisePass() {
-    if (!aoEnabled || !aoDenoisePipeline.isValid() || !aoRT.isValid()) return;
-    Uint32 w = (rhi->getSwapchainWidth() + 1) / 2;   // aoRT is half-res
-    Uint32 h = (rhi->getSwapchainHeight() + 1) / 2;
-    struct Iter { TextureHandle src, dst; Uint32 stride; };
-    const Iter iters[] = {
-        { aoHistoryRT[aoHistoryIndex], aoScratchRT, 1u },
-        { aoScratchRT, aoRT, 2u },
-    };
-    rhi->beginComputePass("AODenoise");
-    rhi->bindComputePipeline(aoDenoisePipeline);
-    for (const Iter& it : iters) {
-        rhi->setComputeTexture(0, it.src);
-        rhi->setComputeTexture(1, it.dst);
-        rhi->setComputeBytes(&it.stride, sizeof(Uint32), 0);
-        rhi->dispatch((w + 7) / 8, (h + 7) / 8, 1);
-        rhi->computeBarrier();  // iteration 2 reads what iteration 1 wrote
+    if (!aoEnabled || !aoRT.isValid()) return;
+
+    if (backend == GraphicsBackend::Metal) {
+        if (!aoDenoisePipeline.isValid()) return;
+        Uint32 w = (rhi->getSwapchainWidth() + 1) / 2;   // aoRT is half-res
+        Uint32 h = (rhi->getSwapchainHeight() + 1) / 2;
+        struct Iter { TextureHandle src, dst; Uint32 stride; };
+        const Iter iters[] = {
+            { aoHistoryRT[aoHistoryIndex], aoScratchRT, 1u },
+            { aoScratchRT, aoRT, 2u },
+        };
+        rhi->beginComputePass("AODenoise");
+        rhi->bindComputePipeline(aoDenoisePipeline);
+        for (const Iter& it : iters) {
+            rhi->setComputeTexture(0, it.src);
+            rhi->setComputeTexture(1, it.dst);
+            rhi->setComputeBytes(&it.stride, sizeof(Uint32), 0);
+            rhi->dispatch((w + 7) / 8, (h + 7) / 8, 1);
+            rhi->computeBarrier();  // iteration 2 reads what iteration 1 wrote
+        }
+        rhi->endComputePass();
+    } else {
+        // Vulkan: two fullscreen passes; the target formats differ (scratch is
+        // RGBA16F, aoRT is R16F), so each iteration uses its matching pipeline.
+        if (!vkAoDenoisePipelineRGBA.isValid() || !vkAoDenoisePipelineR16.isValid()) return;
+        struct Iter { TextureHandle src, dst; PipelineHandle pipe; Uint32 stride; };
+        const Iter iters[] = {
+            { aoHistoryRT[aoHistoryIndex], aoScratchRT, vkAoDenoisePipelineRGBA, 1u },
+            { aoScratchRT, aoRT, vkAoDenoisePipelineR16, 2u },
+        };
+        for (const Iter& it : iters) {
+            RenderPassDesc rp;
+            rp.name = "AODenoise";
+            rp.colorAttachments.push_back(it.dst);
+            rp.clearColors.push_back(glm::vec4(0.0f));
+            rp.loadColor.push_back(false);
+            rhi->beginRenderPass(rp);
+            rhi->bindPipeline(it.pipe);
+            rhi->setTexture(0, 0, it.src, clampSampler);
+            rhi->setFragmentBytes(&it.stride, sizeof(Uint32), 0);
+            rhi->draw(3, 1, 0, 0);
+            rhi->endRenderPass();
+        }
     }
-    rhi->endComputePass();
 }
 
 // Stochastic ray-traced point-light shadows (clustered light sampling).
@@ -2955,7 +3054,8 @@ void Renderer::createRenderTargets() {
         desc.width = halfW;
         desc.height = halfH;
         desc.format = PixelFormat::R16_FLOAT;  // Single channel float
-        desc.usage = TextureUsage::Storage | TextureUsage::Sampled;
+        // RenderTarget usage for the Vulkan denoise fragment pass's final write.
+        desc.usage = TextureUsage::Storage | TextureUsage::Sampled | TextureUsage::RenderTarget;
         aoRT = rhi->createTexture(desc);
     }
 
@@ -2972,16 +3072,24 @@ void Renderer::createRenderTargets() {
         albedoRT = rhi->createTexture(desc);  // full-res (prepass MRT)
 
         // AO working chain: half-res, matching native's aoChainDesc.
+        // RenderTarget usage added for the Vulkan fragment-pass twins.
         desc.width = halfW;
         desc.height = halfH;
         desc.format = PixelFormat::R16_FLOAT;
-        desc.usage = TextureUsage::Storage | TextureUsage::Sampled;
+        desc.usage = TextureUsage::Storage | TextureUsage::Sampled | TextureUsage::RenderTarget;
         aoRawRT = rhi->createTexture(desc);
+        // History + scratch are RGBA16F like native (3d_ao_temporal.metal packs
+        // ao + view-space depth + octahedral normal); the previous R16F here
+        // silently dropped the depth/normal channels, so the à-trous edge
+        // stops read zeros and the denoise degenerated into a plain blur.
+        desc.format = PixelFormat::RGBA16_FLOAT;
         aoScratchRT = rhi->createTexture(desc);
         aoHistoryRT[0] = rhi->createTexture(desc);
         aoHistoryRT[1] = rhi->createTexture(desc);
 
         // Point shadows stay full-res (native creates these at drawableSize).
+        desc.format = PixelFormat::R16_FLOAT;
+        desc.usage = TextureUsage::Storage | TextureUsage::Sampled;
         desc.width = width;
         desc.height = height;
         pointShadowRT = rhi->createTexture(desc);
@@ -3191,7 +3299,8 @@ void Renderer::createRenderPipeline() {
             // rendering into RGBA16F pyramid levels. The upsample pass uses
             // additive blending to accumulate onto the level it targets.
             auto makeFullscreenFragPipeline = [&](const char* fragSpv, ShaderHandle& outShader,
-                                                  BlendMode blend) -> PipelineHandle {
+                                                  BlendMode blend,
+                                                  PixelFormat colorFormat = PixelFormat::RGBA16_FLOAT) -> PipelineHandle {
                 std::string code = readFile(fragSpv);
                 if (code.empty()) return {};
                 ShaderDesc fd;
@@ -3212,7 +3321,7 @@ void Renderer::createRenderPipeline() {
                 d.cullMode = CullMode::None;
                 d.sampleCount = 1;
                 d.hasDepthAttachment = false;
-                d.colorAttachmentFormats = { PixelFormat::RGBA16_FLOAT };
+                d.colorAttachmentFormats = { colorFormat };
                 return rhi->createPipeline(d);
             };
             bloomBrightPipeline      = makeFullscreenFragPipeline("shaders/BloomBright.frag.spv",     bloomBrightShader,     BlendMode::Opaque);
@@ -3251,6 +3360,22 @@ void Renderer::createRenderPipeline() {
             // God rays: fullscreen light-scattering march into the half-res RT.
             lightScatteringPipeline = makeFullscreenFragPipeline(
                 "shaders/LightScattering.frag.spv", lightScatteringShader, BlendMode::Opaque);
+
+            // SSAO chain twins (fragment passes — compute can't sample depth):
+            // SSAO -> aoRawRT (R16F), temporal -> history (RGBA16F), à-trous
+            // denoise runs twice with different target formats (scratch RGBA16F,
+            // final aoRT R16F), hence two pipelines over one shader.
+            vkSsaoPipeline = makeFullscreenFragPipeline(
+                "shaders/SSAO.frag.spv", vkSsaoShader, BlendMode::Opaque, PixelFormat::R16_FLOAT);
+            vkAoTemporalPipeline = makeFullscreenFragPipeline(
+                "shaders/AOTemporal.frag.spv", vkAoTemporalShader, BlendMode::Opaque, PixelFormat::RGBA16_FLOAT);
+            vkAoDenoisePipelineRGBA = makeFullscreenFragPipeline(
+                "shaders/AODenoise.frag.spv", vkAoDenoiseShader, BlendMode::Opaque, PixelFormat::RGBA16_FLOAT);
+            {
+                ShaderHandle dummy;  // shader already created above; reuse the file
+                vkAoDenoisePipelineR16 = makeFullscreenFragPipeline(
+                    "shaders/AODenoise.frag.spv", dummy, BlendMode::Opaque, PixelFormat::R16_FLOAT);
+            }
 
             // Simple height/distance fog: fullscreen color+depth -> tempColorRT.
             volumetricFogPipeline = makeFullscreenFragPipeline(
@@ -3426,6 +3551,9 @@ void Renderer::createRenderPipeline() {
         // Threadgroup shapes mirror the native dispatches exactly.
         raytraceShadowPipeline        = makeMetalCompute("shaders/3d_raytrace_shadow.metal", rtShadowShader, 1, 1, 1);
         raytraceAOPipeline            = makeMetalCompute("shaders/3d_raytrace_ao.metal", rtAOShader, 1, 1, 1);
+        // SSAO shares the RT AO binding interface (ignores the TLAS slot) and
+        // is selected by aoMethod, exactly like native RaytraceAOPass.
+        ssaoPipeline                  = makeMetalCompute("shaders/3d_ssao.metal", ssaoShader, 1, 1, 1);
         aoTemporalPipeline            = makeMetalCompute("shaders/3d_ao_temporal.metal", aoTemporalShader, 8, 8, 1);
         aoDenoisePipeline             = makeMetalCompute("shaders/3d_ao_denoise.metal", aoDenoiseShader, 8, 8, 1);
         stochasticPointShadowPipeline = makeMetalCompute("shaders/3d_stochastic_point_shadow.metal", pointShadowShader, 8, 8, 1);

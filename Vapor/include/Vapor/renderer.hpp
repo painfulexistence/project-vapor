@@ -685,8 +685,16 @@ private:
     // AO method (native aoMethod): 0 = ray traced, 1 = screen space (SSAO).
     // On non-RT backends SSAO is the only option and is used regardless.
     int aoMethod = 0;
-    ComputePipelineHandle ssaoPipeline;  // 3d_ssao.metal / SSAO.comp
+    ComputePipelineHandle ssaoPipeline;  // Metal: 3d_ssao.metal compute kernel
     ShaderHandle ssaoShader;
+    // Vulkan AO chain twins — fullscreen fragment passes (the RHI compute path
+    // cannot sample depth on Vulkan; same pattern as Velocity/clouds).
+    PipelineHandle vkSsaoPipeline;              // SSAO.frag -> aoRawRT (R16F)
+    PipelineHandle vkAoTemporalPipeline;        // AOTemporal.frag -> history (RGBA16F)
+    PipelineHandle vkAoDenoisePipelineRGBA;     // AODenoise.frag -> scratch (RGBA16F)
+    PipelineHandle vkAoDenoisePipelineR16;      // AODenoise.frag -> aoRT (R16F)
+    ShaderHandle vkSsaoShader, vkAoTemporalShader, vkAoDenoiseShader;
+    BufferHandle aoTemporalDataBuffer;          // {mat4 prevView; uint historyValid}
     // PSSM: distance where RT near-field shadows hand over to the cascades
     // (native pssmRTMaxDist, panel-tunable 5..200).
     float pssmRTMaxDist = 50.0f;

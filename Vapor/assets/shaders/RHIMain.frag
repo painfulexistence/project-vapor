@@ -116,6 +116,10 @@ layout(set = 2, binding = 3) uniform sampler2D roughnessMap;
 layout(set = 2, binding = 4) uniform sampler2D occlusionMap;
 layout(set = 2, binding = 5) uniform sampler2D emissiveMap;
 layout(set = 2, binding = 6) uniform sampler2DArray shadowMap;  // 3-cascade depth array
+// Screen-space AO (SSAO chain output; white texture when AO is disabled).
+// Attenuates ambient/indirect light ONLY — multiplying direct light by AO is
+// physically wrong (same rule as the Metal PBR shader).
+layout(set = 2, binding = 7) uniform sampler2D texAO;
 
 // PCF sample of one cascade. Returns 1.0 = lit, 0.0 = fully shadowed, or -1.0
 // when the world position falls outside this cascade's frustum.
@@ -155,7 +159,9 @@ float sampleShadow(vec3 worldPos, vec3 N, vec3 L, float viewDepth) {
 }
 
 // RHI::setFragmentBytes(&lightCounts, 8, /*binding=*/7) -> offset 64+(7%4)*16 = 112
+// RHI::setFragmentBytes(&screenSize, 8, /*binding=*/4)  -> offset 64+(4%4)*16 = 64
 layout(push_constant) uniform PushConstants {
+    layout(offset = 64)  vec2 screenSize;   // swapchain pixels (for AO screen UV)
     layout(offset = 112) uvec2 lightCounts; // x = dir count, y = point count
 };
 
@@ -257,8 +263,10 @@ void main() {
         }
     }
 
-    // Flat ambient so unlit scenes are never pure black
-    color += albedo * 0.03 * occlusion;
+    // Flat ambient so unlit scenes are never pure black. Screen-space AO
+    // darkens this indirect term only (never the direct lights above).
+    float screenAO = texture(texAO, gl_FragCoord.xy / max(screenSize, vec2(1.0))).r;
+    color += albedo * 0.03 * occlusion * screenAO;
     color += emissive;
 
     // Output LINEAR HDR into the RGBA16F colorRT. Tone mapping (ACES) and the
