@@ -172,6 +172,9 @@ float sampleShadow(vec3 worldPos, vec3 N, vec3 L, float viewDepth) {
 // RHI::setFragmentBytes(&screenSize, 8, /*binding=*/4)  -> offset 64+(4%4)*16 = 64
 layout(push_constant) uniform PushConstants {
     layout(offset = 64)  vec2 screenSize;   // swapchain pixels (for AO screen UV)
+    // Perf-isolation debug flags (setFragmentBytes binding=2 -> offset 96).
+    // bit0 = skip the point-light loop, bit1 = skip the shadow PCF. Panel-driven.
+    layout(offset = 96)  uint mainDebugFlags;
     layout(offset = 112) uvec2 lightCounts; // x = dir count, y = point count
 };
 
@@ -245,13 +248,14 @@ void main() {
         vec3 Ldir = normalize(-l.direction);
         vec3 contrib = shade(N, V, Ldir, l.color * l.intensity, albedo, metallic, roughness);
         // Only the first (sun) directional light casts the cascaded shadow.
-        if (i == 0u) contrib *= sampleShadow(fragPos, N, Ldir, viewDepth);
+        // Debug bit1 skips the PCF to isolate its cost.
+        if (i == 0u && (mainDebugFlags & 2u) == 0u) contrib *= sampleShadow(fragPos, N, Ldir, viewDepth);
         color += contrib;
     }
     // Point lights via the culled tile list. The tile is selected with the
     // exact projection math the culling shader uses, so screen-space
-    // conventions cancel out by construction.
-    {
+    // conventions cancel out by construction. Debug bit0 skips the whole loop.
+    if ((mainDebugFlags & 1u) == 0u) {
         vec4 clip = cam.proj * cam.view * vec4(fragPos, 1.0);
         vec2 suv = clamp((clip.xy / max(clip.w, 1e-4)) * 0.5 + 0.5, vec2(0.0), vec2(0.9999));
         uvec2 tile = uvec2(suv * vec2(cullGridSize.xy));

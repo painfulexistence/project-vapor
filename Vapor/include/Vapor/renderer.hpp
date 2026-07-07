@@ -705,6 +705,9 @@ private:
     // Stochastic point-shadow debug view (native pointShadowDebugMode):
     // 0 = visibility, 1 = tile light-count heatmap.
     Uint32 pointShadowDebugMode = 0;
+    // Vulkan Main-pass perf isolation (RHIMain.frag mainDebugFlags, push offset 96):
+    // bit0 = skip point-light loop, bit1 = skip shadow PCF. Panel-driven.
+    Uint32 mainDebugFlags = 0;
 
     // Sun/lens flare (Metal MSL for now; GLSL twin lands with the IBL round).
     // (tileCullingPipeline is declared with the other compute pipelines above.)

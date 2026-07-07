@@ -1254,6 +1254,10 @@ void Renderer::mainRenderPass() {
         // SSAO chain output at set2 b7 (RHIMain.frag texAO; whiteTex = neutral
         // when AO is off — the defaults loop above already bound white there).
         if (aoEnabled && aoRT.isValid()) rhi->setTexture(0, 7, aoRT, clampSampler);
+        // Perf-isolation debug flags -> RHIMain.frag push offset 96 (binding 2).
+        // Vulkan-only: on Metal, fragment buffer(2) is the CLUSTER buffer, so
+        // pushing here would corrupt it (the old billions-of-iterations hang).
+        rhi->setFragmentBytes(&mainDebugFlags, sizeof(Uint32), 2);
     } else {
         // Metal-via-RHI: real IBL outputs replace the neutral blacks —
         // irradiance(8), prefilter(9), brdfLUT(10).
@@ -4442,6 +4446,19 @@ void Renderer::drawGraphicsImGui() {
         if (ImGui::Combo("Point shadow view", &psd, "Visibility (normal)\0Tile light-count heatmap\0")) {
             pointShadowDebugMode = static_cast<Uint32>(psd);
         }
+        ImGui::TreePop();
+    }
+
+    // Vulkan Main-pass perf isolation: toggle off the two heaviest per-pixel
+    // suspects and watch the Main ms in the GPU Pass Timings panel.
+    if (ImGui::TreeNode("Main Debug (perf)")) {
+        bool skipPoint = (mainDebugFlags & 1u) != 0u;
+        bool skipShadow = (mainDebugFlags & 2u) != 0u;
+        if (ImGui::Checkbox("Skip point-light loop", &skipPoint))
+            mainDebugFlags = (mainDebugFlags & ~1u) | (skipPoint ? 1u : 0u);
+        if (ImGui::Checkbox("Skip shadow PCF", &skipShadow))
+            mainDebugFlags = (mainDebugFlags & ~2u) | (skipShadow ? 2u : 0u);
+        ImGui::TextDisabled("Vulkan only; watch Main in GPU Pass Timings");
         ImGui::TreePop();
     }
 
