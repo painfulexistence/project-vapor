@@ -71,7 +71,7 @@ float miePhase(float c, float g) {
 
 vec3 computeAtmosphere(vec3 ro, vec3 rd, vec3 sunDir) {
     const int PRIMARY_STEPS = 16;
-    const int SECONDARY_STEPS = 8;
+    const int SECONDARY_STEPS = 4;
     vec3 planetCenter = vec3(0.0, -atmo.planetRadius, 0.0);
 
     vec2 atmoHit = raySphereIntersect(ro, rd, planetCenter, atmo.atmosphereRadius);

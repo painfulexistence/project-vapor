@@ -87,7 +87,7 @@ float3 computeAtmosphere(
     float mieG             // Mie preferred scattering direction
 ) {
     const int PRIMARY_STEPS = 16;
-    const int SECONDARY_STEPS = 8;
+    const int SECONDARY_STEPS = 4;
 
     float3 planetCenter = float3(0.0, -planetRadius, 0.0);
 
