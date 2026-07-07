@@ -866,6 +866,35 @@ TextureHandle RHI_Vulkan::createTexture(const TextureDesc& desc) {
     resource.arrayLayers = desc.arrayLayers;
     resource.usage = imageInfo.usage;
     resource.currentLayout = VK_IMAGE_LAYOUT_UNDEFINED;
+
+    // Sampled textures start life in SHADER_READ_ONLY (all mips/layers) so that
+    // sampling one that is never written — an RT-only target like shadowRT/aoRT
+    // on the non-raytracing Vulkan path, whose generateMipmaps/compute writes
+    // only run behind capability gates — is at least layout-valid instead of
+    // UNDEFINED (InvalidImageLayout at submit). A texture that IS written later
+    // (updateTexture / render pass / compute) transitions from here normally.
+    if (hasUsage(desc.usage, TextureUsage::Sampled)) {
+        VkImageMemoryBarrier barrier{};
+        barrier.sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER;
+        barrier.oldLayout = VK_IMAGE_LAYOUT_UNDEFINED;
+        barrier.newLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
+        barrier.srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+        barrier.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+        barrier.image = image;
+        barrier.subresourceRange.aspectMask =
+            isDepthFormat ? VK_IMAGE_ASPECT_DEPTH_BIT : VK_IMAGE_ASPECT_COLOR_BIT;
+        barrier.subresourceRange.baseMipLevel = 0;
+        barrier.subresourceRange.levelCount = VK_REMAINING_MIP_LEVELS;
+        barrier.subresourceRange.baseArrayLayer = 0;
+        barrier.subresourceRange.layerCount = VK_REMAINING_ARRAY_LAYERS;
+        barrier.srcAccessMask = 0;
+        barrier.dstAccessMask = VK_ACCESS_SHADER_READ_BIT;
+        vkCmdPipelineBarrier(ensureUploadCmd(), VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT,
+                             VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT,
+                             0, 0, nullptr, 0, nullptr, 1, &barrier);
+        resource.currentLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
+    }
+
     textures[id] = resource;
 
     return TextureHandle{id};
