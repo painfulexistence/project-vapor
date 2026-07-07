@@ -116,6 +116,16 @@ struct alignas(16) MaterialData {
     float sheenTint;
     float clearcoat;
     float clearcoatGloss;
+    // These three were on the shader's MaterialData (3d_common.metal) and the
+    // global GPU struct, but had drifted off this Vapor:: copy. Because
+    // alignas(16) already padded the struct to 96 bytes, the shader was
+    // reading them out of that uninitialized tail: a garbage prototypeUVMode
+    // (> 0.5) made the PBR shader replace every mesh UV with triplanar
+    // projection — textures smeared, surfaces looked flat ("half the detail
+    // gone"). Defaults keep un-set materials on their mesh UVs with no IBL.
+    float prototypeUVMode = 0.0f;  // 0 = mesh UV, 1 = world-space, 2 = object-space
+    float uvScale = 1.0f;
+    float iblEnabled = 0.0f;       // 1 = image-based lighting, 0 = ambient approximation
 };
 
 struct alignas(16) DirectionalLight { // Note that alignas(16) is not enough to ensure 16-byte alignment
