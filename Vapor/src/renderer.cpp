@@ -1473,8 +1473,9 @@ void Renderer::sunFlarePass() {
 // the PBR shader's soft lookup). Mirrors the native RaytraceShadowPass 1:1.
 void Renderer::raytraceShadowPass() {
     if (!raytraceShadowPipeline.isValid() || !sceneTLAS.isValid() || !shadowRT.isValid()) return;
-    Uint32 w = rhi->getSwapchainWidth();
-    Uint32 h = rhi->getSwapchainHeight();
+    // Half-res: shadowRT is half-res, the kernel derives UV from its own dims.
+    Uint32 w = (rhi->getSwapchainWidth() + 1) / 2;
+    Uint32 h = (rhi->getSwapchainHeight() + 1) / 2;
     glm::vec2 screenSize(w, h);
     rhi->beginComputePass("RaytraceShadow");
     rhi->bindComputePipeline(raytraceShadowPipeline);
@@ -1501,8 +1502,8 @@ void Renderer::raytraceAOPass() {
     fd.deltaTime = 1.0f / 60.0f;
     rhi->updateBuffer(frameDataBuffer, &fd, 0, sizeof(fd));
 
-    Uint32 w = rhi->getSwapchainWidth();
-    Uint32 h = rhi->getSwapchainHeight();
+    Uint32 w = (rhi->getSwapchainWidth() + 1) / 2;   // aoRawRT is half-res
+    Uint32 h = (rhi->getSwapchainHeight() + 1) / 2;
     rhi->beginComputePass("RaytraceAO");
     rhi->bindComputePipeline(raytraceAOPipeline);
     rhi->setComputeTexture(0, depthStencilRT);
@@ -1523,8 +1524,8 @@ void Renderer::aoTemporalPass() {
     Uint32 historyValid = aoHistoryValid ? 1u : 0u;
     Uint32 inIdx = aoHistoryIndex;
     Uint32 outIdx = inIdx ^ 1u;
-    Uint32 w = rhi->getSwapchainWidth();
-    Uint32 h = rhi->getSwapchainHeight();
+    Uint32 w = (rhi->getSwapchainWidth() + 1) / 2;   // AO chain is half-res
+    Uint32 h = (rhi->getSwapchainHeight() + 1) / 2;
     rhi->beginComputePass("AOTemporal");
     rhi->bindComputePipeline(aoTemporalPipeline);
     rhi->setComputeTexture(0, aoRawRT);
@@ -1546,8 +1547,8 @@ void Renderer::aoTemporalPass() {
 // À-trous denoise: history -> scratch (stride 1) -> aoRT (stride 2).
 void Renderer::aoDenoisePass() {
     if (!aoEnabled || !aoDenoisePipeline.isValid() || !aoRT.isValid()) return;
-    Uint32 w = rhi->getSwapchainWidth();
-    Uint32 h = rhi->getSwapchainHeight();
+    Uint32 w = (rhi->getSwapchainWidth() + 1) / 2;   // aoRT is half-res
+    Uint32 h = (rhi->getSwapchainHeight() + 1) / 2;
     struct Iter { TextureHandle src, dst; Uint32 stride; };
     const Iter iters[] = {
         { aoHistoryRT[aoHistoryIndex], aoScratchRT, 1u },
@@ -2815,6 +2816,15 @@ void Renderer::destroyRenderTargets() {
 void Renderer::createRenderTargets() {
     Uint32 width = rhi->getSwapchainWidth();
     Uint32 height = rhi->getSwapchainHeight();
+    // The RT ambient-occlusion chain and the ray-traced directional shadow are
+    // rendered at HALF resolution and bilinearly upsampled when the PBR shader
+    // samples them by screen UV — exactly like the native renderer. Running
+    // them full-res (as this path used to) made AODenoise's two 5x5 a-trous
+    // passes and the RT shadow trace ~4x more expensive than native for no
+    // visible gain (AO/soft shadow are low frequency). Point shadows and the
+    // colour/normal/depth targets stay full-res, matching native.
+    Uint32 halfW = (width + 1) / 2;
+    Uint32 halfH = (height + 1) / 2;
     constexpr Uint32 MSAA_SAMPLE_COUNT = 4;
 
     // Create depth/stencil RT (MSAA and resolved)
@@ -2867,22 +2877,22 @@ void Renderer::createRenderTargets() {
         normalRT = rhi->createTexture(desc);
     }
 
-    // Create shadow RT
+    // Create shadow RT (half-res RT directional shadow, like native)
     {
         TextureDesc desc;
-        desc.width = width;
-        desc.height = height;
+        desc.width = halfW;
+        desc.height = halfH;
         desc.format = PixelFormat::RGBA8_UNORM;
         desc.usage = TextureUsage::Storage | TextureUsage::Sampled;
-        desc.mipLevels = static_cast<Uint32>(std::floor(std::log2(std::max(width, height))) + 1);
+        desc.mipLevels = static_cast<Uint32>(std::floor(std::log2(std::max(halfW, halfH))) + 1);
         shadowRT = rhi->createTexture(desc);
     }
 
-    // Create AO RT
+    // Create AO RT (half-res, like native)
     {
         TextureDesc desc;
-        desc.width = width;
-        desc.height = height;
+        desc.width = halfW;
+        desc.height = halfH;
         desc.format = PixelFormat::R16_FLOAT;  // Single channel float
         desc.usage = TextureUsage::Storage | TextureUsage::Sampled;
         aoRT = rhi->createTexture(desc);
@@ -2898,14 +2908,21 @@ void Renderer::createRenderTargets() {
 
         desc.format = PixelFormat::RGBA8_UNORM;
         desc.usage = TextureUsage::RenderTarget | TextureUsage::Sampled;
-        albedoRT = rhi->createTexture(desc);
+        albedoRT = rhi->createTexture(desc);  // full-res (prepass MRT)
 
+        // AO working chain: half-res, matching native's aoChainDesc.
+        desc.width = halfW;
+        desc.height = halfH;
         desc.format = PixelFormat::R16_FLOAT;
         desc.usage = TextureUsage::Storage | TextureUsage::Sampled;
         aoRawRT = rhi->createTexture(desc);
         aoScratchRT = rhi->createTexture(desc);
         aoHistoryRT[0] = rhi->createTexture(desc);
         aoHistoryRT[1] = rhi->createTexture(desc);
+
+        // Point shadows stay full-res (native creates these at drawableSize).
+        desc.width = width;
+        desc.height = height;
         pointShadowRT = rhi->createTexture(desc);
         pointShadowHistoryRT = rhi->createTexture(desc);
         pointShadowDenoisedRT = rhi->createTexture(desc);
