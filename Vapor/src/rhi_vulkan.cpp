@@ -2939,11 +2939,15 @@ void RHI_Vulkan::computeBarrier() {
     VkMemoryBarrier b{};
     b.sType = VK_STRUCTURE_TYPE_MEMORY_BARRIER;
     b.srcAccessMask = VK_ACCESS_SHADER_WRITE_BIT;
-    b.dstAccessMask = VK_ACCESS_SHADER_READ_BIT | VK_ACCESS_SHADER_WRITE_BIT;
+    // SHADER_READ/WRITE for compute/vertex/fragment consumers, plus
+    // INDIRECT_COMMAND_READ so a GPU-driven cull pass that writes an indirect
+    // args buffer is visible to a following drawIndexedIndirect.
+    b.dstAccessMask = VK_ACCESS_SHADER_READ_BIT | VK_ACCESS_SHADER_WRITE_BIT |
+                      VK_ACCESS_INDIRECT_COMMAND_READ_BIT;
     vkCmdPipelineBarrier(currentCommandBuffer,
         VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
         VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT | VK_PIPELINE_STAGE_VERTEX_SHADER_BIT |
-            VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT,
+            VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT | VK_PIPELINE_STAGE_DRAW_INDIRECT_BIT,
         0, 1, &b, 0, nullptr, 0, nullptr);
 }
 

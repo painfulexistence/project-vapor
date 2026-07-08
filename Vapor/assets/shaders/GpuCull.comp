@@ -10,9 +10,9 @@
 //
 // Binding convention (RHI::setComputeBuffer / setComputeBytes):
 //   binding 0 = CameraBuf   (readonly)
-//   binding 1 = InstanceBuf (readonly)
+//   binding 1 = InstanceBuf (readonly, bound with an instance-count-sized range
+//               so instances.length() == the live instance count)
 //   binding 2 = DrawCommandBuf (written)
-//   push constant = instance count
 
 layout(local_size_x = 64, local_size_y = 1, local_size_z = 1) in;
 
@@ -68,10 +68,6 @@ layout(std430, set = 0, binding = 2) writeonly buffer DrawCommandBuf {
     DrawCommand commands[];
 };
 
-layout(push_constant) uniform CullPush {
-    uint instanceCount;
-};
-
 bool sphereInFrustum(vec3 center, float radius) {
     for (int i = 0; i < 6; ++i) {
         vec4 plane = cam.frustumPlanes[i]; // normalized, points inward
@@ -84,7 +80,9 @@ bool sphereInFrustum(vec3 center, float radius) {
 
 void main() {
     uint id = gl_GlobalInvocationID.x;
-    if (id >= instanceCount) {
+    // InstanceBuf is bound with a range covering exactly the live instances, so
+    // its runtime-array length is the instance count.
+    if (id >= instances.length()) {
         return;
     }
 

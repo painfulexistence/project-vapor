@@ -316,6 +316,13 @@ public:
     Uint32 getCurrentInstanceCount() const { return currentInstanceCount; }
     Uint32 getCulledInstanceCount() const { return culledInstanceCount; }
 
+    // GPU-driven rendering: replace CPU frustum culling + per-object drawIndexed
+    // with a compute cull pass that fills an indirect-args buffer, consumed by
+    // per-object drawIndexedIndirect. Off by default; when off the existing CPU
+    // path is used unchanged.
+    void setGpuDrivenCulling(bool enabled) { gpuDrivenCulling = enabled; }
+    bool isGpuDrivenCulling() const { return gpuDrivenCulling; }
+
 private:
     // ========================================================================
     // Internal Rendering Steps
@@ -343,6 +350,7 @@ private:
     void normalResolvePass();
     void clusterBuildPass();
     void tileCullingPass();
+    void gpuCullPass();  // GPU-driven frustum cull -> indirect draw args
     void raytraceShadowPass();
     void raytraceAOPass();
     void mainRenderPass();
@@ -715,6 +723,13 @@ private:
     // Vulkan tile culling twin (TileLightCull.comp) + its params buffer.
     ComputePipelineHandle vkTileCullPipeline;
     ShaderHandle vkTileCullShader;
+
+    // GPU-driven rendering (Vulkan): compute frustum cull -> per-object indirect
+    // draw. Off by default; toggle with setGpuDrivenCulling().
+    ComputePipelineHandle gpuCullPipeline;
+    ShaderHandle gpuCullShader;
+    BufferHandle gpuCullArgsBuffer;  // DrawCommand[MAX_INSTANCES], frame-slotted
+    bool gpuDrivenCulling = false;
     BufferHandle lightCullDataBuffer;
     PipelineHandle sunFlarePipeline;
     ShaderHandle sunFlareVertexShader, sunFlareFragmentShader;

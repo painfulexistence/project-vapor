@@ -227,13 +227,19 @@ struct Particle {
     glm::vec3 density = glm::vec3(1.0f);
 };
 
-// struct alignas(16) DrawCommand {
-//     Uint32 indexCount;
-//     Uint32 instanceCount;
-//     Uint32 indexStart;
-//     Uint32 baseVertex;
-//     Uint32 baseInstance;
-// };
+// GPU-driven rendering: indirect draw arguments produced by the cull compute
+// pass. Packed 20-byte layout, matching VkDrawIndexedIndirectCommand and
+// MTLDrawIndexedPrimitivesIndirectArguments exactly (intentionally NOT
+// alignas(16) — the tight stride is what the indirect-draw APIs expect). Mirror
+// of the global ::DrawCommand in graphics_gpu_structs.hpp.
+struct DrawCommand {
+    Uint32 indexCount;
+    Uint32 instanceCount; // 0 = culled (GPU no-op)
+    Uint32 firstIndex;
+    Sint32 vertexOffset;
+    Uint32 firstInstance; // = instance index (InstanceData lookup)
+};
+static_assert(sizeof(DrawCommand) == 20, "DrawCommand must match the GPU indirect-args layout");
 
 struct Mesh {
     void initialize(const std::vector<VertexData>& vertices, const std::vector<Uint32>& indices);

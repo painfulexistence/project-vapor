@@ -112,6 +112,15 @@ void Renderer::initialize(std::unique_ptr<RHI> rhiPtr, GraphicsBackend backendTy
     instanceDataBufferDesc.memoryUsage = MemoryUsage::CPUtoGPU;
     createFrameSlottedBuffer(instanceDataBuffer, instanceDataBufferDesc);
 
+    // GPU-driven rendering: indirect draw args produced by the cull compute pass
+    // (one DrawCommand per instance). Frame-slotted like instanceDataBuffer so
+    // the compute writes and indirect draw of a frame use the same slot.
+    BufferDesc gpuCullArgsBufferDesc;
+    gpuCullArgsBufferDesc.size = sizeof(Vapor::DrawCommand) * MAX_INSTANCES;
+    gpuCullArgsBufferDesc.usage = BufferUsage::Indirect;
+    gpuCullArgsBufferDesc.memoryUsage = MemoryUsage::CPUtoGPU;
+    createFrameSlottedBuffer(gpuCullArgsBuffer, gpuCullArgsBufferDesc);
+
     // Shader-contract buffers (clusters / rect lights / PSSM), neutral-filled.
     // See the "Full PBR shader contract" note in renderer.hpp.
     {
@@ -811,6 +820,11 @@ void Renderer::setupDefaultRenderGraph() {
     renderGraph.addPass("Shadow",
         [](Renderer& r) { r.shadowPass(); });
 
+    // GPU-driven frustum cull -> indirect draw args. No-op unless the
+    // gpuDrivenCulling flag is set; the pass itself early-outs otherwise.
+    renderGraph.addPass("GpuCull",
+        [](Renderer& r) { r.gpuCullPass(); }, PassFlags::RequiresCompute);
+
     // exists, directly to the swapchain otherwise (decided inside the pass).
     renderGraph.addPass("Main",
         [](Renderer& r) { r.mainRenderPass(); });
@@ -1016,6 +1030,16 @@ void Renderer::sortDrawables() {
 }
 
 void Renderer::updateBuffers() {
+    // Populate the camera's frustum planes so the GPU cull compute pass can test
+    // instance bounding spheres against them. Only when GPU-driven culling is on,
+    // to keep the default path's camera data byte-identical.
+    if (gpuDrivenCulling) {
+        Frustum f = extractFrustum(currentCamera.proj * currentCamera.view);
+        for (int i = 0; i < 6; ++i) {
+            currentCamera.frustumPlanes[i] = f.planes[i];
+        }
+    }
+
     // Update camera uniform buffer
     rhi->updateBuffer(cameraUniformBuffer, &currentCamera, 0, sizeof(CameraRenderData));
 
@@ -1278,11 +1302,20 @@ void Renderer::mainRenderPass() {
         }
     }
 
-    // Group drawables by material to reduce state changes
+    // Group drawables by material to reduce state changes.
     std::map<MaterialId, std::vector<Uint32>> materialBatches;
-    for (Uint32 drawableIdx : visibleDrawables) {
-        const Drawable& drawable = frameDrawables[drawableIdx];
-        materialBatches[drawable.material].push_back(drawableIdx);
+    if (gpuDrivenCulling) {
+        // GPU-driven: submit ALL drawables and let the compute cull decide
+        // visibility per instance (via instanceCount in the indirect args),
+        // rather than the CPU-culled visibleDrawables subset.
+        for (Uint32 i = 0; i < frameDrawables.size(); ++i) {
+            materialBatches[frameDrawables[i].material].push_back(i);
+        }
+    } else {
+        for (Uint32 drawableIdx : visibleDrawables) {
+            const Drawable& drawable = frameDrawables[drawableIdx];
+            materialBatches[drawable.material].push_back(drawableIdx);
+        }
     }
 
     // Draw by material batches (matching old renderer behavior)
@@ -1317,7 +1350,18 @@ void Renderer::mainRenderPass() {
             // Draw
             if (mesh.indexBuffer.isValid()) {
                 rhi->bindIndexBuffer(mesh.indexBuffer, 0);
-                rhi->drawIndexed(mesh.indexCount, 1, 0, 0, 0);
+                if (gpuDrivenCulling && gpuCullArgsBuffer.isValid()) {
+                    // Per-object indirect draw: the compute cull wrote this
+                    // instance's command (instanceCount 0 => culled => GPU
+                    // no-op). firstIndex/vertexOffset are 0 for per-mesh buffers,
+                    // matching what the cull shader wrote. The push-constant
+                    // instanceID set above still drives the vertex shader.
+                    rhi->drawIndexedIndirect(gpuCullArgsBuffer,
+                                             correctInstanceID * sizeof(Vapor::DrawCommand),
+                                             1, sizeof(Vapor::DrawCommand));
+                } else {
+                    rhi->drawIndexed(mesh.indexCount, 1, 0, 0, 0);
+                }
             } else if (mesh.vertexBuffer.isValid()) {
                 rhi->draw(mesh.vertexCount, 1, 0, 0);
             }
@@ -1541,6 +1585,29 @@ void Renderer::tileCullingPass() {
         rhi->endComputePass();
     }
     rhi->computeBarrier();  // cluster writes -> fragment reads in Main
+}
+
+// GPU-driven rendering: frustum-cull every instance in a compute pass, writing
+// one indirect draw command per instance into gpuCullArgsBuffer (instanceCount
+// 0 = culled). The main pass then issues per-object drawIndexedIndirect, so the
+// GPU decides what actually draws. Vulkan-only for now; no-op unless the
+// gpuDrivenCulling flag is set. The existing CPU cull path is untouched.
+void Renderer::gpuCullPass() {
+    if (!gpuDrivenCulling || backend == GraphicsBackend::Metal) return;
+    if (!gpuCullPipeline.isValid() || !gpuCullArgsBuffer.isValid()) return;
+    if (totalInstanceCount == 0) return;
+
+    const Uint32 n = totalInstanceCount;
+    rhi->beginComputePass("GpuCull");
+    rhi->bindComputePipeline(gpuCullPipeline);
+    rhi->setComputeBuffer(0, cameraUniformBuffer, 0, sizeof(CameraRenderData));
+    // Bind instance + args with instance-count-sized ranges so the shader's
+    // instances.length() equals the live instance count.
+    rhi->setComputeBuffer(1, instanceDataBuffer, 0, sizeof(Vapor::InstanceData) * n);
+    rhi->setComputeBuffer(2, gpuCullArgsBuffer, 0, sizeof(Vapor::DrawCommand) * n);
+    rhi->dispatch((n + 63) / 64, 1, 1);
+    rhi->endComputePass();
+    rhi->computeBarrier();  // cull writes args -> indirect draw reads them in Main
 }
 
 // Sun/lens flare: procedural glow/halo/ghosts/starburst added over the HDR
@@ -3466,6 +3533,9 @@ void Renderer::createRenderPipeline() {
                 cd.threadGroupSizeX = 256;  // matches local_size_x in the .comp
                 return rhi->createComputePipeline(cd);
             };
+            // GPU-driven rendering: frustum-cull compute pass.
+            gpuCullPipeline = makeCompute("shaders/GpuCull.comp.spv", gpuCullShader);
+
             particleForcePipeline     = makeCompute("shaders/ParticleForce.comp.spv", particleForceShader);
             particleIntegratePipeline = makeCompute("shaders/ParticleIntegrate.comp.spv", particleIntegrateShader);
 
