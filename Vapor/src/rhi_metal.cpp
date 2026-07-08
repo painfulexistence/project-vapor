@@ -90,6 +90,11 @@ bool RHI_Metal::initialize(SDL_Window* window) {
 
     initGpuTiming();
 
+    // One permit per in-flight frame; beginFrame() waits, the completion handler
+    // signals. Value must match getMaxFramesInFlight() (and the renderer's
+    // kFrameSlots) so the CPU is never more than that many frames ahead.
+    frameSemaphore = dispatch_semaphore_create(getMaxFramesInFlight());
+
     // Device capabilities. Raytracing is force-disabled on CI runners: the
     // virtualized GPU advertises support but acceleration-structure builds
     // fail there (matching the old renderer's behavior).
@@ -272,6 +277,19 @@ void RHI_Metal::shutdown() {
         SDL_DestroyRenderer(renderer);
         renderer = nullptr;
     }
+
+    // waitIdle() above drained the GPU, so no completion handler is still pending
+    // to signal this. dispatch objects are ARC/GCD ref-counted; release our ref.
+    if (frameSemaphore) {
+        // Restore to full count first so the release doesn't assert on a
+        // semaphore destroyed while its value is below its initial value.
+        for (Uint32 i = 0; i < getMaxFramesInFlight(); i++) {
+            dispatch_semaphore_signal(frameSemaphore);
+        }
+        dispatch_release(frameSemaphore);
+        frameSemaphore = nullptr;
+    }
+    frameSemaphoreAcquired = false;
 
     device = nullptr;
     swapchain = nullptr;
@@ -763,6 +781,14 @@ void RHI_Metal::unmapBuffer(BufferHandle handle) {
 // ============================================================================
 
 void RHI_Metal::beginFrame() {
+    // Throttle the CPU to getMaxFramesInFlight() frames ahead of the GPU. The
+    // permit is returned by this frame's completion handler (endFrame) or, if
+    // this frame is skipped for want of a drawable, immediately below.
+    if (frameSemaphore) {
+        dispatch_semaphore_wait(frameSemaphore, DISPATCH_TIME_FOREVER);
+        frameSemaphoreAcquired = true;
+    }
+
     // Open this frame's autorelease pool before anything that can produce an
     // autoreleased object (uploads create command buffers). Drained in
     // endFrame; see the member declaration for why this is load-bearing.
@@ -815,6 +841,13 @@ void RHI_Metal::beginFrame() {
     currentDrawable = swapchain->nextDrawable();
     if (!currentDrawable) {
         currentCommandBuffer = nullptr;
+        // No command buffer will be committed this frame, so nothing would ever
+        // signal the permit we took above — return it now to stay balanced.
+        // (endFrame's skipped-frame path drains framePool.)
+        if (frameSemaphore && frameSemaphoreAcquired) {
+            dispatch_semaphore_signal(frameSemaphore);
+            frameSemaphoreAcquired = false;
+        }
         return;
     }
 
@@ -890,6 +923,17 @@ void RHI_Metal::endFrame() {
 
     // Schedule GPU timing resolution for when this command buffer completes
     resolveGpuTimings();
+
+    // Return this frame's throttle permit once the GPU finishes with it. Capture
+    // the semaphore by value (not `this`): it outlives every in-flight frame
+    // (released only in shutdown, after waitIdle), so the handler is always safe.
+    if (frameSemaphore && frameSemaphoreAcquired) {
+        dispatch_semaphore_t sem = frameSemaphore;
+        currentCommandBuffer->addCompletedHandler([sem](MTL::CommandBuffer*) {
+            dispatch_semaphore_signal(sem);
+        });
+        frameSemaphoreAcquired = false;
+    }
 
     // Present drawable
     if (currentDrawable) {

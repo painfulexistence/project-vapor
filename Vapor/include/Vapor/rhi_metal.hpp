@@ -7,6 +7,7 @@
 #include <Foundation/Foundation.hpp>
 #include <Metal/Metal.hpp>
 #include <QuartzCore/QuartzCore.hpp>
+#include <dispatch/dispatch.h>
 #include <mutex>
 #include <string>
 #include <unordered_map>
@@ -173,6 +174,15 @@ private:
     NS::AutoreleasePool* framePool = nullptr;
     CA::MetalDrawable* currentDrawable = nullptr;
     NS::SharedPtr<MTL::CommandBuffer> currentCommandBuffer;
+
+    // Explicit CPU throttle, one permit per in-flight frame (== getMaxFramesInFlight()).
+    // beginFrame() waits, the frame's completion handler signals. nextDrawable()
+    // already bounds the CPU to the drawable pool today, but a frame that never
+    // presents (offscreen/compute-only) would not be throttled by it — this makes
+    // the bound explicit and matches Vulkan's vkWaitForFences. Balanced on the
+    // skipped-frame path so a missing drawable can't drain a permit.
+    dispatch_semaphore_t frameSemaphore = nullptr;
+    bool frameSemaphoreAcquired = false;
     MTL::RenderCommandEncoder* currentRenderEncoder = nullptr;
     MTL::ComputeCommandEncoder* currentComputeEncoder = nullptr;
 

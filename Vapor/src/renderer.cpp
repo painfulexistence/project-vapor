@@ -16,6 +16,7 @@
 #include <fmt/core.h>
 #include <map>
 #include <algorithm>
+#include <cassert>
 #include <cstring>
 #include <cstdlib>
 #include <random>
@@ -79,6 +80,15 @@ void Renderer::initialize(std::unique_ptr<RHI> rhiPtr, GraphicsBackend backendTy
         fmt::print("VAPOR_DISABLE_RT set: forcing raytracing off\n");
     }
     setupDefaultRenderGraph();
+
+    // Correctness invariant for the per-frame buffer slotting below: there must
+    // be at least one buffer slot per in-flight frame, or beginFrame() would
+    // rewrite a slot the GPU may still be reading (kFrameSlots wraps every
+    // kFrameSlots frames; the CPU can run getMaxFramesInFlight() frames ahead).
+    // kFrameSlots is a compile-time constant shared by both backends, so it must
+    // be >= the largest backend's frame count. Assert rather than silently race.
+    assert(kFrameSlots >= rhi->getMaxFramesInFlight() &&
+           "kFrameSlots must be >= backend frames-in-flight (per-frame buffer slotting invariant)");
 
     // Create uniform buffers. Everything rewritten per frame goes through
     // createFrameSlottedBuffer (see renderer.hpp: frames-in-flight slotting).
