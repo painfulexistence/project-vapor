@@ -140,7 +140,7 @@ namespace Vapor {
         // Future: Coordinate physics-render synchronization
     }
 
-    void EngineCore::attachRenderer(::Renderer* renderer, const std::string& outputBasePath) {
+    void EngineCore::attachRenderer(::IRenderer* renderer, const std::string& outputBasePath) {
         _videoRecorder->setBaseOutputDir(outputBasePath);
 
         // Per-frame hook: capture the rendered frame while recording and handle

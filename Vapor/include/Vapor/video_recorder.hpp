@@ -1,7 +1,7 @@
 #pragma once
 
 #include "audio_engine.hpp"
-#include "renderer.hpp"
+#include "irenderer.hpp"
 #include "imgui.h"
 #include <atomic>
 #include <chrono>
@@ -64,8 +64,8 @@ public:
     // (Config is a nested type with default member initializers, so we use an
     // overload rather than a `= {}` default argument, which is ill-formed inside
     // the enclosing class definition.)
-    bool startRecording(Renderer* renderer, const Config& config);
-    bool startRecording(Renderer* renderer) {
+    bool startRecording(IRenderer* renderer, const Config& config);
+    bool startRecording(IRenderer* renderer) {
         return startRecording(renderer, Config{});
     }
 
@@ -77,7 +77,7 @@ public:
     // Start if stopped, stop if recording, using the current timestamped output
     // path. Shared by the F2 hotkey and the ImGui Start/Stop buttons so both
     // paths behave identically. Returns the new recording state.
-    bool toggleRecording(Renderer& renderer) {
+    bool toggleRecording(IRenderer& renderer) {
         if (isRecording()) {
             stopRecording();
             m_status = fmt::format("Saved: {}", m_outputBuf);
@@ -112,7 +112,7 @@ public:
     }
 
     // Draw the recording section inside whatever ImGui window is currently open.
-    void drawImGui(Renderer& renderer) {
+    void drawImGui(IRenderer& renderer) {
         ImGui::SetNextItemWidth(-1.0f);
         ImGui::InputText("##recpath", m_outputBuf, sizeof(m_outputBuf));
 
@@ -179,7 +179,7 @@ private:
         m_outputBuf[sizeof(m_outputBuf) - 1] = '\0';
     }
 
-    Renderer* m_renderer = nullptr;
+    IRenderer* m_renderer = nullptr;
     Config m_config;
     std::chrono::steady_clock::time_point m_recordingStart;
 
