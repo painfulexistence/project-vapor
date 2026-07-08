@@ -1,5 +1,6 @@
 #include "rhi_vulkan.hpp"
 #include "helper.hpp"
+#include "stats_log.hpp"
 #include <fmt/core.h>
 #include <cstring>
 #include <algorithm>
@@ -45,6 +46,28 @@ bool RHI_Vulkan::initialize(SDL_Window* windowPtr) {
     // (VK_KHR_acceleration_structure) is not yet.
     capabilities.computeShaders = true;
     capabilities.gpuTimestamps = gpuTimingSupported;
+
+    // Backend telemetry: one grouped "[VK]" line per --stats interval. The
+    // per-window churn counters are read-and-reset here so each line reports
+    // the count since the previous line.
+    Vapor::StatsLog::get().addSource("VK", [this](Vapor::StatLine& s) {
+        s.add("buf", buffers.size());
+        s.add("tex", textures.size());
+        s.add("smp", samplers.size());
+        s.add("shd", shaders.size());
+        s.add("pso", pipelines.size());
+        s.add("cpso", computePipelines.size());
+        s.add("pendingUpFences", pendingUploadFences.size());
+        s.add("retireQ", retirementQueue.size());
+        s.add("descSets/int", statsDescriptorSets);
+        s.add("bufCreates/int", statsBufferCreates);
+        s.add("texCreates/int", statsTextureCreates);
+        s.add("stagingHW_KB", statsStagingHighWater / 1024);
+        statsDescriptorSets = 0;
+        statsBufferCreates = 0;
+        statsTextureCreates = 0;
+        statsStagingHighWater = 0;
+    });
 
     return true;
 }
@@ -1579,26 +1602,9 @@ void RHI_Vulkan::beginFrame() {
     stagingRegionBase = currentFrameInFlight * (STAGING_RING_SIZE / MAX_FRAMES_IN_FLIGHT);
     stagingRingOffset = 0;
 
-    // VAPOR_RHI_STATS=1: leak-hunt telemetry. One line every ~120 frames with
-    // every live-object count and the per-window churn counters — whatever
-    // climbs monotonically across lines is the leak (or proves there is none
-    // and the decay is a stall). Negligible cost when the env var is unset.
-    static const bool rhiStats = std::getenv("VAPOR_RHI_STATS") != nullptr;
-    if (rhiStats && (frameCounter % 120) == 0) {
-        fmt::print(stderr,
-            "[VKSTATS] f={} buf={} tex={} smp={} shd={} pso={} cpso={} "
-            "pendingUpFences={} retireQ={} descSets/120f={} bufCreates/120f={} "
-            "texCreates/120f={} stagingHW={}KB\n",
-            frameCounter, buffers.size(), textures.size(), samplers.size(),
-            shaders.size(), pipelines.size(), computePipelines.size(),
-            pendingUploadFences.size(), retirementQueue.size(),
-            statsDescriptorSets, statsBufferCreates, statsTextureCreates,
-            statsStagingHighWater / 1024);
-        statsDescriptorSets = 0;
-        statsBufferCreates = 0;
-        statsTextureCreates = 0;
-        statsStagingHighWater = 0;
-    }
+    // Leak-hunt telemetry moved to the StatsLog "VK" source (registered in
+    // initialize()); read-and-reset of the per-window churn counters happens
+    // there. Whatever climbs monotonically across lines is the leak.
     if (gpuTimingSupported) {
         collectTimestamps(currentFrameInFlight);
     }

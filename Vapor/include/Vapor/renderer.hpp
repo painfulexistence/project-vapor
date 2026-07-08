@@ -381,6 +381,10 @@ private:
     void initBatchRendering();
     void shutdownBatchRendering();
 
+    // Registers the renderer-side StatsLog sources ("R"/"RT"/"CULL"). Called
+    // from initialize(); driven once per frame by StatsLog::tick() in beginFrame.
+    void registerStatsSources();
+
     // Post-processing helpers
     void initPostProcessing();
     void shutdownPostProcessing();

@@ -1,4 +1,5 @@
 #include "renderer.hpp"
+#include "stats_log.hpp"
 #include "rhi_vulkan.hpp"
 #ifdef __APPLE__
 #include "rhi_metal.hpp"
@@ -313,6 +314,63 @@ void Renderer::initialize(std::unique_ptr<RHI> rhiPtr, GraphicsBackend backendTy
     visibleDrawables.reserve(MAX_INSTANCES);
     directionalLights.reserve(maxDirectionalLights);
     pointLights.reserve(maxPointLights);
+
+    // Register the renderer-side telemetry sources. Driven once per frame by
+    // StatsLog::tick() in beginFrame; the RHI backend registers its own "VK"/
+    // "MTL" source, so --stats prints one grouped line per subsystem.
+    registerStatsSources();
+}
+
+// Renderer-side stat sources (the map counts live above the RHI). The backend
+// contributes "VK"/"MTL" from its own constructor.
+void Renderer::registerStatsSources() {
+    auto& log = Vapor::StatsLog::get();
+
+    log.addSource("R", [this](Vapor::StatLine& s) {
+        s.add("textures", textures.size());
+        s.add("texCache", textureCache.size());
+        s.add("imguiTexCache", imguiTextureCache.size());
+        s.add("meshes", meshes.size());
+        s.add("materials", materials.size());
+        s.add("renderTextures", renderTextures.size());
+        s.add("drawables", frameDrawables.size());
+        s.add("instances", totalInstanceCount);
+    });
+
+    // RT diagnostics: only re-emitted when a count changes (was VAPOR_RT_DEBUG).
+    log.addSource("RT", [this](Vapor::StatLine& s) {
+        Uint32 validBLAS = 0;
+        for (const auto& b : meshBLAS) if (b.isValid()) ++validBLAS;
+        s.add("raytracing", capabilities.raytracing ? 1u : 0u);
+        s.add("tlasValid", sceneTLAS.isValid() ? 1u : 0u);
+        s.add("blasValid", validBLAS);
+        s.add("blasTotal", static_cast<Uint32>(meshBLAS.size()));
+        s.add("visible", static_cast<Uint32>(visibleDrawables.size()));
+        s.add("tlasInst", static_cast<Uint32>(tlasInstances.size()));
+    }, Vapor::StatsLog::Mode::OnChange);
+
+    // Tile-cull histogram: reads back the (host-visible) cluster buffer. The
+    // waitIdle only runs on emit frames while --stats is on (was VAPOR_CULL_DEBUG).
+    log.addSource("CULL", [this](Vapor::StatLine& s) {
+        if (!clusterBuffer.isValid()) return;
+        rhi->waitIdle();
+        const Uint32 tileCount = clusterGridSizeX * clusterGridSizeY;  // 2D grid
+        auto* clusters = static_cast<const Vapor::Cluster*>(rhi->mapBuffer(clusterBuffer));
+        if (!clusters) return;
+        Uint32 mn = ~0u, mx = 0u, sum = 0u, nonEmpty = 0u;
+        for (Uint32 i = 0; i < tileCount; ++i) {
+            Uint32 c = clusters[i].lightCount;
+            mn = std::min(mn, c); mx = std::max(mx, c); sum += c;
+            if (c > 0) ++nonEmpty;
+        }
+        rhi->unmapBuffer(clusterBuffer);
+        s.add("tiles", tileCount);
+        s.add("pointLights", static_cast<Uint32>(pointLights.size()));
+        s.add("min", tileCount ? mn : 0u);
+        s.add("avg", tileCount ? sum / tileCount : 0u);
+        s.add("max", mx);
+        s.add("nonEmpty", nonEmpty);
+    });
 }
 
 // One GPU buffer per frame slot; `alias` always names the current frame's
@@ -647,17 +705,10 @@ void Renderer::beginFrame(const CameraRenderData& camera) {
     // backend recreates an out-of-date/resized swapchain here.
     rhi->beginFrame();
 
-    // VAPOR_RHI_STATS=1: renderer-side leak-hunt telemetry (pairs with the
-    // backend's [VKSTATS]/[MTLSTATS] line — these maps live above the RHI).
-    static const bool rhiStats = std::getenv("VAPOR_RHI_STATS") != nullptr;
-    if (rhiStats && (frameNumber % 120) == 0) {
-        fmt::print(stderr,
-            "[RSTATS] f={} textures={} texCache={} imguiTexCache={} meshes={} "
-            "materials={} renderTextures={} drawables={} instances={}\n",
-            frameNumber, textures.size(), textureCache.size(),
-            imguiTextureCache.size(), meshes.size(), materials.size(),
-            renderTextures.size(), frameDrawables.size(), totalInstanceCount);
-    }
+    // Per-frame telemetry (--stats). Drives every registered source — renderer
+    // "R"/"RT"/"CULL" and the backend's "VK"/"MTL" — emitting one grouped line
+    // each to stderr and vapor_stats.log. No-op when --stats is off.
+    Vapor::StatsLog::get().tick(frameNumber);
 
     // Window resized: the swapchain extent changed under us — rebuild every
     // swapchain-sized render target before anything records against them.
@@ -1477,25 +1528,7 @@ void Renderer::buildAccelerationStructures() {
         rhi->updateAccelerationStructure(sceneTLAS, tlasInstances);  // rebuilds
     }
 
-    // VAPOR_RT_DEBUG: pinpoint why RT shadow/AO produce the "no hit" default
-    // (uniform white / R=1). Logs once and again only when the counts change, so
-    // it never spams the hot path. Distinguishes: RT off / no BLAS built /
-    // empty visible set / empty TLAS.
-    if (std::getenv("VAPOR_RT_DEBUG")) {
-        Uint32 validBLAS = 0;
-        for (const auto& b : meshBLAS) if (b.isValid()) ++validBLAS;
-        static Uint32 lastVis = ~0u, lastInst = ~0u, lastBLAS = ~0u;
-        Uint32 vis = static_cast<Uint32>(visibleDrawables.size());
-        Uint32 inst = static_cast<Uint32>(tlasInstances.size());
-        if (vis != lastVis || inst != lastInst || validBLAS != lastBLAS) {
-            fmt::print(stderr,
-                "[RT] raytracing={} sceneTLAS.valid={} meshBLAS(valid/total)={}/{} "
-                "visibleDrawables={} tlasInstances={}\n",
-                capabilities.raytracing, sceneTLAS.isValid(), validBLAS,
-                static_cast<Uint32>(meshBLAS.size()), vis, inst);
-            lastVis = vis; lastInst = inst; lastBLAS = validBLAS;
-        }
-    }
+    // (RT diagnostics moved to the StatsLog "RT" OnChange source.)
 }
 
 void Renderer::normalResolvePass() {
@@ -1541,29 +1574,7 @@ void Renderer::tileCullingPass() {
         rhi->endComputePass();
     }
     rhi->computeBarrier();  // cluster writes -> fragment reads in Main
-
-    // VAPOR_CULL_DEBUG=1: read back the culled cluster buffer and print a
-    // per-tile light-count histogram every ~120 frames. Confirms whether the
-    // tile culling actually reduces the point-light count (vs looping all).
-    static const bool cullDebug = std::getenv("VAPOR_CULL_DEBUG") != nullptr;
-    if (cullDebug && (frameNumber % 120) == 0 && clusterBuffer.isValid()) {
-        rhi->waitIdle();
-        const Uint32 tileCount = clusterGridSizeX * clusterGridSizeY;  // 2D grid
-        auto* clusters = static_cast<const Vapor::Cluster*>(rhi->mapBuffer(clusterBuffer));
-        if (clusters) {
-            Uint32 mn = ~0u, mx = 0u, sum = 0u, nonEmpty = 0u;
-            for (Uint32 i = 0; i < tileCount; ++i) {
-                Uint32 c = clusters[i].lightCount;
-                mn = std::min(mn, c); mx = std::max(mx, c); sum += c;
-                if (c > 0) ++nonEmpty;
-            }
-            rhi->unmapBuffer(clusterBuffer);
-            fmt::print(stderr,
-                "[CULL] f={} tiles={} pointLights={} perTile(min/avg/max)={}/{}/{} nonEmptyTiles={}\n",
-                frameNumber, tileCount, static_cast<Uint32>(pointLights.size()),
-                mn, sum / std::max(tileCount, 1u), mx, nonEmpty);
-        }
-    }
+    // (Per-tile light-count histogram moved to the StatsLog "CULL" source.)
 }
 
 // Sun/lens flare: procedural glow/halo/ghosts/starburst added over the HDR
