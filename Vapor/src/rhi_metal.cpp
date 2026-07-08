@@ -757,6 +757,11 @@ void RHI_Metal::unmapBuffer(BufferHandle handle) {
 // ============================================================================
 
 void RHI_Metal::beginFrame() {
+    // Open this frame's autorelease pool before anything that can produce an
+    // autoreleased object (uploads create command buffers). Drained in
+    // endFrame; see the member declaration for why this is load-bearing.
+    framePool = NS::AutoreleasePool::alloc()->init();
+
     // Commit pending uploads first: queue submission order makes the data
     // visible to this frame's commands without a CPU wait. Completed upload
     // command buffers are dropped opportunistically to bound the list.
@@ -863,6 +868,7 @@ void RHI_Metal::endFrame() {
     // Frame was skipped (no drawable available in beginFrame)
     if (!currentCommandBuffer) {
         currentDrawable = nullptr;
+        if (framePool) { framePool->release(); framePool = nullptr; }
         return;
     }
 
@@ -905,6 +911,12 @@ void RHI_Metal::endFrame() {
     // Reset frame state
     currentDrawable = nullptr;
     currentCommandBuffer = nullptr;
+
+    // Drain this frame's autoreleased objects (encoders, pass-label strings,
+    // drawable ref, Metal-internal temporaries). commit()/presentDrawable and
+    // the TransferPtr'd command buffer hold their own refs on anything the GPU
+    // still needs, so this only reclaims the transient frame garbage.
+    if (framePool) { framePool->release(); framePool = nullptr; }
 }
 
 void RHI_Metal::beginRenderPass(const RenderPassDesc& desc) {

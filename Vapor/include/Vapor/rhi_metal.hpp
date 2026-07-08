@@ -163,6 +163,13 @@ private:
     NS::SharedPtr<MTL::CommandQueue> commandQueue;
 
     // Current frame resources
+    // Per-frame autorelease pool: metal-cpp returns autoreleased objects from
+    // command-buffer / encoder / drawable / NS::String factory calls, and this
+    // app has no NSApplicationMain draining one for us. Without a pool bracketing
+    // each frame, every encoder (~45/frame), pass-label string, and drawable ref
+    // accumulates for the process lifetime — the unbounded RSS growth. Created at
+    // the top of beginFrame, drained at the bottom of endFrame.
+    NS::AutoreleasePool* framePool = nullptr;
     CA::MetalDrawable* currentDrawable = nullptr;
     NS::SharedPtr<MTL::CommandBuffer> currentCommandBuffer;
     MTL::RenderCommandEncoder* currentRenderEncoder = nullptr;
