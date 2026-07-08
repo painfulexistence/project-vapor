@@ -1126,7 +1126,9 @@ void Renderer::updateBuffers() {
     // MDI mode (Vulkan): instances address the merged scene buffers, so they need
     // real per-mesh offsets and must be grouped into contiguous per-material
     // ranges. Any other mode uses per-mesh buffers -> offsets stay 0.
-    const bool mdi = gpuDrivenMDI && (backend == GraphicsBackend::Vulkan);
+    const bool mdi = gpuDrivenMDI &&
+                     ((backend == GraphicsBackend::Vulkan && capabilities.multiDrawIndirect) ||
+                      backend == GraphicsBackend::Metal);
     if (mdi) ensureMergedGeometry();
     m_materialRanges.clear();
 
@@ -1368,9 +1370,13 @@ void Renderer::mainRenderPass() {
     // merged-buffer offsets; instanceCount 0 makes culled instances no-ops. The
     // instance index comes from gl_InstanceIndex (= command.firstInstance), so
     // the push-constant instanceID is 0.
-    const bool useMDI = useGpuDriven && gpuDrivenMDI &&
-                        backend == GraphicsBackend::Vulkan &&
-                        capabilities.multiDrawIndirect &&
+    // MDI works on Vulkan when the multiDrawIndirect feature is available (native
+    // multi-draw), and on Metal via the RHI's per-command loop (correct, though
+    // single-call there needs an Indirect Command Buffer — a Metal-internal
+    // follow-up). Both backends share this renderer path.
+    const bool mdiBackendOk = (backend == GraphicsBackend::Vulkan && capabilities.multiDrawIndirect) ||
+                              backend == GraphicsBackend::Metal;
+    const bool useMDI = useGpuDriven && gpuDrivenMDI && mdiBackendOk &&
                         mergedVertexBuffer.isValid() && mergedIndexBuffer.isValid() &&
                         !m_materialRanges.empty();
     if (useMDI) {
@@ -1432,8 +1438,10 @@ void Renderer::mainRenderPass() {
             // instances[instanceID + gl_InstanceIndex]; in GPU-driven mode the
             // draw command's firstInstance carries the index (gl_InstanceIndex),
             // so push 0. Metal keeps using the push constant directly.
-            Uint32 vsInstanceID =
-                (useGpuDriven && backend == GraphicsBackend::Vulkan) ? 0u : correctInstanceID;
+            // In GPU-driven mode the index comes from gl_InstanceIndex (Vulkan) /
+            // base_instance (Metal), carried by the draw command's firstInstance,
+            // so push 0. The CPU path pushes the real index.
+            Uint32 vsInstanceID = useGpuDriven ? 0u : correctInstanceID;
             rhi->setVertexBytes(&vsInstanceID, sizeof(Uint32), 4);
 
             // Draw
@@ -4622,10 +4630,11 @@ void Renderer::drawGraphicsImGui() {
         // material over the merged scene buffers). Vulkan-only — Metal draws one
         // indirect command per call, so it stays on the per-object path. Requires
         // GPU-driven culling to be on (it fills the indirect args).
-        const bool mdiAvailable = gpuDrivenCulling && backend == GraphicsBackend::Vulkan &&
-                                  capabilities.multiDrawIndirect;
+        const bool mdiAvailable = gpuDrivenCulling &&
+            ((backend == GraphicsBackend::Vulkan && capabilities.multiDrawIndirect) ||
+             backend == GraphicsBackend::Metal);
         ImGui::BeginDisabled(!mdiAvailable);
-        ImGui::Checkbox("  -> single-call MDI (Vulkan)", &gpuDrivenMDI);
+        ImGui::Checkbox("  -> multi-draw indirect (per material)", &gpuDrivenMDI);
         ImGui::EndDisabled();
         if (!mdiAvailable) gpuDrivenMDI = false;
     } else {

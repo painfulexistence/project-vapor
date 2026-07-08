@@ -309,11 +309,17 @@ vertex RasterizerData vertexMain(
     constant MaterialData* materials [[buffer(1)]],
     constant InstanceData* instances [[buffer(2)]],
     device const VertexData* in [[buffer(3)]],
-    constant uint& instanceID [[buffer(4)]]
+    constant uint& instanceID [[buffer(4)]],
+    uint baseInstance [[base_instance]]
 ) {
     RasterizerData vert;
-    uint actualVertexID = instances[instanceID].vertexOffset + vertexID;
-    float4x4 model = instances[instanceID].model;
+    // Effective instance index. Normal/per-object draws pass it via buffer(4)
+    // with baseInstance 0 (no-op); single-call MDI can't set a per-object
+    // constant, so it passes instanceID 0 and carries the index in the draw
+    // command's baseInstance.
+    uint iid = instanceID + baseInstance;
+    uint actualVertexID = instances[iid].vertexOffset + vertexID;
+    float4x4 model = instances[iid].model;
     float3x3 normalMatrix = transpose(inverse(float3x3(
         model[0].xyz,
         model[1].xyz,
@@ -325,7 +331,7 @@ vertex RasterizerData vertexMain(
     vert.worldPosition = model * float4(in[actualVertexID].position, 1.0);
     vert.position = camera.proj * camera.view * vert.worldPosition;
     vert.uv = in[actualVertexID].uv;
-    vert.material = materials[instances[instanceID].materialID];
+    vert.material = materials[instances[iid].materialID];
     
     // Pass scaled local position and local normal for Object Space Triplanar
     float3 scale = float3(length(model[0].xyz), length(model[1].xyz), length(model[2].xyz));
