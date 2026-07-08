@@ -1,5 +1,6 @@
 #include "renderer.hpp"
 #include "rhi_vulkan.hpp"
+#include <chrono>
 #ifdef __APPLE__
 #include "rhi_metal.hpp"
 #endif
@@ -754,9 +755,19 @@ void Renderer::submitPointLight(const PointLightData& light) {
 }
 
 void Renderer::render() {
+    // CPU frame timing (single-threaded submission). m_cpuPreGraphMs is the
+    // cull + sort + buffer-upload cost; the per-pass recording cost is measured
+    // inside renderGraph.execute (see getPassCpuTimings). Their sum is the CPU
+    // cost of a frame's rendering work — compare against total GPU time to see
+    // whether you are CPU- or GPU-bound.
+    const auto _cpuFrameStart = std::chrono::high_resolution_clock::now();
+
     performCulling();
     sortDrawables();
     updateBuffers();
+
+    m_cpuPreGraphMs = std::chrono::duration<double, std::milli>(
+        std::chrono::high_resolution_clock::now() - _cpuFrameStart).count();
 
     // Execute the frame's passes. Which passes run is decided by the graph:
     // disabled passes and passes whose capability requirements the backend
@@ -4421,6 +4432,7 @@ void Renderer::invokeImGuiCallback() {
     drawGraphicsImGui();
     drawRenderGraphImGui();
     drawGpuTimingsImGui();
+    drawCpuTimingsImGui();
 
     if (m_engineWindowCallback)
         m_engineWindowCallback();
@@ -4825,6 +4837,61 @@ void Renderer::drawGpuTimingsImGui() {
             ImGui::Text("%.3f", t.gpuTimeMs);
             ImGui::TableSetColumnIndex(2);
             ImGui::ProgressBar(static_cast<float>(t.gpuTimeMs / maxMs), ImVec2(-1.0f, 0.0f), "");
+        }
+        ImGui::EndTable();
+    }
+}
+
+// Per-pass CPU (command-recording) time, mirroring drawGpuTimingsImGui. This is
+// how long the CPU spends building each pass on the (single) render thread — the
+// number that decides whether multithreaded command recording would help.
+void Renderer::drawCpuTimingsImGui() {
+    if (!ImGui::CollapsingHeader("CPU Pass Timings"))
+        return;
+
+    const auto& cpuTimings = renderGraph.getPassCpuTimings();
+    double graphMs = 0.0;
+    double maxMs = 0.001;
+    for (const auto& t : cpuTimings) {
+        graphMs += t.second;
+        maxMs = std::max(maxMs, t.second);
+    }
+    const double cpuTotalMs = m_cpuPreGraphMs + graphMs;
+
+    ImGui::Text("CPU frame (submit): %.3f ms", cpuTotalMs);
+    ImGui::Text("  cull + sort + upload: %.3f ms", m_cpuPreGraphMs);
+    ImGui::Text("  render graph:        %.3f ms", graphMs);
+
+    // Bottleneck readout: compare against total GPU time when it's available.
+    if (rhi->isGpuTimingSupported() && rhi->isGpuTimingEnabled()) {
+        double gpuTotalMs = 0.0;
+        for (const auto& t : rhi->getGpuPassTimings()) gpuTotalMs += t.gpuTimeMs;
+        const char* verdict = "roughly balanced";
+        if (gpuTotalMs > cpuTotalMs * 1.3) verdict = "GPU-bound";
+        else if (cpuTotalMs > gpuTotalMs * 1.3) verdict = "CPU-bound";
+        ImGui::Separator();
+        ImGui::Text("GPU total: %.3f ms  |  CPU total: %.3f ms", gpuTotalMs, cpuTotalMs);
+        ImGui::Text("=> %s", verdict);
+        ImGui::TextDisabled("Multithreaded command recording only helps when CPU-bound.");
+    } else {
+        ImGui::TextDisabled("Enable GPU Pass Timings to see the CPU-vs-GPU verdict.");
+    }
+
+    ImGui::Separator();
+    if (ImGui::BeginTable("##cpu_pass_timings", 3,
+                          ImGuiTableFlags_Borders | ImGuiTableFlags_RowBg | ImGuiTableFlags_SizingFixedFit)) {
+        ImGui::TableSetupColumn("Pass", ImGuiTableColumnFlags_WidthStretch);
+        ImGui::TableSetupColumn("ms", ImGuiTableColumnFlags_WidthFixed, 60.0f);
+        ImGui::TableSetupColumn("", ImGuiTableColumnFlags_WidthStretch);
+        ImGui::TableHeadersRow();
+        for (const auto& t : cpuTimings) {
+            ImGui::TableNextRow();
+            ImGui::TableSetColumnIndex(0);
+            ImGui::TextUnformatted(t.first.c_str());
+            ImGui::TableSetColumnIndex(1);
+            ImGui::Text("%.3f", t.second);
+            ImGui::TableSetColumnIndex(2);
+            ImGui::ProgressBar(static_cast<float>(t.second / maxMs), ImVec2(-1.0f, 0.0f), "");
         }
         ImGui::EndTable();
     }

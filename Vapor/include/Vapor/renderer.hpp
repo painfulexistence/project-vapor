@@ -331,6 +331,7 @@ private:
     void performCulling();
     void setupDefaultRenderGraph();
     void drawGpuTimingsImGui();
+    void drawCpuTimingsImGui();  // per-pass CPU (command-recording) time
     void drawRenderGraphImGui();
     void sortDrawables();
     void updateBuffers();
@@ -966,6 +967,7 @@ private:
     Uint32 drawCount = 0;
     Uint32 currentInstanceCount = 0;
     Uint32 culledInstanceCount = 0;
+    double m_cpuPreGraphMs = 0.0;  // CPU cost of cull + sort + buffer upload (per frame)
 };
 
 // The createRenderer() factory is declared in irenderer.hpp and returns a
