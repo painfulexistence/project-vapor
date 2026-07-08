@@ -60,7 +60,7 @@ class SpriteRenderSystem {
 public:
     static void update(
         entt::registry& reg,
-        Renderer* renderer,
+        IRenderer* renderer,
         Vapor::ResourceManager* resourceManager
     ) {
         // Collect visible sprites

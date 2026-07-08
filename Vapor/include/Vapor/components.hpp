@@ -73,7 +73,7 @@ namespace Vapor {
     struct FlyCameraComponent {
         float moveSpeed = 5.0f;
         float rotateSpeed = 90.0f;
-        float yaw = -90.0f;
+        float yaw = 90.0f;  // Look toward -Z (forward)
         float pitch = 0.0f;
     };
 

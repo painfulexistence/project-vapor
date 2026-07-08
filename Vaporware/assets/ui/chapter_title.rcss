@@ -19,7 +19,7 @@ body {
     /* Fade animation */
     opacity: 0;
     transform: scale(0.95);
-    transition: opacity 0.8s sine-out, transform 0.8s sine-out;
+    transition: opacity transform 0.8s sine-out;
 }
 
 #chapter-container.visible {
@@ -71,7 +71,7 @@ body {
 /* Epic style - slide up */
 #chapter-container.epic {
     transform: translateY(20dp);
-    transition: opacity 1.0s sine-out, transform 1.0s sine-out;
+    transition: opacity transform 1.0s sine-out;
 }
 
 #chapter-container.epic.visible {

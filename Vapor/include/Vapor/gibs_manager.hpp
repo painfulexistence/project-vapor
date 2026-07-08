@@ -1,5 +1,6 @@
 #pragma once
 #include "graphics.hpp"
+#include "graphics_gibs.hpp"  // Surfel, SurfelCell, GIBSData, GIBSQuality (branch graphics.hpp is a monolith, not an umbrella)
 #include "scene.hpp"
 #include <Metal/Metal.hpp>
 #include <memory>

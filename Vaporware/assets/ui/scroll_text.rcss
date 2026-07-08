@@ -28,7 +28,7 @@ body {
     /* Base state: rotated away (below the cylinder) */
     opacity: 0;
     transform: rotateX(-60deg) translateZ(-50dp);
-    transition: transform 0.5s sine-out, opacity 0.4s sine-out;
+    transition: transform opacity 0.5s sine-out;
     color: #ffffff;
     font-effect: shadow(2dp 2dp #000000);
     padding: 10dp;
@@ -44,7 +44,7 @@ body {
 #scroll-text.scroll-out {
     opacity: 0;
     transform: rotateX(60deg) translateZ(-50dp);
-    transition: transform 0.5s sine-in, opacity 0.4s sine-in;
+    transition: transform opacity 0.5s sine-in;
 }
 
 /* Prepare for scroll-in: instantly position at bottom of cylinder (no transition) */
@@ -58,5 +58,5 @@ body {
 #scroll-text.scroll-in {
     opacity: 1;
     transform: rotateX(0deg) translateZ(0dp);
-    transition: transform 0.5s sine-out, opacity 0.4s sine-out;
+    transition: transform opacity 0.5s sine-out;
 }

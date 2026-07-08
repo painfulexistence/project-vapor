@@ -13,7 +13,7 @@ body {
     background-color: #0a0a0a;
 
     opacity: 0;
-    transition: opacity 0.3s ease-in-out;
+    transition: opacity 0.3s sine-in-out;
 }
 
 #main-menu-container.visible {
@@ -55,7 +55,7 @@ button {
     font-weight: bold;
     text-align: center;
     letter-spacing: 2dp;
-    transition: background-color 0.15s linear, color 0.15s linear;
+    transition: background-color color 0.15s linear;
 }
 
 button:hover {

@@ -54,7 +54,7 @@ button {
     font-weight: bold;
     text-align: center;
     letter-spacing: 1dp;
-    transition: background-color 0.15s linear, color 0.15s linear;
+    transition: background-color color 0.15s linear;
 }
 
 button:hover {
