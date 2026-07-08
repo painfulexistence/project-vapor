@@ -1541,6 +1541,29 @@ void Renderer::tileCullingPass() {
         rhi->endComputePass();
     }
     rhi->computeBarrier();  // cluster writes -> fragment reads in Main
+
+    // VAPOR_CULL_DEBUG=1: read back the culled cluster buffer and print a
+    // per-tile light-count histogram every ~120 frames. Confirms whether the
+    // tile culling actually reduces the point-light count (vs looping all).
+    static const bool cullDebug = std::getenv("VAPOR_CULL_DEBUG") != nullptr;
+    if (cullDebug && (frameNumber % 120) == 0 && clusterBuffer.isValid()) {
+        rhi->waitIdle();
+        const Uint32 tileCount = clusterGridSizeX * clusterGridSizeY;  // 2D grid
+        auto* clusters = static_cast<const Vapor::Cluster*>(rhi->mapBuffer(clusterBuffer));
+        if (clusters) {
+            Uint32 mn = ~0u, mx = 0u, sum = 0u, nonEmpty = 0u;
+            for (Uint32 i = 0; i < tileCount; ++i) {
+                Uint32 c = clusters[i].lightCount;
+                mn = std::min(mn, c); mx = std::max(mx, c); sum += c;
+                if (c > 0) ++nonEmpty;
+            }
+            rhi->unmapBuffer(clusterBuffer);
+            fmt::print(stderr,
+                "[CULL] f={} tiles={} pointLights={} perTile(min/avg/max)={}/{}/{} nonEmptyTiles={}\n",
+                frameNumber, tileCount, static_cast<Uint32>(pointLights.size()),
+                mn, sum / std::max(tileCount, 1u), mx, nonEmpty);
+        }
+    }
 }
 
 // Sun/lens flare: procedural glow/halo/ghosts/starburst added over the HDR
