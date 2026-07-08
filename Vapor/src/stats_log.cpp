@@ -4,24 +4,19 @@
 
 namespace Vapor {
 
-void StatLine::add(const char* key, std::uint64_t value) {
+void StatLine::appendKV(const char* key, const std::string& value) {
     if (!buffer_.empty()) buffer_ += ' ';
-    buffer_ += fmt::format("{}={}", key, value);
-}
-
-void StatLine::add(const char* key, std::int64_t value) {
-    if (!buffer_.empty()) buffer_ += ' ';
-    buffer_ += fmt::format("{}={}", key, value);
+    buffer_ += key;
+    buffer_ += '=';
+    buffer_ += value;
 }
 
 void StatLine::add(const char* key, double value) {
-    if (!buffer_.empty()) buffer_ += ' ';
-    buffer_ += fmt::format("{}={:.3g}", key, value);
+    appendKV(key, fmt::format("{:.3g}", value));
 }
 
 void StatLine::add(const char* key, const char* value) {
-    if (!buffer_.empty()) buffer_ += ' ';
-    buffer_ += fmt::format("{}={}", key, value);
+    appendKV(key, value);
 }
 
 StatsLog& StatsLog::get() {

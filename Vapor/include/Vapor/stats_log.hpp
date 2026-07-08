@@ -4,6 +4,7 @@
 #include <cstdio>
 #include <functional>
 #include <string>
+#include <type_traits>
 #include <vector>
 
 namespace Vapor {
@@ -27,12 +28,13 @@ namespace Vapor {
 // prefix are added by StatsLog at emit time.
 class StatLine {
 public:
-    // Note: on LP64 std::size_t == std::uint64_t, so no separate size_t overload
-    // (it would collide). Container .size() results bind to the uint64_t overload.
-    void add(const char* key, std::uint64_t value);
-    void add(const char* key, std::int64_t value);
-    void add(const char* key, std::uint32_t value) { add(key, static_cast<std::uint64_t>(value)); }
-    void add(const char* key, int value)            { add(key, static_cast<std::int64_t>(value)); }
+    // One template for every integral type (size_t / uint32_t / int / uint64_t
+    // / …) via std::to_string. A fixed set of fixed-width overloads is not
+    // portable: on Linux glibc size_t IS uint64_t (unsigned long) so .size()
+    // bound cleanly, but on macOS uint64_t is unsigned long long while size_t is
+    // unsigned long — distinct, so .size() was ambiguous across the overloads.
+    template <typename T, typename = std::enable_if_t<std::is_integral_v<T>>>
+    void add(const char* key, T value) { appendKV(key, std::to_string(value)); }
     void add(const char* key, double value);
     void add(const char* key, const char* value);
 
@@ -40,6 +42,7 @@ public:
     bool empty() const { return buffer_.empty(); }
 
 private:
+    void appendKV(const char* key, const std::string& value);
     std::string buffer_;
 };
 
