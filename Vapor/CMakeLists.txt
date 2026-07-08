@@ -56,7 +56,10 @@ set(SOURCES
     src/character_controller.cpp
     src/vehicle_controller.cpp
     src/fluid_volume.cpp
-    src/renderer_vulkan.cpp
+    # RHI architecture files (replacing renderer_metal.cpp and renderer_vulkan.cpp)
+    src/renderer.cpp
+    src/rhi_vulkan.cpp
+    src/rml_renderer_rhi.cpp
     src/render_scene.cpp
     src/task_scheduler.cpp
     src/resource_manager.cpp
@@ -77,10 +80,14 @@ set(SOURCES
 
 if(APPLE)
     list(APPEND SOURCES
+        # Native full-feature Metal renderer (45 passes, RT/GIBS/water/clouds/…).
+        # createRenderer() routes the Metal backend here; Vulkan uses the RHI
+        # renderer (src/renderer.cpp) on every platform.
         src/renderer_metal.cpp
+        src/gibs_manager.cpp
+        src/rhi_metal.cpp
         src/rml_renderer_metal.cpp
         src/ui_renderer_metal.cpp
-        src/gibs_manager.cpp
         imgui/backends/imgui_impl_metal.mm
     )
 else()

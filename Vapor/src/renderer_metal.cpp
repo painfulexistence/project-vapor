@@ -4,7 +4,11 @@
 #define CA_PRIVATE_IMPLEMENTATION
 #include "components.hpp"
 
-using namespace Vapor;
+// NOTE: `using namespace Vapor;` is intentionally placed AFTER all includes
+// (see below). The branch's graphics.hpp defines Vapor:: copies of the GPU
+// structs that also exist at global scope in graphics_gpu_structs.hpp; if the
+// using-directive were active while those headers parse, their own unqualified
+// references (e.g. InstanceData::primitiveMode) would be ambiguous.
 #include "debug_draw.hpp"
 #include "graphics_mesh.hpp"
 #include "renderer_metal.hpp"
@@ -34,7 +38,11 @@ using namespace Vapor;
 #include "asset_manager.hpp"
 #include "engine_core.hpp"
 #include "graphics.hpp"
-#include "rng.hpp"
+// The branch's graphics.hpp is a monolith (not an umbrella), so pull in the
+// effect/batch/gibs sub-headers the native Metal renderer needs directly.
+#include "graphics_effects.hpp"   // AtmosphereData, WaterData, GPUParticle, ::Particle, …
+#include "graphics_batch2d.hpp"   // Batch2DVertex, Batch2DBlendMode
+#include "graphics_gibs.hpp"      // Surfel, SurfelCell, GIBSData
 #include "helper.hpp"
 #include "mesh_builder.hpp"
 #include "rmlui_manager.hpp"
@@ -46,10 +54,16 @@ using namespace Vapor;
 // GIBS (Global Illumination Based on Surfels)
 #include "Vapor/gibs_manager.hpp"
 
+// All headers are parsed above with no using-directive active, so their own
+// unqualified references bind to the intended (global gpu_structs) types. The
+// renderer body below uses Vapor:: types unqualified; GPU-struct names are
+// qualified with :: where the global versions are required.
+using namespace Vapor;
+
 // Pre-pass: Renders depth and normals
-class PrePass : public RenderPass {
+class PrePass : public MetalRenderPass {
 public:
-    explicit PrePass(Renderer_Metal* renderer) : RenderPass(renderer) {
+    explicit PrePass(Renderer_Metal* renderer) : MetalRenderPass(renderer) {
     }
 
     auto getName() const -> const char* override {
@@ -124,9 +138,9 @@ public:
 };
 
 // TLAS build pass: Builds top-level acceleration structure for ray tracing
-class TLASBuildPass : public RenderPass {
+class TLASBuildPass : public MetalRenderPass {
 public:
-    explicit TLASBuildPass(Renderer_Metal* renderer) : RenderPass(renderer) {
+    explicit TLASBuildPass(Renderer_Metal* renderer) : MetalRenderPass(renderer) {
     }
 
     auto getName() const -> const char* override {
@@ -181,9 +195,9 @@ public:
 };
 
 // Normal resolve pass: Resolves MSAA normal texture
-class NormalResolvePass : public RenderPass {
+class NormalResolvePass : public MetalRenderPass {
 public:
-    explicit NormalResolvePass(Renderer_Metal* renderer) : RenderPass(renderer) {
+    explicit NormalResolvePass(Renderer_Metal* renderer) : MetalRenderPass(renderer) {
     }
 
     auto getName() const -> const char* override {
@@ -213,9 +227,9 @@ public:
 
 // Velocity pass: camera-motion vectors from the depth buffer (see 3d_velocity.metal).
 // Feeds every temporal technique (RT AO temporal accumulation, TAA).
-class VelocityPass : public RenderPass {
+class VelocityPass : public MetalRenderPass {
 public:
-    explicit VelocityPass(Renderer_Metal* renderer) : RenderPass(renderer) {
+    explicit VelocityPass(Renderer_Metal* renderer) : MetalRenderPass(renderer) {
     }
 
     auto getName() const -> const char* override {
@@ -254,9 +268,9 @@ public:
 };
 
 // Tile culling pass: Performs light culling for tiled rendering
-class TileCullingPass : public RenderPass {
+class TileCullingPass : public MetalRenderPass {
 public:
-    explicit TileCullingPass(Renderer_Metal* renderer) : RenderPass(renderer) {
+    explicit TileCullingPass(Renderer_Metal* renderer) : MetalRenderPass(renderer) {
     }
 
     auto getName() const -> const char* override {
@@ -285,9 +299,9 @@ public:
 };
 
 // Raytrace shadow pass: Computes ray-traced shadows
-class RaytraceShadowPass : public RenderPass {
+class RaytraceShadowPass : public MetalRenderPass {
 public:
-    explicit RaytraceShadowPass(Renderer_Metal* renderer) : RenderPass(renderer) {
+    explicit RaytraceShadowPass(Renderer_Metal* renderer) : MetalRenderPass(renderer) {
     }
 
     auto getName() const -> const char* override {
@@ -330,9 +344,9 @@ public:
 };
 
 // PSSM shadow pass: renders scene depth into a 3-slice texture array for cascades 1-3
-class PSSMShadowPass : public RenderPass {
+class PSSMShadowPass : public MetalRenderPass {
 public:
-    explicit PSSMShadowPass(Renderer_Metal* renderer) : RenderPass(renderer) {
+    explicit PSSMShadowPass(Renderer_Metal* renderer) : MetalRenderPass(renderer) {
     }
 
     auto getName() const -> const char* override {
@@ -520,9 +534,9 @@ public:
 
 // PSSM resolve pass (debug): writes the directional shadow factor into a
 // camera-aligned screen-space texture so it can be inspected like RT shadow.
-class PSSMResolvePass : public RenderPass {
+class PSSMResolvePass : public MetalRenderPass {
 public:
-    explicit PSSMResolvePass(Renderer_Metal* renderer) : RenderPass(renderer) {}
+    explicit PSSMResolvePass(Renderer_Metal* renderer) : MetalRenderPass(renderer) {}
     auto getName() const -> const char* override { return "PSSMResolvePass"; }
 
     void execute() override {
@@ -550,9 +564,9 @@ public:
 };
 
 // Stochastic point shadow pass: MegaLights-style 2-ray shadow for clustered point lights
-class StochasticPointShadowPass : public RenderPass {
+class StochasticPointShadowPass : public MetalRenderPass {
 public:
-    explicit StochasticPointShadowPass(Renderer_Metal* renderer) : RenderPass(renderer) {}
+    explicit StochasticPointShadowPass(Renderer_Metal* renderer) : MetalRenderPass(renderer) {}
     auto getName() const -> const char* override { return "StochasticPointShadowPass"; }
 
     void execute() override {
@@ -587,9 +601,9 @@ public:
 };
 
 // Point shadow temporal pass: motion-vector reprojection + variance clamping denoiser
-class PointShadowTemporalPass : public RenderPass {
+class PointShadowTemporalPass : public MetalRenderPass {
 public:
-    explicit PointShadowTemporalPass(Renderer_Metal* renderer) : RenderPass(renderer) {}
+    explicit PointShadowTemporalPass(Renderer_Metal* renderer) : MetalRenderPass(renderer) {}
     auto getName() const -> const char* override { return "PointShadowTemporalPass"; }
 
     void execute() override {
@@ -618,9 +632,9 @@ public:
 };
 
 // Raytrace AO pass: Computes ray-traced ambient occlusion
-class RaytraceAOPass : public RenderPass {
+class RaytraceAOPass : public MetalRenderPass {
 public:
-    explicit RaytraceAOPass(Renderer_Metal* renderer) : RenderPass(renderer) {
+    explicit RaytraceAOPass(Renderer_Metal* renderer) : MetalRenderPass(renderer) {
     }
 
     auto getName() const -> const char* override {
@@ -658,9 +672,9 @@ public:
 
 // AO temporal accumulation: reprojects last frame's AO with the velocity
 // buffer and blends it with the raygen output (ADR-008 step 2).
-class AOTemporalPass : public RenderPass {
+class AOTemporalPass : public MetalRenderPass {
 public:
-    explicit AOTemporalPass(Renderer_Metal* renderer) : RenderPass(renderer) {
+    explicit AOTemporalPass(Renderer_Metal* renderer) : MetalRenderPass(renderer) {
     }
 
     auto getName() const -> const char* override {
@@ -711,9 +725,9 @@ public:
 // (ADR-008 step 3). aoRT is what the lighting/post passes consume. One serial
 // compute encoder for all iterations: successive dispatches are ordered and
 // their writes visible to each other.
-class AODenoisePass : public RenderPass {
+class AODenoisePass : public MetalRenderPass {
 public:
-    explicit AODenoisePass(Renderer_Metal* renderer) : RenderPass(renderer) {
+    explicit AODenoisePass(Renderer_Metal* renderer) : MetalRenderPass(renderer) {
     }
 
     auto getName() const -> const char* override {
@@ -755,9 +769,9 @@ public:
 };
 
 // Sky atmosphere pass: Renders procedural sky with Rayleigh and Mie scattering
-class SkyAtmospherePass : public RenderPass {
+class SkyAtmospherePass : public MetalRenderPass {
 public:
-    explicit SkyAtmospherePass(Renderer_Metal* renderer) : RenderPass(renderer) {
+    explicit SkyAtmospherePass(Renderer_Metal* renderer) : MetalRenderPass(renderer) {
     }
 
     auto getName() const -> const char* override {
@@ -809,9 +823,9 @@ public:
 };
 
 // Equirect-to-cubemap pass: Converts a loaded equirectangular HDRI texture to environmentCubemap
-class EquirectToCubemapPass : public RenderPass {
+class EquirectToCubemapPass : public MetalRenderPass {
 public:
-    explicit EquirectToCubemapPass(Renderer_Metal* renderer) : RenderPass(renderer) {}
+    explicit EquirectToCubemapPass(Renderer_Metal* renderer) : MetalRenderPass(renderer) {}
     auto getName() const -> const char* override { return "EquirectToCubemapPass"; }
 
     void execute() override {
@@ -822,7 +836,7 @@ public:
         if (!r.equirectHDRITexture) return;
 
         for (uint32_t face = 0; face < 6; ++face) {
-            auto* captureData = reinterpret_cast<IBLCaptureData*>(r.iblCaptureDataBuffer->contents());
+            auto* captureData = reinterpret_cast<::IBLCaptureData*>(r.iblCaptureDataBuffer->contents());
             captureData->faceIndex = face;
             captureData->roughness = 0.0f;
             r.iblCaptureDataBuffer->didModifyRange(NS::Range::Make(0, r.iblCaptureDataBuffer->length()));
@@ -855,9 +869,9 @@ public:
 };
 
 // Sky capture pass: Captures atmosphere to environment cubemap for IBL
-class SkyCapturePass : public RenderPass {
+class SkyCapturePass : public MetalRenderPass {
 public:
-    explicit SkyCapturePass(Renderer_Metal* renderer) : RenderPass(renderer) {
+    explicit SkyCapturePass(Renderer_Metal* renderer) : MetalRenderPass(renderer) {
     }
 
     auto getName() const -> const char* override {
@@ -884,7 +898,7 @@ public:
         // Render each face of the cubemap
         for (uint32_t face = 0; face < 6; ++face) {
             // Update capture data
-            auto* captureData = reinterpret_cast<IBLCaptureData*>(r.iblCaptureDataBuffer->contents());
+            auto* captureData = reinterpret_cast<::IBLCaptureData*>(r.iblCaptureDataBuffer->contents());
             captureData->viewProj = captureProj * captureViews[face];
             captureData->faceIndex = face;
             captureData->roughness = 0.0f;
@@ -919,9 +933,9 @@ public:
 };
 
 // Irradiance convolution pass: Creates diffuse irradiance map from environment cubemap
-class IrradianceConvolutionPass : public RenderPass {
+class IrradianceConvolutionPass : public MetalRenderPass {
 public:
-    explicit IrradianceConvolutionPass(Renderer_Metal* renderer) : RenderPass(renderer) {
+    explicit IrradianceConvolutionPass(Renderer_Metal* renderer) : MetalRenderPass(renderer) {
     }
 
     auto getName() const -> const char* override {
@@ -935,7 +949,7 @@ public:
 
         // Render each face of the irradiance cubemap
         for (uint32_t face = 0; face < 6; ++face) {
-            auto* captureData = reinterpret_cast<IBLCaptureData*>(r.iblCaptureDataBuffer->contents());
+            auto* captureData = reinterpret_cast<::IBLCaptureData*>(r.iblCaptureDataBuffer->contents());
             captureData->faceIndex = face;
             captureData->roughness = 0.0f;
             r.iblCaptureDataBuffer->didModifyRange(NS::Range::Make(0, r.iblCaptureDataBuffer->length()));
@@ -962,9 +976,9 @@ public:
 };
 
 // Pre-filter environment map pass: Creates specular pre-filtered cubemap with roughness mips
-class PrefilterEnvMapPass : public RenderPass {
+class PrefilterEnvMapPass : public MetalRenderPass {
 public:
-    explicit PrefilterEnvMapPass(Renderer_Metal* renderer) : RenderPass(renderer) {
+    explicit PrefilterEnvMapPass(Renderer_Metal* renderer) : MetalRenderPass(renderer) {
     }
 
     auto getName() const -> const char* override {
@@ -980,11 +994,11 @@ public:
 
         // For each mip level (roughness level)
         for (uint32_t mip = 0; mip < maxMipLevels; ++mip) {
-            float roughness = static_cast<float>(mip) / static_cast<float>(maxMipLevels - 1);
+            float roughness = (float)mip / (float)(maxMipLevels - 1);
 
             // For each face
             for (uint32_t face = 0; face < 6; ++face) {
-                auto* captureData = reinterpret_cast<IBLCaptureData*>(r.iblCaptureDataBuffer->contents());
+                auto* captureData = reinterpret_cast<::IBLCaptureData*>(r.iblCaptureDataBuffer->contents());
                 captureData->faceIndex = face;
                 captureData->roughness = roughness;
                 r.iblCaptureDataBuffer->didModifyRange(NS::Range::Make(0, r.iblCaptureDataBuffer->length()));
@@ -1015,9 +1029,9 @@ public:
 };
 
 // BRDF LUT pass: Pre-computes BRDF integration lookup table
-class BRDFLUTPass : public RenderPass {
+class BRDFLUTPass : public MetalRenderPass {
 public:
-    explicit BRDFLUTPass(Renderer_Metal* renderer) : RenderPass(renderer) {
+    explicit BRDFLUTPass(Renderer_Metal* renderer) : MetalRenderPass(renderer) {
     }
 
     auto getName() const -> const char* override {
@@ -1049,9 +1063,9 @@ public:
 };
 
 // Main render pass: Renders the scene with PBR lighting
-class MainRenderPass : public RenderPass {
+class MainRenderPass : public MetalRenderPass {
 public:
-    explicit MainRenderPass(Renderer_Metal* renderer) : RenderPass(renderer) {
+    explicit MainRenderPass(Renderer_Metal* renderer) : MetalRenderPass(renderer) {
     }
 
     auto getName() const -> const char* override {
@@ -1068,7 +1082,7 @@ public:
         // with a repeat sampler that shows up as tiled/compressed shadows.
         glm::vec2 screenSize = glm::vec2(r.colorRT->width(), r.colorRT->height());
         glm::uvec3 gridSize = glm::uvec3(r.clusterGridSizeX, r.clusterGridSizeY, r.clusterGridSizeZ);
-        auto time = static_cast<float>(SDL_GetTicks()) / 1000.0f;
+        auto time = (float)SDL_GetTicks() / 1000.0f;
 
         // Create render pass descriptor
         auto renderPassDesc = NS::TransferPtr(MTL::RenderPassDescriptor::renderPassDescriptor());
@@ -1182,9 +1196,9 @@ public:
 };
 
 // Water pass: Renders water surface with Gerstner waves, reflections, and refractions
-class WaterPass : public RenderPass {
+class WaterPass : public MetalRenderPass {
 public:
-    explicit WaterPass(Renderer_Metal* renderer) : RenderPass(renderer) {
+    explicit WaterPass(Renderer_Metal* renderer) : MetalRenderPass(renderer) {
     }
 
     auto getName() const -> const char* override {
@@ -1200,7 +1214,7 @@ public:
 
         auto drawableSize = r.swapchain->drawableSize();
         glm::vec2 screenSize = glm::vec2(drawableSize.width, drawableSize.height);
-        auto time = static_cast<float>(SDL_GetTicks()) / 1000.0f;
+        auto time = (float)SDL_GetTicks() / 1000.0f;
 
         // Build model matrix from transform
         auto modelMatrix = glm::mat4(1.0f);
@@ -1272,9 +1286,9 @@ public:
 };
 
 // Particle pass: GPU particle simulation and rendering
-class ParticlePass : public RenderPass {
+class ParticlePass : public MetalRenderPass {
 public:
-    explicit ParticlePass(Renderer_Metal* renderer) : RenderPass(renderer) {
+    explicit ParticlePass(Renderer_Metal* renderer) : MetalRenderPass(renderer) {
     }
 
     auto getName() const -> const char* override {
@@ -1292,7 +1306,7 @@ public:
             return;
         }
 
-        auto time = static_cast<float>(SDL_GetTicks()) / 1000.0f;
+        auto time = (float)SDL_GetTicks() / 1000.0f;
         float deltaTime = 1.0f / 60.0f;// Use fixed timestep to avoid issues
 
         // Compute attractor position (in front of camera)
@@ -1399,9 +1413,9 @@ public:
 };
 
 // Light scattering pass: Renders volumetric god rays effect
-class LightScatteringPass : public RenderPass {
+class LightScatteringPass : public MetalRenderPass {
 public:
-    explicit LightScatteringPass(Renderer_Metal* renderer) : RenderPass(renderer) {
+    explicit LightScatteringPass(Renderer_Metal* renderer) : MetalRenderPass(renderer) {
     }
 
     auto getName() const -> const char* override {
@@ -1490,9 +1504,9 @@ public:
 // Volumetric Fog Pass: Height-based fog with scattering
 // ============================================================================
 
-class VolumetricFogPass : public RenderPass {
+class VolumetricFogPass : public MetalRenderPass {
 public:
-    explicit VolumetricFogPass(Renderer_Metal* renderer) : RenderPass(renderer) {
+    explicit VolumetricFogPass(Renderer_Metal* renderer) : MetalRenderPass(renderer) {
     }
 
     auto getName() const -> const char* override {
@@ -1568,9 +1582,9 @@ public:
 // Volumetric Cloud Pass: Ray-marched clouds
 // ============================================================================
 
-class VolumetricCloudPass : public RenderPass {
+class VolumetricCloudPass : public MetalRenderPass {
 public:
-    explicit VolumetricCloudPass(Renderer_Metal* renderer) : RenderPass(renderer) {
+    explicit VolumetricCloudPass(Renderer_Metal* renderer) : MetalRenderPass(renderer) {
     }
 
     auto getName() const -> const char* override {
@@ -1781,9 +1795,9 @@ public:
 // Sun Flare Pass: Lens flare effect with procedural textures
 // ============================================================================
 
-class SunFlarePass : public RenderPass {
+class SunFlarePass : public MetalRenderPass {
 public:
-    explicit SunFlarePass(Renderer_Metal* renderer) : RenderPass(renderer) {
+    explicit SunFlarePass(Renderer_Metal* renderer) : MetalRenderPass(renderer) {
     }
 
     auto getName() const -> const char* override {
@@ -1888,9 +1902,9 @@ public:
 // ============================================================================
 
 // Bloom brightness pass: Extracts bright pixels from the scene
-class BloomBrightnessPass : public RenderPass {
+class BloomBrightnessPass : public MetalRenderPass {
 public:
-    explicit BloomBrightnessPass(Renderer_Metal* renderer) : RenderPass(renderer) {
+    explicit BloomBrightnessPass(Renderer_Metal* renderer) : MetalRenderPass(renderer) {
     }
 
     auto getName() const -> const char* override {
@@ -1919,9 +1933,9 @@ public:
 };
 
 // Bloom downsample pass: Creates the bloom mipmap pyramid
-class BloomDownsamplePass : public RenderPass {
+class BloomDownsamplePass : public MetalRenderPass {
 public:
-    explicit BloomDownsamplePass(Renderer_Metal* renderer) : RenderPass(renderer) {
+    explicit BloomDownsamplePass(Renderer_Metal* renderer) : MetalRenderPass(renderer) {
     }
 
     auto getName() const -> const char* override {
@@ -1972,9 +1986,9 @@ public:
 };
 
 // Bloom upsample pass: Upsamples and accumulates the bloom
-class BloomUpsamplePass : public RenderPass {
+class BloomUpsamplePass : public MetalRenderPass {
 public:
-    explicit BloomUpsamplePass(Renderer_Metal* renderer) : RenderPass(renderer) {
+    explicit BloomUpsamplePass(Renderer_Metal* renderer) : MetalRenderPass(renderer) {
     }
 
     auto getName() const -> const char* override {
@@ -2007,9 +2021,9 @@ public:
 };
 
 // Bloom composite pass: Combines bloom with the scene
-class BloomCompositePass : public RenderPass {
+class BloomCompositePass : public MetalRenderPass {
 public:
-    explicit BloomCompositePass(Renderer_Metal* renderer) : RenderPass(renderer) {
+    explicit BloomCompositePass(Renderer_Metal* renderer) : MetalRenderPass(renderer) {
     }
 
     auto getName() const -> const char* override {
@@ -2044,9 +2058,9 @@ public:
 // ============================================================================
 
 // DOF CoC pass: Calculate Circle of Confusion based on screen position
-class DOFCoCPass : public RenderPass {
+class DOFCoCPass : public MetalRenderPass {
 public:
-    explicit DOFCoCPass(Renderer_Metal* renderer) : RenderPass(renderer) {
+    explicit DOFCoCPass(Renderer_Metal* renderer) : MetalRenderPass(renderer) {
     }
 
     auto getName() const -> const char* override {
@@ -2096,9 +2110,9 @@ public:
 };
 
 // DOF Blur pass: Apply bokeh blur based on CoC
-class DOFBlurPass : public RenderPass {
+class DOFBlurPass : public MetalRenderPass {
 public:
-    explicit DOFBlurPass(Renderer_Metal* renderer) : RenderPass(renderer) {
+    explicit DOFBlurPass(Renderer_Metal* renderer) : MetalRenderPass(renderer) {
     }
 
     auto getName() const -> const char* override {
@@ -2135,9 +2149,9 @@ public:
 };
 
 // DOF Composite pass: Blend sharp and blurred images
-class DOFCompositePass : public RenderPass {
+class DOFCompositePass : public MetalRenderPass {
 public:
-    explicit DOFCompositePass(Renderer_Metal* renderer) : RenderPass(renderer) {
+    explicit DOFCompositePass(Renderer_Metal* renderer) : MetalRenderPass(renderer) {
     }
 
     auto getName() const -> const char* override {
@@ -2168,9 +2182,9 @@ public:
 };
 
 // Post-process pass: Applies tone mapping, color grading, chromatic aberration, vignette
-class PostProcessPass : public RenderPass {
+class PostProcessPass : public MetalRenderPass {
 public:
-    explicit PostProcessPass(Renderer_Metal* renderer) : RenderPass(renderer) {
+    explicit PostProcessPass(Renderer_Metal* renderer) : MetalRenderPass(renderer) {
     }
 
     auto getName() const -> const char* override {
@@ -2234,9 +2248,9 @@ public:
 };
 
 // Debug draw pass: Renders wireframe debug shapes (lines)
-class DebugDrawPass : public RenderPass {
+class DebugDrawPass : public MetalRenderPass {
 public:
-    explicit DebugDrawPass(Renderer_Metal* renderer) : RenderPass(renderer) {
+    explicit DebugDrawPass(Renderer_Metal* renderer) : MetalRenderPass(renderer) {
     }
 
     auto getName() const -> const char* override {
@@ -2315,9 +2329,9 @@ public:
 };
 
 // RmlUI pass: Renders the RmlUI overlay (before ImGui)
-class RmlUiPass : public RenderPass {
+class RmlUiPass : public MetalRenderPass {
 public:
-    explicit RmlUiPass(Renderer_Metal* renderer) : RenderPass(renderer) {
+    explicit RmlUiPass(Renderer_Metal* renderer) : MetalRenderPass(renderer) {
     }
 
     auto getName() const -> const char* override {
@@ -2332,9 +2346,9 @@ public:
 };
 
 // ImGui pass: Renders the ImGui UI overlay
-class ImGuiPass : public RenderPass {
+class ImGuiPass : public MetalRenderPass {
 public:
-    explicit ImGuiPass(Renderer_Metal* renderer) : RenderPass(renderer) {
+    explicit ImGuiPass(Renderer_Metal* renderer) : MetalRenderPass(renderer) {
     }
 
     auto getName() const -> const char* override {
@@ -2363,9 +2377,9 @@ public:
 };
 
 // 2D Batch pass: Renders batched 2D primitives (quads, lines, shapes)
-class WorldCanvasPass : public RenderPass {
+class WorldCanvasPass : public MetalRenderPass {
 public:
-    explicit WorldCanvasPass(Renderer_Metal* renderer) : RenderPass(renderer) {
+    explicit WorldCanvasPass(Renderer_Metal* renderer) : MetalRenderPass(renderer) {
     }
 
     auto getName() const -> const char* override {
@@ -2444,7 +2458,7 @@ public:
         for (Uint32 i = 0; i < r.batch3DTextureSlotIndex; i++) {
             TextureHandle handle = r.batch3DTextureSlots[i];
             MTL::Texture* texture = r.batch2DWhiteTexture.get();
-            if (handle.rid != UINT32_MAX) {
+            if (handle.id != UINT32_MAX) {
                 auto texPtr = r.getTexture(handle);
                 if (texPtr) texture = texPtr.get();
             }
@@ -2468,9 +2482,9 @@ public:
     }
 };
 
-class CanvasPass : public RenderPass {
+class CanvasPass : public MetalRenderPass {
 public:
-    explicit CanvasPass(Renderer_Metal* renderer) : RenderPass(renderer) {
+    explicit CanvasPass(Renderer_Metal* renderer) : MetalRenderPass(renderer) {
     }
 
     auto getName() const -> const char* override {
@@ -2583,7 +2597,7 @@ public:
             for (Uint32 i = 0; i < b.slotCount; i++) {
                 TextureHandle handle = (*b.slots)[i];
                 MTL::Texture* tex = nullptr;
-                if (handle.rid != UINT32_MAX) {
+                if (handle.id != UINT32_MAX) {
                     auto texPtr = r.getTexture(handle);
                     if (texPtr) tex = texPtr.get();
                 }
@@ -2620,10 +2634,10 @@ public:
 // GIBS (Global Illumination Based on Surfels) Passes
 // ============================================================================
 
-class SurfelGenerationPass : public RenderPass {
+class SurfelGenerationPass : public MetalRenderPass {
 public:
     SurfelGenerationPass(Renderer_Metal* renderer, Vapor::GIBSManager* gm)
-        : RenderPass(renderer), gibsManager(gm) {}
+        : MetalRenderPass(renderer), gibsManager(gm) {}
 
     const char* getName() const override { return "SurfelGenerationPass"; }
 
@@ -2673,10 +2687,10 @@ private:
     Vapor::GIBSManager* gibsManager;
 };
 
-class SurfelHashBuildPass : public RenderPass {
+class SurfelHashBuildPass : public MetalRenderPass {
 public:
     SurfelHashBuildPass(Renderer_Metal* renderer, Vapor::GIBSManager* gm)
-        : RenderPass(renderer), gibsManager(gm) {}
+        : MetalRenderPass(renderer), gibsManager(gm) {}
 
     const char* getName() const override { return "SurfelHashBuildPass"; }
 
@@ -2719,10 +2733,10 @@ private:
     Vapor::GIBSManager* gibsManager;
 };
 
-class SurfelRaytracingPass : public RenderPass {
+class SurfelRaytracingPass : public MetalRenderPass {
 public:
     SurfelRaytracingPass(Renderer_Metal* renderer, Vapor::GIBSManager* gm)
-        : RenderPass(renderer), gibsManager(gm) {}
+        : MetalRenderPass(renderer), gibsManager(gm) {}
 
     const char* getName() const override { return "SurfelRaytracingPass"; }
 
@@ -2779,10 +2793,10 @@ private:
     Vapor::GIBSManager* gibsManager;
 };
 
-class GIBSTemporalPass : public RenderPass {
+class GIBSTemporalPass : public MetalRenderPass {
 public:
     GIBSTemporalPass(Renderer_Metal* renderer, Vapor::GIBSManager* gm)
-        : RenderPass(renderer), gibsManager(gm) {}
+        : MetalRenderPass(renderer), gibsManager(gm) {}
 
     const char* getName() const override { return "GIBSTemporalPass"; }
 
@@ -2810,10 +2824,10 @@ private:
     Vapor::GIBSManager* gibsManager;
 };
 
-class GIBSSamplePass : public RenderPass {
+class GIBSSamplePass : public MetalRenderPass {
 public:
     GIBSSamplePass(Renderer_Metal* renderer, Vapor::GIBSManager* gm)
-        : RenderPass(renderer), gibsManager(gm) {}
+        : MetalRenderPass(renderer), gibsManager(gm) {}
 
     const char* getName() const override { return "GIBSSamplePass"; }
 
@@ -2866,8 +2880,10 @@ private:
     Vapor::GIBSManager* gibsManager;
 };
 
-auto createRendererMetal() -> std::unique_ptr<Renderer> {
-    return std::make_unique<Renderer_Metal>();
+std::unique_ptr<IRenderer> createRendererMetal(SDL_Window* window) {
+    auto r = std::make_unique<Renderer_Metal>();
+    r->init(window);  // creates device/swapchain and initializes the ImGui Metal backend
+    return r;
 }
 
 Renderer_Metal::Renderer_Metal() {
@@ -2989,7 +3005,9 @@ auto Renderer_Metal::init(SDL_Window* window) -> void {
     graph.addPass(std::make_unique<PostProcessPass>(this));
     graph.addPass(std::make_unique<DebugDrawPass>(this));// Debug draw after post-process
     graph.addPass(std::make_unique<RmlUiPass>(this));// RmlUI (pure UI, no bloom)
-    graph.addPass(std::make_unique<ImGuiPass>(this));
+    // NOTE: ImGuiPass is NOT part of the graph. ImGui draw-data submission runs
+    // in endFrame(), after the caller's ImGui::Render() (frame model parity with
+    // the RHI renderer). See Renderer_Metal::endFrame().
 
     debugDraw = std::make_shared<Vapor::DebugDraw>();
 
@@ -3019,8 +3037,10 @@ auto Renderer_Metal::deinit() -> void {
 
     // UI cleanup
     if (m_uiRenderer) {
-        m_uiRenderer->shutdown();
-        m_uiRenderer.reset();
+        auto* uiRenderer = static_cast<Vapor::RmlRendererMetal*>(m_uiRenderer);
+        uiRenderer->shutdown();
+        delete uiRenderer;
+        m_uiRenderer = nullptr;
     }
 
     // ImGui deinit
@@ -3047,20 +3067,23 @@ auto Renderer_Metal::initUI() -> bool {
     }
 
     // Create Metal UI renderer (shared implementation)
-    auto uiRenderer = std::make_unique<Vapor::RmlRendererMetal>(device);
+    auto* uiRenderer = new Vapor::RmlRendererMetal(device);
     if (!uiRenderer->initialize()) {
         fmt::print("Renderer_Metal::initUI: Failed to initialize Metal UI renderer\n");
-        return false;// uiRenderer frees itself
+        delete uiRenderer;
+        return false;
     }
 
-    // Set as RmlUI's render interface, then take ownership.
-    Rml::SetRenderInterface(uiRenderer.get());
-    m_uiRenderer = std::move(uiRenderer);
+    m_uiRenderer = uiRenderer;
+
+    // Set as RmlUI's render interface
+    Rml::SetRenderInterface(uiRenderer);
 
     // Now finalize RmlUI initialization (creates context, loads fonts, etc.)
     if (!rmluiManager->FinalizeInitialization()) {
         fmt::print("Renderer_Metal::initUI: Failed to finalize RmlUI\n");
-        m_uiRenderer.reset();
+        delete uiRenderer;
+        m_uiRenderer = nullptr;
         return false;
     }
 
@@ -3076,7 +3099,7 @@ void Renderer_Metal::renderUI() {
         return;
     }
 
-    auto* uiRenderer = m_uiRenderer.get();
+    auto* uiRenderer = static_cast<Vapor::RmlRendererMetal*>(m_uiRenderer);
 
     auto surface = currentDrawable;
     if (!surface) return;
@@ -3435,8 +3458,8 @@ auto Renderer_Metal::createResources() -> void {
         batch2DWhiteTexture->replaceRegion(MTL::Region(0, 0, 1, 1), 0, &whitePixel, sizeof(uint32_t));
 
         // Create texture handle for the white texture
-        batch2DWhiteTextureHandle.rid = nextTextureID++;
-        textures[batch2DWhiteTextureHandle.rid] = batch2DWhiteTexture;
+        batch2DWhiteTextureHandle.id = nextTextureID++;
+        textures[batch2DWhiteTextureHandle.id] = batch2DWhiteTexture;
 
         fmt::print("2D batch rendering pipeline initialized\n");
     }
@@ -3444,28 +3467,28 @@ auto Renderer_Metal::createResources() -> void {
     // Create buffers
     frameDataBuffers.resize(MAX_FRAMES_IN_FLIGHT);
     for (auto& frameDataBuffer : frameDataBuffers) {
-        frameDataBuffer = NS::TransferPtr(device->newBuffer(sizeof(FrameData), MTL::ResourceStorageModeManaged));
+        frameDataBuffer = NS::TransferPtr(device->newBuffer(sizeof(::FrameData), MTL::ResourceStorageModeManaged));
     }
     cameraDataBuffers.resize(MAX_FRAMES_IN_FLIGHT);
     for (auto& cameraDataBuffer : cameraDataBuffers) {
-        cameraDataBuffer = NS::TransferPtr(device->newBuffer(sizeof(CameraData), MTL::ResourceStorageModeManaged));
+        cameraDataBuffer = NS::TransferPtr(device->newBuffer(sizeof(::CameraData), MTL::ResourceStorageModeManaged));
     }
     instanceDataBuffers.resize(MAX_FRAMES_IN_FLIGHT);
     for (auto& instanceDataBuffer : instanceDataBuffers) {
         instanceDataBuffer =
-            NS::TransferPtr(device->newBuffer(sizeof(InstanceData) * MAX_INSTANCES, MTL::ResourceStorageModeManaged));
+            NS::TransferPtr(device->newBuffer(sizeof(::InstanceData) * MAX_INSTANCES, MTL::ResourceStorageModeManaged));
     }
 
-    std::vector<Particle> particles{ 1000 };
+    std::vector<::Particle> particles{ 1000 };
     testStorageBuffer =
-        NS::TransferPtr(device->newBuffer(particles.size() * sizeof(Particle), MTL::ResourceStorageModeManaged));
-    memcpy(testStorageBuffer->contents(), particles.data(), particles.size() * sizeof(Particle));
+        NS::TransferPtr(device->newBuffer(particles.size() * sizeof(::Particle), MTL::ResourceStorageModeManaged));
+    memcpy(testStorageBuffer->contents(), particles.data(), particles.size() * sizeof(::Particle));
     testStorageBuffer->didModifyRange(NS::Range::Make(0, testStorageBuffer->length()));
 
     clusterBuffers.resize(MAX_FRAMES_IN_FLIGHT);
     for (auto& clusterBuffer : clusterBuffers) {
         clusterBuffer = NS::TransferPtr(device->newBuffer(
-            clusterGridSizeX * clusterGridSizeY * clusterGridSizeZ * sizeof(Cluster), MTL::ResourceStorageModeManaged
+            clusterGridSizeX * clusterGridSizeY * clusterGridSizeZ * sizeof(::Cluster), MTL::ResourceStorageModeManaged
         ));
     }
 
@@ -3601,7 +3624,7 @@ auto Renderer_Metal::createResources() -> void {
     atmosphereDataBuffer->didModifyRange(NS::Range::Make(0, atmosphereDataBuffer->length()));
 
     // Create IBL capture data buffer
-    iblCaptureDataBuffer = NS::TransferPtr(device->newBuffer(sizeof(IBLCaptureData), MTL::ResourceStorageModeManaged));
+    iblCaptureDataBuffer = NS::TransferPtr(device->newBuffer(sizeof(::IBLCaptureData), MTL::ResourceStorageModeManaged));
 
     // Create IBL textures
     const uint32_t envMapSize = 512;
@@ -4878,14 +4901,14 @@ auto Renderer_Metal::createResources() -> void {
 
     // Initialize particles with random positions and colors
     {
-        Vapor::RNG rng;
+        std::srand(static_cast<unsigned>(std::time(nullptr)));
 
         auto* particles = reinterpret_cast<GPUParticle*>(particleBuffer->contents());
         for (size_t i = 0; i < MAX_PARTICLES; i++) {
             // Minimum radius of 0.5 to avoid particles at origin
-            float r = 0.5f + std::sqrt(rng.RandomFloat()) * 4.5f;
-            float theta = rng.RandomFloat() * 2.0f * 3.14159265f;
-            float phi = rng.RandomFloat() * 3.14159265f;
+            float r = 0.5f + std::sqrt(static_cast<float>(std::rand()) / RAND_MAX) * 4.5f;
+            float theta = static_cast<float>(std::rand()) / RAND_MAX * 2.0f * 3.14159265f;
+            float phi = static_cast<float>(std::rand()) / RAND_MAX * 3.14159265f;
 
             particles[i].position =
                 glm::vec3(r * std::sin(phi) * std::cos(theta), r * std::sin(phi) * std::sin(theta), r * std::cos(phi));
@@ -4925,32 +4948,32 @@ auto Renderer_Metal::stage(std::shared_ptr<RenderScene> scene) -> void {
     // Lights
     size_t directionalLightsSize = std::max((size_t)1, scene->directionalLights.size());
     directionalLightBuffer = NS::TransferPtr(
-        device->newBuffer(directionalLightsSize * sizeof(DirectionalLight), MTL::ResourceStorageModeManaged)
+        device->newBuffer(directionalLightsSize * sizeof(::DirectionalLight), MTL::ResourceStorageModeManaged)
     );
     if (!scene->directionalLights.empty()) {
         memcpy(
             directionalLightBuffer->contents(),
             scene->directionalLights.data(),
-            scene->directionalLights.size() * sizeof(DirectionalLight)
+            scene->directionalLights.size() * sizeof(::DirectionalLight)
         );
     }
     directionalLightBuffer->didModifyRange(NS::Range::Make(0, directionalLightBuffer->length()));
 
     size_t pointLightsSize = std::max((size_t)1, scene->pointLights.size());
     pointLightBuffer = NS::TransferPtr(
-        device->newBuffer(pointLightsSize * sizeof(PointLight), MTL::ResourceStorageModeManaged)
+        device->newBuffer(pointLightsSize * sizeof(::PointLight), MTL::ResourceStorageModeManaged)
     );
     if (!scene->pointLights.empty()) {
-        memcpy(pointLightBuffer->contents(), scene->pointLights.data(), scene->pointLights.size() * sizeof(PointLight));
+        memcpy(pointLightBuffer->contents(), scene->pointLights.data(), scene->pointLights.size() * sizeof(::PointLight));
     }
     pointLightBuffer->didModifyRange(NS::Range::Make(0, pointLightBuffer->length()));
 
     size_t rectLightsSize = std::max((size_t)1, scene->rectLights.size());
     rectLightBuffer = NS::TransferPtr(
-        device->newBuffer(rectLightsSize * sizeof(RectLight), MTL::ResourceStorageModeManaged)
+        device->newBuffer(rectLightsSize * sizeof(::RectLight), MTL::ResourceStorageModeManaged)
     );
     if (!scene->rectLights.empty()) {
-        memcpy(rectLightBuffer->contents(), scene->rectLights.data(), scene->rectLights.size() * sizeof(RectLight));
+        memcpy(rectLightBuffer->contents(), scene->rectLights.data(), scene->rectLights.size() * sizeof(::RectLight));
     }
     rectLightBuffer->didModifyRange(NS::Range::Make(0, rectLightBuffer->length()));
 
@@ -4969,7 +4992,7 @@ auto Renderer_Metal::stage(std::shared_ptr<RenderScene> scene) -> void {
     }
     size_t materialsSize = std::max((size_t)1, scene->materials.size());
     materialDataBuffer = NS::TransferPtr(
-        device->newBuffer(materialsSize * sizeof(MaterialData), MTL::ResourceStorageModeManaged)
+        device->newBuffer(materialsSize * sizeof(::MaterialData), MTL::ResourceStorageModeManaged)
     );
 
     // Buffers
@@ -5019,22 +5042,87 @@ auto Renderer_Metal::stage(std::shared_ptr<RenderScene> scene) -> void {
     cmd->commit();
 }
 
+// ============================================================================
+// Frame model (parity with the RHI renderer / IRenderer):
+//   beginFrame()          — acquire drawable + command buffer, backend ImGui
+//                           NewFrame. Caller then calls ImGui::NewFrame().
+//   invokeImGuiCallback() — no-op here: the engine debug panel and the app/
+//                           engine callbacks are built inside draw() (main's
+//                           data model needs the scene, available in draw()).
+//   draw()                — record all render passes (no ImGui pass, no present)
+//   (caller: ImGui::Render())
+//   endFrame()            — submit ImGui draw data, present, commit.
+// ============================================================================
+void Renderer_Metal::beginFrame(const CameraRenderData& /*camera*/) {
+    // Acquire the drawable (autoreleased; managed by the system AutoreleasePool)
+    // and a fresh command buffer for the frame.
+    currentDrawable = swapchain->nextDrawable();
+    currentCommandBuffer = currentDrawable ? queue->commandBuffer() : nullptr;
+
+    // ImGui backend NewFrame must run before the caller's ImGui::NewFrame().
+    // The Metal backend takes a render-pass descriptor to learn the target
+    // pixel format; point it at the drawable when we have one.
+    auto imguiPassDesc = NS::TransferPtr(MTL::RenderPassDescriptor::renderPassDescriptor());
+    if (currentDrawable) {
+        imguiPassDesc->colorAttachments()->object(0)->setTexture(currentDrawable->texture());
+    }
+    ImGui_ImplMetal_NewFrame(imguiPassDesc.get());
+    ImGui_ImplSDL3_NewFrame();
+}
+
+void Renderer_Metal::invokeImGuiCallback() {
+    // Intentionally empty — see beginFrame()/draw() notes above. The panel and
+    // callbacks are built during draw() where the staged scene is available.
+}
+
+void Renderer_Metal::endFrame() {
+    // Submit ImGui draw data on top of the rendered frame, then present.
+    // The caller has already called ImGui::Render(); do NOT call it again here.
+    if (!currentDrawable || !currentCommandBuffer) {
+        return;
+    }
+
+    if (ImGui::GetDrawData() && ImGui::GetDrawData()->CmdListsCount > 0) {
+        auto imguiPassDesc = NS::TransferPtr(MTL::RenderPassDescriptor::renderPassDescriptor());
+        auto imguiPassColorRT = imguiPassDesc->colorAttachments()->object(0);
+        imguiPassColorRT->setLoadAction(MTL::LoadActionLoad);
+        imguiPassColorRT->setStoreAction(MTL::StoreActionStore);
+        imguiPassColorRT->setTexture(currentDrawable->texture());
+        auto encoder = currentCommandBuffer->renderCommandEncoder(imguiPassDesc.get());
+        ImGui_ImplMetal_RenderDrawData(ImGui::GetDrawData(), currentCommandBuffer, encoder);
+        encoder->endEncoding();
+    }
+
+    currentCommandBuffer->presentDrawable(currentDrawable);
+    currentCommandBuffer->commit();
+    // Do not release the drawable: nextDrawable() returns an autoreleased object
+    // retained by presentDrawable() until presentation completes.
+
+    frameNumber++;
+    currentFrameInFlight = (currentFrameInFlight + 1) % MAX_FRAMES_IN_FLIGHT;
+    currentCommandBuffer = nullptr;
+    currentDrawable = nullptr;
+}
+
 auto Renderer_Metal::draw(std::shared_ptr<RenderScene> scene, Camera& camera) -> void {
     ZoneScoped;
     FrameMark;
 
-    // Get drawable (autoreleased, will be managed by system AutoreleasePool)
-    auto surface = swapchain->nextDrawable();
-    if (!surface) {
+    // The drawable and command buffer are acquired in beginFrame(); ImGui draw
+    // data is submitted and the drawable is presented in endFrame(). This
+    // function only records the render passes.
+    auto surface = currentDrawable;
+    auto cmd = currentCommandBuffer;
+    if (!surface || !cmd) {
         return;
     }
 
     // ==========================================================================
     // Prepare frame data
     // ==========================================================================
-    auto time = static_cast<float>(SDL_GetTicks()) / 1000.0f;
+    auto time = (float)SDL_GetTicks() / 1000.0f;
 
-    auto* frameData = reinterpret_cast<FrameData*>(frameDataBuffers[currentFrameInFlight]->contents());
+    auto* frameData = reinterpret_cast<::FrameData*>(frameDataBuffers[currentFrameInFlight]->contents());
     frameData->frameNumber = frameNumber;
     frameData->time = time;
     frameData->deltaTime = 0.016f;// TODO:
@@ -5049,7 +5137,7 @@ auto Renderer_Metal::draw(std::shared_ptr<RenderScene> scene, Camera& camera) ->
     glm::mat4 view = camera.getViewMatrix();
     glm::mat4 invProj = glm::inverse(proj);
     glm::mat4 invView = glm::inverse(view);
-    auto* cameraData = reinterpret_cast<CameraData*>(cameraDataBuffers[currentFrameInFlight]->contents());
+    auto* cameraData = reinterpret_cast<::CameraData*>(cameraDataBuffers[currentFrameInFlight]->contents());
     cameraData->proj = proj;
     cameraData->view = view;
     cameraData->invProj = invProj;
@@ -5063,8 +5151,8 @@ auto Renderer_Metal::draw(std::shared_ptr<RenderScene> scene, Camera& camera) ->
 
     // Reallocate light buffers if the ECS has added lights since stage() was called
     // (LightGatherSystem populates scene->directionalLights / pointLights after staging)
-    const size_t dirLightBytes   = std::max(scene->directionalLights.size(), (size_t)1) * sizeof(DirectionalLight);
-    const size_t pointLightBytes = std::max(scene->pointLights.size(),       (size_t)1) * sizeof(PointLight);
+    const size_t dirLightBytes   = std::max(scene->directionalLights.size(), (size_t)1) * sizeof(::DirectionalLight);
+    const size_t pointLightBytes = std::max(scene->pointLights.size(),       (size_t)1) * sizeof(::PointLight);
     if (!directionalLightBuffer || directionalLightBuffer->length() < dirLightBytes) {
         directionalLightBuffer = NS::TransferPtr(
             device->newBuffer(dirLightBytes, MTL::ResourceStorageModeManaged));
@@ -5074,7 +5162,7 @@ auto Renderer_Metal::draw(std::shared_ptr<RenderScene> scene, Camera& camera) ->
             device->newBuffer(pointLightBytes, MTL::ResourceStorageModeManaged));
     }
 
-    auto* dirLights = reinterpret_cast<DirectionalLight*>(directionalLightBuffer->contents());
+    auto* dirLights = reinterpret_cast<::DirectionalLight*>(directionalLightBuffer->contents());
     for (size_t i = 0; i < scene->directionalLights.size(); ++i) {
         dirLights[i].direction = scene->directionalLights[i].direction;
         dirLights[i].color = scene->directionalLights[i].color;
@@ -5090,7 +5178,7 @@ auto Renderer_Metal::draw(std::shared_ptr<RenderScene> scene, Camera& camera) ->
         atmosphereData->sunIntensity = sunLight.intensity;
     }
 
-    auto* pointLights = reinterpret_cast<PointLight*>(pointLightBuffer->contents());
+    auto* pointLights = reinterpret_cast<::PointLight*>(pointLightBuffer->contents());
     for (size_t i = 0; i < scene->pointLights.size(); ++i) {
         pointLights[i].position = scene->pointLights[i].position;
         pointLights[i].color = scene->pointLights[i].color;
@@ -5099,19 +5187,19 @@ auto Renderer_Metal::draw(std::shared_ptr<RenderScene> scene, Camera& camera) ->
     }
     pointLightBuffer->didModifyRange(NS::Range::Make(0, pointLightBuffer->length()));
 
-    const size_t rectLightBytes = std::max(scene->rectLights.size(), (size_t)1) * sizeof(RectLight);
+    const size_t rectLightBytes = std::max(scene->rectLights.size(), (size_t)1) * sizeof(::RectLight);
     if (!rectLightBuffer || rectLightBuffer->length() < rectLightBytes) {
         rectLightBuffer = NS::TransferPtr(device->newBuffer(rectLightBytes, MTL::ResourceStorageModeManaged));
     }
     if (!scene->rectLights.empty()) {
-        memcpy(rectLightBuffer->contents(), scene->rectLights.data(), scene->rectLights.size() * sizeof(RectLight));
+        memcpy(rectLightBuffer->contents(), scene->rectLights.data(), scene->rectLights.size() * sizeof(::RectLight));
         rectLightBuffer->didModifyRange(NS::Range::Make(0, rectLightBytes));
     }
 
-    auto* materialData = reinterpret_cast<MaterialData*>(materialDataBuffer->contents());
+    auto* materialData = reinterpret_cast<::MaterialData*>(materialDataBuffer->contents());
     for (size_t i = 0; i < scene->materials.size(); ++i) {
         const auto& mat = scene->materials[i];
-        materialData[i] = MaterialData{ .baseColorFactor = mat->baseColorFactor,
+        materialData[i] = ::MaterialData{ .baseColorFactor = mat->baseColorFactor,
                                         .normalScale = mat->normalScale,
                                         .metallicFactor = mat->metallicFactor,
                                         .roughnessFactor = mat->roughnessFactor,
@@ -5149,7 +5237,7 @@ auto Renderer_Metal::draw(std::shared_ptr<RenderScene> scene, Camera& camera) ->
     }
     // TODO: avoid updating the entire instance data buffer every frame
     memcpy(
-        instanceDataBuffers[currentFrameInFlight]->contents(), instances.data(), instances.size() * sizeof(InstanceData)
+        instanceDataBuffers[currentFrameInFlight]->contents(), instances.data(), instances.size() * sizeof(::InstanceData)
     );
     instanceDataBuffers[currentFrameInFlight]->didModifyRange(
         NS::Range::Make(0, instanceDataBuffers[currentFrameInFlight]->length())
@@ -5165,12 +5253,10 @@ auto Renderer_Metal::draw(std::shared_ptr<RenderScene> scene, Camera& camera) ->
 
     // ==========================================================================
     // Set up rendering context for passes
+    // (currentCommandBuffer / currentDrawable were set in beginFrame())
     // ==========================================================================
-    auto cmd = queue->commandBuffer();
-    currentCommandBuffer = cmd;
     currentScene = scene;
     currentCamera = &camera;
-    currentDrawable = surface;
     drawCount = 0;
 
     // ==========================================================================
@@ -5210,9 +5296,14 @@ auto Renderer_Metal::draw(std::shared_ptr<RenderScene> scene, Camera& camera) ->
     if (engineCore) {
         auto* rmluiManager = engineCore->getRmlUiManager();
         if (!rmluiManager) {
-            // Initialize RmlUI with current window size
-            int width = static_cast<int>(surface->texture()->width());
-            int height = static_cast<int>(surface->texture()->height());
+            // Initialize RmlUI with the LOGICAL window size (points), not the
+            // drawable size. RmlUi lays out in logical coordinates and the
+            // render projection is logical too (RmlRendererMetal::SetViewport),
+            // while the physical framebuffer viewport handles Retina upscaling.
+            // Using the drawable (physical, 2x on Retina) here doubled every
+            // UI element.
+            int width = 0, height = 0;
+            SDL_GetWindowSize(window, &width, &height);
             if (engineCore->initRmlUI(width, height)) {
                 // Initialize renderer UI support (sets RenderInterface and finalizes RmlUI)
                 initUI();
@@ -5222,15 +5313,11 @@ auto Renderer_Metal::draw(std::shared_ptr<RenderScene> scene, Camera& camera) ->
 
     // ==========================================================================
     // Build ImGui UI (before ImGuiPass executes)
+    // ------------------------------------------------------------------------
+    // The ImGui backend NewFrame (ImGui_ImplMetal_NewFrame / ImGui_ImplSDL3_
+    // NewFrame) runs in beginFrame(); the caller invokes ImGui::NewFrame()
+    // between beginFrame() and here. This block only builds the windows.
     // ==========================================================================
-    // Create temporary render pass descriptor for ImGui initialization
-    auto imguiPassDesc = NS::TransferPtr(MTL::RenderPassDescriptor::renderPassDescriptor());
-    auto imguiPassColorRT = imguiPassDesc->colorAttachments()->object(0);
-    imguiPassColorRT->setTexture(surface->texture());
-
-    ImGui_ImplMetal_NewFrame(imguiPassDesc.get());
-    ImGui_ImplSDL3_NewFrame();
-    ImGui::NewFrame();
 
     // F1 toggles the engine ImGui overlay on/off.
     if (ImGui::IsKeyPressed(ImGuiKey_F1))
@@ -5999,16 +6086,9 @@ auto Renderer_Metal::draw(std::shared_ptr<RenderScene> scene, Camera& camera) ->
         });
     }
 
-    cmd->presentDrawable(surface);
-    cmd->commit();
-
-    // Note: Don't call surface->release() here!
-    // nextDrawable() returns an autoreleased object that will be managed by the system AutoreleasePool.
-    // presentDrawable() retains the drawable until presentation completes.
-    // The system AutoreleasePool (managed by the main run loop) will automatically release it.
-
-    currentFrameInFlight = (currentFrameInFlight + 1) % MAX_FRAMES_IN_FLIGHT;
-    frameNumber++;
+    // NOTE: ImGui draw-data submission and presentDrawable()/commit() happen in
+    // endFrame(), after the caller's ImGui::Render(). The frame counters are
+    // advanced there too. Do not present or advance counters here.
 }
 
 
@@ -6221,9 +6301,9 @@ void Renderer_Metal::updateTexture(TextureHandle handle, const std::shared_ptr<I
     if (!img) {
         return;
     }
-    auto it = textures.find(handle.rid);
+    auto it = textures.find(handle.id);
     if (it == textures.end() || !it->second) {
-        fmt::print(stderr, "[Metal] updateTexture: invalid texture handle {}\n", handle.rid);
+        fmt::print(stderr, "[Metal] updateTexture: invalid texture handle {}\n", handle.id);
         return;
     }
     MTL::Texture* texture = it->second.get();
@@ -6263,13 +6343,13 @@ RenderTextureHandle Renderer_Metal::createRenderTexture(const RenderTextureDesc&
     RenderTextureData rtData;
     rtData.width = desc.width;
     rtData.height = desc.height;
-    rtData.hdr = desc.hdr;
+    rtData.hdr = desc.isHDR;
     rtData.sampleCount = desc.sampleCount;
 
     // Create color texture
     auto colorDesc = NS::TransferPtr(MTL::TextureDescriptor::alloc()->init());
     colorDesc->setTextureType(MTL::TextureType2D);
-    colorDesc->setPixelFormat(desc.hdr ? MTL::PixelFormatRGBA16Float : MTL::PixelFormatRGBA8Unorm);
+    colorDesc->setPixelFormat(desc.isHDR ? MTL::PixelFormatRGBA16Float : MTL::PixelFormatRGBA8Unorm);
     colorDesc->setWidth(desc.width);
     colorDesc->setHeight(desc.height);
     colorDesc->setMipmapLevelCount(1);
@@ -6300,7 +6380,7 @@ RenderTextureHandle Renderer_Metal::createRenderTexture(const RenderTextureDesc&
     // Create temp texture for ping-pong post-processing (same format as color)
     auto tempDesc = NS::TransferPtr(MTL::TextureDescriptor::alloc()->init());
     tempDesc->setTextureType(MTL::TextureType2D);
-    tempDesc->setPixelFormat(desc.hdr ? MTL::PixelFormatRGBA16Float : MTL::PixelFormatRGBA8Unorm);
+    tempDesc->setPixelFormat(desc.isHDR ? MTL::PixelFormatRGBA16Float : MTL::PixelFormatRGBA8Unorm);
     tempDesc->setWidth(desc.width);
     tempDesc->setHeight(desc.height);
     tempDesc->setMipmapLevelCount(1);
@@ -6321,16 +6401,16 @@ RenderTextureHandle Renderer_Metal::createRenderTexture(const RenderTextureDesc&
 }
 
 void Renderer_Metal::destroyRenderTexture(RenderTextureHandle handle) {
-    auto it = renderTextures.find(handle.rid);
+    auto it = renderTextures.find(handle.id);
     if (it != renderTextures.end()) {
         // Remove from regular textures as well
-        textures.erase(it->second.textureHandle.rid);
+        textures.erase(it->second.textureHandle.id);
         renderTextures.erase(it);
     }
 }
 
 TextureHandle Renderer_Metal::getRenderTextureAsTexture(RenderTextureHandle handle) {
-    auto it = renderTextures.find(handle.rid);
+    auto it = renderTextures.find(handle.id);
     if (it != renderTextures.end()) {
         return it->second.textureHandle;
     }
@@ -6338,7 +6418,7 @@ TextureHandle Renderer_Metal::getRenderTextureAsTexture(RenderTextureHandle hand
 }
 
 glm::uvec2 Renderer_Metal::getRenderTextureSize(RenderTextureHandle handle) {
-    auto it = renderTextures.find(handle.rid);
+    auto it = renderTextures.find(handle.id);
     if (it != renderTextures.end()) {
         return glm::uvec2(it->second.width, it->second.height);
     }
@@ -6348,7 +6428,7 @@ glm::uvec2 Renderer_Metal::getRenderTextureSize(RenderTextureHandle handle) {
 void Renderer_Metal::renderToTexture(
     RenderTextureHandle target, std::shared_ptr<RenderScene> scene, Camera& camera, const glm::vec4& clearColor
 ) {
-    auto it = renderTextures.find(target.rid);
+    auto it = renderTextures.find(target.id);
     if (it == renderTextures.end() || !scene) {
         return;
     }
@@ -6395,7 +6475,7 @@ void Renderer_Metal::renderToTexture(
     camera.updateAspectRatio(aspect);
 
     // Update camera data buffer
-    CameraData cameraData;
+    ::CameraData cameraData;
     cameraData.proj = camera.getProjMatrix();
     cameraData.view = camera.getViewMatrix();
     cameraData.invProj = glm::inverse(cameraData.proj);
@@ -6409,8 +6489,8 @@ void Renderer_Metal::renderToTexture(
     }
 
     // Create temporary camera buffer for this render
-    auto tempCameraBuffer = NS::TransferPtr(device->newBuffer(sizeof(CameraData), MTL::ResourceStorageModeShared));
-    memcpy(tempCameraBuffer->contents(), &cameraData, sizeof(CameraData));
+    auto tempCameraBuffer = NS::TransferPtr(device->newBuffer(sizeof(::CameraData), MTL::ResourceStorageModeShared));
+    memcpy(tempCameraBuffer->contents(), &cameraData, sizeof(::CameraData));
 
     // Set pipeline state
     encoder->setRenderPipelineState(drawPipeline.get());
@@ -6502,7 +6582,7 @@ void Renderer_Metal::renderToTexture(
 }
 
 Uint64 Renderer_Metal::registerRenderTextureForUI(RenderTextureHandle handle) {
-    auto it = renderTextures.find(handle.rid);
+    auto it = renderTextures.find(handle.id);
     if (it == renderTextures.end()) {
         return 0;
     }
@@ -6512,14 +6592,14 @@ Uint64 Renderer_Metal::registerRenderTextureForUI(RenderTextureHandle handle) {
         return 0;
     }
 
-    auto* uiRenderer = m_uiRenderer.get();
+    auto* uiRenderer = static_cast<Vapor::RmlRendererMetal*>(m_uiRenderer);
     return uiRenderer->registerExternalTexture(it->second.colorTexture.get(), it->second.width, it->second.height);
 }
 
 // ===== Render Texture Post-Processing Implementation =====
 
 void Renderer_Metal::applyBloom(RenderTextureHandle target, float threshold, float strength) {
-    auto it = renderTextures.find(target.rid);
+    auto it = renderTextures.find(target.id);
     if (it == renderTextures.end()) {
         return;
     }
@@ -6539,7 +6619,7 @@ void Renderer_Metal::applyBloom(RenderTextureHandle target, float threshold, flo
         auto encoder = cmdBuffer->renderCommandEncoder(passDesc.get());
         encoder->setRenderPipelineState(bloomBrightnessPipeline.get());
 
-        MTL::Viewport viewport = { 0, 0, static_cast<double>(rtData.width), static_cast<double>(rtData.height), 0, 1 };
+        MTL::Viewport viewport = { 0, 0, (double)rtData.width, (double)rtData.height, 0, 1 };
         encoder->setViewport(viewport);
 
         // Bind source texture and uniforms
@@ -6562,7 +6642,7 @@ void Renderer_Metal::applyBloom(RenderTextureHandle target, float threshold, flo
         auto encoder = cmdBuffer->renderCommandEncoder(passDesc.get());
         encoder->setRenderPipelineState(bloomCompositePipeline.get());
 
-        MTL::Viewport viewport = { 0, 0, static_cast<double>(rtData.width), static_cast<double>(rtData.height), 0, 1 };
+        MTL::Viewport viewport = { 0, 0, (double)rtData.width, (double)rtData.height, 0, 1 };
         encoder->setViewport(viewport);
 
         encoder->setFragmentTexture(rtData.tempTexture.get(), 0);
@@ -6577,7 +6657,7 @@ void Renderer_Metal::applyBloom(RenderTextureHandle target, float threshold, flo
 }
 
 void Renderer_Metal::applyToneMapping(RenderTextureHandle target, float exposure) {
-    auto it = renderTextures.find(target.rid);
+    auto it = renderTextures.find(target.id);
     if (it == renderTextures.end()) {
         return;
     }
@@ -6613,7 +6693,7 @@ void Renderer_Metal::applyToneMapping(RenderTextureHandle target, float exposure
         auto encoder = cmdBuffer->renderCommandEncoder(passDesc.get());
         encoder->setRenderPipelineState(postProcessPipeline.get());
 
-        MTL::Viewport viewport = { 0, 0, static_cast<double>(rtData.width), static_cast<double>(rtData.height), 0, 1 };
+        MTL::Viewport viewport = { 0, 0, (double)rtData.width, (double)rtData.height, 0, 1 };
         encoder->setViewport(viewport);
 
         struct GPUPostProcessParams {
@@ -6654,7 +6734,7 @@ void Renderer_Metal::applyToneMapping(RenderTextureHandle target, float exposure
 }
 
 void Renderer_Metal::applyVignette(RenderTextureHandle target, float strength, float radius) {
-    auto it = renderTextures.find(target.rid);
+    auto it = renderTextures.find(target.id);
     if (it == renderTextures.end()) {
         return;
     }
@@ -6690,7 +6770,7 @@ void Renderer_Metal::applyVignette(RenderTextureHandle target, float strength, f
         auto encoder = cmdBuffer->renderCommandEncoder(passDesc.get());
         encoder->setRenderPipelineState(postProcessPipeline.get());
 
-        MTL::Viewport viewport = { 0, 0, static_cast<double>(rtData.width), static_cast<double>(rtData.height), 0, 1 };
+        MTL::Viewport viewport = { 0, 0, (double)rtData.width, (double)rtData.height, 0, 1 };
         encoder->setViewport(viewport);
 
         struct GPUPostProcessParams {
@@ -6780,8 +6860,8 @@ void Renderer_Metal::unloadFont(FontHandle handle) {
 
     // Get texture handle before unloading
     TextureHandle texHandle = m_fontManager.getFontTexture(handle);
-    if (texHandle.rid != UINT32_MAX) {
-        textures.erase(texHandle.rid);
+    if (texHandle.id != UINT32_MAX) {
+        textures.erase(texHandle.id);
     }
 
     m_fontManager.unloadFont(handle);
@@ -6791,7 +6871,7 @@ void Renderer_Metal::drawText2D(
     FontHandle fontHandle, const std::string& text, const glm::vec2& position, float scale, const glm::vec4& color
 ) {
     Font* font = m_fontManager.getFont(fontHandle);
-    if (!font || font->textureHandle.rid == UINT32_MAX) return;
+    if (!font || font->textureHandle.id == UINT32_MAX) return;
 
     float cursorX = position.x;
     float cursorY = position.y;
@@ -6831,7 +6911,7 @@ void Renderer_Metal::drawText3D(
     FontHandle fontHandle, const std::string& text, const glm::vec3& worldPosition, float scale, const glm::vec4& color
 ) {
     Font* font = m_fontManager.getFont(fontHandle);
-    if (!font || font->textureHandle.rid == UINT32_MAX) return;
+    if (!font || font->textureHandle.id == UINT32_MAX) return;
 
     // For 3D text, we draw at the world position
     // The text will be rendered as billboards facing the camera
@@ -6917,18 +6997,18 @@ auto Renderer_Metal::createIndexBuffer(const std::vector<Uint32>& indices) -> Bu
 }
 
 auto Renderer_Metal::getBuffer(BufferHandle handle) const -> NS::SharedPtr<MTL::Buffer> {
-    if (handle.rid == UINT32_MAX || buffers.find(handle.rid) == buffers.end()) return nullptr;
-    return buffers.at(handle.rid);
+    if (handle.id == UINT32_MAX || buffers.find(handle.id) == buffers.end()) return nullptr;
+    return buffers.at(handle.id);
 }
 
 auto Renderer_Metal::getTexture(TextureHandle handle) const -> NS::SharedPtr<MTL::Texture> {
-    if (handle.rid == UINT32_MAX || textures.find(handle.rid) == textures.end()) return nullptr;
-    return textures.at(handle.rid);
+    if (handle.id == UINT32_MAX || textures.find(handle.id) == textures.end()) return nullptr;
+    return textures.at(handle.id);
 }
 
 auto Renderer_Metal::getPipeline(PipelineHandle handle) const -> NS::SharedPtr<MTL::RenderPipelineState> {
-    if (handle.rid == UINT32_MAX || pipelines.find(handle.rid) == pipelines.end()) return nullptr;
-    return pipelines.at(handle.rid);
+    if (handle.id == UINT32_MAX || pipelines.find(handle.id) == pipelines.end()) return nullptr;
+    return pipelines.at(handle.id);
 }
 
 // ===== 2D/3D Batch Rendering Implementation =====
@@ -6989,12 +7069,12 @@ void Renderer_Metal::flush3D() {
 static auto findOrAddTextureSlot(
     std::array<TextureHandle, 16>& slots, Uint32& slotIndex, TextureHandle texture, TextureHandle whiteTexture
 ) -> float {
-    if (texture.rid == UINT32_MAX || texture.rid == whiteTexture.rid) {
+    if (texture.id == UINT32_MAX || texture.id == whiteTexture.id) {
         return 0.0f;
     }
 
     for (Uint32 i = 1; i < slotIndex; i++) {
-        if (slots[i].rid == texture.rid) {
+        if (slots[i].id == texture.id) {
             return static_cast<float>(i);
         }
     }
@@ -7409,7 +7489,7 @@ void Renderer_Metal::draw(entt::registry& registry, std::shared_ptr<RenderScene>
                 .vertexCount = mesh->vertexCount,
                 .indexCount = mesh->indexCount,
                 .materialID = mesh->materialID,
-                .primitiveMode = mesh->primitiveMode,
+                .primitiveMode = static_cast<::PrimitiveMode>(static_cast<int>(mesh->primitiveMode)),
                 .AABBMin = wMin,
                 .AABBMax = wMax,
                 .boundingSphere = glm::vec4(bsCenter, bsRadius),
@@ -7465,7 +7545,7 @@ void Renderer_Metal::draw(entt::registry& registry, std::shared_ptr<RenderScene>
             .vertexCount = mesh->vertexCount,
             .indexCount = mesh->indexCount,
             .materialID = mesh->materialID,
-            .primitiveMode = mesh->primitiveMode,
+            .primitiveMode = static_cast<::PrimitiveMode>(static_cast<int>(mesh->primitiveMode)),
             .AABBMin = wMin,
             .AABBMax = wMax,
             .boundingSphere = glm::vec4(bsCenter, bsRadius),

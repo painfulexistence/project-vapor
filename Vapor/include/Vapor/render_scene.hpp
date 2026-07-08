@@ -7,6 +7,7 @@
 
 #include "graphics.hpp"
 #include "physics_3d.hpp"
+#include "rhi.hpp"
 
 class FluidVolume;
 struct FluidVolumeSettings;
@@ -27,9 +28,9 @@ public:
     std::vector<std::shared_ptr<Vapor::Material>> materials;
     // Light lists are overwritten every frame from the ECS; they are runtime
     // state for the renderer, not authored scene content.
-    std::vector<DirectionalLight> directionalLights;
-    std::vector<PointLight> pointLights;
-    std::vector<RectLight> rectLights;
+    std::vector<Vapor::DirectionalLight> directionalLights;
+    std::vector<Vapor::PointLight> pointLights;
+    std::vector<Vapor::RectLight> rectLights;
     std::vector<std::shared_ptr<FluidVolume>> fluidVolumes;
 
     // GPU-driven rendering: one shared vertex/index pool for the whole world.

@@ -202,8 +202,14 @@ auto main(int argc, char* args[]) -> int {
 
     Vapor::RNG rng;
 
-    auto renderer = createRenderer(gfxBackend);
-    renderer->init(window);
+    auto renderer = createRenderer(gfxBackend, window);
+    if (!renderer) {
+        fmt::print(stderr, "Failed to create renderer (backend unavailable?)\n");
+        SDL_DestroyWindow(window);
+        SDL_Quit();
+        return 1;
+    }
+    // Renderer is already initialized by createRenderer()
 
     // Optional: load an external HDRI for IBL instead of the procedural sky.
     // Place your .hdr file at:  <assets>/textures/env/sky.hdr
@@ -249,7 +255,7 @@ auto main(int argc, char* args[]) -> int {
     rtDesc.width = 512;
     rtDesc.height = 512;
     rtDesc.hasDepth = true;
-    rtDesc.hdr = true;// HDR for post-processing effects
+    rtDesc.isHDR = true;// HDR for post-processing effects
     RenderTextureHandle renderTexture = renderer->createRenderTexture(rtDesc);
     fmt::print("Render texture created: {}x{}\n", rtDesc.width, rtDesc.height);
 
@@ -264,8 +270,8 @@ auto main(int argc, char* args[]) -> int {
         100.0f// Far
     );
 
-    if (engineCore->initRmlUI(windowWidth, windowHeight) && renderer->initUI()) {
-        fmt::print("RmlUI System Initialized\n");
+    if (renderer->initUI()) {
+        fmt::print("UI System Initialized\n");
     }
 
     auto physics = std::make_unique<Physics3D>();
@@ -341,13 +347,16 @@ auto main(int argc, char* args[]) -> int {
         auto e = registry.create();
         registry.emplace<Vapor::NameComponent>(e, Vapor::NameComponent{ fmt::format("Sponza_{}", i) });
         auto& tc = registry.emplace<Vapor::TransformComponent>(e);
-        // Decompose baked world matrix so the inspector shows meaningful values
-        tc.position = glm::vec3(worldMat[3]);
+        // Extract scale correctly from world matrix and scale down by 0.01 for Sponza
+        // The Khronos Sponza GLTF is authored in meters (~30m across) — use
+        // its world transforms as-is. (An earlier 0.01 scale shrank the whole
+        // scene to a 30cm dollhouse the camera flew straight past.)
         tc.scale = glm::vec3(
             glm::length(glm::vec3(worldMat[0])),
             glm::length(glm::vec3(worldMat[1])),
             glm::length(glm::vec3(worldMat[2]))
         );
+        tc.position = glm::vec3(worldMat[3]);
         if (tc.scale.x > 0.0f && tc.scale.y > 0.0f && tc.scale.z > 0.0f) {
             glm::mat3 rotMat(
                 glm::vec3(worldMat[0]) / tc.scale.x,
@@ -356,8 +365,7 @@ auto main(int argc, char* args[]) -> int {
             );
             tc.rotation = glm::quat_cast(rotMat);
         }
-        tc.worldTransform = worldMat;
-        tc.isDirty = false;// worldTransform already correct; skip TransformSystem
+        tc.isDirty = true; // Let TransformSystem compute the scaled world matrix
         auto& mrc = registry.emplace<Vapor::MeshRendererComponent>(e);
         mrc.meshes.push_back(mesh);
         registry.emplace<SceneGeometryTag>(e);// marks GLTF-spawned geometry for serializer
@@ -549,6 +557,20 @@ auto main(int argc, char* args[]) -> int {
             tempCamera.setViewMatrix(cam.viewMatrix);
             tempCamera.setProjectionMatrix(cam.projectionMatrix);
 
+            CameraRenderData camData;
+            camData.proj = tempCamera.getProjMatrix();
+            camData.view = tempCamera.getViewMatrix();
+            camData.invProj = glm::inverse(camData.proj);
+            camData.invView = glm::inverse(camData.view);
+            camData.nearPlane = tempCamera.near();
+            camData.farPlane = tempCamera.far();
+            camData.position = tempCamera.getEye();
+
+            renderer->beginFrame(camData);
+            
+            ImGui::NewFrame();
+            renderer->invokeImGuiCallback();
+
             // ===== 2D Canvas Demo (Screen Space) =====
             // Note: When camera is perspective (default), CanvasPass uses screen space (pixel coords)
             // When camera is orthographic, CanvasPass uses world space ortho
@@ -628,7 +650,7 @@ auto main(int argc, char* args[]) -> int {
             );
 
             // Draw the render texture on a 3D quad (like a TV screen in the world)
-            if (rtTexHandle.valid()) {
+            if (rtTexHandle.isValid()) {
                 // Create a transform for the "TV screen"
                 glm::mat4 tvTransform = glm::mat4(1.0f);
                 tvTransform = glm::translate(tvTransform, glm::vec3(-3.0f, 2.0f, 0.0f));
@@ -640,6 +662,9 @@ auto main(int argc, char* args[]) -> int {
 
 
             renderer->draw(registry, scene, tempCamera);
+
+            ImGui::Render();
+            renderer->endFrame();
         }
 
         frameCount++;
@@ -648,7 +673,7 @@ auto main(int argc, char* args[]) -> int {
     // Shutdown subsystems
     physics->deinit();
     engineCore->shutdown();
-    renderer->deinit();
+    renderer->shutdown();
 
     ImGui::DestroyContext();
 

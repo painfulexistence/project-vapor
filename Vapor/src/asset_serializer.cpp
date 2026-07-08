@@ -136,7 +136,7 @@ auto AssetSerializer::deserializeScene(const std::string& path) -> std::shared_p
     archive(directionalLightCount);
     scene->directionalLights.reserve(directionalLightCount);
     for (Uint32 i = 0; i < directionalLightCount; ++i) {
-        DirectionalLight light = deserializeDirectionalLight(archive);
+        Vapor::DirectionalLight light = deserializeDirectionalLight(archive);
         scene->directionalLights.push_back(light);
     }
 
@@ -144,7 +144,7 @@ auto AssetSerializer::deserializeScene(const std::string& path) -> std::shared_p
     archive(pointLightCount);
     scene->pointLights.reserve(pointLightCount);
     for (Uint32 i = 0; i < pointLightCount; ++i) {
-        PointLight light = deserializePointLight(archive);
+        Vapor::PointLight light = deserializePointLight(archive);
         scene->pointLights.push_back(light);
     }
 
@@ -390,29 +390,29 @@ auto AssetSerializer::deserializeMesh(
     return mesh;
 }
 
-void AssetSerializer::serializeDirectionalLight(cereal::BinaryOutputArchive& archive, const DirectionalLight& light) {
+void AssetSerializer::serializeDirectionalLight(cereal::BinaryOutputArchive& archive, const Vapor::DirectionalLight& light) {
     archive(light.direction);
     archive(light.color);
     archive(light.intensity);
 }
 
-auto AssetSerializer::deserializeDirectionalLight(cereal::BinaryInputArchive& archive) -> DirectionalLight {
-    DirectionalLight light;
+auto AssetSerializer::deserializeDirectionalLight(cereal::BinaryInputArchive& archive) -> Vapor::DirectionalLight {
+    Vapor::DirectionalLight light;
     archive(light.direction);
     archive(light.color);
     archive(light.intensity);
     return light;
 }
 
-void AssetSerializer::serializePointLight(cereal::BinaryOutputArchive& archive, const PointLight& light) {
+void AssetSerializer::serializePointLight(cereal::BinaryOutputArchive& archive, const Vapor::PointLight& light) {
     archive(light.position);
     archive(light.color);
     archive(light.intensity);
     archive(light.radius);
 }
 
-auto AssetSerializer::deserializePointLight(cereal::BinaryInputArchive& archive) -> PointLight {
-    PointLight light;
+auto AssetSerializer::deserializePointLight(cereal::BinaryInputArchive& archive) -> Vapor::PointLight {
+    Vapor::PointLight light;
     archive(light.position);
     archive(light.color);
     archive(light.intensity);

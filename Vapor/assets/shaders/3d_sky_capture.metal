@@ -119,7 +119,9 @@ float3 computeAtmosphere(
 
     for (int i = 0; i < PRIMARY_STEPS; i++) {
         float3 samplePos = rayOrigin + rayDir * (rayStart + stepSize * (float(i) + 0.5));
-        float sampleHeight = length(samplePos - planetCenter) - planetRadius;
+        // Clamped like 3d_atmosphere.metal — grazing samples below the
+        // surface would overflow the exp() density terms.
+        float sampleHeight = max(length(samplePos - planetCenter) - planetRadius, 0.0);
 
         float rayleighDensity = exp(-sampleHeight / rayleighScale) * stepSize;
         float mieDensity = exp(-sampleHeight / mieScale) * stepSize;

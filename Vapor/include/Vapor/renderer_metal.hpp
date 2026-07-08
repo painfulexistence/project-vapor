@@ -1,5 +1,5 @@
 #pragma once
-#include "renderer.hpp"
+#include "irenderer.hpp"
 
 #include <Foundation/Foundation.hpp>
 #include <Metal/Metal.hpp>
@@ -8,6 +8,8 @@
 #include <SDL3/SDL_stdinc.h>
 #include <SDL3/SDL_video.h>
 #include <array>
+#include <cmath>
+#include <algorithm>
 #include <memory>
 #include <mutex>
 #include <os/signpost.h>
@@ -17,6 +19,10 @@
 
 #include "debug_draw.hpp"
 #include "graphics.hpp"
+#include "graphics_gpu_structs.hpp"  // global GPU-layout structs (InstanceData, …) matching the .metal shaders
+#include "graphics_batch2d.hpp"  // Batch2DStats, Batch2DVertex, Batch2DBlendMode
+#include "graphics_effects.hpp"  // WaterData, VolumetricFogData, VolumetricCloudData, LightScatteringData, SunFlareData, Particle
+#include "graphics_gibs.hpp"     // GIBSQuality, GIBSData, Surfel
 
 // Forward declarations
 namespace Rml {
@@ -66,14 +72,13 @@ class PointShadowTemporalPass;
 
 // GIBS forward declarations
 namespace Vapor { class GIBSManager; }
-namespace Vapor { class RmlRendererMetal; }
 class SurfelGenerationPass;
 class SurfelHashBuildPass;
 class SurfelRaytracingPass;
 class GIBSTemporalPass;
 class GIBSSamplePass;
 
-struct GpuPassTiming {
+struct MetalGpuPassTiming {
     std::string name;
     double gpuTimeMs = 0.0;
     uint64_t estimatedBytes = 0; // estimated minimum memory traffic (attachment load/store + pass-reported)
@@ -113,19 +118,19 @@ inline uint64_t vaporAttachmentTrafficBytes(const MTL::Texture* tex, MTL::LoadAc
     return total;
 }
 
-class RenderPass {
+class MetalRenderPass {
 public:
-    explicit RenderPass(Renderer_Metal* renderer) : renderer(renderer) {}
-    virtual ~RenderPass() = default;
+    explicit MetalRenderPass(Renderer_Metal* renderer) : renderer(renderer) {}
+    virtual ~MetalRenderPass() = default;
     virtual void execute() = 0;
     virtual const char* getName() const = 0;
 
     bool enabled = true;
 
-    // Timing context — set by RenderGraph before each execute().
+    // Timing context — set by MetalRenderGraph before each execute().
     // Slot layout: beginIdx = end slot of previous pass (or frame-start slot for first pass).
     //              endIdx   = end slot of this pass.
-    // beginIdx[N] == endIdx[N-1], guaranteed by RenderGraph — no prevEnd heuristic needed.
+    // beginIdx[N] == endIdx[N-1], guaranteed by MetalRenderGraph — no prevEnd heuristic needed.
     MTL::CounterSampleBuffer* m_timingSampleBuf = nullptr;
     NS::UInteger m_timingBeginIdx = MTL::CounterDontSample;
     NS::UInteger m_timingEndIdx   = MTL::CounterDontSample;
@@ -136,7 +141,7 @@ public:
     // Estimated minimum memory traffic this frame. Render passes accumulate attachment
     // load/store traffic automatically via applyTimingToRenderDesc; compute/blit passes
     // report their texture/buffer traffic manually via addTrafficEstimate. Reset by
-    // RenderGraph before each execute(). Excludes texture sampling unless reported.
+    // MetalRenderGraph before each execute(). Excludes texture sampling unless reported.
     uint64_t m_estimatedBytes = 0;
 
     void addTrafficEstimate(uint64_t bytes) {
@@ -220,7 +225,7 @@ protected:
     Renderer_Metal* renderer;
 };
 
-class RenderGraph {
+class MetalRenderGraph {
 public:
     struct PassSampleInfo {
         std::string name;
@@ -229,7 +234,7 @@ public:
         uint64_t estimatedBytes;
     };
 
-    void addPass(std::unique_ptr<RenderPass> pass) {
+    void addPass(std::unique_ptr<MetalRenderPass> pass) {
         passes.push_back(std::move(pass));
     }
 
@@ -260,9 +265,9 @@ public:
             // Signpost: names this pass in Instruments (Points of Interest track).
             // Marks CPU encode time; match against the GPU track via the debug groups.
             os_signpost_id_t spid = os_signpost_id_make_with_pointer(spLog, pass.get());
-            os_signpost_interval_begin(spLog, spid, "RenderPass", "%{public}s", passName);
+            os_signpost_interval_begin(spLog, spid, "MetalRenderPass", "%{public}s", passName);
             pass->execute();
-            os_signpost_interval_end(spLog, spid, "RenderPass");
+            os_signpost_interval_end(spLog, spid, "MetalRenderPass");
             if (cmd) cmd->popDebugGroup();
             if (cmd && sampleBuf) {
                 if (pass->m_didWriteTimingSamples) {
@@ -282,13 +287,13 @@ public:
     std::vector<PassSampleInfo> passTimingInfo;
 
 private:
-    std::vector<std::unique_ptr<RenderPass>> passes;
+    std::vector<std::unique_ptr<MetalRenderPass>> passes;
 };
 
 
 class EquirectToCubemapPass;
 
-class Renderer_Metal final : public Renderer {// Must be public or factory function won't work
+class Renderer_Metal final : public IRenderer {// Must be public or factory function won't work
     friend class PrePass;
     friend class TLASBuildPass;
     friend class NormalResolvePass;
@@ -341,11 +346,24 @@ public:
 
     ~Renderer_Metal();
 
-    virtual void init(SDL_Window* window) override;
-
-    virtual void deinit() override;
+    // Native lifecycle (called by the createRendererMetal factory). Not part of
+    // IRenderer; shutdown() below is the polymorphic entry point.
+    void init(SDL_Window* window);
+    void deinit();
+    void shutdown() override { deinit(); }
 
     virtual void stage(std::shared_ptr<RenderScene> scene) override;
+
+    // Frame model matching IRenderer / the RHI renderer:
+    //   beginFrame()  → acquire drawable + command buffer, backend ImGui NewFrame
+    //   (caller: ImGui::NewFrame())
+    //   invokeImGuiCallback() → engine debug panel + app/engine callbacks
+    //   draw()        → run the render passes (no ImGui pass, no present)
+    //   (caller: ImGui::Render())
+    //   endFrame()    → render ImGui draw data + present
+    void beginFrame(const CameraRenderData& camera) override;
+    void invokeImGuiCallback() override;
+    void endFrame() override;
 
     virtual void draw(std::shared_ptr<RenderScene> scene, Camera& camera) override;
     virtual void draw(entt::registry& registry, std::shared_ptr<RenderScene> scene, Camera& camera) override;
@@ -439,11 +457,11 @@ public:
     void drawTriangleFilled2D(const glm::vec2& p0, const glm::vec2& p1, const glm::vec2& p2, const glm::vec4& color)
         override;
 
-    // Batch statistics
-    Batch2DStats getBatch2DStats() const override {
+    // Batch statistics (native Metal renderer's own type; not part of IRenderer).
+    Batch2DStats getBatch2DStats() const {
         return batch2DStats;
     }
-    void resetBatch2DStats() override {
+    void resetBatch2DStats() {
         batch2DStats = {};
     }
 
@@ -502,12 +520,34 @@ public:
     NS::SharedPtr<MTL::RenderPipelineState> getPipeline(PipelineHandle handle) const;
 
 protected:
-    RenderGraph graph;
+    MetalRenderGraph graph;
+
+    // Configuration constants + frame state (previously provided by the shared
+    // Renderer base; IRenderer no longer carries these, so the native Metal
+    // renderer owns them directly).
+    const Uint32 MAX_FRAMES_IN_FLIGHT = 3;
+    const Uint32 MSAA_SAMPLE_COUNT = 4;
+    const Uint32 MAX_INSTANCES = 5000;// Increased for large scenes like Bistro
+    const Uint32 MAX_DIRECTIONAL_LIGHTS = 4;
+    const Uint32 MAX_POINT_LIGHTS = 1024;
+    const Uint32 MAX_RECT_LIGHTS = 32;
+    glm::vec4 clearColor = glm::vec4(0.0f, 0.5f, 1.0f, 1.0f);
+    double clearDepth = 1.0;
+    Uint32 clusterGridSizeX = 16;
+    Uint32 clusterGridSizeY = 16;
+    Uint32 clusterGridSizeZ = 24;
+    Uint32 numClusters = clusterGridSizeX * clusterGridSizeY * clusterGridSizeZ;
+    Uint32 currentFrameInFlight = 0;
+    Uint32 frameNumber = 0;
+    bool isInitialized = false;
+    int calculateMipmapLevelCount(Uint32 width, Uint32 height) const {
+        return static_cast<int>(std::floor(std::log2(std::max(width, height))) + 1);
+    }
 
     // GPU pass timing (Apple Silicon, MTLCounterSampleBuffer timestamps)
     static constexpr NS::UInteger GPU_TIMER_SAMPLE_COUNT = 64;
     NS::SharedPtr<MTL::CounterSampleBuffer> gpuTimerSampleBuffer;
-    std::vector<GpuPassTiming> gpuPassTimings;
+    std::vector<MetalGpuPassTiming> gpuPassTimings;
     std::mutex gpuTimingMutex;
     bool gpuTimingSupported = false;
     bool gpuTimingEnabled = false;
@@ -613,7 +653,7 @@ protected:
     std::array<TextureHandle, 16> batch2DTextureSlots;
     Uint32 batch2DTextureSlotIndex = 1;// 0 = white texture
     glm::mat4 batch2DProjection = glm::mat4(1.0f);
-    BlendMode batch2DBlendMode = BlendMode::Alpha;
+    Batch2DBlendMode batch2DBlendMode = Batch2DBlendMode::Alpha;
     Batch2DStats batch2DStats;
     bool batch2DActive = false;
 
@@ -625,7 +665,7 @@ protected:
     std::array<TextureHandle, 16> batch3DTextureSlots;
     Uint32 batch3DTextureSlotIndex = 1;
     glm::mat4 batch3DProjection = glm::mat4(1.0f);
-    BlendMode batch3DBlendMode = BlendMode::Alpha;
+    Batch2DBlendMode batch3DBlendMode = Batch2DBlendMode::Alpha;
     Batch2DStats batch3DStats;
     bool batch3DActive = false;
 
@@ -743,8 +783,8 @@ protected:
     // Instance data
     // instanceBatches: material → list of (mesh, instanceArrayIndex) for rasterization draw calls
     struct MeshDraw { std::shared_ptr<Vapor::Mesh> mesh; uint32_t instanceIndex; };
-    std::vector<InstanceData> instances;
-    std::vector<InstanceData> pendingEcsInstances;
+    std::vector<::InstanceData> instances;
+    std::vector<::InstanceData> pendingEcsInstances;
     std::unordered_map<std::shared_ptr<Vapor::Material>, std::vector<MeshDraw>> pendingEcsBatches;
     std::vector<MTL::AccelerationStructureInstanceDescriptor> pendingEcsAccelInstances;
     std::vector<MTL::AccelerationStructureInstanceDescriptor> accelInstances;
@@ -907,9 +947,8 @@ private:
 
     RenderPath currentRenderPath = RenderPath::Forward;
 
-    // UI renderer (forward-declared; the complete type lives in the .cpp, which
-    // is where ~Renderer_Metal is defined so the unique_ptr can free it).
-    std::unique_ptr<Vapor::RmlRendererMetal> m_uiRenderer;
+    // UI rendering (using void* for pimpl idiom to hide implementation)
+    void* m_uiRenderer = nullptr;
     Rml::Context* m_uiContext = nullptr;
     std::vector<ScreenshotCallback> m_pendingScreenshots;
 

@@ -312,7 +312,7 @@ namespace Vapor {
         if (!result.success || !result.atlasImage) return AtlasHandle{};
 
         result.atlas.texture = renderer->createTexture(result.atlasImage);
-        if (!result.atlas.texture.valid()) return AtlasHandle{};
+        if (!result.atlas.texture.isValid()) return AtlasHandle{};
 
         return registerAtlas(name, std::move(result.atlas));
     }
