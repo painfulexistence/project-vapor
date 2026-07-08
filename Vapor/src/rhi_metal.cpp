@@ -1251,6 +1251,31 @@ void RHI_Metal::drawIndexed(Uint32 indexCount, Uint32 instanceCount, Uint32 firs
     }
 }
 
+void RHI_Metal::drawIndexedIndirect(BufferHandle argsBuffer, size_t offset, Uint32 drawCount, Uint32 stride) {
+    auto argsIt = buffers.find(argsBuffer.id);
+    auto idxIt = buffers.find(currentIndexBuffer.id);
+    if (argsIt == buffers.end() || idxIt == buffers.end() || !currentRenderEncoder) {
+        return;
+    }
+    MTL::Buffer* args = argsIt->second.buffer.get();
+    MTL::Buffer* indexBuffer = idxIt->second.buffer.get();
+    // Metal draws one indirect command per call, so multi-draw expands to a loop.
+    // Each command reads its own indexCount/firstIndex/baseVertex/baseInstance
+    // from the args buffer; instanceCount == 0 makes the draw a GPU no-op. The
+    // index-buffer offset is 0 because the command carries the absolute
+    // firstIndex into the merged index buffer.
+    for (Uint32 i = 0; i < drawCount; ++i) {
+        currentRenderEncoder->drawIndexedPrimitives(
+            currentPrimitiveType,
+            MTL::IndexTypeUInt32,
+            indexBuffer,
+            static_cast<NS::UInteger>(0),
+            args,
+            static_cast<NS::UInteger>(offset + static_cast<size_t>(i) * stride)
+        );
+    }
+}
+
 // ============================================================================
 // Utility
 // ============================================================================

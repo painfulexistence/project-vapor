@@ -88,6 +88,10 @@ enum class BufferUsage {
     Storage,
     TransferSrc,
     TransferDst,
+    // GPU-driven rendering: a buffer that holds indirect draw arguments produced
+    // by a compute pass. On Vulkan this also carries STORAGE (so compute can
+    // write it) + INDIRECT; on Metal buffers are usage-agnostic.
+    Indirect,
 };
 
 enum class MemoryUsage {
@@ -511,6 +515,16 @@ public:
 
     virtual void draw(Uint32 vertexCount, Uint32 instanceCount = 1, Uint32 firstVertex = 0, Uint32 firstInstance = 0) = 0;
     virtual void drawIndexed(Uint32 indexCount, Uint32 instanceCount = 1, Uint32 firstIndex = 0, int32_t vertexOffset = 0, Uint32 firstInstance = 0) = 0;
+
+    // Multi-draw indirect: issue `drawCount` indexed draws whose arguments are
+    // read from `argsBuffer` starting at `offset`, one DrawCommand every
+    // `stride` bytes (see the DrawCommand struct in graphics_gpu_structs.hpp).
+    // The currently bound index buffer + a merged vertex buffer are used; each
+    // command carries its own firstIndex/vertexOffset/firstInstance. On Vulkan
+    // this is a single vkCmdDrawIndexedIndirect; on Metal it expands to a loop
+    // of per-command indirect draws (same observable result). A command with
+    // instanceCount == 0 draws nothing, which is how the cull pass drops objects.
+    virtual void drawIndexedIndirect(BufferHandle argsBuffer, size_t offset, Uint32 drawCount, Uint32 stride) = 0;
 
     // ========================================================================
     // Compute Commands

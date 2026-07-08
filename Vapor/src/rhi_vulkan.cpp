@@ -2075,6 +2075,21 @@ void RHI_Vulkan::drawIndexed(Uint32 indexCount, Uint32 instanceCount, Uint32 fir
     }
 }
 
+void RHI_Vulkan::drawIndexedIndirect(BufferHandle argsBuffer, size_t offset, Uint32 drawCount, Uint32 stride) {
+    if (currentCommandBuffer == VK_NULL_HANDLE || drawCount == 0) {
+        return;
+    }
+    auto it = buffers.find(argsBuffer.id);
+    if (it == buffers.end()) {
+        return;
+    }
+    flushDescriptors();
+    // Native multi-draw indirect: a single call issues all `drawCount` draws,
+    // reading VkDrawIndexedIndirectCommand-compatible args from the buffer.
+    vkCmdDrawIndexedIndirect(currentCommandBuffer, it->second.buffer,
+                             static_cast<VkDeviceSize>(offset), drawCount, stride);
+}
+
 // ============================================================================
 // Utility
 // ============================================================================
@@ -2643,6 +2658,11 @@ VkBufferUsageFlags RHI_Vulkan::convertBufferUsage(BufferUsage usage) {
                    VK_BUFFER_USAGE_TRANSFER_DST_BIT;
         case BufferUsage::Storage:
             return VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_TRANSFER_DST_BIT;
+        case BufferUsage::Indirect:
+            // Written by the cull compute pass (STORAGE), consumed by
+            // vkCmdDrawIndexedIndirect (INDIRECT); TRANSFER_DST for uploads/clears.
+            return VK_BUFFER_USAGE_INDIRECT_BUFFER_BIT | VK_BUFFER_USAGE_STORAGE_BUFFER_BIT |
+                   VK_BUFFER_USAGE_TRANSFER_DST_BIT;
         case BufferUsage::TransferSrc: return VK_BUFFER_USAGE_TRANSFER_SRC_BIT;
         case BufferUsage::TransferDst: return VK_BUFFER_USAGE_TRANSFER_DST_BIT;
         default: return VK_BUFFER_USAGE_VERTEX_BUFFER_BIT;
