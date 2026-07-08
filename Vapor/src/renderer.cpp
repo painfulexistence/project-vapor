@@ -1339,6 +1339,15 @@ void Renderer::mainRenderPass() {
         // Vulkan-only: on Metal, fragment buffer(2) is the CLUSTER buffer, so
         // pushing here would corrupt it (the old billions-of-iterations hang).
         rhi->setFragmentBytes(&mainDebugFlags, sizeof(Uint32), 2);
+        // Real IBL maps once the (HDRI) IBL chain has run — irradiance(8),
+        // prefilter(9), brdfLUT(10). Otherwise the black cubemap / black 2D
+        // defaults bound above keep IBL at zero, and RHIMain.frag falls back to
+        // flat ambient wherever a material's iblEnabled is 0.
+        if (!iblNeedsUpdate) {
+            if (irradianceMap.isValid()) rhi->setTexture(0, 8, irradianceMap, clampSampler);
+            if (prefilterMap.isValid()) rhi->setTexture(0, 9, prefilterMap, clampSampler);
+            if (brdfLUTTex.isValid()) rhi->setTexture(0, 10, brdfLUTTex, clampSampler);
+        }
     } else {
         // Metal-via-RHI: real IBL outputs replace the neutral blacks —
         // irradiance(8), prefilter(9), brdfLUT(10).
@@ -1506,10 +1515,14 @@ void Renderer::loadHDRI(const std::string& path) {
 
 void Renderer::iblCapturePass() {
     if (!iblNeedsUpdate) return;
-    if (!skyCapturePipeline.isValid() || !irradiancePipeline.isValid() ||
-        !prefilterPipeline.isValid() || !brdfLUTPipeline.isValid()) {
+    if (!irradiancePipeline.isValid() || !prefilterPipeline.isValid() || !brdfLUTPipeline.isValid()) {
         return;
     }
+    // Need an environment source: HDRI (equirect->cubemap) or the procedural sky
+    // capture. Vulkan only ships the HDRI source, so it no-ops without an HDRI.
+    const bool haveHDRISource = (iblSource == IBLSource::HDRI) && equirectHDRITexture.isValid() &&
+                                equirectToCubemapPipeline.isValid();
+    if (!haveHDRISource && !skyCapturePipeline.isValid()) return;
 
     // Fill all 42 capture slots up front (race-free per-draw offsets).
     const glm::mat4 captureViews[6] = {
@@ -3690,6 +3703,40 @@ void Renderer::createRenderPipeline() {
                 ComputePipelineDesc tcd; tcd.computeShader = vkTileCullShader;
                 vkTileCullPipeline = rhi->createComputePipeline(tcd);
             }
+
+            // IBL capture pipelines (SPIR-V). The RHI IBL chain was Metal-only;
+            // these bring the HDRI environment path to Vulkan. Each is a
+            // fullscreen-triangle pass rendering into a cube face / 2D LUT
+            // (RGBA16F, no depth). Sky capture is not ported, so the Vulkan IBL
+            // source is HDRI only.
+            auto makeIblVkPipeline = [&](const char* vertSpv, const char* fragSpv,
+                                         ShaderHandle& vsOut, ShaderHandle& fsOut) -> PipelineHandle {
+                std::string vcode = readFile(vertSpv);
+                std::string fcode = readFile(fragSpv);
+                if (vcode.empty() || fcode.empty()) return {};
+                ShaderDesc vd; vd.stage = ShaderStage::Vertex;   vd.code = vcode.data(); vd.codeSize = vcode.size(); vd.entryPoint = "main";
+                ShaderDesc fd; fd.stage = ShaderStage::Fragment; fd.code = fcode.data(); fd.codeSize = fcode.size(); fd.entryPoint = "main";
+                vsOut = rhi->createShader(vd);
+                fsOut = rhi->createShader(fd);
+                PipelineDesc d;
+                d.vertexShader = vsOut;
+                d.fragmentShader = fsOut;
+                d.vertexLayout.stride = 0;
+                d.vertexLayout.attributes = {};
+                d.topology = PrimitiveTopology::TriangleList;
+                d.blendMode = BlendMode::Opaque;
+                d.depthTest = false;
+                d.depthWrite = false;
+                d.cullMode = CullMode::None;
+                d.sampleCount = 1;
+                d.hasDepthAttachment = false;
+                d.colorAttachmentFormats = { PixelFormat::RGBA16_FLOAT };
+                return rhi->createPipeline(d);
+            };
+            equirectToCubemapPipeline = makeIblVkPipeline("shaders/IBLCubeFace.vert.spv", "shaders/IBLEquirect.frag.spv",   equirectToCubemapVS, equirectToCubemapFS);
+            irradiancePipeline        = makeIblVkPipeline("shaders/IBLCubeFace.vert.spv", "shaders/IBLIrradiance.frag.spv", irradianceVS, irradianceFS);
+            prefilterPipeline         = makeIblVkPipeline("shaders/IBLCubeFace.vert.spv", "shaders/IBLPrefilter.frag.spv",  prefilterVS, prefilterFS);
+            brdfLUTPipeline           = makeIblVkPipeline("shaders/IBLBRDF.vert.spv",     "shaders/IBLBRDF.frag.spv",        brdfVS, brdfFS);
 
             // Volumetric clouds: quarter-res raymarch, temporal resolve, and
             // full-res composite — all fullscreen RGBA16F passes.

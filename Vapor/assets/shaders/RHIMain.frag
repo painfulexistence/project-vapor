@@ -1,6 +1,7 @@
 #version 450
 // RHI renderer main-pass fragment shader (Vulkan backend).
-// Simplified PBR: direct dir/point lighting, normal mapping, no clusters/IBL.
+// PBR: direct dir/point lighting, normal mapping, tiled point-light culling
+// (clusters), cascaded shadows, and optional IBL (per-material iblEnabled).
 //
 // Binding convention (see rhi_vulkan.cpp):
 //   set 0 = vertex-stage buffers (visible here too; materials live in binding 1)
@@ -45,6 +46,9 @@ struct MaterialData {
     float sheenTint;
     float clearcoat;
     float clearcoatGloss;
+    float prototypeUVMode;
+    float uvScale;
+    float iblEnabled; // 1.0 = sample the IBL maps, 0.0 = flat ambient
 };
 
 // Must match DirectionalLightData / PointLightData (C++, stride 48 each)
@@ -131,6 +135,14 @@ layout(set = 2, binding = 6) uniform sampler2DArray shadowMap;  // 3-cascade dep
 // physically wrong (same rule as the Metal PBR shader).
 layout(set = 2, binding = 7) uniform sampler2D texAO;
 
+// IBL environment maps (bindings 8-10). Bound to defaults (black cube / white 2D)
+// when no environment is loaded; sampled only when MaterialData.iblEnabled != 0,
+// so scenes without IBL keep the flat-ambient behaviour.
+layout(set = 2, binding = 8) uniform samplerCube irradianceMap;   // diffuse IBL
+layout(set = 2, binding = 9) uniform samplerCube prefilterMap;    // specular IBL (roughness in mips)
+layout(set = 2, binding = 10) uniform sampler2D brdfLUT;          // split-sum BRDF LUT
+const float IBL_MAX_REFLECTION_LOD = 4.0;
+
 // PCF sample of one cascade. Returns 1.0 = lit, 0.0 = fully shadowed, or -1.0
 // when the world position falls outside this cascade's frustum.
 float sampleCascade(int ci, vec3 worldPos, float bias) {
@@ -194,6 +206,11 @@ float geometrySmith(float NdotV, float NdotL, float roughness) {
     float g1 = NdotV / (NdotV * (1.0 - k) + k);
     float g2 = NdotL / (NdotL * (1.0 - k) + k);
     return g1 * g2;
+}
+
+// Roughness-aware Fresnel for the IBL ambient term.
+vec3 fresnelSchlickRoughness(float cosTheta, vec3 F0, float roughness) {
+    return F0 + (max(vec3(1.0 - roughness), F0) - F0) * pow(clamp(1.0 - cosTheta, 0.0, 1.0), 5.0);
 }
 
 vec3 fresnelSchlick(float cosTheta, vec3 F0) {
@@ -277,10 +294,30 @@ void main() {
         }
     }
 
-    // Flat ambient so unlit scenes are never pure black. Screen-space AO
-    // darkens this indirect term only (never the direct lights above).
+    // Indirect / ambient term. Screen-space AO darkens this only (never the
+    // direct lights above).
     float screenAO = texture(texAO, gl_FragCoord.xy / max(screenSize, vec2(1.0))).r;
-    color += albedo * 0.03 * occlusion * screenAO;
+    if (mat.iblEnabled > 0.5) {
+        // Image-based lighting from the environment cubemaps (diffuse from the
+        // irradiance map, specular from the prefiltered map + BRDF LUT).
+        float NdotV = max(dot(N, V), 0.0);
+        vec3 F0 = mix(vec3(0.04), albedo, metallic);
+        vec3 F = fresnelSchlickRoughness(NdotV, F0, roughness);
+        vec3 kD = (vec3(1.0) - F) * (1.0 - metallic);
+
+        vec3 irradiance = texture(irradianceMap, N).rgb;
+        vec3 diffuseIBL = irradiance * albedo;
+
+        vec3 R = reflect(-V, N);
+        vec3 prefiltered = textureLod(prefilterMap, R, roughness * IBL_MAX_REFLECTION_LOD).rgb;
+        vec2 brdf = texture(brdfLUT, vec2(NdotV, roughness)).rg;
+        vec3 specularIBL = prefiltered * (F0 * brdf.x + brdf.y);
+
+        color += (kD * diffuseIBL + specularIBL) * occlusion * screenAO;
+    } else {
+        // Flat ambient so unlit scenes are never pure black.
+        color += albedo * 0.03 * occlusion * screenAO;
+    }
     color += emissive;
 
     // Output LINEAR HDR into the RGBA16F colorRT. Tone mapping (ACES) and the

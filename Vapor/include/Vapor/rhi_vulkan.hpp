@@ -290,7 +290,12 @@ private:
     // after a binding change.
     // ========================================================================
 
-    static constexpr Uint32 BINDINGS_PER_SET = 8;
+    // 16 (was 8): the main pass's fragment-texture set needs slots 0-7 for
+    // material/shadow/AO maps plus 8-10 for the IBL environment maps. The set
+    // layouts and bound-resource arrays scale from this constant; descriptor-pool
+    // consumption tracks actual bound resources, not this bound, so the fixed pool
+    // headroom is unaffected.
+    static constexpr Uint32 BINDINGS_PER_SET = 16;
 
     struct BufferBinding {
         VkBuffer buffer = VK_NULL_HANDLE;
