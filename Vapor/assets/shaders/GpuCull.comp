@@ -1,0 +1,102 @@
+#version 450
+// GPU-driven rendering: frustum-cull compute pass (Vulkan backend).
+//
+// One thread per instance. Reads the per-instance bounding sphere and the
+// camera frustum planes, and writes one indirect draw command per instance into
+// the args buffer. Visible instances get instanceCount = 1; culled instances get
+// instanceCount = 0 (the subsequent multi-draw-indirect turns those into GPU
+// no-ops). The command's firstInstance is the instance index, so the main-pass
+// vertex shader can look up InstanceData via gl_InstanceIndex.
+//
+// Binding convention (RHI::setComputeBuffer / setComputeBytes):
+//   binding 0 = CameraBuf   (readonly)
+//   binding 1 = InstanceBuf (readonly)
+//   binding 2 = DrawCommandBuf (written)
+//   push constant = instance count
+
+layout(local_size_x = 64, local_size_y = 1, local_size_z = 1) in;
+
+// Must match CameraRenderData / CameraData (C++); frustumPlanes at offset 288.
+struct CameraData {
+    mat4 proj;
+    mat4 view;
+    mat4 invProj;
+    mat4 invView;
+    float nearPlane;
+    float farPlane;
+    vec2 _pad;
+    vec3 position;
+    float _pad2;
+    vec4 frustumPlanes[6];
+};
+
+// Must match Vapor::InstanceData (C++, std430 array stride = 160 bytes).
+struct InstanceData {
+    mat4 model;
+    vec4 color;
+    uint vertexOffset;
+    uint indexOffset;
+    uint vertexCount;
+    uint indexCount;
+    uint materialID;
+    uint primitiveMode;
+    uvec2 _pad1;
+    vec3 aabbMin;
+    float _pad2;
+    vec3 aabbMax;
+    float _pad3;
+    vec4 boundingSphere; // xyz = world center, w = radius
+};
+
+// Must match Vapor::DrawCommand (C++, packed 20-byte stride) and
+// VkDrawIndexedIndirectCommand.
+struct DrawCommand {
+    uint indexCount;
+    uint instanceCount;
+    uint firstIndex;
+    int  vertexOffset;
+    uint firstInstance;
+};
+
+layout(std430, set = 0, binding = 0) readonly buffer CameraBuf {
+    CameraData cam;
+};
+layout(std430, set = 0, binding = 1) readonly buffer InstanceBuf {
+    InstanceData instances[];
+};
+layout(std430, set = 0, binding = 2) writeonly buffer DrawCommandBuf {
+    DrawCommand commands[];
+};
+
+layout(push_constant) uniform CullPush {
+    uint instanceCount;
+};
+
+bool sphereInFrustum(vec3 center, float radius) {
+    for (int i = 0; i < 6; ++i) {
+        vec4 plane = cam.frustumPlanes[i]; // normalized, points inward
+        if (dot(plane.xyz, center) + plane.w < -radius) {
+            return false;
+        }
+    }
+    return true;
+}
+
+void main() {
+    uint id = gl_GlobalInvocationID.x;
+    if (id >= instanceCount) {
+        return;
+    }
+
+    InstanceData inst = instances[id];
+    vec4 bs = inst.boundingSphere;
+    bool visible = sphereInFrustum(bs.xyz, bs.w);
+
+    DrawCommand cmd;
+    cmd.indexCount = inst.indexCount;
+    cmd.instanceCount = visible ? 1u : 0u;
+    cmd.firstIndex = inst.indexOffset;
+    cmd.vertexOffset = int(inst.vertexOffset);
+    cmd.firstInstance = id; // vertex shader reads instances[gl_InstanceIndex]
+    commands[id] = cmd;
+}
