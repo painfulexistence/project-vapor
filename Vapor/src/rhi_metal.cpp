@@ -138,7 +138,13 @@ MTL::BlitCommandEncoder* RHI_Metal::ensureUploadBlit() {
         stagingRingBuffer = NS::TransferPtr(device->newBuffer(STAGING_RING_SIZE, MTL::ResourceStorageModeShared));
     }
     if (!uploadCmdBuffer) {
-        uploadCmdBuffer = NS::TransferPtr(commandQueue->commandBuffer());
+        // commandBuffer() returns an AUTORELEASED object (+0), so it must be
+        // RetainPtr, not TransferPtr — TransferPtr assumes an owned +1 (alloc/
+        // new/copy) and under-retains. Harmless while no autorelease pool
+        // drained the frame; now that beginFrame/endFrame bracket one, a
+        // TransferPtr here would let the pool free a command buffer we still
+        // hold in pendingUploadCmds, crashing next frame in ->status().
+        uploadCmdBuffer = NS::RetainPtr(commandQueue->commandBuffer());
         uploadBlitEncoder = uploadCmdBuffer->blitCommandEncoder();
         uploadBlitEncoder->setLabel(NS::String::string("Uploads", NS::UTF8StringEncoding));
     }
@@ -820,9 +826,9 @@ void RHI_Metal::beginFrame() {
     if (debugCB) {
         auto cbDesc = NS::TransferPtr(MTL::CommandBufferDescriptor::alloc()->init());
         cbDesc->setErrorOptions(MTL::CommandBufferErrorOptionEncoderExecutionStatus);
-        currentCommandBuffer = NS::TransferPtr(commandQueue->commandBuffer(cbDesc.get()));
+        currentCommandBuffer = NS::RetainPtr(commandQueue->commandBuffer(cbDesc.get()));
     } else {
-        currentCommandBuffer = NS::TransferPtr(commandQueue->commandBuffer());
+        currentCommandBuffer = NS::RetainPtr(commandQueue->commandBuffer());
     }
     if (!currentCommandBuffer) {
         throw std::runtime_error("Failed to create command buffer");
@@ -1564,7 +1570,10 @@ void RHI_Metal::buildAccelerationStructure(AccelStructHandle handle) {
         }
         std::memcpy(instBuf->contents(), descriptors.data(), bytes);
         resource.instanceBuffer = instBuf;
-        resource.blasArray = NS::TransferPtr(NS::Array::array(blasObjects.data(), blasObjects.size()));
+        // NS::Array::array() is an autoreleased class factory (+0) → RetainPtr,
+        // not TransferPtr; the pool would otherwise free this array while
+        // resource.blasArray still references it.
+        resource.blasArray = NS::RetainPtr(NS::Array::array(blasObjects.data(), blasObjects.size()));
 
         auto tlasDesc = NS::TransferPtr(MTL::InstanceAccelerationStructureDescriptor::alloc()->init());
         tlasDesc->setInstancedAccelerationStructures(resource.blasArray.get());
@@ -1641,7 +1650,10 @@ void RHI_Metal::beginComputePass(const char* name) {
     if (currentCommandBuffer && !currentComputeEncoder) {
         NS::UInteger timingBegin, timingEnd;
         if (allocateTimingSlots(name, timingBegin, timingEnd)) {
-            auto passDesc = NS::TransferPtr(MTL::ComputePassDescriptor::computePassDescriptor());
+            // computePassDescriptor() is an autoreleased class factory (+0):
+            // RetainPtr so the scope-end release and the frame pool's drain
+            // don't double-free it.
+            auto passDesc = NS::RetainPtr(MTL::ComputePassDescriptor::computePassDescriptor());
             auto* sampleAttachment = passDesc->sampleBufferAttachments()->object(0);
             sampleAttachment->setSampleBuffer(gpuTimerSampleBuffer.get());
             sampleAttachment->setStartOfEncoderSampleIndex(timingBegin);
