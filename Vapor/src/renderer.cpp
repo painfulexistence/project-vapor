@@ -7,6 +7,7 @@
 #include "helper.hpp"
 #include "components.hpp"
 #include "engine_core.hpp"
+#include "asset_manager.hpp"  // AssetManager::loadHDRI
 #include "rmlui_manager.hpp"
 #include "graphics_gibs.hpp"  // Surfel/GIBSData/param structs (Metal-layout asserted)
 #include "Vapor/rml_renderer_rhi.hpp"
@@ -1477,6 +1478,32 @@ void Renderer::mainRenderPass() {
 // IBL-from-sky: capture the atmosphere into a cubemap, convolve irradiance,
 // prefilter specular mips, integrate the BRDF LUT. Runs once (iblNeedsUpdate),
 // Metal MSL for now (the Vulkan PBR path uses the atmosphere directly).
+void Renderer::loadHDRI(const std::string& path) {
+    std::shared_ptr<Vapor::HDRImage> img;
+    try {
+        img = AssetManager::loadHDRI(path);
+    } catch (const std::exception& e) {
+        fmt::print(stderr, "loadHDRI: {}\n", e.what());
+        return;
+    }
+    if (!img || img->floatArray.empty()) return;
+
+    // (Re)create the RGBA32F equirect source texture and upload the float pixels.
+    if (equirectHDRITexture.isValid()) rhi->destroyTexture(equirectHDRITexture);
+    TextureDesc desc;
+    desc.width = img->width;
+    desc.height = img->height;
+    desc.format = PixelFormat::RGBA32_FLOAT;
+    desc.usage = TextureUsage::Sampled;
+    equirectHDRITexture = rhi->createTexture(desc);
+    rhi->updateTexture(equirectHDRITexture, img->floatArray.data(),
+                       img->floatArray.size() * sizeof(float));
+
+    iblSource = IBLSource::HDRI;
+    iblNeedsUpdate = true;  // re-run the IBL chain from the new environment
+    fmt::print("HDRI loaded: {} ({}x{})\n", path, img->width, img->height);
+}
+
 void Renderer::iblCapturePass() {
     if (!iblNeedsUpdate) return;
     if (!skyCapturePipeline.isValid() || !irradiancePipeline.isValid() ||
@@ -1533,8 +1560,30 @@ void Renderer::iblCapturePass() {
         rhi->endRenderPass();
     };
 
-    for (Uint32 f = 0; f < 6; f++)
-        faceDraw("SkyCapture", skyCapturePipeline, environmentCubemap, f, f, 0, false, true, false);
+    // Fill the environment cubemap from the HDRI equirect map when one is loaded,
+    // otherwise from the procedural sky. Everything downstream (irradiance /
+    // prefilter / BRDF LUT) is identical.
+    const bool useHDRI = (iblSource == IBLSource::HDRI) && equirectHDRITexture.isValid() &&
+                         equirectToCubemapPipeline.isValid();
+    for (Uint32 f = 0; f < 6; f++) {
+        if (useHDRI) {
+            RenderPassDesc rp;
+            rp.name = "EquirectToCubemap";
+            rp.colorAttachments.push_back(environmentCubemap);
+            rp.clearColors.push_back(glm::vec4(0, 0, 0, 1));
+            rp.loadColor.push_back(false);
+            rp.colorArrayLayer = f;
+            rp.colorMipLevel = 0;
+            rhi->beginRenderPass(rp);
+            rhi->bindPipeline(equirectToCubemapPipeline);
+            rhi->setVertexBuffer(0, iblCaptureDataBuffer, f * stride, stride);  // faceIndex slot
+            rhi->setTexture(0, 0, equirectHDRITexture, clampSampler);
+            rhi->draw(3, 1, 0, 0);
+            rhi->endRenderPass();
+        } else {
+            faceDraw("SkyCapture", skyCapturePipeline, environmentCubemap, f, f, 0, false, true, false);
+        }
+    }
     rhi->generateMipmaps(environmentCubemap);
     for (Uint32 f = 0; f < 6; f++)
         faceDraw("IrradianceConv", irradiancePipeline, irradianceMap, 6 + f, f, 0, true, false, false);
@@ -3859,6 +3908,8 @@ void Renderer::createRenderPipeline() {
             return rhi->createPipeline(d);
         };
         skyCapturePipeline = makeIblPipeline("shaders/3d_sky_capture.metal", skyCaptureVS, skyCaptureFS);
+        // Equirect HDRI -> cubemap face (reuses the native renderer's shader).
+        equirectToCubemapPipeline = makeIblPipeline("shaders/3d_equirect_to_cubemap.metal", equirectToCubemapVS, equirectToCubemapFS);
         irradiancePipeline = makeIblPipeline("shaders/3d_irradiance_convolution.metal", irradianceVS, irradianceFS);
         prefilterPipeline  = makeIblPipeline("shaders/3d_prefilter_envmap.metal", prefilterVS, prefilterFS);
         brdfLUTPipeline    = makeIblPipeline("shaders/3d_brdf_lut.metal", brdfVS, brdfFS);

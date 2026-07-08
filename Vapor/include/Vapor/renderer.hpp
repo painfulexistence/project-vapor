@@ -323,6 +323,9 @@ public:
     void setGpuDrivenCulling(bool enabled) { gpuDrivenCulling = enabled; }
     bool isGpuDrivenCulling() const { return gpuDrivenCulling; }
 
+    // Load an equirectangular HDR image as the IBL environment (see IBLSource).
+    void loadHDRI(const std::string& path) override;
+
 private:
     // ========================================================================
     // Internal Rendering Steps
@@ -766,6 +769,16 @@ private:
     bool iblNeedsUpdate = true;
     static constexpr Uint32 PREFILTER_MIP_LEVELS = 5;
     void iblCapturePass();
+
+    // HDRI environment source (ported from the native Metal renderer). When set,
+    // iblCapturePass converts the equirect map into environmentCubemap (instead of
+    // the sky capture) and the rest of the IBL chain runs unchanged. The IBL chain
+    // is currently Metal-only on the RHI path, so HDRI IBL applies to Metal-via-RHI.
+    enum class IBLSource { Sky, HDRI };
+    IBLSource iblSource = IBLSource::Sky;
+    TextureHandle equirectHDRITexture;         // RGBA32F equirect source
+    PipelineHandle equirectToCubemapPipeline;
+    ShaderHandle equirectToCubemapVS, equirectToCubemapFS;
 
     // GIBS surfel GI (RequiresRaytracing; Metal MSL kernels via RHI compute).
     // GIBSData itself lives in graphics_gibs.hpp (included in renderer.cpp only

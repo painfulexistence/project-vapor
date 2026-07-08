@@ -178,6 +178,11 @@ public:
     // getBatch2DStats()/resetBatch2DStats() are intentionally NOT here — the
     // stats type differs per renderer and is never queried polymorphically.
 
+    // ---- Environment / IBL ----------------------------------------------
+    // Load an equirectangular HDR image as the IBL environment source. No-op on
+    // renderers/backends without an IBL cubemap chain.
+    virtual void loadHDRI(const std::string& path) {}
+
     // ---- Fonts / text ----------------------------------------------------
     virtual FontHandle loadFont(const std::string& path, float baseSize) { return {}; }
     virtual void unloadFont(FontHandle handle) {}
