@@ -497,6 +497,16 @@ MeshId Renderer::registerMesh(const std::vector<Vapor::VertexData>& vertices,
     mesh.indexCount = static_cast<Uint32>(indices.size());
     mesh.vertexCount = static_cast<Uint32>(vertices.size());
 
+    // Accumulate into the merged scene geometry used by single-call MDI. Indices
+    // stay mesh-local; the per-mesh vertexOffset rebases them at draw time. These
+    // offsets are only consumed in MDI mode (InstanceData keeps 0 otherwise), so
+    // this is inert for the default / per-object-indirect paths.
+    mesh.vertexOffset = static_cast<Uint32>(m_mergedVertices.size());
+    mesh.indexOffset = static_cast<Uint32>(m_mergedIndices.size());
+    m_mergedVertices.insert(m_mergedVertices.end(), vertices.begin(), vertices.end());
+    m_mergedIndices.insert(m_mergedIndices.end(), indices.begin(), indices.end());
+    m_mergedGeometryDirty = true;
+
     MeshId id = static_cast<MeshId>(meshes.size());
     meshes.push_back(mesh);
 
@@ -1112,6 +1122,14 @@ void Renderer::updateBuffers() {
     std::vector<Vapor::InstanceData> instanceData;
     instanceData.reserve(frameDrawables.size());
     Uint32 instanceID = 0;
+
+    // MDI mode (Vulkan): instances address the merged scene buffers, so they need
+    // real per-mesh offsets and must be grouped into contiguous per-material
+    // ranges. Any other mode uses per-mesh buffers -> offsets stay 0.
+    const bool mdi = gpuDrivenMDI && (backend == GraphicsBackend::Vulkan);
+    if (mdi) ensureMergedGeometry();
+    m_materialRanges.clear();
+
     auto appendInstance = [&](Uint32 drawableIdx) {
         const Drawable& drawable = frameDrawables[drawableIdx];
         const RenderMesh& mesh = meshes[drawable.mesh];
@@ -1119,8 +1137,8 @@ void Renderer::updateBuffers() {
         Vapor::InstanceData instance;
         instance.model = drawable.transform;
         instance.color = drawable.color;
-        instance.vertexOffset = 0;  // Each mesh has its own buffer
-        instance.indexOffset = 0;   // Each mesh has its own buffer
+        instance.vertexOffset = mdi ? mesh.vertexOffset : 0;  // into merged buffer (MDI) or 0 (per-mesh)
+        instance.indexOffset = mdi ? mesh.indexOffset : 0;
         instance.vertexCount = mesh.vertexCount;
         instance.indexCount = mesh.indexCount;
         instance.materialID = drawable.material;
@@ -1135,9 +1153,34 @@ void Renderer::updateBuffers() {
         drawableToInstanceID[drawableIdx] = instanceID;
         instanceID++;
     };
-    for (Uint32 drawableIdx : visibleDrawables) appendInstance(drawableIdx);
-    for (Uint32 i = 0; i < frameDrawables.size() && instanceID < MAX_INSTANCES; i++) {
-        if (drawableToInstanceID.find(i) == drawableToInstanceID.end()) appendInstance(i);
+    if (mdi) {
+        // Submit ALL drawables, sorted by material so each material occupies a
+        // contiguous instance range -> one drawIndexedIndirect per material.
+        std::vector<Uint32> order(frameDrawables.size());
+        for (Uint32 i = 0; i < frameDrawables.size(); ++i) order[i] = i;
+        std::stable_sort(order.begin(), order.end(), [this](Uint32 a, Uint32 b) {
+            return frameDrawables[a].material < frameDrawables[b].material;
+        });
+        MaterialId curMat = UINT32_MAX;
+        Uint32 rangeStart = 0;
+        for (Uint32 idx : order) {
+            if (instanceID >= MAX_INSTANCES) break;
+            MaterialId m = frameDrawables[idx].material;
+            if (m != curMat) {
+                if (curMat != UINT32_MAX)
+                    m_materialRanges.push_back({curMat, {rangeStart, instanceID - rangeStart}});
+                curMat = m;
+                rangeStart = instanceID;
+            }
+            appendInstance(idx);
+        }
+        if (curMat != UINT32_MAX)
+            m_materialRanges.push_back({curMat, {rangeStart, instanceID - rangeStart}});
+    } else {
+        for (Uint32 drawableIdx : visibleDrawables) appendInstance(drawableIdx);
+        for (Uint32 i = 0; i < frameDrawables.size() && instanceID < MAX_INSTANCES; i++) {
+            if (drawableToInstanceID.find(i) == drawableToInstanceID.end()) appendInstance(i);
+        }
     }
     totalInstanceCount = instanceID;
 
@@ -1319,6 +1362,30 @@ void Renderer::mainRenderPass() {
     const bool useGpuDriven = gpuDrivenCulling && gpuCullPipeline.isValid() &&
                               gpuCullArgsBuffer.isValid();
 
+    // True single-call multi-draw indirect (Vulkan): bind the merged scene
+    // buffers once, then issue one drawIndexedIndirect per material range (each
+    // spanning many meshes). The cull pass wrote per-instance commands with real
+    // merged-buffer offsets; instanceCount 0 makes culled instances no-ops. The
+    // instance index comes from gl_InstanceIndex (= command.firstInstance), so
+    // the push-constant instanceID is 0.
+    const bool useMDI = useGpuDriven && gpuDrivenMDI &&
+                        backend == GraphicsBackend::Vulkan &&
+                        capabilities.multiDrawIndirect &&
+                        mergedVertexBuffer.isValid() && mergedIndexBuffer.isValid() &&
+                        !m_materialRanges.empty();
+    if (useMDI) {
+        rhi->bindVertexBuffer(mergedVertexBuffer, 3, 0);
+        rhi->bindIndexBuffer(mergedIndexBuffer, 0);
+        Uint32 zeroId = 0;
+        rhi->setVertexBytes(&zeroId, sizeof(Uint32), 4);
+        for (const auto& [materialId, range] : m_materialRanges) {
+            if (materialId < materials.size()) bindMaterial(materialId);
+            rhi->drawIndexedIndirect(gpuCullArgsBuffer,
+                                     static_cast<size_t>(range.first) * sizeof(Vapor::DrawCommand),
+                                     range.second, sizeof(Vapor::DrawCommand));
+        }
+    } else {
+
     // Group drawables by material to reduce state changes.
     std::map<MaterialId, std::vector<Uint32>> materialBatches;
     if (useGpuDriven) {
@@ -1361,8 +1428,13 @@ void Renderer::mainRenderPass() {
                 rhi->bindVertexBuffer(mesh.vertexBuffer, 3, 0);
             }
 
-            // Set instance ID (binding 4 for Metal shader)
-            rhi->setVertexBytes(&correctInstanceID, sizeof(Uint32), 4);
+            // Set instance ID. On Vulkan the vertex shader reads
+            // instances[instanceID + gl_InstanceIndex]; in GPU-driven mode the
+            // draw command's firstInstance carries the index (gl_InstanceIndex),
+            // so push 0. Metal keeps using the push constant directly.
+            Uint32 vsInstanceID =
+                (useGpuDriven && backend == GraphicsBackend::Vulkan) ? 0u : correctInstanceID;
+            rhi->setVertexBytes(&vsInstanceID, sizeof(Uint32), 4);
 
             // Draw
             if (mesh.indexBuffer.isValid()) {
@@ -1384,6 +1456,7 @@ void Renderer::mainRenderPass() {
             }
         }
     }
+    }  // end !useMDI (per-object / CPU path)
 
     // World-space batch quads are NOT flushed here: they render in the
     // WorldCanvas pass after sky/fog/scattering (native graph order), so the
@@ -1630,6 +1703,32 @@ void Renderer::gpuCullPass() {
     rhi->dispatch((n + 63) / 64, 1, 1);
     rhi->endComputePass();
     rhi->computeBarrier();  // cull writes args -> indirect draw reads them in Main
+}
+
+// Build (or rebuild, if meshes were added) the merged scene vertex/index buffers
+// used by single-call MDI, from the CPU geometry accumulated in registerMesh.
+void Renderer::ensureMergedGeometry() {
+    if (!m_mergedGeometryDirty) return;
+    if (m_mergedVertices.empty() || m_mergedIndices.empty()) return;
+
+    if (mergedVertexBuffer.isValid()) rhi->destroyBuffer(mergedVertexBuffer);
+    if (mergedIndexBuffer.isValid()) rhi->destroyBuffer(mergedIndexBuffer);
+
+    BufferDesc vbDesc;
+    vbDesc.size = m_mergedVertices.size() * sizeof(Vapor::VertexData);
+    vbDesc.usage = BufferUsage::Vertex;
+    vbDesc.memoryUsage = MemoryUsage::GPU;
+    mergedVertexBuffer = rhi->createBuffer(vbDesc);
+    rhi->updateBuffer(mergedVertexBuffer, m_mergedVertices.data(), 0, vbDesc.size);
+
+    BufferDesc ibDesc;
+    ibDesc.size = m_mergedIndices.size() * sizeof(Uint32);
+    ibDesc.usage = BufferUsage::Index;
+    ibDesc.memoryUsage = MemoryUsage::GPU;
+    mergedIndexBuffer = rhi->createBuffer(ibDesc);
+    rhi->updateBuffer(mergedIndexBuffer, m_mergedIndices.data(), 0, ibDesc.size);
+
+    m_mergedGeometryDirty = false;
 }
 
 // Sun/lens flare: procedural glow/halo/ghosts/starburst added over the HDR
@@ -4519,6 +4618,16 @@ void Renderer::drawGraphicsImGui() {
     // drawIndexed path is used unchanged.
     if (capabilities.computeShaders) {
         ImGui::Checkbox("GPU-driven culling (indirect draw)", &gpuDrivenCulling);
+        // True single-call multi-draw indirect (one drawIndexedIndirect per
+        // material over the merged scene buffers). Vulkan-only — Metal draws one
+        // indirect command per call, so it stays on the per-object path. Requires
+        // GPU-driven culling to be on (it fills the indirect args).
+        const bool mdiAvailable = gpuDrivenCulling && backend == GraphicsBackend::Vulkan &&
+                                  capabilities.multiDrawIndirect;
+        ImGui::BeginDisabled(!mdiAvailable);
+        ImGui::Checkbox("  -> single-call MDI (Vulkan)", &gpuDrivenMDI);
+        ImGui::EndDisabled();
+        if (!mdiAvailable) gpuDrivenMDI = false;
     } else {
         ImGui::BeginDisabled();
         bool off = false;

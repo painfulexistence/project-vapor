@@ -2284,6 +2284,19 @@ void RHI_Vulkan::createLogicalDevice() {
     VkPhysicalDeviceFeatures deviceFeatures{};
     deviceFeatures.samplerAnisotropy = VK_TRUE;
 
+    // Enable multiDrawIndirect (needed for vkCmdDrawIndexedIndirect with
+    // drawCount > 1, i.e. single-call multi-draw indirect) only when the device
+    // supports it, so device creation never fails on hardware that lacks it. The
+    // render path checks capabilities.multiDrawIndirect before using it.
+    {
+        VkPhysicalDeviceFeatures supportedFeatures{};
+        vkGetPhysicalDeviceFeatures(physicalDevice, &supportedFeatures);
+        if (supportedFeatures.multiDrawIndirect) {
+            deviceFeatures.multiDrawIndirect = VK_TRUE;
+            capabilities.multiDrawIndirect = true;
+        }
+    }
+
     VkPhysicalDeviceDynamicRenderingFeaturesKHR dynamicRenderingFeatures{};
     dynamicRenderingFeatures.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_DYNAMIC_RENDERING_FEATURES_KHR;
     dynamicRenderingFeatures.dynamicRendering = VK_TRUE;

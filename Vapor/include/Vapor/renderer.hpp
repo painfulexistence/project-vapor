@@ -731,6 +731,21 @@ private:
     ShaderHandle gpuCullShader;
     BufferHandle gpuCullArgsBuffer;  // DrawCommand[MAX_INSTANCES], frame-slotted
     bool gpuDrivenCulling = false;
+
+    // True single-call multi-draw indirect (Vulkan only): one vkCmdDrawIndexedIndirect
+    // per material batch over a merged scene vertex/index buffer, instead of one
+    // indirect draw per object. Metal keeps the per-object loop (single-call MDI
+    // there needs Indirect Command Buffers). Requires gpuDrivenCulling to be on.
+    bool gpuDrivenMDI = false;
+    std::vector<Vapor::VertexData> m_mergedVertices;  // CPU accumulation (registerMesh)
+    std::vector<Uint32> m_mergedIndices;              // mesh-local indices; rebased via vertexOffset
+    BufferHandle mergedVertexBuffer;
+    BufferHandle mergedIndexBuffer;
+    bool m_mergedGeometryDirty = false;
+    // Per-material contiguous instance ranges in the material-sorted InstanceData
+    // buffer, from the last MDI updateBuffers(): {material, {firstSlot, count}}.
+    std::vector<std::pair<MaterialId, std::pair<Uint32, Uint32>>> m_materialRanges;
+    void ensureMergedGeometry();  // (re)build merged GPU buffers from CPU data
     BufferHandle lightCullDataBuffer;
     PipelineHandle sunFlarePipeline;
     ShaderHandle sunFlareVertexShader, sunFlareFragmentShader;

@@ -384,6 +384,10 @@ struct RHICapabilities {
     bool raytracing = false;     // acceleration structures + ray queries
     bool computeShaders = false; // compute pipelines with resource binding
     bool gpuTimestamps = false;  // per-pass GPU timing (see GPU Profiling)
+    // vkCmdDrawIndexedIndirect with drawCount > 1 (single-call multi-draw
+    // indirect). Vulkan gates this on the multiDrawIndirect device feature; Metal
+    // draws one indirect command per call, so it reports false.
+    bool multiDrawIndirect = false;
 };
 
 // ============================================================================
