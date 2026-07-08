@@ -42,7 +42,8 @@ struct DrawCommand {
     uint firstInstance;
 };
 
-kernel void gpuCull(
+// Entry point must be named computeMain (RHI Metal compute convention).
+kernel void computeMain(
     device const CameraData&   cam           [[buffer(0)]],
     device const InstanceData* instances     [[buffer(1)]],
     device DrawCommand*        commands      [[buffer(2)]],

@@ -1313,9 +1313,15 @@ void Renderer::mainRenderPass() {
         }
     }
 
+    // GPU-driven path is used only when enabled AND the cull pipeline/args
+    // buffer actually exist — otherwise fall back to the CPU path entirely
+    // (avoids drawing from an unwritten indirect args buffer).
+    const bool useGpuDriven = gpuDrivenCulling && gpuCullPipeline.isValid() &&
+                              gpuCullArgsBuffer.isValid();
+
     // Group drawables by material to reduce state changes.
     std::map<MaterialId, std::vector<Uint32>> materialBatches;
-    if (gpuDrivenCulling) {
+    if (useGpuDriven) {
         // GPU-driven: submit ALL drawables and let the compute cull decide
         // visibility per instance (via instanceCount in the indirect args),
         // rather than the CPU-culled visibleDrawables subset.
@@ -1361,7 +1367,7 @@ void Renderer::mainRenderPass() {
             // Draw
             if (mesh.indexBuffer.isValid()) {
                 rhi->bindIndexBuffer(mesh.indexBuffer, 0);
-                if (gpuDrivenCulling && gpuCullArgsBuffer.isValid()) {
+                if (useGpuDriven) {
                     // Per-object indirect draw: the compute cull wrote this
                     // instance's command (instanceCount 0 => culled => GPU
                     // no-op). firstIndex/vertexOffset are 0 for per-mesh buffers,
@@ -1604,7 +1610,7 @@ void Renderer::tileCullingPass() {
 // GPU decides what actually draws. Vulkan-only for now; no-op unless the
 // gpuDrivenCulling flag is set. The existing CPU cull path is untouched.
 void Renderer::gpuCullPass() {
-    if (!gpuDrivenCulling || backend == GraphicsBackend::Metal) return;
+    if (!gpuDrivenCulling) return;
     if (!gpuCullPipeline.isValid() || !gpuCullArgsBuffer.isValid()) return;
     if (totalInstanceCount == 0) return;
 
@@ -1612,10 +1618,15 @@ void Renderer::gpuCullPass() {
     rhi->beginComputePass("GpuCull");
     rhi->bindComputePipeline(gpuCullPipeline);
     rhi->setComputeBuffer(0, cameraUniformBuffer, 0, sizeof(CameraRenderData));
-    // Bind instance + args with instance-count-sized ranges so the shader's
+    // Bind instance + args with instance-count-sized ranges so the GLSL shader's
     // instances.length() equals the live instance count.
     rhi->setComputeBuffer(1, instanceDataBuffer, 0, sizeof(Vapor::InstanceData) * n);
     rhi->setComputeBuffer(2, gpuCullArgsBuffer, 0, sizeof(Vapor::DrawCommand) * n);
+    // The MSL kernel can't use .length() on a device pointer, so Metal takes the
+    // instance count as an explicit constant at buffer(3).
+    if (backend == GraphicsBackend::Metal) {
+        rhi->setComputeBytes(&n, sizeof(Uint32), 3);
+    }
     rhi->dispatch((n + 63) / 64, 1, 1);
     rhi->endComputePass();
     rhi->computeBarrier();  // cull writes args -> indirect draw reads them in Main
@@ -3754,6 +3765,19 @@ void Renderer::createRenderPipeline() {
             tileCullingPipeline = rhi->createComputePipeline(cd);
         }
 
+        // GPU-driven frustum cull (Metal). Not RT-gated — GPU culling works on
+        // any compute-capable device. Threadgroup 64 matches gpuCullPass's
+        // dispatch of (n + 63) / 64 groups.
+        std::string gcCode = readFile("shaders/3d_gpu_cull.metal");
+        if (!gcCode.empty()) {
+            ShaderDesc d; d.stage = ShaderStage::Compute; d.code = gcCode.data();
+            d.codeSize = gcCode.size(); d.entryPoint = "computeMain";
+            gpuCullShader = rhi->createShader(d);
+            ComputePipelineDesc cd; cd.computeShader = gpuCullShader;
+            cd.threadGroupSizeX = 64;
+            gpuCullPipeline = rhi->createComputePipeline(cd);
+        }
+
         // --------------------------------------------------------------------
         // Post/effect chain from the native MSL files. The generic creation
         // below this block reads SPIR-V, which RHI_Metal can't build — without
@@ -4489,6 +4513,18 @@ void Renderer::drawGraphicsImGui() {
                 capabilities.computeShaders ? "yes" : "no",
                 capabilities.gpuTimestamps ? "yes" : "no");
     ImGui::Text("Frame: %u", frameNumber);
+
+    // GPU-driven rendering toggle: compute frustum cull -> per-object indirect
+    // draw (both Vulkan and Metal). Requires compute; when off, the CPU cull +
+    // drawIndexed path is used unchanged.
+    if (capabilities.computeShaders) {
+        ImGui::Checkbox("GPU-driven culling (indirect draw)", &gpuDrivenCulling);
+    } else {
+        ImGui::BeginDisabled();
+        bool off = false;
+        ImGui::Checkbox("GPU-driven culling (indirect draw)", &off);
+        ImGui::EndDisabled();
+    }
 
     // Render-target viewer
     if (ImGui::TreeNode("RTs")) {
