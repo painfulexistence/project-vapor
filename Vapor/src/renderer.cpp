@@ -363,6 +363,26 @@ void Renderer::registerStatsSources() {
     });
 }
 
+// Returns a cached grayscale / single-layer view of `src` for ImGui previews,
+// rebuilding it when the source RT is recreated (resize gives it a new id). The
+// view is non-owning, so destroying it never touches the source's image.
+TextureHandle Renderer::debugView(const char* key, TextureHandle src,
+                                  TextureSwizzle swizzle, Uint32 layer) {
+    if (!src.isValid()) return {};
+    auto& pv = previewViews[key];
+    if (pv.srcId != src.id) {
+        if (pv.view.isValid()) rhi->destroyTexture(pv.view);
+        TextureViewDesc vd;
+        vd.source = src;
+        vd.swizzle = swizzle;
+        vd.baseArrayLayer = layer;
+        vd.layerCount = 1;
+        pv.view = rhi->createTextureView(vd);
+        pv.srcId = src.id;
+    }
+    return pv.view;
+}
+
 // Reads the culled cluster buffer (host-visible) and reduces the 2D tile grid to
 // min/avg/max/non-empty light counts. Contains a waitIdle so the read sees the
 // GPU's writes — callers must throttle (StatsLog interval, or panel %N).
@@ -1323,6 +1343,11 @@ void Renderer::mainRenderPass() {
         // pushing here would corrupt it (the old billions-of-iterations hang).
         rhi->setFragmentBytes(&mainDebugFlags, sizeof(Uint32), 2);
     } else {
+        // Perf-isolation debug flags for the Metal PBR shader at buffer(12)
+        // (buffer(2) is the cluster buffer here — see the Vulkan note above —
+        // and buffer(11) is lightCounts, so 12 is the free slot). Same bits as
+        // the Vulkan path: bit0 skip point-light loop, bit1 skip shadow.
+        rhi->setFragmentBytes(&mainDebugFlags, sizeof(Uint32), 12);
         // Metal-via-RHI: real IBL outputs replace the neutral blacks —
         // irradiance(8), prefilter(9), brdfLUT(10).
         if (!iblNeedsUpdate) {
@@ -4530,12 +4555,22 @@ void Renderer::drawGraphicsImGui() {
         bool skipShadow = (mainDebugFlags & 2u) != 0u;
         if (ImGui::Checkbox("Skip shadow PCF (perf isolation)", &skipShadow))
             mainDebugFlags = (mainDebugFlags & ~2u) | (skipShadow ? 2u : 0u);
-        // Intermediate shadow textures (native Metal parity). Single-channel
-        // shadow RTs render in the red channel — no grayscale swizzle view on
-        // this path yet, but the structure is still legible.
-        preview("RT Shadow (screen)", shadowRT);
-        preview("Point Shadow (raw / heatmap)", pointShadowRT);
-        preview("Point Shadow (denoised)", pointShadowDenoisedRT);
+        // Intermediate shadow textures (native Metal parity). These are
+        // single-channel R16F/depth RTs; the RRR1 swizzle view renders them as
+        // grayscale instead of red-only.
+        preview("RT Shadow (screen)", debugView("shadowGray", shadowRT, TextureSwizzle::RRR1, 0));
+        preview("Point Shadow (raw / heatmap)", debugView("psRaw", pointShadowRT, TextureSwizzle::RRR1, 0));
+        preview("Point Shadow (denoised)", debugView("psDen", pointShadowDenoisedRT, TextureSwizzle::RRR1, 0));
+        // PSSM cascades: one 2D grayscale view per array layer of the 3-cascade
+        // depth array (createTextureView returns invalid for a missing layer, so
+        // the preview simply skips it).
+        for (Uint32 c = 0; c < 3u; ++c) {
+            char key[24];
+            std::snprintf(key, sizeof(key), "pssmC%u", c);
+            char label[40];
+            std::snprintf(label, sizeof(label), "PSSM Cascade %u (depth)", c);
+            preview(label, debugView(key, pssmShadowArrayTexture, TextureSwizzle::RRR1, c));
+        }
         ImGui::TreePop();
     }
 

@@ -955,6 +955,55 @@ TextureHandle RHI_Vulkan::createTexture(const TextureDesc& desc) {
     return TextureHandle{id};
 }
 
+TextureHandle RHI_Vulkan::createTextureView(const TextureViewDesc& desc) {
+    auto srcIt = textures.find(desc.source.id);
+    if (srcIt == textures.end()) return {};
+    const TextureResource& src = srcIt->second;
+
+    // Depth formats must be viewed through the DEPTH aspect.
+    bool isDepth = (src.format == VK_FORMAT_D32_SFLOAT ||
+                    src.format == VK_FORMAT_D24_UNORM_S8_UINT ||
+                    src.format == VK_FORMAT_D32_SFLOAT_S8_UINT ||
+                    src.format == VK_FORMAT_D16_UNORM);
+
+    VkImageViewCreateInfo info{};
+    info.sType = VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO;
+    info.image = src.image;
+    info.viewType = VK_IMAGE_VIEW_TYPE_2D;  // one layer, presented as a plain 2D
+    info.format = src.format;
+    if (desc.swizzle == TextureSwizzle::RRR1) {
+        info.components = { VK_COMPONENT_SWIZZLE_R, VK_COMPONENT_SWIZZLE_R,
+                            VK_COMPONENT_SWIZZLE_R, VK_COMPONENT_SWIZZLE_ONE };
+    } else {
+        info.components = { VK_COMPONENT_SWIZZLE_IDENTITY, VK_COMPONENT_SWIZZLE_IDENTITY,
+                            VK_COMPONENT_SWIZZLE_IDENTITY, VK_COMPONENT_SWIZZLE_IDENTITY };
+    }
+    info.subresourceRange.aspectMask =
+        isDepth ? VK_IMAGE_ASPECT_DEPTH_BIT : VK_IMAGE_ASPECT_COLOR_BIT;
+    info.subresourceRange.baseMipLevel = 0;
+    info.subresourceRange.levelCount = 1;
+    info.subresourceRange.baseArrayLayer = desc.baseArrayLayer;
+    info.subresourceRange.layerCount = desc.layerCount;
+
+    VkImageView view = VK_NULL_HANDLE;
+    if (vkCreateImageView(device, &info, nullptr, &view) != VK_SUCCESS) return {};
+
+    // View-only resource: image/memory left null so destroyTexture frees ONLY
+    // the view and never touches the source's image/allocation.
+    Uint32 id = nextTextureId++;
+    TextureResource r{};
+    r.image = VK_NULL_HANDLE;
+    r.memory = VK_NULL_HANDLE;
+    r.view = view;
+    r.format = src.format;
+    r.width = src.width;
+    r.height = src.height;
+    r.arrayLayers = desc.layerCount;
+    r.currentLayout = src.currentLayout;  // sampled RTs are SHADER_READ_ONLY
+    textures[id] = r;
+    return TextureHandle{id};
+}
+
 void RHI_Vulkan::destroyTexture(TextureHandle handle) {
     auto it = textures.find(handle.id);
     if (it != textures.end()) {

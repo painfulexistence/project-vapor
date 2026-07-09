@@ -391,6 +391,35 @@ TextureHandle RHI_Metal::createTexture(const TextureDesc& desc) {
     return TextureHandle{id};
 }
 
+TextureHandle RHI_Metal::createTextureView(const TextureViewDesc& desc) {
+    auto it = textures.find(desc.source.id);
+    if (it == textures.end() || !it->second.texture) return {};
+    MTL::Texture* src = it->second.texture.get();
+
+    MTL::TextureSwizzleChannels sw = (desc.swizzle == TextureSwizzle::RRR1)
+        ? MTL::TextureSwizzleChannels::Make(MTL::TextureSwizzleRed, MTL::TextureSwizzleRed,
+                                            MTL::TextureSwizzleRed, MTL::TextureSwizzleOne)
+        : MTL::TextureSwizzleChannels::Make(MTL::TextureSwizzleRed, MTL::TextureSwizzleGreen,
+                                            MTL::TextureSwizzleBlue, MTL::TextureSwizzleAlpha);
+
+    // newTextureView returns an owned (+1) object; TransferPtr is correct. The
+    // view retains the source's storage, so the source stays alive on its own.
+    auto view = NS::TransferPtr(src->newTextureView(
+        src->pixelFormat(), MTL::TextureType2D,
+        NS::Range::Make(0, 1),                                    // one mip
+        NS::Range::Make(desc.baseArrayLayer, desc.layerCount),   // one array slice
+        sw));
+    if (!view) return {};
+
+    Uint32 id = nextTextureId++;
+    TextureResource r{};
+    r.texture = view;
+    r.width = it->second.width;
+    r.height = it->second.height;
+    textures[id] = r;
+    return TextureHandle{id};
+}
+
 void RHI_Metal::destroyTexture(TextureHandle handle) {
     textures.erase(handle.id);
 }

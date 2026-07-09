@@ -385,6 +385,14 @@ private:
     // from initialize(); driven once per frame by StatsLog::tick() in beginFrame.
     void registerStatsSources();
 
+    // Cached debug-preview texture views (grayscale swizzle / single array
+    // layer) for the ImGui panels. Rebuilt when the source RT id changes (a
+    // resize recreates the RTs), keyed by a caller-supplied label.
+    struct PreviewView { TextureHandle view; Uint32 srcId = 0; };
+    std::unordered_map<std::string, PreviewView> previewViews;
+    TextureHandle debugView(const char* key, TextureHandle src,
+                            TextureSwizzle swizzle, Uint32 layer);
+
     // Post-processing helpers
     void initPostProcessing();
     void shutdownPostProcessing();

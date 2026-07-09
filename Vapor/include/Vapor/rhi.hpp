@@ -228,6 +228,22 @@ struct TextureDesc {
     TextureUsage usage = TextureUsage::Sampled;
 };
 
+// Component swizzle for texture views (currently just what debug previews need).
+enum class TextureSwizzle {
+    Identity,  // rgba -> rgba
+    RRR1,      // r -> rgb, 1 -> a  (single-channel depth/AO rendered as grayscale)
+};
+
+// A lightweight view over an existing texture: reinterprets a layer range and/or
+// applies a component swizzle without copying. Used for ImGui debug previews
+// (grayscale single-channel RTs, one PSSM cascade layer of an array as 2D).
+struct TextureViewDesc {
+    TextureHandle source;
+    Uint32 baseArrayLayer = 0;
+    Uint32 layerCount = 1;
+    TextureSwizzle swizzle = TextureSwizzle::Identity;
+};
+
 struct SamplerDesc {
     FilterMode minFilter = FilterMode::Linear;
     FilterMode magFilter = FilterMode::Linear;
@@ -423,6 +439,11 @@ public:
 
     virtual TextureHandle createTexture(const TextureDesc& desc) = 0;
     virtual void destroyTexture(TextureHandle handle) = 0;
+
+    // Create a non-owning view (layer range + swizzle) over an existing texture.
+    // Returns an invalid handle if the backend doesn't support it. destroyTexture
+    // on the returned handle frees only the view, never the source's image.
+    virtual TextureHandle createTextureView(const TextureViewDesc& /*desc*/) { return {}; }
 
     virtual ShaderHandle createShader(const ShaderDesc& desc) = 0;
     virtual void destroyShader(ShaderHandle handle) = 0;
