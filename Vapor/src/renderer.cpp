@@ -349,28 +349,41 @@ void Renderer::registerStatsSources() {
         s.add("tlasInst", static_cast<Uint32>(tlasInstances.size()));
     }, Vapor::StatsLog::Mode::OnChange);
 
-    // Tile-cull histogram: reads back the (host-visible) cluster buffer. The
-    // waitIdle only runs on emit frames while --stats is on (was VAPOR_CULL_DEBUG).
+    // Tile-cull histogram: reads back the (host-visible) cluster buffer via the
+    // shared helper. The waitIdle only runs on emit frames while --stats is on.
     log.addSource("CULL", [this](Vapor::StatLine& s) {
-        if (!clusterBuffer.isValid()) return;
-        rhi->waitIdle();
-        const Uint32 tileCount = clusterGridSizeX * clusterGridSizeY;  // 2D grid
-        auto* clusters = static_cast<const Vapor::Cluster*>(rhi->mapBuffer(clusterBuffer));
-        if (!clusters) return;
-        Uint32 mn = ~0u, mx = 0u, sum = 0u, nonEmpty = 0u;
-        for (Uint32 i = 0; i < tileCount; ++i) {
-            Uint32 c = clusters[i].lightCount;
-            mn = std::min(mn, c); mx = std::max(mx, c); sum += c;
-            if (c > 0) ++nonEmpty;
-        }
-        rhi->unmapBuffer(clusterBuffer);
-        s.add("tiles", tileCount);
+        Uint32 mn, avg, mx, nonEmpty;
+        if (!sampleClusterHistogram(mn, avg, mx, nonEmpty)) return;
+        s.add("tiles", clusterGridSizeX * clusterGridSizeY);
         s.add("pointLights", static_cast<Uint32>(pointLights.size()));
-        s.add("min", tileCount ? mn : 0u);
-        s.add("avg", tileCount ? sum / tileCount : 0u);
+        s.add("min", mn);
+        s.add("avg", avg);
         s.add("max", mx);
         s.add("nonEmpty", nonEmpty);
     });
+}
+
+// Reads the culled cluster buffer (host-visible) and reduces the 2D tile grid to
+// min/avg/max/non-empty light counts. Contains a waitIdle so the read sees the
+// GPU's writes — callers must throttle (StatsLog interval, or panel %N).
+bool Renderer::sampleClusterHistogram(Uint32& mn, Uint32& avg, Uint32& mx, Uint32& nonEmpty) {
+    if (!clusterBuffer.isValid()) return false;
+    rhi->waitIdle();
+    const Uint32 tileCount = clusterGridSizeX * clusterGridSizeY;  // 2D grid
+    auto* clusters = static_cast<const Vapor::Cluster*>(rhi->mapBuffer(clusterBuffer));
+    if (!clusters) return false;
+    Uint32 lo = ~0u, hi = 0u, sum = 0u, ne = 0u;
+    for (Uint32 i = 0; i < tileCount; ++i) {
+        Uint32 c = clusters[i].lightCount;
+        lo = std::min(lo, c); hi = std::max(hi, c); sum += c;
+        if (c > 0) ++ne;
+    }
+    rhi->unmapBuffer(clusterBuffer);
+    mn = tileCount ? lo : 0u;
+    avg = tileCount ? sum / tileCount : 0u;
+    mx = hi;
+    nonEmpty = ne;
+    return true;
 }
 
 // One GPU buffer per frame slot; `alias` always names the current frame's
@@ -1574,7 +1587,13 @@ void Renderer::tileCullingPass() {
         rhi->endComputePass();
     }
     rhi->computeBarrier();  // cluster writes -> fragment reads in Main
-    // (Per-tile light-count histogram moved to the StatsLog "CULL" source.)
+
+    // Refresh the Light Culling Debug panel's cached histogram while it's open.
+    // Throttled because sampleClusterHistogram() stalls (waitIdle). (The
+    // StatsLog "CULL" source covers the --stats path independently.)
+    if (lightCullDebugOpen && (frameNumber % 15) == 0) {
+        sampleClusterHistogram(cullMinLights, cullAvgLights, cullMaxLights, cullNonEmptyTiles);
+    }
 }
 
 // Sun/lens flare: procedural glow/halo/ghosts/starburst added over the HDR
@@ -4442,23 +4461,25 @@ void Renderer::drawGraphicsImGui() {
                 capabilities.gpuTimestamps ? "yes" : "no");
     ImGui::Text("Frame: %u", frameNumber);
 
+    // Aspect-correct texture preview, shared by the RTs and Shadow Debug nodes.
+    Uint32 rtW = rhi->getSwapchainWidth();
+    Uint32 rtH = rhi->getSwapchainHeight();
+    float rtAspect = rtH > 0 ? static_cast<float>(rtW) / static_cast<float>(rtH) : 1.0f;
+    auto preview = [&](const char* label, TextureHandle tex) {
+        if (!tex.isValid()) return;
+        if (ImGui::TreeNode(label)) {
+            ImGui::Text("%u x %u", rtW, rtH);
+            if (void* id = getImGuiTextureID(tex)) {
+                ImGui::Image((ImTextureID)(intptr_t)id, ImVec2(320, 320 / rtAspect));
+            } else {
+                ImGui::TextDisabled("(preview unavailable on this backend)");
+            }
+            ImGui::TreePop();
+        }
+    };
+
     // Render-target viewer
     if (ImGui::TreeNode("RTs")) {
-        Uint32 w = rhi->getSwapchainWidth();
-        Uint32 h = rhi->getSwapchainHeight();
-        float aspect = h > 0 ? static_cast<float>(w) / static_cast<float>(h) : 1.0f;
-        auto preview = [&](const char* label, TextureHandle tex) {
-            if (!tex.isValid()) return;
-            if (ImGui::TreeNode(label)) {
-                ImGui::Text("%u x %u", w, h);
-                if (void* id = getImGuiTextureID(tex)) {
-                    ImGui::Image((ImTextureID)(intptr_t)id, ImVec2(320, 320 / aspect));
-                } else {
-                    ImGui::TextDisabled("(preview unavailable on this backend)");
-                }
-                ImGui::TreePop();
-            }
-        };
         preview("Color RT", colorRT);
         preview("Normal RT", normalRT);
         preview("Shadow RT", shadowRT);
@@ -4474,25 +4495,47 @@ void Renderer::drawGraphicsImGui() {
     // labels match renderer_metal.cpp so users find the same knobs).
     // ------------------------------------------------------------------------
 
+    // Light Culling Debug (above Shadow Debug): live per-tile point-light counts
+    // from the tile cull, plus the perf-isolation toggle for the point-light
+    // loop. The avg is exactly the loop length the Main pass runs per pixel.
+    {
+        bool open = ImGui::TreeNode("Light Culling Debug");
+        lightCullDebugOpen = open;  // gates the throttled readback in tileCullingPass
+        if (open) {
+            ImGui::Text("Scene point lights: %zu", pointLights.size());
+            const Uint32 tiles = clusterGridSizeX * clusterGridSizeY;
+            ImGui::Text("Tiles: %u (%ux%u)", tiles, clusterGridSizeX, clusterGridSizeY);
+            ImGui::Text("Culled per tile:  avg %u   (min %u / max %u)",
+                        cullAvgLights, cullMinLights, cullMaxLights);
+            ImGui::Text("Non-empty tiles: %u / %u", cullNonEmptyTiles, tiles);
+            ImGui::TextDisabled("avg = point-light loop length per pixel (refreshed ~15f)");
+            bool skipPoint = (mainDebugFlags & 1u) != 0u;
+            if (ImGui::Checkbox("Skip point-light loop (perf isolation)", &skipPoint))
+                mainDebugFlags = (mainDebugFlags & ~1u) | (skipPoint ? 1u : 0u);
+            ImGui::TreePop();
+        }
+    }
+
     if (ImGui::TreeNode("Shadow Debug")) {
+        ImGui::Text("Raytracing: %s", capabilities.raytracing ? "yes" : "no");
         ImGui::SliderFloat("RT shadow max dist", &pssmRTMaxDist, 5.0f, 200.0f);
         int psd = static_cast<int>(pointShadowDebugMode);
         if (ImGui::Combo("Point shadow view", &psd, "Visibility (normal)\0Tile light-count heatmap\0")) {
             pointShadowDebugMode = static_cast<Uint32>(psd);
         }
-        ImGui::TreePop();
-    }
-
-    // Vulkan Main-pass perf isolation: toggle off the two heaviest per-pixel
-    // suspects and watch the Main ms in the GPU Pass Timings panel.
-    if (ImGui::TreeNode("Main Debug (perf)")) {
-        bool skipPoint = (mainDebugFlags & 1u) != 0u;
+        if (pointShadowDebugMode == 1) {
+            ImGui::TextWrapped("Heatmap: black = tile has 0 lights, brighter = more (8+ ~ white). "
+                               "Shown in 'Point Shadow (raw)' below.");
+        }
         bool skipShadow = (mainDebugFlags & 2u) != 0u;
-        if (ImGui::Checkbox("Skip point-light loop", &skipPoint))
-            mainDebugFlags = (mainDebugFlags & ~1u) | (skipPoint ? 1u : 0u);
-        if (ImGui::Checkbox("Skip shadow PCF", &skipShadow))
+        if (ImGui::Checkbox("Skip shadow PCF (perf isolation)", &skipShadow))
             mainDebugFlags = (mainDebugFlags & ~2u) | (skipShadow ? 2u : 0u);
-        ImGui::TextDisabled("Vulkan only; watch Main in GPU Pass Timings");
+        // Intermediate shadow textures (native Metal parity). Single-channel
+        // shadow RTs render in the red channel — no grayscale swizzle view on
+        // this path yet, but the structure is still legible.
+        preview("RT Shadow (screen)", shadowRT);
+        preview("Point Shadow (raw / heatmap)", pointShadowRT);
+        preview("Point Shadow (denoised)", pointShadowDenoisedRT);
         ImGui::TreePop();
     }
 
