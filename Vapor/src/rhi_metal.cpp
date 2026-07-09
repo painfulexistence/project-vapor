@@ -416,6 +416,10 @@ TextureHandle RHI_Metal::createTextureView(const TextureViewDesc& desc) {
     r.texture = view;
     r.width = it->second.width;
     r.height = it->second.height;
+    r.depth = 1;
+    r.mipLevels = 1;
+    r.bytesPerPixel = it->second.bytesPerPixel;
+    r.format = src->pixelFormat();  // the view keeps the source's format
     textures[id] = r;
     return TextureHandle{id};
 }

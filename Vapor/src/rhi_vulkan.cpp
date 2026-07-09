@@ -2415,6 +2415,23 @@ void RHI_Vulkan::recreateSwapchain() {
 
     createSwapchain();
     swapchainImageLayout = VK_IMAGE_LAYOUT_UNDEFINED;
+
+    // renderFinishedSemaphores are per-swapchain-image and consumed by
+    // endFrame() as [currentSwapchainImageIndex]. A recreate can change the
+    // image count (legal, and more likely under MoltenVK); if it grows, the old
+    // vector would be indexed out of bounds. Rebuild it to match. Safe to
+    // destroy here — vkDeviceWaitIdle above drained all in-flight use.
+    if (renderFinishedSemaphores.size() != swapchainImages.size()) {
+        for (auto& s : renderFinishedSemaphores) {
+            if (s != VK_NULL_HANDLE) vkDestroySemaphore(device, s, nullptr);
+        }
+        renderFinishedSemaphores.assign(swapchainImages.size(), VK_NULL_HANDLE);
+        VkSemaphoreCreateInfo semaphoreInfo{};
+        semaphoreInfo.sType = VK_STRUCTURE_TYPE_SEMAPHORE_CREATE_INFO;
+        for (auto& s : renderFinishedSemaphores) {
+            vkCreateSemaphore(device, &semaphoreInfo, nullptr, &s);
+        }
+    }
 }
 
 void RHI_Vulkan::createSwapchain() {
