@@ -16,7 +16,6 @@
 #include <fmt/core.h>
 #include <map>
 #include <algorithm>
-#include <cassert>
 #include <cstring>
 #include <cstdlib>
 #include <random>
@@ -81,14 +80,14 @@ void Renderer::initialize(std::unique_ptr<RHI> rhiPtr, GraphicsBackend backendTy
     }
     setupDefaultRenderGraph();
 
-    // Correctness invariant for the per-frame buffer slotting below: there must
-    // be at least one buffer slot per in-flight frame, or beginFrame() would
-    // rewrite a slot the GPU may still be reading (kFrameSlots wraps every
-    // kFrameSlots frames; the CPU can run getMaxFramesInFlight() frames ahead).
-    // kFrameSlots is a compile-time constant shared by both backends, so it must
-    // be >= the largest backend's frame count. Assert rather than silently race.
-    assert(kFrameSlots >= rhi->getMaxFramesInFlight() &&
-           "kFrameSlots must be >= backend frames-in-flight (per-frame buffer slotting invariant)");
+    // Per-frame buffer slotting keeps exactly one buffer slot per in-flight
+    // frame, so beginFrame() never rewrites a slot the GPU may still be reading:
+    // the slot index wraps every frameSlotCount frames and the CPU runs at most
+    // getMaxFramesInFlight() frames ahead. Deriving the count from the backend
+    // here (rather than a renderer-side constant) makes it the single source of
+    // truth — it cannot drift out of sync. Must be set before the first
+    // createFrameSlottedBuffer() call below.
+    frameSlotCount = rhi->getMaxFramesInFlight();
 
     // Create uniform buffers. Everything rewritten per frame goes through
     // createFrameSlottedBuffer (see renderer.hpp: frames-in-flight slotting).
@@ -343,7 +342,8 @@ void Renderer::createFrameSlottedBuffer(BufferHandle& alias, const BufferDesc& d
                                         const void* initData, size_t initSize) {
     FrameSlottedBuffer sb;
     sb.alias = &alias;
-    for (Uint32 i = 0; i < kFrameSlots; i++) {
+    sb.slots.resize(frameSlotCount);
+    for (Uint32 i = 0; i < frameSlotCount; i++) {
         sb.slots[i] = rhi->createBuffer(desc);
         if (initData && initSize > 0) {
             rhi->updateBuffer(sb.slots[i], initData, 0, initSize);
@@ -384,12 +384,12 @@ void Renderer::shutdown() {
                 break;
         }
 
-        // Destroy buffers. Slotted buffers own kFrameSlots handles each — the
+        // Destroy buffers. Slotted buffers own one handle per frame slot — the
         // alias members point at one of them, so only the registry is walked.
         for (auto& sb : frameSlottedBuffers) {
-            for (Uint32 i = 0; i < kFrameSlots; i++) {
-                if (sb.slots[i].isValid()) {
-                    rhi->destroyBuffer(sb.slots[i]);
+            for (auto& slot : sb.slots) {
+                if (slot.isValid()) {
+                    rhi->destroyBuffer(slot);
                 }
             }
             *sb.alias = {};
@@ -667,7 +667,7 @@ void Renderer::beginFrame(const CameraRenderData& camera) {
     // Rotate every frames-in-flight buffer slot BEFORE anything writes frame
     // data: all named aliases (cameraUniformBuffer, instanceDataBuffer, ...)
     // now point at a buffer no in-flight frame reads.
-    frameSlotIndex = (frameSlotIndex + 1) % kFrameSlots;
+    frameSlotIndex = (frameSlotIndex + 1) % frameSlotCount;
     for (auto& sb : frameSlottedBuffers) {
         *sb.alias = sb.slots[frameSlotIndex];
     }

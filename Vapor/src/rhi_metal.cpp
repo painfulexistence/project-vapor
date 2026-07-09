@@ -91,8 +91,9 @@ bool RHI_Metal::initialize(SDL_Window* window) {
     initGpuTiming();
 
     // One permit per in-flight frame; beginFrame() waits, the completion handler
-    // signals. Value must match getMaxFramesInFlight() (and the renderer's
-    // kFrameSlots) so the CPU is never more than that many frames ahead.
+    // signals. getMaxFramesInFlight() is the single source of truth (the renderer
+    // sizes its per-frame buffer slots off it too), so the CPU is never more than
+    // that many frames ahead.
     frameSemaphore = dispatch_semaphore_create(getMaxFramesInFlight());
 
     // Device capabilities. Raytracing is force-disabled on CI runners: the

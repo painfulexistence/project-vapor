@@ -182,9 +182,10 @@ private:
     std::vector<VkSemaphore> renderFinishedSemaphores;
     std::vector<VkFence> inFlightFences;
 
-    // Current frame. Kept equal to the Metal backend's getMaxFramesInFlight()
-    // and to the renderer's kFrameSlots so per-frame buffer slotting has exactly
-    // one slot per in-flight frame (invariant: kFrameSlots >= this value).
+    // Current frame. This is the backend's own frames-in-flight and the value
+    // getMaxFramesInFlight() returns; the renderer derives its per-frame buffer
+    // slot count from it, so one slot per in-flight frame is guaranteed. Kept at
+    // 3 to match the Metal backend.
     const Uint32 MAX_FRAMES_IN_FLIGHT = 3;
     Uint32 currentFrameInFlight = 0;
     Uint32 currentSwapchainImageIndex = 0;

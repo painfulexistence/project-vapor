@@ -503,10 +503,15 @@ private:
     // named alias member (e.g. cameraUniformBuffer) at the current slot so
     // all bind/update sites stay unchanged.
     // ------------------------------------------------------------------------
-    static constexpr Uint32 kFrameSlots = 3;  // >= max frames in flight on any backend
+    // Slot count is not a renderer-side constant: it follows the backend's
+    // frames-in-flight (rhi->getMaxFramesInFlight()), the single source of truth
+    // for how far the CPU can run ahead of the GPU. One slot per in-flight frame
+    // is exactly the no-race minimum. Set once at init, before the first
+    // createFrameSlottedBuffer() call.
+    Uint32 frameSlotCount = 0;
     struct FrameSlottedBuffer {
         BufferHandle* alias;
-        BufferHandle slots[kFrameSlots];
+        std::vector<BufferHandle> slots;  // frameSlotCount entries
     };
     std::vector<FrameSlottedBuffer> frameSlottedBuffers;
     Uint32 frameSlotIndex = 0;
