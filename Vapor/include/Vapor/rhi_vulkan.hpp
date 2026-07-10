@@ -124,6 +124,7 @@ public:
     void bindComputePipeline(ComputePipelineHandle pipeline) override;
     void setComputeBuffer(Uint32 binding, BufferHandle buffer, size_t offset, size_t range) override;
     void setComputeTexture(Uint32 binding, TextureHandle texture) override;
+    void setComputeSampledTexture(Uint32 binding, TextureHandle texture, SamplerHandle sampler) override;
     void setComputeBytes(const void* data, size_t size, Uint32 binding) override;
     void setAccelerationStructure(Uint32 binding, AccelStructHandle accelStruct) override;
     void dispatch(Uint32 groupCountX, Uint32 groupCountY, Uint32 groupCountZ) override;
@@ -322,13 +323,16 @@ private:
     bool descriptorsDirty = true;
 
     // Compute follows the same model with its own global layout:
-    //   set 0 = storage buffers (setComputeBuffer)
-    //   set 1 = storage images  (setComputeTexture, transitioned to GENERAL)
+    //   set 0 = storage buffers  (setComputeBuffer)
+    //   set 1 = storage images   (setComputeTexture, transitioned to GENERAL, imageLoad)
+    //   set 2 = sampled textures (setComputeSampledTexture, SHADER_READ, textureLod)
     VkDescriptorSetLayout computeBufferSetLayout = VK_NULL_HANDLE;
     VkDescriptorSetLayout computeImageSetLayout = VK_NULL_HANDLE;
+    VkDescriptorSetLayout computeSampledSetLayout = VK_NULL_HANDLE;
     VkPipelineLayout computePipelineLayout = VK_NULL_HANDLE;
     BufferBinding boundComputeBuffers[BINDINGS_PER_SET];
     VkImageView boundComputeImages[BINDINGS_PER_SET] = {};
+    TextureBinding boundComputeSampled[BINDINGS_PER_SET] = {};
     bool computeDescriptorsDirty = true;
     void flushComputeDescriptors();
 

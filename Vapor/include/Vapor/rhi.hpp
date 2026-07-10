@@ -541,7 +541,12 @@ public:
     virtual void endComputePass() = 0;
     virtual void bindComputePipeline(ComputePipelineHandle pipeline) = 0;
     virtual void setComputeBuffer(Uint32 binding, BufferHandle buffer, size_t offset = 0, size_t range = 0) = 0;
+    // Storage-image bind (imageLoad/imageStore, single mip, no filtering).
     virtual void setComputeTexture(Uint32 binding, TextureHandle texture) = 0;
+    // Sampled bind: the compute shader reads via a sampler (textureLod), so it
+    // can sample any mip of a mipped texture — needed for hierarchical Hi-Z.
+    // Default no-op so backends without it still link; Vulkan/Metal override.
+    virtual void setComputeSampledTexture(Uint32 /*binding*/, TextureHandle /*texture*/, SamplerHandle /*sampler*/) {}
     virtual void setAccelerationStructure(Uint32 binding, AccelStructHandle accelStruct) = 0;
     // Small inline constants for compute (Metal: setBytes at the given buffer
     // index; Vulkan: compute push constants at (binding%4)*16, 16 bytes/slot).

@@ -427,15 +427,25 @@ void RHI_Vulkan::createDescriptorInfrastructure() {
         if (vkCreateDescriptorSetLayout(device, &info, nullptr, &computeImageSetLayout) != VK_SUCCESS) {
             throw std::runtime_error("Failed to create compute image set layout");
         }
+        // Set 2 = sampled textures (setComputeSampledTexture): combined image
+        // samplers so a compute shader can textureLod() a mipped texture (Hi-Z),
+        // which the storage-image path (set 1, imageLoad only) cannot do.
+        for (Uint32 i = 0; i < BINDINGS_PER_SET; i++) {
+            bindings[i].descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
+        }
+        if (vkCreateDescriptorSetLayout(device, &info, nullptr, &computeSampledSetLayout) != VK_SUCCESS) {
+            throw std::runtime_error("Failed to create compute sampled set layout");
+        }
 
-        VkDescriptorSetLayout computeSets[2] = { computeBufferSetLayout, computeImageSetLayout };
+        VkDescriptorSetLayout computeSets[3] = { computeBufferSetLayout, computeImageSetLayout,
+                                                 computeSampledSetLayout };
         VkPushConstantRange computePush{};
         computePush.stageFlags = VK_SHADER_STAGE_COMPUTE_BIT;
         computePush.offset = 0;
         computePush.size = 128;
         VkPipelineLayoutCreateInfo computeLayoutInfo{};
         computeLayoutInfo.sType = VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO;
-        computeLayoutInfo.setLayoutCount = 2;
+        computeLayoutInfo.setLayoutCount = 3;
         computeLayoutInfo.pSetLayouts = computeSets;
         computeLayoutInfo.pushConstantRangeCount = 1;
         computeLayoutInfo.pPushConstantRanges = &computePush;
@@ -484,7 +494,7 @@ void RHI_Vulkan::destroyDescriptorInfrastructure() {
         computePipelineLayout = VK_NULL_HANDLE;
     }
     for (VkDescriptorSetLayout* layout : { &vertexBufferSetLayout, &fragmentBufferSetLayout, &textureSetLayout,
-                                           &computeBufferSetLayout, &computeImageSetLayout }) {
+                                           &computeBufferSetLayout, &computeImageSetLayout, &computeSampledSetLayout }) {
         if (*layout != VK_NULL_HANDLE) {
             vkDestroyDescriptorSetLayout(device, *layout, nullptr);
             *layout = VK_NULL_HANDLE;
@@ -2851,21 +2861,42 @@ void RHI_Vulkan::setComputeTexture(Uint32 binding, TextureHandle texture) {
     }
 }
 
+void RHI_Vulkan::setComputeSampledTexture(Uint32 binding, TextureHandle texture, SamplerHandle sampler) {
+    auto it = textures.find(texture.id);
+    auto sIt = samplers.find(sampler.id);
+    if (it == textures.end() || sIt == samplers.end() || binding >= BINDINGS_PER_SET) {
+        return;
+    }
+    // Sampled read: SHADER_READ_ONLY layout (not GENERAL). Runs outside any
+    // render pass, so the transition is legal here. The whole-mip view lets the
+    // shader textureLod() any level (Hi-Z pyramid sampling).
+    transitionImage(it->second.image, it->second.currentLayout,
+                    VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL, VK_IMAGE_ASPECT_COLOR_BIT);
+    it->second.currentLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
+    TextureBinding& cur = boundComputeSampled[binding];
+    if (cur.view != it->second.view || cur.sampler != sIt->second.sampler) {
+        cur = { it->second.view, sIt->second.sampler };
+        computeDescriptorsDirty = true;
+    }
+}
+
 void RHI_Vulkan::flushComputeDescriptors() {
     if (!computeDescriptorsDirty || currentCommandBuffer == VK_NULL_HANDLE) {
         return;
     }
     computeDescriptorsDirty = false;
 
-    VkDescriptorSetLayout layouts[2] = { computeBufferSetLayout, computeImageSetLayout };
-    static_assert(sizeof(layouts) / sizeof(layouts[0]) == 2,
-                  "writes[] below is sized for 2 sets; keep the multiplier in sync "
-                  "with the set count to avoid a silent overflow");
-    VkDescriptorSet sets[2];
+    VkDescriptorSetLayout layouts[3] = { computeBufferSetLayout, computeImageSetLayout,
+                                         computeSampledSetLayout };
+    constexpr Uint32 kComputeSetCount = sizeof(layouts) / sizeof(layouts[0]);
+    static_assert(kComputeSetCount == 3,
+                  "writes[] below is sized for this many sets; keep the multiplier in "
+                  "sync with the set count to avoid a silent overflow");
+    VkDescriptorSet sets[kComputeSetCount];
     VkDescriptorSetAllocateInfo allocInfo{};
     allocInfo.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO;
     allocInfo.descriptorPool = descriptorPools[currentFrameInFlight];
-    allocInfo.descriptorSetCount = 2;
+    allocInfo.descriptorSetCount = kComputeSetCount;
     allocInfo.pSetLayouts = layouts;
     if (vkAllocateDescriptorSets(device, &allocInfo, sets) != VK_SUCCESS) {
         if (frameCounter != lastDescExhaustFrame) {
@@ -2876,12 +2907,13 @@ void RHI_Vulkan::flushComputeDescriptors() {
         }
         return;
     }
-    statsDescriptorSets += 2;
+    statsDescriptorSets += kComputeSetCount;
 
-    VkWriteDescriptorSet writes[BINDINGS_PER_SET * 2];
+    VkWriteDescriptorSet writes[BINDINGS_PER_SET * kComputeSetCount];
     VkDescriptorBufferInfo bufferInfos[BINDINGS_PER_SET];
     VkDescriptorImageInfo imageInfos[BINDINGS_PER_SET];
-    Uint32 writeCount = 0, bufferCount = 0, imageCount = 0;
+    VkDescriptorImageInfo sampledInfos[BINDINGS_PER_SET];
+    Uint32 writeCount = 0, bufferCount = 0, imageCount = 0, sampledCount = 0;
 
     for (Uint32 i = 0; i < BINDINGS_PER_SET; i++) {
         if (boundComputeBuffers[i].buffer == VK_NULL_HANDLE) continue;
@@ -2909,12 +2941,26 @@ void RHI_Vulkan::flushComputeDescriptors() {
         w.descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_IMAGE;
         w.pImageInfo = &info;
     }
+    for (Uint32 i = 0; i < BINDINGS_PER_SET; i++) {
+        if (boundComputeSampled[i].view == VK_NULL_HANDLE) continue;
+        VkDescriptorImageInfo& info = sampledInfos[sampledCount++];
+        info = { boundComputeSampled[i].sampler, boundComputeSampled[i].view,
+                 VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL };
+        VkWriteDescriptorSet& w = writes[writeCount++];
+        w = {};
+        w.sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
+        w.dstSet = sets[2];
+        w.dstBinding = i;
+        w.descriptorCount = 1;
+        w.descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
+        w.pImageInfo = &info;
+    }
 
     if (writeCount > 0) {
         vkUpdateDescriptorSets(device, writeCount, writes, 0, nullptr);
     }
     vkCmdBindDescriptorSets(currentCommandBuffer, VK_PIPELINE_BIND_POINT_COMPUTE,
-                            computePipelineLayout, 0, 2, sets, 0, nullptr);
+                            computePipelineLayout, 0, kComputeSetCount, sets, 0, nullptr);
 }
 
 void RHI_Vulkan::setAccelerationStructure(Uint32 binding, AccelStructHandle accelStruct) {

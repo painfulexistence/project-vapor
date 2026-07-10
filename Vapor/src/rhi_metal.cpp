@@ -1768,6 +1768,21 @@ void RHI_Metal::setComputeTexture(Uint32 binding, TextureHandle texture) {
     }
 }
 
+void RHI_Metal::setComputeSampledTexture(Uint32 binding, TextureHandle texture, SamplerHandle sampler) {
+    // Metal samples in compute the same way as in fragment: the texture at a
+    // texture index plus a sampler state at the matching sampler index. (Unlike
+    // Vulkan, there is no separate storage-vs-sampled layout to manage.)
+    auto texIt = textures.find(texture.id);
+    auto samplerIt = samplers.find(sampler.id);
+    if (!currentComputeEncoder) return;
+    if (texIt != textures.end()) {
+        currentComputeEncoder->setTexture(texIt->second.texture.get(), binding);
+    }
+    if (samplerIt != samplers.end()) {
+        currentComputeEncoder->setSamplerState(samplerIt->second.sampler.get(), binding);
+    }
+}
+
 void RHI_Metal::setAccelerationStructure(Uint32 binding, AccelStructHandle accelStruct) {
     auto it = accelStructs.find(accelStruct.id);
     if (std::getenv("VAPOR_RT_DEBUG")) {
