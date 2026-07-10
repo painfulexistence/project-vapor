@@ -579,6 +579,12 @@ public:
     virtual void setGpuTimingEnabled(bool /*enabled*/) {}
     virtual bool isGpuTimingEnabled() const { return false; }
     virtual std::vector<GpuPassTiming> getGpuPassTimings() { return {}; }
+    // Wall-clock span of the whole frame's GPU work (first sample -> last
+    // sample), in ms. THIS is the number comparable to frame time. Summing the
+    // per-pass timings is NOT: on TBDR GPUs (Apple) pass windows overlap
+    // heavily, so a sum double-counts the same GPU time many times over.
+    // 0.0 = backend doesn't report it.
+    virtual double getGpuFrameSpanMs() { return 0.0; }
 
     // ========================================================================
     // Backend Query Interface (for backend-specific operations)

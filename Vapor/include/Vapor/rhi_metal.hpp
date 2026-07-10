@@ -140,6 +140,7 @@ public:
     void setGpuTimingEnabled(bool enabled) override { gpuTimingEnabled = enabled; }
     bool isGpuTimingEnabled() const override { return gpuTimingEnabled; }
     std::vector<GpuPassTiming> getGpuPassTimings() override;
+    double getGpuFrameSpanMs() override;
 
     // ========================================================================
     // Backend Query Interface
@@ -308,7 +309,8 @@ private:
     NS::UInteger timingBaseSlot = 0;                // this frame's region base
     NS::UInteger timingRegion = 0;                  // rotating region index
     std::vector<GpuPassTiming> gpuPassTimings;      // last resolved results
-    std::mutex gpuTimingMutex;                      // guards gpuPassTimings
+    double gpuFrameSpanMs = 0.0;                    // minBegin->maxEnd of last frame
+    std::mutex gpuTimingMutex;                      // guards gpuPassTimings + span
     bool gpuTimingSupported = false;
     bool gpuTimingEnabled = false;
     bool gpuTimingActiveThisFrame = false;          // latched at beginFrame

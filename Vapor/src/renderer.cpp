@@ -4851,7 +4851,18 @@ void Renderer::drawGpuTimingsImGui() {
         totalMs += t.gpuTimeMs;
         maxMs = std::max(maxMs, t.gpuTimeMs);
     }
-    ImGui::Text("Total GPU: %.3f ms", totalMs);
+    // Frame GPU span (first sample -> last sample) is the number comparable to
+    // frame time. The naive sum of per-pass windows is NOT: TBDR (Apple)
+    // overlaps passes, so the sum double-counts the same GPU time many times
+    // over — that sum was the fake "5<->200ms oscillation" this panel used to
+    // show as "Total GPU".
+    double spanMs = rhi->getGpuFrameSpanMs();
+    if (spanMs > 0.0) {
+        ImGui::Text("Frame GPU span: %.3f ms", spanMs);
+        ImGui::TextDisabled("Sum of pass windows: %.3f ms (overlaps double-count on TBDR)", totalMs);
+    } else {
+        ImGui::Text("Total GPU: %.3f ms", totalMs);
+    }
     ImGui::Separator();
     if (ImGui::BeginTable("##gpu_pass_timings", 3,
                           ImGuiTableFlags_Borders | ImGuiTableFlags_RowBg | ImGuiTableFlags_SizingFixedFit)) {

@@ -271,6 +271,7 @@ void RHI_Metal::resolveGpuTimings() {
             // few spikes' shape — per-pass begin/end offsets relative to the
             // frame's first sample — so the mechanism is identifiable on sight.
             const uint64_t firstBegin = timestamps[capturedInfo.front().beginIdx - base].timestamp;
+            uint64_t minBegin = ~0ull;
             uint64_t maxEnd = 0;
             char spikeBuf[512];
             int spikeLen = 0;
@@ -281,6 +282,7 @@ void RHI_Metal::resolveGpuTimings() {
                 for (const auto& info : capturedInfo) {
                     uint64_t begin = timestamps[info.beginIdx - base].timestamp;
                     uint64_t end = timestamps[info.endIdx - base].timestamp;
+                    minBegin = std::min(minBegin, begin);
                     maxEnd = std::max(maxEnd, end);
                     double ms = (end >= begin) ? static_cast<double>(end - begin) / 1e6 : 0.0;
                     gpuPassTimings.push_back({info.name, ms});
@@ -291,6 +293,12 @@ void RHI_Metal::resolveGpuTimings() {
                                              static_cast<double>(static_cast<int64_t>(end - firstBegin)) / 1e6);
                     }
                 }
+                // The frame's true GPU wall span. The panel shows this instead
+                // of summing pass windows — TBDR overlaps passes, so a sum
+                // double-counts the same time many times over (the fake
+                // "5<->200ms oscillation" was exactly that sum).
+                gpuFrameSpanMs = (maxEnd > minBegin)
+                    ? static_cast<double>(maxEnd - minBegin) / 1e6 : 0.0;
             }
             if (spikeLen > 0 && gpuSpikeReportsLeft.fetch_sub(1, std::memory_order_relaxed) > 0) {
                 fprintf(stderr, "[GPUT] f=%u late=%u span=%.1fms spikes:%s\n",
@@ -315,6 +323,11 @@ void RHI_Metal::resolveGpuTimings() {
 std::vector<GpuPassTiming> RHI_Metal::getGpuPassTimings() {
     std::lock_guard<std::mutex> lock(gpuTimingMutex);
     return gpuPassTimings;
+}
+
+double RHI_Metal::getGpuFrameSpanMs() {
+    std::lock_guard<std::mutex> lock(gpuTimingMutex);
+    return gpuFrameSpanMs;
 }
 
 void RHI_Metal::shutdown() {
