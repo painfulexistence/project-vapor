@@ -1781,7 +1781,7 @@ void Renderer::hizBuildPass() {
 
     auto reduce = [&](TextureHandle src, int srcLod, Uint32 dstMip) {
         RenderPassDesc rp;
-        rp.name = "HiZReduce";
+        rp.name = "HiZBuild";  // one per mip; the HUD aggregates them into one row
         rp.colorAttachments.push_back(hizTexture);
         rp.clearColors.push_back(glm::vec4(0.0f));
         rp.loadColor.push_back(false);  // full overwrite
@@ -5176,11 +5176,26 @@ void Renderer::drawGpuTimingsImGui() {
         return;
 
     auto timings = rhi->getGpuPassTimings();
+
+    // Aggregate passes that share a name into one row (with an occurrence count).
+    // Several passes fan out over multiple invocations — the Hi-Z build issues
+    // one "HiZBuild" pass per mip, bloom one "BloomDownsample" per level — and a
+    // row per invocation buries the useful per-effect total. Insertion order is
+    // preserved so the table still reads top-to-bottom in frame order.
+    struct Agg { std::string name; double ms; int count; };
+    std::vector<Agg> agg;
+    for (const auto& t : timings) {
+        auto it = std::find_if(agg.begin(), agg.end(),
+                               [&](const Agg& a) { return a.name == t.name; });
+        if (it == agg.end()) agg.push_back({ t.name, t.gpuTimeMs, 1 });
+        else { it->ms += t.gpuTimeMs; it->count++; }
+    }
+
     double totalMs = 0.0;
     double maxMs = 0.001;
-    for (const auto& t : timings) {
-        totalMs += t.gpuTimeMs;
-        maxMs = std::max(maxMs, t.gpuTimeMs);
+    for (const auto& a : agg) {
+        totalMs += a.ms;
+        maxMs = std::max(maxMs, a.ms);
     }
     ImGui::Text("Total GPU: %.3f ms", totalMs);
     ImGui::Separator();
@@ -5190,14 +5205,15 @@ void Renderer::drawGpuTimingsImGui() {
         ImGui::TableSetupColumn("ms", ImGuiTableColumnFlags_WidthFixed, 60.0f);
         ImGui::TableSetupColumn("", ImGuiTableColumnFlags_WidthStretch);
         ImGui::TableHeadersRow();
-        for (const auto& t : timings) {
+        for (const auto& a : agg) {
             ImGui::TableNextRow();
             ImGui::TableSetColumnIndex(0);
-            ImGui::TextUnformatted(t.name.c_str());
+            if (a.count > 1) ImGui::Text("%s (x%d)", a.name.c_str(), a.count);
+            else ImGui::TextUnformatted(a.name.c_str());
             ImGui::TableSetColumnIndex(1);
-            ImGui::Text("%.3f", t.gpuTimeMs);
+            ImGui::Text("%.3f", a.ms);
             ImGui::TableSetColumnIndex(2);
-            ImGui::ProgressBar(static_cast<float>(t.gpuTimeMs / maxMs), ImVec2(-1.0f, 0.0f), "");
+            ImGui::ProgressBar(static_cast<float>(a.ms / maxMs), ImVec2(-1.0f, 0.0f), "");
         }
         ImGui::EndTable();
     }
