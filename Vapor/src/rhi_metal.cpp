@@ -262,14 +262,43 @@ void RHI_Metal::resolveGpuTimings() {
         NS::Data* data = capturedBuf->resolveCounterRange(NS::Range::Make(base, count));
         if (data) {
             auto* timestamps = reinterpret_cast<const MTL::CounterResultTimestamp*>(data->mutableBytes());
-            std::lock_guard<std::mutex> lock(gpuTimingMutex);
-            gpuPassTimings.clear();
-            gpuPassTimings.reserve(capturedInfo.size());
-            for (const auto& info : capturedInfo) {
-                uint64_t begin = timestamps[info.beginIdx - base].timestamp;
-                uint64_t end = timestamps[info.endIdx - base].timestamp;
-                double ms = (end >= begin) ? static_cast<double>(end - begin) / 1e6 : 0.0;
-                gpuPassTimings.push_back({info.name, ms});
+            // Spike capture: with region reuse completion-gated, every value here
+            // was sampled within THIS frame's command buffer — even a stale
+            // (unwritten) slot holds a value from a single ~one-frame span, so a
+            // >50ms delta cannot be cross-frame pollution. It must be a real
+            // wall-clock gap inside the pass's [vertexStart, fragmentEnd] window
+            // (drawable/present back-pressure, GPU preemption). Print the first
+            // few spikes' shape — per-pass begin/end offsets relative to the
+            // frame's first sample — so the mechanism is identifiable on sight.
+            const uint64_t firstBegin = timestamps[capturedInfo.front().beginIdx - base].timestamp;
+            uint64_t maxEnd = 0;
+            char spikeBuf[512];
+            int spikeLen = 0;
+            {
+                std::lock_guard<std::mutex> lock(gpuTimingMutex);
+                gpuPassTimings.clear();
+                gpuPassTimings.reserve(capturedInfo.size());
+                for (const auto& info : capturedInfo) {
+                    uint64_t begin = timestamps[info.beginIdx - base].timestamp;
+                    uint64_t end = timestamps[info.endIdx - base].timestamp;
+                    maxEnd = std::max(maxEnd, end);
+                    double ms = (end >= begin) ? static_cast<double>(end - begin) / 1e6 : 0.0;
+                    gpuPassTimings.push_back({info.name, ms});
+                    if (ms > 50.0 && spikeLen < static_cast<int>(sizeof(spikeBuf)) - 96) {
+                        spikeLen += snprintf(spikeBuf + spikeLen, sizeof(spikeBuf) - spikeLen,
+                                             " %s=%.1fms(b%+.1f,e%+.1f)", info.name.c_str(), ms,
+                                             static_cast<double>(static_cast<int64_t>(begin - firstBegin)) / 1e6,
+                                             static_cast<double>(static_cast<int64_t>(end - firstBegin)) / 1e6);
+                    }
+                }
+            }
+            if (spikeLen > 0 && gpuSpikeReportsLeft.fetch_sub(1, std::memory_order_relaxed) > 0) {
+                fprintf(stderr, "[GPUT] f=%u late=%u span=%.1fms spikes:%s\n",
+                        registeredFrame,
+                        latestTimingFrame.load(std::memory_order_relaxed) - registeredFrame,
+                        static_cast<double>(static_cast<int64_t>(maxEnd - firstBegin)) / 1e6,
+                        spikeBuf);
+                fflush(stderr);
             }
         }
         // Race telemetry: how many frames after registration did this handler

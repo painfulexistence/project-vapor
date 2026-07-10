@@ -329,6 +329,10 @@ private:
     std::atomic<uint32_t> statsTimingSkips{0};
     std::atomic<uint32_t> statsHandlerLateMax{0};
     uint32_t timingFrameCounter = 0;
+    // One-shot spike capture budget: the first few >50ms pass deltas print a
+    // [GPUT] line with per-pass begin/end offsets so the mechanism (drawable
+    // wait vs preemption vs bad data) is identifiable from the shape.
+    std::atomic<int> gpuSpikeReportsLeft{12};
 
     // ========================================================================
     // Internal Helpers
