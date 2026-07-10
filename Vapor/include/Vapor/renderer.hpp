@@ -740,6 +740,20 @@ private:
     BufferHandle gpuCullArgsBuffer;  // DrawCommand[MAX_INSTANCES], frame-slotted
     bool gpuDrivenCulling = false;
 
+    // Hi-Z occlusion culling (requires gpuDrivenCulling). A depth pyramid built
+    // from the PrePass depth; the cull compute rejects instances whose screen
+    // AABB is fully behind the recorded occluders. Off by default; the reduce
+    // pass and the cull's occlusion branch both no-op unless this is on.
+    bool gpuOcclusionCulling = false;
+    void setGpuOcclusionCulling(bool e) { gpuOcclusionCulling = e; }
+    bool isGpuOcclusionCulling() const { return gpuOcclusionCulling; }
+    TextureHandle hizTexture;         // R32F, full mip chain, max-depth pyramid
+    TextureHandle hizScratchTexture;  // staging for the single-texture build
+    Uint32 hizWidth = 0, hizHeight = 0, hizMipCount = 0;
+    PipelineHandle hizReducePipeline;
+    ShaderHandle hizReduceFS;  // Vulkan reuses the fullscreen VS; Metal is one file
+    void hizBuildPass();
+
     // True single-call multi-draw indirect (Vulkan only): one vkCmdDrawIndexedIndirect
     // per material batch over a merged scene vertex/index buffer, instead of one
     // indirect draw per object. Metal keeps the per-object loop (single-call MDI

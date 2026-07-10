@@ -467,6 +467,17 @@ public:
     // Recorded into the batched upload stream like updateTexture.
     virtual void generateMipmaps(TextureHandle handle) = 0;
 
+    // Copy one mip level (layer 0) of src into one mip level of dst, recorded on
+    // the current frame's command buffer (between passes, not inside one). src
+    // and dst must be different textures; the two mip levels must have matching
+    // dimensions. Used to stage a Hi-Z level through a scratch texture so the
+    // pyramid can be built in a single sampleable texture without a read/write
+    // feedback loop. Both images are left in a shader-readable state afterwards
+    // (a copy's result is meant to be sampled next; setTexture does not itself
+    // transition). Default no-op so backends without it still link.
+    virtual void copyTexture(TextureHandle /*src*/, Uint32 /*srcMip*/,
+                             TextureHandle /*dst*/, Uint32 /*dstMip*/) {}
+
     // Uploads to GPU-only resources are recorded into a shared upload command
     // stream and submitted automatically before the next frame's rendering
     // (or when the staging ring fills). Call this to force an immediate

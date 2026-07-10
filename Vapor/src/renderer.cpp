@@ -852,8 +852,14 @@ void Renderer::setupDefaultRenderGraph() {
     renderGraph.addPass("Shadow",
         [](Renderer& r) { r.shadowPass(); });
 
-    // GPU-driven frustum cull -> indirect draw args. No-op unless the
-    // gpuDrivenCulling flag is set; the pass itself early-outs otherwise.
+    // Hi-Z depth pyramid from the PrePass depth (feeds occlusion culling below).
+    // No-op unless both gpuDrivenCulling and gpuOcclusionCulling are set. Must sit
+    // after PrePass (needs its depth) and before GpuCull (which samples the Hi-Z).
+    renderGraph.addPass("HiZBuild",
+        [](Renderer& r) { r.hizBuildPass(); });
+
+    // GPU-driven frustum (+ optional Hi-Z occlusion) cull -> indirect draw args.
+    // No-op unless the gpuDrivenCulling flag is set; the pass itself early-outs otherwise.
     renderGraph.addPass("GpuCull",
         [](Renderer& r) { r.gpuCullPass(); }, PassFlags::RequiresCompute);
 
@@ -1762,6 +1768,46 @@ void Renderer::tileCullingPass() {
 // 0 = culled). The main pass then issues per-object drawIndexedIndirect, so the
 // GPU decides what actually draws. Vulkan-only for now; no-op unless the
 // gpuDrivenCulling flag is set. The existing CPU cull path is untouched.
+// Build the Hi-Z depth pyramid from the PrePass depth: mip 0 is a 2:1 max-depth
+// reduction of the scene depth; each further mip max-reduces the previous. Built
+// into a single sampleable texture via a scratch copy per level, because a
+// render pass can't read and write the same image (see copyTexture).
+void Renderer::hizBuildPass() {
+    if (!gpuDrivenCulling || !gpuOcclusionCulling) return;
+    if (!hizReducePipeline.isValid() || !hizTexture.isValid() ||
+        !hizScratchTexture.isValid() || !depthStencilRT.isValid() || hizMipCount == 0) {
+        return;
+    }
+
+    auto reduce = [&](TextureHandle src, int srcLod, Uint32 dstMip) {
+        RenderPassDesc rp;
+        rp.name = "HiZReduce";
+        rp.colorAttachments.push_back(hizTexture);
+        rp.clearColors.push_back(glm::vec4(0.0f));
+        rp.loadColor.push_back(false);  // full overwrite
+        rp.colorMipLevel = dstMip;
+        // hizTexture is multi-mip: force the single-mip subresource-view path in
+        // both backends (a whole-texture multi-mip view is invalid as a color
+        // attachment). layer 0 is the only layer of this 2D texture.
+        rp.colorArrayLayer = 0;
+        rhi->beginRenderPass(rp);
+        rhi->bindPipeline(hizReducePipeline);
+        rhi->setTexture(0, 0, src, clampSampler);
+        rhi->setFragmentBytes(&srcLod, sizeof(int), 0);  // source mip to reduce
+        rhi->draw(3, 1, 0, 0);
+        rhi->endRenderPass();
+    };
+
+    // Level 0: reduce the full-res scene depth into the half-res mip 0.
+    reduce(depthStencilRT, 0, 0);
+    // Levels 1..N-1: stage the previous level through the scratch (a render pass
+    // can't sample hizTexture while targeting it), then reduce into this level.
+    for (Uint32 mip = 1; mip < hizMipCount; mip++) {
+        rhi->copyTexture(hizTexture, mip - 1, hizScratchTexture, mip - 1);
+        reduce(hizScratchTexture, int(mip - 1), mip);
+    }
+}
+
 void Renderer::gpuCullPass() {
     if (!gpuDrivenCulling) return;
     if (!gpuCullPipeline.isValid() || !gpuCullArgsBuffer.isValid()) return;
@@ -1775,10 +1821,28 @@ void Renderer::gpuCullPass() {
     // instances.length() equals the live instance count.
     rhi->setComputeBuffer(1, instanceDataBuffer, 0, sizeof(Vapor::InstanceData) * n);
     rhi->setComputeBuffer(2, gpuCullArgsBuffer, 0, sizeof(Vapor::DrawCommand) * n);
+
+    // Hi-Z occlusion inputs. Always bound (the shader declares them) so the
+    // resources are valid even when occlusion is off; `enabled` gates the test.
+    // hizTexture always exists; its contents are only meaningful once hizBuildPass
+    // has run this frame, which happens iff occlusion is enabled.
+    struct OccParams { Uint32 enabled; Uint32 mipCount; float hizW; float hizH; } occ;
+    occ.enabled = (gpuOcclusionCulling && hizTexture.isValid()) ? 1u : 0u;
+    occ.mipCount = hizMipCount;
+    occ.hizW = float(hizWidth);
+    occ.hizH = float(hizHeight);
+
     // The MSL kernel can't use .length() on a device pointer, so Metal takes the
-    // instance count as an explicit constant at buffer(3).
+    // instance count as an explicit constant at buffer(3). Binding indices differ
+    // per backend: Vulkan set 2/binding 0 + push constant; Metal texture/sampler/
+    // buffer index 4 (see GpuCull.comp / 3d_gpu_cull.metal).
     if (backend == GraphicsBackend::Metal) {
         rhi->setComputeBytes(&n, sizeof(Uint32), 3);
+        rhi->setComputeSampledTexture(4, hizTexture, clampSampler);
+        rhi->setComputeBytes(&occ, sizeof(occ), 4);
+    } else {
+        rhi->setComputeSampledTexture(0, hizTexture, clampSampler);
+        rhi->setComputeBytes(&occ, sizeof(occ), 0);
     }
     rhi->dispatch((n + 63) / 64, 1, 1);
     rhi->endComputePass();
@@ -3321,6 +3385,29 @@ void Renderer::createRenderTargets() {
         depthStencilRT = rhi->createTexture(desc);
     }
 
+    // Hi-Z depth pyramid (half-res mip 0, full max-depth mip chain) + a scratch
+    // twin used to stage each level (see hizBuildPass: a single sampleable
+    // texture can't be read and written in the same pass, so a mip is copied to
+    // the scratch and reduced back). R32F color so a compute shader can textureLod
+    // it. Only the GPU-occlusion path uses these, but they're cheap to always have.
+    {
+        if (hizTexture.isValid()) rhi->destroyTexture(hizTexture);
+        if (hizScratchTexture.isValid()) rhi->destroyTexture(hizScratchTexture);
+        hizWidth = std::max(1u, (width + 1) / 2);
+        hizHeight = std::max(1u, (height + 1) / 2);
+        hizMipCount = 1;
+        for (Uint32 d = std::max(hizWidth, hizHeight); d > 1; d >>= 1) hizMipCount++;
+
+        TextureDesc desc;
+        desc.width = hizWidth;
+        desc.height = hizHeight;
+        desc.mipLevels = hizMipCount;
+        desc.format = PixelFormat::R32_FLOAT;
+        desc.usage = TextureUsage::RenderTarget | TextureUsage::Sampled;
+        hizTexture = rhi->createTexture(desc);
+        hizScratchTexture = rhi->createTexture(desc);
+    }
+
     // Create color RT (MSAA and resolved, HDR format)
     {
         TextureDesc desc;
@@ -3646,6 +3733,8 @@ void Renderer::createRenderPipeline() {
             bloomBrightPipeline      = makeFullscreenFragPipeline("shaders/BloomBright.frag.spv",     bloomBrightShader,     BlendMode::Opaque);
             bloomDownsamplePipeline  = makeFullscreenFragPipeline("shaders/BloomDownsample.frag.spv", bloomDownsampleShader, BlendMode::Opaque);
             bloomUpsamplePipeline    = makeFullscreenFragPipeline("shaders/BloomUpsample.frag.spv",   bloomUpsampleShader,   BlendMode::Additive);
+            // Hi-Z reduce: fullscreen max-depth downsample into an R32F mip.
+            hizReducePipeline        = makeFullscreenFragPipeline("shaders/HiZReduce.frag.spv",       hizReduceFS,           BlendMode::Opaque, PixelFormat::R32_FLOAT);
 
             // Sky/atmosphere: fullscreen into the HDR colorRT, depth-tested
             // (LessOrEqual at z=1.0) so it only fills background pixels; no
@@ -4034,6 +4123,9 @@ void Renderer::createRenderPipeline() {
                                             BlendMode::Opaque, { PixelFormat::RGBA16_FLOAT }, false, CompareOp::Less);
         bloomDownsamplePipeline = makeMetalPass("shaders/3d_bloom_downsample.metal", "vertexMain", "fragmentMain",
                                                 BlendMode::Opaque, { PixelFormat::RGBA16_FLOAT }, false, CompareOp::Less);
+        // Hi-Z reduce: fullscreen max-depth downsample into an R32F mip.
+        hizReducePipeline = makeMetalPass("shaders/3d_hiz_reduce.metal", "vertexMain", "fragmentMain",
+                                          BlendMode::Opaque, { PixelFormat::R32_FLOAT }, false, CompareOp::Less);
         // Native upsample blends in-shader (texBlend at texture(1)) — Opaque,
         // unlike the Vulkan twin's additive-blend pipeline.
         bloomUpsamplePipeline = makeMetalPass("shaders/3d_bloom_upsample.metal", "vertexMain", "fragmentMain",

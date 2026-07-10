@@ -682,6 +682,28 @@ void RHI_Metal::generateMipmaps(TextureHandle handle) {
     ensureUploadBlit()->generateMipmaps(it->second.texture.get());
 }
 
+void RHI_Metal::copyTexture(TextureHandle src, Uint32 srcMip, TextureHandle dst, Uint32 dstMip) {
+    if (!currentCommandBuffer) return;
+    auto sit = textures.find(src.id);
+    auto dit = textures.find(dst.id);
+    if (sit == textures.end() || dit == textures.end() || src.id == dst.id) return;
+
+    // Must record on the frame command buffer (not the upload blit, which runs
+    // before the frame) so the copy is ordered between the Hi-Z reduce passes.
+    // One encoder at a time: close any open render/compute encoder first.
+    if (currentRenderEncoder) { currentRenderEncoder->endEncoding(); currentRenderEncoder = nullptr; }
+    if (currentComputeEncoder) { currentComputeEncoder->endEncoding(); currentComputeEncoder = nullptr; }
+
+    MTL::Texture* s = sit->second.texture.get();
+    MTL::Texture* d = dit->second.texture.get();
+    MTL::Size size = MTL::Size::Make(std::max<NS::UInteger>(1, d->width() >> dstMip),
+                                     std::max<NS::UInteger>(1, d->height() >> dstMip), 1);
+    auto blit = currentCommandBuffer->blitCommandEncoder();
+    blit->copyFromTexture(s, 0, srcMip, MTL::Origin::Make(0, 0, 0), size,
+                          d, 0, dstMip, MTL::Origin::Make(0, 0, 0));
+    blit->endEncoding();
+}
+
 BufferHandle RHI_Metal::copySwapchainToBuffer(Uint32& outWidth, Uint32& outHeight) {
     if (!currentDrawable) {
         fmt::print(stderr, "No current drawable for screenshot\n");

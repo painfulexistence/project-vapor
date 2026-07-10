@@ -1442,6 +1442,40 @@ void RHI_Vulkan::generateMipmaps(TextureHandle handle) {
     tex.currentLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
 }
 
+void RHI_Vulkan::copyTexture(TextureHandle src, Uint32 srcMip, TextureHandle dst, Uint32 dstMip) {
+    if (currentCommandBuffer == VK_NULL_HANDLE) return;
+    auto sit = textures.find(src.id);
+    auto dit = textures.find(dst.id);
+    if (sit == textures.end() || dit == textures.end() || src.id == dst.id) return;
+    TextureResource& s = sit->second;
+    TextureResource& d = dit->second;
+
+    // Whole-image transitions (the RHI tracks one layout per image): src -> SRC,
+    // dst -> DST. Already-built mips of dst come along harmlessly; the next
+    // sample/attachment use transitions the image again.
+    transitionImage(s.image, s.currentLayout, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, VK_IMAGE_ASPECT_COLOR_BIT);
+    s.currentLayout = VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL;
+    transitionImage(d.image, d.currentLayout, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, VK_IMAGE_ASPECT_COLOR_BIT);
+    d.currentLayout = VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL;
+
+    VkImageCopy region{};
+    region.srcSubresource = { VK_IMAGE_ASPECT_COLOR_BIT, srcMip, 0, 1 };
+    region.dstSubresource = { VK_IMAGE_ASPECT_COLOR_BIT, dstMip, 0, 1 };
+    region.extent = { std::max(1u, d.width >> dstMip), std::max(1u, d.height >> dstMip), 1 };
+    vkCmdCopyImage(currentCommandBuffer,
+                   s.image, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
+                   d.image, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
+                   1, &region);
+
+    // Leave both sampleable: setTexture() (graphics) does not transition layouts,
+    // so a copy-then-sample caller (Hi-Z build) needs SHADER_READ here. A later
+    // beginRenderPass re-transitions whichever image it targets.
+    transitionImage(s.image, s.currentLayout, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL, VK_IMAGE_ASPECT_COLOR_BIT);
+    s.currentLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
+    transitionImage(d.image, d.currentLayout, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL, VK_IMAGE_ASPECT_COLOR_BIT);
+    d.currentLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
+}
+
 BufferHandle RHI_Vulkan::copySwapchainToBuffer(Uint32& outWidth, Uint32& outHeight) {
     if (currentCommandBuffer == VK_NULL_HANDLE) {
         return BufferHandle{};  // frame was skipped
