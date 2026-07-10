@@ -4837,6 +4837,13 @@ void Renderer::drawGraphicsImGui() {
         ImGui::Checkbox("  -> multi-draw indirect (per material)", &gpuDrivenMDI);
         ImGui::EndDisabled();
         if (!mdiAvailable) gpuDrivenMDI = false;
+        // Hi-Z occlusion culling: builds a depth pyramid (HiZBuild pass) and
+        // rejects instances hidden behind nearer geometry, on top of the frustum
+        // cull. Also requires GPU-driven culling (it refines the same indirect args).
+        ImGui::BeginDisabled(!gpuDrivenCulling);
+        ImGui::Checkbox("  -> Hi-Z occlusion culling", &gpuOcclusionCulling);
+        ImGui::EndDisabled();
+        if (!gpuDrivenCulling) gpuOcclusionCulling = false;
     } else {
         ImGui::BeginDisabled();
         bool off = false;
