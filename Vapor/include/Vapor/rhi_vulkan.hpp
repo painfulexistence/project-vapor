@@ -395,6 +395,10 @@ private:
     float timestampPeriodNs = 0.0f;
     bool gpuTimingSupported = false;
     bool gpuTimingEnabled = false;
+    // Portability-subset (MoltenVK) may forbid non-identity image-view swizzle;
+    // createTextureView falls back to identity when this is false. Default true
+    // for full Vulkan (no portability subset present).
+    bool imageViewSwizzleSupported = true;
     bool gpuTimingActiveThisFrame = false;
     std::mutex gpuTimingMutex;
     std::vector<GpuPassTiming> gpuPassTimings;

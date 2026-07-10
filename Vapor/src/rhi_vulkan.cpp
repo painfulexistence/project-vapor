@@ -971,7 +971,11 @@ TextureHandle RHI_Vulkan::createTextureView(const TextureViewDesc& desc) {
     info.image = src.image;
     info.viewType = VK_IMAGE_VIEW_TYPE_2D;  // one layer, presented as a plain 2D
     info.format = src.format;
-    if (desc.swizzle == TextureSwizzle::RRR1) {
+    // Non-identity swizzle is forbidden under portability subset when
+    // imageViewFormatSwizzle is unsupported (MoltenVK) — fall back to identity
+    // there. The preview then renders the raw single channel (red) instead of
+    // grayscale, but stays validation-clean; full Vulkan gets the swizzle.
+    if (desc.swizzle == TextureSwizzle::RRR1 && imageViewSwizzleSupported) {
         info.components = { VK_COMPONENT_SWIZZLE_R, VK_COMPONENT_SWIZZLE_R,
                             VK_COMPONENT_SWIZZLE_R, VK_COMPONENT_SWIZZLE_ONE };
     } else {
@@ -2358,6 +2362,16 @@ void RHI_Vulkan::createLogicalDevice() {
         // MoltenVK requires enabling portability_subset when it is present
         if (has(VK_KHR_PORTABILITY_SUBSET_EXTENSION_NAME)) {
             deviceExtensions.push_back(VK_KHR_PORTABILITY_SUBSET_EXTENSION_NAME);
+            // Portability subset can forbid non-identity image-view swizzle
+            // (VUID-VkImageViewCreateInfo-imageViewFormatSwizzle-04465;
+            // imageViewFormatSwizzle == VK_FALSE on MoltenVK). The feature struct
+            // that would report it precisely is beta-gated in the headers, so
+            // rather than enable beta extensions globally, conservatively treat
+            // the subset's mere presence as "no swizzle": createTextureView then
+            // uses identity components (preview shows the raw channel instead of
+            // grayscale). Full Vulkan never advertises this extension, so it
+            // keeps the swizzle.
+            imageViewSwizzleSupported = false;
         }
     }
 
