@@ -275,6 +275,8 @@ void RHI_Metal::resolveGpuTimings() {
             uint64_t maxEnd = 0;
             char spikeBuf[512];
             int spikeLen = 0;
+            std::vector<std::pair<uint64_t, uint64_t>> windows;
+            windows.reserve(capturedInfo.size());
             {
                 std::lock_guard<std::mutex> lock(gpuTimingMutex);
                 gpuPassTimings.clear();
@@ -284,6 +286,7 @@ void RHI_Metal::resolveGpuTimings() {
                     uint64_t end = timestamps[info.endIdx - base].timestamp;
                     minBegin = std::min(minBegin, begin);
                     maxEnd = std::max(maxEnd, end);
+                    if (end > begin) windows.emplace_back(begin, end);
                     double ms = (end >= begin) ? static_cast<double>(end - begin) / 1e6 : 0.0;
                     gpuPassTimings.push_back({info.name, ms});
                     if (ms > 50.0 && spikeLen < static_cast<int>(sizeof(spikeBuf)) - 96) {
@@ -296,9 +299,22 @@ void RHI_Metal::resolveGpuTimings() {
                 // The frame's true GPU wall span. The panel shows this instead
                 // of summing pass windows — TBDR overlaps passes, so a sum
                 // double-counts the same time many times over (the fake
-                // "5<->200ms oscillation" was exactly that sum).
+                // "5<->200ms oscillation" was exactly that sum). Note span is
+                // LATENCY: pipelined frames overlap, so it can exceed the frame
+                // period at steady state.
                 gpuFrameSpanMs = (maxEnd > minBegin)
                     ? static_cast<double>(maxEnd - minBegin) / 1e6 : 0.0;
+                // Occupancy approximation: interval-union of the pass windows
+                // (overlap counted once, gaps excluded). Comparable to the
+                // frame period: ~equal means GPU-bound.
+                std::sort(windows.begin(), windows.end());
+                uint64_t busy = 0, curB = 0, curE = 0;
+                for (const auto& [b, e] : windows) {
+                    if (b > curE) { busy += curE - curB; curB = b; curE = e; }
+                    else if (e > curE) { curE = e; }
+                }
+                busy += curE - curB;
+                gpuFrameBusyMs = static_cast<double>(busy) / 1e6;
             }
             if (spikeLen > 0 && gpuSpikeReportsLeft.fetch_sub(1, std::memory_order_relaxed) > 0) {
                 fprintf(stderr, "[GPUT] f=%u late=%u span=%.1fms spikes:%s\n",
@@ -328,6 +344,11 @@ std::vector<GpuPassTiming> RHI_Metal::getGpuPassTimings() {
 double RHI_Metal::getGpuFrameSpanMs() {
     std::lock_guard<std::mutex> lock(gpuTimingMutex);
     return gpuFrameSpanMs;
+}
+
+double RHI_Metal::getGpuFrameBusyMs() {
+    std::lock_guard<std::mutex> lock(gpuTimingMutex);
+    return gpuFrameBusyMs;
 }
 
 void RHI_Metal::shutdown() {
