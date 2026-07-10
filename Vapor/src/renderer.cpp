@@ -4851,27 +4851,22 @@ void Renderer::drawGpuTimingsImGui() {
         totalMs += t.gpuTimeMs;
         maxMs = std::max(maxMs, t.gpuTimeMs);
     }
-    // Three distinct numbers, each meaning something different on a pipelined
-    // TBDR GPU (Apple):
-    //   busy = interval-UNION of pass windows -> occupancy; compare THIS to the
-    //          frame period (~equal = GPU-bound).
-    //   span = first sample -> last sample -> per-frame LATENCY; pipelined
-    //          frames overlap, so span > frame period at steady state is
-    //          normal (e.g. 20ms span at 90fps = pipeline depth ~1.8).
-    //   sum  = naive total of windows; double-counts overlap (was the fake
-    //          "5<->200ms oscillation") — shown only as a labeled footnote.
+    // Metal uses chained end-timestamps (native parity): pass time = gap
+    // between consecutive pass completions, so the per-pass values are
+    // ADDITIVE — they sum to the frame's GPU span. Span is per-frame LATENCY:
+    // pipelined frames overlap, so span > frame period at steady state is
+    // healthy (e.g. 20ms span at 90fps = pipeline depth ~1.8). busy is only
+    // reported by backends with per-pass windows (currently none).
     double spanMs = rhi->getGpuFrameSpanMs();
     double busyMs = rhi->getGpuFrameBusyMs();
     if (spanMs > 0.0) {
         if (busyMs > 0.0) {
             ImGui::Text("GPU busy (approx): %.3f ms", busyMs);
-            ImGui::SameLine();
-            ImGui::TextDisabled("(vs frame period -> GPU-bound?)");
         }
         ImGui::Text("GPU frame latency (span): %.3f ms", spanMs);
         ImGui::SameLine();
         ImGui::TextDisabled("(overlaps adjacent frames)");
-        ImGui::TextDisabled("Sum of pass windows: %.3f ms (double-counts on TBDR)", totalMs);
+        ImGui::TextDisabled("Sum of passes: %.3f ms", totalMs);
     } else {
         ImGui::Text("Total GPU: %.3f ms", totalMs);
     }

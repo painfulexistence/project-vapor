@@ -290,13 +290,21 @@ private:
     // GPU Pass Timing (MTLCounterSampleBuffer timestamps, AtStageBoundary)
     // ========================================================================
 
+    // Chained end-timestamps, same scheme as the native renderer: slots are
+    // [frame-anchor, end0, end1, ..., endN-1] with beginIdx[K] == endIdx[K-1],
+    // so pass K's time is the gap between consecutive pass completions. On TBDR
+    // fragment kicks serialize, which makes that gap the pass's own cost — and
+    // the deltas are additive (they sum exactly to the frame span). Sampling
+    // each pass's [vertexStart, fragmentEnd] window instead is useless there:
+    // every pass's vertex kick runs near frame start, so every window reads
+    // ~frame time (the "all passes ~10ms" panel).
     struct PassSampleInfo {
         std::string name;
-        NS::UInteger beginIdx;
+        NS::UInteger beginIdx;  // == previous pass's endIdx (or the frame anchor)
         NS::UInteger endIdx;
     };
 
-    static constexpr NS::UInteger GPU_TIMER_SAMPLE_COUNT = 64;  // slot budget per frame region
+    static constexpr NS::UInteger GPU_TIMER_SAMPLE_COUNT = 64;  // slots per frame region (1/pass + anchor)
     // The sample buffer is partitioned into kTimingRegions per-frame regions and
     // rotated each frame (same idea as the staging ring): a frame writes region
     // R and its completion handler reads only region R, which no other in-flight
@@ -392,6 +400,10 @@ private:
     void initGpuTiming();
     // Reserves a slot pair and records the pass; returns false when timing is
     // off or the per-frame slot budget is exhausted.
-    bool allocateTimingSlots(const char* passName, NS::UInteger& outBegin, NS::UInteger& outEnd);
+    // outSampleBegin is true only for the frame's first timed pass, which must
+    // also write the frame anchor (its start-of-stage sample); every later pass
+    // writes only its end and chains off the previous end.
+    bool allocateTimingSlots(const char* passName, bool& outSampleBegin,
+                             NS::UInteger& outBegin, NS::UInteger& outEnd);
     void resolveGpuTimings();  // installs completion handler on current command buffer
 };
