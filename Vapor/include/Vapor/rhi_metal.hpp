@@ -7,6 +7,8 @@
 #include <Foundation/Foundation.hpp>
 #include <Metal/Metal.hpp>
 #include <QuartzCore/QuartzCore.hpp>
+#include <array>
+#include <atomic>
 #include <mutex>
 #include <string>
 #include <unordered_map>
@@ -310,6 +312,23 @@ private:
     bool gpuTimingSupported = false;
     bool gpuTimingEnabled = false;
     bool gpuTimingActiveThisFrame = false;          // latched at beginFrame
+
+    // Completion-gated region reuse + race telemetry. Rotation alone only makes
+    // reuse safe if a region's completion handler runs within kTimingRegions
+    // frames — a starved handler still races a fresh writer. So a region is
+    // marked busy when its resolve handler is registered and freed when the
+    // handler finishes; beginFrame SKIPS timing for a frame whose next region is
+    // still busy instead of racing. The two counters go out via the [MTL] stats
+    // line so the actual failure mode is measured, not guessed:
+    //   statsTimingSkips        — frames that skipped timing (busy region)
+    //   statsHandlerLateMax     — max handler lateness seen, in frames
+    // If spikes persist while both stay ~0, the cause is NOT stale-slot pairing
+    // (points at TBDR vertex/fragment kick separation or GPU clock domain).
+    std::array<std::atomic<bool>, kTimingRegions> timingRegionBusy{};
+    std::atomic<uint32_t> latestTimingFrame{0};
+    std::atomic<uint32_t> statsTimingSkips{0};
+    std::atomic<uint32_t> statsHandlerLateMax{0};
+    uint32_t timingFrameCounter = 0;
 
     // ========================================================================
     // Internal Helpers

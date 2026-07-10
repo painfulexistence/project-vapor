@@ -110,6 +110,12 @@ bool RHI_Metal::initialize(SDL_Window* window) {
         s.add("pendingUpCmds", pendingUploadCmds.size());
         s.add("oversize", oversizeStaging.size());
         s.add("stagingOff_KB", stagingRingOffset / 1024);
+        // GPU-timing race telemetry (read-and-reset per interval): frames that
+        // skipped timing because their region's handler hadn't run, and the max
+        // handler lateness in frames. Both ~0 while spikes persist would rule
+        // OUT stale-slot pairing as the spike mechanism.
+        s.add("tSkips/int", statsTimingSkips.exchange(0));
+        s.add("tLateMax/int", statsHandlerLateMax.exchange(0));
     });
 
     return true;
@@ -246,19 +252,34 @@ void RHI_Metal::resolveGpuTimings() {
     // now — we never read those slots, so there is no cross-frame race.
     NS::UInteger base = capturedInfo.front().beginIdx;
     NS::UInteger count = capturedInfo.back().endIdx + 1 - base;
-    currentCommandBuffer->addCompletedHandler([this, capturedInfo, capturedBuf, base, count](MTL::CommandBuffer*) {
+    // Gate this region against reuse until the handler below has read it, and
+    // stamp the registration frame so handler lateness is measurable.
+    const NS::UInteger region = timingBaseSlot / GPU_TIMER_SAMPLE_COUNT;
+    timingRegionBusy[region].store(true, std::memory_order_release);
+    const uint32_t registeredFrame = timingFrameCounter;
+    currentCommandBuffer->addCompletedHandler([this, capturedInfo, capturedBuf, base, count,
+                                               region, registeredFrame](MTL::CommandBuffer*) {
         NS::Data* data = capturedBuf->resolveCounterRange(NS::Range::Make(base, count));
-        if (!data) return;
-        auto* timestamps = reinterpret_cast<const MTL::CounterResultTimestamp*>(data->mutableBytes());
-        std::lock_guard<std::mutex> lock(gpuTimingMutex);
-        gpuPassTimings.clear();
-        gpuPassTimings.reserve(capturedInfo.size());
-        for (const auto& info : capturedInfo) {
-            uint64_t begin = timestamps[info.beginIdx - base].timestamp;
-            uint64_t end = timestamps[info.endIdx - base].timestamp;
-            double ms = (end >= begin) ? static_cast<double>(end - begin) / 1e6 : 0.0;
-            gpuPassTimings.push_back({info.name, ms});
+        if (data) {
+            auto* timestamps = reinterpret_cast<const MTL::CounterResultTimestamp*>(data->mutableBytes());
+            std::lock_guard<std::mutex> lock(gpuTimingMutex);
+            gpuPassTimings.clear();
+            gpuPassTimings.reserve(capturedInfo.size());
+            for (const auto& info : capturedInfo) {
+                uint64_t begin = timestamps[info.beginIdx - base].timestamp;
+                uint64_t end = timestamps[info.endIdx - base].timestamp;
+                double ms = (end >= begin) ? static_cast<double>(end - begin) / 1e6 : 0.0;
+                gpuPassTimings.push_back({info.name, ms});
+            }
         }
+        // Race telemetry: how many frames after registration did this handler
+        // run? >= kTimingRegions would have raced the old rotation-only scheme.
+        uint32_t late = latestTimingFrame.load(std::memory_order_relaxed) - registeredFrame;
+        uint32_t prev = statsHandlerLateMax.load(std::memory_order_relaxed);
+        while (late > prev &&
+               !statsHandlerLateMax.compare_exchange_weak(prev, late, std::memory_order_relaxed)) {}
+        // ALWAYS free the region (also on the !data path) or timing wedges.
+        timingRegionBusy[region].store(false, std::memory_order_release);
     });
 }
 
@@ -907,11 +928,25 @@ void RHI_Metal::beginFrame() {
     // Latch GPU timing for this frame (the flag may be toggled mid-frame from
     // the UI; slot bookkeeping must stay consistent within a frame).
     gpuTimingActiveThisFrame = gpuTimingEnabled && gpuTimingSupported;
-    // Rotate to this frame's timing region so a completion handler reads slots
-    // no other in-flight frame is overwriting (see kTimingRegions).
-    timingBaseSlot = timingRegion * GPU_TIMER_SAMPLE_COUNT;
-    nextTimingSlot = timingBaseSlot;
-    timingRegion = (timingRegion + 1) % kTimingRegions;
+    ++timingFrameCounter;
+    latestTimingFrame.store(timingFrameCounter, std::memory_order_relaxed);
+    if (gpuTimingActiveThisFrame) {
+        // Rotate to this frame's timing region — but ONLY if its previous
+        // completion handler has finished reading it. A handler starved past
+        // kTimingRegions frames would otherwise race the GPU rewriting the
+        // region (fresh begin paired with a frames-old end -> fabricated
+        // multi-frame pass times). Skipping one frame of timing is always
+        // preferable to publishing garbage; the skip is counted for the
+        // [MTL] stats line.
+        if (timingRegionBusy[timingRegion].load(std::memory_order_acquire)) {
+            gpuTimingActiveThisFrame = false;
+            statsTimingSkips.fetch_add(1, std::memory_order_relaxed);
+        } else {
+            timingBaseSlot = timingRegion * GPU_TIMER_SAMPLE_COUNT;
+            nextTimingSlot = timingBaseSlot;
+            timingRegion = (timingRegion + 1) % kTimingRegions;
+        }
+    }
     framePassSamples.clear();
 }
 
