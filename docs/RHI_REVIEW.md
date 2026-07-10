@@ -65,7 +65,7 @@ work — the natural "RHI v2" follow-up.
 |---|------|---------|----------|
 | H1 | arch | Binding-model leak (see above): dead `(set,binding)` API, push-constant offsets + buffer indices in the consumer, unenforced per-shader contract | `renderer.cpp:1272-1368`, `rhi.hpp:305,517-527` |
 | H2 | vulkan | `recreateSwapchain()` does **not** resize `renderFinishedSemaphores`; if a resize changes the swapchain image count (legal, likelier on MoltenVK), `endFrame` indexes the per-image semaphore vector out of bounds → heap corruption | `rhi_vulkan.cpp:2402` vs `:2574`, used `:1746` |
-| H3 | metal | Multi-geometry BLAS build overwrites itself — the per-geometry loop assigns `resource.accelStruct`/`scratchBuffer` each iteration, so a BLAS with N geometries keeps only the last; earlier geometry silently never intersects | `rhi_metal.cpp:1519-1553` |
+| H3 | metal | ~~Multi-geometry BLAS build overwrites itself — the per-geometry loop assigns `resource.accelStruct`/`scratchBuffer` each iteration, so a BLAS with N geometries keeps only the last~~ **FIXED**: accumulate all geometry descriptors, build once. Was latent (one geometry per BLAS today, mirroring native's one-BLAS-per-mesh model); not a rotate/sync bug — a plain accumulate-vs-overwrite. | `rhi_metal.cpp:1519-1553` |
 | H4 | metal | GPU timestamp race — one shared `gpuTimerSampleBuffer` reused across in-flight frames; a late completion handler reads slots a newer frame overwrote → spurious ~200ms pass readings (already diagnosed) | `rhi_metal.cpp:236-259`, `hpp:296` |
 
 ### Medium

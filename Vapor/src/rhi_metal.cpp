@@ -1528,14 +1528,20 @@ void RHI_Metal::buildAccelerationStructure(AccelStructHandle handle) {
         // (uniform white / R=1) while TLAS/bind diagnostics all look valid.
         submitUploads(true);
 
-        // Build BLAS from geometries
+        // Collect ALL of this BLAS's geometry descriptors, then build ONE
+        // acceleration structure containing them. The old loop rebuilt a
+        // single-geometry BLAS per iteration and reassigned resource.accelStruct
+        // each time, so only the LAST geometry survived (latent today because
+        // each BLAS holds one mesh, but a landmine for any multi-geometry mesh).
+        // Accumulating also collapses N commit+waitUntilCompleted stalls into 1.
+        std::vector<NS::SharedPtr<MTL::AccelerationStructureTriangleGeometryDescriptor>> geoms;
+        geoms.reserve(resource.geometries.size());
         for (const auto& geom : resource.geometries) {
             auto vertexBufIt = buffers.find(geom.vertexBuffer.id);
             auto indexBufIt = buffers.find(geom.indexBuffer.id);
             if (vertexBufIt == buffers.end() || indexBufIt == buffers.end()) {
                 continue;
             }
-
             auto geomDesc = NS::TransferPtr(MTL::AccelerationStructureTriangleGeometryDescriptor::alloc()->init());
             geomDesc->setVertexBuffer(vertexBufIt->second.buffer.get());
             geomDesc->setVertexBufferOffset(0);
@@ -1544,25 +1550,30 @@ void RHI_Metal::buildAccelerationStructure(AccelStructHandle handle) {
             geomDesc->setIndexBufferOffset(0);
             geomDesc->setIndexType(MTL::IndexTypeUInt32);
             geomDesc->setTriangleCount(geom.indexCount / 3);
-
-            auto accelDesc = NS::TransferPtr(MTL::PrimitiveAccelerationStructureDescriptor::alloc()->init());
-            NS::Object* geomDescPtr = static_cast<NS::Object*>(geomDesc.get());
-            auto geomArray = NS::Array::array(&geomDescPtr, 1);
-            accelDesc->setGeometryDescriptors(geomArray);
-
-            auto accelSizes = device->accelerationStructureSizes(accelDesc.get());
-
-            resource.scratchBuffer = NS::TransferPtr(device->newBuffer(accelSizes.buildScratchBufferSize, MTL::ResourceStorageModePrivate));
-            resource.accelStruct = NS::TransferPtr(device->newAccelerationStructure(accelSizes.accelerationStructureSize));
-
-            // Need to build via command buffer
-            auto cmdBuffer = commandQueue->commandBuffer();
-            auto encoder = cmdBuffer->accelerationStructureCommandEncoder();
-            encoder->buildAccelerationStructure(resource.accelStruct.get(), accelDesc.get(), resource.scratchBuffer.get(), 0);
-            encoder->endEncoding();
-            cmdBuffer->commit();
-            cmdBuffer->waitUntilCompleted();
+            geoms.push_back(geomDesc);
         }
+        if (geoms.empty()) return;
+
+        std::vector<NS::Object*> geomPtrs;
+        geomPtrs.reserve(geoms.size());
+        for (auto& g : geoms) geomPtrs.push_back(g.get());
+
+        auto accelDesc = NS::TransferPtr(MTL::PrimitiveAccelerationStructureDescriptor::alloc()->init());
+        // Autoreleased array, used synchronously below (build waits before this
+        // returns), so a raw pointer under the frame pool is correct here.
+        NS::Array* geomArray = NS::Array::array(geomPtrs.data(), geomPtrs.size());
+        accelDesc->setGeometryDescriptors(geomArray);
+
+        auto accelSizes = device->accelerationStructureSizes(accelDesc.get());
+        resource.scratchBuffer = NS::TransferPtr(device->newBuffer(accelSizes.buildScratchBufferSize, MTL::ResourceStorageModePrivate));
+        resource.accelStruct = NS::TransferPtr(device->newAccelerationStructure(accelSizes.accelerationStructureSize));
+
+        auto cmdBuffer = commandQueue->commandBuffer();
+        auto encoder = cmdBuffer->accelerationStructureCommandEncoder();
+        encoder->buildAccelerationStructure(resource.accelStruct.get(), accelDesc.get(), resource.scratchBuffer.get(), 0);
+        encoder->endEncoding();
+        cmdBuffer->commit();
+        cmdBuffer->waitUntilCompleted();
     } else {
         // Build the TLAS from the instance list (rebuilt whenever
         // updateAccelerationStructure() supplies new instances).
