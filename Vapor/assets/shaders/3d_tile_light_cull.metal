@@ -26,7 +26,8 @@ struct CameraData {
     float far;
 };
 
-bool sphereTileIntersection(float3 center, float radius, float4x4 viewProj, float2 tileMin, float2 tileMax, float2 screenSize) {
+bool sphereTileIntersection(float3 center, float radius, float4x4 viewProj, float2 tileMin, float2 tileMax, float2 screenSize,
+                            float sliceZ0, float sliceZ1) {
     float4 clipPos = viewProj * float4(center, 1.0);
     // clipPos.w is the view-space forward distance (+ in front of the camera,
     // - behind). A light whose influence sphere is entirely behind the camera
@@ -34,6 +35,14 @@ bool sphereTileIntersection(float3 center, float radius, float4x4 viewProj, floa
     // scatters it into arbitrary tiles). Only spheres straddling the near/camera
     // plane get the conservative accept. Mirrors TileLightCull.comp.
     if (clipPos.w < -radius) { return false; }
+    // 3D clustering: reject lights whose depth interval misses this z-slice.
+    // clipPos.w IS the light's view-space depth, so the test needs no
+    // projection and is valid even for near-plane-straddling lights — do it
+    // BEFORE the conservative accept below, or near lights flood all Z slices
+    // (an every-cluster floor, the depth-axis twin of the behind-camera bug).
+    if (clipPos.w + radius < sliceZ0 || clipPos.w - radius > sliceZ1) { return false; }
+    // Straddling the near plane: the projected position is unreliable, so
+    // conservatively accept for every XY tile — but only in the admitted slices.
     if (clipPos.w <= radius) { return true; }
 
     float3 ndc = clipPos.xyz / clipPos.w;
@@ -60,7 +69,10 @@ kernel void computeMain(
     constant float2& screenSize [[buffer(5)]],
     uint3 gid [[threadgroup_position_in_grid]]
 ) {
-    uint tileIndex = gid.x + gid.y * gridSize.x;
+    // 3D cluster index: (x, y) screen tile x logarithmic depth slice z. The
+    // slice mapping MUST match the readers (PBR / stochastic point shadow):
+    //   slice k spans [near * (far/near)^(k/Z), near * (far/near)^((k+1)/Z))
+    uint tileIndex = gid.x + gid.y * gridSize.x + gid.z * gridSize.x * gridSize.y;
     Cluster tile = tiles[tileIndex];
     tile.lightCount = 0; // reset counter every frame
 
@@ -70,10 +82,14 @@ kernel void computeMain(
     float2 tileMin = float2(gid.xy) * tileSize;
     float2 tileMax = float2(gid.xy + 1) * tileSize;
 
+    float zRatio = camera.far / camera.near;
+    float sliceZ0 = camera.near * pow(zRatio, float(gid.z) / float(gridSize.z));
+    float sliceZ1 = camera.near * pow(zRatio, float(gid.z + 1) / float(gridSize.z));
+
     float4x4 viewProj = camera.proj * camera.view;
     for (uint i = 0; i < lightCount; i++) {
         PointLight light = pointLights[i];
-        if (sphereTileIntersection(light.position, light.radius, camera.proj * camera.view, tileMin, tileMax, screenSize) && tile.lightCount < MAX_LIGHTS_PER_TILE) {
+        if (sphereTileIntersection(light.position, light.radius, viewProj, tileMin, tileMax, screenSize, sliceZ0, sliceZ1) && tile.lightCount < MAX_LIGHTS_PER_TILE) {
             tile.lightIndices[tile.lightCount] = i;
             tile.lightCount++;
         }

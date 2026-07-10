@@ -293,7 +293,9 @@ public:
         encoder->setBytes(&pointLightCount, sizeof(uint), 3);
         encoder->setBytes(&gridSize, sizeof(glm::uvec3), 4);
         encoder->setBytes(&screenSize, sizeof(glm::vec2), 5);
-        encoder->dispatchThreadgroups(MTL::Size(r.clusterGridSizeX, r.clusterGridSizeY, 1), MTL::Size(1, 1, 1));
+        // One threadgroup per 3D cluster (x, y, log-z slice).
+        encoder->dispatchThreadgroups(
+            MTL::Size(r.clusterGridSizeX, r.clusterGridSizeY, r.clusterGridSizeZ), MTL::Size(1, 1, 1));
         encoder->endEncoding();
     }
 };

@@ -1,6 +1,6 @@
 #version 450
-// Screen-space tile light culling (Vulkan RHI). One invocation per 2D tile;
-// fills the Cluster buffer consumed by RHIMain.frag's point-light loop.
+// Clustered light culling (Vulkan RHI). One invocation per 3D cluster (x, y
+// screen tile + log depth slice); fills the Cluster buffer for RHIMain.frag.
 // SSBOs throughout (the RHI compute descriptor set is storage-buffer only),
 // and the PointLight layout matches Vapor::PointLightData (48-byte stride).
 
@@ -45,7 +45,8 @@ layout(std430, set = 0, binding = 4) readonly buffer LightCullBuf {
 };
 layout(std430, set = 0, binding = 5) restrict buffer ClusterBuffer { Cluster tiles[]; };
 
-bool sphereTileIntersection(vec3 center, float radius, mat4 viewProj, vec2 tileMin, vec2 tileMax) {
+bool sphereTileIntersection(vec3 center, float radius, mat4 viewProj, vec2 tileMin, vec2 tileMax,
+                            float sliceZ0, float sliceZ1) {
     vec4 clipPos = viewProj * vec4(center, 1.0);
     // clipPos.w is the view-space forward distance (positive in front of the
     // camera, negative behind). A light whose influence sphere is entirely
@@ -55,6 +56,15 @@ bool sphereTileIntersection(vec3 center, float radius, mat4 viewProj, vec2 tileM
     // cull). Only spheres straddling the near/camera plane get the
     // conservative accept, since those genuinely can cover anything on screen.
     if (clipPos.w < -radius) return false;
+    // 3D clustering: reject lights whose depth interval misses this z-slice.
+    // clipPos.w IS the light's view-space depth, so the test needs no
+    // projection and is valid even for near-plane-straddling lights — do it
+    // BEFORE the conservative accept below, or near lights flood all Z slices
+    // (an every-cluster floor, the depth-axis twin of the behind-camera bug).
+    if (clipPos.w + radius < sliceZ0 || clipPos.w - radius > sliceZ1) return false;
+    // Straddling the near plane: the projected position is unreliable, so
+    // conservatively accept for every XY tile — but only in the slices the
+    // depth test above admitted.
     if (clipPos.w <= radius) return true;
     vec3 ndc = clipPos.xyz / clipPos.w;
     vec2 screenUV = ndc.xy * 0.5 + 0.5;
@@ -74,17 +84,27 @@ bool sphereTileIntersection(vec3 center, float radius, mat4 viewProj, vec2 tileM
 }
 
 void main() {
-    uint tileIndex = gl_WorkGroupID.x + gl_WorkGroupID.y * gridSize.x;
+    // 3D cluster index: (x, y) screen tile x logarithmic depth slice z.
+    // The slice mapping MUST match the readers (RHIMain.frag and the Metal
+    // PBR/point-shadow shaders): slice k spans
+    //   [near * (far/near)^(k/Z), near * (far/near)^((k+1)/Z))
+    uint tileIndex = gl_WorkGroupID.x + gl_WorkGroupID.y * gridSize.x
+                   + gl_WorkGroupID.z * gridSize.x * gridSize.y;
     uint count = 0u;
 
     vec2 tileSize = screenSize / vec2(gridSize.xy);
     vec2 tileMin = vec2(gl_WorkGroupID.xy) * tileSize;
     vec2 tileMax = vec2(gl_WorkGroupID.xy + uvec2(1)) * tileSize;
 
+    float zRatio = cam.farPlane / cam.nearPlane;
+    float sliceZ0 = cam.nearPlane * pow(zRatio, float(gl_WorkGroupID.z) / float(gridSize.z));
+    float sliceZ1 = cam.nearPlane * pow(zRatio, float(gl_WorkGroupID.z + 1u) / float(gridSize.z));
+
     mat4 viewProj = cam.proj * cam.view;
     for (uint i = 0u; i < lightCount; i++) {
         if (count >= MAX_LIGHTS_PER_TILE) break;
-        if (sphereTileIntersection(pointLights[i].position, pointLights[i].radius, viewProj, tileMin, tileMax)) {
+        if (sphereTileIntersection(pointLights[i].position, pointLights[i].radius, viewProj,
+                                   tileMin, tileMax, sliceZ0, sliceZ1)) {
             tiles[tileIndex].lightIndices[count] = i;
             count++;
         }

@@ -262,7 +262,15 @@ void main() {
         vec4 clip = cam.proj * cam.view * vec4(fragPos, 1.0);
         vec2 suv = clamp((clip.xy / max(clip.w, 1e-4)) * 0.5 + 0.5, vec2(0.0), vec2(0.9999));
         uvec2 tile = uvec2(suv * vec2(cullGridSize.xy));
-        uint tileIndex = tile.x + tile.y * cullGridSize.x;
+        // 3D cluster: logarithmic depth slice, same mapping the culler writes:
+        // slice k spans [near*(far/near)^(k/Z), near*(far/near)^((k+1)/Z)).
+        // clip.w is the fragment's view-space depth (== viewDepth above).
+        uint tileZ = uint(clamp(
+            log(max(clip.w, cam.nearPlane) / cam.nearPlane)
+                / log(cam.farPlane / cam.nearPlane) * float(cullGridSize.z),
+            0.0, float(cullGridSize.z - 1u)));
+        uint tileIndex = tile.x + tile.y * cullGridSize.x
+                       + tileZ * cullGridSize.x * cullGridSize.y;
         uint count = min(tiles[tileIndex].lightCount, MAX_LIGHTS_PER_TILE);
         for (uint t = 0u; t < count; ++t) {
             PointLight l = pointLights[tiles[tileIndex].lightIndices[t]];

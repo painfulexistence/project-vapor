@@ -354,7 +354,7 @@ void Renderer::registerStatsSources() {
     log.addSource("CULL", [this](Vapor::StatLine& s) {
         Uint32 mn, avg, mx, nonEmpty;
         if (!sampleClusterHistogram(mn, avg, mx, nonEmpty)) return;
-        s.add("tiles", clusterGridSizeX * clusterGridSizeY);
+        s.add("clusters", clusterGridSizeX * clusterGridSizeY * clusterGridSizeZ);
         s.add("pointLights", static_cast<Uint32>(pointLights.size()));
         s.add("min", mn);
         s.add("avg", avg);
@@ -383,13 +383,13 @@ TextureHandle Renderer::debugView(const char* key, TextureHandle src,
     return pv.view;
 }
 
-// Reads the culled cluster buffer (host-visible) and reduces the 2D tile grid to
+// Reads the culled cluster buffer (host-visible) and reduces the 3D cluster grid to
 // min/avg/max/non-empty light counts. Contains a waitIdle so the read sees the
 // GPU's writes — callers must throttle (StatsLog interval, or panel %N).
 bool Renderer::sampleClusterHistogram(Uint32& mn, Uint32& avg, Uint32& mx, Uint32& nonEmpty) {
     if (!clusterBuffer.isValid()) return false;
     rhi->waitIdle();
-    const Uint32 tileCount = clusterGridSizeX * clusterGridSizeY;  // 2D grid
+    const Uint32 tileCount = clusterGridSizeX * clusterGridSizeY * clusterGridSizeZ;  // 3D grid
     auto* clusters = static_cast<const Vapor::Cluster*>(rhi->mapBuffer(clusterBuffer));
     if (!clusters) return false;
     Uint32 lo = ~0u, hi = 0u, sum = 0u, ne = 0u;
@@ -1595,7 +1595,8 @@ void Renderer::tileCullingPass() {
         rhi->setComputeBytes(&pointLightCount, sizeof(Uint32), 3);
         rhi->setComputeBytes(&gridSize, sizeof(glm::uvec3), 4);
         rhi->setComputeBytes(&screenSize, sizeof(glm::vec2), 5);
-        rhi->dispatch(clusterGridSizeX, clusterGridSizeY, 1);
+        // One workgroup per 3D cluster (x, y, log-z slice).
+        rhi->dispatch(clusterGridSizeX, clusterGridSizeY, clusterGridSizeZ);
         rhi->endComputePass();
     } else {
         if (!vkTileCullPipeline.isValid() || !lightCullDataBuffer.isValid()) return;
@@ -1610,7 +1611,8 @@ void Renderer::tileCullingPass() {
         rhi->setComputeBuffer(3, pointLightBuffer, 0, sizeof(PointLightData) * maxPointLights);
         rhi->setComputeBuffer(4, lightCullDataBuffer, 0, sizeof(Vapor::LightCullData));
         rhi->setComputeBuffer(5, clusterBuffer);
-        rhi->dispatch(clusterGridSizeX, clusterGridSizeY, 1);
+        // One workgroup per 3D cluster (x, y, log-z slice).
+        rhi->dispatch(clusterGridSizeX, clusterGridSizeY, clusterGridSizeZ);
         rhi->endComputePass();
     }
     rhi->computeBarrier();  // cluster writes -> fragment reads in Main
@@ -4530,11 +4532,12 @@ void Renderer::drawGraphicsImGui() {
         lightCullDebugOpen = open;  // gates the throttled readback in tileCullingPass
         if (open) {
             ImGui::Text("Scene point lights: %zu", pointLights.size());
-            const Uint32 tiles = clusterGridSizeX * clusterGridSizeY;
-            ImGui::Text("Tiles: %u (%ux%u)", tiles, clusterGridSizeX, clusterGridSizeY);
-            ImGui::Text("Culled per tile:  avg %u   (min %u / max %u)",
+            const Uint32 tiles = clusterGridSizeX * clusterGridSizeY * clusterGridSizeZ;
+            ImGui::Text("Clusters: %u (%ux%ux%u)", tiles,
+                        clusterGridSizeX, clusterGridSizeY, clusterGridSizeZ);
+            ImGui::Text("Culled per cluster:  avg %u   (min %u / max %u)",
                         cullAvgLights, cullMinLights, cullMaxLights);
-            ImGui::Text("Non-empty tiles: %u / %u", cullNonEmptyTiles, tiles);
+            ImGui::Text("Non-empty clusters: %u / %u", cullNonEmptyTiles, tiles);
             ImGui::TextDisabled("avg = point-light loop length per pixel (refreshed ~15f)");
             bool skipPoint = (mainDebugFlags & 1u) != 0u;
             if (ImGui::Checkbox("Skip point-light loop (perf isolation)", &skipPoint))

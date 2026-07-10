@@ -312,7 +312,14 @@ fragment float4 fragmentMain(
 
     uint tileX = uint(screenUV.x * float(gridSize.x));
     uint tileY = uint((1.0 - screenUV.y) * float(gridSize.y));
-    uint tileIndex = tileX + tileY * gridSize.x;
+    // 3D cluster: logarithmic depth slice, same mapping the culler writes
+    // (see 3d_tile_light_cull.metal).
+    float depthVS = -(camera.view * in.worldPosition).z;  // RH: forward = -z
+    uint tileZ = uint(clamp(
+        log(max(depthVS, camera.near) / camera.near)
+            / log(camera.far / camera.near) * float(gridSize.z),
+        0.0, float(gridSize.z) - 1.0));
+    uint tileIndex = tileX + tileY * gridSize.x + tileZ * gridSize.x * gridSize.y;
     // Reference, not copy: Cluster is ~1KB (lightIndices[256]); copying it per
     // fragment spills to stack and reads the whole struct from device memory.
     const device Cluster& tile = clusters[tileIndex];
