@@ -292,10 +292,19 @@ private:
         NS::UInteger endIdx;
     };
 
-    static constexpr NS::UInteger GPU_TIMER_SAMPLE_COUNT = 64;
+    static constexpr NS::UInteger GPU_TIMER_SAMPLE_COUNT = 64;  // slot budget per frame region
+    // The sample buffer is partitioned into kTimingRegions per-frame regions and
+    // rotated each frame (same idea as the staging ring): a frame writes region
+    // R and its completion handler reads only region R, which no other in-flight
+    // frame touches until kTimingRegions frames later — so a late handler can no
+    // longer read slots a newer frame already overwrote (the ~200ms spike race).
+    // Must be >= the backend's max frames in flight (CAMetalLayer default 3).
+    static constexpr NS::UInteger kTimingRegions = 3;
     NS::SharedPtr<MTL::CounterSampleBuffer> gpuTimerSampleBuffer;
     std::vector<PassSampleInfo> framePassSamples;   // passes recorded this frame
-    NS::UInteger nextTimingSlot = 0;                // next free slot pair
+    NS::UInteger nextTimingSlot = 0;                // next free slot pair (absolute)
+    NS::UInteger timingBaseSlot = 0;                // this frame's region base
+    NS::UInteger timingRegion = 0;                  // rotating region index
     std::vector<GpuPassTiming> gpuPassTimings;      // last resolved results
     std::mutex gpuTimingMutex;                      // guards gpuPassTimings
     bool gpuTimingSupported = false;

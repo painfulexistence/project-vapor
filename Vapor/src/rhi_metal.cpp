@@ -132,7 +132,7 @@ void RHI_Metal::initGpuTiming() {
         if (cs->name()->isEqualToString(MTL::CommonCounterSetTimestamp)) {
             auto desc = NS::TransferPtr(MTL::CounterSampleBufferDescriptor::alloc()->init());
             desc->setCounterSet(cs);
-            desc->setSampleCount(GPU_TIMER_SAMPLE_COUNT);
+            desc->setSampleCount(GPU_TIMER_SAMPLE_COUNT * kTimingRegions);
             desc->setStorageMode(MTL::StorageModeShared);
             NS::Error* err = nullptr;
             gpuTimerSampleBuffer = NS::TransferPtr(device->newCounterSampleBuffer(desc.get(), &err));
@@ -223,8 +223,8 @@ bool RHI_Metal::allocateTimingSlots(const char* passName, NS::UInteger& outBegin
     if (!gpuTimingActiveThisFrame || !gpuTimerSampleBuffer) {
         return false;
     }
-    if (nextTimingSlot + 2 > GPU_TIMER_SAMPLE_COUNT) {
-        return false;  // per-frame slot budget exhausted; pass simply goes untimed
+    if (nextTimingSlot + 2 > timingBaseSlot + GPU_TIMER_SAMPLE_COUNT) {
+        return false;  // this region's per-frame slot budget exhausted; pass goes untimed
     }
     outBegin = nextTimingSlot;
     outEnd = nextTimingSlot + 1;
@@ -241,17 +241,21 @@ void RHI_Metal::resolveGpuTimings() {
     // Capture by value: the handler runs after endFrame() has reset frame state.
     auto capturedInfo = framePassSamples;
     auto capturedBuf = gpuTimerSampleBuffer;  // retain via SharedPtr copy
-    NS::UInteger sampleCount = capturedInfo.back().endIdx + 1;
-    currentCommandBuffer->addCompletedHandler([this, capturedInfo, capturedBuf, sampleCount](MTL::CommandBuffer*) {
-        NS::Data* data = capturedBuf->resolveCounterRange(NS::Range::Make(0, sampleCount));
+    // Resolve ONLY this frame's region [base, base+count) and index relative to
+    // it. Other in-flight frames own other regions and may be writing them right
+    // now — we never read those slots, so there is no cross-frame race.
+    NS::UInteger base = capturedInfo.front().beginIdx;
+    NS::UInteger count = capturedInfo.back().endIdx + 1 - base;
+    currentCommandBuffer->addCompletedHandler([this, capturedInfo, capturedBuf, base, count](MTL::CommandBuffer*) {
+        NS::Data* data = capturedBuf->resolveCounterRange(NS::Range::Make(base, count));
         if (!data) return;
         auto* timestamps = reinterpret_cast<const MTL::CounterResultTimestamp*>(data->mutableBytes());
         std::lock_guard<std::mutex> lock(gpuTimingMutex);
         gpuPassTimings.clear();
         gpuPassTimings.reserve(capturedInfo.size());
         for (const auto& info : capturedInfo) {
-            uint64_t begin = timestamps[info.beginIdx].timestamp;
-            uint64_t end = timestamps[info.endIdx].timestamp;
+            uint64_t begin = timestamps[info.beginIdx - base].timestamp;
+            uint64_t end = timestamps[info.endIdx - base].timestamp;
             double ms = (end >= begin) ? static_cast<double>(end - begin) / 1e6 : 0.0;
             gpuPassTimings.push_back({info.name, ms});
         }
@@ -903,7 +907,11 @@ void RHI_Metal::beginFrame() {
     // Latch GPU timing for this frame (the flag may be toggled mid-frame from
     // the UI; slot bookkeeping must stay consistent within a frame).
     gpuTimingActiveThisFrame = gpuTimingEnabled && gpuTimingSupported;
-    nextTimingSlot = 0;
+    // Rotate to this frame's timing region so a completion handler reads slots
+    // no other in-flight frame is overwriting (see kTimingRegions).
+    timingBaseSlot = timingRegion * GPU_TIMER_SAMPLE_COUNT;
+    nextTimingSlot = timingBaseSlot;
+    timingRegion = (timingRegion + 1) % kTimingRegions;
     framePassSamples.clear();
 }
 
