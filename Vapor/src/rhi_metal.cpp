@@ -3,6 +3,7 @@
 // declarations, so it must NOT define those macros (doing so made multiple TUs
 // emit the implementation → duplicate symbols at link).
 #include "rhi_metal.hpp"
+#include "stats_log.hpp"
 #include <fmt/core.h>
 #include <stdexcept>
 #include <algorithm>
@@ -97,6 +98,26 @@ bool RHI_Metal::initialize(SDL_Window* window) {
     capabilities.computeShaders = true;
     capabilities.gpuTimestamps = gpuTimingSupported;
 
+    // Backend telemetry: one grouped "[MTL]" line per --stats interval. Metal is
+    // unified memory, so these counts (plus RSS) are the leak-hunt signal.
+    Vapor::StatsLog::get().addSource("MTL", [this](Vapor::StatLine& s) {
+        s.add("buf", buffers.size());
+        s.add("tex", textures.size());
+        s.add("smp", samplers.size());
+        s.add("shd", shaders.size());
+        s.add("pso", pipelines.size());
+        s.add("cpso", computePipelines.size());
+        s.add("pendingUpCmds", pendingUploadCmds.size());
+        s.add("oversize", oversizeStaging.size());
+        s.add("stagingOff_KB", stagingRingOffset / 1024);
+        // GPU-timing race telemetry (read-and-reset per interval): frames that
+        // skipped timing because their region's handler hadn't run, and the max
+        // handler lateness in frames. Both ~0 while spikes persist would rule
+        // OUT stale-slot pairing as the spike mechanism.
+        s.add("tSkips/int", statsTimingSkips.exchange(0));
+        s.add("tLateMax/int", statsHandlerLateMax.exchange(0));
+    });
+
     return true;
 }
 
@@ -117,7 +138,7 @@ void RHI_Metal::initGpuTiming() {
         if (cs->name()->isEqualToString(MTL::CommonCounterSetTimestamp)) {
             auto desc = NS::TransferPtr(MTL::CounterSampleBufferDescriptor::alloc()->init());
             desc->setCounterSet(cs);
-            desc->setSampleCount(GPU_TIMER_SAMPLE_COUNT);
+            desc->setSampleCount(GPU_TIMER_SAMPLE_COUNT * kTimingRegions);
             desc->setStorageMode(MTL::StorageModeShared);
             NS::Error* err = nullptr;
             gpuTimerSampleBuffer = NS::TransferPtr(device->newCounterSampleBuffer(desc.get(), &err));
@@ -208,8 +229,8 @@ bool RHI_Metal::allocateTimingSlots(const char* passName, NS::UInteger& outBegin
     if (!gpuTimingActiveThisFrame || !gpuTimerSampleBuffer) {
         return false;
     }
-    if (nextTimingSlot + 2 > GPU_TIMER_SAMPLE_COUNT) {
-        return false;  // per-frame slot budget exhausted; pass simply goes untimed
+    if (nextTimingSlot + 2 > timingBaseSlot + GPU_TIMER_SAMPLE_COUNT) {
+        return false;  // this region's per-frame slot budget exhausted; pass goes untimed
     }
     outBegin = nextTimingSlot;
     outEnd = nextTimingSlot + 1;
@@ -226,26 +247,112 @@ void RHI_Metal::resolveGpuTimings() {
     // Capture by value: the handler runs after endFrame() has reset frame state.
     auto capturedInfo = framePassSamples;
     auto capturedBuf = gpuTimerSampleBuffer;  // retain via SharedPtr copy
-    NS::UInteger sampleCount = capturedInfo.back().endIdx + 1;
-    currentCommandBuffer->addCompletedHandler([this, capturedInfo, capturedBuf, sampleCount](MTL::CommandBuffer*) {
-        NS::Data* data = capturedBuf->resolveCounterRange(NS::Range::Make(0, sampleCount));
-        if (!data) return;
-        auto* timestamps = reinterpret_cast<const MTL::CounterResultTimestamp*>(data->mutableBytes());
-        std::lock_guard<std::mutex> lock(gpuTimingMutex);
-        gpuPassTimings.clear();
-        gpuPassTimings.reserve(capturedInfo.size());
-        for (const auto& info : capturedInfo) {
-            uint64_t begin = timestamps[info.beginIdx].timestamp;
-            uint64_t end = timestamps[info.endIdx].timestamp;
-            double ms = (end >= begin) ? static_cast<double>(end - begin) / 1e6 : 0.0;
-            gpuPassTimings.push_back({info.name, ms});
+    // Resolve ONLY this frame's region [base, base+count) and index relative to
+    // it. Other in-flight frames own other regions and may be writing them right
+    // now — we never read those slots, so there is no cross-frame race.
+    NS::UInteger base = capturedInfo.front().beginIdx;
+    NS::UInteger count = capturedInfo.back().endIdx + 1 - base;
+    // Gate this region against reuse until the handler below has read it, and
+    // stamp the registration frame so handler lateness is measurable.
+    const NS::UInteger region = timingBaseSlot / GPU_TIMER_SAMPLE_COUNT;
+    timingRegionBusy[region].store(true, std::memory_order_release);
+    const uint32_t registeredFrame = timingFrameCounter;
+    currentCommandBuffer->addCompletedHandler([this, capturedInfo, capturedBuf, base, count,
+                                               region, registeredFrame](MTL::CommandBuffer*) {
+        NS::Data* data = capturedBuf->resolveCounterRange(NS::Range::Make(base, count));
+        if (data) {
+            auto* timestamps = reinterpret_cast<const MTL::CounterResultTimestamp*>(data->mutableBytes());
+            // Spike capture: a >50ms single-pass window is a real wall-clock gap
+            // inside that pass (drawable/present back-pressure, GPU preemption) —
+            // region reuse is completion-gated, so it can't be cross-frame
+            // pollution. Print the first few spikes' begin/end offsets relative
+            // to the frame's first sample so the mechanism is identifiable.
+            const uint64_t firstBegin = timestamps[capturedInfo.front().beginIdx - base].timestamp;
+            uint64_t minBegin = ~0ull;
+            uint64_t maxEnd = 0;
+            char spikeBuf[512];
+            int spikeLen = 0;
+            std::vector<std::pair<uint64_t, uint64_t>> windows;
+            windows.reserve(capturedInfo.size());
+            {
+                std::lock_guard<std::mutex> lock(gpuTimingMutex);
+                gpuPassTimings.clear();
+                gpuPassTimings.reserve(capturedInfo.size());
+                for (const auto& info : capturedInfo) {
+                    uint64_t begin = timestamps[info.beginIdx - base].timestamp;
+                    uint64_t end = timestamps[info.endIdx - base].timestamp;
+                    // Validity guards: 0 / ~0 means the GPU never wrote the
+                    // sample (encoder type without this stage boundary); a delta
+                    // over a second is a stale slot, not a timing.
+                    bool beginValid = begin != 0 && begin != ~0ull;
+                    bool endValid = end != 0 && end != ~0ull;
+                    double ms = (beginValid && endValid && end >= begin)
+                        ? static_cast<double>(end - begin) / 1e6 : 0.0;
+                    if (ms > 1000.0) ms = 0.0;
+                    // Per-pass = its own fragment/encoder window (EoF - SoF).
+                    gpuPassTimings.push_back({info.name, ms});
+                    if (beginValid && endValid && end > begin && ms <= 1000.0) {
+                        windows.emplace_back(begin, end);
+                        minBegin = std::min(minBegin, begin);
+                        maxEnd = std::max(maxEnd, end);
+                    }
+                    if (ms > 50.0 && spikeLen < static_cast<int>(sizeof(spikeBuf)) - 96) {
+                        spikeLen += snprintf(spikeBuf + spikeLen, sizeof(spikeBuf) - spikeLen,
+                                             " %s=%.1fms(b%+.1f,e%+.1f)", info.name.c_str(), ms,
+                                             static_cast<double>(static_cast<int64_t>(begin - firstBegin)) / 1e6,
+                                             static_cast<double>(static_cast<int64_t>(end - firstBegin)) / 1e6);
+                    }
+                }
+                // span = min sample .. max sample: per-frame LATENCY (pipelined
+                // frames overlap, so it may exceed the frame period — healthy).
+                gpuFrameSpanMs = (maxEnd > minBegin && minBegin != ~0ull)
+                    ? static_cast<double>(maxEnd - minBegin) / 1e6 : 0.0;
+                // busy = interval union of the fragment/encoder windows:
+                // occupancy, ~frame period when GPU-bound. Fragment windows
+                // serialize per pass on TBDR, so this excludes inter-pass idle
+                // (present waits) that inflates span.
+                std::sort(windows.begin(), windows.end());
+                uint64_t busy = 0, curB = 0, curE = 0;
+                for (const auto& [b, e] : windows) {
+                    if (b > curE) { busy += curE - curB; curB = b; curE = e; }
+                    else if (e > curE) { curE = e; }
+                }
+                busy += curE - curB;
+                gpuFrameBusyMs = static_cast<double>(busy) / 1e6;
+            }
+            if (spikeLen > 0 && gpuSpikeReportsLeft.fetch_sub(1, std::memory_order_relaxed) > 0) {
+                fprintf(stderr, "[GPUT] f=%u late=%u span=%.1fms spikes:%s\n",
+                        registeredFrame,
+                        latestTimingFrame.load(std::memory_order_relaxed) - registeredFrame,
+                        static_cast<double>(static_cast<int64_t>(maxEnd - firstBegin)) / 1e6,
+                        spikeBuf);
+                fflush(stderr);
+            }
         }
+        // Race telemetry: how many frames after registration did this handler
+        // run? >= kTimingRegions would have raced the old rotation-only scheme.
+        uint32_t late = latestTimingFrame.load(std::memory_order_relaxed) - registeredFrame;
+        uint32_t prev = statsHandlerLateMax.load(std::memory_order_relaxed);
+        while (late > prev &&
+               !statsHandlerLateMax.compare_exchange_weak(prev, late, std::memory_order_relaxed)) {}
+        // ALWAYS free the region (also on the !data path) or timing wedges.
+        timingRegionBusy[region].store(false, std::memory_order_release);
     });
 }
 
 std::vector<GpuPassTiming> RHI_Metal::getGpuPassTimings() {
     std::lock_guard<std::mutex> lock(gpuTimingMutex);
     return gpuPassTimings;
+}
+
+double RHI_Metal::getGpuFrameSpanMs() {
+    std::lock_guard<std::mutex> lock(gpuTimingMutex);
+    return gpuFrameSpanMs;
+}
+
+double RHI_Metal::getGpuFrameBusyMs() {
+    std::lock_guard<std::mutex> lock(gpuTimingMutex);
+    return gpuFrameBusyMs;
 }
 
 void RHI_Metal::shutdown() {
@@ -373,6 +480,39 @@ TextureHandle RHI_Metal::createTexture(const TextureDesc& desc) {
         convertPixelFormat(desc.format)
     };
 
+    return TextureHandle{id};
+}
+
+TextureHandle RHI_Metal::createTextureView(const TextureViewDesc& desc) {
+    auto it = textures.find(desc.source.id);
+    if (it == textures.end() || !it->second.texture) return {};
+    MTL::Texture* src = it->second.texture.get();
+
+    MTL::TextureSwizzleChannels sw = (desc.swizzle == TextureSwizzle::RRR1)
+        ? MTL::TextureSwizzleChannels::Make(MTL::TextureSwizzleRed, MTL::TextureSwizzleRed,
+                                            MTL::TextureSwizzleRed, MTL::TextureSwizzleOne)
+        : MTL::TextureSwizzleChannels::Make(MTL::TextureSwizzleRed, MTL::TextureSwizzleGreen,
+                                            MTL::TextureSwizzleBlue, MTL::TextureSwizzleAlpha);
+
+    // newTextureView returns an owned (+1) object; TransferPtr is correct. The
+    // view retains the source's storage, so the source stays alive on its own.
+    auto view = NS::TransferPtr(src->newTextureView(
+        src->pixelFormat(), MTL::TextureType2D,
+        NS::Range::Make(0, 1),                                    // one mip
+        NS::Range::Make(desc.baseArrayLayer, desc.layerCount),   // one array slice
+        sw));
+    if (!view) return {};
+
+    Uint32 id = nextTextureId++;
+    TextureResource r{};
+    r.texture = view;
+    r.width = it->second.width;
+    r.height = it->second.height;
+    r.depth = 1;
+    r.mipLevels = 1;
+    r.bytesPerPixel = it->second.bytesPerPixel;
+    r.format = src->pixelFormat();  // the view keeps the source's format
+    textures[id] = r;
     return TextureHandle{id};
 }
 
@@ -794,20 +934,9 @@ void RHI_Metal::beginFrame() {
         submitUploads(true);
     }
 
-    // VAPOR_RHI_STATS=1: leak-hunt telemetry, one line every ~120 frames
-    // (pairs with the renderer's [RSTATS] line). Whatever climbs across lines
-    // is the leak; flat lines mean the decay is a stall, not memory.
-    static const bool rhiStats = std::getenv("VAPOR_RHI_STATS") != nullptr;
-    static Uint32 statsFrame = 0;
-    if (rhiStats && (statsFrame++ % 120) == 0) {
-        fprintf(stderr,
-            "[MTLSTATS] f=%u buf=%zu tex=%zu smp=%zu shd=%zu pso=%zu cpso=%zu "
-            "pendingUpCmds=%zu oversize=%zu stagingOff=%zuKB\n",
-            statsFrame - 1, buffers.size(), textures.size(), samplers.size(),
-            shaders.size(), pipelines.size(), computePipelines.size(),
-            pendingUploadCmds.size(), oversizeStaging.size(),
-            stagingRingOffset / 1024);
-    }
+    // Leak-hunt telemetry moved to the StatsLog "MTL" source (registered in
+    // initialize()). Whatever climbs across lines is the leak; flat lines mean
+    // the decay is a stall, not memory.
 
     // Get next drawable. This legitimately fails when the window is occluded
     // or minimized — skip the frame instead of crashing; endFrame() and every
@@ -866,7 +995,25 @@ void RHI_Metal::beginFrame() {
     // Latch GPU timing for this frame (the flag may be toggled mid-frame from
     // the UI; slot bookkeeping must stay consistent within a frame).
     gpuTimingActiveThisFrame = gpuTimingEnabled && gpuTimingSupported;
-    nextTimingSlot = 0;
+    ++timingFrameCounter;
+    latestTimingFrame.store(timingFrameCounter, std::memory_order_relaxed);
+    if (gpuTimingActiveThisFrame) {
+        // Rotate to this frame's timing region — but ONLY if its previous
+        // completion handler has finished reading it. A handler starved past
+        // kTimingRegions frames would otherwise race the GPU rewriting the
+        // region (fresh begin paired with a frames-old end -> fabricated
+        // multi-frame pass times). Skipping one frame of timing is always
+        // preferable to publishing garbage; the skip is counted for the
+        // [MTL] stats line.
+        if (timingRegionBusy[timingRegion].load(std::memory_order_acquire)) {
+            gpuTimingActiveThisFrame = false;
+            statsTimingSkips.fetch_add(1, std::memory_order_relaxed);
+        } else {
+            timingBaseSlot = timingRegion * GPU_TIMER_SAMPLE_COUNT;
+            nextTimingSlot = timingBaseSlot;
+            timingRegion = (timingRegion + 1) % kTimingRegions;
+        }
+    }
     framePassSamples.clear();
 }
 
@@ -1023,12 +1170,16 @@ void RHI_Metal::beginRenderPass(const RenderPassDesc& desc) {
         depthAttachment->setStoreAction(MTL::StoreActionStore);
     }
 
-    // Attach GPU timestamp sampling for this pass (no-op when timing is off)
+    // Attach GPU timestamp sampling for this pass (no-op when timing is off).
+    // Window scheme: [StartOfFragment, EndOfFragment] — the pass's own fragment
+    // cost. StartOfVertex is deliberately NOT used (it degenerates on TBDR; see
+    // PassSampleInfo). Fragment windows serialize per pass, so their union is a
+    // real occupancy figure.
     NS::UInteger timingBegin, timingEnd;
     if (allocateTimingSlots(desc.name, timingBegin, timingEnd)) {
         auto* sampleAttachment = renderPassDesc->sampleBufferAttachments()->object(0);
         sampleAttachment->setSampleBuffer(gpuTimerSampleBuffer.get());
-        sampleAttachment->setStartOfVertexSampleIndex(timingBegin);
+        sampleAttachment->setStartOfFragmentSampleIndex(timingBegin);
         sampleAttachment->setEndOfFragmentSampleIndex(timingEnd);
     }
 
@@ -1483,14 +1634,20 @@ void RHI_Metal::buildAccelerationStructure(AccelStructHandle handle) {
         // (uniform white / R=1) while TLAS/bind diagnostics all look valid.
         submitUploads(true);
 
-        // Build BLAS from geometries
+        // Collect ALL of this BLAS's geometry descriptors, then build ONE
+        // acceleration structure containing them. The old loop rebuilt a
+        // single-geometry BLAS per iteration and reassigned resource.accelStruct
+        // each time, so only the LAST geometry survived (latent today because
+        // each BLAS holds one mesh, but a landmine for any multi-geometry mesh).
+        // Accumulating also collapses N commit+waitUntilCompleted stalls into 1.
+        std::vector<NS::SharedPtr<MTL::AccelerationStructureTriangleGeometryDescriptor>> geoms;
+        geoms.reserve(resource.geometries.size());
         for (const auto& geom : resource.geometries) {
             auto vertexBufIt = buffers.find(geom.vertexBuffer.id);
             auto indexBufIt = buffers.find(geom.indexBuffer.id);
             if (vertexBufIt == buffers.end() || indexBufIt == buffers.end()) {
                 continue;
             }
-
             auto geomDesc = NS::TransferPtr(MTL::AccelerationStructureTriangleGeometryDescriptor::alloc()->init());
             geomDesc->setVertexBuffer(vertexBufIt->second.buffer.get());
             geomDesc->setVertexBufferOffset(0);
@@ -1499,25 +1656,30 @@ void RHI_Metal::buildAccelerationStructure(AccelStructHandle handle) {
             geomDesc->setIndexBufferOffset(0);
             geomDesc->setIndexType(MTL::IndexTypeUInt32);
             geomDesc->setTriangleCount(geom.indexCount / 3);
-
-            auto accelDesc = NS::TransferPtr(MTL::PrimitiveAccelerationStructureDescriptor::alloc()->init());
-            NS::Object* geomDescPtr = static_cast<NS::Object*>(geomDesc.get());
-            auto geomArray = NS::Array::array(&geomDescPtr, 1);
-            accelDesc->setGeometryDescriptors(geomArray);
-
-            auto accelSizes = device->accelerationStructureSizes(accelDesc.get());
-
-            resource.scratchBuffer = NS::TransferPtr(device->newBuffer(accelSizes.buildScratchBufferSize, MTL::ResourceStorageModePrivate));
-            resource.accelStruct = NS::TransferPtr(device->newAccelerationStructure(accelSizes.accelerationStructureSize));
-
-            // Need to build via command buffer
-            auto cmdBuffer = commandQueue->commandBuffer();
-            auto encoder = cmdBuffer->accelerationStructureCommandEncoder();
-            encoder->buildAccelerationStructure(resource.accelStruct.get(), accelDesc.get(), resource.scratchBuffer.get(), 0);
-            encoder->endEncoding();
-            cmdBuffer->commit();
-            cmdBuffer->waitUntilCompleted();
+            geoms.push_back(geomDesc);
         }
+        if (geoms.empty()) return;
+
+        std::vector<NS::Object*> geomPtrs;
+        geomPtrs.reserve(geoms.size());
+        for (auto& g : geoms) geomPtrs.push_back(g.get());
+
+        auto accelDesc = NS::TransferPtr(MTL::PrimitiveAccelerationStructureDescriptor::alloc()->init());
+        // Autoreleased array, used synchronously below (build waits before this
+        // returns), so a raw pointer under the frame pool is correct here.
+        NS::Array* geomArray = NS::Array::array(geomPtrs.data(), geomPtrs.size());
+        accelDesc->setGeometryDescriptors(geomArray);
+
+        auto accelSizes = device->accelerationStructureSizes(accelDesc.get());
+        resource.scratchBuffer = NS::TransferPtr(device->newBuffer(accelSizes.buildScratchBufferSize, MTL::ResourceStorageModePrivate));
+        resource.accelStruct = NS::TransferPtr(device->newAccelerationStructure(accelSizes.accelerationStructureSize));
+
+        auto cmdBuffer = commandQueue->commandBuffer();
+        auto encoder = cmdBuffer->accelerationStructureCommandEncoder();
+        encoder->buildAccelerationStructure(resource.accelStruct.get(), accelDesc.get(), resource.scratchBuffer.get(), 0);
+        encoder->endEncoding();
+        cmdBuffer->commit();
+        cmdBuffer->waitUntilCompleted();
     } else {
         // Build the TLAS from the instance list (rebuilt whenever
         // updateAccelerationStructure() supplies new instances).

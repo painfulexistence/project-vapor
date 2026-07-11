@@ -1177,6 +1177,9 @@ public:
             }
             Uint32 gibsEnabledFlag = (r.gibsEnabled && r.gibsManager) ? 1 : 0;
             encoder->setFragmentBytes(&gibsEnabledFlag, sizeof(Uint32), 10);
+            // Perf-isolation flags at buffer(12) — the shared PBR shader now
+            // reads this slot, so it MUST be bound or the reference is UB.
+            encoder->setFragmentBytes(&r.mainDebugFlags, sizeof(uint32_t), 12);
 
             for (const auto& draw : draws) {
                 if (!r.currentCamera->isVisible(r.instances[draw.instanceIndex].boundingSphere)) {

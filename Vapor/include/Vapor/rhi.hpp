@@ -228,6 +228,22 @@ struct TextureDesc {
     TextureUsage usage = TextureUsage::Sampled;
 };
 
+// Component swizzle for texture views (currently just what debug previews need).
+enum class TextureSwizzle {
+    Identity,  // rgba -> rgba
+    RRR1,      // r -> rgb, 1 -> a  (single-channel depth/AO rendered as grayscale)
+};
+
+// A lightweight view over an existing texture: reinterprets a layer range and/or
+// applies a component swizzle without copying. Used for ImGui debug previews
+// (grayscale single-channel RTs, one PSSM cascade layer of an array as 2D).
+struct TextureViewDesc {
+    TextureHandle source;
+    Uint32 baseArrayLayer = 0;
+    Uint32 layerCount = 1;
+    TextureSwizzle swizzle = TextureSwizzle::Identity;
+};
+
 struct SamplerDesc {
     FilterMode minFilter = FilterMode::Linear;
     FilterMode magFilter = FilterMode::Linear;
@@ -424,6 +440,11 @@ public:
     virtual TextureHandle createTexture(const TextureDesc& desc) = 0;
     virtual void destroyTexture(TextureHandle handle) = 0;
 
+    // Create a non-owning view (layer range + swizzle) over an existing texture.
+    // Returns an invalid handle if the backend doesn't support it. destroyTexture
+    // on the returned handle frees only the view, never the source's image.
+    virtual TextureHandle createTextureView(const TextureViewDesc& /*desc*/) { return {}; }
+
     virtual ShaderHandle createShader(const ShaderDesc& desc) = 0;
     virtual void destroyShader(ShaderHandle handle) = 0;
 
@@ -558,6 +579,18 @@ public:
     virtual void setGpuTimingEnabled(bool /*enabled*/) {}
     virtual bool isGpuTimingEnabled() const { return false; }
     virtual std::vector<GpuPassTiming> getGpuPassTimings() { return {}; }
+    // Wall-clock span of one frame's GPU work (first sample -> last sample),
+    // in ms. This is the frame's GPU LATENCY: with frames pipelined on the GPU
+    // it legitimately exceeds the frame period (e.g. 20ms span at 90fps =
+    // pipeline depth ~1.8). Not additive with adjacent frames.
+    // 0.0 = backend doesn't report it.
+    virtual double getGpuFrameSpanMs() { return 0.0; }
+    // Approximate GPU occupancy for one frame, in ms: the interval-UNION of
+    // all pass windows (overlap counted once, inter-pass gaps excluded). This
+    // is the number to compare against the frame period — ~frame period means
+    // GPU-bound, much less means the bottleneck is elsewhere (CPU/vsync).
+    // 0.0 = backend doesn't report it.
+    virtual double getGpuFrameBusyMs() { return 0.0; }
 
     // ========================================================================
     // Backend Query Interface (for backend-specific operations)
