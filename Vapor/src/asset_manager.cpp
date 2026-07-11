@@ -24,6 +24,7 @@
 #include <tiny_gltf.h>
 
 #include "asset_serializer.hpp"
+#include "meshlet_builder.hpp"
 #include "graphics.hpp"
 
 using namespace Vapor;
@@ -787,8 +788,16 @@ auto AssetManager::loadGLTFOptimized(const std::string& filename) -> std::shared
     scene->images    = std::move(images);
     scene->materials = std::move(materials);
 
-    fmt::print("Optimized scene: {} vertices, {} indices, {} draw calls\n",
-        scene->vertices.size(), scene->indices.size(), scene->stagedMeshes.size());
+    // Bake meshlets + cluster-LOD per mesh (offline; cached in the .vscene_optimized).
+    size_t totalMeshlets = 0;
+    for (auto& m : scene->stagedMeshes) {
+        if (!m) continue;
+        MeshletBuilder::build(*m);
+        totalMeshlets += m->meshletData.meshlets.size();
+    }
+
+    fmt::print("Optimized scene: {} vertices, {} indices, {} draw calls, {} meshlets\n",
+        scene->vertices.size(), scene->indices.size(), scene->stagedMeshes.size(), totalMeshlets);
 
     AssetSerializer::serializeScene(scene, scenePath.string());
     return scene;

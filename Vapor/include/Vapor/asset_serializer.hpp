@@ -40,11 +40,22 @@ namespace cereal {
     template<class Archive> void serialize(Archive& archive, Vapor::VertexData& vertex) {
         archive(vertex.position, vertex.uv, vertex.normal, vertex.tangent);
     }
+
+    template<class Archive> void serialize(Archive& archive, Vapor::Meshlet& m) {
+        archive(m.vertexOffset, m.triangleOffset, m.vertexCount, m.triangleCount);
+    }
+
+    template<class Archive> void serialize(Archive& archive, Vapor::MeshletBounds& b) {
+        archive(b.cullSphere, b.coneApex, b.coneAxisCutoff, b.lodSphere, b.parentSphere,
+                b.lodError, b.parentError, b.group, b.refined, b.depth);
+    }
 }// namespace cereal
 
 class AssetSerializer {
 public:
-    static constexpr uint32_t SCENE_FORMAT_VERSION = 2;
+    // v3: added baked meshlet + cluster-LOD data (Mesh::meshletData). Bumping the
+    // version invalidates older caches, which are re-baked from the source glTF.
+    static constexpr uint32_t SCENE_FORMAT_VERSION = 3;
 
     static void serializeScene(const std::shared_ptr<Scene>& scene, const std::string& path);
     static std::shared_ptr<Scene> deserializeScene(const std::string& path);
