@@ -160,7 +160,12 @@ target_link_libraries(Vapor PRIVATE
     Jolt::Jolt
     enkiTS::enkiTS
     Tracy::TracyClient
-    meshoptimizer
+    # BUILD_INTERFACE-only: meshoptimizer is a private impl detail built via
+    # FetchContent (not installed/exported). Without this wrapper it leaks into
+    # Vapor's exported link interface (static lib) and install(EXPORT VaporTargets)
+    # fails with "requires target meshoptimizer that is not in any export set".
+    # In-tree consumers (app, tests) still link it transitively via the build.
+    $<BUILD_INTERFACE:meshoptimizer>
 )
 
 if(APPLE)
