@@ -308,6 +308,15 @@ void RHI_Vulkan::collectTimestamps(Uint32 slot) {
         std::lock_guard<std::mutex> lock(gpuTimingMutex);
         gpuPassTimings.clear();
         gpuPassTimings.reserve(infos.size());
+        // Per-pass [TOP_OF_PIPE, BOTTOM_OF_PIPE] windows overlap heavily (TOP
+        // signals before prior work drains), so their SUM double-counts and is
+        // not a frame cost. Two honest reductions instead:
+        //   span = min(begin)..max(end)          -> frame GPU latency
+        //   busy = interval union of the windows -> occupancy (~frame period
+        //          when GPU-bound; the number to compare against frame time).
+        std::vector<std::pair<uint64_t, uint64_t>> windows;
+        windows.reserve(infos.size());
+        uint64_t minBegin = ~0ull, maxEnd = 0;
         for (const auto& info : infos) {
             uint64_t begin = results[info.beginQuery];
             uint64_t end = results[info.endQuery];
@@ -315,7 +324,22 @@ void RHI_Vulkan::collectTimestamps(Uint32 slot) {
                 ? static_cast<double>(end - begin) * timestampPeriodNs / 1e6
                 : 0.0;
             gpuPassTimings.push_back({ info.name, ms });
+            if (end > begin) {
+                windows.emplace_back(begin, end);
+                minBegin = std::min(minBegin, begin);
+                maxEnd = std::max(maxEnd, end);
+            }
         }
+        gpuFrameSpanMs = (maxEnd > minBegin && minBegin != ~0ull)
+            ? static_cast<double>(maxEnd - minBegin) * timestampPeriodNs / 1e6 : 0.0;
+        std::sort(windows.begin(), windows.end());
+        uint64_t busy = 0, curB = 0, curE = 0;
+        for (const auto& [b, e] : windows) {
+            if (b > curE) { busy += curE - curB; curB = b; curE = e; }
+            else if (e > curE) { curE = e; }
+        }
+        busy += curE - curB;
+        gpuFrameBusyMs = static_cast<double>(busy) * timestampPeriodNs / 1e6;
     }
     infos.clear();
 }
@@ -323,6 +347,16 @@ void RHI_Vulkan::collectTimestamps(Uint32 slot) {
 std::vector<GpuPassTiming> RHI_Vulkan::getGpuPassTimings() {
     std::lock_guard<std::mutex> lock(gpuTimingMutex);
     return gpuPassTimings;
+}
+
+double RHI_Vulkan::getGpuFrameSpanMs() {
+    std::lock_guard<std::mutex> lock(gpuTimingMutex);
+    return gpuFrameSpanMs;
+}
+
+double RHI_Vulkan::getGpuFrameBusyMs() {
+    std::lock_guard<std::mutex> lock(gpuTimingMutex);
+    return gpuFrameBusyMs;
 }
 
 // ============================================================================

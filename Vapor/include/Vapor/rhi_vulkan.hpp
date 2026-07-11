@@ -40,6 +40,8 @@ public:
     void setGpuTimingEnabled(bool enabled) override { gpuTimingEnabled = enabled; }
     bool isGpuTimingEnabled() const override { return gpuTimingEnabled; }
     std::vector<GpuPassTiming> getGpuPassTimings() override;
+    double getGpuFrameSpanMs() override;
+    double getGpuFrameBusyMs() override;
 
     // ========================================================================
     // Resource Creation
@@ -402,6 +404,8 @@ private:
     bool gpuTimingActiveThisFrame = false;
     std::mutex gpuTimingMutex;
     std::vector<GpuPassTiming> gpuPassTimings;
+    double gpuFrameSpanMs = 0.0;   // min(begin)->max(end) across passes: latency
+    double gpuFrameBusyMs = 0.0;   // interval union of [begin,end] windows: occupancy
     void createTimestampPools();
     void collectTimestamps(Uint32 slot);  // read completed results for a slot
     bool allocateTimestampPair(const char* passName, Uint32& outBegin, Uint32& outEnd);

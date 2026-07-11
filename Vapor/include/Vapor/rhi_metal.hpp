@@ -298,13 +298,19 @@ private:
     // each pass's [vertexStart, fragmentEnd] window instead is useless there:
     // every pass's vertex kick runs near frame start, so every window reads
     // ~frame time (the "all passes ~10ms" panel).
+    // Per-pass window: render passes sample [StartOfFragment, EndOfFragment]
+    // (NOT StartOfVertex — that degenerates on TBDR, where every pass's vertex
+    // kick runs at frame start, so [SoV,EoF] reads ~frame time for all passes;
+    // fragment shading serializes per pass, so [SoF,EoF] is the pass's own cost
+    // and the windows are unionable into a real occupancy figure). Compute
+    // passes sample the encoder boundaries. Matches the Vulkan backend's model.
     struct PassSampleInfo {
         std::string name;
-        NS::UInteger beginIdx;  // == previous pass's endIdx (or the frame anchor)
+        NS::UInteger beginIdx;
         NS::UInteger endIdx;
     };
 
-    static constexpr NS::UInteger GPU_TIMER_SAMPLE_COUNT = 64;  // slots per frame region (1/pass + anchor)
+    static constexpr NS::UInteger GPU_TIMER_SAMPLE_COUNT = 128;  // slots per frame region (2/pass)
     // The sample buffer is partitioned into kTimingRegions per-frame regions and
     // rotated each frame (same idea as the staging ring): a frame writes region
     // R and its completion handler reads only region R, which no other in-flight
@@ -398,12 +404,8 @@ private:
 
     // GPU timing helpers
     void initGpuTiming();
-    // Reserves a slot pair and records the pass; returns false when timing is
-    // off or the per-frame slot budget is exhausted.
-    // outSampleBegin is true only for the frame's first timed pass, which must
-    // also write the frame anchor (its start-of-stage sample); every later pass
-    // writes only its end and chains off the previous end.
-    bool allocateTimingSlots(const char* passName, bool& outSampleBegin,
-                             NS::UInteger& outBegin, NS::UInteger& outEnd);
+    // Reserves a (begin, end) slot pair for one pass and records it; returns
+    // false when timing is off or the per-frame region budget is exhausted.
+    bool allocateTimingSlots(const char* passName, NS::UInteger& outBegin, NS::UInteger& outEnd);
     void resolveGpuTimings();  // installs completion handler on current command buffer
 };

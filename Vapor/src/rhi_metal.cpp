@@ -225,25 +225,16 @@ void RHI_Metal::flushUploads() {
     submitUploads(true);
 }
 
-bool RHI_Metal::allocateTimingSlots(const char* passName, bool& outSampleBegin,
-                                    NS::UInteger& outBegin, NS::UInteger& outEnd) {
+bool RHI_Metal::allocateTimingSlots(const char* passName, NS::UInteger& outBegin, NS::UInteger& outEnd) {
     if (!gpuTimingActiveThisFrame || !gpuTimerSampleBuffer) {
         return false;
     }
-    const bool first = framePassSamples.empty();
-    const NS::UInteger needed = first ? 2 : 1;  // anchor + end, or just end
-    if (nextTimingSlot + needed > timingBaseSlot + GPU_TIMER_SAMPLE_COUNT) {
+    if (nextTimingSlot + 2 > timingBaseSlot + GPU_TIMER_SAMPLE_COUNT) {
         return false;  // this region's per-frame slot budget exhausted; pass goes untimed
     }
-    if (first) {
-        outBegin = nextTimingSlot;      // the frame anchor
-        outEnd = nextTimingSlot + 1;
-    } else {
-        outBegin = framePassSamples.back().endIdx;  // chain off the previous end
-        outEnd = nextTimingSlot;
-    }
-    nextTimingSlot += needed;
-    outSampleBegin = first;
+    outBegin = nextTimingSlot;
+    outEnd = nextTimingSlot + 1;
+    nextTimingSlot += 2;
     framePassSamples.push_back({passName ? passName : "(unnamed pass)", outBegin, outEnd});
     return true;
 }
@@ -271,19 +262,18 @@ void RHI_Metal::resolveGpuTimings() {
         NS::Data* data = capturedBuf->resolveCounterRange(NS::Range::Make(base, count));
         if (data) {
             auto* timestamps = reinterpret_cast<const MTL::CounterResultTimestamp*>(data->mutableBytes());
-            // Spike capture: with region reuse completion-gated, every value here
-            // was sampled within THIS frame's command buffer — even a stale
-            // (unwritten) slot holds a value from a single ~one-frame span, so a
-            // >50ms delta cannot be cross-frame pollution. It must be a real
-            // wall-clock gap inside the pass's [vertexStart, fragmentEnd] window
-            // (drawable/present back-pressure, GPU preemption). Print the first
-            // few spikes' shape — per-pass begin/end offsets relative to the
-            // frame's first sample — so the mechanism is identifiable on sight.
+            // Spike capture: a >50ms single-pass window is a real wall-clock gap
+            // inside that pass (drawable/present back-pressure, GPU preemption) —
+            // region reuse is completion-gated, so it can't be cross-frame
+            // pollution. Print the first few spikes' begin/end offsets relative
+            // to the frame's first sample so the mechanism is identifiable.
             const uint64_t firstBegin = timestamps[capturedInfo.front().beginIdx - base].timestamp;
             uint64_t minBegin = ~0ull;
             uint64_t maxEnd = 0;
             char spikeBuf[512];
             int spikeLen = 0;
+            std::vector<std::pair<uint64_t, uint64_t>> windows;
+            windows.reserve(capturedInfo.size());
             {
                 std::lock_guard<std::mutex> lock(gpuTimingMutex);
                 gpuPassTimings.clear();
@@ -291,18 +281,21 @@ void RHI_Metal::resolveGpuTimings() {
                 for (const auto& info : capturedInfo) {
                     uint64_t begin = timestamps[info.beginIdx - base].timestamp;
                     uint64_t end = timestamps[info.endIdx - base].timestamp;
-                    // Native-parity validity guards: 0 / ~0 means the GPU never
-                    // wrote the sample (encoder type without stage-boundary
-                    // sampling); a delta over a second means a stale slot, not a
-                    // timing — no real pass takes 1s at interactive frame rates.
+                    // Validity guards: 0 / ~0 means the GPU never wrote the
+                    // sample (encoder type without this stage boundary); a delta
+                    // over a second is a stale slot, not a timing.
                     bool beginValid = begin != 0 && begin != ~0ull;
                     bool endValid = end != 0 && end != ~0ull;
                     double ms = (beginValid && endValid && end >= begin)
                         ? static_cast<double>(end - begin) / 1e6 : 0.0;
                     if (ms > 1000.0) ms = 0.0;
-                    if (beginValid) minBegin = std::min(minBegin, begin);
-                    if (endValid) maxEnd = std::max(maxEnd, end);
+                    // Per-pass = its own fragment/encoder window (EoF - SoF).
                     gpuPassTimings.push_back({info.name, ms});
+                    if (beginValid && endValid && end > begin && ms <= 1000.0) {
+                        windows.emplace_back(begin, end);
+                        minBegin = std::min(minBegin, begin);
+                        maxEnd = std::max(maxEnd, end);
+                    }
                     if (ms > 50.0 && spikeLen < static_cast<int>(sizeof(spikeBuf)) - 96) {
                         spikeLen += snprintf(spikeBuf + spikeLen, sizeof(spikeBuf) - spikeLen,
                                              " %s=%.1fms(b%+.1f,e%+.1f)", info.name.c_str(), ms,
@@ -310,15 +303,22 @@ void RHI_Metal::resolveGpuTimings() {
                                              static_cast<double>(static_cast<int64_t>(end - firstBegin)) / 1e6);
                     }
                 }
-                // Chained ends make the per-pass deltas additive: they sum to
-                // exactly this span (anchor -> last end). Span is still per-frame
-                // LATENCY — pipelined frames overlap, so it may exceed the frame
-                // period at steady state; that is healthy, not an error.
+                // span = min sample .. max sample: per-frame LATENCY (pipelined
+                // frames overlap, so it may exceed the frame period — healthy).
                 gpuFrameSpanMs = (maxEnd > minBegin && minBegin != ~0ull)
                     ? static_cast<double>(maxEnd - minBegin) / 1e6 : 0.0;
-                // No per-pass windows in the chained scheme -> no occupancy
-                // union; 0 tells the panel to hide the busy line.
-                gpuFrameBusyMs = 0.0;
+                // busy = interval union of the fragment/encoder windows:
+                // occupancy, ~frame period when GPU-bound. Fragment windows
+                // serialize per pass on TBDR, so this excludes inter-pass idle
+                // (present waits) that inflates span.
+                std::sort(windows.begin(), windows.end());
+                uint64_t busy = 0, curB = 0, curE = 0;
+                for (const auto& [b, e] : windows) {
+                    if (b > curE) { busy += curE - curB; curB = b; curE = e; }
+                    else if (e > curE) { curE = e; }
+                }
+                busy += curE - curB;
+                gpuFrameBusyMs = static_cast<double>(busy) / 1e6;
             }
             if (spikeLen > 0 && gpuSpikeReportsLeft.fetch_sub(1, std::memory_order_relaxed) > 0) {
                 fprintf(stderr, "[GPUT] f=%u late=%u span=%.1fms spikes:%s\n",
@@ -1171,16 +1171,15 @@ void RHI_Metal::beginRenderPass(const RenderPassDesc& desc) {
     }
 
     // Attach GPU timestamp sampling for this pass (no-op when timing is off).
-    // Chained-end scheme (native parity): only the frame's first timed pass
-    // writes a start sample (the frame anchor); every pass writes its end, and
-    // pass time = gap between consecutive ends. See PassSampleInfo.
-    bool timingSampleBegin;
+    // Window scheme: [StartOfFragment, EndOfFragment] — the pass's own fragment
+    // cost. StartOfVertex is deliberately NOT used (it degenerates on TBDR; see
+    // PassSampleInfo). Fragment windows serialize per pass, so their union is a
+    // real occupancy figure.
     NS::UInteger timingBegin, timingEnd;
-    if (allocateTimingSlots(desc.name, timingSampleBegin, timingBegin, timingEnd)) {
+    if (allocateTimingSlots(desc.name, timingBegin, timingEnd)) {
         auto* sampleAttachment = renderPassDesc->sampleBufferAttachments()->object(0);
         sampleAttachment->setSampleBuffer(gpuTimerSampleBuffer.get());
-        sampleAttachment->setStartOfVertexSampleIndex(
-            timingSampleBegin ? timingBegin : MTL::CounterDontSample);
+        sampleAttachment->setStartOfFragmentSampleIndex(timingBegin);
         sampleAttachment->setEndOfFragmentSampleIndex(timingEnd);
     }
 
@@ -1811,17 +1810,15 @@ void RHI_Metal::beginComputePass(const char* name) {
 
     // Create compute encoder
     if (currentCommandBuffer && !currentComputeEncoder) {
-        bool timingSampleBegin;
         NS::UInteger timingBegin, timingEnd;
-        if (allocateTimingSlots(name, timingSampleBegin, timingBegin, timingEnd)) {
+        if (allocateTimingSlots(name, timingBegin, timingEnd)) {
             // computePassDescriptor() is an autoreleased class factory (+0):
             // RetainPtr so the scope-end release and the frame pool's drain
             // don't double-free it.
             auto passDesc = NS::RetainPtr(MTL::ComputePassDescriptor::computePassDescriptor());
             auto* sampleAttachment = passDesc->sampleBufferAttachments()->object(0);
             sampleAttachment->setSampleBuffer(gpuTimerSampleBuffer.get());
-            sampleAttachment->setStartOfEncoderSampleIndex(
-                timingSampleBegin ? timingBegin : MTL::CounterDontSample);
+            sampleAttachment->setStartOfEncoderSampleIndex(timingBegin);
             sampleAttachment->setEndOfEncoderSampleIndex(timingEnd);
             currentComputeEncoder = currentCommandBuffer->computeCommandEncoder(passDesc.get());
         } else {

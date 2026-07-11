@@ -4853,22 +4853,29 @@ void Renderer::drawGpuTimingsImGui() {
         totalMs += t.gpuTimeMs;
         maxMs = std::max(maxMs, t.gpuTimeMs);
     }
-    // Metal uses chained end-timestamps (native parity): pass time = gap
-    // between consecutive pass completions, so the per-pass values are
-    // ADDITIVE — they sum to the frame's GPU span. Span is per-frame LATENCY:
-    // pipelined frames overlap, so span > frame period at steady state is
-    // healthy (e.g. 20ms span at 90fps = pipeline depth ~1.8). busy is only
-    // reported by backends with per-pass windows (currently none).
+    // Up to three numbers, each a different thing on a pipelined GPU:
+    //   busy = interval union of pass windows -> occupancy; compare THIS to the
+    //          frame period (~equal = GPU-bound). Reported by backends that
+    //          sample per-pass windows (Vulkan; Metal if StartOfFragment works).
+    //   span = min sample .. max sample -> per-frame LATENCY; pipelined frames
+    //          overlap, so span > frame period at steady state is healthy.
+    //   sum  = per-pass total. Additive == span in Metal's chained scheme
+    //          (busy==0); double-counts overlap in the window scheme (busy>0).
     double spanMs = rhi->getGpuFrameSpanMs();
     double busyMs = rhi->getGpuFrameBusyMs();
     if (spanMs > 0.0) {
         if (busyMs > 0.0) {
-            ImGui::Text("GPU busy (approx): %.3f ms", busyMs);
+            ImGui::Text("GPU busy: %.3f ms", busyMs);
+            ImGui::SameLine();
+            ImGui::TextDisabled("(occupancy; ~frame period when GPU-bound)");
         }
         ImGui::Text("GPU frame latency (span): %.3f ms", spanMs);
         ImGui::SameLine();
         ImGui::TextDisabled("(overlaps adjacent frames)");
-        ImGui::TextDisabled("Sum of passes: %.3f ms", totalMs);
+        if (busyMs > 0.0)
+            ImGui::TextDisabled("Sum of pass windows: %.3f ms (overlap double-counts)", totalMs);
+        else
+            ImGui::TextDisabled("Sum of passes: %.3f ms (= span)", totalMs);
     } else {
         ImGui::Text("Total GPU: %.3f ms", totalMs);
     }
