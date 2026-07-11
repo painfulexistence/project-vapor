@@ -53,6 +53,7 @@ set(SOURCES
     src/font_manager.cpp
     src/graphics.cpp
     src/helper.cpp
+    src/stats_log.cpp
     src/physics_3d.cpp
     src/physics_debug_renderer.cpp
     src/character_controller.cpp

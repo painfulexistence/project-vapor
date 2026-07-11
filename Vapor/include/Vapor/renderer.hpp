@@ -393,6 +393,18 @@ private:
     void initBatchRendering();
     void shutdownBatchRendering();
 
+    // Registers the renderer-side StatsLog sources ("R"/"RT"/"CULL"). Called
+    // from initialize(); driven once per frame by StatsLog::tick() in beginFrame.
+    void registerStatsSources();
+
+    // Cached debug-preview texture views (grayscale swizzle / single array
+    // layer) for the ImGui panels. Rebuilt when the source RT id changes (a
+    // resize recreates the RTs), keyed by a caller-supplied label.
+    struct PreviewView { TextureHandle view; Uint32 srcId = 0; };
+    std::unordered_map<std::string, PreviewView> previewViews;
+    TextureHandle debugView(const char* key, TextureHandle src,
+                            TextureSwizzle swizzle, Uint32 layer);
+
     // Post-processing helpers
     void initPostProcessing();
     void shutdownPostProcessing();
@@ -448,6 +460,15 @@ private:
         Uint32 directionalLights = 0;
         Uint32 pointLights = 0;
     } lastFrameStats;
+
+    // Tile-cull histogram cache for the "Light Culling Debug" panel. Refreshed
+    // by a throttled cluster-buffer readback while that panel is open.
+    bool lightCullDebugOpen = false;
+    Uint32 cullAvgLights = 0, cullMinLights = 0, cullMaxLights = 0, cullNonEmptyTiles = 0;
+    // Reads back the culled cluster buffer into (mn/avg/mx/nonEmpty) over the 2D
+    // tile grid. Does a waitIdle, so callers must throttle. Shared by the panel
+    // and the StatsLog "CULL" source. Returns false if unavailable.
+    bool sampleClusterHistogram(Uint32& mn, Uint32& avg, Uint32& mx, Uint32& nonEmpty);
 
     // ========================================================================
     // Registered Resources

@@ -368,7 +368,11 @@ fragment float4 fragmentMain(
     const device RectLight* rectLights [[buffer(7)]],
     constant uint& rectLightCount [[buffer(8)]],
     constant PSSMData& pssmData [[buffer(9)]],
-    constant uint& gibsEnabled [[buffer(10)]] // GIBS enable flag
+    constant uint& gibsEnabled [[buffer(10)]], // GIBS enable flag
+    // Perf-isolation debug flags (bit0 = skip point-light loop, bit1 = skip
+    // shadow). buffer(11) is dirLightCount (Vulkan-only, unread here), so this
+    // takes buffer(12). Mirrors RHIMain.frag's mainDebugFlags.
+    constant uint& mainDebugFlags [[buffer(12)]]
 ) {
     constexpr sampler s(address::repeat, filter::linear, mip_filter::linear);
 
@@ -479,6 +483,9 @@ fragment float4 fragmentMain(
         }
     }
 
+    // Debug bit1: drop the shadow term to isolate its cost.
+    if ((mainDebugFlags & 2u) != 0u) shadowFactor = 1.0;
+
     float3 result = float3(0.0);
     result += CalculateDirectionalLight(directionalLights[0], norm, T, B, viewDir, surf) * shadowFactor;
 
@@ -533,11 +540,14 @@ fragment float4 fragmentMain(
     // Reference, not copy: Cluster is ~1KB (lightIndices[256]); copying it per
     // fragment spills to stack and reads the whole struct from device memory.
     const device Cluster& tile = clusters[tileIndex];
-    uint lightCount = tile.lightCount;
-    float pointShadow = texPointShadow.sample(s, screenUV).r;
-    for (uint i = 0; i < lightCount; i++) {
-        uint lightIndex = tile.lightIndices[i];
-        result += CalculatePointLight(pointLights[lightIndex], norm, T, B, viewDir, surf, in.worldPosition.xyz) * pointShadow;
+    // Debug bit0: skip the whole tiled point-light loop to isolate its cost.
+    if ((mainDebugFlags & 1u) == 0u) {
+        uint lightCount = tile.lightCount;
+        float pointShadow = texPointShadow.sample(s, screenUV).r;
+        for (uint i = 0; i < lightCount; i++) {
+            uint lightIndex = tile.lightIndices[i];
+            result += CalculatePointLight(pointLights[lightIndex], norm, T, B, viewDir, surf, in.worldPosition.xyz) * pointShadow;
+        }
     }
 
     for (uint i = 0; i < rectLightCount; i++) {

@@ -8,6 +8,8 @@
 #include <Metal/Metal.hpp>
 #include <QuartzCore/QuartzCore.hpp>
 #include <dispatch/dispatch.h>
+#include <array>
+#include <atomic>
 #include <mutex>
 #include <string>
 #include <unordered_map>
@@ -43,6 +45,7 @@ public:
     void destroyBuffer(BufferHandle handle) override;
 
     TextureHandle createTexture(const TextureDesc& desc) override;
+    TextureHandle createTextureView(const TextureViewDesc& desc) override;
     void destroyTexture(TextureHandle handle) override;
 
     ShaderHandle createShader(const ShaderDesc& desc) override;
@@ -141,6 +144,8 @@ public:
     void setGpuTimingEnabled(bool enabled) override { gpuTimingEnabled = enabled; }
     bool isGpuTimingEnabled() const override { return gpuTimingEnabled; }
     std::vector<GpuPassTiming> getGpuPassTimings() override;
+    double getGpuFrameSpanMs() override;
+    double getGpuFrameBusyMs() override;
 
     // ========================================================================
     // Backend Query Interface
@@ -298,21 +303,67 @@ private:
     // GPU Pass Timing (MTLCounterSampleBuffer timestamps, AtStageBoundary)
     // ========================================================================
 
+    // Chained end-timestamps, same scheme as the native renderer: slots are
+    // [frame-anchor, end0, end1, ..., endN-1] with beginIdx[K] == endIdx[K-1],
+    // so pass K's time is the gap between consecutive pass completions. On TBDR
+    // fragment kicks serialize, which makes that gap the pass's own cost — and
+    // the deltas are additive (they sum exactly to the frame span). Sampling
+    // each pass's [vertexStart, fragmentEnd] window instead is useless there:
+    // every pass's vertex kick runs near frame start, so every window reads
+    // ~frame time (the "all passes ~10ms" panel).
+    // Per-pass window: render passes sample [StartOfFragment, EndOfFragment]
+    // (NOT StartOfVertex — that degenerates on TBDR, where every pass's vertex
+    // kick runs at frame start, so [SoV,EoF] reads ~frame time for all passes;
+    // fragment shading serializes per pass, so [SoF,EoF] is the pass's own cost
+    // and the windows are unionable into a real occupancy figure). Compute
+    // passes sample the encoder boundaries. Matches the Vulkan backend's model.
     struct PassSampleInfo {
         std::string name;
         NS::UInteger beginIdx;
         NS::UInteger endIdx;
     };
 
-    static constexpr NS::UInteger GPU_TIMER_SAMPLE_COUNT = 64;
+    static constexpr NS::UInteger GPU_TIMER_SAMPLE_COUNT = 128;  // slots per frame region (2/pass)
+    // The sample buffer is partitioned into kTimingRegions per-frame regions and
+    // rotated each frame (same idea as the staging ring): a frame writes region
+    // R and its completion handler reads only region R, which no other in-flight
+    // frame touches until kTimingRegions frames later — so a late handler can no
+    // longer read slots a newer frame already overwrote (the ~200ms spike race).
+    // Must be >= the backend's max frames in flight (CAMetalLayer default 3).
+    static constexpr NS::UInteger kTimingRegions = 3;
     NS::SharedPtr<MTL::CounterSampleBuffer> gpuTimerSampleBuffer;
     std::vector<PassSampleInfo> framePassSamples;   // passes recorded this frame
-    NS::UInteger nextTimingSlot = 0;                // next free slot pair
+    NS::UInteger nextTimingSlot = 0;                // next free slot pair (absolute)
+    NS::UInteger timingBaseSlot = 0;                // this frame's region base
+    NS::UInteger timingRegion = 0;                  // rotating region index
     std::vector<GpuPassTiming> gpuPassTimings;      // last resolved results
-    std::mutex gpuTimingMutex;                      // guards gpuPassTimings
+    double gpuFrameSpanMs = 0.0;                    // minBegin->maxEnd of last frame
+    double gpuFrameBusyMs = 0.0;                    // interval-union of pass windows
+    std::mutex gpuTimingMutex;                      // guards gpuPassTimings + span/busy
     bool gpuTimingSupported = false;
     bool gpuTimingEnabled = false;
     bool gpuTimingActiveThisFrame = false;          // latched at beginFrame
+
+    // Completion-gated region reuse + race telemetry. Rotation alone only makes
+    // reuse safe if a region's completion handler runs within kTimingRegions
+    // frames — a starved handler still races a fresh writer. So a region is
+    // marked busy when its resolve handler is registered and freed when the
+    // handler finishes; beginFrame SKIPS timing for a frame whose next region is
+    // still busy instead of racing. The two counters go out via the [MTL] stats
+    // line so the actual failure mode is measured, not guessed:
+    //   statsTimingSkips        — frames that skipped timing (busy region)
+    //   statsHandlerLateMax     — max handler lateness seen, in frames
+    // If spikes persist while both stay ~0, the cause is NOT stale-slot pairing
+    // (points at TBDR vertex/fragment kick separation or GPU clock domain).
+    std::array<std::atomic<bool>, kTimingRegions> timingRegionBusy{};
+    std::atomic<uint32_t> latestTimingFrame{0};
+    std::atomic<uint32_t> statsTimingSkips{0};
+    std::atomic<uint32_t> statsHandlerLateMax{0};
+    uint32_t timingFrameCounter = 0;
+    // One-shot spike capture budget: the first few >50ms pass deltas print a
+    // [GPUT] line with per-pass begin/end offsets so the mechanism (drawable
+    // wait vs preemption vs bad data) is identifiable from the shape.
+    std::atomic<int> gpuSpikeReportsLeft{12};
 
     // ========================================================================
     // Internal Helpers
@@ -366,8 +417,8 @@ private:
 
     // GPU timing helpers
     void initGpuTiming();
-    // Reserves a slot pair and records the pass; returns false when timing is
-    // off or the per-frame slot budget is exhausted.
+    // Reserves a (begin, end) slot pair for one pass and records it; returns
+    // false when timing is off or the per-frame region budget is exhausted.
     bool allocateTimingSlots(const char* passName, NS::UInteger& outBegin, NS::UInteger& outEnd);
     void resolveGpuTimings();  // installs completion handler on current command buffer
 };

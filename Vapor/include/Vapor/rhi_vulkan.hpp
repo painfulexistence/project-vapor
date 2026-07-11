@@ -40,6 +40,8 @@ public:
     void setGpuTimingEnabled(bool enabled) override { gpuTimingEnabled = enabled; }
     bool isGpuTimingEnabled() const override { return gpuTimingEnabled; }
     std::vector<GpuPassTiming> getGpuPassTimings() override;
+    double getGpuFrameSpanMs() override;
+    double getGpuFrameBusyMs() override;
 
     // ========================================================================
     // Resource Creation
@@ -49,6 +51,7 @@ public:
     void destroyBuffer(BufferHandle handle) override;
 
     TextureHandle createTexture(const TextureDesc& desc) override;
+    TextureHandle createTextureView(const TextureViewDesc& desc) override;
     void destroyTexture(TextureHandle handle) override;
 
     ShaderHandle createShader(const ShaderDesc& desc) override;
@@ -408,9 +411,15 @@ private:
     float timestampPeriodNs = 0.0f;
     bool gpuTimingSupported = false;
     bool gpuTimingEnabled = false;
+    // Portability-subset (MoltenVK) may forbid non-identity image-view swizzle;
+    // createTextureView falls back to identity when this is false. Default true
+    // for full Vulkan (no portability subset present).
+    bool imageViewSwizzleSupported = true;
     bool gpuTimingActiveThisFrame = false;
     std::mutex gpuTimingMutex;
     std::vector<GpuPassTiming> gpuPassTimings;
+    double gpuFrameSpanMs = 0.0;   // min(begin)->max(end) across passes: latency
+    double gpuFrameBusyMs = 0.0;   // interval union of [begin,end] windows: occupancy
     void createTimestampPools();
     void collectTimestamps(Uint32 slot);  // read completed results for a slot
     bool allocateTimestampPair(const char* passName, Uint32& outBegin, Uint32& outEnd);
