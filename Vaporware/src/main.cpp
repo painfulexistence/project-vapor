@@ -254,7 +254,7 @@ auto main(int argc, char* args[]) -> int {
     setupCustomDrawers(sceneInspector);
 
     // Load a font for text rendering
-    FontHandle gameFont = renderer->loadFont("fonts/Arial Black.ttf", 48.0f);
+    FontHandle gameFont = renderer->loadFont("fonts/NotoSans-SemiBold.ttf", 48.0f);
     if (gameFont.isValid()) {
         fmt::print("Font loaded successfully\n");
     } else {
@@ -588,7 +588,7 @@ auto main(int argc, char* args[]) -> int {
             camData.position = tempCamera.getEye();
 
             renderer->beginFrame(camData);
-            
+
             ImGui::NewFrame();
             renderer->invokeImGuiCallback();
 

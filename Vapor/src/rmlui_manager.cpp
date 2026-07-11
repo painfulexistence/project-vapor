@@ -55,7 +55,7 @@ namespace Vapor {
         }
 
         // Load fonts
-        auto fontPath = FileSystem::instance().resolvePath("fonts/Arial Black.ttf");
+        auto fontPath = FileSystem::instance().resolvePath("fonts/NotoSans-SemiBold.ttf");
         if (!fontPath || !Rml::LoadFontFace(*fontPath)) {
             fmt::print("RmlUiManager::FinalizeInitialization: Warning - failed to load font\n");
         }
