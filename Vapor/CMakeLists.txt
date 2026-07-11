@@ -4,7 +4,19 @@ find_package(glm CONFIG REQUIRED)
 find_package(Vulkan REQUIRED)
 find_path(TINYGLTF_INCLUDE_DIRS "tiny_gltf.h")
 find_package(cereal CONFIG REQUIRED)
-find_package(meshoptimizer CONFIG REQUIRED)
+# meshoptimizer: pinned via FetchContent (NOT vcpkg) because clusterlod.h needs
+# bleeding-edge APIs (meshopt_extractMeshletIndices / partitionClusters /
+# buildMeshletsSpatial) not yet in released/vcpkg versions. Keep this commit in
+# sync with Vapor/meshopt/clusterlod.h (see Vapor/meshopt/VENDOR.md).
+include(FetchContent)
+FetchContent_Declare(meshoptimizer
+    GIT_REPOSITORY https://github.com/zeux/meshoptimizer.git
+    GIT_TAG ce321f27536cdbc61ef86622d8ef11fedf5492a8  # keep in sync with clusterlod.h
+)
+set(MESHOPT_INSTALL OFF CACHE BOOL "" FORCE)
+set(MESHOPT_BUILD_DEMO OFF CACHE BOOL "" FORCE)
+set(MESHOPT_BUILD_GLTFPACK OFF CACHE BOOL "" FORCE)
+FetchContent_MakeAvailable(meshoptimizer)
 find_package(Jolt CONFIG REQUIRED)
 find_package(enkiTS CONFIG REQUIRED)
 find_package(SDL3 CONFIG REQUIRED)
@@ -148,7 +160,7 @@ target_link_libraries(Vapor PRIVATE
     Jolt::Jolt
     enkiTS::enkiTS
     Tracy::TracyClient
-    meshoptimizer::meshoptimizer
+    meshoptimizer
 )
 
 if(APPLE)

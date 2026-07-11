@@ -7,7 +7,6 @@
     "glm",
     "args",
     "tinygltf",
-    "meshoptimizer",
     "cereal",
     {
       "name": "joltphysics",
