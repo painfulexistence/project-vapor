@@ -52,7 +52,7 @@ struct OccParams {
 // Hi-Z occlusion test — mirror of GpuCull.comp::occludedByHiZ. Standard [0,1]
 // depth; store/compare against the farthest occluder depth over the AABB's
 // screen footprint. Conservative: any doubt returns false (keep the instance).
-static bool occludedByHiZ(constant CameraData& cam, float3 aabbMin, float3 aabbMax,
+static bool occludedByHiZ(device const CameraData& cam, float3 aabbMin, float3 aabbMax,
                           texture2d<float> hiz, sampler hizSampler, OccParams occ) {
     float4x4 vp = cam.proj * cam.view;
     float2 uvMin = float2(1.0);
