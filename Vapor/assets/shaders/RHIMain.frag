@@ -168,14 +168,17 @@ float sampleShadow(vec3 worldPos, vec3 N, vec3 L, float viewDepth) {
     return lit < 0.0 ? 1.0 : lit;  // outside all cascades -> lit
 }
 
-// RHI::setFragmentBytes(&lightCounts, 8, /*binding=*/7) -> offset 64+(7%4)*16 = 112
-// RHI::setFragmentBytes(&screenSize, 8, /*binding=*/4)  -> offset 64+(4%4)*16 = 64
+// RHI::setFragmentBytes(&dirLightCount, 4, /*binding=*/11) -> offset 64+(11%4)*16 = 112
+// RHI::setFragmentBytes(&screenSize, 8, /*binding=*/4)     -> offset 64+(4%4)*16  = 64
 layout(push_constant) uniform PushConstants {
     layout(offset = 64)  vec2 screenSize;   // swapchain pixels (for AO screen UV)
     // Perf-isolation debug flags (setFragmentBytes binding=2 -> offset 96).
     // bit0 = skip the point-light loop, bit1 = skip the shadow PCF. Panel-driven.
     layout(offset = 96)  uint mainDebugFlags;
-    layout(offset = 112) uvec2 lightCounts; // x = dir count, y = point count
+    // Directional-light loop bound. (Was uvec2 lightCounts; the .y point count
+    // has been dead since the tile-cull port — the point loop reads per-cluster
+    // counts from the Cluster buffer.)
+    layout(offset = 112) uint dirLightCount;
 };
 
 const float PI = 3.14159265359;
@@ -243,7 +246,7 @@ void main() {
     float viewDepth = -(cam.view * vec4(fragPos, 1.0)).z;
 
     vec3 color = vec3(0.0);
-    for (uint i = 0u; i < lightCounts.x; ++i) {
+    for (uint i = 0u; i < dirLightCount; ++i) {
         DirLight l = dirLights[i];
         vec3 Ldir = normalize(-l.direction);
         vec3 contrib = shade(N, V, Ldir, l.color * l.intensity, albedo, metallic, roughness);

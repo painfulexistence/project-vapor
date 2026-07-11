@@ -1296,12 +1296,14 @@ void Renderer::mainRenderPass() {
     Uint32 gibsOn = (gibsEnabled && capabilities.raytracing && giResultTexture.isValid()) ? 1u : 0u;
     rhi->setFragmentBytes(&gibsOn, sizeof(Uint32), 10);
 
-    // Light counts for the Vulkan shader (no cluster culling there yet).
-    // Binding 11: free on Metal, and maps to push-constant offset 112 on
-    // Vulkan — exactly where RHIMain.frag reads it.
-    glm::uvec2 lightCounts(static_cast<Uint32>(directionalLights.size()),
-                           static_cast<Uint32>(pointLights.size()));
-    rhi->setFragmentBytes(&lightCounts, sizeof(glm::uvec2), 11);
+    // Directional-light count for RHIMain.frag's dir loop (it supports N
+    // directional lights; Metal's shader hardcodes the single sun and declares
+    // no buffer(11), so this write is inert there). This used to be a uvec2
+    // whose .y carried the point-light count — dead since the tile-cull port
+    // (the point loop reads per-cluster counts), so push just the one uint.
+    // Binding 11 -> Vulkan push-constant offset 64 + (11%4)*16 = 112.
+    Uint32 dirLightCount = static_cast<Uint32>(directionalLights.size());
+    rhi->setFragmentBytes(&dirLightCount, sizeof(Uint32), 11);
 
     // Default textures for the shadow/AO/IBL slots (texture table 6-14):
     //   6 texAO  7 texShadow  8 irradiance  9 prefilter  10 brdfLUT
@@ -1345,7 +1347,7 @@ void Renderer::mainRenderPass() {
     } else {
         // Perf-isolation debug flags for the Metal PBR shader at buffer(12)
         // (buffer(2) is the cluster buffer here — see the Vulkan note above —
-        // and buffer(11) is lightCounts, so 12 is the free slot). Same bits as
+        // and buffer(11) is dirLightCount, so 12 is the free slot). Same bits as
         // the Vulkan path: bit0 skip point-light loop, bit1 skip shadow.
         rhi->setFragmentBytes(&mainDebugFlags, sizeof(Uint32), 12);
         // Metal-via-RHI: real IBL outputs replace the neutral blacks —

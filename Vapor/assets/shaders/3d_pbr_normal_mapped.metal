@@ -364,7 +364,7 @@ fragment float4 fragmentMain(
     constant PSSMData& pssmData [[buffer(9)]],
     constant uint& gibsEnabled [[buffer(10)]], // GIBS enable flag
     // Perf-isolation debug flags (bit0 = skip point-light loop, bit1 = skip
-    // shadow). buffer(11) is lightCounts (Vulkan-only, unread here), so this
+    // shadow). buffer(11) is dirLightCount (Vulkan-only, unread here), so this
     // takes buffer(12). Mirrors RHIMain.frag's mainDebugFlags.
     constant uint& mainDebugFlags [[buffer(12)]]
 ) {
