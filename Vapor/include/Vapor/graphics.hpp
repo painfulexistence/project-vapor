@@ -1,5 +1,6 @@
 #pragma once
 #include "rhi.hpp"  // TextureHandle (value member on Image; used by the native Metal renderer)
+#include "meshlet.hpp"  // MeshletData (baked meshlet + cluster-LOD data on Mesh)
 #include <SDL3/SDL_stdinc.h>
 #include <glm/geometric.hpp>
 #include <glm/vec2.hpp>
@@ -258,6 +259,7 @@ struct Mesh {
     bool hasColor = false;
     std::vector<VertexData> vertices; // interleaved vertex data
     std::vector<Uint32> indices;
+    MeshletData meshletData;          // baked offline (MeshletBuilder); empty until built
     std::shared_ptr<Material> material = nullptr;
     Uint32 renderMeshId = UINT32_MAX;
     Uint32 renderMaterialId = UINT32_MAX;

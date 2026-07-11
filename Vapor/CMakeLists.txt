@@ -4,6 +4,7 @@ find_package(glm CONFIG REQUIRED)
 find_package(Vulkan REQUIRED)
 find_path(TINYGLTF_INCLUDE_DIRS "tiny_gltf.h")
 find_package(cereal CONFIG REQUIRED)
+find_package(meshoptimizer CONFIG REQUIRED)
 find_package(Jolt CONFIG REQUIRED)
 find_package(enkiTS CONFIG REQUIRED)
 find_package(SDL3 CONFIG REQUIRED)
@@ -45,6 +46,7 @@ set(SOURCES
     src/input_manager.cpp
     src/asset_manager.cpp
     src/asset_serializer.cpp
+    src/meshlet_builder.cpp
     src/camera.cpp
     src/debug_draw.cpp
     src/atlas_baker.cpp
@@ -145,6 +147,7 @@ target_link_libraries(Vapor PRIVATE
     Jolt::Jolt
     enkiTS::enkiTS
     Tracy::TracyClient
+    meshoptimizer::meshoptimizer
 )
 
 if(APPLE)
