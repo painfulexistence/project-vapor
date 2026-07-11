@@ -836,6 +836,9 @@ protected:
 
     // Stochastic point shadow debug: 0 = visibility, 1 = tile light-count heatmap
     uint32_t pointShadowDebugMode = 0;
+    // Perf-isolation flags for the shared PBR shader (buffer 12): bit0 = skip
+    // point-light loop, bit1 = skip shadow. Mirrors the RHI path's mainDebugFlags.
+    uint32_t mainDebugFlags = 0;
 
     // Bloom render targets
     NS::SharedPtr<MTL::Texture> bloomBrightnessRT;// Half-res brightness extraction

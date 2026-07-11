@@ -28,17 +28,24 @@ struct CameraData {
 
 bool sphereTileIntersection(float3 center, float radius, float4x4 viewProj, float2 tileMin, float2 tileMax, float2 screenSize) {
     float4 clipPos = viewProj * float4(center, 1.0);
-    // if (clipPos.w <= 0.0) { // lights behind camera (but these lights can still affect the pixel if their radius is large enough)
-    //     return false;
-    // }
+    // clipPos.w is the view-space forward distance (+ in front of the camera,
+    // - behind). A light whose influence sphere is entirely behind the camera
+    // cannot touch a visible pixel — reject it (otherwise the flipped ndc below
+    // scatters it into arbitrary tiles). Only spheres straddling the near/camera
+    // plane get the conservative accept. Mirrors TileLightCull.comp.
+    if (clipPos.w < -radius) { return false; }
+    if (clipPos.w <= radius) { return true; }
+
     float3 ndc = clipPos.xyz / clipPos.w;
     float2 screenUV = ndc.xy * 0.5 + 0.5;
     // screenUV.y = 1.0 - screenUV.y;
 
     float2 centerSS = screenUV * screenSize;
-    float radiusSS = radius * 2.0 * min(screenSize.x, screenSize.y) / abs(clipPos.w * 2.0); // approximation
-    float2 sphereMin = centerSS - radiusSS;
-    float2 sphereMax = centerSS + radiusSS;
+    float radiusSS = radius * 2.0 * min(screenSize.x, screenSize.y) / abs(clipPos.w * 2.0); // approximation (kept)
+    // Half-tile pad against center/edge quantization (tile size = tileMax-tileMin).
+    float2 pad = 0.5 * (tileMax - tileMin);
+    float2 sphereMin = centerSS - radiusSS - pad;
+    float2 sphereMax = centerSS + radiusSS + pad;
 
     return !(sphereMax.x < tileMin.x || sphereMin.x > tileMax.x ||
              sphereMax.y < tileMin.y || sphereMin.y > tileMax.y);
