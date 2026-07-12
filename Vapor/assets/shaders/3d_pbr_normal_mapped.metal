@@ -496,12 +496,23 @@ fragment float4 fragmentMain(
         }
     };
 
+    // Direction toward the sun; used for the slope-scaled shadow bias.
+    float3 shadowL = normalize(-directionalLights[0].direction);
+
     // Helper: sample a specific cascade
     auto sampleCascade = [&](int ci) -> float {
         float4 lsPos = pssmData.lightSpaceMatrices[ci] * in.worldPosition;
         float3 proj  = lsPos.xyz / lsPos.w;
         float2 shadowUV = float2(proj.x * 0.5 + 0.5, 0.5 - proj.y * 0.5);
-        float refDepth = proj.z - PSSM_BIAS;
+        // Per-cascade + slope-scaled depth bias. A flat bias is fine for the
+        // near cascade but far cascades cover far more world per texel, and
+        // grazing surfaces (small N·L, e.g. a ceiling lit obliquely) self-shadow
+        // — the moiré / "z-fighting" acne that also swallows lit regions. Scale
+        // the bias with cascade index and inverse N·L to suppress both.
+        float ndl = max(dot(N, shadowL), 0.0);
+        float slope = clamp(1.0 - ndl, 0.0, 1.0);
+        float bias = PSSM_BIAS * float(ci + 1) * (1.0 + 2.0 * slope);
+        float refDepth = proj.z - bias;
         return samplePSSMShadow(ci, shadowUV, refDepth);
     };
 
