@@ -2570,7 +2570,11 @@ void Renderer::lightScatteringPass() {
 void Renderer::volumetricFogPass() {
     if (!volumetricFogEnabled || !volumetricFogPipeline.isValid() ||
         !colorRT.isValid() || !tempColorRT.isValid() || !depthStencilRT.isValid() ||
-        !fogDataBuffer.isValid()) {
+        !fogDataBuffer.isValid() ||
+        // The raymarch reads the shadow cascades and every light list.
+        !pssmShadowArrayTexture.isValid() || !pssmDataBuffer.isValid() ||
+        !clusterBuffer.isValid() || !pointLightBuffer.isValid() ||
+        !spotLightBuffer.isValid() || !rectLightBuffer.isValid()) {
         return;
     }
 
@@ -2640,8 +2644,30 @@ void Renderer::volumetricFogPass() {
         mfd.screenSize = glm::vec2(rhi->getSwapchainWidth(), rhi->getSwapchainHeight());
         rhi->setFragmentBytes(&mfd, sizeof(mfd), 0);
         rhi->setFragmentBuffer(1, cameraUniformBuffer, 0, sizeof(CameraRenderData));
+        // Volumetric raymarch inputs: PSSM cascades for sun shafts + the full
+        // light set (tile-culled points, spots, rects).
+        rhi->setTexture(0, 2, pssmShadowArrayTexture, shadowSampler);
+        rhi->setFragmentBuffer(2, pssmDataBuffer, 0, sizeof(PSSMRenderData));
+        rhi->setFragmentBuffer(3, pointLightBuffer, 0, sizeof(PointLightData) * maxPointLights);
+        rhi->setFragmentBuffer(4, clusterBuffer);
+        rhi->setFragmentBuffer(5, spotLightBuffer, 0, sizeof(Vapor::SpotLight) * maxSpotLights);
+        rhi->setFragmentBuffer(6, rectLightBuffer);
+        glm::uvec4 fogLightParams(clusterGridSizeX, clusterGridSizeY,
+                                  static_cast<Uint32>(spotLights.size()),
+                                  static_cast<Uint32>(rectLights.size()));
+        rhi->setFragmentBytes(&fogLightParams, sizeof(glm::uvec4), 7);
     } else {
         rhi->setFragmentBuffer(0, fogDataBuffer, 0, sizeof(FogRenderData));
+        rhi->setFragmentBuffer(1, pssmDataBuffer, 0, sizeof(PSSMRenderData));
+        rhi->setFragmentBuffer(2, clusterBuffer);
+        rhi->setFragmentBuffer(3, pointLightBuffer, 0, sizeof(PointLightData) * maxPointLights);
+        rhi->setFragmentBuffer(4, spotLightBuffer, 0, sizeof(Vapor::SpotLight) * maxSpotLights);
+        rhi->setFragmentBuffer(5, rectLightBuffer);
+        rhi->setTexture(0, 2, pssmShadowArrayTexture, shadowSampler);
+        glm::uvec4 fogLightParams(clusterGridSizeX, clusterGridSizeY,
+                                  static_cast<Uint32>(spotLights.size()),
+                                  static_cast<Uint32>(rectLights.size()));
+        rhi->setFragmentBytes(&fogLightParams, sizeof(glm::uvec4), 0);  // push offset 64
     }
     rhi->draw(3, 1, 0, 0);
     rhi->endRenderPass();

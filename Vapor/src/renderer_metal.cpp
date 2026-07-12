@@ -1644,6 +1644,19 @@ public:
         encoder->setFragmentTexture(r.depthStencilRT.get(), 1);
         encoder->setFragmentBuffer(r.volumetricFogDataBuffers[r.currentFrameInFlight].get(), 0, 0);
         encoder->setFragmentBuffer(r.cameraDataBuffers[r.currentFrameInFlight].get(), 0, 1);
+        // Volumetric raymarch inputs (shared shader contract): PSSM cascades
+        // for sun shafts + the light set. Native has no spot lights — bind a
+        // placeholder with count 0.
+        encoder->setFragmentTexture(r.pssmShadowMaps.get(), 2);
+        encoder->setFragmentBuffer(r.pssmDataBuffers[r.currentFrameInFlight].get(), 0, 2);
+        encoder->setFragmentBuffer(r.pointLightBuffer.get(), 0, 3);
+        encoder->setFragmentBuffer(r.clusterBuffers[r.currentFrameInFlight].get(), 0, 4);
+        encoder->setFragmentBuffer(r.pointLightBuffer.get(), 0, 5);  // spot placeholder (count 0)
+        encoder->setFragmentBuffer(r.rectLightBuffer.get(), 0, 6);
+        uint32_t fogRectCount = r.currentScene
+            ? static_cast<uint32_t>(r.currentScene->rectLights.size()) : 0u;
+        glm::uvec4 fogLightParams(r.clusterGridSizeX, r.clusterGridSizeY, 0u, fogRectCount);
+        encoder->setFragmentBytes(&fogLightParams, sizeof(fogLightParams), 7);
         encoder->drawPrimitives(MTL::PrimitiveType::PrimitiveTypeTriangle, 0, 3, 1);
         encoder->endEncoding();
 

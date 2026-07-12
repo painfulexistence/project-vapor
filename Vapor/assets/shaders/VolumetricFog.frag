@@ -1,13 +1,17 @@
 #version 450
-// Simple screen-space height/distance fog. GLSL port of the Metal
-// simpleFogFragment (3d_volumetric_fog.metal): reconstruct world position from
-// depth, apply exponential height fog with a Henyey-Greenstein sun phase.
+// True volumetric raymarched fog. GLSL twin of the Metal simpleFogFragment
+// (3d_volumetric_fog.metal): 32 steps along the view ray, per-step
+// in-scattering from the FULL light set — sun with a PSSM cascade tap per step
+// (volumetric light shafts), the pixel's tile-culled point-light list, spot
+// cones, and rect area lights (center-point x area approximation) — with
+// Henyey-Greenstein phase and Beer-Lambert transmittance.
 
 layout(location = 0) in vec2 tex_uv;
 layout(location = 0) out vec4 outColor;
 
 layout(set = 2, binding = 0) uniform sampler2D sceneColor;
 layout(set = 2, binding = 1) uniform sampler2D sceneDepth;
+layout(set = 2, binding = 2) uniform sampler2DArray pssmShadowMaps;
 
 // Must match Vapor::FogRenderData (std430).
 layout(std430, set = 1, binding = 0) readonly buffer FogBuf {
@@ -21,6 +25,65 @@ layout(std430, set = 1, binding = 0) readonly buffer FogBuf {
     float ambientIntensity;
 };
 
+// Must match Vapor::PSSMRenderData (same layout RHIMain.frag reads).
+layout(std430, set = 1, binding = 1) readonly buffer PSSMBuf {
+    mat4 shadowLightSpaceMatrices[3];
+    vec4 cascadeSplits;
+    float shadowBlendRange;
+};
+
+const uint MAX_LIGHTS_PER_TILE = 256;
+struct Cluster {
+    vec4 mn;
+    vec4 mx;
+    uint lightCount;
+    uint lightIndices[MAX_LIGHTS_PER_TILE];
+};
+layout(std430, set = 1, binding = 2) readonly buffer ClusterBuf { Cluster tiles[]; };
+
+// Must match Vapor::PointLightData (stride 48).
+struct PointLight {
+    vec3 position;
+    float _pad1;
+    vec3 color;
+    float _pad2;
+    float intensity;
+    float radius;
+    vec2 _pad3;
+};
+layout(std430, set = 1, binding = 3) readonly buffer PointLightBuf { PointLight pointLights[]; };
+
+// Must match Vapor::SpotLight (scalars follow the vectors).
+struct SpotLight {
+    vec3 position;
+    float _pad0;
+    vec3 direction;   // normalized, FROM the light
+    float _pad1;
+    vec3 color;
+    float _pad2;
+    float radius;
+    float cosInner;
+    float cosOuter;
+    float intensity;
+};
+layout(std430, set = 1, binding = 4) readonly buffer SpotLightBuf { SpotLight spotLights[]; };
+
+// Must match Vapor::RectLight (std430 legally packs the scalars into the vec3
+// tails, unlike MSL — same 64-byte layout as the C++ struct).
+struct RectLight {
+    vec3 position;  float halfWidth;
+    vec3 rright;    float halfHeight;
+    vec3 up;        float intensity;
+    vec3 color;     uint useVideoTexture;
+};
+layout(std430, set = 1, binding = 5) readonly buffer RectLightBuf { RectLight rectLights[]; };
+
+// x = cull grid X, y = cull grid Y, z = spot count, w = rect count
+// (RHI::setFragmentBytes binding 0 -> push offset 64).
+layout(push_constant) uniform PushConstants {
+    layout(offset = 64) uvec4 fogLightParams;
+};
+
 const float INV_4PI = 0.07957747;
 
 float phaseHG(float cosTheta, float g) {
@@ -29,19 +92,28 @@ float phaseHG(float cosTheta, float g) {
     return INV_4PI * (1.0 - g2) / pow(d, 1.5);
 }
 
-float exponentialHeightFog(float dist, float height, float density, float falloffIn) {
-    float falloff = max(falloffIn, 0.0001);
-    float heightFactor = exp(-max(0.0, height) * falloff);
-    float distFactor = (1.0 - exp(-dist * falloff)) / falloff;
-    float amt = density * heightFactor * distFactor;
-    return 1.0 - exp(-amt);
+// One-tap PSSM visibility at an arbitrary world position (RHIMain.frag's
+// cascade conventions: uv = proj.xy*0.5+0.5, manual depth compare). Positions
+// outside every cascade count as lit.
+float sunVisibilityAt(vec3 p, float viewDepth) {
+    int ci = 0;
+    if      (viewDepth > cascadeSplits.z) ci = 2;
+    else if (viewDepth > cascadeSplits.y) ci = 1;
+    vec4 lp = shadowLightSpaceMatrices[ci] * vec4(p, 1.0);
+    vec3 proj = lp.xyz / lp.w;
+    vec2 uv = proj.xy * 0.5 + 0.5;
+    if (uv.x < 0.0 || uv.x > 1.0 || uv.y < 0.0 || uv.y > 1.0 || proj.z > 1.0) {
+        return 1.0;
+    }
+    float d = texture(pssmShadowMaps, vec3(uv, float(ci))).r;
+    return (proj.z - 0.002) <= d ? 1.0 : 0.0;
 }
 
 void main() {
     vec4 color = texture(sceneColor, tex_uv);
     float depth = texture(sceneDepth, tex_uv).r;
 
-    if (depth >= 0.9999) { outColor = color; return; }  // sky: no fog
+    if (depth >= 0.9999) { outColor = color; return; }  // sky: no fog (parity)
 
     // Reconstruct world position (GL-convention +Y-up NDC, Vulkan ZO depth).
     vec2 ndc = vec2(tex_uv.x * 2.0 - 1.0, 1.0 - tex_uv.y * 2.0);
@@ -49,14 +121,80 @@ void main() {
     vec3 worldPos = wp.xyz / wp.w;
 
     vec3 rayDir = normalize(worldPos - cameraPosition);
-    float dist = length(worldPos - cameraPosition);
-    float height = worldPos.y;
+    float marchDist = length(worldPos - cameraPosition);
 
-    float fogAmount = clamp(exponentialHeightFog(dist, height, fogDensity, fogHeightFalloff), 0.0, 1.0);
+    // Per-pixel tile light list: the cull writer indexes tiles in y-up screen
+    // space, tex_uv is y-down.
+    uvec2 grid = fogLightParams.xy;
+    uint tileX = min(uint(tex_uv.x * float(grid.x)), grid.x - 1u);
+    uint tileY = min(uint((1.0 - tex_uv.y) * float(grid.y)), grid.y - 1u);
+    uint tileIdx = tileX + tileY * grid.x;
+    uint tileLights = min(tiles[tileIdx].lightCount, 16u);  // fog cost cap
 
-    float cosTheta = dot(rayDir, sunDirection);
-    float phase = phaseHG(cosTheta, anisotropy);
-    vec3 fogColor = sunColor * sunIntensity * phase * 0.1 + vec3(0.5, 0.6, 0.7) * ambientIntensity;
+    const int STEPS = 32;
+    float stepLen = marchDist / float(STEPS);
+    float sunPhase = phaseHG(dot(rayDir, sunDirection), anisotropy);
 
-    outColor = vec4(mix(color.rgb, fogColor, fogAmount), color.a);
+    vec3 scatter = vec3(0.0);
+    float trans = 1.0;
+    for (int st = 0; st < STEPS; ++st) {
+        float t = (float(st) + 0.5) * stepLen;
+        vec3 p = cameraPosition + rayDir * t;
+        float dens = fogDensity * exp(-max(0.0, p.y) * max(fogHeightFalloff, 0.0001));
+        if (dens < 1e-6) continue;
+
+        vec3 L = vec3(0.0);
+
+        // Sun with volumetric PSSM shadow (light shafts). The march distance t
+        // approximates the view depth for cascade selection.
+        L += sunColor * sunIntensity * sunPhase * sunVisibilityAt(p, t);
+
+        // Tile-culled point lights (surface-matching falloff).
+        for (uint i = 0u; i < tileLights; ++i) {
+            PointLight pl = pointLights[tiles[tileIdx].lightIndices[i]];
+            vec3 toL = pl.position - p;
+            float d2 = max(dot(toL, toL), 1e-4);
+            float d = sqrt(d2);
+            if (d >= pl.radius) continue;
+            float atten = (1.0 - smoothstep(pl.radius * 0.8, pl.radius, d)) / d2;
+            L += pl.color * pl.intensity * atten * phaseHG(dot(rayDir, toL / d), anisotropy);
+        }
+
+        // Spot cones (loop-all; scenes carry a handful).
+        for (uint i = 0u; i < fogLightParams.z; ++i) {
+            SpotLight sl = spotLights[i];
+            vec3 toL = sl.position - p;
+            float d2 = max(dot(toL, toL), 1e-4);
+            float d = sqrt(d2);
+            if (d >= sl.radius) continue;
+            vec3 ldir = toL / d;
+            float cone = clamp((dot(-ldir, sl.direction) - sl.cosOuter)
+                                   / max(sl.cosInner - sl.cosOuter, 1e-4), 0.0, 1.0);
+            if (cone <= 0.0) continue;
+            float atten = (1.0 - smoothstep(sl.radius * 0.8, sl.radius, d)) / d2 * cone * cone;
+            L += sl.color * sl.intensity * atten * phaseHG(dot(rayDir, ldir), anisotropy);
+        }
+
+        // Rect area lights: center-point x area approximation with a
+        // size-derived range window.
+        for (uint i = 0u; i < fogLightParams.w; ++i) {
+            RectLight rl = rectLights[i];
+            float area = 4.0 * rl.halfWidth * rl.halfHeight;
+            float range = 8.0 * max(rl.halfWidth, rl.halfHeight);
+            vec3 toL = rl.position - p;
+            float d2 = max(dot(toL, toL), 1e-4);
+            float d = sqrt(d2);
+            if (d >= range) continue;
+            float atten = (1.0 - smoothstep(range * 0.8, range, d)) / d2 * area;
+            L += rl.color * rl.intensity * atten * phaseHG(dot(rayDir, normalize(toL)), anisotropy);
+        }
+
+        // Ambient floor so fog reads even away from direct light.
+        L += vec3(0.5, 0.6, 0.7) * ambientIntensity;
+
+        scatter += trans * L * dens * stepLen;
+        trans *= exp(-dens * stepLen);
+    }
+
+    outColor = vec4(color.rgb * trans + scatter, color.a);
 }
