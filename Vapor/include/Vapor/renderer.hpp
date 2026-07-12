@@ -438,6 +438,8 @@ private:
     TextureHandle nearShadowMap;            // independent near-field depth map [near, pssmRTMaxDist] (Vulkan: set2 b9)
     static constexpr Uint32 NEAR_SHADOW_MAP_SIZE = Vapor::kNearShadowMapSize;  // shared (irenderer.hpp)
     std::vector<Vapor::RectLight> rectLights;   // gathered from the scene
+    std::vector<Vapor::SpotLight> spotLights;   // gathered from the scene
+    BufferHandle spotLightBuffer;               // frame-slotted, maxSpotLights
 
     // ImGui texture previews (RT viewer / material thumbnails)
     void* getImGuiTextureID(TextureHandle handle);
@@ -965,6 +967,7 @@ private:
     Uint32 maxDirectionalLights = 4;
     Uint32 maxPointLights = 1024;
     Uint32 maxRectLights = 32;
+    Uint32 maxSpotLights = 64;
 
     // Clustering configuration
     Uint32 clusterGridSizeX = 16;

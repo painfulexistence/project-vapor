@@ -141,6 +141,21 @@ float3 CalculatePointLight(PointLight light, float3 norm, float3 tangent, float3
     return CookTorranceBRDF(norm, tangent, bitangent, lightDir, viewDir, surf) * radiance * clamp(dot(norm, lightDir), 0.0, 1.0);
 }
 
+// Spot: a point light windowed by a smooth cone falloff between the inner
+// (full intensity) and outer (zero) half-angle cosines.
+float3 CalculateSpotLight(SpotLight light, float3 norm, float3 tangent, float3 bitangent, float3 viewDir, Surface surf, float3 fragPos) {
+    float3 lightDir = normalize(light.position - fragPos);
+    float dist = distance(light.position, fragPos);
+    float attenuation = 1.0 / (dist * dist);
+    attenuation *= 1.0 - smoothstep(light.radius * 0.8, light.radius, dist);
+    float cosAngle = dot(-lightDir, light.direction);
+    float cone = clamp((cosAngle - light.cosOuter) / max(light.cosInner - light.cosOuter, 1e-4), 0.0, 1.0);
+    attenuation *= cone * cone;
+    float3 radiance = attenuation * light.color * light.intensity;
+
+    return CookTorranceBRDF(norm, tangent, bitangent, lightDir, viewDir, surf) * radiance * clamp(dot(norm, lightDir), 0.0, 1.0);
+}
+
 // ── Rect area light (diffuse + specular) ─────────────────────────────────────
 
 // Exact diffuse irradiance from a quad via the polygon solid-angle edge formula
@@ -367,7 +382,13 @@ fragment float4 fragmentMain(
     // Perf-isolation debug flags (bit0 = skip point-light loop, bit1 = skip
     // shadow). buffer(11) is dirLightCount (Vulkan-only, unread here), so this
     // takes buffer(12). Mirrors RHIMain.frag's mainDebugFlags.
-    constant uint& mainDebugFlags [[buffer(12)]]
+    constant uint& mainDebugFlags [[buffer(12)]],
+    // buffer(13) is reserved for the RT PR's reflectionParams.
+    const device SpotLight* spotLights [[buffer(14)]],
+    // x = spot light count, y = shadow-format flags (bit0 = the point-shadow
+    // texture carries RGB channels: R point / G rect / B spot; 0 on legacy
+    // R16F targets so rect/spot stay unshadowed instead of black).
+    constant uint2& spotRectParams [[buffer(15)]]
 ) {
     constexpr sampler s(address::repeat, filter::linear, mip_filter::linear);
 
@@ -659,8 +680,23 @@ fragment float4 fragmentMain(
         }
     }
 
-    for (uint i = 0; i < rectLightCount; i++) {
-        result += CalculateRectLight(rectLights[i], norm, in.worldPosition.xyz, viewDir, surf, rectLightVideo);
+    // Rect area lights, shadowed by the stochastic pass's G channel when the
+    // RGB shadow format is active (spotRectParams.y bit0); legacy R16F targets
+    // read G as 0, so the flag keeps them fully lit there instead of black.
+    {
+        float rectShadow = (spotRectParams.y & 1u) ? texPointShadow.sample(s, screenUV).g : 1.0;
+        for (uint i = 0; i < rectLightCount; i++) {
+            result += CalculateRectLight(rectLights[i], norm, in.worldPosition.xyz, viewDir, surf, rectLightVideo) * rectShadow;
+        }
+    }
+
+    // Spot lights (loop-all; typical scenes carry a handful, so no clustering).
+    // Shadowed by the stochastic pass's B channel under the same flag.
+    {
+        float spotShadow = (spotRectParams.y & 1u) ? texPointShadow.sample(s, screenUV).b : 1.0;
+        for (uint i = 0; i < spotRectParams.x; i++) {
+            result += CalculateSpotLight(spotLights[i], norm, T, B, viewDir, surf, in.worldPosition.xyz) * spotShadow;
+        }
     }
 
     // Screen-space AO attenuates ambient/indirect light only — multiplying

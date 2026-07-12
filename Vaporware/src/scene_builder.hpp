@@ -163,6 +163,34 @@ inline SceneResources buildScene(
         }
     }
 
+    // RT-showcase lights: one spot (cone falloff + RT shadow via the stochastic
+    // pass's B channel) and one rect area light (RT-sampled soft penumbra via
+    // the G channel).
+    {
+        auto e      = registry.create();
+        auto& tc    = registry.emplace<Vapor::TransformComponent>(e);
+        tc.position = glm::vec3(0.0f, 6.0f, 0.0f);
+        // Beam is the transform's -Z; rotate it to point straight down.
+        tc.rotation = glm::angleAxis(glm::radians(-90.0f), glm::vec3(1.0f, 0.0f, 0.0f));
+        tc.isDirty  = true;
+        auto& sl      = registry.emplace<SpotLightComponent>(e);
+        sl.color      = glm::vec3(1.0f, 0.95f, 0.8f);
+        sl.intensity  = 40.0f;
+        sl.radius     = 15.0f;
+        sl.innerAngle = 18.0f;
+        sl.outerAngle = 28.0f;
+    }
+    {
+        auto e      = registry.create();
+        auto& tc    = registry.emplace<Vapor::TransformComponent>(e);
+        tc.position = glm::vec3(4.0f, 1.8f, -3.0f);  // vertical panel
+        tc.isDirty  = true;
+        auto& rl     = registry.emplace<Vapor::RectLightComponent>(e);
+        rl.size      = glm::vec2(2.0f, 3.0f);
+        rl.color     = glm::vec3(0.4f, 0.7f, 1.0f);
+        rl.intensity = 8.0f;
+    }
+
     auto flyCam = registry.create();
     {
         auto& cam = registry.emplace<Vapor::VirtualCameraComponent>(flyCam);

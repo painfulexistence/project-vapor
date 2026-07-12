@@ -107,6 +107,12 @@ void Renderer::initialize(std::unique_ptr<RHI> rhiPtr, GraphicsBackend backendTy
     pointLightBufferDesc.memoryUsage = MemoryUsage::CPUtoGPU;
     createFrameSlottedBuffer(pointLightBuffer, pointLightBufferDesc);
 
+    BufferDesc spotLightBufferDesc;
+    spotLightBufferDesc.size = sizeof(Vapor::SpotLight) * maxSpotLights;
+    spotLightBufferDesc.usage = BufferUsage::Uniform;
+    spotLightBufferDesc.memoryUsage = MemoryUsage::CPUtoGPU;
+    createFrameSlottedBuffer(spotLightBuffer, spotLightBufferDesc);
+
     BufferDesc instanceDataBufferDesc;
     instanceDataBufferDesc.size = sizeof(Vapor::InstanceData) * MAX_INSTANCES;
     instanceDataBufferDesc.usage = BufferUsage::Uniform;
@@ -797,6 +803,7 @@ void Renderer::beginFrame(const CameraRenderData& camera) {
     directionalLights.clear();
     pointLights.clear();
     rectLights.clear();
+    spotLights.clear();
 
     // Set up batch renderers for auto-flushing
     // 2D uses orthographic projection
@@ -1156,6 +1163,12 @@ void Renderer::updateBuffers() {
                           pointLights.size() * sizeof(PointLightData));
     }
 
+    // Update spot lights
+    if (!spotLights.empty()) {
+        rhi->updateBuffer(spotLightBuffer, spotLights.data(), 0,
+                          spotLights.size() * sizeof(Vapor::SpotLight));
+    }
+
     // Update instance data — for EVERY submitted drawable, not just the
     // camera-visible set. Shadow consumers (PSSM cascade draws, the TLAS the
     // RT kernels trace) must include casters OUTSIDE the camera frustum, or
@@ -1357,6 +1370,11 @@ void Renderer::mainRenderPass() {
         // Vulkan-only: on Metal, fragment buffer(2) is the CLUSTER buffer, so
         // pushing here would corrupt it (the old billions-of-iterations hang).
         rhi->setFragmentBytes(&mainDebugFlags, sizeof(Uint32), 2);
+        // Spot lights: buffer at set1 b6, loop bound at push offset 80 (binding 1).
+        if (spotLightBuffer.isValid())
+            rhi->setFragmentBuffer(6, spotLightBuffer, 0, sizeof(Vapor::SpotLight) * maxSpotLights);
+        Uint32 spotCount = static_cast<Uint32>(spotLights.size());
+        rhi->setFragmentBytes(&spotCount, sizeof(Uint32), 1);
     } else {
         // Perf-isolation debug flags for the Metal PBR shader at buffer(12)
         // (buffer(2) is the cluster buffer here — see the Vulkan note above —
@@ -1384,6 +1402,13 @@ void Renderer::mainRenderPass() {
             if (pointShadowHistoryRT.isValid()) rhi->setTexture(0, 13, pointShadowHistoryRT, clampSampler);
             if (gibsEnabled && giResultTexture.isValid()) rhi->setTexture(0, 14, giResultTexture, clampSampler);
         }
+        // Spot lights (buffer 14) + counts/flags (buffer 15). Flag bit0 says the
+        // point-shadow texture carries the RGB channel format (R point / G rect
+        // / B spot) — true on this path, whose targets are RGBA16F.
+        rhi->setFragmentBuffer(14, spotLightBuffer, 0, sizeof(Vapor::SpotLight) * maxSpotLights);
+        glm::uvec2 spotRectParams(static_cast<Uint32>(spotLights.size()),
+                                  capabilities.raytracing ? 1u : 0u);
+        rhi->setFragmentBytes(&spotRectParams, sizeof(glm::uvec2), 15);
     }
 
     // Group drawables by material to reduce state changes
@@ -1884,6 +1909,12 @@ void Renderer::stochasticPointShadowPass() {
     rhi->setComputeBytes(&fi, sizeof(Uint32), 5);
     rhi->setAccelerationStructure(6, sceneTLAS);
     rhi->setComputeBytes(&debugMode, sizeof(Uint32), 7);
+    // Rect area + spot light shadow inputs (channels G / B of the output).
+    rhi->setComputeBuffer(8, spotLightBuffer, 0, sizeof(Vapor::SpotLight) * maxSpotLights);
+    rhi->setComputeBuffer(9, rectLightBuffer);
+    glm::uvec2 extraCounts(static_cast<Uint32>(rectLights.size()),
+                           static_cast<Uint32>(spotLights.size()));
+    rhi->setComputeBytes(&extraCounts, sizeof(glm::uvec2), 10);
     rhi->dispatch((w + 7) / 8, (h + 7) / 8, 1);
     rhi->endComputePass();
 }
@@ -3412,7 +3443,11 @@ void Renderer::createRenderTargets() {
         aoHistoryRT[1] = rhi->createTexture(desc);
 
         // Point shadows stay full-res (native creates these at drawableSize).
-        desc.format = PixelFormat::R16_FLOAT;
+        // RGBA16F: the stochastic kernel now packs THREE visibility channels —
+        // R = point lights, G = rect area lights, B = spot lights (native keeps
+        // its R16F targets; the extra channels just drop there, and its PBR
+        // binds shadowFlags=0 so it never reads them).
+        desc.format = PixelFormat::RGBA16_FLOAT;
         desc.usage = TextureUsage::Storage | TextureUsage::Sampled;
         desc.width = width;
         desc.height = height;
@@ -4485,6 +4520,10 @@ void Renderer::submitSceneLights(const std::shared_ptr<Scene>& scene) {
         if (rectLights.size() >= maxRectLights) break;
         rectLights.push_back(l);
     }
+    for (const auto& l : scene->spotLights) {
+        if (spotLights.size() >= maxSpotLights) break;
+        spotLights.push_back(l);
+    }
 }
 
 void Renderer::collectDrawables(std::shared_ptr<Scene> scene) {
@@ -4676,8 +4715,9 @@ void Renderer::drawGraphicsImGui() {
     ImGui::ColorEdit3("Clear color", (float*)&clearColor);
     ImGui::Text("Drawables: %u / %u visible",
                 lastFrameStats.visibleDrawables, lastFrameStats.totalDrawables);
-    ImGui::Text("Scene lights: dir %u | point %u | rect %zu",
-                lastFrameStats.directionalLights, lastFrameStats.pointLights, rectLights.size());
+    ImGui::Text("Scene lights: dir %u | point %u | rect %zu | spot %zu",
+                lastFrameStats.directionalLights, lastFrameStats.pointLights,
+                rectLights.size(), spotLights.size());
     ImGui::Text("Raytracing: %s | Compute: %s | GPU timestamps: %s",
                 capabilities.raytracing ? "yes" : "no",
                 capabilities.computeShaders ? "yes" : "no",

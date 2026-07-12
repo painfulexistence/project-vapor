@@ -39,6 +39,7 @@
 static void setupCustomDrawers(Vapor::SceneInspector& inspector) {
     // Register app-specific components for auto field-by-field drawing.
     inspector.registerComponent<PointLightComponent>("Point Light");
+    inspector.registerComponent<SpotLightComponent>("Spot Light");
     inspector.registerComponent<DirectionalLightComponent>("Directional Light");
     inspector.registerComponent<CharacterIntent>("Character Intent");
     inspector.registerComponent<CharacterControllerComponent>("Character Controller");

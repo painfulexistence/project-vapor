@@ -67,6 +67,20 @@ struct PointLight {
     vec2 _pad3;
 };
 
+// Must match Vapor::SpotLight (std430, 64 bytes; scalars follow the vectors).
+struct SpotLight {
+    vec3 position;
+    float _pad0;
+    vec3 direction;   // normalized, FROM the light
+    float _pad1;
+    vec3 color;
+    float _pad2;
+    float radius;     // range
+    float cosInner;
+    float cosOuter;
+    float intensity;
+};
+
 // Must match CameraRenderData (C++)
 struct CameraData {
     mat4 proj;
@@ -107,6 +121,9 @@ layout(std430, set = 1, binding = 5) readonly buffer LightCullBuf {
     vec2 _cpad1;
     uvec3 cullGridSize;
     uint cullLightCount;
+};
+layout(std430, set = 1, binding = 6) readonly buffer SpotLightBuf {
+    SpotLight spotLights[];
 };
 // PSSM cascaded directional shadow data. Must match Vapor::PSSMRenderData
 // (std430). The neutral default (cascadeSplits = +inf) keeps every pixel in the
@@ -242,6 +259,8 @@ float sampleShadow(vec3 worldPos, vec3 N, vec3 L, float viewDepth) {
 // RHI::setFragmentBytes(&screenSize, 8, /*binding=*/4)     -> offset 64+(4%4)*16  = 64
 layout(push_constant) uniform PushConstants {
     layout(offset = 64)  vec2 screenSize;   // swapchain pixels (for AO screen UV)
+    // Spot-light loop bound (setFragmentBytes binding=1 -> offset 80).
+    layout(offset = 80)  uint spotLightCount;
     // Perf-isolation debug flags (setFragmentBytes binding=2 -> offset 96).
     // bit0 = skip the point-light loop, bit1 = skip the shadow PCF. Panel-driven.
     layout(offset = 96)  uint mainDebugFlags;
@@ -354,6 +373,23 @@ void main() {
             vec3 radiance = l.color * l.intensity * attenuation;
             color += shade(N, V, normalize(toLight), radiance, albedo, metallic, roughness);
         }
+    }
+
+    // Spot lights (loop-all; typical scenes carry a handful). Same falloff as
+    // point lights, windowed by a squared smooth cone factor between the inner
+    // and outer half-angle cosines. Unshadowed on Vulkan until RT lands here.
+    for (uint sIdx = 0u; sIdx < spotLightCount; ++sIdx) {
+        SpotLight sl = spotLights[sIdx];
+        vec3 toLight = sl.position - fragPos;
+        float dist2 = max(dot(toLight, toLight), 1e-4);
+        float dist = sqrt(dist2);
+        vec3 Ldir = toLight / dist;
+        float cone = clamp((dot(-Ldir, sl.direction) - sl.cosOuter)
+                               / max(sl.cosInner - sl.cosOuter, 1e-4), 0.0, 1.0);
+        float attenuation = (1.0 - smoothstep(sl.radius * 0.8, sl.radius, dist)) / dist2
+                          * cone * cone;
+        vec3 radiance = sl.color * sl.intensity * attenuation;
+        color += shade(N, V, Ldir, radiance, albedo, metallic, roughness);
     }
 
     // Flat ambient so unlit scenes are never pure black. Screen-space AO

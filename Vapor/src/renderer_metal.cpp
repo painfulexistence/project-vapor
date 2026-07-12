@@ -647,6 +647,14 @@ public:
         encoder->setBytes(&fi, sizeof(uint32_t), 5);
         encoder->setAccelerationStructure(r.TLASBuffers[r.currentFrameInFlight].get(), 6);
         encoder->setBytes(&r.pointShadowDebugMode, sizeof(uint32_t), 7);
+        // The shared kernel now takes spot/rect shadow inputs at 8-10. Native
+        // has no spot lights and keeps R16F targets, so bind placeholders with
+        // zero counts — the kernel then leaves the extra channels at 1.0 and
+        // this path stays byte-for-byte.
+        encoder->setBuffer(r.pointLightBuffer.get(), 0, 8);   // placeholder (unread)
+        encoder->setBuffer(r.rectLightBuffer.get(), 0, 9);
+        glm::uvec2 extraCounts(0u, 0u);
+        encoder->setBytes(&extraCounts, sizeof(glm::uvec2), 10);
         encoder->dispatchThreadgroups(
             MTL::Size((uint32_t(screenSize.x) + 7) / 8, (uint32_t(screenSize.y) + 7) / 8, 1),
             MTL::Size(8, 8, 1)
@@ -1232,6 +1240,12 @@ public:
             // Perf-isolation flags at buffer(12) — the shared PBR shader now
             // reads this slot, so it MUST be bound or the reference is UB.
             encoder->setFragmentBytes(&r.mainDebugFlags, sizeof(uint32_t), 12);
+            // Spot lights are an RHI-path feature: bind a placeholder buffer
+            // (count 0 -> the loop never dereferences it) and shadowFlags 0
+            // (legacy R16F shadow target: rect/spot channels unavailable).
+            encoder->setFragmentBuffer(r.pointLightBuffer.get(), 0, 14);
+            glm::uvec2 spotRectParams(0u, 0u);
+            encoder->setFragmentBytes(&spotRectParams, sizeof(spotRectParams), 15);
 
             for (const auto& draw : draws) {
                 if (!r.currentCamera->isVisible(r.instances[draw.instanceIndex].boundingSphere)) {
