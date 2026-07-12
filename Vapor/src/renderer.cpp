@@ -1348,6 +1348,10 @@ void Renderer::mainRenderPass() {
         // Screen-space contact shadow at set2 b8 (RHIMain.frag sscsTex; whiteTex
         // = neutral/lit when disabled). Uses the bumped 10-binding texture set.
         rhi->setTexture(0, 8, (sscsEnabled && sscsRT.isValid()) ? sscsRT : whiteTex, clampSampler);
+        // Independent near-field shadow map at set2 b9 (RHIMain.frag nearShadowTex).
+        // Always bind a 2D texture here: the defaults loop above put a cubemap in
+        // b8/b9 (dead Metal contract), and b8/b9 are sampler2D on this path.
+        rhi->setTexture(0, 9, nearShadowMap.isValid() ? nearShadowMap : whiteTex, shadowSampler);
         // Perf-isolation debug flags -> RHIMain.frag push offset 96 (binding 2).
         // Vulkan-only: on Metal, fragment buffer(2) is the CLUSTER buffer, so
         // pushing here would corrupt it (the old billions-of-iterations hang).
@@ -2080,7 +2084,12 @@ void Renderer::shadowPass() {
     // PSSM showed, matching the "weak RT shadow" report. Vulkan has no RT
     // shadow, so it keeps nearClip (cascade 0 starts at the near plane).
     // pssmRTMaxDist is a member now (panel slider "RT shadow max dist", 5..200).
-    const float rtEnd = capabilities.raytracing ? pssmRTMaxDist : nearClip;
+    // The independent near-field shadow map (not RT) owns [near, rtEnd] on this
+    // path, so the boundary is unconditional — no capabilities.raytracing gate.
+    // (Previously, with RT available the near map only reached nearShadowEnd
+    // while cascades started at rtEnd, leaving [nearShadowEnd, rtEnd] unshadowed
+    // because RHIMain.frag never consumed the RT shadow.)
+    const float rtEnd = pssmRTMaxDist;
 
     // Cascade split distances (view space). splits[0] = near end, splits[3] = far.
     float splits[4];
@@ -2165,10 +2174,10 @@ void Renderer::shadowPass() {
     // Independent near-field shadow map: fit a tight ortho to the [near,
     // nearShadowEnd] sub-frustum, separate from the cascades. Same bounding-
     // sphere + world-anchored texel snap as the cascades (anti-shimmer).
-    gpuData.nearShadowEnd = nearShadowEnd;
-    if (nearShadowEnd > nearClip) {
-        float nNDC = viewDepthToNDCz(glm::clamp(nearClip,      nearClip, farClip));
-        float fNDC = viewDepthToNDCz(glm::clamp(nearShadowEnd, nearClip, farClip));
+    gpuData.nearShadowEnd = rtEnd;
+    if (rtEnd > nearClip) {
+        float nNDC = viewDepthToNDCz(glm::clamp(nearClip, nearClip, farClip));
+        float fNDC = viewDepthToNDCz(glm::clamp(rtEnd,    nearClip, farClip));
         const glm::vec4 ndc8[8] = {
             {-1,-1,nNDC,1},{1,-1,nNDC,1},{-1,1,nNDC,1},{1,1,nNDC,1},
             {-1,-1,fNDC,1},{1,-1,fNDC,1},{-1,1,fNDC,1},{1,1,fNDC,1},
@@ -2180,7 +2189,7 @@ void Renderer::shadowPass() {
         for (auto& p : c) radius = glm::max(radius, glm::length(p - center));
         radius = std::ceil(radius * 16.0f) / 16.0f;
         const glm::mat4 lightRot = glm::lookAt(glm::vec3(0.0f), lightDir, up);
-        const float texel = (2.0f * radius) / float(SHADOW_MAP_SIZE);
+        const float texel = (2.0f * radius) / float(NEAR_SHADOW_MAP_SIZE);
         glm::vec3 lsC = glm::vec3(lightRot * glm::vec4(center, 1.0f));
         lsC.x = std::floor(lsC.x / texel) * texel;
         lsC.y = std::floor(lsC.y / texel) * texel;
@@ -2244,14 +2253,13 @@ void Renderer::shadowPass() {
         rhi->endRenderPass();
     }
 
-    // Render the independent near-field shadow map into cascade-array layer 3.
-    // The VS selects nearLightMatrix when cascadeIndex == 3 (Vulkan) / receives
-    // it via vertex bytes (Metal).
-    if (nearShadowEnd > nearClip && pssmShadowArrayTexture.isValid()) {
+    // Render the independent near-field shadow map into its own texture. The VS
+    // selects nearLightMatrix when cascadeIndex == 3 (Vulkan) / receives it via
+    // vertex bytes (Metal).
+    if (rtEnd > nearClip && nearShadowMap.isValid()) {
         RenderPassDesc rp;
         rp.name = "NearShadow";
-        rp.depthAttachment = pssmShadowArrayTexture;
-        rp.depthArrayLayer = 3;
+        rp.depthAttachment = nearShadowMap;
         rp.loadDepth = false;  // clear
         rp.clearDepth = 1.0f;
         rhi->beginRenderPass(rp);
@@ -3089,18 +3097,24 @@ void Renderer::createDefaultResources() {
         // by the shadow pass and sampled as a sampler2DArray in the PBR shader.
         // Fixed-size (independent of the swapchain), so it lives here rather than
         // in createRenderTargets. DepthStencil = render target, Sampled = read.
-        // Layers 0..2 = PSSM cascades; layer 3 = the independent near-field map
-        // (its own tight fit + matrix, sampled separately). A 4th layer keeps it
-        // within Vulkan's 8-binding-per-set budget — a distinct texture would
-        // need a 9th sampler slot. Tight [near, nearShadowEnd] fit at this size
-        // still yields very fine texels for contact-scale shadows.
         TextureDesc pssmDesc;
         pssmDesc.width = SHADOW_MAP_SIZE;
         pssmDesc.height = SHADOW_MAP_SIZE;
-        pssmDesc.arrayLayers = 4;
+        pssmDesc.arrayLayers = 3;
         pssmDesc.format = PixelFormat::Depth32Float;
         pssmDesc.usage = TextureUsage::DepthStencil | TextureUsage::Sampled;
         pssmShadowArrayTexture = rhi->createTexture(pssmDesc);
+
+        // Independent near-field shadow map: its own texture at its own (finer)
+        // resolution, tight-fit to [near, pssmRTMaxDist]. Sampled at set2 b9 —
+        // the texture set now has 10 bindings, so a distinct map costs nothing.
+        TextureDesc nearDesc;
+        nearDesc.width = NEAR_SHADOW_MAP_SIZE;
+        nearDesc.height = NEAR_SHADOW_MAP_SIZE;
+        nearDesc.arrayLayers = 1;
+        nearDesc.format = PixelFormat::Depth32Float;
+        nearDesc.usage = TextureUsage::DepthStencil | TextureUsage::Sampled;
+        nearShadowMap = rhi->createTexture(nearDesc);
     }
 
     // GPU particle system: a self-contained orbital demo. The particle buffer
@@ -4687,7 +4701,9 @@ void Renderer::drawGraphicsImGui() {
 
     if (ImGui::TreeNode("Shadow Debug")) {
         ImGui::Text("Raytracing: %s", capabilities.raytracing ? "yes" : "no");
-        ImGui::SliderFloat("RT shadow max dist", &pssmRTMaxDist, 5.0f, 200.0f);
+        // pssmRTMaxDist now sets where the independent near-field shadow map ends
+        // and the PSSM cascades begin (the near map, not RT, owns [near, this]).
+        ImGui::SliderFloat("Near shadow distance", &pssmRTMaxDist, 5.0f, 200.0f);
         int psd = static_cast<int>(pointShadowDebugMode);
         if (ImGui::Combo("Point shadow view", &psd, "Visibility (normal)\0Tile light-count heatmap\0")) {
             pointShadowDebugMode = static_cast<Uint32>(psd);
@@ -4702,7 +4718,9 @@ void Renderer::drawGraphicsImGui() {
         // Intermediate shadow textures (native Metal parity). These are
         // single-channel R16F/depth RTs; the RRR1 swizzle view renders them as
         // grayscale instead of red-only.
-        preview("RT Shadow (screen)", debugView("shadowGray", shadowRT, TextureSwizzle::RRR1, 0));
+        preview("Near Shadow Map (light-space depth)", debugView("nearMap", nearShadowMap, TextureSwizzle::RRR1, 0));
+        preview("Contact Shadow (SSCS)", debugView("sscs", sscsRT, TextureSwizzle::RRR1, 0));
+        preview("RT Shadow (screen, unused on this path)", debugView("shadowGray", shadowRT, TextureSwizzle::RRR1, 0));
         preview("Point Shadow (raw / heatmap)", debugView("psRaw", pointShadowRT, TextureSwizzle::RRR1, 0));
         preview("Point Shadow (denoised)", debugView("psDen", pointShadowDenoisedRT, TextureSwizzle::RRR1, 0));
         // PSSM cascades: one 2D grayscale view per array layer of the 3-cascade

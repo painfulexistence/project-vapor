@@ -119,7 +119,7 @@ layout(std430, set = 1, binding = 2) readonly buffer PSSMBuf {
     float shadowBlendRange;
     float nearShadowEnd;        // view depth the independent near map covers; 0 = off
     vec2 _pssmPad;
-    mat4 nearLightMatrix;       // near-field map (cascade-array layer 3)
+    mat4 nearLightMatrix;       // near-field map (own texture, nearShadowTex)
 };
 
 layout(set = 2, binding = 0) uniform sampler2D albedoMap;
@@ -136,6 +136,9 @@ layout(set = 2, binding = 7) uniform sampler2D texAO;
 // Screen-space contact shadow visibility (1 = lit); min-composited onto the sun
 // shadow. White when disabled. Screen-space, sampled at gl_FragCoord like texAO.
 layout(set = 2, binding = 8) uniform sampler2D sscsTex;
+// Independent near-field shadow map (own texture + resolution), covers
+// [near, nearShadowEnd]. Depth values sampled with the negative-viewport Y-flip.
+layout(set = 2, binding = 9) uniform sampler2D nearShadowTex;
 
 // PCF sample of one cascade. Returns 1.0 = lit, 0.0 = fully shadowed, or -1.0
 // when the world position falls outside this cascade's frustum.
@@ -164,7 +167,7 @@ float sampleCascade(int ci, vec3 worldPos, float bias) {
     return lit / 9.0;
 }
 
-// Independent near-field shadow map (cascade-array layer 3): a tight, high-
+// Independent near-field shadow map (own texture, own resolution): a tight, high-
 // effective-resolution fit for [near, nearShadowEnd]. Same negative-viewport
 // Y-flip as the cascades. Returns -1.0 when the fragment is outside its frustum.
 float sampleNearMap(vec3 worldPos, float bias) {
@@ -175,11 +178,11 @@ float sampleNearMap(vec3 worldPos, float bias) {
     if (uv.x < 0.0 || uv.x > 1.0 || uv.y < 0.0 || uv.y > 1.0 || curDepth > 1.0) {
         return -1.0;
     }
-    vec2 texel = 1.0 / vec2(textureSize(shadowMap, 0).xy);
+    vec2 texel = 1.0 / vec2(textureSize(nearShadowTex, 0).xy);
     float lit = 0.0;
     for (int y = -1; y <= 1; ++y) {
         for (int x = -1; x <= 1; ++x) {
-            float d = texture(shadowMap, vec3(uv + vec2(x, y) * texel, 3.0)).r;
+            float d = texture(nearShadowTex, uv + vec2(x, y) * texel).r;
             lit += (curDepth - bias) <= d ? 1.0 : 0.0;
         }
     }
