@@ -174,6 +174,53 @@ void Renderer::initialize(std::unique_ptr<RHI> rhiPtr, GraphicsBackend backendTy
         FogRenderData fogDefaults;
         createFrameSlottedBuffer(fogDataBuffer, fogDesc, &fogDefaults, sizeof(fogDefaults));
 
+        BufferDesc volDesc;
+        volDesc.size = sizeof(VolumeRenderData);
+        volDesc.usage = BufferUsage::Uniform;
+        volDesc.memoryUsage = MemoryUsage::CPUtoGPU;
+        createFrameSlottedBuffer(volumeDataBuffer, volDesc, &volumeSettings, sizeof(volumeSettings));
+
+        // Procedural 64^3 test density grid (radial-falloff smoke puff shaped
+        // by trilinear value noise) so the volume raymarch pass has something
+        // to draw before real EmberGen exports arrive (import is a future PR).
+        {
+            constexpr Uint32 N = 64;
+            auto hash3 = [](int x, int y, int z) {
+                Uint32 h = Uint32(x) * 73856093u ^ Uint32(y) * 19349663u ^ Uint32(z) * 83492791u;
+                h = (h ^ (h >> 13)) * 0x85ebca6bu;
+                return float((h ^ (h >> 16)) & 0xFFFFFFu) / float(0xFFFFFFu);
+            };
+            auto valueNoise = [&](float x, float y, float z) {
+                int xi = int(std::floor(x)), yi = int(std::floor(y)), zi = int(std::floor(z));
+                float fx = x - xi, fy = y - yi, fz = z - zi;
+                auto lerp3 = [](float a, float b, float t) { return a + (b - a) * t; };
+                float c00 = lerp3(hash3(xi, yi, zi),     hash3(xi + 1, yi, zi),     fx);
+                float c10 = lerp3(hash3(xi, yi + 1, zi), hash3(xi + 1, yi + 1, zi), fx);
+                float c01 = lerp3(hash3(xi, yi, zi + 1),     hash3(xi + 1, yi, zi + 1),     fx);
+                float c11 = lerp3(hash3(xi, yi + 1, zi + 1), hash3(xi + 1, yi + 1, zi + 1), fx);
+                return lerp3(lerp3(c00, c10, fy), lerp3(c01, c11, fy), fz);
+            };
+            std::vector<Uint8> voxels(N * N * N);
+            for (Uint32 z = 0; z < N; z++) {
+                for (Uint32 y = 0; y < N; y++) {
+                    for (Uint32 x = 0; x < N; x++) {
+                        glm::vec3 q(x / float(N - 1) * 2.0f - 1.0f,
+                                    y / float(N - 1) * 2.0f - 1.0f,
+                                    z / float(N - 1) * 2.0f - 1.0f);
+                        float r = glm::length(q);
+                        glm::vec3 s = (q + 1.0f) * 4.0f;  // noise domain
+                        float fbm = 0.6f * valueNoise(s.x, s.y, s.z)
+                                  + 0.3f * valueNoise(s.x * 2.0f, s.y * 2.0f, s.z * 2.0f)
+                                  + 0.1f * valueNoise(s.x * 4.0f, s.y * 4.0f, s.z * 4.0f);
+                        float d = std::clamp(fbm * 1.5f - r * 1.1f, 0.0f, 1.0f);
+                        voxels[x + y * N + z * N * N] = Uint8(d * 255.0f + 0.5f);
+                    }
+                }
+            }
+            volumeTestTexture = createVolumeTexture(N, N, N, voxels.data(), voxels.size());
+            volumeDensityTexture = volumeTestTexture;
+        }
+
         BufferDesc prevVPDesc;
         prevVPDesc.size = sizeof(glm::mat4);
         prevVPDesc.usage = BufferUsage::Uniform;
@@ -926,6 +973,12 @@ void Renderer::setupDefaultRenderGraph() {
     // rays); swaps colorRT with tempColorRT internally.
     renderGraph.addPass("VolumetricFog",
         [](Renderer& r) { r.volumetricFogPass(); });
+
+    // Heterogeneous volume raymarch (EmberGen density grids) right after the
+    // global fog, same colorRT/tempColorRT swap. Off by default until the
+    // panel enables it (test grid) or real volume data is set.
+    renderGraph.addPass("VolumeRaymarch",
+        [](Renderer& r) { r.volumeRaymarchPass(); });
 
     // Volumetric clouds (quarter-res raymarch + temporal + composite), after
     // fog and before bloom, matching the Metal graph. Off by default.
@@ -2675,6 +2728,83 @@ void Renderer::volumetricFogPass() {
     std::swap(colorRT, tempColorRT);  // colorRT now holds the fogged scene
 }
 
+// Heterogeneous volume raymarch (EmberGen-style density grid in an AABB):
+// read colorRT + depth, march the 3D density texture with sun single
+// scattering (PSSM tap + self-shadow march), write to tempColorRT, swap.
+// Rendering only — EmberGen import/parsing lives in a separate PR; until then
+// the procedural test grid stands in (panel: Effects > Volume).
+void Renderer::volumeRaymarchPass() {
+    if (!volumeRenderEnabled || !volumeRaymarchPipeline.isValid() ||
+        !volumeDensityTexture.isValid() || !volumeDataBuffer.isValid() ||
+        !colorRT.isValid() || !tempColorRT.isValid() || !depthStencilRT.isValid() ||
+        !pssmShadowArrayTexture.isValid() || !pssmDataBuffer.isValid()) {
+        return;
+    }
+
+    VolumeRenderData vol = volumeSettings;
+    vol.invViewProj = glm::inverse(currentCamera.proj * currentCamera.view);
+    vol.cameraPosition = glm::vec4(currentCamera.position, 0.0f);
+    vol.sunDirection = glm::vec4(glm::normalize(atmosphereData.sunDirection), 0.0f);
+    vol.sunColor = glm::vec4(atmosphereData.sunColor, atmosphereData.sunIntensity);
+
+    RenderPassDesc rp;
+    rp.name = "VolumeRaymarch";
+    rp.colorAttachments.push_back(tempColorRT);
+    rp.loadColor.push_back(false);  // every pixel written
+    rhi->beginRenderPass(rp);
+    rhi->bindPipeline(volumeRaymarchPipeline);
+    rhi->setTexture(0, 0, colorRT, clampSampler);
+    rhi->setTexture(0, 1, depthStencilRT, clampSampler);
+    rhi->setTexture(0, 2, pssmShadowArrayTexture, shadowSampler);
+    rhi->setTexture(0, 3, volumeDensityTexture, clampSampler);
+    if (backend == GraphicsBackend::Metal) {
+        // VolumeRenderData is vec4-only, so the C++ struct matches the MSL
+        // twin byte-for-byte and can travel as immediate bytes.
+        rhi->setFragmentBytes(&vol, sizeof(vol), 0);
+        rhi->setFragmentBuffer(1, pssmDataBuffer, 0, sizeof(PSSMRenderData));
+    } else {
+        rhi->updateBuffer(volumeDataBuffer, &vol, 0, sizeof(vol));
+        rhi->setFragmentBuffer(0, volumeDataBuffer, 0, sizeof(VolumeRenderData));
+        rhi->setFragmentBuffer(1, pssmDataBuffer, 0, sizeof(PSSMRenderData));
+    }
+    rhi->draw(3, 1, 0, 0);
+    rhi->endRenderPass();
+
+    std::swap(colorRT, tempColorRT);  // colorRT now holds the composited volume
+}
+
+// Volume Rendering API — the hook a future EmberGen import PR calls with
+// decoded voxel data. R8_UNORM slice-major grid -> sampled 3D texture.
+TextureHandle Renderer::createVolumeTexture(Uint32 width, Uint32 height, Uint32 depth,
+                                            const void* data, size_t size) {
+    if (!rhi || width == 0 || height == 0 || depth <= 1 || !data ||
+        size < size_t(width) * height * depth) {
+        return {};
+    }
+    TextureDesc desc;
+    desc.width = width;
+    desc.height = height;
+    desc.depth = depth;
+    desc.format = PixelFormat::R8_UNORM;
+    desc.usage = TextureUsage::Sampled;
+    TextureHandle tex = rhi->createTexture(desc);
+    if (tex.isValid()) {
+        rhi->updateTexture(tex, data, size, 0, 0);
+    }
+    return tex;
+}
+
+void Renderer::setVolumeDensity(TextureHandle density, const glm::vec3& boxMin,
+                                const glm::vec3& boxMax) {
+    if (density.isValid()) {
+        volumeDensityTexture = density;
+        volumeSettings.boxMin = glm::vec4(boxMin, volumeSettings.boxMin.w);
+        volumeSettings.boxMax = glm::vec4(boxMax, volumeSettings.boxMax.w);
+    } else {
+        volumeDensityTexture = volumeTestTexture;  // back to the built-in grid
+    }
+}
+
 // Camera-motion velocity (motion vectors) from the depth buffer. Standalone
 // infrastructure for a future TAA / motion-blur consumer; produces velocityRT.
 void Renderer::velocityPass() {
@@ -3768,6 +3898,10 @@ void Renderer::createRenderPipeline() {
             volumetricFogPipeline = makeFullscreenFragPipeline(
                 "shaders/VolumetricFog.frag.spv", volumetricFogShader, BlendMode::Opaque);
 
+            // Heterogeneous volume raymarch (EmberGen density grids).
+            volumeRaymarchPipeline = makeFullscreenFragPipeline(
+                "shaders/VolumeRaymarch.frag.spv", volumeRaymarchShader, BlendMode::Opaque);
+
             // Camera-motion velocity (motion vectors) from depth.
             velocityPipeline = makeFullscreenFragPipeline(
                 "shaders/Velocity.frag.spv", velocityShader, BlendMode::Opaque);
@@ -4063,6 +4197,8 @@ void Renderer::createRenderPipeline() {
                                                 BlendMode::Opaque, { PixelFormat::RGBA16_FLOAT }, false, CompareOp::Less);
         volumetricFogPipeline = makeMetalPass("shaders/3d_volumetric_fog.metal", "volumetricFogVertex", "simpleFogFragment",
                                               BlendMode::Opaque, { PixelFormat::RGBA16_FLOAT }, false, CompareOp::Less);
+        volumeRaymarchPipeline = makeMetalPass("shaders/3d_volume_raymarch.metal", "volumeRaymarchVertex", "volumeRaymarchFragment",
+                                               BlendMode::Opaque, { PixelFormat::RGBA16_FLOAT }, false, CompareOp::Less);
         // Volumetric clouds (off by default): quarter-res raymarch ->
         // temporal resolve -> upscale composite, all from the native file.
         cloudRaymarchPipeline = makeMetalPass("shaders/3d_volumetric_clouds.metal", "cloudVertex", "cloudFragmentLowRes",
@@ -5019,6 +5155,29 @@ void Renderer::drawGraphicsImGui() {
         ImGui::DragFloat("Anisotropy", &fogSettings.anisotropy, 0.01f, -0.99f, 0.99f);
         ImGui::DragFloat("Ambient Intensity", &fogSettings.ambientIntensity, 0.01f, 0.0f, 2.0f);
         if (ImGui::Button("Reset to Defaults")) fogSettings = FogRenderData{};
+        ImGui::TreePop();
+    }
+
+    if (ImGui::TreeNode("Volume (EmberGen)")) {
+        ImGui::Checkbox("Enabled", &volumeRenderEnabled);
+        ImGui::TextDisabled(volumeDensityTexture.id == volumeTestTexture.id
+                                ? "density: built-in test grid (64^3)"
+                                : "density: external grid");
+        ImGui::DragFloat3("Box Min", &volumeSettings.boxMin.x, 0.1f, -100.0f, 100.0f);
+        ImGui::DragFloat3("Box Max", &volumeSettings.boxMax.x, 0.1f, -100.0f, 100.0f);
+        ImGui::DragFloat("Density Scale", &volumeSettings.boxMin.w, 0.1f, 0.0f, 100.0f);
+        ImGui::DragFloat("Anisotropy", &volumeSettings.boxMax.w, 0.01f, -0.99f, 0.99f);
+        ImGui::ColorEdit3("Albedo", &volumeSettings.albedo.x);
+        ImGui::DragFloat("Ambient Intensity", &volumeSettings.albedo.w, 0.01f, 0.0f, 2.0f);
+        int volSteps = static_cast<int>(volumeSettings.params.x);
+        if (ImGui::SliderInt("Steps", &volSteps, 16, 128)) volumeSettings.params.x = float(volSteps);
+        int volShadowSteps = static_cast<int>(volumeSettings.params.y);
+        if (ImGui::SliderInt("Self-shadow steps", &volShadowSteps, 0, 16)) volumeSettings.params.y = float(volShadowSteps);
+        if (ImGui::Button("Reset to Defaults")) {
+            bool wasEnabled = volumeRenderEnabled;
+            volumeSettings = VolumeRenderData{};
+            volumeRenderEnabled = wasEnabled;
+        }
         ImGui::TreePop();
     }
 

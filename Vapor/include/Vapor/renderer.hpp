@@ -306,6 +306,20 @@ public:
     void updateTexture(TextureHandle handle, const std::shared_ptr<Vapor::Image>& img) override;
 
     // ========================================================================
+    // Volume Rendering API (EmberGen density grids)
+    // ========================================================================
+
+    // Upload a raw single-channel density grid (width*height*depth bytes,
+    // R8_UNORM, tightly packed, slice-major) as a 3D texture — the hook the
+    // EmberGen import PR will call with decoded voxel data.
+    TextureHandle createVolumeTexture(Uint32 width, Uint32 height, Uint32 depth,
+                                      const void* data, size_t size);
+    // Point the volume raymarch pass at a density grid with world-space AABB
+    // bounds. Pass an invalid handle to fall back to the procedural test grid.
+    void setVolumeDensity(TextureHandle density, const glm::vec3& boxMin,
+                          const glm::vec3& boxMax);
+
+    // ========================================================================
     // Getters
     // ========================================================================
 
@@ -353,6 +367,7 @@ private:
     void skyAtmospherePass();
     void lightScatteringPass();
     void volumetricFogPass();
+    void volumeRaymarchPass();
     void velocityPass();
     void particlePass();
     void volumetricCloudPass();
@@ -615,6 +630,15 @@ private:
     // Persistent fog tunables (ImGui-editable). volumetricFogPass() copies this
     // and overwrites the per-frame fields (invViewProj/camera/sun).
     FogRenderData fogSettings;
+    // Heterogeneous volume raymarch (EmberGen density grids; rendering only —
+    // import/parsing lives in a separate PR). One AABB volume per scene; a
+    // procedural 64^3 test grid stands in until setVolumeDensity() gets real
+    // data. Reuses tempColorRT ping-pong like fog.
+    PipelineHandle volumeRaymarchPipeline;
+    TextureHandle volumeDensityTexture;  // active 3D grid (may equal the test grid)
+    TextureHandle volumeTestTexture;     // owned procedural test grid
+    bool volumeRenderEnabled = false;    // default OFF until real data lands
+    VolumeRenderData volumeSettings;     // panel tunables (box/density/albedo/steps)
     // Camera-motion velocity (motion vectors) — infrastructure for future TAA.
     PipelineHandle velocityPipeline;
     TextureHandle velocityRT;
@@ -665,6 +689,8 @@ private:
     ShaderHandle lightScatteringShader;
     ShaderHandle volumetricFogShader;
     BufferHandle fogDataBuffer;
+    ShaderHandle volumeRaymarchShader;
+    BufferHandle volumeDataBuffer;
     ShaderHandle velocityShader;
     ShaderHandle particleForceShader;
     ShaderHandle particleIntegrateShader;
