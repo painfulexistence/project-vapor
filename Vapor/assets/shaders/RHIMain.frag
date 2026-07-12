@@ -117,6 +117,9 @@ layout(std430, set = 1, binding = 2) readonly buffer PSSMBuf {
     mat4 shadowLightSpaceMatrices[3];
     vec4 cascadeSplits;
     float shadowBlendRange;
+    float nearShadowEnd;        // view depth the independent near map covers; 0 = off
+    vec2 _pssmPad;
+    mat4 nearLightMatrix;       // near-field map (cascade-array layer 3)
 };
 
 layout(set = 2, binding = 0) uniform sampler2D albedoMap;
@@ -158,15 +161,43 @@ float sampleCascade(int ci, vec3 worldPos, float bias) {
     return lit / 9.0;
 }
 
-// Select the cascade by the fragment's view-space depth, then PCF-sample it.
-// Returns 1.0 = lit, 0.0 = fully shadowed.
+// Independent near-field shadow map (cascade-array layer 3): a tight, high-
+// effective-resolution fit for [near, nearShadowEnd]. Same negative-viewport
+// Y-flip as the cascades. Returns -1.0 when the fragment is outside its frustum.
+float sampleNearMap(vec3 worldPos, float bias) {
+    vec4 lp = nearLightMatrix * vec4(worldPos, 1.0);
+    vec3 proj = lp.xyz / lp.w;
+    vec2 uv = vec2(proj.x * 0.5 + 0.5, 0.5 - proj.y * 0.5);
+    float curDepth = proj.z;
+    if (uv.x < 0.0 || uv.x > 1.0 || uv.y < 0.0 || uv.y > 1.0 || curDepth > 1.0) {
+        return -1.0;
+    }
+    vec2 texel = 1.0 / vec2(textureSize(shadowMap, 0).xy);
+    float lit = 0.0;
+    for (int y = -1; y <= 1; ++y) {
+        for (int x = -1; x <= 1; ++x) {
+            float d = texture(shadowMap, vec3(uv + vec2(x, y) * texel, 3.0)).r;
+            lit += (curDepth - bias) <= d ? 1.0 : 0.0;
+        }
+    }
+    return lit / 9.0;
+}
+
+// Select the near-field map or a cascade by the fragment's view-space depth,
+// then PCF-sample it. Returns 1.0 = lit, 0.0 = fully shadowed.
 float sampleShadow(vec3 worldPos, vec3 N, vec3 L, float viewDepth) {
+    float b = max(0.0015 * (1.0 - dot(N, L)), 0.0004);
+    // Near field: the dedicated high-res map overrides cascade 0 where it covers.
+    if (nearShadowEnd > 0.0 && viewDepth < nearShadowEnd) {
+        float lit = sampleNearMap(worldPos, b);
+        if (lit >= 0.0) return lit;  // fall through to cascades if outside its frustum
+    }
     // Pick the first cascade whose far split still contains this fragment.
     int ci = 2;
     if (viewDepth <= cascadeSplits.y)      ci = 0;
     else if (viewDepth <= cascadeSplits.z) ci = 1;
     // Slightly slacker bias for the coarser (farther) cascades.
-    float bias = max(0.0015 * (1.0 - dot(N, L)), 0.0004) * float(ci + 1);
+    float bias = b * float(ci + 1);
     float lit = sampleCascade(ci, worldPos, bias);
     // Fall through to farther cascades if the fragment left this one's frustum.
     if (lit < 0.0 && ci < 1) lit = sampleCascade(1, worldPos, bias);

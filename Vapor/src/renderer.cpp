@@ -2172,7 +2172,7 @@ void Renderer::shadowPass() {
         for (auto& p : c) radius = glm::max(radius, glm::length(p - center));
         radius = std::ceil(radius * 16.0f) / 16.0f;
         const glm::mat4 lightRot = glm::lookAt(glm::vec3(0.0f), lightDir, up);
-        const float texel = (2.0f * radius) / float(NEAR_SHADOW_MAP_SIZE);
+        const float texel = (2.0f * radius) / float(SHADOW_MAP_SIZE);
         glm::vec3 lsC = glm::vec3(lightRot * glm::vec4(center, 1.0f));
         lsC.x = std::floor(lsC.x / texel) * texel;
         lsC.y = std::floor(lsC.y / texel) * texel;
@@ -2236,13 +2236,14 @@ void Renderer::shadowPass() {
         rhi->endRenderPass();
     }
 
-    // Render the independent near-field shadow map (single depth map). The VS
-    // selects nearLightMatrix when cascadeIndex == 3 (Vulkan) / receives it via
-    // vertex bytes (Metal). Not sampled yet — wired into the shaders next.
-    if (nearShadowEnd > nearClip && nearShadowMap.isValid()) {
+    // Render the independent near-field shadow map into cascade-array layer 3.
+    // The VS selects nearLightMatrix when cascadeIndex == 3 (Vulkan) / receives
+    // it via vertex bytes (Metal).
+    if (nearShadowEnd > nearClip && pssmShadowArrayTexture.isValid()) {
         RenderPassDesc rp;
         rp.name = "NearShadow";
-        rp.depthAttachment = nearShadowMap;
+        rp.depthAttachment = pssmShadowArrayTexture;
+        rp.depthArrayLayer = 3;
         rp.loadDepth = false;  // clear
         rp.clearDepth = 1.0f;
         rhi->beginRenderPass(rp);
@@ -3040,24 +3041,18 @@ void Renderer::createDefaultResources() {
         // by the shadow pass and sampled as a sampler2DArray in the PBR shader.
         // Fixed-size (independent of the swapchain), so it lives here rather than
         // in createRenderTargets. DepthStencil = render target, Sampled = read.
+        // Layers 0..2 = PSSM cascades; layer 3 = the independent near-field map
+        // (its own tight fit + matrix, sampled separately). A 4th layer keeps it
+        // within Vulkan's 8-binding-per-set budget — a distinct texture would
+        // need a 9th sampler slot. Tight [near, nearShadowEnd] fit at this size
+        // still yields very fine texels for contact-scale shadows.
         TextureDesc pssmDesc;
         pssmDesc.width = SHADOW_MAP_SIZE;
         pssmDesc.height = SHADOW_MAP_SIZE;
-        pssmDesc.arrayLayers = 3;
+        pssmDesc.arrayLayers = 4;
         pssmDesc.format = PixelFormat::Depth32Float;
         pssmDesc.usage = TextureUsage::DepthStencil | TextureUsage::Sampled;
         pssmShadowArrayTexture = rhi->createTexture(pssmDesc);
-
-        // Independent near-field shadow map: a single tight-fit depth map for the
-        // [near, nearShadowEnd] region, decoupled from the cascade array so it can
-        // use its own resolution and (on Metal) be swapped for the RT near shadow.
-        TextureDesc nearDesc;
-        nearDesc.width = NEAR_SHADOW_MAP_SIZE;
-        nearDesc.height = NEAR_SHADOW_MAP_SIZE;
-        nearDesc.arrayLayers = 1;
-        nearDesc.format = PixelFormat::Depth32Float;
-        nearDesc.usage = TextureUsage::DepthStencil | TextureUsage::Sampled;
-        nearShadowMap = rhi->createTexture(nearDesc);
     }
 
     // GPU particle system: a self-contained orbital demo. The particle buffer

@@ -433,9 +433,7 @@ private:
     BufferHandle lightScatteringDataBuffer;  // god-ray params (Vulkan: set1 b0 in LS pass)
     Uint32 frameCounter = 0;  // for temporal jitter
     TextureHandle defaultBlackCubemapTex;   // IBL irradiance/prefilter default
-    TextureHandle pssmShadowArrayTexture;   // 3-cascade depth array (Vulkan: set2 b6)
-    TextureHandle nearShadowMap;            // independent near-field depth map [near, nearShadowEnd]
-    static constexpr Uint32 NEAR_SHADOW_MAP_SIZE = 2048;
+    TextureHandle pssmShadowArrayTexture;   // layers 0-2 = cascades, 3 = near-field map (Vulkan: set2 b6)
     std::vector<Vapor::RectLight> rectLights;   // gathered from the scene
 
     // ImGui texture previews (RT viewer / material thumbnails)
