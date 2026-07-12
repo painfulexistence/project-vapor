@@ -5373,7 +5373,7 @@ auto Renderer_Metal::draw(std::shared_ptr<Scene> scene, Camera& camera) -> void 
             rtPreview("Scene Color RT", colorRT.get());
             rtPreview("Scene Depth RT", depthStencilRT.get());
             // Shadow results consumed by the PBR shader (all screen-space)
-            rtPreview("Raytraced Shadow", shadowRTGrayView.get());
+            rtPreview("Near Shadow", shadowRTGrayView.get()); // RT-based here; same role as Vulkan's near map
             rtPreview("Point Shadow", pointShadowDenoisedRTGrayView.get());
             rtPreview("PSSM Shadow", pssmShadowScreenRTGrayView.get());
             rtPreview("Raytraced AO", aoRTGrayView.get()); // grayscale swizzle view (raw R16F renders red)
@@ -5402,7 +5402,7 @@ auto Renderer_Metal::draw(std::shared_ptr<Scene> scene, Camera& camera) -> void 
                 ImGui::Text("Cascade splits (view depth): RT<%.1f | C1<%.1f | C2<%.1f | C3<%.1f",
                     splits.x, splits.y, splits.z, splits.w);
             }
-            ImGui::SliderFloat("RT shadow max dist", &pssmRTMaxDist, 5.0f, 200.0f);
+            ImGui::SliderFloat("Near shadow distance", &pssmRTMaxDist, 5.0f, 200.0f);
 
             // --- PSSM PCF & blend controls ---
             const char* pcfCounts[] = { "4", "8", "16", "32" };

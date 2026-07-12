@@ -1673,6 +1673,11 @@ void Renderer::sunFlarePass() {
 // Ray-traced near-field directional shadow into shadowRT (mips regenerated for
 // the PBR shader's soft lookup). Mirrors the native RaytraceShadowPass 1:1.
 void Renderer::raytraceShadowPass() {
+    // The independent near-field shadow map owns the near region on the Vulkan
+    // path (RHIMain.frag never samples shadowRT), so tracing it here is pure
+    // waste. Skip it — the near map + SSCS provide the near shadow. (The dead
+    // Metal-via-RHI branch still consumes shadowRT at b7, so keep it for Metal.)
+    if (backend == GraphicsBackend::Vulkan) return;
     if (!raytraceShadowPipeline.isValid() || !sceneTLAS.isValid() || !shadowRT.isValid()) return;
     // Half-res: shadowRT is half-res, the kernel derives UV from its own dims.
     Uint32 w = (rhi->getSwapchainWidth() + 1) / 2;
@@ -4718,9 +4723,10 @@ void Renderer::drawGraphicsImGui() {
         // Intermediate shadow textures (native Metal parity). These are
         // single-channel R16F/depth RTs; the RRR1 swizzle view renders them as
         // grayscale instead of red-only.
-        preview("Near Shadow Map (light-space depth)", debugView("nearMap", nearShadowMap, TextureSwizzle::RRR1, 0));
+        // Near-field shadow (its own map here; RT on the Metal native path — same
+        // purpose, so the UI just says "Near Shadow") plus the SSCS contact layer.
+        preview("Near Shadow (light-space depth)", debugView("nearMap", nearShadowMap, TextureSwizzle::RRR1, 0));
         preview("Contact Shadow (SSCS)", debugView("sscs", sscsRT, TextureSwizzle::RRR1, 0));
-        preview("RT Shadow (screen, unused on this path)", debugView("shadowGray", shadowRT, TextureSwizzle::RRR1, 0));
         preview("Point Shadow (raw / heatmap)", debugView("psRaw", pointShadowRT, TextureSwizzle::RRR1, 0));
         preview("Point Shadow (denoised)", debugView("psDen", pointShadowDenoisedRT, TextureSwizzle::RRR1, 0));
         // PSSM cascades: one 2D grayscale view per array layer of the 3-cascade
