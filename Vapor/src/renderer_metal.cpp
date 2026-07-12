@@ -453,20 +453,27 @@ public:
             float sphereRadius = 0.0f;
             for (auto& c : corners)
                 sphereRadius = glm::max(sphereRadius, glm::length(c - sphereCenter));
+            // Quantize the radius so texelSize doesn't jitter from per-frame float noise
+            sphereRadius = std::ceil(sphereRadius * 16.0f) / 16.0f;
+
+            // Snap the cascade center to the shadow-map texel grid so the map
+            // translates in whole texels as the camera moves (stops edge
+            // crawling/swimming). The snap MUST happen in a world-anchored,
+            // rotation-only light frame: the previous code snapped
+            // lightView * sphereCenter, but that view looks AT sphereCenter, so
+            // the product is always (0, 0, -lightDist) and the snap was a no-op.
+            const glm::mat4 lightRot = glm::lookAt(glm::vec3(0.0f), lightDir, up);
+            const float texelSize = (2.0f * sphereRadius) / float(r.PSSM_SHADOW_MAP_SIZE);
+            glm::vec3 lsC = glm::vec3(lightRot * glm::vec4(sphereCenter, 1.0f));
+            lsC.x = std::floor(lsC.x / texelSize) * texelSize;
+            lsC.y = std::floor(lsC.y / texelSize) * texelSize;
+            const glm::vec3 snappedCenter = glm::vec3(glm::inverse(lightRot) * glm::vec4(lsC, 1.0f));
 
             // Light view: eye pulled back far enough that the whole bounding
             // sphere sits in front of it (RH lookAt: forward is -z, so points in
             // front have negative view z; distance from eye = -z).
             const float lightDist = sphereRadius * 2.0f + 1.0f;
-            glm::mat4 lightView = glm::lookAt(sphereCenter - lightDir * lightDist, sphereCenter, up);
-
-            // Snap sphere center to texel grid in light space to stop shimmering
-            float texelSize = (2.0f * sphereRadius) / float(r.PSSM_SHADOW_MAP_SIZE);
-            glm::vec4 lsCenter = lightView * glm::vec4(sphereCenter, 1.0f);
-            lsCenter.x = std::floor(lsCenter.x / texelSize) * texelSize;
-            lsCenter.y = std::floor(lsCenter.y / texelSize) * texelSize;
-            glm::vec3 snappedCenter = glm::vec3(glm::inverse(lightView) * lsCenter);
-            lightView = glm::lookAt(snappedCenter - lightDir * lightDist, snappedCenter, up);
+            glm::mat4 lightView = glm::lookAt(snappedCenter - lightDir * lightDist, snappedCenter, up);
 
             // Depth extents as positive distances in front of the light eye
             float minDist = 1e38f, maxDist = -1e38f;

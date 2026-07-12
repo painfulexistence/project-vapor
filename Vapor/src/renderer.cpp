@@ -2123,17 +2123,23 @@ void Renderer::shadowPass() {
         sphereCenter /= 8.0f;
         float sphereRadius = 0.0f;
         for (auto& c : corners) sphereRadius = glm::max(sphereRadius, glm::length(c - sphereCenter));
+        // Quantize the radius so texelSize doesn't jitter from per-frame float noise
+        sphereRadius = std::ceil(sphereRadius * 16.0f) / 16.0f;
+
+        // Snap the cascade center to the shadow-map texel grid so the map moves
+        // in whole texels with the camera (anti-shimmer). The snap MUST be done
+        // in a world-anchored, rotation-only light frame: snapping
+        // lightView * sphereCenter is a no-op because that view looks AT
+        // sphereCenter, so the product is always (0, 0, -lightDist).
+        const glm::mat4 lightRot = glm::lookAt(glm::vec3(0.0f), lightDir, up);
+        const float texelSize = (2.0f * sphereRadius) / float(SHADOW_MAP_SIZE);
+        glm::vec3 lsC = glm::vec3(lightRot * glm::vec4(sphereCenter, 1.0f));
+        lsC.x = std::floor(lsC.x / texelSize) * texelSize;
+        lsC.y = std::floor(lsC.y / texelSize) * texelSize;
+        const glm::vec3 snapped = glm::vec3(glm::inverse(lightRot) * glm::vec4(lsC, 1.0f));
 
         const float lightDist = sphereRadius * 2.0f + 1.0f;
-        glm::mat4 lightView = glm::lookAt(sphereCenter - lightDir * lightDist, sphereCenter, up);
-
-        // Snap the sphere center to the texel grid in light space (anti-shimmer).
-        float texelSize = (2.0f * sphereRadius) / float(SHADOW_MAP_SIZE);
-        glm::vec4 lsCenter = lightView * glm::vec4(sphereCenter, 1.0f);
-        lsCenter.x = std::floor(lsCenter.x / texelSize) * texelSize;
-        lsCenter.y = std::floor(lsCenter.y / texelSize) * texelSize;
-        glm::vec3 snapped = glm::vec3(glm::inverse(lightView) * lsCenter);
-        lightView = glm::lookAt(snapped - lightDir * lightDist, snapped, up);
+        glm::mat4 lightView = glm::lookAt(snapped - lightDir * lightDist, snapped, up);
 
         float minDist = std::numeric_limits<float>::max();
         float maxDist = -minDist;
