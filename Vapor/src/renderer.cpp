@@ -889,6 +889,10 @@ void Renderer::setupDefaultRenderGraph() {
     // GIBS surfel GI (generation -> hash -> RT -> temporal -> gather).
     renderGraph.addPass("GIBS",
         [](Renderer& r) { r.gibsPass(); }, PassFlags::RequiresRaytracing);
+    // Mirror reflections trace against the TLAS and shade hits from the GIBS
+    // surfel cache — must run after GIBS so this frame's surfel state is live.
+    renderGraph.addPass("RaytraceReflection",
+        [](Renderer& r) { r.raytraceReflectionPass(); }, PassFlags::RequiresRaytracing);
 
     // Main geometry pass: renders to colorRT when a post-process pipeline
     // Directional shadow depth (single cascade) before the main lighting pass.
@@ -1384,6 +1388,14 @@ void Renderer::mainRenderPass() {
             if (pointShadowHistoryRT.isValid()) rhi->setTexture(0, 13, pointShadowHistoryRT, clampSampler);
             if (gibsEnabled && giResultTexture.isValid()) rhi->setTexture(0, 14, giResultTexture, clampSampler);
         }
+        // RT mirror reflections: texture(16) + params at buffer(13)
+        // (texture(15) is SSCS, so reflections live at 16).
+        // (x = enabled, y = intensity). The shader samples the texture only
+        // behind the runtime x > 0.5 check (same contract as gibsGI at 14).
+        bool reflOn = rtReflectionsEnabled && capabilities.raytracing && reflectionRT.isValid();
+        if (reflOn) rhi->setTexture(0, 16, reflectionRT, clampSampler);
+        glm::vec2 reflParams(reflOn ? 1.0f : 0.0f, rtReflectionIntensity);
+        rhi->setFragmentBytes(&reflParams, sizeof(glm::vec2), 13);
     }
 
     // Group drawables by material to reduce state changes
@@ -1698,9 +1710,59 @@ void Renderer::raytraceShadowPass() {
     rhi->setComputeBuffer(2, pointLightBuffer, 0, sizeof(PointLightData) * maxPointLights);
     rhi->setComputeBytes(&screenSize, sizeof(glm::vec2), 3);
     rhi->setAccelerationStructure(4, sceneTLAS);
+    // Sun soft-shadow params (buffer 5): angularRadius 0 = legacy hard shadow,
+    // > 0 = cone-sampled penumbra with 4 rays/pixel (see SunShadowParams).
+    struct { float angularRadius; Uint32 frameIndex; Uint32 samples; Uint32 _pad; } sunParams{
+        rtSunAngularRadius, frameCounter, 4u, 0u };
+    rhi->setComputeBytes(&sunParams, sizeof(sunParams), 5);
     rhi->dispatch(w, h, 1);  // native dispatches w*h groups of 1x1
     rhi->endComputePass();
     rhi->generateMipmaps(shadowRT);
+}
+
+// RT mirror reflections: one closest-hit ray per (half-res) pixel; hits shade
+// from the GIBS surfel radiance cache, misses from the prefiltered env map.
+// Runs AFTER the GIBS pass so the surfel/gibsData buffers hold this frame's
+// state. With GIBS disabled, gibsDataBuffer is zeroed here so hit lookups
+// return black and only env misses contribute (the panel says so). Mirror-only
+// output is noise-free, so no temporal denoise is needed; the PBR composite
+// (texture 16 / buffer 13) weights it by fresnel and fades it by roughness.
+void Renderer::raytraceReflectionPass() {
+    if (!rtReflectionsEnabled || !raytraceReflectionPipeline.isValid() ||
+        !sceneTLAS.isValid() || !reflectionRT.isValid() ||
+        !surfelBuffer.isValid() || !cellHeadBuffer.isValid() ||
+        !surfelNextBuffer.isValid() || !gibsDataBuffer.isValid() ||
+        !prefilterMap.isValid()) {
+        return;
+    }
+    if (!gibsEnabled && gibsDataBuffer.isValid()) {
+        GIBSData zero{};  // totalCells==0 -> surfel lookups return black
+        zero.frameIndex = frameCounter;
+        rhi->updateBuffer(gibsDataBuffer, &zero, 0, sizeof(zero));
+    }
+
+    Uint32 w = (rhi->getSwapchainWidth() + 1) / 2;   // reflectionRT is half-res
+    Uint32 h = (rhi->getSwapchainHeight() + 1) / 2;
+    const size_t surfelBytes = size_t(gibsMaxSurfels) * sizeof(Surfel);
+    struct { float rayBias; float rayMaxDistance; Uint32 frameIndex; Uint32 _pad; } rp{
+        0.01f, 200.0f, frameCounter, 0u };
+
+    rhi->beginComputePass("RaytraceReflection");
+    rhi->bindComputePipeline(raytraceReflectionPipeline);
+    rhi->setComputeTexture(0, depthStencilRT);
+    rhi->setComputeTexture(1, normalRT);
+    rhi->setComputeTexture(2, reflectionRT);
+    rhi->setComputeTexture(3, prefilterMap);
+    rhi->setComputeBuffer(0, cameraUniformBuffer, 0, sizeof(CameraRenderData));
+    rhi->setComputeBuffer(1, surfelBuffer, 0, surfelBytes);
+    rhi->setComputeBuffer(2, cellHeadBuffer);
+    rhi->setComputeBuffer(3, surfelNextBuffer);
+    rhi->setComputeBuffer(4, gibsDataBuffer, 0, sizeof(GIBSData));
+    rhi->setAccelerationStructure(5, sceneTLAS);
+    rhi->setComputeBytes(&rp, sizeof(rp), 6);
+    rhi->dispatch((w + 7) / 8, (h + 7) / 8, 1);
+    rhi->endComputePass();
+    rhi->computeBarrier();  // reflection writes -> fragment reads in Main
 }
 
 // AO raygen into the noisy aoRawRT; the temporal + à-trous passes below
@@ -3266,7 +3328,7 @@ void Renderer::destroyRenderTargets() {
     kill(depthStencilRT_MSAA); kill(depthStencilRT);
     kill(colorRT_MSAA); kill(colorRT); kill(tempColorRT);
     kill(normalRT_MSAA); kill(normalRT); kill(albedoRT);
-    kill(shadowRT); kill(aoRT);
+    kill(shadowRT); kill(aoRT); kill(reflectionRT);
     kill(aoRawRT); kill(aoScratchRT); kill(aoHistoryRT[0]); kill(aoHistoryRT[1]);
     kill(pointShadowRT); kill(pointShadowHistoryRT); kill(pointShadowDenoisedRT);
     kill(giResultTexture);
@@ -3358,6 +3420,17 @@ void Renderer::createRenderTargets() {
         desc.usage = TextureUsage::Storage | TextureUsage::Sampled;
         desc.mipLevels = static_cast<Uint32>(std::floor(std::log2(std::max(halfW, halfH))) + 1);
         shadowRT = rhi->createTexture(desc);
+    }
+
+    // RT mirror reflections (half-res; rgb = reflected radiance, a = hit mask).
+    // HDR: it carries surfel radiance / env light, composited pre-tonemap.
+    {
+        TextureDesc desc;
+        desc.width = halfW;
+        desc.height = halfH;
+        desc.format = PixelFormat::RGBA16_FLOAT;
+        desc.usage = TextureUsage::Storage | TextureUsage::Sampled;
+        reflectionRT = rhi->createTexture(desc);
     }
 
     // Create AO RT (half-res, like native)
@@ -3878,6 +3951,7 @@ void Renderer::createRenderPipeline() {
         raytraceShadowPipeline        = makeMetalCompute("shaders/3d_raytrace_shadow.metal", rtShadowShader, 1, 1, 1);
         sscsComputePipeline           = makeMetalCompute("shaders/3d_sscs.metal", sscsMetalShader, 1, 1, 1);
         raytraceAOPipeline            = makeMetalCompute("shaders/3d_raytrace_ao.metal", rtAOShader, 1, 1, 1);
+        raytraceReflectionPipeline    = makeMetalCompute("shaders/3d_raytrace_reflection.metal", rtReflectionShader, 8, 8, 1);
         // SSAO shares the RT AO binding interface (ignores the TLAS slot) and
         // is selected by aoMethod, exactly like native RaytraceAOPass.
         ssaoPipeline                  = makeMetalCompute("shaders/3d_ssao.metal", ssaoShader, 1, 1, 1);
@@ -4706,6 +4780,7 @@ void Renderer::drawGraphicsImGui() {
         preview("Color RT", colorRT);
         preview("Normal RT", normalRT);
         preview("Shadow RT", shadowRT);
+        preview("Reflection RT", reflectionRT);
         preview("AO RT", aoRT);
         preview("Velocity RT", velocityRT);
         preview("God Rays RT", lightScatteringRT);
@@ -4744,6 +4819,10 @@ void Renderer::drawGraphicsImGui() {
         // pssmRTMaxDist now sets where the independent near-field shadow map ends
         // and the PSSM cascades begin (the near map, not RT, owns [near, this]).
         ImGui::SliderFloat("Near shadow distance", &pssmRTMaxDist, 5.0f, 200.0f);
+        // 0 = hard single-ray sun shadow (legacy); >0 = cone-sampled penumbra
+        // (4 rays/pixel; the real sun is ~0.0047 rad). No denoiser yet, so
+        // large radii show noise in the penumbra.
+        ImGui::SliderFloat("RT sun angular radius", &rtSunAngularRadius, 0.0f, 0.05f, "%.4f");
         ImGui::Checkbox("Contact shadows (SSCS)", &sscsEnabled);
         if (sscsEnabled) {
             ImGui::SliderFloat("SSCS length", &sscsLength, 0.05f, 2.0f);
@@ -4884,6 +4963,16 @@ void Renderer::drawGraphicsImGui() {
 
     if (ImGui::TreeNode("Water Settings")) {
         ImGui::TextDisabled("(water pass not ported to the RHI renderer yet)");
+        ImGui::TreePop();
+    }
+
+    // RT mirror reflections (Metal RT only — no-op without a TLAS). Hits shade
+    // from the GIBS surfel cache, so enable GI for full reflections; with GI
+    // off, only sky/environment misses reflect.
+    if (ImGui::TreeNode("RT Reflections")) {
+        ImGui::Checkbox("Enabled", &rtReflectionsEnabled);
+        ImGui::SliderFloat("Intensity", &rtReflectionIntensity, 0.0f, 2.0f);
+        ImGui::TextDisabled("hits shade from GIBS surfels; enable GI for full effect");
         ImGui::TreePop();
     }
 

@@ -344,6 +344,7 @@ private:
     void clusterBuildPass();
     void tileCullingPass();
     void raytraceShadowPass();
+    void raytraceReflectionPass();
     void raytraceAOPass();
     void mainRenderPass();
     void postProcessPass();
@@ -687,8 +688,18 @@ private:
     ComputePipelineHandle aoDenoisePipeline;
     ComputePipelineHandle stochasticPointShadowPipeline;
     ComputePipelineHandle pointShadowTemporalPipeline;
+    // RT mirror reflections (Metal RT only): traces reflection rays and shades
+    // hits from the GIBS surfel radiance cache; misses sample the env map.
+    ComputePipelineHandle raytraceReflectionPipeline;
+    TextureHandle reflectionRT;              // half-res RGBA16F (rgb, a=hit mask)
+    bool rtReflectionsEnabled = true;        // panel toggle (no-op without RT)
+    float rtReflectionIntensity = 1.0f;      // composite multiplier in the PBR
+    // RT sun soft shadows: 0 = hard single ray (legacy behavior); > 0 = the
+    // sun's angular radius in radians, cone-sampled with a few rays/pixel
+    // (real sun ~0.0047). Panel slider under Shadow Debug.
+    float rtSunAngularRadius = 0.0f;
     ShaderHandle rtShadowShader, rtAOShader, aoTemporalShader, aoDenoiseShader,
-                 pointShadowShader, pointShadowTemporalShader;
+                 pointShadowShader, pointShadowTemporalShader, rtReflectionShader;
     ShaderHandle prePassMetalVertexShader, prePassMetalFragmentShader;
 
     // Acceleration structures: one BLAS per registered mesh (index-aligned with

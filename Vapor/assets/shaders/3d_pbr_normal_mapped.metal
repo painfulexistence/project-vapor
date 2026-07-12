@@ -353,6 +353,7 @@ fragment float4 fragmentMain(
     texture2d<float, access::sample> texPointShadow [[texture(13)]],
     texture2d<float, access::sample> gibsGI [[texture(14)]], // GIBS indirect lighting
     texture2d<float, access::sample> texSSCS [[texture(15)]], // screen-space contact shadow
+    texture2d<float, access::sample> texReflection [[texture(16)]], // RT mirror reflections
     const device DirLight* directionalLights [[buffer(0)]],
     const device PointLight* pointLights [[buffer(1)]],
     const device Cluster* clusters [[buffer(2)]],
@@ -367,7 +368,10 @@ fragment float4 fragmentMain(
     // Perf-isolation debug flags (bit0 = skip point-light loop, bit1 = skip
     // shadow). buffer(11) is dirLightCount (Vulkan-only, unread here), so this
     // takes buffer(12). Mirrors RHIMain.frag's mainDebugFlags.
-    constant uint& mainDebugFlags [[buffer(12)]]
+    constant uint& mainDebugFlags [[buffer(12)]],
+    // RT reflections: x = enabled (texture 16 sampled only when > 0.5, same
+    // contract as gibsGI), y = composite intensity.
+    constant float2& reflectionParams [[buffer(13)]]
 ) {
     constexpr sampler s(address::repeat, filter::linear, mip_filter::linear);
 
@@ -677,6 +681,18 @@ fragment float4 fragmentMain(
         result += CalculateIBL(norm, viewDir, surf, irradianceMap, prefilterMap, brdfLUT) * screenAO;
     } else {
         result += float3(0.03) * surf.ao * surf.color * screenAO; // minimal ambient fallback
+    }
+
+    // RT mirror reflections (half-res, bilinearly upsampled by the sample).
+    // Fresnel-weighted like the IBL specular, faded by roughness — the traced
+    // ray is a mirror ray, so rough surfaces should not show sharp reflections.
+    if (reflectionParams.x > 0.5) {
+        float3 refl = texReflection.sample(s, screenUV).rgb;
+        float NdotV = max(dot(norm, viewDir), 0.0);
+        float3 F0r = mix(float3(0.04), surf.color, surf.metallic);
+        float3 Fr = FresnelSchlickRoughness(NdotV, F0r, surf.roughness);
+        float roughFade = (1.0 - surf.roughness) * (1.0 - surf.roughness);
+        result += refl * Fr * roughFade * reflectionParams.y * screenAO;
     }
 
     result += surf.emission;
