@@ -292,7 +292,11 @@ private:
     // after a binding change.
     // ========================================================================
 
-    static constexpr Uint32 BINDINGS_PER_SET = 8;
+    // 10 (was 8): the material/texture set needs a 9th sampler for the SSCS
+    // contact-shadow RT (set2 b8), with one spare. Purely additive capacity —
+    // the per-frame write loop only writes bound slots, so existing passes that
+    // bind <=8 are unaffected. Pool sizes below are bumped to keep draw headroom.
+    static constexpr Uint32 BINDINGS_PER_SET = 10;
 
     struct BufferBinding {
         VkBuffer buffer = VK_NULL_HANDLE;

@@ -362,6 +362,7 @@ private:
     // render interface; renderUI() draws the context at the end of the graph.
     void renderUI();
     void shadowPass();
+    void sscsPass();  // screen-space contact shadows (Vulkan fullscreen frag)
 
     // ========================================================================
     // Internal Helpers
@@ -550,6 +551,7 @@ private:
     TextureHandle normalRT;
     TextureHandle shadowRT;
     TextureHandle aoRT;
+    TextureHandle sscsRT;   // screen-space contact shadow visibility (R8, min-composited onto the sun shadow)
     // Physically-based pyramid bloom (matches the Metal backend): brightness
     // extract -> progressive downsample chain -> tent-filter upsample chain that
     // accumulates back into pyramid[0] -> composited in PostProcess.
@@ -715,6 +717,8 @@ private:
     // Vulkan AO chain twins — fullscreen fragment passes (the RHI compute path
     // cannot sample depth on Vulkan; same pattern as Velocity/clouds).
     PipelineHandle vkSsaoPipeline;              // SSAO.frag -> aoRawRT (R16F)
+    PipelineHandle vkSscsPipeline;              // SSCS.frag -> sscsRT (screen-space contact shadow)
+    ShaderHandle   vkSscsShader;
     PipelineHandle vkAoTemporalPipeline;        // AOTemporal.frag -> history (RGBA16F)
     PipelineHandle vkAoDenoisePipelineRGBA;     // AODenoise.frag -> scratch (RGBA16F)
     PipelineHandle vkAoDenoisePipelineR16;      // AODenoise.frag -> aoRT (R16F)
@@ -726,6 +730,12 @@ private:
     // Independent near-field shadow map extent (view-space metres). The near map
     // covers [near, nearShadowEnd]; cascades take over beyond it. 0 = disabled.
     float nearShadowEnd = 8.0f;
+    // Screen-space contact shadows (min-composited onto the sun shadow term).
+    bool  sscsEnabled = true;
+    float sscsLength = 0.3f;      // view-space march distance (contact scale, metres)
+    float sscsThickness = 0.3f;   // occluder depth window
+    Uint32 sscsSteps = 12;
+    float sscsBias = 0.02f;       // view-space start offset (self-occlusion guard)
     // Stochastic point-shadow debug view (native pointShadowDebugMode):
     // 0 = visibility, 1 = tile light-count heatmap.
     Uint32 pointShadowDebugMode = 0;

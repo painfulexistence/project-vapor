@@ -133,6 +133,9 @@ layout(set = 2, binding = 6) uniform sampler2DArray shadowMap;  // 3-cascade dep
 // Attenuates ambient/indirect light ONLY — multiplying direct light by AO is
 // physically wrong (same rule as the Metal PBR shader).
 layout(set = 2, binding = 7) uniform sampler2D texAO;
+// Screen-space contact shadow visibility (1 = lit); min-composited onto the sun
+// shadow. White when disabled. Screen-space, sampled at gl_FragCoord like texAO.
+layout(set = 2, binding = 8) uniform sampler2D sscsTex;
 
 // PCF sample of one cascade. Returns 1.0 = lit, 0.0 = fully shadowed, or -1.0
 // when the world position falls outside this cascade's frustum.
@@ -289,7 +292,13 @@ void main() {
         vec3 contrib = shade(N, V, Ldir, l.color * l.intensity, albedo, metallic, roughness);
         // Only the first (sun) directional light casts the cascaded shadow.
         // Debug bit1 skips the PCF to isolate its cost.
-        if (i == 0u && (mainDebugFlags & 2u) == 0u) contrib *= sampleShadow(fragPos, N, Ldir, viewDepth);
+        if (i == 0u && (mainDebugFlags & 2u) == 0u) {
+            float sh = sampleShadow(fragPos, N, Ldir, viewDepth);
+            // Contact shadows tighten the near contact the cascade/near map miss.
+            // min() = shadowed if either says so (no double-darkening from multiply).
+            sh = min(sh, texture(sscsTex, gl_FragCoord.xy / max(screenSize, vec2(1.0))).r);
+            contrib *= sh;
+        }
         color += contrib;
     }
     // Point lights via the culled tile list. The tile is selected with the

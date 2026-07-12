@@ -508,9 +508,11 @@ void RHI_Vulkan::createDescriptorInfrastructure() {
         // slots (2 buffer sets x 8 bindings). The old 8192 ceiling capped a frame
         // at ~512 draws before vkAllocateDescriptorSets failed — reachable with a
         // full scene + RmlUI geometry churn. 4x the headroom (~2048 draws/frame).
+        // Bumped alongside BINDINGS_PER_SET (8 -> 10) to preserve ~2048 draws of
+        // headroom: buffers 40960 (10 x 2 sets x 2048), samplers 20480 (10 x 2048).
         VkDescriptorPoolSize sizes[3] = {
-            { VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, 32768 },
-            { VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, 16384 },
+            { VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, 40960 },
+            { VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, 20480 },
             { VK_DESCRIPTOR_TYPE_STORAGE_IMAGE, 4096 },
         };
         VkDescriptorPoolCreateInfo poolInfo{};

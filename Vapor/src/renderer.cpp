@@ -895,6 +895,11 @@ void Renderer::setupDefaultRenderGraph() {
     renderGraph.addPass("Shadow",
         [](Renderer& r) { r.shadowPass(); });
 
+    // Screen-space contact shadows (Vulkan fullscreen frag; reads the pre-pass
+    // depth, so it runs after depth is available and before Main consumes it).
+    renderGraph.addPass("SSCS",
+        [](Renderer& r) { r.sscsPass(); });
+
     // exists, directly to the swapchain otherwise (decided inside the pass).
     renderGraph.addPass("Main",
         [](Renderer& r) { r.mainRenderPass(); });
@@ -1340,6 +1345,9 @@ void Renderer::mainRenderPass() {
         // SSAO chain output at set2 b7 (RHIMain.frag texAO; whiteTex = neutral
         // when AO is off — the defaults loop above already bound white there).
         if (aoEnabled && aoRT.isValid()) rhi->setTexture(0, 7, aoRT, clampSampler);
+        // Screen-space contact shadow at set2 b8 (RHIMain.frag sscsTex; whiteTex
+        // = neutral/lit when disabled). Uses the bumped 10-binding texture set.
+        rhi->setTexture(0, 8, (sscsEnabled && sscsRT.isValid()) ? sscsRT : whiteTex, clampSampler);
         // Perf-isolation debug flags -> RHIMain.frag push offset 96 (binding 2).
         // Vulkan-only: on Metal, fragment buffer(2) is the CLUSTER buffer, so
         // pushing here would corrupt it (the old billions-of-iterations hang).
@@ -2275,6 +2283,46 @@ void Renderer::shadowPass() {
         }
         rhi->endRenderPass();
     }
+}
+
+// Screen-space contact shadows: march the pre-pass depth toward the light and
+// write a visibility RT (R: 0 shadowed, 1 lit). The main pass min-composites it
+// onto the sun shadow, tightening the near contact the cascade/near map miss.
+// Vulkan fullscreen frag only (the Metal native renderer has RT near shadows).
+void Renderer::sscsPass() {
+    if (backend != GraphicsBackend::Vulkan) return;
+    if (!sscsEnabled || !vkSscsPipeline.isValid() || !sscsRT.isValid() ||
+        !depthStencilRT.isValid() || directionalLights.empty()) {
+        return;
+    }
+
+    struct SSCSPush {
+        glm::vec4 lightDirVS;   // view-space direction TO the light
+        float rayLength;
+        float thickness;
+        Uint32 stepCount;
+        float bias;
+    } push;
+    glm::vec3 Lworld = glm::normalize(-directionalLights[0].direction);   // toward light
+    glm::vec3 Lview  = glm::normalize(glm::mat3(currentCamera.view) * Lworld);
+    push.lightDirVS = glm::vec4(Lview, 0.0f);
+    push.rayLength  = sscsLength;
+    push.thickness  = sscsThickness;
+    push.stepCount  = sscsSteps;
+    push.bias       = sscsBias;
+
+    RenderPassDesc rp;
+    rp.name = "SSCS";
+    rp.colorAttachments.push_back(sscsRT);
+    rp.clearColors.push_back(glm::vec4(1.0f));  // default lit
+    rp.loadColor.push_back(false);              // clear
+    rhi->beginRenderPass(rp);
+    rhi->bindPipeline(vkSscsPipeline);
+    rhi->setTexture(0, 0, depthStencilRT, clampSampler);
+    rhi->setFragmentBuffer(3, cameraUniformBuffer, 0, sizeof(CameraRenderData));
+    rhi->setFragmentBytes(&push, sizeof(push), 0);
+    rhi->draw(3, 1, 0, 0);
+    rhi->endRenderPass();
 }
 
 // Bloom brightness: soft-threshold extract from colorRT into the half-res
@@ -3272,6 +3320,16 @@ void Renderer::createRenderTargets() {
         aoRT = rhi->createTexture(desc);
     }
 
+    // Screen-space contact shadow RT (half-res, single channel visibility).
+    {
+        TextureDesc desc;
+        desc.width = halfW;
+        desc.height = halfH;
+        desc.format = PixelFormat::R8_UNORM;
+        desc.usage = TextureUsage::Sampled | TextureUsage::RenderTarget;
+        sscsRT = rhi->createTexture(desc);
+    }
+
     // RT AO / point-shadow working set + prepass albedo (RT-capable backends;
     // cheap enough to create unconditionally, only written when RT passes run).
     {
@@ -3580,6 +3638,8 @@ void Renderer::createRenderPipeline() {
             // final aoRT R16F), hence two pipelines over one shader.
             vkSsaoPipeline = makeFullscreenFragPipeline(
                 "shaders/SSAO.frag.spv", vkSsaoShader, BlendMode::Opaque, PixelFormat::R16_FLOAT);
+            vkSscsPipeline = makeFullscreenFragPipeline(
+                "shaders/SSCS.frag.spv", vkSscsShader, BlendMode::Opaque, PixelFormat::R8_UNORM);
             vkAoTemporalPipeline = makeFullscreenFragPipeline(
                 "shaders/AOTemporal.frag.spv", vkAoTemporalShader, BlendMode::Opaque, PixelFormat::RGBA16_FLOAT);
             vkAoDenoisePipelineRGBA = makeFullscreenFragPipeline(
