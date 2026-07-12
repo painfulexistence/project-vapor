@@ -155,9 +155,8 @@ struct alignas(16) PointLight { // Note that alignas(16) is not enough to ensure
 // cosines of the inner (full intensity) and outer (falloff-to-zero) half-angles.
 // Layout is std430/MSL-clean (vec3 + trailing scalar packing), uploaded as-is.
 // NOTE the explicit pads: MSL float3 occupies a 16-byte slot, so scalars must
-// NOT be packed into a vec3's tail (that is the PointLight convention; the
-// tail-packed RectLight layout does not actually line up with its MSL twin —
-// latent because no scene ships rect lights yet).
+// NOT be packed into a vec3's tail (the PointLight convention). RectLight
+// keeps its tail-packed layout; its MSL twin uses packed_float3 to match.
 struct alignas(16) SpotLight {
     glm::vec3 position{0.0f};
     float _pad0 = 0.0f;

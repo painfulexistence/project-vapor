@@ -109,8 +109,8 @@ kernel void computeMain(
         uint ri = uint(random(seed + 2u).x * float(extraCounts.x)) % extraCounts.x;
         RectLight rl = rectLights[ri];
         float2 rq = random(seed + 3u) * 2.0 - 1.0;   // uniform on the quad
-        float3 target = rl.position + rl.right * (rq.x * rl.halfWidth)
-                                    + rl.up * (rq.y * rl.halfHeight);
+        float3 target = float3(rl.position) + float3(rl.right) * (rq.x * rl.halfWidth)
+                                            + float3(rl.up) * (rq.y * rl.halfHeight);
         float3 toLight = target - worldPos;
         float dist = length(toLight);
         if (dist > 0.01) {

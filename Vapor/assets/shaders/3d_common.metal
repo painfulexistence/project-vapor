@@ -103,15 +103,21 @@ struct SpotLight {
 
 // Rectangular area light.  right and up are orthonormal axes of the light face;
 // halfWidth/halfHeight give half-extents in those directions.
+// packed_float3 is REQUIRED here: the C++ Vapor::RectLight tail-packs each
+// scalar into the vec3's 4th float (offsets 0/12/16/28/32/44/48/60, 64 bytes).
+// The previous plain-float3 declaration put every member on a 16-byte slot
+// (position [0,16), halfWidth at 16 = C++ right.x, ... 128 bytes total) — every
+// field except position read garbage. Latent for as long as no scene shipped
+// rect lights; fatal the moment one does.
 struct RectLight {
-    float3 position;
-    float  halfWidth;
-    float3 right;           // normalized
-    float  halfHeight;
-    float3 up;              // normalized
-    float  intensity;
-    float3 color;
-    uint   useVideoTexture; // 0 = solid color, 1 = sample video texture
+    packed_float3 position;   // 0
+    float  halfWidth;         // 12
+    packed_float3 right;      // 16 — normalized
+    float  halfHeight;        // 28
+    packed_float3 up;         // 32 — normalized
+    float  intensity;         // 44
+    packed_float3 color;      // 48
+    uint   useVideoTexture;   // 60 — 0 = solid color, 1 = sample video texture
 };
 
 struct Cluster {
