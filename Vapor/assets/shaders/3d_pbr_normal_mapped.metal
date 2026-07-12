@@ -352,6 +352,7 @@ fragment float4 fragmentMain(
     depth2d_array<float, access::sample> pssmShadowMaps [[texture(12)]],
     texture2d<float, access::sample> texPointShadow [[texture(13)]],
     texture2d<float, access::sample> gibsGI [[texture(14)]], // GIBS indirect lighting
+    texture2d<float, access::sample> texSSCS [[texture(15)]], // screen-space contact shadow
     const device DirLight* directionalLights [[buffer(0)]],
     const device PointLight* pointLights [[buffer(1)]],
     const device Cluster* clusters [[buffer(2)]],
@@ -589,6 +590,10 @@ fragment float4 fragmentMain(
 
     // Debug bit1: drop the shadow term to isolate its cost.
     if ((mainDebugFlags & 2u) != 0u) shadowFactor = 1.0;
+
+    // Screen-space contact shadows tighten the near contact the RT/PSSM shadow
+    // misses. min() = shadowed if either says so (no double-darkening).
+    shadowFactor = min(shadowFactor, texSSCS.sample(rtShadowSampler, screenUV).r);
 
     float3 result = float3(0.0);
     result += CalculateDirectionalLight(directionalLights[0], norm, T, B, viewDir, surf) * shadowFactor;

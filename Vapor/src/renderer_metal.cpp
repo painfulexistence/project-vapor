@@ -343,6 +343,43 @@ public:
     }
 };
 
+// Screen-space contact shadows: march the depth buffer toward the sun and write
+// a visibility RT the PBR pass min-composites onto the directional shadow. Adds
+// the fine near contact the RT/PSSM shadow misses (parity with the Vulkan path).
+class SSCSPass : public MetalRenderPass {
+public:
+    explicit SSCSPass(Renderer_Metal* renderer) : MetalRenderPass(renderer) {}
+    auto getName() const -> const char* override { return "SSCSPass"; }
+
+    void execute() override {
+        auto& r = *renderer;
+        if (!r.sscsEnabled || !r.sscsPipeline || !r.sscsRT || !r.depthStencilRT) return;
+
+        auto w = r.sscsRT->width();
+        auto h = r.sscsRT->height();
+        glm::vec2 screenSize = glm::vec2(w, h);
+        struct SSCSParams { float rayLength; float thickness; uint32_t stepCount; float bias; } params;
+        params.rayLength = r.sscsLength;
+        params.thickness = r.sscsThickness;
+        params.stepCount = r.sscsSteps;
+        params.bias      = r.sscsBias;
+
+        auto timedComputeDesc = makeTimedComputeDesc(true, true);
+        auto encoder = r.currentCommandBuffer->computeCommandEncoder(timedComputeDesc.get());
+        encoder->setComputePipelineState(r.sscsPipeline.get());
+        encoder->setTexture(r.depthStencilRT.get(), 0);
+        encoder->setTexture(r.sscsRT.get(), 1);
+        encoder->setBuffer(r.cameraDataBuffers[r.currentFrameInFlight].get(), 0, 0);
+        encoder->setBuffer(r.directionalLightBuffer.get(), 0, 1);
+        encoder->setBytes(&screenSize, sizeof(glm::vec2), 2);
+        encoder->setBytes(&params, sizeof(params), 3);
+        encoder->dispatchThreadgroups(MTL::Size((w + 7) / 8, (h + 7) / 8, 1), MTL::Size(8, 8, 1));
+        encoder->endEncoding();
+
+        addTrafficEstimate(uint64_t(w) * h * (4 + 1));
+    }
+};
+
 // PSSM shadow pass: renders scene depth into a 3-slice texture array for cascades 1-3
 class PSSMShadowPass : public MetalRenderPass {
 public:
@@ -1168,6 +1205,7 @@ public:
                 r.getTexture(material->emissiveMap ? material->emissiveMap->texture : r.defaultEmissiveTexture).get(), 5
             );
             encoder->setFragmentTexture(r.shadowRT.get(), 7);
+            encoder->setFragmentTexture(r.sscsRT.get(), 15);  // contact shadow (min-composited)
 
             // IBL textures
             encoder->setFragmentTexture(r.irradianceMap.get(), 8);
@@ -2968,6 +3006,7 @@ auto Renderer_Metal::init(SDL_Window* window) -> void {
     graph.addPass(std::make_unique<PSSMShadowPass>(this));
     graph.addPass(std::make_unique<PSSMResolvePass>(this));
     if (m_supportsRaytracing) graph.addPass(std::make_unique<RaytraceShadowPass>(this));
+    graph.addPass(std::make_unique<SSCSPass>(this));  // contact shadows (no RT needed)
     if (m_supportsRaytracing) graph.addPass(std::make_unique<RaytraceAOPass>(this));
     if (m_supportsRaytracing) graph.addPass(std::make_unique<AOTemporalPass>(this));
     if (m_supportsRaytracing) graph.addPass(std::make_unique<AODenoisePass>(this));
@@ -3194,6 +3233,7 @@ auto Renderer_Metal::createResources() -> void {
     normalResolvePipeline = createComputePipeline("shaders/3d_normal_resolve.metal");
     velocityPipeline = createComputePipeline("shaders/3d_velocity.metal");
     if (m_supportsRaytracing) raytraceShadowPipeline = createComputePipeline("shaders/3d_raytrace_shadow.metal");
+    sscsPipeline = createComputePipeline("shaders/3d_sscs.metal");
     // AO raygen: 3d_ssao.metal (screen-space) and 3d_raytrace_ao.metal (ray-traced)
     // are drop-in interchangeable here; both feed the temporal + à-trous chain.
     // RT AO: 2 cosine-weighted any-hit rays/px, 1.5m cap (the visibility knob —
@@ -3798,6 +3838,25 @@ auto Renderer_Metal::createResources() -> void {
         )
     ));
     shadowTextureDesc->release();
+
+    // Screen-space contact shadow RT (half-res, single-channel visibility).
+    MTL::TextureDescriptor* sscsTextureDesc = MTL::TextureDescriptor::alloc()->init();
+    sscsTextureDesc->setTextureType(MTL::TextureType2D);
+    sscsTextureDesc->setPixelFormat(MTL::PixelFormatR8Unorm);
+    sscsTextureDesc->setWidth((swapchain->drawableSize().width + 1) / 2);
+    sscsTextureDesc->setHeight((swapchain->drawableSize().height + 1) / 2);
+    sscsTextureDesc->setUsage(MTL::TextureUsageShaderRead | MTL::TextureUsageShaderWrite);
+    sscsRT = NS::TransferPtr(device->newTexture(sscsTextureDesc));
+    sscsRTGrayView = NS::TransferPtr(sscsRT->newTextureView(
+        MTL::PixelFormatR8Unorm,
+        MTL::TextureType2D,
+        NS::Range::Make(0, 1),
+        NS::Range::Make(0, 1),
+        MTL::TextureSwizzleChannels::Make(
+            MTL::TextureSwizzleRed, MTL::TextureSwizzleRed, MTL::TextureSwizzleRed, MTL::TextureSwizzleOne
+        )
+    ));
+    sscsTextureDesc->release();
 
     // PSSM shadow maps: 2D texture array, 3 cascades × 4096×4096 Depth32
     {
@@ -5374,6 +5433,7 @@ auto Renderer_Metal::draw(std::shared_ptr<Scene> scene, Camera& camera) -> void 
             rtPreview("Scene Depth RT", depthStencilRT.get());
             // Shadow results consumed by the PBR shader (all screen-space)
             rtPreview("Near Shadow", shadowRTGrayView.get()); // RT-based here; same role as Vulkan's near map
+            rtPreview("Contact Shadow (SSCS)", sscsRTGrayView.get());
             rtPreview("Point Shadow", pointShadowDenoisedRTGrayView.get());
             rtPreview("PSSM Shadow", pssmShadowScreenRTGrayView.get());
             rtPreview("Raytraced AO", aoRTGrayView.get()); // grayscale swizzle view (raw R16F renders red)
@@ -5403,6 +5463,11 @@ auto Renderer_Metal::draw(std::shared_ptr<Scene> scene, Camera& camera) -> void 
                     splits.x, splits.y, splits.z, splits.w);
             }
             ImGui::SliderFloat("Near shadow distance", &pssmRTMaxDist, 5.0f, 200.0f);
+            ImGui::Checkbox("Contact shadows (SSCS)", &sscsEnabled);
+            if (sscsEnabled) {
+                ImGui::SliderFloat("SSCS length", &sscsLength, 0.05f, 2.0f);
+                ImGui::SliderFloat("SSCS thickness", &sscsThickness, 0.05f, 2.0f);
+            }
 
             // --- PSSM PCF & blend controls ---
             const char* pcfCounts[] = { "4", "8", "16", "32" };
@@ -6577,6 +6642,7 @@ void Renderer_Metal::renderToTexture(
             getTexture(material->emissiveMap ? material->emissiveMap->texture : defaultEmissiveTexture).get(), 5
         );
         encoder->setFragmentTexture(shadowRT.get(), 7);
+        encoder->setFragmentTexture(sscsRT.get(), 15);  // contact shadow (min-composited)
 
         // IBL textures
         encoder->setFragmentTexture(irradianceMap.get(), 8);
