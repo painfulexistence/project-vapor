@@ -1,0 +1,110 @@
+#version 450
+#extension GL_EXT_mesh_shader : require
+// Meshlet mesh stage — Vulkan backend. One workgroup per surviving meshlet
+// (from the task payload): expands the meshlet's triangles from the merged
+// scene vertex buffer (vertex pulling — the merged VB is read as a float SSBO
+// because std430 has no tightly-packed vec3). Outputs a per-meshlet debug color
+// for bring-up; PBR parity is a follow-up. Mirror of 3d_meshlet.metal's meshMain.
+//
+// Bindings: 0 = CameraBuf, 2 = InstanceBuf, 3 = MeshletBuf, 4 = MeshletVertexBuf,
+//           5 = MeshletTriangleBuf (u8 packed in uint words), 7 = merged VB.
+
+layout(local_size_x = 64) in;
+layout(triangles, max_vertices = 64, max_primitives = 128) out;
+
+struct CameraData {
+    mat4 proj;
+    mat4 view;
+    mat4 invProj;
+    mat4 invView;
+    float nearPlane;
+    float farPlane;
+    vec2 _pad;
+    vec3 position;
+    float _pad2;
+    vec4 frustumPlanes[6];
+};
+
+struct InstanceData {
+    mat4 model;
+    vec4 color;
+    uint vertexOffset;
+    uint indexOffset;
+    uint vertexCount;
+    uint indexCount;
+    uint materialID;
+    uint primitiveMode;
+    uvec2 _pad1;
+    vec3 aabbMin;
+    float _pad2;
+    vec3 aabbMax;
+    float _pad3;
+    vec4 boundingSphere;
+};
+
+// Must match Vapor::Meshlet (16 bytes).
+struct Meshlet {
+    uint vertexOffset;    // into MeshletVertexBuf
+    uint triangleOffset;  // byte index into MeshletTriangleBuf
+    uint vertexCount;
+    uint triangleCount;
+};
+
+layout(std430, set = 0, binding = 0) readonly buffer CameraBuf { CameraData cam; };
+layout(std430, set = 0, binding = 2) readonly buffer InstanceBuf { InstanceData instances[]; };
+layout(std430, set = 0, binding = 3) readonly buffer MeshletBuf { Meshlet meshlets[]; };
+layout(std430, set = 0, binding = 4) readonly buffer MeshletVertexBuf { uint meshletVertices[]; };
+layout(std430, set = 0, binding = 5) readonly buffer MeshletTriangleBuf { uint triWords[]; };
+// Merged scene VertexData as raw floats (stride 12 floats = 48 bytes; position
+// at float offset 0 — see Vapor::VertexData).
+layout(std430, set = 0, binding = 7) readonly buffer MergedVB { float vb[]; };
+
+layout(push_constant) uniform MeshletParams {
+    uint instanceID;
+    uint meshletOffset;
+    uint meshletCount;
+    float errorThreshold;
+};
+
+struct TaskPayload {
+    uint meshletIndices[32];
+};
+taskPayloadSharedEXT TaskPayload payload;
+
+layout(location = 0) out vec3 meshletColor[];
+
+uint triByte(uint byteIndex) {
+    return (triWords[byteIndex >> 2] >> ((byteIndex & 3u) * 8u)) & 0xFFu;
+}
+
+// Distinct-ish color per meshlet (integer hash -> hue-ish RGB).
+vec3 hashColor(uint x) {
+    x = (x ^ 61u) ^ (x >> 16u);
+    x *= 9u;
+    x = x ^ (x >> 4u);
+    x *= 0x27d4eb2du;
+    x = x ^ (x >> 15u);
+    return vec3(float(x & 255u), float((x >> 8u) & 255u), float((x >> 16u) & 255u)) / 255.0;
+}
+
+void main() {
+    uint mi = payload.meshletIndices[gl_WorkGroupID.x];
+    Meshlet m = meshlets[mi];
+    SetMeshOutputsEXT(m.vertexCount, m.triangleCount);
+
+    mat4 mvp = cam.proj * cam.view * instances[instanceID].model;
+    vec3 color = hashColor(mi);
+
+    const uint kVertexFloats = 12u;  // sizeof(VertexData) / sizeof(float)
+    for (uint v = gl_LocalInvocationIndex; v < m.vertexCount; v += 64u) {
+        uint vi = meshletVertices[m.vertexOffset + v];  // merged-VB vertex index
+        uint f = vi * kVertexFloats;
+        vec3 pos = vec3(vb[f], vb[f + 1u], vb[f + 2u]);
+        gl_MeshVerticesEXT[v].gl_Position = mvp * vec4(pos, 1.0);
+        meshletColor[v] = color;
+    }
+    for (uint t = gl_LocalInvocationIndex; t < m.triangleCount; t += 64u) {
+        uint b = m.triangleOffset + t * 3u;
+        gl_PrimitiveTriangleIndicesEXT[t] = uvec3(triByte(b), triByte(b + 1u), triByte(b + 2u));
+    }
+}

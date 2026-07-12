@@ -773,9 +773,17 @@ private:
     bool gpuDrivenActive()   const { return gpuDrivenMode != GpuDrivenMode::Off; }
     bool gpuDrivenIndirect() const { return gpuDrivenMode == GpuDrivenMode::Indirect; }
     bool gpuDrivenMeshlet()  const { return gpuDrivenMode == GpuDrivenMode::Meshlet; }
-    // The meshlet draw path (task/mesh shaders) is not implemented until Phase C;
-    // the UI keeps the Meshlet option disabled while this is false.
-    static constexpr bool kMeshletDrawImplemented = false;
+    // Meshlet draw path (task/mesh shaders): per-cluster frustum/cone cull +
+    // two-sphere cluster-LOD selection in the task stage, triangles expanded by
+    // the mesh stage, per-meshlet debug colors in the fragment (PBR parity is a
+    // follow-up). Selectable when the backend reports mesh-shader support.
+    static constexpr bool kMeshletDrawImplemented = true;
+    PipelineHandle meshletPipeline;
+    ShaderHandle meshletTaskShader, meshletMeshShader, meshletFragShader;
+    // Cluster-LOD screen-space error tolerance, in pixels. Larger = coarser
+    // clusters selected sooner (fewer triangles); the task shader compares the
+    // projected cluster error against this / screenHeight.
+    float meshletLodPixelError = 1.0f;
 
     // Hi-Z occlusion culling (requires a GPU-driven mode). A depth pyramid built
     // from the PrePass depth; the cull compute rejects instances whose screen

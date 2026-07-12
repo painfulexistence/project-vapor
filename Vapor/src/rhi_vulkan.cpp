@@ -404,6 +404,15 @@ void RHI_Vulkan::createDescriptorInfrastructure() {
     // Set layouts: 8 SSBO slots for each buffer set (both stages visible so a
     // fragment shader can also read vertex-stage data like materials), and 8
     // combined image samplers for the texture set.
+    // Task/mesh stages read the same set-0/1 storage buffers and push constants
+    // as the vertex stage (the meshlet path binds via setVertexBuffer/Bytes), so
+    // when mesh shaders are enabled every graphics stage mask is widened. Push
+    // calls must use the exact same mask as the range (VUID 01795), hence the
+    // shared member.
+    graphicsStageFlags = VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT;
+    if (meshShadersEnabled) {
+        graphicsStageFlags |= VK_SHADER_STAGE_TASK_BIT_EXT | VK_SHADER_STAGE_MESH_BIT_EXT;
+    }
     auto makeBufferSetLayout = [&]() {
         VkDescriptorSetLayoutBinding bindings[BINDINGS_PER_SET];
         for (Uint32 i = 0; i < BINDINGS_PER_SET; i++) {
@@ -411,7 +420,7 @@ void RHI_Vulkan::createDescriptorInfrastructure() {
             bindings[i].binding = i;
             bindings[i].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
             bindings[i].descriptorCount = 1;
-            bindings[i].stageFlags = VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT;
+            bindings[i].stageFlags = graphicsStageFlags;
         }
         VkDescriptorSetLayoutCreateInfo info{};
         info.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO;
@@ -447,7 +456,7 @@ void RHI_Vulkan::createDescriptorInfrastructure() {
     // One pipeline layout shared by every graphics pipeline
     VkDescriptorSetLayout setLayouts[3] = { vertexBufferSetLayout, fragmentBufferSetLayout, textureSetLayout };
     VkPushConstantRange pushRange{};
-    pushRange.stageFlags = VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT;
+    pushRange.stageFlags = graphicsStageFlags;
     pushRange.offset = 0;
     pushRange.size = 128;  // Vulkan guaranteed minimum
 
@@ -1359,6 +1368,132 @@ PipelineHandle RHI_Vulkan::createPipeline(const PipelineDesc& desc) {
     return PipelineHandle{id};
 }
 
+PipelineHandle RHI_Vulkan::createMeshPipeline(const MeshPipelineDesc& desc) {
+    if (!meshShadersEnabled) return {};
+    auto msIt = shaders.find(desc.meshShader.id);
+    auto fsIt = shaders.find(desc.fragmentShader.id);
+    if (msIt == shaders.end() || fsIt == shaders.end()) {
+        throw std::runtime_error("Invalid shader handles for mesh pipeline");
+    }
+
+    // Stages: optional task, mesh, fragment. No vertex input / input assembly —
+    // the spec ignores those states when a mesh shader is present.
+    std::vector<VkPipelineShaderStageCreateInfo> stages;
+    auto tsIt = shaders.find(desc.taskShader.id);
+    if (desc.taskShader.isValid() && tsIt != shaders.end()) {
+        VkPipelineShaderStageCreateInfo s{};
+        s.sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO;
+        s.stage = VK_SHADER_STAGE_TASK_BIT_EXT;
+        s.module = tsIt->second.module;
+        s.pName = "main";
+        stages.push_back(s);
+    }
+    {
+        VkPipelineShaderStageCreateInfo s{};
+        s.sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO;
+        s.stage = VK_SHADER_STAGE_MESH_BIT_EXT;
+        s.module = msIt->second.module;
+        s.pName = "main";
+        stages.push_back(s);
+    }
+    {
+        VkPipelineShaderStageCreateInfo s{};
+        s.sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO;
+        s.stage = VK_SHADER_STAGE_FRAGMENT_BIT;
+        s.module = fsIt->second.module;
+        s.pName = "main";
+        stages.push_back(s);
+    }
+
+    VkPipelineViewportStateCreateInfo viewportState{};
+    viewportState.sType = VK_STRUCTURE_TYPE_PIPELINE_VIEWPORT_STATE_CREATE_INFO;
+    viewportState.viewportCount = 1;
+    viewportState.scissorCount = 1;
+
+    VkPipelineRasterizationStateCreateInfo rasterizer{};
+    rasterizer.sType = VK_STRUCTURE_TYPE_PIPELINE_RASTERIZATION_STATE_CREATE_INFO;
+    rasterizer.polygonMode = VK_POLYGON_MODE_FILL;
+    rasterizer.lineWidth = 1.0f;
+    rasterizer.cullMode = convertCullMode(desc.cullMode);
+    rasterizer.frontFace = desc.frontFaceCounterClockwise ? VK_FRONT_FACE_COUNTER_CLOCKWISE
+                                                          : VK_FRONT_FACE_CLOCKWISE;
+
+    VkPipelineMultisampleStateCreateInfo multisampling{};
+    multisampling.sType = VK_STRUCTURE_TYPE_PIPELINE_MULTISAMPLE_STATE_CREATE_INFO;
+    multisampling.rasterizationSamples = static_cast<VkSampleCountFlagBits>(desc.sampleCount);
+
+    VkPipelineDepthStencilStateCreateInfo depthStencil{};
+    depthStencil.sType = VK_STRUCTURE_TYPE_PIPELINE_DEPTH_STENCIL_STATE_CREATE_INFO;
+    depthStencil.depthTestEnable = desc.depthTest ? VK_TRUE : VK_FALSE;
+    depthStencil.depthWriteEnable = desc.depthWrite ? VK_TRUE : VK_FALSE;
+    depthStencil.depthCompareOp = convertCompareOp(desc.depthCompareOp);
+
+    // Meshlet debug path draws opaque; alpha modes can be added when needed.
+    VkPipelineColorBlendAttachmentState colorBlendAttachment{};
+    colorBlendAttachment.colorWriteMask = VK_COLOR_COMPONENT_R_BIT | VK_COLOR_COMPONENT_G_BIT |
+                                          VK_COLOR_COMPONENT_B_BIT | VK_COLOR_COMPONENT_A_BIT;
+    colorBlendAttachment.blendEnable = VK_FALSE;
+    std::vector<VkPipelineColorBlendAttachmentState> blendAttachments(
+        std::max<size_t>(1, desc.colorAttachmentFormats.size()), colorBlendAttachment);
+    VkPipelineColorBlendStateCreateInfo colorBlending{};
+    colorBlending.sType = VK_STRUCTURE_TYPE_PIPELINE_COLOR_BLEND_STATE_CREATE_INFO;
+    colorBlending.attachmentCount = static_cast<uint32_t>(blendAttachments.size());
+    colorBlending.pAttachments = blendAttachments.data();
+
+    std::vector<VkDynamicState> dynamicStates = { VK_DYNAMIC_STATE_VIEWPORT, VK_DYNAMIC_STATE_SCISSOR };
+    VkPipelineDynamicStateCreateInfo dynamicState{};
+    dynamicState.sType = VK_STRUCTURE_TYPE_PIPELINE_DYNAMIC_STATE_CREATE_INFO;
+    dynamicState.dynamicStateCount = static_cast<uint32_t>(dynamicStates.size());
+    dynamicState.pDynamicStates = dynamicStates.data();
+
+    std::vector<VkFormat> colorFormats;
+    colorFormats.reserve(desc.colorAttachmentFormats.size());
+    for (PixelFormat f : desc.colorAttachmentFormats) {
+        colorFormats.push_back(f == PixelFormat::Swapchain ? swapchainImageFormat
+                                                           : convertPixelFormat(f));
+    }
+    VkPipelineRenderingCreateInfo pipelineRenderingInfo{};
+    pipelineRenderingInfo.sType = VK_STRUCTURE_TYPE_PIPELINE_RENDERING_CREATE_INFO;
+    pipelineRenderingInfo.colorAttachmentCount = static_cast<uint32_t>(colorFormats.size());
+    pipelineRenderingInfo.pColorAttachmentFormats = colorFormats.data();
+    if (desc.hasDepthAttachment) {
+        pipelineRenderingInfo.depthAttachmentFormat = convertPixelFormat(desc.depthAttachmentFormat);
+    }
+
+    VkGraphicsPipelineCreateInfo pipelineInfo{};
+    pipelineInfo.sType = VK_STRUCTURE_TYPE_GRAPHICS_PIPELINE_CREATE_INFO;
+    pipelineInfo.pNext = &pipelineRenderingInfo;
+    pipelineInfo.stageCount = static_cast<uint32_t>(stages.size());
+    pipelineInfo.pStages = stages.data();
+    pipelineInfo.pVertexInputState = nullptr;    // ignored with a mesh stage
+    pipelineInfo.pInputAssemblyState = nullptr;  // ignored with a mesh stage
+    pipelineInfo.pViewportState = &viewportState;
+    pipelineInfo.pRasterizationState = &rasterizer;
+    pipelineInfo.pMultisampleState = &multisampling;
+    pipelineInfo.pDepthStencilState = &depthStencil;
+    pipelineInfo.pColorBlendState = &colorBlending;
+    pipelineInfo.pDynamicState = &dynamicState;
+    pipelineInfo.layout = globalPipelineLayout;
+    pipelineInfo.renderPass = VK_NULL_HANDLE;  // dynamic rendering
+
+    VkPipeline pipeline;
+    if (vkCreateGraphicsPipelines(device, VK_NULL_HANDLE, 1, &pipelineInfo, nullptr, &pipeline) != VK_SUCCESS) {
+        throw std::runtime_error("Failed to create mesh pipeline");
+    }
+
+    Uint32 id = nextPipelineId++;
+    pipelines[id] = {pipeline, globalPipelineLayout};
+    return PipelineHandle{id};
+}
+
+void RHI_Vulkan::drawMeshTasks(Uint32 groupCountX, Uint32 groupCountY, Uint32 groupCountZ) {
+    if (currentCommandBuffer == VK_NULL_HANDLE || !pfnCmdDrawMeshTasks || groupCountX == 0) {
+        return;
+    }
+    flushDescriptors();
+    pfnCmdDrawMeshTasks(currentCommandBuffer, groupCountX, groupCountY, groupCountZ);
+}
+
 void RHI_Vulkan::destroyPipeline(PipelineHandle handle) {
     auto it = pipelines.find(handle.id);
     if (it != pipelines.end()) {
@@ -2172,8 +2307,7 @@ void RHI_Vulkan::setVertexBytes(const void* data, size_t size, Uint32 binding) {
     Uint32 offset = (binding % 4) * 16;
     Uint32 clamped = static_cast<Uint32>(std::min<size_t>(size, 64 - offset));
     vkCmdPushConstants(currentCommandBuffer, globalPipelineLayout,
-                       VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT,
-                       offset, clamped, data);
+                       graphicsStageFlags, offset, clamped, data);
 }
 
 void RHI_Vulkan::setFragmentBytes(const void* data, size_t size, Uint32 binding) {
@@ -2184,8 +2318,7 @@ void RHI_Vulkan::setFragmentBytes(const void* data, size_t size, Uint32 binding)
     Uint32 offset = 64 + (binding % 4) * 16;
     Uint32 clamped = static_cast<Uint32>(std::min<size_t>(size, 128 - offset));
     vkCmdPushConstants(currentCommandBuffer, globalPipelineLayout,
-                       VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT,
-                       offset, clamped, data);
+                       graphicsStageFlags, offset, clamped, data);
 }
 
 void RHI_Vulkan::setTexture(Uint32 set, Uint32 binding, TextureHandle texture, SamplerHandle sampler) {
@@ -2468,10 +2601,22 @@ void RHI_Vulkan::createLogicalDevice() {
                 if (std::strcmp(e.extensionName, name) == 0) return true;
             return false;
         };
-        // Mesh/task shaders (meshlet path). Detected here; the extension + feature
-        // are only enabled when the meshlet draw path is wired up (Phase C).
+        // Mesh/task shaders (meshlet path): enable the extension when both the
+        // extension and its task+mesh features are supported. Capability is set
+        // only when the feature is actually enabled on the device.
 #ifdef VK_EXT_MESH_SHADER_EXTENSION_NAME
-        capabilities.meshShaders = has(VK_EXT_MESH_SHADER_EXTENSION_NAME);
+        if (has(VK_EXT_MESH_SHADER_EXTENSION_NAME)) {
+            VkPhysicalDeviceMeshShaderFeaturesEXT supported{};
+            supported.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_MESH_SHADER_FEATURES_EXT;
+            VkPhysicalDeviceFeatures2 features2{};
+            features2.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_FEATURES_2;
+            features2.pNext = &supported;
+            vkGetPhysicalDeviceFeatures2(physicalDevice, &features2);
+            if (supported.taskShader && supported.meshShader) {
+                deviceExtensions.push_back(VK_EXT_MESH_SHADER_EXTENSION_NAME);
+                meshShadersEnabled = true;
+            }
+        }
 #endif
         // MoltenVK requires enabling portability_subset when it is present
         if (has(VK_KHR_PORTABILITY_SUBSET_EXTENSION_NAME)) {
@@ -2489,10 +2634,21 @@ void RHI_Vulkan::createLogicalDevice() {
         }
     }
 
+    // Task + mesh shader features, chained ahead of the existing feature chain
+    // when supported (see detection above).
+    VkPhysicalDeviceMeshShaderFeaturesEXT meshShaderFeatures{};
+    meshShaderFeatures.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_MESH_SHADER_FEATURES_EXT;
+    meshShaderFeatures.taskShader = VK_TRUE;
+    meshShaderFeatures.meshShader = VK_TRUE;
+
     // Create device
     VkDeviceCreateInfo deviceInfo{};
     deviceInfo.sType = VK_STRUCTURE_TYPE_DEVICE_CREATE_INFO;
     deviceInfo.pNext = &synchronization2Features;
+    if (meshShadersEnabled) {
+        meshShaderFeatures.pNext = &synchronization2Features;
+        deviceInfo.pNext = &meshShaderFeatures;
+    }
     deviceInfo.queueCreateInfoCount = 1;
     deviceInfo.pQueueCreateInfos = &graphicsQueueInfo;
     deviceInfo.enabledExtensionCount = static_cast<uint32_t>(deviceExtensions.size());
@@ -2520,6 +2676,12 @@ void RHI_Vulkan::createLogicalDevice() {
 
     if (!vkCmdBeginRenderingKHR || !vkCmdEndRenderingKHR) {
         throw std::runtime_error("Failed to load dynamic rendering extension functions");
+    }
+
+    if (meshShadersEnabled) {
+        pfnCmdDrawMeshTasks = (PFN_vkCmdDrawMeshTasksEXT)vkGetDeviceProcAddr(device, "vkCmdDrawMeshTasksEXT");
+        capabilities.meshShaders = pfnCmdDrawMeshTasks != nullptr;
+        meshShadersEnabled = capabilities.meshShaders;
     }
 }
 
@@ -2835,7 +2997,11 @@ VkBufferUsageFlags RHI_Vulkan::convertBufferUsage(BufferUsage usage) {
     // binding model notes in rhi_vulkan.hpp.
     switch (usage) {
         case BufferUsage::Vertex:
-            return VK_BUFFER_USAGE_VERTEX_BUFFER_BIT | VK_BUFFER_USAGE_TRANSFER_DST_BIT;
+            // STORAGE so mesh shaders (and any vertex-pulling path) can read
+            // vertex buffers as SSBOs — the meshlet path samples the merged
+            // vertex buffer from the mesh stage.
+            return VK_BUFFER_USAGE_VERTEX_BUFFER_BIT | VK_BUFFER_USAGE_STORAGE_BUFFER_BIT |
+                   VK_BUFFER_USAGE_TRANSFER_DST_BIT;
         case BufferUsage::Index:
             return VK_BUFFER_USAGE_INDEX_BUFFER_BIT | VK_BUFFER_USAGE_TRANSFER_DST_BIT;
         case BufferUsage::Uniform:

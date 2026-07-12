@@ -55,6 +55,7 @@ public:
     void destroySampler(SamplerHandle handle) override;
 
     PipelineHandle createPipeline(const PipelineDesc& desc) override;
+    PipelineHandle createMeshPipeline(const MeshPipelineDesc& desc) override;
     void destroyPipeline(PipelineHandle handle) override;
 
     ComputePipelineHandle createComputePipeline(const ComputePipelineDesc& desc) override;
@@ -112,6 +113,7 @@ public:
     void draw(Uint32 vertexCount, Uint32 instanceCount, Uint32 firstVertex, Uint32 firstInstance) override;
     void drawIndexed(Uint32 indexCount, Uint32 instanceCount, Uint32 firstIndex, int32_t vertexOffset, Uint32 firstInstance) override;
     void drawIndexedIndirect(BufferHandle argsBuffer, size_t offset, Uint32 drawCount, Uint32 stride) override;
+    void drawMeshTasks(Uint32 groupCountX, Uint32 groupCountY = 1, Uint32 groupCountZ = 1) override;
 
     // ========================================================================
     // Compute Commands
@@ -192,6 +194,11 @@ private:
     bool frameSemaphoreAcquired = false;
     MTL::RenderCommandEncoder* currentRenderEncoder = nullptr;
     MTL::ComputeCommandEncoder* currentComputeEncoder = nullptr;
+    // Set by bindPipeline for mesh pipelines: reroutes vertex-stage binds to the
+    // object+mesh stages and supplies drawMeshThreadgroups' threadgroup sizes.
+    bool currentPipelineIsMesh = false;
+    Uint32 currentTaskThreads = 32;
+    Uint32 currentMeshThreads = 64;
 
     // Swapchain properties
     Uint32 swapchainWidth = 0;
@@ -239,6 +246,11 @@ private:
         NS::SharedPtr<MTL::RenderPipelineState> renderPipeline;
         NS::SharedPtr<MTL::ComputePipelineState> computePipeline;
         bool isCompute = false;
+        // Mesh pipelines: object/mesh threadgroup sizes for drawMeshThreadgroups,
+        // and a flag that reroutes setVertexBuffer/Bytes to the object+mesh stages.
+        bool isMesh = false;
+        Uint32 taskThreads = 32;
+        Uint32 meshThreads = 64;
         // Fixed-function state captured from PipelineDesc. Metal has no single
         // pipeline-state object for these, so they are applied at bind time.
         NS::SharedPtr<MTL::DepthStencilState> depthStencilState;

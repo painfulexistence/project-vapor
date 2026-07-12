@@ -1526,7 +1526,38 @@ void Renderer::mainRenderPass() {
     const bool useMDI = useGpuDriven && gpuDrivenMDI && mdiBackendOk &&
                         mergedVertexBuffer.isValid() && mergedIndexBuffer.isValid() &&
                         !m_materialRanges.empty();
-    if (useMDI) {
+
+    // Meshlet path (task/mesh shaders): per-cluster cull + LOD selection on the
+    // GPU, one drawMeshTasks per instance. Draws per-meshlet debug colors for
+    // now (PBR parity is a follow-up). Falls back to the paths below if the
+    // pipeline or any meshlet buffer is missing.
+    const bool useMeshlet = gpuDrivenMeshlet() && meshletPipeline.isValid() &&
+                            meshletBuffer.isValid() && meshletBoundsBuffer.isValid() &&
+                            meshletVertexBuffer.isValid() && meshletTriangleBuffer.isValid() &&
+                            mergedVertexBuffer.isValid() && totalInstanceCount > 0;
+    if (useMeshlet) {
+        rhi->bindPipeline(meshletPipeline);
+        // Bindings mirror Meshlet.task/.mesh and 3d_meshlet.metal.
+        rhi->setVertexBuffer(0, cameraUniformBuffer, 0, sizeof(CameraRenderData));
+        rhi->setVertexBuffer(2, instanceDataBuffer, 0, sizeof(Vapor::InstanceData) * totalInstanceCount);
+        rhi->setVertexBuffer(3, meshletBuffer, 0, 0);
+        rhi->setVertexBuffer(4, meshletVertexBuffer, 0, 0);
+        rhi->setVertexBuffer(5, meshletTriangleBuffer, 0, 0);
+        rhi->setVertexBuffer(6, meshletBoundsBuffer, 0, 0);
+        rhi->setVertexBuffer(7, mergedVertexBuffer, 0, 0);
+
+        struct MeshletParams { Uint32 instanceID; Uint32 meshletOffset; Uint32 meshletCount; float errorThreshold; };
+        const float threshold = meshletLodPixelError / std::max(1.0f, float(rhi->getSwapchainHeight()));
+        for (Uint32 i = 0; i < frameDrawables.size(); ++i) {
+            auto it = drawableToInstanceID.find(i);
+            if (it == drawableToInstanceID.end()) continue;
+            const RenderMesh& mesh = meshes[frameDrawables[i].mesh];
+            if (mesh.meshletCount == 0) continue;  // mesh without baked meshlets
+            MeshletParams params{ it->second, mesh.meshletOffset, mesh.meshletCount, threshold };
+            rhi->setVertexBytes(&params, sizeof(params), 8);
+            rhi->drawMeshTasks((mesh.meshletCount + 31) / 32, 1, 1);
+        }
+    } else if (useMDI) {
         rhi->bindVertexBuffer(mergedVertexBuffer, 3, 0);
         rhi->bindIndexBuffer(mergedIndexBuffer, 0);
         Uint32 zeroId = 0;
@@ -3890,6 +3921,36 @@ void Renderer::createRenderPipeline() {
             // Hi-Z reduce: fullscreen max-depth downsample into an R32F mip.
             hizReducePipeline        = makeFullscreenFragPipeline("shaders/HiZReduce.frag.spv",       hizReduceFS,           BlendMode::Opaque, PixelFormat::R32_FLOAT);
 
+            // Meshlet task/mesh pipeline (VK_EXT_mesh_shader). Draws into the
+            // main pass's HDR color + depth; LessOrEqual so it coexists with the
+            // PrePass depth. Skipped entirely without mesh-shader support.
+            if (capabilities.meshShaders) {
+                std::string ts = readFile("shaders/Meshlet.task.spv");
+                std::string ms = readFile("shaders/Meshlet.mesh.spv");
+                std::string fs = readFile("shaders/MeshletDebug.frag.spv");
+                if (!ts.empty() && !ms.empty() && !fs.empty()) {
+                    ShaderDesc d;
+                    d.stage = ShaderStage::Task;     d.code = ts.data(); d.codeSize = ts.size(); d.entryPoint = "main";
+                    meshletTaskShader = rhi->createShader(d);
+                    d.stage = ShaderStage::Mesh;     d.code = ms.data(); d.codeSize = ms.size();
+                    meshletMeshShader = rhi->createShader(d);
+                    d.stage = ShaderStage::Fragment; d.code = fs.data(); d.codeSize = fs.size();
+                    meshletFragShader = rhi->createShader(d);
+                    MeshPipelineDesc mp;
+                    mp.taskShader = meshletTaskShader;
+                    mp.meshShader = meshletMeshShader;
+                    mp.fragmentShader = meshletFragShader;
+                    mp.taskThreadgroupSize = 32;
+                    mp.meshThreadgroupSize = 64;
+                    mp.depthTest = true;
+                    mp.depthWrite = true;
+                    mp.depthCompareOp = CompareOp::LessOrEqual;
+                    mp.hasDepthAttachment = true;
+                    mp.colorAttachmentFormats = { PixelFormat::RGBA16_FLOAT };
+                    meshletPipeline = rhi->createMeshPipeline(mp);
+                }
+            }
+
             // Sky/atmosphere: fullscreen into the HDR colorRT, depth-tested
             // (LessOrEqual at z=1.0) so it only fills background pixels; no
             // depth write. Its own vertex shader (z=1.0), so not the lambda.
@@ -4280,6 +4341,33 @@ void Renderer::createRenderPipeline() {
         // Hi-Z reduce: fullscreen max-depth downsample into an R32F mip.
         hizReducePipeline = makeMetalPass("shaders/3d_hiz_reduce.metal", "vertexMain", "fragmentMain",
                                           BlendMode::Opaque, { PixelFormat::R32_FLOAT }, false, CompareOp::Less);
+
+        // Meshlet object/mesh pipeline. Same render-state contract as the Vulkan
+        // twin: HDR color + depth, LessOrEqual against the PrePass depth.
+        if (capabilities.meshShaders) {
+            std::string code = readFile("shaders/3d_meshlet.metal");
+            if (!code.empty()) {
+                ShaderDesc d;
+                d.stage = ShaderStage::Task;     d.code = code.data(); d.codeSize = code.size(); d.entryPoint = "objectMain";
+                meshletTaskShader = rhi->createShader(d);
+                d.stage = ShaderStage::Mesh;     d.entryPoint = "meshMain";
+                meshletMeshShader = rhi->createShader(d);
+                d.stage = ShaderStage::Fragment; d.entryPoint = "fragmentMain";
+                meshletFragShader = rhi->createShader(d);
+                MeshPipelineDesc mp;
+                mp.taskShader = meshletTaskShader;
+                mp.meshShader = meshletMeshShader;
+                mp.fragmentShader = meshletFragShader;
+                mp.taskThreadgroupSize = 32;
+                mp.meshThreadgroupSize = 64;
+                mp.depthTest = true;
+                mp.depthWrite = true;
+                mp.depthCompareOp = CompareOp::LessOrEqual;
+                mp.hasDepthAttachment = true;
+                mp.colorAttachmentFormats = { PixelFormat::RGBA16_FLOAT };
+                meshletPipeline = rhi->createMeshPipeline(mp);
+            }
+        }
         // Native upsample blends in-shader (texBlend at texture(1)) — Opaque,
         // unlike the Vulkan twin's additive-blend pipeline.
         bloomUpsamplePipeline = makeMetalPass("shaders/3d_bloom_upsample.metal", "vertexMain", "fragmentMain",
@@ -5000,6 +5088,12 @@ void Renderer::drawGraphicsImGui() {
         }
         if (gpuDrivenMode == GpuDrivenMode::Meshlet && !meshletSelectable)
             gpuDrivenMode = GpuDrivenMode::Off;  // never stick on an unavailable mode
+        // Cluster-LOD error tolerance (pixels). Bigger = coarser LODs kick in
+        // sooner. Only meaningful while the meshlet path is drawing.
+        if (gpuDrivenMode == GpuDrivenMode::Meshlet) {
+            ImGui::SliderFloat("  LOD error (px)", &meshletLodPixelError, 0.1f, 16.0f, "%.1f",
+                               ImGuiSliderFlags_Logarithmic);
+        }
 
         // MDI is a sub-option of the Indirect method (single-call multi-draw over
         // the merged scene buffers; Vulkan native, Metal per-command loop).

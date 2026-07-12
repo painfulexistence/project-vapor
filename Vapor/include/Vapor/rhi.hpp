@@ -208,6 +208,8 @@ enum class ShaderStage {
     Vertex,
     Fragment,
     Compute,
+    Task,  // mesh-shading amplification stage (Metal: object function)
+    Mesh,  // mesh-shading geometry stage (Metal: mesh function)
 };
 
 // ============================================================================
@@ -280,6 +282,30 @@ struct VertexAttribute {
 struct VertexLayout {
     std::vector<VertexAttribute> attributes;
     Uint32 stride;
+};
+
+// Mesh-shading pipeline: task (optional) + mesh + fragment stages, no vertex
+// input (the mesh shader pulls geometry from storage buffers itself). Vulkan
+// VK_EXT_mesh_shader; Metal object/mesh functions. Only usable when
+// RHICapabilities::meshShaders is true.
+struct MeshPipelineDesc {
+    ShaderHandle taskShader;      // invalid handle = mesh-only pipeline
+    ShaderHandle meshShader;
+    ShaderHandle fragmentShader;
+    // Threadgroup sizes, needed by Metal's drawMeshThreadgroups (Vulkan bakes
+    // them in the shaders' local_size). Must match the shaders.
+    Uint32 taskThreadgroupSize = 32;
+    Uint32 meshThreadgroupSize = 64;
+    BlendMode blendMode = BlendMode::Opaque;
+    bool depthTest = true;
+    bool depthWrite = true;
+    CompareOp depthCompareOp = CompareOp::Less;
+    bool hasDepthAttachment = true;
+    PixelFormat depthAttachmentFormat = PixelFormat::Depth32Float;
+    CullMode cullMode = CullMode::Back;
+    bool frontFaceCounterClockwise = true;
+    Uint32 sampleCount = 1;
+    std::vector<PixelFormat> colorAttachmentFormats = { PixelFormat::Swapchain };
 };
 
 struct PipelineDesc {
@@ -464,6 +490,9 @@ public:
 
     virtual PipelineHandle createPipeline(const PipelineDesc& desc) = 0;
     virtual void destroyPipeline(PipelineHandle handle) = 0;
+    // Mesh-shading pipeline (see MeshPipelineDesc). Returns an invalid handle on
+    // backends without mesh-shader support; destroy with destroyPipeline.
+    virtual PipelineHandle createMeshPipeline(const MeshPipelineDesc& /*desc*/) { return {}; }
 
     virtual ComputePipelineHandle createComputePipeline(const ComputePipelineDesc& desc) = 0;
     virtual void destroyComputePipeline(ComputePipelineHandle handle) = 0;
@@ -564,6 +593,10 @@ public:
     // of per-command indirect draws (same observable result). A command with
     // instanceCount == 0 draws nothing, which is how the cull pass drops objects.
     virtual void drawIndexedIndirect(BufferHandle argsBuffer, size_t offset, Uint32 drawCount, Uint32 stride) = 0;
+    // Launch task-shader workgroups of the bound mesh pipeline (Vulkan
+    // vkCmdDrawMeshTasksEXT; Metal drawMeshThreadgroups). No-op default so
+    // backends without mesh shaders still link.
+    virtual void drawMeshTasks(Uint32 /*groupCountX*/, Uint32 /*groupCountY*/ = 1, Uint32 /*groupCountZ*/ = 1) {}
 
     // ========================================================================
     // Compute Commands

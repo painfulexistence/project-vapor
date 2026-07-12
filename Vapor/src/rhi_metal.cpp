@@ -749,6 +749,69 @@ PipelineHandle RHI_Metal::createPipeline(const PipelineDesc& desc) {
     return PipelineHandle{id};
 }
 
+PipelineHandle RHI_Metal::createMeshPipeline(const MeshPipelineDesc& desc) {
+    if (!capabilities.meshShaders) return {};
+    auto msIt = shaders.find(desc.meshShader.id);
+    auto fsIt = shaders.find(desc.fragmentShader.id);
+    if (msIt == shaders.end() || fsIt == shaders.end()) {
+        throw std::runtime_error("Invalid shader handles for mesh pipeline");
+    }
+
+    auto pipelineDesc = MTL::MeshRenderPipelineDescriptor::alloc()->init();
+    auto tsIt = shaders.find(desc.taskShader.id);
+    if (desc.taskShader.isValid() && tsIt != shaders.end()) {
+        pipelineDesc->setObjectFunction(tsIt->second.function.get());
+    }
+    pipelineDesc->setMeshFunction(msIt->second.function.get());
+    pipelineDesc->setFragmentFunction(fsIt->second.function.get());
+
+    for (size_t i = 0; i < desc.colorAttachmentFormats.size(); i++) {
+        auto attachment = pipelineDesc->colorAttachments()->object(i);
+        PixelFormat fmt = desc.colorAttachmentFormats[i];
+        attachment->setPixelFormat(fmt == PixelFormat::Swapchain ? swapchainFormat
+                                                                 : convertPixelFormat(fmt));
+        attachment->setBlendingEnabled(false);  // meshlet path draws opaque
+    }
+    if (desc.hasDepthAttachment) {
+        pipelineDesc->setDepthAttachmentPixelFormat(convertPixelFormat(desc.depthAttachmentFormat));
+    }
+    pipelineDesc->setRasterSampleCount(desc.sampleCount);
+
+    NS::Error* error = nullptr;
+    auto pipeline = NS::TransferPtr(device->newRenderPipelineState(
+        pipelineDesc, MTL::PipelineOptionNone, nullptr, &error));
+    pipelineDesc->release();
+    if (!pipeline || error) {
+        if (error) {
+            fmt::print("Mesh pipeline creation error: {}\n",
+                       error->localizedDescription()->utf8String());
+        }
+        throw std::runtime_error("Failed to create mesh render pipeline");
+    }
+
+    NS::SharedPtr<MTL::DepthStencilState> depthStencilState;
+    if (desc.hasDepthAttachment) {
+        auto dsDesc = NS::TransferPtr(MTL::DepthStencilDescriptor::alloc()->init());
+        dsDesc->setDepthCompareFunction(
+            desc.depthTest ? convertCompareOp(desc.depthCompareOp) : MTL::CompareFunctionAlways);
+        dsDesc->setDepthWriteEnabled(desc.depthTest && desc.depthWrite);
+        depthStencilState = NS::TransferPtr(device->newDepthStencilState(dsDesc.get()));
+    }
+
+    Uint32 id = nextPipelineId++;
+    PipelineResource resource;
+    resource.renderPipeline = pipeline;
+    resource.isCompute = false;
+    resource.isMesh = true;
+    resource.taskThreads = desc.taskThreadgroupSize;
+    resource.meshThreads = desc.meshThreadgroupSize;
+    resource.depthStencilState = depthStencilState;
+    resource.cullMode = convertCullMode(desc.cullMode);
+    resource.winding = convertFrontFace(desc.frontFaceCounterClockwise);
+    pipelines[id] = resource;
+    return PipelineHandle{id};
+}
+
 void RHI_Metal::destroyPipeline(PipelineHandle handle) {
     pipelines.erase(handle.id);
 }
@@ -1373,6 +1436,11 @@ void RHI_Metal::bindPipeline(PipelineHandle pipeline) {
             currentRenderEncoder->setDepthStencilState(res.depthStencilState.get());
         }
         currentPrimitiveType = res.primitiveType;
+        // Mesh pipelines have no vertex stage: route subsequent vertex-stage
+        // binds to the object+mesh stages and remember the threadgroup sizes.
+        currentPipelineIsMesh = res.isMesh;
+        currentTaskThreads = res.taskThreads;
+        currentMeshThreads = res.meshThreads;
     }
 }
 
@@ -1409,8 +1477,23 @@ void RHI_Metal::setStorageBuffer(Uint32 set, Uint32 binding, BufferHandle buffer
 void RHI_Metal::setVertexBuffer(Uint32 binding, BufferHandle buffer, size_t offset, size_t range) {
     auto it = buffers.find(buffer.id);
     if (it != buffers.end() && currentRenderEncoder) {
-        currentRenderEncoder->setVertexBuffer(it->second.buffer.get(), offset, binding);
+        if (currentPipelineIsMesh) {
+            // Mesh pipelines have no vertex stage; the same data feeds the
+            // object (task) and mesh stages at the same index.
+            currentRenderEncoder->setObjectBuffer(it->second.buffer.get(), offset, binding);
+            currentRenderEncoder->setMeshBuffer(it->second.buffer.get(), offset, binding);
+        } else {
+            currentRenderEncoder->setVertexBuffer(it->second.buffer.get(), offset, binding);
+        }
     }
+}
+
+void RHI_Metal::drawMeshTasks(Uint32 groupCountX, Uint32 groupCountY, Uint32 groupCountZ) {
+    if (!currentRenderEncoder || !currentPipelineIsMesh || groupCountX == 0) return;
+    currentRenderEncoder->drawMeshThreadgroups(
+        MTL::Size::Make(groupCountX, groupCountY, groupCountZ),
+        MTL::Size::Make(currentTaskThreads, 1, 1),
+        MTL::Size::Make(currentMeshThreads, 1, 1));
 }
 
 void RHI_Metal::setFragmentBuffer(Uint32 binding, BufferHandle buffer, size_t offset, size_t range) {
@@ -1435,7 +1518,12 @@ void RHI_Metal::setTexture(Uint32 set, Uint32 binding, TextureHandle texture, Sa
 
 void RHI_Metal::setVertexBytes(const void* data, size_t size, Uint32 binding) {
     if (currentRenderEncoder && data && size > 0) {
-        currentRenderEncoder->setVertexBytes(data, size, binding);
+        if (currentPipelineIsMesh) {
+            currentRenderEncoder->setObjectBytes(data, size, binding);
+            currentRenderEncoder->setMeshBytes(data, size, binding);
+        } else {
+            currentRenderEncoder->setVertexBytes(data, size, binding);
+        }
     }
 }
 

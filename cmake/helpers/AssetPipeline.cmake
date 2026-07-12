@@ -23,16 +23,25 @@ function(vapor_compile_glsl_shaders TARGET SHADER_DIR)
         "${SHADER_DIR}/*.vert"
         "${SHADER_DIR}/*.frag"
         "${SHADER_DIR}/*.comp"
+        "${SHADER_DIR}/*.task"
+        "${SHADER_DIR}/*.mesh"
     )
 
     set(_spirv_outputs)
     foreach(_glsl ${_sources})
         get_filename_component(_name ${_glsl} NAME)
         set(_spirv "${SHADER_DIR}/${_name}.spv")
+        # Task/mesh shaders (GL_EXT_mesh_shader) need SPIR-V >= 1.4; target the
+        # Vulkan 1.3 env for them (the device is created with API version 1.3).
+        # Other stages keep the default target for maximal compatibility.
+        set(_stage_flags "")
+        if(_name MATCHES "\\.(task|mesh)$")
+            set(_stage_flags --target-env vulkan1.3)
+        endif()
         add_custom_command(
             OUTPUT  ${_spirv}
             COMMAND ${CMAKE_COMMAND} -E make_directory "${CMAKE_CURRENT_BINARY_DIR}/assets/shaders"
-            COMMAND ${GLSL_VALIDATOR} -V ${_glsl} -o ${_spirv}
+            COMMAND ${GLSL_VALIDATOR} -V ${_stage_flags} ${_glsl} -o ${_spirv}
             DEPENDS ${_glsl}
             COMMENT "Compiling ${_name} to SPIR-V"
         )

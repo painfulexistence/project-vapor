@@ -36,7 +36,13 @@ struct MeshletBounds {
     Sint32 group   = -1;            // clod group id (DAG bookkeeping)
     Sint32 refined = -1;            // finer group this was simplified from, -1 if original
     Sint32 depth   = 0;             // DAG level (0 = full-detail)
+    // Explicit padding so the CPU array stride matches the shaders' std430/MSL
+    // struct (which round the 20 trailing scalar bytes up to a 16-byte multiple).
+    // Not serialized (cereal archives fields, not raw bytes).
+    Sint32 _pad0 = 0, _pad1 = 0, _pad2 = 0;
 };
+static_assert(sizeof(MeshletBounds) == 112,
+              "MeshletBounds must match the std430/MSL layout the meshlet shaders declare");
 
 struct MeshletData {
     std::vector<Meshlet>       meshlets;

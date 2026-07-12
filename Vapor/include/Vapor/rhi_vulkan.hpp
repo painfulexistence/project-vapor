@@ -61,6 +61,7 @@ public:
     void destroySampler(SamplerHandle handle) override;
 
     PipelineHandle createPipeline(const PipelineDesc& desc) override;
+    PipelineHandle createMeshPipeline(const MeshPipelineDesc& desc) override;
     void destroyPipeline(PipelineHandle handle) override;
 
     ComputePipelineHandle createComputePipeline(const ComputePipelineDesc& desc) override;
@@ -118,6 +119,7 @@ public:
     void draw(Uint32 vertexCount, Uint32 instanceCount, Uint32 firstVertex, Uint32 firstInstance) override;
     void drawIndexed(Uint32 indexCount, Uint32 instanceCount, Uint32 firstIndex, int32_t vertexOffset, Uint32 firstInstance) override;
     void drawIndexedIndirect(BufferHandle argsBuffer, size_t offset, Uint32 drawCount, Uint32 stride) override;
+    void drawMeshTasks(Uint32 groupCountX, Uint32 groupCountY = 1, Uint32 groupCountZ = 1) override;
 
     // ========================================================================
     // Compute Commands
@@ -334,6 +336,13 @@ private:
     VkDescriptorSetLayout computeImageSetLayout = VK_NULL_HANDLE;
     VkDescriptorSetLayout computeSampledSetLayout = VK_NULL_HANDLE;
     VkPipelineLayout computePipelineLayout = VK_NULL_HANDLE;
+    // VK_EXT_mesh_shader: set during device creation when the extension + its
+    // task/mesh features are supported and enabled. Widens the graphics stage
+    // mask (set layouts + push constants) so task/mesh stages can bind through
+    // the existing setVertexBuffer/setVertexBytes paths.
+    bool meshShadersEnabled = false;
+    VkShaderStageFlags graphicsStageFlags = 0;
+    PFN_vkCmdDrawMeshTasksEXT pfnCmdDrawMeshTasks = nullptr;
     BufferBinding boundComputeBuffers[BINDINGS_PER_SET];
     VkImageView boundComputeImages[BINDINGS_PER_SET] = {};
     TextureBinding boundComputeSampled[BINDINGS_PER_SET] = {};
