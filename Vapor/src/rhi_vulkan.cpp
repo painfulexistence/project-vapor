@@ -427,8 +427,8 @@ void RHI_Vulkan::createDescriptorInfrastructure() {
     fragmentBufferSetLayout = makeBufferSetLayout();
 
     {
-        VkDescriptorSetLayoutBinding bindings[BINDINGS_PER_SET];
-        for (Uint32 i = 0; i < BINDINGS_PER_SET; i++) {
+        VkDescriptorSetLayoutBinding bindings[TEXTURE_BINDINGS_PER_SET];
+        for (Uint32 i = 0; i < TEXTURE_BINDINGS_PER_SET; i++) {
             bindings[i] = {};
             bindings[i].binding = i;
             bindings[i].descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
@@ -437,7 +437,7 @@ void RHI_Vulkan::createDescriptorInfrastructure() {
         }
         VkDescriptorSetLayoutCreateInfo info{};
         info.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO;
-        info.bindingCount = BINDINGS_PER_SET;
+        info.bindingCount = TEXTURE_BINDINGS_PER_SET;
         info.pBindings = bindings;
         if (vkCreateDescriptorSetLayout(device, &info, nullptr, &textureSetLayout) != VK_SUCCESS) {
             throw std::runtime_error("Failed to create texture descriptor set layout");
@@ -508,10 +508,10 @@ void RHI_Vulkan::createDescriptorInfrastructure() {
         // slots (2 buffer sets x 8 bindings). The old 8192 ceiling capped a frame
         // at ~512 draws before vkAllocateDescriptorSets failed — reachable with a
         // full scene + RmlUI geometry churn. 4x the headroom (~2048 draws/frame).
-        // Bumped alongside BINDINGS_PER_SET (8 -> 10) to preserve ~2048 draws of
-        // headroom: buffers 40960 (10 x 2 sets x 2048), samplers 20480 (10 x 2048).
+        // Samplers bumped for the 10-binding texture set (10 x 2048 = 20480);
+        // storage buffers stay at 8-per-set headroom (8 x 2 x 2048 = 32768).
         VkDescriptorPoolSize sizes[3] = {
-            { VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, 40960 },
+            { VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, 32768 },
             { VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, 20480 },
             { VK_DESCRIPTOR_TYPE_STORAGE_IMAGE, 4096 },
         };
@@ -584,9 +584,9 @@ void RHI_Vulkan::flushDescriptors() {
     // added or BINDINGS_PER_SET changes (else vkUpdateDescriptorSets corrupts).
     // Write only the slots that have been bound; untouched slots stay
     // undefined, which is fine as long as no bound shader statically uses them.
-    VkWriteDescriptorSet writes[BINDINGS_PER_SET * 3];
+    VkWriteDescriptorSet writes[BINDINGS_PER_SET * 2 + TEXTURE_BINDINGS_PER_SET];
     VkDescriptorBufferInfo bufferInfos[BINDINGS_PER_SET * 2];
-    VkDescriptorImageInfo imageInfos[BINDINGS_PER_SET];
+    VkDescriptorImageInfo imageInfos[TEXTURE_BINDINGS_PER_SET];
     Uint32 writeCount = 0, bufferCount = 0, imageCount = 0;
 
     auto writeBuffers = [&](const BufferBinding* bindings, VkDescriptorSet set) {
@@ -607,7 +607,7 @@ void RHI_Vulkan::flushDescriptors() {
     writeBuffers(boundVertexBuffers, sets[0]);
     writeBuffers(boundFragmentBuffers, sets[1]);
 
-    for (Uint32 i = 0; i < BINDINGS_PER_SET; i++) {
+    for (Uint32 i = 0; i < TEXTURE_BINDINGS_PER_SET; i++) {
         if (boundTextures[i].view == VK_NULL_HANDLE) continue;
         VkDescriptorImageInfo& info = imageInfos[imageCount++];
         info = { boundTextures[i].sampler, boundTextures[i].view, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL };
@@ -2146,7 +2146,7 @@ void RHI_Vulkan::setFragmentBytes(const void* data, size_t size, Uint32 binding)
 void RHI_Vulkan::setTexture(Uint32 set, Uint32 binding, TextureHandle texture, SamplerHandle sampler) {
     auto texIt = textures.find(texture.id);
     auto samplerIt = samplers.find(sampler.id);
-    if (texIt == textures.end() || samplerIt == samplers.end() || binding >= BINDINGS_PER_SET) {
+    if (texIt == textures.end() || samplerIt == samplers.end() || binding >= TEXTURE_BINDINGS_PER_SET) {
         return;
     }
     TextureBinding& cur = boundTextures[binding];

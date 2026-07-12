@@ -292,11 +292,15 @@ private:
     // after a binding change.
     // ========================================================================
 
-    // 10 (was 8): the material/texture set needs a 9th sampler for the SSCS
-    // contact-shadow RT (set2 b8), with one spare. Purely additive capacity —
-    // the per-frame write loop only writes bound slots, so existing passes that
-    // bind <=8 are unaffected. Pool sizes below are bumped to keep draw headroom.
-    static constexpr Uint32 BINDINGS_PER_SET = 10;
+    // Buffer + storage-image sets stay at 8: MoltenVK/Metal caps
+    // maxPerStageDescriptorStorageImages (and storage buffers) at 8, so bumping
+    // these would fail pipeline-layout creation.
+    static constexpr Uint32 BINDINGS_PER_SET = 8;
+    // The texture set (combined image samplers, device limit >= 16) is bumped to
+    // 10 for the 9th sampler the SSCS contact RT needs (set2 b8), plus a spare.
+    // Additive capacity: the write loop only writes bound slots, so existing
+    // material sets (<=8) are unaffected.
+    static constexpr Uint32 TEXTURE_BINDINGS_PER_SET = 10;
 
     struct BufferBinding {
         VkBuffer buffer = VK_NULL_HANDLE;
@@ -316,7 +320,7 @@ private:
 
     BufferBinding boundVertexBuffers[BINDINGS_PER_SET];
     BufferBinding boundFragmentBuffers[BINDINGS_PER_SET];
-    TextureBinding boundTextures[BINDINGS_PER_SET];
+    TextureBinding boundTextures[TEXTURE_BINDINGS_PER_SET];
     bool descriptorsDirty = true;
 
     // Compute follows the same model with its own global layout:
