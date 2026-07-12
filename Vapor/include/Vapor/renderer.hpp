@@ -715,8 +715,23 @@ private:
     ComputePipelineHandle aoDenoisePipeline;
     ComputePipelineHandle stochasticPointShadowPipeline;
     ComputePipelineHandle pointShadowTemporalPipeline;
+    // GIBS screen-space denoise ("SVGF-lite"): temporal reprojection + 2x
+    // edge-aware a-trous over the GI gather output. The gather writes giRawRT,
+    // the chain produces the giResultTexture the PBR samples. Kills the visible
+    // surfel-disc seams and residual flicker the surfel-space EMA leaves behind.
+    ComputePipelineHandle giTemporalPipeline;
+    ComputePipelineHandle giDenoisePipeline;
+    TextureHandle giRawRT;              // gather output (pre-denoise)
+    TextureHandle giScratchRT;          // a-trous ping-pong
+    TextureHandle giHistoryChainRT[2];  // temporal history (RGB gi, A viewZ)
+    bool gibsDenoiseEnabled = true;
+    Uint32 giHistoryIndex = 0;
+    bool giHistoryValid = false;
+    glm::mat4 giPrevView{1.0f};         // AO owns `prevView`; GI keeps its own
+    bool giPrevViewValid = false;
     ShaderHandle rtShadowShader, rtAOShader, aoTemporalShader, aoDenoiseShader,
-                 pointShadowShader, pointShadowTemporalShader;
+                 pointShadowShader, pointShadowTemporalShader,
+                 giTemporalShader, giDenoiseShader;
     ShaderHandle prePassMetalVertexShader, prePassMetalFragmentShader;
 
     // Acceleration structures: one BLAS per registered mesh (index-aligned with

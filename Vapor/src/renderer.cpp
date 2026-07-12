@@ -2113,7 +2113,14 @@ void Renderer::gibsPass() {
         rhi->computeBarrier();
     }
 
-    // 5) Per-pixel GI gather into giResultTexture.
+    // 5) Per-pixel GI gather. With the SVGF-lite chain available it writes the
+    // raw target and the chain below produces giResultTexture; otherwise it
+    // writes giResultTexture directly (the pre-denoise behavior).
+    const bool denoise = gibsDenoiseEnabled &&
+        giTemporalPipeline.isValid() && giDenoisePipeline.isValid() &&
+        giRawRT.isValid() && giScratchRT.isValid() &&
+        giHistoryChainRT[0].isValid() && giHistoryChainRT[1].isValid() &&
+        velocityRT.isValid();
     GIBSSampleParams sp{};
     sp.invViewProj = gd.invViewProj;
     sp.screenSize = screenSize;
@@ -2125,7 +2132,7 @@ void Renderer::gibsPass() {
     rhi->bindComputePipeline(giSamplePipeline);
     rhi->setComputeTexture(0, depthStencilRT);
     rhi->setComputeTexture(1, normalRT);
-    rhi->setComputeTexture(2, giResultTexture);
+    rhi->setComputeTexture(2, denoise ? giRawRT : giResultTexture);
     rhi->setComputeBuffer(0, surfelBuffer, 0, surfelBytes);
     rhi->setComputeBuffer(1, cellHeadBuffer);
     rhi->setComputeBuffer(2, gibsDataBuffer, 0, sizeof(GIBSData));
@@ -2133,7 +2140,56 @@ void Renderer::gibsPass() {
     rhi->setComputeBuffer(4, surfelNextBuffer);
     rhi->dispatch((Uint32(giResolution.x) + 7) / 8, (Uint32(giResolution.y) + 7) / 8, 1);
     rhi->endComputePass();
-    rhi->computeBarrier();  // GI writes -> fragment reads in Main
+    rhi->computeBarrier();  // GI writes -> next consumer
+
+    // 6) SVGF-lite: temporal reprojection over the gather, then two edge-aware
+    // a-trous iterations (stride 1, 2) into giResultTexture. Blends away the
+    // surfel-disc seams and the flicker the surfel-space EMA leaves behind.
+    if (denoise) {
+        if (!giPrevViewValid) { giPrevView = currentCamera.view; giPrevViewValid = true; }
+        Uint32 histIn = giHistoryIndex;
+        Uint32 histOut = histIn ^ 1u;
+        Uint32 histValid = giHistoryValid ? 1u : 0u;
+        // Chain dispatch covers the full GI texture (64px floor included) so
+        // the history never carries unwritten texels into the a-trous taps.
+        Uint32 giW = std::max(64u, Uint32(w * gibsResolutionScale));
+        Uint32 giH = std::max(64u, Uint32(h * gibsResolutionScale));
+
+        rhi->beginComputePass("GIBSDenoise");
+        rhi->bindComputePipeline(giTemporalPipeline);
+        rhi->setComputeTexture(0, giRawRT);
+        rhi->setComputeTexture(1, giHistoryChainRT[histIn]);
+        rhi->setComputeTexture(2, giHistoryChainRT[histOut]);
+        rhi->setComputeTexture(3, velocityRT);
+        rhi->setComputeTexture(4, depthStencilRT);
+        rhi->setComputeBuffer(0, cameraUniformBuffer, 0, sizeof(CameraRenderData));
+        rhi->setComputeBytes(&giPrevView, sizeof(glm::mat4), 1);
+        rhi->setComputeBytes(&histValid, sizeof(Uint32), 2);
+        rhi->dispatch((giW + 7) / 8, (giH + 7) / 8, 1);
+        rhi->computeBarrier();
+
+        Uint32 stride = 1;
+        rhi->bindComputePipeline(giDenoisePipeline);
+        rhi->setComputeTexture(0, giHistoryChainRT[histOut]);
+        rhi->setComputeTexture(1, giScratchRT);
+        rhi->setComputeTexture(2, normalRT);
+        rhi->setComputeBytes(&stride, sizeof(Uint32), 0);
+        rhi->dispatch((giW + 7) / 8, (giH + 7) / 8, 1);
+        rhi->computeBarrier();
+
+        stride = 2;
+        rhi->setComputeTexture(0, giScratchRT);
+        rhi->setComputeTexture(1, giResultTexture);
+        rhi->setComputeTexture(2, normalRT);
+        rhi->setComputeBytes(&stride, sizeof(Uint32), 0);
+        rhi->dispatch((giW + 7) / 8, (giH + 7) / 8, 1);
+        rhi->endComputePass();
+        rhi->computeBarrier();
+
+        giHistoryIndex = histOut;
+        giHistoryValid = true;
+        giPrevView = currentCamera.view;
+    }
 }
 
 // Temporal point-shadow resolve. Native copies denoised->history with a blit;
@@ -3457,6 +3513,7 @@ void Renderer::destroyRenderTargets() {
     kill(aoRawRT); kill(aoScratchRT); kill(aoHistoryRT[0]); kill(aoHistoryRT[1]);
     kill(pointShadowRT); kill(pointShadowHistoryRT); kill(pointShadowDenoisedRT);
     kill(giResultTexture);
+    kill(giRawRT); kill(giScratchRT); kill(giHistoryChainRT[0]); kill(giHistoryChainRT[1]);
     kill(bloomBrightness);
     for (Uint32 i = 0; i < BLOOM_PYRAMID_LEVELS; i++) kill(bloomPyramid[i]);
     kill(lightScatteringRT);
@@ -3621,6 +3678,13 @@ void Renderer::createRenderTargets() {
             gi.usage = TextureUsage::Storage | TextureUsage::Sampled;
             gi.sampleCount = 1;
             giResultTexture = rhi->createTexture(gi);
+            // SVGF-lite chain (same size/format): gather -> giRawRT ->
+            // temporal (history ping-pong) -> a-trous x2 -> giResultTexture.
+            giRawRT = rhi->createTexture(gi);
+            giScratchRT = rhi->createTexture(gi);
+            giHistoryChainRT[0] = rhi->createTexture(gi);
+            giHistoryChainRT[1] = rhi->createTexture(gi);
+            giHistoryValid = false;  // resolution changed: old history is garbage
         }
     }
 
@@ -4073,6 +4137,8 @@ void Renderer::createRenderPipeline() {
         raytraceShadowPipeline        = makeMetalCompute("shaders/3d_raytrace_shadow.metal", rtShadowShader, 1, 1, 1);
         sscsComputePipeline           = makeMetalCompute("shaders/3d_sscs.metal", sscsMetalShader, 1, 1, 1);
         raytraceAOPipeline            = makeMetalCompute("shaders/3d_raytrace_ao.metal", rtAOShader, 1, 1, 1);
+        giTemporalPipeline            = makeMetalCompute("shaders/gibs_gi_temporal.metal", giTemporalShader, 8, 8, 1);
+        giDenoisePipeline             = makeMetalCompute("shaders/gibs_gi_denoise.metal", giDenoiseShader, 8, 8, 1);
         // SSAO shares the RT AO binding interface (ignores the TLAS slot) and
         // is selected by aoMethod, exactly like native RaytraceAOPass.
         ssaoPipeline                  = makeMetalCompute("shaders/3d_ssao.metal", ssaoShader, 1, 1, 1);
@@ -5109,6 +5175,9 @@ void Renderer::drawGraphicsImGui() {
         ImGui::Checkbox("Enabled", &gibsEnabled);
         ImGui::Text("Active surfels: %u / %u", gibsActiveSurfels, gibsMaxSurfels);
         if (ImGui::Button("Reset Surfels")) gibsResetRequested = true;
+        // Temporal reprojection + edge-aware a-trous over the GI gather —
+        // toggle off to see the raw surfel discs/flicker for comparison.
+        ImGui::Checkbox("Screen-space denoise (SVGF-lite)", &gibsDenoiseEnabled);
         if (ImGui::Combo("Quality", &gibsQuality, "Low\0Medium\0High\0Ultra\0")) {
             Uint32 newMax; Uint32 newRays; float newScale;
             getGIBSQualitySettings(static_cast<GIBSQuality>(gibsQuality), newMax, newRays, newScale);
