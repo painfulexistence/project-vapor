@@ -47,8 +47,14 @@ layout(std430, set = 0, binding = 5) restrict buffer ClusterBuffer { Cluster til
 
 bool sphereTileIntersection(vec3 center, float radius, mat4 viewProj, vec2 tileMin, vec2 tileMax) {
     vec4 clipPos = viewProj * vec4(center, 1.0);
-    // Behind/straddling the near plane: the sphere can cover anything on
-    // screen — accept conservatively instead of dropping the light.
+    // clipPos.w is the view-space forward distance (positive in front of the
+    // camera, negative behind). A light whose influence sphere is entirely
+    // behind the camera cannot touch any visible pixel — reject it, or it
+    // lands in EVERY tile (the old `w <= radius` accepted all w<0 lights,
+    // giving every tile a floor of ~half the scene's lights and defeating the
+    // cull). Only spheres straddling the near/camera plane get the
+    // conservative accept, since those genuinely can cover anything on screen.
+    if (clipPos.w < -radius) return false;
     if (clipPos.w <= radius) return true;
     vec3 ndc = clipPos.xyz / clipPos.w;
     vec2 screenUV = ndc.xy * 0.5 + 0.5;

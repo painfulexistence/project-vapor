@@ -94,7 +94,7 @@ public:
                     s_rmlSystem.reset();
                     return false;
                 }
-                auto fontPath = FileSystem::instance().resolvePath("fonts/Arial Black.ttf");
+                auto fontPath = FileSystem::instance().resolvePath("fonts/NotoSans-SemiBold.ttf");
                 if (fontPath) Rml::LoadFontFace(*fontPath);
                 s_rmlInitialized.store(true);
             } else {

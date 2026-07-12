@@ -1,4 +1,5 @@
 #include "renderer.hpp"
+#include "stats_log.hpp"
 #include "rhi_vulkan.hpp"
 #ifdef __APPLE__
 #include "rhi_metal.hpp"
@@ -313,6 +314,96 @@ void Renderer::initialize(std::unique_ptr<RHI> rhiPtr, GraphicsBackend backendTy
     visibleDrawables.reserve(MAX_INSTANCES);
     directionalLights.reserve(maxDirectionalLights);
     pointLights.reserve(maxPointLights);
+
+    // Register the renderer-side telemetry sources. Driven once per frame by
+    // StatsLog::tick() in beginFrame; the RHI backend registers its own "VK"/
+    // "MTL" source, so --stats prints one grouped line per subsystem.
+    registerStatsSources();
+}
+
+// Renderer-side stat sources (the map counts live above the RHI). The backend
+// contributes "VK"/"MTL" from its own constructor.
+void Renderer::registerStatsSources() {
+    auto& log = Vapor::StatsLog::get();
+
+    log.addSource("R", [this](Vapor::StatLine& s) {
+        s.add("textures", textures.size());
+        s.add("texCache", textureCache.size());
+        s.add("imguiTexCache", imguiTextureCache.size());
+        s.add("meshes", meshes.size());
+        s.add("materials", materials.size());
+        s.add("renderTextures", renderTextures.size());
+        s.add("drawables", frameDrawables.size());
+        s.add("instances", totalInstanceCount);
+    });
+
+    // RT diagnostics: only re-emitted when a count changes (was VAPOR_RT_DEBUG).
+    log.addSource("RT", [this](Vapor::StatLine& s) {
+        Uint32 validBLAS = 0;
+        for (const auto& b : meshBLAS) if (b.isValid()) ++validBLAS;
+        s.add("raytracing", capabilities.raytracing ? 1u : 0u);
+        s.add("tlasValid", sceneTLAS.isValid() ? 1u : 0u);
+        s.add("blasValid", validBLAS);
+        s.add("blasTotal", static_cast<Uint32>(meshBLAS.size()));
+        s.add("visible", static_cast<Uint32>(visibleDrawables.size()));
+        s.add("tlasInst", static_cast<Uint32>(tlasInstances.size()));
+    }, Vapor::StatsLog::Mode::OnChange);
+
+    // Tile-cull histogram: reads back the (host-visible) cluster buffer via the
+    // shared helper. The waitIdle only runs on emit frames while --stats is on.
+    log.addSource("CULL", [this](Vapor::StatLine& s) {
+        Uint32 mn, avg, mx, nonEmpty;
+        if (!sampleClusterHistogram(mn, avg, mx, nonEmpty)) return;
+        s.add("tiles", clusterGridSizeX * clusterGridSizeY);
+        s.add("pointLights", static_cast<Uint32>(pointLights.size()));
+        s.add("min", mn);
+        s.add("avg", avg);
+        s.add("max", mx);
+        s.add("nonEmpty", nonEmpty);
+    });
+}
+
+// Returns a cached grayscale / single-layer view of `src` for ImGui previews,
+// rebuilding it when the source RT is recreated (resize gives it a new id). The
+// view is non-owning, so destroying it never touches the source's image.
+TextureHandle Renderer::debugView(const char* key, TextureHandle src,
+                                  TextureSwizzle swizzle, Uint32 layer) {
+    if (!src.isValid()) return {};
+    auto& pv = previewViews[key];
+    if (pv.srcId != src.id) {
+        if (pv.view.isValid()) rhi->destroyTexture(pv.view);
+        TextureViewDesc vd;
+        vd.source = src;
+        vd.swizzle = swizzle;
+        vd.baseArrayLayer = layer;
+        vd.layerCount = 1;
+        pv.view = rhi->createTextureView(vd);
+        pv.srcId = src.id;
+    }
+    return pv.view;
+}
+
+// Reads the culled cluster buffer (host-visible) and reduces the 2D tile grid to
+// min/avg/max/non-empty light counts. Contains a waitIdle so the read sees the
+// GPU's writes — callers must throttle (StatsLog interval, or panel %N).
+bool Renderer::sampleClusterHistogram(Uint32& mn, Uint32& avg, Uint32& mx, Uint32& nonEmpty) {
+    if (!clusterBuffer.isValid()) return false;
+    rhi->waitIdle();
+    const Uint32 tileCount = clusterGridSizeX * clusterGridSizeY;  // 2D grid
+    auto* clusters = static_cast<const Vapor::Cluster*>(rhi->mapBuffer(clusterBuffer));
+    if (!clusters) return false;
+    Uint32 lo = ~0u, hi = 0u, sum = 0u, ne = 0u;
+    for (Uint32 i = 0; i < tileCount; ++i) {
+        Uint32 c = clusters[i].lightCount;
+        lo = std::min(lo, c); hi = std::max(hi, c); sum += c;
+        if (c > 0) ++ne;
+    }
+    rhi->unmapBuffer(clusterBuffer);
+    mn = tileCount ? lo : 0u;
+    avg = tileCount ? sum / tileCount : 0u;
+    mx = hi;
+    nonEmpty = ne;
+    return true;
 }
 
 // One GPU buffer per frame slot; `alias` always names the current frame's
@@ -647,17 +738,10 @@ void Renderer::beginFrame(const CameraRenderData& camera) {
     // backend recreates an out-of-date/resized swapchain here.
     rhi->beginFrame();
 
-    // VAPOR_RHI_STATS=1: renderer-side leak-hunt telemetry (pairs with the
-    // backend's [VKSTATS]/[MTLSTATS] line — these maps live above the RHI).
-    static const bool rhiStats = std::getenv("VAPOR_RHI_STATS") != nullptr;
-    if (rhiStats && (frameNumber % 120) == 0) {
-        fmt::print(stderr,
-            "[RSTATS] f={} textures={} texCache={} imguiTexCache={} meshes={} "
-            "materials={} renderTextures={} drawables={} instances={}\n",
-            frameNumber, textures.size(), textureCache.size(),
-            imguiTextureCache.size(), meshes.size(), materials.size(),
-            renderTextures.size(), frameDrawables.size(), totalInstanceCount);
-    }
+    // Per-frame telemetry (--stats). Drives every registered source — renderer
+    // "R"/"RT"/"CULL" and the backend's "VK"/"MTL" — emitting one grouped line
+    // each to stderr and vapor_stats.log. No-op when --stats is off.
+    Vapor::StatsLog::get().tick(frameNumber);
 
     // Window resized: the swapchain extent changed under us — rebuild every
     // swapchain-sized render target before anything records against them.
@@ -1212,12 +1296,14 @@ void Renderer::mainRenderPass() {
     Uint32 gibsOn = (gibsEnabled && capabilities.raytracing && giResultTexture.isValid()) ? 1u : 0u;
     rhi->setFragmentBytes(&gibsOn, sizeof(Uint32), 10);
 
-    // Light counts for the Vulkan shader (no cluster culling there yet).
-    // Binding 11: free on Metal, and maps to push-constant offset 112 on
-    // Vulkan — exactly where RHIMain.frag reads it.
-    glm::uvec2 lightCounts(static_cast<Uint32>(directionalLights.size()),
-                           static_cast<Uint32>(pointLights.size()));
-    rhi->setFragmentBytes(&lightCounts, sizeof(glm::uvec2), 11);
+    // Directional-light count for RHIMain.frag's dir loop (it supports N
+    // directional lights; Metal's shader hardcodes the single sun and declares
+    // no buffer(11), so this write is inert there). This used to be a uvec2
+    // whose .y carried the point-light count — dead since the tile-cull port
+    // (the point loop reads per-cluster counts), so push just the one uint.
+    // Binding 11 -> Vulkan push-constant offset 64 + (11%4)*16 = 112.
+    Uint32 dirLightCount = static_cast<Uint32>(directionalLights.size());
+    rhi->setFragmentBytes(&dirLightCount, sizeof(Uint32), 11);
 
     // Default textures for the shadow/AO/IBL slots (texture table 6-14):
     //   6 texAO  7 texShadow  8 irradiance  9 prefilter  10 brdfLUT
@@ -1259,6 +1345,11 @@ void Renderer::mainRenderPass() {
         // pushing here would corrupt it (the old billions-of-iterations hang).
         rhi->setFragmentBytes(&mainDebugFlags, sizeof(Uint32), 2);
     } else {
+        // Perf-isolation debug flags for the Metal PBR shader at buffer(12)
+        // (buffer(2) is the cluster buffer here — see the Vulkan note above —
+        // and buffer(11) is dirLightCount, so 12 is the free slot). Same bits as
+        // the Vulkan path: bit0 skip point-light loop, bit1 skip shadow.
+        rhi->setFragmentBytes(&mainDebugFlags, sizeof(Uint32), 12);
         // Metal-via-RHI: real IBL outputs replace the neutral blacks —
         // irradiance(8), prefilter(9), brdfLUT(10).
         if (!iblNeedsUpdate) {
@@ -1477,25 +1568,7 @@ void Renderer::buildAccelerationStructures() {
         rhi->updateAccelerationStructure(sceneTLAS, tlasInstances);  // rebuilds
     }
 
-    // VAPOR_RT_DEBUG: pinpoint why RT shadow/AO produce the "no hit" default
-    // (uniform white / R=1). Logs once and again only when the counts change, so
-    // it never spams the hot path. Distinguishes: RT off / no BLAS built /
-    // empty visible set / empty TLAS.
-    if (std::getenv("VAPOR_RT_DEBUG")) {
-        Uint32 validBLAS = 0;
-        for (const auto& b : meshBLAS) if (b.isValid()) ++validBLAS;
-        static Uint32 lastVis = ~0u, lastInst = ~0u, lastBLAS = ~0u;
-        Uint32 vis = static_cast<Uint32>(visibleDrawables.size());
-        Uint32 inst = static_cast<Uint32>(tlasInstances.size());
-        if (vis != lastVis || inst != lastInst || validBLAS != lastBLAS) {
-            fmt::print(stderr,
-                "[RT] raytracing={} sceneTLAS.valid={} meshBLAS(valid/total)={}/{} "
-                "visibleDrawables={} tlasInstances={}\n",
-                capabilities.raytracing, sceneTLAS.isValid(), validBLAS,
-                static_cast<Uint32>(meshBLAS.size()), vis, inst);
-            lastVis = vis; lastInst = inst; lastBLAS = validBLAS;
-        }
-    }
+    // (RT diagnostics moved to the StatsLog "RT" OnChange source.)
 }
 
 void Renderer::normalResolvePass() {
@@ -1541,6 +1614,13 @@ void Renderer::tileCullingPass() {
         rhi->endComputePass();
     }
     rhi->computeBarrier();  // cluster writes -> fragment reads in Main
+
+    // Refresh the Light Culling Debug panel's cached histogram while it's open.
+    // Throttled because sampleClusterHistogram() stalls (waitIdle). (The
+    // StatsLog "CULL" source covers the --stats path independently.)
+    if (lightCullDebugOpen && (frameNumber % 15) == 0) {
+        sampleClusterHistogram(cullMinLights, cullAvgLights, cullMaxLights, cullNonEmptyTiles);
+    }
 }
 
 // Sun/lens flare: procedural glow/halo/ghosts/starburst added over the HDR
@@ -4408,23 +4488,25 @@ void Renderer::drawGraphicsImGui() {
                 capabilities.gpuTimestamps ? "yes" : "no");
     ImGui::Text("Frame: %u", frameNumber);
 
+    // Aspect-correct texture preview, shared by the RTs and Shadow Debug nodes.
+    Uint32 rtW = rhi->getSwapchainWidth();
+    Uint32 rtH = rhi->getSwapchainHeight();
+    float rtAspect = rtH > 0 ? static_cast<float>(rtW) / static_cast<float>(rtH) : 1.0f;
+    auto preview = [&](const char* label, TextureHandle tex) {
+        if (!tex.isValid()) return;
+        if (ImGui::TreeNode(label)) {
+            ImGui::Text("%u x %u", rtW, rtH);
+            if (void* id = getImGuiTextureID(tex)) {
+                ImGui::Image((ImTextureID)(intptr_t)id, ImVec2(320, 320 / rtAspect));
+            } else {
+                ImGui::TextDisabled("(preview unavailable on this backend)");
+            }
+            ImGui::TreePop();
+        }
+    };
+
     // Render-target viewer
     if (ImGui::TreeNode("RTs")) {
-        Uint32 w = rhi->getSwapchainWidth();
-        Uint32 h = rhi->getSwapchainHeight();
-        float aspect = h > 0 ? static_cast<float>(w) / static_cast<float>(h) : 1.0f;
-        auto preview = [&](const char* label, TextureHandle tex) {
-            if (!tex.isValid()) return;
-            if (ImGui::TreeNode(label)) {
-                ImGui::Text("%u x %u", w, h);
-                if (void* id = getImGuiTextureID(tex)) {
-                    ImGui::Image((ImTextureID)(intptr_t)id, ImVec2(320, 320 / aspect));
-                } else {
-                    ImGui::TextDisabled("(preview unavailable on this backend)");
-                }
-                ImGui::TreePop();
-            }
-        };
         preview("Color RT", colorRT);
         preview("Normal RT", normalRT);
         preview("Shadow RT", shadowRT);
@@ -4440,25 +4522,57 @@ void Renderer::drawGraphicsImGui() {
     // labels match renderer_metal.cpp so users find the same knobs).
     // ------------------------------------------------------------------------
 
+    // Light Culling Debug (above Shadow Debug): live per-tile point-light counts
+    // from the tile cull, plus the perf-isolation toggle for the point-light
+    // loop. The avg is exactly the loop length the Main pass runs per pixel.
+    {
+        bool open = ImGui::TreeNode("Light Culling Debug");
+        lightCullDebugOpen = open;  // gates the throttled readback in tileCullingPass
+        if (open) {
+            ImGui::Text("Scene point lights: %zu", pointLights.size());
+            const Uint32 tiles = clusterGridSizeX * clusterGridSizeY;
+            ImGui::Text("Tiles: %u (%ux%u)", tiles, clusterGridSizeX, clusterGridSizeY);
+            ImGui::Text("Culled per tile:  avg %u   (min %u / max %u)",
+                        cullAvgLights, cullMinLights, cullMaxLights);
+            ImGui::Text("Non-empty tiles: %u / %u", cullNonEmptyTiles, tiles);
+            ImGui::TextDisabled("avg = point-light loop length per pixel (refreshed ~15f)");
+            bool skipPoint = (mainDebugFlags & 1u) != 0u;
+            if (ImGui::Checkbox("Skip point-light loop (perf isolation)", &skipPoint))
+                mainDebugFlags = (mainDebugFlags & ~1u) | (skipPoint ? 1u : 0u);
+            ImGui::TreePop();
+        }
+    }
+
     if (ImGui::TreeNode("Shadow Debug")) {
+        ImGui::Text("Raytracing: %s", capabilities.raytracing ? "yes" : "no");
         ImGui::SliderFloat("RT shadow max dist", &pssmRTMaxDist, 5.0f, 200.0f);
         int psd = static_cast<int>(pointShadowDebugMode);
         if (ImGui::Combo("Point shadow view", &psd, "Visibility (normal)\0Tile light-count heatmap\0")) {
             pointShadowDebugMode = static_cast<Uint32>(psd);
         }
-        ImGui::TreePop();
-    }
-
-    // Vulkan Main-pass perf isolation: toggle off the two heaviest per-pixel
-    // suspects and watch the Main ms in the GPU Pass Timings panel.
-    if (ImGui::TreeNode("Main Debug (perf)")) {
-        bool skipPoint = (mainDebugFlags & 1u) != 0u;
+        if (pointShadowDebugMode == 1) {
+            ImGui::TextWrapped("Heatmap: black = tile has 0 lights, brighter = more (8+ ~ white). "
+                               "Shown in 'Point Shadow (raw)' below.");
+        }
         bool skipShadow = (mainDebugFlags & 2u) != 0u;
-        if (ImGui::Checkbox("Skip point-light loop", &skipPoint))
-            mainDebugFlags = (mainDebugFlags & ~1u) | (skipPoint ? 1u : 0u);
-        if (ImGui::Checkbox("Skip shadow PCF", &skipShadow))
+        if (ImGui::Checkbox("Skip shadow PCF (perf isolation)", &skipShadow))
             mainDebugFlags = (mainDebugFlags & ~2u) | (skipShadow ? 2u : 0u);
-        ImGui::TextDisabled("Vulkan only; watch Main in GPU Pass Timings");
+        // Intermediate shadow textures (native Metal parity). These are
+        // single-channel R16F/depth RTs; the RRR1 swizzle view renders them as
+        // grayscale instead of red-only.
+        preview("RT Shadow (screen)", debugView("shadowGray", shadowRT, TextureSwizzle::RRR1, 0));
+        preview("Point Shadow (raw / heatmap)", debugView("psRaw", pointShadowRT, TextureSwizzle::RRR1, 0));
+        preview("Point Shadow (denoised)", debugView("psDen", pointShadowDenoisedRT, TextureSwizzle::RRR1, 0));
+        // PSSM cascades: one 2D grayscale view per array layer of the 3-cascade
+        // depth array (createTextureView returns invalid for a missing layer, so
+        // the preview simply skips it).
+        for (Uint32 c = 0; c < 3u; ++c) {
+            char key[24];
+            std::snprintf(key, sizeof(key), "pssmC%u", c);
+            char label[40];
+            std::snprintf(label, sizeof(label), "PSSM Cascade %u (depth)", c);
+            preview(label, debugView(key, pssmShadowArrayTexture, TextureSwizzle::RRR1, c));
+        }
         ImGui::TreePop();
     }
 
@@ -4739,7 +4853,32 @@ void Renderer::drawGpuTimingsImGui() {
         totalMs += t.gpuTimeMs;
         maxMs = std::max(maxMs, t.gpuTimeMs);
     }
-    ImGui::Text("Total GPU: %.3f ms", totalMs);
+    // Up to three numbers, each a different thing on a pipelined GPU:
+    //   busy = interval union of pass windows -> occupancy; compare THIS to the
+    //          frame period (~equal = GPU-bound). Reported by backends that
+    //          sample per-pass windows (Vulkan; Metal if StartOfFragment works).
+    //   span = min sample .. max sample -> per-frame LATENCY; pipelined frames
+    //          overlap, so span > frame period at steady state is healthy.
+    //   sum  = per-pass total. Additive == span in Metal's chained scheme
+    //          (busy==0); double-counts overlap in the window scheme (busy>0).
+    double spanMs = rhi->getGpuFrameSpanMs();
+    double busyMs = rhi->getGpuFrameBusyMs();
+    if (spanMs > 0.0) {
+        if (busyMs > 0.0) {
+            ImGui::Text("GPU busy: %.3f ms", busyMs);
+            ImGui::SameLine();
+            ImGui::TextDisabled("(occupancy; ~frame period when GPU-bound)");
+        }
+        ImGui::Text("GPU frame latency (span): %.3f ms", spanMs);
+        ImGui::SameLine();
+        ImGui::TextDisabled("(overlaps adjacent frames)");
+        if (busyMs > 0.0)
+            ImGui::TextDisabled("Sum of pass windows: %.3f ms (overlap double-counts)", totalMs);
+        else
+            ImGui::TextDisabled("Sum of passes: %.3f ms (= span)", totalMs);
+    } else {
+        ImGui::Text("Total GPU: %.3f ms", totalMs);
+    }
     ImGui::Separator();
     if (ImGui::BeginTable("##gpu_pass_timings", 3,
                           ImGuiTableFlags_Borders | ImGuiTableFlags_RowBg | ImGuiTableFlags_SizingFixedFit)) {

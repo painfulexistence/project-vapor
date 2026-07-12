@@ -1,5 +1,6 @@
 #include "rhi_vulkan.hpp"
 #include "helper.hpp"
+#include "stats_log.hpp"
 #include <fmt/core.h>
 #include <cstring>
 #include <algorithm>
@@ -45,6 +46,28 @@ bool RHI_Vulkan::initialize(SDL_Window* windowPtr) {
     // (VK_KHR_acceleration_structure) is not yet.
     capabilities.computeShaders = true;
     capabilities.gpuTimestamps = gpuTimingSupported;
+
+    // Backend telemetry: one grouped "[VK]" line per --stats interval. The
+    // per-window churn counters are read-and-reset here so each line reports
+    // the count since the previous line.
+    Vapor::StatsLog::get().addSource("VK", [this](Vapor::StatLine& s) {
+        s.add("buf", buffers.size());
+        s.add("tex", textures.size());
+        s.add("smp", samplers.size());
+        s.add("shd", shaders.size());
+        s.add("pso", pipelines.size());
+        s.add("cpso", computePipelines.size());
+        s.add("pendingUpFences", pendingUploadFences.size());
+        s.add("retireQ", retirementQueue.size());
+        s.add("descSets/int", statsDescriptorSets);
+        s.add("bufCreates/int", statsBufferCreates);
+        s.add("texCreates/int", statsTextureCreates);
+        s.add("stagingHW_KB", statsStagingHighWater / 1024);
+        statsDescriptorSets = 0;
+        statsBufferCreates = 0;
+        statsTextureCreates = 0;
+        statsStagingHighWater = 0;
+    });
 
     return true;
 }
@@ -285,6 +308,15 @@ void RHI_Vulkan::collectTimestamps(Uint32 slot) {
         std::lock_guard<std::mutex> lock(gpuTimingMutex);
         gpuPassTimings.clear();
         gpuPassTimings.reserve(infos.size());
+        // Per-pass [TOP_OF_PIPE, BOTTOM_OF_PIPE] windows overlap heavily (TOP
+        // signals before prior work drains), so their SUM double-counts and is
+        // not a frame cost. Two honest reductions instead:
+        //   span = min(begin)..max(end)          -> frame GPU latency
+        //   busy = interval union of the windows -> occupancy (~frame period
+        //          when GPU-bound; the number to compare against frame time).
+        std::vector<std::pair<uint64_t, uint64_t>> windows;
+        windows.reserve(infos.size());
+        uint64_t minBegin = ~0ull, maxEnd = 0;
         for (const auto& info : infos) {
             uint64_t begin = results[info.beginQuery];
             uint64_t end = results[info.endQuery];
@@ -292,7 +324,22 @@ void RHI_Vulkan::collectTimestamps(Uint32 slot) {
                 ? static_cast<double>(end - begin) * timestampPeriodNs / 1e6
                 : 0.0;
             gpuPassTimings.push_back({ info.name, ms });
+            if (end > begin) {
+                windows.emplace_back(begin, end);
+                minBegin = std::min(minBegin, begin);
+                maxEnd = std::max(maxEnd, end);
+            }
         }
+        gpuFrameSpanMs = (maxEnd > minBegin && minBegin != ~0ull)
+            ? static_cast<double>(maxEnd - minBegin) * timestampPeriodNs / 1e6 : 0.0;
+        std::sort(windows.begin(), windows.end());
+        uint64_t busy = 0, curB = 0, curE = 0;
+        for (const auto& [b, e] : windows) {
+            if (b > curE) { busy += curE - curB; curB = b; curE = e; }
+            else if (e > curE) { curE = e; }
+        }
+        busy += curE - curB;
+        gpuFrameBusyMs = static_cast<double>(busy) * timestampPeriodNs / 1e6;
     }
     infos.clear();
 }
@@ -300,6 +347,16 @@ void RHI_Vulkan::collectTimestamps(Uint32 slot) {
 std::vector<GpuPassTiming> RHI_Vulkan::getGpuPassTimings() {
     std::lock_guard<std::mutex> lock(gpuTimingMutex);
     return gpuPassTimings;
+}
+
+double RHI_Vulkan::getGpuFrameSpanMs() {
+    std::lock_guard<std::mutex> lock(gpuTimingMutex);
+    return gpuFrameSpanMs;
+}
+
+double RHI_Vulkan::getGpuFrameBusyMs() {
+    std::lock_guard<std::mutex> lock(gpuTimingMutex);
+    return gpuFrameBusyMs;
 }
 
 // ============================================================================
@@ -929,6 +986,59 @@ TextureHandle RHI_Vulkan::createTexture(const TextureDesc& desc) {
 
     textures[id] = resource;
 
+    return TextureHandle{id};
+}
+
+TextureHandle RHI_Vulkan::createTextureView(const TextureViewDesc& desc) {
+    auto srcIt = textures.find(desc.source.id);
+    if (srcIt == textures.end()) return {};
+    const TextureResource& src = srcIt->second;
+
+    // Depth formats must be viewed through the DEPTH aspect.
+    bool isDepth = (src.format == VK_FORMAT_D32_SFLOAT ||
+                    src.format == VK_FORMAT_D24_UNORM_S8_UINT ||
+                    src.format == VK_FORMAT_D32_SFLOAT_S8_UINT ||
+                    src.format == VK_FORMAT_D16_UNORM);
+
+    VkImageViewCreateInfo info{};
+    info.sType = VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO;
+    info.image = src.image;
+    info.viewType = VK_IMAGE_VIEW_TYPE_2D;  // one layer, presented as a plain 2D
+    info.format = src.format;
+    // Non-identity swizzle is forbidden under portability subset when
+    // imageViewFormatSwizzle is unsupported (MoltenVK) — fall back to identity
+    // there. The preview then renders the raw single channel (red) instead of
+    // grayscale, but stays validation-clean; full Vulkan gets the swizzle.
+    if (desc.swizzle == TextureSwizzle::RRR1 && imageViewSwizzleSupported) {
+        info.components = { VK_COMPONENT_SWIZZLE_R, VK_COMPONENT_SWIZZLE_R,
+                            VK_COMPONENT_SWIZZLE_R, VK_COMPONENT_SWIZZLE_ONE };
+    } else {
+        info.components = { VK_COMPONENT_SWIZZLE_IDENTITY, VK_COMPONENT_SWIZZLE_IDENTITY,
+                            VK_COMPONENT_SWIZZLE_IDENTITY, VK_COMPONENT_SWIZZLE_IDENTITY };
+    }
+    info.subresourceRange.aspectMask =
+        isDepth ? VK_IMAGE_ASPECT_DEPTH_BIT : VK_IMAGE_ASPECT_COLOR_BIT;
+    info.subresourceRange.baseMipLevel = 0;
+    info.subresourceRange.levelCount = 1;
+    info.subresourceRange.baseArrayLayer = desc.baseArrayLayer;
+    info.subresourceRange.layerCount = desc.layerCount;
+
+    VkImageView view = VK_NULL_HANDLE;
+    if (vkCreateImageView(device, &info, nullptr, &view) != VK_SUCCESS) return {};
+
+    // View-only resource: image/memory left null so destroyTexture frees ONLY
+    // the view and never touches the source's image/allocation.
+    Uint32 id = nextTextureId++;
+    TextureResource r{};
+    r.image = VK_NULL_HANDLE;
+    r.memory = VK_NULL_HANDLE;
+    r.view = view;
+    r.format = src.format;
+    r.width = src.width;
+    r.height = src.height;
+    r.arrayLayers = desc.layerCount;
+    r.currentLayout = src.currentLayout;  // sampled RTs are SHADER_READ_ONLY
+    textures[id] = r;
     return TextureHandle{id};
 }
 
@@ -1579,26 +1689,9 @@ void RHI_Vulkan::beginFrame() {
     stagingRegionBase = currentFrameInFlight * (STAGING_RING_SIZE / MAX_FRAMES_IN_FLIGHT);
     stagingRingOffset = 0;
 
-    // VAPOR_RHI_STATS=1: leak-hunt telemetry. One line every ~120 frames with
-    // every live-object count and the per-window churn counters — whatever
-    // climbs monotonically across lines is the leak (or proves there is none
-    // and the decay is a stall). Negligible cost when the env var is unset.
-    static const bool rhiStats = std::getenv("VAPOR_RHI_STATS") != nullptr;
-    if (rhiStats && (frameCounter % 120) == 0) {
-        fmt::print(stderr,
-            "[VKSTATS] f={} buf={} tex={} smp={} shd={} pso={} cpso={} "
-            "pendingUpFences={} retireQ={} descSets/120f={} bufCreates/120f={} "
-            "texCreates/120f={} stagingHW={}KB\n",
-            frameCounter, buffers.size(), textures.size(), samplers.size(),
-            shaders.size(), pipelines.size(), computePipelines.size(),
-            pendingUploadFences.size(), retirementQueue.size(),
-            statsDescriptorSets, statsBufferCreates, statsTextureCreates,
-            statsStagingHighWater / 1024);
-        statsDescriptorSets = 0;
-        statsBufferCreates = 0;
-        statsTextureCreates = 0;
-        statsStagingHighWater = 0;
-    }
+    // Leak-hunt telemetry moved to the StatsLog "VK" source (registered in
+    // initialize()); read-and-reset of the per-window churn counters happens
+    // there. Whatever climbs monotonically across lines is the leak.
     if (gpuTimingSupported) {
         collectTimestamps(currentFrameInFlight);
     }
@@ -2303,6 +2396,16 @@ void RHI_Vulkan::createLogicalDevice() {
         // MoltenVK requires enabling portability_subset when it is present
         if (has(VK_KHR_PORTABILITY_SUBSET_EXTENSION_NAME)) {
             deviceExtensions.push_back(VK_KHR_PORTABILITY_SUBSET_EXTENSION_NAME);
+            // Portability subset can forbid non-identity image-view swizzle
+            // (VUID-VkImageViewCreateInfo-imageViewFormatSwizzle-04465;
+            // imageViewFormatSwizzle == VK_FALSE on MoltenVK). The feature struct
+            // that would report it precisely is beta-gated in the headers, so
+            // rather than enable beta extensions globally, conservatively treat
+            // the subset's mere presence as "no swizzle": createTextureView then
+            // uses identity components (preview shows the raw channel instead of
+            // grayscale). Full Vulkan never advertises this extension, so it
+            // keeps the swizzle.
+            imageViewSwizzleSupported = false;
         }
     }
 
@@ -2360,6 +2463,23 @@ void RHI_Vulkan::recreateSwapchain() {
 
     createSwapchain();
     swapchainImageLayout = VK_IMAGE_LAYOUT_UNDEFINED;
+
+    // renderFinishedSemaphores are per-swapchain-image and consumed by
+    // endFrame() as [currentSwapchainImageIndex]. A recreate can change the
+    // image count (legal, and more likely under MoltenVK); if it grows, the old
+    // vector would be indexed out of bounds. Rebuild it to match. Safe to
+    // destroy here — vkDeviceWaitIdle above drained all in-flight use.
+    if (renderFinishedSemaphores.size() != swapchainImages.size()) {
+        for (auto& s : renderFinishedSemaphores) {
+            if (s != VK_NULL_HANDLE) vkDestroySemaphore(device, s, nullptr);
+        }
+        renderFinishedSemaphores.assign(swapchainImages.size(), VK_NULL_HANDLE);
+        VkSemaphoreCreateInfo semaphoreInfo{};
+        semaphoreInfo.sType = VK_STRUCTURE_TYPE_SEMAPHORE_CREATE_INFO;
+        for (auto& s : renderFinishedSemaphores) {
+            vkCreateSemaphore(device, &semaphoreInfo, nullptr, &s);
+        }
+    }
 }
 
 void RHI_Vulkan::createSwapchain() {

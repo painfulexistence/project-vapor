@@ -19,6 +19,7 @@
 #include "Vapor/physics_3d.hpp"
 #include "Vapor/renderer.hpp"
 #include "Vapor/rmlui_manager.hpp"
+#include "Vapor/stats_log.hpp"
 #include "Vapor/rng.hpp"
 #include "Vapor/render_scene.hpp"
 #include "Vapor/systems.hpp"
@@ -138,9 +139,15 @@ auto main(int argc, char* args[]) -> int {
     args::Group windowGroup(parser, "Window:");
     args::ValueFlag<Uint32> width(windowGroup, "number", "Window width", { 'w', "width" }, 1280);
     args::ValueFlag<Uint32> height(windowGroup, "number", "Window height", { 'h', "height" }, 720);
-    args::Group graphicsGroup(parser, "Graphics:", args::Group::Validators::Xor);
+    // AtMostOne (not Xor): the backend flags stay mutually exclusive, but
+    // omitting both is allowed and falls through to the per-platform default
+    // (Metal on Apple, Vulkan elsewhere). Xor here forced every invocation that
+    // passed ANY flag (e.g. --stats) to also name a backend.
+    args::Group graphicsGroup(parser, "Graphics:", args::Group::Validators::AtMostOne);
     args::Flag useMetal(graphicsGroup, "Metal", "Use Metal backend", { "metal" });
     args::Flag useVulkan(graphicsGroup, "Vulkan", "Use Vulkan backend", { "vulkan" });
+    args::Group debugGroup(parser, "Debug:");
+    args::Flag statsFlag(debugGroup, "stats", "Enable per-frame telemetry log (stderr + vapor_stats.log)", { "stats" });
     args::Group helpGroup(parser, "Help:");
     args::HelpFlag help(helpGroup, "help", "Display help menu", { "help" });
     if (argc > 1) {
@@ -159,6 +166,8 @@ auto main(int argc, char* args[]) -> int {
             return 1;
         }
     }
+
+    Vapor::StatsLog::get().setEnabled(static_cast<bool>(statsFlag));
 
     if (!SDL_Init(SDL_INIT_VIDEO)) {
         fmt::print("SDL could not initialize! Error: {}\n", SDL_GetError());
@@ -238,7 +247,7 @@ auto main(int argc, char* args[]) -> int {
     setupCustomDrawers(sceneInspector);
 
     // Load a font for text rendering
-    FontHandle gameFont = renderer->loadFont("fonts/Arial Black.ttf", 48.0f);
+    FontHandle gameFont = renderer->loadFont("fonts/NotoSans-SemiBold.ttf", 48.0f);
     if (gameFont.isValid()) {
         fmt::print("Font loaded successfully\n");
     } else {
@@ -567,7 +576,7 @@ auto main(int argc, char* args[]) -> int {
             camData.position = tempCamera.getEye();
 
             renderer->beginFrame(camData);
-            
+
             ImGui::NewFrame();
             renderer->invokeImGuiCallback();
 
