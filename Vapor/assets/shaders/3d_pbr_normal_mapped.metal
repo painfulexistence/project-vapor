@@ -354,6 +354,7 @@ fragment float4 fragmentMain(
     texture2d<float, access::sample> gibsGI [[texture(14)]], // GIBS indirect lighting
     texture2d<float, access::sample> texSSCS [[texture(15)]], // screen-space contact shadow
     texture2d<float, access::sample> texReflection [[texture(16)]], // RT mirror reflections
+    texture2d<float, access::sample> texRefraction [[texture(17)]], // RT refractions (transmission)
     const device DirLight* directionalLights [[buffer(0)]],
     const device PointLight* pointLights [[buffer(1)]],
     const device Cluster* clusters [[buffer(2)]],
@@ -371,7 +372,11 @@ fragment float4 fragmentMain(
     constant uint& mainDebugFlags [[buffer(12)]],
     // RT reflections: x = enabled (texture 16 sampled only when > 0.5, same
     // contract as gibsGI), y = composite intensity.
-    constant float2& reflectionParams [[buffer(13)]]
+    constant float2& reflectionParams [[buffer(13)]],
+    // buffers 14/15 are reserved for the lighting PR's spotLights/spotRectParams.
+    // RT refractions: x = enabled (texture 17 sampled only when > 0.5, same
+    // contract as reflectionParams), y = composite intensity.
+    constant float2& refractionParams [[buffer(16)]]
 ) {
     constexpr sampler s(address::repeat, filter::linear, mip_filter::linear);
 
@@ -693,6 +698,23 @@ fragment float4 fragmentMain(
         float3 Fr = FresnelSchlickRoughness(NdotV, F0r, surf.roughness);
         float roughFade = (1.0 - surf.roughness) * (1.0 - surf.roughness);
         result += refl * Fr * roughFade * reflectionParams.y * screenAO;
+    }
+
+    // RT refractions (KHR_materials_transmission): blend the traced
+    // transmitted radiance in by the material's transmission factor. What
+    // Fresnel reflects cannot transmit (1 - F), the base color tints the
+    // transmitted light like glTF's BTDF, and the sharp traced ray fades by
+    // roughness exactly like the mirror reflection above. mix() REPLACES the
+    // accumulated diffuse/GI response instead of adding — a transmissive
+    // surface trades its diffuse lobe for transmission per the spec.
+    if (refractionParams.x > 0.5 && material.transmission > 0.0) {
+        float3 refr = texRefraction.sample(s, screenUV).rgb;
+        float NdotV = max(dot(norm, viewDir), 0.0);
+        float3 F0t = mix(float3(0.04), surf.color, surf.metallic);
+        float3 Ft = FresnelSchlickRoughness(NdotV, F0t, surf.roughness);
+        float roughFade = (1.0 - surf.roughness) * (1.0 - surf.roughness);
+        float3 transmitted = refr * surf.color * (1.0 - Ft) * refractionParams.y;
+        result = mix(result, transmitted, material.transmission * roughFade);
     }
 
     result += surf.emission;

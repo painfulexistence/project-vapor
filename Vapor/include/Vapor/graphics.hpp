@@ -85,6 +85,10 @@ struct Material {
     float sheenTint = 0.5f;
     float clearcoat = 0.0f;
     float clearcoatGloss = 1.0f;
+    // KHR_materials_transmission factor. RENDERING support only for now: the
+    // glTF importer does not parse the extension yet (separate PR); set from
+    // code / the Scene Materials panel. IOR is fixed at 1.5 (the glTF default).
+    float transmission = 0.0f;
 
     // Prototype UV Mode: 0 = Off, 1 = World Space, 2 = Object Space
     int prototypeUVMode = 0;
@@ -126,6 +130,11 @@ struct alignas(16) MaterialData {
     float prototypeUVMode = 0.0f;  // 0 = mesh UV, 1 = world-space, 2 = object-space
     float uvScale = 1.0f;
     float iblEnabled = 0.0f;       // 1 = image-based lighting, 0 = ambient approximation
+    // KHR_materials_transmission factor (0 = opaque). Weights the RT
+    // refraction composite in the PBR shader; IOR fixed at 1.5.
+    // Grows the struct 96 -> 112 (alignas rounds up); every GPU twin
+    // (3d_common.metal, RHIMain.frag, PrePass.frag) matches that stride.
+    float transmission = 0.0f;
 };
 
 struct alignas(16) DirectionalLight { // Note that alignas(16) is not enough to ensure 16-byte alignment

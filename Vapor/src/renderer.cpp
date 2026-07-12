@@ -168,6 +168,7 @@ void Renderer::initialize(std::unique_ptr<RHI> rhiPtr, GraphicsBackend backendTy
         FogRenderData fogDefaults;
         createFrameSlottedBuffer(fogDataBuffer, fogDesc, &fogDefaults, sizeof(fogDefaults));
 
+
         BufferDesc prevVPDesc;
         prevVPDesc.size = sizeof(glm::mat4);
         prevVPDesc.usage = BufferUsage::Uniform;
@@ -620,6 +621,7 @@ MaterialId Renderer::registerMaterial(const MaterialDataInput& materialData) {
     material.sheenTint = materialData.sheenTint;
     material.clearcoat = materialData.clearcoat;
     material.clearcoatGloss = materialData.clearcoatGloss;
+    material.transmission = materialData.transmission;
     material.alphaMode = materialData.alphaMode;
     material.alphaCutoff = materialData.alphaCutoff;
     material.doubleSided = materialData.doubleSided;
@@ -704,6 +706,7 @@ MaterialId Renderer::registerMaterial(const MaterialDataInput& materialData) {
     params.sheenTint = material.sheenTint;
     params.clearcoat = material.clearcoat;
     params.clearcoatGloss = material.clearcoatGloss;
+    params.transmission = material.transmission;
 
     rhi->updateBuffer(material.parameterBuffer, &params, 0, sizeof(Vapor::MaterialData));
 
@@ -894,6 +897,12 @@ void Renderer::setupDefaultRenderGraph() {
     renderGraph.addPass("RaytraceReflection",
         [](Renderer& r) { r.raytraceReflectionPass(); }, PassFlags::RequiresRaytracing);
 
+    // RT refractions (KHR_materials_transmission): same TLAS + surfel-cache
+    // shading as reflections, refracted ray (IOR 1.5). Skipped while no scene
+    // material transmits.
+    renderGraph.addPass("RaytraceRefraction",
+        [](Renderer& r) { r.raytraceRefractionPass(); }, PassFlags::RequiresRaytracing);
+
     // Main geometry pass: renders to colorRT when a post-process pipeline
     // Directional shadow depth (single cascade) before the main lighting pass.
     renderGraph.addPass("Shadow",
@@ -923,6 +932,7 @@ void Renderer::setupDefaultRenderGraph() {
     // rays); swaps colorRT with tempColorRT internally.
     renderGraph.addPass("VolumetricFog",
         [](Renderer& r) { r.volumetricFogPass(); });
+
 
     // Volumetric clouds (quarter-res raymarch + temporal + composite), after
     // fog and before bloom, matching the Metal graph. Off by default.
@@ -1135,10 +1145,15 @@ void Renderer::updateBuffers() {
             data.clearcoat = mat.clearcoat;
             data.clearcoatGloss = mat.clearcoatGloss;
             data.iblEnabled = mat.useIBL ? 1.0f : 0.0f;  // panel "Use IBL"
+            data.transmission = mat.transmission;
             materialDataArray.push_back(data);
         }
         rhi->updateBuffer(materialUniformBuffer, materialDataArray.data(), 0,
                           materialDataArray.size() * sizeof(Vapor::MaterialData));
+        // Gates the RT refraction pass: skip the trace entirely while nothing
+        // in the scene transmits (the panel slider can flip this any frame).
+        sceneHasTransmission = std::any_of(materials.begin(), materials.end(),
+            [](const RenderMaterial& m) { return m.transmission > 0.0f; });
     }
 
     // Atmosphere tunables are panel-editable; re-upload every frame so edits
@@ -1396,6 +1411,14 @@ void Renderer::mainRenderPass() {
         if (reflOn) rhi->setTexture(0, 16, reflectionRT, clampSampler);
         glm::vec2 reflParams(reflOn ? 1.0f : 0.0f, rtReflectionIntensity);
         rhi->setFragmentBytes(&reflParams, sizeof(glm::vec2), 13);
+        // RT refraction result (texture 17) + params (buffer 16), same
+        // runtime-gated contract as the reflection pair above. Weighted per
+        // pixel by the material's transmission factor in the shader.
+        bool refrOn = rtRefractionsEnabled && sceneHasTransmission &&
+                      capabilities.raytracing && refractionRT.isValid();
+        if (refrOn) rhi->setTexture(0, 17, refractionRT, clampSampler);
+        glm::vec2 refrParams(refrOn ? 1.0f : 0.0f, rtRefractionIntensity);
+        rhi->setFragmentBytes(&refrParams, sizeof(glm::vec2), 16);
     }
 
     // Group drawables by material to reduce state changes
@@ -1763,6 +1786,53 @@ void Renderer::raytraceReflectionPass() {
     rhi->dispatch((w + 7) / 8, (h + 7) / 8, 1);
     rhi->endComputePass();
     rhi->computeBarrier();  // reflection writes -> fragment reads in Main
+}
+
+// RT refractions: the reflection pass's structural twin with a refracted ray
+// (fixed IOR 1.5, thin-walled, TIR falls back to reflect — see
+// 3d_raytrace_refraction.metal). Only runs while a scene material has
+// transmission > 0; the PBR composite (texture 16 / buffer 16) weights it per
+// pixel by the material's transmission and fades it by roughness.
+void Renderer::raytraceRefractionPass() {
+    if (!rtRefractionsEnabled || !sceneHasTransmission ||
+        !raytraceRefractionPipeline.isValid() ||
+        !sceneTLAS.isValid() || !refractionRT.isValid() ||
+        !surfelBuffer.isValid() || !cellHeadBuffer.isValid() ||
+        !surfelNextBuffer.isValid() || !gibsDataBuffer.isValid() ||
+        !prefilterMap.isValid()) {
+        return;
+    }
+    // gibsDataBuffer neutralization when GIBS is off is handled by the
+    // reflection pass, which always runs first in the graph; doing it again
+    // here would be a redundant upload of the same zero struct.
+    if (!gibsEnabled && !rtReflectionsEnabled) {
+        GIBSData zero{};  // totalCells==0 -> surfel lookups return black
+        zero.frameIndex = frameCounter;
+        rhi->updateBuffer(gibsDataBuffer, &zero, 0, sizeof(GIBSData));
+    }
+
+    Uint32 w = (rhi->getSwapchainWidth() + 1) / 2;   // refractionRT is half-res
+    Uint32 h = (rhi->getSwapchainHeight() + 1) / 2;
+    const size_t surfelBytes = size_t(gibsMaxSurfels) * sizeof(Surfel);
+    struct { float rayBias; float rayMaxDistance; Uint32 frameIndex; Uint32 _pad; } rp{
+        0.01f, 200.0f, frameCounter, 0u };
+
+    rhi->beginComputePass("RaytraceRefraction");
+    rhi->bindComputePipeline(raytraceRefractionPipeline);
+    rhi->setComputeTexture(0, depthStencilRT);
+    rhi->setComputeTexture(1, normalRT);
+    rhi->setComputeTexture(2, refractionRT);
+    rhi->setComputeTexture(3, prefilterMap);
+    rhi->setComputeBuffer(0, cameraUniformBuffer, 0, sizeof(CameraRenderData));
+    rhi->setComputeBuffer(1, surfelBuffer, 0, surfelBytes);
+    rhi->setComputeBuffer(2, cellHeadBuffer);
+    rhi->setComputeBuffer(3, surfelNextBuffer);
+    rhi->setComputeBuffer(4, gibsDataBuffer, 0, sizeof(GIBSData));
+    rhi->setAccelerationStructure(5, sceneTLAS);
+    rhi->setComputeBytes(&rp, sizeof(rp), 6);
+    rhi->dispatch((w + 7) / 8, (h + 7) / 8, 1);
+    rhi->endComputePass();
+    rhi->computeBarrier();  // refraction writes -> fragment reads in Main
 }
 
 // AO raygen into the noisy aoRawRT; the temporal + à-trous passes below
@@ -3328,7 +3398,7 @@ void Renderer::destroyRenderTargets() {
     kill(depthStencilRT_MSAA); kill(depthStencilRT);
     kill(colorRT_MSAA); kill(colorRT); kill(tempColorRT);
     kill(normalRT_MSAA); kill(normalRT); kill(albedoRT);
-    kill(shadowRT); kill(aoRT); kill(reflectionRT);
+    kill(shadowRT); kill(aoRT); kill(reflectionRT); kill(refractionRT);
     kill(aoRawRT); kill(aoScratchRT); kill(aoHistoryRT[0]); kill(aoHistoryRT[1]);
     kill(pointShadowRT); kill(pointShadowHistoryRT); kill(pointShadowDenoisedRT);
     kill(giResultTexture);
@@ -3431,6 +3501,8 @@ void Renderer::createRenderTargets() {
         desc.format = PixelFormat::RGBA16_FLOAT;
         desc.usage = TextureUsage::Storage | TextureUsage::Sampled;
         reflectionRT = rhi->createTexture(desc);
+        // RT refraction twin (same half-res RGBA16F, rgb + hit mask in a).
+        refractionRT = rhi->createTexture(desc);
     }
 
     // Create AO RT (half-res, like native)
@@ -3780,6 +3852,7 @@ void Renderer::createRenderPipeline() {
             volumetricFogPipeline = makeFullscreenFragPipeline(
                 "shaders/VolumetricFog.frag.spv", volumetricFogShader, BlendMode::Opaque);
 
+
             // Camera-motion velocity (motion vectors) from depth.
             velocityPipeline = makeFullscreenFragPipeline(
                 "shaders/Velocity.frag.spv", velocityShader, BlendMode::Opaque);
@@ -3952,6 +4025,7 @@ void Renderer::createRenderPipeline() {
         sscsComputePipeline           = makeMetalCompute("shaders/3d_sscs.metal", sscsMetalShader, 1, 1, 1);
         raytraceAOPipeline            = makeMetalCompute("shaders/3d_raytrace_ao.metal", rtAOShader, 1, 1, 1);
         raytraceReflectionPipeline    = makeMetalCompute("shaders/3d_raytrace_reflection.metal", rtReflectionShader, 8, 8, 1);
+        raytraceRefractionPipeline    = makeMetalCompute("shaders/3d_raytrace_refraction.metal", rtRefractionShader, 8, 8, 1);
         // SSAO shares the RT AO binding interface (ignores the TLAS slot) and
         // is selected by aoMethod, exactly like native RaytraceAOPass.
         ssaoPipeline                  = makeMetalCompute("shaders/3d_ssao.metal", ssaoShader, 1, 1, 1);
@@ -4473,6 +4547,7 @@ void Renderer::stage(std::shared_ptr<Scene> scene) {
                 matData.sheenTint = mesh->material->sheenTint;
                 matData.clearcoat = mesh->material->clearcoat;
                 matData.clearcoatGloss = mesh->material->clearcoatGloss;
+                matData.transmission = mesh->material->transmission;
                 matData.alphaMode = mesh->material->alphaMode;
                 matData.alphaCutoff = mesh->material->alphaCutoff;
                 matData.doubleSided = mesh->material->doubleSided;
@@ -4781,6 +4856,7 @@ void Renderer::drawGraphicsImGui() {
         preview("Normal RT", normalRT);
         preview("Shadow RT", shadowRT);
         preview("Reflection RT", reflectionRT);
+        preview("Refraction RT", refractionRT);
         preview("AO RT", aoRT);
         preview("Velocity RT", velocityRT);
         preview("God Rays RT", lightScatteringRT);
@@ -4883,6 +4959,9 @@ void Renderer::drawGraphicsImGui() {
                 ImGui::DragFloat("Sheen Tint", &m.sheenTint, 0.01f, 0.0f, 1.0f);
                 ImGui::DragFloat("Clearcoat", &m.clearcoat, 0.01f, 0.0f, 1.0f);
                 ImGui::DragFloat("Clearcoat Gloss", &m.clearcoatGloss, 0.01f, 0.0f, 1.0f);
+                // KHR_materials_transmission (RT refraction; importer doesn't
+                // parse the extension yet — this slider is the test hook).
+                ImGui::DragFloat("Transmission", &m.transmission, 0.01f, 0.0f, 1.0f);
                 ImGui::Checkbox("Use IBL", &m.useIBL);
                 ImGui::TreePop();
             }
@@ -4973,6 +5052,18 @@ void Renderer::drawGraphicsImGui() {
         ImGui::Checkbox("Enabled", &rtReflectionsEnabled);
         ImGui::SliderFloat("Intensity", &rtReflectionIntensity, 0.0f, 2.0f);
         ImGui::TextDisabled("hits shade from GIBS surfels; enable GI for full effect");
+        ImGui::TreePop();
+    }
+
+    // RT refractions (Metal RT only): renders KHR_materials_transmission with
+    // a fixed IOR of 1.5. The trace only runs while some material has
+    // transmission > 0 — use the Scene Materials editor to set one.
+    if (ImGui::TreeNode("RT Refractions")) {
+        ImGui::Checkbox("Enabled", &rtRefractionsEnabled);
+        ImGui::SliderFloat("Intensity", &rtRefractionIntensity, 0.0f, 2.0f);
+        ImGui::TextDisabled(sceneHasTransmission
+                                ? "active (a material transmits)"
+                                : "idle: no material has transmission > 0");
         ImGui::TreePop();
     }
 

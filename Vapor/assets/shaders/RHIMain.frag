@@ -27,7 +27,7 @@ layout(location = 5) in vec4 instanceColor;
 
 layout(location = 0) out vec4 outColor;
 
-// Must match Vapor::MaterialData (C++, std430 stride = 96)
+// Must match Vapor::MaterialData (C++, std430 stride = 112)
 struct MaterialData {
     vec4 baseColorFactor;
     float normalScale;
@@ -45,6 +45,12 @@ struct MaterialData {
     float sheenTint;
     float clearcoat;
     float clearcoatGloss;
+    // Tail kept layout-matched with the C++/MSL twins (this shader does not
+    // read them yet; transmission needs the RT refraction pass, Metal-only).
+    float prototypeUVMode;
+    float uvScale;
+    float iblEnabled;
+    float transmission;
 };
 
 // Must match DirectionalLightData / PointLightData (C++, stride 48 each)

@@ -100,6 +100,7 @@ struct RenderMaterial {
     float sheenTint = 0.5f;
     float clearcoat = 0.0f;
     float clearcoatGloss = 1.0f;
+    float transmission = 0.0f;  // KHR_materials_transmission (rendering only)
     bool useIBL = false;  // native Material::useIBL default (graphics.hpp)
 
     // Texture references (IDs, not handles)
@@ -252,6 +253,7 @@ struct alignas(16) FogRenderData {
     float fogMaxHeight = 100.0f;
     glm::vec2 _tailPad = glm::vec2(0.0f);  // keep 16-byte struct size multiple
 };
+
 
 // Volumetric clouds. Field-for-field mirror of the Metal backend's
 // VolumetricCloudData (graphics_effects.hpp) — the defaults below are the
@@ -411,6 +413,7 @@ struct MaterialDataInput {
     float sheenTint = 0.5f;
     float clearcoat = 0.0f;
     float clearcoatGloss = 1.0f;
+    float transmission = 0.0f;  // KHR_materials_transmission (rendering only)
 
     // Texture data (from Application's Image objects)
     std::shared_ptr<Vapor::Image> albedoMap;

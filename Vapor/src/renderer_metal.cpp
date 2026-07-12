@@ -1243,6 +1243,11 @@ public:
             // the same contract as gibsGI at texture(14) when GIBS is off).
             glm::vec2 reflParams(0.0f, 0.0f);
             encoder->setFragmentBytes(&reflParams, sizeof(reflParams), 13);
+            // RT refractions: RHI-path feature; disabled params keep the
+            // declared buffer(16) bound (texture(17) stays unbound behind the
+            // same runtime x > 0.5 contract as the reflection texture at 16).
+            glm::vec2 refrParams(0.0f, 0.0f);
+            encoder->setFragmentBytes(&refrParams, sizeof(refrParams), 16);
 
             for (const auto& draw : draws) {
                 if (!r.currentCamera->isVisible(r.instances[draw.instanceIndex].boundingSphere)) {

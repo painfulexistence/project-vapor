@@ -345,6 +345,7 @@ private:
     void tileCullingPass();
     void raytraceShadowPass();
     void raytraceReflectionPass();
+    void raytraceRefractionPass();
     void raytraceAOPass();
     void mainRenderPass();
     void postProcessPass();
@@ -694,12 +695,21 @@ private:
     TextureHandle reflectionRT;              // half-res RGBA16F (rgb, a=hit mask)
     bool rtReflectionsEnabled = true;        // panel toggle (no-op without RT)
     float rtReflectionIntensity = 1.0f;      // composite multiplier in the PBR
+    // RT refractions (KHR_materials_transmission rendering; Metal RT only).
+    // Structural clone of the reflection chain with a refracted ray (fixed IOR
+    // 1.5, thin-walled). Runs only while some material has transmission > 0.
+    ComputePipelineHandle raytraceRefractionPipeline;
+    TextureHandle refractionRT;              // half-res RGBA16F (rgb, a=hit mask)
+    bool rtRefractionsEnabled = true;        // panel toggle (no-op without RT)
+    float rtRefractionIntensity = 1.0f;      // composite multiplier in the PBR
+    bool sceneHasTransmission = false;       // recomputed in updateBuffers()
     // RT sun soft shadows: 0 = hard single ray (legacy behavior); > 0 = the
     // sun's angular radius in radians, cone-sampled with a few rays/pixel
     // (real sun ~0.0047). Panel slider under Shadow Debug.
     float rtSunAngularRadius = 0.0f;
     ShaderHandle rtShadowShader, rtAOShader, aoTemporalShader, aoDenoiseShader,
-                 pointShadowShader, pointShadowTemporalShader, rtReflectionShader;
+                 pointShadowShader, pointShadowTemporalShader, rtReflectionShader,
+                 rtRefractionShader;
     ShaderHandle prePassMetalVertexShader, prePassMetalFragmentShader;
 
     // Acceleration structures: one BLAS per registered mesh (index-aligned with
