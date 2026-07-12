@@ -434,6 +434,8 @@ private:
     Uint32 frameCounter = 0;  // for temporal jitter
     TextureHandle defaultBlackCubemapTex;   // IBL irradiance/prefilter default
     TextureHandle pssmShadowArrayTexture;   // 3-cascade depth array (Vulkan: set2 b6)
+    TextureHandle nearShadowMap;            // independent near-field depth map [near, nearShadowEnd]
+    static constexpr Uint32 NEAR_SHADOW_MAP_SIZE = 2048;
     std::vector<Vapor::RectLight> rectLights;   // gathered from the scene
 
     // ImGui texture previews (RT viewer / material thumbnails)
@@ -723,6 +725,9 @@ private:
     // PSSM: distance where RT near-field shadows hand over to the cascades
     // (native pssmRTMaxDist, panel-tunable 5..200).
     float pssmRTMaxDist = 50.0f;
+    // Independent near-field shadow map extent (view-space metres). The near map
+    // covers [near, nearShadowEnd]; cascades take over beyond it. 0 = disabled.
+    float nearShadowEnd = 8.0f;
     // Stochastic point-shadow debug view (native pointShadowDebugMode):
     // 0 = visibility, 1 = tile light-count heatmap.
     Uint32 pointShadowDebugMode = 0;

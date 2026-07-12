@@ -2154,6 +2154,37 @@ void Renderer::shadowPass() {
         gpuData.lightSpaceMatrices[ci] = lightProj * lightView;
     }
 
+    // Independent near-field shadow map: fit a tight ortho to the [near,
+    // nearShadowEnd] sub-frustum, separate from the cascades. Same bounding-
+    // sphere + world-anchored texel snap as the cascades (anti-shimmer).
+    gpuData.nearShadowEnd = nearShadowEnd;
+    if (nearShadowEnd > nearClip) {
+        float nNDC = viewDepthToNDCz(glm::clamp(nearClip,      nearClip, farClip));
+        float fNDC = viewDepthToNDCz(glm::clamp(nearShadowEnd, nearClip, farClip));
+        const glm::vec4 ndc8[8] = {
+            {-1,-1,nNDC,1},{1,-1,nNDC,1},{-1,1,nNDC,1},{1,1,nNDC,1},
+            {-1,-1,fNDC,1},{1,-1,fNDC,1},{-1,1,fNDC,1},{1,1,fNDC,1},
+        };
+        glm::vec3 c[8]; glm::vec3 center(0.0f);
+        for (int i = 0; i < 8; i++) { glm::vec4 w = invVP * ndc8[i]; c[i] = glm::vec3(w) / w.w; center += c[i]; }
+        center /= 8.0f;
+        float radius = 0.0f;
+        for (auto& p : c) radius = glm::max(radius, glm::length(p - center));
+        radius = std::ceil(radius * 16.0f) / 16.0f;
+        const glm::mat4 lightRot = glm::lookAt(glm::vec3(0.0f), lightDir, up);
+        const float texel = (2.0f * radius) / float(NEAR_SHADOW_MAP_SIZE);
+        glm::vec3 lsC = glm::vec3(lightRot * glm::vec4(center, 1.0f));
+        lsC.x = std::floor(lsC.x / texel) * texel;
+        lsC.y = std::floor(lsC.y / texel) * texel;
+        glm::vec3 snapped = glm::vec3(glm::inverse(lightRot) * glm::vec4(lsC, 1.0f));
+        const float dist = radius * 2.0f + 1.0f;
+        glm::mat4 lv = glm::lookAt(snapped - lightDir * dist, snapped, up);
+        float mn = 1e30f, mx = -1e30f;
+        for (auto& p : c) { float d = -(lv * glm::vec4(p, 1.0f)).z; mn = glm::min(mn, d); mx = glm::max(mx, d); }
+        mn -= (mx - mn);
+        gpuData.nearLightMatrix = glm::orthoZO(-radius, radius, -radius, radius, mn, mx) * lv;
+    }
+
     // Upload all cascade matrices once; the shadow VS indexes by cascadeIndex.
     rhi->updateBuffer(pssmDataBuffer, &gpuData, 0, sizeof(gpuData));
 
@@ -2193,6 +2224,45 @@ void Renderer::shadowPass() {
                 // texAlbedo at fragment texture(0) for alpha-tested cutouts.
                 bindMaterial(drawable.material);
             }
+            if (mesh.vertexBuffer.isValid()) rhi->bindVertexBuffer(mesh.vertexBuffer, 3, 0);
+            rhi->setVertexBytes(&iid, sizeof(Uint32), 4);  // instanceID -> push offset 0
+            if (mesh.indexBuffer.isValid()) {
+                rhi->bindIndexBuffer(mesh.indexBuffer, 0);
+                rhi->drawIndexed(mesh.indexCount, 1, 0, 0, 0);
+            } else if (mesh.vertexBuffer.isValid()) {
+                rhi->draw(mesh.vertexCount, 1, 0, 0);
+            }
+        }
+        rhi->endRenderPass();
+    }
+
+    // Render the independent near-field shadow map (single depth map). The VS
+    // selects nearLightMatrix when cascadeIndex == 3 (Vulkan) / receives it via
+    // vertex bytes (Metal). Not sampled yet — wired into the shaders next.
+    if (nearShadowEnd > nearClip && nearShadowMap.isValid()) {
+        RenderPassDesc rp;
+        rp.name = "NearShadow";
+        rp.depthAttachment = nearShadowMap;
+        rp.loadDepth = false;  // clear
+        rp.clearDepth = 1.0f;
+        rhi->beginRenderPass(rp);
+        rhi->bindPipeline(shadowPipeline);
+        if (backend == GraphicsBackend::Metal) {
+            rhi->setVertexBytes(&gpuData.nearLightMatrix, sizeof(glm::mat4), 0);
+            rhi->setVertexBuffer(1, materialUniformBuffer, 0, sizeof(Vapor::MaterialData) * MAX_INSTANCES);
+        } else {
+            Uint32 nearIdx = 3u;
+            rhi->setVertexBuffer(0, pssmDataBuffer, 0, sizeof(PSSMRenderData));
+            rhi->setVertexBytes(&nearIdx, sizeof(Uint32), 5);  // cascadeIndex -> push offset 16
+        }
+        rhi->setVertexBuffer(2, instanceDataBuffer, 0, sizeof(Vapor::InstanceData) * std::max<Uint32>(1, totalInstanceCount));
+        for (Uint32 drawableIdx = 0; drawableIdx < frameDrawables.size(); drawableIdx++) {
+            const Drawable& drawable = frameDrawables[drawableIdx];
+            const RenderMesh& mesh = meshes[drawable.mesh];
+            auto it = drawableToInstanceID.find(drawableIdx);
+            if (it == drawableToInstanceID.end()) continue;
+            Uint32 iid = it->second;
+            if (backend == GraphicsBackend::Metal) bindMaterial(drawable.material);
             if (mesh.vertexBuffer.isValid()) rhi->bindVertexBuffer(mesh.vertexBuffer, 3, 0);
             rhi->setVertexBytes(&iid, sizeof(Uint32), 4);  // instanceID -> push offset 0
             if (mesh.indexBuffer.isValid()) {
@@ -2977,6 +3047,17 @@ void Renderer::createDefaultResources() {
         pssmDesc.format = PixelFormat::Depth32Float;
         pssmDesc.usage = TextureUsage::DepthStencil | TextureUsage::Sampled;
         pssmShadowArrayTexture = rhi->createTexture(pssmDesc);
+
+        // Independent near-field shadow map: a single tight-fit depth map for the
+        // [near, nearShadowEnd] region, decoupled from the cascade array so it can
+        // use its own resolution and (on Metal) be swapped for the RT near shadow.
+        TextureDesc nearDesc;
+        nearDesc.width = NEAR_SHADOW_MAP_SIZE;
+        nearDesc.height = NEAR_SHADOW_MAP_SIZE;
+        nearDesc.arrayLayers = 1;
+        nearDesc.format = PixelFormat::Depth32Float;
+        nearDesc.usage = TextureUsage::DepthStencil | TextureUsage::Sampled;
+        nearShadowMap = rhi->createTexture(nearDesc);
     }
 
     // GPU particle system: a self-contained orbital demo. The particle buffer
