@@ -153,6 +153,11 @@ void main() {
     cmd.indexCount = inst.indexCount;
     cmd.instanceCount = visible ? 1u : 0u;
     cmd.firstIndex = inst.indexOffset;
+    // Intentional divergence from 3d_gpu_cull.metal (which writes 0 here): the
+    // Vulkan main pass uses fixed-function vertex attributes, so baseVertex is
+    // the ONLY place the merged-buffer offset is applied. The Metal main pass
+    // pulls vertices manually (instances[iid].vertexOffset + vertex_id, and
+    // vertex_id already includes baseVertex), so it must not also get it here.
     cmd.vertexOffset = int(inst.vertexOffset);
     cmd.firstInstance = id; // vertex shader reads instances[gl_InstanceIndex]
     commands[id] = cmd;

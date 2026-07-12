@@ -126,7 +126,12 @@ kernel void computeMain(
     cmd.indexCount = inst.indexCount;
     cmd.instanceCount = visible ? 1u : 0u;
     cmd.firstIndex = inst.indexOffset;
-    cmd.vertexOffset = int(inst.vertexOffset);
+    // baseVertex must stay 0 on Metal, unlike the Vulkan kernel: [[vertex_id]]
+    // already includes baseVertex, and the Metal main-pass vertex shader pulls
+    // vertices manually via instances[iid].vertexOffset + vertex_id. Writing the
+    // offset here too would apply it twice (2x vertexOffset in MDI mode -> every
+    // mesh fetches past its own vertices -> garbage/degenerate geometry).
+    cmd.vertexOffset = 0;
     cmd.firstInstance = id;
     commands[id] = cmd;
 }
