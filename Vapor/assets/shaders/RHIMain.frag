@@ -136,7 +136,13 @@ layout(set = 2, binding = 7) uniform sampler2D texAO;
 float sampleCascade(int ci, vec3 worldPos, float bias) {
     vec4 lp = shadowLightSpaceMatrices[ci] * vec4(worldPos, 1.0);
     vec3 proj = lp.xyz / lp.w;
-    vec2 uv = proj.xy * 0.5 + 0.5;  // Vulkan: z in [0,1], xy [-1,1] -> UV [0,1]
+    // The shadow map is rendered through the engine's negative-height viewport
+    // (rhi_vulkan: viewport.height = -H), which rasterizes ndc.y=+1 to texture
+    // row 0. So the sample UV must flip Y (v = 0.5 - 0.5*proj.y); using
+    // 0.5 + 0.5*proj.y samples the vertically-mirrored texel, which reads
+    // correctly only at the cascade centre and makes shadows drift/swim as the
+    // camera (and thus the cascade centre) moves. z stays [0,1] (ZO).
+    vec2 uv = vec2(proj.x * 0.5 + 0.5, 0.5 - proj.y * 0.5);
     float curDepth = proj.z;
     if (uv.x < 0.0 || uv.x > 1.0 || uv.y < 0.0 || uv.y > 1.0 || curDepth > 1.0) {
         return -1.0;
