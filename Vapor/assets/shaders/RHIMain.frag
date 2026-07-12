@@ -190,25 +190,52 @@ float sampleNearMap(vec3 worldPos, float bias) {
 }
 
 // Select the near-field map or a cascade by the fragment's view-space depth,
-// then PCF-sample it. Returns 1.0 = lit, 0.0 = fully shadowed.
+// PCF-sample it, and cross-fade across boundaries so transitions don't seam.
+// Returns 1.0 = lit, 0.0 = fully shadowed. Boundaries (view depth):
+//   nearShadowEnd = near map -> cascade 0,  cascadeSplits.y = c0 -> c1,
+//   cascadeSplits.z = c1 -> c2. Blend band width = shadowBlendRange.
 float sampleShadow(vec3 worldPos, vec3 N, vec3 L, float viewDepth) {
     float b = max(0.0015 * (1.0 - dot(N, L)), 0.0004);
-    // Near field: the dedicated high-res map overrides cascade 0 where it covers.
+    float blend = max(shadowBlendRange, 1e-4);
+
+    // Near field: dedicated high-res map, cross-fading into cascade 0 near its far edge.
     if (nearShadowEnd > 0.0 && viewDepth < nearShadowEnd) {
-        float lit = sampleNearMap(worldPos, b);
-        if (lit >= 0.0) return lit;  // fall through to cascades if outside its frustum
+        float nearLit = sampleNearMap(worldPos, b);
+        if (nearLit >= 0.0) {
+            if (viewDepth > nearShadowEnd - blend) {
+                float c0 = sampleCascade(0, worldPos, b);
+                if (c0 >= 0.0) {
+                    float t = (viewDepth - (nearShadowEnd - blend)) / blend;
+                    return mix(nearLit, c0, smoothstep(0.0, 1.0, t));
+                }
+            }
+            return nearLit;
+        }
+        // outside the near frustum -> fall through to the cascades
     }
+
     // Pick the first cascade whose far split still contains this fragment.
     int ci = 2;
     if (viewDepth <= cascadeSplits.y)      ci = 0;
     else if (viewDepth <= cascadeSplits.z) ci = 1;
-    // Slightly slacker bias for the coarser (farther) cascades.
-    float bias = b * float(ci + 1);
-    float lit = sampleCascade(ci, worldPos, bias);
+    float lit = sampleCascade(ci, worldPos, b * float(ci + 1));
     // Fall through to farther cascades if the fragment left this one's frustum.
-    if (lit < 0.0 && ci < 1) lit = sampleCascade(1, worldPos, bias);
-    if (lit < 0.0 && ci < 2) lit = sampleCascade(2, worldPos, bias);
-    return lit < 0.0 ? 1.0 : lit;  // outside all cascades -> lit
+    if (lit < 0.0 && ci < 1) { ci = 1; lit = sampleCascade(1, worldPos, b * 2.0); }
+    if (lit < 0.0 && ci < 2) { ci = 2; lit = sampleCascade(2, worldPos, b * 3.0); }
+    if (lit < 0.0) return 1.0;  // outside all cascades -> lit
+
+    // Cross-fade into the next cascade near this cascade's far split.
+    if (ci < 2) {
+        float farSplit = (ci == 0) ? cascadeSplits.y : cascadeSplits.z;
+        if (viewDepth > farSplit - blend) {
+            float nextLit = sampleCascade(ci + 1, worldPos, b * float(ci + 2));
+            if (nextLit >= 0.0) {
+                float t = (viewDepth - (farSplit - blend)) / blend;
+                lit = mix(lit, nextLit, smoothstep(0.0, 1.0, t));
+            }
+        }
+    }
+    return lit;
 }
 
 // RHI::setFragmentBytes(&dirLightCount, 4, /*binding=*/11) -> offset 64+(11%4)*16 = 112
