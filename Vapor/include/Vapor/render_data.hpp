@@ -50,6 +50,11 @@ struct RenderMesh {
     Uint32 vertexCount = 0;
     Uint32 vertexOffset = 0;
     Uint32 indexOffset = 0;
+    // Range into the global meshlet buffers (meshlet path). Shared by every
+    // instance of this mesh; the task shader looks it up by mesh id. 0/0 when the
+    // mesh has no baked meshlet data.
+    Uint32 meshletOffset = 0;
+    Uint32 meshletCount = 0;
 };
 
 // ============================================================================

@@ -573,7 +573,8 @@ void Renderer::shutdown() {
 // ============================================================================
 
 MeshId Renderer::registerMesh(const std::vector<Vapor::VertexData>& vertices,
-                                    const std::vector<Uint32>& indices) {
+                                    const std::vector<Uint32>& indices,
+                                    const Vapor::MeshletData* meshletData) {
     RenderMesh mesh;
 
     // Create vertex buffer
@@ -608,6 +609,30 @@ MeshId Renderer::registerMesh(const std::vector<Vapor::VertexData>& vertices,
     m_mergedVertices.insert(m_mergedVertices.end(), vertices.begin(), vertices.end());
     m_mergedIndices.insert(m_mergedIndices.end(), indices.begin(), indices.end());
     m_mergedGeometryDirty = true;
+
+    // Accumulate baked meshlets into the global meshlet buffers. meshletVertices
+    // are mesh-local (into `vertices`); rebase them into the merged vertex buffer
+    // by adding this mesh's vertexOffset, and rebase each meshlet's own offsets to
+    // the global arrays. Shared by every instance via the per-mesh range below.
+    if (meshletData && meshletData->isBuilt()) {
+        const Uint32 vtxBase = static_cast<Uint32>(m_globalMeshletVertices.size());
+        const Uint32 triBase = static_cast<Uint32>(m_globalMeshletTriangles.size());
+        mesh.meshletOffset = static_cast<Uint32>(m_globalMeshlets.size());
+        mesh.meshletCount  = static_cast<Uint32>(meshletData->meshlets.size());
+        for (const Vapor::Meshlet& src : meshletData->meshlets) {
+            Vapor::Meshlet m = src;
+            m.vertexOffset   += vtxBase;
+            m.triangleOffset += triBase;
+            m_globalMeshlets.push_back(m);
+        }
+        for (Uint32 mv : meshletData->meshletVertices)
+            m_globalMeshletVertices.push_back(mv + mesh.vertexOffset);  // -> merged VB
+        m_globalMeshletTriangles.insert(m_globalMeshletTriangles.end(),
+            meshletData->meshletTriangles.begin(), meshletData->meshletTriangles.end());
+        m_globalMeshletBounds.insert(m_globalMeshletBounds.end(),
+            meshletData->bounds.begin(), meshletData->bounds.end());
+        m_meshletsDirty = true;
+    }
 
     MeshId id = static_cast<MeshId>(meshes.size());
     meshes.push_back(mesh);
@@ -1231,7 +1256,11 @@ void Renderer::updateBuffers() {
     const bool mdi = gpuDrivenIndirect() && gpuDrivenMDI &&
                      ((backend == GraphicsBackend::Vulkan && capabilities.multiDrawIndirect) ||
                       backend == GraphicsBackend::Metal);
-    if (mdi) ensureMergedGeometry();
+    // MDI and the meshlet path both address the merged vertex buffer, so build it
+    // for either (self-gates on m_mergedGeometryDirty).
+    if (mdi || gpuDrivenMeshlet()) ensureMergedGeometry();
+    // Upload meshlet buffers (self-gates on mesh-shader support + dirty).
+    ensureMeshletBuffers();
     m_materialRanges.clear();
 
     auto appendInstance = [&](Uint32 drawableIdx) {
@@ -1954,6 +1983,50 @@ void Renderer::ensureMergedGeometry() {
     rhi->updateBuffer(mergedIndexBuffer, m_mergedIndices.data(), 0, ibDesc.size);
 
     m_mergedGeometryDirty = false;
+}
+
+// (Re)upload the global meshlet buffers accumulated in registerMesh. Only on
+// mesh-shader-capable backends (nothing else consumes them). The Phase-C task/
+// mesh shaders read these; until then this just makes the data GPU-resident.
+void Renderer::ensureMeshletBuffers() {
+    if (!m_meshletsDirty || m_globalMeshlets.empty()) return;
+    if (!capabilities.meshShaders) return;
+
+    auto makeStorage = [&](BufferHandle& h, const void* data, size_t bytes) {
+        if (bytes == 0) return;
+        if (h.isValid()) rhi->destroyBuffer(h);
+        BufferDesc d;
+        d.size = bytes;
+        d.usage = BufferUsage::Storage;
+        d.memoryUsage = MemoryUsage::GPU;
+        h = rhi->createBuffer(d);
+        rhi->updateBuffer(h, data, 0, bytes);
+    };
+
+    makeStorage(meshletBuffer, m_globalMeshlets.data(),
+                m_globalMeshlets.size() * sizeof(Vapor::Meshlet));
+    makeStorage(meshletVertexBuffer, m_globalMeshletVertices.data(),
+                m_globalMeshletVertices.size() * sizeof(Uint32));
+    // u8 triangle indices, padded to a 4-byte multiple for buffer sizing.
+    {
+        std::vector<Uint8> tris = m_globalMeshletTriangles;
+        while (tris.size() % 4 != 0) tris.push_back(0);
+        makeStorage(meshletTriangleBuffer, tris.data(), tris.size());
+    }
+    makeStorage(meshletBoundsBuffer, m_globalMeshletBounds.data(),
+                m_globalMeshletBounds.size() * sizeof(Vapor::MeshletBounds));
+
+    // Per-mesh range table indexed by mesh id (all instances of a mesh share it).
+    std::vector<glm::uvec2> ranges;
+    ranges.reserve(meshes.size());
+    for (const RenderMesh& m : meshes)
+        ranges.push_back(glm::uvec2(m.meshletOffset, m.meshletCount));
+    makeStorage(meshMeshletRangeBuffer, ranges.data(), ranges.size() * sizeof(glm::uvec2));
+
+    m_meshletsDirty = false;
+    fmt::print("Meshlet buffers uploaded: {} meshlets, {} verts, {} tris, {} meshes\n",
+               m_globalMeshlets.size(), m_globalMeshletVertices.size(),
+               m_globalMeshletTriangles.size() / 3, meshes.size());
 }
 
 // Sun/lens flare: procedural glow/halo/ghosts/starburst added over the HDR
@@ -4577,7 +4650,7 @@ void Renderer::stage(std::shared_ptr<Scene> scene) {
         // Register mesh if not already registered
         if (mesh->renderMeshId == UINT32_MAX) {
             if (!mesh->vertices.empty()) {
-                mesh->renderMeshId = registerMesh(mesh->vertices, mesh->indices);
+                mesh->renderMeshId = registerMesh(mesh->vertices, mesh->indices, &mesh->meshletData);
             } else if (mesh->vertexCount > 0 && mesh->indexCount > 0 &&
                        mesh->vertexOffset + mesh->vertexCount <= scene->vertices.size() &&
                        mesh->indexOffset + mesh->indexCount <= scene->indices.size()) {
@@ -4593,7 +4666,8 @@ void Renderer::stage(std::shared_ptr<Scene> scene) {
                 std::vector<Uint32> inds(
                     scene->indices.begin() + mesh->indexOffset,
                     scene->indices.begin() + mesh->indexOffset + mesh->indexCount);
-                mesh->renderMeshId = registerMesh(verts, inds);
+                // meshletData indices are mesh-local, matching this sliced range.
+                mesh->renderMeshId = registerMesh(verts, inds, &mesh->meshletData);
             }
         }
         

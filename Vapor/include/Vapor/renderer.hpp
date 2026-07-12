@@ -66,9 +66,11 @@ public:
     // Resource Registration (called during scene loading/staging)
     // ========================================================================
 
-    // Register a mesh and return its ID
+    // Register a mesh and return its ID. Optional baked meshletData is accumulated
+    // into the global meshlet buffers for the meshlet path (ignored if null/empty).
     MeshId registerMesh(const std::vector<Vapor::VertexData>& vertices,
-                        const std::vector<Uint32>& indices);
+                        const std::vector<Uint32>& indices,
+                        const Vapor::MeshletData* meshletData = nullptr);
 
     // Register a material and return its ID
     MaterialId registerMaterial(const MaterialDataInput& materialData);
@@ -803,6 +805,27 @@ private:
     // buffer, from the last MDI updateBuffers(): {material, {firstSlot, count}}.
     std::vector<std::pair<MaterialId, std::pair<Uint32, Uint32>>> m_materialRanges;
     void ensureMergedGeometry();  // (re)build merged GPU buffers from CPU data
+
+    // ------------------------------------------------------------------------
+    // Meshlet path (Phase B): global meshlet buffers, accumulated per mesh in
+    // registerMesh from Mesh::meshletData (baked offline). meshletVertices are
+    // rebased into the merged vertex buffer (+ RenderMesh::vertexOffset), so the
+    // meshlet path shares mergedVertexBuffer with MDI. Uploaded lazily by
+    // ensureMeshletBuffers() only when the backend supports mesh shaders. Nothing
+    // consumes these until the Phase-C task/mesh shaders; the exact GPU layout of
+    // the triangle/bounds buffers may be finalized alongside those shaders.
+    // ------------------------------------------------------------------------
+    std::vector<Vapor::Meshlet> m_globalMeshlets;
+    std::vector<Uint32> m_globalMeshletVertices;   // rebased into mergedVertexBuffer
+    std::vector<Uint8> m_globalMeshletTriangles;   // local u8, 3 per triangle
+    std::vector<Vapor::MeshletBounds> m_globalMeshletBounds;  // parallel to m_globalMeshlets
+    BufferHandle meshletBuffer;          // Meshlet[]
+    BufferHandle meshletVertexBuffer;    // Uint32[]
+    BufferHandle meshletTriangleBuffer;  // Uint8[] (padded to 4)
+    BufferHandle meshletBoundsBuffer;    // MeshletBounds[]
+    BufferHandle meshMeshletRangeBuffer; // uvec2[meshId] = {meshletOffset, meshletCount}
+    bool m_meshletsDirty = false;
+    void ensureMeshletBuffers();  // (re)build meshlet GPU buffers from CPU data
     BufferHandle lightCullDataBuffer;
     PipelineHandle sunFlarePipeline;
     ShaderHandle sunFlareVertexShader, sunFlareFragmentShader;
