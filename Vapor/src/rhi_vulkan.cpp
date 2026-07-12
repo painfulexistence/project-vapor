@@ -2468,6 +2468,11 @@ void RHI_Vulkan::createLogicalDevice() {
                 if (std::strcmp(e.extensionName, name) == 0) return true;
             return false;
         };
+        // Mesh/task shaders (meshlet path). Detected here; the extension + feature
+        // are only enabled when the meshlet draw path is wired up (Phase C).
+#ifdef VK_EXT_MESH_SHADER_EXTENSION_NAME
+        capabilities.meshShaders = has(VK_EXT_MESH_SHADER_EXTENSION_NAME);
+#endif
         // MoltenVK requires enabling portability_subset when it is present
         if (has(VK_KHR_PORTABILITY_SUBSET_EXTENSION_NAME)) {
             deviceExtensions.push_back(VK_KHR_PORTABILITY_SUBSET_EXTENSION_NAME);

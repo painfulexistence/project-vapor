@@ -320,8 +320,8 @@ public:
     // with a compute cull pass that fills an indirect-args buffer, consumed by
     // per-object drawIndexedIndirect. Off by default; when off the existing CPU
     // path is used unchanged.
-    void setGpuDrivenCulling(bool enabled) { gpuDrivenCulling = enabled; }
-    bool isGpuDrivenCulling() const { return gpuDrivenCulling; }
+    void setGpuDrivenCulling(bool enabled) { gpuDrivenMode = enabled ? GpuDrivenMode::Indirect : GpuDrivenMode::Off; }
+    bool isGpuDrivenCulling() const { return gpuDrivenIndirect(); }
 
     // Load an equirectangular HDR image as the IBL environment (see IBLSource).
     void loadHDRI(const std::string& path) override;
@@ -759,9 +759,23 @@ private:
     ComputePipelineHandle gpuCullPipeline;
     ShaderHandle gpuCullShader;
     BufferHandle gpuCullArgsBuffer;  // DrawCommand[MAX_INSTANCES], frame-slotted
-    bool gpuDrivenCulling = false;
 
-    // Hi-Z occlusion culling (requires gpuDrivenCulling). A depth pyramid built
+    // GPU-driven geometry submission method (mutually exclusive — the same object
+    // can't go through both the vertex pipeline and mesh shaders):
+    //   Off      - CPU cull + drawIndexed (default; existing path untouched)
+    //   Indirect - compute cull (GpuCull.comp) -> per-object / MDI indirect draw
+    //   Meshlet  - task + mesh shaders (per-cluster cull + LOD); Phase C
+    // Hi-Z occlusion (below) is orthogonal and applies to whichever mode is active.
+    enum class GpuDrivenMode { Off, Indirect, Meshlet };
+    GpuDrivenMode gpuDrivenMode = GpuDrivenMode::Off;
+    bool gpuDrivenActive()   const { return gpuDrivenMode != GpuDrivenMode::Off; }
+    bool gpuDrivenIndirect() const { return gpuDrivenMode == GpuDrivenMode::Indirect; }
+    bool gpuDrivenMeshlet()  const { return gpuDrivenMode == GpuDrivenMode::Meshlet; }
+    // The meshlet draw path (task/mesh shaders) is not implemented until Phase C;
+    // the UI keeps the Meshlet option disabled while this is false.
+    static constexpr bool kMeshletDrawImplemented = false;
+
+    // Hi-Z occlusion culling (requires a GPU-driven mode). A depth pyramid built
     // from the PrePass depth; the cull compute rejects instances whose screen
     // AABB is fully behind the recorded occluders. Off by default; the reduce
     // pass and the cull's occlusion branch both no-op unless this is on.
@@ -778,7 +792,7 @@ private:
     // True single-call multi-draw indirect (Vulkan only): one vkCmdDrawIndexedIndirect
     // per material batch over a merged scene vertex/index buffer, instead of one
     // indirect draw per object. Metal keeps the per-object loop (single-call MDI
-    // there needs Indirect Command Buffers). Requires gpuDrivenCulling to be on.
+    // there needs Indirect Command Buffers). Sub-option of the Indirect mode.
     bool gpuDrivenMDI = false;
     std::vector<Vapor::VertexData> m_mergedVertices;  // CPU accumulation (registerMesh)
     std::vector<Uint32> m_mergedIndices;              // mesh-local indices; rebased via vertexOffset

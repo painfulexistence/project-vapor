@@ -103,6 +103,10 @@ bool RHI_Metal::initialize(SDL_Window* window) {
     capabilities.raytracing = device->supportsRaytracing() && !std::getenv("GITHUB_ACTIONS");
     capabilities.computeShaders = true;
     capabilities.gpuTimestamps = gpuTimingSupported;
+    // Object/mesh shaders (meshlet path): Apple GPU family 7 (A14/M1) and later,
+    // or Mac family 2. Detected here; the pipeline type is wired up in Phase C.
+    capabilities.meshShaders = device->supportsFamily(MTL::GPUFamilyApple7) ||
+                               device->supportsFamily(MTL::GPUFamilyMac2);
 
     // Backend telemetry: one grouped "[MTL]" line per --stats interval. Metal is
     // unified memory, so these counts (plus RSS) are the leak-hunt signal.

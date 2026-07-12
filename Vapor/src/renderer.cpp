@@ -1152,10 +1152,11 @@ void Renderer::sortDrawables() {
 }
 
 void Renderer::updateBuffers() {
-    // Populate the camera's frustum planes so the GPU cull compute pass can test
-    // instance bounding spheres against them. Only when GPU-driven culling is on,
-    // to keep the default path's camera data byte-identical.
-    if (gpuDrivenCulling) {
+    // Populate the camera's frustum planes so the GPU cull pass can test bounds
+    // against them (object cull in Indirect mode, meshlet cull in Meshlet mode).
+    // Only when a GPU-driven mode is active, to keep the default path's camera
+    // data byte-identical.
+    if (gpuDrivenActive()) {
         Frustum f = extractFrustum(currentCamera.proj * currentCamera.view);
         for (int i = 0; i < 6; ++i) {
             currentCamera.frustumPlanes[i] = f.planes[i];
@@ -1227,7 +1228,7 @@ void Renderer::updateBuffers() {
     // MDI mode (Vulkan): instances address the merged scene buffers, so they need
     // real per-mesh offsets and must be grouped into contiguous per-material
     // ranges. Any other mode uses per-mesh buffers -> offsets stay 0.
-    const bool mdi = gpuDrivenMDI &&
+    const bool mdi = gpuDrivenIndirect() && gpuDrivenMDI &&
                      ((backend == GraphicsBackend::Vulkan && capabilities.multiDrawIndirect) ||
                       backend == GraphicsBackend::Metal);
     if (mdi) ensureMergedGeometry();
@@ -1478,7 +1479,7 @@ void Renderer::mainRenderPass() {
     // GPU-driven path is used only when enabled AND the cull pipeline/args
     // buffer actually exist — otherwise fall back to the CPU path entirely
     // (avoids drawing from an unwritten indirect args buffer).
-    const bool useGpuDriven = gpuDrivenCulling && gpuCullPipeline.isValid() &&
+    const bool useGpuDriven = gpuDrivenIndirect() && gpuCullPipeline.isValid() &&
                               gpuCullArgsBuffer.isValid();
 
     // True single-call multi-draw indirect (Vulkan): bind the merged scene
@@ -1846,14 +1847,14 @@ void Renderer::tileCullingPass() {
 // GPU-driven rendering: frustum-cull every instance in a compute pass, writing
 // one indirect draw command per instance into gpuCullArgsBuffer (instanceCount
 // 0 = culled). The main pass then issues per-object drawIndexedIndirect, so the
-// GPU decides what actually draws. Vulkan-only for now; no-op unless the
-// gpuDrivenCulling flag is set. The existing CPU cull path is untouched.
+// GPU decides what actually draws. No-op unless the Indirect GPU-driven mode is
+// active. The existing CPU cull path is untouched.
 // Build the Hi-Z depth pyramid from the PrePass depth: mip 0 is a 2:1 max-depth
 // reduction of the scene depth; each further mip max-reduces the previous. Built
 // into a single sampleable texture via a scratch copy per level, because a
 // render pass can't read and write the same image (see copyTexture).
 void Renderer::hizBuildPass() {
-    if (!gpuDrivenCulling || !gpuOcclusionCulling) return;
+    if (!gpuDrivenActive() || !gpuOcclusionCulling) return;
     if (!hizReducePipeline.isValid() || !hizTexture.isValid() ||
         !hizScratchTexture.isValid() || !depthStencilRT.isValid() || hizMipCount == 0) {
         return;
@@ -1889,7 +1890,7 @@ void Renderer::hizBuildPass() {
 }
 
 void Renderer::gpuCullPass() {
-    if (!gpuDrivenCulling) return;
+    if (!gpuDrivenIndirect()) return;
     if (!gpuCullPipeline.isValid() || !gpuCullArgsBuffer.isValid()) return;
     if (totalInstanceCount == 0) return;
 
@@ -4901,33 +4902,50 @@ void Renderer::drawGraphicsImGui() {
                 capabilities.gpuTimestamps ? "yes" : "no");
     ImGui::Text("Frame: %u", frameNumber);
 
-    // GPU-driven rendering toggle: compute frustum cull -> per-object indirect
-    // draw (both Vulkan and Metal). Requires compute; when off, the CPU cull +
-    // drawIndexed path is used unchanged.
+    // GPU-driven geometry submission — mutually-exclusive method (a mesh can't go
+    // through both the vertex pipeline and mesh shaders). Off = CPU cull +
+    // drawIndexed (existing path, untouched). Requires compute.
     if (capabilities.computeShaders) {
-        ImGui::Checkbox("GPU-driven culling (indirect draw)", &gpuDrivenCulling);
-        // True single-call multi-draw indirect (one drawIndexedIndirect per
-        // material over the merged scene buffers). Vulkan-only — Metal draws one
-        // indirect command per call, so it stays on the per-object path. Requires
-        // GPU-driven culling to be on (it fills the indirect args).
-        const bool mdiAvailable = gpuDrivenCulling &&
+        ImGui::Text("GPU-driven method:");
+        if (ImGui::RadioButton("Off (CPU cull)", gpuDrivenMode == GpuDrivenMode::Off))
+            gpuDrivenMode = GpuDrivenMode::Off;
+        ImGui::SameLine();
+        if (ImGui::RadioButton("Indirect + MDI", gpuDrivenMode == GpuDrivenMode::Indirect))
+            gpuDrivenMode = GpuDrivenMode::Indirect;
+        ImGui::SameLine();
+        // Meshlet (task/mesh shaders): needs mesh-shader support AND the Phase-C
+        // draw path. Disabled until both hold.
+        const bool meshletSelectable = capabilities.meshShaders && kMeshletDrawImplemented;
+        ImGui::BeginDisabled(!meshletSelectable);
+        if (ImGui::RadioButton("Meshlet", gpuDrivenMode == GpuDrivenMode::Meshlet))
+            gpuDrivenMode = GpuDrivenMode::Meshlet;
+        ImGui::EndDisabled();
+        if (!meshletSelectable && ImGui::IsItemHovered(ImGuiHoveredFlags_AllowWhenDisabled)) {
+            ImGui::SetTooltip(capabilities.meshShaders ? "Meshlet draw path not yet implemented (Phase C)"
+                                                       : "Mesh shaders unsupported on this device");
+        }
+        if (gpuDrivenMode == GpuDrivenMode::Meshlet && !meshletSelectable)
+            gpuDrivenMode = GpuDrivenMode::Off;  // never stick on an unavailable mode
+
+        // MDI is a sub-option of the Indirect method (single-call multi-draw over
+        // the merged scene buffers; Vulkan native, Metal per-command loop).
+        const bool mdiAvailable = gpuDrivenIndirect() &&
             ((backend == GraphicsBackend::Vulkan && capabilities.multiDrawIndirect) ||
              backend == GraphicsBackend::Metal);
         ImGui::BeginDisabled(!mdiAvailable);
         ImGui::Checkbox("  -> multi-draw indirect (per material)", &gpuDrivenMDI);
         ImGui::EndDisabled();
         if (!mdiAvailable) gpuDrivenMDI = false;
-        // Hi-Z occlusion culling: builds a depth pyramid (HiZBuild pass) and
-        // rejects instances hidden behind nearer geometry, on top of the frustum
-        // cull. Also requires GPU-driven culling (it refines the same indirect args).
-        ImGui::BeginDisabled(!gpuDrivenCulling);
-        ImGui::Checkbox("  -> Hi-Z occlusion culling", &gpuOcclusionCulling);
+
+        // Hi-Z occlusion is orthogonal — it refines whichever GPU-driven mode is
+        // active (object cull in Indirect, meshlet cull in Meshlet).
+        ImGui::BeginDisabled(!gpuDrivenActive());
+        ImGui::Checkbox("Hi-Z occlusion culling", &gpuOcclusionCulling);
         ImGui::EndDisabled();
-        if (!gpuDrivenCulling) gpuOcclusionCulling = false;
+        if (!gpuDrivenActive()) gpuOcclusionCulling = false;
     } else {
         ImGui::BeginDisabled();
-        bool off = false;
-        ImGui::Checkbox("GPU-driven culling (indirect draw)", &off);
+        ImGui::Text("GPU-driven method: (requires compute)");
         ImGui::EndDisabled();
     }
 

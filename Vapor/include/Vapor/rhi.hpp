@@ -404,6 +404,9 @@ struct RHICapabilities {
     // indirect). Vulkan gates this on the multiDrawIndirect device feature; Metal
     // draws one indirect command per call, so it reports false.
     bool multiDrawIndirect = false;
+    // Task + mesh shader pipelines (Vulkan VK_EXT_mesh_shader; Metal object/mesh
+    // functions). Required for the meshlet-based GPU-driven path.
+    bool meshShaders = false;
 };
 
 // ============================================================================
