@@ -436,7 +436,7 @@ private:
     TextureHandle defaultBlackCubemapTex;   // IBL irradiance/prefilter default
     TextureHandle pssmShadowArrayTexture;   // 3-cascade depth array (Vulkan: set2 b6)
     TextureHandle nearShadowMap;            // independent near-field depth map [near, pssmRTMaxDist] (Vulkan: set2 b9)
-    static constexpr Uint32 NEAR_SHADOW_MAP_SIZE = 4096;  // own resolution, finer than the cascades
+    static constexpr Uint32 NEAR_SHADOW_MAP_SIZE = Vapor::kNearShadowMapSize;  // shared (irenderer.hpp)
     std::vector<Vapor::RectLight> rectLights;   // gathered from the scene
 
     // ImGui texture previews (RT viewer / material thumbnails)
@@ -673,7 +673,7 @@ private:
     ShaderHandle cloudCompositeShader;
     ShaderHandle shadowVertexShader;
     ShaderHandle shadowFragmentShader;
-    static constexpr Uint32 SHADOW_MAP_SIZE = 2048;
+    static constexpr Uint32 SHADOW_MAP_SIZE = Vapor::kDirectionalShadowMapSize;  // shared (irenderer.hpp)
 
     // Compute pipelines
     ComputePipelineHandle buildClustersPipeline;

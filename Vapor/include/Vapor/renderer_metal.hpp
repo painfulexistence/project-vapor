@@ -837,7 +837,7 @@ protected:
     NS::SharedPtr<MTL::Texture> pssmShadowScreenRTGrayView; // swizzle (r,r,r,1) for ImGui
     std::vector<NS::SharedPtr<MTL::Buffer>> pssmDataBuffers;
     static constexpr uint32_t PSSM_CASCADE_COUNT = 3;
-    static constexpr uint32_t PSSM_SHADOW_MAP_SIZE = 4096;
+    static constexpr uint32_t PSSM_SHADOW_MAP_SIZE = Vapor::kDirectionalShadowMapSize;
     float pssmRTMaxDist = 50.0f; // view-space depth where RT shadow ends and PSSM begins
 
     // PSSM PCF and blend settings
