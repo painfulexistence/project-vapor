@@ -4718,7 +4718,7 @@ void Renderer::drawGraphicsImGui() {
                                "Shown in 'Point Shadow (raw)' below.");
         }
         bool skipShadow = (mainDebugFlags & 2u) != 0u;
-        if (ImGui::Checkbox("Skip shadow PCF (perf isolation)", &skipShadow))
+        if (ImGui::Checkbox("Skip shadow", &skipShadow))
             mainDebugFlags = (mainDebugFlags & ~2u) | (skipShadow ? 2u : 0u);
         // Intermediate shadow textures (native Metal parity). These are
         // single-channel R16F/depth RTs; the RRR1 swizzle view renders them as

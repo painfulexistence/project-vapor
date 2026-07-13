@@ -5470,6 +5470,11 @@ auto Renderer_Metal::draw(std::shared_ptr<Scene> scene, Camera& camera) -> void 
                     splits.x, splits.y, splits.z, splits.w);
             }
             ImGui::SliderFloat("Near shadow distance", &pssmRTMaxDist, 5.0f, 200.0f);
+            // Skip the directional shadow term (perf/debug). Pushed to the PBR
+            // shader at buffer(12) as mainDebugFlags bit 1 — same as Vulkan.
+            bool skipShadow = (mainDebugFlags & 2u) != 0u;
+            if (ImGui::Checkbox("Skip shadow", &skipShadow))
+                mainDebugFlags = (mainDebugFlags & ~2u) | (skipShadow ? 2u : 0u);
             ImGui::Checkbox("Contact shadows (SSCS)", &sscsEnabled);
             if (sscsEnabled) {
                 ImGui::SliderFloat("SSCS length", &sscsLength, 0.05f, 2.0f);
