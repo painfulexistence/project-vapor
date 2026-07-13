@@ -895,8 +895,9 @@ void Renderer::setupDefaultRenderGraph() {
     renderGraph.addPass("Shadow",
         [](Renderer& r) { r.shadowPass(); });
 
-    // Screen-space contact shadows (Vulkan fullscreen frag; reads the pre-pass
-    // depth, so it runs after depth is available and before Main consumes it).
+    // Screen-space contact shadows (Metal compute / Vulkan fullscreen frag).
+    // Reads the pre-pass depth, so it runs after depth is available and before
+    // Main consumes the result.
     renderGraph.addPass("SSCS",
         [](Renderer& r) { r.sscsPass(); });
 
@@ -1372,11 +1373,10 @@ void Renderer::mainRenderPass() {
         // AO output replaces the neutral white at texAO(6) whenever the AO
         // chain ran — with RT (RTAO) or without (SSAO shares the chain).
         if (aoEnabled && aoRT.isValid()) rhi->setTexture(0, 6, aoRT, clampSampler);
-        // 3d_pbr_normal_mapped.metal min()'s the sun shadow with texSSCS(15). It
-        // MUST be bound or Metal samples an unbound texture as 0 -> whole scene
-        // black. SSCS compute isn't wired on the RHI-Metal path yet, so bind
-        // white (= lit, min() no-op). (Vulkan uses RHIMain.frag's own SSCS slot.)
-        rhi->setTexture(0, 15, whiteTex, clampSampler);
+        // 3d_pbr_normal_mapped.metal min()'s the sun shadow with texSSCS(15) — it
+        // MUST be bound (an unbound sample reads 0 -> whole scene black). Use the
+        // computed contact RT when SSCS is on, else white (min() no-op).
+        rhi->setTexture(0, 15, (sscsEnabled && sscsRT.isValid()) ? sscsRT : whiteTex, clampSampler);
         if (capabilities.raytracing) {
             // RT kernel outputs replace the neutral whites —
             // texShadow(7), texPointShadow(13), gibsGI(14).
@@ -2308,11 +2308,38 @@ void Renderer::shadowPass() {
 // onto the sun shadow, tightening the near contact the cascade/near map miss.
 // Vulkan fullscreen frag only (the Metal native renderer has RT near shadows).
 void Renderer::sscsPass() {
-    if (backend != GraphicsBackend::Vulkan) return;
-    if (!sscsEnabled || !vkSscsPipeline.isValid() || !sscsRT.isValid() ||
-        !depthStencilRT.isValid() || directionalLights.empty()) {
+    if (!sscsEnabled || !sscsRT.isValid() || !depthStencilRT.isValid() || directionalLights.empty()) {
         return;
     }
+
+    // Metal (RHI): compute path with 3d_sscs.metal (mirrors raytraceShadowPass).
+    // The kernel derives the view-space light dir from directionalLights[0] +
+    // camera itself, so we only feed camera + lights + screenSize + params.
+    if (backend == GraphicsBackend::Metal) {
+        if (!sscsComputePipeline.isValid()) return;
+        struct SSCSParamsC { float rayLength; float thickness; Uint32 stepCount; float bias; } params;
+        params.rayLength = sscsLength;
+        params.thickness = sscsThickness;
+        params.stepCount = sscsSteps;
+        params.bias      = sscsBias;
+        Uint32 w = (rhi->getSwapchainWidth() + 1) / 2;   // sscsRT is half-res
+        Uint32 h = (rhi->getSwapchainHeight() + 1) / 2;
+        glm::vec2 screenSize(w, h);
+        rhi->beginComputePass("SSCS");
+        rhi->bindComputePipeline(sscsComputePipeline);
+        rhi->setComputeTexture(0, depthStencilRT);
+        rhi->setComputeTexture(1, sscsRT);
+        rhi->setComputeBuffer(0, cameraUniformBuffer, 0, sizeof(CameraRenderData));
+        rhi->setComputeBuffer(1, directionalLightBuffer, 0, sizeof(DirectionalLightData) * maxDirectionalLights);
+        rhi->setComputeBytes(&screenSize, sizeof(glm::vec2), 2);
+        rhi->setComputeBytes(&params, sizeof(params), 3);
+        rhi->dispatch(w, h, 1);  // 1x1 groups, matching raytraceShadowPass
+        rhi->endComputePass();
+        return;
+    }
+
+    // Vulkan: fullscreen fragment path with SSCS.frag.
+    if (!vkSscsPipeline.isValid()) return;
 
     struct SSCSPush {
         glm::vec4 lightDirVS;   // view-space direction TO the light
@@ -3350,7 +3377,9 @@ void Renderer::createRenderTargets() {
         desc.width = halfW;
         desc.height = halfH;
         desc.format = PixelFormat::R8_UNORM;
-        desc.usage = TextureUsage::Sampled | TextureUsage::RenderTarget;
+        // RenderTarget for the Vulkan fullscreen frag path; Storage for the Metal
+        // compute path (3d_sscs.metal writes it); Sampled for the main pass read.
+        desc.usage = TextureUsage::Sampled | TextureUsage::RenderTarget | TextureUsage::Storage;
         sscsRT = rhi->createTexture(desc);
     }
 
@@ -3847,6 +3876,7 @@ void Renderer::createRenderPipeline() {
         };
         // Threadgroup shapes mirror the native dispatches exactly.
         raytraceShadowPipeline        = makeMetalCompute("shaders/3d_raytrace_shadow.metal", rtShadowShader, 1, 1, 1);
+        sscsComputePipeline           = makeMetalCompute("shaders/3d_sscs.metal", sscsMetalShader, 1, 1, 1);
         raytraceAOPipeline            = makeMetalCompute("shaders/3d_raytrace_ao.metal", rtAOShader, 1, 1, 1);
         // SSAO shares the RT AO binding interface (ignores the TLAS slot) and
         // is selected by aoMethod, exactly like native RaytraceAOPass.
@@ -4718,8 +4748,6 @@ void Renderer::drawGraphicsImGui() {
         if (sscsEnabled) {
             ImGui::SliderFloat("SSCS length", &sscsLength, 0.05f, 2.0f);
             ImGui::SliderFloat("SSCS thickness", &sscsThickness, 0.05f, 2.0f);
-            if (backend != GraphicsBackend::Vulkan)
-                ImGui::TextDisabled("(SSCS computes on Vulkan/MoltenVK; RHI-Metal wiring pending)");
         }
         int psd = static_cast<int>(pointShadowDebugMode);
         if (ImGui::Combo("Point shadow view", &psd, "Visibility (normal)\0Tile light-count heatmap\0")) {

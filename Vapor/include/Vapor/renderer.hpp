@@ -719,8 +719,10 @@ private:
     // Vulkan AO chain twins — fullscreen fragment passes (the RHI compute path
     // cannot sample depth on Vulkan; same pattern as Velocity/clouds).
     PipelineHandle vkSsaoPipeline;              // SSAO.frag -> aoRawRT (R16F)
-    PipelineHandle vkSscsPipeline;              // SSCS.frag -> sscsRT (screen-space contact shadow)
+    PipelineHandle vkSscsPipeline;              // SSCS.frag -> sscsRT (Vulkan fullscreen contact shadow)
     ShaderHandle   vkSscsShader;
+    ComputePipelineHandle sscsComputePipeline;  // 3d_sscs.metal -> sscsRT (Metal compute contact shadow)
+    ShaderHandle   sscsMetalShader;
     PipelineHandle vkAoTemporalPipeline;        // AOTemporal.frag -> history (RGBA16F)
     PipelineHandle vkAoDenoisePipelineRGBA;     // AODenoise.frag -> scratch (RGBA16F)
     PipelineHandle vkAoDenoisePipelineR16;      // AODenoise.frag -> aoRT (R16F)
