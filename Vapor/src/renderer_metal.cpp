@@ -523,7 +523,13 @@ public:
             // (a negative near just extends the ortho volume behind the eye — valid).
             minDist -= (maxDist - minDist);
 
-            glm::mat4 lightProj = glm::ortho(
+            // orthoZO (not plain ortho): the camera uses perspectiveZO and Metal's
+            // depth buffer is [0,1], but glm::ortho here follows the GL [-1,1]
+            // convention unless GLM_FORCE_DEPTH_ZERO_TO_ONE took effect — which is
+            // unreliable in this TU (its sibling GLM_FORCE_LEFT_HANDED did not).
+            // Match the Vulkan path explicitly. RH (LEFT_HANDED inert) pairs with
+            // the RH lightView above.
+            glm::mat4 lightProj = glm::orthoZO(
                 -sphereRadius,  sphereRadius,
                 -sphereRadius,  sphereRadius,
                 minDist, maxDist
