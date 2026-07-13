@@ -1372,6 +1372,11 @@ void Renderer::mainRenderPass() {
         // AO output replaces the neutral white at texAO(6) whenever the AO
         // chain ran — with RT (RTAO) or without (SSAO shares the chain).
         if (aoEnabled && aoRT.isValid()) rhi->setTexture(0, 6, aoRT, clampSampler);
+        // 3d_pbr_normal_mapped.metal min()'s the sun shadow with texSSCS(15). It
+        // MUST be bound or Metal samples an unbound texture as 0 -> whole scene
+        // black. SSCS compute isn't wired on the RHI-Metal path yet, so bind
+        // white (= lit, min() no-op). (Vulkan uses RHIMain.frag's own SSCS slot.)
+        rhi->setTexture(0, 15, whiteTex, clampSampler);
         if (capabilities.raytracing) {
             // RT kernel outputs replace the neutral whites —
             // texShadow(7), texPointShadow(13), gibsGI(14).
@@ -4709,6 +4714,13 @@ void Renderer::drawGraphicsImGui() {
         // pssmRTMaxDist now sets where the independent near-field shadow map ends
         // and the PSSM cascades begin (the near map, not RT, owns [near, this]).
         ImGui::SliderFloat("Near shadow distance", &pssmRTMaxDist, 5.0f, 200.0f);
+        ImGui::Checkbox("Contact shadows (SSCS)", &sscsEnabled);
+        if (sscsEnabled) {
+            ImGui::SliderFloat("SSCS length", &sscsLength, 0.05f, 2.0f);
+            ImGui::SliderFloat("SSCS thickness", &sscsThickness, 0.05f, 2.0f);
+            if (backend != GraphicsBackend::Vulkan)
+                ImGui::TextDisabled("(SSCS computes on Vulkan/MoltenVK; RHI-Metal wiring pending)");
+        }
         int psd = static_cast<int>(pointShadowDebugMode);
         if (ImGui::Combo("Point shadow view", &psd, "Visibility (normal)\0Tile light-count heatmap\0")) {
             pointShadowDebugMode = static_cast<Uint32>(psd);
