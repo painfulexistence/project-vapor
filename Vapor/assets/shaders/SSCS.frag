@@ -78,8 +78,11 @@ void main() {
         // RH view space looks down -z: the scene surface occludes the ray when
         // it sits in front of (greater z than) the ray sample, but only within a
         // thickness window so distant background is not treated as a contact.
+        // Require a margin (bias) so the ray's own origin surface — which early
+        // steps project back onto — is not mistaken for an occluder. Without this
+        // lower bound the whole frame self-occludes and goes black.
         float diff = sceneZ - rayPos.z;
-        if (diff > 0.0 && diff < thickness) {
+        if (diff > bias && diff < thickness) {
             occlusion = 1.0 - float(i) / float(stepCount); // fade toward ray end
             break;
         }

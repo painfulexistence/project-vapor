@@ -1205,7 +1205,8 @@ public:
                 r.getTexture(material->emissiveMap ? material->emissiveMap->texture : r.defaultEmissiveTexture).get(), 5
             );
             encoder->setFragmentTexture(r.shadowRT.get(), 7);
-            encoder->setFragmentTexture(r.sscsRT.get(), 15);  // contact shadow (min-composited)
+            // White (=lit) when SSCS is off, so the shader's min() is a no-op.
+            encoder->setFragmentTexture(r.sscsEnabled ? r.sscsRT.get() : r.batch2DWhiteTexture.get(), 15);
 
             // IBL textures
             encoder->setFragmentTexture(r.irradianceMap.get(), 8);
@@ -6642,7 +6643,7 @@ void Renderer_Metal::renderToTexture(
             getTexture(material->emissiveMap ? material->emissiveMap->texture : defaultEmissiveTexture).get(), 5
         );
         encoder->setFragmentTexture(shadowRT.get(), 7);
-        encoder->setFragmentTexture(sscsRT.get(), 15);  // contact shadow (min-composited)
+        encoder->setFragmentTexture(sscsEnabled ? sscsRT.get() : batch2DWhiteTexture.get(), 15);
 
         // IBL textures
         encoder->setFragmentTexture(irradianceMap.get(), 8);

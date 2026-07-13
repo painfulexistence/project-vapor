@@ -845,8 +845,8 @@ protected:
     float pssmCascadeBlendRange = 10.0f;  // blend range between PSSM cascades (view-space units)
     uint32_t pssmPcfSampleCount = 16;     // PCF sample count: 4, 8, 16, or 32
     bool pssmDebugVisualize = false;      // visualize cascade regions with colors
-    // Screen-space contact shadow settings
-    bool sscsEnabled = true;
+    // Screen-space contact shadow settings (opt-in: enable in the Shadow Debug panel)
+    bool sscsEnabled = false;
     float sscsLength = 0.3f;      // view-space march distance (contact scale, metres)
     float sscsThickness = 0.3f;   // occluder depth window
     uint32_t sscsSteps = 12;

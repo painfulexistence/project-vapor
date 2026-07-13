@@ -732,8 +732,8 @@ private:
     // Independent near-field shadow map extent (view-space metres). The near map
     // covers [near, nearShadowEnd]; cascades take over beyond it. 0 = disabled.
     float nearShadowEnd = 8.0f;
-    // Screen-space contact shadows (min-composited onto the sun shadow term).
-    bool  sscsEnabled = true;
+    // Screen-space contact shadows (min-composited onto the sun shadow term). Opt-in.
+    bool  sscsEnabled = false;
     float sscsLength = 0.3f;      // view-space march distance (contact scale, metres)
     float sscsThickness = 0.3f;   // occluder depth window
     Uint32 sscsSteps = 12;

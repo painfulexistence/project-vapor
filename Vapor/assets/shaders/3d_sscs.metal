@@ -89,8 +89,11 @@ kernel void computeMain(
         // The scene surface occludes the ray if it sits in front of the ray
         // sample by more than nothing but less than `thickness` (so we skip
         // background surfaces far behind, which are not real contact occluders).
+        // Require a margin (params.bias) so the ray's own origin surface — which
+        // early steps project back onto — is not mistaken for an occluder. Without
+        // this lower bound the whole frame self-occludes and goes black.
         float diff = sceneVS.z - rayPos.z;
-        if (diff > 0.0 && diff < params.thickness) {
+        if (diff > params.bias && diff < params.thickness) {
             // Fade with marching distance so the contact term dies out smoothly
             // toward the ray's end instead of a hard cutoff.
             occlusion = 1.0 - float(i) / float(params.stepCount);
