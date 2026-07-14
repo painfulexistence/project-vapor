@@ -4727,6 +4727,7 @@ void Renderer::draw(std::shared_ptr<Scene> scene, Camera& camera) {
 
 void Renderer::draw(entt::registry& registry, std::shared_ptr<Scene> scene, Camera& camera) {
     if (!scene) return;
+    lastDrawRegistry = &registry;  // renderToTexture collects through this
 
     currentCamera.proj = camera.getProjMatrix();
     currentCamera.view = camera.getViewMatrix();
@@ -4775,9 +4776,47 @@ void Renderer::submitSceneLights(const std::shared_ptr<Scene>& scene) {
     }
 }
 
+// Scene-graph (non-ECS) collection: walk the node tree and emit one drawable
+// per mesh, composing world transforms during the walk (a node's cached
+// worldTransform may be stale outside the game's own update). Games that keep
+// their objects in the ECS get nothing from this — prefer the registry
+// overload below when one is available (see lastDrawRegistry).
+// This was an EMPTY STUB for as long as renderToTexture existed, which is why
+// the render-texture demo drew zero meshes (clear color only) on both backends.
 void Renderer::collectDrawables(std::shared_ptr<Scene> scene) {
-    // Only used for backwards compatibility or manual staging
-    // Usually collectDrawables(registry, scene) is used for ECS
+    if (!scene) return;
+
+    std::function<void(const std::shared_ptr<Node>&, const glm::mat4&)> walk =
+        [&](const std::shared_ptr<Node>& node, const glm::mat4& parentWorld) {
+            if (!node) return;
+            glm::mat4 world = parentWorld * node->localTransform;
+            if (node->meshGroup) {
+                for (auto& mesh : node->meshGroup->meshes) {
+                    if (!mesh || mesh->renderMeshId == UINT32_MAX) continue;
+                    Drawable drawable;
+                    drawable.mesh = mesh->renderMeshId;
+                    drawable.material = mesh->renderMaterialId;
+                    drawable.transform = world;
+                    glm::vec3 mn = mesh->localAABBMin;
+                    glm::vec3 mx = mesh->localAABBMax;
+                    glm::vec3 worldMin(std::numeric_limits<float>::max());
+                    glm::vec3 worldMax(std::numeric_limits<float>::lowest());
+                    for (int i = 0; i < 8; i++) {
+                        glm::vec3 c((i & 1) ? mx.x : mn.x,
+                                    (i & 2) ? mx.y : mn.y,
+                                    (i & 4) ? mx.z : mn.z);
+                        glm::vec3 p = glm::vec3(world * glm::vec4(c, 1.0f));
+                        worldMin = glm::min(worldMin, p);
+                        worldMax = glm::max(worldMax, p);
+                    }
+                    drawable.aabbMin = worldMin;
+                    drawable.aabbMax = worldMax;
+                    submitDrawable(drawable);
+                }
+            }
+            for (auto& child : node->children) walk(child, world);
+        };
+    for (auto& node : scene->nodes) walk(node, glm::mat4(1.0f));
 }
 
 void Renderer::collectDrawables(entt::registry& registry, std::shared_ptr<Scene> scene) {
@@ -6022,11 +6061,17 @@ void Renderer::renderToTexture(
     currentCamera = rtCamera;
 
     // Cull for THIS view and build ITS instance array into the dedicated RTT
-    // buffers. frameDrawables/visibleDrawables are per-draw scratch — the main
-    // draw() re-collects them later in the frame.
+    // buffers. frameDrawables/visibleDrawables are per-draw scratch (cleared
+    // again below so the main draw's APPENDING collect starts from empty).
+    // Collection prefers the ECS registry the game last drew with — the demo's
+    // meshes are ECS entities, invisible to the scene-node walk.
     frameDrawables.clear();
     visibleDrawables.clear();
-    collectDrawables(scene);
+    if (lastDrawRegistry) {
+        collectDrawables(*lastDrawRegistry, scene);
+    } else {
+        collectDrawables(scene);
+    }
     performCulling();
     sortDrawables();
 
@@ -6169,7 +6214,9 @@ void Renderer::renderToTexture(
         for (Uint32 iid = 0; iid < rttDraws.size(); iid++) {
             const Drawable& drawable = frameDrawables[rttDraws[iid]];
             const RenderMesh& mesh = meshes[drawable.mesh];
-            bindMaterial(drawable.material);
+            if (drawable.material < materials.size()) {
+                bindMaterial(drawable.material);
+            }
             rhi->bindVertexBuffer(mesh.vertexBuffer, 3, 0);
             rhi->setVertexBytes(&iid, sizeof(Uint32), 4);
             if (mesh.indexBuffer.isValid()) {
@@ -6191,6 +6238,12 @@ void Renderer::renderToTexture(
     // wanted, it needs an explicit scoped API, not the shared queues.
 
     rhi->endRenderPass();
+
+    // Leave the shared per-frame lists EMPTY: beginFrame owns the clear and the
+    // main draw's ECS collect APPENDS — leftovers here would double every
+    // drawable in the main view.
+    frameDrawables.clear();
+    visibleDrawables.clear();
 
     // Restore previous camera state
     currentCamera = previousCamera;

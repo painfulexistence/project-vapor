@@ -644,6 +644,11 @@ private:
     TextureHandle volumeTestTexture;     // owned procedural test grid
     bool volumeRenderEnabled = false;    // default OFF until real data lands
     VolumeRenderData volumeSettings;     // panel tunables (box/density/albedo/steps)
+    // The registry the ECS draw() last rendered with. renderToTexture needs it
+    // because the demo's meshes live on ECS entities, not the scene-node tree —
+    // the scene-only collectDrawables(scene) finds nothing there. The registry
+    // outlives frames (owned by the game), so the cached pointer stays valid.
+    entt::registry* lastDrawRegistry = nullptr;
     // Render-to-texture scene view (renderToTexture): dedicated camera and
     // instance buffers. The offscreen view encodes BEFORE the main draw, but
     // host-visible buffer writes are last-write-wins across the whole frame's
