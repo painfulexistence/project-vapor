@@ -1,4 +1,5 @@
 #include "renderer.hpp"
+#include "meshlet_builder.hpp"  // runtime meshlet fallback in registerMesh
 #include "stats_log.hpp"
 #include "rhi_vulkan.hpp"
 #include <chrono>
@@ -609,6 +610,23 @@ MeshId Renderer::registerMesh(const std::vector<Vapor::VertexData>& vertices,
     m_mergedVertices.insert(m_mergedVertices.end(), vertices.begin(), vertices.end());
     m_mergedIndices.insert(m_mergedIndices.end(), indices.begin(), indices.end());
     m_mergedGeometryDirty = true;
+
+    // Fallback: if the mesh arrived without baked meshlets (e.g. loaded via
+    // loadGLTF instead of loadGLTFOptimized, or a pre-v3 cache) but the backend
+    // can use the meshlet path, build them now. One-time per mesh at load; the
+    // preferred path is the offline bake in loadGLTFOptimized.
+    Vapor::MeshletData builtMeshlets;
+    if ((!meshletData || !meshletData->isBuilt()) && capabilities.meshShaders && !indices.empty()) {
+        Vapor::Mesh tmp;
+        tmp.vertices = vertices;
+        tmp.indices = indices;
+        tmp.primitiveMode = Vapor::PrimitiveMode::TRIANGLES;
+        MeshletBuilder::build(tmp);
+        if (tmp.meshletData.isBuilt()) {
+            builtMeshlets = std::move(tmp.meshletData);
+            meshletData = &builtMeshlets;
+        }
+    }
 
     // Accumulate baked meshlets into the global meshlet buffers. meshletVertices
     // are mesh-local (into `vertices`); rebase them into the merged vertex buffer
@@ -2031,6 +2049,9 @@ void Renderer::ensureMergedGeometry() {
     rhi->updateBuffer(mergedIndexBuffer, m_mergedIndices.data(), 0, ibDesc.size);
 
     m_mergedGeometryDirty = false;
+    // Complete these large one-time uploads before their staging retires (see
+    // ensureMeshletBuffers for the VUID this avoids).
+    rhi->flushUploads();
 }
 
 // (Re)upload the global meshlet buffers accumulated in registerMesh. Only on
@@ -2072,6 +2093,11 @@ void Renderer::ensureMeshletBuffers() {
     makeStorage(meshMeshletRangeBuffer, ranges.data(), ranges.size() * sizeof(glm::uvec2));
 
     m_meshletsDirty = false;
+    // These are large one-time uploads recorded into the upload command stream.
+    // Force them to complete now: otherwise an oversize staging buffer (retired
+    // on a frame-counter timer) can be freed one frame before the upload command
+    // buffer that reads it finishes (VUID-vkDestroyBuffer-buffer-00922).
+    rhi->flushUploads();
     fmt::print("Meshlet buffers uploaded: {} meshlets, {} verts, {} tris, {} meshes\n",
                m_globalMeshlets.size(), m_globalMeshletVertices.size(),
                m_globalMeshletTriangles.size() / 3, meshes.size());
