@@ -731,6 +731,7 @@ private:
     // PSSM: distance where RT near-field shadows hand over to the cascades
     // (native pssmRTMaxDist, panel-tunable 5..200).
     float pssmRTMaxDist = 25.0f;  // near shadow extent [near, this]; cascades beyond
+    Uint32 pssmPcfSampleCount = 16;  // PCF taps: 4/8/16/32 (Metal PBR shader; Vulkan is fixed 3x3)
     // Independent near-field shadow map extent (view-space metres). The near map
     // covers [near, nearShadowEnd]; cascades take over beyond it. 0 = disabled.
     float nearShadowEnd = 8.0f;

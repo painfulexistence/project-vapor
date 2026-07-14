@@ -175,7 +175,11 @@ struct alignas(16) PSSMRenderData {
     // is transported here too (appended so existing shaders reading the prefix
     // are unaffected). std430: nearLightMatrix lands on a 16-byte boundary.
     float nearShadowEnd = 0.0f;
-    float _pad[2] = {};
+    // PCF tap count (4/8/16/32) at offset 216 — where the Metal PBR shader's
+    // PSSMData reads pcfSampleCount, so RHI-Metal honours it. nearLightMatrix
+    // stays at offset 224, so the Vulkan PSSMBuf declarations are unaffected.
+    Uint32 pcfSampleCount = 16;
+    float _pad = 0.0f;
     glm::mat4 nearLightMatrix = glm::mat4(1.0f);
 };
 
