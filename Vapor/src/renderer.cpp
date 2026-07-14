@@ -1600,6 +1600,31 @@ void Renderer::mainRenderPass() {
             mainDrawCalls++;
         }
     } else if (useMDI) {
+        // Throttled diagnostic: read back what the cull compute pass wrote into the
+        // host-visible args buffer (CPUtoGPU = shared). At encode time this frame's
+        // cull hasn't executed yet, so we see the PREVIOUS frame's commands — sane
+        // for a steady scene. Tells us cull output vs. clear-color cause:
+        //   instanceCount all 0 -> cull is dropping everything (frustum/camera)
+        //   instanceCount 1, sane indexCount/firstIndex -> geometry/vertex issue
+        //   garbage indexCount -> cull didn't run / wrong binding.
+        static Uint32 s_mdiDiagFrame = 0;
+        if ((s_mdiDiagFrame++ % 120u) == 0u && !m_materialRanges.empty()) {
+            if (void* mapped = rhi->mapBuffer(gpuCullArgsBuffer)) {
+                const auto* cmds = static_cast<const Vapor::DrawCommand*>(mapped);
+                Uint32 visible = 0;
+                const Uint32 sampleN = std::min<Uint32>(totalInstanceCount, MAX_INSTANCES);
+                for (Uint32 i = 0; i < sampleN; ++i) visible += (cmds[i].instanceCount != 0) ? 1u : 0u;
+                const auto& r0 = m_materialRanges.front().second;
+                const Vapor::DrawCommand& c = cmds[r0.first];
+                fmt::print("[MDI diag] instances={} visible(prevFrame)={} ranges={} "
+                           "cmd0{{idxCount={} instCount={} firstIdx={} vtxOff={} firstInst={}}} "
+                           "mergedVtx={} mergedIdx={}\n",
+                           totalInstanceCount, visible, m_materialRanges.size(),
+                           c.indexCount, c.instanceCount, c.firstIndex, c.vertexOffset, c.firstInstance,
+                           m_mergedVertices.size(), m_mergedIndices.size());
+                rhi->unmapBuffer(gpuCullArgsBuffer);
+            }
+        }
         rhi->bindVertexBuffer(mergedVertexBuffer, 3, 0);
         rhi->bindIndexBuffer(mergedIndexBuffer, 0);
         Uint32 zeroId = 0;

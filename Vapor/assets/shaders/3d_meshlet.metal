@@ -186,13 +186,20 @@ static float3 hashColor(uint x) {
     uint mi = payload.meshletIndices[gid];
     Meshlet m = meshlets[mi];
 
-    float4x4 mvp = cam.proj * cam.view * instances[params.instanceID].model;
+    // Transform in the SAME associativity as the pre-pass / main vertex shader:
+    // world = model * pos, clip = proj * view * world. A fused proj*view*model
+    // MVP rounds differently and can land fragments epsilon-farther than the
+    // pre-pass depth, which the main pass's LessOrEqual test then rejects
+    // (whole-cluster dropout -> clear color).
+    float4x4 model = instances[params.instanceID].model;
+    float4x4 viewProj = cam.proj * cam.view;
     float3 color = hashColor(mi);
 
     for (uint v = tid; v < m.vertexCount; v += 64u) {
         uint vi = meshletVertices[m.vertexOffset + v];  // merged-VB vertex index
         MeshletVertexOut vout;
-        vout.position = mvp * float4(float3(vertices[vi].position), 1.0);
+        float4 worldPos = model * float4(float3(vertices[vi].position), 1.0);
+        vout.position = viewProj * worldPos;
         vout.color = color;
         output.set_vertex(v, vout);
     }
