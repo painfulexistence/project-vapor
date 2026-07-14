@@ -4776,47 +4776,10 @@ void Renderer::submitSceneLights(const std::shared_ptr<Scene>& scene) {
     }
 }
 
-// Scene-graph (non-ECS) collection: walk the node tree and emit one drawable
-// per mesh, composing world transforms during the walk (a node's cached
-// worldTransform may be stale outside the game's own update). Games that keep
-// their objects in the ECS get nothing from this — prefer the registry
-// overload below when one is available (see lastDrawRegistry).
-// This was an EMPTY STUB for as long as renderToTexture existed, which is why
-// the render-texture demo drew zero meshes (clear color only) on both backends.
+// Non-ECS collection is intentionally a no-op: the scene-node tree is headed
+// for retirement — game objects live in the ECS, and every collector should go
+// through the registry overload below (renderToTexture uses lastDrawRegistry).
 void Renderer::collectDrawables(std::shared_ptr<Scene> scene) {
-    if (!scene) return;
-
-    std::function<void(const std::shared_ptr<Node>&, const glm::mat4&)> walk =
-        [&](const std::shared_ptr<Node>& node, const glm::mat4& parentWorld) {
-            if (!node) return;
-            glm::mat4 world = parentWorld * node->localTransform;
-            if (node->meshGroup) {
-                for (auto& mesh : node->meshGroup->meshes) {
-                    if (!mesh || mesh->renderMeshId == UINT32_MAX) continue;
-                    Drawable drawable;
-                    drawable.mesh = mesh->renderMeshId;
-                    drawable.material = mesh->renderMaterialId;
-                    drawable.transform = world;
-                    glm::vec3 mn = mesh->localAABBMin;
-                    glm::vec3 mx = mesh->localAABBMax;
-                    glm::vec3 worldMin(std::numeric_limits<float>::max());
-                    glm::vec3 worldMax(std::numeric_limits<float>::lowest());
-                    for (int i = 0; i < 8; i++) {
-                        glm::vec3 c((i & 1) ? mx.x : mn.x,
-                                    (i & 2) ? mx.y : mn.y,
-                                    (i & 4) ? mx.z : mn.z);
-                        glm::vec3 p = glm::vec3(world * glm::vec4(c, 1.0f));
-                        worldMin = glm::min(worldMin, p);
-                        worldMax = glm::max(worldMax, p);
-                    }
-                    drawable.aabbMin = worldMin;
-                    drawable.aabbMax = worldMax;
-                    submitDrawable(drawable);
-                }
-            }
-            for (auto& child : node->children) walk(child, world);
-        };
-    for (auto& node : scene->nodes) walk(node, glm::mat4(1.0f));
 }
 
 void Renderer::collectDrawables(entt::registry& registry, std::shared_ptr<Scene> scene) {
@@ -6063,14 +6026,12 @@ void Renderer::renderToTexture(
     // Cull for THIS view and build ITS instance array into the dedicated RTT
     // buffers. frameDrawables/visibleDrawables are per-draw scratch (cleared
     // again below so the main draw's APPENDING collect starts from empty).
-    // Collection prefers the ECS registry the game last drew with — the demo's
-    // meshes are ECS entities, invisible to the scene-node walk.
+    // Collection goes straight through the ECS registry the game last drew
+    // with — the scene-node tree is being retired and collects nothing.
     frameDrawables.clear();
     visibleDrawables.clear();
     if (lastDrawRegistry) {
         collectDrawables(*lastDrawRegistry, scene);
-    } else {
-        collectDrawables(scene);
     }
     performCulling();
     sortDrawables();
