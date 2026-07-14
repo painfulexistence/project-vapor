@@ -4745,16 +4745,14 @@ void Renderer::drawGraphicsImGui() {
         // pssmRTMaxDist now sets where the independent near-field shadow map ends
         // and the PSSM cascades begin (the near map, not RT, owns [near, this]).
         ImGui::SliderFloat("Near shadow distance", &pssmRTMaxDist, 5.0f, 200.0f);
-        // PCF taps for the PSSM cascades (Metal PBR shader honours 4/8/16/32;
-        // the Vulkan RHIMain.frag path is a fixed 3x3).
+        // PCF taps for the PSSM cascades + near map (4/8/16/32 Poisson) — honoured
+        // by both the Metal PBR shader and the Vulkan RHIMain.frag path.
         {
             const char* pcfLabels[] = { "4", "8", "16", "32" };
             const Uint32 pcfValues[] = { 4u, 8u, 16u, 32u };
             int idx = 2;
             for (int i = 0; i < 4; ++i) if (pssmPcfSampleCount == pcfValues[i]) idx = i;
             if (ImGui::Combo("PCF samples", &idx, pcfLabels, 4)) pssmPcfSampleCount = pcfValues[idx];
-            if (backend == GraphicsBackend::Vulkan)
-                ImGui::TextDisabled("(Vulkan cascades use a fixed 3x3 PCF)");
         }
         ImGui::Checkbox("Contact shadows (SSCS)", &sscsEnabled);
         if (sscsEnabled) {
