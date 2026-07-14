@@ -765,6 +765,14 @@ PipelineHandle RHI_Metal::createMeshPipeline(const MeshPipelineDesc& desc) {
     pipelineDesc->setMeshFunction(msIt->second.function.get());
     pipelineDesc->setFragmentFunction(fsIt->second.function.get());
 
+    // Object/mesh amplification limits. Without these Metal allocates no payload
+    // memory and caps the mesh grid at 0 — the object shader runs but emits no
+    // mesh threadgroups, so nothing is drawn.
+    pipelineDesc->setMaxTotalThreadsPerObjectThreadgroup(desc.taskThreadgroupSize);
+    pipelineDesc->setMaxTotalThreadsPerMeshThreadgroup(desc.meshThreadgroupSize);
+    pipelineDesc->setMaxTotalThreadgroupsPerMeshGrid(desc.maxMeshThreadgroupsPerObject);
+    pipelineDesc->setPayloadMemoryLength(desc.payloadBytes);
+
     for (size_t i = 0; i < desc.colorAttachmentFormats.size(); i++) {
         auto attachment = pipelineDesc->colorAttachments()->object(i);
         PixelFormat fmt = desc.colorAttachmentFormats[i];

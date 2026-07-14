@@ -296,6 +296,13 @@ struct MeshPipelineDesc {
     // them in the shaders' local_size). Must match the shaders.
     Uint32 taskThreadgroupSize = 32;
     Uint32 meshThreadgroupSize = 64;
+    // Metal object/mesh amplification limits (Vulkan ignores these — it bakes
+    // them into the SPIR-V). Without them Metal allocates no payload memory and
+    // caps the mesh grid at 0, so the object->mesh handoff emits nothing.
+    // payloadBytes must cover the task payload struct; maxMeshThreadgroupsPerObject
+    // caps each object threadgroup's set_threadgroups_per_grid.
+    Uint32 payloadBytes = 128;                 // MeshletPayload = uint[32]
+    Uint32 maxMeshThreadgroupsPerObject = 32;  // <= task threads per group
     BlendMode blendMode = BlendMode::Opaque;
     bool depthTest = true;
     bool depthWrite = true;
