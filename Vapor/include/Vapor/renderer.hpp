@@ -464,6 +464,12 @@ private:
         Uint32 visibleDrawables = 0;
         Uint32 directionalLights = 0;
         Uint32 pointLights = 0;
+        // Main-pass geometry submissions this frame. The clearest "is MDI/GPU-
+        // driven actually engaged" signal: CPU/per-object issue ~one draw per
+        // object, MDI issues ~one drawIndexedIndirect per material, meshlet issues
+        // one drawMeshTasks per instance.
+        Uint32 mainDrawCalls = 0;
+        const char* mainPath = "CPU";  // "CPU" | "Indirect" | "MDI" | "Meshlet"
     } lastFrameStats;
 
     // Tile-cull histogram cache for the "Light Culling Debug" panel. Refreshed

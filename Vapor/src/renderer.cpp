@@ -1570,6 +1570,12 @@ void Renderer::mainRenderPass() {
                             meshletBuffer.isValid() && meshletBoundsBuffer.isValid() &&
                             meshletVertexBuffer.isValid() && meshletTriangleBuffer.isValid() &&
                             mergedVertexBuffer.isValid() && totalInstanceCount > 0;
+
+    // Count the geometry submissions issued below so the debug panel can show
+    // which path actually ran (see FrameStats::mainDrawCalls / mainPath).
+    Uint32 mainDrawCalls = 0;
+    lastFrameStats.mainPath = useMeshlet ? "Meshlet" : useMDI ? "MDI"
+                            : useGpuDriven ? "Indirect" : "CPU";
     if (useMeshlet) {
         rhi->bindPipeline(meshletPipeline);
         // Bindings mirror Meshlet.task/.mesh and 3d_meshlet.metal.
@@ -1591,6 +1597,7 @@ void Renderer::mainRenderPass() {
             MeshletParams params{ it->second, mesh.meshletOffset, mesh.meshletCount, threshold };
             rhi->setVertexBytes(&params, sizeof(params), 8);
             rhi->drawMeshTasks((mesh.meshletCount + 31) / 32, 1, 1);
+            mainDrawCalls++;
         }
     } else if (useMDI) {
         rhi->bindVertexBuffer(mergedVertexBuffer, 3, 0);
@@ -1602,6 +1609,7 @@ void Renderer::mainRenderPass() {
             rhi->drawIndexedIndirect(gpuCullArgsBuffer,
                                      static_cast<size_t>(range.first) * sizeof(Vapor::DrawCommand),
                                      range.second, sizeof(Vapor::DrawCommand));
+            mainDrawCalls++;  // one native multi-draw per material range
         }
     } else {
 
@@ -1672,12 +1680,15 @@ void Renderer::mainRenderPass() {
                 } else {
                     rhi->drawIndexed(mesh.indexCount, 1, 0, 0, 0);
                 }
+                mainDrawCalls++;
             } else if (mesh.vertexBuffer.isValid()) {
                 rhi->draw(mesh.vertexCount, 1, 0, 0);
+                mainDrawCalls++;
             }
         }
     }
     }  // end !useMDI (per-object / CPU path)
+    lastFrameStats.mainDrawCalls = mainDrawCalls;
 
     // World-space batch quads are NOT flushed here: they render in the
     // WorldCanvas pass after sky/fog/scattering (native graph order), so the
@@ -5278,6 +5289,10 @@ void Renderer::drawGraphicsImGui() {
     ImGui::ColorEdit3("Clear color", (float*)&clearColor);
     ImGui::Text("Drawables: %u / %u visible",
                 lastFrameStats.visibleDrawables, lastFrameStats.totalDrawables);
+    // Main-pass path + submission count: the direct signal that MDI/GPU-driven is
+    // engaged. Switching Off->Indirect+MDI should collapse this from ~drawable
+    // count to ~material count.
+    ImGui::Text("Main pass: %s | %u draw calls", lastFrameStats.mainPath, lastFrameStats.mainDrawCalls);
     ImGui::Text("Scene lights: dir %u | point %u | rect %zu",
                 lastFrameStats.directionalLights, lastFrameStats.pointLights, rectLights.size());
     ImGui::Text("Raytracing: %s | Compute: %s | GPU timestamps: %s",
