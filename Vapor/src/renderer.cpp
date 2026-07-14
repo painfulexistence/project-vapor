@@ -783,6 +783,7 @@ MaterialId Renderer::registerMaterial(const MaterialDataInput& materialData) {
 
     MaterialId id = static_cast<MaterialId>(materials.size());
     materials.push_back(material);
+    m_bindlessTableDirty = true;  // ICB mode's texture table must pick this up
     return id;
 }
 
@@ -1277,15 +1278,21 @@ void Renderer::updateBuffers() {
     // MDI mode (Vulkan): instances address the merged scene buffers, so they need
     // real per-mesh offsets and must be grouped into contiguous per-material
     // ranges. Any other mode uses per-mesh buffers -> offsets stay 0.
-    const bool mdi = gpuDrivenIndirect() && gpuDrivenMDI &&
-                     ((backend == GraphicsBackend::Vulkan && capabilities.multiDrawIndirect) ||
-                      backend == GraphicsBackend::Metal);
+    // ICB mode shares the MDI instance layout (merged offsets, material-sorted)
+    // — its commands index the merged buffers the same way.
+    const bool icb = gpuDrivenIndirect() && gpuDrivenICB && capabilities.indirectCommandBuffers;
+    const bool mdi = icb ||
+                     (gpuDrivenIndirect() && gpuDrivenMDI &&
+                      ((backend == GraphicsBackend::Vulkan && capabilities.multiDrawIndirect) ||
+                       backend == GraphicsBackend::Metal));
     m_mdiInstanceLayout = mdi;  // pre-pass/shadow must match this layout (Metal)
     // MDI and the meshlet path both address the merged vertex buffer, so build it
     // for either (self-gates on m_mergedGeometryDirty).
     if (mdi || gpuDrivenMeshlet()) ensureMergedGeometry();
     // Upload meshlet buffers (self-gates on mesh-shader support + dirty).
     ensureMeshletBuffers();
+    // Bindless material table for the ICB mode (self-gates on dirty + caps).
+    if (icb) ensureBindlessMaterialTable();
     m_materialRanges.clear();
 
     auto appendInstance = [&](Uint32 drawableIdx) {
@@ -1567,6 +1574,15 @@ void Renderer::mainRenderPass() {
                         mergedVertexBuffer.isValid() && mergedIndexBuffer.isValid() &&
                         !m_materialRanges.empty();
 
+    // ICB mode (Metal): the cull kernel encoded the whole scene's draws into
+    // sceneICB; replay them with ONE executeCommandsInBuffer on the bindless
+    // pipeline. Takes precedence over plain MDI. Falls back to the paths below
+    // when anything is missing (pipeline compile failed, ICB unsupported...).
+    const bool useICB = useGpuDriven && gpuDrivenICB && capabilities.indirectCommandBuffers &&
+                        sceneICB.isValid() && mainPipelineICB.isValid() &&
+                        bindlessMaterialTable.isValid() && mergedVertexBuffer.isValid() &&
+                        totalInstanceCount > 0;
+
     // Meshlet path (task/mesh shaders): per-cluster cull + LOD selection on the
     // GPU, one drawMeshTasks per instance. Draws per-meshlet debug colors for
     // now (PBR parity is a follow-up). Falls back to the paths below if the
@@ -1579,7 +1595,7 @@ void Renderer::mainRenderPass() {
     // Count the geometry submissions issued below so the debug panel can show
     // which path actually ran (see FrameStats::mainDrawCalls / mainPath).
     Uint32 mainDrawCalls = 0;
-    lastFrameStats.mainPath = useMeshlet ? "Meshlet" : useMDI ? "MDI"
+    lastFrameStats.mainPath = useMeshlet ? "Meshlet" : useICB ? "ICB" : useMDI ? "MDI"
                             : useGpuDriven ? "Indirect" : "CPU";
     if (useMeshlet) {
         // Debug probes also drop the depth test + face culling (NoDepth twin).
@@ -1612,6 +1628,19 @@ void Renderer::mainRenderPass() {
             rhi->drawMeshTasks((mesh.meshletCount + 31) / 32, 1, 1);
             mainDrawCalls++;
         }
+    } else if (useICB) {
+        // Encoder state set for mainPipeline above (camera/instances/lights/
+        // system textures) carries over — Metal encoder bindings persist across
+        // pipeline switches. Only the pipeline (bindless frag + supportsICB),
+        // the merged VB, and the material table differ from the normal path.
+        rhi->bindPipeline(mainPipelineICB);
+        rhi->bindVertexBuffer(mergedVertexBuffer, 3, 0);
+        Uint32 zeroId = 0;
+        rhi->setVertexBytes(&zeroId, sizeof(Uint32), 4);  // index rides base_instance
+        rhi->setFragmentBuffer(13, bindlessMaterialTable, 0, 0);
+        rhi->useArgumentTableResources(bindlessMaterialTable);  // residency for table textures
+        rhi->executeICB(sceneICB, totalInstanceCount);
+        mainDrawCalls = 1;  // the whole scene in one executeCommandsInBuffer
     } else if (useMDI) {
         // Throttled diagnostic: read back what the cull compute pass wrote into the
         // host-visible args buffer (CPUtoGPU = shared). At encode time this frame's
@@ -2052,7 +2081,36 @@ void Renderer::gpuCullPass() {
     if (!gpuCullPipeline.isValid() || !gpuCullArgsBuffer.isValid()) return;
     if (totalInstanceCount == 0) return;
 
+    // ICB variant: the kernel encodes real draw commands into the scene ICB
+    // (created lazily here) instead of writing indirect-args structs.
+    const bool icbMode = gpuDrivenICB && capabilities.indirectCommandBuffers &&
+                         gpuCullICBPipeline.isValid() && mergedIndexBuffer.isValid();
+    if (icbMode && !sceneICB.isValid()) {
+        sceneICB = rhi->createIndirectCommandBuffer(MAX_INSTANCES);
+    }
+
     const Uint32 n = totalInstanceCount;
+    if (icbMode && sceneICB.isValid()) {
+        rhi->beginComputePass("GpuCull");
+        rhi->bindComputePipeline(gpuCullICBPipeline);
+        rhi->setComputeBuffer(0, cameraUniformBuffer, 0, sizeof(CameraRenderData));
+        rhi->setComputeBuffer(1, instanceDataBuffer, 0, sizeof(Vapor::InstanceData) * n);
+        rhi->bindComputeICB(2, sceneICB);
+        rhi->setComputeBytes(&n, sizeof(Uint32), 3);
+        struct OccParams { Uint32 enabled; Uint32 mipCount; float hizW; float hizH; } occ;
+        occ.enabled = (gpuOcclusionCulling && hizTexture.isValid()) ? 1u : 0u;
+        occ.mipCount = hizMipCount;
+        occ.hizW = float(hizWidth);
+        occ.hizH = float(hizHeight);
+        rhi->setComputeBytes(&occ, sizeof(occ), 4);
+        rhi->setComputeBuffer(5, mergedIndexBuffer, 0, 0);
+        rhi->setComputeSampledTexture(4, hizTexture, clampSampler);
+        rhi->dispatch((n + 63) / 64, 1, 1);
+        rhi->endComputePass();
+        rhi->computeBarrier();  // ICB writes -> executeICB reads in Main
+        return;
+    }
+
     rhi->beginComputePass("GpuCull");
     rhi->bindComputePipeline(gpuCullPipeline);
     rhi->setComputeBuffer(0, cameraUniformBuffer, 0, sizeof(CameraRenderData));
@@ -2164,6 +2222,40 @@ void Renderer::ensureMeshletBuffers() {
     fmt::print("Meshlet buffers uploaded: {} meshlets, {} verts, {} tris, {} meshes\n",
                m_globalMeshlets.size(), m_globalMeshletVertices.size(),
                m_globalMeshletTriangles.size() / 3, meshes.size());
+}
+
+// (Re)write the bindless material texture table for the ICB draw mode: one
+// MaterialTexs entry (6 texture slots) per material, indexed by materialID in
+// the bindless-specialized PBR fragment. Missing textures fall back to the
+// engine defaults (white/flat-normal/black) so every slot is a valid handle —
+// argument-table reads have no "unbound" concept. Self-gates on dirty + caps.
+void Renderer::ensureBindlessMaterialTable() {
+    if (!m_bindlessTableDirty) return;
+    if (!capabilities.indirectCommandBuffers || !fragmentShaderBindless.isValid()) return;
+    if (materials.empty()) return;
+
+    if (!bindlessMaterialTable.isValid()) {
+        bindlessMaterialTable = rhi->createTextureArgumentTable(
+            fragmentShaderBindless, /*bufferIndex=*/13, MAX_INSTANCES, /*texturesPerEntry=*/6);
+        if (!bindlessMaterialTable.isValid()) return;
+    }
+
+    auto texOrDefault = [&](TextureId id, TextureId fallback) -> TextureHandle {
+        if (id < textures.size() && textures[id].handle.isValid()) return textures[id].handle;
+        return textures[fallback].handle;
+    };
+    const Uint32 n = std::min<Uint32>(static_cast<Uint32>(materials.size()), MAX_INSTANCES);
+    for (Uint32 i = 0; i < n; ++i) {
+        const RenderMaterial& m = materials[i];
+        rhi->writeTextureArgumentTable(bindlessMaterialTable, i, 0, texOrDefault(m.albedoTexture,    defaultWhiteTexture));
+        rhi->writeTextureArgumentTable(bindlessMaterialTable, i, 1, texOrDefault(m.normalTexture,    defaultNormalTexture));
+        rhi->writeTextureArgumentTable(bindlessMaterialTable, i, 2, texOrDefault(m.metallicTexture,  defaultWhiteTexture));
+        rhi->writeTextureArgumentTable(bindlessMaterialTable, i, 3, texOrDefault(m.roughnessTexture, defaultWhiteTexture));
+        rhi->writeTextureArgumentTable(bindlessMaterialTable, i, 4, texOrDefault(m.occlusionTexture, defaultWhiteTexture));
+        rhi->writeTextureArgumentTable(bindlessMaterialTable, i, 5, texOrDefault(m.emissiveTexture,  defaultBlackTexture));
+    }
+    m_bindlessTableDirty = false;
+    fmt::print("Bindless material table written: {} materials\n", n);
 }
 
 // Sun/lens flare: procedural glow/halo/ghosts/starburst added over the HDR
@@ -4136,6 +4228,23 @@ void Renderer::createRenderPipeline() {
 
     mainPipeline = rhi->createPipeline(pipelineDesc);
 
+    // ICB twin (Metal): same pipeline with the bindless-specialized fragment
+    // (material textures from the argument table at buffer 13) and the
+    // supportIndirectCommandBuffers opt-in that executeICB requires.
+    if (backend == GraphicsBackend::Metal && capabilities.indirectCommandBuffers) {
+        ShaderDesc bfd;
+        bfd.stage = ShaderStage::Fragment;
+        bfd.code = fragShaderCode.data();
+        bfd.codeSize = fragShaderCode.size();
+        bfd.entryPoint = "fragmentMain";
+        bfd.bindlessMaterials = true;
+        fragmentShaderBindless = rhi->createShader(bfd);
+        PipelineDesc icbDesc = pipelineDesc;
+        icbDesc.fragmentShader = fragmentShaderBindless;
+        icbDesc.supportsICB = true;
+        mainPipelineICB = rhi->createPipeline(icbDesc);
+    }
+
     // ------------------------------------------------------------------------
     // Post-process pipeline: fullscreen triangle sampling colorRT, ACES tone
     // map + sRGB encode to the swapchain. Vulkan only (the Metal backend uses
@@ -4596,6 +4705,16 @@ void Renderer::createRenderPipeline() {
             ComputePipelineDesc cd; cd.computeShader = gpuCullShader;
             cd.threadGroupSizeX = 64;
             gpuCullPipeline = rhi->createComputePipeline(cd);
+
+            // ICB variant of the same cull: encodes draws straight into the
+            // scene's indirect command buffer (see computeMainICB).
+            if (capabilities.indirectCommandBuffers) {
+                d.entryPoint = "computeMainICB";
+                gpuCullICBShader = rhi->createShader(d);
+                ComputePipelineDesc icd; icd.computeShader = gpuCullICBShader;
+                icd.threadGroupSizeX = 64;
+                gpuCullICBPipeline = rhi->createComputePipeline(icd);
+            }
         }
 
         // --------------------------------------------------------------------
@@ -5422,6 +5541,21 @@ void Renderer::drawGraphicsImGui() {
         ImGui::Checkbox("  -> multi-draw indirect (per material)", &gpuDrivenMDI);
         ImGui::EndDisabled();
         if (!mdiAvailable) gpuDrivenMDI = false;
+
+        // ICB: GPU-encoded command buffer + bindless materials — the whole
+        // scene in ONE executeCommandsInBuffer. Metal-only (on Vulkan the MDI
+        // path above is already a single native multi-draw call).
+        const bool icbAvailable = gpuDrivenIndirect() && capabilities.indirectCommandBuffers &&
+                                  mainPipelineICB.isValid() && gpuCullICBPipeline.isValid();
+        ImGui::BeginDisabled(!icbAvailable);
+        ImGui::Checkbox("  -> ICB + bindless (single executeCommands)", &gpuDrivenICB);
+        ImGui::EndDisabled();
+        if (!icbAvailable && ImGui::IsItemHovered(ImGuiHoveredFlags_AllowWhenDisabled)) {
+            ImGui::SetTooltip(capabilities.indirectCommandBuffers
+                                  ? "Requires the Indirect method"
+                                  : "Metal only (Vulkan MDI is already single-call)");
+        }
+        if (!icbAvailable) gpuDrivenICB = false;
 
         // Hi-Z occlusion is orthogonal — it refines whichever GPU-driven mode is
         // active (object cull in Indirect, meshlet cull in Meshlet).

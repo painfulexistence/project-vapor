@@ -838,6 +838,26 @@ private:
     // indirect draw per object. Metal keeps the per-object loop (single-call MDI
     // there needs Indirect Command Buffers). Sub-option of the Indirect mode.
     bool gpuDrivenMDI = false;
+    // ICB draw mode (Metal): the cull kernel encodes draws into a real
+    // MTLIndirectCommandBuffer; the main pass replays the whole scene with ONE
+    // executeCommandsInBuffer, and the fragment reads material textures from a
+    // bindless argument table (buffer 13) by materialID — no per-material CPU
+    // loop at all. Sub-option of Indirect, gated on
+    // capabilities.indirectCommandBuffers (Vulkan reports false: its native MDI
+    // is already single-call). Takes precedence over plain MDI when both are on.
+    bool gpuDrivenICB = false;
+    IndirectCommandBufferHandle sceneICB;
+    ComputePipelineHandle gpuCullICBPipeline;
+    ShaderHandle gpuCullICBShader;
+    PipelineHandle mainPipelineICB;       // mainPipeline twin: bindless frag + supportsICB
+    ShaderHandle fragmentShaderBindless;  // fragmentMain specialized with kBindlessMaterials
+    BufferHandle bindlessMaterialTable;   // MaterialTexs[MAX_INSTANCES] argument table
+    bool m_bindlessTableDirty = true;     // rewrite entries when materials/textures change
+    void ensureBindlessMaterialTable();
+    // Note: a single ICB is shared across frames in flight — Metal's automatic
+    // hazard tracking serializes the next frame's cull (write) against the
+    // previous frame's executeICB (read). Correct, at the cost of some overlap;
+    // per-frame ICB slots are a follow-up if that shows up in GPU timings.
     // True while this frame's InstanceData carries MERGED-buffer vertex/index
     // offsets (MDI layout, set in updateBuffers). Metal shaders that pull
     // vertices via instances[iid].vertexOffset + vertex_id (pre-pass, shadow)

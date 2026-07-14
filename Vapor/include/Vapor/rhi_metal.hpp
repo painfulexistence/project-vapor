@@ -115,6 +115,17 @@ public:
     void drawIndexedIndirect(BufferHandle argsBuffer, size_t offset, Uint32 drawCount, Uint32 stride) override;
     void drawMeshTasks(Uint32 groupCountX, Uint32 groupCountY = 1, Uint32 groupCountZ = 1) override;
 
+    // Indirect command buffers + bindless texture tables (see rhi.hpp).
+    IndirectCommandBufferHandle createIndirectCommandBuffer(Uint32 maxCommands) override;
+    void destroyIndirectCommandBuffer(IndirectCommandBufferHandle handle) override;
+    void bindComputeICB(Uint32 binding, IndirectCommandBufferHandle handle) override;
+    void executeICB(IndirectCommandBufferHandle handle, Uint32 commandCount) override;
+    BufferHandle createTextureArgumentTable(ShaderHandle fragmentShader, Uint32 bufferIndex,
+                                            Uint32 entryCount, Uint32 texturesPerEntry) override;
+    void writeTextureArgumentTable(BufferHandle table, Uint32 entry, Uint32 slot,
+                                   TextureHandle texture) override;
+    void useArgumentTableResources(BufferHandle table) override;
+
     // ========================================================================
     // Compute Commands
     // ========================================================================
@@ -261,9 +272,37 @@ private:
 
     struct ComputePipelineResource {
         NS::SharedPtr<MTL::ComputePipelineState> pipeline;
+        // Kept for bindComputeICB: the ICB container argument buffer is encoded
+        // with an argument encoder created from the kernel function.
+        NS::SharedPtr<MTL::Function> function;
         // Threadgroup shape from ComputePipelineDesc — Metal sets it at
         // dispatch time (SPIR-V bakes local_size; MSL does not).
         Uint32 tgX = 1, tgY = 1, tgZ = 1;
+    };
+
+    struct ICBResource {
+        NS::SharedPtr<MTL::IndirectCommandBuffer> icb;
+        // 8-byte argument buffer holding the ICB reference for the cull kernel
+        // (MSL `device ICBContainer& { command_buffer icb; }`), encoded lazily
+        // on first bindComputeICB with the bound kernel's argument encoder.
+        NS::SharedPtr<MTL::Buffer> containerArgBuffer;
+        Uint32 maxCommands = 0;
+    };
+
+    // Bindless texture table: argument buffer of entryCount structs, each with
+    // texturesPerEntry texture slots, plus the written textures for residency
+    // (useResources at draw time) and the encoder that lays entries out.
+    struct ArgumentTableResource {
+        NS::SharedPtr<MTL::Buffer> buffer;
+        NS::SharedPtr<MTL::ArgumentEncoder> encoder;
+        NS::UInteger stride = 0;
+        Uint32 entryCount = 0;
+        Uint32 texturesPerEntry = 0;
+        // Written textures, deduped, retained for useResources. Rebuilt lazily
+        // from writtenSet when dirty.
+        std::vector<MTL::Resource*> residentResources;
+        std::unordered_map<Uint32, NS::SharedPtr<MTL::Texture>> written;  // (entry*slots+slot) -> tex
+        bool residencyDirty = true;
     };
 
     struct AccelStructResource {
@@ -295,6 +334,7 @@ private:
     Uint32 nextPipelineId = 1;
     Uint32 nextComputePipelineId = 1;
     Uint32 nextAccelStructId = 1;
+    Uint32 nextICBId = 1;
 
     std::unordered_map<Uint32, BufferResource> buffers;
     std::unordered_map<Uint32, TextureResource> textures;
@@ -303,6 +343,11 @@ private:
     std::unordered_map<Uint32, PipelineResource> pipelines;
     std::unordered_map<Uint32, ComputePipelineResource> computePipelines;
     std::unordered_map<Uint32, AccelStructResource> accelStructs;
+    std::unordered_map<Uint32, ICBResource> icbs;
+    // Keyed by the BufferHandle id returned from createTextureArgumentTable.
+    // The underlying MTL::Buffer is also registered in `buffers` under the same
+    // id, so the table binds through the normal setFragmentBuffer path.
+    std::unordered_map<Uint32, ArgumentTableResource> argumentTables;
 
     // Current binding state (invalid = nothing bound)
     PipelineHandle currentPipeline;

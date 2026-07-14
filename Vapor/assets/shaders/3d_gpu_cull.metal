@@ -90,6 +90,25 @@ static bool occludedByHiZ(device const CameraData& cam, float3 aabbMin, float3 a
     return minDepth > o;
 }
 
+// Shared cull test: frustum sphere + optional Hi-Z occlusion. Returns true
+// when the instance should draw.
+static bool instanceVisible(InstanceData inst, device const CameraData& cam,
+                            OccParams occ, texture2d<float> hiz, sampler hizSampler) {
+    float3 center = inst.boundingSphere.xyz;
+    float radius = inst.boundingSphere.w;
+    for (int i = 0; i < 6; ++i) {
+        float4 plane = cam.frustumPlanes[i]; // normalized, points inward
+        if (dot(plane.xyz, center) + plane.w < -radius) {
+            return false;
+        }
+    }
+    if (occ.occlusionEnabled != 0u &&
+        occludedByHiZ(cam, inst.AABBMin, inst.AABBMax, hiz, hizSampler, occ)) {
+        return false;
+    }
+    return true;
+}
+
 // Entry point must be named computeMain (RHI Metal compute convention).
 kernel void computeMain(
     device const CameraData&   cam           [[buffer(0)]],
@@ -106,21 +125,7 @@ kernel void computeMain(
     }
 
     InstanceData inst = instances[id];
-    float3 center = inst.boundingSphere.xyz;
-    float radius = inst.boundingSphere.w;
-
-    bool visible = true;
-    for (int i = 0; i < 6; ++i) {
-        float4 plane = cam.frustumPlanes[i]; // normalized, points inward
-        if (dot(plane.xyz, center) + plane.w < -radius) {
-            visible = false;
-            break;
-        }
-    }
-    if (visible && occ.occlusionEnabled != 0u &&
-        occludedByHiZ(cam, inst.AABBMin, inst.AABBMax, hiz, hizSampler, occ)) {
-        visible = false;
-    }
+    bool visible = instanceVisible(inst, cam, occ, hiz, hizSampler);
 
     DrawCommand cmd;
     cmd.indexCount = inst.indexCount;
@@ -134,4 +139,48 @@ kernel void computeMain(
     cmd.vertexOffset = 0;
     cmd.firstInstance = id;
     commands[id] = cmd;
+}
+
+// ============================================================================
+// ICB variant: encode the draw commands directly into an indirect command
+// buffer on the GPU. The render pass then replays the whole scene with ONE
+// executeCommandsInBuffer — no per-command CPU loop, no material re-binding
+// (the bindless fragment fetches material textures by materialID).
+// ============================================================================
+
+// Bound via RHI::bindComputeICB (argument buffer holding the ICB reference).
+struct ICBContainer {
+    command_buffer icb [[id(0)]];
+};
+
+kernel void computeMainICB(
+    device const CameraData&   cam           [[buffer(0)]],
+    device const InstanceData* instances     [[buffer(1)]],
+    device ICBContainer&       container     [[buffer(2)]],
+    constant uint&             instanceCount [[buffer(3)]],
+    constant OccParams&        occ           [[buffer(4)]],
+    device const uint*         mergedIndices [[buffer(5)]],
+    texture2d<float>           hiz           [[texture(4)]],
+    sampler                    hizSampler    [[sampler(4)]],
+    uint                       id            [[thread_position_in_grid]]
+) {
+    if (id >= instanceCount) {
+        return;
+    }
+
+    InstanceData inst = instances[id];
+    bool visible = instanceVisible(inst, cam, occ, hiz, hizSampler);
+
+    // Always (re-)encode the slot: ICB slots persist across frames, so a
+    // culled instance must overwrite its stale command. instanceCount 0 keeps
+    // the slot a GPU no-op. baseVertex stays 0 on Metal (vertex pulling adds
+    // instances[iid].vertexOffset — see computeMain); baseInstance carries the
+    // instance index into [[base_instance]].
+    render_command cmd(container.icb, id);
+    cmd.draw_indexed_primitives(primitive_type::triangle,
+                                inst.indexCount,
+                                mergedIndices + inst.indexOffset,
+                                visible ? 1u : 0u,
+                                0u,
+                                id);
 }

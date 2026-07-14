@@ -72,6 +72,15 @@ struct SamplerHandle {
     bool isValid() const { return id != UINT32_MAX; }
 };
 
+// GPU-encoded command list (Metal MTLIndirectCommandBuffer). A compute kernel
+// writes draw commands into it; the render pass replays the whole list with one
+// executeICB call. Vulkan has no portable equivalent exposed here (its native
+// multi-draw indirect already replays N draws in one call).
+struct IndirectCommandBufferHandle {
+    Uint32 id = UINT32_MAX;
+    bool isValid() const { return id != UINT32_MAX; }
+};
+
 struct DescriptorSetHandle {
     Uint32 id = UINT32_MAX;
     bool isValid() const { return id != UINT32_MAX; }
@@ -271,6 +280,12 @@ struct ShaderDesc {
     const void* code;
     size_t codeSize;
     const char* entryPoint = "main";
+    // Metal: specialize the function with kBindlessMaterials=true (function
+    // constant 0) — the PBR fragment then reads material textures from the
+    // argument table at buffer(13) instead of the bound slots 0-5. Only set for
+    // shaders that declare the constant (3d_pbr_normal_mapped.metal); ignored
+    // on Vulkan.
+    bool bindlessMaterials = false;
 };
 
 struct VertexAttribute {
@@ -339,6 +354,10 @@ struct PipelineDesc {
     // PixelFormat::Swapchain resolves to the actual swapchain format.
     std::vector<PixelFormat> colorAttachmentFormats = { PixelFormat::Swapchain };
     PixelFormat depthAttachmentFormat = PixelFormat::Depth32Float;  // when hasDepthAttachment
+    // Metal: pipeline may be referenced by indirect command buffer draws
+    // (MTLRenderPipelineDescriptor.supportIndirectCommandBuffers). Required for
+    // executeICB with an inherit-pipeline ICB. Ignored on Vulkan.
+    bool supportsICB = false;
     // TODO: Add descriptor set layouts when needed.
 };
 
@@ -440,6 +459,11 @@ struct RHICapabilities {
     // Task + mesh shader pipelines (Vulkan VK_EXT_mesh_shader; Metal object/mesh
     // functions). Required for the meshlet-based GPU-driven path.
     bool meshShaders = false;
+    // GPU-encoded indirect command buffers + bindless texture tables (Metal
+    // MTLIndirectCommandBuffer + argument buffers). Required for the ICB draw
+    // mode. Vulkan reports false: its native MDI is already a single call, and
+    // device-generated commands aren't portably available (MoltenVK).
+    bool indirectCommandBuffers = false;
 };
 
 // ============================================================================
@@ -604,6 +628,37 @@ public:
     // vkCmdDrawMeshTasksEXT; Metal drawMeshThreadgroups). No-op default so
     // backends without mesh shaders still link.
     virtual void drawMeshTasks(Uint32 /*groupCountX*/, Uint32 /*groupCountY*/ = 1, Uint32 /*groupCountZ*/ = 1) {}
+
+    // ========================================================================
+    // Indirect Command Buffers + bindless texture tables (Metal-only for now;
+    // capabilities.indirectCommandBuffers gates all of it, defaults keep other
+    // backends linking). See the ICB draw mode in the renderer.
+    // ========================================================================
+
+    // GPU-encodable command list holding up to maxCommands indexed draws. The
+    // ICB inherits the encoder's pipeline and buffer bindings; commands carry
+    // only indexCount/indexBuffer/instanceCount/baseVertex/baseInstance.
+    virtual IndirectCommandBufferHandle createIndirectCommandBuffer(Uint32 /*maxCommands*/) { return {}; }
+    virtual void destroyIndirectCommandBuffer(IndirectCommandBufferHandle /*handle*/) {}
+    // Bind the ICB to the current COMPUTE pass so the kernel can encode into it
+    // (Metal: container argument buffer at `binding` + useResource(write); the
+    // kernel declares `device ICBContainer& { command_buffer icb; }`).
+    virtual void bindComputeICB(Uint32 /*binding*/, IndirectCommandBufferHandle /*handle*/) {}
+    // Replay commands [0, commandCount) of the ICB on the current render pass.
+    // The bound pipeline must have been created with supportsICB.
+    virtual void executeICB(IndirectCommandBufferHandle /*handle*/, Uint32 /*commandCount*/) {}
+
+    // Bindless texture table: an argument buffer holding `entryCount` structs of
+    // `texturesPerEntry` texture handles each, laid out to match the given
+    // fragment shader's argument at `bufferIndex` (Metal argument encoder).
+    // Write entries with writeTextureArgumentTable; call useArgumentTableResources
+    // inside the render pass (after bindPipeline) to make every written texture
+    // resident, then bind the table with setFragmentBuffer(bufferIndex, table).
+    virtual BufferHandle createTextureArgumentTable(ShaderHandle /*fragmentShader*/, Uint32 /*bufferIndex*/,
+                                                    Uint32 /*entryCount*/, Uint32 /*texturesPerEntry*/) { return {}; }
+    virtual void writeTextureArgumentTable(BufferHandle /*table*/, Uint32 /*entry*/, Uint32 /*slot*/,
+                                           TextureHandle /*texture*/) {}
+    virtual void useArgumentTableResources(BufferHandle /*table*/) {}
 
     // ========================================================================
     // Compute Commands

@@ -107,6 +107,12 @@ bool RHI_Metal::initialize(SDL_Window* window) {
     // or Mac family 2. Detected here; the pipeline type is wired up in Phase C.
     capabilities.meshShaders = device->supportsFamily(MTL::GPUFamilyApple7) ||
                                device->supportsFamily(MTL::GPUFamilyMac2);
+    // Indirect command buffers with inherited pipeline state + argument-buffer
+    // texture tables (the ICB draw mode). Same families as mesh shaders — every
+    // Apple-silicon Mac qualifies; the inherit-pipeline and Tier-2 argument
+    // buffer requirements are both met there.
+    capabilities.indirectCommandBuffers = device->supportsFamily(MTL::GPUFamilyApple7) ||
+                                          device->supportsFamily(MTL::GPUFamilyMac2);
 
     // Backend telemetry: one grouped "[MTL]" line per --stats interval. Metal is
     // unified memory, so these counts (plus RSS) are the leak-hunt signal.
@@ -587,7 +593,27 @@ ShaderHandle RHI_Metal::createShader(const ShaderDesc& desc) {
                     break;
             }
         }
-        function = NS::TransferPtr(library->newFunction(NS::String::string(entryPoint.c_str(), NS::UTF8StringEncoding)));
+        auto entryName = NS::String::string(entryPoint.c_str(), NS::UTF8StringEncoding);
+        if (desc.bindlessMaterials) {
+            // Specialize with kBindlessMaterials=true (function constant 0):
+            // the PBR fragment reads material textures from the argument table
+            // at buffer(13). Shaders never specialized this way see the
+            // constant as undefined -> false (is_function_constant_defined).
+            auto constants = NS::TransferPtr(MTL::FunctionConstantValues::alloc()->init());
+            bool bindless = true;
+            constants->setConstantValue(&bindless, MTL::DataTypeBool, NS::UInteger(0));
+            NS::Error* fcError = nullptr;
+            function = NS::TransferPtr(library->newFunction(entryName, constants.get(), &fcError));
+            if (!function || fcError) {
+                if (fcError) {
+                    fmt::print("Shader specialization error: {}\n",
+                               fcError->localizedDescription()->utf8String());
+                }
+                throw std::runtime_error(fmt::format("Failed to specialize shader entry point '{}'", entryPoint));
+            }
+        } else {
+            function = NS::TransferPtr(library->newFunction(entryName));
+        }
         if (!function) {
             throw std::runtime_error(fmt::format("Failed to find shader entry point '{}'", entryPoint));
         }
@@ -710,6 +736,11 @@ PipelineHandle RHI_Metal::createPipeline(const PipelineDesc& desc) {
 
     // Sample count
     pipelineDesc->setSampleCount(desc.sampleCount);
+
+    // Indirect-command-buffer replay (executeICB) requires opting the PSO in.
+    if (desc.supportsICB) {
+        pipelineDesc->setSupportIndirectCommandBuffers(true);
+    }
 
     // Create pipeline
     NS::Error* error = nullptr;
@@ -1595,6 +1626,153 @@ void RHI_Metal::drawIndexedIndirect(BufferHandle argsBuffer, size_t offset, Uint
 }
 
 // ============================================================================
+// Indirect Command Buffers + bindless texture tables (the ICB draw mode)
+// ============================================================================
+
+IndirectCommandBufferHandle RHI_Metal::createIndirectCommandBuffer(Uint32 maxCommands) {
+    if (!capabilities.indirectCommandBuffers || maxCommands == 0) return {};
+
+    auto desc = NS::TransferPtr(MTL::IndirectCommandBufferDescriptor::alloc()->init());
+    desc->setCommandTypes(MTL::IndirectCommandTypeDrawIndexed);
+    // Commands inherit the encoder's pipeline and buffer bindings; each command
+    // carries only the indexed-draw arguments (its index-buffer region,
+    // baseVertex, baseInstance). Textures/samplers are encoder state anyway.
+    desc->setInheritPipelineState(true);
+    desc->setInheritBuffers(true);
+    desc->setMaxVertexBufferBindCount(0);
+    desc->setMaxFragmentBufferBindCount(0);
+
+    auto icb = NS::TransferPtr(device->newIndirectCommandBuffer(
+        desc.get(), maxCommands, MTL::ResourceStorageModePrivate));
+    if (!icb) {
+        fmt::print("Failed to create indirect command buffer ({} commands)\n", maxCommands);
+        return {};
+    }
+
+    Uint32 id = nextICBId++;
+    ICBResource res;
+    res.icb = icb;
+    res.maxCommands = maxCommands;
+    icbs[id] = res;
+    return IndirectCommandBufferHandle{id};
+}
+
+void RHI_Metal::destroyIndirectCommandBuffer(IndirectCommandBufferHandle handle) {
+    icbs.erase(handle.id);
+}
+
+void RHI_Metal::bindComputeICB(Uint32 binding, IndirectCommandBufferHandle handle) {
+    auto it = icbs.find(handle.id);
+    if (it == icbs.end() || !currentComputeEncoder) return;
+    ICBResource& res = it->second;
+
+    // The kernel sees the ICB through a tiny argument buffer (MSL:
+    // `device ICBContainer& { command_buffer icb; }`). Encode it once with an
+    // argument encoder from the currently bound kernel function.
+    if (!res.containerArgBuffer) {
+        auto pit = computePipelines.find(currentComputePipeline.id);
+        if (pit == computePipelines.end() || !pit->second.function) return;
+        auto encoder = NS::TransferPtr(pit->second.function->newArgumentEncoder(binding));
+        if (!encoder) {
+            fmt::print("bindComputeICB: no argument encoder for kernel buffer({})\n", binding);
+            return;
+        }
+        res.containerArgBuffer = NS::TransferPtr(
+            device->newBuffer(encoder->encodedLength(), MTL::ResourceStorageModeShared));
+        encoder->setArgumentBuffer(res.containerArgBuffer.get(), 0);
+        encoder->setIndirectCommandBuffer(res.icb.get(), 0);
+    }
+
+    currentComputeEncoder->setBuffer(res.containerArgBuffer.get(), 0, binding);
+    // Argument-buffer indirection: the kernel's writes to the ICB must be
+    // declared to the encoder explicitly.
+    currentComputeEncoder->useResource(res.icb.get(), MTL::ResourceUsageWrite);
+}
+
+void RHI_Metal::executeICB(IndirectCommandBufferHandle handle, Uint32 commandCount) {
+    auto it = icbs.find(handle.id);
+    if (it == icbs.end() || !currentRenderEncoder || commandCount == 0) return;
+    Uint32 count = std::min(commandCount, it->second.maxCommands);
+    currentRenderEncoder->executeCommandsInBuffer(it->second.icb.get(),
+                                                  NS::Range::Make(0, count));
+}
+
+BufferHandle RHI_Metal::createTextureArgumentTable(ShaderHandle fragmentShader, Uint32 bufferIndex,
+                                                   Uint32 entryCount, Uint32 texturesPerEntry) {
+    auto sit = shaders.find(fragmentShader.id);
+    if (sit == shaders.end() || !sit->second.function || entryCount == 0) return {};
+
+    auto encoder = NS::TransferPtr(sit->second.function->newArgumentEncoder(bufferIndex));
+    if (!encoder) {
+        fmt::print("createTextureArgumentTable: no argument encoder at buffer({})\n", bufferIndex);
+        return {};
+    }
+    // One struct per entry; entries are tightly packed at the encoded stride.
+    NS::UInteger stride = encoder->encodedLength();
+    auto buffer = NS::TransferPtr(device->newBuffer(stride * entryCount,
+                                                    MTL::ResourceStorageModeShared));
+    if (!buffer) return {};
+
+    // Register the MTL::Buffer under a normal buffer id so setFragmentBuffer
+    // binds the table like any other buffer; the table map shares the id.
+    Uint32 id = nextBufferId++;
+    BufferResource bufRes;
+    bufRes.buffer = buffer;
+    bufRes.size = stride * entryCount;
+    bufRes.isMapped = false;
+    bufRes.mappedPointer = nullptr;
+    buffers[id] = bufRes;
+
+    ArgumentTableResource table;
+    table.buffer = buffer;
+    table.encoder = encoder;
+    table.stride = stride;
+    table.entryCount = entryCount;
+    table.texturesPerEntry = texturesPerEntry;
+    argumentTables[id] = std::move(table);
+    return BufferHandle{id};
+}
+
+void RHI_Metal::writeTextureArgumentTable(BufferHandle tableHandle, Uint32 entry, Uint32 slot,
+                                          TextureHandle texture) {
+    auto tit = argumentTables.find(tableHandle.id);
+    auto xit = textures.find(texture.id);
+    if (tit == argumentTables.end() || xit == textures.end()) return;
+    ArgumentTableResource& table = tit->second;
+    if (entry >= table.entryCount || slot >= table.texturesPerEntry) return;
+
+    table.encoder->setArgumentBuffer(table.buffer.get(), table.stride * entry);
+    table.encoder->setTexture(xit->second.texture.get(), slot);
+    table.written[entry * table.texturesPerEntry + slot] = xit->second.texture;
+    table.residencyDirty = true;
+}
+
+void RHI_Metal::useArgumentTableResources(BufferHandle tableHandle) {
+    auto tit = argumentTables.find(tableHandle.id);
+    if (tit == argumentTables.end() || !currentRenderEncoder) return;
+    ArgumentTableResource& table = tit->second;
+
+    if (table.residencyDirty) {
+        table.residentResources.clear();
+        // Dedup: many materials share default/white textures.
+        std::unordered_map<MTL::Texture*, bool> seen;
+        for (auto& [key, tex] : table.written) {
+            if (tex && !seen.count(tex.get())) {
+                seen[tex.get()] = true;
+                table.residentResources.push_back(tex.get());
+            }
+        }
+        table.residencyDirty = false;
+    }
+    if (!table.residentResources.empty()) {
+        currentRenderEncoder->useResources(table.residentResources.data(),
+                                           table.residentResources.size(),
+                                           MTL::ResourceUsageRead,
+                                           MTL::RenderStageFragment);
+    }
+}
+
+// ============================================================================
 // Utility
 // ============================================================================
 
@@ -1771,6 +1949,7 @@ ComputePipelineHandle RHI_Metal::createComputePipeline(const ComputePipelineDesc
     Uint32 id = nextComputePipelineId++;
     ComputePipelineResource res;
     res.pipeline = pipeline;
+    res.function = it->second.function;  // for bindComputeICB's argument encoder
     res.tgX = std::max(1u, desc.threadGroupSizeX);
     res.tgY = std::max(1u, desc.threadGroupSizeY);
     res.tgZ = std::max(1u, desc.threadGroupSizeZ);

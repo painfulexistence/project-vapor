@@ -2,6 +2,27 @@
 using namespace metal;
 #include "Res/shaders/3d_common.metal" // TODO: use more robust include path
 
+// Bindless-materials specialization (the ICB draw mode). When the pipeline is
+// built with kBindlessMaterials=true (function constant 0, RHI
+// ShaderDesc::bindlessMaterials), the fragment reads its six material textures
+// from the argument table at buffer(13) indexed by the materialID varying,
+// instead of the per-draw bound slots 0-5 — required because a single
+// executeCommandsInBuffer can't rebind textures between draws. Unspecialized
+// pipelines see the constant as undefined -> false and keep the bound path.
+constant bool kBindlessMaterialsSet [[function_constant(0)]];
+constant bool kBindlessMaterials = is_function_constant_defined(kBindlessMaterialsSet) && kBindlessMaterialsSet;
+constant bool kBoundMaterials = !kBindlessMaterials;
+
+// One entry per material in the bindless table (matches the RHI's
+// createTextureArgumentTable(..., texturesPerEntry=6) slot order).
+struct MaterialTexs {
+    texture2d<float, access::sample> albedo    [[id(0)]];
+    texture2d<float, access::sample> normal    [[id(1)]];
+    texture2d<float, access::sample> metallic  [[id(2)]];
+    texture2d<float, access::sample> roughness [[id(3)]];
+    texture2d<float, access::sample> occlusion [[id(4)]];
+    texture2d<float, access::sample> emissive  [[id(5)]];
+};
 
 struct RasterizerData {
     float4 position [[position]];
@@ -12,6 +33,7 @@ struct RasterizerData {
     float3 scaledLocalPos;
     float3 localNormal;
     MaterialData material;
+    uint materialID [[flat]];  // bindless table index (ICB mode)
 };
 
 struct Surface {
@@ -332,6 +354,7 @@ vertex RasterizerData vertexMain(
     vert.position = camera.proj * camera.view * vert.worldPosition;
     vert.uv = in[actualVertexID].uv;
     vert.material = materials[instances[iid].materialID];
+    vert.materialID = instances[iid].materialID;
     
     // Pass scaled local position and local normal for Object Space Triplanar
     float3 scale = float3(length(model[0].xyz), length(model[1].xyz), length(model[2].xyz));
@@ -343,12 +366,15 @@ vertex RasterizerData vertexMain(
 
 fragment float4 fragmentMain(
     RasterizerData in [[stage_in]],
-    texture2d<float, access::sample> texAlbedo [[texture(0)]],
-    texture2d<float, access::sample> texNormal [[texture(1)]],
-    texture2d<float, access::sample> texMetallic [[texture(2)]],
-    texture2d<float, access::sample> texRoughness [[texture(3)]],
-    texture2d<float, access::sample> texOcclusion [[texture(4)]],
-    texture2d<float, access::sample> texEmissive [[texture(5)]],
+    // Per-draw material textures — bound path only. The bindless
+    // specialization disables these and reads materialTexs instead.
+    texture2d<float, access::sample> texAlbedo [[texture(0), function_constant(kBoundMaterials)]],
+    texture2d<float, access::sample> texNormal [[texture(1), function_constant(kBoundMaterials)]],
+    texture2d<float, access::sample> texMetallic [[texture(2), function_constant(kBoundMaterials)]],
+    texture2d<float, access::sample> texRoughness [[texture(3), function_constant(kBoundMaterials)]],
+    texture2d<float, access::sample> texOcclusion [[texture(4), function_constant(kBoundMaterials)]],
+    texture2d<float, access::sample> texEmissive [[texture(5), function_constant(kBoundMaterials)]],
+    const device MaterialTexs* materialTexs [[buffer(13), function_constant(kBindlessMaterials)]],
     texture2d<float, access::sample> texAO [[texture(6)]],
     texture2d<float, access::sample> texShadow [[texture(7)]],
     texturecube<float, access::sample> irradianceMap [[texture(8)]],
@@ -379,6 +405,17 @@ fragment float4 fragmentMain(
 
     MaterialData material = in.material;
 
+    // Resolve the material texture set once: bound slots (normal path) or the
+    // bindless table entry for this fragment's material (ICB path). The dead
+    // branch references a disabled argument, which is legal — it's eliminated
+    // when the function constant is folded at pipeline build.
+    texture2d<float, access::sample> matAlbedo    = kBindlessMaterials ? materialTexs[in.materialID].albedo    : texAlbedo;
+    texture2d<float, access::sample> matNormal    = kBindlessMaterials ? materialTexs[in.materialID].normal    : texNormal;
+    texture2d<float, access::sample> matMetallic  = kBindlessMaterials ? materialTexs[in.materialID].metallic  : texMetallic;
+    texture2d<float, access::sample> matRoughness = kBindlessMaterials ? materialTexs[in.materialID].roughness : texRoughness;
+    texture2d<float, access::sample> matOcclusion = kBindlessMaterials ? materialTexs[in.materialID].occlusion : texOcclusion;
+    texture2d<float, access::sample> matEmissive  = kBindlessMaterials ? materialTexs[in.materialID].emissive  : texEmissive;
+
     // Prototype UV: triplanar mapping with world space or object space
     // Mode: 0 = Off, 1 = World Space (static objects), 2 = Object Space (dynamic objects)
     if (material.prototypeUVMode > 0.5) {
@@ -404,16 +441,16 @@ fragment float4 fragmentMain(
         }
     }
 
-    float4 baseColor = texAlbedo.sample(s, in.uv);
+    float4 baseColor = matAlbedo.sample(s, in.uv);
     if (baseColor.a * material.baseColorFactor.a < 0.5) {
         discard_fragment();
     }
     Surface surf;
     surf.color = srgbToLinear(baseColor.rgb * material.baseColorFactor.rgb);
-    surf.ao = texOcclusion.sample(s, in.uv).r * material.occlusionStrength;
-    surf.roughness = texRoughness.sample(s, in.uv).g * material.roughnessFactor;
-    surf.metallic = texMetallic.sample(s, in.uv).b * material.metallicFactor;
-    surf.emission = linearToSRGB(texEmissive.sample(s, in.uv).rgb * material.emissiveFactor) * material.emissiveStrength;
+    surf.ao = matOcclusion.sample(s, in.uv).r * material.occlusionStrength;
+    surf.roughness = matRoughness.sample(s, in.uv).g * material.roughnessFactor;
+    surf.metallic = matMetallic.sample(s, in.uv).b * material.metallicFactor;
+    surf.emission = linearToSRGB(matEmissive.sample(s, in.uv).rgb * material.emissiveFactor) * material.emissiveStrength;
     surf.subsurface = material.subsurface;
     surf.specular = material.specular;
     surf.specular_tint = material.specularTint;
@@ -428,7 +465,7 @@ fragment float4 fragmentMain(
     T = normalize(T - dot(T, N) * N);
     float3 B = normalize(cross(N, T) * in.worldTangent.w);
     float3x3 TBN = float3x3(T, B, N);
-    float3 norm = normalize(TBN * normalize(texNormal.sample(s, in.uv).rgb * 2.0 - 1.0));
+    float3 norm = normalize(TBN * normalize(matNormal.sample(s, in.uv).rgb * 2.0 - 1.0));
     float3 viewDir = normalize(camera.position - in.worldPosition.xyz);
 
     float2 screenUV = in.position.xy / screenSize;
