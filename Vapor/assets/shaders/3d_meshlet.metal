@@ -113,17 +113,22 @@ static float projectError(float4 sphere, float error, float4x4 model, float maxS
         float4x4 model = instances[params.instanceID].model;
         float maxScale = max(length(model[0].xyz), max(length(model[1].xyz), length(model[2].xyz)));
 
+        // Debug bypass: a negative threshold means "emit everything" — skips
+        // frustum, cone, AND the LOD cut so raster problems can be isolated
+        // from culling problems.
+        bool cullBypass = params.errorThreshold < 0.0;
+
         // Frustum: world-space sphere vs the camera planes.
         float3 wc = (model * float4(b.cullSphere.xyz, 1.0)).xyz;
         float wr = b.cullSphere.w * maxScale;
         bool visible = true;
-        for (int i = 0; i < 6; ++i) {
+        for (int i = 0; i < 6 && !cullBypass; ++i) {
             float4 plane = cam.frustumPlanes[i];
             if (dot(plane.xyz, wc) + plane.w < -wr) { visible = false; break; }
         }
 
         // Backface cone (meshopt): cull when the whole cluster faces away.
-        if (visible && b.coneAxisCutoff.w < 1.0) {
+        if (visible && !cullBypass && b.coneAxisCutoff.w < 1.0) {
             float3 apexW = (model * float4(b.coneApex.xyz, 1.0)).xyz;
             float3 axisW = normalize(float3x3(model[0].xyz, model[1].xyz, model[2].xyz) * b.coneAxisCutoff.xyz);
             if (dot(normalize(apexW - cam.position), axisW) >= b.coneAxisCutoff.w) {
@@ -132,7 +137,7 @@ static float projectError(float4 sphere, float error, float4x4 model, float maxS
         }
 
         // Two-sphere LOD cut: parent too coarse AND this cluster fine enough.
-        if (visible) {
+        if (visible && !cullBypass) {
             bool parentTooCoarse =
                 projectError(b.parentSphere, b.parentError, model, maxScale, cam) > params.errorThreshold;
             bool thisFineEnough = (b.refined < 0) ||

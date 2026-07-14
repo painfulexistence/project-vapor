@@ -802,11 +802,18 @@ private:
     // follow-up). Selectable when the backend reports mesh-shader support.
     static constexpr bool kMeshletDrawImplemented = true;
     PipelineHandle meshletPipeline;
+    // Depth-test-less twin, bound while meshletDrawAll is on (debug): separates
+    // "fragments depth-rejected against the PrePass" from "nothing rasterized".
+    PipelineHandle meshletPipelineNoDepth;
     ShaderHandle meshletTaskShader, meshletMeshShader, meshletFragShader;
     // Cluster-LOD screen-space error tolerance, in pixels. Larger = coarser
     // clusters selected sooner (fewer triangles); the task shader compares the
     // projected cluster error against this / screenHeight.
     float meshletLodPixelError = 1.0f;
+    // Debug: bypass ALL meshlet culling (frustum/cone/LOD cut) — the task shader
+    // emits every meshlet when the errorThreshold it receives is negative.
+    // Isolates "cull rejects everything" from raster/depth/binding problems.
+    bool meshletDrawAll = false;
 
     // Hi-Z occlusion culling (requires a GPU-driven mode). A depth pyramid built
     // from the PrePass depth; the cull compute rejects instances whose screen
@@ -827,6 +834,13 @@ private:
     // indirect draw per object. Metal keeps the per-object loop (single-call MDI
     // there needs Indirect Command Buffers). Sub-option of the Indirect mode.
     bool gpuDrivenMDI = false;
+    // True while this frame's InstanceData carries MERGED-buffer vertex/index
+    // offsets (MDI layout, set in updateBuffers). Metal shaders that pull
+    // vertices via instances[iid].vertexOffset + vertex_id (pre-pass, shadow)
+    // must then read the MERGED vertex buffer, not the per-mesh one — the
+    // per-mesh buffers are far smaller than the offsets baked into the
+    // instances, so mixing them fetches garbage (full-screen depth corruption).
+    bool m_mdiInstanceLayout = false;
     std::vector<Vapor::VertexData> m_mergedVertices;  // CPU accumulation (registerMesh)
     std::vector<Uint32> m_mergedIndices;              // mesh-local indices; rebased via vertexOffset
     BufferHandle mergedVertexBuffer;

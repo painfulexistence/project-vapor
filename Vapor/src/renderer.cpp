@@ -1280,6 +1280,7 @@ void Renderer::updateBuffers() {
     const bool mdi = gpuDrivenIndirect() && gpuDrivenMDI &&
                      ((backend == GraphicsBackend::Vulkan && capabilities.multiDrawIndirect) ||
                       backend == GraphicsBackend::Metal);
+    m_mdiInstanceLayout = mdi;  // pre-pass/shadow must match this layout (Metal)
     // MDI and the meshlet path both address the merged vertex buffer, so build it
     // for either (self-gates on m_mergedGeometryDirty).
     if (mdi || gpuDrivenMeshlet()) ensureMergedGeometry();
@@ -1416,9 +1417,12 @@ void Renderer::mainRenderPass() {
     rhi->setVertexBuffer(0, cameraUniformBuffer, 0, sizeof(CameraRenderData));
     // Binding 1: MaterialData array (all materials)
     rhi->setVertexBuffer(1, materialUniformBuffer, 0, sizeof(Vapor::MaterialData) * MAX_INSTANCES);
-    // Binding 2: InstanceData array
-    // Note: We only update the buffer with visible drawables, so the size is visibleDrawables.size()
-    rhi->setVertexBuffer(2, instanceDataBuffer, 0, sizeof(Vapor::InstanceData) * visibleDrawables.size());
+    // Binding 2: InstanceData array. Range = ALL uploaded instances, not just
+    // the CPU-visible prefix: the GPU-driven paths (Indirect per-object + MDI)
+    // index instances[] up to totalInstanceCount, and a visible-only range makes
+    // those reads out-of-bounds on Vulkan (updateBuffers uploads every drawable).
+    rhi->setVertexBuffer(2, instanceDataBuffer, 0,
+                         sizeof(Vapor::InstanceData) * std::max<Uint32>(1, totalInstanceCount));
 
     // Fragment bindings — the FULL contract of 3d_pbr_normal_mapped.metal.
     // Every slot the shader declares must be bound (Metal reads several of
@@ -1577,7 +1581,9 @@ void Renderer::mainRenderPass() {
     lastFrameStats.mainPath = useMeshlet ? "Meshlet" : useMDI ? "MDI"
                             : useGpuDriven ? "Indirect" : "CPU";
     if (useMeshlet) {
-        rhi->bindPipeline(meshletPipeline);
+        // Draw-all debug also drops the depth test (see meshletPipelineNoDepth).
+        const bool noDepth = meshletDrawAll && meshletPipelineNoDepth.isValid();
+        rhi->bindPipeline(noDepth ? meshletPipelineNoDepth : meshletPipeline);
         // Bindings mirror Meshlet.task/.mesh and 3d_meshlet.metal.
         rhi->setVertexBuffer(0, cameraUniformBuffer, 0, sizeof(CameraRenderData));
         rhi->setVertexBuffer(2, instanceDataBuffer, 0, sizeof(Vapor::InstanceData) * totalInstanceCount);
@@ -1588,7 +1594,11 @@ void Renderer::mainRenderPass() {
         rhi->setVertexBuffer(7, mergedVertexBuffer, 0, 0);
 
         struct MeshletParams { Uint32 instanceID; Uint32 meshletOffset; Uint32 meshletCount; float errorThreshold; };
-        const float threshold = meshletLodPixelError / std::max(1.0f, float(rhi->getSwapchainHeight()));
+        // Negative threshold = debug sentinel: the task shader skips ALL culling
+        // (frustum/cone/LOD) and emits every meshlet.
+        const float threshold = meshletDrawAll
+            ? -1.0f
+            : meshletLodPixelError / std::max(1.0f, float(rhi->getSwapchainHeight()));
         for (Uint32 i = 0; i < frameDrawables.size(); ++i) {
             auto it = drawableToInstanceID.find(i);
             if (it == drawableToInstanceID.end()) continue;
@@ -1876,7 +1886,21 @@ void Renderer::prePass() {
     rhi->bindPipeline(prePassPipeline);
     rhi->setVertexBuffer(0, cameraUniformBuffer, 0, sizeof(CameraRenderData));
     rhi->setVertexBuffer(1, materialUniformBuffer, 0, sizeof(Vapor::MaterialData) * MAX_INSTANCES);
-    rhi->setVertexBuffer(2, instanceDataBuffer, 0, sizeof(Vapor::InstanceData) * std::max<size_t>(1, visibleDrawables.size()));
+    // Full instance range: in MDI mode the material-sorted instance IDs of the
+    // CPU-visible drawables can land anywhere in [0, totalInstanceCount).
+    rhi->setVertexBuffer(2, instanceDataBuffer, 0, sizeof(Vapor::InstanceData) * std::max<Uint32>(1, totalInstanceCount));
+    // MDI layout: instances carry MERGED-buffer vertex offsets, and the Metal
+    // pre-pass shader adds instances[iid].vertexOffset to vertex_id. Feed it the
+    // merged vertex buffer (per-mesh index buffers stay: their local indices +
+    // the merged base land on the right vertices). Binding the small per-mesh
+    // buffers here instead made every fetch read far out of bounds -> garbage
+    // depth over the whole screen -> the main pass's LessOrEqual rejected all
+    // fragments (clear color) while rasterizing junk (FPS drop). Vulkan's
+    // PrePass.vert uses fixed-function attributes and ignores vertexOffset, so
+    // it keeps the per-mesh buffers.
+    const bool prePullsMerged = backend == GraphicsBackend::Metal &&
+                                m_mdiInstanceLayout && mergedVertexBuffer.isValid();
+    if (prePullsMerged) rhi->bindVertexBuffer(mergedVertexBuffer, 3, 0);
     for (Uint32 drawableIdx : visibleDrawables) {
         const Drawable& drawable = frameDrawables[drawableIdx];
         const RenderMesh& mesh = meshes[drawable.mesh];
@@ -1884,7 +1908,7 @@ void Renderer::prePass() {
         if (it == drawableToInstanceID.end()) continue;
         Uint32 iid = it->second;
         bindMaterial(drawable.material);  // albedo/normal maps for the MRT frag
-        if (mesh.vertexBuffer.isValid()) rhi->bindVertexBuffer(mesh.vertexBuffer, 3, 0);
+        if (!prePullsMerged && mesh.vertexBuffer.isValid()) rhi->bindVertexBuffer(mesh.vertexBuffer, 3, 0);
         rhi->setVertexBytes(&iid, sizeof(Uint32), 4);
         if (mesh.indexBuffer.isValid()) {
             rhi->bindIndexBuffer(mesh.indexBuffer, 0);
@@ -2735,6 +2759,11 @@ void Renderer::shadowPass() {
             rhi->setVertexBytes(&ci, sizeof(Uint32), 5);  // cascadeIndex -> push offset 16
         }
         rhi->setVertexBuffer(2, instanceDataBuffer, 0, sizeof(Vapor::InstanceData) * std::max<Uint32>(1, totalInstanceCount));
+        // MDI layout: Metal's shadow shader pulls instances[iid].vertexOffset +
+        // vertex_id, so it must read the merged vertex buffer (see prePass).
+        const bool shadowPullsMerged = backend == GraphicsBackend::Metal &&
+                                       m_mdiInstanceLayout && mergedVertexBuffer.isValid();
+        if (shadowPullsMerged) rhi->bindVertexBuffer(mergedVertexBuffer, 3, 0);
 
         // ALL drawables, not the camera-visible set: casters outside the view
         // frustum must still render into the cascades or their shadows vanish
@@ -2750,7 +2779,7 @@ void Renderer::shadowPass() {
                 // texAlbedo at fragment texture(0) for alpha-tested cutouts.
                 bindMaterial(drawable.material);
             }
-            if (mesh.vertexBuffer.isValid()) rhi->bindVertexBuffer(mesh.vertexBuffer, 3, 0);
+            if (!shadowPullsMerged && mesh.vertexBuffer.isValid()) rhi->bindVertexBuffer(mesh.vertexBuffer, 3, 0);
             rhi->setVertexBytes(&iid, sizeof(Uint32), 4);  // instanceID -> push offset 0
             if (mesh.indexBuffer.isValid()) {
                 rhi->bindIndexBuffer(mesh.indexBuffer, 0);
@@ -2782,6 +2811,10 @@ void Renderer::shadowPass() {
             rhi->setVertexBytes(&nearIdx, sizeof(Uint32), 5);  // cascadeIndex -> push offset 16
         }
         rhi->setVertexBuffer(2, instanceDataBuffer, 0, sizeof(Vapor::InstanceData) * std::max<Uint32>(1, totalInstanceCount));
+        // Same merged-VB requirement as the cascade loop above (MDI layout).
+        const bool nearPullsMerged = backend == GraphicsBackend::Metal &&
+                                     m_mdiInstanceLayout && mergedVertexBuffer.isValid();
+        if (nearPullsMerged) rhi->bindVertexBuffer(mergedVertexBuffer, 3, 0);
         for (Uint32 drawableIdx = 0; drawableIdx < frameDrawables.size(); drawableIdx++) {
             const Drawable& drawable = frameDrawables[drawableIdx];
             const RenderMesh& mesh = meshes[drawable.mesh];
@@ -2789,7 +2822,7 @@ void Renderer::shadowPass() {
             if (it == drawableToInstanceID.end()) continue;
             Uint32 iid = it->second;
             if (backend == GraphicsBackend::Metal) bindMaterial(drawable.material);
-            if (mesh.vertexBuffer.isValid()) rhi->bindVertexBuffer(mesh.vertexBuffer, 3, 0);
+            if (!nearPullsMerged && mesh.vertexBuffer.isValid()) rhi->bindVertexBuffer(mesh.vertexBuffer, 3, 0);
             rhi->setVertexBytes(&iid, sizeof(Uint32), 4);  // instanceID -> push offset 0
             if (mesh.indexBuffer.isValid()) {
                 rhi->bindIndexBuffer(mesh.indexBuffer, 0);
@@ -4203,6 +4236,13 @@ void Renderer::createRenderPipeline() {
                     mp.hasDepthAttachment = true;
                     mp.colorAttachmentFormats = { PixelFormat::RGBA16_FLOAT };
                     meshletPipeline = rhi->createMeshPipeline(mp);
+                    // Debug twin without the depth test: used by "draw all
+                    // meshlets" to tell depth rejection apart from cull/raster
+                    // failures (LOD-simplified clusters don't depth-match the
+                    // full-res PrePass geometry, so LessOrEqual can drop them).
+                    mp.depthTest = false;
+                    mp.depthWrite = false;
+                    meshletPipelineNoDepth = rhi->createMeshPipeline(mp);
                 }
             }
 
@@ -4624,6 +4664,10 @@ void Renderer::createRenderPipeline() {
                 mp.hasDepthAttachment = true;
                 mp.colorAttachmentFormats = { PixelFormat::RGBA16_FLOAT };
                 meshletPipeline = rhi->createMeshPipeline(mp);
+                // Debug twin without the depth test (see the Vulkan block).
+                mp.depthTest = false;
+                mp.depthWrite = false;
+                meshletPipelineNoDepth = rhi->createMeshPipeline(mp);
             }
         }
         // Native upsample blends in-shader (texBlend at texture(1)) — Opaque,
@@ -5355,6 +5399,10 @@ void Renderer::drawGraphicsImGui() {
         if (gpuDrivenMode == GpuDrivenMode::Meshlet) {
             ImGui::SliderFloat("  LOD error (px)", &meshletLodPixelError, 0.1f, 16.0f, "%.1f",
                                ImGuiSliderFlags_Logarithmic);
+            // Diagnostic: emit EVERY meshlet (all LOD levels stacked, heavy
+            // overdraw). If the screen stays empty with this on, the problem is
+            // raster/depth/bindings, not the cull.
+            ImGui::Checkbox("  Draw all meshlets (skip cull, debug)", &meshletDrawAll);
         }
 
         // MDI is a sub-option of the Indirect method (single-call multi-draw over
