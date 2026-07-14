@@ -791,10 +791,17 @@ private:
     //   Indirect - compute cull (GpuCull.comp) -> per-object / MDI indirect draw
     //   Meshlet  - task + mesh shaders (per-cluster cull + LOD); Phase C
     // Hi-Z occlusion (below) is orthogonal and applies to whichever mode is active.
-    enum class GpuDrivenMode { Off, Indirect, Meshlet };
+    enum class GpuDrivenMode { Off, Indirect, BindlessMDI, Meshlet };
     GpuDrivenMode gpuDrivenMode = GpuDrivenMode::Off;
     bool gpuDrivenActive()   const { return gpuDrivenMode != GpuDrivenMode::Off; }
-    bool gpuDrivenIndirect() const { return gpuDrivenMode == GpuDrivenMode::Indirect; }
+    // Indirect covers BOTH compute-cull modes: plain Indirect (per-object /
+    // per-material MDI draws) and BindlessMDI share the cull pass, Hi-Z, and
+    // the instance pipeline; they differ only in how the main pass submits.
+    bool gpuDrivenIndirect() const {
+        return gpuDrivenMode == GpuDrivenMode::Indirect ||
+               gpuDrivenMode == GpuDrivenMode::BindlessMDI;
+    }
+    bool gpuDrivenBindless() const { return gpuDrivenMode == GpuDrivenMode::BindlessMDI; }
     bool gpuDrivenMeshlet()  const { return gpuDrivenMode == GpuDrivenMode::Meshlet; }
     // Meshlet draw path (task/mesh shaders): per-cluster frustum/cone cull +
     // two-sphere cluster-LOD selection in the task stage, triangles expanded by
@@ -818,6 +825,13 @@ private:
     // buffers (errorThreshold <= -1.5 sentinel). Shows on screen => the
     // pipeline/dispatch/raster chain works and the fault is buffer bindings.
     bool meshletSyntheticTri = false;
+    // Second, even lower-level probe drawn alongside when meshletSyntheticTri
+    // is on (Metal): a MESH-ONLY pipeline (no object stage, no payload, no
+    // buffers) emitting a green triangle on the LEFT. Green shows while the
+    // centered triangle doesn't => the object->mesh amplification is broken;
+    // neither shows => drawMeshThreadgroups / encoder-level.
+    PipelineHandle meshletSyntheticPipeline;
+    ShaderHandle meshletSyntheticShader;
 
     // Hi-Z occlusion culling (requires a GPU-driven mode). A depth pyramid built
     // from the PrePass depth; the cull compute rejects instances whose screen
@@ -847,10 +861,9 @@ private:
     //   Vulkan: one native vkCmdDrawIndexedIndirect over every instance (the
     //           same cull-written args buffer as plain MDI); materials come
     //           from a descriptor-indexed runtime array at set 3.
-    // Sub-option of Indirect, gated on capabilities.bindlessTextures plus the
-    // per-backend submission cap (indirectCommandBuffers / multiDrawIndirect).
-    // Takes precedence over plain MDI when both are on.
-    bool gpuDrivenBindlessMDI = false;
+    // Selected as its own GpuDrivenMode (mutually exclusive with plain MDI),
+    // gated on capabilities.bindlessTextures plus the per-backend submission
+    // cap (indirectCommandBuffers / multiDrawIndirect).
     IndirectCommandBufferHandle sceneICB;      // Metal only: GPU-encoded commands
     ComputePipelineHandle gpuCullICBPipeline;  // Metal only: ICB-encoding cull
     ShaderHandle gpuCullICBShader;

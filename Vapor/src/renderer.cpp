@@ -1282,7 +1282,7 @@ void Renderer::updateBuffers() {
     // sorted) — its draws index the merged buffers the same way. Availability:
     // Metal needs ICB support (GPU-encoded commands), Vulkan needs native MDI +
     // descriptor indexing (one vkCmdDrawIndexedIndirect + set-3 texture array).
-    const bool bindlessMDI = gpuDrivenIndirect() && gpuDrivenBindlessMDI &&
+    const bool bindlessMDI = gpuDrivenBindless() &&
                              capabilities.bindlessTextures &&
                              (backend == GraphicsBackend::Metal
                                   ? capabilities.indirectCommandBuffers
@@ -1590,7 +1590,7 @@ void Renderer::mainRenderPass() {
     const bool bindlessBackendOk = backend == GraphicsBackend::Metal
         ? (capabilities.indirectCommandBuffers && sceneICB.isValid())
         : (capabilities.multiDrawIndirect && mergedIndexBuffer.isValid());
-    const bool useBindless = useGpuDriven && gpuDrivenBindlessMDI &&
+    const bool useBindless = useGpuDriven && gpuDrivenBindless() &&
                              capabilities.bindlessTextures && bindlessBackendOk &&
                              mainPipelineBindless.isValid() &&
                              bindlessMaterialTable.isValid() && mergedVertexBuffer.isValid() &&
@@ -1611,6 +1611,13 @@ void Renderer::mainRenderPass() {
     lastFrameStats.mainPath = useMeshlet ? "Meshlet" : useBindless ? "BindlessMDI" : useMDI ? "MDI"
                             : useGpuDriven ? "Indirect" : "CPU";
     if (useMeshlet) {
+        // Lowest-level probe first (Metal): mesh-ONLY pipeline, zero inputs,
+        // green triangle on the left. See meshletSyntheticPipeline.
+        if (meshletSyntheticTri && meshletSyntheticPipeline.isValid()) {
+            rhi->bindPipeline(meshletSyntheticPipeline);
+            rhi->drawMeshTasks(1, 1, 1);
+            mainDrawCalls++;
+        }
         // Debug probes also drop the depth test + face culling (NoDepth twin).
         const bool noDepth = (meshletDrawAll || meshletSyntheticTri) &&
                              meshletPipelineNoDepth.isValid();
@@ -2140,7 +2147,7 @@ void Renderer::gpuCullPass() {
     // ICB (created lazily here) instead of writing indirect-args structs.
     // Vulkan Bindless MDI keeps the classic args-writing cull below — its
     // single native multi-draw consumes the same args buffer.
-    const bool icbMode = gpuDrivenBindlessMDI && capabilities.indirectCommandBuffers &&
+    const bool icbMode = gpuDrivenBindless() && capabilities.indirectCommandBuffers &&
                          gpuCullICBPipeline.isValid() && mergedIndexBuffer.isValid();
     if (icbMode && !sceneICB.isValid()) {
         sceneICB = rhi->createIndirectCommandBuffer(MAX_INSTANCES);
@@ -4865,6 +4872,23 @@ void Renderer::createRenderPipeline() {
                 mp.depthWrite = false;
                 mp.cullMode = CullMode::None;
                 meshletPipelineNoDepth = rhi->createMeshPipeline(mp);
+                // Mesh-ONLY probe (no object stage/payload/buffers): drawn
+                // alongside the synthetic triangle to split "object->mesh
+                // amplification broken" from "encoder-level broken".
+                d.stage = ShaderStage::Mesh; d.entryPoint = "meshSynthetic";
+                meshletSyntheticShader = rhi->createShader(d);
+                MeshPipelineDesc sp;
+                sp.taskShader = {};  // mesh-only
+                sp.meshShader = meshletSyntheticShader;
+                sp.fragmentShader = meshletFragShader;
+                sp.taskThreadgroupSize = 1;
+                sp.meshThreadgroupSize = 64;
+                sp.depthTest = false;
+                sp.depthWrite = false;
+                sp.cullMode = CullMode::None;
+                sp.hasDepthAttachment = true;
+                sp.colorAttachmentFormats = { PixelFormat::RGBA16_FLOAT };
+                meshletSyntheticPipeline = rhi->createMeshPipeline(sp);
             }
         }
         // Native upsample blends in-shader (texBlend at texture(1)) — Opaque,
@@ -5578,6 +5602,26 @@ void Renderer::drawGraphicsImGui() {
         if (ImGui::RadioButton("Indirect + MDI", gpuDrivenMode == GpuDrivenMode::Indirect))
             gpuDrivenMode = GpuDrivenMode::Indirect;
         ImGui::SameLine();
+        // Bindless MDI: same compute cull, but the whole scene in ONE
+        // submission with bindlessly-fetched material textures. Metal = ICB
+        // replay + argument tables; Vulkan = one native multi-draw + set-3
+        // descriptor array.
+        const bool bindlessSelectable = capabilities.bindlessTextures &&
+            mainPipelineBindless.isValid() &&
+            (backend == GraphicsBackend::Metal
+                 ? (capabilities.indirectCommandBuffers && gpuCullICBPipeline.isValid())
+                 : capabilities.multiDrawIndirect);
+        ImGui::BeginDisabled(!bindlessSelectable);
+        if (ImGui::RadioButton("Bindless MDI", gpuDrivenMode == GpuDrivenMode::BindlessMDI))
+            gpuDrivenMode = GpuDrivenMode::BindlessMDI;
+        ImGui::EndDisabled();
+        if (!bindlessSelectable && ImGui::IsItemHovered(ImGuiHoveredFlags_AllowWhenDisabled)) {
+            ImGui::SetTooltip("Needs bindless textures (Metal Tier-2 argument buffers / "
+                              "Vulkan descriptor indexing)");
+        }
+        if (gpuDrivenMode == GpuDrivenMode::BindlessMDI && !bindlessSelectable)
+            gpuDrivenMode = GpuDrivenMode::Off;  // never stick on an unavailable mode
+        ImGui::SameLine();
         // Meshlet (task/mesh shaders): needs mesh-shader support AND the Phase-C
         // draw path. Disabled until both hold.
         const bool meshletSelectable = capabilities.meshShaders && kMeshletDrawImplemented;
@@ -5605,36 +5649,16 @@ void Renderer::drawGraphicsImGui() {
             ImGui::Checkbox("  Synthetic triangle (skip buffers, debug)", &meshletSyntheticTri);
         }
 
-        // MDI is a sub-option of the Indirect method (single-call multi-draw over
-        // the merged scene buffers; Vulkan native, Metal per-command loop).
-        const bool mdiAvailable = gpuDrivenIndirect() &&
+        // MDI is a sub-option of the plain Indirect method (single-call
+        // multi-draw per material over the merged scene buffers; Vulkan
+        // native, Metal per-command loop). Bindless MDI is its own mode above.
+        const bool mdiAvailable = gpuDrivenMode == GpuDrivenMode::Indirect &&
             ((backend == GraphicsBackend::Vulkan && capabilities.multiDrawIndirect) ||
              backend == GraphicsBackend::Metal);
         ImGui::BeginDisabled(!mdiAvailable);
         ImGui::Checkbox("  -> MDI (per material)", &gpuDrivenMDI);
         ImGui::EndDisabled();
         if (!mdiAvailable) gpuDrivenMDI = false;
-
-        // Bindless MDI: the whole scene in ONE submission, material textures
-        // fetched bindlessly by materialID (no per-material CPU loop). Metal =
-        // GPU-encoded MTLIndirectCommandBuffer + argument-table textures;
-        // Vulkan = one native vkCmdDrawIndexedIndirect + descriptor-indexed
-        // texture array. Takes precedence over plain MDI when both are on.
-        const bool bindlessAvailable = gpuDrivenIndirect() && capabilities.bindlessTextures &&
-                                       mainPipelineBindless.isValid() &&
-                                       (backend == GraphicsBackend::Metal
-                                            ? (capabilities.indirectCommandBuffers && gpuCullICBPipeline.isValid())
-                                            : capabilities.multiDrawIndirect);
-        ImGui::BeginDisabled(!bindlessAvailable);
-        ImGui::Checkbox("  -> Bindless MDI (single call, bindless materials)", &gpuDrivenBindlessMDI);
-        ImGui::EndDisabled();
-        if (!bindlessAvailable && ImGui::IsItemHovered(ImGuiHoveredFlags_AllowWhenDisabled)) {
-            ImGui::SetTooltip(capabilities.bindlessTextures
-                                  ? "Requires the Indirect method"
-                                  : "Needs bindless textures (Metal Tier-2 argument buffers / "
-                                    "Vulkan descriptor indexing)");
-        }
-        if (!bindlessAvailable) gpuDrivenBindlessMDI = false;
 
         // Hi-Z occlusion is orthogonal — it refines whichever GPU-driven mode is
         // active (object cull in Indirect, meshlet cull in Meshlet).

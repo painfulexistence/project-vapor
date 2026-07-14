@@ -804,19 +804,20 @@ PipelineHandle RHI_Metal::createMeshPipeline(const MeshPipelineDesc& desc) {
 
     auto pipelineDesc = MTL::MeshRenderPipelineDescriptor::alloc()->init();
     auto tsIt = shaders.find(desc.taskShader.id);
-    if (desc.taskShader.isValid() && tsIt != shaders.end()) {
+    const bool hasObjectStage = desc.taskShader.isValid() && tsIt != shaders.end();
+    if (hasObjectStage) {
         pipelineDesc->setObjectFunction(tsIt->second.function.get());
+        // Object/mesh amplification limits. Without these Metal allocates no
+        // payload memory and caps the mesh grid at 0 — the object shader runs
+        // but emits no mesh threadgroups, so nothing is drawn. Only meaningful
+        // (and only valid) with an object function present.
+        pipelineDesc->setMaxTotalThreadsPerObjectThreadgroup(desc.taskThreadgroupSize);
+        pipelineDesc->setMaxTotalThreadgroupsPerMeshGrid(desc.maxMeshThreadgroupsPerObject);
+        pipelineDesc->setPayloadMemoryLength(desc.payloadBytes);
     }
     pipelineDesc->setMeshFunction(msIt->second.function.get());
     pipelineDesc->setFragmentFunction(fsIt->second.function.get());
-
-    // Object/mesh amplification limits. Without these Metal allocates no payload
-    // memory and caps the mesh grid at 0 — the object shader runs but emits no
-    // mesh threadgroups, so nothing is drawn.
-    pipelineDesc->setMaxTotalThreadsPerObjectThreadgroup(desc.taskThreadgroupSize);
     pipelineDesc->setMaxTotalThreadsPerMeshThreadgroup(desc.meshThreadgroupSize);
-    pipelineDesc->setMaxTotalThreadgroupsPerMeshGrid(desc.maxMeshThreadgroupsPerObject);
-    pipelineDesc->setPayloadMemoryLength(desc.payloadBytes);
 
     for (size_t i = 0; i < desc.colorAttachmentFormats.size(); i++) {
         auto attachment = pipelineDesc->colorAttachments()->object(i);

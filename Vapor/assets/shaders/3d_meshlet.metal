@@ -240,3 +240,27 @@ static float3 hashColor(uint x) {
 fragment float4 fragmentMain(MeshletVertexOut in [[stage_in]]) {
     return float4(in.color, 1.0);
 }
+
+// Lowest-level probe: a MESH-ONLY pipeline (no object stage, no payload, no
+// buffer reads at all) emitting one green triangle on the left half of the
+// screen. If this rasterizes while the object->mesh synthetic (centered
+// magenta/yellow/cyan) doesn't, the amplification chain is at fault; if
+// neither shows, drawMeshThreadgroups / encoder state is.
+[[mesh]] void meshSynthetic(
+    MeshletMeshT output,
+    uint tid [[thread_position_in_threadgroup]]
+) {
+    if (tid == 0u) {
+        MeshletVertexOut a, b, c;
+        a.position = float4(-0.9, -0.8, 0.5, 1.0); a.color = float3(0.0, 1.0, 0.0);
+        b.position = float4(-0.1, -0.8, 0.5, 1.0); b.color = float3(0.0, 1.0, 0.0);
+        c.position = float4(-0.5,  0.8, 0.5, 1.0); c.color = float3(0.0, 1.0, 0.0);
+        output.set_vertex(0, a);
+        output.set_vertex(1, b);
+        output.set_vertex(2, c);
+        output.set_index(0, 0);
+        output.set_index(1, 1);
+        output.set_index(2, 2);
+        output.set_primitive_count(1);
+    }
+}
