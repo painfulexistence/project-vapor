@@ -596,13 +596,11 @@ ShaderHandle RHI_Metal::createShader(const ShaderDesc& desc) {
             }
         }
         auto entryName = NS::String::string(entryPoint.c_str(), NS::UTF8StringEncoding);
-        if (desc.bindlessMaterials) {
-            // Specialize with kBindlessMaterials=true (function constant 0):
-            // the PBR fragment reads material textures from the argument table
-            // at buffer(13). Shaders never specialized this way see the
-            // constant as undefined -> false (is_function_constant_defined).
+        auto specialize = [&](bool bindless) {
+            // Function constant 0 = kBindlessMaterialsSet (3d_pbr_normal_mapped):
+            // true reads material textures from the argument table at buffer(13),
+            // false keeps the bound slots 0-5.
             auto constants = NS::TransferPtr(MTL::FunctionConstantValues::alloc()->init());
-            bool bindless = true;
             constants->setConstantValue(&bindless, MTL::DataTypeBool, NS::UInteger(0));
             NS::Error* fcError = nullptr;
             function = NS::TransferPtr(library->newFunction(entryName, constants.get(), &fcError));
@@ -613,8 +611,22 @@ ShaderHandle RHI_Metal::createShader(const ShaderDesc& desc) {
                 }
                 throw std::runtime_error(fmt::format("Failed to specialize shader entry point '{}'", entryPoint));
             }
+        };
+        if (desc.bindlessMaterials) {
+            specialize(true);
         } else {
             function = NS::TransferPtr(library->newFunction(entryName));
+            // A function that declares ANY function constants can only build a
+            // pipeline in specialized form ("use newFunctionWithName:
+            // constantValues:" validation abort) — even when the shader guards
+            // every use with is_function_constant_defined. Re-create such
+            // functions with the constant explicitly false (the bound-material
+            // path). Constant values with no matching constant are ignored, so
+            // this only triggers for shaders that declare constants.
+            if (function && function->functionConstantsDictionary() &&
+                function->functionConstantsDictionary()->count() > 0) {
+                specialize(false);
+            }
         }
         if (!function) {
             throw std::runtime_error(fmt::format("Failed to find shader entry point '{}'", entryPoint));
