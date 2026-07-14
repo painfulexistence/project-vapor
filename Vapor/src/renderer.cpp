@@ -5532,9 +5532,13 @@ void Renderer::drawQuad3D(
     const glm::vec4& tintColor,
     int entityID
 ) {
-    // TODO: custom tex coords are not applied yet
     batch3D.setTexture(texture);
-    batch3D.addQuad(transform, tintColor, entityID);
+    if (texCoords) {
+        // Corner order: BL, BR, TR, TL (quad local -0.5..+0.5, +Y up).
+        batch3D.addQuad(transform, texCoords, tintColor, entityID);
+    } else {
+        batch3D.addQuad(transform, tintColor, entityID);
+    }
     batch3D.setTexture(TextureHandle{});
 }
 

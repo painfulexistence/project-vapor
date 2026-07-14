@@ -679,7 +679,14 @@ auto main(int argc, char* args[]) -> int {
                 tvTransform = glm::rotate(tvTransform, glm::radians(30.0f), glm::vec3(0.0f, 1.0f, 0.0f));
                 tvTransform = glm::scale(tvTransform, glm::vec3(2.0f, 2.0f, 1.0f));
 
-                renderer->drawQuad3D(tvTransform, rtTexHandle, nullptr, glm::vec4(1.0f));
+                // Rendered textures store row 0 = top of the view, but the batch
+                // quad's default UVs put v=0 at the quad's BOTTOM corner (image
+                // convention) — sample with V flipped so the TV reads upright.
+                // Corner order: BL, BR, TR, TL.
+                static const glm::vec2 kRttUVs[4] = {
+                    { 0.0f, 1.0f }, { 1.0f, 1.0f }, { 1.0f, 0.0f }, { 0.0f, 0.0f }
+                };
+                renderer->drawQuad3D(tvTransform, rtTexHandle, kRttUVs, glm::vec4(1.0f));
             }
 
 
