@@ -24,6 +24,24 @@ struct MaterialTexs {
     texture2d<float, access::sample> emissive  [[id(5)]];
 };
 
+// The bindless variant must take EVERY texture through argument buffers: a
+// pipeline built with supportIndirectCommandBuffers rejects any direct
+// texture/sampler argument on the fragment function ("Fragment shader cannot
+// be used with indirect command buffers"). This single-entry table carries the
+// per-frame system textures (slot order = the renderer's Metal contract 6-15).
+struct SystemTexs {
+    texture2d<float, access::sample>     texAO          [[id(0)]];
+    texture2d<float, access::sample>     texShadow      [[id(1)]];
+    texturecube<float, access::sample>   irradianceMap  [[id(2)]];
+    texturecube<float, access::sample>   prefilterMap   [[id(3)]];
+    texture2d<float, access::sample>     brdfLUT        [[id(4)]];
+    texture2d<float, access::sample>     rectLightVideo [[id(5)]];
+    depth2d_array<float, access::sample> pssmShadowMaps [[id(6)]];
+    texture2d<float, access::sample>     texPointShadow [[id(7)]];
+    texture2d<float, access::sample>     gibsGI         [[id(8)]];
+    texture2d<float, access::sample>     texSSCS        [[id(9)]];
+};
+
 struct RasterizerData {
     float4 position [[position]];
     float2 uv;
@@ -375,16 +393,21 @@ fragment float4 fragmentMain(
     texture2d<float, access::sample> texOcclusion [[texture(4), function_constant(kBoundMaterials)]],
     texture2d<float, access::sample> texEmissive [[texture(5), function_constant(kBoundMaterials)]],
     const device MaterialTexs* materialTexs [[buffer(13), function_constant(kBindlessMaterials)]],
-    texture2d<float, access::sample> texAO [[texture(6)]],
-    texture2d<float, access::sample> texShadow [[texture(7)]],
-    texturecube<float, access::sample> irradianceMap [[texture(8)]],
-    texturecube<float, access::sample> prefilterMap [[texture(9)]],
-    texture2d<float, access::sample> brdfLUT [[texture(10)]],
-    texture2d<float, access::sample> rectLightVideo [[texture(11)]],
-    depth2d_array<float, access::sample> pssmShadowMaps [[texture(12)]],
-    texture2d<float, access::sample> texPointShadow [[texture(13)]],
-    texture2d<float, access::sample> gibsGI [[texture(14)]], // GIBS indirect lighting
-    texture2d<float, access::sample> texSSCS [[texture(15)]], // screen-space contact shadow
+    // System textures (Metal contract slots 6-15). Direct arguments on the
+    // bound path only; the bindless path reads the same set from systemTexs
+    // (locals with the original names are resolved at the top of the body, so
+    // everything below is shared).
+    texture2d<float, access::sample> texAOArg [[texture(6), function_constant(kBoundMaterials)]],
+    texture2d<float, access::sample> texShadowArg [[texture(7), function_constant(kBoundMaterials)]],
+    texturecube<float, access::sample> irradianceMapArg [[texture(8), function_constant(kBoundMaterials)]],
+    texturecube<float, access::sample> prefilterMapArg [[texture(9), function_constant(kBoundMaterials)]],
+    texture2d<float, access::sample> brdfLUTArg [[texture(10), function_constant(kBoundMaterials)]],
+    texture2d<float, access::sample> rectLightVideoArg [[texture(11), function_constant(kBoundMaterials)]],
+    depth2d_array<float, access::sample> pssmShadowMapsArg [[texture(12), function_constant(kBoundMaterials)]],
+    texture2d<float, access::sample> texPointShadowArg [[texture(13), function_constant(kBoundMaterials)]],
+    texture2d<float, access::sample> gibsGIArg [[texture(14), function_constant(kBoundMaterials)]], // GIBS indirect lighting
+    texture2d<float, access::sample> texSSCSArg [[texture(15), function_constant(kBoundMaterials)]], // screen-space contact shadow
+    const device SystemTexs* systemTexs [[buffer(14), function_constant(kBindlessMaterials)]],
     const device DirLight* directionalLights [[buffer(0)]],
     const device PointLight* pointLights [[buffer(1)]],
     const device Cluster* clusters [[buffer(2)]],
@@ -415,6 +438,19 @@ fragment float4 fragmentMain(
     texture2d<float, access::sample> matRoughness = kBindlessMaterials ? materialTexs[in.materialID].roughness : texRoughness;
     texture2d<float, access::sample> matOcclusion = kBindlessMaterials ? materialTexs[in.materialID].occlusion : texOcclusion;
     texture2d<float, access::sample> matEmissive  = kBindlessMaterials ? materialTexs[in.materialID].emissive  : texEmissive;
+
+    // System textures under their original names — the rest of the body (and
+    // its lambdas/helper calls) is identical on both paths.
+    texture2d<float, access::sample>     texAO          = kBindlessMaterials ? systemTexs->texAO          : texAOArg;
+    texture2d<float, access::sample>     texShadow      = kBindlessMaterials ? systemTexs->texShadow      : texShadowArg;
+    texturecube<float, access::sample>   irradianceMap  = kBindlessMaterials ? systemTexs->irradianceMap  : irradianceMapArg;
+    texturecube<float, access::sample>   prefilterMap   = kBindlessMaterials ? systemTexs->prefilterMap   : prefilterMapArg;
+    texture2d<float, access::sample>     brdfLUT        = kBindlessMaterials ? systemTexs->brdfLUT        : brdfLUTArg;
+    texture2d<float, access::sample>     rectLightVideo = kBindlessMaterials ? systemTexs->rectLightVideo : rectLightVideoArg;
+    depth2d_array<float, access::sample> pssmShadowMaps = kBindlessMaterials ? systemTexs->pssmShadowMaps : pssmShadowMapsArg;
+    texture2d<float, access::sample>     texPointShadow = kBindlessMaterials ? systemTexs->texPointShadow : texPointShadowArg;
+    texture2d<float, access::sample>     gibsGI         = kBindlessMaterials ? systemTexs->gibsGI         : gibsGIArg;
+    texture2d<float, access::sample>     texSSCS        = kBindlessMaterials ? systemTexs->texSSCS        : texSSCSArg;
 
     // Prototype UV: triplanar mapping with world space or object space
     // Mode: 0 = Off, 1 = World Space (static objects), 2 = Object Space (dynamic objects)

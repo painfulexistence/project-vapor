@@ -1652,6 +1652,40 @@ void Renderer::mainRenderPass() {
         rhi->setVertexBytes(&zeroId, sizeof(Uint32), 4);
         rhi->bindTextureArgumentTable(bindlessMaterialTable);
         if (backend == GraphicsBackend::Metal) {
+            // ICB pipelines reject direct fragment texture arguments, so the 10
+            // system textures (Metal contract slots 6-15) also go through an
+            // argument table. Resolve the same values the bound path binds
+            // above (KEEP IN SYNC with the Metal else-branch of the fragment
+            // contract), rewrite only changed slots (the table is shared with
+            // in-flight frames), and bind it at buffer(14).
+            if (!bindlessSystemTable.isValid()) {
+                bindlessSystemTable = rhi->createTextureArgumentTable(
+                    fragmentShaderBindless, /*bufferIndex=*/14, 1, /*texturesPerEntry=*/10);
+            }
+            if (bindlessSystemTable.isValid()) {
+                TextureHandle whiteTex = textures[defaultWhiteTexture].handle;
+                TextureHandle blackTex = textures[defaultBlackTexture].handle;
+                const bool iblReady = !iblNeedsUpdate;
+                const TextureHandle sys[10] = {
+                    (aoEnabled && aoRT.isValid()) ? aoRT : whiteTex,                     // 0 texAO
+                    (capabilities.raytracing && shadowRT.isValid()) ? shadowRT : whiteTex, // 1 texShadow
+                    (iblReady && irradianceMap.isValid()) ? irradianceMap : defaultBlackCubemapTex, // 2
+                    (iblReady && prefilterMap.isValid()) ? prefilterMap : defaultBlackCubemapTex,   // 3
+                    (iblReady && brdfLUTTex.isValid()) ? brdfLUTTex : blackTex,          // 4 brdfLUT
+                    whiteTex,                                                            // 5 rectLightVideo
+                    pssmShadowArrayTexture,                                              // 6 pssmShadowMaps
+                    (capabilities.raytracing && pointShadowHistoryRT.isValid()) ? pointShadowHistoryRT : whiteTex, // 7
+                    (capabilities.raytracing && gibsEnabled && giResultTexture.isValid()) ? giResultTexture : blackTex, // 8
+                    (sscsEnabled && sscsRT.isValid()) ? sscsRT : whiteTex,               // 9 texSSCS
+                };
+                for (Uint32 i = 0; i < 10; ++i) {
+                    if (sys[i].id != m_bindlessSysCache[i].id) {
+                        rhi->writeTextureArgumentTable(bindlessSystemTable, 0, i, sys[i]);
+                        m_bindlessSysCache[i] = sys[i];
+                    }
+                }
+                rhi->bindTextureArgumentTable(bindlessSystemTable);
+            }
             // Replay the GPU-encoded command buffer (commands carry their own
             // index-buffer regions).
             rhi->executeICB(sceneICB, totalInstanceCount);

@@ -860,6 +860,14 @@ private:
     BufferHandle bindlessMaterialTable;   // 6 texture slots per material (see RHI docs)
     bool m_bindlessTableDirty = true;     // rewrite entries when materials/textures change
     void ensureBindlessMaterialTable();
+    // Metal only: ICB-compatible pipelines reject DIRECT fragment texture
+    // arguments, so the bindless fragment takes the 10 per-frame system
+    // textures (Metal contract slots 6-15) through a second single-entry
+    // argument table at buffer(14). Entries are rewritten only when the
+    // resolved handle changes (cache below) — rewriting every frame would race
+    // in-flight replays of the shared table.
+    BufferHandle bindlessSystemTable;
+    TextureHandle m_bindlessSysCache[10];
     // Note: the single Metal ICB is shared across frames in flight — Metal's
     // automatic hazard tracking serializes the next frame's cull (write)
     // against the previous frame's executeICB (read). Correct, at the cost of
