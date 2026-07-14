@@ -121,6 +121,9 @@ layout(std430, set = 1, binding = 2) readonly buffer PSSMBuf {
     mat4 shadowLightSpaceMatrices[3];
     vec4 cascadeSplits;
     float shadowBlendRange;
+    float nearShadowEnd;        // view depth the independent near map covers; 0 = off
+    vec2 _pssmPad;
+    mat4 nearLightMatrix;       // near-field map (own texture, nearShadowTex)
 };
 
 layout(set = 2, binding = 0) uniform sampler2D albedoMap;
@@ -134,6 +137,12 @@ layout(set = 2, binding = 6) uniform sampler2DArray shadowMap;  // 3-cascade dep
 // Attenuates ambient/indirect light ONLY — multiplying direct light by AO is
 // physically wrong (same rule as the Metal PBR shader).
 layout(set = 2, binding = 7) uniform sampler2D texAO;
+// Screen-space contact shadow visibility (1 = lit); min-composited onto the sun
+// shadow. White when disabled. Screen-space, sampled at gl_FragCoord like texAO.
+layout(set = 2, binding = 8) uniform sampler2D sscsTex;
+// Independent near-field shadow map (own texture + resolution), covers
+// [near, nearShadowEnd]. Depth values sampled with the negative-viewport Y-flip.
+layout(set = 2, binding = 9) uniform sampler2D nearShadowTex;
 
 // IBL environment maps (bindings 8-10). Bound to defaults (black cube / white 2D)
 // when no environment is loaded; sampled only when MaterialData.iblEnabled != 0,
@@ -148,7 +157,13 @@ const float IBL_MAX_REFLECTION_LOD = 4.0;
 float sampleCascade(int ci, vec3 worldPos, float bias) {
     vec4 lp = shadowLightSpaceMatrices[ci] * vec4(worldPos, 1.0);
     vec3 proj = lp.xyz / lp.w;
-    vec2 uv = proj.xy * 0.5 + 0.5;  // Vulkan: z in [0,1], xy [-1,1] -> UV [0,1]
+    // The shadow map is rendered through the engine's negative-height viewport
+    // (rhi_vulkan: viewport.height = -H), which rasterizes ndc.y=+1 to texture
+    // row 0. So the sample UV must flip Y (v = 0.5 - 0.5*proj.y); using
+    // 0.5 + 0.5*proj.y samples the vertically-mirrored texel, which reads
+    // correctly only at the cascade centre and makes shadows drift/swim as the
+    // camera (and thus the cascade centre) moves. z stays [0,1] (ZO).
+    vec2 uv = vec2(proj.x * 0.5 + 0.5, 0.5 - proj.y * 0.5);
     float curDepth = proj.z;
     if (uv.x < 0.0 || uv.x > 1.0 || uv.y < 0.0 || uv.y > 1.0 || curDepth > 1.0) {
         return -1.0;
@@ -164,20 +179,75 @@ float sampleCascade(int ci, vec3 worldPos, float bias) {
     return lit / 9.0;
 }
 
-// Select the cascade by the fragment's view-space depth, then PCF-sample it.
-// Returns 1.0 = lit, 0.0 = fully shadowed.
+// Independent near-field shadow map (own texture, own resolution): a tight, high-
+// effective-resolution fit for [near, nearShadowEnd]. Same negative-viewport
+// Y-flip as the cascades. Returns -1.0 when the fragment is outside its frustum.
+float sampleNearMap(vec3 worldPos, float bias) {
+    vec4 lp = nearLightMatrix * vec4(worldPos, 1.0);
+    vec3 proj = lp.xyz / lp.w;
+    vec2 uv = vec2(proj.x * 0.5 + 0.5, 0.5 - proj.y * 0.5);
+    float curDepth = proj.z;
+    if (uv.x < 0.0 || uv.x > 1.0 || uv.y < 0.0 || uv.y > 1.0 || curDepth > 1.0) {
+        return -1.0;
+    }
+    vec2 texel = 1.0 / vec2(textureSize(nearShadowTex, 0).xy);
+    float lit = 0.0;
+    for (int y = -1; y <= 1; ++y) {
+        for (int x = -1; x <= 1; ++x) {
+            float d = texture(nearShadowTex, uv + vec2(x, y) * texel).r;
+            lit += (curDepth - bias) <= d ? 1.0 : 0.0;
+        }
+    }
+    return lit / 9.0;
+}
+
+// Select the near-field map or a cascade by the fragment's view-space depth,
+// PCF-sample it, and cross-fade across boundaries so transitions don't seam.
+// Returns 1.0 = lit, 0.0 = fully shadowed. Boundaries (view depth):
+//   nearShadowEnd = near map -> cascade 0,  cascadeSplits.y = c0 -> c1,
+//   cascadeSplits.z = c1 -> c2. Blend band width = shadowBlendRange.
 float sampleShadow(vec3 worldPos, vec3 N, vec3 L, float viewDepth) {
+    float b = max(0.0015 * (1.0 - dot(N, L)), 0.0004);
+    float blend = max(shadowBlendRange, 1e-4);
+
+    // Near field: dedicated high-res map, cross-fading into cascade 0 near its far edge.
+    if (nearShadowEnd > 0.0 && viewDepth < nearShadowEnd) {
+        float nearLit = sampleNearMap(worldPos, b);
+        if (nearLit >= 0.0) {
+            if (viewDepth > nearShadowEnd - blend) {
+                float c0 = sampleCascade(0, worldPos, b);
+                if (c0 >= 0.0) {
+                    float t = (viewDepth - (nearShadowEnd - blend)) / blend;
+                    return mix(nearLit, c0, smoothstep(0.0, 1.0, t));
+                }
+            }
+            return nearLit;
+        }
+        // outside the near frustum -> fall through to the cascades
+    }
+
     // Pick the first cascade whose far split still contains this fragment.
     int ci = 2;
     if (viewDepth <= cascadeSplits.y)      ci = 0;
     else if (viewDepth <= cascadeSplits.z) ci = 1;
-    // Slightly slacker bias for the coarser (farther) cascades.
-    float bias = max(0.0015 * (1.0 - dot(N, L)), 0.0004) * float(ci + 1);
-    float lit = sampleCascade(ci, worldPos, bias);
+    float lit = sampleCascade(ci, worldPos, b * float(ci + 1));
     // Fall through to farther cascades if the fragment left this one's frustum.
-    if (lit < 0.0 && ci < 1) lit = sampleCascade(1, worldPos, bias);
-    if (lit < 0.0 && ci < 2) lit = sampleCascade(2, worldPos, bias);
-    return lit < 0.0 ? 1.0 : lit;  // outside all cascades -> lit
+    if (lit < 0.0 && ci < 1) { ci = 1; lit = sampleCascade(1, worldPos, b * 2.0); }
+    if (lit < 0.0 && ci < 2) { ci = 2; lit = sampleCascade(2, worldPos, b * 3.0); }
+    if (lit < 0.0) return 1.0;  // outside all cascades -> lit
+
+    // Cross-fade into the next cascade near this cascade's far split.
+    if (ci < 2) {
+        float farSplit = (ci == 0) ? cascadeSplits.y : cascadeSplits.z;
+        if (viewDepth > farSplit - blend) {
+            float nextLit = sampleCascade(ci + 1, worldPos, b * float(ci + 2));
+            if (nextLit >= 0.0) {
+                float t = (viewDepth - (farSplit - blend)) / blend;
+                lit = mix(lit, nextLit, smoothstep(0.0, 1.0, t));
+            }
+        }
+    }
+    return lit;
 }
 
 // RHI::setFragmentBytes(&dirLightCount, 4, /*binding=*/11) -> offset 64+(11%4)*16 = 112
@@ -269,7 +339,13 @@ void main() {
         vec3 contrib = shade(N, V, Ldir, l.color * l.intensity, albedo, metallic, roughness);
         // Only the first (sun) directional light casts the cascaded shadow.
         // Debug bit1 skips the PCF to isolate its cost.
-        if (i == 0u && (mainDebugFlags & 2u) == 0u) contrib *= sampleShadow(fragPos, N, Ldir, viewDepth);
+        if (i == 0u && (mainDebugFlags & 2u) == 0u) {
+            float sh = sampleShadow(fragPos, N, Ldir, viewDepth);
+            // Contact shadows tighten the near contact the cascade/near map miss.
+            // min() = shadowed if either says so (no double-darkening from multiply).
+            sh = min(sh, texture(sscsTex, gl_FragCoord.xy / max(screenSize, vec2(1.0))).r);
+            contrib *= sh;
+        }
         color += contrib;
     }
     // Point lights via the culled tile list. The tile is selected with the

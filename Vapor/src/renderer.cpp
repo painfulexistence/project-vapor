@@ -962,15 +962,21 @@ void Renderer::setupDefaultRenderGraph() {
         [](Renderer& r) { r.shadowPass(); });
 
     // Hi-Z depth pyramid from the PrePass depth (feeds occlusion culling below).
-    // No-op unless both gpuDrivenCulling and gpuOcclusionCulling are set. Must sit
-    // after PrePass (needs its depth) and before GpuCull (which samples the Hi-Z).
+    // No-op unless both a GPU-driven mode and gpuOcclusionCulling are set. Must
+    // sit after PrePass (needs its depth) and before GpuCull (samples the Hi-Z).
     renderGraph.addPass("HiZBuild",
         [](Renderer& r) { r.hizBuildPass(); });
 
     // GPU-driven frustum (+ optional Hi-Z occlusion) cull -> indirect draw args.
-    // No-op unless the gpuDrivenCulling flag is set; the pass itself early-outs otherwise.
+    // No-op unless the Indirect GPU-driven mode is active; the pass early-outs otherwise.
     renderGraph.addPass("GpuCull",
         [](Renderer& r) { r.gpuCullPass(); }, PassFlags::RequiresCompute);
+
+    // Screen-space contact shadows (Metal compute / Vulkan fullscreen frag).
+    // Reads the pre-pass depth, so it runs after depth is available and before
+    // Main consumes the result.
+    renderGraph.addPass("SSCS",
+        [](Renderer& r) { r.sscsPass(); });
 
     // exists, directly to the swapchain otherwise (decided inside the pass).
     renderGraph.addPass("Main",
@@ -1467,6 +1473,13 @@ void Renderer::mainRenderPass() {
         // SSAO chain output at set2 b7 (RHIMain.frag texAO; whiteTex = neutral
         // when AO is off — the defaults loop above already bound white there).
         if (aoEnabled && aoRT.isValid()) rhi->setTexture(0, 7, aoRT, clampSampler);
+        // Screen-space contact shadow at set2 b8 (RHIMain.frag sscsTex; whiteTex
+        // = neutral/lit when disabled). Uses the bumped 10-binding texture set.
+        rhi->setTexture(0, 8, (sscsEnabled && sscsRT.isValid()) ? sscsRT : whiteTex, clampSampler);
+        // Independent near-field shadow map at set2 b9 (RHIMain.frag nearShadowTex).
+        // Always bind a 2D texture here: the defaults loop above put a cubemap in
+        // b8/b9 (dead Metal contract), and b8/b9 are sampler2D on this path.
+        rhi->setTexture(0, 9, nearShadowMap.isValid() ? nearShadowMap : whiteTex, shadowSampler);
         // Perf-isolation debug flags -> RHIMain.frag push offset 96 (binding 2).
         // Vulkan-only: on Metal, fragment buffer(2) is the CLUSTER buffer, so
         // pushing here would corrupt it (the old billions-of-iterations hang).
@@ -1496,6 +1509,10 @@ void Renderer::mainRenderPass() {
         // AO output replaces the neutral white at texAO(6) whenever the AO
         // chain ran — with RT (RTAO) or without (SSAO shares the chain).
         if (aoEnabled && aoRT.isValid()) rhi->setTexture(0, 6, aoRT, clampSampler);
+        // 3d_pbr_normal_mapped.metal min()'s the sun shadow with texSSCS(15) — it
+        // MUST be bound (an unbound sample reads 0 -> whole scene black). Use the
+        // computed contact RT when SSCS is on, else white (min() no-op).
+        rhi->setTexture(0, 15, (sscsEnabled && sscsRT.isValid()) ? sscsRT : whiteTex, clampSampler);
         if (capabilities.raytracing) {
             // RT kernel outputs replace the neutral whites —
             // texShadow(7), texPointShadow(13), gibsGI(14).
@@ -2098,6 +2115,11 @@ void Renderer::sunFlarePass() {
 // Ray-traced near-field directional shadow into shadowRT (mips regenerated for
 // the PBR shader's soft lookup). Mirrors the native RaytraceShadowPass 1:1.
 void Renderer::raytraceShadowPass() {
+    // The independent near-field shadow map owns the near region on the Vulkan
+    // path (RHIMain.frag never samples shadowRT), so tracing it here is pure
+    // waste. Skip it — the near map + SSCS provide the near shadow. (The dead
+    // Metal-via-RHI branch still consumes shadowRT at b7, so keep it for Metal.)
+    if (backend == GraphicsBackend::Vulkan) return;
     if (!raytraceShadowPipeline.isValid() || !sceneTLAS.isValid() || !shadowRT.isValid()) return;
     // Half-res: shadowRT is half-res, the kernel derives UV from its own dims.
     Uint32 w = (rhi->getSwapchainWidth() + 1) / 2;
@@ -2509,7 +2531,12 @@ void Renderer::shadowPass() {
     // PSSM showed, matching the "weak RT shadow" report. Vulkan has no RT
     // shadow, so it keeps nearClip (cascade 0 starts at the near plane).
     // pssmRTMaxDist is a member now (panel slider "RT shadow max dist", 5..200).
-    const float rtEnd = capabilities.raytracing ? pssmRTMaxDist : nearClip;
+    // The independent near-field shadow map (not RT) owns [near, rtEnd] on this
+    // path, so the boundary is unconditional — no capabilities.raytracing gate.
+    // (Previously, with RT available the near map only reached nearShadowEnd
+    // while cascades started at rtEnd, leaving [nearShadowEnd, rtEnd] unshadowed
+    // because RHIMain.frag never consumed the RT shadow.)
+    const float rtEnd = pssmRTMaxDist;
 
     // Cascade split distances (view space). splits[0] = near end, splits[3] = far.
     float splits[4];
@@ -2560,17 +2587,23 @@ void Renderer::shadowPass() {
         sphereCenter /= 8.0f;
         float sphereRadius = 0.0f;
         for (auto& c : corners) sphereRadius = glm::max(sphereRadius, glm::length(c - sphereCenter));
+        // Quantize the radius so texelSize doesn't jitter from per-frame float noise
+        sphereRadius = std::ceil(sphereRadius * 16.0f) / 16.0f;
+
+        // Snap the cascade center to the shadow-map texel grid so the map moves
+        // in whole texels with the camera (anti-shimmer). The snap MUST be done
+        // in a world-anchored, rotation-only light frame: snapping
+        // lightView * sphereCenter is a no-op because that view looks AT
+        // sphereCenter, so the product is always (0, 0, -lightDist).
+        const glm::mat4 lightRot = glm::lookAt(glm::vec3(0.0f), lightDir, up);
+        const float texelSize = (2.0f * sphereRadius) / float(SHADOW_MAP_SIZE);
+        glm::vec3 lsC = glm::vec3(lightRot * glm::vec4(sphereCenter, 1.0f));
+        lsC.x = std::floor(lsC.x / texelSize) * texelSize;
+        lsC.y = std::floor(lsC.y / texelSize) * texelSize;
+        const glm::vec3 snapped = glm::vec3(glm::inverse(lightRot) * glm::vec4(lsC, 1.0f));
 
         const float lightDist = sphereRadius * 2.0f + 1.0f;
-        glm::mat4 lightView = glm::lookAt(sphereCenter - lightDir * lightDist, sphereCenter, up);
-
-        // Snap the sphere center to the texel grid in light space (anti-shimmer).
-        float texelSize = (2.0f * sphereRadius) / float(SHADOW_MAP_SIZE);
-        glm::vec4 lsCenter = lightView * glm::vec4(sphereCenter, 1.0f);
-        lsCenter.x = std::floor(lsCenter.x / texelSize) * texelSize;
-        lsCenter.y = std::floor(lsCenter.y / texelSize) * texelSize;
-        glm::vec3 snapped = glm::vec3(glm::inverse(lightView) * lsCenter);
-        lightView = glm::lookAt(snapped - lightDir * lightDist, snapped, up);
+        glm::mat4 lightView = glm::lookAt(snapped - lightDir * lightDist, snapped, up);
 
         float minDist = std::numeric_limits<float>::max();
         float maxDist = -minDist;
@@ -2583,6 +2616,37 @@ void Renderer::shadowPass() {
 
         glm::mat4 lightProj = glm::orthoZO(-sphereRadius, sphereRadius, -sphereRadius, sphereRadius, minDist, maxDist);
         gpuData.lightSpaceMatrices[ci] = lightProj * lightView;
+    }
+
+    // Independent near-field shadow map: fit a tight ortho to the [near,
+    // nearShadowEnd] sub-frustum, separate from the cascades. Same bounding-
+    // sphere + world-anchored texel snap as the cascades (anti-shimmer).
+    gpuData.nearShadowEnd = rtEnd;
+    if (rtEnd > nearClip) {
+        float nNDC = viewDepthToNDCz(glm::clamp(nearClip, nearClip, farClip));
+        float fNDC = viewDepthToNDCz(glm::clamp(rtEnd,    nearClip, farClip));
+        const glm::vec4 ndc8[8] = {
+            {-1,-1,nNDC,1},{1,-1,nNDC,1},{-1,1,nNDC,1},{1,1,nNDC,1},
+            {-1,-1,fNDC,1},{1,-1,fNDC,1},{-1,1,fNDC,1},{1,1,fNDC,1},
+        };
+        glm::vec3 c[8]; glm::vec3 center(0.0f);
+        for (int i = 0; i < 8; i++) { glm::vec4 w = invVP * ndc8[i]; c[i] = glm::vec3(w) / w.w; center += c[i]; }
+        center /= 8.0f;
+        float radius = 0.0f;
+        for (auto& p : c) radius = glm::max(radius, glm::length(p - center));
+        radius = std::ceil(radius * 16.0f) / 16.0f;
+        const glm::mat4 lightRot = glm::lookAt(glm::vec3(0.0f), lightDir, up);
+        const float texel = (2.0f * radius) / float(NEAR_SHADOW_MAP_SIZE);
+        glm::vec3 lsC = glm::vec3(lightRot * glm::vec4(center, 1.0f));
+        lsC.x = std::floor(lsC.x / texel) * texel;
+        lsC.y = std::floor(lsC.y / texel) * texel;
+        glm::vec3 snapped = glm::vec3(glm::inverse(lightRot) * glm::vec4(lsC, 1.0f));
+        const float dist = radius * 2.0f + 1.0f;
+        glm::mat4 lv = glm::lookAt(snapped - lightDir * dist, snapped, up);
+        float mn = 1e30f, mx = -1e30f;
+        for (auto& p : c) { float d = -(lv * glm::vec4(p, 1.0f)).z; mn = glm::min(mn, d); mx = glm::max(mx, d); }
+        mn -= (mx - mn);
+        gpuData.nearLightMatrix = glm::orthoZO(-radius, radius, -radius, radius, mn, mx) * lv;
     }
 
     // Upload all cascade matrices once; the shadow VS indexes by cascadeIndex.
@@ -2635,6 +2699,112 @@ void Renderer::shadowPass() {
         }
         rhi->endRenderPass();
     }
+
+    // Render the independent near-field shadow map into its own texture. The VS
+    // selects nearLightMatrix when cascadeIndex == 3 (Vulkan) / receives it via
+    // vertex bytes (Metal).
+    if (rtEnd > nearClip && nearShadowMap.isValid()) {
+        RenderPassDesc rp;
+        rp.name = "NearShadow";
+        rp.depthAttachment = nearShadowMap;
+        rp.loadDepth = false;  // clear
+        rp.clearDepth = 1.0f;
+        rhi->beginRenderPass(rp);
+        rhi->bindPipeline(shadowPipeline);
+        if (backend == GraphicsBackend::Metal) {
+            rhi->setVertexBytes(&gpuData.nearLightMatrix, sizeof(glm::mat4), 0);
+            rhi->setVertexBuffer(1, materialUniformBuffer, 0, sizeof(Vapor::MaterialData) * MAX_INSTANCES);
+        } else {
+            Uint32 nearIdx = 3u;
+            rhi->setVertexBuffer(0, pssmDataBuffer, 0, sizeof(PSSMRenderData));
+            rhi->setVertexBytes(&nearIdx, sizeof(Uint32), 5);  // cascadeIndex -> push offset 16
+        }
+        rhi->setVertexBuffer(2, instanceDataBuffer, 0, sizeof(Vapor::InstanceData) * std::max<Uint32>(1, totalInstanceCount));
+        for (Uint32 drawableIdx = 0; drawableIdx < frameDrawables.size(); drawableIdx++) {
+            const Drawable& drawable = frameDrawables[drawableIdx];
+            const RenderMesh& mesh = meshes[drawable.mesh];
+            auto it = drawableToInstanceID.find(drawableIdx);
+            if (it == drawableToInstanceID.end()) continue;
+            Uint32 iid = it->second;
+            if (backend == GraphicsBackend::Metal) bindMaterial(drawable.material);
+            if (mesh.vertexBuffer.isValid()) rhi->bindVertexBuffer(mesh.vertexBuffer, 3, 0);
+            rhi->setVertexBytes(&iid, sizeof(Uint32), 4);  // instanceID -> push offset 0
+            if (mesh.indexBuffer.isValid()) {
+                rhi->bindIndexBuffer(mesh.indexBuffer, 0);
+                rhi->drawIndexed(mesh.indexCount, 1, 0, 0, 0);
+            } else if (mesh.vertexBuffer.isValid()) {
+                rhi->draw(mesh.vertexCount, 1, 0, 0);
+            }
+        }
+        rhi->endRenderPass();
+    }
+}
+
+// Screen-space contact shadows: march the pre-pass depth toward the light and
+// write a visibility RT (R: 0 shadowed, 1 lit). The main pass min-composites it
+// onto the sun shadow, tightening the near contact the cascade/near map miss.
+// Vulkan fullscreen frag only (the Metal native renderer has RT near shadows).
+void Renderer::sscsPass() {
+    if (!sscsEnabled || !sscsRT.isValid() || !depthStencilRT.isValid() || directionalLights.empty()) {
+        return;
+    }
+
+    // Metal (RHI): compute path with 3d_sscs.metal (mirrors raytraceShadowPass).
+    // The kernel derives the view-space light dir from directionalLights[0] +
+    // camera itself, so we only feed camera + lights + screenSize + params.
+    if (backend == GraphicsBackend::Metal) {
+        if (!sscsComputePipeline.isValid()) return;
+        struct SSCSParamsC { float rayLength; float thickness; Uint32 stepCount; float bias; } params;
+        params.rayLength = sscsLength;
+        params.thickness = sscsThickness;
+        params.stepCount = sscsSteps;
+        params.bias      = sscsBias;
+        Uint32 w = (rhi->getSwapchainWidth() + 1) / 2;   // sscsRT is half-res
+        Uint32 h = (rhi->getSwapchainHeight() + 1) / 2;
+        glm::vec2 screenSize(w, h);
+        rhi->beginComputePass("SSCS");
+        rhi->bindComputePipeline(sscsComputePipeline);
+        rhi->setComputeTexture(0, depthStencilRT);
+        rhi->setComputeTexture(1, sscsRT);
+        rhi->setComputeBuffer(0, cameraUniformBuffer, 0, sizeof(CameraRenderData));
+        rhi->setComputeBuffer(1, directionalLightBuffer, 0, sizeof(DirectionalLightData) * maxDirectionalLights);
+        rhi->setComputeBytes(&screenSize, sizeof(glm::vec2), 2);
+        rhi->setComputeBytes(&params, sizeof(params), 3);
+        rhi->dispatch(w, h, 1);  // 1x1 groups, matching raytraceShadowPass
+        rhi->endComputePass();
+        return;
+    }
+
+    // Vulkan: fullscreen fragment path with SSCS.frag.
+    if (!vkSscsPipeline.isValid()) return;
+
+    struct SSCSPush {
+        glm::vec4 lightDirVS;   // view-space direction TO the light
+        float rayLength;
+        float thickness;
+        Uint32 stepCount;
+        float bias;
+    } push;
+    glm::vec3 Lworld = glm::normalize(-directionalLights[0].direction);   // toward light
+    glm::vec3 Lview  = glm::normalize(glm::mat3(currentCamera.view) * Lworld);
+    push.lightDirVS = glm::vec4(Lview, 0.0f);
+    push.rayLength  = sscsLength;
+    push.thickness  = sscsThickness;
+    push.stepCount  = sscsSteps;
+    push.bias       = sscsBias;
+
+    RenderPassDesc rp;
+    rp.name = "SSCS";
+    rp.colorAttachments.push_back(sscsRT);
+    rp.clearColors.push_back(glm::vec4(1.0f));  // default lit
+    rp.loadColor.push_back(false);              // clear
+    rhi->beginRenderPass(rp);
+    rhi->bindPipeline(vkSscsPipeline);
+    rhi->setTexture(0, 0, depthStencilRT, clampSampler);
+    rhi->setFragmentBuffer(3, cameraUniformBuffer, 0, sizeof(CameraRenderData));
+    rhi->setFragmentBytes(&push, sizeof(push), 0);
+    rhi->draw(3, 1, 0, 0);
+    rhi->endRenderPass();
 }
 
 // Bloom brightness: soft-threshold extract from colorRT into the half-res
@@ -3408,6 +3578,17 @@ void Renderer::createDefaultResources() {
         pssmDesc.format = PixelFormat::Depth32Float;
         pssmDesc.usage = TextureUsage::DepthStencil | TextureUsage::Sampled;
         pssmShadowArrayTexture = rhi->createTexture(pssmDesc);
+
+        // Independent near-field shadow map: its own texture at its own (finer)
+        // resolution, tight-fit to [near, pssmRTMaxDist]. Sampled at set2 b9 —
+        // the texture set now has 10 bindings, so a distinct map costs nothing.
+        TextureDesc nearDesc;
+        nearDesc.width = NEAR_SHADOW_MAP_SIZE;
+        nearDesc.height = NEAR_SHADOW_MAP_SIZE;
+        nearDesc.arrayLayers = 1;
+        nearDesc.format = PixelFormat::Depth32Float;
+        nearDesc.usage = TextureUsage::DepthStencil | TextureUsage::Sampled;
+        nearShadowMap = rhi->createTexture(nearDesc);
     }
 
     // GPU particle system: a self-contained orbital demo. The particle buffer
@@ -3648,6 +3829,18 @@ void Renderer::createRenderTargets() {
         // RenderTarget usage for the Vulkan denoise fragment pass's final write.
         desc.usage = TextureUsage::Storage | TextureUsage::Sampled | TextureUsage::RenderTarget;
         aoRT = rhi->createTexture(desc);
+    }
+
+    // Screen-space contact shadow RT (half-res, single channel visibility).
+    {
+        TextureDesc desc;
+        desc.width = halfW;
+        desc.height = halfH;
+        desc.format = PixelFormat::R8_UNORM;
+        // RenderTarget for the Vulkan fullscreen frag path; Storage for the Metal
+        // compute path (3d_sscs.metal writes it); Sampled for the main pass read.
+        desc.usage = TextureUsage::Sampled | TextureUsage::RenderTarget | TextureUsage::Storage;
+        sscsRT = rhi->createTexture(desc);
     }
 
     // RT AO / point-shadow working set + prepass albedo (RT-capable backends;
@@ -3990,6 +4183,8 @@ void Renderer::createRenderPipeline() {
             // final aoRT R16F), hence two pipelines over one shader.
             vkSsaoPipeline = makeFullscreenFragPipeline(
                 "shaders/SSAO.frag.spv", vkSsaoShader, BlendMode::Opaque, PixelFormat::R16_FLOAT);
+            vkSscsPipeline = makeFullscreenFragPipeline(
+                "shaders/SSCS.frag.spv", vkSscsShader, BlendMode::Opaque, PixelFormat::R8_UNORM);
             vkAoTemporalPipeline = makeFullscreenFragPipeline(
                 "shaders/AOTemporal.frag.spv", vkAoTemporalShader, BlendMode::Opaque, PixelFormat::RGBA16_FLOAT);
             vkAoDenoisePipelineRGBA = makeFullscreenFragPipeline(
@@ -4210,6 +4405,7 @@ void Renderer::createRenderPipeline() {
         };
         // Threadgroup shapes mirror the native dispatches exactly.
         raytraceShadowPipeline        = makeMetalCompute("shaders/3d_raytrace_shadow.metal", rtShadowShader, 1, 1, 1);
+        sscsComputePipeline           = makeMetalCompute("shaders/3d_sscs.metal", sscsMetalShader, 1, 1, 1);
         raytraceAOPipeline            = makeMetalCompute("shaders/3d_raytrace_ao.metal", rtAOShader, 1, 1, 1);
         // SSAO shares the RT AO binding interface (ignores the TLAS slot) and
         // is selected by aoMethod, exactly like native RaytraceAOPass.
@@ -5174,7 +5370,14 @@ void Renderer::drawGraphicsImGui() {
 
     if (ImGui::TreeNode("Shadow Debug")) {
         ImGui::Text("Raytracing: %s", capabilities.raytracing ? "yes" : "no");
-        ImGui::SliderFloat("RT shadow max dist", &pssmRTMaxDist, 5.0f, 200.0f);
+        // pssmRTMaxDist now sets where the independent near-field shadow map ends
+        // and the PSSM cascades begin (the near map, not RT, owns [near, this]).
+        ImGui::SliderFloat("Near shadow distance", &pssmRTMaxDist, 5.0f, 200.0f);
+        ImGui::Checkbox("Contact shadows (SSCS)", &sscsEnabled);
+        if (sscsEnabled) {
+            ImGui::SliderFloat("SSCS length", &sscsLength, 0.05f, 2.0f);
+            ImGui::SliderFloat("SSCS thickness", &sscsThickness, 0.05f, 2.0f);
+        }
         int psd = static_cast<int>(pointShadowDebugMode);
         if (ImGui::Combo("Point shadow view", &psd, "Visibility (normal)\0Tile light-count heatmap\0")) {
             pointShadowDebugMode = static_cast<Uint32>(psd);
@@ -5184,12 +5387,15 @@ void Renderer::drawGraphicsImGui() {
                                "Shown in 'Point Shadow (raw)' below.");
         }
         bool skipShadow = (mainDebugFlags & 2u) != 0u;
-        if (ImGui::Checkbox("Skip shadow PCF (perf isolation)", &skipShadow))
+        if (ImGui::Checkbox("Skip shadow", &skipShadow))
             mainDebugFlags = (mainDebugFlags & ~2u) | (skipShadow ? 2u : 0u);
         // Intermediate shadow textures (native Metal parity). These are
         // single-channel R16F/depth RTs; the RRR1 swizzle view renders them as
         // grayscale instead of red-only.
-        preview("RT Shadow (screen)", debugView("shadowGray", shadowRT, TextureSwizzle::RRR1, 0));
+        // Near-field shadow (its own map here; RT on the Metal native path — same
+        // purpose, so the UI just says "Near Shadow") plus the SSCS contact layer.
+        preview("Near Shadow (light-space depth)", debugView("nearMap", nearShadowMap, TextureSwizzle::RRR1, 0));
+        preview("Contact Shadow (SSCS)", debugView("sscs", sscsRT, TextureSwizzle::RRR1, 0));
         preview("Point Shadow (raw / heatmap)", debugView("psRaw", pointShadowRT, TextureSwizzle::RRR1, 0));
         preview("Point Shadow (denoised)", debugView("psDen", pointShadowDenoisedRT, TextureSwizzle::RRR1, 0));
         // PSSM cascades: one 2D grayscale view per array layer of the 3-cascade

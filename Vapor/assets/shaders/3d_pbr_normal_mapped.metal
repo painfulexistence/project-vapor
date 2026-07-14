@@ -358,6 +358,7 @@ fragment float4 fragmentMain(
     depth2d_array<float, access::sample> pssmShadowMaps [[texture(12)]],
     texture2d<float, access::sample> texPointShadow [[texture(13)]],
     texture2d<float, access::sample> gibsGI [[texture(14)]], // GIBS indirect lighting
+    texture2d<float, access::sample> texSSCS [[texture(15)]], // screen-space contact shadow
     const device DirLight* directionalLights [[buffer(0)]],
     const device PointLight* pointLights [[buffer(1)]],
     const device Cluster* clusters [[buffer(2)]],
@@ -444,47 +445,161 @@ fragment float4 fragmentMain(
     // abs(): view matrix is RH (visible z is negative); splits are positive distances
     float viewDepth = abs((camera.view * in.worldPosition).z);
 
+    // Helper: sample PSSM shadow with configurable PCF
+    auto samplePSSMShadow = [&](int cascadeIndex, float2 shadowUV, float refDepth) -> float {
+        float pcf = 0.0;
+        uint sampleCount = pssmData.pcfSampleCount;
+
+        if (sampleCount <= 4) {
+            // 4-tap Poisson disk
+            for (int i = 0; i < 4; i++) {
+                pcf += pssmShadowMaps.sample_compare(
+                    shadowCmpSampler,
+                    shadowUV + poissonDisk4[i] * PSSM_TEXEL * 2.0,
+                    cascadeIndex, refDepth
+                );
+            }
+            return pcf / 4.0;
+        } else if (sampleCount <= 8) {
+            // 8-tap Poisson disk
+            for (int i = 0; i < 8; i++) {
+                pcf += pssmShadowMaps.sample_compare(
+                    shadowCmpSampler,
+                    shadowUV + poissonDisk8[i] * PSSM_TEXEL * 2.0,
+                    cascadeIndex, refDepth
+                );
+            }
+            return pcf / 8.0;
+        } else if (sampleCount <= 16) {
+            // 16-tap Poisson disk
+            for (int i = 0; i < 16; i++) {
+                pcf += pssmShadowMaps.sample_compare(
+                    shadowCmpSampler,
+                    shadowUV + poissonDisk16[i] * PSSM_TEXEL * 2.0,
+                    cascadeIndex, refDepth
+                );
+            }
+            return pcf / 16.0;
+        } else {
+            // 32-tap: 16-tap Poisson + 16-tap rotated
+            for (int i = 0; i < 16; i++) {
+                pcf += pssmShadowMaps.sample_compare(
+                    shadowCmpSampler,
+                    shadowUV + poissonDisk16[i] * PSSM_TEXEL * 2.0,
+                    cascadeIndex, refDepth
+                );
+                // Rotated samples for better coverage
+                float2 rotated = float2(
+                    poissonDisk16[i].x * 0.7071 - poissonDisk16[i].y * 0.7071,
+                    poissonDisk16[i].x * 0.7071 + poissonDisk16[i].y * 0.7071
+                ) * 1.5;
+                pcf += pssmShadowMaps.sample_compare(
+                    shadowCmpSampler,
+                    shadowUV + rotated * PSSM_TEXEL * 2.0,
+                    cascadeIndex, refDepth
+                );
+            }
+            return pcf / 32.0;
+        }
+    };
+
+    // Direction toward the sun; used for the slope-scaled shadow bias.
+    float3 shadowL = normalize(-directionalLights[0].direction);
+
+    // Helper: sample a specific cascade
+    auto sampleCascade = [&](int ci) -> float {
+        float4 lsPos = pssmData.lightSpaceMatrices[ci] * in.worldPosition;
+        float3 proj  = lsPos.xyz / lsPos.w;
+        float2 shadowUV = float2(proj.x * 0.5 + 0.5, 0.5 - proj.y * 0.5);
+        // Per-cascade + slope-scaled depth bias. A flat bias is fine for the
+        // near cascade but far cascades cover far more world per texel, and
+        // grazing surfaces (small N·L, e.g. a ceiling lit obliquely) self-shadow
+        // — the moiré / "z-fighting" acne that also swallows lit regions. Scale
+        // the bias with cascade index and inverse N·L to suppress both.
+        float ndl = max(dot(N, shadowL), 0.0);
+        float slope = clamp(1.0 - ndl, 0.0, 1.0);
+        float bias = PSSM_BIAS * float(ci + 1) * (1.0 + 2.0 * slope);
+        float refDepth = proj.z - bias;
+        return samplePSSMShadow(ci, shadowUV, refDepth);
+    };
+
+    // Crisp, non-repeating fetch for the screen-space RT shadow. Reusing the
+    // material sampler `s` (address::repeat, mip_filter::linear) can pull a
+    // blurred mip / wrap at screen edges, softening the RT shadow right where it
+    // has to line up with PSSM.
+    constexpr sampler rtShadowSampler(
+        address::clamp_to_edge,
+        filter::linear,
+        mip_filter::none
+    );
+
+    // RT↔PSSM cross-fade is centred on rtEnd instead of starting there. The RT
+    // shadow has crisp, contact-accurate edges; PSSM is slightly offset
+    // (peter-panning from the depth bias + widened ortho range). A one-sided
+    // fade lets the accurate RT shadow end abruptly at rtEnd, exposing a lit
+    // sliver where the offset PSSM edge has not caught up yet — the bright line.
+    // Centring the window keeps RT dominant across the contact region and only
+    // hands off to PSSM well past the seam.
+    float rtEnd     = pssmData.cascadeSplits.x;
+    float halfBlend = pssmData.blendRange * 0.5;
+    float blendLo   = rtEnd - halfBlend;
+    float blendHi   = rtEnd + halfBlend;
+
     float shadowFactor;
-    if (viewDepth <= pssmData.cascadeSplits.x) {
-        // Cascade 0: RT ray-traced shadow
-        shadowFactor = texShadow.sample(s, screenUV).r;
+    int debugCascade = -1; // -1 = RT, 0-2 = PSSM cascades
+
+    if (viewDepth < blendLo) {
+        // Fully inside the RT region
+        shadowFactor = texShadow.sample(rtShadowSampler, screenUV).r;
+        debugCascade = -1;
     } else {
-        // Select PSSM cascade (index 0-2 = cascade 1-3)
+        // At or past the RT boundary: evaluate the PSSM cascade
         int ci = 0;
         if      (viewDepth > pssmData.cascadeSplits.z) ci = 2;
         else if (viewDepth > pssmData.cascadeSplits.y) ci = 1;
+        debugCascade = ci;
 
-        float4 lsPos = pssmData.lightSpaceMatrices[ci] * in.worldPosition;
-        float3 proj  = lsPos.xyz / lsPos.w;
+        shadowFactor = sampleCascade(ci);
 
-        // NDC → texture UV (Metal: y=+1 at top → v=0)
-        float2 shadowUV = float2(proj.x * 0.5 + 0.5, 0.5 - proj.y * 0.5);
-        float  refDepth = proj.z - PSSM_BIAS;
-
-        // 3×3 PCF (each tap uses hardware bilinear comparison)
-        float pcf = 0.0;
-        for (int px = -1; px <= 1; px++) {
-            for (int py = -1; py <= 1; py++) {
-                pcf += pssmShadowMaps.sample_compare(
-                    shadowCmpSampler,
-                    shadowUV + float2(px, py) * PSSM_TEXEL,
-                    ci, refDepth
-                );
+        // Cascade blend: smooth transition between cascades
+        float cascadeBlend = pssmData.cascadeBlendRange;
+        if (cascadeBlend > 0.0 && ci < 2) {
+            float cascadeEnd = (ci == 0) ? pssmData.cascadeSplits.y : pssmData.cascadeSplits.z;
+            float blendStart = cascadeEnd - cascadeBlend;
+            if (viewDepth > blendStart && viewDepth < cascadeEnd) {
+                float nextShadow = sampleCascade(ci + 1);
+                float t = (viewDepth - blendStart) / cascadeBlend;
+                shadowFactor = mix(shadowFactor, nextShadow, smoothstep(0.0, 1.0, t));
             }
         }
-        shadowFactor = pcf / 9.0;
 
-        // Blend zone between RT (cascade 0) and PSSM cascade 1
-        float blendEnd = pssmData.cascadeSplits.x + pssmData.blendRange;
-        if (viewDepth < blendEnd) {
-            float rtShadow = texShadow.sample(s, screenUV).r;
-            float t = (viewDepth - pssmData.cascadeSplits.x) / pssmData.blendRange;
-            shadowFactor = mix(rtShadow, shadowFactor, t);
+        // Symmetric RT↔PSSM cross-fade window [blendLo, blendHi] around rtEnd
+        if (viewDepth < blendHi && pssmData.blendRange > 0.0) {
+            float rtShadow = texShadow.sample(rtShadowSampler, screenUV).r;
+            float t = (viewDepth - blendLo) / pssmData.blendRange; // 0 at blendLo → 1 at blendHi
+            shadowFactor = mix(rtShadow, shadowFactor, smoothstep(0.0, 1.0, t));
+            if (t < 0.5) debugCascade = -1; // RT-dominant half shows as RT in debug view
         }
+    }
+
+    // Debug visualization: show cascade colors
+    if (pssmData.debugVisualize > 0) {
+        float3 cascadeColors[4] = {
+            float3(0.2, 0.8, 0.2), // RT = green
+            float3(0.8, 0.2, 0.2), // Cascade 0 = red
+            float3(0.2, 0.2, 0.8), // Cascade 1 = blue
+            float3(0.8, 0.8, 0.2)  // Cascade 2 = yellow
+        };
+        float3 cascadeColor = cascadeColors[debugCascade + 1];
+        return float4(cascadeColor * shadowFactor, 1.0);
     }
 
     // Debug bit1: drop the shadow term to isolate its cost.
     if ((mainDebugFlags & 2u) != 0u) shadowFactor = 1.0;
+
+    // Screen-space contact shadows tighten the near contact the RT/PSSM shadow
+    // misses. min() = shadowed if either says so (no double-darkening).
+    shadowFactor = min(shadowFactor, texSSCS.sample(rtShadowSampler, screenUV).r);
 
     float3 result = float3(0.0);
     result += CalculateDirectionalLight(directionalLights[0], norm, T, B, viewDir, surf) * shadowFactor;

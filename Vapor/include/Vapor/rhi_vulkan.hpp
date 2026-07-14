@@ -300,12 +300,16 @@ private:
     // after a binding change.
     // ========================================================================
 
-    // 16 (was 8): the main pass's fragment-texture set needs slots 0-7 for
-    // material/shadow/AO maps plus 8-10 for the IBL environment maps. The set
-    // layouts and bound-resource arrays scale from this constant; descriptor-pool
-    // consumption tracks actual bound resources, not this bound, so the fixed pool
-    // headroom is unaffected.
-    static constexpr Uint32 BINDINGS_PER_SET = 16;
+    // Buffer + storage-image sets stay at 8: MoltenVK/Metal caps
+    // maxPerStageDescriptorStorageImages (and storage buffers) at 8, so bumping
+    // these would fail pipeline-layout creation. The meshlet vertex-stage binds
+    // (slots 0-7) fit exactly.
+    static constexpr Uint32 BINDINGS_PER_SET = 8;
+    // The texture set (combined image samplers, device limit >= 16) is widened
+    // for the SSCS contact-RT sampler (set2 b8) AND the IBL environment maps
+    // (irradiance/prefilter/brdfLUT at 8/9/10). The write loop only writes bound
+    // slots, so material sets (<=8) are unaffected.
+    static constexpr Uint32 TEXTURE_BINDINGS_PER_SET = 16;
 
     struct BufferBinding {
         VkBuffer buffer = VK_NULL_HANDLE;
@@ -325,7 +329,7 @@ private:
 
     BufferBinding boundVertexBuffers[BINDINGS_PER_SET];
     BufferBinding boundFragmentBuffers[BINDINGS_PER_SET];
-    TextureBinding boundTextures[BINDINGS_PER_SET];
+    TextureBinding boundTextures[TEXTURE_BINDINGS_PER_SET];
     bool descriptorsDirty = true;
 
     // Compute follows the same model with its own global layout:
