@@ -1506,15 +1506,16 @@ void Renderer::mainRenderPass() {
         // Vulkan-only: on Metal, fragment buffer(2) is the CLUSTER buffer, so
         // pushing here would corrupt it (the old billions-of-iterations hang).
         rhi->setFragmentBytes(&mainDebugFlags, sizeof(Uint32), 2);
-        // Real IBL maps once the (HDRI) IBL chain has run — irradiance(8),
-        // prefilter(9), brdfLUT(10). Otherwise the black cubemap / black 2D
-        // defaults bound above keep IBL at zero, and RHIMain.frag falls back to
-        // flat ambient wherever a material's iblEnabled is 0.
-        if (!iblNeedsUpdate) {
-            if (irradianceMap.isValid()) rhi->setTexture(0, 8, irradianceMap, clampSampler);
-            if (prefilterMap.isValid()) rhi->setTexture(0, 9, prefilterMap, clampSampler);
-            if (brdfLUTTex.isValid()) rhi->setTexture(0, 10, brdfLUTTex, clampSampler);
-        }
+        // IBL maps at set2 b11/b12 (cubes) + b10 (BRDF LUT 2D). NOT 8/9 — those
+        // are sscsTex/nearShadowTex on this shader (aliasing them with cube
+        // types broke MoltenVK's MSL translation). RHIMain.frag statically
+        // samples all three, so always bind valid textures: black cube / the
+        // black 2D default (bound at b10 by the defaults loop) until the HDRI
+        // IBL chain has produced the real maps.
+        const bool iblReady = !iblNeedsUpdate;
+        rhi->setTexture(0, 11, (iblReady && irradianceMap.isValid()) ? irradianceMap : defaultBlackCubemapTex, clampSampler);
+        rhi->setTexture(0, 12, (iblReady && prefilterMap.isValid()) ? prefilterMap : defaultBlackCubemapTex, clampSampler);
+        if (iblReady && brdfLUTTex.isValid()) rhi->setTexture(0, 10, brdfLUTTex, clampSampler);
     } else {
         // Perf-isolation debug flags for the Metal PBR shader at buffer(12)
         // (buffer(2) is the cluster buffer here — see the Vulkan note above —

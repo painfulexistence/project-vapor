@@ -144,11 +144,14 @@ layout(set = 2, binding = 8) uniform sampler2D sscsTex;
 // [near, nearShadowEnd]. Depth values sampled with the negative-viewport Y-flip.
 layout(set = 2, binding = 9) uniform sampler2D nearShadowTex;
 
-// IBL environment maps (bindings 8-10). Bound to defaults (black cube / white 2D)
-// when no environment is loaded; sampled only when MaterialData.iblEnabled != 0,
-// so scenes without IBL keep the flat-ambient behaviour.
-layout(set = 2, binding = 8) uniform samplerCube irradianceMap;   // diffuse IBL
-layout(set = 2, binding = 9) uniform samplerCube prefilterMap;    // specular IBL (roughness in mips)
+// IBL environment maps (bindings 10-12; 8/9 belong to sscsTex/nearShadowTex —
+// aliasing them here with different sampler types broke MoltenVK's SPIR-V->MSL
+// translation: only one texture+sampler pair per binding gets declared, so the
+// generated MSL referenced an undeclared irradianceMapSmplr). Bound to defaults
+// (black cube / black 2D) when no environment is loaded; sampled only when
+// MaterialData.iblEnabled != 0, so scenes without IBL keep flat ambient.
+layout(set = 2, binding = 11) uniform samplerCube irradianceMap;  // diffuse IBL
+layout(set = 2, binding = 12) uniform samplerCube prefilterMap;   // specular IBL (roughness in mips)
 layout(set = 2, binding = 10) uniform sampler2D brdfLUT;          // split-sum BRDF LUT
 const float IBL_MAX_REFLECTION_LOD = 4.0;
 
