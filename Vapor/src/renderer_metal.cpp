@@ -343,6 +343,43 @@ public:
     }
 };
 
+// Screen-space contact shadows: march the depth buffer toward the sun and write
+// a visibility RT the PBR pass min-composites onto the directional shadow. Adds
+// the fine near contact the RT/PSSM shadow misses (parity with the Vulkan path).
+class SSCSPass : public MetalRenderPass {
+public:
+    explicit SSCSPass(Renderer_Metal* renderer) : MetalRenderPass(renderer) {}
+    auto getName() const -> const char* override { return "SSCSPass"; }
+
+    void execute() override {
+        auto& r = *renderer;
+        if (!r.sscsEnabled || !r.sscsPipeline || !r.sscsRT || !r.depthStencilRT) return;
+
+        auto w = r.sscsRT->width();
+        auto h = r.sscsRT->height();
+        glm::vec2 screenSize = glm::vec2(w, h);
+        struct SSCSParams { float rayLength; float thickness; uint32_t stepCount; float bias; } params;
+        params.rayLength = r.sscsLength;
+        params.thickness = r.sscsThickness;
+        params.stepCount = r.sscsSteps;
+        params.bias      = r.sscsBias;
+
+        auto timedComputeDesc = makeTimedComputeDesc(true, true);
+        auto encoder = r.currentCommandBuffer->computeCommandEncoder(timedComputeDesc.get());
+        encoder->setComputePipelineState(r.sscsPipeline.get());
+        encoder->setTexture(r.depthStencilRT.get(), 0);
+        encoder->setTexture(r.sscsRT.get(), 1);
+        encoder->setBuffer(r.cameraDataBuffers[r.currentFrameInFlight].get(), 0, 0);
+        encoder->setBuffer(r.directionalLightBuffer.get(), 0, 1);
+        encoder->setBytes(&screenSize, sizeof(glm::vec2), 2);
+        encoder->setBytes(&params, sizeof(params), 3);
+        encoder->dispatchThreadgroups(MTL::Size((w + 7) / 8, (h + 7) / 8, 1), MTL::Size(8, 8, 1));
+        encoder->endEncoding();
+
+        addTrafficEstimate(uint64_t(w) * h * (4 + 1));
+    }
+};
+
 // PSSM shadow pass: renders scene depth into a 3-slice texture array for cascades 1-3
 class PSSMShadowPass : public MetalRenderPass {
 public:
@@ -362,7 +399,7 @@ public:
         const float nearClip  = r.currentCamera->near();
         const float farClip   = r.currentCamera->far();
         const float rtEnd     = r.m_supportsRaytracing ? r.pssmRTMaxDist : nearClip;
-        const float blendRange = (farClip - rtEnd) * 0.05f; // 5% of remaining range
+        const float blendRange = (farClip - rtEnd) * r.pssmRTBlendScale; // fraction of remaining range
 
         // ----- Cascade split depths (practical split: blend of log + uniform) -----
         // splits[0] = rtEnd, splits[1..3] = cascade ends, splits[3] = farClip
@@ -402,13 +439,18 @@ public:
         struct PSSMGPUData {
             glm::mat4 lightSpaceMatrices[3];
             glm::vec4 cascadeSplits;
-            float blendRange;
-            float _pad[3];
+            float blendRange;          // RT↔PSSM blend range
+            float cascadeBlendRange;   // cascade↔cascade blend range
+            uint32_t pcfSampleCount;   // 4, 8, 16, or 32
+            uint32_t debugVisualize;   // 0 = off, 1 = visualize cascades
         };
 
         PSSMGPUData gpuData{};
         gpuData.cascadeSplits = glm::vec4(splits[0], splits[1], splits[2], splits[3]);
-        gpuData.blendRange    = blendRange;
+        gpuData.blendRange         = blendRange;
+        gpuData.cascadeBlendRange  = r.pssmCascadeBlendRange;
+        gpuData.pcfSampleCount     = r.pssmPcfSampleCount;
+        gpuData.debugVisualize     = r.pssmDebugVisualize ? 1 : 0;
 
         // Convert a forward view-space distance to NDC z by projecting an actual
         // view-space point. Handedness-aware: RH projections (glm default; the
@@ -448,20 +490,27 @@ public:
             float sphereRadius = 0.0f;
             for (auto& c : corners)
                 sphereRadius = glm::max(sphereRadius, glm::length(c - sphereCenter));
+            // Quantize the radius so texelSize doesn't jitter from per-frame float noise
+            sphereRadius = std::ceil(sphereRadius * 16.0f) / 16.0f;
+
+            // Snap the cascade center to the shadow-map texel grid so the map
+            // translates in whole texels as the camera moves (stops edge
+            // crawling/swimming). The snap MUST happen in a world-anchored,
+            // rotation-only light frame: the previous code snapped
+            // lightView * sphereCenter, but that view looks AT sphereCenter, so
+            // the product is always (0, 0, -lightDist) and the snap was a no-op.
+            const glm::mat4 lightRot = glm::lookAt(glm::vec3(0.0f), lightDir, up);
+            const float texelSize = (2.0f * sphereRadius) / float(r.PSSM_SHADOW_MAP_SIZE);
+            glm::vec3 lsC = glm::vec3(lightRot * glm::vec4(sphereCenter, 1.0f));
+            lsC.x = std::floor(lsC.x / texelSize) * texelSize;
+            lsC.y = std::floor(lsC.y / texelSize) * texelSize;
+            const glm::vec3 snappedCenter = glm::vec3(glm::inverse(lightRot) * glm::vec4(lsC, 1.0f));
 
             // Light view: eye pulled back far enough that the whole bounding
             // sphere sits in front of it (RH lookAt: forward is -z, so points in
             // front have negative view z; distance from eye = -z).
             const float lightDist = sphereRadius * 2.0f + 1.0f;
-            glm::mat4 lightView = glm::lookAt(sphereCenter - lightDir * lightDist, sphereCenter, up);
-
-            // Snap sphere center to texel grid in light space to stop shimmering
-            float texelSize = (2.0f * sphereRadius) / float(r.PSSM_SHADOW_MAP_SIZE);
-            glm::vec4 lsCenter = lightView * glm::vec4(sphereCenter, 1.0f);
-            lsCenter.x = std::floor(lsCenter.x / texelSize) * texelSize;
-            lsCenter.y = std::floor(lsCenter.y / texelSize) * texelSize;
-            glm::vec3 snappedCenter = glm::vec3(glm::inverse(lightView) * lsCenter);
-            lightView = glm::lookAt(snappedCenter - lightDir * lightDist, snappedCenter, up);
+            glm::mat4 lightView = glm::lookAt(snappedCenter - lightDir * lightDist, snappedCenter, up);
 
             // Depth extents as positive distances in front of the light eye
             float minDist = 1e38f, maxDist = -1e38f;
@@ -474,7 +523,13 @@ public:
             // (a negative near just extends the ortho volume behind the eye — valid).
             minDist -= (maxDist - minDist);
 
-            glm::mat4 lightProj = glm::ortho(
+            // orthoZO (not plain ortho): the camera uses perspectiveZO and Metal's
+            // depth buffer is [0,1], but glm::ortho here follows the GL [-1,1]
+            // convention unless GLM_FORCE_DEPTH_ZERO_TO_ONE took effect — which is
+            // unreliable in this TU (its sibling GLM_FORCE_LEFT_HANDED did not).
+            // Match the Vulkan path explicitly. RH (LEFT_HANDED inert) pairs with
+            // the RH lightView above.
+            glm::mat4 lightProj = glm::orthoZO(
                 -sphereRadius,  sphereRadius,
                 -sphereRadius,  sphereRadius,
                 minDist, maxDist
@@ -1156,6 +1211,8 @@ public:
                 r.getTexture(material->emissiveMap ? material->emissiveMap->texture : r.defaultEmissiveTexture).get(), 5
             );
             encoder->setFragmentTexture(r.shadowRT.get(), 7);
+            // White (=lit) when SSCS is off, so the shader's min() is a no-op.
+            encoder->setFragmentTexture(r.sscsEnabled ? r.sscsRT.get() : r.batch2DWhiteTexture.get(), 15);
 
             // IBL textures
             encoder->setFragmentTexture(r.irradianceMap.get(), 8);
@@ -2956,6 +3013,7 @@ auto Renderer_Metal::init(SDL_Window* window) -> void {
     graph.addPass(std::make_unique<PSSMShadowPass>(this));
     graph.addPass(std::make_unique<PSSMResolvePass>(this));
     if (m_supportsRaytracing) graph.addPass(std::make_unique<RaytraceShadowPass>(this));
+    graph.addPass(std::make_unique<SSCSPass>(this));  // contact shadows (no RT needed)
     if (m_supportsRaytracing) graph.addPass(std::make_unique<RaytraceAOPass>(this));
     if (m_supportsRaytracing) graph.addPass(std::make_unique<AOTemporalPass>(this));
     if (m_supportsRaytracing) graph.addPass(std::make_unique<AODenoisePass>(this));
@@ -3182,6 +3240,7 @@ auto Renderer_Metal::createResources() -> void {
     normalResolvePipeline = createComputePipeline("shaders/3d_normal_resolve.metal");
     velocityPipeline = createComputePipeline("shaders/3d_velocity.metal");
     if (m_supportsRaytracing) raytraceShadowPipeline = createComputePipeline("shaders/3d_raytrace_shadow.metal");
+    sscsPipeline = createComputePipeline("shaders/3d_sscs.metal");
     // AO raygen: 3d_ssao.metal (screen-space) and 3d_raytrace_ao.metal (ray-traced)
     // are drop-in interchangeable here; both feed the temporal + à-trous chain.
     // RT AO: 2 cosine-weighted any-hit rays/px, 1.5m cap (the visibility knob —
@@ -3786,6 +3845,25 @@ auto Renderer_Metal::createResources() -> void {
         )
     ));
     shadowTextureDesc->release();
+
+    // Screen-space contact shadow RT (half-res, single-channel visibility).
+    MTL::TextureDescriptor* sscsTextureDesc = MTL::TextureDescriptor::alloc()->init();
+    sscsTextureDesc->setTextureType(MTL::TextureType2D);
+    sscsTextureDesc->setPixelFormat(MTL::PixelFormatR8Unorm);
+    sscsTextureDesc->setWidth((swapchain->drawableSize().width + 1) / 2);
+    sscsTextureDesc->setHeight((swapchain->drawableSize().height + 1) / 2);
+    sscsTextureDesc->setUsage(MTL::TextureUsageShaderRead | MTL::TextureUsageShaderWrite);
+    sscsRT = NS::TransferPtr(device->newTexture(sscsTextureDesc));
+    sscsRTGrayView = NS::TransferPtr(sscsRT->newTextureView(
+        MTL::PixelFormatR8Unorm,
+        MTL::TextureType2D,
+        NS::Range::Make(0, 1),
+        NS::Range::Make(0, 1),
+        MTL::TextureSwizzleChannels::Make(
+            MTL::TextureSwizzleRed, MTL::TextureSwizzleRed, MTL::TextureSwizzleRed, MTL::TextureSwizzleOne
+        )
+    ));
+    sscsTextureDesc->release();
 
     // PSSM shadow maps: 2D texture array, 3 cascades × 4096×4096 Depth32
     {
@@ -5361,7 +5439,8 @@ auto Renderer_Metal::draw(std::shared_ptr<Scene> scene, Camera& camera) -> void 
             rtPreview("Scene Color RT", colorRT.get());
             rtPreview("Scene Depth RT", depthStencilRT.get());
             // Shadow results consumed by the PBR shader (all screen-space)
-            rtPreview("Raytraced Shadow", shadowRTGrayView.get());
+            rtPreview("Near Shadow", shadowRTGrayView.get()); // RT-based here; same role as Vulkan's near map
+            rtPreview("Contact Shadow (SSCS)", sscsRTGrayView.get());
             rtPreview("Point Shadow", pointShadowDenoisedRTGrayView.get());
             rtPreview("PSSM Shadow", pssmShadowScreenRTGrayView.get());
             rtPreview("Raytraced AO", aoRTGrayView.get()); // grayscale swizzle view (raw R16F renders red)
@@ -5390,7 +5469,30 @@ auto Renderer_Metal::draw(std::shared_ptr<Scene> scene, Camera& camera) -> void 
                 ImGui::Text("Cascade splits (view depth): RT<%.1f | C1<%.1f | C2<%.1f | C3<%.1f",
                     splits.x, splits.y, splits.z, splits.w);
             }
-            ImGui::SliderFloat("RT shadow max dist", &pssmRTMaxDist, 5.0f, 200.0f);
+            ImGui::SliderFloat("Near shadow distance", &pssmRTMaxDist, 5.0f, 200.0f);
+            // Skip the directional shadow term (perf/debug). Pushed to the PBR
+            // shader at buffer(12) as mainDebugFlags bit 1 — same as Vulkan.
+            bool skipShadow = (mainDebugFlags & 2u) != 0u;
+            if (ImGui::Checkbox("Skip shadow", &skipShadow))
+                mainDebugFlags = (mainDebugFlags & ~2u) | (skipShadow ? 2u : 0u);
+            ImGui::Checkbox("Contact shadows (SSCS)", &sscsEnabled);
+            if (sscsEnabled) {
+                ImGui::SliderFloat("SSCS length", &sscsLength, 0.05f, 2.0f);
+                ImGui::SliderFloat("SSCS thickness", &sscsThickness, 0.05f, 2.0f);
+            }
+
+            // --- PSSM PCF & blend controls ---
+            const char* pcfCounts[] = { "4", "8", "16", "32" };
+            const uint32_t pcfValues[] = { 4u, 8u, 16u, 32u };
+            int pcfIdx = 2; // default 16
+            for (int i = 0; i < 4; i++) if (pssmPcfSampleCount == pcfValues[i]) pcfIdx = i;
+            if (ImGui::Combo("PCF samples", &pcfIdx, pcfCounts, 4)) {
+                pssmPcfSampleCount = pcfValues[pcfIdx];
+            }
+            ImGui::SliderFloat("RT<->PSSM blend", &pssmRTBlendScale, 0.0f, 0.25f, "%.3f");
+            ImGui::SliderFloat("Cascade blend range", &pssmCascadeBlendRange, 0.0f, 30.0f);
+            ImGui::Checkbox("Visualize cascades", &pssmDebugVisualize);
+            ImGui::TextWrapped("Cascade colors: green = RT, red = C1, blue = C2, yellow = C3");
 
             // --- Stochastic point shadow debug mode ---
             const char* psDebugModes[] = { "Visibility (normal)", "Tile light-count heatmap" };
@@ -6552,6 +6654,7 @@ void Renderer_Metal::renderToTexture(
             getTexture(material->emissiveMap ? material->emissiveMap->texture : defaultEmissiveTexture).get(), 5
         );
         encoder->setFragmentTexture(shadowRT.get(), 7);
+        encoder->setFragmentTexture(sscsEnabled ? sscsRT.get() : batch2DWhiteTexture.get(), 15);
 
         // IBL textures
         encoder->setFragmentTexture(irradianceMap.get(), 8);

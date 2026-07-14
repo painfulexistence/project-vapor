@@ -362,6 +362,7 @@ private:
     // render interface; renderUI() draws the context at the end of the graph.
     void renderUI();
     void shadowPass();
+    void sscsPass();  // screen-space contact shadows (Vulkan fullscreen frag)
 
     // ========================================================================
     // Internal Helpers
@@ -434,6 +435,8 @@ private:
     Uint32 frameCounter = 0;  // for temporal jitter
     TextureHandle defaultBlackCubemapTex;   // IBL irradiance/prefilter default
     TextureHandle pssmShadowArrayTexture;   // 3-cascade depth array (Vulkan: set2 b6)
+    TextureHandle nearShadowMap;            // independent near-field depth map [near, pssmRTMaxDist] (Vulkan: set2 b9)
+    static constexpr Uint32 NEAR_SHADOW_MAP_SIZE = Vapor::kNearShadowMapSize;  // shared (irenderer.hpp)
     std::vector<Vapor::RectLight> rectLights;   // gathered from the scene
 
     // ImGui texture previews (RT viewer / material thumbnails)
@@ -550,6 +553,7 @@ private:
     TextureHandle normalRT;
     TextureHandle shadowRT;
     TextureHandle aoRT;
+    TextureHandle sscsRT;   // screen-space contact shadow visibility (R8, min-composited onto the sun shadow)
     // Physically-based pyramid bloom (matches the Metal backend): brightness
     // extract -> progressive downsample chain -> tent-filter upsample chain that
     // accumulates back into pyramid[0] -> composited in PostProcess.
@@ -669,7 +673,7 @@ private:
     ShaderHandle cloudCompositeShader;
     ShaderHandle shadowVertexShader;
     ShaderHandle shadowFragmentShader;
-    static constexpr Uint32 SHADOW_MAP_SIZE = 2048;
+    static constexpr Uint32 SHADOW_MAP_SIZE = Vapor::kDirectionalShadowMapSize;  // shared (irenderer.hpp)
 
     // Compute pipelines
     ComputePipelineHandle buildClustersPipeline;
@@ -715,6 +719,10 @@ private:
     // Vulkan AO chain twins — fullscreen fragment passes (the RHI compute path
     // cannot sample depth on Vulkan; same pattern as Velocity/clouds).
     PipelineHandle vkSsaoPipeline;              // SSAO.frag -> aoRawRT (R16F)
+    PipelineHandle vkSscsPipeline;              // SSCS.frag -> sscsRT (Vulkan fullscreen contact shadow)
+    ShaderHandle   vkSscsShader;
+    ComputePipelineHandle sscsComputePipeline;  // 3d_sscs.metal -> sscsRT (Metal compute contact shadow)
+    ShaderHandle   sscsMetalShader;
     PipelineHandle vkAoTemporalPipeline;        // AOTemporal.frag -> history (RGBA16F)
     PipelineHandle vkAoDenoisePipelineRGBA;     // AODenoise.frag -> scratch (RGBA16F)
     PipelineHandle vkAoDenoisePipelineR16;      // AODenoise.frag -> aoRT (R16F)
@@ -722,7 +730,16 @@ private:
     BufferHandle aoTemporalDataBuffer;          // {mat4 prevView; uint historyValid}
     // PSSM: distance where RT near-field shadows hand over to the cascades
     // (native pssmRTMaxDist, panel-tunable 5..200).
-    float pssmRTMaxDist = 50.0f;
+    float pssmRTMaxDist = 25.0f;  // near shadow extent [near, this]; cascades beyond
+    // Independent near-field shadow map extent (view-space metres). The near map
+    // covers [near, nearShadowEnd]; cascades take over beyond it. 0 = disabled.
+    float nearShadowEnd = 8.0f;
+    // Screen-space contact shadows (min-composited onto the sun shadow term). Opt-in.
+    bool  sscsEnabled = false;
+    float sscsLength = 0.3f;      // view-space march distance (contact scale, metres)
+    float sscsThickness = 0.3f;   // occluder depth window
+    Uint32 sscsSteps = 12;
+    float sscsBias = 0.02f;       // view-space start offset (self-occlusion guard)
     // Stochastic point-shadow debug view (native pointShadowDebugMode):
     // 0 = visibility, 1 = tile light-count heatmap.
     Uint32 pointShadowDebugMode = 0;
