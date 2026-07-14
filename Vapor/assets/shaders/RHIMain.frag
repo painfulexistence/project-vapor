@@ -1,5 +1,14 @@
 #version 450
+#ifdef BINDLESS
+#extension GL_EXT_nonuniform_qualifier : require
+#endif
 // RHI renderer main-pass fragment shader (Vulkan backend).
+// Compiled twice by the asset pipeline: plain (RHIMain.frag.spv, per-draw
+// material textures at set2 b0-5) and with -DBINDLESS
+// (RHIMainBindless.frag.spv, material textures fetched from the set-3 runtime
+// array by fragMaterialID — the Bindless MDI draw mode, where one
+// vkCmdDrawIndexedIndirect draws the whole scene and per-draw texture binding
+// is impossible).
 // PBR: direct dir/point lighting, normal mapping, tiled point-light culling
 // (clusters), cascaded shadows, and optional IBL (per-material iblEnabled).
 //
@@ -126,12 +135,29 @@ layout(std430, set = 1, binding = 2) readonly buffer PSSMBuf {
     mat4 nearLightMatrix;       // near-field map (own texture, nearShadowTex)
 };
 
+#ifndef BINDLESS
 layout(set = 2, binding = 0) uniform sampler2D albedoMap;
 layout(set = 2, binding = 1) uniform sampler2D normalMap;
 layout(set = 2, binding = 2) uniform sampler2D metallicMap;
 layout(set = 2, binding = 3) uniform sampler2D roughnessMap;
 layout(set = 2, binding = 4) uniform sampler2D occlusionMap;
 layout(set = 2, binding = 5) uniform sampler2D emissiveMap;
+#else
+// Bindless MDI: material textures live in the set-3 runtime array (6 slots per
+// material, written by the renderer's bindless table — see
+// RHI::createTextureArgumentTable), sampled with one shared trilinear-repeat
+// sampler. The macros keep every texture() site below identical to the bound
+// path. nonuniformEXT: fragments of different materials run in the same wave.
+layout(set = 3, binding = 0) uniform texture2D bindlessTextures[];
+layout(set = 3, binding = 1) uniform sampler bindlessSampler;
+#define MAT_TEX(slot) sampler2D(bindlessTextures[nonuniformEXT(fragMaterialID * 6u + slot)], bindlessSampler)
+#define albedoMap    MAT_TEX(0u)
+#define normalMap    MAT_TEX(1u)
+#define metallicMap  MAT_TEX(2u)
+#define roughnessMap MAT_TEX(3u)
+#define occlusionMap MAT_TEX(4u)
+#define emissiveMap  MAT_TEX(5u)
+#endif
 layout(set = 2, binding = 6) uniform sampler2DArray shadowMap;  // 3-cascade depth array
 // Screen-space AO (SSAO chain output; white texture when AO is disabled).
 // Attenuates ambient/indirect light ONLY — multiplying direct light by AO is

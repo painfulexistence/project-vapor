@@ -121,6 +121,13 @@ public:
     void drawIndexedIndirect(BufferHandle argsBuffer, size_t offset, Uint32 drawCount, Uint32 stride) override;
     void drawMeshTasks(Uint32 groupCountX, Uint32 groupCountY = 1, Uint32 groupCountZ = 1) override;
 
+    // Bindless texture tables (Bindless MDI): descriptor-indexed set 3.
+    BufferHandle createTextureArgumentTable(ShaderHandle fragmentShader, Uint32 bufferIndex,
+                                            Uint32 entryCount, Uint32 texturesPerEntry) override;
+    void writeTextureArgumentTable(BufferHandle table, Uint32 entry, Uint32 slot,
+                                   TextureHandle texture) override;
+    void bindTextureArgumentTable(BufferHandle table) override;
+
     // ========================================================================
     // Compute Commands
     // ========================================================================
@@ -326,6 +333,24 @@ private:
     VkDescriptorSetLayout textureSetLayout = VK_NULL_HANDLE;        // set 2
     VkPipelineLayout globalPipelineLayout = VK_NULL_HANDLE;
     std::vector<VkDescriptorPool> descriptorPools;  // one per frame in flight
+
+    // Bindless texture tables (Bindless MDI): set 3 in the global layout when
+    // descriptor indexing is enabled — binding 0 = runtime sampled-image array
+    // (partially bound, update-after-bind), binding 1 = one linear-repeat
+    // sampler. Tables are persistent update-after-bind sets from their own pool.
+    bool descriptorIndexingEnabled = false;
+    static constexpr Uint32 BINDLESS_TABLE_CAPACITY = 30720;  // >= MAX_INSTANCES * 6
+    VkDescriptorSetLayout bindlessSetLayout = VK_NULL_HANDLE;  // set 3
+    VkDescriptorPool bindlessPool = VK_NULL_HANDLE;
+    VkSampler bindlessSampler = VK_NULL_HANDLE;
+    struct BindlessTableResource {
+        VkDescriptorSet set = VK_NULL_HANDLE;
+        Uint32 entryCount = 0;
+        Uint32 texturesPerEntry = 0;
+    };
+    // Keyed by the opaque BufferHandle id returned from createTextureArgumentTable
+    // (no VkBuffer behind it — binding goes through vkCmdBindDescriptorSets).
+    std::unordered_map<Uint32, BindlessTableResource> bindlessTables;
 
     BufferBinding boundVertexBuffers[BINDINGS_PER_SET];
     BufferBinding boundFragmentBuffers[BINDINGS_PER_SET];

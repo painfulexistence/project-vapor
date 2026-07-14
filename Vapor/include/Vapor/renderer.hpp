@@ -838,26 +838,32 @@ private:
     // indirect draw per object. Metal keeps the per-object loop (single-call MDI
     // there needs Indirect Command Buffers). Sub-option of the Indirect mode.
     bool gpuDrivenMDI = false;
-    // ICB draw mode (Metal): the cull kernel encodes draws into a real
-    // MTLIndirectCommandBuffer; the main pass replays the whole scene with ONE
-    // executeCommandsInBuffer, and the fragment reads material textures from a
-    // bindless argument table (buffer 13) by materialID — no per-material CPU
-    // loop at all. Sub-option of Indirect, gated on
-    // capabilities.indirectCommandBuffers (Vulkan reports false: its native MDI
-    // is already single-call). Takes precedence over plain MDI when both are on.
-    bool gpuDrivenICB = false;
-    IndirectCommandBufferHandle sceneICB;
-    ComputePipelineHandle gpuCullICBPipeline;
+    // Bindless MDI draw mode: the whole scene in ONE submission with material
+    // textures fetched bindlessly by materialID (no per-material CPU loop).
+    //   Metal:  the cull kernel encodes draws into a real
+    //           MTLIndirectCommandBuffer, replayed with one
+    //           executeCommandsInBuffer; materials come from an argument table
+    //           at fragment buffer 13.
+    //   Vulkan: one native vkCmdDrawIndexedIndirect over every instance (the
+    //           same cull-written args buffer as plain MDI); materials come
+    //           from a descriptor-indexed runtime array at set 3.
+    // Sub-option of Indirect, gated on capabilities.bindlessTextures plus the
+    // per-backend submission cap (indirectCommandBuffers / multiDrawIndirect).
+    // Takes precedence over plain MDI when both are on.
+    bool gpuDrivenBindlessMDI = false;
+    IndirectCommandBufferHandle sceneICB;      // Metal only: GPU-encoded commands
+    ComputePipelineHandle gpuCullICBPipeline;  // Metal only: ICB-encoding cull
     ShaderHandle gpuCullICBShader;
-    PipelineHandle mainPipelineICB;       // mainPipeline twin: bindless frag + supportsICB
-    ShaderHandle fragmentShaderBindless;  // fragmentMain specialized with kBindlessMaterials
-    BufferHandle bindlessMaterialTable;   // MaterialTexs[MAX_INSTANCES] argument table
+    PipelineHandle mainPipelineBindless;  // mainPipeline twin with the bindless fragment
+    ShaderHandle fragmentShaderBindless;  // Metal: kBindlessMaterials specialization;
+                                          // Vulkan: RHIMainBindless.frag.spv
+    BufferHandle bindlessMaterialTable;   // 6 texture slots per material (see RHI docs)
     bool m_bindlessTableDirty = true;     // rewrite entries when materials/textures change
     void ensureBindlessMaterialTable();
-    // Note: a single ICB is shared across frames in flight — Metal's automatic
-    // hazard tracking serializes the next frame's cull (write) against the
-    // previous frame's executeICB (read). Correct, at the cost of some overlap;
-    // per-frame ICB slots are a follow-up if that shows up in GPU timings.
+    // Note: the single Metal ICB is shared across frames in flight — Metal's
+    // automatic hazard tracking serializes the next frame's cull (write)
+    // against the previous frame's executeICB (read). Correct, at the cost of
+    // some overlap; per-frame ICB slots are a follow-up if timings say so.
     // True while this frame's InstanceData carries MERGED-buffer vertex/index
     // offsets (MDI layout, set in updateBuffers). Metal shaders that pull
     // vertices via instances[iid].vertexOffset + vertex_id (pre-pass, shadow)

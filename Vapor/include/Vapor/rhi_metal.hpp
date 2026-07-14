@@ -124,7 +124,7 @@ public:
                                             Uint32 entryCount, Uint32 texturesPerEntry) override;
     void writeTextureArgumentTable(BufferHandle table, Uint32 entry, Uint32 slot,
                                    TextureHandle texture) override;
-    void useArgumentTableResources(BufferHandle table) override;
+    void bindTextureArgumentTable(BufferHandle table) override;
 
     // ========================================================================
     // Compute Commands
@@ -296,6 +296,7 @@ private:
         NS::SharedPtr<MTL::Buffer> buffer;
         NS::SharedPtr<MTL::ArgumentEncoder> encoder;
         NS::UInteger stride = 0;
+        Uint32 bufferIndex = 0;  // fragment buffer slot the table binds to
         Uint32 entryCount = 0;
         Uint32 texturesPerEntry = 0;
         // Written textures, deduped, retained for useResources. Rebuilt lazily

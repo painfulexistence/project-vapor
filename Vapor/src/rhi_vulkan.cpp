@@ -453,8 +453,49 @@ void RHI_Vulkan::createDescriptorInfrastructure() {
         }
     }
 
-    // One pipeline layout shared by every graphics pipeline
-    VkDescriptorSetLayout setLayouts[3] = { vertexBufferSetLayout, fragmentBufferSetLayout, textureSetLayout };
+    // Set 3 (bindless texture table, Bindless MDI): a runtime sampled-image
+    // array (partially bound + update-after-bind, so entries can be written
+    // sparsely and after the set is bound) plus one immutable-ish sampler slot.
+    if (descriptorIndexingEnabled) {
+        VkDescriptorSetLayoutBinding b[2]{};
+        b[0].binding = 0;
+        b[0].descriptorType = VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE;
+        b[0].descriptorCount = BINDLESS_TABLE_CAPACITY;
+        b[0].stageFlags = VK_SHADER_STAGE_FRAGMENT_BIT;
+        b[1].binding = 1;
+        b[1].descriptorType = VK_DESCRIPTOR_TYPE_SAMPLER;
+        b[1].descriptorCount = 1;
+        b[1].stageFlags = VK_SHADER_STAGE_FRAGMENT_BIT;
+
+        VkDescriptorBindingFlags flags[2] = {
+            VK_DESCRIPTOR_BINDING_PARTIALLY_BOUND_BIT |
+            VK_DESCRIPTOR_BINDING_UPDATE_AFTER_BIND_BIT |
+            VK_DESCRIPTOR_BINDING_UPDATE_UNUSED_WHILE_PENDING_BIT,
+            0
+        };
+        VkDescriptorSetLayoutBindingFlagsCreateInfo flagsInfo{};
+        flagsInfo.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_BINDING_FLAGS_CREATE_INFO;
+        flagsInfo.bindingCount = 2;
+        flagsInfo.pBindingFlags = flags;
+
+        VkDescriptorSetLayoutCreateInfo info{};
+        info.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO;
+        info.pNext = &flagsInfo;
+        info.flags = VK_DESCRIPTOR_SET_LAYOUT_CREATE_UPDATE_AFTER_BIND_POOL_BIT;
+        info.bindingCount = 2;
+        info.pBindings = b;
+        if (vkCreateDescriptorSetLayout(device, &info, nullptr, &bindlessSetLayout) != VK_SUCCESS) {
+            // Not fatal: fall back to the non-bindless layout below.
+            fmt::print("Bindless set layout creation failed; Bindless MDI disabled\n");
+            descriptorIndexingEnabled = false;
+            capabilities.bindlessTextures = false;
+        }
+    }
+
+    // One pipeline layout shared by every graphics pipeline (set 3 present only
+    // when descriptor indexing is on; pipelines that don't use it are unaffected).
+    VkDescriptorSetLayout setLayouts[4] = { vertexBufferSetLayout, fragmentBufferSetLayout,
+                                            textureSetLayout, bindlessSetLayout };
     VkPushConstantRange pushRange{};
     pushRange.stageFlags = graphicsStageFlags;
     pushRange.offset = 0;
@@ -462,12 +503,49 @@ void RHI_Vulkan::createDescriptorInfrastructure() {
 
     VkPipelineLayoutCreateInfo layoutInfo{};
     layoutInfo.sType = VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO;
-    layoutInfo.setLayoutCount = 3;
+    layoutInfo.setLayoutCount = descriptorIndexingEnabled ? 4 : 3;
     layoutInfo.pSetLayouts = setLayouts;
     layoutInfo.pushConstantRangeCount = 1;
     layoutInfo.pPushConstantRanges = &pushRange;
     if (vkCreatePipelineLayout(device, &layoutInfo, nullptr, &globalPipelineLayout) != VK_SUCCESS) {
         throw std::runtime_error("Failed to create global pipeline layout");
+    }
+
+    // Dedicated update-after-bind pool + the shared table sampler.
+    if (descriptorIndexingEnabled) {
+        VkDescriptorPoolSize sizes[2] = {
+            { VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE, BINDLESS_TABLE_CAPACITY * 2 },  // headroom: 2 tables
+            { VK_DESCRIPTOR_TYPE_SAMPLER, 2 },
+        };
+        VkDescriptorPoolCreateInfo poolInfo{};
+        poolInfo.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO;
+        poolInfo.flags = VK_DESCRIPTOR_POOL_CREATE_UPDATE_AFTER_BIND_BIT;
+        poolInfo.maxSets = 2;
+        poolInfo.poolSizeCount = 2;
+        poolInfo.pPoolSizes = sizes;
+        if (vkCreateDescriptorPool(device, &poolInfo, nullptr, &bindlessPool) != VK_SUCCESS) {
+            fmt::print("Bindless descriptor pool creation failed; Bindless MDI disabled\n");
+            descriptorIndexingEnabled = false;
+            capabilities.bindlessTextures = false;
+        }
+
+        // Trilinear repeat sampler for every table texture (matches the Metal
+        // PBR shader's constexpr material sampler).
+        VkSamplerCreateInfo samplerInfo{};
+        samplerInfo.sType = VK_STRUCTURE_TYPE_SAMPLER_CREATE_INFO;
+        samplerInfo.magFilter = VK_FILTER_LINEAR;
+        samplerInfo.minFilter = VK_FILTER_LINEAR;
+        samplerInfo.mipmapMode = VK_SAMPLER_MIPMAP_MODE_LINEAR;
+        samplerInfo.addressModeU = VK_SAMPLER_ADDRESS_MODE_REPEAT;
+        samplerInfo.addressModeV = VK_SAMPLER_ADDRESS_MODE_REPEAT;
+        samplerInfo.addressModeW = VK_SAMPLER_ADDRESS_MODE_REPEAT;
+        samplerInfo.maxLod = VK_LOD_CLAMP_NONE;
+        if (descriptorIndexingEnabled &&
+            vkCreateSampler(device, &samplerInfo, nullptr, &bindlessSampler) != VK_SUCCESS) {
+            fmt::print("Bindless sampler creation failed; Bindless MDI disabled\n");
+            descriptorIndexingEnabled = false;
+            capabilities.bindlessTextures = false;
+        }
     }
 
     // Compute set layouts + layout (same model, compute stage)
@@ -559,12 +637,22 @@ void RHI_Vulkan::destroyDescriptorInfrastructure() {
         computePipelineLayout = VK_NULL_HANDLE;
     }
     for (VkDescriptorSetLayout* layout : { &vertexBufferSetLayout, &fragmentBufferSetLayout, &textureSetLayout,
-                                           &computeBufferSetLayout, &computeImageSetLayout, &computeSampledSetLayout }) {
+                                           &computeBufferSetLayout, &computeImageSetLayout, &computeSampledSetLayout,
+                                           &bindlessSetLayout }) {
         if (*layout != VK_NULL_HANDLE) {
             vkDestroyDescriptorSetLayout(device, *layout, nullptr);
             *layout = VK_NULL_HANDLE;
         }
     }
+    if (bindlessPool != VK_NULL_HANDLE) {
+        vkDestroyDescriptorPool(device, bindlessPool, nullptr);  // frees table sets
+        bindlessPool = VK_NULL_HANDLE;
+    }
+    if (bindlessSampler != VK_NULL_HANDLE) {
+        vkDestroySampler(device, bindlessSampler, nullptr);
+        bindlessSampler = VK_NULL_HANDLE;
+    }
+    bindlessTables.clear();
 }
 
 void RHI_Vulkan::flushDescriptors() {
@@ -2363,6 +2451,81 @@ void RHI_Vulkan::drawIndexedIndirect(BufferHandle argsBuffer, size_t offset, Uin
 }
 
 // ============================================================================
+// Bindless texture tables (Bindless MDI) — descriptor-indexed set 3
+// ============================================================================
+
+BufferHandle RHI_Vulkan::createTextureArgumentTable(ShaderHandle /*fragmentShader*/, Uint32 /*bufferIndex*/,
+                                                    Uint32 entryCount, Uint32 texturesPerEntry) {
+    if (!descriptorIndexingEnabled || bindlessPool == VK_NULL_HANDLE || entryCount == 0) return {};
+    if (entryCount * texturesPerEntry > BINDLESS_TABLE_CAPACITY) {
+        fmt::print("Bindless table request {}x{} exceeds capacity {}\n",
+                   entryCount, texturesPerEntry, BINDLESS_TABLE_CAPACITY);
+        return {};
+    }
+
+    VkDescriptorSetAllocateInfo alloc{};
+    alloc.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO;
+    alloc.descriptorPool = bindlessPool;
+    alloc.descriptorSetCount = 1;
+    alloc.pSetLayouts = &bindlessSetLayout;
+    VkDescriptorSet set = VK_NULL_HANDLE;
+    if (vkAllocateDescriptorSets(device, &alloc, &set) != VK_SUCCESS) {
+        fmt::print("Bindless table set allocation failed\n");
+        return {};
+    }
+
+    // Shared material sampler at binding 1.
+    VkDescriptorImageInfo samplerInfo{};
+    samplerInfo.sampler = bindlessSampler;
+    VkWriteDescriptorSet write{};
+    write.sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
+    write.dstSet = set;
+    write.dstBinding = 1;
+    write.descriptorCount = 1;
+    write.descriptorType = VK_DESCRIPTOR_TYPE_SAMPLER;
+    write.pImageInfo = &samplerInfo;
+    vkUpdateDescriptorSets(device, 1, &write, 0, nullptr);
+
+    // Opaque id in the buffer id-space; there is no VkBuffer behind it (binding
+    // goes through vkCmdBindDescriptorSets in bindTextureArgumentTable).
+    Uint32 id = nextBufferId++;
+    bindlessTables[id] = { set, entryCount, texturesPerEntry };
+    return BufferHandle{id};
+}
+
+void RHI_Vulkan::writeTextureArgumentTable(BufferHandle table, Uint32 entry, Uint32 slot,
+                                           TextureHandle texture) {
+    auto tit = bindlessTables.find(table.id);
+    auto xit = textures.find(texture.id);
+    if (tit == bindlessTables.end() || xit == textures.end()) return;
+    const BindlessTableResource& t = tit->second;
+    if (entry >= t.entryCount || slot >= t.texturesPerEntry) return;
+
+    // Update-after-bind + update-unused-while-pending make this legal even with
+    // frames in flight, as long as no in-flight draw reads the exact element.
+    VkDescriptorImageInfo imageInfo{};
+    imageInfo.imageView = xit->second.view;
+    imageInfo.imageLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
+    VkWriteDescriptorSet write{};
+    write.sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
+    write.dstSet = t.set;
+    write.dstBinding = 0;
+    write.dstArrayElement = entry * t.texturesPerEntry + slot;
+    write.descriptorCount = 1;
+    write.descriptorType = VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE;
+    write.pImageInfo = &imageInfo;
+    vkUpdateDescriptorSets(device, 1, &write, 0, nullptr);
+}
+
+void RHI_Vulkan::bindTextureArgumentTable(BufferHandle table) {
+    auto tit = bindlessTables.find(table.id);
+    if (tit == bindlessTables.end() || currentCommandBuffer == VK_NULL_HANDLE) return;
+    vkCmdBindDescriptorSets(currentCommandBuffer, VK_PIPELINE_BIND_POINT_GRAPHICS,
+                            globalPipelineLayout, /*firstSet=*/3, 1, &tit->second.set,
+                            0, nullptr);
+}
+
+// ============================================================================
 // Utility
 // ============================================================================
 
@@ -2633,6 +2796,44 @@ void RHI_Vulkan::createLogicalDevice() {
         }
     }
 
+    // Descriptor indexing (Bindless MDI's texture table): enable the exact
+    // subset the bindless set-3 layout needs, only when the device supports all
+    // of it AND its update-after-bind sampled-image budget covers the table.
+    // Core in Vulkan 1.2; MoltenVK implements it on Metal argument buffers
+    // (default-enabled there since MoltenVK 1.2.10 on Metal-3 devices).
+    VkPhysicalDeviceDescriptorIndexingFeatures descriptorIndexingFeatures{};
+    descriptorIndexingFeatures.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_DESCRIPTOR_INDEXING_FEATURES;
+    {
+        VkPhysicalDeviceDescriptorIndexingFeatures supported{};
+        supported.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_DESCRIPTOR_INDEXING_FEATURES;
+        VkPhysicalDeviceFeatures2 features2{};
+        features2.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_FEATURES_2;
+        features2.pNext = &supported;
+        vkGetPhysicalDeviceFeatures2(physicalDevice, &features2);
+
+        VkPhysicalDeviceDescriptorIndexingProperties indexingProps{};
+        indexingProps.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_DESCRIPTOR_INDEXING_PROPERTIES;
+        VkPhysicalDeviceProperties2 props2{};
+        props2.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_PROPERTIES_2;
+        props2.pNext = &indexingProps;
+        vkGetPhysicalDeviceProperties2(physicalDevice, &props2);
+
+        if (supported.shaderSampledImageArrayNonUniformIndexing &&
+            supported.runtimeDescriptorArray &&
+            supported.descriptorBindingPartiallyBound &&
+            supported.descriptorBindingSampledImageUpdateAfterBind &&
+            supported.descriptorBindingUpdateUnusedWhilePending &&
+            indexingProps.maxPerStageDescriptorUpdateAfterBindSampledImages >= BINDLESS_TABLE_CAPACITY) {
+            descriptorIndexingFeatures.shaderSampledImageArrayNonUniformIndexing = VK_TRUE;
+            descriptorIndexingFeatures.runtimeDescriptorArray = VK_TRUE;
+            descriptorIndexingFeatures.descriptorBindingPartiallyBound = VK_TRUE;
+            descriptorIndexingFeatures.descriptorBindingSampledImageUpdateAfterBind = VK_TRUE;
+            descriptorIndexingFeatures.descriptorBindingUpdateUnusedWhilePending = VK_TRUE;
+            descriptorIndexingEnabled = true;
+            capabilities.bindlessTextures = true;
+        }
+    }
+
     // Task + mesh shader features, chained ahead of the existing feature chain
     // when supported (see detection above).
     VkPhysicalDeviceMeshShaderFeaturesEXT meshShaderFeatures{};
@@ -2647,6 +2848,10 @@ void RHI_Vulkan::createLogicalDevice() {
     if (meshShadersEnabled) {
         meshShaderFeatures.pNext = &synchronization2Features;
         deviceInfo.pNext = &meshShaderFeatures;
+    }
+    if (descriptorIndexingEnabled) {
+        descriptorIndexingFeatures.pNext = const_cast<void*>(deviceInfo.pNext);
+        deviceInfo.pNext = &descriptorIndexingFeatures;
     }
     deviceInfo.queueCreateInfoCount = 1;
     deviceInfo.pQueueCreateInfos = &graphicsQueueInfo;

@@ -459,11 +459,14 @@ struct RHICapabilities {
     // Task + mesh shader pipelines (Vulkan VK_EXT_mesh_shader; Metal object/mesh
     // functions). Required for the meshlet-based GPU-driven path.
     bool meshShaders = false;
-    // GPU-encoded indirect command buffers + bindless texture tables (Metal
-    // MTLIndirectCommandBuffer + argument buffers). Required for the ICB draw
-    // mode. Vulkan reports false: its native MDI is already a single call, and
+    // GPU-encoded indirect command buffers (Metal MTLIndirectCommandBuffer).
+    // Vulkan reports false: its native MDI is already a single call, and
     // device-generated commands aren't portably available (MoltenVK).
     bool indirectCommandBuffers = false;
+    // Bindless texture tables (Metal argument buffers; Vulkan descriptor
+    // indexing with runtime arrays + update-after-bind). Required for the
+    // Bindless MDI draw mode on either backend.
+    bool bindlessTextures = false;
 };
 
 // ============================================================================
@@ -648,17 +651,23 @@ public:
     // The bound pipeline must have been created with supportsICB.
     virtual void executeICB(IndirectCommandBufferHandle /*handle*/, Uint32 /*commandCount*/) {}
 
-    // Bindless texture table: an argument buffer holding `entryCount` structs of
-    // `texturesPerEntry` texture handles each, laid out to match the given
-    // fragment shader's argument at `bufferIndex` (Metal argument encoder).
-    // Write entries with writeTextureArgumentTable; call useArgumentTableResources
-    // inside the render pass (after bindPipeline) to make every written texture
-    // resident, then bind the table with setFragmentBuffer(bufferIndex, table).
+    // Bindless texture table (the Bindless MDI draw mode; gated on
+    // capabilities.bindlessTextures). Holds entryCount structs of
+    // texturesPerEntry texture slots each, indexed by the shader as
+    // entry*texturesPerEntry+slot.
+    //   Metal:  an argument buffer laid out by the given fragment shader's
+    //           argument at `bufferIndex` (both params used).
+    //   Vulkan: a persistent update-after-bind descriptor set — set 3,
+    //           binding 0 = runtime sampled-image array, binding 1 = one
+    //           linear-repeat sampler (fragmentShader/bufferIndex ignored).
+    // Write entries with writeTextureArgumentTable; bind inside the render pass
+    // (after bindPipeline) with bindTextureArgumentTable, which also handles
+    // Metal residency (useResources) for every written texture.
     virtual BufferHandle createTextureArgumentTable(ShaderHandle /*fragmentShader*/, Uint32 /*bufferIndex*/,
                                                     Uint32 /*entryCount*/, Uint32 /*texturesPerEntry*/) { return {}; }
     virtual void writeTextureArgumentTable(BufferHandle /*table*/, Uint32 /*entry*/, Uint32 /*slot*/,
                                            TextureHandle /*texture*/) {}
-    virtual void useArgumentTableResources(BufferHandle /*table*/) {}
+    virtual void bindTextureArgumentTable(BufferHandle /*table*/) {}
 
     // ========================================================================
     // Compute Commands

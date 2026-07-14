@@ -113,6 +113,8 @@ bool RHI_Metal::initialize(SDL_Window* window) {
     // buffer requirements are both met there.
     capabilities.indirectCommandBuffers = device->supportsFamily(MTL::GPUFamilyApple7) ||
                                           device->supportsFamily(MTL::GPUFamilyMac2);
+    // Bindless texture tables ride on Tier-2 argument buffers — same families.
+    capabilities.bindlessTextures = capabilities.indirectCommandBuffers;
 
     // Backend telemetry: one grouped "[MTL]" line per --stats interval. Metal is
     // unified memory, so these counts (plus RSS) are the leak-hunt signal.
@@ -1727,6 +1729,7 @@ BufferHandle RHI_Metal::createTextureArgumentTable(ShaderHandle fragmentShader, 
     table.buffer = buffer;
     table.encoder = encoder;
     table.stride = stride;
+    table.bufferIndex = bufferIndex;
     table.entryCount = entryCount;
     table.texturesPerEntry = texturesPerEntry;
     argumentTables[id] = std::move(table);
@@ -1747,10 +1750,14 @@ void RHI_Metal::writeTextureArgumentTable(BufferHandle tableHandle, Uint32 entry
     table.residencyDirty = true;
 }
 
-void RHI_Metal::useArgumentTableResources(BufferHandle tableHandle) {
+void RHI_Metal::bindTextureArgumentTable(BufferHandle tableHandle) {
     auto tit = argumentTables.find(tableHandle.id);
     if (tit == argumentTables.end() || !currentRenderEncoder) return;
     ArgumentTableResource& table = tit->second;
+
+    // Bind the argument buffer at its fragment slot, then declare residency
+    // for every texture it references (argument-buffer indirection).
+    currentRenderEncoder->setFragmentBuffer(table.buffer.get(), 0, table.bufferIndex);
 
     if (table.residencyDirty) {
         table.residentResources.clear();

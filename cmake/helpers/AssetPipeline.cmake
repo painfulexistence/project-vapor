@@ -46,6 +46,21 @@ function(vapor_compile_glsl_shaders TARGET SHADER_DIR)
             COMMENT "Compiling ${_name} to SPIR-V"
         )
         list(APPEND _spirv_outputs ${_spirv})
+
+        # Bindless MDI variant: RHIMain.frag is compiled a second time with
+        # -DBINDLESS (material textures from the set-3 runtime descriptor array
+        # instead of per-draw set-2 slots). Needs SPIR-V 1.4+ for
+        # GL_EXT_nonuniform_qualifier's descriptor-indexing capabilities.
+        if(_name STREQUAL "RHIMain.frag")
+            set(_bindless_spirv "${SHADER_DIR}/RHIMainBindless.frag.spv")
+            add_custom_command(
+                OUTPUT  ${_bindless_spirv}
+                COMMAND ${GLSL_VALIDATOR} -V --target-env vulkan1.3 -DBINDLESS ${_glsl} -o ${_bindless_spirv}
+                DEPENDS ${_glsl}
+                COMMENT "Compiling ${_name} (BINDLESS) to SPIR-V"
+            )
+            list(APPEND _spirv_outputs ${_bindless_spirv})
+        endif()
     endforeach()
 
     if(_spirv_outputs)
