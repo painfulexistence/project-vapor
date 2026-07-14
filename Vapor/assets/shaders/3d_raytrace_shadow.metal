@@ -68,28 +68,43 @@ kernel void computeMain(
         float3 worldNormal = normalize(normalTexture.read(fullTid).xyz); // RGBA16Float
 
         DirLight light = directionalLights[0];
-        float3 sunDir = normalize(-light.direction);
+
+        // ====================================================================
+        // TEMP DIAGNOSTIC (bisect vs main): this block is a verbatim restore of
+        // main's single-ray hard shadow — sunParams stays BOUND at buffer(5)
+        // but is deliberately not read. If the Shadow RT still differs from
+        // main with this build, the kernel is exonerated and the difference is
+        // in its inputs; if it matches main again, the cone-sampling rewrite
+        // (below, disabled) miscompiles or misreads params on device.
+        // ====================================================================
+        raytracing::ray r;
+        r.origin = worldPos + worldNormal * 0.005;
+        r.direction = normalize(-light.direction);
+        r.min_distance = 0.001;
+        r.max_distance = 10000.0;
 
         // Occlusion query: any hit terminates traversal, and no per-triangle
         // data (barycentrics etc.) is needed — the result is only hit/none.
         raytracing::intersector<raytracing::instancing> inter;
         inter.assume_geometry_type(raytracing::geometry_type::triangle);
         inter.accept_any_intersection(true);
-
+        auto intersection = inter.intersect(r, TLAS, 0xFF);
+        if (intersection.type == raytracing::intersection_type::triangle) {
+            finalColor = float4(0.0, 0.0, 0.0, 1.0);
+        } else if (intersection.type == raytracing::intersection_type::none) {
+            finalColor = float4(1.0, 1.0, 1.0, 1.0);
+        }
+#if 0   // Cone-sampled sun soft shadows — disabled during the bisect above.
+        float3 sunDir = normalize(-light.direction);
         uint sampleCount = (sunParams.angularRadius > 0.0) ? max(sunParams.samples, 1u) : 1u;
-
-        // Orthonormal basis around the sun direction for disk sampling.
         float3 up = abs(sunDir.y) < 0.99 ? float3(0.0, 1.0, 0.0) : float3(1.0, 0.0, 0.0);
         float3 t1 = normalize(cross(up, sunDir));
         float3 t2 = cross(sunDir, t1);
         float tanRadius = tan(sunParams.angularRadius);
-
         float visibility = 0.0;
         for (uint s = 0; s < sampleCount; s++) {
             float3 dir = sunDir;
             if (sunParams.angularRadius > 0.0) {
-                // Uniform disk sample over the sun's angular extent, decorrelated
-                // per pixel and per frame.
                 uint seed = tid.x * 1973u + tid.y * 9277u
                           + sunParams.frameIndex * 26699u + s * 6151u;
                 float2 rnd = random(seed);
@@ -97,16 +112,17 @@ kernel void computeMain(
                 float phi = rnd.y * 2.0 * PI;
                 dir = normalize(sunDir + t1 * (rr * cos(phi)) + t2 * (rr * sin(phi)));
             }
-            raytracing::ray r;
-            r.origin = worldPos + worldNormal * 0.005;
-            r.direction = dir;
-            r.min_distance = 0.001;
-            r.max_distance = 10000.0;
-            auto intersection = inter.intersect(r, TLAS, 0xFF);
-            visibility += (intersection.type == raytracing::intersection_type::none) ? 1.0 : 0.0;
+            raytracing::ray sr;
+            sr.origin = worldPos + worldNormal * 0.005;
+            sr.direction = dir;
+            sr.min_distance = 0.001;
+            sr.max_distance = 10000.0;
+            auto si = inter.intersect(sr, TLAS, 0xFF);
+            visibility += (si.type == raytracing::intersection_type::none) ? 1.0 : 0.0;
         }
         visibility /= float(sampleCount);
         finalColor = float4(visibility, visibility, visibility, 1.0);
+#endif
         // Debug output - world position
         // finalColor = float4(float3(worldPos), 1.0);
         // Debug output - world normal
