@@ -644,6 +644,13 @@ private:
     TextureHandle volumeTestTexture;     // owned procedural test grid
     bool volumeRenderEnabled = false;    // default OFF until real data lands
     VolumeRenderData volumeSettings;     // panel tunables (box/density/albedo/steps)
+    // Render-to-texture scene view (renderToTexture): dedicated camera and
+    // instance buffers. The offscreen view encodes BEFORE the main draw, but
+    // host-visible buffer writes are last-write-wins across the whole frame's
+    // command stream — sharing cameraUniformBuffer/instanceDataBuffer meant
+    // the RTT draw executed with the MAIN view's data (or vice versa).
+    BufferHandle rttCameraBuffer;
+    BufferHandle rttInstanceBuffer;
     // Camera-motion velocity (motion vectors) — infrastructure for future TAA.
     PipelineHandle velocityPipeline;
     TextureHandle velocityRT;

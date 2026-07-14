@@ -119,6 +119,21 @@ void Renderer::initialize(std::unique_ptr<RHI> rhiPtr, GraphicsBackend backendTy
     instanceDataBufferDesc.memoryUsage = MemoryUsage::CPUtoGPU;
     createFrameSlottedBuffer(instanceDataBuffer, instanceDataBufferDesc);
 
+    // Render-to-texture view: its own camera/instance buffers (see renderer.hpp
+    // note — the shared ones are overwritten by the main draw later in the same
+    // frame, before the GPU executes anything).
+    BufferDesc rttCamDesc;
+    rttCamDesc.size = sizeof(CameraRenderData);
+    rttCamDesc.usage = BufferUsage::Uniform;
+    rttCamDesc.memoryUsage = MemoryUsage::CPUtoGPU;
+    createFrameSlottedBuffer(rttCameraBuffer, rttCamDesc);
+
+    BufferDesc rttInstDesc;
+    rttInstDesc.size = sizeof(Vapor::InstanceData) * MAX_INSTANCES;
+    rttInstDesc.usage = BufferUsage::Uniform;
+    rttInstDesc.memoryUsage = MemoryUsage::CPUtoGPU;
+    createFrameSlottedBuffer(rttInstanceBuffer, rttInstDesc);
+
     // Shader-contract buffers (clusters / rect lights / PSSM), neutral-filled.
     // See the "Full PBR shader contract" note in renderer.hpp.
     {
@@ -5984,11 +5999,19 @@ void Renderer::renderToTexture(
 
     auto& resource = renderTextures[target.id];
 
-    // Save current camera state
+    // The PBR pipeline bakes RGBA16F color + Depth32F depth attachments into
+    // the PSO, so a depth-less render texture can't bind it.
+    if (!mainPipeline.isValid() || !resource.colorTexture.isValid() ||
+        !resource.hasDepth || !resource.depthTexture.isValid() ||
+        !rttCameraBuffer.isValid() || !rttInstanceBuffer.isValid()) {
+        return;
+    }
+
+    // Save current camera state (collectDrawables/performCulling read it)
     CameraRenderData previousCamera = currentCamera;
 
     // Set up camera for this render
-    CameraRenderData rtCamera;
+    CameraRenderData rtCamera{};
     rtCamera.proj = camera.getProjMatrix();
     rtCamera.view = camera.getViewMatrix();
     rtCamera.invProj = glm::inverse(rtCamera.proj);
@@ -5998,51 +6021,163 @@ void Renderer::renderToTexture(
     rtCamera.position = camera.getEye();
     currentCamera = rtCamera;
 
+    // Cull for THIS view and build ITS instance array into the dedicated RTT
+    // buffers. frameDrawables/visibleDrawables are per-draw scratch — the main
+    // draw() re-collects them later in the frame.
+    frameDrawables.clear();
+    visibleDrawables.clear();
+    collectDrawables(scene);
+    performCulling();
+    sortDrawables();
+
+    std::vector<Vapor::InstanceData> rttInstances;
+    rttInstances.reserve(std::min<size_t>(visibleDrawables.size(), MAX_INSTANCES));
+    std::vector<Uint32> rttDraws;  // drawable index per instance slot
+    rttDraws.reserve(rttInstances.capacity());
+    for (Uint32 drawableIdx : visibleDrawables) {
+        if (rttInstances.size() >= MAX_INSTANCES) break;
+        const Drawable& drawable = frameDrawables[drawableIdx];
+        if (drawable.mesh >= meshes.size()) continue;
+        const RenderMesh& mesh = meshes[drawable.mesh];
+        if (!mesh.vertexBuffer.isValid()) continue;
+        Vapor::InstanceData instance;
+        instance.model = drawable.transform;
+        instance.color = drawable.color;
+        instance.vertexOffset = 0;
+        instance.indexOffset = 0;
+        instance.vertexCount = mesh.vertexCount;
+        instance.indexCount = mesh.indexCount;
+        instance.materialID = drawable.material;
+        instance.primitiveMode = Vapor::PrimitiveMode::TRIANGLES;
+        instance.AABBMin = drawable.aabbMin;
+        instance.AABBMax = drawable.aabbMax;
+        instance.boundingSphere = glm::vec4(
+            (drawable.aabbMin + drawable.aabbMax) * 0.5f,
+            glm::length(glm::vec3(drawable.aabbMax - drawable.aabbMin)) * 0.5f
+        );
+        rttInstances.push_back(instance);
+        rttDraws.push_back(drawableIdx);
+    }
+
+    rhi->updateBuffer(rttCameraBuffer, &rtCamera, 0, sizeof(CameraRenderData));
+    if (!rttInstances.empty()) {
+        rhi->updateBuffer(rttInstanceBuffer, rttInstances.data(), 0,
+                          rttInstances.size() * sizeof(Vapor::InstanceData));
+    }
+
     // Begin render pass with render texture as target
     RenderPassDesc passDesc;
     passDesc.name = "RenderToTexture";
     passDesc.colorAttachments.push_back(resource.colorTexture);
     passDesc.clearColors.push_back(clearColor);
     passDesc.loadColor.push_back(false); // Clear, don't load
-
-    if (resource.hasDepth && resource.depthTexture.isValid()) {
-        passDesc.depthAttachment = resource.depthTexture;
-        passDesc.clearDepth = 1.0f;
-        passDesc.loadDepth = false; // Clear depth
-    }
+    passDesc.depthAttachment = resource.depthTexture;
+    passDesc.clearDepth = 1.0f;
+    passDesc.loadDepth = false; // Clear depth
     rhi->beginRenderPass(passDesc);
 
-    // Collect drawables from scene
-    frameDrawables.clear();
-    visibleDrawables.clear();
-    collectDrawables(scene);
-
-    // Perform rendering
-    if (!visibleDrawables.empty()) {
-        performCulling();
-        sortDrawables();
-        updateBuffers();
-
-        // Bind pipeline and render
+    if (!rttInstances.empty()) {
         rhi->bindPipeline(mainPipeline);
 
-        for (uint32_t drawableIdx : visibleDrawables) {
-            const Drawable& drawable = frameDrawables[drawableIdx];
+        // Full main-pass binding contract (mirrors mainRenderPass), with the
+        // RTT camera/instance buffers and every screen-space input neutralized
+        // — shadow/AO/SSCS/point-shadow whites, GIBS/reflection/refraction off.
+        // Those buffers hold the MAIN view; sampling them here would paste the
+        // main view's screen-space data over this view.
+        rhi->setVertexBuffer(0, rttCameraBuffer, 0, sizeof(CameraRenderData));
+        rhi->setVertexBuffer(1, materialUniformBuffer, 0, sizeof(Vapor::MaterialData) * MAX_INSTANCES);
+        rhi->setVertexBuffer(2, rttInstanceBuffer, 0, sizeof(Vapor::InstanceData) * rttInstances.size());
+
+        rhi->setFragmentBuffer(0, directionalLightBuffer, 0, sizeof(DirectionalLightData) * maxDirectionalLights);
+        rhi->setFragmentBuffer(1, pointLightBuffer, 0, sizeof(PointLightData) * maxPointLights);
+        rhi->setFragmentBuffer(2, clusterBuffer);
+        rhi->setFragmentBuffer(3, rttCameraBuffer, 0, sizeof(CameraRenderData));
+        glm::vec2 rttScreenSize(static_cast<float>(resource.width), static_cast<float>(resource.height));
+        rhi->setFragmentBytes(&rttScreenSize, sizeof(glm::vec2), 4);
+        glm::uvec3 gridSize(clusterGridSizeX, clusterGridSizeY, clusterGridSizeZ);
+        rhi->setFragmentBytes(&gridSize, sizeof(glm::uvec3), 5);
+        float time = 0.0f;
+        rhi->setFragmentBytes(&time, sizeof(float), 6);
+        rhi->setFragmentBuffer(7, rectLightBuffer);
+        // Rect/spot loops off: their world data would be fine from any view,
+        // but this frame's CPU light lists may not be submitted yet (the demo
+        // calls renderToTexture before draw()), so the counts aren't reliable.
+        Uint32 rttRectCount = 0;
+        rhi->setFragmentBytes(&rttRectCount, sizeof(Uint32), 8);
+        rhi->setFragmentBuffer(9, pssmDataBuffer, 0, sizeof(PSSMRenderData));
+        Uint32 rttGibsOn = 0;  // GI gather is a main-view screen-space texture
+        rhi->setFragmentBytes(&rttGibsOn, sizeof(Uint32), 10);
+        // Directional count for RHIMain.frag's loop: from the scene directly
+        // (the renderer's per-frame list is empty until the main draw submits).
+        Uint32 rttDirCount = scene ? static_cast<Uint32>(scene->directionalLights.size()) : 0u;
+        rhi->setFragmentBytes(&rttDirCount, sizeof(Uint32), 11);
+
+        // Neutral texture defaults (same table as mainRenderPass).
+        TextureHandle whiteTex = textures[defaultWhiteTexture].handle;
+        TextureHandle blackTex = textures[defaultBlackTexture].handle;
+        rhi->setTexture(0, 6, whiteTex, defaultSampler);
+        rhi->setTexture(0, 7, whiteTex, defaultSampler);
+        rhi->setTexture(0, 8, defaultBlackCubemapTex, defaultSampler);
+        rhi->setTexture(0, 9, defaultBlackCubemapTex, defaultSampler);
+        rhi->setTexture(0, 10, blackTex, defaultSampler);
+        rhi->setTexture(0, 11, whiteTex, defaultSampler);
+        rhi->setTexture(0, 12, pssmShadowArrayTexture, defaultSampler);
+        rhi->setTexture(0, 13, whiteTex, defaultSampler);
+        rhi->setTexture(0, 14, blackTex, defaultSampler);
+
+        // Skip the tile-culled point-light loop (bit0): the cluster buffer is
+        // built for the MAIN camera's screen tiles, meaningless in this view.
+        Uint32 rttDebugFlags = mainDebugFlags | 1u;
+
+        if (backend == GraphicsBackend::Vulkan) {
+            // RHIMain.frag contract (see mainRenderPass for the slot notes).
+            if (pssmDataBuffer.isValid()) rhi->setFragmentBuffer(2, pssmDataBuffer, 0, sizeof(PSSMRenderData));
+            if (pssmShadowArrayTexture.isValid()) rhi->setTexture(0, 6, pssmShadowArrayTexture, shadowSampler);
+            if (clusterBuffer.isValid()) rhi->setFragmentBuffer(4, clusterBuffer);
+            if (lightCullDataBuffer.isValid()) rhi->setFragmentBuffer(5, lightCullDataBuffer, 0, sizeof(Vapor::LightCullData));
+            rhi->setTexture(0, 7, whiteTex, clampSampler);   // AO neutral
+            rhi->setTexture(0, 8, whiteTex, clampSampler);   // SSCS neutral
+            // Near-field shadow map is light-space (world POV) — valid here.
+            rhi->setTexture(0, 9, nearShadowMap.isValid() ? nearShadowMap : whiteTex, shadowSampler);
+            rhi->setFragmentBytes(&rttDebugFlags, sizeof(Uint32), 2);
+            // Spot/rect buffers must be bound (declared in RHIMain.frag); zero
+            // counts keep both loops off — their per-frame data belongs to the
+            // main view and may not be submitted yet.
+            if (spotLightBuffer.isValid())
+                rhi->setFragmentBuffer(6, spotLightBuffer, 0, sizeof(Vapor::SpotLight) * maxSpotLights);
+            if (rectLightBuffer.isValid()) rhi->setFragmentBuffer(7, rectLightBuffer);
+            glm::uvec2 rttSpotRectCounts(0u, 0u);
+            rhi->setFragmentBytes(&rttSpotRectCounts, sizeof(glm::uvec2), 1);
+        } else {
+            rhi->setFragmentBytes(&rttDebugFlags, sizeof(Uint32), 12);
+            // Real IBL cubes: image-based ambience is view-independent.
+            if (!iblNeedsUpdate) {
+                if (irradianceMap.isValid()) rhi->setTexture(0, 8, irradianceMap, clampSampler);
+                if (prefilterMap.isValid()) rhi->setTexture(0, 9, prefilterMap, clampSampler);
+                if (brdfLUTTex.isValid()) rhi->setTexture(0, 10, brdfLUTTex, clampSampler);
+            }
+            // texSSCS(15) is min()'d unconditionally — MUST be bound; white = lit.
+            rhi->setTexture(0, 15, whiteTex, clampSampler);
+            // Spot buffer (14) + counts/flags (15) are declared in the shared
+            // PBR shader — bind placeholders with zero counts/flags.
+            rhi->setFragmentBuffer(14, spotLightBuffer, 0, sizeof(Vapor::SpotLight) * maxSpotLights);
+            glm::uvec2 rttSpotRectParams(0u, 0u);
+            rhi->setFragmentBytes(&rttSpotRectParams, sizeof(glm::uvec2), 15);
+        }
+
+        // Draw: instance IDs are sequential in rttInstances order.
+        for (Uint32 iid = 0; iid < rttDraws.size(); iid++) {
+            const Drawable& drawable = frameDrawables[rttDraws[iid]];
             const RenderMesh& mesh = meshes[drawable.mesh];
-
-            // Bind material
             bindMaterial(drawable.material);
-
-            // Bind instance data (transform, color, etc.)
-            uint32_t instanceID = drawableToInstanceID[drawableIdx];
-            rhi->setVertexBytes(&instanceID, sizeof(uint32_t), 1);
-
-            // Bind mesh buffers
-            rhi->bindVertexBuffer(mesh.vertexBuffer, 0, 0);
-            rhi->bindIndexBuffer(mesh.indexBuffer, 0);
-
-            // Draw
-            rhi->drawIndexed(mesh.indexCount, 1, 0, 0, 0);
+            rhi->bindVertexBuffer(mesh.vertexBuffer, 3, 0);
+            rhi->setVertexBytes(&iid, sizeof(Uint32), 4);
+            if (mesh.indexBuffer.isValid()) {
+                rhi->bindIndexBuffer(mesh.indexBuffer, 0);
+                rhi->drawIndexed(mesh.indexCount, 1, 0, 0, 0);
+            } else {
+                rhi->draw(mesh.vertexCount, 1, 0, 0);
+            }
         }
     }
 
