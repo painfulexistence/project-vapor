@@ -814,6 +814,10 @@ private:
     // emits every meshlet when the errorThreshold it receives is negative.
     // Isolates "cull rejects everything" from raster/depth/binding problems.
     bool meshletDrawAll = false;
+    // Debug: mesh stage emits one hardcoded clip-space triangle, reading NO
+    // buffers (errorThreshold <= -1.5 sentinel). Shows on screen => the
+    // pipeline/dispatch/raster chain works and the fault is buffer bindings.
+    bool meshletSyntheticTri = false;
 
     // Hi-Z occlusion culling (requires a GPU-driven mode). A depth pyramid built
     // from the PrePass depth; the cull compute rejects instances whose screen

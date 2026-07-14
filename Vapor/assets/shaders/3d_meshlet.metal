@@ -188,6 +188,27 @@ static float3 hashColor(uint x) {
     uint tid [[thread_position_in_threadgroup]],
     uint gid [[threadgroup_position_in_grid]]
 ) {
+    // Synthetic-triangle probe (errorThreshold <= -1.5): emit one hardcoded
+    // clip-space triangle and read NO buffers at all. If this shows on screen,
+    // the pipeline/dispatch/raster chain is healthy and the fault is in the
+    // object/mesh-stage buffer bindings (zero reads -> degenerate triangles).
+    if (params.errorThreshold <= -1.5) {
+        if (tid == 0u) {
+            MeshletVertexOut a, b, c;
+            a.position = float4(-0.9, -0.9, 0.5, 1.0); a.color = float3(1.0, 0.0, 1.0);
+            b.position = float4( 0.9, -0.9, 0.5, 1.0); b.color = float3(1.0, 1.0, 0.0);
+            c.position = float4( 0.0,  0.9, 0.5, 1.0); c.color = float3(0.0, 1.0, 1.0);
+            output.set_vertex(0, a);
+            output.set_vertex(1, b);
+            output.set_vertex(2, c);
+            output.set_index(0, 0);
+            output.set_index(1, 1);
+            output.set_index(2, 2);
+            output.set_primitive_count(1);
+        }
+        return;
+    }
+
     uint mi = payload.meshletIndices[gid];
     Meshlet m = meshlets[mi];
 

@@ -1582,8 +1582,9 @@ void Renderer::mainRenderPass() {
     lastFrameStats.mainPath = useMeshlet ? "Meshlet" : useMDI ? "MDI"
                             : useGpuDriven ? "Indirect" : "CPU";
     if (useMeshlet) {
-        // Draw-all debug also drops the depth test (see meshletPipelineNoDepth).
-        const bool noDepth = meshletDrawAll && meshletPipelineNoDepth.isValid();
+        // Debug probes also drop the depth test + face culling (NoDepth twin).
+        const bool noDepth = (meshletDrawAll || meshletSyntheticTri) &&
+                             meshletPipelineNoDepth.isValid();
         rhi->bindPipeline(noDepth ? meshletPipelineNoDepth : meshletPipeline);
         // Bindings mirror Meshlet.task/.mesh and 3d_meshlet.metal.
         rhi->setVertexBuffer(0, cameraUniformBuffer, 0, sizeof(CameraRenderData));
@@ -1595,10 +1596,11 @@ void Renderer::mainRenderPass() {
         rhi->setVertexBuffer(7, mergedVertexBuffer, 0, 0);
 
         struct MeshletParams { Uint32 instanceID; Uint32 meshletOffset; Uint32 meshletCount; float errorThreshold; };
-        // Negative threshold = debug sentinel: the task shader skips ALL culling
-        // (frustum/cone/LOD) and emits every meshlet.
-        const float threshold = meshletDrawAll
-            ? -1.0f
+        // Negative-threshold debug sentinels: <0 makes the task shader skip ALL
+        // culling; <=-1.5 additionally makes the mesh stage emit one hardcoded
+        // triangle without reading any buffer (see 3d_meshlet.metal).
+        const float threshold = meshletSyntheticTri ? -2.0f
+            : meshletDrawAll ? -1.0f
             : meshletLodPixelError / std::max(1.0f, float(rhi->getSwapchainHeight()));
         for (Uint32 i = 0; i < frameDrawables.size(); ++i) {
             auto it = drawableToInstanceID.find(i);
@@ -4237,12 +4239,12 @@ void Renderer::createRenderPipeline() {
                     mp.hasDepthAttachment = true;
                     mp.colorAttachmentFormats = { PixelFormat::RGBA16_FLOAT };
                     meshletPipeline = rhi->createMeshPipeline(mp);
-                    // Debug twin without the depth test: used by "draw all
-                    // meshlets" to tell depth rejection apart from cull/raster
-                    // failures (LOD-simplified clusters don't depth-match the
-                    // full-res PrePass geometry, so LessOrEqual can drop them).
+                    // Debug twin without depth test OR face culling: used by the
+                    // "draw all meshlets" / synthetic-triangle probes to rule
+                    // out depth rejection and winding along with the cull.
                     mp.depthTest = false;
                     mp.depthWrite = false;
+                    mp.cullMode = CullMode::None;
                     meshletPipelineNoDepth = rhi->createMeshPipeline(mp);
                 }
             }
@@ -4665,9 +4667,11 @@ void Renderer::createRenderPipeline() {
                 mp.hasDepthAttachment = true;
                 mp.colorAttachmentFormats = { PixelFormat::RGBA16_FLOAT };
                 meshletPipeline = rhi->createMeshPipeline(mp);
-                // Debug twin without the depth test (see the Vulkan block).
+                // Debug twin without depth test or face culling (see the
+                // Vulkan block).
                 mp.depthTest = false;
                 mp.depthWrite = false;
+                mp.cullMode = CullMode::None;
                 meshletPipelineNoDepth = rhi->createMeshPipeline(mp);
             }
         }
@@ -5404,6 +5408,9 @@ void Renderer::drawGraphicsImGui() {
             // overdraw). If the screen stays empty with this on, the problem is
             // raster/depth/bindings, not the cull.
             ImGui::Checkbox("  Draw all meshlets (skip cull, debug)", &meshletDrawAll);
+            // Diagnostic: mesh stage draws one hardcoded triangle, zero buffer
+            // reads. Visible triangle => dispatch/raster fine, bindings broken.
+            ImGui::Checkbox("  Synthetic triangle (skip buffers, debug)", &meshletSyntheticTri);
         }
 
         // MDI is a sub-option of the Indirect method (single-call multi-draw over
