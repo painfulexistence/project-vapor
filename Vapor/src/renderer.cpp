@@ -898,6 +898,8 @@ void Renderer::render() {
     lastFrameStats.visibleDrawables = static_cast<Uint32>(visibleDrawables.size());
     lastFrameStats.directionalLights = static_cast<Uint32>(directionalLights.size());
     lastFrameStats.pointLights = static_cast<Uint32>(pointLights.size());
+    lastFrameStats.rectLights = static_cast<Uint32>(rectLights.size());
+    lastFrameStats.spotLights = static_cast<Uint32>(spotLights.size());
 }
 
 // The engine's default frame composition. Gameplay code is free to modify
@@ -4943,9 +4945,9 @@ void Renderer::drawGraphicsImGui() {
     ImGui::ColorEdit3("Clear color", (float*)&clearColor);
     ImGui::Text("Drawables: %u / %u visible",
                 lastFrameStats.visibleDrawables, lastFrameStats.totalDrawables);
-    ImGui::Text("Scene lights: dir %u | point %u | rect %zu | spot %zu",
+    ImGui::Text("Scene lights: dir %u | point %u | rect %u | spot %u",
                 lastFrameStats.directionalLights, lastFrameStats.pointLights,
-                rectLights.size(), spotLights.size());
+                lastFrameStats.rectLights, lastFrameStats.spotLights);
     ImGui::Text("Raytracing: %s | Compute: %s | GPU timestamps: %s",
                 capabilities.raytracing ? "yes" : "no",
                 capabilities.computeShaders ? "yes" : "no",

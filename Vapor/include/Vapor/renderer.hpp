@@ -461,12 +461,17 @@ private:
     std::unordered_map<Uint32, void*> imguiTextureCache;  // Vulkan descriptor sets
     void drawGraphicsImGui();
 
-    // Last completed frame's numbers, shown in the Engine window
+    // Last completed frame's numbers, shown in the Engine window. The panel
+    // draws BETWEEN beginFrame (which clears the live per-frame light vectors)
+    // and draw() (which refills them), so it must read this snapshot — reading
+    // the live vectors there always shows 0.
     struct FrameStats {
         Uint32 totalDrawables = 0;
         Uint32 visibleDrawables = 0;
         Uint32 directionalLights = 0;
         Uint32 pointLights = 0;
+        Uint32 rectLights = 0;
+        Uint32 spotLights = 0;
     } lastFrameStats;
 
     // Tile-cull histogram cache for the "Light Culling Debug" panel. Refreshed
