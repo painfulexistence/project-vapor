@@ -1620,7 +1620,7 @@ void Renderer::mainRenderPass() {
         }
         // Debug probes also drop the depth test + face culling (NoDepth twin).
         const bool noDepth = (meshletDrawAll || meshletSyntheticTri || meshletProbeData ||
-                              meshletProbeVertex) &&
+                              meshletProbeVertex || meshletProbeXform) &&
                              meshletPipelineNoDepth.isValid();
         rhi->bindPipeline(noDepth ? meshletPipelineNoDepth : meshletPipeline);
         // Bindings mirror Meshlet.task/.mesh and 3d_meshlet.metal.
@@ -1634,11 +1634,13 @@ void Renderer::mainRenderPass() {
 
         struct MeshletParams { Uint32 instanceID; Uint32 meshletOffset; Uint32 meshletCount; float errorThreshold; };
         // Negative-threshold debug sentinels (all skip cull in the task stage):
+        //   <= -4.5  transform probe   (clip-space landing of the first vertex)
         //   <= -3.5  vertex-read probe (real position read -> colored triangle)
         //   <= -2.5  count probe       (vertexCount/triangleCount validity)
         //   <= -1.5  synthetic         (hardcoded triangle, no reads)
         //   <  0     draw-all          (real geometry, cull off)
-        const float threshold = meshletProbeVertex ? -4.0f
+        const float threshold = meshletProbeXform ? -5.0f
+            : meshletProbeVertex ? -4.0f
             : meshletProbeData ? -3.0f
             : meshletSyntheticTri ? -2.0f
             : meshletDrawAll ? -1.0f
@@ -5660,6 +5662,10 @@ void Renderer::drawGraphicsImGui() {
             // position. White => read OK (bug is transform/index); cyan =>
             // zero (buffer unbound); magenta => huge/NaN (VertexData stride).
             ImGui::Checkbox("  Vertex-read probe (color = position, debug)", &meshletProbeVertex);
+            // Diagnostic: fixed triangle colored by clip-space landing of the
+            // first vertex. White => transform OK (bug is topology/set_index);
+            // missing R = behind camera, missing G = off-screen, missing B = bad Z.
+            ImGui::Checkbox("  Transform probe (color = clip landing, debug)", &meshletProbeXform);
         }
 
         // MDI is a sub-option of the plain Indirect method (single-call

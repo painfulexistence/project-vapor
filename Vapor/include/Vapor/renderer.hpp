@@ -835,6 +835,11 @@ private:
     // is transform/index); cyan = position all-zero (buffer unbound); magenta =
     // huge/NaN (VertexData stride). (errorThreshold <= -3.5.)
     bool meshletProbeVertex = false;
+    // Transform probe: fixed triangle colored by where the first vertex lands
+    // in clip space (R=in front, G=on-screen XY, B=in depth range). Tests the
+    // last untested mesh-stage reads (camera 0, instances 2) + the math. White
+    // => transform OK (bug is topology/set_index). (errorThreshold <= -4.5.)
+    bool meshletProbeXform = false;
     // Second, even lower-level probe drawn alongside when meshletSyntheticTri
     // is on (Metal): a MESH-ONLY pipeline (no object stage, no payload, no
     // buffers) emitting a green triangle on the LEFT. Green shows while the

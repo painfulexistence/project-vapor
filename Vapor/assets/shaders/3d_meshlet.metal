@@ -195,6 +195,47 @@ static float3 hashColor(uint x) {
     // triangle if primitive_count is garbage) from "geometry/transform wrong"
     // (sane yellowish triangle, ~0.6-1.0 R+G for real clusters). Fixed position
     // so it can't be pushed offscreen by a bad transform.
+    // Transform probe (errorThreshold <= -4.5): position reads are proven good,
+    // so test the last untested reads — camera(0) and instances(2) in the MESH
+    // stage — plus the transform math. Compute the real clip position of the
+    // first vertex and report where it lands:
+    //   R = clip.w > 0            (vertex is in front of the camera)
+    //   G = |ndc.xy| <= 1         (inside the screen rectangle)
+    //   B = 0 <= ndc.z <= 1       (inside the depth range)
+    // Legend:
+    //   white  (R+G+B) -> transform is correct; the bug is TOPOLOGY (set_index /
+    //                     meshletTriangles buffer 5)
+    //   no R           -> behind camera: model or view is wrong (bad instanceID,
+    //                     or camera/instance buffer not reaching the mesh stage)
+    //   R, no G        -> in front but off-screen: projection or model scale wrong
+    //   R+G, no B      -> on-screen XY but depth out of range: proj Z convention
+    if (params.errorThreshold <= -4.5) {
+        uint mi = payload.meshletIndices[gid];
+        Meshlet m = meshlets[mi];
+        uint vi = meshletVertices[m.vertexOffset];
+        float4x4 model = instances[params.instanceID].model;
+        float4 clip = cam.proj * cam.view * model * float4(float3(vertices[vi].position), 1.0);
+        float3 ndc = clip.xyz / clip.w;
+        bool front = clip.w > 0.0;
+        bool inXY = front && abs(ndc.x) <= 1.0 && abs(ndc.y) <= 1.0;
+        bool inZ  = front && ndc.z >= 0.0 && ndc.z <= 1.0;
+        float3 c = float3(front ? 1.0 : 0.0, inXY ? 1.0 : 0.0, inZ ? 1.0 : 0.0);
+        if (tid == 0u) {
+            MeshletVertexOut a, b, cc;
+            a.position = float4(-0.9, -0.9, 0.5, 1.0); a.color = c;
+            b.position = float4( 0.9, -0.9, 0.5, 1.0); b.color = c;
+            cc.position = float4( 0.0,  0.9, 0.5, 1.0); cc.color = c;
+            output.set_vertex(0, a);
+            output.set_vertex(1, b);
+            output.set_vertex(2, cc);
+            output.set_index(0, 0);
+            output.set_index(1, 1);
+            output.set_index(2, 2);
+            output.set_primitive_count(1);
+        }
+        return;
+    }
+
     // Vertex-read probe (errorThreshold <= -3.5): counts are proven valid, so
     // now test whether the mesh stage actually reads real vertex POSITIONS
     // through the full chain meshletVertices[4] -> mergedVB[7]. Emit the fixed
