@@ -397,15 +397,17 @@ static float3 hashColor(uint x) {
     uint mi = payload.meshletIndices[gid];
     Meshlet m = meshlets[mi];
 
-    // Declare the output size BEFORE writing any vertices/indices. Metal expects
-    // the mesh grid's primitive count set up front — calling set_primitive_count
-    // last (after a multi-threaded set_index loop) let tid 0 close the primitive
-    // list while other threads were still writing indices, so nothing rendered
-    // even though every input was correct (all debug probes passed).
+    // Set the output size, then write the index buffer from a SINGLE thread.
+    // The debug ladder cleared every input (vertex loop, transform, index data
+    // all verified) yet the real path stayed blank; the one thing no passing
+    // probe exercised was set_index called from divergent threads. Writing the
+    // indices single-threaded (the vertex writes stay parallel) sidesteps it.
     if (tid == 0u) {
         output.set_primitive_count(m.triangleCount);
+        for (uint t = 0u; t < m.triangleCount * 3u; ++t) {
+            output.set_index(t, uint(meshletTriangles[m.triangleOffset + t]));
+        }
     }
-    threadgroup_barrier(mem_flags::mem_threadgroup);
 
     // Transform in the SAME associativity as the pre-pass / main vertex shader:
     // world = model * pos, clip = proj * view * world. A fused proj*view*model
@@ -423,9 +425,6 @@ static float3 hashColor(uint x) {
         vout.position = viewProj * worldPos;
         vout.color = color;
         output.set_vertex(v, vout);
-    }
-    for (uint t = tid; t < m.triangleCount * 3u; t += 64u) {
-        output.set_index(t, uint(meshletTriangles[m.triangleOffset + t]));
     }
 }
 
