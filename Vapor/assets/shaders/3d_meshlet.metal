@@ -195,6 +195,43 @@ static float3 hashColor(uint x) {
     // triangle if primitive_count is garbage) from "geometry/transform wrong"
     // (sane yellowish triangle, ~0.6-1.0 R+G for real clusters). Fixed position
     // so it can't be pushed offscreen by a bad transform.
+    // Vertex-read probe (errorThreshold <= -3.5): counts are proven valid, so
+    // now test whether the mesh stage actually reads real vertex POSITIONS
+    // through the full chain meshletVertices[4] -> mergedVB[7]. Emit the fixed
+    // triangle colored by predicates on the first vertex's position:
+    //   R = position is non-zero        (read returned data, not silent 0)
+    //   G = position magnitude is sane  (|comp| < 1e5 -> not garbage/NaN)
+    //   B = the vi index varies         (vi & 255)
+    // Legend:
+    //   white  (R+G+B) -> positions read fine; bug is the TRANSFORM or set_index
+    //   cyan   (G+B, no R) -> position is all-zero: mergedVB(7) or meshletVertices(4) unbound
+    //   magenta(R+B, no G) -> position huge/NaN: VertexData stride/layout wrong
+    //   black          -> vi or the whole chain is broken
+    if (params.errorThreshold <= -3.5) {
+        uint mi = payload.meshletIndices[gid];
+        Meshlet m = meshlets[mi];
+        uint vi = meshletVertices[m.vertexOffset];  // first vertex of the meshlet
+        float3 p = float3(vertices[vi].position);
+        float mag = abs(p.x) + abs(p.y) + abs(p.z);
+        bool nonZero = mag > 1e-4;
+        bool sane = isfinite(mag) && mag < 1e5;
+        float3 c = float3(nonZero ? 1.0 : 0.0, sane ? 1.0 : 0.0, float(vi & 255u) / 255.0);
+        if (tid == 0u) {
+            MeshletVertexOut a, b, cc;
+            a.position = float4(-0.9, -0.9, 0.5, 1.0); a.color = c;
+            b.position = float4( 0.9, -0.9, 0.5, 1.0); b.color = c;
+            cc.position = float4( 0.0,  0.9, 0.5, 1.0); cc.color = c;
+            output.set_vertex(0, a);
+            output.set_vertex(1, b);
+            output.set_vertex(2, cc);
+            output.set_index(0, 0);
+            output.set_index(1, 1);
+            output.set_index(2, 2);
+            output.set_primitive_count(1);
+        }
+        return;
+    }
+
     if (params.errorThreshold <= -2.5) {
         uint mi = payload.meshletIndices[gid];
         Meshlet m = meshlets[mi];

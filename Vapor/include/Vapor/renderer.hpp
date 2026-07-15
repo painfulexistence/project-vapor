@@ -830,6 +830,11 @@ private:
     // yellowish => reads work, bug is geometry/transform; black/wild/none =>
     // payload or meshlet-buffer read is the fault. (errorThreshold <= -2.5.)
     bool meshletProbeData = false;
+    // Vertex-read probe: fixed triangle colored by the first real vertex
+    // position read through meshletVertices -> mergedVB. White = read OK (bug
+    // is transform/index); cyan = position all-zero (buffer unbound); magenta =
+    // huge/NaN (VertexData stride). (errorThreshold <= -3.5.)
+    bool meshletProbeVertex = false;
     // Second, even lower-level probe drawn alongside when meshletSyntheticTri
     // is on (Metal): a MESH-ONLY pipeline (no object stage, no payload, no
     // buffers) emitting a green triangle on the LEFT. Green shows while the

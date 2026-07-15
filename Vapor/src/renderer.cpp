@@ -1619,7 +1619,8 @@ void Renderer::mainRenderPass() {
             mainDrawCalls++;
         }
         // Debug probes also drop the depth test + face culling (NoDepth twin).
-        const bool noDepth = (meshletDrawAll || meshletSyntheticTri || meshletProbeData) &&
+        const bool noDepth = (meshletDrawAll || meshletSyntheticTri || meshletProbeData ||
+                              meshletProbeVertex) &&
                              meshletPipelineNoDepth.isValid();
         rhi->bindPipeline(noDepth ? meshletPipelineNoDepth : meshletPipeline);
         // Bindings mirror Meshlet.task/.mesh and 3d_meshlet.metal.
@@ -1633,10 +1634,12 @@ void Renderer::mainRenderPass() {
 
         struct MeshletParams { Uint32 instanceID; Uint32 meshletOffset; Uint32 meshletCount; float errorThreshold; };
         // Negative-threshold debug sentinels (all skip cull in the task stage):
-        //   <= -2.5  data probe   (real read -> fixed colored triangle)
-        //   <= -1.5  synthetic    (hardcoded triangle, no reads)
-        //   <  0     draw-all     (real geometry, cull off)
-        const float threshold = meshletProbeData ? -3.0f
+        //   <= -3.5  vertex-read probe (real position read -> colored triangle)
+        //   <= -2.5  count probe       (vertexCount/triangleCount validity)
+        //   <= -1.5  synthetic         (hardcoded triangle, no reads)
+        //   <  0     draw-all          (real geometry, cull off)
+        const float threshold = meshletProbeVertex ? -4.0f
+            : meshletProbeData ? -3.0f
             : meshletSyntheticTri ? -2.0f
             : meshletDrawAll ? -1.0f
             : meshletLodPixelError / std::max(1.0f, float(rhi->getSwapchainHeight()));
@@ -5653,6 +5656,10 @@ void Renderer::drawGraphicsImGui() {
             // read (R=vertexCount/64, G=triangleCount/128, B=mi). Yellowish =>
             // reads OK (bug is geometry/transform); black/wild/none => read bad.
             ImGui::Checkbox("  Data probe (color = meshlet record, debug)", &meshletProbeData);
+            // Diagnostic: fixed triangle colored by the first real vertex
+            // position. White => read OK (bug is transform/index); cyan =>
+            // zero (buffer unbound); magenta => huge/NaN (VertexData stride).
+            ImGui::Checkbox("  Vertex-read probe (color = position, debug)", &meshletProbeVertex);
         }
 
         // MDI is a sub-option of the plain Indirect method (single-call
