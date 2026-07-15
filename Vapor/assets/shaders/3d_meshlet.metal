@@ -397,6 +397,16 @@ static float3 hashColor(uint x) {
     uint mi = payload.meshletIndices[gid];
     Meshlet m = meshlets[mi];
 
+    // Declare the output size BEFORE writing any vertices/indices. Metal expects
+    // the mesh grid's primitive count set up front — calling set_primitive_count
+    // last (after a multi-threaded set_index loop) let tid 0 close the primitive
+    // list while other threads were still writing indices, so nothing rendered
+    // even though every input was correct (all debug probes passed).
+    if (tid == 0u) {
+        output.set_primitive_count(m.triangleCount);
+    }
+    threadgroup_barrier(mem_flags::mem_threadgroup);
+
     // Transform in the SAME associativity as the pre-pass / main vertex shader:
     // world = model * pos, clip = proj * view * world. A fused proj*view*model
     // MVP rounds differently and can land fragments epsilon-farther than the
@@ -415,10 +425,7 @@ static float3 hashColor(uint x) {
         output.set_vertex(v, vout);
     }
     for (uint t = tid; t < m.triangleCount * 3u; t += 64u) {
-        output.set_index(t, meshletTriangles[m.triangleOffset + t]);
-    }
-    if (tid == 0u) {
-        output.set_primitive_count(m.triangleCount);
+        output.set_index(t, uint(meshletTriangles[m.triangleOffset + t]));
     }
 }
 
