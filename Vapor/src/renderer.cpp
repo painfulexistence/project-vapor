@@ -1425,11 +1425,15 @@ void Renderer::mainRenderPass() {
         // Vulkan-only: on Metal, fragment buffer(2) is the CLUSTER buffer, so
         // pushing here would corrupt it (the old billions-of-iterations hang).
         rhi->setFragmentBytes(&mainDebugFlags, sizeof(Uint32), 2);
-        // Spot lights: buffer at set1 b6, loop bound at push offset 80 (binding 1).
+        // Spot lights: buffer at set1 b6; rect area lights at set1 b7 (analytic
+        // eval in RHIMain.frag, unshadowed — the RT area shadow is Metal-only).
+        // Loop bounds travel together at push offset 80 (binding 1).
         if (spotLightBuffer.isValid())
             rhi->setFragmentBuffer(6, spotLightBuffer, 0, sizeof(Vapor::SpotLight) * maxSpotLights);
-        Uint32 spotCount = static_cast<Uint32>(spotLights.size());
-        rhi->setFragmentBytes(&spotCount, sizeof(Uint32), 1);
+        if (rectLightBuffer.isValid()) rhi->setFragmentBuffer(7, rectLightBuffer);
+        glm::uvec2 spotRectCounts(static_cast<Uint32>(spotLights.size()),
+                                  static_cast<Uint32>(rectLights.size()));
+        rhi->setFragmentBytes(&spotRectCounts, sizeof(glm::uvec2), 1);
     } else {
         // Perf-isolation debug flags for the Metal PBR shader at buffer(12)
         // (buffer(2) is the cluster buffer here — see the Vulkan note above —

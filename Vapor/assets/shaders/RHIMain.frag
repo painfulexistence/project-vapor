@@ -125,6 +125,18 @@ layout(std430, set = 1, binding = 5) readonly buffer LightCullBuf {
 layout(std430, set = 1, binding = 6) readonly buffer SpotLightBuf {
     SpotLight spotLights[];
 };
+
+// Must match Vapor::RectLight (std430 legally packs the scalars into the vec3
+// tails, unlike MSL — same 64-byte layout as the C++ struct).
+struct RectLight {
+    vec3 position;  float halfWidth;
+    vec3 rright;    float halfHeight;
+    vec3 up;        float intensity;
+    vec3 color;     uint useVideoTexture;
+};
+layout(std430, set = 1, binding = 7) readonly buffer RectLightBuf {
+    RectLight rectLights[];
+};
 // PSSM cascaded directional shadow data. Must match Vapor::PSSMRenderData
 // (std430). The neutral default (cascadeSplits = +inf) keeps every pixel in the
 // nearest cascade sampling the identity matrix, i.e. fully lit until the shadow
@@ -260,7 +272,7 @@ float sampleShadow(vec3 worldPos, vec3 N, vec3 L, float viewDepth) {
 layout(push_constant) uniform PushConstants {
     layout(offset = 64)  vec2 screenSize;   // swapchain pixels (for AO screen UV)
     // Spot-light loop bound (setFragmentBytes binding=1 -> offset 80).
-    layout(offset = 80)  uint spotLightCount;
+    layout(offset = 80)  uvec2 spotRectCounts;  // x = spot count, y = rect count
     // Perf-isolation debug flags (setFragmentBytes binding=2 -> offset 96).
     // bit0 = skip the point-light loop, bit1 = skip the shadow PCF. Panel-driven.
     layout(offset = 96)  uint mainDebugFlags;
@@ -290,6 +302,64 @@ float geometrySmith(float NdotV, float NdotL, float roughness) {
 
 vec3 fresnelSchlick(float cosTheta, vec3 F0) {
     return F0 + (1.0 - F0) * pow(clamp(1.0 - cosTheta, 0.0, 1.0), 5.0);
+}
+
+// ── Rect area light (Vulkan twin of the Metal eval) ─────────────────────────
+
+// Exact diffuse irradiance from a quad via the polygon solid-angle edge
+// formula (Baum et al. 1989 / Arvo 1994). Returns irradiance in [0, 1/2].
+float rectLightDiffuse(vec3 N, vec3 fragPos, RectLight l) {
+    vec3 corners[4] = vec3[4](
+        l.position + l.rright * l.halfWidth + l.up * l.halfHeight,
+        l.position - l.rright * l.halfWidth + l.up * l.halfHeight,
+        l.position - l.rright * l.halfWidth - l.up * l.halfHeight,
+        l.position + l.rright * l.halfWidth - l.up * l.halfHeight);
+    vec3 s = vec3(0.0);
+    for (int i = 0; i < 4; i++) {
+        vec3 v0 = normalize(corners[i] - fragPos);
+        vec3 v1 = normalize(corners[(i + 1) % 4] - fragPos);
+        vec3 c = cross(v0, v1);
+        float len = length(c);
+        if (len < 1e-6) continue;
+        float theta = atan(len, dot(v0, v1));
+        s += (theta / len) * c;
+    }
+    return max(0.0, dot(s, N)) / (2.0 * PI);
+}
+
+// Specular via Most Representative Point (Karis, SIGGRAPH 2013): closest point
+// on the rect to the reflection ray, GGX with area-corrected roughness.
+vec3 rectLightSpecular(vec3 N, vec3 V, vec3 fragPos, RectLight l,
+                       vec3 albedo, float metallic, float roughness) {
+    vec3 refl = reflect(-V, N);
+    vec3 lightNorm = cross(l.rright, l.up);  // unnormalized plane normal
+    float denom = dot(lightNorm, refl);
+    vec3 repPt = l.position;
+    if (abs(denom) > 1e-5) {
+        float t = dot(l.position - fragPos, lightNorm) / denom;
+        if (t > 0.0) {
+            vec3 hit = fragPos + refl * t;
+            vec3 rel = hit - l.position;
+            float u = clamp(dot(rel, l.rright), -l.halfWidth, l.halfWidth);
+            float v = clamp(dot(rel, l.up), -l.halfHeight, l.halfHeight);
+            repPt = l.position + l.rright * u + l.up * v;
+        }
+    }
+    vec3 L = normalize(repPt - fragPos);
+    float NdotL = max(dot(N, L), 0.0);
+    if (NdotL <= 0.0) return vec3(0.0);
+    float dist = length(repPt - fragPos);
+    float area = 4.0 * l.halfWidth * l.halfHeight;
+    float alpha = roughness * roughness;
+    float alphaPrime = clamp(alpha + area / max(2.0 * PI * dist * dist, 1e-6), 0.0, 1.0);
+    float r = sqrt(alphaPrime);
+    vec3 H = normalize(L + V);
+    float NdotV = max(dot(N, V), 1e-4);
+    float D = distributionGGX(N, H, r);
+    float G = geometrySmith(NdotV, NdotL, r);
+    vec3 F0 = mix(vec3(0.04), albedo, metallic);
+    vec3 F = fresnelSchlick(max(dot(H, V), 0.0), F0);
+    return (D * G * F) / max(4.0 * NdotV * NdotL, 1e-4);
 }
 
 vec3 shade(vec3 N, vec3 V, vec3 L, vec3 radiance, vec3 albedo, float metallic, float roughness) {
@@ -378,7 +448,7 @@ void main() {
     // Spot lights (loop-all; typical scenes carry a handful). Same falloff as
     // point lights, windowed by a squared smooth cone factor between the inner
     // and outer half-angle cosines. Unshadowed on Vulkan until RT lands here.
-    for (uint sIdx = 0u; sIdx < spotLightCount; ++sIdx) {
+    for (uint sIdx = 0u; sIdx < spotRectCounts.x; ++sIdx) {
         SpotLight sl = spotLights[sIdx];
         vec3 toLight = sl.position - fragPos;
         float dist2 = max(dot(toLight, toLight), 1e-4);
@@ -390,6 +460,20 @@ void main() {
                           * cone * cone;
         vec3 radiance = sl.color * sl.intensity * attenuation;
         color += shade(N, V, Ldir, radiance, albedo, metallic, roughness);
+    }
+
+    // Rect area lights (loop-all): analytic diffuse + specular, combined the
+    // same way as the Metal CalculateRectLight. Unshadowed on Vulkan (the RT
+    // area shadow needs the raytracing port); video-textured lights fall back
+    // to their solid color (no video texture bound on this path).
+    for (uint rIdx = 0u; rIdx < spotRectCounts.y; ++rIdx) {
+        RectLight rl = rectLights[rIdx];
+        vec3 radiance = rl.color * rl.intensity;
+        float diffuseGeo = rectLightDiffuse(N, fragPos, rl);
+        vec3 spec = rectLightSpecular(N, V, fragPos, rl, albedo, metallic, roughness);
+        vec3 F0r = mix(vec3(0.04), albedo, metallic);
+        vec3 kD = (vec3(1.0) - F0r) * (1.0 - metallic);
+        color += (kD * albedo / PI * diffuseGeo + spec) * radiance;
     }
 
     // Flat ambient so unlit scenes are never pure black. Screen-space AO
