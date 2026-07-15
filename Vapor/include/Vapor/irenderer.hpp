@@ -36,6 +36,15 @@
 #include <vector>
 #include <string>
 
+namespace Vapor {
+// Directional shadow map resolution — a renderer-level decision shared by every
+// backend so the Metal and Vulkan cascade implementations stay in lockstep
+// (previously hardcoded separately: Metal 4096, Vulkan 2048). Raising/lowering
+// this once here changes both backends. Cascade array VRAM = 3 * size^2 * 4B.
+inline constexpr uint32_t kDirectionalShadowMapSize = 4096;  // PSSM cascade array
+inline constexpr uint32_t kNearShadowMapSize        = 4096;  // independent near-field map
+}
+
 namespace Rml {
     class Context;
 }

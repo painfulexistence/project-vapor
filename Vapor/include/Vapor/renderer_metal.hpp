@@ -67,6 +67,7 @@ class WorldCanvasPass;
 
 class PSSMShadowPass;
 class PSSMResolvePass;
+class SSCSPass;
 class StochasticPointShadowPass;
 class PointShadowTemporalPass;
 
@@ -330,6 +331,7 @@ class Renderer_Metal final : public IRenderer {// Must be public or factory func
     friend class WorldCanvasPass;
     friend class PSSMShadowPass;
     friend class PSSMResolvePass;
+    friend class SSCSPass;
     friend class StochasticPointShadowPass;
     friend class PointShadowTemporalPass;
     friend class EquirectToCubemapPass;
@@ -802,6 +804,10 @@ protected:
     NS::SharedPtr<MTL::Texture> albedoRT;
     NS::SharedPtr<MTL::Texture> shadowRT;
     NS::SharedPtr<MTL::Texture> shadowRTGrayView; // swizzle view (r,r,r,1) for ImGui preview
+    // Screen-space contact shadows, min-composited onto the directional shadow.
+    NS::SharedPtr<MTL::Texture> sscsRT;
+    NS::SharedPtr<MTL::Texture> sscsRTGrayView;
+    NS::SharedPtr<MTL::ComputePipelineState> sscsPipeline;
     NS::SharedPtr<MTL::Texture> pointShadowRT;       // R16F, raw stochastic point shadow
     NS::SharedPtr<MTL::Texture> pointShadowDenoisedRT; // R16F, temporally denoised
     NS::SharedPtr<MTL::Texture> pointShadowHistoryRT;  // R16F, history for temporal
@@ -831,8 +837,20 @@ protected:
     NS::SharedPtr<MTL::Texture> pssmShadowScreenRTGrayView; // swizzle (r,r,r,1) for ImGui
     std::vector<NS::SharedPtr<MTL::Buffer>> pssmDataBuffers;
     static constexpr uint32_t PSSM_CASCADE_COUNT = 3;
-    static constexpr uint32_t PSSM_SHADOW_MAP_SIZE = 4096;
-    float pssmRTMaxDist = 50.0f; // view-space depth where RT shadow ends and PSSM begins
+    static constexpr uint32_t PSSM_SHADOW_MAP_SIZE = Vapor::kDirectionalShadowMapSize;
+    float pssmRTMaxDist = 25.0f; // view-space depth where the near shadow ends and PSSM begins
+
+    // PSSM PCF and blend settings
+    float pssmRTBlendScale = 0.05f;       // RT↔PSSM cross-fade width as a fraction of (far - rtEnd)
+    float pssmCascadeBlendRange = 10.0f;  // blend range between PSSM cascades (view-space units)
+    uint32_t pssmPcfSampleCount = 16;     // PCF sample count: 4, 8, 16, or 32
+    bool pssmDebugVisualize = false;      // visualize cascade regions with colors
+    // Screen-space contact shadow settings (opt-in: enable in the Shadow Debug panel)
+    bool sscsEnabled = false;
+    float sscsLength = 0.3f;      // view-space march distance (contact scale, metres)
+    float sscsThickness = 0.3f;   // occluder depth window
+    uint32_t sscsSteps = 12;
+    float sscsBias = 0.02f;
 
     // Stochastic point shadow debug: 0 = visibility, 1 = tile light-count heatmap
     uint32_t pointShadowDebugMode = 0;

@@ -170,7 +170,13 @@ struct alignas(16) PSSMRenderData {
     glm::mat4 lightSpaceMatrices[3] = { glm::mat4(1.0f), glm::mat4(1.0f), glm::mat4(1.0f) };
     glm::vec4 cascadeSplits = glm::vec4(3.0e38f);
     float blendRange = 1.0f;
-    float _pad[3] = {};
+    // Independent near-field shadow map (separate from the CSM cascades):
+    // covers [near, nearShadowEnd]; 0 = disabled. Its own tight-fit light matrix
+    // is transported here too (appended so existing shaders reading the prefix
+    // are unaffected). std430: nearLightMatrix lands on a 16-byte boundary.
+    float nearShadowEnd = 0.0f;
+    float _pad[2] = {};
+    glm::mat4 nearLightMatrix = glm::mat4(1.0f);
 };
 
 // Physically-based atmosphere (Rayleigh/Mie/Ozone) consumed by Atmosphere.frag.
