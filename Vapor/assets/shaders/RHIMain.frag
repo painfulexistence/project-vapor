@@ -116,11 +116,15 @@ layout(std430, set = 1, binding = 5) readonly buffer LightCullBuf {
 layout(std430, set = 1, binding = 2) readonly buffer PSSMBuf {
     mat4 shadowLightSpaceMatrices[3];
     vec4 cascadeSplits;
-    float shadowBlendRange;
-    float nearShadowEnd;        // view depth the independent near map covers; 0 = off
-    uint pcfSampleCount;        // PCF taps: 4/8/16/32 (offset 216, matches the Metal PBR shader)
-    float _pssmPad;
-    mat4 nearLightMatrix;       // near-field map (own texture, nearShadowTex)
+    float shadowBlendRange;     // 208
+    float cascadeBlendRange;    // 212  cascade<->cascade blend width (view units)
+    uint pcfSampleCount;        // 216  PCF taps: 4/8/16/32
+    uint debugVisualize;        // 220  cascade-colour debug (0 = off)
+    float nearShadowEnd;        // 224  view depth the near map covers; 0 = off
+    float _pssmPad0;            // 228
+    float _pssmPad1;            // 232  (pad so nearLightMatrix is 16-aligned at 240)
+    float _pssmPad2;            // 236
+    mat4 nearLightMatrix;       // 240  near-field map (own texture, nearShadowTex)
 };
 
 // Poisson disk (matches 3d_common.metal) — 4/8/16 use the first N; 32 adds a
@@ -227,10 +231,10 @@ float sampleNearMap(vec3 worldPos, float bias) {
 // PCF-sample it, and cross-fade across boundaries so transitions don't seam.
 // Returns 1.0 = lit, 0.0 = fully shadowed. Boundaries (view depth):
 //   nearShadowEnd = near map -> cascade 0,  cascadeSplits.y = c0 -> c1,
-//   cascadeSplits.z = c1 -> c2. Blend band width = shadowBlendRange.
+//   cascadeSplits.z = c1 -> c2. Blend band width = cascadeBlendRange.
 float sampleShadow(vec3 worldPos, vec3 N, vec3 L, float viewDepth) {
     float b = max(0.0015 * (1.0 - dot(N, L)), 0.0004);
-    float blend = max(shadowBlendRange, 1e-4);
+    float blend = max(cascadeBlendRange, 1e-4);
 
     // Near field: dedicated high-res map, cross-fading into cascade 0 near its far edge.
     if (nearShadowEnd > 0.0 && viewDepth < nearShadowEnd) {

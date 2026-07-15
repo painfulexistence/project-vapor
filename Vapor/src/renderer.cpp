@@ -2186,6 +2186,8 @@ void Renderer::shadowPass() {
     // sphere + world-anchored texel snap as the cascades (anti-shimmer).
     gpuData.nearShadowEnd = rtEnd;
     gpuData.pcfSampleCount = pssmPcfSampleCount;
+    gpuData.cascadeBlendRange = pssmCascadeBlendRange;
+    gpuData.debugVisualize = pssmDebugVisualize ? 1u : 0u;
     if (rtEnd > nearClip) {
         float nNDC = viewDepthToNDCz(glm::clamp(nearClip, nearClip, farClip));
         float fNDC = viewDepthToNDCz(glm::clamp(rtEnd,    nearClip, farClip));
@@ -4754,6 +4756,8 @@ void Renderer::drawGraphicsImGui() {
             for (int i = 0; i < 4; ++i) if (pssmPcfSampleCount == pcfValues[i]) idx = i;
             if (ImGui::Combo("PCF samples", &idx, pcfLabels, 4)) pssmPcfSampleCount = pcfValues[idx];
         }
+        ImGui::SliderFloat("Cascade blend", &pssmCascadeBlendRange, 0.0f, 10.0f);
+        ImGui::Checkbox("Visualize cascades", &pssmDebugVisualize);
         ImGui::Checkbox("Contact shadows (SSCS)", &sscsEnabled);
         if (sscsEnabled) {
             ImGui::SliderFloat("SSCS length", &sscsLength, 0.05f, 2.0f);
