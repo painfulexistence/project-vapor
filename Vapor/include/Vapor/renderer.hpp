@@ -844,6 +844,10 @@ private:
     // topology. Cyan triangles => vertex loop OK (bug is the index loop /
     // meshletTriangles); blank => vertex emission itself. (errorThreshold <= -5.5.)
     bool meshletProbeEmit = false;
+    // Topology probe: read + validate meshletTriangles(5). In-range non-degen
+    // indices => buffer 5 reads fine (bug is set_index mechanics); no R =>
+    // indices out of range (buffer 5 garbage/unbound). (errorThreshold <= -6.5.)
+    bool meshletProbeTopo = false;
     // Second, even lower-level probe drawn alongside when meshletSyntheticTri
     // is on (Metal): a MESH-ONLY pipeline (no object stage, no payload, no
     // buffers) emitting a green triangle on the LEFT. Green shows while the

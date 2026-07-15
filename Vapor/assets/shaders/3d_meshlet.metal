@@ -195,6 +195,44 @@ static float3 hashColor(uint x) {
     // triangle if primitive_count is garbage) from "geometry/transform wrong"
     // (sane yellowish triangle, ~0.6-1.0 R+G for real clusters). Fixed position
     // so it can't be pushed offscreen by a bad transform.
+    // Topology probe (errorThreshold <= -6.5): the vertex loop is proven good,
+    // so read the one untested mesh-stage buffer — meshletTriangles(5), u8 —
+    // and validate the first triangle's three local indices against the
+    // meshlet's vertexCount:
+    //   R = all three indices < vertexCount   (in range)
+    //   G = the three indices are not all equal (non-degenerate)
+    //   B = first index, scaled              (shows a real, varying value)
+    // Legend:
+    //   white/varied -> indices read fine; bug is set_index mechanics / count
+    //   no R         -> indices out of range: buffer 5 unbound or garbage bytes
+    //   no G (+dark) -> all-zero read: buffer 5 not reaching the mesh stage
+    if (params.errorThreshold <= -6.5) {
+        uint mi = payload.meshletIndices[gid];
+        Meshlet m = meshlets[mi];
+        uint i0 = uint(meshletTriangles[m.triangleOffset + 0u]);
+        uint i1 = uint(meshletTriangles[m.triangleOffset + 1u]);
+        uint i2 = uint(meshletTriangles[m.triangleOffset + 2u]);
+        bool inRange = (i0 < m.vertexCount) && (i1 < m.vertexCount) && (i2 < m.vertexCount);
+        bool nonDegen = !(i0 == i1 && i1 == i2);
+        float3 c = float3(inRange ? 1.0 : 0.0,
+                          nonDegen ? 1.0 : 0.0,
+                          float(i0) / float(max(m.vertexCount, 1u)));
+        if (tid == 0u) {
+            MeshletVertexOut a, b, cc;
+            a.position = float4(-0.9, -0.9, 0.5, 1.0); a.color = c;
+            b.position = float4( 0.9, -0.9, 0.5, 1.0); b.color = c;
+            cc.position = float4( 0.0,  0.9, 0.5, 1.0); cc.color = c;
+            output.set_vertex(0, a);
+            output.set_vertex(1, b);
+            output.set_vertex(2, cc);
+            output.set_index(0, 0);
+            output.set_index(1, 1);
+            output.set_index(2, 2);
+            output.set_primitive_count(1);
+        }
+        return;
+    }
+
     // Emission probe (errorThreshold <= -5.5): run the REAL multi-threaded
     // vertex loop (transform + set_vertex across all 64 threads — untested by
     // every tid==0-only probe above), but with HARDCODED topology (just the
