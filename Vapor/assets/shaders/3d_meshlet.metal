@@ -198,9 +198,19 @@ static float3 hashColor(uint x) {
     if (params.errorThreshold <= -2.5) {
         uint mi = payload.meshletIndices[gid];
         Meshlet m = meshlets[mi];
-        float3 c = float3(saturate(float(m.vertexCount) / 64.0),
-                          saturate(float(m.triangleCount) / 128.0),
-                          float(mi & 255u) / 255.0);
+        // Decisive binary predicates (removes the normalized-color ambiguity):
+        //   R = vertexCount in valid range  [1, 64]
+        //   G = triangleCount in valid range [1, 128]
+        //   B = triangleCount is EXACTLY zero
+        // Legend:
+        //   yellow  (R+G)  -> both fields valid; bug is downstream geometry/index
+        //   magenta (R+B)  -> vertexCount valid, triangleCount HARD ZERO
+        //   red     (R)    -> vertexCount valid, triangleCount garbage-large
+        //   black          -> vertexCount also bad (binding / mi / struct)
+        bool vOk = (m.vertexCount >= 1u && m.vertexCount <= 64u);
+        bool tOk = (m.triangleCount >= 1u && m.triangleCount <= 128u);
+        bool tZero = (m.triangleCount == 0u);
+        float3 c = float3(vOk ? 1.0 : 0.0, tOk ? 1.0 : 0.0, tZero ? 1.0 : 0.0);
         if (tid == 0u) {
             MeshletVertexOut a, b, cc;
             a.position = float4(-0.9, -0.9, 0.5, 1.0); a.color = c;
