@@ -838,7 +838,7 @@ protected:
     std::vector<NS::SharedPtr<MTL::Buffer>> pssmDataBuffers;
     static constexpr uint32_t PSSM_CASCADE_COUNT = 3;
     static constexpr uint32_t PSSM_SHADOW_MAP_SIZE = Vapor::kDirectionalShadowMapSize;
-    float pssmRTMaxDist = 25.0f; // view-space depth where the near shadow ends and PSSM begins
+    float pssmRTMaxDist = 12.0f; // view-space depth where the near shadow ends and PSSM begins (character scale)
 
     // PSSM PCF and blend settings
     float pssmRTBlendScale = 0.05f;       // RT↔PSSM cross-fade width as a fraction of (far - rtEnd)
