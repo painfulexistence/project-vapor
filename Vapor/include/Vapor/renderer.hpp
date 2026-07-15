@@ -825,6 +825,11 @@ private:
     // buffers (errorThreshold <= -1.5 sentinel). Shows on screen => the
     // pipeline/dispatch/raster chain works and the fault is buffer bindings.
     bool meshletSyntheticTri = false;
+    // Data probe: mesh stage reads the real payload + meshlet record and draws
+    // a fixed triangle colored by (vertexCount, triangleCount, mi). Sane
+    // yellowish => reads work, bug is geometry/transform; black/wild/none =>
+    // payload or meshlet-buffer read is the fault. (errorThreshold <= -2.5.)
+    bool meshletProbeData = false;
     // Second, even lower-level probe drawn alongside when meshletSyntheticTri
     // is on (Metal): a MESH-ONLY pipeline (no object stage, no payload, no
     // buffers) emitting a green triangle on the LEFT. Green shows while the

@@ -188,6 +188,35 @@ static float3 hashColor(uint x) {
     uint tid [[thread_position_in_threadgroup]],
     uint gid [[threadgroup_position_in_grid]]
 ) {
+    // Data probe (errorThreshold <= -2.5): read the REAL payload + meshlet
+    // record, then emit one FIXED-position triangle colored by what was read —
+    // R = vertexCount/64, G = triangleCount/128, B = (mi & 255)/255. This
+    // isolates "buffers/payload read garbage" (black or wild colors, or no
+    // triangle if primitive_count is garbage) from "geometry/transform wrong"
+    // (sane yellowish triangle, ~0.6-1.0 R+G for real clusters). Fixed position
+    // so it can't be pushed offscreen by a bad transform.
+    if (params.errorThreshold <= -2.5) {
+        uint mi = payload.meshletIndices[gid];
+        Meshlet m = meshlets[mi];
+        float3 c = float3(saturate(float(m.vertexCount) / 64.0),
+                          saturate(float(m.triangleCount) / 128.0),
+                          float(mi & 255u) / 255.0);
+        if (tid == 0u) {
+            MeshletVertexOut a, b, cc;
+            a.position = float4(-0.9, -0.9, 0.5, 1.0); a.color = c;
+            b.position = float4( 0.9, -0.9, 0.5, 1.0); b.color = c;
+            cc.position = float4( 0.0,  0.9, 0.5, 1.0); cc.color = c;
+            output.set_vertex(0, a);
+            output.set_vertex(1, b);
+            output.set_vertex(2, cc);
+            output.set_index(0, 0);
+            output.set_index(1, 1);
+            output.set_index(2, 2);
+            output.set_primitive_count(1);
+        }
+        return;
+    }
+
     // Synthetic-triangle probe (errorThreshold <= -1.5): emit one hardcoded
     // clip-space triangle and read NO buffers at all. If this shows on screen,
     // the pipeline/dispatch/raster chain is healthy and the fault is in the
