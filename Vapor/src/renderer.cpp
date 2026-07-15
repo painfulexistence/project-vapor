@@ -2181,9 +2181,13 @@ void Renderer::shadowPass() {
         gpuData.lightSpaceMatrices[ci] = lightProj * lightView;
     }
 
-    // Independent near-field shadow map: fit a tight ortho to the [near,
-    // nearShadowEnd] sub-frustum, separate from the cascades. Same bounding-
-    // sphere + world-anchored texel snap as the cascades (anti-shimmer).
+    // Independent near-field shadow map for the [near, rtEnd] sub-frustum.
+    // Unlike the cascades (bounding-sphere fit, for zero rotation shimmer), the
+    // near map uses a TIGHT AABB fit: it recovers the ~30-40% resolution a sphere
+    // wastes around the slice, so the near shadow is noticeably sharper. Still
+    // texel-snapped in a world-anchored light frame so the map translates in
+    // whole texels; the AABB *size* can shift slightly on rotation (minor
+    // shimmer), which is acceptable over this small near range.
     gpuData.nearShadowEnd = rtEnd;
     gpuData.pcfSampleCount = pssmPcfSampleCount;
     gpuData.cascadeBlendRange = pssmCascadeBlendRange;
@@ -2195,24 +2199,32 @@ void Renderer::shadowPass() {
             {-1,-1,nNDC,1},{1,-1,nNDC,1},{-1,1,nNDC,1},{1,1,nNDC,1},
             {-1,-1,fNDC,1},{1,-1,fNDC,1},{-1,1,fNDC,1},{1,1,fNDC,1},
         };
-        glm::vec3 c[8]; glm::vec3 center(0.0f);
-        for (int i = 0; i < 8; i++) { glm::vec4 w = invVP * ndc8[i]; c[i] = glm::vec3(w) / w.w; center += c[i]; }
-        center /= 8.0f;
-        float radius = 0.0f;
-        for (auto& p : c) radius = glm::max(radius, glm::length(p - center));
-        radius = std::ceil(radius * 16.0f) / 16.0f;
+        glm::vec3 c[8];
+        for (int i = 0; i < 8; i++) { glm::vec4 w = invVP * ndc8[i]; c[i] = glm::vec3(w) / w.w; }
+        // XY AABB (+ Z extent) of the slice in a world-anchored, rotation-only
+        // light frame.
         const glm::mat4 lightRot = glm::lookAt(glm::vec3(0.0f), lightDir, up);
-        const float texel = (2.0f * radius) / float(NEAR_SHADOW_MAP_SIZE);
-        glm::vec3 lsC = glm::vec3(lightRot * glm::vec4(center, 1.0f));
-        lsC.x = std::floor(lsC.x / texel) * texel;
-        lsC.y = std::floor(lsC.y / texel) * texel;
-        glm::vec3 snapped = glm::vec3(glm::inverse(lightRot) * glm::vec4(lsC, 1.0f));
-        const float dist = radius * 2.0f + 1.0f;
-        glm::mat4 lv = glm::lookAt(snapped - lightDir * dist, snapped, up);
+        glm::vec3 lmin(1e30f), lmax(-1e30f);
+        for (auto& p : c) {
+            glm::vec3 lc = glm::vec3(lightRot * glm::vec4(p, 1.0f));
+            lmin = glm::min(lmin, lc); lmax = glm::max(lmax, lc);
+        }
+        // Square, quantized extent -> stable texel size frame to frame.
+        float extent = std::ceil(glm::max(lmax.x - lmin.x, lmax.y - lmin.y) * 16.0f) / 16.0f;
+        float texel = extent / float(NEAR_SHADOW_MAP_SIZE);
+        // Snap the box centre to the texel grid so the map moves in whole texels.
+        glm::vec2 boxCtr(0.5f * (lmin.x + lmax.x), 0.5f * (lmin.y + lmax.y));
+        boxCtr.x = std::floor(boxCtr.x / texel) * texel;
+        boxCtr.y = std::floor(boxCtr.y / texel) * texel;
+        glm::vec3 ctrWorld = glm::vec3(glm::inverse(lightRot) *
+            glm::vec4(boxCtr.x, boxCtr.y, 0.5f * (lmin.z + lmax.z), 1.0f));
+        const float dist = extent + 1.0f;
+        glm::mat4 lv = glm::lookAt(ctrWorld - lightDir * dist, ctrWorld, up);
         float mn = 1e30f, mx = -1e30f;
         for (auto& p : c) { float d = -(lv * glm::vec4(p, 1.0f)).z; mn = glm::min(mn, d); mx = glm::max(mx, d); }
         mn -= (mx - mn);
-        gpuData.nearLightMatrix = glm::orthoZO(-radius, radius, -radius, radius, mn, mx) * lv;
+        gpuData.nearLightMatrix = glm::orthoZO(-extent * 0.5f, extent * 0.5f,
+                                               -extent * 0.5f, extent * 0.5f, mn, mx) * lv;
     }
 
     // Upload all cascade matrices once; the shadow VS indexes by cascadeIndex.

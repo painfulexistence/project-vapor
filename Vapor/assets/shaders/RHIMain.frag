@@ -400,6 +400,18 @@ void main() {
     color += albedo * 0.03 * occlusion * screenAO;
     color += emissive;
 
+    // Cascade debug: tint by shadow region (near map = green, cascades =
+    // red/blue/yellow), matching the Metal PBR shader's visualization.
+    if (debugVisualize != 0u) {
+        vec3 tint;
+        if (nearShadowEnd > 0.0 && viewDepth < nearShadowEnd) tint = vec3(0.2, 0.8, 0.2);
+        else if (viewDepth <= cascadeSplits.y)                tint = vec3(0.8, 0.2, 0.2);
+        else if (viewDepth <= cascadeSplits.z)                tint = vec3(0.2, 0.2, 0.8);
+        else                                                  tint = vec3(0.8, 0.8, 0.2);
+        vec3 Lviz = dirLightCount > 0u ? normalize(-dirLights[0].direction) : vec3(0.0, 1.0, 0.0);
+        color = tint * max(dot(N, Lviz), 0.15) * sampleShadow(fragPos, N, Lviz, viewDepth);
+    }
+
     // Output LINEAR HDR into the RGBA16F colorRT. Tone mapping (ACES) and the
     // sRGB encode happen in the PostProcess pass, so bloom and other effects
     // can operate on the HDR image beforehand.
