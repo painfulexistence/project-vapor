@@ -195,6 +195,36 @@ static float3 hashColor(uint x) {
     // triangle if primitive_count is garbage) from "geometry/transform wrong"
     // (sane yellowish triangle, ~0.6-1.0 R+G for real clusters). Fixed position
     // so it can't be pushed offscreen by a bad transform.
+    // Emission probe (errorThreshold <= -5.5): run the REAL multi-threaded
+    // vertex loop (transform + set_vertex across all 64 threads — untested by
+    // every tid==0-only probe above), but with HARDCODED topology (just the
+    // meshlet's first triangle, indices 0/1/2). This splits the two remaining
+    // suspects:
+    //   cyan triangles appear -> the vertex loop + set_vertex work; the bug is
+    //     the INDEX loop (set_index / meshletTriangles buffer 5).
+    //   blank                 -> the multi-thread vertex emission itself is the
+    //     fault (set_vertex in a strided loop, or output completeness).
+    if (params.errorThreshold <= -5.5) {
+        uint mi = payload.meshletIndices[gid];
+        Meshlet m = meshlets[mi];
+        float4x4 model = instances[params.instanceID].model;
+        float4x4 viewProj = cam.proj * cam.view;
+        for (uint v = tid; v < m.vertexCount; v += 64u) {
+            uint vi = meshletVertices[m.vertexOffset + v];
+            MeshletVertexOut vout;
+            vout.position = viewProj * (model * float4(float3(vertices[vi].position), 1.0));
+            vout.color = float3(0.0, 1.0, 1.0);
+            output.set_vertex(v, vout);
+        }
+        if (tid == 0u) {
+            output.set_index(0, 0);
+            output.set_index(1, 1);
+            output.set_index(2, 2);
+            output.set_primitive_count(1);  // just the first triangle
+        }
+        return;
+    }
+
     // Transform probe (errorThreshold <= -4.5): position reads are proven good,
     // so test the last untested reads — camera(0) and instances(2) in the MESH
     // stage — plus the transform math. Compute the real clip position of the

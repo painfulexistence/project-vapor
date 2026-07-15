@@ -840,6 +840,10 @@ private:
     // last untested mesh-stage reads (camera 0, instances 2) + the math. White
     // => transform OK (bug is topology/set_index). (errorThreshold <= -4.5.)
     bool meshletProbeXform = false;
+    // Emission probe: real multi-threaded vertex loop + hardcoded first-triangle
+    // topology. Cyan triangles => vertex loop OK (bug is the index loop /
+    // meshletTriangles); blank => vertex emission itself. (errorThreshold <= -5.5.)
+    bool meshletProbeEmit = false;
     // Second, even lower-level probe drawn alongside when meshletSyntheticTri
     // is on (Metal): a MESH-ONLY pipeline (no object stage, no payload, no
     // buffers) emitting a green triangle on the LEFT. Green shows while the
