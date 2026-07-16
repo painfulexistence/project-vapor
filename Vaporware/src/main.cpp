@@ -355,12 +355,14 @@ auto main(int argc, char* args[]) -> int {
         engineCore->attachRenderer(renderer.get(), outputDir);
     }
 
-    // Particle controls the game layer owns because they must reach both the
-    // GPU sim and the CPU-side ECS timers:
-    //   Pause — freezes the GPU sim AND the CPU reclaim/emission timers, so
-    //           frozen particles neither age nor get their slots reclaimed.
-    //   Emit  — graceful stop: existing particles live out their lifetime, no
-    //           new ones are produced. (Hide is renderer-only, in Effects panel.)
+    // System-level particle state the game layer owns (must reach both the GPU
+    // sim and the CPU-side ECS timers). Surfaced as transport controls in the
+    // Systems > Particles panel below:
+    //   particlePaused          — freezes the GPU sim AND the CPU reclaim/emission
+    //                             timers; frozen particles neither age nor reclaim.
+    //   particleEmissionEnabled — graceful stop: existing particles finish, no new
+    //                             ones spawn.
+    //   particleVisible         — render on/off (sim keeps running).
     bool particlePaused = false;
     bool particleEmissionEnabled = true;
     bool particleVisible = true;
@@ -370,9 +372,32 @@ auto main(int argc, char* args[]) -> int {
     // now; a real system inspector would enumerate registered systems.
     sceneInspector.setSystemsDrawer([&](entt::registry&) {
         if (ImGui::TreeNode("Particles")) {
-            ImGui::Checkbox("Visible (hide render when off)", &particleVisible);
-            ImGui::Checkbox("Pause (freeze sim + reclaim)", &particlePaused);
-            ImGui::Checkbox("Emit (graceful stop when off)", &particleEmissionEnabled);
+            ImGui::Checkbox("Visible", &particleVisible);
+
+            // Transport controls. Pause freezes the sim (and CPU reclaim/emission
+            // timers); Resume returns to normal running (unpause + re-enable
+            // emission); Stop is a graceful emission halt — existing particles
+            // finish, no new ones spawn.
+            const bool running = !particlePaused && particleEmissionEnabled;
+
+            ImGui::BeginDisabled(particlePaused);
+            if (ImGui::Button("Pause")) particlePaused = true;
+            ImGui::EndDisabled();
+
+            ImGui::SameLine();
+            ImGui::BeginDisabled(running);
+            if (ImGui::Button("Resume")) { particlePaused = false; particleEmissionEnabled = true; }
+            ImGui::EndDisabled();
+
+            ImGui::SameLine();
+            ImGui::BeginDisabled(!particleEmissionEnabled);
+            if (ImGui::Button("Stop")) particleEmissionEnabled = false;
+            ImGui::EndDisabled();
+
+            ImGui::SameLine();
+            ImGui::TextDisabled("%s", particlePaused            ? "paused"
+                                    : !particleEmissionEnabled  ? "stopped"
+                                                                : "running");
             ImGui::TreePop();
         }
     });
