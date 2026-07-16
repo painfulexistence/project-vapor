@@ -128,7 +128,9 @@ float3 CalculateDirectionalLight(DirLight light, float3 norm, float3 tangent, fl
     float3 lightDir = normalize(-light.direction);
     float3 radiance = light.color * light.intensity;
 
-    return CookTorranceBRDF(norm, tangent, bitangent, lightDir, viewDir, surf) * radiance * clamp(dot(norm, lightDir), 0.0, 1.0);
+    // NdotL is already folded into CookTorranceBRDF's `* nl` — don't apply it
+    // twice (that squared the cosine and darkened grazing faces).
+    return CookTorranceBRDF(norm, tangent, bitangent, lightDir, viewDir, surf) * radiance;
 }
 
 float3 CalculatePointLight(PointLight light, float3 norm, float3 tangent, float3 bitangent, float3 viewDir, Surface surf, float3 fragPos) {
@@ -138,7 +140,9 @@ float3 CalculatePointLight(PointLight light, float3 norm, float3 tangent, float3
     attenuation *= 1.0 - smoothstep(light.radius * 0.8, light.radius, dist);
     float3 radiance = attenuation * light.color * light.intensity;
 
-    return CookTorranceBRDF(norm, tangent, bitangent, lightDir, viewDir, surf) * radiance * clamp(dot(norm, lightDir), 0.0, 1.0);
+    // NdotL is already folded into CookTorranceBRDF's `* nl` — don't apply it
+    // twice (that squared the cosine and darkened grazing faces).
+    return CookTorranceBRDF(norm, tangent, bitangent, lightDir, viewDir, surf) * radiance;
 }
 
 // Spot: a point light windowed by a smooth cone falloff between the inner
@@ -153,7 +157,9 @@ float3 CalculateSpotLight(SpotLight light, float3 norm, float3 tangent, float3 b
     attenuation *= cone * cone;
     float3 radiance = attenuation * light.color * light.intensity;
 
-    return CookTorranceBRDF(norm, tangent, bitangent, lightDir, viewDir, surf) * radiance * clamp(dot(norm, lightDir), 0.0, 1.0);
+    // NdotL is already folded into CookTorranceBRDF's `* nl` — don't apply it
+    // twice (that squared the cosine and darkened grazing faces).
+    return CookTorranceBRDF(norm, tangent, bitangent, lightDir, viewDir, surf) * radiance;
 }
 
 // ── Rect area light (diffuse + specular) ─────────────────────────────────────
