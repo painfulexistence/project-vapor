@@ -463,7 +463,9 @@ void main() {
     float metallic = texture(metallicMap, fragUV).b * mat.metallicFactor;
     float roughness = clamp(texture(roughnessMap, fragUV).g * mat.roughnessFactor, 0.04, 1.0);
     float occlusion = mix(1.0, texture(occlusionMap, fragUV).r, mat.occlusionStrength);
-    vec3 emissive = texture(emissiveMap, fragUV).rgb * mat.emissiveFactor * mat.emissiveStrength;
+    // Emissive is sRGB-authored (like albedo) — linearize before it joins the
+    // linear lighting sum (mirrors the Metal path).
+    vec3 emissive = srgbToLinear(texture(emissiveMap, fragUV).rgb * mat.emissiveFactor) * mat.emissiveStrength;
 
     // Normal mapping (fall back to the geometric normal when tangent is degenerate)
     vec3 N = normalize(worldNormal);

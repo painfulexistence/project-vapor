@@ -444,7 +444,11 @@ fragment float4 fragmentMain(
     surf.ao = texOcclusion.sample(s, in.uv).r * material.occlusionStrength;
     surf.roughness = texRoughness.sample(s, in.uv).g * material.roughnessFactor;
     surf.metallic = texMetallic.sample(s, in.uv).b * material.metallicFactor;
-    surf.emission = linearToSRGB(texEmissive.sample(s, in.uv).rgb * material.emissiveFactor) * material.emissiveStrength;
+    // Emissive is an sRGB-authored colour (like albedo) — linearize it before
+    // it joins the linear lighting sum. (Was linearToSRGB, the wrong direction:
+    // that re-encodes toward sRGB and brightens; the sRGB->linear encode
+    // belongs only at the final output, which PostProcess/the swapchain do.)
+    surf.emission = srgbToLinear(texEmissive.sample(s, in.uv).rgb * material.emissiveFactor) * material.emissiveStrength;
     surf.subsurface = material.subsurface;
     surf.specular = material.specular;
     surf.specular_tint = material.specularTint;
