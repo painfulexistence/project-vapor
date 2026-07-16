@@ -205,11 +205,11 @@ namespace Vapor {
         glm::vec4 color = glm::vec4(1.0f);
         bool enabled = true;
 
-        // Runtime state (managed by ParticleEmitterSystem)
-        float     _accumulator = 0.0f;
-        uint32_t  _slotBegin   = ~0u;   // ~0u = not yet allocated
-        uint32_t  _slotCount   = 0;
-        uint32_t  _ringCursor  = 0;     // next slot to overwrite (ring buffer)
+        // Runtime state (managed by ParticleEmitterSystem) — hidden from inspector
+        Hidden<float>    _accumulator = {0.0f};
+        Hidden<uint32_t> _slotBegin   = {~0u};  // ~0u = not yet allocated
+        Hidden<uint32_t> _slotCount   = {0};
+        Hidden<uint32_t> _ringCursor  = {0};    // next slot to overwrite (ring buffer)
     };
 
     // One-shot burst of particles at the entity's current position.
@@ -227,8 +227,8 @@ namespace Vapor {
     // Drives emitter parameters from an EmotionState (skeleton — extend per project).
     struct EmitterModulatorComponent {
         EmotionState state = EmotionState::Neutral;
-        float transitionSpeed = 1.0f; // seconds to blend between states
-        float _blendTimer = 0.0f;
+        float           transitionSpeed = 1.0f;
+        Hidden<float>   _blendTimer     = {0.0f};
     };
 
     // Flying spell bolt: moves from origin to target along a Bezier arc,
@@ -236,9 +236,9 @@ namespace Vapor {
     struct SpellBoltComponent {
         glm::vec3 origin;
         glm::vec3 target;
-        float     speed     = 15.0f;
-        float     arcHeight = 0.5f;
-        float     _progress = 0.0f; // [0,1], managed by SpellBoltSystem
+        float         speed     = 15.0f;
+        float         arcHeight = 0.5f;
+        Hidden<float> _progress = {0.0f}; // [0,1], managed by SpellBoltSystem
     };
 
 }// namespace Vapor
