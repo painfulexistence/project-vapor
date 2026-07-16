@@ -810,11 +810,11 @@ private:
     Uint32 sscsSteps = 12;
     float sscsBias = 0.02f;       // view-space start offset (self-occlusion guard)
     // Stochastic RT shadows for the analytic lights (point R / rect G / spot B
-    // channels). Metal RT only. Default ON ("All shadows" in the panel) now
-    // that ReSTIR keeps the noise down; backends without ray tracing skip the
-    // pass and render point/rect/spot unshadowed as before, so this is the one
-    // place Metal+RT output intentionally diverges from the Vulkan path.
-    bool stochasticShadowsEnabled = true;
+    // channels). Metal RT only. Default OFF ("Directional only"): Vulkan has
+    // no equivalent path yet, and the default keeps the two backends' output
+    // aligned — opt in via the panel's "All shadows", where ReSTIR + the
+    // denoise chain keep the noise down.
+    bool stochasticShadowsEnabled = false;
     // ReSTIR denoise for the stochastic shadows: per-pixel weighted reservoirs
     // over light samples with temporal + spatial reuse, so the one shadow ray
     // per domain lands on the light (and quad point) that dominates the pixel.
