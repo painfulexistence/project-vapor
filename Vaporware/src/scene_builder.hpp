@@ -42,6 +42,7 @@ inline SceneResources buildScene(
 
     auto cube1 = registry.create();
     {
+        registry.emplace<Vapor::NameComponent>(cube1, Vapor::NameComponent{"Cube 1"});
         auto& transform = registry.emplace<Vapor::TransformComponent>(cube1);
         transform.position = glm::vec3(-2.0f, 0.5f, 0.0f);
         auto& col = registry.emplace<Vapor::BoxColliderComponent>(cube1);
@@ -78,6 +79,7 @@ inline SceneResources buildScene(
 
     auto cube2 = registry.create();
     {
+        registry.emplace<Vapor::NameComponent>(cube2, Vapor::NameComponent{"Cube 2 (Iridescent)"});
         auto& transform = registry.emplace<Vapor::TransformComponent>(cube2);
         transform.position = glm::vec3(2.0f, 0.5f, 0.0f);
         auto& col = registry.emplace<Vapor::BoxColliderComponent>(cube2);
@@ -95,6 +97,7 @@ inline SceneResources buildScene(
 
     auto floor = registry.create();
     {
+        registry.emplace<Vapor::NameComponent>(floor, Vapor::NameComponent{"Floor"});
         auto& transform = registry.emplace<Vapor::TransformComponent>(floor);
         transform.position = glm::vec3(0.0f, -0.5f, 0.0f);
         auto& col = registry.emplace<Vapor::BoxColliderComponent>(floor);
@@ -107,6 +110,7 @@ inline SceneResources buildScene(
 
     {
         auto sunLight = registry.create();
+        registry.emplace<Vapor::NameComponent>(sunLight, Vapor::NameComponent{"Sun Light"});
         auto& dl      = registry.emplace<DirectionalLightComponent>(sunLight);
         dl.direction  = glm::normalize(glm::vec3(0.5f, -1.0f, 0.0f));
         dl.color      = glm::vec3(1.0f, 1.0f, 1.0f);
@@ -122,6 +126,7 @@ inline SceneResources buildScene(
     // level so screen-space AO is visible (radius 0.5 made them near-invisible)
     for (int i = 0; i < 128; i++) {
         auto e         = registry.create();
+        registry.emplace<Vapor::NameComponent>(e, Vapor::NameComponent{fmt::format("Point Light {}", i)});
         auto& tc       = registry.emplace<Vapor::TransformComponent>(e);
         tc.position    = glm::vec3(
             rng.RandomFloatInRange(-10.0f, 10.0f),
@@ -168,6 +173,7 @@ inline SceneResources buildScene(
     // the G channel).
     {
         auto e      = registry.create();
+        registry.emplace<Vapor::NameComponent>(e, Vapor::NameComponent{"Spot Light"});
         auto& tc    = registry.emplace<Vapor::TransformComponent>(e);
         tc.position = glm::vec3(0.0f, 6.0f, 0.0f);
         // Beam is the transform's -Z; rotate it to point straight down.
@@ -182,6 +188,7 @@ inline SceneResources buildScene(
     }
     {
         auto e      = registry.create();
+        registry.emplace<Vapor::NameComponent>(e, Vapor::NameComponent{"Rect Light"});
         auto& tc    = registry.emplace<Vapor::TransformComponent>(e);
         tc.position = glm::vec3(4.0f, 1.8f, -3.0f);  // vertical panel
         tc.isDirty  = true;
@@ -193,6 +200,7 @@ inline SceneResources buildScene(
 
     auto flyCam = registry.create();
     {
+        registry.emplace<Vapor::NameComponent>(flyCam, Vapor::NameComponent{"Fly Camera"});
         auto& cam = registry.emplace<Vapor::VirtualCameraComponent>(flyCam);
         cam.isActive = true;
         cam.fov = glm::radians(60.0f);
@@ -207,6 +215,7 @@ inline SceneResources buildScene(
 
     auto followCam = registry.create();
     {
+        registry.emplace<Vapor::NameComponent>(followCam, Vapor::NameComponent{"Follow Camera"});
         auto& cam = registry.emplace<Vapor::VirtualCameraComponent>(followCam);
         cam.isActive = false;
         cam.aspect = (float)windowWidth / (float)windowHeight;
@@ -219,6 +228,7 @@ inline SceneResources buildScene(
 
     // --- UI navigator (singleton entity: owns PageID→entity map + menu stack) ---
     auto navEntity = registry.create();
+    registry.emplace<Vapor::NameComponent>(navEntity, Vapor::NameComponent{"UI Navigator"});
     registry.emplace<PersistentTag>(navEntity);
     auto& nav = registry.emplace<UINavigatorComponent>(navEntity);
 
@@ -292,6 +302,7 @@ inline SceneResources buildScene(
     // (set in main) causes the stream to swirl rather than collapse to a point.
     {
         auto e = registry.create();
+        registry.emplace<Vapor::NameComponent>(e, Vapor::NameComponent{"Particle Attractor A"});
         auto& tc = registry.emplace<Vapor::TransformComponent>(e);
         tc.position = glm::vec3(0.0f, 3.0f, 0.0f);
         auto& attr = registry.emplace<Vapor::ParticleAttractorComponent>(e);
@@ -299,6 +310,7 @@ inline SceneResources buildScene(
     }
     {
         auto e = registry.create();
+        registry.emplace<Vapor::NameComponent>(e, Vapor::NameComponent{"Particle Attractor B"});
         auto& tc = registry.emplace<Vapor::TransformComponent>(e);
         tc.position = glm::vec3(6.0f, 1.0f, -4.0f);
         auto& attr = registry.emplace<Vapor::ParticleAttractorComponent>(e);
@@ -306,6 +318,7 @@ inline SceneResources buildScene(
     }
     {
         auto e = registry.create();
+        registry.emplace<Vapor::NameComponent>(e, Vapor::NameComponent{"Wind Field"});
         auto& wf = registry.emplace<Vapor::WindFieldComponent>(e);
         wf.direction  = glm::normalize(glm::vec3(1.0f, 0.1f, 0.4f));
         wf.strength   = 0.6f;
@@ -313,6 +326,7 @@ inline SceneResources buildScene(
     }
     {
         auto e = registry.create();
+        registry.emplace<Vapor::NameComponent>(e, Vapor::NameComponent{"Particle Sea Emitter"});
         auto& tc = registry.emplace<Vapor::TransformComponent>(e);
         tc.position = glm::vec3(0.0f, 5.0f, 0.0f);
         auto& em = registry.emplace<Vapor::ParticleEmitterComponent>(e);
@@ -326,6 +340,7 @@ inline SceneResources buildScene(
     }
 
     res.global = registry.create();
+    registry.emplace<Vapor::NameComponent>(res.global, Vapor::NameComponent{"Scene Global"});
 
     return res;
 }
