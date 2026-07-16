@@ -211,6 +211,7 @@ namespace Vapor {
         Hidden<uint32_t> _slotBegin   = {~0u};  // ~0u = not yet allocated
         Hidden<uint32_t> _slotCount   = {0};
         Hidden<uint32_t> _ringCursor  = {0};    // next slot to overwrite (ring buffer)
+        Hidden<float>    _reclaimTimer = {-1.0f}; // >=0: countdown to free slots (one-shot)
     };
 
     // One-shot burst of particles at the entity's current position.

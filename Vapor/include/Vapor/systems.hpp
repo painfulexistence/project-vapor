@@ -484,6 +484,21 @@ namespace Vapor {
                 auto& emit = view.get<ParticleEmitterComponent>(entity);
                 const auto& t = view.get<TransformComponent>(entity);
 
+                // Reclaim: once a spent one-shot's particles have all outlived
+                // their lifetime on the GPU, return its slots to the pool. Runs
+                // even while disabled — that's the whole point of a one-shot.
+                if (emit._reclaimTimer >= 0.0f) {
+                    emit._reclaimTimer = emit._reclaimTimer - deltaTime;
+                    if (emit._reclaimTimer <= 0.0f) {
+                        if (emit._slotBegin != ~0u)
+                            renderer->releaseParticleSlots(emit._slotBegin, emit._slotCount);
+                        emit._slotBegin    = ~0u;
+                        emit._slotCount    = 0;
+                        emit._ringCursor   = 0;
+                        emit._reclaimTimer = -1.0f;
+                    }
+                }
+
                 if (!emit.enabled) continue;
 
                 // Claim or re-claim slots when maxParticles changed at runtime.
@@ -532,7 +547,13 @@ namespace Vapor {
                     p.color    = emit.color;
                 }
 
-                if (emit.oneShot) emit.enabled = false;
+                if (emit.oneShot) {
+                    emit.enabled = false;
+                    // Arm slot reclamation for after the last particle dies.
+                    // Immortal particles (lifetime < 0) never die → keep the slots.
+                    if (emit.particleLifetime >= 0.0f)
+                        emit._reclaimTimer = emit.particleLifetime;
+                }
 
                 // Ring-buffer write: record slot BEFORE advancing cursor
                 uint32_t writeSlot = emit._slotBegin + emit._ringCursor;
