@@ -1,3 +1,4 @@
+#include <algorithm>
 #include <memory>
 #define NS_PRIVATE_IMPLEMENTATION
 #define MTL_PRIVATE_IMPLEMENTATION
@@ -1389,39 +1390,37 @@ public:
         glm::vec3 forward = -glm::vec3(view[0][2], view[1][2], view[2][2]);
         glm::vec3 attractorPos = camPos + forward * 3.0f;
 
-        // Update simulation params buffer
-        struct ParticleSimParams {
-            glm::vec2 resolution;
-            glm::vec2 mousePosition;
-            float time;
-            float deltaTime;
-            Uint32 particleCount;
-            float _pad1;
-        } simParams;
-
+        // Update simulation params buffer using the canonical render_data.hpp struct.
+        ParticleSimParams simParams;
         auto drawableSize = r.swapchain->drawableSize();
         simParams.resolution = glm::vec2(drawableSize.width, drawableSize.height);
         simParams.mousePosition = glm::vec2(0.0f);
         simParams.time = time;
         simParams.deltaTime = deltaTime;
         simParams.particleCount = r.particleCount;
+        simParams.wind = r.m_particleWind;
+        simParams.turbulence = glm::vec4(0.0f, 0.0f, 0.0f, r.m_particleTurbulence);
+
+        // ECS attractors if present; otherwise use the demo orbital attractor.
+        std::vector<ParticleAttractor> attractors;
+        if (!r.m_ecsAttractors.empty()) {
+            attractors = r.m_ecsAttractors;
+        } else {
+            ParticleAttractor demo;
+            demo.position = attractorPos;
+            demo.strength = 50.0f;
+            attractors.push_back(demo);
+        }
+        if (attractors.size() > MAX_PARTICLE_ATTRACTORS)
+            attractors.resize(MAX_PARTICLE_ATTRACTORS);
+        simParams.attractorCount = static_cast<Uint32>(attractors.size());
 
         memcpy(r.particleSimParamsBuffers[r.currentFrameInFlight]->contents(), &simParams, sizeof(ParticleSimParams));
-        r.particleSimParamsBuffers[r.currentFrameInFlight]->didModifyRange(NS::Range::Make(0, sizeof(ParticleSimParams))
-        );
+        r.particleSimParamsBuffers[r.currentFrameInFlight]->didModifyRange(NS::Range::Make(0, sizeof(ParticleSimParams)));
 
-        // Update attractor buffer
-        struct ParticleAttractor {
-            glm::vec3 position;
-            float strength;
-        } attractor;
-
-        attractor.position = attractorPos;
-        attractor.strength = 50.0f;// Increased strength
-
-        memcpy(r.particleAttractorBuffers[r.currentFrameInFlight]->contents(), &attractor, sizeof(ParticleAttractor));
-        r.particleAttractorBuffers[r.currentFrameInFlight]->didModifyRange(NS::Range::Make(0, sizeof(ParticleAttractor))
-        );
+        const size_t attractorBytes = attractors.size() * sizeof(ParticleAttractor);
+        memcpy(r.particleAttractorBuffers[r.currentFrameInFlight]->contents(), attractors.data(), attractorBytes);
+        r.particleAttractorBuffers[r.currentFrameInFlight]->didModifyRange(NS::Range::Make(0, attractorBytes));
 
         // Compute passes (single particle buffer - persistent state)
         {
@@ -4994,24 +4993,26 @@ auto Renderer_Metal::createResources() -> void {
 
     // Create particle buffers
     // Single particle buffer for persistent state (not triple-buffered)
-    size_t particleBufferSize = sizeof(GPUParticle) * MAX_PARTICLES;
+    size_t particleBufferSize = sizeof(GPUParticleData) * MAX_PARTICLES;
     particleBuffer = NS::TransferPtr(device->newBuffer(particleBufferSize, MTL::ResourceStorageModeShared));
 
-    // Per-frame uniform buffers (triple-buffered)
+    // Per-frame uniform buffers (triple-buffered).
+    // attractor buffer holds MAX_PARTICLE_ATTRACTORS elements.
     particleSimParamsBuffers.resize(MAX_FRAMES_IN_FLIGHT);
     particleAttractorBuffers.resize(MAX_FRAMES_IN_FLIGHT);
     for (size_t i = 0; i < MAX_FRAMES_IN_FLIGHT; i++) {
         particleSimParamsBuffers[i] =
-            NS::TransferPtr(device->newBuffer(sizeof(ParticleSimulationParams), MTL::ResourceStorageModeShared));
+            NS::TransferPtr(device->newBuffer(sizeof(ParticleSimParams), MTL::ResourceStorageModeShared));
         particleAttractorBuffers[i] =
-            NS::TransferPtr(device->newBuffer(sizeof(ParticleAttractorData), MTL::ResourceStorageModeShared));
+            NS::TransferPtr(device->newBuffer(sizeof(ParticleAttractor) * MAX_PARTICLE_ATTRACTORS,
+                                              MTL::ResourceStorageModeShared));
     }
 
     // Initialize particles with random positions and colors
     {
         std::srand(static_cast<unsigned>(std::time(nullptr)));
 
-        auto* particles = reinterpret_cast<GPUParticle*>(particleBuffer->contents());
+        auto* particles = reinterpret_cast<GPUParticleData*>(particleBuffer->contents());
         for (size_t i = 0; i < MAX_PARTICLES; i++) {
             // Minimum radius of 0.5 to avoid particles at origin
             float r = 0.5f + std::sqrt(static_cast<float>(std::rand()) / RAND_MAX) * 4.5f;
@@ -5020,13 +5021,14 @@ auto Renderer_Metal::createResources() -> void {
 
             particles[i].position =
                 glm::vec3(r * std::sin(phi) * std::cos(theta), r * std::sin(phi) * std::sin(theta), r * std::cos(phi));
+            particles[i].lifetime = -1.0f; // immortal (orbital demo)
+            particles[i].age = 0.0f;
 
             // Initialize tangential velocity for orbital motion
             glm::vec3 tangent = glm::normalize(glm::cross(particles[i].position, glm::vec3(0.0f, 1.0f, 0.0f)));
             if (glm::length(tangent) < 0.001f) {
                 tangent = glm::vec3(1.0f, 0.0f, 0.0f);
             }
-            // Increase initial velocity for more dynamic motion (was 0.5)
             // Velocity inversely proportional to radius for stable orbits
             particles[i].velocity = tangent * (1.5f / std::sqrt(r + 0.1f));
             particles[i].force = glm::vec3(0.0f);
@@ -7718,4 +7720,82 @@ auto Renderer_Metal::loadHDRI(const std::string& path) -> void {
     iblSource = IBLSource::HDRI;
     iblNeedsUpdate = true;
     fmt::print("HDRI loaded: {} ({}x{})\n", path, img->width, img->height);
+}
+
+// ============================================================================
+// ECS Particle Integration API (Metal backend)
+// ============================================================================
+
+void Renderer_Metal::ensureParticleFreeList() {
+    if (!m_particleFreeListInitialized) {
+        m_particleSlotFreeList.push_back({0u, MAX_PARTICLES});
+        m_particleFreeListInitialized = true;
+    }
+}
+
+uint32_t Renderer_Metal::allocParticleSlots(uint32_t count) {
+    ensureParticleFreeList();
+    for (size_t i = 0; i < m_particleSlotFreeList.size(); ++i) {
+        auto& r = m_particleSlotFreeList[i];
+        if (r.count >= count) {
+            uint32_t begin = r.begin;
+            r.begin += count;
+            r.count -= count;
+            if (r.count == 0)
+                m_particleSlotFreeList.erase(m_particleSlotFreeList.begin() + i);
+            return begin;
+        }
+    }
+    return ~0u; // pool exhausted
+}
+
+void Renderer_Metal::freeParticleSlots(uint32_t slotBegin, uint32_t count) {
+    if (count == 0) return;
+    m_particleSlotFreeList.push_back({slotBegin, count});
+    std::sort(m_particleSlotFreeList.begin(), m_particleSlotFreeList.end(),
+              [](const ParticleSlotRange& a, const ParticleSlotRange& b) {
+                  return a.begin < b.begin;
+              });
+    for (size_t i = 0; i + 1 < m_particleSlotFreeList.size(); ) {
+        auto& cur = m_particleSlotFreeList[i];
+        auto& nxt = m_particleSlotFreeList[i + 1];
+        if (cur.begin + cur.count == nxt.begin) {
+            cur.count += nxt.count;
+            m_particleSlotFreeList.erase(m_particleSlotFreeList.begin() + i + 1);
+        } else {
+            ++i;
+        }
+    }
+}
+
+uint32_t Renderer_Metal::claimParticleSlots(uint32_t count) {
+    return allocParticleSlots(count);
+}
+
+void Renderer_Metal::releaseParticleSlots(uint32_t slotBegin, uint32_t count) {
+    freeParticleSlots(slotBegin, count);
+}
+
+void Renderer_Metal::uploadParticles(uint32_t slotBegin,
+                                     const std::vector<GPUParticleData>& particles) {
+    if (slotBegin == ~0u || particles.empty()) return;
+    if (slotBegin + particles.size() > MAX_PARTICLES) return;
+    if (!particleBuffer) return;
+    auto* dst = reinterpret_cast<GPUParticleData*>(particleBuffer->contents()) + slotBegin;
+    std::memcpy(dst, particles.data(), particles.size() * sizeof(GPUParticleData));
+    // StorageModeShared — no explicit flush needed; GPU reads after CPU writes are coherent.
+}
+
+void Renderer_Metal::setParticleAttractors(const std::vector<ParticleAttractor>& attractors) {
+    m_ecsAttractors = attractors;
+    if (m_ecsAttractors.size() > MAX_PARTICLE_ATTRACTORS)
+        m_ecsAttractors.resize(MAX_PARTICLE_ATTRACTORS);
+}
+
+void Renderer_Metal::setParticleWind(glm::vec3 direction, float strength) {
+    m_particleWind = glm::vec4(direction, strength);
+}
+
+void Renderer_Metal::setParticleTurbulence(float strength) {
+    m_particleTurbulence = strength;
 }

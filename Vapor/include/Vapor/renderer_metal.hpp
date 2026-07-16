@@ -493,6 +493,15 @@ public:
     void applyToneMapping(RenderTextureHandle target, float exposure = 1.0f) override;
     void applyVignette(RenderTextureHandle target, float strength = 0.3f, float radius = 0.8f) override;
 
+    // ===== ECS Particle Integration API =====
+    uint32_t claimParticleSlots(uint32_t count) override;
+    void releaseParticleSlots(uint32_t slotBegin, uint32_t count) override;
+    void uploadParticles(uint32_t slotBegin,
+                         const std::vector<GPUParticleData>& particles) override;
+    void setParticleAttractors(const std::vector<ParticleAttractor>& attractors) override;
+    void setParticleWind(glm::vec3 direction, float strength) override;
+    void setParticleTurbulence(float strength) override;
+
     // ===== Font Rendering API =====
     FontHandle loadFont(const std::string& path, float baseSize) override;
     void unloadFont(FontHandle handle) override;
@@ -714,7 +723,21 @@ protected:
     NS::SharedPtr<MTL::Buffer> particleBuffer;
     // Per-frame uniform buffers (triple-buffered)
     std::vector<NS::SharedPtr<MTL::Buffer>> particleSimParamsBuffers;
-    std::vector<NS::SharedPtr<MTL::Buffer>> particleAttractorBuffers;
+    std::vector<NS::SharedPtr<MTL::Buffer>> particleAttractorBuffers; // MAX_PARTICLE_ATTRACTORS elements each
+
+    // ECS particle slot management (first-fit free list)
+    struct ParticleSlotRange { uint32_t begin = 0, count = 0; };
+    std::vector<ParticleSlotRange> m_particleSlotFreeList;
+    bool m_particleFreeListInitialized = false;
+    // Per-frame ECS state
+    std::vector<ParticleAttractor> m_ecsAttractors;
+    glm::vec4 m_particleWind = glm::vec4(0.0f);
+    float m_particleTurbulence = 0.0f;
+
+    // Free-list helpers
+    uint32_t allocParticleSlots(uint32_t count);
+    void freeParticleSlots(uint32_t slotBegin, uint32_t count);
+    void ensureParticleFreeList();
 
     // Per-frame buffers
     std::vector<NS::SharedPtr<MTL::Buffer>> frameDataBuffers;

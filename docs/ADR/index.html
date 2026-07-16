@@ -1,0 +1,96 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Project Vapor · Architecture Decision Records</title>
+<style>
+  :root {
+    --bg: #0d0f14; --surface: #161a23; --border: #252c3d;
+    --accent: #5b8def; --accent2: #a78bfa;
+    --text: #dde2f0; --muted: #8892aa; --code-bg: #1c2130;
+  }
+  @media (prefers-color-scheme: light) {
+    :root { --bg:#f5f7fa;--surface:#fff;--border:#d1d9e6;--accent:#2563eb;--accent2:#7c3aed;--text:#1e2535;--muted:#6b7280;--code-bg:#eef0f7; }
+  }
+  :root[data-theme="dark"]  { --bg:#0d0f14;--surface:#161a23;--border:#252c3d;--accent:#5b8def;--accent2:#a78bfa;--text:#dde2f0;--muted:#8892aa;--code-bg:#1c2130; }
+  :root[data-theme="light"] { --bg:#f5f7fa;--surface:#fff;--border:#d1d9e6;--accent:#2563eb;--accent2:#7c3aed;--text:#1e2535;--muted:#6b7280;--code-bg:#eef0f7; }
+  *, *::before, *::after { box-sizing:border-box;margin:0;padding:0; }
+  body { background:var(--bg);color:var(--text);font-family:'Inter','Segoe UI',system-ui,sans-serif;font-size:15px;line-height:1.7; }
+  a { color:var(--accent);text-decoration:none; }
+  a:hover { text-decoration:underline; }
+  .hero { background:linear-gradient(135deg,#0a1628 0%,#1a0a2e 50%,#0a1628 100%);border-bottom:1px solid var(--border);padding:40px 24px;text-align:center; }
+  .hero h1 { font-size:clamp(1.4rem,3.5vw,2.2rem);font-weight:800;color:#e8eeff;margin-bottom:6px; }
+  .hero .sub { color:var(--muted);font-size:13px; }
+  .container { max-width:760px;margin:0 auto;padding:32px 24px 80px; }
+  .adr-card { background:var(--surface);border:1px solid var(--border);border-radius:10px;padding:18px 22px;margin-bottom:14px;display:flex;gap:16px;align-items:flex-start; }
+  .adr-num { font-size:11px;font-weight:700;letter-spacing:0.1em;color:var(--accent2);min-width:56px; }
+  .adr-title { font-weight:700;color:var(--text);margin-bottom:4px; }
+  .adr-desc { color:var(--muted);font-size:13px; }
+</style>
+</head>
+<body>
+<div class="hero">
+  <h1>Project Vapor · ADR Index</h1>
+  <p class="sub">Architecture Decision Records — living design documents for non-obvious technical choices.</p>
+</div>
+<div class="container">
+  <div class="adr-card">
+    <div class="adr-num">ADR-001</div>
+    <div>
+      <div class="adr-title">Physics Integration (Jolt)</div>
+      <div class="adr-desc">Decision to adopt Jolt Physics over Bullet/PhysX for determinism and multi-threading.</div>
+    </div>
+  </div>
+  <div class="adr-card">
+    <div class="adr-num">ADR-002</div>
+    <div>
+      <div class="adr-title">Dual-Backend Renderer (Vulkan + Metal)</div>
+      <div class="adr-desc">Cross-platform rendering strategy and the RHI abstraction layer.</div>
+    </div>
+  </div>
+  <div class="adr-card">
+    <div class="adr-num">ADR-003</div>
+    <div>
+      <div class="adr-title">ECS Architecture (EnTT)</div>
+      <div class="adr-desc">EnTT chosen for cache-friendly archetype layout and zero-cost view iteration.</div>
+    </div>
+  </div>
+  <div class="adr-card">
+    <div class="adr-num">ADR-004</div>
+    <div>
+      <div class="adr-title">Scene Graph Hybrid</div>
+      <div class="adr-desc">Combining ECS transforms with a lightweight Scene object for lights and skybox.</div>
+    </div>
+  </div>
+  <div class="adr-card">
+    <div class="adr-num">ADR-005</div>
+    <div>
+      <div class="adr-title">Asset Pipeline</div>
+      <div class="adr-desc">GLTF loading strategy, texture atlases, and hot-reload approach.</div>
+    </div>
+  </div>
+  <div class="adr-card">
+    <div class="adr-num">ADR-006</div>
+    <div>
+      <div class="adr-title">Playmaker FSM System</div>
+      <div class="adr-desc">ECS-compatible finite state machine for entity behaviour trees.</div>
+    </div>
+  </div>
+  <div class="adr-card">
+    <div class="adr-num">ADR-007</div>
+    <div>
+      <div class="adr-title">FSM + ECS Journey</div>
+      <div class="adr-desc">Lessons from iterating on the FSM design before landing on the current approach.</div>
+    </div>
+  </div>
+  <div class="adr-card">
+    <div class="adr-num">ADR-008</div>
+    <div>
+      <div class="adr-title"><a href="ADR-008-particle-ecs-integration.html">GPU Particle ECS Integration</a></div>
+      <div class="adr-desc">Coupling EnTT components to the GPU compute particle system — slot management, curl noise, spell bolts, and the alignment bugs along the way.</div>
+    </div>
+  </div>
+</div>
+</body>
+</html>

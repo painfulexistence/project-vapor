@@ -294,6 +294,18 @@ public:
     void applyVignette(RenderTextureHandle target, float strength = 0.3f, float radius = 0.8f) override;
 
     // ========================================================================
+    // ECS Particle Integration API
+    // ========================================================================
+
+    uint32_t claimParticleSlots(uint32_t count) override;
+    void releaseParticleSlots(uint32_t slotBegin, uint32_t count) override;
+    void uploadParticles(uint32_t slotBegin,
+                         const std::vector<GPUParticleData>& particles) override;
+    void setParticleAttractors(const std::vector<ParticleAttractor>& attractors) override;
+    void setParticleWind(glm::vec3 direction, float strength) override;
+    void setParticleTurbulence(float strength) override;
+
+    // ========================================================================
     // Texture Creation (for sprites/batch rendering)
     // ========================================================================
 
@@ -681,16 +693,30 @@ private:
     bool cloudPrevViewProjValid = false;
     bool volumetricCloudsEnabled = false;  // default OFF (enable when verifying)
 
-    // GPU particle system (self-contained orbital demo).
+    // GPU particle system (self-contained orbital demo + ECS emitters).
     static constexpr Uint32 MAX_PARTICLES = 8192;
     ComputePipelineHandle particleForcePipeline;
     ComputePipelineHandle particleIntegratePipeline;
     PipelineHandle particleRenderPipeline;     // instanced billboards
     BufferHandle particleBuffer;
     BufferHandle particleSimParamsBuffer;
-    BufferHandle particleAttractorBuffer;
+    BufferHandle particleAttractorBuffer;      // MAX_PARTICLE_ATTRACTORS elements
     Uint32 particleCount = 0;
     bool particleSystemEnabled = true;
+
+    // ECS particle slot management (first-fit free list).
+    struct ParticleSlotRange { uint32_t begin = 0, count = 0; };
+    std::vector<ParticleSlotRange> m_particleSlotFreeList;
+    bool m_particleFreeListInitialized = false;
+    // Per-frame ECS state (written by particle ECS systems, read by particlePass()).
+    std::vector<ParticleAttractor> m_ecsAttractors;
+    glm::vec4 m_particleWind = glm::vec4(0.0f); // xyz=dir, w=strength
+    float m_particleTurbulence = 0.0f;
+
+    // Free-list helpers
+    uint32_t allocParticleSlots(uint32_t count);
+    void freeParticleSlots(uint32_t slotBegin, uint32_t count);
+    void ensureParticleFreeList();
     PipelineHandle shadowPipeline;
     ShaderHandle vertexShader;
     ShaderHandle fragmentShader;

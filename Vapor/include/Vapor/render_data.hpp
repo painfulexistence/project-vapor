@@ -348,41 +348,44 @@ struct alignas(16) SunFlareRenderData {
     float _pad2 = 0.0f;
 };
 
+// Maximum ECS attractors uploaded per frame.
+static constexpr Uint32 MAX_PARTICLE_ATTRACTORS = 8;
+
 // GPU particle (matches the Particle struct in ParticleForce/Integrate.comp and
-// Particle.vert).
+// Particle.vert).  _pad1 repurposed as per-particle lifetime (-1 = immortal),
+// _pad2 repurposed as current age; zero binary-layout change (64 bytes).
 struct alignas(16) GPUParticleData {
     glm::vec3 position = glm::vec3(0.0f);
-    float _pad1 = 0.0f;
+    float lifetime = -1.0f; // seconds before despawn; -1 = immortal
     glm::vec3 velocity = glm::vec3(0.0f);
-    float _pad2 = 0.0f;
+    float age = 0.0f;       // seconds since spawn
     glm::vec3 force = glm::vec3(0.0f);
     float _pad3 = 0.0f;
     glm::vec4 color = glm::vec4(1.0f);
 };
 
-// Particle simulation params / attractor (bound as SSBOs; the RHI compute set is
-// storage-buffer only, so these are std430 buffers in the shaders).
+// Particle simulation params (bound as an SSBO in both backends).
+// 64 bytes — std430/std140 safe.
 struct alignas(16) ParticleSimParams {
-    glm::vec2 resolution = glm::vec2(1280.0f, 720.0f);
-    glm::vec2 mousePosition = glm::vec2(0.0f);
-    float time = 0.0f;
-    float deltaTime = 1.0f / 60.0f;
-    // The Metal kernels bounds-check `id >= particleCount`; leaving this a pad
-    // read as 0 and skipped every particle on Metal. (The Vulkan .comp names
-    // this slot _pad1 and ignores it — same offset/size, so the binary layout
-    // is identical either way.)
-    Uint32 particleCount = 0;
-    float _pad2 = 0.0f;
-};
+    glm::vec2 resolution = glm::vec2(1280.0f, 720.0f); // offset 0
+    glm::vec2 mousePosition = glm::vec2(0.0f);          // offset 8
+    float time = 0.0f;                                   // offset 16
+    float deltaTime = 1.0f / 60.0f;                     // offset 20
+    Uint32 particleCount = 0;                            // offset 24
+    Uint32 attractorCount = 0;                           // offset 28
+    glm::vec4 wind = glm::vec4(0.0f);       // offset 32 — xyz=dir, w=strength
+    glm::vec4 turbulence = glm::vec4(0.0f); // offset 48 — w=strength (xyz reserved)
+};                                           // total: 64 bytes
 
 // MSL's float3 occupies 16 bytes, so position must be padded to 16 and the
 // struct rounds to 32 (strength at offset 16). The GLSL twin gets the same
 // explicit pad; without this Metal asserted "attractor needs 32, got 16".
+// Layout: 32 bytes — mirrors std430 Attractor struct in the shaders.
 struct alignas(16) ParticleAttractor {
     glm::vec3 position = glm::vec3(0.0f);
-    float _pad0 = 0.0f;
-    float strength = 50.0f;
-    float _pad1[3] = {0.0f, 0.0f, 0.0f};
+    float _pad0 = 0.0f;      // offset 12 — keeps strength at offset 16
+    float strength = 50.0f;  // offset 16
+    float _pad1[3] = {0.0f, 0.0f, 0.0f}; // offset 20 — round to 32 bytes
 };
 
 // ============================================================================

@@ -178,4 +178,66 @@ namespace Vapor {
         }
     };
 
+    // ============================================================================
+    // Particle ECS Components
+    // ============================================================================
+
+    // Attached to any entity that should act as a particle attractor.
+    struct ParticleAttractorComponent {
+        float strength = 5.0f;
+    };
+
+    // World-space wind — not particle-specific; vegetation, cloth, audio all read it.
+    struct WindFieldComponent {
+        glm::vec3 direction = glm::vec3(1.0f, 0.0f, 0.0f);
+        float strength = 0.0f;
+    };
+
+    // Per-emitter configuration.
+    struct ParticleEmitterComponent {
+        uint32_t maxParticles = 128;
+        float emitRate = 30.0f;         // particles per second
+        float particleLifetime = 2.0f;  // -1 for immortal
+        float speed = 2.0f;
+        float spread = 0.3f;            // half-cone angle in radians
+        glm::vec3 emitDirection = glm::vec3(0.0f, 1.0f, 0.0f);
+        glm::vec4 color = glm::vec4(1.0f);
+        bool enabled = true;
+
+        // Runtime state (managed by ParticleEmitterSystem)
+        float     _accumulator = 0.0f;
+        uint32_t  _slotBegin   = ~0u;   // ~0u = not yet allocated
+        uint32_t  _slotCount   = 0;
+        uint32_t  _ringCursor  = 0;     // next slot to overwrite (ring buffer)
+    };
+
+    // One-shot burst of particles at the entity's current position.
+    struct ParticleBurstRequest {
+        uint32_t  count    = 64;
+        float     speed    = 3.0f;
+        float     spread   = 3.14159f;  // full sphere
+        float     lifetime = 1.0f;
+        glm::vec4 color    = glm::vec4(1.0f);
+    };
+
+    // Emotion/mood state that modulates particle emitters via EmitterModulatorComponent.
+    enum class EmotionState { Neutral, Joy, Rage, Sorrow, Fear };
+
+    // Drives emitter parameters from an EmotionState (skeleton — extend per project).
+    struct EmitterModulatorComponent {
+        EmotionState state = EmotionState::Neutral;
+        float transitionSpeed = 1.0f; // seconds to blend between states
+        float _blendTimer = 0.0f;
+    };
+
+    // Flying spell bolt: moves from origin to target along a Bezier arc,
+    // emitting particles along the way and bursting on arrival.
+    struct SpellBoltComponent {
+        glm::vec3 origin;
+        glm::vec3 target;
+        float     speed     = 15.0f;
+        float     arcHeight = 0.5f;
+        float     _progress = 0.0f; // [0,1], managed by SpellBoltSystem
+    };
+
 }// namespace Vapor

@@ -3007,19 +3007,33 @@ void Renderer::particlePass() {
         return;
     }
 
-    // Per-frame sim params + attractor (attractor sits in front of the camera).
+    // Per-frame sim params.
     ParticleSimParams sp;
     sp.resolution = glm::vec2(rhi->getSwapchainWidth(), rhi->getSwapchainHeight());
     sp.time = float(frameCounter) / 60.0f;
     sp.deltaTime = 1.0f / 60.0f;
-    sp.particleCount = particleCount;  // Metal kernels bounds-check on this
-    rhi->updateBuffer(particleSimParamsBuffer, &sp, 0, sizeof(sp));
+    sp.particleCount = particleCount;
+    sp.wind = m_particleWind;
+    sp.turbulence = glm::vec4(0.0f, 0.0f, 0.0f, m_particleTurbulence);
 
-    ParticleAttractor attr;
-    glm::vec3 forward = -glm::vec3(currentCamera.view[0][2], currentCamera.view[1][2], currentCamera.view[2][2]);
-    attr.position = currentCamera.position + forward * 3.0f;
-    attr.strength = 50.0f;
-    rhi->updateBuffer(particleAttractorBuffer, &attr, 0, sizeof(attr));
+    // ECS attractors if present; otherwise use the demo orbital attractor.
+    std::vector<ParticleAttractor> attractors;
+    if (!m_ecsAttractors.empty()) {
+        attractors = m_ecsAttractors;
+    } else {
+        ParticleAttractor demo;
+        glm::vec3 forward = -glm::vec3(currentCamera.view[0][2], currentCamera.view[1][2], currentCamera.view[2][2]);
+        demo.position = currentCamera.position + forward * 3.0f;
+        demo.strength = 50.0f;
+        attractors.push_back(demo);
+    }
+    // Clamp to MAX_PARTICLE_ATTRACTORS
+    if (attractors.size() > MAX_PARTICLE_ATTRACTORS)
+        attractors.resize(MAX_PARTICLE_ATTRACTORS);
+    sp.attractorCount = static_cast<Uint32>(attractors.size());
+    rhi->updateBuffer(particleSimParamsBuffer, &sp, 0, sizeof(sp));
+    rhi->updateBuffer(particleAttractorBuffer, attractors.data(), 0,
+                      attractors.size() * sizeof(ParticleAttractor));
 
     const size_t bufBytes = sizeof(GPUParticleData) * particleCount;
     const Uint32 groups = (particleCount + 255) / 256;
@@ -3034,10 +3048,10 @@ void Renderer::particlePass() {
     if (metal) {
         rhi->setComputeBuffer(0, particleBuffer, 0, bufBytes);
         rhi->setComputeBuffer(1, particleSimParamsBuffer, 0, sizeof(ParticleSimParams));
-        rhi->setComputeBuffer(2, particleAttractorBuffer, 0, sizeof(ParticleAttractor));
+        rhi->setComputeBuffer(2, particleAttractorBuffer, 0, sizeof(ParticleAttractor) * MAX_PARTICLE_ATTRACTORS);
     } else {
         rhi->setComputeBuffer(0, particleSimParamsBuffer, 0, sizeof(ParticleSimParams));
-        rhi->setComputeBuffer(1, particleAttractorBuffer, 0, sizeof(ParticleAttractor));
+        rhi->setComputeBuffer(1, particleAttractorBuffer, 0, sizeof(ParticleAttractor) * MAX_PARTICLE_ATTRACTORS);
         rhi->setComputeBuffer(2, particleBuffer, 0, bufBytes);
     }
     rhi->dispatch(groups, 1, 1);
@@ -3077,6 +3091,85 @@ void Renderer::particlePass() {
     }
     rhi->draw(6, particleCount, 0, 0);
     rhi->endRenderPass();
+}
+
+// ============================================================================
+// ECS Particle Integration API
+// ============================================================================
+
+void Renderer::ensureParticleFreeList() {
+    if (!m_particleFreeListInitialized) {
+        m_particleSlotFreeList.push_back({0u, MAX_PARTICLES});
+        m_particleFreeListInitialized = true;
+    }
+}
+
+uint32_t Renderer::allocParticleSlots(uint32_t count) {
+    ensureParticleFreeList();
+    for (size_t i = 0; i < m_particleSlotFreeList.size(); ++i) {
+        auto& r = m_particleSlotFreeList[i];
+        if (r.count >= count) {
+            uint32_t begin = r.begin;
+            r.begin += count;
+            r.count -= count;
+            if (r.count == 0)
+                m_particleSlotFreeList.erase(m_particleSlotFreeList.begin() + i);
+            return begin;
+        }
+    }
+    return ~0u; // pool exhausted
+}
+
+void Renderer::freeParticleSlots(uint32_t slotBegin, uint32_t count) {
+    if (count == 0) return;
+    m_particleSlotFreeList.push_back({slotBegin, count});
+    // Coalesce adjacent ranges by sorting and merging
+    std::sort(m_particleSlotFreeList.begin(), m_particleSlotFreeList.end(),
+              [](const ParticleSlotRange& a, const ParticleSlotRange& b) {
+                  return a.begin < b.begin;
+              });
+    for (size_t i = 0; i + 1 < m_particleSlotFreeList.size(); ) {
+        auto& cur = m_particleSlotFreeList[i];
+        auto& nxt = m_particleSlotFreeList[i + 1];
+        if (cur.begin + cur.count == nxt.begin) {
+            cur.count += nxt.count;
+            m_particleSlotFreeList.erase(m_particleSlotFreeList.begin() + i + 1);
+        } else {
+            ++i;
+        }
+    }
+}
+
+uint32_t Renderer::claimParticleSlots(uint32_t count) {
+    return allocParticleSlots(count);
+}
+
+void Renderer::releaseParticleSlots(uint32_t slotBegin, uint32_t count) {
+    freeParticleSlots(slotBegin, count);
+}
+
+void Renderer::uploadParticles(uint32_t slotBegin, const std::vector<GPUParticleData>& particles) {
+    if (slotBegin == ~0u || particles.empty()) return;
+    if (slotBegin + particles.size() > MAX_PARTICLES) return;
+    if (!particleBuffer.isValid()) return;
+    rhi->updateBuffer(particleBuffer,
+                      particles.data(),
+                      slotBegin * sizeof(GPUParticleData),
+                      particles.size() * sizeof(GPUParticleData));
+}
+
+void Renderer::setParticleAttractors(const std::vector<ParticleAttractor>& attractors) {
+    m_ecsAttractors = attractors;
+    if (m_ecsAttractors.size() > MAX_PARTICLE_ATTRACTORS)
+        m_ecsAttractors.resize(MAX_PARTICLE_ATTRACTORS);
+}
+
+void Renderer::setParticleWind(glm::vec3 direction, float strength) {
+    m_particleWind = glm::vec4(direction, strength);
+}
+
+void Renderer::setParticleTurbulence(float strength) {
+    m_particleTurbulence = strength;
 }
 
 // Volumetric clouds (port of the Metal quarter-res path): raymarch into a
@@ -3517,7 +3610,7 @@ void Renderer::createDefaultResources() {
         uDesc.memoryUsage = MemoryUsage::CPUtoGPU;
         uDesc.size = sizeof(ParticleSimParams);
         createFrameSlottedBuffer(particleSimParamsBuffer, uDesc);  // rewritten per sim step
-        uDesc.size = sizeof(ParticleAttractor);
+        uDesc.size = sizeof(ParticleAttractor) * MAX_PARTICLE_ATTRACTORS;
         createFrameSlottedBuffer(particleAttractorBuffer, uDesc);
     }
 }

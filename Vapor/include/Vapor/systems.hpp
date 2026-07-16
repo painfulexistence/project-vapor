@@ -3,10 +3,14 @@
 #include "components.hpp"
 #include "input_manager.hpp"
 #include "physics_3d.hpp"
+#include "render_data.hpp"
 #include "renderer.hpp"
 #include "scene.hpp"
 #include <entt/entt.hpp>
+#include <cmath>
 #include <memory>
+#include <random>
+#include <vector>
 
 namespace Vapor {
 
@@ -428,6 +432,228 @@ namespace Vapor {
 
             // Projection Matrix
             cam.projectionMatrix = glm::perspective(cam.fov, cam.aspect, cam.near, cam.far);
+        }
+    };
+
+    // ============================================================================
+    // 粒子力場系統 - 收集 ECS attractor + wind 並上傳至 Renderer
+    // ============================================================================
+    class ParticleForceFieldSystem {
+    public:
+        static void update(entt::registry& registry, IRenderer* renderer) {
+            if (!renderer) return;
+
+            // Collect attractors from ParticleAttractorComponent entities
+            std::vector<ParticleAttractor> attractors;
+            auto attrView = registry.view<ParticleAttractorComponent, TransformComponent>();
+            for (auto entity : attrView) {
+                const auto& t = attrView.get<TransformComponent>(entity);
+                const auto& a = attrView.get<ParticleAttractorComponent>(entity);
+                ParticleAttractor pa;
+                pa.position = t.position;
+                pa.strength = a.strength;
+                attractors.push_back(pa);
+                if (attractors.size() >= MAX_PARTICLE_ATTRACTORS) break;
+            }
+            renderer->setParticleAttractors(attractors);
+
+            // Use first WindFieldComponent found
+            auto windView = registry.view<WindFieldComponent>();
+            for (auto entity : windView) {
+                const auto& w = windView.get<WindFieldComponent>(entity);
+                renderer->setParticleWind(w.direction, w.strength);
+                break;
+            }
+        }
+    };
+
+    // ============================================================================
+    // 粒子發射器系統 - 累積器式發射、ring-buffer 複寫
+    // ============================================================================
+    class ParticleEmitterSystem {
+    public:
+        static void update(entt::registry& registry, IRenderer* renderer, float deltaTime) {
+            if (!renderer) return;
+
+            static std::mt19937 rng(std::random_device{}());
+            static std::uniform_real_distribution<float> u01(0.0f, 1.0f);
+
+            auto view = registry.view<ParticleEmitterComponent, TransformComponent>();
+            for (auto entity : view) {
+                auto& emit = view.get<ParticleEmitterComponent>(entity);
+                const auto& t = view.get<TransformComponent>(entity);
+
+                if (!emit.enabled) continue;
+
+                // Lazy slot claim
+                if (emit._slotBegin == ~0u) {
+                    emit._slotCount = emit.maxParticles;
+                    emit._slotBegin = renderer->claimParticleSlots(emit._slotCount);
+                    emit._ringCursor = 0;
+                    if (emit._slotBegin == ~0u) continue; // pool full
+                }
+
+                emit._accumulator += emit.emitRate * deltaTime;
+                uint32_t spawns = static_cast<uint32_t>(emit._accumulator);
+                if (spawns == 0) continue;
+                emit._accumulator -= static_cast<float>(spawns);
+                spawns = std::min(spawns, emit._slotCount);
+
+                // Sample random cone directions around emitDirection
+                glm::vec3 fwd = glm::normalize(emit.emitDirection);
+                glm::vec3 right = glm::abs(fwd.x) < 0.9f
+                    ? glm::normalize(glm::cross(fwd, glm::vec3(1, 0, 0)))
+                    : glm::normalize(glm::cross(fwd, glm::vec3(0, 1, 0)));
+                glm::vec3 up = glm::cross(fwd, right);
+
+                std::vector<GPUParticleData> batch(spawns);
+                for (uint32_t i = 0; i < spawns; ++i) {
+                    float theta  = u01(rng) * 2.0f * 3.14159265f;
+                    float phi    = u01(rng) * emit.spread;
+                    glm::vec3 dir = glm::normalize(fwd * std::cos(phi)
+                        + (right * std::cos(theta) + up * std::sin(theta)) * std::sin(phi));
+
+                    GPUParticleData& p = batch[i];
+                    p.position = t.position;
+                    p.lifetime = emit.particleLifetime;
+                    p.age      = 0.0f;
+                    p.velocity = dir * emit.speed;
+                    p.force    = glm::vec3(0.0f);
+                    p.color    = emit.color;
+                }
+
+                // Ring-buffer write: record slot BEFORE advancing cursor
+                uint32_t writeSlot = emit._slotBegin + emit._ringCursor;
+                // Handle wrap-around by splitting into at most two uploads
+                uint32_t remaining = emit._slotCount - emit._ringCursor;
+                if (spawns <= remaining) {
+                    renderer->uploadParticles(writeSlot, batch);
+                    emit._ringCursor = (emit._ringCursor + spawns) % emit._slotCount;
+                } else {
+                    // Split: first part fills to end, second part wraps
+                    std::vector<GPUParticleData> part1(batch.begin(), batch.begin() + remaining);
+                    std::vector<GPUParticleData> part2(batch.begin() + remaining, batch.end());
+                    renderer->uploadParticles(writeSlot, part1);
+                    renderer->uploadParticles(emit._slotBegin, part2);
+                    emit._ringCursor = static_cast<uint32_t>(part2.size());
+                }
+            }
+        }
+
+        // Call when an emitter entity is destroyed to return its slots.
+        static void onEmitterDestroyed(entt::registry& registry, entt::entity entity,
+                                       IRenderer* renderer) {
+            if (!renderer) return;
+            auto* emit = registry.try_get<ParticleEmitterComponent>(entity);
+            if (emit && emit->_slotBegin != ~0u) {
+                renderer->releaseParticleSlots(emit->_slotBegin, emit->_slotCount);
+            }
+        }
+    };
+
+    // ============================================================================
+    // 粒子爆發系統 - 處理一次性爆發請求
+    // ============================================================================
+    class ParticleBurstSystem {
+    public:
+        static void update(entt::registry& registry, IRenderer* renderer) {
+            if (!renderer) return;
+
+            static std::mt19937 rng(std::random_device{}());
+            static std::uniform_real_distribution<float> u01(0.0f, 1.0f);
+
+            auto view = registry.view<ParticleBurstRequest>();
+            for (auto entity : view) {
+                const auto& req = view.get<ParticleBurstRequest>(entity);
+                auto* t = registry.try_get<TransformComponent>(entity);
+                glm::vec3 origin = t ? t->position : glm::vec3(0.0f);
+
+                // Reuse the emitter's slot range if available, else claim a fresh range
+                auto* emit = registry.try_get<ParticleEmitterComponent>(entity);
+                uint32_t slotBegin = ~0u;
+                uint32_t slotCount = req.count;
+                if (emit && emit->_slotBegin != ~0u) {
+                    slotBegin = emit->_slotBegin;
+                    slotCount = std::min(req.count, emit->_slotCount);
+                } else {
+                    slotBegin = renderer->claimParticleSlots(slotCount);
+                }
+                if (slotBegin == ~0u) {
+                    registry.remove<ParticleBurstRequest>(entity);
+                    continue;
+                }
+
+                std::vector<GPUParticleData> batch(slotCount);
+                for (uint32_t i = 0; i < slotCount; ++i) {
+                    // Uniform sphere sampling
+                    float cosTheta = 2.0f * u01(rng) - 1.0f;
+                    float sinTheta = std::sqrt(1.0f - cosTheta * cosTheta);
+                    float phi      = u01(rng) * 2.0f * 3.14159265f;
+                    glm::vec3 dir(sinTheta * std::cos(phi), cosTheta, sinTheta * std::sin(phi));
+
+                    GPUParticleData& p = batch[i];
+                    p.position = origin;
+                    p.lifetime = req.lifetime;
+                    p.age      = 0.0f;
+                    p.velocity = dir * req.speed;
+                    p.force    = glm::vec3(0.0f);
+                    p.color    = req.color;
+                }
+                renderer->uploadParticles(slotBegin, batch);
+                registry.remove<ParticleBurstRequest>(entity);
+            }
+        }
+    };
+
+    // ============================================================================
+    // 法術彈系統 - 二次貝塞爾弧線移動 + curl noise 流體軌跡
+    // ============================================================================
+    class SpellBoltSystem {
+    public:
+        static void update(entt::registry& registry, IRenderer* renderer, float deltaTime) {
+            auto view = registry.view<SpellBoltComponent, TransformComponent>();
+            for (auto entity : view) {
+                auto& bolt = view.get<SpellBoltComponent>(entity);
+                auto& t    = view.get<TransformComponent>(entity);
+
+                float totalDist = glm::length(bolt.target - bolt.origin);
+                if (totalDist < 0.001f) {
+                    registry.remove<SpellBoltComponent>(entity);
+                    continue;
+                }
+                bolt._progress += (bolt.speed / totalDist) * deltaTime;
+
+                // Mid-point of the quadratic Bezier arc (raised by arcHeight)
+                glm::vec3 mid = (bolt.origin + bolt.target) * 0.5f
+                                + glm::vec3(0.0f, bolt.arcHeight, 0.0f);
+                float s = glm::clamp(bolt._progress, 0.0f, 1.0f);
+
+                // Bezier position
+                t.position = (1.0f - s) * (1.0f - s) * bolt.origin
+                           + 2.0f * (1.0f - s) * s * mid
+                           + s * s * bolt.target;
+                t.isDirty = true;
+
+                // Bezier tangent → emitter direction (fluid feel from curl noise)
+                glm::vec3 tan = glm::normalize(
+                    2.0f * (1.0f - s) * (mid - bolt.origin)
+                    + 2.0f * s * (bolt.target - mid));
+                if (auto* emit = registry.try_get<ParticleEmitterComponent>(entity)) {
+                    emit->emitDirection = tan;
+                }
+
+                // On arrival: burst and remove the bolt
+                if (bolt._progress >= 1.0f) {
+                    glm::vec4 boltColor = glm::vec4(0.4f, 0.8f, 1.0f, 1.0f);
+                    if (auto* emit = registry.try_get<ParticleEmitterComponent>(entity))
+                        boltColor = emit->color;
+                    registry.emplace_or_replace<ParticleBurstRequest>(entity,
+                        ParticleBurstRequest{ 80, 4.0f, 3.14159f, 0.8f, boltColor });
+                    if (auto* emit = registry.try_get<ParticleEmitterComponent>(entity))
+                        emit->enabled = false;
+                    registry.remove<SpellBoltComponent>(entity);
+                }
+            }
         }
     };
 
