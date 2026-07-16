@@ -809,10 +809,11 @@ private:
     Uint32 sscsSteps = 12;
     float sscsBias = 0.02f;       // view-space start offset (self-occlusion guard)
     // Stochastic RT shadows for the analytic lights (point R / rect G / spot B
-    // channels). Metal RT only. Default OFF: leaving it off makes Metal render
-    // point/rect/spot unshadowed — the same as the (RT-less) Vulkan path — so
-    // the two backends' output stays roughly aligned unless it's opted into.
-    bool stochasticShadowsEnabled = false;
+    // channels). Metal RT only. Default ON ("All shadows" in the panel) now
+    // that ReSTIR keeps the noise down; backends without ray tracing skip the
+    // pass and render point/rect/spot unshadowed as before, so this is the one
+    // place Metal+RT output intentionally diverges from the Vulkan path.
+    bool stochasticShadowsEnabled = true;
     // ReSTIR denoise for the stochastic shadows: per-pixel weighted reservoirs
     // over light samples with temporal + spatial reuse, so the one shadow ray
     // per domain lands on the light (and quad point) that dominates the pixel.
@@ -839,6 +840,12 @@ private:
     float restirSpatialRadius = 16.0f;
     float restirPointMClamp = 8.0f;
     float restirRectMClamp = 3.0f;
+    // Dataflow guards for the default-on chain: the accumulator only runs on
+    // frames the stochastic pass actually wrote (TLAS ready, pipelines built),
+    // and the PBR only samples a history that has been accumulated at least
+    // once — otherwise both would read undefined texture memory at startup.
+    bool pointShadowWritten = false;         // this frame
+    bool pointShadowHistoryWritten = false;  // ever (since last RT rebuild)
     // Stochastic point-shadow debug view (native pointShadowDebugMode):
     // 0 = visibility, 1 = tile light-count heatmap, 2 = ReSTIR winner id,
     // 3 = ReSTIR reservoir confidence (modes 2-3 need the ReSTIR path).

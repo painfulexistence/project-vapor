@@ -1498,7 +1498,8 @@ void Renderer::mainRenderPass() {
             // texPointShadow (RGB point/rect/spot channels) only when stochastic
             // shadows are on; otherwise the neutral white bound above keeps
             // point/rect/spot unshadowed — matching the RT-less Vulkan path.
-            if (stochasticShadowsEnabled && pointShadowHistoryRT.isValid())
+            if (capabilities.raytracing && stochasticShadowsEnabled &&
+                pointShadowHistoryWritten && pointShadowHistoryRT.isValid())
                 rhi->setTexture(0, 13, pointShadowHistoryRT, clampSampler);
             if (gibsEnabled && giResultTexture.isValid()) rhi->setTexture(0, 14, giResultTexture, clampSampler);
         }
@@ -2023,6 +2024,7 @@ static_assert(sizeof(RestirShadowParamsCPU) == 80, "must match the MSL RestirSha
 // Routes to the ReSTIR reservoir path when enabled; the legacy uniform-pick
 // kernel below stays as the fallback (and the A/B reference).
 void Renderer::stochasticPointShadowPass() {
+    pointShadowWritten = false;  // set again below iff a kernel writes the RT
     const bool restirWanted = stochasticShadowsEnabled && restirShadowsEnabled &&
                               restirShadowTemporalPipeline.isValid() &&
                               restirShadowResolvePipeline.isValid();
@@ -2038,7 +2040,7 @@ void Renderer::stochasticPointShadowPass() {
     }
     if (!stochasticShadowsEnabled) return;  // off = aligns with the RT-less Vulkan output
     if (!sceneTLAS.isValid() || !pointShadowRT.isValid()) return;
-    if (restirWanted && restirShadowPass()) return;
+    if (restirWanted && restirShadowPass()) { pointShadowWritten = true; return; }
     if (!stochasticPointShadowPipeline.isValid()) return;
     Uint32 w = rhi->getSwapchainWidth();
     Uint32 h = rhi->getSwapchainHeight();
@@ -2069,6 +2071,7 @@ void Renderer::stochasticPointShadowPass() {
     rhi->setComputeBytes(&extraCounts, sizeof(glm::uvec2), 10);
     rhi->dispatch((w + 7) / 8, (h + 7) / 8, 1);
     rhi->endComputePass();
+    pointShadowWritten = true;
 }
 
 // ReSTIR denoise for the stochastic shadows. Two kernels in one compute pass:
@@ -2415,7 +2418,11 @@ void Renderer::gibsPass() {
 // here the handles are swapped instead (post-swap, history holds the latest
 // denoised result and is what the PBR shader binds).
 void Renderer::pointShadowTemporalPass() {
-    if (!stochasticShadowsEnabled) return;
+    // Only accumulate frames the stochastic pass actually wrote (covers the
+    // feature toggle, missing RT support, and the frames before the TLAS is
+    // built) — otherwise the EMA would fold undefined texture memory into the
+    // history the PBR pass samples.
+    if (!pointShadowWritten) return;
     if (!pointShadowTemporalPipeline.isValid() || !pointShadowRT.isValid()) return;
     Uint32 w = rhi->getSwapchainWidth();
     Uint32 h = rhi->getSwapchainHeight();
@@ -2428,6 +2435,7 @@ void Renderer::pointShadowTemporalPass() {
     rhi->dispatch((w + 7) / 8, (h + 7) / 8, 1);
     rhi->endComputePass();
     std::swap(pointShadowDenoisedRT, pointShadowHistoryRT);
+    pointShadowHistoryWritten = true;
 }
 
 // Directional shadow pass (PSSM, 3 cascades): split the camera frustum by a
@@ -3761,6 +3769,9 @@ void Renderer::destroyRenderTargets() {
     if (restirReservoirHistory.isValid()) { rhi->destroyBuffer(restirReservoirHistory); restirReservoirHistory = {}; }
     if (restirReservoirScratch.isValid()) { rhi->destroyBuffer(restirReservoirScratch); restirReservoirScratch = {}; }
     restirHistoryValid = false;
+    // The recreated shadow targets hold undefined memory until the chain runs.
+    pointShadowWritten = false;
+    pointShadowHistoryWritten = false;
 
     // History/reprojection state is stale at the new resolution.
     aoHistoryValid = false;
