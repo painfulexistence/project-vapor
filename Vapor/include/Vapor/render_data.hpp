@@ -170,14 +170,18 @@ struct PointLightData {
 struct alignas(16) PSSMRenderData {
     glm::mat4 lightSpaceMatrices[3] = { glm::mat4(1.0f), glm::mat4(1.0f), glm::mat4(1.0f) };
     glm::vec4 cascadeSplits = glm::vec4(3.0e38f);
-    float blendRange = 1.0f;
-    // Independent near-field shadow map (separate from the CSM cascades):
-    // covers [near, nearShadowEnd]; 0 = disabled. Its own tight-fit light matrix
-    // is transported here too (appended so existing shaders reading the prefix
-    // are unaffected). std430: nearLightMatrix lands on a 16-byte boundary.
-    float nearShadowEnd = 0.0f;
-    float _pad[2] = {};
-    glm::mat4 nearLightMatrix = glm::mat4(1.0f);
+    // Offsets 208-224 mirror the Metal PSSMData (3d_common.metal) EXACTLY so the
+    // RHI-Metal PBR shader reads every field correctly. Previously nearShadowEnd
+    // sat at 212 where the Metal shader reads cascadeBlendRange, aliasing the
+    // cascade-blend width to the near distance (~25) and heavily over-blending.
+    float  blendRange = 1.0f;         // 208  RT<->PSSM (unused on the RHI path)
+    float  cascadeBlendRange = 2.0f;  // 212  cascade<->cascade blend (view units)
+    Uint32 pcfSampleCount = 16;       // 216  PCF taps 4/8/16/32
+    Uint32 debugVisualize = 0;        // 220  cascade-colour debug (0 = off)
+    // Near-field shadow map data, appended after the Metal-shared prefix.
+    float  nearShadowEnd = 0.0f;      // 224  covers [near, nearShadowEnd]; 0 = off
+    float  _pad[3] = {};              // 228  pad so nearLightMatrix is 16-aligned
+    glm::mat4 nearLightMatrix = glm::mat4(1.0f);  // 240
 };
 
 // Physically-based atmosphere (Rayleigh/Mie/Ozone) consumed by Atmosphere.frag.
@@ -254,6 +258,19 @@ struct alignas(16) FogRenderData {
     glm::vec2 _tailPad = glm::vec2(0.0f);  // keep 16-byte struct size multiple
 };
 
+// Heterogeneous volume raymarch (EmberGen-style density grid in an AABB).
+// vec4-only layout so the MSL and std430 twins are byte-identical
+// (VolumeRaymarch.frag / 3d_volume_raymarch.metal).
+struct alignas(16) VolumeRenderData {
+    glm::mat4 invViewProj = glm::mat4(1.0f);
+    glm::vec4 cameraPosition = glm::vec4(0.0f);              // xyz
+    glm::vec4 boxMin = glm::vec4(-2.0f, 0.0f, -2.0f, 8.0f);  // xyz; w = densityScale
+    glm::vec4 boxMax = glm::vec4(2.0f, 4.0f, 2.0f, 0.3f);    // xyz; w = anisotropy
+    glm::vec4 albedo = glm::vec4(0.9f, 0.9f, 0.9f, 0.15f);   // xyz; w = ambientIntensity
+    glm::vec4 sunDirection = glm::vec4(0.0f, 1.0f, 0.0f, 0.0f);  // xyz
+    glm::vec4 sunColor = glm::vec4(1.0f, 1.0f, 1.0f, 12.0f); // xyz; w = sunIntensity
+    glm::vec4 params = glm::vec4(48.0f, 8.0f, 0.0f, 0.0f);   // x = steps, y = shadow steps
+};
 
 // Volumetric clouds. Field-for-field mirror of the Metal backend's
 // VolumetricCloudData (graphics_effects.hpp) — the defaults below are the

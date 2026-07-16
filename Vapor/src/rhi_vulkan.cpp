@@ -883,7 +883,7 @@ TextureHandle RHI_Vulkan::createTexture(const TextureDesc& desc) {
     // Create image
     VkImageCreateInfo imageInfo{};
     imageInfo.sType = VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO;
-    imageInfo.imageType = VK_IMAGE_TYPE_2D;
+    imageInfo.imageType = desc.depth > 1 ? VK_IMAGE_TYPE_3D : VK_IMAGE_TYPE_2D;
     if (desc.isCube) {
         imageInfo.flags |= VK_IMAGE_CREATE_CUBE_COMPATIBLE_BIT;
     }
@@ -926,6 +926,7 @@ TextureHandle RHI_Vulkan::createTexture(const TextureDesc& desc) {
     viewInfo.sType = VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO;
     viewInfo.image = image;
     viewInfo.viewType = desc.isCube ? VK_IMAGE_VIEW_TYPE_CUBE
+                       : desc.depth > 1 ? VK_IMAGE_VIEW_TYPE_3D
                        : desc.arrayLayers > 1 ? VK_IMAGE_VIEW_TYPE_2D_ARRAY
                                               : VK_IMAGE_VIEW_TYPE_2D;
     viewInfo.format = convertPixelFormat(desc.format);
@@ -954,6 +955,7 @@ TextureHandle RHI_Vulkan::createTexture(const TextureDesc& desc) {
     resource.format = convertPixelFormat(desc.format);
     resource.width = desc.width;
     resource.height = desc.height;
+    resource.depth = desc.depth;
     resource.arrayLayers = desc.arrayLayers;
     resource.usage = imageInfo.usage;
     resource.currentLayout = VK_IMAGE_LAYOUT_UNDEFINED;
@@ -1397,6 +1399,8 @@ void RHI_Vulkan::updateTexture(TextureHandle handle, const void* data, size_t si
 
     Uint32 mipWidth = std::max(1u, tex.width >> mipLevel);
     Uint32 mipHeight = std::max(1u, tex.height >> mipLevel);
+    // 3D volumes upload every depth slice in one call (depth is 1 for 2D)
+    Uint32 mipDepth = std::max(1u, tex.depth >> mipLevel);
 
     // Stage through the ring (or a dedicated buffer when oversize) into the
     // batched upload stream
@@ -1437,7 +1441,7 @@ void RHI_Vulkan::updateTexture(TextureHandle handle, const void* data, size_t si
     region.imageSubresource.baseArrayLayer = arrayLayer;
     region.imageSubresource.layerCount = 1;
     region.imageOffset = {0, 0, 0};
-    region.imageExtent = {mipWidth, mipHeight, 1};
+    region.imageExtent = {mipWidth, mipHeight, mipDepth};
     vkCmdCopyBufferToImage(cmd, srcBuffer, tex.image,
                            VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 1, &region);
 

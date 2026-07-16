@@ -35,10 +35,15 @@ struct InstanceData {
 layout(std430, set = 0, binding = 0) readonly buffer PSSMBuf {
     mat4 lightSpaceMatrices[3];
     vec4 cascadeSplits;
-    float blendRange;
-    float nearShadowEnd;
-    vec2 _pad;
-    mat4 nearLightMatrix;   // independent near-field map (cascadeIndex == 3)
+    float blendRange;          // 208
+    float cascadeBlendRange;   // 212
+    uint  pcfSampleCount;      // 216
+    uint  debugVisualize;      // 220
+    float nearShadowEnd;       // 224
+    float _pad0;               // 228
+    float _pad1;               // 232
+    float _pad2;               // 236
+    mat4 nearLightMatrix;      // 240  near-field map (cascadeIndex == 3)
 };
 layout(std430, set = 0, binding = 2) readonly buffer InstanceBuf {
     InstanceData instances[];

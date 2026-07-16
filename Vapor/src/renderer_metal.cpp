@@ -652,6 +652,14 @@ public:
         encoder->setBytes(&fi, sizeof(uint32_t), 5);
         encoder->setAccelerationStructure(r.TLASBuffers[r.currentFrameInFlight].get(), 6);
         encoder->setBytes(&r.pointShadowDebugMode, sizeof(uint32_t), 7);
+        // The shared kernel now takes spot/rect shadow inputs at 8-10. Native
+        // has no spot lights and keeps R16F targets, so bind placeholders with
+        // zero counts — the kernel then leaves the extra channels at 1.0 and
+        // this path stays byte-for-byte.
+        encoder->setBuffer(r.pointLightBuffer.get(), 0, 8);   // placeholder (unread)
+        encoder->setBuffer(r.rectLightBuffer.get(), 0, 9);
+        glm::uvec2 extraCounts(0u, 0u);
+        encoder->setBytes(&extraCounts, sizeof(glm::uvec2), 10);
         encoder->dispatchThreadgroups(
             MTL::Size((uint32_t(screenSize.x) + 7) / 8, (uint32_t(screenSize.y) + 7) / 8, 1),
             MTL::Size(8, 8, 1)
@@ -1243,6 +1251,12 @@ public:
             // the same contract as gibsGI at texture(14) when GIBS is off).
             glm::vec2 reflParams(0.0f, 0.0f);
             encoder->setFragmentBytes(&reflParams, sizeof(reflParams), 13);
+            // Spot lights are an RHI-path feature: bind a placeholder buffer
+            // (count 0 -> the loop never dereferences it) and shadowFlags 0
+            // (legacy R16F shadow target: rect/spot channels unavailable).
+            encoder->setFragmentBuffer(r.pointLightBuffer.get(), 0, 14);
+            glm::uvec2 spotRectParams(0u, 0u);
+            encoder->setFragmentBytes(&spotRectParams, sizeof(spotRectParams), 15);
             // RT refractions: RHI-path feature; disabled params keep the
             // declared buffer(16) bound (texture(17) stays unbound behind the
             // same runtime x > 0.5 contract as the reflection texture at 16).
@@ -1646,6 +1660,19 @@ public:
         encoder->setFragmentTexture(r.depthStencilRT.get(), 1);
         encoder->setFragmentBuffer(r.volumetricFogDataBuffers[r.currentFrameInFlight].get(), 0, 0);
         encoder->setFragmentBuffer(r.cameraDataBuffers[r.currentFrameInFlight].get(), 0, 1);
+        // Volumetric raymarch inputs (shared shader contract): PSSM cascades
+        // for sun shafts + the light set. Native has no spot lights — bind a
+        // placeholder with count 0.
+        encoder->setFragmentTexture(r.pssmShadowMaps.get(), 2);
+        encoder->setFragmentBuffer(r.pssmDataBuffers[r.currentFrameInFlight].get(), 0, 2);
+        encoder->setFragmentBuffer(r.pointLightBuffer.get(), 0, 3);
+        encoder->setFragmentBuffer(r.clusterBuffers[r.currentFrameInFlight].get(), 0, 4);
+        encoder->setFragmentBuffer(r.pointLightBuffer.get(), 0, 5);  // spot placeholder (count 0)
+        encoder->setFragmentBuffer(r.rectLightBuffer.get(), 0, 6);
+        uint32_t fogRectCount = r.currentScene
+            ? static_cast<uint32_t>(r.currentScene->rectLights.size()) : 0u;
+        glm::uvec4 fogLightParams(r.clusterGridSizeX, r.clusterGridSizeY, 0u, fogRectCount);
+        encoder->setFragmentBytes(&fogLightParams, sizeof(fogLightParams), 7);
         encoder->drawPrimitives(MTL::PrimitiveType::PrimitiveTypeTriangle, 0, 3, 1);
         encoder->endEncoding();
 
