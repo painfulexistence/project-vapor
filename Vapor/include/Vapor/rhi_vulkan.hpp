@@ -297,11 +297,12 @@ private:
     // maxPerStageDescriptorStorageImages (and storage buffers) at 8, so bumping
     // these would fail pipeline-layout creation.
     static constexpr Uint32 BINDINGS_PER_SET = 8;
-    // The texture set (combined image samplers, device limit >= 16) is bumped to
-    // 10 for the 9th sampler the SSCS contact RT needs (set2 b8), plus a spare.
-    // Additive capacity: the write loop only writes bound slots, so existing
-    // material sets (<=8) are unaffected.
-    static constexpr Uint32 TEXTURE_BINDINGS_PER_SET = 10;
+    // The texture set (combined image samplers, device limit >= 16) holds the 10
+    // material/shadow/AO/SSCS/near samplers (b0-b9) plus the 3 IBL maps the main
+    // pass now samples: irradiance cube (b10), prefilter cube (b11), BRDF LUT
+    // (b12). Additive capacity: the write loop only writes bound slots, so
+    // pipelines that use fewer textures (bloom, IBL bake) are unaffected.
+    static constexpr Uint32 TEXTURE_BINDINGS_PER_SET = 13;
 
     struct BufferBinding {
         VkBuffer buffer = VK_NULL_HANDLE;

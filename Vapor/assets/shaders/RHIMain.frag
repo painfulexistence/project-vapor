@@ -45,6 +45,11 @@ struct MaterialData {
     float sheenTint;
     float clearcoat;
     float clearcoatGloss;
+    // Tail matching the C++ MaterialData (stride 96): iblEnabled gates the IBL
+    // indirect term. prototypeUVMode/uvScale are unused here but keep the layout.
+    float prototypeUVMode;
+    float uvScale;
+    float iblEnabled;
 };
 
 // Must match DirectionalLightData / PointLightData (C++, stride 48 each)
@@ -168,6 +173,11 @@ layout(set = 2, binding = 8) uniform sampler2D sscsTex;
 // Independent near-field shadow map (own texture + resolution), covers
 // [near, nearShadowEnd]. Depth values sampled with the negative-viewport Y-flip.
 layout(set = 2, binding = 9) uniform sampler2D nearShadowTex;
+// IBL from the sky bake (matches the Metal path): diffuse irradiance cube,
+// GGX-prefiltered specular cube, split-sum BRDF LUT.
+layout(set = 2, binding = 10) uniform samplerCube irradianceMap;
+layout(set = 2, binding = 11) uniform samplerCube prefilterMap;
+layout(set = 2, binding = 12) uniform sampler2D brdfLut;
 
 // PCF sample of one cascade. Returns 1.0 = lit, 0.0 = fully shadowed, or -1.0
 // when the world position falls outside this cascade's frustum.
@@ -453,6 +463,26 @@ vec3 disneyBRDF(vec3 N, vec3 T, vec3 B, vec3 L, vec3 V, Surface s) {
             + specular + clearcoat) * nl;
 }
 
+// ── Image-based lighting (twin of Metal's CalculateIBL) ─────────────────────
+vec3 fresnelSchlickRoughness(float cosTheta, vec3 F0, float roughness) {
+    return F0 + (max(vec3(1.0 - roughness), F0) - F0) * pow(clamp(1.0 - cosTheta, 0.0, 1.0), 5.0);
+}
+vec3 calculateIBL(vec3 N, vec3 V, Surface s, float ao) {
+    float NdotV = max(dot(N, V), 0.0);
+    vec3 F0 = mix(vec3(0.04), s.color, s.metallic);
+    vec3 F = fresnelSchlickRoughness(NdotV, F0, s.roughness);
+    vec3 kD = (1.0 - F) * (1.0 - s.metallic);
+    // Diffuse IBL
+    vec3 diffuseIBL = texture(irradianceMap, N).rgb * s.color * kD;
+    // Specular IBL (split-sum): prefiltered env by roughness + BRDF LUT
+    vec3 R = reflect(-V, N);
+    const float MAX_REFLECTION_LOD = 4.0;
+    vec3 prefiltered = textureLod(prefilterMap, R, s.roughness * MAX_REFLECTION_LOD).rgb;
+    vec2 brdf = texture(brdfLut, vec2(NdotV, s.roughness)).rg;
+    vec3 specularIBL = prefiltered * (F * brdf.x + brdf.y);
+    return (diffuseIBL + specularIBL) * ao;
+}
+
 void main() {
     MaterialData mat = materials[fragMaterialID];
 
@@ -581,10 +611,14 @@ void main() {
         color += (kD * albedo / PI * diffuseGeo + spec) * radiance;
     }
 
-    // Flat ambient so unlit scenes are never pure black. Screen-space AO
-    // darkens this indirect term only (never the direct lights above).
+    // Indirect term: IBL when the material enables it (matches Metal), else a
+    // flat ambient floor. Screen-space AO darkens the indirect only.
     float screenAO = texture(texAO, gl_FragCoord.xy / max(screenSize, vec2(1.0))).r;
-    color += albedo * 0.03 * occlusion * screenAO;
+    if (mat.iblEnabled > 0.5) {
+        color += calculateIBL(N, V, surf, occlusion) * screenAO;
+    } else {
+        color += albedo * 0.03 * occlusion * screenAO;
+    }
     color += emissive;
 
     // Output LINEAR HDR into the RGBA16F colorRT. Tone mapping (ACES) and the

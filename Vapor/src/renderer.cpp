@@ -1452,6 +1452,12 @@ void Renderer::mainRenderPass() {
         // Always bind a 2D texture here: the defaults loop above put a cubemap in
         // b8/b9 (dead Metal contract), and b8/b9 are sampler2D on this path.
         rhi->setTexture(0, 9, nearShadowMap.isValid() ? nearShadowMap : whiteTex, shadowSampler);
+        // IBL maps (set2 b10/b11/b12): the sky bake fills them on Vulkan now.
+        // Sampled only when the material's iblEnabled is set; bind always so the
+        // descriptor is valid whenever a material does enable it.
+        if (irradianceMap.isValid()) rhi->setTexture(0, 10, irradianceMap, clampSampler);
+        if (prefilterMap.isValid()) rhi->setTexture(0, 11, prefilterMap, clampSampler);
+        if (brdfLUTTex.isValid())    rhi->setTexture(0, 12, brdfLUTTex, clampSampler);
         // Perf-isolation debug flags -> RHIMain.frag push offset 96 (binding 2).
         // Vulkan-only: on Metal, fragment buffer(2) is the CLUSTER buffer, so
         // pushing here would corrupt it (the old billions-of-iterations hang).
@@ -1561,8 +1567,9 @@ void Renderer::mainRenderPass() {
 }
 
 // IBL-from-sky: capture the atmosphere into a cubemap, convolve irradiance,
-// prefilter specular mips, integrate the BRDF LUT. Runs once (iblNeedsUpdate),
-// Metal MSL for now (the Vulkan PBR path uses the atmosphere directly).
+// prefilter specular mips, integrate the BRDF LUT. Runs once (iblNeedsUpdate)
+// on both backends — the bake pipelines are MSL on Metal and GLSL twins on
+// Vulkan, and the main pass consumes the results as split-sum IBL.
 void Renderer::iblCapturePass() {
     if (!iblNeedsUpdate) return;
     if (!skyCapturePipeline.isValid() || !irradiancePipeline.isValid() ||
@@ -6233,6 +6240,9 @@ void Renderer::renderToTexture(
             rhi->setTexture(0, 8, whiteTex, clampSampler);   // SSCS neutral
             // Near-field shadow map is light-space (world POV) — valid here.
             rhi->setTexture(0, 9, nearShadowMap.isValid() ? nearShadowMap : whiteTex, shadowSampler);
+            if (irradianceMap.isValid()) rhi->setTexture(0, 10, irradianceMap, clampSampler);
+            if (prefilterMap.isValid()) rhi->setTexture(0, 11, prefilterMap, clampSampler);
+            if (brdfLUTTex.isValid())    rhi->setTexture(0, 12, brdfLUTTex, clampSampler);
             rhi->setFragmentBytes(&rttDebugFlags, sizeof(Uint32), 2);
             // Spot/rect buffers must be bound (declared in RHIMain.frag); zero
             // counts keep both loops off — their per-frame data belongs to the
