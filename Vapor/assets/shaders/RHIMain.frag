@@ -384,6 +384,14 @@ struct Surface {
 float luminance(vec3 c)     { return dot(c, vec3(0.3, 0.6, 0.1)); }
 float fresnelApprox(float u) { return pow(1.0001 - u, 5.0); }
 
+// Exact sRGB -> linear (matches 3d_common.metal's srgbToLinear). Albedo
+// textures are UNORM (raw sRGB bytes), so lighting must linearize them — Metal
+// does this per pixel; without it the Vulkan path lit with sRGB values, which
+// read too bright.
+vec3 srgbToLinear(vec3 c) {
+    return mix(c / 12.92, pow((c + 0.055) / 1.055, vec3(2.4)), step(0.04045, c));
+}
+
 float GTR1(float nh, float a) {
     if (a >= 1.0) return 1.0 / PI;
     float a2 = a * a;
@@ -449,7 +457,9 @@ void main() {
     MaterialData mat = materials[fragMaterialID];
 
     vec4 baseSample = texture(albedoMap, fragUV);
-    vec3 albedo = baseSample.rgb * mat.baseColorFactor.rgb * instanceColor.rgb;
+    // Linearize the sRGB-authored albedo before lighting (mirrors Metal's
+    // srgbToLinear(baseColor * baseColorFactor)); instanceColor is a linear tint.
+    vec3 albedo = srgbToLinear(baseSample.rgb * mat.baseColorFactor.rgb) * instanceColor.rgb;
     float metallic = texture(metallicMap, fragUV).b * mat.metallicFactor;
     float roughness = clamp(texture(roughnessMap, fragUV).g * mat.roughnessFactor, 0.04, 1.0);
     float occlusion = mix(1.0, texture(occlusionMap, fragUV).r, mat.occlusionStrength);
