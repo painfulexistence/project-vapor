@@ -61,14 +61,14 @@ public:
         ImGui::SetNextWindowPos(ImVec2(10, 30),   ImGuiCond_FirstUseEver);
         if (!ImGui::Begin("Application##debug_ui")) { ImGui::End(); return; }
 
-        // Left panel — entity list + systems + save
+        // Left panel — systems (top) + entity hierarchy + save
         ImGui::BeginChild("##scene_panel", ImVec2(280, 0), true);
-        drawEntityListContent(registry);
         if (m_systemsDrawer) {
-            ImGui::Separator();
-            if (ImGui::CollapsingHeader("Systems"))
+            if (ImGui::CollapsingHeader("Systems", ImGuiTreeNodeFlags_DefaultOpen))
                 m_systemsDrawer(registry);
         }
+        if (ImGui::CollapsingHeader("Hierarchy", ImGuiTreeNodeFlags_DefaultOpen))
+            drawEntityListContent(registry);
         if (m_serializer) {
             ImGui::Separator();
             drawSaveSection(registry);
@@ -184,7 +184,6 @@ private:
     // Left panel — entity list content
     // -------------------------------------------------------------------------
     void drawEntityListContent(entt::registry& registry) {
-        ImGui::TextDisabled("Scene");
         ImGui::InputText("Search", m_searchBuf, sizeof(m_searchBuf));
         ImGui::Separator();
 
