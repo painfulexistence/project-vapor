@@ -572,6 +572,13 @@ public:
     // phase when you want the transfer cost accounted there.
     virtual void flushUploads() = 0;
 
+    // Request a GPU capture of the NEXT frame, written to `outPath` as a
+    // .gputrace document (open it in Xcode: no Xcode project needed — ideal for
+    // CMake/Ninja builds). Metal wraps beginFrame..endFrame in
+    // MTLCaptureManager start/stopCapture. Requires the environment to allow
+    // capture: run with MTL_CAPTURE_ENABLED=1. No-op on backends without it.
+    virtual void captureFrame(const char* /*outPath*/) {}
+
     // Copy swapchain/texture to CPU-readable buffer for screenshot
     // Returns a buffer handle that can be mapped after the copy completes
     virtual BufferHandle copySwapchainToBuffer(Uint32& outWidth, Uint32& outHeight) = 0;

@@ -4,6 +4,8 @@
 // emit the implementation → duplicate symbols at link).
 #include "rhi_metal.hpp"
 #include "stats_log.hpp"
+#include <filesystem>
+#include <system_error>
 #include <fmt/core.h>
 #include <stdexcept>
 #include <algorithm>
@@ -1064,7 +1066,48 @@ void RHI_Metal::unmapBuffer(BufferHandle handle) {
 // Frame Operations
 // ============================================================================
 
+void RHI_Metal::captureFrame(const char* outPath) {
+    pendingCapturePath = outPath ? outPath : "";
+}
+
+void RHI_Metal::stopCaptureIfActive() {
+    if (captureInProgress) {
+        MTL::CaptureManager::sharedCaptureManager()->stopCapture();
+        captureInProgress = false;
+        fmt::print("[capture] stopped — open the .gputrace in Xcode\n");
+    }
+}
+
 void RHI_Metal::beginFrame() {
+    // Arm a one-shot GPU capture spanning this whole frame (captureFrame()).
+    if (!pendingCapturePath.empty() && !captureInProgress) {
+        auto* mgr = MTL::CaptureManager::sharedCaptureManager();
+        if (mgr->supportsDestination(MTL::CaptureDestinationGPUTraceDocument)) {
+            auto* desc = MTL::CaptureDescriptor::alloc()->init();
+            desc->setCaptureObject(device);
+            desc->setDestination(MTL::CaptureDestinationGPUTraceDocument);
+            // startCapture fails if the output already exists (.gputrace is a
+            // bundle/directory) — clear a prior trace at this path first.
+            std::error_code ec;
+            std::filesystem::remove_all(pendingCapturePath, ec);
+            auto* nsPath = NS::String::string(pendingCapturePath.c_str(), NS::UTF8StringEncoding);
+            desc->setOutputURL(NS::URL::fileURLWithPath(nsPath));
+            NS::Error* err = nullptr;
+            if (mgr->startCapture(desc, &err)) {
+                captureInProgress = true;
+                fmt::print("[capture] started -> {}\n", pendingCapturePath);
+            } else {
+                fmt::print("[capture] startCapture failed: {}\n",
+                           err ? err->localizedDescription()->utf8String()
+                               : "unknown (run with MTL_CAPTURE_ENABLED=1, and delete any existing file at that path)");
+            }
+            desc->release();
+        } else {
+            fmt::print("[capture] GPU-trace capture unavailable — relaunch with MTL_CAPTURE_ENABLED=1\n");
+        }
+        pendingCapturePath.clear();
+    }
+
     // Throttle the CPU to getMaxFramesInFlight() frames ahead of the GPU. The
     // permit is returned by this frame's completion handler (endFrame) or, if
     // this frame is skipped for want of a drawable, immediately below.
@@ -1198,6 +1241,7 @@ void RHI_Metal::endFrame() {
     // Frame was skipped (no drawable available in beginFrame)
     if (!currentCommandBuffer) {
         currentDrawable = nullptr;
+        stopCaptureIfActive();  // don't leave a capture armed across a skipped frame
         if (framePool) { framePool->release(); framePool = nullptr; }
         return;
     }
@@ -1248,6 +1292,10 @@ void RHI_Metal::endFrame() {
             fflush(stderr);
         }
     }
+
+    // Close the one-shot capture (commit above already recorded this frame's
+    // command buffer into the trace).
+    stopCaptureIfActive();
 
     // Reset frame state
     currentDrawable = nullptr;

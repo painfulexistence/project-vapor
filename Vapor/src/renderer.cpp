@@ -5680,6 +5680,13 @@ void Renderer::drawGraphicsImGui() {
             // Diagnostic: read + validate meshletTriangles(5). In-range non-degen
             // => buffer read OK (bug is set_index); no R => indices out of range.
             ImGui::Checkbox("  Topology probe (color = index validity, debug)", &meshletProbeTopo);
+            // One-shot GPU capture of the next frame -> .gputrace (open in Xcode).
+            // Needs the app relaunched with MTL_CAPTURE_ENABLED=1.
+            if (ImGui::Button("  Capture next frame (.gputrace)")) {
+                rhi->captureFrame("/tmp/vapor_meshlet.gputrace");
+            }
+            ImGui::SameLine();
+            ImGui::TextDisabled("(run with MTL_CAPTURE_ENABLED=1)");
         }
 
         // MDI is a sub-option of the plain Indirect method (single-call

@@ -77,6 +77,7 @@ public:
     void generateMipmaps(TextureHandle handle) override;
     void copyTexture(TextureHandle src, Uint32 srcMip, TextureHandle dst, Uint32 dstMip) override;
     void flushUploads() override;
+    void captureFrame(const char* outPath) override;
 
     BufferHandle copySwapchainToBuffer(Uint32& outWidth, Uint32& outHeight) override;
     void* mapBuffer(BufferHandle handle) override;
@@ -221,6 +222,12 @@ private:
 
     // Device feature support, filled in initialize()
     RHICapabilities capabilities;
+
+    // One-shot GPU capture (captureFrame): non-empty path arms a capture that
+    // spans the next beginFrame..endFrame into a .gputrace document.
+    std::string pendingCapturePath;
+    bool captureInProgress = false;
+    void stopCaptureIfActive();
 
     // ========================================================================
     // Resource Storage
