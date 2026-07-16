@@ -2,13 +2,19 @@
 
 // GPU Particle structure for compute shader simulation.
 // Matches render_data.hpp GPUParticleData (64 bytes).
-// Metal float3 occupies 16 bytes (implicit 4-byte pad after each field),
-// which aligns with C++ (glm::vec3 + float pad = 16 bytes).
+//
+// IMPORTANT: Metal float3 in a struct aligns to 16 bytes — its .w component
+// is inaccessible implicit padding. Using float4 instead makes the lifetime
+// and age fields explicitly readable, and keeps byte offsets identical to C++:
+//   posLifetime.xyz = position (offset 0),  .w = lifetime (offset 12)
+//   velAge.xyz      = velocity (offset 16), .w = age      (offset 28)
+//   forcePad.xyz    = force    (offset 32), .w = _pad3    (offset 44)
+//   color                                             offset 48
 struct Particle {
-    float3 position;  // bytes  0-15 (12 data + 4 implicit pad = lifetime slot)
-    float3 velocity;  // bytes 16-31 (12 data + 4 implicit pad = age slot)
-    float3 force;     // bytes 32-47 (12 data + 4 implicit pad)
-    float4 color;     // bytes 48-63
+    float4 posLifetime; // xyz=position, w=lifetime (-1=immortal)
+    float4 velAge;      // xyz=velocity, w=age (seconds since spawn)
+    float4 forcePad;    // xyz=force, w=_pad3
+    float4 color;
 };
 
 // Canonical sim params (64 bytes) — matches C++ ParticleSimParams in render_data.hpp.
@@ -74,34 +80,45 @@ kernel void particleForce(
     if (id >= params.particleCount) return;
 
     Particle p = particles[id];
+    float3 pos      = p.posLifetime.xyz;
+    float  lifetime = p.posLifetime.w;
+    float3 vel      = p.velAge.xyz;
+    float3 force    = p.forcePad.xyz;
+
+    // Skip dead particles (force pass mirrors GLSL)
+    if (lifetime >= 0.0 && p.velAge.w >= lifetime) {
+        particles[id] = p;
+        return;
+    }
 
     // Reset force
-    p.force = float3(0.0);
+    force = float3(0.0);
 
     // Accumulate attractor forces (inverse-square with softening)
     for (uint i = 0; i < params.attractorCount; i++) {
-        float3 toAttr = attractors[i].position - p.position;
+        float3 toAttr = attractors[i].position - pos;
         float  dist   = length(toAttr);
         if (dist > 0.001) {
             float3 dir      = toAttr / dist;
             float  forceMag = attractors[i].strength / (dist * dist + 0.1);
-            p.force += dir * forceMag;
+            force += dir * forceMag;
         }
     }
 
     // Wind
     if (params.wind.w > 0.0) {
-        p.force += params.wind.xyz * params.wind.w;
+        force += params.wind.xyz * params.wind.w;
     }
 
     // Divergence-free curl noise turbulence
     if (params.turbulence.w > 0.0) {
-        p.force += curlNoise(p.position, params.time) * params.turbulence.w;
+        force += curlNoise(pos, params.time) * params.turbulence.w;
     }
 
     // Velocity-dependent drag — matches Vulkan (0.5)
-    p.force -= p.velocity * 0.5;
+    force -= vel * 0.5;
 
+    p.forcePad = float4(force, p.forcePad.w);
     particles[id] = p;
 }
 
@@ -113,20 +130,42 @@ kernel void particleIntegrate(
     if (id >= params.particleCount) return;
 
     Particle p = particles[id];
+    float3 pos      = p.posLifetime.xyz;
+    float  lifetime = p.posLifetime.w;
+    float  age      = p.velAge.w;
+    float3 vel      = p.velAge.xyz;
+    float3 force    = p.forcePad.xyz;
 
-    // Semi-implicit Euler integration
-    p.velocity += p.force * params.deltaTime;
-    p.position += p.velocity * params.deltaTime;
-
-    // Boundary conditions for orbital demo particles (no lifetime)
-    float maxDist = 20.0;
-    float dist = length(p.position);
-    if (dist > maxDist) {
-        p.position = normalize(p.position) * maxDist;
-        float3 normal = normalize(p.position);
-        p.velocity = reflect(p.velocity, normal) * 0.5;
+    // Advance age; fade and kill finite-lifetime particles (mirrors GLSL)
+    if (lifetime >= 0.0) {
+        age += params.deltaTime;
+        p.velAge.w = age;
+        if (age >= lifetime) {
+            particles[id] = p;
+            return;
+        }
+        // Fade alpha in last 30% of life
+        float frac = age / lifetime;
+        if (frac > 0.7) p.color.a = 1.0 - (frac - 0.7) / 0.3;
     }
 
+    // Semi-implicit Euler integration
+    vel   += force * params.deltaTime;
+    pos   += vel   * params.deltaTime;
+
+    // Boundary conditions for immortal orbital demo particles
+    if (lifetime < 0.0) {
+        float maxDist = 20.0;
+        float dist = length(pos);
+        if (dist > maxDist) {
+            pos = normalize(pos) * maxDist;
+            float3 normal = normalize(pos);
+            vel = reflect(vel, normal) * 0.5;
+        }
+    }
+
+    p.posLifetime = float4(pos, lifetime);
+    p.velAge      = float4(vel, age);
     particles[id] = p;
 }
 
@@ -177,9 +216,9 @@ vertex ParticleVertexOut particleVertex(
     float3 cameraRight = float3(camera.view[0][0], camera.view[1][0], camera.view[2][0]);
     float3 cameraUp    = float3(camera.view[0][1], camera.view[1][1], camera.view[2][1]);
 
-    float2 quadPos = quadVertices[vertexID];
-    float  size    = pushConstants.particleSize;
-    float3 worldPos = p.position
+    float2 quadPos  = quadVertices[vertexID];
+    float  size     = pushConstants.particleSize;
+    float3 worldPos = p.posLifetime.xyz  // position is the xyz of posLifetime
                     + cameraRight * quadPos.x * size
                     + cameraUp    * quadPos.y * size;
 
