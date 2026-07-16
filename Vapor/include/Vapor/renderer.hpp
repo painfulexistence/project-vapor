@@ -837,10 +837,12 @@ private:
     // GIBS surfel GI (RequiresRaytracing; Metal MSL kernels via RHI compute).
     // GIBSData itself lives in graphics_gibs.hpp (included in renderer.cpp only
     // to keep this header clear of the split-header landmines).
-    ComputePipelineHandle surfelGenPipeline, surfelClearPipeline, surfelInsertPipeline,
-                          surfelRTPipeline, surfelTemporalPipeline, giSamplePipeline;
+    ComputePipelineHandle surfelGenPipeline, surfelUpdatePipeline, surfelClearPipeline,
+                          surfelInsertPipeline, surfelRTPipeline, surfelTemporalPipeline, giSamplePipeline;
     ShaderHandle gibsShaders[6];
-    BufferHandle surfelBuffer, cellHeadBuffer, surfelNextBuffer, surfelCounterBuffer, gibsDataBuffer;
+    ShaderHandle gibsUpdateShader;  // surfelUpdate entry (aging + free-list eviction)
+    BufferHandle surfelBuffer, cellHeadBuffer, surfelNextBuffer, surfelFreeListBuffer,
+                 surfelCounterBuffer, gibsDataBuffer;
     TextureHandle giResultTexture;
     glm::mat4 gibsPrevViewProj = glm::mat4(1.0f);
     Uint32 gibsActiveSurfels = 0;

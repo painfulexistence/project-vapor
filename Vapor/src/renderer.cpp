@@ -346,6 +346,9 @@ void Renderer::initialize(std::unique_ptr<RHI> rhiPtr, GraphicsBackend backendTy
         cellHeadBuffer = rhi->createBuffer(bd);
         bd.size = size_t(gibsMaxSurfels) * sizeof(Uint32);
         surfelNextBuffer = rhi->createBuffer(bd);
+        // Free-list: indices of surfel slots surfelUpdate has evicted, popped by
+        // generation for reuse so the pool self-recycles (holds at most maxSurfels).
+        surfelFreeListBuffer = rhi->createBuffer(bd);
 
         BufferDesc cb;
         cb.usage = BufferUsage::Storage;
@@ -2014,11 +2017,13 @@ void Renderer::gibsPass() {
         if (gibsResetRequested) {
             p[0] = 0;
             p[1] = 0;
+            p[2] = 0;  // free-list depth: drop all reclaimed slots too
             gibsActiveSurfels = 0;
             gibsResetRequested = false;
         } else {
             gibsActiveSurfels = std::min(p[1], gibsMaxSurfels);
             p[0] = 0;
+            // p[1] (high-water) and p[2] (free-list depth) persist across frames.
         }
         rhi->unmapBuffer(surfelCounterBuffer);
     }
@@ -2069,6 +2074,21 @@ void Renderer::gibsPass() {
 
     rhi->beginComputePass("GIBS");
 
+    // 0) Age + evict existing surfels, pushing reclaimed slots onto the
+    //    free-list, BEFORE generation so this frame can reuse them. Without
+    //    this the pool only grows and freezes at maxSurfels (manual reset was
+    //    the only recovery). Iterates [0, active); the kernel skips invalid
+    //    slots (already freed).
+    if (surfelUpdatePipeline.isValid() && gibsActiveSurfels > 0) {
+        rhi->bindComputePipeline(surfelUpdatePipeline);
+        rhi->setComputeBuffer(0, surfelBuffer, 0, surfelBytes);
+        rhi->setComputeBuffer(1, surfelCounterBuffer, 0, 4 * sizeof(Uint32));
+        rhi->setComputeBuffer(2, gibsDataBuffer, 0, sizeof(GIBSData));
+        rhi->setComputeBuffer(3, surfelFreeListBuffer);
+        rhi->dispatch((gibsActiveSurfels + 255) / 256, 1, 1);
+        rhi->computeBarrier();
+    }
+
     // 1) Surfel generation from the pre-pass G-buffer.
     SurfelGenerationParams gp{};
     gp.invViewProj = gd.invViewProj;
@@ -2087,6 +2107,7 @@ void Renderer::gibsPass() {
     rhi->setComputeBytes(&gp, sizeof(gp), 3);
     rhi->setComputeBuffer(4, cellHeadBuffer);
     rhi->setComputeBuffer(5, surfelNextBuffer);
+    rhi->setComputeBuffer(6, surfelFreeListBuffer);  // pop reclaimed slots
     rhi->dispatch((w + 7) / 8, (h + 7) / 8, 1);
     rhi->computeBarrier();
 
@@ -4181,6 +4202,7 @@ void Renderer::createRenderPipeline() {
             return rhi->createComputePipeline(cd);
         };
         surfelGenPipeline      = makeNamedCompute("shaders/gibs_surfel_generation.metal", "surfelGeneration", gibsShaders[0], 8, 8, 1);
+        surfelUpdatePipeline   = makeNamedCompute("shaders/gibs_surfel_generation.metal", "surfelUpdate", gibsUpdateShader, 256, 1, 1);
         surfelClearPipeline    = makeNamedCompute("shaders/gibs_spatial_hash.metal", "clearCellHeads", gibsShaders[1], 256, 1, 1);
         surfelInsertPipeline   = makeNamedCompute("shaders/gibs_spatial_hash.metal", "insertSurfels", gibsShaders[2], 256, 1, 1);
         surfelRTPipeline       = makeNamedCompute("shaders/gibs_raytracing.metal", "surfelRaytracing", gibsShaders[3], 64, 1, 1);
