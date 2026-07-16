@@ -350,7 +350,14 @@ auto main(int argc, char* args[]) -> int {
         engineCore->attachRenderer(renderer.get(), outputDir);
     }
 
+    // Render-to-texture "TV" demo toggle. Off = the offscreen render, its
+    // post-process, and the world-space quad are all skipped, so nothing shows.
+    bool tvEnabled = true;
     renderer->setImGuiCallback([&]() {
+        if (ImGui::Begin("Demo")) {
+            ImGui::Checkbox("Render-to-texture TV", &tvEnabled);
+        }
+        ImGui::End();
         sceneInspector.draw(registry);
     });
 
@@ -651,43 +658,45 @@ auto main(int argc, char* args[]) -> int {
                 );
             }
 
-            // ===== Render-to-Texture Demo =====
-            // Update RT camera to orbit around the scene
-            float rtAngle = time * 0.5f;
-            rtCamera.setEye(glm::vec3(sin(rtAngle) * 8.0f, 4.0f, cos(rtAngle) * 8.0f));
-            rtCamera.setCenter(glm::vec3(0.0f, 0.0f, 0.0f));
-
-            // Render scene to texture with different camera angle
-            renderer->renderToTexture(renderTexture, scene, rtCamera, glm::vec4(0.1f, 0.1f, 0.15f, 1.0f));
-
-            // Apply post-processing effects to the render texture
-            renderer->applyBloom(renderTexture, 0.8f, 0.3f);
-            renderer->applyToneMapping(renderTexture, 1.2f);
-
-            // Get the render texture as a regular texture for drawing
-            TextureHandle rtTexHandle = renderer->getRenderTextureAsTexture(renderTexture);
-
             // ===== 3D Batch Demo =====
             renderer->drawQuad3D(
                 glm::vec3(0.0f, 2.0f, 0.0f), glm::vec2(1.0f, 1.0f), spriteTexture, glm::vec4(1.0f, 0.5f, 0.5f, 1.0f)
             );
 
-            // Draw the render texture on a 3D quad (like a TV screen in the world)
-            if (rtTexHandle.isValid()) {
-                // Create a transform for the "TV screen"
-                glm::mat4 tvTransform = glm::mat4(1.0f);
-                tvTransform = glm::translate(tvTransform, glm::vec3(-3.0f, 2.0f, 0.0f));
-                tvTransform = glm::rotate(tvTransform, glm::radians(30.0f), glm::vec3(0.0f, 1.0f, 0.0f));
-                tvTransform = glm::scale(tvTransform, glm::vec3(2.0f, 2.0f, 1.0f));
+            // ===== Render-to-Texture "TV" Demo (toggled from the Demo window) =====
+            if (tvEnabled) {
+                // Update RT camera to orbit around the scene
+                float rtAngle = time * 0.5f;
+                rtCamera.setEye(glm::vec3(sin(rtAngle) * 8.0f, 4.0f, cos(rtAngle) * 8.0f));
+                rtCamera.setCenter(glm::vec3(0.0f, 0.0f, 0.0f));
 
-                // Rendered textures store row 0 = top of the view, but the batch
-                // quad's default UVs put v=0 at the quad's BOTTOM corner (image
-                // convention) — sample with V flipped so the TV reads upright.
-                // Corner order: BL, BR, TR, TL.
-                static const glm::vec2 kRttUVs[4] = {
-                    { 0.0f, 1.0f }, { 1.0f, 1.0f }, { 1.0f, 0.0f }, { 0.0f, 0.0f }
-                };
-                renderer->drawQuad3D(tvTransform, rtTexHandle, kRttUVs, glm::vec4(1.0f));
+                // Render scene to texture with different camera angle
+                renderer->renderToTexture(renderTexture, scene, rtCamera, glm::vec4(0.1f, 0.1f, 0.15f, 1.0f));
+
+                // Apply post-processing effects to the render texture
+                renderer->applyBloom(renderTexture, 0.8f, 0.3f);
+                renderer->applyToneMapping(renderTexture, 1.2f);
+
+                // Get the render texture as a regular texture for drawing
+                TextureHandle rtTexHandle = renderer->getRenderTextureAsTexture(renderTexture);
+
+                // Draw the render texture on a 3D quad (like a TV screen in the world)
+                if (rtTexHandle.isValid()) {
+                    // Create a transform for the "TV screen"
+                    glm::mat4 tvTransform = glm::mat4(1.0f);
+                    tvTransform = glm::translate(tvTransform, glm::vec3(-3.0f, 2.0f, 0.0f));
+                    tvTransform = glm::rotate(tvTransform, glm::radians(30.0f), glm::vec3(0.0f, 1.0f, 0.0f));
+                    tvTransform = glm::scale(tvTransform, glm::vec3(2.0f, 2.0f, 1.0f));
+
+                    // Rendered textures store row 0 = top of the view, but the batch
+                    // quad's default UVs put v=0 at the quad's BOTTOM corner (image
+                    // convention) — sample with V flipped so the TV reads upright.
+                    // Corner order: BL, BR, TR, TL.
+                    static const glm::vec2 kRttUVs[4] = {
+                        { 0.0f, 1.0f }, { 1.0f, 1.0f }, { 1.0f, 0.0f }, { 0.0f, 0.0f }
+                    };
+                    renderer->drawQuad3D(tvTransform, rtTexHandle, kRttUVs, glm::vec4(1.0f));
+                }
             }
 
 
