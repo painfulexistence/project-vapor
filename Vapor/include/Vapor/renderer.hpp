@@ -800,6 +800,12 @@ private:
     float sscsThickness = 0.3f;   // occluder depth window
     Uint32 sscsSteps = 12;
     float sscsBias = 0.02f;       // view-space start offset (self-occlusion guard)
+    // Stochastic RT shadows for the analytic lights (point R / rect G / spot B
+    // channels). Metal RT only; noisy without a denoiser (ReSTIR is the planned
+    // fix). Default OFF: leaving it off makes Metal render point/rect/spot
+    // unshadowed — the same as the (RT-less) Vulkan path — so the two backends'
+    // output stays roughly aligned until the denoiser lands.
+    bool stochasticShadowsEnabled = false;
     // Stochastic point-shadow debug view (native pointShadowDebugMode):
     // 0 = visibility, 1 = tile light-count heatmap.
     Uint32 pointShadowDebugMode = 0;

@@ -1476,15 +1476,20 @@ void Renderer::mainRenderPass() {
             // RT kernel outputs replace the neutral whites —
             // texShadow(7), texPointShadow(13), gibsGI(14).
             if (shadowRT.isValid()) rhi->setTexture(0, 7, shadowRT, clampSampler);
-            if (pointShadowHistoryRT.isValid()) rhi->setTexture(0, 13, pointShadowHistoryRT, clampSampler);
+            // texPointShadow (RGB point/rect/spot channels) only when stochastic
+            // shadows are on; otherwise the neutral white bound above keeps
+            // point/rect/spot unshadowed — matching the RT-less Vulkan path.
+            if (stochasticShadowsEnabled && pointShadowHistoryRT.isValid())
+                rhi->setTexture(0, 13, pointShadowHistoryRT, clampSampler);
             if (gibsEnabled && giResultTexture.isValid()) rhi->setTexture(0, 14, giResultTexture, clampSampler);
         }
         // Spot lights (buffer 14) + counts/flags (buffer 15). Flag bit0 says the
         // point-shadow texture carries the RGB channel format (R point / G rect
-        // / B spot) — true on this path, whose targets are RGBA16F.
+        // / B spot); 0 when stochastic shadows are off, so rect/spot stay
+        // unshadowed instead of sampling the (white) placeholder's channels.
         rhi->setFragmentBuffer(14, spotLightBuffer, 0, sizeof(Vapor::SpotLight) * maxSpotLights);
         glm::uvec2 spotRectParams(static_cast<Uint32>(spotLights.size()),
-                                  capabilities.raytracing ? 1u : 0u);
+                                  (capabilities.raytracing && stochasticShadowsEnabled) ? 1u : 0u);
         rhi->setFragmentBytes(&spotRectParams, sizeof(glm::uvec2), 15);
     }
 
@@ -1964,6 +1969,7 @@ void Renderer::aoDenoisePass() {
 
 // Stochastic ray-traced point-light shadows (clustered light sampling).
 void Renderer::stochasticPointShadowPass() {
+    if (!stochasticShadowsEnabled) return;  // noisy without a denoiser; off = aligns with Vulkan
     if (!stochasticPointShadowPipeline.isValid() || !sceneTLAS.isValid() || !pointShadowRT.isValid()) return;
     Uint32 w = rhi->getSwapchainWidth();
     Uint32 h = rhi->getSwapchainHeight();
@@ -2238,6 +2244,7 @@ void Renderer::gibsPass() {
 // here the handles are swapped instead (post-swap, history holds the latest
 // denoised result and is what the PBR shader binds).
 void Renderer::pointShadowTemporalPass() {
+    if (!stochasticShadowsEnabled) return;
     if (!pointShadowTemporalPipeline.isValid() || !pointShadowRT.isValid()) return;
     Uint32 w = rhi->getSwapchainWidth();
     Uint32 h = rhi->getSwapchainHeight();
@@ -5054,6 +5061,11 @@ void Renderer::drawGraphicsImGui() {
 
     if (ImGui::TreeNode("Shadow Debug")) {
         ImGui::Text("Raytracing: %s", capabilities.raytracing ? "yes" : "no");
+        // Stochastic RT area/point/spot shadows: noisy without a denoiser
+        // (ReSTIR pending). Off = point/rect/spot unshadowed on both backends.
+        ImGui::Checkbox("Stochastic RT shadows (point/rect/spot)", &stochasticShadowsEnabled);
+        if (stochasticShadowsEnabled)
+            ImGui::TextDisabled("noisy until ReSTIR denoise lands (Metal RT only)");
         // pssmRTMaxDist now sets where the independent near-field shadow map ends
         // and the PSSM cascades begin (the near map, not RT, owns [near, this]).
         ImGui::SliderFloat("Near shadow distance", &pssmRTMaxDist, 5.0f, 200.0f);
