@@ -358,6 +358,7 @@ auto main(int argc, char* args[]) -> int {
         buildScene(registry, *physics, scene, material, windowWidth, windowHeight, rng);
 
     renderer->stage(scene);
+    renderer->setParticleTurbulence(2.0f); // curl noise swirl for the particle sea
 
     // Convert GLTF scene meshes to ECS entities so they appear in the inspector
     // and are rendered through the unified registry draw path.
@@ -567,6 +568,8 @@ auto main(int argc, char* args[]) -> int {
 
         physics->process(registry, deltaTime);
         Vapor::TransformSystem::update(registry);
+        Vapor::ParticleForceFieldSystem::update(registry, renderer.get());
+        Vapor::ParticleEmitterSystem::update(registry, renderer.get(), deltaTime);
         LightGatherSystem::update(registry, scene.get());
         FlipbookSystem::update(registry, deltaTime);
         SpriteRenderSystem::update(registry, renderer.get(), &resourceManager);

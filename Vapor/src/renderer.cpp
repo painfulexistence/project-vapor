@@ -3016,24 +3016,14 @@ void Renderer::particlePass() {
     sp.wind = m_particleWind;
     sp.turbulence = glm::vec4(0.0f, 0.0f, 0.0f, m_particleTurbulence);
 
-    // ECS attractors if present; otherwise use the demo orbital attractor.
-    std::vector<ParticleAttractor> attractors;
-    if (!m_ecsAttractors.empty()) {
-        attractors = m_ecsAttractors;
-    } else {
-        ParticleAttractor demo;
-        glm::vec3 forward = -glm::vec3(currentCamera.view[0][2], currentCamera.view[1][2], currentCamera.view[2][2]);
-        demo.position = currentCamera.position + forward * 3.0f;
-        demo.strength = 50.0f;
-        attractors.push_back(demo);
-    }
-    // Clamp to MAX_PARTICLE_ATTRACTORS
+    std::vector<ParticleAttractor> attractors = m_ecsAttractors;
     if (attractors.size() > MAX_PARTICLE_ATTRACTORS)
         attractors.resize(MAX_PARTICLE_ATTRACTORS);
     sp.attractorCount = static_cast<Uint32>(attractors.size());
     rhi->updateBuffer(particleSimParamsBuffer, &sp, 0, sizeof(sp));
-    rhi->updateBuffer(particleAttractorBuffer, attractors.data(), 0,
-                      attractors.size() * sizeof(ParticleAttractor));
+    if (!attractors.empty())
+        rhi->updateBuffer(particleAttractorBuffer, attractors.data(), 0,
+                          attractors.size() * sizeof(ParticleAttractor));
 
     const size_t bufBytes = sizeof(GPUParticleData) * particleCount;
     const Uint32 groups = (particleCount + 255) / 256;

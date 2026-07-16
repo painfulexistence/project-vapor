@@ -1384,12 +1384,6 @@ public:
         auto time = (float)SDL_GetTicks() / 1000.0f;
         float deltaTime = 1.0f / 60.0f;// Use fixed timestep to avoid issues
 
-        // Compute attractor position (in front of camera)
-        glm::vec3 camPos = r.currentCamera->getEye();
-        glm::mat4 view = r.currentCamera->getViewMatrix();
-        glm::vec3 forward = -glm::vec3(view[0][2], view[1][2], view[2][2]);
-        glm::vec3 attractorPos = camPos + forward * 3.0f;
-
         // Update simulation params buffer using the canonical render_data.hpp struct.
         ParticleSimParams simParams;
         auto drawableSize = r.swapchain->drawableSize();
@@ -1401,16 +1395,7 @@ public:
         simParams.wind = r.m_particleWind;
         simParams.turbulence = glm::vec4(0.0f, 0.0f, 0.0f, r.m_particleTurbulence);
 
-        // ECS attractors if present; otherwise use the demo orbital attractor.
-        std::vector<ParticleAttractor> attractors;
-        if (!r.m_ecsAttractors.empty()) {
-            attractors = r.m_ecsAttractors;
-        } else {
-            ParticleAttractor demo;
-            demo.position = attractorPos;
-            demo.strength = 50.0f;
-            attractors.push_back(demo);
-        }
+        std::vector<ParticleAttractor> attractors = r.m_ecsAttractors;
         if (attractors.size() > MAX_PARTICLE_ATTRACTORS)
             attractors.resize(MAX_PARTICLE_ATTRACTORS);
         simParams.attractorCount = static_cast<Uint32>(attractors.size());
@@ -1418,9 +1403,11 @@ public:
         memcpy(r.particleSimParamsBuffers[r.currentFrameInFlight]->contents(), &simParams, sizeof(ParticleSimParams));
         r.particleSimParamsBuffers[r.currentFrameInFlight]->didModifyRange(NS::Range::Make(0, sizeof(ParticleSimParams)));
 
-        const size_t attractorBytes = attractors.size() * sizeof(ParticleAttractor);
-        memcpy(r.particleAttractorBuffers[r.currentFrameInFlight]->contents(), attractors.data(), attractorBytes);
-        r.particleAttractorBuffers[r.currentFrameInFlight]->didModifyRange(NS::Range::Make(0, attractorBytes));
+        if (!attractors.empty()) {
+            const size_t attractorBytes = attractors.size() * sizeof(ParticleAttractor);
+            memcpy(r.particleAttractorBuffers[r.currentFrameInFlight]->contents(), attractors.data(), attractorBytes);
+            r.particleAttractorBuffers[r.currentFrameInFlight]->didModifyRange(NS::Range::Make(0, attractorBytes));
+        }
 
         // Compute passes (single particle buffer - persistent state)
         {

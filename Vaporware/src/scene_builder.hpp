@@ -287,6 +287,43 @@ inline SceneResources buildScene(
     }
     registry.emplace<SceneTransitionComponent>(navEntity);
 
+    // ── Particle sea ──────────────────────────────────────────────────────────
+    // Two attractors create a dual-focus gravitational field; curl noise turbulence
+    // (set in main) causes the stream to swirl rather than collapse to a point.
+    {
+        auto e = registry.create();
+        auto& tc = registry.emplace<Vapor::TransformComponent>(e);
+        tc.position = glm::vec3(0.0f, 3.0f, 0.0f);
+        auto& attr = registry.emplace<Vapor::ParticleAttractorComponent>(e);
+        attr.strength = 40.0f;
+    }
+    {
+        auto e = registry.create();
+        auto& tc = registry.emplace<Vapor::TransformComponent>(e);
+        tc.position = glm::vec3(6.0f, 1.0f, -4.0f);
+        auto& attr = registry.emplace<Vapor::ParticleAttractorComponent>(e);
+        attr.strength = 18.0f;
+    }
+    {
+        auto e = registry.create();
+        auto& wf = registry.emplace<Vapor::WindFieldComponent>(e);
+        wf.direction = glm::normalize(glm::vec3(1.0f, 0.1f, 0.4f));
+        wf.strength  = 0.6f;
+    }
+    {
+        auto e = registry.create();
+        auto& tc = registry.emplace<Vapor::TransformComponent>(e);
+        tc.position = glm::vec3(0.0f, 5.0f, 0.0f);
+        auto& em = registry.emplace<Vapor::ParticleEmitterComponent>(e);
+        em.maxParticles     = 1'000'000;
+        em.emitRate         = 300'000.0f; // fills slots in ~3 s
+        em.particleLifetime = 5.0f;
+        em.speed            = 6.0f;
+        em.spread           = 3.14159265f; // full sphere
+        em.emitDirection    = glm::vec3(0.0f, 1.0f, 0.0f);
+        em.color            = glm::vec4(0.45f, 0.55f, 1.0f, 1.0f); // indigo-blue
+    }
+
     res.global = registry.create();
 
     return res;
