@@ -501,7 +501,7 @@ namespace Vapor {
                 uint32_t spawns = static_cast<uint32_t>(emit._accumulator);
                 if (spawns == 0) continue;
                 emit._accumulator -= static_cast<float>(spawns);
-                spawns = std::min(spawns, emit._slotCount);
+                spawns = std::min(spawns, static_cast<uint32_t>(emit._slotCount));
 
                 // Sample random cone directions around emitDirection
                 glm::vec3 fwd = glm::normalize(emit.emitDirection);
@@ -578,7 +578,7 @@ namespace Vapor {
                 uint32_t slotCount = req.count;
                 if (emit && emit->_slotBegin != ~0u) {
                     slotBegin = emit->_slotBegin;
-                    slotCount = std::min(req.count, emit->_slotCount);
+                    slotCount = std::min(req.count, static_cast<uint32_t>(emit->_slotCount));
                 } else {
                     slotBegin = renderer->claimParticleSlots(slotCount);
                 }
@@ -630,7 +630,7 @@ namespace Vapor {
                 // Mid-point of the quadratic Bezier arc (raised by arcHeight)
                 glm::vec3 mid = (bolt.origin + bolt.target) * 0.5f
                                 + glm::vec3(0.0f, bolt.arcHeight, 0.0f);
-                float s = glm::clamp(bolt._progress, 0.0f, 1.0f);
+                float s = glm::clamp(static_cast<float>(bolt._progress), 0.0f, 1.0f);
 
                 // Bezier position
                 t.position = (1.0f - s) * (1.0f - s) * bolt.origin

@@ -165,7 +165,7 @@ public:
     // Upload RGBA pixel data as the video texture sampled by rect lights marked
     // with useVideoTexture = true. Call once per frame after VideoPlayer::update().
     // TODO(RHI): implement via RHI texture upload once rect-light shading is ported.
-    void uploadRectLightVideoTexture(const uint8_t* /*rgba*/, uint32_t /*width*/, uint32_t /*height*/) {}
+    void uploadRectLightVideoTexture(const uint8_t* /*rgba*/, uint32_t /*width*/, uint32_t /*height*/) override {}
 
     // Manual flush (for controlling draw order)
     void flush2D() override;
