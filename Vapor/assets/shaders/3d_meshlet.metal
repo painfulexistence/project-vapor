@@ -161,6 +161,7 @@ static float projectError(float4 sphere, float error, float4x4 model, float maxS
 struct MeshletVertexOut {
     float4 position [[position]];
     float3 color;
+    float3 worldNormal;  // for the depth+normal pre-pass MRT (real path only)
 };
 
 // Per-primitive output. The working reference (metal-by-example/
@@ -423,6 +424,8 @@ static float3 hashColor(uint x) {
     // differently and can trip the main pass's LessOrEqual depth test).
     float4x4 model = instances[params.instanceID].model;
     float4x4 viewProj = cam.proj * cam.view;
+    float3x3 model33 = float3x3(model[0].xyz, model[1].xyz, model[2].xyz);
+    float3x3 normalMatrix = transpose(inverse(model33));
     float3 color = hashColor(mi);
 
     if (tid < m.vertexCount) {
@@ -430,6 +433,7 @@ static float3 hashColor(uint x) {
         MeshletVertexOut vout;
         vout.position = viewProj * (model * float4(float3(vertices[vi].position), 1.0));
         vout.color = color;
+        vout.worldNormal = normalMatrix * float3(vertices[vi].normal.xyz);
         output.set_vertex(tid, vout);
     }
     if (tid < m.triangleCount) {
@@ -453,6 +457,22 @@ static float3 hashColor(uint x) {
 
 fragment float4 fragmentMain(MeshletVertexOut in [[stage_in]]) {
     return float4(in.color, 1.0);
+}
+
+// MRT output for the meshlet depth pre-pass (mirrors 3d_depth_only.metal's
+// PrePassOutput): color(0) = world normal, color(1) = base color. The meshlet
+// path has no PBR material bind yet, so albedo carries the per-meshlet debug
+// color — enough for downstream passes that only need depth + a normal.
+struct MeshletPrePassOutput {
+    float4 normal [[color(0)]];
+    float4 albedo [[color(1)]];
+};
+
+fragment MeshletPrePassOutput fragmentPrePass(MeshletVertexOut in [[stage_in]]) {
+    MeshletPrePassOutput out;
+    out.normal = float4(normalize(in.worldNormal), 1.0);
+    out.albedo = float4(in.color, 1.0);
+    return out;
 }
 
 // Lowest-level probe: a MESH-ONLY pipeline (no object stage, no payload, no

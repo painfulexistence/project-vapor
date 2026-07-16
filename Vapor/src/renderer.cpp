@@ -985,17 +985,16 @@ void Renderer::render() {
     // whether you are CPU- or GPU-bound.
     const auto _cpuFrameStart = std::chrono::high_resolution_clock::now();
 
-    // Option A: with an MDI layout + GPU-driven pre-pass, EVERY geometry pass that
-    // consumed visibleDrawables is now GPU-driven (PreCull->PrePass indirect,
-    // GpuCull->Main indirect) or iterates the full frameDrawables set (shadows,
-    // TLAS). The CPU frustum cull would just produce an unused list, so skip it —
-    // that's the point of the indirect pre-pass. visibleDrawables stays empty;
-    // the HUD reports totalInstanceCount as the visible count in this mode.
-    const bool cpuCullNeeded = !(mdiLayoutActive() && gpuDrivenPrePass);
-    if (cpuCullNeeded) {
-        performCulling();
-    } else {
+    // Option A: when the pre-pass runs fully GPU-driven (indirect MDI pre-pass or
+    // meshlet mesh-shader pre-pass), EVERY geometry pass that consumed
+    // visibleDrawables is now GPU-driven or iterates the full frameDrawables set
+    // (shadows, TLAS). The CPU frustum cull would just produce an unused list, so
+    // skip it — that's the point. visibleDrawables stays empty; the HUD reports
+    // totalInstanceCount as the visible count in this mode.
+    if (gpuDrivenPrePassActive()) {
         visibleDrawables.clear();
+    } else {
+        performCulling();
     }
     sortDrawables();
     updateBuffers();
@@ -1015,7 +1014,7 @@ void Renderer::render() {
     // decides visibility per instance. Report the submitted instance count as the
     // "visible" figure rather than a misleading 0 (true GPU-visible count would
     // need a readback of the cull args).
-    lastFrameStats.visibleDrawables = (mdiLayoutActive() && gpuDrivenPrePass)
+    lastFrameStats.visibleDrawables = gpuDrivenPrePassActive()
         ? totalInstanceCount
         : static_cast<Uint32>(visibleDrawables.size());
     lastFrameStats.directionalLights = static_cast<Uint32>(directionalLights.size());
@@ -2127,6 +2126,41 @@ void Renderer::prePass() {
     rp.loadDepth = false;
     rp.clearDepth = 1.0f;
     rhi->beginRenderPass(rp);
+
+    // Meshlet Option A: GPU-driven depth+normal pre-pass via the SAME task+mesh
+    // shaders the main meshlet pass uses, so the pre-pass depth matches exactly
+    // what the main pass draws (its task-stage per-cluster cull decides
+    // visibility — there's no CPU-culled visibleDrawables to loop). One
+    // drawMeshTasks per instance, real LOD threshold (no debug probes here).
+    const bool meshletPrePass = gpuDrivenMeshlet() && gpuDrivenPrePass &&
+        meshletPrePassPipeline.isValid() &&
+        meshletBuffer.isValid() && meshletBoundsBuffer.isValid() &&
+        meshletVertexBuffer.isValid() && meshletTriangleBuffer.isValid() &&
+        mergedVertexBuffer.isValid() && totalInstanceCount > 0;
+    if (meshletPrePass) {
+        rhi->bindPipeline(meshletPrePassPipeline);
+        rhi->setVertexBuffer(0, cameraUniformBuffer, 0, sizeof(CameraRenderData));
+        rhi->setVertexBuffer(2, instanceDataBuffer, 0, sizeof(Vapor::InstanceData) * totalInstanceCount);
+        rhi->setVertexBuffer(3, meshletBuffer, 0, 0);
+        rhi->setVertexBuffer(4, meshletVertexBuffer, 0, 0);
+        rhi->setVertexBuffer(5, meshletTriangleBuffer, 0, 0);
+        rhi->setVertexBuffer(6, meshletBoundsBuffer, 0, 0);
+        rhi->setVertexBuffer(7, mergedVertexBuffer, 0, 0);
+        const float threshold = meshletLodPixelError / std::max(1.0f, float(rhi->getSwapchainHeight()));
+        struct MeshletParams { Uint32 instanceID; Uint32 meshletOffset; Uint32 meshletCount; float errorThreshold; };
+        for (Uint32 i = 0; i < frameDrawables.size(); ++i) {
+            auto it = drawableToInstanceID.find(i);
+            if (it == drawableToInstanceID.end()) continue;
+            const RenderMesh& mesh = meshes[frameDrawables[i].mesh];
+            if (mesh.meshletCount == 0) continue;  // mesh without baked meshlets
+            MeshletParams params{ it->second, mesh.meshletOffset, mesh.meshletCount, threshold };
+            rhi->setVertexBytes(&params, sizeof(params), 8);
+            rhi->drawMeshTasks((mesh.meshletCount + 31) / 32, 1, 1);
+        }
+        rhi->endRenderPass();
+        return;
+    }
+
     rhi->bindPipeline(prePassPipeline);
     rhi->setVertexBuffer(0, cameraUniformBuffer, 0, sizeof(CameraRenderData));
     rhi->setVertexBuffer(1, materialUniformBuffer, 0, sizeof(Vapor::MaterialData) * MAX_INSTANCES);
@@ -4846,6 +4880,29 @@ void Renderer::createRenderPipeline() {
                     mp.depthWrite = false;
                     mp.cullMode = CullMode::None;
                     meshletPipelineNoDepth = rhi->createMeshPipeline(mp);
+
+                    // Meshlet depth+normal pre-pass: same task+mesh shaders, MRT
+                    // fragment into the PrePass targets (normal + albedo + depth),
+                    // Less depth write (first writer). Keeps the meshlet pre-pass
+                    // on the exact geometry the main meshlet pass draws.
+                    std::string pf = readFile("shaders/MeshletPrePass.frag.spv");
+                    if (!pf.empty()) {
+                        ShaderDesc pd; pd.stage = ShaderStage::Fragment;
+                        pd.code = pf.data(); pd.codeSize = pf.size(); pd.entryPoint = "main";
+                        meshletPrePassFragShader = rhi->createShader(pd);
+                        MeshPipelineDesc pp;
+                        pp.taskShader = meshletTaskShader;
+                        pp.meshShader = meshletMeshShader;
+                        pp.fragmentShader = meshletPrePassFragShader;
+                        pp.taskThreadgroupSize = 32;
+                        pp.meshThreadgroupSize = 128;
+                        pp.depthTest = true;
+                        pp.depthWrite = true;
+                        pp.depthCompareOp = CompareOp::Less;
+                        pp.hasDepthAttachment = true;
+                        pp.colorAttachmentFormats = { PixelFormat::RGBA16_FLOAT, PixelFormat::RGBA8_UNORM };
+                        meshletPrePassPipeline = rhi->createMeshPipeline(pp);
+                    }
                 }
             }
 
@@ -5343,6 +5400,25 @@ void Renderer::createRenderPipeline() {
                 sp.hasDepthAttachment = true;
                 sp.colorAttachmentFormats = { PixelFormat::RGBA16_FLOAT };
                 meshletSyntheticPipeline = rhi->createMeshPipeline(sp);
+
+                // Meshlet depth+normal pre-pass: same task+mesh shaders, MRT
+                // fragment into the PrePass targets (normal + albedo + depth),
+                // Less depth write (first writer). Keeps the meshlet pre-pass on
+                // the exact geometry the main meshlet pass draws.
+                d.stage = ShaderStage::Fragment; d.entryPoint = "fragmentPrePass";
+                meshletPrePassFragShader = rhi->createShader(d);
+                MeshPipelineDesc pp;
+                pp.taskShader = meshletTaskShader;
+                pp.meshShader = meshletMeshShader;
+                pp.fragmentShader = meshletPrePassFragShader;
+                pp.taskThreadgroupSize = 32;
+                pp.meshThreadgroupSize = 128;
+                pp.depthTest = true;
+                pp.depthWrite = true;
+                pp.depthCompareOp = CompareOp::Less;
+                pp.hasDepthAttachment = true;
+                pp.colorAttachmentFormats = { PixelFormat::RGBA16_FLOAT, PixelFormat::RGBA8_UNORM };
+                meshletPrePassPipeline = rhi->createMeshPipeline(pp);
             }
         }
         // Native upsample blends in-shader (texBlend at texture(1)) — Opaque,

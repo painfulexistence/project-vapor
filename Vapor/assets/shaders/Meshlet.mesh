@@ -76,6 +76,9 @@ struct TaskPayload {
 taskPayloadSharedEXT TaskPayload payload;
 
 layout(location = 0) out vec3 meshletColor[];
+// World-space normal for the depth+normal pre-pass MRT (real path only; the
+// synthetic probe leaves it default). Mirror of 3d_meshlet.metal worldNormal.
+layout(location = 1) out vec3 meshletWorldNormal[];
 
 uint triByte(uint byteIndex) {
     return (triWords[byteIndex >> 2] >> ((byteIndex & 3u) * 8u)) & 0xFFu;
@@ -112,7 +115,9 @@ void main() {
     Meshlet m = meshlets[mi];
     SetMeshOutputsEXT(m.vertexCount, m.triangleCount);
 
-    mat4 mvp = cam.proj * cam.view * instances[instanceID].model;
+    mat4 model = instances[instanceID].model;
+    mat4 mvp = cam.proj * cam.view * model;
+    mat3 normalMatrix = transpose(inverse(mat3(model)));
     vec3 color = hashColor(mi);
 
     const uint kVertexFloats = 12u;  // sizeof(VertexData) / sizeof(float)
@@ -121,8 +126,10 @@ void main() {
         uint vi = meshletVertices[m.vertexOffset + tid];  // merged-VB vertex index
         uint f = vi * kVertexFloats;
         vec3 pos = vec3(vb[f], vb[f + 1u], vb[f + 2u]);
+        vec3 nrm = vec3(vb[f + 5u], vb[f + 6u], vb[f + 7u]);  // normal at float offset 5
         gl_MeshVerticesEXT[tid].gl_Position = mvp * vec4(pos, 1.0);
         meshletColor[tid] = color;
+        meshletWorldNormal[tid] = normalMatrix * nrm;
     }
     if (tid < m.triangleCount) {
         uint b = m.triangleOffset + tid * 3u;

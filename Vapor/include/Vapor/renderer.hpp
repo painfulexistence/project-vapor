@@ -900,6 +900,15 @@ private:
                 ((backend == GraphicsBackend::Vulkan && capabilities.multiDrawIndirect) ||
                  backend == GraphicsBackend::Metal));
     }
+    // Whether the depth pre-pass runs fully GPU-driven this frame (so the CPU
+    // frustum cull is redundant and skipped): the indirect MDI pre-pass, or the
+    // meshlet mesh-shader pre-pass. Consulted in render() BEFORE updateBuffers,
+    // so it uses only mode/caps/pipeline-validity (no per-frame buffer state).
+    bool gpuDrivenPrePassActive() const {
+        if (!gpuDrivenPrePass) return false;
+        return mdiLayoutActive() ||
+               (gpuDrivenMeshlet() && meshletPrePassPipeline.isValid());
+    }
     // Meshlet draw path (task/mesh shaders): per-cluster frustum/cone cull +
     // two-sphere cluster-LOD selection in the task stage, triangles expanded by
     // the mesh stage, per-meshlet debug colors in the fragment (PBR parity is a
@@ -952,6 +961,15 @@ private:
     // neither shows => drawMeshThreadgroups / encoder-level.
     PipelineHandle meshletSyntheticPipeline;
     ShaderHandle meshletSyntheticShader;
+
+    // GPU-driven meshlet depth+normal pre-pass (Option A for the meshlet path):
+    // the SAME task+mesh shaders as the main meshlet pass, into the PrePass MRT
+    // (normal RGBA16F + albedo RGBA8 + depth) with a Less depth write. Reusing
+    // the mesh stage keeps the pre-pass and main pass on identical geometry — the
+    // meshlet twin of the indirect MDI pre-pass. Fragment is fragmentPrePass
+    // (Metal) / MeshletPrePass.frag (Vulkan).
+    PipelineHandle meshletPrePassPipeline;
+    ShaderHandle meshletPrePassFragShader;
 
     // Hi-Z occlusion culling (requires a GPU-driven mode). A depth pyramid built
     // from the PrePass depth; the cull compute rejects instances whose screen
