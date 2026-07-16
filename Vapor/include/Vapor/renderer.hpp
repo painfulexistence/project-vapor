@@ -755,7 +755,10 @@ private:
     BufferHandle aoTemporalDataBuffer;          // {mat4 prevView; uint historyValid}
     // PSSM: distance where RT near-field shadows hand over to the cascades
     // (native pssmRTMaxDist, panel-tunable 5..200).
-    float pssmRTMaxDist = 25.0f;  // near shadow extent [near, this]; cascades beyond
+    float pssmRTMaxDist = 12.0f;  // near shadow extent [near, this] (character scale); cascades beyond
+    Uint32 pssmPcfSampleCount = 16;  // PCF taps: 4/8/16/32 (honoured by both Metal and Vulkan shaders)
+    float  pssmCascadeBlendRange = 2.0f;  // cascade<->cascade blend width (view units)
+    bool   pssmDebugVisualize = false;    // tint cascades for debugging
     // Independent near-field shadow map extent (view-space metres). The near map
     // covers [near, nearShadowEnd]; cascades take over beyond it. 0 = disabled.
     float nearShadowEnd = 8.0f;

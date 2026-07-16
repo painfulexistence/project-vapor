@@ -129,11 +129,29 @@ layout(std430, set = 1, binding = 5) readonly buffer LightCullBuf {
 layout(std430, set = 1, binding = 2) readonly buffer PSSMBuf {
     mat4 shadowLightSpaceMatrices[3];
     vec4 cascadeSplits;
-    float shadowBlendRange;
-    float nearShadowEnd;        // view depth the independent near map covers; 0 = off
-    vec2 _pssmPad;
-    mat4 nearLightMatrix;       // near-field map (own texture, nearShadowTex)
+    float shadowBlendRange;     // 208
+    float cascadeBlendRange;    // 212  cascade<->cascade blend width (view units)
+    uint pcfSampleCount;        // 216  PCF taps: 4/8/16/32
+    uint debugVisualize;        // 220  cascade-colour debug (0 = off)
+    float nearShadowEnd;        // 224  view depth the near map covers; 0 = off
+    float _pssmPad0;            // 228
+    float _pssmPad1;            // 232  (pad so nearLightMatrix is 16-aligned at 240)
+    float _pssmPad2;            // 236
+    mat4 nearLightMatrix;       // 240  near-field map (own texture, nearShadowTex)
 };
+
+// Poisson disk (matches 3d_common.metal) — 4/8/16 use the first N; 32 adds a
+// 45deg-rotated second set, mirroring the Metal samplePSSMShadow tap schedule.
+const vec2 kPoisson16[16] = vec2[16](
+    vec2(-0.94201624, -0.39906216), vec2( 0.94558609, -0.76890725),
+    vec2(-0.09418410, -0.92938870), vec2( 0.34495938,  0.29387760),
+    vec2(-0.91588581,  0.45771432), vec2(-0.81544232, -0.87912464),
+    vec2(-0.38277543,  0.27676845), vec2( 0.97484398,  0.75648379),
+    vec2( 0.44323325, -0.97511554), vec2( 0.53742981, -0.47373420),
+    vec2(-0.26496911, -0.41893023), vec2( 0.79197514,  0.19090188),
+    vec2(-0.24188840,  0.99706507), vec2(-0.81409955,  0.91437590),
+    vec2( 0.19984126,  0.78641367), vec2( 0.14383161, -0.14100790)
+);
 
 #ifndef BINDLESS
 layout(set = 2, binding = 0) uniform sampler2D albedoMap;
@@ -198,14 +216,24 @@ float sampleCascade(int ci, vec3 worldPos, float bias) {
         return -1.0;
     }
     vec2 texel = 1.0 / vec2(textureSize(shadowMap, 0).xy);
+    float refDepth = curDepth - bias;
+    uint n = clamp(pcfSampleCount, 4u, 16u);
     float lit = 0.0;
-    for (int y = -1; y <= 1; ++y) {
-        for (int x = -1; x <= 1; ++x) {
-            float d = texture(shadowMap, vec3(uv + vec2(x, y) * texel, float(ci))).r;
-            lit += (curDepth - bias) <= d ? 1.0 : 0.0;
-        }
+    for (uint i = 0u; i < n; ++i) {
+        float d = texture(shadowMap, vec3(uv + kPoisson16[i] * texel * 2.0, float(ci))).r;
+        lit += refDepth <= d ? 1.0 : 0.0;
     }
-    return lit / 9.0;
+    float total = float(n);
+    if (pcfSampleCount >= 32u) {          // second, rotated 16-tap set
+        for (uint i = 0u; i < 16u; ++i) {
+            vec2 r = vec2(kPoisson16[i].x - kPoisson16[i].y,
+                          kPoisson16[i].x + kPoisson16[i].y) * 0.7071 * 1.5;
+            float d = texture(shadowMap, vec3(uv + r * texel * 2.0, float(ci))).r;
+            lit += refDepth <= d ? 1.0 : 0.0;
+        }
+        total += 16.0;
+    }
+    return lit / total;
 }
 
 // Independent near-field shadow map (own texture, own resolution): a tight, high-
@@ -220,24 +248,34 @@ float sampleNearMap(vec3 worldPos, float bias) {
         return -1.0;
     }
     vec2 texel = 1.0 / vec2(textureSize(nearShadowTex, 0).xy);
+    float refDepth = curDepth - bias;
+    uint n = clamp(pcfSampleCount, 4u, 16u);
     float lit = 0.0;
-    for (int y = -1; y <= 1; ++y) {
-        for (int x = -1; x <= 1; ++x) {
-            float d = texture(nearShadowTex, uv + vec2(x, y) * texel).r;
-            lit += (curDepth - bias) <= d ? 1.0 : 0.0;
-        }
+    for (uint i = 0u; i < n; ++i) {
+        float d = texture(nearShadowTex, uv + kPoisson16[i] * texel * 2.0).r;
+        lit += refDepth <= d ? 1.0 : 0.0;
     }
-    return lit / 9.0;
+    float total = float(n);
+    if (pcfSampleCount >= 32u) {
+        for (uint i = 0u; i < 16u; ++i) {
+            vec2 r = vec2(kPoisson16[i].x - kPoisson16[i].y,
+                          kPoisson16[i].x + kPoisson16[i].y) * 0.7071 * 1.5;
+            float d = texture(nearShadowTex, uv + r * texel * 2.0).r;
+            lit += refDepth <= d ? 1.0 : 0.0;
+        }
+        total += 16.0;
+    }
+    return lit / total;
 }
 
 // Select the near-field map or a cascade by the fragment's view-space depth,
 // PCF-sample it, and cross-fade across boundaries so transitions don't seam.
 // Returns 1.0 = lit, 0.0 = fully shadowed. Boundaries (view depth):
 //   nearShadowEnd = near map -> cascade 0,  cascadeSplits.y = c0 -> c1,
-//   cascadeSplits.z = c1 -> c2. Blend band width = shadowBlendRange.
+//   cascadeSplits.z = c1 -> c2. Blend band width = cascadeBlendRange.
 float sampleShadow(vec3 worldPos, vec3 N, vec3 L, float viewDepth) {
     float b = max(0.0015 * (1.0 - dot(N, L)), 0.0004);
-    float blend = max(shadowBlendRange, 1e-4);
+    float blend = max(cascadeBlendRange, 1e-4);
 
     // Near field: dedicated high-res map, cross-fading into cascade 0 near its far edge.
     if (nearShadowEnd > 0.0 && viewDepth < nearShadowEnd) {
@@ -427,6 +465,18 @@ void main() {
         color += albedo * 0.03 * occlusion * screenAO;
     }
     color += emissive;
+
+    // Cascade debug: tint by shadow region (near map = green, cascades =
+    // red/blue/yellow), matching the Metal PBR shader's visualization.
+    if (debugVisualize != 0u) {
+        vec3 tint;
+        if (nearShadowEnd > 0.0 && viewDepth < nearShadowEnd) tint = vec3(0.2, 0.8, 0.2);
+        else if (viewDepth <= cascadeSplits.y)                tint = vec3(0.8, 0.2, 0.2);
+        else if (viewDepth <= cascadeSplits.z)                tint = vec3(0.2, 0.2, 0.8);
+        else                                                  tint = vec3(0.8, 0.8, 0.2);
+        vec3 Lviz = dirLightCount > 0u ? normalize(-dirLights[0].direction) : vec3(0.0, 1.0, 0.0);
+        color = tint * max(dot(N, Lviz), 0.15) * sampleShadow(fragPos, N, Lviz, viewDepth);
+    }
 
     // Output LINEAR HDR into the RGBA16F colorRT. Tone mapping (ACES) and the
     // sRGB encode happen in the PostProcess pass, so bloom and other effects
