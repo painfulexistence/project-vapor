@@ -18,6 +18,9 @@ using raytracing::instance_acceleration_structure;
 // cap as the legacy kernel. The post-spatial reservoirs become next frame's
 // temporal history.
 
+// Plastic-constant (R2) low-discrepancy increment for the rect quad walk.
+constant float2 kR2 = float2(0.7548776662, 0.5698402910);
+
 static float traceVisibility(
     instance_acceleration_structure TLAS,
     float3 origin, float3 normal, float3 target
@@ -186,12 +189,18 @@ kernel void computeMain(
     }
     float rectVis = 1.0;
     if (rRect.pdf > 0.0 && tlasValid) {
-        // Two independently jittered quad points per frame: the penumbra
-        // factor is a fractional coverage, so more decorrelated Bernoulli
-        // taps means less variance for the accumulator to soak up.
+        // Two quad points per frame, stratified over time: a static per-pixel
+        // Cranley-Patterson rotation + an R2 walk over the frame index, with
+        // the second tap antithetic (half-quad offset). Independent random
+        // pairs would leave the accumulator's EMA a variance floor of
+        // alpha/(2-alpha) forever; the low-discrepancy walk covers the quad
+        // evenly inside the EMA window, so the accumulated mean actually
+        // converges on the coverage fraction. (& 1023 keeps the float walk
+        // inside fract() precision — a 1024-frame stratification cycle.)
         RectLight rl = rectLights[rRect.candidate];
-        float2 uv0 = float2(randomNext(rng), randomNext(rng));
-        float2 uv1 = float2(randomNext(rng), randomNext(rng));
+        float2 cp = random(tid.x * 9781u + tid.y * 6271u);
+        float2 uv0 = fract(cp + float(params.frameIndex & 1023u) * kR2);
+        float2 uv1 = fract(uv0 + 0.5);
         rectVis = 0.5 * (traceVisibility(TLAS, surf.worldPos, worldNormal, restirRectPoint(rl, uv0)) +
                          traceVisibility(TLAS, surf.worldPos, worldNormal, restirRectPoint(rl, uv1)));
     }

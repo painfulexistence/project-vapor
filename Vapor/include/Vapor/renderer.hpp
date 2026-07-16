@@ -732,6 +732,7 @@ private:
     ComputePipelineHandle aoDenoisePipeline;
     ComputePipelineHandle stochasticPointShadowPipeline;
     ComputePipelineHandle pointShadowTemporalPipeline;
+    ComputePipelineHandle pointShadowDenoisePipeline;
     // ReSTIR reuse for the stochastic shadow (restirShadowPass): reservoir
     // build + temporal merge, then spatial merge + winner visibility rays.
     ComputePipelineHandle restirShadowTemporalPipeline;
@@ -751,7 +752,7 @@ private:
     glm::mat4 giPrevView{1.0f};         // AO owns `prevView`; GI keeps its own
     bool giPrevViewValid = false;
     ShaderHandle rtShadowShader, rtAOShader, aoTemporalShader, aoDenoiseShader,
-                 pointShadowShader, pointShadowTemporalShader,
+                 pointShadowShader, pointShadowTemporalShader, pointShadowDenoiseShader,
                  restirShadowTemporalShader, restirShadowResolveShader,
                  giTemporalShader, giDenoiseShader;
     ShaderHandle prePassMetalVertexShader, prePassMetalFragmentShader;
@@ -846,8 +847,11 @@ private:
     // frames the stochastic pass actually wrote (TLAS ready, pipelines built),
     // and the PBR only samples a history that has been accumulated at least
     // once — otherwise both would read undefined texture memory at startup.
+    // pointShadowDenoiseRan additionally routes the PBR to the edge-aware
+    // filtered copy when the denoise pass produced one this frame.
     bool pointShadowWritten = false;         // this frame
     bool pointShadowHistoryWritten = false;  // ever (since last RT rebuild)
+    bool pointShadowDenoiseRan = false;      // this frame
     // Stochastic point-shadow debug view (native pointShadowDebugMode):
     // 0 = visibility, 1 = tile light-count heatmap, 2 = ReSTIR winner id,
     // 3 = ReSTIR reservoir confidence (modes 2-3 need the ReSTIR path).
@@ -913,6 +917,7 @@ private:
     void stochasticPointShadowPass();
     bool restirShadowPass();  // false = couldn't run, caller uses the legacy kernel
     void pointShadowTemporalPass();
+    void pointShadowDenoisePass();
 
     // Acceleration structures (for ray tracing)
     std::vector<AccelStructHandle> BLASs;  // Bottom-level acceleration structures (one per mesh)
