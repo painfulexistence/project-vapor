@@ -350,14 +350,7 @@ auto main(int argc, char* args[]) -> int {
         engineCore->attachRenderer(renderer.get(), outputDir);
     }
 
-    // Render-to-texture "TV" demo toggle. Off = the offscreen render, its
-    // post-process, and the world-space quad are all skipped, so nothing shows.
-    bool tvEnabled = true;
     renderer->setImGuiCallback([&]() {
-        if (ImGui::Begin("Demo")) {
-            ImGui::Checkbox("Render-to-texture TV", &tvEnabled);
-        }
-        ImGui::End();
         sceneInspector.draw(registry);
     });
 
@@ -663,8 +656,12 @@ auto main(int argc, char* args[]) -> int {
                 glm::vec3(0.0f, 2.0f, 0.0f), glm::vec2(1.0f, 1.0f), spriteTexture, glm::vec4(1.0f, 0.5f, 0.5f, 1.0f)
             );
 
-            // ===== Render-to-Texture "TV" Demo (toggled from the Demo window) =====
-            if (tvEnabled) {
+            // ===== Render-to-Texture "TV" Demo =====
+            // Disabled by default — it's a demo affordance, not part of the
+            // scene. Flip to 1 to render the scene from an orbiting camera into
+            // a texture and hang it on a world-space quad (a "TV screen").
+#if 0
+            {
                 // Update RT camera to orbit around the scene
                 float rtAngle = time * 0.5f;
                 rtCamera.setEye(glm::vec3(sin(rtAngle) * 8.0f, 4.0f, cos(rtAngle) * 8.0f));
@@ -698,6 +695,7 @@ auto main(int argc, char* args[]) -> int {
                     renderer->drawQuad3D(tvTransform, rtTexHandle, kRttUVs, glm::vec4(1.0f));
                 }
             }
+#endif
 
 
             renderer->draw(registry, scene, tempCamera);

@@ -5272,7 +5272,7 @@ void Renderer::drawGraphicsImGui() {
         ImGui::TreePop();
     }
 
-    if (ImGui::TreeNode("Volume (EmberGen)")) {
+    if (ImGui::TreeNode("Volume")) {
         ImGui::Checkbox("Enabled", &volumeRenderEnabled);
         ImGui::TextDisabled(volumeDensityTexture.id == volumeTestTexture.id
                                 ? "density: built-in test grid (64^3)"
