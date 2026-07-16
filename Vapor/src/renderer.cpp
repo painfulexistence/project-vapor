@@ -5061,11 +5061,18 @@ void Renderer::drawGraphicsImGui() {
 
     if (ImGui::TreeNode("Shadow Debug")) {
         ImGui::Text("Raytracing: %s", capabilities.raytracing ? "yes" : "no");
-        // Stochastic RT area/point/spot shadows: noisy without a denoiser
-        // (ReSTIR pending). Off = point/rect/spot unshadowed on both backends.
-        ImGui::Checkbox("Stochastic RT shadows (point/rect/spot)", &stochasticShadowsEnabled);
-        if (stochasticShadowsEnabled)
-            ImGui::TextDisabled("noisy until ReSTIR denoise lands (Metal RT only)");
+        // Shadow scope, one control (state derived from the two flags it drives):
+        //   Off              = no shadows          (mainDebugFlags bit1 set)
+        //   Directional only = sun/PSSM only       (default; stochastic off)
+        //   All shadows      = + stochastic RT      (point/rect/spot; Metal RT,
+        //                      noisy until ReSTIR — the reason it's not default)
+        int shadowMode = (mainDebugFlags & 2u) ? 0 : (stochasticShadowsEnabled ? 2 : 1);
+        if (ImGui::Combo("Shadows", &shadowMode, "Off\0Directional only\0All shadows\0")) {
+            mainDebugFlags = (shadowMode == 0) ? (mainDebugFlags | 2u) : (mainDebugFlags & ~2u);
+            stochasticShadowsEnabled = (shadowMode == 2);
+        }
+        if (shadowMode == 2)
+            ImGui::TextDisabled("stochastic RT shadows noisy until ReSTIR denoise (Metal RT only)");
         // pssmRTMaxDist now sets where the independent near-field shadow map ends
         // and the PSSM cascades begin (the near map, not RT, owns [near, this]).
         ImGui::SliderFloat("Near shadow distance", &pssmRTMaxDist, 5.0f, 200.0f);
@@ -5082,9 +5089,6 @@ void Renderer::drawGraphicsImGui() {
             ImGui::TextWrapped("Heatmap: black = tile has 0 lights, brighter = more (8+ ~ white). "
                                "Shown in 'Point Shadow (raw)' below.");
         }
-        bool skipShadow = (mainDebugFlags & 2u) != 0u;
-        if (ImGui::Checkbox("Skip shadow", &skipShadow))
-            mainDebugFlags = (mainDebugFlags & ~2u) | (skipShadow ? 2u : 0u);
         // Intermediate shadow textures (native Metal parity). These are
         // single-channel R16F/depth RTs; the RRR1 swizzle view renders them as
         // grayscale instead of red-only.
