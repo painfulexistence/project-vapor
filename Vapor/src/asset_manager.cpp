@@ -312,6 +312,52 @@ auto AssetManager::loadGLTF(const std::string& filename) -> std::shared_ptr<Scen
             }
         }
 
+        // --- glTF material extensions (factor-based) ------------------------
+        // These map straight onto Disney fields the shaders already consume —
+        // the ingestion gap was bigger than the rendering gap. Texture-based
+        // extension inputs (clearcoat/sheen textures, KHR_texture_transform)
+        // are follow-ups; transform in particular must reconcile with the
+        // triplanar prototype-UV path first.
+        {
+            auto ext = mat.extensions.find("KHR_materials_emissive_strength");
+            if (ext != mat.extensions.end() && ext->second.Has("emissiveStrength")) {
+                material->emissiveStrength = static_cast<float>(
+                    ext->second.Get("emissiveStrength").GetNumberAsDouble());
+            }
+
+            ext = mat.extensions.find("KHR_materials_clearcoat");
+            if (ext != mat.extensions.end()) {
+                if (ext->second.Has("clearcoatFactor")) {
+                    material->clearcoat = static_cast<float>(
+                        ext->second.Get("clearcoatFactor").GetNumberAsDouble());
+                }
+                // Disney's clearcoatGloss is the inverse of glTF's roughness.
+                if (ext->second.Has("clearcoatRoughnessFactor")) {
+                    material->clearcoatGloss = 1.0f - static_cast<float>(
+                        ext->second.Get("clearcoatRoughnessFactor").GetNumberAsDouble());
+                }
+            }
+
+            ext = mat.extensions.find("KHR_materials_sheen");
+            if (ext != mat.extensions.end() && ext->second.Has("sheenColorFactor")) {
+                // The Disney sheen model here is scalar: take the strongest
+                // channel as the strength and keep sheenTint at its default
+                // (tinted toward the base color) — documented approximation.
+                const auto& v = ext->second.Get("sheenColorFactor");
+                float mx = 0.0f;
+                for (int c = 0; c < 3 && c < static_cast<int>(v.ArrayLen()); ++c) {
+                    mx = std::max(mx, static_cast<float>(v.Get(c).GetNumberAsDouble()));
+                }
+                material->sheen = mx;
+            }
+
+            ext = mat.extensions.find("KHR_materials_specular");
+            if (ext != mat.extensions.end() && ext->second.Has("specularFactor")) {
+                material->specular = static_cast<float>(
+                    ext->second.Get("specularFactor").GetNumberAsDouble());
+            }
+        }
+
         materials.push_back(material);
     }
 

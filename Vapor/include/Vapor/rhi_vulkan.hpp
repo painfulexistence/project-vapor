@@ -226,6 +226,7 @@ private:
         VkFormat format;
         Uint32 width;
         Uint32 height;
+        Uint32 depth = 1;  // >1 = 3D volume texture
         Uint32 arrayLayers = 1;
         VkImageUsageFlags usage = 0;
         VkImageLayout currentLayout = VK_IMAGE_LAYOUT_UNDEFINED;
@@ -312,11 +313,13 @@ private:
     // these would fail pipeline-layout creation. The meshlet vertex-stage binds
     // (slots 0-7) fit exactly.
     static constexpr Uint32 BINDINGS_PER_SET = 8;
-    // The texture set (combined image samplers, device limit >= 16) is widened
-    // for the SSCS contact-RT sampler (set2 b8) AND the IBL environment maps
-    // (irradiance/prefilter/brdfLUT at 8/9/10). The write loop only writes bound
-    // slots, so material sets (<=8) are unaffected.
-    static constexpr Uint32 TEXTURE_BINDINGS_PER_SET = 16;
+    // The texture set (combined image samplers, device limit >= 16) holds the 10
+    // material/shadow/AO/SSCS/near samplers (b0-b9) plus the 3 IBL maps the main
+    // pass now samples: irradiance cube (b10), prefilter cube (b11), BRDF LUT
+    // (b12). Additive capacity: the write loop only writes bound slots, so
+    // pipelines that use fewer textures (bloom, IBL bake) are unaffected.
+    // (Bindless MDI's material texture array lives in set 3, not here.)
+    static constexpr Uint32 TEXTURE_BINDINGS_PER_SET = 13;
 
     struct BufferBinding {
         VkBuffer buffer = VK_NULL_HANDLE;

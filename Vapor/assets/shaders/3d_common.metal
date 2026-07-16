@@ -86,17 +86,38 @@ struct PointLight {
     // float _pad[2];
 };
 
+// Cone spot light. direction points FROM the light; cosInner/cosOuter are the
+// cosines of the inner (full-intensity) and outer (falloff-to-zero) half-angles.
+// Must match Vapor::SpotLight (graphics.hpp, 64 bytes, vec3+scalar packing).
+// float3 members occupy full 16-byte slots; scalars follow after the vectors
+// (offsets 48/52/56/60) — mirrors the explicit pads on the C++ side.
+struct SpotLight {
+    float3 position;    // [0, 16)
+    float3 direction;   // [16, 32) normalized, FROM the light
+    float3 color;       // [32, 48)
+    float  radius;      // 48 — range
+    float  cosInner;    // 52
+    float  cosOuter;    // 56
+    float  intensity;   // 60
+};
+
 // Rectangular area light.  right and up are orthonormal axes of the light face;
 // halfWidth/halfHeight give half-extents in those directions.
+// packed_float3 is REQUIRED here: the C++ Vapor::RectLight tail-packs each
+// scalar into the vec3's 4th float (offsets 0/12/16/28/32/44/48/60, 64 bytes).
+// The previous plain-float3 declaration put every member on a 16-byte slot
+// (position [0,16), halfWidth at 16 = C++ right.x, ... 128 bytes total) — every
+// field except position read garbage. Latent for as long as no scene shipped
+// rect lights; fatal the moment one does.
 struct RectLight {
-    float3 position;
-    float  halfWidth;
-    float3 right;           // normalized
-    float  halfHeight;
-    float3 up;              // normalized
-    float  intensity;
-    float3 color;
-    uint   useVideoTexture; // 0 = solid color, 1 = sample video texture
+    packed_float3 position;   // 0
+    float  halfWidth;         // 12
+    packed_float3 right;      // 16 — normalized
+    float  halfHeight;        // 28
+    packed_float3 up;         // 32 — normalized
+    float  intensity;         // 44
+    packed_float3 color;      // 48
+    uint   useVideoTexture;   // 60 — 0 = solid color, 1 = sample video texture
 };
 
 struct Cluster {

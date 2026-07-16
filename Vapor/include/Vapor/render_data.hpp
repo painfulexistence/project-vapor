@@ -262,6 +262,20 @@ struct alignas(16) FogRenderData {
     glm::vec2 _tailPad = glm::vec2(0.0f);  // keep 16-byte struct size multiple
 };
 
+// Heterogeneous volume raymarch (EmberGen-style density grid in an AABB).
+// vec4-only layout so the MSL and std430 twins are byte-identical
+// (VolumeRaymarch.frag / 3d_volume_raymarch.metal).
+struct alignas(16) VolumeRenderData {
+    glm::mat4 invViewProj = glm::mat4(1.0f);
+    glm::vec4 cameraPosition = glm::vec4(0.0f);              // xyz
+    glm::vec4 boxMin = glm::vec4(-2.0f, 0.0f, -2.0f, 8.0f);  // xyz; w = densityScale
+    glm::vec4 boxMax = glm::vec4(2.0f, 4.0f, 2.0f, 0.3f);    // xyz; w = anisotropy
+    glm::vec4 albedo = glm::vec4(0.9f, 0.9f, 0.9f, 0.15f);   // xyz; w = ambientIntensity
+    glm::vec4 sunDirection = glm::vec4(0.0f, 1.0f, 0.0f, 0.0f);  // xyz
+    glm::vec4 sunColor = glm::vec4(1.0f, 1.0f, 1.0f, 12.0f); // xyz; w = sunIntensity
+    glm::vec4 params = glm::vec4(48.0f, 8.0f, 0.0f, 0.0f);   // x = steps, y = shadow steps
+};
+
 // Volumetric clouds. Field-for-field mirror of the Metal backend's
 // VolumetricCloudData (graphics_effects.hpp) — the defaults below are the
 // values already tuned/tested on the Metal renderer.

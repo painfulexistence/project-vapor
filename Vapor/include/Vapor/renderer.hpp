@@ -308,6 +308,20 @@ public:
     void updateTexture(TextureHandle handle, const std::shared_ptr<Vapor::Image>& img) override;
 
     // ========================================================================
+    // Volume Rendering API (EmberGen density grids)
+    // ========================================================================
+
+    // Upload a raw single-channel density grid (width*height*depth bytes,
+    // R8_UNORM, tightly packed, slice-major) as a 3D texture — the hook the
+    // EmberGen import PR will call with decoded voxel data.
+    TextureHandle createVolumeTexture(Uint32 width, Uint32 height, Uint32 depth,
+                                      const void* data, size_t size);
+    // Point the volume raymarch pass at a density grid with world-space AABB
+    // bounds. Pass an invalid handle to fall back to the procedural test grid.
+    void setVolumeDensity(TextureHandle density, const glm::vec3& boxMin,
+                          const glm::vec3& boxMax);
+
+    // ========================================================================
     // Getters
     // ========================================================================
 
@@ -367,6 +381,7 @@ private:
     void skyAtmospherePass();
     void lightScatteringPass();
     void volumetricFogPass();
+    void volumeRaymarchPass();
     void velocityPass();
     void particlePass();
     void volumetricCloudPass();
@@ -452,24 +467,31 @@ private:
     TextureHandle nearShadowMap;            // independent near-field depth map [near, pssmRTMaxDist] (Vulkan: set2 b9)
     static constexpr Uint32 NEAR_SHADOW_MAP_SIZE = Vapor::kNearShadowMapSize;  // shared (irenderer.hpp)
     std::vector<Vapor::RectLight> rectLights;   // gathered from the scene
+    std::vector<Vapor::SpotLight> spotLights;   // gathered from the scene
+    BufferHandle spotLightBuffer;               // frame-slotted, maxSpotLights
 
     // ImGui texture previews (RT viewer / material thumbnails)
     void* getImGuiTextureID(TextureHandle handle);
     std::unordered_map<Uint32, void*> imguiTextureCache;  // Vulkan descriptor sets
     void drawGraphicsImGui();
 
-    // Last completed frame's numbers, shown in the Engine window
+    // Last completed frame's numbers, shown in the Engine window. The panel
+    // draws BETWEEN beginFrame (which clears the live per-frame light vectors)
+    // and draw() (which refills them), so it must read this snapshot — reading
+    // the live vectors there always shows 0.
     struct FrameStats {
         Uint32 totalDrawables = 0;
         Uint32 visibleDrawables = 0;
         Uint32 directionalLights = 0;
         Uint32 pointLights = 0;
+        Uint32 rectLights = 0;
+        Uint32 spotLights = 0;
         // Main-pass geometry submissions this frame. The clearest "is MDI/GPU-
         // driven actually engaged" signal: CPU/per-object issue ~one draw per
         // object, MDI issues ~one drawIndexedIndirect per material, meshlet issues
         // one drawMeshTasks per instance.
         Uint32 mainDrawCalls = 0;
-        const char* mainPath = "CPU";  // "CPU" | "Indirect" | "MDI" | "Meshlet"
+        const char* mainPath = "CPU";  // "CPU" | "Indirect" | "MDI" | "BindlessMDI" | "Meshlet"
     } lastFrameStats;
 
     // Tile-cull histogram cache for the "Light Culling Debug" panel. Refreshed
@@ -638,6 +660,27 @@ private:
     // Persistent fog tunables (ImGui-editable). volumetricFogPass() copies this
     // and overwrites the per-frame fields (invViewProj/camera/sun).
     FogRenderData fogSettings;
+    // Heterogeneous volume raymarch (EmberGen density grids; rendering only —
+    // import/parsing lives in a separate PR). One AABB volume per scene; a
+    // procedural 64^3 test grid stands in until setVolumeDensity() gets real
+    // data. Reuses tempColorRT ping-pong like fog.
+    PipelineHandle volumeRaymarchPipeline;
+    TextureHandle volumeDensityTexture;  // active 3D grid (may equal the test grid)
+    TextureHandle volumeTestTexture;     // owned procedural test grid
+    bool volumeRenderEnabled = false;    // default OFF until real data lands
+    VolumeRenderData volumeSettings;     // panel tunables (box/density/albedo/steps)
+    // The registry the ECS draw() last rendered with. renderToTexture needs it
+    // because the demo's meshes live on ECS entities, not the scene-node tree —
+    // the scene-only collectDrawables(scene) finds nothing there. The registry
+    // outlives frames (owned by the game), so the cached pointer stays valid.
+    entt::registry* lastDrawRegistry = nullptr;
+    // Render-to-texture scene view (renderToTexture): dedicated camera and
+    // instance buffers. The offscreen view encodes BEFORE the main draw, but
+    // host-visible buffer writes are last-write-wins across the whole frame's
+    // command stream — sharing cameraUniformBuffer/instanceDataBuffer meant
+    // the RTT draw executed with the MAIN view's data (or vice versa).
+    BufferHandle rttCameraBuffer;
+    BufferHandle rttInstanceBuffer;
     // Camera-motion velocity (motion vectors) — infrastructure for future TAA.
     PipelineHandle velocityPipeline;
     TextureHandle velocityRT;
@@ -688,6 +731,8 @@ private:
     ShaderHandle lightScatteringShader;
     ShaderHandle volumetricFogShader;
     BufferHandle fogDataBuffer;
+    ShaderHandle volumeRaymarchShader;
+    BufferHandle volumeDataBuffer;
     ShaderHandle velocityShader;
     ShaderHandle particleForceShader;
     ShaderHandle particleIntegrateShader;
@@ -712,8 +757,23 @@ private:
     ComputePipelineHandle aoDenoisePipeline;
     ComputePipelineHandle stochasticPointShadowPipeline;
     ComputePipelineHandle pointShadowTemporalPipeline;
+    // GIBS screen-space denoise ("SVGF-lite"): temporal reprojection + 2x
+    // edge-aware a-trous over the GI gather output. The gather writes giRawRT,
+    // the chain produces the giResultTexture the PBR samples. Kills the visible
+    // surfel-disc seams and residual flicker the surfel-space EMA leaves behind.
+    ComputePipelineHandle giTemporalPipeline;
+    ComputePipelineHandle giDenoisePipeline;
+    TextureHandle giRawRT;              // gather output (pre-denoise)
+    TextureHandle giScratchRT;          // a-trous ping-pong
+    TextureHandle giHistoryChainRT[2];  // temporal history (RGB gi, A viewZ)
+    bool gibsDenoiseEnabled = true;
+    Uint32 giHistoryIndex = 0;
+    bool giHistoryValid = false;
+    glm::mat4 giPrevView{1.0f};         // AO owns `prevView`; GI keeps its own
+    bool giPrevViewValid = false;
     ShaderHandle rtShadowShader, rtAOShader, aoTemporalShader, aoDenoiseShader,
-                 pointShadowShader, pointShadowTemporalShader;
+                 pointShadowShader, pointShadowTemporalShader,
+                 giTemporalShader, giDenoiseShader;
     ShaderHandle prePassMetalVertexShader, prePassMetalFragmentShader;
 
     // Acceleration structures: one BLAS per registered mesh (index-aligned with
@@ -768,6 +828,12 @@ private:
     float sscsThickness = 0.3f;   // occluder depth window
     Uint32 sscsSteps = 12;
     float sscsBias = 0.02f;       // view-space start offset (self-occlusion guard)
+    // Stochastic RT shadows for the analytic lights (point R / rect G / spot B
+    // channels). Metal RT only; noisy without a denoiser (ReSTIR is the planned
+    // fix). Default OFF: leaving it off makes Metal render point/rect/spot
+    // unshadowed — the same as the (RT-less) Vulkan path — so the two backends'
+    // output stays roughly aligned until the denoiser lands.
+    bool stochasticShadowsEnabled = false;
     // Stochastic point-shadow debug view (native pointShadowDebugMode):
     // 0 = visibility, 1 = tile light-count heatmap.
     Uint32 pointShadowDebugMode = 0;
@@ -982,10 +1048,12 @@ private:
     // GIBS surfel GI (RequiresRaytracing; Metal MSL kernels via RHI compute).
     // GIBSData itself lives in graphics_gibs.hpp (included in renderer.cpp only
     // to keep this header clear of the split-header landmines).
-    ComputePipelineHandle surfelGenPipeline, surfelClearPipeline, surfelInsertPipeline,
-                          surfelRTPipeline, surfelTemporalPipeline, giSamplePipeline;
+    ComputePipelineHandle surfelGenPipeline, surfelUpdatePipeline, surfelClearPipeline,
+                          surfelInsertPipeline, surfelRTPipeline, surfelTemporalPipeline, giSamplePipeline;
     ShaderHandle gibsShaders[6];
-    BufferHandle surfelBuffer, cellHeadBuffer, surfelNextBuffer, surfelCounterBuffer, gibsDataBuffer;
+    ShaderHandle gibsUpdateShader;  // surfelUpdate entry (aging + free-list eviction)
+    BufferHandle surfelBuffer, cellHeadBuffer, surfelNextBuffer, surfelFreeListBuffer,
+                 surfelCounterBuffer, gibsDataBuffer;
     TextureHandle giResultTexture;
     glm::mat4 gibsPrevViewProj = glm::mat4(1.0f);
     Uint32 gibsActiveSurfels = 0;
@@ -1170,6 +1238,7 @@ private:
     Uint32 maxDirectionalLights = 4;
     Uint32 maxPointLights = 1024;
     Uint32 maxRectLights = 32;
+    Uint32 maxSpotLights = 64;
 
     // Clustering configuration
     Uint32 clusterGridSizeX = 16;

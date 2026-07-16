@@ -473,11 +473,13 @@ void RHI_Metal::destroyBuffer(BufferHandle handle) {
 TextureHandle RHI_Metal::createTexture(const TextureDesc& desc) {
     auto textureDesc = MTL::TextureDescriptor::alloc()->init();
 
-    // Texture type: MSAA / cube / 2D array / plain 2D
+    // Texture type: MSAA / cube / 3D volume / 2D array / plain 2D
     if (desc.sampleCount > 1) {
         textureDesc->setTextureType(MTL::TextureType2DMultisample);
     } else if (desc.isCube) {
         textureDesc->setTextureType(MTL::TextureTypeCube);
+    } else if (desc.depth > 1) {
+        textureDesc->setTextureType(MTL::TextureType3D);
     } else if (desc.arrayLayers > 1) {
         textureDesc->setTextureType(MTL::TextureType2DArray);
     } else {
@@ -918,6 +920,9 @@ void RHI_Metal::updateTexture(TextureHandle handle, const void* data, size_t siz
 
     Uint32 mipWidth = std::max(1u, texRes.width >> mipLevel);
     Uint32 mipHeight = std::max(1u, texRes.height >> mipLevel);
+    // 3D volumes upload all their depth slices in one call; 2D textures have
+    // depth 1 so this stays a single-slice copy for them.
+    Uint32 mipDepth = std::max(1u, texRes.depth >> mipLevel);
     Uint32 bytesPerRow = mipWidth * texRes.bytesPerPixel;
     Uint32 bytesPerImage = bytesPerRow * mipHeight;
 
@@ -928,12 +933,14 @@ void RHI_Metal::updateTexture(TextureHandle handle, const void* data, size_t siz
         MTL::Buffer* srcBuf = stageData(data, size, srcOffset);
         ensureUploadBlit()->copyFromBuffer(
             srcBuf, srcOffset, bytesPerRow, bytesPerImage,
-            MTL::Size::Make(mipWidth, mipHeight, 1),
+            MTL::Size::Make(mipWidth, mipHeight, mipDepth),
             texture, arrayLayer, mipLevel, MTL::Origin::Make(0, 0, 0));
     } else {
-        // CPU-accessible texture: direct write
-        MTL::Region region(0, 0, 0, mipWidth, mipHeight, 1);
-        texture->replaceRegion(region, mipLevel, arrayLayer, data, bytesPerRow, 0);
+        // CPU-accessible texture: direct write. Metal requires bytesPerImage 0
+        // for non-3D textures.
+        MTL::Region region(0, 0, 0, mipWidth, mipHeight, mipDepth);
+        texture->replaceRegion(region, mipLevel, arrayLayer, data, bytesPerRow,
+                               mipDepth > 1 ? bytesPerImage : 0);
     }
 }
 
