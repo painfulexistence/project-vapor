@@ -3969,6 +3969,39 @@ void Renderer::createRenderPipeline() {
             bloomDownsamplePipeline  = makeFullscreenFragPipeline("shaders/BloomDownsample.frag.spv", bloomDownsampleShader, BlendMode::Opaque);
             bloomUpsamplePipeline    = makeFullscreenFragPipeline("shaders/BloomUpsample.frag.spv",   bloomUpsampleShader,   BlendMode::Additive);
 
+            // IBL bake pipelines (GLSL twins of the Metal chain). iblCapturePass
+            // is backend-agnostic (RHI calls + render-to-array-layer), so once
+            // these exist it runs on Vulkan and fills the same cubemaps.
+            auto makeVertFragPipeline = [&](const char* vertSpv, const char* fragSpv,
+                                            ShaderHandle& outVS, ShaderHandle& outFS) -> PipelineHandle {
+                std::string vc = readFile(vertSpv), fc = readFile(fragSpv);
+                if (vc.empty() || fc.empty()) return {};
+                ShaderDesc vd; vd.stage = ShaderStage::Vertex;
+                vd.code = vc.data(); vd.codeSize = vc.size(); vd.entryPoint = "main";
+                outVS = rhi->createShader(vd);
+                ShaderDesc fd; fd.stage = ShaderStage::Fragment;
+                fd.code = fc.data(); fd.codeSize = fc.size(); fd.entryPoint = "main";
+                outFS = rhi->createShader(fd);
+                PipelineDesc d;
+                d.vertexShader = outVS;
+                d.fragmentShader = outFS;
+                d.vertexLayout.stride = 0;
+                d.vertexLayout.attributes = {};
+                d.topology = PrimitiveTopology::TriangleList;
+                d.blendMode = BlendMode::Opaque;
+                d.depthTest = false;
+                d.depthWrite = false;
+                d.cullMode = CullMode::None;
+                d.sampleCount = 1;
+                d.hasDepthAttachment = false;
+                d.colorAttachmentFormats = { PixelFormat::RGBA16_FLOAT };
+                return rhi->createPipeline(d);
+            };
+            skyCapturePipeline = makeVertFragPipeline("shaders/IblCubeface.vert.spv", "shaders/SkyCapture.frag.spv",    skyCaptureVS, skyCaptureFS);
+            irradiancePipeline = makeVertFragPipeline("shaders/IblCubeface.vert.spv", "shaders/IrradianceConv.frag.spv", irradianceVS, irradianceFS);
+            prefilterPipeline  = makeVertFragPipeline("shaders/IblCubeface.vert.spv", "shaders/PrefilterEnv.frag.spv",   prefilterVS, prefilterFS);
+            brdfLUTPipeline    = makeVertFragPipeline("shaders/BrdfLut.vert.spv",     "shaders/BrdfLut.frag.spv",        brdfVS, brdfFS);
+
             // Sky/atmosphere: fullscreen into the HDR colorRT, depth-tested
             // (LessOrEqual at z=1.0) so it only fills background pixels; no
             // depth write. Its own vertex shader (z=1.0), so not the lambda.
