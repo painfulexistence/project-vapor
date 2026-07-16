@@ -5376,6 +5376,12 @@ void Renderer::drawGraphicsImGui() {
                                       * sizeof(ShadowReservoirSetCPU) * 2.0 / (1024.0 * 1024.0);
                     ImGui::TextDisabled("reservoirs: %ux%u, %.0f MB", rw, rh, mb);
                 }
+                // Live chain status — a stage silently skipping (missing
+                // pipeline, TLAS not ready) shows up here instead of only as
+                // unexplained noise.
+                ImGui::TextDisabled("chain: %s > accumulate > %s",
+                                    (restirLastFrame == frameNumber) ? "restir" : "legacy/skip",
+                                    pointShadowDenoiseRan ? "denoise" : "raw");
             } else if (restirShadowsEnabled) {
                 ImGui::TextDisabled("ReSTIR pipelines unavailable (Metal RT only)");
             } else {

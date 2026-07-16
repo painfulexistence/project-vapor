@@ -43,6 +43,16 @@ kernel void computeMain(
     mean /= 9.0;
     float3 variance = max(sq / 9.0 - mean * mean, float3(0.0));
     float3 stddev = sqrt(variance);
+    // Variance floor: stochastic shadow factors are FRACTIONAL (a rect
+    // penumbra converges on the covered fraction), so a frame whose 3x3
+    // window happens to be uniform (all 0 at a penumbra fringe: ~15% of
+    // frames at 10% coverage) must not collapse the window to a point and
+    // erase the accumulated value — that reset-and-reclimb sawtooth reads
+    // as crawling noise that never converges. The floor keeps the clamp's
+    // ghosting rejection for real signal changes (which exceed it within a
+    // frame or two) while letting small accumulated fractions survive
+    // unlucky all-uniform frames.
+    stddev = max(stddev, float3(0.15));
 
     constexpr sampler s(coord::normalized, address::clamp_to_edge, filter::linear);
     float3 history = historyShadow.sample(s, prevUV).rgb;
