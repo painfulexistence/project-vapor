@@ -1373,42 +1373,42 @@ public:
     void execute() override {
         auto& r = *renderer;
 
-        // Skip if particle system is disabled or pipelines aren't ready
-        if (!r.particleSystemEnabled || r.particleCount == 0) {
+        if (r.particleCount == 0) {
             return;
         }
         if (!r.particleForcePipeline || !r.particleIntegratePipeline || !r.particleRenderPipeline) {
             return;
         }
 
-        auto time = (float)SDL_GetTicks() / 1000.0f;
-        float deltaTime = r.m_particleSimPaused ? 0.0f : 1.0f / 60.0f;
+        // ── Simulate ────────────────────────────────────────────────────────
+        // Pause: skip the sim (deltaTime=0 would be a no-op) and leave state frozen.
+        if (!r.m_particleSimPaused) {
+            auto time = (float)SDL_GetTicks() / 1000.0f;
 
-        // Update simulation params buffer using the canonical render_data.hpp struct.
-        ParticleSimParams simParams;
-        auto drawableSize = r.swapchain->drawableSize();
-        simParams.resolution = glm::vec2(drawableSize.width, drawableSize.height);
-        simParams.mousePosition = glm::vec2(0.0f);
-        simParams.time = time;
-        simParams.deltaTime = deltaTime;
-        simParams.particleCount = r.particleCount;
-        simParams.wind      = r.m_forceField.wind;
-        simParams.turbulence = glm::vec4(0.0f, 0.0f, 0.0f, r.m_forceField.turbulence);
+            // Update simulation params buffer using the canonical render_data.hpp struct.
+            ParticleSimParams simParams;
+            auto drawableSize = r.swapchain->drawableSize();
+            simParams.resolution = glm::vec2(drawableSize.width, drawableSize.height);
+            simParams.mousePosition = glm::vec2(0.0f);
+            simParams.time = time;
+            simParams.deltaTime = 1.0f / 60.0f;
+            simParams.particleCount = r.particleCount;
+            simParams.wind      = r.m_forceField.wind;
+            simParams.turbulence = glm::vec4(0.0f, 0.0f, 0.0f, r.m_forceField.turbulence);
 
-        const auto& attractors = r.m_forceField.attractors;
-        simParams.attractorCount = static_cast<Uint32>(attractors.size());
+            const auto& attractors = r.m_forceField.attractors;
+            simParams.attractorCount = static_cast<Uint32>(attractors.size());
 
-        memcpy(r.particleSimParamsBuffers[r.currentFrameInFlight]->contents(), &simParams, sizeof(ParticleSimParams));
-        r.particleSimParamsBuffers[r.currentFrameInFlight]->didModifyRange(NS::Range::Make(0, sizeof(ParticleSimParams)));
+            memcpy(r.particleSimParamsBuffers[r.currentFrameInFlight]->contents(), &simParams, sizeof(ParticleSimParams));
+            r.particleSimParamsBuffers[r.currentFrameInFlight]->didModifyRange(NS::Range::Make(0, sizeof(ParticleSimParams)));
 
-        if (!attractors.empty()) {
-            const size_t attractorBytes = attractors.size() * sizeof(ParticleAttractor);
-            memcpy(r.particleAttractorBuffers[r.currentFrameInFlight]->contents(), attractors.data(), attractorBytes);
-            r.particleAttractorBuffers[r.currentFrameInFlight]->didModifyRange(NS::Range::Make(0, attractorBytes));
-        }
+            if (!attractors.empty()) {
+                const size_t attractorBytes = attractors.size() * sizeof(ParticleAttractor);
+                memcpy(r.particleAttractorBuffers[r.currentFrameInFlight]->contents(), attractors.data(), attractorBytes);
+                r.particleAttractorBuffers[r.currentFrameInFlight]->didModifyRange(NS::Range::Make(0, attractorBytes));
+            }
 
-        // Compute passes (single particle buffer - persistent state)
-        {
+            // Compute passes (single particle buffer - persistent state)
             auto timedComputeDesc = makeTimedComputeDesc(true, false);
             auto computeEncoder = r.currentCommandBuffer->computeCommandEncoder(timedComputeDesc.get());
 
@@ -1430,6 +1430,10 @@ public:
 
             computeEncoder->endEncoding();
         }
+
+        // ── Render ──────────────────────────────────────────────────────────
+        // Hide: skip drawing but keep simulating, so unhiding is seamless.
+        if (!r.particleVisible) return;
 
         // Render pass: Draw particles
         {

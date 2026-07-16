@@ -701,7 +701,7 @@ private:
     BufferHandle particleSimParamsBuffer;
     BufferHandle particleAttractorBuffer;      // MAX_PARTICLE_ATTRACTORS elements
     Uint32 particleCount = 0;          // = high-water mark of claimed slots; 0 = no ECS emitters yet
-    bool particleSystemEnabled = true;
+    bool particleVisible = true; // hide toggle — gates render only, sim keeps running
 
     // ECS particle slot management (first-fit free list).
     struct ParticleSlotRange { uint32_t begin = 0, count = 0; };

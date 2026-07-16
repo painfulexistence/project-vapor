@@ -473,7 +473,11 @@ namespace Vapor {
     // ============================================================================
     class ParticleEmitterSystem {
     public:
-        static void update(entt::registry& registry, IRenderer* renderer, float deltaTime) {
+        // emissionEnabled == false is a graceful global stop: no emitter spawns
+        // new particles, but existing particles keep living and simulating, and
+        // one-shot slot reclamation still runs.
+        static void update(entt::registry& registry, IRenderer* renderer, float deltaTime,
+                           bool emissionEnabled = true) {
             if (!renderer) return;
 
             static std::mt19937 rng(std::random_device{}());
@@ -498,6 +502,10 @@ namespace Vapor {
                         emit._reclaimTimer = -1.0f;
                     }
                 }
+
+                // Graceful global stop: existing particles finish their lives,
+                // but no emitter produces new ones (and none claim fresh slots).
+                if (!emissionEnabled) continue;
 
                 if (!emit.enabled) continue;
 

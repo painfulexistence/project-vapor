@@ -355,8 +355,16 @@ auto main(int argc, char* args[]) -> int {
         engineCore->attachRenderer(renderer.get(), outputDir);
     }
 
+    // Graceful global particle "stop": halts all emission; existing particles
+    // live out their lifetime. (pause/hide are renderer-side, in Effects panel.)
+    bool particleEmissionEnabled = true;
+
     renderer->setImGuiCallback([&]() {
         sceneInspector.draw(registry);
+        if (ImGui::Begin("Particles")) {
+            ImGui::Checkbox("Emit (graceful stop when off)", &particleEmissionEnabled);
+        }
+        ImGui::End();
     });
 
     auto [sceneBuilt, materialBuilt, cube1, global] =
@@ -573,7 +581,7 @@ auto main(int argc, char* args[]) -> int {
         physics->process(registry, deltaTime);
         Vapor::TransformSystem::update(registry);
         Vapor::ParticleForceFieldSystem::update(registry, renderer.get());
-        Vapor::ParticleEmitterSystem::update(registry, renderer.get(), deltaTime);
+        Vapor::ParticleEmitterSystem::update(registry, renderer.get(), deltaTime, particleEmissionEnabled);
         LightGatherSystem::update(registry, scene.get());
         FlipbookSystem::update(registry, deltaTime);
         SpriteRenderSystem::update(registry, renderer.get(), &resourceManager);

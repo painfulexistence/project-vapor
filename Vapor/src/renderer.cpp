@@ -3001,60 +3001,67 @@ void Renderer::velocityPass() {
 // GPU particle system: simulate (force -> integrate compute) then render as
 // instanced additive billboards into colorRT. A self-contained orbital demo.
 void Renderer::particlePass() {
-    if (!particleSystemEnabled || particleCount == 0) return;
+    if (particleCount == 0) return;
     if (!particleForcePipeline.isValid() || !particleIntegratePipeline.isValid() ||
         !particleRenderPipeline.isValid() || !particleBuffer.isValid()) {
         return;
     }
 
-    // Per-frame sim params.
-    ParticleSimParams sp;
-    sp.resolution = glm::vec2(rhi->getSwapchainWidth(), rhi->getSwapchainHeight());
-    sp.time = float(frameCounter) / 60.0f;
-    sp.deltaTime = m_particleSimPaused ? 0.0f : 1.0f / 60.0f;
-    sp.particleCount = particleCount;
-    sp.wind      = m_forceField.wind;
-    sp.turbulence = glm::vec4(0.0f, 0.0f, 0.0f, m_forceField.turbulence);
-
-    const auto& attractors = m_forceField.attractors;
-    sp.attractorCount = static_cast<Uint32>(attractors.size());
-    rhi->updateBuffer(particleSimParamsBuffer, &sp, 0, sizeof(sp));
-    if (!attractors.empty())
-        rhi->updateBuffer(particleAttractorBuffer, attractors.data(), 0,
-                          attractors.size() * sizeof(ParticleAttractor));
-
     const size_t bufBytes = sizeof(GPUParticleData) * particleCount;
     const Uint32 groups = (particleCount + 255) / 256;
-
     const bool metal = (backend == GraphicsBackend::Metal);
 
-    // Compute: force writes p.force, then integrate reads it -> barrier between.
-    // 3d_particle.metal orders the kernel buffers particles(0)/params(1)/
-    // attractor(2); the Vulkan .comp uses params(0)/attractor(1)/particles(2).
-    rhi->beginComputePass("ParticleSim");
-    rhi->bindComputePipeline(particleForcePipeline);
-    if (metal) {
-        rhi->setComputeBuffer(0, particleBuffer, 0, bufBytes);
-        rhi->setComputeBuffer(1, particleSimParamsBuffer, 0, sizeof(ParticleSimParams));
-        rhi->setComputeBuffer(2, particleAttractorBuffer, 0, sizeof(ParticleAttractor) * MAX_PARTICLE_ATTRACTORS);
-    } else {
-        rhi->setComputeBuffer(0, particleSimParamsBuffer, 0, sizeof(ParticleSimParams));
-        rhi->setComputeBuffer(1, particleAttractorBuffer, 0, sizeof(ParticleAttractor) * MAX_PARTICLE_ATTRACTORS);
-        rhi->setComputeBuffer(2, particleBuffer, 0, bufBytes);
+    // ── Simulate ──────────────────────────────────────────────────────────────
+    // Pause: skip the sim entirely — with deltaTime=0 the compute would be a
+    // no-op anyway, so we save the dispatch and just leave state frozen.
+    if (!m_particleSimPaused) {
+        ParticleSimParams sp;
+        sp.resolution = glm::vec2(rhi->getSwapchainWidth(), rhi->getSwapchainHeight());
+        sp.time = float(frameCounter) / 60.0f;
+        sp.deltaTime = 1.0f / 60.0f;
+        sp.particleCount = particleCount;
+        sp.wind      = m_forceField.wind;
+        sp.turbulence = glm::vec4(0.0f, 0.0f, 0.0f, m_forceField.turbulence);
+
+        const auto& attractors = m_forceField.attractors;
+        sp.attractorCount = static_cast<Uint32>(attractors.size());
+        rhi->updateBuffer(particleSimParamsBuffer, &sp, 0, sizeof(sp));
+        if (!attractors.empty())
+            rhi->updateBuffer(particleAttractorBuffer, attractors.data(), 0,
+                              attractors.size() * sizeof(ParticleAttractor));
+
+        // Compute: force writes p.force, then integrate reads it -> barrier between.
+        // 3d_particle.metal orders the kernel buffers particles(0)/params(1)/
+        // attractor(2); the Vulkan .comp uses params(0)/attractor(1)/particles(2).
+        rhi->beginComputePass("ParticleSim");
+        rhi->bindComputePipeline(particleForcePipeline);
+        if (metal) {
+            rhi->setComputeBuffer(0, particleBuffer, 0, bufBytes);
+            rhi->setComputeBuffer(1, particleSimParamsBuffer, 0, sizeof(ParticleSimParams));
+            rhi->setComputeBuffer(2, particleAttractorBuffer, 0, sizeof(ParticleAttractor) * MAX_PARTICLE_ATTRACTORS);
+        } else {
+            rhi->setComputeBuffer(0, particleSimParamsBuffer, 0, sizeof(ParticleSimParams));
+            rhi->setComputeBuffer(1, particleAttractorBuffer, 0, sizeof(ParticleAttractor) * MAX_PARTICLE_ATTRACTORS);
+            rhi->setComputeBuffer(2, particleBuffer, 0, bufBytes);
+        }
+        rhi->dispatch(groups, 1, 1);
+        rhi->computeBarrier();
+        rhi->bindComputePipeline(particleIntegratePipeline);
+        if (metal) {
+            rhi->setComputeBuffer(0, particleBuffer, 0, bufBytes);
+            rhi->setComputeBuffer(1, particleSimParamsBuffer, 0, sizeof(ParticleSimParams));
+        } else {
+            rhi->setComputeBuffer(0, particleSimParamsBuffer, 0, sizeof(ParticleSimParams));
+            rhi->setComputeBuffer(2, particleBuffer, 0, bufBytes);
+        }
+        rhi->dispatch(groups, 1, 1);
+        rhi->endComputePass();
+        rhi->computeBarrier();  // sim writes -> vertex reads
     }
-    rhi->dispatch(groups, 1, 1);
-    rhi->computeBarrier();
-    rhi->bindComputePipeline(particleIntegratePipeline);
-    if (metal) {
-        rhi->setComputeBuffer(0, particleBuffer, 0, bufBytes);
-        rhi->setComputeBuffer(1, particleSimParamsBuffer, 0, sizeof(ParticleSimParams));
-    } else {
-        rhi->setComputeBuffer(0, particleSimParamsBuffer, 0, sizeof(ParticleSimParams));
-        rhi->setComputeBuffer(2, particleBuffer, 0, bufBytes);
-    }
-    rhi->dispatch(groups, 1, 1);
-    rhi->endComputePass();
-    rhi->computeBarrier();  // sim writes -> vertex reads
+
+    // ── Render ────────────────────────────────────────────────────────────────
+    // Hide: skip drawing but keep simulating, so unhiding is seamless.
+    if (!particleVisible) return;
 
     // Render: instanced billboards (6 verts x particleCount) into colorRT+depth.
     RenderPassDesc rp;
@@ -5500,7 +5507,7 @@ void Renderer::drawGraphicsImGui() {
     }
 
     if (ImGui::TreeNode("Effects")) {
-        ImGui::Checkbox("Particles", &particleSystemEnabled);
+        ImGui::Checkbox("Visible", &particleVisible);
         ImGui::SameLine();
         ImGui::Checkbox("Pause Sim", &m_particleSimPaused);
         ImGui::TreePop();
