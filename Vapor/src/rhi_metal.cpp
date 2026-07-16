@@ -1364,13 +1364,15 @@ void RHI_Metal::setTexture(Uint32 set, Uint32 binding, TextureHandle texture, Sa
         currentRenderEncoder->setFragmentTexture(texIt->second.texture.get(), binding);
     }
 
-    // Metal allows 31 fragment texture slots but only 16 sampler-state slots
-    // (0-15) per stage. Mirroring the texture index onto the sampler table is
-    // an API violation for slots >= 16 (texReflection at 16 / texRefraction at
-    // 17) — undefined behavior in release builds that can scramble the whole
-    // fragment argument table (observed as garbage texShadow reads). Those
-    // high slots are sampled with constexpr MSL samplers anyway, so the
-    // runtime sampler bind is unnecessary there.
+    // WORKAROUND: Metal allows 31 fragment texture slots but only 16
+    // sampler-state slots (0-15) per stage, so mirroring the texture index
+    // onto the sampler table is an API violation for slots >= 16
+    // (texReflection at 16 / texRefraction at 17) — UB in release builds that
+    // can scramble the whole fragment argument table (observed as garbage
+    // texShadow reads). Skipping is safe today: every runtime [[sampler(n)]]
+    // consumer uses slot 0, the high slots sample via constexpr MSL samplers.
+    // The real fix is dropping the mirroring for a fixed sampler table
+    // (default/clamp/shadow at 0/1/2, bound once per encoder) — RHI v2.
     if (samplerIt != samplers.end() && currentRenderEncoder && binding < 16) {
         currentRenderEncoder->setFragmentSamplerState(samplerIt->second.sampler.get(), binding);
     }
