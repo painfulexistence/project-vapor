@@ -225,6 +225,8 @@ public:
                                  const std::vector<GPUParticleData>& particles) {}
     // Per-frame particle force field gathered by ParticleForceFieldSystem.
     virtual void setParticleForceField(const ParticleForceField& field) {}
+    // Freeze the GPU sim (deltaTime=0); particles stay in place but are still rendered.
+    virtual void setParticleSimPaused(bool paused) {}
 
 protected:
     std::function<void()> m_imGuiCallback;

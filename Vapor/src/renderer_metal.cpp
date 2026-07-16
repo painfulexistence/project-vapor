@@ -1382,7 +1382,7 @@ public:
         }
 
         auto time = (float)SDL_GetTicks() / 1000.0f;
-        float deltaTime = 1.0f / 60.0f;// Use fixed timestep to avoid issues
+        float deltaTime = r.m_particleSimPaused ? 0.0f : 1.0f / 60.0f;
 
         // Update simulation params buffer using the canonical render_data.hpp struct.
         ParticleSimParams simParams;

@@ -497,11 +497,17 @@ namespace Vapor {
                     if (emit._slotBegin == ~0u) continue; // pool full
                 }
 
-                emit._accumulator += emit.emitRate * deltaTime;
-                uint32_t spawns = static_cast<uint32_t>(emit._accumulator);
-                if (spawns == 0) continue;
-                emit._accumulator -= static_cast<float>(spawns);
-                spawns = std::min(spawns, static_cast<uint32_t>(emit._slotCount));
+                uint32_t spawns;
+                if (emit.oneShot) {
+                    // Emit all slots in one frame, then self-disable.
+                    spawns = static_cast<uint32_t>(emit._slotCount);
+                } else {
+                    emit._accumulator += emit.emitRate * deltaTime;
+                    spawns = static_cast<uint32_t>(emit._accumulator);
+                    if (spawns == 0) continue;
+                    emit._accumulator -= static_cast<float>(spawns);
+                    spawns = std::min(spawns, static_cast<uint32_t>(emit._slotCount));
+                }
 
                 // Sample random cone directions around emitDirection
                 glm::vec3 fwd = glm::normalize(emit.emitDirection);
@@ -525,6 +531,8 @@ namespace Vapor {
                     p.force    = glm::vec3(0.0f);
                     p.color    = emit.color;
                 }
+
+                if (emit.oneShot) emit.enabled = false;
 
                 // Ring-buffer write: record slot BEFORE advancing cursor
                 uint32_t writeSlot = emit._slotBegin + emit._ringCursor;

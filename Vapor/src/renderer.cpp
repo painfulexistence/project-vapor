@@ -3011,7 +3011,7 @@ void Renderer::particlePass() {
     ParticleSimParams sp;
     sp.resolution = glm::vec2(rhi->getSwapchainWidth(), rhi->getSwapchainHeight());
     sp.time = float(frameCounter) / 60.0f;
-    sp.deltaTime = 1.0f / 60.0f;
+    sp.deltaTime = m_particleSimPaused ? 0.0f : 1.0f / 60.0f;
     sp.particleCount = particleCount;
     sp.wind      = m_forceField.wind;
     sp.turbulence = glm::vec4(0.0f, 0.0f, 0.0f, m_forceField.turbulence);
@@ -5501,6 +5501,8 @@ void Renderer::drawGraphicsImGui() {
 
     if (ImGui::TreeNode("Effects")) {
         ImGui::Checkbox("Particles", &particleSystemEnabled);
+        ImGui::SameLine();
+        ImGui::Checkbox("Pause Sim", &m_particleSimPaused);
         ImGui::TreePop();
     }
 

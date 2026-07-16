@@ -204,6 +204,7 @@ namespace Vapor {
         glm::vec3 emitDirection = glm::vec3(0.0f, 1.0f, 0.0f);
         glm::vec4 color = glm::vec4(1.0f);
         bool enabled = true;
+        bool oneShot = false; // emit all maxParticles at once then self-disable
 
         // Runtime state (managed by ParticleEmitterSystem) — hidden from inspector
         Hidden<float>    _accumulator = {0.0f};

@@ -302,6 +302,7 @@ public:
     void uploadParticles(uint32_t slotBegin,
                          const std::vector<GPUParticleData>& particles) override;
     void setParticleForceField(const ParticleForceField& field) override;
+    void setParticleSimPaused(bool paused) override { m_particleSimPaused = paused; }
 
     // ========================================================================
     // Texture Creation (for sprites/batch rendering)
@@ -707,6 +708,7 @@ private:
     std::vector<ParticleSlotRange> m_particleSlotFreeList;
     bool m_particleFreeListInitialized = false;
     ParticleForceField m_forceField; // set each frame by ParticleForceFieldSystem
+    bool m_particleSimPaused = false;
 
     // Free-list helpers
     uint32_t allocParticleSlots(uint32_t count);
