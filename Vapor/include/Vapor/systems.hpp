@@ -488,9 +488,9 @@ namespace Vapor {
                 auto& emit = view.get<ParticleEmitterComponent>(entity);
                 const auto& t = view.get<TransformComponent>(entity);
 
-                // Reclaim: once a spent one-shot's particles have all outlived
-                // their lifetime on the GPU, return its slots to the pool. Runs
-                // even while disabled — that's the whole point of a one-shot.
+                // Drain: an emitter that has stopped producing waits for its
+                // in-flight particles to age out, then the system reclaims —
+                // releaseParticleSlots frees AND zero-clears the GPU slots.
                 if (emit._reclaimTimer >= 0.0f) {
                     emit._reclaimTimer = emit._reclaimTimer - deltaTime;
                     if (emit._reclaimTimer <= 0.0f) {
@@ -503,11 +503,24 @@ namespace Vapor {
                     }
                 }
 
-                // Graceful global stop: existing particles finish their lives,
-                // but no emitter produces new ones (and none claim fresh slots).
-                if (!emissionEnabled) continue;
+                // Is this emitter producing new particles this frame? enabled is
+                // gameplay-owned — the system never writes it. A fired one-shot
+                // stays inert (tracked internally, not by flipping enabled).
+                bool producing = emit.enabled && emissionEnabled
+                                 && !(emit.oneShot && emit._hasFired);
 
-                if (!emit.enabled) continue;
+                if (!producing) {
+                    // Just stopped and still holds slots: let the in-flight
+                    // particles age out, then reclaim. Immortal particles never
+                    // age out, so keep them until the entity/component is gone.
+                    if (emit._slotBegin != ~0u && emit._reclaimTimer < 0.0f
+                        && emit.particleLifetime >= 0.0f)
+                        emit._reclaimTimer = emit.particleLifetime;
+                    continue;
+                }
+
+                // Producing: cancel any pending drain and resume into our slots.
+                emit._reclaimTimer = -1.0f;
 
                 // Claim or re-claim slots when maxParticles changed at runtime.
                 if (emit._slotBegin == ~0u || emit._slotCount != emit.maxParticles) {
@@ -522,7 +535,7 @@ namespace Vapor {
 
                 uint32_t spawns;
                 if (emit.oneShot) {
-                    // Emit all slots in one frame, then self-disable.
+                    // Emit the whole batch in one frame.
                     spawns = static_cast<uint32_t>(emit._slotCount);
                 } else {
                     emit._accumulator += emit.emitRate * deltaTime;
@@ -556,9 +569,10 @@ namespace Vapor {
                 }
 
                 if (emit.oneShot) {
-                    emit.enabled = false;
-                    // Arm slot reclamation for after the last particle dies.
-                    // Immortal particles (lifetime < 0) never die → keep the slots.
+                    // Mark fired internally — never touch enabled (gameplay owns
+                    // it). Arm the drain so slots are reclaimed after the batch
+                    // ages out; immortal particles (lifetime < 0) are kept.
+                    emit._hasFired = true;
                     if (emit.particleLifetime >= 0.0f)
                         emit._reclaimTimer = emit.particleLifetime;
                 }

@@ -3146,6 +3146,15 @@ uint32_t Renderer::claimParticleSlots(uint32_t count) {
 
 void Renderer::releaseParticleSlots(uint32_t slotBegin, uint32_t count) {
     freeParticleSlots(slotBegin, count);
+    // Zero-clear the released GPU slots. A freed mid-buffer range stays within
+    // particleCount and would otherwise keep rendering stale particles; zeroing
+    // makes age=0 >= lifetime=0, so the compute passes skip them immediately.
+    if (count > 0 && particleBuffer.isValid()) {
+        std::vector<GPUParticleData> blank(count);
+        rhi->updateBuffer(particleBuffer, blank.data(),
+                          slotBegin * sizeof(GPUParticleData),
+                          count * sizeof(GPUParticleData));
+    }
     // Shrink dispatch range if the released slots were at the top.
     if (slotBegin + count == particleCount) {
         // Find the new high-water mark from what remains claimed.

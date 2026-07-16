@@ -7728,6 +7728,13 @@ uint32_t Renderer_Metal::claimParticleSlots(uint32_t count) {
 
 void Renderer_Metal::releaseParticleSlots(uint32_t slotBegin, uint32_t count) {
     freeParticleSlots(slotBegin, count);
+    // Zero-clear the released GPU slots so freed particles vanish immediately
+    // (age=0 >= lifetime=0 → the compute passes skip them). Without this a
+    // freed mid-buffer range keeps rendering stale data.
+    if (count > 0 && particleBuffer && slotBegin + count <= MAX_PARTICLES) {
+        auto* dst = reinterpret_cast<GPUParticleData*>(particleBuffer->contents()) + slotBegin;
+        std::memset(dst, 0, count * sizeof(GPUParticleData));
+    }
 }
 
 void Renderer_Metal::uploadParticles(uint32_t slotBegin,
