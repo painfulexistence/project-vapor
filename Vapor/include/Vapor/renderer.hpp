@@ -694,7 +694,7 @@ private:
     bool volumetricCloudsEnabled = false;  // default OFF (enable when verifying)
 
     // GPU particle system (self-contained orbital demo + ECS emitters).
-    static constexpr Uint32 MAX_PARTICLES = 8192;
+    static constexpr Uint32 MAX_PARTICLES = 3'000'000;
     ComputePipelineHandle particleForcePipeline;
     ComputePipelineHandle particleIntegratePipeline;
     PipelineHandle particleRenderPipeline;     // instanced billboards

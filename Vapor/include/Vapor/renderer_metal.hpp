@@ -710,7 +710,7 @@ protected:
     NS::SharedPtr<MTL::Texture> environmentCubeMap;
 
     // Particle system
-    static constexpr Uint32 MAX_PARTICLES = 8192;
+    static constexpr Uint32 MAX_PARTICLES = 3'000'000;
     bool particleSystemEnabled = true;
     Uint32 particleCount = 0; // high-water mark of claimed slots; 0 until ECS claims
 

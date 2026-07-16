@@ -3601,9 +3601,11 @@ void Renderer::createDefaultResources() {
         pbDesc.memoryUsage = MemoryUsage::CPUtoGPU;
         particleBuffer = rhi->createBuffer(pbDesc);
 
-        // Zero-fill so all slots start as dead (age=0 >= lifetime=0 → shader skips).
-        std::vector<GPUParticleData> blank(MAX_PARTICLES);
-        rhi->updateBuffer(particleBuffer, blank.data(), 0, pbDesc.size);
+        // Zero-fill via mapped pointer — avoids a 192 MB temporary heap allocation.
+        // lifetime=0/age=0 → age >= lifetime → compute shaders skip these slots.
+        void* ptr = rhi->mapBuffer(particleBuffer);
+        std::memset(ptr, 0, pbDesc.size);
+        rhi->unmapBuffer(particleBuffer);
         // particleCount starts at 0; updated by claimParticleSlots() high-water mark.
 
         BufferDesc uDesc;
