@@ -330,8 +330,8 @@ inline SceneResources buildScene(
         auto& tc = registry.emplace<Vapor::TransformComponent>(e);
         tc.position = glm::vec3(0.0f, 5.0f, 0.0f);
         auto& em = registry.emplace<Vapor::ParticleEmitterComponent>(e);
-        em.maxParticles     = 1'000'000;
-        em.emitRate         = 300'000.0f; // fills slots in ~3 s
+        em.maxParticles     = 100'000;
+        em.emitRate         = 30'000.0f;  // fills slots in ~3 s
         em.particleLifetime = 5.0f;
         em.speed            = 6.0f;
         em.spread           = 3.14159265f; // full sphere
