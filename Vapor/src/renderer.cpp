@@ -3141,11 +3141,28 @@ void Renderer::freeParticleSlots(uint32_t slotBegin, uint32_t count) {
 }
 
 uint32_t Renderer::claimParticleSlots(uint32_t count) {
-    return allocParticleSlots(count);
+    uint32_t begin = allocParticleSlots(count);
+    if (begin != ~0u) {
+        // Expand dispatch range to cover newly claimed slots.
+        particleCount = std::max(particleCount, begin + count);
+    }
+    return begin;
 }
 
 void Renderer::releaseParticleSlots(uint32_t slotBegin, uint32_t count) {
     freeParticleSlots(slotBegin, count);
+    // Shrink dispatch range if the released slots were at the top.
+    if (slotBegin + count == particleCount) {
+        // Find the new high-water mark from what remains claimed.
+        // Free-list entries represent unclaimed ranges; the highest claimed
+        // address is MAX_PARTICLES minus the tail free range (if any).
+        uint32_t tailFree = 0;
+        for (const auto& r : m_particleSlotFreeList) {
+            if (r.begin + r.count == particleCount)
+                tailFree = r.count;
+        }
+        particleCount -= tailFree;
+    }
 }
 
 void Renderer::uploadParticles(uint32_t slotBegin, const std::vector<GPUParticleData>& particles) {
@@ -3574,8 +3591,9 @@ void Renderer::createDefaultResources() {
         nearShadowMap = rhi->createTexture(nearDesc);
     }
 
-    // GPU particle system: a self-contained orbital demo. The particle buffer
-    // holds persistent state; the sim/attractor buffers are updated per frame.
+    // GPU particle pool: ECS emitters claim slots via claimParticleSlots().
+    // Buffer is zero-filled — lifetime=0/age=0 means instantly-dead in the shader,
+    // so uninitialized slots are safely skipped by the compute passes.
     {
         BufferDesc pbDesc;
         pbDesc.size = sizeof(GPUParticleData) * MAX_PARTICLES;
@@ -3583,33 +3601,16 @@ void Renderer::createDefaultResources() {
         pbDesc.memoryUsage = MemoryUsage::CPUtoGPU;
         particleBuffer = rhi->createBuffer(pbDesc);
 
-        std::vector<GPUParticleData> particles(MAX_PARTICLES);
-        std::mt19937 rng(1337u);  // fixed seed -> deterministic layout
-        std::uniform_real_distribution<float> u01(0.0f, 1.0f);
-        for (Uint32 i = 0; i < MAX_PARTICLES; i++) {
-            float r = 0.5f + std::sqrt(u01(rng)) * 4.5f;
-            float theta = u01(rng) * 2.0f * 3.14159265f;
-            float phi = u01(rng) * 3.14159265f;
-            glm::vec3 pos(r * std::sin(phi) * std::cos(theta),
-                          r * std::sin(phi) * std::sin(theta),
-                          r * std::cos(phi));
-            particles[i].position = pos;
-            glm::vec3 tangent = glm::cross(pos, glm::vec3(0.0f, 1.0f, 0.0f));
-            tangent = (glm::length(tangent) < 0.001f) ? glm::vec3(1.0f, 0.0f, 0.0f)
-                                                      : glm::normalize(tangent);
-            particles[i].velocity = tangent * (1.5f / std::sqrt(r + 0.1f));
-            particles[i].force = glm::vec3(0.0f);
-            float b = 1.0f - (r / 5.0f);
-            particles[i].color = glm::vec4(0.5f + 0.5f * b, 0.3f + 0.4f * b, 0.9f, 1.0f);
-        }
-        rhi->updateBuffer(particleBuffer, particles.data(), 0, pbDesc.size);
-        particleCount = MAX_PARTICLES;
+        // Zero-fill so all slots start as dead (age=0 >= lifetime=0 → shader skips).
+        std::vector<GPUParticleData> blank(MAX_PARTICLES);
+        rhi->updateBuffer(particleBuffer, blank.data(), 0, pbDesc.size);
+        // particleCount starts at 0; updated by claimParticleSlots() high-water mark.
 
         BufferDesc uDesc;
         uDesc.usage = BufferUsage::Storage;
         uDesc.memoryUsage = MemoryUsage::CPUtoGPU;
         uDesc.size = sizeof(ParticleSimParams);
-        createFrameSlottedBuffer(particleSimParamsBuffer, uDesc);  // rewritten per sim step
+        createFrameSlottedBuffer(particleSimParamsBuffer, uDesc);
         uDesc.size = sizeof(ParticleAttractor) * MAX_PARTICLE_ATTRACTORS;
         createFrameSlottedBuffer(particleAttractorBuffer, uDesc);
     }

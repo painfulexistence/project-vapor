@@ -710,9 +710,9 @@ protected:
     NS::SharedPtr<MTL::Texture> environmentCubeMap;
 
     // Particle system
-    static constexpr Uint32 MAX_PARTICLES = 1000;// Reduced for debugging
+    static constexpr Uint32 MAX_PARTICLES = 8192;
     bool particleSystemEnabled = true;
-    Uint32 particleCount = MAX_PARTICLES;
+    Uint32 particleCount = 0; // high-water mark of claimed slots; 0 until ECS claims
 
     NS::SharedPtr<MTL::ComputePipelineState> particleForcePipeline;
     NS::SharedPtr<MTL::ComputePipelineState> particleIntegratePipeline;

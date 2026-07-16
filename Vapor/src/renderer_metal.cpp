@@ -5008,48 +5008,13 @@ auto Renderer_Metal::createResources() -> void {
                                               MTL::ResourceStorageModeShared));
     }
 
-    // Initialize particles with random positions and colors
-    {
-        std::srand(static_cast<unsigned>(std::time(nullptr)));
+    // Zero-fill: lifetime=0/age=0 → all slots start as dead and are skipped
+    // by the compute shaders. ECS emitters claim slots via claimParticleSlots()
+    // and fill them with uploadParticles().
+    std::memset(particleBuffer->contents(), 0, particleBufferSize);
+    // particleCount starts at 0; updated by claimParticleSlots() high-water mark.
 
-        auto* particles = reinterpret_cast<GPUParticleData*>(particleBuffer->contents());
-        for (size_t i = 0; i < MAX_PARTICLES; i++) {
-            // Minimum radius of 0.5 to avoid particles at origin
-            float r = 0.5f + std::sqrt(static_cast<float>(std::rand()) / RAND_MAX) * 4.5f;
-            float theta = static_cast<float>(std::rand()) / RAND_MAX * 2.0f * 3.14159265f;
-            float phi = static_cast<float>(std::rand()) / RAND_MAX * 3.14159265f;
-
-            particles[i].position =
-                glm::vec3(r * std::sin(phi) * std::cos(theta), r * std::sin(phi) * std::sin(theta), r * std::cos(phi));
-            particles[i].lifetime = -1.0f; // immortal (orbital demo)
-            particles[i].age = 0.0f;
-
-            // Initialize tangential velocity for orbital motion
-            glm::vec3 tangent = glm::normalize(glm::cross(particles[i].position, glm::vec3(0.0f, 1.0f, 0.0f)));
-            if (glm::length(tangent) < 0.001f) {
-                tangent = glm::vec3(1.0f, 0.0f, 0.0f);
-            }
-            // Velocity inversely proportional to radius for stable orbits
-            particles[i].velocity = tangent * (1.5f / std::sqrt(r + 0.1f));
-            particles[i].force = glm::vec3(0.0f);
-
-            float brightness = 1.0f - (r / 5.0f);
-
-            // "Nocturne" palette - mysterious, elegant purple-blue gradient
-            // Perfect for piano atmosphere: deep purple → indigo → electric blue
-            glm::vec3 a = glm::vec3(0.25f, 0.25f, 0.6f);// Base: royal blue
-            glm::vec3 b = glm::vec3(0.35f, 0.3f, 0.4f);// Amplitude: purple-blue dominant
-            glm::vec3 c = glm::vec3(0.8f, 0.9f, 1.0f);// Frequency: blue channel most active
-            glm::vec3 d = glm::vec3(0.7f, 0.65f, 0.5f);// Phase: starts from purple
-
-            glm::vec3 color = a + b * glm::cos(6.28318f * (c * brightness + d));
-            // Clamp color to [0, 1] to prevent negative values and oversaturation
-            color = glm::clamp(color, 0.0f, 1.0f);
-            particles[i].color = glm::vec4(color, 1.0f);
-        }
-    }
-
-    fmt::print("Particle system initialized with {} particles\n", MAX_PARTICLES);
+    fmt::print("Particle pool initialized ({} slots, ECS-driven)\n", MAX_PARTICLES);
 }
 
 auto Renderer_Metal::stage(std::shared_ptr<Scene> scene) -> void {

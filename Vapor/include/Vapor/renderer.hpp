@@ -701,7 +701,7 @@ private:
     BufferHandle particleBuffer;
     BufferHandle particleSimParamsBuffer;
     BufferHandle particleAttractorBuffer;      // MAX_PARTICLE_ATTRACTORS elements
-    Uint32 particleCount = 0;
+    Uint32 particleCount = 0;          // = high-water mark of claimed slots; 0 = no ECS emitters yet
     bool particleSystemEnabled = true;
 
     // ECS particle slot management (first-fit free list).
