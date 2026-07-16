@@ -18,11 +18,16 @@ vertex RasterizerData vertexMain(
     constant MaterialData* materials [[buffer(1)]],
     constant InstanceData* instances [[buffer(2)]],
     device const VertexData* in [[buffer(3)]],
-    constant uint& instanceID [[buffer(4)]]
+    constant uint& instanceID [[buffer(4)]],
+    uint baseInstance [[base_instance]]
 ) {
     RasterizerData vert;
-    uint actualVertexID = instances[instanceID].vertexOffset + vertexID;
-    float4x4 model = instances[instanceID].model;
+    // Per-object draws push the index via buffer(4) with baseInstance 0; the
+    // GPU-driven indirect pre-pass pushes 0 and carries the index in the draw
+    // command's baseInstance (mirrors the main-pass vertex shader).
+    uint iid = instanceID + baseInstance;
+    uint actualVertexID = instances[iid].vertexOffset + vertexID;
+    float4x4 model = instances[iid].model;
     float3x3 model33 = float3x3(model[0].xyz, model[1].xyz, model[2].xyz);
     float3x3 normalMatrix = transpose(inverse(model33));
     // Caution: worldNormal and worldTangent are not normalized yet, and they can be affected by model scaling
@@ -31,7 +36,7 @@ vertex RasterizerData vertexMain(
     vert.worldPosition = model * float4(in[actualVertexID].position, 1.0);
     vert.position = camera.proj * camera.view * vert.worldPosition;
     vert.uv = float2(in[actualVertexID].uv);
-    vert.material = materials[instances[instanceID].materialID];
+    vert.material = materials[instances[iid].materialID];
     return vert;
 }
 

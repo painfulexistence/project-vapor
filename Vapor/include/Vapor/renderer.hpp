@@ -370,7 +370,12 @@ private:
     void normalResolvePass();
     void clusterBuildPass();
     void tileCullingPass();
-    void gpuCullPass();  // GPU-driven frustum cull -> indirect draw args
+    void gpuCullPass();  // GPU-driven frustum (+ Hi-Z) cull -> gpuCullArgsBuffer
+    void prePassCullPass();  // frustum-only cull before the pre-pass -> prepassCullArgsBuffer
+    // Shared cull dispatch: writes one DrawCommand per instance into argsBuffer,
+    // optionally applying the Hi-Z occlusion test. gpuCullPass() and
+    // prePassCullPass() are thin wrappers (main = frustum+Hi-Z, pre = frustum only).
+    void runGpuCull(BufferHandle argsBuffer, bool enableOcclusion);
     void raytraceShadowPass();
     void raytraceAOPass();
     void mainRenderPass();
@@ -853,6 +858,15 @@ private:
     ComputePipelineHandle gpuCullPipeline;
     ShaderHandle gpuCullShader;
     BufferHandle gpuCullArgsBuffer;  // DrawCommand[MAX_INSTANCES], frame-slotted
+    // Frustum-only cull output for the GPU-driven pre-pass (Option A): runs
+    // before the pre-pass (Hi-Z not built yet), so the depth pass draws indirect
+    // instead of from the CPU-culled visibleDrawables. Same layout as
+    // gpuCullArgsBuffer; the main GpuCull still adds Hi-Z occlusion afterwards.
+    BufferHandle prepassCullArgsBuffer;
+    // Pre-pass goes fully GPU-driven (indirect, no CPU cull) when the MDI/Bindless
+    // instance layout is active — merged buffers + material ranges exist there.
+    // Runtime toggle so the CPU-cull pre-pass can be compared/restored.
+    bool gpuDrivenPrePass = true;
 
     // GPU-driven geometry submission method (mutually exclusive — the same object
     // can't go through both the vertex pipeline and mesh shaders):
@@ -872,6 +886,20 @@ private:
     }
     bool gpuDrivenBindless() const { return gpuDrivenMode == GpuDrivenMode::BindlessMDI; }
     bool gpuDrivenMeshlet()  const { return gpuDrivenMode == GpuDrivenMode::Meshlet; }
+    // Whether this frame will use the merged-buffer MDI instance layout (plain
+    // MDI or Bindless MDI). Deterministic from mode + backend + caps (no prior-
+    // frame state), so render() can consult it BEFORE updateBuffers sets
+    // m_mdiInstanceLayout — used to gate CPU culling off for Option A's
+    // GPU-driven pre-pass. Kept in sync with the `mdi` local in collectDrawables.
+    bool mdiLayoutActive() const {
+        const bool bindless = gpuDrivenBindless() && capabilities.bindlessTextures &&
+            (backend == GraphicsBackend::Metal ? capabilities.indirectCommandBuffers
+                                               : capabilities.multiDrawIndirect);
+        return bindless ||
+               (gpuDrivenIndirect() && gpuDrivenMDI &&
+                ((backend == GraphicsBackend::Vulkan && capabilities.multiDrawIndirect) ||
+                 backend == GraphicsBackend::Metal));
+    }
     // Meshlet draw path (task/mesh shaders): per-cluster frustum/cone cull +
     // two-sphere cluster-LOD selection in the task stage, triangles expanded by
     // the mesh stage, per-meshlet debug colors in the fragment (PBR parity is a

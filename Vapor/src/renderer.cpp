@@ -139,6 +139,8 @@ void Renderer::initialize(std::unique_ptr<RHI> rhiPtr, GraphicsBackend backendTy
     gpuCullArgsBufferDesc.usage = BufferUsage::Indirect;
     gpuCullArgsBufferDesc.memoryUsage = MemoryUsage::CPUtoGPU;
     createFrameSlottedBuffer(gpuCullArgsBuffer, gpuCullArgsBufferDesc);
+    // Frustum-only cull output for the GPU-driven pre-pass (same layout).
+    createFrameSlottedBuffer(prepassCullArgsBuffer, gpuCullArgsBufferDesc);
 
     // Render-to-texture view: its own camera/instance buffers (see renderer.hpp
     // note — the shared ones are overwritten by the main draw later in the same
@@ -983,7 +985,18 @@ void Renderer::render() {
     // whether you are CPU- or GPU-bound.
     const auto _cpuFrameStart = std::chrono::high_resolution_clock::now();
 
-    performCulling();
+    // Option A: with an MDI layout + GPU-driven pre-pass, EVERY geometry pass that
+    // consumed visibleDrawables is now GPU-driven (PreCull->PrePass indirect,
+    // GpuCull->Main indirect) or iterates the full frameDrawables set (shadows,
+    // TLAS). The CPU frustum cull would just produce an unused list, so skip it —
+    // that's the point of the indirect pre-pass. visibleDrawables stays empty;
+    // the HUD reports totalInstanceCount as the visible count in this mode.
+    const bool cpuCullNeeded = !(mdiLayoutActive() && gpuDrivenPrePass);
+    if (cpuCullNeeded) {
+        performCulling();
+    } else {
+        visibleDrawables.clear();
+    }
     sortDrawables();
     updateBuffers();
 
@@ -998,7 +1011,13 @@ void Renderer::render() {
 
     // Frame stats for the Engine window (read next frame, before the clear)
     lastFrameStats.totalDrawables = static_cast<Uint32>(frameDrawables.size());
-    lastFrameStats.visibleDrawables = static_cast<Uint32>(visibleDrawables.size());
+    // In Option A the CPU cull is skipped (visibleDrawables empty); the GPU
+    // decides visibility per instance. Report the submitted instance count as the
+    // "visible" figure rather than a misleading 0 (true GPU-visible count would
+    // need a readback of the cull args).
+    lastFrameStats.visibleDrawables = (mdiLayoutActive() && gpuDrivenPrePass)
+        ? totalInstanceCount
+        : static_cast<Uint32>(visibleDrawables.size());
     lastFrameStats.directionalLights = static_cast<Uint32>(directionalLights.size());
     lastFrameStats.pointLights = static_cast<Uint32>(pointLights.size());
     lastFrameStats.rectLights = static_cast<Uint32>(rectLights.size());
@@ -1019,6 +1038,12 @@ void Renderer::setupDefaultRenderGraph() {
 
     renderGraph.addPass("BuildAccelStructures",
         [](Renderer& r) { r.buildAccelerationStructures(); }, PassFlags::RequiresRaytracing);
+    // Frustum-only cull that feeds the GPU-driven (indirect) pre-pass. No-op
+    // unless a GPU-driven MDI layout is active; the pass early-outs otherwise.
+    // Must run before PrePass (which consumes its args) and can't use Hi-Z
+    // occlusion (the Hi-Z is built from the pre-pass depth that doesn't exist yet).
+    renderGraph.addPass("PreCull",
+        [](Renderer& r) { r.prePassCullPass(); }, PassFlags::RequiresCompute);
     renderGraph.addPass("PrePass",
         [](Renderer& r) { r.prePass(); });
     // Camera-motion velocity from the pre-pass depth — consumed by the RT
@@ -1386,10 +1411,7 @@ void Renderer::updateBuffers() {
                              (backend == GraphicsBackend::Metal
                                   ? capabilities.indirectCommandBuffers
                                   : capabilities.multiDrawIndirect);
-    const bool mdi = bindlessMDI ||
-                     (gpuDrivenIndirect() && gpuDrivenMDI &&
-                      ((backend == GraphicsBackend::Vulkan && capabilities.multiDrawIndirect) ||
-                       backend == GraphicsBackend::Metal));
+    const bool mdi = mdiLayoutActive();  // == bindlessMDI || plain-MDI (see helper)
     m_mdiInstanceLayout = mdi;  // pre-pass/shadow must match this layout (Metal)
     // MDI and the meshlet path both address the merged vertex buffer, so build it
     // for either (self-gates on m_mergedGeometryDirty).
@@ -2120,6 +2142,36 @@ void Renderer::prePass() {
     // fragments (clear color) while rasterizing junk (FPS drop). Vulkan's
     // PrePass.vert uses fixed-function attributes and ignores vertexOffset, so
     // it keeps the per-mesh buffers.
+    // Option A: GPU-driven (indirect) pre-pass. When an MDI layout is active, the
+    // PreCull compute pass has written one frustum-culled DrawCommand per instance
+    // into prepassCullArgsBuffer (with real merged-buffer offsets; instanceCount 0
+    // = culled). Bind the merged buffers once and issue one drawIndexedIndirect per
+    // material range — the GPU decides visibility, so no CPU visibleDrawables loop.
+    // This mirrors the main pass's MDI branch and keeps the indirect path complete
+    // (depth is produced by the same GPU decision the main pass draws from).
+    // Instance index rides base_instance (Metal) / gl_InstanceIndex (Vulkan); both
+    // pre-pass vertex shaders read instanceID + that, so the byte push is 0.
+    const bool prePassIndirect = gpuDrivenPrePass && m_mdiInstanceLayout &&
+        prepassCullArgsBuffer.isValid() &&
+        mergedVertexBuffer.isValid() && mergedIndexBuffer.isValid() &&
+        !m_materialRanges.empty() &&
+        ((backend == GraphicsBackend::Vulkan && capabilities.multiDrawIndirect) ||
+         backend == GraphicsBackend::Metal);
+    if (prePassIndirect) {
+        rhi->bindVertexBuffer(mergedVertexBuffer, 3, 0);
+        rhi->bindIndexBuffer(mergedIndexBuffer, 0);
+        Uint32 zeroId = 0;
+        rhi->setVertexBytes(&zeroId, sizeof(Uint32), 4);
+        for (const auto& [materialId, range] : m_materialRanges) {
+            if (materialId < materials.size()) bindMaterial(materialId);  // MRT albedo/normal maps
+            rhi->drawIndexedIndirect(prepassCullArgsBuffer,
+                                     static_cast<size_t>(range.first) * sizeof(Vapor::DrawCommand),
+                                     range.second, sizeof(Vapor::DrawCommand));
+        }
+        rhi->endRenderPass();
+        return;
+    }
+
     const bool prePullsMerged = backend == GraphicsBackend::Metal &&
                                 m_mdiInstanceLayout && mergedVertexBuffer.isValid();
     if (prePullsMerged) rhi->bindVertexBuffer(mergedVertexBuffer, 3, 0);
@@ -2266,6 +2318,7 @@ void Renderer::hizBuildPass() {
     }
 }
 
+// Main-pass cull: frustum + optional Hi-Z occlusion -> gpuCullArgsBuffer.
 void Renderer::gpuCullPass() {
     if (!gpuDrivenIndirect()) return;
     if (!gpuCullPipeline.isValid() || !gpuCullArgsBuffer.isValid()) return;
@@ -2303,20 +2356,38 @@ void Renderer::gpuCullPass() {
         return;
     }
 
+    runGpuCull(gpuCullArgsBuffer, gpuOcclusionCulling);
+}
+
+// Pre-pass cull (Option A): frustum only (Hi-Z isn't built until after the
+// pre-pass), so the depth pass can draw indirect instead of from the CPU-culled
+// visibleDrawables. Only meaningful when the pre-pass runs GPU-driven.
+void Renderer::prePassCullPass() {
+    if (!gpuDrivenIndirect() || !gpuDrivenPrePass) return;
+    if (!m_mdiInstanceLayout || !prepassCullArgsBuffer.isValid()) return;
+    if (!gpuCullPipeline.isValid() || totalInstanceCount == 0) return;
+    runGpuCull(prepassCullArgsBuffer, /*enableOcclusion=*/false);
+}
+
+// Shared cull dispatch: one DrawCommand per instance into argsBuffer, optionally
+// applying the Hi-Z occlusion test (never for the pre-pass — its output is the
+// depth Hi-Z is built from).
+void Renderer::runGpuCull(BufferHandle argsBuffer, bool enableOcclusion) {
+    const Uint32 n = totalInstanceCount;
     rhi->beginComputePass("GpuCull");
     rhi->bindComputePipeline(gpuCullPipeline);
     rhi->setComputeBuffer(0, cameraUniformBuffer, 0, sizeof(CameraRenderData));
     // Bind instance + args with instance-count-sized ranges so the GLSL shader's
     // instances.length() equals the live instance count.
     rhi->setComputeBuffer(1, instanceDataBuffer, 0, sizeof(Vapor::InstanceData) * n);
-    rhi->setComputeBuffer(2, gpuCullArgsBuffer, 0, sizeof(Vapor::DrawCommand) * n);
+    rhi->setComputeBuffer(2, argsBuffer, 0, sizeof(Vapor::DrawCommand) * n);
 
     // Hi-Z occlusion inputs. Always bound (the shader declares them) so the
     // resources are valid even when occlusion is off; `enabled` gates the test.
     // hizTexture always exists; its contents are only meaningful once hizBuildPass
     // has run this frame, which happens iff occlusion is enabled.
     struct OccParams { Uint32 enabled; Uint32 mipCount; float hizW; float hizH; } occ;
-    occ.enabled = (gpuOcclusionCulling && hizTexture.isValid()) ? 1u : 0u;
+    occ.enabled = (enableOcclusion && hizTexture.isValid()) ? 1u : 0u;
     occ.mipCount = hizMipCount;
     occ.hizW = float(hizWidth);
     occ.hizH = float(hizHeight);
@@ -2335,7 +2406,7 @@ void Renderer::gpuCullPass() {
     }
     rhi->dispatch((n + 63) / 64, 1, 1);
     rhi->endComputePass();
-    rhi->computeBarrier();  // cull writes args -> indirect draw reads them in Main
+    rhi->computeBarrier();  // cull writes args -> indirect draw reads them
 }
 
 // Build (or rebuild, if meshes were added) the merged scene vertex/index buffers
