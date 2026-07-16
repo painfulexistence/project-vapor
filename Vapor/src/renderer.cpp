@@ -1217,6 +1217,19 @@ void Renderer::updateBuffers() {
                           materialDataArray.size() * sizeof(Vapor::MaterialData));
     }
 
+    // The directional light IS the sun: derive the atmosphere/sky sun direction
+    // from it so the sky disc, god rays, fog, GIBS and clouds all agree with the
+    // surface shading and the PSSM shadows (which read the light directly).
+    // Conventions differ — DirectionalLight.direction points the way light
+    // TRAVELS (away from the sun), atmosphere sunDirection points TOWARD the sun
+    // — so negate. Without this the two were independent and started misaligned,
+    // making the lit direction and the sky sun disagree (and, on Metal, the RT
+    // sun shadow followed a different sun than the Vulkan PSSM shadow). Scenes
+    // with no directional light keep the panel-set sun.
+    if (!directionalLights.empty()) {
+        glm::vec3 d = directionalLights[0].direction;
+        if (glm::dot(d, d) > 1e-8f) atmosphereData.sunDirection = -glm::normalize(d);
+    }
     // Atmosphere tunables are panel-editable; re-upload every frame so edits
     // reach the sky/fog/IBL consumers (the buffer is tiny; staged-ring cost
     // is negligible, and it keeps every frame slot coherent).
