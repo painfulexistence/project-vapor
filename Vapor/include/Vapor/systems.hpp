@@ -486,11 +486,14 @@ namespace Vapor {
 
                 if (!emit.enabled) continue;
 
-                // Lazy slot claim
-                if (emit._slotBegin == ~0u) {
-                    emit._slotCount = emit.maxParticles;
-                    emit._slotBegin = renderer->claimParticleSlots(emit._slotCount);
+                // Claim or re-claim slots when maxParticles changed at runtime.
+                if (emit._slotBegin == ~0u || emit._slotCount != emit.maxParticles) {
+                    if (emit._slotBegin != ~0u)
+                        renderer->releaseParticleSlots(emit._slotBegin, emit._slotCount);
+                    emit._slotCount  = emit.maxParticles;
+                    emit._slotBegin  = renderer->claimParticleSlots(emit._slotCount);
                     emit._ringCursor = 0;
+                    emit._accumulator = 0.0f;
                     if (emit._slotBegin == ~0u) continue; // pool full
                 }
 
