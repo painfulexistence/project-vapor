@@ -362,20 +362,87 @@ vec3 rectLightSpecular(vec3 N, vec3 V, vec3 fragPos, RectLight l,
     return (D * G * F) / max(4.0 * NdotV * NdotL, 1e-4);
 }
 
-vec3 shade(vec3 N, vec3 V, vec3 L, vec3 radiance, vec3 albedo, float metallic, float roughness) {
-    vec3 H = normalize(V + L);
-    float NdotL = max(dot(N, L), 0.0);
-    float NdotV = max(dot(N, V), 0.0);
-    if (NdotL <= 0.0) return vec3(0.0);
+// ── Disney principled BRDF ──────────────────────────────────────────────────
+// GLSL twin of 3d_pbr_normal_mapped.metal's CookTorranceBRDF, so the Vulkan
+// direct lighting matches the Metal look: retro-reflective diffuse + subsurface,
+// anisotropic GGX specular, plus sheen and clearcoat lobes. Returns f_r * NdotL
+// (the cosine is folded in exactly ONCE — the callers must not multiply again).
+struct Surface {
+    vec3  color;
+    float roughness;
+    float metallic;
+    float subsurface;
+    float specular;
+    float specularTint;
+    float anisotropic;
+    float sheen;
+    float sheenTint;
+    float clearcoat;
+    float clearcoatGloss;
+};
 
-    vec3 F0 = mix(vec3(0.04), albedo, metallic);
-    float D = distributionGGX(N, H, roughness);
-    float G = geometrySmith(NdotV, NdotL, roughness);
-    vec3 F = fresnelSchlick(max(dot(H, V), 0.0), F0);
+float luminance(vec3 c)     { return dot(c, vec3(0.3, 0.6, 0.1)); }
+float fresnelApprox(float u) { return pow(1.0001 - u, 5.0); }
 
-    vec3 specular = (D * G * F) / max(4.0 * NdotV * NdotL, 1e-4);
-    vec3 kD = (vec3(1.0) - F) * (1.0 - metallic);
-    return (kD * albedo / PI + specular) * radiance * NdotL;
+float GTR1(float nh, float a) {
+    if (a >= 1.0) return 1.0 / PI;
+    float a2 = a * a;
+    float t = 1.0 + (a2 - 1.0) * nh * nh;
+    return (a2 - 1.0) / (PI * log(a2) * t);
+}
+float GTR2aniso(float nh, float hx, float hy, float ax, float ay) {
+    float t = (hx * hx) / (ax * ax) + (hy * hy) / (ay * ay) + nh * nh;
+    return 1.0 / (PI * ax * ay * t * t);
+}
+float smithGGX(float u, float r) {
+    float a = r * r, b = u * u;
+    return 1.0 / (u + sqrt(a + b - a * b));
+}
+float smithGGXaniso(float u, float vx, float vy, float ax, float ay) {
+    float t = vx * vx * ax * ax + vy * vy * ay * ay + u * u;
+    return 1.0 / (u + sqrt(t));
+}
+
+vec3 disneyBRDF(vec3 N, vec3 T, vec3 B, vec3 L, vec3 V, Surface s) {
+    vec3 H = normalize(L + V);
+    float nv = max(dot(N, V), 0.0);
+    float nl = max(dot(N, L), 0.0);
+    float nh = max(dot(N, H), 0.0);
+    float lh = max(dot(L, H), 0.0);
+    float lum = luminance(s.color);
+    vec3 tint = lum > 0.0 ? s.color / lum : vec3(1.0);
+    vec3 spec0 = mix(s.specular * 0.08 * mix(vec3(1.0), tint, s.specularTint), s.color, s.metallic);
+    float fh = fresnelApprox(lh);
+    float fl = fresnelApprox(nl);
+    float fv = fresnelApprox(nv);
+    float fss90 = lh * lh * s.roughness;
+    // Disney retro-reflective diffuse
+    float fd90 = 0.5 + 2.0 * fss90;
+    float kd = mix(1.0, fd90, fl) * mix(1.0, fd90, fv);
+    // subsurface approximation
+    float fss = mix(1.0, fss90, fl) * mix(1.0, fss90, fv);
+    float ss = 1.25 * (fss * (1.0 / (nl + nv + 0.0001) - 0.5) + 0.5);
+    // anisotropic GGX specular
+    float aspect = sqrt(1.0 - s.anisotropic * 0.9);
+    float ax = max(0.001, s.roughness * s.roughness / aspect);
+    float ay = max(0.001, s.roughness * s.roughness * aspect);
+    float hx = dot(H, T), hy = dot(H, B);
+    float lx = dot(L, T), ly = dot(L, B);
+    float vx = dot(V, T), vy = dot(V, B);
+    float D = GTR2aniso(nh, hx, hy, ax, ay);
+    float G = smithGGXaniso(nl, lx, ly, ax, ay) * smithGGXaniso(nv, vx, vy, ax, ay);
+    vec3  F = mix(spec0, vec3(1.0), fh);
+    vec3  specular = D * G * F;
+    // sheen
+    vec3 sheen = fh * s.sheen * mix(vec3(1.0), tint, s.sheenTint);
+    // clearcoat
+    float Dr = GTR1(nh, mix(0.1, 0.001, s.clearcoatGloss));
+    float Fr = mix(0.04, 1.0, fh);
+    float Gr = smithGGX(nl, 0.25) * smithGGX(nv, 0.25);
+    vec3  clearcoat = 0.25 * vec3(s.clearcoat) * Dr * Fr * Gr;
+
+    return ((mix(kd, ss, s.subsurface) * s.color / PI + sheen) * (1.0 - s.metallic)
+            + specular + clearcoat) * nl;
 }
 
 void main() {
@@ -391,15 +458,41 @@ void main() {
     // Normal mapping (fall back to the geometric normal when tangent is degenerate)
     vec3 N = normalize(worldNormal);
     vec3 T = worldTangent.xyz;
+    vec3 B;
     if (dot(T, T) > 1e-8) {
         T = normalize(T - dot(T, N) * N);
-        vec3 B = cross(N, T) * worldTangent.w;
+        B = cross(N, T) * worldTangent.w;
         vec3 nSample = texture(normalMap, fragUV).xyz * 2.0 - 1.0;
         nSample.xy *= mat.normalScale;
         N = normalize(mat3(T, B, N) * nSample);
     }
+    // Orthonormal tangent frame against the (possibly mapped) N for the
+    // anisotropic BRDF term. Degenerate tangent -> arbitrary basis (anisotropic
+    // defaults to 0, so the exact axis is moot then).
+    if (dot(worldTangent.xyz, worldTangent.xyz) > 1e-8) {
+        T = normalize(T - dot(T, N) * N);
+        B = cross(N, T) * worldTangent.w;
+    } else {
+        vec3 up = abs(N.y) < 0.99 ? vec3(0.0, 1.0, 0.0) : vec3(1.0, 0.0, 0.0);
+        T = normalize(cross(up, N));
+        B = cross(N, T);
+    }
 
     vec3 V = normalize(cam.position - fragPos);
+
+    // Full Disney material for the direct-lighting BRDF (mirrors Metal's Surface).
+    Surface surf;
+    surf.color = albedo;
+    surf.roughness = roughness;
+    surf.metallic = metallic;
+    surf.subsurface = mat.subsurface;
+    surf.specular = mat.specular;
+    surf.specularTint = mat.specularTint;
+    surf.anisotropic = mat.anisotropic;
+    surf.sheen = mat.sheen;
+    surf.sheenTint = mat.sheenTint;
+    surf.clearcoat = mat.clearcoat;
+    surf.clearcoatGloss = mat.clearcoatGloss;
 
     // View-space forward distance selects the shadow cascade (RH: forward = -z).
     float viewDepth = -(cam.view * vec4(fragPos, 1.0)).z;
@@ -408,7 +501,7 @@ void main() {
     for (uint i = 0u; i < dirLightCount; ++i) {
         DirLight l = dirLights[i];
         vec3 Ldir = normalize(-l.direction);
-        vec3 contrib = shade(N, V, Ldir, l.color * l.intensity, albedo, metallic, roughness);
+        vec3 contrib = disneyBRDF(N, T, B, Ldir, V, surf) * (l.color * l.intensity);
         // Only the first (sun) directional light casts the cascaded shadow.
         // Debug bit1 skips the PCF to isolate its cost.
         if (i == 0u && (mainDebugFlags & 2u) == 0u) {
@@ -441,7 +534,7 @@ void main() {
             float dist = sqrt(dist2);
             float attenuation = (1.0 - smoothstep(l.radius * 0.8, l.radius, dist)) / dist2;
             vec3 radiance = l.color * l.intensity * attenuation;
-            color += shade(N, V, normalize(toLight), radiance, albedo, metallic, roughness);
+            color += disneyBRDF(N, T, B, normalize(toLight), V, surf) * radiance;
         }
     }
 
@@ -459,7 +552,7 @@ void main() {
         float attenuation = (1.0 - smoothstep(sl.radius * 0.8, sl.radius, dist)) / dist2
                           * cone * cone;
         vec3 radiance = sl.color * sl.intensity * attenuation;
-        color += shade(N, V, Ldir, radiance, albedo, metallic, roughness);
+        color += disneyBRDF(N, T, B, Ldir, V, surf) * radiance;
     }
 
     // Rect area lights (loop-all): analytic diffuse + specular, combined the
