@@ -163,7 +163,17 @@ struct MeshletVertexOut {
     float3 color;
 };
 
-using MeshletMeshT = metal::mesh<MeshletVertexOut, void, 64, 128, metal::topology::triangle>;
+// Per-primitive output. The working reference (metal-by-example/
+// MetalMeshletCulling) declares a real primitive data type and calls
+// set_primitive() for every counted primitive; our previous `void` primitive
+// type had only ever been proven at primitive_count==1 (every probe), never
+// at real triangleCounts. Matching the reference removes the last structural
+// difference from a known-good implementation.
+struct MeshletPrimOut {
+    float3 primColor [[flat]];
+};
+
+using MeshletMeshT = metal::mesh<MeshletVertexOut, MeshletPrimOut, 64, 128, metal::topology::triangle>;
 
 // Distinct-ish color per meshlet (integer hash).
 static float3 hashColor(uint x) {
@@ -228,6 +238,7 @@ static float3 hashColor(uint x) {
             output.set_index(0, 0);
             output.set_index(1, 1);
             output.set_index(2, 2);
+            { MeshletPrimOut pr; pr.primColor = float3(1.0); output.set_primitive(0, pr); }
             output.set_primitive_count(1);
         }
         return;
@@ -258,6 +269,7 @@ static float3 hashColor(uint x) {
             output.set_index(0, 0);
             output.set_index(1, 1);
             output.set_index(2, 2);
+            { MeshletPrimOut pr; pr.primColor = float3(1.0); output.set_primitive(0, pr); }
             output.set_primitive_count(1);  // just the first triangle
         }
         return;
@@ -299,6 +311,7 @@ static float3 hashColor(uint x) {
             output.set_index(0, 0);
             output.set_index(1, 1);
             output.set_index(2, 2);
+            { MeshletPrimOut pr; pr.primColor = float3(1.0); output.set_primitive(0, pr); }
             output.set_primitive_count(1);
         }
         return;
@@ -336,6 +349,7 @@ static float3 hashColor(uint x) {
             output.set_index(0, 0);
             output.set_index(1, 1);
             output.set_index(2, 2);
+            { MeshletPrimOut pr; pr.primColor = float3(1.0); output.set_primitive(0, pr); }
             output.set_primitive_count(1);
         }
         return;
@@ -368,6 +382,7 @@ static float3 hashColor(uint x) {
             output.set_index(0, 0);
             output.set_index(1, 1);
             output.set_index(2, 2);
+            { MeshletPrimOut pr; pr.primColor = float3(1.0); output.set_primitive(0, pr); }
             output.set_primitive_count(1);
         }
         return;
@@ -389,6 +404,7 @@ static float3 hashColor(uint x) {
             output.set_index(0, 0);
             output.set_index(1, 1);
             output.set_index(2, 2);
+            { MeshletPrimOut pr; pr.primColor = float3(1.0); output.set_primitive(0, pr); }
             output.set_primitive_count(1);
         }
         return;
@@ -399,12 +415,8 @@ static float3 hashColor(uint x) {
 
     // ONE thread per vertex / per triangle — the pattern Apple's mesh-shader
     // samples use. The mesh threadgroup is sized to MAX(maxVertexCount,
-    // maxTriangleCount) = 128 threads (see meshThreadgroupSize in the pipeline).
-    // The earlier 64-thread + strided-loop version emitted up to 128 primitives
-    // from a 64-thread group: a mesh threadgroup with fewer threads than the
-    // primitive count produces no valid output, so the whole cluster vanished
-    // even though every input was correct (that's why set_primitive_count(1)
-    // probes rendered but the real triangleCount-primitive path did not).
+    // maxTriangleCount) = 128 threads (see meshThreadgroupSize in the pipeline),
+    // matching the reference implementation's emission pattern exactly.
 
     // Transform in the SAME associativity as the pre-pass / main vertex shader:
     // world = model * pos, clip = proj * view * world (a fused MVP rounds
@@ -422,9 +434,17 @@ static float3 hashColor(uint x) {
     }
     if (tid < m.triangleCount) {
         uint i = tid * 3u;  // this thread owns triangle `tid`, indices i..i+2
-        output.set_index(i + 0u, uint(meshletTriangles[m.triangleOffset + i + 0u]));
-        output.set_index(i + 1u, uint(meshletTriangles[m.triangleOffset + i + 1u]));
-        output.set_index(i + 2u, uint(meshletTriangles[m.triangleOffset + i + 2u]));
+        // Defensive clamp: an out-of-range index in the emitted set is
+        // undefined behavior that can drop the whole meshlet. All probed data
+        // is in range, but the clamp turns any residual stray into a visible
+        // distorted triangle instead of a silent blank.
+        uint maxIdx = m.vertexCount - 1u;
+        output.set_index(i + 0u, min(uint(meshletTriangles[m.triangleOffset + i + 0u]), maxIdx));
+        output.set_index(i + 1u, min(uint(meshletTriangles[m.triangleOffset + i + 1u]), maxIdx));
+        output.set_index(i + 2u, min(uint(meshletTriangles[m.triangleOffset + i + 2u]), maxIdx));
+        MeshletPrimOut pr;
+        pr.primColor = color;
+        output.set_primitive(tid, pr);
     }
     if (tid == 0u) {
         output.set_primitive_count(m.triangleCount);
@@ -455,6 +475,7 @@ fragment float4 fragmentMain(MeshletVertexOut in [[stage_in]]) {
         output.set_index(0, 0);
         output.set_index(1, 1);
         output.set_index(2, 2);
+        { MeshletPrimOut pr; pr.primColor = float3(1.0); output.set_primitive(0, pr); }
         output.set_primitive_count(1);
     }
 }
