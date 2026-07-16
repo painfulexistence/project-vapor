@@ -528,8 +528,23 @@ namespace Vapor {
                 // just don't spawn. Re-enabling emission resumes into the slots.
                 if (!emissionEnabled) continue;
 
+                // Graceful per-emitter stop (Stop semantic): stop spawning and let
+                // the in-flight particles finish. Arm the reclaim so finite
+                // particles' slots are freed once they've aged out; immortal
+                // particles stay until the emitter is disabled (Clear) or resumed.
+                if (emit.stopping) {
+                    if (emit._slotBegin != ~0u && emit._reclaimTimer < 0.0f
+                        && emit.particleLifetime >= 0.0f)
+                        emit._reclaimTimer = emit.particleLifetime;
+                    continue;
+                }
+
                 // A fired one-shot has nothing more to spawn.
                 if (emit.oneShot && emit._hasFired) continue;
+
+                // Actively emitting — cancel any pending graceful-stop drain so a
+                // resumed emitter isn't reclaimed out from under itself.
+                emit._reclaimTimer = -1.0f;
 
                 // Claim or re-claim slots when maxParticles changed at runtime.
                 if (emit._slotBegin == ~0u || emit._slotCount != emit.maxParticles) {

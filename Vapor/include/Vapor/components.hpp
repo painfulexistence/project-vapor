@@ -203,8 +203,9 @@ namespace Vapor {
         float spread = 0.3f;            // half-cone angle in radians
         glm::vec3 emitDirection = glm::vec3(0.0f, 1.0f, 0.0f);
         glm::vec4 color = glm::vec4(1.0f);
-        bool enabled = true;
-        bool oneShot = false; // emit all maxParticles at once then self-disable
+        bool enabled = true;   // false = immediate clear (Clear semantic)
+        bool stopping = false; // true = graceful stop: stop spawning, let existing finish (Stop semantic)
+        bool oneShot = false;  // emit all maxParticles at once, then idle
 
         // Runtime state (managed by ParticleEmitterSystem) — hidden from inspector
         Hidden<float>    _accumulator = {0.0f};
