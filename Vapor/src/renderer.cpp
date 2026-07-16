@@ -3155,18 +3155,16 @@ void Renderer::releaseParticleSlots(uint32_t slotBegin, uint32_t count) {
                           slotBegin * sizeof(GPUParticleData),
                           count * sizeof(GPUParticleData));
     }
-    // Shrink dispatch range if the released slots were at the top.
-    if (slotBegin + count == particleCount) {
-        // Find the new high-water mark from what remains claimed.
-        // Free-list entries represent unclaimed ranges; the highest claimed
-        // address is MAX_PARTICLES minus the tail free range (if any).
-        uint32_t tailFree = 0;
-        for (const auto& r : m_particleSlotFreeList) {
-            if (r.begin + r.count == particleCount)
-                tailFree = r.count;
-        }
-        particleCount -= tailFree;
+    // Recompute the high-water mark: the tail [particleCount, MAX_PARTICLES) must
+    // be entirely free. Find the free range that reaches the end of the pool; its
+    // start is the new mark (0 when the whole pool is free). This is order-
+    // independent — unlike shrinking only when the freed range touched the mark,
+    // which left it stuck if a middle range was freed before the tail.
+    uint32_t hw = MAX_PARTICLES;
+    for (const auto& r : m_particleSlotFreeList) {
+        if (r.begin + r.count == MAX_PARTICLES) { hw = r.begin; break; }
     }
+    particleCount = hw;
 }
 
 void Renderer::uploadParticles(uint32_t slotBegin, const std::vector<GPUParticleData>& particles) {

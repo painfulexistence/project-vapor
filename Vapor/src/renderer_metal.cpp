@@ -7723,7 +7723,10 @@ void Renderer_Metal::freeParticleSlots(uint32_t slotBegin, uint32_t count) {
 }
 
 uint32_t Renderer_Metal::claimParticleSlots(uint32_t count) {
-    return allocParticleSlots(count);
+    uint32_t begin = allocParticleSlots(count);
+    if (begin != ~0u)
+        particleCount = std::max(particleCount, begin + count); // expand dispatch range
+    return begin;
 }
 
 void Renderer_Metal::releaseParticleSlots(uint32_t slotBegin, uint32_t count) {
@@ -7735,6 +7738,13 @@ void Renderer_Metal::releaseParticleSlots(uint32_t slotBegin, uint32_t count) {
         auto* dst = reinterpret_cast<GPUParticleData*>(particleBuffer->contents()) + slotBegin;
         std::memset(dst, 0, count * sizeof(GPUParticleData));
     }
+    // Recompute the high-water mark: the tail must be entirely free (see the
+    // Vulkan Renderer::releaseParticleSlots comment).
+    uint32_t hw = MAX_PARTICLES;
+    for (const auto& r : m_particleSlotFreeList) {
+        if (r.begin + r.count == MAX_PARTICLES) { hw = r.begin; break; }
+    }
+    particleCount = hw;
 }
 
 void Renderer_Metal::uploadParticles(uint32_t slotBegin,
