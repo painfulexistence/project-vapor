@@ -8,10 +8,15 @@ using raytracing::instance_acceleration_structure;
 // ReSTIR stochastic-shadow pass 2: spatial reuse + winner visibility rays.
 // Merges a few geometry-compatible neighbor reservoirs into the pixel's own
 // (biased combiner — neighbor W is reused as-is under depth/normal guards),
-// traces ONE shadow ray per light domain for the merged winner, and writes
+// traces the merged winner's visibility, and writes
 //   R = point visibility, G = rect-area visibility, B = spot visibility
 // to the shadow target (consumed by the PBR shader / temporal accumulator).
-// The post-spatial reservoirs become next frame's temporal history.
+// Point/spot get one ray; the rect winner gets TWO rays at independently
+// jittered quad points (fresh every frame — never reservoir-frozen, see
+// restir_shadow_common.metal) so penumbra visibility is a decorrelated 2-tap
+// estimate the accumulator can average. Worst case 4 rays/pixel, the same
+// cap as the legacy kernel. The post-spatial reservoirs become next frame's
+// temporal history.
 
 static float traceVisibility(
     instance_acceleration_structure TLAS,
@@ -75,6 +80,8 @@ kernel void computeMain(
         return;
     }
 
+    uint rng = tid.x * 2371u + tid.y * 8933u + params.frameIndex * 15881u;
+
     // Rebuild working reservoirs from the stored (sample, W, M) form:
     // wSum = W * M * p̂(y) with p̂ evaluated here (same pixel, same frame).
     WRSReservoir rPoint = wrsEmpty();
@@ -90,14 +97,15 @@ kernel void computeMain(
     }
     WRSReservoir rRect = wrsEmpty();
     {
-        uint idx = restirUnpackRectIdx(own.rectData);
+        uint idx = restirUnpackIdx(own.rectData);
         if (idx < params.rectCount && own.rectW > 0.0 && isfinite(own.rectW)) {
-            float pdf = restirRectPdf(rectLights[idx], restirUnpackRectUV(own.rectData), surf.worldPos, worldNormal);
-            rRect.candidate = own.rectData;
+            float2 quadUV = float2(randomNext(rng), randomNext(rng));
+            float pdf = restirRectPdf(rectLights[idx], quadUV, surf.worldPos, worldNormal);
+            rRect.candidate = idx;
             rRect.pdf = pdf;
-            rRect.wSum = own.rectW * restirUnpackRectM(own.rectM) * pdf;
+            rRect.wSum = own.rectW * restirUnpackM(own.rectData) * pdf;
         }
-        rRect.M = restirUnpackRectM(own.rectM);
+        rRect.M = restirUnpackM(own.rectData);
     }
     WRSReservoir rSpot = wrsEmpty();
     {
@@ -112,7 +120,6 @@ kernel void computeMain(
     }
 
     // ---- Spatial reuse ------------------------------------------------------
-    uint rng = tid.x * 2371u + tid.y * 8933u + params.frameIndex * 15881u;
     float angle = randomNext(rng) * 2.0 * PI;
     float2x2 rot = float2x2(float2(cos(angle), sin(angle)),
                             float2(-sin(angle), cos(angle)));
@@ -128,17 +135,18 @@ kernel void computeMain(
         // The neighbor's normal rides in its reservoir — no texture fetch.
         if (nbSet.viewDepth == 0.0 ||
             abs(nbSet.viewDepth - surf.viewDepth) > params.depthTolerance * abs(surf.viewDepth)) continue;
-        if (dot(restirUnpackNormal(nbSet.rectM), worldNormal) < params.normalTolerance) continue;
+        if (dot(restirUnpackNormal(nbSet.packedNormal), worldNormal) < params.normalTolerance) continue;
 
         uint idx = restirUnpackIdx(nbSet.pointData);
         if (idx < params.pointCount && nbSet.pointW > 0.0 && isfinite(nbSet.pointW)) {
             float pdf = restirPointPdf(pointLights[idx], surf.worldPos, worldNormal);
             wrsMerge(rPoint, idx, pdf, nbSet.pointW, restirUnpackM(nbSet.pointData), randomNext(rng));
         }
-        idx = restirUnpackRectIdx(nbSet.rectData);
+        idx = restirUnpackIdx(nbSet.rectData);
         if (idx < params.rectCount && nbSet.rectW > 0.0 && isfinite(nbSet.rectW)) {
-            float pdf = restirRectPdf(rectLights[idx], restirUnpackRectUV(nbSet.rectData), surf.worldPos, worldNormal);
-            wrsMerge(rRect, nbSet.rectData, pdf, nbSet.rectW, restirUnpackRectM(nbSet.rectM), randomNext(rng));
+            float2 quadUV = float2(randomNext(rng), randomNext(rng));
+            float pdf = restirRectPdf(rectLights[idx], quadUV, surf.worldPos, worldNormal);
+            wrsMerge(rRect, idx, pdf, nbSet.rectW, restirUnpackM(nbSet.rectData), randomNext(rng));
         }
         idx = restirUnpackIdx(nbSet.spotData);
         if (idx < params.spotCount && nbSet.spotW > 0.0 && isfinite(nbSet.spotW)) {
@@ -155,7 +163,7 @@ kernel void computeMain(
         // Winner id bands (0 = no winner) — selection stability check.
         float3 ids = float3(
             rPoint.pdf > 0.0 ? (float(rPoint.candidate % 8u) + 1.0) / 9.0 : 0.0,
-            rRect.pdf > 0.0 ? (float(restirUnpackRectIdx(rRect.candidate) % 8u) + 1.0) / 9.0 : 0.0,
+            rRect.pdf > 0.0 ? (float(rRect.candidate % 8u) + 1.0) / 9.0 : 0.0,
             rSpot.pdf > 0.0 ? (float(rSpot.candidate % 8u) + 1.0) / 9.0 : 0.0);
         shadowTexture.write(float4(ids, 1.0), tid);
         return;
@@ -178,9 +186,14 @@ kernel void computeMain(
     }
     float rectVis = 1.0;
     if (rRect.pdf > 0.0 && tlasValid) {
-        RectLight rl = rectLights[restirUnpackRectIdx(rRect.candidate)];
-        rectVis = traceVisibility(TLAS, surf.worldPos, worldNormal,
-                                  restirRectPoint(rl, restirUnpackRectUV(rRect.candidate)));
+        // Two independently jittered quad points per frame: the penumbra
+        // factor is a fractional coverage, so more decorrelated Bernoulli
+        // taps means less variance for the accumulator to soak up.
+        RectLight rl = rectLights[rRect.candidate];
+        float2 uv0 = float2(randomNext(rng), randomNext(rng));
+        float2 uv1 = float2(randomNext(rng), randomNext(rng));
+        rectVis = 0.5 * (traceVisibility(TLAS, surf.worldPos, worldNormal, restirRectPoint(rl, uv0)) +
+                         traceVisibility(TLAS, surf.worldPos, worldNormal, restirRectPoint(rl, uv1)));
     }
     float spotVis = 1.0;
     if (rSpot.pdf > 0.0 && tlasValid) {

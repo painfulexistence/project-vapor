@@ -58,12 +58,14 @@ kernel void computeMain(
 
     WRSReservoir rRect = wrsEmpty();
     if (params.rectCount > 0) {
-        // No single-light shortcut here: each candidate is a distinct quad point.
+        // The candidate is the LIGHT; p̂ is estimated at a fresh quad point per
+        // draw (see restir_shadow_common.metal), so no single-light shortcut —
+        // repeated draws on one light still average its integral estimate.
         for (uint i = 0; i < params.rectCandidates; i++) {
             uint ri = min(uint(randomNext(rng) * float(params.rectCount)), params.rectCount - 1);
             float2 quadUV = float2(randomNext(rng), randomNext(rng));
             float pdf = restirRectPdf(rectLights[ri], quadUV, surf.worldPos, worldNormal);
-            wrsUpdate(rRect, restirPackRect(ri, quadUV), pdf * float(params.rectCount), pdf, randomNext(rng));
+            wrsUpdate(rRect, ri, pdf * float(params.rectCount), pdf, randomNext(rng));
         }
     }
 
@@ -90,7 +92,7 @@ kernel void computeMain(
             // not inherit the other face's reservoir.
             if (hist.viewDepth != 0.0 &&
                 abs(hist.viewDepth - surf.viewDepth) <= params.depthTolerance * abs(surf.viewDepth) &&
-                dot(restirUnpackNormal(hist.rectM), worldNormal) >= params.normalTolerance) {
+                dot(restirUnpackNormal(hist.packedNormal), worldNormal) >= params.normalTolerance) {
                 uint idx = restirUnpackIdx(hist.pointData);
                 float M = min(restirUnpackM(hist.pointData), params.pointMClamp);
                 if (idx < params.pointCount && M > 0.0 && hist.pointW > 0.0 && isfinite(hist.pointW)) {
@@ -98,12 +100,12 @@ kernel void computeMain(
                     wrsMerge(rPoint, idx, pdf, hist.pointW, M, randomNext(rng));
                 }
 
-                idx = restirUnpackRectIdx(hist.rectData);
-                M = min(restirUnpackRectM(hist.rectM), params.rectMClamp);
+                idx = restirUnpackIdx(hist.rectData);
+                M = min(restirUnpackM(hist.rectData), params.rectMClamp);
                 if (idx < params.rectCount && M > 0.0 && hist.rectW > 0.0 && isfinite(hist.rectW)) {
-                    float2 quadUV = restirUnpackRectUV(hist.rectData);
+                    float2 quadUV = float2(randomNext(rng), randomNext(rng));
                     float pdf = restirRectPdf(rectLights[idx], quadUV, surf.worldPos, worldNormal);
-                    wrsMerge(rRect, hist.rectData, pdf, hist.rectW, M, randomNext(rng));
+                    wrsMerge(rRect, idx, pdf, hist.rectW, M, randomNext(rng));
                 }
 
                 idx = restirUnpackIdx(hist.spotData);

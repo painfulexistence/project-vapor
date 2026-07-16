@@ -1990,10 +1990,10 @@ void Renderer::aoDenoisePass() {
 
 // Mirrors ShadowReservoirSet in restir_shadow_common.metal (32 B per pixel).
 struct ShadowReservoirSetCPU {
-    Uint32 pointData; float pointW;
-    Uint32 spotData;  float spotW;
-    Uint32 rectData;  float rectW;
-    Uint32 rectM;     float viewDepth;
+    Uint32 pointData;    float pointW;
+    Uint32 spotData;     float spotW;
+    Uint32 rectData;     float rectW;
+    Uint32 packedNormal; float viewDepth;
 };
 static_assert(sizeof(ShadowReservoirSetCPU) == 32, "must match the MSL ShadowReservoirSet");
 
@@ -2081,7 +2081,9 @@ void Renderer::stochasticPointShadowPass() {
 //      per light domain for the winner -> pointShadowRT (RGB) + history buffer
 // The winner's binary visibility estimates the contribution-weighted shadow
 // factor per domain; the existing PointShadowTemporal accumulator stays as the
-// final averager. Ray budget: <= 3/pixel (legacy kernel: up to 4).
+// final averager. Ray budget: <= 4/pixel — 1 point, 1 spot, 2 independently
+// jittered quad points on the rect winner (fresh every frame so the penumbra
+// coverage stays a decorrelated estimate) — matching the legacy kernel's cap.
 // Returns false (without recording) if the reservoirs can't be allocated, so
 // the caller falls back to the legacy kernel.
 bool Renderer::restirShadowPass() {

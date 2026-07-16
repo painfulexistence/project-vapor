@@ -13,13 +13,22 @@
 // Per pixel, one weighted-reservoir per analytic light domain (point / rect
 // area / spot — the R/G/B channels of the shadow target). The reservoir's
 // target function is the light's UNSHADOWED contribution estimate, so the
-// resolve pass's single traced ray per domain lands on the light (and, for
-// rect lights, the point on the quad) that actually dominates the pixel.
-// Visibility deliberately stays OUT of the target function: the resolved
-// output is the winner's binary visibility, whose expectation under a
-// p̂-proportional selection is the contribution-weighted visibility — exactly
-// the factor the PBR shader multiplies each domain's analytic sum by. The
-// existing point-shadow temporal accumulator remains the final averager.
+// resolve pass's ray budget lands on the light that actually dominates the
+// pixel. Visibility deliberately stays OUT of the target function: the
+// resolved output is the winner's traced visibility, whose expectation under
+// a p̂-proportional selection is the contribution-weighted visibility —
+// exactly the factor the PBR shader multiplies each domain's analytic sum by.
+// The existing point-shadow temporal accumulator remains the final averager.
+//
+// The reservoir sample is the LIGHT only, for rect lights too. The point on
+// the quad must NOT be temporally reused: a rect penumbra is the fraction of
+// the quad that is visible, so the traced point has to be re-jittered every
+// frame to keep visibility an independent Bernoulli sample the accumulator
+// can average — a reservoir-frozen quad point pins V at 0 or 1 for the whole
+// dwell and the EMA has nothing to average (per-pixel-stable, spatially
+// random patch noise). p̂ for a rect light is therefore evaluated at a fresh
+// random quad point per evaluation — a stochastic estimate of the light's
+// integral, which only jitters selection weights, never biases the output.
 //
 // Known tradeoff: temporal reuse correlates the winner across frames, so where
 // two comparable lights disagree on visibility the output dwells on one state
@@ -29,14 +38,14 @@
 
 // Mirrors ShadowReservoirSetCPU in renderer.cpp — 32 bytes per pixel.
 struct ShadowReservoirSet {
-    uint  pointData;  // [0:16) point light index, [16:32) M
-    float pointW;     // RIS weight W = wSum / (M * p̂(y))
-    uint  spotData;   // [0:16) spot light index, [16:32) M
+    uint  pointData;     // [0:16) point light index, [16:32) M
+    float pointW;        // RIS weight W = wSum / (M * p̂(y))
+    uint  spotData;      // [0:16) spot light index, [16:32) M
     float spotW;
-    uint  rectData;   // [0:8) rect index, [8:20) quad u, [20:32) quad v
+    uint  rectData;      // [0:16) rect light index, [16:32) M
     float rectW;
-    uint  rectM;      // [0:16) rect M, [16:32) oct-encoded surface normal
-    float viewDepth;  // view-space z at write time (temporal validation)
+    uint  packedNormal;  // [0:16) oct-encoded surface normal (reuse gates)
+    float viewDepth;     // view-space z at write time (temporal validation)
 };
 
 // Mirrors RestirShadowParamsCPU in renderer.cpp — 80 bytes.
@@ -53,8 +62,8 @@ struct RestirShadowParams {
     uint   spotCandidates;
     uint   debugMode;       // 0 visibility, 1 tile heatmap, 2 winner id, 3 M
     uint   spatialTaps;
-    float  pointMClamp;     // absolute history M caps, per domain (rect stays
-    float  rectMClamp;      //  low so quad points keep resampling the penumbra)
+    float  pointMClamp;     // absolute history M caps, per domain
+    float  rectMClamp;
     float  spatialRadius;   // px
     float  depthTolerance;  // max relative view-depth difference for reuse
     float  normalTolerance; // min normal dot for temporal/spatial reuse
@@ -62,7 +71,6 @@ struct RestirShadowParams {
 };
 
 constant uint RESTIR_INVALID_LIGHT = 0xFFFFu;
-constant uint RESTIR_INVALID_RECT  = 0xFFu;
 
 // ---------------------------------------------------------------------------
 // Packing
@@ -74,29 +82,16 @@ inline uint restirPackIdxM(uint idx, float M) {
 inline uint restirUnpackIdx(uint data) { return data & 0xFFFFu; }
 inline float restirUnpackM(uint data) { return float(data >> 16); }
 
-// Rect sample = (light index, point on the quad). 12-bit quantized UV keeps
-// the whole sample in one word; 1/4096 of the quad is far below penumbra
-// scale.
-inline uint restirPackRect(uint idx, float2 uv) {
-    uint2 q = uint2(clamp(uv, 0.0, 1.0) * 4095.0 + 0.5);
-    return (idx & 0xFFu) | (q.x << 8) | (q.y << 20);
-}
-inline uint restirUnpackRectIdx(uint data) { return data & 0xFFu; }
-inline float2 restirUnpackRectUV(uint data) {
-    return float2(float((data >> 8) & 0xFFFu), float((data >> 20) & 0xFFFu)) / 4095.0;
-}
-
-// The surface normal rides in rectM's high half (8+8-bit octahedral, ~1-2°
+// The surface normal rides in the reservoir set (8+8-bit octahedral, ~1-2°
 // error against a 25° reuse threshold) so the temporal/spatial normal gates
-// read only the reservoir they already loaded — the trick the AO chain uses.
-inline uint restirPackMNormal(float M, float3 n) {
+// read only the struct they already loaded — the trick the AO chain uses.
+inline uint restirPackNormal(float3 n) {
     float2 e = octEncode(n) * 0.5 + 0.5;
     uint2 q = uint2(e * 255.0 + 0.5);
-    return min(uint(M + 0.5), 0xFFFFu) | (q.x << 16) | (q.y << 24);
+    return q.x | (q.y << 8);
 }
-inline float restirUnpackRectM(uint rectM) { return float(rectM & 0xFFFFu); }
-inline float3 restirUnpackNormal(uint rectM) {
-    float2 e = float2(float((rectM >> 16) & 0xFFu), float(rectM >> 24)) / 255.0;
+inline float3 restirUnpackNormal(uint packed) {
+    float2 e = float2(float(packed & 0xFFu), float((packed >> 8) & 0xFFu)) / 255.0;
     return octDecode(e * 2.0 - 1.0);
 }
 
@@ -106,9 +101,9 @@ inline ShadowReservoirSet restirEmptySet(float viewDepth) {
     s.pointW = 0.0;
     s.spotData = RESTIR_INVALID_LIGHT;
     s.spotW = 0.0;
-    s.rectData = RESTIR_INVALID_RECT;
+    s.rectData = RESTIR_INVALID_LIGHT;
     s.rectW = 0.0;
-    s.rectM = 0u;
+    s.packedNormal = 0u;
     s.viewDepth = viewDepth;
     return s;
 }
@@ -257,9 +252,9 @@ inline ShadowReservoirSet restirPackSet(
     out.pointW = wrsFinalizeW(rPoint);
     out.spotData = restirPackIdxM(rSpot.pdf > 0.0 ? rSpot.candidate : RESTIR_INVALID_LIGHT, rSpot.M);
     out.spotW = wrsFinalizeW(rSpot);
-    out.rectData = rRect.pdf > 0.0 ? rRect.candidate : RESTIR_INVALID_RECT;
+    out.rectData = restirPackIdxM(rRect.pdf > 0.0 ? rRect.candidate : RESTIR_INVALID_LIGHT, rRect.M);
     out.rectW = wrsFinalizeW(rRect);
-    out.rectM = restirPackMNormal(rRect.M, normal);
+    out.packedNormal = restirPackNormal(normal);
     out.viewDepth = viewDepth;
     return out;
 }

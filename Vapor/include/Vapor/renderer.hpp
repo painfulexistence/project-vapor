@@ -831,15 +831,17 @@ private:
     // spot candidate counts are fixed defaults). M clamps are multiples of the
     // per-frame candidate count: they bound how long the reservoir can dwell
     // on one winner, so keep them low enough that the temporal accumulator's
-    // ~14-frame EMA still averages across winner switches; rect stays lowest
-    // so fresh quad points keep resampling the penumbra.
+    // ~14-frame EMA still averages across winner switches. Reservoirs select
+    // LIGHTS only — the rect quad point is re-jittered every frame (see
+    // restir_shadow_common.metal), so the rect clamp too governs selection
+    // stability only, never penumbra sampling.
     Uint32 restirPointCandidates = 8;
     Uint32 restirRectCandidates = 4;
     Uint32 restirSpotCandidates = 4;
     Uint32 restirSpatialTaps = 4;
     float restirSpatialRadius = 16.0f;
     float restirPointMClamp = 8.0f;
-    float restirRectMClamp = 3.0f;
+    float restirRectMClamp = 8.0f;
     // Dataflow guards for the default-on chain: the accumulator only runs on
     // frames the stochastic pass actually wrote (TLAS ready, pipelines built),
     // and the PBR only samples a history that has been accumulated at least
