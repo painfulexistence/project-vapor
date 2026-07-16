@@ -307,8 +307,9 @@ inline SceneResources buildScene(
     {
         auto e = registry.create();
         auto& wf = registry.emplace<Vapor::WindFieldComponent>(e);
-        wf.direction = glm::normalize(glm::vec3(1.0f, 0.1f, 0.4f));
-        wf.strength  = 0.6f;
+        wf.direction  = glm::normalize(glm::vec3(1.0f, 0.1f, 0.4f));
+        wf.strength   = 0.6f;
+        wf.turbulence = 2.0f;
     }
     {
         auto e = registry.create();

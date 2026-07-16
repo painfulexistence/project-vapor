@@ -388,6 +388,14 @@ struct alignas(16) ParticleAttractor {
     float _pad1[3] = {0.0f, 0.0f, 0.0f}; // offset 20 — round to 32 bytes
 };
 
+// Per-frame particle force field — built by ParticleForceFieldSystem from ECS
+// and handed to the renderer as a single packet.
+struct ParticleForceField {
+    std::vector<ParticleAttractor> attractors; // capped to MAX_PARTICLE_ATTRACTORS
+    glm::vec4 wind        = glm::vec4(0.0f);  // xyz=direction, w=strength
+    float     turbulence  = 0.0f;
+};
+
 // ============================================================================
 // Frustum for Culling
 // ============================================================================

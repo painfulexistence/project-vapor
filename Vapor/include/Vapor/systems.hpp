@@ -443,8 +443,8 @@ namespace Vapor {
         static void update(entt::registry& registry, IRenderer* renderer) {
             if (!renderer) return;
 
-            // Collect attractors from ParticleAttractorComponent entities
-            std::vector<ParticleAttractor> attractors;
+            ParticleForceField field;
+
             auto attrView = registry.view<ParticleAttractorComponent, TransformComponent>();
             for (auto entity : attrView) {
                 const auto& t = attrView.get<TransformComponent>(entity);
@@ -452,18 +452,19 @@ namespace Vapor {
                 ParticleAttractor pa;
                 pa.position = t.position;
                 pa.strength = a.strength;
-                attractors.push_back(pa);
-                if (attractors.size() >= MAX_PARTICLE_ATTRACTORS) break;
+                field.attractors.push_back(pa);
+                if (field.attractors.size() >= MAX_PARTICLE_ATTRACTORS) break;
             }
-            renderer->setParticleAttractors(attractors);
 
-            // Use first WindFieldComponent found
             auto windView = registry.view<WindFieldComponent>();
             for (auto entity : windView) {
                 const auto& w = windView.get<WindFieldComponent>(entity);
-                renderer->setParticleWind(w.direction, w.strength);
+                field.wind       = glm::vec4(w.direction, w.strength);
+                field.turbulence = w.turbulence;
                 break;
             }
+
+            renderer->setParticleForceField(field);
         }
     };
 

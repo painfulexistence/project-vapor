@@ -1392,12 +1392,10 @@ public:
         simParams.time = time;
         simParams.deltaTime = deltaTime;
         simParams.particleCount = r.particleCount;
-        simParams.wind = r.m_particleWind;
-        simParams.turbulence = glm::vec4(0.0f, 0.0f, 0.0f, r.m_particleTurbulence);
+        simParams.wind      = r.m_forceField.wind;
+        simParams.turbulence = glm::vec4(0.0f, 0.0f, 0.0f, r.m_forceField.turbulence);
 
-        std::vector<ParticleAttractor> attractors = r.m_ecsAttractors;
-        if (attractors.size() > MAX_PARTICLE_ATTRACTORS)
-            attractors.resize(MAX_PARTICLE_ATTRACTORS);
+        const auto& attractors = r.m_forceField.attractors;
         simParams.attractorCount = static_cast<Uint32>(attractors.size());
 
         memcpy(r.particleSimParamsBuffers[r.currentFrameInFlight]->contents(), &simParams, sizeof(ParticleSimParams));
@@ -7738,16 +7736,8 @@ void Renderer_Metal::uploadParticles(uint32_t slotBegin,
     // StorageModeShared — no explicit flush needed; GPU reads after CPU writes are coherent.
 }
 
-void Renderer_Metal::setParticleAttractors(const std::vector<ParticleAttractor>& attractors) {
-    m_ecsAttractors = attractors;
-    if (m_ecsAttractors.size() > MAX_PARTICLE_ATTRACTORS)
-        m_ecsAttractors.resize(MAX_PARTICLE_ATTRACTORS);
-}
-
-void Renderer_Metal::setParticleWind(glm::vec3 direction, float strength) {
-    m_particleWind = glm::vec4(direction, strength);
-}
-
-void Renderer_Metal::setParticleTurbulence(float strength) {
-    m_particleTurbulence = strength;
+void Renderer_Metal::setParticleForceField(const ParticleForceField& field) {
+    m_forceField = field;
+    if (m_forceField.attractors.size() > MAX_PARTICLE_ATTRACTORS)
+        m_forceField.attractors.resize(MAX_PARTICLE_ATTRACTORS);
 }

@@ -301,9 +301,7 @@ public:
     void releaseParticleSlots(uint32_t slotBegin, uint32_t count) override;
     void uploadParticles(uint32_t slotBegin,
                          const std::vector<GPUParticleData>& particles) override;
-    void setParticleAttractors(const std::vector<ParticleAttractor>& attractors) override;
-    void setParticleWind(glm::vec3 direction, float strength) override;
-    void setParticleTurbulence(float strength) override;
+    void setParticleForceField(const ParticleForceField& field) override;
 
     // ========================================================================
     // Texture Creation (for sprites/batch rendering)
@@ -708,10 +706,7 @@ private:
     struct ParticleSlotRange { uint32_t begin = 0, count = 0; };
     std::vector<ParticleSlotRange> m_particleSlotFreeList;
     bool m_particleFreeListInitialized = false;
-    // Per-frame ECS state (written by particle ECS systems, read by particlePass()).
-    std::vector<ParticleAttractor> m_ecsAttractors;
-    glm::vec4 m_particleWind = glm::vec4(0.0f); // xyz=dir, w=strength
-    float m_particleTurbulence = 0.0f;
+    ParticleForceField m_forceField; // set each frame by ParticleForceFieldSystem
 
     // Free-list helpers
     uint32_t allocParticleSlots(uint32_t count);

@@ -189,8 +189,9 @@ namespace Vapor {
 
     // World-space wind — not particle-specific; vegetation, cloth, audio all read it.
     struct WindFieldComponent {
-        glm::vec3 direction = glm::vec3(1.0f, 0.0f, 0.0f);
-        float strength = 0.0f;
+        glm::vec3 direction  = glm::vec3(1.0f, 0.0f, 0.0f);
+        float     strength   = 0.0f;
+        float     turbulence = 0.0f; // curl noise strength for the particle sim
     };
 
     // Per-emitter configuration.

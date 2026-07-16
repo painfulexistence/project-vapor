@@ -3013,12 +3013,10 @@ void Renderer::particlePass() {
     sp.time = float(frameCounter) / 60.0f;
     sp.deltaTime = 1.0f / 60.0f;
     sp.particleCount = particleCount;
-    sp.wind = m_particleWind;
-    sp.turbulence = glm::vec4(0.0f, 0.0f, 0.0f, m_particleTurbulence);
+    sp.wind      = m_forceField.wind;
+    sp.turbulence = glm::vec4(0.0f, 0.0f, 0.0f, m_forceField.turbulence);
 
-    std::vector<ParticleAttractor> attractors = m_ecsAttractors;
-    if (attractors.size() > MAX_PARTICLE_ATTRACTORS)
-        attractors.resize(MAX_PARTICLE_ATTRACTORS);
+    const auto& attractors = m_forceField.attractors;
     sp.attractorCount = static_cast<Uint32>(attractors.size());
     rhi->updateBuffer(particleSimParamsBuffer, &sp, 0, sizeof(sp));
     if (!attractors.empty())
@@ -3165,18 +3163,10 @@ void Renderer::uploadParticles(uint32_t slotBegin, const std::vector<GPUParticle
                       particles.size() * sizeof(GPUParticleData));
 }
 
-void Renderer::setParticleAttractors(const std::vector<ParticleAttractor>& attractors) {
-    m_ecsAttractors = attractors;
-    if (m_ecsAttractors.size() > MAX_PARTICLE_ATTRACTORS)
-        m_ecsAttractors.resize(MAX_PARTICLE_ATTRACTORS);
-}
-
-void Renderer::setParticleWind(glm::vec3 direction, float strength) {
-    m_particleWind = glm::vec4(direction, strength);
-}
-
-void Renderer::setParticleTurbulence(float strength) {
-    m_particleTurbulence = strength;
+void Renderer::setParticleForceField(const ParticleForceField& field) {
+    m_forceField = field;
+    if (m_forceField.attractors.size() > MAX_PARTICLE_ATTRACTORS)
+        m_forceField.attractors.resize(MAX_PARTICLE_ATTRACTORS);
 }
 
 // Volumetric clouds (port of the Metal quarter-res path): raymarch into a

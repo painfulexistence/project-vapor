@@ -223,10 +223,8 @@ public:
     // Upload initial particle state into previously claimed slots.
     virtual void uploadParticles(uint32_t slotBegin,
                                  const std::vector<GPUParticleData>& particles) {}
-    // Per-frame ECS state — call before rendering.
-    virtual void setParticleAttractors(const std::vector<ParticleAttractor>& attractors) {}
-    virtual void setParticleWind(glm::vec3 direction, float strength) {}
-    virtual void setParticleTurbulence(float strength) {}
+    // Per-frame particle force field gathered by ParticleForceFieldSystem.
+    virtual void setParticleForceField(const ParticleForceField& field) {}
 
 protected:
     std::function<void()> m_imGuiCallback;
