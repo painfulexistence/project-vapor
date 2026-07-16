@@ -4,11 +4,15 @@ using namespace metal;
 using raytracing::instance_acceleration_structure;
 #include "Res/shaders/3d_common.metal"
 
-// Stochastic point light shadow pass (MegaLights-style).
-// For each pixel: pick 2 point lights from the tile cluster, cast 1 shadow ray each.
-// Output: R16F texture where 0=shadowed, 1=lit (averaged over the 2 samples).
-// The caller (PBR shader) uses this as a single shadow multiplier applied to the
-// stochastically-chosen lights; temporal accumulation denoises the result.
+// Stochastic light shadow pass (MegaLights-style), covering EVERY analytic
+// light type. Per pixel:
+//   R = point-light visibility (2 lights picked from the tile cluster)
+//   G = rect AREA light visibility — a random point is sampled on the quad
+//       each frame, so temporal accumulation converges to a true soft penumbra
+//   B = spot-light visibility (1 ray to the picked spot's position)
+// Channels for absent light types stay 1.0 (fully lit). Legacy R16F targets
+// (native path) simply drop G/B; its PBR binds shadowFlags=0 and never reads
+// them. Temporal accumulation denoises all three channels together.
 kernel void computeMain(
     texture2d<float>              depthTexture    [[texture(0)]],
     texture2d<float>              normalTexture   [[texture(1)]],
@@ -21,6 +25,9 @@ kernel void computeMain(
     constant uint&                frameIndex      [[buffer(5)]],
     instance_acceleration_structure TLAS          [[buffer(6)]],
     constant uint&                debugMode       [[buffer(7)]], // 0=visibility, 1=tile light-count heatmap
+    const device SpotLight*       spotLights      [[buffer(8)]],
+    const device RectLight*       rectLights      [[buffer(9)]],
+    constant uint2&               extraCounts     [[buffer(10)]], // x=rectCount, y=spotCount
     uint2 tid [[thread_position_in_grid]]
 ) {
     uint w = shadowTexture.get_width();
@@ -58,46 +65,90 @@ kernel void computeMain(
         return;
     }
 
-    if (lightCount == 0) {
-        shadowTexture.write(float4(1.0), tid);
-        return;
-    }
-
-    // Stochastic: pick 2 lights using per-pixel per-frame hash
     uint seed = tid.x * 1973u + tid.y * 9277u + frameIndex * 26699u;
-    float2 r0 = random(seed);
-    float2 r1 = random(seed + 1u);
+    raytracing::intersector<raytracing::instancing> occl;
+    occl.assume_geometry_type(raytracing::geometry_type::triangle);
+    occl.accept_any_intersection(true);
 
-    uint lightA = cluster.lightIndices[uint(r0.x * float(lightCount)) % lightCount];
-    uint lightB = cluster.lightIndices[uint(r1.x * float(lightCount)) % lightCount];
+    // --- R: point lights (2 picks from the tile cluster) -------------------
+    float pointVis = 1.0;
+    if (lightCount > 0) {
+        float2 r0 = random(seed);
+        float2 r1 = random(seed + 1u);
+        uint lightA = cluster.lightIndices[uint(r0.x * float(lightCount)) % lightCount];
+        uint lightB = cluster.lightIndices[uint(r1.x * float(lightCount)) % lightCount];
 
-    float visibility = 0.0;
-    uint sampleCount = (lightA == lightB) ? 1u : 2u;
+        float visibility = 0.0;
+        uint sampleCount = (lightA == lightB) ? 1u : 2u;
+        for (uint s = 0; s < sampleCount; s++) {
+            uint li = (s == 0) ? lightA : lightB;
+            PointLight light = pointLights[li];
 
-    for (uint s = 0; s < sampleCount; s++) {
-        uint li = (s == 0) ? lightA : lightB;
-        PointLight light = pointLights[li];
+            float3 toLight = light.position - worldPos;
+            float dist = length(toLight);
+            if (dist >= light.radius) { visibility += 1.0; continue; }
 
-        float3 toLight = light.position - worldPos;
-        float dist = length(toLight);
-        if (dist >= light.radius) { visibility += 1.0; continue; }
+            float3 dir = toLight / dist;
+            // Skip lights behind the surface
+            if (dot(dir, worldNormal) <= 0.0) { visibility += 1.0; continue; }
 
-        float3 dir = toLight / dist;
-        // Skip lights behind the surface
-        if (dot(dir, worldNormal) <= 0.0) { visibility += 1.0; continue; }
-
-        raytracing::ray ray;
-        ray.origin = worldPos + worldNormal * 0.005;
-        ray.direction = dir;
-        ray.min_distance = 0.001;
-        ray.max_distance = dist - 0.01;
-
-        raytracing::intersector<raytracing::instancing, raytracing::triangle_data> inter;
-        inter.assume_geometry_type(raytracing::geometry_type::triangle);
-        auto hit = inter.intersect(ray, TLAS, 0xFF);
-        visibility += (hit.type == raytracing::intersection_type::none) ? 1.0 : 0.0;
+            raytracing::ray ray;
+            ray.origin = worldPos + worldNormal * 0.005;
+            ray.direction = dir;
+            ray.min_distance = 0.001;
+            ray.max_distance = dist - 0.01;
+            auto hit = occl.intersect(ray, TLAS, 0xFF);
+            visibility += (hit.type == raytracing::intersection_type::none) ? 1.0 : 0.0;
+        }
+        pointVis = visibility / float(sampleCount);
     }
 
-    visibility /= float(sampleCount);
-    shadowTexture.write(float4(visibility, 0.0, 0.0, 1.0), tid);
+    // --- G: rect AREA lights (random point on the quad -> soft penumbra) ---
+    float rectVis = 1.0;
+    if (extraCounts.x > 0) {
+        uint ri = uint(random(seed + 2u).x * float(extraCounts.x)) % extraCounts.x;
+        RectLight rl = rectLights[ri];
+        float2 rq = random(seed + 3u) * 2.0 - 1.0;   // uniform on the quad
+        float3 target = float3(rl.position) + float3(rl.right) * (rq.x * rl.halfWidth)
+                                            + float3(rl.up) * (rq.y * rl.halfHeight);
+        float3 toLight = target - worldPos;
+        float dist = length(toLight);
+        if (dist > 0.01) {
+            float3 dir = toLight / dist;
+            if (dot(dir, worldNormal) > 0.0) {
+                raytracing::ray ray;
+                ray.origin = worldPos + worldNormal * 0.005;
+                ray.direction = dir;
+                ray.min_distance = 0.001;
+                ray.max_distance = dist - 0.01;
+                auto hit = occl.intersect(ray, TLAS, 0xFF);
+                rectVis = (hit.type == raytracing::intersection_type::none) ? 1.0 : 0.0;
+            }
+        }
+    }
+
+    // --- B: spot lights (1 ray to the picked spot's apex) ------------------
+    float spotVis = 1.0;
+    if (extraCounts.y > 0) {
+        uint si = uint(random(seed + 4u).x * float(extraCounts.y)) % extraCounts.y;
+        SpotLight sl = spotLights[si];
+        float3 toLight = sl.position - worldPos;
+        float dist = length(toLight);
+        if (dist < sl.radius && dist > 0.01) {
+            float3 dir = toLight / dist;
+            // Only shade pixels the cone can reach and that face the light.
+            bool inCone = dot(-dir, sl.direction) > sl.cosOuter;
+            if (inCone && dot(dir, worldNormal) > 0.0) {
+                raytracing::ray ray;
+                ray.origin = worldPos + worldNormal * 0.005;
+                ray.direction = dir;
+                ray.min_distance = 0.001;
+                ray.max_distance = dist - 0.01;
+                auto hit = occl.intersect(ray, TLAS, 0xFF);
+                spotVis = (hit.type == raytracing::intersection_type::none) ? 1.0 : 0.0;
+            }
+        }
+    }
+
+    shadowTexture.write(float4(pointVis, rectVis, spotVis, 1.0), tid);
 }

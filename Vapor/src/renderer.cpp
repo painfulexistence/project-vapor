@@ -107,11 +107,32 @@ void Renderer::initialize(std::unique_ptr<RHI> rhiPtr, GraphicsBackend backendTy
     pointLightBufferDesc.memoryUsage = MemoryUsage::CPUtoGPU;
     createFrameSlottedBuffer(pointLightBuffer, pointLightBufferDesc);
 
+    BufferDesc spotLightBufferDesc;
+    spotLightBufferDesc.size = sizeof(Vapor::SpotLight) * maxSpotLights;
+    spotLightBufferDesc.usage = BufferUsage::Uniform;
+    spotLightBufferDesc.memoryUsage = MemoryUsage::CPUtoGPU;
+    createFrameSlottedBuffer(spotLightBuffer, spotLightBufferDesc);
+
     BufferDesc instanceDataBufferDesc;
     instanceDataBufferDesc.size = sizeof(Vapor::InstanceData) * MAX_INSTANCES;
     instanceDataBufferDesc.usage = BufferUsage::Uniform;
     instanceDataBufferDesc.memoryUsage = MemoryUsage::CPUtoGPU;
     createFrameSlottedBuffer(instanceDataBuffer, instanceDataBufferDesc);
+
+    // Render-to-texture view: its own camera/instance buffers (see renderer.hpp
+    // note — the shared ones are overwritten by the main draw later in the same
+    // frame, before the GPU executes anything).
+    BufferDesc rttCamDesc;
+    rttCamDesc.size = sizeof(CameraRenderData);
+    rttCamDesc.usage = BufferUsage::Uniform;
+    rttCamDesc.memoryUsage = MemoryUsage::CPUtoGPU;
+    createFrameSlottedBuffer(rttCameraBuffer, rttCamDesc);
+
+    BufferDesc rttInstDesc;
+    rttInstDesc.size = sizeof(Vapor::InstanceData) * MAX_INSTANCES;
+    rttInstDesc.usage = BufferUsage::Uniform;
+    rttInstDesc.memoryUsage = MemoryUsage::CPUtoGPU;
+    createFrameSlottedBuffer(rttInstanceBuffer, rttInstDesc);
 
     // Shader-contract buffers (clusters / rect lights / PSSM), neutral-filled.
     // See the "Full PBR shader contract" note in renderer.hpp.
@@ -167,6 +188,53 @@ void Renderer::initialize(std::unique_ptr<RHI> rhiPtr, GraphicsBackend backendTy
         fogDesc.memoryUsage = MemoryUsage::CPUtoGPU;
         FogRenderData fogDefaults;
         createFrameSlottedBuffer(fogDataBuffer, fogDesc, &fogDefaults, sizeof(fogDefaults));
+
+        BufferDesc volDesc;
+        volDesc.size = sizeof(VolumeRenderData);
+        volDesc.usage = BufferUsage::Uniform;
+        volDesc.memoryUsage = MemoryUsage::CPUtoGPU;
+        createFrameSlottedBuffer(volumeDataBuffer, volDesc, &volumeSettings, sizeof(volumeSettings));
+
+        // Procedural 64^3 test density grid (radial-falloff smoke puff shaped
+        // by trilinear value noise) so the volume raymarch pass has something
+        // to draw before real EmberGen exports arrive (import is a future PR).
+        {
+            constexpr Uint32 N = 64;
+            auto hash3 = [](int x, int y, int z) {
+                Uint32 h = Uint32(x) * 73856093u ^ Uint32(y) * 19349663u ^ Uint32(z) * 83492791u;
+                h = (h ^ (h >> 13)) * 0x85ebca6bu;
+                return float((h ^ (h >> 16)) & 0xFFFFFFu) / float(0xFFFFFFu);
+            };
+            auto valueNoise = [&](float x, float y, float z) {
+                int xi = int(std::floor(x)), yi = int(std::floor(y)), zi = int(std::floor(z));
+                float fx = x - xi, fy = y - yi, fz = z - zi;
+                auto lerp3 = [](float a, float b, float t) { return a + (b - a) * t; };
+                float c00 = lerp3(hash3(xi, yi, zi),     hash3(xi + 1, yi, zi),     fx);
+                float c10 = lerp3(hash3(xi, yi + 1, zi), hash3(xi + 1, yi + 1, zi), fx);
+                float c01 = lerp3(hash3(xi, yi, zi + 1),     hash3(xi + 1, yi, zi + 1),     fx);
+                float c11 = lerp3(hash3(xi, yi + 1, zi + 1), hash3(xi + 1, yi + 1, zi + 1), fx);
+                return lerp3(lerp3(c00, c10, fy), lerp3(c01, c11, fy), fz);
+            };
+            std::vector<Uint8> voxels(N * N * N);
+            for (Uint32 z = 0; z < N; z++) {
+                for (Uint32 y = 0; y < N; y++) {
+                    for (Uint32 x = 0; x < N; x++) {
+                        glm::vec3 q(x / float(N - 1) * 2.0f - 1.0f,
+                                    y / float(N - 1) * 2.0f - 1.0f,
+                                    z / float(N - 1) * 2.0f - 1.0f);
+                        float r = glm::length(q);
+                        glm::vec3 s = (q + 1.0f) * 4.0f;  // noise domain
+                        float fbm = 0.6f * valueNoise(s.x, s.y, s.z)
+                                  + 0.3f * valueNoise(s.x * 2.0f, s.y * 2.0f, s.z * 2.0f)
+                                  + 0.1f * valueNoise(s.x * 4.0f, s.y * 4.0f, s.z * 4.0f);
+                        float d = std::clamp(fbm * 1.5f - r * 1.1f, 0.0f, 1.0f);
+                        voxels[x + y * N + z * N * N] = Uint8(d * 255.0f + 0.5f);
+                    }
+                }
+            }
+            volumeTestTexture = createVolumeTexture(N, N, N, voxels.data(), voxels.size());
+            volumeDensityTexture = volumeTestTexture;
+        }
 
         BufferDesc prevVPDesc;
         prevVPDesc.size = sizeof(glm::mat4);
@@ -278,6 +346,9 @@ void Renderer::initialize(std::unique_ptr<RHI> rhiPtr, GraphicsBackend backendTy
         cellHeadBuffer = rhi->createBuffer(bd);
         bd.size = size_t(gibsMaxSurfels) * sizeof(Uint32);
         surfelNextBuffer = rhi->createBuffer(bd);
+        // Free-list: indices of surfel slots surfelUpdate has evicted, popped by
+        // generation for reuse so the pool self-recycles (holds at most maxSurfels).
+        surfelFreeListBuffer = rhi->createBuffer(bd);
 
         BufferDesc cb;
         cb.usage = BufferUsage::Storage;
@@ -797,6 +868,7 @@ void Renderer::beginFrame(const CameraRenderData& camera) {
     directionalLights.clear();
     pointLights.clear();
     rectLights.clear();
+    spotLights.clear();
 
     // Set up batch renderers for auto-flushing
     // 2D uses orthographic projection
@@ -844,6 +916,8 @@ void Renderer::render() {
     lastFrameStats.visibleDrawables = static_cast<Uint32>(visibleDrawables.size());
     lastFrameStats.directionalLights = static_cast<Uint32>(directionalLights.size());
     lastFrameStats.pointLights = static_cast<Uint32>(pointLights.size());
+    lastFrameStats.rectLights = static_cast<Uint32>(rectLights.size());
+    lastFrameStats.spotLights = static_cast<Uint32>(spotLights.size());
 }
 
 // The engine's default frame composition. Gameplay code is free to modify
@@ -919,6 +993,12 @@ void Renderer::setupDefaultRenderGraph() {
     // rays); swaps colorRT with tempColorRT internally.
     renderGraph.addPass("VolumetricFog",
         [](Renderer& r) { r.volumetricFogPass(); });
+
+    // Heterogeneous volume raymarch (EmberGen density grids) right after the
+    // global fog, same colorRT/tempColorRT swap. Off by default until the
+    // panel enables it (test grid) or real volume data is set.
+    renderGraph.addPass("VolumeRaymarch",
+        [](Renderer& r) { r.volumeRaymarchPass(); });
 
     // Volumetric clouds (quarter-res raymarch + temporal + composite), after
     // fog and before bloom, matching the Metal graph. Off by default.
@@ -1137,6 +1217,19 @@ void Renderer::updateBuffers() {
                           materialDataArray.size() * sizeof(Vapor::MaterialData));
     }
 
+    // The directional light IS the sun: derive the atmosphere/sky sun direction
+    // from it so the sky disc, god rays, fog, GIBS and clouds all agree with the
+    // surface shading and the PSSM shadows (which read the light directly).
+    // Conventions differ — DirectionalLight.direction points the way light
+    // TRAVELS (away from the sun), atmosphere sunDirection points TOWARD the sun
+    // — so negate. Without this the two were independent and started misaligned,
+    // making the lit direction and the sky sun disagree (and, on Metal, the RT
+    // sun shadow followed a different sun than the Vulkan PSSM shadow). Scenes
+    // with no directional light keep the panel-set sun.
+    if (!directionalLights.empty()) {
+        glm::vec3 d = directionalLights[0].direction;
+        if (glm::dot(d, d) > 1e-8f) atmosphereData.sunDirection = -glm::normalize(d);
+    }
     // Atmosphere tunables are panel-editable; re-upload every frame so edits
     // reach the sky/fog/IBL consumers (the buffer is tiny; staged-ring cost
     // is negligible, and it keeps every frame slot coherent).
@@ -1154,6 +1247,12 @@ void Renderer::updateBuffers() {
     if (!pointLights.empty()) {
         rhi->updateBuffer(pointLightBuffer, pointLights.data(), 0,
                           pointLights.size() * sizeof(PointLightData));
+    }
+
+    // Update spot lights
+    if (!spotLights.empty()) {
+        rhi->updateBuffer(spotLightBuffer, spotLights.data(), 0,
+                          spotLights.size() * sizeof(Vapor::SpotLight));
     }
 
     // Update instance data — for EVERY submitted drawable, not just the
@@ -1353,10 +1452,25 @@ void Renderer::mainRenderPass() {
         // Always bind a 2D texture here: the defaults loop above put a cubemap in
         // b8/b9 (dead Metal contract), and b8/b9 are sampler2D on this path.
         rhi->setTexture(0, 9, nearShadowMap.isValid() ? nearShadowMap : whiteTex, shadowSampler);
+        // IBL maps (set2 b10/b11/b12): the sky bake fills them on Vulkan now.
+        // Sampled only when the material's iblEnabled is set; bind always so the
+        // descriptor is valid whenever a material does enable it.
+        if (irradianceMap.isValid()) rhi->setTexture(0, 10, irradianceMap, clampSampler);
+        if (prefilterMap.isValid()) rhi->setTexture(0, 11, prefilterMap, clampSampler);
+        if (brdfLUTTex.isValid())    rhi->setTexture(0, 12, brdfLUTTex, clampSampler);
         // Perf-isolation debug flags -> RHIMain.frag push offset 96 (binding 2).
         // Vulkan-only: on Metal, fragment buffer(2) is the CLUSTER buffer, so
         // pushing here would corrupt it (the old billions-of-iterations hang).
         rhi->setFragmentBytes(&mainDebugFlags, sizeof(Uint32), 2);
+        // Spot lights: buffer at set1 b6; rect area lights at set1 b7 (analytic
+        // eval in RHIMain.frag, unshadowed — the RT area shadow is Metal-only).
+        // Loop bounds travel together at push offset 80 (binding 1).
+        if (spotLightBuffer.isValid())
+            rhi->setFragmentBuffer(6, spotLightBuffer, 0, sizeof(Vapor::SpotLight) * maxSpotLights);
+        if (rectLightBuffer.isValid()) rhi->setFragmentBuffer(7, rectLightBuffer);
+        glm::uvec2 spotRectCounts(static_cast<Uint32>(spotLights.size()),
+                                  static_cast<Uint32>(rectLights.size()));
+        rhi->setFragmentBytes(&spotRectCounts, sizeof(glm::uvec2), 1);
     } else {
         // Perf-isolation debug flags for the Metal PBR shader at buffer(12)
         // (buffer(2) is the cluster buffer here — see the Vulkan note above —
@@ -1381,9 +1495,21 @@ void Renderer::mainRenderPass() {
             // RT kernel outputs replace the neutral whites —
             // texShadow(7), texPointShadow(13), gibsGI(14).
             if (shadowRT.isValid()) rhi->setTexture(0, 7, shadowRT, clampSampler);
-            if (pointShadowHistoryRT.isValid()) rhi->setTexture(0, 13, pointShadowHistoryRT, clampSampler);
+            // texPointShadow (RGB point/rect/spot channels) only when stochastic
+            // shadows are on; otherwise the neutral white bound above keeps
+            // point/rect/spot unshadowed — matching the RT-less Vulkan path.
+            if (stochasticShadowsEnabled && pointShadowHistoryRT.isValid())
+                rhi->setTexture(0, 13, pointShadowHistoryRT, clampSampler);
             if (gibsEnabled && giResultTexture.isValid()) rhi->setTexture(0, 14, giResultTexture, clampSampler);
         }
+        // Spot lights (buffer 14) + counts/flags (buffer 15). Flag bit0 says the
+        // point-shadow texture carries the RGB channel format (R point / G rect
+        // / B spot); 0 when stochastic shadows are off, so rect/spot stay
+        // unshadowed instead of sampling the (white) placeholder's channels.
+        rhi->setFragmentBuffer(14, spotLightBuffer, 0, sizeof(Vapor::SpotLight) * maxSpotLights);
+        glm::uvec2 spotRectParams(static_cast<Uint32>(spotLights.size()),
+                                  (capabilities.raytracing && stochasticShadowsEnabled) ? 1u : 0u);
+        rhi->setFragmentBytes(&spotRectParams, sizeof(glm::uvec2), 15);
     }
 
     // Group drawables by material to reduce state changes
@@ -1441,8 +1567,9 @@ void Renderer::mainRenderPass() {
 }
 
 // IBL-from-sky: capture the atmosphere into a cubemap, convolve irradiance,
-// prefilter specular mips, integrate the BRDF LUT. Runs once (iblNeedsUpdate),
-// Metal MSL for now (the Vulkan PBR path uses the atmosphere directly).
+// prefilter specular mips, integrate the BRDF LUT. Runs once (iblNeedsUpdate)
+// on both backends — the bake pipelines are MSL on Metal and GLSL twins on
+// Vulkan, and the main pass consumes the results as split-sum IBL.
 void Renderer::iblCapturePass() {
     if (!iblNeedsUpdate) return;
     if (!skyCapturePipeline.isValid() || !irradiancePipeline.isValid() ||
@@ -1862,6 +1989,7 @@ void Renderer::aoDenoisePass() {
 
 // Stochastic ray-traced point-light shadows (clustered light sampling).
 void Renderer::stochasticPointShadowPass() {
+    if (!stochasticShadowsEnabled) return;  // noisy without a denoiser; off = aligns with Vulkan
     if (!stochasticPointShadowPipeline.isValid() || !sceneTLAS.isValid() || !pointShadowRT.isValid()) return;
     Uint32 w = rhi->getSwapchainWidth();
     Uint32 h = rhi->getSwapchainHeight();
@@ -1884,6 +2012,12 @@ void Renderer::stochasticPointShadowPass() {
     rhi->setComputeBytes(&fi, sizeof(Uint32), 5);
     rhi->setAccelerationStructure(6, sceneTLAS);
     rhi->setComputeBytes(&debugMode, sizeof(Uint32), 7);
+    // Rect area + spot light shadow inputs (channels G / B of the output).
+    rhi->setComputeBuffer(8, spotLightBuffer, 0, sizeof(Vapor::SpotLight) * maxSpotLights);
+    rhi->setComputeBuffer(9, rectLightBuffer);
+    glm::uvec2 extraCounts(static_cast<Uint32>(rectLights.size()),
+                           static_cast<Uint32>(spotLights.size()));
+    rhi->setComputeBytes(&extraCounts, sizeof(glm::uvec2), 10);
     rhi->dispatch((w + 7) / 8, (h + 7) / 8, 1);
     rhi->endComputePass();
 }
@@ -1909,11 +2043,13 @@ void Renderer::gibsPass() {
         if (gibsResetRequested) {
             p[0] = 0;
             p[1] = 0;
+            p[2] = 0;  // free-list depth: drop all reclaimed slots too
             gibsActiveSurfels = 0;
             gibsResetRequested = false;
         } else {
             gibsActiveSurfels = std::min(p[1], gibsMaxSurfels);
             p[0] = 0;
+            // p[1] (high-water) and p[2] (free-list depth) persist across frames.
         }
         rhi->unmapBuffer(surfelCounterBuffer);
     }
@@ -1964,6 +2100,21 @@ void Renderer::gibsPass() {
 
     rhi->beginComputePass("GIBS");
 
+    // 0) Age + evict existing surfels, pushing reclaimed slots onto the
+    //    free-list, BEFORE generation so this frame can reuse them. Without
+    //    this the pool only grows and freezes at maxSurfels (manual reset was
+    //    the only recovery). Iterates [0, active); the kernel skips invalid
+    //    slots (already freed).
+    if (surfelUpdatePipeline.isValid() && gibsActiveSurfels > 0) {
+        rhi->bindComputePipeline(surfelUpdatePipeline);
+        rhi->setComputeBuffer(0, surfelBuffer, 0, surfelBytes);
+        rhi->setComputeBuffer(1, surfelCounterBuffer, 0, 4 * sizeof(Uint32));
+        rhi->setComputeBuffer(2, gibsDataBuffer, 0, sizeof(GIBSData));
+        rhi->setComputeBuffer(3, surfelFreeListBuffer);
+        rhi->dispatch((gibsActiveSurfels + 255) / 256, 1, 1);
+        rhi->computeBarrier();
+    }
+
     // 1) Surfel generation from the pre-pass G-buffer.
     SurfelGenerationParams gp{};
     gp.invViewProj = gd.invViewProj;
@@ -1982,6 +2133,7 @@ void Renderer::gibsPass() {
     rhi->setComputeBytes(&gp, sizeof(gp), 3);
     rhi->setComputeBuffer(4, cellHeadBuffer);
     rhi->setComputeBuffer(5, surfelNextBuffer);
+    rhi->setComputeBuffer(6, surfelFreeListBuffer);  // pop reclaimed slots
     rhi->dispatch((w + 7) / 8, (h + 7) / 8, 1);
     rhi->computeBarrier();
 
@@ -2029,7 +2181,14 @@ void Renderer::gibsPass() {
         rhi->computeBarrier();
     }
 
-    // 5) Per-pixel GI gather into giResultTexture.
+    // 5) Per-pixel GI gather. With the SVGF-lite chain available it writes the
+    // raw target and the chain below produces giResultTexture; otherwise it
+    // writes giResultTexture directly (the pre-denoise behavior).
+    const bool denoise = gibsDenoiseEnabled &&
+        giTemporalPipeline.isValid() && giDenoisePipeline.isValid() &&
+        giRawRT.isValid() && giScratchRT.isValid() &&
+        giHistoryChainRT[0].isValid() && giHistoryChainRT[1].isValid() &&
+        velocityRT.isValid();
     GIBSSampleParams sp{};
     sp.invViewProj = gd.invViewProj;
     sp.screenSize = screenSize;
@@ -2041,7 +2200,7 @@ void Renderer::gibsPass() {
     rhi->bindComputePipeline(giSamplePipeline);
     rhi->setComputeTexture(0, depthStencilRT);
     rhi->setComputeTexture(1, normalRT);
-    rhi->setComputeTexture(2, giResultTexture);
+    rhi->setComputeTexture(2, denoise ? giRawRT : giResultTexture);
     rhi->setComputeBuffer(0, surfelBuffer, 0, surfelBytes);
     rhi->setComputeBuffer(1, cellHeadBuffer);
     rhi->setComputeBuffer(2, gibsDataBuffer, 0, sizeof(GIBSData));
@@ -2049,13 +2208,63 @@ void Renderer::gibsPass() {
     rhi->setComputeBuffer(4, surfelNextBuffer);
     rhi->dispatch((Uint32(giResolution.x) + 7) / 8, (Uint32(giResolution.y) + 7) / 8, 1);
     rhi->endComputePass();
-    rhi->computeBarrier();  // GI writes -> fragment reads in Main
+    rhi->computeBarrier();  // GI writes -> next consumer
+
+    // 6) SVGF-lite: temporal reprojection over the gather, then two edge-aware
+    // a-trous iterations (stride 1, 2) into giResultTexture. Blends away the
+    // surfel-disc seams and the flicker the surfel-space EMA leaves behind.
+    if (denoise) {
+        if (!giPrevViewValid) { giPrevView = currentCamera.view; giPrevViewValid = true; }
+        Uint32 histIn = giHistoryIndex;
+        Uint32 histOut = histIn ^ 1u;
+        Uint32 histValid = giHistoryValid ? 1u : 0u;
+        // Chain dispatch covers the full GI texture (64px floor included) so
+        // the history never carries unwritten texels into the a-trous taps.
+        Uint32 giW = std::max(64u, Uint32(w * gibsResolutionScale));
+        Uint32 giH = std::max(64u, Uint32(h * gibsResolutionScale));
+
+        rhi->beginComputePass("GIBSDenoise");
+        rhi->bindComputePipeline(giTemporalPipeline);
+        rhi->setComputeTexture(0, giRawRT);
+        rhi->setComputeTexture(1, giHistoryChainRT[histIn]);
+        rhi->setComputeTexture(2, giHistoryChainRT[histOut]);
+        rhi->setComputeTexture(3, velocityRT);
+        rhi->setComputeTexture(4, depthStencilRT);
+        rhi->setComputeBuffer(0, cameraUniformBuffer, 0, sizeof(CameraRenderData));
+        rhi->setComputeBytes(&giPrevView, sizeof(glm::mat4), 1);
+        rhi->setComputeBytes(&histValid, sizeof(Uint32), 2);
+        rhi->dispatch((giW + 7) / 8, (giH + 7) / 8, 1);
+        rhi->computeBarrier();
+
+        Uint32 stride = 1;
+        rhi->bindComputePipeline(giDenoisePipeline);
+        rhi->setComputeTexture(0, giHistoryChainRT[histOut]);
+        rhi->setComputeTexture(1, giScratchRT);
+        rhi->setComputeTexture(2, normalRT);
+        rhi->setComputeBytes(&stride, sizeof(Uint32), 0);
+        rhi->dispatch((giW + 7) / 8, (giH + 7) / 8, 1);
+        rhi->computeBarrier();
+
+        stride = 2;
+        rhi->setComputeTexture(0, giScratchRT);
+        rhi->setComputeTexture(1, giResultTexture);
+        rhi->setComputeTexture(2, normalRT);
+        rhi->setComputeBytes(&stride, sizeof(Uint32), 0);
+        rhi->dispatch((giW + 7) / 8, (giH + 7) / 8, 1);
+        rhi->endComputePass();
+        rhi->computeBarrier();
+
+        giHistoryIndex = histOut;
+        giHistoryValid = true;
+        giPrevView = currentCamera.view;
+    }
 }
 
 // Temporal point-shadow resolve. Native copies denoised->history with a blit;
 // here the handles are swapped instead (post-swap, history holds the latest
 // denoised result and is what the PBR shader binds).
 void Renderer::pointShadowTemporalPass() {
+    if (!stochasticShadowsEnabled) return;
     if (!pointShadowTemporalPipeline.isValid() || !pointShadowRT.isValid()) return;
     Uint32 w = rhi->getSwapchainWidth();
     Uint32 h = rhi->getSwapchainHeight();
@@ -2554,7 +2763,11 @@ void Renderer::lightScatteringPass() {
 void Renderer::volumetricFogPass() {
     if (!volumetricFogEnabled || !volumetricFogPipeline.isValid() ||
         !colorRT.isValid() || !tempColorRT.isValid() || !depthStencilRT.isValid() ||
-        !fogDataBuffer.isValid()) {
+        !fogDataBuffer.isValid() ||
+        // The raymarch reads the shadow cascades and every light list.
+        !pssmShadowArrayTexture.isValid() || !pssmDataBuffer.isValid() ||
+        !clusterBuffer.isValid() || !pointLightBuffer.isValid() ||
+        !spotLightBuffer.isValid() || !rectLightBuffer.isValid()) {
         return;
     }
 
@@ -2624,13 +2837,112 @@ void Renderer::volumetricFogPass() {
         mfd.screenSize = glm::vec2(rhi->getSwapchainWidth(), rhi->getSwapchainHeight());
         rhi->setFragmentBytes(&mfd, sizeof(mfd), 0);
         rhi->setFragmentBuffer(1, cameraUniformBuffer, 0, sizeof(CameraRenderData));
+        // Volumetric raymarch inputs: PSSM cascades for sun shafts + the full
+        // light set (tile-culled points, spots, rects).
+        rhi->setTexture(0, 2, pssmShadowArrayTexture, shadowSampler);
+        rhi->setFragmentBuffer(2, pssmDataBuffer, 0, sizeof(PSSMRenderData));
+        rhi->setFragmentBuffer(3, pointLightBuffer, 0, sizeof(PointLightData) * maxPointLights);
+        rhi->setFragmentBuffer(4, clusterBuffer);
+        rhi->setFragmentBuffer(5, spotLightBuffer, 0, sizeof(Vapor::SpotLight) * maxSpotLights);
+        rhi->setFragmentBuffer(6, rectLightBuffer);
+        glm::uvec4 fogLightParams(clusterGridSizeX, clusterGridSizeY,
+                                  static_cast<Uint32>(spotLights.size()),
+                                  static_cast<Uint32>(rectLights.size()));
+        rhi->setFragmentBytes(&fogLightParams, sizeof(glm::uvec4), 7);
     } else {
         rhi->setFragmentBuffer(0, fogDataBuffer, 0, sizeof(FogRenderData));
+        rhi->setFragmentBuffer(1, pssmDataBuffer, 0, sizeof(PSSMRenderData));
+        rhi->setFragmentBuffer(2, clusterBuffer);
+        rhi->setFragmentBuffer(3, pointLightBuffer, 0, sizeof(PointLightData) * maxPointLights);
+        rhi->setFragmentBuffer(4, spotLightBuffer, 0, sizeof(Vapor::SpotLight) * maxSpotLights);
+        rhi->setFragmentBuffer(5, rectLightBuffer);
+        rhi->setTexture(0, 2, pssmShadowArrayTexture, shadowSampler);
+        glm::uvec4 fogLightParams(clusterGridSizeX, clusterGridSizeY,
+                                  static_cast<Uint32>(spotLights.size()),
+                                  static_cast<Uint32>(rectLights.size()));
+        rhi->setFragmentBytes(&fogLightParams, sizeof(glm::uvec4), 0);  // push offset 64
     }
     rhi->draw(3, 1, 0, 0);
     rhi->endRenderPass();
 
     std::swap(colorRT, tempColorRT);  // colorRT now holds the fogged scene
+}
+
+// Heterogeneous volume raymarch (EmberGen-style density grid in an AABB):
+// read colorRT + depth, march the 3D density texture with sun single
+// scattering (PSSM tap + self-shadow march), write to tempColorRT, swap.
+// Rendering only — EmberGen import/parsing lives in a separate PR; until then
+// the procedural test grid stands in (panel: Effects > Volume).
+void Renderer::volumeRaymarchPass() {
+    if (!volumeRenderEnabled || !volumeRaymarchPipeline.isValid() ||
+        !volumeDensityTexture.isValid() || !volumeDataBuffer.isValid() ||
+        !colorRT.isValid() || !tempColorRT.isValid() || !depthStencilRT.isValid() ||
+        !pssmShadowArrayTexture.isValid() || !pssmDataBuffer.isValid()) {
+        return;
+    }
+
+    VolumeRenderData vol = volumeSettings;
+    vol.invViewProj = glm::inverse(currentCamera.proj * currentCamera.view);
+    vol.cameraPosition = glm::vec4(currentCamera.position, 0.0f);
+    vol.sunDirection = glm::vec4(glm::normalize(atmosphereData.sunDirection), 0.0f);
+    vol.sunColor = glm::vec4(atmosphereData.sunColor, atmosphereData.sunIntensity);
+
+    RenderPassDesc rp;
+    rp.name = "VolumeRaymarch";
+    rp.colorAttachments.push_back(tempColorRT);
+    rp.loadColor.push_back(false);  // every pixel written
+    rhi->beginRenderPass(rp);
+    rhi->bindPipeline(volumeRaymarchPipeline);
+    rhi->setTexture(0, 0, colorRT, clampSampler);
+    rhi->setTexture(0, 1, depthStencilRT, clampSampler);
+    rhi->setTexture(0, 2, pssmShadowArrayTexture, shadowSampler);
+    rhi->setTexture(0, 3, volumeDensityTexture, clampSampler);
+    if (backend == GraphicsBackend::Metal) {
+        // VolumeRenderData is vec4-only, so the C++ struct matches the MSL
+        // twin byte-for-byte and can travel as immediate bytes.
+        rhi->setFragmentBytes(&vol, sizeof(vol), 0);
+        rhi->setFragmentBuffer(1, pssmDataBuffer, 0, sizeof(PSSMRenderData));
+    } else {
+        rhi->updateBuffer(volumeDataBuffer, &vol, 0, sizeof(vol));
+        rhi->setFragmentBuffer(0, volumeDataBuffer, 0, sizeof(VolumeRenderData));
+        rhi->setFragmentBuffer(1, pssmDataBuffer, 0, sizeof(PSSMRenderData));
+    }
+    rhi->draw(3, 1, 0, 0);
+    rhi->endRenderPass();
+
+    std::swap(colorRT, tempColorRT);  // colorRT now holds the composited volume
+}
+
+// Volume Rendering API — the hook a future EmberGen import PR calls with
+// decoded voxel data. R8_UNORM slice-major grid -> sampled 3D texture.
+TextureHandle Renderer::createVolumeTexture(Uint32 width, Uint32 height, Uint32 depth,
+                                            const void* data, size_t size) {
+    if (!rhi || width == 0 || height == 0 || depth <= 1 || !data ||
+        size < size_t(width) * height * depth) {
+        return {};
+    }
+    TextureDesc desc;
+    desc.width = width;
+    desc.height = height;
+    desc.depth = depth;
+    desc.format = PixelFormat::R8_UNORM;
+    desc.usage = TextureUsage::Sampled;
+    TextureHandle tex = rhi->createTexture(desc);
+    if (tex.isValid()) {
+        rhi->updateTexture(tex, data, size, 0, 0);
+    }
+    return tex;
+}
+
+void Renderer::setVolumeDensity(TextureHandle density, const glm::vec3& boxMin,
+                                const glm::vec3& boxMax) {
+    if (density.isValid()) {
+        volumeDensityTexture = density;
+        volumeSettings.boxMin = glm::vec4(boxMin, volumeSettings.boxMin.w);
+        volumeSettings.boxMax = glm::vec4(boxMax, volumeSettings.boxMax.w);
+    } else {
+        volumeDensityTexture = volumeTestTexture;  // back to the built-in grid
+    }
 }
 
 // Camera-motion velocity (motion vectors) from the depth buffer. Standalone
@@ -3285,6 +3597,7 @@ void Renderer::destroyRenderTargets() {
     kill(aoRawRT); kill(aoScratchRT); kill(aoHistoryRT[0]); kill(aoHistoryRT[1]);
     kill(pointShadowRT); kill(pointShadowHistoryRT); kill(pointShadowDenoisedRT);
     kill(giResultTexture);
+    kill(giRawRT); kill(giScratchRT); kill(giHistoryChainRT[0]); kill(giHistoryChainRT[1]);
     kill(bloomBrightness);
     for (Uint32 i = 0; i < BLOOM_PYRAMID_LEVELS; i++) kill(bloomPyramid[i]);
     kill(lightScatteringRT);
@@ -3427,7 +3740,11 @@ void Renderer::createRenderTargets() {
         aoHistoryRT[1] = rhi->createTexture(desc);
 
         // Point shadows stay full-res (native creates these at drawableSize).
-        desc.format = PixelFormat::R16_FLOAT;
+        // RGBA16F: the stochastic kernel now packs THREE visibility channels —
+        // R = point lights, G = rect area lights, B = spot lights (native keeps
+        // its R16F targets; the extra channels just drop there, and its PBR
+        // binds shadowFlags=0 so it never reads them).
+        desc.format = PixelFormat::RGBA16_FLOAT;
         desc.usage = TextureUsage::Storage | TextureUsage::Sampled;
         desc.width = width;
         desc.height = height;
@@ -3445,6 +3762,13 @@ void Renderer::createRenderTargets() {
             gi.usage = TextureUsage::Storage | TextureUsage::Sampled;
             gi.sampleCount = 1;
             giResultTexture = rhi->createTexture(gi);
+            // SVGF-lite chain (same size/format): gather -> giRawRT ->
+            // temporal (history ping-pong) -> a-trous x2 -> giResultTexture.
+            giRawRT = rhi->createTexture(gi);
+            giScratchRT = rhi->createTexture(gi);
+            giHistoryChainRT[0] = rhi->createTexture(gi);
+            giHistoryChainRT[1] = rhi->createTexture(gi);
+            giHistoryValid = false;  // resolution changed: old history is garbage
         }
     }
 
@@ -3667,6 +3991,39 @@ void Renderer::createRenderPipeline() {
             bloomDownsamplePipeline  = makeFullscreenFragPipeline("shaders/BloomDownsample.frag.spv", bloomDownsampleShader, BlendMode::Opaque);
             bloomUpsamplePipeline    = makeFullscreenFragPipeline("shaders/BloomUpsample.frag.spv",   bloomUpsampleShader,   BlendMode::Additive);
 
+            // IBL bake pipelines (GLSL twins of the Metal chain). iblCapturePass
+            // is backend-agnostic (RHI calls + render-to-array-layer), so once
+            // these exist it runs on Vulkan and fills the same cubemaps.
+            auto makeVertFragPipeline = [&](const char* vertSpv, const char* fragSpv,
+                                            ShaderHandle& outVS, ShaderHandle& outFS) -> PipelineHandle {
+                std::string vc = readFile(vertSpv), fc = readFile(fragSpv);
+                if (vc.empty() || fc.empty()) return {};
+                ShaderDesc vd; vd.stage = ShaderStage::Vertex;
+                vd.code = vc.data(); vd.codeSize = vc.size(); vd.entryPoint = "main";
+                outVS = rhi->createShader(vd);
+                ShaderDesc fd; fd.stage = ShaderStage::Fragment;
+                fd.code = fc.data(); fd.codeSize = fc.size(); fd.entryPoint = "main";
+                outFS = rhi->createShader(fd);
+                PipelineDesc d;
+                d.vertexShader = outVS;
+                d.fragmentShader = outFS;
+                d.vertexLayout.stride = 0;
+                d.vertexLayout.attributes = {};
+                d.topology = PrimitiveTopology::TriangleList;
+                d.blendMode = BlendMode::Opaque;
+                d.depthTest = false;
+                d.depthWrite = false;
+                d.cullMode = CullMode::None;
+                d.sampleCount = 1;
+                d.hasDepthAttachment = false;
+                d.colorAttachmentFormats = { PixelFormat::RGBA16_FLOAT };
+                return rhi->createPipeline(d);
+            };
+            skyCapturePipeline = makeVertFragPipeline("shaders/IblCubeface.vert.spv", "shaders/SkyCapture.frag.spv",    skyCaptureVS, skyCaptureFS);
+            irradiancePipeline = makeVertFragPipeline("shaders/IblCubeface.vert.spv", "shaders/IrradianceConv.frag.spv", irradianceVS, irradianceFS);
+            prefilterPipeline  = makeVertFragPipeline("shaders/IblCubeface.vert.spv", "shaders/PrefilterEnv.frag.spv",   prefilterVS, prefilterFS);
+            brdfLUTPipeline    = makeVertFragPipeline("shaders/BrdfLut.vert.spv",     "shaders/BrdfLut.frag.spv",        brdfVS, brdfFS);
+
             // Sky/atmosphere: fullscreen into the HDR colorRT, depth-tested
             // (LessOrEqual at z=1.0) so it only fills background pixels; no
             // depth write. Its own vertex shader (z=1.0), so not the lambda.
@@ -3721,6 +4078,10 @@ void Renderer::createRenderPipeline() {
             // Simple height/distance fog: fullscreen color+depth -> tempColorRT.
             volumetricFogPipeline = makeFullscreenFragPipeline(
                 "shaders/VolumetricFog.frag.spv", volumetricFogShader, BlendMode::Opaque);
+
+            // Heterogeneous volume raymarch (EmberGen density grids).
+            volumeRaymarchPipeline = makeFullscreenFragPipeline(
+                "shaders/VolumeRaymarch.frag.spv", volumeRaymarchShader, BlendMode::Opaque);
 
             // Camera-motion velocity (motion vectors) from depth.
             velocityPipeline = makeFullscreenFragPipeline(
@@ -3893,6 +4254,8 @@ void Renderer::createRenderPipeline() {
         raytraceShadowPipeline        = makeMetalCompute("shaders/3d_raytrace_shadow.metal", rtShadowShader, 1, 1, 1);
         sscsComputePipeline           = makeMetalCompute("shaders/3d_sscs.metal", sscsMetalShader, 1, 1, 1);
         raytraceAOPipeline            = makeMetalCompute("shaders/3d_raytrace_ao.metal", rtAOShader, 1, 1, 1);
+        giTemporalPipeline            = makeMetalCompute("shaders/gibs_gi_temporal.metal", giTemporalShader, 8, 8, 1);
+        giDenoisePipeline             = makeMetalCompute("shaders/gibs_gi_denoise.metal", giDenoiseShader, 8, 8, 1);
         // SSAO shares the RT AO binding interface (ignores the TLAS slot) and
         // is selected by aoMethod, exactly like native RaytraceAOPass.
         ssaoPipeline                  = makeMetalCompute("shaders/3d_ssao.metal", ssaoShader, 1, 1, 1);
@@ -3914,6 +4277,7 @@ void Renderer::createRenderPipeline() {
             return rhi->createComputePipeline(cd);
         };
         surfelGenPipeline      = makeNamedCompute("shaders/gibs_surfel_generation.metal", "surfelGeneration", gibsShaders[0], 8, 8, 1);
+        surfelUpdatePipeline   = makeNamedCompute("shaders/gibs_surfel_generation.metal", "surfelUpdate", gibsUpdateShader, 256, 1, 1);
         surfelClearPipeline    = makeNamedCompute("shaders/gibs_spatial_hash.metal", "clearCellHeads", gibsShaders[1], 256, 1, 1);
         surfelInsertPipeline   = makeNamedCompute("shaders/gibs_spatial_hash.metal", "insertSurfels", gibsShaders[2], 256, 1, 1);
         surfelRTPipeline       = makeNamedCompute("shaders/gibs_raytracing.metal", "surfelRaytracing", gibsShaders[3], 64, 1, 1);
@@ -4017,6 +4381,8 @@ void Renderer::createRenderPipeline() {
                                                 BlendMode::Opaque, { PixelFormat::RGBA16_FLOAT }, false, CompareOp::Less);
         volumetricFogPipeline = makeMetalPass("shaders/3d_volumetric_fog.metal", "volumetricFogVertex", "simpleFogFragment",
                                               BlendMode::Opaque, { PixelFormat::RGBA16_FLOAT }, false, CompareOp::Less);
+        volumeRaymarchPipeline = makeMetalPass("shaders/3d_volume_raymarch.metal", "volumeRaymarchVertex", "volumeRaymarchFragment",
+                                               BlendMode::Opaque, { PixelFormat::RGBA16_FLOAT }, false, CompareOp::Less);
         // Volumetric clouds (off by default): quarter-res raymarch ->
         // temporal resolve -> upscale composite, all from the native file.
         cloudRaymarchPipeline = makeMetalPass("shaders/3d_volumetric_clouds.metal", "cloudVertex", "cloudFragmentLowRes",
@@ -4458,6 +4824,7 @@ void Renderer::draw(std::shared_ptr<Scene> scene, Camera& camera) {
 
 void Renderer::draw(entt::registry& registry, std::shared_ptr<Scene> scene, Camera& camera) {
     if (!scene) return;
+    lastDrawRegistry = &registry;  // renderToTexture collects through this
 
     currentCamera.proj = camera.getProjMatrix();
     currentCamera.view = camera.getViewMatrix();
@@ -4500,11 +4867,16 @@ void Renderer::submitSceneLights(const std::shared_ptr<Scene>& scene) {
         if (rectLights.size() >= maxRectLights) break;
         rectLights.push_back(l);
     }
+    for (const auto& l : scene->spotLights) {
+        if (spotLights.size() >= maxSpotLights) break;
+        spotLights.push_back(l);
+    }
 }
 
+// Non-ECS collection is intentionally a no-op: the scene-node tree is headed
+// for retirement — game objects live in the ECS, and every collector should go
+// through the registry overload below (renderToTexture uses lastDrawRegistry).
 void Renderer::collectDrawables(std::shared_ptr<Scene> scene) {
-    // Only used for backwards compatibility or manual staging
-    // Usually collectDrawables(registry, scene) is used for ECS
 }
 
 void Renderer::collectDrawables(entt::registry& registry, std::shared_ptr<Scene> scene) {
@@ -4691,8 +5063,9 @@ void Renderer::drawGraphicsImGui() {
     ImGui::ColorEdit3("Clear color", (float*)&clearColor);
     ImGui::Text("Drawables: %u / %u visible",
                 lastFrameStats.visibleDrawables, lastFrameStats.totalDrawables);
-    ImGui::Text("Scene lights: dir %u | point %u | rect %zu",
-                lastFrameStats.directionalLights, lastFrameStats.pointLights, rectLights.size());
+    ImGui::Text("Scene lights: dir %u | point %u | rect %u | spot %u",
+                lastFrameStats.directionalLights, lastFrameStats.pointLights,
+                lastFrameStats.rectLights, lastFrameStats.spotLights);
     ImGui::Text("Raytracing: %s | Compute: %s | GPU timestamps: %s",
                 capabilities.raytracing ? "yes" : "no",
                 capabilities.computeShaders ? "yes" : "no",
@@ -4756,6 +5129,18 @@ void Renderer::drawGraphicsImGui() {
 
     if (ImGui::TreeNode("Shadow Debug")) {
         ImGui::Text("Raytracing: %s", capabilities.raytracing ? "yes" : "no");
+        // Shadow scope, one control (state derived from the two flags it drives):
+        //   Off              = no shadows          (mainDebugFlags bit1 set)
+        //   Directional only = sun/PSSM only       (default; stochastic off)
+        //   All shadows      = + stochastic RT      (point/rect/spot; Metal RT,
+        //                      noisy until ReSTIR — the reason it's not default)
+        int shadowMode = (mainDebugFlags & 2u) ? 0 : (stochasticShadowsEnabled ? 2 : 1);
+        if (ImGui::Combo("Shadows", &shadowMode, "Off\0Directional only\0All shadows\0")) {
+            mainDebugFlags = (shadowMode == 0) ? (mainDebugFlags | 2u) : (mainDebugFlags & ~2u);
+            stochasticShadowsEnabled = (shadowMode == 2);
+        }
+        if (shadowMode == 2)
+            ImGui::TextDisabled("stochastic RT shadows noisy until ReSTIR denoise (Metal RT only)");
         // pssmRTMaxDist now sets where the independent near-field shadow map ends
         // and the PSSM cascades begin (the near map, not RT, owns [near, this]).
         ImGui::SliderFloat("Near shadow distance", &pssmRTMaxDist, 5.0f, 200.0f);
@@ -4783,9 +5168,6 @@ void Renderer::drawGraphicsImGui() {
             ImGui::TextWrapped("Heatmap: black = tile has 0 lights, brighter = more (8+ ~ white). "
                                "Shown in 'Point Shadow (raw)' below.");
         }
-        bool skipShadow = (mainDebugFlags & 2u) != 0u;
-        if (ImGui::Checkbox("Skip shadow", &skipShadow))
-            mainDebugFlags = (mainDebugFlags & ~2u) | (skipShadow ? 2u : 0u);
         // Intermediate shadow textures (native Metal parity). These are
         // single-channel R16F/depth RTs; the RRR1 swizzle view renders them as
         // grayscale instead of red-only.
@@ -4933,6 +5315,9 @@ void Renderer::drawGraphicsImGui() {
         ImGui::Checkbox("Enabled", &gibsEnabled);
         ImGui::Text("Active surfels: %u / %u", gibsActiveSurfels, gibsMaxSurfels);
         if (ImGui::Button("Reset Surfels")) gibsResetRequested = true;
+        // Temporal reprojection + edge-aware a-trous over the GI gather —
+        // toggle off to see the raw surfel discs/flicker for comparison.
+        ImGui::Checkbox("Screen-space denoise (SVGF-lite)", &gibsDenoiseEnabled);
         if (ImGui::Combo("Quality", &gibsQuality, "Low\0Medium\0High\0Ultra\0")) {
             Uint32 newMax; Uint32 newRays; float newScale;
             getGIBSQualitySettings(static_cast<GIBSQuality>(gibsQuality), newMax, newRays, newScale);
@@ -4979,6 +5364,29 @@ void Renderer::drawGraphicsImGui() {
         ImGui::DragFloat("Anisotropy", &fogSettings.anisotropy, 0.01f, -0.99f, 0.99f);
         ImGui::DragFloat("Ambient Intensity", &fogSettings.ambientIntensity, 0.01f, 0.0f, 2.0f);
         if (ImGui::Button("Reset to Defaults")) fogSettings = FogRenderData{};
+        ImGui::TreePop();
+    }
+
+    if (ImGui::TreeNode("Volume")) {
+        ImGui::Checkbox("Enabled", &volumeRenderEnabled);
+        ImGui::TextDisabled(volumeDensityTexture.id == volumeTestTexture.id
+                                ? "density: built-in test grid (64^3)"
+                                : "density: external grid");
+        ImGui::DragFloat3("Box Min", &volumeSettings.boxMin.x, 0.1f, -100.0f, 100.0f);
+        ImGui::DragFloat3("Box Max", &volumeSettings.boxMax.x, 0.1f, -100.0f, 100.0f);
+        ImGui::DragFloat("Density Scale", &volumeSettings.boxMin.w, 0.1f, 0.0f, 100.0f);
+        ImGui::DragFloat("Anisotropy", &volumeSettings.boxMax.w, 0.01f, -0.99f, 0.99f);
+        ImGui::ColorEdit3("Albedo", &volumeSettings.albedo.x);
+        ImGui::DragFloat("Ambient Intensity", &volumeSettings.albedo.w, 0.01f, 0.0f, 2.0f);
+        int volSteps = static_cast<int>(volumeSettings.params.x);
+        if (ImGui::SliderInt("Steps", &volSteps, 16, 128)) volumeSettings.params.x = float(volSteps);
+        int volShadowSteps = static_cast<int>(volumeSettings.params.y);
+        if (ImGui::SliderInt("Self-shadow steps", &volShadowSteps, 0, 16)) volumeSettings.params.y = float(volShadowSteps);
+        if (ImGui::Button("Reset to Defaults")) {
+            bool wasEnabled = volumeRenderEnabled;
+            volumeSettings = VolumeRenderData{};
+            volumeRenderEnabled = wasEnabled;
+        }
         ImGui::TreePop();
     }
 
@@ -5241,9 +5649,13 @@ void Renderer::drawQuad3D(
     const glm::vec4& tintColor,
     int entityID
 ) {
-    // TODO: custom tex coords are not applied yet
     batch3D.setTexture(texture);
-    batch3D.addQuad(transform, tintColor, entityID);
+    if (texCoords) {
+        // Corner order: BL, BR, TR, TL (quad local -0.5..+0.5, +Y up).
+        batch3D.addQuad(transform, texCoords, tintColor, entityID);
+    } else {
+        batch3D.addQuad(transform, tintColor, entityID);
+    }
     batch3D.setTexture(TextureHandle{});
 }
 
@@ -5710,11 +6122,19 @@ void Renderer::renderToTexture(
 
     auto& resource = renderTextures[target.id];
 
-    // Save current camera state
+    // The PBR pipeline bakes RGBA16F color + Depth32F depth attachments into
+    // the PSO, so a depth-less render texture can't bind it.
+    if (!mainPipeline.isValid() || !resource.colorTexture.isValid() ||
+        !resource.hasDepth || !resource.depthTexture.isValid() ||
+        !rttCameraBuffer.isValid() || !rttInstanceBuffer.isValid()) {
+        return;
+    }
+
+    // Save current camera state (collectDrawables/performCulling read it)
     CameraRenderData previousCamera = currentCamera;
 
     // Set up camera for this render
-    CameraRenderData rtCamera;
+    CameraRenderData rtCamera{};
     rtCamera.proj = camera.getProjMatrix();
     rtCamera.view = camera.getViewMatrix();
     rtCamera.invProj = glm::inverse(rtCamera.proj);
@@ -5724,51 +6144,172 @@ void Renderer::renderToTexture(
     rtCamera.position = camera.getEye();
     currentCamera = rtCamera;
 
+    // Cull for THIS view and build ITS instance array into the dedicated RTT
+    // buffers. frameDrawables/visibleDrawables are per-draw scratch (cleared
+    // again below so the main draw's APPENDING collect starts from empty).
+    // Collection goes straight through the ECS registry the game last drew
+    // with — the scene-node tree is being retired and collects nothing.
+    frameDrawables.clear();
+    visibleDrawables.clear();
+    if (lastDrawRegistry) {
+        collectDrawables(*lastDrawRegistry, scene);
+    }
+    performCulling();
+    sortDrawables();
+
+    std::vector<Vapor::InstanceData> rttInstances;
+    rttInstances.reserve(std::min<size_t>(visibleDrawables.size(), MAX_INSTANCES));
+    std::vector<Uint32> rttDraws;  // drawable index per instance slot
+    rttDraws.reserve(rttInstances.capacity());
+    for (Uint32 drawableIdx : visibleDrawables) {
+        if (rttInstances.size() >= MAX_INSTANCES) break;
+        const Drawable& drawable = frameDrawables[drawableIdx];
+        if (drawable.mesh >= meshes.size()) continue;
+        const RenderMesh& mesh = meshes[drawable.mesh];
+        if (!mesh.vertexBuffer.isValid()) continue;
+        Vapor::InstanceData instance;
+        instance.model = drawable.transform;
+        instance.color = drawable.color;
+        instance.vertexOffset = 0;
+        instance.indexOffset = 0;
+        instance.vertexCount = mesh.vertexCount;
+        instance.indexCount = mesh.indexCount;
+        instance.materialID = drawable.material;
+        instance.primitiveMode = Vapor::PrimitiveMode::TRIANGLES;
+        instance.AABBMin = drawable.aabbMin;
+        instance.AABBMax = drawable.aabbMax;
+        instance.boundingSphere = glm::vec4(
+            (drawable.aabbMin + drawable.aabbMax) * 0.5f,
+            glm::length(glm::vec3(drawable.aabbMax - drawable.aabbMin)) * 0.5f
+        );
+        rttInstances.push_back(instance);
+        rttDraws.push_back(drawableIdx);
+    }
+
+    rhi->updateBuffer(rttCameraBuffer, &rtCamera, 0, sizeof(CameraRenderData));
+    if (!rttInstances.empty()) {
+        rhi->updateBuffer(rttInstanceBuffer, rttInstances.data(), 0,
+                          rttInstances.size() * sizeof(Vapor::InstanceData));
+    }
+
     // Begin render pass with render texture as target
     RenderPassDesc passDesc;
     passDesc.name = "RenderToTexture";
     passDesc.colorAttachments.push_back(resource.colorTexture);
     passDesc.clearColors.push_back(clearColor);
     passDesc.loadColor.push_back(false); // Clear, don't load
-
-    if (resource.hasDepth && resource.depthTexture.isValid()) {
-        passDesc.depthAttachment = resource.depthTexture;
-        passDesc.clearDepth = 1.0f;
-        passDesc.loadDepth = false; // Clear depth
-    }
+    passDesc.depthAttachment = resource.depthTexture;
+    passDesc.clearDepth = 1.0f;
+    passDesc.loadDepth = false; // Clear depth
     rhi->beginRenderPass(passDesc);
 
-    // Collect drawables from scene
-    frameDrawables.clear();
-    visibleDrawables.clear();
-    collectDrawables(scene);
-
-    // Perform rendering
-    if (!visibleDrawables.empty()) {
-        performCulling();
-        sortDrawables();
-        updateBuffers();
-
-        // Bind pipeline and render
+    if (!rttInstances.empty()) {
         rhi->bindPipeline(mainPipeline);
 
-        for (uint32_t drawableIdx : visibleDrawables) {
-            const Drawable& drawable = frameDrawables[drawableIdx];
+        // Full main-pass binding contract (mirrors mainRenderPass), with the
+        // RTT camera/instance buffers and every screen-space input neutralized
+        // — shadow/AO/SSCS/point-shadow whites, GIBS/reflection/refraction off.
+        // Those buffers hold the MAIN view; sampling them here would paste the
+        // main view's screen-space data over this view.
+        rhi->setVertexBuffer(0, rttCameraBuffer, 0, sizeof(CameraRenderData));
+        rhi->setVertexBuffer(1, materialUniformBuffer, 0, sizeof(Vapor::MaterialData) * MAX_INSTANCES);
+        rhi->setVertexBuffer(2, rttInstanceBuffer, 0, sizeof(Vapor::InstanceData) * rttInstances.size());
+
+        rhi->setFragmentBuffer(0, directionalLightBuffer, 0, sizeof(DirectionalLightData) * maxDirectionalLights);
+        rhi->setFragmentBuffer(1, pointLightBuffer, 0, sizeof(PointLightData) * maxPointLights);
+        rhi->setFragmentBuffer(2, clusterBuffer);
+        rhi->setFragmentBuffer(3, rttCameraBuffer, 0, sizeof(CameraRenderData));
+        glm::vec2 rttScreenSize(static_cast<float>(resource.width), static_cast<float>(resource.height));
+        rhi->setFragmentBytes(&rttScreenSize, sizeof(glm::vec2), 4);
+        glm::uvec3 gridSize(clusterGridSizeX, clusterGridSizeY, clusterGridSizeZ);
+        rhi->setFragmentBytes(&gridSize, sizeof(glm::uvec3), 5);
+        float time = 0.0f;
+        rhi->setFragmentBytes(&time, sizeof(float), 6);
+        rhi->setFragmentBuffer(7, rectLightBuffer);
+        // Rect/spot loops off: their world data would be fine from any view,
+        // but this frame's CPU light lists may not be submitted yet (the demo
+        // calls renderToTexture before draw()), so the counts aren't reliable.
+        Uint32 rttRectCount = 0;
+        rhi->setFragmentBytes(&rttRectCount, sizeof(Uint32), 8);
+        rhi->setFragmentBuffer(9, pssmDataBuffer, 0, sizeof(PSSMRenderData));
+        Uint32 rttGibsOn = 0;  // GI gather is a main-view screen-space texture
+        rhi->setFragmentBytes(&rttGibsOn, sizeof(Uint32), 10);
+        // Directional count for RHIMain.frag's loop: from the scene directly
+        // (the renderer's per-frame list is empty until the main draw submits).
+        Uint32 rttDirCount = scene ? static_cast<Uint32>(scene->directionalLights.size()) : 0u;
+        rhi->setFragmentBytes(&rttDirCount, sizeof(Uint32), 11);
+
+        // Neutral texture defaults (same table as mainRenderPass).
+        TextureHandle whiteTex = textures[defaultWhiteTexture].handle;
+        TextureHandle blackTex = textures[defaultBlackTexture].handle;
+        rhi->setTexture(0, 6, whiteTex, defaultSampler);
+        rhi->setTexture(0, 7, whiteTex, defaultSampler);
+        rhi->setTexture(0, 8, defaultBlackCubemapTex, defaultSampler);
+        rhi->setTexture(0, 9, defaultBlackCubemapTex, defaultSampler);
+        rhi->setTexture(0, 10, blackTex, defaultSampler);
+        rhi->setTexture(0, 11, whiteTex, defaultSampler);
+        rhi->setTexture(0, 12, pssmShadowArrayTexture, defaultSampler);
+        rhi->setTexture(0, 13, whiteTex, defaultSampler);
+        rhi->setTexture(0, 14, blackTex, defaultSampler);
+
+        // Skip the tile-culled point-light loop (bit0): the cluster buffer is
+        // built for the MAIN camera's screen tiles, meaningless in this view.
+        Uint32 rttDebugFlags = mainDebugFlags | 1u;
+
+        if (backend == GraphicsBackend::Vulkan) {
+            // RHIMain.frag contract (see mainRenderPass for the slot notes).
+            if (pssmDataBuffer.isValid()) rhi->setFragmentBuffer(2, pssmDataBuffer, 0, sizeof(PSSMRenderData));
+            if (pssmShadowArrayTexture.isValid()) rhi->setTexture(0, 6, pssmShadowArrayTexture, shadowSampler);
+            if (clusterBuffer.isValid()) rhi->setFragmentBuffer(4, clusterBuffer);
+            if (lightCullDataBuffer.isValid()) rhi->setFragmentBuffer(5, lightCullDataBuffer, 0, sizeof(Vapor::LightCullData));
+            rhi->setTexture(0, 7, whiteTex, clampSampler);   // AO neutral
+            rhi->setTexture(0, 8, whiteTex, clampSampler);   // SSCS neutral
+            // Near-field shadow map is light-space (world POV) — valid here.
+            rhi->setTexture(0, 9, nearShadowMap.isValid() ? nearShadowMap : whiteTex, shadowSampler);
+            if (irradianceMap.isValid()) rhi->setTexture(0, 10, irradianceMap, clampSampler);
+            if (prefilterMap.isValid()) rhi->setTexture(0, 11, prefilterMap, clampSampler);
+            if (brdfLUTTex.isValid())    rhi->setTexture(0, 12, brdfLUTTex, clampSampler);
+            rhi->setFragmentBytes(&rttDebugFlags, sizeof(Uint32), 2);
+            // Spot/rect buffers must be bound (declared in RHIMain.frag); zero
+            // counts keep both loops off — their per-frame data belongs to the
+            // main view and may not be submitted yet.
+            if (spotLightBuffer.isValid())
+                rhi->setFragmentBuffer(6, spotLightBuffer, 0, sizeof(Vapor::SpotLight) * maxSpotLights);
+            if (rectLightBuffer.isValid()) rhi->setFragmentBuffer(7, rectLightBuffer);
+            glm::uvec2 rttSpotRectCounts(0u, 0u);
+            rhi->setFragmentBytes(&rttSpotRectCounts, sizeof(glm::uvec2), 1);
+        } else {
+            rhi->setFragmentBytes(&rttDebugFlags, sizeof(Uint32), 12);
+            // Real IBL cubes: image-based ambience is view-independent.
+            if (!iblNeedsUpdate) {
+                if (irradianceMap.isValid()) rhi->setTexture(0, 8, irradianceMap, clampSampler);
+                if (prefilterMap.isValid()) rhi->setTexture(0, 9, prefilterMap, clampSampler);
+                if (brdfLUTTex.isValid()) rhi->setTexture(0, 10, brdfLUTTex, clampSampler);
+            }
+            // texSSCS(15) is min()'d unconditionally — MUST be bound; white = lit.
+            rhi->setTexture(0, 15, whiteTex, clampSampler);
+            // Spot buffer (14) + counts/flags (15) are declared in the shared
+            // PBR shader — bind placeholders with zero counts/flags.
+            rhi->setFragmentBuffer(14, spotLightBuffer, 0, sizeof(Vapor::SpotLight) * maxSpotLights);
+            glm::uvec2 rttSpotRectParams(0u, 0u);
+            rhi->setFragmentBytes(&rttSpotRectParams, sizeof(glm::uvec2), 15);
+        }
+
+        // Draw: instance IDs are sequential in rttInstances order.
+        for (Uint32 iid = 0; iid < rttDraws.size(); iid++) {
+            const Drawable& drawable = frameDrawables[rttDraws[iid]];
             const RenderMesh& mesh = meshes[drawable.mesh];
-
-            // Bind material
-            bindMaterial(drawable.material);
-
-            // Bind instance data (transform, color, etc.)
-            uint32_t instanceID = drawableToInstanceID[drawableIdx];
-            rhi->setVertexBytes(&instanceID, sizeof(uint32_t), 1);
-
-            // Bind mesh buffers
-            rhi->bindVertexBuffer(mesh.vertexBuffer, 0, 0);
-            rhi->bindIndexBuffer(mesh.indexBuffer, 0);
-
-            // Draw
-            rhi->drawIndexed(mesh.indexCount, 1, 0, 0, 0);
+            if (drawable.material < materials.size()) {
+                bindMaterial(drawable.material);
+            }
+            rhi->bindVertexBuffer(mesh.vertexBuffer, 3, 0);
+            rhi->setVertexBytes(&iid, sizeof(Uint32), 4);
+            if (mesh.indexBuffer.isValid()) {
+                rhi->bindIndexBuffer(mesh.indexBuffer, 0);
+                rhi->drawIndexed(mesh.indexCount, 1, 0, 0, 0);
+            } else {
+                rhi->draw(mesh.vertexCount, 1, 0, 0);
+            }
         }
     }
 
@@ -5782,6 +6323,12 @@ void Renderer::renderToTexture(
     // wanted, it needs an explicit scoped API, not the shared queues.
 
     rhi->endRenderPass();
+
+    // Leave the shared per-frame lists EMPTY: beginFrame owns the clear and the
+    // main draw's ECS collect APPENDS — leftovers here would double every
+    // drawable in the main view.
+    frameDrawables.clear();
+    visibleDrawables.clear();
 
     // Restore previous camera state
     currentCamera = previousCamera;

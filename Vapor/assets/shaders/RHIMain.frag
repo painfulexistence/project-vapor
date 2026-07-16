@@ -45,6 +45,11 @@ struct MaterialData {
     float sheenTint;
     float clearcoat;
     float clearcoatGloss;
+    // Tail matching the C++ MaterialData (stride 96): iblEnabled gates the IBL
+    // indirect term. prototypeUVMode/uvScale are unused here but keep the layout.
+    float prototypeUVMode;
+    float uvScale;
+    float iblEnabled;
 };
 
 // Must match DirectionalLightData / PointLightData (C++, stride 48 each)
@@ -65,6 +70,20 @@ struct PointLight {
     float intensity;
     float radius;
     vec2 _pad3;
+};
+
+// Must match Vapor::SpotLight (std430, 64 bytes; scalars follow the vectors).
+struct SpotLight {
+    vec3 position;
+    float _pad0;
+    vec3 direction;   // normalized, FROM the light
+    float _pad1;
+    vec3 color;
+    float _pad2;
+    float radius;     // range
+    float cosInner;
+    float cosOuter;
+    float intensity;
 };
 
 // Must match CameraRenderData (C++)
@@ -107,6 +126,21 @@ layout(std430, set = 1, binding = 5) readonly buffer LightCullBuf {
     vec2 _cpad1;
     uvec3 cullGridSize;
     uint cullLightCount;
+};
+layout(std430, set = 1, binding = 6) readonly buffer SpotLightBuf {
+    SpotLight spotLights[];
+};
+
+// Must match Vapor::RectLight (std430 legally packs the scalars into the vec3
+// tails, unlike MSL — same 64-byte layout as the C++ struct).
+struct RectLight {
+    vec3 position;  float halfWidth;
+    vec3 rright;    float halfHeight;
+    vec3 up;        float intensity;
+    vec3 color;     uint useVideoTexture;
+};
+layout(std430, set = 1, binding = 7) readonly buffer RectLightBuf {
+    RectLight rectLights[];
 };
 // PSSM cascaded directional shadow data. Must match Vapor::PSSMRenderData
 // (std430). The neutral default (cascadeSplits = +inf) keeps every pixel in the
@@ -157,6 +191,11 @@ layout(set = 2, binding = 8) uniform sampler2D sscsTex;
 // Independent near-field shadow map (own texture + resolution), covers
 // [near, nearShadowEnd]. Depth values sampled with the negative-viewport Y-flip.
 layout(set = 2, binding = 9) uniform sampler2D nearShadowTex;
+// IBL from the sky bake (matches the Metal path): diffuse irradiance cube,
+// GGX-prefiltered specular cube, split-sum BRDF LUT.
+layout(set = 2, binding = 10) uniform samplerCube irradianceMap;
+layout(set = 2, binding = 11) uniform samplerCube prefilterMap;
+layout(set = 2, binding = 12) uniform sampler2D brdfLut;
 
 // PCF sample of one cascade. Returns 1.0 = lit, 0.0 = fully shadowed, or -1.0
 // when the world position falls outside this cascade's frustum.
@@ -280,6 +319,8 @@ float sampleShadow(vec3 worldPos, vec3 N, vec3 L, float viewDepth) {
 // RHI::setFragmentBytes(&screenSize, 8, /*binding=*/4)     -> offset 64+(4%4)*16  = 64
 layout(push_constant) uniform PushConstants {
     layout(offset = 64)  vec2 screenSize;   // swapchain pixels (for AO screen UV)
+    // Spot-light loop bound (setFragmentBytes binding=1 -> offset 80).
+    layout(offset = 80)  uvec2 spotRectCounts;  // x = spot count, y = rect count
     // Perf-isolation debug flags (setFragmentBytes binding=2 -> offset 96).
     // bit0 = skip the point-light loop, bit1 = skip the shadow PCF. Panel-driven.
     layout(offset = 96)  uint mainDebugFlags;
@@ -311,44 +352,227 @@ vec3 fresnelSchlick(float cosTheta, vec3 F0) {
     return F0 + (1.0 - F0) * pow(clamp(1.0 - cosTheta, 0.0, 1.0), 5.0);
 }
 
-vec3 shade(vec3 N, vec3 V, vec3 L, vec3 radiance, vec3 albedo, float metallic, float roughness) {
-    vec3 H = normalize(V + L);
+// ── Rect area light (Vulkan twin of the Metal eval) ─────────────────────────
+
+// Exact diffuse irradiance from a quad via the polygon solid-angle edge
+// formula (Baum et al. 1989 / Arvo 1994). Returns irradiance in [0, 1/2].
+float rectLightDiffuse(vec3 N, vec3 fragPos, RectLight l) {
+    vec3 corners[4] = vec3[4](
+        l.position + l.rright * l.halfWidth + l.up * l.halfHeight,
+        l.position - l.rright * l.halfWidth + l.up * l.halfHeight,
+        l.position - l.rright * l.halfWidth - l.up * l.halfHeight,
+        l.position + l.rright * l.halfWidth - l.up * l.halfHeight);
+    vec3 s = vec3(0.0);
+    for (int i = 0; i < 4; i++) {
+        vec3 v0 = normalize(corners[i] - fragPos);
+        vec3 v1 = normalize(corners[(i + 1) % 4] - fragPos);
+        vec3 c = cross(v0, v1);
+        float len = length(c);
+        if (len < 1e-6) continue;
+        float theta = atan(len, dot(v0, v1));
+        s += (theta / len) * c;
+    }
+    return max(0.0, dot(s, N)) / (2.0 * PI);
+}
+
+// Specular via Most Representative Point (Karis, SIGGRAPH 2013): closest point
+// on the rect to the reflection ray, GGX with area-corrected roughness.
+vec3 rectLightSpecular(vec3 N, vec3 V, vec3 fragPos, RectLight l,
+                       vec3 albedo, float metallic, float roughness) {
+    vec3 refl = reflect(-V, N);
+    vec3 lightNorm = cross(l.rright, l.up);  // unnormalized plane normal
+    float denom = dot(lightNorm, refl);
+    vec3 repPt = l.position;
+    if (abs(denom) > 1e-5) {
+        float t = dot(l.position - fragPos, lightNorm) / denom;
+        if (t > 0.0) {
+            vec3 hit = fragPos + refl * t;
+            vec3 rel = hit - l.position;
+            float u = clamp(dot(rel, l.rright), -l.halfWidth, l.halfWidth);
+            float v = clamp(dot(rel, l.up), -l.halfHeight, l.halfHeight);
+            repPt = l.position + l.rright * u + l.up * v;
+        }
+    }
+    vec3 L = normalize(repPt - fragPos);
     float NdotL = max(dot(N, L), 0.0);
-    float NdotV = max(dot(N, V), 0.0);
     if (NdotL <= 0.0) return vec3(0.0);
-
+    float dist = length(repPt - fragPos);
+    float area = 4.0 * l.halfWidth * l.halfHeight;
+    float alpha = roughness * roughness;
+    float alphaPrime = clamp(alpha + area / max(2.0 * PI * dist * dist, 1e-6), 0.0, 1.0);
+    float r = sqrt(alphaPrime);
+    vec3 H = normalize(L + V);
+    float NdotV = max(dot(N, V), 1e-4);
+    float D = distributionGGX(N, H, r);
+    float G = geometrySmith(NdotV, NdotL, r);
     vec3 F0 = mix(vec3(0.04), albedo, metallic);
-    float D = distributionGGX(N, H, roughness);
-    float G = geometrySmith(NdotV, NdotL, roughness);
     vec3 F = fresnelSchlick(max(dot(H, V), 0.0), F0);
+    return (D * G * F) / max(4.0 * NdotV * NdotL, 1e-4);
+}
 
-    vec3 specular = (D * G * F) / max(4.0 * NdotV * NdotL, 1e-4);
-    vec3 kD = (vec3(1.0) - F) * (1.0 - metallic);
-    return (kD * albedo / PI + specular) * radiance * NdotL;
+// ── Disney principled BRDF ──────────────────────────────────────────────────
+// GLSL twin of 3d_pbr_normal_mapped.metal's CookTorranceBRDF, so the Vulkan
+// direct lighting matches the Metal look: retro-reflective diffuse + subsurface,
+// anisotropic GGX specular, plus sheen and clearcoat lobes. Returns f_r * NdotL
+// (the cosine is folded in exactly ONCE — the callers must not multiply again).
+struct Surface {
+    vec3  color;
+    float roughness;
+    float metallic;
+    float subsurface;
+    float specular;
+    float specularTint;
+    float anisotropic;
+    float sheen;
+    float sheenTint;
+    float clearcoat;
+    float clearcoatGloss;
+};
+
+float luminance(vec3 c)     { return dot(c, vec3(0.3, 0.6, 0.1)); }
+float fresnelApprox(float u) { return pow(1.0001 - u, 5.0); }
+
+// Exact sRGB -> linear (matches 3d_common.metal's srgbToLinear). Albedo
+// textures are UNORM (raw sRGB bytes), so lighting must linearize them — Metal
+// does this per pixel; without it the Vulkan path lit with sRGB values, which
+// read too bright.
+vec3 srgbToLinear(vec3 c) {
+    return mix(c / 12.92, pow((c + 0.055) / 1.055, vec3(2.4)), step(0.04045, c));
+}
+
+float GTR1(float nh, float a) {
+    if (a >= 1.0) return 1.0 / PI;
+    float a2 = a * a;
+    float t = 1.0 + (a2 - 1.0) * nh * nh;
+    return (a2 - 1.0) / (PI * log(a2) * t);
+}
+float GTR2aniso(float nh, float hx, float hy, float ax, float ay) {
+    float t = (hx * hx) / (ax * ax) + (hy * hy) / (ay * ay) + nh * nh;
+    return 1.0 / (PI * ax * ay * t * t);
+}
+float smithGGX(float u, float r) {
+    float a = r * r, b = u * u;
+    return 1.0 / (u + sqrt(a + b - a * b));
+}
+float smithGGXaniso(float u, float vx, float vy, float ax, float ay) {
+    float t = vx * vx * ax * ax + vy * vy * ay * ay + u * u;
+    return 1.0 / (u + sqrt(t));
+}
+
+vec3 disneyBRDF(vec3 N, vec3 T, vec3 B, vec3 L, vec3 V, Surface s) {
+    vec3 H = normalize(L + V);
+    float nv = max(dot(N, V), 0.0);
+    float nl = max(dot(N, L), 0.0);
+    float nh = max(dot(N, H), 0.0);
+    float lh = max(dot(L, H), 0.0);
+    float lum = luminance(s.color);
+    vec3 tint = lum > 0.0 ? s.color / lum : vec3(1.0);
+    vec3 spec0 = mix(s.specular * 0.08 * mix(vec3(1.0), tint, s.specularTint), s.color, s.metallic);
+    float fh = fresnelApprox(lh);
+    float fl = fresnelApprox(nl);
+    float fv = fresnelApprox(nv);
+    float fss90 = lh * lh * s.roughness;
+    // Disney retro-reflective diffuse
+    float fd90 = 0.5 + 2.0 * fss90;
+    float kd = mix(1.0, fd90, fl) * mix(1.0, fd90, fv);
+    // subsurface approximation
+    float fss = mix(1.0, fss90, fl) * mix(1.0, fss90, fv);
+    float ss = 1.25 * (fss * (1.0 / (nl + nv + 0.0001) - 0.5) + 0.5);
+    // anisotropic GGX specular
+    float aspect = sqrt(1.0 - s.anisotropic * 0.9);
+    float ax = max(0.001, s.roughness * s.roughness / aspect);
+    float ay = max(0.001, s.roughness * s.roughness * aspect);
+    float hx = dot(H, T), hy = dot(H, B);
+    float lx = dot(L, T), ly = dot(L, B);
+    float vx = dot(V, T), vy = dot(V, B);
+    float D = GTR2aniso(nh, hx, hy, ax, ay);
+    float G = smithGGXaniso(nl, lx, ly, ax, ay) * smithGGXaniso(nv, vx, vy, ax, ay);
+    vec3  F = mix(spec0, vec3(1.0), fh);
+    vec3  specular = D * G * F;
+    // sheen
+    vec3 sheen = fh * s.sheen * mix(vec3(1.0), tint, s.sheenTint);
+    // clearcoat
+    float Dr = GTR1(nh, mix(0.1, 0.001, s.clearcoatGloss));
+    float Fr = mix(0.04, 1.0, fh);
+    float Gr = smithGGX(nl, 0.25) * smithGGX(nv, 0.25);
+    vec3  clearcoat = 0.25 * vec3(s.clearcoat) * Dr * Fr * Gr;
+
+    return ((mix(kd, ss, s.subsurface) * s.color / PI + sheen) * (1.0 - s.metallic)
+            + specular + clearcoat) * nl;
+}
+
+// ── Image-based lighting (twin of Metal's CalculateIBL) ─────────────────────
+vec3 fresnelSchlickRoughness(float cosTheta, vec3 F0, float roughness) {
+    return F0 + (max(vec3(1.0 - roughness), F0) - F0) * pow(clamp(1.0 - cosTheta, 0.0, 1.0), 5.0);
+}
+vec3 calculateIBL(vec3 N, vec3 V, Surface s, float ao) {
+    float NdotV = max(dot(N, V), 0.0);
+    vec3 F0 = mix(vec3(0.04), s.color, s.metallic);
+    vec3 F = fresnelSchlickRoughness(NdotV, F0, s.roughness);
+    vec3 kD = (1.0 - F) * (1.0 - s.metallic);
+    // Diffuse IBL
+    vec3 diffuseIBL = texture(irradianceMap, N).rgb * s.color * kD;
+    // Specular IBL (split-sum): prefiltered env by roughness + BRDF LUT
+    vec3 R = reflect(-V, N);
+    const float MAX_REFLECTION_LOD = 4.0;
+    vec3 prefiltered = textureLod(prefilterMap, R, s.roughness * MAX_REFLECTION_LOD).rgb;
+    vec2 brdf = texture(brdfLut, vec2(NdotV, s.roughness)).rg;
+    vec3 specularIBL = prefiltered * (F * brdf.x + brdf.y);
+    return (diffuseIBL + specularIBL) * ao;
 }
 
 void main() {
     MaterialData mat = materials[fragMaterialID];
 
     vec4 baseSample = texture(albedoMap, fragUV);
-    vec3 albedo = baseSample.rgb * mat.baseColorFactor.rgb * instanceColor.rgb;
+    // Linearize the sRGB-authored albedo before lighting (mirrors Metal's
+    // srgbToLinear(baseColor * baseColorFactor)); instanceColor is a linear tint.
+    vec3 albedo = srgbToLinear(baseSample.rgb * mat.baseColorFactor.rgb) * instanceColor.rgb;
     float metallic = texture(metallicMap, fragUV).b * mat.metallicFactor;
     float roughness = clamp(texture(roughnessMap, fragUV).g * mat.roughnessFactor, 0.04, 1.0);
     float occlusion = mix(1.0, texture(occlusionMap, fragUV).r, mat.occlusionStrength);
-    vec3 emissive = texture(emissiveMap, fragUV).rgb * mat.emissiveFactor * mat.emissiveStrength;
+    // Emissive is sRGB-authored (like albedo) — linearize before it joins the
+    // linear lighting sum (mirrors the Metal path).
+    vec3 emissive = srgbToLinear(texture(emissiveMap, fragUV).rgb * mat.emissiveFactor) * mat.emissiveStrength;
 
     // Normal mapping (fall back to the geometric normal when tangent is degenerate)
     vec3 N = normalize(worldNormal);
     vec3 T = worldTangent.xyz;
+    vec3 B;
     if (dot(T, T) > 1e-8) {
         T = normalize(T - dot(T, N) * N);
-        vec3 B = cross(N, T) * worldTangent.w;
+        B = cross(N, T) * worldTangent.w;
         vec3 nSample = texture(normalMap, fragUV).xyz * 2.0 - 1.0;
         nSample.xy *= mat.normalScale;
         N = normalize(mat3(T, B, N) * nSample);
     }
+    // Orthonormal tangent frame against the (possibly mapped) N for the
+    // anisotropic BRDF term. Degenerate tangent -> arbitrary basis (anisotropic
+    // defaults to 0, so the exact axis is moot then).
+    if (dot(worldTangent.xyz, worldTangent.xyz) > 1e-8) {
+        T = normalize(T - dot(T, N) * N);
+        B = cross(N, T) * worldTangent.w;
+    } else {
+        vec3 up = abs(N.y) < 0.99 ? vec3(0.0, 1.0, 0.0) : vec3(1.0, 0.0, 0.0);
+        T = normalize(cross(up, N));
+        B = cross(N, T);
+    }
 
     vec3 V = normalize(cam.position - fragPos);
+
+    // Full Disney material for the direct-lighting BRDF (mirrors Metal's Surface).
+    Surface surf;
+    surf.color = albedo;
+    surf.roughness = roughness;
+    surf.metallic = metallic;
+    surf.subsurface = mat.subsurface;
+    surf.specular = mat.specular;
+    surf.specularTint = mat.specularTint;
+    surf.anisotropic = mat.anisotropic;
+    surf.sheen = mat.sheen;
+    surf.sheenTint = mat.sheenTint;
+    surf.clearcoat = mat.clearcoat;
+    surf.clearcoatGloss = mat.clearcoatGloss;
 
     // View-space forward distance selects the shadow cascade (RH: forward = -z).
     float viewDepth = -(cam.view * vec4(fragPos, 1.0)).z;
@@ -357,7 +581,7 @@ void main() {
     for (uint i = 0u; i < dirLightCount; ++i) {
         DirLight l = dirLights[i];
         vec3 Ldir = normalize(-l.direction);
-        vec3 contrib = shade(N, V, Ldir, l.color * l.intensity, albedo, metallic, roughness);
+        vec3 contrib = disneyBRDF(N, T, B, Ldir, V, surf) * (l.color * l.intensity);
         // Only the first (sun) directional light casts the cascaded shadow.
         // Debug bit1 skips the PCF to isolate its cost.
         if (i == 0u && (mainDebugFlags & 2u) == 0u) {
@@ -390,14 +614,49 @@ void main() {
             float dist = sqrt(dist2);
             float attenuation = (1.0 - smoothstep(l.radius * 0.8, l.radius, dist)) / dist2;
             vec3 radiance = l.color * l.intensity * attenuation;
-            color += shade(N, V, normalize(toLight), radiance, albedo, metallic, roughness);
+            color += disneyBRDF(N, T, B, normalize(toLight), V, surf) * radiance;
         }
     }
 
-    // Flat ambient so unlit scenes are never pure black. Screen-space AO
-    // darkens this indirect term only (never the direct lights above).
+    // Spot lights (loop-all; typical scenes carry a handful). Same falloff as
+    // point lights, windowed by a squared smooth cone factor between the inner
+    // and outer half-angle cosines. Unshadowed on Vulkan until RT lands here.
+    for (uint sIdx = 0u; sIdx < spotRectCounts.x; ++sIdx) {
+        SpotLight sl = spotLights[sIdx];
+        vec3 toLight = sl.position - fragPos;
+        float dist2 = max(dot(toLight, toLight), 1e-4);
+        float dist = sqrt(dist2);
+        vec3 Ldir = toLight / dist;
+        float cone = clamp((dot(-Ldir, sl.direction) - sl.cosOuter)
+                               / max(sl.cosInner - sl.cosOuter, 1e-4), 0.0, 1.0);
+        float attenuation = (1.0 - smoothstep(sl.radius * 0.8, sl.radius, dist)) / dist2
+                          * cone * cone;
+        vec3 radiance = sl.color * sl.intensity * attenuation;
+        color += disneyBRDF(N, T, B, Ldir, V, surf) * radiance;
+    }
+
+    // Rect area lights (loop-all): analytic diffuse + specular, combined the
+    // same way as the Metal CalculateRectLight. Unshadowed on Vulkan (the RT
+    // area shadow needs the raytracing port); video-textured lights fall back
+    // to their solid color (no video texture bound on this path).
+    for (uint rIdx = 0u; rIdx < spotRectCounts.y; ++rIdx) {
+        RectLight rl = rectLights[rIdx];
+        vec3 radiance = rl.color * rl.intensity;
+        float diffuseGeo = rectLightDiffuse(N, fragPos, rl);
+        vec3 spec = rectLightSpecular(N, V, fragPos, rl, albedo, metallic, roughness);
+        vec3 F0r = mix(vec3(0.04), albedo, metallic);
+        vec3 kD = (vec3(1.0) - F0r) * (1.0 - metallic);
+        color += (kD * albedo / PI * diffuseGeo + spec) * radiance;
+    }
+
+    // Indirect term: IBL when the material enables it (matches Metal), else a
+    // flat ambient floor. Screen-space AO darkens the indirect only.
     float screenAO = texture(texAO, gl_FragCoord.xy / max(screenSize, vec2(1.0))).r;
-    color += albedo * 0.03 * occlusion * screenAO;
+    if (mat.iblEnabled > 0.5) {
+        color += calculateIBL(N, V, surf, occlusion) * screenAO;
+    } else {
+        color += albedo * 0.03 * occlusion * screenAO;
+    }
     color += emissive;
 
     // Cascade debug: tint by shadow region (near map = green, cascades =

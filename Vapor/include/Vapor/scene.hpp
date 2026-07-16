@@ -170,6 +170,7 @@ public:
     std::vector<Vapor::DirectionalLight> directionalLights;
     std::vector<Vapor::PointLight> pointLights;
     std::vector<Vapor::RectLight> rectLights;
+    std::vector<Vapor::SpotLight> spotLights;
     std::vector<std::shared_ptr<FluidVolume>> fluidVolumes;
 
     // GPU-driven rendering
