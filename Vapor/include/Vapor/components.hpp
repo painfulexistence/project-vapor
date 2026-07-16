@@ -204,7 +204,7 @@ namespace Vapor {
         glm::vec3 emitDirection = glm::vec3(0.0f, 1.0f, 0.0f);
         glm::vec4 color = glm::vec4(1.0f);
         bool enabled = true;   // false = immediate clear (Clear semantic)
-        bool stopping = false; // true = graceful stop: stop spawning, let existing finish (Stop semantic)
+        bool emitting = true;  // false = graceful stop: stop spawning, let existing finish (Stop semantic)
         bool oneShot = false;  // emit all maxParticles at once, then idle
 
         // Runtime state (managed by ParticleEmitterSystem) — hidden from inspector
@@ -214,6 +214,7 @@ namespace Vapor {
         Hidden<uint32_t> _ringCursor  = {0};    // next slot to overwrite (ring buffer)
         Hidden<float>    _reclaimTimer = {-1.0f}; // >=0: draining, countdown to free+clear slots
         Hidden<bool>     _hasFired     = {false}; // one-shot already emitted its batch
+        Hidden<bool>     _cleared      = {true};  // query: true once all emitted particles are gone
     };
 
     // One-shot burst of particles at the entity's current position.

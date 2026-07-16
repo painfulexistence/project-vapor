@@ -504,6 +504,7 @@ namespace Vapor {
                     emit._accumulator  = 0.0f;
                     emit._reclaimTimer = -1.0f;
                     emit._hasFired     = false;
+                    emit._cleared      = true;
                     continue;
                 }
 
@@ -521,6 +522,7 @@ namespace Vapor {
                         emit._slotCount    = 0;
                         emit._ringCursor   = 0;
                         emit._reclaimTimer = -1.0f;
+                        emit._cleared      = true;
                     }
                 }
 
@@ -528,11 +530,11 @@ namespace Vapor {
                 // just don't spawn. Re-enabling emission resumes into the slots.
                 if (!emissionEnabled) continue;
 
-                // Graceful per-emitter stop (Stop semantic): stop spawning and let
-                // the in-flight particles finish. Arm the reclaim so finite
-                // particles' slots are freed once they've aged out; immortal
-                // particles stay until the emitter is disabled (Clear) or resumed.
-                if (emit.stopping) {
+                // Graceful per-emitter stop (Stop semantic): emitting == false stops
+                // spawning and lets the in-flight particles finish. Arm the reclaim
+                // so finite particles' slots are freed once they've aged out;
+                // immortal particles stay until the emitter is disabled or resumed.
+                if (!emit.emitting) {
                     if (emit._slotBegin != ~0u && emit._reclaimTimer < 0.0f
                         && emit.particleLifetime >= 0.0f)
                         emit._reclaimTimer = emit.particleLifetime;
@@ -555,6 +557,7 @@ namespace Vapor {
                     emit._ringCursor = 0;
                     emit._accumulator = 0.0f;
                     if (emit._slotBegin == ~0u) continue; // pool full
+                    emit._cleared = false; // slots claimed → particles about to exist
                 }
 
                 uint32_t spawns;
