@@ -324,19 +324,36 @@ inline SceneResources buildScene(
         wf.strength   = 0.6f;
         wf.turbulence = 2.0f;
     }
+    // Two one-shot bursts: each fires its whole batch in one frame, the particles
+    // live out particleLifetime, then their slots are reclaimed. emitRate is
+    // unused for one-shot emitters.
     {
         auto e = registry.create();
-        registry.emplace<Vapor::NameComponent>(e, Vapor::NameComponent{"Particle Sea Emitter"});
+        registry.emplace<Vapor::NameComponent>(e, Vapor::NameComponent{"Particle Sea Emitter A"});
         auto& tc = registry.emplace<Vapor::TransformComponent>(e);
         tc.position = glm::vec3(0.0f, 5.0f, 0.0f);
         auto& em = registry.emplace<Vapor::ParticleEmitterComponent>(e);
-        em.maxParticles     = 100'000;
-        em.emitRate         = 30'000.0f;  // fills slots in ~3 s
+        em.maxParticles     = 70'000;
+        em.oneShot          = true;
         em.particleLifetime = 5.0f;
         em.speed            = 6.0f;
         em.spread           = 3.14159265f; // full sphere
         em.emitDirection    = glm::vec3(0.0f, 1.0f, 0.0f);
         em.color            = glm::vec4(0.45f, 0.55f, 1.0f, 1.0f); // indigo-blue
+    }
+    {
+        auto e = registry.create();
+        registry.emplace<Vapor::NameComponent>(e, Vapor::NameComponent{"Particle Sea Emitter B"});
+        auto& tc = registry.emplace<Vapor::TransformComponent>(e);
+        tc.position = glm::vec3(3.0f, 4.0f, -2.0f);
+        auto& em = registry.emplace<Vapor::ParticleEmitterComponent>(e);
+        em.maxParticles     = 30'000;
+        em.oneShot          = true;
+        em.particleLifetime = 5.0f;
+        em.speed            = 6.0f;
+        em.spread           = 3.14159265f; // full sphere
+        em.emitDirection    = glm::vec3(0.0f, 1.0f, 0.0f);
+        em.color            = glm::vec4(1.0f, 0.55f, 0.35f, 1.0f); // warm amber
     }
 
     res.global = registry.create();
