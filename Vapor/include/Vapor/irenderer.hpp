@@ -227,6 +227,8 @@ public:
     virtual void setParticleForceField(const ParticleForceField& field) {}
     // Freeze the GPU sim (deltaTime=0); particles stay in place but are still rendered.
     virtual void setParticleSimPaused(bool paused) {}
+    // Hide toggle — gate the particle render only; the sim keeps running.
+    virtual void setParticleVisible(bool visible) {}
 
 protected:
     std::function<void()> m_imGuiCallback;

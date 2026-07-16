@@ -363,10 +363,15 @@ auto main(int argc, char* args[]) -> int {
     //           new ones are produced. (Hide is renderer-only, in Effects panel.)
     bool particlePaused = false;
     bool particleEmissionEnabled = true;
+    bool particleVisible = true;
 
     renderer->setImGuiCallback([&]() {
         sceneInspector.draw(registry);
+        // System-level particle controls (global, not per-entity). A dedicated
+        // System Inspector would be the proper long-term home; this window is a
+        // stand-in for it. The renderer exposes these purely as setters.
         if (ImGui::Begin("Particles")) {
+            ImGui::Checkbox("Visible (hide render when off)", &particleVisible);
             ImGui::Checkbox("Pause (freeze sim + reclaim)", &particlePaused);
             ImGui::Checkbox("Emit (graceful stop when off)", &particleEmissionEnabled);
         }
@@ -589,6 +594,7 @@ auto main(int argc, char* args[]) -> int {
         // Pause freezes the GPU sim (renderer) and the CPU-side emitter/reclaim
         // timers (skip the system entirely) so nothing advances while paused.
         renderer->setParticleSimPaused(particlePaused);
+        renderer->setParticleVisible(particleVisible);
         Vapor::ParticleForceFieldSystem::update(registry, renderer.get());
         if (!particlePaused)
             Vapor::ParticleEmitterSystem::update(registry, renderer.get(), deltaTime, particleEmissionEnabled);

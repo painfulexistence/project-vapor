@@ -5506,12 +5506,9 @@ void Renderer::drawGraphicsImGui() {
         ImGui::TreePop();
     }
 
-    if (ImGui::TreeNode("Effects")) {
-        // Hide toggle (render only). Pause + Emit live in the game's Particles
-        // window because they must also drive the CPU-side ECS timers.
-        ImGui::Checkbox("Visible", &particleVisible);
-        ImGui::TreePop();
-    }
+    // Particle system controls (Visible/Pause/Emit) live in the game's Particles
+    // window — the renderer only exposes them as setters (pure mechanism), since
+    // Pause and Emit must also drive the CPU-side ECS timers.
 
     // Registered texture thumbnails (material maps etc.)
     if (ImGui::TreeNode("Textures")) {

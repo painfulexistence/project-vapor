@@ -500,6 +500,7 @@ public:
                          const std::vector<GPUParticleData>& particles) override;
     void setParticleForceField(const ParticleForceField& field) override;
     void setParticleSimPaused(bool paused) override { m_particleSimPaused = paused; }
+    void setParticleVisible(bool visible) override { particleVisible = visible; }
 
     // ===== Font Rendering API =====
     FontHandle loadFont(const std::string& path, float baseSize) override;

@@ -303,6 +303,7 @@ public:
                          const std::vector<GPUParticleData>& particles) override;
     void setParticleForceField(const ParticleForceField& field) override;
     void setParticleSimPaused(bool paused) override { m_particleSimPaused = paused; }
+    void setParticleVisible(bool visible) override { particleVisible = visible; }
 
     // ========================================================================
     // Texture Creation (for sprites/batch rendering)
