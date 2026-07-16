@@ -816,20 +816,28 @@ private:
     // ReSTIR denoise for the stochastic shadows: per-pixel weighted reservoirs
     // over light samples with temporal + spatial reuse, so the one shadow ray
     // per domain lands on the light (and quad point) that dominates the pixel.
-    // Falls back to the legacy uniform-pick kernel when off.
+    // Falls back to the legacy uniform-pick kernel when off (or when the
+    // reservoir allocation fails). Buffers exist only while the path runs.
     bool restirShadowsEnabled = true;
     BufferHandle restirReservoirHistory;  // post-spatial reservoirs (frame N-1)
     BufferHandle restirReservoirScratch;  // pass-1 output within the frame
-    Uint32 restirReservoirW = 0, restirReservoirH = 0;  // lazy (re)allocation
+    // History is valid only when the pass ran last frame too — derived from
+    // frame contiguity so every skip path (toggles, invalid TLAS, resize,
+    // graph edits) invalidates it without needing to remember to.
     bool restirHistoryValid = false;
-    // Panel tunables. M clamps are multiples of the per-frame candidate count;
-    // rect stays low so fresh quad points keep resampling the penumbra.
+    Uint32 restirLastFrame = 0;
+    // Tunables (candidates/taps/radius/M-clamp are panel-exposed; the rect and
+    // spot candidate counts are fixed defaults). M clamps are multiples of the
+    // per-frame candidate count: they bound how long the reservoir can dwell
+    // on one winner, so keep them low enough that the temporal accumulator's
+    // ~14-frame EMA still averages across winner switches; rect stays lowest
+    // so fresh quad points keep resampling the penumbra.
     Uint32 restirPointCandidates = 8;
     Uint32 restirRectCandidates = 4;
     Uint32 restirSpotCandidates = 4;
     Uint32 restirSpatialTaps = 4;
     float restirSpatialRadius = 16.0f;
-    float restirPointMClamp = 20.0f;
+    float restirPointMClamp = 8.0f;
     float restirRectMClamp = 3.0f;
     // Stochastic point-shadow debug view (native pointShadowDebugMode):
     // 0 = visibility, 1 = tile light-count heatmap, 2 = ReSTIR winner id,
@@ -894,7 +902,7 @@ private:
     void aoTemporalPass();
     void aoDenoisePass();
     void stochasticPointShadowPass();
-    void restirShadowPass();
+    bool restirShadowPass();  // false = couldn't run, caller uses the legacy kernel
     void pointShadowTemporalPass();
 
     // Acceleration structures (for ray tracing)

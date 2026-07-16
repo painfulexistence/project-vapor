@@ -2015,7 +2015,7 @@ struct RestirShadowParamsCPU {
     float spatialRadius;
     float depthTolerance;
     float normalTolerance;
-    float _pad0;
+    float spotMClamp;
 };
 static_assert(sizeof(RestirShadowParamsCPU) == 80, "must match the MSL RestirShadowParams");
 
@@ -2023,13 +2023,22 @@ static_assert(sizeof(RestirShadowParamsCPU) == 80, "must match the MSL RestirSha
 // Routes to the ReSTIR reservoir path when enabled; the legacy uniform-pick
 // kernel below stays as the fallback (and the A/B reference).
 void Renderer::stochasticPointShadowPass() {
+    const bool restirWanted = stochasticShadowsEnabled && restirShadowsEnabled &&
+                              restirShadowTemporalPipeline.isValid() &&
+                              restirShadowResolvePipeline.isValid();
+    // Reservoirs exist exactly while the ReSTIR path is active: free them the
+    // frame the feature stops running (toggle off, missing TLAS, ...) so a
+    // one-time experiment doesn't pin 2x 32 B/pixel for the whole session.
+    if (!restirWanted && restirReservoirHistory.isValid()) {
+        rhi->destroyBuffer(restirReservoirHistory);
+        rhi->destroyBuffer(restirReservoirScratch);
+        restirReservoirHistory = {};
+        restirReservoirScratch = {};
+        restirHistoryValid = false;
+    }
     if (!stochasticShadowsEnabled) return;  // off = aligns with the RT-less Vulkan output
     if (!sceneTLAS.isValid() || !pointShadowRT.isValid()) return;
-    if (restirShadowsEnabled && restirShadowTemporalPipeline.isValid() &&
-        restirShadowResolvePipeline.isValid()) {
-        restirShadowPass();
-        return;
-    }
+    if (restirWanted && restirShadowPass()) return;
     if (!stochasticPointShadowPipeline.isValid()) return;
     Uint32 w = rhi->getSwapchainWidth();
     Uint32 h = rhi->getSwapchainHeight();
@@ -2070,43 +2079,59 @@ void Renderer::stochasticPointShadowPass() {
 // The winner's binary visibility estimates the contribution-weighted shadow
 // factor per domain; the existing PointShadowTemporal accumulator stays as the
 // final averager. Ray budget: <= 3/pixel (legacy kernel: up to 4).
-void Renderer::restirShadowPass() {
+// Returns false (without recording) if the reservoirs can't be allocated, so
+// the caller falls back to the legacy kernel.
+bool Renderer::restirShadowPass() {
     Uint32 w = rhi->getSwapchainWidth();
     Uint32 h = rhi->getSwapchainHeight();
 
-    // Reservoirs allocate lazily on first use (32 B/pixel x2 — ~59 MB per
-    // buffer at 4K) so the memory only exists once stochastic shadows actually
-    // run with ReSTIR on. destroyRenderTargets() drops them on resize too.
-    if (!restirReservoirHistory.isValid() || !restirReservoirScratch.isValid() ||
-        restirReservoirW != w || restirReservoirH != h) {
-        if (restirReservoirHistory.isValid()) rhi->destroyBuffer(restirReservoirHistory);
-        if (restirReservoirScratch.isValid()) rhi->destroyBuffer(restirReservoirScratch);
+    // Reservoirs allocate on first use and are freed the moment the path stops
+    // running (see stochasticPointShadowPass) or the swapchain resizes
+    // (destroyRenderTargets). 32 B/pixel x2: ~28 MB combined at 1500x900,
+    // ~236 MB at 2560x1440 retina, ~530 MB at 4K — the reason they don't sit
+    // in createRenderTargets with the always-on targets.
+    if (!restirReservoirHistory.isValid() || !restirReservoirScratch.isValid()) {
         BufferDesc bd;
         bd.size = size_t(w) * size_t(h) * sizeof(ShadowReservoirSetCPU);
         bd.usage = BufferUsage::Storage;
         bd.memoryUsage = MemoryUsage::GPU;
-        restirReservoirHistory = rhi->createBuffer(bd);
-        restirReservoirScratch = rhi->createBuffer(bd);
-        restirReservoirW = w;
-        restirReservoirH = h;
+        try {
+            restirReservoirHistory = rhi->createBuffer(bd);
+            restirReservoirScratch = rhi->createBuffer(bd);
+        } catch (const std::exception& e) {
+            if (restirReservoirHistory.isValid()) rhi->destroyBuffer(restirReservoirHistory);
+            restirReservoirHistory = {};
+            restirReservoirScratch = {};
+            restirShadowsEnabled = false;  // don't retry every frame
+            fmt::print(stderr, "restirShadowPass: reservoir allocation failed ({}), "
+                               "falling back to the legacy stochastic kernel\n", e.what());
+            return false;
+        }
         restirHistoryValid = false;  // fresh buffers hold garbage, not history
     }
 
     RestirShadowParamsCPU p{};
     p.screenSize = glm::vec2(w, h);
     p.gridDims = glm::uvec2(clusterGridSizeX, clusterGridSizeY);
-    p.frameIndex = frameCounter;
+    // frameNumber, not frameCounter: the latter only advances inside
+    // lightScatteringPass, so it freezes (and with it the RNG sequence and
+    // history-contiguity check) whenever god rays are toggled off.
+    p.frameIndex = frameNumber;
     p.pointCount = static_cast<Uint32>(pointLights.size());
     p.rectCount = static_cast<Uint32>(rectLights.size());
     p.spotCount = static_cast<Uint32>(spotLights.size());
-    p.historyValid = restirHistoryValid ? 1u : 0u;
-    p.pointCandidates = std::max(restirPointCandidates, 1u);
-    p.rectCandidates = std::max(restirRectCandidates, 1u);
-    p.spotCandidates = std::max(restirSpotCandidates, 1u);
+    // History is only trusted when the pass also ran last frame — any skip
+    // (toggle, invalid TLAS, resize, graph edits) breaks the chain here
+    // instead of every skip site having to remember to invalidate.
+    p.historyValid = (restirHistoryValid && frameNumber == restirLastFrame + 1) ? 1u : 0u;
+    p.pointCandidates = std::max(restirPointCandidates, 1u);  // panel slider allows typed 0
+    p.rectCandidates = restirRectCandidates;
+    p.spotCandidates = restirSpotCandidates;
     p.debugMode = pointShadowDebugMode;
     p.spatialTaps = restirSpatialTaps;
     p.pointMClamp = restirPointMClamp * float(p.pointCandidates);
     p.rectMClamp = restirRectMClamp * float(p.rectCandidates);
+    p.spotMClamp = restirPointMClamp * float(p.spotCandidates);
     p.spatialRadius = restirSpatialRadius;
     p.depthTolerance = 0.1f;
     p.normalTolerance = 0.9f;
@@ -2144,6 +2169,8 @@ void Renderer::restirShadowPass() {
     rhi->endComputePass();
 
     restirHistoryValid = true;
+    restirLastFrame = frameNumber;
+    return true;
 }
 
 // GIBS surfel GI (RequiresRaytracing): generate surfels from the pre-pass
@@ -3730,10 +3757,9 @@ void Renderer::destroyRenderTargets() {
     kill(swapchainDepthBuffer);
 
     // ReSTIR shadow reservoirs are swapchain-sized too (restirShadowPass
-    // reallocates lazily at the new size on its next run).
+    // reallocates at the new size on its next run).
     if (restirReservoirHistory.isValid()) { rhi->destroyBuffer(restirReservoirHistory); restirReservoirHistory = {}; }
     if (restirReservoirScratch.isValid()) { rhi->destroyBuffer(restirReservoirScratch); restirReservoirScratch = {}; }
-    restirReservoirW = restirReservoirH = 0;
     restirHistoryValid = false;
 
     // History/reprojection state is stale at the new resolution.
@@ -4394,8 +4420,16 @@ void Renderer::createRenderPipeline() {
         aoDenoisePipeline             = makeMetalCompute("shaders/3d_ao_denoise.metal", aoDenoiseShader, 8, 8, 1);
         stochasticPointShadowPipeline = makeMetalCompute("shaders/3d_stochastic_point_shadow.metal", pointShadowShader, 8, 8, 1);
         pointShadowTemporalPipeline   = makeMetalCompute("shaders/3d_point_shadow_temporal.metal", pointShadowTemporalShader, 8, 8, 1);
-        restirShadowTemporalPipeline  = makeMetalCompute("shaders/3d_restir_shadow_temporal.metal", restirShadowTemporalShader, 8, 8, 1);
-        restirShadowResolvePipeline   = makeMetalCompute("shaders/3d_restir_shadow_resolve.metal", restirShadowResolveShader, 8, 8, 1);
+        // ReSTIR is optional with a live legacy fallback — a compile failure
+        // here must not take down renderer init like the required kernels do.
+        try {
+            restirShadowTemporalPipeline = makeMetalCompute("shaders/3d_restir_shadow_temporal.metal", restirShadowTemporalShader, 8, 8, 1);
+            restirShadowResolvePipeline  = makeMetalCompute("shaders/3d_restir_shadow_resolve.metal", restirShadowResolveShader, 8, 8, 1);
+        } catch (const std::exception& e) {
+            restirShadowTemporalPipeline = {};
+            restirShadowResolvePipeline = {};
+            fmt::print(stderr, "ReSTIR shadow pipelines unavailable ({}), legacy stochastic kernel stays active\n", e.what());
+        }
 
         // GIBS surfel GI kernels (entry points differ per file).
         auto makeNamedCompute = [&](const char* path, const char* entry, ShaderHandle& sh,
@@ -5271,13 +5305,13 @@ void Renderer::drawGraphicsImGui() {
         if (ImGui::Combo("Shadows", &shadowMode, "Off\0Directional only\0All shadows\0")) {
             mainDebugFlags = (shadowMode == 0) ? (mainDebugFlags | 2u) : (mainDebugFlags & ~2u);
             stochasticShadowsEnabled = (shadowMode == 2);
-            restirHistoryValid = false;  // reservoirs are stale after a toggle
         }
         if (shadowMode == 2) {
             const bool restirAvailable = restirShadowTemporalPipeline.isValid() &&
                                          restirShadowResolvePipeline.isValid();
-            if (ImGui::Checkbox("ReSTIR denoise (reservoir reuse)", &restirShadowsEnabled))
-                restirHistoryValid = false;
+            // No history invalidation needed on toggles: restirShadowPass
+            // trusts history only when it also ran the previous frame.
+            ImGui::Checkbox("ReSTIR denoise (reservoir reuse)", &restirShadowsEnabled);
             if (restirShadowsEnabled && restirAvailable) {
                 int cand = static_cast<int>(restirPointCandidates);
                 if (ImGui::SliderInt("Light candidates", &cand, 1, 16))
@@ -5288,10 +5322,11 @@ void Renderer::drawGraphicsImGui() {
                 ImGui::SliderFloat("Spatial radius (px)", &restirSpatialRadius, 2.0f, 32.0f);
                 ImGui::SliderFloat("History clamp (xM)", &restirPointMClamp, 1.0f, 40.0f);
                 if (restirReservoirHistory.isValid()) {
-                    const double mb = double(restirReservoirW) * double(restirReservoirH)
-                                      * 32.0 * 2.0 / (1024.0 * 1024.0);
-                    ImGui::TextDisabled("reservoirs: %ux%u, %.0f MB", restirReservoirW,
-                                        restirReservoirH, mb);
+                    const Uint32 rw = rhi->getSwapchainWidth();
+                    const Uint32 rh = rhi->getSwapchainHeight();
+                    const double mb = double(rw) * double(rh)
+                                      * sizeof(ShadowReservoirSetCPU) * 2.0 / (1024.0 * 1024.0);
+                    ImGui::TextDisabled("reservoirs: %ux%u, %.0f MB", rw, rh, mb);
                 }
             } else if (restirShadowsEnabled) {
                 ImGui::TextDisabled("ReSTIR pipelines unavailable (Metal RT only)");
@@ -5330,7 +5365,9 @@ void Renderer::drawGraphicsImGui() {
         } else if (pointShadowDebugMode >= 2) {
             ImGui::TextWrapped("ReSTIR-only view (falls back to visibility on the legacy path). "
                                "Winner id: color bands per selected light — stable bands mean the "
-                               "reservoir has locked on. Confidence: reservoir M vs the history clamp.");
+                               "reservoir has locked on. Confidence: reservoir M vs the history clamp. "
+                               "Like the heatmap, the view replaces the shadow factors, so scene "
+                               "lighting is affected while it is active.");
         }
         // Intermediate shadow textures (native Metal parity). These are
         // single-channel R16F/depth RTs; the RRR1 swizzle view renders them as

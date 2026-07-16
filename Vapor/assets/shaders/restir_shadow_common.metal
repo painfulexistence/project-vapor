@@ -1,7 +1,11 @@
 #ifndef RESTIR_SHADOW_COMMON_METAL
 #define RESTIR_SHADOW_COMMON_METAL
 
-#include "Res/shaders/3d_common.metal"
+// Requires "Res/shaders/3d_common.metal" to be included FIRST by the kernel.
+// No nested #include here: kernels compile from a path-less source string, so
+// only top-level quoted includes reliably resolve against the process CWD —
+// a quoted include nested inside this (real, on-disk) header would resolve
+// against Res/shaders/ instead and fail. Same convention as gibs_common.metal.
 
 // Shared types + helpers for the ReSTIR stochastic-shadow passes
 // (3d_restir_shadow_temporal.metal / 3d_restir_shadow_resolve.metal).
@@ -16,6 +20,12 @@
 // p̂-proportional selection is the contribution-weighted visibility — exactly
 // the factor the PBR shader multiplies each domain's analytic sum by. The
 // existing point-shadow temporal accumulator remains the final averager.
+//
+// Known tradeoff: temporal reuse correlates the winner across frames, so where
+// two comparable lights disagree on visibility the output dwells on one state
+// instead of averaging. The M clamp bounds that dwell (history ≤ clamp×
+// candidates, so fresh samples keep ~1/(clamp+1) influence per frame); the
+// default keeps winner refresh inside the accumulator's ~14-frame EMA window.
 
 // Mirrors ShadowReservoirSetCPU in renderer.cpp — 32 bytes per pixel.
 struct ShadowReservoirSet {
@@ -25,7 +35,7 @@ struct ShadowReservoirSet {
     float spotW;
     uint  rectData;   // [0:8) rect index, [8:20) quad u, [20:32) quad v
     float rectW;
-    uint  rectM;      // [0:16) M (rectData has no room for it)
+    uint  rectM;      // [0:16) rect M, [16:32) oct-encoded surface normal
     float viewDepth;  // view-space z at write time (temporal validation)
 };
 
@@ -37,18 +47,18 @@ struct RestirShadowParams {
     uint   pointCount;      // live light counts (stale history indices are
     uint   rectCount;       //  dropped against these)
     uint   spotCount;
-    uint   historyValid;    // 0 on the first frame / after resize or toggle
+    uint   historyValid;    // 0 on the first frame / after any skipped frame
     uint   pointCandidates; // fresh RIS candidates per frame, per domain
     uint   rectCandidates;
     uint   spotCandidates;
     uint   debugMode;       // 0 visibility, 1 tile heatmap, 2 winner id, 3 M
     uint   spatialTaps;
-    float  pointMClamp;     // absolute history M caps (point/spot share one;
-    float  rectMClamp;      //  rect stays low so quad points keep refreshing)
+    float  pointMClamp;     // absolute history M caps, per domain (rect stays
+    float  rectMClamp;      //  low so quad points keep resampling the penumbra)
     float  spatialRadius;   // px
     float  depthTolerance;  // max relative view-depth difference for reuse
-    float  normalTolerance; // min normal dot for spatial reuse
-    float  _pad0;
+    float  normalTolerance; // min normal dot for temporal/spatial reuse
+    float  spotMClamp;
 };
 
 constant uint RESTIR_INVALID_LIGHT = 0xFFFFu;
@@ -76,6 +86,20 @@ inline float2 restirUnpackRectUV(uint data) {
     return float2(float((data >> 8) & 0xFFFu), float((data >> 20) & 0xFFFu)) / 4095.0;
 }
 
+// The surface normal rides in rectM's high half (8+8-bit octahedral, ~1-2°
+// error against a 25° reuse threshold) so the temporal/spatial normal gates
+// read only the reservoir they already loaded — the trick the AO chain uses.
+inline uint restirPackMNormal(float M, float3 n) {
+    float2 e = octEncode(n) * 0.5 + 0.5;
+    uint2 q = uint2(e * 255.0 + 0.5);
+    return min(uint(M + 0.5), 0xFFFFu) | (q.x << 16) | (q.y << 24);
+}
+inline float restirUnpackRectM(uint rectM) { return float(rectM & 0xFFFFu); }
+inline float3 restirUnpackNormal(uint rectM) {
+    float2 e = float2(float((rectM >> 16) & 0xFFu), float(rectM >> 24)) / 255.0;
+    return octDecode(e * 2.0 - 1.0);
+}
+
 inline ShadowReservoirSet restirEmptySet(float viewDepth) {
     ShadowReservoirSet s;
     s.pointData = RESTIR_INVALID_LIGHT;
@@ -90,25 +114,42 @@ inline ShadowReservoirSet restirEmptySet(float viewDepth) {
 }
 
 // ---------------------------------------------------------------------------
-// RNG — same hash family as random() in 3d_common.metal, but stateful so each
-// draw advances the sequence instead of re-deriving offsets by hand.
+// Surface reconstruction — the convention every reuse guard compares against,
+// shared so the two kernels cannot drift (matches the stochastic kernel).
 // ---------------------------------------------------------------------------
 
-inline float restirRand(thread uint& state) {
-    state = state * 747796405u + 2891336453u;
-    uint word = ((state >> ((state >> 28u) + 4u)) ^ state) * 277803737u;
-    return float(word >> 8u) * (1.0 / 16777216.0); // [0, 1)
+struct RestirSurface {
+    float3 worldPos;
+    float viewDepth;
+};
+
+inline RestirSurface restirReconstructSurface(
+    uint2 tid, uint w, uint h, float depth, constant CameraData& camera
+) {
+    float2 uv = float2(tid) / float2(w, h);
+    float2 ndcXY = float2(uv.x, 1.0 - uv.y) * 2.0 - 1.0;
+    float4 viewPos = camera.invProj * float4(ndcXY, depth, 1.0);
+    viewPos /= viewPos.w;
+    RestirSurface s;
+    s.worldPos = (camera.invView * viewPos).xyz;
+    s.viewDepth = viewPos.z;
+    return s;
+}
+
+// Tile-cluster index, matching the PBR/stochastic kernels' 2D convention.
+// The min() keeps the top pixel row (uv.y == 0 → tileY == gridY) inside the
+// culled grid instead of reading the never-written row beyond it.
+inline uint restirClusterIndex(float2 uv, uint2 gridDims) {
+    uint tileX = min(uint(uv.x * float(gridDims.x)), gridDims.x - 1);
+    uint tileY = min(uint((1.0 - uv.y) * float(gridDims.y)), gridDims.y - 1);
+    return tileX + tileY * gridDims.x;
 }
 
 // ---------------------------------------------------------------------------
 // Target functions p̂ — the UNSHADOWED contribution of a light sample at the
-// shaded point, matching the PBR shaders' analytic attenuation exactly
+// shaded point, matching the PBR shaders' analytic attenuation
 // (3d_pbr_normal_mapped.metal) with N·L standing in for the BRDF.
 // ---------------------------------------------------------------------------
-
-inline float restirLuminance(float3 c) {
-    return dot(c, float3(0.2126, 0.7152, 0.0722));
-}
 
 inline float restirPointPdf(PointLight light, float3 P, float3 N) {
     float3 toL = light.position - P;
@@ -118,7 +159,7 @@ inline float restirPointPdf(PointLight light, float3 P, float3 N) {
     float ndotl = dot(N, toL / d);
     if (ndotl <= 0.0) return 0.0;
     float att = (1.0 / d2) * (1.0 - smoothstep(light.radius * 0.8, light.radius, d));
-    return restirLuminance(light.color) * light.intensity * att * ndotl;
+    return luminance709(light.color) * light.intensity * att * ndotl;
 }
 
 inline float restirSpotPdf(SpotLight light, float3 P, float3 N) {
@@ -133,7 +174,7 @@ inline float restirSpotPdf(SpotLight light, float3 P, float3 N) {
                        max(light.cosInner - light.cosOuter, 1e-4), 0.0, 1.0);
     if (cone <= 0.0) return 0.0;
     float att = (1.0 / d2) * (1.0 - smoothstep(light.radius * 0.8, light.radius, d));
-    return restirLuminance(light.color) * light.intensity * att * cone * cone * ndotl;
+    return luminance709(light.color) * light.intensity * att * cone * cone * ndotl;
 }
 
 inline float3 restirRectPoint(RectLight light, float2 uv) {
@@ -152,7 +193,11 @@ inline float restirRectPdf(RectLight light, float2 uv, float3 P, float3 N) {
     // Double-sided emitter assumption, matching the trace pass (which shadows
     // the pixel no matter which face of the quad it sees).
     float cosEmit = abs(dot(dir, normalize(cross(float3(light.right), float3(light.up)))));
-    return restirLuminance(float3(light.color)) * light.intensity * cosEmit * ndotl / d2;
+    // Quad area converts per-point radiance into the light's contribution, so
+    // selection between rect lights of different sizes weighs correctly (a
+    // uniform quad pdf is 1/area — the area must reappear in the target).
+    float area = 4.0 * light.halfWidth * light.halfHeight;
+    return luminance709(float3(light.color)) * light.intensity * area * cosEmit * ndotl / d2;
 }
 
 // ---------------------------------------------------------------------------
@@ -199,6 +244,24 @@ inline void wrsMerge(thread WRSReservoir& r, uint candidate, float pdfHere, floa
 
 inline float wrsFinalizeW(WRSReservoir r) {
     return (r.pdf > 0.0 && r.M > 0.0) ? r.wSum / (r.M * r.pdf) : 0.0;
+}
+
+// Pack the three domain reservoirs (+ the reuse-validation surface data) into
+// the stored form. Shared by both kernels so the layout cannot drift.
+inline ShadowReservoirSet restirPackSet(
+    WRSReservoir rPoint, WRSReservoir rRect, WRSReservoir rSpot,
+    float viewDepth, float3 normal
+) {
+    ShadowReservoirSet out;
+    out.pointData = restirPackIdxM(rPoint.pdf > 0.0 ? rPoint.candidate : RESTIR_INVALID_LIGHT, rPoint.M);
+    out.pointW = wrsFinalizeW(rPoint);
+    out.spotData = restirPackIdxM(rSpot.pdf > 0.0 ? rSpot.candidate : RESTIR_INVALID_LIGHT, rSpot.M);
+    out.spotW = wrsFinalizeW(rSpot);
+    out.rectData = rRect.pdf > 0.0 ? rRect.candidate : RESTIR_INVALID_RECT;
+    out.rectW = wrsFinalizeW(rRect);
+    out.rectM = restirPackMNormal(rRect.M, normal);
+    out.viewDepth = viewDepth;
+    return out;
 }
 
 #endif

@@ -2,6 +2,7 @@
 #include <metal_raytracing>
 using namespace metal;
 using raytracing::instance_acceleration_structure;
+#include "Res/shaders/3d_common.metal"
 #include "Res/shaders/restir_shadow_common.metal"
 
 // ReSTIR stochastic-shadow pass 2: spatial reuse + winner visibility rays.
@@ -60,22 +61,15 @@ kernel void computeMain(
         return;
     }
 
-    float2 uv = float2(tid) / float2(w, h);
-    float2 ndcXY = float2(uv.x, 1.0 - uv.y) * 2.0 - 1.0;
-    float4 ndc = float4(ndcXY, depth, 1.0);
-    float4 viewPos = camera.invProj * ndc;
-    viewPos /= viewPos.w;
-    float3 worldPos = (camera.invView * viewPos).xyz;
+    RestirSurface surf = restirReconstructSurface(tid, w, h, depth, camera);
     float3 worldNormal = normalize(normalTexture.read(tid).xyz);
-    float viewDepth = viewPos.z;
 
     ShadowReservoirSet own = inReservoirs[pixel];
 
     // Tile heatmap debug (parity with the legacy kernel's debugMode 1).
     if (params.debugMode == 1) {
-        uint tileX = uint(uv.x * float(params.gridDims.x));
-        uint tileY = uint((1.0 - uv.y) * float(params.gridDims.y));
-        uint lightCount = clusters[tileX + tileY * params.gridDims.x].lightCount;
+        float2 uv = float2(tid) / float2(w, h);
+        uint lightCount = clusters[restirClusterIndex(uv, params.gridDims)].lightCount;
         shadowTexture.write(float4(float(lightCount) / 8.0), tid);
         history[pixel] = own; // keep reservoir state flowing
         return;
@@ -86,8 +80,8 @@ kernel void computeMain(
     WRSReservoir rPoint = wrsEmpty();
     {
         uint idx = restirUnpackIdx(own.pointData);
-        if (idx < params.pointCount && own.pointW > 0.0) {
-            float pdf = restirPointPdf(pointLights[idx], worldPos, worldNormal);
+        if (idx < params.pointCount && own.pointW > 0.0 && isfinite(own.pointW)) {
+            float pdf = restirPointPdf(pointLights[idx], surf.worldPos, worldNormal);
             rPoint.candidate = idx;
             rPoint.pdf = pdf;
             rPoint.wSum = own.pointW * restirUnpackM(own.pointData) * pdf;
@@ -97,19 +91,19 @@ kernel void computeMain(
     WRSReservoir rRect = wrsEmpty();
     {
         uint idx = restirUnpackRectIdx(own.rectData);
-        if (idx < params.rectCount && own.rectW > 0.0) {
-            float pdf = restirRectPdf(rectLights[idx], restirUnpackRectUV(own.rectData), worldPos, worldNormal);
+        if (idx < params.rectCount && own.rectW > 0.0 && isfinite(own.rectW)) {
+            float pdf = restirRectPdf(rectLights[idx], restirUnpackRectUV(own.rectData), surf.worldPos, worldNormal);
             rRect.candidate = own.rectData;
             rRect.pdf = pdf;
-            rRect.wSum = own.rectW * float(own.rectM & 0xFFFFu) * pdf;
+            rRect.wSum = own.rectW * restirUnpackRectM(own.rectM) * pdf;
         }
-        rRect.M = float(own.rectM & 0xFFFFu);
+        rRect.M = restirUnpackRectM(own.rectM);
     }
     WRSReservoir rSpot = wrsEmpty();
     {
         uint idx = restirUnpackIdx(own.spotData);
-        if (idx < params.spotCount && own.spotW > 0.0) {
-            float pdf = restirSpotPdf(spotLights[idx], worldPos, worldNormal);
+        if (idx < params.spotCount && own.spotW > 0.0 && isfinite(own.spotW)) {
+            float pdf = restirSpotPdf(spotLights[idx], surf.worldPos, worldNormal);
             rSpot.candidate = idx;
             rSpot.pdf = pdf;
             rSpot.wSum = own.spotW * restirUnpackM(own.spotData) * pdf;
@@ -119,7 +113,7 @@ kernel void computeMain(
 
     // ---- Spatial reuse ------------------------------------------------------
     uint rng = tid.x * 2371u + tid.y * 8933u + params.frameIndex * 15881u;
-    float angle = restirRand(rng) * 2.0 * PI;
+    float angle = randomNext(rng) * 2.0 * PI;
     float2x2 rot = float2x2(float2(cos(angle), sin(angle)),
                             float2(-sin(angle), cos(angle)));
     for (uint t = 0; t < params.spatialTaps; t++) {
@@ -131,60 +125,32 @@ kernel void computeMain(
         ShadowReservoirSet nbSet = inReservoirs[uint(nb.y) * w + uint(nb.x)];
         // Geometry compatibility: same-ish depth (sky neighbors carry 0) and
         // same-ish orientation, else the reused W darkens across silhouettes.
+        // The neighbor's normal rides in its reservoir — no texture fetch.
         if (nbSet.viewDepth == 0.0 ||
-            abs(nbSet.viewDepth - viewDepth) > params.depthTolerance * abs(viewDepth)) continue;
-        float3 nbNormal = normalize(normalTexture.read(uint2(nb)).xyz);
-        if (dot(nbNormal, worldNormal) < params.normalTolerance) continue;
+            abs(nbSet.viewDepth - surf.viewDepth) > params.depthTolerance * abs(surf.viewDepth)) continue;
+        if (dot(restirUnpackNormal(nbSet.rectM), worldNormal) < params.normalTolerance) continue;
 
         uint idx = restirUnpackIdx(nbSet.pointData);
-        if (idx < params.pointCount && nbSet.pointW > 0.0) {
-            float pdf = restirPointPdf(pointLights[idx], worldPos, worldNormal);
-            wrsMerge(rPoint, idx, pdf, nbSet.pointW, restirUnpackM(nbSet.pointData), restirRand(rng));
+        if (idx < params.pointCount && nbSet.pointW > 0.0 && isfinite(nbSet.pointW)) {
+            float pdf = restirPointPdf(pointLights[idx], surf.worldPos, worldNormal);
+            wrsMerge(rPoint, idx, pdf, nbSet.pointW, restirUnpackM(nbSet.pointData), randomNext(rng));
         }
         idx = restirUnpackRectIdx(nbSet.rectData);
-        if (idx < params.rectCount && nbSet.rectW > 0.0) {
-            float pdf = restirRectPdf(rectLights[idx], restirUnpackRectUV(nbSet.rectData), worldPos, worldNormal);
-            wrsMerge(rRect, nbSet.rectData, pdf, nbSet.rectW, float(nbSet.rectM & 0xFFFFu), restirRand(rng));
+        if (idx < params.rectCount && nbSet.rectW > 0.0 && isfinite(nbSet.rectW)) {
+            float pdf = restirRectPdf(rectLights[idx], restirUnpackRectUV(nbSet.rectData), surf.worldPos, worldNormal);
+            wrsMerge(rRect, nbSet.rectData, pdf, nbSet.rectW, restirUnpackRectM(nbSet.rectM), randomNext(rng));
         }
         idx = restirUnpackIdx(nbSet.spotData);
-        if (idx < params.spotCount && nbSet.spotW > 0.0) {
-            float pdf = restirSpotPdf(spotLights[idx], worldPos, worldNormal);
-            wrsMerge(rSpot, idx, pdf, nbSet.spotW, restirUnpackM(nbSet.spotData), restirRand(rng));
+        if (idx < params.spotCount && nbSet.spotW > 0.0 && isfinite(nbSet.spotW)) {
+            float pdf = restirSpotPdf(spotLights[idx], surf.worldPos, worldNormal);
+            wrsMerge(rSpot, idx, pdf, nbSet.spotW, restirUnpackM(nbSet.spotData), randomNext(rng));
         }
-    }
-
-    // ---- Winner visibility (one ray per domain) -----------------------------
-    bool tlasValid = !is_null_instance_acceleration_structure(TLAS);
-    float pointVis = 1.0;
-    if (rPoint.pdf > 0.0 && tlasValid) {
-        pointVis = traceVisibility(TLAS, worldPos, worldNormal,
-                                   pointLights[rPoint.candidate].position);
-    }
-    float rectVis = 1.0;
-    if (rRect.pdf > 0.0 && tlasValid) {
-        RectLight rl = rectLights[restirUnpackRectIdx(rRect.candidate)];
-        rectVis = traceVisibility(TLAS, worldPos, worldNormal,
-                                  restirRectPoint(rl, restirUnpackRectUV(rRect.candidate)));
-    }
-    float spotVis = 1.0;
-    if (rSpot.pdf > 0.0 && tlasValid) {
-        spotVis = traceVisibility(TLAS, worldPos, worldNormal,
-                                  spotLights[rSpot.candidate].position);
     }
 
     // ---- Store post-spatial reservoirs as next frame's history --------------
-    ShadowReservoirSet out;
-    out.pointData = restirPackIdxM(rPoint.pdf > 0.0 ? rPoint.candidate : RESTIR_INVALID_LIGHT, rPoint.M);
-    out.pointW = wrsFinalizeW(rPoint);
-    out.spotData = restirPackIdxM(rSpot.pdf > 0.0 ? rSpot.candidate : RESTIR_INVALID_LIGHT, rSpot.M);
-    out.spotW = wrsFinalizeW(rSpot);
-    out.rectData = rRect.pdf > 0.0 ? rRect.candidate : RESTIR_INVALID_RECT;
-    out.rectW = wrsFinalizeW(rRect);
-    out.rectM = min(uint(rRect.M + 0.5), 0xFFFFu);
-    out.viewDepth = viewDepth;
-    history[pixel] = out;
+    history[pixel] = restirPackSet(rPoint, rRect, rSpot, surf.viewDepth, worldNormal);
 
-    // ---- Output -------------------------------------------------------------
+    // Debug views need only the merged reservoirs — return before spending rays.
     if (params.debugMode == 2) {
         // Winner id bands (0 = no winner) — selection stability check.
         float3 ids = float3(
@@ -198,9 +164,29 @@ kernel void computeMain(
         // Reservoir confidence (M relative to the temporal clamp).
         float3 ms = float3(rPoint.M / max(params.pointMClamp * 2.0, 1.0),
                            rRect.M / max(params.rectMClamp * 2.0, 1.0),
-                           rSpot.M / max(params.pointMClamp * 2.0, 1.0));
+                           rSpot.M / max(params.spotMClamp * 2.0, 1.0));
         shadowTexture.write(float4(saturate(ms), 1.0), tid);
         return;
     }
+
+    // ---- Winner visibility (one ray per domain) -----------------------------
+    bool tlasValid = !is_null_instance_acceleration_structure(TLAS);
+    float pointVis = 1.0;
+    if (rPoint.pdf > 0.0 && tlasValid) {
+        pointVis = traceVisibility(TLAS, surf.worldPos, worldNormal,
+                                   pointLights[rPoint.candidate].position);
+    }
+    float rectVis = 1.0;
+    if (rRect.pdf > 0.0 && tlasValid) {
+        RectLight rl = rectLights[restirUnpackRectIdx(rRect.candidate)];
+        rectVis = traceVisibility(TLAS, surf.worldPos, worldNormal,
+                                  restirRectPoint(rl, restirUnpackRectUV(rRect.candidate)));
+    }
+    float spotVis = 1.0;
+    if (rSpot.pdf > 0.0 && tlasValid) {
+        spotVis = traceVisibility(TLAS, surf.worldPos, worldNormal,
+                                  spotLights[rSpot.candidate].position);
+    }
+
     shadowTexture.write(float4(pointVis, rectVis, spotVis, 1.0), tid);
 }
