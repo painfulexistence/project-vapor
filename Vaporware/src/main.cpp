@@ -365,17 +365,20 @@ auto main(int argc, char* args[]) -> int {
     bool particleEmissionEnabled = true;
     bool particleVisible = true;
 
-    renderer->setImGuiCallback([&]() {
-        sceneInspector.draw(registry);
-        // System-level particle controls (global, not per-entity). A dedicated
-        // System Inspector would be the proper long-term home; this window is a
-        // stand-in for it. The renderer exposes these purely as setters.
-        if (ImGui::Begin("Particles")) {
+    // "Systems" section under Application > Scene. System-level (global) controls
+    // that don't belong in the per-entity inspector. Hardcoded to particles for
+    // now; a real system inspector would enumerate registered systems.
+    sceneInspector.setSystemsDrawer([&](entt::registry&) {
+        if (ImGui::TreeNode("Particles")) {
             ImGui::Checkbox("Visible (hide render when off)", &particleVisible);
             ImGui::Checkbox("Pause (freeze sim + reclaim)", &particlePaused);
             ImGui::Checkbox("Emit (graceful stop when off)", &particleEmissionEnabled);
+            ImGui::TreePop();
         }
-        ImGui::End();
+    });
+
+    renderer->setImGuiCallback([&]() {
+        sceneInspector.draw(registry);
     });
 
     auto [sceneBuilt, materialBuilt, cube1, global] =
