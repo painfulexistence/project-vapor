@@ -9,7 +9,11 @@
 // Bindings: 0 = CameraBuf, 2 = InstanceBuf, 3 = MeshletBuf, 4 = MeshletVertexBuf,
 //           5 = MeshletTriangleBuf (u8 packed in uint words), 7 = merged VB.
 
-layout(local_size_x = 64) in;
+// 128 = MAX(maxVertsPerMeshlet 64, maxTrisPerMeshlet 128): one invocation per
+// vertex and per triangle, matching 3d_meshlet.metal. (Metal additionally needs
+// the mesh threadgroup >= primitive count or it emits nothing; Vulkan is looser
+// but the parity keeps both backends on the same emission pattern.)
+layout(local_size_x = 128) in;
 layout(triangles, max_vertices = 64, max_primitives = 128) out;
 
 struct CameraData {
@@ -112,15 +116,16 @@ void main() {
     vec3 color = hashColor(mi);
 
     const uint kVertexFloats = 12u;  // sizeof(VertexData) / sizeof(float)
-    for (uint v = gl_LocalInvocationIndex; v < m.vertexCount; v += 64u) {
-        uint vi = meshletVertices[m.vertexOffset + v];  // merged-VB vertex index
+    uint tid = gl_LocalInvocationIndex;  // 0..127
+    if (tid < m.vertexCount) {
+        uint vi = meshletVertices[m.vertexOffset + tid];  // merged-VB vertex index
         uint f = vi * kVertexFloats;
         vec3 pos = vec3(vb[f], vb[f + 1u], vb[f + 2u]);
-        gl_MeshVerticesEXT[v].gl_Position = mvp * vec4(pos, 1.0);
-        meshletColor[v] = color;
+        gl_MeshVerticesEXT[tid].gl_Position = mvp * vec4(pos, 1.0);
+        meshletColor[tid] = color;
     }
-    for (uint t = gl_LocalInvocationIndex; t < m.triangleCount; t += 64u) {
-        uint b = m.triangleOffset + t * 3u;
-        gl_PrimitiveTriangleIndicesEXT[t] = uvec3(triByte(b), triByte(b + 1u), triByte(b + 2u));
+    if (tid < m.triangleCount) {
+        uint b = m.triangleOffset + tid * 3u;
+        gl_PrimitiveTriangleIndicesEXT[tid] = uvec3(triByte(b), triByte(b + 1u), triByte(b + 2u));
     }
 }

@@ -4433,7 +4433,7 @@ void Renderer::createRenderPipeline() {
                     mp.meshShader = meshletMeshShader;
                     mp.fragmentShader = meshletFragShader;
                     mp.taskThreadgroupSize = 32;
-                    mp.meshThreadgroupSize = 64;
+                    mp.meshThreadgroupSize = 128;  // one thread per vertex/triangle (see Metal block)
                     mp.depthTest = true;
                     mp.depthWrite = true;
                     mp.depthCompareOp = CompareOp::LessOrEqual;
@@ -4871,7 +4871,10 @@ void Renderer::createRenderPipeline() {
                 mp.meshShader = meshletMeshShader;
                 mp.fragmentShader = meshletFragShader;
                 mp.taskThreadgroupSize = 32;
-                mp.meshThreadgroupSize = 64;
+                // One mesh thread per vertex/triangle: size to MAX(maxVerts 64,
+                // maxTris 128). A mesh threadgroup smaller than the primitive
+                // count emits no valid output (see 3d_meshlet.metal meshMain).
+                mp.meshThreadgroupSize = 128;
                 mp.depthTest = true;
                 mp.depthWrite = true;
                 mp.depthCompareOp = CompareOp::LessOrEqual;

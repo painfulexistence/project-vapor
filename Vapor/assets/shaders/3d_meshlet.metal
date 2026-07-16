@@ -397,34 +397,37 @@ static float3 hashColor(uint x) {
     uint mi = payload.meshletIndices[gid];
     Meshlet m = meshlets[mi];
 
-    // Set the output size, then write the index buffer from a SINGLE thread.
-    // The debug ladder cleared every input (vertex loop, transform, index data
-    // all verified) yet the real path stayed blank; the one thing no passing
-    // probe exercised was set_index called from divergent threads. Writing the
-    // indices single-threaded (the vertex writes stay parallel) sidesteps it.
-    if (tid == 0u) {
-        output.set_primitive_count(m.triangleCount);
-        for (uint t = 0u; t < m.triangleCount * 3u; ++t) {
-            output.set_index(t, uint(meshletTriangles[m.triangleOffset + t]));
-        }
-    }
+    // ONE thread per vertex / per triangle — the pattern Apple's mesh-shader
+    // samples use. The mesh threadgroup is sized to MAX(maxVertexCount,
+    // maxTriangleCount) = 128 threads (see meshThreadgroupSize in the pipeline).
+    // The earlier 64-thread + strided-loop version emitted up to 128 primitives
+    // from a 64-thread group: a mesh threadgroup with fewer threads than the
+    // primitive count produces no valid output, so the whole cluster vanished
+    // even though every input was correct (that's why set_primitive_count(1)
+    // probes rendered but the real triangleCount-primitive path did not).
 
     // Transform in the SAME associativity as the pre-pass / main vertex shader:
-    // world = model * pos, clip = proj * view * world. A fused proj*view*model
-    // MVP rounds differently and can land fragments epsilon-farther than the
-    // pre-pass depth, which the main pass's LessOrEqual test then rejects
-    // (whole-cluster dropout -> clear color).
+    // world = model * pos, clip = proj * view * world (a fused MVP rounds
+    // differently and can trip the main pass's LessOrEqual depth test).
     float4x4 model = instances[params.instanceID].model;
     float4x4 viewProj = cam.proj * cam.view;
     float3 color = hashColor(mi);
 
-    for (uint v = tid; v < m.vertexCount; v += 64u) {
-        uint vi = meshletVertices[m.vertexOffset + v];  // merged-VB vertex index
+    if (tid < m.vertexCount) {
+        uint vi = meshletVertices[m.vertexOffset + tid];  // merged-VB vertex index
         MeshletVertexOut vout;
-        float4 worldPos = model * float4(float3(vertices[vi].position), 1.0);
-        vout.position = viewProj * worldPos;
+        vout.position = viewProj * (model * float4(float3(vertices[vi].position), 1.0));
         vout.color = color;
-        output.set_vertex(v, vout);
+        output.set_vertex(tid, vout);
+    }
+    if (tid < m.triangleCount) {
+        uint i = tid * 3u;  // this thread owns triangle `tid`, indices i..i+2
+        output.set_index(i + 0u, uint(meshletTriangles[m.triangleOffset + i + 0u]));
+        output.set_index(i + 1u, uint(meshletTriangles[m.triangleOffset + i + 1u]));
+        output.set_index(i + 2u, uint(meshletTriangles[m.triangleOffset + i + 2u]));
+    }
+    if (tid == 0u) {
+        output.set_primitive_count(m.triangleCount);
     }
 }
 
