@@ -488,9 +488,30 @@ namespace Vapor {
                 auto& emit = view.get<ParticleEmitterComponent>(entity);
                 const auto& t = view.get<TransformComponent>(entity);
 
-                // Drain: an emitter that has stopped producing waits for its
-                // in-flight particles to age out, then the system reclaims —
-                // releaseParticleSlots frees AND zero-clears the GPU slots.
+                // enabled == false is an IMMEDIATE clear: the emitter and its
+                // particles are gone now, regardless of lifetime/age. This is the
+                // intuitive on/off for a boolean toggle, and the only thing that
+                // works uniformly — a lifetime-based drain can never clear
+                // immortal particles. Reset so a re-enable starts fresh (and
+                // re-fires a one-shot). enabled is still read, never written.
+                if (!emit.enabled) {
+                    if (emit._slotBegin != ~0u) {
+                        renderer->releaseParticleSlots(emit._slotBegin, emit._slotCount);
+                        emit._slotBegin = ~0u;
+                        emit._slotCount = 0;
+                    }
+                    emit._ringCursor   = 0;
+                    emit._accumulator  = 0.0f;
+                    emit._reclaimTimer = -1.0f;
+                    emit._hasFired     = false;
+                    continue;
+                }
+
+                // Auto-reclaim (graceful, natural death): a finite emitter that
+                // has stopped producing — a fired one-shot — frees + zero-clears
+                // its slots once its particles have all aged out. Immortal
+                // particles never age out, so their slots are kept until the
+                // emitter is disabled (immediate clear) or destroyed.
                 if (emit._reclaimTimer >= 0.0f) {
                     emit._reclaimTimer = emit._reclaimTimer - deltaTime;
                     if (emit._reclaimTimer <= 0.0f) {
@@ -503,24 +524,12 @@ namespace Vapor {
                     }
                 }
 
-                // Is this emitter producing new particles this frame? enabled is
-                // gameplay-owned — the system never writes it. A fired one-shot
-                // stays inert (tracked internally, not by flipping enabled).
-                bool producing = emit.enabled && emissionEnabled
-                                 && !(emit.oneShot && emit._hasFired);
+                // Graceful global stop: keep slots and let particles keep aging,
+                // just don't spawn. Re-enabling emission resumes into the slots.
+                if (!emissionEnabled) continue;
 
-                if (!producing) {
-                    // Just stopped and still holds slots: let the in-flight
-                    // particles age out, then reclaim. Immortal particles never
-                    // age out, so keep them until the entity/component is gone.
-                    if (emit._slotBegin != ~0u && emit._reclaimTimer < 0.0f
-                        && emit.particleLifetime >= 0.0f)
-                        emit._reclaimTimer = emit.particleLifetime;
-                    continue;
-                }
-
-                // Producing: cancel any pending drain and resume into our slots.
-                emit._reclaimTimer = -1.0f;
+                // A fired one-shot has nothing more to spawn.
+                if (emit.oneShot && emit._hasFired) continue;
 
                 // Claim or re-claim slots when maxParticles changed at runtime.
                 if (emit._slotBegin == ~0u || emit._slotCount != emit.maxParticles) {
