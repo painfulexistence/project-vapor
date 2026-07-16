@@ -381,6 +381,9 @@ auto main(int argc, char* args[]) -> int {
         sceneInspector.draw(registry);
     });
 
+    // Return (and zero-clear) particle slots when an emitter entity is destroyed.
+    Vapor::ParticleEmitterSystem::attach(registry, renderer.get());
+
     auto [sceneBuilt, materialBuilt, cube1, global] =
         buildScene(registry, *physics, scene, material, windowWidth, windowHeight, rng);
 

@@ -595,14 +595,25 @@ namespace Vapor {
             }
         }
 
-        // Call when an emitter entity is destroyed to return its slots.
-        static void onEmitterDestroyed(entt::registry& registry, entt::entity entity,
-                                       IRenderer* renderer) {
-            if (!renderer) return;
-            auto* emit = registry.try_get<ParticleEmitterComponent>(entity);
-            if (emit && emit->_slotBegin != ~0u) {
-                renderer->releaseParticleSlots(emit->_slotBegin, emit->_slotCount);
-            }
+        // Wire slot cleanup to component destruction. Call once at startup. The
+        // renderer is stashed in the registry context so the EnTT destroy
+        // callback (which only receives registry + entity) can reach it.
+        static void attach(entt::registry& registry, IRenderer* renderer) {
+            registry.ctx().emplace<IRenderer*>(renderer);
+            registry.on_destroy<ParticleEmitterComponent>()
+                    .connect<&ParticleEmitterSystem::onDestroy>();
+        }
+
+        // Destroying an emitter entity (or removing the component) returns its
+        // slots to the pool and zero-clears them, so gameplay owns the emitter's
+        // lifecycle end-to-end. Fires before the component is erased, so get() is
+        // valid here.
+        static void onDestroy(entt::registry& registry, entt::entity entity) {
+            auto* rptr = registry.ctx().find<IRenderer*>();
+            if (!rptr || !*rptr) return;
+            auto& emit = registry.get<ParticleEmitterComponent>(entity);
+            if (emit._slotBegin != ~0u)
+                (*rptr)->releaseParticleSlots(emit._slotBegin, emit._slotCount);
         }
     };
 
