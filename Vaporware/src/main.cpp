@@ -355,13 +355,19 @@ auto main(int argc, char* args[]) -> int {
         engineCore->attachRenderer(renderer.get(), outputDir);
     }
 
-    // Graceful global particle "stop": halts all emission; existing particles
-    // live out their lifetime. (pause/hide are renderer-side, in Effects panel.)
+    // Particle controls the game layer owns because they must reach both the
+    // GPU sim and the CPU-side ECS timers:
+    //   Pause — freezes the GPU sim AND the CPU reclaim/emission timers, so
+    //           frozen particles neither age nor get their slots reclaimed.
+    //   Emit  — graceful stop: existing particles live out their lifetime, no
+    //           new ones are produced. (Hide is renderer-only, in Effects panel.)
+    bool particlePaused = false;
     bool particleEmissionEnabled = true;
 
     renderer->setImGuiCallback([&]() {
         sceneInspector.draw(registry);
         if (ImGui::Begin("Particles")) {
+            ImGui::Checkbox("Pause (freeze sim + reclaim)", &particlePaused);
             ImGui::Checkbox("Emit (graceful stop when off)", &particleEmissionEnabled);
         }
         ImGui::End();
@@ -580,8 +586,12 @@ auto main(int argc, char* args[]) -> int {
 
         physics->process(registry, deltaTime);
         Vapor::TransformSystem::update(registry);
+        // Pause freezes the GPU sim (renderer) and the CPU-side emitter/reclaim
+        // timers (skip the system entirely) so nothing advances while paused.
+        renderer->setParticleSimPaused(particlePaused);
         Vapor::ParticleForceFieldSystem::update(registry, renderer.get());
-        Vapor::ParticleEmitterSystem::update(registry, renderer.get(), deltaTime, particleEmissionEnabled);
+        if (!particlePaused)
+            Vapor::ParticleEmitterSystem::update(registry, renderer.get(), deltaTime, particleEmissionEnabled);
         LightGatherSystem::update(registry, scene.get());
         FlipbookSystem::update(registry, deltaTime);
         SpriteRenderSystem::update(registry, renderer.get(), &resourceManager);

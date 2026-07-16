@@ -5507,9 +5507,9 @@ void Renderer::drawGraphicsImGui() {
     }
 
     if (ImGui::TreeNode("Effects")) {
+        // Hide toggle (render only). Pause + Emit live in the game's Particles
+        // window because they must also drive the CPU-side ECS timers.
         ImGui::Checkbox("Visible", &particleVisible);
-        ImGui::SameLine();
-        ImGui::Checkbox("Pause Sim", &m_particleSimPaused);
         ImGui::TreePop();
     }
 
