@@ -415,19 +415,29 @@ fragment float4 simpleFogFragment(
             L += sl.color * sl.intensity * atten * phase;
         }
 
-        // Rect area lights: center-point approximation scaled by area, with a
-        // size-derived range window. (packed_float3 fields hoisted before math.)
+        // Rect area lights: attenuate from the CLOSEST point on the quad, so
+        // the scattering hugs the rectangle's extent (a rounded slab near the
+        // panel) instead of a spherical center-point glow. Far away the clamp
+        // collapses to the center and it degenerates to a point light, as it
+        // should. Two-sided (fog is a coarse scattering approximation, so no
+        // front-face cull). (packed_float3 fields hoisted before math.)
         for (uint i = 0; i < fogLightParams.w; i++) {
             RectLight rl = rectLights[i];
             float3 lp = float3(rl.position);
+            float3 lr = float3(rl.right);
+            float3 lu = float3(rl.up);
+            float3 rel = p - lp;
+            float pu = clamp(dot(rel, lr), -rl.halfWidth,  rl.halfWidth);
+            float pv = clamp(dot(rel, lu), -rl.halfHeight, rl.halfHeight);
+            float3 closest = lp + lr * pu + lu * pv;
             float area = 4.0 * rl.halfWidth * rl.halfHeight;
             float range = 8.0 * max(rl.halfWidth, rl.halfHeight);
-            float3 toL = lp - p;
+            float3 toL = closest - p;
             float d2 = max(dot(toL, toL), 1e-4);
             float d = sqrt(d2);
             if (d >= range) continue;
             float atten = (1.0 - smoothstep(range * 0.8, range, d)) / d2 * area;
-            float phase = phaseHenyeyGreenstein(dot(rayDir, normalize(toL)), data.anisotropy);
+            float phase = phaseHenyeyGreenstein(dot(rayDir, toL / d), data.anisotropy);
             L += float3(rl.color) * rl.intensity * atten * phase;
         }
 

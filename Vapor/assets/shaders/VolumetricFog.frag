@@ -175,18 +175,26 @@ void main() {
             L += sl.color * sl.intensity * atten * phaseHG(dot(rayDir, ldir), anisotropy);
         }
 
-        // Rect area lights: center-point x area approximation with a
-        // size-derived range window.
+        // Rect area lights: attenuate from the CLOSEST point on the quad so the
+        // scattering hugs the rectangle's extent (a rounded slab near the
+        // panel) instead of a spherical center-point glow; far away the clamp
+        // collapses to the center and it degenerates to a point light. Two-sided
+        // (fog is a coarse scattering approximation, so no front-face cull).
+        // std430 tail-packs the scalars, so `rright` avoids the keyword clash.
         for (uint i = 0u; i < fogLightParams.w; ++i) {
             RectLight rl = rectLights[i];
+            vec3 rel = p - rl.position;
+            float pu = clamp(dot(rel, rl.rright), -rl.halfWidth,  rl.halfWidth);
+            float pv = clamp(dot(rel, rl.up),     -rl.halfHeight, rl.halfHeight);
+            vec3 closest = rl.position + rl.rright * pu + rl.up * pv;
             float area = 4.0 * rl.halfWidth * rl.halfHeight;
             float range = 8.0 * max(rl.halfWidth, rl.halfHeight);
-            vec3 toL = rl.position - p;
+            vec3 toL = closest - p;
             float d2 = max(dot(toL, toL), 1e-4);
             float d = sqrt(d2);
             if (d >= range) continue;
             float atten = (1.0 - smoothstep(range * 0.8, range, d)) / d2 * area;
-            L += rl.color * rl.intensity * atten * phaseHG(dot(rayDir, normalize(toL)), anisotropy);
+            L += rl.color * rl.intensity * atten * phaseHG(dot(rayDir, toL / d), anisotropy);
         }
 
         // Ambient floor so fog reads even away from direct light.
