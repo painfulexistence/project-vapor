@@ -1,0 +1,116 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>ADR-010: Separating a ParticleRendererComponent — Project Vapor</title>
+  <link rel="stylesheet" href="../styles/global.css">
+  <style>
+    .page-header { margin-bottom: 32px; }
+    .page-header h1 { font-size: 20px; }
+    h2 { font-size: 16px; margin: 36px 0 14px; }
+    h3 { font-size: 14px; margin: 24px 0 10px; }
+    p { margin-bottom: 14px; }
+    hr { margin: 36px 0; }
+    .math { font-family: monospace; white-space: pre; line-height: 1.5; padding: 16px; overflow-x: auto; background: rgba(0,0,0,0.04); border-radius: 6px; }
+    table { border-collapse: collapse; }
+  </style>
+</head>
+<body>
+  <nav>
+    <div class="nav-inner">
+      <a class="nav-logo" href="../index.html">Project Vapor</a>
+      <a href="../documentation/index.html">Docs</a>
+      <a href="index.html" class="active">Devlog</a>
+      <a href="../demo/index.html">Demo</a>
+      <a href="https://github.com/painfulexistence/project-vapor" target="_blank">GitHub ↗</a>
+    </div>
+  </nav>
+  <main>
+    <div class="page-header">
+      <div class="eyebrow">
+      <a href="index.html">Devlog</a> / ADR-010</div>
+      <h1>ADR-010: Separating a ParticleRendererComponent</h1>
+      <div class="meta-row">
+        <span>2026-07-17</span>
+        <span><span class="badge badge-warn">Proposed</span></span>
+      </div>
+    </div>
+
+    <h2>Context</h2>
+    <p>The ECS particle system (ADR — particle integration) split emission, force fields, and slot management into components and systems, but <strong>rendering configuration was left entirely in the shaders</strong>. A <code>ParticleEmitterComponent</code> decides <em>where, when, how fast, and what colour</em> particles are born; nothing decides <em>how they look</em> beyond that single colour. This ADR records the decision to extract a <code>ParticleRendererComponent</code> — the appearance module, analogous to Unity's separation of the Emission module from the Renderer module — and, more importantly, the architectural constraint that dictates how far that separation can go.</p>
+
+    <h3>Where appearance currently lives</h3>
+    <p>Particle rendering is 100% GPU. The CPU contributes exactly three inputs per frame: the particle SSBO contents, the camera, and a <strong>single global <code>particleSize</code> push constant</strong> (hardcoded <code>0.1</code> in both backends). The rest is fixed in two shaders:</p>
+    <ul>
+      <li><strong>Vertex</strong> (<code>Particle.vert</code> / <code>particleVertex</code>): reads the particle, builds a camera-facing billboard quad of size <code>particleSize</code>, forwards <code>color</code>.</li>
+      <li><strong>Fragment</strong> (<code>Particle.frag</code> / <code>particleFragment</code>): a soft radial disc plus an additive glow term, discards near-transparent pixels.</li>
+    </ul>
+    <p>So the only per-particle appearance channel the CPU feeds is <code>color</code>, set at emission from <code>emitter.color</code>. Size, shape, glow, blend, and the aging fade are all global constants baked into the shader.</p>
+
+    <h3>The current aging model, written out</h3>
+    <p>A recurring question — "as a particle ages, does it shrink?" — is worth pinning down precisely, because it is the baseline this ADR proposes to make configurable. <strong>The radius is constant; only opacity fades.</strong> The fade lives in the integrate compute kernel. With normalized age <code>t = age / lifetime ∈ [0,1]</code> (immortal particles, <code>lifetime &lt; 0</code>, never fade):</p>
+    <div class="math">α_life(t) = 1                    for t ≤ 0.7
+          = (1 − t) / 0.3        for 0.7 &lt; t &lt; 1     (linear 1 → 0 over the last 30%)
+          = dead, not drawn      for t ≥ 1</div>
+    <p>The fragment shader then applies a fixed radial profile inside the constant-size sprite. With <code>r = 2·|uv − 0.5| ∈ [0,1]</code> (0 = centre, 1 = edge):</p>
+    <div class="math">opacity(t, r) = α_life(t) · (1 − smoothstep(0, 1, r))
+rgb(r)        = color · (disc(r) + 0.5 · e^(−2r²))     disc(r) = 1 − smoothstep(0,1,r)</div>
+    <p>There is no size term of <code>t</code> anywhere. A "shrink to a point on death" look — a size-over-life curve — does not exist today; it is exactly the kind of knob a renderer component should own.</p>
+
+    <h2>The constraint that shapes the decision</h2>
+    <p>Rendering is a <strong>single instanced draw over <code>[0, particleCount)</code> with one pipeline and one push-constant block</strong>. The draw has no idea which particle belongs to which emitter — emitters own contiguous slot ranges, but that ownership lives on the CPU and is never handed to the GPU draw. Therefore a <code>ParticleRendererComponent</code> cannot simply be "read at draw time." Per-emitter appearance requires one of three mechanisms, and they differ in what they can express:</p>
+
+    <h3>Option A — bake scalar params per particle</h3>
+    <p>Widen the per-particle appearance channel. <code>GPUParticleData</code> is 64 bytes with a currently-unused <code>_pad3</code> float at offset 44 — free space for a per-particle <strong>size</strong>. The emitter copies its <code>ParticleRendererComponent</code>'s parameters into each spawned particle (exactly as <code>color</code> is copied today); the vertex shader reads per-particle size instead of the global push constant. Size-over-life and the fade start can be evaluated in the integrate kernel from <code>t</code>.</p>
+    <ul>
+      <li><strong>Enables:</strong> per-emitter size, size-over-life, fade curve, colour-over-life — anything expressible as per-particle scalar/vector data.</li>
+      <li><strong>Keeps:</strong> the single instanced draw; no CPU-side draw restructuring.</li>
+      <li><strong>Cannot express:</strong> pipeline-level state — blend mode, texture/sprite, custom shader — because those are one-per-pipeline, not per-instance.</li>
+      <li><strong>Cost:</strong> the free 4-byte slot covers one float (size). More per-particle params mean growing the struct past 64 bytes (× up to 3M particles = real bandwidth), or packing.</li>
+    </ul>
+
+    <h3>Option B — per-emitter draw calls</h3>
+    <p>Draw each emitter's slot range separately, each with its own push constants / pipeline. This is the only way to get per-emitter <strong>texture, blend mode, and shader</strong>.</p>
+    <ul>
+      <li><strong>Enables:</strong> full per-emitter appearance including pipeline state.</li>
+      <li><strong>Cost:</strong> N draw calls (N = live emitters); the draw must target exactly an emitter's live particles, which interacts awkwardly with the ring buffer (live particles need not be contiguous within the range) and with reclaimed/zeroed holes. State sorting to minimise pipeline switches becomes the renderer's job.</li>
+    </ul>
+
+    <h3>Option C — global render config only</h3>
+    <p>Do not go per-emitter yet. Lift the hardcoded constants (size, glow intensity, fade-start fraction, soft-edge) into one tweakable settings block — a global component or a renderer struct surfaced in the Systems &gt; Particles panel.</p>
+    <ul>
+      <li><strong>Enables:</strong> live-tunable global look; removes magic numbers from shaders.</li>
+      <li><strong>Cannot express:</strong> anything per-emitter — both demo emitters would share one size/glow/fade.</li>
+      <li><strong>Cost:</strong> minimal; a uniform block and a few sliders.</li>
+    </ul>
+
+    <h2>Decision</h2>
+    <p><strong>Adopt Option A as the shape of <code>ParticleRendererComponent</code></strong>, with Option C's global block folded in as the defaults, and Option B deferred until a concrete need for per-emitter textures or blend modes appears.</p>
+    <p>Rationale: A is the smallest change that delivers genuinely per-emitter appearance (the point of separating the component at all) without restructuring the single-draw pipeline. It reuses the existing "copy emitter data into each particle at spawn" path that already carries <code>color</code>, and it fills the free <code>_pad3</code> slot with the one parameter that most wants to vary per particle — size. Pipeline-state parameters (texture, blend) are explicitly out of scope for this component version; they are a pipeline concern, not a per-particle one, and forcing them into A would mislead.</p>
+
+    <h3>Proposed component shape</h3>
+    <div class="math">struct ParticleRendererComponent {
+    float     size        = 0.1f;   // world-space billboard half-extent
+    float     sizeEndScale = 1.0f;  // size multiplier at end of life (1 = constant; &lt;1 shrinks)
+    float     fadeStart   = 0.7f;   // normalized age at which alpha starts ramping to 0
+    float     glow        = 0.5f;   // additive glow weight in the fragment shader
+    glm::vec4 colorEnd    = ...;    // optional colour-over-life target (or reuse emitter.color)
+    // blend mode / texture intentionally absent — see Option B, deferred.
+};</div>
+    <p>Ownership follows the same rule the emitter fields settled on: <strong>gameplay writes these, the system reads them and bakes the per-particle channels (size, and later colour-over-life) into <code>GPUParticleData</code> at spawn</strong>. Size-over-life and fade-start are evaluated GPU-side in the integrate kernel from <code>t</code>. An emitter with no <code>ParticleRendererComponent</code> falls back to the global defaults, so the component is purely additive.</p>
+
+    <h2>Consequences</h2>
+    <ul>
+      <li>The aging model gains a size term: <code>size(t) = size · lerp(1, sizeEndScale, t)</code>, and <code>fadeStart</code> replaces the hardcoded <code>0.7</code> in α_life. "Shrink to a point on death" becomes <code>sizeEndScale = 0</code>.</li>
+      <li><code>GPUParticleData</code>'s <code>_pad3</code> becomes <code>size</code>; the 64-byte layout and Metal <code>float4</code> aliasing are unchanged (the slot already exists at offset 44).</li>
+      <li>The global <code>particleSize</code> push constant is replaced by per-particle size; the push-constant block can carry the remaining global defaults or be dropped.</li>
+      <li>Per-emitter <strong>texture and blend mode remain unavailable</strong> until Option B (per-emitter draws) or a texture-atlas + per-particle texture-index scheme is added. This is a deliberate, documented limitation, not an oversight.</li>
+      <li>None of this addresses the CPU-free-list / high-water-mark scaling limits (tracked separately as the GPU-driven-particles proposal); it is orthogonal — appearance vs allocation.</li>
+    </ul>
+
+    <hr>
+    <p class="muted">Status: Proposed. Supersedes the hardcoded global <code>particleSize</code> and the fixed last-30% fade. Blocked on nothing; scoped to Option A for the first implementation.</p>
+  </main>
+</body>
+</html>
