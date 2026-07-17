@@ -1698,6 +1698,11 @@ void Renderer::mainRenderPass() {
                 rhi->setTexture(0, 13, pointShadowHistoryRT, clampSampler);
             if (gibsEnabled && giResultTexture.isValid()) rhi->setTexture(0, 14, giResultTexture, clampSampler);
         }
+        // DIAGNOSTIC kill-switch #1: the PBR shader is reverted to main
+        // byte-identical (no texture 16/17, no buffers 17/18), so every RT
+        // reflection/refraction bind below is #if 0'd with it. Revert after
+        // the verdict.
+#if 0
         // RT mirror reflections: texture(16) + params at buffer(17). The shader
         // samples the texture only behind the runtime x > 0.5 check (same
         // contract as gibsGI). On the bound path the result is a direct texture
@@ -1708,6 +1713,7 @@ void Renderer::mainRenderPass() {
         if (reflOn) rhi->setTexture(0, 16, reflectionRT, clampSampler);
         glm::vec2 reflParams(reflOn ? 1.0f : 0.0f, rtReflectionIntensity);
         rhi->setFragmentBytes(&reflParams, sizeof(glm::vec2), 17);
+#endif
         // Spot lights (buffer 16) + counts/flags (buffer 15). buffer 14 is the
         // bindless SystemTexs table's slot, so spot lights use 16 (see the shader
         // note in 3d_pbr_normal_mapped.metal). Flag bit0 says the point-shadow
@@ -1718,6 +1724,8 @@ void Renderer::mainRenderPass() {
         glm::uvec2 spotRectParams(static_cast<Uint32>(spotLights.size()),
                                   (capabilities.raytracing && stochasticShadowsEnabled) ? 1u : 0u);
         rhi->setFragmentBytes(&spotRectParams, sizeof(glm::uvec2), 15);
+        // DIAGNOSTIC kill-switch #1 (see above).
+#if 0
         // RT refraction result (texture 17) + params (buffer 18), same
         // runtime-gated contract as the reflection pair above. Weighted per
         // pixel by the material's transmission factor in the shader.
@@ -1726,6 +1734,7 @@ void Renderer::mainRenderPass() {
         if (refrOn) rhi->setTexture(0, 17, refractionRT, clampSampler);
         glm::vec2 refrParams(refrOn ? 1.0f : 0.0f, rtRefractionIntensity);
         rhi->setFragmentBytes(&refrParams, sizeof(glm::vec2), 18);
+#endif
     }
 
     // GPU-driven path is used only when enabled AND the cull pipeline/args
@@ -1788,18 +1797,18 @@ void Renderer::mainRenderPass() {
             // above (KEEP IN SYNC with the Metal else-branch of the fragment
             // contract), rewrite only changed slots (the table is shared with
             // in-flight frames), and bind it at buffer(14).
+            // DIAGNOSTIC kill-switch #1: back to main's 10-entry table (the
+            // reverted shader's SystemTexs has 10 ids; a 12-entry table would
+            // mismatch it). Restore the 12-entry version with the shader.
             if (!bindlessSystemTable.isValid()) {
                 bindlessSystemTable = rhi->createTextureArgumentTable(
-                    fragmentShaderBindless, /*bufferIndex=*/14, 1, /*texturesPerEntry=*/12);
+                    fragmentShaderBindless, /*bufferIndex=*/14, 1, /*texturesPerEntry=*/10);
             }
             if (bindlessSystemTable.isValid()) {
                 TextureHandle whiteTex = textures[defaultWhiteTexture].handle;
                 TextureHandle blackTex = textures[defaultBlackTexture].handle;
                 const bool iblReady = !iblNeedsUpdate;
-                bool reflOn = rtReflectionsEnabled && capabilities.raytracing && reflectionRT.isValid();
-                bool refrOn = rtRefractionsEnabled && sceneHasTransmission &&
-                              capabilities.raytracing && refractionRT.isValid();
-                const TextureHandle sys[12] = {
+                const TextureHandle sys[10] = {
                     (aoEnabled && aoRT.isValid()) ? aoRT : whiteTex,                     // 0 texAO
                     (capabilities.raytracing && shadowRT.isValid()) ? shadowRT : whiteTex, // 1 texShadow
                     (iblReady && irradianceMap.isValid()) ? irradianceMap : defaultBlackCubemapTex, // 2
@@ -1810,23 +1819,14 @@ void Renderer::mainRenderPass() {
                     (capabilities.raytracing && pointShadowHistoryRT.isValid()) ? pointShadowHistoryRT : whiteTex, // 7
                     (capabilities.raytracing && gibsEnabled && giResultTexture.isValid()) ? giResultTexture : blackTex, // 8
                     (sscsEnabled && sscsRT.isValid()) ? sscsRT : whiteTex,               // 9 texSSCS
-                    reflOn ? reflectionRT : blackTex,                                    // 10 texReflection
-                    refrOn ? refractionRT : blackTex,                                    // 11 texRefraction
                 };
-                for (Uint32 i = 0; i < 12; ++i) {
+                for (Uint32 i = 0; i < 10; ++i) {
                     if (sys[i].id != m_bindlessSysCache[i].id) {
                         rhi->writeTextureArgumentTable(bindlessSystemTable, 0, i, sys[i]);
                         m_bindlessSysCache[i] = sys[i];
                     }
                 }
                 rhi->bindTextureArgumentTable(bindlessSystemTable);
-                // RT composite params (buffer 17/18) — same runtime gate as the
-                // bound path; the shader reads texReflection/texRefraction from
-                // the system table above on this ICB path.
-                glm::vec2 reflParams(reflOn ? 1.0f : 0.0f, rtReflectionIntensity);
-                rhi->setFragmentBytes(&reflParams, sizeof(glm::vec2), 17);
-                glm::vec2 refrParams(refrOn ? 1.0f : 0.0f, rtRefractionIntensity);
-                rhi->setFragmentBytes(&refrParams, sizeof(glm::vec2), 18);
             }
             // Replay the GPU-encoded command buffer (commands carry their own
             // index-buffer regions).
@@ -7563,14 +7563,14 @@ void Renderer::renderToTexture(
             rhi->setFragmentBuffer(16, spotLightBuffer, 0, sizeof(Vapor::SpotLight) * maxSpotLights);
             glm::uvec2 rttSpotRectParams(0u, 0u);
             rhi->setFragmentBytes(&rttSpotRectParams, sizeof(glm::uvec2), 15);
-            // RT reflection/refraction composite params (buffer 17/18) are plain
-            // args on the shared PBR shader — bind disabled (x=0) so the
-            // composite is skipped; the RT screen-space inputs are the main
-            // view's anyway and would smear across this off-screen view.
+            // DIAGNOSTIC kill-switch #1: shader reverted to main (no buffers
+            // 17/18) — RT param binds go with it.
+#if 0
             glm::vec2 rttReflParams(0.0f, 0.0f);
             rhi->setFragmentBytes(&rttReflParams, sizeof(glm::vec2), 17);
             glm::vec2 rttRefrParams(0.0f, 0.0f);
             rhi->setFragmentBytes(&rttRefrParams, sizeof(glm::vec2), 18);
+#endif
         }
 
         // Draw: instance IDs are sequential in rttInstances order.
