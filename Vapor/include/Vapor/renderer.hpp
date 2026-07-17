@@ -304,6 +304,7 @@ public:
     void setParticleForceField(const ParticleForceField& field) override;
     void setParticleSimPaused(bool paused) override { m_particleSimPaused = paused; }
     void setParticleVisible(bool visible) override { particleVisible = visible; }
+    void setParticleDrawList(const std::vector<ParticleDrawPacket>& draws) override;
 
     // ========================================================================
     // Texture Creation (for sprites/batch rendering)
@@ -724,12 +725,20 @@ private:
     static constexpr Uint32 MAX_PARTICLES = 3'000'000;
     ComputePipelineHandle particleForcePipeline;
     ComputePipelineHandle particleIntegratePipeline;
-    PipelineHandle particleRenderPipeline;     // instanced billboards
+    // Instanced billboard pipelines, one per ParticleBlendMode (Additive /
+    // AlphaBlend / Multiply) — per-material particle draws pick by packet.
+    static constexpr Uint32 PARTICLE_BLEND_COUNT = 3;
+    PipelineHandle particleRenderPipelines[PARTICLE_BLEND_COUNT];
     BufferHandle particleBuffer;
     BufferHandle particleSimParamsBuffer;
     BufferHandle particleAttractorBuffer;      // MAX_PARTICLE_ATTRACTORS elements
+    // Indirect draw args, MAX_PARTICLE_DRAWS × 16B (VkDrawIndirectCommand /
+    // MTLDrawPrimitivesIndirectArguments). CPU-written today; a GPU compact/cull
+    // pass can take over writing instanceCount without touching the draw loop.
+    BufferHandle particleDrawArgsBuffer;
     Uint32 particleCount = 0;          // = high-water mark of claimed slots; 0 = no ECS emitters yet
     bool particleVisible = true; // hide toggle — gates render only, sim keeps running
+    std::vector<ParticleDrawPacket> m_particleDrawList; // set each frame by ParticleRenderSystem
 
     // ECS particle slot management (first-fit free list).
     struct ParticleSlotRange { uint32_t begin = 0, count = 0; };

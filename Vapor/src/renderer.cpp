@@ -3630,11 +3630,12 @@ void Renderer::velocityPass() {
 }
 
 // GPU particle system: simulate (force -> integrate compute) then render as
-// instanced additive billboards into colorRT. A self-contained orbital demo.
+// instanced billboards into colorRT — one draw per ParticleDrawPacket, each
+// with its own blend pipeline + texture (per-material draws).
 void Renderer::particlePass() {
     if (particleCount == 0) return;
     if (!particleForcePipeline.isValid() || !particleIntegratePipeline.isValid() ||
-        !particleRenderPipeline.isValid() || !particleBuffer.isValid()) {
+        !particleRenderPipelines[0].isValid() || !particleBuffer.isValid()) {
         return;
     }
 
@@ -3694,7 +3695,38 @@ void Renderer::particlePass() {
     // Hide: skip drawing but keep simulating, so unhiding is seamless.
     if (!particleVisible) return;
 
-    // Render: instanced billboards (6 verts x particleCount) into colorRT+depth.
+    // Per-emitter draw list from ParticleRenderSystem. Fallback: one full-range
+    // additive draw when no packets were submitted (particles driven without
+    // the ECS render system).
+    std::vector<ParticleDrawPacket> fallbackDraws;
+    const std::vector<ParticleDrawPacket>* draws = &m_particleDrawList;
+    if (draws->empty()) {
+        ParticleDrawPacket all;
+        all.slotBegin = 0;
+        all.slotCount = particleCount;
+        fallbackDraws.push_back(all);
+        draws = &fallbackDraws;
+    }
+    const Uint32 drawTotal = static_cast<Uint32>(
+        std::min<size_t>(draws->size(), MAX_PARTICLE_DRAWS));
+
+    // Indirect mode (follows the GPU-driven toggle): draw args come from a
+    // buffer instead of CPU call parameters. The args are CPU-written today —
+    // the point is the submission path, so a later GPU compact/cull pass can
+    // overwrite instanceCount without touching this loop.
+    const bool indirect = gpuDrivenIndirect() && particleDrawArgsBuffer.isValid();
+    if (indirect) {
+        // VkDrawIndirectCommand == MTLDrawPrimitivesIndirectArguments (16 B).
+        struct DrawArgs { Uint32 vertexCount, instanceCount, firstVertex, firstInstance; };
+        DrawArgs args[MAX_PARTICLE_DRAWS];
+        for (Uint32 i = 0; i < drawTotal; ++i) {
+            const auto& p = (*draws)[i];
+            args[i] = { 6u, p.slotCount, 0u, p.slotBegin };
+        }
+        rhi->updateBuffer(particleDrawArgsBuffer, args, 0, sizeof(DrawArgs) * drawTotal);
+    }
+
+    // Instanced billboards (6 verts × slotCount per packet) into colorRT+depth.
     RenderPassDesc rp;
     rp.name = "Particles";
     rp.colorAttachments.push_back(colorRT);
@@ -3702,20 +3734,47 @@ void Renderer::particlePass() {
     rp.depthAttachment = depthStencilRT;
     rp.loadDepth = true;
     rhi->beginRenderPass(rp);
-    rhi->bindPipeline(particleRenderPipeline);
-    if (metal) {
-        // particleVertex: camera(0), ParticlePushConstants(1), particles(2).
-        rhi->setVertexBuffer(0, cameraUniformBuffer, 0, sizeof(CameraRenderData));
-        struct { float particleSize; float _pad[3]; } pc{ 0.1f, {0,0,0} };
-        rhi->setVertexBytes(&pc, sizeof(pc), 1);
-        rhi->setVertexBuffer(2, particleBuffer, 0, bufBytes);
-    } else {
-        rhi->setVertexBuffer(0, cameraUniformBuffer, 0, sizeof(CameraRenderData));   // set0 b0
-        rhi->setFragmentBuffer(0, particleBuffer, 0, bufBytes);                       // set1 b0 (read in VS)
-        float particleSize = 0.1f;
-        rhi->setVertexBytes(&particleSize, sizeof(float), 0);                         // push offset 0
+    for (Uint32 i = 0; i < drawTotal; ++i) {
+        const auto& p = (*draws)[i];
+        if (p.slotCount == 0) continue;
+
+        const Uint32 blend = std::min<Uint32>(p.blendMode, PARTICLE_BLEND_COUNT - 1);
+        rhi->bindPipeline(particleRenderPipelines[blend]);
+
+        // Per-packet texture; the default white texture keeps the sampler bound
+        // while useTexture=0 selects the procedural soft-disc path in the shader.
+        const bool hasTexture = p.texture != INVALID_TEXTURE_ID &&
+                                p.texture < textures.size();
+        const TextureId texId = hasTexture ? p.texture : defaultWhiteTexture;
+        struct { float particleSize; float useTexture; float _pad[2]; }
+            pc{ p.size, hasTexture ? 1.0f : 0.0f, {0.0f, 0.0f} };
+
+        if (metal) {
+            // particleVertex: camera(0), ParticlePushConstants(1), particles(2);
+            // particleFragment: params in buffer(0), texture/sampler at 0.
+            rhi->setVertexBuffer(0, cameraUniformBuffer, 0, sizeof(CameraRenderData));
+            rhi->setVertexBytes(&pc, sizeof(pc), 1);
+            rhi->setFragmentBytes(&pc, sizeof(pc), 0);
+            rhi->setVertexBuffer(2, particleBuffer, 0, bufBytes);
+        } else {
+            rhi->setVertexBuffer(0, cameraUniformBuffer, 0, sizeof(CameraRenderData));   // set0 b0
+            rhi->setFragmentBuffer(0, particleBuffer, 0, bufBytes);                       // set1 b0 (read in VS)
+            rhi->setVertexBytes(&pc, sizeof(pc), 0);  // pc [0,16), visible to VS+FS
+        }
+        if (texId < textures.size()) {
+            const RenderTexture& tex = textures[texId];
+            rhi->setTexture(2, 0, tex.handle, tex.sampler);  // GLSL set2 b0 / MSL texture(0)
+        }
+
+        if (indirect) {
+            rhi->drawIndirect(particleDrawArgsBuffer, static_cast<size_t>(i) * 16u, 1, 16);
+        } else {
+            // firstInstance = slotBegin: gl_InstanceIndex / [[instance_id]]
+            // include the base instance on both backends, indexing the SSBO
+            // directly at the emitter's slot range.
+            rhi->draw(6, p.slotCount, 0, p.slotBegin);
+        }
     }
-    rhi->draw(6, particleCount, 0, 0);
     rhi->endRenderPass();
 }
 
@@ -3812,6 +3871,12 @@ void Renderer::setParticleForceField(const ParticleForceField& field) {
     m_forceField = field;
     if (m_forceField.attractors.size() > MAX_PARTICLE_ATTRACTORS)
         m_forceField.attractors.resize(MAX_PARTICLE_ATTRACTORS);
+}
+
+void Renderer::setParticleDrawList(const std::vector<ParticleDrawPacket>& draws) {
+    m_particleDrawList = draws;
+    if (m_particleDrawList.size() > MAX_PARTICLE_DRAWS)
+        m_particleDrawList.resize(MAX_PARTICLE_DRAWS);
 }
 
 // Volumetric clouds (port of the Metal quarter-res path): raymarch into a
@@ -4240,6 +4305,14 @@ void Renderer::createDefaultResources() {
         createFrameSlottedBuffer(particleSimParamsBuffer, uDesc);
         uDesc.size = sizeof(ParticleAttractor) * MAX_PARTICLE_ATTRACTORS;
         createFrameSlottedBuffer(particleAttractorBuffer, uDesc);
+
+        // Indirect draw args for per-emitter particle draws: one 16-byte
+        // {vertexCount, instanceCount, firstVertex, firstInstance} per packet.
+        BufferDesc iaDesc;
+        iaDesc.usage = BufferUsage::Indirect;
+        iaDesc.memoryUsage = MemoryUsage::CPUtoGPU;
+        iaDesc.size = 16u * MAX_PARTICLE_DRAWS;
+        createFrameSlottedBuffer(particleDrawArgsBuffer, iaDesc);
     }
 }
 
@@ -4950,16 +5023,22 @@ void Renderer::createRenderPipeline() {
                 pd.vertexLayout.stride = 0;   // billboard verts generated in-shader
                 pd.vertexLayout.attributes = {};
                 pd.topology = PrimitiveTopology::TriangleList;
-                pd.blendMode = BlendMode::Additive;  // glowing particles
                 pd.depthTest = true;
-                pd.depthWrite = false;               // additive, don't occlude
+                pd.depthWrite = false;               // translucent, don't occlude
                 pd.depthCompareOp = CompareOp::LessOrEqual;
                 pd.cullMode = CullMode::None;
                 pd.sampleCount = 1;
                 pd.hasDepthAttachment = true;
                 pd.depthAttachmentFormat = PixelFormat::Depth32Float;
                 pd.colorAttachmentFormats = { PixelFormat::RGBA16_FLOAT };
-                particleRenderPipeline = rhi->createPipeline(pd);
+                // One pipeline per ParticleBlendMode — indexed by packet.blendMode.
+                const BlendMode particleBlends[PARTICLE_BLEND_COUNT] = {
+                    BlendMode::Additive, BlendMode::AlphaBlend, BlendMode::Multiply
+                };
+                for (Uint32 i = 0; i < PARTICLE_BLEND_COUNT; ++i) {
+                    pd.blendMode = particleBlends[i];
+                    particleRenderPipelines[i] = rhi->createPipeline(pd);
+                }
             }
         }
 
@@ -5314,7 +5393,6 @@ void Renderer::createRenderPipeline() {
                 pd.vertexLayout.stride = 0;   // billboard verts generated in-shader
                 pd.vertexLayout.attributes = {};
                 pd.topology = PrimitiveTopology::TriangleList;
-                pd.blendMode = BlendMode::Additive;
                 pd.depthTest = true;
                 pd.depthWrite = false;
                 pd.depthCompareOp = CompareOp::LessOrEqual;
@@ -5323,7 +5401,13 @@ void Renderer::createRenderPipeline() {
                 pd.hasDepthAttachment = true;
                 pd.depthAttachmentFormat = PixelFormat::Depth32Float;
                 pd.colorAttachmentFormats = { PixelFormat::RGBA16_FLOAT };
-                particleRenderPipeline = rhi->createPipeline(pd);
+                const BlendMode particleBlends[PARTICLE_BLEND_COUNT] = {
+                    BlendMode::Additive, BlendMode::AlphaBlend, BlendMode::Multiply
+                };
+                for (Uint32 i = 0; i < PARTICLE_BLEND_COUNT; ++i) {
+                    pd.blendMode = particleBlends[i];
+                    particleRenderPipelines[i] = rhi->createPipeline(pd);
+                }
             }
         }
     }

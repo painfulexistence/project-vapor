@@ -401,6 +401,23 @@ struct ParticleForceField {
     float     turbulence  = 0.0f;
 };
 
+// Maximum per-emitter particle draws submitted per frame (sizes the indirect
+// args buffer; the draw list is truncated past this).
+static constexpr Uint32 MAX_PARTICLE_DRAWS = 64;
+
+// One per-emitter particle draw — built by ParticleRenderSystem from
+// ParticleEmitterComponent + ParticleRendererComponent and handed to the
+// renderer as the frame's draw list. Each packet becomes one draw with its
+// own blend pipeline and texture (per-material draws); the slot range maps
+// to instances via firstInstance = slotBegin.
+struct ParticleDrawPacket {
+    Uint32    slotBegin = 0;
+    Uint32    slotCount = 0;
+    Uint8     blendMode = 0;                    // ParticleBlendMode value
+    TextureId texture   = INVALID_TEXTURE_ID;   // INVALID = procedural soft disc
+    float     size      = 0.1f;                 // billboard half-extent
+};
+
 // ============================================================================
 // Frustum for Culling
 // ============================================================================

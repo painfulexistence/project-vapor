@@ -234,6 +234,10 @@ public:
     virtual void setParticleSimPaused(bool paused) {}
     // Hide toggle — gate the particle render only; the sim keeps running.
     virtual void setParticleVisible(bool visible) {}
+    // Per-frame particle draw list gathered by ParticleRenderSystem — one packet
+    // per emitter (per-material draws: blend mode + texture per packet). Backends
+    // without per-material particle draws (legacy Metal) ignore this.
+    virtual void setParticleDrawList(const std::vector<ParticleDrawPacket>& draws) {}
 
 protected:
     std::function<void()> m_imGuiCallback;
