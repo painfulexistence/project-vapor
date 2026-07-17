@@ -3410,6 +3410,11 @@ void Renderer::volumetricFogPass() {
     fog.sunDirection = glm::normalize(atmosphereData.sunDirection);
     fog.sunColor = atmosphereData.sunColor;
     fog.sunIntensity = atmosphereData.sunIntensity;
+    // Animate the density-noise scroll; the per-medium windSpeed coefficient is
+    // scaled by the shared wind strength (windDirection is carried from setWind).
+    fogSettings.time += 1.0f / 60.0f;
+    fog.time = fogSettings.time;
+    fog.windSpeed = fogSettings.windSpeed * m_windStrength;
     rhi->updateBuffer(fogDataBuffer, &fog, 0, sizeof(fog));
 
     RenderPassDesc rp;
@@ -3466,6 +3471,11 @@ void Renderer::volumetricFogPass() {
         mfd.nearPlane = currentCamera.nearPlane;
         mfd.farPlane = currentCamera.farPlane;
         mfd.screenSize = glm::vec2(rhi->getSwapchainWidth(), rhi->getSwapchainHeight());
+        mfd.noiseScale = fog.noiseScale;
+        mfd.noiseIntensity = fog.noiseIntensity;
+        mfd.windSpeed = fog.windSpeed;   // already scaled by wind strength
+        mfd.time = fog.time;
+        mfd.windDirection = glm::vec4(fog.windDirection, 0.0f);
         rhi->setFragmentBytes(&mfd, sizeof(mfd), 0);
         rhi->setFragmentBuffer(1, cameraUniformBuffer, 0, sizeof(CameraRenderData));
         // Volumetric raymarch inputs: PSSM cascades for sun shafts + the full
@@ -3891,11 +3901,12 @@ void Renderer::setSky(const SkyRenderData& sky) {
 }
 
 void Renderer::setWind(const WindRenderData& wind) {
-    // Shared wind direction drives the cloud scroll; the shared strength scales
-    // the cloud's per-medium windSpeed coefficient at scroll time. The RHI fog
-    // path (FogRenderData) carries no wind (simple non-froxel fog), so there is
-    // nothing to drive there yet — it reaches parity when the froxel fog lands.
+    // Shared wind direction drives both the cloud and fog scroll; the shared
+    // strength scales each medium's per-medium windSpeed coefficient at fill
+    // time. Fog now has wind-animated density noise (VolumetricFog.frag), at
+    // parity with the native/Metal simpleFogFragment.
     cloudSettings.windDirection = wind.direction;
+    fogSettings.windDirection = wind.direction;
     m_windStrength = wind.strength;
 }
 

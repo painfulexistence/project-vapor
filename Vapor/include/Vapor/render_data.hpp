@@ -297,11 +297,20 @@ struct alignas(16) FogRenderData {
     float fogHeightFalloff = 0.1f;
     float anisotropy = 0.6f;
     float ambientIntensity = 0.3f;
-    // Panel-tunable like native (native's simpleFogFragment doesn't read them
-    // either — they only affect the froxel path; kept for parity/forward-compat).
-    float fogBaseHeight = 0.0f;
-    float fogMaxHeight = 100.0f;
-    glm::vec2 _tailPad = glm::vec2(0.0f);  // keep 16-byte struct size multiple
+    // Height falloff shaping + wind-animated density noise (GLSL twin of the
+    // Metal simpleFogFragment). windDirection comes from the shared
+    // WindFieldComponent (setWind); windSpeed is the per-medium scroll
+    // coefficient scaled by the shared wind strength at fill time; `time`
+    // scrolls the noise. Defaults mirror the Metal fog so both backends match.
+    float fogBaseHeight = 0.0f;    // 128
+    float fogMaxHeight = 100.0f;   // 132
+    float noiseScale = 0.01f;      // 136
+    float noiseIntensity = 0.5f;   // 140
+    float windSpeed = 1.0f;        // 144  per-medium scroll coefficient
+    float time = 0.0f;             // 148
+    glm::vec2 _pad2 = glm::vec2(0.0f);                        // 152 (align vec3 to 160)
+    glm::vec3 windDirection = glm::vec3(1.0f, 0.0f, 0.0f);   // 160
+    float _pad3 = 0.0f;                                       // 172 (struct = 176, /16)
 };
 
 // Heterogeneous volume raymarch (EmberGen-style density grid in an AABB).
