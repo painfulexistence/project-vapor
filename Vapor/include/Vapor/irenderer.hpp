@@ -250,6 +250,13 @@ public:
     // exists — otherwise the backends keep their panel-set wind.
     virtual void setWind(const WindRenderData& wind) {}
 
+    // Request a rebake of the environment IBL (sky capture -> irradiance /
+    // prefilter). SkySystem calls this when the sun has moved far enough to
+    // restale the captured environment. Both backends satisfy it identically by
+    // setting their iblNeedsUpdate flag, so the throttle decision lives in one
+    // place (the ECS layer), not duplicated per backend.
+    virtual void requestIBLUpdate() {}
+
 protected:
     std::function<void()> m_imGuiCallback;
     std::function<void()> m_engineWindowCallback;

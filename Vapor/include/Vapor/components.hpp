@@ -205,6 +205,13 @@ namespace Vapor {
         glm::vec3 gradientHorizon = glm::vec3(0.62f, 0.74f, 0.88f);
         glm::vec3 gradientGround  = glm::vec3(0.20f, 0.18f, 0.16f);
         bool dirty = true;  // set when edited; SkySystem re-pushes to the renderer
+
+        // IBL rebake throttle: SkySystem re-bakes the environment IBL when the
+        // sun has moved more than this many degrees since the last bake (a moving
+        // sun restales the captured sky). 0 disables it. _lastIblSunDir is the
+        // sun direction the IBL was last baked for (runtime, inspector-hidden).
+        float iblSunThresholdDeg = 5.0f;
+        Hidden<glm::vec3> _lastIblSunDir = {glm::vec3(0.0f)};
     };
 
     // Time-of-day clock. TimeOfDaySystem advances it and drives the

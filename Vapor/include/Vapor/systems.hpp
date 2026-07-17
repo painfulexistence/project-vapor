@@ -373,25 +373,52 @@ namespace Vapor {
             auto view = reg.view<SkyComponent>();
             for (auto entity : view) {
                 auto& sky = view.get<SkyComponent>(entity);
-                if (!sky.dirty) continue;
 
-                SkyRenderData data;
-                data.type                  = sky.type;
-                data.rayleighCoefficients  = sky.rayleighCoefficients;
-                data.rayleighScaleHeight   = sky.rayleighScaleHeight;
-                data.mieCoefficient        = sky.mieCoefficient;
-                data.mieScaleHeight        = sky.mieScaleHeight;
-                data.miePreferredDirection = sky.miePreferredDirection;
-                data.planetRadius          = sky.planetRadius;
-                data.atmosphereRadius      = sky.atmosphereRadius;
-                data.exposure              = sky.exposure;
-                data.groundColor           = sky.groundColor;
-                data.gradientZenith        = sky.gradientZenith;
-                data.gradientHorizon       = sky.gradientHorizon;
-                data.gradientGround        = sky.gradientGround;
-                renderer->setSky(data);
+                // Push the sky description only when it changes.
+                if (sky.dirty) {
+                    SkyRenderData data;
+                    data.type                  = sky.type;
+                    data.rayleighCoefficients  = sky.rayleighCoefficients;
+                    data.rayleighScaleHeight   = sky.rayleighScaleHeight;
+                    data.mieCoefficient        = sky.mieCoefficient;
+                    data.mieScaleHeight        = sky.mieScaleHeight;
+                    data.miePreferredDirection = sky.miePreferredDirection;
+                    data.planetRadius          = sky.planetRadius;
+                    data.atmosphereRadius      = sky.atmosphereRadius;
+                    data.exposure              = sky.exposure;
+                    data.groundColor           = sky.groundColor;
+                    data.gradientZenith        = sky.gradientZenith;
+                    data.gradientHorizon       = sky.gradientHorizon;
+                    data.gradientGround        = sky.gradientGround;
+                    renderer->setSky(data);
+                    sky.dirty = false;
+                }
 
-                sky.dirty = false;
+                // Throttled IBL rebake: a moving sun restales the captured
+                // environment. Runs every frame; the decision lives here (ECS),
+                // so both backends stay aligned via requestIBLUpdate().
+                if (sky.iblSunThresholdDeg > 0.0f) {
+                    glm::vec3 sunDir(0.0f);
+                    auto sunView = reg.view<DirectionalLightComponent, SunComponent>();
+                    for (auto e : sunView) {
+                        sunDir = sunView.get<DirectionalLightComponent>(e).direction;
+                        break;
+                    }
+                    if (glm::length(sunDir) > 1e-6f) {
+                        sunDir = glm::normalize(sunDir);
+                        const glm::vec3 last = sky._lastIblSunDir;
+                        // First bake (last == 0) always counts as "moved".
+                        float cosT = (glm::length(last) > 1e-6f)
+                                         ? glm::clamp(glm::dot(sunDir, last), -1.0f, 1.0f)
+                                         : -1.0f;
+                        float movedDeg = glm::degrees(std::acos(cosT));
+                        if (movedDeg >= sky.iblSunThresholdDeg) {
+                            renderer->requestIBLUpdate();
+                            sky._lastIblSunDir = sunDir;
+                        }
+                    }
+                }
+
                 break;  // singleton: the first sky entity wins
             }
         }
