@@ -455,7 +455,11 @@ fragment float4 fragmentMain(
     // takes buffer(12). Mirrors RHIMain.frag's mainDebugFlags.
     constant uint& mainDebugFlags [[buffer(12)]],
     // buffer(13) is reserved for the RT PR's reflectionParams.
-    const device SpotLight* spotLights [[buffer(14)]],
+    // NOTE: buffer(14) is the bindless SystemTexs argument table (function-
+    // constant gated, but its slot is claimed statically), so spot lights live
+    // at buffer(16) — a plain buffer(14) here collides with it and fails Metal
+    // shader specialization ("spotLights has invalid location").
+    const device SpotLight* spotLights [[buffer(16)]],
     // x = spot light count, y = shadow-format flags (bit0 = the point-shadow
     // texture carries RGB channels: R point / G rect / B spot; 0 on legacy
     // R16F targets so rect/spot stay unshadowed instead of black).
