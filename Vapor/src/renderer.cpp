@@ -454,6 +454,46 @@ void Renderer::registerStatsSources() {
         s.add("max", mx);
         s.add("nonEmpty", nonEmpty);
     });
+
+    // GPU-driven cull diagnostics (was the always-on [MDI diag] fmt::print in the
+    // MDI draw branch). Covers every indirect submission mode (plain Indirect /
+    // MDI / Bindless MDI), not just MDI. Periodic: the host-visible readback runs
+    // at most once per interval, and only while --stats is enabled (tick() is a
+    // no-op otherwise, so zero cost in normal runs).
+    //
+    // Reads back gpuCullArgsBuffer, which the cull compute wrote LAST frame (this
+    // frame's cull hasn't run at tick() time — sane for a steady scene). Reads
+    // cull output so a blank frame can be diagnosed:
+    //   instCount all 0 -> cull dropped everything (frustum/camera)
+    //   instCount 1, sane idxCount/firstIdx -> geometry/vertex issue
+    //   garbage idxCount -> cull didn't run / wrong binding
+    log.addSource("GPUDRV", [this](Vapor::StatLine& s) {
+        if (!gpuDrivenIndirect() || totalInstanceCount == 0) return;
+        s.add("mode", lastFrameStats.mainPath);
+        s.add("instances", totalInstanceCount);
+        s.add("ranges", static_cast<Uint32>(m_materialRanges.size()));
+        s.add("mergedVtx", static_cast<Uint32>(m_mergedVertices.size()));
+        s.add("mergedIdx", static_cast<Uint32>(m_mergedIndices.size()));
+        // Metal's Bindless-MDI encodes into sceneICB, not gpuCullArgsBuffer, so
+        // the args readback (visible + cmd0) isn't meaningful there.
+        const bool icbMetal = backend == GraphicsBackend::Metal && gpuDrivenBindless() &&
+                              capabilities.indirectCommandBuffers && sceneICB.isValid();
+        if (icbMetal || !gpuCullArgsBuffer.isValid()) { s.add("args", "icb"); return; }
+        if (void* mapped = rhi->mapBuffer(gpuCullArgsBuffer)) {
+            const auto* cmds = static_cast<const Vapor::DrawCommand*>(mapped);
+            Uint32 visible = 0;
+            const Uint32 n = std::min<Uint32>(totalInstanceCount, MAX_INSTANCES);
+            for (Uint32 i = 0; i < n; ++i) visible += (cmds[i].instanceCount != 0) ? 1u : 0u;
+            const Vapor::DrawCommand& c = cmds[0];  // instance 0 = first material range's start
+            s.add("visible", visible);
+            s.add("idxCount", c.indexCount);
+            s.add("instCount", c.instanceCount);
+            s.add("firstIdx", c.firstIndex);
+            s.add("vtxOff", c.vertexOffset);
+            s.add("firstInst", c.firstInstance);
+            rhi->unmapBuffer(gpuCullArgsBuffer);
+        }
+    });
 }
 
 // Returns a cached grayscale / single-layer view of `src` for ImGui previews,
@@ -1752,31 +1792,8 @@ void Renderer::mainRenderPass() {
         }
         mainDrawCalls = 1;  // the whole scene in one submission
     } else if (useMDI) {
-        // Throttled diagnostic: read back what the cull compute pass wrote into the
-        // host-visible args buffer (CPUtoGPU = shared). At encode time this frame's
-        // cull hasn't executed yet, so we see the PREVIOUS frame's commands — sane
-        // for a steady scene. Tells us cull output vs. clear-color cause:
-        //   instanceCount all 0 -> cull is dropping everything (frustum/camera)
-        //   instanceCount 1, sane indexCount/firstIndex -> geometry/vertex issue
-        //   garbage indexCount -> cull didn't run / wrong binding.
-        static Uint32 s_mdiDiagFrame = 0;
-        if ((s_mdiDiagFrame++ % 120u) == 0u && !m_materialRanges.empty()) {
-            if (void* mapped = rhi->mapBuffer(gpuCullArgsBuffer)) {
-                const auto* cmds = static_cast<const Vapor::DrawCommand*>(mapped);
-                Uint32 visible = 0;
-                const Uint32 sampleN = std::min<Uint32>(totalInstanceCount, MAX_INSTANCES);
-                for (Uint32 i = 0; i < sampleN; ++i) visible += (cmds[i].instanceCount != 0) ? 1u : 0u;
-                const auto& r0 = m_materialRanges.front().second;
-                const Vapor::DrawCommand& c = cmds[r0.first];
-                fmt::print("[MDI diag] instances={} visible(prevFrame)={} ranges={} "
-                           "cmd0{{idxCount={} instCount={} firstIdx={} vtxOff={} firstInst={}}} "
-                           "mergedVtx={} mergedIdx={}\n",
-                           totalInstanceCount, visible, m_materialRanges.size(),
-                           c.indexCount, c.instanceCount, c.firstIndex, c.vertexOffset, c.firstInstance,
-                           m_mergedVertices.size(), m_mergedIndices.size());
-                rhi->unmapBuffer(gpuCullArgsBuffer);
-            }
-        }
+        // Cull-output diagnostics moved to the StatsLog "GPUDRV" source (covers
+        // every indirect mode, only reads back when --stats is enabled).
         rhi->bindVertexBuffer(mergedVertexBuffer, 3, 0);
         rhi->bindIndexBuffer(mergedIndexBuffer, 0);
         Uint32 zeroId = 0;
@@ -5800,8 +5817,17 @@ void Renderer::drawGraphicsImGui() {
     ImGui::Text("Average frame rate: %.3f ms/frame (%.1f FPS)",
                 1000.0f / ImGui::GetIO().Framerate, ImGui::GetIO().Framerate);
     ImGui::ColorEdit3("Clear color", (float*)&clearColor);
-    ImGui::Text("Drawables: %u / %u visible",
-                lastFrameStats.visibleDrawables, lastFrameStats.totalDrawables);
+    // "visible" is the CPU frustum-cull result. In GPU-driven-prepass modes the
+    // CPU cull is skipped and the GPU decides visibility, so there's no CPU count
+    // to show — report the submitted total and point at the GPUDRV --stats source
+    // for the real post-cull count (avoids the misleading "105/105 always").
+    if (gpuDrivenPrePassActive()) {
+        ImGui::Text("Drawables: %u submitted (GPU cull; real count via --stats GPUDRV)",
+                    lastFrameStats.totalDrawables);
+    } else {
+        ImGui::Text("Drawables: %u / %u visible",
+                    lastFrameStats.visibleDrawables, lastFrameStats.totalDrawables);
+    }
     // Main-pass path + submission count: the direct signal that MDI/GPU-driven is
     // engaged. Switching Off->Indirect+MDI should collapse this from ~drawable
     // count to ~material count.
