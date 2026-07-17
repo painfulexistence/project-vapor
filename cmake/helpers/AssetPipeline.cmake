@@ -159,6 +159,45 @@ function(vapor_flatten_metal_shaders TARGET)
         add_dependencies(${_flatten_target} copy_engine_assets_${_copy_hash})
     endif()
     add_dependencies(${TARGET} ${_flatten_target})
+
+    # ── Build-time validation: compile each shader with `xcrun metal` so MSL
+    # errors (undeclared identifiers, buffer collisions, …) fail the BUILD instead
+    # of only surfacing at the user's createRenderer. OUTPUT-tracked (per-shader
+    # .air), so only changed shaders recompile — not all ~70 every build. Compiles
+    # the FLATTENED shader (source `#include "Res/shaders/X"` can't be resolved by
+    # `-I`, since the path is written with the Res/shaders/ prefix). Fatal: a
+    # compile error stops the build.
+    #
+    # Escape hatch: -DVAPOR_VALIDATE_METAL=OFF. Uses the default `xcrun metal`
+    # language version (matches the runtime newLibrary, which passes no options);
+    # if a shader needs a specific -std/target on your toolchain, add it to the
+    # `xcrun metal` command below.
+    option(VAPOR_VALIDATE_METAL "Compile-check Metal shaders at build via xcrun metal" ON)
+    if(NOT VAPOR_VALIDATE_METAL)
+        return()
+    endif()
+    set(_scratch "${CMAKE_CURRENT_BINARY_DIR}/metal_validate")
+    set(_common "${VAPOR_ASSETS_DIR}/shaders/3d_common.metal")
+    set(_air_outputs)
+    foreach(_metal ${_metal_sources})
+        get_filename_component(_name ${_metal} NAME)
+        add_custom_command(
+            OUTPUT  "${_scratch}/${_name}.air"
+            COMMAND ${CMAKE_COMMAND} -E make_directory "${_scratch}"
+            COMMAND ${Python3_EXECUTABLE} "${_flatten_script}"
+                    "${_metal}" "${VAPOR_ASSETS_DIR}/shaders" "${_scratch}/${_name}"
+            COMMAND xcrun metal -c "${_scratch}/${_name}" -o "${_scratch}/${_name}.air"
+            # Re-validate when the shader OR the shared include changes.
+            DEPENDS "${_metal}" "${_common}" "${_flatten_script}"
+            COMMENT "Validating (xcrun metal) ${_name}"
+            VERBATIM
+        )
+        list(APPEND _air_outputs "${_scratch}/${_name}.air")
+    endforeach()
+    if(_air_outputs)
+        add_custom_target(validate_metal_${_hash} ALL DEPENDS ${_air_outputs})
+        add_dependencies(${TARGET} validate_metal_${_hash})
+    endif()
 endfunction()
 
 function(vapor_copy_game_assets TARGET ASSETS_DIR)
