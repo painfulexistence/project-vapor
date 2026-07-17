@@ -1,5 +1,6 @@
 #pragma once
 #include "rhi.hpp"  // TextureHandle (value member on Image; used by the native Metal renderer)
+#include "meshlet.hpp"  // MeshletData (baked meshlet + cluster-LOD data on Mesh)
 #include <SDL3/SDL_stdinc.h>
 #include <glm/geometric.hpp>
 #include <glm/vec2.hpp>
@@ -246,13 +247,19 @@ struct Particle {
     glm::vec3 density = glm::vec3(1.0f);
 };
 
-// struct alignas(16) DrawCommand {
-//     Uint32 indexCount;
-//     Uint32 instanceCount;
-//     Uint32 indexStart;
-//     Uint32 baseVertex;
-//     Uint32 baseInstance;
-// };
+// GPU-driven rendering: indirect draw arguments produced by the cull compute
+// pass. Packed 20-byte layout, matching VkDrawIndexedIndirectCommand and
+// MTLDrawIndexedPrimitivesIndirectArguments exactly (intentionally NOT
+// alignas(16) — the tight stride is what the indirect-draw APIs expect). Mirror
+// of the global ::DrawCommand in graphics_gpu_structs.hpp.
+struct DrawCommand {
+    Uint32 indexCount;
+    Uint32 instanceCount; // 0 = culled (GPU no-op)
+    Uint32 firstIndex;
+    Sint32 vertexOffset;
+    Uint32 firstInstance; // = instance index (InstanceData lookup)
+};
+static_assert(sizeof(DrawCommand) == 20, "DrawCommand must match the GPU indirect-args layout");
 
 struct Mesh {
     void initialize(const std::vector<VertexData>& vertices, const std::vector<Uint32>& indices);
@@ -271,6 +278,7 @@ struct Mesh {
     bool hasColor = false;
     std::vector<VertexData> vertices; // interleaved vertex data
     std::vector<Uint32> indices;
+    MeshletData meshletData;          // baked meshlet data model; unused/unserialized here
     std::shared_ptr<Material> material = nullptr;
     Uint32 renderMeshId = UINT32_MAX;
     Uint32 renderMaterialId = UINT32_MAX;

@@ -103,6 +103,21 @@ struct alignas(16) InstanceData {
     glm::vec4 boundingSphere;
 };
 
+// Indirect draw arguments produced by the GPU cull compute pass.
+// The binary layout matches VkDrawIndexedIndirectCommand and
+// MTLDrawIndexedPrimitivesIndirectArguments exactly (5x 4-byte fields, 20 bytes,
+// no padding), so a single compute-written buffer feeds both backends.
+// NOTE: intentionally NOT alignas(16) — the tight 20-byte stride is what the
+// indirect-draw APIs expect (Vulkan stride arg / Metal per-command offset).
+struct DrawCommand {
+    Uint32 indexCount;
+    Uint32 instanceCount; // 0 = culled (GPU no-op), 1 = visible
+    Uint32 firstIndex;    // base index into the merged index buffer
+    Sint32 vertexOffset;  // base vertex into the merged vertex buffer
+    Uint32 firstInstance; // = instance index, so the vertex shader can look up InstanceData
+};
+static_assert(sizeof(DrawCommand) == 20, "DrawCommand must match the GPU indirect-args layout");
+
 struct alignas(16) Cluster {
     glm::vec4 min;
     glm::vec4 max;

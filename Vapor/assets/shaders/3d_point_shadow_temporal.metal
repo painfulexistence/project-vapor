@@ -43,19 +43,6 @@ kernel void computeMain(
     mean /= 9.0;
     float3 variance = max(sq / 9.0 - mean * mean, float3(0.0));
     float3 stddev = sqrt(variance);
-    // Variance floor: stochastic shadow factors are FRACTIONAL (a rect
-    // penumbra converges on the covered fraction), so a frame whose 3x3
-    // window happens to be uniform (all 0 at a penumbra fringe: ~15% of
-    // frames at 10% coverage) must not collapse the window to a point and
-    // erase the accumulated value — that reset-and-reclimb sawtooth reads
-    // as crawling noise that never converges. The floor is faded out with
-    // reprojection motion, though: the same slack that lets fractions
-    // survive unlucky frames turns into ghost trails once the history is
-    // being dragged across the screen (the clamp IS the accumulator's
-    // anti-ghost mechanism). Static pixels keep full convergence; anything
-    // moving more than ~2 px/frame gets the tight clamp back.
-    float pxMotion = length(velocity * screenSize);
-    stddev = max(stddev, float3(0.15 * saturate(1.0 - 0.5 * pxMotion)));
 
     constexpr sampler s(coord::normalized, address::clamp_to_edge, filter::linear);
     float3 history = historyShadow.sample(s, prevUV).rgb;

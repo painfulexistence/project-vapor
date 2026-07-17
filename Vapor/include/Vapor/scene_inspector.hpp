@@ -22,8 +22,6 @@ public:
     using CustomDrawer     = std::function<void(entt::registry&, entt::entity)>;
     using CustomMenuDrawer = std::function<void(entt::registry&, entt::entity)>;
     using EntityProvider   = std::function<std::vector<entt::entity>(entt::registry&)>;
-    // Draws the "Systems" section (system-level, non-per-entity controls).
-    using SystemsDrawer    = std::function<void(entt::registry&)>;
 
     SceneInspector() {
         // Register all built-in engine components for auto-draw.
@@ -61,14 +59,9 @@ public:
         ImGui::SetNextWindowPos(ImVec2(10, 30),   ImGuiCond_FirstUseEver);
         if (!ImGui::Begin("Application##debug_ui")) { ImGui::End(); return; }
 
-        // Left panel — systems (top) + entity hierarchy + save
+        // Left panel — entity list + save
         ImGui::BeginChild("##scene_panel", ImVec2(280, 0), true);
-        if (m_systemsDrawer) {
-            if (ImGui::CollapsingHeader("Systems", ImGuiTreeNodeFlags_DefaultOpen))
-                m_systemsDrawer(registry);
-        }
-        if (ImGui::CollapsingHeader("Hierarchy", ImGuiTreeNodeFlags_DefaultOpen))
-            drawEntityListContent(registry);
+        drawEntityListContent(registry);
         if (m_serializer) {
             ImGui::Separator();
             drawSaveSection(registry);
@@ -136,12 +129,6 @@ public:
         m_entityProvider = std::move(fn);
     }
 
-    // Register the "Systems" section content (global, system-level controls).
-    // This is the ECS-conventional counterpart to the per-entity inspector.
-    void setSystemsDrawer(SystemsDrawer fn) {
-        m_systemsDrawer = std::move(fn);
-    }
-
     void setGltfPath(const std::string& path, bool optimized = true) {
         strncpy(m_gltfPathBuf, path.c_str(), sizeof(m_gltfPathBuf) - 1);
         m_gltfOptimized = optimized;
@@ -169,7 +156,6 @@ private:
     std::vector<ComponentEntry>   m_componentEntries;
     std::vector<CustomDrawer>     m_customDrawers;
     std::vector<CustomMenuDrawer> m_customMenuDrawers;
-    SystemsDrawer                 m_systemsDrawer;
 
     // Save section state
     SceneSerializer* m_serializer   = nullptr;
@@ -184,6 +170,7 @@ private:
     // Left panel — entity list content
     // -------------------------------------------------------------------------
     void drawEntityListContent(entt::registry& registry) {
+        ImGui::TextDisabled("Scene");
         ImGui::InputText("Search", m_searchBuf, sizeof(m_searchBuf));
         ImGui::Separator();
 

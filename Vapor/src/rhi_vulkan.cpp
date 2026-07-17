@@ -404,6 +404,15 @@ void RHI_Vulkan::createDescriptorInfrastructure() {
     // Set layouts: 8 SSBO slots for each buffer set (both stages visible so a
     // fragment shader can also read vertex-stage data like materials), and 8
     // combined image samplers for the texture set.
+    // Task/mesh stages read the same set-0/1 storage buffers and push constants
+    // as the vertex stage (the meshlet path binds via setVertexBuffer/Bytes), so
+    // when mesh shaders are enabled every graphics stage mask is widened. Push
+    // calls must use the exact same mask as the range (VUID 01795), hence the
+    // shared member.
+    graphicsStageFlags = VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT;
+    if (meshShadersEnabled) {
+        graphicsStageFlags |= VK_SHADER_STAGE_TASK_BIT_EXT | VK_SHADER_STAGE_MESH_BIT_EXT;
+    }
     auto makeBufferSetLayout = [&]() {
         VkDescriptorSetLayoutBinding bindings[BINDINGS_PER_SET];
         for (Uint32 i = 0; i < BINDINGS_PER_SET; i++) {
@@ -411,7 +420,7 @@ void RHI_Vulkan::createDescriptorInfrastructure() {
             bindings[i].binding = i;
             bindings[i].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
             bindings[i].descriptorCount = 1;
-            bindings[i].stageFlags = VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT;
+            bindings[i].stageFlags = graphicsStageFlags;
         }
         VkDescriptorSetLayoutCreateInfo info{};
         info.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO;
@@ -444,21 +453,99 @@ void RHI_Vulkan::createDescriptorInfrastructure() {
         }
     }
 
-    // One pipeline layout shared by every graphics pipeline
-    VkDescriptorSetLayout setLayouts[3] = { vertexBufferSetLayout, fragmentBufferSetLayout, textureSetLayout };
+    // Set 3 (bindless texture table, Bindless MDI): a runtime sampled-image
+    // array (partially bound + update-after-bind, so entries can be written
+    // sparsely and after the set is bound) plus one immutable-ish sampler slot.
+    if (descriptorIndexingEnabled) {
+        VkDescriptorSetLayoutBinding b[2]{};
+        b[0].binding = 0;
+        b[0].descriptorType = VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE;
+        b[0].descriptorCount = BINDLESS_TABLE_CAPACITY;
+        b[0].stageFlags = VK_SHADER_STAGE_FRAGMENT_BIT;
+        b[1].binding = 1;
+        b[1].descriptorType = VK_DESCRIPTOR_TYPE_SAMPLER;
+        b[1].descriptorCount = 1;
+        b[1].stageFlags = VK_SHADER_STAGE_FRAGMENT_BIT;
+
+        VkDescriptorBindingFlags flags[2] = {
+            VK_DESCRIPTOR_BINDING_PARTIALLY_BOUND_BIT |
+            VK_DESCRIPTOR_BINDING_UPDATE_AFTER_BIND_BIT |
+            VK_DESCRIPTOR_BINDING_UPDATE_UNUSED_WHILE_PENDING_BIT,
+            0
+        };
+        VkDescriptorSetLayoutBindingFlagsCreateInfo flagsInfo{};
+        flagsInfo.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_BINDING_FLAGS_CREATE_INFO;
+        flagsInfo.bindingCount = 2;
+        flagsInfo.pBindingFlags = flags;
+
+        VkDescriptorSetLayoutCreateInfo info{};
+        info.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO;
+        info.pNext = &flagsInfo;
+        info.flags = VK_DESCRIPTOR_SET_LAYOUT_CREATE_UPDATE_AFTER_BIND_POOL_BIT;
+        info.bindingCount = 2;
+        info.pBindings = b;
+        if (vkCreateDescriptorSetLayout(device, &info, nullptr, &bindlessSetLayout) != VK_SUCCESS) {
+            // Not fatal: fall back to the non-bindless layout below.
+            fmt::print("Bindless set layout creation failed; Bindless MDI disabled\n");
+            descriptorIndexingEnabled = false;
+            capabilities.bindlessTextures = false;
+        }
+    }
+
+    // One pipeline layout shared by every graphics pipeline (set 3 present only
+    // when descriptor indexing is on; pipelines that don't use it are unaffected).
+    VkDescriptorSetLayout setLayouts[4] = { vertexBufferSetLayout, fragmentBufferSetLayout,
+                                            textureSetLayout, bindlessSetLayout };
     VkPushConstantRange pushRange{};
-    pushRange.stageFlags = VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT;
+    pushRange.stageFlags = graphicsStageFlags;
     pushRange.offset = 0;
     pushRange.size = 128;  // Vulkan guaranteed minimum
 
     VkPipelineLayoutCreateInfo layoutInfo{};
     layoutInfo.sType = VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO;
-    layoutInfo.setLayoutCount = 3;
+    layoutInfo.setLayoutCount = descriptorIndexingEnabled ? 4 : 3;
     layoutInfo.pSetLayouts = setLayouts;
     layoutInfo.pushConstantRangeCount = 1;
     layoutInfo.pPushConstantRanges = &pushRange;
     if (vkCreatePipelineLayout(device, &layoutInfo, nullptr, &globalPipelineLayout) != VK_SUCCESS) {
         throw std::runtime_error("Failed to create global pipeline layout");
+    }
+
+    // Dedicated update-after-bind pool + the shared table sampler.
+    if (descriptorIndexingEnabled) {
+        VkDescriptorPoolSize sizes[2] = {
+            { VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE, BINDLESS_TABLE_CAPACITY * 2 },  // headroom: 2 tables
+            { VK_DESCRIPTOR_TYPE_SAMPLER, 2 },
+        };
+        VkDescriptorPoolCreateInfo poolInfo{};
+        poolInfo.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO;
+        poolInfo.flags = VK_DESCRIPTOR_POOL_CREATE_UPDATE_AFTER_BIND_BIT;
+        poolInfo.maxSets = 2;
+        poolInfo.poolSizeCount = 2;
+        poolInfo.pPoolSizes = sizes;
+        if (vkCreateDescriptorPool(device, &poolInfo, nullptr, &bindlessPool) != VK_SUCCESS) {
+            fmt::print("Bindless descriptor pool creation failed; Bindless MDI disabled\n");
+            descriptorIndexingEnabled = false;
+            capabilities.bindlessTextures = false;
+        }
+
+        // Trilinear repeat sampler for every table texture (matches the Metal
+        // PBR shader's constexpr material sampler).
+        VkSamplerCreateInfo samplerInfo{};
+        samplerInfo.sType = VK_STRUCTURE_TYPE_SAMPLER_CREATE_INFO;
+        samplerInfo.magFilter = VK_FILTER_LINEAR;
+        samplerInfo.minFilter = VK_FILTER_LINEAR;
+        samplerInfo.mipmapMode = VK_SAMPLER_MIPMAP_MODE_LINEAR;
+        samplerInfo.addressModeU = VK_SAMPLER_ADDRESS_MODE_REPEAT;
+        samplerInfo.addressModeV = VK_SAMPLER_ADDRESS_MODE_REPEAT;
+        samplerInfo.addressModeW = VK_SAMPLER_ADDRESS_MODE_REPEAT;
+        samplerInfo.maxLod = VK_LOD_CLAMP_NONE;
+        if (descriptorIndexingEnabled &&
+            vkCreateSampler(device, &samplerInfo, nullptr, &bindlessSampler) != VK_SUCCESS) {
+            fmt::print("Bindless sampler creation failed; Bindless MDI disabled\n");
+            descriptorIndexingEnabled = false;
+            capabilities.bindlessTextures = false;
+        }
     }
 
     // Compute set layouts + layout (same model, compute stage)
@@ -484,15 +571,25 @@ void RHI_Vulkan::createDescriptorInfrastructure() {
         if (vkCreateDescriptorSetLayout(device, &info, nullptr, &computeImageSetLayout) != VK_SUCCESS) {
             throw std::runtime_error("Failed to create compute image set layout");
         }
+        // Set 2 = sampled textures (setComputeSampledTexture): combined image
+        // samplers so a compute shader can textureLod() a mipped texture (Hi-Z),
+        // which the storage-image path (set 1, imageLoad only) cannot do.
+        for (Uint32 i = 0; i < BINDINGS_PER_SET; i++) {
+            bindings[i].descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
+        }
+        if (vkCreateDescriptorSetLayout(device, &info, nullptr, &computeSampledSetLayout) != VK_SUCCESS) {
+            throw std::runtime_error("Failed to create compute sampled set layout");
+        }
 
-        VkDescriptorSetLayout computeSets[2] = { computeBufferSetLayout, computeImageSetLayout };
+        VkDescriptorSetLayout computeSets[3] = { computeBufferSetLayout, computeImageSetLayout,
+                                                 computeSampledSetLayout };
         VkPushConstantRange computePush{};
         computePush.stageFlags = VK_SHADER_STAGE_COMPUTE_BIT;
         computePush.offset = 0;
         computePush.size = 128;
         VkPipelineLayoutCreateInfo computeLayoutInfo{};
         computeLayoutInfo.sType = VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO;
-        computeLayoutInfo.setLayoutCount = 2;
+        computeLayoutInfo.setLayoutCount = 3;
         computeLayoutInfo.pSetLayouts = computeSets;
         computeLayoutInfo.pushConstantRangeCount = 1;
         computeLayoutInfo.pPushConstantRanges = &computePush;
@@ -508,11 +605,11 @@ void RHI_Vulkan::createDescriptorInfrastructure() {
         // slots (2 buffer sets x 8 bindings). The old 8192 ceiling capped a frame
         // at ~512 draws before vkAllocateDescriptorSets failed — reachable with a
         // full scene + RmlUI geometry churn. 4x the headroom (~2048 draws/frame).
-        // Samplers bumped for the 10-binding texture set (10 x 2048 = 20480);
+        // Samplers sized for the 16-binding texture set (16 x 2048 = 32768);
         // storage buffers stay at 8-per-set headroom (8 x 2 x 2048 = 32768).
         VkDescriptorPoolSize sizes[3] = {
             { VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, 32768 },
-            { VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, 20480 },
+            { VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, 32768 },
             { VK_DESCRIPTOR_TYPE_STORAGE_IMAGE, 4096 },
         };
         VkDescriptorPoolCreateInfo poolInfo{};
@@ -540,12 +637,22 @@ void RHI_Vulkan::destroyDescriptorInfrastructure() {
         computePipelineLayout = VK_NULL_HANDLE;
     }
     for (VkDescriptorSetLayout* layout : { &vertexBufferSetLayout, &fragmentBufferSetLayout, &textureSetLayout,
-                                           &computeBufferSetLayout, &computeImageSetLayout }) {
+                                           &computeBufferSetLayout, &computeImageSetLayout, &computeSampledSetLayout,
+                                           &bindlessSetLayout }) {
         if (*layout != VK_NULL_HANDLE) {
             vkDestroyDescriptorSetLayout(device, *layout, nullptr);
             *layout = VK_NULL_HANDLE;
         }
     }
+    if (bindlessPool != VK_NULL_HANDLE) {
+        vkDestroyDescriptorPool(device, bindlessPool, nullptr);  // frees table sets
+        bindlessPool = VK_NULL_HANDLE;
+    }
+    if (bindlessSampler != VK_NULL_HANDLE) {
+        vkDestroySampler(device, bindlessSampler, nullptr);
+        bindlessSampler = VK_NULL_HANDLE;
+    }
+    bindlessTables.clear();
 }
 
 void RHI_Vulkan::flushDescriptors() {
@@ -1350,6 +1457,132 @@ PipelineHandle RHI_Vulkan::createPipeline(const PipelineDesc& desc) {
     return PipelineHandle{id};
 }
 
+PipelineHandle RHI_Vulkan::createMeshPipeline(const MeshPipelineDesc& desc) {
+    if (!meshShadersEnabled) return {};
+    auto msIt = shaders.find(desc.meshShader.id);
+    auto fsIt = shaders.find(desc.fragmentShader.id);
+    if (msIt == shaders.end() || fsIt == shaders.end()) {
+        throw std::runtime_error("Invalid shader handles for mesh pipeline");
+    }
+
+    // Stages: optional task, mesh, fragment. No vertex input / input assembly —
+    // the spec ignores those states when a mesh shader is present.
+    std::vector<VkPipelineShaderStageCreateInfo> stages;
+    auto tsIt = shaders.find(desc.taskShader.id);
+    if (desc.taskShader.isValid() && tsIt != shaders.end()) {
+        VkPipelineShaderStageCreateInfo s{};
+        s.sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO;
+        s.stage = VK_SHADER_STAGE_TASK_BIT_EXT;
+        s.module = tsIt->second.module;
+        s.pName = "main";
+        stages.push_back(s);
+    }
+    {
+        VkPipelineShaderStageCreateInfo s{};
+        s.sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO;
+        s.stage = VK_SHADER_STAGE_MESH_BIT_EXT;
+        s.module = msIt->second.module;
+        s.pName = "main";
+        stages.push_back(s);
+    }
+    {
+        VkPipelineShaderStageCreateInfo s{};
+        s.sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO;
+        s.stage = VK_SHADER_STAGE_FRAGMENT_BIT;
+        s.module = fsIt->second.module;
+        s.pName = "main";
+        stages.push_back(s);
+    }
+
+    VkPipelineViewportStateCreateInfo viewportState{};
+    viewportState.sType = VK_STRUCTURE_TYPE_PIPELINE_VIEWPORT_STATE_CREATE_INFO;
+    viewportState.viewportCount = 1;
+    viewportState.scissorCount = 1;
+
+    VkPipelineRasterizationStateCreateInfo rasterizer{};
+    rasterizer.sType = VK_STRUCTURE_TYPE_PIPELINE_RASTERIZATION_STATE_CREATE_INFO;
+    rasterizer.polygonMode = VK_POLYGON_MODE_FILL;
+    rasterizer.lineWidth = 1.0f;
+    rasterizer.cullMode = convertCullMode(desc.cullMode);
+    rasterizer.frontFace = desc.frontFaceCounterClockwise ? VK_FRONT_FACE_COUNTER_CLOCKWISE
+                                                          : VK_FRONT_FACE_CLOCKWISE;
+
+    VkPipelineMultisampleStateCreateInfo multisampling{};
+    multisampling.sType = VK_STRUCTURE_TYPE_PIPELINE_MULTISAMPLE_STATE_CREATE_INFO;
+    multisampling.rasterizationSamples = static_cast<VkSampleCountFlagBits>(desc.sampleCount);
+
+    VkPipelineDepthStencilStateCreateInfo depthStencil{};
+    depthStencil.sType = VK_STRUCTURE_TYPE_PIPELINE_DEPTH_STENCIL_STATE_CREATE_INFO;
+    depthStencil.depthTestEnable = desc.depthTest ? VK_TRUE : VK_FALSE;
+    depthStencil.depthWriteEnable = desc.depthWrite ? VK_TRUE : VK_FALSE;
+    depthStencil.depthCompareOp = convertCompareOp(desc.depthCompareOp);
+
+    // Meshlet debug path draws opaque; alpha modes can be added when needed.
+    VkPipelineColorBlendAttachmentState colorBlendAttachment{};
+    colorBlendAttachment.colorWriteMask = VK_COLOR_COMPONENT_R_BIT | VK_COLOR_COMPONENT_G_BIT |
+                                          VK_COLOR_COMPONENT_B_BIT | VK_COLOR_COMPONENT_A_BIT;
+    colorBlendAttachment.blendEnable = VK_FALSE;
+    std::vector<VkPipelineColorBlendAttachmentState> blendAttachments(
+        std::max<size_t>(1, desc.colorAttachmentFormats.size()), colorBlendAttachment);
+    VkPipelineColorBlendStateCreateInfo colorBlending{};
+    colorBlending.sType = VK_STRUCTURE_TYPE_PIPELINE_COLOR_BLEND_STATE_CREATE_INFO;
+    colorBlending.attachmentCount = static_cast<uint32_t>(blendAttachments.size());
+    colorBlending.pAttachments = blendAttachments.data();
+
+    std::vector<VkDynamicState> dynamicStates = { VK_DYNAMIC_STATE_VIEWPORT, VK_DYNAMIC_STATE_SCISSOR };
+    VkPipelineDynamicStateCreateInfo dynamicState{};
+    dynamicState.sType = VK_STRUCTURE_TYPE_PIPELINE_DYNAMIC_STATE_CREATE_INFO;
+    dynamicState.dynamicStateCount = static_cast<uint32_t>(dynamicStates.size());
+    dynamicState.pDynamicStates = dynamicStates.data();
+
+    std::vector<VkFormat> colorFormats;
+    colorFormats.reserve(desc.colorAttachmentFormats.size());
+    for (PixelFormat f : desc.colorAttachmentFormats) {
+        colorFormats.push_back(f == PixelFormat::Swapchain ? swapchainImageFormat
+                                                           : convertPixelFormat(f));
+    }
+    VkPipelineRenderingCreateInfo pipelineRenderingInfo{};
+    pipelineRenderingInfo.sType = VK_STRUCTURE_TYPE_PIPELINE_RENDERING_CREATE_INFO;
+    pipelineRenderingInfo.colorAttachmentCount = static_cast<uint32_t>(colorFormats.size());
+    pipelineRenderingInfo.pColorAttachmentFormats = colorFormats.data();
+    if (desc.hasDepthAttachment) {
+        pipelineRenderingInfo.depthAttachmentFormat = convertPixelFormat(desc.depthAttachmentFormat);
+    }
+
+    VkGraphicsPipelineCreateInfo pipelineInfo{};
+    pipelineInfo.sType = VK_STRUCTURE_TYPE_GRAPHICS_PIPELINE_CREATE_INFO;
+    pipelineInfo.pNext = &pipelineRenderingInfo;
+    pipelineInfo.stageCount = static_cast<uint32_t>(stages.size());
+    pipelineInfo.pStages = stages.data();
+    pipelineInfo.pVertexInputState = nullptr;    // ignored with a mesh stage
+    pipelineInfo.pInputAssemblyState = nullptr;  // ignored with a mesh stage
+    pipelineInfo.pViewportState = &viewportState;
+    pipelineInfo.pRasterizationState = &rasterizer;
+    pipelineInfo.pMultisampleState = &multisampling;
+    pipelineInfo.pDepthStencilState = &depthStencil;
+    pipelineInfo.pColorBlendState = &colorBlending;
+    pipelineInfo.pDynamicState = &dynamicState;
+    pipelineInfo.layout = globalPipelineLayout;
+    pipelineInfo.renderPass = VK_NULL_HANDLE;  // dynamic rendering
+
+    VkPipeline pipeline;
+    if (vkCreateGraphicsPipelines(device, VK_NULL_HANDLE, 1, &pipelineInfo, nullptr, &pipeline) != VK_SUCCESS) {
+        throw std::runtime_error("Failed to create mesh pipeline");
+    }
+
+    Uint32 id = nextPipelineId++;
+    pipelines[id] = {pipeline, globalPipelineLayout};
+    return PipelineHandle{id};
+}
+
+void RHI_Vulkan::drawMeshTasks(Uint32 groupCountX, Uint32 groupCountY, Uint32 groupCountZ) {
+    if (currentCommandBuffer == VK_NULL_HANDLE || !pfnCmdDrawMeshTasks || groupCountX == 0) {
+        return;
+    }
+    flushDescriptors();
+    pfnCmdDrawMeshTasks(currentCommandBuffer, groupCountX, groupCountY, groupCountZ);
+}
+
 void RHI_Vulkan::destroyPipeline(PipelineHandle handle) {
     auto it = pipelines.find(handle.id);
     if (it != pipelines.end()) {
@@ -1543,6 +1776,40 @@ void RHI_Vulkan::generateMipmaps(TextureHandle handle) {
                        VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
                        VK_ACCESS_TRANSFER_WRITE_BIT, VK_ACCESS_SHADER_READ_BIT);
     tex.currentLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
+}
+
+void RHI_Vulkan::copyTexture(TextureHandle src, Uint32 srcMip, TextureHandle dst, Uint32 dstMip) {
+    if (currentCommandBuffer == VK_NULL_HANDLE) return;
+    auto sit = textures.find(src.id);
+    auto dit = textures.find(dst.id);
+    if (sit == textures.end() || dit == textures.end() || src.id == dst.id) return;
+    TextureResource& s = sit->second;
+    TextureResource& d = dit->second;
+
+    // Whole-image transitions (the RHI tracks one layout per image): src -> SRC,
+    // dst -> DST. Already-built mips of dst come along harmlessly; the next
+    // sample/attachment use transitions the image again.
+    transitionImage(s.image, s.currentLayout, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, VK_IMAGE_ASPECT_COLOR_BIT);
+    s.currentLayout = VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL;
+    transitionImage(d.image, d.currentLayout, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, VK_IMAGE_ASPECT_COLOR_BIT);
+    d.currentLayout = VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL;
+
+    VkImageCopy region{};
+    region.srcSubresource = { VK_IMAGE_ASPECT_COLOR_BIT, srcMip, 0, 1 };
+    region.dstSubresource = { VK_IMAGE_ASPECT_COLOR_BIT, dstMip, 0, 1 };
+    region.extent = { std::max(1u, d.width >> dstMip), std::max(1u, d.height >> dstMip), 1 };
+    vkCmdCopyImage(currentCommandBuffer,
+                   s.image, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
+                   d.image, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
+                   1, &region);
+
+    // Leave both sampleable: setTexture() (graphics) does not transition layouts,
+    // so a copy-then-sample caller (Hi-Z build) needs SHADER_READ here. A later
+    // beginRenderPass re-transitions whichever image it targets.
+    transitionImage(s.image, s.currentLayout, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL, VK_IMAGE_ASPECT_COLOR_BIT);
+    s.currentLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
+    transitionImage(d.image, d.currentLayout, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL, VK_IMAGE_ASPECT_COLOR_BIT);
+    d.currentLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
 }
 
 BufferHandle RHI_Vulkan::copySwapchainToBuffer(Uint32& outWidth, Uint32& outHeight) {
@@ -2131,8 +2398,7 @@ void RHI_Vulkan::setVertexBytes(const void* data, size_t size, Uint32 binding) {
     Uint32 offset = (binding % 4) * 16;
     Uint32 clamped = static_cast<Uint32>(std::min<size_t>(size, 64 - offset));
     vkCmdPushConstants(currentCommandBuffer, globalPipelineLayout,
-                       VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT,
-                       offset, clamped, data);
+                       graphicsStageFlags, offset, clamped, data);
 }
 
 void RHI_Vulkan::setFragmentBytes(const void* data, size_t size, Uint32 binding) {
@@ -2143,8 +2409,7 @@ void RHI_Vulkan::setFragmentBytes(const void* data, size_t size, Uint32 binding)
     Uint32 offset = 64 + (binding % 4) * 16;
     Uint32 clamped = static_cast<Uint32>(std::min<size_t>(size, 128 - offset));
     vkCmdPushConstants(currentCommandBuffer, globalPipelineLayout,
-                       VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT,
-                       offset, clamped, data);
+                       graphicsStageFlags, offset, clamped, data);
 }
 
 void RHI_Vulkan::setTexture(Uint32 set, Uint32 binding, TextureHandle texture, SamplerHandle sampler) {
@@ -2172,6 +2437,96 @@ void RHI_Vulkan::drawIndexed(Uint32 indexCount, Uint32 instanceCount, Uint32 fir
         flushDescriptors();
         vkCmdDrawIndexed(currentCommandBuffer, indexCount, instanceCount, firstIndex, vertexOffset, firstInstance);
     }
+}
+
+void RHI_Vulkan::drawIndexedIndirect(BufferHandle argsBuffer, size_t offset, Uint32 drawCount, Uint32 stride) {
+    if (currentCommandBuffer == VK_NULL_HANDLE || drawCount == 0) {
+        return;
+    }
+    auto it = buffers.find(argsBuffer.id);
+    if (it == buffers.end()) {
+        return;
+    }
+    flushDescriptors();
+    // Native multi-draw indirect: a single call issues all `drawCount` draws,
+    // reading VkDrawIndexedIndirectCommand-compatible args from the buffer.
+    vkCmdDrawIndexedIndirect(currentCommandBuffer, it->second.buffer,
+                             static_cast<VkDeviceSize>(offset), drawCount, stride);
+}
+
+// ============================================================================
+// Bindless texture tables (Bindless MDI) — descriptor-indexed set 3
+// ============================================================================
+
+BufferHandle RHI_Vulkan::createTextureArgumentTable(ShaderHandle /*fragmentShader*/, Uint32 /*bufferIndex*/,
+                                                    Uint32 entryCount, Uint32 texturesPerEntry) {
+    if (!descriptorIndexingEnabled || bindlessPool == VK_NULL_HANDLE || entryCount == 0) return {};
+    if (entryCount * texturesPerEntry > BINDLESS_TABLE_CAPACITY) {
+        fmt::print("Bindless table request {}x{} exceeds capacity {}\n",
+                   entryCount, texturesPerEntry, BINDLESS_TABLE_CAPACITY);
+        return {};
+    }
+
+    VkDescriptorSetAllocateInfo alloc{};
+    alloc.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO;
+    alloc.descriptorPool = bindlessPool;
+    alloc.descriptorSetCount = 1;
+    alloc.pSetLayouts = &bindlessSetLayout;
+    VkDescriptorSet set = VK_NULL_HANDLE;
+    if (vkAllocateDescriptorSets(device, &alloc, &set) != VK_SUCCESS) {
+        fmt::print("Bindless table set allocation failed\n");
+        return {};
+    }
+
+    // Shared material sampler at binding 1.
+    VkDescriptorImageInfo samplerInfo{};
+    samplerInfo.sampler = bindlessSampler;
+    VkWriteDescriptorSet write{};
+    write.sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
+    write.dstSet = set;
+    write.dstBinding = 1;
+    write.descriptorCount = 1;
+    write.descriptorType = VK_DESCRIPTOR_TYPE_SAMPLER;
+    write.pImageInfo = &samplerInfo;
+    vkUpdateDescriptorSets(device, 1, &write, 0, nullptr);
+
+    // Opaque id in the buffer id-space; there is no VkBuffer behind it (binding
+    // goes through vkCmdBindDescriptorSets in bindTextureArgumentTable).
+    Uint32 id = nextBufferId++;
+    bindlessTables[id] = { set, entryCount, texturesPerEntry };
+    return BufferHandle{id};
+}
+
+void RHI_Vulkan::writeTextureArgumentTable(BufferHandle table, Uint32 entry, Uint32 slot,
+                                           TextureHandle texture) {
+    auto tit = bindlessTables.find(table.id);
+    auto xit = textures.find(texture.id);
+    if (tit == bindlessTables.end() || xit == textures.end()) return;
+    const BindlessTableResource& t = tit->second;
+    if (entry >= t.entryCount || slot >= t.texturesPerEntry) return;
+
+    // Update-after-bind + update-unused-while-pending make this legal even with
+    // frames in flight, as long as no in-flight draw reads the exact element.
+    VkDescriptorImageInfo imageInfo{};
+    imageInfo.imageView = xit->second.view;
+    imageInfo.imageLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
+    VkWriteDescriptorSet write{};
+    write.sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
+    write.dstSet = t.set;
+    write.dstBinding = 0;
+    write.dstArrayElement = entry * t.texturesPerEntry + slot;
+    write.descriptorCount = 1;
+    write.descriptorType = VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE;
+    write.pImageInfo = &imageInfo;
+    vkUpdateDescriptorSets(device, 1, &write, 0, nullptr);
+}
+
+void RHI_Vulkan::bindTextureArgumentTable(BufferHandle table) {
+    auto tit = bindlessTables.find(table.id);
+    if (tit == bindlessTables.end() || currentCommandBuffer == VK_NULL_HANDLE) return;
+    vkCmdBindDescriptorSets(currentCommandBuffer, VK_PIPELINE_BIND_POINT_GRAPHICS,
+                            globalPipelineLayout, /*firstSet=*/3, 1, &tit->second.set,
+                            0, nullptr);
 }
 
 // ============================================================================
@@ -2368,6 +2723,19 @@ void RHI_Vulkan::createLogicalDevice() {
     VkPhysicalDeviceFeatures deviceFeatures{};
     deviceFeatures.samplerAnisotropy = VK_TRUE;
 
+    // Enable multiDrawIndirect (needed for vkCmdDrawIndexedIndirect with
+    // drawCount > 1, i.e. single-call multi-draw indirect) only when the device
+    // supports it, so device creation never fails on hardware that lacks it. The
+    // render path checks capabilities.multiDrawIndirect before using it.
+    {
+        VkPhysicalDeviceFeatures supportedFeatures{};
+        vkGetPhysicalDeviceFeatures(physicalDevice, &supportedFeatures);
+        if (supportedFeatures.multiDrawIndirect) {
+            deviceFeatures.multiDrawIndirect = VK_TRUE;
+            capabilities.multiDrawIndirect = true;
+        }
+    }
+
     VkPhysicalDeviceDynamicRenderingFeaturesKHR dynamicRenderingFeatures{};
     dynamicRenderingFeatures.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_DYNAMIC_RENDERING_FEATURES_KHR;
     dynamicRenderingFeatures.dynamicRendering = VK_TRUE;
@@ -2399,6 +2767,23 @@ void RHI_Vulkan::createLogicalDevice() {
                 if (std::strcmp(e.extensionName, name) == 0) return true;
             return false;
         };
+        // Mesh/task shaders (meshlet path): enable the extension when both the
+        // extension and its task+mesh features are supported. Capability is set
+        // only when the feature is actually enabled on the device.
+#ifdef VK_EXT_MESH_SHADER_EXTENSION_NAME
+        if (has(VK_EXT_MESH_SHADER_EXTENSION_NAME)) {
+            VkPhysicalDeviceMeshShaderFeaturesEXT supported{};
+            supported.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_MESH_SHADER_FEATURES_EXT;
+            VkPhysicalDeviceFeatures2 features2{};
+            features2.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_FEATURES_2;
+            features2.pNext = &supported;
+            vkGetPhysicalDeviceFeatures2(physicalDevice, &features2);
+            if (supported.taskShader && supported.meshShader) {
+                deviceExtensions.push_back(VK_EXT_MESH_SHADER_EXTENSION_NAME);
+                meshShadersEnabled = true;
+            }
+        }
+#endif
         // MoltenVK requires enabling portability_subset when it is present
         if (has(VK_KHR_PORTABILITY_SUBSET_EXTENSION_NAME)) {
             deviceExtensions.push_back(VK_KHR_PORTABILITY_SUBSET_EXTENSION_NAME);
@@ -2415,10 +2800,63 @@ void RHI_Vulkan::createLogicalDevice() {
         }
     }
 
+    // Descriptor indexing (Bindless MDI's texture table): enable the exact
+    // subset the bindless set-3 layout needs, only when the device supports all
+    // of it AND its update-after-bind sampled-image budget covers the table.
+    // Core in Vulkan 1.2; MoltenVK implements it on Metal argument buffers
+    // (default-enabled there since MoltenVK 1.2.10 on Metal-3 devices).
+    VkPhysicalDeviceDescriptorIndexingFeatures descriptorIndexingFeatures{};
+    descriptorIndexingFeatures.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_DESCRIPTOR_INDEXING_FEATURES;
+    {
+        VkPhysicalDeviceDescriptorIndexingFeatures supported{};
+        supported.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_DESCRIPTOR_INDEXING_FEATURES;
+        VkPhysicalDeviceFeatures2 features2{};
+        features2.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_FEATURES_2;
+        features2.pNext = &supported;
+        vkGetPhysicalDeviceFeatures2(physicalDevice, &features2);
+
+        VkPhysicalDeviceDescriptorIndexingProperties indexingProps{};
+        indexingProps.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_DESCRIPTOR_INDEXING_PROPERTIES;
+        VkPhysicalDeviceProperties2 props2{};
+        props2.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_PROPERTIES_2;
+        props2.pNext = &indexingProps;
+        vkGetPhysicalDeviceProperties2(physicalDevice, &props2);
+
+        if (supported.shaderSampledImageArrayNonUniformIndexing &&
+            supported.runtimeDescriptorArray &&
+            supported.descriptorBindingPartiallyBound &&
+            supported.descriptorBindingSampledImageUpdateAfterBind &&
+            supported.descriptorBindingUpdateUnusedWhilePending &&
+            indexingProps.maxPerStageDescriptorUpdateAfterBindSampledImages >= BINDLESS_TABLE_CAPACITY) {
+            descriptorIndexingFeatures.shaderSampledImageArrayNonUniformIndexing = VK_TRUE;
+            descriptorIndexingFeatures.runtimeDescriptorArray = VK_TRUE;
+            descriptorIndexingFeatures.descriptorBindingPartiallyBound = VK_TRUE;
+            descriptorIndexingFeatures.descriptorBindingSampledImageUpdateAfterBind = VK_TRUE;
+            descriptorIndexingFeatures.descriptorBindingUpdateUnusedWhilePending = VK_TRUE;
+            descriptorIndexingEnabled = true;
+            capabilities.bindlessTextures = true;
+        }
+    }
+
+    // Task + mesh shader features, chained ahead of the existing feature chain
+    // when supported (see detection above).
+    VkPhysicalDeviceMeshShaderFeaturesEXT meshShaderFeatures{};
+    meshShaderFeatures.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_MESH_SHADER_FEATURES_EXT;
+    meshShaderFeatures.taskShader = VK_TRUE;
+    meshShaderFeatures.meshShader = VK_TRUE;
+
     // Create device
     VkDeviceCreateInfo deviceInfo{};
     deviceInfo.sType = VK_STRUCTURE_TYPE_DEVICE_CREATE_INFO;
     deviceInfo.pNext = &synchronization2Features;
+    if (meshShadersEnabled) {
+        meshShaderFeatures.pNext = &synchronization2Features;
+        deviceInfo.pNext = &meshShaderFeatures;
+    }
+    if (descriptorIndexingEnabled) {
+        descriptorIndexingFeatures.pNext = const_cast<void*>(deviceInfo.pNext);
+        deviceInfo.pNext = &descriptorIndexingFeatures;
+    }
     deviceInfo.queueCreateInfoCount = 1;
     deviceInfo.pQueueCreateInfos = &graphicsQueueInfo;
     deviceInfo.enabledExtensionCount = static_cast<uint32_t>(deviceExtensions.size());
@@ -2446,6 +2884,12 @@ void RHI_Vulkan::createLogicalDevice() {
 
     if (!vkCmdBeginRenderingKHR || !vkCmdEndRenderingKHR) {
         throw std::runtime_error("Failed to load dynamic rendering extension functions");
+    }
+
+    if (meshShadersEnabled) {
+        pfnCmdDrawMeshTasks = (PFN_vkCmdDrawMeshTasksEXT)vkGetDeviceProcAddr(device, "vkCmdDrawMeshTasksEXT");
+        capabilities.meshShaders = pfnCmdDrawMeshTasks != nullptr;
+        meshShadersEnabled = capabilities.meshShaders;
     }
 }
 
@@ -2761,7 +3205,11 @@ VkBufferUsageFlags RHI_Vulkan::convertBufferUsage(BufferUsage usage) {
     // binding model notes in rhi_vulkan.hpp.
     switch (usage) {
         case BufferUsage::Vertex:
-            return VK_BUFFER_USAGE_VERTEX_BUFFER_BIT | VK_BUFFER_USAGE_TRANSFER_DST_BIT;
+            // STORAGE so mesh shaders (and any vertex-pulling path) can read
+            // vertex buffers as SSBOs — the meshlet path samples the merged
+            // vertex buffer from the mesh stage.
+            return VK_BUFFER_USAGE_VERTEX_BUFFER_BIT | VK_BUFFER_USAGE_STORAGE_BUFFER_BIT |
+                   VK_BUFFER_USAGE_TRANSFER_DST_BIT;
         case BufferUsage::Index:
             return VK_BUFFER_USAGE_INDEX_BUFFER_BIT | VK_BUFFER_USAGE_TRANSFER_DST_BIT;
         case BufferUsage::Uniform:
@@ -2769,6 +3217,11 @@ VkBufferUsageFlags RHI_Vulkan::convertBufferUsage(BufferUsage usage) {
                    VK_BUFFER_USAGE_TRANSFER_DST_BIT;
         case BufferUsage::Storage:
             return VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_TRANSFER_DST_BIT;
+        case BufferUsage::Indirect:
+            // Written by the cull compute pass (STORAGE), consumed by
+            // vkCmdDrawIndexedIndirect (INDIRECT); TRANSFER_DST for uploads/clears.
+            return VK_BUFFER_USAGE_INDIRECT_BUFFER_BIT | VK_BUFFER_USAGE_STORAGE_BUFFER_BIT |
+                   VK_BUFFER_USAGE_TRANSFER_DST_BIT;
         case BufferUsage::TransferSrc: return VK_BUFFER_USAGE_TRANSFER_SRC_BIT;
         case BufferUsage::TransferDst: return VK_BUFFER_USAGE_TRANSFER_DST_BIT;
         default: return VK_BUFFER_USAGE_VERTEX_BUFFER_BIT;
@@ -2941,21 +3394,42 @@ void RHI_Vulkan::setComputeTexture(Uint32 binding, TextureHandle texture) {
     }
 }
 
+void RHI_Vulkan::setComputeSampledTexture(Uint32 binding, TextureHandle texture, SamplerHandle sampler) {
+    auto it = textures.find(texture.id);
+    auto sIt = samplers.find(sampler.id);
+    if (it == textures.end() || sIt == samplers.end() || binding >= BINDINGS_PER_SET) {
+        return;
+    }
+    // Sampled read: SHADER_READ_ONLY layout (not GENERAL). Runs outside any
+    // render pass, so the transition is legal here. The whole-mip view lets the
+    // shader textureLod() any level (Hi-Z pyramid sampling).
+    transitionImage(it->second.image, it->second.currentLayout,
+                    VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL, VK_IMAGE_ASPECT_COLOR_BIT);
+    it->second.currentLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
+    TextureBinding& cur = boundComputeSampled[binding];
+    if (cur.view != it->second.view || cur.sampler != sIt->second.sampler) {
+        cur = { it->second.view, sIt->second.sampler };
+        computeDescriptorsDirty = true;
+    }
+}
+
 void RHI_Vulkan::flushComputeDescriptors() {
     if (!computeDescriptorsDirty || currentCommandBuffer == VK_NULL_HANDLE) {
         return;
     }
     computeDescriptorsDirty = false;
 
-    VkDescriptorSetLayout layouts[2] = { computeBufferSetLayout, computeImageSetLayout };
-    static_assert(sizeof(layouts) / sizeof(layouts[0]) == 2,
-                  "writes[] below is sized for 2 sets; keep the multiplier in sync "
-                  "with the set count to avoid a silent overflow");
-    VkDescriptorSet sets[2];
+    VkDescriptorSetLayout layouts[3] = { computeBufferSetLayout, computeImageSetLayout,
+                                         computeSampledSetLayout };
+    constexpr Uint32 kComputeSetCount = sizeof(layouts) / sizeof(layouts[0]);
+    static_assert(kComputeSetCount == 3,
+                  "writes[] below is sized for this many sets; keep the multiplier in "
+                  "sync with the set count to avoid a silent overflow");
+    VkDescriptorSet sets[kComputeSetCount];
     VkDescriptorSetAllocateInfo allocInfo{};
     allocInfo.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO;
     allocInfo.descriptorPool = descriptorPools[currentFrameInFlight];
-    allocInfo.descriptorSetCount = 2;
+    allocInfo.descriptorSetCount = kComputeSetCount;
     allocInfo.pSetLayouts = layouts;
     if (vkAllocateDescriptorSets(device, &allocInfo, sets) != VK_SUCCESS) {
         if (frameCounter != lastDescExhaustFrame) {
@@ -2966,12 +3440,13 @@ void RHI_Vulkan::flushComputeDescriptors() {
         }
         return;
     }
-    statsDescriptorSets += 2;
+    statsDescriptorSets += kComputeSetCount;
 
-    VkWriteDescriptorSet writes[BINDINGS_PER_SET * 2];
+    VkWriteDescriptorSet writes[BINDINGS_PER_SET * kComputeSetCount];
     VkDescriptorBufferInfo bufferInfos[BINDINGS_PER_SET];
     VkDescriptorImageInfo imageInfos[BINDINGS_PER_SET];
-    Uint32 writeCount = 0, bufferCount = 0, imageCount = 0;
+    VkDescriptorImageInfo sampledInfos[BINDINGS_PER_SET];
+    Uint32 writeCount = 0, bufferCount = 0, imageCount = 0, sampledCount = 0;
 
     for (Uint32 i = 0; i < BINDINGS_PER_SET; i++) {
         if (boundComputeBuffers[i].buffer == VK_NULL_HANDLE) continue;
@@ -2999,12 +3474,26 @@ void RHI_Vulkan::flushComputeDescriptors() {
         w.descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_IMAGE;
         w.pImageInfo = &info;
     }
+    for (Uint32 i = 0; i < BINDINGS_PER_SET; i++) {
+        if (boundComputeSampled[i].view == VK_NULL_HANDLE) continue;
+        VkDescriptorImageInfo& info = sampledInfos[sampledCount++];
+        info = { boundComputeSampled[i].sampler, boundComputeSampled[i].view,
+                 VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL };
+        VkWriteDescriptorSet& w = writes[writeCount++];
+        w = {};
+        w.sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
+        w.dstSet = sets[2];
+        w.dstBinding = i;
+        w.descriptorCount = 1;
+        w.descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
+        w.pImageInfo = &info;
+    }
 
     if (writeCount > 0) {
         vkUpdateDescriptorSets(device, writeCount, writes, 0, nullptr);
     }
     vkCmdBindDescriptorSets(currentCommandBuffer, VK_PIPELINE_BIND_POINT_COMPUTE,
-                            computePipelineLayout, 0, 2, sets, 0, nullptr);
+                            computePipelineLayout, 0, kComputeSetCount, sets, 0, nullptr);
 }
 
 void RHI_Vulkan::setAccelerationStructure(Uint32 binding, AccelStructHandle accelStruct) {
@@ -3045,11 +3534,15 @@ void RHI_Vulkan::computeBarrier() {
     VkMemoryBarrier b{};
     b.sType = VK_STRUCTURE_TYPE_MEMORY_BARRIER;
     b.srcAccessMask = VK_ACCESS_SHADER_WRITE_BIT;
-    b.dstAccessMask = VK_ACCESS_SHADER_READ_BIT | VK_ACCESS_SHADER_WRITE_BIT;
+    // SHADER_READ/WRITE for compute/vertex/fragment consumers, plus
+    // INDIRECT_COMMAND_READ so a GPU-driven cull pass that writes an indirect
+    // args buffer is visible to a following drawIndexedIndirect.
+    b.dstAccessMask = VK_ACCESS_SHADER_READ_BIT | VK_ACCESS_SHADER_WRITE_BIT |
+                      VK_ACCESS_INDIRECT_COMMAND_READ_BIT;
     vkCmdPipelineBarrier(currentCommandBuffer,
         VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
         VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT | VK_PIPELINE_STAGE_VERTEX_SHADER_BIT |
-            VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT,
+            VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT | VK_PIPELINE_STAGE_DRAW_INDIRECT_BIT,
         0, 1, &b, 0, nullptr, 0, nullptr);
 }
 
