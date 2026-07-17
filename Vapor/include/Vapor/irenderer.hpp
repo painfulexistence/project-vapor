@@ -220,6 +220,21 @@ public:
     virtual void applyToneMapping(RenderTextureHandle target, float exposure = 1.0f) {}
     virtual void applyVignette(RenderTextureHandle target, float strength = 0.3f, float radius = 0.8f) {}
 
+    // ---- ECS particle integration ----------------------------------------
+    // Claim/release a contiguous range of slots in the shared GPU particle pool.
+    // Returns ~0u if the pool is full.
+    virtual uint32_t claimParticleSlots(uint32_t count) { return ~0u; }
+    virtual void releaseParticleSlots(uint32_t slotBegin, uint32_t count) {}
+    // Upload initial particle state into previously claimed slots.
+    virtual void uploadParticles(uint32_t slotBegin,
+                                 const std::vector<GPUParticleData>& particles) {}
+    // Per-frame particle force field gathered by ParticleForceFieldSystem.
+    virtual void setParticleForceField(const ParticleForceField& field) {}
+    // Freeze the GPU sim (deltaTime=0); particles stay in place but are still rendered.
+    virtual void setParticleSimPaused(bool paused) {}
+    // Hide toggle — gate the particle render only; the sim keeps running.
+    virtual void setParticleVisible(bool visible) {}
+
 protected:
     std::function<void()> m_imGuiCallback;
     std::function<void()> m_engineWindowCallback;
