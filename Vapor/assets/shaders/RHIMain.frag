@@ -1,6 +1,16 @@
 #version 450
+#ifdef BINDLESS
+#extension GL_EXT_nonuniform_qualifier : require
+#endif
 // RHI renderer main-pass fragment shader (Vulkan backend).
-// Simplified PBR: direct dir/point lighting, normal mapping, no clusters/IBL.
+// Compiled twice by the asset pipeline: plain (RHIMain.frag.spv, per-draw
+// material textures at set2 b0-5) and with -DBINDLESS
+// (RHIMainBindless.frag.spv, material textures fetched from the set-3 runtime
+// array by fragMaterialID — the Bindless MDI draw mode, where one
+// vkCmdDrawIndexedIndirect draws the whole scene and per-draw texture binding
+// is impossible).
+// PBR: direct dir/point lighting, normal mapping, tiled point-light culling
+// (clusters), cascaded shadows, and optional IBL (per-material iblEnabled).
 //
 // Binding convention (see rhi_vulkan.cpp):
 //   set 0 = vertex-stage buffers (visible here too; materials live in binding 1)
@@ -174,12 +184,29 @@ const vec2 kPoisson16[16] = vec2[16](
     vec2( 0.19984126,  0.78641367), vec2( 0.14383161, -0.14100790)
 );
 
+#ifndef BINDLESS
 layout(set = 2, binding = 0) uniform sampler2D albedoMap;
 layout(set = 2, binding = 1) uniform sampler2D normalMap;
 layout(set = 2, binding = 2) uniform sampler2D metallicMap;
 layout(set = 2, binding = 3) uniform sampler2D roughnessMap;
 layout(set = 2, binding = 4) uniform sampler2D occlusionMap;
 layout(set = 2, binding = 5) uniform sampler2D emissiveMap;
+#else
+// Bindless MDI: material textures live in the set-3 runtime array (6 slots per
+// material, written by the renderer's bindless table — see
+// RHI::createTextureArgumentTable), sampled with one shared trilinear-repeat
+// sampler. The macros keep every texture() site below identical to the bound
+// path. nonuniformEXT: fragments of different materials run in the same wave.
+layout(set = 3, binding = 0) uniform texture2D bindlessTextures[];
+layout(set = 3, binding = 1) uniform sampler bindlessSampler;
+#define MAT_TEX(slot) sampler2D(bindlessTextures[nonuniformEXT(fragMaterialID * 6u + slot)], bindlessSampler)
+#define albedoMap    MAT_TEX(0u)
+#define normalMap    MAT_TEX(1u)
+#define metallicMap  MAT_TEX(2u)
+#define roughnessMap MAT_TEX(3u)
+#define occlusionMap MAT_TEX(4u)
+#define emissiveMap  MAT_TEX(5u)
+#endif
 layout(set = 2, binding = 6) uniform sampler2DArray shadowMap;  // 3-cascade depth array
 // Screen-space AO (SSAO chain output; white texture when AO is disabled).
 // Attenuates ambient/indirect light ONLY — multiplying direct light by AO is
@@ -192,7 +219,10 @@ layout(set = 2, binding = 8) uniform sampler2D sscsTex;
 // [near, nearShadowEnd]. Depth values sampled with the negative-viewport Y-flip.
 layout(set = 2, binding = 9) uniform sampler2D nearShadowTex;
 // IBL from the sky bake (matches the Metal path): diffuse irradiance cube,
-// GGX-prefiltered specular cube, split-sum BRDF LUT.
+// GGX-prefiltered specular cube, split-sum BRDF LUT. Bindings 10-12 sit clear
+// of sscsTex(8)/nearShadowTex(9), so no sampler-type aliasing (which would
+// break MoltenVK's SPIR-V->MSL translation). Bound to black defaults when no
+// environment is loaded; sampled only when MaterialData.iblEnabled != 0.
 layout(set = 2, binding = 10) uniform samplerCube irradianceMap;
 layout(set = 2, binding = 11) uniform samplerCube prefilterMap;
 layout(set = 2, binding = 12) uniform sampler2D brdfLut;
@@ -346,6 +376,11 @@ float geometrySmith(float NdotV, float NdotL, float roughness) {
     float g1 = NdotV / (NdotV * (1.0 - k) + k);
     float g2 = NdotL / (NdotL * (1.0 - k) + k);
     return g1 * g2;
+}
+
+// Roughness-aware Fresnel for the IBL ambient term.
+vec3 fresnelSchlickRoughness(float cosTheta, vec3 F0, float roughness) {
+    return F0 + (max(vec3(1.0 - roughness), F0) - F0) * pow(clamp(1.0 - cosTheta, 0.0, 1.0), 5.0);
 }
 
 vec3 fresnelSchlick(float cosTheta, vec3 F0) {
@@ -502,9 +537,6 @@ vec3 disneyBRDF(vec3 N, vec3 T, vec3 B, vec3 L, vec3 V, Surface s) {
 }
 
 // ── Image-based lighting (twin of Metal's CalculateIBL) ─────────────────────
-vec3 fresnelSchlickRoughness(float cosTheta, vec3 F0, float roughness) {
-    return F0 + (max(vec3(1.0 - roughness), F0) - F0) * pow(clamp(1.0 - cosTheta, 0.0, 1.0), 5.0);
-}
 vec3 calculateIBL(vec3 N, vec3 V, Surface s, float ao) {
     float NdotV = max(dot(N, V), 0.0);
     vec3 F0 = mix(vec3(0.04), s.color, s.metallic);

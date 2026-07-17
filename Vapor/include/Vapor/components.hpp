@@ -217,6 +217,24 @@ namespace Vapor {
         Hidden<bool>     _cleared      = {true};  // query: true once all emitted particles are gone
     };
 
+    // How a particle emitter's billboard sprites are blended over the scene.
+    // Values must stay in sync with the renderer's per-blend pipeline table.
+    enum class ParticleBlendMode : uint8_t {
+        Additive = 0,   // glow / energy (default; no sort dependency)
+        AlphaBlend = 1, // smoke / dust
+        Multiply = 2,   // darkening / shadow wisps
+    };
+
+    // Per-emitter appearance (the Niagara-style renderer module). Optional —
+    // an emitter without one draws with the defaults below. Gameplay-owned;
+    // ParticleRenderSystem gathers these into per-material draw packets each
+    // frame, so blend mode and texture are per-emitter (one draw per emitter).
+    struct ParticleRendererComponent {
+        ParticleBlendMode blendMode = ParticleBlendMode::Additive;
+        uint32_t texture = 0xFFFFFFFFu; // renderer TextureId; ~0u = procedural soft disc
+        float size = 0.1f;              // world-space billboard half-extent
+    };
+
     // One-shot burst of particles at the entity's current position.
     struct ParticleBurstRequest {
         uint32_t  count    = 64;

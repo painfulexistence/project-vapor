@@ -58,6 +58,21 @@ static void setupCustomDrawers(Vapor::SceneInspector& inspector) {
     inspector.registerComponent<Vapor::ParticleBurstRequest>("Particle Burst");
     inspector.registerComponent<Vapor::SpellBoltComponent>("Spell Bolt");
 
+    // ParticleRendererComponent — custom drawer for the named blend-mode combo.
+    inspector.registerCustomDrawer([](entt::registry& reg, entt::entity e) {
+        if (auto* c = reg.try_get<Vapor::ParticleRendererComponent>(e)) {
+            if (ImGui::CollapsingHeader("Particle Renderer", ImGuiTreeNodeFlags_DefaultOpen)) {
+                const char* blends[] = { "Additive", "AlphaBlend", "Multiply" };
+                int b = static_cast<int>(c->blendMode);
+                if (ImGui::Combo("blend", &b, blends, 3))
+                    c->blendMode = static_cast<Vapor::ParticleBlendMode>(b);
+                ImGui::DragFloat("size", &c->size, 0.005f, 0.005f, 2.0f);
+                if (c->texture == 0xFFFFFFFFu) ImGui::LabelText("texture", "(procedural)");
+                else                           ImGui::LabelText("texture", "%u", c->texture);
+            }
+        }
+    });
+
     // LightMovementLogicComponent — keep custom drawer for the named Pattern combo.
     inspector.registerCustomDrawer([](entt::registry& reg, entt::entity e) {
         if (auto* c = reg.try_get<LightMovementLogicComponent>(e)) {
@@ -615,6 +630,9 @@ auto main(int argc, char* args[]) -> int {
         Vapor::ParticleForceFieldSystem::update(registry, renderer.get());
         if (!particlePaused)
             Vapor::ParticleEmitterSystem::update(registry, renderer.get(), deltaTime, particleEmissionEnabled);
+        // Gather per-emitter draw packets (blend/texture/size). Runs even while
+        // paused — frozen particles still need their draw list.
+        Vapor::ParticleRenderSystem::update(registry, renderer.get());
         LightGatherSystem::update(registry, scene.get());
         FlipbookSystem::update(registry, deltaTime);
         SpriteRenderSystem::update(registry, renderer.get(), &resourceManager);
