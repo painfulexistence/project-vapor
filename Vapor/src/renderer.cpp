@@ -1062,13 +1062,13 @@ void Renderer::setupDefaultRenderGraph() {
         [](Renderer& r) { r.aoTemporalPass(); }, PassFlags::RequiresCompute);
     renderGraph.addPass("AODenoise",
         [](Renderer& r) { r.aoDenoisePass(); }, PassFlags::RequiresCompute);
-    renderGraph.addPass("StochasticPointShadow",
+    renderGraph.addPass("StochasticShadows",
         [](Renderer& r) { r.stochasticPointShadowPass(); }, PassFlags::RequiresRaytracing);
-    renderGraph.addPass("PointShadowTemporal",
+    renderGraph.addPass("StochasticShadowTemporal",
         [](Renderer& r) { r.pointShadowTemporalPass(); }, PassFlags::RequiresRaytracing);
     // Edge-aware spatial filter over the accumulated result (reads post-swap
     // history, writes the display copy the PBR samples) — must follow Temporal.
-    renderGraph.addPass("PointShadowDenoise",
+    renderGraph.addPass("StochasticShadowDenoise",
         [](Renderer& r) { r.pointShadowDenoisePass(); }, PassFlags::RequiresRaytracing);
     // GIBS surfel GI (generation -> hash -> RT -> temporal -> gather).
     renderGraph.addPass("GIBS",
@@ -2689,7 +2689,7 @@ void Renderer::stochasticPointShadowPass() {
     glm::uvec4 gridDims(clusterGridSizeX, clusterGridSizeY, clusterGridSizeZ, 0u);
     Uint32 fi = frameCounter;
     Uint32 debugMode = pointShadowDebugMode;  // panel "Point shadow view"
-    rhi->beginComputePass("StochasticPointShadow");
+    rhi->beginComputePass("StochasticShadows");
     rhi->bindComputePipeline(stochasticPointShadowPipeline);
     rhi->setComputeTexture(0, depthStencilRT);
     rhi->setComputeTexture(1, normalRT);
@@ -3083,7 +3083,7 @@ void Renderer::pointShadowTemporalPass() {
     if (!pointShadowTemporalPipeline.isValid() || !pointShadowRT.isValid()) return;
     Uint32 w = rhi->getSwapchainWidth();
     Uint32 h = rhi->getSwapchainHeight();
-    rhi->beginComputePass("PointShadowTemporal");
+    rhi->beginComputePass("StochasticShadowTemporal");
     rhi->bindComputePipeline(pointShadowTemporalPipeline);
     rhi->setComputeTexture(0, pointShadowRT);
     rhi->setComputeTexture(1, pointShadowHistoryRT);
@@ -3108,7 +3108,7 @@ void Renderer::pointShadowDenoisePass() {
         !pointShadowDenoisedRT.isValid()) return;
     Uint32 w = rhi->getSwapchainWidth();
     Uint32 h = rhi->getSwapchainHeight();
-    rhi->beginComputePass("PointShadowDenoise");
+    rhi->beginComputePass("StochasticShadowDenoise");
     rhi->bindComputePipeline(pointShadowDenoisePipeline);
     rhi->setComputeTexture(0, pointShadowHistoryRT);
     rhi->setComputeTexture(1, depthStencilRT);
