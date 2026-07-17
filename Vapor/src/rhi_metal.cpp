@@ -1704,6 +1704,23 @@ void RHI_Metal::drawIndexedIndirect(BufferHandle argsBuffer, size_t offset, Uint
     }
 }
 
+void RHI_Metal::drawIndirect(BufferHandle argsBuffer, size_t offset, Uint32 drawCount, Uint32 stride) {
+    auto argsIt = buffers.find(argsBuffer.id);
+    if (argsIt == buffers.end() || !currentRenderEncoder) {
+        return;
+    }
+    MTL::Buffer* args = argsIt->second.buffer.get();
+    // Non-indexed indirect: MTLDrawPrimitivesIndirectArguments per command.
+    // Metal draws one indirect command per call, so multi-draw expands to a loop.
+    for (Uint32 i = 0; i < drawCount; ++i) {
+        currentRenderEncoder->drawPrimitives(
+            currentPrimitiveType,
+            args,
+            static_cast<NS::UInteger>(offset + static_cast<size_t>(i) * stride)
+        );
+    }
+}
+
 // ============================================================================
 // Indirect Command Buffers + bindless texture tables (the ICB draw mode)
 // ============================================================================
