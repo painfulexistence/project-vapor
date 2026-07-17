@@ -330,13 +330,6 @@ void AssetSerializer::serializeMesh(
     archive(mesh->localAABBMin);
     archive(mesh->localAABBMax);
 
-    // Baked meshlet + cluster-LOD data (v3). Empty vectors when not built.
-    archive(mesh->meshletData.meshlets);
-    archive(mesh->meshletData.meshletVertices);
-    archive(mesh->meshletData.meshletTriangles);
-    archive(mesh->meshletData.bounds);
-    archive(mesh->meshletData.lodLevelCount);
-
     if (mesh->material) {
         auto it = materialIDs.find(mesh->material);
         if (it != materialIDs.end()) {
@@ -380,13 +373,6 @@ auto AssetSerializer::deserializeMesh(
     archive(mesh->localAABBMin);
     archive(mesh->localAABBMax);
     mesh->isGeometryDirty = false;// prevent AABB updating
-
-    // Baked meshlet + cluster-LOD data (v3), written after localAABBMax above.
-    archive(mesh->meshletData.meshlets);
-    archive(mesh->meshletData.meshletVertices);
-    archive(mesh->meshletData.meshletTriangles);
-    archive(mesh->meshletData.bounds);
-    archive(mesh->meshletData.lodLevelCount);
 
     bool hasMaterial;
     archive(hasMaterial);

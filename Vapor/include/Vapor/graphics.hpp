@@ -278,7 +278,7 @@ struct Mesh {
     bool hasColor = false;
     std::vector<VertexData> vertices; // interleaved vertex data
     std::vector<Uint32> indices;
-    MeshletData meshletData;          // baked meshlet data (serialized); empty when unused
+    MeshletData meshletData;          // baked meshlet data model; unused/unserialized here
     std::shared_ptr<Material> material = nullptr;
     Uint32 renderMeshId = UINT32_MAX;
     Uint32 renderMaterialId = UINT32_MAX;
