@@ -627,6 +627,7 @@ auto main(int argc, char* args[]) -> int {
         if (!particlePaused)
             Vapor::ParticleEmitterSystem::update(registry, renderer.get(), deltaTime, particleEmissionEnabled);
         Vapor::LightGatherSystem::update(registry, scene.get());
+        Vapor::SkySystem::update(registry, renderer.get());
         FlipbookSystem::update(registry, deltaTime);
         SpriteRenderSystem::update(registry, renderer.get(), &resourceManager);
 

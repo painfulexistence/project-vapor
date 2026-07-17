@@ -3377,6 +3377,23 @@ void Renderer::setParticleForceField(const ParticleForceField& field) {
         m_forceField.attractors.resize(MAX_PARTICLE_ATTRACTORS);
 }
 
+void Renderer::setSky(const SkyRenderData& sky) {
+    // The RHI/Vulkan backend has no HDRI IBL source yet, so `type` only selects
+    // future behavior here. Push the atmosphere tunables into the CPU copy that
+    // is re-uploaded every frame; the sun fields stay driven by
+    // directionalLights[0] (see the per-frame sync in stage()/update()).
+    atmosphereData.rayleighCoefficients  = sky.rayleighCoefficients;
+    atmosphereData.rayleighScaleHeight   = sky.rayleighScaleHeight;
+    atmosphereData.mieCoefficient        = sky.mieCoefficient;
+    atmosphereData.mieScaleHeight        = sky.mieScaleHeight;
+    atmosphereData.miePreferredDirection = sky.miePreferredDirection;
+    atmosphereData.planetRadius          = sky.planetRadius;
+    atmosphereData.atmosphereRadius      = sky.atmosphereRadius;
+    atmosphereData.exposure              = sky.exposure;
+    atmosphereData.groundColor           = sky.groundColor;
+    iblNeedsUpdate = true;  // re-bake IBL from the new sky
+}
+
 // Volumetric clouds (port of the Metal quarter-res path): raymarch into a
 // quarter-res RT, temporally resolve against the previous frame's result
 // (prevViewProj reprojection + neighborhood clamp), then upscale-composite

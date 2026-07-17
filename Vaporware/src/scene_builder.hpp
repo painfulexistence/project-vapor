@@ -125,6 +125,15 @@ inline SceneResources buildScene(
         logic.magnitude     = 0.05f;
     }
 
+    {
+        // Environment/sky singleton. Defaults to the procedural atmosphere;
+        // SkySystem pushes it to the renderer (starts dirty). The gameplay layer
+        // can switch type (Atmosphere/HDRI/Gradient) or edit tunables here.
+        auto skyEntity = registry.create();
+        registry.emplace<Vapor::NameComponent>(skyEntity, Vapor::NameComponent{"Sky"});
+        registry.emplace<Vapor::SkyComponent>(skyEntity);
+    }
+
     // Enough lights to exercise tiled light culling and to lift the ambient
     // level so screen-space AO is visible (radius 0.5 made them near-invisible)
     for (int i = 0; i < 128; i++) {

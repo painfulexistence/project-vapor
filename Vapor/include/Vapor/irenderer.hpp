@@ -230,6 +230,11 @@ public:
     // Hide toggle — gate the particle render only; the sim keeps running.
     virtual void setParticleVisible(bool visible) {}
 
+    // Sky/atmosphere description resolved from the ECS SkyComponent by SkySystem.
+    // Pushed only when the component changes. The sun is not included here — it
+    // is light-driven (see LightGatherSystem).
+    virtual void setSky(const SkyRenderData& sky) {}
+
 protected:
     std::function<void()> m_imGuiCallback;
     std::function<void()> m_engineWindowCallback;

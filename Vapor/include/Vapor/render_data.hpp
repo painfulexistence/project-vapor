@@ -205,6 +205,36 @@ struct alignas(16) AtmosphereRenderData {
     float _pad4 = 0.0f;
 };
 
+// Which sky the gameplay layer wants rendered and used for image-based lighting.
+enum class SkyType : uint32_t {
+    Atmosphere = 0,  // procedural Rayleigh/Mie/Ozone march (default)
+    HDRI       = 1,  // equirectangular HDRI captured to the environment cubemap
+    Gradient   = 2,  // cheap zenith/horizon/ground gradient
+};
+
+// Resolved sky description that SkySystem hands to the renderer whenever the
+// authoring SkyComponent changes. Carries only what the sky itself owns — the
+// sun (direction/color/intensity) stays light-driven (see LightGatherSystem),
+// so these are the atmosphere tunables minus the sun fields, plus gradient
+// colors. This is a CPU-side contract, not a GPU buffer (no alignment needed).
+struct SkyRenderData {
+    SkyType type = SkyType::Atmosphere;
+    // Atmosphere tunables (mirror AtmosphereRenderData minus the sun fields).
+    glm::vec3 rayleighCoefficients = glm::vec3(5.8e-6f, 13.5e-6f, 33.1e-6f);
+    float rayleighScaleHeight = 8500.0f;
+    float mieCoefficient = 21e-6f;
+    float mieScaleHeight = 1200.0f;
+    float miePreferredDirection = 0.758f;
+    float planetRadius = 6371e3f;
+    float atmosphereRadius = 6471e3f;
+    float exposure = 1.0f;
+    glm::vec3 groundColor = glm::vec3(0.015f, 0.015f, 0.02f);
+    // Gradient sky colors (used when type == Gradient).
+    glm::vec3 gradientZenith  = glm::vec3(0.18f, 0.34f, 0.62f);
+    glm::vec3 gradientHorizon = glm::vec3(0.62f, 0.74f, 0.88f);
+    glm::vec3 gradientGround  = glm::vec3(0.20f, 0.18f, 0.16f);
+};
+
 // Screen-space light scattering (god rays). Layout matches the Metal backend's
 // LightScatteringData. sunScreenPos/screenSize are filled per frame.
 struct alignas(16) LightScatteringRenderData {

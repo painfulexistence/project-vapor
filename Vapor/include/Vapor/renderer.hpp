@@ -304,6 +304,7 @@ public:
     void setParticleForceField(const ParticleForceField& field) override;
     void setParticleSimPaused(bool paused) override { m_particleSimPaused = paused; }
     void setParticleVisible(bool visible) override { particleVisible = visible; }
+    void setSky(const SkyRenderData& sky) override;
 
     // ========================================================================
     // Texture Creation (for sprites/batch rendering)

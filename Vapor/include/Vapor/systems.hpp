@@ -360,6 +360,44 @@ namespace Vapor {
     };
 
     // ============================================================================
+    // 天空系統 - resolves the SkyComponent into a SkyRenderData for the renderer
+    // ============================================================================
+    // The registry owns the sky description (SkyComponent). This system pushes it
+    // to the renderer only when it changes (the `dirty` flag), so it never fights
+    // the renderer's own atmosphere debug UI on unchanged frames. The sun stays
+    // light-driven — only the sky type + atmosphere/gradient tunables flow here.
+    class SkySystem {
+    public:
+        static void update(entt::registry& reg, IRenderer* renderer) {
+            if (!renderer) return;
+            auto view = reg.view<SkyComponent>();
+            for (auto entity : view) {
+                auto& sky = view.get<SkyComponent>(entity);
+                if (!sky.dirty) continue;
+
+                SkyRenderData data;
+                data.type                  = sky.type;
+                data.rayleighCoefficients  = sky.rayleighCoefficients;
+                data.rayleighScaleHeight   = sky.rayleighScaleHeight;
+                data.mieCoefficient        = sky.mieCoefficient;
+                data.mieScaleHeight        = sky.mieScaleHeight;
+                data.miePreferredDirection = sky.miePreferredDirection;
+                data.planetRadius          = sky.planetRadius;
+                data.atmosphereRadius      = sky.atmosphereRadius;
+                data.exposure              = sky.exposure;
+                data.groundColor           = sky.groundColor;
+                data.gradientZenith        = sky.gradientZenith;
+                data.gradientHorizon       = sky.gradientHorizon;
+                data.gradientGround        = sky.gradientGround;
+                renderer->setSky(data);
+
+                sky.dirty = false;
+                break;  // singleton: the first sky entity wins
+            }
+        }
+    };
+
+    // ============================================================================
     // 相機系統
     // ============================================================================
     class CameraSystem {

@@ -7762,3 +7762,27 @@ void Renderer_Metal::setParticleForceField(const ParticleForceField& field) {
     if (m_forceField.attractors.size() > MAX_PARTICLE_ATTRACTORS)
         m_forceField.attractors.resize(MAX_PARTICLE_ATTRACTORS);
 }
+
+void Renderer_Metal::setSky(const SkyRenderData& sky) {
+    // HDRI type sources IBL from the loaded equirect; everything else captures
+    // the procedural sky. (Gradient uses the sky capture too for now — its
+    // dedicated visible pass is not implemented yet.)
+    iblSource = (sky.type == SkyType::HDRI) ? IBLSource::HDRI : IBLSource::Sky;
+
+    // Push the atmosphere tunables into the shared atmosphere buffer. The sun
+    // fields (direction/color/intensity) are intentionally left untouched —
+    // they are synced from directionalLights[0] every frame.
+    auto* atmos = reinterpret_cast<AtmosphereData*>(atmosphereDataBuffer->contents());
+    atmos->rayleighCoefficients  = sky.rayleighCoefficients;
+    atmos->rayleighScaleHeight   = sky.rayleighScaleHeight;
+    atmos->mieCoefficient        = sky.mieCoefficient;
+    atmos->mieScaleHeight        = sky.mieScaleHeight;
+    atmos->miePreferredDirection = sky.miePreferredDirection;
+    atmos->planetRadius          = sky.planetRadius;
+    atmos->atmosphereRadius      = sky.atmosphereRadius;
+    atmos->exposure              = sky.exposure;
+    atmos->groundColor           = sky.groundColor;
+    atmosphereDataBuffer->didModifyRange(NS::Range::Make(0, atmosphereDataBuffer->length()));
+
+    iblNeedsUpdate = true;  // re-bake IBL from the new sky
+}
