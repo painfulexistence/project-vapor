@@ -786,6 +786,11 @@ protected:
     bool m_supportsRaytracing = false;
     VolumetricCloudData volumetricCloudSettings;
 
+    // Shared wind magnitude from the ECS WindFieldComponent (via setWind).
+    // Multiplies each medium's per-medium windSpeed coefficient. Defaults to 1.0
+    // so scenes without a WindFieldComponent keep the panel-set scroll speeds.
+    float m_windStrength = 1.0f;
+
     // Sun Flare resources
     NS::SharedPtr<MTL::RenderPipelineState> sunFlarePipeline;
     NS::SharedPtr<MTL::ComputePipelineState> sunOcclusionPipeline;

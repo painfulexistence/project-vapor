@@ -719,6 +719,10 @@ private:
     TextureHandle cloudResolvedRT;  // temporal output (swapped with history)
     BufferHandle cloudDataBuffer;
     VolumetricCloudRenderData cloudSettings;  // CPU copy (tunables + wind/time accumulation)
+    // Shared wind magnitude from the ECS WindFieldComponent (via setWind).
+    // Multiplies the cloud's per-medium windSpeed coefficient at scroll time.
+    // Defaults to 1.0 so scenes without a WindFieldComponent are unaffected.
+    float m_windStrength = 1.0f;
     glm::mat4 cloudPrevViewProj = glm::mat4(1.0f);
     bool cloudPrevViewProjValid = false;
     bool volumetricCloudsEnabled = false;  // default OFF (enable when verifying)

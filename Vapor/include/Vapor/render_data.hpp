@@ -274,14 +274,14 @@ struct alignas(16) AOTemporalRenderData {
 
 // Simple screen-space height/distance fog (the Metal backend's simpleFog path).
 // Shared wind, resolved from the ECS WindFieldComponent by WindSystem and
-// pushed to the renderer. Wind DIRECTION is a single shared field — clouds,
-// fog and particles must all blow the same way. Per-medium scroll SPEED stays
-// a local property of each effect (fog drifts slower than clouds; the particle
-// sim reads `strength` as a force, whose units differ from a scroll speed), so
-// `speed` here is carried for future use but not yet applied to cloud/fog scroll.
+// pushed to the renderer. Wind DIRECTION is a single shared field — clouds, fog
+// and particles all blow the same way. `strength` is the shared wind magnitude:
+// each medium keeps its own per-medium scroll coefficient (the existing
+// windSpeed on the fog/cloud settings) and multiplies it by this strength, so
+// one knob drives everything while per-medium ratios are preserved.
 struct WindRenderData {
     glm::vec3 direction  = glm::vec3(1.0f, 0.0f, 0.0f);
-    float     speed      = 0.0f;
+    float     strength   = 1.0f;
     float     turbulence = 0.0f;
 };
 

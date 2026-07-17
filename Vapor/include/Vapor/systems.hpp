@@ -414,7 +414,7 @@ namespace Vapor {
                 const auto& wf = view.get<WindFieldComponent>(entity);
                 WindRenderData data;
                 data.direction  = wf.direction;
-                data.speed      = wf.strength;
+                data.strength   = wf.strength;
                 data.turbulence = wf.turbulence;
                 renderer->setWind(data);
                 break;  // singleton: the first wind field wins

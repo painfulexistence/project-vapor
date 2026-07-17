@@ -1609,7 +1609,8 @@ public:
         fogData->ambientIntensity = r.volumetricFogSettings.ambientIntensity;
         fogData->noiseScale = r.volumetricFogSettings.noiseScale;
         fogData->noiseIntensity = r.volumetricFogSettings.noiseIntensity;
-        fogData->windSpeed = r.volumetricFogSettings.windSpeed;
+        // Per-medium fog scroll coefficient scaled by the shared wind strength.
+        fogData->windSpeed = r.volumetricFogSettings.windSpeed * r.m_windStrength;
         fogData->windDirection = r.volumetricFogSettings.windDirection;
         fogData->temporalBlend = r.volumetricFogSettings.temporalBlend;
 
@@ -1691,9 +1692,11 @@ public:
         cloudData->frameIndex = r.currentFrameInFlight;
         cloudData->time = r.volumetricCloudSettings.time;
 
-        // Update wind offset (accumulate over time)
+        // Update wind offset (accumulate over time). The per-medium windSpeed is
+        // the cloud's scroll coefficient; the shared wind strength scales it.
         r.volumetricCloudSettings.windOffset +=
-            r.volumetricCloudSettings.windDirection * r.volumetricCloudSettings.windSpeed * 0.016f;
+            r.volumetricCloudSettings.windDirection *
+            (r.volumetricCloudSettings.windSpeed * r.m_windStrength) * 0.016f;
         cloudData->windOffset = r.volumetricCloudSettings.windOffset;
 
         // Copy settings
@@ -7788,9 +7791,10 @@ void Renderer_Metal::setSky(const SkyRenderData& sky) {
 }
 
 void Renderer_Metal::setWind(const WindRenderData& wind) {
-    // Shared wind direction drives the fog and cloud scroll. Per-effect scroll
-    // speed (volumetric*Settings.windSpeed) stays as tuned — the WindFieldComponent
-    // strength is a particle-force unit, not a cloud-scroll speed.
+    // Shared wind direction drives the fog and cloud scroll. The shared strength
+    // scales each medium's per-medium windSpeed coefficient at fill time (see the
+    // fog/cloud passes), so one knob drives both while their ratio is preserved.
     volumetricFogSettings.windDirection   = wind.direction;
     volumetricCloudSettings.windDirection = wind.direction;
+    m_windStrength = wind.strength;
 }

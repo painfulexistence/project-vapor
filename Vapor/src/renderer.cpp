@@ -3891,10 +3891,12 @@ void Renderer::setSky(const SkyRenderData& sky) {
 }
 
 void Renderer::setWind(const WindRenderData& wind) {
-    // Shared wind direction drives the cloud scroll. The RHI fog path (FogRenderData)
-    // carries no wind, so there is nothing to set there. Cloud scroll speed
-    // (cloudSettings.windSpeed) stays as tuned — see setSky's note on units.
+    // Shared wind direction drives the cloud scroll; the shared strength scales
+    // the cloud's per-medium windSpeed coefficient at scroll time. The RHI fog
+    // path (FogRenderData) carries no wind (simple non-froxel fog), so there is
+    // nothing to drive there yet — it reaches parity when the froxel fog lands.
     cloudSettings.windDirection = wind.direction;
+    m_windStrength = wind.strength;
 }
 
 void Renderer::setParticleDrawList(const std::vector<ParticleDrawPacket>& draws) {
@@ -3928,7 +3930,9 @@ void Renderer::volumetricCloudPass() {
     cloudSettings.cameraPosition = currentCamera.position;
     cloudSettings.sunDirection = glm::normalize(atmosphereData.sunDirection);
     cloudSettings.sunColor = atmosphereData.sunColor;
-    cloudSettings.windOffset += cloudSettings.windDirection * cloudSettings.windSpeed * 0.016f;
+    // windSpeed is the cloud's per-medium scroll coefficient; the shared wind
+    // strength scales it so the WindFieldComponent drives the scroll rate.
+    cloudSettings.windOffset += cloudSettings.windDirection * (cloudSettings.windSpeed * m_windStrength) * 0.016f;
     cloudSettings.time += 1.0f / 60.0f;
     cloudSettings.frameIndex = frameCounter;
     cloudSettings.screenSize = glm::vec2(std::max(1u, rhi->getSwapchainWidth() / 4),
