@@ -10,13 +10,17 @@ using raytracing::instance_acceleration_structure;
 // (biased combiner — neighbor W is reused as-is under depth/normal guards),
 // traces the merged winner's visibility, and writes
 //   R = point visibility, G = rect-area visibility, B = spot visibility
-// to the shadow target (consumed by the PBR shader / temporal accumulator).
-// Point/spot get one ray; the rect winner gets TWO rays at independently
-// jittered quad points (fresh every frame — never reservoir-frozen, see
-// restir_shadow_common.metal) so penumbra visibility is a decorrelated 2-tap
-// estimate the accumulator can average. Worst case 4 rays/pixel, the same
-// cap as the legacy kernel. The post-spatial reservoirs become next frame's
-// temporal history.
+// to the HALF-RES raw shadow target (joint-bilaterally upsampled to full res
+// by 3d_point_shadow_upsample.metal before the temporal accumulator).
+//
+// HALF-RES: same fp = tid*2 mapping as the temporal kernel — G-buffer reads
+// at fp, reservoir grid and shadow writes on the half grid. The 4x ray/eval
+// saving is partly reinvested: the rect winner gets FOUR quad-point rays per
+// half-pixel (a per-frame 2x2 stratum riding a per-pixel R2 walk — fresh
+// every frame, never reservoir-frozen; see restir_shadow_common.metal), so
+// penumbra variance is halved vs the old full-res 2-ray version while the
+// total cost is still ~1.5 rays per full-res pixel (legacy cap: 4). The
+// post-spatial reservoirs become next frame's temporal history.
 
 // Plastic-constant (R2) low-discrepancy increment for the rect quad walk.
 constant float2 kR2 = float2(0.7548776662, 0.5698402910);
@@ -59,24 +63,27 @@ kernel void computeMain(
 ) {
     uint w = uint(params.screenSize.x);
     uint h = uint(params.screenSize.y);
-    if (tid.x >= w || tid.y >= h) return;
-    uint pixel = tid.y * w + tid.x;
+    uint halfW = (w + 1u) / 2u;
+    uint halfH = (h + 1u) / 2u;
+    if (tid.x >= halfW || tid.y >= halfH) return;
+    uint pixel = tid.y * halfW + tid.x;
+    uint2 fp = tid * 2u;  // representative full-res pixel of this half texel
 
-    float depth = depthTexture.read(tid).r;
+    float depth = depthTexture.read(fp).r;
     if (depth >= 1.0) {
         shadowTexture.write(float4(params.debugMode == 1 ? 0.0 : 1.0), tid);
         history[pixel] = restirEmptySet(0.0);
         return;
     }
 
-    RestirSurface surf = restirReconstructSurface(tid, w, h, depth, camera);
-    float3 worldNormal = normalize(normalTexture.read(tid).xyz);
+    RestirSurface surf = restirReconstructSurface(fp, w, h, depth, camera);
+    float3 worldNormal = normalize(normalTexture.read(fp).xyz);
 
     ShadowReservoirSet own = inReservoirs[pixel];
 
     // Tile heatmap debug (parity with the legacy kernel's debugMode 1).
     if (params.debugMode == 1) {
-        float2 uv = float2(tid) / float2(w, h);
+        float2 uv = float2(fp) / float2(w, h);
         uint lightCount = clusters[restirClusterIndex(uv, params.gridDims)].lightCount;
         shadowTexture.write(float4(float(lightCount) / 8.0), tid);
         history[pixel] = own; // keep reservoir state flowing
@@ -123,16 +130,18 @@ kernel void computeMain(
     }
 
     // ---- Spatial reuse ------------------------------------------------------
+    // Tap offsets are in HALF-res pixels; the CPU pre-scales spatialRadius by
+    // 0.5 so the panel value keeps meaning full-res pixels of visual radius.
     float angle = randomNext(rng) * 2.0 * PI;
     float2x2 rot = float2x2(float2(cos(angle), sin(angle)),
                             float2(-sin(angle), cos(angle)));
     for (uint t = 0; t < params.spatialTaps; t++) {
         float2 offset = rot * poissonDisk8[t % 8u] * params.spatialRadius;
         int2 nb = int2(float2(tid) + offset + 0.5);
-        if (nb.x < 0 || nb.y < 0 || nb.x >= int(w) || nb.y >= int(h)) continue;
+        if (nb.x < 0 || nb.y < 0 || nb.x >= int(halfW) || nb.y >= int(halfH)) continue;
         if (uint(nb.x) == tid.x && uint(nb.y) == tid.y) continue;
 
-        ShadowReservoirSet nbSet = inReservoirs[uint(nb.y) * w + uint(nb.x)];
+        ShadowReservoirSet nbSet = inReservoirs[uint(nb.y) * halfW + uint(nb.x)];
         // Geometry compatibility: same-ish depth (sky neighbors carry 0) and
         // same-ish orientation, else the reused W darkens across silhouettes.
         // The neighbor's normal rides in its reservoir — no texture fetch.
@@ -189,20 +198,22 @@ kernel void computeMain(
     }
     float rectVis = 1.0;
     if (rRect.pdf > 0.0 && tlasValid) {
-        // Two quad points per frame, stratified over time: a static per-pixel
-        // Cranley-Patterson rotation + an R2 walk over the frame index, with
-        // the second tap antithetic (half-quad offset). Independent random
-        // pairs would leave the accumulator's EMA a variance floor of
-        // alpha/(2-alpha) forever; the low-discrepancy walk covers the quad
-        // evenly inside the EMA window, so the accumulated mean actually
-        // converges on the coverage fraction. (& 1023 keeps the float walk
-        // inside fract() precision — a 1024-frame stratification cycle.)
+        // Four quad points per frame, stratified in space AND time: a static
+        // per-pixel Cranley-Patterson rotation + an R2 walk over the frame
+        // index gives the base point, and the other three fill the remaining
+        // 2x2 strata (half-quad offsets). Independent random points would
+        // leave the accumulator's EMA a variance floor of alpha/(2-alpha)
+        // forever; the stratified walk covers the quad evenly inside the EMA
+        // window, so the accumulated mean actually converges on the coverage
+        // fraction. (& 1023 keeps the float walk inside fract() precision —
+        // a 1024-frame stratification cycle.)
         RectLight rl = rectLights[rRect.candidate];
         float2 cp = random(tid.x * 9781u + tid.y * 6271u);
         float2 uv0 = fract(cp + float(params.frameIndex & 1023u) * kR2);
-        float2 uv1 = fract(uv0 + 0.5);
-        rectVis = 0.5 * (traceVisibility(TLAS, surf.worldPos, worldNormal, restirRectPoint(rl, uv0)) +
-                         traceVisibility(TLAS, surf.worldPos, worldNormal, restirRectPoint(rl, uv1)));
+        rectVis = 0.25 * (traceVisibility(TLAS, surf.worldPos, worldNormal, restirRectPoint(rl, uv0)) +
+                          traceVisibility(TLAS, surf.worldPos, worldNormal, restirRectPoint(rl, fract(uv0 + float2(0.5, 0.0)))) +
+                          traceVisibility(TLAS, surf.worldPos, worldNormal, restirRectPoint(rl, fract(uv0 + float2(0.0, 0.5)))) +
+                          traceVisibility(TLAS, surf.worldPos, worldNormal, restirRectPoint(rl, fract(uv0 + float2(0.5, 0.5)))));
     }
     float spotVis = 1.0;
     if (rSpot.pdf > 0.0 && tlasValid) {
