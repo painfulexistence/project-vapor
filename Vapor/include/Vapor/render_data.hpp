@@ -169,14 +169,18 @@ struct PointLightData {
 struct alignas(16) PSSMRenderData {
     glm::mat4 lightSpaceMatrices[3] = { glm::mat4(1.0f), glm::mat4(1.0f), glm::mat4(1.0f) };
     glm::vec4 cascadeSplits = glm::vec4(3.0e38f);
-    float blendRange = 1.0f;
-    // Independent near-field shadow map (separate from the CSM cascades):
-    // covers [near, nearShadowEnd]; 0 = disabled. Its own tight-fit light matrix
-    // is transported here too (appended so existing shaders reading the prefix
-    // are unaffected). std430: nearLightMatrix lands on a 16-byte boundary.
-    float nearShadowEnd = 0.0f;
-    float _pad[2] = {};
-    glm::mat4 nearLightMatrix = glm::mat4(1.0f);
+    // Offsets 208-224 mirror the Metal PSSMData (3d_common.metal) EXACTLY so the
+    // RHI-Metal PBR shader reads every field correctly. Previously nearShadowEnd
+    // sat at 212 where the Metal shader reads cascadeBlendRange, aliasing the
+    // cascade-blend width to the near distance (~25) and heavily over-blending.
+    float  blendRange = 1.0f;         // 208  RT<->PSSM (unused on the RHI path)
+    float  cascadeBlendRange = 2.0f;  // 212  cascade<->cascade blend (view units)
+    Uint32 pcfSampleCount = 16;       // 216  PCF taps 4/8/16/32
+    Uint32 debugVisualize = 0;        // 220  cascade-colour debug (0 = off)
+    // Near-field shadow map data, appended after the Metal-shared prefix.
+    float  nearShadowEnd = 0.0f;      // 224  covers [near, nearShadowEnd]; 0 = off
+    float  _pad[3] = {};              // 228  pad so nearLightMatrix is 16-aligned
+    glm::mat4 nearLightMatrix = glm::mat4(1.0f);  // 240
 };
 
 // Physically-based atmosphere (Rayleigh/Mie/Ozone) consumed by Atmosphere.frag.
@@ -251,6 +255,20 @@ struct alignas(16) FogRenderData {
     float fogBaseHeight = 0.0f;
     float fogMaxHeight = 100.0f;
     glm::vec2 _tailPad = glm::vec2(0.0f);  // keep 16-byte struct size multiple
+};
+
+// Heterogeneous volume raymarch (EmberGen-style density grid in an AABB).
+// vec4-only layout so the MSL and std430 twins are byte-identical
+// (VolumeRaymarch.frag / 3d_volume_raymarch.metal).
+struct alignas(16) VolumeRenderData {
+    glm::mat4 invViewProj = glm::mat4(1.0f);
+    glm::vec4 cameraPosition = glm::vec4(0.0f);              // xyz
+    glm::vec4 boxMin = glm::vec4(-2.0f, 0.0f, -2.0f, 8.0f);  // xyz; w = densityScale
+    glm::vec4 boxMax = glm::vec4(2.0f, 4.0f, 2.0f, 0.3f);    // xyz; w = anisotropy
+    glm::vec4 albedo = glm::vec4(0.9f, 0.9f, 0.9f, 0.15f);   // xyz; w = ambientIntensity
+    glm::vec4 sunDirection = glm::vec4(0.0f, 1.0f, 0.0f, 0.0f);  // xyz
+    glm::vec4 sunColor = glm::vec4(1.0f, 1.0f, 1.0f, 12.0f); // xyz; w = sunIntensity
+    glm::vec4 params = glm::vec4(48.0f, 8.0f, 0.0f, 0.0f);   // x = steps, y = shadow steps
 };
 
 // Volumetric clouds. Field-for-field mirror of the Metal backend's
@@ -330,41 +348,52 @@ struct alignas(16) SunFlareRenderData {
     float _pad2 = 0.0f;
 };
 
+// Maximum ECS attractors uploaded per frame.
+static constexpr Uint32 MAX_PARTICLE_ATTRACTORS = 8;
+
 // GPU particle (matches the Particle struct in ParticleForce/Integrate.comp and
-// Particle.vert).
+// Particle.vert).  _pad1 repurposed as per-particle lifetime (-1 = immortal),
+// _pad2 repurposed as current age; zero binary-layout change (64 bytes).
 struct alignas(16) GPUParticleData {
     glm::vec3 position = glm::vec3(0.0f);
-    float _pad1 = 0.0f;
+    float lifetime = -1.0f; // seconds before despawn; -1 = immortal
     glm::vec3 velocity = glm::vec3(0.0f);
-    float _pad2 = 0.0f;
+    float age = 0.0f;       // seconds since spawn
     glm::vec3 force = glm::vec3(0.0f);
     float _pad3 = 0.0f;
     glm::vec4 color = glm::vec4(1.0f);
 };
 
-// Particle simulation params / attractor (bound as SSBOs; the RHI compute set is
-// storage-buffer only, so these are std430 buffers in the shaders).
+// Particle simulation params (bound as an SSBO in both backends).
+// 64 bytes — std430/std140 safe.
 struct alignas(16) ParticleSimParams {
-    glm::vec2 resolution = glm::vec2(1280.0f, 720.0f);
-    glm::vec2 mousePosition = glm::vec2(0.0f);
-    float time = 0.0f;
-    float deltaTime = 1.0f / 60.0f;
-    // The Metal kernels bounds-check `id >= particleCount`; leaving this a pad
-    // read as 0 and skipped every particle on Metal. (The Vulkan .comp names
-    // this slot _pad1 and ignores it — same offset/size, so the binary layout
-    // is identical either way.)
-    Uint32 particleCount = 0;
-    float _pad2 = 0.0f;
-};
+    glm::vec2 resolution = glm::vec2(1280.0f, 720.0f); // offset 0
+    glm::vec2 mousePosition = glm::vec2(0.0f);          // offset 8
+    float time = 0.0f;                                   // offset 16
+    float deltaTime = 1.0f / 60.0f;                     // offset 20
+    Uint32 particleCount = 0;                            // offset 24
+    Uint32 attractorCount = 0;                           // offset 28
+    glm::vec4 wind = glm::vec4(0.0f);       // offset 32 — xyz=dir, w=strength
+    glm::vec4 turbulence = glm::vec4(0.0f); // offset 48 — w=strength (xyz reserved)
+};                                           // total: 64 bytes
 
 // MSL's float3 occupies 16 bytes, so position must be padded to 16 and the
 // struct rounds to 32 (strength at offset 16). The GLSL twin gets the same
 // explicit pad; without this Metal asserted "attractor needs 32, got 16".
+// Layout: 32 bytes — mirrors std430 Attractor struct in the shaders.
 struct alignas(16) ParticleAttractor {
     glm::vec3 position = glm::vec3(0.0f);
-    float _pad0 = 0.0f;
-    float strength = 50.0f;
-    float _pad1[3] = {0.0f, 0.0f, 0.0f};
+    float _pad0 = 0.0f;      // offset 12 — keeps strength at offset 16
+    float strength = 50.0f;  // offset 16
+    float _pad1[3] = {0.0f, 0.0f, 0.0f}; // offset 20 — round to 32 bytes
+};
+
+// Per-frame particle force field — built by ParticleForceFieldSystem from ECS
+// and handed to the renderer as a single packet.
+struct ParticleForceField {
+    std::vector<ParticleAttractor> attractors; // capped to MAX_PARTICLE_ATTRACTORS
+    glm::vec4 wind        = glm::vec4(0.0f);  // xyz=direction, w=strength
+    float     turbulence  = 0.0f;
 };
 
 // ============================================================================

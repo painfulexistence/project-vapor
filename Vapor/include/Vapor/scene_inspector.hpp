@@ -22,6 +22,8 @@ namespace Vapor {
         using CustomDrawer = std::function<void(entt::registry&, entt::entity)>;
         using CustomMenuDrawer = std::function<void(entt::registry&, entt::entity)>;
         using EntityProvider = std::function<std::vector<entt::entity>(entt::registry&)>;
+        // Draws the "Systems" section (system-level, non-per-entity controls).
+        using SystemsDrawer = std::function<void(entt::registry&)>;
 
         SceneInspector() {
             // Register all built-in engine components for auto-draw.
@@ -62,8 +64,11 @@ namespace Vapor {
                 return;
             }
 
-            // Left panel — entity list + save
+            // Left panel — systems (top) + entity list + save
             ImGui::BeginChild("##scene_panel", ImVec2(280, 0), true);
+            if (m_systemsDrawer) {
+                if (ImGui::CollapsingHeader("Systems", ImGuiTreeNodeFlags_DefaultOpen)) m_systemsDrawer(registry);
+            }
             drawEntityListContent(registry);
             if (m_serializer) {
                 ImGui::Separator();
@@ -128,6 +133,12 @@ namespace Vapor {
             m_entityProvider = std::move(fn);
         }
 
+        // Register the "Systems" section content (global, system-level controls).
+        // This is the ECS-conventional counterpart to the per-entity inspector.
+        void setSystemsDrawer(SystemsDrawer fn) {
+            m_systemsDrawer = std::move(fn);
+        }
+
         void setGltfPath(const std::string& path) {
             strncpy(m_gltfPathBuf, path.c_str(), sizeof(m_gltfPathBuf) - 1);
         }
@@ -158,6 +169,7 @@ namespace Vapor {
         std::vector<ComponentEntry> m_componentEntries;
         std::vector<CustomDrawer> m_customDrawers;
         std::vector<CustomMenuDrawer> m_customMenuDrawers;
+        SystemsDrawer m_systemsDrawer;
 
         // Save section state
         SceneSerializer* m_serializer = nullptr;

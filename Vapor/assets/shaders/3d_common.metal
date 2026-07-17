@@ -86,17 +86,38 @@ struct PointLight {
     // float _pad[2];
 };
 
+// Cone spot light. direction points FROM the light; cosInner/cosOuter are the
+// cosines of the inner (full-intensity) and outer (falloff-to-zero) half-angles.
+// Must match Vapor::SpotLight (graphics.hpp, 64 bytes, vec3+scalar packing).
+// float3 members occupy full 16-byte slots; scalars follow after the vectors
+// (offsets 48/52/56/60) — mirrors the explicit pads on the C++ side.
+struct SpotLight {
+    float3 position;    // [0, 16)
+    float3 direction;   // [16, 32) normalized, FROM the light
+    float3 color;       // [32, 48)
+    float  radius;      // 48 — range
+    float  cosInner;    // 52
+    float  cosOuter;    // 56
+    float  intensity;   // 60
+};
+
 // Rectangular area light.  right and up are orthonormal axes of the light face;
 // halfWidth/halfHeight give half-extents in those directions.
+// packed_float3 is REQUIRED here: the C++ Vapor::RectLight tail-packs each
+// scalar into the vec3's 4th float (offsets 0/12/16/28/32/44/48/60, 64 bytes).
+// The previous plain-float3 declaration put every member on a 16-byte slot
+// (position [0,16), halfWidth at 16 = C++ right.x, ... 128 bytes total) — every
+// field except position read garbage. Latent for as long as no scene shipped
+// rect lights; fatal the moment one does.
 struct RectLight {
-    float3 position;
-    float  halfWidth;
-    float3 right;           // normalized
-    float  halfHeight;
-    float3 up;              // normalized
-    float  intensity;
-    float3 color;
-    uint   useVideoTexture; // 0 = solid color, 1 = sample video texture
+    packed_float3 position;   // 0
+    float  halfWidth;         // 12
+    packed_float3 right;      // 16 — normalized
+    float  halfHeight;        // 28
+    packed_float3 up;         // 32 — normalized
+    float  intensity;         // 44
+    packed_float3 color;      // 48
+    uint   useVideoTexture;   // 60 — 0 = solid color, 1 = sample video texture
 };
 
 struct Cluster {
@@ -171,6 +192,22 @@ float2 random(uint seed) {
     uint w = ((s >> ((s >> 28u) + 4u)) ^ s) * 277803737u;
     return float2(float(w >> 22u) / 4294967295.0f,
                  float(w & 0x003FFFFFu) / 4194304.0f);
+}
+
+// Stateful variant of random(): same PCG hash, but advances `state` so a
+// kernel can draw an arbitrary sequence instead of deriving seed offsets by
+// hand. TODO: swap the hash for tiled blue-noise sampling (the VISION pass
+// skeleton; same note as 3d_raytrace_ao.metal).
+float randomNext(thread uint& state) {
+    state = state * 747796405u + 2891336453u;
+    uint word = ((state >> ((state >> 28u) + 4u)) ^ state) * 277803737u;
+    return float(word >> 8u) * (1.0 / 16777216.0); // [0, 1)
+}
+
+// Rec.709 luma. (3d_pbr_normal_mapped.metal keeps its own 0.3/0.6/0.1
+// approximation for iridescence — distinct on purpose.)
+float luminance709(float3 c) {
+    return dot(c, float3(0.2126, 0.7152, 0.0722));
 }
 
 // uniform distribution on a unit sphere

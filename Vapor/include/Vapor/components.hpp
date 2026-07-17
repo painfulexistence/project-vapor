@@ -178,4 +178,72 @@ namespace Vapor {
         }
     };
 
+    // ============================================================================
+    // Particle ECS Components
+    // ============================================================================
+
+    // Attached to any entity that should act as a particle attractor.
+    struct ParticleAttractorComponent {
+        float strength = 5.0f;
+    };
+
+    // World-space wind — not particle-specific; vegetation, cloth, audio all read it.
+    struct WindFieldComponent {
+        glm::vec3 direction  = glm::vec3(1.0f, 0.0f, 0.0f);
+        float     strength   = 0.0f;
+        float     turbulence = 0.0f; // curl noise strength for the particle sim
+    };
+
+    // Per-emitter configuration.
+    struct ParticleEmitterComponent {
+        uint32_t maxParticles = 128;
+        float emitRate = 30.0f;         // particles per second
+        float particleLifetime = 2.0f;  // -1 for immortal
+        float speed = 2.0f;
+        float spread = 0.3f;            // half-cone angle in radians
+        glm::vec3 emitDirection = glm::vec3(0.0f, 1.0f, 0.0f);
+        glm::vec4 color = glm::vec4(1.0f);
+        bool enabled = true;   // false = immediate clear (Clear semantic)
+        bool emitting = true;  // false = graceful stop: stop spawning, let existing finish (Stop semantic)
+        bool oneShot = false;  // emit all maxParticles at once, then idle
+
+        // Runtime state (managed by ParticleEmitterSystem) — hidden from inspector
+        Hidden<float>    _accumulator = {0.0f};
+        Hidden<uint32_t> _slotBegin   = {~0u};  // ~0u = not yet allocated
+        Hidden<uint32_t> _slotCount   = {0};
+        Hidden<uint32_t> _ringCursor  = {0};    // next slot to overwrite (ring buffer)
+        Hidden<float>    _reclaimTimer = {-1.0f}; // >=0: draining, countdown to free+clear slots
+        Hidden<bool>     _hasFired     = {false}; // one-shot already emitted its batch
+        Hidden<bool>     _cleared      = {true};  // query: true once all emitted particles are gone
+    };
+
+    // One-shot burst of particles at the entity's current position.
+    struct ParticleBurstRequest {
+        uint32_t  count    = 64;
+        float     speed    = 3.0f;
+        float     spread   = 3.14159f;  // full sphere
+        float     lifetime = 1.0f;
+        glm::vec4 color    = glm::vec4(1.0f);
+    };
+
+    // Emotion/mood state that modulates particle emitters via EmitterModulatorComponent.
+    enum class EmotionState { Neutral, Joy, Rage, Sorrow, Fear };
+
+    // Drives emitter parameters from an EmotionState (skeleton — extend per project).
+    struct EmitterModulatorComponent {
+        EmotionState state = EmotionState::Neutral;
+        float           transitionSpeed = 1.0f;
+        Hidden<float>   _blendTimer     = {0.0f};
+    };
+
+    // Flying spell bolt: moves from origin to target along a Bezier arc,
+    // emitting particles along the way and bursting on arrival.
+    struct SpellBoltComponent {
+        glm::vec3 origin;
+        glm::vec3 target;
+        float         speed     = 15.0f;
+        float         arcHeight = 0.5f;
+        Hidden<float> _progress = {0.0f}; // [0,1], managed by SpellBoltSystem
+    };
+
 }// namespace Vapor

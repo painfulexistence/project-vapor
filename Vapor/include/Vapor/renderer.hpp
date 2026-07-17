@@ -165,7 +165,7 @@ public:
     // Upload RGBA pixel data as the video texture sampled by rect lights marked
     // with useVideoTexture = true. Call once per frame after VideoPlayer::update().
     // TODO(RHI): implement via RHI texture upload once rect-light shading is ported.
-    void uploadRectLightVideoTexture(const uint8_t* /*rgba*/, uint32_t /*width*/, uint32_t /*height*/) {}
+    void uploadRectLightVideoTexture(const uint8_t* /*rgba*/, uint32_t /*width*/, uint32_t /*height*/) override {}
 
     // Manual flush (for controlling draw order)
     void flush2D() override;
@@ -294,6 +294,18 @@ public:
     void applyVignette(RenderTextureHandle target, float strength = 0.3f, float radius = 0.8f) override;
 
     // ========================================================================
+    // ECS Particle Integration API
+    // ========================================================================
+
+    uint32_t claimParticleSlots(uint32_t count) override;
+    void releaseParticleSlots(uint32_t slotBegin, uint32_t count) override;
+    void uploadParticles(uint32_t slotBegin,
+                         const std::vector<GPUParticleData>& particles) override;
+    void setParticleForceField(const ParticleForceField& field) override;
+    void setParticleSimPaused(bool paused) override { m_particleSimPaused = paused; }
+    void setParticleVisible(bool visible) override { particleVisible = visible; }
+
+    // ========================================================================
     // Texture Creation (for sprites/batch rendering)
     // ========================================================================
 
@@ -304,6 +316,20 @@ public:
     // Intended for streaming sources (e.g. video playback) that re-upload pixel
     // data every frame without reallocating the GPU texture.
     void updateTexture(TextureHandle handle, const std::shared_ptr<Vapor::Image>& img) override;
+
+    // ========================================================================
+    // Volume Rendering API (EmberGen density grids)
+    // ========================================================================
+
+    // Upload a raw single-channel density grid (width*height*depth bytes,
+    // R8_UNORM, tightly packed, slice-major) as a 3D texture — the hook the
+    // EmberGen import PR will call with decoded voxel data.
+    TextureHandle createVolumeTexture(Uint32 width, Uint32 height, Uint32 depth,
+                                      const void* data, size_t size);
+    // Point the volume raymarch pass at a density grid with world-space AABB
+    // bounds. Pass an invalid handle to fall back to the procedural test grid.
+    void setVolumeDensity(TextureHandle density, const glm::vec3& boxMin,
+                          const glm::vec3& boxMax);
 
     // ========================================================================
     // Getters
@@ -353,6 +379,7 @@ private:
     void skyAtmospherePass();
     void lightScatteringPass();
     void volumetricFogPass();
+    void volumeRaymarchPass();
     void velocityPass();
     void particlePass();
     void volumetricCloudPass();
@@ -438,18 +465,25 @@ private:
     TextureHandle nearShadowMap;            // independent near-field depth map [near, pssmRTMaxDist] (Vulkan: set2 b9)
     static constexpr Uint32 NEAR_SHADOW_MAP_SIZE = Vapor::kNearShadowMapSize;  // shared (irenderer.hpp)
     std::vector<Vapor::RectLight> rectLights;   // gathered from the scene
+    std::vector<Vapor::SpotLight> spotLights;   // gathered from the scene
+    BufferHandle spotLightBuffer;               // frame-slotted, maxSpotLights
 
     // ImGui texture previews (RT viewer / material thumbnails)
     void* getImGuiTextureID(TextureHandle handle);
     std::unordered_map<Uint32, void*> imguiTextureCache;  // Vulkan descriptor sets
     void drawGraphicsImGui();
 
-    // Last completed frame's numbers, shown in the Engine window
+    // Last completed frame's numbers, shown in the Engine window. The panel
+    // draws BETWEEN beginFrame (which clears the live per-frame light vectors)
+    // and draw() (which refills them), so it must read this snapshot — reading
+    // the live vectors there always shows 0.
     struct FrameStats {
         Uint32 totalDrawables = 0;
         Uint32 visibleDrawables = 0;
         Uint32 directionalLights = 0;
         Uint32 pointLights = 0;
+        Uint32 rectLights = 0;
+        Uint32 spotLights = 0;
     } lastFrameStats;
 
     // Tile-cull histogram cache for the "Light Culling Debug" panel. Refreshed
@@ -613,6 +647,27 @@ private:
     // Persistent fog tunables (ImGui-editable). volumetricFogPass() copies this
     // and overwrites the per-frame fields (invViewProj/camera/sun).
     FogRenderData fogSettings;
+    // Heterogeneous volume raymarch (EmberGen density grids; rendering only —
+    // import/parsing lives in a separate PR). One AABB volume per scene; a
+    // procedural 64^3 test grid stands in until setVolumeDensity() gets real
+    // data. Reuses tempColorRT ping-pong like fog.
+    PipelineHandle volumeRaymarchPipeline;
+    TextureHandle volumeDensityTexture;  // active 3D grid (may equal the test grid)
+    TextureHandle volumeTestTexture;     // owned procedural test grid
+    bool volumeRenderEnabled = false;    // default OFF until real data lands
+    VolumeRenderData volumeSettings;     // panel tunables (box/density/albedo/steps)
+    // The registry the ECS draw() last rendered with. renderToTexture needs it
+    // because the demo's meshes live on ECS entities, not the scene-node tree —
+    // the scene-only collectDrawables(scene) finds nothing there. The registry
+    // outlives frames (owned by the game), so the cached pointer stays valid.
+    entt::registry* lastDrawRegistry = nullptr;
+    // Render-to-texture scene view (renderToTexture): dedicated camera and
+    // instance buffers. The offscreen view encodes BEFORE the main draw, but
+    // host-visible buffer writes are last-write-wins across the whole frame's
+    // command stream — sharing cameraUniformBuffer/instanceDataBuffer meant
+    // the RTT draw executed with the MAIN view's data (or vice versa).
+    BufferHandle rttCameraBuffer;
+    BufferHandle rttInstanceBuffer;
     // Camera-motion velocity (motion vectors) — infrastructure for future TAA.
     PipelineHandle velocityPipeline;
     TextureHandle velocityRT;
@@ -638,16 +693,28 @@ private:
     bool cloudPrevViewProjValid = false;
     bool volumetricCloudsEnabled = false;  // default OFF (enable when verifying)
 
-    // GPU particle system (self-contained orbital demo).
-    static constexpr Uint32 MAX_PARTICLES = 8192;
+    // GPU particle system (self-contained orbital demo + ECS emitters).
+    static constexpr Uint32 MAX_PARTICLES = 3'000'000;
     ComputePipelineHandle particleForcePipeline;
     ComputePipelineHandle particleIntegratePipeline;
     PipelineHandle particleRenderPipeline;     // instanced billboards
     BufferHandle particleBuffer;
     BufferHandle particleSimParamsBuffer;
-    BufferHandle particleAttractorBuffer;
-    Uint32 particleCount = 0;
-    bool particleSystemEnabled = true;
+    BufferHandle particleAttractorBuffer;      // MAX_PARTICLE_ATTRACTORS elements
+    Uint32 particleCount = 0;          // = high-water mark of claimed slots; 0 = no ECS emitters yet
+    bool particleVisible = true; // hide toggle — gates render only, sim keeps running
+
+    // ECS particle slot management (first-fit free list).
+    struct ParticleSlotRange { uint32_t begin = 0, count = 0; };
+    std::vector<ParticleSlotRange> m_particleSlotFreeList;
+    bool m_particleFreeListInitialized = false;
+    ParticleForceField m_forceField; // set each frame by ParticleForceFieldSystem
+    bool m_particleSimPaused = false;
+
+    // Free-list helpers
+    uint32_t allocParticleSlots(uint32_t count);
+    void freeParticleSlots(uint32_t slotBegin, uint32_t count);
+    void ensureParticleFreeList();
     PipelineHandle shadowPipeline;
     ShaderHandle vertexShader;
     ShaderHandle fragmentShader;
@@ -663,6 +730,8 @@ private:
     ShaderHandle lightScatteringShader;
     ShaderHandle volumetricFogShader;
     BufferHandle fogDataBuffer;
+    ShaderHandle volumeRaymarchShader;
+    BufferHandle volumeDataBuffer;
     ShaderHandle velocityShader;
     ShaderHandle particleForceShader;
     ShaderHandle particleIntegrateShader;
@@ -687,8 +756,29 @@ private:
     ComputePipelineHandle aoDenoisePipeline;
     ComputePipelineHandle stochasticPointShadowPipeline;
     ComputePipelineHandle pointShadowTemporalPipeline;
+    ComputePipelineHandle pointShadowDenoisePipeline;
+    // ReSTIR reuse for the stochastic shadow (restirShadowPass): reservoir
+    // build + temporal merge, then spatial merge + winner visibility rays.
+    ComputePipelineHandle restirShadowTemporalPipeline;
+    ComputePipelineHandle restirShadowResolvePipeline;
+    // GIBS screen-space denoise ("SVGF-lite"): temporal reprojection + 2x
+    // edge-aware a-trous over the GI gather output. The gather writes giRawRT,
+    // the chain produces the giResultTexture the PBR samples. Kills the visible
+    // surfel-disc seams and residual flicker the surfel-space EMA leaves behind.
+    ComputePipelineHandle giTemporalPipeline;
+    ComputePipelineHandle giDenoisePipeline;
+    TextureHandle giRawRT;              // gather output (pre-denoise)
+    TextureHandle giScratchRT;          // a-trous ping-pong
+    TextureHandle giHistoryChainRT[2];  // temporal history (RGB gi, A viewZ)
+    bool gibsDenoiseEnabled = true;
+    Uint32 giHistoryIndex = 0;
+    bool giHistoryValid = false;
+    glm::mat4 giPrevView{1.0f};         // AO owns `prevView`; GI keeps its own
+    bool giPrevViewValid = false;
     ShaderHandle rtShadowShader, rtAOShader, aoTemporalShader, aoDenoiseShader,
-                 pointShadowShader, pointShadowTemporalShader;
+                 pointShadowShader, pointShadowTemporalShader, pointShadowDenoiseShader,
+                 restirShadowTemporalShader, restirShadowResolveShader,
+                 giTemporalShader, giDenoiseShader;
     ShaderHandle prePassMetalVertexShader, prePassMetalFragmentShader;
 
     // Acceleration structures: one BLAS per registered mesh (index-aligned with
@@ -730,7 +820,10 @@ private:
     BufferHandle aoTemporalDataBuffer;          // {mat4 prevView; uint historyValid}
     // PSSM: distance where RT near-field shadows hand over to the cascades
     // (native pssmRTMaxDist, panel-tunable 5..200).
-    float pssmRTMaxDist = 25.0f;  // near shadow extent [near, this]; cascades beyond
+    float pssmRTMaxDist = 12.0f;  // near shadow extent [near, this] (character scale); cascades beyond
+    Uint32 pssmPcfSampleCount = 16;  // PCF taps: 4/8/16/32 (honoured by both Metal and Vulkan shaders)
+    float  pssmCascadeBlendRange = 2.0f;  // cascade<->cascade blend width (view units)
+    bool   pssmDebugVisualize = false;    // tint cascades for debugging
     // Independent near-field shadow map extent (view-space metres). The near map
     // covers [near, nearShadowEnd]; cascades take over beyond it. 0 = disabled.
     float nearShadowEnd = 8.0f;
@@ -740,8 +833,52 @@ private:
     float sscsThickness = 0.3f;   // occluder depth window
     Uint32 sscsSteps = 12;
     float sscsBias = 0.02f;       // view-space start offset (self-occlusion guard)
+    // Stochastic RT shadows for the analytic lights (point R / rect G / spot B
+    // channels). Metal RT only. Default OFF ("Directional only"): Vulkan has
+    // no equivalent path yet, and the default keeps the two backends' output
+    // aligned — opt in via the panel's "All shadows", where ReSTIR + the
+    // denoise chain keep the noise down.
+    bool stochasticShadowsEnabled = false;
+    // ReSTIR denoise for the stochastic shadows: per-pixel weighted reservoirs
+    // over light samples with temporal + spatial reuse, so the one shadow ray
+    // per domain lands on the light (and quad point) that dominates the pixel.
+    // Falls back to the legacy uniform-pick kernel when off (or when the
+    // reservoir allocation fails). Buffers exist only while the path runs.
+    bool restirShadowsEnabled = true;
+    BufferHandle restirReservoirHistory;  // post-spatial reservoirs (frame N-1)
+    BufferHandle restirReservoirScratch;  // pass-1 output within the frame
+    // History is valid only when the pass ran last frame too — derived from
+    // frame contiguity so every skip path (toggles, invalid TLAS, resize,
+    // graph edits) invalidates it without needing to remember to.
+    bool restirHistoryValid = false;
+    Uint32 restirLastFrame = 0;
+    // Tunables (candidates/taps/radius/M-clamp are panel-exposed; the rect and
+    // spot candidate counts are fixed defaults). M clamps are multiples of the
+    // per-frame candidate count: they bound how long the reservoir can dwell
+    // on one winner, so keep them low enough that the temporal accumulator's
+    // ~14-frame EMA still averages across winner switches. Reservoirs select
+    // LIGHTS only — the rect quad point is re-jittered every frame (see
+    // restir_shadow_common.metal), so the rect clamp too governs selection
+    // stability only, never penumbra sampling.
+    Uint32 restirPointCandidates = 8;
+    Uint32 restirRectCandidates = 4;
+    Uint32 restirSpotCandidates = 4;
+    Uint32 restirSpatialTaps = 4;
+    float restirSpatialRadius = 16.0f;
+    float restirPointMClamp = 8.0f;
+    float restirRectMClamp = 8.0f;
+    // Dataflow guards for the default-on chain: the accumulator only runs on
+    // frames the stochastic pass actually wrote (TLAS ready, pipelines built),
+    // and the PBR only samples a history that has been accumulated at least
+    // once — otherwise both would read undefined texture memory at startup.
+    // pointShadowDenoiseRan additionally routes the PBR to the edge-aware
+    // filtered copy when the denoise pass produced one this frame.
+    bool pointShadowWritten = false;         // this frame
+    bool pointShadowHistoryWritten = false;  // ever (since last RT rebuild)
+    bool pointShadowDenoiseRan = false;      // this frame
     // Stochastic point-shadow debug view (native pointShadowDebugMode):
-    // 0 = visibility, 1 = tile light-count heatmap.
+    // 0 = visibility, 1 = tile light-count heatmap, 2 = ReSTIR winner id,
+    // 3 = ReSTIR reservoir confidence (modes 2-3 need the ReSTIR path).
     Uint32 pointShadowDebugMode = 0;
     // Vulkan Main-pass perf isolation (RHIMain.frag mainDebugFlags, push offset 96):
     // bit0 = skip point-light loop, bit1 = skip shadow PCF. Panel-driven.
@@ -777,10 +914,12 @@ private:
     // GIBS surfel GI (RequiresRaytracing; Metal MSL kernels via RHI compute).
     // GIBSData itself lives in graphics_gibs.hpp (included in renderer.cpp only
     // to keep this header clear of the split-header landmines).
-    ComputePipelineHandle surfelGenPipeline, surfelClearPipeline, surfelInsertPipeline,
-                          surfelRTPipeline, surfelTemporalPipeline, giSamplePipeline;
+    ComputePipelineHandle surfelGenPipeline, surfelUpdatePipeline, surfelClearPipeline,
+                          surfelInsertPipeline, surfelRTPipeline, surfelTemporalPipeline, giSamplePipeline;
     ShaderHandle gibsShaders[6];
-    BufferHandle surfelBuffer, cellHeadBuffer, surfelNextBuffer, surfelCounterBuffer, gibsDataBuffer;
+    ShaderHandle gibsUpdateShader;  // surfelUpdate entry (aging + free-list eviction)
+    BufferHandle surfelBuffer, cellHeadBuffer, surfelNextBuffer, surfelFreeListBuffer,
+                 surfelCounterBuffer, gibsDataBuffer;
     TextureHandle giResultTexture;
     glm::mat4 gibsPrevViewProj = glm::mat4(1.0f);
     Uint32 gibsActiveSurfels = 0;
@@ -800,7 +939,9 @@ private:
     void aoTemporalPass();
     void aoDenoisePass();
     void stochasticPointShadowPass();
+    bool restirShadowPass();  // false = couldn't run, caller uses the legacy kernel
     void pointShadowTemporalPass();
+    void pointShadowDenoisePass();
 
     // Acceleration structures (for ray tracing)
     std::vector<AccelStructHandle> BLASs;  // Bottom-level acceleration structures (one per mesh)
@@ -965,6 +1106,7 @@ private:
     Uint32 maxDirectionalLights = 4;
     Uint32 maxPointLights = 1024;
     Uint32 maxRectLights = 32;
+    Uint32 maxSpotLights = 64;
 
     // Clustering configuration
     Uint32 clusterGridSizeX = 16;

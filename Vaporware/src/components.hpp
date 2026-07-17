@@ -33,6 +33,16 @@ struct DirectionalLightComponent {
     float     intensity = 1.0f;
 };
 
+// Cone spot light. Position comes from the TransformComponent; the beam points
+// along the transform's forward axis (rotation * -Z). Angles are in degrees.
+struct SpotLightComponent {
+    glm::vec3 color      = glm::vec3(1.0f);
+    float     intensity  = 10.0f;
+    float     radius     = 12.0f;   // range (world units)
+    float     innerAngle = 20.0f;   // full-intensity half-angle (deg)
+    float     outerAngle = 30.0f;   // falloff-to-zero half-angle (deg)
+};
+
 // ============================================================================
 // Character Logic
 // ============================================================================

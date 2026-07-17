@@ -128,7 +128,9 @@ float3 CalculateDirectionalLight(DirLight light, float3 norm, float3 tangent, fl
     float3 lightDir = normalize(-light.direction);
     float3 radiance = light.color * light.intensity;
 
-    return CookTorranceBRDF(norm, tangent, bitangent, lightDir, viewDir, surf) * radiance * clamp(dot(norm, lightDir), 0.0, 1.0);
+    // NdotL is already folded into CookTorranceBRDF's `* nl` — don't apply it
+    // twice (that squared the cosine and darkened grazing faces).
+    return CookTorranceBRDF(norm, tangent, bitangent, lightDir, viewDir, surf) * radiance;
 }
 
 float3 CalculatePointLight(PointLight light, float3 norm, float3 tangent, float3 bitangent, float3 viewDir, Surface surf, float3 fragPos) {
@@ -138,7 +140,26 @@ float3 CalculatePointLight(PointLight light, float3 norm, float3 tangent, float3
     attenuation *= 1.0 - smoothstep(light.radius * 0.8, light.radius, dist);
     float3 radiance = attenuation * light.color * light.intensity;
 
-    return CookTorranceBRDF(norm, tangent, bitangent, lightDir, viewDir, surf) * radiance * clamp(dot(norm, lightDir), 0.0, 1.0);
+    // NdotL is already folded into CookTorranceBRDF's `* nl` — don't apply it
+    // twice (that squared the cosine and darkened grazing faces).
+    return CookTorranceBRDF(norm, tangent, bitangent, lightDir, viewDir, surf) * radiance;
+}
+
+// Spot: a point light windowed by a smooth cone falloff between the inner
+// (full intensity) and outer (zero) half-angle cosines.
+float3 CalculateSpotLight(SpotLight light, float3 norm, float3 tangent, float3 bitangent, float3 viewDir, Surface surf, float3 fragPos) {
+    float3 lightDir = normalize(light.position - fragPos);
+    float dist = distance(light.position, fragPos);
+    float attenuation = 1.0 / (dist * dist);
+    attenuation *= 1.0 - smoothstep(light.radius * 0.8, light.radius, dist);
+    float cosAngle = dot(-lightDir, light.direction);
+    float cone = clamp((cosAngle - light.cosOuter) / max(light.cosInner - light.cosOuter, 1e-4), 0.0, 1.0);
+    attenuation *= cone * cone;
+    float3 radiance = attenuation * light.color * light.intensity;
+
+    // NdotL is already folded into CookTorranceBRDF's `* nl` — don't apply it
+    // twice (that squared the cosine and darkened grazing faces).
+    return CookTorranceBRDF(norm, tangent, bitangent, lightDir, viewDir, surf) * radiance;
 }
 
 // ── Rect area light (diffuse + specular) ─────────────────────────────────────
@@ -146,11 +167,15 @@ float3 CalculatePointLight(PointLight light, float3 norm, float3 tangent, float3
 // Exact diffuse irradiance from a quad via the polygon solid-angle edge formula
 // (Baum et al. 1989 / Arvo 1994).  Returns irradiance ∈ [0, 1/2].
 float EvalRectLightDiffuse(float3 N, float3 fragPos, RectLight light) {
+    // Hoist packed_float3 fields into aligned locals before doing math on them.
+    float3 lp = float3(light.position);
+    float3 lr = float3(light.right);
+    float3 lu = float3(light.up);
     float3 corners[4] = {
-        light.position + light.right * light.halfWidth + light.up * light.halfHeight,
-        light.position - light.right * light.halfWidth + light.up * light.halfHeight,
-        light.position - light.right * light.halfWidth - light.up * light.halfHeight,
-        light.position + light.right * light.halfWidth - light.up * light.halfHeight,
+        lp + lr * light.halfWidth + lu * light.halfHeight,
+        lp - lr * light.halfWidth + lu * light.halfHeight,
+        lp - lr * light.halfWidth - lu * light.halfHeight,
+        lp + lr * light.halfWidth - lu * light.halfHeight,
     };
     float3 sum = float3(0.0);
     for (int i = 0; i < 4; i++) {
@@ -169,19 +194,22 @@ float EvalRectLightDiffuse(float3 N, float3 fragPos, RectLight light) {
 // Finds the closest point on the rect to the reflection ray and evaluates GGX
 // with an area-corrected roughness for energy conservation.
 float3 EvalRectLightSpecular(float3 N, float3 fragPos, float3 viewDir, RectLight light, Surface surf) {
+    float3 lp = float3(light.position);
+    float3 lr = float3(light.right);
+    float3 lu = float3(light.up);
     float3 refl       = reflect(-viewDir, N);
-    float3 lightNorm  = cross(light.right, light.up); // unnormalized plane normal
+    float3 lightNorm  = cross(lr, lu); // unnormalized plane normal
 
     float denom   = dot(lightNorm, refl);
-    float3 repPt  = light.position;
+    float3 repPt  = lp;
     if (abs(denom) > 1e-5) {
-        float t = dot(light.position - fragPos, lightNorm) / denom;
+        float t = dot(lp - fragPos, lightNorm) / denom;
         if (t > 0.0) {
             float3 hit = fragPos + refl * t;
-            float3 rel = hit - light.position;
-            float u    = clamp(dot(rel, light.right), -light.halfWidth,  light.halfWidth);
-            float v    = clamp(dot(rel, light.up),    -light.halfHeight, light.halfHeight);
-            repPt = light.position + light.right * u + light.up * v;
+            float3 rel = hit - lp;
+            float u    = clamp(dot(rel, lr), -light.halfWidth,  light.halfWidth);
+            float v    = clamp(dot(rel, lu), -light.halfHeight, light.halfHeight);
+            repPt = lp + lr * u + lu * v;
         }
     }
 
@@ -211,9 +239,9 @@ float3 EvalRectLightSpecular(float3 N, float3 fragPos, float3 viewDir, RectLight
 
 // UV of a world-space position projected onto the rect light face [0,1]².
 float2 RectLightUV(RectLight light, float3 worldPos) {
-    float3 rel = worldPos - light.position;
-    float u = dot(rel, light.right)  / light.halfWidth  * 0.5f + 0.5f;
-    float v = dot(rel, light.up)     / light.halfHeight * 0.5f + 0.5f;
+    float3 rel = worldPos - float3(light.position);
+    float u = dot(rel, float3(light.right)) / light.halfWidth  * 0.5f + 0.5f;
+    float v = dot(rel, float3(light.up))    / light.halfHeight * 0.5f + 0.5f;
     return saturate(float2(u, v));
 }
 
@@ -223,16 +251,19 @@ float2 RectLightUV(RectLight light, float3 worldPos) {
 float3 RectLightColor(RectLight light, float3 fragPos,
                       texture2d<float, access::sample> videoTex) {
     if (light.useVideoTexture == 0) {
-        return light.color;
+        return float3(light.color);
     }
     constexpr sampler clampS(address::clamp_to_edge, filter::linear);
+    float3 lp = float3(light.position);
+    float3 lr = float3(light.right);
+    float3 lu = float3(light.up);
     // 5-point stratified sample across the rect face
     float3 pts[5] = {
-        light.position,
-        light.position + light.right * light.halfWidth  * 0.5f,
-        light.position - light.right * light.halfWidth  * 0.5f,
-        light.position + light.up    * light.halfHeight * 0.5f,
-        light.position - light.up    * light.halfHeight * 0.5f,
+        lp,
+        lp + lr * light.halfWidth  * 0.5f,
+        lp - lr * light.halfWidth  * 0.5f,
+        lp + lu * light.halfHeight * 0.5f,
+        lp - lu * light.halfHeight * 0.5f,
     };
     float3 col = float3(0.0f);
     for (int i = 0; i < 5; i++) {
@@ -367,7 +398,13 @@ fragment float4 fragmentMain(
     // Perf-isolation debug flags (bit0 = skip point-light loop, bit1 = skip
     // shadow). buffer(11) is dirLightCount (Vulkan-only, unread here), so this
     // takes buffer(12). Mirrors RHIMain.frag's mainDebugFlags.
-    constant uint& mainDebugFlags [[buffer(12)]]
+    constant uint& mainDebugFlags [[buffer(12)]],
+    // buffer(13) is reserved for the RT PR's reflectionParams.
+    const device SpotLight* spotLights [[buffer(14)]],
+    // x = spot light count, y = shadow-format flags (bit0 = the point-shadow
+    // texture carries RGB channels: R point / G rect / B spot; 0 on legacy
+    // R16F targets so rect/spot stay unshadowed instead of black).
+    constant uint2& spotRectParams [[buffer(15)]]
 ) {
     constexpr sampler s(address::repeat, filter::linear, mip_filter::linear);
 
@@ -407,7 +444,11 @@ fragment float4 fragmentMain(
     surf.ao = texOcclusion.sample(s, in.uv).r * material.occlusionStrength;
     surf.roughness = texRoughness.sample(s, in.uv).g * material.roughnessFactor;
     surf.metallic = texMetallic.sample(s, in.uv).b * material.metallicFactor;
-    surf.emission = linearToSRGB(texEmissive.sample(s, in.uv).rgb * material.emissiveFactor) * material.emissiveStrength;
+    // Emissive is an sRGB-authored colour (like albedo) — linearize it before
+    // it joins the linear lighting sum. (Was linearToSRGB, the wrong direction:
+    // that re-encodes toward sRGB and brightens; the sRGB->linear encode
+    // belongs only at the final output, which PostProcess/the swapchain do.)
+    surf.emission = srgbToLinear(texEmissive.sample(s, in.uv).rgb * material.emissiveFactor) * material.emissiveStrength;
     surf.subsurface = material.subsurface;
     surf.specular = material.specular;
     surf.specular_tint = material.specularTint;
@@ -659,8 +700,23 @@ fragment float4 fragmentMain(
         }
     }
 
-    for (uint i = 0; i < rectLightCount; i++) {
-        result += CalculateRectLight(rectLights[i], norm, in.worldPosition.xyz, viewDir, surf, rectLightVideo);
+    // Rect area lights, shadowed by the stochastic pass's G channel when the
+    // RGB shadow format is active (spotRectParams.y bit0); legacy R16F targets
+    // read G as 0, so the flag keeps them fully lit there instead of black.
+    {
+        float rectShadow = (spotRectParams.y & 1u) ? texPointShadow.sample(s, screenUV).g : 1.0;
+        for (uint i = 0; i < rectLightCount; i++) {
+            result += CalculateRectLight(rectLights[i], norm, in.worldPosition.xyz, viewDir, surf, rectLightVideo) * rectShadow;
+        }
+    }
+
+    // Spot lights (loop-all; typical scenes carry a handful, so no clustering).
+    // Shadowed by the stochastic pass's B channel under the same flag.
+    {
+        float spotShadow = (spotRectParams.y & 1u) ? texPointShadow.sample(s, screenUV).b : 1.0;
+        for (uint i = 0; i < spotRectParams.x; i++) {
+            result += CalculateSpotLight(spotLights[i], norm, T, B, viewDir, surf, in.worldPosition.xyz) * spotShadow;
+        }
     }
 
     // Screen-space AO attenuates ambient/indirect light only — multiplying
