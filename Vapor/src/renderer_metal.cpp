@@ -1245,25 +1245,24 @@ public:
             // Perf-isolation flags at buffer(12) — the shared PBR shader now
             // reads this slot, so it MUST be bound or the reference is UB.
             encoder->setFragmentBytes(&r.mainDebugFlags, sizeof(uint32_t), 12);
-            // RT reflections are an RHI-path feature; the shared PBR shader now
-            // declares buffer(13), so bind a disabled param (texture(16) stays
-            // unbound — it is sampled only behind the runtime x > 0.5 check,
-            // the same contract as gibsGI at texture(14) when GIBS is off).
+            // RT reflections are an RHI-path feature; the shared PBR shader
+            // declares reflectionParams at buffer(17), so bind a disabled param
+            // (texture(16) stays unbound — it is sampled only behind the runtime
+            // x > 0.5 check, the same contract as gibsGI when GIBS is off).
             glm::vec2 reflParams(0.0f, 0.0f);
-            encoder->setFragmentBytes(&reflParams, sizeof(reflParams), 13);
+            encoder->setFragmentBytes(&reflParams, sizeof(reflParams), 17);
             // Spot lights are an RHI-path feature: bind a placeholder buffer
             // (count 0 -> the loop never dereferences it) and shadowFlags 0
             // (legacy R16F shadow target: rect/spot channels unavailable).
-            // buffer(16): buffer(14) is refractionParams on this bound-path
-            // pipeline (and the bindless systemTexs slot otherwise).
+            // buffer(16): buffer(14) is the bindless systemTexs table's slot.
             encoder->setFragmentBuffer(r.pointLightBuffer.get(), 0, 16);
             glm::uvec2 spotRectParams(0u, 0u);
             encoder->setFragmentBytes(&spotRectParams, sizeof(spotRectParams), 15);
             // RT refractions: RHI-path feature; disabled params keep the
-            // declared buffer(14) bound (texture(17) stays unbound behind the
+            // declared buffer(18) bound (texture(17) stays unbound behind the
             // same runtime x > 0.5 contract as the reflection texture at 16).
             glm::vec2 refrParams(0.0f, 0.0f);
-            encoder->setFragmentBytes(&refrParams, sizeof(refrParams), 14);
+            encoder->setFragmentBytes(&refrParams, sizeof(refrParams), 18);
 
             for (const auto& draw : draws) {
                 if (!r.currentCamera->isVisible(r.instances[draw.instanceIndex].boundingSphere)) {

@@ -40,6 +40,10 @@ struct SystemTexs {
     texture2d<float, access::sample>     texPointShadow [[id(7)]];
     texture2d<float, access::sample>     gibsGI         [[id(8)]];
     texture2d<float, access::sample>     texSSCS        [[id(9)]];
+    // RT reflection/refraction results (bindless path): the ICB fragment can't
+    // take direct texture args, so these join the system table like the rest.
+    texture2d<float, access::sample>     texReflection  [[id(10)]];
+    texture2d<float, access::sample>     texRefraction  [[id(11)]];
 };
 
 struct RasterizerData {
@@ -439,11 +443,11 @@ fragment float4 fragmentMain(
     texture2d<float, access::sample> gibsGIArg [[texture(14), function_constant(kBoundMaterials)]], // GIBS indirect lighting
     texture2d<float, access::sample> texSSCSArg [[texture(15), function_constant(kBoundMaterials)]], // screen-space contact shadow
     const device SystemTexs* systemTexs [[buffer(14), function_constant(kBindlessMaterials)]],
-    // RT reflection/refraction (bound path only — the bindless MDI whole-scene
-    // draw never runs the RT composite, so these are gated by kBoundMaterials
-    // and their usage below is folded away on the bindless specialization).
-    texture2d<float, access::sample> texReflection [[texture(16), function_constant(kBoundMaterials)]], // RT mirror reflections
-    texture2d<float, access::sample> texRefraction [[texture(17), function_constant(kBoundMaterials)]], // RT refractions (transmission)
+    // RT reflection/refraction textures: direct args on the bound path,
+    // resolved from systemTexs on the bindless (ICB) path — same split as the
+    // system textures above. Resolved to locals at the top of the body.
+    texture2d<float, access::sample> texReflectionArg [[texture(16), function_constant(kBoundMaterials)]], // RT mirror reflections
+    texture2d<float, access::sample> texRefractionArg [[texture(17), function_constant(kBoundMaterials)]], // RT refractions (transmission)
     const device DirLight* directionalLights [[buffer(0)]],
     const device PointLight* pointLights [[buffer(1)]],
     const device Cluster* clusters [[buffer(2)]],
@@ -459,11 +463,6 @@ fragment float4 fragmentMain(
     // shadow). buffer(11) is dirLightCount (Vulkan-only, unread here), so this
     // takes buffer(12). Mirrors RHIMain.frag's mainDebugFlags.
     constant uint& mainDebugFlags [[buffer(12)]],
-    // RT reflections (bound path only): x = enabled (texture 16 sampled only
-    // when > 0.5), y = intensity. Shares buffer(13) with the bindless
-    // materialTexs table via complementary function constants — exactly one of
-    // the two exists in any given pipeline specialization, so no collision.
-    constant float2& reflectionParams [[buffer(13), function_constant(kBoundMaterials)]],
     // Spot lights at buffer(16): buffer(14) is the bindless systemTexs table,
     // so a plain buffer(14) here fails specialization ("invalid location").
     const device SpotLight* spotLights [[buffer(16)]],
@@ -471,10 +470,13 @@ fragment float4 fragmentMain(
     // texture carries RGB channels: R point / G rect / B spot; 0 on legacy
     // R16F targets so rect/spot stay unshadowed instead of black).
     constant uint2& spotRectParams [[buffer(15)]],
-    // RT refractions (bound path only): shares buffer(14) with the bindless
-    // systemTexs table via complementary function constants. x = enabled
-    // (texture 17), y = intensity.
-    constant float2& refractionParams [[buffer(14), function_constant(kBoundMaterials)]]
+    // RT reflection/refraction composite params (x = enabled, y = intensity).
+    // Plain buffers at 17/18 — free on BOTH the bound and bindless paths (13/14
+    // are the bindless argument tables, 16 is spotLights), so the RT composite
+    // works in either draw mode. Buffers are legal on ICB fragments (only
+    // direct texture/sampler args are rejected).
+    constant float2& reflectionParams [[buffer(17)]],
+    constant float2& refractionParams [[buffer(18)]]
 ) {
     constexpr sampler s(address::repeat, filter::linear, mip_filter::linear);
 
@@ -503,6 +505,8 @@ fragment float4 fragmentMain(
     texture2d<float, access::sample>     texPointShadow = kBindlessMaterials ? systemTexs->texPointShadow : texPointShadowArg;
     texture2d<float, access::sample>     gibsGI         = kBindlessMaterials ? systemTexs->gibsGI         : gibsGIArg;
     texture2d<float, access::sample>     texSSCS        = kBindlessMaterials ? systemTexs->texSSCS        : texSSCSArg;
+    texture2d<float, access::sample>     texReflection  = kBindlessMaterials ? systemTexs->texReflection  : texReflectionArg;
+    texture2d<float, access::sample>     texRefraction  = kBindlessMaterials ? systemTexs->texRefraction  : texRefractionArg;
 
     // Prototype UV: triplanar mapping with world space or object space
     // Mode: 0 = Off, 1 = World Space (static objects), 2 = Object Space (dynamic objects)
@@ -832,7 +836,7 @@ fragment float4 fragmentMain(
     // RT mirror reflections (half-res, bilinearly upsampled by the sample).
     // Fresnel-weighted like the IBL specular, faded by roughness — the traced
     // ray is a mirror ray, so rough surfaces should not show sharp reflections.
-    if (kBoundMaterials && reflectionParams.x > 0.5) {
+    if (reflectionParams.x > 0.5) {
         float3 refl = texReflection.sample(s, screenUV).rgb;
         float NdotV = max(dot(norm, viewDir), 0.0);
         float3 F0r = mix(float3(0.04), surf.color, surf.metallic);
@@ -848,7 +852,7 @@ fragment float4 fragmentMain(
     // roughness exactly like the mirror reflection above. mix() REPLACES the
     // accumulated diffuse/GI response instead of adding — a transmissive
     // surface trades its diffuse lobe for transmission per the spec.
-    if (kBoundMaterials && refractionParams.x > 0.5 && material.transmission > 0.0) {
+    if (refractionParams.x > 0.5 && material.transmission > 0.0) {
         float3 refr = texRefraction.sample(s, screenUV).rgb;
         float NdotV = max(dot(norm, viewDir), 0.0);
         float3 F0t = mix(float3(0.04), surf.color, surf.metallic);
