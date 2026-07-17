@@ -4649,8 +4649,19 @@ void Renderer::createRenderTargets() {
         shadowRT = rhi->createTexture(desc);
     }
 
+    // DIAGNOSTIC kill-switch #2: DO NOT create reflectionRT/refractionRT. This
+    // is the ONLY thing left in #65 that inserts extra createTexture calls into
+    // createRenderTargets, shifting the resource id of every RT allocated after
+    // it (aoRT/sscsRT/albedoRT/pointShadowRT/giResultTexture...) by 2 vs main.
+    // With this removed, the texture-id sequence is byte-identical to main's.
+    // Everything that uses these handles guards on .isValid(), so leaving them
+    // invalid is safe (the RT passes early-out). Revert after the verdict:
+    //   holes GONE -> the id shift (or the 2 extra allocations) is the cause.
+    //   holes STAY -> id shift exonerated; suspects left = transmission + sun
+    //                 sync + debug previews.
     // RT mirror reflections (half-res; rgb = reflected radiance, a = hit mask).
     // HDR: it carries surfel radiance / env light, composited pre-tonemap.
+#if 0
     {
         TextureDesc desc;
         desc.width = halfW;
@@ -4661,6 +4672,7 @@ void Renderer::createRenderTargets() {
         // RT refraction twin (same half-res RGBA16F, rgb + hit mask in a).
         refractionRT = rhi->createTexture(desc);
     }
+#endif
 
     // Create AO RT (half-res, like native)
     {
