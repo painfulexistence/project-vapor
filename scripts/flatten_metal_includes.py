@@ -9,16 +9,22 @@ unresolved `#include`. Flattening the include into the .metal at build time make
 the copied shader self-contained, so both the app and trace replay compile it
 without needing the include to resolve.
 
-Only local, double-quoted `#include "Res/shaders/..."` directives are expanded;
-`#include <...>` system headers (metal_stdlib) are left for the Metal compiler.
+Only local, double-quoted `#include "....metal"` directives are expanded (any
+path prefix — Res/shaders/, assets/shaders/ — resolved by basename against the
+source shader dir); `#include <...>` system headers (metal_stdlib) are left for
+the Metal compiler.
 An include is expanded at most once per translation unit (mirrors the shaders'
 own `#ifndef` guards and avoids duplicate definitions).
 """
+import os
 import re
 import sys
 
-# Matches:  #include "Res/shaders/<name>"   (optionally with trailing comment)
-_INCLUDE_RE = re.compile(r'^\s*#include\s+"Res/shaders/([^"]+)"')
+# Matches any local (double-quoted) include of a .metal file, regardless of path
+# prefix — the codebase mixes "Res/shaders/X.metal" and "assets/shaders/X.metal",
+# and both resolve to the same shared shader in the source dir. `#include <...>`
+# system headers use angle brackets and are left for the compiler.
+_INCLUDE_RE = re.compile(r'^\s*#include\s+"([^"]+\.metal)"')
 
 
 def flatten(path, shader_root, already):
@@ -30,7 +36,9 @@ def flatten(path, shader_root, already):
             if not m:
                 out.append(line)
                 continue
-            name = m.group(1)
+            # Resolve by basename from the shader source dir (the include's path
+            # prefix — Res/shaders, assets/shaders — is a runtime-CWD convention).
+            name = os.path.basename(m.group(1))
             if name in already:
                 out.append(f"// [flattened] #include \"Res/shaders/{name}\" (already expanded)\n")
                 continue

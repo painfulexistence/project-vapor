@@ -174,6 +174,11 @@ function(vapor_flatten_metal_shaders TARGET)
     # language version (matches the runtime newLibrary, which passes no options);
     # if a shader needs a specific -std/target on your toolchain, add it to the
     # `xcrun metal` command below.
+    #
+    # -Wno-unused-{variable,const-variable}: 3d_common.metal defines shared
+    # constants/helpers that any given shader uses only a subset of, so a bare
+    # compile floods ~12 unused warnings per shader and buries real errors. These
+    # are benign in a shared-include translation unit; silence only those two.
     option(VAPOR_VALIDATE_METAL "Compile-check Metal shaders at build via xcrun metal" ON)
     if(NOT VAPOR_VALIDATE_METAL)
         return()
@@ -188,7 +193,8 @@ function(vapor_flatten_metal_shaders TARGET)
             COMMAND ${CMAKE_COMMAND} -E make_directory "${_scratch}"
             COMMAND ${Python3_EXECUTABLE} "${_flatten_script}"
                     "${_metal}" "${VAPOR_ASSETS_DIR}/shaders" "${_scratch}/${_name}"
-            COMMAND xcrun metal -c "${_scratch}/${_name}" -o "${_scratch}/${_name}.air"
+            COMMAND xcrun metal -c -Wno-unused-variable -Wno-unused-const-variable
+                    "${_scratch}/${_name}" -o "${_scratch}/${_name}.air"
             # Re-validate when the shader OR the shared include changes.
             DEPENDS "${_metal}" "${_common}" "${_flatten_script}"
             COMMENT "Validating (xcrun metal) ${_name}"
