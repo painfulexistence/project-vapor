@@ -165,7 +165,7 @@ public:
     // Upload RGBA pixel data as the video texture sampled by rect lights marked
     // with useVideoTexture = true. Call once per frame after VideoPlayer::update().
     // TODO(RHI): implement via RHI texture upload once rect-light shading is ported.
-    void uploadRectLightVideoTexture(const uint8_t* /*rgba*/, uint32_t /*width*/, uint32_t /*height*/) {}
+    void uploadRectLightVideoTexture(const uint8_t* /*rgba*/, uint32_t /*width*/, uint32_t /*height*/) override {}
 
     // Manual flush (for controlling draw order)
     void flush2D() override;
@@ -292,6 +292,18 @@ public:
     void applyBloom(RenderTextureHandle target, float threshold = 1.0f, float strength = 0.5f) override;
     void applyToneMapping(RenderTextureHandle target, float exposure = 1.0f) override;
     void applyVignette(RenderTextureHandle target, float strength = 0.3f, float radius = 0.8f) override;
+
+    // ========================================================================
+    // ECS Particle Integration API
+    // ========================================================================
+
+    uint32_t claimParticleSlots(uint32_t count) override;
+    void releaseParticleSlots(uint32_t slotBegin, uint32_t count) override;
+    void uploadParticles(uint32_t slotBegin,
+                         const std::vector<GPUParticleData>& particles) override;
+    void setParticleForceField(const ParticleForceField& field) override;
+    void setParticleSimPaused(bool paused) override { m_particleSimPaused = paused; }
+    void setParticleVisible(bool visible) override { particleVisible = visible; }
 
     // ========================================================================
     // Texture Creation (for sprites/batch rendering)
@@ -681,16 +693,28 @@ private:
     bool cloudPrevViewProjValid = false;
     bool volumetricCloudsEnabled = false;  // default OFF (enable when verifying)
 
-    // GPU particle system (self-contained orbital demo).
-    static constexpr Uint32 MAX_PARTICLES = 8192;
+    // GPU particle system (self-contained orbital demo + ECS emitters).
+    static constexpr Uint32 MAX_PARTICLES = 3'000'000;
     ComputePipelineHandle particleForcePipeline;
     ComputePipelineHandle particleIntegratePipeline;
     PipelineHandle particleRenderPipeline;     // instanced billboards
     BufferHandle particleBuffer;
     BufferHandle particleSimParamsBuffer;
-    BufferHandle particleAttractorBuffer;
-    Uint32 particleCount = 0;
-    bool particleSystemEnabled = true;
+    BufferHandle particleAttractorBuffer;      // MAX_PARTICLE_ATTRACTORS elements
+    Uint32 particleCount = 0;          // = high-water mark of claimed slots; 0 = no ECS emitters yet
+    bool particleVisible = true; // hide toggle — gates render only, sim keeps running
+
+    // ECS particle slot management (first-fit free list).
+    struct ParticleSlotRange { uint32_t begin = 0, count = 0; };
+    std::vector<ParticleSlotRange> m_particleSlotFreeList;
+    bool m_particleFreeListInitialized = false;
+    ParticleForceField m_forceField; // set each frame by ParticleForceFieldSystem
+    bool m_particleSimPaused = false;
+
+    // Free-list helpers
+    uint32_t allocParticleSlots(uint32_t count);
+    void freeParticleSlots(uint32_t slotBegin, uint32_t count);
+    void ensureParticleFreeList();
     PipelineHandle shadowPipeline;
     ShaderHandle vertexShader;
     ShaderHandle fragmentShader;
