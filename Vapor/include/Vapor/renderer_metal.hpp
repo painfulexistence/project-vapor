@@ -493,15 +493,6 @@ public:
     void applyToneMapping(RenderTextureHandle target, float exposure = 1.0f) override;
     void applyVignette(RenderTextureHandle target, float strength = 0.3f, float radius = 0.8f) override;
 
-    // ===== ECS Particle Integration API =====
-    uint32_t claimParticleSlots(uint32_t count) override;
-    void releaseParticleSlots(uint32_t slotBegin, uint32_t count) override;
-    void uploadParticles(uint32_t slotBegin,
-                         const std::vector<GPUParticleData>& particles) override;
-    void setParticleForceField(const ParticleForceField& field) override;
-    void setParticleSimPaused(bool paused) override { m_particleSimPaused = paused; }
-    void setParticleVisible(bool visible) override { particleVisible = visible; }
-
     // ===== Font Rendering API =====
     FontHandle loadFont(const std::string& path, float baseSize) override;
     void unloadFont(FontHandle handle) override;
@@ -710,9 +701,9 @@ protected:
     NS::SharedPtr<MTL::Texture> environmentCubeMap;
 
     // Particle system
-    static constexpr Uint32 MAX_PARTICLES = 3'000'000;
-    bool particleVisible = true; // hide toggle — gates render only, sim keeps running
-    Uint32 particleCount = 0; // high-water mark of claimed slots; 0 until ECS claims
+    static constexpr Uint32 MAX_PARTICLES = 1000;// Reduced for debugging
+    bool particleSystemEnabled = true;
+    Uint32 particleCount = MAX_PARTICLES;
 
     NS::SharedPtr<MTL::ComputePipelineState> particleForcePipeline;
     NS::SharedPtr<MTL::ComputePipelineState> particleIntegratePipeline;
@@ -723,19 +714,7 @@ protected:
     NS::SharedPtr<MTL::Buffer> particleBuffer;
     // Per-frame uniform buffers (triple-buffered)
     std::vector<NS::SharedPtr<MTL::Buffer>> particleSimParamsBuffers;
-    std::vector<NS::SharedPtr<MTL::Buffer>> particleAttractorBuffers; // MAX_PARTICLE_ATTRACTORS elements each
-
-    // ECS particle slot management (first-fit free list)
-    struct ParticleSlotRange { uint32_t begin = 0, count = 0; };
-    std::vector<ParticleSlotRange> m_particleSlotFreeList;
-    bool m_particleFreeListInitialized = false;
-    ParticleForceField m_forceField; // set each frame by ParticleForceFieldSystem
-    bool m_particleSimPaused = false;
-
-    // Free-list helpers
-    uint32_t allocParticleSlots(uint32_t count);
-    void freeParticleSlots(uint32_t slotBegin, uint32_t count);
-    void ensureParticleFreeList();
+    std::vector<NS::SharedPtr<MTL::Buffer>> particleAttractorBuffers;
 
     // Per-frame buffers
     std::vector<NS::SharedPtr<MTL::Buffer>> frameDataBuffers;
