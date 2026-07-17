@@ -1071,17 +1071,6 @@ void Renderer::setupDefaultRenderGraph() {
     // GIBS surfel GI (generation -> hash -> RT -> temporal -> gather).
     renderGraph.addPass("GIBS",
         [](Renderer& r) { r.gibsPass(); }, PassFlags::RequiresRaytracing);
-    // ========================================================================
-    // DIAGNOSTIC (isolation experiment — revert after the verdict): the RT
-    // reflection/refraction passes are REMOVED from the graph entirely, so no
-    // reflection code dispatches at all this build. Compare the Normal RT /
-    // Albedo RT / Shadow RT previews against the previous build:
-    //   - previews come back clean  -> the reflection pass IS the contaminator
-    //     (mechanism hunt follows: magenta-tracer build next).
-    //   - previews unchanged        -> the reflection pass is exonerated by
-    //     experiment; the contamination predates this PR's passes.
-    // ========================================================================
-#if 0
     // Mirror reflections trace against the TLAS and shade hits from the GIBS
     // surfel cache — must run after GIBS so this frame's surfel state is live.
     renderGraph.addPass("RaytraceReflection",
@@ -1092,7 +1081,6 @@ void Renderer::setupDefaultRenderGraph() {
     // material transmits.
     renderGraph.addPass("RaytraceRefraction",
         [](Renderer& r) { r.raytraceRefractionPass(); }, PassFlags::RequiresRaytracing);
-#endif
 
     // Main geometry pass: renders to colorRT when a post-process pipeline
     // Directional shadow depth (single cascade) before the main lighting pass.
