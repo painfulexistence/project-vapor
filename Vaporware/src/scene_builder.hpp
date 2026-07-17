@@ -115,6 +115,9 @@ inline SceneResources buildScene(
         dl.direction  = glm::normalize(glm::vec3(0.5f, -1.0f, 0.0f));
         dl.color      = glm::vec3(1.0f, 1.0f, 1.0f);
         dl.intensity  = 10.0f;
+        // Mark this as the authoritative sun so LightGatherSystem places it at
+        // directionalLights[0], where the atmosphere/sky and shadows read it.
+        registry.emplace<Vapor::SunComponent>(sunLight);
 
         auto& logic         = registry.emplace<DirectionalLightLogicComponent>(sunLight);
         logic.baseDirection = glm::vec3(0.5f, -1.0f, 0.0f);

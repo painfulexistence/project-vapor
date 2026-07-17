@@ -271,69 +271,93 @@ namespace Vapor {
     };
 
     // ============================================================================
-    // 光照移動系統 - Logic Driver
+    // 光照收集系統 - gathers ECS light components into the scene's render lists
     // ============================================================================
-    // NOTE: This system is commented out because it uses game-specific component types
-    // (LightMovementLogicComponent, SceneLightReferenceComponent, MovementPattern) that
-    // are not defined in the engine. The game provides its own LightMovementSystem in
-    // Vaporware/src/systems.hpp that handles light movement.
-    /*
-    class LightMovementSystem {
+    // The registry is the single source of truth for lights: authoring lives on
+    // per-entity light components, and this system rebuilds the scene's transient
+    // render lists from them every frame (they are never authored on the Scene).
+    // The SunComponent-tagged directional light is gathered into index 0, which
+    // the atmosphere/sky and shadow paths treat as the authoritative sun.
+    class LightGatherSystem {
     public:
-        static void update(entt::registry& registry, Scene* scene, float deltaTime) {
-            auto view = registry.view<LightMovementLogicComponent>();
+        static void update(entt::registry& reg, Scene* scene) {
+            if (!scene) return;
 
-            for (auto entity : view) {
-                auto& logic = view.get<LightMovementLogicComponent>(entity);
+            // Point lights: position from the transform.
+            scene->pointLights.clear();
+            auto pointView = reg.view<PointLightComponent, TransformComponent>();
+            for (auto entity : pointView) {
+                const auto& light     = pointView.get<PointLightComponent>(entity);
+                const auto& transform = pointView.get<TransformComponent>(entity);
+                scene->pointLights.push_back({
+                    .position  = transform.position,
+                    .color     = light.color,
+                    .intensity = light.intensity,
+                    .radius    = light.radius,
+                });
+            }
 
-                auto* ref = registry.try_get<SceneLightReferenceComponent>(entity);
-                if (!ref || ref->lightIndex < 0 || ref->lightIndex >= scene->pointLights.size()) {
-                    continue;
-                }
+            // Directional lights: the SunComponent-tagged entity (if any) is
+            // emitted first so it lands at directionalLights[0] regardless of
+            // registry iteration order.
+            scene->directionalLights.clear();
+            entt::entity sunEntity = entt::null;
+            auto sunView = reg.view<DirectionalLightComponent, SunComponent>();
+            for (auto entity : sunView) { sunEntity = entity; break; }
+            auto pushDirectional = [&](const DirectionalLightComponent& light) {
+                scene->directionalLights.push_back({
+                    .direction = light.direction,
+                    .color     = light.color,
+                    .intensity = light.intensity,
+                });
+            };
+            if (sunEntity != entt::null) {
+                pushDirectional(reg.get<DirectionalLightComponent>(sunEntity));
+            }
+            auto dirView = reg.view<DirectionalLightComponent>();
+            for (auto entity : dirView) {
+                if (entity == sunEntity) continue;
+                pushDirectional(dirView.get<DirectionalLightComponent>(entity));
+            }
 
-                // Update timer
-                logic.timer += deltaTime * logic.speed;
-                float t = logic.timer;
+            // Spot lights: position from the transform, beam along its forward
+            // axis (rotation * -Z), degree angles converted to cosines for the GPU.
+            scene->spotLights.clear();
+            auto spotView = reg.view<SpotLightComponent, TransformComponent>();
+            for (auto entity : spotView) {
+                const auto& light     = spotView.get<SpotLightComponent>(entity);
+                const auto& transform = spotView.get<TransformComponent>(entity);
+                SpotLight sl{};
+                sl.position  = transform.position;
+                sl.direction = glm::normalize(transform.rotation * glm::vec3(0.0f, 0.0f, -1.0f));
+                sl.color     = light.color;
+                sl.intensity = light.intensity;
+                sl.radius    = light.radius;
+                sl.cosInner  = std::cos(glm::radians(light.innerAngle));
+                sl.cosOuter  = std::cos(glm::radians(light.outerAngle));
+                scene->spotLights.push_back(sl);
+            }
 
-                glm::vec3 newPos(0.0f);
-
-                switch (logic.pattern) {
-                case MovementPattern::Circle:
-                    newPos.x = logic.radius * cos(t);
-                    newPos.z = logic.radius * sin(t);
-                    newPos.y = logic.height + 0.5f * sin(t * 0.5f);
-                    break;
-
-                case MovementPattern::Figure8:
-                    newPos.x = (logic.radius + 1.0f) * sin(t * 0.7f);
-                    newPos.z = (logic.radius + 1.0f) * sin(t * 0.7f) * cos(t * 0.7f);
-                    newPos.y = 1.0f + 1.0f * cos(t * 0.3f);
-                    break;
-
-                case MovementPattern::Linear:
-                    newPos.x = (logic.radius + 1.0f) * sin(t * 0.6f);
-                    newPos.z = 2.0f * cos(t * 0.8f);
-                    newPos.y = 0.5f + 2.0f * abs(sin(t * 0.4f));
-                    break;
-
-                case MovementPattern::Spiral: {
-                    float spiralRadius = 2.0f + 1.0f * sin(t * 0.2f);
-                    newPos.x = spiralRadius * cos(t * 0.5f);
-                    newPos.z = spiralRadius * sin(t * 0.5f);
-                    newPos.y = 0.5f + 2.5f * (1.0f - cos(t * 0.3f));
-                    break;
-                }
-                }
-
-                // Direct write to Scene
-                scene->pointLights[ref->lightIndex].position = newPos;
-
-                // Optional: Update intensity logic if needed (keeping it simple for now)
-                scene->pointLights[ref->lightIndex].intensity = 3.0f + 2.0f * (0.5f + 0.5f * sin(t * 0.3f));
+            // Rect area lights: quad axes from the transform's rotation (right =
+            // +X, up = +Y), half-extents from the component size.
+            scene->rectLights.clear();
+            auto rectView = reg.view<RectLightComponent, TransformComponent>();
+            for (auto entity : rectView) {
+                const auto& light     = rectView.get<RectLightComponent>(entity);
+                const auto& transform = rectView.get<TransformComponent>(entity);
+                RectLight rl{};
+                rl.position       = transform.position;
+                rl.right          = glm::normalize(transform.rotation * glm::vec3(1.0f, 0.0f, 0.0f));
+                rl.up             = glm::normalize(transform.rotation * glm::vec3(0.0f, 1.0f, 0.0f));
+                rl.halfWidth      = light.size.x * 0.5f;
+                rl.halfHeight     = light.size.y * 0.5f;
+                rl.color          = light.color;
+                rl.intensity      = light.intensity;
+                rl.useVideoTexture = light.useVideoTexture ? 1u : 0u;
+                scene->rectLights.push_back(rl);
             }
         }
     };
-    */
 
     // ============================================================================
     // 相機系統

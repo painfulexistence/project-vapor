@@ -42,6 +42,7 @@ static void setupCustomDrawers(Vapor::SceneInspector& inspector) {
     inspector.registerComponent<SpotLightComponent>("Spot Light");
     inspector.registerComponent<Vapor::RectLightComponent>("Rect Light");
     inspector.registerComponent<DirectionalLightComponent>("Directional Light");
+    inspector.registerComponent<Vapor::SunComponent>("Sun");
     inspector.registerComponent<CharacterIntent>("Character Intent");
     inspector.registerComponent<CharacterControllerComponent>("Character Controller");
     inspector.registerComponent<GrabbableComponent>("Grabbable");
@@ -625,7 +626,7 @@ auto main(int argc, char* args[]) -> int {
         Vapor::ParticleForceFieldSystem::update(registry, renderer.get());
         if (!particlePaused)
             Vapor::ParticleEmitterSystem::update(registry, renderer.get(), deltaTime, particleEmissionEnabled);
-        LightGatherSystem::update(registry, scene.get());
+        Vapor::LightGatherSystem::update(registry, scene.get());
         FlipbookSystem::update(registry, deltaTime);
         SpriteRenderSystem::update(registry, renderer.get(), &resourceManager);
 
