@@ -64,7 +64,12 @@ layout(push_constant) uniform PushConstants {
 };
 
 void main() {
-    InstanceData inst = instances[instanceID];
+    // instanceID + gl_InstanceIndex: the normal/per-object paths pass the index
+    // via the push constant and draw with firstInstance = 0, so gl_InstanceIndex
+    // is 0 (a no-op). Single-call multi-draw indirect can't set a per-object
+    // push constant, so it passes instanceID = 0 and carries the index in the
+    // draw command's firstInstance, which surfaces as gl_InstanceIndex.
+    InstanceData inst = instances[instanceID + gl_InstanceIndex];
     mat4 model = inst.model;
 
     mat3 normalMatrix = transpose(inverse(mat3(model)));

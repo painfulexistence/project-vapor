@@ -209,18 +209,22 @@ vertex RasterizerData vertexMain(
     constant MaterialData*  materials [[buffer(1)]],
     constant InstanceData*  instances [[buffer(2)]],
     device const VertexData* in       [[buffer(3)]],
-    constant uint& instanceID         [[buffer(4)]]
+    constant uint& instanceID         [[buffer(4)]],
+    uint baseInstance [[base_instance]]
 ) {
     RasterizerData vert;
-    uint actual    = instances[instanceID].vertexOffset + vertexID;
-    float4x4 model = instances[instanceID].model;
+    // Effective instance index (see 3d_pbr_normal_mapped.metal): baseInstance is
+    // 0 for normal/per-object draws; single-call MDI carries the index there.
+    uint iid = instanceID + baseInstance;
+    uint actual    = instances[iid].vertexOffset + vertexID;
+    float4x4 model = instances[iid].model;
     float3x3 N     = transpose(inverse(float3x3(model[0].xyz, model[1].xyz, model[2].xyz)));
     vert.worldNormal   = float4(N * float3(in[actual].normal), 0.0);
     vert.worldTangent  = float4(N * in[actual].tangent.xyz, in[actual].tangent.w);
     vert.worldPosition = model * float4(in[actual].position, 1.0);
     vert.position      = camera.proj * camera.view * vert.worldPosition;
     vert.uv            = in[actual].uv;
-    vert.material      = materials[instances[instanceID].materialID];
+    vert.material      = materials[instances[iid].materialID];
     float3 scale       = float3(length(model[0].xyz), length(model[1].xyz), length(model[2].xyz));
     vert.scaledLocalPos = float3(in[actual].position) * scale;
     vert.localNormal    = float3(in[actual].normal);

@@ -2,6 +2,45 @@
 using namespace metal;
 #include "Res/shaders/3d_common.metal" // TODO: use more robust include path
 
+// Bindless-materials specialization (the ICB draw mode). When the pipeline is
+// built with kBindlessMaterials=true (function constant 0, RHI
+// ShaderDesc::bindlessMaterials), the fragment reads its six material textures
+// from the argument table at buffer(13) indexed by the materialID varying,
+// instead of the per-draw bound slots 0-5 — required because a single
+// executeCommandsInBuffer can't rebind textures between draws. Unspecialized
+// pipelines see the constant as undefined -> false and keep the bound path.
+constant bool kBindlessMaterialsSet [[function_constant(0)]];
+constant bool kBindlessMaterials = is_function_constant_defined(kBindlessMaterialsSet) && kBindlessMaterialsSet;
+constant bool kBoundMaterials = !kBindlessMaterials;
+
+// One entry per material in the bindless table (matches the RHI's
+// createTextureArgumentTable(..., texturesPerEntry=6) slot order).
+struct MaterialTexs {
+    texture2d<float, access::sample> albedo    [[id(0)]];
+    texture2d<float, access::sample> normal    [[id(1)]];
+    texture2d<float, access::sample> metallic  [[id(2)]];
+    texture2d<float, access::sample> roughness [[id(3)]];
+    texture2d<float, access::sample> occlusion [[id(4)]];
+    texture2d<float, access::sample> emissive  [[id(5)]];
+};
+
+// The bindless variant must take EVERY texture through argument buffers: a
+// pipeline built with supportIndirectCommandBuffers rejects any direct
+// texture/sampler argument on the fragment function ("Fragment shader cannot
+// be used with indirect command buffers"). This single-entry table carries the
+// per-frame system textures (slot order = the renderer's Metal contract 6-15).
+struct SystemTexs {
+    texture2d<float, access::sample>     texAO          [[id(0)]];
+    texture2d<float, access::sample>     texShadow      [[id(1)]];
+    texturecube<float, access::sample>   irradianceMap  [[id(2)]];
+    texturecube<float, access::sample>   prefilterMap   [[id(3)]];
+    texture2d<float, access::sample>     brdfLUT        [[id(4)]];
+    texture2d<float, access::sample>     rectLightVideo [[id(5)]];
+    depth2d_array<float, access::sample> pssmShadowMaps [[id(6)]];
+    texture2d<float, access::sample>     texPointShadow [[id(7)]];
+    texture2d<float, access::sample>     gibsGI         [[id(8)]];
+    texture2d<float, access::sample>     texSSCS        [[id(9)]];
+};
 
 struct RasterizerData {
     float4 position [[position]];
@@ -12,6 +51,7 @@ struct RasterizerData {
     float3 scaledLocalPos;
     float3 localNormal;
     MaterialData material;
+    uint materialID [[flat]];  // bindless table index (ICB mode)
 };
 
 struct Surface {
@@ -340,11 +380,17 @@ vertex RasterizerData vertexMain(
     constant MaterialData* materials [[buffer(1)]],
     constant InstanceData* instances [[buffer(2)]],
     device const VertexData* in [[buffer(3)]],
-    constant uint& instanceID [[buffer(4)]]
+    constant uint& instanceID [[buffer(4)]],
+    uint baseInstance [[base_instance]]
 ) {
     RasterizerData vert;
-    uint actualVertexID = instances[instanceID].vertexOffset + vertexID;
-    float4x4 model = instances[instanceID].model;
+    // Effective instance index. Normal/per-object draws pass it via buffer(4)
+    // with baseInstance 0 (no-op); single-call MDI can't set a per-object
+    // constant, so it passes instanceID 0 and carries the index in the draw
+    // command's baseInstance.
+    uint iid = instanceID + baseInstance;
+    uint actualVertexID = instances[iid].vertexOffset + vertexID;
+    float4x4 model = instances[iid].model;
     float3x3 normalMatrix = transpose(inverse(float3x3(
         model[0].xyz,
         model[1].xyz,
@@ -356,7 +402,8 @@ vertex RasterizerData vertexMain(
     vert.worldPosition = model * float4(in[actualVertexID].position, 1.0);
     vert.position = camera.proj * camera.view * vert.worldPosition;
     vert.uv = in[actualVertexID].uv;
-    vert.material = materials[instances[instanceID].materialID];
+    vert.material = materials[instances[iid].materialID];
+    vert.materialID = instances[iid].materialID;
     
     // Pass scaled local position and local normal for Object Space Triplanar
     float3 scale = float3(length(model[0].xyz), length(model[1].xyz), length(model[2].xyz));
@@ -368,22 +415,30 @@ vertex RasterizerData vertexMain(
 
 fragment float4 fragmentMain(
     RasterizerData in [[stage_in]],
-    texture2d<float, access::sample> texAlbedo [[texture(0)]],
-    texture2d<float, access::sample> texNormal [[texture(1)]],
-    texture2d<float, access::sample> texMetallic [[texture(2)]],
-    texture2d<float, access::sample> texRoughness [[texture(3)]],
-    texture2d<float, access::sample> texOcclusion [[texture(4)]],
-    texture2d<float, access::sample> texEmissive [[texture(5)]],
-    texture2d<float, access::sample> texAO [[texture(6)]],
-    texture2d<float, access::sample> texShadow [[texture(7)]],
-    texturecube<float, access::sample> irradianceMap [[texture(8)]],
-    texturecube<float, access::sample> prefilterMap [[texture(9)]],
-    texture2d<float, access::sample> brdfLUT [[texture(10)]],
-    texture2d<float, access::sample> rectLightVideo [[texture(11)]],
-    depth2d_array<float, access::sample> pssmShadowMaps [[texture(12)]],
-    texture2d<float, access::sample> texPointShadow [[texture(13)]],
-    texture2d<float, access::sample> gibsGI [[texture(14)]], // GIBS indirect lighting
-    texture2d<float, access::sample> texSSCS [[texture(15)]], // screen-space contact shadow
+    // Per-draw material textures — bound path only. The bindless
+    // specialization disables these and reads materialTexs instead.
+    texture2d<float, access::sample> texAlbedo [[texture(0), function_constant(kBoundMaterials)]],
+    texture2d<float, access::sample> texNormal [[texture(1), function_constant(kBoundMaterials)]],
+    texture2d<float, access::sample> texMetallic [[texture(2), function_constant(kBoundMaterials)]],
+    texture2d<float, access::sample> texRoughness [[texture(3), function_constant(kBoundMaterials)]],
+    texture2d<float, access::sample> texOcclusion [[texture(4), function_constant(kBoundMaterials)]],
+    texture2d<float, access::sample> texEmissive [[texture(5), function_constant(kBoundMaterials)]],
+    const device MaterialTexs* materialTexs [[buffer(13), function_constant(kBindlessMaterials)]],
+    // System textures (Metal contract slots 6-15). Direct arguments on the
+    // bound path only; the bindless path reads the same set from systemTexs
+    // (locals with the original names are resolved at the top of the body, so
+    // everything below is shared).
+    texture2d<float, access::sample> texAOArg [[texture(6), function_constant(kBoundMaterials)]],
+    texture2d<float, access::sample> texShadowArg [[texture(7), function_constant(kBoundMaterials)]],
+    texturecube<float, access::sample> irradianceMapArg [[texture(8), function_constant(kBoundMaterials)]],
+    texturecube<float, access::sample> prefilterMapArg [[texture(9), function_constant(kBoundMaterials)]],
+    texture2d<float, access::sample> brdfLUTArg [[texture(10), function_constant(kBoundMaterials)]],
+    texture2d<float, access::sample> rectLightVideoArg [[texture(11), function_constant(kBoundMaterials)]],
+    depth2d_array<float, access::sample> pssmShadowMapsArg [[texture(12), function_constant(kBoundMaterials)]],
+    texture2d<float, access::sample> texPointShadowArg [[texture(13), function_constant(kBoundMaterials)]],
+    texture2d<float, access::sample> gibsGIArg [[texture(14), function_constant(kBoundMaterials)]], // GIBS indirect lighting
+    texture2d<float, access::sample> texSSCSArg [[texture(15), function_constant(kBoundMaterials)]], // screen-space contact shadow
+    const device SystemTexs* systemTexs [[buffer(14), function_constant(kBindlessMaterials)]],
     const device DirLight* directionalLights [[buffer(0)]],
     const device PointLight* pointLights [[buffer(1)]],
     const device Cluster* clusters [[buffer(2)]],
@@ -410,6 +465,30 @@ fragment float4 fragmentMain(
 
     MaterialData material = in.material;
 
+    // Resolve the material texture set once: bound slots (normal path) or the
+    // bindless table entry for this fragment's material (ICB path). The dead
+    // branch references a disabled argument, which is legal — it's eliminated
+    // when the function constant is folded at pipeline build.
+    texture2d<float, access::sample> matAlbedo    = kBindlessMaterials ? materialTexs[in.materialID].albedo    : texAlbedo;
+    texture2d<float, access::sample> matNormal    = kBindlessMaterials ? materialTexs[in.materialID].normal    : texNormal;
+    texture2d<float, access::sample> matMetallic  = kBindlessMaterials ? materialTexs[in.materialID].metallic  : texMetallic;
+    texture2d<float, access::sample> matRoughness = kBindlessMaterials ? materialTexs[in.materialID].roughness : texRoughness;
+    texture2d<float, access::sample> matOcclusion = kBindlessMaterials ? materialTexs[in.materialID].occlusion : texOcclusion;
+    texture2d<float, access::sample> matEmissive  = kBindlessMaterials ? materialTexs[in.materialID].emissive  : texEmissive;
+
+    // System textures under their original names — the rest of the body (and
+    // its lambdas/helper calls) is identical on both paths.
+    texture2d<float, access::sample>     texAO          = kBindlessMaterials ? systemTexs->texAO          : texAOArg;
+    texture2d<float, access::sample>     texShadow      = kBindlessMaterials ? systemTexs->texShadow      : texShadowArg;
+    texturecube<float, access::sample>   irradianceMap  = kBindlessMaterials ? systemTexs->irradianceMap  : irradianceMapArg;
+    texturecube<float, access::sample>   prefilterMap   = kBindlessMaterials ? systemTexs->prefilterMap   : prefilterMapArg;
+    texture2d<float, access::sample>     brdfLUT        = kBindlessMaterials ? systemTexs->brdfLUT        : brdfLUTArg;
+    texture2d<float, access::sample>     rectLightVideo = kBindlessMaterials ? systemTexs->rectLightVideo : rectLightVideoArg;
+    depth2d_array<float, access::sample> pssmShadowMaps = kBindlessMaterials ? systemTexs->pssmShadowMaps : pssmShadowMapsArg;
+    texture2d<float, access::sample>     texPointShadow = kBindlessMaterials ? systemTexs->texPointShadow : texPointShadowArg;
+    texture2d<float, access::sample>     gibsGI         = kBindlessMaterials ? systemTexs->gibsGI         : gibsGIArg;
+    texture2d<float, access::sample>     texSSCS        = kBindlessMaterials ? systemTexs->texSSCS        : texSSCSArg;
+
     // Prototype UV: triplanar mapping with world space or object space
     // Mode: 0 = Off, 1 = World Space (static objects), 2 = Object Space (dynamic objects)
     if (material.prototypeUVMode > 0.5) {
@@ -435,20 +514,20 @@ fragment float4 fragmentMain(
         }
     }
 
-    float4 baseColor = texAlbedo.sample(s, in.uv);
+    float4 baseColor = matAlbedo.sample(s, in.uv);
     if (baseColor.a * material.baseColorFactor.a < 0.5) {
         discard_fragment();
     }
     Surface surf;
     surf.color = srgbToLinear(baseColor.rgb * material.baseColorFactor.rgb);
-    surf.ao = texOcclusion.sample(s, in.uv).r * material.occlusionStrength;
-    surf.roughness = texRoughness.sample(s, in.uv).g * material.roughnessFactor;
-    surf.metallic = texMetallic.sample(s, in.uv).b * material.metallicFactor;
+    surf.ao = matOcclusion.sample(s, in.uv).r * material.occlusionStrength;
+    surf.roughness = matRoughness.sample(s, in.uv).g * material.roughnessFactor;
+    surf.metallic = matMetallic.sample(s, in.uv).b * material.metallicFactor;
     // Emissive is an sRGB-authored colour (like albedo) — linearize it before
     // it joins the linear lighting sum. (Was linearToSRGB, the wrong direction:
     // that re-encodes toward sRGB and brightens; the sRGB->linear encode
     // belongs only at the final output, which PostProcess/the swapchain do.)
-    surf.emission = srgbToLinear(texEmissive.sample(s, in.uv).rgb * material.emissiveFactor) * material.emissiveStrength;
+    surf.emission = srgbToLinear(matEmissive.sample(s, in.uv).rgb * material.emissiveFactor) * material.emissiveStrength;
     surf.subsurface = material.subsurface;
     surf.specular = material.specular;
     surf.specular_tint = material.specularTint;
@@ -463,7 +542,7 @@ fragment float4 fragmentMain(
     T = normalize(T - dot(T, N) * N);
     float3 B = normalize(cross(N, T) * in.worldTangent.w);
     float3x3 TBN = float3x3(T, B, N);
-    float3 norm = normalize(TBN * normalize(texNormal.sample(s, in.uv).rgb * 2.0 - 1.0));
+    float3 norm = normalize(TBN * normalize(matNormal.sample(s, in.uv).rgb * 2.0 - 1.0));
     float3 viewDir = normalize(camera.position - in.worldPosition.xyz);
 
     float2 screenUV = in.position.xy / screenSize;
