@@ -52,6 +52,26 @@ static void setupCustomDrawers(Vapor::SceneInspector& inspector) {
     inspector.registerComponent<ChapterTitleTriggerComponent>("Chapter Title Trigger");
     inspector.registerComponent<SceneTransitionComponent>("Scene Transition");
     inspector.registerComponent<ScrollTextQueueComponent>("Scroll Text Queue");
+    inspector.registerComponent<Vapor::ParticleEmitterComponent>("Particle Emitter");
+    inspector.registerComponent<Vapor::ParticleAttractorComponent>("Particle Attractor");
+    inspector.registerComponent<Vapor::WindFieldComponent>("Wind Field");
+    inspector.registerComponent<Vapor::ParticleBurstRequest>("Particle Burst");
+    inspector.registerComponent<Vapor::SpellBoltComponent>("Spell Bolt");
+
+    // ParticleRendererComponent — custom drawer for the named blend-mode combo.
+    inspector.registerCustomDrawer([](entt::registry& reg, entt::entity e) {
+        if (auto* c = reg.try_get<Vapor::ParticleRendererComponent>(e)) {
+            if (ImGui::CollapsingHeader("Particle Renderer", ImGuiTreeNodeFlags_DefaultOpen)) {
+                const char* blends[] = { "Additive", "AlphaBlend", "Multiply" };
+                int b = static_cast<int>(c->blendMode);
+                if (ImGui::Combo("blend", &b, blends, 3))
+                    c->blendMode = static_cast<Vapor::ParticleBlendMode>(b);
+                ImGui::DragFloat("size", &c->size, 0.005f, 0.005f, 2.0f);
+                if (c->texture == 0xFFFFFFFFu) ImGui::LabelText("texture", "(procedural)");
+                else                           ImGui::LabelText("texture", "%u", c->texture);
+            }
+        }
+    });
 
     // LightMovementLogicComponent — keep custom drawer for the named Pattern combo.
     inspector.registerCustomDrawer([](entt::registry& reg, entt::entity e) {
@@ -350,9 +370,55 @@ auto main(int argc, char* args[]) -> int {
         engineCore->attachRenderer(renderer.get(), outputDir);
     }
 
+    // System-level particle state the game layer owns (must reach both the GPU
+    // sim and the CPU-side ECS timers). Surfaced as transport controls in the
+    // Systems > Particles panel below:
+    //   particlePaused          — freezes the GPU sim AND the CPU reclaim/emission
+    //                             timers; frozen particles neither age nor reclaim.
+    //   particleEmissionEnabled — graceful stop: existing particles finish, no new
+    //                             ones spawn.
+    //   particleVisible         — render on/off (sim keeps running).
+    bool particlePaused = false;
+    bool particleEmissionEnabled = true;
+    bool particleVisible = true;
+
+    // "Systems" section under Application > Scene. System-level (global) controls
+    // that don't belong in the per-entity inspector. Hardcoded to particles for
+    // now; a real system inspector would enumerate registered systems.
+    sceneInspector.setSystemsDrawer([&](entt::registry&) {
+        if (ImGui::TreeNode("Particles")) {
+            ImGui::Checkbox("Visible", &particleVisible);
+
+            // Transport controls. Pause freezes the sim (and CPU reclaim/emission
+            // timers); Resume returns to normal running (unpause + re-enable
+            // emission); Stop is a graceful emission halt — existing particles
+            // finish, no new ones spawn.
+            const bool running = !particlePaused && particleEmissionEnabled;
+
+            ImGui::BeginDisabled(particlePaused);
+            if (ImGui::Button("Pause")) particlePaused = true;
+            ImGui::EndDisabled();
+
+            ImGui::SameLine();
+            ImGui::BeginDisabled(running);
+            if (ImGui::Button("Resume")) { particlePaused = false; particleEmissionEnabled = true; }
+            ImGui::EndDisabled();
+
+            ImGui::SameLine();
+            ImGui::BeginDisabled(!particleEmissionEnabled);
+            if (ImGui::Button("Stop")) particleEmissionEnabled = false;
+            ImGui::EndDisabled();
+
+            ImGui::TreePop();
+        }
+    });
+
     renderer->setImGuiCallback([&]() {
         sceneInspector.draw(registry);
     });
+
+    // Return (and zero-clear) particle slots when an emitter entity is destroyed.
+    Vapor::ParticleEmitterSystem::attach(registry, renderer.get());
 
     auto [sceneBuilt, materialBuilt, cube1, global] =
         buildScene(registry, *physics, scene, material, windowWidth, windowHeight, rng);
@@ -567,6 +633,16 @@ auto main(int argc, char* args[]) -> int {
 
         physics->process(registry, deltaTime);
         Vapor::TransformSystem::update(registry);
+        // Pause freezes the GPU sim (renderer) and the CPU-side emitter/reclaim
+        // timers (skip the system entirely) so nothing advances while paused.
+        renderer->setParticleSimPaused(particlePaused);
+        renderer->setParticleVisible(particleVisible);
+        Vapor::ParticleForceFieldSystem::update(registry, renderer.get());
+        if (!particlePaused)
+            Vapor::ParticleEmitterSystem::update(registry, renderer.get(), deltaTime, particleEmissionEnabled);
+        // Gather per-emitter draw packets (blend/texture/size). Runs even while
+        // paused — frozen particles still need their draw list.
+        Vapor::ParticleRenderSystem::update(registry, renderer.get());
         LightGatherSystem::update(registry, scene.get());
         FlipbookSystem::update(registry, deltaTime);
         SpriteRenderSystem::update(registry, renderer.get(), &resourceManager);

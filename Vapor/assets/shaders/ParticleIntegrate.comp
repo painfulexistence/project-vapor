@@ -2,23 +2,25 @@
 layout(local_size_x = 256, local_size_y = 1, local_size_z = 1) in;
 
 struct Particle {
-    vec3 position;
-    float _pad1;
-    vec3 velocity;
-    float _pad2;
-    vec3 force;
+    vec3  position;
+    float lifetime; // -1 = immortal; ≥ 0 = max seconds alive
+    vec3  velocity;
+    float age;      // seconds since spawn
+    vec3  force;
     float _pad3;
-    vec4 color;
+    vec4  color;
 };
 
 // SSBO (not UBO): the RHI compute descriptor set is all storage buffers.
 layout(std430, set = 0, binding = 0) readonly buffer SimulationParams {
-    vec2 resolution;
-    vec2 mousePosition;
+    vec2  resolution;
+    vec2  mousePosition;
     float time;
     float deltaTime;
-    float _pad1;
-    float _pad2;
+    uint  particleCount;
+    uint  attractorCount;
+    vec4  wind;
+    vec4  turbulence;
 };
 
 layout(std430, set = 0, binding = 2) buffer ParticleBuffer {
@@ -27,24 +29,35 @@ layout(std430, set = 0, binding = 2) buffer ParticleBuffer {
 
 void main() {
     uint idx = gl_GlobalInvocationID.x;
-    if (idx >= particles.length()) {
-        return;
-    }
+    if (idx >= particleCount) return;
 
     Particle p = particles[idx];
+
+    // Advance age; leave dead particles at their final position (force=0 in Force pass)
+    if (p.lifetime >= 0.0) {
+        p.age += deltaTime;
+        if (p.age >= p.lifetime) {
+            particles[idx] = p;
+            return;
+        }
+        // Fade alpha in last 30% of life
+        float frac = p.age / p.lifetime;
+        if (frac > 0.7) p.color.a = 1.0 - (frac - 0.7) / 0.3;
+    }
 
     // Semi-implicit Euler integration
     p.velocity += p.force * deltaTime;
     p.position += p.velocity * deltaTime;
 
-    // Boundary conditions (keep particles in a sphere)
-    float maxDist = 20.0;
-    float dist = length(p.position);
-    if (dist > maxDist) {
-        p.position = normalize(p.position) * maxDist;
-        // Reflect velocity
-        vec3 normal = normalize(p.position);
-        p.velocity = reflect(p.velocity, normal) * 0.5;
+    // Boundary conditions (keep orbital demo particles in a sphere)
+    if (p.lifetime < 0.0) {
+        float maxDist = 20.0;
+        float dist = length(p.position);
+        if (dist > maxDist) {
+            p.position = normalize(p.position) * maxDist;
+            vec3 normal = normalize(p.position);
+            p.velocity = reflect(p.velocity, normal) * 0.5;
+        }
     }
 
     particles[idx] = p;

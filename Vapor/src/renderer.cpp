@@ -3630,62 +3630,103 @@ void Renderer::velocityPass() {
 }
 
 // GPU particle system: simulate (force -> integrate compute) then render as
-// instanced additive billboards into colorRT. A self-contained orbital demo.
+// instanced billboards into colorRT — one draw per ParticleDrawPacket, each
+// with its own blend pipeline + texture (per-material draws).
 void Renderer::particlePass() {
-    if (!particleSystemEnabled || particleCount == 0) return;
+    if (particleCount == 0) return;
     if (!particleForcePipeline.isValid() || !particleIntegratePipeline.isValid() ||
-        !particleRenderPipeline.isValid() || !particleBuffer.isValid()) {
+        !particleRenderPipelines[0].isValid() || !particleBuffer.isValid()) {
         return;
     }
 
-    // Per-frame sim params + attractor (attractor sits in front of the camera).
-    ParticleSimParams sp;
-    sp.resolution = glm::vec2(rhi->getSwapchainWidth(), rhi->getSwapchainHeight());
-    sp.time = float(frameCounter) / 60.0f;
-    sp.deltaTime = 1.0f / 60.0f;
-    sp.particleCount = particleCount;  // Metal kernels bounds-check on this
-    rhi->updateBuffer(particleSimParamsBuffer, &sp, 0, sizeof(sp));
-
-    ParticleAttractor attr;
-    glm::vec3 forward = -glm::vec3(currentCamera.view[0][2], currentCamera.view[1][2], currentCamera.view[2][2]);
-    attr.position = currentCamera.position + forward * 3.0f;
-    attr.strength = 50.0f;
-    rhi->updateBuffer(particleAttractorBuffer, &attr, 0, sizeof(attr));
-
     const size_t bufBytes = sizeof(GPUParticleData) * particleCount;
     const Uint32 groups = (particleCount + 255) / 256;
-
     const bool metal = (backend == GraphicsBackend::Metal);
 
-    // Compute: force writes p.force, then integrate reads it -> barrier between.
-    // 3d_particle.metal orders the kernel buffers particles(0)/params(1)/
-    // attractor(2); the Vulkan .comp uses params(0)/attractor(1)/particles(2).
-    rhi->beginComputePass("ParticleSim");
-    rhi->bindComputePipeline(particleForcePipeline);
-    if (metal) {
-        rhi->setComputeBuffer(0, particleBuffer, 0, bufBytes);
-        rhi->setComputeBuffer(1, particleSimParamsBuffer, 0, sizeof(ParticleSimParams));
-        rhi->setComputeBuffer(2, particleAttractorBuffer, 0, sizeof(ParticleAttractor));
-    } else {
-        rhi->setComputeBuffer(0, particleSimParamsBuffer, 0, sizeof(ParticleSimParams));
-        rhi->setComputeBuffer(1, particleAttractorBuffer, 0, sizeof(ParticleAttractor));
-        rhi->setComputeBuffer(2, particleBuffer, 0, bufBytes);
-    }
-    rhi->dispatch(groups, 1, 1);
-    rhi->computeBarrier();
-    rhi->bindComputePipeline(particleIntegratePipeline);
-    if (metal) {
-        rhi->setComputeBuffer(0, particleBuffer, 0, bufBytes);
-        rhi->setComputeBuffer(1, particleSimParamsBuffer, 0, sizeof(ParticleSimParams));
-    } else {
-        rhi->setComputeBuffer(0, particleSimParamsBuffer, 0, sizeof(ParticleSimParams));
-        rhi->setComputeBuffer(2, particleBuffer, 0, bufBytes);
-    }
-    rhi->dispatch(groups, 1, 1);
-    rhi->endComputePass();
-    rhi->computeBarrier();  // sim writes -> vertex reads
+    // ── Simulate ──────────────────────────────────────────────────────────────
+    // Pause: skip the sim entirely — with deltaTime=0 the compute would be a
+    // no-op anyway, so we save the dispatch and just leave state frozen.
+    if (!m_particleSimPaused) {
+        ParticleSimParams sp;
+        sp.resolution = glm::vec2(rhi->getSwapchainWidth(), rhi->getSwapchainHeight());
+        sp.time = float(frameCounter) / 60.0f;
+        sp.deltaTime = 1.0f / 60.0f;
+        sp.particleCount = particleCount;
+        sp.wind      = m_forceField.wind;
+        sp.turbulence = glm::vec4(0.0f, 0.0f, 0.0f, m_forceField.turbulence);
 
-    // Render: instanced billboards (6 verts x particleCount) into colorRT+depth.
+        const auto& attractors = m_forceField.attractors;
+        sp.attractorCount = static_cast<Uint32>(attractors.size());
+        rhi->updateBuffer(particleSimParamsBuffer, &sp, 0, sizeof(sp));
+        if (!attractors.empty())
+            rhi->updateBuffer(particleAttractorBuffer, attractors.data(), 0,
+                              attractors.size() * sizeof(ParticleAttractor));
+
+        // Compute: force writes p.force, then integrate reads it -> barrier between.
+        // 3d_particle.metal orders the kernel buffers particles(0)/params(1)/
+        // attractor(2); the Vulkan .comp uses params(0)/attractor(1)/particles(2).
+        rhi->beginComputePass("ParticleSim");
+        rhi->bindComputePipeline(particleForcePipeline);
+        if (metal) {
+            rhi->setComputeBuffer(0, particleBuffer, 0, bufBytes);
+            rhi->setComputeBuffer(1, particleSimParamsBuffer, 0, sizeof(ParticleSimParams));
+            rhi->setComputeBuffer(2, particleAttractorBuffer, 0, sizeof(ParticleAttractor) * MAX_PARTICLE_ATTRACTORS);
+        } else {
+            rhi->setComputeBuffer(0, particleSimParamsBuffer, 0, sizeof(ParticleSimParams));
+            rhi->setComputeBuffer(1, particleAttractorBuffer, 0, sizeof(ParticleAttractor) * MAX_PARTICLE_ATTRACTORS);
+            rhi->setComputeBuffer(2, particleBuffer, 0, bufBytes);
+        }
+        rhi->dispatch(groups, 1, 1);
+        rhi->computeBarrier();
+        rhi->bindComputePipeline(particleIntegratePipeline);
+        if (metal) {
+            rhi->setComputeBuffer(0, particleBuffer, 0, bufBytes);
+            rhi->setComputeBuffer(1, particleSimParamsBuffer, 0, sizeof(ParticleSimParams));
+        } else {
+            rhi->setComputeBuffer(0, particleSimParamsBuffer, 0, sizeof(ParticleSimParams));
+            rhi->setComputeBuffer(2, particleBuffer, 0, bufBytes);
+        }
+        rhi->dispatch(groups, 1, 1);
+        rhi->endComputePass();
+        rhi->computeBarrier();  // sim writes -> vertex reads
+    }
+
+    // ── Render ────────────────────────────────────────────────────────────────
+    // Hide: skip drawing but keep simulating, so unhiding is seamless.
+    if (!particleVisible) return;
+
+    // Per-emitter draw list from ParticleRenderSystem. Fallback: one full-range
+    // additive draw when no packets were submitted (particles driven without
+    // the ECS render system).
+    std::vector<ParticleDrawPacket> fallbackDraws;
+    const std::vector<ParticleDrawPacket>* draws = &m_particleDrawList;
+    if (draws->empty()) {
+        ParticleDrawPacket all;
+        all.slotBegin = 0;
+        all.slotCount = particleCount;
+        fallbackDraws.push_back(all);
+        draws = &fallbackDraws;
+    }
+    const Uint32 drawTotal = static_cast<Uint32>(
+        std::min<size_t>(draws->size(), MAX_PARTICLE_DRAWS));
+
+    // Indirect mode (follows the GPU-driven toggle): draw args come from a
+    // buffer instead of CPU call parameters. The args are CPU-written today —
+    // the point is the submission path, so a later GPU compact/cull pass can
+    // overwrite instanceCount without touching this loop.
+    const bool indirect = gpuDrivenIndirect() && particleDrawArgsBuffer.isValid();
+    if (indirect) {
+        // VkDrawIndirectCommand == MTLDrawPrimitivesIndirectArguments (16 B).
+        struct DrawArgs { Uint32 vertexCount, instanceCount, firstVertex, firstInstance; };
+        DrawArgs args[MAX_PARTICLE_DRAWS];
+        for (Uint32 i = 0; i < drawTotal; ++i) {
+            const auto& p = (*draws)[i];
+            args[i] = { 6u, p.slotCount, 0u, p.slotBegin };
+        }
+        rhi->updateBuffer(particleDrawArgsBuffer, args, 0, sizeof(DrawArgs) * drawTotal);
+    }
+
+    // Instanced billboards (6 verts × slotCount per packet) into colorRT+depth.
     RenderPassDesc rp;
     rp.name = "Particles";
     rp.colorAttachments.push_back(colorRT);
@@ -3693,21 +3734,149 @@ void Renderer::particlePass() {
     rp.depthAttachment = depthStencilRT;
     rp.loadDepth = true;
     rhi->beginRenderPass(rp);
-    rhi->bindPipeline(particleRenderPipeline);
-    if (metal) {
-        // particleVertex: camera(0), ParticlePushConstants(1), particles(2).
-        rhi->setVertexBuffer(0, cameraUniformBuffer, 0, sizeof(CameraRenderData));
-        struct { float particleSize; float _pad[3]; } pc{ 0.1f, {0,0,0} };
-        rhi->setVertexBytes(&pc, sizeof(pc), 1);
-        rhi->setVertexBuffer(2, particleBuffer, 0, bufBytes);
-    } else {
-        rhi->setVertexBuffer(0, cameraUniformBuffer, 0, sizeof(CameraRenderData));   // set0 b0
-        rhi->setFragmentBuffer(0, particleBuffer, 0, bufBytes);                       // set1 b0 (read in VS)
-        float particleSize = 0.1f;
-        rhi->setVertexBytes(&particleSize, sizeof(float), 0);                         // push offset 0
+    for (Uint32 i = 0; i < drawTotal; ++i) {
+        const auto& p = (*draws)[i];
+        if (p.slotCount == 0) continue;
+
+        const Uint32 blend = std::min<Uint32>(p.blendMode, PARTICLE_BLEND_COUNT - 1);
+        rhi->bindPipeline(particleRenderPipelines[blend]);
+
+        // Per-packet texture; the default white texture keeps the sampler bound
+        // while useTexture=0 selects the procedural soft-disc path in the shader.
+        const bool hasTexture = p.texture != INVALID_TEXTURE_ID &&
+                                p.texture < textures.size();
+        const TextureId texId = hasTexture ? p.texture : defaultWhiteTexture;
+        struct { float particleSize; float useTexture; float _pad[2]; }
+            pc{ p.size, hasTexture ? 1.0f : 0.0f, {0.0f, 0.0f} };
+
+        if (metal) {
+            // particleVertex: camera(0), ParticlePushConstants(1), particles(2);
+            // particleFragment: params in buffer(0), texture/sampler at 0.
+            rhi->setVertexBuffer(0, cameraUniformBuffer, 0, sizeof(CameraRenderData));
+            rhi->setVertexBytes(&pc, sizeof(pc), 1);
+            rhi->setFragmentBytes(&pc, sizeof(pc), 0);
+            rhi->setVertexBuffer(2, particleBuffer, 0, bufBytes);
+        } else {
+            rhi->setVertexBuffer(0, cameraUniformBuffer, 0, sizeof(CameraRenderData));   // set0 b0
+            rhi->setFragmentBuffer(0, particleBuffer, 0, bufBytes);                       // set1 b0 (read in VS)
+            rhi->setVertexBytes(&pc, sizeof(pc), 0);  // pc [0,16), visible to VS+FS
+        }
+        if (texId < textures.size()) {
+            const RenderTexture& tex = textures[texId];
+            rhi->setTexture(2, 0, tex.handle, tex.sampler);  // GLSL set2 b0 / MSL texture(0)
+        }
+
+        if (indirect) {
+            rhi->drawIndirect(particleDrawArgsBuffer, static_cast<size_t>(i) * 16u, 1, 16);
+        } else {
+            // firstInstance = slotBegin: gl_InstanceIndex / [[instance_id]]
+            // include the base instance on both backends, indexing the SSBO
+            // directly at the emitter's slot range.
+            rhi->draw(6, p.slotCount, 0, p.slotBegin);
+        }
     }
-    rhi->draw(6, particleCount, 0, 0);
     rhi->endRenderPass();
+}
+
+// ============================================================================
+// ECS Particle Integration API
+// ============================================================================
+
+void Renderer::ensureParticleFreeList() {
+    if (!m_particleFreeListInitialized) {
+        m_particleSlotFreeList.push_back({0u, MAX_PARTICLES});
+        m_particleFreeListInitialized = true;
+    }
+}
+
+uint32_t Renderer::allocParticleSlots(uint32_t count) {
+    ensureParticleFreeList();
+    for (size_t i = 0; i < m_particleSlotFreeList.size(); ++i) {
+        auto& r = m_particleSlotFreeList[i];
+        if (r.count >= count) {
+            uint32_t begin = r.begin;
+            r.begin += count;
+            r.count -= count;
+            if (r.count == 0)
+                m_particleSlotFreeList.erase(m_particleSlotFreeList.begin() + i);
+            return begin;
+        }
+    }
+    return ~0u; // pool exhausted
+}
+
+void Renderer::freeParticleSlots(uint32_t slotBegin, uint32_t count) {
+    if (count == 0) return;
+    m_particleSlotFreeList.push_back({slotBegin, count});
+    // Coalesce adjacent ranges by sorting and merging
+    std::sort(m_particleSlotFreeList.begin(), m_particleSlotFreeList.end(),
+              [](const ParticleSlotRange& a, const ParticleSlotRange& b) {
+                  return a.begin < b.begin;
+              });
+    for (size_t i = 0; i + 1 < m_particleSlotFreeList.size(); ) {
+        auto& cur = m_particleSlotFreeList[i];
+        auto& nxt = m_particleSlotFreeList[i + 1];
+        if (cur.begin + cur.count == nxt.begin) {
+            cur.count += nxt.count;
+            m_particleSlotFreeList.erase(m_particleSlotFreeList.begin() + i + 1);
+        } else {
+            ++i;
+        }
+    }
+}
+
+uint32_t Renderer::claimParticleSlots(uint32_t count) {
+    uint32_t begin = allocParticleSlots(count);
+    if (begin != ~0u) {
+        // Expand dispatch range to cover newly claimed slots.
+        particleCount = std::max(particleCount, begin + count);
+    }
+    return begin;
+}
+
+void Renderer::releaseParticleSlots(uint32_t slotBegin, uint32_t count) {
+    freeParticleSlots(slotBegin, count);
+    // Zero-clear the released GPU slots. A freed mid-buffer range stays within
+    // particleCount and would otherwise keep rendering stale particles; zeroing
+    // makes age=0 >= lifetime=0, so the compute passes skip them immediately.
+    if (count > 0 && particleBuffer.isValid()) {
+        std::vector<GPUParticleData> blank(count);
+        rhi->updateBuffer(particleBuffer, blank.data(),
+                          slotBegin * sizeof(GPUParticleData),
+                          count * sizeof(GPUParticleData));
+    }
+    // Recompute the high-water mark: the tail [particleCount, MAX_PARTICLES) must
+    // be entirely free. Find the free range that reaches the end of the pool; its
+    // start is the new mark (0 when the whole pool is free). This is order-
+    // independent — unlike shrinking only when the freed range touched the mark,
+    // which left it stuck if a middle range was freed before the tail.
+    uint32_t hw = MAX_PARTICLES;
+    for (const auto& r : m_particleSlotFreeList) {
+        if (r.begin + r.count == MAX_PARTICLES) { hw = r.begin; break; }
+    }
+    particleCount = hw;
+}
+
+void Renderer::uploadParticles(uint32_t slotBegin, const std::vector<GPUParticleData>& particles) {
+    if (slotBegin == ~0u || particles.empty()) return;
+    if (slotBegin + particles.size() > MAX_PARTICLES) return;
+    if (!particleBuffer.isValid()) return;
+    rhi->updateBuffer(particleBuffer,
+                      particles.data(),
+                      slotBegin * sizeof(GPUParticleData),
+                      particles.size() * sizeof(GPUParticleData));
+}
+
+void Renderer::setParticleForceField(const ParticleForceField& field) {
+    m_forceField = field;
+    if (m_forceField.attractors.size() > MAX_PARTICLE_ATTRACTORS)
+        m_forceField.attractors.resize(MAX_PARTICLE_ATTRACTORS);
+}
+
+void Renderer::setParticleDrawList(const std::vector<ParticleDrawPacket>& draws) {
+    m_particleDrawList = draws;
+    if (m_particleDrawList.size() > MAX_PARTICLE_DRAWS)
+        m_particleDrawList.resize(MAX_PARTICLE_DRAWS);
 }
 
 // Volumetric clouds (port of the Metal quarter-res path): raymarch into a
@@ -4112,8 +4281,9 @@ void Renderer::createDefaultResources() {
         nearShadowMap = rhi->createTexture(nearDesc);
     }
 
-    // GPU particle system: a self-contained orbital demo. The particle buffer
-    // holds persistent state; the sim/attractor buffers are updated per frame.
+    // GPU particle pool: ECS emitters claim slots via claimParticleSlots().
+    // Buffer is zero-filled — lifetime=0/age=0 means instantly-dead in the shader,
+    // so uninitialized slots are safely skipped by the compute passes.
     {
         BufferDesc pbDesc;
         pbDesc.size = sizeof(GPUParticleData) * MAX_PARTICLES;
@@ -4121,35 +4291,28 @@ void Renderer::createDefaultResources() {
         pbDesc.memoryUsage = MemoryUsage::CPUtoGPU;
         particleBuffer = rhi->createBuffer(pbDesc);
 
-        std::vector<GPUParticleData> particles(MAX_PARTICLES);
-        std::mt19937 rng(1337u);  // fixed seed -> deterministic layout
-        std::uniform_real_distribution<float> u01(0.0f, 1.0f);
-        for (Uint32 i = 0; i < MAX_PARTICLES; i++) {
-            float r = 0.5f + std::sqrt(u01(rng)) * 4.5f;
-            float theta = u01(rng) * 2.0f * 3.14159265f;
-            float phi = u01(rng) * 3.14159265f;
-            glm::vec3 pos(r * std::sin(phi) * std::cos(theta),
-                          r * std::sin(phi) * std::sin(theta),
-                          r * std::cos(phi));
-            particles[i].position = pos;
-            glm::vec3 tangent = glm::cross(pos, glm::vec3(0.0f, 1.0f, 0.0f));
-            tangent = (glm::length(tangent) < 0.001f) ? glm::vec3(1.0f, 0.0f, 0.0f)
-                                                      : glm::normalize(tangent);
-            particles[i].velocity = tangent * (1.5f / std::sqrt(r + 0.1f));
-            particles[i].force = glm::vec3(0.0f);
-            float b = 1.0f - (r / 5.0f);
-            particles[i].color = glm::vec4(0.5f + 0.5f * b, 0.3f + 0.4f * b, 0.9f, 1.0f);
-        }
-        rhi->updateBuffer(particleBuffer, particles.data(), 0, pbDesc.size);
-        particleCount = MAX_PARTICLES;
+        // Zero-fill via mapped pointer — avoids a 192 MB temporary heap allocation.
+        // lifetime=0/age=0 → age >= lifetime → compute shaders skip these slots.
+        void* ptr = rhi->mapBuffer(particleBuffer);
+        std::memset(ptr, 0, pbDesc.size);
+        rhi->unmapBuffer(particleBuffer);
+        // particleCount starts at 0; updated by claimParticleSlots() high-water mark.
 
         BufferDesc uDesc;
         uDesc.usage = BufferUsage::Storage;
         uDesc.memoryUsage = MemoryUsage::CPUtoGPU;
         uDesc.size = sizeof(ParticleSimParams);
-        createFrameSlottedBuffer(particleSimParamsBuffer, uDesc);  // rewritten per sim step
-        uDesc.size = sizeof(ParticleAttractor);
+        createFrameSlottedBuffer(particleSimParamsBuffer, uDesc);
+        uDesc.size = sizeof(ParticleAttractor) * MAX_PARTICLE_ATTRACTORS;
         createFrameSlottedBuffer(particleAttractorBuffer, uDesc);
+
+        // Indirect draw args for per-emitter particle draws: one 16-byte
+        // {vertexCount, instanceCount, firstVertex, firstInstance} per packet.
+        BufferDesc iaDesc;
+        iaDesc.usage = BufferUsage::Indirect;
+        iaDesc.memoryUsage = MemoryUsage::CPUtoGPU;
+        iaDesc.size = 16u * MAX_PARTICLE_DRAWS;
+        createFrameSlottedBuffer(particleDrawArgsBuffer, iaDesc);
     }
 }
 
@@ -4860,16 +5023,22 @@ void Renderer::createRenderPipeline() {
                 pd.vertexLayout.stride = 0;   // billboard verts generated in-shader
                 pd.vertexLayout.attributes = {};
                 pd.topology = PrimitiveTopology::TriangleList;
-                pd.blendMode = BlendMode::Additive;  // glowing particles
                 pd.depthTest = true;
-                pd.depthWrite = false;               // additive, don't occlude
+                pd.depthWrite = false;               // translucent, don't occlude
                 pd.depthCompareOp = CompareOp::LessOrEqual;
                 pd.cullMode = CullMode::None;
                 pd.sampleCount = 1;
                 pd.hasDepthAttachment = true;
                 pd.depthAttachmentFormat = PixelFormat::Depth32Float;
                 pd.colorAttachmentFormats = { PixelFormat::RGBA16_FLOAT };
-                particleRenderPipeline = rhi->createPipeline(pd);
+                // One pipeline per ParticleBlendMode — indexed by packet.blendMode.
+                const BlendMode particleBlends[PARTICLE_BLEND_COUNT] = {
+                    BlendMode::Additive, BlendMode::AlphaBlend, BlendMode::Multiply
+                };
+                for (Uint32 i = 0; i < PARTICLE_BLEND_COUNT; ++i) {
+                    pd.blendMode = particleBlends[i];
+                    particleRenderPipelines[i] = rhi->createPipeline(pd);
+                }
             }
         }
 
@@ -5224,7 +5393,6 @@ void Renderer::createRenderPipeline() {
                 pd.vertexLayout.stride = 0;   // billboard verts generated in-shader
                 pd.vertexLayout.attributes = {};
                 pd.topology = PrimitiveTopology::TriangleList;
-                pd.blendMode = BlendMode::Additive;
                 pd.depthTest = true;
                 pd.depthWrite = false;
                 pd.depthCompareOp = CompareOp::LessOrEqual;
@@ -5233,7 +5401,13 @@ void Renderer::createRenderPipeline() {
                 pd.hasDepthAttachment = true;
                 pd.depthAttachmentFormat = PixelFormat::Depth32Float;
                 pd.colorAttachmentFormats = { PixelFormat::RGBA16_FLOAT };
-                particleRenderPipeline = rhi->createPipeline(pd);
+                const BlendMode particleBlends[PARTICLE_BLEND_COUNT] = {
+                    BlendMode::Additive, BlendMode::AlphaBlend, BlendMode::Multiply
+                };
+                for (Uint32 i = 0; i < PARTICLE_BLEND_COUNT; ++i) {
+                    pd.blendMode = particleBlends[i];
+                    particleRenderPipelines[i] = rhi->createPipeline(pd);
+                }
             }
         }
     }
@@ -6243,10 +6417,9 @@ void Renderer::drawGraphicsImGui() {
         ImGui::TreePop();
     }
 
-    if (ImGui::TreeNode("Effects")) {
-        ImGui::Checkbox("Particles", &particleSystemEnabled);
-        ImGui::TreePop();
-    }
+    // Particle system controls (Visible/Pause/Emit) live in the game's Particles
+    // window — the renderer only exposes them as setters (pure mechanism), since
+    // Pause and Emit must also drive the CPU-side ECS timers.
 
     // Registered texture thumbnails (material maps etc.)
     if (ImGui::TreeNode("Textures")) {

@@ -2454,6 +2454,21 @@ void RHI_Vulkan::drawIndexedIndirect(BufferHandle argsBuffer, size_t offset, Uin
                              static_cast<VkDeviceSize>(offset), drawCount, stride);
 }
 
+void RHI_Vulkan::drawIndirect(BufferHandle argsBuffer, size_t offset, Uint32 drawCount, Uint32 stride) {
+    if (currentCommandBuffer == VK_NULL_HANDLE || drawCount == 0) {
+        return;
+    }
+    auto it = buffers.find(argsBuffer.id);
+    if (it == buffers.end()) {
+        return;
+    }
+    flushDescriptors();
+    // Non-indexed variant: VkDrawIndirectCommand args. drawCount > 1 requires
+    // the multiDrawIndirect feature, same as the indexed call above.
+    vkCmdDrawIndirect(currentCommandBuffer, it->second.buffer,
+                      static_cast<VkDeviceSize>(offset), drawCount, stride);
+}
+
 // ============================================================================
 // Bindless texture tables (Bindless MDI) — descriptor-indexed set 3
 // ============================================================================

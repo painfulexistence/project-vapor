@@ -157,6 +157,24 @@ target_link_libraries(test_file_system PRIVATE
 target_compile_features(test_file_system PRIVATE cxx_std_20)
 target_compile_options(test_file_system PRIVATE ${TEST_WARNING_FLAGS})
 
+# ── Particle ECS system tests (emitter state machine, render packets, forces) ─
+# Links Vapor so the REAL Vapor::Particle* systems are under test (not a stub);
+# a recording mock IRenderer stands in for the GPU. No engine assets needed —
+# the mock never loads shaders.
+add_executable(test_particle_system
+    particle_system_test.cpp
+)
+find_package(EnTT CONFIG REQUIRED)
+target_link_libraries(test_particle_system PRIVATE
+    Vapor
+    Catch2::Catch2WithMain
+    glm::glm
+    fmt::fmt
+    EnTT::EnTT
+)
+target_compile_features(test_particle_system PRIVATE cxx_std_20)
+target_compile_options(test_particle_system PRIVATE ${TEST_WARNING_FLAGS})
+
 vapor_copy_engine_assets(test_physics)
 vapor_copy_engine_assets(test_resource_manager)
 vapor_copy_engine_assets(test_asset_management)
@@ -178,3 +196,4 @@ catch_discover_tests(test_resource_manager   WORKING_DIRECTORY "$<TARGET_FILE_DI
 catch_discover_tests(test_backend_support    WORKING_DIRECTORY "$<TARGET_FILE_DIR:test_backend_support>")
 catch_discover_tests(test_ui_system          WORKING_DIRECTORY "$<TARGET_FILE_DIR:test_ui_system>")
 catch_discover_tests(test_file_system        WORKING_DIRECTORY "$<TARGET_FILE_DIR:test_file_system>")
+catch_discover_tests(test_particle_system    WORKING_DIRECTORY "$<TARGET_FILE_DIR:test_particle_system>")
