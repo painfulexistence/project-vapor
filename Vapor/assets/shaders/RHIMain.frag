@@ -62,6 +62,7 @@ struct MaterialData {
     float prototypeUVMode;
     float uvScale;
     float iblEnabled;
+    float transmission;
 };
 
 // Must match DirectionalLightData / PointLightData (C++, stride 48 each)

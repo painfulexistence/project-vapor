@@ -852,14 +852,14 @@ fragment float4 fragmentMain(
     // roughness exactly like the mirror reflection above. mix() REPLACES the
     // accumulated diffuse/GI response instead of adding — a transmissive
     // surface trades its diffuse lobe for transmission per the spec.
-    if (refractionParams.x > 0.5 && 0.0 > 0.0) {  // DIAG kill-switch: transmission removed
+    if (refractionParams.x > 0.5 && material.transmission > 0.0) {
         float3 refr = texRefraction.sample(s, screenUV).rgb;
         float NdotV = max(dot(norm, viewDir), 0.0);
         float3 F0t = mix(float3(0.04), surf.color, surf.metallic);
         float3 Ft = FresnelSchlickRoughness(NdotV, F0t, surf.roughness);
         float roughFade = (1.0 - surf.roughness) * (1.0 - surf.roughness);
         float3 transmitted = refr * surf.color * (1.0 - Ft) * refractionParams.y;
-        result = mix(result, transmitted, 0.0 * roughFade);  // DIAG kill-switch
+        result = mix(result, transmitted, material.transmission * roughFade);
     }
 
     result += surf.emission;

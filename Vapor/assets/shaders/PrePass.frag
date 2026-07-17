@@ -33,6 +33,7 @@ struct MaterialData {
     float prototypeUVMode;
     float uvScale;
     float iblEnabled;
+    float transmission;
 };
 layout(std430, set = 0, binding = 1) readonly buffer MaterialBuf {
     MaterialData materials[];
