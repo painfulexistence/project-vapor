@@ -707,6 +707,40 @@ namespace Vapor {
     };
 
     // ============================================================================
+    // 粒子渲染收集系統 - 每個 emitter 一個 draw packet(per-material draws)
+    // ============================================================================
+    // The renderer-module gather (Niagara-style split): emission decides where
+    // particles are born, ParticleRendererComponent decides how they look. Each
+    // slot-holding emitter becomes one ParticleDrawPacket (blend + texture +
+    // size); emitters without the component draw with defaults. Runs after
+    // ParticleEmitterSystem so slot ranges are current.
+    class ParticleRenderSystem {
+    public:
+        static void update(entt::registry& registry, IRenderer* renderer) {
+            if (!renderer) return;
+
+            std::vector<ParticleDrawPacket> draws;
+            auto view = registry.view<ParticleEmitterComponent>();
+            for (auto entity : view) {
+                const auto& emit = view.get<ParticleEmitterComponent>(entity);
+                if (emit._slotBegin == ~0u || emit._slotCount == 0) continue;
+
+                ParticleDrawPacket p;
+                p.slotBegin = emit._slotBegin;
+                p.slotCount = emit._slotCount;
+                if (const auto* r = registry.try_get<ParticleRendererComponent>(entity)) {
+                    p.blendMode = static_cast<Uint8>(r->blendMode);
+                    p.texture   = r->texture;
+                    p.size      = r->size;
+                }
+                draws.push_back(p);
+                if (draws.size() >= MAX_PARTICLE_DRAWS) break;
+            }
+            renderer->setParticleDrawList(draws);
+        }
+    };
+
+    // ============================================================================
     // 粒子爆發系統 - 處理一次性爆發請求
     // ============================================================================
     class ParticleBurstSystem {

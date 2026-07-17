@@ -48,7 +48,7 @@ layout(std430, set = 1, binding = 0) readonly buffer ParticleBuffer {
 
 layout(push_constant) uniform PushConstants {
     float particleSize;
-    float _pad1;
+    float useTexture;   // consumed by the fragment stage
     float _pad2;
     float _pad3;
 } pushConstants;

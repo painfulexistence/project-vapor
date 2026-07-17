@@ -1,12 +1,14 @@
 #include "renderer.hpp"
 #include "stats_log.hpp"
 #include "rhi_vulkan.hpp"
+#include <chrono>
 #ifdef __APPLE__
 #include "rhi_metal.hpp"
 #endif
 #include "helper.hpp"
 #include "components.hpp"
 #include "engine_core.hpp"
+#include "asset_manager.hpp"  // AssetManager::loadHDRI
 #include "rmlui_manager.hpp"
 #include "graphics_gibs.hpp"  // Surfel/GIBSData/param structs (Metal-layout asserted)
 #include "Vapor/rml_renderer_rhi.hpp"
@@ -79,6 +81,15 @@ void Renderer::initialize(std::unique_ptr<RHI> rhiPtr, GraphicsBackend backendTy
     }
     setupDefaultRenderGraph();
 
+    // Per-frame buffer slotting keeps exactly one buffer slot per in-flight
+    // frame, so beginFrame() never rewrites a slot the GPU may still be reading:
+    // the slot index wraps every frameSlotCount frames and the CPU runs at most
+    // getMaxFramesInFlight() frames ahead. Deriving the count from the backend
+    // here (rather than a renderer-side constant) makes it the single source of
+    // truth — it cannot drift out of sync. Must be set before the first
+    // createFrameSlottedBuffer() call below.
+    frameSlotCount = rhi->getMaxFramesInFlight();
+
     // Create uniform buffers. Everything rewritten per frame goes through
     // createFrameSlottedBuffer (see renderer.hpp: frames-in-flight slotting).
     BufferDesc cameraBufferDesc;
@@ -118,6 +129,17 @@ void Renderer::initialize(std::unique_ptr<RHI> rhiPtr, GraphicsBackend backendTy
     instanceDataBufferDesc.usage = BufferUsage::Uniform;
     instanceDataBufferDesc.memoryUsage = MemoryUsage::CPUtoGPU;
     createFrameSlottedBuffer(instanceDataBuffer, instanceDataBufferDesc);
+
+    // GPU-driven rendering: indirect draw args produced by the cull compute pass
+    // (one DrawCommand per instance). Frame-slotted like instanceDataBuffer so
+    // the compute writes and indirect draw of a frame use the same slot.
+    BufferDesc gpuCullArgsBufferDesc;
+    gpuCullArgsBufferDesc.size = sizeof(Vapor::DrawCommand) * MAX_INSTANCES;
+    gpuCullArgsBufferDesc.usage = BufferUsage::Indirect;
+    gpuCullArgsBufferDesc.memoryUsage = MemoryUsage::CPUtoGPU;
+    createFrameSlottedBuffer(gpuCullArgsBuffer, gpuCullArgsBufferDesc);
+    // Frustum-only cull output for the GPU-driven pre-pass (same layout).
+    createFrameSlottedBuffer(prepassCullArgsBuffer, gpuCullArgsBufferDesc);
 
     // Render-to-texture view: its own camera/instance buffers (see renderer.hpp
     // note — the shared ones are overwritten by the main draw later in the same
@@ -432,6 +454,46 @@ void Renderer::registerStatsSources() {
         s.add("max", mx);
         s.add("nonEmpty", nonEmpty);
     });
+
+    // GPU-driven cull diagnostics (was the always-on [MDI diag] fmt::print in the
+    // MDI draw branch). Covers every indirect submission mode (plain Indirect /
+    // MDI / Bindless MDI), not just MDI. Periodic: the host-visible readback runs
+    // at most once per interval, and only while --stats is enabled (tick() is a
+    // no-op otherwise, so zero cost in normal runs).
+    //
+    // Reads back gpuCullArgsBuffer, which the cull compute wrote LAST frame (this
+    // frame's cull hasn't run at tick() time — sane for a steady scene). Reads
+    // cull output so a blank frame can be diagnosed:
+    //   instCount all 0 -> cull dropped everything (frustum/camera)
+    //   instCount 1, sane idxCount/firstIdx -> geometry/vertex issue
+    //   garbage idxCount -> cull didn't run / wrong binding
+    log.addSource("GPUDRV", [this](Vapor::StatLine& s) {
+        if (!gpuDrivenIndirect() || totalInstanceCount == 0) return;
+        s.add("mode", lastFrameStats.mainPath);
+        s.add("instances", totalInstanceCount);
+        s.add("ranges", static_cast<Uint32>(m_materialRanges.size()));
+        s.add("mergedVtx", static_cast<Uint32>(m_mergedVertices.size()));
+        s.add("mergedIdx", static_cast<Uint32>(m_mergedIndices.size()));
+        // Metal's Bindless-MDI encodes into sceneICB, not gpuCullArgsBuffer, so
+        // the args readback (visible + cmd0) isn't meaningful there.
+        const bool icbMetal = backend == GraphicsBackend::Metal && gpuDrivenBindless() &&
+                              capabilities.indirectCommandBuffers && sceneICB.isValid();
+        if (icbMetal || !gpuCullArgsBuffer.isValid()) { s.add("args", "icb"); return; }
+        if (void* mapped = rhi->mapBuffer(gpuCullArgsBuffer)) {
+            const auto* cmds = static_cast<const Vapor::DrawCommand*>(mapped);
+            Uint32 visible = 0;
+            const Uint32 n = std::min<Uint32>(totalInstanceCount, MAX_INSTANCES);
+            for (Uint32 i = 0; i < n; ++i) visible += (cmds[i].instanceCount != 0) ? 1u : 0u;
+            const Vapor::DrawCommand& c = cmds[0];  // instance 0 = first material range's start
+            s.add("visible", visible);
+            s.add("idxCount", c.indexCount);
+            s.add("instCount", c.instanceCount);
+            s.add("firstIdx", c.firstIndex);
+            s.add("vtxOff", c.vertexOffset);
+            s.add("firstInst", c.firstInstance);
+            rhi->unmapBuffer(gpuCullArgsBuffer);
+        }
+    });
 }
 
 // Returns a cached grayscale / single-layer view of `src` for ImGui previews,
@@ -484,7 +546,8 @@ void Renderer::createFrameSlottedBuffer(BufferHandle& alias, const BufferDesc& d
                                         const void* initData, size_t initSize) {
     FrameSlottedBuffer sb;
     sb.alias = &alias;
-    for (Uint32 i = 0; i < kFrameSlots; i++) {
+    sb.slots.resize(frameSlotCount);
+    for (Uint32 i = 0; i < frameSlotCount; i++) {
         sb.slots[i] = rhi->createBuffer(desc);
         if (initData && initSize > 0) {
             rhi->updateBuffer(sb.slots[i], initData, 0, initSize);
@@ -525,12 +588,12 @@ void Renderer::shutdown() {
                 break;
         }
 
-        // Destroy buffers. Slotted buffers own kFrameSlots handles each — the
+        // Destroy buffers. Slotted buffers own one handle per frame slot — the
         // alias members point at one of them, so only the registry is walked.
         for (auto& sb : frameSlottedBuffers) {
-            for (Uint32 i = 0; i < kFrameSlots; i++) {
-                if (sb.slots[i].isValid()) {
-                    rhi->destroyBuffer(sb.slots[i]);
+            for (auto& slot : sb.slots) {
+                if (slot.isValid()) {
+                    rhi->destroyBuffer(slot);
                 }
             }
             *sb.alias = {};
@@ -648,6 +711,16 @@ MeshId Renderer::registerMesh(const std::vector<Vapor::VertexData>& vertices,
 
     mesh.indexCount = static_cast<Uint32>(indices.size());
     mesh.vertexCount = static_cast<Uint32>(vertices.size());
+
+    // Accumulate into the merged scene geometry used by single-call MDI. Indices
+    // stay mesh-local; the per-mesh vertexOffset rebases them at draw time. These
+    // offsets are only consumed in MDI mode (InstanceData keeps 0 otherwise), so
+    // this is inert for the default / per-object-indirect paths.
+    mesh.vertexOffset = static_cast<Uint32>(m_mergedVertices.size());
+    mesh.indexOffset = static_cast<Uint32>(m_mergedIndices.size());
+    m_mergedVertices.insert(m_mergedVertices.end(), vertices.begin(), vertices.end());
+    m_mergedIndices.insert(m_mergedIndices.end(), indices.begin(), indices.end());
+    m_mergedGeometryDirty = true;
 
     MeshId id = static_cast<MeshId>(meshes.size());
     meshes.push_back(mesh);
@@ -780,6 +853,7 @@ MaterialId Renderer::registerMaterial(const MaterialDataInput& materialData) {
 
     MaterialId id = static_cast<MaterialId>(materials.size());
     materials.push_back(material);
+    m_bindlessTableDirty = true;  // ICB mode's texture table must pick this up
     return id;
 }
 
@@ -798,7 +872,7 @@ void Renderer::beginFrame(const CameraRenderData& camera) {
     // Rotate every frames-in-flight buffer slot BEFORE anything writes frame
     // data: all named aliases (cameraUniformBuffer, instanceDataBuffer, ...)
     // now point at a buffer no in-flight frame reads.
-    frameSlotIndex = (frameSlotIndex + 1) % kFrameSlots;
+    frameSlotIndex = (frameSlotIndex + 1) % frameSlotCount;
     for (auto& sb : frameSlottedBuffers) {
         *sb.alias = sb.slots[frameSlotIndex];
     }
@@ -901,9 +975,29 @@ void Renderer::submitPointLight(const PointLightData& light) {
 }
 
 void Renderer::render() {
-    performCulling();
+    // CPU frame timing (single-threaded submission). m_cpuPreGraphMs is the
+    // cull + sort + buffer-upload cost; the per-pass recording cost is measured
+    // inside renderGraph.execute (see getPassCpuTimings). Their sum is the CPU
+    // cost of a frame's rendering work — compare against total GPU time to see
+    // whether you are CPU- or GPU-bound.
+    const auto _cpuFrameStart = std::chrono::high_resolution_clock::now();
+
+    // Option A: when the pre-pass runs fully GPU-driven (the indirect MDI
+    // pre-pass), EVERY geometry pass that consumed
+    // visibleDrawables is now GPU-driven or iterates the full frameDrawables set
+    // (shadows, TLAS). The CPU frustum cull would just produce an unused list, so
+    // skip it — that's the point. visibleDrawables stays empty; the HUD reports
+    // totalInstanceCount as the visible count in this mode.
+    if (gpuDrivenPrePassActive()) {
+        visibleDrawables.clear();
+    } else {
+        performCulling();
+    }
     sortDrawables();
     updateBuffers();
+
+    m_cpuPreGraphMs = std::chrono::duration<double, std::milli>(
+        std::chrono::high_resolution_clock::now() - _cpuFrameStart).count();
 
     // Execute the frame's passes. Which passes run is decided by the graph:
     // disabled passes and passes whose capability requirements the backend
@@ -913,7 +1007,13 @@ void Renderer::render() {
 
     // Frame stats for the Engine window (read next frame, before the clear)
     lastFrameStats.totalDrawables = static_cast<Uint32>(frameDrawables.size());
-    lastFrameStats.visibleDrawables = static_cast<Uint32>(visibleDrawables.size());
+    // In Option A the CPU cull is skipped (visibleDrawables empty); the GPU
+    // decides visibility per instance. Report the submitted instance count as the
+    // "visible" figure rather than a misleading 0 (true GPU-visible count would
+    // need a readback of the cull args).
+    lastFrameStats.visibleDrawables = gpuDrivenPrePassActive()
+        ? totalInstanceCount
+        : static_cast<Uint32>(visibleDrawables.size());
     lastFrameStats.directionalLights = static_cast<Uint32>(directionalLights.size());
     lastFrameStats.pointLights = static_cast<Uint32>(pointLights.size());
     lastFrameStats.rectLights = static_cast<Uint32>(rectLights.size());
@@ -934,6 +1034,12 @@ void Renderer::setupDefaultRenderGraph() {
 
     renderGraph.addPass("BuildAccelStructures",
         [](Renderer& r) { r.buildAccelerationStructures(); }, PassFlags::RequiresRaytracing);
+    // Frustum-only cull that feeds the GPU-driven (indirect) pre-pass. No-op
+    // unless a GPU-driven MDI layout is active; the pass early-outs otherwise.
+    // Must run before PrePass (which consumes its args) and can't use Hi-Z
+    // occlusion (the Hi-Z is built from the pre-pass depth that doesn't exist yet).
+    renderGraph.addPass("PreCull",
+        [](Renderer& r) { r.prePassCullPass(); }, PassFlags::RequiresCompute);
     renderGraph.addPass("PrePass",
         [](Renderer& r) { r.prePass(); });
     // Camera-motion velocity from the pre-pass depth — consumed by the RT
@@ -960,8 +1066,6 @@ void Renderer::setupDefaultRenderGraph() {
         [](Renderer& r) { r.stochasticPointShadowPass(); }, PassFlags::RequiresRaytracing);
     renderGraph.addPass("PointShadowTemporal",
         [](Renderer& r) { r.pointShadowTemporalPass(); }, PassFlags::RequiresRaytracing);
-    renderGraph.addPass("PointShadowDenoise",
-        [](Renderer& r) { r.pointShadowDenoisePass(); }, PassFlags::RequiresRaytracing);
     // GIBS surfel GI (generation -> hash -> RT -> temporal -> gather).
     renderGraph.addPass("GIBS",
         [](Renderer& r) { r.gibsPass(); }, PassFlags::RequiresRaytracing);
@@ -970,6 +1074,17 @@ void Renderer::setupDefaultRenderGraph() {
     // Directional shadow depth (single cascade) before the main lighting pass.
     renderGraph.addPass("Shadow",
         [](Renderer& r) { r.shadowPass(); });
+
+    // Hi-Z depth pyramid from the PrePass depth (feeds occlusion culling below).
+    // No-op unless both a GPU-driven mode and gpuOcclusionCulling are set. Must
+    // sit after PrePass (needs its depth) and before GpuCull (samples the Hi-Z).
+    renderGraph.addPass("HiZBuild",
+        [](Renderer& r) { r.hizBuildPass(); });
+
+    // GPU-driven frustum (+ optional Hi-Z occlusion) cull -> indirect draw args.
+    // No-op unless the Indirect GPU-driven mode is active; the pass early-outs otherwise.
+    renderGraph.addPass("GpuCull",
+        [](Renderer& r) { r.gpuCullPass(); }, PassFlags::RequiresCompute);
 
     // Screen-space contact shadows (Metal compute / Vulkan fullscreen frag).
     // Reads the pre-pass depth, so it runs after depth is available and before
@@ -1188,6 +1303,17 @@ void Renderer::sortDrawables() {
 }
 
 void Renderer::updateBuffers() {
+    // Populate the camera's frustum planes so the GPU cull pass can test bounds
+    // against them (object cull in Indirect mode).
+    // Only when a GPU-driven mode is active, to keep the default path's camera
+    // data byte-identical.
+    if (gpuDrivenActive()) {
+        Frustum f = extractFrustum(currentCamera.proj * currentCamera.view);
+        for (int i = 0; i < 6; ++i) {
+            currentCamera.frustumPlanes[i] = f.planes[i];
+        }
+    }
+
     // Update camera uniform buffer
     rhi->updateBuffer(cameraUniformBuffer, &currentCamera, 0, sizeof(CameraRenderData));
 
@@ -1268,6 +1394,28 @@ void Renderer::updateBuffers() {
     std::vector<Vapor::InstanceData> instanceData;
     instanceData.reserve(frameDrawables.size());
     Uint32 instanceID = 0;
+
+    // MDI mode (Vulkan): instances address the merged scene buffers, so they need
+    // real per-mesh offsets and must be grouped into contiguous per-material
+    // ranges. Any other mode uses per-mesh buffers -> offsets stay 0.
+    // Bindless MDI shares the MDI instance layout (merged offsets, material-
+    // sorted) — its draws index the merged buffers the same way. Availability:
+    // Metal needs ICB support (GPU-encoded commands), Vulkan needs native MDI +
+    // descriptor indexing (one vkCmdDrawIndexedIndirect + set-3 texture array).
+    const bool bindlessMDI = gpuDrivenBindless() &&
+                             capabilities.bindlessTextures &&
+                             (backend == GraphicsBackend::Metal
+                                  ? capabilities.indirectCommandBuffers
+                                  : capabilities.multiDrawIndirect);
+    const bool mdi = mdiLayoutActive();  // == bindlessMDI || plain-MDI (see helper)
+    m_mdiInstanceLayout = mdi;  // pre-pass/shadow must match this layout (Metal)
+    // MDI addresses the merged vertex buffer, so build it (self-gates on
+    // m_mergedGeometryDirty).
+    if (mdi) ensureMergedGeometry();
+    // Bindless material table for the Bindless MDI mode (self-gates on dirty + caps).
+    if (bindlessMDI) ensureBindlessMaterialTable();
+    m_materialRanges.clear();
+
     auto appendInstance = [&](Uint32 drawableIdx) {
         const Drawable& drawable = frameDrawables[drawableIdx];
         const RenderMesh& mesh = meshes[drawable.mesh];
@@ -1275,8 +1423,8 @@ void Renderer::updateBuffers() {
         Vapor::InstanceData instance;
         instance.model = drawable.transform;
         instance.color = drawable.color;
-        instance.vertexOffset = 0;  // Each mesh has its own buffer
-        instance.indexOffset = 0;   // Each mesh has its own buffer
+        instance.vertexOffset = mdi ? mesh.vertexOffset : 0;  // into merged buffer (MDI) or 0 (per-mesh)
+        instance.indexOffset = mdi ? mesh.indexOffset : 0;
         instance.vertexCount = mesh.vertexCount;
         instance.indexCount = mesh.indexCount;
         instance.materialID = drawable.material;
@@ -1291,9 +1439,34 @@ void Renderer::updateBuffers() {
         drawableToInstanceID[drawableIdx] = instanceID;
         instanceID++;
     };
-    for (Uint32 drawableIdx : visibleDrawables) appendInstance(drawableIdx);
-    for (Uint32 i = 0; i < frameDrawables.size() && instanceID < MAX_INSTANCES; i++) {
-        if (drawableToInstanceID.find(i) == drawableToInstanceID.end()) appendInstance(i);
+    if (mdi) {
+        // Submit ALL drawables, sorted by material so each material occupies a
+        // contiguous instance range -> one drawIndexedIndirect per material.
+        std::vector<Uint32> order(frameDrawables.size());
+        for (Uint32 i = 0; i < frameDrawables.size(); ++i) order[i] = i;
+        std::stable_sort(order.begin(), order.end(), [this](Uint32 a, Uint32 b) {
+            return frameDrawables[a].material < frameDrawables[b].material;
+        });
+        MaterialId curMat = UINT32_MAX;
+        Uint32 rangeStart = 0;
+        for (Uint32 idx : order) {
+            if (instanceID >= MAX_INSTANCES) break;
+            MaterialId m = frameDrawables[idx].material;
+            if (m != curMat) {
+                if (curMat != UINT32_MAX)
+                    m_materialRanges.push_back({curMat, {rangeStart, instanceID - rangeStart}});
+                curMat = m;
+                rangeStart = instanceID;
+            }
+            appendInstance(idx);
+        }
+        if (curMat != UINT32_MAX)
+            m_materialRanges.push_back({curMat, {rangeStart, instanceID - rangeStart}});
+    } else {
+        for (Uint32 drawableIdx : visibleDrawables) appendInstance(drawableIdx);
+        for (Uint32 i = 0; i < frameDrawables.size() && instanceID < MAX_INSTANCES; i++) {
+            if (drawableToInstanceID.find(i) == drawableToInstanceID.end()) appendInstance(i);
+        }
     }
     totalInstanceCount = instanceID;
 
@@ -1372,9 +1545,12 @@ void Renderer::mainRenderPass() {
     rhi->setVertexBuffer(0, cameraUniformBuffer, 0, sizeof(CameraRenderData));
     // Binding 1: MaterialData array (all materials)
     rhi->setVertexBuffer(1, materialUniformBuffer, 0, sizeof(Vapor::MaterialData) * MAX_INSTANCES);
-    // Binding 2: InstanceData array
-    // Note: We only update the buffer with visible drawables, so the size is visibleDrawables.size()
-    rhi->setVertexBuffer(2, instanceDataBuffer, 0, sizeof(Vapor::InstanceData) * visibleDrawables.size());
+    // Binding 2: InstanceData array. Range = ALL uploaded instances, not just
+    // the CPU-visible prefix: the GPU-driven paths (Indirect per-object + MDI)
+    // index instances[] up to totalInstanceCount, and a visible-only range makes
+    // those reads out-of-bounds on Vulkan (updateBuffers uploads every drawable).
+    rhi->setVertexBuffer(2, instanceDataBuffer, 0,
+                         sizeof(Vapor::InstanceData) * std::max<Uint32>(1, totalInstanceCount));
 
     // Fragment bindings — the FULL contract of 3d_pbr_normal_mapped.metal.
     // Every slot the shader declares must be bound (Metal reads several of
@@ -1467,6 +1643,7 @@ void Renderer::mainRenderPass() {
         // Spot lights: buffer at set1 b6; rect area lights at set1 b7 (analytic
         // eval in RHIMain.frag, unshadowed — the RT area shadow is Metal-only).
         // Loop bounds travel together at push offset 80 (binding 1).
+        // (IBL maps already bound at b10/11/12 above.)
         if (spotLightBuffer.isValid())
             rhi->setFragmentBuffer(6, spotLightBuffer, 0, sizeof(Vapor::SpotLight) * maxSpotLights);
         if (rectLightBuffer.isValid()) rhi->setFragmentBuffer(7, rectLightBuffer);
@@ -1500,31 +1677,150 @@ void Renderer::mainRenderPass() {
             // texPointShadow (RGB point/rect/spot channels) only when stochastic
             // shadows are on; otherwise the neutral white bound above keeps
             // point/rect/spot unshadowed — matching the RT-less Vulkan path.
-            if (capabilities.raytracing && stochasticShadowsEnabled &&
-                pointShadowHistoryWritten && pointShadowHistoryRT.isValid()) {
-                // Prefer the edge-aware filtered copy; the raw accumulator
-                // output is the fallback if the denoise pass didn't run.
-                TextureHandle shadowTex = (pointShadowDenoiseRan && pointShadowDenoisedRT.isValid())
-                                              ? pointShadowDenoisedRT : pointShadowHistoryRT;
-                rhi->setTexture(0, 13, shadowTex, clampSampler);
-            }
+            if (stochasticShadowsEnabled && pointShadowHistoryRT.isValid())
+                rhi->setTexture(0, 13, pointShadowHistoryRT, clampSampler);
             if (gibsEnabled && giResultTexture.isValid()) rhi->setTexture(0, 14, giResultTexture, clampSampler);
         }
-        // Spot lights (buffer 14) + counts/flags (buffer 15). Flag bit0 says the
-        // point-shadow texture carries the RGB channel format (R point / G rect
-        // / B spot); 0 when stochastic shadows are off, so rect/spot stay
-        // unshadowed instead of sampling the (white) placeholder's channels.
-        rhi->setFragmentBuffer(14, spotLightBuffer, 0, sizeof(Vapor::SpotLight) * maxSpotLights);
+        // Spot lights (buffer 16) + counts/flags (buffer 15). buffer 14 is the
+        // bindless SystemTexs table's slot, so spot lights use 16 (see the shader
+        // note in 3d_pbr_normal_mapped.metal). Flag bit0 says the point-shadow
+        // texture carries the RGB channel format (R point / G rect / B spot); 0
+        // when stochastic shadows are off, so rect/spot stay unshadowed instead
+        // of sampling the (white) placeholder's channels.
+        rhi->setFragmentBuffer(16, spotLightBuffer, 0, sizeof(Vapor::SpotLight) * maxSpotLights);
         glm::uvec2 spotRectParams(static_cast<Uint32>(spotLights.size()),
                                   (capabilities.raytracing && stochasticShadowsEnabled) ? 1u : 0u);
         rhi->setFragmentBytes(&spotRectParams, sizeof(glm::uvec2), 15);
     }
 
-    // Group drawables by material to reduce state changes
+    // GPU-driven path is used only when enabled AND the cull pipeline/args
+    // buffer actually exist — otherwise fall back to the CPU path entirely
+    // (avoids drawing from an unwritten indirect args buffer).
+    const bool useGpuDriven = gpuDrivenIndirect() && gpuCullPipeline.isValid() &&
+                              gpuCullArgsBuffer.isValid();
+
+    // True single-call multi-draw indirect (Vulkan): bind the merged scene
+    // buffers once, then issue one drawIndexedIndirect per material range (each
+    // spanning many meshes). The cull pass wrote per-instance commands with real
+    // merged-buffer offsets; instanceCount 0 makes culled instances no-ops. The
+    // instance index comes from gl_InstanceIndex (= command.firstInstance), so
+    // the push-constant instanceID is 0.
+    // MDI works on Vulkan when the multiDrawIndirect feature is available (native
+    // multi-draw), and on Metal via the RHI's per-command loop (correct, though
+    // single-call there needs an Indirect Command Buffer — a Metal-internal
+    // follow-up). Both backends share this renderer path.
+    const bool mdiBackendOk = (backend == GraphicsBackend::Vulkan && capabilities.multiDrawIndirect) ||
+                              backend == GraphicsBackend::Metal;
+    const bool useMDI = useGpuDriven && gpuDrivenMDI && mdiBackendOk &&
+                        mergedVertexBuffer.isValid() && mergedIndexBuffer.isValid() &&
+                        !m_materialRanges.empty();
+
+    // Bindless MDI: the whole scene in ONE submission on the bindless pipeline
+    // (material textures fetched by materialID — no per-material loop).
+    //   Metal:  replay the GPU-encoded sceneICB with executeCommandsInBuffer.
+    //   Vulkan: one native vkCmdDrawIndexedIndirect over every instance,
+    //           reading the same cull-written args buffer as plain MDI.
+    // Takes precedence over plain MDI; falls back to the paths below when
+    // anything is missing (pipeline compile failed, caps absent...).
+    const bool bindlessBackendOk = backend == GraphicsBackend::Metal
+        ? (capabilities.indirectCommandBuffers && sceneICB.isValid())
+        : (capabilities.multiDrawIndirect && mergedIndexBuffer.isValid());
+    const bool useBindless = useGpuDriven && gpuDrivenBindless() &&
+                             capabilities.bindlessTextures && bindlessBackendOk &&
+                             mainPipelineBindless.isValid() &&
+                             bindlessMaterialTable.isValid() && mergedVertexBuffer.isValid() &&
+                             totalInstanceCount > 0;
+
+    // Count the geometry submissions issued below so the debug panel can show
+    // which path actually ran (see FrameStats::mainDrawCalls / mainPath).
+    Uint32 mainDrawCalls = 0;
+    lastFrameStats.mainPath = useBindless ? "BindlessMDI" : useMDI ? "MDI"
+                            : useGpuDriven ? "Indirect" : "CPU";
+    if (useBindless) {
+        // Binding state set for mainPipeline above (camera/instances/lights/
+        // system textures) carries over. Only the pipeline (bindless fragment),
+        // the merged buffers, and the material table differ from the normal path.
+        rhi->bindPipeline(mainPipelineBindless);
+        rhi->bindVertexBuffer(mergedVertexBuffer, 3, 0);
+        Uint32 zeroId = 0;
+        // Instance index rides base_instance (Metal) / gl_InstanceIndex (Vulkan).
+        rhi->setVertexBytes(&zeroId, sizeof(Uint32), 4);
+        rhi->bindTextureArgumentTable(bindlessMaterialTable);
+        if (backend == GraphicsBackend::Metal) {
+            // ICB pipelines reject direct fragment texture arguments, so the 10
+            // system textures (Metal contract slots 6-15) also go through an
+            // argument table. Resolve the same values the bound path binds
+            // above (KEEP IN SYNC with the Metal else-branch of the fragment
+            // contract), rewrite only changed slots (the table is shared with
+            // in-flight frames), and bind it at buffer(14).
+            if (!bindlessSystemTable.isValid()) {
+                bindlessSystemTable = rhi->createTextureArgumentTable(
+                    fragmentShaderBindless, /*bufferIndex=*/14, 1, /*texturesPerEntry=*/10);
+            }
+            if (bindlessSystemTable.isValid()) {
+                TextureHandle whiteTex = textures[defaultWhiteTexture].handle;
+                TextureHandle blackTex = textures[defaultBlackTexture].handle;
+                const bool iblReady = !iblNeedsUpdate;
+                const TextureHandle sys[10] = {
+                    (aoEnabled && aoRT.isValid()) ? aoRT : whiteTex,                     // 0 texAO
+                    (capabilities.raytracing && shadowRT.isValid()) ? shadowRT : whiteTex, // 1 texShadow
+                    (iblReady && irradianceMap.isValid()) ? irradianceMap : defaultBlackCubemapTex, // 2
+                    (iblReady && prefilterMap.isValid()) ? prefilterMap : defaultBlackCubemapTex,   // 3
+                    (iblReady && brdfLUTTex.isValid()) ? brdfLUTTex : blackTex,          // 4 brdfLUT
+                    whiteTex,                                                            // 5 rectLightVideo
+                    pssmShadowArrayTexture,                                              // 6 pssmShadowMaps
+                    (capabilities.raytracing && pointShadowHistoryRT.isValid()) ? pointShadowHistoryRT : whiteTex, // 7
+                    (capabilities.raytracing && gibsEnabled && giResultTexture.isValid()) ? giResultTexture : blackTex, // 8
+                    (sscsEnabled && sscsRT.isValid()) ? sscsRT : whiteTex,               // 9 texSSCS
+                };
+                for (Uint32 i = 0; i < 10; ++i) {
+                    if (sys[i].id != m_bindlessSysCache[i].id) {
+                        rhi->writeTextureArgumentTable(bindlessSystemTable, 0, i, sys[i]);
+                        m_bindlessSysCache[i] = sys[i];
+                    }
+                }
+                rhi->bindTextureArgumentTable(bindlessSystemTable);
+            }
+            // Replay the GPU-encoded command buffer (commands carry their own
+            // index-buffer regions).
+            rhi->executeICB(sceneICB, totalInstanceCount);
+        } else {
+            // One native multi-draw over the cull-written args, all materials.
+            rhi->bindIndexBuffer(mergedIndexBuffer, 0);
+            rhi->drawIndexedIndirect(gpuCullArgsBuffer, 0, totalInstanceCount,
+                                     sizeof(Vapor::DrawCommand));
+        }
+        mainDrawCalls = 1;  // the whole scene in one submission
+    } else if (useMDI) {
+        // Cull-output diagnostics moved to the StatsLog "GPUDRV" source (covers
+        // every indirect mode, only reads back when --stats is enabled).
+        rhi->bindVertexBuffer(mergedVertexBuffer, 3, 0);
+        rhi->bindIndexBuffer(mergedIndexBuffer, 0);
+        Uint32 zeroId = 0;
+        rhi->setVertexBytes(&zeroId, sizeof(Uint32), 4);
+        for (const auto& [materialId, range] : m_materialRanges) {
+            if (materialId < materials.size()) bindMaterial(materialId);
+            rhi->drawIndexedIndirect(gpuCullArgsBuffer,
+                                     static_cast<size_t>(range.first) * sizeof(Vapor::DrawCommand),
+                                     range.second, sizeof(Vapor::DrawCommand));
+            mainDrawCalls++;  // one native multi-draw per material range
+        }
+    } else {
+
+    // Group drawables by material to reduce state changes.
     std::map<MaterialId, std::vector<Uint32>> materialBatches;
-    for (Uint32 drawableIdx : visibleDrawables) {
-        const Drawable& drawable = frameDrawables[drawableIdx];
-        materialBatches[drawable.material].push_back(drawableIdx);
+    if (useGpuDriven) {
+        // GPU-driven: submit ALL drawables and let the compute cull decide
+        // visibility per instance (via instanceCount in the indirect args),
+        // rather than the CPU-culled visibleDrawables subset.
+        for (Uint32 i = 0; i < frameDrawables.size(); ++i) {
+            materialBatches[frameDrawables[i].material].push_back(i);
+        }
+    } else {
+        for (Uint32 drawableIdx : visibleDrawables) {
+            const Drawable& drawable = frameDrawables[drawableIdx];
+            materialBatches[drawable.material].push_back(drawableIdx);
+        }
     }
 
     // Draw by material batches (matching old renderer behavior)
@@ -1553,18 +1849,40 @@ void Renderer::mainRenderPass() {
                 rhi->bindVertexBuffer(mesh.vertexBuffer, 3, 0);
             }
 
-            // Set instance ID (binding 4 for Metal shader)
-            rhi->setVertexBytes(&correctInstanceID, sizeof(Uint32), 4);
+            // Set instance ID. On Vulkan the vertex shader reads
+            // instances[instanceID + gl_InstanceIndex]; in GPU-driven mode the
+            // draw command's firstInstance carries the index (gl_InstanceIndex),
+            // so push 0. Metal keeps using the push constant directly.
+            // In GPU-driven mode the index comes from gl_InstanceIndex (Vulkan) /
+            // base_instance (Metal), carried by the draw command's firstInstance,
+            // so push 0. The CPU path pushes the real index.
+            Uint32 vsInstanceID = useGpuDriven ? 0u : correctInstanceID;
+            rhi->setVertexBytes(&vsInstanceID, sizeof(Uint32), 4);
 
             // Draw
             if (mesh.indexBuffer.isValid()) {
                 rhi->bindIndexBuffer(mesh.indexBuffer, 0);
-                rhi->drawIndexed(mesh.indexCount, 1, 0, 0, 0);
+                if (useGpuDriven) {
+                    // Per-object indirect draw: the compute cull wrote this
+                    // instance's command (instanceCount 0 => culled => GPU
+                    // no-op). firstIndex/vertexOffset are 0 for per-mesh buffers,
+                    // matching what the cull shader wrote. The push-constant
+                    // instanceID set above still drives the vertex shader.
+                    rhi->drawIndexedIndirect(gpuCullArgsBuffer,
+                                             correctInstanceID * sizeof(Vapor::DrawCommand),
+                                             1, sizeof(Vapor::DrawCommand));
+                } else {
+                    rhi->drawIndexed(mesh.indexCount, 1, 0, 0, 0);
+                }
+                mainDrawCalls++;
             } else if (mesh.vertexBuffer.isValid()) {
                 rhi->draw(mesh.vertexCount, 1, 0, 0);
+                mainDrawCalls++;
             }
         }
     }
+    }  // end !useMDI (per-object / CPU path)
+    lastFrameStats.mainDrawCalls = mainDrawCalls;
 
     // World-space batch quads are NOT flushed here: they render in the
     // WorldCanvas pass after sky/fog/scattering (native graph order), so the
@@ -1574,16 +1892,44 @@ void Renderer::mainRenderPass() {
     rhi->endRenderPass();
 }
 
-// IBL-from-sky: capture the atmosphere into a cubemap, convolve irradiance,
-// prefilter specular mips, integrate the BRDF LUT. Runs once (iblNeedsUpdate)
-// on both backends — the bake pipelines are MSL on Metal and GLSL twins on
-// Vulkan, and the main pass consumes the results as split-sum IBL.
-void Renderer::iblCapturePass() {
-    if (!iblNeedsUpdate) return;
-    if (!skyCapturePipeline.isValid() || !irradiancePipeline.isValid() ||
-        !prefilterPipeline.isValid() || !brdfLUTPipeline.isValid()) {
+// Load an equirectangular HDR image as the IBL environment source. The actual
+// cubemap bake (irradiance/prefilter/BRDF LUT) happens later in iblCapturePass.
+void Renderer::loadHDRI(const std::string& path) {
+    std::shared_ptr<Vapor::HDRImage> img;
+    try {
+        img = AssetManager::loadHDRI(path);
+    } catch (const std::exception& e) {
+        fmt::print(stderr, "loadHDRI: {}\n", e.what());
         return;
     }
+    if (!img || img->floatArray.empty()) return;
+
+    // (Re)create the RGBA32F equirect source texture and upload the float pixels.
+    if (equirectHDRITexture.isValid()) rhi->destroyTexture(equirectHDRITexture);
+    TextureDesc desc;
+    desc.width = img->width;
+    desc.height = img->height;
+    desc.format = PixelFormat::RGBA32_FLOAT;
+    desc.usage = TextureUsage::Sampled;
+    equirectHDRITexture = rhi->createTexture(desc);
+    rhi->updateTexture(equirectHDRITexture, img->floatArray.data(),
+                       img->floatArray.size() * sizeof(float));
+
+    iblSource = IBLSource::HDRI;
+    iblNeedsUpdate = true;  // re-run the IBL chain from the new environment
+    fmt::print("HDRI loaded: {} ({}x{})\n", path, img->width, img->height);
+}
+
+void Renderer::iblCapturePass() {
+    if (!iblNeedsUpdate) return;
+    if (!irradiancePipeline.isValid() || !prefilterPipeline.isValid() || !brdfLUTPipeline.isValid()) {
+        return;
+    }
+    // Need an environment source: HDRI (equirect->cubemap) or the procedural sky
+    // capture. Vulkan only ships the HDRI source, so it no-ops without an HDRI.
+    const bool haveHDRISource = (iblSource == IBLSource::HDRI) && equirectHDRITexture.isValid() &&
+                                equirectToCubemapPipeline.isValid();
+    if (!haveHDRISource && !skyCapturePipeline.isValid()) return;
 
     // Fill all 42 capture slots up front (race-free per-draw offsets).
     const glm::mat4 captureViews[6] = {
@@ -1634,8 +1980,30 @@ void Renderer::iblCapturePass() {
         rhi->endRenderPass();
     };
 
-    for (Uint32 f = 0; f < 6; f++)
-        faceDraw("SkyCapture", skyCapturePipeline, environmentCubemap, f, f, 0, false, true, false);
+    // Fill the environment cubemap from the HDRI equirect map when one is loaded,
+    // otherwise from the procedural sky. Everything downstream (irradiance /
+    // prefilter / BRDF LUT) is identical.
+    const bool useHDRI = (iblSource == IBLSource::HDRI) && equirectHDRITexture.isValid() &&
+                         equirectToCubemapPipeline.isValid();
+    for (Uint32 f = 0; f < 6; f++) {
+        if (useHDRI) {
+            RenderPassDesc rp;
+            rp.name = "EquirectToCubemap";
+            rp.colorAttachments.push_back(environmentCubemap);
+            rp.clearColors.push_back(glm::vec4(0, 0, 0, 1));
+            rp.loadColor.push_back(false);
+            rp.colorArrayLayer = f;
+            rp.colorMipLevel = 0;
+            rhi->beginRenderPass(rp);
+            rhi->bindPipeline(equirectToCubemapPipeline);
+            rhi->setVertexBuffer(0, iblCaptureDataBuffer, f * stride, stride);  // faceIndex slot
+            rhi->setTexture(0, 0, equirectHDRITexture, clampSampler);
+            rhi->draw(3, 1, 0, 0);
+            rhi->endRenderPass();
+        } else {
+            faceDraw("SkyCapture", skyCapturePipeline, environmentCubemap, f, f, 0, false, true, false);
+        }
+    }
     rhi->generateMipmaps(environmentCubemap);
     for (Uint32 f = 0; f < 6; f++)
         faceDraw("IrradianceConv", irradiancePipeline, irradianceMap, 6 + f, f, 0, true, false, false);
@@ -1673,10 +2041,55 @@ void Renderer::prePass() {
     rp.loadDepth = false;
     rp.clearDepth = 1.0f;
     rhi->beginRenderPass(rp);
+
     rhi->bindPipeline(prePassPipeline);
     rhi->setVertexBuffer(0, cameraUniformBuffer, 0, sizeof(CameraRenderData));
     rhi->setVertexBuffer(1, materialUniformBuffer, 0, sizeof(Vapor::MaterialData) * MAX_INSTANCES);
-    rhi->setVertexBuffer(2, instanceDataBuffer, 0, sizeof(Vapor::InstanceData) * std::max<size_t>(1, visibleDrawables.size()));
+    // Full instance range: in MDI mode the material-sorted instance IDs of the
+    // CPU-visible drawables can land anywhere in [0, totalInstanceCount).
+    rhi->setVertexBuffer(2, instanceDataBuffer, 0, sizeof(Vapor::InstanceData) * std::max<Uint32>(1, totalInstanceCount));
+    // MDI layout: instances carry MERGED-buffer vertex offsets, and the Metal
+    // pre-pass shader adds instances[iid].vertexOffset to vertex_id. Feed it the
+    // merged vertex buffer (per-mesh index buffers stay: their local indices +
+    // the merged base land on the right vertices). Binding the small per-mesh
+    // buffers here instead made every fetch read far out of bounds -> garbage
+    // depth over the whole screen -> the main pass's LessOrEqual rejected all
+    // fragments (clear color) while rasterizing junk (FPS drop). Vulkan's
+    // PrePass.vert uses fixed-function attributes and ignores vertexOffset, so
+    // it keeps the per-mesh buffers.
+    // Option A: GPU-driven (indirect) pre-pass. When an MDI layout is active, the
+    // PreCull compute pass has written one frustum-culled DrawCommand per instance
+    // into prepassCullArgsBuffer (with real merged-buffer offsets; instanceCount 0
+    // = culled). Bind the merged buffers once and issue one drawIndexedIndirect per
+    // material range — the GPU decides visibility, so no CPU visibleDrawables loop.
+    // This mirrors the main pass's MDI branch and keeps the indirect path complete
+    // (depth is produced by the same GPU decision the main pass draws from).
+    // Instance index rides base_instance (Metal) / gl_InstanceIndex (Vulkan); both
+    // pre-pass vertex shaders read instanceID + that, so the byte push is 0.
+    const bool prePassIndirect = gpuDrivenPrePass && m_mdiInstanceLayout &&
+        prepassCullArgsBuffer.isValid() &&
+        mergedVertexBuffer.isValid() && mergedIndexBuffer.isValid() &&
+        !m_materialRanges.empty() &&
+        ((backend == GraphicsBackend::Vulkan && capabilities.multiDrawIndirect) ||
+         backend == GraphicsBackend::Metal);
+    if (prePassIndirect) {
+        rhi->bindVertexBuffer(mergedVertexBuffer, 3, 0);
+        rhi->bindIndexBuffer(mergedIndexBuffer, 0);
+        Uint32 zeroId = 0;
+        rhi->setVertexBytes(&zeroId, sizeof(Uint32), 4);
+        for (const auto& [materialId, range] : m_materialRanges) {
+            if (materialId < materials.size()) bindMaterial(materialId);  // MRT albedo/normal maps
+            rhi->drawIndexedIndirect(prepassCullArgsBuffer,
+                                     static_cast<size_t>(range.first) * sizeof(Vapor::DrawCommand),
+                                     range.second, sizeof(Vapor::DrawCommand));
+        }
+        rhi->endRenderPass();
+        return;
+    }
+
+    const bool prePullsMerged = backend == GraphicsBackend::Metal &&
+                                m_mdiInstanceLayout && mergedVertexBuffer.isValid();
+    if (prePullsMerged) rhi->bindVertexBuffer(mergedVertexBuffer, 3, 0);
     for (Uint32 drawableIdx : visibleDrawables) {
         const Drawable& drawable = frameDrawables[drawableIdx];
         const RenderMesh& mesh = meshes[drawable.mesh];
@@ -1684,7 +2097,7 @@ void Renderer::prePass() {
         if (it == drawableToInstanceID.end()) continue;
         Uint32 iid = it->second;
         bindMaterial(drawable.material);  // albedo/normal maps for the MRT frag
-        if (mesh.vertexBuffer.isValid()) rhi->bindVertexBuffer(mesh.vertexBuffer, 3, 0);
+        if (!prePullsMerged && mesh.vertexBuffer.isValid()) rhi->bindVertexBuffer(mesh.vertexBuffer, 3, 0);
         rhi->setVertexBytes(&iid, sizeof(Uint32), 4);
         if (mesh.indexBuffer.isValid()) {
             rhi->bindIndexBuffer(mesh.indexBuffer, 0);
@@ -1773,6 +2186,207 @@ void Renderer::tileCullingPass() {
     if (lightCullDebugOpen && (frameNumber % 15) == 0) {
         sampleClusterHistogram(cullMinLights, cullAvgLights, cullMaxLights, cullNonEmptyTiles);
     }
+}
+
+// GPU-driven rendering: frustum-cull every instance in a compute pass, writing
+// one indirect draw command per instance into gpuCullArgsBuffer (instanceCount
+// 0 = culled). The main pass then issues per-object drawIndexedIndirect, so the
+// GPU decides what actually draws. No-op unless the Indirect GPU-driven mode is
+// active. The existing CPU cull path is untouched.
+// Build the Hi-Z depth pyramid from the PrePass depth: mip 0 is a 2:1 max-depth
+// reduction of the scene depth; each further mip max-reduces the previous. Built
+// into a single sampleable texture via a scratch copy per level, because a
+// render pass can't read and write the same image (see copyTexture).
+void Renderer::hizBuildPass() {
+    if (!gpuDrivenActive() || !gpuOcclusionCulling) return;
+    if (!hizReducePipeline.isValid() || !hizTexture.isValid() ||
+        !hizScratchTexture.isValid() || !depthStencilRT.isValid() || hizMipCount == 0) {
+        return;
+    }
+
+    auto reduce = [&](TextureHandle src, int srcLod, Uint32 dstMip) {
+        RenderPassDesc rp;
+        rp.name = "HiZBuild";  // one per mip; the HUD aggregates them into one row
+        rp.colorAttachments.push_back(hizTexture);
+        rp.clearColors.push_back(glm::vec4(0.0f));
+        rp.loadColor.push_back(false);  // full overwrite
+        rp.colorMipLevel = dstMip;
+        // hizTexture is multi-mip: force the single-mip subresource-view path in
+        // both backends (a whole-texture multi-mip view is invalid as a color
+        // attachment). layer 0 is the only layer of this 2D texture.
+        rp.colorArrayLayer = 0;
+        rhi->beginRenderPass(rp);
+        rhi->bindPipeline(hizReducePipeline);
+        rhi->setTexture(0, 0, src, clampSampler);
+        rhi->setFragmentBytes(&srcLod, sizeof(int), 0);  // source mip to reduce
+        rhi->draw(3, 1, 0, 0);
+        rhi->endRenderPass();
+    };
+
+    // Level 0: reduce the full-res scene depth into the half-res mip 0.
+    reduce(depthStencilRT, 0, 0);
+    // Levels 1..N-1: stage the previous level through the scratch (a render pass
+    // can't sample hizTexture while targeting it), then reduce into this level.
+    for (Uint32 mip = 1; mip < hizMipCount; mip++) {
+        rhi->copyTexture(hizTexture, mip - 1, hizScratchTexture, mip - 1);
+        reduce(hizScratchTexture, int(mip - 1), mip);
+    }
+}
+
+// Main-pass cull: frustum + optional Hi-Z occlusion -> gpuCullArgsBuffer.
+void Renderer::gpuCullPass() {
+    if (!gpuDrivenIndirect()) return;
+    if (!gpuCullPipeline.isValid() || !gpuCullArgsBuffer.isValid()) return;
+    if (totalInstanceCount == 0) return;
+
+    // Metal Bindless MDI: the kernel encodes real draw commands into the scene
+    // ICB (created lazily here) instead of writing indirect-args structs.
+    // Vulkan Bindless MDI keeps the classic args-writing cull below — its
+    // single native multi-draw consumes the same args buffer.
+    const bool icbMode = gpuDrivenBindless() && capabilities.indirectCommandBuffers &&
+                         gpuCullICBPipeline.isValid() && mergedIndexBuffer.isValid();
+    if (icbMode && !sceneICB.isValid()) {
+        sceneICB = rhi->createIndirectCommandBuffer(MAX_INSTANCES);
+    }
+
+    const Uint32 n = totalInstanceCount;
+    if (icbMode && sceneICB.isValid()) {
+        rhi->beginComputePass("GpuCull");
+        rhi->bindComputePipeline(gpuCullICBPipeline);
+        rhi->setComputeBuffer(0, cameraUniformBuffer, 0, sizeof(CameraRenderData));
+        rhi->setComputeBuffer(1, instanceDataBuffer, 0, sizeof(Vapor::InstanceData) * n);
+        rhi->bindComputeICB(2, sceneICB);
+        rhi->setComputeBytes(&n, sizeof(Uint32), 3);
+        struct OccParams { Uint32 enabled; Uint32 mipCount; float hizW; float hizH; } occ;
+        occ.enabled = (gpuOcclusionCulling && hizTexture.isValid()) ? 1u : 0u;
+        occ.mipCount = hizMipCount;
+        occ.hizW = float(hizWidth);
+        occ.hizH = float(hizHeight);
+        rhi->setComputeBytes(&occ, sizeof(occ), 4);
+        rhi->setComputeBuffer(5, mergedIndexBuffer, 0, 0);
+        rhi->setComputeSampledTexture(4, hizTexture, clampSampler);
+        rhi->dispatch((n + 63) / 64, 1, 1);
+        rhi->endComputePass();
+        rhi->computeBarrier();  // ICB writes -> executeICB reads in Main
+        return;
+    }
+
+    runGpuCull(gpuCullArgsBuffer, gpuOcclusionCulling);
+}
+
+// Pre-pass cull (Option A): frustum only (Hi-Z isn't built until after the
+// pre-pass), so the depth pass can draw indirect instead of from the CPU-culled
+// visibleDrawables. Only meaningful when the pre-pass runs GPU-driven.
+void Renderer::prePassCullPass() {
+    if (!gpuDrivenIndirect() || !gpuDrivenPrePass) return;
+    if (!m_mdiInstanceLayout || !prepassCullArgsBuffer.isValid()) return;
+    if (!gpuCullPipeline.isValid() || totalInstanceCount == 0) return;
+    runGpuCull(prepassCullArgsBuffer, /*enableOcclusion=*/false);
+}
+
+// Shared cull dispatch: one DrawCommand per instance into argsBuffer, optionally
+// applying the Hi-Z occlusion test (never for the pre-pass — its output is the
+// depth Hi-Z is built from).
+void Renderer::runGpuCull(BufferHandle argsBuffer, bool enableOcclusion) {
+    const Uint32 n = totalInstanceCount;
+    rhi->beginComputePass("GpuCull");
+    rhi->bindComputePipeline(gpuCullPipeline);
+    rhi->setComputeBuffer(0, cameraUniformBuffer, 0, sizeof(CameraRenderData));
+    // Bind instance + args with instance-count-sized ranges so the GLSL shader's
+    // instances.length() equals the live instance count.
+    rhi->setComputeBuffer(1, instanceDataBuffer, 0, sizeof(Vapor::InstanceData) * n);
+    rhi->setComputeBuffer(2, argsBuffer, 0, sizeof(Vapor::DrawCommand) * n);
+
+    // Hi-Z occlusion inputs. Always bound (the shader declares them) so the
+    // resources are valid even when occlusion is off; `enabled` gates the test.
+    // hizTexture always exists; its contents are only meaningful once hizBuildPass
+    // has run this frame, which happens iff occlusion is enabled.
+    struct OccParams { Uint32 enabled; Uint32 mipCount; float hizW; float hizH; } occ;
+    occ.enabled = (enableOcclusion && hizTexture.isValid()) ? 1u : 0u;
+    occ.mipCount = hizMipCount;
+    occ.hizW = float(hizWidth);
+    occ.hizH = float(hizHeight);
+
+    // The MSL kernel can't use .length() on a device pointer, so Metal takes the
+    // instance count as an explicit constant at buffer(3). Binding indices differ
+    // per backend: Vulkan set 2/binding 0 + push constant; Metal texture/sampler/
+    // buffer index 4 (see GpuCull.comp / 3d_gpu_cull.metal).
+    if (backend == GraphicsBackend::Metal) {
+        rhi->setComputeBytes(&n, sizeof(Uint32), 3);
+        rhi->setComputeSampledTexture(4, hizTexture, clampSampler);
+        rhi->setComputeBytes(&occ, sizeof(occ), 4);
+    } else {
+        rhi->setComputeSampledTexture(0, hizTexture, clampSampler);
+        rhi->setComputeBytes(&occ, sizeof(occ), 0);
+    }
+    rhi->dispatch((n + 63) / 64, 1, 1);
+    rhi->endComputePass();
+    rhi->computeBarrier();  // cull writes args -> indirect draw reads them
+}
+
+// Build (or rebuild, if meshes were added) the merged scene vertex/index buffers
+// used by single-call MDI, from the CPU geometry accumulated in registerMesh.
+void Renderer::ensureMergedGeometry() {
+    if (!m_mergedGeometryDirty) return;
+    if (m_mergedVertices.empty() || m_mergedIndices.empty()) return;
+
+    if (mergedVertexBuffer.isValid()) rhi->destroyBuffer(mergedVertexBuffer);
+    if (mergedIndexBuffer.isValid()) rhi->destroyBuffer(mergedIndexBuffer);
+
+    BufferDesc vbDesc;
+    vbDesc.size = m_mergedVertices.size() * sizeof(Vapor::VertexData);
+    vbDesc.usage = BufferUsage::Vertex;
+    vbDesc.memoryUsage = MemoryUsage::GPU;
+    mergedVertexBuffer = rhi->createBuffer(vbDesc);
+    rhi->updateBuffer(mergedVertexBuffer, m_mergedVertices.data(), 0, vbDesc.size);
+
+    BufferDesc ibDesc;
+    ibDesc.size = m_mergedIndices.size() * sizeof(Uint32);
+    ibDesc.usage = BufferUsage::Index;
+    ibDesc.memoryUsage = MemoryUsage::GPU;
+    mergedIndexBuffer = rhi->createBuffer(ibDesc);
+    rhi->updateBuffer(mergedIndexBuffer, m_mergedIndices.data(), 0, ibDesc.size);
+
+    m_mergedGeometryDirty = false;
+    // These are large one-time uploads recorded into the upload command stream.
+    // Force them to complete now: otherwise an oversize staging buffer (retired
+    // on a frame-counter timer) can be freed one frame before the upload command
+    // buffer that reads it finishes (VUID-vkDestroyBuffer-buffer-00922).
+    rhi->flushUploads();
+}
+
+// (Re)write the bindless material texture table for the ICB draw mode: one
+// MaterialTexs entry (6 texture slots) per material, indexed by materialID in
+// the bindless-specialized PBR fragment. Missing textures fall back to the
+// engine defaults (white/flat-normal/black) so every slot is a valid handle —
+// argument-table reads have no "unbound" concept. Self-gates on dirty + caps.
+void Renderer::ensureBindlessMaterialTable() {
+    if (!m_bindlessTableDirty) return;
+    if (!capabilities.bindlessTextures || !fragmentShaderBindless.isValid()) return;
+    if (materials.empty()) return;
+
+    if (!bindlessMaterialTable.isValid()) {
+        bindlessMaterialTable = rhi->createTextureArgumentTable(
+            fragmentShaderBindless, /*bufferIndex=*/13, MAX_INSTANCES, /*texturesPerEntry=*/6);
+        if (!bindlessMaterialTable.isValid()) return;
+    }
+
+    auto texOrDefault = [&](TextureId id, TextureId fallback) -> TextureHandle {
+        if (id < textures.size() && textures[id].handle.isValid()) return textures[id].handle;
+        return textures[fallback].handle;
+    };
+    const Uint32 n = std::min<Uint32>(static_cast<Uint32>(materials.size()), MAX_INSTANCES);
+    for (Uint32 i = 0; i < n; ++i) {
+        const RenderMaterial& m = materials[i];
+        rhi->writeTextureArgumentTable(bindlessMaterialTable, i, 0, texOrDefault(m.albedoTexture,    defaultWhiteTexture));
+        rhi->writeTextureArgumentTable(bindlessMaterialTable, i, 1, texOrDefault(m.normalTexture,    defaultNormalTexture));
+        rhi->writeTextureArgumentTable(bindlessMaterialTable, i, 2, texOrDefault(m.metallicTexture,  defaultWhiteTexture));
+        rhi->writeTextureArgumentTable(bindlessMaterialTable, i, 3, texOrDefault(m.roughnessTexture, defaultWhiteTexture));
+        rhi->writeTextureArgumentTable(bindlessMaterialTable, i, 4, texOrDefault(m.occlusionTexture, defaultWhiteTexture));
+        rhi->writeTextureArgumentTable(bindlessMaterialTable, i, 5, texOrDefault(m.emissiveTexture,  defaultBlackTexture));
+    }
+    m_bindlessTableDirty = false;
+    fmt::print("Bindless material table written: {} materials\n", n);
 }
 
 // Sun/lens flare: procedural glow/halo/ghosts/starburst added over the HDR
@@ -1995,61 +2609,10 @@ void Renderer::aoDenoisePass() {
     }
 }
 
-// Mirrors ShadowReservoirSet in restir_shadow_common.metal (32 B per pixel).
-struct ShadowReservoirSetCPU {
-    Uint32 pointData;    float pointW;
-    Uint32 spotData;     float spotW;
-    Uint32 rectData;     float rectW;
-    Uint32 packedNormal; float viewDepth;
-};
-static_assert(sizeof(ShadowReservoirSetCPU) == 32, "must match the MSL ShadowReservoirSet");
-
-// Mirrors RestirShadowParams in restir_shadow_common.metal.
-struct RestirShadowParamsCPU {
-    glm::vec2 screenSize;
-    glm::uvec2 gridDims;
-    Uint32 frameIndex;
-    Uint32 pointCount;
-    Uint32 rectCount;
-    Uint32 spotCount;
-    Uint32 historyValid;
-    Uint32 pointCandidates;
-    Uint32 rectCandidates;
-    Uint32 spotCandidates;
-    Uint32 debugMode;
-    Uint32 spatialTaps;
-    float pointMClamp;
-    float rectMClamp;
-    float spatialRadius;
-    float depthTolerance;
-    float normalTolerance;
-    float spotMClamp;
-};
-static_assert(sizeof(RestirShadowParamsCPU) == 80, "must match the MSL RestirShadowParams");
-
 // Stochastic ray-traced point-light shadows (clustered light sampling).
-// Routes to the ReSTIR reservoir path when enabled; the legacy uniform-pick
-// kernel below stays as the fallback (and the A/B reference).
 void Renderer::stochasticPointShadowPass() {
-    pointShadowWritten = false;  // set again below iff a kernel writes the RT
-    pointShadowDenoiseRan = false;
-    const bool restirWanted = stochasticShadowsEnabled && restirShadowsEnabled &&
-                              restirShadowTemporalPipeline.isValid() &&
-                              restirShadowResolvePipeline.isValid();
-    // Reservoirs exist exactly while the ReSTIR path is active: free them the
-    // frame the feature stops running (toggle off, missing TLAS, ...) so a
-    // one-time experiment doesn't pin 2x 32 B/pixel for the whole session.
-    if (!restirWanted && restirReservoirHistory.isValid()) {
-        rhi->destroyBuffer(restirReservoirHistory);
-        rhi->destroyBuffer(restirReservoirScratch);
-        restirReservoirHistory = {};
-        restirReservoirScratch = {};
-        restirHistoryValid = false;
-    }
-    if (!stochasticShadowsEnabled) return;  // off = aligns with the RT-less Vulkan output
-    if (!sceneTLAS.isValid() || !pointShadowRT.isValid()) return;
-    if (restirWanted && restirShadowPass()) { pointShadowWritten = true; return; }
-    if (!stochasticPointShadowPipeline.isValid()) return;
+    if (!stochasticShadowsEnabled) return;  // noisy without a denoiser; off = aligns with Vulkan
+    if (!stochasticPointShadowPipeline.isValid() || !sceneTLAS.isValid() || !pointShadowRT.isValid()) return;
     Uint32 w = rhi->getSwapchainWidth();
     Uint32 h = rhi->getSwapchainHeight();
     glm::vec2 screenSize(w, h);
@@ -2079,111 +2642,6 @@ void Renderer::stochasticPointShadowPass() {
     rhi->setComputeBytes(&extraCounts, sizeof(glm::uvec2), 10);
     rhi->dispatch((w + 7) / 8, (h + 7) / 8, 1);
     rhi->endComputePass();
-    pointShadowWritten = true;
-}
-
-// ReSTIR denoise for the stochastic shadows. Two kernels in one compute pass:
-//   1) 3d_restir_shadow_temporal — fresh light candidates (RIS, no rays) +
-//      velocity-reprojected temporal reservoir merge -> scratch buffer
-//   2) 3d_restir_shadow_resolve — spatial reservoir merge + ONE visibility ray
-//      per light domain for the winner -> pointShadowRT (RGB) + history buffer
-// The winner's binary visibility estimates the contribution-weighted shadow
-// factor per domain; the existing PointShadowTemporal accumulator stays as the
-// final averager. Ray budget: <= 4/pixel — 1 point, 1 spot, 2 independently
-// jittered quad points on the rect winner (fresh every frame so the penumbra
-// coverage stays a decorrelated estimate) — matching the legacy kernel's cap.
-// Returns false (without recording) if the reservoirs can't be allocated, so
-// the caller falls back to the legacy kernel.
-bool Renderer::restirShadowPass() {
-    Uint32 w = rhi->getSwapchainWidth();
-    Uint32 h = rhi->getSwapchainHeight();
-
-    // Reservoirs allocate on first use and are freed the moment the path stops
-    // running (see stochasticPointShadowPass) or the swapchain resizes
-    // (destroyRenderTargets). 32 B/pixel x2: ~28 MB combined at 1500x900,
-    // ~236 MB at 2560x1440 retina, ~530 MB at 4K — the reason they don't sit
-    // in createRenderTargets with the always-on targets.
-    if (!restirReservoirHistory.isValid() || !restirReservoirScratch.isValid()) {
-        BufferDesc bd;
-        bd.size = size_t(w) * size_t(h) * sizeof(ShadowReservoirSetCPU);
-        bd.usage = BufferUsage::Storage;
-        bd.memoryUsage = MemoryUsage::GPU;
-        try {
-            restirReservoirHistory = rhi->createBuffer(bd);
-            restirReservoirScratch = rhi->createBuffer(bd);
-        } catch (const std::exception& e) {
-            if (restirReservoirHistory.isValid()) rhi->destroyBuffer(restirReservoirHistory);
-            restirReservoirHistory = {};
-            restirReservoirScratch = {};
-            restirShadowsEnabled = false;  // don't retry every frame
-            fmt::print(stderr, "restirShadowPass: reservoir allocation failed ({}), "
-                               "falling back to the legacy stochastic kernel\n", e.what());
-            return false;
-        }
-        restirHistoryValid = false;  // fresh buffers hold garbage, not history
-    }
-
-    RestirShadowParamsCPU p{};
-    p.screenSize = glm::vec2(w, h);
-    p.gridDims = glm::uvec2(clusterGridSizeX, clusterGridSizeY);
-    // frameNumber, not frameCounter: the latter only advances inside
-    // lightScatteringPass, so it freezes (and with it the RNG sequence and
-    // history-contiguity check) whenever god rays are toggled off.
-    p.frameIndex = frameNumber;
-    p.pointCount = static_cast<Uint32>(pointLights.size());
-    p.rectCount = static_cast<Uint32>(rectLights.size());
-    p.spotCount = static_cast<Uint32>(spotLights.size());
-    // History is only trusted when the pass also ran last frame — any skip
-    // (toggle, invalid TLAS, resize, graph edits) breaks the chain here
-    // instead of every skip site having to remember to invalidate.
-    p.historyValid = (restirHistoryValid && frameNumber == restirLastFrame + 1) ? 1u : 0u;
-    p.pointCandidates = std::max(restirPointCandidates, 1u);  // panel slider allows typed 0
-    p.rectCandidates = restirRectCandidates;
-    p.spotCandidates = restirSpotCandidates;
-    p.debugMode = pointShadowDebugMode;
-    p.spatialTaps = restirSpatialTaps;
-    p.pointMClamp = restirPointMClamp * float(p.pointCandidates);
-    p.rectMClamp = restirRectMClamp * float(p.rectCandidates);
-    p.spotMClamp = restirPointMClamp * float(p.spotCandidates);
-    p.spatialRadius = restirSpatialRadius;
-    p.depthTolerance = 0.1f;
-    p.normalTolerance = 0.9f;
-
-    rhi->beginComputePass("ReSTIRShadow");
-    rhi->bindComputePipeline(restirShadowTemporalPipeline);
-    rhi->setComputeTexture(0, depthStencilRT);
-    rhi->setComputeTexture(1, normalRT);
-    rhi->setComputeTexture(2, velocityRT);
-    rhi->setComputeBuffer(0, cameraUniformBuffer, 0, sizeof(CameraRenderData));
-    rhi->setComputeBuffer(1, pointLightBuffer, 0, sizeof(PointLightData) * maxPointLights);
-    rhi->setComputeBuffer(2, clusterBuffer);
-    rhi->setComputeBuffer(3, spotLightBuffer, 0, sizeof(Vapor::SpotLight) * maxSpotLights);
-    rhi->setComputeBuffer(4, rectLightBuffer);
-    rhi->setComputeBuffer(5, restirReservoirHistory);
-    rhi->setComputeBuffer(6, restirReservoirScratch);
-    rhi->setComputeBytes(&p, sizeof(p), 7);
-    rhi->dispatch((w + 7) / 8, (h + 7) / 8, 1);
-    rhi->computeBarrier();  // scratch reservoirs -> spatial taps
-
-    rhi->bindComputePipeline(restirShadowResolvePipeline);
-    rhi->setComputeTexture(0, depthStencilRT);
-    rhi->setComputeTexture(1, normalRT);
-    rhi->setComputeTexture(2, pointShadowRT);
-    rhi->setComputeBuffer(0, cameraUniformBuffer, 0, sizeof(CameraRenderData));
-    rhi->setComputeBuffer(1, pointLightBuffer, 0, sizeof(PointLightData) * maxPointLights);
-    rhi->setComputeBuffer(2, clusterBuffer);
-    rhi->setComputeBuffer(3, spotLightBuffer, 0, sizeof(Vapor::SpotLight) * maxSpotLights);
-    rhi->setComputeBuffer(4, rectLightBuffer);
-    rhi->setComputeBuffer(5, restirReservoirScratch);
-    rhi->setComputeBuffer(6, restirReservoirHistory);
-    rhi->setAccelerationStructure(7, sceneTLAS);
-    rhi->setComputeBytes(&p, sizeof(p), 8);
-    rhi->dispatch((w + 7) / 8, (h + 7) / 8, 1);
-    rhi->endComputePass();
-
-    restirHistoryValid = true;
-    restirLastFrame = frameNumber;
-    return true;
 }
 
 // GIBS surfel GI (RequiresRaytracing): generate surfels from the pre-pass
@@ -2428,11 +2886,7 @@ void Renderer::gibsPass() {
 // here the handles are swapped instead (post-swap, history holds the latest
 // denoised result and is what the PBR shader binds).
 void Renderer::pointShadowTemporalPass() {
-    // Only accumulate frames the stochastic pass actually wrote (covers the
-    // feature toggle, missing RT support, and the frames before the TLAS is
-    // built) — otherwise the EMA would fold undefined texture memory into the
-    // history the PBR pass samples.
-    if (!pointShadowWritten) return;
+    if (!stochasticShadowsEnabled) return;
     if (!pointShadowTemporalPipeline.isValid() || !pointShadowRT.isValid()) return;
     Uint32 w = rhi->getSwapchainWidth();
     Uint32 h = rhi->getSwapchainHeight();
@@ -2445,32 +2899,6 @@ void Renderer::pointShadowTemporalPass() {
     rhi->dispatch((w + 7) / 8, (h + 7) / 8, 1);
     rhi->endComputePass();
     std::swap(pointShadowDenoisedRT, pointShadowHistoryRT);
-    pointShadowHistoryWritten = true;
-}
-
-// Edge-aware 5x5 cross-bilateral filter over the accumulated shadow factors —
-// the spatial-filtering stage of the stochastic-RT skeleton. The accumulator's
-// EMA keeps a variance floor for the rect penumbra's per-frame coverage
-// samples; averaging geometry-compatible neighbors removes it. Reads the
-// post-swap history (the accumulated result) and writes the now-scratch
-// denoised target, which is what the PBR pass samples — so the history
-// feedback stays unfiltered and the blur never compounds across frames.
-void Renderer::pointShadowDenoisePass() {
-    if (!pointShadowWritten) return;  // accumulator didn't run either
-    if (!pointShadowDenoisePipeline.isValid() || !pointShadowHistoryRT.isValid() ||
-        !pointShadowDenoisedRT.isValid()) return;
-    Uint32 w = rhi->getSwapchainWidth();
-    Uint32 h = rhi->getSwapchainHeight();
-    rhi->beginComputePass("PointShadowDenoise");
-    rhi->bindComputePipeline(pointShadowDenoisePipeline);
-    rhi->setComputeTexture(0, pointShadowHistoryRT);
-    rhi->setComputeTexture(1, depthStencilRT);
-    rhi->setComputeTexture(2, normalRT);
-    rhi->setComputeTexture(3, pointShadowDenoisedRT);
-    rhi->setComputeBuffer(0, cameraUniformBuffer, 0, sizeof(CameraRenderData));
-    rhi->dispatch((w + 7) / 8, (h + 7) / 8, 1);
-    rhi->endComputePass();
-    pointShadowDenoiseRan = true;
 }
 
 // Directional shadow pass (PSSM, 3 cascades): split the camera frustum by a
@@ -2654,6 +3082,11 @@ void Renderer::shadowPass() {
             rhi->setVertexBytes(&ci, sizeof(Uint32), 5);  // cascadeIndex -> push offset 16
         }
         rhi->setVertexBuffer(2, instanceDataBuffer, 0, sizeof(Vapor::InstanceData) * std::max<Uint32>(1, totalInstanceCount));
+        // MDI layout: Metal's shadow shader pulls instances[iid].vertexOffset +
+        // vertex_id, so it must read the merged vertex buffer (see prePass).
+        const bool shadowPullsMerged = backend == GraphicsBackend::Metal &&
+                                       m_mdiInstanceLayout && mergedVertexBuffer.isValid();
+        if (shadowPullsMerged) rhi->bindVertexBuffer(mergedVertexBuffer, 3, 0);
 
         // ALL drawables, not the camera-visible set: casters outside the view
         // frustum must still render into the cascades or their shadows vanish
@@ -2669,7 +3102,7 @@ void Renderer::shadowPass() {
                 // texAlbedo at fragment texture(0) for alpha-tested cutouts.
                 bindMaterial(drawable.material);
             }
-            if (mesh.vertexBuffer.isValid()) rhi->bindVertexBuffer(mesh.vertexBuffer, 3, 0);
+            if (!shadowPullsMerged && mesh.vertexBuffer.isValid()) rhi->bindVertexBuffer(mesh.vertexBuffer, 3, 0);
             rhi->setVertexBytes(&iid, sizeof(Uint32), 4);  // instanceID -> push offset 0
             if (mesh.indexBuffer.isValid()) {
                 rhi->bindIndexBuffer(mesh.indexBuffer, 0);
@@ -2701,6 +3134,10 @@ void Renderer::shadowPass() {
             rhi->setVertexBytes(&nearIdx, sizeof(Uint32), 5);  // cascadeIndex -> push offset 16
         }
         rhi->setVertexBuffer(2, instanceDataBuffer, 0, sizeof(Vapor::InstanceData) * std::max<Uint32>(1, totalInstanceCount));
+        // Same merged-VB requirement as the cascade loop above (MDI layout).
+        const bool nearPullsMerged = backend == GraphicsBackend::Metal &&
+                                     m_mdiInstanceLayout && mergedVertexBuffer.isValid();
+        if (nearPullsMerged) rhi->bindVertexBuffer(mergedVertexBuffer, 3, 0);
         for (Uint32 drawableIdx = 0; drawableIdx < frameDrawables.size(); drawableIdx++) {
             const Drawable& drawable = frameDrawables[drawableIdx];
             const RenderMesh& mesh = meshes[drawable.mesh];
@@ -2708,7 +3145,7 @@ void Renderer::shadowPass() {
             if (it == drawableToInstanceID.end()) continue;
             Uint32 iid = it->second;
             if (backend == GraphicsBackend::Metal) bindMaterial(drawable.material);
-            if (mesh.vertexBuffer.isValid()) rhi->bindVertexBuffer(mesh.vertexBuffer, 3, 0);
+            if (!nearPullsMerged && mesh.vertexBuffer.isValid()) rhi->bindVertexBuffer(mesh.vertexBuffer, 3, 0);
             rhi->setVertexBytes(&iid, sizeof(Uint32), 4);  // instanceID -> push offset 0
             if (mesh.indexBuffer.isValid()) {
                 rhi->bindIndexBuffer(mesh.indexBuffer, 0);
@@ -3193,11 +3630,12 @@ void Renderer::velocityPass() {
 }
 
 // GPU particle system: simulate (force -> integrate compute) then render as
-// instanced additive billboards into colorRT. A self-contained orbital demo.
+// instanced billboards into colorRT — one draw per ParticleDrawPacket, each
+// with its own blend pipeline + texture (per-material draws).
 void Renderer::particlePass() {
     if (particleCount == 0) return;
     if (!particleForcePipeline.isValid() || !particleIntegratePipeline.isValid() ||
-        !particleRenderPipeline.isValid() || !particleBuffer.isValid()) {
+        !particleRenderPipelines[0].isValid() || !particleBuffer.isValid()) {
         return;
     }
 
@@ -3257,7 +3695,38 @@ void Renderer::particlePass() {
     // Hide: skip drawing but keep simulating, so unhiding is seamless.
     if (!particleVisible) return;
 
-    // Render: instanced billboards (6 verts x particleCount) into colorRT+depth.
+    // Per-emitter draw list from ParticleRenderSystem. Fallback: one full-range
+    // additive draw when no packets were submitted (particles driven without
+    // the ECS render system).
+    std::vector<ParticleDrawPacket> fallbackDraws;
+    const std::vector<ParticleDrawPacket>* draws = &m_particleDrawList;
+    if (draws->empty()) {
+        ParticleDrawPacket all;
+        all.slotBegin = 0;
+        all.slotCount = particleCount;
+        fallbackDraws.push_back(all);
+        draws = &fallbackDraws;
+    }
+    const Uint32 drawTotal = static_cast<Uint32>(
+        std::min<size_t>(draws->size(), MAX_PARTICLE_DRAWS));
+
+    // Indirect mode (follows the GPU-driven toggle): draw args come from a
+    // buffer instead of CPU call parameters. The args are CPU-written today —
+    // the point is the submission path, so a later GPU compact/cull pass can
+    // overwrite instanceCount without touching this loop.
+    const bool indirect = gpuDrivenIndirect() && particleDrawArgsBuffer.isValid();
+    if (indirect) {
+        // VkDrawIndirectCommand == MTLDrawPrimitivesIndirectArguments (16 B).
+        struct DrawArgs { Uint32 vertexCount, instanceCount, firstVertex, firstInstance; };
+        DrawArgs args[MAX_PARTICLE_DRAWS];
+        for (Uint32 i = 0; i < drawTotal; ++i) {
+            const auto& p = (*draws)[i];
+            args[i] = { 6u, p.slotCount, 0u, p.slotBegin };
+        }
+        rhi->updateBuffer(particleDrawArgsBuffer, args, 0, sizeof(DrawArgs) * drawTotal);
+    }
+
+    // Instanced billboards (6 verts × slotCount per packet) into colorRT+depth.
     RenderPassDesc rp;
     rp.name = "Particles";
     rp.colorAttachments.push_back(colorRT);
@@ -3265,20 +3734,47 @@ void Renderer::particlePass() {
     rp.depthAttachment = depthStencilRT;
     rp.loadDepth = true;
     rhi->beginRenderPass(rp);
-    rhi->bindPipeline(particleRenderPipeline);
-    if (metal) {
-        // particleVertex: camera(0), ParticlePushConstants(1), particles(2).
-        rhi->setVertexBuffer(0, cameraUniformBuffer, 0, sizeof(CameraRenderData));
-        struct { float particleSize; float _pad[3]; } pc{ 0.1f, {0,0,0} };
-        rhi->setVertexBytes(&pc, sizeof(pc), 1);
-        rhi->setVertexBuffer(2, particleBuffer, 0, bufBytes);
-    } else {
-        rhi->setVertexBuffer(0, cameraUniformBuffer, 0, sizeof(CameraRenderData));   // set0 b0
-        rhi->setFragmentBuffer(0, particleBuffer, 0, bufBytes);                       // set1 b0 (read in VS)
-        float particleSize = 0.1f;
-        rhi->setVertexBytes(&particleSize, sizeof(float), 0);                         // push offset 0
+    for (Uint32 i = 0; i < drawTotal; ++i) {
+        const auto& p = (*draws)[i];
+        if (p.slotCount == 0) continue;
+
+        const Uint32 blend = std::min<Uint32>(p.blendMode, PARTICLE_BLEND_COUNT - 1);
+        rhi->bindPipeline(particleRenderPipelines[blend]);
+
+        // Per-packet texture; the default white texture keeps the sampler bound
+        // while useTexture=0 selects the procedural soft-disc path in the shader.
+        const bool hasTexture = p.texture != INVALID_TEXTURE_ID &&
+                                p.texture < textures.size();
+        const TextureId texId = hasTexture ? p.texture : defaultWhiteTexture;
+        struct { float particleSize; float useTexture; float _pad[2]; }
+            pc{ p.size, hasTexture ? 1.0f : 0.0f, {0.0f, 0.0f} };
+
+        if (metal) {
+            // particleVertex: camera(0), ParticlePushConstants(1), particles(2);
+            // particleFragment: params in buffer(0), texture/sampler at 0.
+            rhi->setVertexBuffer(0, cameraUniformBuffer, 0, sizeof(CameraRenderData));
+            rhi->setVertexBytes(&pc, sizeof(pc), 1);
+            rhi->setFragmentBytes(&pc, sizeof(pc), 0);
+            rhi->setVertexBuffer(2, particleBuffer, 0, bufBytes);
+        } else {
+            rhi->setVertexBuffer(0, cameraUniformBuffer, 0, sizeof(CameraRenderData));   // set0 b0
+            rhi->setFragmentBuffer(0, particleBuffer, 0, bufBytes);                       // set1 b0 (read in VS)
+            rhi->setVertexBytes(&pc, sizeof(pc), 0);  // pc [0,16), visible to VS+FS
+        }
+        if (texId < textures.size()) {
+            const RenderTexture& tex = textures[texId];
+            rhi->setTexture(2, 0, tex.handle, tex.sampler);  // GLSL set2 b0 / MSL texture(0)
+        }
+
+        if (indirect) {
+            rhi->drawIndirect(particleDrawArgsBuffer, static_cast<size_t>(i) * 16u, 1, 16);
+        } else {
+            // firstInstance = slotBegin: gl_InstanceIndex / [[instance_id]]
+            // include the base instance on both backends, indexing the SSBO
+            // directly at the emitter's slot range.
+            rhi->draw(6, p.slotCount, 0, p.slotBegin);
+        }
     }
-    rhi->draw(6, particleCount, 0, 0);
     rhi->endRenderPass();
 }
 
@@ -3392,6 +3888,12 @@ void Renderer::setSky(const SkyRenderData& sky) {
     atmosphereData.exposure              = sky.exposure;
     atmosphereData.groundColor           = sky.groundColor;
     iblNeedsUpdate = true;  // re-bake IBL from the new sky
+}
+
+void Renderer::setParticleDrawList(const std::vector<ParticleDrawPacket>& draws) {
+    m_particleDrawList = draws;
+    if (m_particleDrawList.size() > MAX_PARTICLE_DRAWS)
+        m_particleDrawList.resize(MAX_PARTICLE_DRAWS);
 }
 
 // Volumetric clouds (port of the Metal quarter-res path): raymarch into a
@@ -3820,6 +4322,14 @@ void Renderer::createDefaultResources() {
         createFrameSlottedBuffer(particleSimParamsBuffer, uDesc);
         uDesc.size = sizeof(ParticleAttractor) * MAX_PARTICLE_ATTRACTORS;
         createFrameSlottedBuffer(particleAttractorBuffer, uDesc);
+
+        // Indirect draw args for per-emitter particle draws: one 16-byte
+        // {vertexCount, instanceCount, firstVertex, firstInstance} per packet.
+        BufferDesc iaDesc;
+        iaDesc.usage = BufferUsage::Indirect;
+        iaDesc.memoryUsage = MemoryUsage::CPUtoGPU;
+        iaDesc.size = 16u * MAX_PARTICLE_DRAWS;
+        createFrameSlottedBuffer(particleDrawArgsBuffer, iaDesc);
     }
 }
 
@@ -3906,16 +4416,6 @@ void Renderer::destroyRenderTargets() {
     kill(cloudRT); kill(cloudHistoryRT); kill(cloudResolvedRT);
     kill(swapchainDepthBuffer);
 
-    // ReSTIR shadow reservoirs are swapchain-sized too (restirShadowPass
-    // reallocates at the new size on its next run).
-    if (restirReservoirHistory.isValid()) { rhi->destroyBuffer(restirReservoirHistory); restirReservoirHistory = {}; }
-    if (restirReservoirScratch.isValid()) { rhi->destroyBuffer(restirReservoirScratch); restirReservoirScratch = {}; }
-    restirHistoryValid = false;
-    // The recreated shadow targets hold undefined memory until the chain runs.
-    pointShadowWritten = false;
-    pointShadowHistoryWritten = false;
-    pointShadowDenoiseRan = false;
-
     // History/reprojection state is stale at the new resolution.
     aoHistoryValid = false;
     aoHistoryIndex = 0;
@@ -3951,6 +4451,29 @@ void Renderer::createRenderTargets() {
         desc.sampleCount = 1;
         desc.usage = TextureUsage::DepthStencil | TextureUsage::Sampled;  // Sampled by later passes
         depthStencilRT = rhi->createTexture(desc);
+    }
+
+    // Hi-Z depth pyramid (half-res mip 0, full max-depth mip chain) + a scratch
+    // twin used to stage each level (see hizBuildPass: a single sampleable
+    // texture can't be read and written in the same pass, so a mip is copied to
+    // the scratch and reduced back). R32F color so a compute shader can textureLod
+    // it. Only the GPU-occlusion path uses these, but they're cheap to always have.
+    {
+        if (hizTexture.isValid()) rhi->destroyTexture(hizTexture);
+        if (hizScratchTexture.isValid()) rhi->destroyTexture(hizScratchTexture);
+        hizWidth = std::max(1u, (width + 1) / 2);
+        hizHeight = std::max(1u, (height + 1) / 2);
+        hizMipCount = 1;
+        for (Uint32 d = std::max(hizWidth, hizHeight); d > 1; d >>= 1) hizMipCount++;
+
+        TextureDesc desc;
+        desc.width = hizWidth;
+        desc.height = hizHeight;
+        desc.mipLevels = hizMipCount;
+        desc.format = PixelFormat::R32_FLOAT;
+        desc.usage = TextureUsage::RenderTarget | TextureUsage::Sampled;
+        hizTexture = rhi->createTexture(desc);
+        hizScratchTexture = rhi->createTexture(desc);
     }
 
     // Create color RT (MSAA and resolved, HDR format)
@@ -4228,6 +4751,39 @@ void Renderer::createRenderPipeline() {
 
     mainPipeline = rhi->createPipeline(pipelineDesc);
 
+    // Bindless MDI twin: same pipeline with the bindless fragment variant.
+    //   Metal:  fragmentMain specialized with kBindlessMaterials (argument
+    //           table at buffer 13) + the supportIndirectCommandBuffers opt-in
+    //           that executeICB requires.
+    //   Vulkan: RHIMainBindless.frag.spv (compiled with -DBINDLESS; material
+    //           textures from the set-3 runtime descriptor array).
+    if (backend == GraphicsBackend::Metal && capabilities.bindlessTextures) {
+        ShaderDesc bfd;
+        bfd.stage = ShaderStage::Fragment;
+        bfd.code = fragShaderCode.data();
+        bfd.codeSize = fragShaderCode.size();
+        bfd.entryPoint = "fragmentMain";
+        bfd.bindlessMaterials = true;
+        fragmentShaderBindless = rhi->createShader(bfd);
+        PipelineDesc bDesc = pipelineDesc;
+        bDesc.fragmentShader = fragmentShaderBindless;
+        bDesc.supportsICB = true;
+        mainPipelineBindless = rhi->createPipeline(bDesc);
+    } else if (backend == GraphicsBackend::Vulkan && capabilities.bindlessTextures) {
+        std::string bindlessFragCode = readFile("shaders/RHIMainBindless.frag.spv");
+        if (!bindlessFragCode.empty()) {
+            ShaderDesc bfd;
+            bfd.stage = ShaderStage::Fragment;
+            bfd.code = bindlessFragCode.data();
+            bfd.codeSize = bindlessFragCode.size();
+            bfd.entryPoint = "main";
+            fragmentShaderBindless = rhi->createShader(bfd);
+            PipelineDesc bDesc = pipelineDesc;
+            bDesc.fragmentShader = fragmentShaderBindless;
+            mainPipelineBindless = rhi->createPipeline(bDesc);
+        }
+    }
+
     // ------------------------------------------------------------------------
     // Post-process pipeline: fullscreen triangle sampling colorRT, ACES tone
     // map + sRGB encode to the swapchain. Vulkan only (the Metal backend uses
@@ -4301,6 +4857,8 @@ void Renderer::createRenderPipeline() {
             bloomBrightPipeline      = makeFullscreenFragPipeline("shaders/BloomBright.frag.spv",     bloomBrightShader,     BlendMode::Opaque);
             bloomDownsamplePipeline  = makeFullscreenFragPipeline("shaders/BloomDownsample.frag.spv", bloomDownsampleShader, BlendMode::Opaque);
             bloomUpsamplePipeline    = makeFullscreenFragPipeline("shaders/BloomUpsample.frag.spv",   bloomUpsampleShader,   BlendMode::Additive);
+            // Hi-Z reduce: fullscreen max-depth downsample into an R32F mip.
+            hizReducePipeline        = makeFullscreenFragPipeline("shaders/HiZReduce.frag.spv",       hizReduceFS,           BlendMode::Opaque, PixelFormat::R32_FLOAT);
 
             // IBL bake pipelines (GLSL twins of the Metal chain). iblCapturePass
             // is backend-agnostic (RHI calls + render-to-array-layer), so once
@@ -4408,6 +4966,40 @@ void Renderer::createRenderPipeline() {
                 vkTileCullPipeline = rhi->createComputePipeline(tcd);
             }
 
+            // IBL capture pipelines (SPIR-V). The RHI IBL chain was Metal-only;
+            // these bring the HDRI environment path to Vulkan. Each is a
+            // fullscreen-triangle pass rendering into a cube face / 2D LUT
+            // (RGBA16F, no depth). Sky capture is not ported, so the Vulkan IBL
+            // source is HDRI only.
+            auto makeIblVkPipeline = [&](const char* vertSpv, const char* fragSpv,
+                                         ShaderHandle& vsOut, ShaderHandle& fsOut) -> PipelineHandle {
+                std::string vcode = readFile(vertSpv);
+                std::string fcode = readFile(fragSpv);
+                if (vcode.empty() || fcode.empty()) return {};
+                ShaderDesc vd; vd.stage = ShaderStage::Vertex;   vd.code = vcode.data(); vd.codeSize = vcode.size(); vd.entryPoint = "main";
+                ShaderDesc fd; fd.stage = ShaderStage::Fragment; fd.code = fcode.data(); fd.codeSize = fcode.size(); fd.entryPoint = "main";
+                vsOut = rhi->createShader(vd);
+                fsOut = rhi->createShader(fd);
+                PipelineDesc d;
+                d.vertexShader = vsOut;
+                d.fragmentShader = fsOut;
+                d.vertexLayout.stride = 0;
+                d.vertexLayout.attributes = {};
+                d.topology = PrimitiveTopology::TriangleList;
+                d.blendMode = BlendMode::Opaque;
+                d.depthTest = false;
+                d.depthWrite = false;
+                d.cullMode = CullMode::None;
+                d.sampleCount = 1;
+                d.hasDepthAttachment = false;
+                d.colorAttachmentFormats = { PixelFormat::RGBA16_FLOAT };
+                return rhi->createPipeline(d);
+            };
+            equirectToCubemapPipeline = makeIblVkPipeline("shaders/IBLCubeFace.vert.spv", "shaders/IBLEquirect.frag.spv",   equirectToCubemapVS, equirectToCubemapFS);
+            irradiancePipeline        = makeIblVkPipeline("shaders/IBLCubeFace.vert.spv", "shaders/IBLIrradiance.frag.spv", irradianceVS, irradianceFS);
+            prefilterPipeline         = makeIblVkPipeline("shaders/IBLCubeFace.vert.spv", "shaders/IBLPrefilter.frag.spv",  prefilterVS, prefilterFS);
+            brdfLUTPipeline           = makeIblVkPipeline("shaders/IBLBRDF.vert.spv",     "shaders/IBLBRDF.frag.spv",        brdfVS, brdfFS);
+
             // Volumetric clouds: quarter-res raymarch, temporal resolve, and
             // full-res composite — all fullscreen RGBA16F passes.
             cloudRaymarchPipeline = makeFullscreenFragPipeline(
@@ -4428,6 +5020,9 @@ void Renderer::createRenderPipeline() {
                 cd.threadGroupSizeX = 256;  // matches local_size_x in the .comp
                 return rhi->createComputePipeline(cd);
             };
+            // GPU-driven rendering: frustum-cull compute pass.
+            gpuCullPipeline = makeCompute("shaders/GpuCull.comp.spv", gpuCullShader);
+
             particleForcePipeline     = makeCompute("shaders/ParticleForce.comp.spv", particleForceShader);
             particleIntegratePipeline = makeCompute("shaders/ParticleIntegrate.comp.spv", particleIntegrateShader);
 
@@ -4445,16 +5040,22 @@ void Renderer::createRenderPipeline() {
                 pd.vertexLayout.stride = 0;   // billboard verts generated in-shader
                 pd.vertexLayout.attributes = {};
                 pd.topology = PrimitiveTopology::TriangleList;
-                pd.blendMode = BlendMode::Additive;  // glowing particles
                 pd.depthTest = true;
-                pd.depthWrite = false;               // additive, don't occlude
+                pd.depthWrite = false;               // translucent, don't occlude
                 pd.depthCompareOp = CompareOp::LessOrEqual;
                 pd.cullMode = CullMode::None;
                 pd.sampleCount = 1;
                 pd.hasDepthAttachment = true;
                 pd.depthAttachmentFormat = PixelFormat::Depth32Float;
                 pd.colorAttachmentFormats = { PixelFormat::RGBA16_FLOAT };
-                particleRenderPipeline = rhi->createPipeline(pd);
+                // One pipeline per ParticleBlendMode — indexed by packet.blendMode.
+                const BlendMode particleBlends[PARTICLE_BLEND_COUNT] = {
+                    BlendMode::Additive, BlendMode::AlphaBlend, BlendMode::Multiply
+                };
+                for (Uint32 i = 0; i < PARTICLE_BLEND_COUNT; ++i) {
+                    pd.blendMode = particleBlends[i];
+                    particleRenderPipelines[i] = rhi->createPipeline(pd);
+                }
             }
         }
 
@@ -4574,17 +5175,6 @@ void Renderer::createRenderPipeline() {
         aoDenoisePipeline             = makeMetalCompute("shaders/3d_ao_denoise.metal", aoDenoiseShader, 8, 8, 1);
         stochasticPointShadowPipeline = makeMetalCompute("shaders/3d_stochastic_point_shadow.metal", pointShadowShader, 8, 8, 1);
         pointShadowTemporalPipeline   = makeMetalCompute("shaders/3d_point_shadow_temporal.metal", pointShadowTemporalShader, 8, 8, 1);
-        pointShadowDenoisePipeline    = makeMetalCompute("shaders/3d_point_shadow_denoise.metal", pointShadowDenoiseShader, 8, 8, 1);
-        // ReSTIR is optional with a live legacy fallback — a compile failure
-        // here must not take down renderer init like the required kernels do.
-        try {
-            restirShadowTemporalPipeline = makeMetalCompute("shaders/3d_restir_shadow_temporal.metal", restirShadowTemporalShader, 8, 8, 1);
-            restirShadowResolvePipeline  = makeMetalCompute("shaders/3d_restir_shadow_resolve.metal", restirShadowResolveShader, 8, 8, 1);
-        } catch (const std::exception& e) {
-            restirShadowTemporalPipeline = {};
-            restirShadowResolvePipeline = {};
-            fmt::print(stderr, "ReSTIR shadow pipelines unavailable ({}), legacy stochastic kernel stays active\n", e.what());
-        }
 
         // GIBS surfel GI kernels (entry points differ per file).
         auto makeNamedCompute = [&](const char* path, const char* entry, ShaderHandle& sh,
@@ -4637,6 +5227,8 @@ void Renderer::createRenderPipeline() {
             return rhi->createPipeline(d);
         };
         skyCapturePipeline = makeIblPipeline("shaders/3d_sky_capture.metal", skyCaptureVS, skyCaptureFS);
+        // Equirect HDRI -> cubemap face (reuses the native renderer's shader).
+        equirectToCubemapPipeline = makeIblPipeline("shaders/3d_equirect_to_cubemap.metal", equirectToCubemapVS, equirectToCubemapFS);
         irradiancePipeline = makeIblPipeline("shaders/3d_irradiance_convolution.metal", irradianceVS, irradianceFS);
         prefilterPipeline  = makeIblPipeline("shaders/3d_prefilter_envmap.metal", prefilterVS, prefilterFS);
         brdfLUTPipeline    = makeIblPipeline("shaders/3d_brdf_lut.metal", brdfVS, brdfFS);
@@ -4648,6 +5240,29 @@ void Renderer::createRenderPipeline() {
             tileCullingShader = rhi->createShader(d);
             ComputePipelineDesc cd; cd.computeShader = tileCullingShader;
             tileCullingPipeline = rhi->createComputePipeline(cd);
+        }
+
+        // GPU-driven frustum cull (Metal). Not RT-gated — GPU culling works on
+        // any compute-capable device. Threadgroup 64 matches gpuCullPass's
+        // dispatch of (n + 63) / 64 groups.
+        std::string gcCode = readFile("shaders/3d_gpu_cull.metal");
+        if (!gcCode.empty()) {
+            ShaderDesc d; d.stage = ShaderStage::Compute; d.code = gcCode.data();
+            d.codeSize = gcCode.size(); d.entryPoint = "computeMain";
+            gpuCullShader = rhi->createShader(d);
+            ComputePipelineDesc cd; cd.computeShader = gpuCullShader;
+            cd.threadGroupSizeX = 64;
+            gpuCullPipeline = rhi->createComputePipeline(cd);
+
+            // ICB variant of the same cull: encodes draws straight into the
+            // scene's indirect command buffer (see computeMainICB).
+            if (capabilities.indirectCommandBuffers) {
+                d.entryPoint = "computeMainICB";
+                gpuCullICBShader = rhi->createShader(d);
+                ComputePipelineDesc icd; icd.computeShader = gpuCullICBShader;
+                icd.threadGroupSizeX = 64;
+                gpuCullICBPipeline = rhi->createComputePipeline(icd);
+            }
         }
 
         // --------------------------------------------------------------------
@@ -4691,6 +5306,10 @@ void Renderer::createRenderPipeline() {
                                             BlendMode::Opaque, { PixelFormat::RGBA16_FLOAT }, false, CompareOp::Less);
         bloomDownsamplePipeline = makeMetalPass("shaders/3d_bloom_downsample.metal", "vertexMain", "fragmentMain",
                                                 BlendMode::Opaque, { PixelFormat::RGBA16_FLOAT }, false, CompareOp::Less);
+        // Hi-Z reduce: fullscreen max-depth downsample into an R32F mip.
+        hizReducePipeline = makeMetalPass("shaders/3d_hiz_reduce.metal", "vertexMain", "fragmentMain",
+                                          BlendMode::Opaque, { PixelFormat::R32_FLOAT }, false, CompareOp::Less);
+
         // Native upsample blends in-shader (texBlend at texture(1)) — Opaque,
         // unlike the Vulkan twin's additive-blend pipeline.
         bloomUpsamplePipeline = makeMetalPass("shaders/3d_bloom_upsample.metal", "vertexMain", "fragmentMain",
@@ -4791,7 +5410,6 @@ void Renderer::createRenderPipeline() {
                 pd.vertexLayout.stride = 0;   // billboard verts generated in-shader
                 pd.vertexLayout.attributes = {};
                 pd.topology = PrimitiveTopology::TriangleList;
-                pd.blendMode = BlendMode::Additive;
                 pd.depthTest = true;
                 pd.depthWrite = false;
                 pd.depthCompareOp = CompareOp::LessOrEqual;
@@ -4800,7 +5418,13 @@ void Renderer::createRenderPipeline() {
                 pd.hasDepthAttachment = true;
                 pd.depthAttachmentFormat = PixelFormat::Depth32Float;
                 pd.colorAttachmentFormats = { PixelFormat::RGBA16_FLOAT };
-                particleRenderPipeline = rhi->createPipeline(pd);
+                const BlendMode particleBlends[PARTICLE_BLEND_COUNT] = {
+                    BlendMode::Additive, BlendMode::AlphaBlend, BlendMode::Multiply
+                };
+                for (Uint32 i = 0; i < PARTICLE_BLEND_COUNT; ++i) {
+                    pd.blendMode = particleBlends[i];
+                    particleRenderPipelines[i] = rhi->createPipeline(pd);
+                }
             }
         }
     }
@@ -5336,6 +5960,7 @@ void Renderer::invokeImGuiCallback() {
     drawGraphicsImGui();
     drawRenderGraphImGui();
     drawGpuTimingsImGui();
+    drawCpuTimingsImGui();
 
     if (m_engineWindowCallback)
         m_engineWindowCallback();
@@ -5383,8 +6008,18 @@ void Renderer::drawGraphicsImGui() {
     ImGui::Text("Average frame rate: %.3f ms/frame (%.1f FPS)",
                 1000.0f / ImGui::GetIO().Framerate, ImGui::GetIO().Framerate);
     ImGui::ColorEdit3("Clear color", (float*)&clearColor);
-    ImGui::Text("Drawables: %u / %u visible",
-                lastFrameStats.visibleDrawables, lastFrameStats.totalDrawables);
+    // GPU-driven-prepass modes skip the CPU cull, so there's no CPU "visible"
+    // count — show "-" (the real post-cull count is in the GPUDRV --stats source).
+    if (gpuDrivenPrePassActive()) {
+        ImGui::Text("Drawables: - / %u visible", lastFrameStats.totalDrawables);
+    } else {
+        ImGui::Text("Drawables: %u / %u visible",
+                    lastFrameStats.visibleDrawables, lastFrameStats.totalDrawables);
+    }
+    // Main-pass path + submission count: the direct signal that MDI/GPU-driven is
+    // engaged. Switching Off->Indirect+MDI should collapse this from ~drawable
+    // count to ~material count.
+    ImGui::Text("Main pass: %s | %u draw calls", lastFrameStats.mainPath, lastFrameStats.mainDrawCalls);
     ImGui::Text("Scene lights: dir %u | point %u | rect %u | spot %u",
                 lastFrameStats.directionalLights, lastFrameStats.pointLights,
                 lastFrameStats.rectLights, lastFrameStats.spotLights);
@@ -5393,6 +6028,60 @@ void Renderer::drawGraphicsImGui() {
                 capabilities.computeShaders ? "yes" : "no",
                 capabilities.gpuTimestamps ? "yes" : "no");
     ImGui::Text("Frame: %u", frameNumber);
+
+    // GPU-driven geometry submission — mutually-exclusive method (a mesh can't go
+    // through both the vertex pipeline and mesh shaders). Off = CPU cull +
+    // drawIndexed (existing path, untouched). Requires compute.
+    if (capabilities.computeShaders) {
+        ImGui::Text("GPU-driven method:");
+        if (ImGui::RadioButton("Off (CPU cull)", gpuDrivenMode == GpuDrivenMode::Off))
+            gpuDrivenMode = GpuDrivenMode::Off;
+        ImGui::SameLine();
+        if (ImGui::RadioButton("Indirect + MDI", gpuDrivenMode == GpuDrivenMode::Indirect))
+            gpuDrivenMode = GpuDrivenMode::Indirect;
+        ImGui::SameLine();
+        // Bindless MDI: same compute cull, but the whole scene in ONE
+        // submission with bindlessly-fetched material textures. Metal = ICB
+        // replay + argument tables; Vulkan = one native multi-draw + set-3
+        // descriptor array.
+        const bool bindlessSelectable = capabilities.bindlessTextures &&
+            mainPipelineBindless.isValid() &&
+            (backend == GraphicsBackend::Metal
+                 ? (capabilities.indirectCommandBuffers && gpuCullICBPipeline.isValid())
+                 : capabilities.multiDrawIndirect);
+        ImGui::BeginDisabled(!bindlessSelectable);
+        if (ImGui::RadioButton("Bindless MDI", gpuDrivenMode == GpuDrivenMode::BindlessMDI))
+            gpuDrivenMode = GpuDrivenMode::BindlessMDI;
+        ImGui::EndDisabled();
+        if (!bindlessSelectable && ImGui::IsItemHovered(ImGuiHoveredFlags_AllowWhenDisabled)) {
+            ImGui::SetTooltip("Needs bindless textures (Metal Tier-2 argument buffers / "
+                              "Vulkan descriptor indexing)");
+        }
+        if (gpuDrivenMode == GpuDrivenMode::BindlessMDI && !bindlessSelectable)
+            gpuDrivenMode = GpuDrivenMode::Off;  // never stick on an unavailable mode
+
+        // MDI is a sub-option of the plain Indirect method (single-call
+        // multi-draw per material over the merged scene buffers; Vulkan
+        // native, Metal per-command loop). Bindless MDI is its own mode above.
+        const bool mdiAvailable = gpuDrivenMode == GpuDrivenMode::Indirect &&
+            ((backend == GraphicsBackend::Vulkan && capabilities.multiDrawIndirect) ||
+             backend == GraphicsBackend::Metal);
+        ImGui::BeginDisabled(!mdiAvailable);
+        ImGui::Checkbox("  -> MDI (per material)", &gpuDrivenMDI);
+        ImGui::EndDisabled();
+        if (!mdiAvailable) gpuDrivenMDI = false;
+
+        // Hi-Z occlusion is orthogonal — it refines whichever GPU-driven mode is
+        // active (object cull in Indirect).
+        ImGui::BeginDisabled(!gpuDrivenActive());
+        ImGui::Checkbox("Hi-Z occlusion culling", &gpuOcclusionCulling);
+        ImGui::EndDisabled();
+        if (!gpuDrivenActive()) gpuOcclusionCulling = false;
+    } else {
+        ImGui::BeginDisabled();
+        ImGui::Text("GPU-driven method: (requires compute)");
+        ImGui::EndDisabled();
+    }
 
     // Aspect-correct texture preview, shared by the RTs and Shadow Debug nodes.
     Uint32 rtW = rhi->getSwapchainWidth();
@@ -5455,46 +6144,14 @@ void Renderer::drawGraphicsImGui() {
         //   Off              = no shadows          (mainDebugFlags bit1 set)
         //   Directional only = sun/PSSM only       (default; stochastic off)
         //   All shadows      = + stochastic RT      (point/rect/spot; Metal RT,
-        //                      ReSTIR-denoised; off by default to match Vulkan)
+        //                      noisy until ReSTIR — the reason it's not default)
         int shadowMode = (mainDebugFlags & 2u) ? 0 : (stochasticShadowsEnabled ? 2 : 1);
         if (ImGui::Combo("Shadows", &shadowMode, "Off\0Directional only\0All shadows\0")) {
             mainDebugFlags = (shadowMode == 0) ? (mainDebugFlags | 2u) : (mainDebugFlags & ~2u);
             stochasticShadowsEnabled = (shadowMode == 2);
         }
-        if (shadowMode == 2) {
-            const bool restirAvailable = restirShadowTemporalPipeline.isValid() &&
-                                         restirShadowResolvePipeline.isValid();
-            // No history invalidation needed on toggles: restirShadowPass
-            // trusts history only when it also ran the previous frame.
-            ImGui::Checkbox("ReSTIR denoise (reservoir reuse)", &restirShadowsEnabled);
-            if (restirShadowsEnabled && restirAvailable) {
-                int cand = static_cast<int>(restirPointCandidates);
-                if (ImGui::SliderInt("Light candidates", &cand, 1, 16))
-                    restirPointCandidates = static_cast<Uint32>(cand);
-                int taps = static_cast<int>(restirSpatialTaps);
-                if (ImGui::SliderInt("Spatial taps", &taps, 0, 8))
-                    restirSpatialTaps = static_cast<Uint32>(taps);
-                ImGui::SliderFloat("Spatial radius (px)", &restirSpatialRadius, 2.0f, 32.0f);
-                ImGui::SliderFloat("History clamp (xM)", &restirPointMClamp, 1.0f, 40.0f);
-                if (restirReservoirHistory.isValid()) {
-                    const Uint32 rw = rhi->getSwapchainWidth();
-                    const Uint32 rh = rhi->getSwapchainHeight();
-                    const double mb = double(rw) * double(rh)
-                                      * sizeof(ShadowReservoirSetCPU) * 2.0 / (1024.0 * 1024.0);
-                    ImGui::TextDisabled("reservoirs: %ux%u, %.0f MB", rw, rh, mb);
-                }
-                // Live chain status — a stage silently skipping (missing
-                // pipeline, TLAS not ready) shows up here instead of only as
-                // unexplained noise.
-                ImGui::TextDisabled("chain: %s > accumulate > %s",
-                                    (restirLastFrame == frameNumber) ? "restir" : "legacy/skip",
-                                    pointShadowDenoiseRan ? "denoise" : "raw");
-            } else if (restirShadowsEnabled) {
-                ImGui::TextDisabled("ReSTIR pipelines unavailable (Metal RT only)");
-            } else {
-                ImGui::TextDisabled("legacy uniform light picks (noisy) — ReSTIR off");
-            }
-        }
+        if (shadowMode == 2)
+            ImGui::TextDisabled("stochastic RT shadows noisy until ReSTIR denoise (Metal RT only)");
         // pssmRTMaxDist now sets where the independent near-field shadow map ends
         // and the PSSM cascades begin (the near map, not RT, owns [near, this]).
         ImGui::SliderFloat("Near shadow distance", &pssmRTMaxDist, 5.0f, 200.0f);
@@ -5515,20 +6172,12 @@ void Renderer::drawGraphicsImGui() {
             ImGui::SliderFloat("SSCS thickness", &sscsThickness, 0.05f, 2.0f);
         }
         int psd = static_cast<int>(pointShadowDebugMode);
-        if (ImGui::Combo("Point shadow view", &psd,
-                         "Visibility (normal)\0Tile light-count heatmap\0"
-                         "ReSTIR winner id\0ReSTIR confidence (M)\0")) {
+        if (ImGui::Combo("Point shadow view", &psd, "Visibility (normal)\0Tile light-count heatmap\0")) {
             pointShadowDebugMode = static_cast<Uint32>(psd);
         }
         if (pointShadowDebugMode == 1) {
             ImGui::TextWrapped("Heatmap: black = tile has 0 lights, brighter = more (8+ ~ white). "
                                "Shown in 'Point Shadow (raw)' below.");
-        } else if (pointShadowDebugMode >= 2) {
-            ImGui::TextWrapped("ReSTIR-only view (falls back to visibility on the legacy path). "
-                               "Winner id: color bands per selected light — stable bands mean the "
-                               "reservoir has locked on. Confidence: reservoir M vs the history clamp. "
-                               "Like the heatmap, the view replaces the shadow factors, so scene "
-                               "lighting is affected while it is active.");
         }
         // Intermediate shadow textures (native Metal parity). These are
         // single-channel R16F/depth RTs; the RRR1 swizzle view renders them as
@@ -5848,11 +6497,26 @@ void Renderer::drawGpuTimingsImGui() {
         return;
 
     auto timings = rhi->getGpuPassTimings();
+
+    // Aggregate passes that share a name into one row (with an occurrence count).
+    // Several passes fan out over multiple invocations — the Hi-Z build issues
+    // one "HiZBuild" pass per mip, bloom one "BloomDownsample" per level — and a
+    // row per invocation buries the useful per-effect total. Insertion order is
+    // preserved so the table still reads top-to-bottom in frame order.
+    struct Agg { std::string name; double ms; int count; };
+    std::vector<Agg> agg;
+    for (const auto& t : timings) {
+        auto it = std::find_if(agg.begin(), agg.end(),
+                               [&](const Agg& a) { return a.name == t.name; });
+        if (it == agg.end()) agg.push_back({ t.name, t.gpuTimeMs, 1 });
+        else { it->ms += t.gpuTimeMs; it->count++; }
+    }
+
     double totalMs = 0.0;
     double maxMs = 0.001;
-    for (const auto& t : timings) {
-        totalMs += t.gpuTimeMs;
-        maxMs = std::max(maxMs, t.gpuTimeMs);
+    for (const auto& a : agg) {
+        totalMs += a.ms;
+        maxMs = std::max(maxMs, a.ms);
     }
     // Up to three numbers, each a different thing on a pipelined GPU:
     //   busy = interval union of pass windows -> occupancy; compare THIS to the
@@ -5887,14 +6551,70 @@ void Renderer::drawGpuTimingsImGui() {
         ImGui::TableSetupColumn("ms", ImGuiTableColumnFlags_WidthFixed, 60.0f);
         ImGui::TableSetupColumn("", ImGuiTableColumnFlags_WidthStretch);
         ImGui::TableHeadersRow();
-        for (const auto& t : timings) {
+        for (const auto& a : agg) {
             ImGui::TableNextRow();
             ImGui::TableSetColumnIndex(0);
-            ImGui::TextUnformatted(t.name.c_str());
+            if (a.count > 1) ImGui::Text("%s (x%d)", a.name.c_str(), a.count);
+            else ImGui::TextUnformatted(a.name.c_str());
             ImGui::TableSetColumnIndex(1);
-            ImGui::Text("%.3f", t.gpuTimeMs);
+            ImGui::Text("%.3f", a.ms);
             ImGui::TableSetColumnIndex(2);
-            ImGui::ProgressBar(static_cast<float>(t.gpuTimeMs / maxMs), ImVec2(-1.0f, 0.0f), "");
+            ImGui::ProgressBar(static_cast<float>(a.ms / maxMs), ImVec2(-1.0f, 0.0f), "");
+        }
+        ImGui::EndTable();
+    }
+}
+
+// Per-pass CPU (command-recording) time, mirroring drawGpuTimingsImGui. This is
+// how long the CPU spends building each pass on the (single) render thread — the
+// number that decides whether multithreaded command recording would help.
+void Renderer::drawCpuTimingsImGui() {
+    if (!ImGui::CollapsingHeader("CPU Pass Timings"))
+        return;
+
+    const auto& cpuTimings = renderGraph.getPassCpuTimings();
+    double graphMs = 0.0;
+    double maxMs = 0.001;
+    for (const auto& t : cpuTimings) {
+        graphMs += t.second;
+        maxMs = std::max(maxMs, t.second);
+    }
+    const double cpuTotalMs = m_cpuPreGraphMs + graphMs;
+
+    ImGui::Text("CPU frame (submit): %.3f ms", cpuTotalMs);
+    ImGui::Text("  cull + sort + upload: %.3f ms", m_cpuPreGraphMs);
+    ImGui::Text("  render graph:        %.3f ms", graphMs);
+
+    // Bottleneck readout: compare against total GPU time when it's available.
+    if (rhi->isGpuTimingSupported() && rhi->isGpuTimingEnabled()) {
+        double gpuTotalMs = 0.0;
+        for (const auto& t : rhi->getGpuPassTimings()) gpuTotalMs += t.gpuTimeMs;
+        const char* verdict = "roughly balanced";
+        if (gpuTotalMs > cpuTotalMs * 1.3) verdict = "GPU-bound";
+        else if (cpuTotalMs > gpuTotalMs * 1.3) verdict = "CPU-bound";
+        ImGui::Separator();
+        ImGui::Text("GPU total: %.3f ms  |  CPU total: %.3f ms", gpuTotalMs, cpuTotalMs);
+        ImGui::Text("=> %s", verdict);
+        ImGui::TextDisabled("Multithreaded command recording only helps when CPU-bound.");
+    } else {
+        ImGui::TextDisabled("Enable GPU Pass Timings to see the CPU-vs-GPU verdict.");
+    }
+
+    ImGui::Separator();
+    if (ImGui::BeginTable("##cpu_pass_timings", 3,
+                          ImGuiTableFlags_Borders | ImGuiTableFlags_RowBg | ImGuiTableFlags_SizingFixedFit)) {
+        ImGui::TableSetupColumn("Pass", ImGuiTableColumnFlags_WidthStretch);
+        ImGui::TableSetupColumn("ms", ImGuiTableColumnFlags_WidthFixed, 60.0f);
+        ImGui::TableSetupColumn("", ImGuiTableColumnFlags_WidthStretch);
+        ImGui::TableHeadersRow();
+        for (const auto& t : cpuTimings) {
+            ImGui::TableNextRow();
+            ImGui::TableSetColumnIndex(0);
+            ImGui::TextUnformatted(t.first.c_str());
+            ImGui::TableSetColumnIndex(1);
+            ImGui::Text("%.3f", t.second);
+            ImGui::TableSetColumnIndex(2);
+            ImGui::ProgressBar(static_cast<float>(t.second / maxMs), ImVec2(-1.0f, 0.0f), "");
         }
         ImGui::EndTable();
     }
@@ -6649,9 +7369,10 @@ void Renderer::renderToTexture(
             }
             // texSSCS(15) is min()'d unconditionally — MUST be bound; white = lit.
             rhi->setTexture(0, 15, whiteTex, clampSampler);
-            // Spot buffer (14) + counts/flags (15) are declared in the shared
-            // PBR shader — bind placeholders with zero counts/flags.
-            rhi->setFragmentBuffer(14, spotLightBuffer, 0, sizeof(Vapor::SpotLight) * maxSpotLights);
+            // Spot buffer (16) + counts/flags (15) are declared in the shared
+            // PBR shader — bind placeholders with zero counts/flags. (16, not 14:
+            // buffer 14 is the bindless SystemTexs slot — see the shader note.)
+            rhi->setFragmentBuffer(16, spotLightBuffer, 0, sizeof(Vapor::SpotLight) * maxSpotLights);
             glm::uvec2 rttSpotRectParams(0u, 0u);
             rhi->setFragmentBytes(&rttSpotRectParams, sizeof(glm::uvec2), 15);
         }

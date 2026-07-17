@@ -336,9 +336,9 @@ inline SceneResources buildScene(
         wf.strength   = 0.6f;
         wf.turbulence = 2.0f;
     }
-    // Two one-shot bursts: each fires its whole batch in one frame. Immortal
-    // particles (lifetime < 0) never age out, so they persist and bounce at the
-    // sim boundary; their slots are held until the emitter entity is destroyed.
+    // Two immortal one-shot bursts, both additive — distinguished only by launch
+    // speed and sprite size: A is small + fast (fine bright spray), B is 2× the
+    // size + half the launch speed (slow, fat embers).
     {
         auto e = registry.create();
         registry.emplace<Vapor::NameComponent>(e, Vapor::NameComponent{"Particle Sea Emitter A"});
@@ -352,6 +352,9 @@ inline SceneResources buildScene(
         em.spread           = 3.14159265f; // full sphere
         em.emitDirection    = glm::vec3(0.0f, 1.0f, 0.0f);
         em.color            = glm::vec4(0.45f, 0.55f, 1.0f, 1.0f); // indigo-blue
+        auto& pr = registry.emplace<Vapor::ParticleRendererComponent>(e);
+        pr.blendMode = Vapor::ParticleBlendMode::Additive; // glow
+        pr.size      = 0.05f;                              // small (fine spray)
     }
     {
         auto e = registry.create();
@@ -362,10 +365,13 @@ inline SceneResources buildScene(
         em.maxParticles     = 30'000;
         em.oneShot          = true;
         em.particleLifetime = -1.0f; // immortal
-        em.speed            = 6.0f;
+        em.speed            = 3.0f;  // half of A's launch speed
         em.spread           = 3.14159265f; // full sphere
         em.emitDirection    = glm::vec3(0.0f, 1.0f, 0.0f);
         em.color            = glm::vec4(1.0f, 0.55f, 0.35f, 1.0f); // warm amber
+        auto& pr = registry.emplace<Vapor::ParticleRendererComponent>(e);
+        pr.blendMode = Vapor::ParticleBlendMode::Additive; // same blend as A
+        pr.size      = 0.1f;                               // 2× A's size
     }
 
     res.global = registry.create();

@@ -61,6 +61,7 @@ public:
     void destroySampler(SamplerHandle handle) override;
 
     PipelineHandle createPipeline(const PipelineDesc& desc) override;
+    PipelineHandle createMeshPipeline(const MeshPipelineDesc& desc) override;
     void destroyPipeline(PipelineHandle handle) override;
 
     ComputePipelineHandle createComputePipeline(const ComputePipelineDesc& desc) override;
@@ -80,6 +81,7 @@ public:
                        Uint32 mipLevel, Uint32 arrayLayer) override;
     using RHI::updateTexture;
     void generateMipmaps(TextureHandle handle) override;
+    void copyTexture(TextureHandle src, Uint32 srcMip, TextureHandle dst, Uint32 dstMip) override;
     void flushUploads() override;
 
     BufferHandle copySwapchainToBuffer(Uint32& outWidth, Uint32& outHeight) override;
@@ -116,6 +118,16 @@ public:
 
     void draw(Uint32 vertexCount, Uint32 instanceCount, Uint32 firstVertex, Uint32 firstInstance) override;
     void drawIndexed(Uint32 indexCount, Uint32 instanceCount, Uint32 firstIndex, int32_t vertexOffset, Uint32 firstInstance) override;
+    void drawIndexedIndirect(BufferHandle argsBuffer, size_t offset, Uint32 drawCount, Uint32 stride) override;
+    void drawIndirect(BufferHandle argsBuffer, size_t offset, Uint32 drawCount, Uint32 stride) override;
+    void drawMeshTasks(Uint32 groupCountX, Uint32 groupCountY = 1, Uint32 groupCountZ = 1) override;
+
+    // Bindless texture tables (Bindless MDI): descriptor-indexed set 3.
+    BufferHandle createTextureArgumentTable(ShaderHandle fragmentShader, Uint32 bufferIndex,
+                                            Uint32 entryCount, Uint32 texturesPerEntry) override;
+    void writeTextureArgumentTable(BufferHandle table, Uint32 entry, Uint32 slot,
+                                   TextureHandle texture) override;
+    void bindTextureArgumentTable(BufferHandle table) override;
 
     // ========================================================================
     // Compute Commands
@@ -126,6 +138,7 @@ public:
     void bindComputePipeline(ComputePipelineHandle pipeline) override;
     void setComputeBuffer(Uint32 binding, BufferHandle buffer, size_t offset, size_t range) override;
     void setComputeTexture(Uint32 binding, TextureHandle texture) override;
+    void setComputeSampledTexture(Uint32 binding, TextureHandle texture, SamplerHandle sampler) override;
     void setComputeBytes(const void* data, size_t size, Uint32 binding) override;
     void setAccelerationStructure(Uint32 binding, AccelStructHandle accelStruct) override;
     void dispatch(Uint32 groupCountX, Uint32 groupCountY, Uint32 groupCountZ) override;
@@ -184,8 +197,11 @@ private:
     std::vector<VkSemaphore> renderFinishedSemaphores;
     std::vector<VkFence> inFlightFences;
 
-    // Current frame
-    const Uint32 MAX_FRAMES_IN_FLIGHT = 2;
+    // Current frame. This is the backend's own frames-in-flight and the value
+    // getMaxFramesInFlight() returns; the renderer derives its per-frame buffer
+    // slot count from it, so one slot per in-flight frame is guaranteed. Kept at
+    // 3 to match the Metal backend.
+    const Uint32 MAX_FRAMES_IN_FLIGHT = 3;
     Uint32 currentFrameInFlight = 0;
     Uint32 currentSwapchainImageIndex = 0;
     VkCommandBuffer currentCommandBuffer = VK_NULL_HANDLE;
@@ -295,13 +311,15 @@ private:
 
     // Buffer + storage-image sets stay at 8: MoltenVK/Metal caps
     // maxPerStageDescriptorStorageImages (and storage buffers) at 8, so bumping
-    // these would fail pipeline-layout creation.
+    // these would fail pipeline-layout creation. The meshlet vertex-stage binds
+    // (slots 0-7) fit exactly.
     static constexpr Uint32 BINDINGS_PER_SET = 8;
     // The texture set (combined image samplers, device limit >= 16) holds the 10
     // material/shadow/AO/SSCS/near samplers (b0-b9) plus the 3 IBL maps the main
     // pass now samples: irradiance cube (b10), prefilter cube (b11), BRDF LUT
     // (b12). Additive capacity: the write loop only writes bound slots, so
     // pipelines that use fewer textures (bloom, IBL bake) are unaffected.
+    // (Bindless MDI's material texture array lives in set 3, not here.)
     static constexpr Uint32 TEXTURE_BINDINGS_PER_SET = 13;
 
     struct BufferBinding {
@@ -320,19 +338,47 @@ private:
     VkPipelineLayout globalPipelineLayout = VK_NULL_HANDLE;
     std::vector<VkDescriptorPool> descriptorPools;  // one per frame in flight
 
+    // Bindless texture tables (Bindless MDI): set 3 in the global layout when
+    // descriptor indexing is enabled — binding 0 = runtime sampled-image array
+    // (partially bound, update-after-bind), binding 1 = one linear-repeat
+    // sampler. Tables are persistent update-after-bind sets from their own pool.
+    bool descriptorIndexingEnabled = false;
+    static constexpr Uint32 BINDLESS_TABLE_CAPACITY = 30720;  // >= MAX_INSTANCES * 6
+    VkDescriptorSetLayout bindlessSetLayout = VK_NULL_HANDLE;  // set 3
+    VkDescriptorPool bindlessPool = VK_NULL_HANDLE;
+    VkSampler bindlessSampler = VK_NULL_HANDLE;
+    struct BindlessTableResource {
+        VkDescriptorSet set = VK_NULL_HANDLE;
+        Uint32 entryCount = 0;
+        Uint32 texturesPerEntry = 0;
+    };
+    // Keyed by the opaque BufferHandle id returned from createTextureArgumentTable
+    // (no VkBuffer behind it — binding goes through vkCmdBindDescriptorSets).
+    std::unordered_map<Uint32, BindlessTableResource> bindlessTables;
+
     BufferBinding boundVertexBuffers[BINDINGS_PER_SET];
     BufferBinding boundFragmentBuffers[BINDINGS_PER_SET];
     TextureBinding boundTextures[TEXTURE_BINDINGS_PER_SET];
     bool descriptorsDirty = true;
 
     // Compute follows the same model with its own global layout:
-    //   set 0 = storage buffers (setComputeBuffer)
-    //   set 1 = storage images  (setComputeTexture, transitioned to GENERAL)
+    //   set 0 = storage buffers  (setComputeBuffer)
+    //   set 1 = storage images   (setComputeTexture, transitioned to GENERAL, imageLoad)
+    //   set 2 = sampled textures (setComputeSampledTexture, SHADER_READ, textureLod)
     VkDescriptorSetLayout computeBufferSetLayout = VK_NULL_HANDLE;
     VkDescriptorSetLayout computeImageSetLayout = VK_NULL_HANDLE;
+    VkDescriptorSetLayout computeSampledSetLayout = VK_NULL_HANDLE;
     VkPipelineLayout computePipelineLayout = VK_NULL_HANDLE;
+    // VK_EXT_mesh_shader: set during device creation when the extension + its
+    // task/mesh features are supported and enabled. Widens the graphics stage
+    // mask (set layouts + push constants) so task/mesh stages can bind through
+    // the existing setVertexBuffer/setVertexBytes paths.
+    bool meshShadersEnabled = false;
+    VkShaderStageFlags graphicsStageFlags = 0;
+    PFN_vkCmdDrawMeshTasksEXT pfnCmdDrawMeshTasks = nullptr;
     BufferBinding boundComputeBuffers[BINDINGS_PER_SET];
     VkImageView boundComputeImages[BINDINGS_PER_SET] = {};
+    TextureBinding boundComputeSampled[BINDINGS_PER_SET] = {};
     bool computeDescriptorsDirty = true;
     void flushComputeDescriptors();
 

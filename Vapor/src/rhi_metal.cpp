@@ -4,6 +4,8 @@
 // emit the implementation → duplicate symbols at link).
 #include "rhi_metal.hpp"
 #include "stats_log.hpp"
+#include <filesystem>
+#include <system_error>
 #include <fmt/core.h>
 #include <stdexcept>
 #include <algorithm>
@@ -91,12 +93,30 @@ bool RHI_Metal::initialize(SDL_Window* window) {
 
     initGpuTiming();
 
+    // One permit per in-flight frame; beginFrame() waits, the completion handler
+    // signals. getMaxFramesInFlight() is the single source of truth (the renderer
+    // sizes its per-frame buffer slots off it too), so the CPU is never more than
+    // that many frames ahead.
+    frameSemaphore = dispatch_semaphore_create(getMaxFramesInFlight());
+
     // Device capabilities. Raytracing is force-disabled on CI runners: the
     // virtualized GPU advertises support but acceleration-structure builds
     // fail there (matching the old renderer's behavior).
     capabilities.raytracing = device->supportsRaytracing() && !std::getenv("GITHUB_ACTIONS");
     capabilities.computeShaders = true;
     capabilities.gpuTimestamps = gpuTimingSupported;
+    // Object/mesh shaders (meshlet path): Apple GPU family 7 (A14/M1) and later,
+    // or Mac family 2. Detected here; the pipeline type is wired up in Phase C.
+    capabilities.meshShaders = device->supportsFamily(MTL::GPUFamilyApple7) ||
+                               device->supportsFamily(MTL::GPUFamilyMac2);
+    // Indirect command buffers with inherited pipeline state + argument-buffer
+    // texture tables (the ICB draw mode). Same families as mesh shaders — every
+    // Apple-silicon Mac qualifies; the inherit-pipeline and Tier-2 argument
+    // buffer requirements are both met there.
+    capabilities.indirectCommandBuffers = device->supportsFamily(MTL::GPUFamilyApple7) ||
+                                          device->supportsFamily(MTL::GPUFamilyMac2);
+    // Bindless texture tables ride on Tier-2 argument buffers — same families.
+    capabilities.bindlessTextures = capabilities.indirectCommandBuffers;
 
     // Backend telemetry: one grouped "[MTL]" line per --stats interval. Metal is
     // unified memory, so these counts (plus RSS) are the leak-hunt signal.
@@ -380,6 +400,19 @@ void RHI_Metal::shutdown() {
         renderer = nullptr;
     }
 
+    // waitIdle() above drained the GPU, so no completion handler is still pending
+    // to signal this. dispatch objects are ARC/GCD ref-counted; release our ref.
+    if (frameSemaphore) {
+        // Restore to full count first so the release doesn't assert on a
+        // semaphore destroyed while its value is below its initial value.
+        for (Uint32 i = 0; i < getMaxFramesInFlight(); i++) {
+            dispatch_semaphore_signal(frameSemaphore);
+        }
+        dispatch_release(frameSemaphore);
+        frameSemaphore = nullptr;
+    }
+    frameSemaphoreAcquired = false;
+
     device = nullptr;
     swapchain = nullptr;
     window = nullptr;
@@ -566,7 +599,39 @@ ShaderHandle RHI_Metal::createShader(const ShaderDesc& desc) {
                     break;
             }
         }
-        function = NS::TransferPtr(library->newFunction(NS::String::string(entryPoint.c_str(), NS::UTF8StringEncoding)));
+        auto entryName = NS::String::string(entryPoint.c_str(), NS::UTF8StringEncoding);
+        auto specialize = [&](bool bindless) {
+            // Function constant 0 = kBindlessMaterialsSet (3d_pbr_normal_mapped):
+            // true reads material textures from the argument table at buffer(13),
+            // false keeps the bound slots 0-5.
+            auto constants = NS::TransferPtr(MTL::FunctionConstantValues::alloc()->init());
+            constants->setConstantValue(&bindless, MTL::DataTypeBool, NS::UInteger(0));
+            NS::Error* fcError = nullptr;
+            function = NS::TransferPtr(library->newFunction(entryName, constants.get(), &fcError));
+            if (!function || fcError) {
+                if (fcError) {
+                    fmt::print("Shader specialization error: {}\n",
+                               fcError->localizedDescription()->utf8String());
+                }
+                throw std::runtime_error(fmt::format("Failed to specialize shader entry point '{}'", entryPoint));
+            }
+        };
+        if (desc.bindlessMaterials) {
+            specialize(true);
+        } else {
+            function = NS::TransferPtr(library->newFunction(entryName));
+            // A function that declares ANY function constants can only build a
+            // pipeline in specialized form ("use newFunctionWithName:
+            // constantValues:" validation abort) — even when the shader guards
+            // every use with is_function_constant_defined. Re-create such
+            // functions with the constant explicitly false (the bound-material
+            // path). Constant values with no matching constant are ignored, so
+            // this only triggers for shaders that declare constants.
+            if (function && function->functionConstantsDictionary() &&
+                function->functionConstantsDictionary()->count() > 0) {
+                specialize(false);
+            }
+        }
         if (!function) {
             throw std::runtime_error(fmt::format("Failed to find shader entry point '{}'", entryPoint));
         }
@@ -690,6 +755,11 @@ PipelineHandle RHI_Metal::createPipeline(const PipelineDesc& desc) {
     // Sample count
     pipelineDesc->setSampleCount(desc.sampleCount);
 
+    // Indirect-command-buffer replay (executeICB) requires opting the PSO in.
+    if (desc.supportsICB) {
+        pipelineDesc->setSupportIndirectCommandBuffers(true);
+    }
+
     // Create pipeline
     NS::Error* error = nullptr;
     auto pipeline = NS::TransferPtr(device->newRenderPipelineState(pipelineDesc, &error));
@@ -725,6 +795,78 @@ PipelineHandle RHI_Metal::createPipeline(const PipelineDesc& desc) {
     resource.primitiveType = convertPrimitiveTopology(desc.topology);
     pipelines[id] = resource;
 
+    return PipelineHandle{id};
+}
+
+PipelineHandle RHI_Metal::createMeshPipeline(const MeshPipelineDesc& desc) {
+    if (!capabilities.meshShaders) return {};
+    auto msIt = shaders.find(desc.meshShader.id);
+    auto fsIt = shaders.find(desc.fragmentShader.id);
+    if (msIt == shaders.end() || fsIt == shaders.end()) {
+        throw std::runtime_error("Invalid shader handles for mesh pipeline");
+    }
+
+    auto pipelineDesc = MTL::MeshRenderPipelineDescriptor::alloc()->init();
+    auto tsIt = shaders.find(desc.taskShader.id);
+    const bool hasObjectStage = desc.taskShader.isValid() && tsIt != shaders.end();
+    if (hasObjectStage) {
+        pipelineDesc->setObjectFunction(tsIt->second.function.get());
+        // Object/mesh amplification limits. Without these Metal allocates no
+        // payload memory and caps the mesh grid at 0 — the object shader runs
+        // but emits no mesh threadgroups, so nothing is drawn. Only meaningful
+        // (and only valid) with an object function present.
+        pipelineDesc->setMaxTotalThreadsPerObjectThreadgroup(desc.taskThreadgroupSize);
+        pipelineDesc->setMaxTotalThreadgroupsPerMeshGrid(desc.maxMeshThreadgroupsPerObject);
+        pipelineDesc->setPayloadMemoryLength(desc.payloadBytes);
+    }
+    pipelineDesc->setMeshFunction(msIt->second.function.get());
+    pipelineDesc->setFragmentFunction(fsIt->second.function.get());
+    pipelineDesc->setMaxTotalThreadsPerMeshThreadgroup(desc.meshThreadgroupSize);
+
+    for (size_t i = 0; i < desc.colorAttachmentFormats.size(); i++) {
+        auto attachment = pipelineDesc->colorAttachments()->object(i);
+        PixelFormat fmt = desc.colorAttachmentFormats[i];
+        attachment->setPixelFormat(fmt == PixelFormat::Swapchain ? swapchainFormat
+                                                                 : convertPixelFormat(fmt));
+        attachment->setBlendingEnabled(false);  // meshlet path draws opaque
+    }
+    if (desc.hasDepthAttachment) {
+        pipelineDesc->setDepthAttachmentPixelFormat(convertPixelFormat(desc.depthAttachmentFormat));
+    }
+    pipelineDesc->setRasterSampleCount(desc.sampleCount);
+
+    NS::Error* error = nullptr;
+    auto pipeline = NS::TransferPtr(device->newRenderPipelineState(
+        pipelineDesc, MTL::PipelineOptionNone, nullptr, &error));
+    pipelineDesc->release();
+    if (!pipeline || error) {
+        if (error) {
+            fmt::print("Mesh pipeline creation error: {}\n",
+                       error->localizedDescription()->utf8String());
+        }
+        throw std::runtime_error("Failed to create mesh render pipeline");
+    }
+
+    NS::SharedPtr<MTL::DepthStencilState> depthStencilState;
+    if (desc.hasDepthAttachment) {
+        auto dsDesc = NS::TransferPtr(MTL::DepthStencilDescriptor::alloc()->init());
+        dsDesc->setDepthCompareFunction(
+            desc.depthTest ? convertCompareOp(desc.depthCompareOp) : MTL::CompareFunctionAlways);
+        dsDesc->setDepthWriteEnabled(desc.depthTest && desc.depthWrite);
+        depthStencilState = NS::TransferPtr(device->newDepthStencilState(dsDesc.get()));
+    }
+
+    Uint32 id = nextPipelineId++;
+    PipelineResource resource;
+    resource.renderPipeline = pipeline;
+    resource.isCompute = false;
+    resource.isMesh = true;
+    resource.taskThreads = desc.taskThreadgroupSize;
+    resource.meshThreads = desc.meshThreadgroupSize;
+    resource.depthStencilState = depthStencilState;
+    resource.cullMode = convertCullMode(desc.cullMode);
+    resource.winding = convertFrontFace(desc.frontFaceCounterClockwise);
+    pipelines[id] = resource;
     return PipelineHandle{id};
 }
 
@@ -808,6 +950,28 @@ void RHI_Metal::generateMipmaps(TextureHandle handle) {
         return;
     }
     ensureUploadBlit()->generateMipmaps(it->second.texture.get());
+}
+
+void RHI_Metal::copyTexture(TextureHandle src, Uint32 srcMip, TextureHandle dst, Uint32 dstMip) {
+    if (!currentCommandBuffer) return;
+    auto sit = textures.find(src.id);
+    auto dit = textures.find(dst.id);
+    if (sit == textures.end() || dit == textures.end() || src.id == dst.id) return;
+
+    // Must record on the frame command buffer (not the upload blit, which runs
+    // before the frame) so the copy is ordered between the Hi-Z reduce passes.
+    // One encoder at a time: close any open render/compute encoder first.
+    if (currentRenderEncoder) { currentRenderEncoder->endEncoding(); currentRenderEncoder = nullptr; }
+    if (currentComputeEncoder) { currentComputeEncoder->endEncoding(); currentComputeEncoder = nullptr; }
+
+    MTL::Texture* s = sit->second.texture.get();
+    MTL::Texture* d = dit->second.texture.get();
+    MTL::Size size = MTL::Size::Make(std::max<NS::UInteger>(1, d->width() >> dstMip),
+                                     std::max<NS::UInteger>(1, d->height() >> dstMip), 1);
+    auto blit = currentCommandBuffer->blitCommandEncoder();
+    blit->copyFromTexture(s, 0, srcMip, MTL::Origin::Make(0, 0, 0), size,
+                          d, 0, dstMip, MTL::Origin::Make(0, 0, 0));
+    blit->endEncoding();
 }
 
 BufferHandle RHI_Metal::copySwapchainToBuffer(Uint32& outWidth, Uint32& outHeight) {
@@ -909,7 +1073,56 @@ void RHI_Metal::unmapBuffer(BufferHandle handle) {
 // Frame Operations
 // ============================================================================
 
+void RHI_Metal::captureFrame(const char* outPath) {
+    pendingCapturePath = outPath ? outPath : "";
+}
+
+void RHI_Metal::stopCaptureIfActive() {
+    if (captureInProgress) {
+        MTL::CaptureManager::sharedCaptureManager()->stopCapture();
+        captureInProgress = false;
+        fmt::print("[capture] stopped — open the .gputrace in Xcode\n");
+    }
+}
+
 void RHI_Metal::beginFrame() {
+    // Arm a one-shot GPU capture spanning this whole frame (captureFrame()).
+    if (!pendingCapturePath.empty() && !captureInProgress) {
+        auto* mgr = MTL::CaptureManager::sharedCaptureManager();
+        if (mgr->supportsDestination(MTL::CaptureDestinationGPUTraceDocument)) {
+            auto* desc = MTL::CaptureDescriptor::alloc()->init();
+            desc->setCaptureObject(device);
+            desc->setDestination(MTL::CaptureDestinationGPUTraceDocument);
+            // startCapture fails if the output already exists (.gputrace is a
+            // bundle/directory) — clear a prior trace at this path first.
+            std::error_code ec;
+            std::filesystem::remove_all(pendingCapturePath, ec);
+            auto* nsPath = NS::String::string(pendingCapturePath.c_str(), NS::UTF8StringEncoding);
+            desc->setOutputURL(NS::URL::fileURLWithPath(nsPath));
+            NS::Error* err = nullptr;
+            if (mgr->startCapture(desc, &err)) {
+                captureInProgress = true;
+                fmt::print("[capture] started -> {}\n", pendingCapturePath);
+            } else {
+                fmt::print("[capture] startCapture failed: {}\n",
+                           err ? err->localizedDescription()->utf8String()
+                               : "unknown (run with MTL_CAPTURE_ENABLED=1, and delete any existing file at that path)");
+            }
+            desc->release();
+        } else {
+            fmt::print("[capture] GPU-trace capture unavailable — relaunch with MTL_CAPTURE_ENABLED=1\n");
+        }
+        pendingCapturePath.clear();
+    }
+
+    // Throttle the CPU to getMaxFramesInFlight() frames ahead of the GPU. The
+    // permit is returned by this frame's completion handler (endFrame) or, if
+    // this frame is skipped for want of a drawable, immediately below.
+    if (frameSemaphore) {
+        dispatch_semaphore_wait(frameSemaphore, DISPATCH_TIME_FOREVER);
+        frameSemaphoreAcquired = true;
+    }
+
     // Open this frame's autorelease pool before anything that can produce an
     // autoreleased object (uploads create command buffers). Drained in
     // endFrame; see the member declaration for why this is load-bearing.
@@ -951,6 +1164,13 @@ void RHI_Metal::beginFrame() {
     currentDrawable = swapchain->nextDrawable();
     if (!currentDrawable) {
         currentCommandBuffer = nullptr;
+        // No command buffer will be committed this frame, so nothing would ever
+        // signal the permit we took above — return it now to stay balanced.
+        // (endFrame's skipped-frame path drains framePool.)
+        if (frameSemaphore && frameSemaphoreAcquired) {
+            dispatch_semaphore_signal(frameSemaphore);
+            frameSemaphoreAcquired = false;
+        }
         return;
     }
 
@@ -1028,6 +1248,7 @@ void RHI_Metal::endFrame() {
     // Frame was skipped (no drawable available in beginFrame)
     if (!currentCommandBuffer) {
         currentDrawable = nullptr;
+        stopCaptureIfActive();  // don't leave a capture armed across a skipped frame
         if (framePool) { framePool->release(); framePool = nullptr; }
         return;
     }
@@ -1044,6 +1265,17 @@ void RHI_Metal::endFrame() {
 
     // Schedule GPU timing resolution for when this command buffer completes
     resolveGpuTimings();
+
+    // Return this frame's throttle permit once the GPU finishes with it. Capture
+    // the semaphore by value (not `this`): it outlives every in-flight frame
+    // (released only in shutdown, after waitIdle), so the handler is always safe.
+    if (frameSemaphore && frameSemaphoreAcquired) {
+        dispatch_semaphore_t sem = frameSemaphore;
+        currentCommandBuffer->addCompletedHandler([sem](MTL::CommandBuffer*) {
+            dispatch_semaphore_signal(sem);
+        });
+        frameSemaphoreAcquired = false;
+    }
 
     // Present drawable
     if (currentDrawable) {
@@ -1067,6 +1299,10 @@ void RHI_Metal::endFrame() {
             fflush(stderr);
         }
     }
+
+    // Close the one-shot capture (commit above already recorded this frame's
+    // command buffer into the trace).
+    stopCaptureIfActive();
 
     // Reset frame state
     currentDrawable = nullptr;
@@ -1309,6 +1545,11 @@ void RHI_Metal::bindPipeline(PipelineHandle pipeline) {
             currentRenderEncoder->setDepthStencilState(res.depthStencilState.get());
         }
         currentPrimitiveType = res.primitiveType;
+        // Mesh pipelines have no vertex stage: route subsequent vertex-stage
+        // binds to the object+mesh stages and remember the threadgroup sizes.
+        currentPipelineIsMesh = res.isMesh;
+        currentTaskThreads = res.taskThreads;
+        currentMeshThreads = res.meshThreads;
     }
 }
 
@@ -1345,8 +1586,23 @@ void RHI_Metal::setStorageBuffer(Uint32 set, Uint32 binding, BufferHandle buffer
 void RHI_Metal::setVertexBuffer(Uint32 binding, BufferHandle buffer, size_t offset, size_t range) {
     auto it = buffers.find(buffer.id);
     if (it != buffers.end() && currentRenderEncoder) {
-        currentRenderEncoder->setVertexBuffer(it->second.buffer.get(), offset, binding);
+        if (currentPipelineIsMesh) {
+            // Mesh pipelines have no vertex stage; the same data feeds the
+            // object (task) and mesh stages at the same index.
+            currentRenderEncoder->setObjectBuffer(it->second.buffer.get(), offset, binding);
+            currentRenderEncoder->setMeshBuffer(it->second.buffer.get(), offset, binding);
+        } else {
+            currentRenderEncoder->setVertexBuffer(it->second.buffer.get(), offset, binding);
+        }
     }
+}
+
+void RHI_Metal::drawMeshTasks(Uint32 groupCountX, Uint32 groupCountY, Uint32 groupCountZ) {
+    if (!currentRenderEncoder || !currentPipelineIsMesh || groupCountX == 0) return;
+    currentRenderEncoder->drawMeshThreadgroups(
+        MTL::Size::Make(groupCountX, groupCountY, groupCountZ),
+        MTL::Size::Make(currentTaskThreads, 1, 1),
+        MTL::Size::Make(currentMeshThreads, 1, 1));
 }
 
 void RHI_Metal::setFragmentBuffer(Uint32 binding, BufferHandle buffer, size_t offset, size_t range) {
@@ -1371,7 +1627,12 @@ void RHI_Metal::setTexture(Uint32 set, Uint32 binding, TextureHandle texture, Sa
 
 void RHI_Metal::setVertexBytes(const void* data, size_t size, Uint32 binding) {
     if (currentRenderEncoder && data && size > 0) {
-        currentRenderEncoder->setVertexBytes(data, size, binding);
+        if (currentPipelineIsMesh) {
+            currentRenderEncoder->setObjectBytes(data, size, binding);
+            currentRenderEncoder->setMeshBytes(data, size, binding);
+        } else {
+            currentRenderEncoder->setVertexBytes(data, size, binding);
+        }
     }
 }
 
@@ -1406,6 +1667,200 @@ void RHI_Metal::drawIndexed(Uint32 indexCount, Uint32 instanceCount, Uint32 firs
             vertexOffset,
             firstInstance
         );
+    }
+}
+
+void RHI_Metal::drawIndexedIndirect(BufferHandle argsBuffer, size_t offset, Uint32 drawCount, Uint32 stride) {
+    auto argsIt = buffers.find(argsBuffer.id);
+    auto idxIt = buffers.find(currentIndexBuffer.id);
+    if (argsIt == buffers.end() || idxIt == buffers.end() || !currentRenderEncoder) {
+        return;
+    }
+    MTL::Buffer* args = argsIt->second.buffer.get();
+    MTL::Buffer* indexBuffer = idxIt->second.buffer.get();
+    // Metal draws one indirect command per call, so multi-draw expands to a loop.
+    // Each command reads its own indexCount/firstIndex/baseVertex/baseInstance
+    // from the args buffer; instanceCount == 0 makes the draw a GPU no-op. The
+    // index-buffer offset is 0 because the command carries the absolute
+    // firstIndex into the merged index buffer.
+    for (Uint32 i = 0; i < drawCount; ++i) {
+        currentRenderEncoder->drawIndexedPrimitives(
+            currentPrimitiveType,
+            MTL::IndexTypeUInt32,
+            indexBuffer,
+            static_cast<NS::UInteger>(0),
+            args,
+            static_cast<NS::UInteger>(offset + static_cast<size_t>(i) * stride)
+        );
+    }
+}
+
+void RHI_Metal::drawIndirect(BufferHandle argsBuffer, size_t offset, Uint32 drawCount, Uint32 stride) {
+    auto argsIt = buffers.find(argsBuffer.id);
+    if (argsIt == buffers.end() || !currentRenderEncoder) {
+        return;
+    }
+    MTL::Buffer* args = argsIt->second.buffer.get();
+    // Non-indexed indirect: MTLDrawPrimitivesIndirectArguments per command.
+    // Metal draws one indirect command per call, so multi-draw expands to a loop.
+    for (Uint32 i = 0; i < drawCount; ++i) {
+        currentRenderEncoder->drawPrimitives(
+            currentPrimitiveType,
+            args,
+            static_cast<NS::UInteger>(offset + static_cast<size_t>(i) * stride)
+        );
+    }
+}
+
+// ============================================================================
+// Indirect Command Buffers + bindless texture tables (the ICB draw mode)
+// ============================================================================
+
+IndirectCommandBufferHandle RHI_Metal::createIndirectCommandBuffer(Uint32 maxCommands) {
+    if (!capabilities.indirectCommandBuffers || maxCommands == 0) return {};
+
+    auto desc = NS::TransferPtr(MTL::IndirectCommandBufferDescriptor::alloc()->init());
+    desc->setCommandTypes(MTL::IndirectCommandTypeDrawIndexed);
+    // Commands inherit the encoder's pipeline and buffer bindings; each command
+    // carries only the indexed-draw arguments (its index-buffer region,
+    // baseVertex, baseInstance). Textures/samplers are encoder state anyway.
+    desc->setInheritPipelineState(true);
+    desc->setInheritBuffers(true);
+    desc->setMaxVertexBufferBindCount(0);
+    desc->setMaxFragmentBufferBindCount(0);
+
+    auto icb = NS::TransferPtr(device->newIndirectCommandBuffer(
+        desc.get(), maxCommands, MTL::ResourceStorageModePrivate));
+    if (!icb) {
+        fmt::print("Failed to create indirect command buffer ({} commands)\n", maxCommands);
+        return {};
+    }
+
+    Uint32 id = nextICBId++;
+    ICBResource res;
+    res.icb = icb;
+    res.maxCommands = maxCommands;
+    icbs[id] = res;
+    return IndirectCommandBufferHandle{id};
+}
+
+void RHI_Metal::destroyIndirectCommandBuffer(IndirectCommandBufferHandle handle) {
+    icbs.erase(handle.id);
+}
+
+void RHI_Metal::bindComputeICB(Uint32 binding, IndirectCommandBufferHandle handle) {
+    auto it = icbs.find(handle.id);
+    if (it == icbs.end() || !currentComputeEncoder) return;
+    ICBResource& res = it->second;
+
+    // The kernel sees the ICB through a tiny argument buffer (MSL:
+    // `device ICBContainer& { command_buffer icb; }`). Encode it once with an
+    // argument encoder from the currently bound kernel function.
+    if (!res.containerArgBuffer) {
+        auto pit = computePipelines.find(currentComputePipeline.id);
+        if (pit == computePipelines.end() || !pit->second.function) return;
+        auto encoder = NS::TransferPtr(pit->second.function->newArgumentEncoder(binding));
+        if (!encoder) {
+            fmt::print("bindComputeICB: no argument encoder for kernel buffer({})\n", binding);
+            return;
+        }
+        res.containerArgBuffer = NS::TransferPtr(
+            device->newBuffer(encoder->encodedLength(), MTL::ResourceStorageModeShared));
+        encoder->setArgumentBuffer(res.containerArgBuffer.get(), 0);
+        encoder->setIndirectCommandBuffer(res.icb.get(), 0);
+    }
+
+    currentComputeEncoder->setBuffer(res.containerArgBuffer.get(), 0, binding);
+    // Argument-buffer indirection: the kernel's writes to the ICB must be
+    // declared to the encoder explicitly.
+    currentComputeEncoder->useResource(res.icb.get(), MTL::ResourceUsageWrite);
+}
+
+void RHI_Metal::executeICB(IndirectCommandBufferHandle handle, Uint32 commandCount) {
+    auto it = icbs.find(handle.id);
+    if (it == icbs.end() || !currentRenderEncoder || commandCount == 0) return;
+    Uint32 count = std::min(commandCount, it->second.maxCommands);
+    currentRenderEncoder->executeCommandsInBuffer(it->second.icb.get(),
+                                                  NS::Range::Make(0, count));
+}
+
+BufferHandle RHI_Metal::createTextureArgumentTable(ShaderHandle fragmentShader, Uint32 bufferIndex,
+                                                   Uint32 entryCount, Uint32 texturesPerEntry) {
+    auto sit = shaders.find(fragmentShader.id);
+    if (sit == shaders.end() || !sit->second.function || entryCount == 0) return {};
+
+    auto encoder = NS::TransferPtr(sit->second.function->newArgumentEncoder(bufferIndex));
+    if (!encoder) {
+        fmt::print("createTextureArgumentTable: no argument encoder at buffer({})\n", bufferIndex);
+        return {};
+    }
+    // One struct per entry; entries are tightly packed at the encoded stride.
+    NS::UInteger stride = encoder->encodedLength();
+    auto buffer = NS::TransferPtr(device->newBuffer(stride * entryCount,
+                                                    MTL::ResourceStorageModeShared));
+    if (!buffer) return {};
+
+    // Register the MTL::Buffer under a normal buffer id so setFragmentBuffer
+    // binds the table like any other buffer; the table map shares the id.
+    Uint32 id = nextBufferId++;
+    BufferResource bufRes;
+    bufRes.buffer = buffer;
+    bufRes.size = stride * entryCount;
+    bufRes.isMapped = false;
+    bufRes.mappedPointer = nullptr;
+    buffers[id] = bufRes;
+
+    ArgumentTableResource table;
+    table.buffer = buffer;
+    table.encoder = encoder;
+    table.stride = stride;
+    table.bufferIndex = bufferIndex;
+    table.entryCount = entryCount;
+    table.texturesPerEntry = texturesPerEntry;
+    argumentTables[id] = std::move(table);
+    return BufferHandle{id};
+}
+
+void RHI_Metal::writeTextureArgumentTable(BufferHandle tableHandle, Uint32 entry, Uint32 slot,
+                                          TextureHandle texture) {
+    auto tit = argumentTables.find(tableHandle.id);
+    auto xit = textures.find(texture.id);
+    if (tit == argumentTables.end() || xit == textures.end()) return;
+    ArgumentTableResource& table = tit->second;
+    if (entry >= table.entryCount || slot >= table.texturesPerEntry) return;
+
+    table.encoder->setArgumentBuffer(table.buffer.get(), table.stride * entry);
+    table.encoder->setTexture(xit->second.texture.get(), slot);
+    table.written[entry * table.texturesPerEntry + slot] = xit->second.texture;
+    table.residencyDirty = true;
+}
+
+void RHI_Metal::bindTextureArgumentTable(BufferHandle tableHandle) {
+    auto tit = argumentTables.find(tableHandle.id);
+    if (tit == argumentTables.end() || !currentRenderEncoder) return;
+    ArgumentTableResource& table = tit->second;
+
+    // Bind the argument buffer at its fragment slot, then declare residency
+    // for every texture it references (argument-buffer indirection).
+    currentRenderEncoder->setFragmentBuffer(table.buffer.get(), 0, table.bufferIndex);
+
+    if (table.residencyDirty) {
+        table.residentResources.clear();
+        // Dedup: many materials share default/white textures.
+        std::unordered_map<MTL::Texture*, bool> seen;
+        for (auto& [key, tex] : table.written) {
+            if (tex && !seen.count(tex.get())) {
+                seen[tex.get()] = true;
+                table.residentResources.push_back(tex.get());
+            }
+        }
+        table.residencyDirty = false;
+    }
+    if (!table.residentResources.empty()) {
+        currentRenderEncoder->useResources(table.residentResources.data(),
+                                           table.residentResources.size(),
+                                           MTL::ResourceUsageRead,
+                                           MTL::RenderStageFragment);
     }
 }
 
@@ -1586,6 +2041,7 @@ ComputePipelineHandle RHI_Metal::createComputePipeline(const ComputePipelineDesc
     Uint32 id = nextComputePipelineId++;
     ComputePipelineResource res;
     res.pipeline = pipeline;
+    res.function = it->second.function;  // for bindComputeICB's argument encoder
     res.tgX = std::max(1u, desc.threadGroupSizeX);
     res.tgY = std::max(1u, desc.threadGroupSizeY);
     res.tgZ = std::max(1u, desc.threadGroupSizeZ);
@@ -1864,6 +2320,21 @@ void RHI_Metal::setComputeTexture(Uint32 binding, TextureHandle texture) {
     auto it = textures.find(texture.id);
     if (it != textures.end() && currentComputeEncoder) {
         currentComputeEncoder->setTexture(it->second.texture.get(), binding);
+    }
+}
+
+void RHI_Metal::setComputeSampledTexture(Uint32 binding, TextureHandle texture, SamplerHandle sampler) {
+    // Metal samples in compute the same way as in fragment: the texture at a
+    // texture index plus a sampler state at the matching sampler index. (Unlike
+    // Vulkan, there is no separate storage-vs-sampled layout to manage.)
+    auto texIt = textures.find(texture.id);
+    auto samplerIt = samplers.find(sampler.id);
+    if (!currentComputeEncoder) return;
+    if (texIt != textures.end()) {
+        currentComputeEncoder->setTexture(texIt->second.texture.get(), binding);
+    }
+    if (samplerIt != samplers.end()) {
+        currentComputeEncoder->setSamplerState(samplerIt->second.sampler.get(), binding);
     }
 }
 

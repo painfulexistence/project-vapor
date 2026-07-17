@@ -1,6 +1,7 @@
 #pragma once
 #include "rhi.hpp"// RHICapabilities
 #include <SDL3/SDL_stdinc.h>
+#include <chrono>
 #include <functional>
 #include <memory>
 #include <string>
@@ -123,11 +124,26 @@ public:
     // Executes enabled passes in order, skipping any whose declared
     // requirements the backend does not meet.
     void execute(Renderer& renderer, const RHICapabilities& caps) {
+        m_passCpuTimings.clear();
         for (auto& pass : passes) {
             if (!pass->enabled) continue;
             if (!pass->isSupported(caps)) continue;
+            // Per-pass CPU (command-recording) time. This is wall-clock time on
+            // the calling thread — how long the CPU spends building the pass,
+            // NOT its GPU execution time (see RHI::getGpuPassTimings for that).
+            // Comparing the two tells you whether a pass is CPU- or GPU-bound.
+            const auto t0 = std::chrono::high_resolution_clock::now();
             pass->execute(renderer);
+            const auto t1 = std::chrono::high_resolution_clock::now();
+            m_passCpuTimings.emplace_back(
+                pass->getName(),
+                std::chrono::duration<double, std::milli>(t1 - t0).count());
         }
+    }
+
+    // Per-pass CPU recording times from the last execute(), in pass order.
+    const std::vector<std::pair<std::string, double>>& getPassCpuTimings() const {
+        return m_passCpuTimings;
     }
 
     const std::vector<std::unique_ptr<RenderPass>>& getPasses() const {
@@ -136,4 +152,5 @@ public:
 
 private:
     std::vector<std::unique_ptr<RenderPass>> passes;
+    std::vector<std::pair<std::string, double>> m_passCpuTimings;
 };

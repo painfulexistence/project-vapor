@@ -199,7 +199,7 @@ struct ParticleVertexOut {
 
 struct ParticlePushConstants {
     float particleSize;
-    float _pad1;
+    float useTexture;   // > 0.5: sample the per-emitter texture; else procedural disc
     float _pad2;
     float _pad3;
 };
@@ -229,14 +229,26 @@ vertex ParticleVertexOut particleVertex(
     return out;
 }
 
-fragment float4 particleFragment(ParticleVertexOut in [[stage_in]]) {
-    float2 center = in.uv - float2(0.5);
-    float  dist   = length(center) * 2.0;
+fragment float4 particleFragment(
+    ParticleVertexOut               in              [[stage_in]],
+    constant ParticlePushConstants& pc              [[buffer(0)]],
+    texture2d<float>                particleTexture [[texture(0)]],
+    sampler                         particleSampler [[sampler(0)]]
+) {
+    float4 outColor;
+    if (pc.useTexture > 0.5) {
+        // Textured sprite, modulated by per-particle color (carries the age fade).
+        outColor = particleTexture.sample(particleSampler, in.uv) * in.color;
+    } else {
+        // Procedural: soft circular falloff + additive glow core.
+        float2 center = in.uv - float2(0.5);
+        float  dist   = length(center) * 2.0;
 
-    float alpha = 1.0 - smoothstep(0.0, 1.0, dist);
-    float glow  = exp(-dist * dist * 2.0);
+        float alpha = 1.0 - smoothstep(0.0, 1.0, dist);
+        float glow  = exp(-dist * dist * 2.0);
 
-    float4 outColor = float4(in.color.rgb * (alpha + glow * 0.5), in.color.a * alpha);
+        outColor = float4(in.color.rgb * (alpha + glow * 0.5), in.color.a * alpha);
+    }
     if (outColor.a < 0.01) discard_fragment();
     return outColor;
 }
