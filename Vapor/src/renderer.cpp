@@ -960,6 +960,8 @@ void Renderer::setupDefaultRenderGraph() {
         [](Renderer& r) { r.stochasticPointShadowPass(); }, PassFlags::RequiresRaytracing);
     renderGraph.addPass("PointShadowTemporal",
         [](Renderer& r) { r.pointShadowTemporalPass(); }, PassFlags::RequiresRaytracing);
+    renderGraph.addPass("PointShadowDenoise",
+        [](Renderer& r) { r.pointShadowDenoisePass(); }, PassFlags::RequiresRaytracing);
     // GIBS surfel GI (generation -> hash -> RT -> temporal -> gather).
     renderGraph.addPass("GIBS",
         [](Renderer& r) { r.gibsPass(); }, PassFlags::RequiresRaytracing);
@@ -1498,8 +1500,14 @@ void Renderer::mainRenderPass() {
             // texPointShadow (RGB point/rect/spot channels) only when stochastic
             // shadows are on; otherwise the neutral white bound above keeps
             // point/rect/spot unshadowed — matching the RT-less Vulkan path.
-            if (stochasticShadowsEnabled && pointShadowHistoryRT.isValid())
-                rhi->setTexture(0, 13, pointShadowHistoryRT, clampSampler);
+            if (capabilities.raytracing && stochasticShadowsEnabled &&
+                pointShadowHistoryWritten && pointShadowHistoryRT.isValid()) {
+                // Prefer the edge-aware filtered copy; the raw accumulator
+                // output is the fallback if the denoise pass didn't run.
+                TextureHandle shadowTex = (pointShadowDenoiseRan && pointShadowDenoisedRT.isValid())
+                                              ? pointShadowDenoisedRT : pointShadowHistoryRT;
+                rhi->setTexture(0, 13, shadowTex, clampSampler);
+            }
             if (gibsEnabled && giResultTexture.isValid()) rhi->setTexture(0, 14, giResultTexture, clampSampler);
         }
         // Spot lights (buffer 14) + counts/flags (buffer 15). Flag bit0 says the
@@ -1987,10 +1995,61 @@ void Renderer::aoDenoisePass() {
     }
 }
 
+// Mirrors ShadowReservoirSet in restir_shadow_common.metal (32 B per pixel).
+struct ShadowReservoirSetCPU {
+    Uint32 pointData;    float pointW;
+    Uint32 spotData;     float spotW;
+    Uint32 rectData;     float rectW;
+    Uint32 packedNormal; float viewDepth;
+};
+static_assert(sizeof(ShadowReservoirSetCPU) == 32, "must match the MSL ShadowReservoirSet");
+
+// Mirrors RestirShadowParams in restir_shadow_common.metal.
+struct RestirShadowParamsCPU {
+    glm::vec2 screenSize;
+    glm::uvec2 gridDims;
+    Uint32 frameIndex;
+    Uint32 pointCount;
+    Uint32 rectCount;
+    Uint32 spotCount;
+    Uint32 historyValid;
+    Uint32 pointCandidates;
+    Uint32 rectCandidates;
+    Uint32 spotCandidates;
+    Uint32 debugMode;
+    Uint32 spatialTaps;
+    float pointMClamp;
+    float rectMClamp;
+    float spatialRadius;
+    float depthTolerance;
+    float normalTolerance;
+    float spotMClamp;
+};
+static_assert(sizeof(RestirShadowParamsCPU) == 80, "must match the MSL RestirShadowParams");
+
 // Stochastic ray-traced point-light shadows (clustered light sampling).
+// Routes to the ReSTIR reservoir path when enabled; the legacy uniform-pick
+// kernel below stays as the fallback (and the A/B reference).
 void Renderer::stochasticPointShadowPass() {
-    if (!stochasticShadowsEnabled) return;  // noisy without a denoiser; off = aligns with Vulkan
-    if (!stochasticPointShadowPipeline.isValid() || !sceneTLAS.isValid() || !pointShadowRT.isValid()) return;
+    pointShadowWritten = false;  // set again below iff a kernel writes the RT
+    pointShadowDenoiseRan = false;
+    const bool restirWanted = stochasticShadowsEnabled && restirShadowsEnabled &&
+                              restirShadowTemporalPipeline.isValid() &&
+                              restirShadowResolvePipeline.isValid();
+    // Reservoirs exist exactly while the ReSTIR path is active: free them the
+    // frame the feature stops running (toggle off, missing TLAS, ...) so a
+    // one-time experiment doesn't pin 2x 32 B/pixel for the whole session.
+    if (!restirWanted && restirReservoirHistory.isValid()) {
+        rhi->destroyBuffer(restirReservoirHistory);
+        rhi->destroyBuffer(restirReservoirScratch);
+        restirReservoirHistory = {};
+        restirReservoirScratch = {};
+        restirHistoryValid = false;
+    }
+    if (!stochasticShadowsEnabled) return;  // off = aligns with the RT-less Vulkan output
+    if (!sceneTLAS.isValid() || !pointShadowRT.isValid()) return;
+    if (restirWanted && restirShadowPass()) { pointShadowWritten = true; return; }
+    if (!stochasticPointShadowPipeline.isValid()) return;
     Uint32 w = rhi->getSwapchainWidth();
     Uint32 h = rhi->getSwapchainHeight();
     glm::vec2 screenSize(w, h);
@@ -2020,6 +2079,111 @@ void Renderer::stochasticPointShadowPass() {
     rhi->setComputeBytes(&extraCounts, sizeof(glm::uvec2), 10);
     rhi->dispatch((w + 7) / 8, (h + 7) / 8, 1);
     rhi->endComputePass();
+    pointShadowWritten = true;
+}
+
+// ReSTIR denoise for the stochastic shadows. Two kernels in one compute pass:
+//   1) 3d_restir_shadow_temporal — fresh light candidates (RIS, no rays) +
+//      velocity-reprojected temporal reservoir merge -> scratch buffer
+//   2) 3d_restir_shadow_resolve — spatial reservoir merge + ONE visibility ray
+//      per light domain for the winner -> pointShadowRT (RGB) + history buffer
+// The winner's binary visibility estimates the contribution-weighted shadow
+// factor per domain; the existing PointShadowTemporal accumulator stays as the
+// final averager. Ray budget: <= 4/pixel — 1 point, 1 spot, 2 independently
+// jittered quad points on the rect winner (fresh every frame so the penumbra
+// coverage stays a decorrelated estimate) — matching the legacy kernel's cap.
+// Returns false (without recording) if the reservoirs can't be allocated, so
+// the caller falls back to the legacy kernel.
+bool Renderer::restirShadowPass() {
+    Uint32 w = rhi->getSwapchainWidth();
+    Uint32 h = rhi->getSwapchainHeight();
+
+    // Reservoirs allocate on first use and are freed the moment the path stops
+    // running (see stochasticPointShadowPass) or the swapchain resizes
+    // (destroyRenderTargets). 32 B/pixel x2: ~28 MB combined at 1500x900,
+    // ~236 MB at 2560x1440 retina, ~530 MB at 4K — the reason they don't sit
+    // in createRenderTargets with the always-on targets.
+    if (!restirReservoirHistory.isValid() || !restirReservoirScratch.isValid()) {
+        BufferDesc bd;
+        bd.size = size_t(w) * size_t(h) * sizeof(ShadowReservoirSetCPU);
+        bd.usage = BufferUsage::Storage;
+        bd.memoryUsage = MemoryUsage::GPU;
+        try {
+            restirReservoirHistory = rhi->createBuffer(bd);
+            restirReservoirScratch = rhi->createBuffer(bd);
+        } catch (const std::exception& e) {
+            if (restirReservoirHistory.isValid()) rhi->destroyBuffer(restirReservoirHistory);
+            restirReservoirHistory = {};
+            restirReservoirScratch = {};
+            restirShadowsEnabled = false;  // don't retry every frame
+            fmt::print(stderr, "restirShadowPass: reservoir allocation failed ({}), "
+                               "falling back to the legacy stochastic kernel\n", e.what());
+            return false;
+        }
+        restirHistoryValid = false;  // fresh buffers hold garbage, not history
+    }
+
+    RestirShadowParamsCPU p{};
+    p.screenSize = glm::vec2(w, h);
+    p.gridDims = glm::uvec2(clusterGridSizeX, clusterGridSizeY);
+    // frameNumber, not frameCounter: the latter only advances inside
+    // lightScatteringPass, so it freezes (and with it the RNG sequence and
+    // history-contiguity check) whenever god rays are toggled off.
+    p.frameIndex = frameNumber;
+    p.pointCount = static_cast<Uint32>(pointLights.size());
+    p.rectCount = static_cast<Uint32>(rectLights.size());
+    p.spotCount = static_cast<Uint32>(spotLights.size());
+    // History is only trusted when the pass also ran last frame — any skip
+    // (toggle, invalid TLAS, resize, graph edits) breaks the chain here
+    // instead of every skip site having to remember to invalidate.
+    p.historyValid = (restirHistoryValid && frameNumber == restirLastFrame + 1) ? 1u : 0u;
+    p.pointCandidates = std::max(restirPointCandidates, 1u);  // panel slider allows typed 0
+    p.rectCandidates = restirRectCandidates;
+    p.spotCandidates = restirSpotCandidates;
+    p.debugMode = pointShadowDebugMode;
+    p.spatialTaps = restirSpatialTaps;
+    p.pointMClamp = restirPointMClamp * float(p.pointCandidates);
+    p.rectMClamp = restirRectMClamp * float(p.rectCandidates);
+    p.spotMClamp = restirPointMClamp * float(p.spotCandidates);
+    p.spatialRadius = restirSpatialRadius;
+    p.depthTolerance = 0.1f;
+    p.normalTolerance = 0.9f;
+
+    rhi->beginComputePass("ReSTIRShadow");
+    rhi->bindComputePipeline(restirShadowTemporalPipeline);
+    rhi->setComputeTexture(0, depthStencilRT);
+    rhi->setComputeTexture(1, normalRT);
+    rhi->setComputeTexture(2, velocityRT);
+    rhi->setComputeBuffer(0, cameraUniformBuffer, 0, sizeof(CameraRenderData));
+    rhi->setComputeBuffer(1, pointLightBuffer, 0, sizeof(PointLightData) * maxPointLights);
+    rhi->setComputeBuffer(2, clusterBuffer);
+    rhi->setComputeBuffer(3, spotLightBuffer, 0, sizeof(Vapor::SpotLight) * maxSpotLights);
+    rhi->setComputeBuffer(4, rectLightBuffer);
+    rhi->setComputeBuffer(5, restirReservoirHistory);
+    rhi->setComputeBuffer(6, restirReservoirScratch);
+    rhi->setComputeBytes(&p, sizeof(p), 7);
+    rhi->dispatch((w + 7) / 8, (h + 7) / 8, 1);
+    rhi->computeBarrier();  // scratch reservoirs -> spatial taps
+
+    rhi->bindComputePipeline(restirShadowResolvePipeline);
+    rhi->setComputeTexture(0, depthStencilRT);
+    rhi->setComputeTexture(1, normalRT);
+    rhi->setComputeTexture(2, pointShadowRT);
+    rhi->setComputeBuffer(0, cameraUniformBuffer, 0, sizeof(CameraRenderData));
+    rhi->setComputeBuffer(1, pointLightBuffer, 0, sizeof(PointLightData) * maxPointLights);
+    rhi->setComputeBuffer(2, clusterBuffer);
+    rhi->setComputeBuffer(3, spotLightBuffer, 0, sizeof(Vapor::SpotLight) * maxSpotLights);
+    rhi->setComputeBuffer(4, rectLightBuffer);
+    rhi->setComputeBuffer(5, restirReservoirScratch);
+    rhi->setComputeBuffer(6, restirReservoirHistory);
+    rhi->setAccelerationStructure(7, sceneTLAS);
+    rhi->setComputeBytes(&p, sizeof(p), 8);
+    rhi->dispatch((w + 7) / 8, (h + 7) / 8, 1);
+    rhi->endComputePass();
+
+    restirHistoryValid = true;
+    restirLastFrame = frameNumber;
+    return true;
 }
 
 // GIBS surfel GI (RequiresRaytracing): generate surfels from the pre-pass
@@ -2264,7 +2428,11 @@ void Renderer::gibsPass() {
 // here the handles are swapped instead (post-swap, history holds the latest
 // denoised result and is what the PBR shader binds).
 void Renderer::pointShadowTemporalPass() {
-    if (!stochasticShadowsEnabled) return;
+    // Only accumulate frames the stochastic pass actually wrote (covers the
+    // feature toggle, missing RT support, and the frames before the TLAS is
+    // built) — otherwise the EMA would fold undefined texture memory into the
+    // history the PBR pass samples.
+    if (!pointShadowWritten) return;
     if (!pointShadowTemporalPipeline.isValid() || !pointShadowRT.isValid()) return;
     Uint32 w = rhi->getSwapchainWidth();
     Uint32 h = rhi->getSwapchainHeight();
@@ -2277,6 +2445,32 @@ void Renderer::pointShadowTemporalPass() {
     rhi->dispatch((w + 7) / 8, (h + 7) / 8, 1);
     rhi->endComputePass();
     std::swap(pointShadowDenoisedRT, pointShadowHistoryRT);
+    pointShadowHistoryWritten = true;
+}
+
+// Edge-aware 5x5 cross-bilateral filter over the accumulated shadow factors —
+// the spatial-filtering stage of the stochastic-RT skeleton. The accumulator's
+// EMA keeps a variance floor for the rect penumbra's per-frame coverage
+// samples; averaging geometry-compatible neighbors removes it. Reads the
+// post-swap history (the accumulated result) and writes the now-scratch
+// denoised target, which is what the PBR pass samples — so the history
+// feedback stays unfiltered and the blur never compounds across frames.
+void Renderer::pointShadowDenoisePass() {
+    if (!pointShadowWritten) return;  // accumulator didn't run either
+    if (!pointShadowDenoisePipeline.isValid() || !pointShadowHistoryRT.isValid() ||
+        !pointShadowDenoisedRT.isValid()) return;
+    Uint32 w = rhi->getSwapchainWidth();
+    Uint32 h = rhi->getSwapchainHeight();
+    rhi->beginComputePass("PointShadowDenoise");
+    rhi->bindComputePipeline(pointShadowDenoisePipeline);
+    rhi->setComputeTexture(0, pointShadowHistoryRT);
+    rhi->setComputeTexture(1, depthStencilRT);
+    rhi->setComputeTexture(2, normalRT);
+    rhi->setComputeTexture(3, pointShadowDenoisedRT);
+    rhi->setComputeBuffer(0, cameraUniformBuffer, 0, sizeof(CameraRenderData));
+    rhi->dispatch((w + 7) / 8, (h + 7) / 8, 1);
+    rhi->endComputePass();
+    pointShadowDenoiseRan = true;
 }
 
 // Directional shadow pass (PSSM, 3 cascades): split the camera frustum by a
@@ -3695,6 +3889,16 @@ void Renderer::destroyRenderTargets() {
     kill(cloudRT); kill(cloudHistoryRT); kill(cloudResolvedRT);
     kill(swapchainDepthBuffer);
 
+    // ReSTIR shadow reservoirs are swapchain-sized too (restirShadowPass
+    // reallocates at the new size on its next run).
+    if (restirReservoirHistory.isValid()) { rhi->destroyBuffer(restirReservoirHistory); restirReservoirHistory = {}; }
+    if (restirReservoirScratch.isValid()) { rhi->destroyBuffer(restirReservoirScratch); restirReservoirScratch = {}; }
+    restirHistoryValid = false;
+    // The recreated shadow targets hold undefined memory until the chain runs.
+    pointShadowWritten = false;
+    pointShadowHistoryWritten = false;
+    pointShadowDenoiseRan = false;
+
     // History/reprojection state is stale at the new resolution.
     aoHistoryValid = false;
     aoHistoryIndex = 0;
@@ -4353,6 +4557,17 @@ void Renderer::createRenderPipeline() {
         aoDenoisePipeline             = makeMetalCompute("shaders/3d_ao_denoise.metal", aoDenoiseShader, 8, 8, 1);
         stochasticPointShadowPipeline = makeMetalCompute("shaders/3d_stochastic_point_shadow.metal", pointShadowShader, 8, 8, 1);
         pointShadowTemporalPipeline   = makeMetalCompute("shaders/3d_point_shadow_temporal.metal", pointShadowTemporalShader, 8, 8, 1);
+        pointShadowDenoisePipeline    = makeMetalCompute("shaders/3d_point_shadow_denoise.metal", pointShadowDenoiseShader, 8, 8, 1);
+        // ReSTIR is optional with a live legacy fallback — a compile failure
+        // here must not take down renderer init like the required kernels do.
+        try {
+            restirShadowTemporalPipeline = makeMetalCompute("shaders/3d_restir_shadow_temporal.metal", restirShadowTemporalShader, 8, 8, 1);
+            restirShadowResolvePipeline  = makeMetalCompute("shaders/3d_restir_shadow_resolve.metal", restirShadowResolveShader, 8, 8, 1);
+        } catch (const std::exception& e) {
+            restirShadowTemporalPipeline = {};
+            restirShadowResolvePipeline = {};
+            fmt::print(stderr, "ReSTIR shadow pipelines unavailable ({}), legacy stochastic kernel stays active\n", e.what());
+        }
 
         // GIBS surfel GI kernels (entry points differ per file).
         auto makeNamedCompute = [&](const char* path, const char* entry, ShaderHandle& sh,
@@ -5223,14 +5438,46 @@ void Renderer::drawGraphicsImGui() {
         //   Off              = no shadows          (mainDebugFlags bit1 set)
         //   Directional only = sun/PSSM only       (default; stochastic off)
         //   All shadows      = + stochastic RT      (point/rect/spot; Metal RT,
-        //                      noisy until ReSTIR — the reason it's not default)
+        //                      ReSTIR-denoised; off by default to match Vulkan)
         int shadowMode = (mainDebugFlags & 2u) ? 0 : (stochasticShadowsEnabled ? 2 : 1);
         if (ImGui::Combo("Shadows", &shadowMode, "Off\0Directional only\0All shadows\0")) {
             mainDebugFlags = (shadowMode == 0) ? (mainDebugFlags | 2u) : (mainDebugFlags & ~2u);
             stochasticShadowsEnabled = (shadowMode == 2);
         }
-        if (shadowMode == 2)
-            ImGui::TextDisabled("stochastic RT shadows noisy until ReSTIR denoise (Metal RT only)");
+        if (shadowMode == 2) {
+            const bool restirAvailable = restirShadowTemporalPipeline.isValid() &&
+                                         restirShadowResolvePipeline.isValid();
+            // No history invalidation needed on toggles: restirShadowPass
+            // trusts history only when it also ran the previous frame.
+            ImGui::Checkbox("ReSTIR denoise (reservoir reuse)", &restirShadowsEnabled);
+            if (restirShadowsEnabled && restirAvailable) {
+                int cand = static_cast<int>(restirPointCandidates);
+                if (ImGui::SliderInt("Light candidates", &cand, 1, 16))
+                    restirPointCandidates = static_cast<Uint32>(cand);
+                int taps = static_cast<int>(restirSpatialTaps);
+                if (ImGui::SliderInt("Spatial taps", &taps, 0, 8))
+                    restirSpatialTaps = static_cast<Uint32>(taps);
+                ImGui::SliderFloat("Spatial radius (px)", &restirSpatialRadius, 2.0f, 32.0f);
+                ImGui::SliderFloat("History clamp (xM)", &restirPointMClamp, 1.0f, 40.0f);
+                if (restirReservoirHistory.isValid()) {
+                    const Uint32 rw = rhi->getSwapchainWidth();
+                    const Uint32 rh = rhi->getSwapchainHeight();
+                    const double mb = double(rw) * double(rh)
+                                      * sizeof(ShadowReservoirSetCPU) * 2.0 / (1024.0 * 1024.0);
+                    ImGui::TextDisabled("reservoirs: %ux%u, %.0f MB", rw, rh, mb);
+                }
+                // Live chain status — a stage silently skipping (missing
+                // pipeline, TLAS not ready) shows up here instead of only as
+                // unexplained noise.
+                ImGui::TextDisabled("chain: %s > accumulate > %s",
+                                    (restirLastFrame == frameNumber) ? "restir" : "legacy/skip",
+                                    pointShadowDenoiseRan ? "denoise" : "raw");
+            } else if (restirShadowsEnabled) {
+                ImGui::TextDisabled("ReSTIR pipelines unavailable (Metal RT only)");
+            } else {
+                ImGui::TextDisabled("legacy uniform light picks (noisy) — ReSTIR off");
+            }
+        }
         // pssmRTMaxDist now sets where the independent near-field shadow map ends
         // and the PSSM cascades begin (the near map, not RT, owns [near, this]).
         ImGui::SliderFloat("Near shadow distance", &pssmRTMaxDist, 5.0f, 200.0f);
@@ -5251,12 +5498,20 @@ void Renderer::drawGraphicsImGui() {
             ImGui::SliderFloat("SSCS thickness", &sscsThickness, 0.05f, 2.0f);
         }
         int psd = static_cast<int>(pointShadowDebugMode);
-        if (ImGui::Combo("Point shadow view", &psd, "Visibility (normal)\0Tile light-count heatmap\0")) {
+        if (ImGui::Combo("Point shadow view", &psd,
+                         "Visibility (normal)\0Tile light-count heatmap\0"
+                         "ReSTIR winner id\0ReSTIR confidence (M)\0")) {
             pointShadowDebugMode = static_cast<Uint32>(psd);
         }
         if (pointShadowDebugMode == 1) {
             ImGui::TextWrapped("Heatmap: black = tile has 0 lights, brighter = more (8+ ~ white). "
                                "Shown in 'Point Shadow (raw)' below.");
+        } else if (pointShadowDebugMode >= 2) {
+            ImGui::TextWrapped("ReSTIR-only view (falls back to visibility on the legacy path). "
+                               "Winner id: color bands per selected light — stable bands mean the "
+                               "reservoir has locked on. Confidence: reservoir M vs the history clamp. "
+                               "Like the heatmap, the view replaces the shadow factors, so scene "
+                               "lighting is affected while it is active.");
         }
         // Intermediate shadow textures (native Metal parity). These are
         // single-channel R16F/depth RTs; the RRR1 swizzle view renders them as
