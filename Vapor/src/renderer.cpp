@@ -1641,11 +1641,13 @@ void Renderer::mainRenderPass() {
                 rhi->setTexture(0, 13, pointShadowHistoryRT, clampSampler);
             if (gibsEnabled && giResultTexture.isValid()) rhi->setTexture(0, 14, giResultTexture, clampSampler);
         }
-        // Spot lights (buffer 14) + counts/flags (buffer 15). Flag bit0 says the
-        // point-shadow texture carries the RGB channel format (R point / G rect
-        // / B spot); 0 when stochastic shadows are off, so rect/spot stay
-        // unshadowed instead of sampling the (white) placeholder's channels.
-        rhi->setFragmentBuffer(14, spotLightBuffer, 0, sizeof(Vapor::SpotLight) * maxSpotLights);
+        // Spot lights (buffer 16) + counts/flags (buffer 15). buffer 14 is the
+        // bindless SystemTexs table's slot, so spot lights use 16 (see the shader
+        // note in 3d_pbr_normal_mapped.metal). Flag bit0 says the point-shadow
+        // texture carries the RGB channel format (R point / G rect / B spot); 0
+        // when stochastic shadows are off, so rect/spot stay unshadowed instead
+        // of sampling the (white) placeholder's channels.
+        rhi->setFragmentBuffer(16, spotLightBuffer, 0, sizeof(Vapor::SpotLight) * maxSpotLights);
         glm::uvec2 spotRectParams(static_cast<Uint32>(spotLights.size()),
                                   (capabilities.raytracing && stochasticShadowsEnabled) ? 1u : 0u);
         rhi->setFragmentBytes(&spotRectParams, sizeof(glm::uvec2), 15);
@@ -7154,9 +7156,10 @@ void Renderer::renderToTexture(
             }
             // texSSCS(15) is min()'d unconditionally — MUST be bound; white = lit.
             rhi->setTexture(0, 15, whiteTex, clampSampler);
-            // Spot buffer (14) + counts/flags (15) are declared in the shared
-            // PBR shader — bind placeholders with zero counts/flags.
-            rhi->setFragmentBuffer(14, spotLightBuffer, 0, sizeof(Vapor::SpotLight) * maxSpotLights);
+            // Spot buffer (16) + counts/flags (15) are declared in the shared
+            // PBR shader — bind placeholders with zero counts/flags. (16, not 14:
+            // buffer 14 is the bindless SystemTexs slot — see the shader note.)
+            rhi->setFragmentBuffer(16, spotLightBuffer, 0, sizeof(Vapor::SpotLight) * maxSpotLights);
             glm::uvec2 rttSpotRectParams(0u, 0u);
             rhi->setFragmentBytes(&rttSpotRectParams, sizeof(glm::uvec2), 15);
         }
