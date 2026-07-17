@@ -72,6 +72,15 @@ struct SamplerHandle {
     bool isValid() const { return id != UINT32_MAX; }
 };
 
+// GPU-encoded command list (Metal MTLIndirectCommandBuffer). A compute kernel
+// writes draw commands into it; the render pass replays the whole list with one
+// executeICB call. Vulkan has no portable equivalent exposed here (its native
+// multi-draw indirect already replays N draws in one call).
+struct IndirectCommandBufferHandle {
+    Uint32 id = UINT32_MAX;
+    bool isValid() const { return id != UINT32_MAX; }
+};
+
 struct DescriptorSetHandle {
     Uint32 id = UINT32_MAX;
     bool isValid() const { return id != UINT32_MAX; }
@@ -88,6 +97,10 @@ enum class BufferUsage {
     Storage,
     TransferSrc,
     TransferDst,
+    // GPU-driven rendering: a buffer that holds indirect draw arguments produced
+    // by a compute pass. On Vulkan this also carries STORAGE (so compute can
+    // write it) + INDIRECT; on Metal buffers are usage-agnostic.
+    Indirect,
 };
 
 enum class MemoryUsage {
@@ -204,6 +217,8 @@ enum class ShaderStage {
     Vertex,
     Fragment,
     Compute,
+    Task,  // mesh-shading amplification stage (Metal: object function)
+    Mesh,  // mesh-shading geometry stage (Metal: mesh function)
 };
 
 // ============================================================================
@@ -265,6 +280,12 @@ struct ShaderDesc {
     const void* code;
     size_t codeSize;
     const char* entryPoint = "main";
+    // Metal: specialize the function with kBindlessMaterials=true (function
+    // constant 0) — the PBR fragment then reads material textures from the
+    // argument table at buffer(13) instead of the bound slots 0-5. Only set for
+    // shaders that declare the constant (3d_pbr_normal_mapped.metal); ignored
+    // on Vulkan.
+    bool bindlessMaterials = false;
 };
 
 struct VertexAttribute {
@@ -276,6 +297,37 @@ struct VertexAttribute {
 struct VertexLayout {
     std::vector<VertexAttribute> attributes;
     Uint32 stride;
+};
+
+// Mesh-shading pipeline: task (optional) + mesh + fragment stages, no vertex
+// input (the mesh shader pulls geometry from storage buffers itself). Vulkan
+// VK_EXT_mesh_shader; Metal object/mesh functions. Only usable when
+// RHICapabilities::meshShaders is true.
+struct MeshPipelineDesc {
+    ShaderHandle taskShader;      // invalid handle = mesh-only pipeline
+    ShaderHandle meshShader;
+    ShaderHandle fragmentShader;
+    // Threadgroup sizes, needed by Metal's drawMeshThreadgroups (Vulkan bakes
+    // them in the shaders' local_size). Must match the shaders.
+    Uint32 taskThreadgroupSize = 32;
+    Uint32 meshThreadgroupSize = 64;
+    // Metal object/mesh amplification limits (Vulkan ignores these — it bakes
+    // them into the SPIR-V). Without them Metal allocates no payload memory and
+    // caps the mesh grid at 0, so the object->mesh handoff emits nothing.
+    // payloadBytes must cover the task payload struct; maxMeshThreadgroupsPerObject
+    // caps each object threadgroup's set_threadgroups_per_grid.
+    Uint32 payloadBytes = 128;                 // MeshletPayload = uint[32]
+    Uint32 maxMeshThreadgroupsPerObject = 32;  // <= task threads per group
+    BlendMode blendMode = BlendMode::Opaque;
+    bool depthTest = true;
+    bool depthWrite = true;
+    CompareOp depthCompareOp = CompareOp::Less;
+    bool hasDepthAttachment = true;
+    PixelFormat depthAttachmentFormat = PixelFormat::Depth32Float;
+    CullMode cullMode = CullMode::Back;
+    bool frontFaceCounterClockwise = true;
+    Uint32 sampleCount = 1;
+    std::vector<PixelFormat> colorAttachmentFormats = { PixelFormat::Swapchain };
 };
 
 struct PipelineDesc {
@@ -302,6 +354,10 @@ struct PipelineDesc {
     // PixelFormat::Swapchain resolves to the actual swapchain format.
     std::vector<PixelFormat> colorAttachmentFormats = { PixelFormat::Swapchain };
     PixelFormat depthAttachmentFormat = PixelFormat::Depth32Float;  // when hasDepthAttachment
+    // Metal: pipeline may be referenced by indirect command buffer draws
+    // (MTLRenderPipelineDescriptor.supportIndirectCommandBuffers). Required for
+    // executeICB with an inherit-pipeline ICB. Ignored on Vulkan.
+    bool supportsICB = false;
     // TODO: Add descriptor set layouts when needed.
 };
 
@@ -396,6 +452,21 @@ struct RHICapabilities {
     bool raytracing = false;     // acceleration structures + ray queries
     bool computeShaders = false; // compute pipelines with resource binding
     bool gpuTimestamps = false;  // per-pass GPU timing (see GPU Profiling)
+    // vkCmdDrawIndexedIndirect with drawCount > 1 (single-call multi-draw
+    // indirect). Vulkan gates this on the multiDrawIndirect device feature; Metal
+    // draws one indirect command per call, so it reports false.
+    bool multiDrawIndirect = false;
+    // Task + mesh shader pipelines (Vulkan VK_EXT_mesh_shader; Metal object/mesh
+    // functions). Required for the meshlet-based GPU-driven path.
+    bool meshShaders = false;
+    // GPU-encoded indirect command buffers (Metal MTLIndirectCommandBuffer).
+    // Vulkan reports false: its native MDI is already a single call, and
+    // device-generated commands aren't portably available (MoltenVK).
+    bool indirectCommandBuffers = false;
+    // Bindless texture tables (Metal argument buffers; Vulkan descriptor
+    // indexing with runtime arrays + update-after-bind). Required for the
+    // Bindless MDI draw mode on either backend.
+    bool bindlessTextures = false;
 };
 
 // ============================================================================
@@ -453,6 +524,9 @@ public:
 
     virtual PipelineHandle createPipeline(const PipelineDesc& desc) = 0;
     virtual void destroyPipeline(PipelineHandle handle) = 0;
+    // Mesh-shading pipeline (see MeshPipelineDesc). Returns an invalid handle on
+    // backends without mesh-shader support; destroy with destroyPipeline.
+    virtual PipelineHandle createMeshPipeline(const MeshPipelineDesc& /*desc*/) { return {}; }
 
     virtual ComputePipelineHandle createComputePipeline(const ComputePipelineDesc& desc) = 0;
     virtual void destroyComputePipeline(ComputePipelineHandle handle) = 0;
@@ -480,12 +554,30 @@ public:
     // Recorded into the batched upload stream like updateTexture.
     virtual void generateMipmaps(TextureHandle handle) = 0;
 
+    // Copy one mip level (layer 0) of src into one mip level of dst, recorded on
+    // the current frame's command buffer (between passes, not inside one). src
+    // and dst must be different textures; the two mip levels must have matching
+    // dimensions. Used to stage a Hi-Z level through a scratch texture so the
+    // pyramid can be built in a single sampleable texture without a read/write
+    // feedback loop. Both images are left in a shader-readable state afterwards
+    // (a copy's result is meant to be sampled next; setTexture does not itself
+    // transition). Default no-op so backends without it still link.
+    virtual void copyTexture(TextureHandle /*src*/, Uint32 /*srcMip*/,
+                             TextureHandle /*dst*/, Uint32 /*dstMip*/) {}
+
     // Uploads to GPU-only resources are recorded into a shared upload command
     // stream and submitted automatically before the next frame's rendering
     // (or when the staging ring fills). Call this to force an immediate
     // submit + wait — e.g. before reading back, or at the end of a loading
     // phase when you want the transfer cost accounted there.
     virtual void flushUploads() = 0;
+
+    // Request a GPU capture of the NEXT frame, written to `outPath` as a
+    // .gputrace document (open it in Xcode: no Xcode project needed — ideal for
+    // CMake/Ninja builds). Metal wraps beginFrame..endFrame in
+    // MTLCaptureManager start/stopCapture. Requires the environment to allow
+    // capture: run with MTL_CAPTURE_ENABLED=1. No-op on backends without it.
+    virtual void captureFrame(const char* /*outPath*/) {}
 
     // Copy swapchain/texture to CPU-readable buffer for screenshot
     // Returns a buffer handle that can be mapped after the copy completes
@@ -533,6 +625,63 @@ public:
     virtual void draw(Uint32 vertexCount, Uint32 instanceCount = 1, Uint32 firstVertex = 0, Uint32 firstInstance = 0) = 0;
     virtual void drawIndexed(Uint32 indexCount, Uint32 instanceCount = 1, Uint32 firstIndex = 0, int32_t vertexOffset = 0, Uint32 firstInstance = 0) = 0;
 
+    // Multi-draw indirect: issue `drawCount` indexed draws whose arguments are
+    // read from `argsBuffer` starting at `offset`, one DrawCommand every
+    // `stride` bytes (see the DrawCommand struct in graphics_gpu_structs.hpp).
+    // The currently bound index buffer + a merged vertex buffer are used; each
+    // command carries its own firstIndex/vertexOffset/firstInstance. On Vulkan
+    // this is a single vkCmdDrawIndexedIndirect; on Metal it expands to a loop
+    // of per-command indirect draws (same observable result). A command with
+    // instanceCount == 0 draws nothing, which is how the cull pass drops objects.
+    virtual void drawIndexedIndirect(BufferHandle argsBuffer, size_t offset, Uint32 drawCount, Uint32 stride) = 0;
+    // Non-indexed indirect draw: like drawIndexedIndirect but for draw() calls.
+    // Args layout is VkDrawIndirectCommand == MTLDrawPrimitivesIndirectArguments:
+    // {vertexCount, instanceCount, firstVertex, firstInstance} (16 bytes). On
+    // Vulkan drawCount > 1 needs the multiDrawIndirect feature (same caveat as
+    // the indexed variant); Metal loops per command.
+    virtual void drawIndirect(BufferHandle argsBuffer, size_t offset, Uint32 drawCount, Uint32 stride) = 0;
+    // Launch task-shader workgroups of the bound mesh pipeline (Vulkan
+    // vkCmdDrawMeshTasksEXT; Metal drawMeshThreadgroups). No-op default so
+    // backends without mesh shaders still link.
+    virtual void drawMeshTasks(Uint32 /*groupCountX*/, Uint32 /*groupCountY*/ = 1, Uint32 /*groupCountZ*/ = 1) {}
+
+    // ========================================================================
+    // Indirect Command Buffers + bindless texture tables (Metal-only for now;
+    // capabilities.indirectCommandBuffers gates all of it, defaults keep other
+    // backends linking). See the ICB draw mode in the renderer.
+    // ========================================================================
+
+    // GPU-encodable command list holding up to maxCommands indexed draws. The
+    // ICB inherits the encoder's pipeline and buffer bindings; commands carry
+    // only indexCount/indexBuffer/instanceCount/baseVertex/baseInstance.
+    virtual IndirectCommandBufferHandle createIndirectCommandBuffer(Uint32 /*maxCommands*/) { return {}; }
+    virtual void destroyIndirectCommandBuffer(IndirectCommandBufferHandle /*handle*/) {}
+    // Bind the ICB to the current COMPUTE pass so the kernel can encode into it
+    // (Metal: container argument buffer at `binding` + useResource(write); the
+    // kernel declares `device ICBContainer& { command_buffer icb; }`).
+    virtual void bindComputeICB(Uint32 /*binding*/, IndirectCommandBufferHandle /*handle*/) {}
+    // Replay commands [0, commandCount) of the ICB on the current render pass.
+    // The bound pipeline must have been created with supportsICB.
+    virtual void executeICB(IndirectCommandBufferHandle /*handle*/, Uint32 /*commandCount*/) {}
+
+    // Bindless texture table (the Bindless MDI draw mode; gated on
+    // capabilities.bindlessTextures). Holds entryCount structs of
+    // texturesPerEntry texture slots each, indexed by the shader as
+    // entry*texturesPerEntry+slot.
+    //   Metal:  an argument buffer laid out by the given fragment shader's
+    //           argument at `bufferIndex` (both params used).
+    //   Vulkan: a persistent update-after-bind descriptor set — set 3,
+    //           binding 0 = runtime sampled-image array, binding 1 = one
+    //           linear-repeat sampler (fragmentShader/bufferIndex ignored).
+    // Write entries with writeTextureArgumentTable; bind inside the render pass
+    // (after bindPipeline) with bindTextureArgumentTable, which also handles
+    // Metal residency (useResources) for every written texture.
+    virtual BufferHandle createTextureArgumentTable(ShaderHandle /*fragmentShader*/, Uint32 /*bufferIndex*/,
+                                                    Uint32 /*entryCount*/, Uint32 /*texturesPerEntry*/) { return {}; }
+    virtual void writeTextureArgumentTable(BufferHandle /*table*/, Uint32 /*entry*/, Uint32 /*slot*/,
+                                           TextureHandle /*texture*/) {}
+    virtual void bindTextureArgumentTable(BufferHandle /*table*/) {}
+
     // ========================================================================
     // Compute Commands
     // ========================================================================
@@ -544,7 +693,12 @@ public:
     virtual void endComputePass() = 0;
     virtual void bindComputePipeline(ComputePipelineHandle pipeline) = 0;
     virtual void setComputeBuffer(Uint32 binding, BufferHandle buffer, size_t offset = 0, size_t range = 0) = 0;
+    // Storage-image bind (imageLoad/imageStore, single mip, no filtering).
     virtual void setComputeTexture(Uint32 binding, TextureHandle texture) = 0;
+    // Sampled bind: the compute shader reads via a sampler (textureLod), so it
+    // can sample any mip of a mipped texture — needed for hierarchical Hi-Z.
+    // Default no-op so backends without it still link; Vulkan/Metal override.
+    virtual void setComputeSampledTexture(Uint32 /*binding*/, TextureHandle /*texture*/, SamplerHandle /*sampler*/) {}
     virtual void setAccelerationStructure(Uint32 binding, AccelStructHandle accelStruct) = 0;
     // Small inline constants for compute (Metal: setBytes at the given buffer
     // index; Vulkan: compute push constants at (binding%4)*16, 16 bytes/slot).

@@ -86,17 +86,38 @@ struct PointLight {
     // float _pad[2];
 };
 
+// Cone spot light. direction points FROM the light; cosInner/cosOuter are the
+// cosines of the inner (full-intensity) and outer (falloff-to-zero) half-angles.
+// Must match Vapor::SpotLight (graphics.hpp, 64 bytes, vec3+scalar packing).
+// float3 members occupy full 16-byte slots; scalars follow after the vectors
+// (offsets 48/52/56/60) — mirrors the explicit pads on the C++ side.
+struct SpotLight {
+    float3 position;    // [0, 16)
+    float3 direction;   // [16, 32) normalized, FROM the light
+    float3 color;       // [32, 48)
+    float  radius;      // 48 — range
+    float  cosInner;    // 52
+    float  cosOuter;    // 56
+    float  intensity;   // 60
+};
+
 // Rectangular area light.  right and up are orthonormal axes of the light face;
 // halfWidth/halfHeight give half-extents in those directions.
+// packed_float3 is REQUIRED here: the C++ Vapor::RectLight tail-packs each
+// scalar into the vec3's 4th float (offsets 0/12/16/28/32/44/48/60, 64 bytes).
+// The previous plain-float3 declaration put every member on a 16-byte slot
+// (position [0,16), halfWidth at 16 = C++ right.x, ... 128 bytes total) — every
+// field except position read garbage. Latent for as long as no scene shipped
+// rect lights; fatal the moment one does.
 struct RectLight {
-    float3 position;
-    float  halfWidth;
-    float3 right;           // normalized
-    float  halfHeight;
-    float3 up;              // normalized
-    float  intensity;
-    float3 color;
-    uint   useVideoTexture; // 0 = solid color, 1 = sample video texture
+    packed_float3 position;   // 0
+    float  halfWidth;         // 12
+    packed_float3 right;      // 16 — normalized
+    float  halfHeight;        // 28
+    packed_float3 up;         // 32 — normalized
+    float  intensity;         // 44
+    packed_float3 color;      // 48
+    uint   useVideoTexture;   // 60 — 0 = solid color, 1 = sample video texture
 };
 
 struct Cluster {
@@ -112,10 +133,34 @@ struct PSSMData {
     float4x4 lightSpaceMatrices[3];
     // view-space depths: x = RT shadow end, y = cascade1 end, z = cascade2 end, w = cascade3 end (far)
     float4 cascadeSplits;
-    float blendRange;
-    float _pad0;
-    float _pad1;
-    float _pad2;
+    float blendRange;          // RT↔PSSM blend range
+    float cascadeBlendRange;   // cascade↔cascade blend range (0 = hard transition)
+    uint pcfSampleCount;       // 4, 8, 16, or 32
+    uint debugVisualize;       // 0 = off, 1 = visualize cascades
+};
+
+// Poisson disk samples for high-quality PCF
+constant float2 poissonDisk16[16] = {
+    float2(-0.94201624, -0.39906216), float2(0.94558609, -0.76890725),
+    float2(-0.094184101, -0.92938870), float2(0.34495938, 0.29387760),
+    float2(-0.91588581, 0.45771432), float2(-0.81544232, -0.87912464),
+    float2(-0.38277543, 0.27676845), float2(0.97484398, 0.75648379),
+    float2(0.44323325, -0.97511554), float2(0.53742981, -0.47373420),
+    float2(-0.26496911, -0.41893023), float2(0.79197514, 0.19090188),
+    float2(-0.24188840, 0.99706507), float2(-0.81409955, 0.91437590),
+    float2(0.19984126, 0.78641367), float2(0.14383161, -0.14100790)
+};
+
+constant float2 poissonDisk8[8] = {
+    float2(-0.326212, -0.40581), float2(-0.840144, -0.07358),
+    float2(-0.695914, 0.457137), float2(-0.203345, 0.620716),
+    float2(0.96234, -0.194983), float2(0.473434, -0.480026),
+    float2(0.519456, 0.767022), float2(0.185461, -0.893124)
+};
+
+constant float2 poissonDisk4[4] = {
+    float2(-0.94201624, -0.39906216), float2(0.94558609, -0.76890725),
+    float2(-0.094184101, -0.92938870), float2(0.34495938, 0.29387760)
 };
 
 float3x3 inverse(float3x3 const m) {

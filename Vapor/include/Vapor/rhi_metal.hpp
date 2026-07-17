@@ -7,6 +7,7 @@
 #include <Foundation/Foundation.hpp>
 #include <Metal/Metal.hpp>
 #include <QuartzCore/QuartzCore.hpp>
+#include <dispatch/dispatch.h>
 #include <array>
 #include <atomic>
 #include <mutex>
@@ -54,6 +55,7 @@ public:
     void destroySampler(SamplerHandle handle) override;
 
     PipelineHandle createPipeline(const PipelineDesc& desc) override;
+    PipelineHandle createMeshPipeline(const MeshPipelineDesc& desc) override;
     void destroyPipeline(PipelineHandle handle) override;
 
     ComputePipelineHandle createComputePipeline(const ComputePipelineDesc& desc) override;
@@ -73,7 +75,9 @@ public:
                        Uint32 mipLevel, Uint32 arrayLayer) override;
     using RHI::updateTexture;
     void generateMipmaps(TextureHandle handle) override;
+    void copyTexture(TextureHandle src, Uint32 srcMip, TextureHandle dst, Uint32 dstMip) override;
     void flushUploads() override;
+    void captureFrame(const char* outPath) override;
 
     BufferHandle copySwapchainToBuffer(Uint32& outWidth, Uint32& outHeight) override;
     void* mapBuffer(BufferHandle handle) override;
@@ -109,6 +113,20 @@ public:
 
     void draw(Uint32 vertexCount, Uint32 instanceCount, Uint32 firstVertex, Uint32 firstInstance) override;
     void drawIndexed(Uint32 indexCount, Uint32 instanceCount, Uint32 firstIndex, int32_t vertexOffset, Uint32 firstInstance) override;
+    void drawIndexedIndirect(BufferHandle argsBuffer, size_t offset, Uint32 drawCount, Uint32 stride) override;
+    void drawIndirect(BufferHandle argsBuffer, size_t offset, Uint32 drawCount, Uint32 stride) override;
+    void drawMeshTasks(Uint32 groupCountX, Uint32 groupCountY = 1, Uint32 groupCountZ = 1) override;
+
+    // Indirect command buffers + bindless texture tables (see rhi.hpp).
+    IndirectCommandBufferHandle createIndirectCommandBuffer(Uint32 maxCommands) override;
+    void destroyIndirectCommandBuffer(IndirectCommandBufferHandle handle) override;
+    void bindComputeICB(Uint32 binding, IndirectCommandBufferHandle handle) override;
+    void executeICB(IndirectCommandBufferHandle handle, Uint32 commandCount) override;
+    BufferHandle createTextureArgumentTable(ShaderHandle fragmentShader, Uint32 bufferIndex,
+                                            Uint32 entryCount, Uint32 texturesPerEntry) override;
+    void writeTextureArgumentTable(BufferHandle table, Uint32 entry, Uint32 slot,
+                                   TextureHandle texture) override;
+    void bindTextureArgumentTable(BufferHandle table) override;
 
     // ========================================================================
     // Compute Commands
@@ -119,6 +137,7 @@ public:
     void bindComputePipeline(ComputePipelineHandle pipeline) override;
     void setComputeBuffer(Uint32 binding, BufferHandle buffer, size_t offset, size_t range) override;
     void setComputeTexture(Uint32 binding, TextureHandle texture) override;
+    void setComputeSampledTexture(Uint32 binding, TextureHandle texture, SamplerHandle sampler) override;
     void setAccelerationStructure(Uint32 binding, AccelStructHandle accelStruct) override;
     void setComputeBytes(const void* data, size_t size, Uint32 binding) override;
     void dispatch(Uint32 groupCountX, Uint32 groupCountY, Uint32 groupCountZ) override;
@@ -177,8 +196,22 @@ private:
     NS::AutoreleasePool* framePool = nullptr;
     CA::MetalDrawable* currentDrawable = nullptr;
     NS::SharedPtr<MTL::CommandBuffer> currentCommandBuffer;
+
+    // Explicit CPU throttle, one permit per in-flight frame (== getMaxFramesInFlight()).
+    // beginFrame() waits, the frame's completion handler signals. nextDrawable()
+    // already bounds the CPU to the drawable pool today, but a frame that never
+    // presents (offscreen/compute-only) would not be throttled by it — this makes
+    // the bound explicit and matches Vulkan's vkWaitForFences. Balanced on the
+    // skipped-frame path so a missing drawable can't drain a permit.
+    dispatch_semaphore_t frameSemaphore = nullptr;
+    bool frameSemaphoreAcquired = false;
     MTL::RenderCommandEncoder* currentRenderEncoder = nullptr;
     MTL::ComputeCommandEncoder* currentComputeEncoder = nullptr;
+    // Set by bindPipeline for mesh pipelines: reroutes vertex-stage binds to the
+    // object+mesh stages and supplies drawMeshThreadgroups' threadgroup sizes.
+    bool currentPipelineIsMesh = false;
+    Uint32 currentTaskThreads = 32;
+    Uint32 currentMeshThreads = 64;
 
     // Swapchain properties
     Uint32 swapchainWidth = 0;
@@ -190,6 +223,12 @@ private:
 
     // Device feature support, filled in initialize()
     RHICapabilities capabilities;
+
+    // One-shot GPU capture (captureFrame): non-empty path arms a capture that
+    // spans the next beginFrame..endFrame into a .gputrace document.
+    std::string pendingCapturePath;
+    bool captureInProgress = false;
+    void stopCaptureIfActive();
 
     // ========================================================================
     // Resource Storage
@@ -226,6 +265,11 @@ private:
         NS::SharedPtr<MTL::RenderPipelineState> renderPipeline;
         NS::SharedPtr<MTL::ComputePipelineState> computePipeline;
         bool isCompute = false;
+        // Mesh pipelines: object/mesh threadgroup sizes for drawMeshThreadgroups,
+        // and a flag that reroutes setVertexBuffer/Bytes to the object+mesh stages.
+        bool isMesh = false;
+        Uint32 taskThreads = 32;
+        Uint32 meshThreads = 64;
         // Fixed-function state captured from PipelineDesc. Metal has no single
         // pipeline-state object for these, so they are applied at bind time.
         NS::SharedPtr<MTL::DepthStencilState> depthStencilState;
@@ -236,9 +280,38 @@ private:
 
     struct ComputePipelineResource {
         NS::SharedPtr<MTL::ComputePipelineState> pipeline;
+        // Kept for bindComputeICB: the ICB container argument buffer is encoded
+        // with an argument encoder created from the kernel function.
+        NS::SharedPtr<MTL::Function> function;
         // Threadgroup shape from ComputePipelineDesc — Metal sets it at
         // dispatch time (SPIR-V bakes local_size; MSL does not).
         Uint32 tgX = 1, tgY = 1, tgZ = 1;
+    };
+
+    struct ICBResource {
+        NS::SharedPtr<MTL::IndirectCommandBuffer> icb;
+        // 8-byte argument buffer holding the ICB reference for the cull kernel
+        // (MSL `device ICBContainer& { command_buffer icb; }`), encoded lazily
+        // on first bindComputeICB with the bound kernel's argument encoder.
+        NS::SharedPtr<MTL::Buffer> containerArgBuffer;
+        Uint32 maxCommands = 0;
+    };
+
+    // Bindless texture table: argument buffer of entryCount structs, each with
+    // texturesPerEntry texture slots, plus the written textures for residency
+    // (useResources at draw time) and the encoder that lays entries out.
+    struct ArgumentTableResource {
+        NS::SharedPtr<MTL::Buffer> buffer;
+        NS::SharedPtr<MTL::ArgumentEncoder> encoder;
+        NS::UInteger stride = 0;
+        Uint32 bufferIndex = 0;  // fragment buffer slot the table binds to
+        Uint32 entryCount = 0;
+        Uint32 texturesPerEntry = 0;
+        // Written textures, deduped, retained for useResources. Rebuilt lazily
+        // from writtenSet when dirty.
+        std::vector<MTL::Resource*> residentResources;
+        std::unordered_map<Uint32, NS::SharedPtr<MTL::Texture>> written;  // (entry*slots+slot) -> tex
+        bool residencyDirty = true;
     };
 
     struct AccelStructResource {
@@ -270,6 +343,7 @@ private:
     Uint32 nextPipelineId = 1;
     Uint32 nextComputePipelineId = 1;
     Uint32 nextAccelStructId = 1;
+    Uint32 nextICBId = 1;
 
     std::unordered_map<Uint32, BufferResource> buffers;
     std::unordered_map<Uint32, TextureResource> textures;
@@ -278,6 +352,11 @@ private:
     std::unordered_map<Uint32, PipelineResource> pipelines;
     std::unordered_map<Uint32, ComputePipelineResource> computePipelines;
     std::unordered_map<Uint32, AccelStructResource> accelStructs;
+    std::unordered_map<Uint32, ICBResource> icbs;
+    // Keyed by the BufferHandle id returned from createTextureArgumentTable.
+    // The underlying MTL::Buffer is also registered in `buffers` under the same
+    // id, so the table binds through the normal setFragmentBuffer path.
+    std::unordered_map<Uint32, ArgumentTableResource> argumentTables;
 
     // Current binding state (invalid = nothing bound)
     PipelineHandle currentPipeline;

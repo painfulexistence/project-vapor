@@ -66,7 +66,7 @@ public:
     // Resource Registration (called during scene loading/staging)
     // ========================================================================
 
-    // Register a mesh and return its ID
+    // Register a mesh and return its ID.
     MeshId registerMesh(const std::vector<Vapor::VertexData>& vertices,
                         const std::vector<Uint32>& indices);
 
@@ -165,7 +165,7 @@ public:
     // Upload RGBA pixel data as the video texture sampled by rect lights marked
     // with useVideoTexture = true. Call once per frame after VideoPlayer::update().
     // TODO(RHI): implement via RHI texture upload once rect-light shading is ported.
-    void uploadRectLightVideoTexture(const uint8_t* /*rgba*/, uint32_t /*width*/, uint32_t /*height*/) {}
+    void uploadRectLightVideoTexture(const uint8_t* /*rgba*/, uint32_t /*width*/, uint32_t /*height*/) override {}
 
     // Manual flush (for controlling draw order)
     void flush2D() override;
@@ -294,6 +294,19 @@ public:
     void applyVignette(RenderTextureHandle target, float strength = 0.3f, float radius = 0.8f) override;
 
     // ========================================================================
+    // ECS Particle Integration API
+    // ========================================================================
+
+    uint32_t claimParticleSlots(uint32_t count) override;
+    void releaseParticleSlots(uint32_t slotBegin, uint32_t count) override;
+    void uploadParticles(uint32_t slotBegin,
+                         const std::vector<GPUParticleData>& particles) override;
+    void setParticleForceField(const ParticleForceField& field) override;
+    void setParticleSimPaused(bool paused) override { m_particleSimPaused = paused; }
+    void setParticleVisible(bool visible) override { particleVisible = visible; }
+    void setParticleDrawList(const std::vector<ParticleDrawPacket>& draws) override;
+
+    // ========================================================================
     // Texture Creation (for sprites/batch rendering)
     // ========================================================================
 
@@ -306,6 +319,20 @@ public:
     void updateTexture(TextureHandle handle, const std::shared_ptr<Vapor::Image>& img) override;
 
     // ========================================================================
+    // Volume Rendering API (EmberGen density grids)
+    // ========================================================================
+
+    // Upload a raw single-channel density grid (width*height*depth bytes,
+    // R8_UNORM, tightly packed, slice-major) as a 3D texture — the hook the
+    // EmberGen import PR will call with decoded voxel data.
+    TextureHandle createVolumeTexture(Uint32 width, Uint32 height, Uint32 depth,
+                                      const void* data, size_t size);
+    // Point the volume raymarch pass at a density grid with world-space AABB
+    // bounds. Pass an invalid handle to fall back to the procedural test grid.
+    void setVolumeDensity(TextureHandle density, const glm::vec3& boxMin,
+                          const glm::vec3& boxMax);
+
+    // ========================================================================
     // Getters
     // ========================================================================
 
@@ -316,6 +343,16 @@ public:
     Uint32 getCurrentInstanceCount() const { return currentInstanceCount; }
     Uint32 getCulledInstanceCount() const { return culledInstanceCount; }
 
+    // GPU-driven rendering: replace CPU frustum culling + per-object drawIndexed
+    // with a compute cull pass that fills an indirect-args buffer, consumed by
+    // per-object drawIndexedIndirect. Off by default; when off the existing CPU
+    // path is used unchanged.
+    void setGpuDrivenCulling(bool enabled) { gpuDrivenMode = enabled ? GpuDrivenMode::Indirect : GpuDrivenMode::Off; }
+    bool isGpuDrivenCulling() const { return gpuDrivenIndirect(); }
+
+    // Load an equirectangular HDR image as the IBL environment (see IBLSource).
+    void loadHDRI(const std::string& path) override;
+
 private:
     // ========================================================================
     // Internal Rendering Steps
@@ -324,6 +361,7 @@ private:
     void performCulling();
     void setupDefaultRenderGraph();
     void drawGpuTimingsImGui();
+    void drawCpuTimingsImGui();  // per-pass CPU (command-recording) time
     void drawRenderGraphImGui();
     void sortDrawables();
     void updateBuffers();
@@ -343,6 +381,12 @@ private:
     void normalResolvePass();
     void clusterBuildPass();
     void tileCullingPass();
+    void gpuCullPass();  // GPU-driven frustum (+ Hi-Z) cull -> gpuCullArgsBuffer
+    void prePassCullPass();  // frustum-only cull before the pre-pass -> prepassCullArgsBuffer
+    // Shared cull dispatch: writes one DrawCommand per instance into argsBuffer,
+    // optionally applying the Hi-Z occlusion test. gpuCullPass() and
+    // prePassCullPass() are thin wrappers (main = frustum+Hi-Z, pre = frustum only).
+    void runGpuCull(BufferHandle argsBuffer, bool enableOcclusion);
     void raytraceShadowPass();
     void raytraceAOPass();
     void mainRenderPass();
@@ -353,6 +397,7 @@ private:
     void skyAtmospherePass();
     void lightScatteringPass();
     void volumetricFogPass();
+    void volumeRaymarchPass();
     void velocityPass();
     void particlePass();
     void volumetricCloudPass();
@@ -362,6 +407,7 @@ private:
     // render interface; renderUI() draws the context at the end of the graph.
     void renderUI();
     void shadowPass();
+    void sscsPass();  // screen-space contact shadows (Vulkan fullscreen frag)
 
     // ========================================================================
     // Internal Helpers
@@ -434,19 +480,33 @@ private:
     Uint32 frameCounter = 0;  // for temporal jitter
     TextureHandle defaultBlackCubemapTex;   // IBL irradiance/prefilter default
     TextureHandle pssmShadowArrayTexture;   // 3-cascade depth array (Vulkan: set2 b6)
+    TextureHandle nearShadowMap;            // independent near-field depth map [near, pssmRTMaxDist] (Vulkan: set2 b9)
+    static constexpr Uint32 NEAR_SHADOW_MAP_SIZE = Vapor::kNearShadowMapSize;  // shared (irenderer.hpp)
     std::vector<Vapor::RectLight> rectLights;   // gathered from the scene
+    std::vector<Vapor::SpotLight> spotLights;   // gathered from the scene
+    BufferHandle spotLightBuffer;               // frame-slotted, maxSpotLights
 
     // ImGui texture previews (RT viewer / material thumbnails)
     void* getImGuiTextureID(TextureHandle handle);
     std::unordered_map<Uint32, void*> imguiTextureCache;  // Vulkan descriptor sets
     void drawGraphicsImGui();
 
-    // Last completed frame's numbers, shown in the Engine window
+    // Last completed frame's numbers, shown in the Engine window. The panel
+    // draws BETWEEN beginFrame (which clears the live per-frame light vectors)
+    // and draw() (which refills them), so it must read this snapshot — reading
+    // the live vectors there always shows 0.
     struct FrameStats {
         Uint32 totalDrawables = 0;
         Uint32 visibleDrawables = 0;
         Uint32 directionalLights = 0;
         Uint32 pointLights = 0;
+        Uint32 rectLights = 0;
+        Uint32 spotLights = 0;
+        // Main-pass geometry submissions this frame. The clearest "is MDI/GPU-
+        // driven actually engaged" signal: CPU/per-object issue ~one draw per
+        // object, MDI issues ~one drawIndexedIndirect per material.
+        Uint32 mainDrawCalls = 0;
+        const char* mainPath = "CPU";  // "CPU" | "Indirect" | "MDI" | "BindlessMDI"
     } lastFrameStats;
 
     // Tile-cull histogram cache for the "Light Culling Debug" panel. Refreshed
@@ -512,10 +572,15 @@ private:
     // named alias member (e.g. cameraUniformBuffer) at the current slot so
     // all bind/update sites stay unchanged.
     // ------------------------------------------------------------------------
-    static constexpr Uint32 kFrameSlots = 3;  // >= max frames in flight on any backend
+    // Slot count is not a renderer-side constant: it follows the backend's
+    // frames-in-flight (rhi->getMaxFramesInFlight()), the single source of truth
+    // for how far the CPU can run ahead of the GPU. One slot per in-flight frame
+    // is exactly the no-race minimum. Set once at init, before the first
+    // createFrameSlottedBuffer() call.
+    Uint32 frameSlotCount = 0;
     struct FrameSlottedBuffer {
         BufferHandle* alias;
-        BufferHandle slots[kFrameSlots];
+        std::vector<BufferHandle> slots;  // frameSlotCount entries
     };
     std::vector<FrameSlottedBuffer> frameSlottedBuffers;
     Uint32 frameSlotIndex = 0;
@@ -550,6 +615,7 @@ private:
     TextureHandle normalRT;
     TextureHandle shadowRT;
     TextureHandle aoRT;
+    TextureHandle sscsRT;   // screen-space contact shadow visibility (R8, min-composited onto the sun shadow)
     // Physically-based pyramid bloom (matches the Metal backend): brightness
     // extract -> progressive downsample chain -> tent-filter upsample chain that
     // accumulates back into pyramid[0] -> composited in PostProcess.
@@ -609,6 +675,27 @@ private:
     // Persistent fog tunables (ImGui-editable). volumetricFogPass() copies this
     // and overwrites the per-frame fields (invViewProj/camera/sun).
     FogRenderData fogSettings;
+    // Heterogeneous volume raymarch (EmberGen density grids; rendering only —
+    // import/parsing lives in a separate PR). One AABB volume per scene; a
+    // procedural 64^3 test grid stands in until setVolumeDensity() gets real
+    // data. Reuses tempColorRT ping-pong like fog.
+    PipelineHandle volumeRaymarchPipeline;
+    TextureHandle volumeDensityTexture;  // active 3D grid (may equal the test grid)
+    TextureHandle volumeTestTexture;     // owned procedural test grid
+    bool volumeRenderEnabled = false;    // default OFF until real data lands
+    VolumeRenderData volumeSettings;     // panel tunables (box/density/albedo/steps)
+    // The registry the ECS draw() last rendered with. renderToTexture needs it
+    // because the demo's meshes live on ECS entities, not the scene-node tree —
+    // the scene-only collectDrawables(scene) finds nothing there. The registry
+    // outlives frames (owned by the game), so the cached pointer stays valid.
+    entt::registry* lastDrawRegistry = nullptr;
+    // Render-to-texture scene view (renderToTexture): dedicated camera and
+    // instance buffers. The offscreen view encodes BEFORE the main draw, but
+    // host-visible buffer writes are last-write-wins across the whole frame's
+    // command stream — sharing cameraUniformBuffer/instanceDataBuffer meant
+    // the RTT draw executed with the MAIN view's data (or vice versa).
+    BufferHandle rttCameraBuffer;
+    BufferHandle rttInstanceBuffer;
     // Camera-motion velocity (motion vectors) — infrastructure for future TAA.
     PipelineHandle velocityPipeline;
     TextureHandle velocityRT;
@@ -634,16 +721,36 @@ private:
     bool cloudPrevViewProjValid = false;
     bool volumetricCloudsEnabled = false;  // default OFF (enable when verifying)
 
-    // GPU particle system (self-contained orbital demo).
-    static constexpr Uint32 MAX_PARTICLES = 8192;
+    // GPU particle system (self-contained orbital demo + ECS emitters).
+    static constexpr Uint32 MAX_PARTICLES = 3'000'000;
     ComputePipelineHandle particleForcePipeline;
     ComputePipelineHandle particleIntegratePipeline;
-    PipelineHandle particleRenderPipeline;     // instanced billboards
+    // Instanced billboard pipelines, one per ParticleBlendMode (Additive /
+    // AlphaBlend / Multiply) — per-material particle draws pick by packet.
+    static constexpr Uint32 PARTICLE_BLEND_COUNT = 3;
+    PipelineHandle particleRenderPipelines[PARTICLE_BLEND_COUNT];
     BufferHandle particleBuffer;
     BufferHandle particleSimParamsBuffer;
-    BufferHandle particleAttractorBuffer;
-    Uint32 particleCount = 0;
-    bool particleSystemEnabled = true;
+    BufferHandle particleAttractorBuffer;      // MAX_PARTICLE_ATTRACTORS elements
+    // Indirect draw args, MAX_PARTICLE_DRAWS × 16B (VkDrawIndirectCommand /
+    // MTLDrawPrimitivesIndirectArguments). CPU-written today; a GPU compact/cull
+    // pass can take over writing instanceCount without touching the draw loop.
+    BufferHandle particleDrawArgsBuffer;
+    Uint32 particleCount = 0;          // = high-water mark of claimed slots; 0 = no ECS emitters yet
+    bool particleVisible = true; // hide toggle — gates render only, sim keeps running
+    std::vector<ParticleDrawPacket> m_particleDrawList; // set each frame by ParticleRenderSystem
+
+    // ECS particle slot management (first-fit free list).
+    struct ParticleSlotRange { uint32_t begin = 0, count = 0; };
+    std::vector<ParticleSlotRange> m_particleSlotFreeList;
+    bool m_particleFreeListInitialized = false;
+    ParticleForceField m_forceField; // set each frame by ParticleForceFieldSystem
+    bool m_particleSimPaused = false;
+
+    // Free-list helpers
+    uint32_t allocParticleSlots(uint32_t count);
+    void freeParticleSlots(uint32_t slotBegin, uint32_t count);
+    void ensureParticleFreeList();
     PipelineHandle shadowPipeline;
     ShaderHandle vertexShader;
     ShaderHandle fragmentShader;
@@ -659,6 +766,8 @@ private:
     ShaderHandle lightScatteringShader;
     ShaderHandle volumetricFogShader;
     BufferHandle fogDataBuffer;
+    ShaderHandle volumeRaymarchShader;
+    BufferHandle volumeDataBuffer;
     ShaderHandle velocityShader;
     ShaderHandle particleForceShader;
     ShaderHandle particleIntegrateShader;
@@ -669,7 +778,7 @@ private:
     ShaderHandle cloudCompositeShader;
     ShaderHandle shadowVertexShader;
     ShaderHandle shadowFragmentShader;
-    static constexpr Uint32 SHADOW_MAP_SIZE = 2048;
+    static constexpr Uint32 SHADOW_MAP_SIZE = Vapor::kDirectionalShadowMapSize;  // shared (irenderer.hpp)
 
     // Compute pipelines
     ComputePipelineHandle buildClustersPipeline;
@@ -683,8 +792,23 @@ private:
     ComputePipelineHandle aoDenoisePipeline;
     ComputePipelineHandle stochasticPointShadowPipeline;
     ComputePipelineHandle pointShadowTemporalPipeline;
+    // GIBS screen-space denoise ("SVGF-lite"): temporal reprojection + 2x
+    // edge-aware a-trous over the GI gather output. The gather writes giRawRT,
+    // the chain produces the giResultTexture the PBR samples. Kills the visible
+    // surfel-disc seams and residual flicker the surfel-space EMA leaves behind.
+    ComputePipelineHandle giTemporalPipeline;
+    ComputePipelineHandle giDenoisePipeline;
+    TextureHandle giRawRT;              // gather output (pre-denoise)
+    TextureHandle giScratchRT;          // a-trous ping-pong
+    TextureHandle giHistoryChainRT[2];  // temporal history (RGB gi, A viewZ)
+    bool gibsDenoiseEnabled = true;
+    Uint32 giHistoryIndex = 0;
+    bool giHistoryValid = false;
+    glm::mat4 giPrevView{1.0f};         // AO owns `prevView`; GI keeps its own
+    bool giPrevViewValid = false;
     ShaderHandle rtShadowShader, rtAOShader, aoTemporalShader, aoDenoiseShader,
-                 pointShadowShader, pointShadowTemporalShader;
+                 pointShadowShader, pointShadowTemporalShader,
+                 giTemporalShader, giDenoiseShader;
     ShaderHandle prePassMetalVertexShader, prePassMetalFragmentShader;
 
     // Acceleration structures: one BLAS per registered mesh (index-aligned with
@@ -715,6 +839,10 @@ private:
     // Vulkan AO chain twins — fullscreen fragment passes (the RHI compute path
     // cannot sample depth on Vulkan; same pattern as Velocity/clouds).
     PipelineHandle vkSsaoPipeline;              // SSAO.frag -> aoRawRT (R16F)
+    PipelineHandle vkSscsPipeline;              // SSCS.frag -> sscsRT (Vulkan fullscreen contact shadow)
+    ShaderHandle   vkSscsShader;
+    ComputePipelineHandle sscsComputePipeline;  // 3d_sscs.metal -> sscsRT (Metal compute contact shadow)
+    ShaderHandle   sscsMetalShader;
     PipelineHandle vkAoTemporalPipeline;        // AOTemporal.frag -> history (RGBA16F)
     PipelineHandle vkAoDenoisePipelineRGBA;     // AODenoise.frag -> scratch (RGBA16F)
     PipelineHandle vkAoDenoisePipelineR16;      // AODenoise.frag -> aoRT (R16F)
@@ -722,7 +850,25 @@ private:
     BufferHandle aoTemporalDataBuffer;          // {mat4 prevView; uint historyValid}
     // PSSM: distance where RT near-field shadows hand over to the cascades
     // (native pssmRTMaxDist, panel-tunable 5..200).
-    float pssmRTMaxDist = 50.0f;
+    float pssmRTMaxDist = 12.0f;  // near shadow extent [near, this] (character scale); cascades beyond
+    Uint32 pssmPcfSampleCount = 16;  // PCF taps: 4/8/16/32 (honoured by both Metal and Vulkan shaders)
+    float  pssmCascadeBlendRange = 2.0f;  // cascade<->cascade blend width (view units)
+    bool   pssmDebugVisualize = false;    // tint cascades for debugging
+    // Independent near-field shadow map extent (view-space metres). The near map
+    // covers [near, nearShadowEnd]; cascades take over beyond it. 0 = disabled.
+    float nearShadowEnd = 8.0f;
+    // Screen-space contact shadows (min-composited onto the sun shadow term). Opt-in.
+    bool  sscsEnabled = false;
+    float sscsLength = 0.3f;      // view-space march distance (contact scale, metres)
+    float sscsThickness = 0.3f;   // occluder depth window
+    Uint32 sscsSteps = 12;
+    float sscsBias = 0.02f;       // view-space start offset (self-occlusion guard)
+    // Stochastic RT shadows for the analytic lights (point R / rect G / spot B
+    // channels). Metal RT only; noisy without a denoiser (ReSTIR is the planned
+    // fix). Default OFF: leaving it off makes Metal render point/rect/spot
+    // unshadowed — the same as the (RT-less) Vulkan path — so the two backends'
+    // output stays roughly aligned until the denoiser lands.
+    bool stochasticShadowsEnabled = false;
     // Stochastic point-shadow debug view (native pointShadowDebugMode):
     // 0 = visibility, 1 = tile light-count heatmap.
     Uint32 pointShadowDebugMode = 0;
@@ -736,6 +882,128 @@ private:
     // Vulkan tile culling twin (TileLightCull.comp) + its params buffer.
     ComputePipelineHandle vkTileCullPipeline;
     ShaderHandle vkTileCullShader;
+
+    // GPU-driven rendering (Vulkan): compute frustum cull -> per-object indirect
+    // draw. Off by default; toggle with setGpuDrivenCulling().
+    ComputePipelineHandle gpuCullPipeline;
+    ShaderHandle gpuCullShader;
+    BufferHandle gpuCullArgsBuffer;  // DrawCommand[MAX_INSTANCES], frame-slotted
+    // Frustum-only cull output for the GPU-driven pre-pass (Option A): runs
+    // before the pre-pass (Hi-Z not built yet), so the depth pass draws indirect
+    // instead of from the CPU-culled visibleDrawables. Same layout as
+    // gpuCullArgsBuffer; the main GpuCull still adds Hi-Z occlusion afterwards.
+    BufferHandle prepassCullArgsBuffer;
+    // Pre-pass goes fully GPU-driven (indirect, no CPU cull) when the MDI/Bindless
+    // instance layout is active — merged buffers + material ranges exist there.
+    // Runtime toggle so the CPU-cull pre-pass can be compared/restored.
+    bool gpuDrivenPrePass = true;
+
+    // GPU-driven geometry submission method (mutually exclusive — the same object
+    // can't go through both the vertex pipeline and mesh shaders):
+    //   Off      - CPU cull + drawIndexed (default; existing path untouched)
+    //   Indirect - compute cull (GpuCull.comp) -> per-object / MDI indirect draw
+    // Hi-Z occlusion (below) is orthogonal and applies to whichever mode is active.
+    enum class GpuDrivenMode { Off, Indirect, BindlessMDI };
+    GpuDrivenMode gpuDrivenMode = GpuDrivenMode::Off;
+    bool gpuDrivenActive()   const { return gpuDrivenMode != GpuDrivenMode::Off; }
+    // Indirect covers BOTH compute-cull modes: plain Indirect (per-object /
+    // per-material MDI draws) and BindlessMDI share the cull pass, Hi-Z, and
+    // the instance pipeline; they differ only in how the main pass submits.
+    bool gpuDrivenIndirect() const {
+        return gpuDrivenMode == GpuDrivenMode::Indirect ||
+               gpuDrivenMode == GpuDrivenMode::BindlessMDI;
+    }
+    bool gpuDrivenBindless() const { return gpuDrivenMode == GpuDrivenMode::BindlessMDI; }
+    // Whether this frame will use the merged-buffer MDI instance layout (plain
+    // MDI or Bindless MDI). Deterministic from mode + backend + caps (no prior-
+    // frame state), so render() can consult it BEFORE updateBuffers sets
+    // m_mdiInstanceLayout — used to gate CPU culling off for Option A's
+    // GPU-driven pre-pass. Kept in sync with the `mdi` local in collectDrawables.
+    bool mdiLayoutActive() const {
+        const bool bindless = gpuDrivenBindless() && capabilities.bindlessTextures &&
+            (backend == GraphicsBackend::Metal ? capabilities.indirectCommandBuffers
+                                               : capabilities.multiDrawIndirect);
+        return bindless ||
+               (gpuDrivenIndirect() && gpuDrivenMDI &&
+                ((backend == GraphicsBackend::Vulkan && capabilities.multiDrawIndirect) ||
+                 backend == GraphicsBackend::Metal));
+    }
+    // Whether the depth pre-pass runs fully GPU-driven this frame (so the CPU
+    // frustum cull is redundant and skipped): the indirect MDI pre-pass.
+    // Consulted in render() BEFORE updateBuffers, so it uses only mode/caps (no
+    // per-frame buffer state).
+    bool gpuDrivenPrePassActive() const {
+        return gpuDrivenPrePass && mdiLayoutActive();
+    }
+    // Hi-Z occlusion culling (requires a GPU-driven mode). A depth pyramid built
+    // from the PrePass depth; the cull compute rejects instances whose screen
+    // AABB is fully behind the recorded occluders. Off by default; the reduce
+    // pass and the cull's occlusion branch both no-op unless this is on.
+    bool gpuOcclusionCulling = false;
+    void setGpuOcclusionCulling(bool e) { gpuOcclusionCulling = e; }
+    bool isGpuOcclusionCulling() const { return gpuOcclusionCulling; }
+    TextureHandle hizTexture;         // R32F, full mip chain, max-depth pyramid
+    TextureHandle hizScratchTexture;  // staging for the single-texture build
+    Uint32 hizWidth = 0, hizHeight = 0, hizMipCount = 0;
+    PipelineHandle hizReducePipeline;
+    ShaderHandle hizReduceFS;  // Vulkan reuses the fullscreen VS; Metal is one file
+    void hizBuildPass();
+
+    // True single-call multi-draw indirect (Vulkan only): one vkCmdDrawIndexedIndirect
+    // per material batch over a merged scene vertex/index buffer, instead of one
+    // indirect draw per object. Metal keeps the per-object loop (single-call MDI
+    // there needs Indirect Command Buffers). Sub-option of the Indirect mode.
+    bool gpuDrivenMDI = false;
+    // Bindless MDI draw mode: the whole scene in ONE submission with material
+    // textures fetched bindlessly by materialID (no per-material CPU loop).
+    //   Metal:  the cull kernel encodes draws into a real
+    //           MTLIndirectCommandBuffer, replayed with one
+    //           executeCommandsInBuffer; materials come from an argument table
+    //           at fragment buffer 13.
+    //   Vulkan: one native vkCmdDrawIndexedIndirect over every instance (the
+    //           same cull-written args buffer as plain MDI); materials come
+    //           from a descriptor-indexed runtime array at set 3.
+    // Selected as its own GpuDrivenMode (mutually exclusive with plain MDI),
+    // gated on capabilities.bindlessTextures plus the per-backend submission
+    // cap (indirectCommandBuffers / multiDrawIndirect).
+    IndirectCommandBufferHandle sceneICB;      // Metal only: GPU-encoded commands
+    ComputePipelineHandle gpuCullICBPipeline;  // Metal only: ICB-encoding cull
+    ShaderHandle gpuCullICBShader;
+    PipelineHandle mainPipelineBindless;  // mainPipeline twin with the bindless fragment
+    ShaderHandle fragmentShaderBindless;  // Metal: kBindlessMaterials specialization;
+                                          // Vulkan: RHIMainBindless.frag.spv
+    BufferHandle bindlessMaterialTable;   // 6 texture slots per material (see RHI docs)
+    bool m_bindlessTableDirty = true;     // rewrite entries when materials/textures change
+    void ensureBindlessMaterialTable();
+    // Metal only: ICB-compatible pipelines reject DIRECT fragment texture
+    // arguments, so the bindless fragment takes the 10 per-frame system
+    // textures (Metal contract slots 6-15) through a second single-entry
+    // argument table at buffer(14). Entries are rewritten only when the
+    // resolved handle changes (cache below) — rewriting every frame would race
+    // in-flight replays of the shared table.
+    BufferHandle bindlessSystemTable;
+    TextureHandle m_bindlessSysCache[10];
+    // Note: the single Metal ICB is shared across frames in flight — Metal's
+    // automatic hazard tracking serializes the next frame's cull (write)
+    // against the previous frame's executeICB (read). Correct, at the cost of
+    // some overlap; per-frame ICB slots are a follow-up if timings say so.
+    // True while this frame's InstanceData carries MERGED-buffer vertex/index
+    // offsets (MDI layout, set in updateBuffers). Metal shaders that pull
+    // vertices via instances[iid].vertexOffset + vertex_id (pre-pass, shadow)
+    // must then read the MERGED vertex buffer, not the per-mesh one — the
+    // per-mesh buffers are far smaller than the offsets baked into the
+    // instances, so mixing them fetches garbage (full-screen depth corruption).
+    bool m_mdiInstanceLayout = false;
+    std::vector<Vapor::VertexData> m_mergedVertices;  // CPU accumulation (registerMesh)
+    std::vector<Uint32> m_mergedIndices;              // mesh-local indices; rebased via vertexOffset
+    BufferHandle mergedVertexBuffer;
+    BufferHandle mergedIndexBuffer;
+    bool m_mergedGeometryDirty = false;
+    // Per-material contiguous instance ranges in the material-sorted InstanceData
+    // buffer, from the last MDI updateBuffers(): {material, {firstSlot, count}}.
+    std::vector<std::pair<MaterialId, std::pair<Uint32, Uint32>>> m_materialRanges;
+    void ensureMergedGeometry();  // (re)build merged GPU buffers from CPU data
+
     BufferHandle lightCullDataBuffer;
     PipelineHandle sunFlarePipeline;
     ShaderHandle sunFlareVertexShader, sunFlareFragmentShader;
@@ -757,13 +1025,25 @@ private:
     static constexpr Uint32 PREFILTER_MIP_LEVELS = 5;
     void iblCapturePass();
 
+    // HDRI environment source (ported from the native Metal renderer). When set,
+    // iblCapturePass converts the equirect map into environmentCubemap (instead of
+    // the sky capture) and the rest of the IBL chain runs unchanged. The IBL chain
+    // is currently Metal-only on the RHI path, so HDRI IBL applies to Metal-via-RHI.
+    enum class IBLSource { Sky, HDRI };
+    IBLSource iblSource = IBLSource::Sky;
+    TextureHandle equirectHDRITexture;         // RGBA32F equirect source
+    PipelineHandle equirectToCubemapPipeline;
+    ShaderHandle equirectToCubemapVS, equirectToCubemapFS;
+
     // GIBS surfel GI (RequiresRaytracing; Metal MSL kernels via RHI compute).
     // GIBSData itself lives in graphics_gibs.hpp (included in renderer.cpp only
     // to keep this header clear of the split-header landmines).
-    ComputePipelineHandle surfelGenPipeline, surfelClearPipeline, surfelInsertPipeline,
-                          surfelRTPipeline, surfelTemporalPipeline, giSamplePipeline;
+    ComputePipelineHandle surfelGenPipeline, surfelUpdatePipeline, surfelClearPipeline,
+                          surfelInsertPipeline, surfelRTPipeline, surfelTemporalPipeline, giSamplePipeline;
     ShaderHandle gibsShaders[6];
-    BufferHandle surfelBuffer, cellHeadBuffer, surfelNextBuffer, surfelCounterBuffer, gibsDataBuffer;
+    ShaderHandle gibsUpdateShader;  // surfelUpdate entry (aging + free-list eviction)
+    BufferHandle surfelBuffer, cellHeadBuffer, surfelNextBuffer, surfelFreeListBuffer,
+                 surfelCounterBuffer, gibsDataBuffer;
     TextureHandle giResultTexture;
     glm::mat4 gibsPrevViewProj = glm::mat4(1.0f);
     Uint32 gibsActiveSurfels = 0;
@@ -948,6 +1228,7 @@ private:
     Uint32 maxDirectionalLights = 4;
     Uint32 maxPointLights = 1024;
     Uint32 maxRectLights = 32;
+    Uint32 maxSpotLights = 64;
 
     // Clustering configuration
     Uint32 clusterGridSizeX = 16;
@@ -972,6 +1253,7 @@ private:
     Uint32 drawCount = 0;
     Uint32 currentInstanceCount = 0;
     Uint32 culledInstanceCount = 0;
+    double m_cpuPreGraphMs = 0.0;  // CPU cost of cull + sort + buffer upload (per frame)
 };
 
 // The createRenderer() factory is declared in irenderer.hpp and returns a

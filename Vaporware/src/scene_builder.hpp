@@ -42,6 +42,7 @@ inline SceneResources buildScene(
 
     auto cube1 = registry.create();
     {
+        registry.emplace<Vapor::NameComponent>(cube1, Vapor::NameComponent{"Cube 1"});
         auto& transform = registry.emplace<Vapor::TransformComponent>(cube1);
         transform.position = glm::vec3(-2.0f, 0.5f, 0.0f);
         auto& col = registry.emplace<Vapor::BoxColliderComponent>(cube1);
@@ -78,6 +79,7 @@ inline SceneResources buildScene(
 
     auto cube2 = registry.create();
     {
+        registry.emplace<Vapor::NameComponent>(cube2, Vapor::NameComponent{"Cube 2 (Iridescent)"});
         auto& transform = registry.emplace<Vapor::TransformComponent>(cube2);
         transform.position = glm::vec3(2.0f, 0.5f, 0.0f);
         auto& col = registry.emplace<Vapor::BoxColliderComponent>(cube2);
@@ -95,6 +97,7 @@ inline SceneResources buildScene(
 
     auto floor = registry.create();
     {
+        registry.emplace<Vapor::NameComponent>(floor, Vapor::NameComponent{"Floor"});
         auto& transform = registry.emplace<Vapor::TransformComponent>(floor);
         transform.position = glm::vec3(0.0f, -0.5f, 0.0f);
         auto& col = registry.emplace<Vapor::BoxColliderComponent>(floor);
@@ -107,6 +110,7 @@ inline SceneResources buildScene(
 
     {
         auto sunLight = registry.create();
+        registry.emplace<Vapor::NameComponent>(sunLight, Vapor::NameComponent{"Sun Light"});
         auto& dl      = registry.emplace<DirectionalLightComponent>(sunLight);
         dl.direction  = glm::normalize(glm::vec3(0.5f, -1.0f, 0.0f));
         dl.color      = glm::vec3(1.0f, 1.0f, 1.0f);
@@ -122,6 +126,7 @@ inline SceneResources buildScene(
     // level so screen-space AO is visible (radius 0.5 made them near-invisible)
     for (int i = 0; i < 128; i++) {
         auto e         = registry.create();
+        registry.emplace<Vapor::NameComponent>(e, Vapor::NameComponent{fmt::format("Point Light {}", i)});
         auto& tc       = registry.emplace<Vapor::TransformComponent>(e);
         tc.position    = glm::vec3(
             rng.RandomFloatInRange(-10.0f, 10.0f),
@@ -163,8 +168,39 @@ inline SceneResources buildScene(
         }
     }
 
+    // RT-showcase lights: one spot (cone falloff + RT shadow via the stochastic
+    // pass's B channel) and one rect area light (RT-sampled soft penumbra via
+    // the G channel).
+    {
+        auto e      = registry.create();
+        registry.emplace<Vapor::NameComponent>(e, Vapor::NameComponent{"Spot Light"});
+        auto& tc    = registry.emplace<Vapor::TransformComponent>(e);
+        tc.position = glm::vec3(0.0f, 6.0f, 0.0f);
+        // Beam is the transform's -Z; rotate it to point straight down.
+        tc.rotation = glm::angleAxis(glm::radians(-90.0f), glm::vec3(1.0f, 0.0f, 0.0f));
+        tc.isDirty  = true;
+        auto& sl      = registry.emplace<SpotLightComponent>(e);
+        sl.color      = glm::vec3(1.0f, 0.95f, 0.8f);
+        sl.intensity  = 40.0f;
+        sl.radius     = 15.0f;
+        sl.innerAngle = 18.0f;
+        sl.outerAngle = 28.0f;
+    }
+    {
+        auto e      = registry.create();
+        registry.emplace<Vapor::NameComponent>(e, Vapor::NameComponent{"Rect Light"});
+        auto& tc    = registry.emplace<Vapor::TransformComponent>(e);
+        tc.position = glm::vec3(4.0f, 1.8f, -3.0f);  // vertical panel
+        tc.isDirty  = true;
+        auto& rl     = registry.emplace<Vapor::RectLightComponent>(e);
+        rl.size      = glm::vec2(2.0f, 3.0f);
+        rl.color     = glm::vec3(0.4f, 0.7f, 1.0f);
+        rl.intensity = 8.0f;
+    }
+
     auto flyCam = registry.create();
     {
+        registry.emplace<Vapor::NameComponent>(flyCam, Vapor::NameComponent{"Fly Camera"});
         auto& cam = registry.emplace<Vapor::VirtualCameraComponent>(flyCam);
         cam.isActive = true;
         cam.fov = glm::radians(60.0f);
@@ -179,6 +215,7 @@ inline SceneResources buildScene(
 
     auto followCam = registry.create();
     {
+        registry.emplace<Vapor::NameComponent>(followCam, Vapor::NameComponent{"Follow Camera"});
         auto& cam = registry.emplace<Vapor::VirtualCameraComponent>(followCam);
         cam.isActive = false;
         cam.aspect = (float)windowWidth / (float)windowHeight;
@@ -191,6 +228,7 @@ inline SceneResources buildScene(
 
     // --- UI navigator (singleton entity: owns PageID→entity map + menu stack) ---
     auto navEntity = registry.create();
+    registry.emplace<Vapor::NameComponent>(navEntity, Vapor::NameComponent{"UI Navigator"});
     registry.emplace<PersistentTag>(navEntity);
     auto& nav = registry.emplace<UINavigatorComponent>(navEntity);
 
@@ -259,7 +297,73 @@ inline SceneResources buildScene(
     }
     registry.emplace<SceneTransitionComponent>(navEntity);
 
+    // ── Particle sea ──────────────────────────────────────────────────────────
+    // Two attractors create a dual-focus gravitational field; curl noise turbulence
+    // (set in main) causes the stream to swirl rather than collapse to a point.
+    {
+        auto e = registry.create();
+        registry.emplace<Vapor::NameComponent>(e, Vapor::NameComponent{"Particle Attractor A"});
+        auto& tc = registry.emplace<Vapor::TransformComponent>(e);
+        tc.position = glm::vec3(0.0f, 3.0f, 0.0f);
+        auto& attr = registry.emplace<Vapor::ParticleAttractorComponent>(e);
+        attr.strength = 40.0f;
+    }
+    {
+        auto e = registry.create();
+        registry.emplace<Vapor::NameComponent>(e, Vapor::NameComponent{"Particle Attractor B"});
+        auto& tc = registry.emplace<Vapor::TransformComponent>(e);
+        tc.position = glm::vec3(6.0f, 1.0f, -4.0f);
+        auto& attr = registry.emplace<Vapor::ParticleAttractorComponent>(e);
+        attr.strength = 18.0f;
+    }
+    {
+        auto e = registry.create();
+        registry.emplace<Vapor::NameComponent>(e, Vapor::NameComponent{"Wind Field"});
+        auto& wf = registry.emplace<Vapor::WindFieldComponent>(e);
+        wf.direction  = glm::normalize(glm::vec3(1.0f, 0.1f, 0.4f));
+        wf.strength   = 0.6f;
+        wf.turbulence = 2.0f;
+    }
+    // Two immortal one-shot bursts, both additive — distinguished only by launch
+    // speed and sprite size: A is small + fast (fine bright spray), B is 2× the
+    // size + half the launch speed (slow, fat embers).
+    {
+        auto e = registry.create();
+        registry.emplace<Vapor::NameComponent>(e, Vapor::NameComponent{"Particle Sea Emitter A"});
+        auto& tc = registry.emplace<Vapor::TransformComponent>(e);
+        tc.position = glm::vec3(0.0f, 5.0f, 0.0f);
+        auto& em = registry.emplace<Vapor::ParticleEmitterComponent>(e);
+        em.maxParticles     = 70'000;
+        em.oneShot          = true;
+        em.particleLifetime = -1.0f; // immortal
+        em.speed            = 6.0f;
+        em.spread           = 3.14159265f; // full sphere
+        em.emitDirection    = glm::vec3(0.0f, 1.0f, 0.0f);
+        em.color            = glm::vec4(0.45f, 0.55f, 1.0f, 1.0f); // indigo-blue
+        auto& pr = registry.emplace<Vapor::ParticleRendererComponent>(e);
+        pr.blendMode = Vapor::ParticleBlendMode::Additive; // glow
+        pr.size      = 0.05f;                              // small (fine spray)
+    }
+    {
+        auto e = registry.create();
+        registry.emplace<Vapor::NameComponent>(e, Vapor::NameComponent{"Particle Sea Emitter B"});
+        auto& tc = registry.emplace<Vapor::TransformComponent>(e);
+        tc.position = glm::vec3(3.0f, 4.0f, -2.0f);
+        auto& em = registry.emplace<Vapor::ParticleEmitterComponent>(e);
+        em.maxParticles     = 30'000;
+        em.oneShot          = true;
+        em.particleLifetime = -1.0f; // immortal
+        em.speed            = 3.0f;  // half of A's launch speed
+        em.spread           = 3.14159265f; // full sphere
+        em.emitDirection    = glm::vec3(0.0f, 1.0f, 0.0f);
+        em.color            = glm::vec4(1.0f, 0.55f, 0.35f, 1.0f); // warm amber
+        auto& pr = registry.emplace<Vapor::ParticleRendererComponent>(e);
+        pr.blendMode = Vapor::ParticleBlendMode::Additive; // same blend as A
+        pr.size      = 0.1f;                               // 2× A's size
+    }
+
     res.global = registry.create();
+    registry.emplace<Vapor::NameComponent>(res.global, Vapor::NameComponent{"Scene Global"});
 
     return res;
 }

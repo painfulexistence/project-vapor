@@ -301,19 +301,37 @@ fragment float4 volumetricFogFragment(
 // Simplified Single-Pass Fog (Alternative for lower-end hardware)
 // ============================================================================
 
+// True volumetric raymarch (replaces the old single-sample analytic height
+// fog): 32 steps along the view ray, per-step in-scattering from the FULL
+// light set — sun with a PSSM cascade tap per step (real volumetric light
+// shafts), the pixel's tile-culled point-light list, spot cones, and rect
+// area lights (center-point x area approximation) — with Henyey-Greenstein
+// phase and Beer-Lambert transmittance. Density keeps the exponential height
+// profile, so the same panel knobs steer it (the brightness response differs
+// from the old analytic curve; expect a light retune).
 fragment float4 simpleFogFragment(
     VertexOut in [[stage_in]],
     texture2d<float, access::sample> sceneColor [[texture(0)]],
     texture2d<float, access::sample> sceneDepth [[texture(1)]],
+    depth2d_array<float, access::sample> pssmShadowMaps [[texture(2)]],
     constant VolumetricFogData& data [[buffer(0)]],
-    constant CameraData& camera [[buffer(1)]]
+    constant CameraData& camera [[buffer(1)]],
+    constant PSSMData& pssmData [[buffer(2)]],
+    const device PointLight* pointLights [[buffer(3)]],
+    const device Cluster* clusters [[buffer(4)]],
+    const device SpotLight* spotLights [[buffer(5)]],
+    const device RectLight* rectLights [[buffer(6)]],
+    constant uint4& fogLightParams [[buffer(7)]]  // x=gridX y=gridY z=spotCount w=rectCount
 ) {
     constexpr sampler linearSampler(filter::linear, address::clamp_to_edge);
+    constexpr sampler shadowCmpSampler(filter::linear, compare_func::less_equal,
+                                       address::clamp_to_edge);
 
     float4 color = sceneColor.sample(linearSampler, in.uv);
     float depth = sceneDepth.sample(linearSampler, in.uv).r;
 
-    // Skip sky pixels (no fog at infinity)
+    // Skip sky pixels (matches the old behavior; fogging the sky needs a
+    // far-plane march and its own tuning — a follow-up).
     if (depth >= 0.9999) {
         return color;
     }
@@ -325,26 +343,111 @@ fragment float4 simpleFogFragment(
     float4 worldPos4 = data.invViewProj * clipPos;
     float3 worldPos = worldPos4.xyz / worldPos4.w;
 
-    // Calculate fog
     float3 rayDir = normalize(worldPos - data.cameraPosition);
-    float distance = length(worldPos - data.cameraPosition);
-    float height = worldPos.y;
+    float marchDist = length(worldPos - data.cameraPosition);
 
-    // Height-based exponential fog
-    float fogAmount = exponentialHeightFog(distance, height, data.fogDensity, data.fogHeightFalloff);
+    // Per-pixel tile light list (2D grid, y-up — the PBR reader convention).
+    uint tileX = min(uint(in.uv.x * float(fogLightParams.x)), fogLightParams.x - 1);
+    uint tileY = min(uint((1.0 - in.uv.y) * float(fogLightParams.y)), fogLightParams.y - 1);
+    const device Cluster& tile = clusters[tileX + tileY * fogLightParams.x];
+    uint tileLights = min(tile.lightCount, 16u);  // fog cost cap
 
-    // Clamp fog amount to reasonable range
-    fogAmount = saturate(fogAmount);
+    const int STEPS = 32;
+    float stepLen = marchDist / float(STEPS);
+    float sunPhase = phaseHenyeyGreenstein(dot(rayDir, data.sunDirection), data.anisotropy);
 
-    // Phase function for sun (forward scattering effect)
-    float cosTheta = dot(rayDir, data.sunDirection);
-    float phase = phaseHenyeyGreenstein(cosTheta, data.anisotropy);
+    float3 scatter = float3(0.0);
+    float trans = 1.0;
+    for (int st = 0; st < STEPS; st++) {
+        float t = (float(st) + 0.5) * stepLen;
+        float3 p = data.cameraPosition + rayDir * t;
+        float dens = data.fogDensity
+                   * exp(-max(0.0, p.y) * max(data.fogHeightFalloff, 0.0001));
+        if (dens < 1e-6) continue;
 
-    // Fog color (sun contribution + ambient)
-    float3 fogColor = data.sunColor * data.sunIntensity * phase * 0.1 + float3(0.5, 0.6, 0.7) * data.ambientIntensity;
+        float3 L = float3(0.0);
 
-    // Apply fog
-    float3 result = mix(color.rgb, fogColor, fogAmount);
+        // Sun with volumetric PSSM shadow (1 tap per step -> light shafts).
+        // Cascade selection mirrors the PBR shader; positions outside every
+        // cascade count as lit.
+        {
+            float viewDepth = abs((camera.view * float4(p, 1.0)).z);
+            int ci = 0;
+            if      (viewDepth > pssmData.cascadeSplits.z) ci = 2;
+            else if (viewDepth > pssmData.cascadeSplits.y) ci = 1;
+            float4 lsPos = pssmData.lightSpaceMatrices[ci] * float4(p, 1.0);
+            float3 proj = lsPos.xyz / lsPos.w;
+            float2 sUV = float2(proj.x * 0.5 + 0.5, 0.5 - proj.y * 0.5);
+            float sunVis = 1.0;
+            if (all(sUV >= 0.0) && all(sUV <= 1.0) && proj.z <= 1.0) {
+                sunVis = pssmShadowMaps.sample_compare(shadowCmpSampler, sUV, ci,
+                                                       proj.z - 0.002);
+            }
+            L += data.sunColor * data.sunIntensity * sunPhase * sunVis;
+        }
 
+        // Tile-culled point lights (same falloff as the surface shading).
+        for (uint i = 0; i < tileLights; i++) {
+            PointLight pl = pointLights[tile.lightIndices[i]];
+            float3 toL = pl.position - p;
+            float d2 = max(dot(toL, toL), 1e-4);
+            float d = sqrt(d2);
+            if (d >= pl.radius) continue;
+            float atten = (1.0 - smoothstep(pl.radius * 0.8, pl.radius, d)) / d2;
+            float phase = phaseHenyeyGreenstein(dot(rayDir, toL / d), data.anisotropy);
+            L += pl.color * pl.intensity * atten * phase;
+        }
+
+        // Spot cones (loop-all; scenes carry a handful).
+        for (uint i = 0; i < fogLightParams.z; i++) {
+            SpotLight sl = spotLights[i];
+            float3 toL = sl.position - p;
+            float d2 = max(dot(toL, toL), 1e-4);
+            float d = sqrt(d2);
+            if (d >= sl.radius) continue;
+            float3 ldir = toL / d;
+            float cone = clamp((dot(-ldir, sl.direction) - sl.cosOuter)
+                                   / max(sl.cosInner - sl.cosOuter, 1e-4), 0.0, 1.0);
+            if (cone <= 0.0) continue;
+            float atten = (1.0 - smoothstep(sl.radius * 0.8, sl.radius, d)) / d2
+                        * cone * cone;
+            float phase = phaseHenyeyGreenstein(dot(rayDir, ldir), data.anisotropy);
+            L += sl.color * sl.intensity * atten * phase;
+        }
+
+        // Rect area lights: attenuate from the CLOSEST point on the quad, so
+        // the scattering hugs the rectangle's extent (a rounded slab near the
+        // panel) instead of a spherical center-point glow. Far away the clamp
+        // collapses to the center and it degenerates to a point light, as it
+        // should. Two-sided (fog is a coarse scattering approximation, so no
+        // front-face cull). (packed_float3 fields hoisted before math.)
+        for (uint i = 0; i < fogLightParams.w; i++) {
+            RectLight rl = rectLights[i];
+            float3 lp = float3(rl.position);
+            float3 lr = float3(rl.right);
+            float3 lu = float3(rl.up);
+            float3 rel = p - lp;
+            float pu = clamp(dot(rel, lr), -rl.halfWidth,  rl.halfWidth);
+            float pv = clamp(dot(rel, lu), -rl.halfHeight, rl.halfHeight);
+            float3 closest = lp + lr * pu + lu * pv;
+            float area = 4.0 * rl.halfWidth * rl.halfHeight;
+            float range = 8.0 * max(rl.halfWidth, rl.halfHeight);
+            float3 toL = closest - p;
+            float d2 = max(dot(toL, toL), 1e-4);
+            float d = sqrt(d2);
+            if (d >= range) continue;
+            float atten = (1.0 - smoothstep(range * 0.8, range, d)) / d2 * area;
+            float phase = phaseHenyeyGreenstein(dot(rayDir, toL / d), data.anisotropy);
+            L += float3(rl.color) * rl.intensity * atten * phase;
+        }
+
+        // Ambient floor so fog reads even away from direct light.
+        L += float3(0.5, 0.6, 0.7) * data.ambientIntensity;
+
+        scatter += trans * L * dens * stepLen;
+        trans *= exp(-dens * stepLen);
+    }
+
+    float3 result = color.rgb * trans + scatter;
     return float4(result, color.a);
 }

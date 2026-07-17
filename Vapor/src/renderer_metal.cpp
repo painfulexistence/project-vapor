@@ -1,3 +1,4 @@
+#include <algorithm>
 #include <memory>
 #define NS_PRIVATE_IMPLEMENTATION
 #define MTL_PRIVATE_IMPLEMENTATION
@@ -345,6 +346,43 @@ public:
     }
 };
 
+// Screen-space contact shadows: march the depth buffer toward the sun and write
+// a visibility RT the PBR pass min-composites onto the directional shadow. Adds
+// the fine near contact the RT/PSSM shadow misses (parity with the Vulkan path).
+class SSCSPass : public MetalRenderPass {
+public:
+    explicit SSCSPass(Renderer_Metal* renderer) : MetalRenderPass(renderer) {}
+    auto getName() const -> const char* override { return "SSCSPass"; }
+
+    void execute() override {
+        auto& r = *renderer;
+        if (!r.sscsEnabled || !r.sscsPipeline || !r.sscsRT || !r.depthStencilRT) return;
+
+        auto w = r.sscsRT->width();
+        auto h = r.sscsRT->height();
+        glm::vec2 screenSize = glm::vec2(w, h);
+        struct SSCSParams { float rayLength; float thickness; uint32_t stepCount; float bias; } params;
+        params.rayLength = r.sscsLength;
+        params.thickness = r.sscsThickness;
+        params.stepCount = r.sscsSteps;
+        params.bias      = r.sscsBias;
+
+        auto timedComputeDesc = makeTimedComputeDesc(true, true);
+        auto encoder = r.currentCommandBuffer->computeCommandEncoder(timedComputeDesc.get());
+        encoder->setComputePipelineState(r.sscsPipeline.get());
+        encoder->setTexture(r.depthStencilRT.get(), 0);
+        encoder->setTexture(r.sscsRT.get(), 1);
+        encoder->setBuffer(r.cameraDataBuffers[r.currentFrameInFlight].get(), 0, 0);
+        encoder->setBuffer(r.directionalLightBuffer.get(), 0, 1);
+        encoder->setBytes(&screenSize, sizeof(glm::vec2), 2);
+        encoder->setBytes(&params, sizeof(params), 3);
+        encoder->dispatchThreadgroups(MTL::Size((w + 7) / 8, (h + 7) / 8, 1), MTL::Size(8, 8, 1));
+        encoder->endEncoding();
+
+        addTrafficEstimate(uint64_t(w) * h * (4 + 1));
+    }
+};
+
 // PSSM shadow pass: renders scene depth into a 3-slice texture array for cascades 1-3
 class PSSMShadowPass : public MetalRenderPass {
 public:
@@ -364,7 +402,7 @@ public:
         const float nearClip  = r.currentCamera->near();
         const float farClip   = r.currentCamera->far();
         const float rtEnd     = r.m_supportsRaytracing ? r.pssmRTMaxDist : nearClip;
-        const float blendRange = (farClip - rtEnd) * 0.05f; // 5% of remaining range
+        const float blendRange = (farClip - rtEnd) * r.pssmRTBlendScale; // fraction of remaining range
 
         // ----- Cascade split depths (practical split: blend of log + uniform) -----
         // splits[0] = rtEnd, splits[1..3] = cascade ends, splits[3] = farClip
@@ -404,13 +442,18 @@ public:
         struct PSSMGPUData {
             glm::mat4 lightSpaceMatrices[3];
             glm::vec4 cascadeSplits;
-            float blendRange;
-            float _pad[3];
+            float blendRange;          // RT↔PSSM blend range
+            float cascadeBlendRange;   // cascade↔cascade blend range
+            uint32_t pcfSampleCount;   // 4, 8, 16, or 32
+            uint32_t debugVisualize;   // 0 = off, 1 = visualize cascades
         };
 
         PSSMGPUData gpuData{};
         gpuData.cascadeSplits = glm::vec4(splits[0], splits[1], splits[2], splits[3]);
-        gpuData.blendRange    = blendRange;
+        gpuData.blendRange         = blendRange;
+        gpuData.cascadeBlendRange  = r.pssmCascadeBlendRange;
+        gpuData.pcfSampleCount     = r.pssmPcfSampleCount;
+        gpuData.debugVisualize     = r.pssmDebugVisualize ? 1 : 0;
 
         // Convert a forward view-space distance to NDC z by projecting an actual
         // view-space point. Handedness-aware: RH projections (glm default; the
@@ -450,20 +493,27 @@ public:
             float sphereRadius = 0.0f;
             for (auto& c : corners)
                 sphereRadius = glm::max(sphereRadius, glm::length(c - sphereCenter));
+            // Quantize the radius so texelSize doesn't jitter from per-frame float noise
+            sphereRadius = std::ceil(sphereRadius * 16.0f) / 16.0f;
+
+            // Snap the cascade center to the shadow-map texel grid so the map
+            // translates in whole texels as the camera moves (stops edge
+            // crawling/swimming). The snap MUST happen in a world-anchored,
+            // rotation-only light frame: the previous code snapped
+            // lightView * sphereCenter, but that view looks AT sphereCenter, so
+            // the product is always (0, 0, -lightDist) and the snap was a no-op.
+            const glm::mat4 lightRot = glm::lookAt(glm::vec3(0.0f), lightDir, up);
+            const float texelSize = (2.0f * sphereRadius) / float(r.PSSM_SHADOW_MAP_SIZE);
+            glm::vec3 lsC = glm::vec3(lightRot * glm::vec4(sphereCenter, 1.0f));
+            lsC.x = std::floor(lsC.x / texelSize) * texelSize;
+            lsC.y = std::floor(lsC.y / texelSize) * texelSize;
+            const glm::vec3 snappedCenter = glm::vec3(glm::inverse(lightRot) * glm::vec4(lsC, 1.0f));
 
             // Light view: eye pulled back far enough that the whole bounding
             // sphere sits in front of it (RH lookAt: forward is -z, so points in
             // front have negative view z; distance from eye = -z).
             const float lightDist = sphereRadius * 2.0f + 1.0f;
-            glm::mat4 lightView = glm::lookAt(sphereCenter - lightDir * lightDist, sphereCenter, up);
-
-            // Snap sphere center to texel grid in light space to stop shimmering
-            float texelSize = (2.0f * sphereRadius) / float(r.PSSM_SHADOW_MAP_SIZE);
-            glm::vec4 lsCenter = lightView * glm::vec4(sphereCenter, 1.0f);
-            lsCenter.x = std::floor(lsCenter.x / texelSize) * texelSize;
-            lsCenter.y = std::floor(lsCenter.y / texelSize) * texelSize;
-            glm::vec3 snappedCenter = glm::vec3(glm::inverse(lightView) * lsCenter);
-            lightView = glm::lookAt(snappedCenter - lightDir * lightDist, snappedCenter, up);
+            glm::mat4 lightView = glm::lookAt(snappedCenter - lightDir * lightDist, snappedCenter, up);
 
             // Depth extents as positive distances in front of the light eye
             float minDist = 1e38f, maxDist = -1e38f;
@@ -476,7 +526,13 @@ public:
             // (a negative near just extends the ortho volume behind the eye — valid).
             minDist -= (maxDist - minDist);
 
-            glm::mat4 lightProj = glm::ortho(
+            // orthoZO (not plain ortho): the camera uses perspectiveZO and Metal's
+            // depth buffer is [0,1], but glm::ortho here follows the GL [-1,1]
+            // convention unless GLM_FORCE_DEPTH_ZERO_TO_ONE took effect — which is
+            // unreliable in this TU (its sibling GLM_FORCE_LEFT_HANDED did not).
+            // Match the Vulkan path explicitly. RH (LEFT_HANDED inert) pairs with
+            // the RH lightView above.
+            glm::mat4 lightProj = glm::orthoZO(
                 -sphereRadius,  sphereRadius,
                 -sphereRadius,  sphereRadius,
                 minDist, maxDist
@@ -594,6 +650,14 @@ public:
         encoder->setBytes(&fi, sizeof(uint32_t), 5);
         encoder->setAccelerationStructure(r.TLASBuffers[r.currentFrameInFlight].get(), 6);
         encoder->setBytes(&r.pointShadowDebugMode, sizeof(uint32_t), 7);
+        // The shared kernel now takes spot/rect shadow inputs at 8-10. Native
+        // has no spot lights and keeps R16F targets, so bind placeholders with
+        // zero counts — the kernel then leaves the extra channels at 1.0 and
+        // this path stays byte-for-byte.
+        encoder->setBuffer(r.pointLightBuffer.get(), 0, 8);   // placeholder (unread)
+        encoder->setBuffer(r.rectLightBuffer.get(), 0, 9);
+        glm::uvec2 extraCounts(0u, 0u);
+        encoder->setBytes(&extraCounts, sizeof(glm::uvec2), 10);
         encoder->dispatchThreadgroups(
             MTL::Size((uint32_t(screenSize.x) + 7) / 8, (uint32_t(screenSize.y) + 7) / 8, 1),
             MTL::Size(8, 8, 1)
@@ -1158,6 +1222,8 @@ public:
                 r.getTexture(material->emissiveMap ? material->emissiveMap->texture : r.defaultEmissiveTexture).get(), 5
             );
             encoder->setFragmentTexture(r.shadowRT.get(), 7);
+            // White (=lit) when SSCS is off, so the shader's min() is a no-op.
+            encoder->setFragmentTexture(r.sscsEnabled ? r.sscsRT.get() : r.batch2DWhiteTexture.get(), 15);
 
             // IBL textures
             encoder->setFragmentTexture(r.irradianceMap.get(), 8);
@@ -1177,6 +1243,12 @@ public:
             // Perf-isolation flags at buffer(12) — the shared PBR shader now
             // reads this slot, so it MUST be bound or the reference is UB.
             encoder->setFragmentBytes(&r.mainDebugFlags, sizeof(uint32_t), 12);
+            // Spot lights are an RHI-path feature: bind a placeholder buffer
+            // (count 0 -> the loop never dereferences it) and shadowFlags 0
+            // (legacy R16F shadow target: rect/spot channels unavailable).
+            encoder->setFragmentBuffer(r.pointLightBuffer.get(), 0, 14);
+            glm::uvec2 spotRectParams(0u, 0u);
+            encoder->setFragmentBytes(&spotRectParams, sizeof(spotRectParams), 15);
 
             for (const auto& draw : draws) {
                 if (!r.currentCamera->isVisible(r.instances[draw.instanceIndex].boundingSphere)) {
@@ -1303,59 +1375,42 @@ public:
     void execute() override {
         auto& r = *renderer;
 
-        // Skip if particle system is disabled or pipelines aren't ready
-        if (!r.particleSystemEnabled || r.particleCount == 0) {
+        if (r.particleCount == 0) {
             return;
         }
         if (!r.particleForcePipeline || !r.particleIntegratePipeline || !r.particleRenderPipeline) {
             return;
         }
 
-        auto time = (float)SDL_GetTicks() / 1000.0f;
-        float deltaTime = 1.0f / 60.0f;// Use fixed timestep to avoid issues
+        // ── Simulate ────────────────────────────────────────────────────────
+        // Pause: skip the sim (deltaTime=0 would be a no-op) and leave state frozen.
+        if (!r.m_particleSimPaused) {
+            auto time = (float)SDL_GetTicks() / 1000.0f;
 
-        // Compute attractor position (in front of camera)
-        glm::vec3 camPos = r.currentCamera->getEye();
-        glm::mat4 view = r.currentCamera->getViewMatrix();
-        glm::vec3 forward = -glm::vec3(view[0][2], view[1][2], view[2][2]);
-        glm::vec3 attractorPos = camPos + forward * 3.0f;
+            // Update simulation params buffer using the canonical render_data.hpp struct.
+            ParticleSimParams simParams;
+            auto drawableSize = r.swapchain->drawableSize();
+            simParams.resolution = glm::vec2(drawableSize.width, drawableSize.height);
+            simParams.mousePosition = glm::vec2(0.0f);
+            simParams.time = time;
+            simParams.deltaTime = 1.0f / 60.0f;
+            simParams.particleCount = r.particleCount;
+            simParams.wind      = r.m_forceField.wind;
+            simParams.turbulence = glm::vec4(0.0f, 0.0f, 0.0f, r.m_forceField.turbulence);
 
-        // Update simulation params buffer
-        struct ParticleSimParams {
-            glm::vec2 resolution;
-            glm::vec2 mousePosition;
-            float time;
-            float deltaTime;
-            Uint32 particleCount;
-            float _pad1;
-        } simParams;
+            const auto& attractors = r.m_forceField.attractors;
+            simParams.attractorCount = static_cast<Uint32>(attractors.size());
 
-        auto drawableSize = r.swapchain->drawableSize();
-        simParams.resolution = glm::vec2(drawableSize.width, drawableSize.height);
-        simParams.mousePosition = glm::vec2(0.0f);
-        simParams.time = time;
-        simParams.deltaTime = deltaTime;
-        simParams.particleCount = r.particleCount;
+            memcpy(r.particleSimParamsBuffers[r.currentFrameInFlight]->contents(), &simParams, sizeof(ParticleSimParams));
+            r.particleSimParamsBuffers[r.currentFrameInFlight]->didModifyRange(NS::Range::Make(0, sizeof(ParticleSimParams)));
 
-        memcpy(r.particleSimParamsBuffers[r.currentFrameInFlight]->contents(), &simParams, sizeof(ParticleSimParams));
-        r.particleSimParamsBuffers[r.currentFrameInFlight]->didModifyRange(NS::Range::Make(0, sizeof(ParticleSimParams))
-        );
+            if (!attractors.empty()) {
+                const size_t attractorBytes = attractors.size() * sizeof(ParticleAttractor);
+                memcpy(r.particleAttractorBuffers[r.currentFrameInFlight]->contents(), attractors.data(), attractorBytes);
+                r.particleAttractorBuffers[r.currentFrameInFlight]->didModifyRange(NS::Range::Make(0, attractorBytes));
+            }
 
-        // Update attractor buffer
-        struct ParticleAttractor {
-            glm::vec3 position;
-            float strength;
-        } attractor;
-
-        attractor.position = attractorPos;
-        attractor.strength = 50.0f;// Increased strength
-
-        memcpy(r.particleAttractorBuffers[r.currentFrameInFlight]->contents(), &attractor, sizeof(ParticleAttractor));
-        r.particleAttractorBuffers[r.currentFrameInFlight]->didModifyRange(NS::Range::Make(0, sizeof(ParticleAttractor))
-        );
-
-        // Compute passes (single particle buffer - persistent state)
-        {
+            // Compute passes (single particle buffer - persistent state)
             auto timedComputeDesc = makeTimedComputeDesc(true, false);
             auto computeEncoder = r.currentCommandBuffer->computeCommandEncoder(timedComputeDesc.get());
 
@@ -1377,6 +1432,10 @@ public:
 
             computeEncoder->endEncoding();
         }
+
+        // ── Render ──────────────────────────────────────────────────────────
+        // Hide: skip drawing but keep simulating, so unhiding is seamless.
+        if (!r.particleVisible) return;
 
         // Render pass: Draw particles
         {
@@ -1575,6 +1634,19 @@ public:
         encoder->setFragmentTexture(r.depthStencilRT.get(), 1);
         encoder->setFragmentBuffer(r.volumetricFogDataBuffers[r.currentFrameInFlight].get(), 0, 0);
         encoder->setFragmentBuffer(r.cameraDataBuffers[r.currentFrameInFlight].get(), 0, 1);
+        // Volumetric raymarch inputs (shared shader contract): PSSM cascades
+        // for sun shafts + the light set. Native has no spot lights — bind a
+        // placeholder with count 0.
+        encoder->setFragmentTexture(r.pssmShadowMaps.get(), 2);
+        encoder->setFragmentBuffer(r.pssmDataBuffers[r.currentFrameInFlight].get(), 0, 2);
+        encoder->setFragmentBuffer(r.pointLightBuffer.get(), 0, 3);
+        encoder->setFragmentBuffer(r.clusterBuffers[r.currentFrameInFlight].get(), 0, 4);
+        encoder->setFragmentBuffer(r.pointLightBuffer.get(), 0, 5);  // spot placeholder (count 0)
+        encoder->setFragmentBuffer(r.rectLightBuffer.get(), 0, 6);
+        uint32_t fogRectCount = r.currentScene
+            ? static_cast<uint32_t>(r.currentScene->rectLights.size()) : 0u;
+        glm::uvec4 fogLightParams(r.clusterGridSizeX, r.clusterGridSizeY, 0u, fogRectCount);
+        encoder->setFragmentBytes(&fogLightParams, sizeof(fogLightParams), 7);
         encoder->drawPrimitives(MTL::PrimitiveType::PrimitiveTypeTriangle, 0, 3, 1);
         encoder->endEncoding();
 
@@ -2958,6 +3030,7 @@ auto Renderer_Metal::init(SDL_Window* window) -> void {
     graph.addPass(std::make_unique<PSSMShadowPass>(this));
     graph.addPass(std::make_unique<PSSMResolvePass>(this));
     if (m_supportsRaytracing) graph.addPass(std::make_unique<RaytraceShadowPass>(this));
+    graph.addPass(std::make_unique<SSCSPass>(this));  // contact shadows (no RT needed)
     if (m_supportsRaytracing) graph.addPass(std::make_unique<RaytraceAOPass>(this));
     if (m_supportsRaytracing) graph.addPass(std::make_unique<AOTemporalPass>(this));
     if (m_supportsRaytracing) graph.addPass(std::make_unique<AODenoisePass>(this));
@@ -3184,6 +3257,7 @@ auto Renderer_Metal::createResources() -> void {
     normalResolvePipeline = createComputePipeline("shaders/3d_normal_resolve.metal");
     velocityPipeline = createComputePipeline("shaders/3d_velocity.metal");
     if (m_supportsRaytracing) raytraceShadowPipeline = createComputePipeline("shaders/3d_raytrace_shadow.metal");
+    sscsPipeline = createComputePipeline("shaders/3d_sscs.metal");
     // AO raygen: 3d_ssao.metal (screen-space) and 3d_raytrace_ao.metal (ray-traced)
     // are drop-in interchangeable here; both feed the temporal + à-trous chain.
     // RT AO: 2 cosine-weighted any-hit rays/px, 1.5m cap (the visibility knob —
@@ -3788,6 +3862,25 @@ auto Renderer_Metal::createResources() -> void {
         )
     ));
     shadowTextureDesc->release();
+
+    // Screen-space contact shadow RT (half-res, single-channel visibility).
+    MTL::TextureDescriptor* sscsTextureDesc = MTL::TextureDescriptor::alloc()->init();
+    sscsTextureDesc->setTextureType(MTL::TextureType2D);
+    sscsTextureDesc->setPixelFormat(MTL::PixelFormatR8Unorm);
+    sscsTextureDesc->setWidth((swapchain->drawableSize().width + 1) / 2);
+    sscsTextureDesc->setHeight((swapchain->drawableSize().height + 1) / 2);
+    sscsTextureDesc->setUsage(MTL::TextureUsageShaderRead | MTL::TextureUsageShaderWrite);
+    sscsRT = NS::TransferPtr(device->newTexture(sscsTextureDesc));
+    sscsRTGrayView = NS::TransferPtr(sscsRT->newTextureView(
+        MTL::PixelFormatR8Unorm,
+        MTL::TextureType2D,
+        NS::Range::Make(0, 1),
+        NS::Range::Make(0, 1),
+        MTL::TextureSwizzleChannels::Make(
+            MTL::TextureSwizzleRed, MTL::TextureSwizzleRed, MTL::TextureSwizzleRed, MTL::TextureSwizzleOne
+        )
+    ));
+    sscsTextureDesc->release();
 
     // PSSM shadow maps: 2D texture array, 3 cascades × 4096×4096 Depth32
     {
@@ -4891,60 +4984,28 @@ auto Renderer_Metal::createResources() -> void {
 
     // Create particle buffers
     // Single particle buffer for persistent state (not triple-buffered)
-    size_t particleBufferSize = sizeof(GPUParticle) * MAX_PARTICLES;
+    size_t particleBufferSize = sizeof(GPUParticleData) * MAX_PARTICLES;
     particleBuffer = NS::TransferPtr(device->newBuffer(particleBufferSize, MTL::ResourceStorageModeShared));
 
-    // Per-frame uniform buffers (triple-buffered)
+    // Per-frame uniform buffers (triple-buffered).
+    // attractor buffer holds MAX_PARTICLE_ATTRACTORS elements.
     particleSimParamsBuffers.resize(MAX_FRAMES_IN_FLIGHT);
     particleAttractorBuffers.resize(MAX_FRAMES_IN_FLIGHT);
     for (size_t i = 0; i < MAX_FRAMES_IN_FLIGHT; i++) {
         particleSimParamsBuffers[i] =
-            NS::TransferPtr(device->newBuffer(sizeof(ParticleSimulationParams), MTL::ResourceStorageModeShared));
+            NS::TransferPtr(device->newBuffer(sizeof(ParticleSimParams), MTL::ResourceStorageModeShared));
         particleAttractorBuffers[i] =
-            NS::TransferPtr(device->newBuffer(sizeof(ParticleAttractorData), MTL::ResourceStorageModeShared));
+            NS::TransferPtr(device->newBuffer(sizeof(ParticleAttractor) * MAX_PARTICLE_ATTRACTORS,
+                                              MTL::ResourceStorageModeShared));
     }
 
-    // Initialize particles with random positions and colors
-    {
-        std::srand(static_cast<unsigned>(std::time(nullptr)));
+    // Zero-fill: lifetime=0/age=0 → all slots start as dead and are skipped
+    // by the compute shaders. ECS emitters claim slots via claimParticleSlots()
+    // and fill them with uploadParticles().
+    std::memset(particleBuffer->contents(), 0, particleBufferSize);
+    // particleCount starts at 0; updated by claimParticleSlots() high-water mark.
 
-        auto* particles = reinterpret_cast<GPUParticle*>(particleBuffer->contents());
-        for (size_t i = 0; i < MAX_PARTICLES; i++) {
-            // Minimum radius of 0.5 to avoid particles at origin
-            float r = 0.5f + std::sqrt(static_cast<float>(std::rand()) / RAND_MAX) * 4.5f;
-            float theta = static_cast<float>(std::rand()) / RAND_MAX * 2.0f * 3.14159265f;
-            float phi = static_cast<float>(std::rand()) / RAND_MAX * 3.14159265f;
-
-            particles[i].position =
-                glm::vec3(r * std::sin(phi) * std::cos(theta), r * std::sin(phi) * std::sin(theta), r * std::cos(phi));
-
-            // Initialize tangential velocity for orbital motion
-            glm::vec3 tangent = glm::normalize(glm::cross(particles[i].position, glm::vec3(0.0f, 1.0f, 0.0f)));
-            if (glm::length(tangent) < 0.001f) {
-                tangent = glm::vec3(1.0f, 0.0f, 0.0f);
-            }
-            // Increase initial velocity for more dynamic motion (was 0.5)
-            // Velocity inversely proportional to radius for stable orbits
-            particles[i].velocity = tangent * (1.5f / std::sqrt(r + 0.1f));
-            particles[i].force = glm::vec3(0.0f);
-
-            float brightness = 1.0f - (r / 5.0f);
-
-            // "Nocturne" palette - mysterious, elegant purple-blue gradient
-            // Perfect for piano atmosphere: deep purple → indigo → electric blue
-            glm::vec3 a = glm::vec3(0.25f, 0.25f, 0.6f);// Base: royal blue
-            glm::vec3 b = glm::vec3(0.35f, 0.3f, 0.4f);// Amplitude: purple-blue dominant
-            glm::vec3 c = glm::vec3(0.8f, 0.9f, 1.0f);// Frequency: blue channel most active
-            glm::vec3 d = glm::vec3(0.7f, 0.65f, 0.5f);// Phase: starts from purple
-
-            glm::vec3 color = a + b * glm::cos(6.28318f * (c * brightness + d));
-            // Clamp color to [0, 1] to prevent negative values and oversaturation
-            color = glm::clamp(color, 0.0f, 1.0f);
-            particles[i].color = glm::vec4(color, 1.0f);
-        }
-    }
-
-    fmt::print("Particle system initialized with {} particles\n", MAX_PARTICLES);
+    fmt::print("Particle pool initialized ({} slots, ECS-driven)\n", MAX_PARTICLES);
 }
 
 auto Renderer_Metal::stage(std::shared_ptr<Scene> scene) -> void {
@@ -5363,7 +5424,8 @@ auto Renderer_Metal::draw(std::shared_ptr<Scene> scene, Camera& camera) -> void 
             rtPreview("Scene Color RT", colorRT.get());
             rtPreview("Scene Depth RT", depthStencilRT.get());
             // Shadow results consumed by the PBR shader (all screen-space)
-            rtPreview("Raytraced Shadow", shadowRTGrayView.get());
+            rtPreview("Near Shadow", shadowRTGrayView.get()); // RT-based here; same role as Vulkan's near map
+            rtPreview("Contact Shadow (SSCS)", sscsRTGrayView.get());
             rtPreview("Point Shadow", pointShadowDenoisedRTGrayView.get());
             rtPreview("PSSM Shadow", pssmShadowScreenRTGrayView.get());
             rtPreview("Raytraced AO", aoRTGrayView.get()); // grayscale swizzle view (raw R16F renders red)
@@ -5392,7 +5454,30 @@ auto Renderer_Metal::draw(std::shared_ptr<Scene> scene, Camera& camera) -> void 
                 ImGui::Text("Cascade splits (view depth): RT<%.1f | C1<%.1f | C2<%.1f | C3<%.1f",
                     splits.x, splits.y, splits.z, splits.w);
             }
-            ImGui::SliderFloat("RT shadow max dist", &pssmRTMaxDist, 5.0f, 200.0f);
+            ImGui::SliderFloat("Near shadow distance", &pssmRTMaxDist, 5.0f, 200.0f);
+            // Skip the directional shadow term (perf/debug). Pushed to the PBR
+            // shader at buffer(12) as mainDebugFlags bit 1 — same as Vulkan.
+            bool skipShadow = (mainDebugFlags & 2u) != 0u;
+            if (ImGui::Checkbox("Skip shadow", &skipShadow))
+                mainDebugFlags = (mainDebugFlags & ~2u) | (skipShadow ? 2u : 0u);
+            ImGui::Checkbox("Contact shadows (SSCS)", &sscsEnabled);
+            if (sscsEnabled) {
+                ImGui::SliderFloat("SSCS length", &sscsLength, 0.05f, 2.0f);
+                ImGui::SliderFloat("SSCS thickness", &sscsThickness, 0.05f, 2.0f);
+            }
+
+            // --- PSSM PCF & blend controls ---
+            const char* pcfCounts[] = { "4", "8", "16", "32" };
+            const uint32_t pcfValues[] = { 4u, 8u, 16u, 32u };
+            int pcfIdx = 2; // default 16
+            for (int i = 0; i < 4; i++) if (pssmPcfSampleCount == pcfValues[i]) pcfIdx = i;
+            if (ImGui::Combo("PCF samples", &pcfIdx, pcfCounts, 4)) {
+                pssmPcfSampleCount = pcfValues[pcfIdx];
+            }
+            ImGui::SliderFloat("RT<->PSSM blend", &pssmRTBlendScale, 0.0f, 0.25f, "%.3f");
+            ImGui::SliderFloat("Cascade blend range", &pssmCascadeBlendRange, 0.0f, 30.0f);
+            ImGui::Checkbox("Visualize cascades", &pssmDebugVisualize);
+            ImGui::TextWrapped("Cascade colors: green = RT, red = C1, blue = C2, yellow = C3");
 
             // --- Stochastic point shadow debug mode ---
             const char* psDebugModes[] = { "Visibility (normal)", "Tile light-count heatmap" };
@@ -6554,6 +6639,7 @@ void Renderer_Metal::renderToTexture(
             getTexture(material->emissiveMap ? material->emissiveMap->texture : defaultEmissiveTexture).get(), 5
         );
         encoder->setFragmentTexture(shadowRT.get(), 7);
+        encoder->setFragmentTexture(sscsEnabled ? sscsRT.get() : batch2DWhiteTexture.get(), 15);
 
         // IBL textures
         encoder->setFragmentTexture(irradianceMap.get(), 8);
@@ -7590,4 +7676,91 @@ auto Renderer_Metal::loadHDRI(const std::string& path) -> void {
     iblSource = IBLSource::HDRI;
     iblNeedsUpdate = true;
     fmt::print("HDRI loaded: {} ({}x{})\n", path, img->width, img->height);
+}
+
+// ============================================================================
+// ECS Particle Integration API (Metal backend)
+// ============================================================================
+
+void Renderer_Metal::ensureParticleFreeList() {
+    if (!m_particleFreeListInitialized) {
+        m_particleSlotFreeList.push_back({0u, MAX_PARTICLES});
+        m_particleFreeListInitialized = true;
+    }
+}
+
+uint32_t Renderer_Metal::allocParticleSlots(uint32_t count) {
+    ensureParticleFreeList();
+    for (size_t i = 0; i < m_particleSlotFreeList.size(); ++i) {
+        auto& r = m_particleSlotFreeList[i];
+        if (r.count >= count) {
+            uint32_t begin = r.begin;
+            r.begin += count;
+            r.count -= count;
+            if (r.count == 0)
+                m_particleSlotFreeList.erase(m_particleSlotFreeList.begin() + i);
+            return begin;
+        }
+    }
+    return ~0u; // pool exhausted
+}
+
+void Renderer_Metal::freeParticleSlots(uint32_t slotBegin, uint32_t count) {
+    if (count == 0) return;
+    m_particleSlotFreeList.push_back({slotBegin, count});
+    std::sort(m_particleSlotFreeList.begin(), m_particleSlotFreeList.end(),
+              [](const ParticleSlotRange& a, const ParticleSlotRange& b) {
+                  return a.begin < b.begin;
+              });
+    for (size_t i = 0; i + 1 < m_particleSlotFreeList.size(); ) {
+        auto& cur = m_particleSlotFreeList[i];
+        auto& nxt = m_particleSlotFreeList[i + 1];
+        if (cur.begin + cur.count == nxt.begin) {
+            cur.count += nxt.count;
+            m_particleSlotFreeList.erase(m_particleSlotFreeList.begin() + i + 1);
+        } else {
+            ++i;
+        }
+    }
+}
+
+uint32_t Renderer_Metal::claimParticleSlots(uint32_t count) {
+    uint32_t begin = allocParticleSlots(count);
+    if (begin != ~0u)
+        particleCount = std::max(particleCount, begin + count); // expand dispatch range
+    return begin;
+}
+
+void Renderer_Metal::releaseParticleSlots(uint32_t slotBegin, uint32_t count) {
+    freeParticleSlots(slotBegin, count);
+    // Zero-clear the released GPU slots so freed particles vanish immediately
+    // (age=0 >= lifetime=0 → the compute passes skip them). Without this a
+    // freed mid-buffer range keeps rendering stale data.
+    if (count > 0 && particleBuffer && slotBegin + count <= MAX_PARTICLES) {
+        auto* dst = reinterpret_cast<GPUParticleData*>(particleBuffer->contents()) + slotBegin;
+        std::memset(dst, 0, count * sizeof(GPUParticleData));
+    }
+    // Recompute the high-water mark: the tail must be entirely free (see the
+    // Vulkan Renderer::releaseParticleSlots comment).
+    uint32_t hw = MAX_PARTICLES;
+    for (const auto& r : m_particleSlotFreeList) {
+        if (r.begin + r.count == MAX_PARTICLES) { hw = r.begin; break; }
+    }
+    particleCount = hw;
+}
+
+void Renderer_Metal::uploadParticles(uint32_t slotBegin,
+                                     const std::vector<GPUParticleData>& particles) {
+    if (slotBegin == ~0u || particles.empty()) return;
+    if (slotBegin + particles.size() > MAX_PARTICLES) return;
+    if (!particleBuffer) return;
+    auto* dst = reinterpret_cast<GPUParticleData*>(particleBuffer->contents()) + slotBegin;
+    std::memcpy(dst, particles.data(), particles.size() * sizeof(GPUParticleData));
+    // StorageModeShared — no explicit flush needed; GPU reads after CPU writes are coherent.
+}
+
+void Renderer_Metal::setParticleForceField(const ParticleForceField& field) {
+    m_forceField = field;
+    if (m_forceField.attractors.size() > MAX_PARTICLE_ATTRACTORS)
+        m_forceField.attractors.resize(MAX_PARTICLE_ATTRACTORS);
 }

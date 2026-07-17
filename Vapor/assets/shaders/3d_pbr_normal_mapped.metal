@@ -2,6 +2,45 @@
 using namespace metal;
 #include "Res/shaders/3d_common.metal" // TODO: use more robust include path
 
+// Bindless-materials specialization (the ICB draw mode). When the pipeline is
+// built with kBindlessMaterials=true (function constant 0, RHI
+// ShaderDesc::bindlessMaterials), the fragment reads its six material textures
+// from the argument table at buffer(13) indexed by the materialID varying,
+// instead of the per-draw bound slots 0-5 — required because a single
+// executeCommandsInBuffer can't rebind textures between draws. Unspecialized
+// pipelines see the constant as undefined -> false and keep the bound path.
+constant bool kBindlessMaterialsSet [[function_constant(0)]];
+constant bool kBindlessMaterials = is_function_constant_defined(kBindlessMaterialsSet) && kBindlessMaterialsSet;
+constant bool kBoundMaterials = !kBindlessMaterials;
+
+// One entry per material in the bindless table (matches the RHI's
+// createTextureArgumentTable(..., texturesPerEntry=6) slot order).
+struct MaterialTexs {
+    texture2d<float, access::sample> albedo    [[id(0)]];
+    texture2d<float, access::sample> normal    [[id(1)]];
+    texture2d<float, access::sample> metallic  [[id(2)]];
+    texture2d<float, access::sample> roughness [[id(3)]];
+    texture2d<float, access::sample> occlusion [[id(4)]];
+    texture2d<float, access::sample> emissive  [[id(5)]];
+};
+
+// The bindless variant must take EVERY texture through argument buffers: a
+// pipeline built with supportIndirectCommandBuffers rejects any direct
+// texture/sampler argument on the fragment function ("Fragment shader cannot
+// be used with indirect command buffers"). This single-entry table carries the
+// per-frame system textures (slot order = the renderer's Metal contract 6-15).
+struct SystemTexs {
+    texture2d<float, access::sample>     texAO          [[id(0)]];
+    texture2d<float, access::sample>     texShadow      [[id(1)]];
+    texturecube<float, access::sample>   irradianceMap  [[id(2)]];
+    texturecube<float, access::sample>   prefilterMap   [[id(3)]];
+    texture2d<float, access::sample>     brdfLUT        [[id(4)]];
+    texture2d<float, access::sample>     rectLightVideo [[id(5)]];
+    depth2d_array<float, access::sample> pssmShadowMaps [[id(6)]];
+    texture2d<float, access::sample>     texPointShadow [[id(7)]];
+    texture2d<float, access::sample>     gibsGI         [[id(8)]];
+    texture2d<float, access::sample>     texSSCS        [[id(9)]];
+};
 
 struct RasterizerData {
     float4 position [[position]];
@@ -12,6 +51,7 @@ struct RasterizerData {
     float3 scaledLocalPos;
     float3 localNormal;
     MaterialData material;
+    uint materialID [[flat]];  // bindless table index (ICB mode)
 };
 
 struct Surface {
@@ -128,7 +168,9 @@ float3 CalculateDirectionalLight(DirLight light, float3 norm, float3 tangent, fl
     float3 lightDir = normalize(-light.direction);
     float3 radiance = light.color * light.intensity;
 
-    return CookTorranceBRDF(norm, tangent, bitangent, lightDir, viewDir, surf) * radiance * clamp(dot(norm, lightDir), 0.0, 1.0);
+    // NdotL is already folded into CookTorranceBRDF's `* nl` — don't apply it
+    // twice (that squared the cosine and darkened grazing faces).
+    return CookTorranceBRDF(norm, tangent, bitangent, lightDir, viewDir, surf) * radiance;
 }
 
 float3 CalculatePointLight(PointLight light, float3 norm, float3 tangent, float3 bitangent, float3 viewDir, Surface surf, float3 fragPos) {
@@ -138,7 +180,26 @@ float3 CalculatePointLight(PointLight light, float3 norm, float3 tangent, float3
     attenuation *= 1.0 - smoothstep(light.radius * 0.8, light.radius, dist);
     float3 radiance = attenuation * light.color * light.intensity;
 
-    return CookTorranceBRDF(norm, tangent, bitangent, lightDir, viewDir, surf) * radiance * clamp(dot(norm, lightDir), 0.0, 1.0);
+    // NdotL is already folded into CookTorranceBRDF's `* nl` — don't apply it
+    // twice (that squared the cosine and darkened grazing faces).
+    return CookTorranceBRDF(norm, tangent, bitangent, lightDir, viewDir, surf) * radiance;
+}
+
+// Spot: a point light windowed by a smooth cone falloff between the inner
+// (full intensity) and outer (zero) half-angle cosines.
+float3 CalculateSpotLight(SpotLight light, float3 norm, float3 tangent, float3 bitangent, float3 viewDir, Surface surf, float3 fragPos) {
+    float3 lightDir = normalize(light.position - fragPos);
+    float dist = distance(light.position, fragPos);
+    float attenuation = 1.0 / (dist * dist);
+    attenuation *= 1.0 - smoothstep(light.radius * 0.8, light.radius, dist);
+    float cosAngle = dot(-lightDir, light.direction);
+    float cone = clamp((cosAngle - light.cosOuter) / max(light.cosInner - light.cosOuter, 1e-4), 0.0, 1.0);
+    attenuation *= cone * cone;
+    float3 radiance = attenuation * light.color * light.intensity;
+
+    // NdotL is already folded into CookTorranceBRDF's `* nl` — don't apply it
+    // twice (that squared the cosine and darkened grazing faces).
+    return CookTorranceBRDF(norm, tangent, bitangent, lightDir, viewDir, surf) * radiance;
 }
 
 // ── Rect area light (diffuse + specular) ─────────────────────────────────────
@@ -146,11 +207,15 @@ float3 CalculatePointLight(PointLight light, float3 norm, float3 tangent, float3
 // Exact diffuse irradiance from a quad via the polygon solid-angle edge formula
 // (Baum et al. 1989 / Arvo 1994).  Returns irradiance ∈ [0, 1/2].
 float EvalRectLightDiffuse(float3 N, float3 fragPos, RectLight light) {
+    // Hoist packed_float3 fields into aligned locals before doing math on them.
+    float3 lp = float3(light.position);
+    float3 lr = float3(light.right);
+    float3 lu = float3(light.up);
     float3 corners[4] = {
-        light.position + light.right * light.halfWidth + light.up * light.halfHeight,
-        light.position - light.right * light.halfWidth + light.up * light.halfHeight,
-        light.position - light.right * light.halfWidth - light.up * light.halfHeight,
-        light.position + light.right * light.halfWidth - light.up * light.halfHeight,
+        lp + lr * light.halfWidth + lu * light.halfHeight,
+        lp - lr * light.halfWidth + lu * light.halfHeight,
+        lp - lr * light.halfWidth - lu * light.halfHeight,
+        lp + lr * light.halfWidth - lu * light.halfHeight,
     };
     float3 sum = float3(0.0);
     for (int i = 0; i < 4; i++) {
@@ -169,19 +234,22 @@ float EvalRectLightDiffuse(float3 N, float3 fragPos, RectLight light) {
 // Finds the closest point on the rect to the reflection ray and evaluates GGX
 // with an area-corrected roughness for energy conservation.
 float3 EvalRectLightSpecular(float3 N, float3 fragPos, float3 viewDir, RectLight light, Surface surf) {
+    float3 lp = float3(light.position);
+    float3 lr = float3(light.right);
+    float3 lu = float3(light.up);
     float3 refl       = reflect(-viewDir, N);
-    float3 lightNorm  = cross(light.right, light.up); // unnormalized plane normal
+    float3 lightNorm  = cross(lr, lu); // unnormalized plane normal
 
     float denom   = dot(lightNorm, refl);
-    float3 repPt  = light.position;
+    float3 repPt  = lp;
     if (abs(denom) > 1e-5) {
-        float t = dot(light.position - fragPos, lightNorm) / denom;
+        float t = dot(lp - fragPos, lightNorm) / denom;
         if (t > 0.0) {
             float3 hit = fragPos + refl * t;
-            float3 rel = hit - light.position;
-            float u    = clamp(dot(rel, light.right), -light.halfWidth,  light.halfWidth);
-            float v    = clamp(dot(rel, light.up),    -light.halfHeight, light.halfHeight);
-            repPt = light.position + light.right * u + light.up * v;
+            float3 rel = hit - lp;
+            float u    = clamp(dot(rel, lr), -light.halfWidth,  light.halfWidth);
+            float v    = clamp(dot(rel, lu), -light.halfHeight, light.halfHeight);
+            repPt = lp + lr * u + lu * v;
         }
     }
 
@@ -211,9 +279,9 @@ float3 EvalRectLightSpecular(float3 N, float3 fragPos, float3 viewDir, RectLight
 
 // UV of a world-space position projected onto the rect light face [0,1]².
 float2 RectLightUV(RectLight light, float3 worldPos) {
-    float3 rel = worldPos - light.position;
-    float u = dot(rel, light.right)  / light.halfWidth  * 0.5f + 0.5f;
-    float v = dot(rel, light.up)     / light.halfHeight * 0.5f + 0.5f;
+    float3 rel = worldPos - float3(light.position);
+    float u = dot(rel, float3(light.right)) / light.halfWidth  * 0.5f + 0.5f;
+    float v = dot(rel, float3(light.up))    / light.halfHeight * 0.5f + 0.5f;
     return saturate(float2(u, v));
 }
 
@@ -223,16 +291,19 @@ float2 RectLightUV(RectLight light, float3 worldPos) {
 float3 RectLightColor(RectLight light, float3 fragPos,
                       texture2d<float, access::sample> videoTex) {
     if (light.useVideoTexture == 0) {
-        return light.color;
+        return float3(light.color);
     }
     constexpr sampler clampS(address::clamp_to_edge, filter::linear);
+    float3 lp = float3(light.position);
+    float3 lr = float3(light.right);
+    float3 lu = float3(light.up);
     // 5-point stratified sample across the rect face
     float3 pts[5] = {
-        light.position,
-        light.position + light.right * light.halfWidth  * 0.5f,
-        light.position - light.right * light.halfWidth  * 0.5f,
-        light.position + light.up    * light.halfHeight * 0.5f,
-        light.position - light.up    * light.halfHeight * 0.5f,
+        lp,
+        lp + lr * light.halfWidth  * 0.5f,
+        lp - lr * light.halfWidth  * 0.5f,
+        lp + lu * light.halfHeight * 0.5f,
+        lp - lu * light.halfHeight * 0.5f,
     };
     float3 col = float3(0.0f);
     for (int i = 0; i < 5; i++) {
@@ -309,11 +380,17 @@ vertex RasterizerData vertexMain(
     constant MaterialData* materials [[buffer(1)]],
     constant InstanceData* instances [[buffer(2)]],
     device const VertexData* in [[buffer(3)]],
-    constant uint& instanceID [[buffer(4)]]
+    constant uint& instanceID [[buffer(4)]],
+    uint baseInstance [[base_instance]]
 ) {
     RasterizerData vert;
-    uint actualVertexID = instances[instanceID].vertexOffset + vertexID;
-    float4x4 model = instances[instanceID].model;
+    // Effective instance index. Normal/per-object draws pass it via buffer(4)
+    // with baseInstance 0 (no-op); single-call MDI can't set a per-object
+    // constant, so it passes instanceID 0 and carries the index in the draw
+    // command's baseInstance.
+    uint iid = instanceID + baseInstance;
+    uint actualVertexID = instances[iid].vertexOffset + vertexID;
+    float4x4 model = instances[iid].model;
     float3x3 normalMatrix = transpose(inverse(float3x3(
         model[0].xyz,
         model[1].xyz,
@@ -325,7 +402,8 @@ vertex RasterizerData vertexMain(
     vert.worldPosition = model * float4(in[actualVertexID].position, 1.0);
     vert.position = camera.proj * camera.view * vert.worldPosition;
     vert.uv = in[actualVertexID].uv;
-    vert.material = materials[instances[instanceID].materialID];
+    vert.material = materials[instances[iid].materialID];
+    vert.materialID = instances[iid].materialID;
     
     // Pass scaled local position and local normal for Object Space Triplanar
     float3 scale = float3(length(model[0].xyz), length(model[1].xyz), length(model[2].xyz));
@@ -337,21 +415,30 @@ vertex RasterizerData vertexMain(
 
 fragment float4 fragmentMain(
     RasterizerData in [[stage_in]],
-    texture2d<float, access::sample> texAlbedo [[texture(0)]],
-    texture2d<float, access::sample> texNormal [[texture(1)]],
-    texture2d<float, access::sample> texMetallic [[texture(2)]],
-    texture2d<float, access::sample> texRoughness [[texture(3)]],
-    texture2d<float, access::sample> texOcclusion [[texture(4)]],
-    texture2d<float, access::sample> texEmissive [[texture(5)]],
-    texture2d<float, access::sample> texAO [[texture(6)]],
-    texture2d<float, access::sample> texShadow [[texture(7)]],
-    texturecube<float, access::sample> irradianceMap [[texture(8)]],
-    texturecube<float, access::sample> prefilterMap [[texture(9)]],
-    texture2d<float, access::sample> brdfLUT [[texture(10)]],
-    texture2d<float, access::sample> rectLightVideo [[texture(11)]],
-    depth2d_array<float, access::sample> pssmShadowMaps [[texture(12)]],
-    texture2d<float, access::sample> texPointShadow [[texture(13)]],
-    texture2d<float, access::sample> gibsGI [[texture(14)]], // GIBS indirect lighting
+    // Per-draw material textures — bound path only. The bindless
+    // specialization disables these and reads materialTexs instead.
+    texture2d<float, access::sample> texAlbedo [[texture(0), function_constant(kBoundMaterials)]],
+    texture2d<float, access::sample> texNormal [[texture(1), function_constant(kBoundMaterials)]],
+    texture2d<float, access::sample> texMetallic [[texture(2), function_constant(kBoundMaterials)]],
+    texture2d<float, access::sample> texRoughness [[texture(3), function_constant(kBoundMaterials)]],
+    texture2d<float, access::sample> texOcclusion [[texture(4), function_constant(kBoundMaterials)]],
+    texture2d<float, access::sample> texEmissive [[texture(5), function_constant(kBoundMaterials)]],
+    const device MaterialTexs* materialTexs [[buffer(13), function_constant(kBindlessMaterials)]],
+    // System textures (Metal contract slots 6-15). Direct arguments on the
+    // bound path only; the bindless path reads the same set from systemTexs
+    // (locals with the original names are resolved at the top of the body, so
+    // everything below is shared).
+    texture2d<float, access::sample> texAOArg [[texture(6), function_constant(kBoundMaterials)]],
+    texture2d<float, access::sample> texShadowArg [[texture(7), function_constant(kBoundMaterials)]],
+    texturecube<float, access::sample> irradianceMapArg [[texture(8), function_constant(kBoundMaterials)]],
+    texturecube<float, access::sample> prefilterMapArg [[texture(9), function_constant(kBoundMaterials)]],
+    texture2d<float, access::sample> brdfLUTArg [[texture(10), function_constant(kBoundMaterials)]],
+    texture2d<float, access::sample> rectLightVideoArg [[texture(11), function_constant(kBoundMaterials)]],
+    depth2d_array<float, access::sample> pssmShadowMapsArg [[texture(12), function_constant(kBoundMaterials)]],
+    texture2d<float, access::sample> texPointShadowArg [[texture(13), function_constant(kBoundMaterials)]],
+    texture2d<float, access::sample> gibsGIArg [[texture(14), function_constant(kBoundMaterials)]], // GIBS indirect lighting
+    texture2d<float, access::sample> texSSCSArg [[texture(15), function_constant(kBoundMaterials)]], // screen-space contact shadow
+    const device SystemTexs* systemTexs [[buffer(14), function_constant(kBindlessMaterials)]],
     const device DirLight* directionalLights [[buffer(0)]],
     const device PointLight* pointLights [[buffer(1)]],
     const device Cluster* clusters [[buffer(2)]],
@@ -366,11 +453,45 @@ fragment float4 fragmentMain(
     // Perf-isolation debug flags (bit0 = skip point-light loop, bit1 = skip
     // shadow). buffer(11) is dirLightCount (Vulkan-only, unread here), so this
     // takes buffer(12). Mirrors RHIMain.frag's mainDebugFlags.
-    constant uint& mainDebugFlags [[buffer(12)]]
+    constant uint& mainDebugFlags [[buffer(12)]],
+    // buffer(13) is reserved for the RT PR's reflectionParams.
+    // NOTE: buffer(14) is the bindless SystemTexs argument table (function-
+    // constant gated, but its slot is claimed statically), so spot lights live
+    // at buffer(16) — a plain buffer(14) here collides with it and fails Metal
+    // shader specialization ("spotLights has invalid location").
+    const device SpotLight* spotLights [[buffer(16)]],
+    // x = spot light count, y = shadow-format flags (bit0 = the point-shadow
+    // texture carries RGB channels: R point / G rect / B spot; 0 on legacy
+    // R16F targets so rect/spot stay unshadowed instead of black).
+    constant uint2& spotRectParams [[buffer(15)]]
 ) {
     constexpr sampler s(address::repeat, filter::linear, mip_filter::linear);
 
     MaterialData material = in.material;
+
+    // Resolve the material texture set once: bound slots (normal path) or the
+    // bindless table entry for this fragment's material (ICB path). The dead
+    // branch references a disabled argument, which is legal — it's eliminated
+    // when the function constant is folded at pipeline build.
+    texture2d<float, access::sample> matAlbedo    = kBindlessMaterials ? materialTexs[in.materialID].albedo    : texAlbedo;
+    texture2d<float, access::sample> matNormal    = kBindlessMaterials ? materialTexs[in.materialID].normal    : texNormal;
+    texture2d<float, access::sample> matMetallic  = kBindlessMaterials ? materialTexs[in.materialID].metallic  : texMetallic;
+    texture2d<float, access::sample> matRoughness = kBindlessMaterials ? materialTexs[in.materialID].roughness : texRoughness;
+    texture2d<float, access::sample> matOcclusion = kBindlessMaterials ? materialTexs[in.materialID].occlusion : texOcclusion;
+    texture2d<float, access::sample> matEmissive  = kBindlessMaterials ? materialTexs[in.materialID].emissive  : texEmissive;
+
+    // System textures under their original names — the rest of the body (and
+    // its lambdas/helper calls) is identical on both paths.
+    texture2d<float, access::sample>     texAO          = kBindlessMaterials ? systemTexs->texAO          : texAOArg;
+    texture2d<float, access::sample>     texShadow      = kBindlessMaterials ? systemTexs->texShadow      : texShadowArg;
+    texturecube<float, access::sample>   irradianceMap  = kBindlessMaterials ? systemTexs->irradianceMap  : irradianceMapArg;
+    texturecube<float, access::sample>   prefilterMap   = kBindlessMaterials ? systemTexs->prefilterMap   : prefilterMapArg;
+    texture2d<float, access::sample>     brdfLUT        = kBindlessMaterials ? systemTexs->brdfLUT        : brdfLUTArg;
+    texture2d<float, access::sample>     rectLightVideo = kBindlessMaterials ? systemTexs->rectLightVideo : rectLightVideoArg;
+    depth2d_array<float, access::sample> pssmShadowMaps = kBindlessMaterials ? systemTexs->pssmShadowMaps : pssmShadowMapsArg;
+    texture2d<float, access::sample>     texPointShadow = kBindlessMaterials ? systemTexs->texPointShadow : texPointShadowArg;
+    texture2d<float, access::sample>     gibsGI         = kBindlessMaterials ? systemTexs->gibsGI         : gibsGIArg;
+    texture2d<float, access::sample>     texSSCS        = kBindlessMaterials ? systemTexs->texSSCS        : texSSCSArg;
 
     // Prototype UV: triplanar mapping with world space or object space
     // Mode: 0 = Off, 1 = World Space (static objects), 2 = Object Space (dynamic objects)
@@ -397,16 +518,20 @@ fragment float4 fragmentMain(
         }
     }
 
-    float4 baseColor = texAlbedo.sample(s, in.uv);
+    float4 baseColor = matAlbedo.sample(s, in.uv);
     if (baseColor.a * material.baseColorFactor.a < 0.5) {
         discard_fragment();
     }
     Surface surf;
     surf.color = srgbToLinear(baseColor.rgb * material.baseColorFactor.rgb);
-    surf.ao = texOcclusion.sample(s, in.uv).r * material.occlusionStrength;
-    surf.roughness = texRoughness.sample(s, in.uv).g * material.roughnessFactor;
-    surf.metallic = texMetallic.sample(s, in.uv).b * material.metallicFactor;
-    surf.emission = linearToSRGB(texEmissive.sample(s, in.uv).rgb * material.emissiveFactor) * material.emissiveStrength;
+    surf.ao = matOcclusion.sample(s, in.uv).r * material.occlusionStrength;
+    surf.roughness = matRoughness.sample(s, in.uv).g * material.roughnessFactor;
+    surf.metallic = matMetallic.sample(s, in.uv).b * material.metallicFactor;
+    // Emissive is an sRGB-authored colour (like albedo) — linearize it before
+    // it joins the linear lighting sum. (Was linearToSRGB, the wrong direction:
+    // that re-encodes toward sRGB and brightens; the sRGB->linear encode
+    // belongs only at the final output, which PostProcess/the swapchain do.)
+    surf.emission = srgbToLinear(matEmissive.sample(s, in.uv).rgb * material.emissiveFactor) * material.emissiveStrength;
     surf.subsurface = material.subsurface;
     surf.specular = material.specular;
     surf.specular_tint = material.specularTint;
@@ -421,7 +546,7 @@ fragment float4 fragmentMain(
     T = normalize(T - dot(T, N) * N);
     float3 B = normalize(cross(N, T) * in.worldTangent.w);
     float3x3 TBN = float3x3(T, B, N);
-    float3 norm = normalize(TBN * normalize(texNormal.sample(s, in.uv).rgb * 2.0 - 1.0));
+    float3 norm = normalize(TBN * normalize(matNormal.sample(s, in.uv).rgb * 2.0 - 1.0));
     float3 viewDir = normalize(camera.position - in.worldPosition.xyz);
 
     float2 screenUV = in.position.xy / screenSize;
@@ -438,47 +563,161 @@ fragment float4 fragmentMain(
     // abs(): view matrix is RH (visible z is negative); splits are positive distances
     float viewDepth = abs((camera.view * in.worldPosition).z);
 
+    // Helper: sample PSSM shadow with configurable PCF
+    auto samplePSSMShadow = [&](int cascadeIndex, float2 shadowUV, float refDepth) -> float {
+        float pcf = 0.0;
+        uint sampleCount = pssmData.pcfSampleCount;
+
+        if (sampleCount <= 4) {
+            // 4-tap Poisson disk
+            for (int i = 0; i < 4; i++) {
+                pcf += pssmShadowMaps.sample_compare(
+                    shadowCmpSampler,
+                    shadowUV + poissonDisk4[i] * PSSM_TEXEL * 2.0,
+                    cascadeIndex, refDepth
+                );
+            }
+            return pcf / 4.0;
+        } else if (sampleCount <= 8) {
+            // 8-tap Poisson disk
+            for (int i = 0; i < 8; i++) {
+                pcf += pssmShadowMaps.sample_compare(
+                    shadowCmpSampler,
+                    shadowUV + poissonDisk8[i] * PSSM_TEXEL * 2.0,
+                    cascadeIndex, refDepth
+                );
+            }
+            return pcf / 8.0;
+        } else if (sampleCount <= 16) {
+            // 16-tap Poisson disk
+            for (int i = 0; i < 16; i++) {
+                pcf += pssmShadowMaps.sample_compare(
+                    shadowCmpSampler,
+                    shadowUV + poissonDisk16[i] * PSSM_TEXEL * 2.0,
+                    cascadeIndex, refDepth
+                );
+            }
+            return pcf / 16.0;
+        } else {
+            // 32-tap: 16-tap Poisson + 16-tap rotated
+            for (int i = 0; i < 16; i++) {
+                pcf += pssmShadowMaps.sample_compare(
+                    shadowCmpSampler,
+                    shadowUV + poissonDisk16[i] * PSSM_TEXEL * 2.0,
+                    cascadeIndex, refDepth
+                );
+                // Rotated samples for better coverage
+                float2 rotated = float2(
+                    poissonDisk16[i].x * 0.7071 - poissonDisk16[i].y * 0.7071,
+                    poissonDisk16[i].x * 0.7071 + poissonDisk16[i].y * 0.7071
+                ) * 1.5;
+                pcf += pssmShadowMaps.sample_compare(
+                    shadowCmpSampler,
+                    shadowUV + rotated * PSSM_TEXEL * 2.0,
+                    cascadeIndex, refDepth
+                );
+            }
+            return pcf / 32.0;
+        }
+    };
+
+    // Direction toward the sun; used for the slope-scaled shadow bias.
+    float3 shadowL = normalize(-directionalLights[0].direction);
+
+    // Helper: sample a specific cascade
+    auto sampleCascade = [&](int ci) -> float {
+        float4 lsPos = pssmData.lightSpaceMatrices[ci] * in.worldPosition;
+        float3 proj  = lsPos.xyz / lsPos.w;
+        float2 shadowUV = float2(proj.x * 0.5 + 0.5, 0.5 - proj.y * 0.5);
+        // Per-cascade + slope-scaled depth bias. A flat bias is fine for the
+        // near cascade but far cascades cover far more world per texel, and
+        // grazing surfaces (small N·L, e.g. a ceiling lit obliquely) self-shadow
+        // — the moiré / "z-fighting" acne that also swallows lit regions. Scale
+        // the bias with cascade index and inverse N·L to suppress both.
+        float ndl = max(dot(N, shadowL), 0.0);
+        float slope = clamp(1.0 - ndl, 0.0, 1.0);
+        float bias = PSSM_BIAS * float(ci + 1) * (1.0 + 2.0 * slope);
+        float refDepth = proj.z - bias;
+        return samplePSSMShadow(ci, shadowUV, refDepth);
+    };
+
+    // Crisp, non-repeating fetch for the screen-space RT shadow. Reusing the
+    // material sampler `s` (address::repeat, mip_filter::linear) can pull a
+    // blurred mip / wrap at screen edges, softening the RT shadow right where it
+    // has to line up with PSSM.
+    constexpr sampler rtShadowSampler(
+        address::clamp_to_edge,
+        filter::linear,
+        mip_filter::none
+    );
+
+    // RT↔PSSM cross-fade is centred on rtEnd instead of starting there. The RT
+    // shadow has crisp, contact-accurate edges; PSSM is slightly offset
+    // (peter-panning from the depth bias + widened ortho range). A one-sided
+    // fade lets the accurate RT shadow end abruptly at rtEnd, exposing a lit
+    // sliver where the offset PSSM edge has not caught up yet — the bright line.
+    // Centring the window keeps RT dominant across the contact region and only
+    // hands off to PSSM well past the seam.
+    float rtEnd     = pssmData.cascadeSplits.x;
+    float halfBlend = pssmData.blendRange * 0.5;
+    float blendLo   = rtEnd - halfBlend;
+    float blendHi   = rtEnd + halfBlend;
+
     float shadowFactor;
-    if (viewDepth <= pssmData.cascadeSplits.x) {
-        // Cascade 0: RT ray-traced shadow
-        shadowFactor = texShadow.sample(s, screenUV).r;
+    int debugCascade = -1; // -1 = RT, 0-2 = PSSM cascades
+
+    if (viewDepth < blendLo) {
+        // Fully inside the RT region
+        shadowFactor = texShadow.sample(rtShadowSampler, screenUV).r;
+        debugCascade = -1;
     } else {
-        // Select PSSM cascade (index 0-2 = cascade 1-3)
+        // At or past the RT boundary: evaluate the PSSM cascade
         int ci = 0;
         if      (viewDepth > pssmData.cascadeSplits.z) ci = 2;
         else if (viewDepth > pssmData.cascadeSplits.y) ci = 1;
+        debugCascade = ci;
 
-        float4 lsPos = pssmData.lightSpaceMatrices[ci] * in.worldPosition;
-        float3 proj  = lsPos.xyz / lsPos.w;
+        shadowFactor = sampleCascade(ci);
 
-        // NDC → texture UV (Metal: y=+1 at top → v=0)
-        float2 shadowUV = float2(proj.x * 0.5 + 0.5, 0.5 - proj.y * 0.5);
-        float  refDepth = proj.z - PSSM_BIAS;
-
-        // 3×3 PCF (each tap uses hardware bilinear comparison)
-        float pcf = 0.0;
-        for (int px = -1; px <= 1; px++) {
-            for (int py = -1; py <= 1; py++) {
-                pcf += pssmShadowMaps.sample_compare(
-                    shadowCmpSampler,
-                    shadowUV + float2(px, py) * PSSM_TEXEL,
-                    ci, refDepth
-                );
+        // Cascade blend: smooth transition between cascades
+        float cascadeBlend = pssmData.cascadeBlendRange;
+        if (cascadeBlend > 0.0 && ci < 2) {
+            float cascadeEnd = (ci == 0) ? pssmData.cascadeSplits.y : pssmData.cascadeSplits.z;
+            float blendStart = cascadeEnd - cascadeBlend;
+            if (viewDepth > blendStart && viewDepth < cascadeEnd) {
+                float nextShadow = sampleCascade(ci + 1);
+                float t = (viewDepth - blendStart) / cascadeBlend;
+                shadowFactor = mix(shadowFactor, nextShadow, smoothstep(0.0, 1.0, t));
             }
         }
-        shadowFactor = pcf / 9.0;
 
-        // Blend zone between RT (cascade 0) and PSSM cascade 1
-        float blendEnd = pssmData.cascadeSplits.x + pssmData.blendRange;
-        if (viewDepth < blendEnd) {
-            float rtShadow = texShadow.sample(s, screenUV).r;
-            float t = (viewDepth - pssmData.cascadeSplits.x) / pssmData.blendRange;
-            shadowFactor = mix(rtShadow, shadowFactor, t);
+        // Symmetric RT↔PSSM cross-fade window [blendLo, blendHi] around rtEnd
+        if (viewDepth < blendHi && pssmData.blendRange > 0.0) {
+            float rtShadow = texShadow.sample(rtShadowSampler, screenUV).r;
+            float t = (viewDepth - blendLo) / pssmData.blendRange; // 0 at blendLo → 1 at blendHi
+            shadowFactor = mix(rtShadow, shadowFactor, smoothstep(0.0, 1.0, t));
+            if (t < 0.5) debugCascade = -1; // RT-dominant half shows as RT in debug view
         }
+    }
+
+    // Debug visualization: show cascade colors
+    if (pssmData.debugVisualize > 0) {
+        float3 cascadeColors[4] = {
+            float3(0.2, 0.8, 0.2), // RT = green
+            float3(0.8, 0.2, 0.2), // Cascade 0 = red
+            float3(0.2, 0.2, 0.8), // Cascade 1 = blue
+            float3(0.8, 0.8, 0.2)  // Cascade 2 = yellow
+        };
+        float3 cascadeColor = cascadeColors[debugCascade + 1];
+        return float4(cascadeColor * shadowFactor, 1.0);
     }
 
     // Debug bit1: drop the shadow term to isolate its cost.
     if ((mainDebugFlags & 2u) != 0u) shadowFactor = 1.0;
+
+    // Screen-space contact shadows tighten the near contact the RT/PSSM shadow
+    // misses. min() = shadowed if either says so (no double-darkening).
+    shadowFactor = min(shadowFactor, texSSCS.sample(rtShadowSampler, screenUV).r);
 
     float3 result = float3(0.0);
     result += CalculateDirectionalLight(directionalLights[0], norm, T, B, viewDir, surf) * shadowFactor;
@@ -552,8 +791,23 @@ fragment float4 fragmentMain(
         }
     }
 
-    for (uint i = 0; i < rectLightCount; i++) {
-        result += CalculateRectLight(rectLights[i], norm, in.worldPosition.xyz, viewDir, surf, rectLightVideo);
+    // Rect area lights, shadowed by the stochastic pass's G channel when the
+    // RGB shadow format is active (spotRectParams.y bit0); legacy R16F targets
+    // read G as 0, so the flag keeps them fully lit there instead of black.
+    {
+        float rectShadow = (spotRectParams.y & 1u) ? texPointShadow.sample(s, screenUV).g : 1.0;
+        for (uint i = 0; i < rectLightCount; i++) {
+            result += CalculateRectLight(rectLights[i], norm, in.worldPosition.xyz, viewDir, surf, rectLightVideo) * rectShadow;
+        }
+    }
+
+    // Spot lights (loop-all; typical scenes carry a handful, so no clustering).
+    // Shadowed by the stochastic pass's B channel under the same flag.
+    {
+        float spotShadow = (spotRectParams.y & 1u) ? texPointShadow.sample(s, screenUV).b : 1.0;
+        for (uint i = 0; i < spotRectParams.x; i++) {
+            result += CalculateSpotLight(spotLights[i], norm, T, B, viewDir, surf, in.worldPosition.xyz) * spotShadow;
+        }
     }
 
     // Screen-space AO attenuates ambient/indirect light only — multiplying

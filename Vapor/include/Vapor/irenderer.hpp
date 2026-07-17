@@ -36,6 +36,15 @@
 #include <vector>
 #include <string>
 
+namespace Vapor {
+// Directional shadow map resolution — a renderer-level decision shared by every
+// backend so the Metal and Vulkan cascade implementations stay in lockstep
+// (previously hardcoded separately: Metal 4096, Vulkan 2048). Raising/lowering
+// this once here changes both backends. Cascade array VRAM = 3 * size^2 * 4B.
+inline constexpr uint32_t kDirectionalShadowMapSize = 4096;  // PSSM cascade array
+inline constexpr uint32_t kNearShadowMapSize        = 4096;  // independent near-field map
+}
+
 namespace Rml {
     class Context;
 }
@@ -178,6 +187,11 @@ public:
     // getBatch2DStats()/resetBatch2DStats() are intentionally NOT here — the
     // stats type differs per renderer and is never queried polymorphically.
 
+    // ---- Environment / IBL ----------------------------------------------
+    // Load an equirectangular HDR image as the IBL environment source. No-op on
+    // renderers/backends without an IBL cubemap chain.
+    virtual void loadHDRI(const std::string& path) {}
+
     // ---- Fonts / text ----------------------------------------------------
     virtual FontHandle loadFont(const std::string& path, float baseSize) { return {}; }
     virtual void unloadFont(FontHandle handle) {}
@@ -205,6 +219,25 @@ public:
     virtual void applyBloom(RenderTextureHandle target, float threshold = 1.0f, float strength = 0.5f) {}
     virtual void applyToneMapping(RenderTextureHandle target, float exposure = 1.0f) {}
     virtual void applyVignette(RenderTextureHandle target, float strength = 0.3f, float radius = 0.8f) {}
+
+    // ---- ECS particle integration ----------------------------------------
+    // Claim/release a contiguous range of slots in the shared GPU particle pool.
+    // Returns ~0u if the pool is full.
+    virtual uint32_t claimParticleSlots(uint32_t count) { return ~0u; }
+    virtual void releaseParticleSlots(uint32_t slotBegin, uint32_t count) {}
+    // Upload initial particle state into previously claimed slots.
+    virtual void uploadParticles(uint32_t slotBegin,
+                                 const std::vector<GPUParticleData>& particles) {}
+    // Per-frame particle force field gathered by ParticleForceFieldSystem.
+    virtual void setParticleForceField(const ParticleForceField& field) {}
+    // Freeze the GPU sim (deltaTime=0); particles stay in place but are still rendered.
+    virtual void setParticleSimPaused(bool paused) {}
+    // Hide toggle — gate the particle render only; the sim keeps running.
+    virtual void setParticleVisible(bool visible) {}
+    // Per-frame particle draw list gathered by ParticleRenderSystem — one packet
+    // per emitter (per-material draws: blend mode + texture per packet). Backends
+    // without per-material particle draws (legacy Metal) ignore this.
+    virtual void setParticleDrawList(const std::vector<ParticleDrawPacket>& draws) {}
 
 protected:
     std::function<void()> m_imGuiCallback;

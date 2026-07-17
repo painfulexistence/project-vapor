@@ -35,7 +35,15 @@ struct InstanceData {
 layout(std430, set = 0, binding = 0) readonly buffer PSSMBuf {
     mat4 lightSpaceMatrices[3];
     vec4 cascadeSplits;
-    float blendRange;
+    float blendRange;          // 208
+    float cascadeBlendRange;   // 212
+    uint  pcfSampleCount;      // 216
+    uint  debugVisualize;      // 220
+    float nearShadowEnd;       // 224
+    float _pad0;               // 228
+    float _pad1;               // 232
+    float _pad2;               // 236
+    mat4 nearLightMatrix;      // 240  near-field map (cascadeIndex == 3)
 };
 layout(std430, set = 0, binding = 2) readonly buffer InstanceBuf {
     InstanceData instances[];
@@ -49,5 +57,6 @@ layout(push_constant) uniform PushConstants {
 void main() {
     InstanceData inst = instances[instanceID];
     vec3 worldPos = vec3(inst.model * vec4(inPosition, 1.0));
-    gl_Position = lightSpaceMatrices[cascadeIndex] * vec4(worldPos, 1.0);
+    mat4 m = cascadeIndex < 3u ? lightSpaceMatrices[cascadeIndex] : nearLightMatrix;
+    gl_Position = m * vec4(worldPos, 1.0);
 }
