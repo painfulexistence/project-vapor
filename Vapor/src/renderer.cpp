@@ -6062,7 +6062,16 @@ void Renderer::drawGraphicsImGui() {
             // Swapchain dims, NOT the texture's (several RTs are half-res).
             ImGui::Text("%u x %u (swapchain)", rtW, rtH);
             if (void* id = getImGuiTextureID(tex)) {
-                ImGui::Image((ImTextureID)(intptr_t)id, ImVec2(320, 320 / rtAspect));
+                // Opaque backdrop: several RTs clear their alpha to 0 (the
+                // prepass normal/albedo MRT, half-res RTs), so ImGui::Image
+                // would alpha-blend the transparent (no-geometry) regions with
+                // the panel and read as "empty gray". Fill black first so those
+                // regions show the true cleared RGB, not the panel background.
+                ImVec2 sz(320, 320 / rtAspect);
+                ImVec2 p = ImGui::GetCursorScreenPos();
+                ImGui::GetWindowDrawList()->AddRectFilled(
+                    p, ImVec2(p.x + sz.x, p.y + sz.y), IM_COL32(0, 0, 0, 255));
+                ImGui::Image((ImTextureID)(intptr_t)id, sz);
             } else {
                 ImGui::TextDisabled("(preview unavailable on this backend)");
             }
