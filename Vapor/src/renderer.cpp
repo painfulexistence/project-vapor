@@ -4910,10 +4910,13 @@ void Renderer::createRenderPipeline() {
                 d.colorAttachmentFormats = { PixelFormat::RGBA16_FLOAT };
                 return rhi->createPipeline(d);
             };
-            skyCapturePipeline = makeVertFragPipeline("shaders/IblCubeface.vert.spv", "shaders/SkyCapture.frag.spv",    skyCaptureVS, skyCaptureFS);
-            irradiancePipeline = makeVertFragPipeline("shaders/IblCubeface.vert.spv", "shaders/IrradianceConv.frag.spv", irradianceVS, irradianceFS);
-            prefilterPipeline  = makeVertFragPipeline("shaders/IblCubeface.vert.spv", "shaders/PrefilterEnv.frag.spv",   prefilterVS, prefilterFS);
-            brdfLUTPipeline    = makeVertFragPipeline("shaders/BrdfLut.vert.spv",     "shaders/BrdfLut.frag.spv",        brdfVS, brdfFS);
+            // skyCapture is the atmosphere->cubemap IBL source. It shares the
+            // unified IBLCubeFace.vert with the equirect/irradiance/prefilter
+            // passes built below — irradiance/prefilter/brdfLUT are created there,
+            // NOT here. This block previously rebuilt them with the older
+            // Irradiance/Prefilter/Brdf shaders and had them immediately
+            // overwritten below, leaking three pipelines every startup.
+            skyCapturePipeline = makeVertFragPipeline("shaders/IBLCubeFace.vert.spv", "shaders/SkyCapture.frag.spv", skyCaptureVS, skyCaptureFS);
 
             // Sky/atmosphere: fullscreen into the HDR colorRT, depth-tested
             // (LessOrEqual at z=1.0) so it only fills background pixels; no
