@@ -634,6 +634,12 @@ public:
     // of per-command indirect draws (same observable result). A command with
     // instanceCount == 0 draws nothing, which is how the cull pass drops objects.
     virtual void drawIndexedIndirect(BufferHandle argsBuffer, size_t offset, Uint32 drawCount, Uint32 stride) = 0;
+    // Non-indexed indirect draw: like drawIndexedIndirect but for draw() calls.
+    // Args layout is VkDrawIndirectCommand == MTLDrawPrimitivesIndirectArguments:
+    // {vertexCount, instanceCount, firstVertex, firstInstance} (16 bytes). On
+    // Vulkan drawCount > 1 needs the multiDrawIndirect feature (same caveat as
+    // the indexed variant); Metal loops per command.
+    virtual void drawIndirect(BufferHandle argsBuffer, size_t offset, Uint32 drawCount, Uint32 stride) = 0;
     // Launch task-shader workgroups of the bound mesh pipeline (Vulkan
     // vkCmdDrawMeshTasksEXT; Metal drawMeshThreadgroups). No-op default so
     // backends without mesh shaders still link.
