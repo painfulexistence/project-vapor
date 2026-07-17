@@ -54,8 +54,11 @@ struct RasterizerData {
     float4 worldTangent;
     float3 scaledLocalPos;
     float3 localNormal;
-    MaterialData material;
-    uint materialID [[flat]];  // bindless table index (ICB mode)
+    // Material is fetched by id in the fragment (materials[materialID]), NOT
+    // passed through inter-stage: the full 112-byte MaterialData overflowed
+    // Metal's per-vertex output capacity, corrupting varyings and dropping
+    // geometry (the Vulkan RHIMain.frag already fetches by fragMaterialID).
+    uint materialID [[flat]];  // bindless table index (ICB mode) + material fetch index
 };
 
 struct Surface {
@@ -406,7 +409,8 @@ vertex RasterizerData vertexMain(
     vert.worldPosition = model * float4(in[actualVertexID].position, 1.0);
     vert.position = camera.proj * camera.view * vert.worldPosition;
     vert.uv = in[actualVertexID].uv;
-    vert.material = materials[instances[iid].materialID];
+    // Material fetched in the fragment by this id (not passed through
+    // inter-stage — see RasterizerData).
     vert.materialID = instances[iid].materialID;
     
     // Pass scaled local position and local normal for Object Space Triplanar
@@ -459,6 +463,9 @@ fragment float4 fragmentMain(
     constant uint& rectLightCount [[buffer(8)]],
     constant PSSMData& pssmData [[buffer(9)]],
     constant uint& gibsEnabled [[buffer(10)]], // GIBS enable flag
+    // Material fetched by id here (buffer 11), not passed through inter-stage:
+    // the 112-byte MaterialData overflowed Metal's per-vertex output.
+    const device MaterialData* materials [[buffer(11)]],
     // Perf-isolation debug flags (bit0 = skip point-light loop, bit1 = skip
     // shadow). buffer(11) is dirLightCount (Vulkan-only, unread here), so this
     // takes buffer(12). Mirrors RHIMain.frag's mainDebugFlags.
@@ -480,7 +487,7 @@ fragment float4 fragmentMain(
 ) {
     constexpr sampler s(address::repeat, filter::linear, mip_filter::linear);
 
-    MaterialData material = in.material;
+    MaterialData material = materials[in.materialID];
 
     // Resolve the material texture set once: bound slots (normal path) or the
     // bindless table entry for this fragment's material (ICB path). The dead

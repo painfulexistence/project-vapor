@@ -1581,6 +1581,12 @@ void Renderer::mainRenderPass() {
     rhi->setFragmentBuffer(1, pointLightBuffer, 0, sizeof(PointLightData) * maxPointLights);
     rhi->setFragmentBuffer(2, clusterBuffer);
     rhi->setFragmentBuffer(3, cameraUniformBuffer, 0, sizeof(CameraRenderData));
+    // Materials for the Metal PBR fragment's per-fragment fetch (buffer 11).
+    // The shader reads materials[materialID] instead of taking the material
+    // through inter-stage (Metal per-vertex-output overflow at 112 bytes). This
+    // no-ops on Vulkan (binding 11 >= BINDINGS_PER_SET; RHIMain.frag reads
+    // materials from set0 b1 in the fragment already).
+    rhi->setFragmentBuffer(11, materialUniformBuffer, 0, sizeof(Vapor::MaterialData) * MAX_INSTANCES);
 
     glm::vec2 screenSize(static_cast<float>(width), static_cast<float>(height));
     rhi->setFragmentBytes(&screenSize, sizeof(glm::vec2), 4);
@@ -7500,6 +7506,9 @@ void Renderer::renderToTexture(
         rhi->setFragmentBuffer(1, pointLightBuffer, 0, sizeof(PointLightData) * maxPointLights);
         rhi->setFragmentBuffer(2, clusterBuffer);
         rhi->setFragmentBuffer(3, rttCameraBuffer, 0, sizeof(CameraRenderData));
+        // Materials for the Metal PBR fragment's per-fragment fetch (buffer 11);
+        // no-ops on Vulkan. See the main-pass note.
+        rhi->setFragmentBuffer(11, materialUniformBuffer, 0, sizeof(Vapor::MaterialData) * MAX_INSTANCES);
         glm::vec2 rttScreenSize(static_cast<float>(resource.width), static_cast<float>(resource.height));
         rhi->setFragmentBytes(&rttScreenSize, sizeof(glm::vec2), 4);
         glm::uvec3 gridSize(clusterGridSizeX, clusterGridSizeY, clusterGridSizeZ);
