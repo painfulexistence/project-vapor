@@ -849,7 +849,7 @@ MaterialId Renderer::registerMaterial(const MaterialDataInput& materialData) {
     params.sheenTint = material.sheenTint;
     params.clearcoat = material.clearcoat;
     params.clearcoatGloss = material.clearcoatGloss;
-    params.transmission = material.transmission;
+    // params.transmission = material.transmission;  // DIAG kill-switch (field removed)
 
     rhi->updateBuffer(material.parameterBuffer, &params, 0, sizeof(Vapor::MaterialData));
 
@@ -1351,7 +1351,7 @@ void Renderer::updateBuffers() {
             data.clearcoat = mat.clearcoat;
             data.clearcoatGloss = mat.clearcoatGloss;
             data.iblEnabled = mat.useIBL ? 1.0f : 0.0f;  // panel "Use IBL"
-            data.transmission = mat.transmission;
+            // data.transmission = mat.transmission;  // DIAG kill-switch (field removed)
             materialDataArray.push_back(data);
         }
         rhi->updateBuffer(materialUniformBuffer, materialDataArray.data(), 0,
@@ -5880,7 +5880,7 @@ void Renderer::stage(std::shared_ptr<Scene> scene) {
                 matData.sheenTint = mesh->material->sheenTint;
                 matData.clearcoat = mesh->material->clearcoat;
                 matData.clearcoatGloss = mesh->material->clearcoatGloss;
-                matData.transmission = mesh->material->transmission;
+                // matData.transmission = mesh->material->transmission;  // DIAG kill-switch
                 matData.alphaMode = mesh->material->alphaMode;
                 matData.alphaCutoff = mesh->material->alphaCutoff;
                 matData.doubleSided = mesh->material->doubleSided;

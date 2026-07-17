@@ -36,10 +36,7 @@ struct alignas(16) MaterialData {
     float prototypeUVMode;
     float uvScale;
     float iblEnabled; // 1.0 = use IBL, 0.0 = ambient approximation
-    // Keep byte-identical with Vapor::MaterialData (graphics.hpp) and the
-    // shader twins (3d_common.metal / RHIMain.frag / PrePass.frag): all are
-    // stride 112. A missing field here silently shifts every materials[i>0].
-    float transmission;
+    // DIAGNOSTIC kill-switch: transmission removed -> 96 bytes.
 };
 
 struct alignas(16) DirectionalLight {
