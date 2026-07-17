@@ -394,10 +394,6 @@ auto main(int argc, char* args[]) -> int {
             if (ImGui::Button("Stop")) particleEmissionEnabled = false;
             ImGui::EndDisabled();
 
-            ImGui::SameLine();
-            ImGui::TextDisabled("%s", particlePaused            ? "paused"
-                                    : !particleEmissionEnabled  ? "stopped"
-                                                                : "running");
             ImGui::TreePop();
         }
     });
