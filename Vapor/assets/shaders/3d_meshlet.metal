@@ -1,5 +1,6 @@
 #include <metal_stdlib>
 using namespace metal;
+#include "Res/shaders/3d_common.metal"  // shared CameraData/InstanceData/VertexData + inverse()
 
 // Meshlet task/mesh pipeline — Metal backend. Mirror of Meshlet.task /
 // Meshlet.mesh / MeshletDebug.frag (Vulkan). objectMain culls per meshlet
@@ -11,30 +12,7 @@ using namespace metal;
 // mesh pipelines): 0=camera, 2=instances, 3=meshlets, 4=meshletVertices,
 // 5=meshletTriangles(u8), 6=meshletBounds, 7=merged VB, 8=params (setVertexBytes).
 
-struct CameraData {
-    float4x4 proj;
-    float4x4 view;
-    float4x4 invProj;
-    float4x4 invView;
-    float near;
-    float far;
-    float3 position;
-    float4 frustumPlanes[6];
-};
-
-struct InstanceData {
-    float4x4 model;
-    float4 color;
-    uint vertexOffset;
-    uint indexOffset;
-    uint vertexCount;
-    uint indexCount;
-    uint materialID;
-    uint primitiveMode;
-    float3 AABBMin;
-    float3 AABBMax;
-    float4 boundingSphere;
-};
+// CameraData / InstanceData come from 3d_common.metal (identical layout).
 
 // Must match Vapor::Meshlet (16 bytes).
 struct Meshlet {
@@ -61,13 +39,7 @@ struct MeshletBounds {
     int _p2;
 };
 
-// Must match Vapor::VertexData (48 bytes, tightly packed).
-struct VertexData {
-    packed_float3 position;
-    packed_float2 uv;
-    packed_float3 normal;
-    packed_float4 tangent;
-};
+// VertexData comes from 3d_common.metal (identical layout).
 
 // Mirror of the Vulkan push constants (setVertexBytes binding 8).
 struct MeshletParams {
