@@ -108,6 +108,59 @@ function(vapor_copy_engine_assets TARGET)
     add_dependencies(${TARGET} ${_copy_target})
 endfunction()
 
+# vapor_flatten_metal_shaders(TARGET)
+#   Flatten local `#include "Res/shaders/X.metal"` directives in the Metal
+#   shaders published to TARGET's Res/ dir, so each .metal is self-contained.
+#
+#   Why: the renderer compiles .metal from source at runtime (newLibraryWithSource),
+#   and Metal resolves a relative `#include` against the process CWD. That works
+#   for the running app, but a GPU-trace *replay* tool has a different CWD and
+#   cannot find the included file — the captured program_source keeps the
+#   unresolved `#include` and replay fails with "file not found". Flattening at
+#   build time removes the relative include entirely.
+#
+#   APPLE-only (only the Metal backend reads .metal). Implemented as its own
+#   always-run custom target ordered AFTER the asset copy, so it also re-flattens
+#   when only a shader changed (a POST_BUILD on the app would be skipped when the
+#   app doesn't relink, leaving the copy's raw .metal — and replay broken again).
+function(vapor_flatten_metal_shaders TARGET)
+    if(NOT APPLE)
+        return()
+    endif()
+    if(NOT DEFINED VAPOR_ASSETS_DIR)
+        return()
+    endif()
+    find_package(Python3 COMPONENTS Interpreter QUIET)
+    if(NOT Python3_FOUND)
+        message(WARNING "[Vapor] Python3 not found — Metal shaders not flattened; "
+                        "GPU-trace replay may fail on relative #include.")
+        return()
+    endif()
+    # AssetPipeline.cmake lives in cmake/helpers/ → repo-root/scripts/.
+    set(_flatten_script "${CMAKE_CURRENT_LIST_DIR}/../../scripts/flatten_metal_includes.py")
+    file(GLOB _metal_sources CONFIGURE_DEPENDS "${VAPOR_ASSETS_DIR}/shaders/*.metal")
+    set(_res_shaders "$<TARGET_FILE_DIR:${TARGET}>/Res/shaders")
+
+    string(MD5 _hash "${CMAKE_CURRENT_BINARY_DIR}${TARGET}")
+    set(_flatten_target "flatten_metal_${_hash}")
+    add_custom_target(${_flatten_target}
+        COMMENT "Flattening Metal #include directives in Res/shaders")
+    foreach(_metal ${_metal_sources})
+        get_filename_component(_name ${_metal} NAME)
+        add_custom_command(TARGET ${_flatten_target} POST_BUILD
+            COMMAND ${Python3_EXECUTABLE} "${_flatten_script}"
+                    "${_metal}" "${VAPOR_ASSETS_DIR}/shaders" "${_res_shaders}/${_name}"
+            VERBATIM)
+    endforeach()
+    # Order after the engine asset copy (same binary dir → same hash) so the raw
+    # .metal is published first, then rewritten in place.
+    string(MD5 _copy_hash "${CMAKE_CURRENT_BINARY_DIR}")
+    if(TARGET copy_engine_assets_${_copy_hash})
+        add_dependencies(${_flatten_target} copy_engine_assets_${_copy_hash})
+    endif()
+    add_dependencies(${TARGET} ${_flatten_target})
+endfunction()
+
 function(vapor_copy_game_assets TARGET ASSETS_DIR)
     if(NOT EXISTS "${ASSETS_DIR}")
         message(WARNING "[Vapor] Game assets directory not found: ${ASSETS_DIR}")
