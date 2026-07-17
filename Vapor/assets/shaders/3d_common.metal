@@ -195,6 +195,22 @@ float2 random(uint seed) {
                  float(w & 0x003FFFFFu) / 4194304.0f);
 }
 
+// Stateful variant of random(): same PCG hash, but advances `state` so a
+// kernel can draw an arbitrary sequence instead of deriving seed offsets by
+// hand. TODO: swap the hash for tiled blue-noise sampling (the VISION pass
+// skeleton; same note as 3d_raytrace_ao.metal).
+float randomNext(thread uint& state) {
+    state = state * 747796405u + 2891336453u;
+    uint word = ((state >> ((state >> 28u) + 4u)) ^ state) * 277803737u;
+    return float(word >> 8u) * (1.0 / 16777216.0); // [0, 1)
+}
+
+// Rec.709 luma. (3d_pbr_normal_mapped.metal keeps its own 0.3/0.6/0.1
+// approximation for iridescence — distinct on purpose.)
+float luminance709(float3 c) {
+    return dot(c, float3(0.2126, 0.7152, 0.0722));
+}
+
 // uniform distribution on a unit sphere
 float3 sampleSphere(float2 s) {
     float z = 2.0 * s.x - 1.0;
