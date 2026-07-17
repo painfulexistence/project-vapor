@@ -136,8 +136,10 @@ function(vapor_flatten_metal_shaders TARGET)
                         "GPU-trace replay may fail on relative #include.")
         return()
     endif()
-    # AssetPipeline.cmake lives in cmake/helpers/ → repo-root/scripts/.
-    set(_flatten_script "${CMAKE_CURRENT_LIST_DIR}/../../scripts/flatten_metal_includes.py")
+    # project-vapor's root (set by project(vapor)) — robust whether this repo is
+    # the top project or add_subdirectory'd by a downstream game, and independent
+    # of CMAKE_CURRENT_LIST_DIR (which inside a function is the CALLER's dir).
+    set(_flatten_script "${vapor_SOURCE_DIR}/scripts/flatten_metal_includes.py")
     file(GLOB _metal_sources CONFIGURE_DEPENDS "${VAPOR_ASSETS_DIR}/shaders/*.metal")
     set(_res_shaders "$<TARGET_FILE_DIR:${TARGET}>/Res/shaders")
 
