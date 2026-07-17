@@ -5225,7 +5225,8 @@ void Renderer::drawGraphicsImGui() {
     auto preview = [&](const char* label, TextureHandle tex) {
         if (!tex.isValid()) return;
         if (ImGui::TreeNode(label)) {
-            ImGui::Text("%u x %u", rtW, rtH);
+            // Swapchain dims, NOT the texture's (several RTs are half-res).
+            ImGui::Text("%u x %u (swapchain)", rtW, rtH);
             if (void* id = getImGuiTextureID(tex)) {
                 ImGui::Image((ImTextureID)(intptr_t)id, ImVec2(320, 320 / rtAspect));
             } else {
@@ -5239,6 +5240,10 @@ void Renderer::drawGraphicsImGui() {
     if (ImGui::TreeNode("RTs")) {
         preview("Color RT", colorRT);
         preview("Normal RT", normalRT);
+        // Albedo shares the PrePass MRT with Normal: if contamination shows in
+        // Normal but not here, something writes normalRT AFTER the prepass; if
+        // both are dirty, the prepass itself (camera/culling/attachments) is.
+        preview("Albedo RT (PrePass MRT)", albedoRT);
         preview("Shadow RT", shadowRT);
         preview("Reflection RT", reflectionRT);
         preview("Refraction RT", refractionRT);
