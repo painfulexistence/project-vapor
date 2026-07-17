@@ -398,6 +398,62 @@ namespace Vapor {
     };
 
     // ============================================================================
+    // 時間系統 - advances the time-of-day clock and drives the sun
+    // ============================================================================
+    // The single moving sun: TimeOfDaySystem turns the clock into the
+    // SunComponent-tagged directional light's direction (a sun arc, latitude-
+    // tilted) and its colour/intensity (warm/dim at the horizon, white at noon,
+    // dark at night — the atmosphere->light coupling, CPU side). Run this BEFORE
+    // LightGatherSystem so the updated sun lands in directionalLights[0].
+    class TimeOfDaySystem {
+    public:
+        static void update(entt::registry& reg, float deltaTime) {
+            auto todView = reg.view<TimeOfDayComponent>();
+            entt::entity todEntity = entt::null;
+            for (auto e : todView) { todEntity = e; break; }
+            if (todEntity == entt::null) return;
+            auto& tod = todView.get<TimeOfDayComponent>(todEntity);
+
+            if (!tod.paused && tod.dayLengthSeconds > 0.0f) {
+                tod.timeOfDay += (24.0f / tod.dayLengthSeconds) * deltaTime;
+                tod.timeOfDay = std::fmod(tod.timeOfDay, 24.0f);
+                if (tod.timeOfDay < 0.0f) tod.timeOfDay += 24.0f;
+            }
+
+            // Sun position: rises east (+X) at 06:00, peaks overhead at noon,
+            // sets west (-X) at 18:00, below the horizon at night. Latitude tilts
+            // the arc toward +Z (south).
+            const float twoPi = 6.28318530718f;
+            float phase   = (tod.timeOfDay / 24.0f) * twoPi;   // 0 at midnight
+            float sunUp   = -std::cos(phase);                  // -1 midnight, +1 noon
+            float sunEast =  std::sin(phase);                  // +1 at 06:00 (east)
+            float latRad  = glm::radians(tod.latitudeDeg);
+            glm::vec3 sunPos = glm::normalize(glm::vec3(
+                sunEast,
+                sunUp * std::cos(latRad),
+                sunUp * std::sin(latRad)));
+
+            // Radiometry from elevation (sunPos.y): dark at night, warm near the
+            // horizon, white at noon.
+            float e = sunPos.y;
+            float daylight = glm::clamp((e + 0.1f) / 0.3f, 0.0f, 1.0f);
+            daylight = daylight * daylight * (3.0f - 2.0f * daylight);  // smoothstep
+            float warm = glm::clamp(e / 0.35f, 0.0f, 1.0f);
+            glm::vec3 sunColor = glm::mix(glm::vec3(1.0f, 0.45f, 0.25f),
+                                          glm::vec3(1.0f, 0.98f, 0.95f), warm);
+
+            auto sunView = reg.view<DirectionalLightComponent, SunComponent>();
+            for (auto entity : sunView) {
+                auto& dl = sunView.get<DirectionalLightComponent>(entity);
+                dl.direction = glm::normalize(-sunPos);  // light travels away from the sun
+                dl.color     = sunColor;
+                dl.intensity = tod.maxSunIntensity * daylight;
+                break;
+            }
+        }
+    };
+
+    // ============================================================================
     // 風場系統 - resolves the shared WindFieldComponent for the renderer
     // ============================================================================
     // Wind direction is one shared field (WindFieldComponent) — clouds, fog and

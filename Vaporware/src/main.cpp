@@ -43,6 +43,7 @@ static void setupCustomDrawers(Vapor::SceneInspector& inspector) {
     inspector.registerComponent<Vapor::RectLightComponent>("Rect Light");
     inspector.registerComponent<DirectionalLightComponent>("Directional Light");
     inspector.registerComponent<Vapor::SunComponent>("Sun");
+    inspector.registerComponent<Vapor::TimeOfDayComponent>("Time of Day");
     inspector.registerComponent<CharacterIntent>("Character Intent");
     inspector.registerComponent<CharacterControllerComponent>("Character Controller");
     inspector.registerComponent<GrabbableComponent>("Grabbable");
@@ -644,6 +645,7 @@ auto main(int argc, char* args[]) -> int {
         // Gather per-emitter draw packets (blend/texture/size). Runs even while
         // paused — frozen particles still need their draw list.
         Vapor::ParticleRenderSystem::update(registry, renderer.get());
+        Vapor::TimeOfDaySystem::update(registry, deltaTime);  // moves the sun; before gather
         Vapor::LightGatherSystem::update(registry, scene.get());
         Vapor::SkySystem::update(registry, renderer.get());
         Vapor::WindSystem::update(registry, renderer.get());

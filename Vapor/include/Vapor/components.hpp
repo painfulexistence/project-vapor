@@ -207,6 +207,19 @@ namespace Vapor {
         bool dirty = true;  // set when edited; SkySystem re-pushes to the renderer
     };
 
+    // Time-of-day clock. TimeOfDaySystem advances it and drives the
+    // SunComponent-tagged directional light's direction/color/intensity each
+    // frame, so the sky, fog, clouds and shadows all follow one moving sun. Put
+    // one on the environment entity (singleton). When present it OWNS the sun's
+    // direction — don't also animate that light from game logic.
+    struct TimeOfDayComponent {
+        float timeOfDay = 10.0f;          // hours in [0, 24)
+        float dayLengthSeconds = 120.0f;  // real seconds per in-game day; 0 = frozen
+        float latitudeDeg = 25.0f;        // tilts the sun's arc toward +Z (south)
+        float maxSunIntensity = 10.0f;    // sun intensity at the zenith
+        bool  paused = false;
+    };
+
     // 2D Sprite rendering component
     struct SpriteComponent {
         AtlasHandle atlas;
