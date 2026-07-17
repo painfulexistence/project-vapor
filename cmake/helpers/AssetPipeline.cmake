@@ -179,15 +179,48 @@ function(vapor_flatten_metal_shaders TARGET)
     # constants/helpers that any given shader uses only a subset of, so a bare
     # compile floods ~12 unused warnings per shader and buries real errors. These
     # are benign in a shared-include translation unit; silence only those two.
+    #
+    # Only git-TRACKED shaders are validated. A dev's local, uncommitted WIP
+    # shader dropped into the assets dir may not compile yet, and it must not
+    # fail the engine build (nor is it the engine's job to validate). Untracked
+    # .metal are still flattened above (so the app + replay load them), just not
+    # compile-checked. Fallback when git/tracking is unavailable (e.g. a source
+    # tarball): validate everything — a tarball only contains committed shaders.
     option(VAPOR_VALIDATE_METAL "Compile-check Metal shaders at build via xcrun metal" ON)
     if(NOT VAPOR_VALIDATE_METAL)
         return()
+    endif()
+    find_package(Git QUIET)
+    set(_have_tracking FALSE)
+    set(_tracked_names "")
+    if(GIT_FOUND)
+        execute_process(
+            COMMAND "${GIT_EXECUTABLE}" -C "${VAPOR_ASSETS_DIR}/shaders" ls-files -- "*.metal"
+            OUTPUT_VARIABLE _ls_out
+            RESULT_VARIABLE _ls_rc
+            OUTPUT_STRIP_TRAILING_WHITESPACE
+            ERROR_QUIET)
+        if(_ls_rc EQUAL 0 AND _ls_out)
+            set(_have_tracking TRUE)
+            string(REPLACE "\n" ";" _ls_lines "${_ls_out}")
+            foreach(_p ${_ls_lines})
+                get_filename_component(_bn "${_p}" NAME)
+                list(APPEND _tracked_names "${_bn}")
+            endforeach()
+        endif()
     endif()
     set(_scratch "${CMAKE_CURRENT_BINARY_DIR}/metal_validate")
     set(_common "${VAPOR_ASSETS_DIR}/shaders/3d_common.metal")
     set(_air_outputs)
     foreach(_metal ${_metal_sources})
         get_filename_component(_name ${_metal} NAME)
+        # Skip local, uncommitted shaders (see note above).
+        if(_have_tracking)
+            list(FIND _tracked_names "${_name}" _tracked_idx)
+            if(_tracked_idx EQUAL -1)
+                continue()
+            endif()
+        endif()
         add_custom_command(
             OUTPUT  "${_scratch}/${_name}.air"
             COMMAND ${CMAKE_COMMAND} -E make_directory "${_scratch}"
