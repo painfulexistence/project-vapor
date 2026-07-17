@@ -646,6 +646,7 @@ auto main(int argc, char* args[]) -> int {
         Vapor::ParticleRenderSystem::update(registry, renderer.get());
         Vapor::LightGatherSystem::update(registry, scene.get());
         Vapor::SkySystem::update(registry, renderer.get());
+        Vapor::WindSystem::update(registry, renderer.get());
         FlipbookSystem::update(registry, deltaTime);
         SpriteRenderSystem::update(registry, renderer.get(), &resourceManager);
 

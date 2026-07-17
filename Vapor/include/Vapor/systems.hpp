@@ -398,6 +398,31 @@ namespace Vapor {
     };
 
     // ============================================================================
+    // 風場系統 - resolves the shared WindFieldComponent for the renderer
+    // ============================================================================
+    // Wind direction is one shared field (WindFieldComponent) — clouds, fog and
+    // the particle sim all blow the same way. This pushes it to the renderer each
+    // frame (wind is live/animatable). Only runs when a WindFieldComponent exists,
+    // so scenes without wind keep the renderer's panel-set direction. Particles
+    // read the same component directly via ParticleForceFieldSystem.
+    class WindSystem {
+    public:
+        static void update(entt::registry& reg, IRenderer* renderer) {
+            if (!renderer) return;
+            auto view = reg.view<WindFieldComponent>();
+            for (auto entity : view) {
+                const auto& wf = view.get<WindFieldComponent>(entity);
+                WindRenderData data;
+                data.direction  = wf.direction;
+                data.speed      = wf.strength;
+                data.turbulence = wf.turbulence;
+                renderer->setWind(data);
+                break;  // singleton: the first wind field wins
+            }
+        }
+    };
+
+    // ============================================================================
     // 相機系統
     // ============================================================================
     class CameraSystem {

@@ -7786,3 +7786,11 @@ void Renderer_Metal::setSky(const SkyRenderData& sky) {
 
     iblNeedsUpdate = true;  // re-bake IBL from the new sky
 }
+
+void Renderer_Metal::setWind(const WindRenderData& wind) {
+    // Shared wind direction drives the fog and cloud scroll. Per-effect scroll
+    // speed (volumetric*Settings.windSpeed) stays as tuned — the WindFieldComponent
+    // strength is a particle-force unit, not a cloud-scroll speed.
+    volumetricFogSettings.windDirection   = wind.direction;
+    volumetricCloudSettings.windDirection = wind.direction;
+}

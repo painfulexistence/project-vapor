@@ -244,6 +244,12 @@ public:
     // is light-driven (see LightGatherSystem).
     virtual void setSky(const SkyRenderData& sky) {}
 
+    // Shared wind resolved from the ECS WindFieldComponent by WindSystem. Sets
+    // the wind DIRECTION consumed by the cloud (and Metal fog) passes; per-medium
+    // scroll speed stays local to each effect. Pushed only when a WindFieldComponent
+    // exists — otherwise the backends keep their panel-set wind.
+    virtual void setWind(const WindRenderData& wind) {}
+
 protected:
     std::function<void()> m_imGuiCallback;
     std::function<void()> m_engineWindowCallback;

@@ -305,6 +305,7 @@ public:
     void setParticleSimPaused(bool paused) override { m_particleSimPaused = paused; }
     void setParticleVisible(bool visible) override { particleVisible = visible; }
     void setSky(const SkyRenderData& sky) override;
+    void setWind(const WindRenderData& wind) override;
     void setParticleDrawList(const std::vector<ParticleDrawPacket>& draws) override;
 
     // ========================================================================

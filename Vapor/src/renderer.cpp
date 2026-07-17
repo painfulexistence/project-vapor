@@ -3890,6 +3890,13 @@ void Renderer::setSky(const SkyRenderData& sky) {
     iblNeedsUpdate = true;  // re-bake IBL from the new sky
 }
 
+void Renderer::setWind(const WindRenderData& wind) {
+    // Shared wind direction drives the cloud scroll. The RHI fog path (FogRenderData)
+    // carries no wind, so there is nothing to set there. Cloud scroll speed
+    // (cloudSettings.windSpeed) stays as tuned — see setSky's note on units.
+    cloudSettings.windDirection = wind.direction;
+}
+
 void Renderer::setParticleDrawList(const std::vector<ParticleDrawPacket>& draws) {
     m_particleDrawList = draws;
     if (m_particleDrawList.size() > MAX_PARTICLE_DRAWS)
