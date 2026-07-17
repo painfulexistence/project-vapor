@@ -342,7 +342,7 @@ inline SceneResources buildScene(
         em.color            = glm::vec4(0.45f, 0.55f, 1.0f, 1.0f); // indigo-blue
         auto& pr = registry.emplace<Vapor::ParticleRendererComponent>(e);
         pr.blendMode = Vapor::ParticleBlendMode::Additive; // glow
-        pr.size      = 0.1f;                               // small (fine spray)
+        pr.size      = 0.05f;                              // small (fine spray)
     }
     {
         auto e = registry.create();
@@ -359,7 +359,7 @@ inline SceneResources buildScene(
         em.color            = glm::vec4(1.0f, 0.55f, 0.35f, 1.0f); // warm amber
         auto& pr = registry.emplace<Vapor::ParticleRendererComponent>(e);
         pr.blendMode = Vapor::ParticleBlendMode::Additive; // same blend as A
-        pr.size      = 0.2f;                               // 2× A's size
+        pr.size      = 0.1f;                               // 2× A's size
     }
 
     res.global = registry.create();
