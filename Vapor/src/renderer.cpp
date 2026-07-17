@@ -5817,13 +5817,10 @@ void Renderer::drawGraphicsImGui() {
     ImGui::Text("Average frame rate: %.3f ms/frame (%.1f FPS)",
                 1000.0f / ImGui::GetIO().Framerate, ImGui::GetIO().Framerate);
     ImGui::ColorEdit3("Clear color", (float*)&clearColor);
-    // "visible" is the CPU frustum-cull result. In GPU-driven-prepass modes the
-    // CPU cull is skipped and the GPU decides visibility, so there's no CPU count
-    // to show — report the submitted total and point at the GPUDRV --stats source
-    // for the real post-cull count (avoids the misleading "105/105 always").
+    // GPU-driven-prepass modes skip the CPU cull, so there's no CPU "visible"
+    // count — show "-" (the real post-cull count is in the GPUDRV --stats source).
     if (gpuDrivenPrePassActive()) {
-        ImGui::Text("Drawables: %u submitted (GPU cull; real count via --stats GPUDRV)",
-                    lastFrameStats.totalDrawables);
+        ImGui::Text("Drawables: - / %u visible", lastFrameStats.totalDrawables);
     } else {
         ImGui::Text("Drawables: %u / %u visible",
                     lastFrameStats.visibleDrawables, lastFrameStats.totalDrawables);
