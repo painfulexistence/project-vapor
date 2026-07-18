@@ -7,12 +7,16 @@
 // the extra vertex/fragment definitions it brings along are simply unused by
 // this library.
 //
-// GI kernel: one cosine-weighted diffuse bounce per pixel per frame (+ one
-// sun-shadow ray at the bounce hit), temporal accumulation by reprojecting the
-// primary hit's WORLD position. Primary visibility comes from the voxel
-// G-buffer written by microVoxelFragment — never re-traced. Output stores
-// INCIDENT radiance with camera distance in alpha (history validation +
-// à-trous depth weight); the composite multiplies by albedo/AO.
+// GI kernel (ONE dispatch for all volumes): one cosine-weighted diffuse
+// bounce per pixel per frame (+ one sun-shadow ray at the bounce hit),
+// temporal accumulation by reprojecting the primary hit's WORLD position.
+// Primary visibility comes from the voxel G-buffer written by
+// microVoxelFragment — never re-traced; the pixel's volume index selects its
+// entry in the bound params array, and with cross-volume on the bounce rays
+// brute-force every volume for the nearest hit (the original giCrossVolume,
+// minus its 4-sampler cap). Output stores INCIDENT radiance with camera
+// distance in alpha (history validation + à-trous depth weight); the
+// composite multiplies by albedo/AO.
 //
 // Bindings (Metal): GI kernel — buffers 0 volume params, 1 GI params,
 // 2 pageTable, 3 brickPool, 4 palette; textures 0 giOut (write), 1 hitT,
@@ -32,7 +36,30 @@ struct MicroVoxelGIData {
     float4 prevCameraPosition; // xyz; w = temporal blend (history weight)
     float4 giParams;           // x = giStrength, y = splitX, z = giWidth, w = giHeight
     float4 giSigmas;           // x = depth, y = normal, z = luma, w = debugModeGI
+    float4 giCounts;           // x = volumeCount, y = crossVolume (0/1)
 };
+
+// Nearest hit across volumes (or just `own` when cross-volume is off) — the
+// original giCrossVolume brute force, dynamically indexed over the shared
+// buffers. Rays are WORLD space; t stays world-metric so hits compare.
+static bool mvRaycastScene(constant MicroVoxelData* volumes, int own, int volumeCount, bool crossVol,
+                           device const uint* pageTable, device const uint* brickPool,
+                           float3 worldRo, float3 rd, float maxDist, thread MvHit& hit,
+                           thread int& hitVol) {
+    float bestT = 1e30f;
+    hitVol = -1;
+    MvHit h;
+    for (int v = 0; v < volumeCount; v++) {
+        if (!crossVol && v != own) continue;
+        float3 ro = worldRo - volumes[v].volumeOrigin.xyz;
+        if (mvRaycast(volumes[v], pageTable, brickPool, ro, rd, maxDist, h) && h.t < bestT) {
+            bestT = h.t;
+            hit = h;
+            hitVol = v;
+        }
+    }
+    return hitVol >= 0;
+}
 
 // MSL: constant-address-space arrays must live at program scope.
 constant float3 mvFaceNormals[6] = { float3(1, 0, 0), float3(-1, 0, 0), float3(0, 1, 0),
@@ -55,7 +82,7 @@ static inline float2 mvRand2(uint2 pix, uint frame) {
 
 kernel void microVoxelGIKernel(
     uint2 gid [[thread_position_in_grid]],
-    constant MicroVoxelData& u [[buffer(0)]],
+    constant MicroVoxelData* volumes [[buffer(0)]],
     constant MicroVoxelGIData& gi [[buffer(1)]],
     device const uint* pageTable [[buffer(2)]],
     device const uint* brickPool [[buffer(3)]],
@@ -80,7 +107,10 @@ kernel void microVoxelGIKernel(
         return;
     }
     float4 nm = normalMatTex.sample(pointSampler, uv);
-    if (int(nm.b * 255.0f + 0.5f) != int(u.extra0.x + 0.5f)) return;  // another volume's pixel
+    int volumeCount = int(gi.giCounts.x + 0.5f);
+    bool crossVol = gi.giCounts.y > 0.5f;
+    int v = clamp(int(nm.b * 255.0f + 0.5f), 0, max(volumeCount - 1, 0));
+    constant MicroVoxelData& u = volumes[v];
 
     // Reconstruct the primary hit from the G-buffer (no re-trace).
     float2 ndc = float2(uv.x * 2.0f - 1.0f, 1.0f - uv.y * 2.0f);
@@ -89,7 +119,6 @@ kernel void microVoxelGIKernel(
     float3 hitWorld = gi.giCameraPosition.xyz + rd * hitT;
     float3 n = mvDecodeNormal(int(nm.r * 255.0f + 0.5f));
     float voxelSize = u.volumeOrigin.w;
-    float3 hitLocal = hitWorld - u.volumeOrigin.xyz;
 
     // Cosine-weighted bounce around the face normal.
     float2 xi = mvRand2(gid, uint(gi.giCameraPosition.w));
@@ -101,23 +130,31 @@ kernel void microVoxelGIKernel(
 
     float3 radiance;
     MvHit bh;
-    float3 bounceOrigin = hitLocal + n * voxelSize * 0.51f;
-    if (mvRaycast(u, pageTable, brickPool, bounceOrigin, bounceDir, 1e9f, bh)) {
+    int bhVol;
+    float3 bounceOrigin = hitWorld + n * voxelSize * 0.51f;
+    if (mvRaycastScene(volumes, v, volumeCount, crossVol, pageTable, brickPool,
+                       bounceOrigin, bounceDir, 1e9f, bh, bhVol)) {
         float3 bAlbedo;
         float bEmission, bRefl;
-        mvDecodeMaterial(palette, bh.mat, bAlbedo, bEmission, bRefl);
-        // Sun at the bounce hit with a full shadow ray; the 0.3 sky term
-        // stands in for further bounces. Emissive voxels act as area lights.
+        mvDecodeMaterial(volumes[bhVol], palette, bh.mat, bAlbedo, bEmission, bRefl);
+        // Sun at the bounce hit with a full (cross-volume) shadow ray; the
+        // 0.3 sky term stands in for further bounces. Emissive voxels act as
+        // area lights.
         float bNdl = max(dot(bh.normal, u.sunDirection.xyz), 0.0f);
         float bShadow = 1.0f;
         if (bNdl > 0.0f) {
             MvHit sh;
-            float3 so = bounceOrigin + bounceDir * bh.t + bh.normal * voxelSize * 0.51f;
-            if (mvRaycast(u, pageTable, brickPool, so, u.sunDirection.xyz, 1e9f, sh)) bShadow = 0.0f;
+            int shVol;
+            float bVoxel = volumes[bhVol].volumeOrigin.w;
+            float3 so = bounceOrigin + bounceDir * bh.t + bh.normal * bVoxel * 0.51f;
+            if (mvRaycastScene(volumes, bhVol, volumeCount, crossVol, pageTable, brickPool,
+                               so, u.sunDirection.xyz, 1e9f, sh, shVol)) {
+                bShadow = 0.0f;
+            }
         }
         radiance = bAlbedo * (u.sunColor.xyz * u.sunColor.w * MV_INV_PI * bNdl * bShadow
                               + mvSkyRadiance(u, bh.normal) * 0.3f)
-                 + bAlbedo * bEmission * u.gridDim.w;
+                 + bAlbedo * bEmission * volumes[bhVol].gridDim.w;
     } else {
         radiance = mvSkyRadiance(u, bounceDir);  // sky-light occlusion falls out naturally
     }

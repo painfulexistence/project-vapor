@@ -351,7 +351,10 @@ struct alignas(16) MicroVoxelRenderData {
     glm::vec4 ambientSky = glm::vec4(0.55f, 0.7f, 0.95f, 0.5f);      // xyz; w = ambientIntensity
     glm::vec4 ambientGround = glm::vec4(0.25f, 0.22f, 0.2f, 1.0f);   // xyz; w = albedo hash variation
     glm::vec4 params = glm::vec4(0.7f, 0.0f, 1.0f, 0.0f);            // x = aoStrength, y = debugMode, z = reflectionsEnabled, w = giStrength
-    glm::vec4 extra0 = glm::vec4(0.0f);                              // x = volumeIndex (per-volume GI dispatches)
+    // x = volumeIndex, y = pageTableOffset, z = brickPoolBase, w = paletteBase
+    // (offsets into the shared voxel buffers; exact in float well past any
+    // realistic table size — everything stays vec4 for the MSL/std430 twins).
+    glm::vec4 extra0 = glm::vec4(0.0f);
     glm::vec4 _pad[3] = {};
 };
 static_assert(sizeof(MicroVoxelRenderData) == 256,
@@ -366,6 +369,7 @@ struct alignas(16) MicroVoxelGIRenderData {
     glm::vec4 prevCameraPosition = glm::vec4(0.0f);  // xyz; w = temporal blend (history weight)
     glm::vec4 params = glm::vec4(1.0f, -1.0f, 0.0f, 0.0f);  // x = giStrength, y = splitX, z = giWidth, w = giHeight
     glm::vec4 sigmas = glm::vec4(0.5f, 64.0f, 8.0f, 0.0f);  // x = depth, y = normal, z = luma, w = GI debug view
+    glm::vec4 counts = glm::vec4(0.0f);  // x = volumeCount, y = crossVolume (0/1)
 };
 
 // Volumetric clouds. Field-for-field mirror of the Metal backend's

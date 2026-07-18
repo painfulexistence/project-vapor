@@ -186,7 +186,7 @@ auto main(int argc, char* args[]) -> int {
     fmt::print("MicroVoxel loaded. WASD move, R/F up/down, IJKL look, LShift sprint, Esc quit.\n");
     fmt::print("Raymarched 5 cm voxel volumes — no triangles. Hold E to dig into them.\n");
     fmt::print("Debug: 0=final 1=albedo 2=normals 3=AO 4=shadow 5=GI 6=material | "
-               "G/O/H/X/N toggle GI/AO/shadow/reflections/denoiser | B = split raw|denoised.\n");
+               "G/O/H/X/N/V toggle GI/AO/shadow/reflections/denoiser/cross-volume | B = split raw|denoised.\n");
 
     // The MicroVoxel tunables live on the concrete RHI renderer (also editable
     // in its ImGui panel); hotkeys poke them directly when available.
@@ -263,6 +263,14 @@ auto main(int argc, char* args[]) -> int {
                                 split = (split >= 0.0f) ? -1.0f : 0.5f;
                                 fmt::print("MicroVoxel GI split: {}\n",
                                            split >= 0.0f ? "on (left raw | right denoised)" : "off");
+                                break;
+                            }
+                            case SDL_SCANCODE_V: {
+                                bool& cv = rhiRenderer->getMicroVoxelGICrossVolume();
+                                cv = !cv;
+                                fmt::print("MicroVoxel GI: {}\n",
+                                           cv ? "cross-volume (light bleeds between volumes)"
+                                              : "primary volume only");
                                 break;
                             }
                             default:

@@ -12,19 +12,22 @@
 // in) with the camera distance in alpha for history validation and the
 // à-trous depth weight; the composite pass multiplies by albedo.
 //
+// ONE dispatch covers every volume: the per-volume params array is bound
+// whole and indexed by the G-buffer's volume index, and with cross-volume on
+// (counts.y) the bounce rays brute-force every volume for the nearest hit so
+// light bleeds between volumes — the original demo's giCrossVolume, minus
+// its 4-sampler cap (all volumes live in shared, dynamically-indexed
+// buffers with per-volume offsets in extra0).
+//
 // The traversal duplicates MicroVoxel.frag's DDA (GLSL has no includes) —
 // keep them in sync, and in sync with the CPU reference in voxel_world.cpp.
-//
-// Runs once per volume: pixels whose G-buffer volume index differs are left
-// untouched, so each volume's dispatch shades only its own pixels. Compute
-// bindings (see rhi_vulkan.cpp): set 0 = storage buffers, set 1 = storage
-// images, set 2 = sampled textures.
+// Compute bindings (see rhi_vulkan.cpp): set 0 = storage buffers, set 1 =
+// storage images, set 2 = sampled textures.
 
 layout(local_size_x = 8, local_size_y = 8, local_size_z = 1) in;
 
-// Must match Vapor::MicroVoxelRenderData (the per-volume 256-byte slice the
-// primary pass binds).
-layout(std430, set = 0, binding = 0) readonly buffer ParamsBuf {
+// Must match Vapor::MicroVoxelRenderData (256-byte stride array).
+struct VolumeData {
     mat4 viewProj;
     vec4 cameraPosition;   // xyz; w = maxRaySteps
     vec4 volumeOrigin;     // xyz = world min corner; w = voxelSize
@@ -34,8 +37,10 @@ layout(std430, set = 0, binding = 0) readonly buffer ParamsBuf {
     vec4 ambientSky;       // xyz; w = ambientIntensity
     vec4 ambientGround;    // xyz; w = albedo hash variation strength
     vec4 params;           // x = aoStrength, y = debugMode, z = reflections, w = giStrength
-    vec4 extra0;           // x = volumeIndex
+    vec4 extra0;           // x = volumeIndex, y = pageTableOffset, z = brickPoolBase, w = paletteBase
+    vec4 _pad[3];
 };
+layout(std430, set = 0, binding = 0) readonly buffer ParamsBuf { VolumeData volumes[]; };
 // Must match Vapor::MicroVoxelGIRenderData.
 layout(std430, set = 0, binding = 1) readonly buffer GIParamsBuf {
     mat4 invViewProj;
@@ -44,6 +49,7 @@ layout(std430, set = 0, binding = 1) readonly buffer GIParamsBuf {
     vec4 prevCameraPosition; // xyz; w = temporal blend (history weight)
     vec4 giParams;           // x = giStrength, y = splitX, z = giWidth, w = giHeight
     vec4 giSigmas;           // x = depth, y = normal, z = luma (à-trous)
+    vec4 giCounts;           // x = volumeCount, y = crossVolume (0/1)
 };
 layout(std430, set = 0, binding = 2) readonly buffer PageBuf { uint pageTable[]; };
 layout(std430, set = 0, binding = 3) readonly buffer BrickBuf { uint brickPool[]; };
@@ -61,25 +67,27 @@ const int BRICK_DIM = 8;
 const uint BRICK_WORDS = 144u;
 const float INV_PI = 0.318309886;
 
-// ==== traversal (mirror of MicroVoxel.frag — keep in sync) =================
+// ==== traversal (mirror of MicroVoxel.frag, parameterized by volume) =======
 
-ivec3 brickGrid() { return ivec3(gridDim.xyz) / BRICK_DIM; }
+ivec3 brickGrid(int vol) { return ivec3(volumes[vol].gridDim.xyz) / BRICK_DIM; }
 
-uint pageEntry(ivec3 bcell) {
-    ivec3 bg = brickGrid();
-    return pageTable[(bcell.z * bg.y + bcell.y) * bg.x + bcell.x];
+uint pageEntry(int vol, ivec3 bcell) {
+    ivec3 bg = brickGrid(vol);
+    return pageTable[uint(volumes[vol].extra0.y) + uint((bcell.z * bg.y + bcell.y) * bg.x + bcell.x)];
 }
 
 int voxelIndexInBrick(ivec3 local) {
     return local.x + local.y * BRICK_DIM + local.z * BRICK_DIM * BRICK_DIM;
 }
 
-bool brickOccupied(uint slot, int i) {
-    return (brickPool[slot * BRICK_WORDS + uint(i >> 5)] & (1u << (uint(i) & 31u))) != 0u;
+bool brickOccupied(int vol, uint slot, int i) {
+    uint g = uint(volumes[vol].extra0.z) + slot;
+    return (brickPool[g * BRICK_WORDS + uint(i >> 5)] & (1u << (uint(i) & 31u))) != 0u;
 }
 
-uint brickMaterial(uint slot, int i) {
-    uint word = brickPool[slot * BRICK_WORDS + 16u + uint(i >> 2)];
+uint brickMaterial(int vol, uint slot, int i) {
+    uint g = uint(volumes[vol].extra0.z) + slot;
+    uint word = brickPool[g * BRICK_WORDS + 16u + uint(i >> 2)];
     return (word >> ((uint(i) & 3u) * 8u)) & 0xFFu;
 }
 
@@ -90,7 +98,7 @@ struct Hit {
     uint mat;
 };
 
-bool traverseBrick(vec3 ro, vec3 rd, vec3 invD, uint slot, ivec3 bcell, float tIn,
+bool traverseBrick(int vol, vec3 ro, vec3 rd, vec3 invD, uint slot, ivec3 bcell, float tIn,
                    vec3 enterNormal, float voxelSize, out Hit hit) {
     ivec3 lo = bcell * BRICK_DIM;
     float eps = voxelSize * 1e-3;
@@ -103,11 +111,11 @@ bool traverseBrick(vec3 ro, vec3 rd, vec3 invD, uint slot, ivec3 bcell, float tI
     vec3 normal = enterNormal;
     for (int i = 0; i < 3 * BRICK_DIM + 1; i++) {
         int vi = voxelIndexInBrick(cell - lo);
-        if (brickOccupied(slot, vi)) {
+        if (brickOccupied(vol, slot, vi)) {
             hit.t = t;
             hit.normal = normal;
             hit.cell = cell;
-            hit.mat = brickMaterial(slot, vi);
+            hit.mat = brickMaterial(vol, slot, vi);
             return true;
         }
         if (tMax.x < tMax.y && tMax.x < tMax.z) {
@@ -127,9 +135,12 @@ bool traverseBrick(vec3 ro, vec3 rd, vec3 invD, uint slot, ivec3 bcell, float tI
     return false;
 }
 
-bool raycast(vec3 ro, vec3 rd, float maxDist, out Hit hit) {
-    float voxelSize = volumeOrigin.w;
-    vec3 bmax = gridDim.xyz * voxelSize;
+// Traversal of one volume, ray given in WORLD space (t stays world-metric, so
+// hits from different volumes compare directly).
+bool raycastVolume(int vol, vec3 worldRo, vec3 rd, float maxDist, out Hit hit) {
+    float voxelSize = volumes[vol].volumeOrigin.w;
+    vec3 ro = worldRo - volumes[vol].volumeOrigin.xyz;
+    vec3 bmax = volumes[vol].gridDim.xyz * voxelSize;
     vec3 invD = 1.0 / rd;
 
     vec3 t0 = (vec3(0.0) - ro) * invD;
@@ -157,16 +168,16 @@ bool raycast(vec3 ro, vec3 rd, float maxDist, out Hit hit) {
     if (t > maxDist) return false;
 
     float brickSize = voxelSize * float(BRICK_DIM);
-    ivec3 bg = brickGrid();
+    ivec3 bg = brickGrid(vol);
     ivec3 bcell = clamp(ivec3(floor((ro + rd * t) / brickSize)), ivec3(0), bg - 1);
     ivec3 stepDir = ivec3(sign(rd));
     vec3 tDelta = abs(vec3(brickSize) * invD);
     vec3 stepPos = vec3(greaterThan(rd, vec3(0.0)));
     vec3 tMax = ((vec3(bcell) + stepPos) * brickSize - ro) * invD;
 
-    int maxSteps = int(cameraPosition.w);
+    int maxSteps = int(volumes[vol].cameraPosition.w);
     for (int i = 0; i < maxSteps; i++) {
-        uint entry = pageEntry(bcell);
+        uint entry = pageEntry(vol, bcell);
         if (entry != PAGE_EMPTY) {
             if ((entry & PAGE_UNIFORM_BIT) != 0u) {
                 hit.t = t;
@@ -176,7 +187,7 @@ bool raycast(vec3 ro, vec3 rd, float maxDist, out Hit hit) {
                 hit.mat = entry & 0xFFu;
                 return t <= maxDist;
             }
-            if (traverseBrick(ro, rd, invD, entry, bcell, t, normal, voxelSize, hit)) {
+            if (traverseBrick(vol, ro, rd, invD, entry, bcell, t, normal, voxelSize, hit)) {
                 return hit.t <= maxDist;
             }
         }
@@ -198,14 +209,33 @@ bool raycast(vec3 ro, vec3 rd, float maxDist, out Hit hit) {
     return false;
 }
 
-// ==== shading helpers ======================================================
-
-vec3 skyRadiance(vec3 dir) {
-    return mix(ambientGround.xyz, ambientSky.xyz, dir.y * 0.5 + 0.5) * ambientSky.w;
+// Nearest hit across volumes (or just `own` when cross-volume is off) — the
+// original giCrossVolume brute force, dynamically indexed.
+bool raycastScene(int own, int volumeCount, bool cross, vec3 worldRo, vec3 rd, float maxDist,
+                  out Hit hit, out int hitVol) {
+    float bestT = 1e30;
+    hitVol = -1;
+    Hit h;
+    for (int v = 0; v < volumeCount; v++) {
+        if (!cross && v != own) continue;
+        if (raycastVolume(v, worldRo, rd, maxDist, h) && h.t < bestT) {
+            bestT = h.t;
+            hit = h;
+            hitVol = v;
+        }
+    }
+    return hitVol >= 0;
 }
 
-void decodeMaterial(uint mat, out vec3 albedo, out float emission) {
-    uint w0 = palette[mat * 2u];
+// ==== shading helpers ======================================================
+
+vec3 skyRadiance(int vol, vec3 dir) {
+    return mix(volumes[vol].ambientGround.xyz, volumes[vol].ambientSky.xyz, dir.y * 0.5 + 0.5)
+         * volumes[vol].ambientSky.w;
+}
+
+void decodeMaterial(int vol, uint mat, out vec3 albedo, out float emission) {
+    uint w0 = palette[(uint(volumes[vol].extra0.w) + mat) * 2u];
     albedo = vec3(float(w0 & 0xFFu), float((w0 >> 8u) & 0xFFu), float((w0 >> 16u) & 0xFFu)) / 255.0;
     emission = float((w0 >> 24u) & 0xFFu) / 255.0;
 }
@@ -235,12 +265,14 @@ void main() {
     float hitT = textureLod(hitTTex, uv, 0.0).r;
     if (hitT <= 0.0) {
         // Miss: zero radiance, zero distance — invalid history, rejected by
-        // the à-trous depth weight. Every volume's dispatch agrees on this.
+        // the à-trous depth weight.
         imageStore(giOut, pix, vec4(0.0));
         return;
     }
     vec4 nm = textureLod(normalMatTex, uv, 0.0);
-    if (int(nm.b * 255.0 + 0.5) != int(extra0.x + 0.5)) return;  // another volume's pixel
+    int volumeCount = int(giCounts.x + 0.5);
+    bool crossVol = giCounts.y > 0.5;
+    int v = clamp(int(nm.b * 255.0 + 0.5), 0, max(volumeCount - 1, 0));
 
     // Reconstruct the primary hit from the G-buffer (no re-trace).
     vec2 ndc = vec2(uv.x * 2.0 - 1.0, 1.0 - uv.y * 2.0);
@@ -248,39 +280,43 @@ void main() {
     vec3 rd = normalize(farPt.xyz / farPt.w - giCameraPosition.xyz);
     vec3 hitWorld = giCameraPosition.xyz + rd * hitT;
     vec3 n = decodeNormal(int(nm.r * 255.0 + 0.5));
-    float voxelSize = volumeOrigin.w;
-    vec3 hitLocal = hitWorld - volumeOrigin.xyz;
+    float voxelSize = volumes[v].volumeOrigin.w;
 
     // Cosine-weighted bounce around the face normal. With cosine sampling the
     // estimator is just the incoming radiance — no explicit cos/pdf terms.
     vec2 xi = rand2(uvec2(pix), uint(giCameraPosition.w));
-    vec3 t1 = normalize(abs(n.x) > 0.5 ? cross(n, vec3(0, 1, 0)) : cross(n, vec3(1, 0, 0)));
-    vec3 t2 = cross(n, t1);
+    vec3 tan1 = normalize(abs(n.x) > 0.5 ? cross(n, vec3(0, 1, 0)) : cross(n, vec3(1, 0, 0)));
+    vec3 tan2 = cross(n, tan1);
     float phi = 6.2831853 * xi.x;
     float sq = sqrt(xi.y);
-    vec3 bounceDir = normalize(t1 * cos(phi) * sq + t2 * sin(phi) * sq + n * sqrt(max(1.0 - xi.y, 0.0)));
+    vec3 bounceDir = normalize(tan1 * cos(phi) * sq + tan2 * sin(phi) * sq + n * sqrt(max(1.0 - xi.y, 0.0)));
 
+    vec3 bounceOrigin = hitWorld + n * voxelSize * 0.51;
     vec3 radiance;
     Hit bh;
-    vec3 bounceOrigin = hitLocal + n * voxelSize * 0.51;
-    if (raycast(bounceOrigin, bounceDir, 1e9, bh)) {
+    int bhVol;
+    if (raycastScene(v, volumeCount, crossVol, bounceOrigin, bounceDir, 1e9, bh, bhVol)) {
         vec3 bAlbedo;
         float bEmission;
-        decodeMaterial(bh.mat, bAlbedo, bEmission);
-        // Sun at the bounce hit, with a full shadow ray; the 0.3 sky term
-        // stands in for further bounces. Emissive voxels act as area lights.
-        float bNdl = max(dot(bh.normal, sunDirection.xyz), 0.0);
+        decodeMaterial(bhVol, bh.mat, bAlbedo, bEmission);
+        // Sun at the bounce hit, with a full (cross-volume) shadow ray; the
+        // 0.3 sky term stands in for further bounces. Emissive voxels act as
+        // area lights.
+        vec3 sunDir = volumes[v].sunDirection.xyz;
+        float bNdl = max(dot(bh.normal, sunDir), 0.0);
         float bShadow = 1.0;
         if (bNdl > 0.0) {
+            float bVoxel = volumes[bhVol].volumeOrigin.w;
+            vec3 so = bounceOrigin + bounceDir * bh.t + bh.normal * bVoxel * 0.51;
             Hit sh;
-            vec3 so = bounceOrigin + bounceDir * bh.t + bh.normal * voxelSize * 0.51;
-            if (raycast(so, sunDirection.xyz, 1e9, sh)) bShadow = 0.0;
+            int shVol;
+            if (raycastScene(bhVol, volumeCount, crossVol, so, sunDir, 1e9, sh, shVol)) bShadow = 0.0;
         }
-        radiance = bAlbedo * (sunColor.xyz * sunColor.w * INV_PI * bNdl * bShadow
-                              + skyRadiance(bh.normal) * 0.3)
-                 + bAlbedo * bEmission * gridDim.w;
+        radiance = bAlbedo * (volumes[v].sunColor.xyz * volumes[v].sunColor.w * INV_PI * bNdl * bShadow
+                              + skyRadiance(v, bh.normal) * 0.3)
+                 + bAlbedo * bEmission * volumes[bhVol].gridDim.w;
     } else {
-        radiance = skyRadiance(bounceDir);  // sky-light occlusion falls out naturally
+        radiance = skyRadiance(v, bounceDir);  // sky-light occlusion falls out naturally
     }
 
     // Temporal accumulation: reproject the WORLD hit into the previous frame,

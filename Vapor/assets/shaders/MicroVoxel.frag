@@ -43,7 +43,7 @@ layout(std430, set = 1, binding = 0) readonly buffer ParamsBuf {
     vec4 ambientSky;       // xyz; w = ambientIntensity
     vec4 ambientGround;    // xyz; w = albedo hash variation strength
     vec4 params;           // x = aoStrength, y = debugMode, z = reflectionsEnabled, w = giStrength
-    vec4 extra0;           // x = volumeIndex (for the per-volume GI dispatches)
+    vec4 extra0;           // x = volumeIndex, y = pageTableOffset, z = brickPoolBase, w = paletteBase
 };
 layout(std430, set = 1, binding = 1) readonly buffer PageBuf { uint pageTable[]; };
 layout(std430, set = 1, binding = 2) readonly buffer BrickBuf { uint brickPool[]; };
@@ -63,9 +63,12 @@ const float INV_PI = 0.318309886;
 
 ivec3 brickGrid() { return ivec3(gridDim.xyz) / BRICK_DIM; }
 
+// The shared buffers hold every volume's data; this volume's ranges start at
+// the offsets carried in extra0 (y = page entries, z = pool slots, w =
+// palette entries).
 uint pageEntry(ivec3 bcell) {
     ivec3 bg = brickGrid();
-    return pageTable[(bcell.z * bg.y + bcell.y) * bg.x + bcell.x];
+    return pageTable[uint(extra0.y) + uint((bcell.z * bg.y + bcell.y) * bg.x + bcell.x)];
 }
 
 int voxelIndexInBrick(ivec3 local) {
@@ -73,11 +76,13 @@ int voxelIndexInBrick(ivec3 local) {
 }
 
 bool brickOccupied(uint slot, int i) {
-    return (brickPool[slot * BRICK_WORDS + uint(i >> 5)] & (1u << (uint(i) & 31u))) != 0u;
+    uint g = uint(extra0.z) + slot;
+    return (brickPool[g * BRICK_WORDS + uint(i >> 5)] & (1u << (uint(i) & 31u))) != 0u;
 }
 
 uint brickMaterial(uint slot, int i) {
-    uint word = brickPool[slot * BRICK_WORDS + 16u + uint(i >> 2)];
+    uint g = uint(extra0.z) + slot;
+    uint word = brickPool[g * BRICK_WORDS + 16u + uint(i >> 2)];
     return (word >> ((uint(i) & 3u) * 8u)) & 0xFFu;
 }
 
@@ -265,8 +270,9 @@ float faceAO(ivec3 cell, vec3 normal, vec3 hitLocal, float voxelSize) {
 }
 
 void decodeMaterial(uint mat, out vec3 albedo, out float emission, out float reflectivity) {
-    uint w0 = palette[mat * 2u];
-    uint w1 = palette[mat * 2u + 1u];
+    uint base = (uint(extra0.w) + mat) * 2u;
+    uint w0 = palette[base];
+    uint w1 = palette[base + 1u];
     albedo = vec3(float(w0 & 0xFFu), float((w0 >> 8u) & 0xFFu), float((w0 >> 16u) & 0xFFu)) / 255.0;
     emission = float((w0 >> 24u) & 0xFFu) / 255.0;
     reflectivity = float(w1 & 0xFFu) / 255.0;

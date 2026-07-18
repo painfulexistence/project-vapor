@@ -636,12 +636,13 @@ void Renderer::shutdown() {
             rhi->destroyBuffer(materialUniformBuffer);
         }
 
-        // MicroVoxel GPU mirrors (page tables / brick pools / palettes).
-        for (auto& v : voxelVolumes) {
-            if (v.pageTable.isValid()) rhi->destroyBuffer(v.pageTable);
-            if (v.brickPool.isValid()) rhi->destroyBuffer(v.brickPool);
-            if (v.palette.isValid()) rhi->destroyBuffer(v.palette);
-        }
+        // MicroVoxel shared GPU buffers (page tables / brick pool / palettes).
+        if (voxelPageTableBuffer.isValid()) rhi->destroyBuffer(voxelPageTableBuffer);
+        if (voxelBrickPoolBuffer.isValid()) rhi->destroyBuffer(voxelBrickPoolBuffer);
+        if (voxelPaletteBuffer.isValid()) rhi->destroyBuffer(voxelPaletteBuffer);
+        voxelPageTableBuffer = {};
+        voxelBrickPoolBuffer = {};
+        voxelPaletteBuffer = {};
         voxelVolumes.clear();
         pendingVoxelVolumes.clear();
 
@@ -3945,93 +3946,116 @@ void Renderer::setVoxelVolumes(const std::vector<Vapor::VoxelVolumeDraw>& volume
 }
 
 // Reconcile the ECS-pushed volume list with the renderer's GPU mirrors and
-// flush each world's dirty batches. Buffers are created once per VoxelWorld
-// (page table sized to its brick grid, pool sized to its slot capacity) and
-// edits upload per brick — a carve never re-uploads the volume.
+// flush each world's dirty batches into the SHARED buffers. When the volume
+// set changes (add/remove/reconfigure) the shared page-table and brick-pool
+// buffers are rebuilt with sequential per-volume ranges and every live
+// volume is re-uploaded; steady-state frames upload only dirty bricks — a
+// carve never re-uploads a volume.
 void Renderer::updateVoxelVolumeResources() {
-    // Drop mirrors whose world disappeared from the ECS list.
-    for (auto it = voxelVolumes.begin(); it != voxelVolumes.end();) {
-        bool alive = false;
-        for (const auto& draw : pendingVoxelVolumes) {
-            if (draw.world.get() == it->world.get()) {
-                alive = true;
+    struct Desired {
+        std::shared_ptr<Vapor::VoxelWorld> world;
+        glm::vec3 origin;
+        Uint32 pages;
+        Uint32 capacity;
+    };
+    std::vector<Desired> desired;
+    for (const auto& draw : pendingVoxelVolumes) {
+        if (!draw.world) continue;
+        const Uint32 pages = static_cast<Uint32>(draw.world->pageTableData().size());
+        if (pages == 0) continue;  // not generated yet
+        if (desired.size() >= MAX_VOXEL_VOLUMES) break;
+        desired.push_back({ draw.world, draw.origin, pages, draw.world->capacity() });
+    }
+
+    bool layoutChanged = desired.size() != voxelVolumes.size();
+    if (!layoutChanged) {
+        for (size_t i = 0; i < desired.size(); i++) {
+            if (voxelVolumes[i].world.get() != desired[i].world.get() ||
+                voxelVolumes[i].pageEntryCount != desired[i].pages ||
+                voxelVolumes[i].brickCapacity != desired[i].capacity) {
+                layoutChanged = true;
                 break;
             }
-        }
-        if (!alive) {
-            if (it->pageTable.isValid()) rhi->destroyBuffer(it->pageTable);
-            if (it->brickPool.isValid()) rhi->destroyBuffer(it->brickPool);
-            if (it->palette.isValid()) rhi->destroyBuffer(it->palette);
-            it = voxelVolumes.erase(it);
-        } else {
-            ++it;
         }
     }
 
-    bool createdBuffers = false;
-    for (const auto& draw : pendingVoxelVolumes) {
-        if (!draw.world) continue;
-        Vapor::VoxelWorld& world = *draw.world;
+    if (layoutChanged) {
+        if (voxelPageTableBuffer.isValid()) rhi->destroyBuffer(voxelPageTableBuffer);
+        if (voxelBrickPoolBuffer.isValid()) rhi->destroyBuffer(voxelBrickPoolBuffer);
+        if (voxelPaletteBuffer.isValid()) rhi->destroyBuffer(voxelPaletteBuffer);
+        voxelPageTableBuffer = {};
+        voxelBrickPoolBuffer = {};
+        voxelPaletteBuffer = {};
+        voxelVolumes.clear();
 
-        VoxelVolumeGpu* gpu = nullptr;
-        for (auto& v : voxelVolumes) {
-            if (v.world.get() == draw.world.get()) {
-                gpu = &v;
-                break;
-            }
+        Uint32 pageBase = 0, brickBase = 0;
+        for (const auto& d : desired) {
+            VoxelVolumeGpu gpu;
+            gpu.world = d.world;
+            gpu.origin = d.origin;
+            gpu.pageTableOffset = pageBase;
+            gpu.brickPoolBase = brickBase;
+            gpu.pageEntryCount = d.pages;
+            gpu.brickCapacity = d.capacity;
+            voxelVolumes.push_back(gpu);
+            pageBase += d.pages;
+            brickBase += d.capacity;
         }
-        const Uint32 pageEntries = static_cast<Uint32>(world.pageTableData().size());
-        if (pageEntries == 0) continue;  // not generated yet
-        // A reconfigured world (new grid dims / pool budget) invalidates the
-        // mirror; drop it and rebuild below. prepareGeneration() re-flags
-        // everything dirty, so the fresh buffers get a full upload.
-        if (gpu && (gpu->pageEntryCount != pageEntries || gpu->brickCapacity != world.capacity())) {
-            if (gpu->pageTable.isValid()) rhi->destroyBuffer(gpu->pageTable);
-            if (gpu->brickPool.isValid()) rhi->destroyBuffer(gpu->brickPool);
-            if (gpu->palette.isValid()) rhi->destroyBuffer(gpu->palette);
-            *gpu = VoxelVolumeGpu {};
-            gpu->world = draw.world;
-        }
-        if (!gpu) {
-            if (voxelVolumes.size() >= MAX_VOXEL_VOLUMES) continue;
-            voxelVolumes.push_back(VoxelVolumeGpu {});
-            gpu = &voxelVolumes.back();
-            gpu->world = draw.world;
-        }
-        gpu->origin = draw.origin;
-
-        if (!gpu->pageTable.isValid()) {
+        if (!voxelVolumes.empty()) {
             BufferDesc pd;
-            pd.size = static_cast<size_t>(pageEntries) * sizeof(Uint32);
+            pd.size = static_cast<size_t>(pageBase) * sizeof(Uint32);
             pd.usage = BufferUsage::Storage;
             pd.memoryUsage = MemoryUsage::GPU;
-            gpu->pageTable = rhi->createBuffer(pd);
+            voxelPageTableBuffer = rhi->createBuffer(pd);
 
             BufferDesc bd;
-            bd.size = static_cast<size_t>(world.capacity()) * sizeof(Vapor::VoxelWorld::Brick);
+            bd.size = static_cast<size_t>(brickBase) * sizeof(Vapor::VoxelWorld::Brick);
             bd.usage = BufferUsage::Storage;
             bd.memoryUsage = MemoryUsage::GPU;
-            gpu->brickPool = rhi->createBuffer(bd);
+            voxelBrickPoolBuffer = rhi->createBuffer(bd);
 
             BufferDesc pald;
-            pald.size = 256 * sizeof(Vapor::VoxelMaterial);
+            pald.size = static_cast<size_t>(MAX_VOXEL_VOLUMES) * 256 * sizeof(Vapor::VoxelMaterial);
             pald.usage = BufferUsage::Storage;
             pald.memoryUsage = MemoryUsage::GPU;
-            gpu->palette = rhi->createBuffer(pald);
+            voxelPaletteBuffer = rhi->createBuffer(pald);
+        }
+    }
 
-            gpu->pageEntryCount = pageEntries;
-            gpu->brickCapacity = world.capacity();
-            createdBuffers = true;
+    bool needsFlush = false;
+    for (size_t i = 0; i < voxelVolumes.size(); i++) {
+        VoxelVolumeGpu& gpu = voxelVolumes[i];
+        gpu.origin = desired[i].origin;
+        Vapor::VoxelWorld& world = *gpu.world;
+
+        if (layoutChanged) {
+            // Fresh ranges: upload everything this world currently has and
+            // drain its dirty flags (later generation lands as new batches).
+            world.takeDirty();
+            rhi->updateBuffer(voxelPageTableBuffer, world.pageTableData().data(),
+                              static_cast<size_t>(gpu.pageTableOffset) * sizeof(Uint32),
+                              static_cast<size_t>(gpu.pageEntryCount) * sizeof(Uint32));
+            if (world.brickPoolSize() > 0) {
+                rhi->updateBuffer(voxelBrickPoolBuffer, &world.brick(0),
+                                  static_cast<size_t>(gpu.brickPoolBase) * sizeof(Vapor::VoxelWorld::Brick),
+                                  static_cast<size_t>(world.brickPoolSize()) * sizeof(Vapor::VoxelWorld::Brick));
+            }
+            rhi->updateBuffer(voxelPaletteBuffer, world.paletteData().data(),
+                              i * 256 * sizeof(Vapor::VoxelMaterial), 256 * sizeof(Vapor::VoxelMaterial));
+            needsFlush = true;
+            continue;
         }
 
         if (!world.hasDirty()) continue;
         Vapor::VoxelWorld::DirtyBatch batch = world.takeDirty();
         if (batch.pageTable) {
-            rhi->updateBuffer(gpu->pageTable, world.pageTableData().data(), 0,
-                              static_cast<size_t>(pageEntries) * sizeof(Uint32));
+            rhi->updateBuffer(voxelPageTableBuffer, world.pageTableData().data(),
+                              static_cast<size_t>(gpu.pageTableOffset) * sizeof(Uint32),
+                              static_cast<size_t>(gpu.pageEntryCount) * sizeof(Uint32));
         }
         if (batch.palette) {
-            rhi->updateBuffer(gpu->palette, world.paletteData().data(), 0, 256 * sizeof(Vapor::VoxelMaterial));
+            rhi->updateBuffer(voxelPaletteBuffer, world.paletteData().data(),
+                              i * 256 * sizeof(Vapor::VoxelMaterial), 256 * sizeof(Vapor::VoxelMaterial));
         }
         if (!batch.brickSlots.empty()) {
             // The CPU pool is contiguous, so consecutive slots merge into one
@@ -4039,24 +4063,25 @@ void Renderer::updateVoxelVolumeResources() {
             // per-brick updates into a few large ranges.
             std::sort(batch.brickSlots.begin(), batch.brickSlots.end());
             size_t runStart = 0;
-            for (size_t i = 1; i <= batch.brickSlots.size(); i++) {
-                if (i < batch.brickSlots.size() && batch.brickSlots[i] == batch.brickSlots[i - 1] + 1) {
+            for (size_t r = 1; r <= batch.brickSlots.size(); r++) {
+                if (r < batch.brickSlots.size() && batch.brickSlots[r] == batch.brickSlots[r - 1] + 1) {
                     continue;
                 }
                 const Uint32 first = batch.brickSlots[runStart];
-                const Uint32 count = batch.brickSlots[i - 1] - first + 1;
-                rhi->updateBuffer(gpu->brickPool, &world.brick(first),
-                                  static_cast<size_t>(first) * sizeof(Vapor::VoxelWorld::Brick),
-                                  static_cast<size_t>(count) * sizeof(Vapor::VoxelWorld::Brick));
-                runStart = i;
+                const Uint32 count = batch.brickSlots[r - 1] - first + 1;
+                rhi->updateBuffer(
+                    voxelBrickPoolBuffer, &world.brick(first),
+                    (static_cast<size_t>(gpu.brickPoolBase) + first) * sizeof(Vapor::VoxelWorld::Brick),
+                    static_cast<size_t>(count) * sizeof(Vapor::VoxelWorld::Brick));
+                runStart = r;
             }
         }
     }
-    // GPU-only uploads are normally submitted before the NEXT frame; a volume
-    // whose buffers were created this frame would draw one frame from
-    // uninitialized memory (a garbage page table can even index the pool out
-    // of bounds). Force the initial upload through before it is first used.
-    if (createdBuffers) rhi->flushUploads();
+    // GPU-only uploads are normally submitted before the NEXT frame; freshly
+    // (re)created shared buffers would draw one frame from uninitialized
+    // memory (a garbage page table can even index the pool out of bounds).
+    // Force the initial upload through before first use.
+    if (needsFlush) rhi->flushUploads();
 }
 
 // Box-rasterized two-level DDA over every registered voxel volume, writing
@@ -4084,15 +4109,19 @@ void Renderer::microVoxelPass() {
         microVoxelGIParamsBuffer.isValid() && voxelGIAccumRT[0].isValid() && tempColorRT.isValid();
     if (!voxelGIActiveThisFrame) voxelGIHistoryValid = false;
 
+    if (!voxelPageTableBuffer.isValid() || !voxelBrickPoolBuffer.isValid() || !voxelPaletteBuffer.isValid()) {
+        voxelGIActiveThisFrame = false;
+        return;
+    }
+
     std::array<MicroVoxelRenderData, MAX_VOXEL_VOLUMES> data {};
-    Uint32 written = 0;
+    const Uint32 written = static_cast<Uint32>(std::min<size_t>(voxelVolumes.size(), MAX_VOXEL_VOLUMES));
     const glm::mat4 viewProj = currentCamera.proj * currentCamera.view;
     glm::vec3 sunDir = atmosphereData.sunDirection;
     sunDir = (glm::length(sunDir) > 1e-6f) ? glm::normalize(sunDir) : glm::vec3(0.0f, 1.0f, 0.0f);
-    for (const auto& gpu : voxelVolumes) {
-        if (written >= MAX_VOXEL_VOLUMES) break;
-        if (!gpu.pageTable.isValid() || !gpu.brickPool.isValid() || !gpu.palette.isValid()) continue;
-        MicroVoxelRenderData& d = data[written];
+    for (Uint32 i = 0; i < written; i++) {
+        const VoxelVolumeGpu& gpu = voxelVolumes[i];
+        MicroVoxelRenderData& d = data[i];
         d = microVoxelSettings;
         d.viewProj = viewProj;
         d.cameraPosition = glm::vec4(currentCamera.position, microVoxelSettings.cameraPosition.w);
@@ -4101,9 +4130,10 @@ void Renderer::microVoxelPass() {
         d.sunDirection = glm::vec4(sunDir, microVoxelSettings.sunDirection.w);
         d.sunColor = glm::vec4(atmosphereData.sunColor, atmosphereData.sunIntensity);
         d.params.w = voxelGIActiveThisFrame ? microVoxelGIStrength : 0.0f;
-        d.extra0.x = static_cast<float>(written);
-        voxelVolumesDrawnRefs[written] = &gpu;
-        written++;
+        // Shared-buffer ranges: the slice index doubles as the palette slot.
+        d.extra0 = glm::vec4(static_cast<float>(i), static_cast<float>(gpu.pageTableOffset),
+                             static_cast<float>(gpu.brickPoolBase), static_cast<float>(i * 256u));
+        voxelVolumesDrawnRefs[i] = &gpu;
     }
     if (written == 0) {
         voxelGIActiveThisFrame = false;
@@ -4129,21 +4159,25 @@ void Renderer::microVoxelPass() {
     rp.loadDepth = true;            // test against + write voxel hit depth
     rhi->beginRenderPass(rp);
     rhi->bindPipeline(microVoxelPipeline);
+    rhi->setFragmentBuffer(1, voxelPageTableBuffer);
+    rhi->setFragmentBuffer(2, voxelBrickPoolBuffer);
+    rhi->setFragmentBuffer(3, voxelPaletteBuffer);
     for (Uint32 i = 0; i < written; i++) {
         const size_t offset = static_cast<size_t>(i) * sizeof(MicroVoxelRenderData);
         rhi->setVertexBuffer(0, microVoxelDataBuffer, offset, sizeof(MicroVoxelRenderData));
         rhi->setFragmentBuffer(0, microVoxelDataBuffer, offset, sizeof(MicroVoxelRenderData));
-        rhi->setFragmentBuffer(1, voxelVolumesDrawnRefs[i]->pageTable);
-        rhi->setFragmentBuffer(2, voxelVolumesDrawnRefs[i]->brickPool);
-        rhi->setFragmentBuffer(3, voxelVolumesDrawnRefs[i]->palette);
         rhi->draw(36, 1, 0, 0);
     }
     rhi->endRenderPass();
 }
 
-// Half-res 1-bounce trace + temporal accumulation, one dispatch per volume
-// (each shades only its own G-buffer pixels). History reads the previous
-// frame's RAW accumulation; the filtered result never feeds back.
+// Half-res 1-bounce trace + temporal accumulation in ONE dispatch: the
+// kernel reads each pixel's volume index from the G-buffer and indexes the
+// bound params array, and with cross-volume on its bounce rays brute-force
+// every volume for the nearest hit (the original's giCrossVolume, without
+// its 4-sampler cap — shared buffers dynamically index any volume count).
+// History reads the previous frame's RAW accumulation; the filtered result
+// never feeds back.
 void Renderer::microVoxelGIPass() {
     if (!voxelGIActiveThisFrame || voxelVolumesDrawn == 0) return;
 
@@ -4158,25 +4192,26 @@ void Renderer::microVoxelGIPass() {
                           static_cast<float>(voxelGIWidth), static_cast<float>(voxelGIHeight));
     const bool giDebugView = static_cast<int>(microVoxelSettings.params.y) == 5;
     gp.sigmas = glm::vec4(microVoxelGISigmas, giDebugView ? 1.0f : 0.0f);
+    gp.counts = glm::vec4(static_cast<float>(voxelVolumesDrawn), microVoxelGICrossVolume ? 1.0f : 0.0f,
+                          0.0f, 0.0f);
     rhi->updateBuffer(microVoxelGIParamsBuffer, &gp, 0, sizeof(gp));
 
     const int cur = voxelGICur;
     const int prev = 1 - cur;
     rhi->beginComputePass("MicroVoxelGI");
     rhi->bindComputePipeline(microVoxelGIPipeline);
-    for (Uint32 i = 0; i < voxelVolumesDrawn; i++) {
-        const size_t offset = static_cast<size_t>(i) * sizeof(MicroVoxelRenderData);
-        rhi->setComputeBuffer(0, microVoxelDataBuffer, offset, sizeof(MicroVoxelRenderData));
-        rhi->setComputeBuffer(1, microVoxelGIParamsBuffer, 0, sizeof(MicroVoxelGIRenderData));
-        rhi->setComputeBuffer(2, voxelVolumesDrawnRefs[i]->pageTable);
-        rhi->setComputeBuffer(3, voxelVolumesDrawnRefs[i]->brickPool);
-        rhi->setComputeBuffer(4, voxelVolumesDrawnRefs[i]->palette);
-        rhi->setComputeTexture(0, voxelGIAccumRT[cur]);
-        rhi->setComputeSampledTexture(1, voxelHitTRT, shadowSampler);
-        rhi->setComputeSampledTexture(2, voxelNormalMatRT, shadowSampler);
-        rhi->setComputeSampledTexture(3, voxelGIAccumRT[prev], clampSampler);
-        rhi->dispatch((voxelGIWidth + 7) / 8, (voxelGIHeight + 7) / 8, 1);
-    }
+    // The FULL per-volume params array — the kernel indexes it dynamically.
+    rhi->setComputeBuffer(0, microVoxelDataBuffer, 0,
+                          static_cast<size_t>(voxelVolumesDrawn) * sizeof(MicroVoxelRenderData));
+    rhi->setComputeBuffer(1, microVoxelGIParamsBuffer, 0, sizeof(MicroVoxelGIRenderData));
+    rhi->setComputeBuffer(2, voxelPageTableBuffer);
+    rhi->setComputeBuffer(3, voxelBrickPoolBuffer);
+    rhi->setComputeBuffer(4, voxelPaletteBuffer);
+    rhi->setComputeTexture(0, voxelGIAccumRT[cur]);
+    rhi->setComputeSampledTexture(1, voxelHitTRT, shadowSampler);
+    rhi->setComputeSampledTexture(2, voxelNormalMatRT, shadowSampler);
+    rhi->setComputeSampledTexture(3, voxelGIAccumRT[prev], clampSampler);
+    rhi->dispatch((voxelGIWidth + 7) / 8, (voxelGIHeight + 7) / 8, 1);
     rhi->endComputePass();
     rhi->computeBarrier();
 }
@@ -7461,6 +7496,7 @@ void Renderer::drawGraphicsImGui() {
         ImGui::DragFloat("Emissive strength", &microVoxelSettings.gridDim.w, 0.1f, 0.0f, 16.0f);
         ImGui::SeparatorText("Traced GI");
         ImGui::SliderFloat("GI strength", &microVoxelGIStrength, 0.0f, 2.0f);
+        ImGui::Checkbox("Cross-volume bounces", &microVoxelGICrossVolume);
         ImGui::SliderFloat("Temporal blend", &microVoxelGIBlend, 0.0f, 0.99f);
         ImGui::SliderInt("A-trous iterations", &microVoxelGIAtrousIterations, 0, 5);
         ImGui::DragFloat3("Sigmas (depth/normal/luma)", &microVoxelGISigmas.x, 0.1f, 0.0f, 128.0f);

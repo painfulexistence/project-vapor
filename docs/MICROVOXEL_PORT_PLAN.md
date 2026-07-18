@@ -6,10 +6,12 @@ depth-writing pass with GLSL/MSL twins, ECS component/system with
 task-scheduler chunk streaming and per-brick dirty uploads, the voxel
 G-buffer + half-res traced GI (temporal + à-trous + composite), and
 `Examples/MicroVoxel` (dioramas incl. a 2.5 cm one; `--big` for a
-1024×256×1024 streaming world). Still open (Phase 3/4 tails): camera-radius
-chunk eviction for unbounded worlds, LOD bricks, clustered-light shading in
-the voxel pass, engine-IBL ambient, cross-volume GI, voxels→PSSM shadow
-casting, GPU generation, hardware-RT variant. Deviations from the plan
+1024×256×1024 streaming world), and cross-volume GI (all volumes share
+dynamically-indexed page/pool/palette buffers, so bounce rays brute-force
+every volume — the original's giCrossVolume without its 4-sampler cap).
+Still open (Phase 3/4 tails): camera-radius chunk eviction for unbounded
+worlds, LOD bricks, clustered-light shading in the voxel pass, engine-IBL
+ambient, voxels→PSSM shadow casting, GPU generation, hardware-RT variant. Deviations from the plan
 below are noted in commit messages; the biggest is that the primary pass
 stayed forward-shaded (with the G-buffer written alongside) rather than
 fully deferred — the GI still consumes the G-buffer without re-tracing.

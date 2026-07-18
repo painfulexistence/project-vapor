@@ -316,6 +316,7 @@ public:
     float& getMicroVoxelGIStrength() { return microVoxelGIStrength; }
     int& getMicroVoxelGIAtrousIterations() { return microVoxelGIAtrousIterations; }
     float& getMicroVoxelGISplitX() { return microVoxelGISplitX; }
+    bool& getMicroVoxelGICrossVolume() { return microVoxelGICrossVolume; }
 
     // ========================================================================
     // Texture Creation (for sprites/batch rendering)
@@ -707,18 +708,23 @@ private:
     VolumeRenderData volumeSettings;     // panel tunables (box/density/albedo/steps)
     // MicroVoxel raymarch (sparse-brick voxel volumes, MicroVoxel.frag /
     // 3d_microvoxel.metal). Volumes arrive per frame from VoxelVolumeSystem
-    // via setVoxelVolumes(); the renderer keeps one GPU mirror (page table +
-    // brick pool + palette buffers) per live VoxelWorld and flushes its
-    // per-brick dirty batches each frame — edits never re-upload the volume.
+    // via setVoxelVolumes(). All volumes share three GPU buffers (page
+    // tables, brick pool, palettes) with per-volume offsets — unlike the
+    // original's fixed sampler slots, shaders can dynamically index any
+    // number of volumes, which is what makes cross-volume GI possible under
+    // the RHI's 8-bindings-per-set limit. Dirty batches still upload per
+    // brick — edits never re-upload a volume.
     struct VoxelVolumeGpu {
         std::shared_ptr<Vapor::VoxelWorld> world;
         glm::vec3 origin = glm::vec3(0.0f);
-        BufferHandle pageTable;
-        BufferHandle brickPool;
-        BufferHandle palette;
-        Uint32 pageEntryCount = 0;   // page-table entries the buffer was sized for
-        Uint32 brickCapacity = 0;    // pool slots the buffer was sized for
+        Uint32 pageTableOffset = 0;  // first page entry in the shared table
+        Uint32 brickPoolBase = 0;    // first pool slot in the shared pool
+        Uint32 pageEntryCount = 0;   // page-table entries this volume owns
+        Uint32 brickCapacity = 0;    // pool slots this volume owns
     };
+    BufferHandle voxelPageTableBuffer;  // concatenated per-volume page tables
+    BufferHandle voxelBrickPoolBuffer;  // concatenated per-volume slot ranges
+    BufferHandle voxelPaletteBuffer;    // MAX_VOXEL_VOLUMES x 256 materials
     static constexpr Uint32 MAX_VOXEL_VOLUMES = 8;
     std::vector<VoxelVolumeGpu> voxelVolumes;          // renderer-owned GPU mirrors
     std::vector<Vapor::VoxelVolumeDraw> pendingVoxelVolumes;  // last ECS push
@@ -756,6 +762,9 @@ private:
     int microVoxelGIAtrousIterations = 3;
     glm::vec3 microVoxelGISigmas = glm::vec3(0.5f, 64.0f, 8.0f);  // depth/normal/luma
     float microVoxelGISplitX = -1.0f;       // >= 0: raw|denoised split compare
+    // Bounce rays test every volume (nearest hit) so light bleeds between
+    // them — the original demo's giCrossVolume, minus its 4-volume cap.
+    bool microVoxelGICrossVolume = true;
     // Per-frame state shared between the MicroVoxel passes.
     bool voxelGIActiveThisFrame = false;
     Uint32 voxelVolumesDrawn = 0;

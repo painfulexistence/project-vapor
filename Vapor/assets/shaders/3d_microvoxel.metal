@@ -30,7 +30,7 @@ struct MicroVoxelData {
     float4 ambientSky;       // xyz; w = ambientIntensity
     float4 ambientGround;    // xyz; w = albedo hash variation strength
     float4 params;           // x = aoStrength, y = debugMode, z = reflectionsEnabled, w = giStrength
-    float4 extra0;           // x = volumeIndex (for the per-volume GI dispatches)
+    float4 extra0;           // x = volumeIndex, y = pageTableOffset, z = brickPoolBase, w = paletteBase
     float4 _pad[3];
 };
 
@@ -79,21 +79,26 @@ static inline int3 mvBrickGrid(constant MicroVoxelData& u) {
     return int3(u.gridDim.xyz) / MV_BRICK_DIM;
 }
 
+// The shared buffers hold every volume's data; this volume's ranges start at
+// the offsets carried in extra0 (y = page entries, z = pool slots, w =
+// palette entries).
 static inline uint mvPageEntry(constant MicroVoxelData& u, device const uint* pageTable, int3 bcell) {
     int3 bg = mvBrickGrid(u);
-    return pageTable[(bcell.z * bg.y + bcell.y) * bg.x + bcell.x];
+    return pageTable[uint(u.extra0.y) + uint((bcell.z * bg.y + bcell.y) * bg.x + bcell.x)];
 }
 
 static inline int mvVoxelIndexInBrick(int3 local) {
     return local.x + local.y * MV_BRICK_DIM + local.z * MV_BRICK_DIM * MV_BRICK_DIM;
 }
 
-static inline bool mvBrickOccupied(device const uint* brickPool, uint slot, int i) {
-    return (brickPool[slot * MV_BRICK_WORDS + uint(i >> 5)] & (1u << (uint(i) & 31u))) != 0u;
+static inline bool mvBrickOccupied(constant MicroVoxelData& u, device const uint* brickPool, uint slot, int i) {
+    uint g = uint(u.extra0.z) + slot;
+    return (brickPool[g * MV_BRICK_WORDS + uint(i >> 5)] & (1u << (uint(i) & 31u))) != 0u;
 }
 
-static inline uint mvBrickMaterial(device const uint* brickPool, uint slot, int i) {
-    uint word = brickPool[slot * MV_BRICK_WORDS + 16u + uint(i >> 2)];
+static inline uint mvBrickMaterial(constant MicroVoxelData& u, device const uint* brickPool, uint slot, int i) {
+    uint g = uint(u.extra0.z) + slot;
+    uint word = brickPool[g * MV_BRICK_WORDS + 16u + uint(i >> 2)];
     return (word >> ((uint(i) & 3u) * 8u)) & 0xFFu;
 }
 
@@ -104,7 +109,7 @@ static inline uint mvVoxelMat(constant MicroVoxelData& u, device const uint* pag
     uint entry = mvPageEntry(u, pageTable, cell / MV_BRICK_DIM);
     if (entry == MV_PAGE_EMPTY) return 0u;
     if ((entry & MV_PAGE_UNIFORM_BIT) != 0u) return entry & 0xFFu;
-    return mvBrickMaterial(brickPool, entry, mvVoxelIndexInBrick(cell % MV_BRICK_DIM));
+    return mvBrickMaterial(u, brickPool, entry, mvVoxelIndexInBrick(cell % MV_BRICK_DIM));
 }
 
 // ============================================================================
@@ -118,9 +123,9 @@ struct MvHit {
     uint mat;
 };
 
-static bool mvTraverseBrick(float3 ro, float3 rd, float3 invD, device const uint* brickPool,
-                            uint slot, int3 bcell, float tIn, float3 enterNormal,
-                            float voxelSize, thread MvHit& hit) {
+static bool mvTraverseBrick(constant MicroVoxelData& u, float3 ro, float3 rd, float3 invD,
+                            device const uint* brickPool, uint slot, int3 bcell, float tIn,
+                            float3 enterNormal, float voxelSize, thread MvHit& hit) {
     int3 lo = bcell * MV_BRICK_DIM;
     float eps = voxelSize * 1e-3;
     int3 cell = clamp(int3(floor((ro + rd * (tIn + eps)) / voxelSize)), lo, lo + MV_BRICK_DIM - 1);
@@ -132,11 +137,11 @@ static bool mvTraverseBrick(float3 ro, float3 rd, float3 invD, device const uint
     float3 normal = enterNormal;
     for (int i = 0; i < 3 * MV_BRICK_DIM + 1; i++) {
         int vi = mvVoxelIndexInBrick(cell - lo);
-        if (mvBrickOccupied(brickPool, slot, vi)) {
+        if (mvBrickOccupied(u, brickPool, slot, vi)) {
             hit.t = t;
             hit.normal = normal;
             hit.cell = cell;
-            hit.mat = mvBrickMaterial(brickPool, slot, vi);
+            hit.mat = mvBrickMaterial(u, brickPool, slot, vi);
             return true;
         }
         if (tMax.x < tMax.y && tMax.x < tMax.z) {
@@ -208,7 +213,7 @@ static bool mvRaycast(constant MicroVoxelData& u, device const uint* pageTable,
                 hit.mat = entry & 0xFFu;
                 return t <= maxDist;
             }
-            if (mvTraverseBrick(ro, rd, invD, brickPool, entry, bcell, t, normal, voxelSize, hit)) {
+            if (mvTraverseBrick(u, ro, rd, invD, brickPool, entry, bcell, t, normal, voxelSize, hit)) {
                 return hit.t <= maxDist;
             }
         }
@@ -278,11 +283,12 @@ static float mvFaceAO(constant MicroVoxelData& u, device const uint* pageTable,
     return mix(mix(aoNN, aoPN, uu), mix(aoNP, aoPP, uu), vv);
 }
 
-static inline void mvDecodeMaterial(device const uint* palette, uint mat,
+static inline void mvDecodeMaterial(constant MicroVoxelData& u, device const uint* palette, uint mat,
                                     thread float3& albedo, thread float& emission,
                                     thread float& reflectivity) {
-    uint w0 = palette[mat * 2u];
-    uint w1 = palette[mat * 2u + 1u];
+    uint base = (uint(u.extra0.w) + mat) * 2u;
+    uint w0 = palette[base];
+    uint w1 = palette[base + 1u];
     albedo = float3(float(w0 & 0xFFu), float((w0 >> 8u) & 0xFFu), float((w0 >> 16u) & 0xFFu)) / 255.0;
     emission = float((w0 >> 24u) & 0xFFu) / 255.0;
     reflectivity = float(w1 & 0xFFu) / 255.0;
@@ -321,7 +327,7 @@ fragment MicroVoxelFragOut microVoxelFragment(
 
     float3 albedo;
     float emission, reflectivity;
-    mvDecodeMaterial(palette, hit.mat, albedo, emission, reflectivity);
+    mvDecodeMaterial(u, palette, hit.mat, albedo, emission, reflectivity);
     albedo *= mix(1.0, 0.85 + 0.3 * mvVoxelHash(hit.cell), u.ambientGround.w);
 
     float3 sunDir = u.sunDirection.xyz;
@@ -352,7 +358,7 @@ fragment MicroVoxelFragOut microVoxelFragment(
         if (mvRaycast(u, pageTable, brickPool, rorigin, rdir, 1e9f, rh)) {
             float3 rAlbedo;
             float rEmission, rRefl;
-            mvDecodeMaterial(palette, rh.mat, rAlbedo, rEmission, rRefl);
+            mvDecodeMaterial(u, palette, rh.mat, rAlbedo, rEmission, rRefl);
             float rNdl = max(dot(rh.normal, sunDir), 0.0f);
             refl = rAlbedo * (u.sunColor.xyz * u.sunColor.w * MV_INV_PI * rNdl + mvSkyRadiance(u, rh.normal))
                  + rAlbedo * rEmission * u.gridDim.w;
