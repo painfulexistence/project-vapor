@@ -78,6 +78,9 @@ kernel void computeMain(
     constant GIBSData&               gibs              [[buffer(4)]],
     instance_acceleration_structure  TLAS              [[buffer(5)]],
     constant RefractionParams&       params            [[buffer(6)]],
+    device const InstanceData*       instances         [[buffer(7)]],
+    device const MaterialData*       materials         [[buffer(8)]],
+    device const DirLight*           directionalLights [[buffer(9)]],
     uint2 tid [[thread_position_in_grid]]
 ) {
     uint w = refractionTexture.get_width();
@@ -125,7 +128,7 @@ kernel void computeMain(
     ray.max_distance = params.rayMaxDistance;
 
     // Closest hit (not any-hit): we need the hit DISTANCE to locate the point.
-    raytracing::intersector<raytracing::instancing> inter;
+    raytracing::intersector<raytracing::triangle_data, raytracing::instancing> inter;
     inter.assume_geometry_type(raytracing::geometry_type::triangle);
     auto hit = inter.intersect(ray, TLAS, 0xFF);
 
@@ -133,10 +136,42 @@ kernel void computeMain(
     float hitMask;
     if (hit.type == raytracing::intersection_type::triangle) {
         float3 hitPos = ray.origin + T * hit.distance;
-        // No hit normal without vertex fetch; a surface hit head-on by the ray
-        // faces roughly -T (the surfel weight's normal-similarity term only
-        // needs an approximation).
-        color = surfelRadianceAt(hitPos, -T, surfels, cellHeads, surfelNext, gibs);
+
+        // Standalone hit shading — same recipe as the reflection kernel:
+        // geometric normal + material base color + one sun occlusion ray +
+        // env-irradiance ambient; GIBS adds indirect when live.
+        uint iid = hit.user_instance_id;
+        InstanceData inst = instances[iid];
+        float3x3 model33 = float3x3(inst.model[0].xyz, inst.model[1].xyz, inst.model[2].xyz);
+        float3 hitN = normalize(model33 * hit.triangle_normal);
+        if (dot(hitN, T) > 0.0) hitN = -hitN;
+
+        MaterialData mat = materials[inst.materialID];
+        float3 base = mat.baseColorFactor.rgb;
+
+        DirLight sun = directionalLights[0];
+        float3 L = normalize(-sun.direction);
+        float sunVis = 0.0;
+        float nl = max(dot(hitN, L), 0.0);
+        if (nl > 0.0) {
+            raytracing::ray shadowRay;
+            shadowRay.origin = hitPos + hitN * params.rayBias;
+            shadowRay.direction = L;
+            shadowRay.min_distance = 0.001;
+            shadowRay.max_distance = params.rayMaxDistance;
+            raytracing::intersector<raytracing::instancing> occ;
+            occ.assume_geometry_type(raytracing::geometry_type::triangle);
+            occ.accept_any_intersection(true);
+            auto sh = occ.intersect(shadowRay, TLAS, 0xFF);
+            sunVis = (sh.type == raytracing::intersection_type::none) ? 1.0 : 0.0;
+        }
+
+        constexpr sampler envSampler(filter::linear, mip_filter::linear);
+        float3 ambient = envMap.sample(envSampler, hitN, level(4.0)).rgb;
+
+        color = base * (sun.color * sun.intensity * (sunVis * nl) + ambient)
+              + float3(mat.emissiveFactor) * mat.emissiveStrength;
+        color += base * surfelRadianceAt(hitPos, hitN, surfels, cellHeads, surfelNext, gibs);
         hitMask = 1.0;
     } else {
         constexpr sampler envSampler(filter::linear, mip_filter::linear);

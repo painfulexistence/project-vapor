@@ -2158,9 +2158,13 @@ void RHI_Metal::buildAccelerationStructure(AccelStructHandle handle) {
         if (resource.instances.empty()) return;
 
         // Deduped BLAS array; each instance descriptor indexes into it.
+        // UserID descriptors: userID carries AccelStructInstance::instanceID
+        // (the renderer's InstanceData index), so RT kernels can map a hit
+        // back to per-instance data via intersection.user_instance_id —
+        // the plain descriptor type dropped that mapping entirely.
         std::vector<NS::Object*> blasObjects;
         std::unordered_map<Uint32, Uint32> blasIndex;
-        std::vector<MTL::AccelerationStructureInstanceDescriptor> descriptors;
+        std::vector<MTL::AccelerationStructureUserIDInstanceDescriptor> descriptors;
         descriptors.reserve(resource.instances.size());
         for (const auto& inst : resource.instances) {
             auto blasIt = accelStructs.find(inst.blas.id);
@@ -2173,7 +2177,7 @@ void RHI_Metal::buildAccelerationStructure(AccelStructHandle handle) {
             // Zero-initialize: garbage options bits (NonOpaque, winding flags)
             // make rays miss whole instances — the native renderer learned this
             // the hard way (see its accel-instance fill).
-            MTL::AccelerationStructureInstanceDescriptor d{};
+            MTL::AccelerationStructureUserIDInstanceDescriptor d{};
             for (int c = 0; c < 4; ++c)
                 for (int r = 0; r < 3; ++r)
                     d.transformationMatrix.columns[c][r] = inst.transform[c][r];
@@ -2181,6 +2185,7 @@ void RHI_Metal::buildAccelerationStructure(AccelStructHandle handle) {
             d.mask = inst.mask;
             d.options = MTL::AccelerationStructureInstanceOptionOpaque;
             d.intersectionFunctionTableOffset = 0;
+            d.userID = inst.instanceID;
             descriptors.push_back(d);
         }
         if (descriptors.empty()) {
@@ -2213,6 +2218,9 @@ void RHI_Metal::buildAccelerationStructure(AccelStructHandle handle) {
         tlasDesc->setInstancedAccelerationStructures(resource.blasArray.get());
         tlasDesc->setInstanceCount(descriptors.size());
         tlasDesc->setInstanceDescriptorBuffer(instBuf.get());
+        // The buffer holds UserID descriptors — Metal must be told, or it
+        // reads them with the default (plain) stride/layout.
+        tlasDesc->setInstanceDescriptorType(MTL::AccelerationStructureInstanceDescriptorTypeUserID);
 
         auto sizes = device->accelerationStructureSizes(tlasDesc.get());
         auto& scratch = resource.scratchSlots[slot];

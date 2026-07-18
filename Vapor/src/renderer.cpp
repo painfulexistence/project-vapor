@@ -2626,6 +2626,11 @@ void Renderer::raytraceReflectionPass() {
     rhi->setComputeBuffer(4, gibsDataBuffer, 0, sizeof(GIBSData));
     rhi->setAccelerationStructure(5, sceneTLAS);
     rhi->setComputeBytes(&rp, sizeof(rp), 6);
+    // Standalone hit shading inputs: user_instance_id -> InstanceData ->
+    // materialID -> base color; dirLights[0] for the sun occlusion ray.
+    rhi->setComputeBuffer(7, instanceDataBuffer, 0, sizeof(Vapor::InstanceData) * MAX_INSTANCES);
+    rhi->setComputeBuffer(8, materialUniformBuffer, 0, sizeof(Vapor::MaterialData) * MAX_INSTANCES);
+    rhi->setComputeBuffer(9, directionalLightBuffer, 0, sizeof(DirectionalLightData) * maxDirectionalLights);
     rhi->dispatch((w + 7) / 8, (h + 7) / 8, 1);
     rhi->endComputePass();
     rhi->computeBarrier();  // reflection writes -> fragment reads in Main
@@ -2673,6 +2678,11 @@ void Renderer::raytraceRefractionPass() {
     rhi->setComputeBuffer(4, gibsDataBuffer, 0, sizeof(GIBSData));
     rhi->setAccelerationStructure(5, sceneTLAS);
     rhi->setComputeBytes(&rp, sizeof(rp), 6);
+    // Standalone hit shading inputs: user_instance_id -> InstanceData ->
+    // materialID -> base color; dirLights[0] for the sun occlusion ray.
+    rhi->setComputeBuffer(7, instanceDataBuffer, 0, sizeof(Vapor::InstanceData) * MAX_INSTANCES);
+    rhi->setComputeBuffer(8, materialUniformBuffer, 0, sizeof(Vapor::MaterialData) * MAX_INSTANCES);
+    rhi->setComputeBuffer(9, directionalLightBuffer, 0, sizeof(DirectionalLightData) * maxDirectionalLights);
     rhi->dispatch((w + 7) / 8, (h + 7) / 8, 1);
     rhi->endComputePass();
     rhi->computeBarrier();  // refraction writes -> fragment reads in Main
@@ -7000,7 +7010,7 @@ void Renderer::drawGraphicsImGui() {
     if (ImGui::TreeNode("RT Reflections")) {
         ImGui::Checkbox("Enabled", &rtReflectionsEnabled);
         ImGui::SliderFloat("Intensity", &rtReflectionIntensity, 0.0f, 2.0f);
-        ImGui::TextDisabled("hits shade from GIBS surfels; enable GI for full effect");
+        ImGui::TextDisabled("standalone hit shading (base color + sun); GI adds indirect bounce");
         ImGui::TreePop();
     }
 
