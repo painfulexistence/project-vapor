@@ -3968,6 +3968,7 @@ void Renderer::updateVoxelVolumeResources() {
         }
     }
 
+    bool createdBuffers = false;
     for (const auto& draw : pendingVoxelVolumes) {
         if (!draw.world) continue;
         Vapor::VoxelWorld& world = *draw.world;
@@ -4020,6 +4021,7 @@ void Renderer::updateVoxelVolumeResources() {
 
             gpu->pageEntryCount = pageEntries;
             gpu->brickCapacity = world.capacity();
+            createdBuffers = true;
         }
 
         if (!world.hasDirty()) continue;
@@ -4050,6 +4052,11 @@ void Renderer::updateVoxelVolumeResources() {
             }
         }
     }
+    // GPU-only uploads are normally submitted before the NEXT frame; a volume
+    // whose buffers were created this frame would draw one frame from
+    // uninitialized memory (a garbage page table can even index the pool out
+    // of bounds). Force the initial upload through before it is first used.
+    if (createdBuffers) rhi->flushUploads();
 }
 
 // Box-rasterized two-level DDA over every registered voxel volume, writing

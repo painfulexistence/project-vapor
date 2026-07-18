@@ -34,10 +34,13 @@ struct MicroVoxelGIData {
     float4 giSigmas;           // x = depth, y = normal, z = luma, w = debugModeGI
 };
 
+// MSL: constant-address-space arrays must live at program scope.
+constant float3 mvFaceNormals[6] = { float3(1, 0, 0), float3(-1, 0, 0), float3(0, 1, 0),
+                                     float3(0, -1, 0), float3(0, 0, 1), float3(0, 0, -1) };
+constant float mvAtrousKernel[5] = { 1.0 / 16.0, 4.0 / 16.0, 6.0 / 16.0, 4.0 / 16.0, 1.0 / 16.0 };
+
 static inline float3 mvDecodeNormal(int idx) {
-    constant float3 normals[6] = { float3(1, 0, 0), float3(-1, 0, 0), float3(0, 1, 0),
-                                   float3(0, -1, 0), float3(0, 0, 1), float3(0, 0, -1) };
-    return normals[clamp(idx, 0, 5)];
+    return mvFaceNormals[clamp(idx, 0, 5)];
 }
 
 // Integer hash -> two [0,1) randoms per (pixel, frame).
@@ -175,7 +178,6 @@ kernel void microVoxelAtrousKernel(
     float l0 = mvLuma(center.rgb);
     float stepSize = float(push.stepAndSize.x);
 
-    constant float kernelW[5] = { 1.0 / 16.0, 4.0 / 16.0, 6.0 / 16.0, 4.0 / 16.0, 1.0 / 16.0 };
     float3 sum = float3(0.0);
     float wSum = 0.0;
     for (int dy = -2; dy <= 2; dy++) {
@@ -189,7 +191,7 @@ kernel void microVoxelAtrousKernel(
             float wN = pow(max(dot(n0, nt), 0.0f), push.sigmas.y);
             float wZ = exp(-fabs(center.a - tap.a) / (push.sigmas.x * stepSize + 1e-3f));
             float wL = exp(-fabs(l0 - mvLuma(tap.rgb)) / (push.sigmas.z + 1e-3f));
-            float w = kernelW[dx + 2] * kernelW[dy + 2] * wN * wZ * wL;
+            float w = mvAtrousKernel[dx + 2] * mvAtrousKernel[dy + 2] * wN * wZ * wL;
             sum += tap.rgb * w;
             wSum += w;
         }

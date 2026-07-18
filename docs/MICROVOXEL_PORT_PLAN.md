@@ -1,6 +1,19 @@
 # MicroVoxel Port Plan — Atmospheric → Project Vapor
 
-Status: **proposal** (no implementation yet)
+Status: **implemented through Phase 2** on this branch. Landed: sparse
+voxel world core + oracle-tested suite (`test_voxel_world`), the primary
+depth-writing pass with GLSL/MSL twins, ECS component/system with
+task-scheduler chunk streaming and per-brick dirty uploads, the voxel
+G-buffer + half-res traced GI (temporal + à-trous + composite), and
+`Examples/MicroVoxel` (dioramas incl. a 2.5 cm one; `--big` for a
+1024×256×1024 streaming world). Still open (Phase 3/4 tails): camera-radius
+chunk eviction for unbounded worlds, LOD bricks, clustered-light shading in
+the voxel pass, engine-IBL ambient, cross-volume GI, voxels→PSSM shadow
+casting, GPU generation, hardware-RT variant. Deviations from the plan
+below are noted in commit messages; the biggest is that the primary pass
+stayed forward-shaded (with the G-buffer written alongside) rather than
+fully deferred — the GI still consumes the G-buffer without re-tracing.
+
 Target branch: `claude/microvoxel-project-vapor-port-ng9trx`
 Source of truth studied: `Atmospheric/Examples/MicroVoxel` + `Atmospheric/Engine`
 (`micro_voxel_pass.cpp`, `voxel_volume_component.cpp`, `microvoxel*.frag/vert`)
