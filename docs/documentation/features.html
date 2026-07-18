@@ -22,7 +22,7 @@
   <main>
     <div class="page-header">
       <h1>Features</h1>
-      <p class="muted">Last updated 2026-07-16 · Source: <code>Vapor/include/Vapor/</code> (34 headers) + <code>Vaporware/src/</code></p>
+      <p class="muted">Last updated 2026-07-18 · Source: <code>Vapor/include/Vapor/</code> (34 headers) + <code>Vaporware/src/</code></p>
     </div>
 
     <h2>Rendering</h2>
@@ -33,10 +33,9 @@
         <tr><td>GPU-Driven Instancing</td><td>5000+ simultaneous instances. Tested against the Bistro scene (2911 instances).</td></tr>
         <tr><td>Physically-Based Rendering</td><td>Disney BRDF shading model. Supports albedo, metallic, roughness, normal, and emissive maps.</td></tr>
         <tr><td>MSAA 4x</td><td>Hardware multi-sample anti-aliasing.</td></tr>
-        <tr><td>Raytraced Hard Shadows</td><td>Metal only. Uses Metal ray tracing API for accurate hard shadows.</td></tr>
-        <tr><td>Stochastic RT Shadows + ReSTIR</td><td>Metal only, panel opt-in ("All shadows" — default stays aligned with the RT-less Vulkan output). MegaLights-style stochastic shadows for point/rect-area/spot lights, denoised by ReSTIR: per-pixel weighted reservoirs pick the dominant light per domain with temporal + spatial reuse, a small ray budget resolves visibility (1 point + 1 spot + 2 rect quad points on an R2 low-discrepancy walk, ≤4 rays/px), then temporal accumulation and an edge-aware cross-bilateral filter settle the penumbra.</td></tr>
+        <tr><td>Raytraced Directional Shadow</td><td>Metal only. Raytraced hard shadows.</td></tr>
+        <tr><td>Stochastic RT Shadows + ReSTIR</td><td>Metal only. Stochastic shadows for point/rect/spot lights, denoised by ReSTIR</td></tr>
         <tr><td>Bloom</td><td>HDR bloom post-processing.</td></tr>
-        <tr><td>Depth of Field</td><td>CoC → blur → composite pass infrastructure exists. <span class="warn-note">Currently disabled (passes commented out).</span></td></tr>
         <tr><td>Volumetric Fog / God Rays</td><td>Volumetric fog and Tyndall light beam effect.</td></tr>
         <tr><td>Volumetric Clouds</td><td>Procedural volumetric cloud rendering.</td></tr>
         <tr><td>Atmosphere Rendering</td><td>Rayleigh + Mie scattering atmosphere model.</td></tr>
