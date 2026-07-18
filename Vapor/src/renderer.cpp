@@ -2718,7 +2718,7 @@ void Renderer::stochasticShadowPass() {
 //      velocity-reprojected temporal reservoir merge -> scratch buffer (HALF res)
 //   2) 3d_restir_shadow_resolve — spatial reservoir merge + winner visibility
 //      rays -> stochasticShadowHalfRT (RGB) + history buffer (HALF res)
-//   3) 3d_point_shadow_upsample — joint bilateral upsample -> stochasticShadowRT
+//   3) 3d_stochastic_shadow_upsample — joint bilateral upsample -> stochasticShadowRT
 // The winner's traced visibility estimates the contribution-weighted shadow
 // factor per domain; the existing full-res StochasticShadowTemporal accumulator
 // and StochasticShadowDenoise filter stay as the final averager. Ray budget: <= 4 per
@@ -5419,15 +5419,15 @@ void Renderer::createRenderPipeline() {
         ssaoPipeline                  = makeMetalCompute("shaders/3d_ssao.metal", ssaoShader, 1, 1, 1);
         aoTemporalPipeline            = makeMetalCompute("shaders/3d_ao_temporal.metal", aoTemporalShader, 8, 8, 1);
         aoDenoisePipeline             = makeMetalCompute("shaders/3d_ao_denoise.metal", aoDenoiseShader, 8, 8, 1);
-        stochasticShadowPipeline = makeMetalCompute("shaders/3d_stochastic_point_shadow.metal", stochasticShadowShader, 8, 8, 1);
-        stochasticShadowTemporalPipeline   = makeMetalCompute("shaders/3d_point_shadow_temporal.metal", stochasticShadowTemporalShader, 8, 8, 1);
-        stochasticShadowDenoisePipeline    = makeMetalCompute("shaders/3d_point_shadow_denoise.metal", stochasticShadowDenoiseShader, 8, 8, 1);
+        stochasticShadowPipeline = makeMetalCompute("shaders/3d_stochastic_shadow.metal", stochasticShadowShader, 8, 8, 1);
+        stochasticShadowTemporalPipeline   = makeMetalCompute("shaders/3d_stochastic_shadow_temporal.metal", stochasticShadowTemporalShader, 8, 8, 1);
+        stochasticShadowDenoisePipeline    = makeMetalCompute("shaders/3d_stochastic_shadow_denoise.metal", stochasticShadowDenoiseShader, 8, 8, 1);
         // ReSTIR is optional with a live legacy fallback — a compile failure
         // here must not take down renderer init like the required kernels do.
         try {
             restirShadowTemporalPipeline = makeMetalCompute("shaders/3d_restir_shadow_temporal.metal", restirShadowTemporalShader, 8, 8, 1);
             restirShadowResolvePipeline  = makeMetalCompute("shaders/3d_restir_shadow_resolve.metal", restirShadowResolveShader, 8, 8, 1);
-            stochasticShadowUpsamplePipeline  = makeMetalCompute("shaders/3d_point_shadow_upsample.metal", stochasticShadowUpsampleShader, 8, 8, 1);
+            stochasticShadowUpsamplePipeline  = makeMetalCompute("shaders/3d_stochastic_shadow_upsample.metal", stochasticShadowUpsampleShader, 8, 8, 1);
         } catch (const std::exception& e) {
             restirShadowTemporalPipeline = {};
             restirShadowResolvePipeline = {};

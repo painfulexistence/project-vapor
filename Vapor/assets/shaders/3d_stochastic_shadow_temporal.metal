@@ -2,7 +2,8 @@
 using namespace metal;
 #include "Res/shaders/3d_common.metal"
 
-// Temporal accumulation denoiser for stochastic point light shadows.
+// Temporal accumulation denoiser for the stochastic RT shadows (point / rect /
+// spot — the R/G/B channels).
 // Velocity reprojection + variance clamping + 15%/85% blend.
 kernel void computeMain(
     texture2d<float>              currentShadow   [[texture(0)]],

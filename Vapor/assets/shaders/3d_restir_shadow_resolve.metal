@@ -11,7 +11,7 @@ using raytracing::instance_acceleration_structure;
 // traces the merged winner's visibility, and writes
 //   R = point visibility, G = rect-area visibility, B = spot visibility
 // to the HALF-RES raw shadow target (joint-bilaterally upsampled to full res
-// by 3d_point_shadow_upsample.metal before the temporal accumulator).
+// by 3d_stochastic_shadow_upsample.metal before the temporal accumulator).
 //
 // HALF-RES: same fp = tid*2 mapping as the temporal kernel — G-buffer reads
 // at fp, reservoir grid and shadow writes on the half grid. Ray budget per
