@@ -7,9 +7,12 @@
 #include <string>
 #include <vector>
 
-namespace Vapor {
-
+// RenderScene lives at global scope (like AssetManager); declaring it inside
+// namespace Vapor would introduce a second, forever-incomplete type that wins
+// unqualified lookup from inside the namespace.
 class RenderScene;
+
+namespace Vapor {
 
 // ============================================================================
 // Scene blueprints — the declarative authoring layer.
