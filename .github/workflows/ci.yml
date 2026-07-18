@@ -104,10 +104,9 @@ jobs:
       - name: Initialize vcpkg submodule
         run: git submodule update --init --depth 1 vcpkg
 
-      - uses: rlalik/setup-cpp-compiler@master
-        with:
-          compiler: latest
-
+      # No compiler-setup action: CMake picks /usr/bin/c++ on both platforms
+      # anyway (AppleClang / Ubuntu's gcc), and the action's internal
+      # `brew update` was a recurring source of formulae-API flakes.
       - uses: seanmiddleditch/gha-setup-ninja@master
 
       - name: Set strings
