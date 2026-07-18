@@ -3117,17 +3117,31 @@ void Renderer::pointShadowTemporalPass() {
 void Renderer::pointShadowDenoisePass() {
     if (!pointShadowWritten) return;  // accumulator didn't run either
     if (!pointShadowDenoisePipeline.isValid() || !pointShadowHistoryRT.isValid() ||
-        !pointShadowDenoisedRT.isValid()) return;
+        !pointShadowDenoisedRT.isValid() || !pointShadowRT.isValid()) return;
     Uint32 w = rhi->getSwapchainWidth();
     Uint32 h = rhi->getSwapchainHeight();
+    // À-trous: accumulated -> scratch (stride 1) -> display copy (stride 2).
+    // pointShadowRT (the raw upsample) is free once the accumulator consumed it,
+    // so it doubles as the ping-pong scratch — no extra RT. pointShadowHistoryRT
+    // is only READ here, so the frame count packed in its alpha survives for
+    // next frame's accumulator.
+    struct Iter { TextureHandle src, dst; Uint32 stride; };
+    const Iter iters[] = {
+        { pointShadowHistoryRT, pointShadowRT, 1u },
+        { pointShadowRT, pointShadowDenoisedRT, 2u },
+    };
     rhi->beginComputePass(renderGraph.activePassName().c_str());
     rhi->bindComputePipeline(pointShadowDenoisePipeline);
-    rhi->setComputeTexture(0, pointShadowHistoryRT);
-    rhi->setComputeTexture(1, depthStencilRT);
-    rhi->setComputeTexture(2, normalRT);
-    rhi->setComputeTexture(3, pointShadowDenoisedRT);
-    rhi->setComputeBuffer(0, cameraUniformBuffer, 0, sizeof(CameraRenderData));
-    rhi->dispatch((w + 7) / 8, (h + 7) / 8, 1);
+    for (const Iter& it : iters) {
+        rhi->setComputeTexture(0, it.src);
+        rhi->setComputeTexture(1, depthStencilRT);
+        rhi->setComputeTexture(2, normalRT);
+        rhi->setComputeTexture(3, it.dst);
+        rhi->setComputeBuffer(0, cameraUniformBuffer, 0, sizeof(CameraRenderData));
+        rhi->setComputeBytes(&it.stride, sizeof(Uint32), 1);
+        rhi->dispatch((w + 7) / 8, (h + 7) / 8, 1);
+        rhi->computeBarrier();  // pass 2 reads what pass 1 wrote (pointShadowRT)
+    }
     rhi->endComputePass();
     pointShadowDenoiseRan = true;
 }
@@ -6453,13 +6467,16 @@ void Renderer::drawGraphicsImGui() {
                                    "Like the heatmap, the view replaces the shadow factors, so scene "
                                    "lighting is affected while it is active.");
             }
-            // The View toggle's output, drawn inline (no collapsing node) —
-            // the raw (upsampled, pre-accumulation) pass target. Identity
-            // swizzle: the channels are three light domains (R point / G rect
-            // / B spot), so a per-domain problem shows as a COLORED artifact.
-            if (TextureHandle vt = debugView("psRaw", pointShadowRT, TextureSwizzle::Identity, 0); vt.isValid()) {
+            // The View toggle's output, drawn inline (no collapsing node) — the
+            // half-res resolve target, i.e. the pass's true raw output before
+            // upsample/accumulation (pointShadowRT is reused as the à-trous
+            // scratch, so it isn't raw by panel time; the half-res target is).
+            // Identity swizzle: the channels are three light domains (R point /
+            // G rect / B spot), so a per-domain problem shows as a COLORED
+            // artifact.
+            if (TextureHandle vt = debugView("psRaw", pointShadowHalfRT, TextureSwizzle::Identity, 0); vt.isValid()) {
                 if (void* id = getImGuiTextureID(vt)) {
-                    ImGui::TextDisabled("View output (R=point G=rect B=spot), %u x %u", rtW, rtH);
+                    ImGui::TextDisabled("View output (half-res, R=point G=rect B=spot)");
                     ImGui::Image((ImTextureID)(intptr_t)id, ImVec2(320, 320 / rtAspect));
                 }
             }
