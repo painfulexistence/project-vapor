@@ -19,6 +19,7 @@
 #include "Vapor/physics_3d.hpp"
 #include "Vapor/renderer.hpp"
 #include "Vapor/rmlui_manager.hpp"
+#include "Vapor/stats_log.hpp"
 #include "Vapor/systems.hpp"
 #include "Vapor/rng.hpp"
 #include "Vapor/scene.hpp"
@@ -37,8 +38,12 @@
 
 static void setupCustomDrawers(Vapor::SceneInspector& inspector) {
     // Register app-specific components for auto field-by-field drawing.
-    inspector.registerComponent<PointLightComponent>("Point Light");
-    inspector.registerComponent<DirectionalLightComponent>("Directional Light");
+    inspector.registerComponent<Vapor::PointLightComponent>("Point Light");
+    inspector.registerComponent<Vapor::SpotLightComponent>("Spot Light");
+    inspector.registerComponent<Vapor::RectLightComponent>("Rect Light");
+    inspector.registerComponent<Vapor::DirectionalLightComponent>("Directional Light");
+    inspector.registerComponent<Vapor::SunComponent>("Sun");
+    inspector.registerComponent<Vapor::TimeOfDayComponent>("Time of Day");
     inspector.registerComponent<CharacterIntent>("Character Intent");
     inspector.registerComponent<CharacterControllerComponent>("Character Controller");
     inspector.registerComponent<GrabbableComponent>("Grabbable");
@@ -49,6 +54,49 @@ static void setupCustomDrawers(Vapor::SceneInspector& inspector) {
     inspector.registerComponent<ChapterTitleTriggerComponent>("Chapter Title Trigger");
     inspector.registerComponent<SceneTransitionComponent>("Scene Transition");
     inspector.registerComponent<ScrollTextQueueComponent>("Scroll Text Queue");
+    inspector.registerComponent<Vapor::ParticleEmitterComponent>("Particle Emitter");
+    inspector.registerComponent<Vapor::ParticleAttractorComponent>("Particle Attractor");
+    inspector.registerComponent<Vapor::WindFieldComponent>("Wind Field");
+    inspector.registerComponent<Vapor::ParticleBurstRequest>("Particle Burst");
+    inspector.registerComponent<Vapor::SpellBoltComponent>("Spell Bolt");
+
+    // ParticleRendererComponent — custom drawer for the named blend-mode combo.
+    inspector.registerCustomDrawer([](entt::registry& reg, entt::entity e) {
+        if (auto* c = reg.try_get<Vapor::ParticleRendererComponent>(e)) {
+            if (ImGui::CollapsingHeader("Particle Renderer", ImGuiTreeNodeFlags_DefaultOpen)) {
+                const char* blends[] = { "Additive", "AlphaBlend", "Multiply" };
+                int b = static_cast<int>(c->blendMode);
+                if (ImGui::Combo("blend", &b, blends, 3))
+                    c->blendMode = static_cast<Vapor::ParticleBlendMode>(b);
+                ImGui::DragFloat("size", &c->size, 0.005f, 0.005f, 2.0f);
+                if (c->texture == 0xFFFFFFFFu) ImGui::LabelText("texture", "(procedural)");
+                else                           ImGui::LabelText("texture", "%u", c->texture);
+            }
+        }
+    });
+
+    // SkyComponent — custom drawer for the SkyType combo (auto-draw can't edit
+    // the enum) so the visible sky mode is switchable at runtime. Sets `dirty`
+    // so SkySystem re-pushes the change to the renderer.
+    inspector.registerCustomDrawer([](entt::registry& reg, entt::entity e) {
+        if (auto* c = reg.try_get<Vapor::SkyComponent>(e)) {
+            if (ImGui::CollapsingHeader("Sky", ImGuiTreeNodeFlags_DefaultOpen)) {
+                const char* types[] = { "Atmosphere", "HDRI", "Gradient" };
+                int t = static_cast<int>(c->type);
+                if (ImGui::Combo("type", &t, types, 3)) {
+                    c->type = static_cast<SkyType>(t);   // SkyType is global (render_data.hpp)
+                    c->dirty = true;
+                }
+                if (ImGui::DragFloat("exposure", &c->exposure, 0.01f, 0.01f, 10.0f)) c->dirty = true;
+                if (c->type == SkyType::Gradient) {
+                    if (ImGui::ColorEdit3("zenith",  &c->gradientZenith.x))  c->dirty = true;
+                    if (ImGui::ColorEdit3("horizon", &c->gradientHorizon.x)) c->dirty = true;
+                    if (ImGui::ColorEdit3("ground",  &c->gradientGround.x))  c->dirty = true;
+                }
+                ImGui::DragFloat("IBL sun threshold (deg)", &c->iblSunThresholdDeg, 0.1f, 0.0f, 90.0f);
+            }
+        }
+    });
 
     // LightMovementLogicComponent — keep custom drawer for the named Pattern combo.
     inspector.registerCustomDrawer([](entt::registry& reg, entt::entity e) {
@@ -144,9 +192,15 @@ auto main(int argc, char* args[]) -> int {
     args::Group windowGroup(parser, "Window:");
     args::ValueFlag<Uint32> width(windowGroup, "number", "Window width", { 'w', "width" }, 1280);
     args::ValueFlag<Uint32> height(windowGroup, "number", "Window height", { 'h', "height" }, 720);
-    args::Group graphicsGroup(parser, "Graphics:", args::Group::Validators::Xor);
+    // AtMostOne (not Xor): the backend flags stay mutually exclusive, but
+    // omitting both is allowed and falls through to the per-platform default
+    // (Metal on Apple, Vulkan elsewhere). Xor here forced every invocation that
+    // passed ANY flag (e.g. --stats) to also name a backend.
+    args::Group graphicsGroup(parser, "Graphics:", args::Group::Validators::AtMostOne);
     args::Flag useMetal(graphicsGroup, "Metal", "Use Metal backend", { "metal" });
     args::Flag useVulkan(graphicsGroup, "Vulkan", "Use Vulkan backend", { "vulkan" });
+    args::Group debugGroup(parser, "Debug:");
+    args::Flag statsFlag(debugGroup, "stats", "Enable per-frame telemetry log (stderr + vapor_stats.log)", { "stats" });
     args::Group helpGroup(parser, "Help:");
     args::HelpFlag help(helpGroup, "help", "Display help menu", { "help" });
     if (argc > 1) {
@@ -165,6 +219,8 @@ auto main(int argc, char* args[]) -> int {
             return 1;
         }
     }
+
+    Vapor::StatsLog::get().setEnabled(static_cast<bool>(statsFlag));
 
     if (!SDL_Init(SDL_INIT_VIDEO)) {
         fmt::print("SDL could not initialize! Error: {}\n", SDL_GetError());
@@ -208,8 +264,14 @@ auto main(int argc, char* args[]) -> int {
 
     Vapor::RNG rng;
 
-    auto renderer = createRenderer(gfxBackend);
-    renderer->init(window);
+    auto renderer = createRenderer(gfxBackend, window);
+    if (!renderer) {
+        fmt::print(stderr, "Failed to create renderer (backend unavailable?)\n");
+        SDL_DestroyWindow(window);
+        SDL_Quit();
+        return 1;
+    }
+    // Renderer is already initialized by createRenderer()
 
     // Optional: load an external HDRI for IBL instead of the procedural sky.
     // Place your .hdr file at:  <assets>/textures/env/sky.hdr
@@ -239,7 +301,7 @@ auto main(int argc, char* args[]) -> int {
     setupCustomDrawers(sceneInspector);
 
     // Load a font for text rendering
-    FontHandle gameFont = renderer->loadFont("fonts/Arial Black.ttf", 48.0f);
+    FontHandle gameFont = renderer->loadFont("fonts/NotoSans-SemiBold.ttf", 48.0f);
     if (gameFont.isValid()) {
         fmt::print("Font loaded successfully\n");
     } else {
@@ -256,7 +318,7 @@ auto main(int argc, char* args[]) -> int {
     rtDesc.width = 512;
     rtDesc.height = 512;
     rtDesc.hasDepth = true;
-    rtDesc.hdr = true;// HDR for post-processing effects
+    rtDesc.isHDR = true;// HDR for post-processing effects
     RenderTextureHandle renderTexture = renderer->createRenderTexture(rtDesc);
     fmt::print("Render texture created: {}x{}\n", rtDesc.width, rtDesc.height);
 
@@ -271,8 +333,8 @@ auto main(int argc, char* args[]) -> int {
         100.0f// Far
     );
 
-    if (engineCore->initRmlUI(windowWidth, windowHeight) && renderer->initUI()) {
-        fmt::print("RmlUI System Initialized\n");
+    if (renderer->initUI()) {
+        fmt::print("UI System Initialized\n");
     }
 
     auto physics = std::make_unique<Physics3D>();
@@ -333,9 +395,55 @@ auto main(int argc, char* args[]) -> int {
         engineCore->attachRenderer(renderer.get(), outputDir);
     }
 
+    // System-level particle state the game layer owns (must reach both the GPU
+    // sim and the CPU-side ECS timers). Surfaced as transport controls in the
+    // Systems > Particles panel below:
+    //   particlePaused          — freezes the GPU sim AND the CPU reclaim/emission
+    //                             timers; frozen particles neither age nor reclaim.
+    //   particleEmissionEnabled — graceful stop: existing particles finish, no new
+    //                             ones spawn.
+    //   particleVisible         — render on/off (sim keeps running).
+    bool particlePaused = false;
+    bool particleEmissionEnabled = true;
+    bool particleVisible = true;
+
+    // "Systems" section under Application > Scene. System-level (global) controls
+    // that don't belong in the per-entity inspector. Hardcoded to particles for
+    // now; a real system inspector would enumerate registered systems.
+    sceneInspector.setSystemsDrawer([&](entt::registry&) {
+        if (ImGui::TreeNode("Particles")) {
+            ImGui::Checkbox("Visible", &particleVisible);
+
+            // Transport controls. Pause freezes the sim (and CPU reclaim/emission
+            // timers); Resume returns to normal running (unpause + re-enable
+            // emission); Stop is a graceful emission halt — existing particles
+            // finish, no new ones spawn.
+            const bool running = !particlePaused && particleEmissionEnabled;
+
+            ImGui::BeginDisabled(particlePaused);
+            if (ImGui::Button("Pause")) particlePaused = true;
+            ImGui::EndDisabled();
+
+            ImGui::SameLine();
+            ImGui::BeginDisabled(running);
+            if (ImGui::Button("Resume")) { particlePaused = false; particleEmissionEnabled = true; }
+            ImGui::EndDisabled();
+
+            ImGui::SameLine();
+            ImGui::BeginDisabled(!particleEmissionEnabled);
+            if (ImGui::Button("Stop")) particleEmissionEnabled = false;
+            ImGui::EndDisabled();
+
+            ImGui::TreePop();
+        }
+    });
+
     renderer->setImGuiCallback([&]() {
         sceneInspector.draw(registry);
     });
+
+    // Return (and zero-clear) particle slots when an emitter entity is destroyed.
+    Vapor::ParticleEmitterSystem::attach(registry, renderer.get());
 
     auto [sceneBuilt, materialBuilt, cube1, global] =
         buildScene(registry, *physics, scene, material, windowWidth, windowHeight, rng);
@@ -352,13 +460,16 @@ auto main(int argc, char* args[]) -> int {
         auto e = registry.create();
         registry.emplace<Vapor::NameComponent>(e, Vapor::NameComponent{ fmt::format("Sponza_{}", i) });
         auto& tc = registry.emplace<Vapor::TransformComponent>(e);
-        // Decompose baked world matrix so the inspector shows meaningful values
-        tc.position = glm::vec3(worldMat[3]);
+        // Extract scale correctly from world matrix and scale down by 0.01 for Sponza
+        // The Khronos Sponza GLTF is authored in meters (~30m across) — use
+        // its world transforms as-is. (An earlier 0.01 scale shrank the whole
+        // scene to a 30cm dollhouse the camera flew straight past.)
         tc.scale = glm::vec3(
             glm::length(glm::vec3(worldMat[0])),
             glm::length(glm::vec3(worldMat[1])),
             glm::length(glm::vec3(worldMat[2]))
         );
+        tc.position = glm::vec3(worldMat[3]);
         if (tc.scale.x > 0.0f && tc.scale.y > 0.0f && tc.scale.z > 0.0f) {
             glm::mat3 rotMat(
                 glm::vec3(worldMat[0]) / tc.scale.x,
@@ -367,8 +478,7 @@ auto main(int argc, char* args[]) -> int {
             );
             tc.rotation = glm::quat_cast(rotMat);
         }
-        tc.worldTransform = worldMat;
-        tc.isDirty = false;// worldTransform already correct; skip TransformSystem
+        tc.isDirty = true; // Let TransformSystem compute the scaled world matrix
         auto& mrc = registry.emplace<Vapor::MeshRendererComponent>(e);
         mrc.meshes.push_back(mesh);
         registry.emplace<SceneGeometryTag>(e);// marks GLTF-spawned geometry for serializer
@@ -548,7 +658,20 @@ auto main(int argc, char* args[]) -> int {
 
         physics->process(registry, deltaTime);
         Vapor::TransformSystem::update(registry);
-        LightGatherSystem::update(registry, scene.get());
+        // Pause freezes the GPU sim (renderer) and the CPU-side emitter/reclaim
+        // timers (skip the system entirely) so nothing advances while paused.
+        renderer->setParticleSimPaused(particlePaused);
+        renderer->setParticleVisible(particleVisible);
+        Vapor::ParticleForceFieldSystem::update(registry, renderer.get());
+        if (!particlePaused)
+            Vapor::ParticleEmitterSystem::update(registry, renderer.get(), deltaTime, particleEmissionEnabled);
+        // Gather per-emitter draw packets (blend/texture/size). Runs even while
+        // paused — frozen particles still need their draw list.
+        Vapor::ParticleRenderSystem::update(registry, renderer.get());
+        Vapor::TimeOfDaySystem::update(registry, deltaTime);  // moves the sun; before gather
+        Vapor::LightGatherSystem::update(registry, scene.get());
+        Vapor::SkySystem::update(registry, renderer.get());
+        Vapor::WindSystem::update(registry, renderer.get());
         FlipbookSystem::update(registry, deltaTime);
         SpriteRenderSystem::update(registry, renderer.get(), &resourceManager);
 
@@ -560,6 +683,20 @@ auto main(int argc, char* args[]) -> int {
             tempCamera.setEye(cam.position);// Set position for lighting/etc
             tempCamera.setViewMatrix(cam.viewMatrix);
             tempCamera.setProjectionMatrix(cam.projectionMatrix);
+
+            CameraRenderData camData;
+            camData.proj = tempCamera.getProjMatrix();
+            camData.view = tempCamera.getViewMatrix();
+            camData.invProj = glm::inverse(camData.proj);
+            camData.invView = glm::inverse(camData.view);
+            camData.nearPlane = tempCamera.near();
+            camData.farPlane = tempCamera.far();
+            camData.position = tempCamera.getEye();
+
+            renderer->beginFrame(camData);
+
+            ImGui::NewFrame();
+            renderer->invokeImGuiCallback();
 
             // ===== 2D Canvas Demo (Screen Space) =====
             // Note: When camera is perspective (default), CanvasPass uses screen space (pixel coords)
@@ -618,40 +755,57 @@ auto main(int argc, char* args[]) -> int {
                 );
             }
 
-            // ===== Render-to-Texture Demo =====
-            // Update RT camera to orbit around the scene
-            float rtAngle = time * 0.5f;
-            rtCamera.setEye(glm::vec3(sin(rtAngle) * 8.0f, 4.0f, cos(rtAngle) * 8.0f));
-            rtCamera.setCenter(glm::vec3(0.0f, 0.0f, 0.0f));
-
-            // Render scene to texture with different camera angle
-            renderer->renderToTexture(renderTexture, scene, rtCamera, glm::vec4(0.1f, 0.1f, 0.15f, 1.0f));
-
-            // Apply post-processing effects to the render texture
-            renderer->applyBloom(renderTexture, 0.8f, 0.3f);
-            renderer->applyToneMapping(renderTexture, 1.2f);
-
-            // Get the render texture as a regular texture for drawing
-            TextureHandle rtTexHandle = renderer->getRenderTextureAsTexture(renderTexture);
-
             // ===== 3D Batch Demo =====
             renderer->drawQuad3D(
                 glm::vec3(0.0f, 2.0f, 0.0f), glm::vec2(1.0f, 1.0f), spriteTexture, glm::vec4(1.0f, 0.5f, 0.5f, 1.0f)
             );
 
-            // Draw the render texture on a 3D quad (like a TV screen in the world)
-            if (rtTexHandle.valid()) {
-                // Create a transform for the "TV screen"
-                glm::mat4 tvTransform = glm::mat4(1.0f);
-                tvTransform = glm::translate(tvTransform, glm::vec3(-3.0f, 2.0f, 0.0f));
-                tvTransform = glm::rotate(tvTransform, glm::radians(30.0f), glm::vec3(0.0f, 1.0f, 0.0f));
-                tvTransform = glm::scale(tvTransform, glm::vec3(2.0f, 2.0f, 1.0f));
+            // ===== Render-to-Texture "TV" Demo =====
+            // Disabled by default — it's a demo affordance, not part of the
+            // scene. Flip to 1 to render the scene from an orbiting camera into
+            // a texture and hang it on a world-space quad (a "TV screen").
+#if 0
+            {
+                // Update RT camera to orbit around the scene
+                float rtAngle = time * 0.5f;
+                rtCamera.setEye(glm::vec3(sin(rtAngle) * 8.0f, 4.0f, cos(rtAngle) * 8.0f));
+                rtCamera.setCenter(glm::vec3(0.0f, 0.0f, 0.0f));
 
-                renderer->drawQuad3D(tvTransform, rtTexHandle, nullptr, glm::vec4(1.0f));
+                // Render scene to texture with different camera angle
+                renderer->renderToTexture(renderTexture, scene, rtCamera, glm::vec4(0.1f, 0.1f, 0.15f, 1.0f));
+
+                // Apply post-processing effects to the render texture
+                renderer->applyBloom(renderTexture, 0.8f, 0.3f);
+                renderer->applyToneMapping(renderTexture, 1.2f);
+
+                // Get the render texture as a regular texture for drawing
+                TextureHandle rtTexHandle = renderer->getRenderTextureAsTexture(renderTexture);
+
+                // Draw the render texture on a 3D quad (like a TV screen in the world)
+                if (rtTexHandle.isValid()) {
+                    // Create a transform for the "TV screen"
+                    glm::mat4 tvTransform = glm::mat4(1.0f);
+                    tvTransform = glm::translate(tvTransform, glm::vec3(-3.0f, 2.0f, 0.0f));
+                    tvTransform = glm::rotate(tvTransform, glm::radians(30.0f), glm::vec3(0.0f, 1.0f, 0.0f));
+                    tvTransform = glm::scale(tvTransform, glm::vec3(2.0f, 2.0f, 1.0f));
+
+                    // Rendered textures store row 0 = top of the view, but the batch
+                    // quad's default UVs put v=0 at the quad's BOTTOM corner (image
+                    // convention) — sample with V flipped so the TV reads upright.
+                    // Corner order: BL, BR, TR, TL.
+                    static const glm::vec2 kRttUVs[4] = {
+                        { 0.0f, 1.0f }, { 1.0f, 1.0f }, { 1.0f, 0.0f }, { 0.0f, 0.0f }
+                    };
+                    renderer->drawQuad3D(tvTransform, rtTexHandle, kRttUVs, glm::vec4(1.0f));
+                }
             }
+#endif
 
 
             renderer->draw(registry, scene, tempCamera);
+
+            ImGui::Render();
+            renderer->endFrame();
         }
 
         frameCount++;
@@ -660,7 +814,7 @@ auto main(int argc, char* args[]) -> int {
     // Shutdown subsystems
     physics->deinit();
     engineCore->shutdown();
-    renderer->deinit();
+    renderer->shutdown();
 
     ImGui::DestroyContext();
 

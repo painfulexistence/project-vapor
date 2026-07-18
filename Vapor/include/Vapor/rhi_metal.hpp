@@ -1,0 +1,490 @@
+#pragma once
+
+#include "rhi.hpp"
+
+#include <SDL3/SDL_video.h>
+#include <SDL3/SDL_render.h>
+#include <Foundation/Foundation.hpp>
+#include <Metal/Metal.hpp>
+#include <QuartzCore/QuartzCore.hpp>
+#include <dispatch/dispatch.h>
+#include <array>
+#include <atomic>
+#include <mutex>
+#include <string>
+#include <unordered_map>
+#include <vector>
+
+// ============================================================================
+// RHI_Metal - Metal Implementation of RHI Interface
+// ============================================================================
+
+class RHI_Metal : public RHI {
+public:
+    RHI_Metal();
+    ~RHI_Metal() override;
+
+    // ========================================================================
+    // Initialization
+    // ========================================================================
+
+    bool initialize(SDL_Window* window) override;
+    void shutdown() override;
+    void waitIdle() override;
+
+    const RHICapabilities& getCapabilities() const override { return capabilities; }
+
+    // CAMetalLayer's drawable pool (3 drawables) provides the CPU throttle
+    Uint32 getMaxFramesInFlight() const override { return 3; }
+
+    // ========================================================================
+    // Resource Creation
+    // ========================================================================
+
+    BufferHandle createBuffer(const BufferDesc& desc) override;
+    void destroyBuffer(BufferHandle handle) override;
+
+    TextureHandle createTexture(const TextureDesc& desc) override;
+    TextureHandle createTextureView(const TextureViewDesc& desc) override;
+    void destroyTexture(TextureHandle handle) override;
+
+    ShaderHandle createShader(const ShaderDesc& desc) override;
+    void destroyShader(ShaderHandle handle) override;
+
+    SamplerHandle createSampler(const SamplerDesc& desc) override;
+    void destroySampler(SamplerHandle handle) override;
+
+    PipelineHandle createPipeline(const PipelineDesc& desc) override;
+    PipelineHandle createMeshPipeline(const MeshPipelineDesc& desc) override;
+    void destroyPipeline(PipelineHandle handle) override;
+
+    ComputePipelineHandle createComputePipeline(const ComputePipelineDesc& desc) override;
+    void destroyComputePipeline(ComputePipelineHandle handle) override;
+
+    AccelStructHandle createAccelerationStructure(const AccelStructDesc& desc) override;
+    void destroyAccelerationStructure(AccelStructHandle handle) override;
+    void buildAccelerationStructure(AccelStructHandle handle) override;
+    void updateAccelerationStructure(AccelStructHandle handle, const std::vector<AccelStructInstance>& instances) override;
+
+    // ========================================================================
+    // Resource Updates
+    // ========================================================================
+
+    void updateBuffer(BufferHandle handle, const void* data, size_t offset, size_t size) override;
+    void updateTexture(TextureHandle handle, const void* data, size_t size,
+                       Uint32 mipLevel, Uint32 arrayLayer) override;
+    using RHI::updateTexture;
+    void generateMipmaps(TextureHandle handle) override;
+    void copyTexture(TextureHandle src, Uint32 srcMip, TextureHandle dst, Uint32 dstMip) override;
+    void flushUploads() override;
+    void captureFrame(const char* outPath) override;
+
+    BufferHandle copySwapchainToBuffer(Uint32& outWidth, Uint32& outHeight) override;
+    void* mapBuffer(BufferHandle handle) override;
+    void unmapBuffer(BufferHandle handle) override;
+
+    // ========================================================================
+    // Frame Operations
+    // ========================================================================
+
+    void beginFrame() override;
+    void endFrame() override;
+
+    void beginRenderPass(const RenderPassDesc& desc) override;
+    void endRenderPass() override;
+
+    // ========================================================================
+    // Rendering Commands
+    // ========================================================================
+
+    void bindPipeline(PipelineHandle pipeline) override;
+    void bindVertexBuffer(BufferHandle buffer, Uint32 binding, size_t offset) override;
+    void bindIndexBuffer(BufferHandle buffer, size_t offset) override;
+
+    void setUniformBuffer(Uint32 set, Uint32 binding, BufferHandle buffer, size_t offset, size_t range) override;
+    void setStorageBuffer(Uint32 set, Uint32 binding, BufferHandle buffer, size_t offset, size_t range) override;
+    void setTexture(Uint32 set, Uint32 binding, TextureHandle texture, SamplerHandle sampler) override;
+
+    void setVertexBuffer(Uint32 binding, BufferHandle buffer, size_t offset, size_t range) override;
+    void setFragmentBuffer(Uint32 binding, BufferHandle buffer, size_t offset, size_t range) override;
+
+    void setVertexBytes(const void* data, size_t size, Uint32 binding) override;
+    void setFragmentBytes(const void* data, size_t size, Uint32 binding) override;
+
+    void draw(Uint32 vertexCount, Uint32 instanceCount, Uint32 firstVertex, Uint32 firstInstance) override;
+    void drawIndexed(Uint32 indexCount, Uint32 instanceCount, Uint32 firstIndex, int32_t vertexOffset, Uint32 firstInstance) override;
+    void drawIndexedIndirect(BufferHandle argsBuffer, size_t offset, Uint32 drawCount, Uint32 stride) override;
+    void drawIndirect(BufferHandle argsBuffer, size_t offset, Uint32 drawCount, Uint32 stride) override;
+    void drawMeshTasks(Uint32 groupCountX, Uint32 groupCountY = 1, Uint32 groupCountZ = 1) override;
+
+    // Indirect command buffers + bindless texture tables (see rhi.hpp).
+    IndirectCommandBufferHandle createIndirectCommandBuffer(Uint32 maxCommands) override;
+    void destroyIndirectCommandBuffer(IndirectCommandBufferHandle handle) override;
+    void bindComputeICB(Uint32 binding, IndirectCommandBufferHandle handle) override;
+    void executeICB(IndirectCommandBufferHandle handle, Uint32 commandCount) override;
+    BufferHandle createTextureArgumentTable(ShaderHandle fragmentShader, Uint32 bufferIndex,
+                                            Uint32 entryCount, Uint32 texturesPerEntry) override;
+    void writeTextureArgumentTable(BufferHandle table, Uint32 entry, Uint32 slot,
+                                   TextureHandle texture) override;
+    void bindTextureArgumentTable(BufferHandle table) override;
+
+    // ========================================================================
+    // Compute Commands
+    // ========================================================================
+
+    void beginComputePass(const char* name = "Compute") override;
+    void endComputePass() override;
+    void bindComputePipeline(ComputePipelineHandle pipeline) override;
+    void setComputeBuffer(Uint32 binding, BufferHandle buffer, size_t offset, size_t range) override;
+    void setComputeTexture(Uint32 binding, TextureHandle texture) override;
+    void setComputeSampledTexture(Uint32 binding, TextureHandle texture, SamplerHandle sampler) override;
+    void setAccelerationStructure(Uint32 binding, AccelStructHandle accelStruct) override;
+    void setComputeBytes(const void* data, size_t size, Uint32 binding) override;
+    void dispatch(Uint32 groupCountX, Uint32 groupCountY, Uint32 groupCountZ) override;
+    void setScissor(int32_t x, int32_t y, Uint32 width, Uint32 height) override;
+
+    // ========================================================================
+    // Utility
+    // ========================================================================
+
+    Uint32 getSwapchainWidth() const override;
+    Uint32 getSwapchainHeight() const override;
+    PixelFormat getSwapchainFormat() const override;
+
+    // ========================================================================
+    // GPU Profiling
+    // ========================================================================
+
+    bool isGpuTimingSupported() const override { return gpuTimingSupported; }
+    void setGpuTimingEnabled(bool enabled) override { gpuTimingEnabled = enabled; }
+    bool isGpuTimingEnabled() const override { return gpuTimingEnabled; }
+    std::vector<GpuPassTiming> getGpuPassTimings() override;
+    double getGpuFrameSpanMs() override;
+    double getGpuFrameBusyMs() override;
+
+    // ========================================================================
+    // Backend Query Interface
+    // ========================================================================
+
+    void* getBackendDevice() const override;
+    void* getBackendTexture(TextureHandle handle) const override;
+    void* getBackendPhysicalDevice() const override { return nullptr; } // N/A for Metal
+    void* getBackendInstance() const override { return nullptr; } // N/A for Metal
+    void* getBackendQueue() const override;
+    void* getBackendCommandBuffer() const override;
+    MTL::RenderCommandEncoder* getCurrentRenderEncoder() const;
+    CA::MetalDrawable* getCurrentDrawable() const;
+
+private:
+    // ========================================================================
+    // Metal Objects
+    // ========================================================================
+
+    SDL_Window* window = nullptr;
+    SDL_Renderer* renderer = nullptr;
+    CA::MetalLayer* swapchain = nullptr;
+    MTL::Device* device = nullptr;
+    NS::SharedPtr<MTL::CommandQueue> commandQueue;
+
+    // Current frame resources
+    // Per-frame autorelease pool: metal-cpp returns autoreleased objects from
+    // command-buffer / encoder / drawable / NS::String factory calls, and this
+    // app has no NSApplicationMain draining one for us. Without a pool bracketing
+    // each frame, every encoder (~45/frame), pass-label string, and drawable ref
+    // accumulates for the process lifetime — the unbounded RSS growth. Created at
+    // the top of beginFrame, drained at the bottom of endFrame.
+    NS::AutoreleasePool* framePool = nullptr;
+    CA::MetalDrawable* currentDrawable = nullptr;
+    NS::SharedPtr<MTL::CommandBuffer> currentCommandBuffer;
+
+    // Explicit CPU throttle, one permit per in-flight frame (== getMaxFramesInFlight()).
+    // beginFrame() waits, the frame's completion handler signals. nextDrawable()
+    // already bounds the CPU to the drawable pool today, but a frame that never
+    // presents (offscreen/compute-only) would not be throttled by it — this makes
+    // the bound explicit and matches Vulkan's vkWaitForFences. Balanced on the
+    // skipped-frame path so a missing drawable can't drain a permit.
+    dispatch_semaphore_t frameSemaphore = nullptr;
+    bool frameSemaphoreAcquired = false;
+    MTL::RenderCommandEncoder* currentRenderEncoder = nullptr;
+    MTL::ComputeCommandEncoder* currentComputeEncoder = nullptr;
+    // Set by bindPipeline for mesh pipelines: reroutes vertex-stage binds to the
+    // object+mesh stages and supplies drawMeshThreadgroups' threadgroup sizes.
+    bool currentPipelineIsMesh = false;
+    Uint32 currentTaskThreads = 32;
+    Uint32 currentMeshThreads = 64;
+
+    // Swapchain properties
+    Uint32 swapchainWidth = 0;
+    Uint32 swapchainHeight = 0;
+    MTL::PixelFormat swapchainFormat = MTL::PixelFormatRGBA8Unorm_sRGB;
+    // Extent of the render pass currently being encoded (for scissor clamping).
+    Uint32 currentPassWidth = 0;
+    Uint32 currentPassHeight = 0;
+
+    // Device feature support, filled in initialize()
+    RHICapabilities capabilities;
+
+    // One-shot GPU capture (captureFrame): non-empty path arms a capture that
+    // spans the next beginFrame..endFrame into a .gputrace document.
+    std::string pendingCapturePath;
+    bool captureInProgress = false;
+    void stopCaptureIfActive();
+
+    // ========================================================================
+    // Resource Storage
+    // ========================================================================
+
+    struct BufferResource {
+        NS::SharedPtr<MTL::Buffer> buffer;
+        size_t size;
+        bool isMapped;
+        void* mappedPointer;
+    };
+
+    struct TextureResource {
+        NS::SharedPtr<MTL::Texture> texture;
+        Uint32 width;
+        Uint32 height;
+        Uint32 depth;
+        Uint32 mipLevels;
+        Uint32 bytesPerPixel = 4;
+        MTL::PixelFormat format;
+    };
+
+    struct ShaderResource {
+        NS::SharedPtr<MTL::Library> library;
+        NS::SharedPtr<MTL::Function> function;
+        ShaderStage stage;
+    };
+
+    struct SamplerResource {
+        NS::SharedPtr<MTL::SamplerState> sampler;
+    };
+
+    struct PipelineResource {
+        NS::SharedPtr<MTL::RenderPipelineState> renderPipeline;
+        NS::SharedPtr<MTL::ComputePipelineState> computePipeline;
+        bool isCompute = false;
+        // Mesh pipelines: object/mesh threadgroup sizes for drawMeshThreadgroups,
+        // and a flag that reroutes setVertexBuffer/Bytes to the object+mesh stages.
+        bool isMesh = false;
+        Uint32 taskThreads = 32;
+        Uint32 meshThreads = 64;
+        // Fixed-function state captured from PipelineDesc. Metal has no single
+        // pipeline-state object for these, so they are applied at bind time.
+        NS::SharedPtr<MTL::DepthStencilState> depthStencilState;
+        MTL::CullMode cullMode = MTL::CullModeBack;
+        MTL::Winding winding = MTL::WindingCounterClockwise;
+        MTL::PrimitiveType primitiveType = MTL::PrimitiveTypeTriangle;
+    };
+
+    struct ComputePipelineResource {
+        NS::SharedPtr<MTL::ComputePipelineState> pipeline;
+        // Kept for bindComputeICB: the ICB container argument buffer is encoded
+        // with an argument encoder created from the kernel function.
+        NS::SharedPtr<MTL::Function> function;
+        // Threadgroup shape from ComputePipelineDesc — Metal sets it at
+        // dispatch time (SPIR-V bakes local_size; MSL does not).
+        Uint32 tgX = 1, tgY = 1, tgZ = 1;
+    };
+
+    struct ICBResource {
+        NS::SharedPtr<MTL::IndirectCommandBuffer> icb;
+        // 8-byte argument buffer holding the ICB reference for the cull kernel
+        // (MSL `device ICBContainer& { command_buffer icb; }`), encoded lazily
+        // on first bindComputeICB with the bound kernel's argument encoder.
+        NS::SharedPtr<MTL::Buffer> containerArgBuffer;
+        Uint32 maxCommands = 0;
+    };
+
+    // Bindless texture table: argument buffer of entryCount structs, each with
+    // texturesPerEntry texture slots, plus the written textures for residency
+    // (useResources at draw time) and the encoder that lays entries out.
+    struct ArgumentTableResource {
+        NS::SharedPtr<MTL::Buffer> buffer;
+        NS::SharedPtr<MTL::ArgumentEncoder> encoder;
+        NS::UInteger stride = 0;
+        Uint32 bufferIndex = 0;  // fragment buffer slot the table binds to
+        Uint32 entryCount = 0;
+        Uint32 texturesPerEntry = 0;
+        // Written textures, deduped, retained for useResources. Rebuilt lazily
+        // from writtenSet when dirty.
+        std::vector<MTL::Resource*> residentResources;
+        std::unordered_map<Uint32, NS::SharedPtr<MTL::Texture>> written;  // (entry*slots+slot) -> tex
+        bool residencyDirty = true;
+    };
+
+    struct AccelStructResource {
+        NS::SharedPtr<MTL::AccelerationStructure> accelStruct;
+        NS::SharedPtr<MTL::Buffer> scratchBuffer;
+        AccelStructType type;
+        std::vector<AccelStructGeometry> geometries;
+        std::vector<AccelStructInstance> instances;
+        // TLAS-only: instance descriptors + the BLAS array they index into.
+        NS::SharedPtr<MTL::Buffer> instanceBuffer;
+        NS::SharedPtr<NS::Array> blasArray;
+        // TLAS-only: per-frame rotation slots (mirrors the native renderer's
+        // TLASBuffers[frameInFlight]). Rebuilding a single TLAS in place while
+        // an in-flight frame's ray dispatches still traverse it is a GPU-level
+        // race (hard-hangs Apple GPUs). accelStruct / scratchBuffer /
+        // instanceBuffer above always alias the most recently built slot.
+        static constexpr Uint32 kTlasSlots = 3;  // >= max frames in flight
+        NS::SharedPtr<MTL::AccelerationStructure> accelSlots[kTlasSlots];
+        NS::SharedPtr<MTL::Buffer> scratchSlots[kTlasSlots];
+        NS::SharedPtr<MTL::Buffer> instanceSlots[kTlasSlots];
+        Uint32 nextSlot = 0;
+    };
+
+    // Resource maps
+    Uint32 nextBufferId = 1;
+    Uint32 nextTextureId = 1;
+    Uint32 nextShaderId = 1;
+    Uint32 nextSamplerId = 1;
+    Uint32 nextPipelineId = 1;
+    Uint32 nextComputePipelineId = 1;
+    Uint32 nextAccelStructId = 1;
+    Uint32 nextICBId = 1;
+
+    std::unordered_map<Uint32, BufferResource> buffers;
+    std::unordered_map<Uint32, TextureResource> textures;
+    std::unordered_map<Uint32, ShaderResource> shaders;
+    std::unordered_map<Uint32, SamplerResource> samplers;
+    std::unordered_map<Uint32, PipelineResource> pipelines;
+    std::unordered_map<Uint32, ComputePipelineResource> computePipelines;
+    std::unordered_map<Uint32, AccelStructResource> accelStructs;
+    std::unordered_map<Uint32, ICBResource> icbs;
+    // Keyed by the BufferHandle id returned from createTextureArgumentTable.
+    // The underlying MTL::Buffer is also registered in `buffers` under the same
+    // id, so the table binds through the normal setFragmentBuffer path.
+    std::unordered_map<Uint32, ArgumentTableResource> argumentTables;
+
+    // Current binding state (invalid = nothing bound)
+    PipelineHandle currentPipeline;
+    ComputePipelineHandle currentComputePipeline;
+    BufferHandle currentVertexBuffer;
+    BufferHandle currentIndexBuffer;
+    MTL::PrimitiveType currentPrimitiveType = MTL::PrimitiveTypeTriangle;
+
+    // ========================================================================
+    // GPU Pass Timing (MTLCounterSampleBuffer timestamps, AtStageBoundary)
+    // ========================================================================
+
+    // Chained end-timestamps, same scheme as the native renderer: slots are
+    // [frame-anchor, end0, end1, ..., endN-1] with beginIdx[K] == endIdx[K-1],
+    // so pass K's time is the gap between consecutive pass completions. On TBDR
+    // fragment kicks serialize, which makes that gap the pass's own cost — and
+    // the deltas are additive (they sum exactly to the frame span). Sampling
+    // each pass's [vertexStart, fragmentEnd] window instead is useless there:
+    // every pass's vertex kick runs near frame start, so every window reads
+    // ~frame time (the "all passes ~10ms" panel).
+    // Per-pass window: render passes sample [StartOfFragment, EndOfFragment]
+    // (NOT StartOfVertex — that degenerates on TBDR, where every pass's vertex
+    // kick runs at frame start, so [SoV,EoF] reads ~frame time for all passes;
+    // fragment shading serializes per pass, so [SoF,EoF] is the pass's own cost
+    // and the windows are unionable into a real occupancy figure). Compute
+    // passes sample the encoder boundaries. Matches the Vulkan backend's model.
+    struct PassSampleInfo {
+        std::string name;
+        NS::UInteger beginIdx;
+        NS::UInteger endIdx;
+    };
+
+    static constexpr NS::UInteger GPU_TIMER_SAMPLE_COUNT = 128;  // slots per frame region (2/pass)
+    // The sample buffer is partitioned into kTimingRegions per-frame regions and
+    // rotated each frame (same idea as the staging ring): a frame writes region
+    // R and its completion handler reads only region R, which no other in-flight
+    // frame touches until kTimingRegions frames later — so a late handler can no
+    // longer read slots a newer frame already overwrote (the ~200ms spike race).
+    // Must be >= the backend's max frames in flight (CAMetalLayer default 3).
+    static constexpr NS::UInteger kTimingRegions = 3;
+    NS::SharedPtr<MTL::CounterSampleBuffer> gpuTimerSampleBuffer;
+    std::vector<PassSampleInfo> framePassSamples;   // passes recorded this frame
+    NS::UInteger nextTimingSlot = 0;                // next free slot pair (absolute)
+    NS::UInteger timingBaseSlot = 0;                // this frame's region base
+    NS::UInteger timingRegion = 0;                  // rotating region index
+    std::vector<GpuPassTiming> gpuPassTimings;      // last resolved results
+    double gpuFrameSpanMs = 0.0;                    // minBegin->maxEnd of last frame
+    double gpuFrameBusyMs = 0.0;                    // interval-union of pass windows
+    std::mutex gpuTimingMutex;                      // guards gpuPassTimings + span/busy
+    bool gpuTimingSupported = false;
+    bool gpuTimingEnabled = false;
+    bool gpuTimingActiveThisFrame = false;          // latched at beginFrame
+
+    // Completion-gated region reuse + race telemetry. Rotation alone only makes
+    // reuse safe if a region's completion handler runs within kTimingRegions
+    // frames — a starved handler still races a fresh writer. So a region is
+    // marked busy when its resolve handler is registered and freed when the
+    // handler finishes; beginFrame SKIPS timing for a frame whose next region is
+    // still busy instead of racing. The two counters go out via the [MTL] stats
+    // line so the actual failure mode is measured, not guessed:
+    //   statsTimingSkips        — frames that skipped timing (busy region)
+    //   statsHandlerLateMax     — max handler lateness seen, in frames
+    // If spikes persist while both stay ~0, the cause is NOT stale-slot pairing
+    // (points at TBDR vertex/fragment kick separation or GPU clock domain).
+    std::array<std::atomic<bool>, kTimingRegions> timingRegionBusy{};
+    std::atomic<uint32_t> latestTimingFrame{0};
+    std::atomic<uint32_t> statsTimingSkips{0};
+    std::atomic<uint32_t> statsHandlerLateMax{0};
+    uint32_t timingFrameCounter = 0;
+    // One-shot spike capture budget: the first few >50ms pass deltas print a
+    // [GPUT] line with per-pass begin/end offsets so the mechanism (drawable
+    // wait vs preemption vs bad data) is identifiable from the shape.
+    std::atomic<int> gpuSpikeReportsLeft{12};
+
+    // ========================================================================
+    // Internal Helpers
+    // ========================================================================
+
+    MTL::PixelFormat convertPixelFormat(PixelFormat format);
+    MTL::TextureUsage convertTextureUsage(TextureUsage usage);
+    MTL::SamplerAddressMode convertSamplerAddressMode(AddressMode mode);
+    MTL::SamplerMinMagFilter convertSamplerFilter(FilterMode filter);
+    MTL::SamplerMipFilter convertSamplerMipFilter(FilterMode filter);
+    MTL::CompareFunction convertCompareOp(CompareOp op);
+    MTL::PrimitiveType convertPrimitiveTopology(PrimitiveTopology topology);
+    MTL::CullMode convertCullMode(CullMode mode);
+    MTL::Winding convertFrontFace(bool counterClockwise);
+
+    NS::SharedPtr<MTL::Function> createShaderFunction(const std::string& source, ShaderStage stage);
+    NS::SharedPtr<MTL::RenderPipelineState> createRenderPipeline(const PipelineDesc& desc);
+
+    // ========================================================================
+    // Batched Upload Stream
+    // ------------------------------------------------------------------------
+    // Uploads to GPU-only resources are recorded into a dedicated command
+    // buffer through a shared staging ring and committed lazily: at
+    // beginFrame (queue submission order makes the data visible to that
+    // frame), on flushUploads(), or when the ring wraps (which waits on
+    // prior upload command buffers to reclaim space).
+    //
+    // Note on destruction: Metal needs no retirement queue — a committed
+    // MTLCommandBuffer retains every resource it references until it
+    // completes, so dropping our NS::SharedPtr on destroyX() is safe even
+    // with frames in flight.
+    // ========================================================================
+
+    static constexpr size_t STAGING_RING_SIZE = 32ull * 1024 * 1024;
+    NS::SharedPtr<MTL::Buffer> stagingRingBuffer;
+    size_t stagingRingOffset = 0;
+    NS::SharedPtr<MTL::CommandBuffer> uploadCmdBuffer;     // open while recording
+    MTL::BlitCommandEncoder* uploadBlitEncoder = nullptr;  // open while recording
+    std::vector<NS::SharedPtr<MTL::CommandBuffer>> pendingUploadCmds;
+    // Oversize (> ring) staging buffers must stay alive until their upload
+    // batch completes: the encoder only retains a buffer when the copy is
+    // ENCODED, which happens after stageData() returns.
+    std::vector<NS::SharedPtr<MTL::Buffer>> oversizeStaging;
+
+    MTL::BlitCommandEncoder* ensureUploadBlit();
+    void* allocStaging(size_t size, size_t& outOffset);
+    // Copy `data` into staging memory: the ring for normal sizes, a dedicated
+    // one-shot buffer (retained by the upload command buffer) when oversize.
+    MTL::Buffer* stageData(const void* data, size_t size, size_t& outOffset);
+    void submitUploads(bool waitForCompletion);
+
+    // GPU timing helpers
+    void initGpuTiming();
+    // Reserves a (begin, end) slot pair for one pass and records it; returns
+    // false when timing is off or the per-frame region budget is exhausted.
+    bool allocateTimingSlots(const char* passName, NS::UInteger& outBegin, NS::UInteger& outEnd);
+    void resolveGpuTimings();  // installs completion handler on current command buffer
+};

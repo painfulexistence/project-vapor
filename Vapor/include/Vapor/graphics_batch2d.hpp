@@ -7,7 +7,7 @@
 #include <glm/vec4.hpp>
 
 // Blend modes for 2D batch rendering
-enum class BlendMode { None, Alpha, Additive, Multiply, Screen, Premultiplied };
+enum class Batch2DBlendMode { None, Alpha, Additive, Multiply, Screen, Premultiplied };
 
 struct alignas(16) Batch2DVertex {
     glm::vec3 position = glm::vec3(0.0f);

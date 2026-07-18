@@ -119,7 +119,9 @@ float3 computeAtmosphere(
 
     for (int i = 0; i < PRIMARY_STEPS; i++) {
         float3 samplePos = rayOrigin + rayDir * (rayStart + stepSize * (float(i) + 0.5));
-        float sampleHeight = length(samplePos - planetCenter) - planetRadius;
+        // Clamped like 3d_atmosphere.metal — grazing samples below the
+        // surface would overflow the exp() density terms.
+        float sampleHeight = max(length(samplePos - planetCenter) - planetRadius, 0.0);
 
         float rayleighDensity = exp(-sampleHeight / rayleighScale) * stepSize;
         float mieDensity = exp(-sampleHeight / mieScale) * stepSize;
@@ -190,7 +192,12 @@ float3 uvToDirection(float2 uv, uint face) {
         case 5: dir = float3(-st.x, -st.y, -1.0); break; // -Z
     }
 
-    return normalize(dir);
+    // Return the UN-normalized direction: it is affine in uv, so the rasterizer
+    // interpolates it exactly across the fullscreen triangle. Normalizing here
+    // (per vertex) then interpolating would lerp normalized corners and bend the
+    // per-pixel direction (~24deg off at a face centre), distorting the capture.
+    // The fragment stage re-normalizes localPos.
+    return dir;
 }
 
 vertex VertexOut vertexMain(
@@ -202,6 +209,8 @@ vertex VertexOut vertexMain(
 
     // Calculate UV from NDC
     float2 uv = ndcVerts[vertexID] * 0.5 + 0.5;
+    uv.y = 1.0 - uv.y;  // Metal Y-down render target: match the display path's flip
+                        // so the captured cube face isn't vertically inverted.
 
     // Convert to world direction for this cubemap face
     out.localPos = uvToDirection(uv, capture.faceIndex);

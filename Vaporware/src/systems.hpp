@@ -60,7 +60,7 @@ class SpriteRenderSystem {
 public:
     static void update(
         entt::registry& reg,
-        Renderer* renderer,
+        IRenderer* renderer,
         Vapor::ResourceManager* resourceManager
     ) {
         // Collect visible sprites
@@ -156,7 +156,7 @@ public:
 class LightMovementSystem {
 public:
     static void update(entt::registry& reg, float deltaTime) {
-        auto pointView = reg.view<PointLightComponent, Vapor::TransformComponent, LightMovementLogicComponent>();
+        auto pointView = reg.view<Vapor::PointLightComponent, Vapor::TransformComponent, LightMovementLogicComponent>();
         for (auto entity : pointView) {
             auto& transform = pointView.get<Vapor::TransformComponent>(entity);
             auto& logic     = pointView.get<LightMovementLogicComponent>(entity);
@@ -191,9 +191,9 @@ public:
             transform.isDirty  = true;
         }
 
-        auto dirView = reg.view<DirectionalLightComponent, DirectionalLightLogicComponent>();
+        auto dirView = reg.view<Vapor::DirectionalLightComponent, DirectionalLightLogicComponent>();
         for (auto entity : dirView) {
-            auto& light = dirView.get<DirectionalLightComponent>(entity);
+            auto& light = dirView.get<Vapor::DirectionalLightComponent>(entity);
             auto& logic = dirView.get<DirectionalLightLogicComponent>(entity);
 
             logic.timer += deltaTime * logic.speed;
@@ -204,34 +204,9 @@ public:
     }
 };
 
-class LightGatherSystem {
-public:
-    static void update(entt::registry& reg, Scene* scene) {
-        scene->pointLights.clear();
-        auto pointView = reg.view<PointLightComponent, Vapor::TransformComponent>();
-        for (auto entity : pointView) {
-            auto& light     = pointView.get<PointLightComponent>(entity);
-            auto& transform = pointView.get<Vapor::TransformComponent>(entity);
-            scene->pointLights.push_back({
-                .position  = transform.position,
-                .color     = light.color,
-                .intensity = light.intensity,
-                .radius    = light.radius,
-            });
-        }
-
-        scene->directionalLights.clear();
-        auto dirView = reg.view<DirectionalLightComponent>();
-        for (auto entity : dirView) {
-            auto& light = dirView.get<DirectionalLightComponent>(entity);
-            scene->directionalLights.push_back({
-                .direction = light.direction,
-                .color     = light.color,
-                .intensity = light.intensity,
-            });
-        }
-    }
-};
+// LightGatherSystem now lives in the engine (Vapor::LightGatherSystem); the
+// game calls it directly. It gathers the SunComponent-tagged directional light
+// into directionalLights[0].
 
 
 class AutoRotateSystem {

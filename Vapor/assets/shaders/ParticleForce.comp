@@ -2,55 +2,109 @@
 layout(local_size_x = 256, local_size_y = 1, local_size_z = 1) in;
 
 struct Particle {
-    vec3 position;
-    float _pad1;
-    vec3 velocity;
-    float _pad2;
-    vec3 force;
+    vec3  position;
+    float lifetime;  // -1 = immortal; ≥ 0 = max seconds alive
+    vec3  velocity;
+    float age;       // seconds since spawn
+    vec3  force;
     float _pad3;
-    vec4 color;
+    vec4  color;
 };
 
-layout(std140, set = 0, binding = 0) uniform SimulationParams {
-    vec2 resolution;
-    vec2 mousePosition;
+// SSBOs (not UBOs): the RHI compute descriptor set is all storage buffers.
+layout(std430, set = 0, binding = 0) readonly buffer SimulationParams {
+    vec2  resolution;
+    vec2  mousePosition;
     float time;
     float deltaTime;
-    float _pad1;
-    float _pad2;
+    uint  particleCount;
+    uint  attractorCount;
+    vec4  wind;       // xyz=direction, w=strength
+    vec4  turbulence; // w=strength (xyz reserved)
 };
 
-layout(std140, set = 0, binding = 1) uniform AttractorData {
-    vec3 attractorPos;
-    float attractorStrength;
+// One element per active attractor (up to MAX_PARTICLE_ATTRACTORS=8).
+// std430 vec3 has 16-byte base alignment, so strength falls at offset 16
+// inside the struct — matching C++ ParticleAttractor with _pad0 after position.
+struct Attractor {
+    vec3  position; // implicit 4-byte pad (16-byte alignment)
+    float strength; // offset 16
+};
+layout(std430, set = 0, binding = 1) readonly buffer AttractorBuffer {
+    Attractor attractors[];
 };
 
 layout(std430, set = 0, binding = 2) buffer ParticleBuffer {
     Particle particles[];
 };
 
+// ── Divergence-free curl noise ──────────────────────────────────────────────
+float hash(float n) { return fract(sin(n) * 43758.5453); }
+
+float vnoise(vec3 p) {
+    vec3 i = floor(p);
+    vec3 f = fract(p);
+    vec3 u = f * f * (3.0 - 2.0 * f);
+    float n = i.x + i.y * 57.0 + i.z * 113.0;
+    return mix(mix(mix(hash(n),         hash(n + 1.0),   u.x),
+                   mix(hash(n + 57.0),  hash(n + 58.0),  u.x), u.y),
+               mix(mix(hash(n + 113.0), hash(n + 114.0), u.x),
+                   mix(hash(n + 170.0), hash(n + 171.0), u.x), u.y), u.z);
+}
+
+vec3 curlNoise(vec3 p, float t) {
+    const float e  = 0.1;
+    const vec3  o1 = vec3(1.7, 9.2, 3.5);
+    const vec3  o2 = vec3(5.4, 2.1, 7.8);
+    vec3 q = p * 0.5 + vec3(t * 0.07);
+
+    float dFzdy = vnoise(q + o1 + vec3(0, e, 0)) - vnoise(q + o1 - vec3(0, e, 0));
+    float dFydz = vnoise(q + o2 + vec3(0, 0, e)) - vnoise(q + o2 - vec3(0, 0, e));
+    float dFxdz = vnoise(q + o1 + vec3(0, 0, e)) - vnoise(q + o1 - vec3(0, 0, e));
+    float dFzdx = vnoise(q + o2 + vec3(e, 0, 0)) - vnoise(q + o2 - vec3(e, 0, 0));
+    float dFydx = vnoise(q + o1 + vec3(e, 0, 0)) - vnoise(q + o1 - vec3(e, 0, 0));
+    float dFxdy = vnoise(q + o2 + vec3(0, e, 0)) - vnoise(q + o2 - vec3(0, e, 0));
+
+    return vec3(dFzdy - dFydz, dFxdz - dFzdx, dFydx - dFxdy) / (2.0 * e);
+}
+
 void main() {
     uint idx = gl_GlobalInvocationID.x;
-    if (idx >= particles.length()) {
-        return;
-    }
+    if (idx >= particleCount) return;
 
     Particle p = particles[idx];
+
+    // Skip dead particles
+    if (p.lifetime >= 0.0 && p.age >= p.lifetime) {
+        particles[idx] = p;
+        return;
+    }
 
     // Reset force
     p.force = vec3(0.0);
 
-    // Attractor force
-    vec3 toAttractor = attractorPos - p.position;
-    float dist = length(toAttractor);
-    if (dist > 0.001) {
-        vec3 dir = toAttractor / dist;
-        // Inverse square law with softening
-        float forceMag = attractorStrength / (dist * dist + 0.1);
-        p.force += dir * forceMag;
+    // Accumulate attractor forces (inverse-square with softening)
+    for (uint i = 0; i < attractorCount; i++) {
+        vec3  toAttractor = attractors[i].position - p.position;
+        float dist = length(toAttractor);
+        if (dist > 0.001) {
+            vec3  dir      = toAttractor / dist;
+            float forceMag = attractors[i].strength / (dist * dist + 0.1);
+            p.force += dir * forceMag;
+        }
     }
 
-    // Damping force (velocity-dependent drag)
+    // Wind
+    if (wind.w > 0.0) {
+        p.force += wind.xyz * wind.w;
+    }
+
+    // Divergence-free curl noise turbulence
+    if (turbulence.w > 0.0) {
+        p.force += curlNoise(p.position, time) * turbulence.w;
+    }
+
+    // Velocity-dependent drag (semi-implicit Euler — damp before integrate)
     p.force -= p.velocity * 0.5;
 
     particles[idx] = p;

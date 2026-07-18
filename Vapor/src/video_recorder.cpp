@@ -51,7 +51,7 @@ VideoRecorder::~VideoRecorder() {
     }
 }
 
-bool VideoRecorder::startRecording(Renderer* renderer, const Config& config) {
+bool VideoRecorder::startRecording(IRenderer* renderer, const Config& config) {
 #ifndef VAPOR_HAS_FFMPEG
     fmt::print(stderr, "[VideoRecorder] Built without FFmpeg support — recording unavailable\n");
     return false;

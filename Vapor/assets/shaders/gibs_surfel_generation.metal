@@ -15,9 +15,14 @@ using namespace metal;
 
 // Counter indices
 // [0] = per-frame generation budget (reset by CPU each frame in beginFrame)
-// [1] = persistent pool allocation cursor (read back by CPU as active surfel count)
+// [1] = persistent pool high-water cursor (read back by CPU as active surfel count)
+// [2] = free-list depth: count of reclaimed slots available for reuse. surfelUpdate
+//       pushes an evicted slot's index onto freeList[] and increments this; generation
+//       pops before bumping the high-water cursor, so the pool self-recycles instead
+//       of monotonically filling to maxSurfels and freezing (which needed a manual reset).
 constant uint COUNTER_NEW_SURFELS = 0;
 constant uint COUNTER_TOTAL_SURFELS = 1;
+constant uint COUNTER_FREE_SURFELS = 2;
 
 // Stochastic surfel generation based on density
 // Uses blue noise pattern for better distribution
@@ -31,6 +36,7 @@ kernel void surfelGeneration(
     constant SurfelGenerationParams& params [[buffer(3)]],
     device const uint* cellHeads [[buffer(4)]],
     device const uint* surfelNext [[buffer(5)]],
+    device const uint* freeList [[buffer(6)]],
     uint2 gid [[thread_position_in_grid]],
     uint2 gridSize [[threads_per_grid]]
 ) {
@@ -94,8 +100,11 @@ kernel void surfelGeneration(
         return;
     }
 
-    // Cheap pool-full early-out (racy read is fine; bounds check below is authoritative)
-    if (atomic_load_explicit(&counters[COUNTER_TOTAL_SURFELS], memory_order_relaxed) >= gibs.maxSurfels) {
+    // Cheap pool-full early-out: only bail when the high-water cursor is maxed
+    // AND there are no reclaimed slots to reuse (racy read is fine; the
+    // allocation below is authoritative).
+    if (atomic_load_explicit(&counters[COUNTER_TOTAL_SURFELS], memory_order_relaxed) >= gibs.maxSurfels &&
+        atomic_load_explicit(&counters[COUNTER_FREE_SURFELS], memory_order_relaxed) == 0u) {
         return;
     }
 
@@ -127,11 +136,24 @@ kernel void surfelGeneration(
         return;
     }
 
-    // Allocate from the persistent pool; the cursor survives across frames and
-    // is read back by the CPU as the active surfel count
-    uint surfelIndex = atomic_fetch_add_explicit(&counters[COUNTER_TOTAL_SURFELS], 1, memory_order_relaxed);
-    if (surfelIndex >= gibs.maxSurfels) {
-        return;
+    // Allocate a slot. Prefer a reclaimed slot from the free-list (a surfel
+    // surfelUpdate evicted); only bump the persistent high-water cursor when the
+    // free-list is empty. The high-water cursor is read back by the CPU as the
+    // active surfel count (the iteration bound for every downstream pass).
+    uint surfelIndex;
+    uint prevFree = atomic_fetch_sub_explicit(&counters[COUNTER_FREE_SURFELS], 1, memory_order_relaxed);
+    if (prevFree != 0u && prevFree <= gibs.maxSurfels) {
+        // Popped a valid slot (freeList top was at prevFree - 1).
+        surfelIndex = freeList[prevFree - 1u];
+    } else {
+        // Free-list was empty (or a concurrent underflow wrapped it) — undo the
+        // decrement and bump the high-water cursor instead.
+        atomic_fetch_add_explicit(&counters[COUNTER_FREE_SURFELS], 1, memory_order_relaxed);
+        surfelIndex = atomic_fetch_add_explicit(&counters[COUNTER_TOTAL_SURFELS], 1, memory_order_relaxed);
+        if (surfelIndex >= gibs.maxSurfels) {
+            atomic_fetch_sub_explicit(&counters[COUNTER_TOTAL_SURFELS], 1, memory_order_relaxed);
+            return;
+        }
     }
 
     // Calculate cell hash
@@ -163,6 +185,7 @@ kernel void surfelUpdate(
     device Surfel* surfels [[buffer(0)]],
     device atomic_uint* counters [[buffer(1)]],
     constant GIBSData& gibs [[buffer(2)]],
+    device uint* freeList [[buffer(3)]],
     uint gid [[thread_position_in_grid]]
 ) {
     if (gid >= gibs.activeSurfelCount) {
@@ -171,7 +194,7 @@ kernel void surfelUpdate(
 
     Surfel surfel = surfels[gid];
 
-    // Skip invalid surfels
+    // Skip invalid surfels (already evicted; their slot is on the free-list).
     if (!(surfel.flags & SURFEL_FLAG_VALID)) {
         return;
     }
@@ -194,9 +217,24 @@ kernel void surfelUpdate(
         surfel.flags |= SURFEL_FLAG_NEEDS_UPDATE;
     }
 
-    // Cull surfels that are too old or out of bounds
-    if (surfel.age > 1000.0 || !isInWorldBounds(surfel.position, gibs)) {
+    // Evict surfels that are too old or out of bounds, and RECLAIM the slot:
+    // clear VALID and push the index onto the free-list so generation can reuse
+    // it. Without this the pool only ever grows and freezes at maxSurfels.
+    // The age threshold is the reclamation window (nothing resets age, so every
+    // surfel is eventually refreshed); lower it to reclaim off-screen surfels
+    // sooner, at the cost of more on-screen regeneration churn (temporal hides it).
+    if (surfel.age > 600.0 || !isInWorldBounds(surfel.position, gibs)) {
         surfel.flags &= ~SURFEL_FLAG_VALID;
+        surfels[gid] = surfel;
+        uint slot = atomic_fetch_add_explicit(&counters[COUNTER_FREE_SURFELS], 1, memory_order_relaxed);
+        if (slot < gibs.maxSurfels) {
+            freeList[slot] = gid;
+        } else {
+            // Free-list full (should never happen: it holds at most maxSurfels
+            // indices) — undo so the depth counter stays consistent.
+            atomic_fetch_sub_explicit(&counters[COUNTER_FREE_SURFELS], 1, memory_order_relaxed);
+        }
+        return;
     }
 
     surfels[gid] = surfel;

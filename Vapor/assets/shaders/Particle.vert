@@ -29,7 +29,9 @@ struct Particle {
     vec4 color;
 };
 
-layout(std140, set = 0, binding = 0) uniform CameraData {
+// SSBO (not UBO): the RHI set-0 buffer set is all storage buffers. Binds the
+// engine CameraRenderData; proj/view offsets are identical under std430.
+layout(std430, set = 0, binding = 0) readonly buffer CameraData {
     mat4 proj;
     mat4 view;
     mat4 invProj;
@@ -46,7 +48,7 @@ layout(std430, set = 1, binding = 0) readonly buffer ParticleBuffer {
 
 layout(push_constant) uniform PushConstants {
     float particleSize;
-    float _pad1;
+    float useTexture;   // consumed by the fragment stage
     float _pad2;
     float _pad3;
 } pushConstants;

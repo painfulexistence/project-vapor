@@ -1,10 +1,15 @@
+#include <algorithm>
 #include <memory>
 #define NS_PRIVATE_IMPLEMENTATION
 #define MTL_PRIVATE_IMPLEMENTATION
 #define CA_PRIVATE_IMPLEMENTATION
 #include "components.hpp"
 
-using namespace Vapor;
+// NOTE: `using namespace Vapor;` is intentionally placed AFTER all includes
+// (see below). The branch's graphics.hpp defines Vapor:: copies of the GPU
+// structs that also exist at global scope in graphics_gpu_structs.hpp; if the
+// using-directive were active while those headers parse, their own unqualified
+// references (e.g. InstanceData::primitiveMode) would be ambiguous.
 #include "debug_draw.hpp"
 #include "graphics_mesh.hpp"
 #include "renderer_metal.hpp"
@@ -36,6 +41,11 @@ using namespace Vapor;
 #include "asset_manager.hpp"
 #include "engine_core.hpp"
 #include "graphics.hpp"
+// The branch's graphics.hpp is a monolith (not an umbrella), so pull in the
+// effect/batch/gibs sub-headers the native Metal renderer needs directly.
+#include "graphics_effects.hpp"   // AtmosphereData, WaterData, GPUParticle, ::Particle, …
+#include "graphics_batch2d.hpp"   // Batch2DVertex, Batch2DBlendMode
+#include "graphics_gibs.hpp"      // Surfel, SurfelCell, GIBSData
 #include "helper.hpp"
 #include "mesh_builder.hpp"
 #include "rmlui_manager.hpp"
@@ -47,10 +57,16 @@ using namespace Vapor;
 // GIBS (Global Illumination Based on Surfels)
 #include "Vapor/gibs_manager.hpp"
 
+// All headers are parsed above with no using-directive active, so their own
+// unqualified references bind to the intended (global gpu_structs) types. The
+// renderer body below uses Vapor:: types unqualified; GPU-struct names are
+// qualified with :: where the global versions are required.
+using namespace Vapor;
+
 // Pre-pass: Renders depth and normals
-class PrePass : public RenderPass {
+class PrePass : public MetalRenderPass {
 public:
-    explicit PrePass(Renderer_Metal* renderer) : RenderPass(renderer) {
+    explicit PrePass(Renderer_Metal* renderer) : MetalRenderPass(renderer) {
     }
 
     auto getName() const -> const char* override {
@@ -125,9 +141,9 @@ public:
 };
 
 // TLAS build pass: Builds top-level acceleration structure for ray tracing
-class TLASBuildPass : public RenderPass {
+class TLASBuildPass : public MetalRenderPass {
 public:
-    explicit TLASBuildPass(Renderer_Metal* renderer) : RenderPass(renderer) {
+    explicit TLASBuildPass(Renderer_Metal* renderer) : MetalRenderPass(renderer) {
     }
 
     auto getName() const -> const char* override {
@@ -182,9 +198,9 @@ public:
 };
 
 // Normal resolve pass: Resolves MSAA normal texture
-class NormalResolvePass : public RenderPass {
+class NormalResolvePass : public MetalRenderPass {
 public:
-    explicit NormalResolvePass(Renderer_Metal* renderer) : RenderPass(renderer) {
+    explicit NormalResolvePass(Renderer_Metal* renderer) : MetalRenderPass(renderer) {
     }
 
     auto getName() const -> const char* override {
@@ -214,9 +230,9 @@ public:
 
 // Velocity pass: camera-motion vectors from the depth buffer (see 3d_velocity.metal).
 // Feeds every temporal technique (RT AO temporal accumulation, TAA).
-class VelocityPass : public RenderPass {
+class VelocityPass : public MetalRenderPass {
 public:
-    explicit VelocityPass(Renderer_Metal* renderer) : RenderPass(renderer) {
+    explicit VelocityPass(Renderer_Metal* renderer) : MetalRenderPass(renderer) {
     }
 
     auto getName() const -> const char* override {
@@ -255,9 +271,9 @@ public:
 };
 
 // Tile culling pass: Performs light culling for tiled rendering
-class TileCullingPass : public RenderPass {
+class TileCullingPass : public MetalRenderPass {
 public:
-    explicit TileCullingPass(Renderer_Metal* renderer) : RenderPass(renderer) {
+    explicit TileCullingPass(Renderer_Metal* renderer) : MetalRenderPass(renderer) {
     }
 
     auto getName() const -> const char* override {
@@ -286,9 +302,9 @@ public:
 };
 
 // Raytrace shadow pass: Computes ray-traced shadows
-class RaytraceShadowPass : public RenderPass {
+class RaytraceShadowPass : public MetalRenderPass {
 public:
-    explicit RaytraceShadowPass(Renderer_Metal* renderer) : RenderPass(renderer) {
+    explicit RaytraceShadowPass(Renderer_Metal* renderer) : MetalRenderPass(renderer) {
     }
 
     auto getName() const -> const char* override {
@@ -330,10 +346,47 @@ public:
     }
 };
 
-// PSSM shadow pass: renders scene depth into a 3-slice texture array for cascades 1-3
-class PSSMShadowPass : public RenderPass {
+// Screen-space contact shadows: march the depth buffer toward the sun and write
+// a visibility RT the PBR pass min-composites onto the directional shadow. Adds
+// the fine near contact the RT/PSSM shadow misses (parity with the Vulkan path).
+class SSCSPass : public MetalRenderPass {
 public:
-    explicit PSSMShadowPass(Renderer_Metal* renderer) : RenderPass(renderer) {
+    explicit SSCSPass(Renderer_Metal* renderer) : MetalRenderPass(renderer) {}
+    auto getName() const -> const char* override { return "SSCSPass"; }
+
+    void execute() override {
+        auto& r = *renderer;
+        if (!r.sscsEnabled || !r.sscsPipeline || !r.sscsRT || !r.depthStencilRT) return;
+
+        auto w = r.sscsRT->width();
+        auto h = r.sscsRT->height();
+        glm::vec2 screenSize = glm::vec2(w, h);
+        struct SSCSParams { float rayLength; float thickness; uint32_t stepCount; float bias; } params;
+        params.rayLength = r.sscsLength;
+        params.thickness = r.sscsThickness;
+        params.stepCount = r.sscsSteps;
+        params.bias      = r.sscsBias;
+
+        auto timedComputeDesc = makeTimedComputeDesc(true, true);
+        auto encoder = r.currentCommandBuffer->computeCommandEncoder(timedComputeDesc.get());
+        encoder->setComputePipelineState(r.sscsPipeline.get());
+        encoder->setTexture(r.depthStencilRT.get(), 0);
+        encoder->setTexture(r.sscsRT.get(), 1);
+        encoder->setBuffer(r.cameraDataBuffers[r.currentFrameInFlight].get(), 0, 0);
+        encoder->setBuffer(r.directionalLightBuffer.get(), 0, 1);
+        encoder->setBytes(&screenSize, sizeof(glm::vec2), 2);
+        encoder->setBytes(&params, sizeof(params), 3);
+        encoder->dispatchThreadgroups(MTL::Size((w + 7) / 8, (h + 7) / 8, 1), MTL::Size(8, 8, 1));
+        encoder->endEncoding();
+
+        addTrafficEstimate(uint64_t(w) * h * (4 + 1));
+    }
+};
+
+// PSSM shadow pass: renders scene depth into a 3-slice texture array for cascades 1-3
+class PSSMShadowPass : public MetalRenderPass {
+public:
+    explicit PSSMShadowPass(Renderer_Metal* renderer) : MetalRenderPass(renderer) {
     }
 
     auto getName() const -> const char* override {
@@ -349,7 +402,7 @@ public:
         const float nearClip  = r.currentCamera->near();
         const float farClip   = r.currentCamera->far();
         const float rtEnd     = r.m_supportsRaytracing ? r.pssmRTMaxDist : nearClip;
-        const float blendRange = (farClip - rtEnd) * 0.05f; // 5% of remaining range
+        const float blendRange = (farClip - rtEnd) * r.pssmRTBlendScale; // fraction of remaining range
 
         // ----- Cascade split depths (practical split: blend of log + uniform) -----
         // splits[0] = rtEnd, splits[1..3] = cascade ends, splits[3] = farClip
@@ -389,13 +442,18 @@ public:
         struct PSSMGPUData {
             glm::mat4 lightSpaceMatrices[3];
             glm::vec4 cascadeSplits;
-            float blendRange;
-            float _pad[3];
+            float blendRange;          // RT↔PSSM blend range
+            float cascadeBlendRange;   // cascade↔cascade blend range
+            uint32_t pcfSampleCount;   // 4, 8, 16, or 32
+            uint32_t debugVisualize;   // 0 = off, 1 = visualize cascades
         };
 
         PSSMGPUData gpuData{};
         gpuData.cascadeSplits = glm::vec4(splits[0], splits[1], splits[2], splits[3]);
-        gpuData.blendRange    = blendRange;
+        gpuData.blendRange         = blendRange;
+        gpuData.cascadeBlendRange  = r.pssmCascadeBlendRange;
+        gpuData.pcfSampleCount     = r.pssmPcfSampleCount;
+        gpuData.debugVisualize     = r.pssmDebugVisualize ? 1 : 0;
 
         // Convert a forward view-space distance to NDC z by projecting an actual
         // view-space point. Handedness-aware: RH projections (glm default; the
@@ -435,20 +493,27 @@ public:
             float sphereRadius = 0.0f;
             for (auto& c : corners)
                 sphereRadius = glm::max(sphereRadius, glm::length(c - sphereCenter));
+            // Quantize the radius so texelSize doesn't jitter from per-frame float noise
+            sphereRadius = std::ceil(sphereRadius * 16.0f) / 16.0f;
+
+            // Snap the cascade center to the shadow-map texel grid so the map
+            // translates in whole texels as the camera moves (stops edge
+            // crawling/swimming). The snap MUST happen in a world-anchored,
+            // rotation-only light frame: the previous code snapped
+            // lightView * sphereCenter, but that view looks AT sphereCenter, so
+            // the product is always (0, 0, -lightDist) and the snap was a no-op.
+            const glm::mat4 lightRot = glm::lookAt(glm::vec3(0.0f), lightDir, up);
+            const float texelSize = (2.0f * sphereRadius) / float(r.PSSM_SHADOW_MAP_SIZE);
+            glm::vec3 lsC = glm::vec3(lightRot * glm::vec4(sphereCenter, 1.0f));
+            lsC.x = std::floor(lsC.x / texelSize) * texelSize;
+            lsC.y = std::floor(lsC.y / texelSize) * texelSize;
+            const glm::vec3 snappedCenter = glm::vec3(glm::inverse(lightRot) * glm::vec4(lsC, 1.0f));
 
             // Light view: eye pulled back far enough that the whole bounding
             // sphere sits in front of it (RH lookAt: forward is -z, so points in
             // front have negative view z; distance from eye = -z).
             const float lightDist = sphereRadius * 2.0f + 1.0f;
-            glm::mat4 lightView = glm::lookAt(sphereCenter - lightDir * lightDist, sphereCenter, up);
-
-            // Snap sphere center to texel grid in light space to stop shimmering
-            float texelSize = (2.0f * sphereRadius) / float(r.PSSM_SHADOW_MAP_SIZE);
-            glm::vec4 lsCenter = lightView * glm::vec4(sphereCenter, 1.0f);
-            lsCenter.x = std::floor(lsCenter.x / texelSize) * texelSize;
-            lsCenter.y = std::floor(lsCenter.y / texelSize) * texelSize;
-            glm::vec3 snappedCenter = glm::vec3(glm::inverse(lightView) * lsCenter);
-            lightView = glm::lookAt(snappedCenter - lightDir * lightDist, snappedCenter, up);
+            glm::mat4 lightView = glm::lookAt(snappedCenter - lightDir * lightDist, snappedCenter, up);
 
             // Depth extents as positive distances in front of the light eye
             float minDist = 1e38f, maxDist = -1e38f;
@@ -461,7 +526,13 @@ public:
             // (a negative near just extends the ortho volume behind the eye — valid).
             minDist -= (maxDist - minDist);
 
-            glm::mat4 lightProj = glm::ortho(
+            // orthoZO (not plain ortho): the camera uses perspectiveZO and Metal's
+            // depth buffer is [0,1], but glm::ortho here follows the GL [-1,1]
+            // convention unless GLM_FORCE_DEPTH_ZERO_TO_ONE took effect — which is
+            // unreliable in this TU (its sibling GLM_FORCE_LEFT_HANDED did not).
+            // Match the Vulkan path explicitly. RH (LEFT_HANDED inert) pairs with
+            // the RH lightView above.
+            glm::mat4 lightProj = glm::orthoZO(
                 -sphereRadius,  sphereRadius,
                 -sphereRadius,  sphereRadius,
                 minDist, maxDist
@@ -521,9 +592,9 @@ public:
 
 // PSSM resolve pass (debug): writes the directional shadow factor into a
 // camera-aligned screen-space texture so it can be inspected like RT shadow.
-class PSSMResolvePass : public RenderPass {
+class PSSMResolvePass : public MetalRenderPass {
 public:
-    explicit PSSMResolvePass(Renderer_Metal* renderer) : RenderPass(renderer) {}
+    explicit PSSMResolvePass(Renderer_Metal* renderer) : MetalRenderPass(renderer) {}
     auto getName() const -> const char* override { return "PSSMResolvePass"; }
 
     void execute() override {
@@ -551,9 +622,9 @@ public:
 };
 
 // Stochastic point shadow pass: MegaLights-style 2-ray shadow for clustered point lights
-class StochasticPointShadowPass : public RenderPass {
+class StochasticPointShadowPass : public MetalRenderPass {
 public:
-    explicit StochasticPointShadowPass(Renderer_Metal* renderer) : RenderPass(renderer) {}
+    explicit StochasticPointShadowPass(Renderer_Metal* renderer) : MetalRenderPass(renderer) {}
     auto getName() const -> const char* override { return "StochasticPointShadowPass"; }
 
     void execute() override {
@@ -579,6 +650,14 @@ public:
         encoder->setBytes(&fi, sizeof(uint32_t), 5);
         encoder->setAccelerationStructure(r.TLASBuffers[r.currentFrameInFlight].get(), 6);
         encoder->setBytes(&r.pointShadowDebugMode, sizeof(uint32_t), 7);
+        // The shared kernel now takes spot/rect shadow inputs at 8-10. Native
+        // has no spot lights and keeps R16F targets, so bind placeholders with
+        // zero counts — the kernel then leaves the extra channels at 1.0 and
+        // this path stays byte-for-byte.
+        encoder->setBuffer(r.pointLightBuffer.get(), 0, 8);   // placeholder (unread)
+        encoder->setBuffer(r.rectLightBuffer.get(), 0, 9);
+        glm::uvec2 extraCounts(0u, 0u);
+        encoder->setBytes(&extraCounts, sizeof(glm::uvec2), 10);
         encoder->dispatchThreadgroups(
             MTL::Size((uint32_t(screenSize.x) + 7) / 8, (uint32_t(screenSize.y) + 7) / 8, 1),
             MTL::Size(8, 8, 1)
@@ -588,9 +667,9 @@ public:
 };
 
 // Point shadow temporal pass: motion-vector reprojection + variance clamping denoiser
-class PointShadowTemporalPass : public RenderPass {
+class PointShadowTemporalPass : public MetalRenderPass {
 public:
-    explicit PointShadowTemporalPass(Renderer_Metal* renderer) : RenderPass(renderer) {}
+    explicit PointShadowTemporalPass(Renderer_Metal* renderer) : MetalRenderPass(renderer) {}
     auto getName() const -> const char* override { return "PointShadowTemporalPass"; }
 
     void execute() override {
@@ -619,9 +698,9 @@ public:
 };
 
 // Raytrace AO pass: Computes ray-traced ambient occlusion
-class RaytraceAOPass : public RenderPass {
+class RaytraceAOPass : public MetalRenderPass {
 public:
-    explicit RaytraceAOPass(Renderer_Metal* renderer) : RenderPass(renderer) {
+    explicit RaytraceAOPass(Renderer_Metal* renderer) : MetalRenderPass(renderer) {
     }
 
     auto getName() const -> const char* override {
@@ -659,9 +738,9 @@ public:
 
 // AO temporal accumulation: reprojects last frame's AO with the velocity
 // buffer and blends it with the raygen output (ADR-008 step 2).
-class AOTemporalPass : public RenderPass {
+class AOTemporalPass : public MetalRenderPass {
 public:
-    explicit AOTemporalPass(Renderer_Metal* renderer) : RenderPass(renderer) {
+    explicit AOTemporalPass(Renderer_Metal* renderer) : MetalRenderPass(renderer) {
     }
 
     auto getName() const -> const char* override {
@@ -712,9 +791,9 @@ public:
 // (ADR-008 step 3). aoRT is what the lighting/post passes consume. One serial
 // compute encoder for all iterations: successive dispatches are ordered and
 // their writes visible to each other.
-class AODenoisePass : public RenderPass {
+class AODenoisePass : public MetalRenderPass {
 public:
-    explicit AODenoisePass(Renderer_Metal* renderer) : RenderPass(renderer) {
+    explicit AODenoisePass(Renderer_Metal* renderer) : MetalRenderPass(renderer) {
     }
 
     auto getName() const -> const char* override {
@@ -756,9 +835,9 @@ public:
 };
 
 // Sky atmosphere pass: Renders procedural sky with Rayleigh and Mie scattering
-class SkyAtmospherePass : public RenderPass {
+class SkyAtmospherePass : public MetalRenderPass {
 public:
-    explicit SkyAtmospherePass(Renderer_Metal* renderer) : RenderPass(renderer) {
+    explicit SkyAtmospherePass(Renderer_Metal* renderer) : MetalRenderPass(renderer) {
     }
 
     auto getName() const -> const char* override {
@@ -810,9 +889,9 @@ public:
 };
 
 // Equirect-to-cubemap pass: Converts a loaded equirectangular HDRI texture to environmentCubemap
-class EquirectToCubemapPass : public RenderPass {
+class EquirectToCubemapPass : public MetalRenderPass {
 public:
-    explicit EquirectToCubemapPass(Renderer_Metal* renderer) : RenderPass(renderer) {}
+    explicit EquirectToCubemapPass(Renderer_Metal* renderer) : MetalRenderPass(renderer) {}
     auto getName() const -> const char* override { return "EquirectToCubemapPass"; }
 
     void execute() override {
@@ -823,7 +902,7 @@ public:
         if (!r.equirectHDRITexture) return;
 
         for (uint32_t face = 0; face < 6; ++face) {
-            auto* captureData = reinterpret_cast<IBLCaptureData*>(r.iblCaptureDataBuffer->contents());
+            auto* captureData = reinterpret_cast<::IBLCaptureData*>(r.iblCaptureDataBuffer->contents());
             captureData->faceIndex = face;
             captureData->roughness = 0.0f;
             r.iblCaptureDataBuffer->didModifyRange(NS::Range::Make(0, r.iblCaptureDataBuffer->length()));
@@ -856,9 +935,9 @@ public:
 };
 
 // Sky capture pass: Captures atmosphere to environment cubemap for IBL
-class SkyCapturePass : public RenderPass {
+class SkyCapturePass : public MetalRenderPass {
 public:
-    explicit SkyCapturePass(Renderer_Metal* renderer) : RenderPass(renderer) {
+    explicit SkyCapturePass(Renderer_Metal* renderer) : MetalRenderPass(renderer) {
     }
 
     auto getName() const -> const char* override {
@@ -885,7 +964,7 @@ public:
         // Render each face of the cubemap
         for (uint32_t face = 0; face < 6; ++face) {
             // Update capture data
-            auto* captureData = reinterpret_cast<IBLCaptureData*>(r.iblCaptureDataBuffer->contents());
+            auto* captureData = reinterpret_cast<::IBLCaptureData*>(r.iblCaptureDataBuffer->contents());
             captureData->viewProj = captureProj * captureViews[face];
             captureData->faceIndex = face;
             captureData->roughness = 0.0f;
@@ -920,9 +999,9 @@ public:
 };
 
 // Irradiance convolution pass: Creates diffuse irradiance map from environment cubemap
-class IrradianceConvolutionPass : public RenderPass {
+class IrradianceConvolutionPass : public MetalRenderPass {
 public:
-    explicit IrradianceConvolutionPass(Renderer_Metal* renderer) : RenderPass(renderer) {
+    explicit IrradianceConvolutionPass(Renderer_Metal* renderer) : MetalRenderPass(renderer) {
     }
 
     auto getName() const -> const char* override {
@@ -936,7 +1015,7 @@ public:
 
         // Render each face of the irradiance cubemap
         for (uint32_t face = 0; face < 6; ++face) {
-            auto* captureData = reinterpret_cast<IBLCaptureData*>(r.iblCaptureDataBuffer->contents());
+            auto* captureData = reinterpret_cast<::IBLCaptureData*>(r.iblCaptureDataBuffer->contents());
             captureData->faceIndex = face;
             captureData->roughness = 0.0f;
             r.iblCaptureDataBuffer->didModifyRange(NS::Range::Make(0, r.iblCaptureDataBuffer->length()));
@@ -963,9 +1042,9 @@ public:
 };
 
 // Pre-filter environment map pass: Creates specular pre-filtered cubemap with roughness mips
-class PrefilterEnvMapPass : public RenderPass {
+class PrefilterEnvMapPass : public MetalRenderPass {
 public:
-    explicit PrefilterEnvMapPass(Renderer_Metal* renderer) : RenderPass(renderer) {
+    explicit PrefilterEnvMapPass(Renderer_Metal* renderer) : MetalRenderPass(renderer) {
     }
 
     auto getName() const -> const char* override {
@@ -985,7 +1064,7 @@ public:
 
             // For each face
             for (uint32_t face = 0; face < 6; ++face) {
-                auto* captureData = reinterpret_cast<IBLCaptureData*>(r.iblCaptureDataBuffer->contents());
+                auto* captureData = reinterpret_cast<::IBLCaptureData*>(r.iblCaptureDataBuffer->contents());
                 captureData->faceIndex = face;
                 captureData->roughness = roughness;
                 r.iblCaptureDataBuffer->didModifyRange(NS::Range::Make(0, r.iblCaptureDataBuffer->length()));
@@ -1016,9 +1095,9 @@ public:
 };
 
 // BRDF LUT pass: Pre-computes BRDF integration lookup table
-class BRDFLUTPass : public RenderPass {
+class BRDFLUTPass : public MetalRenderPass {
 public:
-    explicit BRDFLUTPass(Renderer_Metal* renderer) : RenderPass(renderer) {
+    explicit BRDFLUTPass(Renderer_Metal* renderer) : MetalRenderPass(renderer) {
     }
 
     auto getName() const -> const char* override {
@@ -1050,9 +1129,9 @@ public:
 };
 
 // Main render pass: Renders the scene with PBR lighting
-class MainRenderPass : public RenderPass {
+class MainRenderPass : public MetalRenderPass {
 public:
-    explicit MainRenderPass(Renderer_Metal* renderer) : RenderPass(renderer) {
+    explicit MainRenderPass(Renderer_Metal* renderer) : MetalRenderPass(renderer) {
     }
 
     auto getName() const -> const char* override {
@@ -1143,6 +1222,8 @@ public:
                 r.getTexture(material->emissiveMap ? material->emissiveMap->texture : r.defaultEmissiveTexture).get(), 5
             );
             encoder->setFragmentTexture(r.shadowRT.get(), 7);
+            // White (=lit) when SSCS is off, so the shader's min() is a no-op.
+            encoder->setFragmentTexture(r.sscsEnabled ? r.sscsRT.get() : r.batch2DWhiteTexture.get(), 15);
 
             // IBL textures
             encoder->setFragmentTexture(r.irradianceMap.get(), 8);
@@ -1159,6 +1240,15 @@ public:
             }
             Uint32 gibsEnabledFlag = (r.gibsEnabled && r.gibsManager) ? 1 : 0;
             encoder->setFragmentBytes(&gibsEnabledFlag, sizeof(Uint32), 10);
+            // Perf-isolation flags at buffer(12) — the shared PBR shader now
+            // reads this slot, so it MUST be bound or the reference is UB.
+            encoder->setFragmentBytes(&r.mainDebugFlags, sizeof(uint32_t), 12);
+            // Spot lights are an RHI-path feature: bind a placeholder buffer
+            // (count 0 -> the loop never dereferences it) and shadowFlags 0
+            // (legacy R16F shadow target: rect/spot channels unavailable).
+            encoder->setFragmentBuffer(r.pointLightBuffer.get(), 0, 14);
+            glm::uvec2 spotRectParams(0u, 0u);
+            encoder->setFragmentBytes(&spotRectParams, sizeof(spotRectParams), 15);
 
             for (const auto& draw : draws) {
                 if (!r.currentCamera->isVisible(r.instances[draw.instanceIndex].boundingSphere)) {
@@ -1183,9 +1273,9 @@ public:
 };
 
 // Water pass: Renders water surface with Gerstner waves, reflections, and refractions
-class WaterPass : public RenderPass {
+class WaterPass : public MetalRenderPass {
 public:
-    explicit WaterPass(Renderer_Metal* renderer) : RenderPass(renderer) {
+    explicit WaterPass(Renderer_Metal* renderer) : MetalRenderPass(renderer) {
     }
 
     auto getName() const -> const char* override {
@@ -1273,9 +1363,9 @@ public:
 };
 
 // Particle pass: GPU particle simulation and rendering
-class ParticlePass : public RenderPass {
+class ParticlePass : public MetalRenderPass {
 public:
-    explicit ParticlePass(Renderer_Metal* renderer) : RenderPass(renderer) {
+    explicit ParticlePass(Renderer_Metal* renderer) : MetalRenderPass(renderer) {
     }
 
     auto getName() const -> const char* override {
@@ -1285,59 +1375,42 @@ public:
     void execute() override {
         auto& r = *renderer;
 
-        // Skip if particle system is disabled or pipelines aren't ready
-        if (!r.particleSystemEnabled || r.particleCount == 0) {
+        if (r.particleCount == 0) {
             return;
         }
         if (!r.particleForcePipeline || !r.particleIntegratePipeline || !r.particleRenderPipeline) {
             return;
         }
 
-        auto time = (float)SDL_GetTicks() / 1000.0f;
-        float deltaTime = 1.0f / 60.0f;// Use fixed timestep to avoid issues
+        // ── Simulate ────────────────────────────────────────────────────────
+        // Pause: skip the sim (deltaTime=0 would be a no-op) and leave state frozen.
+        if (!r.m_particleSimPaused) {
+            auto time = (float)SDL_GetTicks() / 1000.0f;
 
-        // Compute attractor position (in front of camera)
-        glm::vec3 camPos = r.currentCamera->getEye();
-        glm::mat4 view = r.currentCamera->getViewMatrix();
-        glm::vec3 forward = -glm::vec3(view[0][2], view[1][2], view[2][2]);
-        glm::vec3 attractorPos = camPos + forward * 3.0f;
+            // Update simulation params buffer using the canonical render_data.hpp struct.
+            ParticleSimParams simParams;
+            auto drawableSize = r.swapchain->drawableSize();
+            simParams.resolution = glm::vec2(drawableSize.width, drawableSize.height);
+            simParams.mousePosition = glm::vec2(0.0f);
+            simParams.time = time;
+            simParams.deltaTime = 1.0f / 60.0f;
+            simParams.particleCount = r.particleCount;
+            simParams.wind      = r.m_forceField.wind;
+            simParams.turbulence = glm::vec4(0.0f, 0.0f, 0.0f, r.m_forceField.turbulence);
 
-        // Update simulation params buffer
-        struct ParticleSimParams {
-            glm::vec2 resolution;
-            glm::vec2 mousePosition;
-            float time;
-            float deltaTime;
-            Uint32 particleCount;
-            float _pad1;
-        } simParams;
+            const auto& attractors = r.m_forceField.attractors;
+            simParams.attractorCount = static_cast<Uint32>(attractors.size());
 
-        auto drawableSize = r.swapchain->drawableSize();
-        simParams.resolution = glm::vec2(drawableSize.width, drawableSize.height);
-        simParams.mousePosition = glm::vec2(0.0f);
-        simParams.time = time;
-        simParams.deltaTime = deltaTime;
-        simParams.particleCount = r.particleCount;
+            memcpy(r.particleSimParamsBuffers[r.currentFrameInFlight]->contents(), &simParams, sizeof(ParticleSimParams));
+            r.particleSimParamsBuffers[r.currentFrameInFlight]->didModifyRange(NS::Range::Make(0, sizeof(ParticleSimParams)));
 
-        memcpy(r.particleSimParamsBuffers[r.currentFrameInFlight]->contents(), &simParams, sizeof(ParticleSimParams));
-        r.particleSimParamsBuffers[r.currentFrameInFlight]->didModifyRange(NS::Range::Make(0, sizeof(ParticleSimParams))
-        );
+            if (!attractors.empty()) {
+                const size_t attractorBytes = attractors.size() * sizeof(ParticleAttractor);
+                memcpy(r.particleAttractorBuffers[r.currentFrameInFlight]->contents(), attractors.data(), attractorBytes);
+                r.particleAttractorBuffers[r.currentFrameInFlight]->didModifyRange(NS::Range::Make(0, attractorBytes));
+            }
 
-        // Update attractor buffer
-        struct ParticleAttractor {
-            glm::vec3 position;
-            float strength;
-        } attractor;
-
-        attractor.position = attractorPos;
-        attractor.strength = 50.0f;// Increased strength
-
-        memcpy(r.particleAttractorBuffers[r.currentFrameInFlight]->contents(), &attractor, sizeof(ParticleAttractor));
-        r.particleAttractorBuffers[r.currentFrameInFlight]->didModifyRange(NS::Range::Make(0, sizeof(ParticleAttractor))
-        );
-
-        // Compute passes (single particle buffer - persistent state)
-        {
+            // Compute passes (single particle buffer - persistent state)
             auto timedComputeDesc = makeTimedComputeDesc(true, false);
             auto computeEncoder = r.currentCommandBuffer->computeCommandEncoder(timedComputeDesc.get());
 
@@ -1359,6 +1432,10 @@ public:
 
             computeEncoder->endEncoding();
         }
+
+        // ── Render ──────────────────────────────────────────────────────────
+        // Hide: skip drawing but keep simulating, so unhiding is seamless.
+        if (!r.particleVisible) return;
 
         // Render pass: Draw particles
         {
@@ -1400,9 +1477,9 @@ public:
 };
 
 // Light scattering pass: Renders volumetric god rays effect
-class LightScatteringPass : public RenderPass {
+class LightScatteringPass : public MetalRenderPass {
 public:
-    explicit LightScatteringPass(Renderer_Metal* renderer) : RenderPass(renderer) {
+    explicit LightScatteringPass(Renderer_Metal* renderer) : MetalRenderPass(renderer) {
     }
 
     auto getName() const -> const char* override {
@@ -1499,9 +1576,9 @@ public:
 // depth, so voxels depth-test against rasterized geometry and later passes
 // (sky, fog, bloom) composite them like any other opaque surface.
 
-class VoxelRaymarchPass : public RenderPass {
+class VoxelRaymarchPass : public MetalRenderPass {
 public:
-    explicit VoxelRaymarchPass(Renderer_Metal* renderer) : RenderPass(renderer) {
+    explicit VoxelRaymarchPass(Renderer_Metal* renderer) : MetalRenderPass(renderer) {
     }
 
     auto getName() const -> const char* override {
@@ -1552,9 +1629,9 @@ public:
     }
 };
 
-class VolumetricFogPass : public RenderPass {
+class VolumetricFogPass : public MetalRenderPass {
 public:
-    explicit VolumetricFogPass(Renderer_Metal* renderer) : RenderPass(renderer) {
+    explicit VolumetricFogPass(Renderer_Metal* renderer) : MetalRenderPass(renderer) {
     }
 
     auto getName() const -> const char* override {
@@ -1595,7 +1672,8 @@ public:
         fogData->ambientIntensity = r.volumetricFogSettings.ambientIntensity;
         fogData->noiseScale = r.volumetricFogSettings.noiseScale;
         fogData->noiseIntensity = r.volumetricFogSettings.noiseIntensity;
-        fogData->windSpeed = r.volumetricFogSettings.windSpeed;
+        // Per-medium fog scroll coefficient scaled by the shared wind strength.
+        fogData->windSpeed = r.volumetricFogSettings.windSpeed * r.m_windStrength;
         fogData->windDirection = r.volumetricFogSettings.windDirection;
         fogData->temporalBlend = r.volumetricFogSettings.temporalBlend;
 
@@ -1618,6 +1696,19 @@ public:
         encoder->setFragmentTexture(r.depthStencilRT.get(), 1);
         encoder->setFragmentBuffer(r.volumetricFogDataBuffers[r.currentFrameInFlight].get(), 0, 0);
         encoder->setFragmentBuffer(r.cameraDataBuffers[r.currentFrameInFlight].get(), 0, 1);
+        // Volumetric raymarch inputs (shared shader contract): PSSM cascades
+        // for sun shafts + the light set. Native has no spot lights — bind a
+        // placeholder with count 0.
+        encoder->setFragmentTexture(r.pssmShadowMaps.get(), 2);
+        encoder->setFragmentBuffer(r.pssmDataBuffers[r.currentFrameInFlight].get(), 0, 2);
+        encoder->setFragmentBuffer(r.pointLightBuffer.get(), 0, 3);
+        encoder->setFragmentBuffer(r.clusterBuffers[r.currentFrameInFlight].get(), 0, 4);
+        encoder->setFragmentBuffer(r.pointLightBuffer.get(), 0, 5);  // spot placeholder (count 0)
+        encoder->setFragmentBuffer(r.rectLightBuffer.get(), 0, 6);
+        uint32_t fogRectCount = r.currentScene
+            ? static_cast<uint32_t>(r.currentScene->rectLights.size()) : 0u;
+        glm::uvec4 fogLightParams(r.clusterGridSizeX, r.clusterGridSizeY, 0u, fogRectCount);
+        encoder->setFragmentBytes(&fogLightParams, sizeof(fogLightParams), 7);
         encoder->drawPrimitives(MTL::PrimitiveType::PrimitiveTypeTriangle, 0, 3, 1);
         encoder->endEncoding();
 
@@ -1630,9 +1721,9 @@ public:
 // Volumetric Cloud Pass: Ray-marched clouds
 // ============================================================================
 
-class VolumetricCloudPass : public RenderPass {
+class VolumetricCloudPass : public MetalRenderPass {
 public:
-    explicit VolumetricCloudPass(Renderer_Metal* renderer) : RenderPass(renderer) {
+    explicit VolumetricCloudPass(Renderer_Metal* renderer) : MetalRenderPass(renderer) {
     }
 
     auto getName() const -> const char* override {
@@ -1664,9 +1755,11 @@ public:
         cloudData->frameIndex = r.currentFrameInFlight;
         cloudData->time = r.volumetricCloudSettings.time;
 
-        // Update wind offset (accumulate over time)
+        // Update wind offset (accumulate over time). The per-medium windSpeed is
+        // the cloud's scroll coefficient; the shared wind strength scales it.
         r.volumetricCloudSettings.windOffset +=
-            r.volumetricCloudSettings.windDirection * r.volumetricCloudSettings.windSpeed * 0.016f;
+            r.volumetricCloudSettings.windDirection *
+            (r.volumetricCloudSettings.windSpeed * r.m_windStrength) * 0.016f;
         cloudData->windOffset = r.volumetricCloudSettings.windOffset;
 
         // Copy settings
@@ -1843,9 +1936,9 @@ public:
 // Sun Flare Pass: Lens flare effect with procedural textures
 // ============================================================================
 
-class SunFlarePass : public RenderPass {
+class SunFlarePass : public MetalRenderPass {
 public:
-    explicit SunFlarePass(Renderer_Metal* renderer) : RenderPass(renderer) {
+    explicit SunFlarePass(Renderer_Metal* renderer) : MetalRenderPass(renderer) {
     }
 
     auto getName() const -> const char* override {
@@ -1950,9 +2043,9 @@ public:
 // ============================================================================
 
 // Bloom brightness pass: Extracts bright pixels from the scene
-class BloomBrightnessPass : public RenderPass {
+class BloomBrightnessPass : public MetalRenderPass {
 public:
-    explicit BloomBrightnessPass(Renderer_Metal* renderer) : RenderPass(renderer) {
+    explicit BloomBrightnessPass(Renderer_Metal* renderer) : MetalRenderPass(renderer) {
     }
 
     auto getName() const -> const char* override {
@@ -1981,9 +2074,9 @@ public:
 };
 
 // Bloom downsample pass: Creates the bloom mipmap pyramid
-class BloomDownsamplePass : public RenderPass {
+class BloomDownsamplePass : public MetalRenderPass {
 public:
-    explicit BloomDownsamplePass(Renderer_Metal* renderer) : RenderPass(renderer) {
+    explicit BloomDownsamplePass(Renderer_Metal* renderer) : MetalRenderPass(renderer) {
     }
 
     auto getName() const -> const char* override {
@@ -2034,9 +2127,9 @@ public:
 };
 
 // Bloom upsample pass: Upsamples and accumulates the bloom
-class BloomUpsamplePass : public RenderPass {
+class BloomUpsamplePass : public MetalRenderPass {
 public:
-    explicit BloomUpsamplePass(Renderer_Metal* renderer) : RenderPass(renderer) {
+    explicit BloomUpsamplePass(Renderer_Metal* renderer) : MetalRenderPass(renderer) {
     }
 
     auto getName() const -> const char* override {
@@ -2069,9 +2162,9 @@ public:
 };
 
 // Bloom composite pass: Combines bloom with the scene
-class BloomCompositePass : public RenderPass {
+class BloomCompositePass : public MetalRenderPass {
 public:
-    explicit BloomCompositePass(Renderer_Metal* renderer) : RenderPass(renderer) {
+    explicit BloomCompositePass(Renderer_Metal* renderer) : MetalRenderPass(renderer) {
     }
 
     auto getName() const -> const char* override {
@@ -2106,9 +2199,9 @@ public:
 // ============================================================================
 
 // DOF CoC pass: Calculate Circle of Confusion based on screen position
-class DOFCoCPass : public RenderPass {
+class DOFCoCPass : public MetalRenderPass {
 public:
-    explicit DOFCoCPass(Renderer_Metal* renderer) : RenderPass(renderer) {
+    explicit DOFCoCPass(Renderer_Metal* renderer) : MetalRenderPass(renderer) {
     }
 
     auto getName() const -> const char* override {
@@ -2158,9 +2251,9 @@ public:
 };
 
 // DOF Blur pass: Apply bokeh blur based on CoC
-class DOFBlurPass : public RenderPass {
+class DOFBlurPass : public MetalRenderPass {
 public:
-    explicit DOFBlurPass(Renderer_Metal* renderer) : RenderPass(renderer) {
+    explicit DOFBlurPass(Renderer_Metal* renderer) : MetalRenderPass(renderer) {
     }
 
     auto getName() const -> const char* override {
@@ -2197,9 +2290,9 @@ public:
 };
 
 // DOF Composite pass: Blend sharp and blurred images
-class DOFCompositePass : public RenderPass {
+class DOFCompositePass : public MetalRenderPass {
 public:
-    explicit DOFCompositePass(Renderer_Metal* renderer) : RenderPass(renderer) {
+    explicit DOFCompositePass(Renderer_Metal* renderer) : MetalRenderPass(renderer) {
     }
 
     auto getName() const -> const char* override {
@@ -2230,9 +2323,9 @@ public:
 };
 
 // Post-process pass: Applies tone mapping, color grading, chromatic aberration, vignette
-class PostProcessPass : public RenderPass {
+class PostProcessPass : public MetalRenderPass {
 public:
-    explicit PostProcessPass(Renderer_Metal* renderer) : RenderPass(renderer) {
+    explicit PostProcessPass(Renderer_Metal* renderer) : MetalRenderPass(renderer) {
     }
 
     auto getName() const -> const char* override {
@@ -2296,9 +2389,9 @@ public:
 };
 
 // Debug draw pass: Renders wireframe debug shapes (lines)
-class DebugDrawPass : public RenderPass {
+class DebugDrawPass : public MetalRenderPass {
 public:
-    explicit DebugDrawPass(Renderer_Metal* renderer) : RenderPass(renderer) {
+    explicit DebugDrawPass(Renderer_Metal* renderer) : MetalRenderPass(renderer) {
     }
 
     auto getName() const -> const char* override {
@@ -2377,9 +2470,9 @@ public:
 };
 
 // RmlUI pass: Renders the RmlUI overlay (before ImGui)
-class RmlUiPass : public RenderPass {
+class RmlUiPass : public MetalRenderPass {
 public:
-    explicit RmlUiPass(Renderer_Metal* renderer) : RenderPass(renderer) {
+    explicit RmlUiPass(Renderer_Metal* renderer) : MetalRenderPass(renderer) {
     }
 
     auto getName() const -> const char* override {
@@ -2394,9 +2487,9 @@ public:
 };
 
 // ImGui pass: Renders the ImGui UI overlay
-class ImGuiPass : public RenderPass {
+class ImGuiPass : public MetalRenderPass {
 public:
-    explicit ImGuiPass(Renderer_Metal* renderer) : RenderPass(renderer) {
+    explicit ImGuiPass(Renderer_Metal* renderer) : MetalRenderPass(renderer) {
     }
 
     auto getName() const -> const char* override {
@@ -2425,9 +2518,9 @@ public:
 };
 
 // 2D Batch pass: Renders batched 2D primitives (quads, lines, shapes)
-class WorldCanvasPass : public RenderPass {
+class WorldCanvasPass : public MetalRenderPass {
 public:
-    explicit WorldCanvasPass(Renderer_Metal* renderer) : RenderPass(renderer) {
+    explicit WorldCanvasPass(Renderer_Metal* renderer) : MetalRenderPass(renderer) {
     }
 
     auto getName() const -> const char* override {
@@ -2506,7 +2599,7 @@ public:
         for (Uint32 i = 0; i < r.batch3DTextureSlotIndex; i++) {
             TextureHandle handle = r.batch3DTextureSlots[i];
             MTL::Texture* texture = r.batch2DWhiteTexture.get();
-            if (handle.rid != UINT32_MAX) {
+            if (handle.id != UINT32_MAX) {
                 auto texPtr = r.getTexture(handle);
                 if (texPtr) texture = texPtr.get();
             }
@@ -2530,9 +2623,9 @@ public:
     }
 };
 
-class CanvasPass : public RenderPass {
+class CanvasPass : public MetalRenderPass {
 public:
-    explicit CanvasPass(Renderer_Metal* renderer) : RenderPass(renderer) {
+    explicit CanvasPass(Renderer_Metal* renderer) : MetalRenderPass(renderer) {
     }
 
     auto getName() const -> const char* override {
@@ -2645,7 +2738,7 @@ public:
             for (Uint32 i = 0; i < b.slotCount; i++) {
                 TextureHandle handle = (*b.slots)[i];
                 MTL::Texture* tex = nullptr;
-                if (handle.rid != UINT32_MAX) {
+                if (handle.id != UINT32_MAX) {
                     auto texPtr = r.getTexture(handle);
                     if (texPtr) tex = texPtr.get();
                 }
@@ -2682,10 +2775,10 @@ public:
 // GIBS (Global Illumination Based on Surfels) Passes
 // ============================================================================
 
-class SurfelGenerationPass : public RenderPass {
+class SurfelGenerationPass : public MetalRenderPass {
 public:
     SurfelGenerationPass(Renderer_Metal* renderer, Vapor::GIBSManager* gm)
-        : RenderPass(renderer), gibsManager(gm) {}
+        : MetalRenderPass(renderer), gibsManager(gm) {}
 
     const char* getName() const override { return "SurfelGenerationPass"; }
 
@@ -2735,10 +2828,10 @@ private:
     Vapor::GIBSManager* gibsManager;
 };
 
-class SurfelHashBuildPass : public RenderPass {
+class SurfelHashBuildPass : public MetalRenderPass {
 public:
     SurfelHashBuildPass(Renderer_Metal* renderer, Vapor::GIBSManager* gm)
-        : RenderPass(renderer), gibsManager(gm) {}
+        : MetalRenderPass(renderer), gibsManager(gm) {}
 
     const char* getName() const override { return "SurfelHashBuildPass"; }
 
@@ -2781,10 +2874,10 @@ private:
     Vapor::GIBSManager* gibsManager;
 };
 
-class SurfelRaytracingPass : public RenderPass {
+class SurfelRaytracingPass : public MetalRenderPass {
 public:
     SurfelRaytracingPass(Renderer_Metal* renderer, Vapor::GIBSManager* gm)
-        : RenderPass(renderer), gibsManager(gm) {}
+        : MetalRenderPass(renderer), gibsManager(gm) {}
 
     const char* getName() const override { return "SurfelRaytracingPass"; }
 
@@ -2841,10 +2934,10 @@ private:
     Vapor::GIBSManager* gibsManager;
 };
 
-class GIBSTemporalPass : public RenderPass {
+class GIBSTemporalPass : public MetalRenderPass {
 public:
     GIBSTemporalPass(Renderer_Metal* renderer, Vapor::GIBSManager* gm)
-        : RenderPass(renderer), gibsManager(gm) {}
+        : MetalRenderPass(renderer), gibsManager(gm) {}
 
     const char* getName() const override { return "GIBSTemporalPass"; }
 
@@ -2872,10 +2965,10 @@ private:
     Vapor::GIBSManager* gibsManager;
 };
 
-class GIBSSamplePass : public RenderPass {
+class GIBSSamplePass : public MetalRenderPass {
 public:
     GIBSSamplePass(Renderer_Metal* renderer, Vapor::GIBSManager* gm)
-        : RenderPass(renderer), gibsManager(gm) {}
+        : MetalRenderPass(renderer), gibsManager(gm) {}
 
     const char* getName() const override { return "GIBSSamplePass"; }
 
@@ -2928,8 +3021,10 @@ private:
     Vapor::GIBSManager* gibsManager;
 };
 
-auto createRendererMetal() -> std::unique_ptr<Renderer> {
-    return std::make_unique<Renderer_Metal>();
+std::unique_ptr<IRenderer> createRendererMetal(SDL_Window* window) {
+    auto r = std::make_unique<Renderer_Metal>();
+    r->init(window);  // creates device/swapchain and initializes the ImGui Metal backend
+    return r;
 }
 
 Renderer_Metal::Renderer_Metal() {
@@ -2998,6 +3093,7 @@ auto Renderer_Metal::init(SDL_Window* window) -> void {
     graph.addPass(std::make_unique<PSSMShadowPass>(this));
     graph.addPass(std::make_unique<PSSMResolvePass>(this));
     if (m_supportsRaytracing) graph.addPass(std::make_unique<RaytraceShadowPass>(this));
+    graph.addPass(std::make_unique<SSCSPass>(this));  // contact shadows (no RT needed)
     if (m_supportsRaytracing) graph.addPass(std::make_unique<RaytraceAOPass>(this));
     if (m_supportsRaytracing) graph.addPass(std::make_unique<AOTemporalPass>(this));
     if (m_supportsRaytracing) graph.addPass(std::make_unique<AODenoisePass>(this));
@@ -3058,7 +3154,9 @@ auto Renderer_Metal::init(SDL_Window* window) -> void {
     graph.addPass(std::make_unique<PostProcessPass>(this));
     graph.addPass(std::make_unique<DebugDrawPass>(this));// Debug draw after post-process
     graph.addPass(std::make_unique<RmlUiPass>(this));// RmlUI (pure UI, no bloom)
-    graph.addPass(std::make_unique<ImGuiPass>(this));
+    // NOTE: ImGuiPass is NOT part of the graph. ImGui draw-data submission runs
+    // in endFrame(), after the caller's ImGui::Render() (frame model parity with
+    // the RHI renderer). See Renderer_Metal::endFrame().
 
     debugDraw = std::make_shared<Vapor::DebugDraw>();
 
@@ -3230,6 +3328,7 @@ auto Renderer_Metal::createResources() -> void {
     normalResolvePipeline = createComputePipeline("shaders/3d_normal_resolve.metal");
     velocityPipeline = createComputePipeline("shaders/3d_velocity.metal");
     if (m_supportsRaytracing) raytraceShadowPipeline = createComputePipeline("shaders/3d_raytrace_shadow.metal");
+    sscsPipeline = createComputePipeline("shaders/3d_sscs.metal");
     // AO raygen: 3d_ssao.metal (screen-space) and 3d_raytrace_ao.metal (ray-traced)
     // are drop-in interchangeable here; both feed the temporal + à-trous chain.
     // RT AO: 2 cosine-weighted any-hit rays/px, 1.5m cap (the visibility knob —
@@ -3238,8 +3337,8 @@ auto Renderer_Metal::createResources() -> void {
     if (m_supportsRaytracing) ssaoPipeline = createComputePipeline("shaders/3d_ssao.metal");
     if (m_supportsRaytracing) aoTemporalPipeline = createComputePipeline("shaders/3d_ao_temporal.metal");
     if (m_supportsRaytracing) aoDenoisePipeline = createComputePipeline("shaders/3d_ao_denoise.metal");
-    if (m_supportsRaytracing) stochasticPointShadowPipeline = createComputePipeline("shaders/3d_stochastic_point_shadow.metal");
-    pointShadowTemporalPipeline = createComputePipeline("shaders/3d_point_shadow_temporal.metal");
+    if (m_supportsRaytracing) stochasticPointShadowPipeline = createComputePipeline("shaders/3d_stochastic_shadow.metal");
+    pointShadowTemporalPipeline = createComputePipeline("shaders/3d_stochastic_shadow_temporal.metal");
     pssmResolvePipeline = createComputePipeline("shaders/3d_pssm_resolve.metal");
 
     // PSSM depth-only pipeline
@@ -3515,8 +3614,8 @@ auto Renderer_Metal::createResources() -> void {
         batch2DWhiteTexture->replaceRegion(MTL::Region(0, 0, 1, 1), 0, &whitePixel, sizeof(uint32_t));
 
         // Create texture handle for the white texture
-        batch2DWhiteTextureHandle.rid = nextTextureID++;
-        textures[batch2DWhiteTextureHandle.rid] = batch2DWhiteTexture;
+        batch2DWhiteTextureHandle.id = nextTextureID++;
+        textures[batch2DWhiteTextureHandle.id] = batch2DWhiteTexture;
 
         fmt::print("2D batch rendering pipeline initialized\n");
     }
@@ -3524,28 +3623,28 @@ auto Renderer_Metal::createResources() -> void {
     // Create buffers
     frameDataBuffers.resize(MAX_FRAMES_IN_FLIGHT);
     for (auto& frameDataBuffer : frameDataBuffers) {
-        frameDataBuffer = NS::TransferPtr(device->newBuffer(sizeof(FrameData), MTL::ResourceStorageModeManaged));
+        frameDataBuffer = NS::TransferPtr(device->newBuffer(sizeof(::FrameData), MTL::ResourceStorageModeManaged));
     }
     cameraDataBuffers.resize(MAX_FRAMES_IN_FLIGHT);
     for (auto& cameraDataBuffer : cameraDataBuffers) {
-        cameraDataBuffer = NS::TransferPtr(device->newBuffer(sizeof(CameraData), MTL::ResourceStorageModeManaged));
+        cameraDataBuffer = NS::TransferPtr(device->newBuffer(sizeof(::CameraData), MTL::ResourceStorageModeManaged));
     }
     instanceDataBuffers.resize(MAX_FRAMES_IN_FLIGHT);
     for (auto& instanceDataBuffer : instanceDataBuffers) {
         instanceDataBuffer =
-            NS::TransferPtr(device->newBuffer(sizeof(InstanceData) * MAX_INSTANCES, MTL::ResourceStorageModeManaged));
+            NS::TransferPtr(device->newBuffer(sizeof(::InstanceData) * MAX_INSTANCES, MTL::ResourceStorageModeManaged));
     }
 
-    std::vector<Particle> particles{ 1000 };
+    std::vector<::Particle> particles{ 1000 };
     testStorageBuffer =
-        NS::TransferPtr(device->newBuffer(particles.size() * sizeof(Particle), MTL::ResourceStorageModeManaged));
-    memcpy(testStorageBuffer->contents(), particles.data(), particles.size() * sizeof(Particle));
+        NS::TransferPtr(device->newBuffer(particles.size() * sizeof(::Particle), MTL::ResourceStorageModeManaged));
+    memcpy(testStorageBuffer->contents(), particles.data(), particles.size() * sizeof(::Particle));
     testStorageBuffer->didModifyRange(NS::Range::Make(0, testStorageBuffer->length()));
 
     clusterBuffers.resize(MAX_FRAMES_IN_FLIGHT);
     for (auto& clusterBuffer : clusterBuffers) {
         clusterBuffer = NS::TransferPtr(device->newBuffer(
-            clusterGridSizeX * clusterGridSizeY * clusterGridSizeZ * sizeof(Cluster), MTL::ResourceStorageModeManaged
+            clusterGridSizeX * clusterGridSizeY * clusterGridSizeZ * sizeof(::Cluster), MTL::ResourceStorageModeManaged
         ));
     }
 
@@ -3694,7 +3793,7 @@ auto Renderer_Metal::createResources() -> void {
     atmosphereDataBuffer->didModifyRange(NS::Range::Make(0, atmosphereDataBuffer->length()));
 
     // Create IBL capture data buffer
-    iblCaptureDataBuffer = NS::TransferPtr(device->newBuffer(sizeof(IBLCaptureData), MTL::ResourceStorageModeManaged));
+    iblCaptureDataBuffer = NS::TransferPtr(device->newBuffer(sizeof(::IBLCaptureData), MTL::ResourceStorageModeManaged));
 
     // Create IBL textures
     const uint32_t envMapSize = 512;
@@ -3853,6 +3952,25 @@ auto Renderer_Metal::createResources() -> void {
         )
     ));
     shadowTextureDesc->release();
+
+    // Screen-space contact shadow RT (half-res, single-channel visibility).
+    MTL::TextureDescriptor* sscsTextureDesc = MTL::TextureDescriptor::alloc()->init();
+    sscsTextureDesc->setTextureType(MTL::TextureType2D);
+    sscsTextureDesc->setPixelFormat(MTL::PixelFormatR8Unorm);
+    sscsTextureDesc->setWidth((swapchain->drawableSize().width + 1) / 2);
+    sscsTextureDesc->setHeight((swapchain->drawableSize().height + 1) / 2);
+    sscsTextureDesc->setUsage(MTL::TextureUsageShaderRead | MTL::TextureUsageShaderWrite);
+    sscsRT = NS::TransferPtr(device->newTexture(sscsTextureDesc));
+    sscsRTGrayView = NS::TransferPtr(sscsRT->newTextureView(
+        MTL::PixelFormatR8Unorm,
+        MTL::TextureType2D,
+        NS::Range::Make(0, 1),
+        NS::Range::Make(0, 1),
+        MTL::TextureSwizzleChannels::Make(
+            MTL::TextureSwizzleRed, MTL::TextureSwizzleRed, MTL::TextureSwizzleRed, MTL::TextureSwizzleOne
+        )
+    ));
+    sscsTextureDesc->release();
 
     // PSSM shadow maps: 2D texture array, 3 cascades × 4096×4096 Depth32
     {
@@ -4956,60 +5074,28 @@ auto Renderer_Metal::createResources() -> void {
 
     // Create particle buffers
     // Single particle buffer for persistent state (not triple-buffered)
-    size_t particleBufferSize = sizeof(GPUParticle) * MAX_PARTICLES;
+    size_t particleBufferSize = sizeof(GPUParticleData) * MAX_PARTICLES;
     particleBuffer = NS::TransferPtr(device->newBuffer(particleBufferSize, MTL::ResourceStorageModeShared));
 
-    // Per-frame uniform buffers (triple-buffered)
+    // Per-frame uniform buffers (triple-buffered).
+    // attractor buffer holds MAX_PARTICLE_ATTRACTORS elements.
     particleSimParamsBuffers.resize(MAX_FRAMES_IN_FLIGHT);
     particleAttractorBuffers.resize(MAX_FRAMES_IN_FLIGHT);
     for (size_t i = 0; i < MAX_FRAMES_IN_FLIGHT; i++) {
         particleSimParamsBuffers[i] =
-            NS::TransferPtr(device->newBuffer(sizeof(ParticleSimulationParams), MTL::ResourceStorageModeShared));
+            NS::TransferPtr(device->newBuffer(sizeof(ParticleSimParams), MTL::ResourceStorageModeShared));
         particleAttractorBuffers[i] =
-            NS::TransferPtr(device->newBuffer(sizeof(ParticleAttractorData), MTL::ResourceStorageModeShared));
+            NS::TransferPtr(device->newBuffer(sizeof(ParticleAttractor) * MAX_PARTICLE_ATTRACTORS,
+                                              MTL::ResourceStorageModeShared));
     }
 
-    // Initialize particles with random positions and colors
-    {
-        std::srand(static_cast<unsigned>(std::time(nullptr)));
+    // Zero-fill: lifetime=0/age=0 → all slots start as dead and are skipped
+    // by the compute shaders. ECS emitters claim slots via claimParticleSlots()
+    // and fill them with uploadParticles().
+    std::memset(particleBuffer->contents(), 0, particleBufferSize);
+    // particleCount starts at 0; updated by claimParticleSlots() high-water mark.
 
-        auto* particles = reinterpret_cast<GPUParticle*>(particleBuffer->contents());
-        for (size_t i = 0; i < MAX_PARTICLES; i++) {
-            // Minimum radius of 0.5 to avoid particles at origin
-            float r = 0.5f + std::sqrt(static_cast<float>(std::rand()) / RAND_MAX) * 4.5f;
-            float theta = static_cast<float>(std::rand()) / RAND_MAX * 2.0f * 3.14159265f;
-            float phi = static_cast<float>(std::rand()) / RAND_MAX * 3.14159265f;
-
-            particles[i].position =
-                glm::vec3(r * std::sin(phi) * std::cos(theta), r * std::sin(phi) * std::sin(theta), r * std::cos(phi));
-
-            // Initialize tangential velocity for orbital motion
-            glm::vec3 tangent = glm::normalize(glm::cross(particles[i].position, glm::vec3(0.0f, 1.0f, 0.0f)));
-            if (glm::length(tangent) < 0.001f) {
-                tangent = glm::vec3(1.0f, 0.0f, 0.0f);
-            }
-            // Increase initial velocity for more dynamic motion (was 0.5)
-            // Velocity inversely proportional to radius for stable orbits
-            particles[i].velocity = tangent * (1.5f / std::sqrt(r + 0.1f));
-            particles[i].force = glm::vec3(0.0f);
-
-            float brightness = 1.0f - (r / 5.0f);
-
-            // "Nocturne" palette - mysterious, elegant purple-blue gradient
-            // Perfect for piano atmosphere: deep purple → indigo → electric blue
-            glm::vec3 a = glm::vec3(0.25f, 0.25f, 0.6f);// Base: royal blue
-            glm::vec3 b = glm::vec3(0.35f, 0.3f, 0.4f);// Amplitude: purple-blue dominant
-            glm::vec3 c = glm::vec3(0.8f, 0.9f, 1.0f);// Frequency: blue channel most active
-            glm::vec3 d = glm::vec3(0.7f, 0.65f, 0.5f);// Phase: starts from purple
-
-            glm::vec3 color = a + b * glm::cos(6.28318f * (c * brightness + d));
-            // Clamp color to [0, 1] to prevent negative values and oversaturation
-            color = glm::clamp(color, 0.0f, 1.0f);
-            particles[i].color = glm::vec4(color, 1.0f);
-        }
-    }
-
-    fmt::print("Particle system initialized with {} particles\n", MAX_PARTICLES);
+    fmt::print("Particle pool initialized ({} slots, ECS-driven)\n", MAX_PARTICLES);
 }
 
 // ============================================================================
@@ -5301,32 +5387,32 @@ auto Renderer_Metal::stage(std::shared_ptr<Scene> scene) -> void {
     // Lights
     size_t directionalLightsSize = std::max((size_t)1, scene->directionalLights.size());
     directionalLightBuffer = NS::TransferPtr(
-        device->newBuffer(directionalLightsSize * sizeof(DirectionalLight), MTL::ResourceStorageModeManaged)
+        device->newBuffer(directionalLightsSize * sizeof(::DirectionalLight), MTL::ResourceStorageModeManaged)
     );
     if (!scene->directionalLights.empty()) {
         memcpy(
             directionalLightBuffer->contents(),
             scene->directionalLights.data(),
-            scene->directionalLights.size() * sizeof(DirectionalLight)
+            scene->directionalLights.size() * sizeof(::DirectionalLight)
         );
     }
     directionalLightBuffer->didModifyRange(NS::Range::Make(0, directionalLightBuffer->length()));
 
     size_t pointLightsSize = std::max((size_t)1, scene->pointLights.size());
     pointLightBuffer = NS::TransferPtr(
-        device->newBuffer(pointLightsSize * sizeof(PointLight), MTL::ResourceStorageModeManaged)
+        device->newBuffer(pointLightsSize * sizeof(::PointLight), MTL::ResourceStorageModeManaged)
     );
     if (!scene->pointLights.empty()) {
-        memcpy(pointLightBuffer->contents(), scene->pointLights.data(), scene->pointLights.size() * sizeof(PointLight));
+        memcpy(pointLightBuffer->contents(), scene->pointLights.data(), scene->pointLights.size() * sizeof(::PointLight));
     }
     pointLightBuffer->didModifyRange(NS::Range::Make(0, pointLightBuffer->length()));
 
     size_t rectLightsSize = std::max((size_t)1, scene->rectLights.size());
     rectLightBuffer = NS::TransferPtr(
-        device->newBuffer(rectLightsSize * sizeof(RectLight), MTL::ResourceStorageModeManaged)
+        device->newBuffer(rectLightsSize * sizeof(::RectLight), MTL::ResourceStorageModeManaged)
     );
     if (!scene->rectLights.empty()) {
-        memcpy(rectLightBuffer->contents(), scene->rectLights.data(), scene->rectLights.size() * sizeof(RectLight));
+        memcpy(rectLightBuffer->contents(), scene->rectLights.data(), scene->rectLights.size() * sizeof(::RectLight));
     }
     rectLightBuffer->didModifyRange(NS::Range::Make(0, rectLightBuffer->length()));
 
@@ -5345,7 +5431,7 @@ auto Renderer_Metal::stage(std::shared_ptr<Scene> scene) -> void {
     }
     size_t materialsSize = std::max((size_t)1, scene->materials.size());
     materialDataBuffer = NS::TransferPtr(
-        device->newBuffer(materialsSize * sizeof(MaterialData), MTL::ResourceStorageModeManaged)
+        device->newBuffer(materialsSize * sizeof(::MaterialData), MTL::ResourceStorageModeManaged)
     );
 
     // Buffers
@@ -5395,13 +5481,78 @@ auto Renderer_Metal::stage(std::shared_ptr<Scene> scene) -> void {
     cmd->commit();
 }
 
+// ============================================================================
+// Frame model (parity with the RHI renderer / IRenderer):
+//   beginFrame()          — acquire drawable + command buffer, backend ImGui
+//                           NewFrame. Caller then calls ImGui::NewFrame().
+//   invokeImGuiCallback() — no-op here: the engine debug panel and the app/
+//                           engine callbacks are built inside draw() (main's
+//                           data model needs the scene, available in draw()).
+//   draw()                — record all render passes (no ImGui pass, no present)
+//   (caller: ImGui::Render())
+//   endFrame()            — submit ImGui draw data, present, commit.
+// ============================================================================
+void Renderer_Metal::beginFrame(const CameraRenderData& /*camera*/) {
+    // Acquire the drawable (autoreleased; managed by the system AutoreleasePool)
+    // and a fresh command buffer for the frame.
+    currentDrawable = swapchain->nextDrawable();
+    currentCommandBuffer = currentDrawable ? queue->commandBuffer() : nullptr;
+
+    // ImGui backend NewFrame must run before the caller's ImGui::NewFrame().
+    // The Metal backend takes a render-pass descriptor to learn the target
+    // pixel format; point it at the drawable when we have one.
+    auto imguiPassDesc = NS::TransferPtr(MTL::RenderPassDescriptor::renderPassDescriptor());
+    if (currentDrawable) {
+        imguiPassDesc->colorAttachments()->object(0)->setTexture(currentDrawable->texture());
+    }
+    ImGui_ImplMetal_NewFrame(imguiPassDesc.get());
+    ImGui_ImplSDL3_NewFrame();
+}
+
+void Renderer_Metal::invokeImGuiCallback() {
+    // Intentionally empty — see beginFrame()/draw() notes above. The panel and
+    // callbacks are built during draw() where the staged scene is available.
+}
+
+void Renderer_Metal::endFrame() {
+    // Submit ImGui draw data on top of the rendered frame, then present.
+    // The caller has already called ImGui::Render(); do NOT call it again here.
+    if (!currentDrawable || !currentCommandBuffer) {
+        return;
+    }
+
+    if (ImGui::GetDrawData() && ImGui::GetDrawData()->CmdListsCount > 0) {
+        auto imguiPassDesc = NS::TransferPtr(MTL::RenderPassDescriptor::renderPassDescriptor());
+        auto imguiPassColorRT = imguiPassDesc->colorAttachments()->object(0);
+        imguiPassColorRT->setLoadAction(MTL::LoadActionLoad);
+        imguiPassColorRT->setStoreAction(MTL::StoreActionStore);
+        imguiPassColorRT->setTexture(currentDrawable->texture());
+        auto encoder = currentCommandBuffer->renderCommandEncoder(imguiPassDesc.get());
+        ImGui_ImplMetal_RenderDrawData(ImGui::GetDrawData(), currentCommandBuffer, encoder);
+        encoder->endEncoding();
+    }
+
+    currentCommandBuffer->presentDrawable(currentDrawable);
+    currentCommandBuffer->commit();
+    // Do not release the drawable: nextDrawable() returns an autoreleased object
+    // retained by presentDrawable() until presentation completes.
+
+    frameNumber++;
+    currentFrameInFlight = (currentFrameInFlight + 1) % MAX_FRAMES_IN_FLIGHT;
+    currentCommandBuffer = nullptr;
+    currentDrawable = nullptr;
+}
+
 auto Renderer_Metal::draw(std::shared_ptr<Scene> scene, Camera& camera) -> void {
     ZoneScoped;
     FrameMark;
 
-    // Get drawable (autoreleased, will be managed by system AutoreleasePool)
-    auto surface = swapchain->nextDrawable();
-    if (!surface) {
+    // The drawable and command buffer are acquired in beginFrame(); ImGui draw
+    // data is submitted and the drawable is presented in endFrame(). This
+    // function only records the render passes.
+    auto surface = currentDrawable;
+    auto cmd = currentCommandBuffer;
+    if (!surface || !cmd) {
         return;
     }
 
@@ -5410,7 +5561,7 @@ auto Renderer_Metal::draw(std::shared_ptr<Scene> scene, Camera& camera) -> void 
     // ==========================================================================
     auto time = (float)SDL_GetTicks() / 1000.0f;
 
-    auto* frameData = reinterpret_cast<FrameData*>(frameDataBuffers[currentFrameInFlight]->contents());
+    auto* frameData = reinterpret_cast<::FrameData*>(frameDataBuffers[currentFrameInFlight]->contents());
     frameData->frameNumber = frameNumber;
     frameData->time = time;
     frameData->deltaTime = 0.016f;// TODO:
@@ -5425,7 +5576,7 @@ auto Renderer_Metal::draw(std::shared_ptr<Scene> scene, Camera& camera) -> void 
     glm::mat4 view = camera.getViewMatrix();
     glm::mat4 invProj = glm::inverse(proj);
     glm::mat4 invView = glm::inverse(view);
-    auto* cameraData = reinterpret_cast<CameraData*>(cameraDataBuffers[currentFrameInFlight]->contents());
+    auto* cameraData = reinterpret_cast<::CameraData*>(cameraDataBuffers[currentFrameInFlight]->contents());
     cameraData->proj = proj;
     cameraData->view = view;
     cameraData->invProj = invProj;
@@ -5439,8 +5590,8 @@ auto Renderer_Metal::draw(std::shared_ptr<Scene> scene, Camera& camera) -> void 
 
     // Reallocate light buffers if the ECS has added lights since stage() was called
     // (LightGatherSystem populates scene->directionalLights / pointLights after staging)
-    const size_t dirLightBytes   = std::max(scene->directionalLights.size(), (size_t)1) * sizeof(DirectionalLight);
-    const size_t pointLightBytes = std::max(scene->pointLights.size(),       (size_t)1) * sizeof(PointLight);
+    const size_t dirLightBytes   = std::max(scene->directionalLights.size(), (size_t)1) * sizeof(::DirectionalLight);
+    const size_t pointLightBytes = std::max(scene->pointLights.size(),       (size_t)1) * sizeof(::PointLight);
     if (!directionalLightBuffer || directionalLightBuffer->length() < dirLightBytes) {
         directionalLightBuffer = NS::TransferPtr(
             device->newBuffer(dirLightBytes, MTL::ResourceStorageModeManaged));
@@ -5450,7 +5601,7 @@ auto Renderer_Metal::draw(std::shared_ptr<Scene> scene, Camera& camera) -> void 
             device->newBuffer(pointLightBytes, MTL::ResourceStorageModeManaged));
     }
 
-    auto* dirLights = reinterpret_cast<DirectionalLight*>(directionalLightBuffer->contents());
+    auto* dirLights = reinterpret_cast<::DirectionalLight*>(directionalLightBuffer->contents());
     for (size_t i = 0; i < scene->directionalLights.size(); ++i) {
         dirLights[i].direction = scene->directionalLights[i].direction;
         dirLights[i].color = scene->directionalLights[i].color;
@@ -5466,7 +5617,7 @@ auto Renderer_Metal::draw(std::shared_ptr<Scene> scene, Camera& camera) -> void 
         atmosphereData->sunIntensity = sunLight.intensity;
     }
 
-    auto* pointLights = reinterpret_cast<PointLight*>(pointLightBuffer->contents());
+    auto* pointLights = reinterpret_cast<::PointLight*>(pointLightBuffer->contents());
     for (size_t i = 0; i < scene->pointLights.size(); ++i) {
         pointLights[i].position = scene->pointLights[i].position;
         pointLights[i].color = scene->pointLights[i].color;
@@ -5475,19 +5626,19 @@ auto Renderer_Metal::draw(std::shared_ptr<Scene> scene, Camera& camera) -> void 
     }
     pointLightBuffer->didModifyRange(NS::Range::Make(0, pointLightBuffer->length()));
 
-    const size_t rectLightBytes = std::max(scene->rectLights.size(), (size_t)1) * sizeof(RectLight);
+    const size_t rectLightBytes = std::max(scene->rectLights.size(), (size_t)1) * sizeof(::RectLight);
     if (!rectLightBuffer || rectLightBuffer->length() < rectLightBytes) {
         rectLightBuffer = NS::TransferPtr(device->newBuffer(rectLightBytes, MTL::ResourceStorageModeManaged));
     }
     if (!scene->rectLights.empty()) {
-        memcpy(rectLightBuffer->contents(), scene->rectLights.data(), scene->rectLights.size() * sizeof(RectLight));
+        memcpy(rectLightBuffer->contents(), scene->rectLights.data(), scene->rectLights.size() * sizeof(::RectLight));
         rectLightBuffer->didModifyRange(NS::Range::Make(0, rectLightBytes));
     }
 
-    auto* materialData = reinterpret_cast<MaterialData*>(materialDataBuffer->contents());
+    auto* materialData = reinterpret_cast<::MaterialData*>(materialDataBuffer->contents());
     for (size_t i = 0; i < scene->materials.size(); ++i) {
         const auto& mat = scene->materials[i];
-        materialData[i] = MaterialData{ .baseColorFactor = mat->baseColorFactor,
+        materialData[i] = ::MaterialData{ .baseColorFactor = mat->baseColorFactor,
                                         .normalScale = mat->normalScale,
                                         .metallicFactor = mat->metallicFactor,
                                         .roughnessFactor = mat->roughnessFactor,
@@ -5525,7 +5676,7 @@ auto Renderer_Metal::draw(std::shared_ptr<Scene> scene, Camera& camera) -> void 
     }
     // TODO: avoid updating the entire instance data buffer every frame
     memcpy(
-        instanceDataBuffers[currentFrameInFlight]->contents(), instances.data(), instances.size() * sizeof(InstanceData)
+        instanceDataBuffers[currentFrameInFlight]->contents(), instances.data(), instances.size() * sizeof(::InstanceData)
     );
     instanceDataBuffers[currentFrameInFlight]->didModifyRange(
         NS::Range::Make(0, instanceDataBuffers[currentFrameInFlight]->length())
@@ -5541,12 +5692,10 @@ auto Renderer_Metal::draw(std::shared_ptr<Scene> scene, Camera& camera) -> void 
 
     // ==========================================================================
     // Set up rendering context for passes
+    // (currentCommandBuffer / currentDrawable were set in beginFrame())
     // ==========================================================================
-    auto cmd = queue->commandBuffer();
-    currentCommandBuffer = cmd;
     currentScene = scene;
     currentCamera = &camera;
-    currentDrawable = surface;
     drawCount = 0;
 
     // ==========================================================================
@@ -5586,9 +5735,14 @@ auto Renderer_Metal::draw(std::shared_ptr<Scene> scene, Camera& camera) -> void 
     if (engineCore) {
         auto* rmluiManager = engineCore->getRmlUiManager();
         if (!rmluiManager) {
-            // Initialize RmlUI with current window size
-            int width = static_cast<int>(surface->texture()->width());
-            int height = static_cast<int>(surface->texture()->height());
+            // Initialize RmlUI with the LOGICAL window size (points), not the
+            // drawable size. RmlUi lays out in logical coordinates and the
+            // render projection is logical too (RmlRendererMetal::SetViewport),
+            // while the physical framebuffer viewport handles Retina upscaling.
+            // Using the drawable (physical, 2x on Retina) here doubled every
+            // UI element.
+            int width = 0, height = 0;
+            SDL_GetWindowSize(window, &width, &height);
             if (engineCore->initRmlUI(width, height)) {
                 // Initialize renderer UI support (sets RenderInterface and finalizes RmlUI)
                 initUI();
@@ -5598,15 +5752,11 @@ auto Renderer_Metal::draw(std::shared_ptr<Scene> scene, Camera& camera) -> void 
 
     // ==========================================================================
     // Build ImGui UI (before ImGuiPass executes)
+    // ------------------------------------------------------------------------
+    // The ImGui backend NewFrame (ImGui_ImplMetal_NewFrame / ImGui_ImplSDL3_
+    // NewFrame) runs in beginFrame(); the caller invokes ImGui::NewFrame()
+    // between beginFrame() and here. This block only builds the windows.
     // ==========================================================================
-    // Create temporary render pass descriptor for ImGui initialization
-    auto imguiPassDesc = NS::TransferPtr(MTL::RenderPassDescriptor::renderPassDescriptor());
-    auto imguiPassColorRT = imguiPassDesc->colorAttachments()->object(0);
-    imguiPassColorRT->setTexture(surface->texture());
-
-    ImGui_ImplMetal_NewFrame(imguiPassDesc.get());
-    ImGui_ImplSDL3_NewFrame();
-    ImGui::NewFrame();
 
     // F1 toggles the engine ImGui overlay on/off.
     if (ImGui::IsKeyPressed(ImGuiKey_F1))
@@ -5647,7 +5797,8 @@ auto Renderer_Metal::draw(std::shared_ptr<Scene> scene, Camera& camera) -> void 
             rtPreview("Scene Color RT", colorRT.get());
             rtPreview("Scene Depth RT", depthStencilRT.get());
             // Shadow results consumed by the PBR shader (all screen-space)
-            rtPreview("Raytraced Shadow", shadowRTGrayView.get());
+            rtPreview("Near Shadow", shadowRTGrayView.get()); // RT-based here; same role as Vulkan's near map
+            rtPreview("Contact Shadow (SSCS)", sscsRTGrayView.get());
             rtPreview("Point Shadow", pointShadowDenoisedRTGrayView.get());
             rtPreview("PSSM Shadow", pssmShadowScreenRTGrayView.get());
             rtPreview("Raytraced AO", aoRTGrayView.get()); // grayscale swizzle view (raw R16F renders red)
@@ -5676,7 +5827,30 @@ auto Renderer_Metal::draw(std::shared_ptr<Scene> scene, Camera& camera) -> void 
                 ImGui::Text("Cascade splits (view depth): RT<%.1f | C1<%.1f | C2<%.1f | C3<%.1f",
                     splits.x, splits.y, splits.z, splits.w);
             }
-            ImGui::SliderFloat("RT shadow max dist", &pssmRTMaxDist, 5.0f, 200.0f);
+            ImGui::SliderFloat("Near shadow distance", &pssmRTMaxDist, 5.0f, 200.0f);
+            // Skip the directional shadow term (perf/debug). Pushed to the PBR
+            // shader at buffer(12) as mainDebugFlags bit 1 — same as Vulkan.
+            bool skipShadow = (mainDebugFlags & 2u) != 0u;
+            if (ImGui::Checkbox("Skip shadow", &skipShadow))
+                mainDebugFlags = (mainDebugFlags & ~2u) | (skipShadow ? 2u : 0u);
+            ImGui::Checkbox("Contact shadows (SSCS)", &sscsEnabled);
+            if (sscsEnabled) {
+                ImGui::SliderFloat("SSCS length", &sscsLength, 0.05f, 2.0f);
+                ImGui::SliderFloat("SSCS thickness", &sscsThickness, 0.05f, 2.0f);
+            }
+
+            // --- PSSM PCF & blend controls ---
+            const char* pcfCounts[] = { "4", "8", "16", "32" };
+            const uint32_t pcfValues[] = { 4u, 8u, 16u, 32u };
+            int pcfIdx = 2; // default 16
+            for (int i = 0; i < 4; i++) if (pssmPcfSampleCount == pcfValues[i]) pcfIdx = i;
+            if (ImGui::Combo("PCF samples", &pcfIdx, pcfCounts, 4)) {
+                pssmPcfSampleCount = pcfValues[pcfIdx];
+            }
+            ImGui::SliderFloat("RT<->PSSM blend", &pssmRTBlendScale, 0.0f, 0.25f, "%.3f");
+            ImGui::SliderFloat("Cascade blend range", &pssmCascadeBlendRange, 0.0f, 30.0f);
+            ImGui::Checkbox("Visualize cascades", &pssmDebugVisualize);
+            ImGui::TextWrapped("Cascade colors: green = RT, red = C1, blue = C2, yellow = C3");
 
             // --- Stochastic point shadow debug mode ---
             const char* psDebugModes[] = { "Visibility (normal)", "Tile light-count heatmap" };
@@ -6450,16 +6624,9 @@ auto Renderer_Metal::draw(std::shared_ptr<Scene> scene, Camera& camera) -> void 
         });
     }
 
-    cmd->presentDrawable(surface);
-    cmd->commit();
-
-    // Note: Don't call surface->release() here!
-    // nextDrawable() returns an autoreleased object that will be managed by the system AutoreleasePool.
-    // presentDrawable() retains the drawable until presentation completes.
-    // The system AutoreleasePool (managed by the main run loop) will automatically release it.
-
-    currentFrameInFlight = (currentFrameInFlight + 1) % MAX_FRAMES_IN_FLIGHT;
-    frameNumber++;
+    // NOTE: ImGui draw-data submission and presentDrawable()/commit() happen in
+    // endFrame(), after the caller's ImGui::Render(). The frame counters are
+    // advanced there too. Do not present or advance counters here.
 }
 
 
@@ -6672,9 +6839,9 @@ void Renderer_Metal::updateTexture(TextureHandle handle, const std::shared_ptr<I
     if (!img) {
         return;
     }
-    auto it = textures.find(handle.rid);
+    auto it = textures.find(handle.id);
     if (it == textures.end() || !it->second) {
-        fmt::print(stderr, "[Metal] updateTexture: invalid texture handle {}\n", handle.rid);
+        fmt::print(stderr, "[Metal] updateTexture: invalid texture handle {}\n", handle.id);
         return;
     }
     MTL::Texture* texture = it->second.get();
@@ -6714,13 +6881,13 @@ RenderTextureHandle Renderer_Metal::createRenderTexture(const RenderTextureDesc&
     RenderTextureData rtData;
     rtData.width = desc.width;
     rtData.height = desc.height;
-    rtData.hdr = desc.hdr;
+    rtData.hdr = desc.isHDR;
     rtData.sampleCount = desc.sampleCount;
 
     // Create color texture
     auto colorDesc = NS::TransferPtr(MTL::TextureDescriptor::alloc()->init());
     colorDesc->setTextureType(MTL::TextureType2D);
-    colorDesc->setPixelFormat(desc.hdr ? MTL::PixelFormatRGBA16Float : MTL::PixelFormatRGBA8Unorm);
+    colorDesc->setPixelFormat(desc.isHDR ? MTL::PixelFormatRGBA16Float : MTL::PixelFormatRGBA8Unorm);
     colorDesc->setWidth(desc.width);
     colorDesc->setHeight(desc.height);
     colorDesc->setMipmapLevelCount(1);
@@ -6751,7 +6918,7 @@ RenderTextureHandle Renderer_Metal::createRenderTexture(const RenderTextureDesc&
     // Create temp texture for ping-pong post-processing (same format as color)
     auto tempDesc = NS::TransferPtr(MTL::TextureDescriptor::alloc()->init());
     tempDesc->setTextureType(MTL::TextureType2D);
-    tempDesc->setPixelFormat(desc.hdr ? MTL::PixelFormatRGBA16Float : MTL::PixelFormatRGBA8Unorm);
+    tempDesc->setPixelFormat(desc.isHDR ? MTL::PixelFormatRGBA16Float : MTL::PixelFormatRGBA8Unorm);
     tempDesc->setWidth(desc.width);
     tempDesc->setHeight(desc.height);
     tempDesc->setMipmapLevelCount(1);
@@ -6772,16 +6939,16 @@ RenderTextureHandle Renderer_Metal::createRenderTexture(const RenderTextureDesc&
 }
 
 void Renderer_Metal::destroyRenderTexture(RenderTextureHandle handle) {
-    auto it = renderTextures.find(handle.rid);
+    auto it = renderTextures.find(handle.id);
     if (it != renderTextures.end()) {
         // Remove from regular textures as well
-        textures.erase(it->second.textureHandle.rid);
+        textures.erase(it->second.textureHandle.id);
         renderTextures.erase(it);
     }
 }
 
 TextureHandle Renderer_Metal::getRenderTextureAsTexture(RenderTextureHandle handle) {
-    auto it = renderTextures.find(handle.rid);
+    auto it = renderTextures.find(handle.id);
     if (it != renderTextures.end()) {
         return it->second.textureHandle;
     }
@@ -6789,7 +6956,7 @@ TextureHandle Renderer_Metal::getRenderTextureAsTexture(RenderTextureHandle hand
 }
 
 glm::uvec2 Renderer_Metal::getRenderTextureSize(RenderTextureHandle handle) {
-    auto it = renderTextures.find(handle.rid);
+    auto it = renderTextures.find(handle.id);
     if (it != renderTextures.end()) {
         return glm::uvec2(it->second.width, it->second.height);
     }
@@ -6799,7 +6966,7 @@ glm::uvec2 Renderer_Metal::getRenderTextureSize(RenderTextureHandle handle) {
 void Renderer_Metal::renderToTexture(
     RenderTextureHandle target, std::shared_ptr<Scene> scene, Camera& camera, const glm::vec4& clearColor
 ) {
-    auto it = renderTextures.find(target.rid);
+    auto it = renderTextures.find(target.id);
     if (it == renderTextures.end() || !scene) {
         return;
     }
@@ -6846,7 +7013,7 @@ void Renderer_Metal::renderToTexture(
     camera.updateAspectRatio(aspect);
 
     // Update camera data buffer
-    CameraData cameraData;
+    ::CameraData cameraData;
     cameraData.proj = camera.getProjMatrix();
     cameraData.view = camera.getViewMatrix();
     cameraData.invProj = glm::inverse(cameraData.proj);
@@ -6860,8 +7027,8 @@ void Renderer_Metal::renderToTexture(
     }
 
     // Create temporary camera buffer for this render
-    auto tempCameraBuffer = NS::TransferPtr(device->newBuffer(sizeof(CameraData), MTL::ResourceStorageModeShared));
-    memcpy(tempCameraBuffer->contents(), &cameraData, sizeof(CameraData));
+    auto tempCameraBuffer = NS::TransferPtr(device->newBuffer(sizeof(::CameraData), MTL::ResourceStorageModeShared));
+    memcpy(tempCameraBuffer->contents(), &cameraData, sizeof(::CameraData));
 
     // Set pipeline state
     encoder->setRenderPipelineState(drawPipeline.get());
@@ -6920,6 +7087,7 @@ void Renderer_Metal::renderToTexture(
             getTexture(material->emissiveMap ? material->emissiveMap->texture : defaultEmissiveTexture).get(), 5
         );
         encoder->setFragmentTexture(shadowRT.get(), 7);
+        encoder->setFragmentTexture(sscsEnabled ? sscsRT.get() : batch2DWhiteTexture.get(), 15);
 
         // IBL textures
         encoder->setFragmentTexture(irradianceMap.get(), 8);
@@ -6953,7 +7121,7 @@ void Renderer_Metal::renderToTexture(
 }
 
 Uint64 Renderer_Metal::registerRenderTextureForUI(RenderTextureHandle handle) {
-    auto it = renderTextures.find(handle.rid);
+    auto it = renderTextures.find(handle.id);
     if (it == renderTextures.end()) {
         return 0;
     }
@@ -6970,7 +7138,7 @@ Uint64 Renderer_Metal::registerRenderTextureForUI(RenderTextureHandle handle) {
 // ===== Render Texture Post-Processing Implementation =====
 
 void Renderer_Metal::applyBloom(RenderTextureHandle target, float threshold, float strength) {
-    auto it = renderTextures.find(target.rid);
+    auto it = renderTextures.find(target.id);
     if (it == renderTextures.end()) {
         return;
     }
@@ -7028,7 +7196,7 @@ void Renderer_Metal::applyBloom(RenderTextureHandle target, float threshold, flo
 }
 
 void Renderer_Metal::applyToneMapping(RenderTextureHandle target, float exposure) {
-    auto it = renderTextures.find(target.rid);
+    auto it = renderTextures.find(target.id);
     if (it == renderTextures.end()) {
         return;
     }
@@ -7105,7 +7273,7 @@ void Renderer_Metal::applyToneMapping(RenderTextureHandle target, float exposure
 }
 
 void Renderer_Metal::applyVignette(RenderTextureHandle target, float strength, float radius) {
-    auto it = renderTextures.find(target.rid);
+    auto it = renderTextures.find(target.id);
     if (it == renderTextures.end()) {
         return;
     }
@@ -7231,8 +7399,8 @@ void Renderer_Metal::unloadFont(FontHandle handle) {
 
     // Get texture handle before unloading
     TextureHandle texHandle = m_fontManager.getFontTexture(handle);
-    if (texHandle.rid != UINT32_MAX) {
-        textures.erase(texHandle.rid);
+    if (texHandle.id != UINT32_MAX) {
+        textures.erase(texHandle.id);
     }
 
     m_fontManager.unloadFont(handle);
@@ -7242,7 +7410,7 @@ void Renderer_Metal::drawText2D(
     FontHandle fontHandle, const std::string& text, const glm::vec2& position, float scale, const glm::vec4& color
 ) {
     Font* font = m_fontManager.getFont(fontHandle);
-    if (!font || font->textureHandle.rid == UINT32_MAX) return;
+    if (!font || font->textureHandle.id == UINT32_MAX) return;
 
     float cursorX = position.x;
     float cursorY = position.y;
@@ -7282,7 +7450,7 @@ void Renderer_Metal::drawText3D(
     FontHandle fontHandle, const std::string& text, const glm::vec3& worldPosition, float scale, const glm::vec4& color
 ) {
     Font* font = m_fontManager.getFont(fontHandle);
-    if (!font || font->textureHandle.rid == UINT32_MAX) return;
+    if (!font || font->textureHandle.id == UINT32_MAX) return;
 
     // For 3D text, we draw at the world position
     // The text will be rendered as billboards facing the camera
@@ -7368,18 +7536,18 @@ auto Renderer_Metal::createIndexBuffer(const std::vector<Uint32>& indices) -> Bu
 }
 
 auto Renderer_Metal::getBuffer(BufferHandle handle) const -> NS::SharedPtr<MTL::Buffer> {
-    if (handle.rid == UINT32_MAX || buffers.find(handle.rid) == buffers.end()) return nullptr;
-    return buffers.at(handle.rid);
+    if (handle.id == UINT32_MAX || buffers.find(handle.id) == buffers.end()) return nullptr;
+    return buffers.at(handle.id);
 }
 
 auto Renderer_Metal::getTexture(TextureHandle handle) const -> NS::SharedPtr<MTL::Texture> {
-    if (handle.rid == UINT32_MAX || textures.find(handle.rid) == textures.end()) return nullptr;
-    return textures.at(handle.rid);
+    if (handle.id == UINT32_MAX || textures.find(handle.id) == textures.end()) return nullptr;
+    return textures.at(handle.id);
 }
 
 auto Renderer_Metal::getPipeline(PipelineHandle handle) const -> NS::SharedPtr<MTL::RenderPipelineState> {
-    if (handle.rid == UINT32_MAX || pipelines.find(handle.rid) == pipelines.end()) return nullptr;
-    return pipelines.at(handle.rid);
+    if (handle.id == UINT32_MAX || pipelines.find(handle.id) == pipelines.end()) return nullptr;
+    return pipelines.at(handle.id);
 }
 
 // ===== 2D/3D Batch Rendering Implementation =====
@@ -7440,12 +7608,12 @@ void Renderer_Metal::flush3D() {
 static auto findOrAddTextureSlot(
     std::array<TextureHandle, 16>& slots, Uint32& slotIndex, TextureHandle texture, TextureHandle whiteTexture
 ) -> float {
-    if (texture.rid == UINT32_MAX || texture.rid == whiteTexture.rid) {
+    if (texture.id == UINT32_MAX || texture.id == whiteTexture.id) {
         return 0.0f;
     }
 
     for (Uint32 i = 1; i < slotIndex; i++) {
-        if (slots[i].rid == texture.rid) {
+        if (slots[i].id == texture.id) {
             return static_cast<float>(i);
         }
     }
@@ -7860,7 +8028,7 @@ void Renderer_Metal::draw(entt::registry& registry, std::shared_ptr<Scene> scene
                 .vertexCount = mesh->vertexCount,
                 .indexCount = mesh->indexCount,
                 .materialID = mesh->materialID,
-                .primitiveMode = mesh->primitiveMode,
+                .primitiveMode = static_cast<::PrimitiveMode>(static_cast<int>(mesh->primitiveMode)),
                 .AABBMin = wMin,
                 .AABBMax = wMax,
                 .boundingSphere = glm::vec4(bsCenter, bsRadius),
@@ -7916,7 +8084,7 @@ void Renderer_Metal::draw(entt::registry& registry, std::shared_ptr<Scene> scene
             .vertexCount = mesh->vertexCount,
             .indexCount = mesh->indexCount,
             .materialID = mesh->materialID,
-            .primitiveMode = mesh->primitiveMode,
+            .primitiveMode = static_cast<::PrimitiveMode>(static_cast<int>(mesh->primitiveMode)),
             .AABBMin = wMin,
             .AABBMax = wMax,
             .boundingSphere = glm::vec4(bsCenter, bsRadius),
@@ -7956,4 +8124,124 @@ auto Renderer_Metal::loadHDRI(const std::string& path) -> void {
     iblSource = IBLSource::HDRI;
     iblNeedsUpdate = true;
     fmt::print("HDRI loaded: {} ({}x{})\n", path, img->width, img->height);
+}
+
+// ============================================================================
+// ECS Particle Integration API (Metal backend)
+// ============================================================================
+
+void Renderer_Metal::ensureParticleFreeList() {
+    if (!m_particleFreeListInitialized) {
+        m_particleSlotFreeList.push_back({0u, MAX_PARTICLES});
+        m_particleFreeListInitialized = true;
+    }
+}
+
+uint32_t Renderer_Metal::allocParticleSlots(uint32_t count) {
+    ensureParticleFreeList();
+    for (size_t i = 0; i < m_particleSlotFreeList.size(); ++i) {
+        auto& r = m_particleSlotFreeList[i];
+        if (r.count >= count) {
+            uint32_t begin = r.begin;
+            r.begin += count;
+            r.count -= count;
+            if (r.count == 0)
+                m_particleSlotFreeList.erase(m_particleSlotFreeList.begin() + i);
+            return begin;
+        }
+    }
+    return ~0u; // pool exhausted
+}
+
+void Renderer_Metal::freeParticleSlots(uint32_t slotBegin, uint32_t count) {
+    if (count == 0) return;
+    m_particleSlotFreeList.push_back({slotBegin, count});
+    std::sort(m_particleSlotFreeList.begin(), m_particleSlotFreeList.end(),
+              [](const ParticleSlotRange& a, const ParticleSlotRange& b) {
+                  return a.begin < b.begin;
+              });
+    for (size_t i = 0; i + 1 < m_particleSlotFreeList.size(); ) {
+        auto& cur = m_particleSlotFreeList[i];
+        auto& nxt = m_particleSlotFreeList[i + 1];
+        if (cur.begin + cur.count == nxt.begin) {
+            cur.count += nxt.count;
+            m_particleSlotFreeList.erase(m_particleSlotFreeList.begin() + i + 1);
+        } else {
+            ++i;
+        }
+    }
+}
+
+uint32_t Renderer_Metal::claimParticleSlots(uint32_t count) {
+    uint32_t begin = allocParticleSlots(count);
+    if (begin != ~0u)
+        particleCount = std::max(particleCount, begin + count); // expand dispatch range
+    return begin;
+}
+
+void Renderer_Metal::releaseParticleSlots(uint32_t slotBegin, uint32_t count) {
+    freeParticleSlots(slotBegin, count);
+    // Zero-clear the released GPU slots so freed particles vanish immediately
+    // (age=0 >= lifetime=0 → the compute passes skip them). Without this a
+    // freed mid-buffer range keeps rendering stale data.
+    if (count > 0 && particleBuffer && slotBegin + count <= MAX_PARTICLES) {
+        auto* dst = reinterpret_cast<GPUParticleData*>(particleBuffer->contents()) + slotBegin;
+        std::memset(dst, 0, count * sizeof(GPUParticleData));
+    }
+    // Recompute the high-water mark: the tail must be entirely free (see the
+    // Vulkan Renderer::releaseParticleSlots comment).
+    uint32_t hw = MAX_PARTICLES;
+    for (const auto& r : m_particleSlotFreeList) {
+        if (r.begin + r.count == MAX_PARTICLES) { hw = r.begin; break; }
+    }
+    particleCount = hw;
+}
+
+void Renderer_Metal::uploadParticles(uint32_t slotBegin,
+                                     const std::vector<GPUParticleData>& particles) {
+    if (slotBegin == ~0u || particles.empty()) return;
+    if (slotBegin + particles.size() > MAX_PARTICLES) return;
+    if (!particleBuffer) return;
+    auto* dst = reinterpret_cast<GPUParticleData*>(particleBuffer->contents()) + slotBegin;
+    std::memcpy(dst, particles.data(), particles.size() * sizeof(GPUParticleData));
+    // StorageModeShared — no explicit flush needed; GPU reads after CPU writes are coherent.
+}
+
+void Renderer_Metal::setParticleForceField(const ParticleForceField& field) {
+    m_forceField = field;
+    if (m_forceField.attractors.size() > MAX_PARTICLE_ATTRACTORS)
+        m_forceField.attractors.resize(MAX_PARTICLE_ATTRACTORS);
+}
+
+void Renderer_Metal::setSky(const SkyRenderData& sky) {
+    // HDRI type sources IBL from the loaded equirect; everything else captures
+    // the procedural sky. (Gradient uses the sky capture too for now — its
+    // dedicated visible pass is not implemented yet.)
+    iblSource = (sky.type == SkyType::HDRI) ? IBLSource::HDRI : IBLSource::Sky;
+
+    // Push the atmosphere tunables into the shared atmosphere buffer. The sun
+    // fields (direction/color/intensity) are intentionally left untouched —
+    // they are synced from directionalLights[0] every frame.
+    auto* atmos = reinterpret_cast<AtmosphereData*>(atmosphereDataBuffer->contents());
+    atmos->rayleighCoefficients  = sky.rayleighCoefficients;
+    atmos->rayleighScaleHeight   = sky.rayleighScaleHeight;
+    atmos->mieCoefficient        = sky.mieCoefficient;
+    atmos->mieScaleHeight        = sky.mieScaleHeight;
+    atmos->miePreferredDirection = sky.miePreferredDirection;
+    atmos->planetRadius          = sky.planetRadius;
+    atmos->atmosphereRadius      = sky.atmosphereRadius;
+    atmos->exposure              = sky.exposure;
+    atmos->groundColor           = sky.groundColor;
+    atmosphereDataBuffer->didModifyRange(NS::Range::Make(0, atmosphereDataBuffer->length()));
+
+    iblNeedsUpdate = true;  // re-bake IBL from the new sky
+}
+
+void Renderer_Metal::setWind(const WindRenderData& wind) {
+    // Shared wind direction drives the fog and cloud scroll. The shared strength
+    // scales each medium's per-medium windSpeed coefficient at fill time (see the
+    // fog/cloud passes), so one knob drives both while their ratio is preserved.
+    volumetricFogSettings.windDirection   = wind.direction;
+    volumetricCloudSettings.windDirection = wind.direction;
+    m_windStrength = wind.strength;
 }

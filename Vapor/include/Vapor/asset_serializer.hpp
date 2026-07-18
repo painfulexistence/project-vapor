@@ -44,6 +44,9 @@ namespace cereal {
 
 class AssetSerializer {
 public:
+    // v2: geometry + material + AABB scene cache. (The meshlet/cluster-LOD data
+    // model exists on Mesh but is not serialized here — the mesh-shader draw path
+    // and its offline bake land in a separate change that will own the v3 bump.)
     static constexpr uint32_t SCENE_FORMAT_VERSION = 2;
 
     static void serializeScene(const std::shared_ptr<Scene>& scene, const std::string& path);
@@ -71,9 +74,9 @@ private:
         cereal::BinaryInputArchive& archive, const std::unordered_map<Uint32, std::shared_ptr<Vapor::Material>>& materials
     );
 
-    static void serializeDirectionalLight(cereal::BinaryOutputArchive& archive, const DirectionalLight& light);
-    static DirectionalLight deserializeDirectionalLight(cereal::BinaryInputArchive& archive);
+    static void serializeDirectionalLight(cereal::BinaryOutputArchive& archive, const Vapor::DirectionalLight& light);
+    static Vapor::DirectionalLight deserializeDirectionalLight(cereal::BinaryInputArchive& archive);
 
-    static void serializePointLight(cereal::BinaryOutputArchive& archive, const PointLight& light);
-    static PointLight deserializePointLight(cereal::BinaryInputArchive& archive);
+    static void serializePointLight(cereal::BinaryOutputArchive& archive, const Vapor::PointLight& light);
+    static Vapor::PointLight deserializePointLight(cereal::BinaryInputArchive& archive);
 };
