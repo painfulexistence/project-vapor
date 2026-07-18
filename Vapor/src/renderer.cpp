@@ -1800,6 +1800,16 @@ void Renderer::mainRenderPass() {
     lastFrameStats.mainPath = useMeshlet ? "Meshlet" : useBindless ? "BindlessMDI" : useMDI ? "MDI"
                             : useGpuDriven ? "Indirect" : "CPU";
     if (useMeshlet) {
+        // Fragment shading mode for the whole meshlet block (fragment buffer 0 /
+        // Vulkan push-constant offset 64): 1 = per-meshlet debug hashColor,
+        // 0 = lambertian from the interpolated world normal. Probes/synthetic/
+        // draw-all force debug so their hardcoded colors always show. Set once —
+        // it persists on the encoder across the pipeline binds below.
+        const bool forceMeshletDebugColor =
+            meshletDrawAll || meshletSyntheticTri || meshletProbeData || meshletProbeVertex ||
+            meshletProbeXform || meshletProbeEmit || meshletProbeTopo;
+        Uint32 meshletFragDebug = (meshletDebugColor || forceMeshletDebugColor) ? 1u : 0u;
+        rhi->setFragmentBytes(&meshletFragDebug, sizeof(meshletFragDebug), 0);
         // Lowest-level probe first (Metal): mesh-ONLY pipeline, zero inputs,
         // green triangle on the left. See meshletSyntheticPipeline.
         if (meshletSyntheticTri && meshletSyntheticPipeline.isValid()) {
@@ -6654,6 +6664,9 @@ void Renderer::drawGraphicsImGui() {
         if (gpuDrivenMode == GpuDrivenMode::Meshlet) {
             ImGui::SliderFloat("  LOD error (px)", &meshletLodPixelError, 0.1f, 16.0f, "%.1f",
                                ImGuiSliderFlags_Logarithmic);
+            // Display mode: per-meshlet debug color vs a lambertian world-normal
+            // shade. Independent of the probes below (which always force color).
+            ImGui::Checkbox("  Debug color (per-meshlet)", &meshletDebugColor);
             // Diagnostic: emit EVERY meshlet (all LOD levels stacked, heavy
             // overdraw). If the screen stays empty with this on, the problem is
             // raster/depth/bindings, not the cull.

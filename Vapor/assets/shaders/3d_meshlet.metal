@@ -427,8 +427,16 @@ static float3 hashColor(uint x) {
     }
 }
 
-fragment float4 fragmentMain(MeshletVertexOut in [[stage_in]]) {
-    return float4(in.color, 1.0);
+fragment float4 fragmentMain(MeshletVertexOut in [[stage_in]],
+                             constant uint& debugColor [[buffer(0)]]) {
+    // debugColor: 1 = per-meshlet hashColor (bring-up default / probes),
+    // 0 = lambertian from the interpolated world normal (a real-geometry shade;
+    // full PBR material binding for the meshlet path is a follow-up).
+    if (debugColor != 0u) return float4(in.color, 1.0);
+    float3 N = normalize(in.worldNormal);
+    float3 L = normalize(float3(0.4, 0.7, 0.5));
+    float ndl = max(dot(N, L), 0.0);
+    return float4(float3(0.8) * (0.12 + 0.88 * ndl), 1.0);
 }
 
 // MRT output for the meshlet depth pre-pass (mirrors 3d_depth_only.metal's

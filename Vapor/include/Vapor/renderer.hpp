@@ -1004,6 +1004,11 @@ private:
     // clusters selected sooner (fewer triangles); the task shader compares the
     // projected cluster error against this / screenHeight.
     float meshletLodPixelError = 1.0f;
+    // Meshlet shading mode: true = per-meshlet debug hashColor (bring-up default),
+    // false = lambertian from the interpolated world normal (a real-geometry
+    // shade; full PBR material binding for the meshlet path is a follow-up).
+    // Probes/synthetic/draw-all always force debug color regardless of this.
+    bool meshletDebugColor = true;
     // Debug: bypass ALL meshlet culling (frustum/cone/LOD cut) — the task shader
     // emits every meshlet when the errorThreshold it receives is negative.
     // Isolates "cull rejects everything" from raster/depth/binding problems.
