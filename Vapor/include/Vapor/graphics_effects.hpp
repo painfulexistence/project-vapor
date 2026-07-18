@@ -153,6 +153,31 @@ struct alignas(16) VolumetricCloudData {
     glm::vec2 _pad8;
 };
 
+// ── Micro Voxel Volume (experimental) ─────────────────────────────────────
+// Mirrors VoxelVolumeData in shaders/3d_voxel_raymarch.metal.
+
+struct alignas(16) VoxelVolumeData {
+    glm::mat4 invViewProj;
+    glm::vec3 cameraPosition;
+    float _pad1;
+    glm::vec3 sunDirection;
+    float _pad2;
+    glm::vec3 sunColor;
+    float _pad3;
+    glm::vec3 volumeOrigin = glm::vec3(-6.4f, 0.0f, -6.4f);
+    float _pad4;
+    float sunIntensity = 1.0f;
+    float voxelSize = 0.05f;// 5 cm voxels (256^3 => a 12.8m diorama)
+    Uint32 brickDim = 8;
+    Uint32 maxRaySteps = 256;
+    glm::uvec3 gridDim = glm::uvec3(256);
+    Uint32 _pad5;
+    Uint32 shadowEnabled = 1;
+    float ambientIntensity = 0.6f;
+    float aoStrength = 0.7f;// Minecraft-style corner AO; 0 disables
+    float _pad6;
+};
+
 // ── Light Scattering (God Rays) ───────────────────────────────────────────
 
 struct alignas(16) LightScatteringData {

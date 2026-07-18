@@ -48,6 +48,7 @@ class MainRenderPass;
 class WaterPass;
 class ParticlePass;
 class LightScatteringPass;
+class VoxelRaymarchPass;
 class VolumetricFogPass;
 class VolumetricCloudPass;
 class SunFlarePass;
@@ -313,6 +314,7 @@ class Renderer_Metal final : public IRenderer {// Must be public or factory func
     friend class WaterPass;
     friend class ParticlePass;
     friend class LightScatteringPass;
+    friend class VoxelRaymarchPass;
     friend class VolumetricFogPass;
     friend class VolumetricCloudPass;
     friend class SunFlarePass;
@@ -377,6 +379,13 @@ public:
     // After calling this the sky atmosphere is no longer used for IBL.
     // Place your .hdr files under: <assets>/textures/env/
     void loadHDRI(const std::string& path);
+
+    // Micro voxel volume (experimental): toggles the raymarched demo volume.
+    // The procedural volume is generated lazily on first enable.
+    void setVoxelRenderingEnabled(bool enabled);
+    bool isVoxelRenderingEnabled() const {
+        return voxelRenderingEnabled;
+    }
 
     virtual void setRenderPath(RenderPath path) override {
         currentRenderPath = path;
@@ -763,6 +772,29 @@ protected:
     // Raygen method for the AO chain: 0 = ray traced, 1 = screen space (see AO ImGui section)
     int aoMethod = 0;
     LightScatteringData lightScatteringSettings;
+
+    // Micro voxel volume (experimental) resources
+    // Sparse brickmap raymarched by a fullscreen pass between MainRenderPass
+    // and SkyAtmospherePass: a coarse uint32 index grid (one entry per 8^3
+    // brick — empty sentinel, uniform-material sentinel, or brick pool index)
+    // plus a compacted pool holding only mixed (surface) bricks. Buffers are
+    // built lazily on first enable.
+    static constexpr Uint32 VOXEL_BRICK_DIM = 8;
+    static constexpr Uint32 VOXEL_BRICK_EMPTY = 0xFFFFFFFFu;
+    static constexpr Uint32 VOXEL_BRICK_UNIFORM_FLAG = 0x80000000u;
+    NS::SharedPtr<MTL::RenderPipelineState> voxelRaymarchPipeline;
+    std::vector<NS::SharedPtr<MTL::Buffer>> voxelDataBuffers;// Per-frame uniforms
+    NS::SharedPtr<MTL::Buffer> voxelBrickPoolBuffer;// brickDim^3 uint8 palette indices per stored brick
+    NS::SharedPtr<MTL::Buffer> voxelBrickIndexBuffer;// uint32 per brick cell (empty/uniform/pool index)
+    NS::SharedPtr<MTL::Buffer> voxelPaletteBuffer;// 256 x vec4 albedo
+    bool voxelRenderingEnabled = false;
+    VoxelVolumeData voxelSettings;
+    Uint32 voxelGridDim = 256;// Voxels per volume edge (must be a multiple of VOXEL_BRICK_DIM)
+    Uint32 voxelSolidCount = 0;
+    Uint32 voxelStoredBrickCount = 0;
+    Uint32 voxelUniformBrickCount = 0;
+    Uint32 voxelSeed = 1337;
+    void generateVoxelDemoVolume();
 
     // Volumetric Fog resources
     NS::SharedPtr<MTL::ComputePipelineState> fogFroxelInjectionPipeline;
