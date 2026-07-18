@@ -775,6 +775,13 @@ private:
     // sky mode pushed by setSky.
     PipelineHandle skyboxPipeline;
     ShaderHandle skyboxFragmentShader;
+    // Cheap zenith/horizon/ground gradient sky (SkyType::Gradient). Same
+    // fullscreen depth-tested state as the atmosphere pass; colors come from the
+    // SkyComponent via setSky.
+    PipelineHandle gradientPipeline;
+    ShaderHandle gradientFragmentShader;
+    BufferHandle gradientDataBuffer;
+    GradientRenderData gradientData;  // CPU copy, re-uploaded when setSky changes it
     SkyType m_skyType = SkyType::Atmosphere;
     // IBL debug: environmentCubemap unwrapped to a 2D equirect RT for ImGui
     // (cubemaps can't be shown directly). iblPreviewPass renders it each frame.

@@ -240,6 +240,15 @@ struct SkyRenderData {
     glm::vec3 gradientGround  = glm::vec3(0.20f, 0.18f, 0.16f);
 };
 
+// GPU buffer for the gradient sky pass (SkyType::Gradient). Each color is
+// vec4-padded so the std430 layout is identical on every backend (matches
+// GradientData in Gradient.frag / 3d_gradient.metal).
+struct alignas(16) GradientRenderData {
+    glm::vec4 zenith  = glm::vec4(0.18f, 0.34f, 0.62f, 1.0f);
+    glm::vec4 horizon = glm::vec4(0.62f, 0.74f, 0.88f, 1.0f);
+    glm::vec4 ground  = glm::vec4(0.20f, 0.18f, 0.16f, 1.0f);
+};
+
 // Screen-space light scattering (god rays). Layout matches the Metal backend's
 // LightScatteringData. sunScreenPos/screenSize are filled per frame.
 struct alignas(16) LightScatteringRenderData {

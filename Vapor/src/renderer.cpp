@@ -197,6 +197,15 @@ void Renderer::initialize(std::unique_ptr<RHI> rhiPtr, GraphicsBackend backendTy
         atmosphereDataBuffer = rhi->createBuffer(atmoDesc);
         rhi->updateBuffer(atmosphereDataBuffer, &atmosphereData, 0, sizeof(atmosphereData));
 
+        // Gradient sky colors (SkyType::Gradient); re-uploaded by setSky. Same
+        // unslotted single-buffer pattern as the atmosphere params above.
+        BufferDesc gradDesc;
+        gradDesc.size = sizeof(GradientRenderData);
+        gradDesc.usage = BufferUsage::Uniform;
+        gradDesc.memoryUsage = MemoryUsage::CPUtoGPU;
+        gradientDataBuffer = rhi->createBuffer(gradDesc);
+        rhi->updateBuffer(gradientDataBuffer, &gradientData, 0, sizeof(gradientData));
+
         BufferDesc lsDesc;
         lsDesc.size = sizeof(LightScatteringRenderData);
         lsDesc.usage = BufferUsage::Uniform;
@@ -3620,7 +3629,9 @@ void Renderer::skyAtmospherePass() {
     // its own slice), so this stays safe on every backend.
     const bool useCubemapSky = (m_skyType == SkyType::HDRI) &&
                                skyboxPipeline.isValid() && environmentCubemap.isValid();
-    if (!useCubemapSky && !atmospherePipeline.isValid()) return;
+    const bool useGradientSky = (m_skyType == SkyType::Gradient) &&
+                                gradientPipeline.isValid() && gradientDataBuffer.isValid();
+    if (!useCubemapSky && !useGradientSky && !atmospherePipeline.isValid()) return;
     if (!colorRT.isValid() || !depthStencilRT.isValid() || !atmosphereDataBuffer.isValid()) {
         return;
     }
@@ -3637,6 +3648,17 @@ void Renderer::skyAtmospherePass() {
         // 3d_skybox.metal reads camera at buffer(0); the GLSL twin at set1/binding3.
         rhi->setFragmentBuffer(backend == GraphicsBackend::Metal ? 0 : 3,
                                cameraUniformBuffer, 0, sizeof(CameraRenderData));
+    } else if (useGradientSky) {
+        rhi->bindPipeline(gradientPipeline);
+        if (backend == GraphicsBackend::Metal) {
+            // 3d_gradient.metal: camera at buffer(0), gradient colors at buffer(1).
+            rhi->setFragmentBuffer(0, cameraUniformBuffer, 0, sizeof(CameraRenderData));
+            rhi->setFragmentBuffer(1, gradientDataBuffer, 0, sizeof(GradientRenderData));
+        } else {
+            // Gradient.frag: colors at set0/binding0, camera at set1/binding3.
+            rhi->setFragmentBuffer(0, gradientDataBuffer, 0, sizeof(GradientRenderData));
+            rhi->setFragmentBuffer(3, cameraUniformBuffer, 0, sizeof(CameraRenderData));
+        }
     } else {
         rhi->bindPipeline(atmospherePipeline);
         if (backend == GraphicsBackend::Metal) {
@@ -4212,6 +4234,14 @@ void Renderer::setSky(const SkyRenderData& sky) {
     atmosphereData.atmosphereRadius      = sky.atmosphereRadius;
     atmosphereData.exposure              = sky.exposure;
     atmosphereData.groundColor           = sky.groundColor;
+    // Gradient sky colors (used when type == Gradient). setSky only runs when the
+    // SkyComponent is dirty, so re-upload the small unslotted buffer directly.
+    gradientData.zenith  = glm::vec4(sky.gradientZenith, 1.0f);
+    gradientData.horizon = glm::vec4(sky.gradientHorizon, 1.0f);
+    gradientData.ground  = glm::vec4(sky.gradientGround, 1.0f);
+    if (gradientDataBuffer.isValid()) {
+        rhi->updateBuffer(gradientDataBuffer, &gradientData, 0, sizeof(gradientData));
+    }
     iblNeedsUpdate = true;  // re-bake IBL from the new sky
 }
 
@@ -5289,6 +5319,17 @@ void Renderer::createRenderPipeline() {
                     sd.fragmentShader = skyboxFragmentShader;
                     skyboxPipeline = rhi->createPipeline(sd);
                 }
+
+                // Gradient: same fullscreen depth-tested setup, blends a
+                // zenith/horizon/ground gradient (SkyType::Gradient). Reuses Sky.vert.
+                std::string gradientFragCode = readFile("shaders/Gradient.frag.spv");
+                if (!gradientFragCode.empty()) {
+                    ShaderDesc gfd; gfd.stage = ShaderStage::Fragment; gfd.code = gradientFragCode.data(); gfd.codeSize = gradientFragCode.size(); gfd.entryPoint = "main";
+                    gradientFragmentShader = rhi->createShader(gfd);
+                    PipelineDesc gd = ad;               // same fullscreen/depth state as atmosphere
+                    gd.fragmentShader = gradientFragmentShader;
+                    gradientPipeline = rhi->createPipeline(gd);
+                }
             }
 
             // God rays: fullscreen light-scattering march into the half-res RT.
@@ -5706,6 +5747,10 @@ void Renderer::createRenderPipeline() {
         // fullscreen depth-tested state as the atmosphere pass.
         skyboxPipeline = makeMetalPass("shaders/3d_skybox.metal", "vertexMain", "fragmentMain",
                                        BlendMode::Opaque, { PixelFormat::RGBA16_FLOAT }, true, CompareOp::LessOrEqual);
+        // Gradient: zenith/horizon/ground gradient sky (SkyType::Gradient), same
+        // fullscreen depth-tested state as the atmosphere pass.
+        gradientPipeline = makeMetalPass("shaders/3d_gradient.metal", "vertexMain", "fragmentMain",
+                                         BlendMode::Opaque, { PixelFormat::RGBA16_FLOAT }, true, CompareOp::LessOrEqual);
         // IBL debug: cubemap -> equirect 2D RT.
         iblPreviewPipeline = makeMetalPass("shaders/3d_ibl_equirect.metal", "vertexMain", "fragmentMain",
                                            BlendMode::Opaque, { PixelFormat::RGBA16_FLOAT }, false, CompareOp::Less);

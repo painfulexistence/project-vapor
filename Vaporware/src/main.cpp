@@ -88,6 +88,11 @@ static void setupCustomDrawers(Vapor::SceneInspector& inspector) {
                     c->dirty = true;
                 }
                 if (ImGui::DragFloat("exposure", &c->exposure, 0.01f, 0.01f, 10.0f)) c->dirty = true;
+                if (c->type == SkyType::Gradient) {
+                    if (ImGui::ColorEdit3("zenith",  &c->gradientZenith.x))  c->dirty = true;
+                    if (ImGui::ColorEdit3("horizon", &c->gradientHorizon.x)) c->dirty = true;
+                    if (ImGui::ColorEdit3("ground",  &c->gradientGround.x))  c->dirty = true;
+                }
                 ImGui::DragFloat("IBL sun threshold (deg)", &c->iblSunThresholdDeg, 0.1f, 0.0f, 90.0f);
             }
         }
