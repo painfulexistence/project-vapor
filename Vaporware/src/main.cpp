@@ -75,6 +75,24 @@ static void setupCustomDrawers(Vapor::SceneInspector& inspector) {
         }
     });
 
+    // SkyComponent — custom drawer for the SkyType combo (auto-draw can't edit
+    // the enum) so the visible sky mode is switchable at runtime. Sets `dirty`
+    // so SkySystem re-pushes the change to the renderer.
+    inspector.registerCustomDrawer([](entt::registry& reg, entt::entity e) {
+        if (auto* c = reg.try_get<Vapor::SkyComponent>(e)) {
+            if (ImGui::CollapsingHeader("Sky", ImGuiTreeNodeFlags_DefaultOpen)) {
+                const char* types[] = { "Atmosphere", "HDRI", "Gradient" };
+                int t = static_cast<int>(c->type);
+                if (ImGui::Combo("type", &t, types, 3)) {
+                    c->type = static_cast<Vapor::SkyType>(t);
+                    c->dirty = true;
+                }
+                if (ImGui::DragFloat("exposure", &c->exposure, 0.01f, 0.01f, 10.0f)) c->dirty = true;
+                ImGui::DragFloat("IBL sun threshold (deg)", &c->iblSunThresholdDeg, 0.1f, 0.0f, 90.0f);
+            }
+        }
+    });
+
     // LightMovementLogicComponent — keep custom drawer for the named Pattern combo.
     inspector.registerCustomDrawer([](entt::registry& reg, entt::entity e) {
         if (auto* c = reg.try_get<LightMovementLogicComponent>(e)) {

@@ -3315,8 +3315,14 @@ void Renderer::bloomUpsamplePass() {
 // main pass left depth at the far plane). Runs after Main, before bloom, so the
 // bright sky/sun participate in bloom.
 void Renderer::skyAtmospherePass() {
-    if (!atmospherePipeline.isValid() || !colorRT.isValid() || !depthStencilRT.isValid() ||
-        !atmosphereDataBuffer.isValid()) {
+    // SkyType::HDRI samples the captured environment cubemap; everything else
+    // marches the procedural atmosphere. The cubemap path degrades to atmosphere
+    // where its pipeline/texture aren't available (e.g. the RHI-Metal path until
+    // its own slice), so this stays safe on every backend.
+    const bool useCubemapSky = (m_skyType == SkyType::HDRI) &&
+                               skyboxPipeline.isValid() && environmentCubemap.isValid();
+    if (!useCubemapSky && !atmospherePipeline.isValid()) return;
+    if (!colorRT.isValid() || !depthStencilRT.isValid() || !atmosphereDataBuffer.isValid()) {
         return;
     }
     RenderPassDesc rp;
@@ -3326,14 +3332,20 @@ void Renderer::skyAtmospherePass() {
     rp.depthAttachment = depthStencilRT;
     rp.loadDepth = true;               // test against the scene depth (no writes)
     rhi->beginRenderPass(rp);
-    rhi->bindPipeline(atmospherePipeline);
-    if (backend == GraphicsBackend::Metal) {
-        // 3d_atmosphere.metal: camera at buffer(0), atmosphere at buffer(1).
-        rhi->setFragmentBuffer(0, cameraUniformBuffer, 0, sizeof(CameraRenderData));
-        rhi->setFragmentBuffer(1, atmosphereDataBuffer, 0, sizeof(AtmosphereRenderData));
-    } else {
-        rhi->setFragmentBuffer(0, atmosphereDataBuffer, 0, sizeof(AtmosphereRenderData));
+    if (useCubemapSky) {
+        rhi->bindPipeline(skyboxPipeline);
+        rhi->setTexture(0, 0, environmentCubemap, clampSampler);   // samplerCube at set 2 binding 0
         rhi->setFragmentBuffer(3, cameraUniformBuffer, 0, sizeof(CameraRenderData));
+    } else {
+        rhi->bindPipeline(atmospherePipeline);
+        if (backend == GraphicsBackend::Metal) {
+            // 3d_atmosphere.metal: camera at buffer(0), atmosphere at buffer(1).
+            rhi->setFragmentBuffer(0, cameraUniformBuffer, 0, sizeof(CameraRenderData));
+            rhi->setFragmentBuffer(1, atmosphereDataBuffer, 0, sizeof(AtmosphereRenderData));
+        } else {
+            rhi->setFragmentBuffer(0, atmosphereDataBuffer, 0, sizeof(AtmosphereRenderData));
+            rhi->setFragmentBuffer(3, cameraUniformBuffer, 0, sizeof(CameraRenderData));
+        }
     }
     rhi->draw(3, 1, 0, 0);
     rhi->endRenderPass();
@@ -3884,10 +3896,12 @@ void Renderer::setParticleForceField(const ParticleForceField& field) {
 }
 
 void Renderer::setSky(const SkyRenderData& sky) {
-    // The RHI/Vulkan backend has no HDRI IBL source yet, so `type` only selects
-    // future behavior here. Push the atmosphere tunables into the CPU copy that
-    // is re-uploaded every frame; the sun fields stay driven by
-    // directionalLights[0] (see the per-frame sync in stage()/update()).
+    // Visible sky mode: HDRI samples environmentCubemap in skyAtmospherePass;
+    // Atmosphere (and, until S1, Gradient) march the procedural atmosphere.
+    m_skyType = sky.type;
+    // Push the atmosphere tunables into the CPU copy that is re-uploaded every
+    // frame; the sun fields stay driven by directionalLights[0] (see the
+    // per-frame sync in stage()/update()).
     atmosphereData.rayleighCoefficients  = sky.rayleighCoefficients;
     atmosphereData.rayleighScaleHeight   = sky.rayleighScaleHeight;
     atmosphereData.mieCoefficient        = sky.mieCoefficient;
@@ -4945,6 +4959,17 @@ void Renderer::createRenderPipeline() {
                 ad.depthAttachmentFormat = PixelFormat::Depth32Float;
                 ad.colorAttachmentFormats = { PixelFormat::RGBA16_FLOAT };
                 atmospherePipeline = rhi->createPipeline(ad);
+
+                // Skybox: same fullscreen depth-tested setup, but samples the
+                // environment cubemap (SkyType::HDRI). Reuses Sky.vert.
+                std::string skyboxFragCode = readFile("shaders/Skybox.frag.spv");
+                if (!skyboxFragCode.empty()) {
+                    ShaderDesc sfd; sfd.stage = ShaderStage::Fragment; sfd.code = skyboxFragCode.data(); sfd.codeSize = skyboxFragCode.size(); sfd.entryPoint = "main";
+                    skyboxFragmentShader = rhi->createShader(sfd);
+                    PipelineDesc sd = ad;               // same fullscreen/depth state as atmosphere
+                    sd.fragmentShader = skyboxFragmentShader;
+                    skyboxPipeline = rhi->createPipeline(sd);
+                }
             }
 
             // God rays: fullscreen light-scattering march into the half-res RT.

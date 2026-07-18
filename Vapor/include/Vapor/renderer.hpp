@@ -770,6 +770,12 @@ private:
     ShaderHandle bloomUpsampleShader;
     ShaderHandle atmosphereVertexShader;
     ShaderHandle atmosphereFragmentShader;
+    // Visible sky sampled from environmentCubemap when the SkyComponent's type is
+    // HDRI (reuses Sky.vert / atmosphereVertexShader). m_skyType is the visible
+    // sky mode pushed by setSky.
+    PipelineHandle skyboxPipeline;
+    ShaderHandle skyboxFragmentShader;
+    SkyType m_skyType = SkyType::Atmosphere;
     ShaderHandle lightScatteringShader;
     ShaderHandle volumetricFogShader;
     BufferHandle fogDataBuffer;
