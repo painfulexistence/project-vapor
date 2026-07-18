@@ -297,15 +297,14 @@ private:
     // Vulkan Extension Function Pointers
     // ========================================================================
 
-    // Dynamic rendering extension functions
-    PFN_vkCmdBeginRenderingKHR vkCmdBeginRenderingKHR = nullptr;
-    PFN_vkCmdEndRenderingKHR vkCmdEndRenderingKHR = nullptr;
-    // synchronization2 entry points, loaded through the same KHR-suffixed
-    // vkGetDeviceProcAddr path as dynamic rendering: on drivers that only
-    // report 1.2 (MoltenVK) these come from VK_KHR_synchronization2 rather
-    // than core, and the KHR alias resolves in both cases.
-    PFN_vkCmdPipelineBarrier2KHR vkCmdPipelineBarrier2KHR = nullptr;
-    PFN_vkQueueSubmit2KHR vkQueueSubmit2KHR = nullptr;
+    // Dynamic rendering + synchronization2 entry points. Loaded core-name
+    // first (Vulkan 1.3), falling back to the KHR alias for drivers that
+    // report 1.2 + extensions (MoltenVK before 1.2.9). Signatures are
+    // identical; the core PFN types cover both.
+    PFN_vkCmdBeginRendering pfnCmdBeginRendering = nullptr;
+    PFN_vkCmdEndRendering pfnCmdEndRendering = nullptr;
+    PFN_vkCmdPipelineBarrier2 pfnCmdPipelineBarrier2 = nullptr;
+    PFN_vkQueueSubmit2 pfnQueueSubmit2 = nullptr;
 
     // ========================================================================
     // Descriptor Binding Model

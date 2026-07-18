@@ -128,7 +128,9 @@ VkCommandBuffer RHI_Vulkan::ensureUploadCmd() {
     alloc.level = VK_COMMAND_BUFFER_LEVEL_PRIMARY;
     alloc.commandPool = commandPool;
     alloc.commandBufferCount = 1;
-    vkAllocateCommandBuffers(device, &alloc, &uploadCmd);
+    if (vkAllocateCommandBuffers(device, &alloc, &uploadCmd) != VK_SUCCESS) {
+        throw std::runtime_error("Failed to allocate upload command buffer");
+    }
     VkCommandBufferBeginInfo begin{};
     begin.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO;
     begin.flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT;
@@ -207,13 +209,15 @@ void RHI_Vulkan::submitUploads(bool waitForCompletion) {
         dep.sType = VK_STRUCTURE_TYPE_DEPENDENCY_INFO;
         dep.memoryBarrierCount = 1;
         dep.pMemoryBarriers = &barrier;
-        vkCmdPipelineBarrier2KHR(uploadCmd, &dep);
+        pfnCmdPipelineBarrier2(uploadCmd, &dep);
         vkEndCommandBuffer(uploadCmd);
 
         VkFenceCreateInfo fenceInfo{};
         fenceInfo.sType = VK_STRUCTURE_TYPE_FENCE_CREATE_INFO;
         VkFence fence;
-        vkCreateFence(device, &fenceInfo, nullptr, &fence);
+        if (vkCreateFence(device, &fenceInfo, nullptr, &fence) != VK_SUCCESS) {
+            throw std::runtime_error("Failed to create upload fence");
+        }
 
         VkCommandBufferSubmitInfo cmdInfo{};
         cmdInfo.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_SUBMIT_INFO;
@@ -222,7 +226,7 @@ void RHI_Vulkan::submitUploads(bool waitForCompletion) {
         submit.sType = VK_STRUCTURE_TYPE_SUBMIT_INFO_2;
         submit.commandBufferInfoCount = 1;
         submit.pCommandBufferInfos = &cmdInfo;
-        vkQueueSubmit2KHR(graphicsQueue, 1, &submit, fence);
+        pfnQueueSubmit2(graphicsQueue, 1, &submit, fence);
         pendingUploadFences.push_back(fence);
 
         // The one-time command buffer is retired with the fence wait below;
@@ -763,7 +767,7 @@ void RHI_Vulkan::transitionImage(VkImage image, VkImageLayout from, VkImageLayou
     dep.sType = VK_STRUCTURE_TYPE_DEPENDENCY_INFO;
     dep.imageMemoryBarrierCount = 1;
     dep.pImageMemoryBarriers = &barrier;
-    vkCmdPipelineBarrier2KHR(currentCommandBuffer, &dep);
+    pfnCmdPipelineBarrier2(currentCommandBuffer, &dep);
 }
 
 void RHI_Vulkan::shutdown() {
@@ -1085,7 +1089,7 @@ TextureHandle RHI_Vulkan::createTexture(const TextureDesc& desc) {
         dep.sType = VK_STRUCTURE_TYPE_DEPENDENCY_INFO;
         dep.imageMemoryBarrierCount = 1;
         dep.pImageMemoryBarriers = &barrier;
-        vkCmdPipelineBarrier2KHR(ensureUploadCmd(), &dep);
+        pfnCmdPipelineBarrier2(ensureUploadCmd(), &dep);
         resource.currentLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
     }
 
@@ -1662,7 +1666,7 @@ void RHI_Vulkan::updateTexture(TextureHandle handle, const void* data, size_t si
         dep.sType = VK_STRUCTURE_TYPE_DEPENDENCY_INFO;
         dep.imageMemoryBarrierCount = 1;
         dep.pImageMemoryBarriers = &barrier;
-        vkCmdPipelineBarrier2KHR(cmd, &dep);
+        pfnCmdPipelineBarrier2(cmd, &dep);
         tex.currentLayout = VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL;
     }
 
@@ -1700,7 +1704,7 @@ void RHI_Vulkan::updateTexture(TextureHandle handle, const void* data, size_t si
     toReadDep.sType = VK_STRUCTURE_TYPE_DEPENDENCY_INFO;
     toReadDep.imageMemoryBarrierCount = 1;
     toReadDep.pImageMemoryBarriers = &toRead;
-    vkCmdPipelineBarrier2KHR(cmd, &toReadDep);
+    pfnCmdPipelineBarrier2(cmd, &toReadDep);
     tex.currentLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
 }
 
@@ -1750,7 +1754,7 @@ void RHI_Vulkan::generateMipmaps(TextureHandle handle) {
         dep.sType = VK_STRUCTURE_TYPE_DEPENDENCY_INFO;
         dep.imageMemoryBarrierCount = 1;
         dep.pImageMemoryBarriers = &b;
-        vkCmdPipelineBarrier2KHR(cmd, &dep);
+        pfnCmdPipelineBarrier2(cmd, &dep);
     };
 
     // Whole image -> TRANSFER_DST as the baseline
@@ -2081,7 +2085,7 @@ void RHI_Vulkan::endFrame() {
     submitInfo.signalSemaphoreInfoCount = 1;
     submitInfo.pSignalSemaphoreInfos = &signalInfo;
 
-    vkQueueSubmit2KHR(graphicsQueue, 1, &submitInfo, inFlightFences[currentFrameInFlight]);
+    pfnQueueSubmit2(graphicsQueue, 1, &submitInfo, inFlightFences[currentFrameInFlight]);
 
     VkPresentInfoKHR presentInfo{};
     presentInfo.sType = VK_STRUCTURE_TYPE_PRESENT_INFO_KHR;
@@ -2275,7 +2279,7 @@ void RHI_Vulkan::beginRenderPass(const RenderPassDesc& desc) {
         currentPassEndQuery = UINT32_MAX;
     }
 
-    vkCmdBeginRenderingKHR(currentCommandBuffer, &renderingInfo);
+    pfnCmdBeginRendering(currentCommandBuffer, &renderingInfo);
 
     // Set viewport and scissor (attachment-sized, matching the render area).
     // Negative-height viewport (core since Vulkan 1.1): the engine's
@@ -2302,7 +2306,7 @@ void RHI_Vulkan::endRenderPass() {
     if (currentCommandBuffer == VK_NULL_HANDLE) {
         return;  // frame was skipped
     }
-    vkCmdEndRenderingKHR(currentCommandBuffer);
+    pfnCmdEndRendering(currentCommandBuffer);
 
     if (currentPassEndQuery != UINT32_MAX) {
         vkCmdWriteTimestamp(currentCommandBuffer, VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT,
@@ -2624,7 +2628,7 @@ void* RHI_Vulkan::getBackendCommandBuffer() const {
 }
 
 // ============================================================================
-// Internal Helpers - Initialization (Simplified stubs)
+// Internal Helpers - Initialization
 // ============================================================================
 
 void RHI_Vulkan::createInstance() {
@@ -2934,21 +2938,25 @@ void RHI_Vulkan::createLogicalDevice() {
         }
     }
 
-    // Load extension function pointers
-    vkCmdBeginRenderingKHR = (PFN_vkCmdBeginRenderingKHR)vkGetDeviceProcAddr(device, "vkCmdBeginRenderingKHR");
-    vkCmdEndRenderingKHR = (PFN_vkCmdEndRenderingKHR)vkGetDeviceProcAddr(device, "vkCmdEndRenderingKHR");
-
-    if (!vkCmdBeginRenderingKHR || !vkCmdEndRenderingKHR) {
-        throw std::runtime_error("Failed to load dynamic rendering extension functions");
+    // Dynamic rendering + synchronization2: prefer the core entry point (a
+    // 1.3 driver need not expose the KHR alias), fall back to the KHR name
+    // for 1.2-with-extensions drivers (MoltenVK before 1.2.9). Both are
+    // required device features, so failing to resolve either is fatal.
+    const auto loadDeviceProc = [&](const char* core, const char* khr) -> PFN_vkVoidFunction {
+        PFN_vkVoidFunction p = vkGetDeviceProcAddr(device, core);
+        return p ? p : vkGetDeviceProcAddr(device, khr);
+    };
+    pfnCmdBeginRendering = (PFN_vkCmdBeginRendering)loadDeviceProc("vkCmdBeginRendering", "vkCmdBeginRenderingKHR");
+    pfnCmdEndRendering = (PFN_vkCmdEndRendering)loadDeviceProc("vkCmdEndRendering", "vkCmdEndRenderingKHR");
+    if (!pfnCmdBeginRendering || !pfnCmdEndRendering) {
+        throw std::runtime_error("Failed to load dynamic rendering entry points");
     }
 
-    // synchronization2 is a required device feature (device creation enables it
-    // unconditionally), so these must resolve — hard-fail like dynamic rendering.
-    vkCmdPipelineBarrier2KHR = (PFN_vkCmdPipelineBarrier2KHR)vkGetDeviceProcAddr(device, "vkCmdPipelineBarrier2KHR");
-    vkQueueSubmit2KHR = (PFN_vkQueueSubmit2KHR)vkGetDeviceProcAddr(device, "vkQueueSubmit2KHR");
-
-    if (!vkCmdPipelineBarrier2KHR || !vkQueueSubmit2KHR) {
-        throw std::runtime_error("Failed to load synchronization2 extension functions");
+    pfnCmdPipelineBarrier2 =
+        (PFN_vkCmdPipelineBarrier2)loadDeviceProc("vkCmdPipelineBarrier2", "vkCmdPipelineBarrier2KHR");
+    pfnQueueSubmit2 = (PFN_vkQueueSubmit2)loadDeviceProc("vkQueueSubmit2", "vkQueueSubmit2KHR");
+    if (!pfnCmdPipelineBarrier2 || !pfnQueueSubmit2) {
+        throw std::runtime_error("Failed to load synchronization2 entry points");
     }
 
     if (meshShadersEnabled) {
@@ -2992,7 +3000,10 @@ void RHI_Vulkan::recreateSwapchain() {
         VkSemaphoreCreateInfo semaphoreInfo{};
         semaphoreInfo.sType = VK_STRUCTURE_TYPE_SEMAPHORE_CREATE_INFO;
         for (auto& s : renderFinishedSemaphores) {
-            vkCreateSemaphore(device, &semaphoreInfo, nullptr, &s);
+            if (vkCreateSemaphore(device, &semaphoreInfo, nullptr, &s) != VK_SUCCESS) {
+                // A VK_NULL_HANDLE here would fail every subsequent present.
+                throw std::runtime_error("Failed to create render-finished semaphore");
+            }
         }
     }
 }
@@ -3597,7 +3608,7 @@ void RHI_Vulkan::computeBarrier() {
     dep.sType = VK_STRUCTURE_TYPE_DEPENDENCY_INFO;
     dep.memoryBarrierCount = 1;
     dep.pMemoryBarriers = &b;
-    vkCmdPipelineBarrier2KHR(currentCommandBuffer, &dep);
+    pfnCmdPipelineBarrier2(currentCommandBuffer, &dep);
 }
 
 // ============================================================================
