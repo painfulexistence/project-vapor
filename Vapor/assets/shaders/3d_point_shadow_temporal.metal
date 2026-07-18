@@ -72,22 +72,26 @@ kernel void computeMain(
     bool onScreen = all(prevUV >= 0.0) && all(prevUV <= 1.0);
     float3 d = abs(mean - history);
     float changed = max(d.r, max(d.g, d.b));
-    // Three history-shortening signals, take the strongest:
+    // History-shortening resets:
     //  - Off-screen reproject = disocclusion, unambiguous -> HARD reset.
-    //  - MOTION itself -> reset. This is the key one for trailing: under a
-    //    camera pan a static shadow reprojects CORRECTLY (value unchanged), so
-    //    a value-only reset never fires, yet bilinear reprojection still smears
-    //    the history — at the converged alpha of 0.04 that smear is a slow
-    //    ghost trail. Resetting on motion drops alpha so the frame tracks
-    //    current (noisy but motion-masked) and re-converges when you stop.
-    //    Dead-band below ~0.5 px so sub-pixel jitter still converges.
     //  - VALUE change (shadow moved on static geometry) -> capped at 0.5 so a
     //    static penumbra sampling spike can't flash a noise band.
-    float pxMotion = length(velocity * screenSize);
-    float motionReset = saturate((pxMotion - 0.5) * 0.5);
     float valueReset = saturate((changed - 0.30) / 0.25) * 0.5;
-    float reset = onScreen ? max(motionReset, valueReset) : 1.0;
+    float reset = onScreen ? valueReset : 1.0;
     histLen *= (1.0 - reset);
+
+    // Camera motion does NOT hard-reset. Under a pan a static shadow reprojects
+    // correctly (value unchanged, so the value-reset never fires) but bilinear
+    // reprojection still smears the history; at the converged alpha of 0.04
+    // that smear is a slow ghost trail. A hard reset kills the trail but flashes
+    // raw 1-2 ray noise. Instead, CAP the history length by motion so alpha
+    // can't fall below ~0.5 while moving: half the frame stays averaged history
+    // (far less noise than a full reset) while the smear still decays ~50% per
+    // frame — a faint few-frame trail, not the old persistent one. Static keeps
+    // full convergence. Raise the cap toward 256 for less noise / more trail.
+    float pxMotion = length(velocity * screenSize);
+    float maxHistLen = mix(256.0, 1.0, saturate((pxMotion - 0.5) * 0.5));
+    histLen = min(histLen, maxHistLen);
 
     float alpha = max(1.0 / (histLen + 1.0), 0.04);  // floor: stay responsive
     float3 result = mix(history, current, alpha);
