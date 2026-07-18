@@ -30,7 +30,7 @@ enum class LoadMode {
 /**
  * Generic resource container with loading state tracking
  *
- * Template parameter T should be the resource type (Image, Scene, Mesh, etc.)
+ * Template parameter T should be the resource type (Image, RenderScene, Mesh, etc.)
  */
 template<typename T>
 class Resource {

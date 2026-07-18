@@ -28,7 +28,7 @@
 #include "camera.hpp"
 #include "graphics.hpp"       // Image, FontHandle via font_manager
 #include "font_manager.hpp"   // FontHandle
-#include "scene.hpp"
+#include "render_scene.hpp"
 #include <SDL3/SDL_video.h>
 #include <entt/entt.hpp>
 #include <functional>
@@ -107,7 +107,7 @@ public:
     virtual void shutdown() {}
 
     // ---- Scene / staging -------------------------------------------------
-    virtual void stage(std::shared_ptr<Scene> scene) {}
+    virtual void stage(std::shared_ptr<RenderScene> scene) {}
 
     // ---- Frame ----------------------------------------------------------
     // beginFrame(): acquire the drawable/command buffer and run the backend
@@ -117,8 +117,8 @@ public:
     //   registered app/engine callbacks. Call after ImGui::NewFrame().
     virtual void invokeImGuiCallback() {}
     // draw(): collect drawables from the scene/registry and run the passes.
-    virtual void draw(std::shared_ptr<Scene> scene, Camera& camera) {}
-    virtual void draw(entt::registry& registry, std::shared_ptr<Scene> scene, Camera& camera) {}
+    virtual void draw(std::shared_ptr<RenderScene> scene, Camera& camera) {}
+    virtual void draw(entt::registry& registry, std::shared_ptr<RenderScene> scene, Camera& camera) {}
     // endFrame(): render ImGui draw data (after ImGui::Render()) and present.
     virtual void endFrame() {}
 
@@ -210,7 +210,7 @@ public:
     virtual RenderTextureHandle createRenderTexture(const RenderTextureDesc& desc) { return {}; }
     virtual void destroyRenderTexture(RenderTextureHandle handle) {}
     virtual TextureHandle getRenderTextureAsTexture(RenderTextureHandle handle) { return {}; }
-    virtual void renderToTexture(RenderTextureHandle target, std::shared_ptr<Scene> scene, Camera& camera,
+    virtual void renderToTexture(RenderTextureHandle target, std::shared_ptr<RenderScene> scene, Camera& camera,
                                  const glm::vec4& clearColor = glm::vec4(0.0f, 0.0f, 0.0f, 1.0f)) {}
     virtual glm::uvec2 getRenderTextureSize(RenderTextureHandle handle) { return glm::uvec2(0); }
     virtual Uint64 registerRenderTextureForUI(RenderTextureHandle handle) { return 0; }
@@ -238,6 +238,24 @@ public:
     // per emitter (per-material draws: blend mode + texture per packet). Backends
     // without per-material particle draws (legacy Metal) ignore this.
     virtual void setParticleDrawList(const std::vector<ParticleDrawPacket>& draws) {}
+
+    // Sky/atmosphere description resolved from the ECS SkyComponent by SkySystem.
+    // Pushed only when the component changes. The sun is not included here — it
+    // is light-driven (see LightGatherSystem).
+    virtual void setSky(const SkyRenderData& sky) {}
+
+    // Shared wind resolved from the ECS WindFieldComponent by WindSystem. Sets
+    // the wind DIRECTION consumed by the cloud (and Metal fog) passes; per-medium
+    // scroll speed stays local to each effect. Pushed only when a WindFieldComponent
+    // exists — otherwise the backends keep their panel-set wind.
+    virtual void setWind(const WindRenderData& wind) {}
+
+    // Request a rebake of the environment IBL (sky capture -> irradiance /
+    // prefilter). SkySystem calls this when the sun has moved far enough to
+    // restale the captured environment. Both backends satisfy it identically by
+    // setting their iblNeedsUpdate flag, so the throttle decision lives in one
+    // place (the ECS layer), not duplicated per backend.
+    virtual void requestIBLUpdate() {}
 
 protected:
     std::function<void()> m_imGuiCallback;

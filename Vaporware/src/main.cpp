@@ -20,9 +20,10 @@
 #include "Vapor/renderer.hpp"
 #include "Vapor/rmlui_manager.hpp"
 #include "Vapor/stats_log.hpp"
-#include "Vapor/systems.hpp"
 #include "Vapor/rng.hpp"
-#include "Vapor/scene.hpp"
+#include "Vapor/render_scene.hpp"
+#include "Vapor/scene_blueprint.hpp"
+#include "Vapor/systems.hpp"
 #include <RmlUi/Core/ElementDocument.h>
 #include <entt/entt.hpp>
 
@@ -42,6 +43,8 @@ static void setupCustomDrawers(Vapor::SceneInspector& inspector) {
     inspector.registerComponent<Vapor::SpotLightComponent>("Spot Light");
     inspector.registerComponent<Vapor::RectLightComponent>("Rect Light");
     inspector.registerComponent<Vapor::DirectionalLightComponent>("Directional Light");
+    inspector.registerComponent<Vapor::SunComponent>("Sun");
+    inspector.registerComponent<Vapor::TimeOfDayComponent>("Time of Day");
     inspector.registerComponent<CharacterIntent>("Character Intent");
     inspector.registerComponent<CharacterControllerComponent>("Character Controller");
     inspector.registerComponent<GrabbableComponent>("Grabbable");
@@ -73,17 +76,39 @@ static void setupCustomDrawers(Vapor::SceneInspector& inspector) {
         }
     });
 
+    // SkyComponent — custom drawer for the SkyType combo (auto-draw can't edit
+    // the enum) so the visible sky mode is switchable at runtime. Sets `dirty`
+    // so SkySystem re-pushes the change to the renderer.
+    inspector.registerCustomDrawer([](entt::registry& reg, entt::entity e) {
+        if (auto* c = reg.try_get<Vapor::SkyComponent>(e)) {
+            if (ImGui::CollapsingHeader("Sky", ImGuiTreeNodeFlags_DefaultOpen)) {
+                const char* types[] = { "Atmosphere", "HDRI", "Gradient" };
+                int t = static_cast<int>(c->type);
+                if (ImGui::Combo("type", &t, types, 3)) {
+                    c->type = static_cast<SkyType>(t);   // SkyType is global (render_data.hpp)
+                    c->dirty = true;
+                }
+                if (ImGui::DragFloat("exposure", &c->exposure, 0.01f, 0.01f, 10.0f)) c->dirty = true;
+                if (c->type == SkyType::Gradient) {
+                    if (ImGui::ColorEdit3("zenith",  &c->gradientZenith.x))  c->dirty = true;
+                    if (ImGui::ColorEdit3("horizon", &c->gradientHorizon.x)) c->dirty = true;
+                    if (ImGui::ColorEdit3("ground",  &c->gradientGround.x))  c->dirty = true;
+                }
+                ImGui::DragFloat("IBL sun threshold (deg)", &c->iblSunThresholdDeg, 0.1f, 0.0f, 90.0f);
+            }
+        }
+    });
+
     // LightMovementLogicComponent — keep custom drawer for the named Pattern combo.
     inspector.registerCustomDrawer([](entt::registry& reg, entt::entity e) {
         if (auto* c = reg.try_get<LightMovementLogicComponent>(e)) {
             if (ImGui::CollapsingHeader("Light Movement Logic", ImGuiTreeNodeFlags_DefaultOpen)) {
                 const char* patterns[] = { "Circle", "Figure8", "Linear", "Spiral" };
                 int p = static_cast<int>(c->pattern);
-                if (ImGui::Combo("pattern", &p, patterns, 4))
-                    c->pattern = static_cast<MovementPattern>(p);
-                ImGui::DragFloat("speed",      &c->speed,  0.01f);
-                ImGui::DragFloat("radius",     &c->radius, 0.1f, 0.0f, 100.0f);
-                ImGui::DragFloat("height",     &c->height, 0.1f, -50.0f, 50.0f);
+                if (ImGui::Combo("pattern", &p, patterns, 4)) c->pattern = static_cast<MovementPattern>(p);
+                ImGui::DragFloat("speed", &c->speed, 0.01f);
+                ImGui::DragFloat("radius", &c->radius, 0.1f, 0.0f, 100.0f);
+                ImGui::DragFloat("height", &c->height, 0.1f, -50.0f, 50.0f);
                 ImGui::LabelText("timer", "%.2f", c->timer);
             }
         }
@@ -95,8 +120,7 @@ static void setupCustomDrawers(Vapor::SceneInspector& inspector) {
             if (ImGui::CollapsingHeader("Camera Switch Request", ImGuiTreeNodeFlags_DefaultOpen)) {
                 const char* modes[] = { "Free", "Follow", "FirstPerson" };
                 int m = static_cast<int>(c->mode);
-                if (ImGui::Combo("mode", &m, modes, 3))
-                    c->mode = static_cast<CameraSwitchRequest::Mode>(m);
+                if (ImGui::Combo("mode", &m, modes, 3)) c->mode = static_cast<CameraSwitchRequest::Mode>(m);
             }
         }
     });
@@ -105,17 +129,15 @@ static void setupCustomDrawers(Vapor::SceneInspector& inspector) {
     inspector.registerCustomDrawer([](entt::registry& reg, entt::entity e) {
         if (auto* c = reg.try_get<SubtitleQueueComponent>(e)) {
             if (ImGui::CollapsingHeader("Subtitle Queue", ImGuiTreeNodeFlags_DefaultOpen)) {
-                ImGui::LabelText("queue size",       "%zu", c->queue.size());
-                ImGui::LabelText("currentIndex",     "%d",  c->currentIndex);
-                ImGui::Checkbox("advanceRequested",  &c->advanceRequested);
-                ImGui::Checkbox("autoAdvance",       &c->autoAdvance);
-                ImGui::LabelText("displayTimer",     "%.2f", c->displayTimer);
+                ImGui::LabelText("queue size", "%zu", c->queue.size());
+                ImGui::LabelText("currentIndex", "%d", c->currentIndex);
+                ImGui::Checkbox("advanceRequested", &c->advanceRequested);
+                ImGui::Checkbox("autoAdvance", &c->autoAdvance);
+                ImGui::LabelText("displayTimer", "%.2f", c->displayTimer);
                 if (auto* fsm = reg.try_get<Vapor::FSMStateComponent>(e)) {
-                    const char* states[] = {
-                        "Idle", "WaitingForVisible", "Displaying", "WaitingForHidden"
-                    };
+                    const char* states[] = { "Idle", "WaitingForVisible", "Displaying", "WaitingForHidden" };
                     ImGui::LabelText("FSM state", "%s", states[fsm->currentState]);
-                    ImGui::LabelText("FSM time",  "%.2f", fsm->stateTime);
+                    ImGui::LabelText("FSM time", "%.2f", fsm->stateTime);
                 }
             }
         }
@@ -126,10 +148,8 @@ static void setupCustomDrawers(Vapor::SceneInspector& inspector) {
         if (auto* c = reg.try_get<SceneTransitionComponent>(e)) {
             if (ImGui::CollapsingHeader("Scene Transition (FSM)", ImGuiTreeNodeFlags_DefaultOpen)) {
                 if (auto* fsm = reg.try_get<Vapor::FSMStateComponent>(e)) {
-                    const char* states[] = {
-                        "Idle", "FadingInLoadingScreen", "UnloadingScene",
-                        "LoadingAssets", "BuildingScene", "FadingOutLoadingScreen"
-                    };
+                    const char* states[] = { "Idle",          "FadingInLoadingScreen", "UnloadingScene",
+                                             "LoadingAssets", "BuildingScene",         "FadingOutLoadingScreen" };
                     ImGui::LabelText("state", "%s", states[fsm->currentState]);
                 }
                 ImGui::ProgressBar(c->progress);
@@ -256,15 +276,14 @@ auto main(int argc, char* args[]) -> int {
     // Scene serializer — engine pre-registers transform/meshRenderer;
     // game registers game-specific component writers.
     Vapor::SceneSerializer sceneSerializer;
-    sceneSerializer.registerComponent("autoRotate",
-        [](Vapor::json& out, entt::registry& reg, entt::entity e) {
-            if (auto* c = reg.try_get<AutoRotateComponent>(e))
-                out = { {"axis", Vapor::toJson(c->axis)}, {"speed", c->speed} };
-        });
+    sceneSerializer.registerComponent("autoRotate", [](Vapor::json& out, entt::registry& reg, entt::entity e) {
+        if (auto* c = reg.try_get<AutoRotateComponent>(e))
+            out = { { "axis", Vapor::toJson(c->axis) }, { "speed", c->speed } };
+    });
 
     Vapor::SceneInspector sceneInspector;
     sceneInspector.attachSerializer(sceneSerializer);
-    sceneInspector.setGltfPath("models/Sponza/Sponza.gltf", /*optimized=*/true);
+    sceneInspector.setGltfPath("models/Sponza/Sponza.gltf");
     // Exclude GLTF-spawned geometry — the inspector decides what to serialize,
     // not the serializer.
     sceneInspector.setEntityProvider([](entt::registry& reg) {
@@ -323,22 +342,23 @@ auto main(int argc, char* args[]) -> int {
 
     // Register single-frame atlas for the demo sprite texture
     SpriteAtlas demoAtlas;
-    demoAtlas.name    = "demo_sprite";
+    demoAtlas.name = "demo_sprite";
     demoAtlas.texture = spriteTexture;
-    demoAtlas.size    = glm::vec2(1.0f, 1.0f);
+    demoAtlas.size = glm::vec2(1.0f, 1.0f);
     demoAtlas.frames.push_back(SpriteFrame{
-        "default", {0.0f, 0.0f, 1.0f, 1.0f}, {1.0f, 1.0f}, {0.0f, 0.0f}, {0.5f, 0.5f}, false
-    });
+        "default", { 0.0f, 0.0f, 1.0f, 1.0f }, { 1.0f, 1.0f }, { 0.0f, 0.0f }, { 0.5f, 0.5f }, false });
     demoAtlas.nameToIndex["default"] = 0;
     AtlasHandle demoAtlasHandle = resourceManager.registerAtlas("demo_sprite", std::move(demoAtlas));
 
     fmt::print("Loading scene asynchronously...\n");
+    // Declarative scene: scenes/main.json references the Sponza model via its
+    // "source" field; the blueprint loader expands it into a parent-indexed
+    // entity list plus the decoded mesh/material payload.
     auto sceneResource = resourceManager.loadScene(
-        std::string("models/Sponza/Sponza.gltf"),
-        true,// optimized
+        std::string("scenes/main.json"),
         Vapor::LoadMode::Async,
-        [](std::shared_ptr<Scene> loadedScene) -> void {
-            fmt::print("Scene loaded with {} staged meshes\n", loadedScene->stagedMeshes.size());
+        [](std::shared_ptr<Vapor::SceneBlueprint> bp) -> void {
+            fmt::print("Scene blueprint loaded: {} entities, {} meshes\n", bp->entities.size(), bp->meshes.size());
         }
     );
     auto albedoResource =
@@ -350,9 +370,10 @@ auto main(int argc, char* args[]) -> int {
 
     // NOTES: optionally call resourceManager.waitForAll();
 
-    auto scene = sceneResource->get();
-    // Record how many meshes the GLTF scene contributes before buildScene adds more
-    const size_t sponzaMeshCount = scene->stagedMeshes.size();
+    auto sceneBlueprint = sceneResource->get();
+    // The RenderScene (world geometry pool) is the app's now that no importer
+    // fabricates one; instantiate() below fills it from the blueprint.
+    auto scene = std::make_shared<RenderScene>("main");
 
     auto material = std::make_shared<Vapor::Material>(Vapor::Material{
         .albedoMap = albedoResource->get(),
@@ -420,66 +441,46 @@ auto main(int argc, char* args[]) -> int {
     // Return (and zero-clear) particle slots when an emitter entity is destroyed.
     Vapor::ParticleEmitterSystem::attach(registry, renderer.get());
 
+    // Blueprint -> live entities: real hierarchy (local TRS + parent links)
+    // instead of the old flatten-then-decompose-world-matrices conversion.
+    // instantiate() also stages each mesh into the RenderScene pool once.
+    // The Khronos Sponza GLTF is authored in meters (~30m across) — its
+    // transforms are used as-is.
+    if (sceneBlueprint && sceneBlueprint->ok) {
+        std::vector<entt::entity> sceneEntities;
+        Vapor::instantiate(registry, *scene, *sceneBlueprint, entt::null, "", &sceneEntities);
+        for (auto e : sceneEntities)
+            registry.emplace<SceneGeometryTag>(e);// marks scene-spawned geometry for serializer
+    } else {
+        fmt::print(stderr, "Scene blueprint failed to load; continuing with the built-in scene only\n");
+    }
+
     auto [sceneBuilt, materialBuilt, cube1, global] =
         buildScene(registry, *physics, scene, material, windowWidth, windowHeight, rng);
 
     renderer->stage(scene);
 
-    // Convert GLTF scene meshes to ECS entities so they appear in the inspector
-    // and are rendered through the unified registry draw path.
-    for (size_t i = 0; i < sponzaMeshCount && i < scene->stagedMeshes.size(); ++i) {
-        auto& mesh = scene->stagedMeshes[i];
-        const glm::mat4& worldMat =
-            i < scene->stagedMeshTransforms.size() ? scene->stagedMeshTransforms[i] : glm::identity<glm::mat4>();
-
-        auto e = registry.create();
-        registry.emplace<Vapor::NameComponent>(e, Vapor::NameComponent{ fmt::format("Sponza_{}", i) });
-        auto& tc = registry.emplace<Vapor::TransformComponent>(e);
-        // Extract scale correctly from world matrix and scale down by 0.01 for Sponza
-        // The Khronos Sponza GLTF is authored in meters (~30m across) — use
-        // its world transforms as-is. (An earlier 0.01 scale shrank the whole
-        // scene to a 30cm dollhouse the camera flew straight past.)
-        tc.scale = glm::vec3(
-            glm::length(glm::vec3(worldMat[0])),
-            glm::length(glm::vec3(worldMat[1])),
-            glm::length(glm::vec3(worldMat[2]))
-        );
-        tc.position = glm::vec3(worldMat[3]);
-        if (tc.scale.x > 0.0f && tc.scale.y > 0.0f && tc.scale.z > 0.0f) {
-            glm::mat3 rotMat(
-                glm::vec3(worldMat[0]) / tc.scale.x,
-                glm::vec3(worldMat[1]) / tc.scale.y,
-                glm::vec3(worldMat[2]) / tc.scale.z
-            );
-            tc.rotation = glm::quat_cast(rotMat);
-        }
-        tc.isDirty = true; // Let TransformSystem compute the scaled world matrix
-        auto& mrc = registry.emplace<Vapor::MeshRendererComponent>(e);
-        mrc.meshes.push_back(mesh);
-        registry.emplace<SceneGeometryTag>(e);// marks GLTF-spawned geometry for serializer
-    }
-    // Clear stagedMeshes: GLTF meshes are now ECS entities; manually built
-    // meshes (cubes, floor) are already in MeshRendererComponent and were
-    // staged (materialID/instanceID set) so their mesh objects remain valid.
+    // Clear the staging list: everything just staged (blueprint + built-in
+    // geometry) has its renderMeshId/materialID assigned and lives on in
+    // MeshRendererComponents, so the mesh objects remain valid.
     scene->stagedMeshes.clear();
     scene->stagedMeshTransforms.clear();
 
     // Demo sprite entity — replaces the old drawRotatedQuad2D(spriteTexture) call
     {
         auto spriteEntity = registry.create();
-        registry.emplace<Vapor::NameComponent>(spriteEntity, Vapor::NameComponent{"DemoSprite"});
+        registry.emplace<Vapor::NameComponent>(spriteEntity, Vapor::NameComponent{ "DemoSprite" });
         auto& tc = registry.emplace<Vapor::TransformComponent>(spriteEntity);
         tc.position = glm::vec3(650.0f, 100.0f, 0.0f);
-        tc.isDirty  = true;
-        auto& sc    = registry.emplace<Vapor::SpriteComponent>(spriteEntity);
-        sc.atlas      = demoAtlasHandle;
+        tc.isDirty = true;
+        auto& sc = registry.emplace<Vapor::SpriteComponent>(spriteEntity);
+        sc.atlas = demoAtlasHandle;
         sc.frameIndex = 0;
-        sc.size       = glm::vec2(40.0f, 40.0f);
-        sc.tint       = glm::vec4(1.0f);
-        registry.emplace<AutoRotateComponent>(spriteEntity, AutoRotateComponent{
-            .axis  = glm::vec3(0.0f, 0.0f, 1.0f),
-            .speed = 2.0f
-        });
+        sc.size = glm::vec2(40.0f, 40.0f);
+        sc.tint = glm::vec4(1.0f);
+        registry.emplace<AutoRotateComponent>(
+            spriteEntity, AutoRotateComponent{ .axis = glm::vec3(0.0f, 0.0f, 1.0f), .speed = 2.0f }
+        );
     }
 
 
@@ -643,7 +644,10 @@ auto main(int argc, char* args[]) -> int {
         // Gather per-emitter draw packets (blend/texture/size). Runs even while
         // paused — frozen particles still need their draw list.
         Vapor::ParticleRenderSystem::update(registry, renderer.get());
-        LightGatherSystem::update(registry, scene.get());
+        Vapor::TimeOfDaySystem::update(registry, deltaTime);  // moves the sun; before gather
+        Vapor::LightGatherSystem::update(registry, scene.get());
+        Vapor::SkySystem::update(registry, renderer.get());
+        Vapor::WindSystem::update(registry, renderer.get());
         FlipbookSystem::update(registry, deltaTime);
         SpriteRenderSystem::update(registry, renderer.get(), &resourceManager);
 

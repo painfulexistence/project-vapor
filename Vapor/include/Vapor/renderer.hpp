@@ -6,7 +6,7 @@
 #include "camera.hpp"
 #include "graphics.hpp"
 #include "font_manager.hpp"
-#include "scene.hpp"
+#include "render_scene.hpp"
 #include <SDL3/SDL_video.h>
 #include <entt/entt.hpp>
 #include <functional>
@@ -126,13 +126,13 @@ public:
     // ========================================================================
 
     // Stage a scene (upload meshes, materials, textures)
-    void stage(std::shared_ptr<Scene> scene) override;
+    void stage(std::shared_ptr<RenderScene> scene) override;
 
     // Draw a scene with Scene object
-    void draw(std::shared_ptr<Scene> scene, Camera& camera) override;
+    void draw(std::shared_ptr<RenderScene> scene, Camera& camera) override;
 
     // Draw with ECS registry
-    void draw(entt::registry& registry, std::shared_ptr<Scene> scene, Camera& camera) override;
+    void draw(entt::registry& registry, std::shared_ptr<RenderScene> scene, Camera& camera) override;
 
     // ========================================================================
     // Screenshot API
@@ -283,7 +283,7 @@ public:
     TextureHandle getRenderTextureAsTexture(RenderTextureHandle handle) override;
     void renderToTexture(
         RenderTextureHandle target,
-        std::shared_ptr<Scene> scene,
+        std::shared_ptr<RenderScene> scene,
         Camera& camera,
         const glm::vec4& clearColor = glm::vec4(0.0f, 0.0f, 0.0f, 1.0f)
     ) override;
@@ -309,6 +309,9 @@ public:
     void setParticleForceField(const ParticleForceField& field) override;
     void setParticleSimPaused(bool paused) override { m_particleSimPaused = paused; }
     void setParticleVisible(bool visible) override { particleVisible = visible; }
+    void setSky(const SkyRenderData& sky) override;
+    void setWind(const WindRenderData& wind) override;
+    void requestIBLUpdate() override { iblNeedsUpdate = true; }
     void setParticleDrawList(const std::vector<ParticleDrawPacket>& draws) override;
 
     // ========================================================================
@@ -423,10 +426,10 @@ private:
     void bindMaterial(MaterialId materialId);
 
     // Scene/ECS helpers
-    void collectDrawables(std::shared_ptr<Scene> scene);
-    void collectDrawables(entt::registry& registry, std::shared_ptr<Scene> scene);
+    void collectDrawables(std::shared_ptr<RenderScene> scene);
+    void collectDrawables(entt::registry& registry, std::shared_ptr<RenderScene> scene);
     // Submit the scene's gathered lights (filled by the game's light systems)
-    void submitSceneLights(const std::shared_ptr<Scene>& scene);
+    void submitSceneLights(const std::shared_ptr<RenderScene>& scene);
 
     // Batch rendering helpers
     void initBatchRendering();
@@ -533,7 +536,7 @@ private:
 
     // Last staged/drawn scene — kept for the ImGui Scene Materials / Scene
     // Lights editors (the panels edit shared Scene data, like native).
-    std::shared_ptr<Scene> currentScene;
+    std::shared_ptr<RenderScene> currentScene;
 
     // Texture cache (path -> TextureId)
     std::unordered_map<std::string, TextureId> textureCache;
@@ -722,6 +725,10 @@ private:
     TextureHandle cloudResolvedRT;  // temporal output (swapped with history)
     BufferHandle cloudDataBuffer;
     VolumetricCloudRenderData cloudSettings;  // CPU copy (tunables + wind/time accumulation)
+    // Shared wind magnitude from the ECS WindFieldComponent (via setWind).
+    // Multiplies the cloud's per-medium windSpeed coefficient at scroll time.
+    // Defaults to 1.0 so scenes without a WindFieldComponent are unaffected.
+    float m_windStrength = 1.0f;
     glm::mat4 cloudPrevViewProj = glm::mat4(1.0f);
     bool cloudPrevViewProjValid = false;
     bool volumetricCloudsEnabled = false;  // default OFF (enable when verifying)
@@ -768,6 +775,29 @@ private:
     ShaderHandle bloomUpsampleShader;
     ShaderHandle atmosphereVertexShader;
     ShaderHandle atmosphereFragmentShader;
+    // Visible sky sampled from environmentCubemap when the SkyComponent's type is
+    // HDRI (reuses Sky.vert / atmosphereVertexShader). m_skyType is the visible
+    // sky mode pushed by setSky.
+    PipelineHandle skyboxPipeline;
+    ShaderHandle skyboxFragmentShader;
+    // Cheap zenith/horizon/ground gradient sky (SkyType::Gradient). Same
+    // fullscreen depth-tested state as the atmosphere pass; colors come from the
+    // SkyComponent via setSky.
+    PipelineHandle gradientPipeline;
+    ShaderHandle gradientFragmentShader;
+    BufferHandle gradientDataBuffer;
+    GradientRenderData gradientData;  // CPU copy, re-uploaded when setSky changes it
+    SkyType m_skyType = SkyType::Atmosphere;
+    // IBL debug: environmentCubemap unwrapped to a 2D equirect RT for ImGui
+    // (cubemaps can't be shown directly). iblPreviewPass renders it each frame.
+    TextureHandle iblPreviewRT;
+    PipelineHandle iblPreviewPipeline;
+    ShaderHandle iblPreviewVertexShader;
+    ShaderHandle iblPreviewFragmentShader;
+    // Off by default: the preview RT is single-buffered, so rendering it every
+    // frame while ImGui samples last frame's copy stalls (WAR hazard ~a full
+    // frame). Only render it while the debug panel checkbox is on.
+    bool m_iblPreviewEnabled = false;
     ShaderHandle lightScatteringShader;
     ShaderHandle volumetricFogShader;
     BufferHandle fogDataBuffer;
@@ -1075,8 +1105,17 @@ private:
     ShaderHandle skyCaptureVS, skyCaptureFS, irradianceVS, irradianceFS,
                  prefilterVS, prefilterFS, brdfVS, brdfFS;
     bool iblNeedsUpdate = true;
+    // Amortized IBL bake: iblCapturePass spreads the 42-face capture/convolve
+    // over several frames (one stage per frame) to avoid a per-rebake hitch.
+    // m_iblBakeStage: -1 idle, 0 capture(+mips,+BRDF once), 1 irradiance,
+    // 2..(1+MIPS) prefilter mip. m_iblReady gates sampling so the main pass keeps
+    // using the previous bake during a rebake instead of flickering to black.
+    int  m_iblBakeStage = -1;
+    bool m_brdfBaked = false;
+    bool m_iblReady = false;
     static constexpr Uint32 PREFILTER_MIP_LEVELS = 5;
     void iblCapturePass();
+    void iblPreviewPass();  // IBL debug: cubemap -> equirect RT for ImGui
 
     // HDRI environment source (ported from the native Metal renderer). When set,
     // iblCapturePass converts the equirect map into environmentCubemap (instead of

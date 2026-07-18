@@ -1609,7 +1609,8 @@ public:
         fogData->ambientIntensity = r.volumetricFogSettings.ambientIntensity;
         fogData->noiseScale = r.volumetricFogSettings.noiseScale;
         fogData->noiseIntensity = r.volumetricFogSettings.noiseIntensity;
-        fogData->windSpeed = r.volumetricFogSettings.windSpeed;
+        // Per-medium fog scroll coefficient scaled by the shared wind strength.
+        fogData->windSpeed = r.volumetricFogSettings.windSpeed * r.m_windStrength;
         fogData->windDirection = r.volumetricFogSettings.windDirection;
         fogData->temporalBlend = r.volumetricFogSettings.temporalBlend;
 
@@ -1691,9 +1692,11 @@ public:
         cloudData->frameIndex = r.currentFrameInFlight;
         cloudData->time = r.volumetricCloudSettings.time;
 
-        // Update wind offset (accumulate over time)
+        // Update wind offset (accumulate over time). The per-medium windSpeed is
+        // the cloud's scroll coefficient; the shared wind strength scales it.
         r.volumetricCloudSettings.windOffset +=
-            r.volumetricCloudSettings.windDirection * r.volumetricCloudSettings.windSpeed * 0.016f;
+            r.volumetricCloudSettings.windDirection *
+            (r.volumetricCloudSettings.windSpeed * r.m_windStrength) * 0.016f;
         cloudData->windOffset = r.volumetricCloudSettings.windOffset;
 
         // Copy settings
@@ -5001,7 +5004,7 @@ auto Renderer_Metal::createResources() -> void {
     fmt::print("Particle pool initialized ({} slots, ECS-driven)\n", MAX_PARTICLES);
 }
 
-auto Renderer_Metal::stage(std::shared_ptr<Scene> scene) -> void {
+auto Renderer_Metal::stage(std::shared_ptr<RenderScene> scene) -> void {
     ZoneScoped;
 
     // Lights
@@ -5163,7 +5166,7 @@ void Renderer_Metal::endFrame() {
     currentDrawable = nullptr;
 }
 
-auto Renderer_Metal::draw(std::shared_ptr<Scene> scene, Camera& camera) -> void {
+auto Renderer_Metal::draw(std::shared_ptr<RenderScene> scene, Camera& camera) -> void {
     ZoneScoped;
     FrameMark;
 
@@ -6509,7 +6512,7 @@ glm::uvec2 Renderer_Metal::getRenderTextureSize(RenderTextureHandle handle) {
 }
 
 void Renderer_Metal::renderToTexture(
-    RenderTextureHandle target, std::shared_ptr<Scene> scene, Camera& camera, const glm::vec4& clearColor
+    RenderTextureHandle target, std::shared_ptr<RenderScene> scene, Camera& camera, const glm::vec4& clearColor
 ) {
     auto it = renderTextures.find(target.id);
     if (it == renderTextures.end() || !scene) {
@@ -7534,7 +7537,7 @@ extern "C" auto getMetalDevice(void* renderer) -> void* {
 }
 
 
-void Renderer_Metal::draw(entt::registry& registry, std::shared_ptr<Scene> scene, Camera& camera) {
+void Renderer_Metal::draw(entt::registry& registry, std::shared_ptr<RenderScene> scene, Camera& camera) {
     // Build ECS instance data; draw(scene, camera) will clear instances/instanceBatches from Nodes,
     // so store them here and inject after Node traversal via pendingEcsInstances.
     pendingEcsInstances.clear();
@@ -7756,4 +7759,37 @@ void Renderer_Metal::setParticleForceField(const ParticleForceField& field) {
     m_forceField = field;
     if (m_forceField.attractors.size() > MAX_PARTICLE_ATTRACTORS)
         m_forceField.attractors.resize(MAX_PARTICLE_ATTRACTORS);
+}
+
+void Renderer_Metal::setSky(const SkyRenderData& sky) {
+    // HDRI type sources IBL from the loaded equirect; everything else captures
+    // the procedural sky. (Gradient uses the sky capture too for now — its
+    // dedicated visible pass is not implemented yet.)
+    iblSource = (sky.type == SkyType::HDRI) ? IBLSource::HDRI : IBLSource::Sky;
+
+    // Push the atmosphere tunables into the shared atmosphere buffer. The sun
+    // fields (direction/color/intensity) are intentionally left untouched —
+    // they are synced from directionalLights[0] every frame.
+    auto* atmos = reinterpret_cast<AtmosphereData*>(atmosphereDataBuffer->contents());
+    atmos->rayleighCoefficients  = sky.rayleighCoefficients;
+    atmos->rayleighScaleHeight   = sky.rayleighScaleHeight;
+    atmos->mieCoefficient        = sky.mieCoefficient;
+    atmos->mieScaleHeight        = sky.mieScaleHeight;
+    atmos->miePreferredDirection = sky.miePreferredDirection;
+    atmos->planetRadius          = sky.planetRadius;
+    atmos->atmosphereRadius      = sky.atmosphereRadius;
+    atmos->exposure              = sky.exposure;
+    atmos->groundColor           = sky.groundColor;
+    atmosphereDataBuffer->didModifyRange(NS::Range::Make(0, atmosphereDataBuffer->length()));
+
+    iblNeedsUpdate = true;  // re-bake IBL from the new sky
+}
+
+void Renderer_Metal::setWind(const WindRenderData& wind) {
+    // Shared wind direction drives the fog and cloud scroll. The shared strength
+    // scales each medium's per-medium windSpeed coefficient at fill time (see the
+    // fog/cloud passes), so one knob drives both while their ratio is preserved.
+    volumetricFogSettings.windDirection   = wind.direction;
+    volumetricCloudSettings.windDirection = wind.direction;
+    m_windStrength = wind.strength;
 }
