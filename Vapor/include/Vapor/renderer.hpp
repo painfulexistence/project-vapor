@@ -790,15 +790,15 @@ private:
     // RT denoising chain (RequiresRaytracing-gated; Metal MSL kernels via RHI)
     ComputePipelineHandle aoTemporalPipeline;
     ComputePipelineHandle aoDenoisePipeline;
-    ComputePipelineHandle stochasticPointShadowPipeline;
-    ComputePipelineHandle pointShadowTemporalPipeline;
-    ComputePipelineHandle pointShadowDenoisePipeline;
+    ComputePipelineHandle stochasticShadowPipeline;
+    ComputePipelineHandle stochasticShadowTemporalPipeline;
+    ComputePipelineHandle stochasticShadowDenoisePipeline;
     // ReSTIR reuse for the stochastic shadow (restirShadowPass): half-res
     // reservoir build + temporal merge, half-res spatial merge + winner rays,
     // then joint bilateral upsample back to the full-res raw target.
     ComputePipelineHandle restirShadowTemporalPipeline;
     ComputePipelineHandle restirShadowResolvePipeline;
-    ComputePipelineHandle pointShadowUpsamplePipeline;
+    ComputePipelineHandle stochasticShadowUpsamplePipeline;
     // GIBS screen-space denoise ("SVGF-lite"): temporal reprojection + 2x
     // edge-aware a-trous over the GI gather output. The gather writes giRawRT,
     // the chain produces the giResultTexture the PBR samples. Kills the visible
@@ -814,8 +814,8 @@ private:
     glm::mat4 giPrevView{1.0f};         // AO owns `prevView`; GI keeps its own
     bool giPrevViewValid = false;
     ShaderHandle rtShadowShader, rtAOShader, aoTemporalShader, aoDenoiseShader,
-                 pointShadowShader, pointShadowTemporalShader, pointShadowDenoiseShader,
-                 restirShadowTemporalShader, restirShadowResolveShader, pointShadowUpsampleShader,
+                 stochasticShadowShader, stochasticShadowTemporalShader, stochasticShadowDenoiseShader,
+                 restirShadowTemporalShader, restirShadowResolveShader, stochasticShadowUpsampleShader,
                  giTemporalShader, giDenoiseShader;
     ShaderHandle prePassMetalVertexShader, prePassMetalFragmentShader;
 
@@ -834,10 +834,10 @@ private:
     bool aoHistoryValid = false;
     glm::mat4 prevView = glm::mat4(1.0f);
     bool prevViewValid = false;
-    TextureHandle pointShadowRT;         // stochastic raw (full res)
-    TextureHandle pointShadowHistoryRT;  // temporal history (post-swap = latest)
-    TextureHandle pointShadowDenoisedRT; // temporal output (swapped with history)
-    TextureHandle pointShadowHalfRT;     // half-res ReSTIR resolve output (pre-upsample)
+    TextureHandle stochasticShadowRT;         // stochastic raw (full res)
+    TextureHandle stochasticShadowHistoryRT;  // temporal history (post-swap = latest)
+    TextureHandle stochasticShadowDenoisedRT; // temporal output (swapped with history)
+    TextureHandle stochasticShadowHalfRT;     // half-res ReSTIR resolve output (pre-upsample)
     // (frameDataBuffer for the RT kernels' random seeds is declared above.)
     bool aoEnabled = true;
     // AO method (native aoMethod): 0 = ray traced, 1 = screen space (SSAO).
@@ -911,15 +911,15 @@ private:
     // pass actually wrote (TLAS ready, pipelines built), and the PBR only
     // samples a history that has been accumulated at least once — otherwise
     // both would read undefined texture memory when the feature turns on.
-    // pointShadowDenoiseRan additionally routes the PBR to the edge-aware
+    // stochasticShadowDenoiseRan additionally routes the PBR to the edge-aware
     // filtered copy when the denoise pass produced one this frame.
-    bool pointShadowWritten = false;         // this frame
-    bool pointShadowHistoryWritten = false;  // ever (since last RT rebuild)
-    bool pointShadowDenoiseRan = false;      // this frame
-    // Stochastic point-shadow debug view (native pointShadowDebugMode):
+    bool stochasticShadowWritten = false;         // this frame
+    bool stochasticShadowHistoryWritten = false;  // ever (since last RT rebuild)
+    bool stochasticShadowDenoiseRan = false;      // this frame
+    // Stochastic point-shadow debug view (native stochasticShadowDebugMode):
     // 0 = visibility, 1 = tile light-count heatmap, 2 = ReSTIR winner id,
     // 3 = ReSTIR reservoir confidence (modes 2-3 need the ReSTIR path).
-    Uint32 pointShadowDebugMode = 0;
+    Uint32 stochasticShadowDebugMode = 0;
     // Vulkan Main-pass perf isolation (RHIMain.frag mainDebugFlags, push offset 96):
     // bit0 = skip point-light loop, bit1 = skip shadow PCF. Panel-driven.
     Uint32 mainDebugFlags = 0;
@@ -1110,10 +1110,10 @@ private:
 
     void aoTemporalPass();
     void aoDenoisePass();
-    void stochasticPointShadowPass();
+    void stochasticShadowPass();
     bool restirShadowPass();  // false = couldn't run, caller uses the legacy kernel
-    void pointShadowTemporalPass();
-    void pointShadowDenoisePass();
+    void stochasticShadowTemporalPass();
+    void stochasticShadowDenoisePass();
 
     // Acceleration structures (for ray tracing)
     std::vector<AccelStructHandle> BLASs;  // Bottom-level acceleration structures (one per mesh)
