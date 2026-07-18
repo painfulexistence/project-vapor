@@ -1662,7 +1662,7 @@ void Renderer::mainRenderPass() {
         rhi->setFragmentBytes(&mainDebugFlags, sizeof(Uint32), 12);
         // Metal-via-RHI: real IBL outputs replace the neutral blacks —
         // irradiance(8), prefilter(9), brdfLUT(10).
-        if (!iblNeedsUpdate) {
+        if (m_iblReady) {
             if (irradianceMap.isValid()) rhi->setTexture(0, 8, irradianceMap, clampSampler);
             if (prefilterMap.isValid()) rhi->setTexture(0, 9, prefilterMap, clampSampler);
             if (brdfLUTTex.isValid()) rhi->setTexture(0, 10, brdfLUTTex, clampSampler);
@@ -1769,7 +1769,7 @@ void Renderer::mainRenderPass() {
             if (bindlessSystemTable.isValid()) {
                 TextureHandle whiteTex = textures[defaultWhiteTexture].handle;
                 TextureHandle blackTex = textures[defaultBlackTexture].handle;
-                const bool iblReady = !iblNeedsUpdate;
+                const bool iblReady = m_iblReady;
                 const TextureHandle sys[10] = {
                     (aoEnabled && aoRT.isValid()) ? aoRT : whiteTex,                     // 0 texAO
                     (capabilities.raytracing && shadowRT.isValid()) ? shadowRT : whiteTex, // 1 texShadow
@@ -1934,7 +1934,6 @@ void Renderer::loadHDRI(const std::string& path) {
 }
 
 void Renderer::iblCapturePass() {
-    if (!iblNeedsUpdate) return;
     if (!irradiancePipeline.isValid() || !prefilterPipeline.isValid() || !brdfLUTPipeline.isValid()) {
         return;
     }
@@ -1944,32 +1943,45 @@ void Renderer::iblCapturePass() {
                                 equirectToCubemapPipeline.isValid();
     if (!haveHDRISource && !skyCapturePipeline.isValid()) return;
 
-    // Fill all 42 capture slots up front (race-free per-draw offsets).
-    const glm::mat4 captureViews[6] = {
-        glm::lookAt(glm::vec3(0), glm::vec3(1, 0, 0),  glm::vec3(0, -1, 0)),
-        glm::lookAt(glm::vec3(0), glm::vec3(-1, 0, 0), glm::vec3(0, -1, 0)),
-        glm::lookAt(glm::vec3(0), glm::vec3(0, 1, 0),  glm::vec3(0, 0, 1)),
-        glm::lookAt(glm::vec3(0), glm::vec3(0, -1, 0), glm::vec3(0, 0, -1)),
-        glm::lookAt(glm::vec3(0), glm::vec3(0, 0, 1),  glm::vec3(0, -1, 0)),
-        glm::lookAt(glm::vec3(0), glm::vec3(0, 0, -1), glm::vec3(0, -1, 0)),
-    };
-    const glm::mat4 captureProj = glm::perspective(glm::radians(90.0f), 1.0f, 0.1f, 10.0f);
-    IBLCaptureRenderData slots[42];
-    for (Uint32 f = 0; f < 6; f++) {
-        slots[f].viewProj = captureProj * captureViews[f];
-        slots[f].faceIndex = f;
-        slots[6 + f].faceIndex = f;  // irradiance
-    }
-    for (Uint32 m = 0; m < PREFILTER_MIP_LEVELS; m++) {
-        for (Uint32 f = 0; f < 6; f++) {
-            auto& s = slots[12 + m * 6 + f];
-            s.faceIndex = f;
-            s.roughness = float(m) / float(PREFILTER_MIP_LEVELS - 1);
-        }
-    }
-    rhi->updateBuffer(iblCaptureDataBuffer, slots, 0, sizeof(slots));
-    const size_t stride = sizeof(IBLCaptureRenderData);
+    // Start a new amortized bake when one is requested and we're idle. The 42
+    // cube-face capture/convolve is spread one stage per frame: doing it all in a
+    // single frame stalls the GPU (~a hitch), and with a moving sun that fired
+    // roughly every second. Requests arriving mid-bake are picked up after it
+    // finishes (iblNeedsUpdate is consumed at the start).
+    if (m_iblBakeStage < 0) {
+        if (!iblNeedsUpdate) return;
 
+        // Fill all 42 capture slots up front into the stable capture buffer;
+        // every amortized stage reads from it.
+        const glm::mat4 captureViews[6] = {
+            glm::lookAt(glm::vec3(0), glm::vec3(1, 0, 0),  glm::vec3(0, -1, 0)),
+            glm::lookAt(glm::vec3(0), glm::vec3(-1, 0, 0), glm::vec3(0, -1, 0)),
+            glm::lookAt(glm::vec3(0), glm::vec3(0, 1, 0),  glm::vec3(0, 0, 1)),
+            glm::lookAt(glm::vec3(0), glm::vec3(0, -1, 0), glm::vec3(0, 0, -1)),
+            glm::lookAt(glm::vec3(0), glm::vec3(0, 0, 1),  glm::vec3(0, -1, 0)),
+            glm::lookAt(glm::vec3(0), glm::vec3(0, 0, -1), glm::vec3(0, -1, 0)),
+        };
+        const glm::mat4 captureProj = glm::perspective(glm::radians(90.0f), 1.0f, 0.1f, 10.0f);
+        IBLCaptureRenderData slots[42];
+        for (Uint32 f = 0; f < 6; f++) {
+            slots[f].viewProj = captureProj * captureViews[f];
+            slots[f].faceIndex = f;
+            slots[6 + f].faceIndex = f;  // irradiance
+        }
+        for (Uint32 m = 0; m < PREFILTER_MIP_LEVELS; m++) {
+            for (Uint32 f = 0; f < 6; f++) {
+                auto& s = slots[12 + m * 6 + f];
+                s.faceIndex = f;
+                s.roughness = float(m) / float(PREFILTER_MIP_LEVELS - 1);
+            }
+        }
+        rhi->updateBuffer(iblCaptureDataBuffer, slots, 0, sizeof(slots));
+
+        m_iblBakeStage = 0;
+        iblNeedsUpdate = false;  // consumed; a request during the bake re-triggers after
+    }
+
+    const size_t stride = sizeof(IBLCaptureRenderData);
     auto faceDraw = [&](const char* name, PipelineHandle pipe, TextureHandle target,
                         Uint32 slot, Uint32 face, Uint32 mip, bool bindEnv, bool bindAtmo,
                         bool bindCaptureFrag) {
@@ -1993,48 +2005,60 @@ void Renderer::iblCapturePass() {
         rhi->endRenderPass();
     };
 
-    // Fill the environment cubemap from the HDRI equirect map when one is loaded,
-    // otherwise from the procedural sky. Everything downstream (irradiance /
-    // prefilter / BRDF LUT) is identical.
     const bool useHDRI = (iblSource == IBLSource::HDRI) && equirectHDRITexture.isValid() &&
                          equirectToCubemapPipeline.isValid();
-    for (Uint32 f = 0; f < 6; f++) {
-        if (useHDRI) {
+
+    // One stage per frame.
+    if (m_iblBakeStage == 0) {
+        // Environment capture (HDRI equirect->cube, or procedural sky) + mips.
+        for (Uint32 f = 0; f < 6; f++) {
+            if (useHDRI) {
+                RenderPassDesc rp;
+                rp.name = "EquirectToCubemap";
+                rp.colorAttachments.push_back(environmentCubemap);
+                rp.clearColors.push_back(glm::vec4(0, 0, 0, 1));
+                rp.loadColor.push_back(false);
+                rp.colorArrayLayer = f;
+                rp.colorMipLevel = 0;
+                rhi->beginRenderPass(rp);
+                rhi->bindPipeline(equirectToCubemapPipeline);
+                rhi->setVertexBuffer(0, iblCaptureDataBuffer, f * stride, stride);  // faceIndex slot
+                rhi->setTexture(0, 0, equirectHDRITexture, clampSampler);
+                rhi->draw(3, 1, 0, 0);
+                rhi->endRenderPass();
+            } else {
+                faceDraw("SkyCapture", skyCapturePipeline, environmentCubemap, f, f, 0, false, true, false);
+            }
+        }
+        rhi->generateMipmaps(environmentCubemap);
+        // BRDF LUT is view-independent — bake it just once, not every rebake.
+        if (!m_brdfBaked) {
             RenderPassDesc rp;
-            rp.name = "EquirectToCubemap";
-            rp.colorAttachments.push_back(environmentCubemap);
+            rp.name = "BRDFLUT";
+            rp.colorAttachments.push_back(brdfLUTTex);
             rp.clearColors.push_back(glm::vec4(0, 0, 0, 1));
             rp.loadColor.push_back(false);
-            rp.colorArrayLayer = f;
-            rp.colorMipLevel = 0;
             rhi->beginRenderPass(rp);
-            rhi->bindPipeline(equirectToCubemapPipeline);
-            rhi->setVertexBuffer(0, iblCaptureDataBuffer, f * stride, stride);  // faceIndex slot
-            rhi->setTexture(0, 0, equirectHDRITexture, clampSampler);
+            rhi->bindPipeline(brdfLUTPipeline);
             rhi->draw(3, 1, 0, 0);
             rhi->endRenderPass();
-        } else {
-            faceDraw("SkyCapture", skyCapturePipeline, environmentCubemap, f, f, 0, false, true, false);
+            m_brdfBaked = true;
         }
-    }
-    rhi->generateMipmaps(environmentCubemap);
-    for (Uint32 f = 0; f < 6; f++)
-        faceDraw("IrradianceConv", irradiancePipeline, irradianceMap, 6 + f, f, 0, true, false, false);
-    for (Uint32 m = 0; m < PREFILTER_MIP_LEVELS; m++)
+    } else if (m_iblBakeStage == 1) {
+        // Diffuse irradiance convolution.
+        for (Uint32 f = 0; f < 6; f++)
+            faceDraw("IrradianceConv", irradiancePipeline, irradianceMap, 6 + f, f, 0, true, false, false);
+    } else {
+        // Specular prefilter, one roughness mip per frame.
+        Uint32 m = static_cast<Uint32>(m_iblBakeStage - 2);
         for (Uint32 f = 0; f < 6; f++)
             faceDraw("PrefilterEnv", prefilterPipeline, prefilterMap, 12 + m * 6 + f, f, m, true, false, true);
-    {
-        RenderPassDesc rp;
-        rp.name = "BRDFLUT";
-        rp.colorAttachments.push_back(brdfLUTTex);
-        rp.clearColors.push_back(glm::vec4(0, 0, 0, 1));
-        rp.loadColor.push_back(false);
-        rhi->beginRenderPass(rp);
-        rhi->bindPipeline(brdfLUTPipeline);
-        rhi->draw(3, 1, 0, 0);
-        rhi->endRenderPass();
     }
-    iblNeedsUpdate = false;
+
+    if (++m_iblBakeStage >= int(2 + PREFILTER_MIP_LEVELS)) {
+        m_iblBakeStage = -1;  // bake complete
+        m_iblReady = true;    // IBL maps are now valid to sample
+    }
 }
 
 // Depth + normal (+ albedo) pre-pass. Feeds the RT shadow/AO kernels (and,
@@ -7748,7 +7772,7 @@ void Renderer::renderToTexture(
         } else {
             rhi->setFragmentBytes(&rttDebugFlags, sizeof(Uint32), 12);
             // Real IBL cubes: image-based ambience is view-independent.
-            if (!iblNeedsUpdate) {
+            if (m_iblReady) {
                 if (irradianceMap.isValid()) rhi->setTexture(0, 8, irradianceMap, clampSampler);
                 if (prefilterMap.isValid()) rhi->setTexture(0, 9, prefilterMap, clampSampler);
                 if (brdfLUTTex.isValid()) rhi->setTexture(0, 10, brdfLUTTex, clampSampler);

@@ -1083,6 +1083,14 @@ private:
     ShaderHandle skyCaptureVS, skyCaptureFS, irradianceVS, irradianceFS,
                  prefilterVS, prefilterFS, brdfVS, brdfFS;
     bool iblNeedsUpdate = true;
+    // Amortized IBL bake: iblCapturePass spreads the 42-face capture/convolve
+    // over several frames (one stage per frame) to avoid a per-rebake hitch.
+    // m_iblBakeStage: -1 idle, 0 capture(+mips,+BRDF once), 1 irradiance,
+    // 2..(1+MIPS) prefilter mip. m_iblReady gates sampling so the main pass keeps
+    // using the previous bake during a rebake instead of flickering to black.
+    int  m_iblBakeStage = -1;
+    bool m_brdfBaked = false;
+    bool m_iblReady = false;
     static constexpr Uint32 PREFILTER_MIP_LEVELS = 5;
     void iblCapturePass();
 
