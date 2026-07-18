@@ -221,6 +221,17 @@ function(vapor_flatten_metal_shaders TARGET)
                 continue()
             endif()
         endif()
+        # Skip include-only headers (3d_common.metal, restir_shadow_common.metal,
+        # gibs_common.metal, …): they carry no kernel/vertex/fragment entry point
+        # and are not self-contained translation units — some deliberately omit
+        # <metal_stdlib>, relying on the including kernel to pull it (and the
+        # shared types) in first — so compiling them standalone fails. They ARE
+        # compile-checked, transitively: the flatten inlines each into every real
+        # shader that #includes it, and those get validated below.
+        file(STRINGS "${_metal}" _entry_pts REGEX "^(kernel|vertex|fragment) ")
+        if(NOT _entry_pts)
+            continue()
+        endif()
         add_custom_command(
             OUTPUT  "${_scratch}/${_name}.air"
             COMMAND ${CMAKE_COMMAND} -E make_directory "${_scratch}"
