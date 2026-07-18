@@ -6,8 +6,16 @@ using namespace metal;
 // ReSTIR stochastic-shadow pass 1: initial candidates + temporal reuse.
 // Streams a handful of fresh light samples per domain through a weighted
 // reservoir (target = unshadowed contribution), then merges the reprojected
-// previous-frame reservoir under an M clamp. Pure ALU — the single shadow ray
-// per domain is traced by the resolve pass for the post-spatial winner.
+// previous-frame reservoir under an M clamp. Pure ALU — the shadow rays are
+// traced by the resolve pass for the post-spatial winner.
+//
+// HALF-RES: the whole ReSTIR stage runs on a half-resolution grid (the norm
+// for secondary stochastic effects — the AO chain does the same). Each thread
+// tid shades the representative FULL-res pixel fp = tid*2: depth/normal/
+// velocity/cluster reads use fp against the full-res G-buffer, so the surface
+// convention matches the full-res kernels exactly; only the reservoir grid
+// and the raw shadow target are half-sized. params.screenSize stays the FULL
+// resolution — half dims derive as (w+1)/2 to match the CPU-side allocation.
 kernel void computeMain(
     texture2d<float>              depthTexture    [[texture(0)]],
     texture2d<float>              normalTexture   [[texture(1)]],
@@ -24,22 +32,25 @@ kernel void computeMain(
 ) {
     uint w = uint(params.screenSize.x);
     uint h = uint(params.screenSize.y);
-    if (tid.x >= w || tid.y >= h) return;
-    uint pixel = tid.y * w + tid.x;
+    uint halfW = (w + 1u) / 2u;
+    uint halfH = (h + 1u) / 2u;
+    if (tid.x >= halfW || tid.y >= halfH) return;
+    uint pixel = tid.y * halfW + tid.x;
+    uint2 fp = tid * 2u;  // representative full-res pixel of this half texel
 
-    float depth = depthTexture.read(tid).r;
+    float depth = depthTexture.read(fp).r;
     if (depth >= 1.0) {
         // Sky: empty reservoirs (viewDepth 0 marks them unusable for reuse).
         outReservoirs[pixel] = restirEmptySet(0.0);
         return;
     }
 
-    RestirSurface surf = restirReconstructSurface(tid, w, h, depth, camera);
-    float3 worldNormal = normalize(normalTexture.read(tid).xyz);
+    RestirSurface surf = restirReconstructSurface(fp, w, h, depth, camera);
+    float3 worldNormal = normalize(normalTexture.read(fp).xyz);
 
     uint rng = tid.x * 1973u + tid.y * 9277u + params.frameIndex * 26699u;
 
-    float2 uv = float2(tid) / float2(w, h);
+    float2 uv = float2(fp) / float2(w, h);
     const device Cluster& cluster = clusters[restirClusterIndex(uv, params.gridDims)];
     uint lightCount = min(cluster.lightCount, MAX_LIGHTS_PER_CLUSTER);
 
@@ -82,11 +93,12 @@ kernel void computeMain(
     // ---- Temporal reuse ----------------------------------------------------
     if (params.historyValid != 0u) {
         // Velocity is (currNDC - prevNDC) * 0.5 in y-up NDC; y-down UV negates y.
-        float2 velocity = velocityTexture.read(tid).rg;
-        float2 prevUV = (float2(tid) + 0.5) / float2(w, h) - float2(velocity.x, -velocity.y);
-        int2 prevPix = int2(floor(prevUV * float2(w, h)));
-        if (all(prevPix >= 0) && prevPix.x < int(w) && prevPix.y < int(h)) {
-            ShadowReservoirSet hist = history[uint(prevPix.y) * w + uint(prevPix.x)];
+        float2 velocity = velocityTexture.read(fp).rg;
+        float2 prevUV = (float2(fp) + 0.5) / float2(w, h) - float2(velocity.x, -velocity.y);
+        // Reproject on the half grid (uniform full-UV -> half-texel mapping).
+        int2 prevPix = int2(floor(prevUV * float2(halfW, halfH)));
+        if (all(prevPix >= 0) && prevPix.x < int(halfW) && prevPix.y < int(halfH)) {
+            ShadowReservoirSet hist = history[uint(prevPix.y) * halfW + uint(prevPix.x)];
             // Disocclusion guards: same-ish depth (sky history carries 0) AND
             // same-ish orientation — a corner pixel at compatible depth must
             // not inherit the other face's reservoir.

@@ -111,7 +111,7 @@ inline SceneResources buildScene(
     {
         auto sunLight = registry.create();
         registry.emplace<Vapor::NameComponent>(sunLight, Vapor::NameComponent{"Sun Light"});
-        auto& dl      = registry.emplace<DirectionalLightComponent>(sunLight);
+        auto& dl      = registry.emplace<Vapor::DirectionalLightComponent>(sunLight);
         dl.direction  = glm::normalize(glm::vec3(0.5f, -1.0f, 0.0f));
         dl.color      = glm::vec3(1.0f, 1.0f, 1.0f);
         dl.intensity  = 10.0f;
@@ -135,7 +135,7 @@ inline SceneResources buildScene(
         );
         tc.isDirty     = true;
 
-        auto& pl       = registry.emplace<PointLightComponent>(e);
+        auto& pl       = registry.emplace<Vapor::PointLightComponent>(e);
         pl.color       = glm::vec3(
             0.3f + 0.7f * rng.RandomFloat(),
             0.3f + 0.7f * rng.RandomFloat(),
@@ -179,7 +179,7 @@ inline SceneResources buildScene(
         // Beam is the transform's -Z; rotate it to point straight down.
         tc.rotation = glm::angleAxis(glm::radians(-90.0f), glm::vec3(1.0f, 0.0f, 0.0f));
         tc.isDirty  = true;
-        auto& sl      = registry.emplace<SpotLightComponent>(e);
+        auto& sl      = registry.emplace<Vapor::SpotLightComponent>(e);
         sl.color      = glm::vec3(1.0f, 0.95f, 0.8f);
         sl.intensity  = 40.0f;
         sl.radius     = 15.0f;

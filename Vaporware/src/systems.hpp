@@ -156,7 +156,7 @@ public:
 class LightMovementSystem {
 public:
     static void update(entt::registry& reg, float deltaTime) {
-        auto pointView = reg.view<PointLightComponent, Vapor::TransformComponent, LightMovementLogicComponent>();
+        auto pointView = reg.view<Vapor::PointLightComponent, Vapor::TransformComponent, LightMovementLogicComponent>();
         for (auto entity : pointView) {
             auto& transform = pointView.get<Vapor::TransformComponent>(entity);
             auto& logic     = pointView.get<LightMovementLogicComponent>(entity);
@@ -191,9 +191,9 @@ public:
             transform.isDirty  = true;
         }
 
-        auto dirView = reg.view<DirectionalLightComponent, DirectionalLightLogicComponent>();
+        auto dirView = reg.view<Vapor::DirectionalLightComponent, DirectionalLightLogicComponent>();
         for (auto entity : dirView) {
-            auto& light = dirView.get<DirectionalLightComponent>(entity);
+            auto& light = dirView.get<Vapor::DirectionalLightComponent>(entity);
             auto& logic = dirView.get<DirectionalLightLogicComponent>(entity);
 
             logic.timer += deltaTime * logic.speed;
@@ -208,9 +208,9 @@ class LightGatherSystem {
 public:
     static void update(entt::registry& reg, RenderScene* scene) {
         scene->pointLights.clear();
-        auto pointView = reg.view<PointLightComponent, Vapor::TransformComponent>();
+        auto pointView = reg.view<Vapor::PointLightComponent, Vapor::TransformComponent>();
         for (auto entity : pointView) {
-            auto& light     = pointView.get<PointLightComponent>(entity);
+            auto& light     = pointView.get<Vapor::PointLightComponent>(entity);
             auto& transform = pointView.get<Vapor::TransformComponent>(entity);
             scene->pointLights.push_back({
                 .position  = transform.position,
@@ -221,9 +221,9 @@ public:
         }
 
         scene->directionalLights.clear();
-        auto dirView = reg.view<DirectionalLightComponent>();
+        auto dirView = reg.view<Vapor::DirectionalLightComponent>();
         for (auto entity : dirView) {
-            auto& light = dirView.get<DirectionalLightComponent>(entity);
+            auto& light = dirView.get<Vapor::DirectionalLightComponent>(entity);
             scene->directionalLights.push_back({
                 .direction = light.direction,
                 .color     = light.color,
@@ -234,9 +234,9 @@ public:
         // Spot lights: position from the transform, beam along its forward
         // axis (rotation * -Z), degree angles converted to cosines for the GPU.
         scene->spotLights.clear();
-        auto spotView = reg.view<SpotLightComponent, Vapor::TransformComponent>();
+        auto spotView = reg.view<Vapor::SpotLightComponent, Vapor::TransformComponent>();
         for (auto entity : spotView) {
-            auto& light     = spotView.get<SpotLightComponent>(entity);
+            auto& light     = spotView.get<Vapor::SpotLightComponent>(entity);
             auto& transform = spotView.get<Vapor::TransformComponent>(entity);
             Vapor::SpotLight sl{};
             sl.position  = transform.position;
