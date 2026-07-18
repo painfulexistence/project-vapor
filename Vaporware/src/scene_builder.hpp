@@ -129,7 +129,8 @@ inline SceneResources buildScene(
         auto skyEntity = registry.create();
         registry.emplace<Vapor::NameComponent>(skyEntity, Vapor::NameComponent{"Sky"});
         registry.emplace<Vapor::SkyComponent>(skyEntity);
-        registry.emplace<Vapor::TimeOfDayComponent>(skyEntity);
+        auto& tod = registry.emplace<Vapor::TimeOfDayComponent>(skyEntity);
+        tod.latitudeDeg = 0.0f;  // sun arcs due east->overhead->west (no south tilt)
     }
 
     // Enough lights to exercise tiled light culling and to lift the ambient
