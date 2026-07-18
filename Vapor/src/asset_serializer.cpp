@@ -492,6 +492,7 @@ void AssetSerializer::serializeBlueprint(cereal::BinaryOutputArchive& archive, c
         archive(e.lights);
         archive(e.source);
         archive(e.prefab);
+        archive(e.componentsJson);
     }
 
     archive(blueprint.sources);
@@ -560,6 +561,7 @@ auto AssetSerializer::deserializeBlueprint(cereal::BinaryInputArchive& archive) 
         archive(e.lights);
         archive(e.source);
         archive(e.prefab);
+        archive(e.componentsJson);
         blueprint.entities.push_back(std::move(e));
     }
 

@@ -305,3 +305,69 @@ TEST_CASE("scene cook is written, replayed and invalidated by edits", "[scene_bl
     FileSystem::instance().removeSearchPath(dir.string());
     fs::remove_all(dir);
 }
+
+// ── Components blob + material schema ───────────────────────────────────────
+
+TEST_CASE("parse stores the components blob and material declarations", "[scene_blueprint][components]") {
+    SceneBlueprint bp = parseSceneBlueprint(R"({
+        "materials": [
+            { "name": "walnut",
+              "baseColorFactor": [1, 0.9, 0.8, 1],
+              "roughnessFactor": 0.7,
+              "albedoMap": "textures/walnut_albedo.png",
+              "normalMap": "textures/walnut_normal.png" }
+        ],
+        "entities": [
+            { "name": "Env",
+              "components": { "sun": {}, "timeOfDay": { "timeOfDay": 18.5, "paused": true } } }
+        ]
+    })");
+    REQUIRE(bp.ok);
+
+    REQUIRE(bp.materials.size() == 1);
+    CHECK(bp.materials[0]->name == "walnut");
+    CHECK(bp.materials[0]->roughnessFactor == Approx(0.7f));
+    CHECK(bp.materials[0]->baseColorFactor.g == Approx(0.9f));
+    // Texture paths become uri-only Image stubs (pixels load in loadSceneBlueprint).
+    REQUIRE(bp.materials[0]->albedoMap);
+    CHECK(bp.materials[0]->albedoMap->uri == "textures/walnut_albedo.png");
+    CHECK(bp.materials[0]->albedoMap->byteArray.empty());
+    CHECK(bp.images.size() == 2);
+
+    REQUIRE_FALSE(bp.entities[0].componentsJson.empty());
+}
+
+#ifdef VAPOR_HAS_BOOST_PFR
+TEST_CASE("instantiate applies registry components from the blob", "[scene_blueprint][components]") {
+    SceneBlueprint bp = parseSceneBlueprint(R"({
+        "name": "comp",
+        "entities": [
+            { "name": "Env",
+              "components": {
+                  "sun": {},
+                  "pointLight": { "color": [1, 0.5, 0.25], "intensity": 4, "radius": 9 },
+                  "timeOfDay": { "timeOfDay": 18.5, "paused": true },
+                  "noSuchComponent": {}
+              } }
+        ]
+    })");
+    REQUIRE(bp.ok);
+
+    entt::registry registry;
+    RenderScene scene("test");
+    std::vector<entt::entity> created;
+    instantiate(registry, scene, bp, entt::null, "", &created);
+    REQUIRE(created.size() == 2);
+    const entt::entity env = created[1];
+
+    CHECK(registry.all_of<SunComponent>(env));
+    REQUIRE(registry.all_of<PointLightComponent>(env));
+    CHECK(registry.get<PointLightComponent>(env).intensity == Approx(4.0f));
+    CHECK(registry.get<PointLightComponent>(env).radius == Approx(9.0f));
+    CHECK(registry.get<PointLightComponent>(env).color.b == Approx(0.25f));
+    REQUIRE(registry.all_of<TimeOfDayComponent>(env));
+    CHECK(registry.get<TimeOfDayComponent>(env).timeOfDay == Approx(18.5f));
+    CHECK(registry.get<TimeOfDayComponent>(env).paused);
+    // "noSuchComponent" only logs — the rest of the blob still applies.
+}
+#endif// VAPOR_HAS_BOOST_PFR

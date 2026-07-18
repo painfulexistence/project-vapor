@@ -58,7 +58,8 @@ public:
     // lights + sources). Used by the scene cook (.vscene): the cook header
     // (magic/version/source-hash) is owned by scene_blueprint.cpp; these
     // (de)serialize just the blueprint body on an open archive.
-    static constexpr uint32_t BLUEPRINT_FORMAT_VERSION = 1;
+    // v2: EntityBlueprint carries a per-entity "components" JSON blob.
+    static constexpr uint32_t BLUEPRINT_FORMAT_VERSION = 2;
     static void serializeBlueprint(cereal::BinaryOutputArchive& archive, const Vapor::SceneBlueprint& blueprint);
     // Returns ok == false on a version mismatch.
     static Vapor::SceneBlueprint deserializeBlueprint(cereal::BinaryInputArchive& archive);

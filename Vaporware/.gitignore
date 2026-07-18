@@ -1,1 +1,3 @@
 assets/*
+# Scene JSONs are authored source, not binary assets — always versioned.
+!assets/scenes

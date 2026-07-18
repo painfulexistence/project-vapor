@@ -1,0 +1,9 @@
+{
+  "name": "main",
+  "entities": [
+    {
+      "name": "Sponza",
+      "source": "models/Sponza/Sponza.gltf"
+    }
+  ]
+}

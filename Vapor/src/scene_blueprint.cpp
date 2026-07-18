@@ -71,6 +71,34 @@ static LightBlueprint parseLight(const json& j) {
 
 // ── Parse (pure, no I/O) ─────────────────────────────────────────────────────
 
+// ── Component appliers: engine defaults ──────────────────────────────────────
+// Every data-only engine component registers here; gameplay components are the
+// app's to register (same API) before its first instantiate(). Physics
+// components are intentionally absent for now — a RigidbodyComponent needs a
+// live Jolt body, which is a hand-written applier with a Physics3D in hand.
+
+BlueprintComponents& BlueprintComponents::instance() {
+    static BlueprintComponents registry = [] {
+        BlueprintComponents r;
+        r.registerComponent<SunComponent>("sun");
+        r.registerComponent<PointLightComponent>("pointLight");
+        r.registerComponent<DirectionalLightComponent>("directionalLight");
+        r.registerComponent<SpotLightComponent>("spotLight");
+        r.registerComponent<RectLightComponent>("rectLight");
+        r.registerComponent<SkyComponent>("sky");
+        r.registerComponent<TimeOfDayComponent>("timeOfDay");
+        r.registerComponent<VirtualCameraComponent>("virtualCamera");
+        r.registerComponent<FlyCameraComponent>("flyCamera");
+        r.registerComponent<FollowCameraComponent>("followCamera");
+        r.registerComponent<WindFieldComponent>("windField");
+        r.registerComponent<ParticleEmitterComponent>("particleEmitter");
+        r.registerComponent<ParticleAttractorComponent>("particleAttractor");
+        r.registerComponent<ParticleRendererComponent>("particleRenderer");
+        return r;
+    }();
+    return registry;
+}
+
 static void parseEntityRec(const json& j, int parentIndex, SceneBlueprint& out) {
     EntityBlueprint e;
     e.name = j.value("name", "");
@@ -84,12 +112,49 @@ static void parseEntityRec(const json& j, int parentIndex, SceneBlueprint& out) 
         out.lights.push_back(parseLight(j.at("light")));
         e.lights.push_back(static_cast<int>(out.lights.size()) - 1);
     }
+    if (j.contains("components") && j.at("components").is_object()) e.componentsJson = j.at("components").dump();
     const int selfIndex = static_cast<int>(out.entities.size());
     out.entities.push_back(std::move(e));
     if (j.contains("children")) {
         for (const auto& c : j.at("children"))
             parseEntityRec(c, selfIndex, out);
     }
+}
+
+// One declared material. Texture fields hold the asset path; parse creates a
+// uri-only Image stub per unique path (pure — no I/O), and loadSceneBlueprint
+// fills in the pixels afterwards.
+static void parseMaterial(const json& j, SceneBlueprint& out) {
+    auto material = std::make_shared<Material>();
+    material->name = j.value("name", "");
+    if (j.contains("baseColorFactor")) {
+        const auto& a = j.at("baseColorFactor");
+        if (a.is_array() && a.size() >= 4)
+            material->baseColorFactor = { a[0].get<float>(), a[1].get<float>(), a[2].get<float>(), a[3].get<float>() };
+    }
+    material->metallicFactor = j.value("metallicFactor", material->metallicFactor);
+    material->roughnessFactor = j.value("roughnessFactor", material->roughnessFactor);
+    if (j.contains("emissiveFactor")) {
+        const auto& a = j.at("emissiveFactor");
+        if (a.is_array() && a.size() >= 3)
+            material->emissiveFactor = { a[0].get<float>(), a[1].get<float>(), a[2].get<float>() };
+    }
+    const auto stubFor = [&](const char* key) -> std::shared_ptr<Image> {
+        const std::string path = j.value(key, "");
+        if (path.empty()) return nullptr;
+        for (const auto& img : out.images)// share one stub per unique path
+            if (img && img->uri == path && img->byteArray.empty()) return img;
+        auto stub = std::make_shared<Image>(Image{ .uri = path });
+        out.images.push_back(stub);
+        return stub;
+    };
+    material->albedoMap = stubFor("albedoMap");
+    material->normalMap = stubFor("normalMap");
+    material->metallicMap = stubFor("metallicMap");
+    material->roughnessMap = stubFor("roughnessMap");
+    material->occlusionMap = stubFor("occlusionMap");
+    material->emissiveMap = stubFor("emissiveMap");
+    out.materials.push_back(std::move(material));
 }
 
 SceneBlueprint parseSceneBlueprint(const std::string& jsonText, const std::string& nameHint) {
@@ -100,6 +165,10 @@ SceneBlueprint parseSceneBlueprint(const std::string& jsonText, const std::strin
         return bp;
     }
     bp.name = root.value("name", nameHint);
+    if (root.contains("materials")) {
+        for (const auto& m : root.at("materials"))
+            parseMaterial(m, bp);
+    }
     if (root.contains("entities")) {
         for (const auto& e : root.at("entities"))
             parseEntityRec(e, -1, bp);
@@ -270,6 +339,29 @@ SceneBlueprint loadSceneBlueprint(const std::string& path) {
         }
     }
 
+    // Load the declared materials' textures into their uri-stub Images. The
+    // paths join bp.sources so the cook hash covers texture edits too. A path
+    // that fails to load logs and clears the material reference (renderer
+    // falls back to defaults) rather than shipping an empty image.
+    for (auto& img : bp.images) {
+        if (!img || !img->byteArray.empty() || img->uri.empty()) continue;
+        bp.sources.push_back(img->uri);
+        try {
+            if (auto loaded = AssetManager::loadImage(img->uri)) {
+                *img = *loaded;
+                continue;
+            }
+        } catch (const std::exception& e) {
+            fmt::print(stderr, "loadSceneBlueprint: texture '{}' failed to load ({})\n", img->uri, e.what());
+        }
+        for (auto& mat : bp.materials) {
+            if (!mat) continue;
+            for (auto* slot : { &mat->albedoMap, &mat->normalMap, &mat->metallicMap, &mat->roughnessMap,
+                                &mat->occlusionMap, &mat->emissiveMap })
+                if (*slot == img) slot->reset();
+        }
+    }
+
     // Write the cook so the next load skips parsing and model decode entirely.
     writeCook(cookPath, bp, computeSourceHash(text, bp.sources));
     return bp;
@@ -414,6 +506,19 @@ entt::entity instantiate(
                     }
                 );
                 break;
+            }
+        }
+
+        // Generic components: each key resolves through the applier registry
+        // (engine data components are pre-registered; the app adds its own).
+        if (!e.componentsJson.empty()) {
+            const json components = json::parse(e.componentsJson, /*cb=*/nullptr, /*allow_exceptions=*/false);
+            if (components.is_object()) {
+                for (const auto& [key, value] : components.items()) {
+                    if (!BlueprintComponents::instance().apply(key, registry, ent, value))
+                        fmt::print(stderr, "instantiate: no applier registered for component '{}' (entity '{}')\n",
+                                   key, e.name);
+                }
             }
         }
 
