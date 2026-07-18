@@ -26,7 +26,7 @@ fragment float4 fragmentMain(VOut in [[stage_in]],
     float phi   = (in.uv.x * 2.0 - 1.0) * PI;
     float theta = in.uv.y * PI;
     float3 dir = float3(sin(theta) * sin(phi), cos(theta), -sin(theta) * cos(phi));
-    // Sample mip 0 explicitly (see IblEquirectPreview.frag): auto-mip picks a
+    // Sample mip 0 explicitly (see IBLEquirectPreview.frag): auto-mip picks a
     // high/wrong mip for the fast azimuthal sweep and the sky repeats/breaks.
     return float4(envCubemap.sample(cubeSampler, dir, level(0)).rgb, 1.0);
 }

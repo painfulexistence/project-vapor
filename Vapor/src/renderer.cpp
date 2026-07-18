@@ -5406,8 +5406,8 @@ void Renderer::createRenderPipeline() {
             irradiancePipeline        = makeIblVkPipeline("shaders/IBLCubeFace.vert.spv", "shaders/IBLIrradiance.frag.spv", irradianceVS, irradianceFS);
             prefilterPipeline         = makeIblVkPipeline("shaders/IBLCubeFace.vert.spv", "shaders/IBLPrefilter.frag.spv",  prefilterVS, prefilterFS);
             brdfLUTPipeline           = makeIblVkPipeline("shaders/IBLBRDF.vert.spv",     "shaders/IBLBRDF.frag.spv",        brdfVS, brdfFS);
-            // IBL debug: cubemap -> equirect 2D RT (FullScreen.vert + IblEquirectPreview.frag).
-            iblPreviewPipeline        = makeIblVkPipeline("shaders/FullScreen.vert.spv", "shaders/IblEquirectPreview.frag.spv", iblPreviewVertexShader, iblPreviewFragmentShader);
+            // IBL debug: cubemap -> equirect 2D RT (FullScreen.vert + IBLEquirectPreview.frag).
+            iblPreviewPipeline        = makeIblVkPipeline("shaders/FullScreen.vert.spv", "shaders/IBLEquirectPreview.frag.spv", iblPreviewVertexShader, iblPreviewFragmentShader);
 
             // Volumetric clouds: quarter-res raymarch, temporal resolve, and
             // full-res composite — all fullscreen RGBA16F passes.

@@ -19,6 +19,19 @@ jobs:
         with:
           submodules: false
 
+      # Two tracked paths differing only by case checkout onto the SAME file on
+      # macOS/Windows, leaving one entry permanently "modified" (restore/stash
+      # can't clear it). This happened once (IblCubeface.vert vs
+      # IBLCubeFace.vert) — fail fast if it ever happens again.
+      - name: Check for case-colliding paths
+        run: |
+          dups=$(git ls-files | tr 'A-Z' 'a-z' | sort | uniq -d)
+          if [ -n "$dups" ]; then
+            echo "Tracked paths differing only by case (breaks case-insensitive filesystems):"
+            echo "$dups"
+            exit 1
+          fi
+
       - name: Initialize vcpkg submodule
         run: git submodule update --init --depth 1 vcpkg
 
