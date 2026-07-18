@@ -3259,8 +3259,8 @@ auto Renderer_Metal::createResources() -> void {
     if (m_supportsRaytracing) ssaoPipeline = createComputePipeline("shaders/3d_ssao.metal");
     if (m_supportsRaytracing) aoTemporalPipeline = createComputePipeline("shaders/3d_ao_temporal.metal");
     if (m_supportsRaytracing) aoDenoisePipeline = createComputePipeline("shaders/3d_ao_denoise.metal");
-    if (m_supportsRaytracing) stochasticPointShadowPipeline = createComputePipeline("shaders/3d_stochastic_point_shadow.metal");
-    pointShadowTemporalPipeline = createComputePipeline("shaders/3d_point_shadow_temporal.metal");
+    if (m_supportsRaytracing) stochasticPointShadowPipeline = createComputePipeline("shaders/3d_stochastic_shadow.metal");
+    pointShadowTemporalPipeline = createComputePipeline("shaders/3d_stochastic_shadow_temporal.metal");
     pssmResolvePipeline = createComputePipeline("shaders/3d_pssm_resolve.metal");
 
     // PSSM depth-only pipeline
