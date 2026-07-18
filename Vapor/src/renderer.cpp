@@ -6052,9 +6052,14 @@ std::unique_ptr<IRenderer> Vapor::createRenderer(GraphicsBackend backend, SDL_Wi
             void* queue = rhi->getBackendQueue();
 
             if (instance && physicalDevice && device && queue) {
-                // Get swapchain image count from RHI
-                // For now, use a reasonable default (2-3 images)
-                Uint32 imageCount = 2;
+                // ImGui cycles ImageCount sets of vertex/index buffers and
+                // destroys a slot's buffer when it needs to grow. That is only
+                // safe if the slot's previous frame has retired — so the count
+                // must be at least the engine's frames-in-flight. The old
+                // hardcoded 2 (vs 3 in flight) had ImGui resizing buffers a
+                // still-pending frame was drawing from: validation errors
+                // (VUID-vkDestroyBuffer-00922) and UI flicker under churn.
+                Uint32 imageCount = rhi->getMaxFramesInFlight();
 
                 // Dynamic rendering: ImGui bakes the attachment format into
                 // its pipeline, so it must match the swapchain format.
