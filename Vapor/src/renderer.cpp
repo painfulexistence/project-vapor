@@ -2785,8 +2785,13 @@ bool Renderer::restirShadowPass() {
     p.depthTolerance = 0.1f;
     p.normalTolerance = 0.9f;
 
-    const std::string restirLabel = renderGraph.activePassName() + " (ReSTIR)";
-    rhi->beginComputePass(restirLabel.c_str());
+    // Three separately-timed compute passes so the profiler shows where the
+    // cost actually goes — candidate-gen ALU vs resolve+rays vs the full-res
+    // upsample. They're dependent (each reads the previous), so Metal already
+    // serializes them via hazard tracking; separate encoders cost nothing over
+    // the single-encoder version and buy the per-kernel breakdown.
+    const std::string base = renderGraph.activePassName() + " (ReSTIR ";
+    rhi->beginComputePass((base + "candidates)").c_str());
     // Pass 1 (half grid): fresh candidates + temporal reservoir merge.
     rhi->bindComputePipeline(restirShadowTemporalPipeline);
     rhi->setComputeTexture(0, depthStencilRT);
@@ -2801,7 +2806,9 @@ bool Renderer::restirShadowPass() {
     rhi->setComputeBuffer(6, restirReservoirScratch);
     rhi->setComputeBytes(&p, sizeof(p), 7);
     rhi->dispatch((halfW + 7) / 8, (halfH + 7) / 8, 1);
+    rhi->endComputePass();
 
+    rhi->beginComputePass((base + "resolve+rays)").c_str());
     // Pass 2 (half grid): spatial merge + winner visibility rays. Reads the
     // scratch reservoirs, writes the half-res raw target + the history buffer
     // consumed next frame.
@@ -2819,7 +2826,9 @@ bool Renderer::restirShadowPass() {
     rhi->setAccelerationStructure(7, sceneTLAS);
     rhi->setComputeBytes(&p, sizeof(p), 8);
     rhi->dispatch((halfW + 7) / 8, (halfH + 7) / 8, 1);
+    rhi->endComputePass();
 
+    rhi->beginComputePass((base + "upsample)").c_str());
     // Pass 3 (full grid): joint bilateral upsample into the raw target the
     // temporal accumulator reads.
     rhi->bindComputePipeline(pointShadowUpsamplePipeline);
