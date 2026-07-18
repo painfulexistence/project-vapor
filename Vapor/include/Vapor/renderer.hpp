@@ -309,6 +309,10 @@ public:
     void requestIBLUpdate() override { iblNeedsUpdate = true; }
     void setParticleDrawList(const std::vector<ParticleDrawPacket>& draws) override;
     void setVoxelVolumes(const std::vector<Vapor::VoxelVolumeDraw>& volumes) override;
+    // MicroVoxel tunables (the same state the ImGui panel edits) — exposed so
+    // demo/gameplay hotkeys can flip debug views and toggles directly.
+    MicroVoxelRenderData& getMicroVoxelSettings() { return microVoxelSettings; }
+    void setMicroVoxelEnabled(bool enabled) { microVoxelEnabled = enabled; }
 
     // ========================================================================
     // Texture Creation (for sprites/batch rendering)

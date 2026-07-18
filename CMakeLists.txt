@@ -11,11 +11,12 @@ list(APPEND CMAKE_MODULE_PATH "${CMAKE_CURRENT_SOURCE_DIR}/cmake/helpers")
 
 add_subdirectory(Vapor)
 
-# Vaporware (demo app), tests, and benchmarks are only built when Vapor is
-# the root project. Downstream games that add_subdirectory(project-vapor)
-# skip these automatically.
+# Vaporware (demo app), examples, tests, and benchmarks are only built when
+# Vapor is the root project. Downstream games that
+# add_subdirectory(project-vapor) skip these automatically.
 if(PROJECT_IS_TOP_LEVEL)
     add_subdirectory(Vaporware)
+    add_subdirectory(Examples)
     enable_testing()
     add_subdirectory(tests)
     add_subdirectory(benchmarks)
