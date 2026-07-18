@@ -84,7 +84,7 @@ static void setupCustomDrawers(Vapor::SceneInspector& inspector) {
                 const char* types[] = { "Atmosphere", "HDRI", "Gradient" };
                 int t = static_cast<int>(c->type);
                 if (ImGui::Combo("type", &t, types, 3)) {
-                    c->type = static_cast<Vapor::SkyType>(t);
+                    c->type = static_cast<SkyType>(t);   // SkyType is global (render_data.hpp)
                     c->dirty = true;
                 }
                 if (ImGui::DragFloat("exposure", &c->exposure, 0.01f, 0.01f, 10.0f)) c->dirty = true;
