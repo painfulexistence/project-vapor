@@ -236,6 +236,12 @@ void Renderer::initialize(std::unique_ptr<RHI> rhiPtr, GraphicsBackend backendTy
         mvDesc.memoryUsage = MemoryUsage::CPUtoGPU;
         createFrameSlottedBuffer(microVoxelDataBuffer, mvDesc);
 
+        BufferDesc mvGiDesc;
+        mvGiDesc.size = sizeof(MicroVoxelGIRenderData);
+        mvGiDesc.usage = BufferUsage::Uniform;
+        mvGiDesc.memoryUsage = MemoryUsage::CPUtoGPU;
+        createFrameSlottedBuffer(microVoxelGIParamsBuffer, mvGiDesc);
+
         // Procedural 64^3 test density grid (radial-falloff smoke puff shaped
         // by trilinear value noise) so the volume raymarch pass has something
         // to draw before real EmberGen exports arrive (import is a future PR).
@@ -1146,6 +1152,19 @@ void Renderer::setupDefaultRenderGraph() {
     // treats voxels as ordinary scene geometry.
     renderGraph.addPass("MicroVoxel",
         [](Renderer& r) { r.microVoxelPass(); });
+
+    // Traced voxel GI: half-res 1-bounce trace + temporal accumulation over
+    // the voxel G-buffer (no primary re-trace — the original GL version
+    // re-marched every GI pixel), a-trous denoise, then a fullscreen
+    // composite adding albedo * gi * ao to voxel pixels via the
+    // colorRT/tempColorRT swap. The trace/denoise stages need compute; the
+    // composite no-ops with them.
+    renderGraph.addPass("MicroVoxelGI",
+        [](Renderer& r) { r.microVoxelGIPass(); }, PassFlags::RequiresCompute);
+    renderGraph.addPass("MicroVoxelGIDenoise",
+        [](Renderer& r) { r.microVoxelGIDenoisePass(); }, PassFlags::RequiresCompute);
+    renderGraph.addPass("MicroVoxelGIComposite",
+        [](Renderer& r) { r.microVoxelGICompositePass(); });
 
     // Sky/atmosphere fills the background (depth == far) before bloom, so the
     // bright sky and sun disk feed the bloom pyramid.
@@ -4037,15 +4056,28 @@ void Renderer::updateVoxelVolumeResources() {
 // linear HDR into colorRT and true hit depth into depthStencilRT (misses
 // discard). See MicroVoxel.frag / 3d_microvoxel.metal for the traversal.
 void Renderer::microVoxelPass() {
+    voxelVolumesDrawn = 0;
+    voxelGIActiveThisFrame = false;
     if (!microVoxelEnabled || !microVoxelPipeline.isValid() || !microVoxelDataBuffer.isValid() ||
-        !colorRT.isValid() || !depthStencilRT.isValid()) {
+        !colorRT.isValid() || !depthStencilRT.isValid() || !voxelHitTRT.isValid()) {
+        voxelGIHistoryValid = false;
         return;
     }
     updateVoxelVolumeResources();
-    if (voxelVolumes.empty()) return;
+    if (voxelVolumes.empty()) {
+        voxelGIHistoryValid = false;
+        return;
+    }
+
+    // Traced GI runs when the compute pipelines/targets exist and the panel
+    // strength is nonzero; the primary shader then drops its flat ambient
+    // (params.w > 0) and the composite adds albedo * gi * ao instead.
+    voxelGIActiveThisFrame = capabilities.computeShaders && microVoxelGIStrength > 0.0f &&
+        microVoxelGIPipeline.isValid() && microVoxelGICompositePipeline.isValid() &&
+        microVoxelGIParamsBuffer.isValid() && voxelGIAccumRT[0].isValid() && tempColorRT.isValid();
+    if (!voxelGIActiveThisFrame) voxelGIHistoryValid = false;
 
     std::array<MicroVoxelRenderData, MAX_VOXEL_VOLUMES> data {};
-    std::array<const VoxelVolumeGpu*, MAX_VOXEL_VOLUMES> drawn {};
     Uint32 written = 0;
     const glm::mat4 viewProj = currentCamera.proj * currentCamera.view;
     glm::vec3 sunDir = atmosphereData.sunDirection;
@@ -4061,10 +4093,16 @@ void Renderer::microVoxelPass() {
         d.gridDim = glm::vec4(glm::vec3(gpu.world->dim()), microVoxelSettings.gridDim.w);
         d.sunDirection = glm::vec4(sunDir, microVoxelSettings.sunDirection.w);
         d.sunColor = glm::vec4(atmosphereData.sunColor, atmosphereData.sunIntensity);
-        drawn[written] = &gpu;
+        d.params.w = voxelGIActiveThisFrame ? microVoxelGIStrength : 0.0f;
+        d.extra0.x = static_cast<float>(written);
+        voxelVolumesDrawnRefs[written] = &gpu;
         written++;
     }
-    if (written == 0) return;
+    if (written == 0) {
+        voxelGIActiveThisFrame = false;
+        return;
+    }
+    voxelVolumesDrawn = written;
     rhi->updateBuffer(microVoxelDataBuffer, data.data(), 0,
                       static_cast<size_t>(written) * sizeof(MicroVoxelRenderData));
 
@@ -4072,6 +4110,14 @@ void Renderer::microVoxelPass() {
     rp.name = "MicroVoxel";
     rp.colorAttachments.push_back(colorRT);
     rp.loadColor.push_back(true);   // composite over the rendered scene
+    // Voxel G-buffer MRTs, cleared each frame (miss pixels stay hitT = 0).
+    rp.colorAttachments.push_back(voxelHitTRT);
+    rp.colorAttachments.push_back(voxelAlbedoAORT);
+    rp.colorAttachments.push_back(voxelNormalMatRT);
+    rp.clearColors = { glm::vec4(0.0f), glm::vec4(0.0f), glm::vec4(0.0f), glm::vec4(0.0f) };
+    rp.loadColor.push_back(false);
+    rp.loadColor.push_back(false);
+    rp.loadColor.push_back(false);
     rp.depthAttachment = depthStencilRT;
     rp.loadDepth = true;            // test against + write voxel hit depth
     rhi->beginRenderPass(rp);
@@ -4080,12 +4126,115 @@ void Renderer::microVoxelPass() {
         const size_t offset = static_cast<size_t>(i) * sizeof(MicroVoxelRenderData);
         rhi->setVertexBuffer(0, microVoxelDataBuffer, offset, sizeof(MicroVoxelRenderData));
         rhi->setFragmentBuffer(0, microVoxelDataBuffer, offset, sizeof(MicroVoxelRenderData));
-        rhi->setFragmentBuffer(1, drawn[i]->pageTable);
-        rhi->setFragmentBuffer(2, drawn[i]->brickPool);
-        rhi->setFragmentBuffer(3, drawn[i]->palette);
+        rhi->setFragmentBuffer(1, voxelVolumesDrawnRefs[i]->pageTable);
+        rhi->setFragmentBuffer(2, voxelVolumesDrawnRefs[i]->brickPool);
+        rhi->setFragmentBuffer(3, voxelVolumesDrawnRefs[i]->palette);
         rhi->draw(36, 1, 0, 0);
     }
     rhi->endRenderPass();
+}
+
+// Half-res 1-bounce trace + temporal accumulation, one dispatch per volume
+// (each shades only its own G-buffer pixels). History reads the previous
+// frame's RAW accumulation; the filtered result never feeds back.
+void Renderer::microVoxelGIPass() {
+    if (!voxelGIActiveThisFrame || voxelVolumesDrawn == 0) return;
+
+    const glm::mat4 viewProj = currentCamera.proj * currentCamera.view;
+    MicroVoxelGIRenderData gp {};
+    gp.invViewProj = glm::inverse(viewProj);
+    gp.prevViewProj = voxelGIHistoryValid ? voxelGIPrevViewProj : viewProj;
+    gp.cameraPosition = glm::vec4(currentCamera.position, static_cast<float>(voxelGIFrameIndex));
+    gp.prevCameraPosition = glm::vec4(voxelGIHistoryValid ? voxelGIPrevCameraPos : currentCamera.position,
+                                      voxelGIHistoryValid ? microVoxelGIBlend : 0.0f);
+    gp.params = glm::vec4(microVoxelGIStrength, microVoxelGISplitX,
+                          static_cast<float>(voxelGIWidth), static_cast<float>(voxelGIHeight));
+    const bool giDebugView = static_cast<int>(microVoxelSettings.params.y) == 5;
+    gp.sigmas = glm::vec4(microVoxelGISigmas, giDebugView ? 1.0f : 0.0f);
+    rhi->updateBuffer(microVoxelGIParamsBuffer, &gp, 0, sizeof(gp));
+
+    const int cur = voxelGICur;
+    const int prev = 1 - cur;
+    rhi->beginComputePass("MicroVoxelGI");
+    rhi->bindComputePipeline(microVoxelGIPipeline);
+    for (Uint32 i = 0; i < voxelVolumesDrawn; i++) {
+        const size_t offset = static_cast<size_t>(i) * sizeof(MicroVoxelRenderData);
+        rhi->setComputeBuffer(0, microVoxelDataBuffer, offset, sizeof(MicroVoxelRenderData));
+        rhi->setComputeBuffer(1, microVoxelGIParamsBuffer, 0, sizeof(MicroVoxelGIRenderData));
+        rhi->setComputeBuffer(2, voxelVolumesDrawnRefs[i]->pageTable);
+        rhi->setComputeBuffer(3, voxelVolumesDrawnRefs[i]->brickPool);
+        rhi->setComputeBuffer(4, voxelVolumesDrawnRefs[i]->palette);
+        rhi->setComputeTexture(0, voxelGIAccumRT[cur]);
+        rhi->setComputeSampledTexture(1, voxelHitTRT, shadowSampler);
+        rhi->setComputeSampledTexture(2, voxelNormalMatRT, shadowSampler);
+        rhi->setComputeSampledTexture(3, voxelGIAccumRT[prev], clampSampler);
+        rhi->dispatch((voxelGIWidth + 7) / 8, (voxelGIHeight + 7) / 8, 1);
+    }
+    rhi->endComputePass();
+    rhi->computeBarrier();
+}
+
+// A-trous iterations with increasing step size, ping-ponging the two scratch
+// targets. Iteration 0 reads the fresh accumulation.
+void Renderer::microVoxelGIDenoisePass() {
+    if (!voxelGIActiveThisFrame || voxelVolumesDrawn == 0) return;
+    if (!microVoxelAtrousPipeline.isValid() || microVoxelGIAtrousIterations <= 0) return;
+
+    for (int it = 0; it < microVoxelGIAtrousIterations; it++) {
+        TextureHandle input = (it == 0) ? voxelGIAccumRT[voxelGICur] : voxelGIAtrousRT[(it - 1) & 1];
+        TextureHandle output = voxelGIAtrousRT[it & 1];
+        struct {
+            glm::ivec4 stepAndSize;
+            glm::vec4 sigmas;
+        } push;
+        push.stepAndSize = glm::ivec4(1 << it, voxelGIWidth, voxelGIHeight, 0);
+        push.sigmas = glm::vec4(microVoxelGISigmas, 0.0f);
+
+        rhi->beginComputePass("MicroVoxelGIDenoise");
+        rhi->bindComputePipeline(microVoxelAtrousPipeline);
+        rhi->setComputeBytes(&push, sizeof(push), 0);
+        rhi->setComputeTexture(0, output);
+        rhi->setComputeSampledTexture(1, input, shadowSampler);
+        rhi->setComputeSampledTexture(2, voxelNormalMatRT, shadowSampler);
+        rhi->dispatch((voxelGIWidth + 7) / 8, (voxelGIHeight + 7) / 8, 1);
+        rhi->endComputePass();
+        rhi->computeBarrier();
+    }
+}
+
+// Fullscreen composite: scene color + albedo * gi * ao on voxel pixels, via
+// the colorRT/tempColorRT swap (fog-pass pattern). Also rolls the GI frame
+// state forward (ping-pong flip, previous view-proj/camera).
+void Renderer::microVoxelGICompositePass() {
+    if (!voxelGIActiveThisFrame || voxelVolumesDrawn == 0) return;
+
+    TextureHandle denoised = (microVoxelGIAtrousIterations > 0 && microVoxelAtrousPipeline.isValid())
+        ? voxelGIAtrousRT[(microVoxelGIAtrousIterations - 1) & 1]
+        : voxelGIAccumRT[voxelGICur];
+
+    RenderPassDesc rp;
+    rp.name = "MicroVoxelGIComposite";
+    rp.colorAttachments.push_back(tempColorRT);
+    rp.loadColor.push_back(false);  // every pixel written
+    rhi->beginRenderPass(rp);
+    rhi->bindPipeline(microVoxelGICompositePipeline);
+    rhi->setTexture(0, 0, colorRT, clampSampler);
+    rhi->setTexture(0, 1, voxelHitTRT, clampSampler);
+    rhi->setTexture(0, 2, voxelAlbedoAORT, clampSampler);
+    rhi->setTexture(0, 3, denoised, clampSampler);
+    rhi->setTexture(0, 4, voxelGIAccumRT[voxelGICur], clampSampler);
+    rhi->setFragmentBuffer(0, microVoxelGIParamsBuffer, 0, sizeof(MicroVoxelGIRenderData));
+    rhi->draw(3, 1, 0, 0);
+    rhi->endRenderPass();
+    std::swap(colorRT, tempColorRT);
+
+    // Roll temporal state forward: this frame's accumulation becomes next
+    // frame's history.
+    voxelGIPrevViewProj = currentCamera.proj * currentCamera.view;
+    voxelGIPrevCameraPos = currentCamera.position;
+    voxelGIFrameIndex++;
+    voxelGICur = 1 - voxelGICur;
+    voxelGIHistoryValid = true;
 }
 
 // Volume Rendering API — the hook a future EmberGen import PR calls with
@@ -4990,6 +5139,10 @@ void Renderer::destroyRenderTargets() {
     kill(lightScatteringRT);
     kill(velocityRT);
     kill(cloudRT); kill(cloudHistoryRT); kill(cloudResolvedRT);
+    kill(voxelHitTRT); kill(voxelAlbedoAORT); kill(voxelNormalMatRT);
+    kill(voxelGIAccumRT[0]); kill(voxelGIAccumRT[1]);
+    kill(voxelGIAtrousRT[0]); kill(voxelGIAtrousRT[1]);
+    voxelGIHistoryValid = false;
     kill(swapchainDepthBuffer);
 
     // History/reprojection state is stale at the new resolution.
@@ -5248,6 +5401,38 @@ void Renderer::createRenderTargets() {
         cloudRT = rhi->createTexture(desc);
         cloudHistoryRT = rhi->createTexture(desc);
         cloudResolvedRT = rhi->createTexture(desc);
+    }
+
+    // MicroVoxel voxel G-buffer (full res) + traced-GI targets (half res).
+    // The GI history restarts from scratch after any (re)create — the
+    // history-valid flag forces a fresh-sample frame instead of reading
+    // uninitialized texels.
+    {
+        TextureDesc desc;
+        desc.width = width;
+        desc.height = height;
+        desc.usage = TextureUsage::RenderTarget | TextureUsage::Sampled;
+        desc.sampleCount = 1;
+        desc.format = PixelFormat::R32_FLOAT;
+        voxelHitTRT = rhi->createTexture(desc);
+        desc.format = PixelFormat::RGBA8_UNORM;
+        voxelAlbedoAORT = rhi->createTexture(desc);
+        voxelNormalMatRT = rhi->createTexture(desc);
+
+        voxelGIWidth = std::max(1u, width / 2);
+        voxelGIHeight = std::max(1u, height / 2);
+        TextureDesc gid;
+        gid.width = voxelGIWidth;
+        gid.height = voxelGIHeight;
+        gid.format = PixelFormat::RGBA16_FLOAT;
+        gid.usage = TextureUsage::Storage | TextureUsage::Sampled;
+        gid.sampleCount = 1;
+        for (int i = 0; i < 2; i++) {
+            voxelGIAccumRT[i] = rhi->createTexture(gid);
+            voxelGIAtrousRT[i] = rhi->createTexture(gid);
+        }
+        voxelGIHistoryValid = false;
+        voxelGICur = 0;
     }
 
     // Create default depth buffer for swapchain rendering (when not using render targets)
@@ -5595,9 +5780,35 @@ void Renderer::createRenderPipeline() {
                     d.sampleCount = 1;
                     d.hasDepthAttachment = true;
                     d.depthAttachmentFormat = PixelFormat::Depth32Float;
-                    d.colorAttachmentFormats = { PixelFormat::RGBA16_FLOAT };
+                    // Color + the voxel G-buffer MRTs (hitT, albedo+AO,
+                    // normal/material/volume) the GI passes consume.
+                    d.colorAttachmentFormats = { PixelFormat::RGBA16_FLOAT, PixelFormat::R32_FLOAT,
+                                                 PixelFormat::RGBA8_UNORM, PixelFormat::RGBA8_UNORM };
                     microVoxelPipeline = rhi->createPipeline(d);
                 }
+
+                // Traced GI + a-trous denoise (compute) and the fullscreen
+                // composite that folds albedo * gi * ao into the scene.
+                auto makeVkCompute = [&](const char* spv, ShaderHandle& sh) -> ComputePipelineHandle {
+                    std::string code = readFile(spv);
+                    if (code.empty()) return {};
+                    ShaderDesc d2;
+                    d2.stage = ShaderStage::Compute;
+                    d2.code = code.data();
+                    d2.codeSize = code.size();
+                    d2.entryPoint = "main";
+                    sh = rhi->createShader(d2);
+                    ComputePipelineDesc cd;
+                    cd.computeShader = sh;
+                    cd.threadGroupSizeX = 8;
+                    cd.threadGroupSizeY = 8;
+                    return rhi->createComputePipeline(cd);
+                };
+                microVoxelGIPipeline = makeVkCompute("shaders/MicroVoxelGI.comp.spv", microVoxelGIShader);
+                microVoxelAtrousPipeline =
+                    makeVkCompute("shaders/MicroVoxelAtrous.comp.spv", microVoxelAtrousShader);
+                microVoxelGICompositePipeline = makeFullscreenFragPipeline(
+                    "shaders/MicroVoxelGIComposite.frag.spv", microVoxelGICompositeFS, BlendMode::Opaque);
             }
 
             // Camera-motion velocity (motion vectors) from depth.
@@ -6033,8 +6244,37 @@ void Renderer::createRenderPipeline() {
                 d.sampleCount = 1;
                 d.hasDepthAttachment = true;
                 d.depthAttachmentFormat = PixelFormat::Depth32Float;
-                d.colorAttachmentFormats = { PixelFormat::RGBA16_FLOAT };
+                // Color + the voxel G-buffer MRTs (hitT, albedo+AO,
+                // normal/material/volume) the GI passes consume.
+                d.colorAttachmentFormats = { PixelFormat::RGBA16_FLOAT, PixelFormat::R32_FLOAT,
+                                             PixelFormat::RGBA8_UNORM, PixelFormat::RGBA8_UNORM };
                 microVoxelPipeline = rhi->createPipeline(d);
+            }
+
+            // Traced GI + a-trous denoise kernels and the fullscreen GI
+            // composite, all from 3d_microvoxel_gi.metal (which includes the
+            // primary shader for the shared DDA).
+            std::string giCode = readFile("shaders/3d_microvoxel_gi.metal");
+            if (!giCode.empty()) {
+                auto makeKernel = [&](const char* entry, ShaderHandle& sh) -> ComputePipelineHandle {
+                    ShaderDesc d2;
+                    d2.stage = ShaderStage::Compute;
+                    d2.code = giCode.data();
+                    d2.codeSize = giCode.size();
+                    d2.entryPoint = entry;
+                    sh = rhi->createShader(d2);
+                    ComputePipelineDesc cd;
+                    cd.computeShader = sh;
+                    cd.threadGroupSizeX = 8;
+                    cd.threadGroupSizeY = 8;
+                    return rhi->createComputePipeline(cd);
+                };
+                microVoxelGIPipeline = makeKernel("microVoxelGIKernel", microVoxelGIShader);
+                microVoxelAtrousPipeline = makeKernel("microVoxelAtrousKernel", microVoxelAtrousShader);
+                microVoxelGICompositePipeline = makeMetalPass(
+                    "shaders/3d_microvoxel_gi.metal", "microVoxelGICompositeVertex",
+                    "microVoxelGICompositeFragment", BlendMode::Opaque, { PixelFormat::RGBA16_FLOAT },
+                    false, CompareOp::Less);
             }
         }
         // Volumetric clouds (off by default): quarter-res raymarch ->
@@ -7212,6 +7452,16 @@ void Renderer::drawGraphicsImGui() {
         }
         ImGui::SliderFloat("AO strength", &microVoxelSettings.params.x, 0.0f, 1.0f);
         ImGui::DragFloat("Emissive strength", &microVoxelSettings.gridDim.w, 0.1f, 0.0f, 16.0f);
+        ImGui::SeparatorText("Traced GI");
+        ImGui::SliderFloat("GI strength", &microVoxelGIStrength, 0.0f, 2.0f);
+        ImGui::SliderFloat("Temporal blend", &microVoxelGIBlend, 0.0f, 0.99f);
+        ImGui::SliderInt("A-trous iterations", &microVoxelGIAtrousIterations, 0, 5);
+        ImGui::DragFloat3("Sigmas (depth/normal/luma)", &microVoxelGISigmas.x, 0.1f, 0.0f, 128.0f);
+        bool split = microVoxelGISplitX >= 0.0f;
+        if (ImGui::Checkbox("Raw|denoised split", &split)) {
+            microVoxelGISplitX = split ? 0.5f : -1.0f;
+        }
+        if (split) ImGui::SliderFloat("Split position", &microVoxelGISplitX, 0.0f, 1.0f);
         ImGui::ColorEdit3("Ambient sky", &microVoxelSettings.ambientSky.x);
         ImGui::ColorEdit3("Ambient ground", &microVoxelSettings.ambientGround.x);
         ImGui::DragFloat("Ambient intensity", &microVoxelSettings.ambientSky.w, 0.01f, 0.0f, 2.0f);

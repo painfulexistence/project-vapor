@@ -350,11 +350,23 @@ struct alignas(16) MicroVoxelRenderData {
     glm::vec4 sunColor = glm::vec4(1.0f, 0.95f, 0.85f, 10.0f);       // xyz; w = sunIntensity
     glm::vec4 ambientSky = glm::vec4(0.55f, 0.7f, 0.95f, 0.5f);      // xyz; w = ambientIntensity
     glm::vec4 ambientGround = glm::vec4(0.25f, 0.22f, 0.2f, 1.0f);   // xyz; w = albedo hash variation
-    glm::vec4 params = glm::vec4(0.7f, 0.0f, 1.0f, 0.0f);            // x = aoStrength, y = debugMode, z = reflectionsEnabled
-    glm::vec4 _pad[4] = {};
+    glm::vec4 params = glm::vec4(0.7f, 0.0f, 1.0f, 0.0f);            // x = aoStrength, y = debugMode, z = reflectionsEnabled, w = giStrength
+    glm::vec4 extra0 = glm::vec4(0.0f);                              // x = volumeIndex (per-volume GI dispatches)
+    glm::vec4 _pad[3] = {};
 };
 static_assert(sizeof(MicroVoxelRenderData) == 256,
               "MicroVoxelRenderData must stay at the 256-byte per-volume stride the shaders assume");
+
+// MicroVoxel traced-GI shared params (MicroVoxelGI.comp / MicroVoxelAtrous.comp
+// / MicroVoxelGIComposite.frag and their MSL twins in 3d_microvoxel_gi.metal).
+struct alignas(16) MicroVoxelGIRenderData {
+    glm::mat4 invViewProj = glm::mat4(1.0f);
+    glm::mat4 prevViewProj = glm::mat4(1.0f);
+    glm::vec4 cameraPosition = glm::vec4(0.0f);      // xyz; w = frameIndex
+    glm::vec4 prevCameraPosition = glm::vec4(0.0f);  // xyz; w = temporal blend (history weight)
+    glm::vec4 params = glm::vec4(1.0f, -1.0f, 0.0f, 0.0f);  // x = giStrength, y = splitX, z = giWidth, w = giHeight
+    glm::vec4 sigmas = glm::vec4(0.5f, 64.0f, 8.0f, 0.0f);  // x = depth, y = normal, z = luma, w = GI debug view
+};
 
 // Volumetric clouds. Field-for-field mirror of the Metal backend's
 // VolumetricCloudData (graphics_effects.hpp) — the defaults below are the

@@ -313,6 +313,9 @@ public:
     // demo/gameplay hotkeys can flip debug views and toggles directly.
     MicroVoxelRenderData& getMicroVoxelSettings() { return microVoxelSettings; }
     void setMicroVoxelEnabled(bool enabled) { microVoxelEnabled = enabled; }
+    float& getMicroVoxelGIStrength() { return microVoxelGIStrength; }
+    int& getMicroVoxelGIAtrousIterations() { return microVoxelGIAtrousIterations; }
+    float& getMicroVoxelGISplitX() { return microVoxelGISplitX; }
 
     // ========================================================================
     // Texture Creation (for sprites/batch rendering)
@@ -410,6 +413,12 @@ private:
     // Reconciles the ECS-pushed volume list with the GPU mirrors (create /
     // destroy buffers) and flushes per-brick dirty batches into the pool.
     void updateVoxelVolumeResources();
+    // Traced GI over the voxel G-buffer: half-res 1-bounce trace + temporal
+    // accumulation (per-volume dispatches), a-trous denoise iterations, and a
+    // fullscreen composite (albedo * gi * ao added to voxel pixels).
+    void microVoxelGIPass();
+    void microVoxelGIDenoisePass();
+    void microVoxelGICompositePass();
     void velocityPass();
     void particlePass();
     void volumetricCloudPass();
@@ -720,6 +729,37 @@ private:
     // Persistent tunables (ImGui-editable). microVoxelPass() copies this per
     // volume and overwrites the per-frame fields (viewProj/camera/origin/sun).
     MicroVoxelRenderData microVoxelSettings;
+    // Voxel G-buffer (full res), written by the primary pass alongside color:
+    // hitT (R32F), albedo+AO (RGBA8), face-normal/material/volume (RGBA8).
+    TextureHandle voxelHitTRT;
+    TextureHandle voxelAlbedoAORT;
+    TextureHandle voxelNormalMatRT;
+    // Traced GI: half-res accumulation ping-pong (history = RAW temporal, the
+    // filtered result never feeds back) + a-trous ping-pong.
+    TextureHandle voxelGIAccumRT[2];
+    TextureHandle voxelGIAtrousRT[2];
+    Uint32 voxelGIWidth = 0, voxelGIHeight = 0;
+    int voxelGICur = 0;
+    bool voxelGIHistoryValid = false;  // false forces a fresh-sample frame
+    glm::mat4 voxelGIPrevViewProj = glm::mat4(1.0f);
+    glm::vec3 voxelGIPrevCameraPos = glm::vec3(0.0f);
+    Uint32 voxelGIFrameIndex = 0;
+    ComputePipelineHandle microVoxelGIPipeline;
+    ComputePipelineHandle microVoxelAtrousPipeline;
+    ShaderHandle microVoxelGIShader, microVoxelAtrousShader;
+    PipelineHandle microVoxelGICompositePipeline;
+    ShaderHandle microVoxelGICompositeVS, microVoxelGICompositeFS;
+    BufferHandle microVoxelGIParamsBuffer;  // frame-slotted MicroVoxelGIRenderData
+    // GI tunables (ImGui panel + demo hotkeys).
+    float microVoxelGIStrength = 1.0f;
+    float microVoxelGIBlend = 0.93f;        // temporal history weight
+    int microVoxelGIAtrousIterations = 3;
+    glm::vec3 microVoxelGISigmas = glm::vec3(0.5f, 64.0f, 8.0f);  // depth/normal/luma
+    float microVoxelGISplitX = -1.0f;       // >= 0: raw|denoised split compare
+    // Per-frame state shared between the MicroVoxel passes.
+    bool voxelGIActiveThisFrame = false;
+    Uint32 voxelVolumesDrawn = 0;
+    std::array<const VoxelVolumeGpu*, MAX_VOXEL_VOLUMES> voxelVolumesDrawnRefs {};
     // The registry the ECS draw() last rendered with. renderToTexture needs it
     // because the demo's meshes live on ECS entities, not the scene-node tree —
     // the scene-only collectDrawables(scene) finds nothing there. The registry

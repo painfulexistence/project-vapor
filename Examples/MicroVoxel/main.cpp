@@ -185,7 +185,8 @@ auto main(int argc, char* args[]) -> int {
 
     fmt::print("MicroVoxel loaded. WASD move, R/F up/down, IJKL look, LShift sprint, Esc quit.\n");
     fmt::print("Raymarched 5 cm voxel volumes — no triangles. Hold E to dig into them.\n");
-    fmt::print("Debug: 0=final 1=albedo 2=normals 3=AO 4=shadow 6=material | H/O/X toggle shadow/AO/reflections.\n");
+    fmt::print("Debug: 0=final 1=albedo 2=normals 3=AO 4=shadow 5=GI 6=material | "
+               "G/O/H/X/N toggle GI/AO/shadow/reflections/denoiser | B = split raw|denoised.\n");
 
     // The MicroVoxel tunables live on the concrete RHI renderer (also editable
     // in its ImGui panel); hotkeys poke them directly when available.
@@ -242,6 +243,26 @@ auto main(int argc, char* args[]) -> int {
                                 float& rf = mv.params.z;
                                 rf = (rf > 0.5f) ? 0.0f : 1.0f;
                                 fmt::print("MicroVoxel reflections: {}\n", rf > 0.5f ? "on" : "off");
+                                break;
+                            }
+                            case SDL_SCANCODE_G: {
+                                float& gi = rhiRenderer->getMicroVoxelGIStrength();
+                                gi = (gi > 0.0f) ? 0.0f : 1.0f;
+                                fmt::print("MicroVoxel GI: {}\n", gi > 0.0f ? "on" : "off (flat ambient)");
+                                break;
+                            }
+                            case SDL_SCANCODE_N: {
+                                int& its = rhiRenderer->getMicroVoxelGIAtrousIterations();
+                                its = (its > 0) ? 0 : 3;
+                                fmt::print("MicroVoxel GI denoiser: {}\n",
+                                           its > 0 ? "on (a-trous)" : "off (raw temporal)");
+                                break;
+                            }
+                            case SDL_SCANCODE_B: {
+                                float& split = rhiRenderer->getMicroVoxelGISplitX();
+                                split = (split >= 0.0f) ? -1.0f : 0.5f;
+                                fmt::print("MicroVoxel GI split: {}\n",
+                                           split >= 0.0f ? "on (left raw | right denoised)" : "off");
                                 break;
                             }
                             default:

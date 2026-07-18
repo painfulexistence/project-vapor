@@ -1,0 +1,304 @@
+#version 450
+// MicroVoxel traced GI (half resolution). GLSL twin of 3d_microvoxel_gi.metal
+// — keep the binding contracts mirrored.
+//
+// One cosine-weighted diffuse bounce per pixel per frame (+ one sun-shadow
+// ray at the bounce hit), accumulated temporally by reprojecting the primary
+// hit's WORLD position into the previous frame — exact under camera motion
+// because the voxels are static. Unlike the original GL implementation this
+// pass never re-traces primary visibility: the primary hit comes from the
+// voxel G-buffer (hitT + normal/material/volume index) written by
+// MicroVoxel.frag. Output stores INCIDENT radiance (no primary albedo baked
+// in) with the camera distance in alpha for history validation and the
+// à-trous depth weight; the composite pass multiplies by albedo.
+//
+// The traversal duplicates MicroVoxel.frag's DDA (GLSL has no includes) —
+// keep them in sync, and in sync with the CPU reference in voxel_world.cpp.
+//
+// Runs once per volume: pixels whose G-buffer volume index differs are left
+// untouched, so each volume's dispatch shades only its own pixels. Compute
+// bindings (see rhi_vulkan.cpp): set 0 = storage buffers, set 1 = storage
+// images, set 2 = sampled textures.
+
+layout(local_size_x = 8, local_size_y = 8, local_size_z = 1) in;
+
+// Must match Vapor::MicroVoxelRenderData (the per-volume 256-byte slice the
+// primary pass binds).
+layout(std430, set = 0, binding = 0) readonly buffer ParamsBuf {
+    mat4 viewProj;
+    vec4 cameraPosition;   // xyz; w = maxRaySteps
+    vec4 volumeOrigin;     // xyz = world min corner; w = voxelSize
+    vec4 gridDim;          // xyz = voxel counts; w = emissiveStrength
+    vec4 sunDirection;     // xyz toward the sun; w = shadowEnabled
+    vec4 sunColor;         // xyz; w = sunIntensity
+    vec4 ambientSky;       // xyz; w = ambientIntensity
+    vec4 ambientGround;    // xyz; w = albedo hash variation strength
+    vec4 params;           // x = aoStrength, y = debugMode, z = reflections, w = giStrength
+    vec4 extra0;           // x = volumeIndex
+};
+// Must match Vapor::MicroVoxelGIRenderData.
+layout(std430, set = 0, binding = 1) readonly buffer GIParamsBuf {
+    mat4 invViewProj;
+    mat4 prevViewProj;
+    vec4 giCameraPosition;   // xyz; w = frameIndex
+    vec4 prevCameraPosition; // xyz; w = temporal blend (history weight)
+    vec4 giParams;           // x = giStrength, y = splitX, z = giWidth, w = giHeight
+    vec4 giSigmas;           // x = depth, y = normal, z = luma (à-trous)
+};
+layout(std430, set = 0, binding = 2) readonly buffer PageBuf { uint pageTable[]; };
+layout(std430, set = 0, binding = 3) readonly buffer BrickBuf { uint brickPool[]; };
+layout(std430, set = 0, binding = 4) readonly buffer PaletteBuf { uint palette[]; };
+
+layout(set = 1, binding = 0, rgba16f) uniform writeonly image2D giOut;
+
+layout(set = 2, binding = 1) uniform sampler2D hitTTex;       // full-res voxel G-buffer
+layout(set = 2, binding = 2) uniform sampler2D normalMatTex;  // full-res voxel G-buffer
+layout(set = 2, binding = 3) uniform sampler2D historyTex;    // previous accumulation
+
+const uint PAGE_EMPTY = 0xFFFFFFFFu;
+const uint PAGE_UNIFORM_BIT = 0x80000000u;
+const int BRICK_DIM = 8;
+const uint BRICK_WORDS = 144u;
+const float INV_PI = 0.318309886;
+
+// ==== traversal (mirror of MicroVoxel.frag — keep in sync) =================
+
+ivec3 brickGrid() { return ivec3(gridDim.xyz) / BRICK_DIM; }
+
+uint pageEntry(ivec3 bcell) {
+    ivec3 bg = brickGrid();
+    return pageTable[(bcell.z * bg.y + bcell.y) * bg.x + bcell.x];
+}
+
+int voxelIndexInBrick(ivec3 local) {
+    return local.x + local.y * BRICK_DIM + local.z * BRICK_DIM * BRICK_DIM;
+}
+
+bool brickOccupied(uint slot, int i) {
+    return (brickPool[slot * BRICK_WORDS + uint(i >> 5)] & (1u << (uint(i) & 31u))) != 0u;
+}
+
+uint brickMaterial(uint slot, int i) {
+    uint word = brickPool[slot * BRICK_WORDS + 16u + uint(i >> 2)];
+    return (word >> ((uint(i) & 3u) * 8u)) & 0xFFu;
+}
+
+struct Hit {
+    float t;
+    vec3 normal;
+    ivec3 cell;
+    uint mat;
+};
+
+bool traverseBrick(vec3 ro, vec3 rd, vec3 invD, uint slot, ivec3 bcell, float tIn,
+                   vec3 enterNormal, float voxelSize, out Hit hit) {
+    ivec3 lo = bcell * BRICK_DIM;
+    float eps = voxelSize * 1e-3;
+    ivec3 cell = clamp(ivec3(floor((ro + rd * (tIn + eps)) / voxelSize)), lo, lo + BRICK_DIM - 1);
+    ivec3 stepDir = ivec3(sign(rd));
+    vec3 tDelta = abs(vec3(voxelSize) * invD);
+    vec3 stepPos = vec3(greaterThan(rd, vec3(0.0)));
+    vec3 tMax = ((vec3(cell) + stepPos) * voxelSize - ro) * invD;
+    float t = tIn;
+    vec3 normal = enterNormal;
+    for (int i = 0; i < 3 * BRICK_DIM + 1; i++) {
+        int vi = voxelIndexInBrick(cell - lo);
+        if (brickOccupied(slot, vi)) {
+            hit.t = t;
+            hit.normal = normal;
+            hit.cell = cell;
+            hit.mat = brickMaterial(slot, vi);
+            return true;
+        }
+        if (tMax.x < tMax.y && tMax.x < tMax.z) {
+            t = tMax.x; tMax.x += tDelta.x; cell.x += stepDir.x;
+            normal = vec3(-float(stepDir.x), 0.0, 0.0);
+            if (cell.x < lo.x || cell.x >= lo.x + BRICK_DIM) return false;
+        } else if (tMax.y < tMax.z) {
+            t = tMax.y; tMax.y += tDelta.y; cell.y += stepDir.y;
+            normal = vec3(0.0, -float(stepDir.y), 0.0);
+            if (cell.y < lo.y || cell.y >= lo.y + BRICK_DIM) return false;
+        } else {
+            t = tMax.z; tMax.z += tDelta.z; cell.z += stepDir.z;
+            normal = vec3(0.0, 0.0, -float(stepDir.z));
+            if (cell.z < lo.z || cell.z >= lo.z + BRICK_DIM) return false;
+        }
+    }
+    return false;
+}
+
+bool raycast(vec3 ro, vec3 rd, float maxDist, out Hit hit) {
+    float voxelSize = volumeOrigin.w;
+    vec3 bmax = gridDim.xyz * voxelSize;
+    vec3 invD = 1.0 / rd;
+
+    vec3 t0 = (vec3(0.0) - ro) * invD;
+    vec3 t1 = (bmax - ro) * invD;
+    vec3 tsmall = min(t0, t1);
+    vec3 tbig = max(t0, t1);
+    float tEnter = max(max(tsmall.x, tsmall.y), tsmall.z);
+    float tExit = min(min(tbig.x, tbig.y), tbig.z);
+    if (tExit <= max(tEnter, 0.0)) return false;
+
+    vec3 normal;
+    if (tEnter > 0.0) {
+        if (tsmall.x > tsmall.y && tsmall.x > tsmall.z) normal = vec3(-sign(rd.x), 0.0, 0.0);
+        else if (tsmall.y > tsmall.z)                   normal = vec3(0.0, -sign(rd.y), 0.0);
+        else                                            normal = vec3(0.0, 0.0, -sign(rd.z));
+    } else {
+        vec3 a = abs(rd);
+        if (a.x > a.y && a.x > a.z) normal = vec3(-sign(rd.x), 0.0, 0.0);
+        else if (a.y > a.z)         normal = vec3(0.0, -sign(rd.y), 0.0);
+        else                        normal = vec3(0.0, 0.0, -sign(rd.z));
+    }
+
+    float eps = voxelSize * 1e-3;
+    float t = max(tEnter, 0.0) + eps;
+    if (t > maxDist) return false;
+
+    float brickSize = voxelSize * float(BRICK_DIM);
+    ivec3 bg = brickGrid();
+    ivec3 bcell = clamp(ivec3(floor((ro + rd * t) / brickSize)), ivec3(0), bg - 1);
+    ivec3 stepDir = ivec3(sign(rd));
+    vec3 tDelta = abs(vec3(brickSize) * invD);
+    vec3 stepPos = vec3(greaterThan(rd, vec3(0.0)));
+    vec3 tMax = ((vec3(bcell) + stepPos) * brickSize - ro) * invD;
+
+    int maxSteps = int(cameraPosition.w);
+    for (int i = 0; i < maxSteps; i++) {
+        uint entry = pageEntry(bcell);
+        if (entry != PAGE_EMPTY) {
+            if ((entry & PAGE_UNIFORM_BIT) != 0u) {
+                hit.t = t;
+                hit.normal = normal;
+                hit.cell = clamp(ivec3(floor((ro + rd * (t + eps)) / voxelSize)),
+                                 bcell * BRICK_DIM, bcell * BRICK_DIM + BRICK_DIM - 1);
+                hit.mat = entry & 0xFFu;
+                return t <= maxDist;
+            }
+            if (traverseBrick(ro, rd, invD, entry, bcell, t, normal, voxelSize, hit)) {
+                return hit.t <= maxDist;
+            }
+        }
+        if (tMax.x < tMax.y && tMax.x < tMax.z) {
+            t = tMax.x; tMax.x += tDelta.x; bcell.x += stepDir.x;
+            normal = vec3(-float(stepDir.x), 0.0, 0.0);
+            if (bcell.x < 0 || bcell.x >= bg.x) break;
+        } else if (tMax.y < tMax.z) {
+            t = tMax.y; tMax.y += tDelta.y; bcell.y += stepDir.y;
+            normal = vec3(0.0, -float(stepDir.y), 0.0);
+            if (bcell.y < 0 || bcell.y >= bg.y) break;
+        } else {
+            t = tMax.z; tMax.z += tDelta.z; bcell.z += stepDir.z;
+            normal = vec3(0.0, 0.0, -float(stepDir.z));
+            if (bcell.z < 0 || bcell.z >= bg.z) break;
+        }
+        if (t > maxDist || t > tExit) break;
+    }
+    return false;
+}
+
+// ==== shading helpers ======================================================
+
+vec3 skyRadiance(vec3 dir) {
+    return mix(ambientGround.xyz, ambientSky.xyz, dir.y * 0.5 + 0.5) * ambientSky.w;
+}
+
+void decodeMaterial(uint mat, out vec3 albedo, out float emission) {
+    uint w0 = palette[mat * 2u];
+    albedo = vec3(float(w0 & 0xFFu), float((w0 >> 8u) & 0xFFu), float((w0 >> 16u) & 0xFFu)) / 255.0;
+    emission = float((w0 >> 24u) & 0xFFu) / 255.0;
+}
+
+vec3 decodeNormal(int idx) {
+    const vec3 normals[6] = vec3[](vec3(1, 0, 0), vec3(-1, 0, 0), vec3(0, 1, 0),
+                                   vec3(0, -1, 0), vec3(0, 0, 1), vec3(0, 0, -1));
+    return normals[clamp(idx, 0, 5)];
+}
+
+// Integer hash -> two [0,1) randoms per (pixel, frame).
+vec2 rand2(uvec2 pix, uint frame) {
+    uint h = pix.x * 374761393u + pix.y * 668265263u + frame * 2246822519u;
+    h = (h ^ (h >> 13)) * 1274126177u;
+    h ^= h >> 16;
+    uint h2 = (h ^ 0x9E3779B9u) * 2654435761u;
+    h2 ^= h2 >> 15;
+    return vec2(float(h & 0xFFFFu), float(h2 & 0xFFFFu)) / 65535.0;
+}
+
+void main() {
+    ivec2 giSize = ivec2(giParams.zw);
+    ivec2 pix = ivec2(gl_GlobalInvocationID.xy);
+    if (pix.x >= giSize.x || pix.y >= giSize.y) return;
+
+    vec2 uv = (vec2(pix) + 0.5) / vec2(giSize);
+    float hitT = textureLod(hitTTex, uv, 0.0).r;
+    if (hitT <= 0.0) {
+        // Miss: zero radiance, zero distance — invalid history, rejected by
+        // the à-trous depth weight. Every volume's dispatch agrees on this.
+        imageStore(giOut, pix, vec4(0.0));
+        return;
+    }
+    vec4 nm = textureLod(normalMatTex, uv, 0.0);
+    if (int(nm.b * 255.0 + 0.5) != int(extra0.x + 0.5)) return;  // another volume's pixel
+
+    // Reconstruct the primary hit from the G-buffer (no re-trace).
+    vec2 ndc = vec2(uv.x * 2.0 - 1.0, 1.0 - uv.y * 2.0);
+    vec4 farPt = invViewProj * vec4(ndc, 0.9999, 1.0);
+    vec3 rd = normalize(farPt.xyz / farPt.w - giCameraPosition.xyz);
+    vec3 hitWorld = giCameraPosition.xyz + rd * hitT;
+    vec3 n = decodeNormal(int(nm.r * 255.0 + 0.5));
+    float voxelSize = volumeOrigin.w;
+    vec3 hitLocal = hitWorld - volumeOrigin.xyz;
+
+    // Cosine-weighted bounce around the face normal. With cosine sampling the
+    // estimator is just the incoming radiance — no explicit cos/pdf terms.
+    vec2 xi = rand2(uvec2(pix), uint(giCameraPosition.w));
+    vec3 t1 = normalize(abs(n.x) > 0.5 ? cross(n, vec3(0, 1, 0)) : cross(n, vec3(1, 0, 0)));
+    vec3 t2 = cross(n, t1);
+    float phi = 6.2831853 * xi.x;
+    float sq = sqrt(xi.y);
+    vec3 bounceDir = normalize(t1 * cos(phi) * sq + t2 * sin(phi) * sq + n * sqrt(max(1.0 - xi.y, 0.0)));
+
+    vec3 radiance;
+    Hit bh;
+    vec3 bounceOrigin = hitLocal + n * voxelSize * 0.51;
+    if (raycast(bounceOrigin, bounceDir, 1e9, bh)) {
+        vec3 bAlbedo;
+        float bEmission;
+        decodeMaterial(bh.mat, bAlbedo, bEmission);
+        // Sun at the bounce hit, with a full shadow ray; the 0.3 sky term
+        // stands in for further bounces. Emissive voxels act as area lights.
+        float bNdl = max(dot(bh.normal, sunDirection.xyz), 0.0);
+        float bShadow = 1.0;
+        if (bNdl > 0.0) {
+            Hit sh;
+            vec3 so = bounceOrigin + bounceDir * bh.t + bh.normal * voxelSize * 0.51;
+            if (raycast(so, sunDirection.xyz, 1e9, sh)) bShadow = 0.0;
+        }
+        radiance = bAlbedo * (sunColor.xyz * sunColor.w * INV_PI * bNdl * bShadow
+                              + skyRadiance(bh.normal) * 0.3)
+                 + bAlbedo * bEmission * gridDim.w;
+    } else {
+        radiance = skyRadiance(bounceDir);  // sky-light occlusion falls out naturally
+    }
+
+    // Temporal accumulation: reproject the WORLD hit into the previous frame,
+    // validate by stored camera distance (alpha), then blend.
+    float camDist = length(hitWorld - giCameraPosition.xyz);
+    vec3 result = radiance;
+    vec4 prevClip = prevViewProj * vec4(hitWorld, 1.0);
+    if (prevClip.w > 0.0) {
+        vec2 prevNdc = prevClip.xy / prevClip.w;
+        vec2 prevUV = vec2(prevNdc.x * 0.5 + 0.5, 0.5 - prevNdc.y * 0.5);
+        if (all(greaterThanEqual(prevUV, vec2(0.0))) && all(lessThanEqual(prevUV, vec2(1.0)))) {
+            vec4 hist = textureLod(historyTex, prevUV, 0.0);
+            float expected = length(hitWorld - prevCameraPosition.xyz);
+            if (hist.a > 0.0 && abs(hist.a - expected) < 0.05 * expected + voxelSize) {
+                result = mix(radiance, hist.rgb, prevCameraPosition.w);
+            }
+        }
+    }
+
+    imageStore(giOut, pix, vec4(result, camDist));
+}

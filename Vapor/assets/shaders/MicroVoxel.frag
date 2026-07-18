@@ -24,6 +24,12 @@
 
 layout(location = 0) in vec3 v_worldPos;
 layout(location = 0) out vec4 outColor;
+// Voxel G-buffer, consumed by the GI passes (MicroVoxelGI.comp) so they never
+// re-trace primary visibility (the original GL implementation re-marched every
+// GI pixel), and by the GI composite for albedo/AO.
+layout(location = 1) out float outHitT;        // camera distance along the ray; 0 = miss
+layout(location = 2) out vec4 outAlbedoAO;     // rgb = hash-varied albedo, a = corner AO
+layout(location = 3) out vec4 outNormalMat;    // r = face-normal index/255, g = material/255, b = volumeIndex/255
 
 // Must match Vapor::MicroVoxelRenderData (vec4-only, 256-byte stride so
 // per-volume slices can be bound at aligned offsets).
@@ -36,7 +42,8 @@ layout(std430, set = 1, binding = 0) readonly buffer ParamsBuf {
     vec4 sunColor;         // xyz; w = sunIntensity
     vec4 ambientSky;       // xyz; w = ambientIntensity
     vec4 ambientGround;    // xyz; w = albedo hash variation strength
-    vec4 params;           // x = aoStrength, y = debugMode, z = reflectionsEnabled
+    vec4 params;           // x = aoStrength, y = debugMode, z = reflectionsEnabled, w = giStrength
+    vec4 extra0;           // x = volumeIndex (for the per-volume GI dispatches)
 };
 layout(std430, set = 1, binding = 1) readonly buffer PageBuf { uint pageTable[]; };
 layout(std430, set = 1, binding = 2) readonly buffer BrickBuf { uint brickPool[]; };
@@ -301,7 +308,9 @@ void main() {
     float ao = mix(1.0, faceAO(hit.cell, hit.normal, hitLocal, voxelSize), params.x);
 
     vec3 direct = sunColor.xyz * sunColor.w * INV_PI * ndl * shadow;
-    vec3 indirect = skyRadiance(hit.normal);
+    // With GI on (params.w > 0) the traced-GI composite pass supplies the
+    // indirect term (albedo * gi * ao); the flat sky ambient is the fallback.
+    vec3 indirect = (params.w > 0.0) ? vec3(0.0) : skyRadiance(hit.normal);
 
     // AO fully attenuates the ambient term but only 30% of direct sun, so
     // corners stay readable in full sunlight (the original's stylized mix).
@@ -337,6 +346,14 @@ void main() {
     else if (debugMode == 6) color = vec3(float(hit.mat) / 8.0);
 
     outColor = vec4(color, 1.0);
+
+    // Voxel G-buffer. Face-normal index: axis*2 + (negative ? 1 : 0).
+    int normalIdx = (hit.normal.x != 0.0) ? (hit.normal.x < 0.0 ? 1 : 0)
+                  : (hit.normal.y != 0.0) ? (hit.normal.y < 0.0 ? 3 : 2)
+                                          : (hit.normal.z < 0.0 ? 5 : 4);
+    outHitT = hit.t;
+    outAlbedoAO = vec4(albedo, ao);
+    outNormalMat = vec4(float(normalIdx) / 255.0, float(hit.mat) / 255.0, extra0.x / 255.0, 0.0);
 
     // True hit depth so the hardware depth test composites voxels with the
     // raster scene (and later sky/fog/cloud passes see voxel depth). Vulkan

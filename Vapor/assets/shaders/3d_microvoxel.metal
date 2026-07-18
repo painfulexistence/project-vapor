@@ -29,8 +29,9 @@ struct MicroVoxelData {
     float4 sunColor;         // xyz; w = sunIntensity
     float4 ambientSky;       // xyz; w = ambientIntensity
     float4 ambientGround;    // xyz; w = albedo hash variation strength
-    float4 params;           // x = aoStrength, y = debugMode, z = reflectionsEnabled
-    float4 _pad[4];
+    float4 params;           // x = aoStrength, y = debugMode, z = reflectionsEnabled, w = giStrength
+    float4 extra0;           // x = volumeIndex (for the per-volume GI dispatches)
+    float4 _pad[3];
 };
 
 constant uint MV_PAGE_EMPTY = 0xFFFFFFFFu;
@@ -291,6 +292,11 @@ static inline void mvDecodeMaterial(device const uint* palette, uint mat,
 
 struct MicroVoxelFragOut {
     float4 color [[color(0)]];
+    // Voxel G-buffer, consumed by the GI kernels (3d_microvoxel_gi.metal) so
+    // they never re-trace primary visibility, and by the GI composite.
+    float hitT [[color(1)]];         // camera distance along the ray; 0 = miss
+    float4 albedoAO [[color(2)]];    // rgb = hash-varied albedo, a = corner AO
+    float4 normalMat [[color(3)]];   // r = face-normal index/255, g = material/255, b = volumeIndex/255
     float depth [[depth(any)]];
 };
 
@@ -331,7 +337,9 @@ fragment MicroVoxelFragOut microVoxelFragment(
                    u.params.x);
 
     float3 direct = u.sunColor.xyz * u.sunColor.w * MV_INV_PI * ndl * shadow;
-    float3 indirect = mvSkyRadiance(u, hit.normal);
+    // With GI on (params.w > 0) the traced-GI composite supplies the indirect
+    // term (albedo * gi * ao); the flat sky ambient is the fallback.
+    float3 indirect = (u.params.w > 0.0f) ? float3(0.0) : mvSkyRadiance(u, hit.normal);
 
     float3 color = albedo * (direct * (0.7 + 0.3 * ao) + indirect * ao);
     color += albedo * emission * u.gridDim.w;
@@ -365,8 +373,16 @@ fragment MicroVoxelFragOut microVoxelFragment(
     // Metal NDC z is already [0,1]; the clamp keeps hits in front of the sky.
     float4 clip = u.viewProj * float4(hitWorld, 1.0);
 
+    // Voxel G-buffer. Face-normal index: axis*2 + (negative ? 1 : 0).
+    int normalIdx = (hit.normal.x != 0.0f) ? (hit.normal.x < 0.0f ? 1 : 0)
+                  : (hit.normal.y != 0.0f) ? (hit.normal.y < 0.0f ? 3 : 2)
+                                           : (hit.normal.z < 0.0f ? 5 : 4);
+
     MicroVoxelFragOut out;
     out.color = float4(color, 1.0);
+    out.hitT = hit.t;
+    out.albedoAO = float4(albedo, ao);
+    out.normalMat = float4(float(normalIdx) / 255.0, float(hit.mat) / 255.0, u.extra0.x / 255.0, 0.0);
     out.depth = clamp(clip.z / clip.w, 0.0f, 0.999999f);
     return out;
 }
