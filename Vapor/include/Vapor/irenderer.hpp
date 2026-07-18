@@ -28,7 +28,7 @@
 #include "camera.hpp"
 #include "graphics.hpp"       // Image, FontHandle via font_manager
 #include "font_manager.hpp"   // FontHandle
-#include "scene.hpp"
+#include "render_scene.hpp"
 #include <SDL3/SDL_video.h>
 #include <entt/entt.hpp>
 #include <functional>
@@ -107,7 +107,7 @@ public:
     virtual void shutdown() {}
 
     // ---- Scene / staging -------------------------------------------------
-    virtual void stage(std::shared_ptr<Scene> scene) {}
+    virtual void stage(std::shared_ptr<RenderScene> scene) {}
 
     // ---- Frame ----------------------------------------------------------
     // beginFrame(): acquire the drawable/command buffer and run the backend
@@ -117,8 +117,8 @@ public:
     //   registered app/engine callbacks. Call after ImGui::NewFrame().
     virtual void invokeImGuiCallback() {}
     // draw(): collect drawables from the scene/registry and run the passes.
-    virtual void draw(std::shared_ptr<Scene> scene, Camera& camera) {}
-    virtual void draw(entt::registry& registry, std::shared_ptr<Scene> scene, Camera& camera) {}
+    virtual void draw(std::shared_ptr<RenderScene> scene, Camera& camera) {}
+    virtual void draw(entt::registry& registry, std::shared_ptr<RenderScene> scene, Camera& camera) {}
     // endFrame(): render ImGui draw data (after ImGui::Render()) and present.
     virtual void endFrame() {}
 
@@ -210,7 +210,7 @@ public:
     virtual RenderTextureHandle createRenderTexture(const RenderTextureDesc& desc) { return {}; }
     virtual void destroyRenderTexture(RenderTextureHandle handle) {}
     virtual TextureHandle getRenderTextureAsTexture(RenderTextureHandle handle) { return {}; }
-    virtual void renderToTexture(RenderTextureHandle target, std::shared_ptr<Scene> scene, Camera& camera,
+    virtual void renderToTexture(RenderTextureHandle target, std::shared_ptr<RenderScene> scene, Camera& camera,
                                  const glm::vec4& clearColor = glm::vec4(0.0f, 0.0f, 0.0f, 1.0f)) {}
     virtual glm::uvec2 getRenderTextureSize(RenderTextureHandle handle) { return glm::uvec2(0); }
     virtual Uint64 registerRenderTextureForUI(RenderTextureHandle handle) { return 0; }

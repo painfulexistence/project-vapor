@@ -5009,7 +5009,7 @@ auto Renderer_Metal::createResources() -> void {
     fmt::print("Particle pool initialized ({} slots, ECS-driven)\n", MAX_PARTICLES);
 }
 
-auto Renderer_Metal::stage(std::shared_ptr<Scene> scene) -> void {
+auto Renderer_Metal::stage(std::shared_ptr<RenderScene> scene) -> void {
     ZoneScoped;
 
     // Lights
@@ -5171,7 +5171,7 @@ void Renderer_Metal::endFrame() {
     currentDrawable = nullptr;
 }
 
-auto Renderer_Metal::draw(std::shared_ptr<Scene> scene, Camera& camera) -> void {
+auto Renderer_Metal::draw(std::shared_ptr<RenderScene> scene, Camera& camera) -> void {
     ZoneScoped;
     FrameMark;
 
@@ -6517,7 +6517,7 @@ glm::uvec2 Renderer_Metal::getRenderTextureSize(RenderTextureHandle handle) {
 }
 
 void Renderer_Metal::renderToTexture(
-    RenderTextureHandle target, std::shared_ptr<Scene> scene, Camera& camera, const glm::vec4& clearColor
+    RenderTextureHandle target, std::shared_ptr<RenderScene> scene, Camera& camera, const glm::vec4& clearColor
 ) {
     auto it = renderTextures.find(target.id);
     if (it == renderTextures.end() || !scene) {
@@ -7542,7 +7542,7 @@ extern "C" auto getMetalDevice(void* renderer) -> void* {
 }
 
 
-void Renderer_Metal::draw(entt::registry& registry, std::shared_ptr<Scene> scene, Camera& camera) {
+void Renderer_Metal::draw(entt::registry& registry, std::shared_ptr<RenderScene> scene, Camera& camera) {
     // Build ECS instance data; draw(scene, camera) will clear instances/instanceBatches from Nodes,
     // so store them here and inject after Node traversal via pendingEcsInstances.
     pendingEcsInstances.clear();

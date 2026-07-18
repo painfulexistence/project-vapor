@@ -6,7 +6,13 @@ namespace Vapor {
 
 class Page {
 public:
+    Page() = default;
     virtual ~Page() = default;
+
+    // Polymorphic base: copying through a base reference would slice derived
+    // page state, so copying is disabled (Core Guidelines C.67).
+    Page(const Page&) = delete;
+    Page& operator=(const Page&) = delete;
 
     virtual void onAttach(Rml::ElementDocument* doc, entt::registry& reg) { doc_ = doc; reg_ = &reg; }
     virtual void onDetach() {}

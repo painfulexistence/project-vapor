@@ -6,7 +6,7 @@
 #include "camera.hpp"
 #include "graphics.hpp"
 #include "font_manager.hpp"
-#include "scene.hpp"
+#include "render_scene.hpp"
 #include <SDL3/SDL_video.h>
 #include <entt/entt.hpp>
 #include <functional>
@@ -121,13 +121,13 @@ public:
     // ========================================================================
 
     // Stage a scene (upload meshes, materials, textures)
-    void stage(std::shared_ptr<Scene> scene) override;
+    void stage(std::shared_ptr<RenderScene> scene) override;
 
     // Draw a scene with Scene object
-    void draw(std::shared_ptr<Scene> scene, Camera& camera) override;
+    void draw(std::shared_ptr<RenderScene> scene, Camera& camera) override;
 
     // Draw with ECS registry
-    void draw(entt::registry& registry, std::shared_ptr<Scene> scene, Camera& camera) override;
+    void draw(entt::registry& registry, std::shared_ptr<RenderScene> scene, Camera& camera) override;
 
     // ========================================================================
     // Screenshot API
@@ -278,7 +278,7 @@ public:
     TextureHandle getRenderTextureAsTexture(RenderTextureHandle handle) override;
     void renderToTexture(
         RenderTextureHandle target,
-        std::shared_ptr<Scene> scene,
+        std::shared_ptr<RenderScene> scene,
         Camera& camera,
         const glm::vec4& clearColor = glm::vec4(0.0f, 0.0f, 0.0f, 1.0f)
     ) override;
@@ -421,10 +421,10 @@ private:
     void bindMaterial(MaterialId materialId);
 
     // Scene/ECS helpers
-    void collectDrawables(std::shared_ptr<Scene> scene);
-    void collectDrawables(entt::registry& registry, std::shared_ptr<Scene> scene);
+    void collectDrawables(std::shared_ptr<RenderScene> scene);
+    void collectDrawables(entt::registry& registry, std::shared_ptr<RenderScene> scene);
     // Submit the scene's gathered lights (filled by the game's light systems)
-    void submitSceneLights(const std::shared_ptr<Scene>& scene);
+    void submitSceneLights(const std::shared_ptr<RenderScene>& scene);
 
     // Batch rendering helpers
     void initBatchRendering();
@@ -531,7 +531,7 @@ private:
 
     // Last staged/drawn scene — kept for the ImGui Scene Materials / Scene
     // Lights editors (the panels edit shared Scene data, like native).
-    std::shared_ptr<Scene> currentScene;
+    std::shared_ptr<RenderScene> currentScene;
 
     // Texture cache (path -> TextureId)
     std::unordered_map<std::string, TextureId> textureCache;
