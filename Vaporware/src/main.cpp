@@ -43,6 +43,8 @@ static void setupCustomDrawers(Vapor::SceneInspector& inspector) {
     inspector.registerComponent<Vapor::SpotLightComponent>("Spot Light");
     inspector.registerComponent<Vapor::RectLightComponent>("Rect Light");
     inspector.registerComponent<Vapor::DirectionalLightComponent>("Directional Light");
+    inspector.registerComponent<Vapor::SunComponent>("Sun");
+    inspector.registerComponent<Vapor::TimeOfDayComponent>("Time of Day");
     inspector.registerComponent<CharacterIntent>("Character Intent");
     inspector.registerComponent<CharacterControllerComponent>("Character Controller");
     inspector.registerComponent<GrabbableComponent>("Grabbable");
@@ -70,6 +72,29 @@ static void setupCustomDrawers(Vapor::SceneInspector& inspector) {
                 ImGui::DragFloat("size", &c->size, 0.005f, 0.005f, 2.0f);
                 if (c->texture == 0xFFFFFFFFu) ImGui::LabelText("texture", "(procedural)");
                 else                           ImGui::LabelText("texture", "%u", c->texture);
+            }
+        }
+    });
+
+    // SkyComponent — custom drawer for the SkyType combo (auto-draw can't edit
+    // the enum) so the visible sky mode is switchable at runtime. Sets `dirty`
+    // so SkySystem re-pushes the change to the renderer.
+    inspector.registerCustomDrawer([](entt::registry& reg, entt::entity e) {
+        if (auto* c = reg.try_get<Vapor::SkyComponent>(e)) {
+            if (ImGui::CollapsingHeader("Sky", ImGuiTreeNodeFlags_DefaultOpen)) {
+                const char* types[] = { "Atmosphere", "HDRI", "Gradient" };
+                int t = static_cast<int>(c->type);
+                if (ImGui::Combo("type", &t, types, 3)) {
+                    c->type = static_cast<SkyType>(t);   // SkyType is global (render_data.hpp)
+                    c->dirty = true;
+                }
+                if (ImGui::DragFloat("exposure", &c->exposure, 0.01f, 0.01f, 10.0f)) c->dirty = true;
+                if (c->type == SkyType::Gradient) {
+                    if (ImGui::ColorEdit3("zenith",  &c->gradientZenith.x))  c->dirty = true;
+                    if (ImGui::ColorEdit3("horizon", &c->gradientHorizon.x)) c->dirty = true;
+                    if (ImGui::ColorEdit3("ground",  &c->gradientGround.x))  c->dirty = true;
+                }
+                ImGui::DragFloat("IBL sun threshold (deg)", &c->iblSunThresholdDeg, 0.1f, 0.0f, 90.0f);
             }
         }
     });
@@ -619,7 +644,10 @@ auto main(int argc, char* args[]) -> int {
         // Gather per-emitter draw packets (blend/texture/size). Runs even while
         // paused — frozen particles still need their draw list.
         Vapor::ParticleRenderSystem::update(registry, renderer.get());
-        LightGatherSystem::update(registry, scene.get());
+        Vapor::TimeOfDaySystem::update(registry, deltaTime);  // moves the sun; before gather
+        Vapor::LightGatherSystem::update(registry, scene.get());
+        Vapor::SkySystem::update(registry, renderer.get());
+        Vapor::WindSystem::update(registry, renderer.get());
         FlipbookSystem::update(registry, deltaTime);
         SpriteRenderSystem::update(registry, renderer.get(), &resourceManager);
 

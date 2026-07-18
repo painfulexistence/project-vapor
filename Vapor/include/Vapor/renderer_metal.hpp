@@ -501,6 +501,9 @@ public:
     void setParticleForceField(const ParticleForceField& field) override;
     void setParticleSimPaused(bool paused) override { m_particleSimPaused = paused; }
     void setParticleVisible(bool visible) override { particleVisible = visible; }
+    void setSky(const SkyRenderData& sky) override;
+    void setWind(const WindRenderData& wind) override;
+    void requestIBLUpdate() override { iblNeedsUpdate = true; }
 
     // ===== Font Rendering API =====
     FontHandle loadFont(const std::string& path, float baseSize) override;
@@ -783,6 +786,11 @@ protected:
     bool volumetricCloudsEnabled = false;
     bool m_supportsRaytracing = false;
     VolumetricCloudData volumetricCloudSettings;
+
+    // Shared wind magnitude from the ECS WindFieldComponent (via setWind).
+    // Multiplies each medium's per-medium windSpeed coefficient. Defaults to 1.0
+    // so scenes without a WindFieldComponent keep the panel-set scroll speeds.
+    float m_windStrength = 1.0f;
 
     // Sun Flare resources
     NS::SharedPtr<MTL::RenderPipelineState> sunFlarePipeline;

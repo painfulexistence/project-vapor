@@ -239,6 +239,24 @@ public:
     // without per-material particle draws (legacy Metal) ignore this.
     virtual void setParticleDrawList(const std::vector<ParticleDrawPacket>& draws) {}
 
+    // Sky/atmosphere description resolved from the ECS SkyComponent by SkySystem.
+    // Pushed only when the component changes. The sun is not included here — it
+    // is light-driven (see LightGatherSystem).
+    virtual void setSky(const SkyRenderData& sky) {}
+
+    // Shared wind resolved from the ECS WindFieldComponent by WindSystem. Sets
+    // the wind DIRECTION consumed by the cloud (and Metal fog) passes; per-medium
+    // scroll speed stays local to each effect. Pushed only when a WindFieldComponent
+    // exists — otherwise the backends keep their panel-set wind.
+    virtual void setWind(const WindRenderData& wind) {}
+
+    // Request a rebake of the environment IBL (sky capture -> irradiance /
+    // prefilter). SkySystem calls this when the sun has moved far enough to
+    // restale the captured environment. Both backends satisfy it identically by
+    // setting their iblNeedsUpdate flag, so the throttle decision lives in one
+    // place (the ECS layer), not duplicated per backend.
+    virtual void requestIBLUpdate() {}
+
 protected:
     std::function<void()> m_imGuiCallback;
     std::function<void()> m_engineWindowCallback;

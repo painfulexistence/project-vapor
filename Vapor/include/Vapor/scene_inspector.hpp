@@ -12,6 +12,7 @@
 #include <glm/gtx/euler_angles.hpp>
 #include <span>
 #include <string>
+#include <type_traits>
 #include <unordered_map>
 #include <vector>
 
@@ -100,10 +101,23 @@ namespace Vapor {
             entry.displayName = displayName;
             entry.hasComponent = [](entt::registry& reg, entt::entity e) { return reg.all_of<T>(e); };
             entry.draw = [dn = std::string(displayName)](entt::registry& reg, entt::entity e) {
-                if (auto* c = reg.try_get<T>(e)) {
-                    ImGui::PushID(static_cast<int>(entt::type_hash<T>::value()));
-                    if (ImGui::CollapsingHeader(dn.c_str(), ImGuiTreeNodeFlags_DefaultOpen)) drawComponentFields(*c);
-                    ImGui::PopID();
+                // Empty tag components (e.g. SunComponent) have no per-entity
+                // instance under EnTT's empty-type optimization, so try_get<T>()
+                // would form a pointer-to-void and fail to compile. Draw a
+                // header-only row when the tag is present.
+                if constexpr (std::is_empty_v<T>) {
+                    if (reg.all_of<T>(e)) {
+                        ImGui::PushID(static_cast<int>(entt::type_hash<T>::value()));
+                        ImGui::CollapsingHeader(dn.c_str(), ImGuiTreeNodeFlags_Leaf | ImGuiTreeNodeFlags_DefaultOpen);
+                        ImGui::PopID();
+                    }
+                } else {
+                    if (auto* c = reg.try_get<T>(e)) {
+                        ImGui::PushID(static_cast<int>(entt::type_hash<T>::value()));
+                        if (ImGui::CollapsingHeader(dn.c_str(), ImGuiTreeNodeFlags_DefaultOpen))
+                            drawComponentFields(*c);
+                        ImGui::PopID();
+                    }
                 }
             };
             if (addable) {

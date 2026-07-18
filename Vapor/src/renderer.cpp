@@ -197,6 +197,15 @@ void Renderer::initialize(std::unique_ptr<RHI> rhiPtr, GraphicsBackend backendTy
         atmosphereDataBuffer = rhi->createBuffer(atmoDesc);
         rhi->updateBuffer(atmosphereDataBuffer, &atmosphereData, 0, sizeof(atmosphereData));
 
+        // Gradient sky colors (SkyType::Gradient); re-uploaded by setSky. Same
+        // unslotted single-buffer pattern as the atmosphere params above.
+        BufferDesc gradDesc;
+        gradDesc.size = sizeof(GradientRenderData);
+        gradDesc.usage = BufferUsage::Uniform;
+        gradDesc.memoryUsage = MemoryUsage::CPUtoGPU;
+        gradientDataBuffer = rhi->createBuffer(gradDesc);
+        rhi->updateBuffer(gradientDataBuffer, &gradientData, 0, sizeof(gradientData));
+
         BufferDesc lsDesc;
         lsDesc.size = sizeof(LightScatteringRenderData);
         lsDesc.usage = BufferUsage::Uniform;
@@ -342,6 +351,14 @@ void Renderer::initialize(std::unique_ptr<RHI> rhiPtr, GraphicsBackend backendTy
         bd.format = PixelFormat::RGBA16_FLOAT;
         bd.usage = TextureUsage::RenderTarget | TextureUsage::Sampled;
         brdfLUTTex = rhi->createTexture(bd);
+
+        // IBL debug: 2D equirect unwrap of environmentCubemap for ImGui.
+        TextureDesc pd;
+        pd.width = 512;
+        pd.height = 256;
+        pd.format = PixelFormat::RGBA16_FLOAT;
+        pd.usage = TextureUsage::RenderTarget | TextureUsage::Sampled;
+        iblPreviewRT = rhi->createTexture(pd);
     }
 
     // Empty TLAS on RT-capable backends; instances are refit/rebuilt per frame
@@ -1031,6 +1048,8 @@ void Renderer::setupDefaultRenderGraph() {
     // IBL-from-sky capture (runs once, refreshed via iblNeedsUpdate).
     renderGraph.addPass("IBLCapture",
         [](Renderer& r) { r.iblCapturePass(); });
+    renderGraph.addPass("IBLPreview",
+        [](Renderer& r) { r.iblPreviewPass(); });
 
     renderGraph.addPass("BuildAccelStructures",
         [](Renderer& r) { r.buildAccelerationStructures(); }, PassFlags::RequiresRaytracing);
@@ -1662,7 +1681,7 @@ void Renderer::mainRenderPass() {
         rhi->setFragmentBytes(&mainDebugFlags, sizeof(Uint32), 12);
         // Metal-via-RHI: real IBL outputs replace the neutral blacks —
         // irradiance(8), prefilter(9), brdfLUT(10).
-        if (!iblNeedsUpdate) {
+        if (m_iblReady) {
             if (irradianceMap.isValid()) rhi->setTexture(0, 8, irradianceMap, clampSampler);
             if (prefilterMap.isValid()) rhi->setTexture(0, 9, prefilterMap, clampSampler);
             if (brdfLUTTex.isValid()) rhi->setTexture(0, 10, brdfLUTTex, clampSampler);
@@ -1769,7 +1788,7 @@ void Renderer::mainRenderPass() {
             if (bindlessSystemTable.isValid()) {
                 TextureHandle whiteTex = textures[defaultWhiteTexture].handle;
                 TextureHandle blackTex = textures[defaultBlackTexture].handle;
-                const bool iblReady = !iblNeedsUpdate;
+                const bool iblReady = m_iblReady;
                 const TextureHandle sys[10] = {
                     (aoEnabled && aoRT.isValid()) ? aoRT : whiteTex,                     // 0 texAO
                     (capabilities.raytracing && shadowRT.isValid()) ? shadowRT : whiteTex, // 1 texShadow
@@ -1934,7 +1953,6 @@ void Renderer::loadHDRI(const std::string& path) {
 }
 
 void Renderer::iblCapturePass() {
-    if (!iblNeedsUpdate) return;
     if (!irradiancePipeline.isValid() || !prefilterPipeline.isValid() || !brdfLUTPipeline.isValid()) {
         return;
     }
@@ -1944,32 +1962,45 @@ void Renderer::iblCapturePass() {
                                 equirectToCubemapPipeline.isValid();
     if (!haveHDRISource && !skyCapturePipeline.isValid()) return;
 
-    // Fill all 42 capture slots up front (race-free per-draw offsets).
-    const glm::mat4 captureViews[6] = {
-        glm::lookAt(glm::vec3(0), glm::vec3(1, 0, 0),  glm::vec3(0, -1, 0)),
-        glm::lookAt(glm::vec3(0), glm::vec3(-1, 0, 0), glm::vec3(0, -1, 0)),
-        glm::lookAt(glm::vec3(0), glm::vec3(0, 1, 0),  glm::vec3(0, 0, 1)),
-        glm::lookAt(glm::vec3(0), glm::vec3(0, -1, 0), glm::vec3(0, 0, -1)),
-        glm::lookAt(glm::vec3(0), glm::vec3(0, 0, 1),  glm::vec3(0, -1, 0)),
-        glm::lookAt(glm::vec3(0), glm::vec3(0, 0, -1), glm::vec3(0, -1, 0)),
-    };
-    const glm::mat4 captureProj = glm::perspective(glm::radians(90.0f), 1.0f, 0.1f, 10.0f);
-    IBLCaptureRenderData slots[42];
-    for (Uint32 f = 0; f < 6; f++) {
-        slots[f].viewProj = captureProj * captureViews[f];
-        slots[f].faceIndex = f;
-        slots[6 + f].faceIndex = f;  // irradiance
-    }
-    for (Uint32 m = 0; m < PREFILTER_MIP_LEVELS; m++) {
-        for (Uint32 f = 0; f < 6; f++) {
-            auto& s = slots[12 + m * 6 + f];
-            s.faceIndex = f;
-            s.roughness = float(m) / float(PREFILTER_MIP_LEVELS - 1);
-        }
-    }
-    rhi->updateBuffer(iblCaptureDataBuffer, slots, 0, sizeof(slots));
-    const size_t stride = sizeof(IBLCaptureRenderData);
+    // Start a new amortized bake when one is requested and we're idle. The 42
+    // cube-face capture/convolve is spread one stage per frame: doing it all in a
+    // single frame stalls the GPU (~a hitch), and with a moving sun that fired
+    // roughly every second. Requests arriving mid-bake are picked up after it
+    // finishes (iblNeedsUpdate is consumed at the start).
+    if (m_iblBakeStage < 0) {
+        if (!iblNeedsUpdate) return;
 
+        // Fill all 42 capture slots up front into the stable capture buffer;
+        // every amortized stage reads from it.
+        const glm::mat4 captureViews[6] = {
+            glm::lookAt(glm::vec3(0), glm::vec3(1, 0, 0),  glm::vec3(0, -1, 0)),
+            glm::lookAt(glm::vec3(0), glm::vec3(-1, 0, 0), glm::vec3(0, -1, 0)),
+            glm::lookAt(glm::vec3(0), glm::vec3(0, 1, 0),  glm::vec3(0, 0, 1)),
+            glm::lookAt(glm::vec3(0), glm::vec3(0, -1, 0), glm::vec3(0, 0, -1)),
+            glm::lookAt(glm::vec3(0), glm::vec3(0, 0, 1),  glm::vec3(0, -1, 0)),
+            glm::lookAt(glm::vec3(0), glm::vec3(0, 0, -1), glm::vec3(0, -1, 0)),
+        };
+        const glm::mat4 captureProj = glm::perspective(glm::radians(90.0f), 1.0f, 0.1f, 10.0f);
+        IBLCaptureRenderData slots[42];
+        for (Uint32 f = 0; f < 6; f++) {
+            slots[f].viewProj = captureProj * captureViews[f];
+            slots[f].faceIndex = f;
+            slots[6 + f].faceIndex = f;  // irradiance
+        }
+        for (Uint32 m = 0; m < PREFILTER_MIP_LEVELS; m++) {
+            for (Uint32 f = 0; f < 6; f++) {
+                auto& s = slots[12 + m * 6 + f];
+                s.faceIndex = f;
+                s.roughness = float(m) / float(PREFILTER_MIP_LEVELS - 1);
+            }
+        }
+        rhi->updateBuffer(iblCaptureDataBuffer, slots, 0, sizeof(slots));
+
+        m_iblBakeStage = 0;
+        iblNeedsUpdate = false;  // consumed; a request during the bake re-triggers after
+    }
+
+    const size_t stride = sizeof(IBLCaptureRenderData);
     auto faceDraw = [&](const char* name, PipelineHandle pipe, TextureHandle target,
                         Uint32 slot, Uint32 face, Uint32 mip, bool bindEnv, bool bindAtmo,
                         bool bindCaptureFrag) {
@@ -1993,48 +2024,80 @@ void Renderer::iblCapturePass() {
         rhi->endRenderPass();
     };
 
-    // Fill the environment cubemap from the HDRI equirect map when one is loaded,
-    // otherwise from the procedural sky. Everything downstream (irradiance /
-    // prefilter / BRDF LUT) is identical.
     const bool useHDRI = (iblSource == IBLSource::HDRI) && equirectHDRITexture.isValid() &&
                          equirectToCubemapPipeline.isValid();
-    for (Uint32 f = 0; f < 6; f++) {
-        if (useHDRI) {
+
+    // One stage per frame.
+    if (m_iblBakeStage == 0) {
+        // Environment capture (HDRI equirect->cube, or procedural sky) + mips.
+        for (Uint32 f = 0; f < 6; f++) {
+            if (useHDRI) {
+                RenderPassDesc rp;
+                rp.name = "EquirectToCubemap";
+                rp.colorAttachments.push_back(environmentCubemap);
+                rp.clearColors.push_back(glm::vec4(0, 0, 0, 1));
+                rp.loadColor.push_back(false);
+                rp.colorArrayLayer = f;
+                rp.colorMipLevel = 0;
+                rhi->beginRenderPass(rp);
+                rhi->bindPipeline(equirectToCubemapPipeline);
+                rhi->setVertexBuffer(0, iblCaptureDataBuffer, f * stride, stride);  // faceIndex slot
+                rhi->setTexture(0, 0, equirectHDRITexture, clampSampler);
+                rhi->draw(3, 1, 0, 0);
+                rhi->endRenderPass();
+            } else {
+                faceDraw("SkyCapture", skyCapturePipeline, environmentCubemap, f, f, 0, false, true, false);
+            }
+        }
+        rhi->generateMipmaps(environmentCubemap);
+        // BRDF LUT is view-independent — bake it just once, not every rebake.
+        if (!m_brdfBaked) {
             RenderPassDesc rp;
-            rp.name = "EquirectToCubemap";
-            rp.colorAttachments.push_back(environmentCubemap);
+            rp.name = "BRDFLUT";
+            rp.colorAttachments.push_back(brdfLUTTex);
             rp.clearColors.push_back(glm::vec4(0, 0, 0, 1));
             rp.loadColor.push_back(false);
-            rp.colorArrayLayer = f;
-            rp.colorMipLevel = 0;
             rhi->beginRenderPass(rp);
-            rhi->bindPipeline(equirectToCubemapPipeline);
-            rhi->setVertexBuffer(0, iblCaptureDataBuffer, f * stride, stride);  // faceIndex slot
-            rhi->setTexture(0, 0, equirectHDRITexture, clampSampler);
+            rhi->bindPipeline(brdfLUTPipeline);
             rhi->draw(3, 1, 0, 0);
             rhi->endRenderPass();
-        } else {
-            faceDraw("SkyCapture", skyCapturePipeline, environmentCubemap, f, f, 0, false, true, false);
+            m_brdfBaked = true;
         }
-    }
-    rhi->generateMipmaps(environmentCubemap);
-    for (Uint32 f = 0; f < 6; f++)
-        faceDraw("IrradianceConv", irradiancePipeline, irradianceMap, 6 + f, f, 0, true, false, false);
-    for (Uint32 m = 0; m < PREFILTER_MIP_LEVELS; m++)
+    } else if (m_iblBakeStage == 1) {
+        // Diffuse irradiance convolution.
+        for (Uint32 f = 0; f < 6; f++)
+            faceDraw("IrradianceConv", irradiancePipeline, irradianceMap, 6 + f, f, 0, true, false, false);
+    } else {
+        // Specular prefilter, one roughness mip per frame.
+        Uint32 m = static_cast<Uint32>(m_iblBakeStage - 2);
         for (Uint32 f = 0; f < 6; f++)
             faceDraw("PrefilterEnv", prefilterPipeline, prefilterMap, 12 + m * 6 + f, f, m, true, false, true);
-    {
-        RenderPassDesc rp;
-        rp.name = "BRDFLUT";
-        rp.colorAttachments.push_back(brdfLUTTex);
-        rp.clearColors.push_back(glm::vec4(0, 0, 0, 1));
-        rp.loadColor.push_back(false);
-        rhi->beginRenderPass(rp);
-        rhi->bindPipeline(brdfLUTPipeline);
-        rhi->draw(3, 1, 0, 0);
-        rhi->endRenderPass();
     }
-    iblNeedsUpdate = false;
+
+    if (++m_iblBakeStage >= int(2 + PREFILTER_MIP_LEVELS)) {
+        m_iblBakeStage = -1;  // bake complete
+        m_iblReady = true;    // IBL maps are now valid to sample
+    }
+}
+
+void Renderer::iblPreviewPass() {
+    // IBL debug: unwrap environmentCubemap into the 2D equirect RT so ImGui can
+    // show it. Cheap (one 512x256 fullscreen draw); only runs once the IBL has
+    // been baked at least once.
+    if (!m_iblPreviewEnabled || !m_iblReady || !iblPreviewPipeline.isValid() ||
+        !iblPreviewRT.isValid() || !environmentCubemap.isValid()) {
+        return;
+    }
+    RenderPassDesc rp;
+    rp.name = "IBLPreview";
+    rp.colorAttachments.push_back(iblPreviewRT);
+    rp.clearColors.push_back(glm::vec4(0, 0, 0, 1));
+    rp.loadColor.push_back(false);
+    rhi->beginRenderPass(rp);
+    rhi->bindPipeline(iblPreviewPipeline);
+    rhi->setTexture(0, 0, environmentCubemap, clampSampler);  // samplerCube set2/binding0 (Vk) / texture(0) (Metal)
+    rhi->draw(3, 1, 0, 0);
+    rhi->endRenderPass();
 }
 
 // Depth + normal (+ albedo) pre-pass. Feeds the RT shadow/AO kernels (and,
@@ -3560,8 +3623,16 @@ void Renderer::bloomUpsamplePass() {
 // main pass left depth at the far plane). Runs after Main, before bloom, so the
 // bright sky/sun participate in bloom.
 void Renderer::skyAtmospherePass() {
-    if (!atmospherePipeline.isValid() || !colorRT.isValid() || !depthStencilRT.isValid() ||
-        !atmosphereDataBuffer.isValid()) {
+    // SkyType::HDRI samples the captured environment cubemap; everything else
+    // marches the procedural atmosphere. The cubemap path degrades to atmosphere
+    // where its pipeline/texture aren't available (e.g. the RHI-Metal path until
+    // its own slice), so this stays safe on every backend.
+    const bool useCubemapSky = (m_skyType == SkyType::HDRI) &&
+                               skyboxPipeline.isValid() && environmentCubemap.isValid();
+    const bool useGradientSky = (m_skyType == SkyType::Gradient) &&
+                                gradientPipeline.isValid() && gradientDataBuffer.isValid();
+    if (!useCubemapSky && !useGradientSky && !atmospherePipeline.isValid()) return;
+    if (!colorRT.isValid() || !depthStencilRT.isValid() || !atmosphereDataBuffer.isValid()) {
         return;
     }
     RenderPassDesc rp;
@@ -3571,14 +3642,33 @@ void Renderer::skyAtmospherePass() {
     rp.depthAttachment = depthStencilRT;
     rp.loadDepth = true;               // test against the scene depth (no writes)
     rhi->beginRenderPass(rp);
-    rhi->bindPipeline(atmospherePipeline);
-    if (backend == GraphicsBackend::Metal) {
-        // 3d_atmosphere.metal: camera at buffer(0), atmosphere at buffer(1).
-        rhi->setFragmentBuffer(0, cameraUniformBuffer, 0, sizeof(CameraRenderData));
-        rhi->setFragmentBuffer(1, atmosphereDataBuffer, 0, sizeof(AtmosphereRenderData));
+    if (useCubemapSky) {
+        rhi->bindPipeline(skyboxPipeline);
+        rhi->setTexture(0, 0, environmentCubemap, clampSampler);   // cube: set2/binding0 (Vk), texture(0) (Metal)
+        // 3d_skybox.metal reads camera at buffer(0); the GLSL twin at set1/binding3.
+        rhi->setFragmentBuffer(backend == GraphicsBackend::Metal ? 0 : 3,
+                               cameraUniformBuffer, 0, sizeof(CameraRenderData));
+    } else if (useGradientSky) {
+        rhi->bindPipeline(gradientPipeline);
+        if (backend == GraphicsBackend::Metal) {
+            // 3d_gradient.metal: camera at buffer(0), gradient colors at buffer(1).
+            rhi->setFragmentBuffer(0, cameraUniformBuffer, 0, sizeof(CameraRenderData));
+            rhi->setFragmentBuffer(1, gradientDataBuffer, 0, sizeof(GradientRenderData));
+        } else {
+            // Gradient.frag: colors at set0/binding0, camera at set1/binding3.
+            rhi->setFragmentBuffer(0, gradientDataBuffer, 0, sizeof(GradientRenderData));
+            rhi->setFragmentBuffer(3, cameraUniformBuffer, 0, sizeof(CameraRenderData));
+        }
     } else {
-        rhi->setFragmentBuffer(0, atmosphereDataBuffer, 0, sizeof(AtmosphereRenderData));
-        rhi->setFragmentBuffer(3, cameraUniformBuffer, 0, sizeof(CameraRenderData));
+        rhi->bindPipeline(atmospherePipeline);
+        if (backend == GraphicsBackend::Metal) {
+            // 3d_atmosphere.metal: camera at buffer(0), atmosphere at buffer(1).
+            rhi->setFragmentBuffer(0, cameraUniformBuffer, 0, sizeof(CameraRenderData));
+            rhi->setFragmentBuffer(1, atmosphereDataBuffer, 0, sizeof(AtmosphereRenderData));
+        } else {
+            rhi->setFragmentBuffer(0, atmosphereDataBuffer, 0, sizeof(AtmosphereRenderData));
+            rhi->setFragmentBuffer(3, cameraUniformBuffer, 0, sizeof(CameraRenderData));
+        }
     }
     rhi->draw(3, 1, 0, 0);
     rhi->endRenderPass();
@@ -3655,6 +3745,11 @@ void Renderer::volumetricFogPass() {
     fog.sunDirection = glm::normalize(atmosphereData.sunDirection);
     fog.sunColor = atmosphereData.sunColor;
     fog.sunIntensity = atmosphereData.sunIntensity;
+    // Animate the density-noise scroll; the per-medium windSpeed coefficient is
+    // scaled by the shared wind strength (windDirection is carried from setWind).
+    fogSettings.time += 1.0f / 60.0f;
+    fog.time = fogSettings.time;
+    fog.windSpeed = fogSettings.windSpeed * m_windStrength;
     rhi->updateBuffer(fogDataBuffer, &fog, 0, sizeof(fog));
 
     RenderPassDesc rp;
@@ -3711,6 +3806,11 @@ void Renderer::volumetricFogPass() {
         mfd.nearPlane = currentCamera.nearPlane;
         mfd.farPlane = currentCamera.farPlane;
         mfd.screenSize = glm::vec2(rhi->getSwapchainWidth(), rhi->getSwapchainHeight());
+        mfd.noiseScale = fog.noiseScale;
+        mfd.noiseIntensity = fog.noiseIntensity;
+        mfd.windSpeed = fog.windSpeed;   // already scaled by wind strength
+        mfd.time = fog.time;
+        mfd.windDirection = glm::vec4(fog.windDirection, 0.0f);
         rhi->setFragmentBytes(&mfd, sizeof(mfd), 0);
         rhi->setFragmentBuffer(1, cameraUniformBuffer, 0, sizeof(CameraRenderData));
         // Volumetric raymarch inputs: PSSM cascades for sun shafts + the full
@@ -4118,6 +4218,43 @@ void Renderer::setParticleForceField(const ParticleForceField& field) {
         m_forceField.attractors.resize(MAX_PARTICLE_ATTRACTORS);
 }
 
+void Renderer::setSky(const SkyRenderData& sky) {
+    // Visible sky mode: HDRI samples environmentCubemap in skyAtmospherePass;
+    // Atmosphere (and, until S1, Gradient) march the procedural atmosphere.
+    m_skyType = sky.type;
+    // Push the atmosphere tunables into the CPU copy that is re-uploaded every
+    // frame; the sun fields stay driven by directionalLights[0] (see the
+    // per-frame sync in stage()/update()).
+    atmosphereData.rayleighCoefficients  = sky.rayleighCoefficients;
+    atmosphereData.rayleighScaleHeight   = sky.rayleighScaleHeight;
+    atmosphereData.mieCoefficient        = sky.mieCoefficient;
+    atmosphereData.mieScaleHeight        = sky.mieScaleHeight;
+    atmosphereData.miePreferredDirection = sky.miePreferredDirection;
+    atmosphereData.planetRadius          = sky.planetRadius;
+    atmosphereData.atmosphereRadius      = sky.atmosphereRadius;
+    atmosphereData.exposure              = sky.exposure;
+    atmosphereData.groundColor           = sky.groundColor;
+    // Gradient sky colors (used when type == Gradient). setSky only runs when the
+    // SkyComponent is dirty, so re-upload the small unslotted buffer directly.
+    gradientData.zenith  = glm::vec4(sky.gradientZenith, 1.0f);
+    gradientData.horizon = glm::vec4(sky.gradientHorizon, 1.0f);
+    gradientData.ground  = glm::vec4(sky.gradientGround, 1.0f);
+    if (gradientDataBuffer.isValid()) {
+        rhi->updateBuffer(gradientDataBuffer, &gradientData, 0, sizeof(gradientData));
+    }
+    iblNeedsUpdate = true;  // re-bake IBL from the new sky
+}
+
+void Renderer::setWind(const WindRenderData& wind) {
+    // Shared wind direction drives both the cloud and fog scroll; the shared
+    // strength scales each medium's per-medium windSpeed coefficient at fill
+    // time. Fog now has wind-animated density noise (VolumetricFog.frag), at
+    // parity with the native/Metal simpleFogFragment.
+    cloudSettings.windDirection = wind.direction;
+    fogSettings.windDirection = wind.direction;
+    m_windStrength = wind.strength;
+}
+
 void Renderer::setParticleDrawList(const std::vector<ParticleDrawPacket>& draws) {
     m_particleDrawList = draws;
     if (m_particleDrawList.size() > MAX_PARTICLE_DRAWS)
@@ -4149,7 +4286,9 @@ void Renderer::volumetricCloudPass() {
     cloudSettings.cameraPosition = currentCamera.position;
     cloudSettings.sunDirection = glm::normalize(atmosphereData.sunDirection);
     cloudSettings.sunColor = atmosphereData.sunColor;
-    cloudSettings.windOffset += cloudSettings.windDirection * cloudSettings.windSpeed * 0.016f;
+    // windSpeed is the cloud's per-medium scroll coefficient; the shared wind
+    // strength scales it so the WindFieldComponent drives the scroll rate.
+    cloudSettings.windOffset += cloudSettings.windDirection * (cloudSettings.windSpeed * m_windStrength) * 0.016f;
     cloudSettings.time += 1.0f / 60.0f;
     cloudSettings.frameIndex = frameCounter;
     cloudSettings.screenSize = glm::vec2(std::max(1u, rhi->getSwapchainWidth() / 4),
@@ -5134,10 +5273,13 @@ void Renderer::createRenderPipeline() {
                 d.colorAttachmentFormats = { PixelFormat::RGBA16_FLOAT };
                 return rhi->createPipeline(d);
             };
-            skyCapturePipeline = makeVertFragPipeline("shaders/IblCubeface.vert.spv", "shaders/SkyCapture.frag.spv",    skyCaptureVS, skyCaptureFS);
-            irradiancePipeline = makeVertFragPipeline("shaders/IblCubeface.vert.spv", "shaders/IrradianceConv.frag.spv", irradianceVS, irradianceFS);
-            prefilterPipeline  = makeVertFragPipeline("shaders/IblCubeface.vert.spv", "shaders/PrefilterEnv.frag.spv",   prefilterVS, prefilterFS);
-            brdfLUTPipeline    = makeVertFragPipeline("shaders/BrdfLut.vert.spv",     "shaders/BrdfLut.frag.spv",        brdfVS, brdfFS);
+            // skyCapture is the atmosphere->cubemap IBL source. It shares the
+            // unified IBLCubeFace.vert with the equirect/irradiance/prefilter
+            // passes built below — irradiance/prefilter/brdfLUT are created there,
+            // NOT here. This block previously rebuilt them with the older
+            // Irradiance/Prefilter/Brdf shaders and had them immediately
+            // overwritten below, leaking three pipelines every startup.
+            skyCapturePipeline = makeVertFragPipeline("shaders/IBLCubeFace.vert.spv", "shaders/SkyCapture.frag.spv", skyCaptureVS, skyCaptureFS);
 
             // Sky/atmosphere: fullscreen into the HDR colorRT, depth-tested
             // (LessOrEqual at z=1.0) so it only fills background pixels; no
@@ -5166,6 +5308,28 @@ void Renderer::createRenderPipeline() {
                 ad.depthAttachmentFormat = PixelFormat::Depth32Float;
                 ad.colorAttachmentFormats = { PixelFormat::RGBA16_FLOAT };
                 atmospherePipeline = rhi->createPipeline(ad);
+
+                // Skybox: same fullscreen depth-tested setup, but samples the
+                // environment cubemap (SkyType::HDRI). Reuses Sky.vert.
+                std::string skyboxFragCode = readFile("shaders/Skybox.frag.spv");
+                if (!skyboxFragCode.empty()) {
+                    ShaderDesc sfd; sfd.stage = ShaderStage::Fragment; sfd.code = skyboxFragCode.data(); sfd.codeSize = skyboxFragCode.size(); sfd.entryPoint = "main";
+                    skyboxFragmentShader = rhi->createShader(sfd);
+                    PipelineDesc sd = ad;               // same fullscreen/depth state as atmosphere
+                    sd.fragmentShader = skyboxFragmentShader;
+                    skyboxPipeline = rhi->createPipeline(sd);
+                }
+
+                // Gradient: same fullscreen depth-tested setup, blends a
+                // zenith/horizon/ground gradient (SkyType::Gradient). Reuses Sky.vert.
+                std::string gradientFragCode = readFile("shaders/Gradient.frag.spv");
+                if (!gradientFragCode.empty()) {
+                    ShaderDesc gfd; gfd.stage = ShaderStage::Fragment; gfd.code = gradientFragCode.data(); gfd.codeSize = gradientFragCode.size(); gfd.entryPoint = "main";
+                    gradientFragmentShader = rhi->createShader(gfd);
+                    PipelineDesc gd = ad;               // same fullscreen/depth state as atmosphere
+                    gd.fragmentShader = gradientFragmentShader;
+                    gradientPipeline = rhi->createPipeline(gd);
+                }
             }
 
             // God rays: fullscreen light-scattering march into the half-res RT.
@@ -5245,6 +5409,8 @@ void Renderer::createRenderPipeline() {
             irradiancePipeline        = makeIblVkPipeline("shaders/IBLCubeFace.vert.spv", "shaders/IBLIrradiance.frag.spv", irradianceVS, irradianceFS);
             prefilterPipeline         = makeIblVkPipeline("shaders/IBLCubeFace.vert.spv", "shaders/IBLPrefilter.frag.spv",  prefilterVS, prefilterFS);
             brdfLUTPipeline           = makeIblVkPipeline("shaders/IBLBRDF.vert.spv",     "shaders/IBLBRDF.frag.spv",        brdfVS, brdfFS);
+            // IBL debug: cubemap -> equirect 2D RT (FullScreen.vert + IblEquirectPreview.frag).
+            iblPreviewPipeline        = makeIblVkPipeline("shaders/FullScreen.vert.spv", "shaders/IblEquirectPreview.frag.spv", iblPreviewVertexShader, iblPreviewFragmentShader);
 
             // Volumetric clouds: quarter-res raymarch, temporal resolve, and
             // full-res composite — all fullscreen RGBA16F passes.
@@ -5577,6 +5743,17 @@ void Renderer::createRenderPipeline() {
                                                BlendMode::Opaque, { PixelFormat::RGBA16_FLOAT }, false, CompareOp::Less);
         atmospherePipeline = makeMetalPass("shaders/3d_atmosphere.metal", "vertexMain", "fragmentMain",
                                            BlendMode::Opaque, { PixelFormat::RGBA16_FLOAT }, true, CompareOp::LessOrEqual);
+        // Skybox: visible sky from environmentCubemap (SkyType::HDRI), same
+        // fullscreen depth-tested state as the atmosphere pass.
+        skyboxPipeline = makeMetalPass("shaders/3d_skybox.metal", "vertexMain", "fragmentMain",
+                                       BlendMode::Opaque, { PixelFormat::RGBA16_FLOAT }, true, CompareOp::LessOrEqual);
+        // Gradient: zenith/horizon/ground gradient sky (SkyType::Gradient), same
+        // fullscreen depth-tested state as the atmosphere pass.
+        gradientPipeline = makeMetalPass("shaders/3d_gradient.metal", "vertexMain", "fragmentMain",
+                                         BlendMode::Opaque, { PixelFormat::RGBA16_FLOAT }, true, CompareOp::LessOrEqual);
+        // IBL debug: cubemap -> equirect 2D RT.
+        iblPreviewPipeline = makeMetalPass("shaders/3d_ibl_equirect.metal", "vertexMain", "fragmentMain",
+                                           BlendMode::Opaque, { PixelFormat::RGBA16_FLOAT }, false, CompareOp::Less);
         lightScatteringPipeline = makeMetalPass("shaders/3d_light_scattering.metal", "vertexMain", "fragmentMain",
                                                 BlendMode::Opaque, { PixelFormat::RGBA16_FLOAT }, false, CompareOp::Less);
         volumetricFogPipeline = makeMetalPass("shaders/3d_volumetric_fog.metal", "volumetricFogVertex", "simpleFogFragment",
@@ -6611,6 +6788,17 @@ void Renderer::drawGraphicsImGui() {
         }
         if (ImGui::Button("Refresh IBL")) iblNeedsUpdate = true;
         if (ch) iblNeedsUpdate = true;  // sky changed -> recapture IBL (native behavior)
+        // Debug: the baked environment cubemap, unwrapped to equirect. Off by
+        // default — the pass stalls (single-buffered RT read by ImGui), so only
+        // render + show it while this is ticked.
+        ImGui::Checkbox("Show environment cubemap (equirect)", &m_iblPreviewEnabled);
+        if (m_iblPreviewEnabled && iblPreviewRT.isValid()) {
+            if (void* id = getImGuiTextureID(iblPreviewRT)) {
+                ImGui::Image((ImTextureID)(intptr_t)id, ImVec2(320, 160));
+            } else {
+                ImGui::TextDisabled("(IBL preview unavailable on this backend)");
+            }
+        }
         ImGui::TreePop();
     }
 
@@ -7675,7 +7863,7 @@ void Renderer::renderToTexture(
         } else {
             rhi->setFragmentBytes(&rttDebugFlags, sizeof(Uint32), 12);
             // Real IBL cubes: image-based ambience is view-independent.
-            if (!iblNeedsUpdate) {
+            if (m_iblReady) {
                 if (irradianceMap.isValid()) rhi->setTexture(0, 8, irradianceMap, clampSampler);
                 if (prefilterMap.isValid()) rhi->setTexture(0, 9, prefilterMap, clampSampler);
                 if (brdfLUTTex.isValid()) rhi->setTexture(0, 10, brdfLUTTex, clampSampler);
