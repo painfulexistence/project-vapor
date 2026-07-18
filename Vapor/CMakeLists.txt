@@ -210,7 +210,13 @@ configure_package_config_file(
 if(APPLE)
     set(PLATFORM_LIBS metal)
 endif()
-install(TARGETS Vapor ${PLATFORM_LIBS} mikktspace
+# Static PRIVATE deps surface in the exported INTERFACE_LINK_LIBRARIES
+# ($<LINK_ONLY:...>), so every such target must join the export set —
+# mikktspace already does; tinyusdz_static needs the same when enabled.
+if(VAPOR_USE_TINYUSDZ)
+    set(VAPOR_EXPORT_DEPS tinyusdz_static)
+endif()
+install(TARGETS Vapor ${PLATFORM_LIBS} mikktspace ${VAPOR_EXPORT_DEPS}
     EXPORT VaporTargets
     LIBRARY DESTINATION ${CMAKE_INSTALL_LIBDIR}
     ARCHIVE DESTINATION ${CMAKE_INSTALL_LIBDIR}
