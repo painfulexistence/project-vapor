@@ -7648,8 +7648,10 @@ void Renderer_Metal::draw(entt::registry& registry, std::shared_ptr<RenderScene>
 }
 
 auto Renderer_Metal::loadHDRI(const std::string& path) -> void {
-    // Load equirectangular HDR image on the CPU
+    // Load equirectangular HDR image on the CPU.
+    // loadHDRI logs and returns nullptr on failure — keep the sky as-is.
     auto img = AssetManager::loadHDRI(path);
+    if (!img || img->floatArray.empty()) return;
 
     // Create (or recreate) the 2D RGBA32Float texture for the equirect data
     auto texDesc = NS::TransferPtr(MTL::TextureDescriptor::alloc()->init());

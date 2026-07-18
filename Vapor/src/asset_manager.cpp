@@ -29,11 +29,19 @@
 
 using namespace Vapor;
 
+// Asset/IO failures return nullptr (with a log) rather than throwing: bad or
+// missing content must not take the engine down, and these also run on
+// ResourceManager worker threads where an escaped exception is fatal.
 auto AssetManager::loadImage(const std::string& filename) -> std::shared_ptr<Image> {
-    std::string fullPath = FileSystem::instance().resolvePathOrThrow(filename);
+    auto fullPath = FileSystem::instance().resolvePath(filename);
+    if (!fullPath) {
+        fmt::print(stderr, "loadImage '{}': not found in any search path\n", filename);
+        return nullptr;
+    }
     int width, height, numChannels;
-    if (!stbi_info(fullPath.c_str(), &width, &height, &numChannels)) {
-        throw std::runtime_error(fmt::format("Failed to load image at {}!\n", filename));
+    if (!stbi_info(fullPath->c_str(), &width, &height, &numChannels)) {
+        fmt::print(stderr, "loadImage '{}': {}\n", filename, stbi_failure_reason());
+        return nullptr;
     }
     int desiredChannels = 0;
     switch (numChannels) {
@@ -41,38 +49,40 @@ auto AssetManager::loadImage(const std::string& filename) -> std::shared_ptr<Ima
         desiredChannels = 1;
         break;
     case 3:
-        desiredChannels = 4;
-        break;
     case 4:
         desiredChannels = 4;
         break;
     default:
-        throw std::runtime_error(fmt::format("Unknown texture format at {}\n", filename));
-        break;
-    }
-    uint8_t* data = stbi_load(fullPath.c_str(), &width, &height, &numChannels, desiredChannels);
-    if (data) {
-        auto image = std::make_shared<Image>(Image{
-            .uri = filename,
-            .width = static_cast<Uint32>(width),
-            .height = static_cast<Uint32>(height),
-            .channelCount = static_cast<Uint32>(desiredChannels),
-            .byteArray = std::vector<Uint8>(data, data + width * height * desiredChannels) });
-        stbi_image_free(data);
-        return image;
-    } else {
-        stbi_image_free(data);
+        fmt::print(stderr, "loadImage '{}': unsupported channel count {}\n", filename, numChannels);
         return nullptr;
     }
+    uint8_t* data = stbi_load(fullPath->c_str(), &width, &height, &numChannels, desiredChannels);
+    if (!data) {
+        fmt::print(stderr, "loadImage '{}': {}\n", filename, stbi_failure_reason());
+        return nullptr;
+    }
+    auto image = std::make_shared<Image>(Image{
+        .uri = filename,
+        .width = static_cast<Uint32>(width),
+        .height = static_cast<Uint32>(height),
+        .channelCount = static_cast<Uint32>(desiredChannels),
+        .byteArray = std::vector<Uint8>(data, data + width * height * desiredChannels) });
+    stbi_image_free(data);
+    return image;
 }
 
 auto AssetManager::loadHDRI(const std::string& filename) -> std::shared_ptr<Vapor::HDRImage> {
-    std::string fullPath = FileSystem::instance().resolvePathOrThrow(filename);
+    auto fullPath = FileSystem::instance().resolvePath(filename);
+    if (!fullPath) {
+        fmt::print(stderr, "loadHDRI '{}': not found in any search path\n", filename);
+        return nullptr;
+    }
     int width, height, numChannels;
     // stbi_loadf decodes RGBE/HDR to linear float RGB(A)
-    float* data = stbi_loadf(fullPath.c_str(), &width, &height, &numChannels, 4);
+    float* data = stbi_loadf(fullPath->c_str(), &width, &height, &numChannels, 4);
     if (!data) {
-        throw std::runtime_error(fmt::format("Failed to load HDRI at {}: {}\n", filename, stbi_failure_reason()));
+        fmt::print(stderr, "loadHDRI '{}': {}\n", filename, stbi_failure_reason());
+        return nullptr;
     }
     auto img = std::make_shared<Vapor::HDRImage>(Vapor::HDRImage{
         .uri = filename,
@@ -94,15 +104,24 @@ auto AssetManager::loadOBJ(const std::string& filename, const std::string& mtl_b
     std::vector<tinyobj::material_t> materials;
     std::string err;
 
+    auto objPath = FileSystem::instance().resolvePath(filename);
+    if (!objPath) {
+        fmt::print(stderr, "loadOBJ '{}': not found in any search path\n", filename);
+        return nullptr;
+    }
+    std::optional<std::string> mtlPath;
+    if (!mtl_basedir.empty()) {
+        mtlPath = FileSystem::instance().resolvePath(mtl_basedir);
+        if (!mtlPath) {
+            fmt::print(stderr, "loadOBJ '{}': mtl basedir '{}' not found\n", filename, mtl_basedir);
+            return nullptr;
+        }
+    }
     if (!tinyobj::LoadObj(
-            &attrib,
-            &shapes,
-            &materials,
-            &err,
-            FileSystem::instance().resolvePathOrThrow(filename).c_str(),
-            mtl_basedir.empty() ? nullptr : FileSystem::instance().resolvePathOrThrow(mtl_basedir).c_str()
+            &attrib, &shapes, &materials, &err, objPath->c_str(), mtlPath ? mtlPath->c_str() : nullptr
         )) {
-        throw std::runtime_error(fmt::format("Failed to load model: {}", err));
+        fmt::print(stderr, "loadOBJ '{}': {}\n", filename, err);
+        return nullptr;
     }
 
     std::vector<std::shared_ptr<Material>> meshMaterials;

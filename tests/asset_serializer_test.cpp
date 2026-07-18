@@ -153,7 +153,7 @@ TEST_CASE("AssetSerializer - round-trip preserves stagedMeshTransforms", "[asset
             CHECK(lt[col][row] == Catch::Approx(worldTransform[col][row]).epsilon(1e-5f));
 }
 
-TEST_CASE("AssetSerializer - version mismatch throws", "[asset][serializer]") {
+TEST_CASE("AssetSerializer - version mismatch returns nullptr", "[asset][serializer]") {
     std::string testPath = "test_version_mismatch.bin";
     {
         std::ofstream file(testPath, std::ios::binary);
@@ -165,14 +165,31 @@ TEST_CASE("AssetSerializer - version mismatch throws", "[asset][serializer]") {
         archive(fakeName);
     }
 
-    REQUIRE_THROWS_AS(AssetSerializer::deserializeScene(testPath), std::runtime_error);
+    CHECK(AssetSerializer::deserializeScene(testPath) == nullptr);
+    std::remove(testPath.c_str());
+}
+
+TEST_CASE("AssetSerializer - corrupt or missing cache returns nullptr", "[asset][serializer]") {
+    // Missing file
+    CHECK(AssetSerializer::deserializeScene("no_such_cache.bin") == nullptr);
+
+    // Truncated file: correct version, then EOF mid-payload
+    std::string testPath = "test_truncated.bin";
+    {
+        std::ofstream file(testPath, std::ios::binary);
+        REQUIRE(file.is_open());
+        cereal::BinaryOutputArchive archive(file);
+        uint32_t version = AssetSerializer::SCENE_FORMAT_VERSION;
+        archive(version);
+    }
+    CHECK(AssetSerializer::deserializeScene(testPath) == nullptr);
     std::remove(testPath.c_str());
 }
 
 TEST_CASE("AssetSerializer - correct version passes", "[asset][serializer]") {
     auto scene = std::make_shared<RenderScene>("VersionOK");
     std::string testPath = "test_version_ok.bin";
-    AssetSerializer::serializeScene(scene, testPath);
-    REQUIRE_NOTHROW(AssetSerializer::deserializeScene(testPath));
+    REQUIRE(AssetSerializer::serializeScene(scene, testPath));
+    CHECK(AssetSerializer::deserializeScene(testPath) != nullptr);
     std::remove(testPath.c_str());
 }

@@ -1928,13 +1928,8 @@ void Renderer::mainRenderPass() {
 // Load an equirectangular HDR image as the IBL environment source. The actual
 // cubemap bake (irradiance/prefilter/BRDF LUT) happens later in iblCapturePass.
 void Renderer::loadHDRI(const std::string& path) {
-    std::shared_ptr<Vapor::HDRImage> img;
-    try {
-        img = AssetManager::loadHDRI(path);
-    } catch (const std::exception& e) {
-        fmt::print(stderr, "loadHDRI: {}\n", e.what());
-        return;
-    }
+    // loadHDRI logs and returns nullptr on failure — keep the sky as-is.
+    auto img = AssetManager::loadHDRI(path);
     if (!img || img->floatArray.empty()) return;
 
     // (Re)create the RGBA32F equirect source texture and upload the float pixels.
@@ -7962,6 +7957,10 @@ void Renderer::applyVignette(RenderTextureHandle target, float strength, float r
 // ============================================================================
 
 TextureHandle Renderer::createTexture(const std::shared_ptr<Vapor::Image>& img) {
+    if (!img) {
+        fmt::print(stderr, "createTexture: null image — returning invalid handle\n");
+        return {};
+    }
     TextureDesc desc;
     desc.width = img->width;
     desc.height = img->height;
