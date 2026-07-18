@@ -9,6 +9,9 @@
 #include <fmt/core.h>
 #include <functional>
 #include <glm/gtc/quaternion.hpp>
+#ifndef GLM_ENABLE_EXPERIMENTAL
+#define GLM_ENABLE_EXPERIMENTAL
+#endif
 #include <glm/gtx/euler_angles.hpp>
 #include <span>
 #include <string>

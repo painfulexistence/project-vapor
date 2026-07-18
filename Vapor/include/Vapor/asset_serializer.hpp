@@ -45,10 +45,11 @@ namespace cereal {
 
 class AssetSerializer {
 public:
-    // v2: geometry + material + AABB scene cache. (The meshlet/cluster-LOD data
-    // model exists on Mesh but is not serialized here — the mesh-shader draw path
-    // and its offline bake land in a separate change that will own the v3 bump.)
-    static constexpr uint32_t SCENE_FORMAT_VERSION = 2;
+    // v3: material names now serialize (the inspector's Scene Materials editor
+    // and the blueprint cook both want identity, not just factors). The
+    // meshlet/cluster-LOD data model exists on Mesh but is not serialized here —
+    // the mesh-shader draw path and its offline bake will own the next bump.
+    static constexpr uint32_t SCENE_FORMAT_VERSION = 3;
 
     static void serializeScene(const std::shared_ptr<RenderScene>& scene, const std::string& path);
     static std::shared_ptr<RenderScene> deserializeScene(const std::string& path);

@@ -173,7 +173,7 @@ void AssetSerializer::serializeMaterial(
         return;
     }
     archive(true);
-    // archive(material->name);
+    archive(material->name);
     archive(static_cast<int>(material->alphaMode));
     archive(material->alphaCutoff);
     archive(material->doubleSided);
@@ -224,7 +224,7 @@ auto AssetSerializer::deserializeMaterial(
         return nullptr;
     }
     auto material = std::make_shared<Material>();
-    // archive(material->name);
+    archive(material->name);
 
     int alphaModeInt;
     archive(alphaModeInt);
