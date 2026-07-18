@@ -1,12 +1,15 @@
 #include "scene_blueprint.hpp"
 
 #include "asset_manager.hpp"
+#include "asset_serializer.hpp"
 #include "components.hpp"
 #include "file_system.hpp"
 #include "render_scene.hpp"
 
 #include <algorithm>
 #include <cstdint>
+#include <cstring>
+#include <filesystem>
 #include <fmt/core.h>
 #include <fstream>
 #include <glm/gtc/quaternion.hpp>
@@ -127,6 +130,95 @@ void appendBlueprint(SceneBlueprint& dst, SceneBlueprint&& sub, int parentIndex)
     std::move(sub.sources.begin(), sub.sources.end(), std::back_inserter(dst.sources));
 }
 
+// ── Scene cook (.vscene) ─────────────────────────────────────────────────────
+// The cooked artifact is the fully-expanded blueprint (references resolved,
+// payload decoded) serialized next to the scene JSON, guarded by a hash over
+// every input that shaped it: the JSON text plus the bytes of every expanded
+// source/prefab file. Unlike an existence-only cache, editing the JSON or any
+// referenced model invalidates the cook automatically.
+
+namespace {
+
+    constexpr char kCookMagic[4] = { 'V', 'B', 'P', '1' };
+    constexpr uint32_t kCookVersion = 1;
+
+    uint64_t fnv1a64(const void* data, size_t n, uint64_t h) {
+        const auto* p = static_cast<const uint8_t*>(data);
+        for (size_t i = 0; i < n; ++i) {
+            h ^= p[i];
+            h *= 1099511628211ull;
+        }
+        return h;
+    }
+
+    // Hash = JSON text ++ (path, bytes) of every expanded source, chained. The
+    // path itself is folded in so renames invalidate even with identical bytes.
+    uint64_t computeSourceHash(const std::string& jsonText, const std::vector<std::string>& sources) {
+        uint64_t h = fnv1a64(jsonText.data(), jsonText.size(), 14695981039346656037ull);
+        h = fnv1a64(&kCookVersion, sizeof(kCookVersion), h);
+        for (const auto& src : sources) {
+            h = fnv1a64(src.data(), src.size(), h);
+            auto resolved = FileSystem::instance().resolvePath(src);
+            if (!resolved) continue;// missing file still perturbs the hash via the path
+            std::ifstream f(*resolved, std::ios::binary);
+            char buf[64 * 1024];
+            while (f.read(buf, sizeof(buf)) || f.gcount() > 0)
+                h = fnv1a64(buf, static_cast<size_t>(f.gcount()), h);
+        }
+        return h;
+    }
+
+    std::string cookPathFor(const std::string& resolvedJsonPath) {
+        std::filesystem::path p(resolvedJsonPath);
+        p.replace_extension(".vscene");
+        return p.string();
+    }
+
+    SceneBlueprint tryLoadCook(const std::string& cookPath, const std::string& jsonText) {
+        std::ifstream in(cookPath, std::ios::binary);
+        if (!in.is_open()) return {};
+        char magic[4] = {};
+        uint32_t version = 0;
+        uint64_t storedHash = 0;
+        in.read(magic, sizeof(magic));
+        in.read(reinterpret_cast<char*>(&version), sizeof(version));
+        in.read(reinterpret_cast<char*>(&storedHash), sizeof(storedHash));
+        if (!in || std::memcmp(magic, kCookMagic, sizeof(magic)) != 0 || version != kCookVersion) return {};
+
+        SceneBlueprint cooked;
+        try {
+            cereal::BinaryInputArchive archive(in);
+            cooked = AssetSerializer::deserializeBlueprint(archive);
+        } catch (const std::exception& e) {
+            fmt::print(stderr, "scene cook '{}' unreadable ({}); re-cooking\n", cookPath, e.what());
+            return {};
+        }
+        if (!cooked.ok) return {};
+        // Freshness: the cooked blueprint carries the source list it was built
+        // from; recompute the hash over the CURRENT files and compare.
+        if (computeSourceHash(jsonText, cooked.sources) != storedHash) return {};
+        return cooked;
+    }
+
+    void writeCook(const std::string& cookPath, const SceneBlueprint& bp, uint64_t hash) {
+        std::ofstream out(cookPath, std::ios::binary | std::ios::trunc);
+        if (!out.is_open()) {
+            fmt::print(stderr, "scene cook: cannot write '{}'\n", cookPath);
+            return;
+        }
+        out.write(kCookMagic, sizeof(kCookMagic));
+        out.write(reinterpret_cast<const char*>(&kCookVersion), sizeof(kCookVersion));
+        out.write(reinterpret_cast<const char*>(&hash), sizeof(hash));
+        try {
+            cereal::BinaryOutputArchive archive(out);
+            AssetSerializer::serializeBlueprint(archive, bp);
+        } catch (const std::exception& e) {
+            fmt::print(stderr, "scene cook: serialize failed for '{}' ({})\n", cookPath, e.what());
+        }
+    }
+
+}// namespace
+
 // ── Load + expand ────────────────────────────────────────────────────────────
 
 SceneBlueprint loadSceneBlueprint(const std::string& path) {
@@ -139,6 +231,13 @@ SceneBlueprint loadSceneBlueprint(const std::string& path) {
     std::stringstream buffer;
     buffer << file.rdbuf();
     const std::string text = buffer.str();
+
+    // Cook fast path: hash-guarded, so a stale artifact can never be replayed.
+    const std::string cookPath = cookPathFor(*resolved);
+    if (SceneBlueprint cooked = tryLoadCook(cookPath, text); cooked.ok) {
+        fmt::print("loadSceneBlueprint '{}': cook hit ({} entities)\n", path, cooked.entities.size());
+        return cooked;
+    }
 
     SceneBlueprint bp = parseSceneBlueprint(text, path);
     if (!bp.ok) return bp;
@@ -170,6 +269,9 @@ SceneBlueprint loadSceneBlueprint(const std::string& path) {
             }
         }
     }
+
+    // Write the cook so the next load skips parsing and model decode entirely.
+    writeCook(cookPath, bp, computeSourceHash(text, bp.sources));
     return bp;
 }
 

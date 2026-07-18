@@ -205,3 +205,101 @@ TEST_CASE("instantiate on a bad blueprint is a null no-op", "[scene_blueprint]")
     CHECK(instantiate(registry, scene, bad) == entt::null);
     CHECK(registry.storage<entt::entity>().empty());
 }
+
+// ── Blueprint serialization + scene cook (P3) ───────────────────────────────
+
+#include "Vapor/asset_serializer.hpp"
+#include "Vapor/file_system.hpp"
+#include <cstdio>
+#include <filesystem>
+#include <fstream>
+#include <sstream>
+
+TEST_CASE("blueprint body round-trips through cereal", "[scene_blueprint][cook]") {
+    SceneBlueprint bp = parseSceneBlueprint(R"({
+        "name": "roundtrip",
+        "entities": [
+            { "name": "A", "position": [1, 2, 3],
+              "light": { "type": "spot", "range": 6, "innerConeDeg": 10, "outerConeDeg": 20 },
+              "children": [ { "name": "B", "scale": [2, 2, 2] } ] }
+        ]
+    })");
+    REQUIRE(bp.ok);
+    auto image = std::make_shared<Image>(Image{
+        .uri = "img", .width = 2, .height = 2, .channelCount = 4, .byteArray = std::vector<Uint8>(16, 128) });
+    auto material = std::make_shared<Material>();
+    material->name = "mat";
+    material->albedoMap = image;
+    auto mesh = makeMesh();
+    mesh->material = material;
+    bp.images.push_back(image);
+    bp.materials.push_back(material);
+    bp.meshes.push_back(mesh);
+    bp.entities[1].meshes = { 0 };
+    bp.sources.push_back("models/x.glb");
+
+    std::stringstream stream(std::ios::in | std::ios::out | std::ios::binary);
+    {
+        cereal::BinaryOutputArchive out(stream);
+        AssetSerializer::serializeBlueprint(out, bp);
+    }
+    stream.seekg(0);
+    SceneBlueprint back;
+    {
+        cereal::BinaryInputArchive in(stream);
+        back = AssetSerializer::deserializeBlueprint(in);
+    }
+
+    REQUIRE(back.ok);
+    CHECK(back.name == "roundtrip");
+    REQUIRE(back.entities.size() == 2);
+    CHECK(back.entities[0].name == "A");
+    CHECK(back.entities[1].parent == 0);
+    CHECK(back.entities[1].meshes == std::vector<int>{ 0 });
+    REQUIRE(back.lights.size() == 1);
+    CHECK(back.lights[0].type == LightBlueprint::Type::Spot);
+    CHECK(back.lights[0].innerConeAngle == Approx(glm::radians(10.0f)));
+    REQUIRE(back.meshes.size() == 1);
+    CHECK(back.meshes[0]->vertices.size() == 3);
+    REQUIRE(back.meshes[0]->material);
+    CHECK(back.meshes[0]->material->name == "mat");
+    REQUIRE(back.meshes[0]->material->albedoMap);
+    CHECK(back.meshes[0]->material->albedoMap->width == 2);
+    CHECK(back.sources == std::vector<std::string>{ "models/x.glb" });
+}
+
+TEST_CASE("scene cook is written, replayed and invalidated by edits", "[scene_blueprint][cook]") {
+    namespace fs = std::filesystem;
+    const fs::path dir = fs::temp_directory_path() / "vapor_cook_test";
+    fs::create_directories(dir);
+    FileSystem::instance().addSearchPath(dir.string(), -100);
+
+    const fs::path jsonPath = dir / "cooked.json";
+    const fs::path vscenePath = dir / "cooked.vscene";
+    auto writeScene = [&](const char* body) {
+        std::ofstream f(jsonPath, std::ios::trunc);
+        f << body;
+    };
+
+    writeScene(R"({ "name": "v1", "entities": [ { "name": "One" } ] })");
+    SceneBlueprint first = loadSceneBlueprint("cooked.json");
+    REQUIRE(first.ok);
+    CHECK(first.name == "v1");
+    CHECK(fs::exists(vscenePath));// cook written beside the JSON
+
+    // Second load replays the cook and must match.
+    SceneBlueprint replay = loadSceneBlueprint("cooked.json");
+    REQUIRE(replay.ok);
+    CHECK(replay.name == "v1");
+    CHECK(replay.entities.size() == first.entities.size());
+
+    // Editing the JSON changes the hash -> the stale cook must NOT be replayed.
+    writeScene(R"({ "name": "v2", "entities": [ { "name": "One" }, { "name": "Two" } ] })");
+    SceneBlueprint recooked = loadSceneBlueprint("cooked.json");
+    REQUIRE(recooked.ok);
+    CHECK(recooked.name == "v2");
+    CHECK(recooked.entities.size() == 2);
+
+    FileSystem::instance().removeSearchPath(dir.string());
+    fs::remove_all(dir);
+}

@@ -1,6 +1,7 @@
 #pragma once
 #include "graphics.hpp"
 #include "render_scene.hpp"
+#include "scene_blueprint.hpp"
 #include <cereal/archives/binary.hpp>
 #include <cereal/archives/json.hpp>
 #include <cereal/cereal.hpp>
@@ -51,6 +52,15 @@ public:
 
     static void serializeScene(const std::shared_ptr<RenderScene>& scene, const std::string& path);
     static std::shared_ptr<RenderScene> deserializeScene(const std::string& path);
+
+    // SceneBlueprint payload serialization (entities + meshes/materials/images/
+    // lights + sources). Used by the scene cook (.vscene): the cook header
+    // (magic/version/source-hash) is owned by scene_blueprint.cpp; these
+    // (de)serialize just the blueprint body on an open archive.
+    static constexpr uint32_t BLUEPRINT_FORMAT_VERSION = 1;
+    static void serializeBlueprint(cereal::BinaryOutputArchive& archive, const Vapor::SceneBlueprint& blueprint);
+    // Returns ok == false on a version mismatch.
+    static Vapor::SceneBlueprint deserializeBlueprint(cereal::BinaryInputArchive& archive);
 
 private:
     static void serializeMaterial(
