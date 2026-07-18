@@ -6551,6 +6551,10 @@ void Renderer::drawGraphicsImGui() {
     if (ImGui::TreeNode("RTs")) {
         preview("Color RT", colorRT);
         preview("Normal RT", normalRT);
+        // Albedo shares the PrePass MRT with Normal (discriminates prepass vs
+        // post-prepass writes); Shadow RT is the RT sun-visibility mask.
+        preview("Albedo RT (PrePass MRT)", albedoRT);
+        preview("Shadow RT", shadowRT);
         preview("Reflection RT", reflectionRT);
         preview("Refraction RT", refractionRT);
         preview("AO RT", aoRT);
