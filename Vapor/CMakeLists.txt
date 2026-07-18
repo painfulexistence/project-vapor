@@ -33,6 +33,26 @@ else()
     message(STATUS "FFmpeg not found — video recording/playback disabled")
 endif()
 
+# Optional: TinyUSDZ for USD (.usd/.usda/.usdc/.usdz) import. Fetched from
+# source (no vcpkg port); loadUSD compiles to a warning stub when OFF.
+option(VAPOR_USE_TINYUSDZ "Enable USD import via TinyUSDZ" ON)
+if(VAPOR_USE_TINYUSDZ)
+    include(FetchContent)
+    set(TINYUSDZ_WITH_TYDRA ON CACHE BOOL "" FORCE)
+    set(TINYUSDZ_BUILD_TESTS OFF CACHE BOOL "" FORCE)
+    set(TINYUSDZ_BUILD_EXAMPLES OFF CACHE BOOL "" FORCE)
+    set(TINYUSDZ_BUILD_BENCHMARKS OFF CACHE BOOL "" FORCE)
+    # TinyUSDZ vendors its own tinyexr for EXR texture decode inside USD;
+    # keep it off (unused here, and it collides if tinyexr ever joins vcpkg deps).
+    set(TINYUSDZ_WITH_EXR OFF CACHE BOOL "" FORCE)
+    FetchContent_Declare(
+        tinyusdz
+        GIT_REPOSITORY https://github.com/lighttransport/tinyusdz.git
+        GIT_TAG 11a2d361a9b6a0c4bf8918027233858d80ed17c5
+    )
+    FetchContent_MakeAvailable(tinyusdz)
+endif()
+
 if(APPLE)
     add_subdirectory(metal)
 endif()
@@ -44,6 +64,8 @@ set(SOURCES
     src/file_system.cpp
     src/input_manager.cpp
     src/asset_manager.cpp
+    src/scene_blueprint.cpp
+    src/asset_manager_usd.cpp
     src/asset_serializer.cpp
     src/camera.cpp
     src/debug_draw.cpp
@@ -61,7 +83,7 @@ set(SOURCES
     src/renderer.cpp
     src/rhi_vulkan.cpp
     src/rml_renderer_rhi.cpp
-    src/scene.cpp
+    src/render_scene.cpp
     src/task_scheduler.cpp
     src/resource_manager.cpp
     src/jolt_enki_job_system.cpp
@@ -107,6 +129,10 @@ target_include_directories(Vapor PUBLIC
     $<INSTALL_INTERFACE:include>
     $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/imgui>
     $<INSTALL_INTERFACE:${CMAKE_INSTALL_INCLUDEDIR}/imgui>
+    # Vendored VulkanMemoryAllocator (single MIT header, like MikkTSpace):
+    # rhi_vulkan.hpp includes <vk_mem_alloc.h>, so the dir rides the same
+    # PUBLIC interface as include/.
+    $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/VulkanMemoryAllocator>
 )
 target_include_directories(Vapor PRIVATE
     ${TINYGLTF_INCLUDE_DIRS}
@@ -152,6 +178,14 @@ if(APPLE)
     target_link_libraries(Vapor PRIVATE metal)
 endif()
 
+if(VAPOR_USE_TINYUSDZ)
+    # The static target exposes its include dir PRIVATE only; add src/ for
+    # <tinyusdz.hh> / <tydra/render-data.hh>.
+    target_compile_definitions(Vapor PRIVATE VAPOR_USE_TINYUSDZ)
+    target_link_libraries(Vapor PRIVATE tinyusdz::tinyusdz_static)
+    target_include_directories(Vapor PRIVATE ${tinyusdz_SOURCE_DIR}/src)
+endif()
+
 include(AssetPipeline)
 vapor_compile_glsl_shaders(Vapor "${CMAKE_CURRENT_SOURCE_DIR}/assets/shaders")
 
@@ -180,7 +214,13 @@ configure_package_config_file(
 if(APPLE)
     set(PLATFORM_LIBS metal)
 endif()
-install(TARGETS Vapor ${PLATFORM_LIBS} mikktspace
+# Static PRIVATE deps surface in the exported INTERFACE_LINK_LIBRARIES
+# ($<LINK_ONLY:...>), so every such target must join the export set —
+# mikktspace already does; tinyusdz_static needs the same when enabled.
+if(VAPOR_USE_TINYUSDZ)
+    set(VAPOR_EXPORT_DEPS tinyusdz_static)
+endif()
+install(TARGETS Vapor ${PLATFORM_LIBS} mikktspace ${VAPOR_EXPORT_DEPS}
     EXPORT VaporTargets
     LIBRARY DESTINATION ${CMAKE_INSTALL_LIBDIR}
     ARCHIVE DESTINATION ${CMAKE_INSTALL_LIBDIR}

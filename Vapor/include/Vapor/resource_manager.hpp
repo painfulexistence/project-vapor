@@ -2,14 +2,14 @@
 
 #include "atlas_baker.hpp"
 #include "graphics.hpp"
+#include "scene_blueprint.hpp"
 #include "renderer.hpp"
-#include "scene.hpp"
 #include "task_scheduler.hpp"
 #include <atomic>
+#include <condition_variable>
 #include <functional>
 #include <memory>
 #include <mutex>
-#include <condition_variable>
 #include <string>
 #include <unordered_map>
 
@@ -33,7 +33,7 @@ namespace Vapor {
     /**
      * Generic resource container with loading state tracking
      *
-     * Template parameter T should be the resource type (Image, Scene, Mesh, etc.)
+     * Template parameter T should be the resource type (Image, SceneBlueprint, Mesh, etc.)
      */
     template<typename T> class Resource {
     public:
@@ -233,11 +233,10 @@ namespace Vapor {
 
         // === Scene Loading ===
 
-        std::shared_ptr<Resource<Scene>> loadScene(
+        std::shared_ptr<Resource<Vapor::SceneBlueprint>> loadScene(
             const std::string& path,
-            bool optimized = true,
             LoadMode mode = LoadMode::Async,
-            std::function<void(std::shared_ptr<Scene>)> onComplete = nullptr
+            std::function<void(std::shared_ptr<Vapor::SceneBlueprint>)> onComplete = nullptr
         );
 
         // === OBJ Loading ===
@@ -299,7 +298,7 @@ namespace Vapor {
             Renderer* renderer,
             Uint32 maxSize = 4096,
             Uint32 padding = 1,
-            bool   trim    = true
+            bool trim = true
         );
 
         // Get atlas by handle (returns nullptr if not found)
@@ -323,7 +322,7 @@ namespace Vapor {
 
         // Resource caches
         ResourceCache<Image> m_imageCache;
-        ResourceCache<Scene> m_sceneCache;
+        ResourceCache<Vapor::SceneBlueprint> m_sceneCache;
         ResourceCache<Mesh> m_meshCache;
         ResourceCache<std::string> m_textCache;
 
@@ -337,7 +336,7 @@ namespace Vapor {
 
         // Internal loading functions (static, called on worker threads)
         static std::shared_ptr<Image> loadImageInternal(const std::string& path);
-        static std::shared_ptr<Scene> loadSceneInternal(const std::string& path, bool optimized);
+        static std::shared_ptr<Vapor::SceneBlueprint> loadSceneInternal(const std::string& path);
         static std::shared_ptr<Mesh> loadMeshInternal(const std::string& path, const std::string& mtlBasedir);
         static std::shared_ptr<std::string> loadTextInternal(const std::string& path);
 

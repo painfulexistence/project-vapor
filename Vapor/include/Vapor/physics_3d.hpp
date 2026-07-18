@@ -8,7 +8,7 @@
 #include <unordered_map>
 #include <vector>
 
-class Scene;
+class RenderScene;
 
 namespace JPH {
     class TempAllocatorImpl;
@@ -248,24 +248,6 @@ public:
 
 private:
     constexpr static float FIXED_TIME_STEP = 1.0f / 60.0f;
-
-    // ====== 形狀快取系統 ======
-    struct ShapeDesc {
-        enum Type { Sphere, Box, Capsule, Cylinder } type;
-        glm::vec3 dimensions;// Sphere: (radius, 0, 0), Box: (hx, hy, hz), Capsule: (halfHeight, radius, 0), Cylinder:
-                             // (halfHeight, radius, 0)
-
-        bool operator==(const ShapeDesc& other) const {
-            return type == other.type && glm::all(glm::epsilonEqual(dimensions, other.dimensions, 0.001f));
-        }
-    };
-
-    struct ShapeDescHash {
-        std::size_t operator()(const ShapeDesc& desc) const {
-            return std::hash<int>()(static_cast<int>(desc.type)) ^ (std::hash<float>()(desc.dimensions.x) << 1)
-                   ^ (std::hash<float>()(desc.dimensions.y) << 2) ^ (std::hash<float>()(desc.dimensions.z) << 3);
-        }
-    };
 
     std::unordered_map<Uint32, JPH::BodyID> bodies;
     std::unordered_map<Uint32, Uint32> bodyIDToRid; // JPH::BodyID.GetIndexAndSequenceNumber() -> rid

@@ -354,7 +354,7 @@ public:
     void deinit();
     void shutdown() override { deinit(); }
 
-    virtual void stage(std::shared_ptr<Scene> scene) override;
+    virtual void stage(std::shared_ptr<RenderScene> scene) override;
 
     // Frame model matching IRenderer / the RHI renderer:
     //   beginFrame()  → acquire drawable + command buffer, backend ImGui NewFrame
@@ -367,8 +367,8 @@ public:
     void invokeImGuiCallback() override;
     void endFrame() override;
 
-    virtual void draw(std::shared_ptr<Scene> scene, Camera& camera) override;
-    virtual void draw(entt::registry& registry, std::shared_ptr<Scene> scene, Camera& camera) override;
+    virtual void draw(std::shared_ptr<RenderScene> scene, Camera& camera) override;
+    virtual void draw(entt::registry& registry, std::shared_ptr<RenderScene> scene, Camera& camera) override;
 
     virtual void readPixelsAsync(ScreenshotCallback callback) override;
     void uploadRectLightVideoTexture(const uint8_t* rgba, uint32_t width, uint32_t height) override;
@@ -481,7 +481,7 @@ public:
     TextureHandle getRenderTextureAsTexture(RenderTextureHandle handle) override;
     void renderToTexture(
         RenderTextureHandle target,
-        std::shared_ptr<Scene> scene,
+        std::shared_ptr<RenderScene> scene,
         Camera& camera,
         const glm::vec4& clearColor = glm::vec4(0.0f, 0.0f, 0.0f, 1.0f)
     ) override;
@@ -501,6 +501,9 @@ public:
     void setParticleForceField(const ParticleForceField& field) override;
     void setParticleSimPaused(bool paused) override { m_particleSimPaused = paused; }
     void setParticleVisible(bool visible) override { particleVisible = visible; }
+    void setSky(const SkyRenderData& sky) override;
+    void setWind(const WindRenderData& wind) override;
+    void requestIBLUpdate() override { iblNeedsUpdate = true; }
 
     // ===== Font Rendering API =====
     FontHandle loadFont(const std::string& path, float baseSize) override;
@@ -565,7 +568,7 @@ protected:
 
     // Per-frame rendering context
     MTL::CommandBuffer* currentCommandBuffer = nullptr;
-    std::shared_ptr<Scene> currentScene;
+    std::shared_ptr<RenderScene> currentScene;
     Camera* currentCamera = nullptr;
     CA::MetalDrawable* currentDrawable = nullptr;
 
@@ -783,6 +786,11 @@ protected:
     bool volumetricCloudsEnabled = false;
     bool m_supportsRaytracing = false;
     VolumetricCloudData volumetricCloudSettings;
+
+    // Shared wind magnitude from the ECS WindFieldComponent (via setWind).
+    // Multiplies each medium's per-medium windSpeed coefficient. Defaults to 1.0
+    // so scenes without a WindFieldComponent keep the panel-set scroll speeds.
+    float m_windStrength = 1.0f;
 
     // Sun Flare resources
     NS::SharedPtr<MTL::RenderPipelineState> sunFlarePipeline;

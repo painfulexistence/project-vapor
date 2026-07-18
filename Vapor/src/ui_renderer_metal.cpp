@@ -1,6 +1,7 @@
 #ifdef __APPLE__
 
 #include "ui_renderer.hpp"
+#include "rmlui_manager.hpp"// loadDefaultFontFaces
 #include "rmlui_system.hpp"
 #include "Vapor/rml_renderer_metal.hpp"
 #include "Vapor/file_system.hpp"
@@ -94,8 +95,7 @@ public:
                     s_rmlSystem.reset();
                     return false;
                 }
-                auto fontPath = FileSystem::instance().resolvePath("fonts/NotoSans-SemiBold.ttf");
-                if (fontPath) Rml::LoadFontFace(*fontPath);
+                loadDefaultFontFaces();// same face list as RmlUiManager's bootstrap
                 s_rmlInitialized.store(true);
             } else {
                 Rml::SetRenderInterface(m_rmlRenderer.get());

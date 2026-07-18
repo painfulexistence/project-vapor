@@ -16,10 +16,10 @@ public:
 
     // Returns the first resolved absolute path where relativePath exists,
     // or std::nullopt if not found in any search path.
-    std::optional<std::string> resolvePath(const std::string& relativePath) const;
+    [[nodiscard]] std::optional<std::string> resolvePath(const std::string& relativePath) const;
 
     // Like resolvePath but throws std::runtime_error if not found.
-    std::string resolvePathOrThrow(const std::string& relativePath) const;
+    [[nodiscard]] std::string resolvePathOrThrow(const std::string& relativePath) const;
 
 private:
     struct SearchEntry {

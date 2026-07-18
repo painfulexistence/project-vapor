@@ -1,6 +1,7 @@
 #pragma once
 #include "graphics.hpp"
-#include "scene.hpp"
+#include "render_scene.hpp"
+#include "scene_blueprint.hpp"
 #include <cereal/archives/binary.hpp>
 #include <cereal/archives/json.hpp>
 #include <cereal/cereal.hpp>
@@ -44,13 +45,24 @@ namespace cereal {
 
 class AssetSerializer {
 public:
-    // v2: geometry + material + AABB scene cache. (The meshlet/cluster-LOD data
-    // model exists on Mesh but is not serialized here — the mesh-shader draw path
-    // and its offline bake land in a separate change that will own the v3 bump.)
-    static constexpr uint32_t SCENE_FORMAT_VERSION = 2;
+    // v3: material names now serialize (the inspector's Scene Materials editor
+    // and the blueprint cook both want identity, not just factors). The
+    // meshlet/cluster-LOD data model exists on Mesh but is not serialized here —
+    // the mesh-shader draw path and its offline bake will own the next bump.
+    static constexpr uint32_t SCENE_FORMAT_VERSION = 3;
 
-    static void serializeScene(const std::shared_ptr<Scene>& scene, const std::string& path);
-    static std::shared_ptr<Scene> deserializeScene(const std::string& path);
+    static void serializeScene(const std::shared_ptr<RenderScene>& scene, const std::string& path);
+    static std::shared_ptr<RenderScene> deserializeScene(const std::string& path);
+
+    // SceneBlueprint payload serialization (entities + meshes/materials/images/
+    // lights + sources). Used by the scene cook (.vscene): the cook header
+    // (magic/version/source-hash) is owned by scene_blueprint.cpp; these
+    // (de)serialize just the blueprint body on an open archive.
+    // v2: EntityBlueprint carries a per-entity "components" JSON blob.
+    static constexpr uint32_t BLUEPRINT_FORMAT_VERSION = 2;
+    static void serializeBlueprint(cereal::BinaryOutputArchive& archive, const Vapor::SceneBlueprint& blueprint);
+    // Returns ok == false on a version mismatch.
+    static Vapor::SceneBlueprint deserializeBlueprint(cereal::BinaryInputArchive& archive);
 
 private:
     static void serializeMaterial(
