@@ -506,30 +506,55 @@ namespace Vapor {
     };
 
     // ============================================================================
-    // 相機系統
+    // 相機控制系統 — fly / follow camera rigs
     // ============================================================================
-    class CameraSystem {
+    // Intent-driven: each camera entity carries a CharacterIntent written by the
+    // app's input-mapping layer. The InputManager overload is a thin adapter for
+    // demos without an action-mapping layer: it synthesizes a transient intent
+    // from the default actions and runs the exact same handlers.
+    class CameraControlSystem {
     public:
-        static void update(entt::registry& registry, InputManager& inputManager, float deltaTime) {
+        static void update(entt::registry& registry, float deltaTime) {
             auto view = registry.view<VirtualCameraComponent>();
-            const auto& inputState = inputManager.getInputState();
-
             for (auto entity : view) {
                 auto& cam = view.get<VirtualCameraComponent>(entity);
-
                 if (!cam.isActive) continue;
 
-                // 1. Handle Fly Camera Logic
                 if (auto* fly = registry.try_get<FlyCameraComponent>(entity)) {
-                    handleFlyCamera(cam, fly, inputState, deltaTime);
+                    if (auto* intent = registry.try_get<CharacterIntent>(entity)) {
+                        handleFlyCamera(cam, fly, *intent, deltaTime);
+                    }
                 }
-
-                // 2. Handle Follow Camera Logic
                 if (auto* follow = registry.try_get<FollowCameraComponent>(entity)) {
                     handleFollowCamera(cam, follow, deltaTime, registry);
                 }
+                updateMatrices(cam);
+            }
+        }
 
-                // 3. Update Matrices
+        static void update(entt::registry& registry, InputManager& inputManager, float deltaTime) {
+            const auto& inputState = inputManager.getInputState();
+            // Local only — never stomps a CharacterIntent component the app owns.
+            CharacterIntent intent;
+            intent.lookVector = inputState.getVector(
+                InputAction::LookLeft, InputAction::LookRight, InputAction::LookDown, InputAction::LookUp
+            );
+            intent.moveVector = inputState.getVector(
+                InputAction::StrafeLeft, InputAction::StrafeRight, InputAction::MoveBackward, InputAction::MoveForward
+            );
+            intent.moveVerticalAxis = inputState.getAxis(InputAction::MoveDown, InputAction::MoveUp);
+
+            auto view = registry.view<VirtualCameraComponent>();
+            for (auto entity : view) {
+                auto& cam = view.get<VirtualCameraComponent>(entity);
+                if (!cam.isActive) continue;
+
+                if (auto* fly = registry.try_get<FlyCameraComponent>(entity)) {
+                    handleFlyCamera(cam, fly, intent, deltaTime);
+                }
+                if (auto* follow = registry.try_get<FollowCameraComponent>(entity)) {
+                    handleFollowCamera(cam, follow, deltaTime, registry);
+                }
                 updateMatrices(cam);
             }
         }
@@ -546,34 +571,24 @@ namespace Vapor {
 
     private:
         static void handleFlyCamera(
-            VirtualCameraComponent& cam, FlyCameraComponent* fly, const InputState& inputState, float deltaTime
+            VirtualCameraComponent& cam, FlyCameraComponent* fly, const CharacterIntent& intent, float deltaTime
         ) {
-            // Rotation
-            if (inputState.isPressed(InputAction::LookUp)) fly->pitch += fly->rotateSpeed * deltaTime;
-            if (inputState.isPressed(InputAction::LookDown)) fly->pitch -= fly->rotateSpeed * deltaTime;
-            if (inputState.isPressed(InputAction::LookLeft)) fly->yaw += fly->rotateSpeed * deltaTime;
-            if (inputState.isPressed(InputAction::LookRight)) fly->yaw -= fly->rotateSpeed * deltaTime;
-
-            // Clamp pitch
+            // Rotation (lookVector: +x = look right, +y = look up)
+            fly->pitch -= intent.lookVector.y * fly->rotateSpeed * deltaTime;
+            fly->yaw -= intent.lookVector.x * fly->rotateSpeed * deltaTime;
             fly->pitch = glm::clamp(fly->pitch, -89.0f, 89.0f);
 
-            // Update rotation quaternion from yaw/pitch
-            // Simple Euler to Quat:
             cam.rotation = glm::quat(glm::vec3(glm::radians(-fly->pitch), glm::radians(fly->yaw - 90.0f), 0.0f));
 
-            // Calculate Front/Right/Up vectors from rotation
-            glm::vec3 front = cam.rotation * glm::vec3(0, 0, -1);// Assuming -Z is forward
+            glm::vec3 front = cam.rotation * glm::vec3(0, 0, -1);// -Z is forward
             glm::vec3 right = cam.rotation * glm::vec3(1, 0, 0);
             glm::vec3 up = cam.rotation * glm::vec3(0, 1, 0);
 
-            // Movement
+            // Movement (moveVector: +x = strafe right, +y = forward)
             float speed = fly->moveSpeed * deltaTime;
-            if (inputState.isPressed(InputAction::MoveForward)) cam.position += front * speed;
-            if (inputState.isPressed(InputAction::MoveBackward)) cam.position -= front * speed;
-            if (inputState.isPressed(InputAction::StrafeLeft)) cam.position -= right * speed;
-            if (inputState.isPressed(InputAction::StrafeRight)) cam.position += right * speed;
-            if (inputState.isPressed(InputAction::MoveUp)) cam.position += up * speed;
-            if (inputState.isPressed(InputAction::MoveDown)) cam.position -= up * speed;
+            if (intent.moveVector.x != 0.0f) cam.position += intent.moveVector.x * right * speed;
+            if (intent.moveVector.y != 0.0f) cam.position += intent.moveVector.y * front * speed;
+            if (intent.moveVerticalAxis != 0.0f) cam.position += intent.moveVerticalAxis * up * speed;
         }
 
         static void handleFollowCamera(VirtualCameraComponent& cam, FollowCameraComponent* follow, float deltaTime, entt::registry& registry) {
