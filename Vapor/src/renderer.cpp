@@ -6387,6 +6387,11 @@ void Renderer::drawGraphicsImGui() {
             stochasticShadowsEnabled = (shadowMode == 2);
         }
         if (shadowMode == 2) {
+            // One self-contained "Stochastic shadow" block, shown only under
+            // All shadows: controls -> View toggle -> View preview. Everything
+            // here concerns this one pass, so it lives together instead of the
+            // controls being up here and the texture down in the RT dump.
+            ImGui::SeparatorText("Stochastic shadow");
             const bool restirAvailable = restirShadowTemporalPipeline.isValid() &&
                                          restirShadowResolvePipeline.isValid() &&
                                          pointShadowUpsamplePipeline.isValid();
@@ -6439,6 +6444,14 @@ void Renderer::drawGraphicsImGui() {
                                    "Like the heatmap, the view replaces the shadow factors, so scene "
                                    "lighting is affected while it is active.");
             }
+            // The View toggle's output — the raw (upsampled, pre-accumulation)
+            // pass target. Identity swizzle: the channels are three separate
+            // light domains (R point / G rect / B spot), so a per-domain
+            // problem shows as a COLORED artifact. The accumulated/denoised
+            // copies are what the lit render already shows, so no pane for
+            // those (add pointShadowHalfRT/HistoryRT here to isolate a stage).
+            preview("View output (R=point G=rect B=spot)",
+                    debugView("psRaw", pointShadowRT, TextureSwizzle::Identity, 0));
         }
         // pssmRTMaxDist now sets where the independent near-field shadow map ends
         // and the PSSM cascades begin (the near map, not RT, owns [near, this]).
@@ -6459,25 +6472,14 @@ void Renderer::drawGraphicsImGui() {
             ImGui::SliderFloat("SSCS length", &sscsLength, 0.05f, 2.0f);
             ImGui::SliderFloat("SSCS thickness", &sscsThickness, 0.05f, 2.0f);
         }
-        // (Stochastic shadow "View" debug combo moved under the "All shadows"
-        // section above — every mode is a view of that pass's output.)
         // Intermediate shadow textures (native Metal parity). These are
         // single-channel R16F/depth RTs; the RRR1 swizzle view renders them as
-        // grayscale instead of red-only.
+        // grayscale instead of red-only. (The stochastic shadow "View" preview
+        // lives in the "Stochastic shadow" block above, next to its toggle.)
         // Near-field shadow (its own map here; RT on the Metal native path — same
         // purpose, so the UI just says "Near Shadow") plus the SSCS contact layer.
         preview("Near Shadow (light-space depth)", debugView("nearMap", nearShadowMap, TextureSwizzle::RRR1, 0));
         preview("Contact Shadow (SSCS)", debugView("sscs", sscsRT, TextureSwizzle::RRR1, 0));
-        // Stochastic shadow raw target — upsampled input to the accumulator.
-        // Identity swizzle: the channels are three separate light domains
-        // (R point / G rect / B spot), so a per-domain problem shows up as a
-        // COLORED artifact here. The old RRR1 grayscale predates rect/spot and
-        // silently hid two of the three channels. The accumulated/denoised
-        // copies are what the lit render already shows, so they get no pane —
-        // add debugView entries for pointShadowHalfRT/HistoryRT if a chain
-        // stage ever needs isolating.
-        preview("Stochastic Shadow (raw: R=point G=rect B=spot)",
-                debugView("psRaw", pointShadowRT, TextureSwizzle::Identity, 0));
         // PSSM cascades: one 2D grayscale view per array layer of the 3-cascade
         // depth array (createTextureView returns invalid for a missing layer, so
         // the preview simply skips it).
