@@ -3334,8 +3334,10 @@ void Renderer::skyAtmospherePass() {
     rhi->beginRenderPass(rp);
     if (useCubemapSky) {
         rhi->bindPipeline(skyboxPipeline);
-        rhi->setTexture(0, 0, environmentCubemap, clampSampler);   // samplerCube at set 2 binding 0
-        rhi->setFragmentBuffer(3, cameraUniformBuffer, 0, sizeof(CameraRenderData));
+        rhi->setTexture(0, 0, environmentCubemap, clampSampler);   // cube: set2/binding0 (Vk), texture(0) (Metal)
+        // 3d_skybox.metal reads camera at buffer(0); the GLSL twin at set1/binding3.
+        rhi->setFragmentBuffer(backend == GraphicsBackend::Metal ? 0 : 3,
+                               cameraUniformBuffer, 0, sizeof(CameraRenderData));
     } else {
         rhi->bindPipeline(atmospherePipeline);
         if (backend == GraphicsBackend::Metal) {
@@ -5368,6 +5370,10 @@ void Renderer::createRenderPipeline() {
                                                BlendMode::Opaque, { PixelFormat::RGBA16_FLOAT }, false, CompareOp::Less);
         atmospherePipeline = makeMetalPass("shaders/3d_atmosphere.metal", "vertexMain", "fragmentMain",
                                            BlendMode::Opaque, { PixelFormat::RGBA16_FLOAT }, true, CompareOp::LessOrEqual);
+        // Skybox: visible sky from environmentCubemap (SkyType::HDRI), same
+        // fullscreen depth-tested state as the atmosphere pass.
+        skyboxPipeline = makeMetalPass("shaders/3d_skybox.metal", "vertexMain", "fragmentMain",
+                                       BlendMode::Opaque, { PixelFormat::RGBA16_FLOAT }, true, CompareOp::LessOrEqual);
         lightScatteringPipeline = makeMetalPass("shaders/3d_light_scattering.metal", "vertexMain", "fragmentMain",
                                                 BlendMode::Opaque, { PixelFormat::RGBA16_FLOAT }, false, CompareOp::Less);
         volumetricFogPipeline = makeMetalPass("shaders/3d_volumetric_fog.metal", "volumetricFogVertex", "simpleFogFragment",
