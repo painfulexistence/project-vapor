@@ -1189,7 +1189,7 @@ public:
         // Materials for the PBR fragment's per-fragment fetch (buffer 11): the
         // shader reads materials[materialID] instead of taking the material
         // through inter-stage (112-byte per-vertex-output overflow).
-        encoder->setFragmentBuffer(r.materialDataBuffer.get(), 0, 11);
+        encoder->setFragmentBuffer(r.materialDataBuffer.get(), 0, 19);
         encoder->setFragmentBytes(&screenSize, sizeof(glm::vec2), 4);
         encoder->setFragmentBytes(&gridSize, sizeof(glm::uvec3), 5);
         encoder->setFragmentBytes(&time, sizeof(float), 6);

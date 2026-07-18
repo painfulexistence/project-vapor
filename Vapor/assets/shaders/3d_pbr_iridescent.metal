@@ -253,7 +253,7 @@ fragment float4 fragmentMain(
     constant float2&         screenSize        [[buffer(4)]],
     constant packed_uint3&   gridSize          [[buffer(5)]],
     constant float&          time              [[buffer(6)]],
-    const device MaterialData* materials       [[buffer(11)]]  // per-fragment material fetch
+    const device MaterialData* materials       [[buffer(19)]]  // per-fragment material fetch
 ) {
     constexpr sampler s(address::repeat, filter::linear, mip_filter::linear);
 

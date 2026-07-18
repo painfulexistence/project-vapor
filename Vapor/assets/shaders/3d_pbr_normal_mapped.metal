@@ -463,9 +463,11 @@ fragment float4 fragmentMain(
     constant uint& rectLightCount [[buffer(8)]],
     constant PSSMData& pssmData [[buffer(9)]],
     constant uint& gibsEnabled [[buffer(10)]], // GIBS enable flag
-    // Material fetched by id here (buffer 11), not passed through inter-stage:
-    // the 112-byte MaterialData overflowed Metal's per-vertex output.
-    const device MaterialData* materials [[buffer(11)]],
+    // Material fetched by id here, not passed through inter-stage (the 112-byte
+    // MaterialData overflowed Metal's per-vertex output). buffer(19): 0-18 are
+    // taken (11 = dirLightCount, 12 = mainDebugFlags, 13/14 = bindless tables,
+    // 15/16 = spot, 17/18 = RT params), so materials lives past them.
+    const device MaterialData* materials [[buffer(19)]],
     // Perf-isolation debug flags (bit0 = skip point-light loop, bit1 = skip
     // shadow). buffer(11) is dirLightCount (Vulkan-only, unread here), so this
     // takes buffer(12). Mirrors RHIMain.frag's mainDebugFlags.
