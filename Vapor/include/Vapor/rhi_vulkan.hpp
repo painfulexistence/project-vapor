@@ -416,6 +416,12 @@ private:
     // stall-free (no dependency on ALL upload fences draining).
     VkDeviceSize stagingRegionBase = 0;   // this frame's region start
     VkDeviceSize stagingRingOffset = 0;   // offset WITHIN the current region
+    // Per-frame region size, rounded DOWN to 16 bytes: bufferOffset for image
+    // copies must be texel-aligned, and 32MB/3 is not — an unaligned region
+    // BASE defeats the 16-byte alignment done inside the region.
+    VkDeviceSize stagingRegionSize() const {
+        return (STAGING_RING_SIZE / MAX_FRAMES_IN_FLIGHT) & ~VkDeviceSize(15);
+    }
     VkCommandBuffer uploadCmd = VK_NULL_HANDLE;   // valid while recording
     std::vector<VkFence> pendingUploadFences;     // one per in-flight upload submit
 

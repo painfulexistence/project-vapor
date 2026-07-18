@@ -141,7 +141,7 @@ VkCommandBuffer RHI_Vulkan::ensureUploadCmd() {
 void* RHI_Vulkan::allocStaging(VkDeviceSize size, VkDeviceSize& outOffset) {
     // Allocate within THIS frame's region only. bufferOffset for image copies
     // must be texel-aligned; 16 covers all formats.
-    const VkDeviceSize regionSize = STAGING_RING_SIZE / MAX_FRAMES_IN_FLIGHT;
+    const VkDeviceSize regionSize = stagingRegionSize();
     VkDeviceSize aligned = (stagingRingOffset + 15) & ~VkDeviceSize(15);
     if (aligned + size > regionSize) {
         // A single frame staged more than its region (regionSize is ~16MB, so
@@ -162,7 +162,7 @@ VkBuffer RHI_Vulkan::stageData(const void* data, VkDeviceSize size, VkDeviceSize
     // upload larger than one region can't fit even after a drain, so it must
     // take the dedicated-buffer path below (else it overruns its region into
     // the next frame's).
-    if (size <= STAGING_RING_SIZE / MAX_FRAMES_IN_FLIGHT) {
+    if (size <= stagingRegionSize()) {
         void* dst = allocStaging(size, outOffset);
         std::memcpy(dst, data, size);
         return stagingRingBuffer;
@@ -1973,7 +1973,7 @@ void RHI_Vulkan::beginFrame() {
     // fully completed on the GPU; its upload copies were submitted on the same
     // queue BEFORE its frame command buffer, so they are done too. The region
     // is therefore free — reset with no wait, no stall, no unbounded growth.
-    stagingRegionBase = currentFrameInFlight * (STAGING_RING_SIZE / MAX_FRAMES_IN_FLIGHT);
+    stagingRegionBase = currentFrameInFlight * stagingRegionSize();
     stagingRingOffset = 0;
 
     // Leak-hunt telemetry moved to the StatsLog "VK" source (registered in
