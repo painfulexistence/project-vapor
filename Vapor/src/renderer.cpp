@@ -2075,8 +2075,8 @@ void Renderer::iblPreviewPass() {
     // IBL debug: unwrap environmentCubemap into the 2D equirect RT so ImGui can
     // show it. Cheap (one 512x256 fullscreen draw); only runs once the IBL has
     // been baked at least once.
-    if (!m_iblReady || !iblPreviewPipeline.isValid() || !iblPreviewRT.isValid() ||
-        !environmentCubemap.isValid()) {
+    if (!m_iblPreviewEnabled || !m_iblReady || !iblPreviewPipeline.isValid() ||
+        !iblPreviewRT.isValid() || !environmentCubemap.isValid()) {
         return;
     }
     RenderPassDesc rp;
@@ -6743,10 +6743,12 @@ void Renderer::drawGraphicsImGui() {
         }
         if (ImGui::Button("Refresh IBL")) iblNeedsUpdate = true;
         if (ch) iblNeedsUpdate = true;  // sky changed -> recapture IBL (native behavior)
-        // Debug: the baked environment cubemap, unwrapped to equirect.
-        if (iblPreviewRT.isValid()) {
+        // Debug: the baked environment cubemap, unwrapped to equirect. Off by
+        // default — the pass stalls (single-buffered RT read by ImGui), so only
+        // render + show it while this is ticked.
+        ImGui::Checkbox("Show environment cubemap (equirect)", &m_iblPreviewEnabled);
+        if (m_iblPreviewEnabled && iblPreviewRT.isValid()) {
             if (void* id = getImGuiTextureID(iblPreviewRT)) {
-                ImGui::Text("Environment cubemap (equirect):");
                 ImGui::Image((ImTextureID)(intptr_t)id, ImVec2(320, 160));
             } else {
                 ImGui::TextDisabled("(IBL preview unavailable on this backend)");

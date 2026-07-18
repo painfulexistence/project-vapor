@@ -782,6 +782,10 @@ private:
     PipelineHandle iblPreviewPipeline;
     ShaderHandle iblPreviewVertexShader;
     ShaderHandle iblPreviewFragmentShader;
+    // Off by default: the preview RT is single-buffered, so rendering it every
+    // frame while ImGui samples last frame's copy stalls (WAR hazard ~a full
+    // frame). Only render it while the debug panel checkbox is on.
+    bool m_iblPreviewEnabled = false;
     ShaderHandle lightScatteringShader;
     ShaderHandle volumetricFogShader;
     BufferHandle fogDataBuffer;
