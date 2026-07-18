@@ -132,6 +132,10 @@ public:
             // the calling thread — how long the CPU spends building the pass,
             // NOT its GPU execution time (see RHI::getGpuPassTimings for that).
             // Comparing the two tells you whether a pass is CPU- or GPU-bound.
+            // Publish the pass name so passes can label their GPU-timing
+            // compute/render scope with it (beginComputePass) instead of a
+            // parallel hardcoded string that silently drifts from this one.
+            m_activePassName = pass->getName();
             const auto t0 = std::chrono::high_resolution_clock::now();
             pass->execute(renderer);
             const auto t1 = std::chrono::high_resolution_clock::now();
@@ -150,7 +154,13 @@ public:
         return passes;
     }
 
+    // Name of the pass currently executing (valid during execute()). A pass
+    // uses it to label its GPU-timing scope so the profiler entry tracks the
+    // pass name automatically. Empty outside execute().
+    const std::string& activePassName() const { return m_activePassName; }
+
 private:
     std::vector<std::unique_ptr<RenderPass>> passes;
     std::vector<std::pair<std::string, double>> m_passCpuTimings;
+    std::string m_activePassName;
 };

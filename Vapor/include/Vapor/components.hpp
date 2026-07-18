@@ -142,6 +142,27 @@ namespace Vapor {
     // Lighting
     // ============================================================================
 
+    struct PointLightComponent {
+        glm::vec3 color    = glm::vec3(1.0f);
+        float     intensity = 1.0f;
+        float     radius   = 0.5f;
+    };
+
+    struct DirectionalLightComponent {
+        glm::vec3 direction = glm::vec3(0.0f, -1.0f, 0.0f);
+        glm::vec3 color     = glm::vec3(1.0f);
+        float     intensity = 1.0f;
+    };
+
+    // Cone spot light. Position comes from the TransformComponent; the beam points
+    // along the transform's forward axis (rotation * -Z). Angles are in degrees.
+    struct SpotLightComponent {
+        glm::vec3 color      = glm::vec3(1.0f);
+        float     intensity  = 10.0f;
+        float     radius     = 12.0f;   // range (world units)
+        float     innerAngle = 20.0f;   // full-intensity half-angle (deg)
+        float     outerAngle = 30.0f;   // falloff-to-zero half-angle (deg)
+};
     struct RectLightComponent {
         glm::vec2 size = {1.0f, 1.0f};         // total width × height (world units)
         glm::vec3 color = {1.0f, 1.0f, 1.0f};

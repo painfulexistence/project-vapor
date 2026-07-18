@@ -34,7 +34,8 @@
 // two comparable lights disagree on visibility the output dwells on one state
 // instead of averaging. The M clamp bounds that dwell (history ≤ clamp×
 // candidates, so fresh samples keep ~1/(clamp+1) influence per frame); the
-// default keeps winner refresh inside the accumulator's ~14-frame EMA window.
+// default keeps winner refresh fast enough that the downstream temporal
+// accumulator still averages across the switches.
 
 // Mirrors ShadowReservoirSetCPU in renderer.cpp — 32 bytes per pixel.
 struct ShadowReservoirSet {
