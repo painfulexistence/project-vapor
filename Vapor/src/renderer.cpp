@@ -5942,7 +5942,7 @@ void Renderer::stage(std::shared_ptr<Scene> scene) {
 
     for (auto& mesh : scene->stagedMeshes) {
         if (!mesh) continue;
-        
+
         // Register mesh if not already registered
         if (mesh->renderMeshId == UINT32_MAX) {
             if (!mesh->vertices.empty()) {
@@ -5965,7 +5965,7 @@ void Renderer::stage(std::shared_ptr<Scene> scene) {
                 mesh->renderMeshId = registerMesh(verts, inds);
             }
         }
-        
+
         // Register material if not already registered
         if (mesh->material) {
             if (mesh->material->rendererMaterialId == UINT32_MAX) {
@@ -5988,14 +5988,14 @@ void Renderer::stage(std::shared_ptr<Scene> scene) {
                 matData.alphaMode = mesh->material->alphaMode;
                 matData.alphaCutoff = mesh->material->alphaCutoff;
                 matData.doubleSided = mesh->material->doubleSided;
-                
+
                 matData.albedoMap = mesh->material->albedoMap;
                 matData.normalMap = mesh->material->normalMap;
                 matData.metallicMap = mesh->material->metallicMap;
                 matData.roughnessMap = mesh->material->roughnessMap;
                 matData.emissiveMap = mesh->material->emissiveMap;
                 matData.occlusionMap = mesh->material->occlusionMap;
-                
+
                 mesh->material->rendererMaterialId = registerMaterial(matData);
             }
             mesh->renderMaterialId = mesh->material->rendererMaterialId;
@@ -6003,7 +6003,7 @@ void Renderer::stage(std::shared_ptr<Scene> scene) {
             mesh->renderMaterialId = INVALID_MATERIAL_ID;
         }
     }
-    
+
     fmt::print("Scene staged with {} meshes\n", scene->stagedMeshes.size());
 }
 
@@ -6102,11 +6102,11 @@ void Renderer::collectDrawables(entt::registry& registry, std::shared_ptr<Scene>
             drawable.mesh = mesh->renderMeshId;
             drawable.material = mesh->renderMaterialId;
             drawable.transform = transform.worldTransform;
-            
+
             // Transform AABB to world space
             glm::vec3 minAABB = mesh->localAABBMin;
             glm::vec3 maxAABB = mesh->localAABBMax;
-            
+
             glm::vec3 corners[8] = {
                 glm::vec3(minAABB.x, minAABB.y, minAABB.z),
                 glm::vec3(maxAABB.x, minAABB.y, minAABB.z),
@@ -6117,17 +6117,17 @@ void Renderer::collectDrawables(entt::registry& registry, std::shared_ptr<Scene>
                 glm::vec3(minAABB.x, maxAABB.y, maxAABB.z),
                 glm::vec3(maxAABB.x, maxAABB.y, maxAABB.z)
             };
-            
+
             glm::vec3 worldMin(std::numeric_limits<float>::max());
             glm::vec3 worldMax(std::numeric_limits<float>::lowest());
-            
+
             for (int i = 0; i < 8; i++) {
                 glm::vec4 worldPos = transform.worldTransform * glm::vec4(corners[i], 1.0f);
                 glm::vec3 p = glm::vec3(worldPos) / worldPos.w;
                 worldMin = glm::min(worldMin, p);
                 worldMax = glm::max(worldMax, p);
             }
-            
+
             drawable.aabbMin = worldMin;
             drawable.aabbMax = worldMax;
 
@@ -6363,7 +6363,6 @@ void Renderer::drawGraphicsImGui() {
     if (ImGui::TreeNode("RTs")) {
         preview("Color RT", colorRT);
         preview("Normal RT", normalRT);
-        preview("Shadow RT", shadowRT);
         preview("AO RT", aoRT);
         preview("Velocity RT", velocityRT);
         preview("God Rays RT", lightScatteringRT);
@@ -6398,23 +6397,45 @@ void Renderer::drawGraphicsImGui() {
     }
 
     if (ImGui::TreeNode("Shadow Debug")) {
-        ImGui::Text("Raytracing: %s", capabilities.raytracing ? "yes" : "no");
         // Shadow scope, one control (state derived from the two flags it drives):
         //   Off              = no shadows          (mainDebugFlags bit1 set)
-        //   Directional only = sun/PSSM only       (default; stochastic off)
-        //   All shadows      = + stochastic RT      (point/rect/spot; Metal RT,
-        //                      noisy until ReSTIR — the reason it's not default)
+        //   Directional only = sun/PSSM only       (default)
+        //   All shadows      = + stochastic RT      (stochastic: point/rect/spot)
         int shadowMode = (mainDebugFlags & 2u) ? 0 : (stochasticShadowsEnabled ? 2 : 1);
         if (ImGui::Combo("Shadows", &shadowMode, "Off\0Directional only\0All shadows\0")) {
             mainDebugFlags = (shadowMode == 0) ? (mainDebugFlags | 2u) : (mainDebugFlags & ~2u);
             stochasticShadowsEnabled = (shadowMode == 2);
         }
-        if (shadowMode == 2) {
-            // One self-contained "Stochastic shadow" block, shown only under
-            // All shadows: controls -> View toggle -> View preview. Everything
-            // here concerns this one pass, so it lives together instead of the
-            // controls being up here and the texture down in the RT dump.
-            ImGui::SeparatorText("Stochastic shadow");
+        if (ImGui::TreeNode("Directional shadow") && (shadowMode == 1 || shadowMode == 2)) {
+            ImGui::SliderFloat("Near shadow distance", &pssmRTMaxDist, 5.0f, 200.0f);
+            {
+                // PCF taps for the PSSM cascades + near map (4/8/16/32 Poisson)
+                const char* pcfLabels[] = { "4", "8", "16", "32" };
+                const Uint32 pcfValues[] = { 4u, 8u, 16u, 32u };
+                int idx = 2;
+                for (int i = 0; i < 4; ++i) if (pssmPcfSampleCount == pcfValues[i]) idx = i;
+                if (ImGui::Combo("PCF samples", &idx, pcfLabels, 4)) pssmPcfSampleCount = pcfValues[idx];
+            }
+            ImGui::SliderFloat("Cascade blend", &pssmCascadeBlendRange, 0.0f, 10.0f);
+            ImGui::Checkbox("Visualize cascades", &pssmDebugVisualize);
+            if (TextureHandle vt = capabilities.raytracing ? shadowRT : debugView("nearShadow", nearShadowMap, TextureSwizzle::RRR1, 0); vt.isValid()) {
+                if (void* id = getImGuiTextureID(vt)) {
+                    ImGui::Image((ImTextureID)(intptr_t)id, ImVec2(320, 320 / rtAspect));
+                }
+            }
+            // PSSM cascades: one 2D grayscale view per array layer of the 3-cascade
+            // depth array (createTextureView returns invalid for a missing layer, so
+            // the preview simply skips it).
+            for (Uint32 c = 0; c < 3u; ++c) {
+                char key[24];
+                std::snprintf(key, sizeof(key), "pssmC%u", c);
+                char label[40];
+                std::snprintf(label, sizeof(label), "PSSM Cascade %u (depth)", c);
+                preview(label, debugView(key, pssmShadowArrayTexture, TextureSwizzle::RRR1, c));
+            }
+            ImGui::TreePop();
+        }
+        if (ImGui::TreeNode("Stochastic shadows") && shadowMode == 2) {
             const bool restirAvailable = restirShadowTemporalPipeline.isValid() &&
                                          restirShadowResolvePipeline.isValid() &&
                                          stochasticShadowUpsamplePipeline.isValid();
@@ -6448,12 +6469,10 @@ void Renderer::drawGraphicsImGui() {
             } else {
                 ImGui::TextDisabled("legacy uniform light picks (noisy) — ReSTIR off");
             }
-            // Debug view of the stochastic shadow output (the "Stochastic
-            // Shadow (raw)" preview + the lit scene). Lives here because every
-            // mode is a view of THIS pass's target, not a separate feature.
+            // Debug view of the stochastic shadow output
             int psd = static_cast<int>(stochasticShadowDebugMode);
             if (ImGui::Combo("View", &psd,
-                             "Visibility (normal)\0Tile light-count heatmap\0ReSTIR winner id\0ReSTIR confidence (M)\0")) {
+                             "Visibility\0Light-count heatmap\0ReSTIR winner id\0ReSTIR confidence (M)\0")) {
                 stochasticShadowDebugMode = static_cast<Uint32>(psd);
             }
             if (stochasticShadowDebugMode == 1) {
@@ -6467,56 +6486,25 @@ void Renderer::drawGraphicsImGui() {
                                    "Like the heatmap, the view replaces the shadow factors, so scene "
                                    "lighting is affected while it is active.");
             }
-            // The View toggle's output, drawn inline (no collapsing node) — the
-            // half-res resolve target, i.e. the pass's true raw output before
-            // upsample/accumulation (stochasticShadowRT is reused as the à-trous
-            // scratch, so it isn't raw by panel time; the half-res target is).
-            // Identity swizzle: the channels are three light domains (R point /
-            // G rect / B spot), so a per-domain problem shows as a COLORED
-            // artifact.
             if (TextureHandle vt = debugView("psRaw", stochasticShadowHalfRT, TextureSwizzle::Identity, 0); vt.isValid()) {
                 if (void* id = getImGuiTextureID(vt)) {
-                    ImGui::TextDisabled("View output (half-res, R=point G=rect B=spot)");
                     ImGui::Image((ImTextureID)(intptr_t)id, ImVec2(320, 320 / rtAspect));
                 }
             }
+            ImGui::TreePop();
         }
-        // pssmRTMaxDist now sets where the independent near-field shadow map ends
-        // and the PSSM cascades begin (the near map, not RT, owns [near, this]).
-        ImGui::SliderFloat("Near shadow distance", &pssmRTMaxDist, 5.0f, 200.0f);
-        // PCF taps for the PSSM cascades + near map (4/8/16/32 Poisson) — honoured
-        // by both the Metal PBR shader and the Vulkan RHIMain.frag path.
-        {
-            const char* pcfLabels[] = { "4", "8", "16", "32" };
-            const Uint32 pcfValues[] = { 4u, 8u, 16u, 32u };
-            int idx = 2;
-            for (int i = 0; i < 4; ++i) if (pssmPcfSampleCount == pcfValues[i]) idx = i;
-            if (ImGui::Combo("PCF samples", &idx, pcfLabels, 4)) pssmPcfSampleCount = pcfValues[idx];
-        }
-        ImGui::SliderFloat("Cascade blend", &pssmCascadeBlendRange, 0.0f, 10.0f);
-        ImGui::Checkbox("Visualize cascades", &pssmDebugVisualize);
-        ImGui::Checkbox("Contact shadows (SSCS)", &sscsEnabled);
-        if (sscsEnabled) {
-            ImGui::SliderFloat("SSCS length", &sscsLength, 0.05f, 2.0f);
-            ImGui::SliderFloat("SSCS thickness", &sscsThickness, 0.05f, 2.0f);
-        }
-        // Intermediate shadow textures (native Metal parity). These are
-        // single-channel R16F/depth RTs; the RRR1 swizzle view renders them as
-        // grayscale instead of red-only. (The stochastic shadow "View" preview
-        // lives in the "Stochastic shadow" block above, next to its toggle.)
-        // Near-field shadow (its own map here; RT on the Metal native path — same
-        // purpose, so the UI just says "Near Shadow") plus the SSCS contact layer.
-        preview("Near Shadow (light-space depth)", debugView("nearMap", nearShadowMap, TextureSwizzle::RRR1, 0));
-        preview("Contact Shadow (SSCS)", debugView("sscs", sscsRT, TextureSwizzle::RRR1, 0));
-        // PSSM cascades: one 2D grayscale view per array layer of the 3-cascade
-        // depth array (createTextureView returns invalid for a missing layer, so
-        // the preview simply skips it).
-        for (Uint32 c = 0; c < 3u; ++c) {
-            char key[24];
-            std::snprintf(key, sizeof(key), "pssmC%u", c);
-            char label[40];
-            std::snprintf(label, sizeof(label), "PSSM Cascade %u (depth)", c);
-            preview(label, debugView(key, pssmShadowArrayTexture, TextureSwizzle::RRR1, c));
+        if (ImGui::TreeNode("Contact shadows (SSCS)") && (shadowMode == 1 || shadowMode == 2)) {
+            ImGui::Checkbox("Enabled", &sscsEnabled);
+            if (sscsEnabled) {
+                ImGui::SliderFloat("SSCS length", &sscsLength, 0.05f, 2.0f);
+                ImGui::SliderFloat("SSCS thickness", &sscsThickness, 0.05f, 2.0f);
+                if (TextureHandle vt = debugView("sscs", sscsRT, TextureSwizzle::RRR1, 0); vt.isValid()) {
+                    if (void* id = getImGuiTextureID(vt)) {
+                        ImGui::Image((ImTextureID)(intptr_t)id, ImVec2(320, 320 / rtAspect));
+                    }
+                }
+            }
+            ImGui::TreePop();
         }
         ImGui::TreePop();
     }
