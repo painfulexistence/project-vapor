@@ -42,5 +42,8 @@ void main() {
     vec2 v = ndcVerts[gl_VertexIndex];
     gl_Position = vec4(v, 0.0, 1.0);
     vec2 uv = v * 0.5 + 0.5;
+    uv.y = 1.0 - uv.y;  // Cube-face render target is Y-flipped relative to the
+                        // cube sampling convention, same as the Metal capture
+                        // shaders; without this the captured faces are inverted.
     localPos = uvToDirection(uv, capture.faceIndex);
 }
