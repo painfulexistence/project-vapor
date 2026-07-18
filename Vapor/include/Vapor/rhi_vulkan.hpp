@@ -4,6 +4,7 @@
 #include <SDL3/SDL_vulkan.h>
 #include <vulkan/vulkan.h>
 #include <vulkan/vulkan_beta.h>
+#include <vk_mem_alloc.h>
 #include <deque>
 #include <functional>
 #include <mutex>
@@ -178,6 +179,10 @@ private:
     VkSurfaceKHR surface = VK_NULL_HANDLE;
     VkPhysicalDevice physicalDevice = VK_NULL_HANDLE;
     VkDevice device = VK_NULL_HANDLE;
+    // Single VMA allocator for every buffer/image: sub-allocates from large
+    // device memory blocks instead of one vkAllocateMemory per resource (which
+    // fragments and runs into maxMemoryAllocationCount, often just 4096).
+    VmaAllocator allocator = VK_NULL_HANDLE;
     VkQueue graphicsQueue = VK_NULL_HANDLE;
     VkQueue presentQueue = VK_NULL_HANDLE;
     Uint32 graphicsFamilyIdx = UINT32_MAX;
@@ -215,7 +220,7 @@ private:
 
     struct BufferResource {
         VkBuffer buffer;
-        VkDeviceMemory memory;
+        VmaAllocation allocation;
         VkDeviceSize size;
         bool isMapped;
         void* mappedData;
@@ -225,7 +230,7 @@ private:
     struct TextureResource {
         VkImage image;
         VkImageView view;
-        VkDeviceMemory memory;
+        VmaAllocation allocation;
         VkFormat format;
         Uint32 width;
         Uint32 height;
@@ -402,8 +407,8 @@ private:
 
     static constexpr VkDeviceSize STAGING_RING_SIZE = 32ull * 1024 * 1024;
     VkBuffer stagingRingBuffer = VK_NULL_HANDLE;
-    VkDeviceMemory stagingRingMemory = VK_NULL_HANDLE;
-    void* stagingRingPtr = nullptr;
+    VmaAllocation stagingRingAllocation = VK_NULL_HANDLE;
+    void* stagingRingPtr = nullptr;  // persistently mapped via VMA_ALLOCATION_CREATE_MAPPED_BIT
     // Frame-partitioned staging: the ring is split into MAX_FRAMES_IN_FLIGHT
     // equal regions. Each frame allocates only within its own region [base,
     // base+regionSize); the region is reset at beginFrame right after
@@ -524,7 +529,6 @@ private:
     void createCommandBuffers();
     void createSyncObjects();
 
-    Uint32 findMemoryType(Uint32 typeFilter, VkMemoryPropertyFlags properties);
     VkFormat convertPixelFormat(PixelFormat format);
     VkFilter convertFilterMode(FilterMode mode);
     VkSamplerAddressMode convertAddressMode(AddressMode mode);

@@ -1,3 +1,9 @@
+// VMA's implementation is compiled into this TU (header-only library; the
+// define must precede the <vk_mem_alloc.h> pulled in by rhi_vulkan.hpp).
+// Vulkan is statically linked (Vulkan::Vulkan), so VMA calls vk* directly.
+#define VMA_STATIC_VULKAN_FUNCTIONS 1
+#define VMA_DYNAMIC_VULKAN_FUNCTIONS 0
+#define VMA_IMPLEMENTATION
 #include "rhi_vulkan.hpp"
 #include "helper.hpp"
 #include "stats_log.hpp"
@@ -84,36 +90,32 @@ void RHI_Vulkan::createUploadStream() {
     info.size = STAGING_RING_SIZE;
     info.usage = VK_BUFFER_USAGE_TRANSFER_SRC_BIT;
     info.sharingMode = VK_SHARING_MODE_EXCLUSIVE;
-    if (vkCreateBuffer(device, &info, nullptr, &stagingRingBuffer) != VK_SUCCESS) {
+    // Persistently mapped host staging: MAPPED_BIT hands back the pointer with
+    // the allocation; required COHERENT keeps the no-flush write semantics.
+    VmaAllocationCreateInfo allocCreate{};
+    allocCreate.usage = VMA_MEMORY_USAGE_AUTO;
+    allocCreate.flags = VMA_ALLOCATION_CREATE_HOST_ACCESS_SEQUENTIAL_WRITE_BIT |
+                        VMA_ALLOCATION_CREATE_MAPPED_BIT;
+    allocCreate.requiredFlags = VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT;
+    VmaAllocationInfo allocResult{};
+    if (vmaCreateBuffer(allocator, &info, &allocCreate, &stagingRingBuffer,
+                        &stagingRingAllocation, &allocResult) != VK_SUCCESS) {
         throw std::runtime_error("Failed to create staging ring buffer");
     }
-    VkMemoryRequirements req;
-    vkGetBufferMemoryRequirements(device, stagingRingBuffer, &req);
-    VkMemoryAllocateInfo alloc{};
-    alloc.sType = VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO;
-    alloc.allocationSize = req.size;
-    alloc.memoryTypeIndex = findMemoryType(req.memoryTypeBits,
-        VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT);
-    if (vkAllocateMemory(device, &alloc, nullptr, &stagingRingMemory) != VK_SUCCESS) {
-        throw std::runtime_error("Failed to allocate staging ring memory");
-    }
-    vkBindBufferMemory(device, stagingRingBuffer, stagingRingMemory, 0);
-    vkMapMemory(device, stagingRingMemory, 0, STAGING_RING_SIZE, 0, &stagingRingPtr);  // persistent
+    stagingRingPtr = allocResult.pMappedData;
 }
 
 void RHI_Vulkan::destroyUploadStream() {
     submitUploads(true);
     for (VkFence f : pendingUploadFences) vkDestroyFence(device, f, nullptr);
     pendingUploadFences.clear();
-    if (stagingRingMemory != VK_NULL_HANDLE) {
-        vkUnmapMemory(device, stagingRingMemory);
-        vkFreeMemory(device, stagingRingMemory, nullptr);
-        stagingRingMemory = VK_NULL_HANDLE;
-        stagingRingPtr = nullptr;
-    }
     if (stagingRingBuffer != VK_NULL_HANDLE) {
-        vkDestroyBuffer(device, stagingRingBuffer, nullptr);
+        // vmaDestroyBuffer unmaps the persistent mapping and frees buffer +
+        // allocation together.
+        vmaDestroyBuffer(allocator, stagingRingBuffer, stagingRingAllocation);
         stagingRingBuffer = VK_NULL_HANDLE;
+        stagingRingAllocation = VK_NULL_HANDLE;
+        stagingRingPtr = nullptr;
     }
 }
 
@@ -171,32 +173,22 @@ VkBuffer RHI_Vulkan::stageData(const void* data, VkDeviceSize size, VkDeviceSize
     info.size = size;
     info.usage = VK_BUFFER_USAGE_TRANSFER_SRC_BIT;
     info.sharingMode = VK_SHARING_MODE_EXCLUSIVE;
+    VmaAllocationCreateInfo allocCreate{};
+    allocCreate.usage = VMA_MEMORY_USAGE_AUTO;
+    allocCreate.flags = VMA_ALLOCATION_CREATE_HOST_ACCESS_SEQUENTIAL_WRITE_BIT |
+                        VMA_ALLOCATION_CREATE_MAPPED_BIT;
+    allocCreate.requiredFlags = VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT;
     VkBuffer buf;
-    if (vkCreateBuffer(device, &info, nullptr, &buf) != VK_SUCCESS) {
+    VmaAllocation bufAlloc;
+    VmaAllocationInfo allocResult{};
+    if (vmaCreateBuffer(allocator, &info, &allocCreate, &buf, &bufAlloc, &allocResult) != VK_SUCCESS) {
         throw std::runtime_error("stageData: failed to create oversize staging buffer");
     }
-    VkMemoryRequirements req;
-    vkGetBufferMemoryRequirements(device, buf, &req);
-    VkMemoryAllocateInfo alloc{};
-    alloc.sType = VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO;
-    alloc.allocationSize = req.size;
-    alloc.memoryTypeIndex = findMemoryType(req.memoryTypeBits,
-        VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT);
-    VkDeviceMemory mem;
-    if (vkAllocateMemory(device, &alloc, nullptr, &mem) != VK_SUCCESS) {
-        vkDestroyBuffer(device, buf, nullptr);
-        throw std::runtime_error("stageData: failed to allocate oversize staging memory");
-    }
-    vkBindBufferMemory(device, buf, mem, 0);
-    void* mapped;
-    vkMapMemory(device, mem, 0, size, 0, &mapped);
-    std::memcpy(mapped, data, size);
-    vkUnmapMemory(device, mem);
+    std::memcpy(allocResult.pMappedData, data, size);
 
-    VkDevice dev = device;
-    deferDestroy([dev, buf, mem]() {
-        vkDestroyBuffer(dev, buf, nullptr);
-        vkFreeMemory(dev, mem, nullptr);
+    VmaAllocator alloc = allocator;
+    deferDestroy([alloc, buf, bufAlloc]() {
+        vmaDestroyBuffer(alloc, buf, bufAlloc);
     });
     outOffset = 0;
     return buf;
@@ -796,10 +788,7 @@ void RHI_Vulkan::shutdown() {
     // Destroy all resources
     for (auto& [id, buffer] : buffers) {
         if (buffer.buffer != VK_NULL_HANDLE) {
-            vkDestroyBuffer(device, buffer.buffer, nullptr);
-        }
-        if (buffer.memory != VK_NULL_HANDLE) {
-            vkFreeMemory(device, buffer.memory, nullptr);
+            vmaDestroyBuffer(allocator, buffer.buffer, buffer.allocation);
         }
     }
     buffers.clear();
@@ -814,10 +803,7 @@ void RHI_Vulkan::shutdown() {
             if (lv != VK_NULL_HANDLE) vkDestroyImageView(device, lv, nullptr);
         }
         if (texture.image != VK_NULL_HANDLE) {
-            vkDestroyImage(device, texture.image, nullptr);
-        }
-        if (texture.memory != VK_NULL_HANDLE) {
-            vkFreeMemory(device, texture.memory, nullptr);
+            vmaDestroyImage(allocator, texture.image, texture.allocation);
         }
     }
     textures.clear();
@@ -890,7 +876,12 @@ void RHI_Vulkan::shutdown() {
         vkDestroySwapchainKHR(device, swapchain, nullptr);
     }
 
-    // Destroy device and instance
+    // Destroy the allocator (all VMA-owned resources were freed above), then
+    // the device and instance.
+    if (allocator != VK_NULL_HANDLE) {
+        vmaDestroyAllocator(allocator);
+        allocator = VK_NULL_HANDLE;
+    }
     if (device != VK_NULL_HANDLE) {
         vkDestroyDevice(device, nullptr);
     }
@@ -935,46 +926,36 @@ BufferHandle RHI_Vulkan::createBuffer(const BufferDesc& desc) {
     bufferInfo.usage = convertBufferUsage(desc.usage);
     bufferInfo.sharingMode = VK_SHARING_MODE_EXCLUSIVE;
 
+    // MemoryUsage -> VMA: AUTO picks the heap; host paths require COHERENT so
+    // the map/memcpy/unmap call sites keep their no-flush semantics.
+    VmaAllocationCreateInfo allocCreate{};
+    allocCreate.usage = VMA_MEMORY_USAGE_AUTO;
+    switch (desc.memoryUsage) {
+        case MemoryUsage::GPU:
+            allocCreate.usage = VMA_MEMORY_USAGE_AUTO_PREFER_DEVICE;
+            break;
+        case MemoryUsage::CPU:
+        case MemoryUsage::CPUtoGPU:
+            allocCreate.flags = VMA_ALLOCATION_CREATE_HOST_ACCESS_SEQUENTIAL_WRITE_BIT;
+            allocCreate.requiredFlags = VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT;
+            break;
+        case MemoryUsage::GPUreadback:
+            allocCreate.flags = VMA_ALLOCATION_CREATE_HOST_ACCESS_RANDOM_BIT;
+            allocCreate.requiredFlags = VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT;
+            allocCreate.preferredFlags = VK_MEMORY_PROPERTY_HOST_CACHED_BIT;
+            break;
+    }
+
+    // VMA owns buffer creation, memory allocation, and binding in one call.
     VkBuffer buffer;
-    if (vkCreateBuffer(device, &bufferInfo, nullptr, &buffer) != VK_SUCCESS) {
+    VmaAllocation allocation;
+    if (vmaCreateBuffer(allocator, &bufferInfo, &allocCreate, &buffer, &allocation, nullptr) != VK_SUCCESS) {
         throw std::runtime_error("Failed to create buffer");
     }
 
-    VkMemoryRequirements memRequirements;
-    vkGetBufferMemoryRequirements(device, buffer, &memRequirements);
-
-    VkMemoryPropertyFlags memoryProps = 0;
-    switch (desc.memoryUsage) {
-        case MemoryUsage::GPU:
-            memoryProps = VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT;
-            break;
-        case MemoryUsage::CPU:
-            memoryProps = VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT;
-            break;
-        case MemoryUsage::CPUtoGPU:
-            memoryProps = VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT;
-            break;
-        case MemoryUsage::GPUreadback:
-            memoryProps = VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_CACHED_BIT;
-            break;
-    }
-
-    VkMemoryAllocateInfo allocInfo{};
-    allocInfo.sType = VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO;
-    allocInfo.allocationSize = memRequirements.size;
-    allocInfo.memoryTypeIndex = findMemoryType(memRequirements.memoryTypeBits, memoryProps);
-
-    VkDeviceMemory memory;
-    if (vkAllocateMemory(device, &allocInfo, nullptr, &memory) != VK_SUCCESS) {
-        vkDestroyBuffer(device, buffer, nullptr);
-        throw std::runtime_error("Failed to allocate buffer memory");
-    }
-
-    vkBindBufferMemory(device, buffer, memory, 0);
-
     Uint32 id = nextBufferId++;
     const bool hostVisible = desc.memoryUsage != MemoryUsage::GPU;
-    buffers[id] = {buffer, memory, desc.size, false, nullptr, hostVisible};
+    buffers[id] = {buffer, allocation, desc.size, false, nullptr, hostVisible};
 
     return BufferHandle{id};
 }
@@ -984,12 +965,11 @@ void RHI_Vulkan::destroyBuffer(BufferHandle handle) {
     if (it != buffers.end()) {
         // The handle dies now; the Vulkan objects retire once every frame
         // that could still reference them has completed.
-        VkDevice dev = device;
+        VmaAllocator alloc = allocator;
         VkBuffer buf = it->second.buffer;
-        VkDeviceMemory mem = it->second.memory;
-        deferDestroy([dev, buf, mem]() {
-            if (buf != VK_NULL_HANDLE) vkDestroyBuffer(dev, buf, nullptr);
-            if (mem != VK_NULL_HANDLE) vkFreeMemory(dev, mem, nullptr);
+        VmaAllocation bufAlloc = it->second.allocation;
+        deferDestroy([alloc, buf, bufAlloc]() {
+            if (buf != VK_NULL_HANDLE) vmaDestroyBuffer(alloc, buf, bufAlloc);
         });
         buffers.erase(it);
     }
@@ -1025,22 +1005,17 @@ TextureHandle RHI_Vulkan::createTexture(const TextureDesc& desc) {
         throw std::runtime_error("Failed to create image");
     }
 
-    VkMemoryRequirements memRequirements;
-    vkGetImageMemoryRequirements(device, image, &memRequirements);
-
-    VkMemoryAllocateInfo allocInfo{};
-    allocInfo.sType = VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO;
-    allocInfo.allocationSize = memRequirements.size;
-    allocInfo.memoryTypeIndex = findMemoryType(memRequirements.memoryTypeBits,
-                                                VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT);
-
-    VkDeviceMemory memory;
-    if (vkAllocateMemory(device, &allocInfo, nullptr, &memory) != VK_SUCCESS) {
-        vkDestroyImage(device, image, nullptr);
+    // Images are always device-local; VMA sub-allocates (and picks a
+    // dedicated allocation itself for large render targets).
+    // The vkCreateImage above is replaced by vmaCreateImage: destroy and
+    // recreate through VMA so creation, allocation and binding are one call.
+    vkDestroyImage(device, image, nullptr);
+    VmaAllocationCreateInfo allocCreate{};
+    allocCreate.usage = VMA_MEMORY_USAGE_AUTO_PREFER_DEVICE;
+    VmaAllocation allocation;
+    if (vmaCreateImage(allocator, &imageInfo, &allocCreate, &image, &allocation, nullptr) != VK_SUCCESS) {
         throw std::runtime_error("Failed to allocate image memory");
     }
-
-    vkBindImageMemory(device, image, memory, 0);
 
     // Create image view
     VkImageViewCreateInfo viewInfo{};
@@ -1063,8 +1038,7 @@ TextureHandle RHI_Vulkan::createTexture(const TextureDesc& desc) {
 
     VkImageView view;
     if (vkCreateImageView(device, &viewInfo, nullptr, &view) != VK_SUCCESS) {
-        vkFreeMemory(device, memory, nullptr);
-        vkDestroyImage(device, image, nullptr);
+        vmaDestroyImage(allocator, image, allocation);
         throw std::runtime_error("Failed to create image view");
     }
 
@@ -1072,7 +1046,7 @@ TextureHandle RHI_Vulkan::createTexture(const TextureDesc& desc) {
     TextureResource resource{};
     resource.image = image;
     resource.view = view;
-    resource.memory = memory;
+    resource.allocation = allocation;
     resource.format = convertPixelFormat(desc.format);
     resource.width = desc.width;
     resource.height = desc.height;
@@ -1157,12 +1131,12 @@ TextureHandle RHI_Vulkan::createTextureView(const TextureViewDesc& desc) {
     VkImageView view = VK_NULL_HANDLE;
     if (vkCreateImageView(device, &info, nullptr, &view) != VK_SUCCESS) return {};
 
-    // View-only resource: image/memory left null so destroyTexture frees ONLY
-    // the view and never touches the source's image/allocation.
+    // View-only resource: image/allocation left null so destroyTexture frees
+    // ONLY the view and never touches the source's image/allocation.
     Uint32 id = nextTextureId++;
     TextureResource r{};
     r.image = VK_NULL_HANDLE;
-    r.memory = VK_NULL_HANDLE;
+    r.allocation = VK_NULL_HANDLE;
     r.view = view;
     r.format = src.format;
     r.width = src.width;
@@ -1177,18 +1151,18 @@ void RHI_Vulkan::destroyTexture(TextureHandle handle) {
     auto it = textures.find(handle.id);
     if (it != textures.end()) {
         VkDevice dev = device;
+        VmaAllocator alloc = allocator;
         VkImageView view = it->second.view;
         VkImage image = it->second.image;
-        VkDeviceMemory mem = it->second.memory;
+        VmaAllocation imgAlloc = it->second.allocation;
         std::vector<VkImageView> extraViews;
         for (auto& lv : it->second.layerViews) extraViews.push_back(lv.second);
-        deferDestroy([dev, view, image, mem, extraViews]() {
+        deferDestroy([dev, alloc, view, image, imgAlloc, extraViews]() {
             if (view != VK_NULL_HANDLE) vkDestroyImageView(dev, view, nullptr);
             for (VkImageView lv : extraViews) {
                 if (lv != VK_NULL_HANDLE) vkDestroyImageView(dev, lv, nullptr);
             }
-            if (image != VK_NULL_HANDLE) vkDestroyImage(dev, image, nullptr);
-            if (mem != VK_NULL_HANDLE) vkFreeMemory(dev, mem, nullptr);
+            if (image != VK_NULL_HANDLE) vmaDestroyImage(alloc, image, imgAlloc);
         });
         textures.erase(it);
     }
@@ -1627,10 +1601,12 @@ void RHI_Vulkan::updateBuffer(BufferHandle handle, const void* data, size_t offs
     }
 
     if (it->second.hostVisible) {
-        void* mapped;
-        vkMapMemory(device, it->second.memory, offset, size, 0, &mapped);
-        std::memcpy(mapped, data, size);
-        vkUnmapMemory(device, it->second.memory);
+        void* mapped = nullptr;
+        if (vmaMapMemory(allocator, it->second.allocation, &mapped) == VK_SUCCESS) {
+            // vmaMapMemory returns the allocation base; apply the offset here.
+            std::memcpy(static_cast<char*>(mapped) + offset, data, size);
+            vmaUnmapMemory(allocator, it->second.allocation);
+        }
         return;
     }
 
@@ -1874,30 +1850,18 @@ BufferHandle RHI_Vulkan::copySwapchainToBuffer(Uint32& outWidth, Uint32& outHeig
     bufferInfo.usage = VK_BUFFER_USAGE_TRANSFER_DST_BIT;
     bufferInfo.sharingMode = VK_SHARING_MODE_EXCLUSIVE;
 
+    // CPU readback: RANDOM host access (the caller maps and reads it back).
+    VmaAllocationCreateInfo allocCreate{};
+    allocCreate.usage = VMA_MEMORY_USAGE_AUTO;
+    allocCreate.flags = VMA_ALLOCATION_CREATE_HOST_ACCESS_RANDOM_BIT;
+    allocCreate.requiredFlags = VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT;
     VkBuffer stagingBuffer;
-    if (vkCreateBuffer(device, &bufferInfo, nullptr, &stagingBuffer) != VK_SUCCESS) {
+    VmaAllocation stagingAllocation;
+    if (vmaCreateBuffer(allocator, &bufferInfo, &allocCreate, &stagingBuffer,
+                        &stagingAllocation, nullptr) != VK_SUCCESS) {
         fmt::print(stderr, "Failed to create screenshot staging buffer\n");
         return BufferHandle{};
     }
-
-    VkMemoryRequirements memRequirements;
-    vkGetBufferMemoryRequirements(device, stagingBuffer, &memRequirements);
-
-    VkMemoryAllocateInfo allocInfo{};
-    allocInfo.sType = VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO;
-    allocInfo.allocationSize = memRequirements.size;
-    allocInfo.memoryTypeIndex = findMemoryType(memRequirements.memoryTypeBits,
-                                                VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT |
-                                                VK_MEMORY_PROPERTY_HOST_COHERENT_BIT);
-
-    VkDeviceMemory stagingMemory;
-    if (vkAllocateMemory(device, &allocInfo, nullptr, &stagingMemory) != VK_SUCCESS) {
-        vkDestroyBuffer(device, stagingBuffer, nullptr);
-        fmt::print(stderr, "Failed to allocate screenshot staging buffer memory\n");
-        return BufferHandle{};
-    }
-
-    vkBindBufferMemory(device, stagingBuffer, stagingMemory, 0);
 
     // Transition swapchain image for transfer (from whatever layout the
     // frame's passes left it in — usually COLOR_ATTACHMENT_OPTIMAL, since
@@ -1934,7 +1898,7 @@ BufferHandle RHI_Vulkan::copySwapchainToBuffer(Uint32& outWidth, Uint32& outHeig
 
     // Store in buffers map
     Uint32 id = nextBufferId++;
-    buffers[id] = {stagingBuffer, stagingMemory, imageSize, false, nullptr, true};
+    buffers[id] = {stagingBuffer, stagingAllocation, imageSize, false, nullptr, true};
 
     return BufferHandle{id};
 }
@@ -1951,7 +1915,7 @@ void* RHI_Vulkan::mapBuffer(BufferHandle handle) {
     }
 
     void* data = nullptr;
-    if (vkMapMemory(device, bufferRes.memory, 0, bufferRes.size, 0, &data) == VK_SUCCESS) {
+    if (vmaMapMemory(allocator, bufferRes.allocation, &data) == VK_SUCCESS) {
         bufferRes.isMapped = true;
         bufferRes.mappedData = data;
         return data;
@@ -1966,7 +1930,7 @@ void RHI_Vulkan::unmapBuffer(BufferHandle handle) {
         return;
     }
 
-    vkUnmapMemory(device, it->second.memory);
+    vmaUnmapMemory(allocator, it->second.allocation);
     it->second.isMapped = false;
     it->second.mappedData = nullptr;
 }
@@ -2952,6 +2916,24 @@ void RHI_Vulkan::createLogicalDevice() {
     vkGetDeviceQueue(device, graphicsFamilyIdx, 0, &graphicsQueue);
     vkGetDeviceQueue(device, presentFamilyIdx, 0, &presentQueue);
 
+    // One VMA allocator for every buffer/image: sub-allocates from large
+    // memory blocks instead of one vkAllocateMemory per resource, which
+    // fragments and walks into maxMemoryAllocationCount (often just 4096).
+    {
+        VkPhysicalDeviceProperties props{};
+        vkGetPhysicalDeviceProperties(physicalDevice, &props);
+        VmaAllocatorCreateInfo allocatorInfo{};
+        allocatorInfo.physicalDevice = physicalDevice;
+        allocatorInfo.device = device;
+        allocatorInfo.instance = instance;
+        // Cap at 1.3 (our target); MoltenVK may report lower — VMA scales its
+        // feature use (dedicated allocations etc.) to whatever this says.
+        allocatorInfo.vulkanApiVersion = std::min(props.apiVersion, VK_API_VERSION_1_3);
+        if (vmaCreateAllocator(&allocatorInfo, &allocator) != VK_SUCCESS) {
+            throw std::runtime_error("Failed to create VMA allocator");
+        }
+    }
+
     // Load extension function pointers
     vkCmdBeginRenderingKHR = (PFN_vkCmdBeginRenderingKHR)vkGetDeviceProcAddr(device, "vkCmdBeginRenderingKHR");
     vkCmdEndRenderingKHR = (PFN_vkCmdEndRenderingKHR)vkGetDeviceProcAddr(device, "vkCmdEndRenderingKHR");
@@ -3195,20 +3177,6 @@ void RHI_Vulkan::createSyncObjects() {
 // ============================================================================
 // Internal Helpers - Conversion Functions
 // ============================================================================
-
-Uint32 RHI_Vulkan::findMemoryType(Uint32 typeFilter, VkMemoryPropertyFlags properties) {
-    VkPhysicalDeviceMemoryProperties memProperties;
-    vkGetPhysicalDeviceMemoryProperties(physicalDevice, &memProperties);
-
-    for (uint32_t i = 0; i < memProperties.memoryTypeCount; i++) {
-        if ((typeFilter & (1 << i)) &&
-            (memProperties.memoryTypes[i].propertyFlags & properties) == properties) {
-            return i;
-        }
-    }
-
-    throw std::runtime_error("Failed to find suitable memory type");
-}
 
 VkFormat RHI_Vulkan::convertPixelFormat(PixelFormat format) {
     switch (format) {
