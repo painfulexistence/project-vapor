@@ -776,6 +776,12 @@ private:
     PipelineHandle skyboxPipeline;
     ShaderHandle skyboxFragmentShader;
     SkyType m_skyType = SkyType::Atmosphere;
+    // IBL debug: environmentCubemap unwrapped to a 2D equirect RT for ImGui
+    // (cubemaps can't be shown directly). iblPreviewPass renders it each frame.
+    TextureHandle iblPreviewRT;
+    PipelineHandle iblPreviewPipeline;
+    ShaderHandle iblPreviewVertexShader;
+    ShaderHandle iblPreviewFragmentShader;
     ShaderHandle lightScatteringShader;
     ShaderHandle volumetricFogShader;
     BufferHandle fogDataBuffer;
@@ -1093,6 +1099,7 @@ private:
     bool m_iblReady = false;
     static constexpr Uint32 PREFILTER_MIP_LEVELS = 5;
     void iblCapturePass();
+    void iblPreviewPass();  // IBL debug: cubemap -> equirect RT for ImGui
 
     // HDRI environment source (ported from the native Metal renderer). When set,
     // iblCapturePass converts the equirect map into environmentCubemap (instead of

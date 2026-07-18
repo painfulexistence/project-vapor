@@ -342,6 +342,14 @@ void Renderer::initialize(std::unique_ptr<RHI> rhiPtr, GraphicsBackend backendTy
         bd.format = PixelFormat::RGBA16_FLOAT;
         bd.usage = TextureUsage::RenderTarget | TextureUsage::Sampled;
         brdfLUTTex = rhi->createTexture(bd);
+
+        // IBL debug: 2D equirect unwrap of environmentCubemap for ImGui.
+        TextureDesc pd;
+        pd.width = 512;
+        pd.height = 256;
+        pd.format = PixelFormat::RGBA16_FLOAT;
+        pd.usage = TextureUsage::RenderTarget | TextureUsage::Sampled;
+        iblPreviewRT = rhi->createTexture(pd);
     }
 
     // Empty TLAS on RT-capable backends; instances are refit/rebuilt per frame
@@ -1031,6 +1039,8 @@ void Renderer::setupDefaultRenderGraph() {
     // IBL-from-sky capture (runs once, refreshed via iblNeedsUpdate).
     renderGraph.addPass("IBLCapture",
         [](Renderer& r) { r.iblCapturePass(); });
+    renderGraph.addPass("IBLPreview",
+        [](Renderer& r) { r.iblPreviewPass(); });
 
     renderGraph.addPass("BuildAccelStructures",
         [](Renderer& r) { r.buildAccelerationStructures(); }, PassFlags::RequiresRaytracing);
@@ -2059,6 +2069,26 @@ void Renderer::iblCapturePass() {
         m_iblBakeStage = -1;  // bake complete
         m_iblReady = true;    // IBL maps are now valid to sample
     }
+}
+
+void Renderer::iblPreviewPass() {
+    // IBL debug: unwrap environmentCubemap into the 2D equirect RT so ImGui can
+    // show it. Cheap (one 512x256 fullscreen draw); only runs once the IBL has
+    // been baked at least once.
+    if (!m_iblReady || !iblPreviewPipeline.isValid() || !iblPreviewRT.isValid() ||
+        !environmentCubemap.isValid()) {
+        return;
+    }
+    RenderPassDesc rp;
+    rp.name = "IBLPreview";
+    rp.colorAttachments.push_back(iblPreviewRT);
+    rp.clearColors.push_back(glm::vec4(0, 0, 0, 1));
+    rp.loadColor.push_back(false);
+    rhi->beginRenderPass(rp);
+    rhi->bindPipeline(iblPreviewPipeline);
+    rhi->setTexture(0, 0, environmentCubemap, clampSampler);  // samplerCube set2/binding0 (Vk) / texture(0) (Metal)
+    rhi->draw(3, 1, 0, 0);
+    rhi->endRenderPass();
 }
 
 // Depth + normal (+ albedo) pre-pass. Feeds the RT shadow/AO kernels (and,
@@ -5338,6 +5368,8 @@ void Renderer::createRenderPipeline() {
             irradiancePipeline        = makeIblVkPipeline("shaders/IBLCubeFace.vert.spv", "shaders/IBLIrradiance.frag.spv", irradianceVS, irradianceFS);
             prefilterPipeline         = makeIblVkPipeline("shaders/IBLCubeFace.vert.spv", "shaders/IBLPrefilter.frag.spv",  prefilterVS, prefilterFS);
             brdfLUTPipeline           = makeIblVkPipeline("shaders/IBLBRDF.vert.spv",     "shaders/IBLBRDF.frag.spv",        brdfVS, brdfFS);
+            // IBL debug: cubemap -> equirect 2D RT (FullScreen.vert + IblEquirectPreview.frag).
+            iblPreviewPipeline        = makeIblVkPipeline("shaders/FullScreen.vert.spv", "shaders/IblEquirectPreview.frag.spv", iblPreviewVertexShader, iblPreviewFragmentShader);
 
             // Volumetric clouds: quarter-res raymarch, temporal resolve, and
             // full-res composite — all fullscreen RGBA16F passes.
@@ -5674,6 +5706,9 @@ void Renderer::createRenderPipeline() {
         // fullscreen depth-tested state as the atmosphere pass.
         skyboxPipeline = makeMetalPass("shaders/3d_skybox.metal", "vertexMain", "fragmentMain",
                                        BlendMode::Opaque, { PixelFormat::RGBA16_FLOAT }, true, CompareOp::LessOrEqual);
+        // IBL debug: cubemap -> equirect 2D RT.
+        iblPreviewPipeline = makeMetalPass("shaders/3d_ibl_equirect.metal", "vertexMain", "fragmentMain",
+                                           BlendMode::Opaque, { PixelFormat::RGBA16_FLOAT }, false, CompareOp::Less);
         lightScatteringPipeline = makeMetalPass("shaders/3d_light_scattering.metal", "vertexMain", "fragmentMain",
                                                 BlendMode::Opaque, { PixelFormat::RGBA16_FLOAT }, false, CompareOp::Less);
         volumetricFogPipeline = makeMetalPass("shaders/3d_volumetric_fog.metal", "volumetricFogVertex", "simpleFogFragment",
@@ -6708,6 +6743,15 @@ void Renderer::drawGraphicsImGui() {
         }
         if (ImGui::Button("Refresh IBL")) iblNeedsUpdate = true;
         if (ch) iblNeedsUpdate = true;  // sky changed -> recapture IBL (native behavior)
+        // Debug: the baked environment cubemap, unwrapped to equirect.
+        if (iblPreviewRT.isValid()) {
+            if (void* id = getImGuiTextureID(iblPreviewRT)) {
+                ImGui::Text("Environment cubemap (equirect):");
+                ImGui::Image((ImTextureID)(intptr_t)id, ImVec2(320, 160));
+            } else {
+                ImGui::TextDisabled("(IBL preview unavailable on this backend)");
+            }
+        }
         ImGui::TreePop();
     }
 
