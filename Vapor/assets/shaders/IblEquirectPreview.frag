@@ -14,5 +14,8 @@ void main() {
     float phi   = (tex_uv.x * 2.0 - 1.0) * PI;   // longitude, -PI..PI
     float theta = tex_uv.y * PI;                  // latitude, 0..PI (0 = +Y up)
     vec3 dir = vec3(sin(theta) * sin(phi), cos(theta), -sin(theta) * cos(phi));
-    outColor = vec4(texture(envCubemap, dir).rgb, 1.0);
+    // Sample mip 0 explicitly: the equirect's fast azimuthal change gives huge
+    // derivatives, so auto-mip selects a high (possibly wrong) mip and the sky
+    // repeats/breaks. Mip 0 is the sharp capture.
+    outColor = vec4(textureLod(envCubemap, dir, 0.0).rgb, 1.0);
 }

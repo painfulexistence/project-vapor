@@ -38,5 +38,7 @@ fragment float4 fragmentMain(
     float4 viewPos = camera.invProj * clipPos;
     viewPos /= viewPos.w;
     float3 dir = normalize((camera.invView * float4(viewPos.xyz, 0.0)).xyz);
-    return float4(envCubemap.sample(cubeSampler, dir).rgb, 1.0);
+    // Sample mip 0 explicitly: fullscreen cube sampling picks wrong (high) mips
+    // at face boundaries via derivatives, tearing the sky.
+    return float4(envCubemap.sample(cubeSampler, dir, level(0)).rgb, 1.0);
 }

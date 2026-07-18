@@ -33,5 +33,7 @@ void main() {
     viewPos /= viewPos.w;
     vec3 dir = normalize((cam.invView * vec4(viewPos.xyz, 0.0)).xyz);
 
-    outColor = vec4(texture(envCubemap, dir).rgb, 1.0);
+    // Sample mip 0 explicitly: derivative-based mip selection across a fullscreen
+    // cube sample picks wrong (high) mips at face boundaries, which tears the sky.
+    outColor = vec4(textureLod(envCubemap, dir, 0.0).rgb, 1.0);
 }
