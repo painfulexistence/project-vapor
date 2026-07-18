@@ -8,6 +8,13 @@ struct Cluster {
     float4 max;
     uint lightCount;
     uint lightIndices[MAX_LIGHTS_PER_CLUSTER];
+    // Spot/rect tail (stride parity with graphics.hpp Cluster). This legacy
+    // native-path cull does NOT write them — readers gate on the global light
+    // counts, which the native path binds as 0.
+    uint spotCount;
+    uint spotIndices[64];
+    uint rectCount;
+    uint rectIndices[32];
 };
 
 struct PointLight {

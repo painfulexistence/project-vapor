@@ -124,11 +124,17 @@ layout(std430, set = 1, binding = 3) readonly buffer CameraBuf {
 };
 // Tile light culling output (TileLightCull.comp) + its dimensions.
 const uint MAX_LIGHTS_PER_TILE = 256;
+const uint MAX_SPOTS_PER_CLUSTER = 64u;  // must match graphics.hpp Cluster
+const uint MAX_RECTS_PER_CLUSTER = 32u;
 struct Cluster {
     vec4 mn;
     vec4 mx;
     uint lightCount;
     uint lightIndices[MAX_LIGHTS_PER_TILE];
+    uint spotCount;
+    uint spotIndices[MAX_SPOTS_PER_CLUSTER];
+    uint rectCount;
+    uint rectIndices[MAX_RECTS_PER_CLUSTER];
 };
 layout(std430, set = 1, binding = 4) readonly buffer ClusterBuf { Cluster tiles[]; };
 layout(std430, set = 1, binding = 5) readonly buffer LightCullBuf {
@@ -628,19 +634,22 @@ void main() {
     // Point lights via the culled tile list. The tile is selected with the
     // exact projection math the culling shader uses, so screen-space
     // conventions cancel out by construction. Debug bit0 skips the whole loop.
+    // Shared 3D-cluster index for the culled point/spot/rect loops below,
+    // computed with the culler's exact projection math so screen-space
+    // conventions cancel by construction.
+    vec4 clip = cam.proj * cam.view * vec4(fragPos, 1.0);
+    vec2 suv = clamp((clip.xy / max(clip.w, 1e-4)) * 0.5 + 0.5, vec2(0.0), vec2(0.9999));
+    uvec2 tile = uvec2(suv * vec2(cullGridSize.xy));
+    // 3D cluster: logarithmic depth slice, same mapping the culler writes:
+    // slice k spans [near*(far/near)^(k/Z), near*(far/near)^((k+1)/Z)).
+    // clip.w is the fragment's view-space depth (== viewDepth above).
+    uint tileZ = uint(clamp(
+        log(max(clip.w, cam.nearPlane) / cam.nearPlane)
+            / log(cam.farPlane / cam.nearPlane) * float(cullGridSize.z),
+        0.0, float(cullGridSize.z - 1u)));
+    uint tileIndex = tile.x + tile.y * cullGridSize.x
+                   + tileZ * cullGridSize.x * cullGridSize.y;
     if ((mainDebugFlags & 1u) == 0u) {
-        vec4 clip = cam.proj * cam.view * vec4(fragPos, 1.0);
-        vec2 suv = clamp((clip.xy / max(clip.w, 1e-4)) * 0.5 + 0.5, vec2(0.0), vec2(0.9999));
-        uvec2 tile = uvec2(suv * vec2(cullGridSize.xy));
-        // 3D cluster: logarithmic depth slice, same mapping the culler writes:
-        // slice k spans [near*(far/near)^(k/Z), near*(far/near)^((k+1)/Z)).
-        // clip.w is the fragment's view-space depth (== viewDepth above).
-        uint tileZ = uint(clamp(
-            log(max(clip.w, cam.nearPlane) / cam.nearPlane)
-                / log(cam.farPlane / cam.nearPlane) * float(cullGridSize.z),
-            0.0, float(cullGridSize.z - 1u)));
-        uint tileIndex = tile.x + tile.y * cullGridSize.x
-                       + tileZ * cullGridSize.x * cullGridSize.y;
         uint count = min(tiles[tileIndex].lightCount, MAX_LIGHTS_PER_TILE);
         for (uint t = 0u; t < count; ++t) {
             PointLight l = pointLights[tiles[tileIndex].lightIndices[t]];
@@ -661,7 +670,10 @@ void main() {
     // Spot lights (loop-all; typical scenes carry a handful). Same falloff as
     // point lights, windowed by a squared smooth cone factor between the inner
     // and outer half-angle cosines. Unshadowed on Vulkan until RT lands here.
-    for (uint sIdx = 0u; sIdx < spotRectCounts.x; ++sIdx) {
+    uint clusterSpots = min(tiles[tileIndex].spotCount, MAX_SPOTS_PER_CLUSTER);
+    for (uint sSlot = 0u; sSlot < clusterSpots; ++sSlot) {
+        uint sIdx = tiles[tileIndex].spotIndices[sSlot];
+        if (sIdx >= spotRectCounts.x) continue;  // culler/frame mismatch guard
         SpotLight sl = spotLights[sIdx];
         vec3 toLight = sl.position - fragPos;
         float dist2 = max(dot(toLight, toLight), 1e-4);
@@ -679,7 +691,10 @@ void main() {
     // same way as the Metal CalculateRectLight. Unshadowed on Vulkan (the RT
     // area shadow needs the raytracing port); video-textured lights fall back
     // to their solid color (no video texture bound on this path).
-    for (uint rIdx = 0u; rIdx < spotRectCounts.y; ++rIdx) {
+    uint clusterRects = min(tiles[tileIndex].rectCount, MAX_RECTS_PER_CLUSTER);
+    for (uint rSlot = 0u; rSlot < clusterRects; ++rSlot) {
+        uint rIdx = tiles[tileIndex].rectIndices[rSlot];
+        if (rIdx >= spotRectCounts.y) continue;  // culler/frame mismatch guard
         RectLight rl = rectLights[rIdx];
         vec3 radiance = rl.color * rl.intensity;
         float diffuseGeo = rectLightDiffuse(N, fragPos, rl);

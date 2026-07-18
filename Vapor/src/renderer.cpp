@@ -2236,6 +2236,14 @@ void Renderer::tileCullingPass() {
         rhi->setComputeBytes(&pointLightCount, sizeof(Uint32), 3);
         rhi->setComputeBytes(&gridSize, sizeof(glm::uvec3), 4);
         rhi->setComputeBytes(&screenSize, sizeof(glm::vec2), 5);
+        // Spot/rect join the froxel cull (indices into the same light buffers
+        // the PBR shader binds).
+        Uint32 spotCullCount = static_cast<Uint32>(spotLights.size());
+        Uint32 rectCullCount = static_cast<Uint32>(rectLights.size());
+        rhi->setComputeBuffer(6, spotLightBuffer, 0, sizeof(Vapor::SpotLight) * maxSpotLights);
+        rhi->setComputeBuffer(7, rectLightBuffer);
+        rhi->setComputeBytes(&spotCullCount, sizeof(Uint32), 8);
+        rhi->setComputeBytes(&rectCullCount, sizeof(Uint32), 9);
         // One workgroup per 3D cluster (x, y, log-z slice).
         rhi->dispatch(clusterGridSizeX, clusterGridSizeY, clusterGridSizeZ);
         rhi->endComputePass();
@@ -2245,6 +2253,8 @@ void Renderer::tileCullingPass() {
         lc.screenSize = screenSize;
         lc.gridSize = gridSize;
         lc.lightCount = pointLightCount;
+        lc.cullSpotCount = static_cast<Uint32>(spotLights.size());
+        lc.cullRectCount = static_cast<Uint32>(rectLights.size());
         rhi->updateBuffer(lightCullDataBuffer, &lc, 0, sizeof(lc));
         rhi->beginComputePass("TileCulling");
         rhi->bindComputePipeline(vkTileCullPipeline);
@@ -2252,6 +2262,8 @@ void Renderer::tileCullingPass() {
         rhi->setComputeBuffer(3, pointLightBuffer, 0, sizeof(PointLightData) * maxPointLights);
         rhi->setComputeBuffer(4, lightCullDataBuffer, 0, sizeof(Vapor::LightCullData));
         rhi->setComputeBuffer(5, clusterBuffer);
+        rhi->setComputeBuffer(6, spotLightBuffer, 0, sizeof(Vapor::SpotLight) * maxSpotLights);
+        rhi->setComputeBuffer(7, rectLightBuffer);
         // One workgroup per 3D cluster (x, y, log-z slice).
         rhi->dispatch(clusterGridSizeX, clusterGridSizeY, clusterGridSizeZ);
         rhi->endComputePass();

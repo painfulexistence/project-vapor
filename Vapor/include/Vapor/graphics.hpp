@@ -224,6 +224,16 @@ struct alignas(16) Cluster {
     glm::vec4 max;
     Uint32 lightCount;
     Uint32 lightIndices[256];
+    // Clustered spot/rect lists (appended so every existing point-light reader
+    // keeps its offsets). Caps = the engine-wide light maxima, so the writers
+    // can never overflow. Written by TileLightCull.comp / 3d_tile_light_cull
+    // .metal; the native path's legacy 3d_light_cull.metal leaves them
+    // untouched, so readers MUST bound their loops by the global light counts
+    // (0 on that path) before trusting these fields.
+    Uint32 spotCount;
+    Uint32 spotIndices[64];   // MAX_SPOTS_PER_CLUSTER = maxSpotLights
+    Uint32 rectCount;
+    Uint32 rectIndices[32];   // MAX_RECTS_PER_CLUSTER = maxRectLights
 };
 
 struct alignas(16) LightCullData {
@@ -231,6 +241,10 @@ struct alignas(16) LightCullData {
     glm::vec2 _pad1;
     glm::uvec3 gridSize;
     Uint32 lightCount;
+    // Spot/rect counts for the clustered cull (Vulkan path reads these from
+    // the SSBO; the Metal cull takes them as setComputeBytes instead).
+    Uint32 cullSpotCount;
+    Uint32 cullRectCount;
 };
 
 struct VertexData {

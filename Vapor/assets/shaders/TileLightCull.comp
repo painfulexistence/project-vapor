@@ -7,12 +7,33 @@
 layout(local_size_x = 1, local_size_y = 1, local_size_z = 1) in;
 
 const uint MAX_LIGHTS_PER_TILE = 256; // must match graphics.hpp
+const uint MAX_SPOTS_PER_CLUSTER = 64u;
+const uint MAX_RECTS_PER_CLUSTER = 32u;
 
 struct Cluster {
     vec4 mn;
     vec4 mx;
     uint lightCount;
     uint lightIndices[MAX_LIGHTS_PER_TILE];
+    uint spotCount;
+    uint spotIndices[MAX_SPOTS_PER_CLUSTER];
+    uint rectCount;
+    uint rectIndices[MAX_RECTS_PER_CLUSTER];
+};
+
+// Must match Vapor::SpotLight (std430, 64 bytes).
+struct SpotLight {
+    vec3 position;  float _pad0;
+    vec3 direction; float _pad1;
+    vec3 color;     float _pad2;
+    float radius;   float cosInner; float cosOuter; float intensity;
+};
+// Must match Vapor::RectLight (std430 packs the scalars into the vec3 tails).
+struct RectLight {
+    vec3 position;  float halfWidth;
+    vec3 rright;    float halfHeight;
+    vec3 up;        float intensity;
+    vec3 color;     uint useVideoTexture;
 };
 
 // Must match Vapor::PointLightData (stride 48).
@@ -42,8 +63,12 @@ layout(std430, set = 0, binding = 4) readonly buffer LightCullBuf {
     vec2 _pad1;
     uvec3 gridSize;
     uint lightCount;
+    uint cullSpotCount;
+    uint cullRectCount;
 };
 layout(std430, set = 0, binding = 5) restrict buffer ClusterBuffer { Cluster tiles[]; };
+layout(std430, set = 0, binding = 6) readonly buffer SpotLightBuffer { SpotLight spotLights[]; };
+layout(std430, set = 0, binding = 7) readonly buffer RectLightBuffer { RectLight rectLights[]; };
 
 bool sphereTileIntersection(vec3 center, float radius, mat4 viewProj, vec2 tileMin, vec2 tileMax,
                             float sliceZ0, float sliceZ1) {
@@ -110,4 +135,36 @@ void main() {
         }
     }
     tiles[tileIndex].lightCount = count;
+
+    // Spot lights: the range IS a sphere radius, so the point test applies
+    // directly (conservative for narrow cones — a cone/AABB test is the
+    // follow-up refinement).
+    uint sCount = 0u;
+    for (uint i = 0u; i < cullSpotCount; i++) {
+        if (sCount >= MAX_SPOTS_PER_CLUSTER) break;
+        if (sphereTileIntersection(spotLights[i].position, spotLights[i].radius, viewProj,
+                                   tileMin, tileMax, sliceZ0, sliceZ1)) {
+            tiles[tileIndex].spotIndices[sCount] = i;
+            sCount++;
+        }
+    }
+    tiles[tileIndex].spotCount = sCount;
+
+    // Rect area lights carry no range field (pure inverse-square falloff), so
+    // derive a conservative cull sphere: the rect's half-diagonal plus the
+    // distance where intensity/d^2 falls under a 1% cutoff. Never over-culls;
+    // tune the cutoff to tighten.
+    uint rCount = 0u;
+    for (uint i = 0u; i < cullRectCount; i++) {
+        if (rCount >= MAX_RECTS_PER_CLUSTER) break;
+        RectLight rl = rectLights[i];
+        float halfDiag = length(vec2(rl.halfWidth, rl.halfHeight));
+        float range = halfDiag + sqrt(max(rl.intensity, 0.0) / 0.01);
+        if (sphereTileIntersection(rl.position, range, viewProj,
+                                   tileMin, tileMax, sliceZ0, sliceZ1)) {
+            tiles[tileIndex].rectIndices[rCount] = i;
+            rCount++;
+        }
+    }
+    tiles[tileIndex].rectCount = rCount;
 }

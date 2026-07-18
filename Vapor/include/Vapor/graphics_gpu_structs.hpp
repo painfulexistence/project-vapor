@@ -123,6 +123,11 @@ struct alignas(16) Cluster {
     glm::vec4 max;
     Uint32 lightCount;
     Uint32 lightIndices[256];
+    // Spot/rect tail — keep byte-identical with Vapor::Cluster (graphics.hpp).
+    Uint32 spotCount;
+    Uint32 spotIndices[64];
+    Uint32 rectCount;
+    Uint32 rectIndices[32];
 };
 
 struct alignas(16) LightCullData {
@@ -131,6 +136,8 @@ struct alignas(16) LightCullData {
     glm::uvec3 gridSize;
     float _pad2;
     Uint32 lightCount;
+    Uint32 cullSpotCount;   // keep in step with Vapor::LightCullData
+    Uint32 cullRectCount;
 };
 
 struct alignas(16) IBLCaptureData {
