@@ -55,6 +55,12 @@
 
 using namespace Vapor;
 
+// The pass classes below complete the forward declarations in
+// renderer_metal.hpp, which live in namespace Vapor — so the definitions must
+// too. (An unqualified class definition at global scope would define a NEW
+// ::type and leave the Vapor:: one forever incomplete.)
+namespace Vapor {
+
 // Pre-pass: Renders depth and normals
 class PrePass : public MetalRenderPass {
 public:
@@ -2951,6 +2957,8 @@ public:
 private:
     Vapor::GIBSManager* gibsManager;
 };
+
+} // namespace Vapor
 
 std::unique_ptr<IRenderer> Vapor::createRendererMetal(SDL_Window* window) {
     auto r = std::make_unique<Renderer_Metal>();

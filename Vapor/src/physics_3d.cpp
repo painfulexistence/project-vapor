@@ -75,6 +75,12 @@ namespace Layers {
     static constexpr JPH::ObjectLayer numLayers = 3;
 };// namespace Layers
 
+// These impl classes complete the forward declarations in physics_3d.hpp,
+// which live in namespace Vapor — so the definitions must too. (An unqualified
+// class definition at global scope would define a NEW ::type and leave the
+// Vapor:: one forever incomplete.)
+namespace Vapor {
+
 class ObjectLayerPairFilterImpl : public JPH::ObjectLayerPairFilter {
 public:
     virtual auto ShouldCollide(JPH::ObjectLayer inObject1, JPH::ObjectLayer inObject2) const -> bool override {
@@ -214,6 +220,7 @@ public:
     }
 };
 
+} // namespace Vapor
 
 Physics3D* Physics3D::_instance = nullptr;
 
