@@ -29,44 +29,50 @@ kernel void computeMain(
     float2 velocity = velocityTexture.read(tid).rg;
     float2 prevUV = uv - float2(velocity.x, -velocity.y);
 
-    // Variance clamping neighbourhood (3x3)
+    // 3x3 mean of the current frame — a per-frame denoised estimate used only
+    // to decide whether the SHADOW changed (below), robust to single-ray flips.
     float3 mean = float3(0.0);
-    float3 sq   = float3(0.0);
     for (int dy = -1; dy <= 1; dy++) {
         for (int dx = -1; dx <= 1; dx++) {
             uint2 nc = uint2(clamp(int2(tid) + int2(dx, dy), int2(0), int2(w-1, h-1)));
-            float3 v = currentShadow.read(nc).rgb;
-            mean += v;
-            sq   += v * v;
+            mean += currentShadow.read(nc).rgb;
         }
     }
     mean /= 9.0;
-    float3 variance = max(sq / 9.0 - mean * mean, float3(0.0));
-    float3 stddev = sqrt(variance);
-    // Variance floor: stochastic shadow factors are FRACTIONAL (a rect
-    // penumbra converges on the covered fraction), so a frame whose 3x3
-    // window happens to be uniform (all 0 at a penumbra fringe: ~15% of
-    // frames at 10% coverage) must not collapse the window to a point and
-    // erase the accumulated value — that reset-and-reclimb sawtooth reads
-    // as crawling noise that never converges. The floor is faded out with
-    // reprojection motion, though: the same slack that lets fractions
-    // survive unlucky frames turns into ghost trails once the history is
-    // being dragged across the screen (the clamp IS the accumulator's
-    // anti-ghost mechanism). Static pixels keep full convergence; anything
-    // moving more than ~2 px/frame gets the tight clamp back.
-    float pxMotion = length(velocity * screenSize);
-    stddev = max(stddev, float3(0.15 * saturate(1.0 - 0.5 * pxMotion)));
 
+    // Adaptive temporal accumulation (SVGF-style history length) instead of a
+    // fixed 15% blend + variance clamp. The shadow factors are stochastic
+    // FRACTIONS (a rect penumbra converges on its covered fraction) sampled
+    // with 1-2 binary rays/frame; a fixed alpha leaves a permanent EMA
+    // variance floor no amount of frames removes. Here alpha = 1/(N+1) where N
+    // is how many frames this surface point has accumulated: a STATIC penumbra
+    // drives N up and alpha down, averaging the binary samples toward the true
+    // fraction (clean); alpha springs back up on a reset so response stays
+    // fast. The frame count rides in the history's unused alpha channel (the
+    // denoise pass writes rgb only, so it survives the swap).
     constexpr sampler s(coord::normalized, address::clamp_to_edge, filter::linear);
-    float3 history = historyShadow.sample(s, prevUV).rgb;
+    float4 hist = historyShadow.sample(s, prevUV);
+    // Sanitize: the history RT is uninitialized on the first frame after a
+    // resize. Shadow factors are [0,1] and the frame count [0,256], so these
+    // clamps also scrub any NaN/Inf (min/max return the non-NaN operand) before
+    // it can feed back through the accumulator.
+    float3 history = clamp(hist.rgb, 0.0, 1.0);
+    float histLen = clamp(hist.a, 0.0, 256.0);
 
-    // Clamp history into current neighbourhood bbox
-    history = clamp(history, mean - stddev * 1.5, mean + stddev * 1.5);
+    // Reset the history length — springing alpha back up — when the reprojected
+    // sample left the screen (disocclusion) OR when the denoised current has
+    // moved away from history by more than the per-frame sampling noise, i.e.
+    // the shadow itself moved (a moving light/occluder). This reset IS the
+    // anti-ghost mechanism the variance clamp used to provide; it does NOT fire
+    // on per-ray noise because it compares against the 3x3 mean.
+    bool onScreen = all(prevUV >= 0.0) && all(prevUV <= 1.0);
+    float3 d = abs(mean - history);
+    float changed = max(d.r, max(d.g, d.b));
+    float reset = onScreen ? saturate((changed - 0.25) / 0.20) : 1.0;
+    histLen *= (1.0 - reset);
 
-    // Reject history when reprojected UV is out of bounds
-    bool valid = all(prevUV >= 0.0) && all(prevUV <= 1.0);
-    float blendFactor = valid ? 0.15 : 1.0; // 15% current, 85% history
-
-    float3 result = mix(history, current, blendFactor);
-    outputShadow.write(float4(result, 1.0), tid);
+    float alpha = max(1.0 / (histLen + 1.0), 0.04);  // floor: stay responsive
+    float3 result = mix(history, current, alpha);
+    histLen = min(histLen + 1.0, 256.0);
+    outputShadow.write(float4(result, histLen), tid);
 }
