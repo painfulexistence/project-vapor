@@ -72,15 +72,21 @@ kernel void computeMain(
     bool onScreen = all(prevUV >= 0.0) && all(prevUV <= 1.0);
     float3 d = abs(mean - history);
     float changed = max(d.r, max(d.g, d.b));
-    // The value-reset cap is motion-adaptive: capped low (0.5) when static so a
-    // penumbra sampling spike can't flash a noise band, but opened toward a full
-    // reset under camera motion, where a ghost trail across silhouette
-    // disocclusions is worse than the transient noise a hard reset admits (the
-    // motion masks that noise, and it re-converges the moment you stop).
+    // Three history-shortening signals, take the strongest:
+    //  - Off-screen reproject = disocclusion, unambiguous -> HARD reset.
+    //  - MOTION itself -> reset. This is the key one for trailing: under a
+    //    camera pan a static shadow reprojects CORRECTLY (value unchanged), so
+    //    a value-only reset never fires, yet bilinear reprojection still smears
+    //    the history — at the converged alpha of 0.04 that smear is a slow
+    //    ghost trail. Resetting on motion drops alpha so the frame tracks
+    //    current (noisy but motion-masked) and re-converges when you stop.
+    //    Dead-band below ~0.5 px so sub-pixel jitter still converges.
+    //  - VALUE change (shadow moved on static geometry) -> capped at 0.5 so a
+    //    static penumbra sampling spike can't flash a noise band.
     float pxMotion = length(velocity * screenSize);
-    float resetCap = mix(0.5, 1.0, saturate(pxMotion * 0.5));
-    float valueReset = saturate((changed - 0.30) / 0.25) * resetCap;
-    float reset = onScreen ? valueReset : 1.0;
+    float motionReset = saturate((pxMotion - 0.5) * 0.5);
+    float valueReset = saturate((changed - 0.30) / 0.25) * 0.5;
+    float reset = onScreen ? max(motionReset, valueReset) : 1.0;
     histLen *= (1.0 - reset);
 
     float alpha = max(1.0 / (histLen + 1.0), 0.04);  // floor: stay responsive
