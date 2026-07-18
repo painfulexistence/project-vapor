@@ -2,7 +2,7 @@
 using namespace metal;
 
 // IBL debug: unwrap the environment cubemap into an equirectangular 2D image for
-// ImGui. RHI-Metal twin of IblEquirect.frag; self-contained fullscreen triangle.
+// ImGui. RHI-Metal twin of IBLEquirect.frag; self-contained fullscreen triangle.
 
 constant float2 fsVerts[3] = { float2(-1, -1), float2(3, -1), float2(-1, 3) };
 
