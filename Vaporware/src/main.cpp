@@ -615,10 +615,9 @@ auto main(int argc, char* args[]) -> int {
 
         // Gameplay updates
         CameraSwitchSystem::update(registry, global);
-        // The app's own CameraSystem (systems.hpp, CharacterIntent-driven) —
-        // qualified because Vapor::CameraSystem is also visible via the
-        // transitional namespace shim.
-        ::CameraSystem::update(registry, deltaTime);
+        // The app's CharacterIntent-driven camera control (systems.hpp) —
+        // distinct from the engine's InputManager-driven Vapor::CameraSystem.
+        CameraControlSystem::update(registry, deltaTime);
         AutoRotateSystem::update(registry, deltaTime);
         LightMovementSystem::update(registry, deltaTime);
         // Subtitle systems (split into single-responsibility)

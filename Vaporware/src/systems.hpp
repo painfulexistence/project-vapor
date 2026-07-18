@@ -262,7 +262,7 @@ public:
     }
 };
 
-class CameraSystem {
+class CameraControlSystem {
 public:
     static void update(entt::registry& reg, float deltaTime) {
         auto view = reg.view<Vapor::VirtualCameraComponent>();
