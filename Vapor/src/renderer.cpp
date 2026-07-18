@@ -6444,14 +6444,16 @@ void Renderer::drawGraphicsImGui() {
                                    "Like the heatmap, the view replaces the shadow factors, so scene "
                                    "lighting is affected while it is active.");
             }
-            // The View toggle's output — the raw (upsampled, pre-accumulation)
-            // pass target. Identity swizzle: the channels are three separate
-            // light domains (R point / G rect / B spot), so a per-domain
-            // problem shows as a COLORED artifact. The accumulated/denoised
-            // copies are what the lit render already shows, so no pane for
-            // those (add pointShadowHalfRT/HistoryRT here to isolate a stage).
-            preview("View output (R=point G=rect B=spot)",
-                    debugView("psRaw", pointShadowRT, TextureSwizzle::Identity, 0));
+            // The View toggle's output, drawn inline (no collapsing node) —
+            // the raw (upsampled, pre-accumulation) pass target. Identity
+            // swizzle: the channels are three light domains (R point / G rect
+            // / B spot), so a per-domain problem shows as a COLORED artifact.
+            if (TextureHandle vt = debugView("psRaw", pointShadowRT, TextureSwizzle::Identity, 0); vt.isValid()) {
+                if (void* id = getImGuiTextureID(vt)) {
+                    ImGui::TextDisabled("View output (R=point G=rect B=spot), %u x %u", rtW, rtH);
+                    ImGui::Image((ImTextureID)(intptr_t)id, ImVec2(320, 320 / rtAspect));
+                }
+            }
         }
         // pssmRTMaxDist now sets where the independent near-field shadow map ends
         // and the PSSM cascades begin (the near map, not RT, owns [near, this]).
