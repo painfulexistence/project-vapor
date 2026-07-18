@@ -208,17 +208,24 @@ namespace Vapor {
             for (auto& c : filter)
                 c = static_cast<char>(tolower(c));
 
-            for (auto entity : registry.storage<entt::entity>()) {
-                std::string label = entityLabel(registry, entity);
-                std::string lower = label;
-                for (auto& c : lower)
-                    c = static_cast<char>(tolower(c));
-                if (!filter.empty() && lower.find(filter) == std::string::npos) continue;
+            if (filter.empty()) {
+                // Hierarchy view: TransformComponent::parent drives the tree.
+                drawEntityTree(registry);
+            } else {
+                // Searching flattens: a filtered tree would have to surface every
+                // matching entity's ancestor chain — a flat hit list reads better.
+                for (auto entity : registry.storage<entt::entity>()) {
+                    std::string label = entityLabel(registry, entity);
+                    std::string lower = label;
+                    for (auto& c : lower)
+                        c = static_cast<char>(tolower(c));
+                    if (lower.find(filter) == std::string::npos) continue;
 
-                bool selected = (entity == m_selected);
-                ImGui::PushID(static_cast<int>(entt::to_integral(entity)));
-                if (ImGui::Selectable(label.c_str(), selected)) m_selected = entity;
-                ImGui::PopID();
+                    bool selected = (entity == m_selected);
+                    ImGui::PushID(static_cast<int>(entt::to_integral(entity)));
+                    if (ImGui::Selectable(label.c_str(), selected)) m_selected = entity;
+                    ImGui::PopID();
+                }
             }
 
             ImGui::Separator();
@@ -320,6 +327,56 @@ namespace Vapor {
         // -------------------------------------------------------------------------
         // Helpers
         // -------------------------------------------------------------------------
+        // ── Hierarchy view ────────────────────────────────────────────────
+        // One O(N) bucketing pass per frame (child lists keyed by parent),
+        // then a recursive draw. Collapsed nodes skip their whole subtree, so
+        // with anything folded this draws FEWER widgets than the flat list —
+        // a collapsed Sponza root costs one row no matter how many children.
+        void drawEntityTree(entt::registry& registry) {
+            std::unordered_map<entt::entity, std::vector<entt::entity>> children;
+            std::vector<entt::entity> roots;
+            for (auto entity : registry.storage<entt::entity>()) {
+                entt::entity parent = entt::null;
+                if (auto* tc = registry.try_get<TransformComponent>(entity)) parent = tc->parent;
+                if (parent != entt::null && registry.valid(parent))
+                    children[parent].push_back(entity);
+                else
+                    roots.push_back(entity);// no transform / no parent / dangling parent
+            }
+            for (auto entity : roots)
+                drawEntityNode(registry, entity, children, 0);
+        }
+
+        void drawEntityNode(
+            entt::registry& registry,
+            entt::entity entity,
+            const std::unordered_map<entt::entity, std::vector<entt::entity>>& children,
+            int depth
+        ) {
+            // A parent cycle would recurse forever (its members also never appear
+            // as roots, so a genuine cycle simply doesn't render); the cap guards
+            // against pathological-but-acyclic depth too.
+            if (depth > 64) return;
+            const auto it = children.find(entity);
+            const bool leaf = it == children.end();
+
+            ImGuiTreeNodeFlags flags = ImGuiTreeNodeFlags_OpenOnArrow | ImGuiTreeNodeFlags_OpenOnDoubleClick
+                                       | ImGuiTreeNodeFlags_SpanAvailWidth;
+            if (leaf) flags |= ImGuiTreeNodeFlags_Leaf | ImGuiTreeNodeFlags_NoTreePushOnOpen;
+            if (entity == m_selected) flags |= ImGuiTreeNodeFlags_Selected;
+
+            ImGui::PushID(static_cast<int>(entt::to_integral(entity)));
+            const bool open = ImGui::TreeNodeEx(entityLabel(registry, entity).c_str(), flags);
+            // Clicking the row selects; clicking the arrow only toggles.
+            if (ImGui::IsItemClicked() && !ImGui::IsItemToggledOpen()) m_selected = entity;
+            if (!leaf && open) {
+                for (auto child : it->second)
+                    drawEntityNode(registry, child, children, depth + 1);
+                ImGui::TreePop();
+            }
+            ImGui::PopID();
+        }
+
         std::string entityLabel(entt::registry& registry, entt::entity entity) {
             if (auto* name = registry.try_get<NameComponent>(entity))
                 return fmt::format("[{}] {}", entt::to_integral(entity), name->name);
