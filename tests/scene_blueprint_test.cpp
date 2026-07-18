@@ -175,7 +175,9 @@ TEST_CASE("instantiate builds parented entities and stages meshes once", "[scene
     std::vector<entt::entity> created;
     const entt::entity root = instantiate(registry, scene, bp, entt::null, "Mounted", &created);
 
-    REQUIRE(root != entt::null);
+    // Extra parens: entt's operator!=(Entity, null_t) and Catch2's decomposer
+    // templates are otherwise ambiguous — evaluate to bool before Catch sees it.
+    REQUIRE((root != entt::null));
     REQUIRE(created.size() == 4);// root + 3 blueprint entities
     CHECK(registry.get<NameComponent>(root).name == "Mounted");
 
@@ -202,7 +204,7 @@ TEST_CASE("instantiate on a bad blueprint is a null no-op", "[scene_blueprint]")
     entt::registry registry;
     RenderScene scene("test");
     SceneBlueprint bad;// ok == false
-    CHECK(instantiate(registry, scene, bad) == entt::null);
+    CHECK((instantiate(registry, scene, bad) == entt::null));
     CHECK(registry.storage<entt::entity>().empty());
 }
 
