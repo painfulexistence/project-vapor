@@ -3759,6 +3759,16 @@ void Renderer::skyAtmospherePass() {
         !atmosphereDataBuffer.isValid()) {
         return;
     }
+    // Debug: the meshlet probes (synthetic / draw-all / data / vertex / xform /
+    // emit / topo) draw with depthWrite OFF, so this pass — which paints the sky
+    // over every pixel that has no geometry depth — would overdraw them and show
+    // a false blank. Skip the sky while any probe is active so the probe geometry
+    // is visible on a black background (only affects the meshlet debug path).
+    if (gpuDrivenMeshlet() &&
+        (meshletDrawAll || meshletSyntheticTri || meshletProbeData || meshletProbeVertex ||
+         meshletProbeXform || meshletProbeEmit || meshletProbeTopo)) {
+        return;
+    }
     RenderPassDesc rp;
     rp.name = "SkyAtmosphere";
     rp.colorAttachments.push_back(colorRT);
