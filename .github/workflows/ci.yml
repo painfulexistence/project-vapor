@@ -85,6 +85,10 @@ jobs:
     runs-on: ${{ matrix.os }}
     env:
       VCPKG_BINARY_SOURCES: "clear"
+      # setup-cpp-compiler runs `brew update` internally on macOS; the formulae
+      # API fetch it triggers times out often enough to fail whole jobs, and the
+      # runner images ship a current-enough Homebrew anyway.
+      HOMEBREW_NO_AUTO_UPDATE: "1"
 
     strategy:
       fail-fast: false
