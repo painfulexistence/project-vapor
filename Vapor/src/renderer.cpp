@@ -6406,7 +6406,12 @@ void Renderer::drawGraphicsImGui() {
             mainDebugFlags = (shadowMode == 0) ? (mainDebugFlags | 2u) : (mainDebugFlags & ~2u);
             stochasticShadowsEnabled = (shadowMode == 2);
         }
-        if (ImGui::TreeNode("Directional shadow") && (shadowMode == 1 || shadowMode == 2)) {
+        // Condition BEFORE TreeNode: TreeNode() pushes when expanded and then
+        // demands a matching TreePop(). Testing shadowMode after it with && would
+        // short-circuit past the TreePop when a node is open but the mode does
+        // not match — the missing-TreePop imbalance. Gating first means TreeNode
+        // only runs (and only pushes) when the node should show at all.
+        if ((shadowMode == 1 || shadowMode == 2) && ImGui::TreeNode("Directional shadow")) {
             ImGui::SliderFloat("Near shadow distance", &pssmRTMaxDist, 5.0f, 200.0f);
             {
                 // PCF taps for the PSSM cascades + near map (4/8/16/32 Poisson)
@@ -6435,7 +6440,7 @@ void Renderer::drawGraphicsImGui() {
             }
             ImGui::TreePop();
         }
-        if (ImGui::TreeNode("Stochastic shadows") && shadowMode == 2) {
+        if (shadowMode == 2 && ImGui::TreeNode("Stochastic shadows")) {
             const bool restirAvailable = restirShadowTemporalPipeline.isValid() &&
                                          restirShadowResolvePipeline.isValid() &&
                                          stochasticShadowUpsamplePipeline.isValid();
@@ -6493,7 +6498,7 @@ void Renderer::drawGraphicsImGui() {
             }
             ImGui::TreePop();
         }
-        if (ImGui::TreeNode("Contact shadows (SSCS)") && (shadowMode == 1 || shadowMode == 2)) {
+        if ((shadowMode == 1 || shadowMode == 2) && ImGui::TreeNode("Contact shadows (SSCS)")) {
             ImGui::Checkbox("Enabled", &sscsEnabled);
             if (sscsEnabled) {
                 ImGui::SliderFloat("SSCS length", &sscsLength, 0.05f, 2.0f);
