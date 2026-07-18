@@ -6444,7 +6444,7 @@ void Renderer::drawGraphicsImGui() {
         }
         if (pointShadowDebugMode == 1) {
             ImGui::TextWrapped("Heatmap: black = tile has 0 lights, brighter = more (8+ ~ white). "
-                               "Shown in 'Point Shadow (raw)' below.");
+                               "Shown in 'Stochastic Shadow (raw)' below.");
         } else if (pointShadowDebugMode >= 2) {
             ImGui::TextWrapped("ReSTIR-only view (falls back to visibility on the legacy path). "
                                "Winner id: color bands per selected light — stable bands mean the "
@@ -6459,8 +6459,16 @@ void Renderer::drawGraphicsImGui() {
         // purpose, so the UI just says "Near Shadow") plus the SSCS contact layer.
         preview("Near Shadow (light-space depth)", debugView("nearMap", nearShadowMap, TextureSwizzle::RRR1, 0));
         preview("Contact Shadow (SSCS)", debugView("sscs", sscsRT, TextureSwizzle::RRR1, 0));
-        preview("Point Shadow (raw / heatmap)", debugView("psRaw", pointShadowRT, TextureSwizzle::RRR1, 0));
-        preview("Point Shadow (denoised)", debugView("psDen", pointShadowDenoisedRT, TextureSwizzle::RRR1, 0));
+        // Stochastic shadow raw target — upsampled input to the accumulator.
+        // Identity swizzle: the channels are three separate light domains
+        // (R point / G rect / B spot), so a per-domain problem shows up as a
+        // COLORED artifact here. The old RRR1 grayscale predates rect/spot and
+        // silently hid two of the three channels. The accumulated/denoised
+        // copies are what the lit render already shows, so they get no pane —
+        // add debugView entries for pointShadowHalfRT/HistoryRT if a chain
+        // stage ever needs isolating.
+        preview("Stochastic Shadow (raw: R=point G=rect B=spot)",
+                debugView("psRaw", pointShadowRT, TextureSwizzle::Identity, 0));
         // PSSM cascades: one 2D grayscale view per array layer of the 3-cascade
         // depth array (createTextureView returns invalid for a missing layer, so
         // the preview simply skips it).
