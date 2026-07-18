@@ -39,7 +39,12 @@ float3 uvToDirection(float2 uv, uint face) {
         case 5: dir = float3(-st.x, -st.y, -1.0); break; // -Z
     }
 
-    return normalize(dir);
+    // Return the UN-normalized direction: it is affine in uv, so the rasterizer
+    // interpolates it exactly across the fullscreen triangle. Normalizing here
+    // (per vertex) then interpolating would lerp normalized corners and bend the
+    // per-pixel direction (~24deg off at a face centre), distorting the capture.
+    // The fragment stage re-normalizes localPos.
+    return dir;
 }
 
 // Van Der Corpus sequence for low-discrepancy sampling

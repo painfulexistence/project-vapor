@@ -30,7 +30,12 @@ vec3 uvToDirection(vec2 uv, uint face) {
     else if (face == 3u) dir = vec3( st.x, -1.0, -st.y); // -Y
     else if (face == 4u) dir = vec3( st.x, -st.y,  1.0); // +Z
     else                 dir = vec3(-st.x, -st.y, -1.0); // -Z
-    return normalize(dir);
+    // Return the UN-normalized direction. It is affine in uv, so the rasterizer
+    // interpolates it EXACTLY across the fullscreen triangle; normalizing here
+    // (per vertex) and then interpolating would lerp normalized corners and bend
+    // the per-pixel direction (~24deg off at a face centre), which distorted the
+    // whole captured cubemap. Every consumer fragment re-normalizes localPos.
+    return dir;
 }
 
 void main() {
