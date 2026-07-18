@@ -55,6 +55,7 @@ vertex VertexOut vertexMain(
     out.position = float4(ndcVerts[vertexID], 0.0, 1.0);
 
     float2 uv = ndcVerts[vertexID] * 0.5 + 0.5;
+    uv.y = 1.0 - uv.y;  // Metal Y-down render target (see 3d_sky_capture.metal)
     out.localPos = uvToDirection(uv, capture.faceIndex);
 
     return out;

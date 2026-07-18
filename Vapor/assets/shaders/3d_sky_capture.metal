@@ -209,6 +209,8 @@ vertex VertexOut vertexMain(
 
     // Calculate UV from NDC
     float2 uv = ndcVerts[vertexID] * 0.5 + 0.5;
+    uv.y = 1.0 - uv.y;  // Metal Y-down render target: match the display path's flip
+                        // so the captured cube face isn't vertically inverted.
 
     // Convert to world direction for this cubemap face
     out.localPos = uvToDirection(uv, capture.faceIndex);
