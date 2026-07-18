@@ -51,7 +51,7 @@ body {
     color: #aaaaaa;
     font-size: 18dp;
     text-align: center;
-    transition: background-color color 0.15s linear;
+    transition: background-color color 0.15s linear-in-out;
 }
 
 #settings-tabs button.active {
@@ -117,7 +117,7 @@ select {
     color: #ffffff;
     font-size: 20dp;
     text-align: center;
-    transition: background-color color 0.15s linear;
+    transition: background-color color 0.15s linear-in-out;
 }
 
 #btn-back:hover {
