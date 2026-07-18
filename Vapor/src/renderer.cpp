@@ -6596,6 +6596,8 @@ void Renderer::drawGraphicsImGui() {
             mainDebugFlags = (shadowMode == 0) ? (mainDebugFlags | 2u) : (mainDebugFlags & ~2u);
             stochasticShadowsEnabled = (shadowMode == 2);
         }
+        if (shadowMode == 2)
+            ImGui::TextDisabled("stochastic RT shadows noisy until ReSTIR denoise (Metal RT only)");
         // Condition BEFORE TreeNode: TreeNode() pushes when expanded and then
         // demands a matching TreePop(). Testing shadowMode after it with && would
         // short-circuit past the TreePop when a node is open but the mode does
