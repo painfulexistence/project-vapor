@@ -377,7 +377,7 @@ public:
     // IBL source: load an equirectangular .hdr file as the environment map.
     // After calling this the sky atmosphere is no longer used for IBL.
     // Place your .hdr files under: <assets>/textures/env/
-    void loadHDRI(const std::string& path);
+    void loadHDRI(const std::string& path) override;
 
     virtual void setRenderPath(RenderPath path) override {
         currentRenderPath = path;

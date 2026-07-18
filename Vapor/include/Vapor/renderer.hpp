@@ -21,6 +21,7 @@ namespace Rml {
 
 namespace Vapor {
     class DebugDraw;
+    class RmlRendererRHI;
 }
 
 // Batch rendering stats for the RHI renderer. (graphics_batch2d.hpp has a
@@ -51,7 +52,9 @@ struct RHIBatch2DStats {
 class Renderer : public IRenderer {
 public:
     Renderer() = default;
-    ~Renderer() override = default;
+    // Defined in renderer.cpp where RmlRendererRHI is complete, so the
+    // unique_ptr member's deleter can be instantiated.
+    ~Renderer() override;
 
     // Polymorphic base: copying through a base reference would slice off the
     // derived backend's state, so copying is disabled (Core Guidelines C.67).
@@ -710,8 +713,9 @@ private:
     BufferHandle prevViewProjBuffer;
     glm::mat4 prevViewProj = glm::mat4(1.0f);
     bool prevViewProjValid = false;
-    // RmlUI (cross-backend RHI render interface; owned, see initUI()).
-    void* m_uiRenderer = nullptr;
+    // RmlUI (cross-backend RHI render interface; forward-declared, the
+    // complete type lives in renderer.cpp where ~Renderer is defined).
+    std::unique_ptr<Vapor::RmlRendererRHI> m_uiRenderer;
     Rml::Context* m_uiContext = nullptr;
     SDL_Window* window = nullptr;
 

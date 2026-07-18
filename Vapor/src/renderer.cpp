@@ -576,6 +576,10 @@ void Renderer::createFrameSlottedBuffer(BufferHandle& alias, const BufferDesc& d
     frameSlottedBuffers.push_back(sb);
 }
 
+// Out-of-line so the unique_ptr<RmlRendererRHI> deleter is instantiated here,
+// where rml_renderer_rhi.hpp provides the complete type.
+Renderer::~Renderer() = default;
+
 void Renderer::shutdown() {
     if (rhi) {
         // GPU may still be executing the last frame; ImGui backend shutdown
@@ -583,11 +587,8 @@ void Renderer::shutdown() {
         rhi->waitIdle();
 
         // RmlUI renderer (RmlUi itself was already shut down by EngineCore).
-        if (m_uiRenderer) {
-            delete static_cast<Vapor::RmlRendererRHI*>(m_uiRenderer);
-            m_uiRenderer = nullptr;
-            m_uiContext = nullptr;
-        }
+        m_uiRenderer.reset();
+        m_uiContext = nullptr;
 
         // Shutdown ImGui backend
         switch (backend) {
@@ -4382,21 +4383,20 @@ bool Renderer::initUI() {
         return false;
     }
 
-    auto* uiRenderer = new Vapor::RmlRendererRHI(rhi.get(), backend);
+    auto uiRenderer = std::make_unique<Vapor::RmlRendererRHI>(rhi.get(), backend);
     if (!uiRenderer->initialize()) {
         fmt::print("Renderer::initUI: Failed to initialize RHI UI renderer\n");
-        delete uiRenderer;
         return false;
     }
-    m_uiRenderer = uiRenderer;
 
-    Rml::SetRenderInterface(uiRenderer);
+    Rml::SetRenderInterface(uiRenderer.get());
     if (!rmluiManager->FinalizeInitialization()) {
         fmt::print("Renderer::initUI: Failed to finalize RmlUI\n");
-        delete uiRenderer;
-        m_uiRenderer = nullptr;
+        // uiRenderer is about to be destroyed — don't leave Rml holding it.
+        Rml::SetRenderInterface(nullptr);
         return false;
     }
+    m_uiRenderer = std::move(uiRenderer);
     m_uiContext = rmluiManager->GetContext();
     fmt::print("Renderer::initUI: RHI UI renderer initialized successfully\n");
     return true;
@@ -4408,7 +4408,7 @@ void Renderer::renderUI() {
     // Debug escape hatch: draw everything except the UI overlay.
     static const bool uiDisabled = std::getenv("VAPOR_DISABLE_RMLUI") != nullptr;
     if (uiDisabled) return;
-    auto* uiRenderer = static_cast<Vapor::RmlRendererRHI*>(m_uiRenderer);
+    auto* uiRenderer = m_uiRenderer.get();
 
     // Logical UI size = the Rml context dimensions (set from the window size);
     // framebuffer size = the swapchain (physical pixels, HiDPI-aware).

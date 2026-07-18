@@ -115,7 +115,7 @@ namespace Vapor {
         keyToAction.clear();
     }
 
-    auto InputManager::getActionForKey(SDL_Scancode key) const -> const InputAction {
+    auto InputManager::getActionForKey(SDL_Scancode key) const -> InputAction {
         auto it = keyToAction.find(key);
         if (it != keyToAction.end()) {
             return it->second;
