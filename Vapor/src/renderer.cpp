@@ -1,5 +1,6 @@
 #include "renderer.hpp"
 #include "stats_log.hpp"
+#include "voxel_world.hpp"
 #include "rhi_vulkan.hpp"
 #include <chrono>
 #ifdef __APPLE__
@@ -225,6 +226,15 @@ void Renderer::initialize(std::unique_ptr<RHI> rhiPtr, GraphicsBackend backendTy
         volDesc.usage = BufferUsage::Uniform;
         volDesc.memoryUsage = MemoryUsage::CPUtoGPU;
         createFrameSlottedBuffer(volumeDataBuffer, volDesc, &volumeSettings, sizeof(volumeSettings));
+
+        // MicroVoxel per-volume params: one 256-byte slice per volume, bound at
+        // an offset per draw (the stride satisfies storage-buffer offset
+        // alignment on both backends). Rewritten every frame -> frame-slotted.
+        BufferDesc mvDesc;
+        mvDesc.size = sizeof(MicroVoxelRenderData) * MAX_VOXEL_VOLUMES;
+        mvDesc.usage = BufferUsage::Uniform;
+        mvDesc.memoryUsage = MemoryUsage::CPUtoGPU;
+        createFrameSlottedBuffer(microVoxelDataBuffer, mvDesc);
 
         // Procedural 64^3 test density grid (radial-falloff smoke puff shaped
         // by trilinear value noise) so the volume raymarch pass has something
@@ -619,6 +629,15 @@ void Renderer::shutdown() {
         if (materialUniformBuffer.isValid()) {
             rhi->destroyBuffer(materialUniformBuffer);
         }
+
+        // MicroVoxel GPU mirrors (page tables / brick pools / palettes).
+        for (auto& v : voxelVolumes) {
+            if (v.pageTable.isValid()) rhi->destroyBuffer(v.pageTable);
+            if (v.brickPool.isValid()) rhi->destroyBuffer(v.brickPool);
+            if (v.palette.isValid()) rhi->destroyBuffer(v.palette);
+        }
+        voxelVolumes.clear();
+        pendingVoxelVolumes.clear();
 
         // Destroy meshes
         for (auto& mesh : meshes) {
@@ -1118,6 +1137,15 @@ void Renderer::setupDefaultRenderGraph() {
     // exists, directly to the swapchain otherwise (decided inside the pass).
     renderGraph.addPass("Main",
         [](Renderer& r) { r.mainRenderPass(); });
+
+    // Raymarched micro-voxel volumes (VoxelVolumeComponent). Box-rasterized
+    // two-level DDA that writes true hit depth into depthStencilRT, so it must
+    // run after Main (loads scene color+depth) and before SkyAtmosphere —
+    // the sky then fills only pixels neither raster nor voxels claimed, and
+    // every later depth-reading pass (fog, clouds, god rays, sun flare)
+    // treats voxels as ordinary scene geometry.
+    renderGraph.addPass("MicroVoxel",
+        [](Renderer& r) { r.microVoxelPass(); });
 
     // Sky/atmosphere fills the background (depth == far) before bloom, so the
     // bright sky and sun disk feed the bloom pyramid.
@@ -3889,6 +3917,177 @@ void Renderer::volumeRaymarchPass() {
     std::swap(colorRT, tempColorRT);  // colorRT now holds the composited volume
 }
 
+// ============================================================================
+// MicroVoxel raymarch (sparse-brick voxel volumes)
+// ============================================================================
+
+void Renderer::setVoxelVolumes(const std::vector<Vapor::VoxelVolumeDraw>& volumes) {
+    pendingVoxelVolumes = volumes;
+}
+
+// Reconcile the ECS-pushed volume list with the renderer's GPU mirrors and
+// flush each world's dirty batches. Buffers are created once per VoxelWorld
+// (page table sized to its brick grid, pool sized to its slot capacity) and
+// edits upload per brick — a carve never re-uploads the volume.
+void Renderer::updateVoxelVolumeResources() {
+    // Drop mirrors whose world disappeared from the ECS list.
+    for (auto it = voxelVolumes.begin(); it != voxelVolumes.end();) {
+        bool alive = false;
+        for (const auto& draw : pendingVoxelVolumes) {
+            if (draw.world.get() == it->world.get()) {
+                alive = true;
+                break;
+            }
+        }
+        if (!alive) {
+            if (it->pageTable.isValid()) rhi->destroyBuffer(it->pageTable);
+            if (it->brickPool.isValid()) rhi->destroyBuffer(it->brickPool);
+            if (it->palette.isValid()) rhi->destroyBuffer(it->palette);
+            it = voxelVolumes.erase(it);
+        } else {
+            ++it;
+        }
+    }
+
+    for (const auto& draw : pendingVoxelVolumes) {
+        if (!draw.world) continue;
+        Vapor::VoxelWorld& world = *draw.world;
+
+        VoxelVolumeGpu* gpu = nullptr;
+        for (auto& v : voxelVolumes) {
+            if (v.world.get() == draw.world.get()) {
+                gpu = &v;
+                break;
+            }
+        }
+        const Uint32 pageEntries = static_cast<Uint32>(world.pageTableData().size());
+        if (pageEntries == 0) continue;  // not generated yet
+        // A reconfigured world (new grid dims / pool budget) invalidates the
+        // mirror; drop it and rebuild below. prepareGeneration() re-flags
+        // everything dirty, so the fresh buffers get a full upload.
+        if (gpu && (gpu->pageEntryCount != pageEntries || gpu->brickCapacity != world.capacity())) {
+            if (gpu->pageTable.isValid()) rhi->destroyBuffer(gpu->pageTable);
+            if (gpu->brickPool.isValid()) rhi->destroyBuffer(gpu->brickPool);
+            if (gpu->palette.isValid()) rhi->destroyBuffer(gpu->palette);
+            *gpu = VoxelVolumeGpu {};
+            gpu->world = draw.world;
+        }
+        if (!gpu) {
+            if (voxelVolumes.size() >= MAX_VOXEL_VOLUMES) continue;
+            voxelVolumes.push_back(VoxelVolumeGpu {});
+            gpu = &voxelVolumes.back();
+            gpu->world = draw.world;
+        }
+        gpu->origin = draw.origin;
+
+        if (!gpu->pageTable.isValid()) {
+            BufferDesc pd;
+            pd.size = static_cast<size_t>(pageEntries) * sizeof(Uint32);
+            pd.usage = BufferUsage::Storage;
+            pd.memoryUsage = MemoryUsage::GPU;
+            gpu->pageTable = rhi->createBuffer(pd);
+
+            BufferDesc bd;
+            bd.size = static_cast<size_t>(world.capacity()) * sizeof(Vapor::VoxelWorld::Brick);
+            bd.usage = BufferUsage::Storage;
+            bd.memoryUsage = MemoryUsage::GPU;
+            gpu->brickPool = rhi->createBuffer(bd);
+
+            BufferDesc pald;
+            pald.size = 256 * sizeof(Vapor::VoxelMaterial);
+            pald.usage = BufferUsage::Storage;
+            pald.memoryUsage = MemoryUsage::GPU;
+            gpu->palette = rhi->createBuffer(pald);
+
+            gpu->pageEntryCount = pageEntries;
+            gpu->brickCapacity = world.capacity();
+        }
+
+        if (!world.hasDirty()) continue;
+        Vapor::VoxelWorld::DirtyBatch batch = world.takeDirty();
+        if (batch.pageTable) {
+            rhi->updateBuffer(gpu->pageTable, world.pageTableData().data(), 0,
+                              static_cast<size_t>(pageEntries) * sizeof(Uint32));
+        }
+        if (batch.palette) {
+            rhi->updateBuffer(gpu->palette, world.paletteData().data(), 0, 256 * sizeof(Vapor::VoxelMaterial));
+        }
+        if (!batch.brickSlots.empty()) {
+            // The CPU pool is contiguous, so consecutive slots merge into one
+            // upload; after initial generation this collapses thousands of
+            // per-brick updates into a few large ranges.
+            std::sort(batch.brickSlots.begin(), batch.brickSlots.end());
+            size_t runStart = 0;
+            for (size_t i = 1; i <= batch.brickSlots.size(); i++) {
+                if (i < batch.brickSlots.size() && batch.brickSlots[i] == batch.brickSlots[i - 1] + 1) {
+                    continue;
+                }
+                const Uint32 first = batch.brickSlots[runStart];
+                const Uint32 count = batch.brickSlots[i - 1] - first + 1;
+                rhi->updateBuffer(gpu->brickPool, &world.brick(first),
+                                  static_cast<size_t>(first) * sizeof(Vapor::VoxelWorld::Brick),
+                                  static_cast<size_t>(count) * sizeof(Vapor::VoxelWorld::Brick));
+                runStart = i;
+            }
+        }
+    }
+}
+
+// Box-rasterized two-level DDA over every registered voxel volume, writing
+// linear HDR into colorRT and true hit depth into depthStencilRT (misses
+// discard). See MicroVoxel.frag / 3d_microvoxel.metal for the traversal.
+void Renderer::microVoxelPass() {
+    if (!microVoxelEnabled || !microVoxelPipeline.isValid() || !microVoxelDataBuffer.isValid() ||
+        !colorRT.isValid() || !depthStencilRT.isValid()) {
+        return;
+    }
+    updateVoxelVolumeResources();
+    if (voxelVolumes.empty()) return;
+
+    std::array<MicroVoxelRenderData, MAX_VOXEL_VOLUMES> data {};
+    std::array<const VoxelVolumeGpu*, MAX_VOXEL_VOLUMES> drawn {};
+    Uint32 written = 0;
+    const glm::mat4 viewProj = currentCamera.proj * currentCamera.view;
+    glm::vec3 sunDir = atmosphereData.sunDirection;
+    sunDir = (glm::length(sunDir) > 1e-6f) ? glm::normalize(sunDir) : glm::vec3(0.0f, 1.0f, 0.0f);
+    for (const auto& gpu : voxelVolumes) {
+        if (written >= MAX_VOXEL_VOLUMES) break;
+        if (!gpu.pageTable.isValid() || !gpu.brickPool.isValid() || !gpu.palette.isValid()) continue;
+        MicroVoxelRenderData& d = data[written];
+        d = microVoxelSettings;
+        d.viewProj = viewProj;
+        d.cameraPosition = glm::vec4(currentCamera.position, microVoxelSettings.cameraPosition.w);
+        d.volumeOrigin = glm::vec4(gpu.origin, gpu.world->voxelSizeMeters());
+        d.gridDim = glm::vec4(glm::vec3(gpu.world->dim()), microVoxelSettings.gridDim.w);
+        d.sunDirection = glm::vec4(sunDir, microVoxelSettings.sunDirection.w);
+        d.sunColor = glm::vec4(atmosphereData.sunColor, atmosphereData.sunIntensity);
+        drawn[written] = &gpu;
+        written++;
+    }
+    if (written == 0) return;
+    rhi->updateBuffer(microVoxelDataBuffer, data.data(), 0,
+                      static_cast<size_t>(written) * sizeof(MicroVoxelRenderData));
+
+    RenderPassDesc rp;
+    rp.name = "MicroVoxel";
+    rp.colorAttachments.push_back(colorRT);
+    rp.loadColor.push_back(true);   // composite over the rendered scene
+    rp.depthAttachment = depthStencilRT;
+    rp.loadDepth = true;            // test against + write voxel hit depth
+    rhi->beginRenderPass(rp);
+    rhi->bindPipeline(microVoxelPipeline);
+    for (Uint32 i = 0; i < written; i++) {
+        const size_t offset = static_cast<size_t>(i) * sizeof(MicroVoxelRenderData);
+        rhi->setVertexBuffer(0, microVoxelDataBuffer, offset, sizeof(MicroVoxelRenderData));
+        rhi->setFragmentBuffer(0, microVoxelDataBuffer, offset, sizeof(MicroVoxelRenderData));
+        rhi->setFragmentBuffer(1, drawn[i]->pageTable);
+        rhi->setFragmentBuffer(2, drawn[i]->brickPool);
+        rhi->setFragmentBuffer(3, drawn[i]->palette);
+        rhi->draw(36, 1, 0, 0);
+    }
+    rhi->endRenderPass();
+}
+
 // Volume Rendering API — the hook a future EmberGen import PR calls with
 // decoded voxel data. R8_UNORM slice-major grid -> sampled 3D texture.
 TextureHandle Renderer::createVolumeTexture(Uint32 width, Uint32 height, Uint32 depth,
@@ -5362,6 +5561,45 @@ void Renderer::createRenderPipeline() {
             volumeRaymarchPipeline = makeFullscreenFragPipeline(
                 "shaders/VolumeRaymarch.frag.spv", volumeRaymarchShader, BlendMode::Opaque);
 
+            // MicroVoxel primary: box-rasterized voxel DDA. Not the fullscreen
+            // lambda — it draws AABB cubes (cull off, camera may sit inside)
+            // and writes gl_FragDepth, so depth test AND write are on.
+            {
+                std::string mvVertCode = readFile("shaders/MicroVoxel.vert.spv");
+                std::string mvFragCode = readFile("shaders/MicroVoxel.frag.spv");
+                if (!mvVertCode.empty() && !mvFragCode.empty()) {
+                    ShaderDesc vd;
+                    vd.stage = ShaderStage::Vertex;
+                    vd.code = mvVertCode.data();
+                    vd.codeSize = mvVertCode.size();
+                    vd.entryPoint = "main";
+                    microVoxelVS = rhi->createShader(vd);
+                    ShaderDesc fd;
+                    fd.stage = ShaderStage::Fragment;
+                    fd.code = mvFragCode.data();
+                    fd.codeSize = mvFragCode.size();
+                    fd.entryPoint = "main";
+                    microVoxelFS = rhi->createShader(fd);
+
+                    PipelineDesc d;
+                    d.vertexShader = microVoxelVS;
+                    d.fragmentShader = microVoxelFS;
+                    d.vertexLayout.stride = 0;
+                    d.vertexLayout.attributes = {};
+                    d.topology = PrimitiveTopology::TriangleList;
+                    d.blendMode = BlendMode::Opaque;
+                    d.depthTest = true;
+                    d.depthWrite = true;
+                    d.depthCompareOp = CompareOp::Less;
+                    d.cullMode = CullMode::None;
+                    d.sampleCount = 1;
+                    d.hasDepthAttachment = true;
+                    d.depthAttachmentFormat = PixelFormat::Depth32Float;
+                    d.colorAttachmentFormats = { PixelFormat::RGBA16_FLOAT };
+                    microVoxelPipeline = rhi->createPipeline(d);
+                }
+            }
+
             // Camera-motion velocity (motion vectors) from depth.
             velocityPipeline = makeFullscreenFragPipeline(
                 "shaders/Velocity.frag.spv", velocityShader, BlendMode::Opaque);
@@ -5760,6 +5998,45 @@ void Renderer::createRenderPipeline() {
                                               BlendMode::Opaque, { PixelFormat::RGBA16_FLOAT }, false, CompareOp::Less);
         volumeRaymarchPipeline = makeMetalPass("shaders/3d_volume_raymarch.metal", "volumeRaymarchVertex", "volumeRaymarchFragment",
                                                BlendMode::Opaque, { PixelFormat::RGBA16_FLOAT }, false, CompareOp::Less);
+
+        // MicroVoxel primary: box-rasterized voxel DDA. Not makeMetalPass —
+        // it needs depth WRITE (the fragment returns [[depth(any)]] so voxels
+        // depth-composite with the raster scene) and cull off (the camera may
+        // sit inside a volume's AABB).
+        {
+            std::string code = readFile("shaders/3d_microvoxel.metal");
+            if (!code.empty()) {
+                ShaderDesc vd;
+                vd.stage = ShaderStage::Vertex;
+                vd.code = code.data();
+                vd.codeSize = code.size();
+                vd.entryPoint = "microVoxelVertex";
+                microVoxelVS = rhi->createShader(vd);
+                ShaderDesc fd;
+                fd.stage = ShaderStage::Fragment;
+                fd.code = code.data();
+                fd.codeSize = code.size();
+                fd.entryPoint = "microVoxelFragment";
+                microVoxelFS = rhi->createShader(fd);
+
+                PipelineDesc d;
+                d.vertexShader = microVoxelVS;
+                d.fragmentShader = microVoxelFS;
+                d.vertexLayout.stride = 0;
+                d.vertexLayout.attributes = {};
+                d.topology = PrimitiveTopology::TriangleList;
+                d.blendMode = BlendMode::Opaque;
+                d.depthTest = true;
+                d.depthWrite = true;
+                d.depthCompareOp = CompareOp::Less;
+                d.cullMode = CullMode::None;
+                d.sampleCount = 1;
+                d.hasDepthAttachment = true;
+                d.depthAttachmentFormat = PixelFormat::Depth32Float;
+                d.colorAttachmentFormats = { PixelFormat::RGBA16_FLOAT };
+                microVoxelPipeline = rhi->createPipeline(d);
+            }
+        }
         // Volumetric clouds (off by default): quarter-res raymarch ->
         // temporal resolve -> upscale composite, all from the native file.
         cloudRaymarchPipeline = makeMetalPass("shaders/3d_volumetric_clouds.metal", "cloudVertex", "cloudFragmentLowRes",
@@ -6898,6 +7175,56 @@ void Renderer::drawGraphicsImGui() {
             bool wasEnabled = volumeRenderEnabled;
             volumeSettings = VolumeRenderData{};
             volumeRenderEnabled = wasEnabled;
+        }
+        ImGui::TreePop();
+    }
+
+    if (ImGui::TreeNode("MicroVoxel")) {
+        ImGui::Checkbox("Enabled", &microVoxelEnabled);
+        Uint64 solid = 0, dropped = 0;
+        Uint32 resident = 0;
+        for (const auto& v : voxelVolumes) {
+            if (!v.world) continue;
+            solid += v.world->solidVoxels();
+            dropped += v.world->droppedBricks();
+            resident += v.world->residentBricks();
+        }
+        ImGui::TextDisabled("%zu volume(s), %u resident bricks (%.1f MB), %llu solid voxels",
+                            voxelVolumes.size(), resident,
+                            resident * sizeof(Vapor::VoxelWorld::Brick) / (1024.0 * 1024.0),
+                            static_cast<unsigned long long>(solid));
+        if (dropped > 0) {
+            ImGui::TextColored(ImVec4(1.0f, 0.4f, 0.3f, 1.0f),
+                               "%llu bricks dropped (pool exhausted)",
+                               static_cast<unsigned long long>(dropped));
+        }
+        int maxSteps = static_cast<int>(microVoxelSettings.cameraPosition.w);
+        if (ImGui::SliderInt("Max ray steps", &maxSteps, 32, 512)) {
+            microVoxelSettings.cameraPosition.w = static_cast<float>(maxSteps);
+        }
+        bool sunShadow = microVoxelSettings.sunDirection.w > 0.5f;
+        if (ImGui::Checkbox("Sun shadow ray", &sunShadow)) {
+            microVoxelSettings.sunDirection.w = sunShadow ? 1.0f : 0.0f;
+        }
+        bool reflections = microVoxelSettings.params.z > 0.5f;
+        if (ImGui::Checkbox("Reflections", &reflections)) {
+            microVoxelSettings.params.z = reflections ? 1.0f : 0.0f;
+        }
+        ImGui::SliderFloat("AO strength", &microVoxelSettings.params.x, 0.0f, 1.0f);
+        ImGui::DragFloat("Emissive strength", &microVoxelSettings.gridDim.w, 0.1f, 0.0f, 16.0f);
+        ImGui::ColorEdit3("Ambient sky", &microVoxelSettings.ambientSky.x);
+        ImGui::ColorEdit3("Ambient ground", &microVoxelSettings.ambientGround.x);
+        ImGui::DragFloat("Ambient intensity", &microVoxelSettings.ambientSky.w, 0.01f, 0.0f, 2.0f);
+        ImGui::SliderFloat("Albedo variation", &microVoxelSettings.ambientGround.w, 0.0f, 1.0f);
+        const char* debugModes[] = { "Final", "Albedo", "Normals", "AO", "Sun shadow", "GI", "Material" };
+        int debugMode = static_cast<int>(microVoxelSettings.params.y);
+        if (ImGui::Combo("Debug view", &debugMode, debugModes, 7)) {
+            microVoxelSettings.params.y = static_cast<float>(debugMode);
+        }
+        if (ImGui::Button("Reset to Defaults")) {
+            bool wasEnabled = microVoxelEnabled;
+            microVoxelSettings = MicroVoxelRenderData {};
+            microVoxelEnabled = wasEnabled;
         }
         ImGui::TreePop();
     }

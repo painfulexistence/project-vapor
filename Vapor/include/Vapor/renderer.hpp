@@ -308,6 +308,7 @@ public:
     void setWind(const WindRenderData& wind) override;
     void requestIBLUpdate() override { iblNeedsUpdate = true; }
     void setParticleDrawList(const std::vector<ParticleDrawPacket>& draws) override;
+    void setVoxelVolumes(const std::vector<Vapor::VoxelVolumeDraw>& volumes) override;
 
     // ========================================================================
     // Texture Creation (for sprites/batch rendering)
@@ -401,6 +402,10 @@ private:
     void lightScatteringPass();
     void volumetricFogPass();
     void volumeRaymarchPass();
+    void microVoxelPass();
+    // Reconciles the ECS-pushed volume list with the GPU mirrors (create /
+    // destroy buffers) and flushes per-brick dirty batches into the pool.
+    void updateVoxelVolumeResources();
     void velocityPass();
     void particlePass();
     void volumetricCloudPass();
@@ -687,6 +692,30 @@ private:
     TextureHandle volumeTestTexture;     // owned procedural test grid
     bool volumeRenderEnabled = false;    // default OFF until real data lands
     VolumeRenderData volumeSettings;     // panel tunables (box/density/albedo/steps)
+    // MicroVoxel raymarch (sparse-brick voxel volumes, MicroVoxel.frag /
+    // 3d_microvoxel.metal). Volumes arrive per frame from VoxelVolumeSystem
+    // via setVoxelVolumes(); the renderer keeps one GPU mirror (page table +
+    // brick pool + palette buffers) per live VoxelWorld and flushes its
+    // per-brick dirty batches each frame — edits never re-upload the volume.
+    struct VoxelVolumeGpu {
+        std::shared_ptr<Vapor::VoxelWorld> world;
+        glm::vec3 origin = glm::vec3(0.0f);
+        BufferHandle pageTable;
+        BufferHandle brickPool;
+        BufferHandle palette;
+        Uint32 pageEntryCount = 0;   // page-table entries the buffer was sized for
+        Uint32 brickCapacity = 0;    // pool slots the buffer was sized for
+    };
+    static constexpr Uint32 MAX_VOXEL_VOLUMES = 8;
+    std::vector<VoxelVolumeGpu> voxelVolumes;          // renderer-owned GPU mirrors
+    std::vector<Vapor::VoxelVolumeDraw> pendingVoxelVolumes;  // last ECS push
+    PipelineHandle microVoxelPipeline;
+    ShaderHandle microVoxelVS, microVoxelFS;
+    BufferHandle microVoxelDataBuffer;  // frame-slotted, MAX_VOXEL_VOLUMES x 256B slices
+    bool microVoxelEnabled = true;
+    // Persistent tunables (ImGui-editable). microVoxelPass() copies this per
+    // volume and overwrites the per-frame fields (viewProj/camera/origin/sun).
+    MicroVoxelRenderData microVoxelSettings;
     // The registry the ECS draw() last rendered with. renderToTexture needs it
     // because the demo's meshes live on ECS entities, not the scene-node tree —
     // the scene-only collectDrawables(scene) finds nothing there. The registry

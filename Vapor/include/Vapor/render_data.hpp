@@ -336,6 +336,26 @@ struct alignas(16) VolumeRenderData {
     glm::vec4 params = glm::vec4(48.0f, 8.0f, 0.0f, 0.0f);   // x = steps, y = shadow steps
 };
 
+// MicroVoxel raymarch (sparse-brick voxel volumes). vec4-only layout so the
+// MSL and std430 twins are byte-identical (MicroVoxel.frag /
+// 3d_microvoxel.metal). Padded to a 256-byte stride so per-volume slices of
+// one buffer can be bound at offsets that satisfy every backend's storage
+// buffer offset alignment.
+struct alignas(16) MicroVoxelRenderData {
+    glm::mat4 viewProj = glm::mat4(1.0f);
+    glm::vec4 cameraPosition = glm::vec4(0.0f, 0.0f, 0.0f, 256.0f);  // xyz; w = maxRaySteps
+    glm::vec4 volumeOrigin = glm::vec4(0.0f, 0.0f, 0.0f, 0.05f);     // xyz world min corner; w = voxelSize
+    glm::vec4 gridDim = glm::vec4(256.0f, 256.0f, 256.0f, 4.0f);     // xyz voxel counts; w = emissiveStrength
+    glm::vec4 sunDirection = glm::vec4(0.0f, 1.0f, 0.0f, 1.0f);      // xyz toward the sun; w = shadowEnabled
+    glm::vec4 sunColor = glm::vec4(1.0f, 0.95f, 0.85f, 10.0f);       // xyz; w = sunIntensity
+    glm::vec4 ambientSky = glm::vec4(0.55f, 0.7f, 0.95f, 0.5f);      // xyz; w = ambientIntensity
+    glm::vec4 ambientGround = glm::vec4(0.25f, 0.22f, 0.2f, 1.0f);   // xyz; w = albedo hash variation
+    glm::vec4 params = glm::vec4(0.7f, 0.0f, 1.0f, 0.0f);            // x = aoStrength, y = debugMode, z = reflectionsEnabled
+    glm::vec4 _pad[4] = {};
+};
+static_assert(sizeof(MicroVoxelRenderData) == 256,
+              "MicroVoxelRenderData must stay at the 256-byte per-volume stride the shaders assume");
+
 // Volumetric clouds. Field-for-field mirror of the Metal backend's
 // VolumetricCloudData (graphics_effects.hpp) — the defaults below are the
 // values already tuned/tested on the Metal renderer.
