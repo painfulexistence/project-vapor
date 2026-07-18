@@ -10,6 +10,8 @@
 
 // ── Water ─────────────────────────────────────────────────────────────────
 
+namespace Vapor {
+
 struct alignas(16) WaveData {
     glm::vec3 direction;
     float _pad1;
@@ -246,9 +248,12 @@ struct ParticlePushConstants {
     float _pad3 = 0.0f;
 };
 
-// Legacy CPU particle (kept for compatibility with older systems)
-struct Particle {
-    glm::vec3 position = glm::vec3(1.0f);
-    glm::vec3 velocity = glm::vec3(1.0f);
-    glm::vec3 density = glm::vec3(1.0f);
-};
+// (The legacy CPU Particle struct that used to be duplicated here lives in
+// graphics.hpp — one definition now that both headers share namespace Vapor.)
+
+} // namespace Vapor
+
+// Transitional shim: these types lived at global scope before the namespace
+// unification; unqualified call sites keep compiling while they migrate to
+// Vapor:: qualification. Remove once call sites are migrated.
+using namespace Vapor;

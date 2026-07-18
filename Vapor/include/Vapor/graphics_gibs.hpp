@@ -7,6 +7,8 @@
 // Design doc: docs/GIBS_DESIGN.md
 
 // Surfel flags for status tracking
+namespace Vapor {
+
 enum class SurfelFlags : Uint32 {
     None = 0,
     Static = 1 << 0,      // Static geometry surfel (long lifetime)
@@ -185,3 +187,10 @@ struct alignas(16) GIBSSampleParams {
     float normalWeight;           // Weight for normal similarity
     float distanceWeight;         // Weight for distance falloff
 };
+
+} // namespace Vapor
+
+// Transitional shim: these types lived at global scope before the namespace
+// unification; unqualified call sites keep compiling while they migrate to
+// Vapor:: qualification. Remove once call sites are migrated.
+using namespace Vapor;

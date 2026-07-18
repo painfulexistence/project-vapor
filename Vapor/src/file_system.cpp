@@ -6,6 +6,8 @@
 #include <fmt/core.h>
 #include <stdexcept>
 
+using namespace Vapor;
+
 FileSystem& FileSystem::instance() {
     static FileSystem fs;
     return fs;

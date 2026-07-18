@@ -9,6 +9,8 @@
 #include <Jolt/Physics/Collision/Shape/Shape.h>
 #include <Jolt/Physics/PhysicsSystem.h>
 
+using namespace Vapor;
+
 // Template: Water volume
 auto FluidVolumeSettings::createWaterVolume(const glm::vec3& position, const glm::vec3& dimensions)
     -> FluidVolumeSettings {

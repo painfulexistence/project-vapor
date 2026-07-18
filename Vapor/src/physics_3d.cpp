@@ -37,6 +37,8 @@
 #include <thread>
 #include <mutex>
 
+using namespace Vapor;
+
 // #include "physics_debug_drawer.hpp"
 
 JPH_SUPPRESS_WARNINGS

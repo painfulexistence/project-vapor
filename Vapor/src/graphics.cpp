@@ -4,6 +4,8 @@
 #include <utility>
 #include <limits>
 
+using namespace Vapor;
+
 static int getNumFaces(const SMikkTSpaceContext* ctx) {
     auto mesh = static_cast<Vapor::Mesh*>(ctx->m_pUserData);
     if (mesh->indices.size() == 0) {

@@ -9,6 +9,8 @@
 
 #include <fmt/core.h>
 
+using namespace Vapor;
+
 namespace Vapor {
 
 RmlRendererMetal::RmlRendererMetal(MTL::Device* device) : m_device(device) {

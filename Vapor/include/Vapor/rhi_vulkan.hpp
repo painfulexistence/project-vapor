@@ -15,6 +15,8 @@
 // RHI_Vulkan - Vulkan implementation of RHI interface
 // ============================================================================
 
+namespace Vapor {
+
 class RHI_Vulkan : public RHI {
 public:
     RHI_Vulkan();
@@ -535,3 +537,10 @@ private:
 
 // Factory function
 RHI* createRHIVulkan();
+
+} // namespace Vapor
+
+// Transitional shim: these types lived at global scope before the namespace
+// unification; unqualified call sites keep compiling while they migrate to
+// Vapor:: qualification. Remove once call sites are migrated.
+using namespace Vapor;

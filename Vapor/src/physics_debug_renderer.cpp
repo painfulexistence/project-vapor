@@ -18,6 +18,8 @@
 #include <memory>
 #include <vector>
 
+using namespace Vapor;
+
 namespace Vapor {
 
     PhysicsDebugRenderer::PhysicsDebugRenderer() = default;

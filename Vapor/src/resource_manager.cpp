@@ -4,6 +4,8 @@
 #include <fmt/core.h>
 #include <tracy/Tracy.hpp>
 
+using namespace Vapor;
+
 namespace Vapor {
 
     ResourceManager::ResourceManager(TaskScheduler& scheduler) : m_scheduler(scheduler) {

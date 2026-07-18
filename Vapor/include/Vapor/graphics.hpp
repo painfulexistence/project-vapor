@@ -251,7 +251,7 @@ struct Particle {
 // pass. Packed 20-byte layout, matching VkDrawIndexedIndirectCommand and
 // MTLDrawIndexedPrimitivesIndirectArguments exactly (intentionally NOT
 // alignas(16) — the tight stride is what the indirect-draw APIs expect). Mirror
-// of the global ::DrawCommand in graphics_gpu_structs.hpp.
+// of gpu::DrawCommand in graphics_gpu_structs.hpp.
 struct DrawCommand {
     Uint32 indexCount;
     Uint32 instanceCount; // 0 = culled (GPU no-op)
@@ -310,7 +310,8 @@ struct Mesh {
 } // namespace Vapor
 
 // Forward declarations for RHI types (defined in rhi.hpp)
-// These are needed by scene.hpp but defined outside Vapor namespace
+namespace Vapor {
 struct BufferHandle;
 struct TextureHandle;
 struct PipelineHandle;
+}

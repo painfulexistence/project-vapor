@@ -7,6 +7,8 @@
 #include <fmt/format.h>
 #include <fstream>
 
+using namespace Vapor;
+
 void FontManager::initialize(MTL::Device* device) {
     m_device = device;
 }

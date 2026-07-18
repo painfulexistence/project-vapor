@@ -39,6 +39,8 @@
 #include <Metal/Metal.hpp>
 #endif
 
+using namespace Vapor;
+
 namespace {
 // GIBS spatial-hash grid derivation, matching native GIBSManager::calculateGridSize
 // (gibs_manager.cpp) EXACTLY so the RHI surfel hash resolves at the same cell
@@ -5994,7 +5996,7 @@ void Renderer::bindMaterial(MaterialId materialId) {
 // Factory Functions
 // ============================================================================
 
-std::unique_ptr<IRenderer> createRenderer(GraphicsBackend backend, SDL_Window* window) {
+std::unique_ptr<IRenderer> Vapor::createRenderer(GraphicsBackend backend, SDL_Window* window) {
 #ifdef __APPLE__
     // Metal now routes through the RHI renderer by default (the target
     // architecture: renderer -> RHI -> {rhi_metal, rhi_vulkan}). Set

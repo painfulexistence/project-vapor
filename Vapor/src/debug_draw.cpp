@@ -3,6 +3,8 @@
 #include <glm/gtc/constants.hpp>
 #include <glm/gtc/matrix_transform.hpp>
 
+using namespace Vapor;
+
 namespace Vapor {
 
     static constexpr float kPi = glm::pi<float>();

@@ -18,6 +18,8 @@
 #include <sstream>
 #include <unordered_set>
 
+using namespace Vapor;
+
 namespace Vapor {
 
 using json = nlohmann::json;

@@ -43,6 +43,8 @@ namespace cereal {
     }
 }// namespace cereal
 
+namespace Vapor {
+
 class AssetSerializer {
 public:
     // v3: material names now serialize (the inspector's Scene Materials editor
@@ -95,3 +97,10 @@ private:
     static void serializePointLight(cereal::BinaryOutputArchive& archive, const Vapor::PointLight& light);
     static Vapor::PointLight deserializePointLight(cereal::BinaryInputArchive& archive);
 };
+
+} // namespace Vapor
+
+// Transitional shim: these types lived at global scope before the namespace
+// unification; unqualified call sites keep compiling while they migrate to
+// Vapor:: qualification. Remove once call sites are migrated.
+using namespace Vapor;

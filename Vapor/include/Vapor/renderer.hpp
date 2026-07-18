@@ -20,9 +20,9 @@ namespace Rml {
 }
 
 namespace Vapor {
-    class DebugDraw;
-    class RmlRendererRHI;
-}
+
+class DebugDraw;
+class RmlRendererRHI;
 
 // Batch rendering stats for the RHI renderer. (graphics_batch2d.hpp has a
 // richer RHIBatch2DStats but it cannot be included here — it redefines BlendMode,
@@ -1356,3 +1356,10 @@ private:
 
 // The createRenderer() factory is declared in irenderer.hpp and returns a
 // std::unique_ptr<IRenderer> (Renderer for Vulkan, Renderer_Metal for Metal).
+
+} // namespace Vapor
+
+// Transitional shim: these types lived at global scope before the namespace
+// unification; unqualified call sites keep compiling while they migrate to
+// Vapor:: qualification. Remove once call sites are migrated.
+using namespace Vapor;

@@ -1,5 +1,7 @@
 #include "Vapor/input_manager.hpp"
 
+using namespace Vapor;
+
 namespace Vapor {
 
     InputManager::InputManager() {

@@ -8,6 +8,8 @@
 #include <glm/vec3.hpp>
 #include <glm/vec4.hpp>
 
+namespace Vapor::gpu {
+
 enum class PrimitiveMode {
     POINTS,
     LINES,
@@ -139,3 +141,5 @@ struct alignas(16) IBLCaptureData {
     float roughness;
     float _pad[2];
 };
+
+} // namespace Vapor::gpu

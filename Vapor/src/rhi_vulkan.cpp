@@ -5,6 +5,8 @@
 #include <cstring>
 #include <algorithm>
 
+using namespace Vapor;
+
 // ============================================================================
 // Constructor / Destructor
 // ============================================================================
@@ -3634,6 +3636,6 @@ void RHI_Vulkan::computeBarrier() {
 // Factory Function
 // ============================================================================
 
-RHI* createRHIVulkan() {
+RHI* Vapor::createRHIVulkan() {
     return new RHI_Vulkan();
 }

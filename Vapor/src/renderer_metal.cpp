@@ -5,11 +5,9 @@
 #define CA_PRIVATE_IMPLEMENTATION
 #include "components.hpp"
 
-// NOTE: `using namespace Vapor;` is intentionally placed AFTER all includes
-// (see below). The branch's graphics.hpp defines Vapor:: copies of the GPU
-// structs that also exist at global scope in graphics_gpu_structs.hpp; if the
-// using-directive were active while those headers parse, their own unqualified
-// references (e.g. InstanceData::primitiveMode) would be ambiguous.
+// The GPU-layout twins of the engine structs (graphics_gpu_structs.hpp) live
+// in Vapor::gpu; this file refers to them as gpu::X and to the engine-side
+// types (graphics.hpp) unqualified.
 #include "debug_draw.hpp"
 #include "graphics_mesh.hpp"
 #include "renderer_metal.hpp"
@@ -41,7 +39,7 @@
 #include "graphics.hpp"
 // The branch's graphics.hpp is a monolith (not an umbrella), so pull in the
 // effect/batch/gibs sub-headers the native Metal renderer needs directly.
-#include "graphics_effects.hpp"   // AtmosphereData, WaterData, GPUParticle, ::Particle, …
+#include "graphics_effects.hpp"   // AtmosphereData, WaterData, GPUParticle, …
 #include "graphics_batch2d.hpp"   // Batch2DVertex, Batch2DBlendMode
 #include "graphics_gibs.hpp"      // Surfel, SurfelCell, GIBSData
 #include "helper.hpp"
@@ -55,10 +53,6 @@
 // GIBS (Global Illumination Based on Surfels)
 #include "Vapor/gibs_manager.hpp"
 
-// All headers are parsed above with no using-directive active, so their own
-// unqualified references bind to the intended (global gpu_structs) types. The
-// renderer body below uses Vapor:: types unqualified; GPU-struct names are
-// qualified with :: where the global versions are required.
 using namespace Vapor;
 
 // Pre-pass: Renders depth and normals
@@ -900,7 +894,7 @@ public:
         if (!r.equirectHDRITexture) return;
 
         for (uint32_t face = 0; face < 6; ++face) {
-            auto* captureData = reinterpret_cast<::IBLCaptureData*>(r.iblCaptureDataBuffer->contents());
+            auto* captureData = reinterpret_cast<gpu::IBLCaptureData*>(r.iblCaptureDataBuffer->contents());
             captureData->faceIndex = face;
             captureData->roughness = 0.0f;
             r.iblCaptureDataBuffer->didModifyRange(NS::Range::Make(0, r.iblCaptureDataBuffer->length()));
@@ -962,7 +956,7 @@ public:
         // Render each face of the cubemap
         for (uint32_t face = 0; face < 6; ++face) {
             // Update capture data
-            auto* captureData = reinterpret_cast<::IBLCaptureData*>(r.iblCaptureDataBuffer->contents());
+            auto* captureData = reinterpret_cast<gpu::IBLCaptureData*>(r.iblCaptureDataBuffer->contents());
             captureData->viewProj = captureProj * captureViews[face];
             captureData->faceIndex = face;
             captureData->roughness = 0.0f;
@@ -1013,7 +1007,7 @@ public:
 
         // Render each face of the irradiance cubemap
         for (uint32_t face = 0; face < 6; ++face) {
-            auto* captureData = reinterpret_cast<::IBLCaptureData*>(r.iblCaptureDataBuffer->contents());
+            auto* captureData = reinterpret_cast<gpu::IBLCaptureData*>(r.iblCaptureDataBuffer->contents());
             captureData->faceIndex = face;
             captureData->roughness = 0.0f;
             r.iblCaptureDataBuffer->didModifyRange(NS::Range::Make(0, r.iblCaptureDataBuffer->length()));
@@ -1062,7 +1056,7 @@ public:
 
             // For each face
             for (uint32_t face = 0; face < 6; ++face) {
-                auto* captureData = reinterpret_cast<::IBLCaptureData*>(r.iblCaptureDataBuffer->contents());
+                auto* captureData = reinterpret_cast<gpu::IBLCaptureData*>(r.iblCaptureDataBuffer->contents());
                 captureData->faceIndex = face;
                 captureData->roughness = roughness;
                 r.iblCaptureDataBuffer->didModifyRange(NS::Range::Make(0, r.iblCaptureDataBuffer->length()));
@@ -2958,7 +2952,7 @@ private:
     Vapor::GIBSManager* gibsManager;
 };
 
-std::unique_ptr<IRenderer> createRendererMetal(SDL_Window* window) {
+std::unique_ptr<IRenderer> Vapor::createRendererMetal(SDL_Window* window) {
     auto r = std::make_unique<Renderer_Metal>();
     r->init(window);  // creates device/swapchain and initializes the ImGui Metal backend
     return r;
@@ -3542,28 +3536,28 @@ auto Renderer_Metal::createResources() -> void {
     // Create buffers
     frameDataBuffers.resize(MAX_FRAMES_IN_FLIGHT);
     for (auto& frameDataBuffer : frameDataBuffers) {
-        frameDataBuffer = NS::TransferPtr(device->newBuffer(sizeof(::FrameData), MTL::ResourceStorageModeManaged));
+        frameDataBuffer = NS::TransferPtr(device->newBuffer(sizeof(gpu::FrameData), MTL::ResourceStorageModeManaged));
     }
     cameraDataBuffers.resize(MAX_FRAMES_IN_FLIGHT);
     for (auto& cameraDataBuffer : cameraDataBuffers) {
-        cameraDataBuffer = NS::TransferPtr(device->newBuffer(sizeof(::CameraData), MTL::ResourceStorageModeManaged));
+        cameraDataBuffer = NS::TransferPtr(device->newBuffer(sizeof(gpu::CameraData), MTL::ResourceStorageModeManaged));
     }
     instanceDataBuffers.resize(MAX_FRAMES_IN_FLIGHT);
     for (auto& instanceDataBuffer : instanceDataBuffers) {
         instanceDataBuffer =
-            NS::TransferPtr(device->newBuffer(sizeof(::InstanceData) * MAX_INSTANCES, MTL::ResourceStorageModeManaged));
+            NS::TransferPtr(device->newBuffer(sizeof(gpu::InstanceData) * MAX_INSTANCES, MTL::ResourceStorageModeManaged));
     }
 
-    std::vector<::Particle> particles{ 1000 };
+    std::vector<Particle> particles{ 1000 };
     testStorageBuffer =
-        NS::TransferPtr(device->newBuffer(particles.size() * sizeof(::Particle), MTL::ResourceStorageModeManaged));
-    memcpy(testStorageBuffer->contents(), particles.data(), particles.size() * sizeof(::Particle));
+        NS::TransferPtr(device->newBuffer(particles.size() * sizeof(Particle), MTL::ResourceStorageModeManaged));
+    memcpy(testStorageBuffer->contents(), particles.data(), particles.size() * sizeof(Particle));
     testStorageBuffer->didModifyRange(NS::Range::Make(0, testStorageBuffer->length()));
 
     clusterBuffers.resize(MAX_FRAMES_IN_FLIGHT);
     for (auto& clusterBuffer : clusterBuffers) {
         clusterBuffer = NS::TransferPtr(device->newBuffer(
-            clusterGridSizeX * clusterGridSizeY * clusterGridSizeZ * sizeof(::Cluster), MTL::ResourceStorageModeManaged
+            clusterGridSizeX * clusterGridSizeY * clusterGridSizeZ * sizeof(gpu::Cluster), MTL::ResourceStorageModeManaged
         ));
     }
 
@@ -3699,7 +3693,7 @@ auto Renderer_Metal::createResources() -> void {
     atmosphereDataBuffer->didModifyRange(NS::Range::Make(0, atmosphereDataBuffer->length()));
 
     // Create IBL capture data buffer
-    iblCaptureDataBuffer = NS::TransferPtr(device->newBuffer(sizeof(::IBLCaptureData), MTL::ResourceStorageModeManaged));
+    iblCaptureDataBuffer = NS::TransferPtr(device->newBuffer(sizeof(gpu::IBLCaptureData), MTL::ResourceStorageModeManaged));
 
     // Create IBL textures
     const uint32_t envMapSize = 512;
@@ -5010,32 +5004,32 @@ auto Renderer_Metal::stage(std::shared_ptr<RenderScene> scene) -> void {
     // Lights
     size_t directionalLightsSize = std::max((size_t)1, scene->directionalLights.size());
     directionalLightBuffer = NS::TransferPtr(
-        device->newBuffer(directionalLightsSize * sizeof(::DirectionalLight), MTL::ResourceStorageModeManaged)
+        device->newBuffer(directionalLightsSize * sizeof(gpu::DirectionalLight), MTL::ResourceStorageModeManaged)
     );
     if (!scene->directionalLights.empty()) {
         memcpy(
             directionalLightBuffer->contents(),
             scene->directionalLights.data(),
-            scene->directionalLights.size() * sizeof(::DirectionalLight)
+            scene->directionalLights.size() * sizeof(gpu::DirectionalLight)
         );
     }
     directionalLightBuffer->didModifyRange(NS::Range::Make(0, directionalLightBuffer->length()));
 
     size_t pointLightsSize = std::max((size_t)1, scene->pointLights.size());
     pointLightBuffer = NS::TransferPtr(
-        device->newBuffer(pointLightsSize * sizeof(::PointLight), MTL::ResourceStorageModeManaged)
+        device->newBuffer(pointLightsSize * sizeof(gpu::PointLight), MTL::ResourceStorageModeManaged)
     );
     if (!scene->pointLights.empty()) {
-        memcpy(pointLightBuffer->contents(), scene->pointLights.data(), scene->pointLights.size() * sizeof(::PointLight));
+        memcpy(pointLightBuffer->contents(), scene->pointLights.data(), scene->pointLights.size() * sizeof(gpu::PointLight));
     }
     pointLightBuffer->didModifyRange(NS::Range::Make(0, pointLightBuffer->length()));
 
     size_t rectLightsSize = std::max((size_t)1, scene->rectLights.size());
     rectLightBuffer = NS::TransferPtr(
-        device->newBuffer(rectLightsSize * sizeof(::RectLight), MTL::ResourceStorageModeManaged)
+        device->newBuffer(rectLightsSize * sizeof(gpu::RectLight), MTL::ResourceStorageModeManaged)
     );
     if (!scene->rectLights.empty()) {
-        memcpy(rectLightBuffer->contents(), scene->rectLights.data(), scene->rectLights.size() * sizeof(::RectLight));
+        memcpy(rectLightBuffer->contents(), scene->rectLights.data(), scene->rectLights.size() * sizeof(gpu::RectLight));
     }
     rectLightBuffer->didModifyRange(NS::Range::Make(0, rectLightBuffer->length()));
 
@@ -5054,7 +5048,7 @@ auto Renderer_Metal::stage(std::shared_ptr<RenderScene> scene) -> void {
     }
     size_t materialsSize = std::max((size_t)1, scene->materials.size());
     materialDataBuffer = NS::TransferPtr(
-        device->newBuffer(materialsSize * sizeof(::MaterialData), MTL::ResourceStorageModeManaged)
+        device->newBuffer(materialsSize * sizeof(gpu::MaterialData), MTL::ResourceStorageModeManaged)
     );
 
     // Buffers
@@ -5184,7 +5178,7 @@ auto Renderer_Metal::draw(std::shared_ptr<RenderScene> scene, Camera& camera) ->
     // ==========================================================================
     auto time = (float)SDL_GetTicks() / 1000.0f;
 
-    auto* frameData = reinterpret_cast<::FrameData*>(frameDataBuffers[currentFrameInFlight]->contents());
+    auto* frameData = reinterpret_cast<gpu::FrameData*>(frameDataBuffers[currentFrameInFlight]->contents());
     frameData->frameNumber = frameNumber;
     frameData->time = time;
     frameData->deltaTime = 0.016f;// TODO:
@@ -5199,7 +5193,7 @@ auto Renderer_Metal::draw(std::shared_ptr<RenderScene> scene, Camera& camera) ->
     glm::mat4 view = camera.getViewMatrix();
     glm::mat4 invProj = glm::inverse(proj);
     glm::mat4 invView = glm::inverse(view);
-    auto* cameraData = reinterpret_cast<::CameraData*>(cameraDataBuffers[currentFrameInFlight]->contents());
+    auto* cameraData = reinterpret_cast<gpu::CameraData*>(cameraDataBuffers[currentFrameInFlight]->contents());
     cameraData->proj = proj;
     cameraData->view = view;
     cameraData->invProj = invProj;
@@ -5213,8 +5207,8 @@ auto Renderer_Metal::draw(std::shared_ptr<RenderScene> scene, Camera& camera) ->
 
     // Reallocate light buffers if the ECS has added lights since stage() was called
     // (LightGatherSystem populates scene->directionalLights / pointLights after staging)
-    const size_t dirLightBytes   = std::max(scene->directionalLights.size(), (size_t)1) * sizeof(::DirectionalLight);
-    const size_t pointLightBytes = std::max(scene->pointLights.size(),       (size_t)1) * sizeof(::PointLight);
+    const size_t dirLightBytes   = std::max(scene->directionalLights.size(), (size_t)1) * sizeof(gpu::DirectionalLight);
+    const size_t pointLightBytes = std::max(scene->pointLights.size(),       (size_t)1) * sizeof(gpu::PointLight);
     if (!directionalLightBuffer || directionalLightBuffer->length() < dirLightBytes) {
         directionalLightBuffer = NS::TransferPtr(
             device->newBuffer(dirLightBytes, MTL::ResourceStorageModeManaged));
@@ -5224,7 +5218,7 @@ auto Renderer_Metal::draw(std::shared_ptr<RenderScene> scene, Camera& camera) ->
             device->newBuffer(pointLightBytes, MTL::ResourceStorageModeManaged));
     }
 
-    auto* dirLights = reinterpret_cast<::DirectionalLight*>(directionalLightBuffer->contents());
+    auto* dirLights = reinterpret_cast<gpu::DirectionalLight*>(directionalLightBuffer->contents());
     for (size_t i = 0; i < scene->directionalLights.size(); ++i) {
         dirLights[i].direction = scene->directionalLights[i].direction;
         dirLights[i].color = scene->directionalLights[i].color;
@@ -5240,7 +5234,7 @@ auto Renderer_Metal::draw(std::shared_ptr<RenderScene> scene, Camera& camera) ->
         atmosphereData->sunIntensity = sunLight.intensity;
     }
 
-    auto* pointLights = reinterpret_cast<::PointLight*>(pointLightBuffer->contents());
+    auto* pointLights = reinterpret_cast<gpu::PointLight*>(pointLightBuffer->contents());
     for (size_t i = 0; i < scene->pointLights.size(); ++i) {
         pointLights[i].position = scene->pointLights[i].position;
         pointLights[i].color = scene->pointLights[i].color;
@@ -5249,19 +5243,19 @@ auto Renderer_Metal::draw(std::shared_ptr<RenderScene> scene, Camera& camera) ->
     }
     pointLightBuffer->didModifyRange(NS::Range::Make(0, pointLightBuffer->length()));
 
-    const size_t rectLightBytes = std::max(scene->rectLights.size(), (size_t)1) * sizeof(::RectLight);
+    const size_t rectLightBytes = std::max(scene->rectLights.size(), (size_t)1) * sizeof(gpu::RectLight);
     if (!rectLightBuffer || rectLightBuffer->length() < rectLightBytes) {
         rectLightBuffer = NS::TransferPtr(device->newBuffer(rectLightBytes, MTL::ResourceStorageModeManaged));
     }
     if (!scene->rectLights.empty()) {
-        memcpy(rectLightBuffer->contents(), scene->rectLights.data(), scene->rectLights.size() * sizeof(::RectLight));
+        memcpy(rectLightBuffer->contents(), scene->rectLights.data(), scene->rectLights.size() * sizeof(gpu::RectLight));
         rectLightBuffer->didModifyRange(NS::Range::Make(0, rectLightBytes));
     }
 
-    auto* materialData = reinterpret_cast<::MaterialData*>(materialDataBuffer->contents());
+    auto* materialData = reinterpret_cast<gpu::MaterialData*>(materialDataBuffer->contents());
     for (size_t i = 0; i < scene->materials.size(); ++i) {
         const auto& mat = scene->materials[i];
-        materialData[i] = ::MaterialData{ .baseColorFactor = mat->baseColorFactor,
+        materialData[i] = gpu::MaterialData{ .baseColorFactor = mat->baseColorFactor,
                                         .normalScale = mat->normalScale,
                                         .metallicFactor = mat->metallicFactor,
                                         .roughnessFactor = mat->roughnessFactor,
@@ -5299,7 +5293,7 @@ auto Renderer_Metal::draw(std::shared_ptr<RenderScene> scene, Camera& camera) ->
     }
     // TODO: avoid updating the entire instance data buffer every frame
     memcpy(
-        instanceDataBuffers[currentFrameInFlight]->contents(), instances.data(), instances.size() * sizeof(::InstanceData)
+        instanceDataBuffers[currentFrameInFlight]->contents(), instances.data(), instances.size() * sizeof(gpu::InstanceData)
     );
     instanceDataBuffers[currentFrameInFlight]->didModifyRange(
         NS::Range::Make(0, instanceDataBuffers[currentFrameInFlight]->length())
@@ -6561,7 +6555,7 @@ void Renderer_Metal::renderToTexture(
     camera.updateAspectRatio(aspect);
 
     // Update camera data buffer
-    ::CameraData cameraData;
+    gpu::CameraData cameraData;
     cameraData.proj = camera.getProjMatrix();
     cameraData.view = camera.getViewMatrix();
     cameraData.invProj = glm::inverse(cameraData.proj);
@@ -6575,8 +6569,8 @@ void Renderer_Metal::renderToTexture(
     }
 
     // Create temporary camera buffer for this render
-    auto tempCameraBuffer = NS::TransferPtr(device->newBuffer(sizeof(::CameraData), MTL::ResourceStorageModeShared));
-    memcpy(tempCameraBuffer->contents(), &cameraData, sizeof(::CameraData));
+    auto tempCameraBuffer = NS::TransferPtr(device->newBuffer(sizeof(gpu::CameraData), MTL::ResourceStorageModeShared));
+    memcpy(tempCameraBuffer->contents(), &cameraData, sizeof(gpu::CameraData));
 
     // Set pipeline state
     encoder->setRenderPipelineState(drawPipeline.get());
@@ -7576,7 +7570,7 @@ void Renderer_Metal::draw(entt::registry& registry, std::shared_ptr<RenderScene>
                 .vertexCount = mesh->vertexCount,
                 .indexCount = mesh->indexCount,
                 .materialID = mesh->materialID,
-                .primitiveMode = static_cast<::PrimitiveMode>(static_cast<int>(mesh->primitiveMode)),
+                .primitiveMode = static_cast<gpu::PrimitiveMode>(static_cast<int>(mesh->primitiveMode)),
                 .AABBMin = wMin,
                 .AABBMax = wMax,
                 .boundingSphere = glm::vec4(bsCenter, bsRadius),
@@ -7632,7 +7626,7 @@ void Renderer_Metal::draw(entt::registry& registry, std::shared_ptr<RenderScene>
             .vertexCount = mesh->vertexCount,
             .indexCount = mesh->indexCount,
             .materialID = mesh->materialID,
-            .primitiveMode = static_cast<::PrimitiveMode>(static_cast<int>(mesh->primitiveMode)),
+            .primitiveMode = static_cast<gpu::PrimitiveMode>(static_cast<int>(mesh->primitiveMode)),
             .AABBMin = wMin,
             .AABBMax = wMax,
             .boundingSphere = glm::vec4(bsCenter, bsRadius),

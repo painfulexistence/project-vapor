@@ -2,6 +2,8 @@
 
 #include <fmt/core.h>
 
+using namespace Vapor;
+
 namespace Vapor {
 
 void StatLine::appendKV(const char* key, const std::string& value) {

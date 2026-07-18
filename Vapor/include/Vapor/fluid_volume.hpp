@@ -8,6 +8,8 @@ namespace JPH {
     class BodyID;
 }
 
+namespace Vapor {
+
 class Physics3D;
 
 struct FluidVolumeSettings {
@@ -79,3 +81,10 @@ private:
     glm::vec3 calculateBuoyancyForce(const JPH::BodyID& bodyID, float submergedVolume) const;
     glm::vec3 calculateDragForce(const JPH::BodyID& bodyID, const glm::vec3& velocity) const;
 };
+
+} // namespace Vapor
+
+// Transitional shim: these types lived at global scope before the namespace
+// unification; unqualified call sites keep compiling while they migrate to
+// Vapor:: qualification. Remove once call sites are migrated.
+using namespace Vapor;

@@ -6,6 +6,8 @@
 
 #include "graphics.hpp"
 
+namespace Vapor {
+
 class MeshBuilder {
 public:
     static std::shared_ptr<Vapor::Mesh> buildTriforce(std::shared_ptr<Vapor::Material> material = nullptr) {
@@ -425,3 +427,10 @@ public:
 private:
     MeshBuilder() = delete;
 };
+
+} // namespace Vapor
+
+// Transitional shim: these types lived at global scope before the namespace
+// unification; unqualified call sites keep compiling while they migrate to
+// Vapor:: qualification. Remove once call sites are migrated.
+using namespace Vapor;

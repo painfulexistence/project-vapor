@@ -13,11 +13,13 @@
 #include <cstdlib>
 #include <cstring>
 
+using namespace Vapor;
+
 // ============================================================================
 // Factory Function
 // ============================================================================
 
-RHI* createRHIMetal() {
+RHI* Vapor::createRHIMetal() {
     return new RHI_Metal();
 }
 

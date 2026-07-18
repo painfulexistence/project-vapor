@@ -2,6 +2,8 @@
 #include <fmt/core.h>
 #include <thread>
 
+using namespace Vapor;
+
 namespace Vapor {
 
     JoltEnkiJobSystem::JoltEnkiJobSystem(TaskScheduler& scheduler, uint32_t maxJobs)
