@@ -33,6 +33,26 @@ else()
     message(STATUS "FFmpeg not found — video recording/playback disabled")
 endif()
 
+# Optional: TinyUSDZ for USD (.usd/.usda/.usdc/.usdz) import. Fetched from
+# source (no vcpkg port); loadUSD compiles to a warning stub when OFF.
+option(VAPOR_USE_TINYUSDZ "Enable USD import via TinyUSDZ" ON)
+if(VAPOR_USE_TINYUSDZ)
+    include(FetchContent)
+    set(TINYUSDZ_WITH_TYDRA ON CACHE BOOL "" FORCE)
+    set(TINYUSDZ_BUILD_TESTS OFF CACHE BOOL "" FORCE)
+    set(TINYUSDZ_BUILD_EXAMPLES OFF CACHE BOOL "" FORCE)
+    set(TINYUSDZ_BUILD_BENCHMARKS OFF CACHE BOOL "" FORCE)
+    # TinyUSDZ vendors its own tinyexr for EXR texture decode inside USD;
+    # keep it off (unused here, and it collides if tinyexr ever joins vcpkg deps).
+    set(TINYUSDZ_WITH_EXR OFF CACHE BOOL "" FORCE)
+    FetchContent_Declare(
+        tinyusdz
+        GIT_REPOSITORY https://github.com/lighttransport/tinyusdz.git
+        GIT_TAG 11a2d361a9b6a0c4bf8918027233858d80ed17c5
+    )
+    FetchContent_MakeAvailable(tinyusdz)
+endif()
+
 if(APPLE)
     add_subdirectory(metal)
 endif()
@@ -45,6 +65,7 @@ set(SOURCES
     src/input_manager.cpp
     src/asset_manager.cpp
     src/scene_blueprint.cpp
+    src/asset_manager_usd.cpp
     src/asset_serializer.cpp
     src/camera.cpp
     src/debug_draw.cpp
@@ -151,6 +172,14 @@ target_link_libraries(Vapor PRIVATE
 
 if(APPLE)
     target_link_libraries(Vapor PRIVATE metal)
+endif()
+
+if(VAPOR_USE_TINYUSDZ)
+    # The static target exposes its include dir PRIVATE only; add src/ for
+    # <tinyusdz.hh> / <tydra/render-data.hh>.
+    target_compile_definitions(Vapor PRIVATE VAPOR_USE_TINYUSDZ)
+    target_link_libraries(Vapor PRIVATE tinyusdz::tinyusdz_static)
+    target_include_directories(Vapor PRIVATE ${tinyusdz_SOURCE_DIR}/src)
 endif()
 
 include(AssetPipeline)
