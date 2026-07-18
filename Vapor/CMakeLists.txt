@@ -17,6 +17,11 @@ set(MESHOPT_INSTALL OFF CACHE BOOL "" FORCE)
 set(MESHOPT_BUILD_DEMO OFF CACHE BOOL "" FORCE)
 set(MESHOPT_BUILD_GLTFPACK OFF CACHE BOOL "" FORCE)
 FetchContent_MakeAvailable(meshoptimizer)
+# meshoptimizer builds a plain static lib; force PIC so it can be linked into
+# shared consumers of Vapor (e.g. libVaporCAPI.so). Without this the CAPI .so
+# link fails on Linux: "relocation R_X86_64_PC32 ... can not be used when making
+# a shared object; recompile with -fPIC". Vapor itself already sets PIC below.
+set_target_properties(meshoptimizer PROPERTIES POSITION_INDEPENDENT_CODE ON)
 find_package(Jolt CONFIG REQUIRED)
 find_package(enkiTS CONFIG REQUIRED)
 find_package(SDL3 CONFIG REQUIRED)
