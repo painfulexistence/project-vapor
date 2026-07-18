@@ -23,8 +23,9 @@
 #define TINYGLTF_IMPLEMENTATION
 #include <tiny_gltf.h>
 
-#include "asset_serializer.hpp"
 #include "graphics.hpp"
+#include <cstring>
+#include <functional>
 
 using namespace Vapor;
 
@@ -162,17 +163,15 @@ auto AssetManager::loadOBJ(const std::string& filename, const std::string& mtl_b
     return mesh;
 }
 
-auto AssetManager::loadGLTF(const std::string& filename) -> std::shared_ptr<RenderScene> {
+
+auto AssetManager::loadGLTF(const std::string& filename) -> Vapor::SceneBlueprint {
+    Vapor::SceneBlueprint bp;
     auto resolved = FileSystem::instance().resolvePath(filename);
     if (!resolved) {
         fmt::print("GLTF not found in any search path: {}\n", filename);
-        return nullptr;
+        return bp;
     }
     std::filesystem::path filePath(*resolved);
-    std::filesystem::path scenePath(filePath);
-    if (std::filesystem::exists(scenePath.replace_extension(".vscene_optimized"))) {
-        return AssetSerializer::deserializeScene(scenePath.string());
-    }
 
     tinygltf::Model model;
     tinygltf::TinyGLTF loader;
@@ -183,16 +182,13 @@ auto AssetManager::loadGLTF(const std::string& filename) -> std::shared_ptr<Rend
     if (!err.empty()) fmt::print("GLTF Error: {}\n", err);
     if (!result || model.scenes.empty()) {
         fmt::print("Failed to parse GLTF\n");
-        return nullptr;
+        return bp;
     }
 
-    auto scene = std::make_shared<RenderScene>();
-
     // Move tinygltf's decoded image buffers — no copy
-    std::vector<std::shared_ptr<Image>> images;
-    images.reserve(model.images.size());
+    bp.images.reserve(model.images.size());
     for (auto& img : model.images) {
-        images.push_back(std::make_shared<Image>(Image{
+        bp.images.push_back(std::make_shared<Image>(Image{
             .uri = img.uri,
             .width = static_cast<Uint32>(img.width),
             .height = static_cast<Uint32>(img.height),
@@ -201,8 +197,7 @@ auto AssetManager::loadGLTF(const std::string& filename) -> std::shared_ptr<Rend
         }));
     }
 
-    std::vector<std::shared_ptr<Material>> materials;
-    materials.reserve(model.materials.size());
+    bp.materials.reserve(model.materials.size());
     for (const auto& mat : model.materials) {
         auto material = std::make_shared<Material>();
         material->name = mat.name;
@@ -226,14 +221,14 @@ auto AssetManager::loadGLTF(const std::string& filename) -> std::shared_ptr<Rend
         material->normalScale = mat.normalTexture.scale;
         material->occlusionStrength = mat.occlusionTexture.strength;
         const auto assignTex = [&](int idx, std::shared_ptr<Image>& slot) {
-            if (idx >= 0 && model.textures[idx].source >= 0) slot = images[model.textures[idx].source];
+            if (idx >= 0 && model.textures[idx].source >= 0) slot = bp.images[model.textures[idx].source];
         };
         assignTex(mat.pbrMetallicRoughness.baseColorTexture.index, material->albedoMap);
         if (mat.pbrMetallicRoughness.metallicRoughnessTexture.index >= 0) {
             int src = model.textures[mat.pbrMetallicRoughness.metallicRoughnessTexture.index].source;
             if (src >= 0) {
-                material->metallicMap = images[src];
-                material->roughnessMap = images[src];
+                material->metallicMap = bp.images[src];
+                material->roughnessMap = bp.images[src];
             }
         }
         assignTex(mat.normalTexture.index, material->normalMap);
@@ -283,7 +278,7 @@ auto AssetManager::loadGLTF(const std::string& filename) -> std::shared_ptr<Rend
             }
         }
 
-        materials.push_back(material);
+        bp.materials.push_back(material);
     }
 
     // Stride-aware accessor helpers
@@ -326,54 +321,34 @@ auto AssetManager::loadGLTF(const std::string& filename) -> std::shared_ptr<Rend
         }
     };
 
-    const auto getLocalMatrix = [](const tinygltf::Node& node) -> glm::mat4 {
-        if (!node.matrix.empty()) {
-            return glm::mat4(
-                node.matrix[0],
-                node.matrix[1],
-                node.matrix[2],
-                node.matrix[3],
-                node.matrix[4],
-                node.matrix[5],
-                node.matrix[6],
-                node.matrix[7],
-                node.matrix[8],
-                node.matrix[9],
-                node.matrix[10],
-                node.matrix[11],
-                node.matrix[12],
-                node.matrix[13],
-                node.matrix[14],
-                node.matrix[15]
-            );
-        }
-        const auto t =
-            node.translation.empty()
-                ? glm::mat4(1.0f)
-                : glm::translate(
-                      glm::mat4(1.0f), glm::vec3(node.translation[0], node.translation[1], node.translation[2])
-                  );
-        const auto r =
-            node.rotation.empty()
-                ? glm::quat(1, 0, 0, 0)
-                : glm::quat(
-                      float(node.rotation[3]), float(node.rotation[0]), float(node.rotation[1]), float(node.rotation[2])
-                  );
-        const auto tr = t * glm::mat4_cast(r);
-        return node.scale.empty() ? tr : glm::scale(tr, glm::vec3(node.scale[0], node.scale[1], node.scale[2]));
-    };
+    // KHR_lights_punctual: tinygltf parses the extension into model.lights and
+    // Node::light. Angles stay in radians (the blueprint convention).
+    bp.lights.reserve(model.lights.size());
+    for (const auto& l : model.lights) {
+        Vapor::LightBlueprint light;
+        if (l.type == "directional")
+            light.type = Vapor::LightBlueprint::Type::Directional;
+        else if (l.type == "spot")
+            light.type = Vapor::LightBlueprint::Type::Spot;
+        else
+            light.type = Vapor::LightBlueprint::Type::Point;
+        if (l.color.size() >= 3) light.color = glm::vec3(l.color[0], l.color[1], l.color[2]);
+        light.intensity = static_cast<float>(l.intensity);
+        light.range = static_cast<float>(l.range);
+        light.innerConeAngle = static_cast<float>(l.spot.innerConeAngle);
+        light.outerConeAngle = static_cast<float>(l.spot.outerConeAngle);
+        bp.lights.push_back(light);
+    }
 
-    // Mesh cache: GLTF mesh index → primitive handles already written into scene flat buffer.
-    // Multiple scene nodes referencing the same GLTF mesh reuse vertex data without duplication.
-    std::unordered_map<int, std::vector<std::shared_ptr<Mesh>>> meshCache;
-    Uint32 vtxOffset = 0;
-    Uint32 idxOffset = 0;
-
-    const auto processMesh = [&](int meshIdx) -> const std::vector<std::shared_ptr<Mesh>>& {
+    // Mesh cache: GLTF mesh index -> blueprint mesh indices. Multiple nodes
+    // referencing the same GLTF mesh share the decoded primitives, so repeated
+    // use stays one geometry registration (GPU instancing at draw time).
+    std::unordered_map<int, std::vector<int>> meshCache;
+    const auto processMesh = [&](int meshIdx) -> const std::vector<int>& {
         auto it = meshCache.find(meshIdx);
         if (it != meshCache.end()) return it->second;
 
-        std::vector<std::shared_ptr<Mesh>> primitives;
+        std::vector<int> primitives;
         for (const auto& prim : model.meshes[meshIdx].primitives) {
             if (!prim.attributes.count("POSITION")) continue;
 
@@ -386,74 +361,77 @@ auto AssetManager::loadGLTF(const std::string& filename) -> std::shared_ptr<Rend
             const bool hasUV1 = prim.attributes.count("TEXCOORD_1") > 0;
             const bool hasColor = prim.attributes.count("COLOR_0") > 0;
 
-            // Append directly to scene flat buffer — no intermediate per-mesh copy
-            scene->vertices.resize(vtxOffset + vCount);
+            auto mesh = std::make_shared<Mesh>();
+            mesh->vertices.resize(vCount);
             for (size_t i = 0; i < vCount; i++)
-                scene->vertices[vtxOffset + i].position = readVec3(posAcc, i);
+                mesh->vertices[i].position = readVec3(posAcc, i);
             if (hasNormal) {
                 const auto& acc = model.accessors[prim.attributes.at("NORMAL")];
                 for (size_t i = 0; i < vCount; i++)
-                    scene->vertices[vtxOffset + i].normal = readVec3(acc, i);
+                    mesh->vertices[i].normal = readVec3(acc, i);
             }
             if (hasTangent) {
                 const auto& acc = model.accessors[prim.attributes.at("TANGENT")];
                 for (size_t i = 0; i < vCount; i++)
-                    scene->vertices[vtxOffset + i].tangent = readVec4(acc, i);
+                    mesh->vertices[i].tangent = readVec4(acc, i);
             }
             if (hasUV0) {
                 const auto& acc = model.accessors[prim.attributes.at("TEXCOORD_0")];
                 for (size_t i = 0; i < vCount; i++)
-                    scene->vertices[vtxOffset + i].uv = readTexcoord(acc, i);
+                    mesh->vertices[i].uv = readTexcoord(acc, i);
             }
 
-            Uint32 iCount = 0;
             if (prim.indices >= 0) {
                 const auto& idxAcc = model.accessors[prim.indices];
                 const auto& idxBv = model.bufferViews[idxAcc.bufferView];
                 const uint8_t* base = model.buffers[idxBv.buffer].data.data() + idxBv.byteOffset + idxAcc.byteOffset;
-                iCount = static_cast<Uint32>(idxAcc.count);
-                scene->indices.resize(idxOffset + iCount);
+                mesh->indices.resize(idxAcc.count);
                 switch (idxAcc.componentType) {
                 case TINYGLTF_COMPONENT_TYPE_UNSIGNED_SHORT:
                     for (size_t i = 0; i < idxAcc.count; i++) {
                         Uint16 v;
                         std::memcpy(&v, base + i * sizeof(Uint16), sizeof(Uint16));
-                        scene->indices[idxOffset + i] = v;
+                        mesh->indices[i] = v;
                     }
                     break;
                 case TINYGLTF_COMPONENT_TYPE_UNSIGNED_INT:
                     for (size_t i = 0; i < idxAcc.count; i++) {
                         Uint32 v;
                         std::memcpy(&v, base + i * sizeof(Uint32), sizeof(Uint32));
-                        scene->indices[idxOffset + i] = v;
+                        mesh->indices[i] = v;
                     }
                     break;
                 case TINYGLTF_COMPONENT_TYPE_UNSIGNED_BYTE:
                     for (size_t i = 0; i < idxAcc.count; i++)
-                        scene->indices[idxOffset + i] = base[i];
+                        mesh->indices[i] = base[i];
                     break;
                 default:
                     fmt::print("Unsupported index type: {}\n", idxAcc.componentType);
                     break;
                 }
+            } else {
+                // Non-indexed primitive: synthesize a sequential index list so
+                // Renderer::stage() always has indices to register.
+                mesh->indices.resize(vCount);
+                for (Uint32 i = 0; i < vCount; i++)
+                    mesh->indices[i] = i;
             }
 
-            auto mesh = std::make_shared<Mesh>();
             mesh->hasPosition = true;
             mesh->hasNormal = hasNormal;
             mesh->hasTangent = hasTangent;
             mesh->hasUV0 = hasUV0;
             mesh->hasUV1 = hasUV1;
             mesh->hasColor = hasColor;
-            mesh->vertexOffset = vtxOffset;
-            mesh->indexOffset = idxOffset;
             mesh->vertexCount = vCount;
-            mesh->indexCount = iCount;
+            mesh->indexCount = static_cast<Uint32>(mesh->indices.size());
             mesh->isGeometryDirty = false;
-            mesh->material = prim.material >= 0 ? materials[prim.material] : nullptr;
+            mesh->material = prim.material >= 0 ? bp.materials[prim.material] : nullptr;
             if (posAcc.minValues.size() >= 3 && posAcc.maxValues.size() >= 3) {
                 mesh->localAABBMin = glm::vec3(posAcc.minValues[0], posAcc.minValues[1], posAcc.minValues[2]);
                 mesh->localAABBMax = glm::vec3(posAcc.maxValues[0], posAcc.maxValues[1], posAcc.maxValues[2]);
+            } else {
+                mesh->calculateLocalAABB();
             }
             switch (prim.mode) {
             case TINYGLTF_MODE_POINTS:
@@ -476,9 +454,8 @@ auto AssetManager::loadGLTF(const std::string& filename) -> std::shared_ptr<Rend
                 break;
             }
 
-            vtxOffset += vCount;
-            idxOffset += iCount;
-            primitives.push_back(std::move(mesh));
+            primitives.push_back(static_cast<int>(bp.meshes.size()));
+            bp.meshes.push_back(std::move(mesh));
         }
 
         meshCache.emplace(meshIdx, std::move(primitives));
@@ -486,38 +463,66 @@ auto AssetManager::loadGLTF(const std::string& filename) -> std::shared_ptr<Rend
     };
 
     const auto& srcScene = model.defaultScene >= 0 ? model.scenes[model.defaultScene] : model.scenes[0];
-    scene->name = srcScene.name;
+    bp.name = !srcScene.name.empty() ? srcScene.name : filePath.stem().string();
 
-    // Single-pass traversal: build flat buffer and staged draw list together.
-    // processMesh is called at most once per unique GLTF mesh index.
-    std::function<void(int, const glm::mat4&)> processNode = [&](int nodeIdx, const glm::mat4& parentWorld) {
+    // Flatten the node tree into parent-indexed EntityBlueprints, preserving
+    // local TRS (decomposing only matrix-authored nodes).
+    std::function<void(int, int)> processNode = [&](int nodeIdx, int parentIndex) {
         const auto& srcNode = model.nodes[nodeIdx];
-        const glm::mat4 world = parentWorld * getLocalMatrix(srcNode);
-        if (srcNode.mesh >= 0) {
-            for (const auto& mesh : processMesh(srcNode.mesh)) {
-                scene->stagedMeshes.push_back(mesh);
-                scene->stagedMeshTransforms.push_back(world);
-            }
+        Vapor::EntityBlueprint e;
+        e.name = !srcNode.name.empty() ? srcNode.name : fmt::format("node_{}", nodeIdx);
+        e.parent = parentIndex;
+        if (!srcNode.matrix.empty()) {
+            const glm::mat4 m(
+                srcNode.matrix[0], srcNode.matrix[1], srcNode.matrix[2], srcNode.matrix[3],
+                srcNode.matrix[4], srcNode.matrix[5], srcNode.matrix[6], srcNode.matrix[7],
+                srcNode.matrix[8], srcNode.matrix[9], srcNode.matrix[10], srcNode.matrix[11],
+                srcNode.matrix[12], srcNode.matrix[13], srcNode.matrix[14], srcNode.matrix[15]
+            );
+            Vapor::decomposeTransform(m, e.position, e.rotation, e.scale);
+        } else {
+            if (!srcNode.translation.empty())
+                e.position = glm::vec3(srcNode.translation[0], srcNode.translation[1], srcNode.translation[2]);
+            if (!srcNode.rotation.empty())
+                e.rotation = glm::quat(
+                    static_cast<float>(srcNode.rotation[3]),
+                    static_cast<float>(srcNode.rotation[0]),
+                    static_cast<float>(srcNode.rotation[1]),
+                    static_cast<float>(srcNode.rotation[2])
+                );
+            if (!srcNode.scale.empty())
+                e.scale = glm::vec3(srcNode.scale[0], srcNode.scale[1], srcNode.scale[2]);
         }
+        if (srcNode.mesh >= 0) e.meshes = processMesh(srcNode.mesh);
+        if (srcNode.light >= 0 && srcNode.light < static_cast<int>(bp.lights.size()))
+            e.lights.push_back(srcNode.light);
+
+        const int selfIndex = static_cast<int>(bp.entities.size());
+        bp.entities.push_back(std::move(e));
         for (int childIdx : srcNode.children)
-            processNode(childIdx, world);
+            processNode(childIdx, selfIndex);
     };
 
     for (int nodeIdx : srcScene.nodes)
-        processNode(nodeIdx, glm::identity<glm::mat4>());
+        processNode(nodeIdx, -1);
 
-    // materials/images are referenced (by index) by processMesh above — move
-    // into scene only after the traversal is done with them.
-    scene->images = std::move(images);
-    scene->materials = std::move(materials);
-
+    bp.ok = true;
     fmt::print(
-        "Optimized scene: {} vertices, {} indices, {} draw calls\n",
-        scene->vertices.size(),
-        scene->indices.size(),
-        scene->stagedMeshes.size()
+        "loadGLTF '{}': {} entities, {} meshes, {} materials, {} lights\n",
+        filename,
+        bp.entities.size(),
+        bp.meshes.size(),
+        bp.materials.size(),
+        bp.lights.size()
     );
+    return bp;
+}
 
-    AssetSerializer::serializeScene(scene, scenePath.string());
-    return scene;
+auto AssetManager::loadModel(const std::string& filename) -> Vapor::SceneBlueprint {
+    std::filesystem::path p(filename);
+    const std::string ext = p.extension().string();
+    if (ext == ".gltf" || ext == ".glb") return loadGLTF(filename);
+    if (ext == ".usd" || ext == ".usda" || ext == ".usdc" || ext == ".usdz") return loadUSD(filename);
+    fmt::print("loadModel: unsupported model format '{}' ({})\n", ext, filename);
+    return {};
 }

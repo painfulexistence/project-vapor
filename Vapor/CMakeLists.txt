@@ -44,6 +44,7 @@ set(SOURCES
     src/file_system.cpp
     src/input_manager.cpp
     src/asset_manager.cpp
+    src/scene_blueprint.cpp
     src/asset_serializer.cpp
     src/camera.cpp
     src/debug_draw.cpp

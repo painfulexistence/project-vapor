@@ -57,7 +57,7 @@ jobs:
       - name: Build tests only
         run: |
           cmake --build build --config Release \
-            --target test_action_system test_ecs_transform test_fsm_system test_camera test_physics test_asset_management test_resource_manager test_backend_support test_ui_system test_file_system test_particle_system benchmark_example \
+            --target test_action_system test_ecs_transform test_fsm_system test_camera test_physics test_asset_management test_resource_manager test_backend_support test_ui_system test_file_system test_particle_system test_scene_blueprint benchmark_example \
             -- -j$(sysctl -n hw.logicalcpu)
 
       - name: Run tests

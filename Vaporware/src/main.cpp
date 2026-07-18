@@ -22,6 +22,7 @@
 #include "Vapor/stats_log.hpp"
 #include "Vapor/rng.hpp"
 #include "Vapor/render_scene.hpp"
+#include "Vapor/scene_blueprint.hpp"
 #include "Vapor/systems.hpp"
 #include <RmlUi/Core/ElementDocument.h>
 #include <entt/entt.hpp>
@@ -325,11 +326,14 @@ auto main(int argc, char* args[]) -> int {
     AtlasHandle demoAtlasHandle = resourceManager.registerAtlas("demo_sprite", std::move(demoAtlas));
 
     fmt::print("Loading scene asynchronously...\n");
+    // Declarative scene: scenes/main.json references the Sponza model via its
+    // "source" field; the blueprint loader expands it into a parent-indexed
+    // entity list plus the decoded mesh/material payload.
     auto sceneResource = resourceManager.loadScene(
-        std::string("models/Sponza/Sponza.gltf"),
+        std::string("scenes/main.json"),
         Vapor::LoadMode::Async,
-        [](std::shared_ptr<RenderScene> loadedScene) -> void {
-            fmt::print("Scene loaded with {} staged meshes\n", loadedScene->stagedMeshes.size());
+        [](std::shared_ptr<Vapor::SceneBlueprint> bp) -> void {
+            fmt::print("Scene blueprint loaded: {} entities, {} meshes\n", bp->entities.size(), bp->meshes.size());
         }
     );
     auto albedoResource =
@@ -341,9 +345,10 @@ auto main(int argc, char* args[]) -> int {
 
     // NOTES: optionally call resourceManager.waitForAll();
 
-    auto scene = sceneResource->get();
-    // Record how many meshes the GLTF scene contributes before buildScene adds more
-    const size_t sponzaMeshCount = scene->stagedMeshes.size();
+    auto sceneBlueprint = sceneResource->get();
+    // The RenderScene (world geometry pool) is the app's now that no importer
+    // fabricates one; instantiate() below fills it from the blueprint.
+    auto scene = std::make_shared<RenderScene>("main");
 
     auto material = std::make_shared<Vapor::Material>(Vapor::Material{
         .albedoMap = albedoResource->get(),
@@ -411,47 +416,28 @@ auto main(int argc, char* args[]) -> int {
     // Return (and zero-clear) particle slots when an emitter entity is destroyed.
     Vapor::ParticleEmitterSystem::attach(registry, renderer.get());
 
+    // Blueprint -> live entities: real hierarchy (local TRS + parent links)
+    // instead of the old flatten-then-decompose-world-matrices conversion.
+    // instantiate() also stages each mesh into the RenderScene pool once.
+    // The Khronos Sponza GLTF is authored in meters (~30m across) — its
+    // transforms are used as-is.
+    if (sceneBlueprint && sceneBlueprint->ok) {
+        std::vector<entt::entity> sceneEntities;
+        Vapor::instantiate(registry, *scene, *sceneBlueprint, entt::null, "", &sceneEntities);
+        for (auto e : sceneEntities)
+            registry.emplace<SceneGeometryTag>(e);// marks scene-spawned geometry for serializer
+    } else {
+        fmt::print(stderr, "Scene blueprint failed to load; continuing with the built-in scene only\n");
+    }
+
     auto [sceneBuilt, materialBuilt, cube1, global] =
         buildScene(registry, *physics, scene, material, windowWidth, windowHeight, rng);
 
     renderer->stage(scene);
 
-    // Convert GLTF scene meshes to ECS entities so they appear in the inspector
-    // and are rendered through the unified registry draw path.
-    for (size_t i = 0; i < sponzaMeshCount && i < scene->stagedMeshes.size(); ++i) {
-        auto& mesh = scene->stagedMeshes[i];
-        const glm::mat4& worldMat =
-            i < scene->stagedMeshTransforms.size() ? scene->stagedMeshTransforms[i] : glm::identity<glm::mat4>();
-
-        auto e = registry.create();
-        registry.emplace<Vapor::NameComponent>(e, Vapor::NameComponent{ fmt::format("Sponza_{}", i) });
-        auto& tc = registry.emplace<Vapor::TransformComponent>(e);
-        // Extract scale correctly from world matrix and scale down by 0.01 for Sponza
-        // The Khronos Sponza GLTF is authored in meters (~30m across) — use
-        // its world transforms as-is. (An earlier 0.01 scale shrank the whole
-        // scene to a 30cm dollhouse the camera flew straight past.)
-        tc.scale = glm::vec3(
-            glm::length(glm::vec3(worldMat[0])),
-            glm::length(glm::vec3(worldMat[1])),
-            glm::length(glm::vec3(worldMat[2]))
-        );
-        tc.position = glm::vec3(worldMat[3]);
-        if (tc.scale.x > 0.0f && tc.scale.y > 0.0f && tc.scale.z > 0.0f) {
-            glm::mat3 rotMat(
-                glm::vec3(worldMat[0]) / tc.scale.x,
-                glm::vec3(worldMat[1]) / tc.scale.y,
-                glm::vec3(worldMat[2]) / tc.scale.z
-            );
-            tc.rotation = glm::quat_cast(rotMat);
-        }
-        tc.isDirty = true; // Let TransformSystem compute the scaled world matrix
-        auto& mrc = registry.emplace<Vapor::MeshRendererComponent>(e);
-        mrc.meshes.push_back(mesh);
-        registry.emplace<SceneGeometryTag>(e);// marks GLTF-spawned geometry for serializer
-    }
-    // Clear stagedMeshes: GLTF meshes are now ECS entities; manually built
-    // meshes (cubes, floor) are already in MeshRendererComponent and were
-    // staged (materialID/instanceID set) so their mesh objects remain valid.
+    // Clear the staging list: everything just staged (blueprint + built-in
+    // geometry) has its renderMeshId/materialID assigned and lives on in
+    // MeshRendererComponents, so the mesh objects remain valid.
     scene->stagedMeshes.clear();
     scene->stagedMeshTransforms.clear();
 

@@ -27,10 +27,10 @@ namespace Vapor {
     // === Scene Loading ===
 
     auto ResourceManager::loadScene(
-        const std::string& path, LoadMode mode, std::function<void(std::shared_ptr<RenderScene>)> onComplete
-    ) -> std::shared_ptr<Resource<RenderScene>> {
+        const std::string& path, LoadMode mode, std::function<void(std::shared_ptr<Vapor::SceneBlueprint>)> onComplete
+    ) -> std::shared_ptr<Resource<Vapor::SceneBlueprint>> {
 
-        return loadResource<RenderScene>(
+        return loadResource<Vapor::SceneBlueprint>(
             path, m_sceneCache, [path]() -> auto { return loadSceneInternal(path); }, mode, onComplete
         );
     }
@@ -132,11 +132,16 @@ namespace Vapor {
         return AssetManager::loadImage(path);
     }
 
-    auto ResourceManager::loadSceneInternal(const std::string& path) -> std::shared_ptr<RenderScene> {
+    auto ResourceManager::loadSceneInternal(const std::string& path) -> std::shared_ptr<Vapor::SceneBlueprint> {
         ZoneScoped;
         ZoneName(path.c_str(), path.size());
 
-        return AssetManager::loadGLTF(path);
+        // Scene JSONs go through the blueprint loader (which expands source /
+        // prefab references); bare model paths import directly.
+        const bool isSceneJson = path.size() >= 5 && path.compare(path.size() - 5, 5, ".json") == 0;
+        return std::make_shared<Vapor::SceneBlueprint>(
+            isSceneJson ? Vapor::loadSceneBlueprint(path) : AssetManager::loadModel(path)
+        );
     }
 
     auto ResourceManager::loadMeshInternal(const std::string& path, const std::string& mtlBasedir)
@@ -231,8 +236,8 @@ namespace Vapor {
     template std::shared_ptr<Resource<Image>> ResourceManager::
         loadResource(const std::string&, ResourceCache<Image>&, std::function<std::shared_ptr<Image>()>, LoadMode, std::function<void(std::shared_ptr<Image>)>);
 
-    template std::shared_ptr<Resource<RenderScene>> ResourceManager::
-        loadResource(const std::string&, ResourceCache<RenderScene>&, std::function<std::shared_ptr<RenderScene>()>, LoadMode, std::function<void(std::shared_ptr<RenderScene>)>);
+    template std::shared_ptr<Resource<Vapor::SceneBlueprint>> ResourceManager::
+        loadResource(const std::string&, ResourceCache<Vapor::SceneBlueprint>&, std::function<std::shared_ptr<Vapor::SceneBlueprint>()>, LoadMode, std::function<void(std::shared_ptr<Vapor::SceneBlueprint>)>);
 
     template std::shared_ptr<Resource<Mesh>> ResourceManager::
         loadResource(const std::string&, ResourceCache<Mesh>&, std::function<std::shared_ptr<Mesh>()>, LoadMode, std::function<void(std::shared_ptr<Mesh>)>);
