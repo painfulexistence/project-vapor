@@ -211,7 +211,14 @@ kernel void computeMain(
         // (& 1023 keeps the float walk inside fract() precision.)
         RectLight rl = rectLights[rRect.candidate];
         float2 cp = random(tid.x * 9781u + tid.y * 6271u);
-        float2 uv0 = fract(cp + float(params.frameIndex & 1023u) * kR2);
+        // Per-pixel PHASE on the R2 walk (not just a per-pixel start offset):
+        // without it every pixel advances the quad sample by the same kR2 each
+        // frame, so a penumbra's frame-to-frame swing is spatially coherent and
+        // the accumulator's reset misfires as a sweeping band. Phase-shifting
+        // each pixel's frame index decorrelates neighbours — the swing averages
+        // out in the 3x3 mean and any residual is scattered grain, not a band.
+        uint phase = (tid.x * 113u + tid.y * 271u) & 1023u;
+        float2 uv0 = fract(cp + float((params.frameIndex + phase) & 1023u) * kR2);
         float2 uv1 = fract(uv0 + 0.5);
         rectVis = 0.5 * (traceVisibility(TLAS, surf.worldPos, worldNormal, restirRectPoint(rl, uv0)) +
                          traceVisibility(TLAS, surf.worldPos, worldNormal, restirRectPoint(rl, uv1)));

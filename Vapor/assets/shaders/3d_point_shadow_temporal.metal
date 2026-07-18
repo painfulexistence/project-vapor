@@ -59,16 +59,21 @@ kernel void computeMain(
     float3 history = clamp(hist.rgb, 0.0, 1.0);
     float histLen = clamp(hist.a, 0.0, 256.0);
 
-    // Reset the history length — springing alpha back up — when the reprojected
-    // sample left the screen (disocclusion) OR when the denoised current has
-    // moved away from history by more than the per-frame sampling noise, i.e.
-    // the shadow itself moved (a moving light/occluder). This reset IS the
-    // anti-ghost mechanism the variance clamp used to provide; it does NOT fire
-    // on per-ray noise because it compares against the 3x3 mean.
+    // History length reset — springs alpha back up so the accumulator drops
+    // stale history. Two triggers, deliberately asymmetric:
+    //   - Off-screen reproject = real disocclusion, unambiguous -> HARD reset.
+    //   - The denoised current (3x3 mean) departing from history = the shadow
+    //     may have moved, but a penumbra's coherent per-frame sampling swing
+    //     also trips it occasionally. A hard reset there flashes raw 0/1 current
+    //     as a bright noise band, so this trigger is CAPPED: it only partially
+    //     shortens history, nudging alpha up a little. A one-frame penumbra
+    //     spike becomes an imperceptible bump; a SUSTAINED real change keeps
+    //     shortening history each frame and still catches up within a few.
     bool onScreen = all(prevUV >= 0.0) && all(prevUV <= 1.0);
     float3 d = abs(mean - history);
     float changed = max(d.r, max(d.g, d.b));
-    float reset = onScreen ? saturate((changed - 0.25) / 0.20) : 1.0;
+    float valueReset = saturate((changed - 0.30) / 0.25) * 0.5;  // capped at 0.5
+    float reset = onScreen ? valueReset : 1.0;
     histLen *= (1.0 - reset);
 
     float alpha = max(1.0 / (histLen + 1.0), 0.04);  // floor: stay responsive
