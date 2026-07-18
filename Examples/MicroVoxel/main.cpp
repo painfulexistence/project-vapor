@@ -41,19 +41,54 @@
 
 namespace {
 
-struct FlyCamera {
-    glm::vec3 position { 1.0f, 10.0f, 15.0f };
-    float yaw = 0.0f;    // degrees; 0 = -Z forward
-    float pitch = 0.0f;  // degrees
-    float fov = glm::radians(60.0f);
-    float nearPlane = 0.05f;
-    float farPlane = 500.0f;
+// ECS fly-camera driver — the demo-local twin of Vaporware's CameraSystem
+// (game systems live in the app layer; the engine provides the components).
+// Same VirtualCamera/FlyCamera component semantics and integration math; the
+// one deliberate deviation is perspectiveZO, because the RHI's clip depth is
+// [0,1] on both backends and the MicroVoxel pass derives its written depth
+// from this projection.
+struct FlyCameraSystem {
+    static void update(entt::registry& reg, const Vapor::InputState& input, float deltaTime) {
+        auto view = reg.view<Vapor::VirtualCameraComponent, Vapor::FlyCameraComponent>();
+        for (auto entity : view) {
+            auto& cam = view.get<Vapor::VirtualCameraComponent>(entity);
+            auto& fly = view.get<Vapor::FlyCameraComponent>(entity);
+            if (!cam.isActive) continue;
 
-    glm::quat rotation() const {
-        return glm::quat(glm::vec3(glm::radians(pitch), glm::radians(yaw), 0.0f));
+            glm::vec2 look = input.getVector(Vapor::InputAction::LookLeft, Vapor::InputAction::LookRight,
+                                             Vapor::InputAction::LookDown, Vapor::InputAction::LookUp);
+            glm::vec2 move = input.getVector(Vapor::InputAction::StrafeLeft, Vapor::InputAction::StrafeRight,
+                                             Vapor::InputAction::MoveBackward, Vapor::InputAction::MoveForward);
+            float vertical = input.getAxis(Vapor::InputAction::MoveDown, Vapor::InputAction::MoveUp);
+            float moveSpeed = fly.moveSpeed * (input.isHeld(Vapor::InputAction::Sprint) ? 3.0f : 1.0f);
+
+            fly.pitch -= look.y * fly.rotateSpeed * deltaTime;
+            fly.yaw -= look.x * fly.rotateSpeed * deltaTime;
+            fly.pitch = glm::clamp(fly.pitch, -89.0f, 89.0f);
+
+            cam.rotation = glm::quat(glm::vec3(glm::radians(-fly.pitch), glm::radians(fly.yaw - 90.0f), 0.0f));
+            glm::vec3 front = cam.rotation * glm::vec3(0, 0, -1);
+            glm::vec3 right = cam.rotation * glm::vec3(1, 0, 0);
+            glm::vec3 up = cam.rotation * glm::vec3(0, 1, 0);
+            cam.position += move.x * right * moveSpeed * deltaTime;
+            cam.position += move.y * front * moveSpeed * deltaTime;
+            cam.position += vertical * up * moveSpeed * deltaTime;
+
+            glm::mat4 rotation = glm::mat4_cast(cam.rotation);
+            glm::mat4 translation = glm::translate(glm::mat4(1.0f), cam.position);
+            cam.viewMatrix = glm::inverse(translation * rotation);
+            cam.projectionMatrix = glm::perspectiveZO(cam.fov, cam.aspect, cam.near, cam.far);
+        }
     }
-    glm::vec3 forward() const { return rotation() * glm::vec3(0.0f, 0.0f, -1.0f); }
 };
+
+entt::entity getActiveCamera(entt::registry& reg) {
+    auto view = reg.view<Vapor::VirtualCameraComponent>();
+    for (auto entity : view) {
+        if (view.get<Vapor::VirtualCameraComponent>(entity).isActive) return entity;
+    }
+    return entt::null;
+}
 
 entt::entity spawnVolume(entt::registry& registry, const char* name, glm::vec3 position,
                          glm::ivec3 gridDim, float voxelSize, Uint32 seed, Uint32 brickCapacity) {
@@ -173,14 +208,22 @@ auto main(int argc, char* args[]) -> int {
         registry.emplace<Vapor::SkyComponent>(env);  // atmosphere sky + IBL rebake
     }
 
-    // Initial camera: matches the original (at (1, 10, 15), pitched down 16°,
-    // yawed to look across the dioramas toward -X).
-    FlyCamera camera;
-    camera.yaw = 90.0f;
-    camera.pitch = -16.0f;
-    if (bigWorld) {
-        camera.position = glm::vec3(0.0f, 18.0f, 30.0f);
-        camera.yaw = 0.0f;
+    // Camera entity: engine VirtualCamera + FlyCamera components, driven by
+    // the demo's FlyCameraSystem. Matches the original's start pose (at
+    // (1, 10, 15), pitched down 16°, yawed to look across the dioramas
+    // toward -X; FlyCameraComponent yaw 90 = -Z forward).
+    {
+        auto camEntity = registry.create();
+        registry.emplace<Vapor::NameComponent>(camEntity, Vapor::NameComponent { "Fly Camera" });
+        auto& cam = registry.emplace<Vapor::VirtualCameraComponent>(camEntity);
+        cam.isActive = true;
+        cam.aspect = (windowHeight > 0) ? float(windowWidth) / float(windowHeight) : 1.0f;
+        cam.position = bigWorld ? glm::vec3(0.0f, 18.0f, 30.0f) : glm::vec3(1.0f, 10.0f, 15.0f);
+        auto& fly = registry.emplace<Vapor::FlyCameraComponent>(camEntity);
+        fly.moveSpeed = 6.0f;
+        fly.rotateSpeed = 90.0f;
+        fly.yaw = bigWorld ? 90.0f : 180.0f;
+        fly.pitch = 16.0f;
     }
 
     fmt::print("MicroVoxel loaded. WASD move, R/F up/down, IJKL look, LShift sprint, Esc quit.\n");
@@ -279,41 +322,32 @@ auto main(int argc, char* args[]) -> int {
                     }
                     break;
                 }
-                case SDL_EVENT_WINDOW_RESIZED:
+                case SDL_EVENT_WINDOW_RESIZED: {
                     windowWidth = e.window.data1;
                     windowHeight = e.window.data2;
+                    auto camView = registry.view<Vapor::VirtualCameraComponent>();
+                    camView.each([&](auto& cam) {
+                        cam.aspect = (windowHeight > 0) ? float(windowWidth) / float(windowHeight) : 1.0f;
+                    });
                     break;
+                }
                 default:
                     break;
             }
         }
 
-        // ---- Fly camera ----------------------------------------------------
+        // ---- Gameplay systems ----------------------------------------------
         const auto& input = inputManager.getInputState();
-        {
-            glm::vec2 look = input.getVector(Vapor::InputAction::LookLeft, Vapor::InputAction::LookRight,
-                                             Vapor::InputAction::LookDown, Vapor::InputAction::LookUp);
-            glm::vec2 move = input.getVector(Vapor::InputAction::StrafeLeft, Vapor::InputAction::StrafeRight,
-                                             Vapor::InputAction::MoveBackward, Vapor::InputAction::MoveForward);
-            float vertical = input.getAxis(Vapor::InputAction::MoveDown, Vapor::InputAction::MoveUp);
-            const float lookSpeed = 90.0f;  // deg/s
-            float moveSpeed = input.isHeld(Vapor::InputAction::Sprint) ? 18.0f : 6.0f;
-
-            camera.yaw -= look.x * lookSpeed * deltaTime;
-            camera.pitch += look.y * lookSpeed * deltaTime;
-            camera.pitch = glm::clamp(camera.pitch, -89.0f, 89.0f);
-
-            const glm::quat rot = camera.rotation();
-            camera.position += (rot * glm::vec3(1, 0, 0)) * move.x * moveSpeed * deltaTime;
-            camera.position += (rot * glm::vec3(0, 0, -1)) * move.y * moveSpeed * deltaTime;
-            camera.position += glm::vec3(0, 1, 0) * vertical * moveSpeed * deltaTime;
-        }
+        FlyCameraSystem::update(registry, input, deltaTime);
 
         // Hold E to dig: carve a sphere of air at the first solid voxel along
         // the camera ray. No remeshing — the pass re-uploads only the touched
         // bricks, which is the whole point of the raymarch model.
-        if (input.isHeld(Vapor::InputAction::Interact)) {
-            Vapor::VoxelVolumeSystem::dig(registry, camera.position, camera.forward(),
+        entt::entity activeCam = getActiveCamera(registry);
+        if (activeCam != entt::null && input.isHeld(Vapor::InputAction::Interact)) {
+            const auto& cam = registry.get<Vapor::VirtualCameraComponent>(activeCam);
+            Vapor::VoxelVolumeSystem::dig(registry, cam.position,
+                                          cam.rotation * glm::vec3(0.0f, 0.0f, -1.0f),
                                           /*maxDist=*/60.0f, /*radius=*/0.45f);
         }
 
@@ -325,25 +359,21 @@ auto main(int argc, char* args[]) -> int {
         Vapor::VoxelVolumeSystem::update(registry, renderer.get());
 
         // ---- Render --------------------------------------------------------
+        if (activeCam == entt::null) continue;
+        const auto& cam = registry.get<Vapor::VirtualCameraComponent>(activeCam);
         Camera tempCamera;
-        const glm::quat rot = camera.rotation();
-        const glm::mat4 view = glm::inverse(glm::translate(glm::mat4(1.0f), camera.position) * glm::mat4_cast(rot));
-        // perspectiveZO: the RHI's clip-space depth is [0,1] on both backends —
-        // the MicroVoxel pass derives its written depth from this matrix.
-        const float aspect = (windowHeight > 0) ? float(windowWidth) / float(windowHeight) : 1.0f;
-        const glm::mat4 proj = glm::perspectiveZO(camera.fov, aspect, camera.nearPlane, camera.farPlane);
-        tempCamera.setEye(camera.position);
-        tempCamera.setViewMatrix(view);
-        tempCamera.setProjectionMatrix(proj);
+        tempCamera.setEye(cam.position);
+        tempCamera.setViewMatrix(cam.viewMatrix);
+        tempCamera.setProjectionMatrix(cam.projectionMatrix);
 
         CameraRenderData camData;
-        camData.proj = proj;
-        camData.view = view;
-        camData.invProj = glm::inverse(proj);
-        camData.invView = glm::inverse(view);
-        camData.nearPlane = camera.nearPlane;
-        camData.farPlane = camera.farPlane;
-        camData.position = camera.position;
+        camData.proj = cam.projectionMatrix;
+        camData.view = cam.viewMatrix;
+        camData.invProj = glm::inverse(cam.projectionMatrix);
+        camData.invView = glm::inverse(cam.viewMatrix);
+        camData.nearPlane = cam.near;
+        camData.farPlane = cam.far;
+        camData.position = cam.position;
 
         renderer->beginFrame(camData);
         ImGui::NewFrame();
