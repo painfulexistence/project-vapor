@@ -72,7 +72,14 @@ kernel void computeMain(
     bool onScreen = all(prevUV >= 0.0) && all(prevUV <= 1.0);
     float3 d = abs(mean - history);
     float changed = max(d.r, max(d.g, d.b));
-    float valueReset = saturate((changed - 0.30) / 0.25) * 0.5;  // capped at 0.5
+    // The value-reset cap is motion-adaptive: capped low (0.5) when static so a
+    // penumbra sampling spike can't flash a noise band, but opened toward a full
+    // reset under camera motion, where a ghost trail across silhouette
+    // disocclusions is worse than the transient noise a hard reset admits (the
+    // motion masks that noise, and it re-converges the moment you stop).
+    float pxMotion = length(velocity * screenSize);
+    float resetCap = mix(0.5, 1.0, saturate(pxMotion * 0.5));
+    float valueReset = saturate((changed - 0.30) / 0.25) * resetCap;
     float reset = onScreen ? valueReset : 1.0;
     histLen *= (1.0 - reset);
 
