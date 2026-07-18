@@ -203,12 +203,17 @@ VkBuffer RHI_Vulkan::stageData(const void* data, VkDeviceSize size, VkDeviceSize
 void RHI_Vulkan::submitUploads(bool waitForCompletion) {
     if (uploadCmd != VK_NULL_HANDLE) {
         // Make transfer writes visible to subsequent vertex/index/shader reads
-        VkMemoryBarrier barrier{};
-        barrier.sType = VK_STRUCTURE_TYPE_MEMORY_BARRIER;
-        barrier.srcAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
-        barrier.dstAccessMask = VK_ACCESS_MEMORY_READ_BIT | VK_ACCESS_MEMORY_WRITE_BIT;
-        vkCmdPipelineBarrier(uploadCmd, VK_PIPELINE_STAGE_TRANSFER_BIT,
-                             VK_PIPELINE_STAGE_ALL_COMMANDS_BIT, 0, 1, &barrier, 0, nullptr, 0, nullptr);
+        VkMemoryBarrier2 barrier{};
+        barrier.sType = VK_STRUCTURE_TYPE_MEMORY_BARRIER_2;
+        barrier.srcStageMask = VK_PIPELINE_STAGE_2_ALL_TRANSFER_BIT;
+        barrier.srcAccessMask = VK_ACCESS_2_TRANSFER_WRITE_BIT;
+        barrier.dstStageMask = VK_PIPELINE_STAGE_2_ALL_COMMANDS_BIT;
+        barrier.dstAccessMask = VK_ACCESS_2_MEMORY_READ_BIT | VK_ACCESS_2_MEMORY_WRITE_BIT;
+        VkDependencyInfo dep{};
+        dep.sType = VK_STRUCTURE_TYPE_DEPENDENCY_INFO;
+        dep.memoryBarrierCount = 1;
+        dep.pMemoryBarriers = &barrier;
+        vkCmdPipelineBarrier2KHR(uploadCmd, &dep);
         vkEndCommandBuffer(uploadCmd);
 
         VkFenceCreateInfo fenceInfo{};
@@ -216,11 +221,14 @@ void RHI_Vulkan::submitUploads(bool waitForCompletion) {
         VkFence fence;
         vkCreateFence(device, &fenceInfo, nullptr, &fence);
 
-        VkSubmitInfo submit{};
-        submit.sType = VK_STRUCTURE_TYPE_SUBMIT_INFO;
-        submit.commandBufferCount = 1;
-        submit.pCommandBuffers = &uploadCmd;
-        vkQueueSubmit(graphicsQueue, 1, &submit, fence);
+        VkCommandBufferSubmitInfo cmdInfo{};
+        cmdInfo.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_SUBMIT_INFO;
+        cmdInfo.commandBuffer = uploadCmd;
+        VkSubmitInfo2 submit{};
+        submit.sType = VK_STRUCTURE_TYPE_SUBMIT_INFO_2;
+        submit.commandBufferInfoCount = 1;
+        submit.pCommandBufferInfos = &cmdInfo;
+        vkQueueSubmit2KHR(graphicsQueue, 1, &submit, fence);
         pendingUploadFences.push_back(fence);
 
         // The one-time command buffer is retired with the fence wait below;
@@ -739,8 +747,8 @@ void RHI_Vulkan::transitionImage(VkImage image, VkImageLayout from, VkImageLayou
     if (from == to || currentCommandBuffer == VK_NULL_HANDLE) {
         return;
     }
-    VkImageMemoryBarrier barrier{};
-    barrier.sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER;
+    VkImageMemoryBarrier2 barrier{};
+    barrier.sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER_2;
     barrier.oldLayout = from;
     barrier.newLayout = to;
     barrier.srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
@@ -753,11 +761,15 @@ void RHI_Vulkan::transitionImage(VkImage image, VkImageLayout from, VkImageLayou
     barrier.subresourceRange.layerCount = VK_REMAINING_ARRAY_LAYERS;
     // Conservative full barrier — correctness first; refine when the render
     // graph learns resource dependencies.
-    barrier.srcAccessMask = VK_ACCESS_MEMORY_WRITE_BIT | VK_ACCESS_MEMORY_READ_BIT;
-    barrier.dstAccessMask = VK_ACCESS_MEMORY_WRITE_BIT | VK_ACCESS_MEMORY_READ_BIT;
-    vkCmdPipelineBarrier(currentCommandBuffer,
-                         VK_PIPELINE_STAGE_ALL_COMMANDS_BIT, VK_PIPELINE_STAGE_ALL_COMMANDS_BIT,
-                         0, 0, nullptr, 0, nullptr, 1, &barrier);
+    barrier.srcStageMask = VK_PIPELINE_STAGE_2_ALL_COMMANDS_BIT;
+    barrier.srcAccessMask = VK_ACCESS_2_MEMORY_WRITE_BIT | VK_ACCESS_2_MEMORY_READ_BIT;
+    barrier.dstStageMask = VK_PIPELINE_STAGE_2_ALL_COMMANDS_BIT;
+    barrier.dstAccessMask = VK_ACCESS_2_MEMORY_WRITE_BIT | VK_ACCESS_2_MEMORY_READ_BIT;
+    VkDependencyInfo dep{};
+    dep.sType = VK_STRUCTURE_TYPE_DEPENDENCY_INFO;
+    dep.imageMemoryBarrierCount = 1;
+    dep.pImageMemoryBarriers = &barrier;
+    vkCmdPipelineBarrier2KHR(currentCommandBuffer, &dep);
 }
 
 void RHI_Vulkan::shutdown() {
@@ -1074,8 +1086,8 @@ TextureHandle RHI_Vulkan::createTexture(const TextureDesc& desc) {
     // UNDEFINED (InvalidImageLayout at submit). A texture that IS written later
     // (updateTexture / render pass / compute) transitions from here normally.
     if (hasUsage(desc.usage, TextureUsage::Sampled)) {
-        VkImageMemoryBarrier barrier{};
-        barrier.sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER;
+        VkImageMemoryBarrier2 barrier{};
+        barrier.sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER_2;
         barrier.oldLayout = VK_IMAGE_LAYOUT_UNDEFINED;
         barrier.newLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
         barrier.srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
@@ -1087,11 +1099,17 @@ TextureHandle RHI_Vulkan::createTexture(const TextureDesc& desc) {
         barrier.subresourceRange.levelCount = VK_REMAINING_MIP_LEVELS;
         barrier.subresourceRange.baseArrayLayer = 0;
         barrier.subresourceRange.layerCount = VK_REMAINING_ARRAY_LAYERS;
-        barrier.srcAccessMask = 0;
-        barrier.dstAccessMask = VK_ACCESS_SHADER_READ_BIT;
-        vkCmdPipelineBarrier(ensureUploadCmd(), VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT,
-                             VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT,
-                             0, 0, nullptr, 0, nullptr, 1, &barrier);
+        // Fresh image: nothing to wait on (NONE is sync2's explicit spelling of
+        // the old TOP_OF_PIPE + no-access idiom for initial transitions).
+        barrier.srcStageMask = VK_PIPELINE_STAGE_2_NONE;
+        barrier.srcAccessMask = VK_ACCESS_2_NONE;
+        barrier.dstStageMask = VK_PIPELINE_STAGE_2_FRAGMENT_SHADER_BIT;
+        barrier.dstAccessMask = VK_ACCESS_2_SHADER_READ_BIT;
+        VkDependencyInfo dep{};
+        dep.sType = VK_STRUCTURE_TYPE_DEPENDENCY_INFO;
+        dep.imageMemoryBarrierCount = 1;
+        dep.pImageMemoryBarriers = &barrier;
+        vkCmdPipelineBarrier2KHR(ensureUploadCmd(), &dep);
         resource.currentLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
     }
 
@@ -1646,8 +1664,8 @@ void RHI_Vulkan::updateTexture(TextureHandle handle, const void* data, size_t si
     // (Layout is tracked per image, not per mip/layer — uploads are expected
     // to happen before the texture is sampled.)
     if (tex.currentLayout != VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL) {
-        VkImageMemoryBarrier barrier{};
-        barrier.sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER;
+        VkImageMemoryBarrier2 barrier{};
+        barrier.sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER_2;
         barrier.oldLayout = tex.currentLayout;
         barrier.newLayout = VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL;
         barrier.srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
@@ -1658,10 +1676,15 @@ void RHI_Vulkan::updateTexture(TextureHandle handle, const void* data, size_t si
         barrier.subresourceRange.levelCount = VK_REMAINING_MIP_LEVELS;
         barrier.subresourceRange.baseArrayLayer = 0;
         barrier.subresourceRange.layerCount = VK_REMAINING_ARRAY_LAYERS;
-        barrier.srcAccessMask = VK_ACCESS_MEMORY_WRITE_BIT | VK_ACCESS_MEMORY_READ_BIT;
-        barrier.dstAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
-        vkCmdPipelineBarrier(cmd, VK_PIPELINE_STAGE_ALL_COMMANDS_BIT, VK_PIPELINE_STAGE_TRANSFER_BIT,
-                             0, 0, nullptr, 0, nullptr, 1, &barrier);
+        barrier.srcStageMask = VK_PIPELINE_STAGE_2_ALL_COMMANDS_BIT;
+        barrier.srcAccessMask = VK_ACCESS_2_MEMORY_WRITE_BIT | VK_ACCESS_2_MEMORY_READ_BIT;
+        barrier.dstStageMask = VK_PIPELINE_STAGE_2_COPY_BIT;  // sync2's precise copy stage
+        barrier.dstAccessMask = VK_ACCESS_2_TRANSFER_WRITE_BIT;
+        VkDependencyInfo dep{};
+        dep.sType = VK_STRUCTURE_TYPE_DEPENDENCY_INFO;
+        dep.imageMemoryBarrierCount = 1;
+        dep.pImageMemoryBarriers = &barrier;
+        vkCmdPipelineBarrier2KHR(cmd, &dep);
         tex.currentLayout = VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL;
     }
 
@@ -1679,8 +1702,8 @@ void RHI_Vulkan::updateTexture(TextureHandle handle, const void* data, size_t si
                            VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 1, &region);
 
     // Leave the image shader-readable; further uploads transition back
-    VkImageMemoryBarrier toRead{};
-    toRead.sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER;
+    VkImageMemoryBarrier2 toRead{};
+    toRead.sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER_2;
     toRead.oldLayout = VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL;
     toRead.newLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
     toRead.srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
@@ -1691,10 +1714,15 @@ void RHI_Vulkan::updateTexture(TextureHandle handle, const void* data, size_t si
     toRead.subresourceRange.levelCount = VK_REMAINING_MIP_LEVELS;
     toRead.subresourceRange.baseArrayLayer = 0;
     toRead.subresourceRange.layerCount = VK_REMAINING_ARRAY_LAYERS;
-    toRead.srcAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
-    toRead.dstAccessMask = VK_ACCESS_SHADER_READ_BIT;
-    vkCmdPipelineBarrier(cmd, VK_PIPELINE_STAGE_TRANSFER_BIT, VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT,
-                         0, 0, nullptr, 0, nullptr, 1, &toRead);
+    toRead.srcStageMask = VK_PIPELINE_STAGE_2_COPY_BIT;
+    toRead.srcAccessMask = VK_ACCESS_2_TRANSFER_WRITE_BIT;
+    toRead.dstStageMask = VK_PIPELINE_STAGE_2_FRAGMENT_SHADER_BIT;
+    toRead.dstAccessMask = VK_ACCESS_2_SHADER_READ_BIT;
+    VkDependencyInfo toReadDep{};
+    toReadDep.sType = VK_STRUCTURE_TYPE_DEPENDENCY_INFO;
+    toReadDep.imageMemoryBarrierCount = 1;
+    toReadDep.pImageMemoryBarriers = &toRead;
+    vkCmdPipelineBarrier2KHR(cmd, &toReadDep);
     tex.currentLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
 }
 
@@ -1714,11 +1742,18 @@ void RHI_Vulkan::generateMipmaps(TextureHandle handle) {
 
     VkCommandBuffer cmd = ensureUploadCmd();
 
+    // sync2 pairs stage + access per barrier, so each transition can scope
+    // precisely (BLIT for the blit chain, FRAGMENT_SHADER for the final
+    // shader-read handoff). The old sync1 version had to widen both stages to
+    // ALL_COMMANDS because TRANSFER could not legally pair with SHADER_READ
+    // (VUID-vkCmdPipelineBarrier-dstAccessMask-02816) — that workaround is
+    // exactly what synchronization2 exists to remove.
     auto subresourceBarrier = [&](Uint32 baseMip, Uint32 levelCount,
                                   VkImageLayout from, VkImageLayout to,
-                                  VkAccessFlags srcAccess, VkAccessFlags dstAccess) {
-        VkImageMemoryBarrier b{};
-        b.sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER;
+                                  VkPipelineStageFlags2 srcStage, VkAccessFlags2 srcAccess,
+                                  VkPipelineStageFlags2 dstStage, VkAccessFlags2 dstAccess) {
+        VkImageMemoryBarrier2 b{};
+        b.sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER_2;
         b.oldLayout = from;
         b.newLayout = to;
         b.srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
@@ -1729,22 +1764,24 @@ void RHI_Vulkan::generateMipmaps(TextureHandle handle) {
         b.subresourceRange.levelCount = levelCount;
         b.subresourceRange.baseArrayLayer = 0;
         b.subresourceRange.layerCount = VK_REMAINING_ARRAY_LAYERS;
+        b.srcStageMask = srcStage;
         b.srcAccessMask = srcAccess;
+        b.dstStageMask = dstStage;
         b.dstAccessMask = dstAccess;
-        // dstStage = ALL_COMMANDS (not TRANSFER): the final barriers transition
-        // to SHADER_READ_ONLY with dstAccessMask = SHADER_READ, which the
-        // TRANSFER stage does not support (VUID-vkCmdPipelineBarrier-dstAccessMask-02816).
-        // ALL_COMMANDS is valid for both the transfer and shader-read access
-        // masks; this is an upload-time op, so the conservative scope is fine.
-        vkCmdPipelineBarrier(cmd, VK_PIPELINE_STAGE_ALL_COMMANDS_BIT, VK_PIPELINE_STAGE_ALL_COMMANDS_BIT,
-                             0, 0, nullptr, 0, nullptr, 1, &b);
+        VkDependencyInfo dep{};
+        dep.sType = VK_STRUCTURE_TYPE_DEPENDENCY_INFO;
+        dep.imageMemoryBarrierCount = 1;
+        dep.pImageMemoryBarriers = &b;
+        vkCmdPipelineBarrier2KHR(cmd, &dep);
     };
 
     // Whole image -> TRANSFER_DST as the baseline
     subresourceBarrier(0, VK_REMAINING_MIP_LEVELS, tex.currentLayout,
                        VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
-                       VK_ACCESS_MEMORY_WRITE_BIT | VK_ACCESS_MEMORY_READ_BIT,
-                       VK_ACCESS_TRANSFER_WRITE_BIT);
+                       VK_PIPELINE_STAGE_2_ALL_COMMANDS_BIT,
+                       VK_ACCESS_2_MEMORY_WRITE_BIT | VK_ACCESS_2_MEMORY_READ_BIT,
+                       VK_PIPELINE_STAGE_2_BLIT_BIT,
+                       VK_ACCESS_2_TRANSFER_WRITE_BIT);
 
     int32_t srcW = static_cast<int32_t>(tex.width);
     int32_t srcH = static_cast<int32_t>(tex.height);
@@ -1752,7 +1789,8 @@ void RHI_Vulkan::generateMipmaps(TextureHandle handle) {
         // Source level: DST -> SRC
         subresourceBarrier(mip - 1, 1, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
                            VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
-                           VK_ACCESS_TRANSFER_WRITE_BIT, VK_ACCESS_TRANSFER_READ_BIT);
+                           VK_PIPELINE_STAGE_2_BLIT_BIT, VK_ACCESS_2_TRANSFER_WRITE_BIT,
+                           VK_PIPELINE_STAGE_2_BLIT_BIT, VK_ACCESS_2_TRANSFER_READ_BIT);
 
         int32_t dstW = std::max(1, srcW / 2);
         int32_t dstH = std::max(1, srcH / 2);
@@ -1768,13 +1806,19 @@ void RHI_Vulkan::generateMipmaps(TextureHandle handle) {
         srcH = dstH;
     }
 
-    // All levels -> SHADER_READ (levels 0..N-2 are in SRC, last is in DST)
+    // All levels -> SHADER_READ (levels 0..N-2 are in SRC, last is in DST).
+    // dst = fragment + compute: mip chains are sampled by both (e.g. the RT
+    // kernels sample prefilterMap; the PBR fragment samples shadowRT mips).
+    constexpr VkPipelineStageFlags2 kShaderSampleStages =
+        VK_PIPELINE_STAGE_2_FRAGMENT_SHADER_BIT | VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT;
     subresourceBarrier(0, mipLevels - 1, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
                        VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
-                       VK_ACCESS_TRANSFER_READ_BIT, VK_ACCESS_SHADER_READ_BIT);
+                       VK_PIPELINE_STAGE_2_BLIT_BIT, VK_ACCESS_2_TRANSFER_READ_BIT,
+                       kShaderSampleStages, VK_ACCESS_2_SHADER_READ_BIT);
     subresourceBarrier(mipLevels - 1, 1, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
                        VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
-                       VK_ACCESS_TRANSFER_WRITE_BIT, VK_ACCESS_SHADER_READ_BIT);
+                       VK_PIPELINE_STAGE_2_BLIT_BIT, VK_ACCESS_2_TRANSFER_WRITE_BIT,
+                       kShaderSampleStages, VK_ACCESS_2_SHADER_READ_BIT);
     tex.currentLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
 }
 
@@ -2043,22 +2087,35 @@ void RHI_Vulkan::endFrame() {
     // beginFrame, so the current frame sampled them in UNDEFINED layout.
     submitUploads(false);
 
-    VkSubmitInfo submitInfo{};
-    submitInfo.sType = VK_STRUCTURE_TYPE_SUBMIT_INFO;
+    // sync2 submit: the wait/signal stage masks ride on the semaphore infos.
+    // Wait at COLOR_ATTACHMENT_OUTPUT so vertex/compute work overlaps the
+    // acquire; signal at ALL_COMMANDS (the semaphore gates present, which
+    // needs the whole submission).
+    VkSemaphoreSubmitInfo waitInfo{};
+    waitInfo.sType = VK_STRUCTURE_TYPE_SEMAPHORE_SUBMIT_INFO;
+    waitInfo.semaphore = imageAvailableSemaphores[currentFrameInFlight];
+    waitInfo.stageMask = VK_PIPELINE_STAGE_2_COLOR_ATTACHMENT_OUTPUT_BIT;
 
-    VkSemaphore waitSemaphores[] = {imageAvailableSemaphores[currentFrameInFlight]};
-    VkPipelineStageFlags waitStages[] = {VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT};
-    submitInfo.waitSemaphoreCount = 1;
-    submitInfo.pWaitSemaphores = waitSemaphores;
-    submitInfo.pWaitDstStageMask = waitStages;
-    submitInfo.commandBufferCount = 1;
-    submitInfo.pCommandBuffers = &currentCommandBuffer;
+    VkCommandBufferSubmitInfo cmdInfo{};
+    cmdInfo.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_SUBMIT_INFO;
+    cmdInfo.commandBuffer = currentCommandBuffer;
 
     VkSemaphore signalSemaphores[] = {renderFinishedSemaphores[currentSwapchainImageIndex]};
-    submitInfo.signalSemaphoreCount = 1;
-    submitInfo.pSignalSemaphores = signalSemaphores;
+    VkSemaphoreSubmitInfo signalInfo{};
+    signalInfo.sType = VK_STRUCTURE_TYPE_SEMAPHORE_SUBMIT_INFO;
+    signalInfo.semaphore = signalSemaphores[0];
+    signalInfo.stageMask = VK_PIPELINE_STAGE_2_ALL_COMMANDS_BIT;
 
-    vkQueueSubmit(graphicsQueue, 1, &submitInfo, inFlightFences[currentFrameInFlight]);
+    VkSubmitInfo2 submitInfo{};
+    submitInfo.sType = VK_STRUCTURE_TYPE_SUBMIT_INFO_2;
+    submitInfo.waitSemaphoreInfoCount = 1;
+    submitInfo.pWaitSemaphoreInfos = &waitInfo;
+    submitInfo.commandBufferInfoCount = 1;
+    submitInfo.pCommandBufferInfos = &cmdInfo;
+    submitInfo.signalSemaphoreInfoCount = 1;
+    submitInfo.pSignalSemaphoreInfos = &signalInfo;
+
+    vkQueueSubmit2KHR(graphicsQueue, 1, &submitInfo, inFlightFences[currentFrameInFlight]);
 
     VkPresentInfoKHR presentInfo{};
     presentInfo.sType = VK_STRUCTURE_TYPE_PRESENT_INFO_KHR;
@@ -2901,6 +2958,15 @@ void RHI_Vulkan::createLogicalDevice() {
         throw std::runtime_error("Failed to load dynamic rendering extension functions");
     }
 
+    // synchronization2 is a required device feature (device creation enables it
+    // unconditionally), so these must resolve — hard-fail like dynamic rendering.
+    vkCmdPipelineBarrier2KHR = (PFN_vkCmdPipelineBarrier2KHR)vkGetDeviceProcAddr(device, "vkCmdPipelineBarrier2KHR");
+    vkQueueSubmit2KHR = (PFN_vkQueueSubmit2KHR)vkGetDeviceProcAddr(device, "vkQueueSubmit2KHR");
+
+    if (!vkCmdPipelineBarrier2KHR || !vkQueueSubmit2KHR) {
+        throw std::runtime_error("Failed to load synchronization2 extension functions");
+    }
+
     if (meshShadersEnabled) {
         pfnCmdDrawMeshTasks = (PFN_vkCmdDrawMeshTasksEXT)vkGetDeviceProcAddr(device, "vkCmdDrawMeshTasksEXT");
         capabilities.meshShaders = pfnCmdDrawMeshTasks != nullptr;
@@ -3546,19 +3612,22 @@ void RHI_Vulkan::setScissor(int32_t x, int32_t y, Uint32 width, Uint32 height) {
 
 void RHI_Vulkan::computeBarrier() {
     if (currentCommandBuffer == VK_NULL_HANDLE) return;
-    VkMemoryBarrier b{};
-    b.sType = VK_STRUCTURE_TYPE_MEMORY_BARRIER;
-    b.srcAccessMask = VK_ACCESS_SHADER_WRITE_BIT;
+    VkMemoryBarrier2 b{};
+    b.sType = VK_STRUCTURE_TYPE_MEMORY_BARRIER_2;
+    b.srcStageMask = VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT;
+    b.srcAccessMask = VK_ACCESS_2_SHADER_WRITE_BIT;
     // SHADER_READ/WRITE for compute/vertex/fragment consumers, plus
     // INDIRECT_COMMAND_READ so a GPU-driven cull pass that writes an indirect
     // args buffer is visible to a following drawIndexedIndirect.
-    b.dstAccessMask = VK_ACCESS_SHADER_READ_BIT | VK_ACCESS_SHADER_WRITE_BIT |
-                      VK_ACCESS_INDIRECT_COMMAND_READ_BIT;
-    vkCmdPipelineBarrier(currentCommandBuffer,
-        VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
-        VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT | VK_PIPELINE_STAGE_VERTEX_SHADER_BIT |
-            VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT | VK_PIPELINE_STAGE_DRAW_INDIRECT_BIT,
-        0, 1, &b, 0, nullptr, 0, nullptr);
+    b.dstStageMask = VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT | VK_PIPELINE_STAGE_2_VERTEX_SHADER_BIT |
+                     VK_PIPELINE_STAGE_2_FRAGMENT_SHADER_BIT | VK_PIPELINE_STAGE_2_DRAW_INDIRECT_BIT;
+    b.dstAccessMask = VK_ACCESS_2_SHADER_READ_BIT | VK_ACCESS_2_SHADER_WRITE_BIT |
+                      VK_ACCESS_2_INDIRECT_COMMAND_READ_BIT;
+    VkDependencyInfo dep{};
+    dep.sType = VK_STRUCTURE_TYPE_DEPENDENCY_INFO;
+    dep.memoryBarrierCount = 1;
+    dep.pMemoryBarriers = &b;
+    vkCmdPipelineBarrier2KHR(currentCommandBuffer, &dep);
 }
 
 // ============================================================================

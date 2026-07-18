@@ -293,6 +293,12 @@ private:
     // Dynamic rendering extension functions
     PFN_vkCmdBeginRenderingKHR vkCmdBeginRenderingKHR = nullptr;
     PFN_vkCmdEndRenderingKHR vkCmdEndRenderingKHR = nullptr;
+    // synchronization2 entry points, loaded through the same KHR-suffixed
+    // vkGetDeviceProcAddr path as dynamic rendering: on drivers that only
+    // report 1.2 (MoltenVK) these come from VK_KHR_synchronization2 rather
+    // than core, and the KHR alias resolves in both cases.
+    PFN_vkCmdPipelineBarrier2KHR vkCmdPipelineBarrier2KHR = nullptr;
+    PFN_vkQueueSubmit2KHR vkQueueSubmit2KHR = nullptr;
 
     // ========================================================================
     // Descriptor Binding Model
