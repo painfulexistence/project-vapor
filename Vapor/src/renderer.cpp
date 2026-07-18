@@ -2721,9 +2721,11 @@ void Renderer::stochasticPointShadowPass() {
 //   3) 3d_point_shadow_upsample — joint bilateral upsample -> pointShadowRT
 // The winner's traced visibility estimates the contribution-weighted shadow
 // factor per domain; the existing full-res PointShadowTemporal accumulator and
-// PointShadowDenoise filter stay as the final averager. Ray budget: <= 6 per
-// HALF pixel (1 point + 1 spot + 4 stratified rect quad points) = ~1.5 rays
-// per full-res pixel; the legacy full-res kernel spends up to 4.
+// PointShadowDenoise filter stay as the final averager. Ray budget: <= 4 per
+// HALF pixel (1 point + 1 spot + 2 stratified rect quad points) = ~1 ray
+// per full-res pixel; the legacy full-res kernel spends up to 4. (Rect has no
+// distance cull — matching the PBR's global rect loop — so it traces on every
+// forward-facing pixel; keeping it to 2 rays is what bounds the pass cost.)
 // Returns false (without recording) if the reservoirs can't be allocated, so
 // the caller falls back to the legacy kernel.
 bool Renderer::restirShadowPass() {

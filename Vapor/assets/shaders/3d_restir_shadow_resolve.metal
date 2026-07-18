@@ -14,12 +14,12 @@ using raytracing::instance_acceleration_structure;
 // by 3d_point_shadow_upsample.metal before the temporal accumulator).
 //
 // HALF-RES: same fp = tid*2 mapping as the temporal kernel — G-buffer reads
-// at fp, reservoir grid and shadow writes on the half grid. The 4x ray/eval
-// saving is partly reinvested: the rect winner gets FOUR quad-point rays per
-// half-pixel (a per-frame 2x2 stratum riding a per-pixel R2 walk — fresh
-// every frame, never reservoir-frozen; see restir_shadow_common.metal), so
-// penumbra variance is halved vs the old full-res 2-ray version while the
-// total cost is still ~1.5 rays per full-res pixel (legacy cap: 4). The
+// at fp, reservoir grid and shadow writes on the half grid. Ray budget per
+// half-pixel: 1 point + 2 rect + 1 spot = up to 4, i.e. ~1 ray per full-res
+// pixel (legacy full-res cap: 4). The rect winner's 2 quad-point rays ride a
+// per-pixel R2 walk (fresh every frame, never reservoir-frozen; see
+// restir_shadow_common.metal); the temporal accumulator + denoise integrate
+// the walk across frames, so 2/frame converge on the coverage fraction. The
 // post-spatial reservoirs become next frame's temporal history.
 
 // Plastic-constant (R2) low-discrepancy increment for the rect quad walk.
@@ -198,22 +198,23 @@ kernel void computeMain(
     }
     float rectVis = 1.0;
     if (rRect.pdf > 0.0 && tlasValid) {
-        // Four quad points per frame, stratified in space AND time: a static
+        // Two quad points per frame, stratified in space AND time: a static
         // per-pixel Cranley-Patterson rotation + an R2 walk over the frame
-        // index gives the base point, and the other three fill the remaining
-        // 2x2 strata (half-quad offsets). Independent random points would
-        // leave the accumulator's EMA a variance floor of alpha/(2-alpha)
-        // forever; the stratified walk covers the quad evenly inside the EMA
-        // window, so the accumulated mean actually converges on the coverage
-        // fraction. (& 1023 keeps the float walk inside fract() precision —
-        // a 1024-frame stratification cycle.)
+        // index gives the base point, the second tap is antithetic (half-quad
+        // offset). Independent random points would leave the accumulator's EMA
+        // a variance floor of alpha/(2-alpha) forever; the stratified walk
+        // covers the quad evenly ACROSS FRAMES (the temporal accumulator +
+        // 5x5 denoise integrate it), so 2 rays/frame converge on the coverage
+        // fraction — the extra 2 rays the full-res version spent are redundant
+        // with the temporal walk and were the pass's single biggest cost (rect
+        // has no distance cull; it traces on every forward-facing pixel).
+        // (& 1023 keeps the float walk inside fract() precision.)
         RectLight rl = rectLights[rRect.candidate];
         float2 cp = random(tid.x * 9781u + tid.y * 6271u);
         float2 uv0 = fract(cp + float(params.frameIndex & 1023u) * kR2);
-        rectVis = 0.25 * (traceVisibility(TLAS, surf.worldPos, worldNormal, restirRectPoint(rl, uv0)) +
-                          traceVisibility(TLAS, surf.worldPos, worldNormal, restirRectPoint(rl, fract(uv0 + float2(0.5, 0.0)))) +
-                          traceVisibility(TLAS, surf.worldPos, worldNormal, restirRectPoint(rl, fract(uv0 + float2(0.0, 0.5)))) +
-                          traceVisibility(TLAS, surf.worldPos, worldNormal, restirRectPoint(rl, fract(uv0 + float2(0.5, 0.5)))));
+        float2 uv1 = fract(uv0 + 0.5);
+        rectVis = 0.5 * (traceVisibility(TLAS, surf.worldPos, worldNormal, restirRectPoint(rl, uv0)) +
+                         traceVisibility(TLAS, surf.worldPos, worldNormal, restirRectPoint(rl, uv1)));
     }
     float spotVis = 1.0;
     if (rSpot.pdf > 0.0 && tlasValid) {
