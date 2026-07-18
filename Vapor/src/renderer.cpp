@@ -6672,7 +6672,7 @@ std::unique_ptr<IRenderer> createRenderer(GraphicsBackend backend, SDL_Window* w
 // Scene/ECS Integration
 // ============================================================================
 
-void Renderer::stage(std::shared_ptr<Scene> scene) {
+void Renderer::stage(std::shared_ptr<RenderScene> scene) {
     if (!scene) return;
     currentScene = scene;  // for the ImGui Scene Materials/Lights editors
 
@@ -6743,7 +6743,7 @@ void Renderer::stage(std::shared_ptr<Scene> scene) {
     fmt::print("Scene staged with {} meshes\n", scene->stagedMeshes.size());
 }
 
-void Renderer::draw(std::shared_ptr<Scene> scene, Camera& camera) {
+void Renderer::draw(std::shared_ptr<RenderScene> scene, Camera& camera) {
     if (!scene) return;
 
     currentCamera.proj = camera.getProjMatrix();
@@ -6763,7 +6763,7 @@ void Renderer::draw(std::shared_ptr<Scene> scene, Camera& camera) {
     render();
 }
 
-void Renderer::draw(entt::registry& registry, std::shared_ptr<Scene> scene, Camera& camera) {
+void Renderer::draw(entt::registry& registry, std::shared_ptr<RenderScene> scene, Camera& camera) {
     if (!scene) return;
     lastDrawRegistry = &registry;  // renderToTexture collects through this
 
@@ -6785,7 +6785,7 @@ void Renderer::draw(entt::registry& registry, std::shared_ptr<Scene> scene, Came
     render();
 }
 
-void Renderer::submitSceneLights(const std::shared_ptr<Scene>& scene) {
+void Renderer::submitSceneLights(const std::shared_ptr<RenderScene>& scene) {
     if (!scene) {
         return;
     }
@@ -6814,13 +6814,13 @@ void Renderer::submitSceneLights(const std::shared_ptr<Scene>& scene) {
     }
 }
 
-// Non-ECS collection is intentionally a no-op: the scene-node tree is headed
-// for retirement — game objects live in the ECS, and every collector should go
+// Non-ECS collection is intentionally a no-op: the scene-node tree has been
+// retired — game objects live in the ECS, and every collector should go
 // through the registry overload below (renderToTexture uses lastDrawRegistry).
-void Renderer::collectDrawables(std::shared_ptr<Scene> scene) {
+void Renderer::collectDrawables(std::shared_ptr<RenderScene> scene) {
 }
 
-void Renderer::collectDrawables(entt::registry& registry, std::shared_ptr<Scene> scene) {
+void Renderer::collectDrawables(entt::registry& registry, std::shared_ptr<RenderScene> scene) {
     // Collect renderables from ECS
     auto view = registry.view<Vapor::TransformComponent, Vapor::MeshRendererComponent>();
 
@@ -8314,7 +8314,7 @@ TextureHandle Renderer::getRenderTextureAsTexture(RenderTextureHandle handle) {
 
 void Renderer::renderToTexture(
     RenderTextureHandle target,
-    std::shared_ptr<Scene> scene,
+    std::shared_ptr<RenderScene> scene,
     Camera& camera,
     const glm::vec4& clearColor
 ) {

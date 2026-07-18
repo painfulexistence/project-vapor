@@ -354,7 +354,7 @@ public:
     void deinit();
     void shutdown() override { deinit(); }
 
-    virtual void stage(std::shared_ptr<Scene> scene) override;
+    virtual void stage(std::shared_ptr<RenderScene> scene) override;
 
     // Frame model matching IRenderer / the RHI renderer:
     //   beginFrame()  → acquire drawable + command buffer, backend ImGui NewFrame
@@ -367,8 +367,8 @@ public:
     void invokeImGuiCallback() override;
     void endFrame() override;
 
-    virtual void draw(std::shared_ptr<Scene> scene, Camera& camera) override;
-    virtual void draw(entt::registry& registry, std::shared_ptr<Scene> scene, Camera& camera) override;
+    virtual void draw(std::shared_ptr<RenderScene> scene, Camera& camera) override;
+    virtual void draw(entt::registry& registry, std::shared_ptr<RenderScene> scene, Camera& camera) override;
 
     virtual void readPixelsAsync(ScreenshotCallback callback) override;
     void uploadRectLightVideoTexture(const uint8_t* rgba, uint32_t width, uint32_t height) override;
@@ -481,7 +481,7 @@ public:
     TextureHandle getRenderTextureAsTexture(RenderTextureHandle handle) override;
     void renderToTexture(
         RenderTextureHandle target,
-        std::shared_ptr<Scene> scene,
+        std::shared_ptr<RenderScene> scene,
         Camera& camera,
         const glm::vec4& clearColor = glm::vec4(0.0f, 0.0f, 0.0f, 1.0f)
     ) override;
@@ -568,7 +568,7 @@ protected:
 
     // Per-frame rendering context
     MTL::CommandBuffer* currentCommandBuffer = nullptr;
-    std::shared_ptr<Scene> currentScene;
+    std::shared_ptr<RenderScene> currentScene;
     Camera* currentCamera = nullptr;
     CA::MetalDrawable* currentDrawable = nullptr;
 

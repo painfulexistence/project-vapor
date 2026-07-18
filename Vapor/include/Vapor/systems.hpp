@@ -6,7 +6,7 @@
 #include "physics_3d.hpp"
 #include "render_data.hpp"
 #include "renderer.hpp"
-#include "scene.hpp"
+#include "render_scene.hpp"
 #include "voxel_world.hpp"
 #include <entt/entt.hpp>
 #include <cmath>
@@ -283,7 +283,7 @@ namespace Vapor {
     // the atmosphere/sky and shadow paths treat as the authoritative sun.
     class LightGatherSystem {
     public:
-        static void update(entt::registry& reg, Scene* scene) {
+        static void update(entt::registry& reg, RenderScene* scene) {
             if (!scene) return;
 
             // Point lights: position from the transform.

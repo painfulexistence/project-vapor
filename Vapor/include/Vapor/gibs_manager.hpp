@@ -1,7 +1,7 @@
 #pragma once
 #include "graphics.hpp"
 #include "graphics_gibs.hpp"  // Surfel, SurfelCell, GIBSData, GIBSQuality (branch graphics.hpp is a monolith, not an umbrella)
-#include "scene.hpp"
+#include "render_scene.hpp"
 #include <Metal/Metal.hpp>
 #include <memory>
 #include <vector>
@@ -40,7 +40,7 @@ public:
 
     // Scene management
     void setWorldBounds(const glm::vec3& min, const glm::vec3& max);
-    void onSceneLoaded(std::shared_ptr<Scene> scene);
+    void onSceneLoaded(std::shared_ptr<RenderScene> scene);
 
     // Quality settings
     void setQuality(GIBSQuality quality);

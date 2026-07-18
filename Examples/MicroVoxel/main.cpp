@@ -24,7 +24,7 @@
 #include "Vapor/input_manager.hpp"
 #include "Vapor/irenderer.hpp"
 #include "Vapor/renderer.hpp"
-#include "Vapor/scene.hpp"
+#include "Vapor/render_scene.hpp"
 #include "Vapor/systems.hpp"
 #include "Vapor/voxel_world.hpp"
 
@@ -127,8 +127,8 @@ auto main(int argc, char* args[]) -> int {
     }
 
     // Empty scene: everything visible is raymarched, but draw()/light gather
-    // still route through the Scene object.
-    auto scene = std::make_shared<Scene>();
+    // still route through the RenderScene object.
+    auto scene = std::make_shared<RenderScene>("microvoxel");
     renderer->stage(scene);
 
     entt::registry registry;

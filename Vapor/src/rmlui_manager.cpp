@@ -9,6 +9,22 @@
 
 namespace Vapor {
 
+    bool loadDefaultFontFaces() {
+        // One face today; additions go here and nowhere else. RmlUi registers
+        // a face under the font's typographic family from the TTF name table
+        // ("Noto Sans" — NOT the filename), which is what rcss font-family
+        // must reference.
+        bool ok = true;
+        for (const char* path : { "fonts/NotoSans-SemiBold.ttf" }) {
+            auto resolved = FileSystem::instance().resolvePath(path);
+            if (!resolved || !Rml::LoadFontFace(*resolved)) {
+                fmt::print(stderr, "loadDefaultFontFaces: failed to load '{}'\n", path);
+                ok = false;
+            }
+        }
+        return ok;
+    }
+
     RmlUiManager::RmlUiManager() = default;
 
     RmlUiManager::~RmlUiManager() {
@@ -54,9 +70,7 @@ namespace Vapor {
             return false;
         }
 
-        // Load fonts
-        auto fontPath = FileSystem::instance().resolvePath("fonts/NotoSans-SemiBold.ttf");
-        if (!fontPath || !Rml::LoadFontFace(*fontPath)) {
+        if (!loadDefaultFontFaces()) {
             fmt::print("RmlUiManager::FinalizeInitialization: Warning - failed to load font\n");
         }
 
