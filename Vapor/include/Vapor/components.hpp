@@ -4,6 +4,7 @@
 #include "graphics_handles.hpp"
 #include "graphics_sprite.hpp"
 #include "physics_3d.hpp"
+#include "render_data.hpp"   // SkyType
 #include "vehicle_controller.hpp"
 #include <entt/entt.hpp>
 #include <functional>
@@ -168,6 +169,56 @@ namespace Vapor {
         glm::vec3 color = {1.0f, 1.0f, 1.0f};
         float intensity = 1.0f;
         bool useVideoTexture = false;
+    };
+
+    // Tag marking the authoritative sun among directional lights. LightGatherSystem
+    // gathers the tagged entity into directionalLights[0]; the atmosphere/sky and
+    // the time-of-day driver identify the sun by this tag, never by list order.
+    struct SunComponent {};
+
+    // Sky authoring — the gameplay layer's choice of sky and its tunables. Put
+    // one on an environment entity (singleton). SkySystem resolves it into a
+    // SkyRenderData and pushes it to the renderer whenever `dirty` is set. The
+    // sun is NOT here — it stays on the SunComponent-tagged directional light.
+    // Gradient/HDRI *visible* passes are still WIP; today `type` selects the IBL
+    // source and the atmosphere tunables drive the procedural sky.
+    struct SkyComponent {
+        SkyType type = SkyType::Atmosphere;
+        // Atmosphere tunables (used when type == Atmosphere).
+        glm::vec3 rayleighCoefficients = glm::vec3(5.8e-6f, 13.5e-6f, 33.1e-6f);
+        float rayleighScaleHeight = 8500.0f;
+        float mieCoefficient = 21e-6f;
+        float mieScaleHeight = 1200.0f;
+        float miePreferredDirection = 0.758f;
+        float planetRadius = 6371e3f;
+        float atmosphereRadius = 6471e3f;
+        float exposure = 1.0f;
+        glm::vec3 groundColor = glm::vec3(0.015f, 0.015f, 0.02f);
+        // Gradient sky colors (used when type == Gradient).
+        glm::vec3 gradientZenith  = glm::vec3(0.18f, 0.34f, 0.62f);
+        glm::vec3 gradientHorizon = glm::vec3(0.62f, 0.74f, 0.88f);
+        glm::vec3 gradientGround  = glm::vec3(0.20f, 0.18f, 0.16f);
+        bool dirty = true;  // set when edited; SkySystem re-pushes to the renderer
+
+        // IBL rebake throttle: SkySystem re-bakes the environment IBL when the
+        // sun has moved more than this many degrees since the last bake (a moving
+        // sun restales the captured sky). 0 disables it. _lastIblSunDir is the
+        // sun direction the IBL was last baked for (runtime, inspector-hidden).
+        float iblSunThresholdDeg = 5.0f;
+        Hidden<glm::vec3> _lastIblSunDir = {glm::vec3(0.0f)};
+    };
+
+    // Time-of-day clock. TimeOfDaySystem advances it and drives the
+    // SunComponent-tagged directional light's direction/color/intensity each
+    // frame, so the sky, fog, clouds and shadows all follow one moving sun. Put
+    // one on the environment entity (singleton). When present it OWNS the sun's
+    // direction — don't also animate that light from game logic.
+    struct TimeOfDayComponent {
+        float timeOfDay = 10.0f;          // hours in [0, 24)
+        float dayLengthSeconds = 120.0f;  // real seconds per in-game day; 0 = frozen
+        float latitudeDeg = 25.0f;        // tilts the sun's arc toward +Z (south)
+        float maxSunIntensity = 10.0f;    // sun intensity at the zenith
+        bool  paused = false;
     };
 
     // 2D Sprite rendering component

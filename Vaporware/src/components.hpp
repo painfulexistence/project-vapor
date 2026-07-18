@@ -18,6 +18,12 @@ using Vapor::FollowCameraComponent;
 using Vapor::GrabberComponent;
 using Vapor::HeldByComponent;
 
+// Light components now live in the engine (Vapor::) and are gathered by
+// Vapor::LightGatherSystem. Alias them so existing game code stays unqualified.
+using Vapor::DirectionalLightComponent;
+using Vapor::PointLightComponent;
+using Vapor::SpotLightComponent;
+using Vapor::SunComponent;
 // ============================================================================
 // Character Logic
 // ============================================================================

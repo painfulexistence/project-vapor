@@ -30,12 +30,20 @@ vec3 uvToDirection(vec2 uv, uint face) {
     else if (face == 3u) dir = vec3( st.x, -1.0, -st.y); // -Y
     else if (face == 4u) dir = vec3( st.x, -st.y,  1.0); // +Z
     else                 dir = vec3(-st.x, -st.y, -1.0); // -Z
-    return normalize(dir);
+    // Return the UN-normalized direction. It is affine in uv, so the rasterizer
+    // interpolates it EXACTLY across the fullscreen triangle; normalizing here
+    // (per vertex) and then interpolating would lerp normalized corners and bend
+    // the per-pixel direction (~24deg off at a face centre), which distorted the
+    // whole captured cubemap. Every consumer fragment re-normalizes localPos.
+    return dir;
 }
 
 void main() {
     vec2 v = ndcVerts[gl_VertexIndex];
     gl_Position = vec4(v, 0.0, 1.0);
     vec2 uv = v * 0.5 + 0.5;
+    uv.y = 1.0 - uv.y;  // Cube-face render target is Y-flipped relative to the
+                        // cube sampling convention, same as the Metal capture
+                        // shaders; without this the captured faces are inverted.
     localPos = uvToDirection(uv, capture.faceIndex);
 }
