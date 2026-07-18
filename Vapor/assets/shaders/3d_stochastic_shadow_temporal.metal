@@ -3,8 +3,8 @@ using namespace metal;
 #include "Res/shaders/3d_common.metal"
 
 // Temporal accumulation denoiser for the stochastic RT shadows (point / rect /
-// spot — the R/G/B channels).
-// Velocity reprojection + variance clamping + 15%/85% blend.
+// spot — the R/G/B channels). Velocity reprojection + adaptive-alpha (SVGF
+// history-length) accumulation; see the alpha derivation below.
 kernel void computeMain(
     texture2d<float>              currentShadow   [[texture(0)]],
     texture2d<float>              historyShadow   [[texture(1)]],
@@ -20,9 +20,8 @@ kernel void computeMain(
     float2 uv = (float2(tid) + 0.5) / screenSize;
 
     // Three visibility channels: R = point, G = rect area, B = spot — all
-    // accumulated identically with per-channel variance clamping. On the
-    // legacy R16F targets (native path) the extra channels read as 0 and the
-    // writes drop them — harmless.
+    // accumulated identically. On the legacy R16F targets (native path) the
+    // extra channels read as 0 and the writes drop them — harmless.
     float3 current = currentShadow.read(tid).rgb;
 
     // Velocity from 3d_velocity.metal is (currNDC - prevNDC) * 0.5 in y-up NDC

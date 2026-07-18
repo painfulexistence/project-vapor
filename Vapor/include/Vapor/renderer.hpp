@@ -892,21 +892,21 @@ private:
     // graph edits) invalidates it without needing to remember to.
     bool restirHistoryValid = false;
     Uint32 restirLastFrame = 0;
-    // Tunables (candidates/taps/radius/M-clamp are panel-exposed; the rect and
-    // spot candidate counts are fixed defaults). M clamps are multiples of the
-    // per-frame candidate count: they bound how long the reservoir can dwell
-    // on one winner, so keep them low enough that the temporal accumulator's
-    // ~14-frame EMA still averages across winner switches. Reservoirs select
-    // LIGHTS only — the rect quad point is re-jittered every frame (see
-    // restir_shadow_common.metal), so the rect clamp too governs selection
-    // stability only, never penumbra sampling.
+    // Panel-exposed: point candidates, spatial taps, spatial radius, point
+    // M-clamp. Fixed defaults (no control drives them): rect/spot candidate
+    // counts and the rect M-clamp. M clamps are multiples of the per-frame
+    // candidate count and bound how long a reservoir dwells on one winner —
+    // kept low so the temporal accumulator still averages across winner
+    // switches. Reservoirs select LIGHTS only (the rect quad point is
+    // re-jittered every frame, see restir_shadow_common.metal), so the rect
+    // clamp too governs selection stability only, never penumbra sampling.
     Uint32 restirPointCandidates = 8;
-    Uint32 restirRectCandidates = 4;
-    Uint32 restirSpotCandidates = 4;
+    Uint32 restirRectCandidates = 4;   // fixed
+    Uint32 restirSpotCandidates = 4;   // fixed
     Uint32 restirSpatialTaps = 4;
     float restirSpatialRadius = 16.0f;  // full-res px (pre-scaled for the half grid)
     float restirPointMClamp = 8.0f;
-    float restirRectMClamp = 8.0f;
+    float restirRectMClamp = 8.0f;      // fixed
     // Dataflow guards: the accumulator only runs on frames the stochastic
     // pass actually wrote (TLAS ready, pipelines built), and the PBR only
     // samples a history that has been accumulated at least once — otherwise
