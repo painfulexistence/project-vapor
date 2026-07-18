@@ -2689,7 +2689,7 @@ void Renderer::stochasticPointShadowPass() {
     glm::uvec4 gridDims(clusterGridSizeX, clusterGridSizeY, clusterGridSizeZ, 0u);
     Uint32 fi = frameCounter;
     Uint32 debugMode = pointShadowDebugMode;  // panel "Point shadow view"
-    rhi->beginComputePass("StochasticShadows");
+    rhi->beginComputePass(renderGraph.activePassName().c_str());
     rhi->bindComputePipeline(stochasticPointShadowPipeline);
     rhi->setComputeTexture(0, depthStencilRT);
     rhi->setComputeTexture(1, normalRT);
@@ -2783,7 +2783,8 @@ bool Renderer::restirShadowPass() {
     p.depthTolerance = 0.1f;
     p.normalTolerance = 0.9f;
 
-    rhi->beginComputePass("ReSTIRShadow");
+    const std::string restirLabel = renderGraph.activePassName() + " (ReSTIR)";
+    rhi->beginComputePass(restirLabel.c_str());
     // Pass 1 (half grid): fresh candidates + temporal reservoir merge.
     rhi->bindComputePipeline(restirShadowTemporalPipeline);
     rhi->setComputeTexture(0, depthStencilRT);
@@ -3083,7 +3084,7 @@ void Renderer::pointShadowTemporalPass() {
     if (!pointShadowTemporalPipeline.isValid() || !pointShadowRT.isValid()) return;
     Uint32 w = rhi->getSwapchainWidth();
     Uint32 h = rhi->getSwapchainHeight();
-    rhi->beginComputePass("StochasticShadowTemporal");
+    rhi->beginComputePass(renderGraph.activePassName().c_str());
     rhi->bindComputePipeline(pointShadowTemporalPipeline);
     rhi->setComputeTexture(0, pointShadowRT);
     rhi->setComputeTexture(1, pointShadowHistoryRT);
@@ -3108,7 +3109,7 @@ void Renderer::pointShadowDenoisePass() {
         !pointShadowDenoisedRT.isValid()) return;
     Uint32 w = rhi->getSwapchainWidth();
     Uint32 h = rhi->getSwapchainHeight();
-    rhi->beginComputePass("StochasticShadowDenoise");
+    rhi->beginComputePass(renderGraph.activePassName().c_str());
     rhi->bindComputePipeline(pointShadowDenoisePipeline);
     rhi->setComputeTexture(0, pointShadowHistoryRT);
     rhi->setComputeTexture(1, depthStencilRT);
@@ -6417,6 +6418,25 @@ void Renderer::drawGraphicsImGui() {
             } else {
                 ImGui::TextDisabled("legacy uniform light picks (noisy) — ReSTIR off");
             }
+            // Debug view of the stochastic shadow output (the "Stochastic
+            // Shadow (raw)" preview + the lit scene). Lives here because every
+            // mode is a view of THIS pass's target, not a separate feature.
+            int psd = static_cast<int>(pointShadowDebugMode);
+            if (ImGui::Combo("View", &psd,
+                             "Visibility (normal)\0Tile light-count heatmap\0ReSTIR winner id\0ReSTIR confidence (M)\0")) {
+                pointShadowDebugMode = static_cast<Uint32>(psd);
+            }
+            if (pointShadowDebugMode == 1) {
+                ImGui::TextWrapped("Heatmap: black = tile has 0 lights, brighter = more (8+ ~ white). "
+                                   "Shown in 'Stochastic Shadow (raw)' below.");
+            } else if (pointShadowDebugMode >= 2) {
+                ImGui::TextWrapped("ReSTIR-only view. Winner id: color bands per selected light — "
+                                   "stable bands mean the reservoir has locked on. Confidence: reservoir "
+                                   "M vs the history clamp. Note a domain with no winner reads as 0 here "
+                                   "but 1.0 (lit) in Visibility, since 'nothing selected' = 'no shadow'. "
+                                   "Like the heatmap, the view replaces the shadow factors, so scene "
+                                   "lighting is affected while it is active.");
+            }
         }
         // pssmRTMaxDist now sets where the independent near-field shadow map ends
         // and the PSSM cascades begin (the near map, not RT, owns [near, this]).
@@ -6437,21 +6457,8 @@ void Renderer::drawGraphicsImGui() {
             ImGui::SliderFloat("SSCS length", &sscsLength, 0.05f, 2.0f);
             ImGui::SliderFloat("SSCS thickness", &sscsThickness, 0.05f, 2.0f);
         }
-        int psd = static_cast<int>(pointShadowDebugMode);
-        if (ImGui::Combo("Point shadow view", &psd,
-                         "Visibility (normal)\0Tile light-count heatmap\0ReSTIR winner id\0ReSTIR confidence (M)\0")) {
-            pointShadowDebugMode = static_cast<Uint32>(psd);
-        }
-        if (pointShadowDebugMode == 1) {
-            ImGui::TextWrapped("Heatmap: black = tile has 0 lights, brighter = more (8+ ~ white). "
-                               "Shown in 'Stochastic Shadow (raw)' below.");
-        } else if (pointShadowDebugMode >= 2) {
-            ImGui::TextWrapped("ReSTIR-only view (falls back to visibility on the legacy path). "
-                               "Winner id: color bands per selected light — stable bands mean the "
-                               "reservoir has locked on. Confidence: reservoir M vs the history clamp. "
-                               "Like the heatmap, the view replaces the shadow factors, so scene "
-                               "lighting is affected while it is active.");
-        }
+        // (Stochastic shadow "View" debug combo moved under the "All shadows"
+        // section above — every mode is a view of that pass's output.)
         // Intermediate shadow textures (native Metal parity). These are
         // single-channel R16F/depth RTs; the RRR1 swizzle view renders them as
         // grayscale instead of red-only.
