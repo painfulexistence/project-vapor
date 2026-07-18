@@ -9,7 +9,6 @@
 #include "Vapor/renderer.hpp"
 #include "Vapor/resource_manager.hpp"
 #include "Vapor/rmlui_manager.hpp"
-#include "Vapor/scene.hpp"
 #include "components.hpp"
 #include "pages/chapter_title_page.hpp"
 #include "pages/page_system.hpp"

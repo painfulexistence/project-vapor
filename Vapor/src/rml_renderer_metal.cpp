@@ -96,7 +96,7 @@ void RmlRendererMetal::RenderGeometry(
     m_encoder->setDepthStencilState(m_depthStencilState.get());
     m_encoder->setCullMode(MTL::CullModeNone);
 
-    glm::mat4 proj  = glm::ortho(0.0f, (float)m_logicalWidth, (float)m_logicalHeight, 0.0f, -1.0f, 1.0f);
+    glm::mat4 proj  = glm::ortho(0.0f, static_cast<float>(m_logicalWidth), static_cast<float>(m_logicalHeight), 0.0f, -1.0f, 1.0f);
     glm::mat4 xform = glm::make_mat4(m_transform.data());
     xform = glm::translate(xform, glm::vec3(translation.x, translation.y, 0.0f));
 

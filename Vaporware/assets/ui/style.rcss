@@ -5,7 +5,7 @@
 }
 
 body {
-    font-family: Arial Black;
+    font-family: "Noto Sans";
     margin: 0;
     padding: 0;
 }

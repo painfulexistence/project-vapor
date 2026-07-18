@@ -11,6 +11,12 @@ namespace Vapor {
 
     class RmlUiSystem;
 
+    // Registers the engine's default RmlUi font faces. The single source of
+    // truth for which fonts ship: called by RmlUiManager (the main-UI
+    // bootstrap both backends share) AND by the CAPI's standalone UIRenderer
+    // (which runs without an RmlUiManager). Returns false if any face failed.
+    bool loadDefaultFontFaces();
+
     /**
      * RmlUI Manager - manages RmlUI context and document lifecycle (business logic only)
      * Does not handle rendering - rendering is delegated to the backend renderer
