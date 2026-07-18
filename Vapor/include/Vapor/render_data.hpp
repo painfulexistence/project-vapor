@@ -211,6 +211,45 @@ struct alignas(16) AtmosphereRenderData {
     float _pad4 = 0.0f;
 };
 
+// Which sky the gameplay layer wants rendered and used for image-based lighting.
+enum class SkyType : uint32_t {
+    Atmosphere = 0,  // procedural Rayleigh/Mie/Ozone march (default)
+    HDRI       = 1,  // equirectangular HDRI captured to the environment cubemap
+    Gradient   = 2,  // cheap zenith/horizon/ground gradient
+};
+
+// Resolved sky description that SkySystem hands to the renderer whenever the
+// authoring SkyComponent changes. Carries only what the sky itself owns — the
+// sun (direction/color/intensity) stays light-driven (see LightGatherSystem),
+// so these are the atmosphere tunables minus the sun fields, plus gradient
+// colors. This is a CPU-side contract, not a GPU buffer (no alignment needed).
+struct SkyRenderData {
+    SkyType type = SkyType::Atmosphere;
+    // Atmosphere tunables (mirror AtmosphereRenderData minus the sun fields).
+    glm::vec3 rayleighCoefficients = glm::vec3(5.8e-6f, 13.5e-6f, 33.1e-6f);
+    float rayleighScaleHeight = 8500.0f;
+    float mieCoefficient = 21e-6f;
+    float mieScaleHeight = 1200.0f;
+    float miePreferredDirection = 0.758f;
+    float planetRadius = 6371e3f;
+    float atmosphereRadius = 6471e3f;
+    float exposure = 1.0f;
+    glm::vec3 groundColor = glm::vec3(0.015f, 0.015f, 0.02f);
+    // Gradient sky colors (used when type == Gradient).
+    glm::vec3 gradientZenith  = glm::vec3(0.18f, 0.34f, 0.62f);
+    glm::vec3 gradientHorizon = glm::vec3(0.62f, 0.74f, 0.88f);
+    glm::vec3 gradientGround  = glm::vec3(0.20f, 0.18f, 0.16f);
+};
+
+// GPU buffer for the gradient sky pass (SkyType::Gradient). Each color is
+// vec4-padded so the std430 layout is identical on every backend (matches
+// GradientData in Gradient.frag / 3d_gradient.metal).
+struct alignas(16) GradientRenderData {
+    glm::vec4 zenith  = glm::vec4(0.18f, 0.34f, 0.62f, 1.0f);
+    glm::vec4 horizon = glm::vec4(0.62f, 0.74f, 0.88f, 1.0f);
+    glm::vec4 ground  = glm::vec4(0.20f, 0.18f, 0.16f, 1.0f);
+};
+
 // Screen-space light scattering (god rays). Layout matches the Metal backend's
 // LightScatteringData. sunScreenPos/screenSize are filled per frame.
 struct alignas(16) LightScatteringRenderData {
@@ -244,6 +283,18 @@ struct alignas(16) AOTemporalRenderData {
 };
 
 // Simple screen-space height/distance fog (the Metal backend's simpleFog path).
+// Shared wind, resolved from the ECS WindFieldComponent by WindSystem and
+// pushed to the renderer. Wind DIRECTION is a single shared field — clouds, fog
+// and particles all blow the same way. `strength` is the shared wind magnitude:
+// each medium keeps its own per-medium scroll coefficient (the existing
+// windSpeed on the fog/cloud settings) and multiplies it by this strength, so
+// one knob drives everything while per-medium ratios are preserved.
+struct WindRenderData {
+    glm::vec3 direction  = glm::vec3(1.0f, 0.0f, 0.0f);
+    float     strength   = 1.0f;
+    float     turbulence = 0.0f;
+};
+
 struct alignas(16) FogRenderData {
     glm::mat4 invViewProj = glm::mat4(1.0f);
     glm::vec3 cameraPosition = glm::vec3(0.0f);
@@ -256,11 +307,20 @@ struct alignas(16) FogRenderData {
     float fogHeightFalloff = 0.1f;
     float anisotropy = 0.6f;
     float ambientIntensity = 0.3f;
-    // Panel-tunable like native (native's simpleFogFragment doesn't read them
-    // either — they only affect the froxel path; kept for parity/forward-compat).
-    float fogBaseHeight = 0.0f;
-    float fogMaxHeight = 100.0f;
-    glm::vec2 _tailPad = glm::vec2(0.0f);  // keep 16-byte struct size multiple
+    // Height falloff shaping + wind-animated density noise (GLSL twin of the
+    // Metal simpleFogFragment). windDirection comes from the shared
+    // WindFieldComponent (setWind); windSpeed is the per-medium scroll
+    // coefficient scaled by the shared wind strength at fill time; `time`
+    // scrolls the noise. Defaults mirror the Metal fog so both backends match.
+    float fogBaseHeight = 0.0f;    // 128
+    float fogMaxHeight = 100.0f;   // 132
+    float noiseScale = 0.01f;      // 136
+    float noiseIntensity = 0.5f;   // 140
+    float windSpeed = 1.0f;        // 144  per-medium scroll coefficient
+    float time = 0.0f;             // 148
+    glm::vec2 _pad2 = glm::vec2(0.0f);                        // 152 (align vec3 to 160)
+    glm::vec3 windDirection = glm::vec3(1.0f, 0.0f, 0.0f);   // 160
+    float _pad3 = 0.0f;                                       // 172 (struct = 176, /16)
 };
 
 // Heterogeneous volume raymarch (EmberGen-style density grid in an AABB).

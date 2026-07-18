@@ -115,11 +115,22 @@ inline SceneResources buildScene(
         dl.direction  = glm::normalize(glm::vec3(0.5f, -1.0f, 0.0f));
         dl.color      = glm::vec3(1.0f, 1.0f, 1.0f);
         dl.intensity  = 10.0f;
+        // Mark this as the authoritative sun so LightGatherSystem places it at
+        // directionalLights[0], where the atmosphere/sky and shadows read it.
+        // TimeOfDaySystem (below) owns this light's direction/colour/intensity,
+        // so no DirectionalLightLogicComponent here — that would fight the clock.
+        registry.emplace<Vapor::SunComponent>(sunLight);
+    }
 
-        auto& logic         = registry.emplace<DirectionalLightLogicComponent>(sunLight);
-        logic.baseDirection = glm::vec3(0.5f, -1.0f, 0.0f);
-        logic.speed         = 0.5f;
-        logic.magnitude     = 0.05f;
+    {
+        // Environment/sky singleton. Procedural atmosphere + a time-of-day clock
+        // that drives the sun. SkySystem pushes the sky to the renderer;
+        // TimeOfDaySystem advances the clock and moves the sun.
+        auto skyEntity = registry.create();
+        registry.emplace<Vapor::NameComponent>(skyEntity, Vapor::NameComponent{"Sky"});
+        registry.emplace<Vapor::SkyComponent>(skyEntity);
+        auto& tod = registry.emplace<Vapor::TimeOfDayComponent>(skyEntity);
+        tod.latitudeDeg = 0.0f;  // sun arcs due east->overhead->west (no south tilt)
     }
 
     // Enough lights to exercise tiled light culling and to lift the ambient

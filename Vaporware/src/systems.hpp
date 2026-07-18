@@ -204,72 +204,9 @@ public:
     }
 };
 
-class LightGatherSystem {
-public:
-    static void update(entt::registry& reg, Scene* scene) {
-        scene->pointLights.clear();
-        auto pointView = reg.view<Vapor::PointLightComponent, Vapor::TransformComponent>();
-        for (auto entity : pointView) {
-            auto& light     = pointView.get<Vapor::PointLightComponent>(entity);
-            auto& transform = pointView.get<Vapor::TransformComponent>(entity);
-            scene->pointLights.push_back({
-                .position  = transform.position,
-                .color     = light.color,
-                .intensity = light.intensity,
-                .radius    = light.radius,
-            });
-        }
-
-        scene->directionalLights.clear();
-        auto dirView = reg.view<Vapor::DirectionalLightComponent>();
-        for (auto entity : dirView) {
-            auto& light = dirView.get<Vapor::DirectionalLightComponent>(entity);
-            scene->directionalLights.push_back({
-                .direction = light.direction,
-                .color     = light.color,
-                .intensity = light.intensity,
-            });
-        }
-
-        // Spot lights: position from the transform, beam along its forward
-        // axis (rotation * -Z), degree angles converted to cosines for the GPU.
-        scene->spotLights.clear();
-        auto spotView = reg.view<Vapor::SpotLightComponent, Vapor::TransformComponent>();
-        for (auto entity : spotView) {
-            auto& light     = spotView.get<Vapor::SpotLightComponent>(entity);
-            auto& transform = spotView.get<Vapor::TransformComponent>(entity);
-            Vapor::SpotLight sl{};
-            sl.position  = transform.position;
-            sl.direction = glm::normalize(transform.rotation * glm::vec3(0.0f, 0.0f, -1.0f));
-            sl.color     = light.color;
-            sl.intensity = light.intensity;
-            sl.radius    = light.radius;
-            sl.cosInner  = std::cos(glm::radians(light.innerAngle));
-            sl.cosOuter  = std::cos(glm::radians(light.outerAngle));
-            scene->spotLights.push_back(sl);
-        }
-
-        // Rect area lights: quad axes from the transform's rotation (right = +X,
-        // up = +Y), half-extents from the component size. (The engine component
-        // existed but nothing gathered it into the scene until now.)
-        scene->rectLights.clear();
-        auto rectView = reg.view<Vapor::RectLightComponent, Vapor::TransformComponent>();
-        for (auto entity : rectView) {
-            auto& light     = rectView.get<Vapor::RectLightComponent>(entity);
-            auto& transform = rectView.get<Vapor::TransformComponent>(entity);
-            Vapor::RectLight rl{};
-            rl.position   = transform.position;
-            rl.right      = glm::normalize(transform.rotation * glm::vec3(1.0f, 0.0f, 0.0f));
-            rl.up         = glm::normalize(transform.rotation * glm::vec3(0.0f, 1.0f, 0.0f));
-            rl.halfWidth  = light.size.x * 0.5f;
-            rl.halfHeight = light.size.y * 0.5f;
-            rl.color      = light.color;
-            rl.intensity  = light.intensity;
-            rl.useVideoTexture = light.useVideoTexture ? 1u : 0u;
-            scene->rectLights.push_back(rl);
-        }
-    }
-};
+// LightGatherSystem now lives in the engine (Vapor::LightGatherSystem); the
+// game calls it directly. It gathers the SunComponent-tagged directional light
+// into directionalLights[0].
 
 
 class AutoRotateSystem {
