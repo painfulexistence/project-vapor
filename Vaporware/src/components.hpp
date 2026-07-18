@@ -24,7 +24,6 @@ using Vapor::DirectionalLightComponent;
 using Vapor::PointLightComponent;
 using Vapor::SpotLightComponent;
 using Vapor::SunComponent;
-
 // ============================================================================
 // Character Logic
 // ============================================================================

@@ -156,7 +156,7 @@ public:
 class LightMovementSystem {
 public:
     static void update(entt::registry& reg, float deltaTime) {
-        auto pointView = reg.view<PointLightComponent, Vapor::TransformComponent, LightMovementLogicComponent>();
+        auto pointView = reg.view<Vapor::PointLightComponent, Vapor::TransformComponent, LightMovementLogicComponent>();
         for (auto entity : pointView) {
             auto& transform = pointView.get<Vapor::TransformComponent>(entity);
             auto& logic     = pointView.get<LightMovementLogicComponent>(entity);
@@ -191,9 +191,9 @@ public:
             transform.isDirty  = true;
         }
 
-        auto dirView = reg.view<DirectionalLightComponent, DirectionalLightLogicComponent>();
+        auto dirView = reg.view<Vapor::DirectionalLightComponent, DirectionalLightLogicComponent>();
         for (auto entity : dirView) {
-            auto& light = dirView.get<DirectionalLightComponent>(entity);
+            auto& light = dirView.get<Vapor::DirectionalLightComponent>(entity);
             auto& logic = dirView.get<DirectionalLightLogicComponent>(entity);
 
             logic.timer += deltaTime * logic.speed;
