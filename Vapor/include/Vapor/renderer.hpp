@@ -718,6 +718,7 @@ private:
     ShaderHandle fogFroxelInjectShader;
     ShaderHandle fogFroxelIntegrateShader;
     PipelineHandle fogFroxelCompositePipeline;  // fullscreen, samples the integrated volume
+    ShaderHandle fogFroxelCompositeShader;      // Vulkan composite frag (Metal builds its own)
     // Cheap analytic exponential height fog (the pre-raymarch "Height Fog"):
     // a single per-pixel evaluation, no shadows/lights. On by default — it is the
     // common-case global fog; the raymarch above is the opt-in upgrade.

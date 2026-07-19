@@ -4110,11 +4110,12 @@ void Renderer::volumetricFogPass() {
     }
     rhi->updateBuffer(fogDataBuffer, &fog, 0, sizeof(fog));
 
-    // ── Froxel path (Metal): inject (compute) -> integrate (compute) -> composite.
-    // Decouples fog cost from screen resolution. The Vulkan backend keeps the
-    // fullscreen raymarch below until its .comp twins land, so this is gated on
-    // the froxel resources existing (created only for Metal today). ──
-    const bool froxelReady = backend == GraphicsBackend::Metal && fogUseFroxel
+    // ── Froxel path: inject (compute) -> integrate (compute) -> composite.
+    // Decouples fog cost from screen resolution. Backend-agnostic — the Metal
+    // kernels (3d_volumetric_fog.metal) and the Vulkan .comp twins (FroxelInject/
+    // Integrate.comp) bind identically through the RHI compute API, so this is
+    // gated purely on the froxel resources existing, not on the backend. ──
+    const bool froxelReady = fogUseFroxel
         && volCount > 0
         && fogFroxelInjectPipeline.isValid() && fogFroxelIntegratePipeline.isValid()
         && fogFroxelCompositePipeline.isValid()
@@ -4156,8 +4157,14 @@ void Renderer::volumetricFogPass() {
         rhi->setComputeBuffer(6, rectLightBuffer);
         rhi->setComputeBytes(&fogLightParams, sizeof(glm::uvec4), 7);
         rhi->setComputeBuffer(8, fogVolumeBuffer, 0, sizeof(VolumetricFogVolumeGPU) * kMaxFogVolumes);
-        rhi->setComputeTexture(0, fogFroxelGridTexture);       // storage write [[texture(0)]]
-        rhi->setComputeTexture(1, pssmShadowArrayTexture);     // sampled shadow [[texture(1)]] (inline sampler)
+        rhi->setComputeTexture(0, fogFroxelGridTexture);       // storage write (Metal [[texture(0)]] / Vk set1 b0)
+        // Shadow map: Metal samples a plain [[texture(1)]] with the kernel's inline
+        // sampler; Vulkan needs a combined image sampler (set 2) it can textureLod.
+        if (backend == GraphicsBackend::Metal) {
+            rhi->setComputeTexture(1, pssmShadowArrayTexture);
+        } else {
+            rhi->setComputeSampledTexture(1, pssmShadowArrayTexture, shadowSampler);
+        }
         rhi->dispatch((FROXEL_GRID_X + 3) / 4, (FROXEL_GRID_Y + 3) / 4, (FROXEL_GRID_Z + 3) / 4);
 
         rhi->computeBarrier();
@@ -5849,6 +5856,26 @@ void Renderer::createRenderPipeline() {
             // Expensive per-light volumetric fog: fullscreen color+depth -> tempColorRT.
             volumetricFogPipeline = makeFullscreenFragPipeline(
                 "shaders/VolumetricFog.frag.spv", volumetricFogShader, BlendMode::Opaque);
+
+            // Froxel volumetric fog (Vulkan): inject + integrate compute stages
+            // write the 3D grid; the composite samples it. volumetricFogPass prefers
+            // this over the raymarch above when the pipelines/textures exist. The
+            // .comp local_size (4^3 / 8x8) matches the pass's dispatch group counts.
+            {
+                auto makeFroxelCompute = [&](const char* spv, ShaderHandle& sh) -> ComputePipelineHandle {
+                    std::string code = readFile(spv);
+                    if (code.empty()) return {};
+                    ShaderDesc d; d.stage = ShaderStage::Compute; d.code = code.data();
+                    d.codeSize = code.size(); d.entryPoint = "main";
+                    sh = rhi->createShader(d);
+                    ComputePipelineDesc cd; cd.computeShader = sh;
+                    return rhi->createComputePipeline(cd);
+                };
+                fogFroxelInjectPipeline = makeFroxelCompute("shaders/FroxelInject.comp.spv", fogFroxelInjectShader);
+                fogFroxelIntegratePipeline = makeFroxelCompute("shaders/FroxelIntegrate.comp.spv", fogFroxelIntegrateShader);
+                fogFroxelCompositePipeline = makeFullscreenFragPipeline(
+                    "shaders/FroxelFogComposite.frag.spv", fogFroxelCompositeShader, BlendMode::Opaque);
+            }
 
             // Heterogeneous volume raymarch (EmberGen density grids).
             volumeRaymarchPipeline = makeFullscreenFragPipeline(
