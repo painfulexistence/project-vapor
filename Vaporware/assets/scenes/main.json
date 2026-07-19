@@ -198,7 +198,7 @@
       }
     },
     {
-      "name": "Demo Sprite",
+      "name": "Canvas Sprite",
       "position": [650.0, 100.0, 0.0],
       "components": {
         "sprite": { "atlas": "demo_sprite", "size": [40.0, 40.0] },

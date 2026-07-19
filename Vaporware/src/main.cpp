@@ -63,6 +63,7 @@ static void setupCustomDrawers(Vapor::SceneInspector& inspector) {
     inspector.registerComponent<ChapterTitleTriggerComponent>("Chapter Title Trigger");
     inspector.registerComponent<SceneTransitionComponent>("Scene Transition");
     inspector.registerComponent<ScrollTextQueueComponent>("Scroll Text Queue");
+    inspector.registerComponent<FpsTextComponent>("FPS Text");
     inspector.registerComponent<Vapor::ParticleEmitterComponent>("Particle Emitter");
     inspector.registerComponent<Vapor::ParticleAttractorComponent>("Particle Attractor");
     inspector.registerComponent<Vapor::WindFieldComponent>("Wind Field");
