@@ -11,8 +11,8 @@
 // Two demo assets:
 //   - assets/models/cube.usda — tiny committed sample, always loaded.
 //   - assets/models/kitchen/Kitchen_set.usd — Pixar's Kitchen_set, the real
-//     composition stress test. Not committed (large); download it from
-//     http://graphics.pixar.com/usd/downloads.html and unzip it there.
+//     composition stress test. Not committed (large); fetch it with
+//     scripts/downloadUSDSamples.sh, and OnLoad imports it when present.
 //     Kitchen_set is authored in centimetres but omits the metersPerUnit
 //     stage metadatum, so the importer applies no unit scale — the root
 //     entity is scaled to metres here, like the original demo.
@@ -181,8 +181,8 @@ auto main(int argc, char* args[]) -> int {
             }
         }
     } else {
-        fmt::print("Kitchen_set not found — download Pixar's Kitchen_set into "
-                   "assets/models/kitchen/ to load it (showing the sample cube instead)\n");
+        fmt::print("Kitchen_set not found — run scripts/downloadUSDSamples.sh to fetch it "
+                   "(showing the sample cube instead)\n");
     }
 
     // ---- Environment -------------------------------------------------------
