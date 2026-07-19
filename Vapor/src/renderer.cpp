@@ -2549,6 +2549,13 @@ void Renderer::sunFlarePass() {
     }
     glm::vec2 screenSize(rhi->getSwapchainWidth(), rhi->getSwapchainHeight());
     glm::vec3 sunDir = glm::normalize(atmosphereData.sunDirection);
+    // Fade the flare out as the sun drops below the horizon (night). sunDirection
+    // points toward the sun, so its .y is the sun elevation — the same signal the
+    // Atmosphere pass uses for stars/moon. ToD drives sunDirection, so this makes
+    // the flare follow the day/night cycle without any extra plumbing.
+    float e = glm::clamp((sunDir.y + 0.06f) / 0.12f, 0.0f, 1.0f);
+    float dayFactor = e * e * (3.0f - 2.0f * e);  // smoothstep(-0.06, 0.06, sunDir.y)
+    if (dayFactor <= 0.0f) return;  // sun below horizon -> no flare
     glm::vec3 sunWorldPos = currentCamera.position + sunDir * 10000.0f;
     glm::vec4 sunClip = (currentCamera.proj * currentCamera.view) * glm::vec4(sunWorldPos, 1.0f);
     if (sunClip.w <= 0.0f) return;
@@ -2556,11 +2563,14 @@ void Renderer::sunFlarePass() {
     glm::vec2 sunScreenPos = sunNDC * 0.5f + 0.5f;
     sunScreenPos.y = 1.0f - sunScreenPos.y;
 
-    sunFlareSettings.sunScreenPos = sunScreenPos;
-    sunFlareSettings.aspectRatio = glm::vec2(screenSize.x / screenSize.y, 1.0f);
-    sunFlareSettings.sunColor = atmosphereData.sunColor;
+    // Local copy so the day/night scale never mutates the panel-set intensity.
+    SunFlareRenderData sf = sunFlareSettings;
+    sf.sunScreenPos = sunScreenPos;
+    sf.aspectRatio = glm::vec2(screenSize.x / screenSize.y, 1.0f);
+    sf.sunColor = atmosphereData.sunColor;
+    sf.intensity = sunFlareSettings.intensity * dayFactor;
     // Occlusion + edge fade are computed in-shader (smooth depth-disk test).
-    rhi->updateBuffer(sunFlareDataBuffer, &sunFlareSettings, 0, sizeof(sunFlareSettings));
+    rhi->updateBuffer(sunFlareDataBuffer, &sf, 0, sizeof(sf));
 
     RenderPassDesc rp;
     rp.name = "SunFlare";
