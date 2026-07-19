@@ -208,6 +208,14 @@ void Renderer::initialize(std::unique_ptr<RHI> rhiPtr, GraphicsBackend backendTy
         gradientDataBuffer = rhi->createBuffer(gradDesc);
         rhi->updateBuffer(gradientDataBuffer, &gradientData, 0, sizeof(gradientData));
 
+        // Night-sky (stars + moon) visuals; re-uploaded by setSky. Same pattern.
+        BufferDesc nsDesc;
+        nsDesc.size = sizeof(NightSkyRenderData);
+        nsDesc.usage = BufferUsage::Uniform;
+        nsDesc.memoryUsage = MemoryUsage::CPUtoGPU;
+        nightSkyDataBuffer = rhi->createBuffer(nsDesc);
+        rhi->updateBuffer(nightSkyDataBuffer, &nightSkyData, 0, sizeof(nightSkyData));
+
         BufferDesc lsDesc;
         lsDesc.size = sizeof(LightScatteringRenderData);
         lsDesc.usage = BufferUsage::Uniform;
@@ -3901,11 +3909,14 @@ void Renderer::skyAtmospherePass() {
     } else {
         rhi->bindPipeline(atmospherePipeline);
         if (backend == GraphicsBackend::Metal) {
-            // 3d_atmosphere.metal: camera at buffer(0), atmosphere at buffer(1).
+            // 3d_atmosphere.metal: camera(0), atmosphere(1), night sky(2).
             rhi->setFragmentBuffer(0, cameraUniformBuffer, 0, sizeof(CameraRenderData));
             rhi->setFragmentBuffer(1, atmosphereDataBuffer, 0, sizeof(AtmosphereRenderData));
+            rhi->setFragmentBuffer(2, nightSkyDataBuffer, 0, sizeof(NightSkyRenderData));
         } else {
+            // Atmosphere.frag: atmosphere set1/b0, night sky set1/b2, camera set1/b3.
             rhi->setFragmentBuffer(0, atmosphereDataBuffer, 0, sizeof(AtmosphereRenderData));
+            rhi->setFragmentBuffer(2, nightSkyDataBuffer, 0, sizeof(NightSkyRenderData));
             rhi->setFragmentBuffer(3, cameraUniformBuffer, 0, sizeof(CameraRenderData));
         }
     }
@@ -4520,6 +4531,15 @@ void Renderer::setSky(const SkyRenderData& sky) {
     gradientData.ground  = glm::vec4(sky.gradientGround, 1.0f);
     if (gradientDataBuffer.isValid()) {
         rhi->updateBuffer(gradientDataBuffer, &gradientData, 0, sizeof(gradientData));
+    }
+    // Night-sky (stars + moon) visuals for the Atmosphere pass.
+    nightSkyData.moonColor      = glm::vec4(sky.moonColor, 0.0f);
+    nightSkyData.starDensity    = sky.starDensity;
+    nightSkyData.starBrightness = sky.starBrightness;
+    nightSkyData.moonSize       = sky.moonSize;
+    nightSkyData.moonBrightness = sky.moonBrightness;
+    if (nightSkyDataBuffer.isValid()) {
+        rhi->updateBuffer(nightSkyDataBuffer, &nightSkyData, 0, sizeof(nightSkyData));
     }
     iblNeedsUpdate = true;  // re-bake IBL from the new sky
 }

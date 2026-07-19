@@ -204,9 +204,18 @@ float hash31(float3 p) {
     p += dot(p, p.yzx + 33.33);
     return fract((p.x + p.y) * p.z);
 }
+// Night-sky tunables (matches Vapor::NightSkyRenderData / the GLSL NightSkyData).
+struct NightSkyData {
+    float4 moonColor;      // rgb
+    float starDensity;
+    float starBrightness;
+    float moonSize;        // 1 - cos(angular radius)
+    float moonBrightness;
+};
+
 // One jittered point star per sparse cell of the view-direction lattice.
-float starField(float3 dir) {
-    float3 p = dir * 300.0;             // density (higher = more, smaller stars)
+float starField(float3 dir, float density) {
+    float3 p = dir * density;           // density (higher = more, smaller stars)
     float3 cell = floor(p);
     float3 f = fract(p);
     float h = hash31(cell);
@@ -219,7 +228,8 @@ float starField(float3 dir) {
 fragment float4 fragmentMain(
     SkyVertexOut in [[stage_in]],
     constant CameraData& camera [[buffer(0)]],
-    constant AtmosphereData& atmosphere [[buffer(1)]]
+    constant AtmosphereData& atmosphere [[buffer(1)]],
+    constant NightSkyData& ns [[buffer(2)]]
 ) {
 
     // Reconstruct view ray from UV
@@ -293,11 +303,12 @@ fragment float4 fragmentMain(
         float3 moonDir = normalize(-sunDir);
         float moonUp = smoothstep(-0.05, 0.08, moonDir.y);
         float horizonFade = smoothstep(-0.02, 0.15, rayDir.y);
-        color += float3(0.9, 0.92, 1.0) * starField(rayDir) * night * horizonFade;
+        color += float3(0.9, 0.92, 1.0) * starField(rayDir, ns.starDensity) * ns.starBrightness * night * horizonFade;
         float md = dot(rayDir, moonDir);
-        float moonDisk = smoothstep(0.9990, 0.9995, md);
+        float cosR = 1.0 - ns.moonSize;
+        float moonDisk = smoothstep(cosR - 0.0004, cosR, md);
         float halo = smoothstep(0.985, 1.0, md);
-        color += float3(0.92, 0.93, 1.0) * (moonDisk * 1.2 + halo * halo * 0.15) * night * moonUp;
+        color += ns.moonColor.rgb * (moonDisk * ns.moonBrightness + halo * halo * 0.15) * night * moonUp;
     }
 
     return float4(color, 1.0);

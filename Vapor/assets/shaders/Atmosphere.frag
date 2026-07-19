@@ -44,6 +44,16 @@ struct AtmosphereData {
 layout(std430, set = 1, binding = 3) readonly buffer CameraBuf { CameraData cam; };
 layout(std430, set = 1, binding = 0) readonly buffer AtmosphereBuf { AtmosphereData atmo; };
 
+// Night-sky tunables (matches Vapor::NightSkyRenderData / the MSL NightSkyData).
+struct NightSkyData {
+    vec4 moonColor;       // rgb
+    float starDensity;
+    float starBrightness;
+    float moonSize;       // 1 - cos(angular radius)
+    float moonBrightness;
+};
+layout(std430, set = 1, binding = 2) readonly buffer NightSkyBuf { NightSkyData ns; };
+
 const float PI = 3.14159265359;
 const vec3  OZONE_ABSORPTION = vec3(3.426, 8.298, 0.356) * 0.06 * 1e-5;
 const float OZONE_SCALE_HEIGHT = 8000.0;
@@ -136,8 +146,8 @@ float hash31(vec3 p) {
     return fract((p.x + p.y) * p.z);
 }
 // One jittered point star per sparse cell of the view-direction lattice.
-float starField(vec3 dir) {
-    vec3 p = dir * 300.0;               // density (higher = more, smaller stars)
+float starField(vec3 dir, float density) {
+    vec3 p = dir * density;             // density (higher = more, smaller stars)
     vec3 cell = floor(p);
     vec3 f = fract(p);
     float h = hash31(cell);
@@ -186,11 +196,12 @@ void main() {
         vec3 moonDir = normalize(-sunDir);
         float moonUp = smoothstep(-0.05, 0.08, moonDir.y);
         float horizonFade = smoothstep(-0.02, 0.15, rayDir.y);
-        color += vec3(0.9, 0.92, 1.0) * starField(rayDir) * night * horizonFade;
+        color += vec3(0.9, 0.92, 1.0) * starField(rayDir, ns.starDensity) * ns.starBrightness * night * horizonFade;
         float md = dot(rayDir, moonDir);
-        float moonDisk = smoothstep(0.9990, 0.9995, md);
+        float cosR = 1.0 - ns.moonSize;
+        float moonDisk = smoothstep(cosR - 0.0004, cosR, md);
         float halo = smoothstep(0.985, 1.0, md);
-        color += vec3(0.92, 0.93, 1.0) * (moonDisk * 1.2 + halo * halo * 0.15) * night * moonUp;
+        color += ns.moonColor.rgb * (moonDisk * ns.moonBrightness + halo * halo * 0.15) * night * moonUp;
     }
 
     outColor = vec4(color, 1.0);

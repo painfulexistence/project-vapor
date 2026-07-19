@@ -813,6 +813,9 @@ private:
     ShaderHandle gradientFragmentShader;
     BufferHandle gradientDataBuffer;
     GradientRenderData gradientData;  // CPU copy, re-uploaded when setSky changes it
+    // Night-sky (stars + moon) visuals for the atmosphere pass; driven by setSky.
+    BufferHandle nightSkyDataBuffer;
+    NightSkyRenderData nightSkyData;
     SkyType m_skyType = SkyType::Atmosphere;
     // IBL debug: environmentCubemap unwrapped to a 2D equirect RT for ImGui
     // (cubemaps can't be shown directly). iblPreviewPass renders it each frame.

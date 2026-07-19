@@ -96,6 +96,14 @@ static void setupCustomDrawers(Vapor::SceneInspector& inspector) {
                     if (ImGui::ColorEdit3("horizon", &c->gradientHorizon.x)) c->dirty = true;
                     if (ImGui::ColorEdit3("ground",  &c->gradientGround.x))  c->dirty = true;
                 }
+                if (c->type == SkyType::Atmosphere && ImGui::TreeNode("Night Sky (stars + moon)")) {
+                    if (ImGui::DragFloat("star density",    &c->starDensity, 5.0f, 20.0f, 2000.0f)) c->dirty = true;
+                    if (ImGui::DragFloat("star brightness", &c->starBrightness, 0.01f, 0.0f, 5.0f))  c->dirty = true;
+                    if (ImGui::ColorEdit3("moon color",     &c->moonColor.x))                        c->dirty = true;
+                    if (ImGui::DragFloat("moon size",       &c->moonSize, 0.0002f, 0.0001f, 0.05f, "%.4f")) c->dirty = true;
+                    if (ImGui::DragFloat("moon brightness", &c->moonBrightness, 0.01f, 0.0f, 10.0f)) c->dirty = true;
+                    ImGui::TreePop();
+                }
                 ImGui::DragFloat("IBL sun threshold (deg)", &c->iblSunThresholdDeg, 0.1f, 0.0f, 90.0f);
             }
         }

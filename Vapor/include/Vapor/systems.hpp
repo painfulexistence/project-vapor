@@ -390,6 +390,11 @@ namespace Vapor {
                     data.gradientZenith        = sky.gradientZenith;
                     data.gradientHorizon       = sky.gradientHorizon;
                     data.gradientGround        = sky.gradientGround;
+                    data.starDensity           = sky.starDensity;
+                    data.starBrightness        = sky.starBrightness;
+                    data.moonColor             = sky.moonColor;
+                    data.moonSize              = sky.moonSize;
+                    data.moonBrightness        = sky.moonBrightness;
                     renderer->setSky(data);
                     sky.dirty = false;
                 }
