@@ -283,13 +283,9 @@ auto main(int argc, char* args[]) -> int {
     });
     setupCustomDrawers(sceneInspector);
 
-    // Load a font for text rendering
-    FontHandle gameFont = renderer->loadFont("fonts/NotoSans-SemiBold.ttf", 48.0f);
-    if (gameFont.isValid()) {
-        fmt::print("Font loaded successfully\n");
-    } else {
-        fmt::print("Failed to load font\n");
-    }
+    // Fonts are authored per text2D component in scenes/main.json;
+    // Text2DRenderSystem resolves and caches handles by path in here.
+    std::unordered_map<std::string, FontHandle> fontCache;
 
     // Load a sprite texture for 2D/3D batch rendering demo
     auto spriteImage = AssetManager::loadImage("textures/default_albedo.png");
@@ -337,7 +333,8 @@ auto main(int argc, char* args[]) -> int {
     demoAtlas.frames.push_back(SpriteFrame{
         "default", { 0.0f, 0.0f, 1.0f, 1.0f }, { 1.0f, 1.0f }, { 0.0f, 0.0f }, { 0.5f, 0.5f }, false });
     demoAtlas.nameToIndex["default"] = 0;
-    AtlasHandle demoAtlasHandle = resourceManager.registerAtlas("demo_sprite", std::move(demoAtlas));
+    // Referenced by name from main.json's sprite component ("atlas": "demo_sprite").
+    resourceManager.registerAtlas("demo_sprite", std::move(demoAtlas));
 
     fmt::print("Loading scene asynchronously...\n");
     // Declarative scene: scenes/main.json references the Sponza model via its
@@ -423,7 +420,7 @@ auto main(int argc, char* args[]) -> int {
     // The whole demo scene is data now: gameplay component appliers register
     // first, then main.json instantiates everything (Sponza, physics cubes,
     // lights, cameras, UI pages, particles). scene_builder.hpp is retired.
-    registerAppBlueprintComponents();
+    registerAppBlueprintComponents(resourceManager);
     if (sceneBlueprint && sceneBlueprint->ok) {
         std::vector<entt::entity> sceneEntities;
         Vapor::instantiate(registry, *scene, *sceneBlueprint, entt::null, "", &sceneEntities);
@@ -454,23 +451,8 @@ auto main(int argc, char* args[]) -> int {
     scene->stagedMeshes.clear();
     scene->stagedMeshTransforms.clear();
 
-    // Demo sprite entity — replaces the old drawRotatedQuad2D(spriteTexture) call
-    {
-        auto spriteEntity = registry.create();
-        registry.emplace<Vapor::NameComponent>(spriteEntity, Vapor::NameComponent{ "DemoSprite" });
-        auto& tc = registry.emplace<Vapor::TransformComponent>(spriteEntity);
-        tc.position = glm::vec3(650.0f, 100.0f, 0.0f);
-        tc.isDirty = true;
-        auto& sc = registry.emplace<Vapor::SpriteComponent>(spriteEntity);
-        sc.atlas = demoAtlasHandle;
-        sc.frameIndex = 0;
-        sc.size = glm::vec2(40.0f, 40.0f);
-        sc.tint = glm::vec4(1.0f);
-        registry.emplace<AutoRotateComponent>(
-            spriteEntity, AutoRotateComponent{ .axis = glm::vec3(0.0f, 0.0f, 1.0f), .speed = 2.0f }
-        );
-    }
-
+    // (The demo sprite, canvas shapes and text labels are all authored in
+    // scenes/main.json now — sprite / shape2D / text2D / rainbowGrid.)
 
     Uint32 frameCount = 0;
     float time = SDL_GetTicks() / 1000.0f;
@@ -642,6 +624,9 @@ auto main(int argc, char* args[]) -> int {
         Vapor::WindSystem::update(registry, renderer.get());
         FlipbookSystem::update(registry, deltaTime);
         SpriteRenderSystem::update(registry, renderer.get(), &resourceManager);
+        FpsTextSystem::update(registry, deltaTime);
+        Shape2DRenderSystem::update(registry, renderer.get());
+        Text2DRenderSystem::update(registry, renderer.get(), fontCache);
 
         // Rendering
         entt::entity activeCamEntity = Vapor::CameraControlSystem::getActiveCamera(registry);
@@ -666,62 +651,11 @@ auto main(int argc, char* args[]) -> int {
             ImGui::NewFrame();
             renderer->invokeImGuiCallback();
 
-            // ===== 2D Canvas Demo (Screen Space) =====
-            // Note: When camera is perspective (default), CanvasPass uses screen space (pixel coords)
-            // When camera is orthographic, CanvasPass uses world space ortho
-            float quadSize = 20.0f;
-            float spacing = 25.0f;
-            int cols = 10;
-            int rows = 5;
-            for (int y = 0; y < rows; y++) {
-                for (int x = 0; x < cols; x++) {
-                    float px = 50.0f + x * spacing;
-                    float py = 50.0f + y * spacing;
-                    // Rainbow colors based on position
-                    float hue = (float)(x + y * cols) / (float)(cols * rows);
-                    glm::vec4 color = glm::vec4(
-                        0.5f + 0.5f * sin(hue * 6.28f),
-                        0.5f + 0.5f * sin(hue * 6.28f + 2.09f),
-                        0.5f + 0.5f * sin(hue * 6.28f + 4.18f),
-                        0.8f
-                    );
-                    renderer->drawQuad2D(glm::vec2(px, py), glm::vec2(quadSize, quadSize), color);
-                }
-            }
-            renderer->drawCircleFilled2D(glm::vec2(400.0f, 100.0f), 30.0f, glm::vec4(1.0f, 0.5f, 0.0f, 1.0f));
-            renderer->drawRect2D(
-                glm::vec2(450.0f, 70.0f), glm::vec2(60.0f, 60.0f), glm::vec4(0.0f, 1.0f, 0.5f, 1.0f), 2.0f
-            );
-            renderer->drawTriangleFilled2D(
-                glm::vec2(550.0f, 130.0f),
-                glm::vec2(520.0f, 70.0f),
-                glm::vec2(580.0f, 70.0f),
-                glm::vec4(0.5f, 0.0f, 1.0f, 1.0f)
-            );
-            // ===== Text Rendering Demo (Screen Space) =====
-            if (gameFont.isValid()) {
-                // Draw text at screen positions (pixel coordinates)
-                renderer->drawText2D(
-                    gameFont, "Project Vapor", glm::vec2(50.0f, 200.0f), 1.0f, glm::vec4(1.0f, 1.0f, 1.0f, 1.0f)
-                );
-
-                renderer->drawText2D(
-                    gameFont,
-                    "F5: HUD | F6: Letterbox | F7: Subtitles",
-                    glm::vec2(50.0f, 250.0f),
-                    0.5f,
-                    glm::vec4(0.8f, 0.8f, 0.8f, 1.0f)
-                );
-
-                // Show FPS
-                renderer->drawText2D(
-                    gameFont,
-                    fmt::format("FPS: {:.1f}", 1.0f / deltaTime),
-                    glm::vec2(50.0f, 300.0f),
-                    0.5f,
-                    glm::vec4(0.0f, 1.0f, 0.0f, 1.0f)
-                );
-            }
+            // (2D canvas + text demos are ECS-driven now: Shape2D/Text2D
+            // entities in scenes/main.json rendered by the systems in the
+            // update block above. Canvas note: under a perspective camera the
+            // CanvasPass uses screen-space pixel coords; orthographic uses
+            // world-space ortho.)
 
             // ===== 3D Batch Demo =====
             renderer->drawQuad3D(

@@ -197,6 +197,71 @@
         "particleRenderer": { "blendMode": 0, "size": 0.1 }
       }
     },
+    {
+      "name": "Demo Sprite",
+      "position": [650.0, 100.0, 0.0],
+      "components": {
+        "sprite": { "atlas": "demo_sprite", "size": [40.0, 40.0] },
+        "autoRotate": { "axis": [0.0, 0.0, 1.0], "speed": 2.0 }
+      }
+    },
+    {
+      "name": "Rainbow Grid",
+      "position": [50.0, 50.0, 0.0],
+      "components": {
+        "rainbowGrid": { "cols": 10, "rows": 5, "spacing": 25.0, "size": 20.0, "alpha": 0.8 }
+      }
+    },
+    {
+      "name": "Canvas Circle",
+      "position": [400.0, 100.0, 0.0],
+      "components": {
+        "shape2D": { "kind": "circle", "radius": 30.0, "color": [1.0, 0.5, 0.0, 1.0] }
+      }
+    },
+    {
+      "name": "Canvas Rect",
+      "position": [450.0, 70.0, 0.0],
+      "components": {
+        "shape2D": { "kind": "rect", "size": [60.0, 60.0], "thickness": 2.0, "color": [0.0, 1.0, 0.5, 1.0] }
+      }
+    },
+    {
+      "name": "Canvas Triangle",
+      "position": [550.0, 130.0, 0.0],
+      "components": {
+        "shape2D": {
+          "kind": "triangle", "p1": [-30.0, -60.0], "p2": [30.0, -60.0],
+          "color": [0.5, 0.0, 1.0, 1.0]
+        }
+      }
+    },
+    {
+      "name": "Title Text",
+      "position": [50.0, 200.0, 0.0],
+      "components": {
+        "text2D": { "text": "Project Vapor", "font": "fonts/NotoSans-SemiBold.ttf", "scale": 1.0 }
+      }
+    },
+    {
+      "name": "Hint Text",
+      "position": [50.0, 250.0, 0.0],
+      "components": {
+        "text2D": {
+          "text": "F5: HUD | F6: Letterbox | F7: Subtitles",
+          "font": "fonts/NotoSans-SemiBold.ttf", "scale": 0.5,
+          "color": [0.8, 0.8, 0.8, 1.0]
+        }
+      }
+    },
+    {
+      "name": "FPS Text",
+      "position": [50.0, 300.0, 0.0],
+      "components": {
+        "text2D": { "font": "fonts/NotoSans-SemiBold.ttf", "scale": 0.5, "color": [0.0, 1.0, 0.0, 1.0] },
+        "fpsText": {}
+      }
+    },
     { "name": "Scene Global" }
   ]
 }

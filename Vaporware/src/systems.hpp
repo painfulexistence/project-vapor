@@ -17,6 +17,8 @@
 #include <algorithm>
 #include <fmt/core.h>
 #include <glm/gtc/matrix_transform.hpp>
+#include <string>
+#include <unordered_map>
 
 
 
@@ -110,6 +112,70 @@ public:
             };
 
             renderer->drawQuad2D(spriteTransform, atlas->texture, texCoords, sprite->tint, static_cast<int>(entity));
+        }
+    }
+};
+
+class Text2DRenderSystem {
+public:
+    // fontCache maps font path -> handle, owned by the app (no globals). The
+    // handle is created on first use at the component's fontSize; later
+    // entities sharing the path reuse it.
+    static void update(
+        entt::registry& reg,
+        IRenderer* renderer,
+        std::unordered_map<std::string, FontHandle>& fontCache
+    ) {
+        auto view = reg.view<Vapor::TransformComponent, Vapor::Text2DComponent>();
+        for (auto entity : view) {
+            const auto& text = view.get<Vapor::Text2DComponent>(entity);
+            if (!text.visible || text.text.empty() || text.font.empty()) continue;
+
+            auto [it, inserted] = fontCache.try_emplace(text.font);
+            if (inserted) {
+                it->second = renderer->loadFont(text.font, text.fontSize);
+            }
+            if (!it->second.isValid()) continue;
+
+            const auto& transform = view.get<Vapor::TransformComponent>(entity);
+            renderer->drawText2D(
+                it->second, text.text, glm::vec2(transform.worldTransform[3]), text.scale, text.color
+            );
+        }
+    }
+};
+
+class Shape2DRenderSystem {
+public:
+    static void update(entt::registry& reg, IRenderer* renderer) {
+        auto view = reg.view<Vapor::TransformComponent, Vapor::Shape2DComponent>();
+        for (auto entity : view) {
+            const auto& shape = view.get<Vapor::Shape2DComponent>(entity);
+            if (!shape.visible) continue;
+            const glm::vec2 pos = glm::vec2(view.get<Vapor::TransformComponent>(entity).worldTransform[3]);
+            using Kind = Vapor::Shape2DComponent::Kind;
+            switch (shape.kind) {
+            case Kind::Quad: renderer->drawQuad2D(pos, shape.size, shape.color); break;
+            case Kind::Rect: renderer->drawRect2D(pos, shape.size, shape.color, shape.thickness); break;
+            case Kind::Circle: renderer->drawCircleFilled2D(pos, shape.radius, shape.color); break;
+            case Kind::Triangle:
+                renderer->drawTriangleFilled2D(pos, pos + shape.p1, pos + shape.p2, shape.color);
+                break;
+            }
+        }
+    }
+};
+
+// Rewrites the text of every {FpsTextComponent, Text2DComponent} entity with
+// the current frame rate — the dynamic-text counterpart of the static JSON-
+// authored labels.
+class FpsTextSystem {
+public:
+    static void update(entt::registry& reg, float deltaTime) {
+        auto view = reg.view<FpsTextComponent, Vapor::Text2DComponent>();
+        for (auto entity : view) {
+            view.get<Vapor::Text2DComponent>(entity).text =
+                fmt::format("FPS: {:.1f}", deltaTime > 0.0f ? 1.0f / deltaTime : 0.0f);
         }
     }
 };

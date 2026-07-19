@@ -115,6 +115,35 @@ BlueprintComponents& BlueprintComponents::instance() {
         r.registerComponent<ParticleAttractorComponent>("particleAttractor");
         r.registerComponent<ParticleRendererComponent>("particleRenderer");
 
+        r.registerComponent<Text2DComponent>("text2D");
+        // shape2D: hand-written for the string-authored kind (the PFR path
+        // only reads enums as integers). Parsed manually so the applier also
+        // works in no-Boost builds.
+        r.registerApplier("shape2D", [](entt::registry& reg, entt::entity e, const nlohmann::json& j) {
+            Shape2DComponent shape;
+            const std::string kind = j.value("kind", "quad");
+            shape.kind = kind == "rect"       ? Shape2DComponent::Kind::Rect
+                         : kind == "circle"   ? Shape2DComponent::Kind::Circle
+                         : kind == "triangle" ? Shape2DComponent::Kind::Triangle
+                                              : Shape2DComponent::Kind::Quad;
+            const auto readV2 = [&](const char* key, glm::vec2 fallback) {
+                const auto it = j.find(key);
+                if (it == j.end() || !it->is_array() || it->size() < 2) return fallback;
+                return glm::vec2{ (*it)[0].get<float>(), (*it)[1].get<float>() };
+            };
+            shape.size = readV2("size", shape.size);
+            shape.p1 = readV2("p1", shape.p1);
+            shape.p2 = readV2("p2", shape.p2);
+            shape.radius = j.value("radius", shape.radius);
+            shape.thickness = j.value("thickness", shape.thickness);
+            shape.visible = j.value("visible", shape.visible);
+            if (const auto it = j.find("color"); it != j.end() && it->is_array() && it->size() >= 4) {
+                shape.color = { (*it)[0].get<float>(), (*it)[1].get<float>(),
+                                (*it)[2].get<float>(), (*it)[3].get<float>() };
+            }
+            reg.emplace_or_replace<Shape2DComponent>(e, shape);
+        });
+
         // Physics: data-only here — no live Jolt body is created. The app's
         // body-create system observes {Rigidbody, Transform, Collider} with an
         // invalid BodyHandle and creates/registers the body reactively.

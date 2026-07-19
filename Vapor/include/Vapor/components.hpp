@@ -252,6 +252,37 @@ namespace Vapor {
         bool visible = true;
     };
 
+    // 2D canvas text. Position comes from TransformComponent (screen-space
+    // pixels under a perspective camera, same convention as SpriteComponent).
+    // The font is referenced by path; the render system resolves and caches
+    // the FontHandle, so this stays a pure data component.
+    struct Text2DComponent {
+        std::string text;
+        std::string font;                    // e.g. "fonts/NotoSans-SemiBold.ttf"
+        float fontSize = 48.0f;              // rasterized base size (loadFont)
+        float scale = 1.0f;
+        glm::vec4 color = {1, 1, 1, 1};
+        bool visible = true;
+    };
+
+    // 2D canvas shape primitive; position from TransformComponent.
+    struct Shape2DComponent {
+        enum class Kind : uint8_t {
+            Quad,      // filled quad of `size`
+            Rect,      // outline of `size` at `thickness`
+            Circle,    // filled circle of `radius`
+            Triangle,  // filled; position + p1/p2 offsets are the three verts
+        };
+        Kind kind = Kind::Quad;
+        glm::vec2 size = {20.0f, 20.0f};
+        float radius = 10.0f;
+        float thickness = 1.0f;
+        glm::vec2 p1 = {0.0f, 0.0f};
+        glm::vec2 p2 = {0.0f, 0.0f};
+        glm::vec4 color = {1, 1, 1, 1};
+        bool visible = true;
+    };
+
     // Flipbook animation component (drives any frame-based animation)
     struct FlipbookComponent {
         std::vector<uint16_t> frameIndices;

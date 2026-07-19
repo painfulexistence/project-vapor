@@ -11,6 +11,7 @@
 //   - pointLightField expands into N light entities (declarative stand-in for
 //     the old RNG loop in scene_builder; seeded, so layouts are reproducible)
 
+#include "Vapor/resource_manager.hpp"
 #include "Vapor/rng.hpp"
 #include "Vapor/scene_blueprint.hpp"
 #include "components.hpp"
@@ -25,9 +26,10 @@
 #include "pages/settings_page.hpp"
 #include "pages/subtitle_page.hpp"
 #include <SDL3/SDL_events.h>
+#include <cmath>
 #include <fmt/core.h>
 
-inline void registerAppBlueprintComponents() {
+inline void registerAppBlueprintComponents(Vapor::ResourceManager& resourceManager) {
     auto& r = Vapor::BlueprintComponents::instance();
 
     // Plain aggregates — PFR fills fields by JSON key.
@@ -37,6 +39,39 @@ inline void registerAppBlueprintComponents() {
     r.registerComponent<CharacterIntent>("characterIntent");
     r.registerComponent<PersistentTag>("persistentTag");
     r.registerComponent<Vapor::UINavigatorComponent>("uiNavigator");
+    r.registerComponent<FpsTextComponent>("fpsText");
+
+    // sprite: the atlas is authored by NAME and resolved against the app's
+    // ResourceManager (AtlasHandle itself is not authorable). The atlas must
+    // be registered before instantiate() — registration stays code-side.
+    // NOTE: captures resourceManager by pointer; it outlives every
+    // instantiate() call (both live for the whole of main()).
+    r.registerApplier("sprite", [rm = &resourceManager](entt::registry& reg, entt::entity e, const nlohmann::json& j) {
+        Vapor::SpriteComponent sprite;
+        const std::string atlasName = j.value("atlas", "");
+        sprite.atlas = rm->getAtlasHandle(atlasName);
+        if (!sprite.atlas.valid()) {
+            fmt::print(stderr, "blueprint: sprite atlas '{}' not registered — sprite hidden\n", atlasName);
+        }
+        sprite.frameIndex = j.value("frameIndex", sprite.frameIndex);
+        const auto readV2 = [&](const char* key, glm::vec2 fallback) {
+            const auto it = j.find(key);
+            if (it == j.end() || !it->is_array() || it->size() < 2) return fallback;
+            return glm::vec2{ (*it)[0].get<float>(), (*it)[1].get<float>() };
+        };
+        sprite.size = readV2("size", sprite.size);
+        sprite.pivot = readV2("pivot", sprite.pivot);
+        if (const auto it = j.find("tint"); it != j.end() && it->is_array() && it->size() >= 4) {
+            sprite.tint = { (*it)[0].get<float>(), (*it)[1].get<float>(),
+                            (*it)[2].get<float>(), (*it)[3].get<float>() };
+        }
+        sprite.sortingLayer = j.value("sortingLayer", sprite.sortingLayer);
+        sprite.orderInLayer = j.value("orderInLayer", sprite.orderInLayer);
+        sprite.flipX = j.value("flipX", sprite.flipX);
+        sprite.flipY = j.value("flipY", sprite.flipY);
+        sprite.visible = j.value("visible", sprite.visible);
+        reg.emplace_or_replace<Vapor::SpriteComponent>(e, sprite);
+    });
 
     r.registerApplier("lightMovementLogic", [](entt::registry& reg, entt::entity e, const nlohmann::json& j) {
         LightMovementLogicComponent logic;
@@ -192,6 +227,39 @@ inline void registerAppBlueprintComponents() {
                 logic.radius = 3.0f;
                 break;
             case 3: logic.pattern = MovementPattern::Spiral; break;
+            }
+        }
+    });
+
+    // Declarative rainbow quad grid (cols x rows Shape2D children under the
+    // grid entity, hue cycling across cells) — replaces the immediate-mode
+    // canvas demo loop. Cell positions are LOCAL; place the grid entity to
+    // move the whole pattern.
+    r.registerApplier("rainbowGrid", [](entt::registry& reg, entt::entity grid, const nlohmann::json& j) {
+        const int cols = j.value("cols", 10);
+        const int rows = j.value("rows", 5);
+        const float spacing = j.value("spacing", 25.0f);
+        const float size = j.value("size", 20.0f);
+        const float alpha = j.value("alpha", 0.8f);
+        for (int y = 0; y < rows; ++y) {
+            for (int x = 0; x < cols; ++x) {
+                const auto e = reg.create();
+                reg.emplace<Vapor::NameComponent>(
+                    e, Vapor::NameComponent{ fmt::format("Rainbow Quad {}", y * cols + x) });
+                auto& tc = reg.emplace<Vapor::TransformComponent>(e);
+                tc.parent = grid;
+                tc.position = glm::vec3(x * spacing, y * spacing, 0.0f);
+                tc.isDirty = true;
+                const float hue = static_cast<float>(x + y * cols) / static_cast<float>(cols * rows);
+                auto& shape = reg.emplace<Vapor::Shape2DComponent>(e);
+                shape.kind = Vapor::Shape2DComponent::Kind::Quad;
+                shape.size = { size, size };
+                shape.color = glm::vec4(
+                    0.5f + 0.5f * std::sin(hue * 6.28f),
+                    0.5f + 0.5f * std::sin(hue * 6.28f + 2.09f),
+                    0.5f + 0.5f * std::sin(hue * 6.28f + 4.18f),
+                    alpha
+                );
             }
         }
     });
