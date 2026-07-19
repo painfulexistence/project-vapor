@@ -45,7 +45,8 @@ namespace Vapor {
             registerComponent<TriggerVolumeComponent>("Trigger Volume", false);
             registerComponent<CharacterBodyComponent>("Character Body", false);
             registerComponent<VehicleBodyComponent>("Vehicle Body", false);
-            registerComponent<SpriteComponent>("Sprite");
+            registerComponent<Sprite2DComponent>("Sprite 2D");
+            registerComponent<Sprite3DComponent>("Sprite 3D");
             registerComponent<FlipbookComponent>("Flipbook");
             registerComponent<Text2DComponent>("Text 2D");
             registerComponent<Shape2DComponent>("Shape 2D");

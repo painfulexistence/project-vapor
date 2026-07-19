@@ -201,8 +201,15 @@
       "name": "Canvas Sprite",
       "position": [650.0, 100.0, 0.0],
       "components": {
-        "sprite": { "atlas": "demo_sprite", "size": [40.0, 40.0] },
+        "sprite2D": { "atlas": "demo_sprite", "size": [40.0, 40.0] },
         "autoRotate": { "axis": [0.0, 0.0, 1.0], "speed": 2.0 }
+      }
+    },
+    {
+      "name": "World Sprite",
+      "position": [0.0, 2.0, 0.0],
+      "components": {
+        "sprite3D": { "atlas": "demo_sprite", "size": [1.0, 1.0], "tint": [1.0, 0.5, 0.5, 1.0], "billboard": true }
       }
     },
     {

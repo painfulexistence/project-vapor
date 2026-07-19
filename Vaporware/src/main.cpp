@@ -203,36 +203,57 @@ static void registerAppBlueprintComponents(Vapor::ResourceManager& resourceManag
     r.registerComponent<Vapor::UINavigatorComponent>("uiNavigator");
     r.registerComponent<FpsTextComponent>("fpsText");
 
-    // sprite: the atlas is authored by NAME and resolved against the app's
-    // ResourceManager (AtlasHandle itself is not authorable). The atlas must
-    // be registered before instantiate() — registration stays code-side.
-    // NOTE: captures resourceManager by pointer; it outlives every
-    // instantiate() call (both live for the whole of main()).
-    r.registerApplier("sprite", [rm = &resourceManager](entt::registry& reg, entt::entity e, const nlohmann::json& j) {
-        Vapor::SpriteComponent sprite;
+    // sprite2D / sprite3D: the atlas is authored by NAME and resolved against
+    // the app's ResourceManager (AtlasHandle itself is not authorable). The
+    // atlas must be registered before instantiate() — registration stays
+    // code-side. Both appliers capture resourceManager by pointer; it outlives
+    // every instantiate() call (both live for the whole of main()).
+    const auto readV2 = [](const nlohmann::json& j, const char* key, glm::vec2 fallback) {
+        const auto it = j.find(key);
+        if (it == j.end() || !it->is_array() || it->size() < 2) return fallback;
+        return glm::vec2{ (*it)[0].get<float>(), (*it)[1].get<float>() };
+    };
+    const auto readV4 = [](const nlohmann::json& j, const char* key, glm::vec4 fallback) {
+        const auto it = j.find(key);
+        if (it == j.end() || !it->is_array() || it->size() < 4) return fallback;
+        return glm::vec4{ (*it)[0].get<float>(), (*it)[1].get<float>(),
+                          (*it)[2].get<float>(), (*it)[3].get<float>() };
+    };
+
+    r.registerApplier("sprite2D", [rm = &resourceManager, readV2, readV4](entt::registry& reg, entt::entity e, const nlohmann::json& j) {
+        Vapor::Sprite2DComponent sprite;
         const std::string atlasName = j.value("atlas", "");
         sprite.atlas = rm->getAtlasHandle(atlasName);
         if (!sprite.atlas.valid()) {
-            fmt::print(stderr, "blueprint: sprite atlas '{}' not registered — sprite hidden\n", atlasName);
+            fmt::print(stderr, "blueprint: sprite2D atlas '{}' not registered — sprite hidden\n", atlasName);
         }
         sprite.frameIndex = j.value("frameIndex", sprite.frameIndex);
-        const auto readV2 = [&](const char* key, glm::vec2 fallback) {
-            const auto it = j.find(key);
-            if (it == j.end() || !it->is_array() || it->size() < 2) return fallback;
-            return glm::vec2{ (*it)[0].get<float>(), (*it)[1].get<float>() };
-        };
-        sprite.size = readV2("size", sprite.size);
-        sprite.pivot = readV2("pivot", sprite.pivot);
-        if (const auto it = j.find("tint"); it != j.end() && it->is_array() && it->size() >= 4) {
-            sprite.tint = { (*it)[0].get<float>(), (*it)[1].get<float>(),
-                            (*it)[2].get<float>(), (*it)[3].get<float>() };
-        }
+        sprite.size = readV2(j, "size", sprite.size);
+        sprite.pivot = readV2(j, "pivot", sprite.pivot);
+        sprite.tint = readV4(j, "tint", sprite.tint);
         sprite.sortingLayer = j.value("sortingLayer", sprite.sortingLayer);
         sprite.orderInLayer = j.value("orderInLayer", sprite.orderInLayer);
         sprite.flipX = j.value("flipX", sprite.flipX);
         sprite.flipY = j.value("flipY", sprite.flipY);
         sprite.visible = j.value("visible", sprite.visible);
-        reg.emplace_or_replace<Vapor::SpriteComponent>(e, sprite);
+        reg.emplace_or_replace<Vapor::Sprite2DComponent>(e, sprite);
+    });
+
+    r.registerApplier("sprite3D", [rm = &resourceManager, readV2, readV4](entt::registry& reg, entt::entity e, const nlohmann::json& j) {
+        Vapor::Sprite3DComponent sprite;
+        const std::string atlasName = j.value("atlas", "");
+        sprite.atlas = rm->getAtlasHandle(atlasName);
+        if (!sprite.atlas.valid()) {
+            fmt::print(stderr, "blueprint: sprite3D atlas '{}' not registered — sprite hidden\n", atlasName);
+        }
+        sprite.frameIndex = j.value("frameIndex", sprite.frameIndex);
+        sprite.size = readV2(j, "size", sprite.size);
+        sprite.tint = readV4(j, "tint", sprite.tint);
+        sprite.billboard = j.value("billboard", sprite.billboard);
+        sprite.flipX = j.value("flipX", sprite.flipX);
+        sprite.flipY = j.value("flipY", sprite.flipY);
+        sprite.visible = j.value("visible", sprite.visible);
+        reg.emplace_or_replace<Vapor::Sprite3DComponent>(e, sprite);
     });
 
     r.registerApplier("lightMovementLogic", [](entt::registry& reg, entt::entity e, const nlohmann::json& j) {
@@ -877,7 +898,8 @@ auto main(int argc, char* args[]) -> int {
         Vapor::SkySystem::update(registry, renderer.get());
         Vapor::WindSystem::update(registry, renderer.get());
         FlipbookSystem::update(registry, deltaTime);
-        SpriteRenderSystem::update(registry, renderer.get(), &resourceManager);
+        Sprite2DRenderSystem::update(registry, renderer.get(), &resourceManager);
+        Sprite3DRenderSystem::update(registry, renderer.get(), &resourceManager);
         FpsTextSystem::update(registry, deltaTime);
         Shape2DRenderSystem::update(registry, renderer.get());
         Text2DRenderSystem::update(registry, renderer.get(), fontCache);
@@ -909,12 +931,9 @@ auto main(int argc, char* args[]) -> int {
             // entities in scenes/main.json rendered by the systems in the
             // update block above. Canvas note: under a perspective camera the
             // CanvasPass uses screen-space pixel coords; orthographic uses
-            // world-space ortho.)
-
-            // ===== 3D Batch Demo =====
-            renderer->drawQuad3D(
-                glm::vec3(0.0f, 2.0f, 0.0f), glm::vec2(1.0f, 1.0f), spriteTexture, glm::vec4(1.0f, 0.5f, 0.5f, 1.0f)
-            );
+            // world-space ortho. The 3D batch's world sprite is ECS-driven now:
+            // the "World Sprite" Sprite3D entity in scenes/main.json, rendered
+            // by Sprite3DRenderSystem in the update block above.)
 
             // ===== Render-to-Texture "TV" Demo =====
             // Disabled by default — it's a demo affordance, not part of the

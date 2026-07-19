@@ -237,12 +237,14 @@ namespace Vapor {
         bool  paused = false;
     };
 
-    // 2D Sprite rendering component
-    struct SpriteComponent {
+    // Screen-space 2D sprite (atlas frame drawn via the 2D canvas batch).
+    // Position comes from TransformComponent, in screen pixels under a
+    // perspective camera.
+    struct Sprite2DComponent {
         AtlasHandle atlas;
         uint16_t frameIndex = 0;
 
-        glm::vec2 size = {1.0f, 1.0f};       // World units
+        glm::vec2 size = {1.0f, 1.0f};       // Screen pixels
         glm::vec2 pivot = {0.5f, 0.5f};      // Anchor point (0-1)
         glm::vec4 tint = {1, 1, 1, 1};       // Color tint
         int sortingLayer = 0;
@@ -252,8 +254,24 @@ namespace Vapor {
         bool visible = true;
     };
 
+    // World-space 3D sprite: an atlas frame on a quad placed in the world.
+    // billboard = true re-orients it to face the camera every frame (particles,
+    // markers, floating labels); false uses the entity's TransformComponent
+    // orientation (posters, decals, ground quads). size is in world units.
+    struct Sprite3DComponent {
+        AtlasHandle atlas;
+        uint16_t frameIndex = 0;
+
+        glm::vec2 size = {1.0f, 1.0f};       // World units
+        glm::vec4 tint = {1, 1, 1, 1};       // Color tint
+        bool billboard = false;
+        bool flipX = false;
+        bool flipY = false;
+        bool visible = true;
+    };
+
     // 2D canvas text. Position comes from TransformComponent (screen-space
-    // pixels under a perspective camera, same convention as SpriteComponent).
+    // pixels under a perspective camera, same convention as Sprite2DComponent).
     // The font is referenced by path; the render system resolves and caches
     // the FontHandle, so this stays a pure data component.
     struct Text2DComponent {
