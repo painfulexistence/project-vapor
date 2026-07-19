@@ -100,6 +100,7 @@ static LightBlueprint parseLight(const json& j) {
 BlueprintComponents& BlueprintComponents::instance() {
     static BlueprintComponents registry = [] {
         BlueprintComponents r;
+        r.registerComponent<InactiveComponent>("inactive");
         r.registerComponent<SunComponent>("sun");
         r.registerComponent<MoonComponent>("moon");
         r.registerComponent<PointLightComponent>("pointLight");

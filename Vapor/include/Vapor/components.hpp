@@ -23,6 +23,14 @@ namespace Vapor {
         std::string name;
     };
 
+    // Entity-level "disabled" tag (the ECS idiom: presence = off, systems
+    // exclude it). An inactive entity is skipped by rendering and by the systems
+    // that opt in via entt::exclude<InactiveComponent>. This is the whole-entity
+    // switch (Unity's SetActive); it is separate from per-drawable `visible`
+    // (render-only) and per-component `enabled` (that one component's logic).
+    // Toggle it from the inspector's entity "Active" checkbox.
+    struct InactiveComponent {};
+
     struct TransformComponent {
         glm::vec3 position = glm::vec3(0.0f);
         glm::quat rotation = glm::quat(1.0f, 0.0f, 0.0f, 0.0f);

@@ -81,7 +81,7 @@ namespace Vapor {
             std::vector<RenderInstance>& instances,
             std::unordered_map<std::shared_ptr<Material>, std::vector<std::shared_ptr<Mesh>>>& instanceBatches
         ) {
-            auto view = registry.view<MeshRendererComponent>();
+            auto view = registry.view<MeshRendererComponent>(entt::exclude<InactiveComponent>);
 
             for (auto entity : view) {
                 auto& render = view.get<MeshRendererComponent>(entity);
@@ -911,7 +911,7 @@ namespace Vapor {
             if (!renderer) return;
 
             std::vector<ParticleDrawPacket> draws;
-            auto view = registry.view<ParticleEmitterComponent>();
+            auto view = registry.view<ParticleEmitterComponent>(entt::exclude<InactiveComponent>);
             for (auto entity : view) {
                 const auto& emit = view.get<ParticleEmitterComponent>(entity);
                 if (emit._slotBegin == ~0u || emit._slotCount == 0) continue;

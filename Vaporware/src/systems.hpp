@@ -67,7 +67,8 @@ public:
         // Collect visible sprites
         std::vector<std::tuple<glm::mat4, Vapor::Sprite2DComponent*, entt::entity>> sprites;
 
-        auto view = reg.view<Vapor::TransformComponent, Vapor::Sprite2DComponent>();
+        auto view = reg.view<Vapor::TransformComponent, Vapor::Sprite2DComponent>(
+            entt::exclude<Vapor::InactiveComponent>);
         for (auto entity : view) {
             auto& sprite = view.get<Vapor::Sprite2DComponent>(entity);
             if (!sprite.visible || !sprite.atlas.valid()) continue;
@@ -139,7 +140,8 @@ public:
             camUp = glm::vec3(view[0][1], view[1][1], view[2][1]);
         }
 
-        auto view = reg.view<Vapor::TransformComponent, Vapor::Sprite3DComponent>();
+        auto view = reg.view<Vapor::TransformComponent, Vapor::Sprite3DComponent>(
+            entt::exclude<Vapor::InactiveComponent>);
         for (auto entity : view) {
             auto& sprite = view.get<Vapor::Sprite3DComponent>(entity);
             if (!sprite.visible || !sprite.atlas.valid()) continue;
@@ -190,7 +192,8 @@ public:
         IRenderer* renderer,
         std::unordered_map<std::string, FontHandle>& fontCache
     ) {
-        auto view = reg.view<Vapor::TransformComponent, Vapor::Text2DComponent>();
+        auto view = reg.view<Vapor::TransformComponent, Vapor::Text2DComponent>(
+            entt::exclude<Vapor::InactiveComponent>);
         for (auto entity : view) {
             const auto& text = view.get<Vapor::Text2DComponent>(entity);
             if (!text.visible || text.text.empty() || text.font.empty()) continue;
@@ -212,7 +215,8 @@ public:
 class Shape2DRenderSystem {
 public:
     static void update(entt::registry& reg, IRenderer* renderer) {
-        auto view = reg.view<Vapor::TransformComponent, Vapor::Shape2DComponent>();
+        auto view = reg.view<Vapor::TransformComponent, Vapor::Shape2DComponent>(
+            entt::exclude<Vapor::InactiveComponent>);
         for (auto entity : view) {
             const auto& shape = view.get<Vapor::Shape2DComponent>(entity);
             if (!shape.visible) continue;

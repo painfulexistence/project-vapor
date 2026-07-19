@@ -6626,7 +6626,8 @@ void Renderer::collectDrawables(std::shared_ptr<RenderScene> scene) {
 
 void Renderer::collectDrawables(entt::registry& registry, std::shared_ptr<RenderScene> scene) {
     // Collect renderables from ECS
-    auto view = registry.view<Vapor::TransformComponent, Vapor::MeshRendererComponent>();
+    auto view = registry.view<Vapor::TransformComponent, Vapor::MeshRendererComponent>(
+        entt::exclude<Vapor::InactiveComponent>);
 
     for (auto entity : view) {
         auto& transform = view.get<Vapor::TransformComponent>(entity);
