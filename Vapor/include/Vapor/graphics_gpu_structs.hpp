@@ -8,7 +8,10 @@
 #include <glm/vec3.hpp>
 #include <glm/vec4.hpp>
 
-namespace Vapor::gpu {
+namespace Vapor {
+
+// TODO: static_assert(sizeof) + offsetof on the load-bearing fields to lock
+// these GPU upload layouts against silent drift.
 
 enum class PrimitiveMode {
     POINTS,
@@ -134,7 +137,6 @@ struct alignas(16) LightCullData {
     glm::vec2 screenSize;
     glm::vec2 _pad1;
     glm::uvec3 gridSize;
-    float _pad2;
     Uint32 lightCount;
 };
 
@@ -145,4 +147,4 @@ struct alignas(16) IBLCaptureData {
     float _pad[2];
 };
 
-} // namespace Vapor::gpu
+} // namespace Vapor

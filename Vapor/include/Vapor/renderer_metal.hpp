@@ -19,7 +19,7 @@
 
 #include "debug_draw.hpp"
 #include "graphics.hpp"
-#include "graphics_gpu_structs.hpp"  // Vapor::gpu layout structs (gpu::InstanceData, …) matching the .metal shaders
+#include "graphics_gpu_structs.hpp"  // GPU upload structs (InstanceData, …) matching the .metal shaders
 #include "graphics_batch2d.hpp"  // Batch2DStats, Batch2DVertex, Batch2DBlendMode
 #include "graphics_effects.hpp"  // WaterData, VolumetricFogData, VolumetricCloudData, LightScatteringData, SunFlareData, Particle
 #include "graphics_gibs.hpp"     // GIBSQuality, GIBSData, Surfel
@@ -817,8 +817,8 @@ protected:
     // Instance data
     // instanceBatches: material → list of (mesh, instanceArrayIndex) for rasterization draw calls
     struct MeshDraw { std::shared_ptr<Vapor::Mesh> mesh; uint32_t instanceIndex; };
-    std::vector<gpu::InstanceData> instances;
-    std::vector<gpu::InstanceData> pendingEcsInstances;
+    std::vector<InstanceData> instances;
+    std::vector<InstanceData> pendingEcsInstances;
     std::unordered_map<std::shared_ptr<Vapor::Material>, std::vector<MeshDraw>> pendingEcsBatches;
     std::vector<MTL::AccelerationStructureInstanceDescriptor> pendingEcsAccelInstances;
     std::vector<MTL::AccelerationStructureInstanceDescriptor> accelInstances;

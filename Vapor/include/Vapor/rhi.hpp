@@ -629,7 +629,7 @@ public:
 
     // Multi-draw indirect: issue `drawCount` indexed draws whose arguments are
     // read from `argsBuffer` starting at `offset`, one DrawCommand every
-    // `stride` bytes (see gpu::DrawCommand in graphics_gpu_structs.hpp).
+    // `stride` bytes (see DrawCommand in graphics_gpu_structs.hpp).
     // The currently bound index buffer + a merged vertex buffer are used; each
     // command carries its own firstIndex/vertexOffset/firstInstance. On Vulkan
     // this is a single vkCmdDrawIndexedIndirect; on Metal it expands to a loop
