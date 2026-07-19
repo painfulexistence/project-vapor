@@ -31,7 +31,7 @@ fragment void fragmentMain(
 ) {
     constexpr sampler s(address::repeat, filter::linear, mip_filter::linear);
     float4 baseColor = texAlbedo.sample(s, in.uv);
-    if (baseColor.a * in.material.baseColorFactor.a < 0.5) {
+    if (in.material.alphaCutoff > 0.0 && baseColor.a * in.material.baseColorFactor.a < in.material.alphaCutoff) {
         discard_fragment();
     }
 }

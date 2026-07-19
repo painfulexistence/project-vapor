@@ -5269,6 +5269,9 @@ auto Renderer_Metal::draw(std::shared_ptr<RenderScene> scene, Camera& camera) ->
                                         .roughnessFactor = mat->roughnessFactor,
                                         .occlusionStrength = mat->occlusionStrength,
                                         .emissiveFactor = mat->emissiveFactor,
+                                        // Only MASK materials carry a cutoff; 0 disables the
+                                        // shader discard for OPAQUE/BLEND (matches the RHI path).
+                                        .alphaCutoff = mat->alphaMode == AlphaMode::MASK ? mat->alphaCutoff : 0.0f,
                                         .emissiveStrength = mat->emissiveStrength,
                                         .subsurface = mat->subsurface,
                                         .specular = mat->specular,

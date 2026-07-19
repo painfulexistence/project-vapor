@@ -274,7 +274,7 @@ fragment float4 fragmentMain(
     }
 
     float4 baseColor = texAlbedo.sample(s, in.uv);
-    if (baseColor.a * material.baseColorFactor.a < 0.5) discard_fragment();
+    if (material.alphaCutoff > 0.0 && baseColor.a * material.baseColorFactor.a < material.alphaCutoff) discard_fragment();
 
     Surface surf;
     surf.color         = srgbToLinear(baseColor.rgb * material.baseColorFactor.rgb);

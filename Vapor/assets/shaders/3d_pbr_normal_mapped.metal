@@ -519,7 +519,8 @@ fragment float4 fragmentMain(
     }
 
     float4 baseColor = matAlbedo.sample(s, in.uv);
-    if (baseColor.a * material.baseColorFactor.a < 0.5) {
+    // glTF MASK cutout: per-material cutoff (0 = disabled for OPAQUE/BLEND).
+    if (material.alphaCutoff > 0.0 && baseColor.a * material.baseColorFactor.a < material.alphaCutoff) {
         discard_fragment();
     }
     Surface surf;

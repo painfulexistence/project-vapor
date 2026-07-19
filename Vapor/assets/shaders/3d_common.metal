@@ -56,7 +56,8 @@ struct MaterialData {
     float metallicFactor;
     float roughnessFactor;
     float occlusionStrength;
-    float3 emissiveFactor;
+    packed_float3 emissiveFactor;
+    float alphaCutoff;// MASK-mode cutoff; 0 = disabled (matches C++ MaterialData)
     float emissiveStrength;
     float subsurface;
     float specular;

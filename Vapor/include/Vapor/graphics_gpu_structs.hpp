@@ -25,7 +25,10 @@ struct alignas(16) MaterialData {
     float roughnessFactor;
     float occlusionStrength;
     glm::vec3 emissiveFactor;
-    float _pad1;
+    // MASK-mode alpha cutoff in emissiveFactor's alignment tail (was _pad1, so
+    // the layout is unchanged); the Metal MaterialData twin exposes the same
+    // slot via packed_float3 + alphaCutoff. 0 = no cutoff (OPAQUE/BLEND).
+    float alphaCutoff;
     float emissiveStrength;
     float subsurface;
     float specular;

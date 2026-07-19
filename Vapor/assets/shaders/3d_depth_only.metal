@@ -55,7 +55,7 @@ fragment PrePassOutput fragmentMain(
 
     MaterialData material = in.material;
     float4 baseColor = texAlbedo.sample(s, in.uv);
-    if (baseColor.a * material.baseColorFactor.a < 0.5) {
+    if (material.alphaCutoff > 0.0 && baseColor.a * material.baseColorFactor.a < material.alphaCutoff) {
         discard_fragment();
     }
 
