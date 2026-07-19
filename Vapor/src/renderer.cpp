@@ -1774,26 +1774,32 @@ void Renderer::mainRenderPass() {
         // free on both paths (13/14 are the bindless tables, 16 is spotLights).
         bool reflOn = rtReflectionsEnabled && capabilities.raytracing && reflectionRT.isValid();
         if (reflOn) rhi->setTexture(0, 16, reflectionRT, clampSampler);
-        glm::vec2 reflParams(reflOn ? 1.0f : 0.0f, rtReflectionIntensity);
-        rhi->setFragmentBytes(&reflParams, sizeof(glm::vec2), 17);
-        // Spot lights (buffer 16) + counts/flags (buffer 15). buffer 14 is the
-        // bindless SystemTexs table's slot, so spot lights use 16 (see the shader
-        // note in 3d_pbr_normal_mapped.metal). Flag bit0 says the point-shadow
-        // texture carries the RGB channel format (R point / G rect / B spot); 0
-        // when stochastic shadows are off, so rect/spot stay unshadowed instead
-        // of sampling the (white) placeholder's channels.
+        // Spot lights (buffer 16). buffer 14 is the bindless SystemTexs table's
+        // slot, so spot lights use 16 (see 3d_pbr_normal_mapped.metal).
         rhi->setFragmentBuffer(16, spotLightBuffer, 0, sizeof(Vapor::SpotLight) * maxSpotLights);
-        glm::uvec2 spotRectParams(static_cast<Uint32>(spotLights.size()),
-                                  (capabilities.raytracing && stochasticShadowsEnabled) ? 1u : 0u);
-        rhi->setFragmentBytes(&spotRectParams, sizeof(glm::uvec2), 15);
-        // RT refraction result (texture 17) + params (buffer 18), same
-        // runtime-gated contract as the reflection pair above. Weighted per
-        // pixel by the material's transmission factor in the shader.
+        // RT refraction result (texture 17), same runtime gate as reflection.
         bool refrOn = rtRefractionsEnabled && sceneHasTransmission &&
                       capabilities.raytracing && refractionRT.isValid();
         if (refrOn) rhi->setTexture(0, 17, refractionRT, clampSampler);
-        glm::vec2 refrParams(refrOn ? 1.0f : 0.0f, rtRefractionIntensity);
-        rhi->setFragmentBytes(&refrParams, sizeof(glm::vec2), 18);
+        // RT reflection/refraction composite params + the spot-count/stochastic
+        // flag are read by the MSL PBR from fragment buffers 15/17/18. On Vulkan
+        // setFragmentBytes(N) writes push-constant offset 64+(N%4)*16, so 15/17/18
+        // ALIAS dirLightCount(binding 11 -> 112), spotRectCounts(binding 1 -> 80)
+        // and mainDebugFlags(binding 2 -> 96) — clobbering real lighting fields
+        // (corrupt directional/spot counts -> green ghosting when RT reflection is
+        // on). RHIMain.frag doesn't read these params (RT composite is Metal-only;
+        // the GLSL spot count comes from spotRectCounts@80), so push them on Metal
+        // only. The stochastic-shadow flag bit0 says whether the point-shadow
+        // texture carries the RGB channel format (R point / G rect / B spot).
+        if (backend == GraphicsBackend::Metal) {
+            glm::vec2  reflParams(reflOn ? 1.0f : 0.0f, rtReflectionIntensity);
+            glm::uvec2 spotRectParams(static_cast<Uint32>(spotLights.size()),
+                                      (capabilities.raytracing && stochasticShadowsEnabled) ? 1u : 0u);
+            glm::vec2  refrParams(refrOn ? 1.0f : 0.0f, rtRefractionIntensity);
+            rhi->setFragmentBytes(&reflParams, sizeof(glm::vec2), 17);
+            rhi->setFragmentBytes(&spotRectParams, sizeof(glm::uvec2), 15);
+            rhi->setFragmentBytes(&refrParams, sizeof(glm::vec2), 18);
+        }
     }
 
     // GPU-driven path is used only when enabled AND the cull pipeline/args
