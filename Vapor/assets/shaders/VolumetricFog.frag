@@ -31,7 +31,7 @@ layout(std430, set = 1, binding = 0) readonly buffer FogBuf {
     float time;
     vec2 _pad2;
     vec3 windDirection;
-    float _pad3;
+    uint volumeCount;   // fog volumes in FogVolumeBuf (0 = legacy single-volume height fog)
 };
 
 // Must match Vapor::PSSMRenderData (same layout RHIMain.frag reads).
@@ -87,6 +87,18 @@ struct RectLight {
 };
 layout(std430, set = 1, binding = 5) readonly buffer RectLightBuf { RectLight rectLights[]; };
 
+// Fog volumes (global height fog + bounded AABB banks). std430 twin of
+// Vapor::VolumetricFogVolumeGPU (render_data.hpp / 3d_volumetric_fog.metal).
+struct FogVolume {
+    vec4 boundsMin;      // xyz world AABB min; w = bounded flag (0 = global, 1 = AABB)
+    vec4 boundsMax;      // xyz world AABB max; w = edgeFalloff (world units)
+    vec4 densityParams;  // density, heightFalloff, baseHeight, maxHeight
+    vec4 albedoBlend;    // albedo.rgb, blendWeight
+    vec4 phaseNoise;     // anisotropy, ambientIntensity, noiseScale, noiseIntensity
+    vec4 wind;           // windSpeed (× wind strength), ...
+};
+layout(std430, set = 1, binding = 6) readonly buffer FogVolumeBuf { FogVolume fogVolumes[]; };
+
 // x = cull grid X, y = cull grid Y, z = spot count, w = rect count
 // (RHI::setFragmentBytes binding 0 -> push offset 64).
 layout(push_constant) uniform PushConstants {
@@ -129,6 +141,55 @@ float fogFbm3D(vec3 p, int octaves, float lacunarity, float gain) {
         frequency *= lacunarity;
     }
     return value;
+}
+
+// Blended fog density at a world position. Densities from every volume ADD
+// (extinction is additive across overlapping media); each volume is either
+// global exponential height fog or an AABB bank with soft edges, then modulated
+// by its own wind-animated value-noise. Falls back to the legacy single-volume
+// height fog when no volumes are bound (volumeCount == 0). The lighting still
+// uses the fog buffer's (first-volume) phase/ambient — the froxel path (native
+// Metal) does the full per-volume material blend.
+float blendedDensity(vec3 p) {
+    if (volumeCount == 0u) {
+        float d = fogDensity * exp(-max(0.0, p.y - fogBaseHeight) * max(fogHeightFalloff, 1e-4));
+        if (p.y > fogMaxHeight) d = 0.0;
+        if (noiseScale > 0.0) {
+            vec3 np = p * noiseScale + windDirection * (time * windSpeed);
+            float n = fogFbm3D(np, 4, 2.0, 0.5) * 0.5 + 0.5;
+            d = max(0.0, d * (1.0 + (n - 0.5) * noiseIntensity * 2.0));
+        }
+        return d;
+    }
+    float total = 0.0;
+    for (uint i = 0u; i < volumeCount; ++i) {
+        FogVolume v = fogVolumes[i];
+        float density = v.densityParams.x;
+        float d;
+        if (v.boundsMin.w < 0.5) {
+            // Global exponential height fog.
+            if (p.y > v.densityParams.w) continue;
+            d = density * exp(-max(0.0, p.y - v.densityParams.z) * max(v.densityParams.y, 1e-4));
+        } else {
+            // AABB bank with soft edges.
+            vec3 bmin = v.boundsMin.xyz;
+            vec3 bmax = v.boundsMax.xyz;
+            if (any(lessThan(p, bmin)) || any(greaterThan(p, bmax))) continue;
+            vec3 dmn = p - bmin;
+            vec3 dmx = bmax - p;
+            float edge = min(min(min(dmn.x, dmn.y), dmn.z), min(min(dmx.x, dmx.y), dmx.z));
+            d = density * clamp(edge / max(v.boundsMax.w, 1e-4), 0.0, 1.0);
+        }
+        if (d <= 0.0) continue;
+        float nScale = v.phaseNoise.z;
+        if (nScale > 0.0) {
+            vec3 np = p * nScale + windDirection * (time * v.wind.x);
+            float n = fogFbm3D(np, 4, 2.0, 0.5) * 0.5 + 0.5;
+            d *= (1.0 + (n - 0.5) * v.phaseNoise.w * 2.0);
+        }
+        total += max(0.0, d);
+    }
+    return total;
 }
 
 // One-tap PSSM visibility at an arbitrary world position (RHIMain.frag's
@@ -179,15 +240,8 @@ void main() {
     for (int st = 0; st < STEPS; ++st) {
         float t = (float(st) + 0.5) * stepLen;
         vec3 p = cameraPosition + rayDir * t;
-        // Height falloff (base-relative) + wind-animated density noise —
-        // matches the Metal simpleFogFragment sampleFogDensity().
-        float dens = fogDensity * exp(-max(0.0, p.y - fogBaseHeight) * max(fogHeightFalloff, 0.0001));
-        if (p.y > fogMaxHeight) dens = 0.0;
-        if (noiseScale > 0.0) {
-            vec3 noisePos = p * noiseScale + windDirection * (time * windSpeed);
-            float n = fogFbm3D(noisePos, 4, 2.0, 0.5) * 0.5 + 0.5;   // [0,1]
-            dens = max(0.0, dens * (1.0 + (n - 0.5) * noiseIntensity * 2.0));
-        }
+        // Blended density across every fog volume (bounded banks + global haze).
+        float dens = blendedDensity(p);
         if (dens < 1e-6) continue;
 
         vec3 L = vec3(0.0);

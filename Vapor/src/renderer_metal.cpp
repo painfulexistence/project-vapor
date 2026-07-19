@@ -52,6 +52,13 @@
 
 using namespace Vapor;
 
+// Froxel fog grid dimensions — MUST match FROXEL_SIZE_X/Y/Z in
+// 3d_volumetric_fog.metal. The injection dispatches one thread per froxel; the
+// integration one thread per (x,y) column.
+static constexpr uint32_t FROXEL_GRID_X = 160;
+static constexpr uint32_t FROXEL_GRID_Y = 90;
+static constexpr uint32_t FROXEL_GRID_Z = 64;
+
 // The pass classes below complete the forward declarations in
 // renderer_metal.hpp, which live in namespace Vapor — so the definitions must
 // too. (An unqualified class definition at global scope would define a NEW
@@ -1596,15 +1603,15 @@ public:
     void execute() override {
         auto& r = *renderer;
 
-        if (!r.volumetricFogEnabled || !r.fogSimplePipeline) return;
+        if (!r.volumetricFogEnabled) return;
 
+        const auto frame = r.currentFrameInFlight;
         auto drawableSize = r.swapchain->drawableSize();
 
-        // Update fog data buffer
+        // ── Fill the froxel globals (camera / sun / grid / temporal / wind) ──
         auto* atmos = reinterpret_cast<AtmosphereData*>(r.atmosphereDataBuffer->contents());
-
         auto* fogData =
-            reinterpret_cast<VolumetricFogData*>(r.volumetricFogDataBuffers[r.currentFrameInFlight]->contents());
+            reinterpret_cast<VolumetricFogData*>(r.volumetricFogDataBuffers[frame]->contents());
         fogData->invViewProj = glm::inverse(r.currentCamera->getProjMatrix() * r.currentCamera->getViewMatrix());
         fogData->cameraPosition = r.currentCamera->getEye();
         fogData->sunDirection = glm::normalize(atmos->sunDirection);
@@ -1615,8 +1622,8 @@ public:
         fogData->farPlane = r.volumetricFogSettings.farPlane;
         fogData->frameIndex = r.currentFrameInFlight;
         fogData->time = r.volumetricFogSettings.time;
-
-        // Copy settings
+        // Fog params below feed the simpleFogFragment fallback (the froxel path
+        // reads per-volume params from the volume buffer instead).
         fogData->fogDensity = r.volumetricFogSettings.fogDensity;
         fogData->fogHeightFalloff = r.volumetricFogSettings.fogHeightFalloff;
         fogData->fogBaseHeight = r.volumetricFogSettings.fogBaseHeight;
@@ -1632,11 +1639,93 @@ public:
         fogData->windDirection = r.volumetricFogSettings.windDirection;
         fogData->temporalBlend = r.volumetricFogSettings.temporalBlend;
 
-        r.volumetricFogDataBuffers[r.currentFrameInFlight]->didModifyRange(
-            NS::Range::Make(0, r.volumetricFogDataBuffers[r.currentFrameInFlight]->length())
-        );
+        // ── Pack the fog volume buffer (global + bounded banks) ──
+        uint32_t volCount = static_cast<uint32_t>(r.volumetricFogVolumes.size());
+        if (volCount > static_cast<uint32_t>(kMaxFogVolumes)) volCount = kMaxFogVolumes;
+        auto* vols = reinterpret_cast<VolumetricFogVolumeGPU*>(r.fogVolumeBuffers[frame]->contents());
+        for (uint32_t i = 0; i < volCount; ++i) {
+            const auto& s = r.volumetricFogVolumes[i];
+            vols[i].boundsMin = glm::vec4(s.boundsMin, s.bounded ? 1.0f : 0.0f);
+            vols[i].boundsMax = glm::vec4(s.boundsMax, s.edgeFalloff);
+            vols[i].densityParams = glm::vec4(s.density, s.heightFalloff, s.baseHeight, s.maxHeight);
+            vols[i].albedoBlend = glm::vec4(s.albedo, s.blendWeight);
+            vols[i].phaseNoise = glm::vec4(s.anisotropy, s.ambientIntensity, s.noiseScale, s.noiseIntensity);
+            vols[i].wind = glm::vec4(s.windSpeed * r.m_windStrength, 0.0f, 0.0f, 0.0f);
+        }
+        fogData->volumeCount = volCount;
 
-        // Simple fog pass - ping-pong: read from colorRT, write to tempColorRT
+        r.volumetricFogDataBuffers[frame]->didModifyRange(
+            NS::Range::Make(0, r.volumetricFogDataBuffers[frame]->length()));
+        r.fogVolumeBuffers[frame]->didModifyRange(
+            NS::Range::Make(0, r.fogVolumeBuffers[frame]->length()));
+
+        // Shared light-set params (native Metal has no spot lights → count 0).
+        uint32_t fogRectCount = r.currentScene
+            ? static_cast<uint32_t>(r.currentScene->rectLights.size()) : 0u;
+        glm::uvec4 fogLightParams(r.clusterGridSizeX, r.clusterGridSizeY, 0u, fogRectCount);
+
+        const bool froxelReady = r.fogUseFroxel && r.fogFroxelInjectionPipeline
+            && r.fogScatteringIntegrationPipeline && r.fogApplyPipeline
+            && r.fogFroxelGrid && r.fogIntegratedVolume && volCount > 0;
+
+        if (froxelReady) {
+            // ── Compute: inject then integrate. One serial compute encoder
+            // orders the two dispatches and barriers the froxel grid between
+            // them (injection writes it, integration reads it). ──
+            auto computeDesc = makeTimedComputeDesc(true, false);
+            auto compute = r.currentCommandBuffer->computeCommandEncoder(computeDesc.get());
+
+            compute->setComputePipelineState(r.fogFroxelInjectionPipeline.get());
+            compute->setBuffer(r.volumetricFogDataBuffers[frame].get(), 0, 0);
+            compute->setBuffer(r.cameraDataBuffers[frame].get(), 0, 1);
+            compute->setBuffer(r.pssmDataBuffers[frame].get(), 0, 2);
+            compute->setBuffer(r.pointLightBuffer.get(), 0, 3);
+            compute->setBuffer(r.clusterBuffers[frame].get(), 0, 4);
+            compute->setBuffer(r.pointLightBuffer.get(), 0, 5);  // spot placeholder (count 0)
+            compute->setBuffer(r.rectLightBuffer.get(), 0, 6);
+            compute->setBytes(&fogLightParams, sizeof(fogLightParams), 7);
+            compute->setBuffer(r.fogVolumeBuffers[frame].get(), 0, 8);
+            compute->setTexture(r.fogFroxelGrid.get(), 0);
+            compute->setTexture(r.pssmShadowMaps.get(), 1);
+            compute->dispatchThreadgroups(
+                MTL::Size((FROXEL_GRID_X + 3) / 4, (FROXEL_GRID_Y + 3) / 4, (FROXEL_GRID_Z + 3) / 4),
+                MTL::Size(4, 4, 4));
+
+            compute->setComputePipelineState(r.fogScatteringIntegrationPipeline.get());
+            compute->setBuffer(r.volumetricFogDataBuffers[frame].get(), 0, 0);
+            compute->setTexture(r.fogFroxelGrid.get(), 0);
+            compute->setTexture(r.fogIntegratedVolume.get(), 1);
+            compute->dispatchThreadgroups(
+                MTL::Size((FROXEL_GRID_X + 7) / 8, (FROXEL_GRID_Y + 7) / 8, 1),
+                MTL::Size(8, 8, 1));
+            compute->endEncoding();
+
+            // ── Composite: sample the integrated volume, ping-pong colorRT ──
+            auto passDesc = NS::TransferPtr(MTL::RenderPassDescriptor::renderPassDescriptor());
+            auto colorAttach = passDesc->colorAttachments()->object(0);
+            colorAttach->setLoadAction(MTL::LoadActionDontCare);
+            colorAttach->setStoreAction(MTL::StoreActionStore);
+            colorAttach->setTexture(r.tempColorRT.get());
+            // GPU-timing scope began on the compute encoder above; end it here.
+            applyTimingToRenderDesc(passDesc.get(), false, true);
+            auto encoder = r.currentCommandBuffer->renderCommandEncoder(passDesc.get());
+            encoder->setRenderPipelineState(r.fogApplyPipeline.get());
+            encoder->setCullMode(MTL::CullModeNone);
+            encoder->setFragmentTexture(r.colorRT.get(), 0);
+            encoder->setFragmentTexture(r.depthStencilRT.get(), 1);
+            encoder->setFragmentTexture(r.fogIntegratedVolume.get(), 2);
+            encoder->setFragmentBuffer(r.volumetricFogDataBuffers[frame].get(), 0, 0);
+            encoder->setFragmentBuffer(r.cameraDataBuffers[frame].get(), 0, 1);
+            encoder->drawPrimitives(MTL::PrimitiveType::PrimitiveTypeTriangle, 0, 3, 1);
+            encoder->endEncoding();
+            std::swap(r.colorRT, r.tempColorRT);
+            return;
+        }
+
+        // ── Fallback: single-pass simpleFogFragment raymarch (froxel disabled
+        // or its compute pipelines unavailable). Uses the first volume's params,
+        // mirrored into fogData above. ──
+        if (!r.fogSimplePipeline) return;
         auto passDesc = NS::TransferPtr(MTL::RenderPassDescriptor::renderPassDescriptor());
         auto colorAttach = passDesc->colorAttachments()->object(0);
         colorAttach->setLoadAction(MTL::LoadActionDontCare);
@@ -1649,20 +1738,16 @@ public:
         encoder->setCullMode(MTL::CullModeNone);
         encoder->setFragmentTexture(r.colorRT.get(), 0);// Read from color
         encoder->setFragmentTexture(r.depthStencilRT.get(), 1);
-        encoder->setFragmentBuffer(r.volumetricFogDataBuffers[r.currentFrameInFlight].get(), 0, 0);
-        encoder->setFragmentBuffer(r.cameraDataBuffers[r.currentFrameInFlight].get(), 0, 1);
+        encoder->setFragmentBuffer(r.volumetricFogDataBuffers[frame].get(), 0, 0);
+        encoder->setFragmentBuffer(r.cameraDataBuffers[frame].get(), 0, 1);
         // Volumetric raymarch inputs (shared shader contract): PSSM cascades
-        // for sun shafts + the light set. Native has no spot lights — bind a
-        // placeholder with count 0.
+        // for sun shafts + the light set.
         encoder->setFragmentTexture(r.pssmShadowMaps.get(), 2);
-        encoder->setFragmentBuffer(r.pssmDataBuffers[r.currentFrameInFlight].get(), 0, 2);
+        encoder->setFragmentBuffer(r.pssmDataBuffers[frame].get(), 0, 2);
         encoder->setFragmentBuffer(r.pointLightBuffer.get(), 0, 3);
-        encoder->setFragmentBuffer(r.clusterBuffers[r.currentFrameInFlight].get(), 0, 4);
+        encoder->setFragmentBuffer(r.clusterBuffers[frame].get(), 0, 4);
         encoder->setFragmentBuffer(r.pointLightBuffer.get(), 0, 5);  // spot placeholder (count 0)
         encoder->setFragmentBuffer(r.rectLightBuffer.get(), 0, 6);
-        uint32_t fogRectCount = r.currentScene
-            ? static_cast<uint32_t>(r.currentScene->rectLights.size()) : 0u;
-        glm::uvec4 fogLightParams(r.clusterGridSizeX, r.clusterGridSizeY, 0u, fogRectCount);
         encoder->setFragmentBytes(&fogLightParams, sizeof(fogLightParams), 7);
         encoder->drawPrimitives(MTL::PrimitiveType::PrimitiveTypeTriangle, 0, 3, 1);
         encoder->endEncoding();
@@ -3633,6 +3718,31 @@ auto Renderer_Metal::createResources() -> void {
     volumetricFogSettings.windDirection = glm::vec3(1.0f, 0.0f, 0.0f);
     volumetricFogSettings.temporalBlend = 0.1f;
 
+    // Per-frame fog volume buffers (global + bounded AABB banks) injected into
+    // the froxel grid. Sized to the shader's MAX_FOG_VOLUMES / kMaxFogVolumes.
+    fogVolumeBuffers.resize(MAX_FRAMES_IN_FLIGHT);
+    for (auto& volBuffer : fogVolumeBuffers) {
+        volBuffer = NS::TransferPtr(device->newBuffer(
+            sizeof(VolumetricFogVolumeGPU) * kMaxFogVolumes, MTL::ResourceStorageModeManaged));
+    }
+
+    // Froxel 3D textures: the injection grid (in-scatter.rgb, extinction) and the
+    // integrated volume (accumulated scattering.rgb, transmittance). Both RGBA16F,
+    // read+write for the compute passes and sampled by the composite.
+    {
+        MTL::TextureDescriptor* froxelDesc = MTL::TextureDescriptor::alloc()->init();
+        froxelDesc->setTextureType(MTL::TextureType3D);
+        froxelDesc->setPixelFormat(MTL::PixelFormatRGBA16Float);
+        froxelDesc->setWidth(FROXEL_GRID_X);
+        froxelDesc->setHeight(FROXEL_GRID_Y);
+        froxelDesc->setDepth(FROXEL_GRID_Z);
+        froxelDesc->setUsage(MTL::TextureUsageShaderRead | MTL::TextureUsageShaderWrite);
+        froxelDesc->setStorageMode(MTL::StorageModePrivate);
+        fogFroxelGrid = NS::TransferPtr(device->newTexture(froxelDesc));
+        fogIntegratedVolume = NS::TransferPtr(device->newTexture(froxelDesc));
+        froxelDesc->release();
+    }
+
     // ========================================================================
     // Volumetric Cloud buffers and initialization
     // ========================================================================
@@ -4279,6 +4389,22 @@ auto Renderer_Metal::createResources() -> void {
                     );
                 }
 
+                // Froxel composite pipeline: same fullscreen vertex, but samples
+                // the pre-integrated volume instead of raymarching per pixel.
+                auto froxelApplyFn = library->newFunction(
+                    NS::String::string("volumetricFogFragment", NS::StringEncoding::UTF8StringEncoding));
+                if (froxelApplyFn) {
+                    pipelineDesc->setFragmentFunction(froxelApplyFn);
+                    fogApplyPipeline = NS::TransferPtr(device->newRenderPipelineState(pipelineDesc, &error));
+                    if (!fogApplyPipeline) {
+                        fmt::print(
+                            "Warning: Could not create fog apply pipeline: {}\n",
+                            error ? error->localizedDescription()->utf8String() : "unknown error"
+                        );
+                    }
+                    froxelApplyFn->release();
+                }
+
                 pipelineDesc->release();
                 vertexMain->release();
                 fragmentMain->release();
@@ -4286,6 +4412,18 @@ auto Renderer_Metal::createResources() -> void {
             library->release();
         }
         code->release();
+    }
+
+    // Froxel compute pipelines (injection + scattering integration). Wrapped so a
+    // shader failure disables the froxel path (the pass falls back to
+    // simpleFogFragment) instead of aborting renderer initialization.
+    try {
+        fogFroxelInjectionPipeline =
+            createComputePipeline("shaders/3d_volumetric_fog.metal", "froxelInjection");
+        fogScatteringIntegrationPipeline =
+            createComputePipeline("shaders/3d_volumetric_fog.metal", "scatteringIntegration");
+    } catch (const std::exception& e) {
+        fmt::print("Warning: froxel fog compute pipelines unavailable: {}\n", e.what());
     }
 
     // ========================================================================
@@ -5913,31 +6051,34 @@ auto Renderer_Metal::draw(std::shared_ptr<RenderScene> scene, Camera& camera) ->
             ImGui::TreePop();
         }
 
-        if (ImGui::TreeNode("Height Fog")) {
+        if (ImGui::TreeNode("Volumetric Fog")) {
             ImGui::Separator();
-            ImGui::Checkbox("Enabled", &volumetricFogEnabled);
+            // Enable is ECS-driven: VolumetricFogSystem pushes the scene's fog
+            // volumes each frame and gates the pass on whether any exist. This
+            // panel tunes the fallback / first-volume-mirror params + the path.
+            ImGui::Text(volumetricFogEnabled ? "Active — %d volume(s)" : "Inactive (no fog volumes)",
+                        static_cast<int>(volumetricFogVolumes.size()));
+            ImGui::Checkbox("Use froxel grid (off = raymarch fallback)", &fogUseFroxel);
 
-            if (volumetricFogEnabled) {
-                ImGui::Separator();
-                ImGui::Text("Fog Parameters");
-                ImGui::DragFloat("Density", &volumetricFogSettings.fogDensity, 0.001f, 0.0f, 0.5f);
-                ImGui::DragFloat("Height Falloff", &volumetricFogSettings.fogHeightFalloff, 0.01f, 0.001f, 1.0f);
-                ImGui::DragFloat("Base Height", &volumetricFogSettings.fogBaseHeight, 1.0f, -100.0f, 100.0f);
-                ImGui::DragFloat("Max Height", &volumetricFogSettings.fogMaxHeight, 10.0f, 0.0f, 500.0f);
+            ImGui::Separator();
+            ImGui::Text("Fog Parameters");
+            ImGui::DragFloat("Density", &volumetricFogSettings.fogDensity, 0.001f, 0.0f, 0.5f);
+            ImGui::DragFloat("Height Falloff", &volumetricFogSettings.fogHeightFalloff, 0.01f, 0.001f, 1.0f);
+            ImGui::DragFloat("Base Height", &volumetricFogSettings.fogBaseHeight, 1.0f, -100.0f, 100.0f);
+            ImGui::DragFloat("Max Height", &volumetricFogSettings.fogMaxHeight, 10.0f, 0.0f, 500.0f);
 
-                ImGui::Separator();
-                ImGui::Text("Scattering");
-                ImGui::DragFloat("Anisotropy", &volumetricFogSettings.anisotropy, 0.01f, -0.99f, 0.99f);
-                ImGui::DragFloat("Ambient Intensity", &volumetricFogSettings.ambientIntensity, 0.01f, 0.0f, 2.0f);
+            ImGui::Separator();
+            ImGui::Text("Scattering");
+            ImGui::DragFloat("Anisotropy", &volumetricFogSettings.anisotropy, 0.01f, -0.99f, 0.99f);
+            ImGui::DragFloat("Ambient Intensity", &volumetricFogSettings.ambientIntensity, 0.01f, 0.0f, 2.0f);
 
-                if (ImGui::Button("Reset to Defaults")) {
-                    volumetricFogSettings.fogDensity = 0.02f;
-                    volumetricFogSettings.fogHeightFalloff = 0.1f;
-                    volumetricFogSettings.fogBaseHeight = 0.0f;
-                    volumetricFogSettings.fogMaxHeight = 100.0f;
-                    volumetricFogSettings.anisotropy = 0.6f;
-                    volumetricFogSettings.ambientIntensity = 0.3f;
-                }
+            if (ImGui::Button("Reset to Defaults")) {
+                volumetricFogSettings.fogDensity = 0.02f;
+                volumetricFogSettings.fogHeightFalloff = 0.1f;
+                volumetricFogSettings.fogBaseHeight = 0.0f;
+                volumetricFogSettings.fogMaxHeight = 100.0f;
+                volumetricFogSettings.anisotropy = 0.6f;
+                volumetricFogSettings.ambientIntensity = 0.3f;
             }
             ImGui::TreePop();
         }
@@ -7817,4 +7958,27 @@ void Renderer_Metal::setWind(const WindRenderData& wind) {
     volumetricFogSettings.windDirection   = wind.direction;
     volumetricCloudSettings.windDirection = wind.direction;
     m_windStrength = wind.strength;
+}
+
+void Renderer_Metal::setVolumetricFogVolumes(const std::vector<VolumetricFogVolumeData>& volumes) {
+    // Store the ECS-resolved fog volumes for injection; gate the froxel pass on
+    // whether any exist (an empty list turns it off). The VolumetricFogPass packs
+    // them into the per-frame volume buffer.
+    volumetricFogVolumes = volumes;
+    volumetricFogEnabled = !volumes.empty();
+    // Mirror the first volume's tunables into the globals struct so the panel /
+    // simpleFogFragment fallback stay populated (the froxel path reads per-volume
+    // params straight from the volume buffer).
+    if (!volumes.empty()) {
+        const auto& v = volumes.front();
+        volumetricFogSettings.fogDensity       = v.density;
+        volumetricFogSettings.fogHeightFalloff = v.heightFalloff;
+        volumetricFogSettings.fogBaseHeight    = v.baseHeight;
+        volumetricFogSettings.fogMaxHeight     = v.maxHeight;
+        volumetricFogSettings.anisotropy       = v.anisotropy;
+        volumetricFogSettings.ambientIntensity = v.ambientIntensity;
+        volumetricFogSettings.noiseScale       = v.noiseScale;
+        volumetricFogSettings.noiseIntensity   = v.noiseIntensity;
+        volumetricFogSettings.windSpeed        = v.windSpeed;
+    }
 }

@@ -6,238 +6,325 @@ using namespace metal;
 // ============================================================================
 // Volumetric Fog - Froxel-based Implementation
 // ============================================================================
-// Uses a 3D froxel (frustum voxel) grid to compute scattering and extinction.
-// The grid is aligned to the camera frustum with exponential depth distribution.
+// A 3D froxel (frustum voxel) grid aligned to the camera frustum with an
+// exponential depth distribution. Three stages:
+//   1. froxelInjection      (compute) — per froxel, blend every fog volume's
+//      density/scattering, light it (sun + PSSM shadow, tile-culled points,
+//      spots, rects), write (in-scatter.rgb, extinction) to a 3D texture.
+//   2. scatteringIntegration (compute) — march each froxel column front-to-back
+//      accumulating scattering + transmittance into a second 3D texture.
+//   3. volumetricFogFragment (fragment) — sample the integrated volume at the
+//      pixel's depth slice and composite: scene * transmittance + in-scatter.
+// This decouples fog cost from screen resolution (the per-pixel work is a single
+// 3D texture tap) and is the froxel upgrade over the simpleFogFragment raymarch
+// kept below as a fallback.
 
-// Froxel grid dimensions
+// Froxel grid dimensions.
 constant uint FROXEL_SIZE_X = 160;
 constant uint FROXEL_SIZE_Y = 90;
 constant uint FROXEL_SIZE_Z = 64;
+
+// Max fog volumes injected per frame — matches kMaxFogVolumes (render_data.hpp)
+// and the per-volume buffer the renderer uploads.
+constant uint MAX_FOG_VOLUMES = 16;
 
 // ============================================================================
 // Data Structures
 // ============================================================================
 
+// Froxel-fog globals. Byte-for-byte twin of Vapor::VolumetricFogData
+// (graphics_effects.hpp): MSL float3 occupies a full 16-byte slot, so each vec3
+// there matches a vec3 + trailing pad here. The explicit float2 pads
+// (_pad5/_pad6) are REQUIRED to keep frameIndex/windDirection aligned with the
+// C++ struct — the froxel kernels read the whole tail, unlike simpleFogFragment.
 struct VolumetricFogData {
-    float4x4 invViewProj;           // Inverse view-projection matrix
-    float4x4 prevViewProj;          // Previous frame view-projection (for TAA)
-    float3 cameraPosition;          // Camera world position
-    float3 sunDirection;            // Sun direction (normalized)
-    float3 sunColor;                // Sun color
-    float sunIntensity;             // Sun light intensity
-
-    // Fog parameters
-    float fogDensity;               // Base fog density
-    float fogHeightFalloff;         // Height-based density falloff
-    float fogBaseHeight;            // Height where fog is densest
-    float fogMaxHeight;             // Maximum height for fog
-
-    // Scattering parameters
-    float scatteringCoeff;          // Scattering coefficient
-    float extinctionCoeff;          // Extinction coefficient (absorption + out-scatter)
-    float anisotropy;               // Phase function anisotropy (g parameter)
-    float ambientIntensity;         // Ambient light contribution
-
-    // Grid parameters
-    float nearPlane;                // Camera near plane
-    float farPlane;                 // Camera far plane (fog far)
-    float2 screenSize;              // Screen dimensions
-
-    // Temporal
-    uint frameIndex;                // Frame counter for temporal jitter
-    float temporalBlend;            // Blend factor for TAA (0.05-0.1)
-
-    // Noise parameters
-    float noiseScale;               // Scale of density noise
-    float noiseIntensity;           // Intensity of density variation
-    float windSpeed;                // Wind animation speed
-    float time;                     // Current time
-    float3 windDirection;           // Wind direction
+    float4x4 invViewProj;
+    float4x4 prevViewProj;
+    float3 cameraPosition;
+    float3 sunDirection;
+    float3 sunColor;
+    float sunIntensity;
+    float fogDensity;
+    float fogHeightFalloff;
+    float fogBaseHeight;
+    float fogMaxHeight;
+    float scatteringCoeff;
+    float extinctionCoeff;
+    float anisotropy;
+    float ambientIntensity;
+    float nearPlane;
+    float farPlane;
+    uint  volumeCount;      // fog volumes in the volume buffer (was _pad4)
+    float2 screenSize;
+    float2 _pad5;
+    uint  frameIndex;
+    float temporalBlend;
+    float noiseScale;
+    float noiseIntensity;
+    float windSpeed;
+    float time;
+    float2 _pad6;
+    float3 windDirection;
 };
 
-struct FroxelData {
-    float4 scatteringExtinction;    // RGB: in-scattered light, A: transmittance
+// One fog volume. vec4-only twin of Vapor::VolumetricFogVolumeGPU (96 bytes).
+struct VolumetricFogVolume {
+    float4 boundsMin;      // xyz world AABB min; w = bounded flag (0 = global, 1 = AABB)
+    float4 boundsMax;      // xyz world AABB max; w = edgeFalloff (world units)
+    float4 densityParams;  // x = density, y = heightFalloff, z = baseHeight, w = maxHeight
+    float4 albedoBlend;    // xyz = albedo/tint; w = blendWeight
+    float4 phaseNoise;     // x = anisotropy, y = ambientIntensity, z = noiseScale, w = noiseIntensity
+    float4 wind;           // x = windSpeed (already × global strength)
 };
 
 // ============================================================================
 // Helper Functions
 // ============================================================================
 
-// Convert froxel index to world position
-float3 froxelToWorld(uint3 froxelIdx, constant VolumetricFogData& data) {
-    // Normalized froxel coordinates [0, 1]
-    float3 uvw = (float3(froxelIdx) + 0.5) / float3(FROXEL_SIZE_X, FROXEL_SIZE_Y, FROXEL_SIZE_Z);
-
-    // Exponential depth distribution (more slices near camera)
-    float linearDepth = data.nearPlane * pow(data.farPlane / data.nearPlane, uvw.z);
-
-    // Screen space to clip space
-    float2 ndc = uvw.xy * 2.0 - 1.0;
-    ndc.y = -ndc.y;  // Flip Y for Metal
-
-    // Reconstruct world position
-    float4 clipPos = float4(ndc * linearDepth, linearDepth, 1.0);
-    float4 viewPos = data.invViewProj * clipPos;
-    return viewPos.xyz / viewPos.w;
+// Reconstruct the world-space center of a froxel from its normalized grid coord.
+// Depth is distributed exponentially (more slices near the camera). The froxel
+// sits at a PLANAR view-space depth (-Z), matching depthToSlice() in the
+// composite. Uses the camera's own invProj/invView so the reconstruction is
+// exact for the render projection.
+float3 froxelToWorld(float3 uvw, constant VolumetricFogData& data, constant CameraData& camera) {
+    float viewDepth = data.nearPlane * pow(data.farPlane / data.nearPlane, uvw.z);
+    // Normalized froxel xy -> Metal (Y-down) screen UV -> NDC.
+    float2 ndc = float2(uvw.x * 2.0 - 1.0, 1.0 - uvw.y * 2.0);
+    float4 viewH = camera.invProj * float4(ndc, 1.0, 1.0);
+    float3 viewRay = viewH.xyz / viewH.w;                       // point on far plane, view space
+    float3 viewPos = viewRay * (viewDepth / max(-viewRay.z, 1e-4));  // rescale to planar depth
+    return (camera.invView * float4(viewPos, 1.0)).xyz;
 }
 
-// Get depth slice from linear depth
-float depthToSlice(float linearDepth, float nearPlane, float farPlane) {
-    return log(linearDepth / nearPlane) / log(farPlane / nearPlane) * FROXEL_SIZE_Z;
+// View-space planar depth -> fractional froxel Z slice.
+float depthToSlice(float viewDepth, float nearPlane, float farPlane) {
+    return log(max(viewDepth, nearPlane) / nearPlane) / log(farPlane / nearPlane) * float(FROXEL_SIZE_Z);
 }
 
-// Sample fog density at world position
-float sampleFogDensity(float3 worldPos, constant VolumetricFogData& data) {
-    float height = worldPos.y;
+// Density of a single fog volume at a world position (0 outside its extent).
+// Global (bounded==0): exponential height fog. Bounded: uniform density inside
+// the AABB, cross-faded to 0 over edgeFalloff at each face. Both modulated by
+// the shared wind-animated value-noise (windSpeed already folds in wind strength).
+float evalVolumeDensity(const device VolumetricFogVolume& v, float3 p,
+                        constant VolumetricFogData& data) {
+    float density  = v.densityParams.x;
+    float bounded  = v.boundsMin.w;
 
-    // Base height fog density
-    float heightDensity = data.fogDensity * heightFogDensity(height, data.fogBaseHeight, data.fogHeightFalloff);
-
-    // Clamp to max height
-    if (height > data.fogMaxHeight) {
-        return 0.0;
+    float base;
+    if (bounded < 0.5) {
+        // Global exponential height fog.
+        float baseHeight    = v.densityParams.z;
+        float maxHeight     = v.densityParams.w;
+        float heightFalloff = v.densityParams.y;
+        if (p.y > maxHeight) return 0.0;
+        base = density * exp(-max(0.0, p.y - baseHeight) * max(heightFalloff, 1e-4));
+    } else {
+        // AABB fog bank with soft edges.
+        float3 bmin = v.boundsMin.xyz;
+        float3 bmax = v.boundsMax.xyz;
+        if (any(p < bmin) || any(p > bmax)) return 0.0;
+        float edgeFalloff = v.boundsMax.w;
+        float3 dmin = p - bmin;
+        float3 dmax = bmax - p;
+        float edge = min(min(min(dmin.x, dmin.y), dmin.z),
+                         min(min(dmax.x, dmax.y), dmax.z));
+        base = density * saturate(edge / max(edgeFalloff, 1e-4));
     }
+    if (base <= 0.0) return 0.0;
 
-    // Add noise for variation
-    float3 noisePos = worldPos * data.noiseScale + data.windDirection * data.time * data.windSpeed;
-    float noise = fbm3D(noisePos, 4, 2.0, 0.5);
-    noise = noise * 0.5 + 0.5;  // Remap to [0, 1]
-
-    // Combine density
-    float density = heightDensity * (1.0 + (noise - 0.5) * data.noiseIntensity * 2.0);
-
-    return max(0.0, density);
+    float noiseScale = v.phaseNoise.z;
+    if (noiseScale > 0.0) {
+        float noiseIntensity = v.phaseNoise.w;
+        float3 np = p * noiseScale + data.windDirection * (data.time * v.wind.x);
+        float n = fbm3D(np, 4, 2.0, 0.5) * 0.5 + 0.5;   // [0,1]
+        base *= (1.0 + (n - 0.5) * noiseIntensity * 2.0);
+    }
+    return max(0.0, base);
 }
 
 // ============================================================================
 // Compute Shader: Froxel Injection
 // ============================================================================
-// Computes density and lighting for each froxel
+// Blend every fog volume at each froxel, light the medium, store scattering +
+// extinction. Light handling mirrors simpleFogFragment (shared conventions).
 
 kernel void froxelInjection(
     uint3 gid [[thread_position_in_grid]],
     constant VolumetricFogData& data [[buffer(0)]],
-    constant DirLight* dirLights [[buffer(1)]],
-    constant PointLight* pointLights [[buffer(2)]],
-    constant uint& dirLightCount [[buffer(3)]],
-    constant uint& pointLightCount [[buffer(4)]],
-    device FroxelData* froxelGrid [[buffer(5)]],
-    texture2d<float, access::sample> shadowMap [[texture(0)]]
+    constant CameraData& camera [[buffer(1)]],
+    constant PSSMData& pssmData [[buffer(2)]],
+    const device PointLight* pointLights [[buffer(3)]],
+    const device Cluster* clusters [[buffer(4)]],
+    const device SpotLight* spotLights [[buffer(5)]],
+    const device RectLight* rectLights [[buffer(6)]],
+    constant uint4& fogLightParams [[buffer(7)]],  // x=cullGridX y=cullGridY z=spotCount w=rectCount
+    const device VolumetricFogVolume* volumes [[buffer(8)]],
+    texture3d<float, access::write> froxelGrid [[texture(0)]],
+    depth2d_array<float, access::sample> pssmShadowMaps [[texture(1)]]
 ) {
-    // Bounds check
     if (gid.x >= FROXEL_SIZE_X || gid.y >= FROXEL_SIZE_Y || gid.z >= FROXEL_SIZE_Z) {
         return;
     }
+    constexpr sampler shadowCmpSampler(filter::linear, compare_func::less_equal,
+                                       address::clamp_to_edge);
 
-    // Froxel linear index
-    uint froxelIdx = gid.z * FROXEL_SIZE_X * FROXEL_SIZE_Y + gid.y * FROXEL_SIZE_X + gid.x;
+    float3 uvw = (float3(gid) + 0.5) / float3(FROXEL_SIZE_X, FROXEL_SIZE_Y, FROXEL_SIZE_Z);
+    float3 worldPos = froxelToWorld(uvw, data, camera);
 
-    // Get world position of froxel center
-    float3 worldPos = froxelToWorld(gid, data);
-
-    // Sample density
-    float density = sampleFogDensity(worldPos, data);
-
-    // Early out for zero density
-    if (density < 0.0001) {
-        froxelGrid[froxelIdx].scatteringExtinction = float4(0.0, 0.0, 0.0, 1.0);
+    // Volume blend: densities add (extinction is additive across overlapping
+    // media); albedo/phase-g/ambient are density×blendWeight-weighted averages,
+    // so a dense bank dominates a thin haze where they overlap.
+    float  totalDensity = 0.0;
+    float3 wAlbedo  = float3(0.0);
+    float  wG       = 0.0;
+    float  wAmbient = 0.0;
+    float  wSum     = 0.0;
+    uint count = min(data.volumeCount, MAX_FOG_VOLUMES);
+    for (uint vi = 0; vi < count; ++vi) {
+        float d = evalVolumeDensity(volumes[vi], worldPos, data);
+        if (d <= 0.0) continue;
+        float w = d * max(volumes[vi].albedoBlend.w, 0.0);
+        totalDensity += d;
+        wAlbedo  += volumes[vi].albedoBlend.xyz * w;
+        wG       += volumes[vi].phaseNoise.x * w;
+        wAmbient += volumes[vi].phaseNoise.y * w;
+        wSum     += w;
+    }
+    if (totalDensity < 1e-5 || wSum <= 0.0) {
+        froxelGrid.write(float4(0.0), gid);
         return;
     }
+    float3 albedo  = wAlbedo / wSum;
+    float  g       = wG / wSum;
+    float  ambient = wAmbient / wSum;
 
-    // Calculate scattering and extinction coefficients
-    float scattering = density * data.scatteringCoeff;
-    float extinction = density * data.extinctionCoeff;
+    float3 rayDir = normalize(worldPos - data.cameraPosition);
 
-    // View direction (from froxel to camera)
-    float3 viewDir = normalize(data.cameraPosition - worldPos);
+    // Per-froxel tile light list (2D screen tiles, y-up cull convention — the
+    // same mapping simpleFogFragment uses).
+    uint tileX = min(uint(uvw.x * float(fogLightParams.x)), fogLightParams.x - 1);
+    uint tileY = min(uint((1.0 - uvw.y) * float(fogLightParams.y)), fogLightParams.y - 1);
+    const device Cluster& tile = clusters[tileX + tileY * fogLightParams.x];
+    uint tileLights = min(tile.lightCount, 16u);
 
-    // Accumulate light contribution
-    float3 inScatteredLight = float3(0.0);
+    float3 L = float3(0.0);
 
-    // Sun light contribution
+    // Sun with a volumetric PSSM cascade tap (light shafts). Positions outside
+    // every cascade count as lit.
     {
-        float cosTheta = dot(viewDir, data.sunDirection);
-        float phase = phaseHenyeyGreenstein(cosTheta, data.anisotropy);
-
-        // TODO: Add shadow sampling for volumetric shadows
-        float shadow = 1.0;
-
-        inScatteredLight += data.sunColor * data.sunIntensity * phase * shadow;
+        float sunPhase = phaseHenyeyGreenstein(dot(rayDir, data.sunDirection), g);
+        float viewDepth = abs((camera.view * float4(worldPos, 1.0)).z);
+        int ci = 0;
+        if      (viewDepth > pssmData.cascadeSplits.z) ci = 2;
+        else if (viewDepth > pssmData.cascadeSplits.y) ci = 1;
+        float4 lsPos = pssmData.lightSpaceMatrices[ci] * float4(worldPos, 1.0);
+        float3 proj = lsPos.xyz / lsPos.w;
+        float2 sUV = float2(proj.x * 0.5 + 0.5, 0.5 - proj.y * 0.5);
+        float sunVis = 1.0;
+        if (all(sUV >= 0.0) && all(sUV <= 1.0) && proj.z <= 1.0) {
+            // Explicit LOD: a compute kernel has no screen-space derivatives, so
+            // the implicit-LOD sample_compare (used in the fragment path) is
+            // illegal here.
+            sunVis = pssmShadowMaps.sample_compare(shadowCmpSampler, sUV, ci,
+                                                   proj.z - 0.002, level(0));
+        }
+        L += data.sunColor * data.sunIntensity * sunPhase * sunVis;
     }
 
-    // Point light contributions (simplified - could use shadow maps)
-    for (uint i = 0; i < min(pointLightCount, 32u); i++) {
-        float3 lightDir = pointLights[i].position - worldPos;
-        float lightDist = length(lightDir);
-        lightDir /= lightDist;
-
-        // Attenuation
-        float attenuation = 1.0 / (1.0 + lightDist * lightDist / (pointLights[i].radius * pointLights[i].radius));
-
-        // Phase function
-        float cosTheta = dot(viewDir, lightDir);
-        float phase = phaseHenyeyGreenstein(cosTheta, data.anisotropy);
-
-        inScatteredLight += pointLights[i].color * pointLights[i].intensity * phase * attenuation;
+    // Tile-culled point lights (surface-matching falloff).
+    for (uint i = 0; i < tileLights; i++) {
+        PointLight pl = pointLights[tile.lightIndices[i]];
+        float3 toL = pl.position - worldPos;
+        float d2 = max(dot(toL, toL), 1e-4);
+        float d = sqrt(d2);
+        if (d >= pl.radius) continue;
+        float atten = (1.0 - smoothstep(pl.radius * 0.8, pl.radius, d)) / d2;
+        float phase = phaseHenyeyGreenstein(dot(rayDir, toL / d), g);
+        L += pl.color * pl.intensity * atten * phase;
     }
 
-    // Add ambient light
-    float3 ambient = mix(float3(0.1, 0.1, 0.15), data.sunColor * 0.1, saturate(worldPos.y * 0.01));
-    inScatteredLight += ambient * data.ambientIntensity;
+    // Spot cones (loop-all; scenes carry a handful).
+    for (uint i = 0; i < fogLightParams.z; i++) {
+        SpotLight sl = spotLights[i];
+        float3 toL = sl.position - worldPos;
+        float d2 = max(dot(toL, toL), 1e-4);
+        float d = sqrt(d2);
+        if (d >= sl.radius) continue;
+        float3 ldir = toL / d;
+        float cone = clamp((dot(-ldir, sl.direction) - sl.cosOuter)
+                               / max(sl.cosInner - sl.cosOuter, 1e-4), 0.0, 1.0);
+        if (cone <= 0.0) continue;
+        float atten = (1.0 - smoothstep(sl.radius * 0.8, sl.radius, d)) / d2 * cone * cone;
+        float phase = phaseHenyeyGreenstein(dot(rayDir, ldir), g);
+        L += sl.color * sl.intensity * atten * phase;
+    }
 
-    // Scale by scattering coefficient
-    inScatteredLight *= scattering;
+    // Rect area lights: attenuate from the closest point on the quad (see the
+    // simpleFogFragment note); two-sided coarse approximation.
+    for (uint i = 0; i < fogLightParams.w; i++) {
+        RectLight rl = rectLights[i];
+        float3 lp = float3(rl.position);
+        float3 lr = float3(rl.right);
+        float3 lu = float3(rl.up);
+        float3 rel = worldPos - lp;
+        float pu = clamp(dot(rel, lr), -rl.halfWidth,  rl.halfWidth);
+        float pv = clamp(dot(rel, lu), -rl.halfHeight, rl.halfHeight);
+        float3 closest = lp + lr * pu + lu * pv;
+        float area = 4.0 * rl.halfWidth * rl.halfHeight;
+        float range = 8.0 * max(rl.halfWidth, rl.halfHeight);
+        float3 toL = closest - worldPos;
+        float d2 = max(dot(toL, toL), 1e-4);
+        float d = sqrt(d2);
+        if (d >= range) continue;
+        float atten = (1.0 - smoothstep(range * 0.8, range, d)) / d2 * area;
+        float phase = phaseHenyeyGreenstein(dot(rayDir, toL / d), g);
+        L += float3(rl.color) * rl.intensity * atten * phase;
+    }
 
-    // Store result
-    froxelGrid[froxelIdx].scatteringExtinction = float4(inScatteredLight, extinction);
+    // Ambient floor so fog reads even away from direct light.
+    L += float3(0.5, 0.6, 0.7) * ambient;
+
+    // In-scattered radiance = albedo · σ_s · L (σ_s ≈ density); extinction σ_t = density.
+    float3 inScatter = albedo * totalDensity * L;
+    froxelGrid.write(float4(inScatter, totalDensity), gid);
 }
 
 // ============================================================================
 // Compute Shader: Scattering Integration
 // ============================================================================
-// Ray marches through froxel grid and integrates scattering
+// One thread per froxel column: march near->far accumulating scattering and
+// transmittance (analytic per-slice integration), writing the running result
+// into every slice of the integrated volume.
 
 kernel void scatteringIntegration(
-    uint3 gid [[thread_position_in_grid]],
+    uint2 gid [[thread_position_in_grid]],
     constant VolumetricFogData& data [[buffer(0)]],
-    device FroxelData* froxelGrid [[buffer(1)]],
-    texture3d<float, access::write> integratedVolume [[texture(0)]]
+    texture3d<float, access::read> froxelGrid [[texture(0)]],
+    texture3d<float, access::write> integratedVolume [[texture(1)]]
 ) {
-    // Bounds check
     if (gid.x >= FROXEL_SIZE_X || gid.y >= FROXEL_SIZE_Y) {
         return;
     }
 
-    // March from near to far, accumulating scattering
-    float3 accumulatedScattering = float3(0.0);
-    float accumulatedTransmittance = 1.0;
-
-    // Calculate step size (exponential distribution)
+    float3 accumScatter = float3(0.0);
+    float  accumTrans = 1.0;
     for (uint z = 0; z < FROXEL_SIZE_Z; z++) {
-        uint froxelIdx = z * FROXEL_SIZE_X * FROXEL_SIZE_Y + gid.y * FROXEL_SIZE_X + gid.x;
+        float4 se = froxelGrid.read(uint3(gid, z));
+        float3 inScatter = se.rgb;
+        float extinction = se.a;
 
-        float4 scatterExtinct = froxelGrid[froxelIdx].scatteringExtinction;
-        float3 inScatter = scatterExtinct.rgb;
-        float extinction = scatterExtinct.a;
+        float sliceNear = data.nearPlane * pow(data.farPlane / data.nearPlane, float(z) / float(FROXEL_SIZE_Z));
+        float sliceFar  = data.nearPlane * pow(data.farPlane / data.nearPlane, float(z + 1) / float(FROXEL_SIZE_Z));
+        float stepSize = sliceFar - sliceNear;
 
-        // Calculate slice depth for step size
-        float sliceDepthNear = data.nearPlane * pow(data.farPlane / data.nearPlane, float(z) / FROXEL_SIZE_Z);
-        float sliceDepthFar = data.nearPlane * pow(data.farPlane / data.nearPlane, float(z + 1) / FROXEL_SIZE_Z);
-        float stepSize = sliceDepthFar - sliceDepthNear;
+        float sliceTrans = exp(-extinction * stepSize);
+        // Analytic integral of in-scatter under self-extinction over the slice.
+        float3 sliceScatter = inScatter * (1.0 - sliceTrans) / max(extinction, 1e-5);
 
-        // Transmittance through this slice
-        float sliceTransmittance = exp(-extinction * stepSize);
+        accumScatter += accumTrans * sliceScatter;
+        accumTrans   *= sliceTrans;
 
-        // Integrate scattering (analytical integration)
-        // Using the formula: integral of S * exp(-extinction * t) dt
-        float3 sliceScattering = inScatter * (1.0 - sliceTransmittance) / max(extinction, 0.0001);
-
-        // Accumulate
-        accumulatedScattering += accumulatedTransmittance * sliceScattering;
-        accumulatedTransmittance *= sliceTransmittance;
-
-        // Write integrated result for this slice
-        integratedVolume.write(float4(accumulatedScattering, accumulatedTransmittance), uint3(gid.xy, z));
+        integratedVolume.write(float4(accumScatter, accumTrans), uint3(gid, z));
     }
 }
 
@@ -250,7 +337,7 @@ struct VertexOut {
     float2 uv;
 };
 
-// Full screen triangle vertices
+// Full screen triangle vertices.
 constant float2 fsTriVerts[3] = {
     float2(-1.0, -1.0),
     float2( 3.0, -1.0),
@@ -270,35 +357,36 @@ fragment float4 volumetricFogFragment(
     texture2d<float, access::sample> sceneColor [[texture(0)]],
     texture2d<float, access::sample> sceneDepth [[texture(1)]],
     texture3d<float, access::sample> integratedVolume [[texture(2)]],
-    constant VolumetricFogData& data [[buffer(0)]]
+    constant VolumetricFogData& data [[buffer(0)]],
+    constant CameraData& camera [[buffer(1)]]
 ) {
     constexpr sampler linearSampler(filter::linear, address::clamp_to_edge);
 
-    // Sample scene
     float4 color = sceneColor.sample(linearSampler, in.uv);
     float depth = sceneDepth.sample(linearSampler, in.uv).r;
 
-    // Linearize depth
-    float linearDepth = data.nearPlane * data.farPlane / (data.farPlane - depth * (data.farPlane - data.nearPlane));
+    // Sky ends beyond the froxel grid (which stops at the fog far plane) — no
+    // aerial perspective, matching the raymarch fallback.
+    if (depth >= 0.9999) {
+        return color;
+    }
 
-    // Calculate volume UV
+    // Reconstruct world position, take its planar view depth, map to the slice.
+    float2 ndc = float2(in.uv.x * 2.0 - 1.0, 1.0 - in.uv.y * 2.0);
+    float4 wp = data.invViewProj * float4(ndc, depth, 1.0);
+    float3 worldPos = wp.xyz / wp.w;
+    float viewDepth = abs((camera.view * float4(worldPos, 1.0)).z);
+
     float3 volumeUV;
     volumeUV.xy = in.uv;
-    volumeUV.z = saturate(depthToSlice(linearDepth, data.nearPlane, data.farPlane) / FROXEL_SIZE_Z);
+    volumeUV.z = saturate(depthToSlice(viewDepth, data.nearPlane, data.farPlane) / float(FROXEL_SIZE_Z));
 
-    // Sample integrated volume
-    float4 fogData = integratedVolume.sample(linearSampler, volumeUV);
-    float3 inScattering = fogData.rgb;
-    float transmittance = fogData.a;
-
-    // Apply fog: final = scene * transmittance + inScattering
-    float3 result = color.rgb * transmittance + inScattering;
-
-    return float4(result, color.a);
+    float4 fog = integratedVolume.sample(linearSampler, volumeUV);
+    return float4(color.rgb * fog.a + fog.rgb, color.a);
 }
 
 // ============================================================================
-// Simplified Single-Pass Fog (Alternative for lower-end hardware)
+// Simplified Single-Pass Fog (fallback / lower-end path)
 // ============================================================================
 
 // True volumetric raymarch (replaces the old single-sample analytic height

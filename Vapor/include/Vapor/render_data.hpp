@@ -340,7 +340,7 @@ struct alignas(16) FogRenderData {
     float time = 0.0f;             // 148
     glm::vec2 _pad2 = glm::vec2(0.0f);                        // 152 (align vec3 to 160)
     glm::vec3 windDirection = glm::vec3(1.0f, 0.0f, 0.0f);   // 160
-    float _pad3 = 0.0f;                                       // 172 (struct = 176, /16)
+    Uint32 volumeCount = 0;                                   // 172 fog volumes in fogVolumeBuffer (was _pad3)
 };
 
 // Cheap analytic exponential height fog (the pre-raymarch "Height Fog"): one
@@ -358,23 +358,35 @@ struct alignas(16) HeightFogRenderData {
     glm::vec4 params = glm::vec4(0.1f, 0.0f, 0.6f, 0.3f);
 };
 
-// CPU-side contract for the opt-in per-light volumetric fog (the raymarch).
-// VolumetricFogSystem resolves a VolumetricFogComponent into this and pushes it
-// via IRenderer::setVolumetricFog each frame; the renderer copies the tunables
-// into its FogRenderData and gates the pass on `enabled`. No GPU alignment — it
-// is a contract, not a buffer.
-struct VolumetricFogRenderData {
-    bool  enabled = false;
-    float fogDensity = 0.02f;
-    float fogHeightFalloff = 0.1f;
-    float fogBaseHeight = 0.0f;
-    float fogMaxHeight = 100.0f;
+// CPU-side contract for one opt-in volumetric fog volume. VolumetricFogSystem
+// resolves each VolumetricFogComponent into one of these (a bounded volume's
+// world AABB is baked from the entity transform) and pushes the whole list via
+// IRenderer::setVolumetricFogVolumes each frame; the froxel injection blends all
+// volumes into the grid. No GPU alignment — it is a contract, not a buffer.
+struct VolumetricFogVolumeData {
+    // false = global unbounded exponential height fog; true = an AABB fog bank
+    // (boundsMin/boundsMax in world space) with soft edges. See VolumetricFogComponent.
+    bool  bounded = false;
+    glm::vec3 boundsMin = glm::vec3(0.0f);   // world AABB min (bounded only)
+    glm::vec3 boundsMax = glm::vec3(0.0f);   // world AABB max (bounded only)
+    float edgeFalloff = 2.0f;      // soft-edge fade distance at box faces (world units)
+    float blendWeight = 1.0f;      // blend weight where volumes overlap
+    float density = 0.02f;
+    float heightFalloff = 0.1f;
+    float baseHeight = 0.0f;
+    float maxHeight = 100.0f;
+    glm::vec3 albedo = glm::vec3(1.0f);  // single-scatter tint
     float anisotropy = 0.6f;
     float ambientIntensity = 0.3f;
     float noiseScale = 0.01f;
     float noiseIntensity = 0.5f;
     float windSpeed = 1.0f;   // per-medium scroll coefficient (scaled by wind strength)
 };
+
+// Upper bound on fog volumes injected per frame — matches MAX_FOG_VOLUMES in the
+// froxel shaders (the per-volume GPU buffer is sized to this). Extra volumes past
+// this count are dropped (the system logs once when it happens).
+inline constexpr int kMaxFogVolumes = 16;
 
 // Heterogeneous volume raymarch (EmberGen-style density grid in an AABB).
 // vec4-only layout so the MSL and std430 twins are byte-identical

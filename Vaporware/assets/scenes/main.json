@@ -72,7 +72,23 @@
       "components": {
         "sky": {},
         "timeOfDay": { "latitudeDeg": 0.0 },
-        "volumetricFog": { "enabled": false }
+        "volumetricFog": {
+          "enabled": true, "bounded": false,
+          "density": 0.01, "heightFalloff": 0.12, "baseHeight": 0.0, "maxHeight": 15.0,
+          "anisotropy": 0.6, "ambientIntensity": 0.25
+        }
+      }
+    },
+    {
+      "name": "Fog Bank",
+      "position": [0.0, 1.5, 0.0],
+      "components": {
+        "volumetricFog": {
+          "enabled": true, "bounded": true,
+          "halfExtent": [7.0, 2.5, 7.0], "edgeFalloff": 2.0, "blendWeight": 2.0,
+          "density": 0.05, "anisotropy": 0.35, "ambientIntensity": 0.3,
+          "albedo": [0.9, 0.95, 1.0], "noiseScale": 0.05, "noiseIntensity": 0.6
+        }
       }
     },
     {

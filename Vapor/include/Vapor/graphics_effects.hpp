@@ -75,6 +75,12 @@ struct alignas(16) AtmosphereData {
 
 // ── Volumetric Fog ────────────────────────────────────────────────────────
 
+// Froxel-fog globals: camera/frustum, sun, temporal, wind. The per-froxel fog
+// tunables (fogDensity … ambientIntensity) are the "global height fog" volume's
+// params and also feed the simpleFogFragment fallback; bounded volumes come from
+// the separate VolumetricFogVolumeGPU array. Field-for-field twin of the MSL
+// VolumetricFogData in 3d_volumetric_fog.metal (float3 occupies a full 16-byte
+// slot in MSL, so each vec3 + trailing _pad below is one 16-byte member there).
 struct alignas(16) VolumetricFogData {
     glm::mat4 invViewProj;
     glm::mat4 prevViewProj;
@@ -95,7 +101,7 @@ struct alignas(16) VolumetricFogData {
     float ambientIntensity = 0.3f;
     float nearPlane = 0.1f;
     float farPlane = 500.0f;
-    float _pad4;
+    Uint32 volumeCount = 0;   // fog volumes in the VolumetricFogVolumeGPU buffer (was _pad4)
     glm::vec2 screenSize;
     glm::vec2 _pad5;
     Uint32 frameIndex = 0;
@@ -107,6 +113,20 @@ struct alignas(16) VolumetricFogData {
     glm::vec2 _pad6;
     glm::vec3 windDirection = glm::vec3(1.0f, 0.0f, 0.0f);
     float _pad7;
+};
+
+// One fog volume injected into the froxel grid. vec4-only so the MSL and std430
+// twins are byte-identical (96 bytes). boundsMin.w flags bounded vs global;
+// bounded volumes carry a world-space AABB with soft edges. Twin of the MSL
+// VolumetricFogVolume (3d_volumetric_fog.metal) and the std430 FogVolume in
+// VolumetricFog.frag. Packed by the renderer from VolumetricFogVolumeData.
+struct alignas(16) VolumetricFogVolumeGPU {
+    glm::vec4 boundsMin;      // xyz = world AABB min; w = bounded flag (0 = global, 1 = AABB)
+    glm::vec4 boundsMax;      // xyz = world AABB max; w = edgeFalloff (world units)
+    glm::vec4 densityParams;  // x = density, y = heightFalloff, z = baseHeight, w = maxHeight
+    glm::vec4 albedoBlend;    // xyz = single-scatter albedo/tint; w = blendWeight
+    glm::vec4 phaseNoise;     // x = anisotropy, y = ambientIntensity, z = noiseScale, w = noiseIntensity
+    glm::vec4 wind;           // x = windSpeed (already × global strength); yzw unused
 };
 
 // ── Volumetric Clouds ─────────────────────────────────────────────────────

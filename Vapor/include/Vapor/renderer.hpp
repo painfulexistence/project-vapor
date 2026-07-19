@@ -314,7 +314,7 @@ public:
     void setParticleVisible(bool visible) override { particleVisible = visible; }
     void setSky(const SkyRenderData& sky) override;
     void setWind(const WindRenderData& wind) override;
-    void setVolumetricFog(const VolumetricFogRenderData& fog) override;
+    void setVolumetricFogVolumes(const std::vector<VolumetricFogVolumeData>& volumes) override;
     // Sun-driven auto rebake is opt-in (m_iblAutoRebake, default off) — a moving
     // sun otherwise re-bakes the IBL constantly. The one-shot "Refresh IBL"
     // button and sky-config changes (setSky) still force a rebake directly.
@@ -693,13 +693,17 @@ private:
     LightScatteringRenderData lightScatteringSettings;
     PipelineHandle volumetricFogPipeline;
     TextureHandle tempColorRT;  // ping-pong target for fog (swapped with colorRT)
-    // Volumetric fog (the expensive raymarch) is now opt-in and ECS-driven:
-    // setVolumetricFog() copies a VolumetricFogComponent's tunables into
-    // fogSettings and flips m_volumetricFogActive. Off until a component pushes it.
+    // Volumetric fog (the raymarch) is opt-in and ECS-driven: setVolumetricFogVolumes()
+    // stores the scene's fog volumes and gates the pass on whether any exist.
     bool volumetricFogEnabled = false;
-    // Persistent fog tunables. volumetricFogPass() copies this and overwrites the
-    // per-frame fields (invViewProj/camera/sun).
+    // Persistent fog tunables (mirror of the first/global volume). volumetricFogPass()
+    // copies this and overwrites the per-frame fields (invViewProj/camera/sun).
     FogRenderData fogSettings;
+    // ECS-resolved fog volumes (global + bounded AABB banks). Uploaded to
+    // fogVolumeBuffer each frame; the Vulkan raymarch (VolumetricFog.frag) blends
+    // them. The froxel-grid path lives in the native Metal renderer.
+    std::vector<VolumetricFogVolumeData> volumetricFogVolumes;
+    BufferHandle fogVolumeBuffer;  // GPU array of VolumetricFogVolumeGPU (set 1, binding 6)
     // Cheap analytic exponential height fog (the pre-raymarch "Height Fog"):
     // a single per-pixel evaluation, no shadows/lights. On by default — it is the
     // common-case global fog; the raymarch above is the opt-in upgrade.

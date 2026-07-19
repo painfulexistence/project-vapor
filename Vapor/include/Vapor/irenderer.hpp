@@ -250,11 +250,12 @@ public:
     // exists — otherwise the backends keep their panel-set wind.
     virtual void setWind(const WindRenderData& wind) {}
 
-    // Opt-in per-light volumetric fog resolved from the ECS VolumetricFogComponent
-    // by VolumetricFogSystem. Copies the tunables into the backend's fog params and
-    // gates the raymarch pass on `enabled`. Pushed each frame while a component
-    // exists; otherwise the pass stays off (default) or panel-controlled.
-    virtual void setVolumetricFog(const VolumetricFogRenderData& fog) {}
+    // Opt-in volumetric fog resolved from the ECS VolumetricFogComponents by
+    // VolumetricFogSystem. Each entry is one volume (global height fog or a
+    // bounded AABB bank); the backend injects and blends them into the froxel
+    // grid. An empty list turns the froxel fog pass off. Pushed each frame while
+    // any fog component exists; otherwise the pass stays off (default).
+    virtual void setVolumetricFogVolumes(const std::vector<VolumetricFogVolumeData>& volumes) {}
 
     // Request a rebake of the environment IBL (sky capture -> irradiance /
     // prefilter). SkySystem calls this when the sun has moved far enough to

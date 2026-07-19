@@ -230,6 +230,14 @@ void Renderer::initialize(std::unique_ptr<RHI> rhiPtr, GraphicsBackend backendTy
         FogRenderData fogDefaults;
         createFrameSlottedBuffer(fogDataBuffer, fogDesc, &fogDefaults, sizeof(fogDefaults));
 
+        // Fog volume array (global + bounded AABB banks) blended by the Vulkan
+        // raymarch. Bound as a storage buffer at set 1, binding 6.
+        BufferDesc fogVolDesc;
+        fogVolDesc.size = sizeof(VolumetricFogVolumeGPU) * kMaxFogVolumes;
+        fogVolDesc.usage = BufferUsage::Uniform;
+        fogVolDesc.memoryUsage = MemoryUsage::CPUtoGPU;
+        createFrameSlottedBuffer(fogVolumeBuffer, fogVolDesc);
+
         BufferDesc hfogDesc;
         hfogDesc.size = sizeof(HeightFogRenderData);
         hfogDesc.usage = BufferUsage::Uniform;
@@ -4046,6 +4054,26 @@ void Renderer::volumetricFogPass() {
     fogSettings.time += 1.0f / 60.0f;
     fog.time = fogSettings.time;
     fog.windSpeed = fogSettings.windSpeed * m_windStrength;
+
+    // Pack the fog volume array (global + bounded banks) for the Vulkan raymarch.
+    // windSpeed folds in the shared wind strength (matches the fog buffer above).
+    Uint32 volCount = static_cast<Uint32>(volumetricFogVolumes.size());
+    if (volCount > static_cast<Uint32>(kMaxFogVolumes)) volCount = kMaxFogVolumes;
+    fog.volumeCount = volCount;
+    if (volCount > 0 && fogVolumeBuffer.isValid()) {
+        VolumetricFogVolumeGPU gpuVols[kMaxFogVolumes] = {};
+        for (Uint32 i = 0; i < volCount; ++i) {
+            const auto& s = volumetricFogVolumes[i];
+            gpuVols[i].boundsMin = glm::vec4(s.boundsMin, s.bounded ? 1.0f : 0.0f);
+            gpuVols[i].boundsMax = glm::vec4(s.boundsMax, s.edgeFalloff);
+            gpuVols[i].densityParams = glm::vec4(s.density, s.heightFalloff, s.baseHeight, s.maxHeight);
+            gpuVols[i].albedoBlend = glm::vec4(s.albedo, s.blendWeight);
+            gpuVols[i].phaseNoise = glm::vec4(s.anisotropy, s.ambientIntensity, s.noiseScale, s.noiseIntensity);
+            gpuVols[i].wind = glm::vec4(s.windSpeed * m_windStrength, 0.0f, 0.0f, 0.0f);
+        }
+        rhi->updateBuffer(fogVolumeBuffer, gpuVols,
+                          0, sizeof(VolumetricFogVolumeGPU) * volCount);
+    }
     rhi->updateBuffer(fogDataBuffer, &fog, 0, sizeof(fog));
 
     RenderPassDesc rp;
@@ -4128,6 +4156,9 @@ void Renderer::volumetricFogPass() {
         rhi->setFragmentBuffer(3, pointLightBuffer, 0, sizeof(PointLightData) * maxPointLights);
         rhi->setFragmentBuffer(4, spotLightBuffer, 0, sizeof(Vapor::SpotLight) * maxSpotLights);
         rhi->setFragmentBuffer(5, rectLightBuffer);
+        // Fog volume array (bounded banks + blend). Always bound — the shader
+        // falls back to legacy single-volume height fog when volumeCount == 0.
+        rhi->setFragmentBuffer(6, fogVolumeBuffer, 0, sizeof(VolumetricFogVolumeGPU) * kMaxFogVolumes);
         rhi->setTexture(0, 2, pssmShadowArrayTexture, shadowSampler);
         glm::uvec4 fogLightParams(clusterGridSizeX, clusterGridSizeY,
                                   static_cast<Uint32>(spotLights.size()),
@@ -4560,20 +4591,27 @@ void Renderer::setWind(const WindRenderData& wind) {
     m_windStrength = wind.strength;
 }
 
-void Renderer::setVolumetricFog(const VolumetricFogRenderData& fog) {
-    // The VolumetricFogComponent is the SSOT for the raymarch: copy its tunables
-    // into the fog buffer source and gate the pass on `enabled`. Per-frame fields
-    // (matrices/camera/sun) and the wind scroll are still filled in the pass.
-    volumetricFogEnabled       = fog.enabled;
-    fogSettings.fogDensity     = fog.fogDensity;
-    fogSettings.fogHeightFalloff = fog.fogHeightFalloff;
-    fogSettings.fogBaseHeight  = fog.fogBaseHeight;
-    fogSettings.fogMaxHeight   = fog.fogMaxHeight;
-    fogSettings.anisotropy     = fog.anisotropy;
-    fogSettings.ambientIntensity = fog.ambientIntensity;
-    fogSettings.noiseScale     = fog.noiseScale;
-    fogSettings.noiseIntensity = fog.noiseIntensity;
-    fogSettings.windSpeed      = fog.windSpeed;
+void Renderer::setVolumetricFogVolumes(const std::vector<VolumetricFogVolumeData>& volumes) {
+    // ECS-resolved fog volumes: store them, gate the pass on whether any exist,
+    // and mirror the first volume into fogSettings so the single-volume Metal
+    // (simpleFogFragment) path and the panel stay populated. The Vulkan raymarch
+    // blends the whole list (uploaded to fogVolumeBuffer in volumetricFogPass).
+    volumetricFogVolumes = volumes;
+    if (volumetricFogVolumes.size() > static_cast<size_t>(kMaxFogVolumes))
+        volumetricFogVolumes.resize(kMaxFogVolumes);
+    volumetricFogEnabled = !volumetricFogVolumes.empty();
+    if (!volumetricFogVolumes.empty()) {
+        const auto& v = volumetricFogVolumes.front();
+        fogSettings.fogDensity       = v.density;
+        fogSettings.fogHeightFalloff = v.heightFalloff;
+        fogSettings.fogBaseHeight    = v.baseHeight;
+        fogSettings.fogMaxHeight     = v.maxHeight;
+        fogSettings.anisotropy       = v.anisotropy;
+        fogSettings.ambientIntensity = v.ambientIntensity;
+        fogSettings.noiseScale       = v.noiseScale;
+        fogSettings.noiseIntensity   = v.noiseIntensity;
+        fogSettings.windSpeed        = v.windSpeed;
+    }
 }
 
 void Renderer::setParticleDrawList(const std::vector<ParticleDrawPacket>& draws) {

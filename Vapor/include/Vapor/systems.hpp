@@ -543,33 +543,56 @@ namespace Vapor {
     };
 
     // ============================================================================
-    // 體積霧系統 - resolves the VolumetricFogComponent for the renderer
+    // 體積霧系統 - resolves every VolumetricFogComponent for the renderer
     // ============================================================================
-    // The opt-in per-light volumetric fog (raymarch). Like SkySystem/WindSystem
-    // this pushes the singleton component's tunables to the renderer each frame
-    // (fog is live-tunable). No component -> the renderer keeps the pass off
-    // (default) so the expensive raymarch never runs unless a scene asks for it.
+    // The opt-in volumetric fog (froxel grid). Unlike the old singleton path this
+    // gathers ALL enabled VolumetricFogComponents into one list — global height
+    // fog plus any bounded AABB banks — and pushes them each frame so the renderer
+    // blends overlapping volumes in the grid. A bounded volume bakes its world
+    // AABB from the entity transform here (position ± halfExtent * scale). Pushed
+    // every frame (fog is live-tunable); an empty list turns the froxel pass off,
+    // so removing the last fog component at runtime cleanly disables it.
     class VolumetricFogSystem {
     public:
         static void update(entt::registry& reg, IRenderer* renderer) {
             if (!renderer) return;
+            std::vector<VolumetricFogVolumeData> volumes;
             auto view = reg.view<VolumetricFogComponent>();
             for (auto entity : view) {
                 const auto& f = view.get<VolumetricFogComponent>(entity);
-                VolumetricFogRenderData data;
-                data.enabled          = f.enabled;
-                data.fogDensity       = f.density;
-                data.fogHeightFalloff = f.heightFalloff;
-                data.fogBaseHeight    = f.baseHeight;
-                data.fogMaxHeight     = f.maxHeight;
-                data.anisotropy       = f.anisotropy;
-                data.ambientIntensity = f.ambientIntensity;
-                data.noiseScale       = f.noiseScale;
-                data.noiseIntensity   = f.noiseIntensity;
-                data.windSpeed        = f.windSpeed;
-                renderer->setVolumetricFog(data);
-                break;  // singleton: the first volumetric fog wins
+                if (!f.enabled) continue;
+                if (static_cast<int>(volumes.size()) >= kMaxFogVolumes) break;  // grid buffer cap
+
+                VolumetricFogVolumeData v;
+                v.bounded          = f.bounded;
+                v.edgeFalloff      = f.edgeFalloff;
+                v.blendWeight      = f.blendWeight;
+                v.density          = f.density;
+                v.heightFalloff    = f.heightFalloff;
+                v.baseHeight       = f.baseHeight;
+                v.maxHeight        = f.maxHeight;
+                v.albedo           = f.albedo;
+                v.anisotropy       = f.anisotropy;
+                v.ambientIntensity = f.ambientIntensity;
+                v.noiseScale       = f.noiseScale;
+                v.noiseIntensity   = f.noiseIntensity;
+                v.windSpeed        = f.windSpeed;
+
+                // Bounded volume: world AABB from the entity's world-space
+                // position and scale (rotation ignored — the box is axis-aligned).
+                if (f.bounded) {
+                    glm::vec3 center(0.0f), scale(1.0f);
+                    if (const auto* t = reg.try_get<TransformComponent>(entity)) {
+                        center = t->position;
+                        scale  = t->scale;
+                    }
+                    const glm::vec3 ext = f.halfExtent * scale;
+                    v.boundsMin = center - ext;
+                    v.boundsMax = center + ext;
+                }
+                volumes.push_back(v);
             }
+            renderer->setVolumetricFogVolumes(volumes);
         }
     };
 
