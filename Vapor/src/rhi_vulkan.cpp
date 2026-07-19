@@ -2732,8 +2732,22 @@ void RHI_Vulkan::pickPhysicalDevice() {
     std::vector<VkPhysicalDevice> physicalDevices(physicalDeviceCount);
     vkEnumeratePhysicalDevices(instance, &physicalDeviceCount, physicalDevices.data());
 
-    // For now, just pick the first device
-    physicalDevice = physicalDevices[0];
+    // Prefer a discrete GPU, then integrated, then whatever else enumerates.
+    // Index 0 breaks ties (max_element keeps the first maximum), so
+    // single-GPU systems behave exactly as before.
+    auto rank = [](VkPhysicalDevice d) {
+        VkPhysicalDeviceProperties p;
+        vkGetPhysicalDeviceProperties(d, &p);
+        switch (p.deviceType) {
+            case VK_PHYSICAL_DEVICE_TYPE_DISCRETE_GPU: return 3;
+            case VK_PHYSICAL_DEVICE_TYPE_INTEGRATED_GPU: return 2;
+            case VK_PHYSICAL_DEVICE_TYPE_VIRTUAL_GPU: return 1;
+            default: return 0;
+        }
+    };
+    physicalDevice = *std::max_element(
+        physicalDevices.begin(), physicalDevices.end(),
+        [&](VkPhysicalDevice a, VkPhysicalDevice b) { return rank(a) < rank(b); });
 
     if (physicalDevice == VK_NULL_HANDLE) {
         throw std::runtime_error("Failed to find a suitable GPU");
@@ -3367,9 +3381,14 @@ ComputePipelineHandle RHI_Vulkan::createComputePipeline(const ComputePipelineDes
 void RHI_Vulkan::destroyComputePipeline(ComputePipelineHandle handle) {
     auto it = computePipelines.find(handle.id);
     if (it != computePipelines.end()) {
-        if (it->second.pipeline != VK_NULL_HANDLE) {
-            vkDestroyPipeline(device, it->second.pipeline, nullptr);
-        }
+        // Deferred like the graphics path: an in-flight frame's command buffer
+        // may still reference this pipeline (shader hot-reload destroys and
+        // recreates mid-run).
+        VkDevice dev = device;
+        VkPipeline pl = it->second.pipeline;
+        deferDestroy([dev, pl]() {
+            if (pl != VK_NULL_HANDLE) vkDestroyPipeline(dev, pl, nullptr);
+        });
         // layout is the shared compute pipeline layout — not owned per pipeline
         computePipelines.erase(it);
     }
