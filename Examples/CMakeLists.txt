@@ -1,13 +1,15 @@
 # Standalone example apps, each a small main.cpp over the Vapor library —
 # the counterpart of Atmospheric's Examples/ tree.
 #
-# Binaries land directly in the build root (build/microvoxel, not
-# build/Examples/MicroVoxel/microvoxel) so they're trivial to find and run.
-# This propagates into the subdirectories below; the engine-asset copy
-# de-dupes by output dir (see AssetPipeline.cmake), so the three examples
-# sharing the build root still stage Res/ exactly once, race-free.
-set(CMAKE_RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}")
-
+# Drop the intermediate Examples/ path component from the build tree so each
+# app lands at build/<Name>/ (e.g. build/MicroVoxel/microvoxel) instead of
+# build/Examples/MicroVoxel/microvoxel. The value is inherited by each
+# subdirectory below at add_subdirectory time; every example keeps its own
+# output directory, so its Res/ (engine + game assets) stays self-contained
+# exactly as before.
+set(CMAKE_RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/MicroVoxel")
 add_subdirectory(MicroVoxel)
+set(CMAKE_RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/USDViewer")
 add_subdirectory(USDViewer)
+set(CMAKE_RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/TerrainStreaming")
 add_subdirectory(TerrainStreaming)
