@@ -227,10 +227,8 @@ void RHI_Vulkan::submitUploads(bool waitForCompletion) {
         submit.commandBufferInfoCount = 1;
         submit.pCommandBufferInfos = &cmdInfo;
         pfnQueueSubmit2(graphicsQueue, 1, &submit, fence);
-        // Tag with the staging slot whose region this submission's copies read
-        // (recording only ever spans one region epoch — the base changes only
-        // at beginFrame, right after the open cmd is submitted). Oversize
-        // dedicated-buffer copies don't read the ring; the tag is harmless.
+        // One tag suffices: recording spans a single region epoch, because the
+        // base only changes at beginFrame, right after the open cmd is submitted.
         pendingUploadFences.emplace_back(
             fence, static_cast<Uint32>(stagingRegionBase / stagingRegionSize()));
 
@@ -783,9 +781,7 @@ void RHI_Vulkan::shutdown() {
     if (device == VK_NULL_HANDLE && instance == VK_NULL_HANDLE) {
         return;
     }
-    // The "VK" stats source captures `this`; deregister before teardown so a
-    // tick() after shutdown can't call into a dead backend.
-    Vapor::StatsLog::get().removeSource("VK");
+    Vapor::StatsLog::get().removeSource("VK");  // its fill captures `this`
     if (device != VK_NULL_HANDLE) {
         vkDeviceWaitIdle(device);
 
@@ -1015,9 +1011,8 @@ TextureHandle RHI_Vulkan::createTexture(const TextureDesc& desc) {
     imageInfo.samples = static_cast<VkSampleCountFlagBits>(desc.sampleCount);
     imageInfo.sharingMode = VK_SHARING_MODE_EXCLUSIVE;
 
-    // Images are always device-local; VMA creates, allocates and binds in one
-    // call, sub-allocating from large memory blocks (and picking a dedicated
-    // allocation itself for large render targets).
+    // Images are always device-local; VMA sub-allocates (and picks a
+    // dedicated allocation itself for large render targets).
     VkImage image;
     VmaAllocationCreateInfo allocCreate{};
     allocCreate.usage = VMA_MEMORY_USAGE_AUTO_PREFER_DEVICE;
@@ -1721,10 +1716,6 @@ void RHI_Vulkan::generateMipmaps(TextureHandle handle) {
     }
     TextureResource& tex = it->second;
 
-    // Blit exactly the levels the image was created with. Recomputing a full
-    // chain from the dimensions (the old behavior) blits into levels that
-    // don't exist whenever the image was created with fewer mips — a
-    // validation error on the way to UB.
     const Uint32 mipLevels = tex.mipLevels;
     if (mipLevels <= 1) {
         return;
@@ -1976,15 +1967,11 @@ void RHI_Vulkan::beginFrame() {
             ++i;
         }
     }
-    // Reset THIS frame's staging region. The vkWaitForFences above proves the
-    // frame that last used this slot completed, which covers upload copies
-    // submitted at that frame's endFrame (same queue, before its cmdbuf, fence
-    // signal order). It does NOT cover uploads staged into this region BETWEEN
-    // frames (async asset completion, startup) — those were submitted at the
-    // NEXT beginFrame and carry this slot's tag. Wait them out before reuse:
-    // in the steady state they signaled long ago (zero cost); when the GPU
-    // truly is >= 2 frames behind, this wait is exactly what stops the CPU
-    // from overwriting staging bytes an in-flight copy still reads.
+    // Reset THIS frame's staging region. The frame-fence wait above covers
+    // uploads submitted at this slot's endFrame, but NOT uploads staged into
+    // the region BETWEEN frames (async asset completion, startup) — those
+    // carry this slot's tag and must be waited out before the region is
+    // reused. Steady state: long signaled, zero cost.
     for (size_t i = 0; i < pendingUploadFences.size();) {
         if (pendingUploadFences[i].second == currentFrameInFlight) {
             vkWaitForFences(device, 1, &pendingUploadFences[i].first, VK_TRUE, UINT64_MAX);
@@ -2020,12 +2007,9 @@ void RHI_Vulkan::beginFrame() {
         // Acquire succeeded — render this frame, refresh the swapchain next.
         swapchainDirty = true;
     } else if (result != VK_SUCCESS) {
-        // OUT_OF_DATE: recreate next frame and skip this one. Any other error
-        // (SURFACE_LOST, DEVICE_LOST, ...) left no valid image index either —
-        // recording and presenting with it would be UB, so skip and let the
-        // recreate attempt (or the app's device-lost handling) sort it out.
-        // The fence was not reset, so the next beginFrame() passes the wait
-        // immediately.
+        // No usable image index (OUT_OF_DATE, SURFACE_LOST, ...): skip the
+        // frame and recreate. The fence was not reset, so the next
+        // beginFrame() passes the wait immediately.
         swapchainDirty = true;
         return;
     }
@@ -2735,9 +2719,7 @@ void RHI_Vulkan::pickPhysicalDevice() {
     std::vector<VkPhysicalDevice> physicalDevices(physicalDeviceCount);
     vkEnumeratePhysicalDevices(instance, &physicalDeviceCount, physicalDevices.data());
 
-    // Prefer a discrete GPU, then integrated, then whatever else enumerates.
-    // Index 0 breaks ties (max_element keeps the first maximum), so
-    // single-GPU systems behave exactly as before.
+    // Prefer discrete > integrated > virtual; first maximum wins ties.
     auto rank = [](VkPhysicalDevice d) {
         VkPhysicalDeviceProperties p;
         vkGetPhysicalDeviceProperties(d, &p);
@@ -2937,13 +2919,9 @@ void RHI_Vulkan::createLogicalDevice() {
         descriptorIndexingFeatures.pNext = const_cast<void*>(deviceInfo.pNext);
         deviceInfo.pNext = &descriptorIndexingFeatures;
     }
-    // Both queue infos in one function-scope array: pQueueCreateInfos must
-    // still point at live storage when vkCreateDevice runs, so the array
-    // cannot live inside the different-families branch below.
     const VkDeviceQueueCreateInfo queueCreateInfos[2] = { graphicsQueueInfo, presentQueueInfo };
     deviceInfo.pQueueCreateInfos = queueCreateInfos;
-    // Same family: one queue info (listing the same family twice is invalid,
-    // VUID-VkDeviceCreateInfo-queueFamilyIndex-02802).
+    // Same family: one queue info — listing a family twice is invalid (VUID-02802).
     deviceInfo.queueCreateInfoCount = (graphicsFamilyIdx != presentFamilyIdx) ? 2 : 1;
     deviceInfo.enabledExtensionCount = static_cast<uint32_t>(deviceExtensions.size());
     deviceInfo.ppEnabledExtensionNames = deviceExtensions.data();
@@ -3075,8 +3053,6 @@ void RHI_Vulkan::createSwapchain() {
         vkGetPhysicalDeviceSurfaceFormatsKHR(physicalDevice, surface, &surfaceFormatCount, surfaceFormats.data());
     }
     if (surfaceFormats.empty()) {
-        // A live surface always reports >= 1 format; an empty list means the
-        // query itself failed (lost surface). Reading [0] would be UB.
         throw std::runtime_error("Surface reports no formats (lost surface?)");
     }
 
@@ -3384,9 +3360,8 @@ ComputePipelineHandle RHI_Vulkan::createComputePipeline(const ComputePipelineDes
 void RHI_Vulkan::destroyComputePipeline(ComputePipelineHandle handle) {
     auto it = computePipelines.find(handle.id);
     if (it != computePipelines.end()) {
-        // Deferred like the graphics path: an in-flight frame's command buffer
-        // may still reference this pipeline (shader hot-reload destroys and
-        // recreates mid-run).
+        // An in-flight frame may still reference the pipeline (shader
+        // hot-reload); retire like the graphics path.
         VkDevice dev = device;
         VkPipeline pl = it->second.pipeline;
         deferDestroy([dev, pl]() {

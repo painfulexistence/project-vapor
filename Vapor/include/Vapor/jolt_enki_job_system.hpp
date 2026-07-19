@@ -45,9 +45,8 @@ namespace Vapor {
         std::atomic<uint32_t> m_numJobs{ 0 };
         uint32_t m_maxJobs;
 
-        // enkiTS task wrapper for Jolt jobs. Instances are pooled (see
-        // QueueJob): enkiTS never takes ownership of tasks handed to
-        // AddTaskSetToPipe, so heap-allocating one per job leaked one per job.
+        // enkiTS task wrapper for Jolt jobs. Pooled: enkiTS never takes
+        // ownership of tasks handed to AddTaskSetToPipe.
         class JoltJobTask : public enki::ITaskSet {
         public:
             JoltJobTask() = default;
@@ -61,11 +60,8 @@ namespace Vapor {
             JPH::JobSystem::Job* m_job = nullptr;
         };
 
-        // Task pool, reused via GetIsComplete() (enkiTS's documented
-        // safe-to-destroy signal — reuse is destroy-equivalent). Guarded by
-        // m_taskPoolMutex across BOTH the pick and AddTaskSetToPipe, so two
-        // threads can't grab the same still-complete task. Bounded by the
-        // maximum number of simultaneously in-flight jobs.
+        // Reused via GetIsComplete() (enkiTS's safe-to-destroy signal);
+        // bounded by the maximum number of simultaneously in-flight jobs.
         std::mutex m_taskPoolMutex;
         std::vector<std::unique_ptr<JoltJobTask>> m_taskPool;
     };

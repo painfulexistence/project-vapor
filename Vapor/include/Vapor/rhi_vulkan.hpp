@@ -425,13 +425,9 @@ private:
     }
     VkCommandBuffer uploadCmd = VK_NULL_HANDLE;   // valid while recording
     // One entry per in-flight upload submit: fence + the staging slot whose
-    // region the submission's copies read (stagingRegionBase at submit time).
-    // beginFrame waits any entry tagged with the slot it is about to reset:
-    // uploads recorded BETWEEN frames (async asset completion, startup) are
-    // submitted at the next beginFrame and are NOT covered by the frame fence
-    // of the slot that staged them — without this tag-wait, resetting that
-    // region 3 frames later could overwrite bytes an in-flight copy still
-    // reads whenever the GPU is >= 2 frames behind.
+    // region the copies read. Uploads recorded BETWEEN frames are not covered
+    // by that slot's frame fence, so beginFrame must wait matching tags
+    // before reusing a slot's region.
     std::vector<std::pair<VkFence, Uint32>> pendingUploadFences;
 
     void createUploadStream();

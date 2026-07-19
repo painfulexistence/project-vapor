@@ -584,8 +584,7 @@ Renderer::~Renderer() = default;
 
 void Renderer::shutdown() {
     if (rhi) {
-        // The renderer's stats sources capture `this`; deregister before any
-        // teardown so a tick() after shutdown can't call into dead state.
+        // These sources' fills capture `this`
         auto& statsLog = Vapor::StatsLog::get();
         for (const char* tag : { "R", "RT", "CULL", "GPUDRV" }) {
             statsLog.removeSource(tag);

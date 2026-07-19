@@ -385,9 +385,7 @@ double RHI_Metal::getGpuFrameBusyMs() {
 
 void RHI_Metal::shutdown() {
     if (renderer) {
-        // The "MTL" stats source captures `this`; deregister before teardown
-        // so a tick() after shutdown can't call into a dead backend.
-        Vapor::StatsLog::get().removeSource("MTL");
+        Vapor::StatsLog::get().removeSource("MTL");  // its fill captures `this`
         // Flush and drain outstanding uploads, then wait for the GPU
         submitUploads(true);
         stagingRingBuffer = nullptr;
@@ -445,12 +443,10 @@ void RHI_Metal::waitIdle() {
 // ============================================================================
 
 BufferHandle RHI_Metal::createBuffer(const BufferDesc& desc) {
-    // CPUtoGPU is Shared, not Managed: Managed buys a didModifyRange
-    // obligation that the mapBuffer/unmapBuffer path never honored (stale GPU
-    // reads on discrete-GPU Macs), and for per-frame-rewritten data Shared is
-    // Metal's recommended mode anyway — Managed only pays off for data the
-    // GPU re-reads many times per CPU write. On Apple silicon (unified
-    // memory, the primary target) the two are equivalent.
+    // CPUtoGPU is Shared, not Managed: Managed obligates didModifyRange after
+    // every CPU write (the map/unmap path has none), and Shared is Metal's
+    // recommended mode for per-frame-rewritten data anyway. Equivalent on
+    // Apple silicon.
     MTL::ResourceOptions options = MTL::ResourceStorageModeShared;
 
     switch (desc.memoryUsage) {
@@ -907,8 +903,8 @@ void RHI_Metal::updateBuffer(BufferHandle handle, const void* data, size_t offse
         MTL::Buffer* srcBuf = stageData(data, size, srcOffset);
         ensureUploadBlit()->copyFromBuffer(srcBuf, srcOffset, buffer, offset, size);
     } else {
-        // CPU-accessible (Shared) buffer: direct write, coherent by mode —
-        // createBuffer never produces Managed storage, so no didModifyRange.
+        // CPU-accessible (Shared) buffer: direct write. createBuffer never
+        // produces Managed storage, so no didModifyRange.
         void* bufferData = buffer->contents();
         if (!bufferData) {
             throw std::runtime_error("Buffer contents() returned nullptr");
