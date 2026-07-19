@@ -5,19 +5,6 @@ using raytracing::instance_acceleration_structure;
 #include "Res/shaders/3d_common.metal" // TODO: use more robust include path
 
 
-struct Ray {
-    float3 origin;
-    float3 direction;
-    float minDistance;
-    float maxDistance;
-};
-
-struct Intersection {
-    float distance;
-    // unsigned int primitiveIndex;
-    // float2 barycentricCoords;
-};
-
 // Soft-shadow controls. angularRadius == 0 reproduces the old single-ray hard
 // shadow exactly; > 0 cone-samples the sun's disk (the real sun subtends
 // ~0.0047 rad half-angle) with `samples` rays and averages — a true RT
@@ -69,32 +56,18 @@ kernel void computeMain(
 
         DirLight light = directionalLights[0];
 
-        // ====================================================================
-        // TEMP DIAGNOSTIC (bisect vs main): this block is a verbatim restore of
-        // main's single-ray hard shadow — sunParams stays BOUND at buffer(5)
-        // but is deliberately not read. If the Shadow RT still differs from
-        // main with this build, the kernel is exonerated and the difference is
-        // in its inputs; if it matches main again, the cone-sampling rewrite
-        // (below, disabled) miscompiles or misreads params on device.
-        // ====================================================================
-        raytracing::ray r;
-        r.origin = worldPos + worldNormal * 0.005;
-        r.direction = normalize(-light.direction);
-        r.min_distance = 0.001;
-        r.max_distance = 10000.0;
-
         // Occlusion query: any hit terminates traversal, and no per-triangle
         // data (barycentrics etc.) is needed — the result is only hit/none.
         raytracing::intersector<raytracing::instancing> inter;
         inter.assume_geometry_type(raytracing::geometry_type::triangle);
         inter.accept_any_intersection(true);
-        auto intersection = inter.intersect(r, TLAS, 0xFF);
-        if (intersection.type == raytracing::intersection_type::triangle) {
-            finalColor = float4(0.0, 0.0, 0.0, 1.0);
-        } else if (intersection.type == raytracing::intersection_type::none) {
-            finalColor = float4(1.0, 1.0, 1.0, 1.0);
-        }
-#if 0   // Cone-sampled sun soft shadows — disabled during the bisect above.
+
+        // Cone-sampled sun soft shadows. angularRadius == 0 collapses to one ray
+        // along the sun direction — bit-for-bit the old hard shadow. > 0 jitters
+        // each ray within the sun's disk (tangent basis t1/t2 around sunDir) and
+        // averages, giving a true RT penumbra: sharp at contact, wider with
+        // occluder distance. No temporal denoise yet, so the penumbra carries
+        // per-frame noise; the half-res target's bilinear upsample softens it.
         float3 sunDir = normalize(-light.direction);
         uint sampleCount = (sunParams.angularRadius > 0.0) ? max(sunParams.samples, 1u) : 1u;
         float3 up = abs(sunDir.y) < 0.99 ? float3(0.0, 1.0, 0.0) : float3(1.0, 0.0, 0.0);
@@ -122,11 +95,6 @@ kernel void computeMain(
         }
         visibility /= float(sampleCount);
         finalColor = float4(visibility, visibility, visibility, 1.0);
-#endif
-        // Debug output - world position
-        // finalColor = float4(float3(worldPos), 1.0);
-        // Debug output - world normal
-        // finalColor = float4(float3(worldNormal), 1.0);
     }
     shadowTexture.write(finalColor, tid);
 }
