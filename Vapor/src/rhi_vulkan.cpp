@@ -107,7 +107,7 @@ void RHI_Vulkan::createUploadStream() {
 
 void RHI_Vulkan::destroyUploadStream() {
     submitUploads(true);
-    for (VkFence f : pendingUploadFences) vkDestroyFence(device, f, nullptr);
+    for (const auto& [f, slot] : pendingUploadFences) vkDestroyFence(device, f, nullptr);
     pendingUploadFences.clear();
     if (stagingRingBuffer != VK_NULL_HANDLE) {
         // vmaDestroyBuffer unmaps the persistent mapping and frees buffer +
@@ -227,7 +227,12 @@ void RHI_Vulkan::submitUploads(bool waitForCompletion) {
         submit.commandBufferInfoCount = 1;
         submit.pCommandBufferInfos = &cmdInfo;
         pfnQueueSubmit2(graphicsQueue, 1, &submit, fence);
-        pendingUploadFences.push_back(fence);
+        // Tag with the staging slot whose region this submission's copies read
+        // (recording only ever spans one region epoch — the base changes only
+        // at beginFrame, right after the open cmd is submitted). Oversize
+        // dedicated-buffer copies don't read the ring; the tag is harmless.
+        pendingUploadFences.emplace_back(
+            fence, static_cast<Uint32>(stagingRegionBase / stagingRegionSize()));
 
         // The one-time command buffer is retired with the fence wait below;
         // freeing it later is handled through the retirement queue.
@@ -241,9 +246,12 @@ void RHI_Vulkan::submitUploads(bool waitForCompletion) {
     }
 
     if (waitForCompletion && !pendingUploadFences.empty()) {
-        vkWaitForFences(device, static_cast<uint32_t>(pendingUploadFences.size()),
-                        pendingUploadFences.data(), VK_TRUE, UINT64_MAX);
-        for (VkFence f : pendingUploadFences) vkDestroyFence(device, f, nullptr);
+        std::vector<VkFence> fences;
+        fences.reserve(pendingUploadFences.size());
+        for (const auto& [f, slot] : pendingUploadFences) fences.push_back(f);
+        vkWaitForFences(device, static_cast<uint32_t>(fences.size()),
+                        fences.data(), VK_TRUE, UINT64_MAX);
+        for (VkFence f : fences) vkDestroyFence(device, f, nullptr);
         pendingUploadFences.clear();
         stagingRingOffset = 0;
     }
@@ -1961,18 +1969,31 @@ void RHI_Vulkan::beginFrame() {
     // reuse is handled by the frame-partitioned reset below, not by draining
     // all fences).
     for (size_t i = 0; i < pendingUploadFences.size();) {
-        if (vkGetFenceStatus(device, pendingUploadFences[i]) == VK_SUCCESS) {
-            vkDestroyFence(device, pendingUploadFences[i], nullptr);
+        if (vkGetFenceStatus(device, pendingUploadFences[i].first) == VK_SUCCESS) {
+            vkDestroyFence(device, pendingUploadFences[i].first, nullptr);
             pendingUploadFences.erase(pendingUploadFences.begin() + i);
         } else {
             ++i;
         }
     }
-    // Reset THIS frame's staging region. The vkWaitForFences above guarantees
-    // the frame that last used this slot (MAX_FRAMES_IN_FLIGHT frames ago) has
-    // fully completed on the GPU; its upload copies were submitted on the same
-    // queue BEFORE its frame command buffer, so they are done too. The region
-    // is therefore free — reset with no wait, no stall, no unbounded growth.
+    // Reset THIS frame's staging region. The vkWaitForFences above proves the
+    // frame that last used this slot completed, which covers upload copies
+    // submitted at that frame's endFrame (same queue, before its cmdbuf, fence
+    // signal order). It does NOT cover uploads staged into this region BETWEEN
+    // frames (async asset completion, startup) — those were submitted at the
+    // NEXT beginFrame and carry this slot's tag. Wait them out before reuse:
+    // in the steady state they signaled long ago (zero cost); when the GPU
+    // truly is >= 2 frames behind, this wait is exactly what stops the CPU
+    // from overwriting staging bytes an in-flight copy still reads.
+    for (size_t i = 0; i < pendingUploadFences.size();) {
+        if (pendingUploadFences[i].second == currentFrameInFlight) {
+            vkWaitForFences(device, 1, &pendingUploadFences[i].first, VK_TRUE, UINT64_MAX);
+            vkDestroyFence(device, pendingUploadFences[i].first, nullptr);
+            pendingUploadFences.erase(pendingUploadFences.begin() + i);
+        } else {
+            ++i;
+        }
+    }
     stagingRegionBase = currentFrameInFlight * stagingRegionSize();
     stagingRingOffset = 0;
 

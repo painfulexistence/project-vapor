@@ -423,7 +423,15 @@ private:
         return (STAGING_RING_SIZE / MAX_FRAMES_IN_FLIGHT) & ~VkDeviceSize(15);
     }
     VkCommandBuffer uploadCmd = VK_NULL_HANDLE;   // valid while recording
-    std::vector<VkFence> pendingUploadFences;     // one per in-flight upload submit
+    // One entry per in-flight upload submit: fence + the staging slot whose
+    // region the submission's copies read (stagingRegionBase at submit time).
+    // beginFrame waits any entry tagged with the slot it is about to reset:
+    // uploads recorded BETWEEN frames (async asset completion, startup) are
+    // submitted at the next beginFrame and are NOT covered by the frame fence
+    // of the slot that staged them — without this tag-wait, resetting that
+    // region 3 frames later could overwrite bytes an in-flight copy still
+    // reads whenever the GPU is >= 2 frames behind.
+    std::vector<std::pair<VkFence, Uint32>> pendingUploadFences;
 
     void createUploadStream();
     void destroyUploadStream();
