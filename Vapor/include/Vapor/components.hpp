@@ -221,8 +221,8 @@ namespace Vapor {
         glm::vec3 gradientHorizon = glm::vec3(0.62f, 0.74f, 0.88f);
         glm::vec3 gradientGround  = glm::vec3(0.20f, 0.18f, 0.16f);
         // Night-sky visuals (Atmosphere mode): stars + moon that fade in at night.
-        float starDensity    = 300.0f;   // more = smaller/denser stars
-        float starBrightness = 1.0f;
+        float starDensity    = 1000.0f;  // more = smaller/denser stars
+        float starBrightness = 15.0f;
         glm::vec3 moonColor  = glm::vec3(0.92f, 0.93f, 1.0f);
         float moonSize       = 0.0010f;  // angular size (1 - cos radius)
         float moonBrightness = 1.2f;

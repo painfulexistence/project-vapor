@@ -7284,16 +7284,6 @@ void Renderer::drawGraphicsImGui() {
         ImGui::TreePop();
     }
 
-    if (ImGui::TreeNode("Volumetric Fog")) {
-        // Expensive per-light raymarch — now ECS-driven (opt-in). Add a
-        // VolumetricFogComponent to a scene entity and edit it in the entity
-        // inspector; VolumetricFogSystem pushes its tunables here every frame, so
-        // this panel is intentionally read-only to avoid fighting the component.
-        ImGui::TextDisabled("ECS-driven: VolumetricFogComponent (entity inspector)");
-        ImGui::Text("Active: %s", volumetricFogEnabled ? "yes" : "no");
-        ImGui::TreePop();
-    }
-
     if (ImGui::TreeNode("Volume")) {
         ImGui::Checkbox("Enabled", &volumeRenderEnabled);
         ImGui::TextDisabled(volumeDensityTexture.id == volumeTestTexture.id

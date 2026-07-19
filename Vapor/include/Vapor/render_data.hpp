@@ -242,8 +242,8 @@ struct SkyRenderData {
     glm::vec3 gradientHorizon = glm::vec3(0.62f, 0.74f, 0.88f);
     glm::vec3 gradientGround  = glm::vec3(0.20f, 0.18f, 0.16f);
     // Night-sky visuals (stars + moon).
-    float starDensity    = 300.0f;
-    float starBrightness = 1.0f;
+    float starDensity    = 1000.0f;
+    float starBrightness = 15.0f;
     glm::vec3 moonColor  = glm::vec3(0.92f, 0.93f, 1.0f);
     float moonSize       = 0.0010f;
     float moonBrightness = 1.2f;
@@ -264,8 +264,8 @@ struct alignas(16) GradientRenderData {
 // Matches NightSkyData in both shaders. SkyComponent drives it via setSky.
 struct alignas(16) NightSkyRenderData {
     glm::vec4 moonColor  = glm::vec4(0.92f, 0.93f, 1.0f, 0.0f);  // rgb (a unused)
-    float starDensity    = 300.0f;    // view-direction lattice scale (more = smaller/denser)
-    float starBrightness = 1.0f;      // overall star intensity scale
+    float starDensity    = 1000.0f;   // view-direction lattice scale (more = smaller/denser)
+    float starBrightness = 15.0f;     // overall star intensity scale
     float moonSize       = 0.0010f;   // 1 - cos(angular radius); larger = bigger moon disk
     float moonBrightness = 1.2f;      // moon disk intensity scale
 };
