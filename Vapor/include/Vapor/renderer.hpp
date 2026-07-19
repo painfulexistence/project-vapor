@@ -829,7 +829,7 @@ private:
     // hits from the GIBS surfel radiance cache; misses sample the env map.
     ComputePipelineHandle raytraceReflectionPipeline;
     TextureHandle reflectionRT;              // half-res RGBA16F (rgb, a=hit mask)
-    bool rtReflectionsEnabled = true;        // panel toggle (no-op without RT)
+    bool rtReflectionsEnabled = false;       // default off; opt-in via Effects panel (no-op without RT)
     float rtReflectionIntensity = 1.0f;      // composite multiplier in the PBR
     // RT refractions (KHR_materials_transmission rendering; Metal RT only).
     // Structural clone of the reflection chain with a refracted ray (fixed IOR
