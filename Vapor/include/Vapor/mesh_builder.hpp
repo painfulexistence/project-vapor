@@ -4,6 +4,7 @@
 #include <memory>
 
 #include "graphics.hpp"
+#include "graphics_mesh.hpp"// WaterVertexData (buildWaterGrid) — keep this header self-contained
 
 class MeshBuilder {
 public:
