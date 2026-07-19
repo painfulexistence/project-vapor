@@ -1,9 +1,202 @@
 {
   "name": "main",
+  "materials": [
+    {
+      "name": "WoodCrate",
+      "albedoMap": "textures/american_walnut_albedo.png",
+      "normalMap": "textures/american_walnut_normal.png",
+      "roughnessMap": "textures/american_walnut_roughness.png"
+    },
+    {
+      "name": "IridescentWood",
+      "type": "iridescent",
+      "baseColorFactor": [1.0, 1.0, 1.0, 1.0],
+      "metallicFactor": 0.0,
+      "roughnessFactor": 1.0,
+      "clearcoat": 0.9,
+      "clearcoatGloss": 0.45,
+      "useIBL": false,
+      "albedoMap": "textures/american_walnut_albedo.png",
+      "normalMap": "textures/american_walnut_normal.png",
+      "roughnessMap": "textures/american_walnut_roughness.png"
+    }
+  ],
   "entities": [
     {
       "name": "Sponza",
       "source": "models/Sponza/Sponza.gltf"
-    }
+    },
+    {
+      "name": "Cube 1",
+      "position": [-2.0, 0.5, 0.0],
+      "primitive": { "shape": "cube", "size": 1.0, "material": "WoodCrate" },
+      "components": {
+        "boxCollider": { "halfSize": [0.5, 0.5, 0.5] },
+        "rigidbody": { "motionType": "dynamic" },
+        "autoRotate": { "axis": [0.0, 1.0, -1.0], "speed": 1.5 }
+      }
+    },
+    {
+      "name": "Cube 2 (Iridescent)",
+      "position": [2.0, 0.5, 0.0],
+      "primitive": { "shape": "cube", "size": 1.0, "material": "IridescentWood" },
+      "components": {
+        "boxCollider": { "halfSize": [0.5, 0.5, 0.5] },
+        "rigidbody": { "motionType": "dynamic" }
+      }
+    },
+    {
+      "name": "Floor",
+      "position": [0.0, -0.5, 0.0],
+      "components": {
+        "boxCollider": { "halfSize": [50.0, 0.5, 50.0] },
+        "rigidbody": { "motionType": "static" }
+      }
+    },
+    {
+      "name": "Sun Light",
+      "components": {
+        "directionalLight": { "direction": [0.4472136, -0.8944272, 0.0], "color": [1.0, 1.0, 1.0], "intensity": 10.0 },
+        "sun": {}
+      }
+    },
+    {
+      "name": "Sky",
+      "components": {
+        "sky": {},
+        "timeOfDay": { "latitudeDeg": 0.0 }
+      }
+    },
+    {
+      "name": "Point Light Field",
+      "components": {
+        "pointLightField": {
+          "count": 128, "seed": 1,
+          "areaMinX": -10.0, "areaMaxX": 10.0,
+          "areaMinY": 0.5,  "areaMaxY": 4.0,
+          "areaMinZ": -10.0, "areaMaxZ": 10.0,
+          "intensity": 5.0, "radius": 0.5, "speed": 0.5
+        }
+      }
+    },
+    {
+      "name": "Spot Light",
+      "position": [0.0, 6.0, 0.0],
+      "rotationEuler": [-90.0, 0.0, 0.0],
+      "components": {
+        "spotLight": { "color": [1.0, 0.95, 0.8], "intensity": 40.0, "radius": 15.0, "innerAngle": 18.0, "outerAngle": 28.0 }
+      }
+    },
+    {
+      "name": "Rect Light",
+      "position": [4.0, 1.8, -3.0],
+      "components": {
+        "rectLight": { "size": [2.0, 3.0], "color": [0.4, 0.7, 1.0], "intensity": 8.0 }
+      }
+    },
+    {
+      "name": "Fly Camera",
+      "components": {
+        "virtualCamera": { "isActive": true, "fov": 1.0471976, "position": [0.0, 0.0, 3.0] },
+        "flyCamera": { "moveSpeed": 5.0 },
+        "characterIntent": {}
+      }
+    },
+    {
+      "name": "Follow Camera",
+      "components": {
+        "virtualCamera": { "isActive": false, "position": [0.0, 2.0, 5.0] },
+        "followCamera": { "target": "Cube 1", "offset": [0.0, 2.0, 5.0] }
+      }
+    },
+    {
+      "name": "UI Navigator",
+      "components": {
+        "persistentTag": {},
+        "uiNavigator": {},
+        "subtitleQueue": {
+          "autoAdvance": true,
+          "queue": [
+            { "speaker": "NARRATOR",  "text": "In a world where code meets creativity...", "duration": 3.0 },
+            { "speaker": "NARRATOR",  "text": "One engine dared to dream differently.",    "duration": 2.5 },
+            { "speaker": "",          "text": "Press F8 to show chapter title.",           "duration": 2.0 },
+            { "speaker": "DEVELOPER", "text": "Welcome to Project Vapor.",                 "duration": 2.5 },
+            { "speaker": "",          "text": "(End of subtitle demo)",                    "duration": 2.0 }
+          ]
+        },
+        "fsm": {
+          "states": ["Idle", "WaitingForVisible", "Displaying", "WaitingForHidden"],
+          "initial": "Idle",
+          "transitions": [
+            { "from": "Idle",              "to": "WaitingForVisible", "event": "ShowSubtitle" },
+            { "from": "WaitingForVisible", "to": "Displaying",        "event": "PageVisible" },
+            { "from": "Displaying",        "to": "WaitingForHidden",  "event": "HideSubtitle" },
+            { "from": "WaitingForHidden",  "to": "Idle",              "event": "PageHidden" },
+            { "from": "WaitingForHidden",  "to": "WaitingForVisible", "event": "ShowSubtitle" }
+          ]
+        },
+        "scrollTextQueue": {
+          "lines": [
+            "Welcome to Project Vapor",
+            "Press ENTER to advance text",
+            "This is a teleprompter-style scroll effect",
+            "Each line scrolls up and fades out",
+            "While the next line fades in from below",
+            "Perfect for cutscenes or tutorials",
+            "End of demo - press ENTER to restart"
+          ]
+        },
+        "chapterTitleTrigger": { "number": "Chapter I", "title": "The Beginning", "showRequested": true },
+        "sceneTransition": {}
+      }
+    },
+    { "name": "Page HUD",           "components": { "uiPage": { "id": "HUD",           "path": "ui/hud.rml",                   "overlay": true } } },
+    { "name": "Page Letterbox",     "components": { "uiPage": { "id": "Letterbox",     "path": "ui/letterbox.rml",             "overlay": true } } },
+    { "name": "Page Subtitle",      "components": { "uiPage": { "id": "Subtitle",      "path": "ui/subtitle.rml",              "overlay": true } } },
+    { "name": "Page ScrollText",    "components": { "uiPage": { "id": "ScrollText",    "path": "ui/scroll_text.rml",           "overlay": true } } },
+    { "name": "Page ChapterTitle",  "components": { "uiPage": { "id": "ChapterTitle",  "path": "ui/chapter_title.rml",         "overlay": true } } },
+    { "name": "Page MainMenu",      "components": { "uiPage": { "id": "MainMenu",      "path": "ui/menus/main_menu.rml",       "lazy": true } } },
+    { "name": "Page PauseMenu",     "components": { "uiPage": { "id": "PauseMenu",     "path": "ui/menus/pause_menu.rml",      "lazy": true } } },
+    { "name": "Page Settings",      "components": { "uiPage": { "id": "Settings",      "path": "ui/menus/settings.rml",        "lazy": true } } },
+    { "name": "Page LoadingScreen", "components": { "uiPage": { "id": "LoadingScreen", "path": "ui/menus/loading_screen.rml",  "lazy": true } } },
+    {
+      "name": "Particle Attractor A",
+      "position": [0.0, 3.0, 0.0],
+      "components": { "particleAttractor": { "strength": 40.0 } }
+    },
+    {
+      "name": "Particle Attractor B",
+      "position": [6.0, 1.0, -4.0],
+      "components": { "particleAttractor": { "strength": 18.0 } }
+    },
+    {
+      "name": "Wind Field",
+      "components": { "windField": { "direction": [0.9245003, 0.0924500, 0.3698001], "strength": 0.6, "turbulence": 2.0 } }
+    },
+    {
+      "name": "Particle Sea Emitter A",
+      "position": [0.0, 5.0, 0.0],
+      "components": {
+        "particleEmitter": {
+          "maxParticles": 70000, "oneShot": true, "particleLifetime": -1.0,
+          "speed": 6.0, "spread": 3.14159265, "emitDirection": [0.0, 1.0, 0.0],
+          "color": [0.45, 0.55, 1.0, 1.0]
+        },
+        "particleRenderer": { "blendMode": 0, "size": 0.05 }
+      }
+    },
+    {
+      "name": "Particle Sea Emitter B",
+      "position": [3.0, 4.0, -2.0],
+      "components": {
+        "particleEmitter": {
+          "maxParticles": 30000, "oneShot": true, "particleLifetime": -1.0,
+          "speed": 3.0, "spread": 3.14159265, "emitDirection": [0.0, 1.0, 0.0],
+          "color": [1.0, 0.55, 0.35, 1.0]
+        },
+        "particleRenderer": { "blendMode": 0, "size": 0.1 }
+      }
+    },
+    { "name": "Scene Global" }
   ]
 }

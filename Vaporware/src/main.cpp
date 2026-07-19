@@ -31,10 +31,10 @@
 #include "Vapor/scene_inspector.hpp"
 #include "Vapor/scene_serializer.hpp"
 #include "components.hpp"
+#include "blueprint_registrations.hpp"
 #include "pages/hud_page.hpp"
 #include "pages/letterbox_page.hpp"
 #include "pages/page_system.hpp"
-#include "scene_builder.hpp"
 #include "systems.hpp"
 
 static void setupCustomDrawers(Vapor::SceneInspector& inspector) {
@@ -257,8 +257,6 @@ auto main(int argc, char* args[]) -> int {
     auto engineCore = std::make_unique<Vapor::EngineCore>();
     engineCore->init();
 
-    Vapor::RNG rng;
-
     auto renderer = createRenderer(gfxBackend, window);
     if (!renderer) {
         fmt::print(stderr, "Failed to create renderer (backend unavailable?)\n");
@@ -361,25 +359,10 @@ auto main(int argc, char* args[]) -> int {
             fmt::print("Scene blueprint loaded: {} entities, {} meshes\n", bp->entities.size(), bp->meshes.size());
         }
     );
-    auto albedoResource =
-        resourceManager.loadImage(std::string("textures/american_walnut_albedo.png"), Vapor::LoadMode::Async);
-    auto normalResource =
-        resourceManager.loadImage(std::string("textures/american_walnut_normal.png"), Vapor::LoadMode::Async);
-    auto roughnessResource =
-        resourceManager.loadImage(std::string("textures/american_walnut_roughness.png"), Vapor::LoadMode::Async);
-
-    // NOTES: optionally call resourceManager.waitForAll();
-
     auto sceneBlueprint = sceneResource->get();
     // The RenderScene (world geometry pool) is the app's now that no importer
     // fabricates one; instantiate() below fills it from the blueprint.
     auto scene = std::make_shared<RenderScene>("main");
-
-    auto material = std::make_shared<Vapor::Material>(Vapor::Material{
-        .albedoMap = albedoResource->get(),
-        .normalMap = normalResource->get(),
-        .roughnessMap = roughnessResource->get(),
-    });
 
     entt::registry registry;
 
@@ -446,17 +429,31 @@ auto main(int argc, char* args[]) -> int {
     // instantiate() also stages each mesh into the RenderScene pool once.
     // The Khronos Sponza GLTF is authored in meters (~30m across) — its
     // transforms are used as-is.
+    // The whole demo scene is data now: gameplay component appliers register
+    // first, then main.json instantiates everything (Sponza, physics cubes,
+    // lights, cameras, UI pages, particles). scene_builder.hpp is retired.
+    registerAppBlueprintComponents();
     if (sceneBlueprint && sceneBlueprint->ok) {
         std::vector<entt::entity> sceneEntities;
         Vapor::instantiate(registry, *scene, *sceneBlueprint, entt::null, "", &sceneEntities);
-        for (auto e : sceneEntities)
-            registry.emplace<SceneGeometryTag>(e);// marks scene-spawned geometry for serializer
+        for (auto e : sceneEntities)// marks scene-spawned geometry for serializer
+            if (registry.any_of<Vapor::MeshRendererComponent>(e)) registry.emplace<SceneGeometryTag>(e);
     } else {
-        fmt::print(stderr, "Scene blueprint failed to load; continuing with the built-in scene only\n");
+        fmt::print(stderr, "Scene blueprint failed to load; the world will be empty\n");
     }
 
-    auto [sceneBuilt, materialBuilt, cube1, global] =
-        buildScene(registry, *physics, scene, material, windowWidth, windowHeight, rng);
+    // Post-instantiate wiring for runtime-only state the scene can't author:
+    // camera aspect follows the actual window, the singleton request target is
+    // found by name, and the initial menu page is pushed.
+    registry.view<Vapor::VirtualCameraComponent>().each([&](Vapor::VirtualCameraComponent& cam) {
+        cam.aspect = (float)windowWidth / (float)windowHeight;
+    });
+    entt::entity global = entt::null;
+    registry.view<Vapor::NameComponent>().each([&](entt::entity e, const Vapor::NameComponent& name) {
+        if (name.name == "Scene Global") global = e;
+    });
+    if (global == entt::null) global = registry.create();
+    PageSystem::push(registry, PageID::MainMenu);
 
     renderer->stage(scene);
 
@@ -632,6 +629,10 @@ auto main(int argc, char* args[]) -> int {
         // Engine updates
         engineCore->update(deltaTime);
 
+        // Reactive body lifecycle: scene JSON authors data-only rigidbody +
+        // collider components; these systems create/destroy the Jolt bodies.
+        BodyCreateSystem::update(registry, physics.get());
+        BodyDestroySystem::update(registry, physics.get());
         physics->process(registry, deltaTime);
         Vapor::TransformSystem::update(registry);
         // Pause freezes the GPU sim (renderer) and the CPU-side emitter/reclaim
