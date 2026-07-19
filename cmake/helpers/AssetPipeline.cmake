@@ -87,9 +87,17 @@ function(vapor_copy_engine_assets TARGET)
         return()
     endif()
 
-    # One copy target per binary directory avoids parallel-build races when
-    # multiple targets in the same directory all depend on this.
-    string(MD5 _hash "${CMAKE_CURRENT_BINARY_DIR}")
+    # One copy target per OUTPUT directory avoids parallel-build races: the
+    # destination is $<TARGET_FILE_DIR>/Res, so keying on the target's output
+    # dir (not its source dir) de-dupes correctly even when targets in
+    # different source subdirectories share a RUNTIME_OUTPUT_DIRECTORY (e.g.
+    # the Examples all build into the build root). Falls back to the source
+    # binary dir when the target sets no output dir.
+    get_target_property(_outdir ${TARGET} RUNTIME_OUTPUT_DIRECTORY)
+    if(NOT _outdir)
+        set(_outdir "${CMAKE_CURRENT_BINARY_DIR}")
+    endif()
+    string(MD5 _hash "${_outdir}")
     set(_copy_target "copy_engine_assets_${_hash}")
     if(NOT TARGET ${_copy_target})
         add_custom_target(${_copy_target}
