@@ -282,6 +282,24 @@ namespace Vapor {
         float     turbulence = 0.0f; // curl noise strength for the particle sim
     };
 
+    // Opt-in per-light volumetric fog (the expensive raymarch). One singleton per
+    // scene; VolumetricFogSystem pushes it to the renderer each frame. The cheap
+    // always-on global fog is renderer-side "Height Fog"; this is the upgrade you
+    // add only where you want light shafts. First version is a single global
+    // volume — bounds + volume-blend come later.
+    struct VolumetricFogComponent {
+        bool  enabled = true;
+        float density = 0.02f;
+        float heightFalloff = 0.1f;
+        float baseHeight = 0.0f;
+        float maxHeight = 100.0f;
+        float anisotropy = 0.6f;
+        float ambientIntensity = 0.3f;
+        float noiseScale = 0.01f;
+        float noiseIntensity = 0.5f;
+        float windSpeed = 1.0f;
+    };
+
     // Per-emitter configuration.
     struct ParticleEmitterComponent {
         uint32_t maxParticles = 128;

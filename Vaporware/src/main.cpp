@@ -58,6 +58,7 @@ static void setupCustomDrawers(Vapor::SceneInspector& inspector) {
     inspector.registerComponent<Vapor::ParticleEmitterComponent>("Particle Emitter");
     inspector.registerComponent<Vapor::ParticleAttractorComponent>("Particle Attractor");
     inspector.registerComponent<Vapor::WindFieldComponent>("Wind Field");
+    inspector.registerComponent<Vapor::VolumetricFogComponent>("Volumetric Fog");
     inspector.registerComponent<Vapor::ParticleBurstRequest>("Particle Burst");
     inspector.registerComponent<Vapor::SpellBoltComponent>("Spell Bolt");
 
@@ -639,6 +640,7 @@ auto main(int argc, char* args[]) -> int {
         Vapor::LightGatherSystem::update(registry, scene.get());
         Vapor::SkySystem::update(registry, renderer.get());
         Vapor::WindSystem::update(registry, renderer.get());
+        Vapor::VolumetricFogSystem::update(registry, renderer.get());
         FlipbookSystem::update(registry, deltaTime);
         SpriteRenderSystem::update(registry, renderer.get(), &resourceManager);
 

@@ -506,6 +506,37 @@ namespace Vapor {
     };
 
     // ============================================================================
+    // 體積霧系統 - resolves the VolumetricFogComponent for the renderer
+    // ============================================================================
+    // The opt-in per-light volumetric fog (raymarch). Like SkySystem/WindSystem
+    // this pushes the singleton component's tunables to the renderer each frame
+    // (fog is live-tunable). No component -> the renderer keeps the pass off
+    // (default) so the expensive raymarch never runs unless a scene asks for it.
+    class VolumetricFogSystem {
+    public:
+        static void update(entt::registry& reg, IRenderer* renderer) {
+            if (!renderer) return;
+            auto view = reg.view<VolumetricFogComponent>();
+            for (auto entity : view) {
+                const auto& f = view.get<VolumetricFogComponent>(entity);
+                VolumetricFogRenderData data;
+                data.enabled          = f.enabled;
+                data.fogDensity       = f.density;
+                data.fogHeightFalloff = f.heightFalloff;
+                data.fogBaseHeight    = f.baseHeight;
+                data.fogMaxHeight     = f.maxHeight;
+                data.anisotropy       = f.anisotropy;
+                data.ambientIntensity = f.ambientIntensity;
+                data.noiseScale       = f.noiseScale;
+                data.noiseIntensity   = f.noiseIntensity;
+                data.windSpeed        = f.windSpeed;
+                renderer->setVolumetricFog(data);
+                break;  // singleton: the first volumetric fog wins
+            }
+        }
+    };
+
+    // ============================================================================
     // 相機控制系統 — fly / follow camera rigs
     // ============================================================================
     // Intent-driven: each camera entity carries a CharacterIntent written by the

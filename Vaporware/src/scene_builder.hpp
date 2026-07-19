@@ -131,6 +131,11 @@ inline SceneResources buildScene(
         registry.emplace<Vapor::SkyComponent>(skyEntity);
         auto& tod = registry.emplace<Vapor::TimeOfDayComponent>(skyEntity);
         tod.latitudeDeg = 0.0f;  // sun arcs due east->overhead->west (no south tilt)
+        // Opt-in volumetric fog, off by default — flip `enabled` in the inspector
+        // to turn on the per-light raymarch (light shafts). Cheap Height Fog is
+        // the always-on global fog (renderer panel).
+        auto& vfog = registry.emplace<Vapor::VolumetricFogComponent>(skyEntity);
+        vfog.enabled = false;
     }
 
     // Enough lights to exercise tiled light culling and to lift the ambient

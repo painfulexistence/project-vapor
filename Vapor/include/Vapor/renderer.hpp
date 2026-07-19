@@ -314,6 +314,7 @@ public:
     void setParticleVisible(bool visible) override { particleVisible = visible; }
     void setSky(const SkyRenderData& sky) override;
     void setWind(const WindRenderData& wind) override;
+    void setVolumetricFog(const VolumetricFogRenderData& fog) override;
     // Sun-driven auto rebake is opt-in (m_iblAutoRebake, default off) — a moving
     // sun otherwise re-bakes the IBL constantly. The one-shot "Refresh IBL"
     // button and sky-config changes (setSky) still force a rebake directly.

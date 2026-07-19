@@ -4524,6 +4524,22 @@ void Renderer::setWind(const WindRenderData& wind) {
     m_windStrength = wind.strength;
 }
 
+void Renderer::setVolumetricFog(const VolumetricFogRenderData& fog) {
+    // The VolumetricFogComponent is the SSOT for the raymarch: copy its tunables
+    // into the fog buffer source and gate the pass on `enabled`. Per-frame fields
+    // (matrices/camera/sun) and the wind scroll are still filled in the pass.
+    volumetricFogEnabled       = fog.enabled;
+    fogSettings.fogDensity     = fog.fogDensity;
+    fogSettings.fogHeightFalloff = fog.fogHeightFalloff;
+    fogSettings.fogBaseHeight  = fog.fogBaseHeight;
+    fogSettings.fogMaxHeight   = fog.fogMaxHeight;
+    fogSettings.anisotropy     = fog.anisotropy;
+    fogSettings.ambientIntensity = fog.ambientIntensity;
+    fogSettings.noiseScale     = fog.noiseScale;
+    fogSettings.noiseIntensity = fog.noiseIntensity;
+    fogSettings.windSpeed      = fog.windSpeed;
+}
+
 void Renderer::setParticleDrawList(const std::vector<ParticleDrawPacket>& draws) {
     m_particleDrawList = draws;
     if (m_particleDrawList.size() > MAX_PARTICLE_DRAWS)
@@ -7239,16 +7255,12 @@ void Renderer::drawGraphicsImGui() {
     }
 
     if (ImGui::TreeNode("Volumetric Fog")) {
-        // Expensive per-light raymarch. Panel toggle here is a debug override;
-        // it is otherwise opt-in/ECS-driven (VolumetricFogComponent) in Part B.
-        ImGui::Checkbox("Enabled", &volumetricFogEnabled);
-        ImGui::DragFloat("Density", &fogSettings.fogDensity, 0.001f, 0.0f, 0.5f);
-        ImGui::DragFloat("Height Falloff", &fogSettings.fogHeightFalloff, 0.01f, 0.001f, 1.0f);
-        ImGui::DragFloat("Base Height", &fogSettings.fogBaseHeight, 1.0f, -100.0f, 100.0f);
-        ImGui::DragFloat("Max Height", &fogSettings.fogMaxHeight, 10.0f, 0.0f, 500.0f);
-        ImGui::DragFloat("Anisotropy", &fogSettings.anisotropy, 0.01f, -0.99f, 0.99f);
-        ImGui::DragFloat("Ambient Intensity", &fogSettings.ambientIntensity, 0.01f, 0.0f, 2.0f);
-        if (ImGui::Button("Reset to Defaults")) fogSettings = FogRenderData{};
+        // Expensive per-light raymarch — now ECS-driven (opt-in). Add a
+        // VolumetricFogComponent to a scene entity and edit it in the entity
+        // inspector; VolumetricFogSystem pushes its tunables here every frame, so
+        // this panel is intentionally read-only to avoid fighting the component.
+        ImGui::TextDisabled("ECS-driven: VolumetricFogComponent (entity inspector)");
+        ImGui::Text("Active: %s", volumetricFogEnabled ? "yes" : "no");
         ImGui::TreePop();
     }
 

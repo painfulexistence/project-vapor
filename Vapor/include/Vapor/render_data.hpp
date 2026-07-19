@@ -340,6 +340,24 @@ struct alignas(16) HeightFogRenderData {
     glm::vec4 params = glm::vec4(0.1f, 0.0f, 0.6f, 0.3f);
 };
 
+// CPU-side contract for the opt-in per-light volumetric fog (the raymarch).
+// VolumetricFogSystem resolves a VolumetricFogComponent into this and pushes it
+// via IRenderer::setVolumetricFog each frame; the renderer copies the tunables
+// into its FogRenderData and gates the pass on `enabled`. No GPU alignment — it
+// is a contract, not a buffer.
+struct VolumetricFogRenderData {
+    bool  enabled = false;
+    float fogDensity = 0.02f;
+    float fogHeightFalloff = 0.1f;
+    float fogBaseHeight = 0.0f;
+    float fogMaxHeight = 100.0f;
+    float anisotropy = 0.6f;
+    float ambientIntensity = 0.3f;
+    float noiseScale = 0.01f;
+    float noiseIntensity = 0.5f;
+    float windSpeed = 1.0f;   // per-medium scroll coefficient (scaled by wind strength)
+};
+
 // Heterogeneous volume raymarch (EmberGen-style density grid in an AABB).
 // vec4-only layout so the MSL and std430 twins are byte-identical
 // (VolumeRaymarch.frag / 3d_volume_raymarch.metal).
