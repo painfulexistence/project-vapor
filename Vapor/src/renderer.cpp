@@ -4156,7 +4156,11 @@ void Renderer::volumetricFogPass() {
         rhi->setComputeBuffer(5, spotLightBuffer, 0, sizeof(Vapor::SpotLight) * maxSpotLights);
         rhi->setComputeBuffer(6, rectLightBuffer);
         rhi->setComputeBytes(&fogLightParams, sizeof(glm::uvec4), 7);
-        rhi->setComputeBuffer(8, fogVolumeBuffer, 0, sizeof(VolumetricFogVolumeGPU) * kMaxFogVolumes);
+        // Fog volumes: Metal uses buffer index 8 ([[buffer(8)]], past the light-
+        // params bytes at 7). Vulkan has only 8 descriptor slots (0-7) and its
+        // light params are a push constant (not a descriptor), so it binds b7.
+        rhi->setComputeBuffer(backend == GraphicsBackend::Metal ? 8u : 7u,
+                              fogVolumeBuffer, 0, sizeof(VolumetricFogVolumeGPU) * kMaxFogVolumes);
         rhi->setComputeTexture(0, fogFroxelGridTexture);       // storage write (Metal [[texture(0)]] / Vk set1 b0)
         // Shadow map: Metal samples a plain [[texture(1)]] with the kernel's inline
         // sampler; Vulkan needs a combined image sampler (set 2) it can textureLod.
@@ -4174,6 +4178,11 @@ void Renderer::volumetricFogPass() {
         rhi->setComputeTexture(1, fogIntegratedVolumeTexture); // write [[texture(1)]]
         rhi->dispatch((FROXEL_GRID_X + 7) / 8, (FROXEL_GRID_Y + 7) / 8, 1);
         rhi->endComputePass();
+
+        // The integrate pass wrote the volume as a storage image (GENERAL); the
+        // composite samples it. Transition + barrier before the render pass (a
+        // no-op on Metal, which tracks the hazard). Must be outside a render pass.
+        rhi->prepareTextureForSampling(fogIntegratedVolumeTexture);
 
         // Composite: sample the integrated volume, ping-pong colorRT.
         RenderPassDesc crp;

@@ -3486,9 +3486,16 @@ void RHI_Vulkan::setComputeSampledTexture(Uint32 binding, TextureHandle texture,
     }
     // Sampled read: SHADER_READ_ONLY layout (not GENERAL). Runs outside any
     // render pass, so the transition is legal here. The whole-mip view lets the
-    // shader textureLod() any level (Hi-Z pyramid sampling).
+    // shader textureLod() any level (Hi-Z pyramid sampling). Aspect from the
+    // format — the froxel inject samples the Depth32Float PSSM map here, and a
+    // COLOR-aspect barrier on a depth image is a validation error.
+    const bool isDepthTex = (it->second.format == VK_FORMAT_D32_SFLOAT ||
+                             it->second.format == VK_FORMAT_D24_UNORM_S8_UINT ||
+                             it->second.format == VK_FORMAT_D32_SFLOAT_S8_UINT ||
+                             it->second.format == VK_FORMAT_D16_UNORM);
     transitionImage(it->second.image, it->second.currentLayout,
-                    VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL, VK_IMAGE_ASPECT_COLOR_BIT);
+                    VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
+                    isDepthTex ? VK_IMAGE_ASPECT_DEPTH_BIT : VK_IMAGE_ASPECT_COLOR_BIT);
     it->second.currentLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
     TextureBinding& cur = boundComputeSampled[binding];
     if (cur.view != it->second.view || cur.sampler != sIt->second.sampler) {
@@ -3631,6 +3638,22 @@ void RHI_Vulkan::computeBarrier() {
     dep.memoryBarrierCount = 1;
     dep.pMemoryBarriers = &b;
     pfnCmdPipelineBarrier2(currentCommandBuffer, &dep);
+}
+
+void RHI_Vulkan::prepareTextureForSampling(TextureHandle texture) {
+    auto it = textures.find(texture.id);
+    if (it == textures.end()) return;
+    // transitionImage carries a conservative ALL_COMMANDS barrier, so this both
+    // makes the prior compute write visible and moves the image to the sampled
+    // layout. A no-op when already SHADER_READ_ONLY (from==to short-circuits).
+    const bool isDepth = (it->second.format == VK_FORMAT_D32_SFLOAT ||
+                          it->second.format == VK_FORMAT_D24_UNORM_S8_UINT ||
+                          it->second.format == VK_FORMAT_D32_SFLOAT_S8_UINT ||
+                          it->second.format == VK_FORMAT_D16_UNORM);
+    const VkImageAspectFlags aspect = isDepth ? VK_IMAGE_ASPECT_DEPTH_BIT : VK_IMAGE_ASPECT_COLOR_BIT;
+    transitionImage(it->second.image, it->second.currentLayout,
+                    VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL, aspect);
+    it->second.currentLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
 }
 
 // ============================================================================

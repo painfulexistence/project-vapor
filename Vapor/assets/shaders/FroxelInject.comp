@@ -93,7 +93,10 @@ layout(std430, set = 0, binding = 3) readonly buffer PointLightBuf { PointLight 
 layout(std430, set = 0, binding = 4) readonly buffer ClusterBuf { Cluster tiles[]; };
 layout(std430, set = 0, binding = 5) readonly buffer SpotLightBuf { SpotLight spotLights[]; };
 layout(std430, set = 0, binding = 6) readonly buffer RectLightBuf { RectLight rectLights[]; };
-layout(std430, set = 0, binding = 8) readonly buffer FogVolumeBuf { FogVolume fogVolumes[]; };
+// binding 7 (not 8): Vulkan compute has only 8 storage-buffer slots (0-7) and the
+// light params ride a push constant, not a descriptor — so b7 is free here. The
+// Metal kernel keeps volumes at [[buffer(8)]] (its b7 is the light-params bytes).
+layout(std430, set = 0, binding = 7) readonly buffer FogVolumeBuf { FogVolume fogVolumes[]; };
 layout(set = 1, binding = 0, rgba16f) uniform writeonly image3D froxelGrid;
 layout(set = 2, binding = 1) uniform sampler2DArray pssmShadowMaps;
 // x=cullGridX y=cullGridY z=spotCount w=rectCount (setComputeBytes(...,7) -> offset 48)
