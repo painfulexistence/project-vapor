@@ -11,6 +11,8 @@
 #include <Jolt/Physics/Vehicle/VehicleConstraint.h>
 #include <Jolt/Physics/Vehicle/WheeledVehicleController.h>
 
+using namespace Vapor;
+
 // Template: Sedan configuration
 auto VehicleSettings::createSedan() -> VehicleSettings {
     VehicleSettings settings;

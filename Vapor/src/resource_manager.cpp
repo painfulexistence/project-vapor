@@ -4,6 +4,8 @@
 #include <fmt/core.h>
 #include <tracy/Tracy.hpp>
 
+using namespace Vapor;
+
 namespace Vapor {
 
     ResourceManager::ResourceManager(TaskScheduler& scheduler) : m_scheduler(scheduler) {
@@ -183,10 +185,7 @@ namespace Vapor {
         // Check cache first
         auto cached = cache.get(path);
         if (cached) {
-            // If there's a callback and resource is ready, call it immediately
-            if (onComplete && cached->isReady()) {
-                onComplete(cached->get());
-            } else if (onComplete) {
+            if (onComplete) {
                 cached->setCallback(onComplete);
             }
             return cached;

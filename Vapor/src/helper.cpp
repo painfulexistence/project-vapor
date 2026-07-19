@@ -1,8 +1,11 @@
+#include "Vapor/helper.hpp"
 #include "Vapor/file_system.hpp"
 #include <fstream>
 #include <stdexcept>
 
-auto readFile(const std::string& filename) -> std::string {
+using namespace Vapor;
+
+auto Vapor::readFile(const std::string& filename) -> std::string {
     std::ifstream file(FileSystem::instance().resolvePathOrThrow(filename), std::ios::ate | std::ios::binary);
     if (!file.is_open()) {
         throw std::runtime_error("Failed to open file " + filename + "!");

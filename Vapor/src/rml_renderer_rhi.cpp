@@ -9,6 +9,8 @@
 #include <algorithm>
 #include <cstring>
 
+using namespace Vapor;
+
 namespace Vapor {
 
 RmlRendererRHI::RmlRendererRHI(RHI* rhi, GraphicsBackend backend)

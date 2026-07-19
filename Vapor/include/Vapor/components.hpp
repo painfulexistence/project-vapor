@@ -88,6 +88,22 @@ namespace Vapor {
     };
 
     // ============================================================================
+    // Control intent
+    // ============================================================================
+    // Per-entity control intent, written each frame by the app's input-mapping
+    // layer (or synthesized by CameraControlSystem's InputManager adapter).
+    // Systems consume intent instead of raw input, so bindings, gamepads,
+    // replays, and AI drivers all feed the same path.
+    struct CharacterIntent {
+        glm::vec2 lookVector = glm::vec2(0.0f);
+        glm::vec2 moveVector = glm::vec2(0.0f);
+        float moveVerticalAxis = 0.0f;
+        bool jump = false;
+        bool sprint = false;
+        bool interact = false;
+    };
+
+    // ============================================================================
     // Grab / Interaction
     // ============================================================================
     struct GrabberComponent {

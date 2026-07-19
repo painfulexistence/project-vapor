@@ -8,6 +8,8 @@
 #include <vector>
 
 // Single frame within a sprite atlas
+namespace Vapor {
+
 struct SpriteFrame {
     std::string name;
     glm::vec4 uvRect = {0, 0, 1, 1};  // minU, minV, maxU, maxV
@@ -39,3 +41,10 @@ struct SpriteAtlas {
         return it != nameToIndex.end() ? it->second : UINT16_MAX;
     }
 };
+
+} // namespace Vapor
+
+// Transitional shim: these types lived at global scope before the namespace
+// unification; unqualified call sites keep compiling while they migrate to
+// Vapor:: qualification. Remove once call sites are migrated.
+using namespace Vapor;

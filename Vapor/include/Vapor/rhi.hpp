@@ -32,6 +32,8 @@ struct SDL_Window;
 //    bits only become necessary if storage moves to dense free-list arrays.
 // ============================================================================
 
+namespace Vapor {
+
 struct BufferHandle {
     Uint32 id = UINT32_MAX;
     bool isValid() const { return id != UINT32_MAX; }
@@ -627,7 +629,7 @@ public:
 
     // Multi-draw indirect: issue `drawCount` indexed draws whose arguments are
     // read from `argsBuffer` starting at `offset`, one DrawCommand every
-    // `stride` bytes (see the DrawCommand struct in graphics_gpu_structs.hpp).
+    // `stride` bytes (see DrawCommand in graphics_gpu_structs.hpp).
     // The currently bound index buffer + a merged vertex buffer are used; each
     // command carries its own firstIndex/vertexOffset/firstInstance. On Vulkan
     // this is a single vkCmdDrawIndexedIndirect; on Metal it expands to a loop
@@ -681,6 +683,11 @@ public:
     virtual void writeTextureArgumentTable(BufferHandle /*table*/, Uint32 /*entry*/, Uint32 /*slot*/,
                                            TextureHandle /*texture*/) {}
     virtual void bindTextureArgumentTable(BufferHandle /*table*/) {}
+    // Bind the same table to the active COMPUTE encoder at an explicit buffer
+    // index (the table's baked bufferIndex is the fragment slot). Declares Metal
+    // residency for the compute stage. Used by the RT hit-shading kernels to
+    // sample per-material albedo. No-op on backends without argument tables.
+    virtual void bindComputeTextureArgumentTable(BufferHandle /*table*/, Uint32 /*bufferIndex*/) {}
 
     // ========================================================================
     // Compute Commands
@@ -797,3 +804,10 @@ public:
 
 RHI* createRHIVulkan();
 RHI* createRHIMetal();
+
+} // namespace Vapor
+
+// Transitional shim: these types lived at global scope before the namespace
+// unification; unqualified call sites keep compiling while they migrate to
+// Vapor:: qualification. Remove once call sites are migrated.
+using namespace Vapor;

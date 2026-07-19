@@ -1,6 +1,8 @@
 #include "Vapor/action_manager.hpp"
 #include <algorithm>
 
+using namespace Vapor;
+
 namespace Vapor {
 
     // ============================================================

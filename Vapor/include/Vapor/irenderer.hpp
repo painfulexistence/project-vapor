@@ -49,18 +49,18 @@ namespace Rml {
     class Context;
 }
 namespace Vapor {
-    class DebugDraw;
-    class VoxelWorld;
 
-    // One raymarched micro-voxel volume, resolved from the ECS
-    // VoxelVolumeComponent by VoxelVolumeSystem and pushed per frame. The
-    // renderer keys its GPU mirrors (page table / brick pool buffers) on the
-    // VoxelWorld pointer and pulls per-brick dirty batches from it.
-    struct VoxelVolumeDraw {
-        std::shared_ptr<VoxelWorld> world;
-        glm::vec3 origin = glm::vec3(0.0f);  // world-space min corner
-    };
-}
+class DebugDraw;
+class VoxelWorld;
+
+// One raymarched micro-voxel volume, resolved from the ECS
+// VoxelVolumeComponent by VoxelVolumeSystem and pushed per frame. The
+// renderer keys its GPU mirrors (page table / brick pool buffers) on the
+// VoxelWorld pointer and pulls per-brick dirty batches from it.
+struct VoxelVolumeDraw {
+    std::shared_ptr<VoxelWorld> world;
+    glm::vec3 origin = glm::vec3(0.0f);  // world-space min corner
+};
 
 // Graphics backend selection
 enum class GraphicsBackend {
@@ -297,3 +297,10 @@ std::unique_ptr<IRenderer> createRenderer(GraphicsBackend backend, SDL_Window* w
 // and initializes the full-feature Metal renderer for the given window.
 std::unique_ptr<IRenderer> createRendererMetal(SDL_Window* window);
 #endif
+
+} // namespace Vapor
+
+// Transitional shim: these types lived at global scope before the namespace
+// unification; unqualified call sites keep compiling while they migrate to
+// Vapor:: qualification. Remove once call sites are migrated.
+using namespace Vapor;

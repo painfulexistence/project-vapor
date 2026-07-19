@@ -18,6 +18,8 @@ namespace NS {
 }
 
 // Handle type for fonts
+namespace Vapor {
+
 struct FontHandle {
     Uint32 rid = UINT32_MAX;
     bool isValid() const {
@@ -95,3 +97,10 @@ private:
     std::unordered_map<Uint32, AtlasData> m_atlasData;// Temporary storage until texture is created
     Uint32 m_nextFontID = 1;
 };
+
+} // namespace Vapor
+
+// Transitional shim: these types lived at global scope before the namespace
+// unification; unqualified call sites keep compiling while they migrate to
+// Vapor:: qualification. Remove once call sites are migrated.
+using namespace Vapor;

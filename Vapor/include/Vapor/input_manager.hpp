@@ -130,7 +130,7 @@ namespace Vapor {
 
         void clearMappings();
 
-        const InputAction getActionForKey(SDL_Scancode key) const;
+        InputAction getActionForKey(SDL_Scancode key) const;
 
         const std::deque<InputEvent>& getInputBuffer() const {
             return inputHistory;

@@ -131,6 +131,10 @@ target_include_directories(Vapor PUBLIC
     $<INSTALL_INTERFACE:include>
     $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/imgui>
     $<INSTALL_INTERFACE:${CMAKE_INSTALL_INCLUDEDIR}/imgui>
+    # Vendored VulkanMemoryAllocator (single MIT header, like MikkTSpace):
+    # rhi_vulkan.hpp includes <vk_mem_alloc.h>, so the dir rides the same
+    # PUBLIC interface as include/.
+    $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/VulkanMemoryAllocator>
 )
 target_include_directories(Vapor PRIVATE
     ${TINYGLTF_INCLUDE_DIRS}

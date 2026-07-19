@@ -7,6 +7,8 @@
 // defined in rhi.hpp. This file only defines additional application-layer handles.
 
 // Template for application-layer handles
+namespace Vapor {
+
 template<typename Tag> struct GPUHandle {
     Uint32 rid = UINT32_MAX;
 
@@ -25,3 +27,10 @@ template<typename Tag> struct GPUHandle {
 // Application-layer handle (not an RHI handle)
 struct AtlasHandleTag {};
 using AtlasHandle = GPUHandle<AtlasHandleTag>;
+
+} // namespace Vapor
+
+// Transitional shim: these types lived at global scope before the namespace
+// unification; unqualified call sites keep compiling while they migrate to
+// Vapor:: qualification. Remove once call sites are migrated.
+using namespace Vapor;

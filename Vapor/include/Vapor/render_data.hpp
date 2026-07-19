@@ -16,6 +16,8 @@
 // Renderer Resource IDs
 // ============================================================================
 
+namespace Vapor {
+
 using MeshId = Uint32;
 using MaterialId = Uint32;
 using TextureId = Uint32;
@@ -105,6 +107,7 @@ struct RenderMaterial {
     float sheenTint = 0.5f;
     float clearcoat = 0.0f;
     float clearcoatGloss = 1.0f;
+    float transmission = 0.0f;  // KHR_materials_transmission (rendering only)
     bool useIBL = false;  // native Material::useIBL default (graphics.hpp)
 
     // Texture references (IDs, not handles)
@@ -558,6 +561,7 @@ struct MaterialDataInput {
     float sheenTint = 0.5f;
     float clearcoat = 0.0f;
     float clearcoatGloss = 1.0f;
+    float transmission = 0.0f;  // KHR_materials_transmission (rendering only)
 
     // Texture data (from Application's Image objects)
     std::shared_ptr<Vapor::Image> albedoMap;
@@ -571,3 +575,10 @@ struct MaterialDataInput {
     float alphaCutoff = 0.5f;
     bool doubleSided = false;
 };
+
+} // namespace Vapor
+
+// Transitional shim: these types lived at global scope before the namespace
+// unification; unqualified call sites keep compiling while they migrate to
+// Vapor:: qualification. Remove once call sites are migrated.
+using namespace Vapor;

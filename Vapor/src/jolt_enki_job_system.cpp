@@ -2,6 +2,8 @@
 #include <fmt/core.h>
 #include <thread>
 
+using namespace Vapor;
+
 namespace Vapor {
 
     JoltEnkiJobSystem::JoltEnkiJobSystem(TaskScheduler& scheduler, uint32_t maxJobs)
@@ -36,6 +38,10 @@ namespace Vapor {
         // Create a new job using the protected Job constructor
         Job* job = new Job(name, color, this, jobFunction, numDependencies);
 
+        // Construct the handle BEFORE queueing (JobSystemThreadPool order): a
+        // fast worker can Execute+Release the queue's reference before we return.
+        JPH::JobHandle handle(job);
+
         // If no dependencies, queue it immediately
         if (numDependencies == 0) {
             QueueJob(job);
@@ -43,17 +49,34 @@ namespace Vapor {
 
         m_numJobs++;
 
-        return JPH::JobHandle(job);
+        return handle;
     }
 
     // NOLINTNEXTLINE(readability-identifier-naming)
     void JoltEnkiJobSystem::QueueJob(JPH::JobSystem::Job* job) {
         if (!job) return;
 
-        // Create enkiTS task wrapper
-        auto task = new JoltJobTask(job);
+        // Queue's reference, released after Execute in ExecuteRange
+        // (JobSystemThreadPool semantics): keeps the job alive if the caller
+        // drops its handle before execution.
+        job->AddRef();
 
-        // Submit to enkiTS scheduler
+        // Reuse a completed pooled task or grow the pool. The lock must span
+        // both the pick and AddTaskSetToPipe — the pipe call is what flips
+        // the task to not-complete.
+        std::lock_guard<std::mutex> lock(m_taskPoolMutex);
+        JoltJobTask* task = nullptr;
+        for (auto& t : m_taskPool) {
+            if (t->GetIsComplete()) {
+                task = t.get();
+                break;
+            }
+        }
+        if (!task) {
+            m_taskPool.push_back(std::make_unique<JoltJobTask>());
+            task = m_taskPool.back().get();
+        }
+        task->setJob(job);
         m_scheduler.getScheduler()->AddTaskSetToPipe(task);
     }
 
@@ -85,11 +108,11 @@ namespace Vapor {
 
     // NOLINTNEXTLINE(readability-identifier-naming)
     void JoltEnkiJobSystem::JoltJobTask::ExecuteRange(enki::TaskSetPartition range, uint32_t threadnum) {
-        // Execute the Jolt job function
-        // Execute() will handle job completion, barrier notification, etc.
-        // We should NOT call Release() here - JobHandle manages the reference count.
-        // When all JobHandles are destroyed, the job will be automatically freed.
-        m_job->Execute();
+        // Execute() handles completion/barrier notification; Release()
+        // balances QueueJob's AddRef.
+        JPH::JobSystem::Job* job = m_job;
+        job->Execute();
+        job->Release();
     }
 
 }// namespace Vapor

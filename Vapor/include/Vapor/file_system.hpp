@@ -3,6 +3,8 @@
 #include <string>
 #include <vector>
 
+namespace Vapor {
+
 class FileSystem {
 public:
     static FileSystem& instance();
@@ -32,3 +34,10 @@ private:
     // Called automatically by resolvePath if initialize() was never called.
     void lazyInitialize();
 };
+
+} // namespace Vapor
+
+// Transitional shim: these types lived at global scope before the namespace
+// unification; unqualified call sites keep compiling while they migrate to
+// Vapor:: qualification. Remove once call sites are migrated.
+using namespace Vapor;

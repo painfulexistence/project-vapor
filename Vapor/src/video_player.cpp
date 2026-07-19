@@ -18,6 +18,8 @@ extern "C" {
 #include <cstring>
 #include <deque>
 
+using namespace Vapor;
+
 namespace Vapor {
 
 // ─── FFmpegDecodeContext ──────────────────────────────────────────────────────
