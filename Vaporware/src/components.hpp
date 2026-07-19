@@ -218,3 +218,5 @@ struct PersistentTag {};
 struct DeadTag {};
 // Marks entities auto-spawned from a GLTF scene; excluded from level serialization.
 struct SceneGeometryTag {};
+// Marks a Text2DComponent whose text FpsTextSystem rewrites with the frame rate.
+struct FpsTextComponent {};
