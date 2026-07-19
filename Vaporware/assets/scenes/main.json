@@ -209,7 +209,7 @@
       "name": "World Sprite",
       "position": [0.0, 2.0, 0.0],
       "components": {
-        "sprite3D": { "atlas": "demo_sprite", "size": [1.0, 1.0], "tint": [1.0, 0.5, 0.5, 1.0], "billboard": true }
+        "sprite3D": { "atlas": "demo_sprite", "size": [1.0, 1.0], "tint": [1.0, 0.5, 0.5, 1.0], "billboard": false }
       }
     },
     {
