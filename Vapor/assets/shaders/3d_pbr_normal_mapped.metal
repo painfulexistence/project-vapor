@@ -520,7 +520,7 @@ fragment float4 fragmentMain(
 
     float4 baseColor = matAlbedo.sample(s, in.uv);
     // glTF MASK cutout: per-material cutoff (0 = disabled for OPAQUE/BLEND).
-    if (material.alphaCutoff > 0.0 && baseColor.a * material.baseColorFactor.a < material.alphaCutoff) {
+    if (material.emissiveFactor.a > 0.0 && baseColor.a * material.baseColorFactor.a < material.emissiveFactor.a) {
         discard_fragment();
     }
     Surface surf;
@@ -532,7 +532,7 @@ fragment float4 fragmentMain(
     // it joins the linear lighting sum. (Was linearToSRGB, the wrong direction:
     // that re-encodes toward sRGB and brightens; the sRGB->linear encode
     // belongs only at the final output, which PostProcess/the swapchain do.)
-    surf.emission = srgbToLinear(matEmissive.sample(s, in.uv).rgb * material.emissiveFactor) * material.emissiveStrength;
+    surf.emission = srgbToLinear(matEmissive.sample(s, in.uv).rgb * material.emissiveFactor.rgb) * material.emissiveStrength;
     surf.subsurface = material.subsurface;
     surf.specular = material.specular;
     surf.specular_tint = material.specularTint;

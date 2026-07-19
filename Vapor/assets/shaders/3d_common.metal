@@ -56,8 +56,11 @@ struct MaterialData {
     float metallicFactor;
     float roughnessFactor;
     float occlusionStrength;
-    packed_float3 emissiveFactor;
-    float alphaCutoff;// MASK-mode cutoff; 0 = disabled (matches C++ MaterialData)
+    // .rgb = emissive colour, .a = MASK alpha cutoff (0 = disabled). Combined
+    // into a float4 because MSL forbids packed_float3 in stage_in structs and a
+    // plain float3 would 16-align the next scalar, breaking the C++ layout
+    // (emissiveFactor at 32, cutoff at 44, emissiveStrength at 48).
+    float4 emissiveFactor;
     float emissiveStrength;
     float subsurface;
     float specular;
