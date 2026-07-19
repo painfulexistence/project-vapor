@@ -241,6 +241,12 @@ struct SkyRenderData {
     glm::vec3 gradientZenith  = glm::vec3(0.18f, 0.34f, 0.62f);
     glm::vec3 gradientHorizon = glm::vec3(0.62f, 0.74f, 0.88f);
     glm::vec3 gradientGround  = glm::vec3(0.20f, 0.18f, 0.16f);
+    // Night-sky visuals (stars + moon).
+    float starDensity    = 1000.0f;
+    float starBrightness = 15.0f;
+    glm::vec3 moonColor  = glm::vec3(0.92f, 0.93f, 1.0f);
+    float moonSize       = 0.0010f;
+    float moonBrightness = 1.2f;
 };
 
 // GPU buffer for the gradient sky pass (SkyType::Gradient). Each color is
@@ -250,6 +256,18 @@ struct alignas(16) GradientRenderData {
     glm::vec4 zenith  = glm::vec4(0.18f, 0.34f, 0.62f, 1.0f);
     glm::vec4 horizon = glm::vec4(0.62f, 0.74f, 0.88f, 1.0f);
     glm::vec4 ground  = glm::vec4(0.20f, 0.18f, 0.16f, 1.0f);
+};
+
+// Night-sky visual tunables for the Atmosphere pass (stars + moon disk). Bound
+// only to the atmosphere DISPLAY pass (not the IBL capture). vec4 + 4 scalars,
+// so std430 (Atmosphere.frag) and MSL (3d_atmosphere.metal) match byte-for-byte.
+// Matches NightSkyData in both shaders. SkyComponent drives it via setSky.
+struct alignas(16) NightSkyRenderData {
+    glm::vec4 moonColor  = glm::vec4(0.92f, 0.93f, 1.0f, 0.0f);  // rgb (a unused)
+    float starDensity    = 1000.0f;   // view-direction lattice scale (more = smaller/denser)
+    float starBrightness = 15.0f;     // overall star intensity scale
+    float moonSize       = 0.0010f;   // 1 - cos(angular radius); larger = bigger moon disk
+    float moonBrightness = 1.2f;      // moon disk intensity scale
 };
 
 // Screen-space light scattering (god rays). Layout matches the Metal backend's
@@ -323,6 +341,39 @@ struct alignas(16) FogRenderData {
     glm::vec2 _pad2 = glm::vec2(0.0f);                        // 152 (align vec3 to 160)
     glm::vec3 windDirection = glm::vec3(1.0f, 0.0f, 0.0f);   // 160
     float _pad3 = 0.0f;                                       // 172 (struct = 176, /16)
+};
+
+// Cheap analytic exponential height fog (the pre-raymarch "Height Fog"): one
+// evaluation per pixel, no shadows/lights. Every field is vec4-packed so the
+// std430 (GLSL) and MSL layouts are byte-identical — the same struct is used
+// for the Vulkan buffer and the Metal setFragmentBytes upload. Matches
+// HeightFogData in HeightFog.frag / 3d_height_fog.metal.
+struct alignas(16) HeightFogRenderData {
+    glm::mat4 invViewProj = glm::mat4(1.0f);
+    glm::vec4 cameraPosition = glm::vec4(0.0f);                       // xyz = camera pos
+    glm::vec4 sunDirection = glm::vec4(glm::normalize(glm::vec3(0.5f, 0.5f, 0.5f)), 0.0f);
+    glm::vec4 sunColorIntensity = glm::vec4(1.0f, 1.0f, 1.0f, 12.0f); // rgb = color, a = intensity
+    glm::vec4 fogColorDensity = glm::vec4(0.5f, 0.6f, 0.7f, 0.02f);   // rgb = ambient tint, a = density
+    // x = height falloff, y = base height, z = anisotropy (sun phase), w = ambient intensity
+    glm::vec4 params = glm::vec4(0.1f, 0.0f, 0.6f, 0.3f);
+};
+
+// CPU-side contract for the opt-in per-light volumetric fog (the raymarch).
+// VolumetricFogSystem resolves a VolumetricFogComponent into this and pushes it
+// via IRenderer::setVolumetricFog each frame; the renderer copies the tunables
+// into its FogRenderData and gates the pass on `enabled`. No GPU alignment — it
+// is a contract, not a buffer.
+struct VolumetricFogRenderData {
+    bool  enabled = false;
+    float fogDensity = 0.02f;
+    float fogHeightFalloff = 0.1f;
+    float fogBaseHeight = 0.0f;
+    float fogMaxHeight = 100.0f;
+    float anisotropy = 0.6f;
+    float ambientIntensity = 0.3f;
+    float noiseScale = 0.01f;
+    float noiseIntensity = 0.5f;
+    float windSpeed = 1.0f;   // per-medium scroll coefficient (scaled by wind strength)
 };
 
 // Heterogeneous volume raymarch (EmberGen-style density grid in an AABB).

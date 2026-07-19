@@ -52,6 +52,7 @@ static void setupCustomDrawers(Vapor::SceneInspector& inspector) {
     inspector.registerComponent<Vapor::RectLightComponent>("Rect Light");
     inspector.registerComponent<Vapor::DirectionalLightComponent>("Directional Light");
     inspector.registerComponent<Vapor::SunComponent>("Sun");
+    inspector.registerComponent<Vapor::MoonComponent>("Moon");
     inspector.registerComponent<Vapor::TimeOfDayComponent>("Time of Day");
     inspector.registerComponent<CharacterIntent>("Character Intent");
     inspector.registerComponent<CharacterControllerComponent>("Character Controller");
@@ -67,6 +68,7 @@ static void setupCustomDrawers(Vapor::SceneInspector& inspector) {
     inspector.registerComponent<Vapor::ParticleEmitterComponent>("Particle Emitter");
     inspector.registerComponent<Vapor::ParticleAttractorComponent>("Particle Attractor");
     inspector.registerComponent<Vapor::WindFieldComponent>("Wind Field");
+    inspector.registerComponent<Vapor::VolumetricFogComponent>("Volumetric Fog");
     inspector.registerComponent<Vapor::ParticleBurstRequest>("Particle Burst");
     inspector.registerComponent<Vapor::SpellBoltComponent>("Spell Bolt");
 
@@ -102,6 +104,14 @@ static void setupCustomDrawers(Vapor::SceneInspector& inspector) {
                     if (ImGui::ColorEdit3("zenith",  &c->gradientZenith.x))  c->dirty = true;
                     if (ImGui::ColorEdit3("horizon", &c->gradientHorizon.x)) c->dirty = true;
                     if (ImGui::ColorEdit3("ground",  &c->gradientGround.x))  c->dirty = true;
+                }
+                if (c->type == SkyType::Atmosphere && ImGui::TreeNode("Night Sky (stars + moon)")) {
+                    if (ImGui::DragFloat("star density",    &c->starDensity, 5.0f, 20.0f, 2000.0f)) c->dirty = true;
+                    if (ImGui::DragFloat("star brightness", &c->starBrightness, 0.01f, 0.0f, 5.0f))  c->dirty = true;
+                    if (ImGui::ColorEdit3("moon color",     &c->moonColor.x))                        c->dirty = true;
+                    if (ImGui::DragFloat("moon size",       &c->moonSize, 0.0002f, 0.0001f, 0.05f, "%.4f")) c->dirty = true;
+                    if (ImGui::DragFloat("moon brightness", &c->moonBrightness, 0.01f, 0.0f, 10.0f)) c->dirty = true;
+                    ImGui::TreePop();
                 }
                 ImGui::DragFloat("IBL sun threshold (deg)", &c->iblSunThresholdDeg, 0.1f, 0.0f, 90.0f);
             }
@@ -902,6 +912,7 @@ auto main(int argc, char* args[]) -> int {
         Vapor::LightGatherSystem::update(registry, scene.get());
         Vapor::SkySystem::update(registry, renderer.get());
         Vapor::WindSystem::update(registry, renderer.get());
+        Vapor::VolumetricFogSystem::update(registry, renderer.get());
         FlipbookSystem::update(registry, deltaTime);
         Sprite2DRenderSystem::update(registry, renderer.get(), &resourceManager);
         Sprite3DRenderSystem::update(registry, renderer.get(), &resourceManager);
