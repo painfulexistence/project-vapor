@@ -783,6 +783,9 @@ void RHI_Vulkan::shutdown() {
     if (device == VK_NULL_HANDLE && instance == VK_NULL_HANDLE) {
         return;
     }
+    // The "VK" stats source captures `this`; deregister before teardown so a
+    // tick() after shutdown can't call into a dead backend.
+    Vapor::StatsLog::get().removeSource("VK");
     if (device != VK_NULL_HANDLE) {
         vkDeviceWaitIdle(device);
 

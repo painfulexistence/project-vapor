@@ -34,6 +34,10 @@ void StatsLog::addSource(const char* tag, std::function<void(StatLine&)> fill, M
     sources_.push_back(Source{ tag, std::move(fill), mode, {} });
 }
 
+void StatsLog::removeSource(const char* tag) {
+    std::erase_if(sources_, [tag](const Source& s) { return s.tag == tag; });
+}
+
 void StatsLog::ensureFileOpen() {
     if (!file_ && !filePath_.empty()) {
         file_ = std::fopen(filePath_.c_str(), "w");  // truncate at first emit

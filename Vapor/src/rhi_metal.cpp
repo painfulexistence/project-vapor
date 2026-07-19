@@ -379,6 +379,9 @@ double RHI_Metal::getGpuFrameBusyMs() {
 
 void RHI_Metal::shutdown() {
     if (renderer) {
+        // The "MTL" stats source captures `this`; deregister before teardown
+        // so a tick() after shutdown can't call into a dead backend.
+        Vapor::StatsLog::get().removeSource("MTL");
         // Flush and drain outstanding uploads, then wait for the GPU
         submitUploads(true);
         stagingRingBuffer = nullptr;
