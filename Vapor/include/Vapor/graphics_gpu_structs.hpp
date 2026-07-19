@@ -99,7 +99,10 @@ struct alignas(16) InstanceData {
     Uint32 indexCount;
     Uint32 materialID;
     PrimitiveMode primitiveMode;
-    Uint32 _pad1[2];
+    // Always-populated merged-buffer offsets for RT hit shading (see the mirror
+    // in graphics.hpp for the rationale). Occupy the old _pad1[2] slot.
+    Uint32 rtVertexOffset;
+    Uint32 rtIndexOffset;
     glm::vec3 AABBMin;
     float _pad2;
     glm::vec3 AABBMax;

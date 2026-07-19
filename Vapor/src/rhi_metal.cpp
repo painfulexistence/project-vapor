@@ -1844,6 +1844,23 @@ void RHI_Metal::writeTextureArgumentTable(BufferHandle tableHandle, Uint32 entry
     table.residencyDirty = true;
 }
 
+// Rebuild the deduped resident-texture list an argument table references, so
+// useResources declares each backing texture exactly once. Lazy: only when a
+// write dirtied the table.
+void RHI_Metal::rebuildArgumentTableResidency(ArgumentTableResource& table) {
+    if (!table.residencyDirty) return;
+    table.residentResources.clear();
+    // Dedup: many materials share default/white textures.
+    std::unordered_map<MTL::Texture*, bool> seen;
+    for (auto& [key, tex] : table.written) {
+        if (tex && !seen.count(tex.get())) {
+            seen[tex.get()] = true;
+            table.residentResources.push_back(tex.get());
+        }
+    }
+    table.residencyDirty = false;
+}
+
 void RHI_Metal::bindTextureArgumentTable(BufferHandle tableHandle) {
     auto tit = argumentTables.find(tableHandle.id);
     if (tit == argumentTables.end() || !currentRenderEncoder) return;
@@ -1853,23 +1870,29 @@ void RHI_Metal::bindTextureArgumentTable(BufferHandle tableHandle) {
     // for every texture it references (argument-buffer indirection).
     currentRenderEncoder->setFragmentBuffer(table.buffer.get(), 0, table.bufferIndex);
 
-    if (table.residencyDirty) {
-        table.residentResources.clear();
-        // Dedup: many materials share default/white textures.
-        std::unordered_map<MTL::Texture*, bool> seen;
-        for (auto& [key, tex] : table.written) {
-            if (tex && !seen.count(tex.get())) {
-                seen[tex.get()] = true;
-                table.residentResources.push_back(tex.get());
-            }
-        }
-        table.residencyDirty = false;
-    }
+    rebuildArgumentTableResidency(table);
     if (!table.residentResources.empty()) {
         currentRenderEncoder->useResources(table.residentResources.data(),
                                            table.residentResources.size(),
                                            MTL::ResourceUsageRead,
                                            MTL::RenderStageFragment);
+    }
+}
+
+void RHI_Metal::bindComputeTextureArgumentTable(BufferHandle tableHandle, Uint32 bufferIndex) {
+    auto tit = argumentTables.find(tableHandle.id);
+    if (tit == argumentTables.end() || !currentComputeEncoder) return;
+    ArgumentTableResource& table = tit->second;
+
+    // Same argument buffer as the fragment path, bound at the caller's compute
+    // slot. The compute encoder's useResources has no render-stage argument.
+    currentComputeEncoder->setBuffer(table.buffer.get(), 0, bufferIndex);
+
+    rebuildArgumentTableResidency(table);
+    if (!table.residentResources.empty()) {
+        currentComputeEncoder->useResources(table.residentResources.data(),
+                                            table.residentResources.size(),
+                                            MTL::ResourceUsageRead);
     }
 }
 

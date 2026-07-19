@@ -10,21 +10,25 @@ using raytracing::instance_acceleration_structure;
 //
 // Per pixel: reconstruct the surface from depth+normal, trace one reflection
 // ray against the scene TLAS, and shade the hit STANDALONE:
-//   - triangle_data intersector tag -> geometric hit normal (object space,
-//     taken to world through the instance model matrix),
-//   - user_instance_id -> InstanceData -> materialID -> material base color
-//     + emissive (the TLAS is built with UserID descriptors for exactly this),
+//   - user_instance_id -> InstanceData -> materialID (the TLAS is built with
+//     UserID descriptors for exactly this),
+//   - primitive_id + barycentrics fetch the hit triangle from the merged
+//     geometry: interpolated vertex normal (Metal exposes no built-in hit
+//     normal) taken to world through the instance model matrix, and the
+//     interpolated UV that samples the material's ALBEDO texture x base color,
+//   - material emissive,
 //   - one occlusion ray toward the sun for direct visibility,
 //   - environment irradiance (rough envMap mip along the hit normal) as the
 //     ambient term.
 // GIBS, when enabled, ADDS its surfel radiance as the indirect term — the
 // reflection no longer depends on it to show geometry.
 //
-// Deliberate v1 trade-offs:
-//   - Base-color shading only: sampling the hit's albedo TEXTURE needs a
-//     UV + vertex fetch, i.e. bindless vertex/index buffers (RHI v2).
-//   - Mirror-only (no roughness cone jitter), so the output is noise-free and
-//     needs NO temporal denoise. The PBR composite fades it by roughness.
+// The geometry/albedo fetch is gated on params.hasBindlessGeo (merged buffers
+// + material table bound); without it the kernel falls back to base color and
+// the mirror-ray normal.
+//
+// Mirror-only (no roughness cone jitter): the output is noise-free and needs NO
+// temporal denoise. The PBR composite fades it by roughness.
 //
 // Output: RGBA16F, rgb = reflected radiance, a = 1 hit / 0 miss.
 // ============================================================================
@@ -33,7 +37,19 @@ struct ReflectionParams {
     float rayBias;
     float rayMaxDistance;
     uint frameIndex;
-    uint _pad;
+    uint hasBindlessGeo;  // 1 = merged geometry + material table bound (fetch UV/normal/albedo)
+};
+
+// One entry per material in the bindless argument table (same slot order as
+// 3d_pbr_normal_mapped.metal's MaterialTexs — createTextureArgumentTable with
+// texturesPerEntry=6). Only `albedo` is sampled here.
+struct MaterialTexs {
+    texture2d<float, access::sample> albedo    [[id(0)]];
+    texture2d<float, access::sample> normal    [[id(1)]];
+    texture2d<float, access::sample> metallic  [[id(2)]];
+    texture2d<float, access::sample> roughness [[id(3)]];
+    texture2d<float, access::sample> occlusion [[id(4)]];
+    texture2d<float, access::sample> emissive  [[id(5)]];
 };
 
 // Nearest-surfel radiance lookup at an arbitrary world position (a trimmed
@@ -83,6 +99,11 @@ kernel void computeMain(
     device const InstanceData*       instances         [[buffer(7)]],
     device const MaterialData*       materials         [[buffer(8)]],
     device const DirLight*           directionalLights [[buffer(9)]],
+    // Bound only when params.hasBindlessGeo — merged scene geometry + the
+    // per-material texture table, for albedo/UV/normal fetch at the hit.
+    device const VertexData*         meshVertices      [[buffer(10)]],
+    device const uint*               meshIndices       [[buffer(11)]],
+    const device MaterialTexs*       materialTexs      [[buffer(12)]],
     uint2 tid [[thread_position_in_grid]]
 ) {
     uint w = reflectionTexture.get_width();
@@ -130,19 +151,43 @@ kernel void computeMain(
     if (hit.type == raytracing::intersection_type::triangle) {
         float3 hitPos = ray.origin + R * hit.distance;
 
-        // Geometric hit normal: object space from the intersector, world via
-        // the instance's model matrix (upper 3x3 — fine for the rigid/uniform
-        // transforms the scene uses; a full inverse-transpose is not worth the
-        // per-ray cost here). Flip toward the incoming ray: the geometric
-        // normal has no guaranteed winding.
         uint iid = hit.user_instance_id;
         InstanceData inst = instances[iid];
         float3x3 model33 = float3x3(inst.model[0].xyz, inst.model[1].xyz, inst.model[2].xyz);
-        float3 hitN = normalize(model33 * hit.triangle_normal);
-        if (dot(hitN, R) > 0.0) hitN = -hitN;
-
         MaterialData mat = materials[inst.materialID];
         float3 base = mat.baseColorFactor.rgb;
+
+        // Hit surface normal. Metal's triangle intersector exposes NO built-in
+        // hit normal, so fetch the hit triangle's 3 vertices from the merged
+        // geometry (rtIndexOffset + primitive_id*3; indices are mesh-local ->
+        // rebased by rtVertexOffset) and interpolate their object-space normals
+        // with the barycentrics, then take it to world through the model upper
+        // 3x3 (fine for the rigid/uniform transforms the scene uses). When the
+        // geometry table isn't bound, fall back to the mirror ray as the normal.
+        float3 hitN;
+        if (params.hasBindlessGeo != 0) {
+            uint b  = inst.rtIndexOffset + hit.primitive_id * 3u;
+            uint i0 = meshIndices[b + 0u] + inst.rtVertexOffset;
+            uint i1 = meshIndices[b + 1u] + inst.rtVertexOffset;
+            uint i2 = meshIndices[b + 2u] + inst.rtVertexOffset;
+            VertexData v0 = meshVertices[i0];
+            VertexData v1 = meshVertices[i1];
+            VertexData v2 = meshVertices[i2];
+            // triangle_barycentric_coord is (u,v) for verts 1,2; vert 0 = 1-u-v.
+            float2 bc = hit.triangle_barycentric_coord;
+            float  w0 = 1.0 - bc.x - bc.y;
+            float3 nObj = w0 * float3(v0.normal) + bc.x * float3(v1.normal) + bc.y * float3(v2.normal);
+            hitN = normalize(model33 * nObj);
+            // Albedo TEXTURE at the interpolated UV, folded into the base color
+            // (mirror ray: base mip, no ray differentials — the PBR composite
+            // fades the whole reflection by roughness).
+            float2 hitUV = w0 * float2(v0.uv) + bc.x * float2(v1.uv) + bc.y * float2(v2.uv);
+            constexpr sampler albedoSampler(address::repeat, filter::linear, mip_filter::linear);
+            base *= materialTexs[inst.materialID].albedo.sample(albedoSampler, hitUV, level(0.0)).rgb;
+        } else {
+            hitN = -R;
+        }
+        if (dot(hitN, R) > 0.0) hitN = -hitN;
 
         // Direct sun: one occlusion ray (matches the RT shadow kernel's setup).
         DirLight sun = directionalLights[0];

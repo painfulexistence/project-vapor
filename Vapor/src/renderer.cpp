@@ -1465,6 +1465,8 @@ void Renderer::updateBuffers() {
         instance.color = drawable.color;
         instance.vertexOffset = mdi ? mesh.vertexOffset : 0;  // into merged buffer (MDI) or 0 (per-mesh)
         instance.indexOffset = mdi ? mesh.indexOffset : 0;
+        instance.rtVertexOffset = mesh.vertexOffset;  // always valid: RT hit shading
+        instance.rtIndexOffset = mesh.indexOffset;    //   fetches merged geometry
         instance.vertexCount = mesh.vertexCount;
         instance.indexCount = mesh.indexCount;
         instance.materialID = drawable.material;
@@ -2610,8 +2612,19 @@ void Renderer::raytraceReflectionPass() {
     Uint32 w = (rhi->getSwapchainWidth() + 1) / 2;   // reflectionRT is half-res
     Uint32 h = (rhi->getSwapchainHeight() + 1) / 2;
     const size_t surfelBytes = size_t(gibsMaxSurfels) * sizeof(Surfel);
-    struct { float rayBias; float rayMaxDistance; Uint32 frameIndex; Uint32 _pad; } rp{
-        0.01f, 200.0f, frameCounter, 0u };
+
+    // Hit shading needs the merged geometry (to fetch the hit triangle's vertex
+    // normals + UV — Metal's intersector exposes no built-in hit normal) and the
+    // bindless material table (to sample the hit's albedo). Both are otherwise
+    // built only in MDI/bindless draw modes; ensure them for RT regardless of
+    // this frame's draw mode. Self-gate on dirty, so this is near-free.
+    ensureMergedGeometry();
+    ensureBindlessMaterialTable();
+    const bool rtGeo = mergedVertexBuffer.isValid() && mergedIndexBuffer.isValid() &&
+                       bindlessMaterialTable.isValid();
+
+    struct { float rayBias; float rayMaxDistance; Uint32 frameIndex; Uint32 hasBindlessGeo; } rp{
+        0.01f, 200.0f, frameCounter, rtGeo ? 1u : 0u };
 
     rhi->beginComputePass("RaytraceReflection");
     rhi->bindComputePipeline(raytraceReflectionPipeline);
@@ -2631,6 +2644,14 @@ void Renderer::raytraceReflectionPass() {
     rhi->setComputeBuffer(7, instanceDataBuffer, 0, sizeof(Vapor::InstanceData) * MAX_INSTANCES);
     rhi->setComputeBuffer(8, materialUniformBuffer, 0, sizeof(Vapor::MaterialData) * MAX_INSTANCES);
     rhi->setComputeBuffer(9, directionalLightBuffer, 0, sizeof(DirectionalLightData) * maxDirectionalLights);
+    // Albedo-at-hit inputs (hasBindlessGeo): merged vertex/index buffers +
+    // per-material texture argument table. Indexed by rtVertexOffset/rtIndexOffset
+    // + primitive_id and materialID (see 3d_raytrace_reflection.metal).
+    if (rtGeo) {
+        rhi->setComputeBuffer(10, mergedVertexBuffer);
+        rhi->setComputeBuffer(11, mergedIndexBuffer);
+        rhi->bindComputeTextureArgumentTable(bindlessMaterialTable, 12);
+    }
     rhi->dispatch((w + 7) / 8, (h + 7) / 8, 1);
     rhi->endComputePass();
     rhi->computeBarrier();  // reflection writes -> fragment reads in Main
@@ -2662,8 +2683,16 @@ void Renderer::raytraceRefractionPass() {
     Uint32 w = (rhi->getSwapchainWidth() + 1) / 2;   // refractionRT is half-res
     Uint32 h = (rhi->getSwapchainHeight() + 1) / 2;
     const size_t surfelBytes = size_t(gibsMaxSurfels) * sizeof(Surfel);
-    struct { float rayBias; float rayMaxDistance; Uint32 frameIndex; Uint32 _pad; } rp{
-        0.01f, 200.0f, frameCounter, 0u };
+
+    // See raytraceReflectionPass: ensure the merged geometry + material table
+    // the hit shading fetches, independent of this frame's draw mode.
+    ensureMergedGeometry();
+    ensureBindlessMaterialTable();
+    const bool rtGeo = mergedVertexBuffer.isValid() && mergedIndexBuffer.isValid() &&
+                       bindlessMaterialTable.isValid();
+
+    struct { float rayBias; float rayMaxDistance; Uint32 frameIndex; Uint32 hasBindlessGeo; } rp{
+        0.01f, 200.0f, frameCounter, rtGeo ? 1u : 0u };
 
     rhi->beginComputePass("RaytraceRefraction");
     rhi->bindComputePipeline(raytraceRefractionPipeline);
@@ -2683,6 +2712,11 @@ void Renderer::raytraceRefractionPass() {
     rhi->setComputeBuffer(7, instanceDataBuffer, 0, sizeof(Vapor::InstanceData) * MAX_INSTANCES);
     rhi->setComputeBuffer(8, materialUniformBuffer, 0, sizeof(Vapor::MaterialData) * MAX_INSTANCES);
     rhi->setComputeBuffer(9, directionalLightBuffer, 0, sizeof(DirectionalLightData) * maxDirectionalLights);
+    if (rtGeo) {
+        rhi->setComputeBuffer(10, mergedVertexBuffer);
+        rhi->setComputeBuffer(11, mergedIndexBuffer);
+        rhi->bindComputeTextureArgumentTable(bindlessMaterialTable, 12);
+    }
     rhi->dispatch((w + 7) / 8, (h + 7) / 8, 1);
     rhi->endComputePass();
     rhi->computeBarrier();  // refraction writes -> fragment reads in Main
@@ -7973,6 +8007,8 @@ void Renderer::renderToTexture(
         instance.color = drawable.color;
         instance.vertexOffset = 0;
         instance.indexOffset = 0;
+        instance.rtVertexOffset = mesh.vertexOffset;  // always valid: RT hit shading
+        instance.rtIndexOffset = mesh.indexOffset;    //   fetches merged geometry
         instance.vertexCount = mesh.vertexCount;
         instance.indexCount = mesh.indexCount;
         instance.materialID = drawable.material;

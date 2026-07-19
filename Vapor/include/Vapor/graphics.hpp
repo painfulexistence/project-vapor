@@ -220,7 +220,14 @@ struct alignas(16) InstanceData {
     Uint32 indexCount;
     Uint32 materialID;
     PrimitiveMode primitiveMode;
-    Uint32 _pad1[2];
+    // Merged-buffer offsets for the mesh, ALWAYS populated (unlike
+    // vertexOffset/indexOffset above, which the draw path zeroes outside MDI
+    // layout). The RT hit-shading kernels index the merged vertex/index buffers
+    // with these to fetch UV + vertex normals at the hit, regardless of the
+    // frame's draw mode. Occupy what was _pad1[2] (Metal's implicit padding
+    // before AABBMin) — no stride change.
+    Uint32 rtVertexOffset;
+    Uint32 rtIndexOffset;
     glm::vec3 AABBMin;
     float _pad2;
     glm::vec3 AABBMax;

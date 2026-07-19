@@ -33,7 +33,18 @@ struct RefractionParams {
     float rayBias;
     float rayMaxDistance;
     uint frameIndex;
-    uint _pad;
+    uint hasBindlessGeo;  // 1 = merged geometry + material table bound (fetch UV/normal/albedo)
+};
+
+// One entry per material in the bindless argument table (same slot order as
+// 3d_pbr_normal_mapped.metal). Only `albedo` is sampled here.
+struct MaterialTexs {
+    texture2d<float, access::sample> albedo    [[id(0)]];
+    texture2d<float, access::sample> normal    [[id(1)]];
+    texture2d<float, access::sample> metallic  [[id(2)]];
+    texture2d<float, access::sample> roughness [[id(3)]];
+    texture2d<float, access::sample> occlusion [[id(4)]];
+    texture2d<float, access::sample> emissive  [[id(5)]];
 };
 
 // Nearest-surfel radiance lookup (same trimmed copy as the reflection kernel).
@@ -81,6 +92,11 @@ kernel void computeMain(
     device const InstanceData*       instances         [[buffer(7)]],
     device const MaterialData*       materials         [[buffer(8)]],
     device const DirLight*           directionalLights [[buffer(9)]],
+    // Bound only when params.hasBindlessGeo — merged scene geometry + the
+    // per-material texture table, for albedo/UV/normal fetch at the hit.
+    device const VertexData*         meshVertices      [[buffer(10)]],
+    device const uint*               meshIndices       [[buffer(11)]],
+    const device MaterialTexs*       materialTexs      [[buffer(12)]],
     uint2 tid [[thread_position_in_grid]]
 ) {
     uint w = refractionTexture.get_width();
@@ -138,16 +154,37 @@ kernel void computeMain(
         float3 hitPos = ray.origin + T * hit.distance;
 
         // Standalone hit shading — same recipe as the reflection kernel:
-        // geometric normal + material base color + one sun occlusion ray +
-        // env-irradiance ambient; GIBS adds indirect when live.
+        // interpolated normal + material base color x albedo texture + one sun
+        // occlusion ray + env-irradiance ambient; GIBS adds indirect when live.
         uint iid = hit.user_instance_id;
         InstanceData inst = instances[iid];
         float3x3 model33 = float3x3(inst.model[0].xyz, inst.model[1].xyz, inst.model[2].xyz);
-        float3 hitN = normalize(model33 * hit.triangle_normal);
-        if (dot(hitN, T) > 0.0) hitN = -hitN;
-
         MaterialData mat = materials[inst.materialID];
         float3 base = mat.baseColorFactor.rgb;
+
+        // Metal's triangle intersector has no built-in hit normal: fetch the hit
+        // triangle from the merged geometry and interpolate vertex normals + UV
+        // (see 3d_raytrace_reflection.metal for the full rationale).
+        float3 hitN;
+        if (params.hasBindlessGeo != 0) {
+            uint b  = inst.rtIndexOffset + hit.primitive_id * 3u;
+            uint i0 = meshIndices[b + 0u] + inst.rtVertexOffset;
+            uint i1 = meshIndices[b + 1u] + inst.rtVertexOffset;
+            uint i2 = meshIndices[b + 2u] + inst.rtVertexOffset;
+            VertexData v0 = meshVertices[i0];
+            VertexData v1 = meshVertices[i1];
+            VertexData v2 = meshVertices[i2];
+            float2 bc = hit.triangle_barycentric_coord;
+            float  w0 = 1.0 - bc.x - bc.y;
+            float3 nObj = w0 * float3(v0.normal) + bc.x * float3(v1.normal) + bc.y * float3(v2.normal);
+            hitN = normalize(model33 * nObj);
+            float2 hitUV = w0 * float2(v0.uv) + bc.x * float2(v1.uv) + bc.y * float2(v2.uv);
+            constexpr sampler albedoSampler(address::repeat, filter::linear, mip_filter::linear);
+            base *= materialTexs[inst.materialID].albedo.sample(albedoSampler, hitUV, level(0.0)).rgb;
+        } else {
+            hitN = -T;
+        }
+        if (dot(hitN, T) > 0.0) hitN = -hitN;
 
         DirLight sun = directionalLights[0];
         float3 L = normalize(-sun.direction);
