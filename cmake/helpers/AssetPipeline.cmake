@@ -31,12 +31,17 @@ function(vapor_compile_glsl_shaders TARGET SHADER_DIR)
     foreach(_glsl ${_sources})
         get_filename_component(_name ${_glsl} NAME)
         set(_spirv "${SHADER_DIR}/${_name}.spv")
-        # Task/mesh shaders (GL_EXT_mesh_shader) need SPIR-V >= 1.4; target the
-        # Vulkan 1.3 env for them (the device is created with API version 1.3).
-        # Other stages keep the default target for maximal compatibility.
+        # Task/mesh shaders (GL_EXT_mesh_shader) need SPIR-V >= 1.4. Target the
+        # Vulkan 1.2 env (-> SPIR-V 1.5), NOT 1.3 (-> 1.6): the device REQUESTS
+        # API 1.3 but MoltenVK only reports 1.2, so its validation environment
+        # caps at SPIR-V 1.5 and rejects 1.6 modules
+        # (VUID-VkShaderModuleCreateInfo-pCode-08737). SPIR-V 1.5 already covers
+        # mesh shading's >=1.4 requirement and is accepted by native 1.3 drivers
+        # too, so it is the correct floor for both. Other stages keep the default
+        # target for maximal compatibility.
         set(_stage_flags "")
         if(_name MATCHES "\\.(task|mesh)$")
-            set(_stage_flags --target-env vulkan1.3)
+            set(_stage_flags --target-env vulkan1.2)
         endif()
         add_custom_command(
             OUTPUT  ${_spirv}
@@ -50,12 +55,15 @@ function(vapor_compile_glsl_shaders TARGET SHADER_DIR)
         # Bindless MDI variant: RHIMain.frag is compiled a second time with
         # -DBINDLESS (material textures from the set-3 runtime descriptor array
         # instead of per-draw set-2 slots). Needs SPIR-V 1.4+ for
-        # GL_EXT_nonuniform_qualifier's descriptor-indexing capabilities.
+        # GL_EXT_nonuniform_qualifier's descriptor-indexing capabilities —
+        # vulkan1.2 (SPIR-V 1.5) satisfies that AND stays loadable on MoltenVK's
+        # 1.2 environment (descriptor indexing is core in Vulkan 1.2). See the
+        # task/mesh note above for why 1.3/SPIR-V 1.6 is rejected on macOS.
         if(_name STREQUAL "RHIMain.frag")
             set(_bindless_spirv "${SHADER_DIR}/RHIMainBindless.frag.spv")
             add_custom_command(
                 OUTPUT  ${_bindless_spirv}
-                COMMAND ${GLSL_VALIDATOR} -V --target-env vulkan1.3 -DBINDLESS ${_glsl} -o ${_bindless_spirv}
+                COMMAND ${GLSL_VALIDATOR} -V --target-env vulkan1.2 -DBINDLESS ${_glsl} -o ${_bindless_spirv}
                 DEPENDS ${_glsl}
                 COMMENT "Compiling ${_name} (BINDLESS) to SPIR-V"
             )
