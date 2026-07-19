@@ -333,7 +333,8 @@ inline SceneResources buildScene(
         auto e = registry.create();
         registry.emplace<Vapor::NameComponent>(e, Vapor::NameComponent{"Particle Attractor A"});
         auto& tc = registry.emplace<Vapor::TransformComponent>(e);
-        tc.position = glm::vec3(0.0f, 3.0f, 0.0f);
+        // Raised +11 m so the stream is pulled up above the Sponza roof.
+        tc.position = glm::vec3(0.0f, 14.0f, 0.0f);
         auto& attr = registry.emplace<Vapor::ParticleAttractorComponent>(e);
         attr.strength = 40.0f;
     }
@@ -341,7 +342,8 @@ inline SceneResources buildScene(
         auto e = registry.create();
         registry.emplace<Vapor::NameComponent>(e, Vapor::NameComponent{"Particle Attractor B"});
         auto& tc = registry.emplace<Vapor::TransformComponent>(e);
-        tc.position = glm::vec3(6.0f, 1.0f, -4.0f);
+        // Raised +11 m so the stream is pulled up above the Sponza roof.
+        tc.position = glm::vec3(6.0f, 12.0f, -4.0f);
         auto& attr = registry.emplace<Vapor::ParticleAttractorComponent>(e);
         attr.strength = 18.0f;
     }
@@ -360,8 +362,7 @@ inline SceneResources buildScene(
         auto e = registry.create();
         registry.emplace<Vapor::NameComponent>(e, Vapor::NameComponent{"Particle Sea Emitter A"});
         auto& tc = registry.emplace<Vapor::TransformComponent>(e);
-        // ~2 m above the Sponza roof (roofline ~y=11.4 at the model's 0.008 scale).
-        tc.position = glm::vec3(0.0f, 13.5f, 0.0f);
+        tc.position = glm::vec3(0.0f, 5.0f, 0.0f);
         auto& em = registry.emplace<Vapor::ParticleEmitterComponent>(e);
         em.maxParticles     = 70'000;
         em.oneShot          = true;
@@ -378,8 +379,7 @@ inline SceneResources buildScene(
         auto e = registry.create();
         registry.emplace<Vapor::NameComponent>(e, Vapor::NameComponent{"Particle Sea Emitter B"});
         auto& tc = registry.emplace<Vapor::TransformComponent>(e);
-        // ~2 m above the Sponza roof, offset from emitter A.
-        tc.position = glm::vec3(3.0f, 13.5f, -2.0f);
+        tc.position = glm::vec3(3.0f, 4.0f, -2.0f);
         auto& em = registry.emplace<Vapor::ParticleEmitterComponent>(e);
         em.maxParticles     = 30'000;
         em.oneShot          = true;
