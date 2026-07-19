@@ -176,13 +176,15 @@ auto main(int argc, char* args[]) -> int {
         spawnVolume(registry, "Volume.Big", glm::vec3(0.0f), glm::ivec3(1024, 256, 1024), 0.05f,
                     1337u, 1u << 17);
     } else {
-        // Three dioramas side by side, seeds matching the original demo. The
-        // center one runs 2.5 cm voxels (256^3 = a 6.4 m diorama): twice the
-        // detail per meter of the original's 5 cm — the "finer picture" the
-        // sparse storage makes affordable.
+        // Three dioramas side by side, seeds matching the original demo. All
+        // three span the same 12.8 m, but the center one runs 2.5 cm voxels
+        // (512^3) — twice the linear detail (8x the voxels) of the 5 cm sides,
+        // the "finer picture" the sparse storage makes affordable. Only surface
+        // bricks take pool slots (uniform stone interiors collapse to page
+        // entries), so 128k slots cover the 64^3 brick grid with margin.
         const float ext5 = 256 * 0.05f;  // 12.8 m
-        spawnVolume(registry, "Volume.Center", glm::vec3(0.0f), glm::ivec3(256, 256, 256), 0.025f,
-                    1337u, 1u << 16);
+        spawnVolume(registry, "Volume.Center", glm::vec3(0.0f), glm::ivec3(512, 512, 512), 0.025f,
+                    1337u, 1u << 17);
         spawnVolume(registry, "Volume.Right", glm::vec3(ext5, 0.0f, 0.0f), glm::ivec3(256), 0.05f,
                     7u, 1u << 16);
         spawnVolume(registry, "Volume.Left", glm::vec3(-ext5, 0.0f, 0.0f), glm::ivec3(256), 0.05f,
