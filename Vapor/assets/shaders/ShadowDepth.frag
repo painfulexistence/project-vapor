@@ -37,7 +37,12 @@ layout(set = 2, binding = 0) uniform sampler2D albedoMap;
 void main() {
     MaterialData mat = materials[fragMaterialID];
     if (mat.alphaCutoff > 0.0) {
-        float a = texture(albedoMap, fragUV).a * mat.baseColorFactor.a;
+        // Sample mip 0, not the auto mip. In the shadow map the caster covers
+        // few texels (light view, cascade resolution), so the auto derivatives
+        // pick a coarse mip whose averaged alpha falls below the cutoff — the
+        // classic alpha-tested-shadow vanish (foliage casts no shadow at all).
+        // Full-res alpha keeps the leaf mask regardless of shadow-map scale.
+        float a = textureLod(albedoMap, fragUV, 0.0).a * mat.baseColorFactor.a;
         if (a < mat.alphaCutoff) discard;
     }
 }
