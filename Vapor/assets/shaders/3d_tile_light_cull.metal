@@ -96,14 +96,24 @@ kernel void computeMain(
     const device RectLight* rectLights [[buffer(7)]],
     constant uint& spotLightCount [[buffer(8)]],
     constant uint& rectLightCountIn [[buffer(9)]],
-    uint3 gid [[threadgroup_position_in_grid]]
+    uint3 gid [[threadgroup_position_in_grid]],
+    uint lid [[thread_index_in_threadgroup]]
 ) {
+    // One threadgroup per 3D cluster, 64 threads cooperating (pipeline is
+    // created with threadGroupSizeX = 64): each thread tests a strided slice
+    // of the light lists and pushes hits through threadgroup atomics. The old
+    // shape (1 thread/group, serial loop) idled 31/32 SIMD lanes.
+    constexpr uint WG_SIZE = 64;
+    threadgroup atomic_uint sPointCount;
+    threadgroup atomic_uint sSpotCount;
+    threadgroup atomic_uint sRectCount;
+    threadgroup uint sPoint[MAX_LIGHTS_PER_TILE];
+    threadgroup uint sSpot[MAX_SPOTS_PER_CLUSTER];
+    threadgroup uint sRect[MAX_RECTS_PER_CLUSTER];
     // 3D cluster index: (x, y) screen tile x logarithmic depth slice z. The
     // slice mapping MUST match the readers (PBR / stochastic point shadow):
     //   slice k spans [near * (far/near)^(k/Z), near * (far/near)^((k+1)/Z))
     uint tileIndex = gid.x + gid.y * gridSize.x + gid.z * gridSize.x * gridSize.y;
-    Cluster tile = tiles[tileIndex];
-    tile.lightCount = 0; // reset counter every frame
 
     // Calculate tile bounding box in screen space
     // Tile(0, 0) is bottom-left
@@ -115,42 +125,62 @@ kernel void computeMain(
     float sliceZ0 = camera.near * pow(zRatio, float(gid.z) / float(gridSize.z));
     float sliceZ1 = camera.near * pow(zRatio, float(gid.z + 1) / float(gridSize.z));
 
+    if (lid == 0) {
+        atomic_store_explicit(&sPointCount, 0u, memory_order_relaxed);
+        atomic_store_explicit(&sSpotCount, 0u, memory_order_relaxed);
+        atomic_store_explicit(&sRectCount, 0u, memory_order_relaxed);
+    }
+    threadgroup_barrier(mem_flags::mem_threadgroup);
+
     float4x4 viewProj = camera.proj * camera.view;
-    for (uint i = 0; i < lightCount; i++) {
+
+    // Strided cooperative tests; hits compact through the shared counters.
+    // List order becomes nondeterministic — every consumer is order-independent.
+    for (uint i = lid; i < lightCount; i += WG_SIZE) {
         PointLight light = pointLights[i];
-        if (sphereTileIntersection(light.position, light.radius, viewProj, tileMin, tileMax, screenSize, sliceZ0, sliceZ1) && tile.lightCount < MAX_LIGHTS_PER_TILE) {
-            tile.lightIndices[tile.lightCount] = i;
-            tile.lightCount++;
+        if (sphereTileIntersection(light.position, light.radius, viewProj, tileMin, tileMax,
+                                   screenSize, sliceZ0, sliceZ1)) {
+            uint slot = atomic_fetch_add_explicit(&sPointCount, 1u, memory_order_relaxed);
+            if (slot < MAX_LIGHTS_PER_TILE) sPoint[slot] = i;
         }
     }
 
     // Spot lights: range is a sphere radius, point test applies directly
     // (conservative for narrow cones; cone/AABB is the follow-up refinement).
-    tile.spotCount = 0;
-    for (uint i = 0; i < spotLightCount; i++) {
+    for (uint i = lid; i < spotLightCount; i += WG_SIZE) {
         SpotLight sl = spotLights[i];
         if (sphereTileIntersection(sl.position, sl.radius, viewProj, tileMin, tileMax,
-                                   screenSize, sliceZ0, sliceZ1) &&
-            tile.spotCount < MAX_SPOTS_PER_CLUSTER) {
-            tile.spotIndices[tile.spotCount] = i;
-            tile.spotCount++;
+                                   screenSize, sliceZ0, sliceZ1)) {
+            uint slot = atomic_fetch_add_explicit(&sSpotCount, 1u, memory_order_relaxed);
+            if (slot < MAX_SPOTS_PER_CLUSTER) sSpot[slot] = i;
         }
     }
 
     // Rect lights: no range field — conservative sphere = half-diagonal plus
     // the 1%-intensity falloff distance (mirrors TileLightCull.comp).
-    tile.rectCount = 0;
-    for (uint i = 0; i < rectLightCountIn; i++) {
+    for (uint i = lid; i < rectLightCountIn; i += WG_SIZE) {
         RectLight rl = rectLights[i];
         float halfDiag = length(float2(rl.halfWidth, rl.halfHeight));
         float range = halfDiag + sqrt(max(rl.intensity, 0.0) / 0.01);
         if (sphereTileIntersection(float3(rl.position), range, viewProj, tileMin, tileMax,
-                                   screenSize, sliceZ0, sliceZ1) &&
-            tile.rectCount < MAX_RECTS_PER_CLUSTER) {
-            tile.rectIndices[tile.rectCount] = i;
-            tile.rectCount++;
+                                   screenSize, sliceZ0, sliceZ1)) {
+            uint slot = atomic_fetch_add_explicit(&sRectCount, 1u, memory_order_relaxed);
+            if (slot < MAX_RECTS_PER_CLUSTER) sRect[slot] = i;
         }
     }
+    threadgroup_barrier(mem_flags::mem_threadgroup);
 
-    tiles[tileIndex] = tile;
+    // Cooperative write-out of the compacted lists straight to device memory
+    // (the old whole-Cluster local copy spilled ~1.4KB to stack per thread).
+    uint pointsOut = min(atomic_load_explicit(&sPointCount, memory_order_relaxed), MAX_LIGHTS_PER_TILE);
+    uint spotsOut  = min(atomic_load_explicit(&sSpotCount, memory_order_relaxed), MAX_SPOTS_PER_CLUSTER);
+    uint rectsOut  = min(atomic_load_explicit(&sRectCount, memory_order_relaxed), MAX_RECTS_PER_CLUSTER);
+    for (uint i = lid; i < pointsOut; i += WG_SIZE) tiles[tileIndex].lightIndices[i] = sPoint[i];
+    for (uint i = lid; i < spotsOut;  i += WG_SIZE) tiles[tileIndex].spotIndices[i] = sSpot[i];
+    for (uint i = lid; i < rectsOut;  i += WG_SIZE) tiles[tileIndex].rectIndices[i] = sRect[i];
+    if (lid == 0) {
+        tiles[tileIndex].lightCount = pointsOut;
+        tiles[tileIndex].spotCount = spotsOut;
+        tiles[tileIndex].rectCount = rectsOut;
+    }
 }

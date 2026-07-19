@@ -5678,6 +5678,9 @@ void Renderer::createRenderPipeline() {
             d.codeSize = tcCode.size(); d.entryPoint = "computeMain";
             tileCullingShader = rhi->createShader(d);
             ComputePipelineDesc cd; cd.computeShader = tileCullingShader;
+            // 64 threads per threadgroup: the cull kernel is wave-cooperative
+            // (one group per cluster, threads split the light list).
+            cd.threadGroupSizeX = 64;
             tileCullingPipeline = rhi->createComputePipeline(cd);
         }
 

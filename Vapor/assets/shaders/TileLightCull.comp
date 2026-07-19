@@ -4,7 +4,12 @@
 // SSBOs throughout (the RHI compute descriptor set is storage-buffer only),
 // and the PointLight layout matches Vapor::PointLightData (48-byte stride).
 
-layout(local_size_x = 1, local_size_y = 1, local_size_z = 1) in;
+// One workgroup per 3D cluster, 64 threads cooperating: each thread tests a
+// strided slice of the light list and pushes hits through a shared-memory
+// atomic. The old shape (1 thread/workgroup looping every light serially) left
+// 31/32 SIMD lanes idle per group.
+layout(local_size_x = 64, local_size_y = 1, local_size_z = 1) in;
+const uint WG_SIZE = 64u;
 
 const uint MAX_LIGHTS_PER_TILE = 256; // must match graphics.hpp
 const uint MAX_SPOTS_PER_CLUSTER = 64u;
@@ -108,6 +113,17 @@ bool sphereTileIntersection(vec3 center, float radius, mat4 viewProj, vec2 tileM
              sphereMax.y < tileMin.y || sphereMin.y > tileMax.y);
 }
 
+// Cooperative compaction state: hits are pushed via atomicAdd, then the whole
+// group copies the compacted lists out. Index order within a list is therefore
+// nondeterministic — every consumer (PBR sum, stochastic pick) is order-
+// independent, so that costs nothing.
+shared uint sPointCount;
+shared uint sSpotCount;
+shared uint sRectCount;
+shared uint sPoint[MAX_LIGHTS_PER_TILE];
+shared uint sSpot[MAX_SPOTS_PER_CLUSTER];
+shared uint sRect[MAX_RECTS_PER_CLUSTER];
+
 void main() {
     // 3D cluster index: (x, y) screen tile x logarithmic depth slice z.
     // The slice mapping MUST match the readers (RHIMain.frag and the Metal
@@ -115,7 +131,7 @@ void main() {
     //   [near * (far/near)^(k/Z), near * (far/near)^((k+1)/Z))
     uint tileIndex = gl_WorkGroupID.x + gl_WorkGroupID.y * gridSize.x
                    + gl_WorkGroupID.z * gridSize.x * gridSize.y;
-    uint count = 0u;
+    uint lid = gl_LocalInvocationIndex;
 
     vec2 tileSize = screenSize / vec2(gridSize.xy);
     vec2 tileMin = vec2(gl_WorkGroupID.xy) * tileSize;
@@ -125,46 +141,63 @@ void main() {
     float sliceZ0 = cam.nearPlane * pow(zRatio, float(gl_WorkGroupID.z) / float(gridSize.z));
     float sliceZ1 = cam.nearPlane * pow(zRatio, float(gl_WorkGroupID.z + 1u) / float(gridSize.z));
 
+    if (lid == 0u) {
+        sPointCount = 0u;
+        sSpotCount = 0u;
+        sRectCount = 0u;
+    }
+    barrier();
+
     mat4 viewProj = cam.proj * cam.view;
-    for (uint i = 0u; i < lightCount; i++) {
-        if (count >= MAX_LIGHTS_PER_TILE) break;
+
+    // Each thread tests a strided slice of each light list; hits are compacted
+    // through the shared counters. Overflow slots are dropped (same cap
+    // semantics as the serial version, minus its ascending order).
+    for (uint i = lid; i < lightCount; i += WG_SIZE) {
         if (sphereTileIntersection(pointLights[i].position, pointLights[i].radius, viewProj,
                                    tileMin, tileMax, sliceZ0, sliceZ1)) {
-            tiles[tileIndex].lightIndices[count] = i;
-            count++;
+            uint slot = atomicAdd(sPointCount, 1u);
+            if (slot < MAX_LIGHTS_PER_TILE) sPoint[slot] = i;
         }
     }
-    tiles[tileIndex].lightCount = count;
 
     // Spot lights: the range IS a sphere radius, so the point test applies
     // directly (conservative for narrow cones — a cone/AABB test is the
     // follow-up refinement).
-    uint sCount = 0u;
-    for (uint i = 0u; i < cullSpotCount; i++) {
-        if (sCount >= MAX_SPOTS_PER_CLUSTER) break;
+    for (uint i = lid; i < cullSpotCount; i += WG_SIZE) {
         if (sphereTileIntersection(spotLights[i].position, spotLights[i].radius, viewProj,
                                    tileMin, tileMax, sliceZ0, sliceZ1)) {
-            tiles[tileIndex].spotIndices[sCount] = i;
-            sCount++;
+            uint slot = atomicAdd(sSpotCount, 1u);
+            if (slot < MAX_SPOTS_PER_CLUSTER) sSpot[slot] = i;
         }
     }
-    tiles[tileIndex].spotCount = sCount;
 
     // Rect area lights carry no range field (pure inverse-square falloff), so
     // derive a conservative cull sphere: the rect's half-diagonal plus the
     // distance where intensity/d^2 falls under a 1% cutoff. Never over-culls;
     // tune the cutoff to tighten.
-    uint rCount = 0u;
-    for (uint i = 0u; i < cullRectCount; i++) {
-        if (rCount >= MAX_RECTS_PER_CLUSTER) break;
+    for (uint i = lid; i < cullRectCount; i += WG_SIZE) {
         RectLight rl = rectLights[i];
         float halfDiag = length(vec2(rl.halfWidth, rl.halfHeight));
         float range = halfDiag + sqrt(max(rl.intensity, 0.0) / 0.01);
         if (sphereTileIntersection(rl.position, range, viewProj,
                                    tileMin, tileMax, sliceZ0, sliceZ1)) {
-            tiles[tileIndex].rectIndices[rCount] = i;
-            rCount++;
+            uint slot = atomicAdd(sRectCount, 1u);
+            if (slot < MAX_RECTS_PER_CLUSTER) sRect[slot] = i;
         }
     }
-    tiles[tileIndex].rectCount = rCount;
+    barrier();
+
+    // Cooperative write-out of the compacted lists.
+    uint pointsOut = min(sPointCount, MAX_LIGHTS_PER_TILE);
+    uint spotsOut  = min(sSpotCount, MAX_SPOTS_PER_CLUSTER);
+    uint rectsOut  = min(sRectCount, MAX_RECTS_PER_CLUSTER);
+    for (uint i = lid; i < pointsOut; i += WG_SIZE) tiles[tileIndex].lightIndices[i] = sPoint[i];
+    for (uint i = lid; i < spotsOut;  i += WG_SIZE) tiles[tileIndex].spotIndices[i] = sSpot[i];
+    for (uint i = lid; i < rectsOut;  i += WG_SIZE) tiles[tileIndex].rectIndices[i] = sRect[i];
+    if (lid == 0u) {
+        tiles[tileIndex].lightCount = pointsOut;
+        tiles[tileIndex].spotCount = spotsOut;
+        tiles[tileIndex].rectCount = rectsOut;
+    }
 }
