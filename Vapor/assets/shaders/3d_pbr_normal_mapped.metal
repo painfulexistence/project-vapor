@@ -847,11 +847,19 @@ fragment float4 fragmentMain(
     // Fresnel-weighted like the IBL specular, faded by roughness — the traced
     // ray is a mirror ray, so rough surfaces should not show sharp reflections.
     if (reflectionParams.x > 0.5) {
-        float3 refl = texReflection.sample(s, screenUV).rgb;
+        // Glossy: the traced ray is a sharp mirror ray (mip 0). Sample a blurrier
+        // mip as roughness rises so medium-rough surfaces show a soft, spread-out
+        // reflection instead of a crisp mirror. The mip chain is built after the
+        // trace (renderer generateMipmaps). Trilinear via sampler s (mip_filter).
+        float maxMip = float(texReflection.get_num_mip_levels() - 1);
+        float3 refl = texReflection.sample(s, screenUV, level(surf.roughness * maxMip)).rgb;
         float NdotV = max(dot(norm, viewDir), 0.0);
         float3 F0r = mix(float3(0.04), surf.color, surf.metallic);
         float3 Fr = FresnelSchlickRoughness(NdotV, F0r, surf.roughness);
-        float roughFade = (1.0 - surf.roughness) * (1.0 - surf.roughness);
+        // The mip blur now conveys glossiness across the range, so keep the RT
+        // contribution and only fade near fully-rough, where the prefiltered IBL
+        // specular is the better source (mips can't blur far enough).
+        float roughFade = 1.0 - surf.roughness * surf.roughness;
         result += refl * Fr * roughFade * reflectionParams.y * screenAO;
     }
 

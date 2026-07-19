@@ -2698,6 +2698,9 @@ void Renderer::raytraceReflectionPass() {
     rhi->dispatch((w + 7) / 8, (h + 7) / 8, 1);
     rhi->endComputePass();
     rhi->computeBarrier();  // reflection writes -> fragment reads in Main
+    // Glossy: build the mip chain so the PBR composite can sample a blurrier mip
+    // for rougher surfaces (the trace only writes mip 0).
+    rhi->generateMipmaps(reflectionRT);
 }
 
 // RT refractions: the reflection pass's structural twin with a refracted ray
@@ -5227,8 +5230,13 @@ void Renderer::createRenderTargets() {
         desc.height = halfH;
         desc.format = PixelFormat::RGBA16_FLOAT;
         desc.usage = TextureUsage::Storage | TextureUsage::Sampled;
+        // Mip chain for glossy reflections: the composite samples a blurrier mip
+        // as roughness rises (mips filled by generateMipmaps after the RT trace).
+        desc.mipLevels = static_cast<Uint32>(std::floor(std::log2(std::max(halfW, halfH))) + 1);
         reflectionRT = rhi->createTexture(desc);
-        // RT refraction twin (same half-res RGBA16F, rgb + hit mask in a).
+        // RT refraction twin (same half-res RGBA16F, rgb + hit mask in a). No mip
+        // chain for now — its composite still samples the sharp result.
+        desc.mipLevels = 1;
         refractionRT = rhi->createTexture(desc);
     }
 
