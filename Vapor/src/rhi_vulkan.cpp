@@ -2016,15 +2016,18 @@ void RHI_Vulkan::beginFrame() {
                                             imageAvailableSemaphores[currentFrameInFlight],
                                             VK_NULL_HANDLE, &currentSwapchainImageIndex);
 
-    if (result == VK_ERROR_OUT_OF_DATE_KHR) {
-        // Unusable swapchain: recreate next frame and skip this one. The fence
-        // was not reset, so the next beginFrame() passes the wait immediately.
-        swapchainDirty = true;
-        return;
-    }
     if (result == VK_SUBOPTIMAL_KHR) {
         // Acquire succeeded — render this frame, refresh the swapchain next.
         swapchainDirty = true;
+    } else if (result != VK_SUCCESS) {
+        // OUT_OF_DATE: recreate next frame and skip this one. Any other error
+        // (SURFACE_LOST, DEVICE_LOST, ...) left no valid image index either —
+        // recording and presenting with it would be UB, so skip and let the
+        // recreate attempt (or the app's device-lost handling) sort it out.
+        // The fence was not reset, so the next beginFrame() passes the wait
+        // immediately.
+        swapchainDirty = true;
+        return;
     }
 
     vkResetFences(device, 1, &inFlightFences[currentFrameInFlight]);
@@ -3056,6 +3059,11 @@ void RHI_Vulkan::createSwapchain() {
     if (surfaceFormatCount != 0) {
         surfaceFormats.resize(surfaceFormatCount);
         vkGetPhysicalDeviceSurfaceFormatsKHR(physicalDevice, surface, &surfaceFormatCount, surfaceFormats.data());
+    }
+    if (surfaceFormats.empty()) {
+        // A live surface always reports >= 1 format; an empty list means the
+        // query itself failed (lost surface). Reading [0] would be UB.
+        throw std::runtime_error("Surface reports no formats (lost surface?)");
     }
 
     // Select surface format
