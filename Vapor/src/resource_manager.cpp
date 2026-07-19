@@ -182,13 +182,12 @@ namespace Vapor {
         std::function<void(std::shared_ptr<T>)> onComplete
     ) -> std::shared_ptr<Resource<T>> {
 
-        // Check cache first
+        // Check cache first. setCallback invokes immediately when the resource
+        // is already Ready (and stores otherwise), so there is no
+        // isReady()-then-store race dropping the callback here.
         auto cached = cache.get(path);
         if (cached) {
-            // If there's a callback and resource is ready, call it immediately
-            if (onComplete && cached->isReady()) {
-                onComplete(cached->get());
-            } else if (onComplete) {
+            if (onComplete) {
                 cached->setCallback(onComplete);
             }
             return cached;
