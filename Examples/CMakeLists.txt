@@ -2,3 +2,4 @@
 # the counterpart of Atmospheric's Examples/ tree.
 add_subdirectory(MicroVoxel)
 add_subdirectory(USDViewer)
+add_subdirectory(TerrainStreaming)

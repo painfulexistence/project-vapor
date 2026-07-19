@@ -788,6 +788,37 @@ MeshId Renderer::registerMesh(const std::vector<Vapor::VertexData>& vertices,
     return id;
 }
 
+// In-place geometry rewrite for a registered mesh — the streaming hook (e.g.
+// terrain tiles): a fixed pool of meshes is registered once and their
+// contents are rewritten as the world streams, so nothing ever leaks. The
+// counts must match registration (same-size updateBuffer contract); topology
+// changes need a fresh registerMesh instead.
+bool Renderer::updateMeshGeometry(MeshId id, const std::vector<Vapor::VertexData>& vertices,
+                                  const std::vector<Uint32>& indices) {
+    if (id >= meshes.size()) return false;
+    RenderMesh& mesh = meshes[id];
+    if (vertices.size() != mesh.vertexCount || indices.size() != mesh.indexCount) return false;
+
+    if (mesh.vertexBuffer.isValid() && !vertices.empty()) {
+        rhi->updateBuffer(mesh.vertexBuffer, vertices.data(), 0, vertices.size() * sizeof(Vapor::VertexData));
+    }
+    if (mesh.indexBuffer.isValid() && !indices.empty()) {
+        rhi->updateBuffer(mesh.indexBuffer, indices.data(), 0, indices.size() * sizeof(Uint32));
+    }
+
+    // Keep the merged MDI copy in step so the GPU-driven path sees the same
+    // world as the per-object path.
+    std::copy(vertices.begin(), vertices.end(), m_mergedVertices.begin() + mesh.vertexOffset);
+    std::copy(indices.begin(), indices.end(), m_mergedIndices.begin() + mesh.indexOffset);
+    m_mergedGeometryDirty = true;
+
+    // Refit the BLAS on RT backends so rays see the new surface.
+    if (id < meshBLAS.size() && meshBLAS[id].isValid()) {
+        rhi->buildAccelerationStructure(meshBLAS[id]);
+    }
+    return true;
+}
+
 MaterialId Renderer::registerMaterial(const MaterialDataInput& materialData) {
     RenderMaterial material;
 

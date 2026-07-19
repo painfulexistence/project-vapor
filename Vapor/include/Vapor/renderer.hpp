@@ -70,6 +70,12 @@ public:
     MeshId registerMesh(const std::vector<Vapor::VertexData>& vertices,
                         const std::vector<Uint32>& indices);
 
+    // In-place geometry rewrite for a registered mesh (streaming: a fixed
+    // mesh pool registered once, contents rewritten as the world moves).
+    // Counts must match registration; returns false otherwise.
+    bool updateMeshGeometry(MeshId id, const std::vector<Vapor::VertexData>& vertices,
+                            const std::vector<Uint32>& indices);
+
     // Register a material and return its ID
     MaterialId registerMaterial(const MaterialDataInput& materialData);
 
