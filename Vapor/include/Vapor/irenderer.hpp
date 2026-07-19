@@ -272,6 +272,13 @@ public:
     // them (MicroVoxel pass); backends without the pass ignore the list.
     virtual void setVoxelVolumes(const std::vector<Vapor::VoxelVolumeDraw>& volumes) {}
 
+    // In-place geometry rewrite for a registered mesh — the streaming hook
+    // (TerrainSystem's tile slot pools): counts must match registration.
+    // Default false = backend can't stream geometry; callers keep the
+    // registered contents (the terrain then stays at its boot LOD).
+    virtual bool updateMeshGeometry(MeshId /*id*/, const std::vector<Vapor::VertexData>& /*vertices*/,
+                                    const std::vector<Uint32>& /*indices*/) { return false; }
+
 protected:
     std::function<void()> m_imGuiCallback;
     std::function<void()> m_engineWindowCallback;

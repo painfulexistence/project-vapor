@@ -80,6 +80,7 @@ set(SOURCES
     src/vehicle_controller.cpp
     src/fluid_volume.cpp
     src/voxel_world.cpp
+    src/terrain_world.cpp
     # RHI architecture files (replacing renderer_metal.cpp and renderer_vulkan.cpp)
     src/renderer.cpp
     src/rhi_vulkan.cpp

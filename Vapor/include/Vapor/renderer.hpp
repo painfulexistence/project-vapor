@@ -74,7 +74,7 @@ public:
     // mesh pool registered once, contents rewritten as the world moves).
     // Counts must match registration; returns false otherwise.
     bool updateMeshGeometry(MeshId id, const std::vector<Vapor::VertexData>& vertices,
-                            const std::vector<Uint32>& indices);
+                            const std::vector<Uint32>& indices) override;
 
     // Register a material and return its ID
     MaterialId registerMaterial(const MaterialDataInput& materialData);

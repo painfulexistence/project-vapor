@@ -3,10 +3,12 @@
 #include "components.hpp"
 #include "engine_core.hpp"
 #include "input_manager.hpp"
+#include "mesh_builder.hpp"
 #include "physics_3d.hpp"
 #include "render_data.hpp"
 #include "renderer.hpp"
 #include "render_scene.hpp"
+#include "terrain_world.hpp"
 #include "voxel_world.hpp"
 #include <entt/entt.hpp>
 #include <cmath>
@@ -507,6 +509,306 @@ namespace Vapor {
                     scheduler.submitTask([world, cx, cz] { world->generateColumnChunk(cx, cz); });
                 }
             }
+        }
+    };
+
+    // ============================================================================
+    // Streamed terrain — owns each StreamingTerrainComponent's TerrainWorld
+    // (see terrain_world.hpp). First sight prewarms the whole world at the
+    // coarsest LOD on task-scheduler workers (full horizon on frame one);
+    // every frame after, concentric detail rings around the active camera
+    // refine tiles by rewriting a fixed per-LOD mesh slot pool in place
+    // (IRenderer::updateMeshGeometry — no GPU allocation while streaming),
+    // and deterministic tree/rock scatter entities churn in a ring.
+    // ============================================================================
+    class TerrainSystem {
+    public:
+        static void update(entt::registry& reg, IRenderer* renderer, std::shared_ptr<RenderScene> scene) {
+            if (!renderer || !scene) return;
+            auto view = reg.view<StreamingTerrainComponent>();
+            for (auto entity : view) {
+                auto& tc = view.get<StreamingTerrainComponent>(entity);
+                if (!tc.world.value || tc.regenerate) initTerrain(reg, renderer, scene, tc);
+                TerrainWorld& world = *tc.world.value;
+
+                glm::vec3 camPos(0.0f);
+                auto camView = reg.view<VirtualCameraComponent>();
+                for (auto ce : camView) {
+                    const auto& cam = camView.get<VirtualCameraComponent>(ce);
+                    if (cam.isActive) {
+                        camPos = cam.position;
+                        break;
+                    }
+                }
+
+                const glm::ivec2 camTile = world.worldToTile(camPos.x, camPos.z);
+                if (camTile != world.lastCamTile) {
+                    world.lastCamTile = camTile;
+                    // Demotions to the always-resident base coat are free —
+                    // apply first so freed slots can serve incoming tiles.
+                    for (int t : world.computeTargets(camTile)) demoteToBase(reg, world, t);
+                    updateScatter(reg, world, tc, camTile);
+                }
+                enqueueBuilds(world);
+                applyResults(reg, renderer, world);
+                break;  // singleton: the first terrain entity wins
+            }
+        }
+
+        // Terrain height under (x, z) — ground clamps, spawns, teleports.
+        static float groundHeight(entt::registry& reg, float x, float z, float fallback = 0.0f) {
+            auto view = reg.view<StreamingTerrainComponent>();
+            for (auto entity : view) {
+                auto& tc = view.get<StreamingTerrainComponent>(entity);
+                if (tc.world.value) return tc.world.value->heightAt(x, z);
+            }
+            return fallback;
+        }
+
+    private:
+        static entt::entity makeTileEntity(entt::registry& reg, const std::shared_ptr<Mesh>& mesh,
+                                           const char* name, bool visible) {
+            auto e = reg.create();
+            reg.emplace<NameComponent>(e, NameComponent { name });
+            reg.emplace<TransformComponent>(e);  // identity — world coords baked into vertices
+            auto& mr = reg.emplace<MeshRendererComponent>(e);
+            mr.meshes.push_back(mesh);
+            mr.visible = visible;
+            return e;
+        }
+
+        static void destroyTerrainEntities(entt::registry& reg, TerrainWorld& world) {
+            for (auto& slot : world.baseSlots) {
+                if (slot.entity != entt::null) reg.destroy(slot.entity);
+            }
+            for (auto& pool : world.finePools) {
+                for (auto& slot : pool) {
+                    if (slot.entity != entt::null) reg.destroy(slot.entity);
+                }
+            }
+            for (auto& [tile, ents] : world.scatterEntities) {
+                for (auto e : ents) reg.destroy(e);
+            }
+        }
+
+        static void initTerrain(entt::registry& reg, IRenderer* renderer,
+                                const std::shared_ptr<RenderScene>& scenePtr,
+                                StreamingTerrainComponent& tc) {
+            RenderScene& scene = *scenePtr;
+            auto& scheduler = EngineCore::Get()->getTaskScheduler();
+            if (tc.world.value) {
+                // Rebuild: drain any in-flight jobs against the old world and
+                // drop its entities; the old TerrainWorld dies with its refs.
+                scheduler.waitForAll();
+                destroyTerrainEntities(reg, *tc.world.value);
+            }
+            tc.regenerate = false;
+
+            auto world = std::make_shared<TerrainWorld>();
+            TerrainConfig cfg;
+            cfg.worldSize = tc.worldSize;
+            cfg.tileSize = tc.tileSize;
+            cfg.heightScale = tc.heightScale;
+            cfg.noiseFrequency = tc.noiseFrequency;
+            cfg.noiseOctaves = tc.noiseOctaves;
+            cfg.seed = tc.seed;
+            cfg.lod0RadiusTiles = tc.lod0RadiusTiles;
+            cfg.lod1RadiusTiles = tc.lod1RadiusTiles;
+            cfg.lod2RadiusTiles = tc.lod2RadiusTiles;
+            cfg.scatterRadiusTiles = tc.scatterRadiusTiles;
+            cfg.scatterPerTile = tc.scatterPerTile;
+            world->configure(cfg);
+            tc.world.value = world;
+
+            // One material for every tile: (height, slope) UVs into the LUT.
+            auto lut = world->buildPaletteLUT();
+            scene.images.push_back(lut);
+            auto terrainMat = std::make_shared<Material>();
+            terrainMat->albedoMap = lut;
+            terrainMat->roughnessFactor = 0.95f;
+            terrainMat->metallicFactor = 0.0f;
+            scene.materials.push_back(terrainMat);
+
+            // Scatter prototypes (0 = tree, 1 = rock) drawn as GPU instances.
+            {
+                auto treeMat = std::make_shared<Material>();
+                treeMat->baseColorFactor = glm::vec4(0.16f, 0.42f, 0.18f, 1.0f);
+                treeMat->roughnessFactor = 0.9f;
+                scene.materials.push_back(treeMat);
+                auto treeMesh = MeshBuilder::buildCube(1.0f);
+                treeMesh->material = treeMat;
+                scene.addMesh(treeMesh);
+                world->scatterMeshes.push_back(treeMesh);
+
+                auto rockMat = std::make_shared<Material>();
+                rockMat->baseColorFactor = glm::vec4(0.45f, 0.44f, 0.42f, 1.0f);
+                rockMat->roughnessFactor = 0.95f;
+                scene.materials.push_back(rockMat);
+                auto rockMesh = MeshBuilder::buildCube(1.0f);
+                rockMesh->material = rockMat;
+                scene.addMesh(rockMesh);
+                world->scatterMeshes.push_back(rockMesh);
+            }
+
+            // Base coat: every tile's coarsest-LOD mesh, built in parallel and
+            // staged before the first frame — the whole horizon is present at
+            // boot.
+            const int total = world->tileCount();
+            for (int t = 0; t < total; t++) {
+                world->baseSlots[t].mesh = std::make_shared<Mesh>();
+                scheduler.submitTask([world, t] {
+                    std::vector<VertexData> verts;
+                    std::vector<Uint32> inds;
+                    glm::vec3 mn, mx;
+                    world->buildTileGeometry(t % world->tilesPerAxis(), t / world->tilesPerAxis(),
+                                             TerrainWorld::LOD_COUNT - 1, verts, inds, mn, mx);
+                    auto& mesh = *world->baseSlots[t].mesh;
+                    mesh.initialize(verts, inds);
+                    mesh.localAABBMin = mn;
+                    mesh.localAABBMax = mx;
+                });
+            }
+            scheduler.waitForAll();
+            for (int t = 0; t < total; t++) {
+                TerrainWorld::Slot& slot = world->baseSlots[t];
+                slot.mesh->material = terrainMat;
+                scene.addMesh(slot.mesh);
+                slot.entity = makeTileEntity(reg, slot.mesh, "Terrain.Base", /*visible=*/true);
+            }
+
+            // Fine pools: registered once with a flat placeholder per LOD;
+            // contents are rewritten in place as the rings move.
+            for (int lod = 0; lod < TerrainWorld::LOD_COUNT - 1; lod++) {
+                std::vector<VertexData> verts;
+                std::vector<Uint32> inds;
+                glm::vec3 mn, mx;
+                world->buildTileGeometry(0, 0, lod, verts, inds, mn, mx);
+                world->finePools[lod].resize(TerrainWorld::kLodSlots[lod]);
+                world->freeSlots[lod].clear();
+                for (int s = 0; s < TerrainWorld::kLodSlots[lod]; s++) {
+                    TerrainWorld::Slot& slot = world->finePools[lod][s];
+                    slot.mesh = std::make_shared<Mesh>();
+                    slot.mesh->initialize(verts, inds);
+                    slot.mesh->material = terrainMat;
+                    scene.addMesh(slot.mesh);
+                    slot.entity = makeTileEntity(reg, slot.mesh, "Terrain.Fine", /*visible=*/false);
+                    world->freeSlots[lod].push_back(s);
+                }
+            }
+
+            // Register everything just added. The staging list is cleared like
+            // app code does post-stage; anything the app staged earlier this
+            // frame has already been consumed by its own stage() call.
+            renderer->stage(scenePtr);
+            scene.stagedMeshes.clear();
+            scene.stagedMeshTransforms.clear();
+        }
+
+        static void demoteToBase(entt::registry& reg, TerrainWorld& world, int t) {
+            TerrainWorld::Tile& tile = world.tiles[t];
+            if (tile.fineSlot >= 0) {
+                TerrainWorld::Slot& slot = world.finePools[tile.currentLod][tile.fineSlot];
+                reg.get<MeshRendererComponent>(slot.entity).visible = false;
+                world.freeSlots[tile.currentLod].push_back(tile.fineSlot);
+                tile.fineSlot = -1;
+            }
+            reg.get<MeshRendererComponent>(world.baseSlots[t].entity).visible = true;
+            tile.currentLod = TerrainWorld::LOD_COUNT - 1;
+        }
+
+        static void enqueueBuilds(TerrainWorld& world) {
+            auto& scheduler = EngineCore::Get()->getTaskScheduler();
+            for (int t = 0; t < static_cast<int>(world.tiles.size()); t++) {
+                TerrainWorld::Tile& tile = world.tiles[t];
+                if (tile.buildPending || tile.targetLod == tile.currentLod ||
+                    tile.targetLod == TerrainWorld::LOD_COUNT - 1) {
+                    continue;
+                }
+                if (world.freeSlots[tile.targetLod].empty()) continue;  // pool busy; retry next frame
+                if (world.inFlight.load(std::memory_order_relaxed) >= 8) break;
+                tile.buildPending = true;
+                world.inFlight.fetch_add(1, std::memory_order_relaxed);
+                const int lod = tile.targetLod;
+                TerrainWorld* worldPtr = &world;  // outlives jobs: waitForAll on regenerate
+                scheduler.submitTask([worldPtr, t, lod] {
+                    TerrainWorld::BuildResult r;
+                    r.tile = t;
+                    r.lod = lod;
+                    worldPtr->buildTileGeometry(t % worldPtr->tilesPerAxis(), t / worldPtr->tilesPerAxis(),
+                                                lod, r.verts, r.inds, r.aabbMin, r.aabbMax);
+                    worldPtr->pushResult(std::move(r));
+                    worldPtr->inFlight.fetch_sub(1, std::memory_order_relaxed);
+                });
+            }
+        }
+
+        static void applyResults(entt::registry& reg, IRenderer* renderer, TerrainWorld& world) {
+            for (int applied = 0; applied < 2; applied++) {
+                TerrainWorld::BuildResult r;
+                if (!world.popResult(r)) return;
+                TerrainWorld::Tile& tile = world.tiles[r.tile];
+                tile.buildPending = false;
+                // Stale (rings moved on) or no slot left: drop; the enqueue
+                // scan resubmits while the mismatch persists.
+                if (tile.targetLod != r.lod || world.freeSlots[r.lod].empty()) continue;
+
+                const int slotIdx = world.freeSlots[r.lod].back();
+                world.freeSlots[r.lod].pop_back();
+                TerrainWorld::Slot& slot = world.finePools[r.lod][slotIdx];
+                if (!renderer->updateMeshGeometry(slot.mesh->renderMeshId, r.verts, r.inds)) {
+                    world.freeSlots[r.lod].push_back(slotIdx);
+                    continue;  // backend can't stream (native path): keep the base coat
+                }
+                slot.mesh->localAABBMin = r.aabbMin;
+                slot.mesh->localAABBMax = r.aabbMax;
+                reg.get<MeshRendererComponent>(slot.entity).visible = true;
+
+                // Swap out whatever the tile was showing before.
+                if (tile.currentLod < TerrainWorld::LOD_COUNT - 1 && tile.fineSlot >= 0) {
+                    TerrainWorld::Slot& old = world.finePools[tile.currentLod][tile.fineSlot];
+                    reg.get<MeshRendererComponent>(old.entity).visible = false;
+                    world.freeSlots[tile.currentLod].push_back(tile.fineSlot);
+                }
+                reg.get<MeshRendererComponent>(world.baseSlots[r.tile].entity).visible = false;
+                tile.currentLod = r.lod;
+                tile.fineSlot = slotIdx;
+            }
+        }
+
+        static void updateScatter(entt::registry& reg, TerrainWorld& world,
+                                  const StreamingTerrainComponent& tc, glm::ivec2 camTile) {
+            const int radius = tc.scatterRadiusTiles;
+            std::unordered_map<int, std::vector<entt::entity>> keep;
+            for (int tz = camTile.y - radius; tz <= camTile.y + radius; tz++) {
+                for (int tx = camTile.x - radius; tx <= camTile.x + radius; tx++) {
+                    if (tx < 0 || tz < 0 || tx >= world.tilesPerAxis() || tz >= world.tilesPerAxis()) continue;
+                    const int t = tz * world.tilesPerAxis() + tx;
+                    auto it = world.scatterEntities.find(t);
+                    if (it != world.scatterEntities.end()) {
+                        keep.emplace(t, std::move(it->second));
+                        world.scatterEntities.erase(it);
+                        continue;
+                    }
+                    std::vector<entt::entity> spawned;
+                    for (const auto& p : world.scatterPlacements(tx, tz)) {
+                        if (p.meshIndex < 0 || p.meshIndex >= static_cast<int>(world.scatterMeshes.size()))
+                            continue;
+                        auto e = reg.create();
+                        auto& tr = reg.emplace<TransformComponent>(e);
+                        tr.position = p.position;
+                        tr.rotation = glm::angleAxis(p.yawRadians, glm::vec3(0, 1, 0));
+                        tr.scale = p.scale;
+                        auto& mr = reg.emplace<MeshRendererComponent>(e);
+                        mr.meshes.push_back(world.scatterMeshes[p.meshIndex]);
+                        spawned.push_back(e);
+                    }
+                    keep.emplace(t, std::move(spawned));
+                }
+            }
+            for (auto& [tile, ents] : world.scatterEntities) {
+                for (auto e : ents) reg.destroy(e);
+            }
+            world.scatterEntities = std::move(keep);
         }
     };
 
