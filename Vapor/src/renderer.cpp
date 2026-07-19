@@ -222,6 +222,13 @@ void Renderer::initialize(std::unique_ptr<RHI> rhiPtr, GraphicsBackend backendTy
         FogRenderData fogDefaults;
         createFrameSlottedBuffer(fogDataBuffer, fogDesc, &fogDefaults, sizeof(fogDefaults));
 
+        BufferDesc hfogDesc;
+        hfogDesc.size = sizeof(HeightFogRenderData);
+        hfogDesc.usage = BufferUsage::Uniform;
+        hfogDesc.memoryUsage = MemoryUsage::CPUtoGPU;
+        HeightFogRenderData hfogDefaults;
+        createFrameSlottedBuffer(heightFogDataBuffer, hfogDesc, &hfogDefaults, sizeof(hfogDefaults));
+
         BufferDesc volDesc;
         volDesc.size = sizeof(VolumeRenderData);
         volDesc.usage = BufferUsage::Uniform;
@@ -1150,8 +1157,13 @@ void Renderer::setupDefaultRenderGraph() {
     renderGraph.addPass("Particles",
         [](Renderer& r) { r.particlePass(); });
 
-    // Height/distance fog before bloom (so the fogged scene feeds bloom/god
-    // rays); swaps colorRT with tempColorRT internally.
+    // Cheap analytic height fog before bloom (so the fogged scene feeds bloom/
+    // god rays); swaps colorRT with tempColorRT internally. On by default.
+    renderGraph.addPass("HeightFog",
+        [](Renderer& r) { r.heightFogPass(); });
+
+    // Expensive per-light volumetric fog (opt-in, ECS-driven); same colorRT/
+    // tempColorRT swap, runs after the cheap height fog so both can compose.
     renderGraph.addPass("VolumetricFog",
         [](Renderer& r) { r.volumetricFogPass(); });
 
@@ -3941,6 +3953,46 @@ void Renderer::lightScatteringPass() {
     rhi->endRenderPass();
 }
 
+// Cheap analytic exponential height fog: one fullscreen pass, no shadows/lights.
+// Reads colorRT + depth, writes tempColorRT, then swaps so downstream passes
+// (bloom/god rays/post) see the fogged scene. The expensive per-light volumetric
+// variant is volumetricFogPass (now ECS-driven).
+void Renderer::heightFogPass() {
+    if (!heightFogEnabled || !heightFogPipeline.isValid() ||
+        !colorRT.isValid() || !tempColorRT.isValid() || !depthStencilRT.isValid() ||
+        !heightFogDataBuffer.isValid()) {
+        return;
+    }
+
+    // Tunables from the persistent settings; per-frame fields (matrices/camera/
+    // sun) overwritten below. Sun follows the atmosphere/sky (light-driven).
+    HeightFogRenderData hf = heightFogSettings;
+    hf.invViewProj = glm::inverse(currentCamera.proj * currentCamera.view);
+    hf.cameraPosition = glm::vec4(currentCamera.position, 0.0f);
+    hf.sunDirection = glm::vec4(glm::normalize(atmosphereData.sunDirection), 0.0f);
+    hf.sunColorIntensity = glm::vec4(atmosphereData.sunColor, atmosphereData.sunIntensity);
+    rhi->updateBuffer(heightFogDataBuffer, &hf, 0, sizeof(hf));
+
+    RenderPassDesc rp;
+    rp.name = "HeightFog";
+    rp.colorAttachments.push_back(tempColorRT);
+    rp.loadColor.push_back(false);  // every pixel written
+    rhi->beginRenderPass(rp);
+    rhi->bindPipeline(heightFogPipeline);
+    rhi->setTexture(0, 0, colorRT, clampSampler);
+    rhi->setTexture(0, 1, depthStencilRT, clampSampler);
+    if (backend == GraphicsBackend::Metal) {
+        // 3d_height_fog.metal reads HeightFogData at buffer(0) (inline bytes).
+        rhi->setFragmentBytes(&hf, sizeof(hf), 0);
+    } else {
+        rhi->setFragmentBuffer(0, heightFogDataBuffer, 0, sizeof(HeightFogRenderData));
+    }
+    rhi->draw(3, 1, 0, 0);
+    rhi->endRenderPass();
+
+    std::swap(colorRT, tempColorRT);  // colorRT now holds the fogged scene
+}
+
 // Simple height/distance fog: read colorRT + depth, write the fogged result to
 // tempColorRT, then swap so downstream passes (bloom/god rays/post) see it.
 void Renderer::volumetricFogPass() {
@@ -5590,7 +5642,11 @@ void Renderer::createRenderPipeline() {
                     "shaders/AODenoise.frag.spv", dummy, BlendMode::Opaque, PixelFormat::R16_FLOAT);
             }
 
-            // Simple height/distance fog: fullscreen color+depth -> tempColorRT.
+            // Cheap analytic height fog: fullscreen color+depth -> tempColorRT.
+            heightFogPipeline = makeFullscreenFragPipeline(
+                "shaders/HeightFog.frag.spv", heightFogShader, BlendMode::Opaque);
+
+            // Expensive per-light volumetric fog: fullscreen color+depth -> tempColorRT.
             volumetricFogPipeline = makeFullscreenFragPipeline(
                 "shaders/VolumetricFog.frag.spv", volumetricFogShader, BlendMode::Opaque);
 
@@ -5994,6 +6050,8 @@ void Renderer::createRenderPipeline() {
                                            BlendMode::Opaque, { PixelFormat::RGBA16_FLOAT }, false, CompareOp::Less);
         lightScatteringPipeline = makeMetalPass("shaders/3d_light_scattering.metal", "vertexMain", "fragmentMain",
                                                 BlendMode::Opaque, { PixelFormat::RGBA16_FLOAT }, false, CompareOp::Less);
+        heightFogPipeline = makeMetalPass("shaders/3d_height_fog.metal", "heightFogVertex", "heightFogFragment",
+                                          BlendMode::Opaque, { PixelFormat::RGBA16_FLOAT }, false, CompareOp::Less);
         volumetricFogPipeline = makeMetalPass("shaders/3d_volumetric_fog.metal", "volumetricFogVertex", "simpleFogFragment",
                                               BlendMode::Opaque, { PixelFormat::RGBA16_FLOAT }, false, CompareOp::Less);
         volumeRaymarchPipeline = makeMetalPass("shaders/3d_volume_raymarch.metal", "volumeRaymarchVertex", "volumeRaymarchFragment",
@@ -7168,6 +7226,21 @@ void Renderer::drawGraphicsImGui() {
     }
 
     if (ImGui::TreeNode("Height Fog")) {
+        // Cheap analytic exponential height fog (the common-case global fog).
+        ImGui::Checkbox("Enabled", &heightFogEnabled);
+        ImGui::DragFloat("Density", &heightFogSettings.fogColorDensity.a, 0.001f, 0.0f, 0.5f);
+        ImGui::DragFloat("Height Falloff", &heightFogSettings.params.x, 0.01f, 0.001f, 1.0f);
+        ImGui::DragFloat("Base Height", &heightFogSettings.params.y, 1.0f, -100.0f, 100.0f);
+        ImGui::DragFloat("Anisotropy", &heightFogSettings.params.z, 0.01f, -0.99f, 0.99f);
+        ImGui::DragFloat("Ambient Intensity", &heightFogSettings.params.w, 0.01f, 0.0f, 2.0f);
+        ImGui::ColorEdit3("Fog Color", &heightFogSettings.fogColorDensity.x);
+        if (ImGui::Button("Reset to Defaults")) heightFogSettings = HeightFogRenderData{};
+        ImGui::TreePop();
+    }
+
+    if (ImGui::TreeNode("Volumetric Fog")) {
+        // Expensive per-light raymarch. Panel toggle here is a debug override;
+        // it is otherwise opt-in/ECS-driven (VolumetricFogComponent) in Part B.
         ImGui::Checkbox("Enabled", &volumetricFogEnabled);
         ImGui::DragFloat("Density", &fogSettings.fogDensity, 0.001f, 0.0f, 0.5f);
         ImGui::DragFloat("Height Falloff", &fogSettings.fogHeightFalloff, 0.01f, 0.001f, 1.0f);

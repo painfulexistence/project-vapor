@@ -325,6 +325,21 @@ struct alignas(16) FogRenderData {
     float _pad3 = 0.0f;                                       // 172 (struct = 176, /16)
 };
 
+// Cheap analytic exponential height fog (the pre-raymarch "Height Fog"): one
+// evaluation per pixel, no shadows/lights. Every field is vec4-packed so the
+// std430 (GLSL) and MSL layouts are byte-identical — the same struct is used
+// for the Vulkan buffer and the Metal setFragmentBytes upload. Matches
+// HeightFogData in HeightFog.frag / 3d_height_fog.metal.
+struct alignas(16) HeightFogRenderData {
+    glm::mat4 invViewProj = glm::mat4(1.0f);
+    glm::vec4 cameraPosition = glm::vec4(0.0f);                       // xyz = camera pos
+    glm::vec4 sunDirection = glm::vec4(glm::normalize(glm::vec3(0.5f, 0.5f, 0.5f)), 0.0f);
+    glm::vec4 sunColorIntensity = glm::vec4(1.0f, 1.0f, 1.0f, 12.0f); // rgb = color, a = intensity
+    glm::vec4 fogColorDensity = glm::vec4(0.5f, 0.6f, 0.7f, 0.02f);   // rgb = ambient tint, a = density
+    // x = height falloff, y = base height, z = anisotropy (sun phase), w = ambient intensity
+    glm::vec4 params = glm::vec4(0.1f, 0.0f, 0.6f, 0.3f);
+};
+
 // Heterogeneous volume raymarch (EmberGen-style density grid in an AABB).
 // vec4-only layout so the MSL and std430 twins are byte-identical
 // (VolumeRaymarch.frag / 3d_volume_raymarch.metal).

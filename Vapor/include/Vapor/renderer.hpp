@@ -412,6 +412,7 @@ private:
     void bloomUpsamplePass();
     void skyAtmospherePass();
     void lightScatteringPass();
+    void heightFogPass();
     void volumetricFogPass();
     void volumeRaymarchPass();
     void velocityPass();
@@ -691,10 +692,21 @@ private:
     LightScatteringRenderData lightScatteringSettings;
     PipelineHandle volumetricFogPipeline;
     TextureHandle tempColorRT;  // ping-pong target for fog (swapped with colorRT)
-    bool volumetricFogEnabled = true;
-    // Persistent fog tunables (ImGui-editable). volumetricFogPass() copies this
-    // and overwrites the per-frame fields (invViewProj/camera/sun).
+    // Volumetric fog (the expensive raymarch) is now opt-in and ECS-driven:
+    // setVolumetricFog() copies a VolumetricFogComponent's tunables into
+    // fogSettings and flips m_volumetricFogActive. Off until a component pushes it.
+    bool volumetricFogEnabled = false;
+    // Persistent fog tunables. volumetricFogPass() copies this and overwrites the
+    // per-frame fields (invViewProj/camera/sun).
     FogRenderData fogSettings;
+    // Cheap analytic exponential height fog (the pre-raymarch "Height Fog"):
+    // a single per-pixel evaluation, no shadows/lights. On by default — it is the
+    // common-case global fog; the raymarch above is the opt-in upgrade.
+    PipelineHandle heightFogPipeline;
+    ShaderHandle heightFogShader;
+    BufferHandle heightFogDataBuffer;
+    HeightFogRenderData heightFogSettings;
+    bool heightFogEnabled = true;
     // Heterogeneous volume raymarch (EmberGen density grids; rendering only —
     // import/parsing lives in a separate PR). One AABB volume per scene; a
     // procedural 64^3 test grid stands in until setVolumeDensity() gets real
