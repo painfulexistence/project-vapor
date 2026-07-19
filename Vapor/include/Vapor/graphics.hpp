@@ -80,6 +80,10 @@ struct Material {
     float sheenTint = 0.5f;
     float clearcoat = 0.0f;
     float clearcoatGloss = 1.0f;
+    // KHR_materials_transmission factor. RENDERING support only for now: the
+    // glTF importer does not parse the extension yet (separate PR); set from
+    // code / the Scene Materials panel. IOR is fixed at 1.5 (the glTF default).
+    float transmission = 0.0f;
 
     // Prototype UV Mode: 0 = Off, 1 = World Space, 2 = Object Space
     int prototypeUVMode = 0;

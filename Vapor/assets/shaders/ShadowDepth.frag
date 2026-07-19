@@ -27,6 +27,12 @@ struct MaterialData {
     float sheenTint;
     float clearcoat;
     float clearcoatGloss;
+    // Tail is unused here but MUST be present: the buffer stride is 112, so
+    // omitting it would shift every materials[i>0] read by 16*i bytes.
+    float prototypeUVMode;
+    float uvScale;
+    float iblEnabled;
+    float transmission;
 };
 layout(std430, set = 0, binding = 1) readonly buffer MaterialBuf {
     MaterialData materials[];

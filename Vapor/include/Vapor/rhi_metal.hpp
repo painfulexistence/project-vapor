@@ -129,6 +129,13 @@ public:
     void writeTextureArgumentTable(BufferHandle table, Uint32 entry, Uint32 slot,
                                    TextureHandle texture) override;
     void bindTextureArgumentTable(BufferHandle table) override;
+    void bindComputeTextureArgumentTable(BufferHandle table, Uint32 bufferIndex) override;
+
+private:
+    // Lazily rebuild an argument table's deduped resident-texture list.
+    struct ArgumentTableResource;  // defined below
+    static void rebuildArgumentTableResidency(ArgumentTableResource& table);
+public:
 
     // ========================================================================
     // Compute Commands

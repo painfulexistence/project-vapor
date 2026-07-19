@@ -44,6 +44,10 @@ struct alignas(16) MaterialData {
     float prototypeUVMode;
     float uvScale;
     float iblEnabled; // 1.0 = use IBL, 0.0 = ambient approximation
+    // Keep byte-identical with the shader twins (3d_common.metal / RHIMain.frag
+    // / PrePass.frag / ShadowDepth.frag): all are stride 112. A missing field
+    // here silently shifts every materials[i>0] read.
+    float transmission;
 };
 
 struct alignas(16) DirectionalLight {
@@ -103,7 +107,11 @@ struct alignas(16) InstanceData {
     Uint32 indexCount;
     Uint32 materialID;
     PrimitiveMode primitiveMode;
-    Uint32 _pad1[2];
+    // Always-populated merged-buffer offsets for RT hit shading (the RT kernels
+    // fetch UV + normals at the hit regardless of draw mode). Occupy the old
+    // _pad1[2] slot, so the stride is unchanged.
+    Uint32 rtVertexOffset;
+    Uint32 rtIndexOffset;
     glm::vec3 AABBMin;
     float _pad2;
     glm::vec3 AABBMax;

@@ -399,6 +399,8 @@ private:
     // prePassCullPass() are thin wrappers (main = frustum+Hi-Z, pre = frustum only).
     void runGpuCull(BufferHandle argsBuffer, bool enableOcclusion);
     void raytraceShadowPass();
+    void raytraceReflectionPass();
+    void raytraceRefractionPass();
     void raytraceAOPass();
     void mainRenderPass();
     void postProcessPass();
@@ -836,6 +838,24 @@ private:
     ComputePipelineHandle stochasticShadowPipeline;
     ComputePipelineHandle stochasticShadowTemporalPipeline;
     ComputePipelineHandle stochasticShadowDenoisePipeline;
+    // RT mirror reflections (Metal RT only): traces reflection rays and shades
+    // hits from the GIBS surfel radiance cache; misses sample the env map.
+    ComputePipelineHandle raytraceReflectionPipeline;
+    TextureHandle reflectionRT;              // half-res RGBA16F (rgb, a=hit mask)
+    bool rtReflectionsEnabled = false;       // default off; opt-in via Effects panel (no-op without RT)
+    float rtReflectionIntensity = 1.0f;      // composite multiplier in the PBR
+    // RT refractions (KHR_materials_transmission rendering; Metal RT only).
+    // Structural clone of the reflection chain with a refracted ray (fixed IOR
+    // 1.5, thin-walled). Runs only while some material has transmission > 0.
+    ComputePipelineHandle raytraceRefractionPipeline;
+    TextureHandle refractionRT;              // half-res RGBA16F (rgb, a=hit mask)
+    bool rtRefractionsEnabled = true;        // panel toggle (no-op without RT)
+    float rtRefractionIntensity = 1.0f;      // composite multiplier in the PBR
+    bool sceneHasTransmission = false;       // recomputed in updateBuffers()
+    // RT sun soft shadows: 0 = hard single ray (legacy behavior); > 0 = the
+    // sun's angular radius in radians, cone-sampled with a few rays/pixel
+    // (real sun ~0.0047). Panel slider under Shadow Debug.
+    float rtSunAngularRadius = 0.0f;
     // ReSTIR reuse for the stochastic shadow (restirShadowPass): half-res
     // reservoir build + temporal merge, half-res spatial merge + winner rays,
     // then joint bilateral upsample back to the full-res raw target.
@@ -859,6 +879,7 @@ private:
     ShaderHandle rtShadowShader, rtAOShader, aoTemporalShader, aoDenoiseShader,
                  stochasticShadowShader, stochasticShadowTemporalShader, stochasticShadowDenoiseShader,
                  restirShadowTemporalShader, restirShadowResolveShader, stochasticShadowUpsampleShader,
+                 rtReflectionShader, rtRefractionShader,
                  giTemporalShader, giDenoiseShader;
     ShaderHandle prePassMetalVertexShader, prePassMetalFragmentShader;
 
@@ -1073,7 +1094,7 @@ private:
     // resolved handle changes (cache below) — rewriting every frame would race
     // in-flight replays of the shared table.
     BufferHandle bindlessSystemTable;
-    TextureHandle m_bindlessSysCache[10];
+    TextureHandle m_bindlessSysCache[12];  // 10 system textures + RT reflection/refraction
     // Note: the single Metal ICB is shared across frames in flight — Metal's
     // automatic hazard tracking serializes the next frame's cull (write)
     // against the previous frame's executeICB (read). Correct, at the cost of

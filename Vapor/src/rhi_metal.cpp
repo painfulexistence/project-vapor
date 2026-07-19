@@ -1622,7 +1622,16 @@ void RHI_Metal::setTexture(Uint32 set, Uint32 binding, TextureHandle texture, Sa
         currentRenderEncoder->setFragmentTexture(texIt->second.texture.get(), binding);
     }
 
-    if (samplerIt != samplers.end() && currentRenderEncoder) {
+    // WORKAROUND: Metal allows 31 fragment texture slots but only 16
+    // sampler-state slots (0-15) per stage, so mirroring the texture index
+    // onto the sampler table is an API violation for slots >= 16
+    // (texReflection at 16 / texRefraction at 17) — UB in release builds that
+    // can scramble the whole fragment argument table (observed as garbage
+    // texShadow reads). Skipping is safe today: every runtime [[sampler(n)]]
+    // consumer uses slot 0, the high slots sample via constexpr MSL samplers.
+    // The real fix is dropping the mirroring for a fixed sampler table
+    // (default/clamp/shadow at 0/1/2, bound once per encoder) — RHI v2.
+    if (samplerIt != samplers.end() && currentRenderEncoder && binding < 16) {
         currentRenderEncoder->setFragmentSamplerState(samplerIt->second.sampler.get(), binding);
     }
 }
@@ -1837,6 +1846,23 @@ void RHI_Metal::writeTextureArgumentTable(BufferHandle tableHandle, Uint32 entry
     table.residencyDirty = true;
 }
 
+// Rebuild the deduped resident-texture list an argument table references, so
+// useResources declares each backing texture exactly once. Lazy: only when a
+// write dirtied the table.
+void RHI_Metal::rebuildArgumentTableResidency(ArgumentTableResource& table) {
+    if (!table.residencyDirty) return;
+    table.residentResources.clear();
+    // Dedup: many materials share default/white textures.
+    std::unordered_map<MTL::Texture*, bool> seen;
+    for (auto& [key, tex] : table.written) {
+        if (tex && !seen.count(tex.get())) {
+            seen[tex.get()] = true;
+            table.residentResources.push_back(tex.get());
+        }
+    }
+    table.residencyDirty = false;
+}
+
 void RHI_Metal::bindTextureArgumentTable(BufferHandle tableHandle) {
     auto tit = argumentTables.find(tableHandle.id);
     if (tit == argumentTables.end() || !currentRenderEncoder) return;
@@ -1846,23 +1872,29 @@ void RHI_Metal::bindTextureArgumentTable(BufferHandle tableHandle) {
     // for every texture it references (argument-buffer indirection).
     currentRenderEncoder->setFragmentBuffer(table.buffer.get(), 0, table.bufferIndex);
 
-    if (table.residencyDirty) {
-        table.residentResources.clear();
-        // Dedup: many materials share default/white textures.
-        std::unordered_map<MTL::Texture*, bool> seen;
-        for (auto& [key, tex] : table.written) {
-            if (tex && !seen.count(tex.get())) {
-                seen[tex.get()] = true;
-                table.residentResources.push_back(tex.get());
-            }
-        }
-        table.residencyDirty = false;
-    }
+    rebuildArgumentTableResidency(table);
     if (!table.residentResources.empty()) {
         currentRenderEncoder->useResources(table.residentResources.data(),
                                            table.residentResources.size(),
                                            MTL::ResourceUsageRead,
                                            MTL::RenderStageFragment);
+    }
+}
+
+void RHI_Metal::bindComputeTextureArgumentTable(BufferHandle tableHandle, Uint32 bufferIndex) {
+    auto tit = argumentTables.find(tableHandle.id);
+    if (tit == argumentTables.end() || !currentComputeEncoder) return;
+    ArgumentTableResource& table = tit->second;
+
+    // Same argument buffer as the fragment path, bound at the caller's compute
+    // slot. The compute encoder's useResources has no render-stage argument.
+    currentComputeEncoder->setBuffer(table.buffer.get(), 0, bufferIndex);
+
+    rebuildArgumentTableResidency(table);
+    if (!table.residentResources.empty()) {
+        currentComputeEncoder->useResources(table.residentResources.data(),
+                                            table.residentResources.size(),
+                                            MTL::ResourceUsageRead);
     }
 }
 
@@ -2151,9 +2183,13 @@ void RHI_Metal::buildAccelerationStructure(AccelStructHandle handle) {
         if (resource.instances.empty()) return;
 
         // Deduped BLAS array; each instance descriptor indexes into it.
+        // UserID descriptors: userID carries AccelStructInstance::instanceID
+        // (the renderer's InstanceData index), so RT kernels can map a hit
+        // back to per-instance data via intersection.user_instance_id —
+        // the plain descriptor type dropped that mapping entirely.
         std::vector<NS::Object*> blasObjects;
         std::unordered_map<Uint32, Uint32> blasIndex;
-        std::vector<MTL::AccelerationStructureInstanceDescriptor> descriptors;
+        std::vector<MTL::AccelerationStructureUserIDInstanceDescriptor> descriptors;
         descriptors.reserve(resource.instances.size());
         for (const auto& inst : resource.instances) {
             auto blasIt = accelStructs.find(inst.blas.id);
@@ -2166,7 +2202,7 @@ void RHI_Metal::buildAccelerationStructure(AccelStructHandle handle) {
             // Zero-initialize: garbage options bits (NonOpaque, winding flags)
             // make rays miss whole instances — the native renderer learned this
             // the hard way (see its accel-instance fill).
-            MTL::AccelerationStructureInstanceDescriptor d{};
+            MTL::AccelerationStructureUserIDInstanceDescriptor d{};
             for (int c = 0; c < 4; ++c)
                 for (int r = 0; r < 3; ++r)
                     d.transformationMatrix.columns[c][r] = inst.transform[c][r];
@@ -2174,6 +2210,7 @@ void RHI_Metal::buildAccelerationStructure(AccelStructHandle handle) {
             d.mask = inst.mask;
             d.options = MTL::AccelerationStructureInstanceOptionOpaque;
             d.intersectionFunctionTableOffset = 0;
+            d.userID = inst.instanceID;
             descriptors.push_back(d);
         }
         if (descriptors.empty()) {
@@ -2206,6 +2243,9 @@ void RHI_Metal::buildAccelerationStructure(AccelStructHandle handle) {
         tlasDesc->setInstancedAccelerationStructures(resource.blasArray.get());
         tlasDesc->setInstanceCount(descriptors.size());
         tlasDesc->setInstanceDescriptorBuffer(instBuf.get());
+        // The buffer holds UserID descriptors — Metal must be told, or it
+        // reads them with the default (plain) stride/layout.
+        tlasDesc->setInstanceDescriptorType(MTL::AccelerationStructureInstanceDescriptorTypeUserID);
 
         auto sizes = device->accelerationStructureSizes(tlasDesc.get());
         auto& scratch = resource.scratchSlots[slot];
