@@ -95,38 +95,41 @@ namespace Vapor {
         }
 
         static void push(entt::registry& reg, PageID id) {
-            auto& nav = getNavigator(reg);
-            if (!nav.stack.empty()) reg.remove<UIVisibleTag>(nav.stack.back());
-            auto it = nav.pages.find(id);
-            if (it == nav.pages.end()) return;
-            nav.stack.push_back(it->second);
+            auto* nav = getNavigator(reg);
+            if (!nav) return;
+            if (!nav->stack.empty()) reg.remove<UIVisibleTag>(nav->stack.back());
+            auto it = nav->pages.find(id);
+            if (it == nav->pages.end()) return;
+            nav->stack.push_back(it->second);
             reg.emplace_or_replace<UIVisibleTag>(it->second);
         }
 
         static void pop(entt::registry& reg) {
-            auto& nav = getNavigator(reg);
-            if (nav.stack.empty()) return;
-            reg.remove<UIVisibleTag>(nav.stack.back());
-            nav.stack.pop_back();
-            if (!nav.stack.empty()) reg.emplace_or_replace<UIVisibleTag>(nav.stack.back());
+            auto* nav = getNavigator(reg);
+            if (!nav || nav->stack.empty()) return;
+            reg.remove<UIVisibleTag>(nav->stack.back());
+            nav->stack.pop_back();
+            if (!nav->stack.empty()) reg.emplace_or_replace<UIVisibleTag>(nav->stack.back());
         }
 
         static void popAll(entt::registry& reg) {
-            auto& nav = getNavigator(reg);
-            for (auto e : nav.stack)
+            auto* nav = getNavigator(reg);
+            if (!nav) return;
+            for (auto e : nav->stack)
                 reg.remove<UIVisibleTag>(e);
-            nav.stack.clear();
+            nav->stack.clear();
         }
 
         static bool isTopOfStack(entt::registry& reg, PageID id) {
-            auto& nav = getNavigator(reg);
-            if (nav.stack.empty()) return false;
-            auto it = nav.pages.find(id);
-            return it != nav.pages.end() && nav.stack.back() == it->second;
+            auto* nav = getNavigator(reg);
+            if (!nav || nav->stack.empty()) return false;
+            auto it = nav->pages.find(id);
+            return it != nav->pages.end() && nav->stack.back() == it->second;
         }
 
         static bool isStackEmpty(entt::registry& reg) {
-            return getNavigator(reg).stack.empty();
+            auto* nav = getNavigator(reg);
+            return !nav || nav->stack.empty();
         }
 
         template<typename T>
@@ -138,15 +141,24 @@ namespace Vapor {
         }
 
     private:
-        static UINavigatorComponent& getNavigator(entt::registry& reg) {
+        // Returns nullptr when no UINavigatorComponent exists yet. Every caller
+        // must guard: a missing navigator is a normal early-startup state (and,
+        // in a build without Boost.PFR reflection, the blueprint applier that
+        // would emplace it is compiled out entirely). The old version returned a
+        // reference via view.get(view.front()); with an empty view front() is
+        // entt::null, so that dereferenced an invalid entity and crashed.
+        static UINavigatorComponent* getNavigator(entt::registry& reg) {
             auto view = reg.view<UINavigatorComponent>();
-            return view.get<UINavigatorComponent>(view.front());
+            const entt::entity e = view.front();
+            if (e == entt::null) return nullptr;
+            return &view.get<UINavigatorComponent>(e);
         }
 
         static entt::entity findEntity(entt::registry& reg, PageID id) {
-            auto& nav = getNavigator(reg);
-            auto it = nav.pages.find(id);
-            return it != nav.pages.end() ? it->second : entt::null;
+            auto* nav = getNavigator(reg);
+            if (!nav) return entt::null;
+            auto it = nav->pages.find(id);
+            return it != nav->pages.end() ? it->second : entt::null;
         }
     };
 
