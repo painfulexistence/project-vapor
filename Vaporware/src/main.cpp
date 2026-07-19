@@ -44,6 +44,7 @@ static void setupCustomDrawers(Vapor::SceneInspector& inspector) {
     inspector.registerComponent<Vapor::RectLightComponent>("Rect Light");
     inspector.registerComponent<Vapor::DirectionalLightComponent>("Directional Light");
     inspector.registerComponent<Vapor::SunComponent>("Sun");
+    inspector.registerComponent<Vapor::MoonComponent>("Moon");
     inspector.registerComponent<Vapor::TimeOfDayComponent>("Time of Day");
     inspector.registerComponent<CharacterIntent>("Character Intent");
     inspector.registerComponent<CharacterControllerComponent>("Character Controller");

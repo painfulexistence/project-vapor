@@ -192,6 +192,12 @@ namespace Vapor {
     // the time-of-day driver identify the sun by this tag, never by list order.
     struct SunComponent {};
 
+    // Tags the directional light that acts as the moon. TimeOfDaySystem drives
+    // its direction (opposite the sun), a cool dim colour, and an intensity that
+    // ramps up while the moon is above the horizon (i.e. at night). Put it on a
+    // second directional-light entity; LightGatherSystem gathers it after the sun.
+    struct MoonComponent {};
+
     // Sky authoring — the gameplay layer's choice of sky and its tunables. Put
     // one on an environment entity (singleton). SkySystem resolves it into a
     // SkyRenderData and pushes it to the renderer whenever `dirty` is set. The
@@ -234,6 +240,10 @@ namespace Vapor {
         float dayLengthSeconds = 120.0f;  // real seconds per in-game day; 0 = frozen
         float latitudeDeg = 25.0f;        // tilts the sun's arc toward +Z (south)
         float maxSunIntensity = 10.0f;    // sun intensity at the zenith
+        // Moonlight: drives the MoonComponent-tagged directional light. The moon
+        // sits opposite the sun, so it is up (and lit) while the sun is down.
+        float maxMoonIntensity = 0.4f;    // moon intensity when high at night
+        glm::vec3 moonLightColor = glm::vec3(0.55f, 0.65f, 0.9f);  // cool blue
         bool  paused = false;
     };
 

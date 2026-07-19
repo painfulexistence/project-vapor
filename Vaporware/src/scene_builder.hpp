@@ -123,6 +123,19 @@ inline SceneResources buildScene(
     }
 
     {
+        // Moon: a second directional light opposite the sun. TimeOfDaySystem owns
+        // its direction/colour/intensity (ramps up at night), so the initial
+        // values are just placeholders. LightGatherSystem gathers it after the sun.
+        auto moonLight = registry.create();
+        registry.emplace<Vapor::NameComponent>(moonLight, Vapor::NameComponent{"Moon Light"});
+        auto& dl     = registry.emplace<Vapor::DirectionalLightComponent>(moonLight);
+        dl.direction = glm::normalize(glm::vec3(-0.5f, -1.0f, 0.0f));
+        dl.color     = glm::vec3(0.55f, 0.65f, 0.9f);
+        dl.intensity = 0.0f;
+        registry.emplace<Vapor::MoonComponent>(moonLight);
+    }
+
+    {
         // Environment/sky singleton. Procedural atmosphere + a time-of-day clock
         // that drives the sun. SkySystem pushes the sky to the renderer;
         // TimeOfDaySystem advances the clock and moves the sun.

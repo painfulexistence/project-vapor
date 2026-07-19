@@ -477,6 +477,23 @@ namespace Vapor {
                 dl.intensity = tod.maxSunIntensity * daylight;
                 break;
             }
+
+            // Moon: opposite the sun (moonPos = -sunPos), so it is up while the
+            // sun is down. Intensity ramps with the moon's elevation, giving a
+            // dim cool fill at night. This matches the visual moon in the
+            // Atmosphere pass (moonDir = -sunDir). Direction travels away from
+            // the moon (= sunPos). Unshadowed for now (PSSM tracks the sun only).
+            glm::vec3 moonPos = -sunPos;
+            float moonUp = glm::clamp(moonPos.y / 0.15f, 0.0f, 1.0f);
+            moonUp = moonUp * moonUp * (3.0f - 2.0f * moonUp);  // smoothstep
+            auto moonView = reg.view<DirectionalLightComponent, MoonComponent>();
+            for (auto entity : moonView) {
+                auto& dl = moonView.get<DirectionalLightComponent>(entity);
+                dl.direction = glm::normalize(-moonPos);  // = normalize(sunPos)
+                dl.color     = tod.moonLightColor;
+                dl.intensity = tod.maxMoonIntensity * moonUp;
+                break;
+            }
         }
     };
 
