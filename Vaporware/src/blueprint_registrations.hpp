@@ -148,7 +148,7 @@ inline void registerAppBlueprintComponents() {
     // Declarative light field: N seeded-random point lights with cycling
     // movement patterns (Circle/Figure8/Linear/Spiral), replacing the RNG loop
     // scene_builder used to run. Lights spawn as separate entities.
-    r.registerApplier("pointLightField", [](entt::registry& reg, entt::entity, const nlohmann::json& j) {
+    r.registerApplier("pointLightField", [](entt::registry& reg, entt::entity field, const nlohmann::json& j) {
         const int count = j.value("count", 128);
         Vapor::RNG rng(j.value("seed", 1u));
         const glm::vec3 areaMin(j.value("areaMinX", -10.0f), j.value("areaMinY", 0.5f), j.value("areaMinZ", -10.0f));
@@ -157,6 +157,12 @@ inline void registerAppBlueprintComponents() {
             const auto e = reg.create();
             reg.emplace<Vapor::NameComponent>(e, Vapor::NameComponent{ fmt::format("Point Light {}", i) });
             auto& tc = reg.emplace<Vapor::TransformComponent>(e);
+            // Parent each spawned light under the field entity itself: the field
+            // is the scene-graph owner of its emitted lights, so the inspector
+            // shows "Point Light Field > Point Light N" instead of N orphans at
+            // the root. The field's transform is identity, so the world-space
+            // positions authored below are unchanged by the reparent.
+            tc.parent = field;
             tc.position = glm::vec3(
                 rng.RandomFloatInRange(areaMin.x, areaMax.x), rng.RandomFloatInRange(areaMin.y, areaMax.y),
                 rng.RandomFloatInRange(areaMin.z, areaMax.z)
