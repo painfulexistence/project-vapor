@@ -3389,6 +3389,8 @@ void Renderer::shadowPass() {
         } else {
             rhi->setVertexBuffer(0, pssmDataBuffer, 0, sizeof(PSSMRenderData));
             rhi->setVertexBytes(&ci, sizeof(Uint32), 5);  // cascadeIndex -> push offset 16
+            // Materials at set0 b1 for the fragment alpha-cutout (ShadowDepth.frag).
+            rhi->setVertexBuffer(1, materialUniformBuffer, 0, sizeof(Vapor::MaterialData) * MAX_INSTANCES);
         }
         rhi->setVertexBuffer(2, instanceDataBuffer, 0, sizeof(Vapor::InstanceData) * std::max<Uint32>(1, totalInstanceCount));
         // MDI layout: Metal's shadow shader pulls instances[iid].vertexOffset +
@@ -3396,6 +3398,11 @@ void Renderer::shadowPass() {
         const bool shadowPullsMerged = backend == GraphicsBackend::Metal &&
                                        m_mdiInstanceLayout && mergedVertexBuffer.isValid();
         if (shadowPullsMerged) rhi->bindVertexBuffer(mergedVertexBuffer, 3, 0);
+        // Default albedo so the shadow frag's declared sampler (set2 b0) is
+        // always valid even with no MASK casters; opaque casters never sample
+        // it (alphaCutoff == 0), MASK casters override it per draw below.
+        if (defaultWhiteTexture < textures.size() && textures[defaultWhiteTexture].handle.isValid())
+            rhi->setTexture(0, 0, textures[defaultWhiteTexture].handle, textures[defaultWhiteTexture].sampler);
 
         // ALL drawables, not the camera-visible set: casters outside the view
         // frustum must still render into the cascades or their shadows vanish
@@ -3407,9 +3414,12 @@ void Renderer::shadowPass() {
             auto it = drawableToInstanceID.find(drawableIdx);
             if (it == drawableToInstanceID.end()) continue;
             Uint32 iid = it->second;
-            if (backend == GraphicsBackend::Metal) {
-                // texAlbedo at fragment texture(0) for alpha-tested cutouts.
-                bindMaterial(drawable.material);
+            // Alpha-cutout casters (MASK) bind their albedo for the fragment
+            // discard — Metal via 3d_pssm_shadow_depth, Vulkan via
+            // ShadowDepth.frag. Opaque casters need no texture (pure depth).
+            if (drawable.material < materials.size() &&
+                materials[drawable.material].alphaMode == AlphaMode::MASK) {
+                bindMaterialAlbedo(drawable.material);
             }
             if (!shadowPullsMerged && mesh.vertexBuffer.isValid()) rhi->bindVertexBuffer(mesh.vertexBuffer, 3, 0);
             rhi->setVertexBytes(&iid, sizeof(Uint32), 4);  // instanceID -> push offset 0
@@ -3441,19 +3451,25 @@ void Renderer::shadowPass() {
             Uint32 nearIdx = 3u;
             rhi->setVertexBuffer(0, pssmDataBuffer, 0, sizeof(PSSMRenderData));
             rhi->setVertexBytes(&nearIdx, sizeof(Uint32), 5);  // cascadeIndex -> push offset 16
+            rhi->setVertexBuffer(1, materialUniformBuffer, 0, sizeof(Vapor::MaterialData) * MAX_INSTANCES);
         }
         rhi->setVertexBuffer(2, instanceDataBuffer, 0, sizeof(Vapor::InstanceData) * std::max<Uint32>(1, totalInstanceCount));
         // Same merged-VB requirement as the cascade loop above (MDI layout).
         const bool nearPullsMerged = backend == GraphicsBackend::Metal &&
                                      m_mdiInstanceLayout && mergedVertexBuffer.isValid();
         if (nearPullsMerged) rhi->bindVertexBuffer(mergedVertexBuffer, 3, 0);
+        if (defaultWhiteTexture < textures.size() && textures[defaultWhiteTexture].handle.isValid())
+            rhi->setTexture(0, 0, textures[defaultWhiteTexture].handle, textures[defaultWhiteTexture].sampler);
         for (Uint32 drawableIdx = 0; drawableIdx < frameDrawables.size(); drawableIdx++) {
             const Drawable& drawable = frameDrawables[drawableIdx];
             const RenderMesh& mesh = meshes[drawable.mesh];
             auto it = drawableToInstanceID.find(drawableIdx);
             if (it == drawableToInstanceID.end()) continue;
             Uint32 iid = it->second;
-            if (backend == GraphicsBackend::Metal) bindMaterial(drawable.material);
+            if (drawable.material < materials.size() &&
+                materials[drawable.material].alphaMode == AlphaMode::MASK) {
+                bindMaterialAlbedo(drawable.material);  // albedo for the alpha-cutout
+            }
             if (!nearPullsMerged && mesh.vertexBuffer.isValid()) rhi->bindVertexBuffer(mesh.vertexBuffer, 3, 0);
             rhi->setVertexBytes(&iid, sizeof(Uint32), 4);  // instanceID -> push offset 0
             if (mesh.indexBuffer.isValid()) {
@@ -5952,6 +5968,15 @@ TextureId Renderer::getOrCreateTexture(const std::shared_ptr<Vapor::Image>& imag
     textureCache[image->uri] = id;
 
     return id;
+}
+
+void Renderer::bindMaterialAlbedo(MaterialId materialId) {
+    if (materialId >= materials.size()) return;
+    const RenderMaterial& material = materials[materialId];
+    if (material.albedoTexture < textures.size()) {
+        const RenderTexture& tex = textures[material.albedoTexture];
+        rhi->setTexture(0, 0, tex.handle, tex.sampler);  // texture(0) / set2 b0
+    }
 }
 
 void Renderer::bindMaterial(MaterialId materialId) {

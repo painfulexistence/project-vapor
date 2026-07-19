@@ -427,6 +427,10 @@ private:
     Frustum extractFrustum(const glm::mat4& viewProj);
     TextureId getOrCreateTexture(const std::shared_ptr<Vapor::Image>& image);
     void bindMaterial(MaterialId materialId);
+    // Bind only the albedo texture (set2 b0) — the shadow-depth alpha cutout is
+    // the only place that samples without needing the full material texture set,
+    // and binding all six would churn descriptors on maps the pass never reads.
+    void bindMaterialAlbedo(MaterialId materialId);
 
     // Scene/ECS helpers
     void collectDrawables(std::shared_ptr<RenderScene> scene);
