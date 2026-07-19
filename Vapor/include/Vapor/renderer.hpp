@@ -700,10 +700,26 @@ private:
     // copies this and overwrites the per-frame fields (invViewProj/camera/sun).
     FogRenderData fogSettings;
     // ECS-resolved fog volumes (global + bounded AABB banks). Uploaded to
-    // fogVolumeBuffer each frame; the Vulkan raymarch (VolumetricFog.frag) blends
-    // them. The froxel-grid path lives in the native Metal renderer.
+    // fogVolumeBuffer each frame; blended by the froxel inject kernel (Metal) and
+    // the Vulkan raymarch (VolumetricFog.frag).
     std::vector<VolumetricFogVolumeData> volumetricFogVolumes;
-    BufferHandle fogVolumeBuffer;  // GPU array of VolumetricFogVolumeGPU (set 1, binding 6)
+    BufferHandle fogVolumeBuffer;  // GPU array of VolumetricFogVolumeGPU
+    // Froxel volumetric fog (Metal RHI path): inject (compute) -> integrate
+    // (compute) -> composite. Decouples fog cost from screen resolution. Created
+    // for the Metal backend (reuses the 3d_volumetric_fog.metal kernels); the
+    // Vulkan backend keeps the fullscreen raymarch (VolumetricFog.frag) until its
+    // .comp twins land, so the pass falls back when these are absent.
+    bool fogUseFroxel = true;
+    BufferHandle fogFroxelGlobalsBuffer;        // VolumetricFogData layout (froxel kernels)
+    TextureHandle fogFroxelGridTexture;         // 3D: in-scatter.rgb + extinction (storage+sampled)
+    TextureHandle fogIntegratedVolumeTexture;   // 3D: accumulated scattering.rgb + transmittance
+    ComputePipelineHandle fogFroxelInjectPipeline;
+    ComputePipelineHandle fogFroxelIntegratePipeline;
+    ShaderHandle fogFroxelInjectShader;
+    ShaderHandle fogFroxelIntegrateShader;
+    PipelineHandle fogFroxelCompositePipeline;  // fullscreen, samples the integrated volume
+    ShaderHandle fogFroxelCompositeVS;
+    ShaderHandle fogFroxelCompositeFS;
     // Cheap analytic exponential height fog (the pre-raymarch "Height Fog"):
     // a single per-pixel evaluation, no shadows/lights. On by default — it is the
     // common-case global fog; the raymarch above is the opt-in upgrade.

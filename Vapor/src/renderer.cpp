@@ -42,6 +42,13 @@
 using namespace Vapor;
 
 namespace {
+// Froxel fog grid dimensions — MUST match FROXEL_SIZE_X/Y/Z in
+// 3d_volumetric_fog.metal (and any GLSL twin). Injection dispatches one thread
+// per froxel; integration one thread per (x,y) column.
+constexpr Uint32 FROXEL_GRID_X = 160;
+constexpr Uint32 FROXEL_GRID_Y = 90;
+constexpr Uint32 FROXEL_GRID_Z = 64;
+
 // GIBS spatial-hash grid derivation, matching native GIBSManager::calculateGridSize
 // (gibs_manager.cpp) EXACTLY so the RHI surfel hash resolves at the same cell
 // granularity: start from a 1m cell, take ceil(worldSize / cell) per axis,
@@ -231,12 +238,39 @@ void Renderer::initialize(std::unique_ptr<RHI> rhiPtr, GraphicsBackend backendTy
         createFrameSlottedBuffer(fogDataBuffer, fogDesc, &fogDefaults, sizeof(fogDefaults));
 
         // Fog volume array (global + bounded AABB banks) blended by the Vulkan
-        // raymarch. Bound as a storage buffer at set 1, binding 6.
+        // raymarch and the froxel inject kernel. Bound as a storage buffer.
         BufferDesc fogVolDesc;
         fogVolDesc.size = sizeof(VolumetricFogVolumeGPU) * kMaxFogVolumes;
         fogVolDesc.usage = BufferUsage::Uniform;
         fogVolDesc.memoryUsage = MemoryUsage::CPUtoGPU;
         createFrameSlottedBuffer(fogVolumeBuffer, fogVolDesc);
+
+        // Froxel-fog globals (VolumetricFogData layout — camera/sun/grid/temporal),
+        // read by the froxel inject + composite. Distinct from fogDataBuffer, which
+        // is the FogRenderData layout the fullscreen raymarch reads.
+        BufferDesc froxelGlobalsDesc;
+        froxelGlobalsDesc.size = sizeof(VolumetricFogData);
+        froxelGlobalsDesc.usage = BufferUsage::Uniform;
+        froxelGlobalsDesc.memoryUsage = MemoryUsage::CPUtoGPU;
+        VolumetricFogData froxelGlobalsDefaults;
+        createFrameSlottedBuffer(fogFroxelGlobalsBuffer, froxelGlobalsDesc,
+                                 &froxelGlobalsDefaults, sizeof(froxelGlobalsDefaults));
+
+        // Froxel 3D textures: the injection grid (in-scatter.rgb + extinction) and
+        // the integrated volume (accumulated scattering.rgb + transmittance). Both
+        // RGBA16F, storage-written by the compute kernels and sampled by the
+        // composite. Only used on the Metal backend for now (Vulkan keeps the
+        // raymarch); harmless to allocate on both.
+        {
+            TextureDesc froxelTexDesc;
+            froxelTexDesc.width = FROXEL_GRID_X;
+            froxelTexDesc.height = FROXEL_GRID_Y;
+            froxelTexDesc.depth = FROXEL_GRID_Z;
+            froxelTexDesc.format = PixelFormat::RGBA16_FLOAT;
+            froxelTexDesc.usage = TextureUsage::Storage | TextureUsage::Sampled;
+            fogFroxelGridTexture = rhi->createTexture(froxelTexDesc);
+            fogIntegratedVolumeTexture = rhi->createTexture(froxelTexDesc);
+        }
 
         BufferDesc hfogDesc;
         hfogDesc.size = sizeof(HeightFogRenderData);
@@ -4076,6 +4110,82 @@ void Renderer::volumetricFogPass() {
     }
     rhi->updateBuffer(fogDataBuffer, &fog, 0, sizeof(fog));
 
+    // ── Froxel path (Metal): inject (compute) -> integrate (compute) -> composite.
+    // Decouples fog cost from screen resolution. The Vulkan backend keeps the
+    // fullscreen raymarch below until its .comp twins land, so this is gated on
+    // the froxel resources existing (created only for Metal today). ──
+    const bool froxelReady = backend == GraphicsBackend::Metal && fogUseFroxel
+        && volCount > 0
+        && fogFroxelInjectPipeline.isValid() && fogFroxelIntegratePipeline.isValid()
+        && fogFroxelCompositePipeline.isValid()
+        && fogFroxelGridTexture.isValid() && fogIntegratedVolumeTexture.isValid()
+        && fogFroxelGlobalsBuffer.isValid();
+    if (froxelReady) {
+        // Froxel globals in the VolumetricFogData layout the .metal kernels read
+        // (distinct from the FogRenderData `fog` the raymarch uses).
+        VolumetricFogData fg{};
+        fg.invViewProj    = fog.invViewProj;
+        fg.cameraPosition = fog.cameraPosition;
+        fg.sunDirection   = fog.sunDirection;
+        fg.sunColor       = fog.sunColor;
+        fg.sunIntensity   = fog.sunIntensity;
+        fg.nearPlane      = currentCamera.nearPlane;
+        fg.farPlane       = currentCamera.farPlane;
+        fg.screenSize     = glm::vec2(rhi->getSwapchainWidth(), rhi->getSwapchainHeight());
+        fg.time           = fog.time;
+        fg.windDirection  = fog.windDirection;
+        fg.windSpeed      = fog.windSpeed;   // already scaled by wind strength
+        fg.volumeCount    = volCount;
+        rhi->updateBuffer(fogFroxelGlobalsBuffer, &fg, 0, sizeof(fg));
+
+        glm::uvec4 fogLightParams(clusterGridSizeX, clusterGridSizeY,
+                                  static_cast<Uint32>(spotLights.size()),
+                                  static_cast<Uint32>(rectLights.size()));
+
+        // Inject + integrate. One compute pass; Metal serializes the two
+        // dispatches and barriers the froxel grid between them (computeBarrier is
+        // a no-op there, and the correct fence once the Vulkan path is wired).
+        rhi->beginComputePass("FroxelFog");
+        rhi->bindComputePipeline(fogFroxelInjectPipeline);
+        rhi->setComputeBuffer(0, fogFroxelGlobalsBuffer, 0, sizeof(VolumetricFogData));
+        rhi->setComputeBuffer(1, cameraUniformBuffer, 0, sizeof(CameraRenderData));
+        rhi->setComputeBuffer(2, pssmDataBuffer, 0, sizeof(PSSMRenderData));
+        rhi->setComputeBuffer(3, pointLightBuffer, 0, sizeof(PointLightData) * maxPointLights);
+        rhi->setComputeBuffer(4, clusterBuffer);
+        rhi->setComputeBuffer(5, spotLightBuffer, 0, sizeof(Vapor::SpotLight) * maxSpotLights);
+        rhi->setComputeBuffer(6, rectLightBuffer);
+        rhi->setComputeBytes(&fogLightParams, sizeof(glm::uvec4), 7);
+        rhi->setComputeBuffer(8, fogVolumeBuffer, 0, sizeof(VolumetricFogVolumeGPU) * kMaxFogVolumes);
+        rhi->setComputeTexture(0, fogFroxelGridTexture);       // storage write [[texture(0)]]
+        rhi->setComputeTexture(1, pssmShadowArrayTexture);     // sampled shadow [[texture(1)]] (inline sampler)
+        rhi->dispatch((FROXEL_GRID_X + 3) / 4, (FROXEL_GRID_Y + 3) / 4, (FROXEL_GRID_Z + 3) / 4);
+
+        rhi->computeBarrier();
+        rhi->bindComputePipeline(fogFroxelIntegratePipeline);
+        rhi->setComputeBuffer(0, fogFroxelGlobalsBuffer, 0, sizeof(VolumetricFogData));
+        rhi->setComputeTexture(0, fogFroxelGridTexture);       // read [[texture(0)]]
+        rhi->setComputeTexture(1, fogIntegratedVolumeTexture); // write [[texture(1)]]
+        rhi->dispatch((FROXEL_GRID_X + 7) / 8, (FROXEL_GRID_Y + 7) / 8, 1);
+        rhi->endComputePass();
+
+        // Composite: sample the integrated volume, ping-pong colorRT.
+        RenderPassDesc crp;
+        crp.name = "FroxelFogComposite";
+        crp.colorAttachments.push_back(tempColorRT);
+        crp.loadColor.push_back(false);
+        rhi->beginRenderPass(crp);
+        rhi->bindPipeline(fogFroxelCompositePipeline);
+        rhi->setTexture(0, 0, colorRT, clampSampler);
+        rhi->setTexture(0, 1, depthStencilRT, clampSampler);
+        rhi->setTexture(0, 2, fogIntegratedVolumeTexture, clampSampler);
+        rhi->setFragmentBuffer(0, fogFroxelGlobalsBuffer, 0, sizeof(VolumetricFogData));
+        rhi->setFragmentBuffer(1, cameraUniformBuffer, 0, sizeof(CameraRenderData));
+        rhi->draw(3, 1, 0, 0);
+        rhi->endRenderPass();
+        std::swap(colorRT, tempColorRT);
+        return;
+    }
+
     RenderPassDesc rp;
     rp.name = "VolumetricFog";
     rp.colorAttachments.push_back(tempColorRT);
@@ -6144,6 +6254,28 @@ void Renderer::createRenderPipeline() {
                                           BlendMode::Opaque, { PixelFormat::RGBA16_FLOAT }, false, CompareOp::Less);
         volumetricFogPipeline = makeMetalPass("shaders/3d_volumetric_fog.metal", "volumetricFogVertex", "simpleFogFragment",
                                               BlendMode::Opaque, { PixelFormat::RGBA16_FLOAT }, false, CompareOp::Less);
+        // Froxel volumetric fog (Metal): inject + integrate compute kernels reused
+        // from the same file, plus the froxel composite (volumetricFogFragment).
+        // Not RT-gated, so a local compute-pipeline builder (makeNamedCompute lives
+        // in the raytracing block above and is out of scope here).
+        {
+            auto makeFogCompute = [&](const char* entry, ShaderHandle& sh,
+                                      Uint32 tgX, Uint32 tgY, Uint32 tgZ) -> ComputePipelineHandle {
+                std::string code = readFile("shaders/3d_volumetric_fog.metal");
+                if (code.empty()) return {};
+                ShaderDesc d; d.stage = ShaderStage::Compute; d.code = code.data();
+                d.codeSize = code.size(); d.entryPoint = entry;
+                sh = rhi->createShader(d);
+                ComputePipelineDesc cd; cd.computeShader = sh;
+                cd.threadGroupSizeX = tgX; cd.threadGroupSizeY = tgY; cd.threadGroupSizeZ = tgZ;
+                return rhi->createComputePipeline(cd);
+            };
+            fogFroxelInjectPipeline = makeFogCompute("froxelInjection", fogFroxelInjectShader, 4, 4, 4);
+            fogFroxelIntegratePipeline = makeFogCompute("scatteringIntegration", fogFroxelIntegrateShader, 8, 8, 1);
+            fogFroxelCompositePipeline = makeMetalPass("shaders/3d_volumetric_fog.metal",
+                                                       "volumetricFogVertex", "volumetricFogFragment",
+                                                       BlendMode::Opaque, { PixelFormat::RGBA16_FLOAT }, false, CompareOp::Less);
+        }
         volumeRaymarchPipeline = makeMetalPass("shaders/3d_volume_raymarch.metal", "volumeRaymarchVertex", "volumeRaymarchFragment",
                                                BlendMode::Opaque, { PixelFormat::RGBA16_FLOAT }, false, CompareOp::Less);
         // Volumetric clouds (off by default): quarter-res raymarch ->
@@ -7325,6 +7457,19 @@ void Renderer::drawGraphicsImGui() {
         ImGui::DragFloat("Ambient Intensity", &heightFogSettings.params.w, 0.01f, 0.0f, 2.0f);
         ImGui::ColorEdit3("Fog Color", &heightFogSettings.fogColorDensity.x);
         if (ImGui::Button("Reset to Defaults")) heightFogSettings = HeightFogRenderData{};
+        ImGui::TreePop();
+    }
+
+    if (ImGui::TreeNode("Volumetric Fog")) {
+        // ECS-driven: VolumetricFogSystem pushes the scene's fog volumes and gates
+        // the pass on whether any exist. This panel only selects the render path.
+        ImGui::Text(volumetricFogEnabled ? "Active - %d volume(s)" : "Inactive (no fog volumes)",
+                    static_cast<int>(volumetricFogVolumes.size()));
+        if (backend == GraphicsBackend::Metal) {
+            ImGui::Checkbox("Use froxel grid (off = raymarch)", &fogUseFroxel);
+        } else {
+            ImGui::TextDisabled("Vulkan: fullscreen raymarch (froxel is Metal-only for now)");
+        }
         ImGui::TreePop();
     }
 
