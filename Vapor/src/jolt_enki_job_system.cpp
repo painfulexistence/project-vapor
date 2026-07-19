@@ -38,6 +38,12 @@ namespace Vapor {
         // Create a new job using the protected Job constructor
         Job* job = new Job(name, color, this, jobFunction, numDependencies);
 
+        // Take the caller's reference BEFORE queueing (mirrors Jolt's
+        // JobSystemThreadPool): QueueJob adds the queue's own reference and a
+        // fast worker may Execute+Release before this function returns —
+        // constructing the handle afterwards would AddRef a freed job.
+        JPH::JobHandle handle(job);
+
         // If no dependencies, queue it immediately
         if (numDependencies == 0) {
             QueueJob(job);
@@ -45,17 +51,37 @@ namespace Vapor {
 
         m_numJobs++;
 
-        return JPH::JobHandle(job);
+        return handle;
     }
 
     // NOLINTNEXTLINE(readability-identifier-naming)
     void JoltEnkiJobSystem::QueueJob(JPH::JobSystem::Job* job) {
         if (!job) return;
 
-        // Create enkiTS task wrapper
-        auto task = new JoltJobTask(job);
+        // The queue holds a reference until the task has executed the job
+        // (released at the end of ExecuteRange). Without it, a caller that
+        // drops its JobHandle before execution — with no barrier holding a
+        // ref — frees the job while it is still queued. Mirrors
+        // JPH::JobSystemThreadPool::QueueJobInternal.
+        job->AddRef();
 
-        // Submit to enkiTS scheduler
+        // Reuse a completed pooled task or grow the pool. The lock spans the
+        // pick AND AddTaskSetToPipe: the pipe call is what flips the task to
+        // not-complete, so picking outside one critical section could hand the
+        // same task to two jobs.
+        std::lock_guard<std::mutex> lock(m_taskPoolMutex);
+        JoltJobTask* task = nullptr;
+        for (auto& t : m_taskPool) {
+            if (t->GetIsComplete()) {
+                task = t.get();
+                break;
+            }
+        }
+        if (!task) {
+            m_taskPool.push_back(std::make_unique<JoltJobTask>());
+            task = m_taskPool.back().get();
+        }
+        task->setJob(job);
         m_scheduler.getScheduler()->AddTaskSetToPipe(task);
     }
 
@@ -87,11 +113,12 @@ namespace Vapor {
 
     // NOLINTNEXTLINE(readability-identifier-naming)
     void JoltEnkiJobSystem::JoltJobTask::ExecuteRange(enki::TaskSetPartition range, uint32_t threadnum) {
-        // Execute the Jolt job function
-        // Execute() will handle job completion, barrier notification, etc.
-        // We should NOT call Release() here - JobHandle manages the reference count.
-        // When all JobHandles are destroyed, the job will be automatically freed.
-        m_job->Execute();
+        // Execute() handles job completion, barrier notification, etc. The
+        // Release() balances QueueJob's AddRef (the queue's reference); the
+        // job is freed once every JobHandle/barrier reference is gone too.
+        JPH::JobSystem::Job* job = m_job;
+        job->Execute();
+        job->Release();
     }
 
 }// namespace Vapor
