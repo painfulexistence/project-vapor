@@ -1355,6 +1355,9 @@ void Renderer::updateBuffers() {
             data.roughnessFactor = mat.roughnessFactor;
             data.occlusionStrength = mat.occlusionStrength;
             data.emissiveFactor = mat.emissiveFactor;
+            // Foliage-style cutout: only MASK materials carry a cutoff; 0
+            // disables the shader-side discard for OPAQUE/BLEND.
+            data.alphaCutoff = mat.alphaMode == AlphaMode::MASK ? mat.alphaCutoff : 0.0f;
             data.emissiveStrength = mat.emissiveStrength;
             data.subsurface = mat.subsurface;
             data.specular = mat.specular;

@@ -107,7 +107,9 @@ struct alignas(16) MaterialData {
     float roughnessFactor;
     float occlusionStrength;
     glm::vec3 emissiveFactor;
-    float _pad1;
+    // MASK-mode cutoff in emissiveFactor's alignment tail (was padding, so the
+    // 96-byte std430 layout is unchanged). 0 = no cutoff (OPAQUE/BLEND).
+    float alphaCutoff = 0.0f;
     float emissiveStrength;
     float subsurface;
     float specular;
