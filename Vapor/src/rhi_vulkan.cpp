@@ -1012,21 +1012,15 @@ TextureHandle RHI_Vulkan::createTexture(const TextureDesc& desc) {
     imageInfo.samples = static_cast<VkSampleCountFlagBits>(desc.sampleCount);
     imageInfo.sharingMode = VK_SHARING_MODE_EXCLUSIVE;
 
+    // Images are always device-local; VMA creates, allocates and binds in one
+    // call, sub-allocating from large memory blocks (and picking a dedicated
+    // allocation itself for large render targets).
     VkImage image;
-    if (vkCreateImage(device, &imageInfo, nullptr, &image) != VK_SUCCESS) {
-        throw std::runtime_error("Failed to create image");
-    }
-
-    // Images are always device-local; VMA sub-allocates (and picks a
-    // dedicated allocation itself for large render targets).
-    // The vkCreateImage above is replaced by vmaCreateImage: destroy and
-    // recreate through VMA so creation, allocation and binding are one call.
-    vkDestroyImage(device, image, nullptr);
     VmaAllocationCreateInfo allocCreate{};
     allocCreate.usage = VMA_MEMORY_USAGE_AUTO_PREFER_DEVICE;
     VmaAllocation allocation;
     if (vmaCreateImage(allocator, &imageInfo, &allocCreate, &image, &allocation, nullptr) != VK_SUCCESS) {
-        throw std::runtime_error("Failed to allocate image memory");
+        throw std::runtime_error("Failed to create image");
     }
 
     // Create image view
@@ -1063,6 +1057,7 @@ TextureHandle RHI_Vulkan::createTexture(const TextureDesc& desc) {
     resource.width = desc.width;
     resource.height = desc.height;
     resource.depth = desc.depth;
+    resource.mipLevels = desc.mipLevels;
     resource.arrayLayers = desc.arrayLayers;
     resource.usage = imageInfo.usage;
     resource.currentLayout = VK_IMAGE_LAYOUT_UNDEFINED;
@@ -1723,9 +1718,11 @@ void RHI_Vulkan::generateMipmaps(TextureHandle handle) {
     }
     TextureResource& tex = it->second;
 
-    // Mip level count comes from the image; recompute from dimensions
-    Uint32 mipLevels = 1;
-    for (Uint32 d = std::max(tex.width, tex.height); d > 1; d >>= 1) mipLevels++;
+    // Blit exactly the levels the image was created with. Recomputing a full
+    // chain from the dimensions (the old behavior) blits into levels that
+    // don't exist whenever the image was created with fewer mips — a
+    // validation error on the way to UB.
+    const Uint32 mipLevels = tex.mipLevels;
     if (mipLevels <= 1) {
         return;
     }

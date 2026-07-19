@@ -235,6 +235,7 @@ private:
         Uint32 width;
         Uint32 height;
         Uint32 depth = 1;  // >1 = 3D volume texture
+        Uint32 mipLevels = 1;
         Uint32 arrayLayers = 1;
         VkImageUsageFlags usage = 0;
         VkImageLayout currentLayout = VK_IMAGE_LAYOUT_UNDEFINED;
