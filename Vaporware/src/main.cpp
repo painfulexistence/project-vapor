@@ -567,7 +567,11 @@ auto main(int argc, char* args[]) -> int {
     TextureHandle spriteTexture = renderer->createTexture(spriteImage);
     fmt::print("Sprite texture loaded\n");
 
-    // Create a render texture for render-to-texture demo
+    // Render-to-texture "TV" demo setup. Gated with the draw block below (search
+    // "Render-to-Texture") — without the guard this still allocated a 512x512
+    // HDR render target every launch that nothing sampled. Flip both #if 0 to 1
+    // to re-enable the demo.
+#if 0
     RenderTextureDesc rtDesc;
     rtDesc.width = 512;
     rtDesc.height = 512;
@@ -586,6 +590,7 @@ auto main(int argc, char* args[]) -> int {
         0.1f,// Near
         100.0f// Far
     );
+#endif
 
     if (renderer->initUI()) {
         fmt::print("UI System Initialized\n");
@@ -937,8 +942,9 @@ auto main(int argc, char* args[]) -> int {
 
             // ===== Render-to-Texture "TV" Demo =====
             // Disabled by default — it's a demo affordance, not part of the
-            // scene. Flip to 1 to render the scene from an orbiting camera into
-            // a texture and hang it on a world-space quad (a "TV screen").
+            // scene. Flip this AND the setup #if 0 above (search "Render-to-
+            // texture 'TV' demo setup") to 1 to render the scene from an
+            // orbiting camera into a texture and hang it on a world quad.
 #if 0
             {
                 // Update RT camera to orbit around the scene
