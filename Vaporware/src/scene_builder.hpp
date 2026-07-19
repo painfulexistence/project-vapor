@@ -347,7 +347,8 @@ inline SceneResources buildScene(
         auto e = registry.create();
         registry.emplace<Vapor::NameComponent>(e, Vapor::NameComponent{"Particle Sea Emitter A"});
         auto& tc = registry.emplace<Vapor::TransformComponent>(e);
-        tc.position = glm::vec3(0.0f, 5.0f, 0.0f);
+        // ~2 m above the Sponza roof (roofline ~y=11.4 at the model's 0.008 scale).
+        tc.position = glm::vec3(0.0f, 13.5f, 0.0f);
         auto& em = registry.emplace<Vapor::ParticleEmitterComponent>(e);
         em.maxParticles     = 70'000;
         em.oneShot          = true;
@@ -364,7 +365,8 @@ inline SceneResources buildScene(
         auto e = registry.create();
         registry.emplace<Vapor::NameComponent>(e, Vapor::NameComponent{"Particle Sea Emitter B"});
         auto& tc = registry.emplace<Vapor::TransformComponent>(e);
-        tc.position = glm::vec3(3.0f, 4.0f, -2.0f);
+        // ~2 m above the Sponza roof, offset from emitter A.
+        tc.position = glm::vec3(3.0f, 13.5f, -2.0f);
         auto& em = registry.emplace<Vapor::ParticleEmitterComponent>(e);
         em.maxParticles     = 30'000;
         em.oneShot          = true;
