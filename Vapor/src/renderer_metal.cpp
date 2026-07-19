@@ -327,6 +327,11 @@ public:
         encoder->setBuffer(r.pointLightBuffer.get(), 0, 2);
         encoder->setBytes(&screenSize, sizeof(glm::vec2), 3);
         encoder->setAccelerationStructure(r.TLASBuffers[r.currentFrameInFlight].get(), 4);
+        // The shared shadow kernel now takes SunShadowParams at buffer(5);
+        // angularRadius 0 keeps native's single-ray hard shadow byte-for-byte.
+        struct { float angularRadius; uint32_t frameIndex; uint32_t samples; uint32_t _pad; }
+            sunParams{ 0.0f, r.frameNumber, 1u, 0u };
+        encoder->setBytes(&sunParams, sizeof(sunParams), 5);
         encoder->dispatchThreadgroups(MTL::Size(w, h, 1), MTL::Size(1, 1, 1));
         encoder->endEncoding();
 
@@ -1181,6 +1186,10 @@ public:
         encoder->setFragmentBuffer(r.pointLightBuffer.get(), 0, 1);
         encoder->setFragmentBuffer(r.clusterBuffers[r.currentFrameInFlight].get(), 0, 2);
         encoder->setFragmentBuffer(r.cameraDataBuffers[r.currentFrameInFlight].get(), 0, 3);
+        // Materials for the PBR fragment's per-fragment fetch (buffer 11): the
+        // shader reads materials[materialID] instead of taking the material
+        // through inter-stage (112-byte per-vertex-output overflow).
+        encoder->setFragmentBuffer(r.materialDataBuffer.get(), 0, 19);
         encoder->setFragmentBytes(&screenSize, sizeof(glm::vec2), 4);
         encoder->setFragmentBytes(&gridSize, sizeof(glm::uvec3), 5);
         encoder->setFragmentBytes(&time, sizeof(float), 6);
@@ -1241,12 +1250,24 @@ public:
             // Perf-isolation flags at buffer(12) — the shared PBR shader now
             // reads this slot, so it MUST be bound or the reference is UB.
             encoder->setFragmentBytes(&r.mainDebugFlags, sizeof(uint32_t), 12);
+            // RT reflections are an RHI-path feature; the shared PBR shader
+            // declares reflectionParams at buffer(17), so bind a disabled param
+            // (texture(16) stays unbound — it is sampled only behind the runtime
+            // x > 0.5 check, the same contract as gibsGI when GIBS is off).
+            glm::vec2 reflParams(0.0f, 0.0f);
+            encoder->setFragmentBytes(&reflParams, sizeof(reflParams), 17);
             // Spot lights are an RHI-path feature: bind a placeholder buffer
             // (count 0 -> the loop never dereferences it) and shadowFlags 0
             // (legacy R16F shadow target: rect/spot channels unavailable).
-            encoder->setFragmentBuffer(r.pointLightBuffer.get(), 0, 14);
+            // buffer(16): buffer(14) is the bindless systemTexs table's slot.
+            encoder->setFragmentBuffer(r.pointLightBuffer.get(), 0, 16);
             glm::uvec2 spotRectParams(0u, 0u);
             encoder->setFragmentBytes(&spotRectParams, sizeof(spotRectParams), 15);
+            // RT refractions: RHI-path feature; disabled params keep the
+            // declared buffer(18) bound (texture(17) stays unbound behind the
+            // same runtime x > 0.5 contract as the reflection texture at 16).
+            glm::vec2 refrParams(0.0f, 0.0f);
+            encoder->setFragmentBytes(&refrParams, sizeof(refrParams), 18);
 
             for (const auto& draw : draws) {
                 if (!r.currentCamera->isVisible(r.instances[draw.instanceIndex].boundingSphere)) {

@@ -105,6 +105,7 @@ struct RenderMaterial {
     float sheenTint = 0.5f;
     float clearcoat = 0.0f;
     float clearcoatGloss = 1.0f;
+    float transmission = 0.0f;  // KHR_materials_transmission (rendering only)
     bool useIBL = false;  // native Material::useIBL default (graphics.hpp)
 
     // Texture references (IDs, not handles)
@@ -522,6 +523,7 @@ struct MaterialDataInput {
     float sheenTint = 0.5f;
     float clearcoat = 0.0f;
     float clearcoatGloss = 1.0f;
+    float transmission = 0.0f;  // KHR_materials_transmission (rendering only)
 
     // Texture data (from Application's Image objects)
     std::shared_ptr<Vapor::Image> albedoMap;

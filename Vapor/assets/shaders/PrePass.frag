@@ -29,6 +29,11 @@ struct MaterialData {
     float sheenTint;
     float clearcoat;
     float clearcoatGloss;
+    // Tail kept layout-matched with the C++/MSL twins (unused here).
+    float prototypeUVMode;
+    float uvScale;
+    float iblEnabled;
+    float transmission;
 };
 layout(std430, set = 0, binding = 1) readonly buffer MaterialBuf {
     MaterialData materials[];

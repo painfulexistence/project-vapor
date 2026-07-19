@@ -37,7 +37,7 @@ layout(location = 5) in vec4 instanceColor;
 
 layout(location = 0) out vec4 outColor;
 
-// Must match Vapor::MaterialData (C++, std430 stride = 96)
+// Must match Vapor::MaterialData (C++, std430 stride = 112)
 struct MaterialData {
     vec4 baseColorFactor;
     float normalScale;
@@ -55,11 +55,14 @@ struct MaterialData {
     float sheenTint;
     float clearcoat;
     float clearcoatGloss;
-    // Tail matching the C++ MaterialData (stride 96): iblEnabled gates the IBL
-    // indirect term. prototypeUVMode/uvScale are unused here but keep the layout.
+    // Tail matching Vapor::MaterialData in graphics.hpp (std430 stride 112 —
+    // NOT the unused 96-byte twin in graphics_gpu_structs.hpp): iblEnabled
+    // gates the IBL indirect term; transmission is Metal-RT-only but MUST stay
+    // here or every materials[i>0] read shifts by 16*i bytes.
     float prototypeUVMode;
     float uvScale;
     float iblEnabled;
+    float transmission;
 };
 
 // Must match DirectionalLightData / PointLightData (C++, stride 48 each)

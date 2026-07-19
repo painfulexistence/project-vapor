@@ -5,7 +5,7 @@ using namespace metal;
 struct ShadowDepthVert {
     float4 position [[position]];
     float2 uv;
-    MaterialData material;
+    float4 baseColorFactor;  // only field used (alpha test); avoids 112B inter-stage overflow
 };
 
 vertex ShadowDepthVert vertexMain(
@@ -21,7 +21,7 @@ vertex ShadowDepthVert vertexMain(
     float4 worldPos = instances[instanceID].model * float4(float3(in[actualVertexID].position), 1.0);
     vert.position = lightSpaceMatrix * worldPos;
     vert.uv = float2(in[actualVertexID].uv);
-    vert.material = materials[instances[instanceID].materialID];
+    vert.baseColorFactor = materials[instances[instanceID].materialID].baseColorFactor;
     return vert;
 }
 
@@ -31,7 +31,7 @@ fragment void fragmentMain(
 ) {
     constexpr sampler s(address::repeat, filter::linear, mip_filter::linear);
     float4 baseColor = texAlbedo.sample(s, in.uv);
-    if (baseColor.a * in.material.baseColorFactor.a < 0.5) {
+    if (baseColor.a * in.baseColorFactor.a < 0.5) {
         discard_fragment();
     }
 }

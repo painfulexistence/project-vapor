@@ -681,6 +681,11 @@ public:
     virtual void writeTextureArgumentTable(BufferHandle /*table*/, Uint32 /*entry*/, Uint32 /*slot*/,
                                            TextureHandle /*texture*/) {}
     virtual void bindTextureArgumentTable(BufferHandle /*table*/) {}
+    // Bind the same table to the active COMPUTE encoder at an explicit buffer
+    // index (the table's baked bufferIndex is the fragment slot). Declares Metal
+    // residency for the compute stage. Used by the RT hit-shading kernels to
+    // sample per-material albedo. No-op on backends without argument tables.
+    virtual void bindComputeTextureArgumentTable(BufferHandle /*table*/, Uint32 /*bufferIndex*/) {}
 
     // ========================================================================
     // Compute Commands

@@ -36,6 +36,10 @@ struct alignas(16) MaterialData {
     float prototypeUVMode;
     float uvScale;
     float iblEnabled; // 1.0 = use IBL, 0.0 = ambient approximation
+    // Keep byte-identical with Vapor::MaterialData (graphics.hpp) and the
+    // shader twins (3d_common.metal / RHIMain.frag / PrePass.frag): all are
+    // stride 112. A missing field here silently shifts every materials[i>0].
+    float transmission;
 };
 
 struct alignas(16) DirectionalLight {
@@ -95,7 +99,10 @@ struct alignas(16) InstanceData {
     Uint32 indexCount;
     Uint32 materialID;
     PrimitiveMode primitiveMode;
-    Uint32 _pad1[2];
+    // Always-populated merged-buffer offsets for RT hit shading (see the mirror
+    // in graphics.hpp for the rationale). Occupy the old _pad1[2] slot.
+    Uint32 rtVertexOffset;
+    Uint32 rtIndexOffset;
     glm::vec3 AABBMin;
     float _pad2;
     glm::vec3 AABBMax;
