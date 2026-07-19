@@ -129,6 +129,24 @@ vec3 computeAtmosphere(vec3 ro, vec3 rd, vec3 sunDir) {
     return atmo.sunIntensity * atmo.sunColor * (rayleigh + mie);
 }
 
+// --- Night sky: hash-based star field + a simple moon (Atmosphere mode) ---
+float hash31(vec3 p) {
+    p = fract(p * 0.1031);
+    p += dot(p, p.yzx + 33.33);
+    return fract((p.x + p.y) * p.z);
+}
+// One jittered point star per sparse cell of the view-direction lattice.
+float starField(vec3 dir) {
+    vec3 p = dir * 300.0;               // density (higher = more, smaller stars)
+    vec3 cell = floor(p);
+    vec3 f = fract(p);
+    float h = hash31(cell);
+    if (h < 0.972) return 0.0;          // ~2.8% of cells hold a star
+    vec3 j = vec3(hash31(cell + 1.3), hash31(cell + 2.7), hash31(cell + 4.1));
+    float d = length(f - j);
+    return smoothstep(0.12, 0.0, d) * (0.4 + 0.6 * hash31(cell + 5.9));
+}
+
 void main() {
     // Reconstruct the world-space view ray for this pixel.
     vec4 clip = vec4(ndcOut, 1.0, 1.0);
@@ -160,6 +178,20 @@ void main() {
     float sd = dot(rayDir, sunDir);
     float sunDisk = smoothstep(0.9995, 0.9999, sd);
     color += atmo.sunColor * atmo.sunIntensity * sunDisk * 0.5;
+
+    // Night sky: stars + moon fade in as the sun drops below the horizon. The
+    // moon sits opposite the sun (rises as the sun sets), so it lights the night.
+    float night = smoothstep(0.06, -0.06, sunDir.y);
+    if (night > 0.0 && rayDir.y > -0.05) {
+        vec3 moonDir = normalize(-sunDir);
+        float moonUp = smoothstep(-0.05, 0.08, moonDir.y);
+        float horizonFade = smoothstep(-0.02, 0.15, rayDir.y);
+        color += vec3(0.9, 0.92, 1.0) * starField(rayDir) * night * horizonFade;
+        float md = dot(rayDir, moonDir);
+        float moonDisk = smoothstep(0.9990, 0.9995, md);
+        float halo = smoothstep(0.985, 1.0, md);
+        color += vec3(0.92, 0.93, 1.0) * (moonDisk * 1.2 + halo * halo * 0.15) * night * moonUp;
+    }
 
     outColor = vec4(color, 1.0);
 }

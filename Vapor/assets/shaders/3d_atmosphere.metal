@@ -198,6 +198,24 @@ vertex SkyVertexOut vertexMain(uint vertexID [[vertex_id]]) {
     return out;
 }
 
+// --- Night sky: hash-based star field + a simple moon (Atmosphere mode) ---
+float hash31(float3 p) {
+    p = fract(p * 0.1031);
+    p += dot(p, p.yzx + 33.33);
+    return fract((p.x + p.y) * p.z);
+}
+// One jittered point star per sparse cell of the view-direction lattice.
+float starField(float3 dir) {
+    float3 p = dir * 300.0;             // density (higher = more, smaller stars)
+    float3 cell = floor(p);
+    float3 f = fract(p);
+    float h = hash31(cell);
+    if (h < 0.972) return 0.0;          // ~2.8% of cells hold a star
+    float3 j = float3(hash31(cell + 1.3), hash31(cell + 2.7), hash31(cell + 4.1));
+    float d = length(f - j);
+    return smoothstep(0.12, 0.0, d) * (0.4 + 0.6 * hash31(cell + 5.9));
+}
+
 fragment float4 fragmentMain(
     SkyVertexOut in [[stage_in]],
     constant CameraData& camera [[buffer(0)]],
@@ -263,9 +281,24 @@ fragment float4 fragmentMain(
     color = 1.0 - exp(-atmosphere.exposure * color);
 
     // Add sun disk
-    float sunDot = dot(rayDir, normalize(atmosphere.sunDirection));
+    float3 sunDir = normalize(atmosphere.sunDirection);
+    float sunDot = dot(rayDir, sunDir);
     float sunDisk = smoothstep(0.9995, 0.9999, sunDot);
     color += atmosphere.sunColor * atmosphere.sunIntensity * sunDisk * 0.5;
+
+    // Night sky: stars + moon fade in as the sun drops below the horizon. The
+    // moon sits opposite the sun (rises as the sun sets), so it lights the night.
+    float night = smoothstep(0.06, -0.06, sunDir.y);
+    if (night > 0.0 && rayDir.y > -0.05) {
+        float3 moonDir = normalize(-sunDir);
+        float moonUp = smoothstep(-0.05, 0.08, moonDir.y);
+        float horizonFade = smoothstep(-0.02, 0.15, rayDir.y);
+        color += float3(0.9, 0.92, 1.0) * starField(rayDir) * night * horizonFade;
+        float md = dot(rayDir, moonDir);
+        float moonDisk = smoothstep(0.9990, 0.9995, md);
+        float halo = smoothstep(0.985, 1.0, md);
+        color += float3(0.92, 0.93, 1.0) * (moonDisk * 1.2 + halo * halo * 0.15) * night * moonUp;
+    }
 
     return float4(color, 1.0);
 }
