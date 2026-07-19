@@ -2899,18 +2899,17 @@ void RHI_Vulkan::createLogicalDevice() {
         descriptorIndexingFeatures.pNext = const_cast<void*>(deviceInfo.pNext);
         deviceInfo.pNext = &descriptorIndexingFeatures;
     }
-    deviceInfo.queueCreateInfoCount = 1;
-    deviceInfo.pQueueCreateInfos = &graphicsQueueInfo;
+    // Both queue infos in one function-scope array: pQueueCreateInfos must
+    // still point at live storage when vkCreateDevice runs, so the array
+    // cannot live inside the different-families branch below.
+    const VkDeviceQueueCreateInfo queueCreateInfos[2] = { graphicsQueueInfo, presentQueueInfo };
+    deviceInfo.pQueueCreateInfos = queueCreateInfos;
+    // Same family: one queue info (listing the same family twice is invalid,
+    // VUID-VkDeviceCreateInfo-queueFamilyIndex-02802).
+    deviceInfo.queueCreateInfoCount = (graphicsFamilyIdx != presentFamilyIdx) ? 2 : 1;
     deviceInfo.enabledExtensionCount = static_cast<uint32_t>(deviceExtensions.size());
     deviceInfo.ppEnabledExtensionNames = deviceExtensions.data();
     deviceInfo.pEnabledFeatures = &deviceFeatures;
-
-    // If graphics and present are different families, create both queues
-    if (graphicsFamilyIdx != presentFamilyIdx) {
-        const VkDeviceQueueCreateInfo queueCreateInfos[2] = { graphicsQueueInfo, presentQueueInfo };
-        deviceInfo.pQueueCreateInfos = queueCreateInfos;
-        deviceInfo.queueCreateInfoCount = 2;
-    }
 
     if (vkCreateDevice(physicalDevice, &deviceInfo, nullptr, &device) != VK_SUCCESS) {
         throw std::runtime_error("Failed to create logical device");
