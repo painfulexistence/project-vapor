@@ -275,14 +275,14 @@ fragment float4 fragmentMain(
     }
 
     float4 baseColor = texAlbedo.sample(s, in.uv);
-    if (baseColor.a * material.baseColorFactor.a < 0.5) discard_fragment();
+    if (material.emissiveFactor.a > 0.0 && baseColor.a * material.baseColorFactor.a < material.emissiveFactor.a) discard_fragment();
 
     Surface surf;
     surf.color         = srgbToLinear(baseColor.rgb * material.baseColorFactor.rgb);
     surf.ao            = texOcclusion.sample(s, in.uv).r * material.occlusionStrength;
     surf.roughness     = texRoughness.sample(s, in.uv).g * material.roughnessFactor;
     surf.metallic      = texMetallic.sample(s, in.uv).b  * material.metallicFactor;
-    surf.emission      = linearToSRGB(texEmissive.sample(s, in.uv).rgb * material.emissiveFactor)
+    surf.emission      = linearToSRGB(texEmissive.sample(s, in.uv).rgb * material.emissiveFactor.rgb)
                          * material.emissiveStrength;
     surf.subsurface    = material.subsurface;
     surf.specular      = material.specular;

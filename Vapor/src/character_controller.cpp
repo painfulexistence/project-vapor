@@ -9,6 +9,8 @@
 #include <Jolt/Physics/Collision/Shape/RotatedTranslatedShape.h>
 #include <Jolt/Physics/PhysicsSystem.h>
 
+using namespace Vapor;
+
 CharacterController::CharacterController(Physics3D* physics, const CharacterControllerSettings& settings)
   : physics(physics), settings(settings), currentGravity(0, -9.81f, 0) {
     auto* physicsSystem = physics->getPhysicsSystem();

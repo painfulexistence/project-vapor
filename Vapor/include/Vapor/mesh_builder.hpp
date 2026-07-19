@@ -1,9 +1,12 @@
 #pragma once
 #include <SDL3/SDL_stdinc.h>
+#include <numbers>
 #include <array>
 #include <memory>
 
 #include "graphics.hpp"
+
+namespace Vapor {
 
 class MeshBuilder {
 public:
@@ -89,14 +92,14 @@ public:
         // Generate top hemisphere (from top to equator)
         for (Uint32 ring = 0; ring <= rings; ++ring) {
             float v = static_cast<float>(ring) / static_cast<float>(rings);
-            float phi = v * (M_PI * 0.5f);// 0 to PI/2
+            float phi = v * (std::numbers::pi_v<float> * 0.5f);// 0 to PI/2
 
             float y = halfCylinderHeight + radius * cosf(phi);
             float ringRadius = radius * sinf(phi);
 
             for (Uint32 seg = 0; seg <= segments; ++seg) {
                 float u = static_cast<float>(seg) / static_cast<float>(segments);
-                float theta = u * 2.0f * M_PI;
+                float theta = u * 2.0f * std::numbers::pi_v<float>;
 
                 float x = ringRadius * cosf(theta);
                 float z = ringRadius * sinf(theta);
@@ -119,7 +122,7 @@ public:
 
             for (Uint32 seg = 0; seg <= segments; ++seg) {
                 float u = static_cast<float>(seg) / static_cast<float>(segments);
-                float theta = u * 2.0f * M_PI;
+                float theta = u * 2.0f * std::numbers::pi_v<float>;
 
                 float x = radius * cosf(theta);
                 float z = radius * sinf(theta);
@@ -137,14 +140,14 @@ public:
         // Generate bottom hemisphere (from equator to bottom)
         for (Uint32 ring = 0; ring <= rings; ++ring) {
             float v = static_cast<float>(ring) / static_cast<float>(rings);
-            float phi = v * (M_PI * 0.5f);// 0 to PI/2
+            float phi = v * (std::numbers::pi_v<float> * 0.5f);// 0 to PI/2
 
             float y = -halfCylinderHeight - radius * sinf(phi);
             float ringRadius = radius * cosf(phi);
 
             for (Uint32 seg = 0; seg <= segments; ++seg) {
                 float u = static_cast<float>(seg) / static_cast<float>(segments);
-                float theta = u * 2.0f * M_PI;
+                float theta = u * 2.0f * std::numbers::pi_v<float>;
 
                 float x = ringRadius * cosf(theta);
                 float z = ringRadius * sinf(theta);
@@ -251,7 +254,7 @@ public:
 
             for (Uint32 seg = 0; seg <= segments; ++seg) {
                 float u = static_cast<float>(seg) / static_cast<float>(segments);
-                float theta = u * 2.0f * M_PI;
+                float theta = u * 2.0f * std::numbers::pi_v<float>;
 
                 float x = radius * cosf(theta);
                 float z = radius * sinf(theta);
@@ -286,7 +289,7 @@ public:
 
         for (Uint32 seg = 0; seg <= segments; ++seg) {
             float u = static_cast<float>(seg) / static_cast<float>(segments);
-            float theta = u * 2.0f * M_PI;
+            float theta = u * 2.0f * std::numbers::pi_v<float>;
 
             float x = radius * cosf(theta);
             float z = radius * sinf(theta);
@@ -311,7 +314,7 @@ public:
 
         for (Uint32 seg = 0; seg <= segments; ++seg) {
             float u = static_cast<float>(seg) / static_cast<float>(segments);
-            float theta = u * 2.0f * M_PI;
+            float theta = u * 2.0f * std::numbers::pi_v<float>;
 
             float x = radius * cosf(theta);
             float z = radius * sinf(theta);
@@ -424,3 +427,10 @@ public:
 private:
     MeshBuilder() = delete;
 };
+
+} // namespace Vapor
+
+// Transitional shim: these types lived at global scope before the namespace
+// unification; unqualified call sites keep compiling while they migrate to
+// Vapor:: qualification. Remove once call sites are migrated.
+using namespace Vapor;

@@ -49,8 +49,8 @@ namespace Rml {
     class Context;
 }
 namespace Vapor {
-    class DebugDraw;
-}
+
+class DebugDraw;
 
 // Graphics backend selection
 enum class GraphicsBackend {
@@ -275,3 +275,10 @@ std::unique_ptr<IRenderer> createRenderer(GraphicsBackend backend, SDL_Window* w
 // and initializes the full-feature Metal renderer for the given window.
 std::unique_ptr<IRenderer> createRendererMetal(SDL_Window* window);
 #endif
+
+} // namespace Vapor
+
+// Transitional shim: these types lived at global scope before the namespace
+// unification; unqualified call sites keep compiling while they migrate to
+// Vapor:: qualification. Remove once call sites are migrated.
+using namespace Vapor;

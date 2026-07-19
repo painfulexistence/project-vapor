@@ -19,7 +19,7 @@ struct MaterialData {
     float roughnessFactor;
     float occlusionStrength;
     vec3 emissiveFactor;
-    float _pad1;
+    float alphaCutoff;// MASK-mode cutoff; 0 = disabled
     float emissiveStrength;
     float subsurface;
     float specular;
@@ -43,6 +43,10 @@ layout(set = 2, binding = 0) uniform sampler2D albedoMap;
 
 void main() {
     MaterialData mat = materials[fragMaterialID];
+    vec4 baseSample = texture(albedoMap, fragUV);
+    // Alpha cutout: keep the depth buffer's holes in sync with RHIMain.frag —
+    // a solid depth quad here would z-reject the background behind the holes.
+    if (mat.alphaCutoff > 0.0 && baseSample.a * mat.baseColorFactor.a < mat.alphaCutoff) discard;
     outNormal = vec4(normalize(worldNormal), 1.0);
-    outAlbedo = vec4(texture(albedoMap, fragUV).rgb * mat.baseColorFactor.rgb, 1.0);
+    outAlbedo = vec4(baseSample.rgb * mat.baseColorFactor.rgb, 1.0);
 }

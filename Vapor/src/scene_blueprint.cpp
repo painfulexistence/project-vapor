@@ -18,6 +18,8 @@
 #include <sstream>
 #include <unordered_set>
 
+using namespace Vapor;
+
 namespace Vapor {
 
 using json = nlohmann::json;
@@ -346,13 +348,9 @@ SceneBlueprint loadSceneBlueprint(const std::string& path) {
     for (auto& img : bp.images) {
         if (!img || !img->byteArray.empty() || img->uri.empty()) continue;
         bp.sources.push_back(img->uri);
-        try {
-            if (auto loaded = AssetManager::loadImage(img->uri)) {
-                *img = *loaded;
-                continue;
-            }
-        } catch (const std::exception& e) {
-            fmt::print(stderr, "loadSceneBlueprint: texture '{}' failed to load ({})\n", img->uri, e.what());
+        if (auto loaded = AssetManager::loadImage(img->uri)) {
+            *img = *loaded;
+            continue;
         }
         for (auto& mat : bp.materials) {
             if (!mat) continue;

@@ -9,6 +9,8 @@
 #include "physics_3d.hpp"
 #include "rhi.hpp"
 
+namespace Vapor {
+
 class FluidVolume;
 struct FluidVolumeSettings;
 
@@ -54,3 +56,10 @@ public:
     std::shared_ptr<FluidVolume> createFluidVolume(Physics3D* physics, const FluidVolumeSettings& settings);
     void addFluidVolume(std::shared_ptr<FluidVolume> fluidVolume);
 };
+
+} // namespace Vapor
+
+// Transitional shim: these types lived at global scope before the namespace
+// unification; unqualified call sites keep compiling while they migrate to
+// Vapor:: qualification. Remove once call sites are migrated.
+using namespace Vapor;

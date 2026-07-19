@@ -9,11 +9,12 @@ struct RasterizerData {
     float4 worldPosition;
     float4 worldNormal;
     float4 worldTangent;
-    // Only baseColorFactor is used here (alpha test + albedo tint). Passing it
-    // alone instead of the whole MaterialData keeps the inter-stage payload
-    // small: the full 112-byte struct overflowed Metal's per-vertex output
-    // capacity, corrupting varyings and dropping geometry (holes in the MRT).
+    // Only baseColorFactor + the cutoff are used here (alpha test + albedo
+    // tint). Passing them alone instead of the whole MaterialData keeps the
+    // inter-stage payload small: the full 112-byte struct overflowed Metal's
+    // per-vertex output capacity, corrupting varyings and dropping geometry.
     float4 baseColorFactor;
+    float alphaCutoff;
 };
 
 vertex RasterizerData vertexMain(
@@ -41,6 +42,7 @@ vertex RasterizerData vertexMain(
     vert.position = camera.proj * camera.view * vert.worldPosition;
     vert.uv = float2(in[actualVertexID].uv);
     vert.baseColorFactor = materials[instances[iid].materialID].baseColorFactor;
+    vert.alphaCutoff = materials[instances[iid].materialID].emissiveFactor.a;// .a = MASK cutoff
     return vert;
 }
 
@@ -58,7 +60,7 @@ fragment PrePassOutput fragmentMain(
     constexpr sampler s(address::repeat, filter::linear, mip_filter::linear);
 
     float4 baseColor = texAlbedo.sample(s, in.uv);
-    if (baseColor.a * in.baseColorFactor.a < 0.5) {
+    if (in.alphaCutoff > 0.0 && baseColor.a * in.baseColorFactor.a < in.alphaCutoff) {
         discard_fragment();
     }
 

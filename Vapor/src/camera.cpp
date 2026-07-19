@@ -3,6 +3,8 @@
 #include <glm/gtx/rotate_vector.hpp>
 #include <glm/trigonometric.hpp>
 
+using namespace Vapor;
+
 void Camera::dolly(float offset) {
     glm::vec3 dir = _center - _eye;
     _eye += offset * dir;

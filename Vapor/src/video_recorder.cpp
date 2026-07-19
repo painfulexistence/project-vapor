@@ -12,6 +12,8 @@ extern "C" {
 #include <libavutil/samplefmt.h>
 #include <libswresample/swresample.h>
 #include <libswscale/swscale.h>
+
+using namespace Vapor;
 }
 #endif
 

@@ -83,16 +83,32 @@ namespace Vapor {
             return m_path;
         }
 
-        // Get error message (if failed)
-        const std::string& getError() const {
+        // Get error message (if failed). By value: a reference would escape the lock.
+        std::string getError() const {
             std::lock_guard<std::mutex> lock(m_mutex);
             return m_error;
         }
 
-        // Set completion callback
+        // Set completion callback. THREADING CONTRACT: Async callbacks run on
+        // the loader's worker thread — never touch single-threaded systems
+        // (RHI, entt registry, renderer). Runs immediately on the calling
+        // thread when the resource is already Ready; a completion landing
+        // between the caller's isReady() check and this call would otherwise
+        // drop the callback.
         void setCallback(std::function<void(std::shared_ptr<T>)> callback) {
-            std::lock_guard<std::mutex> lock(m_mutex);
-            m_callback = callback;
+            std::shared_ptr<T> ready;
+            {
+                std::lock_guard<std::mutex> lock(m_mutex);
+                if (m_state.load() == ResourceState::Ready) {
+                    ready = m_data;
+                } else {
+                    m_callback = std::move(callback);
+                    return;
+                }
+            }
+            if (callback) {
+                callback(ready);
+            }
         }
 
         // Internal: Set resource data (called by loader)

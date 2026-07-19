@@ -19,7 +19,7 @@
 
 #include "debug_draw.hpp"
 #include "graphics.hpp"
-#include "graphics_gpu_structs.hpp"  // global GPU-layout structs (InstanceData, …) matching the .metal shaders
+#include "graphics_gpu_structs.hpp"  // GPU upload structs (InstanceData, …) matching the .metal shaders
 #include "graphics_batch2d.hpp"  // Batch2DStats, Batch2DVertex, Batch2DBlendMode
 #include "graphics_effects.hpp"  // WaterData, VolumetricFogData, VolumetricCloudData, LightScatteringData, SunFlareData, Particle
 #include "graphics_gibs.hpp"     // GIBSQuality, GIBSData, Surfel
@@ -28,6 +28,8 @@
 namespace Rml {
     class Context;
 }
+
+namespace Vapor {
 
 class Renderer_Metal;
 class PrePass;
@@ -72,7 +74,8 @@ class StochasticPointShadowPass;
 class PointShadowTemporalPass;
 
 // GIBS forward declarations
-namespace Vapor { class GIBSManager; }
+class GIBSManager;
+class RmlRendererMetal;
 class SurfelGenerationPass;
 class SurfelHashBuildPass;
 class SurfelRaytracingPass;
@@ -376,7 +379,7 @@ public:
     // IBL source: load an equirectangular .hdr file as the environment map.
     // After calling this the sky atmosphere is no longer used for IBL.
     // Place your .hdr files under: <assets>/textures/env/
-    void loadHDRI(const std::string& path);
+    void loadHDRI(const std::string& path) override;
 
     virtual void setRenderPath(RenderPath path) override {
         currentRenderPath = path;
@@ -814,8 +817,8 @@ protected:
     // Instance data
     // instanceBatches: material → list of (mesh, instanceArrayIndex) for rasterization draw calls
     struct MeshDraw { std::shared_ptr<Vapor::Mesh> mesh; uint32_t instanceIndex; };
-    std::vector<::InstanceData> instances;
-    std::vector<::InstanceData> pendingEcsInstances;
+    std::vector<InstanceData> instances;
+    std::vector<InstanceData> pendingEcsInstances;
     std::unordered_map<std::shared_ptr<Vapor::Material>, std::vector<MeshDraw>> pendingEcsBatches;
     std::vector<MTL::AccelerationStructureInstanceDescriptor> pendingEcsAccelInstances;
     std::vector<MTL::AccelerationStructureInstanceDescriptor> accelInstances;
@@ -997,8 +1000,9 @@ private:
 
     RenderPath currentRenderPath = RenderPath::Forward;
 
-    // UI rendering (using void* for pimpl idiom to hide implementation)
-    void* m_uiRenderer = nullptr;
+    // UI renderer (forward-declared; the complete type lives in the .cpp, which
+    // is where ~Renderer_Metal is defined so the unique_ptr can free it).
+    std::unique_ptr<Vapor::RmlRendererMetal> m_uiRenderer;
     Rml::Context* m_uiContext = nullptr;
     std::vector<ScreenshotCallback> m_pendingScreenshots;
 
@@ -1008,3 +1012,10 @@ private:
     void createResources();
     void renderUI();// Internal method called by RmlUiPass
 };
+
+} // namespace Vapor
+
+// Transitional shim: these types lived at global scope before the namespace
+// unification; unqualified call sites keep compiling while they migrate to
+// Vapor:: qualification. Remove once call sites are migrated.
+using namespace Vapor;

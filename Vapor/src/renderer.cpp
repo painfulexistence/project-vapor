@@ -39,6 +39,8 @@
 #include <Metal/Metal.hpp>
 #endif
 
+using namespace Vapor;
+
 namespace {
 // GIBS spatial-hash grid derivation, matching native GIBSManager::calculateGridSize
 // (gibs_manager.cpp) EXACTLY so the RHI surfel hash resolves at the same cell
@@ -576,18 +578,25 @@ void Renderer::createFrameSlottedBuffer(BufferHandle& alias, const BufferDesc& d
     frameSlottedBuffers.push_back(sb);
 }
 
+// Out-of-line so the unique_ptr<RmlRendererRHI> deleter is instantiated here,
+// where rml_renderer_rhi.hpp provides the complete type.
+Renderer::~Renderer() = default;
+
 void Renderer::shutdown() {
     if (rhi) {
+        // These sources' fills capture `this`
+        auto& statsLog = Vapor::StatsLog::get();
+        for (const char* tag : { "R", "RT", "CULL", "GPUDRV" }) {
+            statsLog.removeSource(tag);
+        }
+
         // GPU may still be executing the last frame; ImGui backend shutdown
         // and resource destruction below require it to be finished.
         rhi->waitIdle();
 
         // RmlUI renderer (RmlUi itself was already shut down by EngineCore).
-        if (m_uiRenderer) {
-            delete static_cast<Vapor::RmlRendererRHI*>(m_uiRenderer);
-            m_uiRenderer = nullptr;
-            m_uiContext = nullptr;
-        }
+        m_uiRenderer.reset();
+        m_uiContext = nullptr;
 
         // Shutdown ImGui backend
         switch (backend) {
@@ -1364,6 +1373,9 @@ void Renderer::updateBuffers() {
             data.roughnessFactor = mat.roughnessFactor;
             data.occlusionStrength = mat.occlusionStrength;
             data.emissiveFactor = mat.emissiveFactor;
+            // Foliage-style cutout: only MASK materials carry a cutoff; 0
+            // disables the shader-side discard for OPAQUE/BLEND.
+            data.alphaCutoff = mat.alphaMode == AlphaMode::MASK ? mat.alphaCutoff : 0.0f;
             data.emissiveStrength = mat.emissiveStrength;
             data.subsurface = mat.subsurface;
             data.specular = mat.specular;
@@ -1982,13 +1994,8 @@ void Renderer::mainRenderPass() {
 // Load an equirectangular HDR image as the IBL environment source. The actual
 // cubemap bake (irradiance/prefilter/BRDF LUT) happens later in iblCapturePass.
 void Renderer::loadHDRI(const std::string& path) {
-    std::shared_ptr<Vapor::HDRImage> img;
-    try {
-        img = AssetManager::loadHDRI(path);
-    } catch (const std::exception& e) {
-        fmt::print(stderr, "loadHDRI: {}\n", e.what());
-        return;
-    }
+    // loadHDRI logs and returns nullptr on failure — keep the sky as-is.
+    auto img = AssetManager::loadHDRI(path);
     if (!img || img->floatArray.empty()) return;
 
     // (Re)create the RGBA32F equirect source texture and upload the float pixels.
@@ -3582,6 +3589,8 @@ void Renderer::shadowPass() {
         } else {
             rhi->setVertexBuffer(0, pssmDataBuffer, 0, sizeof(PSSMRenderData));
             rhi->setVertexBytes(&ci, sizeof(Uint32), 5);  // cascadeIndex -> push offset 16
+            // Materials at set0 b1 for the fragment alpha-cutout (ShadowDepth.frag).
+            rhi->setVertexBuffer(1, materialUniformBuffer, 0, sizeof(Vapor::MaterialData) * MAX_INSTANCES);
         }
         rhi->setVertexBuffer(2, instanceDataBuffer, 0, sizeof(Vapor::InstanceData) * std::max<Uint32>(1, totalInstanceCount));
         // MDI layout: Metal's shadow shader pulls instances[iid].vertexOffset +
@@ -3589,6 +3598,11 @@ void Renderer::shadowPass() {
         const bool shadowPullsMerged = backend == GraphicsBackend::Metal &&
                                        m_mdiInstanceLayout && mergedVertexBuffer.isValid();
         if (shadowPullsMerged) rhi->bindVertexBuffer(mergedVertexBuffer, 3, 0);
+        // Default albedo so the shadow frag's declared sampler (set2 b0) is
+        // always valid even with no MASK casters; opaque casters never sample
+        // it (alphaCutoff == 0), MASK casters override it per draw below.
+        if (defaultWhiteTexture < textures.size() && textures[defaultWhiteTexture].handle.isValid())
+            rhi->setTexture(0, 0, textures[defaultWhiteTexture].handle, textures[defaultWhiteTexture].sampler);
 
         // ALL drawables, not the camera-visible set: casters outside the view
         // frustum must still render into the cascades or their shadows vanish
@@ -3600,9 +3614,12 @@ void Renderer::shadowPass() {
             auto it = drawableToInstanceID.find(drawableIdx);
             if (it == drawableToInstanceID.end()) continue;
             Uint32 iid = it->second;
-            if (backend == GraphicsBackend::Metal) {
-                // texAlbedo at fragment texture(0) for alpha-tested cutouts.
-                bindMaterial(drawable.material);
+            // Alpha-cutout casters (MASK) bind their albedo for the fragment
+            // discard — Metal via 3d_pssm_shadow_depth, Vulkan via
+            // ShadowDepth.frag. Opaque casters need no texture (pure depth).
+            if (drawable.material < materials.size() &&
+                materials[drawable.material].alphaMode == AlphaMode::MASK) {
+                bindMaterialAlbedo(drawable.material);
             }
             if (!shadowPullsMerged && mesh.vertexBuffer.isValid()) rhi->bindVertexBuffer(mesh.vertexBuffer, 3, 0);
             rhi->setVertexBytes(&iid, sizeof(Uint32), 4);  // instanceID -> push offset 0
@@ -3634,19 +3651,25 @@ void Renderer::shadowPass() {
             Uint32 nearIdx = 3u;
             rhi->setVertexBuffer(0, pssmDataBuffer, 0, sizeof(PSSMRenderData));
             rhi->setVertexBytes(&nearIdx, sizeof(Uint32), 5);  // cascadeIndex -> push offset 16
+            rhi->setVertexBuffer(1, materialUniformBuffer, 0, sizeof(Vapor::MaterialData) * MAX_INSTANCES);
         }
         rhi->setVertexBuffer(2, instanceDataBuffer, 0, sizeof(Vapor::InstanceData) * std::max<Uint32>(1, totalInstanceCount));
         // Same merged-VB requirement as the cascade loop above (MDI layout).
         const bool nearPullsMerged = backend == GraphicsBackend::Metal &&
                                      m_mdiInstanceLayout && mergedVertexBuffer.isValid();
         if (nearPullsMerged) rhi->bindVertexBuffer(mergedVertexBuffer, 3, 0);
+        if (defaultWhiteTexture < textures.size() && textures[defaultWhiteTexture].handle.isValid())
+            rhi->setTexture(0, 0, textures[defaultWhiteTexture].handle, textures[defaultWhiteTexture].sampler);
         for (Uint32 drawableIdx = 0; drawableIdx < frameDrawables.size(); drawableIdx++) {
             const Drawable& drawable = frameDrawables[drawableIdx];
             const RenderMesh& mesh = meshes[drawable.mesh];
             auto it = drawableToInstanceID.find(drawableIdx);
             if (it == drawableToInstanceID.end()) continue;
             Uint32 iid = it->second;
-            if (backend == GraphicsBackend::Metal) bindMaterial(drawable.material);
+            if (drawable.material < materials.size() &&
+                materials[drawable.material].alphaMode == AlphaMode::MASK) {
+                bindMaterialAlbedo(drawable.material);  // albedo for the alpha-cutout
+            }
             if (!nearPullsMerged && mesh.vertexBuffer.isValid()) rhi->bindVertexBuffer(mesh.vertexBuffer, 3, 0);
             rhi->setVertexBytes(&iid, sizeof(Uint32), 4);  // instanceID -> push offset 0
             if (mesh.indexBuffer.isValid()) {
@@ -4576,21 +4599,20 @@ bool Renderer::initUI() {
         return false;
     }
 
-    auto* uiRenderer = new Vapor::RmlRendererRHI(rhi.get(), backend);
+    auto uiRenderer = std::make_unique<Vapor::RmlRendererRHI>(rhi.get(), backend);
     if (!uiRenderer->initialize()) {
         fmt::print("Renderer::initUI: Failed to initialize RHI UI renderer\n");
-        delete uiRenderer;
         return false;
     }
-    m_uiRenderer = uiRenderer;
 
-    Rml::SetRenderInterface(uiRenderer);
+    Rml::SetRenderInterface(uiRenderer.get());
     if (!rmluiManager->FinalizeInitialization()) {
         fmt::print("Renderer::initUI: Failed to finalize RmlUI\n");
-        delete uiRenderer;
-        m_uiRenderer = nullptr;
+        // uiRenderer is about to be destroyed — don't leave Rml holding it.
+        Rml::SetRenderInterface(nullptr);
         return false;
     }
+    m_uiRenderer = std::move(uiRenderer);
     m_uiContext = rmluiManager->GetContext();
     fmt::print("Renderer::initUI: RHI UI renderer initialized successfully\n");
     return true;
@@ -4602,7 +4624,7 @@ void Renderer::renderUI() {
     // Debug escape hatch: draw everything except the UI overlay.
     static const bool uiDisabled = std::getenv("VAPOR_DISABLE_RMLUI") != nullptr;
     if (uiDisabled) return;
-    auto* uiRenderer = static_cast<Vapor::RmlRendererRHI*>(m_uiRenderer);
+    auto* uiRenderer = m_uiRenderer.get();
 
     // Logical UI size = the Rml context dimensions (set from the window size);
     // framebuffer size = the swapchain (physical pixels, HiDPI-aware).
@@ -5326,7 +5348,14 @@ void Renderer::createRenderPipeline() {
     pipelineDesc.topology = PrimitiveTopology::TriangleList;
     pipelineDesc.blendMode = BlendMode::Opaque;
     pipelineDesc.depthTest = true;
-    pipelineDesc.depthWrite = true;
+    // No depth WRITE: the pre-pass already owns the depth buffer (it clears and
+    // writes all geometry), and the main pass redraws the SAME geometry. Writing
+    // here is not just redundant — combined with early_fragment_tests it is
+    // wrong for alpha cutout: early-Z would stamp a MASK caster's depth into a
+    // hole texel BEFORE the shader discards it, blocking the sky/background from
+    // filling the hole (it showed clear colour). Test-only keeps early-Z's
+    // overdraw win without the corruption.
+    pipelineDesc.depthWrite = false;
     // LessOrEqual (not Less): the main pass loads the pre-pass depth and redraws
     // the SAME geometry, so fragments arrive at exactly the stored depth and
     // must pass the test (Less would reject every fragment). Matches native's
@@ -5616,8 +5645,8 @@ void Renderer::createRenderPipeline() {
             irradiancePipeline        = makeIblVkPipeline("shaders/IBLCubeFace.vert.spv", "shaders/IBLIrradiance.frag.spv", irradianceVS, irradianceFS);
             prefilterPipeline         = makeIblVkPipeline("shaders/IBLCubeFace.vert.spv", "shaders/IBLPrefilter.frag.spv",  prefilterVS, prefilterFS);
             brdfLUTPipeline           = makeIblVkPipeline("shaders/IBLBRDF.vert.spv",     "shaders/IBLBRDF.frag.spv",        brdfVS, brdfFS);
-            // IBL debug: cubemap -> equirect 2D RT (FullScreen.vert + IblEquirectPreview.frag).
-            iblPreviewPipeline        = makeIblVkPipeline("shaders/FullScreen.vert.spv", "shaders/IblEquirectPreview.frag.spv", iblPreviewVertexShader, iblPreviewFragmentShader);
+            // IBL debug: cubemap -> equirect 2D RT (FullScreen.vert + IBLEquirectPreview.frag).
+            iblPreviewPipeline        = makeIblVkPipeline("shaders/FullScreen.vert.spv", "shaders/IBLEquirectPreview.frag.spv", iblPreviewVertexShader, iblPreviewFragmentShader);
 
             // Volumetric clouds: quarter-res raymarch, temporal resolve, and
             // full-res composite — all fullscreen RGBA16F passes.
@@ -6163,6 +6192,15 @@ TextureId Renderer::getOrCreateTexture(const std::shared_ptr<Vapor::Image>& imag
     return id;
 }
 
+void Renderer::bindMaterialAlbedo(MaterialId materialId) {
+    if (materialId >= materials.size()) return;
+    const RenderMaterial& material = materials[materialId];
+    if (material.albedoTexture < textures.size()) {
+        const RenderTexture& tex = textures[material.albedoTexture];
+        rhi->setTexture(0, 0, tex.handle, tex.sampler);  // texture(0) / set2 b0
+    }
+}
+
 void Renderer::bindMaterial(MaterialId materialId) {
     if (materialId >= materials.size()) {
         return;
@@ -6208,7 +6246,7 @@ void Renderer::bindMaterial(MaterialId materialId) {
 // Factory Functions
 // ============================================================================
 
-std::unique_ptr<IRenderer> createRenderer(GraphicsBackend backend, SDL_Window* window) {
+std::unique_ptr<IRenderer> Vapor::createRenderer(GraphicsBackend backend, SDL_Window* window) {
 #ifdef __APPLE__
     // Metal now routes through the RHI renderer by default (the target
     // architecture: renderer -> RHI -> {rhi_metal, rhi_vulkan}). Set
@@ -6264,9 +6302,14 @@ std::unique_ptr<IRenderer> createRenderer(GraphicsBackend backend, SDL_Window* w
             void* queue = rhi->getBackendQueue();
 
             if (instance && physicalDevice && device && queue) {
-                // Get swapchain image count from RHI
-                // For now, use a reasonable default (2-3 images)
-                Uint32 imageCount = 2;
+                // ImGui cycles ImageCount sets of vertex/index buffers and
+                // destroys a slot's buffer when it needs to grow. That is only
+                // safe if the slot's previous frame has retired — so the count
+                // must be at least the engine's frames-in-flight. The old
+                // hardcoded 2 (vs 3 in flight) had ImGui resizing buffers a
+                // still-pending frame was drawing from: validation errors
+                // (VUID-vkDestroyBuffer-00922) and UI flicker under churn.
+                Uint32 imageCount = rhi->getMaxFramesInFlight();
 
                 // Dynamic rendering: ImGui bakes the attachment format into
                 // its pipeline, so it must match the swapchain format.
@@ -8228,6 +8271,10 @@ void Renderer::applyVignette(RenderTextureHandle target, float strength, float r
 // ============================================================================
 
 TextureHandle Renderer::createTexture(const std::shared_ptr<Vapor::Image>& img) {
+    if (!img) {
+        fmt::print(stderr, "createTexture: null image — returning invalid handle\n");
+        return {};
+    }
     TextureDesc desc;
     desc.width = img->width;
     desc.height = img->height;

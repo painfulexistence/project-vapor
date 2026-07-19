@@ -40,6 +40,8 @@ auto AssetManager::loadUSD(const std::string& filename) -> Vapor::SceneBlueprint
 #include <tuple>
 #include <tydra/render-data.hh>
 
+using namespace Vapor;
+
 namespace {
 
 std::vector<uint8_t> readFileBytes(const std::string& path) {

@@ -16,6 +16,8 @@
 // Renderer Resource IDs
 // ============================================================================
 
+namespace Vapor {
+
 using MeshId = Uint32;
 using MaterialId = Uint32;
 using TextureId = Uint32;
@@ -537,3 +539,10 @@ struct MaterialDataInput {
     float alphaCutoff = 0.5f;
     bool doubleSided = false;
 };
+
+} // namespace Vapor
+
+// Transitional shim: these types lived at global scope before the namespace
+// unification; unqualified call sites keep compiling while they migrate to
+// Vapor:: qualification. Remove once call sites are migrated.
+using namespace Vapor;

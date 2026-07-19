@@ -13,11 +13,13 @@
 #include <cstdlib>
 #include <cstring>
 
+using namespace Vapor;
+
 // ============================================================================
 // Factory Function
 // ============================================================================
 
-RHI* createRHIMetal() {
+RHI* Vapor::createRHIMetal() {
     return new RHI_Metal();
 }
 
@@ -55,7 +57,13 @@ bool RHI_Metal::initialize(SDL_Window* window) {
 
     // Configure swapchain
     swapchain->setPixelFormat(MTL::PixelFormatRGBA8Unorm_sRGB);
-    swapchain->setColorspace(CGColorSpaceCreateWithName(kCGColorSpaceSRGB));
+    {
+        // Create-rule (+1) CF object; setColorspace retains its own reference,
+        // so release ours or it leaks.
+        CGColorSpaceRef srgb = CGColorSpaceCreateWithName(kCGColorSpaceSRGB);
+        swapchain->setColorspace(srgb);
+        CGColorSpaceRelease(srgb);
+    }
     // Allow reading back the drawable (e.g. screenshot blit). CAMetalLayer
     // drawables default to framebufferOnly=YES, which forbids using them as a
     // blit/copy source and triggers a Metal validation assertion (crash) in
@@ -377,6 +385,7 @@ double RHI_Metal::getGpuFrameBusyMs() {
 
 void RHI_Metal::shutdown() {
     if (renderer) {
+        Vapor::StatsLog::get().removeSource("MTL");  // its fill captures `this`
         // Flush and drain outstanding uploads, then wait for the GPU
         submitUploads(true);
         stagingRingBuffer = nullptr;
@@ -434,18 +443,18 @@ void RHI_Metal::waitIdle() {
 // ============================================================================
 
 BufferHandle RHI_Metal::createBuffer(const BufferDesc& desc) {
-    MTL::ResourceOptions options = MTL::ResourceStorageModeManaged;
+    // CPUtoGPU is Shared, not Managed: Managed obligates didModifyRange after
+    // every CPU write (the map/unmap path has none), and Shared is Metal's
+    // recommended mode for per-frame-rewritten data anyway. Equivalent on
+    // Apple silicon.
+    MTL::ResourceOptions options = MTL::ResourceStorageModeShared;
 
     switch (desc.memoryUsage) {
         case MemoryUsage::GPU:
             options = MTL::ResourceStorageModePrivate;
             break;
         case MemoryUsage::CPU:
-            options = MTL::ResourceStorageModeShared;
-            break;
         case MemoryUsage::CPUtoGPU:
-            options = MTL::ResourceStorageModeManaged;
-            break;
         case MemoryUsage::GPUreadback:
             options = MTL::ResourceStorageModeShared;
             break;
@@ -894,17 +903,13 @@ void RHI_Metal::updateBuffer(BufferHandle handle, const void* data, size_t offse
         MTL::Buffer* srcBuf = stageData(data, size, srcOffset);
         ensureUploadBlit()->copyFromBuffer(srcBuf, srcOffset, buffer, offset, size);
     } else {
-        // CPU-accessible buffer: direct write
+        // CPU-accessible (Shared) buffer: direct write. createBuffer never
+        // produces Managed storage, so no didModifyRange.
         void* bufferData = buffer->contents();
         if (!bufferData) {
             throw std::runtime_error("Buffer contents() returned nullptr");
         }
         std::memcpy(static_cast<char*>(bufferData) + offset, data, size);
-
-        // Notify Metal of modified range if managed storage
-        if (storageMode == MTL::StorageModeManaged) {
-            buffer->didModifyRange(NS::Range::Make(offset, size));
-        }
     }
 }
 

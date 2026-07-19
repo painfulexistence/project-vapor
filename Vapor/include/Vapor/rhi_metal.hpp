@@ -19,6 +19,8 @@
 // RHI_Metal - Metal Implementation of RHI Interface
 // ============================================================================
 
+namespace Vapor {
+
 class RHI_Metal : public RHI {
 public:
     RHI_Metal();
@@ -495,3 +497,10 @@ private:
     bool allocateTimingSlots(const char* passName, NS::UInteger& outBegin, NS::UInteger& outEnd);
     void resolveGpuTimings();  // installs completion handler on current command buffer
 };
+
+} // namespace Vapor
+
+// Transitional shim: these types lived at global scope before the namespace
+// unification; unqualified call sites keep compiling while they migrate to
+// Vapor:: qualification. Remove once call sites are migrated.
+using namespace Vapor;

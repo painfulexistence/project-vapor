@@ -16,6 +16,8 @@
 // RHI_Vulkan - Vulkan implementation of RHI interface
 // ============================================================================
 
+namespace Vapor {
+
 class RHI_Vulkan : public RHI {
 public:
     RHI_Vulkan();
@@ -187,8 +189,8 @@ private:
     Uint32 presentFamilyIdx = UINT32_MAX;
 
     VkSwapchainKHR swapchain = VK_NULL_HANDLE;
-    VkFormat swapchainImageFormat;
-    VkExtent2D swapchainExtent;
+    VkFormat swapchainImageFormat = VK_FORMAT_UNDEFINED;
+    VkExtent2D swapchainExtent{};
     // Extent of the render pass currently being encoded (for scissor clamping).
     Uint32 currentPassWidth = 0;
     Uint32 currentPassHeight = 0;
@@ -233,6 +235,7 @@ private:
         Uint32 width;
         Uint32 height;
         Uint32 depth = 1;  // >1 = 3D volume texture
+        Uint32 mipLevels = 1;
         Uint32 arrayLayers = 1;
         VkImageUsageFlags usage = 0;
         VkImageLayout currentLayout = VK_IMAGE_LAYOUT_UNDEFINED;
@@ -295,9 +298,14 @@ private:
     // Vulkan Extension Function Pointers
     // ========================================================================
 
-    // Dynamic rendering extension functions
-    PFN_vkCmdBeginRenderingKHR vkCmdBeginRenderingKHR = nullptr;
-    PFN_vkCmdEndRenderingKHR vkCmdEndRenderingKHR = nullptr;
+    // Dynamic rendering + synchronization2 entry points. Loaded core-name
+    // first (Vulkan 1.3), falling back to the KHR alias for drivers that
+    // report 1.2 + extensions (MoltenVK before 1.2.9). Signatures are
+    // identical; the core PFN types cover both.
+    PFN_vkCmdBeginRendering pfnCmdBeginRendering = nullptr;
+    PFN_vkCmdEndRendering pfnCmdEndRendering = nullptr;
+    PFN_vkCmdPipelineBarrier2 pfnCmdPipelineBarrier2 = nullptr;
+    PFN_vkQueueSubmit2 pfnQueueSubmit2 = nullptr;
 
     // ========================================================================
     // Descriptor Binding Model
@@ -409,8 +417,18 @@ private:
     // stall-free (no dependency on ALL upload fences draining).
     VkDeviceSize stagingRegionBase = 0;   // this frame's region start
     VkDeviceSize stagingRingOffset = 0;   // offset WITHIN the current region
+    // Per-frame region size, rounded DOWN to 16 bytes: bufferOffset for image
+    // copies must be texel-aligned, and 32MB/3 is not — an unaligned region
+    // BASE defeats the 16-byte alignment done inside the region.
+    VkDeviceSize stagingRegionSize() const {
+        return (STAGING_RING_SIZE / MAX_FRAMES_IN_FLIGHT) & ~VkDeviceSize(15);
+    }
     VkCommandBuffer uploadCmd = VK_NULL_HANDLE;   // valid while recording
-    std::vector<VkFence> pendingUploadFences;     // one per in-flight upload submit
+    // One entry per in-flight upload submit: fence + the staging slot whose
+    // region the copies read. Uploads recorded BETWEEN frames are not covered
+    // by that slot's frame fence, so beginFrame must wait matching tags
+    // before reusing a slot's region.
+    std::vector<std::pair<VkFence, Uint32>> pendingUploadFences;
 
     void createUploadStream();
     void destroyUploadStream();
@@ -533,3 +551,10 @@ private:
 
 // Factory function
 RHI* createRHIVulkan();
+
+} // namespace Vapor
+
+// Transitional shim: these types lived at global scope before the namespace
+// unification; unqualified call sites keep compiling while they migrate to
+// Vapor:: qualification. Remove once call sites are migrated.
+using namespace Vapor;

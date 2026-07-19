@@ -20,8 +20,9 @@ namespace Rml {
 }
 
 namespace Vapor {
-    class DebugDraw;
-}
+
+class DebugDraw;
+class RmlRendererRHI;
 
 // Batch rendering stats for the RHI renderer. (graphics_batch2d.hpp has a
 // richer RHIBatch2DStats but it cannot be included here — it redefines BlendMode,
@@ -51,7 +52,14 @@ struct RHIBatch2DStats {
 class Renderer : public IRenderer {
 public:
     Renderer() = default;
-    ~Renderer() override = default;
+    // Defined in renderer.cpp where RmlRendererRHI is complete, so the
+    // unique_ptr member's deleter can be instantiated.
+    ~Renderer() override;
+
+    // Polymorphic base: copying through a base reference would slice off the
+    // derived backend's state, so copying is disabled (Core Guidelines C.67).
+    Renderer(const Renderer&) = delete;
+    Renderer& operator=(const Renderer&) = delete;
 
     // ========================================================================
     // Initialization
@@ -421,6 +429,10 @@ private:
     Frustum extractFrustum(const glm::mat4& viewProj);
     TextureId getOrCreateTexture(const std::shared_ptr<Vapor::Image>& image);
     void bindMaterial(MaterialId materialId);
+    // Bind only the albedo texture (set2 b0) — the shadow-depth alpha cutout is
+    // the only place that samples without needing the full material texture set,
+    // and binding all six would churn descriptors on maps the pass never reads.
+    void bindMaterialAlbedo(MaterialId materialId);
 
     // Scene/ECS helpers
     void collectDrawables(std::shared_ptr<RenderScene> scene);
@@ -707,8 +719,9 @@ private:
     BufferHandle prevViewProjBuffer;
     glm::mat4 prevViewProj = glm::mat4(1.0f);
     bool prevViewProjValid = false;
-    // RmlUI (cross-backend RHI render interface; owned, see initUI()).
-    void* m_uiRenderer = nullptr;
+    // RmlUI (cross-backend RHI render interface; forward-declared, the
+    // complete type lives in renderer.cpp where ~Renderer is defined).
+    std::unique_ptr<Vapor::RmlRendererRHI> m_uiRenderer;
     Rml::Context* m_uiContext = nullptr;
     SDL_Window* window = nullptr;
 
@@ -1368,3 +1381,10 @@ private:
 
 // The createRenderer() factory is declared in irenderer.hpp and returns a
 // std::unique_ptr<IRenderer> (Renderer for Vulkan, Renderer_Metal for Metal).
+
+} // namespace Vapor
+
+// Transitional shim: these types lived at global scope before the namespace
+// unification; unqualified call sites keep compiling while they migrate to
+// Vapor:: qualification. Remove once call sites are migrated.
+using namespace Vapor;
