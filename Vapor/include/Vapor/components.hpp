@@ -237,18 +237,67 @@ namespace Vapor {
         bool  paused = false;
     };
 
-    // 2D Sprite rendering component
-    struct SpriteComponent {
+    // Screen-space 2D sprite (atlas frame drawn via the 2D canvas batch).
+    // Position comes from TransformComponent, in screen pixels under a
+    // perspective camera.
+    struct Sprite2DComponent {
         AtlasHandle atlas;
         uint16_t frameIndex = 0;
 
-        glm::vec2 size = {1.0f, 1.0f};       // World units
+        glm::vec2 size = {1.0f, 1.0f};       // Screen pixels
         glm::vec2 pivot = {0.5f, 0.5f};      // Anchor point (0-1)
         glm::vec4 tint = {1, 1, 1, 1};       // Color tint
         int sortingLayer = 0;
         int orderInLayer = 0;
         bool flipX = false;
         bool flipY = false;
+        bool visible = true;
+    };
+
+    // World-space 3D sprite: an atlas frame on a quad placed in the world.
+    // billboard = true re-orients it to face the camera every frame (particles,
+    // markers, floating labels); false uses the entity's TransformComponent
+    // orientation (posters, decals, ground quads). size is in world units.
+    struct Sprite3DComponent {
+        AtlasHandle atlas;
+        uint16_t frameIndex = 0;
+
+        glm::vec2 size = {1.0f, 1.0f};       // World units
+        glm::vec4 tint = {1, 1, 1, 1};       // Color tint
+        bool billboard = false;
+        bool flipX = false;
+        bool flipY = false;
+        bool visible = true;
+    };
+
+    // 2D canvas text. Position comes from TransformComponent (screen-space
+    // pixels under a perspective camera, same convention as Sprite2DComponent).
+    // The font is referenced by path; the render system resolves and caches
+    // the FontHandle, so this stays a pure data component.
+    struct Text2DComponent {
+        std::string text;
+        std::string font;                    // e.g. "fonts/NotoSans-SemiBold.ttf"
+        float fontSize = 48.0f;              // rasterized base size (loadFont)
+        float scale = 1.0f;
+        glm::vec4 color = {1, 1, 1, 1};
+        bool visible = true;
+    };
+
+    // 2D canvas shape primitive; position from TransformComponent.
+    struct Shape2DComponent {
+        enum class Kind : uint8_t {
+            Quad,      // filled quad of `size`
+            Rect,      // outline of `size` at `thickness`
+            Circle,    // filled circle of `radius`
+            Triangle,  // filled; position + p1/p2 offsets are the three verts
+        };
+        Kind kind = Kind::Quad;
+        glm::vec2 size = {20.0f, 20.0f};
+        float radius = 10.0f;
+        float thickness = 1.0f;
+        glm::vec2 p1 = {0.0f, 0.0f};
+        glm::vec2 p2 = {0.0f, 0.0f};
+        glm::vec4 color = {1, 1, 1, 1};
         bool visible = true;
     };
 
