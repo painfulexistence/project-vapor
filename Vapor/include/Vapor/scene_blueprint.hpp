@@ -16,12 +16,9 @@
 #include <boost/pfr.hpp>
 #endif
 
-// RenderScene lives at global scope (like AssetManager); declaring it inside
-// namespace Vapor would introduce a second, forever-incomplete type that wins
-// unqualified lookup from inside the namespace.
-class RenderScene;
-
 namespace Vapor {
+
+class RenderScene;
 
 // ============================================================================
 // Scene blueprints — the declarative authoring layer.

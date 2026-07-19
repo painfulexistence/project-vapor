@@ -8,6 +8,11 @@
 #include <glm/vec3.hpp>
 #include <glm/vec4.hpp>
 
+namespace Vapor {
+
+// TODO: static_assert(sizeof) + offsetof on the load-bearing fields to lock
+// these GPU upload layouts against silent drift.
+
 enum class PrimitiveMode {
     POINTS,
     LINES,
@@ -23,7 +28,10 @@ struct alignas(16) MaterialData {
     float roughnessFactor;
     float occlusionStrength;
     glm::vec3 emissiveFactor;
-    float _pad1;
+    // MASK-mode alpha cutoff in emissiveFactor's alignment tail (was _pad1, so
+    // the layout is unchanged); the Metal MaterialData twin exposes the same
+    // slot via packed_float3 + alphaCutoff. 0 = no cutoff (OPAQUE/BLEND).
+    float alphaCutoff;
     float emissiveStrength;
     float subsurface;
     float specular;
@@ -36,6 +44,10 @@ struct alignas(16) MaterialData {
     float prototypeUVMode;
     float uvScale;
     float iblEnabled; // 1.0 = use IBL, 0.0 = ambient approximation
+    // Keep byte-identical with the shader twins (3d_common.metal / RHIMain.frag
+    // / PrePass.frag / ShadowDepth.frag): all are stride 112. A missing field
+    // here silently shifts every materials[i>0] read.
+    float transmission;
 };
 
 struct alignas(16) DirectionalLight {
@@ -95,7 +107,11 @@ struct alignas(16) InstanceData {
     Uint32 indexCount;
     Uint32 materialID;
     PrimitiveMode primitiveMode;
-    Uint32 _pad1[2];
+    // Always-populated merged-buffer offsets for RT hit shading (the RT kernels
+    // fetch UV + normals at the hit regardless of draw mode). Occupy the old
+    // _pad1[2] slot, so the stride is unchanged.
+    Uint32 rtVertexOffset;
+    Uint32 rtIndexOffset;
     glm::vec3 AABBMin;
     float _pad2;
     glm::vec3 AABBMax;
@@ -129,7 +145,6 @@ struct alignas(16) LightCullData {
     glm::vec2 screenSize;
     glm::vec2 _pad1;
     glm::uvec3 gridSize;
-    float _pad2;
     Uint32 lightCount;
 };
 
@@ -139,3 +154,5 @@ struct alignas(16) IBLCaptureData {
     float roughness;
     float _pad[2];
 };
+
+} // namespace Vapor

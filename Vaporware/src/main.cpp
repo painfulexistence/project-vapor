@@ -172,15 +172,6 @@ static void setupCustomDrawers(Vapor::SceneInspector& inspector) {
     });
 }
 
-auto getActiveCamera(entt::registry& registry) -> entt::entity {
-    auto view = registry.view<Vapor::VirtualCameraComponent>();
-    for (auto entity : view) {
-        if (view.get<Vapor::VirtualCameraComponent>(entity).isActive) {
-            return entity;
-        }
-    }
-    return entt::null;
-}
 
 auto main(int argc, char* args[]) -> int {
     args::ArgumentParser parser{ "This is Project Vapor." };
@@ -612,7 +603,7 @@ auto main(int argc, char* args[]) -> int {
 
         // Gameplay updates
         CameraSwitchSystem::update(registry, global);
-        CameraSystem::update(registry, deltaTime);
+        Vapor::CameraControlSystem::update(registry, deltaTime);
         AutoRotateSystem::update(registry, deltaTime);
         LightMovementSystem::update(registry, deltaTime);
         // Subtitle systems (split into single-responsibility)
@@ -653,7 +644,7 @@ auto main(int argc, char* args[]) -> int {
         SpriteRenderSystem::update(registry, renderer.get(), &resourceManager);
 
         // Rendering
-        entt::entity activeCamEntity = getActiveCamera(registry);
+        entt::entity activeCamEntity = Vapor::CameraControlSystem::getActiveCamera(registry);
         if (activeCamEntity != entt::null) {
             auto& cam = registry.get<Vapor::VirtualCameraComponent>(activeCamEntity);
             Camera tempCamera;// Create a temporary Camera object

@@ -14,6 +14,11 @@ layout(location = 1) in vec2 inUV;
 layout(location = 2) in vec3 inNormal;
 layout(location = 3) in vec4 inTangent;
 
+// Passed to the fragment stage for the alpha-cutout test (MASK foliage must
+// punch holes in the shadow map, not cast solid quads).
+layout(location = 0) out vec2 fragUV;
+layout(location = 1) flat out uint fragMaterialID;
+
 struct InstanceData {
     mat4 model;
     vec4 color;
@@ -56,6 +61,8 @@ layout(push_constant) uniform PushConstants {
 
 void main() {
     InstanceData inst = instances[instanceID];
+    fragUV = inUV;
+    fragMaterialID = inst.materialID;
     vec3 worldPos = vec3(inst.model * vec4(inPosition, 1.0));
     mat4 m = cascadeIndex < 3u ? lightSpaceMatrices[cascadeIndex] : nearLightMatrix;
     gl_Position = m * vec4(worldPos, 1.0);

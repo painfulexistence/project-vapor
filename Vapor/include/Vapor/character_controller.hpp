@@ -10,10 +10,11 @@ namespace JPH {
 
 namespace Vapor {
     class TaskScheduler;
+    class Physics3D;
 }
-
-class Physics3D;
 #include "physics_3d.hpp"
+
+namespace Vapor {
 
 struct CharacterControllerSettings {
     float height = 1.8f;// Capsule height
@@ -74,3 +75,10 @@ private:
     // Jump state - when true, disable stick-to-floor to allow jumping
     bool isJumping = false;
 };
+
+} // namespace Vapor
+
+// Transitional shim: these types lived at global scope before the namespace
+// unification; unqualified call sites keep compiling while they migrate to
+// Vapor:: qualification. Remove once call sites are migrated.
+using namespace Vapor;

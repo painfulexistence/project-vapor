@@ -18,6 +18,8 @@
 #include <mutex>
 #include <string>
 
+using namespace Vapor;
+
 namespace Vapor {
 
 // ── Global Rml state (shared across all UIRendererMetal instances) ────────────

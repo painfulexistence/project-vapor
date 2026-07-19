@@ -8,8 +8,6 @@
 #include <unordered_map>
 #include <vector>
 
-class RenderScene;
-
 namespace JPH {
     class TempAllocatorImpl;
     class JobSystem;
@@ -24,11 +22,12 @@ namespace JPH {
 }// namespace JPH
 
 namespace Vapor {
-    class JoltEnkiJobSystem;
-    class TaskScheduler;
-    class DebugDraw;
-    class PhysicsDebugRenderer;
-}// namespace Vapor
+
+class RenderScene;
+class JoltEnkiJobSystem;
+class TaskScheduler;
+class DebugDraw;
+class PhysicsDebugRenderer;
 
 class BPLayerInterfaceImpl;
 class ObjectVsBroadPhaseLayerFilterImpl;
@@ -282,3 +281,9 @@ private:
     bool isDebugUIEnabled = false;
     glm::vec3 currentGravity = glm::vec3(0.0f, -9.81f, 0.0f);
 };
+} // namespace Vapor
+
+// Transitional shim: these types lived at global scope before the namespace
+// unification; unqualified call sites keep compiling while they migrate to
+// Vapor:: qualification. Remove once call sites are migrated.
+using namespace Vapor;

@@ -43,6 +43,8 @@ namespace cereal {
     }
 }// namespace cereal
 
+namespace Vapor {
+
 class AssetSerializer {
 public:
     // v3: material names now serialize (the inspector's Scene Materials editor
@@ -51,7 +53,10 @@ public:
     // the mesh-shader draw path and its offline bake will own the next bump.
     static constexpr uint32_t SCENE_FORMAT_VERSION = 3;
 
-    static void serializeScene(const std::shared_ptr<RenderScene>& scene, const std::string& path);
+    // Cache round-trip is best-effort: a write failure returns false and a
+    // read failure (missing, corrupt, or version-mismatched cache) returns
+    // nullptr — callers fall back to re-importing from source.
+    static bool serializeScene(const std::shared_ptr<RenderScene>& scene, const std::string& path);
     static std::shared_ptr<RenderScene> deserializeScene(const std::string& path);
 
     // SceneBlueprint payload serialization (entities + meshes/materials/images/
@@ -92,3 +97,10 @@ private:
     static void serializePointLight(cereal::BinaryOutputArchive& archive, const Vapor::PointLight& light);
     static Vapor::PointLight deserializePointLight(cereal::BinaryInputArchive& archive);
 };
+
+} // namespace Vapor
+
+// Transitional shim: these types lived at global scope before the namespace
+// unification; unqualified call sites keep compiling while they migrate to
+// Vapor:: qualification. Remove once call sites are migrated.
+using namespace Vapor;

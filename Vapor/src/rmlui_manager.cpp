@@ -5,6 +5,8 @@
 #include <RmlUi/Debugger.h>
 #include <SDL3/SDL.h>
 #include <fmt/core.h>
+
+using namespace Vapor;
 // #include <spdlog/spdlog.h>
 
 namespace Vapor {
