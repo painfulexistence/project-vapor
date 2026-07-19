@@ -11,9 +11,9 @@
 #include <memory>
 #include <string>
 
-class IRenderer; // global namespace — defined in irenderer.hpp
-
 namespace Vapor {
+
+    class IRenderer; // defined in irenderer.hpp
 
     class RmlUiManager;
     class VideoRecorder;
@@ -57,7 +57,7 @@ namespace Vapor {
         // Wire the renderer into the engine: registers the built-in engine
         // ImGui window (recording controls) and sets the recording output dir
         // to <basePath>/output. Call once after the renderer is created.
-        void attachRenderer(::IRenderer* renderer, const std::string& outputBasePath = "output");
+        void attachRenderer(IRenderer* renderer, const std::string& outputBasePath = "output");
 
         // Access the engine-owned video recorder (always valid after init()).
         VideoRecorder& getVideoRecorder();

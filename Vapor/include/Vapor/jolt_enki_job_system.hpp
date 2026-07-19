@@ -6,6 +6,9 @@
 
 #include <Jolt/Core/JobSystemWithBarrier.h>
 #include <atomic>
+#include <memory>
+#include <mutex>
+#include <vector>
 
 namespace Vapor {
 
@@ -42,18 +45,25 @@ namespace Vapor {
         std::atomic<uint32_t> m_numJobs{ 0 };
         uint32_t m_maxJobs;
 
-        // enkiTS task wrapper for Jolt jobs
+        // enkiTS task wrapper for Jolt jobs. Pooled: enkiTS never takes
+        // ownership of tasks handed to AddTaskSetToPipe.
         class JoltJobTask : public enki::ITaskSet {
         public:
-            JoltJobTask(JPH::JobSystem::Job* job) : m_job(job) {
-            }
+            JoltJobTask() = default;
+
+            void setJob(JPH::JobSystem::Job* job) { m_job = job; }
 
             // NOLINTNEXTLINE(readability-identifier-naming)
             void ExecuteRange(enki::TaskSetPartition range, uint32_t threadnum) override;
 
         private:
-            JPH::JobSystem::Job* m_job;
+            JPH::JobSystem::Job* m_job = nullptr;
         };
+
+        // Reused via GetIsComplete() (enkiTS's safe-to-destroy signal);
+        // bounded by the maximum number of simultaneously in-flight jobs.
+        std::mutex m_taskPoolMutex;
+        std::vector<std::unique_ptr<JoltJobTask>> m_taskPool;
     };
 
 }// namespace Vapor

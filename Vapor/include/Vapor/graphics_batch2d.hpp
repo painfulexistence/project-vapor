@@ -7,6 +7,8 @@
 #include <glm/vec4.hpp>
 
 // Blend modes for 2D batch rendering
+namespace Vapor {
+
 enum class Batch2DBlendMode { None, Alpha, Additive, Multiply, Screen, Premultiplied };
 
 struct alignas(16) Batch2DVertex {
@@ -31,3 +33,10 @@ struct Batch2DStats {
     Uint32 vertexCount = 0;
     Uint32 indexCount = 0;
 };
+
+} // namespace Vapor
+
+// Transitional shim: these types lived at global scope before the namespace
+// unification; unqualified call sites keep compiling while they migrate to
+// Vapor:: qualification. Remove once call sites are migrated.
+using namespace Vapor;

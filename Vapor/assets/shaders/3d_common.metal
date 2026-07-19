@@ -45,6 +45,12 @@ struct InstanceData {
     uint indexCount;
     uint materialID;
     uint primitiveMode;
+    // Always-valid merged-buffer offsets for RT hit shading. These occupy the
+    // 8 bytes of implicit padding Metal inserts before the 16-aligned float3
+    // AABBMin — i.e. the C++ InstanceData's _pad1[2] slot — so the struct stride
+    // is unchanged and stays byte-identical with Vapor::InstanceData.
+    uint rtVertexOffset;
+    uint rtIndexOffset;
     float3 AABBMin;
     float3 AABBMax;
     float4 boundingSphere; // x, y, z, radius
@@ -56,7 +62,11 @@ struct MaterialData {
     float metallicFactor;
     float roughnessFactor;
     float occlusionStrength;
-    float3 emissiveFactor;
+    // .rgb = emissive colour, .a = MASK alpha cutoff (0 = disabled). Combined
+    // into a float4 because MSL forbids packed_float3 in stage_in structs and a
+    // plain float3 would 16-align the next scalar, breaking the C++ layout
+    // (emissiveFactor at 32, cutoff at 44, emissiveStrength at 48).
+    float4 emissiveFactor;
     float emissiveStrength;
     float subsurface;
     float specular;
@@ -69,6 +79,7 @@ struct MaterialData {
     float prototypeUVMode; // 0 = Off, 1 = World Space, 2 = Object Space
     float uvScale;
     float iblEnabled; // 1.0 = use IBL, 0.0 = ambient approximation
+    float transmission; // KHR_materials_transmission factor; IOR fixed 1.5
 };
 
 struct DirLight {

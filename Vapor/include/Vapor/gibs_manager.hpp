@@ -6,10 +6,9 @@
 #include <memory>
 #include <vector>
 
-// Forward declaration
-class Renderer_Metal;
-
 namespace Vapor {
+
+class Renderer_Metal;
 
 /**
  * GIBSManager - Global Illumination Based on Surfels Manager

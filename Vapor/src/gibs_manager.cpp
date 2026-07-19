@@ -4,6 +4,8 @@
 #include <algorithm>
 #include <cmath>
 
+using namespace Vapor;
+
 namespace Vapor {
 
 GIBSManager::GIBSManager(Renderer_Metal* renderer)

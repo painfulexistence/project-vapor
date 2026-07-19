@@ -19,6 +19,8 @@
 // RHI_Metal - Metal Implementation of RHI Interface
 // ============================================================================
 
+namespace Vapor {
+
 class RHI_Metal : public RHI {
 public:
     RHI_Metal();
@@ -127,6 +129,13 @@ public:
     void writeTextureArgumentTable(BufferHandle table, Uint32 entry, Uint32 slot,
                                    TextureHandle texture) override;
     void bindTextureArgumentTable(BufferHandle table) override;
+    void bindComputeTextureArgumentTable(BufferHandle table, Uint32 bufferIndex) override;
+
+private:
+    // Lazily rebuild an argument table's deduped resident-texture list.
+    struct ArgumentTableResource;  // defined below
+    static void rebuildArgumentTableResidency(ArgumentTableResource& table);
+public:
 
     // ========================================================================
     // Compute Commands
@@ -488,3 +497,10 @@ private:
     bool allocateTimingSlots(const char* passName, NS::UInteger& outBegin, NS::UInteger& outEnd);
     void resolveGpuTimings();  // installs completion handler on current command buffer
 };
+
+} // namespace Vapor
+
+// Transitional shim: these types lived at global scope before the namespace
+// unification; unqualified call sites keep compiling while they migrate to
+// Vapor:: qualification. Remove once call sites are migrated.
+using namespace Vapor;

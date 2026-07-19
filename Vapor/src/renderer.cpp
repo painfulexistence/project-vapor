@@ -39,6 +39,8 @@
 #include <Metal/Metal.hpp>
 #endif
 
+using namespace Vapor;
+
 namespace {
 // GIBS spatial-hash grid derivation, matching native GIBSManager::calculateGridSize
 // (gibs_manager.cpp) EXACTLY so the RHI surfel hash resolves at the same cell
@@ -576,18 +578,25 @@ void Renderer::createFrameSlottedBuffer(BufferHandle& alias, const BufferDesc& d
     frameSlottedBuffers.push_back(sb);
 }
 
+// Out-of-line so the unique_ptr<RmlRendererRHI> deleter is instantiated here,
+// where rml_renderer_rhi.hpp provides the complete type.
+Renderer::~Renderer() = default;
+
 void Renderer::shutdown() {
     if (rhi) {
+        // These sources' fills capture `this`
+        auto& statsLog = Vapor::StatsLog::get();
+        for (const char* tag : { "R", "RT", "CULL", "GPUDRV" }) {
+            statsLog.removeSource(tag);
+        }
+
         // GPU may still be executing the last frame; ImGui backend shutdown
         // and resource destruction below require it to be finished.
         rhi->waitIdle();
 
         // RmlUI renderer (RmlUi itself was already shut down by EngineCore).
-        if (m_uiRenderer) {
-            delete static_cast<Vapor::RmlRendererRHI*>(m_uiRenderer);
-            m_uiRenderer = nullptr;
-            m_uiContext = nullptr;
-        }
+        m_uiRenderer.reset();
+        m_uiContext = nullptr;
 
         // Shutdown ImGui backend
         switch (backend) {
@@ -781,6 +790,7 @@ MaterialId Renderer::registerMaterial(const MaterialDataInput& materialData) {
     material.sheenTint = materialData.sheenTint;
     material.clearcoat = materialData.clearcoat;
     material.clearcoatGloss = materialData.clearcoatGloss;
+    material.transmission = materialData.transmission;
     material.alphaMode = materialData.alphaMode;
     material.alphaCutoff = materialData.alphaCutoff;
     material.doubleSided = materialData.doubleSided;
@@ -865,6 +875,7 @@ MaterialId Renderer::registerMaterial(const MaterialDataInput& materialData) {
     params.sheenTint = material.sheenTint;
     params.clearcoat = material.clearcoat;
     params.clearcoatGloss = material.clearcoatGloss;
+    params.transmission = material.transmission;
 
     rhi->updateBuffer(material.parameterBuffer, &params, 0, sizeof(Vapor::MaterialData));
 
@@ -1092,6 +1103,16 @@ void Renderer::setupDefaultRenderGraph() {
     // GIBS surfel GI (generation -> hash -> RT -> temporal -> gather).
     renderGraph.addPass("GIBS",
         [](Renderer& r) { r.gibsPass(); }, PassFlags::RequiresRaytracing);
+    // Mirror reflections trace against the TLAS and shade hits from the GIBS
+    // surfel cache — must run after GIBS so this frame's surfel state is live.
+    renderGraph.addPass("RaytraceReflection",
+        [](Renderer& r) { r.raytraceReflectionPass(); }, PassFlags::RequiresRaytracing);
+
+    // RT refractions (KHR_materials_transmission): same TLAS + surfel-cache
+    // shading as reflections, refracted ray (IOR 1.5). Skipped while no scene
+    // material transmits.
+    renderGraph.addPass("RaytraceRefraction",
+        [](Renderer& r) { r.raytraceRefractionPass(); }, PassFlags::RequiresRaytracing);
 
     // Main geometry pass: renders to colorRT when a post-process pipeline
     // Directional shadow depth (single cascade) before the main lighting pass.
@@ -1352,6 +1373,9 @@ void Renderer::updateBuffers() {
             data.roughnessFactor = mat.roughnessFactor;
             data.occlusionStrength = mat.occlusionStrength;
             data.emissiveFactor = mat.emissiveFactor;
+            // Foliage-style cutout: only MASK materials carry a cutoff; 0
+            // disables the shader-side discard for OPAQUE/BLEND.
+            data.alphaCutoff = mat.alphaMode == AlphaMode::MASK ? mat.alphaCutoff : 0.0f;
             data.emissiveStrength = mat.emissiveStrength;
             data.subsurface = mat.subsurface;
             data.specular = mat.specular;
@@ -1362,10 +1386,15 @@ void Renderer::updateBuffers() {
             data.clearcoat = mat.clearcoat;
             data.clearcoatGloss = mat.clearcoatGloss;
             data.iblEnabled = mat.useIBL ? 1.0f : 0.0f;  // panel "Use IBL"
+            data.transmission = mat.transmission;
             materialDataArray.push_back(data);
         }
         rhi->updateBuffer(materialUniformBuffer, materialDataArray.data(), 0,
                           materialDataArray.size() * sizeof(Vapor::MaterialData));
+        // Gates the RT refraction pass: skip the trace entirely while nothing
+        // in the scene transmits (the panel slider can flip this any frame).
+        sceneHasTransmission = std::any_of(materials.begin(), materials.end(),
+            [](const RenderMaterial& m) { return m.transmission > 0.0f; });
     }
 
     // The directional light IS the sun: derive the atmosphere/sky sun direction
@@ -1448,6 +1477,8 @@ void Renderer::updateBuffers() {
         instance.color = drawable.color;
         instance.vertexOffset = mdi ? mesh.vertexOffset : 0;  // into merged buffer (MDI) or 0 (per-mesh)
         instance.indexOffset = mdi ? mesh.indexOffset : 0;
+        instance.rtVertexOffset = mesh.vertexOffset;  // always valid: RT hit shading
+        instance.rtIndexOffset = mesh.indexOffset;    //   fetches merged geometry
         instance.vertexCount = mesh.vertexCount;
         instance.indexCount = mesh.indexCount;
         instance.materialID = drawable.material;
@@ -1587,6 +1618,12 @@ void Renderer::mainRenderPass() {
     rhi->setFragmentBuffer(1, pointLightBuffer, 0, sizeof(PointLightData) * maxPointLights);
     rhi->setFragmentBuffer(2, clusterBuffer);
     rhi->setFragmentBuffer(3, cameraUniformBuffer, 0, sizeof(CameraRenderData));
+    // Materials for the Metal PBR fragment's per-fragment fetch (buffer 11).
+    // The shader reads materials[materialID] instead of taking the material
+    // through inter-stage (Metal per-vertex-output overflow at 112 bytes). This
+    // no-ops on Vulkan (binding 11 >= BINDINGS_PER_SET; RHIMain.frag reads
+    // materials from set0 b1 in the fragment already).
+    rhi->setFragmentBuffer(19, materialUniformBuffer, 0, sizeof(Vapor::MaterialData) * MAX_INSTANCES);
 
     glm::vec2 screenSize(static_cast<float>(width), static_cast<float>(height));
     rhi->setFragmentBytes(&screenSize, sizeof(glm::vec2), 4);
@@ -1709,6 +1746,16 @@ void Renderer::mainRenderPass() {
             }
             if (gibsEnabled && giResultTexture.isValid()) rhi->setTexture(0, 14, giResultTexture, clampSampler);
         }
+        // RT mirror reflections: texture(16) + params at buffer(17). The shader
+        // samples the texture only behind the runtime x > 0.5 check (same
+        // contract as gibsGI). On the bound path the result is a direct texture
+        // arg (texReflectionArg@16); the bindless path reads it from the system
+        // table instead (see the ICB block below). Params live at buffer(17) —
+        // free on both paths (13/14 are the bindless tables, 16 is spotLights).
+        bool reflOn = rtReflectionsEnabled && capabilities.raytracing && reflectionRT.isValid();
+        if (reflOn) rhi->setTexture(0, 16, reflectionRT, clampSampler);
+        glm::vec2 reflParams(reflOn ? 1.0f : 0.0f, rtReflectionIntensity);
+        rhi->setFragmentBytes(&reflParams, sizeof(glm::vec2), 17);
         // Spot lights (buffer 16) + counts/flags (buffer 15). buffer 14 is the
         // bindless SystemTexs table's slot, so spot lights use 16 (see the shader
         // note in 3d_pbr_normal_mapped.metal). Flag bit0 says the point-shadow
@@ -1719,6 +1766,14 @@ void Renderer::mainRenderPass() {
         glm::uvec2 spotRectParams(static_cast<Uint32>(spotLights.size()),
                                   (capabilities.raytracing && stochasticShadowsEnabled) ? 1u : 0u);
         rhi->setFragmentBytes(&spotRectParams, sizeof(glm::uvec2), 15);
+        // RT refraction result (texture 17) + params (buffer 18), same
+        // runtime-gated contract as the reflection pair above. Weighted per
+        // pixel by the material's transmission factor in the shader.
+        bool refrOn = rtRefractionsEnabled && sceneHasTransmission &&
+                      capabilities.raytracing && refractionRT.isValid();
+        if (refrOn) rhi->setTexture(0, 17, refractionRT, clampSampler);
+        glm::vec2 refrParams(refrOn ? 1.0f : 0.0f, rtRefractionIntensity);
+        rhi->setFragmentBytes(&refrParams, sizeof(glm::vec2), 18);
     }
 
     // GPU-driven path is used only when enabled AND the cull pipeline/args
@@ -1783,13 +1838,16 @@ void Renderer::mainRenderPass() {
             // in-flight frames), and bind it at buffer(14).
             if (!bindlessSystemTable.isValid()) {
                 bindlessSystemTable = rhi->createTextureArgumentTable(
-                    fragmentShaderBindless, /*bufferIndex=*/14, 1, /*texturesPerEntry=*/10);
+                    fragmentShaderBindless, /*bufferIndex=*/14, 1, /*texturesPerEntry=*/12);
             }
             if (bindlessSystemTable.isValid()) {
                 TextureHandle whiteTex = textures[defaultWhiteTexture].handle;
                 TextureHandle blackTex = textures[defaultBlackTexture].handle;
                 const bool iblReady = m_iblReady;
-                const TextureHandle sys[10] = {
+                bool reflOn = rtReflectionsEnabled && capabilities.raytracing && reflectionRT.isValid();
+                bool refrOn = rtRefractionsEnabled && sceneHasTransmission &&
+                              capabilities.raytracing && refractionRT.isValid();
+                const TextureHandle sys[12] = {
                     (aoEnabled && aoRT.isValid()) ? aoRT : whiteTex,                     // 0 texAO
                     (capabilities.raytracing && shadowRT.isValid()) ? shadowRT : whiteTex, // 1 texShadow
                     (iblReady && irradianceMap.isValid()) ? irradianceMap : defaultBlackCubemapTex, // 2
@@ -1804,14 +1862,23 @@ void Renderer::mainRenderPass() {
                         : whiteTex, // 7 texPointShadow (denoised copy when available)
                     (capabilities.raytracing && gibsEnabled && giResultTexture.isValid()) ? giResultTexture : blackTex, // 8
                     (sscsEnabled && sscsRT.isValid()) ? sscsRT : whiteTex,               // 9 texSSCS
+                    reflOn ? reflectionRT : blackTex,                                    // 10 texReflection
+                    refrOn ? refractionRT : blackTex,                                    // 11 texRefraction
                 };
-                for (Uint32 i = 0; i < 10; ++i) {
+                for (Uint32 i = 0; i < 12; ++i) {
                     if (sys[i].id != m_bindlessSysCache[i].id) {
                         rhi->writeTextureArgumentTable(bindlessSystemTable, 0, i, sys[i]);
                         m_bindlessSysCache[i] = sys[i];
                     }
                 }
                 rhi->bindTextureArgumentTable(bindlessSystemTable);
+                // RT composite params (buffer 17/18) — same runtime gate as the
+                // bound path; the shader reads texReflection/texRefraction from
+                // the system table above on this ICB path.
+                glm::vec2 reflParams(reflOn ? 1.0f : 0.0f, rtReflectionIntensity);
+                rhi->setFragmentBytes(&reflParams, sizeof(glm::vec2), 17);
+                glm::vec2 refrParams(refrOn ? 1.0f : 0.0f, rtRefractionIntensity);
+                rhi->setFragmentBytes(&refrParams, sizeof(glm::vec2), 18);
             }
             // Replay the GPU-encoded command buffer (commands carry their own
             // index-buffer regions).
@@ -1927,13 +1994,8 @@ void Renderer::mainRenderPass() {
 // Load an equirectangular HDR image as the IBL environment source. The actual
 // cubemap bake (irradiance/prefilter/BRDF LUT) happens later in iblCapturePass.
 void Renderer::loadHDRI(const std::string& path) {
-    std::shared_ptr<Vapor::HDRImage> img;
-    try {
-        img = AssetManager::loadHDRI(path);
-    } catch (const std::exception& e) {
-        fmt::print(stderr, "loadHDRI: {}\n", e.what());
-        return;
-    }
+    // loadHDRI logs and returns nullptr on failure — keep the sky as-is.
+    auto img = AssetManager::loadHDRI(path);
     if (!img || img->floatArray.empty()) return;
 
     // (Re)create the RGBA32F equirect source texture and upload the float pixels.
@@ -2537,9 +2599,148 @@ void Renderer::raytraceShadowPass() {
     rhi->setComputeBuffer(2, pointLightBuffer, 0, sizeof(PointLightData) * maxPointLights);
     rhi->setComputeBytes(&screenSize, sizeof(glm::vec2), 3);
     rhi->setAccelerationStructure(4, sceneTLAS);
+    // Sun soft-shadow params (buffer 5): angularRadius 0 = legacy hard shadow,
+    // > 0 = cone-sampled penumbra with 4 rays/pixel (see SunShadowParams).
+    struct { float angularRadius; Uint32 frameIndex; Uint32 samples; Uint32 _pad; } sunParams{
+        rtSunAngularRadius, frameCounter, 4u, 0u };
+    rhi->setComputeBytes(&sunParams, sizeof(sunParams), 5);
     rhi->dispatch(w, h, 1);  // native dispatches w*h groups of 1x1
     rhi->endComputePass();
     rhi->generateMipmaps(shadowRT);
+}
+
+// RT mirror reflections: one closest-hit ray per (half-res) pixel; hits shade
+// from the GIBS surfel radiance cache, misses from the prefiltered env map.
+// Runs AFTER the GIBS pass so the surfel/gibsData buffers hold this frame's
+// state. With GIBS disabled, gibsDataBuffer is zeroed here so hit lookups
+// return black and only env misses contribute (the panel says so). Mirror-only
+// output is noise-free, so no temporal denoise is needed; the PBR composite
+// (texture 16 / buffer 13) weights it by fresnel and fades it by roughness.
+void Renderer::raytraceReflectionPass() {
+    if (!rtReflectionsEnabled || !raytraceReflectionPipeline.isValid() ||
+        !sceneTLAS.isValid() || !reflectionRT.isValid() ||
+        !surfelBuffer.isValid() || !cellHeadBuffer.isValid() ||
+        !surfelNextBuffer.isValid() || !gibsDataBuffer.isValid() ||
+        !prefilterMap.isValid()) {
+        return;
+    }
+    if (!gibsEnabled && gibsDataBuffer.isValid()) {
+        GIBSData zero{};  // totalCells==0 -> surfel lookups return black
+        zero.frameIndex = frameCounter;
+        rhi->updateBuffer(gibsDataBuffer, &zero, 0, sizeof(zero));
+    }
+
+    Uint32 w = (rhi->getSwapchainWidth() + 1) / 2;   // reflectionRT is half-res
+    Uint32 h = (rhi->getSwapchainHeight() + 1) / 2;
+    const size_t surfelBytes = size_t(gibsMaxSurfels) * sizeof(Surfel);
+
+    // Hit shading needs the merged geometry (to fetch the hit triangle's vertex
+    // normals + UV — Metal's intersector exposes no built-in hit normal) and the
+    // bindless material table (to sample the hit's albedo). Both are otherwise
+    // built only in MDI/bindless draw modes; ensure them for RT regardless of
+    // this frame's draw mode. Self-gate on dirty, so this is near-free.
+    ensureMergedGeometry();
+    ensureBindlessMaterialTable();
+    const bool rtGeo = mergedVertexBuffer.isValid() && mergedIndexBuffer.isValid() &&
+                       bindlessMaterialTable.isValid();
+
+    struct { float rayBias; float rayMaxDistance; Uint32 frameIndex; Uint32 hasBindlessGeo; } rp{
+        0.01f, 200.0f, frameCounter, rtGeo ? 1u : 0u };
+
+    rhi->beginComputePass("RaytraceReflection");
+    rhi->bindComputePipeline(raytraceReflectionPipeline);
+    rhi->setComputeTexture(0, depthStencilRT);
+    rhi->setComputeTexture(1, normalRT);
+    rhi->setComputeTexture(2, reflectionRT);
+    rhi->setComputeTexture(3, prefilterMap);
+    rhi->setComputeBuffer(0, cameraUniformBuffer, 0, sizeof(CameraRenderData));
+    rhi->setComputeBuffer(1, surfelBuffer, 0, surfelBytes);
+    rhi->setComputeBuffer(2, cellHeadBuffer);
+    rhi->setComputeBuffer(3, surfelNextBuffer);
+    rhi->setComputeBuffer(4, gibsDataBuffer, 0, sizeof(GIBSData));
+    rhi->setAccelerationStructure(5, sceneTLAS);
+    rhi->setComputeBytes(&rp, sizeof(rp), 6);
+    // Standalone hit shading inputs: user_instance_id -> InstanceData ->
+    // materialID -> base color; dirLights[0] for the sun occlusion ray.
+    rhi->setComputeBuffer(7, instanceDataBuffer, 0, sizeof(Vapor::InstanceData) * MAX_INSTANCES);
+    rhi->setComputeBuffer(8, materialUniformBuffer, 0, sizeof(Vapor::MaterialData) * MAX_INSTANCES);
+    rhi->setComputeBuffer(9, directionalLightBuffer, 0, sizeof(DirectionalLightData) * maxDirectionalLights);
+    // Albedo-at-hit inputs (hasBindlessGeo): merged vertex/index buffers +
+    // per-material texture argument table. Indexed by rtVertexOffset/rtIndexOffset
+    // + primitive_id and materialID (see 3d_raytrace_reflection.metal).
+    if (rtGeo) {
+        rhi->setComputeBuffer(10, mergedVertexBuffer);
+        rhi->setComputeBuffer(11, mergedIndexBuffer);
+        rhi->bindComputeTextureArgumentTable(bindlessMaterialTable, 12);
+    }
+    rhi->dispatch((w + 7) / 8, (h + 7) / 8, 1);
+    rhi->endComputePass();
+    rhi->computeBarrier();  // reflection writes -> fragment reads in Main
+}
+
+// RT refractions: the reflection pass's structural twin with a refracted ray
+// (fixed IOR 1.5, thin-walled, TIR falls back to reflect — see
+// 3d_raytrace_refraction.metal). Only runs while a scene material has
+// transmission > 0; the PBR composite (texture 16 / buffer 16) weights it per
+// pixel by the material's transmission and fades it by roughness.
+void Renderer::raytraceRefractionPass() {
+    if (!rtRefractionsEnabled || !sceneHasTransmission ||
+        !raytraceRefractionPipeline.isValid() ||
+        !sceneTLAS.isValid() || !refractionRT.isValid() ||
+        !surfelBuffer.isValid() || !cellHeadBuffer.isValid() ||
+        !surfelNextBuffer.isValid() || !gibsDataBuffer.isValid() ||
+        !prefilterMap.isValid()) {
+        return;
+    }
+    // gibsDataBuffer neutralization when GIBS is off is handled by the
+    // reflection pass, which always runs first in the graph; doing it again
+    // here would be a redundant upload of the same zero struct.
+    if (!gibsEnabled && !rtReflectionsEnabled) {
+        GIBSData zero{};  // totalCells==0 -> surfel lookups return black
+        zero.frameIndex = frameCounter;
+        rhi->updateBuffer(gibsDataBuffer, &zero, 0, sizeof(GIBSData));
+    }
+
+    Uint32 w = (rhi->getSwapchainWidth() + 1) / 2;   // refractionRT is half-res
+    Uint32 h = (rhi->getSwapchainHeight() + 1) / 2;
+    const size_t surfelBytes = size_t(gibsMaxSurfels) * sizeof(Surfel);
+
+    // See raytraceReflectionPass: ensure the merged geometry + material table
+    // the hit shading fetches, independent of this frame's draw mode.
+    ensureMergedGeometry();
+    ensureBindlessMaterialTable();
+    const bool rtGeo = mergedVertexBuffer.isValid() && mergedIndexBuffer.isValid() &&
+                       bindlessMaterialTable.isValid();
+
+    struct { float rayBias; float rayMaxDistance; Uint32 frameIndex; Uint32 hasBindlessGeo; } rp{
+        0.01f, 200.0f, frameCounter, rtGeo ? 1u : 0u };
+
+    rhi->beginComputePass("RaytraceRefraction");
+    rhi->bindComputePipeline(raytraceRefractionPipeline);
+    rhi->setComputeTexture(0, depthStencilRT);
+    rhi->setComputeTexture(1, normalRT);
+    rhi->setComputeTexture(2, refractionRT);
+    rhi->setComputeTexture(3, prefilterMap);
+    rhi->setComputeBuffer(0, cameraUniformBuffer, 0, sizeof(CameraRenderData));
+    rhi->setComputeBuffer(1, surfelBuffer, 0, surfelBytes);
+    rhi->setComputeBuffer(2, cellHeadBuffer);
+    rhi->setComputeBuffer(3, surfelNextBuffer);
+    rhi->setComputeBuffer(4, gibsDataBuffer, 0, sizeof(GIBSData));
+    rhi->setAccelerationStructure(5, sceneTLAS);
+    rhi->setComputeBytes(&rp, sizeof(rp), 6);
+    // Standalone hit shading inputs: user_instance_id -> InstanceData ->
+    // materialID -> base color; dirLights[0] for the sun occlusion ray.
+    rhi->setComputeBuffer(7, instanceDataBuffer, 0, sizeof(Vapor::InstanceData) * MAX_INSTANCES);
+    rhi->setComputeBuffer(8, materialUniformBuffer, 0, sizeof(Vapor::MaterialData) * MAX_INSTANCES);
+    rhi->setComputeBuffer(9, directionalLightBuffer, 0, sizeof(DirectionalLightData) * maxDirectionalLights);
+    if (rtGeo) {
+        rhi->setComputeBuffer(10, mergedVertexBuffer);
+        rhi->setComputeBuffer(11, mergedIndexBuffer);
+        rhi->bindComputeTextureArgumentTable(bindlessMaterialTable, 12);
+    }
+    rhi->dispatch((w + 7) / 8, (h + 7) / 8, 1);
+    rhi->endComputePass();
+    rhi->computeBarrier();  // refraction writes -> fragment reads in Main
 }
 
 // AO raygen into the noisy aoRawRT; the temporal + à-trous passes below
@@ -3402,6 +3603,8 @@ void Renderer::shadowPass() {
         } else {
             rhi->setVertexBuffer(0, pssmDataBuffer, 0, sizeof(PSSMRenderData));
             rhi->setVertexBytes(&ci, sizeof(Uint32), 5);  // cascadeIndex -> push offset 16
+            // Materials at set0 b1 for the fragment alpha-cutout (ShadowDepth.frag).
+            rhi->setVertexBuffer(1, materialUniformBuffer, 0, sizeof(Vapor::MaterialData) * MAX_INSTANCES);
         }
         rhi->setVertexBuffer(2, instanceDataBuffer, 0, sizeof(Vapor::InstanceData) * std::max<Uint32>(1, totalInstanceCount));
         // MDI layout: Metal's shadow shader pulls instances[iid].vertexOffset +
@@ -3409,6 +3612,11 @@ void Renderer::shadowPass() {
         const bool shadowPullsMerged = backend == GraphicsBackend::Metal &&
                                        m_mdiInstanceLayout && mergedVertexBuffer.isValid();
         if (shadowPullsMerged) rhi->bindVertexBuffer(mergedVertexBuffer, 3, 0);
+        // Default albedo so the shadow frag's declared sampler (set2 b0) is
+        // always valid even with no MASK casters; opaque casters never sample
+        // it (alphaCutoff == 0), MASK casters override it per draw below.
+        if (defaultWhiteTexture < textures.size() && textures[defaultWhiteTexture].handle.isValid())
+            rhi->setTexture(0, 0, textures[defaultWhiteTexture].handle, textures[defaultWhiteTexture].sampler);
 
         // ALL drawables, not the camera-visible set: casters outside the view
         // frustum must still render into the cascades or their shadows vanish
@@ -3420,9 +3628,12 @@ void Renderer::shadowPass() {
             auto it = drawableToInstanceID.find(drawableIdx);
             if (it == drawableToInstanceID.end()) continue;
             Uint32 iid = it->second;
-            if (backend == GraphicsBackend::Metal) {
-                // texAlbedo at fragment texture(0) for alpha-tested cutouts.
-                bindMaterial(drawable.material);
+            // Alpha-cutout casters (MASK) bind their albedo for the fragment
+            // discard — Metal via 3d_pssm_shadow_depth, Vulkan via
+            // ShadowDepth.frag. Opaque casters need no texture (pure depth).
+            if (drawable.material < materials.size() &&
+                materials[drawable.material].alphaMode == AlphaMode::MASK) {
+                bindMaterialAlbedo(drawable.material);
             }
             if (!shadowPullsMerged && mesh.vertexBuffer.isValid()) rhi->bindVertexBuffer(mesh.vertexBuffer, 3, 0);
             rhi->setVertexBytes(&iid, sizeof(Uint32), 4);  // instanceID -> push offset 0
@@ -3454,19 +3665,25 @@ void Renderer::shadowPass() {
             Uint32 nearIdx = 3u;
             rhi->setVertexBuffer(0, pssmDataBuffer, 0, sizeof(PSSMRenderData));
             rhi->setVertexBytes(&nearIdx, sizeof(Uint32), 5);  // cascadeIndex -> push offset 16
+            rhi->setVertexBuffer(1, materialUniformBuffer, 0, sizeof(Vapor::MaterialData) * MAX_INSTANCES);
         }
         rhi->setVertexBuffer(2, instanceDataBuffer, 0, sizeof(Vapor::InstanceData) * std::max<Uint32>(1, totalInstanceCount));
         // Same merged-VB requirement as the cascade loop above (MDI layout).
         const bool nearPullsMerged = backend == GraphicsBackend::Metal &&
                                      m_mdiInstanceLayout && mergedVertexBuffer.isValid();
         if (nearPullsMerged) rhi->bindVertexBuffer(mergedVertexBuffer, 3, 0);
+        if (defaultWhiteTexture < textures.size() && textures[defaultWhiteTexture].handle.isValid())
+            rhi->setTexture(0, 0, textures[defaultWhiteTexture].handle, textures[defaultWhiteTexture].sampler);
         for (Uint32 drawableIdx = 0; drawableIdx < frameDrawables.size(); drawableIdx++) {
             const Drawable& drawable = frameDrawables[drawableIdx];
             const RenderMesh& mesh = meshes[drawable.mesh];
             auto it = drawableToInstanceID.find(drawableIdx);
             if (it == drawableToInstanceID.end()) continue;
             Uint32 iid = it->second;
-            if (backend == GraphicsBackend::Metal) bindMaterial(drawable.material);
+            if (drawable.material < materials.size() &&
+                materials[drawable.material].alphaMode == AlphaMode::MASK) {
+                bindMaterialAlbedo(drawable.material);  // albedo for the alpha-cutout
+            }
             if (!nearPullsMerged && mesh.vertexBuffer.isValid()) rhi->bindVertexBuffer(mesh.vertexBuffer, 3, 0);
             rhi->setVertexBytes(&iid, sizeof(Uint32), 4);  // instanceID -> push offset 0
             if (mesh.indexBuffer.isValid()) {
@@ -4396,21 +4613,20 @@ bool Renderer::initUI() {
         return false;
     }
 
-    auto* uiRenderer = new Vapor::RmlRendererRHI(rhi.get(), backend);
+    auto uiRenderer = std::make_unique<Vapor::RmlRendererRHI>(rhi.get(), backend);
     if (!uiRenderer->initialize()) {
         fmt::print("Renderer::initUI: Failed to initialize RHI UI renderer\n");
-        delete uiRenderer;
         return false;
     }
-    m_uiRenderer = uiRenderer;
 
-    Rml::SetRenderInterface(uiRenderer);
+    Rml::SetRenderInterface(uiRenderer.get());
     if (!rmluiManager->FinalizeInitialization()) {
         fmt::print("Renderer::initUI: Failed to finalize RmlUI\n");
-        delete uiRenderer;
-        m_uiRenderer = nullptr;
+        // uiRenderer is about to be destroyed — don't leave Rml holding it.
+        Rml::SetRenderInterface(nullptr);
         return false;
     }
+    m_uiRenderer = std::move(uiRenderer);
     m_uiContext = rmluiManager->GetContext();
     fmt::print("Renderer::initUI: RHI UI renderer initialized successfully\n");
     return true;
@@ -4422,7 +4638,7 @@ void Renderer::renderUI() {
     // Debug escape hatch: draw everything except the UI overlay.
     static const bool uiDisabled = std::getenv("VAPOR_DISABLE_RMLUI") != nullptr;
     if (uiDisabled) return;
-    auto* uiRenderer = static_cast<Vapor::RmlRendererRHI*>(m_uiRenderer);
+    auto* uiRenderer = m_uiRenderer.get();
 
     // Logical UI size = the Rml context dimensions (set from the window size);
     // framebuffer size = the swapchain (physical pixels, HiDPI-aware).
@@ -4785,7 +5001,7 @@ void Renderer::destroyRenderTargets() {
     kill(depthStencilRT_MSAA); kill(depthStencilRT);
     kill(colorRT_MSAA); kill(colorRT); kill(tempColorRT);
     kill(normalRT_MSAA); kill(normalRT); kill(albedoRT);
-    kill(shadowRT); kill(aoRT);
+    kill(shadowRT); kill(aoRT); kill(reflectionRT); kill(refractionRT);
     kill(aoRawRT); kill(aoScratchRT); kill(aoHistoryRT[0]); kill(aoHistoryRT[1]);
     kill(stochasticShadowRT); kill(stochasticShadowHistoryRT); kill(stochasticShadowDenoisedRT);
     kill(stochasticShadowHalfRT);
@@ -4911,6 +5127,19 @@ void Renderer::createRenderTargets() {
         desc.usage = TextureUsage::Storage | TextureUsage::Sampled;
         desc.mipLevels = static_cast<Uint32>(std::floor(std::log2(std::max(halfW, halfH))) + 1);
         shadowRT = rhi->createTexture(desc);
+    }
+
+    // RT mirror reflections (half-res; rgb = reflected radiance, a = hit mask).
+    // HDR: it carries surfel radiance / env light, composited pre-tonemap.
+    {
+        TextureDesc desc;
+        desc.width = halfW;
+        desc.height = halfH;
+        desc.format = PixelFormat::RGBA16_FLOAT;
+        desc.usage = TextureUsage::Storage | TextureUsage::Sampled;
+        reflectionRT = rhi->createTexture(desc);
+        // RT refraction twin (same half-res RGBA16F, rgb + hit mask in a).
+        refractionRT = rhi->createTexture(desc);
     }
 
     // Create AO RT (half-res, like native)
@@ -5133,7 +5362,14 @@ void Renderer::createRenderPipeline() {
     pipelineDesc.topology = PrimitiveTopology::TriangleList;
     pipelineDesc.blendMode = BlendMode::Opaque;
     pipelineDesc.depthTest = true;
-    pipelineDesc.depthWrite = true;
+    // No depth WRITE: the pre-pass already owns the depth buffer (it clears and
+    // writes all geometry), and the main pass redraws the SAME geometry. Writing
+    // here is not just redundant — combined with early_fragment_tests it is
+    // wrong for alpha cutout: early-Z would stamp a MASK caster's depth into a
+    // hole texel BEFORE the shader discards it, blocking the sky/background from
+    // filling the hole (it showed clear colour). Test-only keeps early-Z's
+    // overdraw win without the corruption.
+    pipelineDesc.depthWrite = false;
     // LessOrEqual (not Less): the main pass loads the pre-pass depth and redraws
     // the SAME geometry, so fragments arrive at exactly the stored depth and
     // must pass the test (Less would reject every fragment). Matches native's
@@ -5423,8 +5659,8 @@ void Renderer::createRenderPipeline() {
             irradiancePipeline        = makeIblVkPipeline("shaders/IBLCubeFace.vert.spv", "shaders/IBLIrradiance.frag.spv", irradianceVS, irradianceFS);
             prefilterPipeline         = makeIblVkPipeline("shaders/IBLCubeFace.vert.spv", "shaders/IBLPrefilter.frag.spv",  prefilterVS, prefilterFS);
             brdfLUTPipeline           = makeIblVkPipeline("shaders/IBLBRDF.vert.spv",     "shaders/IBLBRDF.frag.spv",        brdfVS, brdfFS);
-            // IBL debug: cubemap -> equirect 2D RT (FullScreen.vert + IblEquirectPreview.frag).
-            iblPreviewPipeline        = makeIblVkPipeline("shaders/FullScreen.vert.spv", "shaders/IblEquirectPreview.frag.spv", iblPreviewVertexShader, iblPreviewFragmentShader);
+            // IBL debug: cubemap -> equirect 2D RT (FullScreen.vert + IBLEquirectPreview.frag).
+            iblPreviewPipeline        = makeIblVkPipeline("shaders/FullScreen.vert.spv", "shaders/IBLEquirectPreview.frag.spv", iblPreviewVertexShader, iblPreviewFragmentShader);
 
             // Volumetric clouds: quarter-res raymarch, temporal resolve, and
             // full-res composite — all fullscreen RGBA16F passes.
@@ -5592,6 +5828,8 @@ void Renderer::createRenderPipeline() {
         raytraceShadowPipeline        = makeMetalCompute("shaders/3d_raytrace_shadow.metal", rtShadowShader, 1, 1, 1);
         sscsComputePipeline           = makeMetalCompute("shaders/3d_sscs.metal", sscsMetalShader, 1, 1, 1);
         raytraceAOPipeline            = makeMetalCompute("shaders/3d_raytrace_ao.metal", rtAOShader, 1, 1, 1);
+        raytraceReflectionPipeline    = makeMetalCompute("shaders/3d_raytrace_reflection.metal", rtReflectionShader, 8, 8, 1);
+        raytraceRefractionPipeline    = makeMetalCompute("shaders/3d_raytrace_refraction.metal", rtRefractionShader, 8, 8, 1);
         giTemporalPipeline            = makeMetalCompute("shaders/gibs_gi_temporal.metal", giTemporalShader, 8, 8, 1);
         giDenoisePipeline             = makeMetalCompute("shaders/gibs_gi_denoise.metal", giDenoiseShader, 8, 8, 1);
         // SSAO shares the RT AO binding interface (ignores the TLAS slot) and
@@ -5971,6 +6209,15 @@ TextureId Renderer::getOrCreateTexture(const std::shared_ptr<Vapor::Image>& imag
     return id;
 }
 
+void Renderer::bindMaterialAlbedo(MaterialId materialId) {
+    if (materialId >= materials.size()) return;
+    const RenderMaterial& material = materials[materialId];
+    if (material.albedoTexture < textures.size()) {
+        const RenderTexture& tex = textures[material.albedoTexture];
+        rhi->setTexture(0, 0, tex.handle, tex.sampler);  // texture(0) / set2 b0
+    }
+}
+
 void Renderer::bindMaterial(MaterialId materialId) {
     if (materialId >= materials.size()) {
         return;
@@ -6016,7 +6263,7 @@ void Renderer::bindMaterial(MaterialId materialId) {
 // Factory Functions
 // ============================================================================
 
-std::unique_ptr<IRenderer> createRenderer(GraphicsBackend backend, SDL_Window* window) {
+std::unique_ptr<IRenderer> Vapor::createRenderer(GraphicsBackend backend, SDL_Window* window) {
 #ifdef __APPLE__
     // Metal now routes through the RHI renderer by default (the target
     // architecture: renderer -> RHI -> {rhi_metal, rhi_vulkan}). Set
@@ -6072,9 +6319,14 @@ std::unique_ptr<IRenderer> createRenderer(GraphicsBackend backend, SDL_Window* w
             void* queue = rhi->getBackendQueue();
 
             if (instance && physicalDevice && device && queue) {
-                // Get swapchain image count from RHI
-                // For now, use a reasonable default (2-3 images)
-                Uint32 imageCount = 2;
+                // ImGui cycles ImageCount sets of vertex/index buffers and
+                // destroys a slot's buffer when it needs to grow. That is only
+                // safe if the slot's previous frame has retired — so the count
+                // must be at least the engine's frames-in-flight. The old
+                // hardcoded 2 (vs 3 in flight) had ImGui resizing buffers a
+                // still-pending frame was drawing from: validation errors
+                // (VUID-vkDestroyBuffer-00922) and UI flicker under churn.
+                Uint32 imageCount = rhi->getMaxFramesInFlight();
 
                 // Dynamic rendering: ImGui bakes the attachment format into
                 // its pipeline, so it must match the swapchain format.
@@ -6179,6 +6431,7 @@ void Renderer::stage(std::shared_ptr<RenderScene> scene) {
                 matData.sheenTint = mesh->material->sheenTint;
                 matData.clearcoat = mesh->material->clearcoat;
                 matData.clearcoatGloss = mesh->material->clearcoatGloss;
+                matData.transmission = mesh->material->transmission;
                 matData.alphaMode = mesh->material->alphaMode;
                 matData.alphaCutoff = mesh->material->alphaCutoff;
                 matData.doubleSided = mesh->material->doubleSided;
@@ -6543,9 +6796,19 @@ void Renderer::drawGraphicsImGui() {
     auto preview = [&](const char* label, TextureHandle tex) {
         if (!tex.isValid()) return;
         if (ImGui::TreeNode(label)) {
-            ImGui::Text("%u x %u", rtW, rtH);
+            // Swapchain dims, NOT the texture's (several RTs are half-res).
+            ImGui::Text("%u x %u (swapchain)", rtW, rtH);
             if (void* id = getImGuiTextureID(tex)) {
-                ImGui::Image((ImTextureID)(intptr_t)id, ImVec2(320, 320 / rtAspect));
+                // Opaque backdrop: several RTs clear their alpha to 0 (the
+                // prepass normal/albedo MRT, half-res RTs), so ImGui::Image
+                // would alpha-blend the transparent (no-geometry) regions with
+                // the panel and read as "empty gray". Fill black first so those
+                // regions show the true cleared RGB, not the panel background.
+                ImVec2 sz(320, 320 / rtAspect);
+                ImVec2 p = ImGui::GetCursorScreenPos();
+                ImGui::GetWindowDrawList()->AddRectFilled(
+                    p, ImVec2(p.x + sz.x, p.y + sz.y), IM_COL32(0, 0, 0, 255));
+                ImGui::Image((ImTextureID)(intptr_t)id, sz);
             } else {
                 ImGui::TextDisabled("(preview unavailable on this backend)");
             }
@@ -6557,6 +6820,8 @@ void Renderer::drawGraphicsImGui() {
     if (ImGui::TreeNode("RTs")) {
         preview("Color RT", colorRT);
         preview("Normal RT", normalRT);
+        preview("Reflection RT", reflectionRT);
+        preview("Refraction RT", refractionRT);
         preview("AO RT", aoRT);
         preview("Velocity RT", velocityRT);
         preview("God Rays RT", lightScatteringRT);
@@ -6601,6 +6866,8 @@ void Renderer::drawGraphicsImGui() {
             mainDebugFlags = (shadowMode == 0) ? (mainDebugFlags | 2u) : (mainDebugFlags & ~2u);
             stochasticShadowsEnabled = (shadowMode == 2);
         }
+        if (shadowMode == 2)
+            ImGui::TextDisabled("stochastic RT shadows noisy until ReSTIR denoise (Metal RT only)");
         // Condition BEFORE TreeNode: TreeNode() pushes when expanded and then
         // demands a matching TreePop(). Testing shadowMode after it with && would
         // short-circuit past the TreePop when a node is open but the mode does
@@ -6608,6 +6875,10 @@ void Renderer::drawGraphicsImGui() {
         // only runs (and only pushes) when the node should show at all.
         if ((shadowMode == 1 || shadowMode == 2) && ImGui::TreeNode("Directional shadow")) {
             ImGui::SliderFloat("Near shadow distance", &pssmRTMaxDist, 5.0f, 200.0f);
+            // 0 = hard single-ray sun shadow (legacy); >0 = cone-sampled penumbra
+            // (4 rays/pixel; real sun ~0.0047 rad). Metal RT only; no denoiser
+            // yet, so large radii show noise in the penumbra.
+            ImGui::SliderFloat("RT sun angular radius", &rtSunAngularRadius, 0.0f, 0.05f, "%.4f");
             {
                 // PCF taps for the PSSM cascades + near map (4/8/16/32 Poisson)
                 const char* pcfLabels[] = { "4", "8", "16", "32" };
@@ -6731,6 +7002,9 @@ void Renderer::drawGraphicsImGui() {
                 ImGui::DragFloat("Sheen Tint", &m.sheenTint, 0.01f, 0.0f, 1.0f);
                 ImGui::DragFloat("Clearcoat", &m.clearcoat, 0.01f, 0.0f, 1.0f);
                 ImGui::DragFloat("Clearcoat Gloss", &m.clearcoatGloss, 0.01f, 0.0f, 1.0f);
+                // KHR_materials_transmission (RT refraction; importer doesn't
+                // parse the extension yet — this slider is the test hook).
+                ImGui::DragFloat("Transmission", &m.transmission, 0.01f, 0.0f, 1.0f);
                 ImGui::Checkbox("Use IBL", &m.useIBL);
                 ImGui::TreePop();
             }
@@ -6822,6 +7096,28 @@ void Renderer::drawGraphicsImGui() {
 
     if (ImGui::TreeNode("Water Settings")) {
         ImGui::TextDisabled("(water pass not ported to the RHI renderer yet)");
+        ImGui::TreePop();
+    }
+
+    // RT mirror reflections (Metal RT only — no-op without a TLAS). Hits shade
+    // from the GIBS surfel cache, so enable GI for full reflections; with GI
+    // off, only sky/environment misses reflect.
+    if (ImGui::TreeNode("RT Reflections")) {
+        ImGui::Checkbox("Enabled", &rtReflectionsEnabled);
+        ImGui::SliderFloat("Intensity", &rtReflectionIntensity, 0.0f, 2.0f);
+        ImGui::TextDisabled("standalone hit shading (base color + sun); GI adds indirect bounce");
+        ImGui::TreePop();
+    }
+
+    // RT refractions (Metal RT only): renders KHR_materials_transmission with
+    // a fixed IOR of 1.5. The trace only runs while some material has
+    // transmission > 0 — use the Scene Materials editor to set one.
+    if (ImGui::TreeNode("RT Refractions")) {
+        ImGui::Checkbox("Enabled", &rtRefractionsEnabled);
+        ImGui::SliderFloat("Intensity", &rtRefractionIntensity, 0.0f, 2.0f);
+        ImGui::TextDisabled(sceneHasTransmission
+                                ? "active (a material transmits)"
+                                : "idle: no material has transmission > 0");
         ImGui::TreePop();
     }
 
@@ -7772,6 +8068,8 @@ void Renderer::renderToTexture(
         instance.color = drawable.color;
         instance.vertexOffset = 0;
         instance.indexOffset = 0;
+        instance.rtVertexOffset = mesh.vertexOffset;  // always valid: RT hit shading
+        instance.rtIndexOffset = mesh.indexOffset;    //   fetches merged geometry
         instance.vertexCount = mesh.vertexCount;
         instance.indexCount = mesh.indexCount;
         instance.materialID = drawable.material;
@@ -7819,6 +8117,9 @@ void Renderer::renderToTexture(
         rhi->setFragmentBuffer(1, pointLightBuffer, 0, sizeof(PointLightData) * maxPointLights);
         rhi->setFragmentBuffer(2, clusterBuffer);
         rhi->setFragmentBuffer(3, rttCameraBuffer, 0, sizeof(CameraRenderData));
+        // Materials for the Metal PBR fragment's per-fragment fetch (buffer 11);
+        // no-ops on Vulkan. See the main-pass note.
+        rhi->setFragmentBuffer(19, materialUniformBuffer, 0, sizeof(Vapor::MaterialData) * MAX_INSTANCES);
         glm::vec2 rttScreenSize(static_cast<float>(resource.width), static_cast<float>(resource.height));
         rhi->setFragmentBytes(&rttScreenSize, sizeof(glm::vec2), 4);
         glm::uvec3 gridSize(clusterGridSizeX, clusterGridSizeY, clusterGridSizeZ);
@@ -7894,6 +8195,14 @@ void Renderer::renderToTexture(
             rhi->setFragmentBuffer(16, spotLightBuffer, 0, sizeof(Vapor::SpotLight) * maxSpotLights);
             glm::uvec2 rttSpotRectParams(0u, 0u);
             rhi->setFragmentBytes(&rttSpotRectParams, sizeof(glm::uvec2), 15);
+            // RT reflection/refraction composite params (buffer 17/18) are plain
+            // args on the shared PBR shader — bind disabled (x=0) so the
+            // composite is skipped; the RT screen-space inputs are the main
+            // view's anyway and would smear across this off-screen view.
+            glm::vec2 rttReflParams(0.0f, 0.0f);
+            rhi->setFragmentBytes(&rttReflParams, sizeof(glm::vec2), 17);
+            glm::vec2 rttRefrParams(0.0f, 0.0f);
+            rhi->setFragmentBytes(&rttRefrParams, sizeof(glm::vec2), 18);
         }
 
         // Draw: instance IDs are sequential in rttInstances order.
@@ -7980,6 +8289,10 @@ void Renderer::applyVignette(RenderTextureHandle target, float strength, float r
 // ============================================================================
 
 TextureHandle Renderer::createTexture(const std::shared_ptr<Vapor::Image>& img) {
+    if (!img) {
+        fmt::print(stderr, "createTexture: null image — returning invalid handle\n");
+        return {};
+    }
     TextureDesc desc;
     desc.width = img->width;
     desc.height = img->height;

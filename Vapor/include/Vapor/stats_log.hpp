@@ -73,6 +73,11 @@ public:
     // Drop all sources (call before the objects their callbacks capture die).
     void clearSources() { sources_.clear(); }
 
+    // Drop one source by tag. Every registrant whose callback captures `this`
+    // must deregister in its shutdown path, or a later tick() would call into
+    // a destroyed object.
+    void removeSource(const char* tag);
+
     // Call exactly once per frame from the render loop.
     void tick(std::uint64_t frame);
 

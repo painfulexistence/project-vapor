@@ -6,6 +6,8 @@
 #include "Vapor/file_system.hpp"
 #include <fmt/core.h>
 
+using namespace Vapor;
+
 namespace Vapor {
 
     // Helper functions

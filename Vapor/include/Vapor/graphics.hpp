@@ -1,6 +1,7 @@
 #pragma once
 #include "rhi.hpp"  // TextureHandle (value member on Image; used by the native Metal renderer)
 #include "meshlet.hpp"  // MeshletData (baked meshlet + cluster-LOD data on Mesh)
+#include "graphics_gpu_structs.hpp"  // GPU upload structs (MaterialData, lights, InstanceData, …)
 #include <SDL3/SDL_stdinc.h>
 #include <glm/geometric.hpp>
 #include <glm/vec2.hpp>
@@ -21,13 +22,6 @@ enum class AlphaMode {
     BLEND,
 };
 
-enum class PrimitiveMode {
-    POINTS,
-    LINES,
-    LINE_STRIP,
-    TRIANGLES,
-    TRIANGLE_STRIP,
-};
 
 // High-level material shading model (selects the render pipeline downstream).
 enum class MaterialType {
@@ -86,6 +80,10 @@ struct Material {
     float sheenTint = 0.5f;
     float clearcoat = 0.0f;
     float clearcoatGloss = 1.0f;
+    // KHR_materials_transmission factor. RENDERING support only for now: the
+    // glTF importer does not parse the extension yet (separate PR); set from
+    // code / the Scene Materials panel. IOR is fixed at 1.5 (the glTF default).
+    float transmission = 0.0f;
 
     // Prototype UV Mode: 0 = Off, 1 = World Space, 2 = Object Space
     int prototypeUVMode = 0;
@@ -100,57 +98,8 @@ struct Material {
     // Material now only holds CPU-side material parameters
 };
 
-struct alignas(16) MaterialData {
-    glm::vec4 baseColorFactor;
-    float normalScale;
-    float metallicFactor;
-    float roughnessFactor;
-    float occlusionStrength;
-    glm::vec3 emissiveFactor;
-    float _pad1;
-    float emissiveStrength;
-    float subsurface;
-    float specular;
-    float specularTint;
-    float anisotropic;
-    float sheen;
-    float sheenTint;
-    float clearcoat;
-    float clearcoatGloss;
-    // These three were on the shader's MaterialData (3d_common.metal) and the
-    // global GPU struct, but had drifted off this Vapor:: copy. Because
-    // alignas(16) already padded the struct to 96 bytes, the shader was
-    // reading them out of that uninitialized tail: a garbage prototypeUVMode
-    // (> 0.5) made the PBR shader replace every mesh UV with triplanar
-    // projection — textures smeared, surfaces looked flat ("half the detail
-    // gone"). Defaults keep un-set materials on their mesh UVs with no IBL.
-    float prototypeUVMode = 0.0f;  // 0 = mesh UV, 1 = world-space, 2 = object-space
-    float uvScale = 1.0f;
-    float iblEnabled = 0.0f;       // 1 = image-based lighting, 0 = ambient approximation
-};
 
-struct alignas(16) DirectionalLight { // Note that alignas(16) is not enough to ensure 16-byte alignment
-    glm::vec3 direction;
-    float _pad1;
-    glm::vec3 color;
-    float _pad2;
-    float intensity;
-    // float _pad3[3];
-    // bool castShadow;
-    // Uint8 _pad4[3];
-};
 
-struct alignas(16) PointLight { // Note that alignas(16) is not enough to ensure 16-byte alignment
-    glm::vec3 position;
-    float _pad1;
-    glm::vec3 color;
-    float _pad2;
-    float intensity = 1.0f;
-    float radius = 0.5f;
-    // float _pad3[2];
-    // bool castShadow;
-    // Uint8 _pad4[3];
-};
 
 // Cone spot light. direction points FROM the light; cosInner/cosOuter are the
 // cosines of the inner (full intensity) and outer (falloff-to-zero) half-angles.
@@ -171,82 +120,6 @@ struct alignas(16) SpotLight {
     float intensity = 1.0f;
 };
 
-// Rectangular area light driven by an optional video texture.
-// right and up must be orthonormal; halfWidth/halfHeight are in world units.
-struct alignas(16) RectLight {
-    glm::vec3 position;
-    float halfWidth;
-    glm::vec3 right;           // normalized right axis
-    float halfHeight;
-    glm::vec3 up;              // normalized up axis
-    float intensity;
-    glm::vec3 color;
-    Uint32 useVideoTexture;    // 0 = solid color, 1 = sample rectLightVideo texture
-};
-
-struct alignas(16) FrameData {
-    Uint32 frameNumber;
-    float time;
-    float deltaTime;
-};
-
-struct alignas(16) CameraData {
-    glm::mat4 proj;
-    glm::mat4 view;
-    glm::mat4 invProj;
-    glm::mat4 invView;
-    float near;
-    float far;
-    glm::vec3 position;
-    float _pad1;
-    glm::vec4 frustumPlanes[6];
-};
-
-struct alignas(16) InstanceData {
-    glm::mat4 model;
-    glm::vec4 color;
-    Uint32 vertexOffset;
-    Uint32 indexOffset;
-    Uint32 vertexCount;
-    Uint32 indexCount;
-    Uint32 materialID;
-    PrimitiveMode primitiveMode;
-    Uint32 _pad1[2];
-    glm::vec3 AABBMin;
-    float _pad2;
-    glm::vec3 AABBMax;
-    float _pad3;
-    glm::vec4 boundingSphere; // x, y, z, radius
-};
-
-struct alignas(16) Cluster {
-    glm::vec4 min;
-    glm::vec4 max;
-    Uint32 lightCount;
-    Uint32 lightIndices[256];
-    // Clustered spot/rect lists (appended so every existing point-light reader
-    // keeps its offsets). Caps = the engine-wide light maxima, so the writers
-    // can never overflow. Written by TileLightCull.comp / 3d_tile_light_cull
-    // .metal; the native path's legacy 3d_light_cull.metal leaves them
-    // untouched, so readers MUST bound their loops by the global light counts
-    // (0 on that path) before trusting these fields.
-    Uint32 spotCount;
-    Uint32 spotIndices[64];   // MAX_SPOTS_PER_CLUSTER = maxSpotLights
-    Uint32 rectCount;
-    Uint32 rectIndices[32];   // MAX_RECTS_PER_CLUSTER = maxRectLights
-};
-
-struct alignas(16) LightCullData {
-    glm::vec2 screenSize;
-    glm::vec2 _pad1;
-    glm::uvec3 gridSize;
-    Uint32 lightCount;
-    // Spot/rect counts for the clustered cull (Vulkan path reads these from
-    // the SSBO; the Metal cull takes them as setComputeBytes instead).
-    Uint32 cullSpotCount;
-    Uint32 cullRectCount;
-};
-
 struct VertexData {
     glm::vec3 position;
     glm::vec2 uv;
@@ -260,20 +133,6 @@ struct Particle {
     glm::vec3 velocity = glm::vec3(1.0f);
     glm::vec3 density = glm::vec3(1.0f);
 };
-
-// GPU-driven rendering: indirect draw arguments produced by the cull compute
-// pass. Packed 20-byte layout, matching VkDrawIndexedIndirectCommand and
-// MTLDrawIndexedPrimitivesIndirectArguments exactly (intentionally NOT
-// alignas(16) — the tight stride is what the indirect-draw APIs expect). Mirror
-// of the global ::DrawCommand in graphics_gpu_structs.hpp.
-struct DrawCommand {
-    Uint32 indexCount;
-    Uint32 instanceCount; // 0 = culled (GPU no-op)
-    Uint32 firstIndex;
-    Sint32 vertexOffset;
-    Uint32 firstInstance; // = instance index (InstanceData lookup)
-};
-static_assert(sizeof(DrawCommand) == 20, "DrawCommand must match the GPU indirect-args layout");
 
 struct Mesh {
     void initialize(const std::vector<VertexData>& vertices, const std::vector<Uint32>& indices);
@@ -324,7 +183,8 @@ struct Mesh {
 } // namespace Vapor
 
 // Forward declarations for RHI types (defined in rhi.hpp)
-// These are needed by scene.hpp but defined outside Vapor namespace
+namespace Vapor {
 struct BufferHandle;
 struct TextureHandle;
 struct PipelineHandle;
+}

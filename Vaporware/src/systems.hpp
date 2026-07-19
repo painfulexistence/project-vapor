@@ -262,52 +262,8 @@ public:
     }
 };
 
-class CameraSystem {
-public:
-    static void update(entt::registry& reg, float deltaTime) {
-        auto view = reg.view<Vapor::VirtualCameraComponent>();
-
-        for (auto entity : view) {
-            auto& cam = view.get<Vapor::VirtualCameraComponent>(entity);
-            if (!cam.isActive) continue;
-
-            if (auto [fly, intent] = reg.try_get<FlyCameraComponent, CharacterIntent>(entity); fly && intent) {
-                fly->pitch -= intent->lookVector.y * fly->rotateSpeed * deltaTime;
-                fly->yaw -= intent->lookVector.x * fly->rotateSpeed * deltaTime;
-                fly->pitch = glm::clamp(fly->pitch, -89.0f, 89.0f);
-
-                cam.rotation = glm::quat(glm::vec3(glm::radians(-fly->pitch), glm::radians(fly->yaw - 90.0f), 0.0f));
-
-                glm::vec3 front = cam.rotation * glm::vec3(0, 0, -1);
-                glm::vec3 right = cam.rotation * glm::vec3(1, 0, 0);
-                glm::vec3 up = cam.rotation * glm::vec3(0, 1, 0);
-
-                if (intent->moveVector.x != 0.0f)
-                    cam.position += intent->moveVector.x * right * fly->moveSpeed * deltaTime;
-                if (intent->moveVector.y != 0.0f)
-                    cam.position += intent->moveVector.y * front * fly->moveSpeed * deltaTime;
-                if (intent->moveVerticalAxis != 0.0f)
-                    cam.position += intent->moveVerticalAxis * up * fly->moveSpeed * deltaTime;
-            }
-
-            if (auto* follow = reg.try_get<FollowCameraComponent>(entity)) {
-                if (!reg.valid(follow->target)) continue;
-                if (auto* transform = reg.try_get<Vapor::TransformComponent>(follow->target)) {
-                    glm::vec3 targetPos = transform->position;
-                    glm::vec3 desiredPos = targetPos + follow->offset;
-                    cam.position = glm::mix(cam.position, desiredPos, 1.0f - pow(follow->smoothFactor, deltaTime));
-                    cam.rotation = glm::quatLookAt(glm::normalize(targetPos - cam.position), glm::vec3(0, 1, 0));
-                }
-            }
-
-            glm::mat4 rotation = glm::mat4_cast(cam.rotation);
-            glm::mat4 translation = glm::translate(glm::mat4(1.0f), cam.position);
-            cam.viewMatrix = glm::inverse(translation * rotation);
-            cam.projectionMatrix = glm::perspective(cam.fov, cam.aspect, cam.near, cam.far);
-        }
-    }
-};
-
+// (Camera control lives in the engine now: Vapor::CameraControlSystem in
+// Vapor/systems.hpp consumes the same CharacterIntent this app writes.)
 
 // ============================================================================
 // Subtitle Systems - Split into single-responsibility systems
