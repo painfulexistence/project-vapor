@@ -182,6 +182,25 @@ target_link_libraries(test_terrain_world PRIVATE
 target_compile_features(test_terrain_world PRIVATE cxx_std_20)
 target_compile_options(test_terrain_world PRIVATE ${TEST_WARNING_FLAGS})
 
+# ── Terrain texture generator tests (pure logic, no GPU) ──────────────────
+# Compiles terrain_texture_gen.cpp directly (same pattern as test_voxel_world):
+# procedural detail-layer + splat synthesis is CPU-pure, so tileability,
+# determinism and the splat slope/height rules are checked without a GPU.
+add_executable(test_terrain_texture_gen
+    terrain_texture_gen_test.cpp
+    ${CMAKE_SOURCE_DIR}/Vapor/src/terrain_texture_gen.cpp
+)
+target_include_directories(test_terrain_texture_gen PRIVATE
+    ${CMAKE_SOURCE_DIR}/Vapor/include
+    ${CMAKE_SOURCE_DIR}/Vapor/include/Vapor
+)
+target_link_libraries(test_terrain_texture_gen PRIVATE
+    Catch2::Catch2WithMain
+    glm::glm
+)
+target_compile_features(test_terrain_texture_gen PRIVATE cxx_std_20)
+target_compile_options(test_terrain_texture_gen PRIVATE ${TEST_WARNING_FLAGS})
+
 # ── Particle ECS system tests (emitter state machine, render packets, forces) ─
 # Links Vapor so the REAL Vapor::Particle* systems are under test (not a stub);
 # a recording mock IRenderer stands in for the GPU. No engine assets needed —
@@ -238,3 +257,4 @@ catch_discover_tests(test_particle_system    WORKING_DIRECTORY "$<TARGET_FILE_DI
 catch_discover_tests(test_scene_blueprint    WORKING_DIRECTORY "$<TARGET_FILE_DIR:test_scene_blueprint>")
 catch_discover_tests(test_voxel_world        WORKING_DIRECTORY "$<TARGET_FILE_DIR:test_voxel_world>")
 catch_discover_tests(test_terrain_world      WORKING_DIRECTORY "$<TARGET_FILE_DIR:test_terrain_world>")
+catch_discover_tests(test_terrain_texture_gen WORKING_DIRECTORY "$<TARGET_FILE_DIR:test_terrain_texture_gen>")
