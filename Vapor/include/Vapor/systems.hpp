@@ -412,13 +412,28 @@ namespace Vapor {
                     if (glm::length(sunDir) > 1e-6f) {
                         sunDir = glm::normalize(sunDir);
                         const glm::vec3 last = sky._lastIblSunDir;
+                        const bool firstBake = (glm::length(last) <= 1e-6f);
                         // First bake (last == 0) always counts as "moved".
-                        float cosT = (glm::length(last) > 1e-6f)
-                                         ? glm::clamp(glm::dot(sunDir, last), -1.0f, 1.0f)
-                                         : -1.0f;
+                        float cosT = firstBake
+                                         ? -1.0f
+                                         : glm::clamp(glm::dot(sunDir, last), -1.0f, 1.0f);
                         float movedDeg = glm::degrees(std::acos(cosT));
                         if (movedDeg >= sky.iblSunThresholdDeg) {
-                            renderer->requestIBLUpdate();
+                            if (firstBake) {
+                                // The initial bake must ALWAYS happen, independent
+                                // of the auto-rebake toggle. The renderer's very-
+                                // early startup bake can capture the sky before the
+                                // async-loaded scene + sun are ready, leaving a
+                                // stale/wrong prefilter that RT reflection samples
+                                // (green ghosting until a manual Refresh IBL). Now
+                                // that the sun is valid, re-push the sky to force
+                                // one ungated bake (setSky sets iblNeedsUpdate).
+                                sky.dirty = true;
+                            } else {
+                                // Continuous sun-tracking rebakes: gated by the
+                                // renderer's auto-rebake toggle (off by default).
+                                renderer->requestIBLUpdate();
+                            }
                             sky._lastIblSunDir = sunDir;
                         }
                     }
