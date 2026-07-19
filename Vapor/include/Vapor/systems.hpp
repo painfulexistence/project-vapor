@@ -390,6 +390,11 @@ namespace Vapor {
                     data.gradientZenith        = sky.gradientZenith;
                     data.gradientHorizon       = sky.gradientHorizon;
                     data.gradientGround        = sky.gradientGround;
+                    data.starDensity           = sky.starDensity;
+                    data.starBrightness        = sky.starBrightness;
+                    data.moonColor             = sky.moonColor;
+                    data.moonSize              = sky.moonSize;
+                    data.moonBrightness        = sky.moonBrightness;
                     renderer->setSky(data);
                     sky.dirty = false;
                 }
@@ -407,13 +412,28 @@ namespace Vapor {
                     if (glm::length(sunDir) > 1e-6f) {
                         sunDir = glm::normalize(sunDir);
                         const glm::vec3 last = sky._lastIblSunDir;
+                        const bool firstBake = (glm::length(last) <= 1e-6f);
                         // First bake (last == 0) always counts as "moved".
-                        float cosT = (glm::length(last) > 1e-6f)
-                                         ? glm::clamp(glm::dot(sunDir, last), -1.0f, 1.0f)
-                                         : -1.0f;
+                        float cosT = firstBake
+                                         ? -1.0f
+                                         : glm::clamp(glm::dot(sunDir, last), -1.0f, 1.0f);
                         float movedDeg = glm::degrees(std::acos(cosT));
                         if (movedDeg >= sky.iblSunThresholdDeg) {
-                            renderer->requestIBLUpdate();
+                            if (firstBake) {
+                                // The initial bake must ALWAYS happen, independent
+                                // of the auto-rebake toggle. The renderer's very-
+                                // early startup bake can capture the sky before the
+                                // async-loaded scene + sun are ready, leaving a
+                                // stale/wrong prefilter that RT reflection samples
+                                // (green ghosting until a manual Refresh IBL). Now
+                                // that the sun is valid, re-push the sky to force
+                                // one ungated bake (setSky sets iblNeedsUpdate).
+                                sky.dirty = true;
+                            } else {
+                                // Continuous sun-tracking rebakes: gated by the
+                                // renderer's auto-rebake toggle (off by default).
+                                renderer->requestIBLUpdate();
+                            }
                             sky._lastIblSunDir = sunDir;
                         }
                     }
@@ -477,6 +497,23 @@ namespace Vapor {
                 dl.intensity = tod.maxSunIntensity * daylight;
                 break;
             }
+
+            // Moon: opposite the sun (moonPos = -sunPos), so it is up while the
+            // sun is down. Intensity ramps with the moon's elevation, giving a
+            // dim cool fill at night. This matches the visual moon in the
+            // Atmosphere pass (moonDir = -sunDir). Direction travels away from
+            // the moon (= sunPos). Unshadowed for now (PSSM tracks the sun only).
+            glm::vec3 moonPos = -sunPos;
+            float moonUp = glm::clamp(moonPos.y / 0.15f, 0.0f, 1.0f);
+            moonUp = moonUp * moonUp * (3.0f - 2.0f * moonUp);  // smoothstep
+            auto moonView = reg.view<DirectionalLightComponent, MoonComponent>();
+            for (auto entity : moonView) {
+                auto& dl = moonView.get<DirectionalLightComponent>(entity);
+                dl.direction = glm::normalize(-moonPos);  // = normalize(sunPos)
+                dl.color     = tod.moonLightColor;
+                dl.intensity = tod.maxMoonIntensity * moonUp;
+                break;
+            }
         }
     };
 
@@ -501,6 +538,37 @@ namespace Vapor {
                 data.turbulence = wf.turbulence;
                 renderer->setWind(data);
                 break;  // singleton: the first wind field wins
+            }
+        }
+    };
+
+    // ============================================================================
+    // 體積霧系統 - resolves the VolumetricFogComponent for the renderer
+    // ============================================================================
+    // The opt-in per-light volumetric fog (raymarch). Like SkySystem/WindSystem
+    // this pushes the singleton component's tunables to the renderer each frame
+    // (fog is live-tunable). No component -> the renderer keeps the pass off
+    // (default) so the expensive raymarch never runs unless a scene asks for it.
+    class VolumetricFogSystem {
+    public:
+        static void update(entt::registry& reg, IRenderer* renderer) {
+            if (!renderer) return;
+            auto view = reg.view<VolumetricFogComponent>();
+            for (auto entity : view) {
+                const auto& f = view.get<VolumetricFogComponent>(entity);
+                VolumetricFogRenderData data;
+                data.enabled          = f.enabled;
+                data.fogDensity       = f.density;
+                data.fogHeightFalloff = f.heightFalloff;
+                data.fogBaseHeight    = f.baseHeight;
+                data.fogMaxHeight     = f.maxHeight;
+                data.anisotropy       = f.anisotropy;
+                data.ambientIntensity = f.ambientIntensity;
+                data.noiseScale       = f.noiseScale;
+                data.noiseIntensity   = f.noiseIntensity;
+                data.windSpeed        = f.windSpeed;
+                renderer->setVolumetricFog(data);
+                break;  // singleton: the first volumetric fog wins
             }
         }
     };

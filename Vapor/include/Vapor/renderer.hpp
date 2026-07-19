@@ -314,7 +314,11 @@ public:
     void setParticleVisible(bool visible) override { particleVisible = visible; }
     void setSky(const SkyRenderData& sky) override;
     void setWind(const WindRenderData& wind) override;
-    void requestIBLUpdate() override { iblNeedsUpdate = true; }
+    void setVolumetricFog(const VolumetricFogRenderData& fog) override;
+    // Sun-driven auto rebake is opt-in (m_iblAutoRebake, default off) — a moving
+    // sun otherwise re-bakes the IBL constantly. The one-shot "Refresh IBL"
+    // button and sky-config changes (setSky) still force a rebake directly.
+    void requestIBLUpdate() override { if (m_iblAutoRebake) iblNeedsUpdate = true; }
     void setParticleDrawList(const std::vector<ParticleDrawPacket>& draws) override;
 
     // ========================================================================
@@ -409,6 +413,7 @@ private:
     void bloomUpsamplePass();
     void skyAtmospherePass();
     void lightScatteringPass();
+    void heightFogPass();
     void volumetricFogPass();
     void volumeRaymarchPass();
     void velocityPass();
@@ -688,10 +693,21 @@ private:
     LightScatteringRenderData lightScatteringSettings;
     PipelineHandle volumetricFogPipeline;
     TextureHandle tempColorRT;  // ping-pong target for fog (swapped with colorRT)
-    bool volumetricFogEnabled = true;
-    // Persistent fog tunables (ImGui-editable). volumetricFogPass() copies this
-    // and overwrites the per-frame fields (invViewProj/camera/sun).
+    // Volumetric fog (the expensive raymarch) is now opt-in and ECS-driven:
+    // setVolumetricFog() copies a VolumetricFogComponent's tunables into
+    // fogSettings and flips m_volumetricFogActive. Off until a component pushes it.
+    bool volumetricFogEnabled = false;
+    // Persistent fog tunables. volumetricFogPass() copies this and overwrites the
+    // per-frame fields (invViewProj/camera/sun).
     FogRenderData fogSettings;
+    // Cheap analytic exponential height fog (the pre-raymarch "Height Fog"):
+    // a single per-pixel evaluation, no shadows/lights. On by default — it is the
+    // common-case global fog; the raymarch above is the opt-in upgrade.
+    PipelineHandle heightFogPipeline;
+    ShaderHandle heightFogShader;
+    BufferHandle heightFogDataBuffer;
+    HeightFogRenderData heightFogSettings;
+    bool heightFogEnabled = true;
     // Heterogeneous volume raymarch (EmberGen density grids; rendering only —
     // import/parsing lives in a separate PR). One AABB volume per scene; a
     // procedural 64^3 test grid stands in until setVolumeDensity() gets real
@@ -797,6 +813,9 @@ private:
     ShaderHandle gradientFragmentShader;
     BufferHandle gradientDataBuffer;
     GradientRenderData gradientData;  // CPU copy, re-uploaded when setSky changes it
+    // Night-sky (stars + moon) visuals for the atmosphere pass; driven by setSky.
+    BufferHandle nightSkyDataBuffer;
+    NightSkyRenderData nightSkyData;
     SkyType m_skyType = SkyType::Atmosphere;
     // IBL debug: environmentCubemap unwrapped to a 2D equirect RT for ImGui
     // (cubemaps can't be shown directly). iblPreviewPass renders it each frame.
@@ -808,6 +827,10 @@ private:
     // frame while ImGui samples last frame's copy stalls (WAR hazard ~a full
     // frame). Only render it while the debug panel checkbox is on.
     bool m_iblPreviewEnabled = false;
+    // Sun-driven IBL rebake toggle (SkySystem calls requestIBLUpdate() as the sun
+    // moves; gated here). Default off to save the per-move bake cost — the sky
+    // still bakes once on startup and on manual Refresh / sky-config changes.
+    bool m_iblAutoRebake = false;
     ShaderHandle lightScatteringShader;
     ShaderHandle volumetricFogShader;
     BufferHandle fogDataBuffer;
