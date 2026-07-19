@@ -14,7 +14,7 @@ namespace Vapor {
 class FSMInitSystem {
 public:
     static void update(entt::registry& registry) {
-        auto view = registry.view<FSMDefinition>(entt::exclude<FSMStateComponent>);
+        auto view = registry.view<FSMDefinition>(entt::exclude<FSMStateComponent, InactiveComponent>);
 
         for (auto entity : view) {
             auto& def = view.get<FSMDefinition>(entity);
@@ -50,7 +50,7 @@ public:
         // 1. Clear previous frame's state change events
         registry.clear<FSMStateChangeEvent>();
 
-        auto view = registry.view<FSMStateComponent, FSMDefinition>();
+        auto view = registry.view<FSMStateComponent, FSMDefinition>(entt::exclude<InactiveComponent>);
 
         for (auto entity : view) {
             auto& state = view.get<FSMStateComponent>(entity);

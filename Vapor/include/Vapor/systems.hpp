@@ -228,7 +228,7 @@ namespace Vapor {
         }
 
         static void update(entt::registry& registry, Physics3D* physics, Camera* camera, float deltaTime) {
-            auto view = registry.view<HeldByComponent>();
+            auto view = registry.view<HeldByComponent>(entt::exclude<InactiveComponent>);
 
             for (auto entity : view) {
                 auto& held = view.get<HeldByComponent>(entity);
@@ -285,7 +285,7 @@ namespace Vapor {
 
             // Point lights: position from the transform.
             scene->pointLights.clear();
-            auto pointView = reg.view<PointLightComponent, TransformComponent>();
+            auto pointView = reg.view<PointLightComponent, TransformComponent>(entt::exclude<InactiveComponent>);
             for (auto entity : pointView) {
                 const auto& light     = pointView.get<PointLightComponent>(entity);
                 const auto& transform = pointView.get<TransformComponent>(entity);
@@ -302,7 +302,7 @@ namespace Vapor {
             // registry iteration order.
             scene->directionalLights.clear();
             entt::entity sunEntity = entt::null;
-            auto sunView = reg.view<DirectionalLightComponent, SunComponent>();
+            auto sunView = reg.view<DirectionalLightComponent, SunComponent>(entt::exclude<InactiveComponent>);
             for (auto entity : sunView) { sunEntity = entity; break; }
             auto pushDirectional = [&](const DirectionalLightComponent& light) {
                 scene->directionalLights.push_back({
@@ -314,7 +314,7 @@ namespace Vapor {
             if (sunEntity != entt::null) {
                 pushDirectional(reg.get<DirectionalLightComponent>(sunEntity));
             }
-            auto dirView = reg.view<DirectionalLightComponent>();
+            auto dirView = reg.view<DirectionalLightComponent>(entt::exclude<InactiveComponent>);
             for (auto entity : dirView) {
                 if (entity == sunEntity) continue;
                 pushDirectional(dirView.get<DirectionalLightComponent>(entity));
@@ -323,7 +323,7 @@ namespace Vapor {
             // Spot lights: position from the transform, beam along its forward
             // axis (rotation * -Z), degree angles converted to cosines for the GPU.
             scene->spotLights.clear();
-            auto spotView = reg.view<SpotLightComponent, TransformComponent>();
+            auto spotView = reg.view<SpotLightComponent, TransformComponent>(entt::exclude<InactiveComponent>);
             for (auto entity : spotView) {
                 const auto& light     = spotView.get<SpotLightComponent>(entity);
                 const auto& transform = spotView.get<TransformComponent>(entity);
@@ -341,7 +341,7 @@ namespace Vapor {
             // Rect area lights: quad axes from the transform's rotation (right =
             // +X, up = +Y), half-extents from the component size.
             scene->rectLights.clear();
-            auto rectView = reg.view<RectLightComponent, TransformComponent>();
+            auto rectView = reg.view<RectLightComponent, TransformComponent>(entt::exclude<InactiveComponent>);
             for (auto entity : rectView) {
                 const auto& light     = rectView.get<RectLightComponent>(entity);
                 const auto& transform = rectView.get<TransformComponent>(entity);
@@ -370,7 +370,7 @@ namespace Vapor {
     public:
         static void update(entt::registry& reg, IRenderer* renderer) {
             if (!renderer) return;
-            auto view = reg.view<SkyComponent>();
+            auto view = reg.view<SkyComponent>(entt::exclude<InactiveComponent>);
             for (auto entity : view) {
                 auto& sky = view.get<SkyComponent>(entity);
 
@@ -404,7 +404,7 @@ namespace Vapor {
                 // so both backends stay aligned via requestIBLUpdate().
                 if (sky.iblSunThresholdDeg > 0.0f) {
                     glm::vec3 sunDir(0.0f);
-                    auto sunView = reg.view<DirectionalLightComponent, SunComponent>();
+                    auto sunView = reg.view<DirectionalLightComponent, SunComponent>(entt::exclude<InactiveComponent>);
                     for (auto e : sunView) {
                         sunDir = sunView.get<DirectionalLightComponent>(e).direction;
                         break;
@@ -455,7 +455,7 @@ namespace Vapor {
     class TimeOfDaySystem {
     public:
         static void update(entt::registry& reg, float deltaTime) {
-            auto todView = reg.view<TimeOfDayComponent>();
+            auto todView = reg.view<TimeOfDayComponent>(entt::exclude<InactiveComponent>);
             entt::entity todEntity = entt::null;
             for (auto e : todView) { todEntity = e; break; }
             if (todEntity == entt::null) return;
@@ -489,7 +489,7 @@ namespace Vapor {
             glm::vec3 sunColor = glm::mix(glm::vec3(1.0f, 0.45f, 0.25f),
                                           glm::vec3(1.0f, 0.98f, 0.95f), warm);
 
-            auto sunView = reg.view<DirectionalLightComponent, SunComponent>();
+            auto sunView = reg.view<DirectionalLightComponent, SunComponent>(entt::exclude<InactiveComponent>);
             for (auto entity : sunView) {
                 auto& dl = sunView.get<DirectionalLightComponent>(entity);
                 dl.direction = glm::normalize(-sunPos);  // light travels away from the sun
@@ -506,7 +506,7 @@ namespace Vapor {
             glm::vec3 moonPos = -sunPos;
             float moonUp = glm::clamp(moonPos.y / 0.15f, 0.0f, 1.0f);
             moonUp = moonUp * moonUp * (3.0f - 2.0f * moonUp);  // smoothstep
-            auto moonView = reg.view<DirectionalLightComponent, MoonComponent>();
+            auto moonView = reg.view<DirectionalLightComponent, MoonComponent>(entt::exclude<InactiveComponent>);
             for (auto entity : moonView) {
                 auto& dl = moonView.get<DirectionalLightComponent>(entity);
                 dl.direction = glm::normalize(-moonPos);  // = normalize(sunPos)
@@ -529,7 +529,7 @@ namespace Vapor {
     public:
         static void update(entt::registry& reg, IRenderer* renderer) {
             if (!renderer) return;
-            auto view = reg.view<WindFieldComponent>();
+            auto view = reg.view<WindFieldComponent>(entt::exclude<InactiveComponent>);
             for (auto entity : view) {
                 const auto& wf = view.get<WindFieldComponent>(entity);
                 WindRenderData data;
@@ -553,7 +553,7 @@ namespace Vapor {
     public:
         static void update(entt::registry& reg, IRenderer* renderer) {
             if (!renderer) return;
-            auto view = reg.view<VolumetricFogComponent>();
+            auto view = reg.view<VolumetricFogComponent>(entt::exclude<InactiveComponent>);
             for (auto entity : view) {
                 const auto& f = view.get<VolumetricFogComponent>(entity);
                 VolumetricFogRenderData data;
@@ -583,7 +583,7 @@ namespace Vapor {
     class CameraControlSystem {
     public:
         static void update(entt::registry& registry, float deltaTime) {
-            auto view = registry.view<VirtualCameraComponent>();
+            auto view = registry.view<VirtualCameraComponent>(entt::exclude<InactiveComponent>);
             for (auto entity : view) {
                 auto& cam = view.get<VirtualCameraComponent>(entity);
                 if (!cam.isActive) continue;
@@ -612,7 +612,7 @@ namespace Vapor {
             );
             intent.moveVerticalAxis = inputState.getAxis(InputAction::MoveDown, InputAction::MoveUp);
 
-            auto view = registry.view<VirtualCameraComponent>();
+            auto view = registry.view<VirtualCameraComponent>(entt::exclude<InactiveComponent>);
             for (auto entity : view) {
                 auto& cam = view.get<VirtualCameraComponent>(entity);
                 if (!cam.isActive) continue;
@@ -628,7 +628,7 @@ namespace Vapor {
         }
 
         static entt::entity getActiveCamera(entt::registry& registry) {
-            auto view = registry.view<VirtualCameraComponent>();
+            auto view = registry.view<VirtualCameraComponent>(entt::exclude<InactiveComponent>);
             for (auto entity : view) {
                 if (view.get<VirtualCameraComponent>(entity).isActive) {
                     return entity;
@@ -698,7 +698,7 @@ namespace Vapor {
 
             ParticleForceField field;
 
-            auto attrView = registry.view<ParticleAttractorComponent, TransformComponent>();
+            auto attrView = registry.view<ParticleAttractorComponent, TransformComponent>(entt::exclude<InactiveComponent>);
             for (auto entity : attrView) {
                 const auto& t = attrView.get<TransformComponent>(entity);
                 const auto& a = attrView.get<ParticleAttractorComponent>(entity);
@@ -709,7 +709,7 @@ namespace Vapor {
                 if (field.attractors.size() >= MAX_PARTICLE_ATTRACTORS) break;
             }
 
-            auto windView = registry.view<WindFieldComponent>();
+            auto windView = registry.view<WindFieldComponent>(entt::exclude<InactiveComponent>);
             for (auto entity : windView) {
                 const auto& w = windView.get<WindFieldComponent>(entity);
                 field.wind       = glm::vec4(w.direction, w.strength);
@@ -736,7 +736,7 @@ namespace Vapor {
             static std::mt19937 rng(std::random_device{}());
             static std::uniform_real_distribution<float> u01(0.0f, 1.0f);
 
-            auto view = registry.view<ParticleEmitterComponent, TransformComponent>();
+            auto view = registry.view<ParticleEmitterComponent, TransformComponent>(entt::exclude<InactiveComponent>);
             for (auto entity : view) {
                 auto& emit = view.get<ParticleEmitterComponent>(entity);
                 const auto& t = view.get<TransformComponent>(entity);
@@ -942,7 +942,7 @@ namespace Vapor {
             static std::mt19937 rng(std::random_device{}());
             static std::uniform_real_distribution<float> u01(0.0f, 1.0f);
 
-            auto view = registry.view<ParticleBurstRequest>();
+            auto view = registry.view<ParticleBurstRequest>(entt::exclude<InactiveComponent>);
             for (auto entity : view) {
                 const auto& req = view.get<ParticleBurstRequest>(entity);
                 auto* t = registry.try_get<TransformComponent>(entity);
@@ -991,7 +991,7 @@ namespace Vapor {
     class SpellBoltSystem {
     public:
         static void update(entt::registry& registry, IRenderer* renderer, float deltaTime) {
-            auto view = registry.view<SpellBoltComponent, TransformComponent>();
+            auto view = registry.view<SpellBoltComponent, TransformComponent>(entt::exclude<InactiveComponent>);
             for (auto entity : view) {
                 auto& bolt = view.get<SpellBoltComponent>(entity);
                 auto& t    = view.get<TransformComponent>(entity);

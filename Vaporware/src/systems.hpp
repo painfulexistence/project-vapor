@@ -36,7 +36,7 @@ public:
 class FlipbookSystem {
 public:
     static void update(entt::registry& reg, float deltaTime) {
-        auto view = reg.view<Vapor::Sprite2DComponent, Vapor::FlipbookComponent>();
+        auto view = reg.view<Vapor::Sprite2DComponent, Vapor::FlipbookComponent>(entt::exclude<Vapor::InactiveComponent>);
         for (auto entity : view) {
             auto& sprite = view.get<Vapor::Sprite2DComponent>(entity);
             auto& flipbook = view.get<Vapor::FlipbookComponent>(entity);
@@ -240,7 +240,7 @@ public:
 class FpsTextSystem {
 public:
     static void update(entt::registry& reg, float deltaTime) {
-        auto view = reg.view<FpsTextComponent, Vapor::Text2DComponent>();
+        auto view = reg.view<FpsTextComponent, Vapor::Text2DComponent>(entt::exclude<Vapor::InactiveComponent>);
         for (auto entity : view) {
             view.get<Vapor::Text2DComponent>(entity).text =
                 fmt::format("FPS: {:.1f}", deltaTime > 0.0f ? 1.0f / deltaTime : 0.0f);
@@ -289,7 +289,7 @@ public:
 class LightMovementSystem {
 public:
     static void update(entt::registry& reg, float deltaTime) {
-        auto pointView = reg.view<Vapor::PointLightComponent, Vapor::TransformComponent, LightMovementLogicComponent>();
+        auto pointView = reg.view<Vapor::PointLightComponent, Vapor::TransformComponent, LightMovementLogicComponent>(entt::exclude<Vapor::InactiveComponent>);
         for (auto entity : pointView) {
             auto& transform = pointView.get<Vapor::TransformComponent>(entity);
             auto& logic     = pointView.get<LightMovementLogicComponent>(entity);
@@ -324,7 +324,7 @@ public:
             transform.isDirty  = true;
         }
 
-        auto dirView = reg.view<Vapor::DirectionalLightComponent, DirectionalLightLogicComponent>();
+        auto dirView = reg.view<Vapor::DirectionalLightComponent, DirectionalLightLogicComponent>(entt::exclude<Vapor::InactiveComponent>);
         for (auto entity : dirView) {
             auto& light = dirView.get<Vapor::DirectionalLightComponent>(entity);
             auto& logic = dirView.get<DirectionalLightLogicComponent>(entity);
@@ -345,7 +345,7 @@ public:
 class AutoRotateSystem {
 public:
     static void update(entt::registry& registry, float deltaTime) {
-        auto view = registry.view<Vapor::TransformComponent, AutoRotateComponent>();
+        auto view = registry.view<Vapor::TransformComponent, AutoRotateComponent>(entt::exclude<Vapor::InactiveComponent>);
         for (auto entity : view) {
             auto& transform = view.get<Vapor::TransformComponent>(entity);
             auto& rotate = view.get<AutoRotateComponent>(entity);
@@ -362,17 +362,17 @@ public:
         if (auto* request = reg.try_get<CameraSwitchRequest>(global)) {
             switch (request->mode) {
             case CameraSwitchRequest::Mode::Free: {
-                auto view = reg.view<Vapor::VirtualCameraComponent>();
+                auto view = reg.view<Vapor::VirtualCameraComponent>(entt::exclude<Vapor::InactiveComponent>);
                 view.each([&](auto entity, auto& cam) { cam.isActive = reg.all_of<FlyCameraComponent>(entity); });
                 break;
             }
             case CameraSwitchRequest::Mode::Follow: {
-                auto view = reg.view<Vapor::VirtualCameraComponent>();
+                auto view = reg.view<Vapor::VirtualCameraComponent>(entt::exclude<Vapor::InactiveComponent>);
                 view.each([&](auto entity, auto& cam) { cam.isActive = reg.all_of<FollowCameraComponent>(entity); });
                 break;
             }
             case CameraSwitchRequest::Mode::FirstPerson: {
-                auto view = reg.view<Vapor::VirtualCameraComponent>();
+                auto view = reg.view<Vapor::VirtualCameraComponent>(entt::exclude<Vapor::InactiveComponent>);
                 view.each([&](auto entity, auto& cam) { cam.isActive = reg.all_of<FirstPersonCameraComponent>(entity); }
                 );
                 break;
@@ -386,7 +386,7 @@ public:
 class CharacterMovementSystem {
 public:
     static void update(entt::registry& reg, float deltaTime) {
-        auto view = reg.view<CharacterControllerComponent, CharacterIntent>();
+        auto view = reg.view<CharacterControllerComponent, CharacterIntent>(entt::exclude<Vapor::InactiveComponent>);
         for (auto entity : view) {
             auto& intent = view.get<CharacterIntent>(entity);
             auto& controller = view.get<CharacterControllerComponent>(entity);
@@ -413,7 +413,7 @@ public:
 class SubtitleInputSystem {
 public:
     static void update(entt::registry& reg) {
-        auto view = reg.view<SubtitleQueueComponent, Vapor::FSMStateComponent, Vapor::FSMEventQueue>();
+        auto view = reg.view<SubtitleQueueComponent, Vapor::FSMStateComponent, Vapor::FSMEventQueue>(entt::exclude<Vapor::InactiveComponent>);
         for (auto entity : view) {
             auto& q = view.get<SubtitleQueueComponent>(entity);
             auto& fsm = view.get<Vapor::FSMStateComponent>(entity);
@@ -451,7 +451,7 @@ public:
         auto* page = PageSystem::getPage<SubtitlePage>(reg, PageID::Subtitle);
         if (!page) return;
 
-        auto view = reg.view<Vapor::FSMStateComponent, Vapor::FSMEventQueue>();
+        auto view = reg.view<Vapor::FSMStateComponent, Vapor::FSMEventQueue>(entt::exclude<Vapor::InactiveComponent>);
         for (auto entity : view) {
             auto& fsm = view.get<Vapor::FSMStateComponent>(entity);
             auto& events = view.get<Vapor::FSMEventQueue>(entity);
@@ -471,7 +471,7 @@ public:
 class SubtitleTimerSystem {
 public:
     static void update(entt::registry& reg, float dt) {
-        auto view = reg.view<SubtitleQueueComponent, Vapor::FSMStateComponent, Vapor::FSMEventQueue>();
+        auto view = reg.view<SubtitleQueueComponent, Vapor::FSMStateComponent, Vapor::FSMEventQueue>(entt::exclude<Vapor::InactiveComponent>);
         for (auto entity : view) {
             auto& q = view.get<SubtitleQueueComponent>(entity);
             auto& fsm = view.get<Vapor::FSMStateComponent>(entity);
@@ -499,7 +499,7 @@ public:
         auto* page = PageSystem::getPage<SubtitlePage>(reg, PageID::Subtitle);
         if (!page) return;
 
-        auto view = reg.view<SubtitleQueueComponent, Vapor::FSMStateChangeEvent>();
+        auto view = reg.view<SubtitleQueueComponent, Vapor::FSMStateChangeEvent>(entt::exclude<Vapor::InactiveComponent>);
         for (auto entity : view) {
             auto& q = view.get<SubtitleQueueComponent>(entity);
             auto& event = view.get<Vapor::FSMStateChangeEvent>(entity);
@@ -528,7 +528,7 @@ public:
         auto* page = PageSystem::getPage<ScrollTextPage>(reg, PageID::ScrollText);
         if (!page) return;
 
-        auto view = reg.view<ScrollTextQueueComponent>();
+        auto view = reg.view<ScrollTextQueueComponent>(entt::exclude<Vapor::InactiveComponent>);
         for (auto entity : view) {
             auto& q = view.get<ScrollTextQueueComponent>(entity);
             if (!q.advanceRequested || !page->isIdle()) {
@@ -554,7 +554,7 @@ public:
         auto* page = PageSystem::getPage<ChapterTitlePage>(reg, PageID::ChapterTitle);
         if (!page) return;
 
-        auto view = reg.view<ChapterTitleTriggerComponent>();
+        auto view = reg.view<ChapterTitleTriggerComponent>(entt::exclude<Vapor::InactiveComponent>);
         for (auto entity : view) {
             auto& t = view.get<ChapterTitleTriggerComponent>(entity);
             if (t.showRequested && page->isFullyHidden()) {
