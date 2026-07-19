@@ -5135,7 +5135,14 @@ void Renderer::createRenderPipeline() {
     pipelineDesc.topology = PrimitiveTopology::TriangleList;
     pipelineDesc.blendMode = BlendMode::Opaque;
     pipelineDesc.depthTest = true;
-    pipelineDesc.depthWrite = true;
+    // No depth WRITE: the pre-pass already owns the depth buffer (it clears and
+    // writes all geometry), and the main pass redraws the SAME geometry. Writing
+    // here is not just redundant — combined with early_fragment_tests it is
+    // wrong for alpha cutout: early-Z would stamp a MASK caster's depth into a
+    // hole texel BEFORE the shader discards it, blocking the sky/background from
+    // filling the hole (it showed clear colour). Test-only keeps early-Z's
+    // overdraw win without the corruption.
+    pipelineDesc.depthWrite = false;
     // LessOrEqual (not Less): the main pass loads the pre-pass depth and redraws
     // the SAME geometry, so fragments arrive at exactly the stored depth and
     // must pass the test (Less would reject every fragment). Matches native's

@@ -24,8 +24,10 @@
 // early-Z automatically; MoltenVK's translation of this shader does NOT unless
 // the SPIR-V carries the EarlyFragmentTests execution mode — without it the
 // Vulkan Main pass pays full overdraw (measured ~25ms vs ~7ms on Metal for the
-// identical algorithm on the same GPU). Safe here: the shader writes only
-// color, never discards, never writes gl_FragDepth.
+// identical algorithm on the same GPU). Safe with the alpha-cutout discard
+// below ONLY because the pipeline writes no depth (depthWrite=false; the
+// pre-pass owns depth): early-Z here tests but never stamps a discarded MASK
+// texel's depth, so cutout holes keep the pre-pass depth behind them.
 layout(early_fragment_tests) in;
 
 layout(location = 0) in vec3 fragPos;
