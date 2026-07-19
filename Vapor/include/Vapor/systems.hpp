@@ -644,7 +644,9 @@ namespace Vapor {
                 rockMat->baseColorFactor = glm::vec4(0.45f, 0.44f, 0.42f, 1.0f);
                 rockMat->roughnessFactor = 0.95f;
                 scene.materials.push_back(rockMat);
-                auto rockMesh = MeshBuilder::buildCube(1.0f);
+                // A low-poly sphere reads as a boulder (the original demo used
+                // CreateSphere for rocks); trees stay cubes.
+                auto rockMesh = MeshBuilder::buildSphere(0.5f, 12, 8);
                 rockMesh->material = rockMat;
                 scene.addMesh(rockMesh);
                 world->scatterMeshes.push_back(rockMesh);
