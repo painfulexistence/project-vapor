@@ -122,7 +122,17 @@ void VoxelWorld::setDefaultPalette() {
 float VoxelWorld::terrainHeight(int x, int z) const {
     const float baseH = 0.10f * static_cast<float>(gridDim.y);
     const float varH = 0.34f * static_cast<float>(gridDim.y);
-    float h01 = MvGradFbm01(glm::vec3(x, 0.0f, z) * 0.010f, 5, seed);
+    // Sample the heightfield in WORLD space, not per-voxel. The original's
+    // tuned 0.010 frequency assumed 5 cm voxels; expressing it as a physical
+    // 0.2/m and multiplying by voxelSize keeps a fixed ~5 m feature wavelength
+    // at ANY resolution. Otherwise a finer voxel size (e.g. the 2.5 cm centre
+    // diorama) packs the same feature count into half the ground and the
+    // terrain reads as horizontally squished. baseH/varH already track
+    // gridDim.y, so the vertical scale is resolution-independent; only the
+    // horizontal frequency needed the fix. At 5 cm this is exactly 0.010, so
+    // every 5 cm world (the side dioramas, --big, the tests) is unchanged.
+    const float freq = 0.2f * voxelSize;
+    float h01 = MvGradFbm01(glm::vec3(x, 0.0f, z) * freq, 5, seed);
     h01 = std::pow(h01, 1.6f);  // bias toward valleys with occasional peaks
     return baseH + h01 * varH;
 }

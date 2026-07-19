@@ -102,7 +102,9 @@ static std::vector<uint8_t> generateDense(int N, uint32_t seed) {
     std::vector<float> heights(static_cast<size_t>(N) * N);
     for (int z = 0; z < N; z++) {
         for (int x = 0; x < N; x++) {
-            float h01 = gradFbm01(glm::vec3(x, 0.0f, z) * 0.010f, 5, seed);
+            // Mirrors terrainHeight's world-space frequency (0.2/m * voxelSize);
+            // every makeWorld here uses 5 cm voxels, so 0.2 * 0.05 == 0.010.
+            float h01 = gradFbm01(glm::vec3(x, 0.0f, z) * (0.2f * 0.05f), 5, seed);
             h01 = std::pow(h01, 1.6f);
             heights[static_cast<size_t>(z) * N + x] = baseH + h01 * varH;
         }
@@ -268,6 +270,51 @@ TEST_CASE("generation is deterministic per seed and diverges across seeds", "[vo
                 anyDiffFromC |= a.voxelAt({ x, y, z }) != c.voxelAt({ x, y, z });
             }
     REQUIRE(anyDiffFromC);
+}
+
+TEST_CASE("terrain feature wavelength is resolution-independent (world-space frequency)", "[voxel_world]") {
+    // Two worlds of the SAME physical size (6.4 m cube) but different voxel
+    // sizes: coarse 64^3 @ 10 cm vs fine 128^3 @ 5 cm. terrainHeight samples in
+    // world space (0.2/m * voxelSize), so a feature keeps a fixed physical
+    // wavelength — matching physical columns must land at the same surface
+    // height regardless of resolution. Without the fix (per-voxel frequency)
+    // the fine world would pack twice the features into the same ground and the
+    // surfaces would diverge (the "squished" terrain).
+    VoxelWorld coarse;
+    coarse.configure(glm::ivec3(64), 0.10f, 1u << 20);
+    coarse.generate(20260705u);
+    VoxelWorld fine;
+    fine.configure(glm::ivec3(128), 0.05f, 1u << 20);
+    fine.generate(20260705u);
+
+    // First solid voxel scanning down from the top: the surface crust
+    // (grass/snow/sand, never caved) — skip columns capped by a floating
+    // feature (glow/crystal) so we compare terrain to terrain.
+    auto surfaceMeters = [](const VoxelWorld& w, int x, int z, float vs) -> float {
+        for (int y = w.dim().y - 1; y >= 0; --y) {
+            const Uint8 m = w.voxelAt({ x, y, z });
+            if (m == 0) continue;
+            if (m == VoxelWorld::MatGrass || m == VoxelWorld::MatSnow || m == VoxelWorld::MatSand)
+                return static_cast<float>(y) * vs;
+            return -1.0f;  // feature on top of this column
+        }
+        return -1.0f;
+    };
+
+    int compared = 0;
+    for (int az = 8; az <= 56; az += 8) {
+        for (int ax = 8; ax <= 56; ax += 8) {
+            // bx/bz are the SAME physical position at the fine resolution.
+            const float sCoarse = surfaceMeters(coarse, ax, az, 0.10f);
+            const float sFine = surfaceMeters(fine, ax * 2, az * 2, 0.05f);
+            if (sCoarse < 0.0f || sFine < 0.0f) continue;  // feature column
+            // Real heights are identical; only per-voxel quantization differs
+            // (<= one coarse voxel = 0.10 m).
+            CHECK(std::abs(sCoarse - sFine) <= 0.12f);
+            compared++;
+        }
+    }
+    REQUIRE(compared >= 30);  // plenty of feature-free columns to compare
 }
 
 TEST_CASE("page table, occupancy bitmasks and materials stay consistent", "[voxel_world]") {
