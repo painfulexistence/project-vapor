@@ -530,6 +530,8 @@ private:
     // by a throttled cluster-buffer readback while that panel is open.
     bool lightCullDebugOpen = false;
     Uint32 cullAvgLights = 0, cullMinLights = 0, cullMaxLights = 0, cullNonEmptyTiles = 0;
+    // Clustered spot/rect loop lengths (avg/max per cluster), same readback.
+    Uint32 cullAvgSpots = 0, cullMaxSpots = 0, cullAvgRects = 0, cullMaxRects = 0;
     // Reads back the culled cluster buffer into (mn/avg/mx/nonEmpty) over the 2D
     // tile grid. Does a waitIdle, so callers must throttle. Shared by the panel
     // and the StatsLog "CULL" source. Returns false if unavailable.

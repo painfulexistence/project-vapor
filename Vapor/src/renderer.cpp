@@ -545,16 +545,25 @@ bool Renderer::sampleClusterHistogram(Uint32& mn, Uint32& avg, Uint32& mx, Uint3
     auto* clusters = static_cast<const Vapor::Cluster*>(rhi->mapBuffer(clusterBuffer));
     if (!clusters) return false;
     Uint32 lo = ~0u, hi = 0u, sum = 0u, ne = 0u;
+    // Spot/rect loop lengths ride the same readback (avg/max per cluster).
+    Uint32 spotSum = 0u, spotHi = 0u, rectSum = 0u, rectHi = 0u;
     for (Uint32 i = 0; i < tileCount; ++i) {
         Uint32 c = clusters[i].lightCount;
         lo = std::min(lo, c); hi = std::max(hi, c); sum += c;
         if (c > 0) ++ne;
+        Uint32 sc = clusters[i].spotCount, rc = clusters[i].rectCount;
+        spotSum += sc; spotHi = std::max(spotHi, sc);
+        rectSum += rc; rectHi = std::max(rectHi, rc);
     }
     rhi->unmapBuffer(clusterBuffer);
     mn = tileCount ? lo : 0u;
     avg = tileCount ? sum / tileCount : 0u;
     mx = hi;
     nonEmpty = ne;
+    cullAvgSpots = tileCount ? spotSum / tileCount : 0u;
+    cullMaxSpots = spotHi;
+    cullAvgRects = tileCount ? rectSum / tileCount : 0u;
+    cullMaxRects = rectHi;
     return true;
 }
 
@@ -6845,10 +6854,16 @@ void Renderer::drawGraphicsImGui() {
             const Uint32 tiles = clusterGridSizeX * clusterGridSizeY * clusterGridSizeZ;
             ImGui::Text("Clusters: %u (%ux%ux%u)", tiles,
                         clusterGridSizeX, clusterGridSizeY, clusterGridSizeZ);
-            ImGui::Text("Culled per cluster:  avg %u   (min %u / max %u)",
+            ImGui::Text("Points  per cluster: avg %u   (min %u / max %u)",
                         cullAvgLights, cullMinLights, cullMaxLights);
+            if (!spotLights.empty())
+                ImGui::Text("Spots   per cluster: avg %u   (max %u)   [%zu in scene]",
+                            cullAvgSpots, cullMaxSpots, spotLights.size());
+            if (!rectLights.empty())
+                ImGui::Text("Rects   per cluster: avg %u   (max %u)   [%zu in scene]",
+                            cullAvgRects, cullMaxRects, rectLights.size());
             ImGui::Text("Non-empty clusters: %u / %u", cullNonEmptyTiles, tiles);
-            ImGui::TextDisabled("avg = point-light loop length per pixel (refreshed ~15f)");
+            ImGui::TextDisabled("avg = per-pixel loop length in the Main pass (refreshed ~15f)");
             bool skipPoint = (mainDebugFlags & 1u) != 0u;
             if (ImGui::Checkbox("Skip point-light loop (perf isolation)", &skipPoint))
                 mainDebugFlags = (mainDebugFlags & ~1u) | (skipPoint ? 1u : 0u);

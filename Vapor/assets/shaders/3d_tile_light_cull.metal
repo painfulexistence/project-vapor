@@ -85,6 +85,47 @@ bool sphereTileIntersection(float3 center, float radius, float4x4 viewProj, floa
              sphereMax.y < tileMin.y || sphereMin.y > tileMax.y);
 }
 
+// World-space bounding sphere of this froxel (screen tile x depth slice), for
+// the spot cone test. ndc.xy at forward distance z -> view-space
+// (ndc.x*z/proj00, ndc.y*z/proj11, -z) (camera looks down -Z), then invView to
+// world. Bounds the froxel AABB — conservative, never over-culls.
+void froxelWorldSphere(constant CameraData& camera, float2 screenSize,
+                       float2 tileMin, float2 tileMax, float z0, float z1,
+                       thread float3& sphereCenter, thread float& sphereRadius) {
+    float2 ndcMin = tileMin / screenSize * 2.0 - 1.0;
+    float2 ndcMax = tileMax / screenSize * 2.0 - 1.0;
+    float ip00 = 1.0 / camera.proj[0][0];
+    float ip11 = 1.0 / camera.proj[1][1];
+    float3 mn = float3(1e30), mx = float3(-1e30);
+    for (int c = 0; c < 8; ++c) {
+        float nx = ((c & 1) == 0) ? ndcMin.x : ndcMax.x;
+        float ny = ((c & 2) == 0) ? ndcMin.y : ndcMax.y;
+        float z  = ((c & 4) == 0) ? z0 : z1;
+        float3 pv = float3(nx * z * ip00, ny * z * ip11, -z);
+        float3 pw = (camera.invView * float4(pv, 1.0)).xyz;
+        mn = min(mn, pw);
+        mx = max(mx, pw);
+    }
+    sphereCenter = 0.5 * (mn + mx);
+    sphereRadius = length(mx - sphereCenter);
+}
+
+// Cone (spot) vs sphere — the "cull cone against sphere" test (Bart Wronski /
+// Frostbite): angle cull, front (past range) cull, back (behind apex) cull.
+// dir points FROM the light; cosHalf is the OUTER half-angle cosine.
+bool spotConeIntersectsSphere(float3 origin, float3 dir, float range, float cosHalf,
+                              float3 sc, float sr) {
+    float sinHalf = sqrt(max(0.0, 1.0 - cosHalf * cosHalf));
+    float3 V = sc - origin;
+    float Vlen = length(V);
+    float V1 = dot(V, dir);
+    float distClosest = cosHalf * sqrt(max(0.0, Vlen * Vlen - V1 * V1)) - V1 * sinHalf;
+    bool angleCull = distClosest > sr;
+    bool frontCull = V1 > sr + range;
+    bool backCull  = V1 < -sr;
+    return !(angleCull || frontCull || backCull);
+}
+
 kernel void computeMain(
     device Cluster* tiles [[buffer(0)]],
     const device PointLight* pointLights [[buffer(1)]],
@@ -133,6 +174,9 @@ kernel void computeMain(
     threadgroup_barrier(mem_flags::mem_threadgroup);
 
     float4x4 viewProj = camera.proj * camera.view;
+    // Froxel world-space bounding sphere, computed once for the spot cone test.
+    float3 froxelC; float froxelR;
+    froxelWorldSphere(camera, screenSize, tileMin, tileMax, sliceZ0, sliceZ1, froxelC, froxelR);
 
     // Strided cooperative tests; hits compact through the shared counters.
     // List order becomes nondeterministic — every consumer is order-independent.
@@ -145,12 +189,15 @@ kernel void computeMain(
         }
     }
 
-    // Spot lights: range is a sphere radius, point test applies directly
-    // (conservative for narrow cones; cone/AABB is the follow-up refinement).
+    // Spot lights: range-sphere test as a cheap pre-reject, then the cone test
+    // drops froxels inside the sphere but outside the actual cone (a big win
+    // for narrow spots, which fill a small fraction of their range sphere).
     for (uint i = lid; i < spotLightCount; i += WG_SIZE) {
         SpotLight sl = spotLights[i];
         if (sphereTileIntersection(sl.position, sl.radius, viewProj, tileMin, tileMax,
-                                   screenSize, sliceZ0, sliceZ1)) {
+                                   screenSize, sliceZ0, sliceZ1) &&
+            spotConeIntersectsSphere(sl.position, normalize(sl.direction), sl.radius,
+                                     sl.cosOuter, froxelC, froxelR)) {
             uint slot = atomic_fetch_add_explicit(&sSpotCount, 1u, memory_order_relaxed);
             if (slot < MAX_SPOTS_PER_CLUSTER) sSpot[slot] = i;
         }
