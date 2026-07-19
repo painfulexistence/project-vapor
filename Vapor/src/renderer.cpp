@@ -7155,9 +7155,9 @@ void Renderer::collectDrawables(entt::registry& registry, std::shared_ptr<Render
         }
     }
 
-    // Sprites are NOT collected here: the game's SpriteRenderSystem submits
+    // Sprites are NOT collected here: the game's Sprite2DRenderSystem submits
     // them via drawQuad2D with the atlas texture and full world transform.
-    // (A leftover placeholder here used to draw every SpriteComponent a second
+    // (A leftover placeholder here used to draw every Sprite2DComponent a second
     // time as an axis-aligned white quad — ghost sprite on top of the real one.)
 }
 

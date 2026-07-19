@@ -501,6 +501,10 @@ void AssetSerializer::serializeBlueprint(cereal::BinaryOutputArchive& archive, c
         archive(e.source);
         archive(e.prefab);
         archive(e.componentsJson);
+        archive(static_cast<uint8_t>(e.primitive.shape));
+        archive(e.primitive.size);
+        archive(e.primitive.height);
+        archive(e.primitive.material);
     }
 
     archive(blueprint.sources);
@@ -570,6 +574,12 @@ auto AssetSerializer::deserializeBlueprint(cereal::BinaryInputArchive& archive) 
         archive(e.source);
         archive(e.prefab);
         archive(e.componentsJson);
+        uint8_t shape = 0;
+        archive(shape);
+        e.primitive.shape = static_cast<Vapor::PrimitiveBlueprint::Shape>(shape);
+        archive(e.primitive.size);
+        archive(e.primitive.height);
+        archive(e.primitive.material);
         blueprint.entities.push_back(std::move(e));
     }
 
