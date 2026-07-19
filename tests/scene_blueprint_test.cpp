@@ -6,6 +6,7 @@
 #include <glm/gtc/quaternion.hpp>
 
 #include "Vapor/components.hpp"
+#include "Vapor/fsm.hpp"
 #include "Vapor/render_scene.hpp"
 #include "Vapor/scene_blueprint.hpp"
 
@@ -371,3 +372,157 @@ TEST_CASE("instantiate applies registry components from the blob", "[scene_bluep
     // "noSuchComponent" only logs — the rest of the blob still applies.
 }
 #endif// VAPOR_HAS_BOOST_PFR
+
+// ── Primitives, entity references, physics data, FSM ────────────────────────
+
+TEST_CASE("primitive entities build and stage MeshBuilder geometry", "[scene_blueprint]") {
+    SceneBlueprint bp = parseSceneBlueprint(R"({
+        "materials": [ { "name": "Crate", "roughnessFactor": 0.8 } ],
+        "entities": [
+            { "name": "Box", "primitive": { "shape": "cube", "size": 2.0, "material": "Crate" } }
+        ]
+    })");
+    REQUIRE(bp.ok);
+    REQUIRE(bp.entities.size() == 1);
+    CHECK(bp.entities[0].primitive.shape == PrimitiveBlueprint::Shape::Cube);
+    CHECK(bp.entities[0].primitive.size == Catch::Approx(2.0f));
+    REQUIRE(bp.entities[0].primitive.material == 0);
+
+    entt::registry registry;
+    RenderScene scene("prim");
+    std::vector<entt::entity> created;
+    instantiate(registry, scene, bp, entt::null, "", &created);
+    REQUIRE(created.size() == 2);// root + Box
+    const entt::entity box = created[1];
+    REQUIRE(registry.all_of<MeshRendererComponent>(box));
+    const auto& mrc = registry.get<MeshRendererComponent>(box);
+    REQUIRE(mrc.meshes.size() == 1);
+    CHECK(mrc.meshes[0]->material == bp.materials[0]);
+    CHECK(scene.stagedMeshes.size() == 1);// primitive staged into the pool
+}
+
+TEST_CASE("material extensions parse type/clearcoat/useIBL", "[scene_blueprint]") {
+    SceneBlueprint bp = parseSceneBlueprint(R"({
+        "materials": [ { "name": "Film", "type": "iridescent", "clearcoat": 0.9, "clearcoatGloss": 0.45, "useIBL": false } ],
+        "entities": []
+    })");
+    REQUIRE(bp.ok);
+    REQUIRE(bp.materials.size() == 1);
+    CHECK(bp.materials[0]->materialType == MaterialType::Iridescent);
+    CHECK(bp.materials[0]->clearcoat == Catch::Approx(0.9f));
+    CHECK(bp.materials[0]->clearcoatGloss == Catch::Approx(0.45f));
+    CHECK_FALSE(bp.materials[0]->useIBL);
+}
+
+#ifdef VAPOR_HAS_BOOST_PFR
+TEST_CASE("entt::entity fields resolve entity-name references", "[scene_blueprint]") {
+    // followCamera.target is an entt::entity authored as the target's name.
+    // "Chaser" is declared BEFORE "Cube 1" — the deferred component pass makes
+    // forward references work.
+    SceneBlueprint bp = parseSceneBlueprint(R"({
+        "entities": [
+            { "name": "Chaser", "components": { "followCamera": { "target": "Cube 1", "offset": [0, 2, 5] } } },
+            { "name": "Cube 1" }
+        ]
+    })");
+    REQUIRE(bp.ok);
+
+    entt::registry registry;
+    RenderScene scene("refs");
+    std::vector<entt::entity> created;
+    instantiate(registry, scene, bp, entt::null, "", &created);
+    REQUIRE(created.size() == 3);// root + 2
+    const entt::entity chaser = created[1];
+    const entt::entity cube = created[2];
+    REQUIRE(registry.all_of<FollowCameraComponent>(chaser));
+    CHECK((registry.get<FollowCameraComponent>(chaser).target == cube));
+    CHECK(registry.get<FollowCameraComponent>(chaser).offset.z == Catch::Approx(5.0f));
+}
+#endif
+
+TEST_CASE("rigidbody applier maps motion type strings; body stays invalid", "[scene_blueprint]") {
+    SceneBlueprint bp = parseSceneBlueprint(R"({
+        "entities": [
+            { "name": "Rock", "components": {
+                "rigidbody": { "motionType": "static" },
+                "boxCollider": { "halfSize": [3, 0.5, 3] } } }
+        ]
+    })");
+    REQUIRE(bp.ok);
+    entt::registry registry;
+    RenderScene scene("phys");
+    std::vector<entt::entity> created;
+    instantiate(registry, scene, bp, entt::null, "", &created);
+    const entt::entity rock = created[1];
+    REQUIRE(registry.all_of<RigidbodyComponent>(rock));
+    CHECK(registry.get<RigidbodyComponent>(rock).motionType == BodyMotionType::Static);
+    // Data-only: no live Jolt body — the app's body-create system owns that.
+    CHECK_FALSE(registry.get<RigidbodyComponent>(rock).body.valid());
+#ifdef VAPOR_HAS_BOOST_PFR
+    REQUIRE(registry.all_of<BoxColliderComponent>(rock));
+    CHECK(registry.get<BoxColliderComponent>(rock).halfSize.x == Catch::Approx(3.0f));
+#endif
+}
+
+TEST_CASE("fsm applier builds a definition by state name", "[scene_blueprint]") {
+    SceneBlueprint bp = parseSceneBlueprint(R"({
+        "entities": [
+            { "name": "Machine", "components": { "fsm": {
+                "states": ["Idle", "Showing", "Visible"],
+                "initial": "Idle",
+                "transitions": [
+                    { "from": "Idle", "to": "Showing", "event": "Show", "minTime": 0.2 }
+                ],
+                "timed": [ { "from": "Showing", "to": "Visible", "duration": 0.3 } ]
+            } } }
+        ]
+    })");
+    REQUIRE(bp.ok);
+    entt::registry registry;
+    RenderScene scene("fsm");
+    std::vector<entt::entity> created;
+    instantiate(registry, scene, bp, entt::null, "", &created);
+    const entt::entity machine = created[1];
+    REQUIRE(registry.all_of<FSMDefinition>(machine));
+    const auto& def = registry.get<FSMDefinition>(machine);
+    REQUIRE(def.stateNames.size() == 3);
+    CHECK(def.initialState == 0);
+    REQUIRE(def.eventTransitions.size() == 1);
+    CHECK(def.eventTransitions[0].fromState == 0);
+    CHECK(def.eventTransitions[0].toState == 1);
+    CHECK(def.eventTransitions[0].triggerEvent == "Show");
+    CHECK(def.eventTransitions[0].minStateTime == Catch::Approx(0.2f));
+    REQUIRE(def.timedTransitions.size() == 1);
+    CHECK(def.timedTransitions[0].duration == Catch::Approx(0.3f));
+    CHECK(registry.all_of<FSMEventQueue>(machine));
+    // FSMInitSystem owns state seeding (and the initial enter event).
+    CHECK_FALSE(registry.all_of<FSMStateComponent>(machine));
+}
+
+TEST_CASE("blueprint cook round-trips primitives (format v3)", "[scene_blueprint]") {
+    SceneBlueprint bp = parseSceneBlueprint(R"({
+        "materials": [ { "name": "M" } ],
+        "entities": [ { "name": "Box", "primitive": { "shape": "capsule", "size": 0.4, "height": 1.8, "material": "M" } } ]
+    })");
+    REQUIRE(bp.ok);
+
+    std::string path = "test_prim_cook.bin";
+    {
+        std::ofstream out(path, std::ios::binary);
+        cereal::BinaryOutputArchive archive(out);
+        AssetSerializer::serializeBlueprint(archive, bp);
+    }
+    SceneBlueprint back;
+    {
+        std::ifstream in(path, std::ios::binary);
+        cereal::BinaryInputArchive archive(in);
+        back = AssetSerializer::deserializeBlueprint(archive);
+    }
+    std::remove(path.c_str());
+    REQUIRE(back.ok);
+    REQUIRE(back.entities.size() == 1);
+    CHECK(back.entities[0].primitive.shape == PrimitiveBlueprint::Shape::Capsule);
+    CHECK(back.entities[0].primitive.size == Catch::Approx(0.4f));
+    CHECK(back.entities[0].primitive.height == Catch::Approx(1.8f));
+    CHECK(back.entities[0].primitive.material == 0);
+}

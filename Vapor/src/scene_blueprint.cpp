@@ -4,6 +4,8 @@
 #include "asset_serializer.hpp"
 #include "components.hpp"
 #include "file_system.hpp"
+#include "fsm.hpp"
+#include "mesh_builder.hpp"
 #include "render_scene.hpp"
 
 #include <algorithm>
@@ -23,6 +25,22 @@ using namespace Vapor;
 namespace Vapor {
 
 using json = nlohmann::json;
+
+// ── Entity name scope (see detail::entityNameScope in the header) ────────────
+
+namespace detail {
+    static const std::unordered_map<std::string, entt::entity>* g_entityNameScope = nullptr;
+
+    const std::unordered_map<std::string, entt::entity>* entityNameScope() {
+        return g_entityNameScope;
+    }
+    EntityNameScopeGuard::EntityNameScopeGuard(const std::unordered_map<std::string, entt::entity>* scope) {
+        g_entityNameScope = scope;
+    }
+    EntityNameScopeGuard::~EntityNameScopeGuard() {
+        g_entityNameScope = nullptr;
+    }
+}// namespace detail
 
 // ── JSON field helpers ───────────────────────────────────────────────────────
 
@@ -83,12 +101,14 @@ BlueprintComponents& BlueprintComponents::instance() {
     static BlueprintComponents registry = [] {
         BlueprintComponents r;
         r.registerComponent<SunComponent>("sun");
+        r.registerComponent<MoonComponent>("moon");
         r.registerComponent<PointLightComponent>("pointLight");
         r.registerComponent<DirectionalLightComponent>("directionalLight");
         r.registerComponent<SpotLightComponent>("spotLight");
         r.registerComponent<RectLightComponent>("rectLight");
         r.registerComponent<SkyComponent>("sky");
         r.registerComponent<TimeOfDayComponent>("timeOfDay");
+        r.registerComponent<VolumetricFogComponent>("volumetricFog");
         r.registerComponent<VirtualCameraComponent>("virtualCamera");
         r.registerComponent<FlyCameraComponent>("flyCamera");
         r.registerComponent<FollowCameraComponent>("followCamera");
@@ -96,6 +116,90 @@ BlueprintComponents& BlueprintComponents::instance() {
         r.registerComponent<ParticleEmitterComponent>("particleEmitter");
         r.registerComponent<ParticleAttractorComponent>("particleAttractor");
         r.registerComponent<ParticleRendererComponent>("particleRenderer");
+
+        r.registerComponent<Text2DComponent>("text2D");
+        // shape2D: hand-written for the string-authored kind (the PFR path
+        // only reads enums as integers). Parsed manually so the applier also
+        // works in no-Boost builds.
+        r.registerApplier("shape2D", [](entt::registry& reg, entt::entity e, const nlohmann::json& j) {
+            Shape2DComponent shape;
+            const std::string kind = j.value("kind", "quad");
+            shape.kind = kind == "rect"       ? Shape2DComponent::Kind::Rect
+                         : kind == "circle"   ? Shape2DComponent::Kind::Circle
+                         : kind == "triangle" ? Shape2DComponent::Kind::Triangle
+                                              : Shape2DComponent::Kind::Quad;
+            const auto readV2 = [&](const char* key, glm::vec2 fallback) {
+                const auto it = j.find(key);
+                if (it == j.end() || !it->is_array() || it->size() < 2) return fallback;
+                return glm::vec2{ (*it)[0].get<float>(), (*it)[1].get<float>() };
+            };
+            shape.size = readV2("size", shape.size);
+            shape.p1 = readV2("p1", shape.p1);
+            shape.p2 = readV2("p2", shape.p2);
+            shape.radius = j.value("radius", shape.radius);
+            shape.thickness = j.value("thickness", shape.thickness);
+            shape.visible = j.value("visible", shape.visible);
+            if (const auto it = j.find("color"); it != j.end() && it->is_array() && it->size() >= 4) {
+                shape.color = { (*it)[0].get<float>(), (*it)[1].get<float>(),
+                                (*it)[2].get<float>(), (*it)[3].get<float>() };
+            }
+            reg.emplace_or_replace<Shape2DComponent>(e, shape);
+        });
+
+        // Physics: data-only here — no live Jolt body is created. The app's
+        // body-create system observes {Rigidbody, Transform, Collider} with an
+        // invalid BodyHandle and creates/registers the body reactively.
+        r.registerComponent<BoxColliderComponent>("boxCollider");
+        r.registerComponent<SphereColliderComponent>("sphereCollider");
+        r.registerApplier("rigidbody", [](entt::registry& reg, entt::entity e, const nlohmann::json& j) {
+            RigidbodyComponent rb;
+            const std::string motion = j.value("motionType", "dynamic");
+            rb.motionType = motion == "static"      ? BodyMotionType::Static
+                            : motion == "kinematic" ? BodyMotionType::Kinematic
+                                                    : BodyMotionType::Dynamic;
+            rb.syncToPhysics = j.value("syncToPhysics", rb.syncToPhysics);
+            rb.syncFromPhysics = j.value("syncFromPhysics", rb.syncFromPhysics);
+            reg.emplace_or_replace<RigidbodyComponent>(e, rb);
+        });
+
+        // FSM: states/transitions authored by name; actions stay out of the
+        // data entirely — FSMSystem emits FSMStateChangeEvent and reaction
+        // systems consume it. Also seeds the runtime state + event queue so an
+        // authored FSM is live without further setup.
+        r.registerApplier("fsm", [](entt::registry& reg, entt::entity e, const nlohmann::json& j) {
+            FSMDefinition def;
+            if (j.contains("states") && j.at("states").is_array())
+                for (const auto& s : j.at("states"))
+                    if (s.is_string()) def.stateNames.push_back(s.get<std::string>());
+            if (def.stateNames.empty()) {
+                fmt::print(stderr, "blueprint: fsm with no states — skipped\n");
+                return;
+            }
+            def.initialState = def.getStateIndex(j.value("initial", def.stateNames.front()));
+            if (j.contains("transitions") && j.at("transitions").is_array()) {
+                for (const auto& t : j.at("transitions")) {
+                    if (!t.is_object()) continue;
+                    def.eventTransitions.emplace_back(
+                        def.getStateIndex(t.value("from", "")), def.getStateIndex(t.value("to", "")),
+                        t.value("event", ""), t.value("minTime", 0.0f)
+                    );
+                }
+            }
+            if (j.contains("timed") && j.at("timed").is_array()) {
+                for (const auto& t : j.at("timed")) {
+                    if (!t.is_object()) continue;
+                    def.timedTransitions.emplace_back(
+                        def.getStateIndex(t.value("from", "")), def.getStateIndex(t.value("to", "")),
+                        t.value("duration", 0.0f)
+                    );
+                }
+            }
+            // No FSMStateComponent here: FSMInitSystem seeds it on first update
+            // (definition-without-state is its trigger) AND emits the initial
+            // state-enter event, which reaction systems may rely on.
+            reg.emplace_or_replace<FSMEventQueue>(e);
+            reg.emplace_or_replace<FSMDefinition>(e, std::move(def));
+        });
         return r;
     }();
     return registry;
@@ -110,6 +214,29 @@ static void parseEntityRec(const json& j, int parentIndex, SceneBlueprint& out) 
     e.parent = parentIndex;
     e.source = j.value("source", "");
     e.prefab = j.value("prefab", "");
+    if (j.contains("primitive") && j.at("primitive").is_object()) {
+        const auto& p = j.at("primitive");
+        const std::string shape = p.value("shape", "");
+        if (shape == "cube") e.primitive.shape = PrimitiveBlueprint::Shape::Cube;
+        else if (shape == "capsule") e.primitive.shape = PrimitiveBlueprint::Shape::Capsule;
+        else if (shape == "cone") e.primitive.shape = PrimitiveBlueprint::Shape::Cone;
+        else if (shape == "triforce") e.primitive.shape = PrimitiveBlueprint::Shape::Triforce;
+        else fmt::print(stderr, "parseSceneBlueprint: unknown primitive shape '{}'\n", shape);
+        e.primitive.size = p.value("size", 1.0f);
+        e.primitive.height = p.value("height", 1.0f);
+        // Material by declared name — materials[] parses before entities[].
+        if (p.contains("material") && p.at("material").is_string()) {
+            const std::string matName = p.at("material").get<std::string>();
+            for (size_t m = 0; m < out.materials.size(); ++m) {
+                if (out.materials[m] && out.materials[m]->name == matName) {
+                    e.primitive.material = static_cast<int>(m);
+                    break;
+                }
+            }
+            if (e.primitive.material < 0)
+                fmt::print(stderr, "parseSceneBlueprint: primitive material '{}' not declared\n", matName);
+        }
+    }
     if (j.contains("light")) {
         out.lights.push_back(parseLight(j.at("light")));
         e.lights.push_back(static_cast<int>(out.lights.size()) - 1);
@@ -136,6 +263,15 @@ static void parseMaterial(const json& j, SceneBlueprint& out) {
     }
     material->metallicFactor = j.value("metallicFactor", material->metallicFactor);
     material->roughnessFactor = j.value("roughnessFactor", material->roughnessFactor);
+    material->clearcoat = j.value("clearcoat", material->clearcoat);
+    material->clearcoatGloss = j.value("clearcoatGloss", material->clearcoatGloss);
+    material->useIBL = j.value("useIBL", material->useIBL);
+    {
+        const std::string type = j.value("type", "");
+        if (type == "iridescent") material->materialType = MaterialType::Iridescent;
+        else if (!type.empty() && type != "pbr")
+            fmt::print(stderr, "parseSceneBlueprint: unknown material type '{}'\n", type);
+    }
     if (j.contains("emissiveFactor")) {
         const auto& a = j.at("emissiveFactor");
         if (a.is_array() && a.size() >= 3)
@@ -463,6 +599,28 @@ entt::entity instantiate(
                 mrc.meshes.push_back(blueprint.meshes[static_cast<size_t>(mi)]);
         }
 
+        // Procedural primitive: built fresh per entity (each gets its own mesh
+        // so per-entity materials stay independent) and staged like any other.
+        if (e.primitive.shape != PrimitiveBlueprint::Shape::None) {
+            std::shared_ptr<Material> mat =
+                e.primitive.material >= 0 ? blueprint.materials[static_cast<size_t>(e.primitive.material)] : nullptr;
+            std::shared_ptr<Mesh> mesh;
+            switch (e.primitive.shape) {
+            case PrimitiveBlueprint::Shape::Cube: mesh = MeshBuilder::buildCube(e.primitive.size, mat); break;
+            case PrimitiveBlueprint::Shape::Capsule:
+                mesh = MeshBuilder::buildCapsule(e.primitive.height, e.primitive.size, 16, 8, mat);
+                break;
+            case PrimitiveBlueprint::Shape::Cone: mesh = MeshBuilder::buildCone(e.primitive.size, mat); break;
+            case PrimitiveBlueprint::Shape::Triforce: mesh = MeshBuilder::buildTriforce(mat); break;
+            case PrimitiveBlueprint::Shape::None: break;
+            }
+            if (mesh) {
+                scene.stagedMeshes.push_back(mesh);
+                scene.stagedMeshTransforms.push_back(glm::mat4(1.0f));
+                registry.get_or_emplace<MeshRendererComponent>(ent).meshes.push_back(std::move(mesh));
+            }
+        }
+
         for (int li : e.lights) {
             const LightBlueprint& light = blueprint.lights[static_cast<size_t>(li)];
             switch (light.type) {
@@ -507,20 +665,30 @@ entt::entity instantiate(
             }
         }
 
-        // Generic components: each key resolves through the applier registry
-        // (engine data components are pre-registered; the app adds its own).
-        if (!e.componentsJson.empty()) {
+        if (outEntities) outEntities->push_back(ent);
+    }
+
+    // Generic components, applied in a second pass now that every entity of
+    // this batch exists: entt::entity fields authored as name strings resolve
+    // through the scope regardless of declaration order.
+    {
+        std::unordered_map<std::string, entt::entity> nameScope;
+        nameScope.reserve(blueprint.entities.size());
+        for (size_t i = 0; i < blueprint.entities.size(); ++i)
+            if (!blueprint.entities[i].name.empty()) nameScope.emplace(blueprint.entities[i].name, created[i]);
+        const detail::EntityNameScopeGuard scopeGuard(&nameScope);
+
+        for (size_t i = 0; i < blueprint.entities.size(); ++i) {
+            const EntityBlueprint& e = blueprint.entities[i];
+            if (e.componentsJson.empty()) continue;
             const json components = json::parse(e.componentsJson, /*cb=*/nullptr, /*allow_exceptions=*/false);
-            if (components.is_object()) {
-                for (const auto& [key, value] : components.items()) {
-                    if (!BlueprintComponents::instance().apply(key, registry, ent, value))
-                        fmt::print(stderr, "instantiate: no applier registered for component '{}' (entity '{}')\n",
-                                   key, e.name);
-                }
+            if (!components.is_object()) continue;
+            for (const auto& [key, value] : components.items()) {
+                if (!BlueprintComponents::instance().apply(key, registry, created[i], value))
+                    fmt::print(stderr, "instantiate: no applier registered for component '{}' (entity '{}')\n",
+                               key, e.name);
             }
         }
-
-        if (outEntities) outEntities->push_back(ent);
     }
 
     return root;
