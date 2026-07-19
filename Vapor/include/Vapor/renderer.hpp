@@ -314,7 +314,10 @@ public:
     void setParticleVisible(bool visible) override { particleVisible = visible; }
     void setSky(const SkyRenderData& sky) override;
     void setWind(const WindRenderData& wind) override;
-    void requestIBLUpdate() override { iblNeedsUpdate = true; }
+    // Sun-driven auto rebake is opt-in (m_iblAutoRebake, default off) — a moving
+    // sun otherwise re-bakes the IBL constantly. The one-shot "Refresh IBL"
+    // button and sky-config changes (setSky) still force a rebake directly.
+    void requestIBLUpdate() override { if (m_iblAutoRebake) iblNeedsUpdate = true; }
     void setParticleDrawList(const std::vector<ParticleDrawPacket>& draws) override;
 
     // ========================================================================
@@ -808,6 +811,10 @@ private:
     // frame while ImGui samples last frame's copy stalls (WAR hazard ~a full
     // frame). Only render it while the debug panel checkbox is on.
     bool m_iblPreviewEnabled = false;
+    // Sun-driven IBL rebake toggle (SkySystem calls requestIBLUpdate() as the sun
+    // moves; gated here). Default off to save the per-move bake cost — the sky
+    // still bakes once on startup and on manual Refresh / sky-config changes.
+    bool m_iblAutoRebake = false;
     ShaderHandle lightScatteringShader;
     ShaderHandle volumetricFogShader;
     BufferHandle fogDataBuffer;

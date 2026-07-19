@@ -7061,6 +7061,10 @@ void Renderer::drawGraphicsImGui() {
             ImGui::TreePop();
         }
         if (ImGui::Button("Refresh IBL")) iblNeedsUpdate = true;
+        ImGui::SameLine();
+        // Sun-driven auto rebake (SkySystem's throttled requestIBLUpdate). Off by
+        // default: a moving sun would otherwise re-bake the IBL every threshold step.
+        ImGui::Checkbox("Auto rebake", &m_iblAutoRebake);
         if (ch) iblNeedsUpdate = true;  // sky changed -> recapture IBL (native behavior)
         // Debug: the baked environment cubemap, unwrapped to equirect. Off by
         // default — the pass stalls (single-buffered RT read by ImGui), so only
