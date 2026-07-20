@@ -340,13 +340,18 @@ float3 FresnelSchlickRoughness(float cosTheta, float3 F0, float roughness) {
 }
 
 // Calculate IBL (Image-Based Lighting) contribution
-float3 CalculateIBL(
+// Outputs the diffuse (irradiance) and specular (prefiltered env) IBL terms
+// separately so the composite can let RT reflection REPLACE the specular term
+// instead of double-counting it.
+void CalculateIBL(
     float3 norm,
     float3 viewDir,
     Surface surf,
     texturecube<float, access::sample> irradianceMap,
     texturecube<float, access::sample> prefilterMap,
-    texture2d<float, access::sample> brdfLUT
+    texture2d<float, access::sample> brdfLUT,
+    thread float3& outDiffuse,
+    thread float3& outSpecular
 ) {
     constexpr sampler cubeSampler(filter::linear, mip_filter::linear);
     constexpr sampler lutSampler(filter::linear, address::clamp_to_edge);
@@ -378,7 +383,8 @@ float3 CalculateIBL(
     float2 brdf = brdfLUT.sample(lutSampler, float2(NdotV, surf.roughness)).rg;
     float3 specularIBL = prefilteredColor * (F * brdf.x + brdf.y);
 
-    return (diffuseIBL + specularIBL) * surf.ao;
+    outDiffuse  = diffuseIBL  * surf.ao;
+    outSpecular = specularIBL * surf.ao;
 }
 
 vertex RasterizerData vertexMain(
@@ -831,37 +837,41 @@ fragment float4 fragmentMain(
     // direct light by AO is physically wrong and dirties lit surfaces
     float screenAO = texAO.sample(s, screenUV).r;
 
-    // GIBS Global Illumination or IBL fallback
+    // Indirect lighting = diffuse indirect + specular indirect (env reflection),
+    // kept as two independent terms so RT reflection can REPLACE the env specular
+    // instead of double-counting it against the IBL prefilter.
+    float3 iblDiffuse  = float3(0.0);
+    float3 iblSpecular = float3(0.0);
+    if (material.iblEnabled > 0.5) {
+        CalculateIBL(norm, viewDir, surf, irradianceMap, prefilterMap, brdfLUT, iblDiffuse, iblSpecular);
+    }
+
+    // Diffuse indirect: GIBS GI, else IBL irradiance, else a flat ambient floor.
     if (gibsEnabled > 0) {
-        // Sample GIBS indirect lighting at screen position
-        float3 giContribution = gibsGI.sample(s, screenUV).rgb;
-        // Apply ambient occlusion to indirect lighting
-        result += giContribution * surf.ao * screenAO;
+        result += gibsGI.sample(s, screenUV).rgb * surf.ao * screenAO;
     } else if (material.iblEnabled > 0.5) {
-        result += CalculateIBL(norm, viewDir, surf, irradianceMap, prefilterMap, brdfLUT) * screenAO;
+        result += iblDiffuse * screenAO;
     } else {
         result += float3(0.03) * surf.ao * surf.color * screenAO; // minimal ambient fallback
     }
 
-    // RT mirror reflections (half-res, bilinearly upsampled by the sample).
-    // Fresnel-weighted like the IBL specular, faded by roughness — the traced
-    // ray is a mirror ray, so rough surfaces should not show sharp reflections.
+    // Specular indirect (environment reflection): RT reflection is the same term
+    // as the IBL prefilter but traced against real geometry, so it REPLACES the
+    // prefilter rather than adding to it. Blend by roughness: RT for smooth
+    // (accurate + glossy via the mip chain), the prefilter for very rough where a
+    // single traced ray can't blur far enough. Fresnel/F0-weighted (metalness).
+    float3 envSpecular = iblSpecular;
     if (reflectionParams.x > 0.5) {
-        // Glossy: the traced ray is a sharp mirror ray (mip 0). Sample a blurrier
-        // mip as roughness rises so medium-rough surfaces show a soft, spread-out
-        // reflection instead of a crisp mirror. The mip chain is built after the
-        // trace (renderer generateMipmaps). Trilinear via sampler s (mip_filter).
         float maxMip = float(texReflection.get_num_mip_levels() - 1);
         float3 refl = texReflection.sample(s, screenUV, level(surf.roughness * maxMip)).rgb;
         float NdotV = max(dot(norm, viewDir), 0.0);
         float3 F0r = mix(float3(0.04), surf.color, surf.metallic);
         float3 Fr = FresnelSchlickRoughness(NdotV, F0r, surf.roughness);
-        // The mip blur now conveys glossiness across the range, so keep the RT
-        // contribution and only fade near fully-rough, where the prefiltered IBL
-        // specular is the better source (mips can't blur far enough).
-        float roughFade = 1.0 - surf.roughness * surf.roughness;
-        result += refl * Fr * roughFade * reflectionParams.y * screenAO;
+        float3 rtSpecular = refl * Fr * reflectionParams.y;
+        float rtWeight = 1.0 - surf.roughness * surf.roughness;  // RT for smooth
+        envSpecular = mix(iblSpecular, rtSpecular, rtWeight);
     }
+    result += envSpecular * screenAO;
 
     // RT refractions (KHR_materials_transmission): blend the traced
     // transmitted radiance in by the material's transmission factor. What
