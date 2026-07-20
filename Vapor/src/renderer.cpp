@@ -7,6 +7,7 @@
 #endif
 #include "helper.hpp"
 #include "components.hpp"
+#include "graphics_effects.hpp"  // VolumetricFogData / VolumetricFogVolumeGPU (froxel kernel layouts)
 #include "engine_core.hpp"
 #include "asset_manager.hpp"  // AssetManager::loadHDRI
 #include "rmlui_manager.hpp"
