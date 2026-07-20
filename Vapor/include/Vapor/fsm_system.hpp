@@ -1,6 +1,7 @@
 #pragma once
 
 #include "fsm.hpp"
+#include "components.hpp"
 #include <entt/entt.hpp>
 
 namespace Vapor {
