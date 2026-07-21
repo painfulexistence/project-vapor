@@ -339,6 +339,9 @@ public:
     void updateGrassCell(Uint32 slot, const std::vector<Vapor::GrassBladeGpu>& blades) override;
     void setGrassDraws(const std::vector<Vapor::GrassCellDraw>& draws,
                        const Vapor::GrassSettingsData& settings) override;
+    // GPU mesh-shader terrain (Vulkan + VK_EXT_mesh_shader only).
+    void setMeshTerrain(const TerrainMeshInfo& info) override;
+    bool isMeshTerrainActive() const override;
     // MicroVoxel tunables (the same state the ImGui panel edits) — exposed so
     // demo/gameplay hotkeys can flip debug views and toggles directly.
     MicroVoxelRenderData& getMicroVoxelSettings() { return microVoxelSettings; }
@@ -443,6 +446,9 @@ private:
     void heightFogPass();
     void volumetricFogPass();
     void volumeRaymarchPass();
+    // GPU mesh-shader terrain: drawMeshTasks over the tile grid, shaded by
+    // RHIMain.frag's terrain branch. Runs between Main and Grass.
+    void terrainMeshPass();
     // Streamed grass ring: instanced blade draws per resident cell, drawn
     // between Main and MicroVoxel (writes depth; opaque, no blending).
     void grassPass();
@@ -781,6 +787,16 @@ private:
         Uint32 pageEntryCount = 0;   // page-table entries this volume owns
         Uint32 brickCapacity = 0;    // pool slots this volume owns
     };
+    // ---- Mesh-shader terrain (see terrainMeshPass) -----------------------
+    // Vulkan + VK_EXT_mesh_shader only; when active, TerrainSystem hides the
+    // CPU tile meshes and this pass generates the whole heightfield on GPU.
+    PipelineHandle terrainMeshPipeline;
+    ShaderHandle terrainTaskShader, terrainMeshShader;
+    BufferHandle terrainMeshParamsBuffer;
+    TerrainMeshInfo terrainMeshInfo;  // IRenderer::TerrainMeshInfo (inherited)
+    bool terrainMeshInfoValid = false;
+    bool meshTerrainEnabled = true;  // runtime toggle (falls back to CPU tiles)
+
     // ---- Grass ring (streamed instanced blades; see grassPass) -----------
     // Fixed pool of cell slots in one instance buffer; TerrainSystem streams
     // cells by rewriting slots in place, and each frame supplies the resident
