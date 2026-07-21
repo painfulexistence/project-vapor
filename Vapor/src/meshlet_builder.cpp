@@ -1,8 +1,14 @@
-#include "meshlet_builder.hpp"
-
+// clusterlod's C-API implementation (CLUSTERLOD_IMPLEMENTATION) lives in the
+// GLOBAL namespace with a `using namespace clod`, so inside it `Cluster` means
+// clod::Cluster. It MUST be compiled before any Vapor header: several Vapor
+// headers do a global `using namespace Vapor`, and main's Vapor::Cluster would
+// then be equally visible, making `Cluster` ambiguous inside the clod impl
+// (a cascade of parse errors in clusterlod.h). Keep this block first.
 #include <meshoptimizer.h>
 #define CLUSTERLOD_IMPLEMENTATION   // exactly one TU emits the clusterlod impl
 #include "meshopt/clusterlod.h"
+
+#include "meshlet_builder.hpp"
 
 #include <algorithm>
 #include <vector>
