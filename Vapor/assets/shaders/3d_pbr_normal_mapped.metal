@@ -421,6 +421,75 @@ vertex RasterizerData vertexMain(
     return vert;
 }
 
+// ── Terrain surface (shaderModel == 1) — MSL twin of RHIMain.frag's branch ──
+// Faithful port of Atmospheric's terrain.frag 4-layer splat: weights recomputed
+// per fragment from height/slope + world-space FBm breakup (defaultSplat rules,
+// no splat texture), detail layers tiled in world space. Layer order/frequency
+// (repeats per metre): 0 grass 0.25, 1 rock 0.046875, 2 dirt 0.125,
+// 3 snow 0.078125.
+constant float4 kTerrainLayerFreq = float4(0.25, 0.046875, 0.125, 0.078125);
+constant uint kTerrainSplatSeed = 7u;
+
+inline uint trgHash2(int x, int y, uint seed) {
+    uint h = uint(x) * 374761393u + uint(y) * 668265263u + seed * 2654435761u;
+    h = (h ^ (h >> 13)) * 1274126177u;
+    return h ^ (h >> 16);
+}
+inline float trgHash01(int x, int y, uint seed) { return float(trgHash2(x, y, seed) >> 8) * (1.0 / 16777216.0); }
+inline float trgSmooth(float t) { return t * t * (3.0 - 2.0 * t); }
+
+static float trgWorldFBm(float2 p, float wavelength, int octaves, uint seed) {
+    float sum = 0.0, amp = 0.5, freq = 1.0 / wavelength;
+    for (int k = 0; k < octaves; ++k) {
+        float u = p.x * freq, v = p.y * freq;
+        int xi = int(floor(u)), yi = int(floor(v));
+        float fx = trgSmooth(u - float(xi)), fy = trgSmooth(v - float(yi));
+        uint sd = seed + uint(k) * 131u;
+        float a = trgHash01(xi, yi, sd),     b = trgHash01(xi + 1, yi, sd);
+        float c = trgHash01(xi, yi + 1, sd), d = trgHash01(xi + 1, yi + 1, sd);
+        sum += amp * mix(mix(a, b, fx), mix(c, d, fx), fy);
+        amp *= 0.5; freq *= 2.0;
+    }
+    return sum;
+}
+
+static float4 trgSplatWeights(float height01, float slope, float2 worldXZ) {
+    float b1 = trgWorldFBm(worldXZ, 180.0, 3, kTerrainSplatSeed);
+    float b2 = trgWorldFBm(worldXZ, 45.0, 3, kTerrainSplatSeed + 101u);
+    float rock = smoothstep(0.55, 1.05, slope + 0.25 * (b1 - 0.5));
+    float snowline = 0.62 + 0.08 * (b2 - 0.5);
+    float snow = smoothstep(snowline, snowline + 0.16, height01) * (1.0 - 0.85 * rock);
+    float dirt = 0.55 * smoothstep(0.5, 0.75, b2) * smoothstep(0.18, 0.45, slope + 0.2 * (b1 - 0.5));
+    dirt += 0.6 * smoothstep(0.10, 0.04, height01);
+    dirt = clamp(dirt, 0.0, 1.0) * (1.0 - rock) * (1.0 - snow);
+    float grass = max(1.0 - rock - snow - dirt, 0.0);
+    float4 w = float4(grass, rock, dirt, snow);
+    return w / max(w.x + w.y + w.z + w.w, 1e-4);
+}
+
+static void trgShadeTerrain(float3 worldPos, float3 geoN, float height01,
+                            texture2d_array<float, access::sample> detailAlbedo,
+                            texture2d_array<float, access::sample> detailNormal,
+                            thread float3& outAlbedo, thread float3& outN) {
+    constexpr sampler ts(address::repeat, filter::linear, mip_filter::linear);
+    float slope = length(geoN.xz) / max(geoN.y, 1e-3);  // rise/run
+    float4 w = trgSplatWeights(height01, slope, worldPos.xz);
+    float2 wp = worldPos.xz;
+    float3 c = float3(0.0);
+    float3 dn = float3(0.0);
+    for (int i = 0; i < 4; ++i) {
+        float2 uv = wp * kTerrainLayerFreq[i];
+        c  += w[i] * pow(detailAlbedo.sample(ts, uv, i).rgb, float3(2.2));
+        dn += w[i] * (detailNormal.sample(ts, uv, i).xyz * 2.0 - 1.0);
+    }
+    outAlbedo = c;
+    dn = normalize(dn + float3(0.0, 0.0, 1e-4));
+    float3 nn = normalize(geoN);
+    float3 T = normalize(float3(1.0, 0.0, 0.0) - nn * nn.x);
+    float3 B = cross(nn, T);
+    outN = normalize(T * dn.x + B * dn.y + nn * dn.z);
+}
+
 fragment float4 fragmentMain(
     RasterizerData in [[stage_in]],
     // Per-draw material textures — bound path only. The bindless
@@ -452,6 +521,13 @@ fragment float4 fragmentMain(
     // system textures above. Resolved to locals at the top of the body.
     texture2d<float, access::sample> texReflectionArg [[texture(16), function_constant(kBoundMaterials)]], // RT mirror reflections
     texture2d<float, access::sample> texRefractionArg [[texture(17), function_constant(kBoundMaterials)]], // RT refractions (transmission)
+    // Terrain detail-layer arrays (grass/rock/dirt/snow albedo + tangent-space
+    // normal), world-space tiled — sampled only by the shaderModel == 1
+    // (Terrain) branch, bound path only (the ICB/bindless system table has no
+    // slots for them; terrain shades standard there). Metal twin of RHIMain.frag
+    // set2 b13/b14.
+    texture2d_array<float, access::sample> terrainDetailAlbedo [[texture(18), function_constant(kBoundMaterials)]],
+    texture2d_array<float, access::sample> terrainDetailNormal [[texture(19), function_constant(kBoundMaterials)]],
     const device DirLight* directionalLights [[buffer(0)]],
     const device PointLight* pointLights [[buffer(1)]],
     const device Cluster* clusters [[buffer(2)]],
@@ -572,6 +648,23 @@ fragment float4 fragmentMain(
     float3 B = normalize(cross(N, T) * in.worldTangent.w);
     float3x3 TBN = float3x3(T, B, N);
     float3 norm = normalize(TBN * normalize(matNormal.sample(s, in.uv).rgb * 2.0 - 1.0));
+
+    // Terrain: replace albedo + normal with the world-space detail-layer splat
+    // (mirrors RHIMain.frag's shaderModel == 1 branch). in.uv.x carries the
+    // baked height01; the geometric normal drives slope. Terrain then shades
+    // as a rough dielectric through the same lighting below. Bound path only:
+    // the ICB/bindless table carries no detail arrays, so terrain falls back
+    // to standard shading (palette-LUT albedo) there.
+    if (kBoundMaterials && material.shaderModel == 1.0) {
+        float3 tAlbedo, tN;
+        trgShadeTerrain(in.worldPosition.xyz, normalize(float3(in.worldNormal)),
+                        clamp(in.uv.x, 0.0, 1.0), terrainDetailAlbedo, terrainDetailNormal, tAlbedo, tN);
+        surf.color = tAlbedo;  // detail albedo is already linearized in the blend
+        surf.roughness = 0.95;
+        surf.metallic = 0.0;
+        norm = tN;
+    }
+
     float3 viewDir = normalize(camera.position - in.worldPosition.xyz);
 
     float2 screenUV = in.position.xy / screenSize;

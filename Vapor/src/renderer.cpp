@@ -699,6 +699,13 @@ void Renderer::shutdown() {
                 rhi->destroySampler(texture.sampler);
             }
         }
+        // Terrain detail-layer arrays (not in the textures registry).
+        if (defaultDetailArrayTexture.isValid()) rhi->destroyTexture(defaultDetailArrayTexture);
+        if (terrainDetailAlbedoArray.isValid()) rhi->destroyTexture(terrainDetailAlbedoArray);
+        if (terrainDetailNormalArray.isValid()) rhi->destroyTexture(terrainDetailNormalArray);
+        defaultDetailArrayTexture = {};
+        terrainDetailAlbedoArray = {};
+        terrainDetailNormalArray = {};
 
         // Destroy shaders
         if (vertexShader.isValid()) {
@@ -841,6 +848,52 @@ bool Renderer::updateMeshGeometry(MeshId id, const std::vector<Vapor::VertexData
         rhi->buildAccelerationStructure(meshBLAS[id]);
     }
     return true;
+}
+
+// Pack the terrain detail layers into the two shared 2D-array textures the
+// Main pass's terrain branch samples with world-space tiling. Called once by
+// TerrainSystem at terrain init (and again on regenerate — the old arrays are
+// replaced). Layer order is the shader's weight order: 0 grass, 1 rock,
+// 2 dirt, 3 snow.
+void Renderer::setTerrainDetailLayers(const std::array<std::shared_ptr<Vapor::Image>, 4>& albedoLayers,
+                                      const std::array<std::shared_ptr<Vapor::Image>, 4>& normalLayers) {
+    const auto& first = albedoLayers[0];
+    if (!first || first->width == 0 || first->width != first->height) return;
+    const Uint32 res = first->width;
+    auto usable = [&](const std::shared_ptr<Vapor::Image>& img) {
+        return img && img->width == res && img->height == res && img->channelCount == 4 &&
+            img->byteArray.size() >= static_cast<size_t>(res) * res * 4;
+    };
+    for (int i = 0; i < 4; i++) {
+        if (!usable(albedoLayers[i]) || !usable(normalLayers[i])) return;
+    }
+
+    if (terrainDetailAlbedoArray.isValid()) rhi->destroyTexture(terrainDetailAlbedoArray);
+    if (terrainDetailNormalArray.isValid()) rhi->destroyTexture(terrainDetailNormalArray);
+
+    Uint32 mips = 1;
+    for (Uint32 r = res; r > 1; r >>= 1) mips++;
+
+    TextureDesc desc;
+    desc.width = res;
+    desc.height = res;
+    desc.arrayLayers = 4;
+    desc.mipLevels = mips;  // full chain: tiled detail viewed at grazing angles
+    desc.format = PixelFormat::RGBA8_UNORM;
+    desc.usage = TextureUsage::Sampled;  // includes the transfer bits the mip blit needs
+
+    auto upload = [&](const std::array<std::shared_ptr<Vapor::Image>, 4>& layers) {
+        TextureHandle tex = rhi->createTexture(desc);
+        for (Uint32 layer = 0; layer < 4; ++layer) {
+            rhi->updateTexture(tex, layers[layer]->byteArray.data(),
+                               static_cast<size_t>(res) * res * 4, 0, layer);
+        }
+        rhi->generateMipmaps(tex);
+        return tex;
+    };
+    terrainDetailAlbedoArray = upload(albedoLayers);
+    terrainDetailNormalArray = upload(normalLayers);
+    fmt::print("Renderer: terrain detail layers staged ({}x{} x4 albedo+normal, {} mips)\n", res, res, mips);
 }
 
 MaterialId Renderer::registerMaterial(const MaterialDataInput& materialData) {
@@ -1843,6 +1896,16 @@ void Renderer::mainRenderPass() {
         // MUST be bound (an unbound sample reads 0 -> whole scene black). Use the
         // computed contact RT when SSCS is on, else white (min() no-op).
         rhi->setTexture(0, 15, (sscsEnabled && sscsRT.isValid()) ? sscsRT : whiteTex, clampSampler);
+        // Terrain detail-layer arrays at the Metal contract slots 18/19 (the MSL
+        // twin of Vulkan's set2 b13/b14). Default white array keeps the
+        // texture2d_array args valid when no terrain is staged; the shader
+        // samples them only in the shaderModel == 1 branch. (Sampler slots >= 16
+        // are skipped by the RHI-Metal workaround — the shader uses a constexpr
+        // sampler for these, so that's fine.)
+        rhi->setTexture(0, 18, terrainDetailAlbedoArray.isValid() ? terrainDetailAlbedoArray
+                                                                  : defaultDetailArrayTexture, defaultSampler);
+        rhi->setTexture(0, 19, terrainDetailNormalArray.isValid() ? terrainDetailNormalArray
+                                                                  : defaultDetailArrayTexture, defaultSampler);
         if (capabilities.raytracing) {
             // RT kernel outputs replace the neutral whites —
             // texShadow(7), texPointShadow(13), gibsGI(14).

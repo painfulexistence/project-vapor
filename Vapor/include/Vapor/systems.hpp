@@ -8,6 +8,7 @@
 #include "render_data.hpp"
 #include "renderer.hpp"
 #include "render_scene.hpp"
+#include "terrain_texture_gen.hpp"
 #include "terrain_world.hpp"
 #include "voxel_world.hpp"
 #include <entt/entt.hpp>
@@ -640,13 +641,26 @@ namespace Vapor {
             world->configure(cfg);
             tc.world.value = world;
 
-            // One material for every tile: (height, slope) UVs into the LUT.
+            // Terrain surface: the Main pass's terrain branch (splat-blended
+            // detail layers, world-space tiled) — push the generated
+            // grass/rock/dirt/snow layers once. The palette LUT stays as the
+            // material's albedoMap so backends without the terrain branch
+            // still show the height/slope banding as a fallback.
+            {
+                auto grassL = TerrainTextureGen::generateGrass();
+                auto rockL = TerrainTextureGen::generateRock();
+                auto dirtL = TerrainTextureGen::generateDirt();
+                auto snowL = TerrainTextureGen::generateSnow();
+                renderer->setTerrainDetailLayers({ grassL.albedo, rockL.albedo, dirtL.albedo, snowL.albedo },
+                                                 { grassL.normal, rockL.normal, dirtL.normal, snowL.normal });
+            }
             auto lut = world->buildPaletteLUT();
             scene.images.push_back(lut);
             auto terrainMat = std::make_shared<Material>();
             terrainMat->albedoMap = lut;
             terrainMat->roughnessFactor = 0.95f;
             terrainMat->metallicFactor = 0.0f;
+            terrainMat->materialShader = MaterialShader::Terrain;
             scene.materials.push_back(terrainMat);
 
             // Scatter prototypes (0 = tree, 1 = rock) drawn as GPU instances.

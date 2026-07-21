@@ -84,6 +84,12 @@ public:
     bool updateMeshGeometry(MeshId id, const std::vector<Vapor::VertexData>& vertices,
                             const std::vector<Uint32>& indices) override;
 
+    // Pack the 4+4 terrain detail layers into the two 2D-array textures the
+    // Main pass's terrain branch samples (set2 b13/b14 on Vulkan; 18/19 on
+    // Metal-via-RHI), with full mip chains.
+    void setTerrainDetailLayers(const std::array<std::shared_ptr<Vapor::Image>, 4>& albedoLayers,
+                                const std::array<std::shared_ptr<Vapor::Image>, 4>& normalLayers) override;
+
     // Register a material and return its ID
     MaterialId registerMaterial(const MaterialDataInput& materialData);
 
