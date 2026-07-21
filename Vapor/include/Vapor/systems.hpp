@@ -506,6 +506,11 @@ namespace Vapor {
                     renderer->setClouds(clouds);
                 }
 
+                // ── Environment dimming: the baked IBL would stay sunny under
+                // an overcast deck; scale it by the resolved factor (applied at
+                // shading time in the PBR pass — no rebake needed) ──
+                if (renderer) renderer->setIBLIntensity(p.iblDim);
+
                 // ── Precipitation: gate on the target state once the transition
                 // is half way in, so rain starts under an already-heavy sky ──
                 const bool committed = w._blend > 0.5f;

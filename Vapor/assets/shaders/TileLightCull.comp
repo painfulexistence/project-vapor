@@ -39,7 +39,8 @@ layout(std430, set = 0, binding = 3) readonly buffer PointLightBuffer { PointLig
 // Must match Vapor::LightCullData.
 layout(std430, set = 0, binding = 4) readonly buffer LightCullBuf {
     vec2 screenSize;
-    vec2 _pad1;
+    float iblIntensity;  // unread here (weather env dimming for RHIMain.frag)
+    float _pad1;
     uvec3 gridSize;
     uint lightCount;
 };

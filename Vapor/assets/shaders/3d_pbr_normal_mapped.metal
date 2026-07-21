@@ -472,6 +472,10 @@ fragment float4 fragmentMain(
     // shadow). buffer(11) is dirLightCount (Vulkan-only, unread here), so this
     // takes buffer(12). Mirrors RHIMain.frag's mainDebugFlags.
     constant uint& mainDebugFlags [[buffer(12)]],
+    // Weather-driven IBL dimming (buffer 20 — 19 is materials). On Vulkan the
+    // same value rides in LightCullData instead. Every pass drawing with this
+    // fragment must bind it (main + RTT).
+    constant float& iblIntensity [[buffer(20)]],
     // Spot lights at buffer(16): buffer(14) is the bindless systemTexs table,
     // so a plain buffer(14) here fails specialization ("invalid location").
     const device SpotLight* spotLights [[buffer(16)]],
@@ -838,7 +842,8 @@ fragment float4 fragmentMain(
         // Apply ambient occlusion to indirect lighting
         result += giContribution * surf.ao * screenAO;
     } else if (material.iblEnabled > 0.5) {
-        result += CalculateIBL(norm, viewDir, surf, irradianceMap, prefilterMap, brdfLUT) * screenAO;
+        // iblIntensity: weather dims the baked environment under heavy cloud.
+        result += CalculateIBL(norm, viewDir, surf, irradianceMap, prefilterMap, brdfLUT) * screenAO * iblIntensity;
     } else {
         result += float3(0.03) * surf.ao * surf.color * screenAO; // minimal ambient fallback
     }

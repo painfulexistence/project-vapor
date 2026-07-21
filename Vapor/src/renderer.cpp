@@ -1736,6 +1736,10 @@ void Renderer::mainRenderPass() {
         // and buffer(11) is dirLightCount, so 12 is the free slot). Same bits as
         // the Vulkan path: bit0 skip point-light loop, bit1 skip shadow.
         rhi->setFragmentBytes(&mainDebugFlags, sizeof(Uint32), 12);
+        // Weather-driven IBL dimming at buffer(20) (19 is materials; on Vulkan
+        // this value rides in LightCullData instead — binding 20 would alias
+        // push offset 64 and clobber screenSize).
+        rhi->setFragmentBytes(&m_iblIntensity, sizeof(float), 20);
         // Metal-via-RHI: real IBL outputs replace the neutral blacks —
         // irradiance(8), prefilter(9), brdfLUT(10).
         if (m_iblReady) {
@@ -2330,6 +2334,7 @@ void Renderer::tileCullingPass() {
         if (!vkTileCullPipeline.isValid() || !lightCullDataBuffer.isValid()) return;
         Vapor::LightCullData lc{};
         lc.screenSize = screenSize;
+        lc.iblIntensity = m_iblIntensity;   // weather-driven env dimming (RHIMain.frag)
         lc.gridSize = gridSize;
         lc.lightCount = pointLightCount;
         rhi->updateBuffer(lightCullDataBuffer, &lc, 0, sizeof(lc));
@@ -4593,6 +4598,10 @@ void Renderer::setClouds(const CloudsRenderData& clouds) {
     cloudSettings.cloudLayerThickness =
         std::max(1.0f, clouds.layerTop - clouds.layerBottom);
     cloudSettings.ambientIntensity   = clouds.ambientIntensity;
+}
+
+void Renderer::setIBLIntensity(float intensity) {
+    m_iblIntensity = glm::clamp(intensity, 0.0f, 4.0f);
 }
 
 void Renderer::setParticleDrawList(const std::vector<ParticleDrawPacket>& draws) {
@@ -8301,6 +8310,9 @@ void Renderer::renderToTexture(
             rhi->setFragmentBytes(&rttSpotRectCounts, sizeof(glm::uvec2), 1);
         } else {
             rhi->setFragmentBytes(&rttDebugFlags, sizeof(Uint32), 12);
+            // IBL dimming at buffer(20) — declared in the shared PBR fragment,
+            // so every encoder that draws with it must bind the slot.
+            rhi->setFragmentBytes(&m_iblIntensity, sizeof(float), 20);
             // Real IBL cubes: image-based ambience is view-independent.
             if (m_iblReady) {
                 if (irradianceMap.isValid()) rhi->setTexture(0, 8, irradianceMap, clampSampler);

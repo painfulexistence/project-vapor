@@ -264,16 +264,17 @@ namespace Vapor {
         float sunDim           = 1.0f;     // multiplies sun/moon light intensity
         float fogDensityMul    = 1.0f;     // multiplies VolumetricFogComponent density
         float windMul          = 1.0f;     // multiplies WindFieldComponent strength
+        float iblDim           = 1.0f;     // scales the baked environment (IBL) ambience
     };
 
     inline WeatherParams weatherParamsFor(WeatherState s) {
         switch (s) {
-            //                     coverage density type  bottom  top    ambient sunDim fogMul windMul
-            case WeatherState::Cloudy:       return { 0.60f, 0.35f, 0.45f,  1200.0f, 3600.0f, 0.28f, 0.80f, 1.2f, 1.3f };
-            case WeatherState::Overcast:     return { 0.90f, 0.55f, 0.20f,   800.0f, 2600.0f, 0.22f, 0.40f, 1.6f, 1.6f };
-            case WeatherState::Rain:         return { 0.95f, 0.70f, 0.15f,   600.0f, 2200.0f, 0.16f, 0.25f, 2.2f, 2.0f };
-            case WeatherState::Thunderstorm: return { 1.00f, 0.90f, 0.10f,   500.0f, 2000.0f, 0.10f, 0.12f, 2.5f, 3.0f };
-            case WeatherState::Snow:         return { 0.85f, 0.45f, 0.30f,   900.0f, 2400.0f, 0.35f, 0.45f, 1.8f, 1.2f };
+            //                     coverage density type  bottom  top    ambient sunDim fogMul windMul iblDim
+            case WeatherState::Cloudy:       return { 0.60f, 0.35f, 0.45f,  1200.0f, 3600.0f, 0.28f, 0.80f, 1.2f, 1.3f, 0.85f };
+            case WeatherState::Overcast:     return { 0.90f, 0.55f, 0.20f,   800.0f, 2600.0f, 0.22f, 0.40f, 1.6f, 1.6f, 0.50f };
+            case WeatherState::Rain:         return { 0.95f, 0.70f, 0.15f,   600.0f, 2200.0f, 0.16f, 0.25f, 2.2f, 2.0f, 0.40f };
+            case WeatherState::Thunderstorm: return { 1.00f, 0.90f, 0.10f,   500.0f, 2000.0f, 0.10f, 0.12f, 2.5f, 3.0f, 0.25f };
+            case WeatherState::Snow:         return { 0.85f, 0.45f, 0.30f,   900.0f, 2400.0f, 0.35f, 0.45f, 1.8f, 1.2f, 0.60f };
             case WeatherState::Clear:
             default:                         return {};
         }
@@ -291,6 +292,7 @@ namespace Vapor {
         r.sunDim           = L(a.sunDim,           b.sunDim);
         r.fogDensityMul    = L(a.fogDensityMul,    b.fogDensityMul);
         r.windMul          = L(a.windMul,          b.windMul);
+        r.iblDim           = L(a.iblDim,           b.iblDim);
         return r;
     }
 

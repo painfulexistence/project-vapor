@@ -143,7 +143,12 @@ struct alignas(16) Cluster {
 
 struct alignas(16) LightCullData {
     glm::vec2 screenSize;
-    glm::vec2 _pad1;
+    // Environment (IBL) intensity scale — weather dims it under heavy cloud
+    // cover. Rides in this buffer because it is already bound to the Vulkan
+    // PBR pass (set1 b5) and the push-constant slots alias dangerously; the
+    // Metal PBR shader receives it separately via fragment bytes (buffer 20).
+    float iblIntensity = 1.0f;
+    float _pad1 = 0.0f;
     glm::uvec3 gridSize;
     Uint32 lightCount;
 };
