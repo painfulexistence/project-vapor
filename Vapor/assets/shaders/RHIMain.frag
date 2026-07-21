@@ -64,6 +64,9 @@ struct MaterialData {
     float uvScale;
     float iblEnabled;
     float transmission;
+    // Surface shader model (0 Standard / 1 Terrain / 2 Grass). In the C++ tail
+    // after transmission; std430 stride stays 112.
+    float shaderModel;
 };
 
 // Must match DirectionalLightData / PointLightData (C++, stride 48 each)
@@ -230,6 +233,14 @@ layout(set = 2, binding = 9) uniform sampler2D nearShadowTex;
 layout(set = 2, binding = 10) uniform samplerCube irradianceMap;
 layout(set = 2, binding = 11) uniform samplerCube prefilterMap;
 layout(set = 2, binding = 12) uniform sampler2D brdfLut;
+// Terrain detail layers (grass/rock/dirt/snow), world-space tiled: two arrays
+// (4 albedo, 4 tangent-space normal) SHARED by every terrain tile — bound once
+// per frame (default white when no terrain is staged), sampled only by the
+// shaderModel == 1 (Terrain) branch. b13/b14 are the slots the raised
+// TEXTURE_BINDINGS_PER_SET added; a plain Standard draw keeps them bound (to the
+// default) but never samples them.
+layout(set = 2, binding = 13) uniform sampler2DArray terrainDetailAlbedo;
+layout(set = 2, binding = 14) uniform sampler2DArray terrainDetailNormal;
 
 // PCF sample of one cascade. Returns 1.0 = lit, 0.0 = fully shadowed, or -1.0
 // when the world position falls outside this cascade's frustum.
@@ -557,6 +568,76 @@ vec3 calculateIBL(vec3 N, vec3 V, Surface s, float ao) {
     return (diffuseIBL + specularIBL) * ao;
 }
 
+// ── Terrain surface (shaderModel == 1) ──────────────────────────────────────
+// Faithful port of Atmospheric's terrain.frag (4-layer albedo/normal blend) +
+// terrain_texture_gen defaultSplat (weights), but the weights are recomputed
+// PER-FRAGMENT from height/slope + world-space FBm breakup — no splat texture,
+// so it stays compatible with the fixed-slot terrain streaming. Detail layers
+// tile in WORLD space (continuous across streamed tiles). Per-layer world-space
+// frequency (repeats/metre): grass 4 m, rock ~21 m, dirt 8 m, snow ~13 m.
+const vec4 kTerrainLayerFreq = vec4(0.25, 0.046875, 0.125, 0.078125);
+const uint kTerrainSplatSeed = 7u;
+
+uint tgHash2(int x, int y, uint seed) {
+    uint h = uint(x) * 374761393u + uint(y) * 668265263u + seed * 2654435761u;
+    h = (h ^ (h >> 13)) * 1274126177u;
+    return h ^ (h >> 16);
+}
+float tgHash01(int x, int y, uint seed) { return float(tgHash2(x, y, seed) >> 8) * (1.0 / 16777216.0); }
+float tgSmooth(float t) { return t * t * (3.0 - 2.0 * t); }
+
+// world-space (non-periodic) value-noise FBm, matching WorldFBm() in the CPU gen
+float tgWorldFBm(vec2 p, float wavelength, int octaves, uint seed) {
+    float sum = 0.0, amp = 0.5, freq = 1.0 / wavelength;
+    for (int k = 0; k < octaves; ++k) {
+        float u = p.x * freq, v = p.y * freq;
+        int xi = int(floor(u)), yi = int(floor(v));
+        float fx = tgSmooth(u - float(xi)), fy = tgSmooth(v - float(yi));
+        uint s = seed + uint(k) * 131u;
+        float a = tgHash01(xi, yi, s),     b = tgHash01(xi + 1, yi, s);
+        float c = tgHash01(xi, yi + 1, s), d = tgHash01(xi + 1, yi + 1, s);
+        sum += amp * mix(mix(a, b, fx), mix(c, d, fx), fy);
+        amp *= 0.5; freq *= 2.0;
+    }
+    return sum;
+}
+
+// {grass, rock, dirt, snow} weights (defaultSplat rules, in-shader).
+vec4 terrainSplatWeights(float height01, float slope, vec2 worldXZ) {
+    float b1 = tgWorldFBm(worldXZ, 180.0, 3, kTerrainSplatSeed);
+    float b2 = tgWorldFBm(worldXZ, 45.0, 3, kTerrainSplatSeed + 101u);
+    float rock = smoothstep(0.55, 1.05, slope + 0.25 * (b1 - 0.5));
+    float snowline = 0.62 + 0.08 * (b2 - 0.5);
+    float snow = smoothstep(snowline, snowline + 0.16, height01) * (1.0 - 0.85 * rock);
+    float dirt = 0.55 * smoothstep(0.5, 0.75, b2) * smoothstep(0.18, 0.45, slope + 0.2 * (b1 - 0.5));
+    dirt += 0.6 * smoothstep(0.10, 0.04, height01);
+    dirt = clamp(dirt, 0.0, 1.0) * (1.0 - rock) * (1.0 - snow);
+    float grass = max(1.0 - rock - snow - dirt, 0.0);
+    vec4 w = vec4(grass, rock, dirt, snow);
+    return w / max(w.x + w.y + w.z + w.w, 1e-4);
+}
+
+// Fill albedo (linear) + perturbed world normal from the detail layers.
+void shadeTerrain(vec3 worldPos, vec3 geoN, float height01, out vec3 albedo, out vec3 N) {
+    float slope = length(geoN.xz) / max(geoN.y, 1e-3);  // rise/run
+    vec4 w = terrainSplatWeights(height01, slope, worldPos.xz);
+    vec2 wp = worldPos.xz;
+    vec3 c = vec3(0.0);
+    vec3 dn = vec3(0.0);
+    for (int i = 0; i < 4; ++i) {
+        vec2 uv = wp * kTerrainLayerFreq[i];
+        c  += w[i] * pow(texture(terrainDetailAlbedo, vec3(uv, float(i))).rgb, vec3(2.2));
+        dn += w[i] * (texture(terrainDetailNormal, vec3(uv, float(i))).xyz * 2.0 - 1.0);
+    }
+    albedo = c;
+    dn = normalize(dn + vec3(0.0, 0.0, 1e-4));
+    // perturb the geometric normal by the tangent-space detail normal
+    vec3 nn = normalize(geoN);
+    vec3 T = normalize(vec3(1.0, 0.0, 0.0) - nn * nn.x);
+    vec3 B = cross(nn, T);
+    N = normalize(T * dn.x + B * dn.y + nn * dn.z);
+}
+
 void main() {
     MaterialData mat = materials[fragMaterialID];
 
@@ -585,6 +666,20 @@ void main() {
         vec3 nSample = texture(normalMap, fragUV).xyz * 2.0 - 1.0;
         nSample.xy *= mat.normalScale;
         N = normalize(mat3(T, B, N) * nSample);
+    }
+
+    // Terrain: replace albedo + normal with the world-space detail-layer splat.
+    // fragUV.x carries height01 (baked by buildTileGeometry); the geometric
+    // normal drives slope. Terrain shades as a rough dielectric through the same
+    // PBR lighting below (shadows / lights / IBL), so it is lit consistently
+    // with the rest of the scene rather than the original's flat sun term.
+    if (mat.shaderModel == 1.0) {
+        vec3 tAlbedo, tN;
+        shadeTerrain(fragPos, normalize(worldNormal), clamp(fragUV.x, 0.0, 1.0), tAlbedo, tN);
+        albedo = tAlbedo * instanceColor.rgb;  // detail albedo is already linear
+        N = tN;
+        metallic = 0.0;
+        roughness = 0.95;
     }
     // Orthonormal tangent frame against the (possibly mapped) N for the
     // anisotropic BRDF term. Degenerate tangent -> arbitrary basis (anisotropic

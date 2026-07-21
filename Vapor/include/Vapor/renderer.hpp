@@ -638,6 +638,14 @@ private:
     TextureId defaultWhiteTexture = INVALID_TEXTURE_ID;
     TextureId defaultNormalTexture = INVALID_TEXTURE_ID;
     TextureId defaultBlackTexture = INVALID_TEXTURE_ID;
+    // Terrain detail-layer arrays sampled by RHIMain.frag's terrain branch at
+    // set2 b13/b14 (Vulkan). defaultDetailArrayTexture (4-layer white) keeps
+    // those sampler2DArray descriptors valid on every Main-pass draw; the two
+    // staged arrays hold the real grass/rock/dirt/snow layers when a terrain
+    // surface is present (else invalid -> the default is bound).
+    TextureHandle defaultDetailArrayTexture;
+    TextureHandle terrainDetailAlbedoArray;
+    TextureHandle terrainDetailNormalArray;
     // Neutral ORM (occlusion=1, roughness=1, metallic=0) — the default for
     // materials lacking a metallic/roughness/occlusion map. Using white here
     // (metallic .b = 1.0) rendered every such surface as fully metallic:

@@ -1797,6 +1797,18 @@ void Renderer::mainRenderPass() {
         if (irradianceMap.isValid()) rhi->setTexture(0, 10, irradianceMap, clampSampler);
         if (prefilterMap.isValid()) rhi->setTexture(0, 11, prefilterMap, clampSampler);
         if (brdfLUTTex.isValid())    rhi->setTexture(0, 12, brdfLUTTex, clampSampler);
+        // Terrain detail-layer arrays (set2 b13/b14): override the Metal-contract
+        // 2D defaults the shared block put at these slots — on Vulkan they are the
+        // sampler2DArray detail layers RHIMain.frag's terrain branch samples. Bind
+        // the staged arrays when a terrain surface exists, else the default white
+        // array so the descriptor stays valid AND type-correct for every draw
+        // (a Standard draw keeps them bound but never samples them). Bound here in
+        // the common section, so every geometry path (incl. Bindless MDI) inherits
+        // it.
+        rhi->setTexture(0, 13, terrainDetailAlbedoArray.isValid() ? terrainDetailAlbedoArray
+                                                                  : defaultDetailArrayTexture, defaultSampler);
+        rhi->setTexture(0, 14, terrainDetailNormalArray.isValid() ? terrainDetailNormalArray
+                                                                  : defaultDetailArrayTexture, defaultSampler);
         // Perf-isolation debug flags -> RHIMain.frag push offset 96 (binding 2).
         // Vulkan-only: on Metal, fragment buffer(2) is the CLUSTER buffer, so
         // pushing here would corrupt it (the old billions-of-iterations hang).
@@ -5338,6 +5350,25 @@ void Renderer::createDefaultResources() {
 
         defaultBlackTexture = static_cast<TextureId>(textures.size());
         textures.push_back(tex);
+    }
+
+    // Default 4-layer white array texture for the terrain detail-layer slots
+    // (set2 b13/b14). Keeps those sampler2DArray descriptors valid and
+    // type-correct on every Main-pass draw; the terrain branch (shaderModel==1)
+    // only samples it when no real detail arrays are staged, and those override
+    // it when a terrain surface exists.
+    {
+        TextureDesc texDesc;
+        texDesc.width = 1;
+        texDesc.height = 1;
+        texDesc.arrayLayers = 4;
+        texDesc.format = PixelFormat::RGBA8_UNORM;
+        texDesc.usage = TextureUsage::Sampled;
+        defaultDetailArrayTexture = rhi->createTexture(texDesc);
+        const Uint32 whitePixel = 0xFFFFFFFF;
+        for (Uint32 layer = 0; layer < 4; ++layer) {
+            rhi->updateTexture(defaultDetailArrayTexture, &whitePixel, sizeof(Uint32), 0, layer);
+        }
     }
 
     // Create default ORM texture: occlusion=1, roughness=1, metallic=0. The
@@ -8903,6 +8934,14 @@ void Renderer::renderToTexture(
         rhi->setTexture(0, 12, pssmShadowArrayTexture, defaultSampler);
         rhi->setTexture(0, 13, whiteTex, defaultSampler);
         rhi->setTexture(0, 14, blackTex, defaultSampler);
+        // On Vulkan, set2 b13/b14 are RHIMain.frag's sampler2DArray terrain
+        // detail layers, not the Metal-contract 2D point-shadow/gibs slots — bind
+        // the default white array so this RTT main-pipeline draw's descriptor is
+        // valid (RTT never renders terrain surfaces, so the default suffices).
+        if (backend == GraphicsBackend::Vulkan) {
+            rhi->setTexture(0, 13, defaultDetailArrayTexture, defaultSampler);
+            rhi->setTexture(0, 14, defaultDetailArrayTexture, defaultSampler);
+        }
 
         // Skip the tile-culled point-light loop (bit0): the cluster buffer is
         // built for the MAIN camera's screen tiles, meaningless in this view.
