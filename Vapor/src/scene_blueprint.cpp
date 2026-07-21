@@ -138,6 +138,8 @@ BlueprintComponents& BlueprintComponents::instance() {
             p.kind = j.value("kind", std::string("rain")) == "snow"
                          ? PrecipitationComponent::Kind::Snow
                          : PrecipitationComponent::Kind::Rain;
+            p.followCamera = j.value("followCamera", p.followCamera);
+            p.followHeight = j.value("followHeight", p.followHeight);
             reg.emplace_or_replace<PrecipitationComponent>(e, p);
         });
         r.registerComponent<LightningComponent>("lightning");

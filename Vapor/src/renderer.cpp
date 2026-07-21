@@ -4392,8 +4392,8 @@ void Renderer::particlePass() {
         const bool hasTexture = p.texture != INVALID_TEXTURE_ID &&
                                 p.texture < textures.size();
         const TextureId texId = hasTexture ? p.texture : defaultWhiteTexture;
-        struct { float particleSize; float useTexture; float _pad[2]; }
-            pc{ p.size, hasTexture ? 1.0f : 0.0f, {0.0f, 0.0f} };
+        struct { float particleSize; float useTexture; float velocityStretch; float _pad; }
+            pc{ p.size, hasTexture ? 1.0f : 0.0f, p.velocityStretch, 0.0f };
 
         if (metal) {
             // particleVertex: camera(0), ParticlePushConstants(1), particles(2);

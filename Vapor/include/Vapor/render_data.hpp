@@ -494,7 +494,10 @@ struct alignas(16) GPUParticleData {
     glm::vec3 velocity = glm::vec3(0.0f);
     float age = 0.0f;       // seconds since spawn
     glm::vec3 force = glm::vec3(0.0f);
-    float _pad3 = 0.0f;
+    // World-Y kill plane (cheap rain/spark ground collision): finite-lifetime
+    // particles below it die. Very negative = disabled. Occupies the old pad,
+    // so the GPU layout is unchanged.
+    float killPlaneY = -1.0e9f;
     glm::vec4 color = glm::vec4(1.0f);
 };
 
@@ -545,6 +548,7 @@ struct ParticleDrawPacket {
     Uint8     blendMode = 0;                    // ParticleBlendMode value
     TextureId texture   = INVALID_TEXTURE_ID;   // INVALID = procedural soft disc
     float     size      = 0.1f;                 // billboard half-extent
+    float     velocityStretch = 0.0f;           // > 0: stretch along velocity (rain)
 };
 
 // ============================================================================

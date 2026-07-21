@@ -82,6 +82,7 @@ static void setupCustomDrawers(Vapor::SceneInspector& inspector) {
                 if (ImGui::Combo("blend", &b, blends, 3))
                     c->blendMode = static_cast<Vapor::ParticleBlendMode>(b);
                 ImGui::DragFloat("size", &c->size, 0.005f, 0.005f, 2.0f);
+                ImGui::DragFloat("velocity stretch", &c->velocityStretch, 0.01f, 0.0f, 1.0f);
                 if (c->texture == 0xFFFFFFFFu) ImGui::LabelText("texture", "(procedural)");
                 else                           ImGui::LabelText("texture", "%u", c->texture);
             }
@@ -119,6 +120,8 @@ static void setupCustomDrawers(Vapor::SceneInspector& inspector) {
                 int k = static_cast<int>(c->kind);
                 if (ImGui::Combo("kind", &k, kinds, 2))
                     c->kind = static_cast<Vapor::PrecipitationComponent::Kind>(k);
+                ImGui::Checkbox("follow camera", &c->followCamera);
+                ImGui::DragFloat("follow height", &c->followHeight, 0.5f, 2.0f, 100.0f);
                 ImGui::TextDisabled("activated by WeatherSystem (Inactive toggle)");
             }
         }

@@ -334,6 +334,11 @@ namespace Vapor {
     struct PrecipitationComponent {
         enum class Kind : uint8_t { Rain = 0, Snow };
         Kind kind = Kind::Rain;
+        // Keep the emitter centered above the active camera so precipitation
+        // exists wherever the player looks (WeatherSystem moves the transform;
+        // pair with a box emitExtents so the sheet has area).
+        bool  followCamera = true;
+        float followHeight = 18.0f;  // meters above the camera
     };
 
     // Tags a (point) light as a lightning flash source. Intensity is OWNED by
@@ -479,6 +484,14 @@ namespace Vapor {
         float spread = 0.3f;            // half-cone angle in radians
         glm::vec3 emitDirection = glm::vec3(0.0f, 1.0f, 0.0f);
         glm::vec4 color = glm::vec4(1.0f);
+        // Emission volume: zero = point emitter (cone around emitDirection);
+        // non-zero half-extents spawn particles anywhere in a box centered on
+        // the entity (rain/snow sheets, area steam).
+        glm::vec3 emitExtents = glm::vec3(0.0f);
+        // Particles below this world Y die on the spot (cheap ground collision
+        // for rain/sparks). Very negative = off. Finite-lifetime only — the
+        // GPU sim ignores it for immortal particles.
+        float groundKillY = -1.0e9f;
         bool enabled = true;   // false = immediate clear (Clear semantic)
         bool emitting = true;  // false = graceful stop: stop spawning, let existing finish (Stop semantic)
         bool oneShot = false;  // emit all maxParticles at once, then idle
@@ -509,6 +522,10 @@ namespace Vapor {
         ParticleBlendMode blendMode = ParticleBlendMode::Additive;
         uint32_t texture = 0xFFFFFFFFu; // renderer TextureId; ~0u = procedural soft disc
         float size = 0.1f;              // world-space billboard half-extent
+        // 0 = camera-facing billboard. > 0 stretches the quad along the
+        // particle's velocity (screen-aligned): half-length becomes
+        // size * (1 + velocityStretch * speed). Rain streaks ≈ 0.1-0.2.
+        float velocityStretch = 0.0f;
     };
 
     // One-shot burst of particles at the entity's current position.

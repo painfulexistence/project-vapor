@@ -153,6 +153,16 @@ kernel void particleIntegrate(
     vel   += force * params.deltaTime;
     pos   += vel   * params.deltaTime;
 
+    // Ground kill (cheap rain/spark collision — mirrors GLSL): finite-lifetime
+    // particles die crossing their world-Y kill plane (forcePad.w).
+    if (lifetime >= 0.0 && pos.y < p.forcePad.w) {
+        p.posLifetime = float4(pos, lifetime);
+        p.velAge      = float4(vel, lifetime);  // age = lifetime -> dead
+        p.color.a     = 0.0;
+        particles[id] = p;
+        return;
+    }
+
     // Boundary conditions for immortal orbital demo particles
     if (lifetime < 0.0) {
         float maxDist = 20.0;
@@ -199,8 +209,8 @@ struct ParticleVertexOut {
 
 struct ParticlePushConstants {
     float particleSize;
-    float useTexture;   // > 0.5: sample the per-emitter texture; else procedural disc
-    float _pad2;
+    float useTexture;       // > 0.5: sample the per-emitter texture; else procedural disc
+    float velocityStretch;  // > 0: stretch the quad along velocity (rain streaks)
     float _pad3;
 };
 
@@ -218,9 +228,22 @@ vertex ParticleVertexOut particleVertex(
 
     float2 quadPos  = quadVertices[vertexID];
     float  size     = pushConstants.particleSize;
-    float3 worldPos = p.posLifetime.xyz  // position is the xyz of posLifetime
-                    + cameraRight * quadPos.x * size
-                    + cameraUp    * quadPos.y * size;
+    float3 pos      = p.posLifetime.xyz;
+    float3 vel      = p.velAge.xyz;
+    float3 worldPos;
+    if (pushConstants.velocityStretch > 0.0 && dot(vel, vel) > 1e-6) {
+        // Velocity-aligned billboard (rain streaks — mirrors Particle.vert):
+        // quad Y runs along the motion, X across it, turned toward the camera.
+        float3 along  = normalize(vel);
+        float3 across = cross(along, camera.position - pos);
+        float  len2   = dot(across, across);
+        across = len2 > 1e-8 ? across * rsqrt(len2) : cameraRight;
+        float halfLen = size * (1.0 + pushConstants.velocityStretch * length(vel));
+        worldPos = pos + across * quadPos.x * size + along * quadPos.y * halfLen;
+    } else {
+        worldPos = pos + cameraRight * quadPos.x * size
+                       + cameraUp    * quadPos.y * size;
+    }
 
     ParticleVertexOut out;
     out.position = camera.proj * camera.view * float4(worldPos, 1.0);

@@ -517,9 +517,25 @@ namespace Vapor {
                 const bool rainOn = committed && (w.state == WeatherState::Rain ||
                                                   w.state == WeatherState::Thunderstorm);
                 const bool snowOn = committed && w.state == WeatherState::Snow;
+                // Active camera position for camera-following emitters (rain
+                // falls where the player is, not where the scene authored it).
+                glm::vec3 camPos(0.0f);
+                bool camValid = false;
+                auto camView = reg.view<VirtualCameraComponent>(entt::exclude<InactiveComponent>);
+                for (auto ce : camView) {
+                    const auto& vc = camView.get<VirtualCameraComponent>(ce);
+                    if (vc.isActive) { camPos = vc.position; camValid = true; break; }
+                }
                 auto precip = reg.view<PrecipitationComponent>();
                 for (auto pe : precip) {
-                    const auto kind = precip.get<PrecipitationComponent>(pe).kind;
+                    const auto& pc = precip.get<PrecipitationComponent>(pe);
+                    const auto kind = pc.kind;
+                    if (pc.followCamera && camValid) {
+                        if (auto* tr = reg.try_get<TransformComponent>(pe)) {
+                            tr->position = glm::vec3(camPos.x, camPos.y + pc.followHeight, camPos.z);
+                            tr->isDirty = true;
+                        }
+                    }
                     const bool on = (kind == PrecipitationComponent::Kind::Rain) ? rainOn : snowOn;
                     if (on) {
                         // Wake the authored-inactive emitter and (re)start it.
@@ -997,6 +1013,8 @@ namespace Vapor {
                     : glm::normalize(glm::cross(fwd, glm::vec3(0, 1, 0)));
                 glm::vec3 up = glm::cross(fwd, right);
 
+                const bool boxEmit = emit.emitExtents.x > 0.0f || emit.emitExtents.y > 0.0f ||
+                                     emit.emitExtents.z > 0.0f;
                 std::vector<GPUParticleData> batch(spawns);
                 for (uint32_t i = 0; i < spawns; ++i) {
                     float theta  = u01(rng) * 2.0f * 3.14159265f;
@@ -1006,10 +1024,19 @@ namespace Vapor {
 
                     GPUParticleData& p = batch[i];
                     p.position = t.position;
+                    if (boxEmit) {
+                        // Area emission: uniform point inside the half-extent box
+                        // (rain/snow sheets — direction still follows the cone).
+                        p.position += glm::vec3(
+                            (u01(rng) * 2.0f - 1.0f) * emit.emitExtents.x,
+                            (u01(rng) * 2.0f - 1.0f) * emit.emitExtents.y,
+                            (u01(rng) * 2.0f - 1.0f) * emit.emitExtents.z);
+                    }
                     p.lifetime = emit.particleLifetime;
                     p.age      = 0.0f;
                     p.velocity = dir * emit.speed;
                     p.force    = glm::vec3(0.0f);
+                    p.killPlaneY = emit.groundKillY;
                     p.color    = emit.color;
                 }
 
@@ -1088,6 +1115,7 @@ namespace Vapor {
                     p.blendMode = static_cast<Uint8>(r->blendMode);
                     p.texture   = r->texture;
                     p.size      = r->size;
+                    p.velocityStretch = r->velocityStretch;
                 }
                 draws.push_back(p);
                 if (draws.size() >= MAX_PARTICLE_DRAWS) break;

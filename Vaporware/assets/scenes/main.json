@@ -211,13 +211,14 @@
       "position": [0.0, 25.0, 0.0],
       "components": {
         "inactive": {},
-        "precipitation": { "kind": "rain" },
+        "precipitation": { "kind": "rain", "followHeight": 18.0 },
         "particleEmitter": {
-          "maxParticles": 12000, "emitRate": 6000.0, "particleLifetime": 1.8,
-          "speed": 22.0, "spread": 0.45, "emitDirection": [0.0, -1.0, 0.0],
+          "maxParticles": 12000, "emitRate": 6000.0, "particleLifetime": 1.6,
+          "speed": 22.0, "spread": 0.05, "emitDirection": [0.0, -1.0, 0.0],
+          "emitExtents": [12.0, 0.5, 12.0], "groundKillY": 0.05,
           "color": [0.45, 0.55, 0.75, 0.4]
         },
-        "particleRenderer": { "blendMode": 0, "size": 0.02 }
+        "particleRenderer": { "blendMode": 0, "size": 0.02, "velocityStretch": 0.12 }
       }
     },
     {
@@ -225,10 +226,11 @@
       "position": [0.0, 20.0, 0.0],
       "components": {
         "inactive": {},
-        "precipitation": { "kind": "snow" },
+        "precipitation": { "kind": "snow", "followHeight": 12.0 },
         "particleEmitter": {
           "maxParticles": 16000, "emitRate": 1200.0, "particleLifetime": 13.0,
-          "speed": 1.6, "spread": 0.6, "emitDirection": [0.0, -1.0, 0.0],
+          "speed": 1.6, "spread": 0.3, "emitDirection": [0.0, -1.0, 0.0],
+          "emitExtents": [14.0, 0.5, 14.0], "groundKillY": 0.05,
           "color": [1.0, 1.0, 1.0, 0.9]
         },
         "particleRenderer": { "blendMode": 1, "size": 0.035 }
