@@ -336,6 +336,85 @@ TEST_CASE("computeTargets builds concentric Chebyshev LOD rings", "[terrain]") {
     for (int t : demoted) CHECK(world.tiles[t].targetLod == TerrainWorld::LOD_COUNT - 1);
 }
 
+TEST_CASE("grass cells are deterministic and obey the placement rules", "[terrain][grass]") {
+    TerrainWorld world;
+    TerrainConfig cfg = smallConfig();
+    cfg.grassDensity = 12.0f;      // 12 attempts/m^2 on a 15 m cell = 2700 attempts
+    cfg.grassCoverage = 0.7f;
+    cfg.grassHeightBand = { 0.02f, 0.64f };
+    world.configure(cfg);
+    const float cs = world.config().grassCellSize;
+
+    // Deterministic per (cell, seed): byte-identical rebuilds.
+    const auto first = world.buildGrassCell(2, -3);
+    const auto second = world.buildGrassCell(2, -3);
+    REQUIRE(first.size() == second.size());
+    for (size_t i = 0; i < first.size(); i++) {
+        CHECK(first[i].positionAndHeight == second[i].positionAndHeight);
+        CHECK(first[i].params == second[i].params);
+    }
+    CHECK_FALSE(first.empty());
+
+    const int attempts = static_cast<int>(cfg.grassDensity * cs * cs);
+    CHECK(first.size() <= static_cast<size_t>(attempts));
+
+    const float half = 0.5f * world.config().worldSize;
+    for (const auto& b : first) {
+        const glm::vec3 p(b.positionAndHeight);
+        // Inside the cell footprint and the world bounds.
+        CHECK(p.x >= 2 * cs);
+        CHECK(p.x <= 3 * cs);
+        CHECK(p.z >= -3 * cs);
+        CHECK(p.z <= -2 * cs);
+        CHECK(p.x >= -half);
+        CHECK(p.x < half);
+        // Sits exactly on the heightfield, inside the growth band.
+        CHECK(p.y == world.heightAt(p.x, p.z));
+        const float hn = p.y / world.config().heightScale;
+        CHECK(hn >= cfg.grassHeightBand.x);
+        CHECK(hn <= cfg.grassHeightBand.y);
+        // Blade height spans 0.7..1.3 x the configured mean; positive width.
+        CHECK(b.positionAndHeight.w >= 0.7f * cfg.grassBladeHeight - 1e-4f);
+        CHECK(b.positionAndHeight.w <= 1.3f * cfg.grassBladeHeight + 1e-4f);
+        CHECK(b.params.w > 0.0f);
+    }
+
+    // A different cell draws a different pattern; coverage scales the count.
+    const auto other = world.buildGrassCell(3, -3);
+    const bool differs = other.size() != first.size()
+        || (!first.empty() && !other.empty()
+            && other[0].positionAndHeight != first[0].positionAndHeight);
+    CHECK(differs);
+
+    TerrainConfig sparse = cfg;
+    sparse.grassCoverage = 0.2f;
+    TerrainWorld sparseWorld;
+    sparseWorld.configure(sparse);
+    CHECK(sparseWorld.buildGrassCell(2, -3).size() < first.size());
+
+    // Zero density disables grass; the result queue round-trips.
+    TerrainConfig off = cfg;
+    off.grassDensity = 0.0f;
+    TerrainWorld offWorld;
+    offWorld.configure(off);
+    CHECK(offWorld.buildGrassCell(2, -3).empty());
+
+    TerrainWorld::GrassCellResult res;
+    res.key = TerrainWorld::grassCellKey({ 2, -3 });
+    res.blades = first;
+    world.pushGrassResult(std::move(res));
+    TerrainWorld::GrassCellResult out;
+    REQUIRE(world.popGrassResult(out));
+    CHECK(out.key == TerrainWorld::grassCellKey({ 2, -3 }));
+    CHECK(out.blades.size() == first.size());
+    CHECK_FALSE(world.popGrassResult(out));
+
+    // Cell key packs (x, z) losslessly, negatives included.
+    CHECK(TerrainWorld::grassCellKey({ -1, 5 }) != TerrainWorld::grassCellKey({ 5, -1 }));
+    CHECK(TerrainWorld::grassCellKey({ -7, -9 }) != TerrainWorld::grassCellKey({ -9, -7 }));
+    CHECK(world.grassCellOf(-0.5f * cs, 2.5f * cs) == glm::ivec2(-1, 2));
+}
+
 TEST_CASE("result queue and stats bookkeeping", "[terrain]") {
     TerrainWorld world;
     world.configure(smallConfig());

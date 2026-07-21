@@ -273,6 +273,18 @@ namespace Vapor {
         int lod2RadiusTiles = 8;
         int scatterRadiusTiles = 3;
         int scatterPerTile = 90;       // placement attempts per tile
+        // Streamed grass ring (GoT-style wind sway; defaults tuned in the
+        // original demo). density is attempts per m^2, culled by the coverage
+        // fraction and the height01 band; 0 disables grass entirely.
+        float grassDensity = 40.0f;
+        float grassRadius = 90.0f;
+        float grassBladeHeight = 1.6f;
+        glm::vec2 grassHeightBand = glm::vec2(0.02f, 0.64f);
+        float grassCoverage = 0.7f;
+        glm::vec3 grassRootColor = glm::vec3(0.10f, 0.15f, 0.06f);   // shadowed base
+        glm::vec3 grassTipColor = glm::vec3(0.965f, 0.949f, 0.388f); // golden tip
+        float grassWindStrength = 0.45f;
+        float grassWindSpeed = 1.8f;
         bool regenerate = false;       // set true (e.g. from the inspector) to rebuild
         Hidden<std::shared_ptr<TerrainWorld>> world = {};  // owned; created by the system
     };

@@ -295,6 +295,16 @@ public:
     virtual void setTerrainDetailLayers(const std::array<std::shared_ptr<Vapor::Image>, 4>& /*albedoLayers*/,
                                         const std::array<std::shared_ptr<Vapor::Image>, 4>& /*normalLayers*/) {}
 
+    // Streamed grass ring (TerrainSystem): a fixed instance pool of
+    // cellSlots * bladesPerSlot blades; cells stream in/out by rewriting slots
+    // in place (the terrain-tile pattern) and each frame draws the resident
+    // cells with the current wind/look settings. Default false/no-op = backend
+    // has no grass pass; the system then skips grass streaming entirely.
+    virtual bool configureGrassPool(Uint32 /*cellSlots*/, Uint32 /*bladesPerSlot*/) { return false; }
+    virtual void updateGrassCell(Uint32 /*slot*/, const std::vector<Vapor::GrassBladeGpu>& /*blades*/) {}
+    virtual void setGrassDraws(const std::vector<Vapor::GrassCellDraw>& /*draws*/,
+                               const Vapor::GrassSettingsData& /*settings*/) {}
+
 protected:
     std::function<void()> m_imGuiCallback;
     std::function<void()> m_engineWindowCallback;

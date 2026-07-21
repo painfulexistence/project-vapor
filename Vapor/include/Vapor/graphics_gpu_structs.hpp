@@ -140,6 +140,27 @@ struct DrawCommand {
 };
 static_assert(sizeof(DrawCommand) == 20, "DrawCommand must match the GPU indirect-args layout");
 
+// One grass blade instance (Grass pass): world base position + per-blade
+// randomization, uploaded verbatim into the grass instance pool. Cell builders
+// (TerrainWorld::buildGrassCell) produce these on worker threads.
+struct alignas(16) GrassBladeGpu {
+    glm::vec4 positionAndHeight;  // xyz = world base position, w = blade height (m)
+    glm::vec4 params;             // x = sway phase (rad), y = facing angle (rad),
+                                  // z = tint jitter 0..1, w = half width (m)
+};
+static_assert(sizeof(GrassBladeGpu) == 32, "grass instance pool layout: 32 bytes per blade");
+
+// Per-frame grass uniforms (renderer-filled; the shader twins mirror this).
+struct alignas(16) GrassParamsGpu {
+    glm::mat4 viewProj;
+    glm::vec4 cameraPosTime;  // xyz = camera position, w = time (s)
+    glm::vec4 wind;           // xy = direction, z = strength (m at tip), w = speed
+    glm::vec4 rootColor;      // rgb = root color, w = fade start distance (m)
+    glm::vec4 tipColor;       // rgb = tip color, w = fade end distance (m)
+    glm::vec4 sun;            // xyz = direction TOWARD the sun, w = intensity
+    glm::vec4 sunColor;       // rgb = sun color, w = unused
+};
+
 struct alignas(16) Cluster {
     glm::vec4 min;
     glm::vec4 max;

@@ -707,6 +707,16 @@ void Renderer::shutdown() {
         terrainDetailAlbedoArray = {};
         terrainDetailNormalArray = {};
 
+        // Grass ring resources.
+        if (grassInstanceBuffer.isValid()) rhi->destroyBuffer(grassInstanceBuffer);
+        if (grassParamsBuffer.isValid()) rhi->destroyBuffer(grassParamsBuffer);
+        if (grassPipeline.isValid()) rhi->destroyPipeline(grassPipeline);
+        if (grassVS.isValid()) rhi->destroyShader(grassVS);
+        if (grassFS.isValid()) rhi->destroyShader(grassFS);
+        grassInstanceBuffer = {};
+        grassParamsBuffer = {};
+        grassPipeline = {};
+
         // Destroy shaders
         if (vertexShader.isValid()) {
             rhi->destroyShader(vertexShader);
@@ -1265,6 +1275,13 @@ void Renderer::setupDefaultRenderGraph() {
     // exists, directly to the swapchain otherwise (decided inside the pass).
     renderGraph.addPass("Main",
         [](Renderer& r) { r.mainRenderPass(); });
+
+    // Streamed grass ring (TerrainSystem): instanced blades drawn per resident
+    // cell over the scene color/depth. Writes depth (opaque, distance fade
+    // shrinks blades geometrically), so the voxel/sky/fog passes after it
+    // treat grass as ordinary scene geometry.
+    renderGraph.addPass("Grass",
+        [](Renderer& r) { r.grassPass(); });
 
     // Raymarched micro-voxel volumes (VoxelVolumeComponent). Box-rasterized
     // two-level DDA that writes true hit depth into depthStencilRT, so it must
@@ -4349,6 +4366,99 @@ void Renderer::setVoxelVolumes(const std::vector<Vapor::VoxelVolumeDraw>& volume
     pendingVoxelVolumes = volumes;
 }
 
+// ── Grass ring ──────────────────────────────────────────────────────────────
+// Fixed instance pool: cellSlots x bladesPerSlot blades. TerrainSystem streams
+// cells by rewriting slots in place — the same never-allocate-while-streaming
+// contract as the terrain tile pools.
+bool Renderer::configureGrassPool(Uint32 cellSlots, Uint32 bladesPerSlot) {
+    if (!grassPipeline.isValid()) return false;  // backend has no grass pass
+    if (cellSlots == 0 || bladesPerSlot == 0) return false;
+    if (grassInstanceBuffer.isValid()) rhi->destroyBuffer(grassInstanceBuffer);
+    BufferDesc bd;
+    bd.size = static_cast<size_t>(cellSlots) * bladesPerSlot * sizeof(Vapor::GrassBladeGpu);
+    bd.usage = BufferUsage::Storage;
+    bd.memoryUsage = MemoryUsage::GPU;
+    grassInstanceBuffer = rhi->createBuffer(bd);
+    grassSlotCount = cellSlots;
+    grassBladesPerSlot = bladesPerSlot;
+    grassDraws.clear();
+    if (!grassParamsBuffer.isValid()) {
+        BufferDesc pd;
+        pd.size = sizeof(Vapor::GrassParamsGpu);
+        pd.usage = BufferUsage::Storage;
+        pd.memoryUsage = MemoryUsage::GPU;
+        grassParamsBuffer = rhi->createBuffer(pd);
+    }
+    fmt::print("Renderer: grass pool {} cells x {} blades ({} MB)\n", cellSlots, bladesPerSlot,
+               bd.size / (1024 * 1024));
+    return grassInstanceBuffer.isValid();
+}
+
+void Renderer::updateGrassCell(Uint32 slot, const std::vector<Vapor::GrassBladeGpu>& blades) {
+    if (!grassInstanceBuffer.isValid() || slot >= grassSlotCount || blades.empty()) return;
+    const size_t count = std::min<size_t>(blades.size(), grassBladesPerSlot);
+    rhi->updateBuffer(grassInstanceBuffer, blades.data(),
+                      static_cast<size_t>(slot) * grassBladesPerSlot * sizeof(Vapor::GrassBladeGpu),
+                      count * sizeof(Vapor::GrassBladeGpu));
+}
+
+void Renderer::setGrassDraws(const std::vector<Vapor::GrassCellDraw>& draws,
+                             const Vapor::GrassSettingsData& settings) {
+    grassDraws = draws;
+    grassSettings = settings;
+}
+
+// Streamed grass blades: one instanced draw per resident cell into the scene
+// color/depth (depth-tested against the raster scene, writes depth so the sky
+// and fog composite correctly). Distance fade shrinks blades to zero height —
+// no blending, no sorting. Runs between Main and MicroVoxel.
+void Renderer::grassPass() {
+    if (!grassEnabled || !grassPipeline.isValid() || !grassInstanceBuffer.isValid() ||
+        !grassParamsBuffer.isValid() || grassDraws.empty() || !colorRT.isValid() ||
+        !depthStencilRT.isValid()) {
+        return;
+    }
+
+    // Self-contained wind clock (the renderer has no global time source).
+    const auto now = std::chrono::steady_clock::now();
+    if (grassLastTick.time_since_epoch().count() != 0) {
+        grassTimeSeconds += std::chrono::duration<float>(now - grassLastTick).count();
+    }
+    grassLastTick = now;
+
+    glm::vec3 sunDir = atmosphereData.sunDirection;
+    sunDir = (glm::length(sunDir) > 1e-6f) ? glm::normalize(sunDir) : glm::vec3(0.0f, 1.0f, 0.0f);
+    Vapor::GrassParamsGpu p {};
+    p.viewProj = currentCamera.proj * currentCamera.view;
+    p.cameraPosTime = glm::vec4(currentCamera.position, grassTimeSeconds);
+    p.wind = glm::vec4(grassSettings.windDir, grassSettings.windStrength, grassSettings.windSpeed);
+    p.rootColor = glm::vec4(grassSettings.rootColor, grassSettings.fadeStart);
+    p.tipColor = glm::vec4(grassSettings.tipColor, grassSettings.fadeEnd);
+    p.sun = glm::vec4(sunDir, atmosphereData.sunIntensity);
+    p.sunColor = glm::vec4(atmosphereData.sunColor, 0.0f);
+    rhi->updateBuffer(grassParamsBuffer, &p, 0, sizeof(Vapor::GrassParamsGpu));
+
+    RenderPassDesc rp;
+    rp.name = "Grass";
+    rp.colorAttachments.push_back(colorRT);
+    rp.clearColors.push_back(clearColor);
+    rp.loadColor.push_back(true);   // composite over the rendered scene
+    rp.depthAttachment = depthStencilRT;
+    rp.loadDepth = true;            // test/write against the scene depth
+    rhi->beginRenderPass(rp);
+    rhi->bindPipeline(grassPipeline);
+    rhi->setVertexBuffer(0, grassParamsBuffer, 0, sizeof(Vapor::GrassParamsGpu));
+    rhi->setVertexBuffer(1, grassInstanceBuffer);
+    rhi->setFragmentBuffer(0, grassParamsBuffer, 0, sizeof(Vapor::GrassParamsGpu));
+    for (const auto& cell : grassDraws) {
+        if (cell.count == 0 || cell.slot >= grassSlotCount) continue;
+        // 15 vertices per blade (two tapered quads + tip); base instance selects
+        // the cell's slot range (gl_InstanceIndex / Metal instance_id include it).
+        rhi->draw(15, std::min(cell.count, grassBladesPerSlot), 0, cell.slot * grassBladesPerSlot);
+    }
+    rhi->endRenderPass();
+}
+
 // Reconcile the ECS-pushed volume list with the renderer's GPU mirrors and
 // flush each world's dirty batches into the SHARED buffers. When the volume
 // set changes (add/remove/reconfigure) the shared page-table and brick-pool
@@ -6324,6 +6434,45 @@ void Renderer::createRenderPipeline() {
                     "shaders/MicroVoxelGIComposite.frag.spv", microVoxelGICompositeFS, BlendMode::Opaque);
             }
 
+            // Grass ring: procedural blades pulled from the instance pool (no
+            // vertex buffer), depth tested + written, cull off (blades are
+            // two-sided). Color-only into colorRT.
+            {
+                std::string gVert = readFile("shaders/Grass.vert.spv");
+                std::string gFrag = readFile("shaders/Grass.frag.spv");
+                if (!gVert.empty() && !gFrag.empty()) {
+                    ShaderDesc vd;
+                    vd.stage = ShaderStage::Vertex;
+                    vd.code = gVert.data();
+                    vd.codeSize = gVert.size();
+                    vd.entryPoint = "main";
+                    grassVS = rhi->createShader(vd);
+                    ShaderDesc fd;
+                    fd.stage = ShaderStage::Fragment;
+                    fd.code = gFrag.data();
+                    fd.codeSize = gFrag.size();
+                    fd.entryPoint = "main";
+                    grassFS = rhi->createShader(fd);
+
+                    PipelineDesc d;
+                    d.vertexShader = grassVS;
+                    d.fragmentShader = grassFS;
+                    d.vertexLayout.stride = 0;
+                    d.vertexLayout.attributes = {};
+                    d.topology = PrimitiveTopology::TriangleList;
+                    d.blendMode = BlendMode::Opaque;
+                    d.depthTest = true;
+                    d.depthWrite = true;
+                    d.depthCompareOp = CompareOp::Less;
+                    d.cullMode = CullMode::None;
+                    d.sampleCount = 1;
+                    d.hasDepthAttachment = true;
+                    d.depthAttachmentFormat = PixelFormat::Depth32Float;
+                    d.colorAttachmentFormats = { PixelFormat::RGBA16_FLOAT };
+                    grassPipeline = rhi->createPipeline(d);
+                }
+            }
+
             // Camera-motion velocity (motion vectors) from depth.
             velocityPipeline = makeFullscreenFragPipeline(
                 "shaders/Velocity.frag.spv", velocityShader, BlendMode::Opaque);
@@ -6792,6 +6941,41 @@ void Renderer::createRenderPipeline() {
                     "shaders/3d_microvoxel_gi.metal", "microVoxelGICompositeVertex",
                     "microVoxelGICompositeFragment", BlendMode::Opaque, { PixelFormat::RGBA16_FLOAT },
                     false, CompareOp::Less);
+            }
+
+            // Grass ring (Metal twin of the Vulkan Grass pipeline): procedural
+            // blades from the instance pool, depth write on, cull off.
+            std::string grassCode = readFile("shaders/3d_grass.metal");
+            if (!grassCode.empty()) {
+                ShaderDesc vd;
+                vd.stage = ShaderStage::Vertex;
+                vd.code = grassCode.data();
+                vd.codeSize = grassCode.size();
+                vd.entryPoint = "grassVertex";
+                grassVS = rhi->createShader(vd);
+                ShaderDesc fd;
+                fd.stage = ShaderStage::Fragment;
+                fd.code = grassCode.data();
+                fd.codeSize = grassCode.size();
+                fd.entryPoint = "grassFragment";
+                grassFS = rhi->createShader(fd);
+
+                PipelineDesc d;
+                d.vertexShader = grassVS;
+                d.fragmentShader = grassFS;
+                d.vertexLayout.stride = 0;
+                d.vertexLayout.attributes = {};
+                d.topology = PrimitiveTopology::TriangleList;
+                d.blendMode = BlendMode::Opaque;
+                d.depthTest = true;
+                d.depthWrite = true;
+                d.depthCompareOp = CompareOp::Less;
+                d.cullMode = CullMode::None;
+                d.sampleCount = 1;
+                d.hasDepthAttachment = true;
+                d.depthAttachmentFormat = PixelFormat::Depth32Float;
+                d.colorAttachmentFormats = { PixelFormat::RGBA16_FLOAT };
+                grassPipeline = rhi->createPipeline(d);
             }
         }
         // Volumetric clouds (off by default): quarter-res raymarch ->

@@ -1,5 +1,5 @@
 #pragma once
-#include "graphics.hpp"// VertexData, Mesh, Image (data structs; no GPU calls here)
+#include "graphics.hpp"// VertexData, Mesh, Image, GrassBladeGpu (data structs; no GPU calls here)
 #include <SDL3/SDL_stdinc.h>
 #include <array>
 #include <atomic>
@@ -8,6 +8,7 @@
 #include <memory>
 #include <mutex>
 #include <unordered_map>
+#include <unordered_set>
 #include <vector>
 
 namespace Vapor {
@@ -46,6 +47,17 @@ struct TerrainConfig {
     // Deterministic tree/rock scatter ring.
     int scatterRadiusTiles = 3;
     int scatterPerTile = 90;      // placement attempts per tile
+
+    // Streamed grass ring (GoT-style sway; defaults from the original demo).
+    // grassDensity is placement ATTEMPTS per m^2; coverage/height-band/slope
+    // rules cull them. 0 disables grass entirely.
+    float grassDensity = 40.0f;
+    float grassRadius = 90.0f;      // ring radius around the camera (m)
+    float grassCellSize = 15.0f;    // streaming cell edge (m)
+    float grassBladeHeight = 1.6f;  // mean blade height (m)
+    glm::vec2 grassHeightBand { 0.02f, 0.64f };  // height01 range that grows grass
+    float grassCoverage = 0.7f;     // fraction of attempts that sprout
+    float grassMaxSlope = 1000.0f;  // rise/run cutoff (>= 999 = grow everywhere)
 };
 
 class TerrainWorld {
@@ -113,6 +125,34 @@ public:
     // demo): trees on gentle mid-band ground, rocks on steeper slopes.
     std::vector<ScatterPlacement> scatterPlacements(int tileX, int tileZ) const;
 
+    // ---- Grass ring (streamed instanced blades) --------------------------
+    // Cells are a world-origin-anchored grid of grassCellSize metres,
+    // independent of the terrain tiles. buildGrassCell is pure and
+    // deterministic per (cell, seed): attempts = density * cellSize^2, each
+    // culled by world bounds, coverage, the height01 band, and (when
+    // grassMaxSlope < 999) the slope cutoff. Blades sit exactly on heightAt.
+    glm::ivec2 grassCellOf(float x, float z) const;
+    static long long grassCellKey(glm::ivec2 c) {
+        return (static_cast<long long>(c.y) << 32) | static_cast<Uint32>(c.x);
+    }
+    std::vector<GrassBladeGpu> buildGrassCell(int cellX, int cellZ) const;
+
+    struct GrassCellResult {
+        long long key = 0;
+        std::vector<GrassBladeGpu> blades;
+    };
+    void pushGrassResult(GrassCellResult&& result) {
+        std::lock_guard<std::mutex> lock(grassResultMutex);
+        grassResults.push_back(std::move(result));
+    }
+    bool popGrassResult(GrassCellResult& out) {
+        std::lock_guard<std::mutex> lock(grassResultMutex);
+        if (grassResults.empty()) return false;
+        out = std::move(grassResults.back());
+        grassResults.pop_back();
+        return true;
+    }
+
     // ---- Streaming bookkeeping (driven by TerrainSystem) -----------------
     // Recomputes every tile's target LOD around camTile; returns the tiles
     // whose target dropped to the base coat while a fine slot is live —
@@ -146,12 +186,28 @@ public:
     std::vector<std::shared_ptr<Mesh>> scatterMeshes;  // prototypes (0 tree, 1 rock)
     std::atomic<int> inFlight { 0 };
 
+    // Grass streaming bookkeeping (system-owned, like the tile slots above).
+    struct GrassCellState {
+        int slot = -1;
+        Uint32 bladeCount = 0;
+    };
+    std::unordered_map<long long, GrassCellState> grassCells;  // resident cells
+    std::unordered_set<long long> grassPending;                // builds in flight
+    std::vector<int> grassFreeSlots;
+    Uint32 grassSlotCount = 0;
+    Uint32 grassBladesPerSlot = 0;
+    glm::ivec2 lastGrassCell { INT32_MIN, INT32_MIN };
+    std::atomic<int> grassInFlight { 0 };
+
 private:
     TerrainConfig cfg;
     int tilesAxis = 20;
 
     mutable std::mutex resultMutex;
     std::vector<BuildResult> results;
+
+    mutable std::mutex grassResultMutex;
+    std::vector<GrassCellResult> grassResults;
 };
 
 }// namespace Vapor

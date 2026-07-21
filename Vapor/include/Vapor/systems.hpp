@@ -572,6 +572,7 @@ namespace Vapor {
                 }
                 enqueueBuilds(world);
                 applyResults(reg, renderer, world);
+                updateGrass(renderer, world, tc, camPos);
                 break;  // singleton: the first terrain entity wins
             }
         }
@@ -638,8 +639,31 @@ namespace Vapor {
             cfg.lod2RadiusTiles = tc.lod2RadiusTiles;
             cfg.scatterRadiusTiles = tc.scatterRadiusTiles;
             cfg.scatterPerTile = tc.scatterPerTile;
+            cfg.grassDensity = tc.grassDensity;
+            cfg.grassRadius = tc.grassRadius;
+            cfg.grassBladeHeight = tc.grassBladeHeight;
+            cfg.grassHeightBand = tc.grassHeightBand;
+            cfg.grassCoverage = tc.grassCoverage;
             world->configure(cfg);
             tc.world.value = world;
+
+            // Grass ring: a fixed pool of cell slots in the renderer's shared
+            // instance buffer (the tile-slot pattern — streaming rewrites slots
+            // in place, never allocates). Pool = every cell whose centre can
+            // fall inside the ring, plus slack for transitions.
+            renderer->setGrassDraws({}, {});
+            if (tc.grassDensity > 0.0f) {
+                const float cs = cfg.grassCellSize;
+                const float ringR = tc.grassRadius / cs + 1.0f;
+                const Uint32 slots = static_cast<Uint32>(std::ceil(3.14159265f * ringR * ringR)) + 8u;
+                const Uint32 perSlot = static_cast<Uint32>(std::ceil(tc.grassDensity * cs * cs));
+                if (renderer->configureGrassPool(slots, perSlot)) {
+                    world->grassSlotCount = slots;
+                    world->grassBladesPerSlot = perSlot;
+                    world->grassFreeSlots.clear();
+                    for (int s = static_cast<int>(slots) - 1; s >= 0; s--) world->grassFreeSlots.push_back(s);
+                }
+            }
 
             // Terrain surface: the Main pass's terrain branch (splat-blended
             // detail layers, world-space tiled) — push the generated
@@ -809,6 +833,103 @@ namespace Vapor {
                 tile.currentLod = r.lod;
                 tile.fineSlot = slotIdx;
             }
+        }
+
+        // Grass ring streaming: cells (world-anchored grassCellSize squares)
+        // whose centre falls inside the ring build on worker threads and land
+        // in fixed instance-pool slots; leaving cells free their slot. The
+        // enqueue scan runs every frame (cheap — a few hundred map lookups) so
+        // cells missed by the in-flight cap are picked up as jobs drain.
+        static void updateGrass(IRenderer* renderer, TerrainWorld& world,
+                                const StreamingTerrainComponent& tc, const glm::vec3& camPos) {
+            if (tc.grassDensity <= 0.0f || world.grassSlotCount == 0) return;
+            auto& scheduler = EngineCore::Get()->getTaskScheduler();
+            const float cs = world.config().grassCellSize;
+            const float radius = tc.grassRadius;
+            const glm::vec2 camXZ(camPos.x, camPos.z);
+            const glm::ivec2 camCell = world.grassCellOf(camPos.x, camPos.z);
+            auto cellCentre = [cs](int cx, int cz) { return glm::vec2((cx + 0.5f) * cs, (cz + 0.5f) * cs); };
+
+            // Evict cells that left the ring (small hysteresis so boundary
+            // jitter doesn't churn); their slots serve incoming cells.
+            if (camCell != world.lastGrassCell) {
+                world.lastGrassCell = camCell;
+                for (auto it = world.grassCells.begin(); it != world.grassCells.end();) {
+                    const int cx = static_cast<int>(static_cast<Uint32>(it->first & 0xFFFFFFFFll));
+                    const int cz = static_cast<int>(it->first >> 32);
+                    if (glm::distance(cellCentre(cx, cz), camXZ) > radius + cs) {
+                        if (it->second.slot >= 0) world.grassFreeSlots.push_back(it->second.slot);
+                        it = world.grassCells.erase(it);
+                    } else {
+                        ++it;
+                    }
+                }
+            }
+
+            // Enqueue builds for cells inside the ring that aren't resident or
+            // pending yet (bounded in-flight; jobs only read the pure world).
+            TerrainWorld* worldPtr = &world;
+            const int span = static_cast<int>(radius / cs) + 1;
+            bool capped = false;
+            for (int dz = -span; dz <= span && !capped; dz++) {
+                for (int dx = -span; dx <= span; dx++) {
+                    const glm::ivec2 cell = camCell + glm::ivec2(dx, dz);
+                    if (glm::distance(cellCentre(cell.x, cell.y), camXZ) > radius) continue;
+                    const long long key = TerrainWorld::grassCellKey(cell);
+                    if (world.grassCells.count(key) || world.grassPending.count(key)) continue;
+                    if (world.grassInFlight.load(std::memory_order_relaxed) >= 4) {
+                        capped = true;
+                        break;
+                    }
+                    world.grassPending.insert(key);
+                    world.grassInFlight.fetch_add(1, std::memory_order_relaxed);
+                    scheduler.submitTask([worldPtr, cell, key] {
+                        TerrainWorld::GrassCellResult r;
+                        r.key = key;
+                        r.blades = worldPtr->buildGrassCell(cell.x, cell.y);
+                        worldPtr->pushGrassResult(std::move(r));
+                        worldPtr->grassInFlight.fetch_sub(1, std::memory_order_relaxed);
+                    });
+                }
+            }
+
+            // Apply finished cells (bounded per frame — one cell is up to a
+            // few-hundred-KB upload). A cell the camera outran is dropped; the
+            // scan above re-enqueues it if it comes back.
+            TerrainWorld::GrassCellResult r;
+            for (int applied = 0; applied < 2 && world.popGrassResult(r); applied++) {
+                world.grassPending.erase(r.key);
+                const int cx = static_cast<int>(static_cast<Uint32>(r.key & 0xFFFFFFFFll));
+                const int cz = static_cast<int>(r.key >> 32);
+                if (glm::distance(cellCentre(cx, cz), camXZ) > radius + cs) continue;  // stale
+                if (r.blades.empty()) {
+                    world.grassCells[r.key] = { -1, 0 };  // resident, nothing to draw
+                    continue;
+                }
+                if (world.grassFreeSlots.empty()) continue;  // pool busy; rescan resubmits
+                const int slot = world.grassFreeSlots.back();
+                world.grassFreeSlots.pop_back();
+                renderer->updateGrassCell(static_cast<Uint32>(slot), r.blades);
+                world.grassCells[r.key] = { slot,
+                    static_cast<Uint32>(std::min<size_t>(r.blades.size(), world.grassBladesPerSlot)) };
+            }
+
+            // Push the resident draw list + look/wind settings every frame.
+            std::vector<GrassCellDraw> draws;
+            draws.reserve(world.grassCells.size());
+            for (const auto& [key, st] : world.grassCells) {
+                if (st.slot >= 0 && st.bladeCount > 0)
+                    draws.push_back({ static_cast<Uint32>(st.slot), st.bladeCount });
+            }
+            GrassSettingsData gs;
+            gs.windDir = glm::normalize(glm::vec2(0.8f, 0.6f));
+            gs.windStrength = tc.grassWindStrength;
+            gs.windSpeed = tc.grassWindSpeed;
+            gs.rootColor = tc.grassRootColor;
+            gs.tipColor = tc.grassTipColor;
+            gs.fadeStart = tc.grassRadius * 0.66f;
+            gs.fadeEnd = tc.grassRadius;
+            renderer->setGrassDraws(draws, gs);
         }
 
         static void updateScatter(entt::registry& reg, TerrainWorld& world,

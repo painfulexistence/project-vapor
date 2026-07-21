@@ -9,6 +9,7 @@
 #include "render_scene.hpp"
 #include <SDL3/SDL_video.h>
 #include <entt/entt.hpp>
+#include <chrono>
 #include <functional>
 #include <unordered_map>
 #include <vector>
@@ -333,6 +334,11 @@ public:
     void requestIBLUpdate() override { if (m_iblAutoRebake) iblNeedsUpdate = true; }
     void setParticleDrawList(const std::vector<ParticleDrawPacket>& draws) override;
     void setVoxelVolumes(const std::vector<Vapor::VoxelVolumeDraw>& volumes) override;
+    // Grass ring: fixed instance pool, per-cell slot rewrites, per-frame draws.
+    bool configureGrassPool(Uint32 cellSlots, Uint32 bladesPerSlot) override;
+    void updateGrassCell(Uint32 slot, const std::vector<Vapor::GrassBladeGpu>& blades) override;
+    void setGrassDraws(const std::vector<Vapor::GrassCellDraw>& draws,
+                       const Vapor::GrassSettingsData& settings) override;
     // MicroVoxel tunables (the same state the ImGui panel edits) — exposed so
     // demo/gameplay hotkeys can flip debug views and toggles directly.
     MicroVoxelRenderData& getMicroVoxelSettings() { return microVoxelSettings; }
@@ -437,6 +443,9 @@ private:
     void heightFogPass();
     void volumetricFogPass();
     void volumeRaymarchPass();
+    // Streamed grass ring: instanced blade draws per resident cell, drawn
+    // between Main and MicroVoxel (writes depth; opaque, no blending).
+    void grassPass();
     void microVoxelPass();
     // Reconciles the ECS-pushed volume list with the GPU mirrors (create /
     // destroy buffers) and flushes per-brick dirty batches into the pool.
@@ -772,6 +781,22 @@ private:
         Uint32 pageEntryCount = 0;   // page-table entries this volume owns
         Uint32 brickCapacity = 0;    // pool slots this volume owns
     };
+    // ---- Grass ring (streamed instanced blades; see grassPass) -----------
+    // Fixed pool of cell slots in one instance buffer; TerrainSystem streams
+    // cells by rewriting slots in place, and each frame supplies the resident
+    // draws + wind/look settings.
+    BufferHandle grassInstanceBuffer;
+    BufferHandle grassParamsBuffer;
+    PipelineHandle grassPipeline;
+    ShaderHandle grassVS, grassFS;
+    Uint32 grassSlotCount = 0;
+    Uint32 grassBladesPerSlot = 0;
+    std::vector<Vapor::GrassCellDraw> grassDraws;
+    Vapor::GrassSettingsData grassSettings;
+    bool grassEnabled = true;
+    float grassTimeSeconds = 0.0f;
+    std::chrono::steady_clock::time_point grassLastTick {};
+
     BufferHandle voxelPageTableBuffer;  // concatenated per-volume page tables
     BufferHandle voxelBrickPoolBuffer;  // concatenated per-volume slot ranges
     BufferHandle voxelPaletteBuffer;    // MAX_VOXEL_VOLUMES x 256 materials

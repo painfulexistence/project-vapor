@@ -55,6 +55,18 @@ void TerrainWorld::configure(const TerrainConfig& config) {
         results.clear();
     }
     inFlight.store(0, std::memory_order_relaxed);
+
+    grassCells.clear();
+    grassPending.clear();
+    grassFreeSlots.clear();
+    grassSlotCount = 0;
+    grassBladesPerSlot = 0;
+    lastGrassCell = { INT32_MIN, INT32_MIN };
+    {
+        std::lock_guard<std::mutex> lock(grassResultMutex);
+        grassResults.clear();
+    }
+    grassInFlight.store(0, std::memory_order_relaxed);
 }
 
 float TerrainWorld::heightAt(float x, float z) const {
@@ -217,6 +229,50 @@ std::vector<TerrainWorld::ScatterPlacement> TerrainWorld::scatterPlacements(int 
             const float s = 1.0f + rand01() * 3.0f;  // rock
             out.push_back({ { wx, y + 0.2f * s, wz }, { s, 0.6f * s, s }, rand01() * 6.2832f, 1 });
         }
+    }
+    return out;
+}
+
+glm::ivec2 TerrainWorld::grassCellOf(float x, float z) const {
+    const float cs = std::max(cfg.grassCellSize, 1.0f);
+    return { static_cast<int>(std::floor(x / cs)), static_cast<int>(std::floor(z / cs)) };
+}
+
+std::vector<GrassBladeGpu> TerrainWorld::buildGrassCell(int cellX, int cellZ) const {
+    std::vector<GrassBladeGpu> out;
+    if (cfg.grassDensity <= 0.0f) return out;
+    const float cs = std::max(cfg.grassCellSize, 1.0f);
+    const float minX = cellX * cs, minZ = cellZ * cs;
+    const float half = 0.5f * cfg.worldSize;
+    const int attempts = static_cast<int>(cfg.grassDensity * cs * cs);
+    out.reserve(static_cast<size_t>(attempts));
+    Uint32 rng = static_cast<Uint32>(cellX) * 73856093u ^ static_cast<Uint32>(cellZ) * 19349663u
+        ^ (cfg.seed * 2654435761u + 17u);
+    auto rand01 = [&rng] {
+        rng = rng * 1664525u + 1013904223u;
+        return static_cast<float>(rng >> 8) * (1.0f / 16777216.0f);
+    };
+    const bool slopeCull = cfg.grassMaxSlope < 999.0f;  // default 1000 = everywhere
+    for (int i = 0; i < attempts; i++) {
+        // Draw every random up-front so the stream (and thus every later
+        // blade) is independent of which culls fire.
+        const float wx = minX + rand01() * cs;
+        const float wz = minZ + rand01() * cs;
+        const float cov = rand01();
+        const float hRand = rand01();
+        const float phase = rand01();
+        const float face = rand01();
+        const float tint = rand01();
+        if (wx < -half || wx >= half || wz < -half || wz >= half) continue;
+        if (cov > cfg.grassCoverage) continue;
+        const float y = heightAt(wx, wz);
+        const float hn = y / cfg.heightScale;
+        if (hn < cfg.grassHeightBand.x || hn > cfg.grassHeightBand.y) continue;
+        if (slopeCull && slopeAt(wx, wz) > cfg.grassMaxSlope) continue;
+        GrassBladeGpu b;
+        b.positionAndHeight = glm::vec4(wx, y, wz, cfg.grassBladeHeight * (0.7f + 0.6f * hRand));
+        b.params = glm::vec4(phase * 6.2831853f, face * 6.2831853f, tint, 0.045f + 0.025f * tint);
+        out.push_back(b);
     }
     return out;
 }
