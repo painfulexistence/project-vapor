@@ -390,6 +390,21 @@ struct alignas(16) VolumeRenderData {
     glm::vec4 params = glm::vec4(48.0f, 8.0f, 0.0f, 0.0f);   // x = steps, y = shadow steps
 };
 
+// CPU-side contract for the artist-facing volumetric-cloud tunables — the
+// subset the ECS (WeatherSystem) drives. Pushed via IRenderer::setClouds; the
+// renderer copies these into its VolumetricCloudRenderData and gates the cloud
+// passes on `enabled`. Shape/phase/step tunables stay renderer-side. Like
+// VolumetricFogRenderData this is a contract, not a GPU buffer.
+struct CloudsRenderData {
+    bool  enabled = false;
+    float coverage = 0.5f;
+    float density = 0.3f;
+    float type = 0.5f;            // 0 stratus → 1 cumulus
+    float layerBottom = 1500.0f;  // meters
+    float layerTop = 4000.0f;
+    float ambientIntensity = 0.3f;
+};
+
 // Volumetric clouds. Field-for-field mirror of the Metal backend's
 // VolumetricCloudData (graphics_effects.hpp) — the defaults below are the
 // values already tuned/tested on the Metal renderer.

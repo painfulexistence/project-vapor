@@ -244,6 +244,101 @@ namespace Vapor {
         Hidden<glm::vec3> _lastIblSunDir = {glm::vec3(0.0f)};
     };
 
+    // ── Weather ──────────────────────────────────────────────────────────────
+
+    enum class WeatherState : uint8_t {
+        Clear = 0, Cloudy, Overcast, Rain, Thunderstorm, Snow,
+    };
+
+    // The blendable slice of a weather state. WeatherSystem lerps between the
+    // outgoing and incoming state's params over the transition, so the sky
+    // thickens/clears smoothly instead of popping. Defaults = the Clear preset
+    // (a default-constructed WeatherComponent resolves to Clear).
+    struct WeatherParams {
+        float cloudCoverage    = 0.35f;
+        float cloudDensity     = 0.25f;
+        float cloudType        = 0.6f;     // 0 stratus → 1 cumulus
+        float cloudLayerBottom = 1500.0f;  // storm states lower the ceiling
+        float cloudLayerTop    = 4000.0f;
+        float cloudAmbient     = 0.3f;
+        float sunDim           = 1.0f;     // multiplies sun/moon light intensity
+        float fogDensityMul    = 1.0f;     // multiplies VolumetricFogComponent density
+        float windMul          = 1.0f;     // multiplies WindFieldComponent strength
+    };
+
+    inline WeatherParams weatherParamsFor(WeatherState s) {
+        switch (s) {
+            //                     coverage density type  bottom  top    ambient sunDim fogMul windMul
+            case WeatherState::Cloudy:       return { 0.60f, 0.35f, 0.45f,  1200.0f, 3600.0f, 0.28f, 0.80f, 1.2f, 1.3f };
+            case WeatherState::Overcast:     return { 0.90f, 0.55f, 0.20f,   800.0f, 2600.0f, 0.22f, 0.40f, 1.6f, 1.6f };
+            case WeatherState::Rain:         return { 0.95f, 0.70f, 0.15f,   600.0f, 2200.0f, 0.16f, 0.25f, 2.2f, 2.0f };
+            case WeatherState::Thunderstorm: return { 1.00f, 0.90f, 0.10f,   500.0f, 2000.0f, 0.10f, 0.12f, 2.5f, 3.0f };
+            case WeatherState::Snow:         return { 0.85f, 0.45f, 0.30f,   900.0f, 2400.0f, 0.35f, 0.45f, 1.8f, 1.2f };
+            case WeatherState::Clear:
+            default:                         return {};
+        }
+    }
+
+    inline WeatherParams mixWeatherParams(const WeatherParams& a, const WeatherParams& b, float t) {
+        auto L = [t](float x, float y) { return x + (y - x) * t; };
+        WeatherParams r;
+        r.cloudCoverage    = L(a.cloudCoverage,    b.cloudCoverage);
+        r.cloudDensity     = L(a.cloudDensity,     b.cloudDensity);
+        r.cloudType        = L(a.cloudType,        b.cloudType);
+        r.cloudLayerBottom = L(a.cloudLayerBottom, b.cloudLayerBottom);
+        r.cloudLayerTop    = L(a.cloudLayerTop,    b.cloudLayerTop);
+        r.cloudAmbient     = L(a.cloudAmbient,     b.cloudAmbient);
+        r.sunDim           = L(a.sunDim,           b.sunDim);
+        r.fogDensityMul    = L(a.fogDensityMul,    b.fogDensityMul);
+        r.windMul          = L(a.windMul,          b.windMul);
+        return r;
+    }
+
+    // Weather authoring — the scene's weather state machine (singleton, put it
+    // on the environment/Sky entity next to SkyComponent). WeatherSystem blends
+    // toward `state` over `transitionSeconds` and orchestrates the downstream
+    // media: volumetric clouds (IRenderer::setClouds — owning them while
+    // driveClouds is set), sun/moon dimming (consumed by TimeOfDaySystem), fog
+    // density and wind strength multipliers (consumed by VolumetricFogSystem /
+    // WindSystem), precipitation emitters (toggled via InactiveComponent on
+    // PrecipitationComponent-tagged entities) and lightning flashes
+    // (LightningComponent-tagged point lights + a cloud-interior glow).
+    struct WeatherComponent {
+        WeatherState state = WeatherState::Clear;  // target; blends over transitionSeconds
+        float transitionSeconds = 15.0f;
+        bool  enabled = true;
+        bool  driveClouds = true;  // push cloud params (turns the clouds pass on)
+        // Lightning (Thunderstorm): random strike interval + flash strength.
+        float lightningMinInterval = 4.0f;   // seconds
+        float lightningMaxInterval = 14.0f;
+        float lightningIntensity   = 300.0f; // peak intensity on tagged lights
+
+        // Runtime (WeatherSystem-owned, inspector-hidden).
+        Hidden<WeatherParams> _from = {};        // params blending FROM (snapshotted on state change)
+        Hidden<float>    _blend = {1.0f};        // 0→1 progress toward `state`
+        Hidden<uint8_t>  _lastState = {0};       // change detection (== WeatherState::Clear)
+        Hidden<WeatherParams> _resolved = {};    // this frame's blended params (consumers read this)
+        Hidden<float>    _lightningTimer = {0.0f};  // countdown to the next strike
+        Hidden<float>    _flashAge = {1e9f};        // seconds since the strike began
+        Hidden<uint32_t> _rng = {0u};               // xorshift32 state (0 = seed on first use)
+    };
+
+    // Tags a particle emitter entity as weather precipitation. WeatherSystem
+    // starts it (removes InactiveComponent, sets emitting) while the weather
+    // calls for its kind — Rain during Rain/Thunderstorm, Snow during Snow —
+    // and gracefully stops it otherwise (emitting = false, so airborne
+    // particles finish falling). Author precipitation emitters with
+    // "inactive": {} so they cost nothing until their first storm.
+    struct PrecipitationComponent {
+        enum class Kind : uint8_t { Rain = 0, Snow };
+        Kind kind = Kind::Rain;
+    };
+
+    // Tags a (point) light as a lightning flash source. Intensity is OWNED by
+    // WeatherSystem: zero except during Thunderstorm strikes, when it spikes
+    // with a double-pulse envelope. Author the light with intensity 0.
+    struct LightningComponent {};
+
     // Time-of-day clock. TimeOfDaySystem advances it and drives the
     // SunComponent-tagged directional light's direction/color/intensity each
     // frame, so the sky, fog, clouds and shadows all follow one moving sun. Put

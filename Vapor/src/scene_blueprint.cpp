@@ -110,6 +110,37 @@ BlueprintComponents& BlueprintComponents::instance() {
         r.registerComponent<SkyComponent>("sky");
         r.registerComponent<TimeOfDayComponent>("timeOfDay");
         r.registerComponent<VolumetricFogComponent>("volumetricFog");
+        // weather: hand-written for the string-authored state (the PFR path
+        // only reads enums as integers). Runtime blend fields stay at their
+        // defaults — a loaded scene starts settled in its authored state.
+        r.registerApplier("weather", [](entt::registry& reg, entt::entity e, const nlohmann::json& j) {
+            WeatherComponent w;
+            const std::string s = j.value("state", "clear");
+            w.state = s == "cloudy"         ? WeatherState::Cloudy
+                      : s == "overcast"     ? WeatherState::Overcast
+                      : s == "rain"         ? WeatherState::Rain
+                      : s == "thunderstorm" ? WeatherState::Thunderstorm
+                      : s == "snow"         ? WeatherState::Snow
+                                            : WeatherState::Clear;
+            w._lastState = static_cast<uint8_t>(w.state);  // no transition on load
+            w._from = weatherParamsFor(w.state);
+            w.transitionSeconds     = j.value("transitionSeconds", w.transitionSeconds);
+            w.enabled               = j.value("enabled", w.enabled);
+            w.driveClouds           = j.value("driveClouds", w.driveClouds);
+            w.lightningMinInterval  = j.value("lightningMinInterval", w.lightningMinInterval);
+            w.lightningMaxInterval  = j.value("lightningMaxInterval", w.lightningMaxInterval);
+            w.lightningIntensity    = j.value("lightningIntensity", w.lightningIntensity);
+            reg.emplace_or_replace<WeatherComponent>(e, w);
+        });
+        // precipitation: hand-written for the string-authored kind.
+        r.registerApplier("precipitation", [](entt::registry& reg, entt::entity e, const nlohmann::json& j) {
+            PrecipitationComponent p;
+            p.kind = j.value("kind", std::string("rain")) == "snow"
+                         ? PrecipitationComponent::Kind::Snow
+                         : PrecipitationComponent::Kind::Rain;
+            reg.emplace_or_replace<PrecipitationComponent>(e, p);
+        });
+        r.registerComponent<LightningComponent>("lightning");
         r.registerComponent<VirtualCameraComponent>("virtualCamera");
         r.registerComponent<FlyCameraComponent>("flyCamera");
         r.registerComponent<FollowCameraComponent>("followCamera");

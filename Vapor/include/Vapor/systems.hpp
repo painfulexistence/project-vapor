@@ -7,6 +7,7 @@
 #include "renderer.hpp"
 #include "render_scene.hpp"
 #include <entt/entt.hpp>
+#include <algorithm>
 #include <cmath>
 #include <memory>
 #include <random>
@@ -445,6 +446,149 @@ namespace Vapor {
     };
 
     // ============================================================================
+    // 天氣系統 - the weather state machine (clouds / dimming / precipitation / lightning)
+    // ============================================================================
+    // Blends the singleton WeatherComponent toward its target state and fans the
+    // resolved params out to every weather-affected medium:
+    //   - volumetric clouds: pushed via IRenderer::setClouds (weather OWNS the
+    //     artist cloud tunables while driveClouds is set — the panel copies of
+    //     those fields are overwritten each frame)
+    //   - sun/moon dimming: resolved into _resolved.sunDim, consumed by
+    //     TimeOfDaySystem (clouds occlude the lights, CPU side)
+    //   - fog density / wind strength multipliers: consumed by
+    //     VolumetricFogSystem / WindSystem at push time (the authored component
+    //     values stay untouched — weather multiplies, never overwrites)
+    //   - precipitation: PrecipitationComponent-tagged emitter entities are
+    //     (de)activated by adding/removing InactiveComponent
+    //   - lightning: LightningComponent-tagged point lights get a double-pulse
+    //     intensity envelope during Thunderstorm, plus a cloud-interior glow
+    // Run BEFORE TimeOfDaySystem / WindSystem / VolumetricFogSystem so they see
+    // this frame's resolved weather.
+    class WeatherSystem {
+    public:
+        static void update(entt::registry& reg, IRenderer* renderer, float deltaTime) {
+            auto view = reg.view<WeatherComponent>(entt::exclude<InactiveComponent>);
+            for (auto entity : view) {
+                auto& w = view.get<WeatherComponent>(entity);
+                if (!w.enabled) break;
+
+                // ── Transition blend (snapshot-on-change so chained switches
+                // mid-transition continue from the currently blended values) ──
+                if (static_cast<uint8_t>(w.state) != static_cast<uint8_t>(w._lastState)) {
+                    const float tPrev = smoothstep01(w._blend);
+                    const auto prevTarget = static_cast<WeatherState>(static_cast<uint8_t>(w._lastState));
+                    w._from = mixWeatherParams(w._from, weatherParamsFor(prevTarget), tPrev);
+                    w._blend = 0.0f;
+                    w._lastState = static_cast<uint8_t>(w.state);
+                }
+                if (w._blend < 1.0f) {
+                    const float step = (w.transitionSeconds > 0.0f)
+                                           ? deltaTime / w.transitionSeconds : 1.0f;
+                    w._blend = std::min(1.0f, w._blend + step);
+                }
+                const WeatherParams p =
+                    mixWeatherParams(w._from, weatherParamsFor(w.state), smoothstep01(w._blend));
+                w._resolved = p;
+
+                // ── Lightning (returns the cloud-interior glow to add) ──
+                const float flashGlow = updateLightning(reg, w, deltaTime);
+
+                // ── Clouds ──
+                if (renderer && w.driveClouds) {
+                    CloudsRenderData clouds;
+                    clouds.enabled          = true;
+                    clouds.coverage         = p.cloudCoverage;
+                    clouds.density          = p.cloudDensity;
+                    clouds.type             = p.cloudType;
+                    clouds.layerBottom      = p.cloudLayerBottom;
+                    clouds.layerTop         = p.cloudLayerTop;
+                    clouds.ambientIntensity = p.cloudAmbient + flashGlow;
+                    renderer->setClouds(clouds);
+                }
+
+                // ── Precipitation: gate on the target state once the transition
+                // is half way in, so rain starts under an already-heavy sky ──
+                const bool committed = w._blend > 0.5f;
+                const bool rainOn = committed && (w.state == WeatherState::Rain ||
+                                                  w.state == WeatherState::Thunderstorm);
+                const bool snowOn = committed && w.state == WeatherState::Snow;
+                auto precip = reg.view<PrecipitationComponent>();
+                for (auto pe : precip) {
+                    const auto kind = precip.get<PrecipitationComponent>(pe).kind;
+                    const bool on = (kind == PrecipitationComponent::Kind::Rain) ? rainOn : snowOn;
+                    if (on) {
+                        // Wake the authored-inactive emitter and (re)start it.
+                        reg.remove<InactiveComponent>(pe);
+                        if (auto* em = reg.try_get<ParticleEmitterComponent>(pe)) em->emitting = true;
+                    } else if (!reg.all_of<InactiveComponent>(pe)) {
+                        // Graceful stop: quit spawning, let airborne particles
+                        // finish falling (the entity stays active so they draw).
+                        if (auto* em = reg.try_get<ParticleEmitterComponent>(pe)) em->emitting = false;
+                    }
+                }
+
+                break;  // singleton: the first weather wins
+            }
+        }
+
+    private:
+        static float smoothstep01(float x) {
+            x = glm::clamp(x, 0.0f, 1.0f);
+            return x * x * (3.0f - 2.0f * x);
+        }
+
+        // Drives every LightningComponent-tagged point light. Returns the
+        // cloud-ambient glow for this frame (lightning illuminating the cloud
+        // deck from inside). Strikes use a double-pulse envelope: a bright
+        // leader followed by a re-strike ~0.15 s later, both decaying fast.
+        static float updateLightning(entt::registry& reg, WeatherComponent& w, float deltaTime) {
+            const bool storm = w.state == WeatherState::Thunderstorm && w._blend > 0.5f;
+            float intensity = 0.0f;
+            float glow = 0.0f;
+            if (storm) {
+                w._flashAge = static_cast<float>(w._flashAge) + deltaTime;
+                w._lightningTimer = static_cast<float>(w._lightningTimer) - deltaTime;
+                if (static_cast<float>(w._lightningTimer) <= 0.0f) {
+                    uint32_t s = w._rng;
+                    if (s == 0u) s = 0x9E3779B9u;   // first-use seed
+                    s ^= s << 13; s ^= s >> 17; s ^= s << 5;   // xorshift32
+                    w._rng = s;
+                    const float u = static_cast<float>(s & 0xFFFFFFu) / 16777216.0f;
+                    const float span = std::max(0.0f, w.lightningMaxInterval - w.lightningMinInterval);
+                    w._lightningTimer = w.lightningMinInterval + u * span;
+                    w._flashAge = 0.0f;   // strike!
+                }
+                const float a = w._flashAge;
+                float env = std::exp(-25.0f * a);
+                if (a > 0.15f) env += 0.7f * std::exp(-25.0f * (a - 0.15f));
+                if (env > 0.005f) {
+                    intensity = w.lightningIntensity * env;
+                    glow = 3.0f * env;
+                }
+            } else {
+                w._flashAge = 1e9f;
+                w._lightningTimer = 0.0f;  // first strike lands as the storm arrives
+            }
+            auto lights = reg.view<PointLightComponent, LightningComponent>();
+            for (auto e : lights)
+                lights.get<PointLightComponent>(e).intensity = intensity;
+            return glow;
+        }
+    };
+
+    // The active weather singleton's resolved params, or nullptr when no
+    // enabled WeatherComponent exists. Consumers (TimeOfDay/Wind/Fog systems)
+    // treat nullptr as "no weather" (all multipliers 1).
+    inline const WeatherParams* activeWeatherParams(entt::registry& reg) {
+        auto view = reg.view<WeatherComponent>(entt::exclude<InactiveComponent>);
+        for (auto e : view) {
+            const auto& w = view.get<WeatherComponent>(e);
+            return w.enabled ? &static_cast<const WeatherParams&>(w._resolved) : nullptr;
+        }
+        return nullptr;
+    }
+
+    // ============================================================================
     // 時間系統 - advances the time-of-day clock and drives the sun
     // ============================================================================
     // The single moving sun: TimeOfDaySystem turns the clock into the
@@ -489,12 +633,17 @@ namespace Vapor {
             glm::vec3 sunColor = glm::mix(glm::vec3(1.0f, 0.45f, 0.25f),
                                           glm::vec3(1.0f, 0.98f, 0.95f), warm);
 
+            // Weather dimming: heavy cloud cover occludes the sun and moon.
+            // WeatherSystem resolves the factor (runs before this system).
+            float weatherDim = 1.0f;
+            if (const WeatherParams* wp = activeWeatherParams(reg)) weatherDim = wp->sunDim;
+
             auto sunView = reg.view<DirectionalLightComponent, SunComponent>(entt::exclude<InactiveComponent>);
             for (auto entity : sunView) {
                 auto& dl = sunView.get<DirectionalLightComponent>(entity);
                 dl.direction = glm::normalize(-sunPos);  // light travels away from the sun
                 dl.color     = sunColor;
-                dl.intensity = tod.maxSunIntensity * daylight;
+                dl.intensity = tod.maxSunIntensity * daylight * weatherDim;
                 break;
             }
 
@@ -511,7 +660,7 @@ namespace Vapor {
                 auto& dl = moonView.get<DirectionalLightComponent>(entity);
                 dl.direction = glm::normalize(-moonPos);  // = normalize(sunPos)
                 dl.color     = tod.moonLightColor;
-                dl.intensity = tod.maxMoonIntensity * moonUp;
+                dl.intensity = tod.maxMoonIntensity * moonUp * weatherDim;
                 break;
             }
         }
@@ -532,9 +681,13 @@ namespace Vapor {
             auto view = reg.view<WindFieldComponent>(entt::exclude<InactiveComponent>);
             for (auto entity : view) {
                 const auto& wf = view.get<WindFieldComponent>(entity);
+                // Weather multiplies at push time — the authored strength stays
+                // untouched, so clearing weather restores the scene's wind.
+                float windMul = 1.0f;
+                if (const WeatherParams* wp = activeWeatherParams(reg)) windMul = wp->windMul;
                 WindRenderData data;
                 data.direction  = wf.direction;
-                data.strength   = wf.strength;
+                data.strength   = wf.strength * windMul;
                 data.turbulence = wf.turbulence;
                 renderer->setWind(data);
                 break;  // singleton: the first wind field wins
@@ -556,9 +709,12 @@ namespace Vapor {
             auto view = reg.view<VolumetricFogComponent>(entt::exclude<InactiveComponent>);
             for (auto entity : view) {
                 const auto& f = view.get<VolumetricFogComponent>(entity);
+                // Weather multiplies at push time (authored density untouched).
+                float fogMul = 1.0f;
+                if (const WeatherParams* wp = activeWeatherParams(reg)) fogMul = wp->fogDensityMul;
                 VolumetricFogRenderData data;
                 data.enabled          = f.enabled;
-                data.fogDensity       = f.density;
+                data.fogDensity       = f.density * fogMul;
                 data.fogHeightFalloff = f.heightFalloff;
                 data.fogBaseHeight    = f.baseHeight;
                 data.fogMaxHeight     = f.maxHeight;
@@ -712,7 +868,11 @@ namespace Vapor {
             auto windView = registry.view<WindFieldComponent>(entt::exclude<InactiveComponent>);
             for (auto entity : windView) {
                 const auto& w = windView.get<WindFieldComponent>(entity);
-                field.wind       = glm::vec4(w.direction, w.strength);
+                // Same weather multiplier WindSystem applies for clouds/fog, so
+                // particles feel the storm's wind too.
+                float windMul = 1.0f;
+                if (const WeatherParams* wp = activeWeatherParams(registry)) windMul = wp->windMul;
+                field.wind       = glm::vec4(w.direction, w.strength * windMul);
                 field.turbulence = w.turbulence;
                 break;
             }

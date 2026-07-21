@@ -72,7 +72,8 @@
       "components": {
         "sky": {},
         "timeOfDay": { "latitudeDeg": 0.0 },
-        "volumetricFog": { "enabled": false }
+        "volumetricFog": { "enabled": false },
+        "weather": { "state": "clear", "transitionSeconds": 15.0 }
       }
     },
     {
@@ -203,6 +204,42 @@
           "color": [1.0, 0.55, 0.35, 1.0]
         },
         "particleRenderer": { "blendMode": 0, "size": 0.1 }
+      }
+    },
+    {
+      "name": "Rain Emitter",
+      "position": [0.0, 25.0, 0.0],
+      "components": {
+        "inactive": {},
+        "precipitation": { "kind": "rain" },
+        "particleEmitter": {
+          "maxParticles": 12000, "emitRate": 6000.0, "particleLifetime": 1.8,
+          "speed": 22.0, "spread": 0.45, "emitDirection": [0.0, -1.0, 0.0],
+          "color": [0.45, 0.55, 0.75, 0.4]
+        },
+        "particleRenderer": { "blendMode": 0, "size": 0.02 }
+      }
+    },
+    {
+      "name": "Snow Emitter",
+      "position": [0.0, 20.0, 0.0],
+      "components": {
+        "inactive": {},
+        "precipitation": { "kind": "snow" },
+        "particleEmitter": {
+          "maxParticles": 16000, "emitRate": 1200.0, "particleLifetime": 13.0,
+          "speed": 1.6, "spread": 0.6, "emitDirection": [0.0, -1.0, 0.0],
+          "color": [1.0, 1.0, 1.0, 0.9]
+        },
+        "particleRenderer": { "blendMode": 1, "size": 0.035 }
+      }
+    },
+    {
+      "name": "Lightning Light",
+      "position": [0.0, 32.0, 0.0],
+      "components": {
+        "pointLight": { "color": [0.78, 0.82, 1.0], "intensity": 0.0, "radius": 120.0 },
+        "lightning": {}
       }
     },
     {

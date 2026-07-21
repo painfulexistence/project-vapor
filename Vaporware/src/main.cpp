@@ -69,6 +69,7 @@ static void setupCustomDrawers(Vapor::SceneInspector& inspector) {
     inspector.registerComponent<Vapor::ParticleAttractorComponent>("Particle Attractor");
     inspector.registerComponent<Vapor::WindFieldComponent>("Wind Field");
     inspector.registerComponent<Vapor::VolumetricFogComponent>("Volumetric Fog");
+    inspector.registerComponent<Vapor::LightningComponent>("Lightning");
     inspector.registerComponent<Vapor::ParticleBurstRequest>("Particle Burst");
     inspector.registerComponent<Vapor::SpellBoltComponent>("Spell Bolt");
 
@@ -83,6 +84,42 @@ static void setupCustomDrawers(Vapor::SceneInspector& inspector) {
                 ImGui::DragFloat("size", &c->size, 0.005f, 0.005f, 2.0f);
                 if (c->texture == 0xFFFFFFFFu) ImGui::LabelText("texture", "(procedural)");
                 else                           ImGui::LabelText("texture", "%u", c->texture);
+            }
+        }
+    });
+
+    // WeatherComponent — custom drawer for the WeatherState combo (auto-draw
+    // can't edit the enum). Switching state starts a timed transition handled
+    // by WeatherSystem; runtime blend fields stay hidden.
+    inspector.registerCustomDrawer([](entt::registry& reg, entt::entity e) {
+        if (auto* c = reg.try_get<Vapor::WeatherComponent>(e)) {
+            if (ImGui::CollapsingHeader("Weather", ImGuiTreeNodeFlags_DefaultOpen)) {
+                ImGui::Checkbox("enabled", &c->enabled);
+                const char* states[] = { "Clear", "Cloudy", "Overcast", "Rain", "Thunderstorm", "Snow" };
+                int s = static_cast<int>(c->state);
+                if (ImGui::Combo("state", &s, states, 6))
+                    c->state = static_cast<Vapor::WeatherState>(s);
+                ImGui::DragFloat("transition (s)", &c->transitionSeconds, 0.5f, 0.0f, 120.0f);
+                ImGui::Checkbox("drive clouds", &c->driveClouds);
+                if (ImGui::TreeNode("Lightning")) {
+                    ImGui::DragFloat("min interval", &c->lightningMinInterval, 0.1f, 0.5f, 60.0f);
+                    ImGui::DragFloat("max interval", &c->lightningMaxInterval, 0.1f, 0.5f, 120.0f);
+                    ImGui::DragFloat("intensity", &c->lightningIntensity, 5.0f, 0.0f, 2000.0f);
+                    ImGui::TreePop();
+                }
+            }
+        }
+    });
+
+    // PrecipitationComponent — custom drawer for the kind combo.
+    inspector.registerCustomDrawer([](entt::registry& reg, entt::entity e) {
+        if (auto* c = reg.try_get<Vapor::PrecipitationComponent>(e)) {
+            if (ImGui::CollapsingHeader("Precipitation", ImGuiTreeNodeFlags_DefaultOpen)) {
+                const char* kinds[] = { "Rain", "Snow" };
+                int k = static_cast<int>(c->kind);
+                if (ImGui::Combo("kind", &k, kinds, 2))
+                    c->kind = static_cast<Vapor::PrecipitationComponent::Kind>(k);
+                ImGui::TextDisabled("activated by WeatherSystem (Inactive toggle)");
             }
         }
     });
@@ -902,6 +939,9 @@ auto main(int argc, char* args[]) -> int {
         // timers (skip the system entirely) so nothing advances while paused.
         renderer->setParticleSimPaused(particlePaused);
         renderer->setParticleVisible(particleVisible);
+        // Weather first: force field / emitters / ToD / wind / fog all read the
+        // frame's resolved weather (multipliers, precipitation toggles).
+        Vapor::WeatherSystem::update(registry, renderer.get(), deltaTime);
         Vapor::ParticleForceFieldSystem::update(registry, renderer.get());
         if (!particlePaused)
             Vapor::ParticleEmitterSystem::update(registry, renderer.get(), deltaTime, particleEmissionEnabled);

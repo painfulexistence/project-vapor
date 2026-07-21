@@ -4576,6 +4576,25 @@ void Renderer::setVolumetricFog(const VolumetricFogRenderData& fog) {
     fogSettings.windSpeed      = fog.windSpeed;
 }
 
+void Renderer::setClouds(const CloudsRenderData& clouds) {
+    // The ECS WeatherSystem is the SSOT for the artist-facing cloud tunables
+    // while a WeatherComponent drives clouds: copy them into cloudSettings and
+    // gate the passes on `enabled`. Shape/phase/step tunables stay panel-side.
+    // (While weather drives, the panel's copies of THESE fields are overwritten
+    // every frame.) Per-frame fields (matrices/sun/wind scroll) are still
+    // filled in the pass.
+    m_cloudsWeatherDriven            = true;  // panel shows a "driven by weather" hint
+    volumetricCloudsEnabled          = clouds.enabled;
+    cloudSettings.cloudCoverage      = clouds.coverage;
+    cloudSettings.cloudDensity       = clouds.density;
+    cloudSettings.cloudType          = clouds.type;
+    cloudSettings.cloudLayerBottom   = clouds.layerBottom;
+    cloudSettings.cloudLayerTop      = clouds.layerTop;
+    cloudSettings.cloudLayerThickness =
+        std::max(1.0f, clouds.layerTop - clouds.layerBottom);
+    cloudSettings.ambientIntensity   = clouds.ambientIntensity;
+}
+
 void Renderer::setParticleDrawList(const std::vector<ParticleDrawPacket>& draws) {
     m_particleDrawList = draws;
     if (m_particleDrawList.size() > MAX_PARTICLE_DRAWS)
@@ -7315,6 +7334,9 @@ void Renderer::drawGraphicsImGui() {
     }
 
     if (ImGui::TreeNode("Volumetric Clouds")) {
+        if (m_cloudsWeatherDriven)
+            ImGui::TextDisabled("(driven by WeatherComponent — coverage/density/type/"
+                                "layer/ambient are overwritten each frame)");
         ImGui::Checkbox("Enabled", &volumetricCloudsEnabled);
         if (ImGui::DragFloat("Bottom (m)", &cloudSettings.cloudLayerBottom, 100.0f, 0.0f, 10000.0f) |
             ImGui::DragFloat("Top (m)", &cloudSettings.cloudLayerTop, 100.0f, 0.0f, 15000.0f)) {
