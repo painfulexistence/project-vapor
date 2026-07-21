@@ -3,18 +3,20 @@
 #include <SDL3/SDL_timer.h>
 #include <fmt/core.h>
 #include <fstream>
-#include <stdexcept>
 #include <unordered_map>
 
 using namespace Vapor;
 
-void AssetSerializer::serializeScene(const std::shared_ptr<Scene>& scene, const std::string& path) {
+bool AssetSerializer::serializeScene(const std::shared_ptr<RenderScene>& scene, const std::string& path) {
     auto start = SDL_GetTicks();
 
     {
         std::ofstream file(path, std::ios::binary);
         if (!file.is_open()) {
-            throw std::runtime_error(fmt::format("Failed to open file for writing: {}", path));
+            // A cache that can't be written is a lost optimization, not a fatal
+            // error — report it and let the caller carry on uncached.
+            fmt::print(stderr, "serializeScene '{}': cannot open file for writing\n", path);
+            return false;
         }
 
         cereal::BinaryOutputArchive archive(file);
@@ -74,93 +76,99 @@ void AssetSerializer::serializeScene(const std::shared_ptr<Scene>& scene, const 
 
     }// Ensure archive is flushed
     fmt::print("Scene serialized to: {} in {} ms\n", path, SDL_GetTicks() - start);
+    return true;
 }
 
-auto AssetSerializer::deserializeScene(const std::string& path) -> std::shared_ptr<Scene> {
+auto AssetSerializer::deserializeScene(const std::string& path) -> std::shared_ptr<RenderScene> {
     auto start = SDL_GetTicks();
 
     std::ifstream file(path, std::ios::binary);
     if (!file.is_open()) {
-        throw std::runtime_error(fmt::format("Failed to open file for reading: {}", path));
+        fmt::print(stderr, "deserializeScene '{}': cannot open file\n", path);
+        return nullptr;
     }
 
-    cereal::BinaryInputArchive archive(file);
-    uint32_t version = 0;
+    // cereal throws on truncated/corrupt input; a bad cache is not worth dying
+    // for — convert every failure into nullptr so the caller re-imports from
+    // source (and overwrites the bad cache on the next serialize).
     try {
+        cereal::BinaryInputArchive archive(file);
+        uint32_t version = 0;
         archive(version);
-    } catch (...) {
-        throw std::runtime_error(fmt::format(
-            "Failed to read scene format version from: {}. Delete the cache file and re-run.", path
-        ));
-    }
-    if (version != SCENE_FORMAT_VERSION) {
-        throw std::runtime_error(fmt::format(
-            "Scene cache version mismatch in {}: expected {}, got {}. Delete the cache file and re-run.",
-            path, SCENE_FORMAT_VERSION, version
-        ));
-    }
-    auto scene = std::make_shared<Scene>();
-    archive(scene->name);
-    archive(scene->vertices);
-    archive(scene->indices);
-
-    Uint32 imageCount;
-    archive(imageCount);
-    scene->images.reserve(imageCount);
-    std::unordered_map<Uint32, std::shared_ptr<Image>> images;
-    for (Uint32 i = 0; i < imageCount; ++i) {
-        Uint32 imageID;
-        archive(imageID);
-        auto image = deserializeImage(archive);
-        if (image) {
-            scene->images.push_back(image);
-            images[imageID] = image;
+        if (version != SCENE_FORMAT_VERSION) {
+            fmt::print(
+                stderr, "deserializeScene '{}': cache version {} != expected {} — re-importing\n", path, version,
+                SCENE_FORMAT_VERSION
+            );
+            return nullptr;
         }
-    }
+        auto scene = std::make_shared<RenderScene>();
+        archive(scene->name);
+        archive(scene->vertices);
+        archive(scene->indices);
 
-    Uint32 materialCount;
-    archive(materialCount);
-    scene->materials.reserve(materialCount);
-    std::unordered_map<Uint32, std::shared_ptr<Material>> materials;
-    for (Uint32 i = 0; i < materialCount; ++i) {
-        Uint32 materialID;
-        archive(materialID);
-        auto material = deserializeMaterial(archive, images);
-        if (material) {
-            scene->materials.push_back(material);
-            materials[materialID] = material;
+        Uint32 imageCount;
+        archive(imageCount);
+        scene->images.reserve(imageCount);
+        std::unordered_map<Uint32, std::shared_ptr<Image>> images;
+        for (Uint32 i = 0; i < imageCount; ++i) {
+            Uint32 imageID;
+            archive(imageID);
+            auto image = deserializeImage(archive);
+            if (image) {
+                scene->images.push_back(image);
+                images[imageID] = image;
+            }
         }
-    }
 
-    Uint32 directionalLightCount;
-    archive(directionalLightCount);
-    scene->directionalLights.reserve(directionalLightCount);
-    for (Uint32 i = 0; i < directionalLightCount; ++i) {
-        Vapor::DirectionalLight light = deserializeDirectionalLight(archive);
-        scene->directionalLights.push_back(light);
-    }
+        Uint32 materialCount;
+        archive(materialCount);
+        scene->materials.reserve(materialCount);
+        std::unordered_map<Uint32, std::shared_ptr<Material>> materials;
+        for (Uint32 i = 0; i < materialCount; ++i) {
+            Uint32 materialID;
+            archive(materialID);
+            auto material = deserializeMaterial(archive, images);
+            if (material) {
+                scene->materials.push_back(material);
+                materials[materialID] = material;
+            }
+        }
 
-    Uint32 pointLightCount;
-    archive(pointLightCount);
-    scene->pointLights.reserve(pointLightCount);
-    for (Uint32 i = 0; i < pointLightCount; ++i) {
-        Vapor::PointLight light = deserializePointLight(archive);
-        scene->pointLights.push_back(light);
-    }
+        Uint32 directionalLightCount;
+        archive(directionalLightCount);
+        scene->directionalLights.reserve(directionalLightCount);
+        for (Uint32 i = 0; i < directionalLightCount; ++i) {
+            Vapor::DirectionalLight light = deserializeDirectionalLight(archive);
+            scene->directionalLights.push_back(light);
+        }
 
-    Uint32 meshCount;
-    archive(meshCount);
-    scene->stagedMeshes.reserve(meshCount);
-    scene->stagedMeshTransforms.reserve(meshCount);
-    for (Uint32 i = 0; i < meshCount; ++i) {
-        scene->stagedMeshes.push_back(deserializeMesh(archive, materials));
-        glm::mat4 t;
-        archive(t);
-        scene->stagedMeshTransforms.push_back(t);
-    }
+        Uint32 pointLightCount;
+        archive(pointLightCount);
+        scene->pointLights.reserve(pointLightCount);
+        for (Uint32 i = 0; i < pointLightCount; ++i) {
+            Vapor::PointLight light = deserializePointLight(archive);
+            scene->pointLights.push_back(light);
+        }
 
-    fmt::print("Scene deserialized from: {} in {} ms\n", path, SDL_GetTicks() - start);
-    return scene;
+        Uint32 meshCount;
+        archive(meshCount);
+        scene->stagedMeshes.reserve(meshCount);
+        scene->stagedMeshTransforms.reserve(meshCount);
+        for (Uint32 i = 0; i < meshCount; ++i) {
+            scene->stagedMeshes.push_back(deserializeMesh(archive, materials));
+            glm::mat4 t;
+            archive(t);
+            scene->stagedMeshTransforms.push_back(t);
+        }
+
+
+        fmt::print("Scene deserialized from: {} in {} ms\n", path, SDL_GetTicks() - start);
+        return scene;
+    } catch (const std::exception& e) {
+        fmt::print(stderr, "deserializeScene '{}': corrupt cache ({}) — re-importing\n", path, e.what());
+        return nullptr;
+    }
 }
 
 void AssetSerializer::serializeMaterial(
@@ -173,7 +181,7 @@ void AssetSerializer::serializeMaterial(
         return;
     }
     archive(true);
-    // archive(material->name);
+    archive(material->name);
     archive(static_cast<int>(material->alphaMode));
     archive(material->alphaCutoff);
     archive(material->doubleSided);
@@ -224,7 +232,7 @@ auto AssetSerializer::deserializeMaterial(
         return nullptr;
     }
     auto material = std::make_shared<Material>();
-    // archive(material->name);
+    archive(material->name);
 
     int alphaModeInt;
     archive(alphaModeInt);
@@ -330,7 +338,7 @@ void AssetSerializer::serializeMesh(
     archive(mesh->localAABBMin);
     archive(mesh->localAABBMax);
 
-    // Baked meshlet + cluster-LOD data (v3). Empty vectors when not built.
+    // Baked meshlet + cluster-LOD data (v4). Empty vectors when not built.
     archive(mesh->meshletData.meshlets);
     archive(mesh->meshletData.meshletVertices);
     archive(mesh->meshletData.meshletTriangles);
@@ -381,7 +389,7 @@ auto AssetSerializer::deserializeMesh(
     archive(mesh->localAABBMax);
     mesh->isGeometryDirty = false;// prevent AABB updating
 
-    // Baked meshlet + cluster-LOD data (v3), written after localAABBMax above.
+    // Baked meshlet + cluster-LOD data (v4), written after localAABBMax above.
     archive(mesh->meshletData.meshlets);
     archive(mesh->meshletData.meshletVertices);
     archive(mesh->meshletData.meshletTriangles);
@@ -432,4 +440,164 @@ auto AssetSerializer::deserializePointLight(cereal::BinaryInputArchive& archive)
     archive(light.intensity);
     archive(light.radius);
     return light;
+}
+// ── SceneBlueprint body (used by the .vscene scene cook) ────────────────────
+
+void AssetSerializer::serializeBlueprint(cereal::BinaryOutputArchive& archive, const Vapor::SceneBlueprint& blueprint) {
+    archive(BLUEPRINT_FORMAT_VERSION);
+    archive(blueprint.name);
+
+    // Unique images: the blueprint list plus any image a material references
+    // that the importer didn't register (defensive; importers do register all).
+    std::unordered_map<std::shared_ptr<Image>, Uint32> imageIDs;
+    std::vector<std::shared_ptr<Image>> uniqueImages;
+    auto addImage = [&](const std::shared_ptr<Image>& img) {
+        if (img && imageIDs.find(img) == imageIDs.end()) {
+            imageIDs[img] = static_cast<Uint32>(uniqueImages.size());
+            uniqueImages.push_back(img);
+        }
+    };
+    for (const auto& img : blueprint.images)
+        addImage(img);
+    for (const auto& mat : blueprint.materials) {
+        if (!mat) continue;
+        addImage(mat->albedoMap);
+        addImage(mat->normalMap);
+        addImage(mat->metallicMap);
+        addImage(mat->roughnessMap);
+        addImage(mat->occlusionMap);
+        addImage(mat->emissiveMap);
+        addImage(mat->displacementMap);
+    }
+    archive(static_cast<Uint32>(uniqueImages.size()));
+    for (const auto& img : uniqueImages)
+        serializeImage(archive, img);
+
+    std::unordered_map<std::shared_ptr<Material>, Uint32> materialIDs;
+    std::vector<std::shared_ptr<Material>> uniqueMaterials;
+    auto addMaterial = [&](const std::shared_ptr<Material>& mat) {
+        if (mat && materialIDs.find(mat) == materialIDs.end()) {
+            materialIDs[mat] = static_cast<Uint32>(uniqueMaterials.size());
+            uniqueMaterials.push_back(mat);
+        }
+    };
+    for (const auto& mat : blueprint.materials)
+        addMaterial(mat);
+    for (const auto& mesh : blueprint.meshes)
+        if (mesh) addMaterial(mesh->material);
+    archive(static_cast<Uint32>(uniqueMaterials.size()));
+    for (const auto& mat : uniqueMaterials)
+        serializeMaterial(archive, mat, imageIDs);
+
+    archive(static_cast<Uint32>(blueprint.meshes.size()));
+    for (const auto& mesh : blueprint.meshes)
+        serializeMesh(archive, mesh, materialIDs);
+
+    archive(static_cast<Uint32>(blueprint.lights.size()));
+    for (const auto& light : blueprint.lights) {
+        archive(static_cast<int>(light.type));
+        archive(light.color);
+        archive(light.intensity);
+        archive(light.range);
+        archive(light.innerConeAngle);
+        archive(light.outerConeAngle);
+    }
+
+    archive(static_cast<Uint32>(blueprint.entities.size()));
+    for (const auto& e : blueprint.entities) {
+        archive(e.name);
+        archive(e.position);
+        archive(e.rotation);
+        archive(e.scale);
+        archive(e.parent);
+        archive(e.meshes);
+        archive(e.lights);
+        archive(e.source);
+        archive(e.prefab);
+        archive(e.componentsJson);
+        archive(static_cast<uint8_t>(e.primitive.shape));
+        archive(e.primitive.size);
+        archive(e.primitive.height);
+        archive(e.primitive.material);
+    }
+
+    archive(blueprint.sources);
+}
+
+auto AssetSerializer::deserializeBlueprint(cereal::BinaryInputArchive& archive) -> Vapor::SceneBlueprint {
+    Vapor::SceneBlueprint blueprint;
+    uint32_t version = 0;
+    archive(version);
+    if (version != BLUEPRINT_FORMAT_VERSION) return blueprint;// ok == false
+    archive(blueprint.name);
+
+    Uint32 imageCount = 0;
+    archive(imageCount);
+    std::unordered_map<Uint32, std::shared_ptr<Image>> images;
+    blueprint.images.reserve(imageCount);
+    for (Uint32 i = 0; i < imageCount; ++i) {
+        auto img = deserializeImage(archive);
+        images[i] = img;
+        blueprint.images.push_back(std::move(img));
+    }
+
+    Uint32 materialCount = 0;
+    archive(materialCount);
+    std::unordered_map<Uint32, std::shared_ptr<Material>> materials;
+    blueprint.materials.reserve(materialCount);
+    for (Uint32 i = 0; i < materialCount; ++i) {
+        auto mat = deserializeMaterial(archive, images);
+        materials[i] = mat;
+        blueprint.materials.push_back(std::move(mat));
+    }
+
+    Uint32 meshCount = 0;
+    archive(meshCount);
+    blueprint.meshes.reserve(meshCount);
+    for (Uint32 i = 0; i < meshCount; ++i)
+        blueprint.meshes.push_back(deserializeMesh(archive, materials));
+
+    Uint32 lightCount = 0;
+    archive(lightCount);
+    blueprint.lights.reserve(lightCount);
+    for (Uint32 i = 0; i < lightCount; ++i) {
+        Vapor::LightBlueprint light;
+        int type = 0;
+        archive(type);
+        light.type = static_cast<Vapor::LightBlueprint::Type>(type);
+        archive(light.color);
+        archive(light.intensity);
+        archive(light.range);
+        archive(light.innerConeAngle);
+        archive(light.outerConeAngle);
+        blueprint.lights.push_back(light);
+    }
+
+    Uint32 entityCount = 0;
+    archive(entityCount);
+    blueprint.entities.reserve(entityCount);
+    for (Uint32 i = 0; i < entityCount; ++i) {
+        Vapor::EntityBlueprint e;
+        archive(e.name);
+        archive(e.position);
+        archive(e.rotation);
+        archive(e.scale);
+        archive(e.parent);
+        archive(e.meshes);
+        archive(e.lights);
+        archive(e.source);
+        archive(e.prefab);
+        archive(e.componentsJson);
+        uint8_t shape = 0;
+        archive(shape);
+        e.primitive.shape = static_cast<Vapor::PrimitiveBlueprint::Shape>(shape);
+        archive(e.primitive.size);
+        archive(e.primitive.height);
+        archive(e.primitive.material);
+        blueprint.entities.push_back(std::move(e));
+    }
+
+    archive(blueprint.sources);
+    blueprint.ok = true;
+    return blueprint;
 }

@@ -5,6 +5,7 @@
 #include <cstdint>
 #include <functional>
 #include <glm/glm.hpp>
+#include <memory>
 #include <mutex>
 #include <string>
 #include <vector>
@@ -260,8 +261,21 @@ namespace Vapor {
         void onDeviceData(void* output, uint32_t frameCount);
 
     private:
+        // Deleters for fully-initialized miniaudio objects: uninit, then free.
+        // Defined in audio_engine.cpp where the miniaudio types are complete,
+        // so this header keeps working with forward declarations only.
+        struct MaEngineDeleter { void operator()(ma_engine* engine) const; };
+        struct MaDeviceDeleter { void operator()(ma_device* device) const; };
+        struct MaSoundDeleter  { void operator()(ma_sound* sound) const; };
+
+        using MaEnginePtr = std::unique_ptr<ma_engine, MaEngineDeleter>;
+        using MaDevicePtr = std::unique_ptr<ma_device, MaDeviceDeleter>;
+        using MaSoundPtr  = std::unique_ptr<ma_sound, MaSoundDeleter>;
+
         struct AudioInstance {
-            ma_sound* sound = nullptr;
+            // Non-null iff this slot is occupied by a fully-initialized sound
+            // (allocateInstance relies on that invariant).
+            MaSoundPtr sound;
             std::string filePath;
             AudioID id = AUDIO_ID_INVALID;
             AudioState state = AudioState::Initial;
@@ -276,8 +290,8 @@ namespace Vapor {
         AudioID allocateInstance();
         void cleanupInstance(AudioInstance& inst);
 
-        ma_engine* m_engine = nullptr;
-        ma_device* m_device = nullptr;
+        MaEnginePtr m_engine;
+        MaDevicePtr m_device;
         std::array<AudioInstance, MAX_AUDIO_INSTANCES> m_instances;
         AudioID m_nextID = 0;
 

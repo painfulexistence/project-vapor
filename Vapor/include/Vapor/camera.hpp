@@ -6,6 +6,8 @@
 #include <glm/mat4x4.hpp>
 #include <glm/vec3.hpp>
 
+namespace Vapor {
+
 enum class FrustumPlane {
     FRUSTUM_LEFT = 0,
     FRUSTUM_RIGHT = 1,
@@ -239,3 +241,10 @@ private:
     bool _isProjDirty = true;
     bool _isFrustumDirty = true;
 };
+
+} // namespace Vapor
+
+// Transitional shim: these types lived at global scope before the namespace
+// unification; unqualified call sites keep compiling while they migrate to
+// Vapor:: qualification. Remove once call sites are migrated.
+using namespace Vapor;

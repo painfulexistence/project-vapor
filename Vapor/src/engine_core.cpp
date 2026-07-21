@@ -9,6 +9,8 @@
 #include <thread>
 #include <tracy/Tracy.hpp>
 
+using namespace Vapor;
+
 namespace Vapor {
 
     EngineCore* EngineCore::s_instance = nullptr;
@@ -140,7 +142,7 @@ namespace Vapor {
         // Future: Coordinate physics-render synchronization
     }
 
-    void EngineCore::attachRenderer(::IRenderer* renderer, const std::string& outputBasePath) {
+    void EngineCore::attachRenderer(IRenderer* renderer, const std::string& outputBasePath) {
         _videoRecorder->setBaseOutputDir(outputBasePath);
 
         // Per-frame hook: capture the rendered frame while recording and handle

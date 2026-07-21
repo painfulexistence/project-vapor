@@ -130,7 +130,7 @@ namespace Vapor {
 
         void clearMappings();
 
-        const InputAction getActionForKey(SDL_Scancode key) const;
+        InputAction getActionForKey(SDL_Scancode key) const;
 
         const std::deque<InputEvent>& getInputBuffer() const {
             return inputHistory;
@@ -162,7 +162,7 @@ namespace Vapor {
         uint64_t currentTime = 0;
 
         bool wasActionPressedRecently(InputAction action, float timeWindow) const {
-            float now = (float)SDL_GetTicks() / 1000.0f;
+            float now = static_cast<float>(SDL_GetTicks()) / 1000.0f;
             for (const auto& event : inputHistory) {
                 if (event.action == action) {
                     if (now - event.timestamp <= timeWindow) {

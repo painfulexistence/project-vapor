@@ -20,21 +20,30 @@
 #include "Vapor/renderer.hpp"
 #include "Vapor/rmlui_manager.hpp"
 #include "Vapor/stats_log.hpp"
-#include "Vapor/systems.hpp"
 #include "Vapor/rng.hpp"
-#include "Vapor/scene.hpp"
+#include "Vapor/render_scene.hpp"
+#include "Vapor/scene_blueprint.hpp"
+#include "Vapor/systems.hpp"
 #include <RmlUi/Core/ElementDocument.h>
 #include <entt/entt.hpp>
 
 
+#include "Vapor/resource_manager.hpp"
 #include "Vapor/scene_inspector.hpp"
 #include "Vapor/scene_serializer.hpp"
 #include "components.hpp"
+#include "pages/chapter_title_page.hpp"
 #include "pages/hud_page.hpp"
 #include "pages/letterbox_page.hpp"
+#include "pages/loading_screen_page.hpp"
+#include "pages/main_menu_page.hpp"
 #include "pages/page_system.hpp"
-#include "scene_builder.hpp"
+#include "pages/pause_menu_page.hpp"
+#include "pages/scroll_text_page.hpp"
+#include "pages/settings_page.hpp"
+#include "pages/subtitle_page.hpp"
 #include "systems.hpp"
+#include <cmath>
 
 static void setupCustomDrawers(Vapor::SceneInspector& inspector) {
     // Register app-specific components for auto field-by-field drawing.
@@ -42,6 +51,9 @@ static void setupCustomDrawers(Vapor::SceneInspector& inspector) {
     inspector.registerComponent<Vapor::SpotLightComponent>("Spot Light");
     inspector.registerComponent<Vapor::RectLightComponent>("Rect Light");
     inspector.registerComponent<Vapor::DirectionalLightComponent>("Directional Light");
+    inspector.registerComponent<Vapor::SunComponent>("Sun");
+    inspector.registerComponent<Vapor::MoonComponent>("Moon");
+    inspector.registerComponent<Vapor::TimeOfDayComponent>("Time of Day");
     inspector.registerComponent<CharacterIntent>("Character Intent");
     inspector.registerComponent<CharacterControllerComponent>("Character Controller");
     inspector.registerComponent<GrabbableComponent>("Grabbable");
@@ -52,9 +64,11 @@ static void setupCustomDrawers(Vapor::SceneInspector& inspector) {
     inspector.registerComponent<ChapterTitleTriggerComponent>("Chapter Title Trigger");
     inspector.registerComponent<SceneTransitionComponent>("Scene Transition");
     inspector.registerComponent<ScrollTextQueueComponent>("Scroll Text Queue");
+    inspector.registerComponent<FpsTextComponent>("FPS Text");
     inspector.registerComponent<Vapor::ParticleEmitterComponent>("Particle Emitter");
     inspector.registerComponent<Vapor::ParticleAttractorComponent>("Particle Attractor");
     inspector.registerComponent<Vapor::WindFieldComponent>("Wind Field");
+    inspector.registerComponent<Vapor::VolumetricFogComponent>("Volumetric Fog");
     inspector.registerComponent<Vapor::ParticleBurstRequest>("Particle Burst");
     inspector.registerComponent<Vapor::SpellBoltComponent>("Spell Bolt");
 
@@ -73,17 +87,47 @@ static void setupCustomDrawers(Vapor::SceneInspector& inspector) {
         }
     });
 
+    // SkyComponent — custom drawer for the SkyType combo (auto-draw can't edit
+    // the enum) so the visible sky mode is switchable at runtime. Sets `dirty`
+    // so SkySystem re-pushes the change to the renderer.
+    inspector.registerCustomDrawer([](entt::registry& reg, entt::entity e) {
+        if (auto* c = reg.try_get<Vapor::SkyComponent>(e)) {
+            if (ImGui::CollapsingHeader("Sky", ImGuiTreeNodeFlags_DefaultOpen)) {
+                const char* types[] = { "Atmosphere", "HDRI", "Gradient" };
+                int t = static_cast<int>(c->type);
+                if (ImGui::Combo("type", &t, types, 3)) {
+                    c->type = static_cast<SkyType>(t);   // SkyType is global (render_data.hpp)
+                    c->dirty = true;
+                }
+                if (ImGui::DragFloat("exposure", &c->exposure, 0.01f, 0.01f, 10.0f)) c->dirty = true;
+                if (c->type == SkyType::Gradient) {
+                    if (ImGui::ColorEdit3("zenith",  &c->gradientZenith.x))  c->dirty = true;
+                    if (ImGui::ColorEdit3("horizon", &c->gradientHorizon.x)) c->dirty = true;
+                    if (ImGui::ColorEdit3("ground",  &c->gradientGround.x))  c->dirty = true;
+                }
+                if (c->type == SkyType::Atmosphere && ImGui::TreeNode("Night Sky (stars + moon)")) {
+                    if (ImGui::DragFloat("star density",    &c->starDensity, 5.0f, 20.0f, 2000.0f)) c->dirty = true;
+                    if (ImGui::DragFloat("star brightness", &c->starBrightness, 0.01f, 0.0f, 5.0f))  c->dirty = true;
+                    if (ImGui::ColorEdit3("moon color",     &c->moonColor.x))                        c->dirty = true;
+                    if (ImGui::DragFloat("moon size",       &c->moonSize, 0.0002f, 0.0001f, 0.05f, "%.4f")) c->dirty = true;
+                    if (ImGui::DragFloat("moon brightness", &c->moonBrightness, 0.01f, 0.0f, 10.0f)) c->dirty = true;
+                    ImGui::TreePop();
+                }
+                ImGui::DragFloat("IBL sun threshold (deg)", &c->iblSunThresholdDeg, 0.1f, 0.0f, 90.0f);
+            }
+        }
+    });
+
     // LightMovementLogicComponent — keep custom drawer for the named Pattern combo.
     inspector.registerCustomDrawer([](entt::registry& reg, entt::entity e) {
         if (auto* c = reg.try_get<LightMovementLogicComponent>(e)) {
             if (ImGui::CollapsingHeader("Light Movement Logic", ImGuiTreeNodeFlags_DefaultOpen)) {
                 const char* patterns[] = { "Circle", "Figure8", "Linear", "Spiral" };
                 int p = static_cast<int>(c->pattern);
-                if (ImGui::Combo("pattern", &p, patterns, 4))
-                    c->pattern = static_cast<MovementPattern>(p);
-                ImGui::DragFloat("speed",      &c->speed,  0.01f);
-                ImGui::DragFloat("radius",     &c->radius, 0.1f, 0.0f, 100.0f);
-                ImGui::DragFloat("height",     &c->height, 0.1f, -50.0f, 50.0f);
+                if (ImGui::Combo("pattern", &p, patterns, 4)) c->pattern = static_cast<MovementPattern>(p);
+                ImGui::DragFloat("speed", &c->speed, 0.01f);
+                ImGui::DragFloat("radius", &c->radius, 0.1f, 0.0f, 100.0f);
+                ImGui::DragFloat("height", &c->height, 0.1f, -50.0f, 50.0f);
                 ImGui::LabelText("timer", "%.2f", c->timer);
             }
         }
@@ -95,8 +139,7 @@ static void setupCustomDrawers(Vapor::SceneInspector& inspector) {
             if (ImGui::CollapsingHeader("Camera Switch Request", ImGuiTreeNodeFlags_DefaultOpen)) {
                 const char* modes[] = { "Free", "Follow", "FirstPerson" };
                 int m = static_cast<int>(c->mode);
-                if (ImGui::Combo("mode", &m, modes, 3))
-                    c->mode = static_cast<CameraSwitchRequest::Mode>(m);
+                if (ImGui::Combo("mode", &m, modes, 3)) c->mode = static_cast<CameraSwitchRequest::Mode>(m);
             }
         }
     });
@@ -105,17 +148,15 @@ static void setupCustomDrawers(Vapor::SceneInspector& inspector) {
     inspector.registerCustomDrawer([](entt::registry& reg, entt::entity e) {
         if (auto* c = reg.try_get<SubtitleQueueComponent>(e)) {
             if (ImGui::CollapsingHeader("Subtitle Queue", ImGuiTreeNodeFlags_DefaultOpen)) {
-                ImGui::LabelText("queue size",       "%zu", c->queue.size());
-                ImGui::LabelText("currentIndex",     "%d",  c->currentIndex);
-                ImGui::Checkbox("advanceRequested",  &c->advanceRequested);
-                ImGui::Checkbox("autoAdvance",       &c->autoAdvance);
-                ImGui::LabelText("displayTimer",     "%.2f", c->displayTimer);
+                ImGui::LabelText("queue size", "%zu", c->queue.size());
+                ImGui::LabelText("currentIndex", "%d", c->currentIndex);
+                ImGui::Checkbox("advanceRequested", &c->advanceRequested);
+                ImGui::Checkbox("autoAdvance", &c->autoAdvance);
+                ImGui::LabelText("displayTimer", "%.2f", c->displayTimer);
                 if (auto* fsm = reg.try_get<Vapor::FSMStateComponent>(e)) {
-                    const char* states[] = {
-                        "Idle", "WaitingForVisible", "Displaying", "WaitingForHidden"
-                    };
+                    const char* states[] = { "Idle", "WaitingForVisible", "Displaying", "WaitingForHidden" };
                     ImGui::LabelText("FSM state", "%s", states[fsm->currentState]);
-                    ImGui::LabelText("FSM time",  "%.2f", fsm->stateTime);
+                    ImGui::LabelText("FSM time", "%.2f", fsm->stateTime);
                 }
             }
         }
@@ -126,10 +167,8 @@ static void setupCustomDrawers(Vapor::SceneInspector& inspector) {
         if (auto* c = reg.try_get<SceneTransitionComponent>(e)) {
             if (ImGui::CollapsingHeader("Scene Transition (FSM)", ImGuiTreeNodeFlags_DefaultOpen)) {
                 if (auto* fsm = reg.try_get<Vapor::FSMStateComponent>(e)) {
-                    const char* states[] = {
-                        "Idle", "FadingInLoadingScreen", "UnloadingScene",
-                        "LoadingAssets", "BuildingScene", "FadingOutLoadingScreen"
-                    };
+                    const char* states[] = { "Idle",          "FadingInLoadingScreen", "UnloadingScene",
+                                             "LoadingAssets", "BuildingScene",         "FadingOutLoadingScreen" };
                     ImGui::LabelText("state", "%s", states[fsm->currentState]);
                 }
                 ImGui::ProgressBar(c->progress);
@@ -152,14 +191,271 @@ static void setupCustomDrawers(Vapor::SceneInspector& inspector) {
     });
 }
 
-auto getActiveCamera(entt::registry& registry) -> entt::entity {
-    auto view = registry.view<Vapor::VirtualCameraComponent>();
-    for (auto entity : view) {
-        if (view.get<Vapor::VirtualCameraComponent>(entity).isActive) {
-            return entity;
+
+// Registers Vaporware's gameplay components with the engine's blueprint applier
+// registry, so scenes/main.json can author them directly. Called once, before
+// the first loadScene(). By mechanism:
+//   - plain aggregates ride the Boost.PFR auto-applier (fields by name)
+//   - container-bearing / string-enum components take hand-written appliers
+//   - uiPage resolves a page-name -> Page-subclass factory (behavior objects
+//     can't live in JSON; their NAME can)
+//   - pointLightField / rainbowGrid expand into N child entities (seeded/
+//     deterministic), the declarative stand-ins for the old scene_builder loops
+static void registerAppBlueprintComponents(Vapor::ResourceManager& resourceManager) {
+    auto& r = Vapor::BlueprintComponents::instance();
+
+    // Plain aggregates — PFR fills fields by JSON key.
+    r.registerComponent<AutoRotateComponent>("autoRotate");
+    r.registerComponent<ChapterTitleTriggerComponent>("chapterTitleTrigger");
+    r.registerComponent<SceneTransitionComponent>("sceneTransition");
+    r.registerComponent<CharacterIntent>("characterIntent");
+    r.registerComponent<PersistentTag>("persistentTag");
+    r.registerComponent<Vapor::UINavigatorComponent>("uiNavigator");
+    r.registerComponent<FpsTextComponent>("fpsText");
+
+    // sprite2D / sprite3D: the atlas is authored by NAME and resolved against
+    // the app's ResourceManager (AtlasHandle itself is not authorable). The
+    // atlas must be registered before instantiate() — registration stays
+    // code-side. Both appliers capture resourceManager by pointer; it outlives
+    // every instantiate() call (both live for the whole of main()).
+    const auto readV2 = [](const nlohmann::json& j, const char* key, glm::vec2 fallback) {
+        const auto it = j.find(key);
+        if (it == j.end() || !it->is_array() || it->size() < 2) return fallback;
+        return glm::vec2{ (*it)[0].get<float>(), (*it)[1].get<float>() };
+    };
+    const auto readV4 = [](const nlohmann::json& j, const char* key, glm::vec4 fallback) {
+        const auto it = j.find(key);
+        if (it == j.end() || !it->is_array() || it->size() < 4) return fallback;
+        return glm::vec4{ (*it)[0].get<float>(), (*it)[1].get<float>(),
+                          (*it)[2].get<float>(), (*it)[3].get<float>() };
+    };
+
+    r.registerApplier("sprite2D", [rm = &resourceManager, readV2, readV4](entt::registry& reg, entt::entity e, const nlohmann::json& j) {
+        Vapor::Sprite2DComponent sprite;
+        const std::string atlasName = j.value("atlas", "");
+        sprite.atlas = rm->getAtlasHandle(atlasName);
+        if (!sprite.atlas.valid()) {
+            fmt::print(stderr, "blueprint: sprite2D atlas '{}' not registered — sprite hidden\n", atlasName);
         }
-    }
-    return entt::null;
+        sprite.frameIndex = j.value("frameIndex", sprite.frameIndex);
+        sprite.size = readV2(j, "size", sprite.size);
+        sprite.pivot = readV2(j, "pivot", sprite.pivot);
+        sprite.tint = readV4(j, "tint", sprite.tint);
+        sprite.sortingLayer = j.value("sortingLayer", sprite.sortingLayer);
+        sprite.orderInLayer = j.value("orderInLayer", sprite.orderInLayer);
+        sprite.flipX = j.value("flipX", sprite.flipX);
+        sprite.flipY = j.value("flipY", sprite.flipY);
+        sprite.visible = j.value("visible", sprite.visible);
+        reg.emplace_or_replace<Vapor::Sprite2DComponent>(e, sprite);
+    });
+
+    r.registerApplier("sprite3D", [rm = &resourceManager, readV2, readV4](entt::registry& reg, entt::entity e, const nlohmann::json& j) {
+        Vapor::Sprite3DComponent sprite;
+        const std::string atlasName = j.value("atlas", "");
+        sprite.atlas = rm->getAtlasHandle(atlasName);
+        if (!sprite.atlas.valid()) {
+            fmt::print(stderr, "blueprint: sprite3D atlas '{}' not registered — sprite hidden\n", atlasName);
+        }
+        sprite.frameIndex = j.value("frameIndex", sprite.frameIndex);
+        sprite.size = readV2(j, "size", sprite.size);
+        sprite.tint = readV4(j, "tint", sprite.tint);
+        sprite.billboard = j.value("billboard", sprite.billboard);
+        sprite.flipX = j.value("flipX", sprite.flipX);
+        sprite.flipY = j.value("flipY", sprite.flipY);
+        sprite.visible = j.value("visible", sprite.visible);
+        reg.emplace_or_replace<Vapor::Sprite3DComponent>(e, sprite);
+    });
+
+    r.registerApplier("lightMovementLogic", [](entt::registry& reg, entt::entity e, const nlohmann::json& j) {
+        LightMovementLogicComponent logic;
+        const std::string pattern = j.value("pattern", "circle");
+        logic.pattern = pattern == "figure8"  ? MovementPattern::Figure8
+                        : pattern == "linear" ? MovementPattern::Linear
+                        : pattern == "spiral" ? MovementPattern::Spiral
+                                              : MovementPattern::Circle;
+        logic.speed = j.value("speed", logic.speed);
+        logic.timer = j.value("timer", logic.timer);
+        logic.radius = j.value("radius", logic.radius);
+        logic.height = j.value("height", logic.height);
+        reg.emplace_or_replace<LightMovementLogicComponent>(e, logic);
+    });
+
+    r.registerApplier("subtitleQueue", [](entt::registry& reg, entt::entity e, const nlohmann::json& j) {
+        SubtitleQueueComponent sq;
+        sq.autoAdvance = j.value("autoAdvance", sq.autoAdvance);
+        if (j.contains("queue") && j.at("queue").is_array()) {
+            for (const auto& entry : j.at("queue")) {
+                if (!entry.is_object()) continue;
+                sq.queue.push_back(SubtitleEntry{
+                    .speaker = entry.value("speaker", ""),
+                    .text = entry.value("text", ""),
+                    .duration = entry.value("duration", 3.0f),
+                });
+            }
+        }
+        reg.emplace_or_replace<SubtitleQueueComponent>(e, std::move(sq));
+    });
+
+    r.registerApplier("scrollTextQueue", [](entt::registry& reg, entt::entity e, const nlohmann::json& j) {
+        ScrollTextQueueComponent stq;
+        if (j.contains("lines") && j.at("lines").is_array())
+            for (const auto& line : j.at("lines"))
+                if (line.is_string()) stq.lines.push_back(line.get<std::string>());
+        reg.emplace_or_replace<ScrollTextQueueComponent>(e, std::move(stq));
+    });
+
+    // UI page: document path + behavior. The Page subclass comes from a
+    // name-keyed factory; the entity is wired into the UINavigatorComponent,
+    // which must be declared on an EARLIER entity in the scene (appliers run
+    // in entity order).
+    r.registerApplier("uiPage", [](entt::registry& reg, entt::entity e, const nlohmann::json& j) {
+        using Vapor::PageID;
+        using PageFactory = std::function<std::shared_ptr<Page>(entt::registry&)>;
+        struct PageDesc {
+            PageID id;
+            PageFactory make;
+        };
+        static const std::unordered_map<std::string, PageDesc> pages = {
+            { "HUD", { PageID::HUD, [](entt::registry&) { return std::make_shared<HUDPage>(); } } },
+            { "Letterbox", { PageID::Letterbox, [](entt::registry&) { return std::make_shared<LetterboxPage>(); } } },
+            { "Subtitle", { PageID::Subtitle, [](entt::registry&) { return std::make_shared<SubtitlePage>(); } } },
+            { "ScrollText",
+              { PageID::ScrollText, [](entt::registry&) { return std::make_shared<ScrollTextPage>(); } } },
+            { "ChapterTitle",
+              { PageID::ChapterTitle, [](entt::registry&) { return std::make_shared<ChapterTitlePage>(); } } },
+            { "MainMenu",
+              { PageID::MainMenu,
+                [](entt::registry& reg) {
+                    return std::make_shared<MainMenuPage>(
+                        [&reg] { Vapor::PageSystem::popAll(reg); },
+                        [] {
+                            SDL_Event quit{};
+                            quit.type = SDL_EVENT_QUIT;
+                            SDL_PushEvent(&quit);
+                        }
+                    );
+                } } },
+            { "PauseMenu",
+              { PageID::PauseMenu,
+                [](entt::registry& reg) {
+                    return std::make_shared<PauseMenuPage>(
+                        [&reg] { Vapor::PageSystem::pop(reg); },
+                        [&reg] {
+                            Vapor::PageSystem::popAll(reg);
+                            Vapor::PageSystem::push(reg, PageID::MainMenu);
+                        }
+                    );
+                } } },
+            { "Settings", { PageID::Settings, [](entt::registry&) { return std::make_shared<SettingsPage>(); } } },
+            { "LoadingScreen",
+              { PageID::LoadingScreen, [](entt::registry&) { return std::make_shared<LoadingScreenPage>(); } } },
+        };
+
+        const std::string id = j.value("id", "");
+        const auto it = pages.find(id);
+        if (it == pages.end()) {
+            fmt::print(stderr, "uiPage: unknown page id '{}'\n", id);
+            return;
+        }
+        reg.emplace_or_replace<Vapor::UIDocumentComponent>(
+            e, Vapor::UIDocumentComponent{ .path = j.value("path", ""), .lazyLoad = j.value("lazy", false) }
+        );
+        reg.emplace_or_replace<Vapor::UIPageBehaviorComponent>(
+            e, Vapor::UIPageBehaviorComponent{ .page = it->second.make(reg) }
+        );
+        if (j.value("overlay", false)) reg.emplace_or_replace<Vapor::UIOverlayTag>(e);
+
+        auto navView = reg.view<Vapor::UINavigatorComponent>();
+        if (navView.begin() == navView.end()) {
+            fmt::print(stderr, "uiPage '{}': no UINavigatorComponent exists yet — declare the navigator first\n", id);
+            return;
+        }
+        navView.get<Vapor::UINavigatorComponent>(*navView.begin()).pages[it->second.id] = e;
+    });
+
+    // Declarative light field: N seeded-random point lights with cycling
+    // movement patterns (Circle/Figure8/Linear/Spiral), replacing the RNG loop
+    // scene_builder used to run. Lights spawn as separate entities.
+    r.registerApplier("pointLightField", [](entt::registry& reg, entt::entity field, const nlohmann::json& j) {
+        const int count = j.value("count", 128);
+        Vapor::RNG rng(j.value("seed", 1u));
+        const glm::vec3 areaMin(j.value("areaMinX", -10.0f), j.value("areaMinY", 0.5f), j.value("areaMinZ", -10.0f));
+        const glm::vec3 areaMax(j.value("areaMaxX", 10.0f), j.value("areaMaxY", 4.0f), j.value("areaMaxZ", 10.0f));
+        for (int i = 0; i < count; ++i) {
+            const auto e = reg.create();
+            reg.emplace<Vapor::NameComponent>(e, Vapor::NameComponent{ fmt::format("Point Light {}", i) });
+            auto& tc = reg.emplace<Vapor::TransformComponent>(e);
+            // Parent each spawned light under the field entity itself: the field
+            // is the scene-graph owner of its emitted lights, so the inspector
+            // shows "Point Light Field > Point Light N" instead of N orphans at
+            // the root. The field's transform is identity, so the world-space
+            // positions authored below are unchanged by the reparent.
+            tc.parent = field;
+            tc.position = glm::vec3(
+                rng.RandomFloatInRange(areaMin.x, areaMax.x), rng.RandomFloatInRange(areaMin.y, areaMax.y),
+                rng.RandomFloatInRange(areaMin.z, areaMax.z)
+            );
+            tc.isDirty = true;
+            auto& pl = reg.emplace<Vapor::PointLightComponent>(e);
+            pl.color = glm::vec3(
+                0.3f + 0.7f * rng.RandomFloat(), 0.3f + 0.7f * rng.RandomFloat(), 0.3f + 0.7f * rng.RandomFloat()
+            );
+            pl.intensity = j.value("intensity", 5.0f) * rng.RandomFloat();
+            pl.radius = j.value("radius", 0.5f);
+            auto& logic = reg.emplace<LightMovementLogicComponent>(e);
+            logic.speed = j.value("speed", 0.5f);
+            logic.timer = i * 0.1f;
+            switch (i % 4) {
+            case 0:
+                logic.pattern = MovementPattern::Circle;
+                logic.radius = 3.0f;
+                logic.height = 1.5f;
+                break;
+            case 1:
+                logic.pattern = MovementPattern::Figure8;
+                logic.radius = 3.0f;
+                break;
+            case 2:
+                logic.pattern = MovementPattern::Linear;
+                logic.radius = 3.0f;
+                break;
+            case 3: logic.pattern = MovementPattern::Spiral; break;
+            }
+        }
+    });
+
+    // Declarative rainbow quad grid (cols x rows Shape2D children under the
+    // grid entity, hue cycling across cells) — replaces the immediate-mode
+    // canvas demo loop. Cell positions are LOCAL; place the grid entity to
+    // move the whole pattern.
+    r.registerApplier("rainbowGrid", [](entt::registry& reg, entt::entity grid, const nlohmann::json& j) {
+        const int cols = j.value("cols", 10);
+        const int rows = j.value("rows", 5);
+        const float spacing = j.value("spacing", 25.0f);
+        const float size = j.value("size", 20.0f);
+        const float alpha = j.value("alpha", 0.8f);
+        for (int y = 0; y < rows; ++y) {
+            for (int x = 0; x < cols; ++x) {
+                const auto e = reg.create();
+                reg.emplace<Vapor::NameComponent>(
+                    e, Vapor::NameComponent{ fmt::format("Rainbow Quad {}", y * cols + x) });
+                auto& tc = reg.emplace<Vapor::TransformComponent>(e);
+                tc.parent = grid;
+                tc.position = glm::vec3(x * spacing, y * spacing, 0.0f);
+                tc.isDirty = true;
+                const float hue = static_cast<float>(x + y * cols) / static_cast<float>(cols * rows);
+                auto& shape = reg.emplace<Vapor::Shape2DComponent>(e);
+                shape.kind = Vapor::Shape2DComponent::Kind::Quad;
+                shape.size = { size, size };
+                shape.color = glm::vec4(
+                    0.5f + 0.5f * std::sin(hue * 6.28f),
+                    0.5f + 0.5f * std::sin(hue * 6.28f + 2.09f),
+                    0.5f + 0.5f * std::sin(hue * 6.28f + 4.18f),
+                    alpha
+                );
+            }
+        }
+    });
 }
 
 auto main(int argc, char* args[]) -> int {
@@ -237,8 +533,6 @@ auto main(int argc, char* args[]) -> int {
     auto engineCore = std::make_unique<Vapor::EngineCore>();
     engineCore->init();
 
-    Vapor::RNG rng;
-
     auto renderer = createRenderer(gfxBackend, window);
     if (!renderer) {
         fmt::print(stderr, "Failed to create renderer (backend unavailable?)\n");
@@ -256,15 +550,14 @@ auto main(int argc, char* args[]) -> int {
     // Scene serializer — engine pre-registers transform/meshRenderer;
     // game registers game-specific component writers.
     Vapor::SceneSerializer sceneSerializer;
-    sceneSerializer.registerComponent("autoRotate",
-        [](Vapor::json& out, entt::registry& reg, entt::entity e) {
-            if (auto* c = reg.try_get<AutoRotateComponent>(e))
-                out = { {"axis", Vapor::toJson(c->axis)}, {"speed", c->speed} };
-        });
+    sceneSerializer.registerComponent("autoRotate", [](Vapor::json& out, entt::registry& reg, entt::entity e) {
+        if (auto* c = reg.try_get<AutoRotateComponent>(e))
+            out = { { "axis", Vapor::toJson(c->axis) }, { "speed", c->speed } };
+    });
 
     Vapor::SceneInspector sceneInspector;
     sceneInspector.attachSerializer(sceneSerializer);
-    sceneInspector.setGltfPath("models/Sponza/Sponza.gltf", /*optimized=*/true);
+    sceneInspector.setGltfPath("models/Sponza/Sponza.gltf");
     // Exclude GLTF-spawned geometry — the inspector decides what to serialize,
     // not the serializer.
     sceneInspector.setEntityProvider([](entt::registry& reg) {
@@ -275,20 +568,20 @@ auto main(int argc, char* args[]) -> int {
     });
     setupCustomDrawers(sceneInspector);
 
-    // Load a font for text rendering
-    FontHandle gameFont = renderer->loadFont("fonts/NotoSans-SemiBold.ttf", 48.0f);
-    if (gameFont.isValid()) {
-        fmt::print("Font loaded successfully\n");
-    } else {
-        fmt::print("Failed to load font\n");
-    }
+    // Fonts are authored per text2D component in scenes/main.json;
+    // Text2DRenderSystem resolves and caches handles by path in here.
+    std::unordered_map<std::string, FontHandle> fontCache;
 
     // Load a sprite texture for 2D/3D batch rendering demo
     auto spriteImage = AssetManager::loadImage("textures/default_albedo.png");
     TextureHandle spriteTexture = renderer->createTexture(spriteImage);
     fmt::print("Sprite texture loaded\n");
 
-    // Create a render texture for render-to-texture demo
+    // Render-to-texture "TV" demo setup. Gated with the draw block below (search
+    // "Render-to-Texture") — without the guard this still allocated a 512x512
+    // HDR render target every launch that nothing sampled. Flip both #if 0 to 1
+    // to re-enable the demo.
+#if 0
     RenderTextureDesc rtDesc;
     rtDesc.width = 512;
     rtDesc.height = 512;
@@ -307,6 +600,7 @@ auto main(int argc, char* args[]) -> int {
         0.1f,// Near
         100.0f// Far
     );
+#endif
 
     if (renderer->initUI()) {
         fmt::print("UI System Initialized\n");
@@ -323,42 +617,30 @@ auto main(int argc, char* args[]) -> int {
 
     // Register single-frame atlas for the demo sprite texture
     SpriteAtlas demoAtlas;
-    demoAtlas.name    = "demo_sprite";
+    demoAtlas.name = "demo_sprite";
     demoAtlas.texture = spriteTexture;
-    demoAtlas.size    = glm::vec2(1.0f, 1.0f);
+    demoAtlas.size = glm::vec2(1.0f, 1.0f);
     demoAtlas.frames.push_back(SpriteFrame{
-        "default", {0.0f, 0.0f, 1.0f, 1.0f}, {1.0f, 1.0f}, {0.0f, 0.0f}, {0.5f, 0.5f}, false
-    });
+        "default", { 0.0f, 0.0f, 1.0f, 1.0f }, { 1.0f, 1.0f }, { 0.0f, 0.0f }, { 0.5f, 0.5f }, false });
     demoAtlas.nameToIndex["default"] = 0;
-    AtlasHandle demoAtlasHandle = resourceManager.registerAtlas("demo_sprite", std::move(demoAtlas));
+    // Referenced by name from main.json's sprite component ("atlas": "demo_sprite").
+    resourceManager.registerAtlas("demo_sprite", std::move(demoAtlas));
 
     fmt::print("Loading scene asynchronously...\n");
+    // Declarative scene: scenes/main.json references the Sponza model via its
+    // "source" field; the blueprint loader expands it into a parent-indexed
+    // entity list plus the decoded mesh/material payload.
     auto sceneResource = resourceManager.loadScene(
-        std::string("models/Sponza/Sponza.gltf"),
-        true,// optimized
+        std::string("scenes/main.json"),
         Vapor::LoadMode::Async,
-        [](std::shared_ptr<Scene> loadedScene) -> void {
-            fmt::print("Scene loaded with {} staged meshes\n", loadedScene->stagedMeshes.size());
+        [](std::shared_ptr<Vapor::SceneBlueprint> bp) -> void {
+            fmt::print("Scene blueprint loaded: {} entities, {} meshes\n", bp->entities.size(), bp->meshes.size());
         }
     );
-    auto albedoResource =
-        resourceManager.loadImage(std::string("textures/american_walnut_albedo.png"), Vapor::LoadMode::Async);
-    auto normalResource =
-        resourceManager.loadImage(std::string("textures/american_walnut_normal.png"), Vapor::LoadMode::Async);
-    auto roughnessResource =
-        resourceManager.loadImage(std::string("textures/american_walnut_roughness.png"), Vapor::LoadMode::Async);
-
-    // NOTES: optionally call resourceManager.waitForAll();
-
-    auto scene = sceneResource->get();
-    // Record how many meshes the GLTF scene contributes before buildScene adds more
-    const size_t sponzaMeshCount = scene->stagedMeshes.size();
-
-    auto material = std::make_shared<Vapor::Material>(Vapor::Material{
-        .albedoMap = albedoResource->get(),
-        .normalMap = normalResource->get(),
-        .roughnessMap = roughnessResource->get(),
-    });
+    auto sceneBlueprint = sceneResource->get();
+    // The RenderScene (world geometry pool) is the app's now that no importer
+    // fabricates one; instantiate() below fills it from the blueprint.
+    auto scene = std::make_shared<RenderScene>("main");
 
     entt::registry registry;
 
@@ -420,68 +702,47 @@ auto main(int argc, char* args[]) -> int {
     // Return (and zero-clear) particle slots when an emitter entity is destroyed.
     Vapor::ParticleEmitterSystem::attach(registry, renderer.get());
 
-    auto [sceneBuilt, materialBuilt, cube1, global] =
-        buildScene(registry, *physics, scene, material, windowWidth, windowHeight, rng);
+    // Blueprint -> live entities: real hierarchy (local TRS + parent links)
+    // instead of the old flatten-then-decompose-world-matrices conversion.
+    // instantiate() also stages each mesh into the RenderScene pool once.
+    // The Khronos Sponza GLTF is authored in meters (~30m across) — its
+    // transforms are used as-is.
+    // The whole demo scene is data now: gameplay component appliers register
+    // first, then main.json instantiates everything (Sponza, physics cubes,
+    // lights, cameras, UI pages, particles). scene_builder.hpp is retired.
+    registerAppBlueprintComponents(resourceManager);
+    if (sceneBlueprint && sceneBlueprint->ok) {
+        std::vector<entt::entity> sceneEntities;
+        Vapor::instantiate(registry, *scene, *sceneBlueprint, entt::null, "", &sceneEntities);
+        for (auto e : sceneEntities)// marks scene-spawned geometry for serializer
+            if (registry.any_of<Vapor::MeshRendererComponent>(e)) registry.emplace<SceneGeometryTag>(e);
+    } else {
+        fmt::print(stderr, "Scene blueprint failed to load; the world will be empty\n");
+    }
+
+    // Post-instantiate wiring for runtime-only state the scene can't author:
+    // camera aspect follows the actual window, the singleton request target is
+    // found by name, and the initial menu page is pushed.
+    registry.view<Vapor::VirtualCameraComponent>().each([&](Vapor::VirtualCameraComponent& cam) {
+        cam.aspect = (float)windowWidth / (float)windowHeight;
+    });
+    entt::entity global = entt::null;
+    registry.view<Vapor::NameComponent>().each([&](entt::entity e, const Vapor::NameComponent& name) {
+        if (name.name == "Scene Global") global = e;
+    });
+    if (global == entt::null) global = registry.create();
+    PageSystem::push(registry, PageID::MainMenu);
 
     renderer->stage(scene);
 
-    // Convert GLTF scene meshes to ECS entities so they appear in the inspector
-    // and are rendered through the unified registry draw path.
-    for (size_t i = 0; i < sponzaMeshCount && i < scene->stagedMeshes.size(); ++i) {
-        auto& mesh = scene->stagedMeshes[i];
-        const glm::mat4& worldMat =
-            i < scene->stagedMeshTransforms.size() ? scene->stagedMeshTransforms[i] : glm::identity<glm::mat4>();
-
-        auto e = registry.create();
-        registry.emplace<Vapor::NameComponent>(e, Vapor::NameComponent{ fmt::format("Sponza_{}", i) });
-        auto& tc = registry.emplace<Vapor::TransformComponent>(e);
-        // Extract scale correctly from world matrix and scale down by 0.01 for Sponza
-        // The Khronos Sponza GLTF is authored in meters (~30m across) — use
-        // its world transforms as-is. (An earlier 0.01 scale shrank the whole
-        // scene to a 30cm dollhouse the camera flew straight past.)
-        tc.scale = glm::vec3(
-            glm::length(glm::vec3(worldMat[0])),
-            glm::length(glm::vec3(worldMat[1])),
-            glm::length(glm::vec3(worldMat[2]))
-        );
-        tc.position = glm::vec3(worldMat[3]);
-        if (tc.scale.x > 0.0f && tc.scale.y > 0.0f && tc.scale.z > 0.0f) {
-            glm::mat3 rotMat(
-                glm::vec3(worldMat[0]) / tc.scale.x,
-                glm::vec3(worldMat[1]) / tc.scale.y,
-                glm::vec3(worldMat[2]) / tc.scale.z
-            );
-            tc.rotation = glm::quat_cast(rotMat);
-        }
-        tc.isDirty = true; // Let TransformSystem compute the scaled world matrix
-        auto& mrc = registry.emplace<Vapor::MeshRendererComponent>(e);
-        mrc.meshes.push_back(mesh);
-        registry.emplace<SceneGeometryTag>(e);// marks GLTF-spawned geometry for serializer
-    }
-    // Clear stagedMeshes: GLTF meshes are now ECS entities; manually built
-    // meshes (cubes, floor) are already in MeshRendererComponent and were
-    // staged (materialID/instanceID set) so their mesh objects remain valid.
+    // Clear the staging list: everything just staged (blueprint + built-in
+    // geometry) has its renderMeshId/materialID assigned and lives on in
+    // MeshRendererComponents, so the mesh objects remain valid.
     scene->stagedMeshes.clear();
     scene->stagedMeshTransforms.clear();
 
-    // Demo sprite entity — replaces the old drawRotatedQuad2D(spriteTexture) call
-    {
-        auto spriteEntity = registry.create();
-        registry.emplace<Vapor::NameComponent>(spriteEntity, Vapor::NameComponent{"DemoSprite"});
-        auto& tc = registry.emplace<Vapor::TransformComponent>(spriteEntity);
-        tc.position = glm::vec3(650.0f, 100.0f, 0.0f);
-        tc.isDirty  = true;
-        auto& sc    = registry.emplace<Vapor::SpriteComponent>(spriteEntity);
-        sc.atlas      = demoAtlasHandle;
-        sc.frameIndex = 0;
-        sc.size       = glm::vec2(40.0f, 40.0f);
-        sc.tint       = glm::vec4(1.0f);
-        registry.emplace<AutoRotateComponent>(spriteEntity, AutoRotateComponent{
-            .axis  = glm::vec3(0.0f, 0.0f, 1.0f),
-            .speed = 2.0f
-        });
-    }
-
+    // (The demo sprite, canvas shapes and text labels are all authored in
+    // scenes/main.json now — sprite / shape2D / text2D / rainbowGrid.)
 
     Uint32 frameCount = 0;
     float time = SDL_GetTicks() / 1000.0f;
@@ -614,7 +875,7 @@ auto main(int argc, char* args[]) -> int {
 
         // Gameplay updates
         CameraSwitchSystem::update(registry, global);
-        CameraSystem::update(registry, deltaTime);
+        Vapor::CameraControlSystem::update(registry, deltaTime);
         AutoRotateSystem::update(registry, deltaTime);
         LightMovementSystem::update(registry, deltaTime);
         // Subtitle systems (split into single-responsibility)
@@ -631,6 +892,10 @@ auto main(int argc, char* args[]) -> int {
         // Engine updates
         engineCore->update(deltaTime);
 
+        // Reactive body lifecycle: scene JSON authors data-only rigidbody +
+        // collider components; these systems create/destroy the Jolt bodies.
+        BodyCreateSystem::update(registry, physics.get());
+        BodyDestroySystem::update(registry, physics.get());
         physics->process(registry, deltaTime);
         Vapor::TransformSystem::update(registry);
         // Pause freezes the GPU sim (renderer) and the CPU-side emitter/reclaim
@@ -643,12 +908,20 @@ auto main(int argc, char* args[]) -> int {
         // Gather per-emitter draw packets (blend/texture/size). Runs even while
         // paused — frozen particles still need their draw list.
         Vapor::ParticleRenderSystem::update(registry, renderer.get());
-        LightGatherSystem::update(registry, scene.get());
+        Vapor::TimeOfDaySystem::update(registry, deltaTime);  // moves the sun; before gather
+        Vapor::LightGatherSystem::update(registry, scene.get());
+        Vapor::SkySystem::update(registry, renderer.get());
+        Vapor::WindSystem::update(registry, renderer.get());
+        Vapor::VolumetricFogSystem::update(registry, renderer.get());
         FlipbookSystem::update(registry, deltaTime);
-        SpriteRenderSystem::update(registry, renderer.get(), &resourceManager);
+        Sprite2DRenderSystem::update(registry, renderer.get(), &resourceManager);
+        Sprite3DRenderSystem::update(registry, renderer.get(), &resourceManager);
+        FpsTextSystem::update(registry, deltaTime);
+        Shape2DRenderSystem::update(registry, renderer.get());
+        Text2DRenderSystem::update(registry, renderer.get(), fontCache);
 
         // Rendering
-        entt::entity activeCamEntity = getActiveCamera(registry);
+        entt::entity activeCamEntity = Vapor::CameraControlSystem::getActiveCamera(registry);
         if (activeCamEntity != entt::null) {
             auto& cam = registry.get<Vapor::VirtualCameraComponent>(activeCamEntity);
             Camera tempCamera;// Create a temporary Camera object
@@ -670,72 +943,19 @@ auto main(int argc, char* args[]) -> int {
             ImGui::NewFrame();
             renderer->invokeImGuiCallback();
 
-            // ===== 2D Canvas Demo (Screen Space) =====
-            // Note: When camera is perspective (default), CanvasPass uses screen space (pixel coords)
-            // When camera is orthographic, CanvasPass uses world space ortho
-            float quadSize = 20.0f;
-            float spacing = 25.0f;
-            int cols = 10;
-            int rows = 5;
-            for (int y = 0; y < rows; y++) {
-                for (int x = 0; x < cols; x++) {
-                    float px = 50.0f + x * spacing;
-                    float py = 50.0f + y * spacing;
-                    // Rainbow colors based on position
-                    float hue = (float)(x + y * cols) / (float)(cols * rows);
-                    glm::vec4 color = glm::vec4(
-                        0.5f + 0.5f * sin(hue * 6.28f),
-                        0.5f + 0.5f * sin(hue * 6.28f + 2.09f),
-                        0.5f + 0.5f * sin(hue * 6.28f + 4.18f),
-                        0.8f
-                    );
-                    renderer->drawQuad2D(glm::vec2(px, py), glm::vec2(quadSize, quadSize), color);
-                }
-            }
-            renderer->drawCircleFilled2D(glm::vec2(400.0f, 100.0f), 30.0f, glm::vec4(1.0f, 0.5f, 0.0f, 1.0f));
-            renderer->drawRect2D(
-                glm::vec2(450.0f, 70.0f), glm::vec2(60.0f, 60.0f), glm::vec4(0.0f, 1.0f, 0.5f, 1.0f), 2.0f
-            );
-            renderer->drawTriangleFilled2D(
-                glm::vec2(550.0f, 130.0f),
-                glm::vec2(520.0f, 70.0f),
-                glm::vec2(580.0f, 70.0f),
-                glm::vec4(0.5f, 0.0f, 1.0f, 1.0f)
-            );
-            // ===== Text Rendering Demo (Screen Space) =====
-            if (gameFont.isValid()) {
-                // Draw text at screen positions (pixel coordinates)
-                renderer->drawText2D(
-                    gameFont, "Project Vapor", glm::vec2(50.0f, 200.0f), 1.0f, glm::vec4(1.0f, 1.0f, 1.0f, 1.0f)
-                );
-
-                renderer->drawText2D(
-                    gameFont,
-                    "F5: HUD | F6: Letterbox | F7: Subtitles",
-                    glm::vec2(50.0f, 250.0f),
-                    0.5f,
-                    glm::vec4(0.8f, 0.8f, 0.8f, 1.0f)
-                );
-
-                // Show FPS
-                renderer->drawText2D(
-                    gameFont,
-                    fmt::format("FPS: {:.1f}", 1.0f / deltaTime),
-                    glm::vec2(50.0f, 300.0f),
-                    0.5f,
-                    glm::vec4(0.0f, 1.0f, 0.0f, 1.0f)
-                );
-            }
-
-            // ===== 3D Batch Demo =====
-            renderer->drawQuad3D(
-                glm::vec3(0.0f, 2.0f, 0.0f), glm::vec2(1.0f, 1.0f), spriteTexture, glm::vec4(1.0f, 0.5f, 0.5f, 1.0f)
-            );
+            // (2D canvas + text demos are ECS-driven now: Shape2D/Text2D
+            // entities in scenes/main.json rendered by the systems in the
+            // update block above. Canvas note: under a perspective camera the
+            // CanvasPass uses screen-space pixel coords; orthographic uses
+            // world-space ortho. The 3D batch's world sprite is ECS-driven now:
+            // the "World Sprite" Sprite3D entity in scenes/main.json, rendered
+            // by Sprite3DRenderSystem in the update block above.)
 
             // ===== Render-to-Texture "TV" Demo =====
             // Disabled by default — it's a demo affordance, not part of the
-            // scene. Flip to 1 to render the scene from an orbiting camera into
-            // a texture and hang it on a world-space quad (a "TV screen").
+            // scene. Flip this AND the setup #if 0 above (search "Render-to-
+            // texture 'TV' demo setup") to 1 to render the scene from an
+            // orbiting camera into a texture and hang it on a world quad.
 #if 0
             {
                 // Update RT camera to orbit around the scene

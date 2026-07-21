@@ -4,6 +4,7 @@
 #include <SDL3/SDL_vulkan.h>
 #include <vulkan/vulkan.h>
 #include <vulkan/vulkan_beta.h>
+#include <vk_mem_alloc.h>
 #include <deque>
 #include <functional>
 #include <mutex>
@@ -14,6 +15,8 @@
 // ============================================================================
 // RHI_Vulkan - Vulkan implementation of RHI interface
 // ============================================================================
+
+namespace Vapor {
 
 class RHI_Vulkan : public RHI {
 public:
@@ -176,14 +179,18 @@ private:
     VkSurfaceKHR surface = VK_NULL_HANDLE;
     VkPhysicalDevice physicalDevice = VK_NULL_HANDLE;
     VkDevice device = VK_NULL_HANDLE;
+    // Single VMA allocator for every buffer/image: sub-allocates from large
+    // device memory blocks instead of one vkAllocateMemory per resource (which
+    // fragments and runs into maxMemoryAllocationCount, often just 4096).
+    VmaAllocator allocator = VK_NULL_HANDLE;
     VkQueue graphicsQueue = VK_NULL_HANDLE;
     VkQueue presentQueue = VK_NULL_HANDLE;
     Uint32 graphicsFamilyIdx = UINT32_MAX;
     Uint32 presentFamilyIdx = UINT32_MAX;
 
     VkSwapchainKHR swapchain = VK_NULL_HANDLE;
-    VkFormat swapchainImageFormat;
-    VkExtent2D swapchainExtent;
+    VkFormat swapchainImageFormat = VK_FORMAT_UNDEFINED;
+    VkExtent2D swapchainExtent{};
     // Extent of the render pass currently being encoded (for scissor clamping).
     Uint32 currentPassWidth = 0;
     Uint32 currentPassHeight = 0;
@@ -213,7 +220,7 @@ private:
 
     struct BufferResource {
         VkBuffer buffer;
-        VkDeviceMemory memory;
+        VmaAllocation allocation;
         VkDeviceSize size;
         bool isMapped;
         void* mappedData;
@@ -223,11 +230,12 @@ private:
     struct TextureResource {
         VkImage image;
         VkImageView view;
-        VkDeviceMemory memory;
+        VmaAllocation allocation;
         VkFormat format;
         Uint32 width;
         Uint32 height;
         Uint32 depth = 1;  // >1 = 3D volume texture
+        Uint32 mipLevels = 1;
         Uint32 arrayLayers = 1;
         VkImageUsageFlags usage = 0;
         VkImageLayout currentLayout = VK_IMAGE_LAYOUT_UNDEFINED;
@@ -290,9 +298,14 @@ private:
     // Vulkan Extension Function Pointers
     // ========================================================================
 
-    // Dynamic rendering extension functions
-    PFN_vkCmdBeginRenderingKHR vkCmdBeginRenderingKHR = nullptr;
-    PFN_vkCmdEndRenderingKHR vkCmdEndRenderingKHR = nullptr;
+    // Dynamic rendering + synchronization2 entry points. Loaded core-name
+    // first (Vulkan 1.3), falling back to the KHR alias for drivers that
+    // report 1.2 + extensions (MoltenVK before 1.2.9). Signatures are
+    // identical; the core PFN types cover both.
+    PFN_vkCmdBeginRendering pfnCmdBeginRendering = nullptr;
+    PFN_vkCmdEndRendering pfnCmdEndRendering = nullptr;
+    PFN_vkCmdPipelineBarrier2 pfnCmdPipelineBarrier2 = nullptr;
+    PFN_vkQueueSubmit2 pfnQueueSubmit2 = nullptr;
 
     // ========================================================================
     // Descriptor Binding Model
@@ -394,8 +407,8 @@ private:
 
     static constexpr VkDeviceSize STAGING_RING_SIZE = 32ull * 1024 * 1024;
     VkBuffer stagingRingBuffer = VK_NULL_HANDLE;
-    VkDeviceMemory stagingRingMemory = VK_NULL_HANDLE;
-    void* stagingRingPtr = nullptr;
+    VmaAllocation stagingRingAllocation = VK_NULL_HANDLE;
+    void* stagingRingPtr = nullptr;  // persistently mapped via VMA_ALLOCATION_CREATE_MAPPED_BIT
     // Frame-partitioned staging: the ring is split into MAX_FRAMES_IN_FLIGHT
     // equal regions. Each frame allocates only within its own region [base,
     // base+regionSize); the region is reset at beginFrame right after
@@ -404,8 +417,18 @@ private:
     // stall-free (no dependency on ALL upload fences draining).
     VkDeviceSize stagingRegionBase = 0;   // this frame's region start
     VkDeviceSize stagingRingOffset = 0;   // offset WITHIN the current region
+    // Per-frame region size, rounded DOWN to 16 bytes: bufferOffset for image
+    // copies must be texel-aligned, and 32MB/3 is not — an unaligned region
+    // BASE defeats the 16-byte alignment done inside the region.
+    VkDeviceSize stagingRegionSize() const {
+        return (STAGING_RING_SIZE / MAX_FRAMES_IN_FLIGHT) & ~VkDeviceSize(15);
+    }
     VkCommandBuffer uploadCmd = VK_NULL_HANDLE;   // valid while recording
-    std::vector<VkFence> pendingUploadFences;     // one per in-flight upload submit
+    // One entry per in-flight upload submit: fence + the staging slot whose
+    // region the copies read. Uploads recorded BETWEEN frames are not covered
+    // by that slot's frame fence, so beginFrame must wait matching tags
+    // before reusing a slot's region.
+    std::vector<std::pair<VkFence, Uint32>> pendingUploadFences;
 
     void createUploadStream();
     void destroyUploadStream();
@@ -516,7 +539,6 @@ private:
     void createCommandBuffers();
     void createSyncObjects();
 
-    Uint32 findMemoryType(Uint32 typeFilter, VkMemoryPropertyFlags properties);
     VkFormat convertPixelFormat(PixelFormat format);
     VkFilter convertFilterMode(FilterMode mode);
     VkSamplerAddressMode convertAddressMode(AddressMode mode);
@@ -529,3 +551,10 @@ private:
 
 // Factory function
 RHI* createRHIVulkan();
+
+} // namespace Vapor
+
+// Transitional shim: these types lived at global scope before the namespace
+// unification; unqualified call sites keep compiling while they migrate to
+// Vapor:: qualification. Remove once call sites are migrated.
+using namespace Vapor;

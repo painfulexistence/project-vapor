@@ -5,6 +5,8 @@
 #include <cstring>
 #include <numeric>
 
+using namespace Vapor;
+
 namespace Vapor {
 
 // ─────────────────────────────────────────────────────────────────────────────

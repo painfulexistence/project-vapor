@@ -6,7 +6,7 @@
 #include "camera.hpp"
 #include "graphics.hpp"
 #include "font_manager.hpp"
-#include "scene.hpp"
+#include "render_scene.hpp"
 #include <SDL3/SDL_video.h>
 #include <entt/entt.hpp>
 #include <functional>
@@ -20,8 +20,9 @@ namespace Rml {
 }
 
 namespace Vapor {
-    class DebugDraw;
-}
+
+class DebugDraw;
+class RmlRendererRHI;
 
 // Batch rendering stats for the RHI renderer. (graphics_batch2d.hpp has a
 // richer RHIBatch2DStats but it cannot be included here — it redefines BlendMode,
@@ -51,7 +52,14 @@ struct RHIBatch2DStats {
 class Renderer : public IRenderer {
 public:
     Renderer() = default;
-    ~Renderer() override = default;
+    // Defined in renderer.cpp where RmlRendererRHI is complete, so the
+    // unique_ptr member's deleter can be instantiated.
+    ~Renderer() override;
+
+    // Polymorphic base: copying through a base reference would slice off the
+    // derived backend's state, so copying is disabled (Core Guidelines C.67).
+    Renderer(const Renderer&) = delete;
+    Renderer& operator=(const Renderer&) = delete;
 
     // ========================================================================
     // Initialization
@@ -123,13 +131,13 @@ public:
     // ========================================================================
 
     // Stage a scene (upload meshes, materials, textures)
-    void stage(std::shared_ptr<Scene> scene) override;
+    void stage(std::shared_ptr<RenderScene> scene) override;
 
     // Draw a scene with Scene object
-    void draw(std::shared_ptr<Scene> scene, Camera& camera) override;
+    void draw(std::shared_ptr<RenderScene> scene, Camera& camera) override;
 
     // Draw with ECS registry
-    void draw(entt::registry& registry, std::shared_ptr<Scene> scene, Camera& camera) override;
+    void draw(entt::registry& registry, std::shared_ptr<RenderScene> scene, Camera& camera) override;
 
     // ========================================================================
     // Screenshot API
@@ -280,7 +288,7 @@ public:
     TextureHandle getRenderTextureAsTexture(RenderTextureHandle handle) override;
     void renderToTexture(
         RenderTextureHandle target,
-        std::shared_ptr<Scene> scene,
+        std::shared_ptr<RenderScene> scene,
         Camera& camera,
         const glm::vec4& clearColor = glm::vec4(0.0f, 0.0f, 0.0f, 1.0f)
     ) override;
@@ -306,6 +314,13 @@ public:
     void setParticleForceField(const ParticleForceField& field) override;
     void setParticleSimPaused(bool paused) override { m_particleSimPaused = paused; }
     void setParticleVisible(bool visible) override { particleVisible = visible; }
+    void setSky(const SkyRenderData& sky) override;
+    void setWind(const WindRenderData& wind) override;
+    void setVolumetricFog(const VolumetricFogRenderData& fog) override;
+    // Sun-driven auto rebake is opt-in (m_iblAutoRebake, default off) — a moving
+    // sun otherwise re-bakes the IBL constantly. The one-shot "Refresh IBL"
+    // button and sky-config changes (setSky) still force a rebake directly.
+    void requestIBLUpdate() override { if (m_iblAutoRebake) iblNeedsUpdate = true; }
     void setParticleDrawList(const std::vector<ParticleDrawPacket>& draws) override;
 
     // ========================================================================
@@ -390,6 +405,8 @@ private:
     // prePassCullPass() are thin wrappers (main = frustum+Hi-Z, pre = frustum only).
     void runGpuCull(BufferHandle argsBuffer, bool enableOcclusion);
     void raytraceShadowPass();
+    void raytraceReflectionPass();
+    void raytraceRefractionPass();
     void raytraceAOPass();
     void mainRenderPass();
     void postProcessPass();
@@ -398,6 +415,7 @@ private:
     void bloomUpsamplePass();
     void skyAtmospherePass();
     void lightScatteringPass();
+    void heightFogPass();
     void volumetricFogPass();
     void volumeRaymarchPass();
     void velocityPass();
@@ -418,12 +436,16 @@ private:
     Frustum extractFrustum(const glm::mat4& viewProj);
     TextureId getOrCreateTexture(const std::shared_ptr<Vapor::Image>& image);
     void bindMaterial(MaterialId materialId);
+    // Bind only the albedo texture (set2 b0) — the shadow-depth alpha cutout is
+    // the only place that samples without needing the full material texture set,
+    // and binding all six would churn descriptors on maps the pass never reads.
+    void bindMaterialAlbedo(MaterialId materialId);
 
     // Scene/ECS helpers
-    void collectDrawables(std::shared_ptr<Scene> scene);
-    void collectDrawables(entt::registry& registry, std::shared_ptr<Scene> scene);
+    void collectDrawables(std::shared_ptr<RenderScene> scene);
+    void collectDrawables(entt::registry& registry, std::shared_ptr<RenderScene> scene);
     // Submit the scene's gathered lights (filled by the game's light systems)
-    void submitSceneLights(const std::shared_ptr<Scene>& scene);
+    void submitSceneLights(const std::shared_ptr<RenderScene>& scene);
 
     // Batch rendering helpers
     void initBatchRendering();
@@ -531,7 +553,7 @@ private:
 
     // Last staged/drawn scene — kept for the ImGui Scene Materials / Scene
     // Lights editors (the panels edit shared Scene data, like native).
-    std::shared_ptr<Scene> currentScene;
+    std::shared_ptr<RenderScene> currentScene;
 
     // Texture cache (path -> TextureId)
     std::unordered_map<std::string, TextureId> textureCache;
@@ -674,10 +696,21 @@ private:
     LightScatteringRenderData lightScatteringSettings;
     PipelineHandle volumetricFogPipeline;
     TextureHandle tempColorRT;  // ping-pong target for fog (swapped with colorRT)
-    bool volumetricFogEnabled = true;
-    // Persistent fog tunables (ImGui-editable). volumetricFogPass() copies this
-    // and overwrites the per-frame fields (invViewProj/camera/sun).
+    // Volumetric fog (the expensive raymarch) is now opt-in and ECS-driven:
+    // setVolumetricFog() copies a VolumetricFogComponent's tunables into
+    // fogSettings and flips m_volumetricFogActive. Off until a component pushes it.
+    bool volumetricFogEnabled = false;
+    // Persistent fog tunables. volumetricFogPass() copies this and overwrites the
+    // per-frame fields (invViewProj/camera/sun).
     FogRenderData fogSettings;
+    // Cheap analytic exponential height fog (the pre-raymarch "Height Fog"):
+    // a single per-pixel evaluation, no shadows/lights. On by default — it is the
+    // common-case global fog; the raymarch above is the opt-in upgrade.
+    PipelineHandle heightFogPipeline;
+    ShaderHandle heightFogShader;
+    BufferHandle heightFogDataBuffer;
+    HeightFogRenderData heightFogSettings;
+    bool heightFogEnabled = true;
     // Heterogeneous volume raymarch (EmberGen density grids; rendering only —
     // import/parsing lives in a separate PR). One AABB volume per scene; a
     // procedural 64^3 test grid stands in until setVolumeDensity() gets real
@@ -705,8 +738,9 @@ private:
     BufferHandle prevViewProjBuffer;
     glm::mat4 prevViewProj = glm::mat4(1.0f);
     bool prevViewProjValid = false;
-    // RmlUI (cross-backend RHI render interface; owned, see initUI()).
-    void* m_uiRenderer = nullptr;
+    // RmlUI (cross-backend RHI render interface; forward-declared, the
+    // complete type lives in renderer.cpp where ~Renderer is defined).
+    std::unique_ptr<Vapor::RmlRendererRHI> m_uiRenderer;
     Rml::Context* m_uiContext = nullptr;
     SDL_Window* window = nullptr;
 
@@ -720,6 +754,10 @@ private:
     TextureHandle cloudResolvedRT;  // temporal output (swapped with history)
     BufferHandle cloudDataBuffer;
     VolumetricCloudRenderData cloudSettings;  // CPU copy (tunables + wind/time accumulation)
+    // Shared wind magnitude from the ECS WindFieldComponent (via setWind).
+    // Multiplies the cloud's per-medium windSpeed coefficient at scroll time.
+    // Defaults to 1.0 so scenes without a WindFieldComponent are unaffected.
+    float m_windStrength = 1.0f;
     glm::mat4 cloudPrevViewProj = glm::mat4(1.0f);
     bool cloudPrevViewProjValid = false;
     bool volumetricCloudsEnabled = false;  // default OFF (enable when verifying)
@@ -766,6 +804,36 @@ private:
     ShaderHandle bloomUpsampleShader;
     ShaderHandle atmosphereVertexShader;
     ShaderHandle atmosphereFragmentShader;
+    // Visible sky sampled from environmentCubemap when the SkyComponent's type is
+    // HDRI (reuses Sky.vert / atmosphereVertexShader). m_skyType is the visible
+    // sky mode pushed by setSky.
+    PipelineHandle skyboxPipeline;
+    ShaderHandle skyboxFragmentShader;
+    // Cheap zenith/horizon/ground gradient sky (SkyType::Gradient). Same
+    // fullscreen depth-tested state as the atmosphere pass; colors come from the
+    // SkyComponent via setSky.
+    PipelineHandle gradientPipeline;
+    ShaderHandle gradientFragmentShader;
+    BufferHandle gradientDataBuffer;
+    GradientRenderData gradientData;  // CPU copy, re-uploaded when setSky changes it
+    // Night-sky (stars + moon) visuals for the atmosphere pass; driven by setSky.
+    BufferHandle nightSkyDataBuffer;
+    NightSkyRenderData nightSkyData;
+    SkyType m_skyType = SkyType::Atmosphere;
+    // IBL debug: environmentCubemap unwrapped to a 2D equirect RT for ImGui
+    // (cubemaps can't be shown directly). iblPreviewPass renders it each frame.
+    TextureHandle iblPreviewRT;
+    PipelineHandle iblPreviewPipeline;
+    ShaderHandle iblPreviewVertexShader;
+    ShaderHandle iblPreviewFragmentShader;
+    // Off by default: the preview RT is single-buffered, so rendering it every
+    // frame while ImGui samples last frame's copy stalls (WAR hazard ~a full
+    // frame). Only render it while the debug panel checkbox is on.
+    bool m_iblPreviewEnabled = false;
+    // Sun-driven IBL rebake toggle (SkySystem calls requestIBLUpdate() as the sun
+    // moves; gated here). Default off to save the per-move bake cost — the sky
+    // still bakes once on startup and on manual Refresh / sky-config changes.
+    bool m_iblAutoRebake = false;
     ShaderHandle lightScatteringShader;
     ShaderHandle volumetricFogShader;
     BufferHandle fogDataBuffer;
@@ -796,6 +864,24 @@ private:
     ComputePipelineHandle stochasticShadowPipeline;
     ComputePipelineHandle stochasticShadowTemporalPipeline;
     ComputePipelineHandle stochasticShadowDenoisePipeline;
+    // RT mirror reflections (Metal RT only): traces reflection rays and shades
+    // hits from the GIBS surfel radiance cache; misses sample the env map.
+    ComputePipelineHandle raytraceReflectionPipeline;
+    TextureHandle reflectionRT;              // half-res RGBA16F (rgb, a=hit mask)
+    bool rtReflectionsEnabled = false;       // default off; opt-in via Effects panel (no-op without RT)
+    float rtReflectionIntensity = 1.0f;      // composite multiplier in the PBR
+    // RT refractions (KHR_materials_transmission rendering; Metal RT only).
+    // Structural clone of the reflection chain with a refracted ray (fixed IOR
+    // 1.5, thin-walled). Runs only while some material has transmission > 0.
+    ComputePipelineHandle raytraceRefractionPipeline;
+    TextureHandle refractionRT;              // half-res RGBA16F (rgb, a=hit mask)
+    bool rtRefractionsEnabled = true;        // panel toggle (no-op without RT)
+    float rtRefractionIntensity = 1.0f;      // composite multiplier in the PBR
+    bool sceneHasTransmission = false;       // recomputed in updateBuffers()
+    // RT sun soft shadows: 0 = hard single ray (legacy behavior); > 0 = the
+    // sun's angular radius in radians, cone-sampled with a few rays/pixel
+    // (real sun ~0.0047). Panel slider under Shadow Debug.
+    float rtSunAngularRadius = 0.0f;
     // ReSTIR reuse for the stochastic shadow (restirShadowPass): half-res
     // reservoir build + temporal merge, half-res spatial merge + winner rays,
     // then joint bilateral upsample back to the full-res raw target.
@@ -819,6 +905,7 @@ private:
     ShaderHandle rtShadowShader, rtAOShader, aoTemporalShader, aoDenoiseShader,
                  stochasticShadowShader, stochasticShadowTemporalShader, stochasticShadowDenoiseShader,
                  restirShadowTemporalShader, restirShadowResolveShader, stochasticShadowUpsampleShader,
+                 rtReflectionShader, rtRefractionShader,
                  giTemporalShader, giDenoiseShader;
     ShaderHandle prePassMetalVertexShader, prePassMetalFragmentShader;
 
@@ -1104,7 +1191,7 @@ private:
     // resolved handle changes (cache below) — rewriting every frame would race
     // in-flight replays of the shared table.
     BufferHandle bindlessSystemTable;
-    TextureHandle m_bindlessSysCache[10];
+    TextureHandle m_bindlessSysCache[12];  // 10 system textures + RT reflection/refraction
     // Note: the single Metal ICB is shared across frames in flight — Metal's
     // automatic hazard tracking serializes the next frame's cull (write)
     // against the previous frame's executeICB (read). Correct, at the cost of
@@ -1164,8 +1251,17 @@ private:
     ShaderHandle skyCaptureVS, skyCaptureFS, irradianceVS, irradianceFS,
                  prefilterVS, prefilterFS, brdfVS, brdfFS;
     bool iblNeedsUpdate = true;
+    // Amortized IBL bake: iblCapturePass spreads the 42-face capture/convolve
+    // over several frames (one stage per frame) to avoid a per-rebake hitch.
+    // m_iblBakeStage: -1 idle, 0 capture(+mips,+BRDF once), 1 irradiance,
+    // 2..(1+MIPS) prefilter mip. m_iblReady gates sampling so the main pass keeps
+    // using the previous bake during a rebake instead of flickering to black.
+    int  m_iblBakeStage = -1;
+    bool m_brdfBaked = false;
+    bool m_iblReady = false;
     static constexpr Uint32 PREFILTER_MIP_LEVELS = 5;
     void iblCapturePass();
+    void iblPreviewPass();  // IBL debug: cubemap -> equirect RT for ImGui
 
     // HDRI environment source (ported from the native Metal renderer). When set,
     // iblCapturePass converts the equirect map into environmentCubemap (instead of
@@ -1402,3 +1498,10 @@ private:
 
 // The createRenderer() factory is declared in irenderer.hpp and returns a
 // std::unique_ptr<IRenderer> (Renderer for Vulkan, Renderer_Metal for Metal).
+
+} // namespace Vapor
+
+// Transitional shim: these types lived at global scope before the namespace
+// unification; unqualified call sites keep compiling while they migrate to
+// Vapor:: qualification. Remove once call sites are migrated.
+using namespace Vapor;

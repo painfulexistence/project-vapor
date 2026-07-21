@@ -1,7 +1,7 @@
 body {
     width: 100%;
     height: 100%;
-    font-family: "Arial Black";
+    font-family: "Noto Sans";
 }
 
 #pause-menu-container {
@@ -54,7 +54,7 @@ button {
     font-weight: bold;
     text-align: center;
     letter-spacing: 1dp;
-    transition: background-color color 0.15s linear;
+    transition: background-color color 0.15s linear-in-out;
 }
 
 button:hover {

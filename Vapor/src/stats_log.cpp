@@ -2,6 +2,8 @@
 
 #include <fmt/core.h>
 
+using namespace Vapor;
+
 namespace Vapor {
 
 void StatLine::appendKV(const char* key, const std::string& value) {
@@ -30,6 +32,10 @@ StatsLog::~StatsLog() {
 
 void StatsLog::addSource(const char* tag, std::function<void(StatLine&)> fill, Mode mode) {
     sources_.push_back(Source{ tag, std::move(fill), mode, {} });
+}
+
+void StatsLog::removeSource(const char* tag) {
+    std::erase_if(sources_, [tag](const Source& s) { return s.tag == tag; });
 }
 
 void StatsLog::ensureFileOpen() {

@@ -9,7 +9,6 @@
 #include "Vapor/renderer.hpp"
 #include "Vapor/resource_manager.hpp"
 #include "Vapor/rmlui_manager.hpp"
-#include "Vapor/scene.hpp"
 #include "components.hpp"
 #include "pages/chapter_title_page.hpp"
 #include "pages/page_system.hpp"
@@ -18,6 +17,8 @@
 #include <algorithm>
 #include <fmt/core.h>
 #include <glm/gtc/matrix_transform.hpp>
+#include <string>
+#include <unordered_map>
 
 
 
@@ -35,9 +36,9 @@ public:
 class FlipbookSystem {
 public:
     static void update(entt::registry& reg, float deltaTime) {
-        auto view = reg.view<Vapor::SpriteComponent, Vapor::FlipbookComponent>();
+        auto view = reg.view<Vapor::Sprite2DComponent, Vapor::FlipbookComponent>();
         for (auto entity : view) {
-            auto& sprite = view.get<Vapor::SpriteComponent>(entity);
+            auto& sprite = view.get<Vapor::Sprite2DComponent>(entity);
             auto& flipbook = view.get<Vapor::FlipbookComponent>(entity);
 
             if (!flipbook.playing || flipbook.frameIndices.empty()) continue;
@@ -56,7 +57,7 @@ public:
     }
 };
 
-class SpriteRenderSystem {
+class Sprite2DRenderSystem {
 public:
     static void update(
         entt::registry& reg,
@@ -64,11 +65,11 @@ public:
         Vapor::ResourceManager* resourceManager
     ) {
         // Collect visible sprites
-        std::vector<std::tuple<glm::mat4, Vapor::SpriteComponent*, entt::entity>> sprites;
+        std::vector<std::tuple<glm::mat4, Vapor::Sprite2DComponent*, entt::entity>> sprites;
 
-        auto view = reg.view<Vapor::TransformComponent, Vapor::SpriteComponent>();
+        auto view = reg.view<Vapor::TransformComponent, Vapor::Sprite2DComponent>();
         for (auto entity : view) {
-            auto& sprite = view.get<Vapor::SpriteComponent>(entity);
+            auto& sprite = view.get<Vapor::Sprite2DComponent>(entity);
             if (!sprite.visible || !sprite.atlas.valid()) continue;
 
             auto& transform = view.get<Vapor::TransformComponent>(entity);
@@ -111,6 +112,134 @@ public:
             };
 
             renderer->drawQuad2D(spriteTransform, atlas->texture, texCoords, sprite->tint, static_cast<int>(entity));
+        }
+    }
+};
+
+// World-space sprites (Sprite3DComponent) drawn into the 3D batch. billboard
+// sprites re-orient to face the active camera each frame; the rest use their
+// entity transform. Runs before beginFrame like the 2D path — drawQuad3D only
+// queues into the 3D batch, which the frame flushes.
+class Sprite3DRenderSystem {
+public:
+    static void update(
+        entt::registry& reg,
+        IRenderer* renderer,
+        Vapor::ResourceManager* resourceManager
+    ) {
+        // Camera basis for billboarding: the active camera's world-space right
+        // and up are the first two rows of the view rotation. Identity fallback
+        // keeps non-billboard sprites correct even with no camera.
+        glm::vec3 camRight(1.0f, 0.0f, 0.0f);
+        glm::vec3 camUp(0.0f, 1.0f, 0.0f);
+        const entt::entity camEntity = Vapor::CameraControlSystem::getActiveCamera(reg);
+        if (camEntity != entt::null && reg.all_of<Vapor::VirtualCameraComponent>(camEntity)) {
+            const glm::mat4& view = reg.get<Vapor::VirtualCameraComponent>(camEntity).viewMatrix;
+            camRight = glm::vec3(view[0][0], view[1][0], view[2][0]);
+            camUp = glm::vec3(view[0][1], view[1][1], view[2][1]);
+        }
+
+        auto view = reg.view<Vapor::TransformComponent, Vapor::Sprite3DComponent>();
+        for (auto entity : view) {
+            auto& sprite = view.get<Vapor::Sprite3DComponent>(entity);
+            if (!sprite.visible || !sprite.atlas.valid()) continue;
+            const auto* atlas = resourceManager->getAtlas(sprite.atlas);
+            if (!atlas) continue;
+            const auto* frame = atlas->getFrame(sprite.frameIndex);
+            if (!frame) continue;
+
+            auto& transform = view.get<Vapor::TransformComponent>(entity);
+            glm::mat4 quadTransform;
+            if (sprite.billboard) {
+                // Camera-facing quad at the entity's world position. The batch's
+                // local quad spans -0.5..+0.5, so the basis axes carry the full
+                // size (±0.5 * size along camera right/up).
+                const glm::vec3 pos = glm::vec3(transform.worldTransform[3]);
+                quadTransform = glm::mat4(1.0f);
+                quadTransform[0] = glm::vec4(camRight * sprite.size.x, 0.0f);
+                quadTransform[1] = glm::vec4(camUp * sprite.size.y, 0.0f);
+                quadTransform[3] = glm::vec4(pos, 1.0f);
+            } else {
+                // Oriented by the entity transform (poster/decal), sized in the
+                // entity's local XY plane.
+                quadTransform = glm::scale(transform.worldTransform, glm::vec3(sprite.size, 1.0f));
+            }
+
+            glm::vec4 uv = frame->uvRect;
+            if (sprite.flipX) std::swap(uv.x, uv.z);
+            if (sprite.flipY) std::swap(uv.y, uv.w);
+            glm::vec2 texCoords[4] = {
+                {uv.x, uv.w},  // bottom-left
+                {uv.z, uv.w},  // bottom-right
+                {uv.z, uv.y},  // top-right
+                {uv.x, uv.y}   // top-left
+            };
+
+            renderer->drawQuad3D(quadTransform, atlas->texture, texCoords, sprite.tint, static_cast<int>(entity));
+        }
+    }
+};
+
+class Text2DRenderSystem {
+public:
+    // fontCache maps font path -> handle, owned by the app (no globals). The
+    // handle is created on first use at the component's fontSize; later
+    // entities sharing the path reuse it.
+    static void update(
+        entt::registry& reg,
+        IRenderer* renderer,
+        std::unordered_map<std::string, FontHandle>& fontCache
+    ) {
+        auto view = reg.view<Vapor::TransformComponent, Vapor::Text2DComponent>();
+        for (auto entity : view) {
+            const auto& text = view.get<Vapor::Text2DComponent>(entity);
+            if (!text.visible || text.text.empty() || text.font.empty()) continue;
+
+            auto [it, inserted] = fontCache.try_emplace(text.font);
+            if (inserted) {
+                it->second = renderer->loadFont(text.font, text.fontSize);
+            }
+            if (!it->second.isValid()) continue;
+
+            const auto& transform = view.get<Vapor::TransformComponent>(entity);
+            renderer->drawText2D(
+                it->second, text.text, glm::vec2(transform.worldTransform[3]), text.scale, text.color
+            );
+        }
+    }
+};
+
+class Shape2DRenderSystem {
+public:
+    static void update(entt::registry& reg, IRenderer* renderer) {
+        auto view = reg.view<Vapor::TransformComponent, Vapor::Shape2DComponent>();
+        for (auto entity : view) {
+            const auto& shape = view.get<Vapor::Shape2DComponent>(entity);
+            if (!shape.visible) continue;
+            const glm::vec2 pos = glm::vec2(view.get<Vapor::TransformComponent>(entity).worldTransform[3]);
+            using Kind = Vapor::Shape2DComponent::Kind;
+            switch (shape.kind) {
+            case Kind::Quad: renderer->drawQuad2D(pos, shape.size, shape.color); break;
+            case Kind::Rect: renderer->drawRect2D(pos, shape.size, shape.color, shape.thickness); break;
+            case Kind::Circle: renderer->drawCircleFilled2D(pos, shape.radius, shape.color); break;
+            case Kind::Triangle:
+                renderer->drawTriangleFilled2D(pos, pos + shape.p1, pos + shape.p2, shape.color);
+                break;
+            }
+        }
+    }
+};
+
+// Rewrites the text of every {FpsTextComponent, Text2DComponent} entity with
+// the current frame rate — the dynamic-text counterpart of the static JSON-
+// authored labels.
+class FpsTextSystem {
+public:
+    static void update(entt::registry& reg, float deltaTime) {
+        auto view = reg.view<FpsTextComponent, Vapor::Text2DComponent>();
+        for (auto entity : view) {
+            view.get<Vapor::Text2DComponent>(entity).text =
+                fmt::format("FPS: {:.1f}", deltaTime > 0.0f ? 1.0f / deltaTime : 0.0f);
         }
     }
 };
@@ -204,72 +333,9 @@ public:
     }
 };
 
-class LightGatherSystem {
-public:
-    static void update(entt::registry& reg, Scene* scene) {
-        scene->pointLights.clear();
-        auto pointView = reg.view<Vapor::PointLightComponent, Vapor::TransformComponent>();
-        for (auto entity : pointView) {
-            auto& light     = pointView.get<Vapor::PointLightComponent>(entity);
-            auto& transform = pointView.get<Vapor::TransformComponent>(entity);
-            scene->pointLights.push_back({
-                .position  = transform.position,
-                .color     = light.color,
-                .intensity = light.intensity,
-                .radius    = light.radius,
-            });
-        }
-
-        scene->directionalLights.clear();
-        auto dirView = reg.view<Vapor::DirectionalLightComponent>();
-        for (auto entity : dirView) {
-            auto& light = dirView.get<Vapor::DirectionalLightComponent>(entity);
-            scene->directionalLights.push_back({
-                .direction = light.direction,
-                .color     = light.color,
-                .intensity = light.intensity,
-            });
-        }
-
-        // Spot lights: position from the transform, beam along its forward
-        // axis (rotation * -Z), degree angles converted to cosines for the GPU.
-        scene->spotLights.clear();
-        auto spotView = reg.view<Vapor::SpotLightComponent, Vapor::TransformComponent>();
-        for (auto entity : spotView) {
-            auto& light     = spotView.get<Vapor::SpotLightComponent>(entity);
-            auto& transform = spotView.get<Vapor::TransformComponent>(entity);
-            Vapor::SpotLight sl{};
-            sl.position  = transform.position;
-            sl.direction = glm::normalize(transform.rotation * glm::vec3(0.0f, 0.0f, -1.0f));
-            sl.color     = light.color;
-            sl.intensity = light.intensity;
-            sl.radius    = light.radius;
-            sl.cosInner  = std::cos(glm::radians(light.innerAngle));
-            sl.cosOuter  = std::cos(glm::radians(light.outerAngle));
-            scene->spotLights.push_back(sl);
-        }
-
-        // Rect area lights: quad axes from the transform's rotation (right = +X,
-        // up = +Y), half-extents from the component size. (The engine component
-        // existed but nothing gathered it into the scene until now.)
-        scene->rectLights.clear();
-        auto rectView = reg.view<Vapor::RectLightComponent, Vapor::TransformComponent>();
-        for (auto entity : rectView) {
-            auto& light     = rectView.get<Vapor::RectLightComponent>(entity);
-            auto& transform = rectView.get<Vapor::TransformComponent>(entity);
-            Vapor::RectLight rl{};
-            rl.position   = transform.position;
-            rl.right      = glm::normalize(transform.rotation * glm::vec3(1.0f, 0.0f, 0.0f));
-            rl.up         = glm::normalize(transform.rotation * glm::vec3(0.0f, 1.0f, 0.0f));
-            rl.halfWidth  = light.size.x * 0.5f;
-            rl.halfHeight = light.size.y * 0.5f;
-            rl.color      = light.color;
-            rl.intensity  = light.intensity;
-            rl.useVideoTexture = light.useVideoTexture ? 1u : 0u;
-            scene->rectLights.push_back(rl);
-        }
-    }
-};
+// LightGatherSystem now lives in the engine (Vapor::LightGatherSystem); the
+// game calls it directly. It gathers the SunComponent-tagged directional light
+// into directionalLights[0].
 
 
 class AutoRotateSystem {
@@ -326,52 +392,8 @@ public:
     }
 };
 
-class CameraSystem {
-public:
-    static void update(entt::registry& reg, float deltaTime) {
-        auto view = reg.view<Vapor::VirtualCameraComponent>();
-
-        for (auto entity : view) {
-            auto& cam = view.get<Vapor::VirtualCameraComponent>(entity);
-            if (!cam.isActive) continue;
-
-            if (auto [fly, intent] = reg.try_get<FlyCameraComponent, CharacterIntent>(entity); fly && intent) {
-                fly->pitch -= intent->lookVector.y * fly->rotateSpeed * deltaTime;
-                fly->yaw -= intent->lookVector.x * fly->rotateSpeed * deltaTime;
-                fly->pitch = glm::clamp(fly->pitch, -89.0f, 89.0f);
-
-                cam.rotation = glm::quat(glm::vec3(glm::radians(-fly->pitch), glm::radians(fly->yaw - 90.0f), 0.0f));
-
-                glm::vec3 front = cam.rotation * glm::vec3(0, 0, -1);
-                glm::vec3 right = cam.rotation * glm::vec3(1, 0, 0);
-                glm::vec3 up = cam.rotation * glm::vec3(0, 1, 0);
-
-                if (intent->moveVector.x != 0.0f)
-                    cam.position += intent->moveVector.x * right * fly->moveSpeed * deltaTime;
-                if (intent->moveVector.y != 0.0f)
-                    cam.position += intent->moveVector.y * front * fly->moveSpeed * deltaTime;
-                if (intent->moveVerticalAxis != 0.0f)
-                    cam.position += intent->moveVerticalAxis * up * fly->moveSpeed * deltaTime;
-            }
-
-            if (auto* follow = reg.try_get<FollowCameraComponent>(entity)) {
-                if (!reg.valid(follow->target)) continue;
-                if (auto* transform = reg.try_get<Vapor::TransformComponent>(follow->target)) {
-                    glm::vec3 targetPos = transform->position;
-                    glm::vec3 desiredPos = targetPos + follow->offset;
-                    cam.position = glm::mix(cam.position, desiredPos, 1.0f - pow(follow->smoothFactor, deltaTime));
-                    cam.rotation = glm::quatLookAt(glm::normalize(targetPos - cam.position), glm::vec3(0, 1, 0));
-                }
-            }
-
-            glm::mat4 rotation = glm::mat4_cast(cam.rotation);
-            glm::mat4 translation = glm::translate(glm::mat4(1.0f), cam.position);
-            cam.viewMatrix = glm::inverse(translation * rotation);
-            cam.projectionMatrix = glm::perspective(cam.fov, cam.aspect, cam.near, cam.far);
-        }
-    }
-};
-
+// (Camera control lives in the engine now: Vapor::CameraControlSystem in
+// Vapor/systems.hpp consumes the same CharacterIntent this app writes.)
 
 // ============================================================================
 // Subtitle Systems - Split into single-responsibility systems

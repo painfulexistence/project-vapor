@@ -60,7 +60,7 @@ VIRGA_API int   Vapor_Surface_Height(int id);
 VIRGA_API void Vapor_Surface_InjectMouseEvent(int id, double x, double y, int button);
 VIRGA_API void Vapor_Surface_InjectKeyEvent(int id, int sdlScancode, int pressed);
 
-/* ── Scene ────────────────────────────────────────────────────────────────── */
+/* ── RenderScene ────────────────────────────────────────────────────────────────── */
 
 VIRGA_API void Vapor_LoadScene(const char* path);
 

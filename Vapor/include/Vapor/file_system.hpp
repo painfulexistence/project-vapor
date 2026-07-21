@@ -3,6 +3,8 @@
 #include <string>
 #include <vector>
 
+namespace Vapor {
+
 class FileSystem {
 public:
     static FileSystem& instance();
@@ -16,10 +18,10 @@ public:
 
     // Returns the first resolved absolute path where relativePath exists,
     // or std::nullopt if not found in any search path.
-    std::optional<std::string> resolvePath(const std::string& relativePath) const;
+    [[nodiscard]] std::optional<std::string> resolvePath(const std::string& relativePath) const;
 
     // Like resolvePath but throws std::runtime_error if not found.
-    std::string resolvePathOrThrow(const std::string& relativePath) const;
+    [[nodiscard]] std::string resolvePathOrThrow(const std::string& relativePath) const;
 
 private:
     struct SearchEntry {
@@ -32,3 +34,10 @@ private:
     // Called automatically by resolvePath if initialize() was never called.
     void lazyInitialize();
 };
+
+} // namespace Vapor
+
+// Transitional shim: these types lived at global scope before the namespace
+// unification; unqualified call sites keep compiling while they migrate to
+// Vapor:: qualification. Remove once call sites are migrated.
+using namespace Vapor;

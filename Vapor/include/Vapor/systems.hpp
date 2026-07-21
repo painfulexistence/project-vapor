@@ -5,7 +5,7 @@
 #include "physics_3d.hpp"
 #include "render_data.hpp"
 #include "renderer.hpp"
-#include "scene.hpp"
+#include "render_scene.hpp"
 #include <entt/entt.hpp>
 #include <cmath>
 #include <memory>
@@ -271,95 +271,358 @@ namespace Vapor {
     };
 
     // ============================================================================
-    // 光照移動系統 - Logic Driver
+    // 光照收集系統 - gathers ECS light components into the scene's render lists
     // ============================================================================
-    // NOTE: This system is commented out because it uses game-specific component types
-    // (LightMovementLogicComponent, SceneLightReferenceComponent, MovementPattern) that
-    // are not defined in the engine. The game provides its own LightMovementSystem in
-    // Vaporware/src/systems.hpp that handles light movement.
-    /*
-    class LightMovementSystem {
+    // The registry is the single source of truth for lights: authoring lives on
+    // per-entity light components, and this system rebuilds the scene's transient
+    // render lists from them every frame (they are never authored on the Scene).
+    // The SunComponent-tagged directional light is gathered into index 0, which
+    // the atmosphere/sky and shadow paths treat as the authoritative sun.
+    class LightGatherSystem {
     public:
-        static void update(entt::registry& registry, Scene* scene, float deltaTime) {
-            auto view = registry.view<LightMovementLogicComponent>();
+        static void update(entt::registry& reg, RenderScene* scene) {
+            if (!scene) return;
 
-            for (auto entity : view) {
-                auto& logic = view.get<LightMovementLogicComponent>(entity);
+            // Point lights: position from the transform.
+            scene->pointLights.clear();
+            auto pointView = reg.view<PointLightComponent, TransformComponent>();
+            for (auto entity : pointView) {
+                const auto& light     = pointView.get<PointLightComponent>(entity);
+                const auto& transform = pointView.get<TransformComponent>(entity);
+                scene->pointLights.push_back({
+                    .position  = transform.position,
+                    .color     = light.color,
+                    .intensity = light.intensity,
+                    .radius    = light.radius,
+                });
+            }
 
-                auto* ref = registry.try_get<SceneLightReferenceComponent>(entity);
-                if (!ref || ref->lightIndex < 0 || ref->lightIndex >= scene->pointLights.size()) {
-                    continue;
-                }
+            // Directional lights: the SunComponent-tagged entity (if any) is
+            // emitted first so it lands at directionalLights[0] regardless of
+            // registry iteration order.
+            scene->directionalLights.clear();
+            entt::entity sunEntity = entt::null;
+            auto sunView = reg.view<DirectionalLightComponent, SunComponent>();
+            for (auto entity : sunView) { sunEntity = entity; break; }
+            auto pushDirectional = [&](const DirectionalLightComponent& light) {
+                scene->directionalLights.push_back({
+                    .direction = light.direction,
+                    .color     = light.color,
+                    .intensity = light.intensity,
+                });
+            };
+            if (sunEntity != entt::null) {
+                pushDirectional(reg.get<DirectionalLightComponent>(sunEntity));
+            }
+            auto dirView = reg.view<DirectionalLightComponent>();
+            for (auto entity : dirView) {
+                if (entity == sunEntity) continue;
+                pushDirectional(dirView.get<DirectionalLightComponent>(entity));
+            }
 
-                // Update timer
-                logic.timer += deltaTime * logic.speed;
-                float t = logic.timer;
+            // Spot lights: position from the transform, beam along its forward
+            // axis (rotation * -Z), degree angles converted to cosines for the GPU.
+            scene->spotLights.clear();
+            auto spotView = reg.view<SpotLightComponent, TransformComponent>();
+            for (auto entity : spotView) {
+                const auto& light     = spotView.get<SpotLightComponent>(entity);
+                const auto& transform = spotView.get<TransformComponent>(entity);
+                SpotLight sl{};
+                sl.position  = transform.position;
+                sl.direction = glm::normalize(transform.rotation * glm::vec3(0.0f, 0.0f, -1.0f));
+                sl.color     = light.color;
+                sl.intensity = light.intensity;
+                sl.radius    = light.radius;
+                sl.cosInner  = std::cos(glm::radians(light.innerAngle));
+                sl.cosOuter  = std::cos(glm::radians(light.outerAngle));
+                scene->spotLights.push_back(sl);
+            }
 
-                glm::vec3 newPos(0.0f);
-
-                switch (logic.pattern) {
-                case MovementPattern::Circle:
-                    newPos.x = logic.radius * cos(t);
-                    newPos.z = logic.radius * sin(t);
-                    newPos.y = logic.height + 0.5f * sin(t * 0.5f);
-                    break;
-
-                case MovementPattern::Figure8:
-                    newPos.x = (logic.radius + 1.0f) * sin(t * 0.7f);
-                    newPos.z = (logic.radius + 1.0f) * sin(t * 0.7f) * cos(t * 0.7f);
-                    newPos.y = 1.0f + 1.0f * cos(t * 0.3f);
-                    break;
-
-                case MovementPattern::Linear:
-                    newPos.x = (logic.radius + 1.0f) * sin(t * 0.6f);
-                    newPos.z = 2.0f * cos(t * 0.8f);
-                    newPos.y = 0.5f + 2.0f * abs(sin(t * 0.4f));
-                    break;
-
-                case MovementPattern::Spiral: {
-                    float spiralRadius = 2.0f + 1.0f * sin(t * 0.2f);
-                    newPos.x = spiralRadius * cos(t * 0.5f);
-                    newPos.z = spiralRadius * sin(t * 0.5f);
-                    newPos.y = 0.5f + 2.5f * (1.0f - cos(t * 0.3f));
-                    break;
-                }
-                }
-
-                // Direct write to Scene
-                scene->pointLights[ref->lightIndex].position = newPos;
-
-                // Optional: Update intensity logic if needed (keeping it simple for now)
-                scene->pointLights[ref->lightIndex].intensity = 3.0f + 2.0f * (0.5f + 0.5f * sin(t * 0.3f));
+            // Rect area lights: quad axes from the transform's rotation (right =
+            // +X, up = +Y), half-extents from the component size.
+            scene->rectLights.clear();
+            auto rectView = reg.view<RectLightComponent, TransformComponent>();
+            for (auto entity : rectView) {
+                const auto& light     = rectView.get<RectLightComponent>(entity);
+                const auto& transform = rectView.get<TransformComponent>(entity);
+                RectLight rl{};
+                rl.position       = transform.position;
+                rl.right          = glm::normalize(transform.rotation * glm::vec3(1.0f, 0.0f, 0.0f));
+                rl.up             = glm::normalize(transform.rotation * glm::vec3(0.0f, 1.0f, 0.0f));
+                rl.halfWidth      = light.size.x * 0.5f;
+                rl.halfHeight     = light.size.y * 0.5f;
+                rl.color          = light.color;
+                rl.intensity      = light.intensity;
+                rl.useVideoTexture = light.useVideoTexture ? 1u : 0u;
+                scene->rectLights.push_back(rl);
             }
         }
     };
-    */
 
     // ============================================================================
-    // 相機系統
+    // 天空系統 - resolves the SkyComponent into a SkyRenderData for the renderer
     // ============================================================================
-    class CameraSystem {
+    // The registry owns the sky description (SkyComponent). This system pushes it
+    // to the renderer only when it changes (the `dirty` flag), so it never fights
+    // the renderer's own atmosphere debug UI on unchanged frames. The sun stays
+    // light-driven — only the sky type + atmosphere/gradient tunables flow here.
+    class SkySystem {
     public:
-        static void update(entt::registry& registry, InputManager& inputManager, float deltaTime) {
-            auto view = registry.view<VirtualCameraComponent>();
-            const auto& inputState = inputManager.getInputState();
-
+        static void update(entt::registry& reg, IRenderer* renderer) {
+            if (!renderer) return;
+            auto view = reg.view<SkyComponent>();
             for (auto entity : view) {
-                auto& cam = view.get<VirtualCameraComponent>(entity);
+                auto& sky = view.get<SkyComponent>(entity);
 
-                if (!cam.isActive) continue;
-
-                // 1. Handle Fly Camera Logic
-                if (auto* fly = registry.try_get<FlyCameraComponent>(entity)) {
-                    handleFlyCamera(cam, fly, inputState, deltaTime);
+                // Push the sky description only when it changes.
+                if (sky.dirty) {
+                    SkyRenderData data;
+                    data.type                  = sky.type;
+                    data.rayleighCoefficients  = sky.rayleighCoefficients;
+                    data.rayleighScaleHeight   = sky.rayleighScaleHeight;
+                    data.mieCoefficient        = sky.mieCoefficient;
+                    data.mieScaleHeight        = sky.mieScaleHeight;
+                    data.miePreferredDirection = sky.miePreferredDirection;
+                    data.planetRadius          = sky.planetRadius;
+                    data.atmosphereRadius      = sky.atmosphereRadius;
+                    data.exposure              = sky.exposure;
+                    data.groundColor           = sky.groundColor;
+                    data.gradientZenith        = sky.gradientZenith;
+                    data.gradientHorizon       = sky.gradientHorizon;
+                    data.gradientGround        = sky.gradientGround;
+                    data.starDensity           = sky.starDensity;
+                    data.starBrightness        = sky.starBrightness;
+                    data.moonColor             = sky.moonColor;
+                    data.moonSize              = sky.moonSize;
+                    data.moonBrightness        = sky.moonBrightness;
+                    renderer->setSky(data);
+                    sky.dirty = false;
                 }
 
-                // 2. Handle Follow Camera Logic
+                // Throttled IBL rebake: a moving sun restales the captured
+                // environment. Runs every frame; the decision lives here (ECS),
+                // so both backends stay aligned via requestIBLUpdate().
+                if (sky.iblSunThresholdDeg > 0.0f) {
+                    glm::vec3 sunDir(0.0f);
+                    auto sunView = reg.view<DirectionalLightComponent, SunComponent>();
+                    for (auto e : sunView) {
+                        sunDir = sunView.get<DirectionalLightComponent>(e).direction;
+                        break;
+                    }
+                    if (glm::length(sunDir) > 1e-6f) {
+                        sunDir = glm::normalize(sunDir);
+                        const glm::vec3 last = sky._lastIblSunDir;
+                        const bool firstBake = (glm::length(last) <= 1e-6f);
+                        // First bake (last == 0) always counts as "moved".
+                        float cosT = firstBake
+                                         ? -1.0f
+                                         : glm::clamp(glm::dot(sunDir, last), -1.0f, 1.0f);
+                        float movedDeg = glm::degrees(std::acos(cosT));
+                        if (movedDeg >= sky.iblSunThresholdDeg) {
+                            if (firstBake) {
+                                // The initial bake must ALWAYS happen, independent
+                                // of the auto-rebake toggle. The renderer's very-
+                                // early startup bake can capture the sky before the
+                                // async-loaded scene + sun are ready, leaving a
+                                // stale/wrong prefilter that RT reflection samples
+                                // (green ghosting until a manual Refresh IBL). Now
+                                // that the sun is valid, re-push the sky to force
+                                // one ungated bake (setSky sets iblNeedsUpdate).
+                                sky.dirty = true;
+                            } else {
+                                // Continuous sun-tracking rebakes: gated by the
+                                // renderer's auto-rebake toggle (off by default).
+                                renderer->requestIBLUpdate();
+                            }
+                            sky._lastIblSunDir = sunDir;
+                        }
+                    }
+                }
+
+                break;  // singleton: the first sky entity wins
+            }
+        }
+    };
+
+    // ============================================================================
+    // 時間系統 - advances the time-of-day clock and drives the sun
+    // ============================================================================
+    // The single moving sun: TimeOfDaySystem turns the clock into the
+    // SunComponent-tagged directional light's direction (a sun arc, latitude-
+    // tilted) and its colour/intensity (warm/dim at the horizon, white at noon,
+    // dark at night — the atmosphere->light coupling, CPU side). Run this BEFORE
+    // LightGatherSystem so the updated sun lands in directionalLights[0].
+    class TimeOfDaySystem {
+    public:
+        static void update(entt::registry& reg, float deltaTime) {
+            auto todView = reg.view<TimeOfDayComponent>();
+            entt::entity todEntity = entt::null;
+            for (auto e : todView) { todEntity = e; break; }
+            if (todEntity == entt::null) return;
+            auto& tod = todView.get<TimeOfDayComponent>(todEntity);
+
+            if (!tod.paused && tod.dayLengthSeconds > 0.0f) {
+                tod.timeOfDay += (24.0f / tod.dayLengthSeconds) * deltaTime;
+                tod.timeOfDay = std::fmod(tod.timeOfDay, 24.0f);
+                if (tod.timeOfDay < 0.0f) tod.timeOfDay += 24.0f;
+            }
+
+            // Sun position: rises east (+X) at 06:00, peaks overhead at noon,
+            // sets west (-X) at 18:00, below the horizon at night. Latitude tilts
+            // the arc toward +Z (south).
+            const float twoPi = 6.28318530718f;
+            float phase   = (tod.timeOfDay / 24.0f) * twoPi;   // 0 at midnight
+            float sunUp   = -std::cos(phase);                  // -1 midnight, +1 noon
+            float sunEast =  std::sin(phase);                  // +1 at 06:00 (east)
+            float latRad  = glm::radians(tod.latitudeDeg);
+            glm::vec3 sunPos = glm::normalize(glm::vec3(
+                sunEast,
+                sunUp * std::cos(latRad),
+                sunUp * std::sin(latRad)));
+
+            // Radiometry from elevation (sunPos.y): dark at night, warm near the
+            // horizon, white at noon.
+            float e = sunPos.y;
+            float daylight = glm::clamp((e + 0.1f) / 0.3f, 0.0f, 1.0f);
+            daylight = daylight * daylight * (3.0f - 2.0f * daylight);  // smoothstep
+            float warm = glm::clamp(e / 0.35f, 0.0f, 1.0f);
+            glm::vec3 sunColor = glm::mix(glm::vec3(1.0f, 0.45f, 0.25f),
+                                          glm::vec3(1.0f, 0.98f, 0.95f), warm);
+
+            auto sunView = reg.view<DirectionalLightComponent, SunComponent>();
+            for (auto entity : sunView) {
+                auto& dl = sunView.get<DirectionalLightComponent>(entity);
+                dl.direction = glm::normalize(-sunPos);  // light travels away from the sun
+                dl.color     = sunColor;
+                dl.intensity = tod.maxSunIntensity * daylight;
+                break;
+            }
+
+            // Moon: opposite the sun (moonPos = -sunPos), so it is up while the
+            // sun is down. Intensity ramps with the moon's elevation, giving a
+            // dim cool fill at night. This matches the visual moon in the
+            // Atmosphere pass (moonDir = -sunDir). Direction travels away from
+            // the moon (= sunPos). Unshadowed for now (PSSM tracks the sun only).
+            glm::vec3 moonPos = -sunPos;
+            float moonUp = glm::clamp(moonPos.y / 0.15f, 0.0f, 1.0f);
+            moonUp = moonUp * moonUp * (3.0f - 2.0f * moonUp);  // smoothstep
+            auto moonView = reg.view<DirectionalLightComponent, MoonComponent>();
+            for (auto entity : moonView) {
+                auto& dl = moonView.get<DirectionalLightComponent>(entity);
+                dl.direction = glm::normalize(-moonPos);  // = normalize(sunPos)
+                dl.color     = tod.moonLightColor;
+                dl.intensity = tod.maxMoonIntensity * moonUp;
+                break;
+            }
+        }
+    };
+
+    // ============================================================================
+    // 風場系統 - resolves the shared WindFieldComponent for the renderer
+    // ============================================================================
+    // Wind direction is one shared field (WindFieldComponent) — clouds, fog and
+    // the particle sim all blow the same way. This pushes it to the renderer each
+    // frame (wind is live/animatable). Only runs when a WindFieldComponent exists,
+    // so scenes without wind keep the renderer's panel-set direction. Particles
+    // read the same component directly via ParticleForceFieldSystem.
+    class WindSystem {
+    public:
+        static void update(entt::registry& reg, IRenderer* renderer) {
+            if (!renderer) return;
+            auto view = reg.view<WindFieldComponent>();
+            for (auto entity : view) {
+                const auto& wf = view.get<WindFieldComponent>(entity);
+                WindRenderData data;
+                data.direction  = wf.direction;
+                data.strength   = wf.strength;
+                data.turbulence = wf.turbulence;
+                renderer->setWind(data);
+                break;  // singleton: the first wind field wins
+            }
+        }
+    };
+
+    // ============================================================================
+    // 體積霧系統 - resolves the VolumetricFogComponent for the renderer
+    // ============================================================================
+    // The opt-in per-light volumetric fog (raymarch). Like SkySystem/WindSystem
+    // this pushes the singleton component's tunables to the renderer each frame
+    // (fog is live-tunable). No component -> the renderer keeps the pass off
+    // (default) so the expensive raymarch never runs unless a scene asks for it.
+    class VolumetricFogSystem {
+    public:
+        static void update(entt::registry& reg, IRenderer* renderer) {
+            if (!renderer) return;
+            auto view = reg.view<VolumetricFogComponent>();
+            for (auto entity : view) {
+                const auto& f = view.get<VolumetricFogComponent>(entity);
+                VolumetricFogRenderData data;
+                data.enabled          = f.enabled;
+                data.fogDensity       = f.density;
+                data.fogHeightFalloff = f.heightFalloff;
+                data.fogBaseHeight    = f.baseHeight;
+                data.fogMaxHeight     = f.maxHeight;
+                data.anisotropy       = f.anisotropy;
+                data.ambientIntensity = f.ambientIntensity;
+                data.noiseScale       = f.noiseScale;
+                data.noiseIntensity   = f.noiseIntensity;
+                data.windSpeed        = f.windSpeed;
+                renderer->setVolumetricFog(data);
+                break;  // singleton: the first volumetric fog wins
+            }
+        }
+    };
+
+    // ============================================================================
+    // 相機控制系統 — fly / follow camera rigs
+    // ============================================================================
+    // Intent-driven: each camera entity carries a CharacterIntent written by the
+    // app's input-mapping layer. The InputManager overload is a thin adapter for
+    // demos without an action-mapping layer: it synthesizes a transient intent
+    // from the default actions and runs the exact same handlers.
+    class CameraControlSystem {
+    public:
+        static void update(entt::registry& registry, float deltaTime) {
+            auto view = registry.view<VirtualCameraComponent>();
+            for (auto entity : view) {
+                auto& cam = view.get<VirtualCameraComponent>(entity);
+                if (!cam.isActive) continue;
+
+                if (auto* fly = registry.try_get<FlyCameraComponent>(entity)) {
+                    if (auto* intent = registry.try_get<CharacterIntent>(entity)) {
+                        handleFlyCamera(cam, fly, *intent, deltaTime);
+                    }
+                }
                 if (auto* follow = registry.try_get<FollowCameraComponent>(entity)) {
                     handleFollowCamera(cam, follow, deltaTime, registry);
                 }
+                updateMatrices(cam);
+            }
+        }
 
-                // 3. Update Matrices
+        static void update(entt::registry& registry, InputManager& inputManager, float deltaTime) {
+            const auto& inputState = inputManager.getInputState();
+            // Local only — never stomps a CharacterIntent component the app owns.
+            CharacterIntent intent;
+            intent.lookVector = inputState.getVector(
+                InputAction::LookLeft, InputAction::LookRight, InputAction::LookDown, InputAction::LookUp
+            );
+            intent.moveVector = inputState.getVector(
+                InputAction::StrafeLeft, InputAction::StrafeRight, InputAction::MoveBackward, InputAction::MoveForward
+            );
+            intent.moveVerticalAxis = inputState.getAxis(InputAction::MoveDown, InputAction::MoveUp);
+
+            auto view = registry.view<VirtualCameraComponent>();
+            for (auto entity : view) {
+                auto& cam = view.get<VirtualCameraComponent>(entity);
+                if (!cam.isActive) continue;
+
+                if (auto* fly = registry.try_get<FlyCameraComponent>(entity)) {
+                    handleFlyCamera(cam, fly, intent, deltaTime);
+                }
+                if (auto* follow = registry.try_get<FollowCameraComponent>(entity)) {
+                    handleFollowCamera(cam, follow, deltaTime, registry);
+                }
                 updateMatrices(cam);
             }
         }
@@ -376,34 +639,24 @@ namespace Vapor {
 
     private:
         static void handleFlyCamera(
-            VirtualCameraComponent& cam, FlyCameraComponent* fly, const InputState& inputState, float deltaTime
+            VirtualCameraComponent& cam, FlyCameraComponent* fly, const CharacterIntent& intent, float deltaTime
         ) {
-            // Rotation
-            if (inputState.isPressed(InputAction::LookUp)) fly->pitch += fly->rotateSpeed * deltaTime;
-            if (inputState.isPressed(InputAction::LookDown)) fly->pitch -= fly->rotateSpeed * deltaTime;
-            if (inputState.isPressed(InputAction::LookLeft)) fly->yaw += fly->rotateSpeed * deltaTime;
-            if (inputState.isPressed(InputAction::LookRight)) fly->yaw -= fly->rotateSpeed * deltaTime;
-
-            // Clamp pitch
+            // Rotation (lookVector: +x = look right, +y = look up)
+            fly->pitch -= intent.lookVector.y * fly->rotateSpeed * deltaTime;
+            fly->yaw -= intent.lookVector.x * fly->rotateSpeed * deltaTime;
             fly->pitch = glm::clamp(fly->pitch, -89.0f, 89.0f);
 
-            // Update rotation quaternion from yaw/pitch
-            // Simple Euler to Quat:
             cam.rotation = glm::quat(glm::vec3(glm::radians(-fly->pitch), glm::radians(fly->yaw - 90.0f), 0.0f));
 
-            // Calculate Front/Right/Up vectors from rotation
-            glm::vec3 front = cam.rotation * glm::vec3(0, 0, -1);// Assuming -Z is forward
+            glm::vec3 front = cam.rotation * glm::vec3(0, 0, -1);// -Z is forward
             glm::vec3 right = cam.rotation * glm::vec3(1, 0, 0);
             glm::vec3 up = cam.rotation * glm::vec3(0, 1, 0);
 
-            // Movement
+            // Movement (moveVector: +x = strafe right, +y = forward)
             float speed = fly->moveSpeed * deltaTime;
-            if (inputState.isPressed(InputAction::MoveForward)) cam.position += front * speed;
-            if (inputState.isPressed(InputAction::MoveBackward)) cam.position -= front * speed;
-            if (inputState.isPressed(InputAction::StrafeLeft)) cam.position -= right * speed;
-            if (inputState.isPressed(InputAction::StrafeRight)) cam.position += right * speed;
-            if (inputState.isPressed(InputAction::MoveUp)) cam.position += up * speed;
-            if (inputState.isPressed(InputAction::MoveDown)) cam.position -= up * speed;
+            if (intent.moveVector.x != 0.0f) cam.position += intent.moveVector.x * right * speed;
+            if (intent.moveVector.y != 0.0f) cam.position += intent.moveVector.y * front * speed;
+            if (intent.moveVerticalAxis != 0.0f) cam.position += intent.moveVerticalAxis * up * speed;
         }
 
         static void handleFollowCamera(VirtualCameraComponent& cam, FollowCameraComponent* follow, float deltaTime, entt::registry& registry) {

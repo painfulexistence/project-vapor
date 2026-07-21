@@ -18,17 +18,18 @@ using Vapor::FollowCameraComponent;
 using Vapor::GrabberComponent;
 using Vapor::HeldByComponent;
 
+// Light components now live in the engine (Vapor::) and are gathered by
+// Vapor::LightGatherSystem. Alias them so existing game code stays unqualified.
+using Vapor::DirectionalLightComponent;
+using Vapor::PointLightComponent;
+using Vapor::SpotLightComponent;
+using Vapor::SunComponent;
 // ============================================================================
 // Character Logic
 // ============================================================================
-struct CharacterIntent {
-    glm::vec2 lookVector = glm::vec2(0.0f);
-    glm::vec2 moveVector = glm::vec2(0.0f);
-    float moveVerticalAxis = 0.0f;
-    bool jump = false;
-    bool sprint = false;
-    bool interact = false;
-};
+// CharacterIntent moved to the engine (Vapor/components.hpp) — the engine's
+// CameraControlSystem consumes it; this app keeps writing it each frame.
+using Vapor::CharacterIntent;
 
 struct CharacterControllerComponent {
     float moveSpeed = 5.0f;
@@ -217,3 +218,5 @@ struct PersistentTag {};
 struct DeadTag {};
 // Marks entities auto-spawned from a GLTF scene; excluded from level serialization.
 struct SceneGeometryTag {};
+// Marks a Text2DComponent whose text FpsTextSystem rewrites with the frame rate.
+struct FpsTextComponent {};

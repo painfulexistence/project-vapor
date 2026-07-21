@@ -24,8 +24,10 @@
 // early-Z automatically; MoltenVK's translation of this shader does NOT unless
 // the SPIR-V carries the EarlyFragmentTests execution mode — without it the
 // Vulkan Main pass pays full overdraw (measured ~25ms vs ~7ms on Metal for the
-// identical algorithm on the same GPU). Safe here: the shader writes only
-// color, never discards, never writes gl_FragDepth.
+// identical algorithm on the same GPU). Safe with the alpha-cutout discard
+// below ONLY because the pipeline writes no depth (depthWrite=false; the
+// pre-pass owns depth): early-Z here tests but never stamps a discarded MASK
+// texel's depth, so cutout holes keep the pre-pass depth behind them.
 layout(early_fragment_tests) in;
 
 layout(location = 0) in vec3 fragPos;
@@ -37,7 +39,7 @@ layout(location = 5) in vec4 instanceColor;
 
 layout(location = 0) out vec4 outColor;
 
-// Must match Vapor::MaterialData (C++, std430 stride = 96)
+// Must match Vapor::MaterialData (C++, std430 stride = 112)
 struct MaterialData {
     vec4 baseColorFactor;
     float normalScale;
@@ -45,7 +47,7 @@ struct MaterialData {
     float roughnessFactor;
     float occlusionStrength;
     vec3 emissiveFactor;
-    float _pad1;
+    float alphaCutoff;// MASK-mode cutoff; 0 = disabled
     float emissiveStrength;
     float subsurface;
     float specular;
@@ -55,11 +57,13 @@ struct MaterialData {
     float sheenTint;
     float clearcoat;
     float clearcoatGloss;
-    // Tail matching the C++ MaterialData (stride 96): iblEnabled gates the IBL
-    // indirect term. prototypeUVMode/uvScale are unused here but keep the layout.
+    // Tail matching Vapor::MaterialData (graphics_gpu_structs.hpp, std430 stride
+    // 112): iblEnabled gates the IBL indirect term; transmission is Metal-RT-only
+    // but MUST stay here or every materials[i>0] read shifts by 16*i bytes.
     float prototypeUVMode;
     float uvScale;
     float iblEnabled;
+    float transmission;
 };
 
 // Must match DirectionalLightData / PointLightData (C++, stride 48 each)
@@ -557,6 +561,10 @@ void main() {
     MaterialData mat = materials[fragMaterialID];
 
     vec4 baseSample = texture(albedoMap, fragUV);
+    // Alpha cutout (glTF MASK mode — foliage, fences): discard below the
+    // cutoff. Must match PrePass.frag's discard or the depth prepass would
+    // leave solid quads in the depth buffer where the holes are.
+    if (mat.alphaCutoff > 0.0 && baseSample.a * mat.baseColorFactor.a < mat.alphaCutoff) discard;
     // Linearize the sRGB-authored albedo before lighting (mirrors Metal's
     // srgbToLinear(baseColor * baseColorFactor)); instanceColor is a linear tint.
     vec3 albedo = srgbToLinear(baseSample.rgb * mat.baseColorFactor.rgb) * instanceColor.rgb;

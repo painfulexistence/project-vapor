@@ -8,8 +8,6 @@
 #include <unordered_map>
 #include <vector>
 
-class Scene;
-
 namespace JPH {
     class TempAllocatorImpl;
     class JobSystem;
@@ -24,11 +22,12 @@ namespace JPH {
 }// namespace JPH
 
 namespace Vapor {
-    class JoltEnkiJobSystem;
-    class TaskScheduler;
-    class DebugDraw;
-    class PhysicsDebugRenderer;
-}// namespace Vapor
+
+class RenderScene;
+class JoltEnkiJobSystem;
+class TaskScheduler;
+class DebugDraw;
+class PhysicsDebugRenderer;
 
 class BPLayerInterfaceImpl;
 class ObjectVsBroadPhaseLayerFilterImpl;
@@ -249,24 +248,6 @@ public:
 private:
     constexpr static float FIXED_TIME_STEP = 1.0f / 60.0f;
 
-    // ====== 形狀快取系統 ======
-    struct ShapeDesc {
-        enum Type { Sphere, Box, Capsule, Cylinder } type;
-        glm::vec3 dimensions;// Sphere: (radius, 0, 0), Box: (hx, hy, hz), Capsule: (halfHeight, radius, 0), Cylinder:
-                             // (halfHeight, radius, 0)
-
-        bool operator==(const ShapeDesc& other) const {
-            return type == other.type && glm::all(glm::epsilonEqual(dimensions, other.dimensions, 0.001f));
-        }
-    };
-
-    struct ShapeDescHash {
-        std::size_t operator()(const ShapeDesc& desc) const {
-            return std::hash<int>()(static_cast<int>(desc.type)) ^ (std::hash<float>()(desc.dimensions.x) << 1)
-                   ^ (std::hash<float>()(desc.dimensions.y) << 2) ^ (std::hash<float>()(desc.dimensions.z) << 3);
-        }
-    };
-
     std::unordered_map<Uint32, JPH::BodyID> bodies;
     std::unordered_map<Uint32, Uint32> bodyIDToRid; // JPH::BodyID.GetIndexAndSequenceNumber() -> rid
     Uint32 nextBodyID = 0;
@@ -300,3 +281,9 @@ private:
     bool isDebugUIEnabled = false;
     glm::vec3 currentGravity = glm::vec3(0.0f, -9.81f, 0.0f);
 };
+} // namespace Vapor
+
+// Transitional shim: these types lived at global scope before the namespace
+// unification; unqualified call sites keep compiling while they migrate to
+// Vapor:: qualification. Remove once call sites are migrated.
+using namespace Vapor;

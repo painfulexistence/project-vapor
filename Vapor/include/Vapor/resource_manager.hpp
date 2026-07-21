@@ -2,14 +2,14 @@
 
 #include "atlas_baker.hpp"
 #include "graphics.hpp"
+#include "scene_blueprint.hpp"
 #include "renderer.hpp"
-#include "scene.hpp"
 #include "task_scheduler.hpp"
 #include <atomic>
+#include <condition_variable>
 #include <functional>
 #include <memory>
 #include <mutex>
-#include <condition_variable>
 #include <string>
 #include <unordered_map>
 
@@ -33,7 +33,7 @@ namespace Vapor {
     /**
      * Generic resource container with loading state tracking
      *
-     * Template parameter T should be the resource type (Image, Scene, Mesh, etc.)
+     * Template parameter T should be the resource type (Image, SceneBlueprint, Mesh, etc.)
      */
     template<typename T> class Resource {
     public:
@@ -83,16 +83,32 @@ namespace Vapor {
             return m_path;
         }
 
-        // Get error message (if failed)
-        const std::string& getError() const {
+        // Get error message (if failed). By value: a reference would escape the lock.
+        std::string getError() const {
             std::lock_guard<std::mutex> lock(m_mutex);
             return m_error;
         }
 
-        // Set completion callback
+        // Set completion callback. THREADING CONTRACT: Async callbacks run on
+        // the loader's worker thread — never touch single-threaded systems
+        // (RHI, entt registry, renderer). Runs immediately on the calling
+        // thread when the resource is already Ready; a completion landing
+        // between the caller's isReady() check and this call would otherwise
+        // drop the callback.
         void setCallback(std::function<void(std::shared_ptr<T>)> callback) {
-            std::lock_guard<std::mutex> lock(m_mutex);
-            m_callback = callback;
+            std::shared_ptr<T> ready;
+            {
+                std::lock_guard<std::mutex> lock(m_mutex);
+                if (m_state.load() == ResourceState::Ready) {
+                    ready = m_data;
+                } else {
+                    m_callback = std::move(callback);
+                    return;
+                }
+            }
+            if (callback) {
+                callback(ready);
+            }
         }
 
         // Internal: Set resource data (called by loader)
@@ -233,11 +249,10 @@ namespace Vapor {
 
         // === Scene Loading ===
 
-        std::shared_ptr<Resource<Scene>> loadScene(
+        std::shared_ptr<Resource<Vapor::SceneBlueprint>> loadScene(
             const std::string& path,
-            bool optimized = true,
             LoadMode mode = LoadMode::Async,
-            std::function<void(std::shared_ptr<Scene>)> onComplete = nullptr
+            std::function<void(std::shared_ptr<Vapor::SceneBlueprint>)> onComplete = nullptr
         );
 
         // === OBJ Loading ===
@@ -299,7 +314,7 @@ namespace Vapor {
             Renderer* renderer,
             Uint32 maxSize = 4096,
             Uint32 padding = 1,
-            bool   trim    = true
+            bool trim = true
         );
 
         // Get atlas by handle (returns nullptr if not found)
@@ -323,7 +338,7 @@ namespace Vapor {
 
         // Resource caches
         ResourceCache<Image> m_imageCache;
-        ResourceCache<Scene> m_sceneCache;
+        ResourceCache<Vapor::SceneBlueprint> m_sceneCache;
         ResourceCache<Mesh> m_meshCache;
         ResourceCache<std::string> m_textCache;
 
@@ -337,7 +352,7 @@ namespace Vapor {
 
         // Internal loading functions (static, called on worker threads)
         static std::shared_ptr<Image> loadImageInternal(const std::string& path);
-        static std::shared_ptr<Scene> loadSceneInternal(const std::string& path, bool optimized);
+        static std::shared_ptr<Vapor::SceneBlueprint> loadSceneInternal(const std::string& path);
         static std::shared_ptr<Mesh> loadMeshInternal(const std::string& path, const std::string& mtlBasedir);
         static std::shared_ptr<std::string> loadTextInternal(const std::string& path);
 

@@ -2,6 +2,8 @@
 #include <thread>
 #include <tracy/Tracy.hpp>
 
+using namespace Vapor;
+
 namespace Vapor {
 
     TaskScheduler::TaskScheduler() {

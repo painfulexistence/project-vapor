@@ -8,6 +8,11 @@
 #include <entt/entt.hpp>
 #include <glm/glm.hpp>
 #include <glm/gtc/quaternion.hpp>
+// gtx/euler_angles is an experimental GLM extension; without this define its
+// include is a hard #error (bites any TU that includes this header first).
+#ifndef GLM_ENABLE_EXPERIMENTAL
+#define GLM_ENABLE_EXPERIMENTAL
+#endif
 #include <glm/gtx/euler_angles.hpp>
 #include <string>
 #include <string_view>

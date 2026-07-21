@@ -1,6 +1,7 @@
 #pragma once
 #include "graphics.hpp"
-#include "scene.hpp"
+#include "render_scene.hpp"
+#include "scene_blueprint.hpp"
 #include <cereal/archives/binary.hpp>
 #include <cereal/archives/json.hpp>
 #include <cereal/cereal.hpp>
@@ -51,14 +52,33 @@ namespace cereal {
     }
 }// namespace cereal
 
+namespace Vapor {
+
 class AssetSerializer {
 public:
-    // v3: added baked meshlet + cluster-LOD data (Mesh::meshletData). Bumping the
-    // version invalidates older caches, which are re-baked from the source glTF.
-    static constexpr uint32_t SCENE_FORMAT_VERSION = 3;
+    // v4: merges two independent v3 bumps whose on-disk layouts differed —
+    // material-name serialization (main: the inspector's Scene Materials editor
+    // and the blueprint cook want identity, not just factors) AND baked meshlet +
+    // cluster-LOD data (mesh-shader branch: Mesh::meshletData). Because both
+    // shipped as "v3" with different layouts, bump to 4 so any old v3 cache from
+    // either lineage is invalidated and re-imported/re-baked from source.
+    static constexpr uint32_t SCENE_FORMAT_VERSION = 4;
 
-    static void serializeScene(const std::shared_ptr<Scene>& scene, const std::string& path);
-    static std::shared_ptr<Scene> deserializeScene(const std::string& path);
+    // Cache round-trip is best-effort: a write failure returns false and a
+    // read failure (missing, corrupt, or version-mismatched cache) returns
+    // nullptr — callers fall back to re-importing from source.
+    static bool serializeScene(const std::shared_ptr<RenderScene>& scene, const std::string& path);
+    static std::shared_ptr<RenderScene> deserializeScene(const std::string& path);
+
+    // SceneBlueprint payload serialization (entities + meshes/materials/images/
+    // lights + sources). Used by the scene cook (.vscene): the cook header
+    // (magic/version/source-hash) is owned by scene_blueprint.cpp; these
+    // (de)serialize just the blueprint body on an open archive.
+    // v2: EntityBlueprint carries a per-entity "components" JSON blob.
+    static constexpr uint32_t BLUEPRINT_FORMAT_VERSION = 3; // v3: EntityBlueprint::primitive
+    static void serializeBlueprint(cereal::BinaryOutputArchive& archive, const Vapor::SceneBlueprint& blueprint);
+    // Returns ok == false on a version mismatch.
+    static Vapor::SceneBlueprint deserializeBlueprint(cereal::BinaryInputArchive& archive);
 
 private:
     static void serializeMaterial(
@@ -88,3 +108,10 @@ private:
     static void serializePointLight(cereal::BinaryOutputArchive& archive, const Vapor::PointLight& light);
     static Vapor::PointLight deserializePointLight(cereal::BinaryInputArchive& archive);
 };
+
+} // namespace Vapor
+
+// Transitional shim: these types lived at global scope before the namespace
+// unification; unqualified call sites keep compiling while they migrate to
+// Vapor:: qualification. Remove once call sites are migrated.
+using namespace Vapor;

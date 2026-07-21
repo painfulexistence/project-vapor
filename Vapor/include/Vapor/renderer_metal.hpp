@@ -19,7 +19,7 @@
 
 #include "debug_draw.hpp"
 #include "graphics.hpp"
-#include "graphics_gpu_structs.hpp"  // global GPU-layout structs (InstanceData, …) matching the .metal shaders
+#include "graphics_gpu_structs.hpp"  // GPU upload structs (InstanceData, …) matching the .metal shaders
 #include "graphics_batch2d.hpp"  // Batch2DStats, Batch2DVertex, Batch2DBlendMode
 #include "graphics_effects.hpp"  // WaterData, VolumetricFogData, VolumetricCloudData, LightScatteringData, SunFlareData, Particle
 #include "graphics_gibs.hpp"     // GIBSQuality, GIBSData, Surfel
@@ -28,6 +28,8 @@
 namespace Rml {
     class Context;
 }
+
+namespace Vapor {
 
 class Renderer_Metal;
 class PrePass;
@@ -72,7 +74,8 @@ class StochasticPointShadowPass;
 class PointShadowTemporalPass;
 
 // GIBS forward declarations
-namespace Vapor { class GIBSManager; }
+class GIBSManager;
+class RmlRendererMetal;
 class SurfelGenerationPass;
 class SurfelHashBuildPass;
 class SurfelRaytracingPass;
@@ -354,7 +357,7 @@ public:
     void deinit();
     void shutdown() override { deinit(); }
 
-    virtual void stage(std::shared_ptr<Scene> scene) override;
+    virtual void stage(std::shared_ptr<RenderScene> scene) override;
 
     // Frame model matching IRenderer / the RHI renderer:
     //   beginFrame()  → acquire drawable + command buffer, backend ImGui NewFrame
@@ -367,8 +370,8 @@ public:
     void invokeImGuiCallback() override;
     void endFrame() override;
 
-    virtual void draw(std::shared_ptr<Scene> scene, Camera& camera) override;
-    virtual void draw(entt::registry& registry, std::shared_ptr<Scene> scene, Camera& camera) override;
+    virtual void draw(std::shared_ptr<RenderScene> scene, Camera& camera) override;
+    virtual void draw(entt::registry& registry, std::shared_ptr<RenderScene> scene, Camera& camera) override;
 
     virtual void readPixelsAsync(ScreenshotCallback callback) override;
     void uploadRectLightVideoTexture(const uint8_t* rgba, uint32_t width, uint32_t height) override;
@@ -376,7 +379,7 @@ public:
     // IBL source: load an equirectangular .hdr file as the environment map.
     // After calling this the sky atmosphere is no longer used for IBL.
     // Place your .hdr files under: <assets>/textures/env/
-    void loadHDRI(const std::string& path);
+    void loadHDRI(const std::string& path) override;
 
     virtual void setRenderPath(RenderPath path) override {
         currentRenderPath = path;
@@ -481,7 +484,7 @@ public:
     TextureHandle getRenderTextureAsTexture(RenderTextureHandle handle) override;
     void renderToTexture(
         RenderTextureHandle target,
-        std::shared_ptr<Scene> scene,
+        std::shared_ptr<RenderScene> scene,
         Camera& camera,
         const glm::vec4& clearColor = glm::vec4(0.0f, 0.0f, 0.0f, 1.0f)
     ) override;
@@ -501,6 +504,9 @@ public:
     void setParticleForceField(const ParticleForceField& field) override;
     void setParticleSimPaused(bool paused) override { m_particleSimPaused = paused; }
     void setParticleVisible(bool visible) override { particleVisible = visible; }
+    void setSky(const SkyRenderData& sky) override;
+    void setWind(const WindRenderData& wind) override;
+    void requestIBLUpdate() override { iblNeedsUpdate = true; }
 
     // ===== Font Rendering API =====
     FontHandle loadFont(const std::string& path, float baseSize) override;
@@ -565,7 +571,7 @@ protected:
 
     // Per-frame rendering context
     MTL::CommandBuffer* currentCommandBuffer = nullptr;
-    std::shared_ptr<Scene> currentScene;
+    std::shared_ptr<RenderScene> currentScene;
     Camera* currentCamera = nullptr;
     CA::MetalDrawable* currentDrawable = nullptr;
 
@@ -784,6 +790,11 @@ protected:
     bool m_supportsRaytracing = false;
     VolumetricCloudData volumetricCloudSettings;
 
+    // Shared wind magnitude from the ECS WindFieldComponent (via setWind).
+    // Multiplies each medium's per-medium windSpeed coefficient. Defaults to 1.0
+    // so scenes without a WindFieldComponent keep the panel-set scroll speeds.
+    float m_windStrength = 1.0f;
+
     // Sun Flare resources
     NS::SharedPtr<MTL::RenderPipelineState> sunFlarePipeline;
     NS::SharedPtr<MTL::ComputePipelineState> sunOcclusionPipeline;
@@ -806,8 +817,8 @@ protected:
     // Instance data
     // instanceBatches: material → list of (mesh, instanceArrayIndex) for rasterization draw calls
     struct MeshDraw { std::shared_ptr<Vapor::Mesh> mesh; uint32_t instanceIndex; };
-    std::vector<::InstanceData> instances;
-    std::vector<::InstanceData> pendingEcsInstances;
+    std::vector<InstanceData> instances;
+    std::vector<InstanceData> pendingEcsInstances;
     std::unordered_map<std::shared_ptr<Vapor::Material>, std::vector<MeshDraw>> pendingEcsBatches;
     std::vector<MTL::AccelerationStructureInstanceDescriptor> pendingEcsAccelInstances;
     std::vector<MTL::AccelerationStructureInstanceDescriptor> accelInstances;
@@ -989,8 +1000,9 @@ private:
 
     RenderPath currentRenderPath = RenderPath::Forward;
 
-    // UI rendering (using void* for pimpl idiom to hide implementation)
-    void* m_uiRenderer = nullptr;
+    // UI renderer (forward-declared; the complete type lives in the .cpp, which
+    // is where ~Renderer_Metal is defined so the unique_ptr can free it).
+    std::unique_ptr<Vapor::RmlRendererMetal> m_uiRenderer;
     Rml::Context* m_uiContext = nullptr;
     std::vector<ScreenshotCallback> m_pendingScreenshots;
 
@@ -1000,3 +1012,10 @@ private:
     void createResources();
     void renderUI();// Internal method called by RmlUiPass
 };
+
+} // namespace Vapor
+
+// Transitional shim: these types lived at global scope before the namespace
+// unification; unqualified call sites keep compiling while they migrate to
+// Vapor:: qualification. Remove once call sites are migrated.
+using namespace Vapor;

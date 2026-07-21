@@ -23,6 +23,15 @@ layout(std430, set = 1, binding = 0) readonly buffer FogBuf {
     float fogHeightFalloff;
     float anisotropy;
     float ambientIntensity;
+    float fogBaseHeight;
+    float fogMaxHeight;
+    float noiseScale;
+    float noiseIntensity;
+    float windSpeed;
+    float time;
+    vec2 _pad2;
+    vec3 windDirection;
+    float _pad3;
 };
 
 // Must match Vapor::PSSMRenderData (same layout RHIMain.frag reads).
@@ -92,6 +101,36 @@ float phaseHG(float cosTheta, float g) {
     return INV_4PI * (1.0 - g2) / pow(d, 1.5);
 }
 
+// Value-noise fBm — GLSL port of the Metal 3d_volumetric_common.metal helpers
+// so the RHI fog's density noise matches the native simpleFogFragment.
+float fogHash13(vec3 p3) {
+    p3 = fract(p3 * 0.1031);
+    p3 += dot(p3, p3.zyx + 31.32);
+    return fract((p3.x + p3.y) * p3.z);
+}
+float fogValueNoise3D(vec3 p) {
+    vec3 pi = floor(p);
+    vec3 pf = fract(p);
+    vec3 w = pf * pf * (3.0 - 2.0 * pf);
+    return mix(
+        mix(mix(fogHash13(pi + vec3(0,0,0)), fogHash13(pi + vec3(1,0,0)), w.x),
+            mix(fogHash13(pi + vec3(0,1,0)), fogHash13(pi + vec3(1,1,0)), w.x), w.y),
+        mix(mix(fogHash13(pi + vec3(0,0,1)), fogHash13(pi + vec3(1,0,1)), w.x),
+            mix(fogHash13(pi + vec3(0,1,1)), fogHash13(pi + vec3(1,1,1)), w.x), w.y),
+        w.z);
+}
+float fogFbm3D(vec3 p, int octaves, float lacunarity, float gain) {
+    float value = 0.0;
+    float amplitude = 0.5;
+    float frequency = 1.0;
+    for (int i = 0; i < octaves; i++) {
+        value += amplitude * fogValueNoise3D(p * frequency);
+        amplitude *= gain;
+        frequency *= lacunarity;
+    }
+    return value;
+}
+
 // One-tap PSSM visibility at an arbitrary world position (RHIMain.frag's
 // cascade conventions: uv = proj.xy*0.5+0.5, manual depth compare). Positions
 // outside every cascade count as lit.
@@ -140,7 +179,15 @@ void main() {
     for (int st = 0; st < STEPS; ++st) {
         float t = (float(st) + 0.5) * stepLen;
         vec3 p = cameraPosition + rayDir * t;
-        float dens = fogDensity * exp(-max(0.0, p.y) * max(fogHeightFalloff, 0.0001));
+        // Height falloff (base-relative) + wind-animated density noise —
+        // matches the Metal simpleFogFragment sampleFogDensity().
+        float dens = fogDensity * exp(-max(0.0, p.y - fogBaseHeight) * max(fogHeightFalloff, 0.0001));
+        if (p.y > fogMaxHeight) dens = 0.0;
+        if (noiseScale > 0.0) {
+            vec3 noisePos = p * noiseScale + windDirection * (time * windSpeed);
+            float n = fogFbm3D(noisePos, 4, 2.0, 0.5) * 0.5 + 0.5;   // [0,1]
+            dens = max(0.0, dens * (1.0 + (n - 0.5) * noiseIntensity * 2.0));
+        }
         if (dens < 1e-6) continue;
 
         vec3 L = vec3(0.0);

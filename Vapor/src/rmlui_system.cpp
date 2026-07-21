@@ -3,6 +3,8 @@
 #include <SDL3/SDL.h>
 #include <chrono>
 
+using namespace Vapor;
+
 namespace Vapor {
 
     RmlUiSystem::RmlUiSystem() {
