@@ -562,16 +562,31 @@ namespace Vapor {
                     }
                 }
 
+                // GPU mesh-shader terrain: when the renderer draws the
+                // heightfield itself, hide the CPU tile meshes and pause their
+                // streaming (they stay registered — the instant fallback when
+                // the toggle flips back). Scatter, grass and height queries
+                // continue on the CPU world either way.
+                const bool meshActive = renderer->isMeshTerrainActive();
+                if (meshActive != world.meshPathActive) {
+                    world.meshPathActive = meshActive;
+                    setTileMeshesVisible(reg, world, !meshActive);
+                }
+
                 const glm::ivec2 camTile = world.worldToTile(camPos.x, camPos.z);
                 if (camTile != world.lastCamTile) {
                     world.lastCamTile = camTile;
-                    // Demotions to the always-resident base coat are free —
-                    // apply first so freed slots can serve incoming tiles.
-                    for (int t : world.computeTargets(camTile)) demoteToBase(reg, world, t);
+                    if (!meshActive) {
+                        // Demotions to the always-resident base coat are free —
+                        // apply first so freed slots can serve incoming tiles.
+                        for (int t : world.computeTargets(camTile)) demoteToBase(reg, world, t);
+                    }
                     updateScatter(reg, world, tc, camTile);
                 }
-                enqueueBuilds(world);
-                applyResults(reg, renderer, world);
+                if (!meshActive) {
+                    enqueueBuilds(world);
+                    applyResults(reg, renderer, world);
+                }
                 updateGrass(renderer, world, tc, camPos);
                 break;  // singleton: the first terrain entity wins
             }
@@ -762,6 +777,43 @@ namespace Vapor {
             renderer->stage(scenePtr);
             scene.stagedMeshes.clear();
             scene.stagedMeshTransforms.clear();
+
+            // GPU mesh-shader terrain: hand the renderer everything the
+            // task/mesh stages need (the terrain material id exists only
+            // after stage()). On backends without mesh shaders this is a
+            // no-op and the CPU tile streaming above remains the renderer.
+            {
+                IRenderer::TerrainMeshInfo mi;
+                mi.worldSize = world->config().worldSize;
+                mi.tileSize = world->config().tileSize;
+                mi.heightScale = world->config().heightScale;
+                mi.noiseFrequency = world->config().noiseFrequency;
+                mi.noiseOctaves = world->config().noiseOctaves;
+                mi.seed = world->config().seed;
+                mi.tilesAxis = world->tilesPerAxis();
+                mi.materialId = terrainMat->rendererMaterialId;
+                mi.lod0RadiusTiles = tc.lod0RadiusTiles;
+                mi.lod1RadiusTiles = tc.lod1RadiusTiles;
+                mi.lod2RadiusTiles = tc.lod2RadiusTiles;
+                renderer->setMeshTerrain(mi);
+            }
+        }
+
+        // Show/hide every tile slot mesh, restoring each tile's own state
+        // (base coat vs live fine slot) when turning back on — the mesh-shader
+        // path transition in both directions.
+        static void setTileMeshesVisible(entt::registry& reg, TerrainWorld& world, bool visible) {
+            for (int t = 0; t < world.tileCount(); t++) {
+                TerrainWorld::Tile& tile = world.tiles[t];
+                const bool baseVis = visible && tile.currentLod == TerrainWorld::LOD_COUNT - 1;
+                if (world.baseSlots[t].entity != entt::null)
+                    reg.get<MeshRendererComponent>(world.baseSlots[t].entity).visible = baseVis;
+                if (tile.currentLod < TerrainWorld::LOD_COUNT - 1 && tile.fineSlot >= 0) {
+                    auto& slot = world.finePools[tile.currentLod][tile.fineSlot];
+                    if (slot.entity != entt::null)
+                        reg.get<MeshRendererComponent>(slot.entity).visible = visible;
+                }
+            }
         }
 
         static void demoteToBase(entt::registry& reg, TerrainWorld& world, int t) {

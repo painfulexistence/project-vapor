@@ -295,6 +295,29 @@ public:
     virtual void setTerrainDetailLayers(const std::array<std::shared_ptr<Vapor::Image>, 4>& /*albedoLayers*/,
                                         const std::array<std::shared_ptr<Vapor::Image>, 4>& /*normalLayers*/) {}
 
+    // GPU mesh-shader terrain (VK_EXT_mesh_shader): the whole heightfield is
+    // generated on the GPU each frame — the task stage frustum-culls tiles and
+    // picks their ring LOD, the mesh stage evaluates the SAME noise as
+    // TerrainWorld::heightAt and emits patches shaded by the Main-pass terrain
+    // branch. TerrainSystem pushes the parameters once (after staging, so the
+    // terrain material id is known) and, while isMeshTerrainActive(), hides
+    // the CPU tile meshes and stops streaming them. Defaults: unsupported.
+    struct TerrainMeshInfo {
+        float worldSize = 0.0f;
+        float tileSize = 512.0f;
+        float heightScale = 500.0f;
+        float noiseFrequency = 0.0007f;
+        int noiseOctaves = 9;
+        Uint32 seed = 0u;
+        int tilesAxis = 0;
+        Uint32 materialId = 0u;   // the terrain material (MaterialShader::Terrain)
+        int lod0RadiusTiles = 2;
+        int lod1RadiusTiles = 4;
+        int lod2RadiusTiles = 8;
+    };
+    virtual void setMeshTerrain(const TerrainMeshInfo& /*info*/) {}
+    virtual bool isMeshTerrainActive() const { return false; }
+
     // Streamed grass ring (TerrainSystem): a fixed instance pool of
     // cellSlots * bladesPerSlot blades; cells stream in/out by rewriting slots
     // in place (the terrain-tile pattern) and each frame draws the resident

@@ -1,0 +1,101 @@
+#version 450
+#extension GL_EXT_mesh_shader : require
+// Mesh-shader terrain, amplification stage (Vulkan; task/mesh only — the CPU
+// tile streaming is the fallback for devices without VK_EXT_mesh_shader).
+//
+// One task workgroup per terrain tile (drawMeshTasks(tilesAxis^2)). The tile
+// is frustum-culled against its AABB, its resolution picked from the SAME
+// concentric Chebyshev rings as the CPU path (64/32/16/8 quads by ring radii),
+// and (res/8)^2 mesh workgroups are emitted — each generates one 8x8-quad
+// patch. Neighbor resolutions ride the payload so the mesh stage can snap
+// shared-edge vertices onto the coarser lattice (crack-free without skirts).
+// Everything is a pure function of (tile, camera), so neighbours agree by
+// construction.
+//
+// Binding contract (set0 storage buffers; task/mesh stages are included in
+// the layout's stage flags when mesh shaders are enabled):
+//   b0  CameraData (the Main-pass camera buffer)
+//   b3  TerrainMeshParams (see Renderer::setMeshTerrain)
+
+layout(local_size_x = 1) in;
+
+struct CameraData {
+    mat4 proj;
+    mat4 view;
+    mat4 invProj;
+    mat4 invView;
+    float nearPlane;
+    float farPlane;
+    vec2 _pad;
+    vec3 position;
+    float _pad2;
+    vec4 frustumPlanes[6];
+};
+layout(std430, set = 0, binding = 0) readonly buffer CameraBuf { CameraData cam; };
+
+// Must match Vapor::TerrainMeshParamsGpu (renderer.cpp).
+layout(std430, set = 0, binding = 3) readonly buffer TerrainInfoBuf {
+    vec4 worldParams;   // x worldSize, y tileSize, z heightScale, w noiseFrequency
+    ivec4 gridParams;   // x tilesAxis, y noiseOctaves, z materialId, w seed
+    ivec4 lodParams;    // xyz lod radii (tiles), w unused
+};
+
+struct TerrainPayload {
+    uint tileX, tileZ;
+    uint res;                        // quads per edge for this tile
+    uint resN, resE, resS, resW;     // neighbor resolutions (edge snapping)
+};
+taskPayloadSharedEXT TerrainPayload payload;
+
+// Ring resolution: identical to the CPU LOD tables (kLodRes / config radii).
+uint tileRes(ivec2 tile, ivec2 camTile) {
+    int ring = max(abs(tile.x - camTile.x), abs(tile.y - camTile.y));
+    if (ring <= lodParams.x) return 64u;
+    if (ring <= lodParams.y) return 32u;
+    if (ring <= lodParams.z) return 16u;
+    return 8u;
+}
+
+void main() {
+    const uint tile = gl_WorkGroupID.x;
+    const int tilesAxis = gridParams.x;
+    const int tx = int(tile) % tilesAxis;
+    const int tz = int(tile) / tilesAxis;
+
+    const float halfW = 0.5 * worldParams.x;
+    const float ts = worldParams.y;
+    const vec3 mn = vec3(tx * ts - halfW, 0.0, tz * ts - halfW);
+    const vec3 mx = vec3(mn.x + ts, worldParams.z, mn.z + ts);
+
+    // Frustum cull: tile AABB vs the camera planes (positive half-space kept,
+    // same convention as the GPU cull pass).
+    bool visible = true;
+    for (int p = 0; p < 6 && visible; p++) {
+        const vec4 pl = cam.frustumPlanes[p];
+        const vec3 v = vec3(pl.x > 0.0 ? mx.x : mn.x,
+                            pl.y > 0.0 ? mx.y : mn.y,
+                            pl.z > 0.0 ? mx.z : mn.z);
+        if (dot(pl.xyz, v) + pl.w < 0.0) visible = false;
+    }
+    if (!visible) {
+        EmitMeshTasksEXT(0u, 0u, 0u);
+        return;
+    }
+
+    // Camera tile (clamped like the CPU worldToTile) drives the LOD rings.
+    ivec2 camTile = ivec2(floor((cam.position.xz + vec2(halfW)) / ts));
+    camTile = clamp(camTile, ivec2(0), ivec2(tilesAxis - 1));
+
+    const uint res = tileRes(ivec2(tx, tz), camTile);
+    payload.tileX = uint(tx);
+    payload.tileZ = uint(tz);
+    payload.res = res;
+    // Out-of-world neighbors report our own res (no snapping at the border).
+    payload.resN = (tz > 0)             ? tileRes(ivec2(tx, tz - 1), camTile) : res;
+    payload.resS = (tz < tilesAxis - 1) ? tileRes(ivec2(tx, tz + 1), camTile) : res;
+    payload.resW = (tx > 0)             ? tileRes(ivec2(tx - 1, tz), camTile) : res;
+    payload.resE = (tx < tilesAxis - 1) ? tileRes(ivec2(tx + 1, tz), camTile) : res;
+
+    const uint patches = res / 8u;
+    EmitMeshTasksEXT(patches, patches, 1u);
+}

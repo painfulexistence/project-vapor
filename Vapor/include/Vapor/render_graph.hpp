@@ -38,6 +38,9 @@ enum class PassFlags : Uint32 {
     // Dispatches compute work; skipped when RHICapabilities::computeShaders
     // is false.
     RequiresCompute = 1 << 1,
+    // Uses task/mesh shading (drawMeshTasks); skipped when
+    // RHICapabilities::meshShaders is false.
+    RequiresMeshShaders = 1 << 2,
 };
 
 inline PassFlags operator|(PassFlags a, PassFlags b) {
@@ -64,6 +67,7 @@ public:
     bool isSupported(const RHICapabilities& caps) const {
         if (hasFlag(m_flags, PassFlags::RequiresRaytracing) && !caps.raytracing) return false;
         if (hasFlag(m_flags, PassFlags::RequiresCompute) && !caps.computeShaders) return false;
+        if (hasFlag(m_flags, PassFlags::RequiresMeshShaders) && !caps.meshShaders) return false;
         return true;
     }
 
