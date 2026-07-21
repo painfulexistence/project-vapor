@@ -48,7 +48,13 @@ struct alignas(16) MaterialData {
     // / PrePass.frag / ShadowDepth.frag): all are stride 112. A missing field
     // here silently shifts every materials[i>0] read.
     float transmission;
+    // Surface shader model the Main pass dispatches on: 0 = Standard PBR,
+    // 1 = Terrain (splat), 2 = Grass. Occupies the alignment tail after
+    // transmission, so the std430 stride stays 112 — shader twins that don't
+    // read it are unaffected.
+    float shaderModel;
 };
+static_assert(sizeof(MaterialData) == 112, "GPU material upload layout: stride must stay 112 (shader twins assume it)");
 
 struct alignas(16) DirectionalLight {
     glm::vec3 direction;

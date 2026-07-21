@@ -108,6 +108,7 @@ struct RenderMaterial {
     float clearcoat = 0.0f;
     float clearcoatGloss = 1.0f;
     float transmission = 0.0f;  // KHR_materials_transmission (rendering only)
+    Uint32 shaderModel = 0;     // Vapor::MaterialShader: 0 Standard / 1 Terrain / 2 Grass
     bool useIBL = false;  // native Material::useIBL default (graphics.hpp)
 
     // Texture references (IDs, not handles)
@@ -613,6 +614,7 @@ struct MaterialDataInput {
     float clearcoat = 0.0f;
     float clearcoatGloss = 1.0f;
     float transmission = 0.0f;  // KHR_materials_transmission (rendering only)
+    Uint32 shaderModel = 0;     // Vapor::MaterialShader: 0 Standard / 1 Terrain / 2 Grass
 
     // Texture data (from Application's Image objects)
     std::shared_ptr<Vapor::Image> albedoMap;

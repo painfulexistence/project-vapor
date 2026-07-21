@@ -863,6 +863,7 @@ MaterialId Renderer::registerMaterial(const MaterialDataInput& materialData) {
     material.clearcoat = materialData.clearcoat;
     material.clearcoatGloss = materialData.clearcoatGloss;
     material.transmission = materialData.transmission;
+    material.shaderModel = materialData.shaderModel;
     material.alphaMode = materialData.alphaMode;
     material.alphaCutoff = materialData.alphaCutoff;
     material.doubleSided = materialData.doubleSided;
@@ -1486,6 +1487,7 @@ void Renderer::updateBuffers() {
             data.clearcoatGloss = mat.clearcoatGloss;
             data.iblEnabled = mat.useIBL ? 1.0f : 0.0f;  // panel "Use IBL"
             data.transmission = mat.transmission;
+            data.shaderModel = static_cast<float>(mat.shaderModel);
             materialDataArray.push_back(data);
         }
         rhi->updateBuffer(materialUniformBuffer, materialDataArray.data(), 0,
@@ -7115,6 +7117,7 @@ void Renderer::stage(std::shared_ptr<RenderScene> scene) {
                 matData.clearcoat = mesh->material->clearcoat;
                 matData.clearcoatGloss = mesh->material->clearcoatGloss;
                 matData.transmission = mesh->material->transmission;
+                matData.shaderModel = static_cast<Uint32>(mesh->material->materialShader);
                 matData.alphaMode = mesh->material->alphaMode;
                 matData.alphaCutoff = mesh->material->alphaCutoff;
                 matData.doubleSided = mesh->material->doubleSided;
