@@ -253,28 +253,34 @@ namespace Vapor {
     // The blendable slice of a weather state. WeatherSystem lerps between the
     // outgoing and incoming state's params over the transition, so the sky
     // thickens/clears smoothly instead of popping. Defaults = the Clear preset
-    // (a default-constructed WeatherComponent resolves to Clear).
+    // (a default-constructed WeatherComponent resolves to Clear), anchored to
+    // the hand-tuned native-Metal cloud settings: a deep 2000-12000 m layer,
+    // low coverage, near-zero ambient (high ambient milks out the whole sky).
     struct WeatherParams {
-        float cloudCoverage    = 0.35f;
-        float cloudDensity     = 0.25f;
-        float cloudType        = 0.6f;     // 0 stratus → 1 cumulus
-        float cloudLayerBottom = 1500.0f;  // storm states lower the ceiling
-        float cloudLayerTop    = 4000.0f;
-        float cloudAmbient     = 0.3f;
-        float sunDim           = 1.0f;     // multiplies sun/moon light intensity
-        float fogDensityMul    = 1.0f;     // multiplies VolumetricFogComponent density
-        float windMul          = 1.0f;     // multiplies WindFieldComponent strength
-        float iblDim           = 1.0f;     // scales the baked environment (IBL) ambience
+        float cloudCoverage    = 0.25f;
+        float cloudDensity     = 0.3f;
+        float cloudType        = 0.5f;      // 0 stratus → 1 cumulus
+        float cloudLayerBottom = 2000.0f;   // storm states lower the ceiling
+        float cloudLayerTop    = 12000.0f;
+        float cloudAmbient     = 0.001f;
+        float sunDim           = 1.0f;      // multiplies sun/moon light intensity
+        float fogDensityMul    = 1.0f;      // multiplies VolumetricFogComponent density
+        float windMul          = 1.0f;      // multiplies WindFieldComponent strength
+        float iblDim           = 1.0f;      // scales the baked environment (IBL) ambience
     };
 
     inline WeatherParams weatherParamsFor(WeatherState s) {
         switch (s) {
-            //                     coverage density type  bottom  top    ambient sunDim fogMul windMul iblDim
-            case WeatherState::Cloudy:       return { 0.60f, 0.35f, 0.45f,  1200.0f, 3600.0f, 0.28f, 0.80f, 1.2f, 1.3f, 0.85f };
-            case WeatherState::Overcast:     return { 0.90f, 0.55f, 0.20f,   800.0f, 2600.0f, 0.22f, 0.40f, 1.6f, 1.6f, 0.50f };
-            case WeatherState::Rain:         return { 0.95f, 0.70f, 0.15f,   600.0f, 2200.0f, 0.16f, 0.25f, 2.2f, 2.0f, 0.40f };
-            case WeatherState::Thunderstorm: return { 1.00f, 0.90f, 0.10f,   500.0f, 2000.0f, 0.10f, 0.12f, 2.5f, 3.0f, 0.25f };
-            case WeatherState::Snow:         return { 0.85f, 0.45f, 0.30f,   900.0f, 2400.0f, 0.35f, 0.45f, 1.8f, 1.2f, 0.60f };
+            // Anchored to the tuned Clear base (0.25/0.3/0.5, 2000-12000 m,
+            // ambient 0.001); storms raise coverage/density, drop the ceiling
+            // and flatten toward stratus. Ambient stays in the tuned ~0.001-0.01
+            // range — it is a full-sky glow, not a per-cloud fill.
+            //                     coverage density type   bottom   top      ambient sunDim fogMul windMul iblDim
+            case WeatherState::Cloudy:       return { 0.45f, 0.35f, 0.40f, 1600.0f, 10000.0f, 0.002f, 0.80f, 1.2f, 1.3f, 0.85f };
+            case WeatherState::Overcast:     return { 0.75f, 0.50f, 0.20f, 1000.0f,  6000.0f, 0.004f, 0.40f, 1.6f, 1.6f, 0.50f };
+            case WeatherState::Rain:         return { 0.85f, 0.65f, 0.15f,  800.0f,  5000.0f, 0.003f, 0.25f, 2.2f, 2.0f, 0.40f };
+            case WeatherState::Thunderstorm: return { 0.95f, 0.85f, 0.10f,  600.0f,  4500.0f, 0.002f, 0.12f, 2.5f, 3.0f, 0.25f };
+            case WeatherState::Snow:         return { 0.70f, 0.45f, 0.30f, 1100.0f,  6000.0f, 0.006f, 0.45f, 1.8f, 1.2f, 0.60f };
             case WeatherState::Clear:
             default:                         return {};
         }

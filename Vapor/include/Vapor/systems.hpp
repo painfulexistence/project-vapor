@@ -584,7 +584,11 @@ namespace Vapor {
                 if (a > 0.15f) env += 0.7f * std::exp(-25.0f * (a - 0.15f));
                 if (env > 0.005f) {
                     intensity = w.lightningIntensity * env;
-                    glow = 3.0f * env;
+                    // Cloud-interior glow. The tuned ambient scale is ~0.001,
+                    // so this is a massive-but-brief relative spike (a flash
+                    // lighting the deck from inside), on par with the direct
+                    // sun scattering for a couple of frames.
+                    glow = 1.5f * env;
                 }
             } else {
                 w._flashAge = 1e9f;

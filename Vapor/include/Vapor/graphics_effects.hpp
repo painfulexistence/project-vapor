@@ -121,10 +121,12 @@ struct alignas(16) VolumetricCloudData {
     glm::vec3 sunColor;
     float _pad3;
     float sunIntensity = 22.0f;
-    float cloudLayerBottom = 1500.0f;
-    float cloudLayerTop = 4000.0f;
-    float cloudLayerThickness = 2500.0f;
-    float cloudCoverage = 0.5f;
+    // Hand-tuned base (see renderer_metal.cpp's volumetricCloudSettings): deep
+    // 2000-12000 m layer, low coverage, near-zero ambient/silver-lining.
+    float cloudLayerBottom = 2000.0f;
+    float cloudLayerTop = 12000.0f;
+    float cloudLayerThickness = 10000.0f;
+    float cloudCoverage = 0.25f;
     float cloudDensity = 0.3f;
     float cloudType = 0.5f;
     float erosionStrength = 0.3f;
@@ -132,8 +134,8 @@ struct alignas(16) VolumetricCloudData {
     float detailNoiseScale = 5.0f;
     float curlNoiseScale = 1.0f;
     float curlNoiseStrength = 0.1f;
-    float ambientIntensity = 0.3f;
-    float silverLiningIntensity = 0.5f;
+    float ambientIntensity = 0.001f;
+    float silverLiningIntensity = 0.001f;
     float silverLiningSpread = 2.0f;
     float phaseG1 = 0.8f;
     float phaseG2 = -0.3f;
