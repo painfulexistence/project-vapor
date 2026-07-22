@@ -39,7 +39,7 @@ layout(std430, set = 1, binding = 0) readonly buffer CloudBuf {
     float phaseG2;
     float phaseBlend;
     float powderStrength;
-    float _p4;
+    float sunLightScale;  // unread here; layout twin of CloudRaymarch.frag
     vec3 windDirection;   float _p5;
     vec3 windOffset;      float _p6;
     float windSpeed;

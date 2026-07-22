@@ -50,7 +50,7 @@ struct VolumetricCloudData {
     float phaseG2;                  // Back scatter g
     float phaseBlend;               // Blend between phases
     float powderStrength;           // Beer-powder effect strength
-    float _pad1;
+    float sunLightScale;            // cloud-specific scale on sunIntensity (< 1: clouds occlude)
 
     // Animation
     float3 windDirection;           // Wind direction
@@ -240,7 +240,10 @@ float3 multiScatterApprox(float density, float lightTransmittance, float cosThet
                           constant VolumetricCloudData& data) {
     // Direct light with phase function
     float phase = phaseDualLobe(cosTheta, data.phaseG1, data.phaseG2, data.phaseBlend);
-    float3 directLight = data.sunColor * data.sunIntensity * phase * lightTransmittance;
+    // sunLightScale < 1: clouds absorb/self-shadow, so their lit surface sits
+    // BELOW the clear-sky brightness instead of blooming over it.
+    float sunPower = data.sunIntensity * data.sunLightScale;
+    float3 directLight = data.sunColor * sunPower * phase * lightTransmittance;
 
     // Multi-scatter approximation (octaves of scattering)
     // Each bounce: dimmer, more isotropic, less shadowed
@@ -270,7 +273,7 @@ float3 multiScatterApprox(float density, float lightTransmittance, float cosThet
     // Ambient sky light
     float3 ambient = float3(0.5, 0.6, 0.9) * data.ambientIntensity;
 
-    return directLight + multiScatter * data.sunIntensity + ambient;
+    return directLight + multiScatter * sunPower + ambient;
 }
 
 // ============================================================================

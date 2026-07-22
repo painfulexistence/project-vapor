@@ -141,7 +141,8 @@ struct alignas(16) VolumetricCloudData {
     float phaseG2 = -0.3f;
     float phaseBlend = 0.3f;
     float powderStrength = 0.5f;
-    float _pad4;
+    // Cloud-specific scale on sunIntensity (see VolumetricCloudRenderData).
+    float sunLightScale = 0.3f;
     glm::vec3 windDirection = glm::vec3(1.0f, 0.0f, 0.0f);
     float _pad5;
     glm::vec3 windOffset;

@@ -37,7 +37,7 @@ layout(std430, set = 1, binding = 0) readonly buffer CloudBuf {
     float phaseG2;
     float phaseBlend;
     float powderStrength;
-    float _p4;
+    float sunLightScale;  // cloud-specific scale on sunIntensity (< 1: clouds occlude)
     vec3 windDirection;   float _p5;
     vec3 windOffset;      float _p6;
     float windSpeed;
@@ -238,7 +238,10 @@ float lightMarch(vec3 worldPos) {
 
 vec3 multiScatterApprox(float lightTransmittance, float cosTheta) {
     float phase = phaseDualLobe(cosTheta, phaseG1, phaseG2, phaseBlend);
-    vec3 directLight = sunColor * sunIntensity * phase * lightTransmittance;
+    // sunLightScale < 1: clouds absorb/self-shadow, so their lit surface sits
+    // BELOW the clear-sky brightness instead of blooming over it.
+    float sunPower = sunIntensity * sunLightScale;
+    vec3 directLight = sunColor * sunPower * phase * lightTransmittance;
 
     vec3 multiScatter = vec3(0.0);
     float attenuation = 0.3;
@@ -258,7 +261,7 @@ vec3 multiScatterApprox(float lightTransmittance, float cosTheta) {
     multiScatter += sunColor * silverLiningIntensity * silverLining;
 
     vec3 ambient = vec3(0.5, 0.6, 0.9) * ambientIntensity;
-    return directLight + multiScatter * sunIntensity + ambient;
+    return directLight + multiScatter * sunPower + ambient;
 }
 
 // ── Raymarch ───────────────────────────────────────────────────────────────
