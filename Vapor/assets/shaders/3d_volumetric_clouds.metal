@@ -62,12 +62,20 @@ struct VolumetricCloudData {
     uint primarySteps;              // Primary ray march steps
     uint lightSteps;                // Light ray march steps
     float2 screenSize;              // Screen dimensions
-    float _pad2;
+    // MUST be float2 (twin of the C++ vec2 _pad7): as a lone float it shifted
+    // everything after by 4 bytes — frameIndex read the padding (stuck at 0,
+    // static blue noise) and temporalBlend read frameIndex's bit pattern
+    // (≈ denormal 0, temporal resolve effectively frozen onto its clamp).
+    float2 _pad2;
 
     // Temporal
     uint frameIndex;                // Frame counter
     float temporalBlend;            // TAA blend factor
     float2 _pad3;
+
+    // Cloud ambient (sky-fill) tint, scaled by ambientIntensity. Weather
+    // drives it: blue for clear, neutral gray overcast, storm green.
+    float3 ambientColor;            // appended — offsets above unchanged
 };
 
 // ============================================================================
@@ -271,7 +279,7 @@ float3 multiScatterApprox(float density, float lightTransmittance, float cosThet
     multiScatter += data.sunColor * data.silverLiningIntensity * silverLining;
 
     // Ambient sky light
-    float3 ambient = float3(0.5, 0.6, 0.9) * data.ambientIntensity;
+    float3 ambient = data.ambientColor * data.ambientIntensity;
 
     return directLight + multiScatter * sunPower + ambient;
 }

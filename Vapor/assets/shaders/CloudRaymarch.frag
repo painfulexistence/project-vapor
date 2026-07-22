@@ -49,6 +49,8 @@ layout(std430, set = 1, binding = 0) readonly buffer CloudBuf {
     uint frameIndex;
     float temporalBlend;
     vec2 _p8;
+    vec3 ambientColor;  // cloud ambient tint (weather-driven), scaled by ambientIntensity
+    float _p9;
 };
 
 // Must match Vapor::CameraRenderData.
@@ -260,7 +262,7 @@ vec3 multiScatterApprox(float lightTransmittance, float cosTheta) {
     silverLining *= saturate(-cosTheta * 0.5 + 0.5);
     multiScatter += sunColor * silverLiningIntensity * silverLining;
 
-    vec3 ambient = vec3(0.5, 0.6, 0.9) * ambientIntensity;
+    vec3 ambient = ambientColor * ambientIntensity;
     return directLight + multiScatter * sunPower + ambient;
 }
 

@@ -407,6 +407,8 @@ struct CloudsRenderData {
     // Multiplies the renderer's panel-tuned sunLightScale (never replaces it):
     // weather darkens the deck beyond what self-shadowing provides.
     float sunScale = 1.0f;
+    // Cloud ambient (sky-fill) tint, scaled by ambientIntensity.
+    glm::vec3 ambientColor = glm::vec3(0.5f, 0.6f, 0.9f);
 };
 
 // Volumetric clouds. Field-for-field mirror of the Metal backend's
@@ -461,6 +463,10 @@ struct alignas(16) VolumetricCloudRenderData {
     Uint32 frameIndex = 0;
     float temporalBlend = 0.05f;
     glm::vec2 _pad8 = glm::vec2(0.0f);
+    // Cloud ambient (sky-fill) tint, scaled by ambientIntensity. Weather
+    // drives it (blue clear sky / gray overcast / storm green).
+    glm::vec3 ambientColor = glm::vec3(0.5f, 0.6f, 0.9f);
+    float _pad9 = 0.0f;
 };
 
 // IBL capture parameters (mirror of the Metal IBLCaptureData).

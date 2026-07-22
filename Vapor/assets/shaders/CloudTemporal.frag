@@ -51,6 +51,8 @@ layout(std430, set = 1, binding = 0) readonly buffer CloudBuf {
     uint frameIndex;
     float temporalBlend;
     vec2 _p8;
+    vec3 ambientColor;  // unread here; layout twin of CloudRaymarch.frag
+    float _p9;
 };
 
 void main() {

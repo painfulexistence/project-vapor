@@ -156,6 +156,9 @@ struct alignas(16) VolumetricCloudData {
     Uint32 frameIndex = 0;
     float temporalBlend = 0.05f;
     glm::vec2 _pad8;
+    // Cloud ambient (sky-fill) tint, scaled by ambientIntensity.
+    glm::vec3 ambientColor = glm::vec3(0.5f, 0.6f, 0.9f);
+    float _pad9 = 0.0f;
 };
 
 // ── Light Scattering (God Rays) ───────────────────────────────────────────

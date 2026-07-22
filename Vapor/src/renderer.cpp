@@ -4598,6 +4598,7 @@ void Renderer::setClouds(const CloudsRenderData& clouds) {
     cloudSettings.cloudLayerThickness =
         std::max(1.0f, clouds.layerTop - clouds.layerBottom);
     cloudSettings.ambientIntensity   = clouds.ambientIntensity;
+    cloudSettings.ambientColor       = clouds.ambientColor;
     m_cloudSunMul                    = clouds.sunScale;
 }
 
@@ -7373,6 +7374,7 @@ void Renderer::drawGraphicsImGui() {
         ImGui::DragFloat("Density", &cloudSettings.cloudDensity, 0.01f, 0.0f, 1.0f);
         ImGui::DragFloat("Type (Stratus-Cumulus)", &cloudSettings.cloudType, 0.01f, 0.0f, 1.0f);
         ImGui::DragFloat("Ambient", &cloudSettings.ambientIntensity, 0.01f, 0.0f, 1.0f);
+        ImGui::ColorEdit3("Ambient Color", &cloudSettings.ambientColor.x);
         // Cloud-specific sun scale (< 1: clouds occlude — darker than the sky).
         ImGui::DragFloat("Sun Light Scale", &cloudSettings.sunLightScale, 0.01f, 0.0f, 2.0f);
         ImGui::DragFloat("Silver Lining", &cloudSettings.silverLiningIntensity, 0.01f, 0.0f, 2.0f);
