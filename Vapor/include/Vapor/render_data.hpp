@@ -447,9 +447,10 @@ struct alignas(16) VolumetricCloudRenderData {
     float phaseG2 = -0.3f;
     float phaseBlend = 0.3f;
     float powderStrength = 0.5f;
-    // Cloud-specific scale on the shared sunIntensity (< 1: clouds absorb and
-    // self-shadow, so the lit deck reads darker than the clear sky).
-    float sunLightScale = 0.3f;
+    // Cloud-specific scale on the shared sunIntensity. A sunlit cloud is nearly
+    // white, so the clear-sky base is high; weather's cloudSunMul steepens it
+    // down for overcast/storm decks (which also self-shadow via density).
+    float sunLightScale = 0.85f;
     glm::vec3 windDirection = glm::vec3(1.0f, 0.0f, 0.0f);
     float _pad5 = 0.0f;
     glm::vec3 windOffset = glm::vec3(0.0f);

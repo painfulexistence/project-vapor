@@ -282,12 +282,15 @@ namespace Vapor {
             // ambient 0.001); storms raise coverage/density, drop the ceiling
             // and flatten toward stratus. Ambient stays in the tuned ~0.001-0.01
             // range — it is a full-sky glow, not a per-cloud fill.
+            // cloudSun multiplies the panel base sunLightScale (0.85): storms
+            // steepen it hard so the deck's ABSOLUTE lit brightness stays dark
+            // (0.85 x 0.12 ≈ 0.10) even though the base is bright for clear skies.
             //                     coverage density type   bottom   top      ambient sunDim fogMul windMul iblDim cloudSun ambientTint
-            case WeatherState::Cloudy:       return { 0.45f, 0.35f, 0.40f, 1600.0f, 10000.0f, 0.002f, 0.80f, 1.2f, 1.3f, 0.85f, 0.85f, {0.55f, 0.60f, 0.78f} };
-            case WeatherState::Overcast:     return { 0.75f, 0.50f, 0.20f, 1000.0f,  6000.0f, 0.004f, 0.40f, 1.6f, 1.6f, 0.50f, 0.55f, {0.55f, 0.57f, 0.62f} };
-            case WeatherState::Rain:         return { 0.85f, 0.65f, 0.15f,  800.0f,  5000.0f, 0.003f, 0.25f, 2.2f, 2.0f, 0.40f, 0.45f, {0.45f, 0.50f, 0.58f} };
-            case WeatherState::Thunderstorm: return { 0.95f, 0.85f, 0.10f,  600.0f,  4500.0f, 0.002f, 0.12f, 2.5f, 3.0f, 0.25f, 0.30f, {0.42f, 0.50f, 0.42f} };
-            case WeatherState::Snow:         return { 0.70f, 0.45f, 0.30f, 1100.0f,  6000.0f, 0.006f, 0.45f, 1.8f, 1.2f, 0.60f, 0.70f, {0.72f, 0.76f, 0.85f} };
+            case WeatherState::Cloudy:       return { 0.45f, 0.35f, 0.40f, 1600.0f, 10000.0f, 0.002f, 0.80f, 1.2f, 1.3f, 0.85f, 0.80f, {0.55f, 0.60f, 0.78f} };
+            case WeatherState::Overcast:     return { 0.75f, 0.50f, 0.20f, 1000.0f,  6000.0f, 0.004f, 0.40f, 1.6f, 1.6f, 0.50f, 0.42f, {0.55f, 0.57f, 0.62f} };
+            case WeatherState::Rain:         return { 0.85f, 0.65f, 0.15f,  800.0f,  5000.0f, 0.003f, 0.25f, 2.2f, 2.0f, 0.40f, 0.30f, {0.45f, 0.50f, 0.58f} };
+            case WeatherState::Thunderstorm: return { 0.95f, 0.85f, 0.10f,  600.0f,  4500.0f, 0.002f, 0.12f, 2.5f, 3.0f, 0.25f, 0.12f, {0.42f, 0.50f, 0.42f} };
+            case WeatherState::Snow:         return { 0.70f, 0.45f, 0.30f, 1100.0f,  6000.0f, 0.006f, 0.45f, 1.8f, 1.2f, 0.60f, 0.62f, {0.72f, 0.76f, 0.85f} };
             case WeatherState::Clear:
             default:                         return {};
         }
