@@ -405,6 +405,13 @@ fragment float4 fragmentMain(
         surf.roughness = 0.95;
         surf.metallic = 0.0;
         norm = tN;
+        // The Disney lobe fields were just read as the terrain height-field
+        // descriptor — reset them to neutral dielectric so the BRDF below does
+        // not shade with specular = heightScale / anisotropic = seed bits.
+        surf.subsurface = 0.0;
+        surf.specular = 0.5;
+        surf.specular_tint = 0.0;
+        surf.anisotropic = 0.0;
     }
 
     float3 viewDir = normalize(camera.position - in.worldPosition.xyz);

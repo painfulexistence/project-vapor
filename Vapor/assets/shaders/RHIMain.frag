@@ -761,14 +761,20 @@ void main() {
     vec3 V = normalize(cam.position - fragPos);
 
     // Full Disney material for the direct-lighting BRDF (mirrors Metal's Surface).
+    // Terrain (shaderModel == 1) overloads the Disney lobe fields to carry its
+    // height-field descriptor (see shadeTerrain), so feed the BRDF neutral
+    // dielectric values there instead of the packed data — otherwise specular
+    // would read heightScale (~500) and anisotropic a garbage seed-bit float.
+    // Terrain is meant to shade as a plain rough dielectric anyway.
+    bool isTerrain = (mat.shaderModel == 1.0);
     Surface surf;
     surf.color = albedo;
     surf.roughness = roughness;
     surf.metallic = metallic;
-    surf.subsurface = mat.subsurface;
-    surf.specular = mat.specular;
-    surf.specularTint = mat.specularTint;
-    surf.anisotropic = mat.anisotropic;
+    surf.subsurface = isTerrain ? 0.0 : mat.subsurface;
+    surf.specular = isTerrain ? 0.5 : mat.specular;
+    surf.specularTint = isTerrain ? 0.0 : mat.specularTint;
+    surf.anisotropic = isTerrain ? 0.0 : mat.anisotropic;
     surf.sheen = mat.sheen;
     surf.sheenTint = mat.sheenTint;
     surf.clearcoat = mat.clearcoat;
