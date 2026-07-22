@@ -1582,6 +1582,20 @@ void RHI_Vulkan::drawMeshTasks(Uint32 groupCountX, Uint32 groupCountY, Uint32 gr
     pfnCmdDrawMeshTasks(currentCommandBuffer, groupCountX, groupCountY, groupCountZ);
 }
 
+void RHI_Vulkan::drawMeshTasksIndirect(BufferHandle argsBuffer, size_t offset) {
+    if (currentCommandBuffer == VK_NULL_HANDLE || !pfnCmdDrawMeshTasksIndirect) {
+        return;
+    }
+    auto it = buffers.find(argsBuffer.id);
+    if (it == buffers.end()) {
+        return;
+    }
+    flushDescriptors();
+    // One VkDrawMeshTasksIndirectCommandEXT {x, y, z} read from the buffer.
+    pfnCmdDrawMeshTasksIndirect(currentCommandBuffer, it->second.buffer,
+                                static_cast<VkDeviceSize>(offset), 1, 3 * sizeof(Uint32));
+}
+
 void RHI_Vulkan::destroyPipeline(PipelineHandle handle) {
     auto it = pipelines.find(handle.id);
     if (it != pipelines.end()) {
@@ -2976,6 +2990,8 @@ void RHI_Vulkan::createLogicalDevice() {
 
     if (meshShadersEnabled) {
         pfnCmdDrawMeshTasks = (PFN_vkCmdDrawMeshTasksEXT)vkGetDeviceProcAddr(device, "vkCmdDrawMeshTasksEXT");
+        pfnCmdDrawMeshTasksIndirect =
+            (PFN_vkCmdDrawMeshTasksIndirectEXT)vkGetDeviceProcAddr(device, "vkCmdDrawMeshTasksIndirectEXT");
         capabilities.meshShaders = pfnCmdDrawMeshTasks != nullptr;
         meshShadersEnabled = capabilities.meshShaders;
     }
@@ -3486,34 +3502,22 @@ void RHI_Vulkan::setComputeSampledTexture(Uint32 binding, TextureHandle texture,
     }
     // Sampled read: SHADER_READ_ONLY layout (not GENERAL). Runs outside any
     // render pass, so the transition is legal here. The whole-mip view lets the
-    // shader textureLod() any level (Hi-Z pyramid sampling).
+    // shader textureLod() any level (Hi-Z pyramid sampling). Aspect from the
+    // format — the froxel inject samples the Depth32Float PSSM map here, and a
+    // COLOR-aspect barrier on a depth image is a validation error.
+    const bool isDepthTex = (it->second.format == VK_FORMAT_D32_SFLOAT ||
+                             it->second.format == VK_FORMAT_D24_UNORM_S8_UINT ||
+                             it->second.format == VK_FORMAT_D32_SFLOAT_S8_UINT ||
+                             it->second.format == VK_FORMAT_D16_UNORM);
     transitionImage(it->second.image, it->second.currentLayout,
-                    VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL, VK_IMAGE_ASPECT_COLOR_BIT);
+                    VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
+                    isDepthTex ? VK_IMAGE_ASPECT_DEPTH_BIT : VK_IMAGE_ASPECT_COLOR_BIT);
     it->second.currentLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
     TextureBinding& cur = boundComputeSampled[binding];
     if (cur.view != it->second.view || cur.sampler != sIt->second.sampler) {
         cur = { it->second.view, sIt->second.sampler };
         computeDescriptorsDirty = true;
     }
-}
-
-void RHI_Vulkan::prepareTextureForSampling(TextureHandle handle) {
-    auto it = textures.find(handle.id);
-    if (it == textures.end()) {
-        return;
-    }
-    // flushDescriptors writes every graphics texture descriptor with layout
-    // SHADER_READ_ONLY_OPTIMAL, but setTexture records no barrier. A texture
-    // whose last write was a compute storage image sits in GENERAL; move it to
-    // the shader-read layout here so the following graphics sample is valid.
-    // Must run outside any render pass (between passes) — the same rule as
-    // setComputeSampledTexture, which this mirrors. Idempotent.
-    if (it->second.currentLayout == VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL) {
-        return;
-    }
-    transitionImage(it->second.image, it->second.currentLayout,
-                    VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL, VK_IMAGE_ASPECT_COLOR_BIT);
-    it->second.currentLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
 }
 
 void RHI_Vulkan::flushComputeDescriptors() {
@@ -3611,6 +3615,16 @@ void RHI_Vulkan::dispatch(Uint32 groupCountX, Uint32 groupCountY, Uint32 groupCo
     }
 }
 
+void RHI_Vulkan::dispatchIndirect(BufferHandle argsBuffer, size_t offset) {
+    if (currentCommandBuffer == VK_NULL_HANDLE) return;
+    auto it = buffers.find(argsBuffer.id);
+    if (it == buffers.end()) return;
+    flushComputeDescriptors();
+    // Args buffer needs BufferUsage::Indirect (STORAGE | INDIRECT on Vulkan);
+    // computeBarrier() already covers indirect-command reads for the producer.
+    vkCmdDispatchIndirect(currentCommandBuffer, it->second.buffer, static_cast<VkDeviceSize>(offset));
+}
+
 void RHI_Vulkan::setScissor(int32_t x, int32_t y, Uint32 width, Uint32 height) {
     if (currentCommandBuffer == VK_NULL_HANDLE) return;
     // Clamp to non-negative offsets (Vulkan requires offset >= 0).
@@ -3650,6 +3664,22 @@ void RHI_Vulkan::computeBarrier() {
     dep.memoryBarrierCount = 1;
     dep.pMemoryBarriers = &b;
     pfnCmdPipelineBarrier2(currentCommandBuffer, &dep);
+}
+
+void RHI_Vulkan::prepareTextureForSampling(TextureHandle texture) {
+    auto it = textures.find(texture.id);
+    if (it == textures.end()) return;
+    // transitionImage carries a conservative ALL_COMMANDS barrier, so this both
+    // makes the prior compute write visible and moves the image to the sampled
+    // layout. A no-op when already SHADER_READ_ONLY (from==to short-circuits).
+    const bool isDepth = (it->second.format == VK_FORMAT_D32_SFLOAT ||
+                          it->second.format == VK_FORMAT_D24_UNORM_S8_UINT ||
+                          it->second.format == VK_FORMAT_D32_SFLOAT_S8_UINT ||
+                          it->second.format == VK_FORMAT_D16_UNORM);
+    const VkImageAspectFlags aspect = isDepth ? VK_IMAGE_ASPECT_DEPTH_BIT : VK_IMAGE_ASPECT_COLOR_BIT;
+    transitionImage(it->second.image, it->second.currentLayout,
+                    VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL, aspect);
+    it->second.currentLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
 }
 
 // ============================================================================

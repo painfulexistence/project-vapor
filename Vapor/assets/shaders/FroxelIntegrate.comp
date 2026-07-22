@@ -1,0 +1,69 @@
+#version 450
+// Froxel scattering integration (Vulkan RHI). GLSL twin of scatteringIntegration
+// in 3d_volumetric_fog.metal: one invocation per froxel column marches near->far
+// accumulating scattering + transmittance into the integrated volume.
+
+layout(local_size_x = 8, local_size_y = 8, local_size_z = 1) in;
+
+const uint FROXEL_SIZE_X = 160u;
+const uint FROXEL_SIZE_Y = 90u;
+const uint FROXEL_SIZE_Z = 64u;
+
+// Only nearPlane/farPlane are read; the full VolumetricFogData std430 layout is
+// declared so those offsets line up (288-byte twin).
+layout(std430, set = 0, binding = 0) readonly buffer GlobalsBuf {
+    mat4 invViewProj;
+    mat4 prevViewProj;
+    vec3 cameraPosition; float _gp1;
+    vec3 sunDirection;   float _gp2;
+    vec3 sunColor;       float _gp3;
+    float sunIntensity;
+    float fogDensity;
+    float fogHeightFalloff;
+    float fogBaseHeight;
+    float fogMaxHeight;
+    float scatteringCoeff;
+    float extinctionCoeff;
+    float anisotropy;
+    float ambientIntensity;
+    float nearPlane;
+    float farPlane;
+    uint  volumeCount;
+    vec2  screenSize;
+    vec2  _gp5;
+    uint  frameIndex;
+    float temporalBlend;
+    float noiseScale;
+    float noiseIntensity;
+    float windSpeed;
+    float gtime;
+    vec2  _gp6;
+    vec3  windDirection; float _gp7;
+};
+layout(set = 1, binding = 0, rgba16f) uniform readonly  image3D froxelGrid;
+layout(set = 1, binding = 1, rgba16f) uniform writeonly image3D integratedVolume;
+
+void main() {
+    uvec2 gid = gl_GlobalInvocationID.xy;
+    if (gid.x >= FROXEL_SIZE_X || gid.y >= FROXEL_SIZE_Y) return;
+
+    vec3 accumScatter = vec3(0.0);
+    float accumTrans = 1.0;
+    for (uint z = 0u; z < FROXEL_SIZE_Z; ++z) {
+        vec4 se = imageLoad(froxelGrid, ivec3(gid, z));
+        vec3 inScatter = se.rgb;
+        float extinction = se.a;
+
+        float sliceNear = nearPlane * pow(farPlane / nearPlane, float(z) / float(FROXEL_SIZE_Z));
+        float sliceFar  = nearPlane * pow(farPlane / nearPlane, float(z + 1u) / float(FROXEL_SIZE_Z));
+        float stepSize = sliceFar - sliceNear;
+
+        float sliceTrans = exp(-extinction * stepSize);
+        vec3 sliceScatter = inScatter * (1.0 - sliceTrans) / max(extinction, 1e-5);
+
+        accumScatter += accumTrans * sliceScatter;
+        accumTrans   *= sliceTrans;
+
+        imageStore(integratedVolume, ivec3(gid, z), vec4(accumScatter, accumTrans));
+    }
+}

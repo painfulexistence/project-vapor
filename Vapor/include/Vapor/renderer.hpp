@@ -7,6 +7,7 @@
 #include "graphics.hpp"
 #include "font_manager.hpp"
 #include "render_scene.hpp"
+#include "tessellation.hpp"
 #include <SDL3/SDL_video.h>
 #include <entt/entt.hpp>
 #include <chrono>
@@ -318,7 +319,7 @@ public:
     void setParticleVisible(bool visible) override { particleVisible = visible; }
     void setSky(const SkyRenderData& sky) override;
     void setWind(const WindRenderData& wind) override;
-    void setVolumetricFog(const VolumetricFogRenderData& fog) override;
+    void setVolumetricFogVolumes(const std::vector<VolumetricFogVolumeData>& volumes) override;
     void setClouds(const CloudsRenderData& clouds) override;
     void setIBLIntensity(float intensity) override;
     // Sun-driven auto rebake is opt-in (m_iblAutoRebake, default off) — a moving
@@ -724,13 +725,29 @@ private:
     LightScatteringRenderData lightScatteringSettings;
     PipelineHandle volumetricFogPipeline;
     TextureHandle tempColorRT;  // ping-pong target for fog (swapped with colorRT)
-    // Volumetric fog (the expensive raymarch) is now opt-in and ECS-driven:
-    // setVolumetricFog() copies a VolumetricFogComponent's tunables into
-    // fogSettings and flips m_volumetricFogActive. Off until a component pushes it.
+    // Volumetric fog (the raymarch) is opt-in and ECS-driven: setVolumetricFogVolumes()
+    // stores the scene's fog volumes and gates the pass on whether any exist.
     bool volumetricFogEnabled = false;
-    // Persistent fog tunables. volumetricFogPass() copies this and overwrites the
-    // per-frame fields (invViewProj/camera/sun).
+    // Persistent fog tunables (mirror of the first/global volume). volumetricFogPass()
+    // copies this and overwrites the per-frame fields (invViewProj/camera/sun).
     FogRenderData fogSettings;
+    // ECS-resolved fog volumes (global + bounded AABB banks), uploaded to
+    // fogVolumeBuffer each frame and blended in the froxel grid.
+    std::vector<VolumetricFogVolumeData> volumetricFogVolumes;
+    BufferHandle fogVolumeBuffer;  // GPU array of VolumetricFogVolumeGPU
+    // Froxel volumetric fog: inject -> integrate (compute) -> composite, on both
+    // backends (Metal reuses the 3d_volumetric_fog.metal kernels, Vulkan the
+    // Froxel*.comp twins). The fullscreen raymarch is the fallback.
+    bool fogUseFroxel = true;
+    BufferHandle fogFroxelGlobalsBuffer;        // VolumetricFogData layout (froxel kernels)
+    TextureHandle fogFroxelGridTexture;         // 3D: in-scatter.rgb + extinction (storage+sampled)
+    TextureHandle fogIntegratedVolumeTexture;   // 3D: accumulated scattering.rgb + transmittance
+    ComputePipelineHandle fogFroxelInjectPipeline;
+    ComputePipelineHandle fogFroxelIntegratePipeline;
+    ShaderHandle fogFroxelInjectShader;
+    ShaderHandle fogFroxelIntegrateShader;
+    PipelineHandle fogFroxelCompositePipeline;  // fullscreen, samples the integrated volume
+    ShaderHandle fogFroxelCompositeShader;      // Vulkan composite frag (Metal builds its own)
     // Cheap analytic exponential height fog (the pre-raymarch "Height Fog"):
     // a single per-pixel evaluation, no shadows/lights. On by default — it is the
     // common-case global fog; the raymarch above is the opt-in upgrade.
@@ -1340,6 +1357,58 @@ private:
     BufferHandle meshMeshletRangeBuffer; // uvec2[meshId] = {meshletOffset, meshletCount}
     bool m_meshletsDirty = false;
     void ensureMeshletBuffers();  // (re)build meshlet GPU buffers from CPU data
+
+    // ------------------------------------------------------------------------
+    // Adaptive GPU tessellation (CBT/LEB — see cbt.hpp / tessellation.hpp and
+    // assets/shaders/3d_tess_*.metal). Opt-in per mesh via
+    // createTessellatedMesh: the mesh is fan-triangulated into LEB roots and
+    // subdivided on the GPU every frame against the screen-space LoD metric.
+    // The CBT update always runs in compute (TessUpdate pass); rendering forks
+    // by capability — mesh/task shaders when supported, otherwise an instanced
+    // vertex-pull draw fed by GPU-written indirect args. Metal-first, like the
+    // meshlet path: the pipelines only exist on backends whose shaders loaded.
+    // Implementation lives in src/tessellation.cpp.
+    // ------------------------------------------------------------------------
+    Uint32 createTessellatedMesh(const Mesh& mesh, const TessellationDesc& desc = {});
+    void destroyTessellatedMesh(Uint32 id);
+    void setTessellatedMeshTransform(Uint32 id, const glm::mat4& model);
+    // Split when a leaf's hypotenuse projects larger than this many pixels
+    // (leaf grid segments are ~1/8 of it — 64 px => ~8 px triangles).
+    float tessSplitPixels = 64.0f;
+    bool tessPreferMeshShaders = true;  // use the mesh/task path when supported
+    bool tessFreeze = false;            // pause split/merge (debug)
+    void tessUpdatePass();
+    void tessRenderPass();
+
+    struct TessInstance {
+        Uint32 id = 0;
+        Uint32 maxDepth = 0;
+        Uint32 rootDepth = 0;
+        Uint32 rootCount = 0;
+        Uint32 maxLeaves = 0;
+        float displacementScale = 0.0f;
+        glm::mat4 model = glm::mat4(1.0f);
+        BufferHandle cbtBuffer;       // CBT storage (counts + bitfield), GPU-resident
+        BufferHandle rootBuffer;      // TessRootGpu[]
+        BufferHandle argsBuffer;      // TessArgs (GPU-written indirect args)
+        BufferHandle leafDataBuffer;  // TessLeafDataGpu[maxLeaves] (compute path)
+    };
+    std::vector<TessInstance> m_tessInstances;
+    Uint32 m_nextTessMeshId = 1;
+    void createTessellationPipelines();  // called from the Metal init block
+    void ensureTessGridBuffers();
+    bool tessMeshPathActive() const;
+    TessParamsGpu tessFillParams(const TessInstance& t) const;
+    ComputePipelineHandle tessClassifyPipeline, tessReduceFirstPipeline,
+        tessReduceLevelPipeline, tessArgsPipeline, tessLeafPrepPipeline;
+    ShaderHandle tessClassifyShader, tessReduceFirstShader, tessReduceLevelShader,
+        tessArgsShader, tessLeafPrepShader;
+    ShaderHandle tessVertexShader, tessFragmentShader;
+    ShaderHandle tessObjectShader, tessMeshShader, tessMeshFragShader;
+    PipelineHandle tessRenderPipeline;  // instanced compute path
+    PipelineHandle tessMeshPipeline;    // object/mesh path
+    BufferHandle tessGridVertexBuffer, tessGridIndexBuffer;
+    Uint32 tessGridIndexCount = 0;
     BufferHandle lightCullDataBuffer;
     PipelineHandle sunFlarePipeline;
     ShaderHandle sunFlareVertexShader, sunFlareFragmentShader;
