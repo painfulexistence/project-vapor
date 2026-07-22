@@ -124,6 +124,7 @@ public:
     void drawIndexedIndirect(BufferHandle argsBuffer, size_t offset, Uint32 drawCount, Uint32 stride) override;
     void drawIndirect(BufferHandle argsBuffer, size_t offset, Uint32 drawCount, Uint32 stride) override;
     void drawMeshTasks(Uint32 groupCountX, Uint32 groupCountY = 1, Uint32 groupCountZ = 1) override;
+    void drawMeshTasksIndirect(BufferHandle argsBuffer, size_t offset) override;
 
     // Bindless texture tables (Bindless MDI): descriptor-indexed set 3.
     BufferHandle createTextureArgumentTable(ShaderHandle fragmentShader, Uint32 bufferIndex,
@@ -145,6 +146,7 @@ public:
     void setComputeBytes(const void* data, size_t size, Uint32 binding) override;
     void setAccelerationStructure(Uint32 binding, AccelStructHandle accelStruct) override;
     void dispatch(Uint32 groupCountX, Uint32 groupCountY, Uint32 groupCountZ) override;
+    void dispatchIndirect(BufferHandle argsBuffer, size_t offset) override;
     void computeBarrier() override;
     void setScissor(int32_t x, int32_t y, Uint32 width, Uint32 height) override;
 
@@ -389,6 +391,7 @@ private:
     bool meshShadersEnabled = false;
     VkShaderStageFlags graphicsStageFlags = 0;
     PFN_vkCmdDrawMeshTasksEXT pfnCmdDrawMeshTasks = nullptr;
+    PFN_vkCmdDrawMeshTasksIndirectEXT pfnCmdDrawMeshTasksIndirect = nullptr;
     BufferBinding boundComputeBuffers[BINDINGS_PER_SET];
     VkImageView boundComputeImages[BINDINGS_PER_SET] = {};
     TextureBinding boundComputeSampled[BINDINGS_PER_SET] = {};
