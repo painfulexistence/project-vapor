@@ -387,6 +387,16 @@ float4 raymarchClouds(float3 rayOrigin, float3 rayDir, float maxDist,
         t += stepSize;
     }
 
+    // Aerial perspective (twin of CloudRaymarch.frag): distant decks sink into
+    // the horizon haze — scattering fades toward a sky tint and the cloud
+    // loses opacity (~40 km e-folding on the entry distance). Day-gated.
+    float apDay = smoothstep(-0.12, 0.08, data.sunDirection.y);
+    float haze = 1.0 - exp(-max(tRange.x, 0.0) * 2.5e-5);
+    float3 hazeTint = (data.sunColor * 0.25 + data.ambientColor * 0.75) *
+                      (data.sunIntensity * data.sunLightScale * 0.25) * mix(0.05, 1.0, apDay);
+    scattering = mix(scattering, hazeTint * (1.0 - transmittance), haze);
+    transmittance = mix(transmittance, 1.0, haze * 0.5);
+
     return float4(scattering, transmittance);
 }
 

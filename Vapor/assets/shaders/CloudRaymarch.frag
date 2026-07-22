@@ -334,6 +334,19 @@ vec4 raymarchClouds(vec3 rayOrigin, vec3 rayDir, float maxDist, float blueNoise)
         }
         t += stepSize;
     }
+
+    // Aerial perspective: distant decks sink into the horizon haze — the
+    // in-scattered light fades toward a sky tint and the cloud loses opacity,
+    // instead of staying crisp all the way to the horizon (~40 km e-folding
+    // on the distance to the cloud entry). Tint follows the sun by day and
+    // nearly vanishes at night.
+    float dayFactor = smoothstep(-0.12, 0.08, sunDirection.y);
+    float haze = 1.0 - exp(-max(tRange.x, 0.0) * 2.5e-5);
+    vec3 hazeTint = (sunColor * 0.25 + ambientColor * 0.75) *
+                    (sunIntensity * sunLightScale * 0.25) * mix(0.05, 1.0, dayFactor);
+    scattering = mix(scattering, hazeTint * (1.0 - transmittance), haze);
+    transmittance = mix(transmittance, 1.0, haze * 0.5);
+
     return vec4(scattering, transmittance);
 }
 
