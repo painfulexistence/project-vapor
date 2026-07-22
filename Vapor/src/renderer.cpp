@@ -1214,11 +1214,6 @@ void Renderer::setupDefaultRenderGraph() {
     renderGraph.addPass("SkyAtmosphere",
         [](Renderer& r) { r.skyAtmospherePass(); });
 
-    // GPU particles (simulate + instanced billboards) into colorRT, after sky
-    // so they composite over it and get fogged like the rest of the scene.
-    renderGraph.addPass("Particles",
-        [](Renderer& r) { r.particlePass(); });
-
     // Cheap analytic height fog before bloom (so the fogged scene feeds bloom/
     // god rays); swaps colorRT with tempColorRT internally. On by default.
     renderGraph.addPass("HeightFog",
@@ -1239,6 +1234,20 @@ void Renderer::setupDefaultRenderGraph() {
     // fog and before bloom, matching the Metal graph. Off by default.
     renderGraph.addPass("VolumetricClouds",
         [](Renderer& r) { r.volumetricCloudPass(); });
+
+    // GPU particles (simulate + instanced billboards) into colorRT — AFTER the
+    // depth-based volumetrics (fog/clouds). Particles are translucent and don't
+    // write depth (depthWrite=false), so if they drew first, the fog/cloud
+    // composite — which derives transmittance from sceneDepth — would treat
+    // every particle pixel as the far background behind it and dim the near
+    // particle by the whole cloud layer that is actually 2 km behind it. Drawn
+    // after, they composite on top of the atmospheric scene and still depth-test
+    // against opaque geometry (depthStencilRT is untouched by the volumetrics).
+    // Trade-off: near-field particles no longer receive aerial fog, which is
+    // fine for rain/snow/effects. Still before bloom/god rays, so glowing
+    // particles bloom and occlude the sun.
+    renderGraph.addPass("Particles",
+        [](Renderer& r) { r.particlePass(); });
 
     // God rays (screen-space light scattering), composited in PostProcess.
     // Runs before the canvas passes (native order) so HUD sprites never feed
@@ -1793,6 +1802,10 @@ void Renderer::mainRenderPass() {
         // and buffer(11) is dirLightCount, so 12 is the free slot). Same bits as
         // the Vulkan path: bit0 skip point-light loop, bit1 skip shadow.
         rhi->setFragmentBytes(&mainDebugFlags, sizeof(Uint32), 12);
+        // Weather-driven IBL dimming at buffer(20) (19 is materials; on Vulkan
+        // this value rides in LightCullData instead — binding 20 would alias
+        // push offset 64 and clobber screenSize).
+        rhi->setFragmentBytes(&m_iblIntensity, sizeof(float), 20);
         // Metal-via-RHI: real IBL outputs replace the neutral blacks —
         // irradiance(8), prefilter(9), brdfLUT(10).
         if (m_iblReady) {
@@ -1977,6 +1990,9 @@ void Renderer::mainRenderPass() {
                 (pssmShadowArrayTexture.isValid() && pssmDataBuffer.isValid()) ? 1u : 0u,
             };
             rhi->setFragmentBytes(&lc, sizeof(lc), 8);
+            // Weather-driven IBL dimming (buffer 12) — parity with the forward
+            // PBR fragment's buffer(20).
+            rhi->setFragmentBytes(&m_iblIntensity, sizeof(float), 12);
             // Tiled point lights: same cluster buffer + tile grid the forward pass
             // uses, so the meshlet fragment shades only the lights covering its
             // tile instead of looping all of them (the main-pass cost driver).
@@ -2633,6 +2649,7 @@ void Renderer::lightCullingPass() {
         if (!vkTileCullPipeline.isValid() || !lightCullDataBuffer.isValid()) return;
         Vapor::LightCullData lc{};
         lc.screenSize = screenSize;
+        lc.iblIntensity = m_iblIntensity;   // weather-driven env dimming (RHIMain.frag)
         lc.gridSize = gridSize;
         lc.lightCount = pointLightCount;
         lc.cullSpotCount = static_cast<Uint32>(spotLights.size());
@@ -3053,6 +3070,9 @@ void Renderer::raytraceReflectionPass() {
     rhi->dispatch((w + 7) / 8, (h + 7) / 8, 1);
     rhi->endComputePass();
     rhi->computeBarrier();  // reflection writes -> fragment reads in Main
+    // Glossy: build the mip chain so the PBR composite can sample a blurrier mip
+    // for rougher surfaces (the trace only writes mip 0).
+    rhi->generateMipmaps(reflectionRT);
 }
 
 // RT refractions: the reflection pass's structural twin with a refracted ray
@@ -4752,23 +4772,25 @@ void Renderer::particlePass() {
         const bool hasTexture = p.texture != INVALID_TEXTURE_ID &&
                                 p.texture < textures.size();
         const TextureId texId = hasTexture ? p.texture : defaultWhiteTexture;
-        // Extended push constants for depth effects (32 bytes, matches shader layout)
+        // Extended push constants for velocity stretch + depth effects (48 bytes)
         struct ParticlePushConstants {
             float particleSize;
             float useTexture;
+            float velocityStretch;
             float depthFadeEnabled;
             float depthFadeDistance;
             float groundClampEnabled;
             float groundClampOffset;
-            float _pad[2];
+            float _pad;
         } pc{
             p.size,
             hasTexture ? 1.0f : 0.0f,
+            p.velocityStretch,
             (p.depthEffects & 0x01) ? 1.0f : 0.0f,  // bit 0 = depthFade
             p.depthFadeDistance,
             (p.depthEffects & 0x02) ? 1.0f : 0.0f,  // bit 1 = groundClamp
             p.groundClampOffset,
-            {0.0f, 0.0f}
+            0.0f
         };
 
         if (metal) {
@@ -4962,6 +4984,29 @@ void Renderer::setVolumetricFog(const VolumetricFogRenderData& fog) {
     fogSettings.windSpeed      = fog.windSpeed;
 }
 
+void Renderer::setClouds(const CloudsRenderData& clouds) {
+    // WeatherSystem owns these artist tunables while a WeatherComponent drives
+    // clouds (the panel copies of these fields are overwritten every frame);
+    // shape/phase/step tunables stay panel-side, per-frame fields are filled
+    // in the pass.
+    m_cloudsWeatherDriven            = true;  // panel shows a "driven by weather" hint
+    volumetricCloudsEnabled          = clouds.enabled;
+    cloudSettings.cloudCoverage      = clouds.coverage;
+    cloudSettings.cloudDensity       = clouds.density;
+    cloudSettings.cloudType          = clouds.type;
+    cloudSettings.cloudLayerBottom   = clouds.layerBottom;
+    cloudSettings.cloudLayerTop      = clouds.layerTop;
+    cloudSettings.cloudLayerThickness =
+        std::max(1.0f, clouds.layerTop - clouds.layerBottom);
+    cloudSettings.ambientIntensity   = clouds.ambientIntensity;
+    cloudSettings.ambientColor       = clouds.ambientColor;
+    m_cloudDim                       = clouds.cloudDim;
+}
+
+void Renderer::setIBLIntensity(float intensity) {
+    m_iblIntensity = glm::clamp(intensity, 0.0f, 4.0f);
+}
+
 void Renderer::setParticleDrawList(const std::vector<ParticleDrawPacket>& draws) {
     m_particleDrawList = draws;
     if (m_particleDrawList.size() > MAX_PARTICLE_DRAWS)
@@ -4993,6 +5038,14 @@ void Renderer::volumetricCloudPass() {
     cloudSettings.cameraPosition = currentCamera.position;
     cloudSettings.sunDirection = glm::normalize(atmosphereData.sunDirection);
     cloudSettings.sunColor = atmosphereData.sunColor;
+    // Shared atmosphere sun intensity (the value the clouds were tuned
+    // against) — NOT the struct default, which is brighter.
+    cloudSettings.sunIntensity = atmosphereData.sunIntensity;
+    // Night key light: the shader fades the sun out below the horizon and lights
+    // the deck with the moon (moonDir = -sunDirection). Colour tracks the Sky's
+    // moon so the moonlit clouds match the visible moon; moonLightScale stays a
+    // panel tunable.
+    cloudSettings.moonColor = glm::vec3(nightSkyData.moonColor);
     // windSpeed is the cloud's per-medium scroll coefficient; the shared wind
     // strength scales it so the WindFieldComponent drives the scroll rate.
     cloudSettings.windOffset += cloudSettings.windDirection * (cloudSettings.windSpeed * m_windStrength) * 0.016f;
@@ -5001,7 +5054,11 @@ void Renderer::volumetricCloudPass() {
     cloudSettings.screenSize = glm::vec2(std::max(1u, rhi->getSwapchainWidth() / 4),
                                          std::max(1u, rhi->getSwapchainHeight() / 4));
     cloudSettings.cloudLayerThickness = cloudSettings.cloudLayerTop - cloudSettings.cloudLayerBottom;
-    rhi->updateBuffer(cloudDataBuffer, &cloudSettings, 0, sizeof(cloudSettings));
+    // Upload a copy with the weather cloud-dim folded in — the panel's
+    // sunLightScale stays authoritative in cloudSettings itself.
+    VolumetricCloudRenderData uploadSettings = cloudSettings;
+    uploadSettings.sunLightScale *= m_cloudDim;
+    rhi->updateBuffer(cloudDataBuffer, &uploadSettings, 0, sizeof(uploadSettings));
 
     // Pass 1: quarter-res raymarch -> cloudRT.
     {
@@ -5056,6 +5113,13 @@ void Renderer::volumetricCloudPass() {
         rhi->setTexture(0, 0, colorRT, clampSampler);
         rhi->setTexture(0, 1, cloudHistoryRT, clampSampler);  // resolved clouds
         rhi->setTexture(0, 2, depthStencilRT, clampSampler);
+        // Camera near/far for the depth-aware upsample (same slots as the
+        // raymarch pass: Metal buffer(1), GLSL set-relative binding 3).
+        if (backend == GraphicsBackend::Metal) {
+            rhi->setFragmentBuffer(1, cameraUniformBuffer, 0, sizeof(CameraRenderData));
+        } else {
+            rhi->setFragmentBuffer(3, cameraUniformBuffer, 0, sizeof(CameraRenderData));
+        }
         rhi->draw(3, 1, 0, 0);
         rhi->endRenderPass();
         std::swap(colorRT, tempColorRT);
@@ -5627,8 +5691,13 @@ void Renderer::createRenderTargets() {
         desc.height = halfH;
         desc.format = PixelFormat::RGBA16_FLOAT;
         desc.usage = TextureUsage::Storage | TextureUsage::Sampled;
+        // Mip chain for glossy reflections: the composite samples a blurrier mip
+        // as roughness rises (mips filled by generateMipmaps after the RT trace).
+        desc.mipLevels = static_cast<Uint32>(std::floor(std::log2(std::max(halfW, halfH))) + 1);
         reflectionRT = rhi->createTexture(desc);
-        // RT refraction twin (same half-res RGBA16F, rgb + hit mask in a).
+        // RT refraction twin (same half-res RGBA16F, rgb + hit mask in a). No mip
+        // chain for now — its composite still samples the sharp result.
+        desc.mipLevels = 1;
         refractionRT = rhi->createTexture(desc);
     }
 
@@ -7169,7 +7238,8 @@ void Renderer::collectDrawables(std::shared_ptr<RenderScene> scene) {
 
 void Renderer::collectDrawables(entt::registry& registry, std::shared_ptr<RenderScene> scene) {
     // Collect renderables from ECS
-    auto view = registry.view<Vapor::TransformComponent, Vapor::MeshRendererComponent>();
+    auto view = registry.view<Vapor::TransformComponent, Vapor::MeshRendererComponent>(
+        entt::exclude<Vapor::InactiveComponent>);
 
     for (auto entity : view) {
         auto& transform = view.get<Vapor::TransformComponent>(entity);
@@ -7931,6 +8001,9 @@ void Renderer::drawGraphicsImGui() {
     }
 
     if (ImGui::TreeNode("Volumetric Clouds")) {
+        if (m_cloudsWeatherDriven)
+            ImGui::TextDisabled("(driven by WeatherComponent — coverage/density/type/"
+                                "layer/ambient are overwritten each frame)");
         ImGui::Checkbox("Enabled", &volumetricCloudsEnabled);
         if (ImGui::DragFloat("Bottom (m)", &cloudSettings.cloudLayerBottom, 100.0f, 0.0f, 10000.0f) |
             ImGui::DragFloat("Top (m)", &cloudSettings.cloudLayerTop, 100.0f, 0.0f, 15000.0f)) {
@@ -7941,6 +8014,11 @@ void Renderer::drawGraphicsImGui() {
         ImGui::DragFloat("Density", &cloudSettings.cloudDensity, 0.01f, 0.0f, 1.0f);
         ImGui::DragFloat("Type (Stratus-Cumulus)", &cloudSettings.cloudType, 0.01f, 0.0f, 1.0f);
         ImGui::DragFloat("Ambient", &cloudSettings.ambientIntensity, 0.01f, 0.0f, 1.0f);
+        ImGui::ColorEdit3("Ambient Color", &cloudSettings.ambientColor.x);
+        // Cloud-specific sun scale (< 1: clouds occlude — darker than the sky).
+        ImGui::DragFloat("Sun Light Scale", &cloudSettings.sunLightScale, 0.01f, 0.0f, 2.0f);
+        // Moonlit-cloud brightness at night, as a fraction of the sun term.
+        ImGui::DragFloat("Moon Light Scale", &cloudSettings.moonLightScale, 0.005f, 0.0f, 1.0f);
         ImGui::DragFloat("Silver Lining", &cloudSettings.silverLiningIntensity, 0.01f, 0.0f, 2.0f);
         // RHI-only extras (kept from the original Effects panel)
         ImGui::SliderFloat("Temporal blend", &cloudSettings.temporalBlend, 0.01f, 1.0f);
@@ -8895,6 +8973,9 @@ void Renderer::renderToTexture(
             rhi->setFragmentBytes(&rttSpotRectCounts, sizeof(glm::uvec2), 1);
         } else {
             rhi->setFragmentBytes(&rttDebugFlags, sizeof(Uint32), 12);
+            // IBL dimming at buffer(20) — declared in the shared PBR fragment,
+            // so every encoder that draws with it must bind the slot.
+            rhi->setFragmentBytes(&m_iblIntensity, sizeof(float), 20);
             // Real IBL cubes: image-based ambience is view-independent.
             if (m_iblReady) {
                 if (irradianceMap.isValid()) rhi->setTexture(0, 8, irradianceMap, clampSampler);

@@ -329,3 +329,39 @@ float3 CalculateIBL(
     return (diffuseIBL + specularIBL) * surf.ao;
 }
 
+// Split IBL: returns the diffuse (irradiance) and specular (prefiltered env)
+// terms separately so the forward composite can let RT reflection REPLACE the
+// specular term instead of double-counting it against the prefilter. Same math
+// as the combined overload above.
+void CalculateIBL(
+    float3 norm,
+    float3 viewDir,
+    Surface surf,
+    texturecube<float, access::sample> irradianceMap,
+    texturecube<float, access::sample> prefilterMap,
+    texture2d<float, access::sample> brdfLUT,
+    thread float3& outDiffuse,
+    thread float3& outSpecular
+) {
+    constexpr sampler cubeSampler(filter::linear, mip_filter::linear);
+    constexpr sampler lutSampler(filter::linear, address::clamp_to_edge);
+
+    float NdotV = max(dot(norm, viewDir), 0.0);
+
+    float3 F0 = mix(float3(0.04), surf.color, surf.metallic);
+    float3 F = FresnelSchlickRoughness(NdotV, F0, surf.roughness);
+    float3 kD = (1.0 - F) * (1.0 - surf.metallic);
+
+    float3 irradiance = irradianceMap.sample(cubeSampler, norm).rgb;
+    float3 diffuseIBL = irradiance * surf.color * kD;
+
+    float3 R = reflect(-viewDir, norm);
+    const float MAX_REFLECTION_LOD = 4.0;
+    float3 prefilteredColor = prefilterMap.sample(cubeSampler, R, level(surf.roughness * MAX_REFLECTION_LOD)).rgb;
+    float2 brdf = brdfLUT.sample(lutSampler, float2(NdotV, surf.roughness)).rg;
+    float3 specularIBL = prefilteredColor * (F * brdf.x + brdf.y);
+
+    outDiffuse  = diffuseIBL  * surf.ao;
+    outSpecular = specularIBL * surf.ao;
+}
+

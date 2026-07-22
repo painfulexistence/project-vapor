@@ -49,16 +49,16 @@ layout(std430, set = 1, binding = 0) readonly buffer ParticleBuffer {
 // Scene depth texture for ground clamping (bound at set 2)
 layout(set = 2, binding = 1) uniform sampler2D sceneDepth;
 
-// Per-emitter parameters (32 bytes total for alignment)
+// Per-emitter parameters (48 bytes: velocityStretch + depth effects)
 layout(push_constant) uniform PushConstants {
     float particleSize;
     float useTexture;         // > 0.5: sample particleTexture; else procedural disc
+    float velocityStretch;    // > 0: stretch the quad along velocity (rain streaks)
     float depthFadeEnabled;   // > 0.5: apply depth fade in fragment
     float depthFadeDistance;
     float groundClampEnabled; // > 0.5: clamp to depth surface
     float groundClampOffset;  // height above surface
-    float _pad0;
-    float _pad1;
+    float _pad;
 } pushConstants;
 
 layout(location = 0) out vec2 fragUV;
@@ -114,9 +114,25 @@ void main() {
     // Calculate billboard vertex position
     vec2 quadPos = quadVertices[vertexIndex];
     float size = pushConstants.particleSize;
-    vec3 billboardPos = worldPos
-                      + cameraRight * quadPos.x * size
-                      + cameraUp * quadPos.y * size;
+    vec3 billboardPos;
+
+    if (pushConstants.velocityStretch > 0.0 && dot(p.velocity, p.velocity) > 1e-6) {
+        // Velocity-aligned billboard (rain streaks): quad Y runs along the
+        // motion, X across it, turned toward the camera. Falls back to the
+        // camera-right axis when the velocity points straight at the viewer.
+        vec3 along = normalize(p.velocity);
+        vec3 across = cross(along, cameraPosition - worldPos);
+        float len2 = dot(across, across);
+        across = len2 > 1e-8 ? across * inversesqrt(len2) : cameraRight;
+        float halfLen = size * (1.0 + pushConstants.velocityStretch * length(p.velocity));
+        billboardPos = worldPos
+                     + across * quadPos.x * size
+                     + along * quadPos.y * halfLen;
+    } else {
+        billboardPos = worldPos
+                     + cameraRight * quadPos.x * size
+                     + cameraUp * quadPos.y * size;
+    }
 
     vec4 viewPos = view * vec4(billboardPos, 1.0);
     gl_Position = proj * viewPos;

@@ -14,12 +14,16 @@ layout(set = 2, binding = 0) uniform sampler2D particleTexture;
 // Scene depth texture for depth fade effect
 layout(set = 2, binding = 1) uniform sampler2D sceneDepth;
 
-// Same 16-byte block the vertex stage reads (offset 0 of the push range).
+// Push constants shared with vertex stage (48 bytes)
 layout(push_constant) uniform PushConstants {
     float particleSize;
-    float useTexture;       // > 0.5: sample particleTexture; else procedural disc
-    float depthFadeEnabled; // > 0.5: apply depth fade
+    float useTexture;         // > 0.5: sample particleTexture; else procedural disc
+    float velocityStretch;    // (vertex only)
+    float depthFadeEnabled;   // > 0.5: apply depth fade
     float depthFadeDistance;
+    float groundClampEnabled; // (vertex only)
+    float groundClampOffset;  // (vertex only)
+    float _pad;
 } pc;
 
 // Camera near/far for depth linearization (from set 0)
