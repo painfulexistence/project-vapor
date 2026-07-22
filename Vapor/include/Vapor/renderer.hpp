@@ -398,7 +398,7 @@ private:
     void prePass();
     void normalResolvePass();
     void clusterBuildPass();
-    void tileCullingPass();
+    void lightCullingPass();
     void gpuCullPass();  // GPU-driven frustum (+ Hi-Z) cull -> gpuCullArgsBuffer
     void prePassCullPass();  // frustum-only cull before the pre-pass -> prepassCullArgsBuffer
     // Shared cull dispatch: writes one DrawCommand per instance into argsBuffer,
@@ -539,6 +539,8 @@ private:
     // by a throttled cluster-buffer readback while that panel is open.
     bool lightCullDebugOpen = false;
     Uint32 cullAvgLights = 0, cullMinLights = 0, cullMaxLights = 0, cullNonEmptyTiles = 0;
+    // Clustered spot/rect loop lengths (avg/max per cluster), same readback.
+    Uint32 cullAvgSpots = 0, cullMaxSpots = 0, cullAvgRects = 0, cullMaxRects = 0;
     // Reads back the culled cluster buffer into (mn/avg/mx/nonEmpty) over the 2D
     // tile grid. Does a waitIdle, so callers must throttle. Shared by the panel
     // and the StatsLog "CULL" source. Returns false if unavailable.
@@ -856,9 +858,7 @@ private:
     static constexpr Uint32 SHADOW_MAP_SIZE = Vapor::kDirectionalShadowMapSize;  // shared (irenderer.hpp)
 
     // Compute pipelines
-    ComputePipelineHandle buildClustersPipeline;
-    ComputePipelineHandle cullLightsPipeline;
-    ComputePipelineHandle tileCullingPipeline;
+    ComputePipelineHandle lightCullingPipeline;
     ComputePipelineHandle normalResolvePipeline;
     ComputePipelineHandle raytraceShadowPipeline;
     ComputePipelineHandle raytraceAOPipeline;
@@ -1019,9 +1019,9 @@ private:
     Uint32 mainDebugFlags = 0;
 
     // Sun/lens flare (Metal MSL for now; GLSL twin lands with the IBL round).
-    // (tileCullingPipeline is declared with the other compute pipelines above.)
-    ShaderHandle tileCullingShader;
-    // Vulkan tile culling twin (TileLightCull.comp) + its params buffer.
+    // (lightCullingPipeline is declared with the other compute pipelines above.)
+    ShaderHandle lightCullingShader;
+    // Vulkan light culling twin (LightCull.comp) + its params buffer.
     ComputePipelineHandle vkTileCullPipeline;
     ShaderHandle vkTileCullShader;
 

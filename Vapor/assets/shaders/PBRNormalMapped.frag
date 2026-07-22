@@ -8,11 +8,17 @@ layout(location = 0) out vec4 Color;
 
 const uint MAX_LIGHTS_PER_TILE = 256; // Must match the definition in graphics.hpp
 
+const uint MAX_SPOTS_PER_CLUSTER = 64u;  // must match graphics.hpp Cluster
+const uint MAX_RECTS_PER_CLUSTER = 32u;
 struct Cluster {
     vec4 min;
     vec4 max;
     uint lightCount;
     uint lightIndices[MAX_LIGHTS_PER_TILE];
+    uint spotCount;
+    uint spotIndices[MAX_SPOTS_PER_CLUSTER];
+    uint rectCount;
+    uint rectIndices[MAX_RECTS_PER_CLUSTER];
 };
 
 struct DirLight {
