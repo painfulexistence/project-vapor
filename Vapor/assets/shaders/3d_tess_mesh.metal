@@ -90,8 +90,10 @@ struct TessMeshPrimOut {
     float3 primColor [[flat]];
 };
 
-using TessMeshT = metal::mesh<TessMeshVertexOut, TessMeshPrimOut, TESS_GRID_VERTS,
-                              TESS_GRID_TRIS, metal::topology::triangle>;
+// Literal limits (= TESS_GRID_VERTS / TESS_GRID_TRIS), matching the meshlet
+// pipeline's proven literal-template-arg pattern.
+using TessMeshT = metal::mesh<TessMeshVertexOut, TessMeshPrimOut, 45, 64,
+                              metal::topology::triangle>;
 
 [[mesh]] void tessMeshMain(
     TessMeshT output,
