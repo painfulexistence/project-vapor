@@ -1247,6 +1247,10 @@ void Renderer::setupDefaultRenderGraph() {
         [](Renderer& r) { r.sscsPass(); });
 
     // exists, directly to the swapchain otherwise (decided inside the pass).
+    // Top-down cloud shadow map — before Main, whose sun term samples it.
+    renderGraph.addPass("CloudShadow",
+        [](Renderer& r) { r.cloudShadowPass(); });
+
     renderGraph.addPass("Main",
         [](Renderer& r) { r.mainRenderPass(); });
 
@@ -1823,6 +1827,8 @@ void Renderer::mainRenderPass() {
         if (irradianceMap.isValid()) rhi->setTexture(0, 10, irradianceMap, clampSampler);
         if (prefilterMap.isValid()) rhi->setTexture(0, 11, prefilterMap, clampSampler);
         if (brdfLUTTex.isValid())    rhi->setTexture(0, 12, brdfLUTTex, clampSampler);
+        // Cloud shadow map at set2 b13 (white = unshadowed when off).
+        rhi->setTexture(0, 13, cloudShadowRT.isValid() ? cloudShadowRT : whiteTex, clampSampler);
         // Perf-isolation debug flags -> RHIMain.frag push offset 96 (binding 2).
         // Vulkan-only: on Metal, fragment buffer(2) is the CLUSTER buffer, so
         // pushing here would corrupt it (the old billions-of-iterations hang).
@@ -1843,10 +1849,15 @@ void Renderer::mainRenderPass() {
         // and buffer(11) is dirLightCount, so 12 is the free slot). Same bits as
         // the Vulkan path: bit0 skip point-light loop, bit1 skip shadow.
         rhi->setFragmentBytes(&mainDebugFlags, sizeof(Uint32), 12);
-        // Weather-driven IBL dimming at buffer(20) (19 is materials; on Vulkan
-        // this value rides in LightCullData instead — binding 20 would alias
-        // push offset 64 and clobber screenSize).
-        rhi->setFragmentBytes(&m_iblIntensity, sizeof(float), 20);
+        // envParams at buffer(20): x = weather IBL dimming, y = cloud-shadow
+        // strength (on Vulkan both ride in LightCullData instead — binding 20
+        // would alias push offset 64 and clobber screenSize).
+        {
+            glm::vec2 envParams(m_iblIntensity, cloudShadowStrengthEffective());
+            rhi->setFragmentBytes(&envParams, sizeof(envParams), 20);
+        }
+        // Cloud shadow map at texture(18); white = unshadowed when off.
+        rhi->setTexture(0, 18, cloudShadowRT.isValid() ? cloudShadowRT : whiteTex, clampSampler);
         // Metal-via-RHI: real IBL outputs replace the neutral blacks —
         // irradiance(8), prefilter(9), brdfLUT(10).
         if (m_iblReady) {
@@ -2031,9 +2042,12 @@ void Renderer::mainRenderPass() {
                 (pssmShadowArrayTexture.isValid() && pssmDataBuffer.isValid()) ? 1u : 0u,
             };
             rhi->setFragmentBytes(&lc, sizeof(lc), 8);
-            // Weather-driven IBL dimming (buffer 12) — parity with the forward
-            // PBR fragment's buffer(20).
-            rhi->setFragmentBytes(&m_iblIntensity, sizeof(float), 12);
+            // envParams (buffer 12): x = weather IBL dimming, y = cloud-shadow
+            // strength — parity with the forward fragment's buffer(20).
+            {
+                glm::vec2 envParams(m_iblIntensity, cloudShadowStrengthEffective());
+                rhi->setFragmentBytes(&envParams, sizeof(envParams), 12);
+            }
             // Tiled point lights: same cluster buffer + tile grid the forward pass
             // uses, so the meshlet fragment shades only the lights covering its
             // tile instead of looping all of them (the main-pass cost driver).
@@ -2075,6 +2089,8 @@ void Renderer::mainRenderPass() {
             // RT hard-shadow near region (white when RT off -> near branch is a
             // no-op since cascadeSplits.x/rtEnd is also 0, matching the forward pass).
             rhi->setTexture(0, 11, (capabilities.raytracing && shadowRT.isValid()) ? shadowRT : whiteTex, clampSampler);
+            // Cloud shadow map at texture(12); white = unshadowed when off.
+            rhi->setTexture(0, 12, cloudShadowRT.isValid() ? cloudShadowRT : whiteTex, clampSampler);
             struct MeshletShadeFlags { Uint32 shadowRGB, gibsOn; float reflOn, reflIntensity, refrOn, refrIntensity; };
             MeshletShadeFlags sf{
                 (capabilities.raytracing && stochasticShadowsEnabled) ? 1u : 0u,
@@ -2691,6 +2707,7 @@ void Renderer::lightCullingPass() {
         Vapor::LightCullData lc{};
         lc.screenSize = screenSize;
         lc.iblIntensity = m_iblIntensity;   // weather-driven env dimming (RHIMain.frag)
+        lc.cloudShadowStrength = cloudShadowStrengthEffective();
         lc.gridSize = gridSize;
         lc.lightCount = pointLightCount;
         lc.cullSpotCount = static_cast<Uint32>(spotLights.size());
@@ -5152,6 +5169,33 @@ void Renderer::setParticleDrawList(const std::vector<ParticleDrawPacket>& draws)
 // (prevViewProj reprojection + neighborhood clamp), then upscale-composite
 // over the scene with a colorRT/tempColorRT swap. Parameters live in
 // cloudSettings (Metal-tested defaults). Off by default.
+// Top-down cloud shadow map: sun transmittance through the deck over a
+// camera-centered region (256^2 R16F), consumed by the PBR passes' sun term.
+// Reads cloudDataBuffer (uploaded by volumetricCloudPass; the frame-slotted
+// write lands before GPU execution, so both passes see this frame's data).
+void Renderer::cloudShadowPass() {
+    if (!volumetricCloudsEnabled || m_cloudShadowStrength <= 0.0f) return;
+    if (!cloudShadowPipeline.isValid() || !cloudShadowRT.isValid() ||
+        !cloudDataBuffer.isValid()) return;
+
+    RenderPassDesc rp;
+    rp.name = "CloudShadow";
+    rp.colorAttachments.push_back(cloudShadowRT);
+    rp.clearColors.push_back(glm::vec4(1.0f));
+    rp.loadColor.push_back(false);
+    rhi->beginRenderPass(rp);
+    rhi->bindPipeline(cloudShadowPipeline);
+    rhi->setFragmentBuffer(0, cloudDataBuffer, 0, sizeof(VolumetricCloudRenderData));
+    // Camera for the region center (same slots as the raymarch pass).
+    if (backend == GraphicsBackend::Metal) {
+        rhi->setFragmentBuffer(1, cameraUniformBuffer, 0, sizeof(CameraRenderData));
+    } else {
+        rhi->setFragmentBuffer(3, cameraUniformBuffer, 0, sizeof(CameraRenderData));
+    }
+    rhi->draw(3, 1, 0, 0);
+    rhi->endRenderPass();
+}
+
 void Renderer::volumetricCloudPass() {
     if (!volumetricCloudsEnabled) return;
     if (!cloudRaymarchPipeline.isValid() || !cloudTemporalPipeline.isValid() ||
@@ -5708,7 +5752,7 @@ void Renderer::destroyRenderTargets() {
     for (Uint32 i = 0; i < BLOOM_PYRAMID_LEVELS; i++) kill(bloomPyramid[i]);
     kill(lightScatteringRT);
     kill(velocityRT);
-    kill(cloudRT); kill(cloudHistoryRT); kill(cloudResolvedRT);
+    kill(cloudRT); kill(cloudHistoryRT); kill(cloudResolvedRT); kill(cloudShadowRT);
     kill(swapchainDepthBuffer);
 
     // History/reprojection state is stale at the new resolution.
@@ -5985,6 +6029,18 @@ void Renderer::createRenderTargets() {
         cloudRT = rhi->createTexture(desc);
         cloudHistoryRT = rhi->createTexture(desc);
         cloudResolvedRT = rhi->createTexture(desc);
+    }
+
+    // Cloud shadow map: fixed 256^2 R16F over a camera-centered world region
+    // (16 m texels across 4 km — soft drifting shadows, resolution-independent).
+    {
+        TextureDesc desc;
+        desc.width = 256;
+        desc.height = 256;
+        desc.format = PixelFormat::R16_FLOAT;
+        desc.usage = TextureUsage::RenderTarget | TextureUsage::Sampled;
+        desc.sampleCount = 1;
+        cloudShadowRT = rhi->createTexture(desc);
     }
 
     // Create default depth buffer for swapchain rendering (when not using render targets)
@@ -6445,6 +6501,10 @@ void Renderer::createRenderPipeline() {
                 "shaders/CloudTemporal.frag.spv", cloudTemporalShader, BlendMode::Opaque);
             cloudCompositePipeline = makeFullscreenFragPipeline(
                 "shaders/CloudComposite.frag.spv", cloudCompositeShader, BlendMode::Opaque);
+            // Top-down cloud shadow map (R16F, camera-centered region).
+            cloudShadowPipeline = makeFullscreenFragPipeline(
+                "shaders/CloudShadow.frag.spv", cloudShadowShader, BlendMode::Opaque,
+                PixelFormat::R16_FLOAT);
 
             // GPU particles: two compute stages + an instanced-billboard render.
             auto makeCompute = [&](const char* spv, ShaderHandle& sh) -> ComputePipelineHandle {
@@ -6897,6 +6957,8 @@ void Renderer::createRenderPipeline() {
                                               BlendMode::Opaque, { PixelFormat::RGBA16_FLOAT }, false, CompareOp::Less);
         cloudCompositePipeline = makeMetalPass("shaders/3d_volumetric_clouds.metal", "cloudVertex", "cloudUpscaleComposite",
                                                BlendMode::Opaque, { PixelFormat::RGBA16_FLOAT }, false, CompareOp::Less);
+        cloudShadowPipeline = makeMetalPass("shaders/3d_volumetric_clouds.metal", "cloudVertex", "cloudShadowMap",
+                                            BlendMode::Opaque, { PixelFormat::R16_FLOAT }, false, CompareOp::Less);
 
         // PSSM shadow depth (3d_pssm_shadow_depth.metal): raw-fetched vertices,
         // depth-only with front-face culling, alpha-tested via texAlbedo.
@@ -8202,6 +8264,8 @@ void Renderer::drawGraphicsImGui() {
         ImGui::DragFloat("Sun Light Scale", &cloudSettings.sunLightScale, 0.01f, 0.0f, 2.0f);
         // Moonlit-cloud brightness at night, as a fraction of the sun term.
         ImGui::DragFloat("Moon Light Scale", &cloudSettings.moonLightScale, 0.005f, 0.0f, 1.0f);
+        // Ground-shadow blend from the top-down cloud shadow map.
+        ImGui::DragFloat("Cloud Shadows", &m_cloudShadowStrength, 0.01f, 0.0f, 1.0f);
         ImGui::DragFloat("Silver Lining", &cloudSettings.silverLiningIntensity, 0.01f, 0.0f, 2.0f);
         // RHI-only extras (kept from the original Effects panel)
         ImGui::SliderFloat("Temporal blend", &cloudSettings.temporalBlend, 0.01f, 1.0f);
@@ -9145,6 +9209,9 @@ void Renderer::renderToTexture(
             if (irradianceMap.isValid()) rhi->setTexture(0, 10, irradianceMap, clampSampler);
             if (prefilterMap.isValid()) rhi->setTexture(0, 11, prefilterMap, clampSampler);
             if (brdfLUTTex.isValid())    rhi->setTexture(0, 12, brdfLUTTex, clampSampler);
+            // Cloud shadow (b13): white — the map's region tracks the MAIN
+            // camera, not this view.
+            rhi->setTexture(0, 13, whiteTex, clampSampler);
             rhi->setFragmentBytes(&rttDebugFlags, sizeof(Uint32), 2);
             // Spot/rect buffers must be bound (declared in RHIMain.frag); zero
             // counts keep both loops off — their per-frame data belongs to the
@@ -9156,9 +9223,15 @@ void Renderer::renderToTexture(
             rhi->setFragmentBytes(&rttSpotRectCounts, sizeof(glm::uvec2), 1);
         } else {
             rhi->setFragmentBytes(&rttDebugFlags, sizeof(Uint32), 12);
-            // IBL dimming at buffer(20) — declared in the shared PBR fragment,
-            // so every encoder that draws with it must bind the slot.
-            rhi->setFragmentBytes(&m_iblIntensity, sizeof(float), 20);
+            // envParams at buffer(20) — declared in the shared PBR fragment, so
+            // every encoder that draws with it must bind the slot. Cloud-shadow
+            // strength 0: the map's region tracks the MAIN camera, not this view.
+            {
+                glm::vec2 envParams(m_iblIntensity, 0.0f);
+                rhi->setFragmentBytes(&envParams, sizeof(envParams), 20);
+            }
+            // texture(18) must still be bound (declared on the bound path).
+            rhi->setTexture(0, 18, whiteTex, clampSampler);
             // Real IBL cubes: image-based ambience is view-independent.
             if (m_iblReady) {
                 if (irradianceMap.isValid()) rhi->setTexture(0, 8, irradianceMap, clampSampler);

@@ -652,7 +652,9 @@ fragment float4 fragmentMain(MeshletVertexOut in [[stage_in]],
                              constant MeshletShadeFlags& flags      [[buffer(11)]],
                              // Weather-driven IBL dimming — same value the
                              // forward PBR fragment reads at buffer(20).
-                             constant float&             iblIntensity [[buffer(12)]],
+                             // x = weather IBL dimming, y = cloud-shadow strength
+                             // (same pair the forward fragment reads at buffer 20).
+                             constant float2&            envParams  [[buffer(12)]],
                              // Shared bindless material table (buffer 13), same
                              // handle the Bindless-MDI PBR fragment consumes.
                              const device MeshletMaterialTexs* materialTexs [[buffer(13)]],
@@ -671,7 +673,9 @@ fragment float4 fragmentMain(MeshletVertexOut in [[stage_in]],
                              texture2d<float, access::sample>     gibsGI         [[texture(8)]],
                              texture2d<float, access::sample>     texReflection  [[texture(9)]],
                              texture2d<float, access::sample>     texRefraction  [[texture(10)]],
-                             texture2d<float, access::sample>     texShadow      [[texture(11)]]) {
+                             texture2d<float, access::sample>     texShadow      [[texture(11)]],
+                             // Top-down cloud transmittance (cloudShadowMap).
+                             texture2d<float, access::sample>     cloudShadowTex [[texture(12)]]) {
     // shadeMode: 1 = per-meshlet hashColor (bring-up default / probes / UI toggle),
     //            0 = lambertian fallback (no material bind — bindless caps absent),
     //            2 = full PBR from the shared material table + analytic lights + IBL.
@@ -750,6 +754,15 @@ fragment float4 fragmentMain(MeshletVertexOut in [[stage_in]],
         ? meshletDirShadow(in.worldPosition, ndlSun, viewZ, screenUV, pssmData, pssmShadowMaps, texShadow)
         : 1.0;
     shadow = min(shadow, texSSCS.sample(screenSampler, screenUV).r);
+    // Drifting cloud shadows on the sun term (twin of the forward fragment;
+    // constants must match cloudShadowMap's region).
+    if (envParams.y > 0.0) {
+        float2 csCenter = floor(camera.position.xz / 16.0) * 16.0;
+        float2 csUV = (in.worldPosition.xz - csCenter) / (2.0 * 2048.0) + 0.5;
+        float2 csEdge = abs(csUV - 0.5);
+        float csIn = 1.0 - smoothstep(0.45, 0.5, max(csEdge.x, csEdge.y));
+        shadow *= mix(1.0, cloudShadowTex.sample(screenSampler, csUV).r, envParams.y * csIn);
+    }
     result += CalculateDirectionalLight(dirLights[0], norm, T, B, viewDir, surf) * shadow;
 
     // Tiled point lights: index the cluster the fragment falls in and shade only
@@ -779,7 +792,7 @@ fragment float4 fragmentMain(MeshletVertexOut in [[stage_in]],
     if (flags.gibsOn != 0u)
         result += gibsGI.sample(screenSampler, screenUV).rgb * surf.ao * screenAO;
     else if (material.iblEnabled > 0.5)
-        result += CalculateIBL(norm, viewDir, surf, irradianceMap, prefilterMap, brdfLUT) * screenAO * iblIntensity;
+        result += CalculateIBL(norm, viewDir, surf, irradianceMap, prefilterMap, brdfLUT) * screenAO * envParams.x;
     else
         result += float3(0.03) * surf.ao * surf.color * screenAO;
 

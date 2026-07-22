@@ -136,6 +136,10 @@ fragment float4 fragmentMain(
     // system textures above. Resolved to locals at the top of the body.
     texture2d<float, access::sample> texReflectionArg [[texture(16), function_constant(kBoundMaterials)]], // RT mirror reflections
     texture2d<float, access::sample> texRefractionArg [[texture(17), function_constant(kBoundMaterials)]], // RT refractions (transmission)
+    // Top-down cloud transmittance (cloudShadowMap). Bound path only — the ICB
+    // fragment can't take direct texture args and the SystemTexs table is full,
+    // so the bindless draw mode skips cloud shadows (cloudShadow() returns 1).
+    texture2d<float, access::sample> cloudShadowTexArg [[texture(18), function_constant(kBoundMaterials)]],
     const device DirLight* directionalLights [[buffer(0)]],
     const device PointLight* pointLights [[buffer(1)]],
     const device Cluster* clusters [[buffer(2)]],
@@ -159,7 +163,8 @@ fragment float4 fragmentMain(
     // Weather-driven IBL dimming (buffer 20 — 19 is materials). On Vulkan the
     // same value rides in LightCullData instead. Every pass drawing with this
     // fragment must bind it (main + RTT).
-    constant float& iblIntensity [[buffer(20)]],
+    // x = weather IBL dimming, y = cloud-shadow blend strength (0 = off).
+    constant float2& envParams [[buffer(20)]],
     // Spot lights at buffer(16): buffer(14) is the bindless systemTexs table,
     // so a plain buffer(14) here fails specialization ("invalid location").
     const device SpotLight* spotLights [[buffer(16)]],
@@ -432,6 +437,18 @@ fragment float4 fragmentMain(
     // misses. min() = shadowed if either says so (no double-darkening).
     shadowFactor = min(shadowFactor, texSSCS.sample(rtShadowSampler, screenUV).r);
 
+    // Drifting cloud shadows on the sun term (twin of RHIMain.frag's
+    // cloudShadow(); constants must match cloudShadowMap's region). Bound path
+    // only — the ICB fragment has no slot for the map, so it stays unshadowed.
+    if (kBoundMaterials && envParams.y > 0.0) {
+        float2 csCenter = floor(camera.position.xz / 16.0) * 16.0;
+        float2 csUV = (in.worldPosition.xz - csCenter) / (2.0 * 2048.0) + 0.5;
+        float2 csEdge = abs(csUV - 0.5);
+        float csIn = 1.0 - smoothstep(0.45, 0.5, max(csEdge.x, csEdge.y));
+        float csT = cloudShadowTexArg.sample(rtShadowSampler, csUV).r;
+        shadowFactor *= mix(1.0, csT, envParams.y * csIn);
+    }
+
     float3 result = float3(0.0);
     result += CalculateDirectionalLight(directionalLights[0], norm, T, B, viewDir, surf) * shadowFactor;
 
@@ -547,8 +564,8 @@ fragment float4 fragmentMain(
         // at the source so both the diffuse branch and the specular composite
         // below carry it; RT reflection stays undimmed (it already reflects the
         // weather-lit scene, so dimming it too would double-count).
-        iblDiffuse  *= iblIntensity;
-        iblSpecular *= iblIntensity;
+        iblDiffuse  *= envParams.x;
+        iblSpecular *= envParams.x;
     }
 
     // Diffuse indirect: GIBS GI, else IBL irradiance, else a flat ambient floor.

@@ -424,6 +424,7 @@ private:
     void velocityPass();
     void particlePass();
     void volumetricCloudPass();
+    void cloudShadowPass();
 
     // RmlUI on the RHI (cross-backend): initUI() (declared above with the
     // IRenderer overrides) creates an RmlRendererRHI and registers it as Rml's
@@ -773,9 +774,19 @@ private:
     PipelineHandle cloudRaymarchPipeline;
     PipelineHandle cloudTemporalPipeline;
     PipelineHandle cloudCompositePipeline;
+    PipelineHandle cloudShadowPipeline;
     TextureHandle cloudRT;          // quarter-res current raymarch
     TextureHandle cloudHistoryRT;   // previous resolved frame
     TextureHandle cloudResolvedRT;  // temporal output (swapped with history)
+    // Top-down sun transmittance over a camera-centered region (CloudShadow
+    // pass); the PBR passes multiply the sun term by it.
+    TextureHandle cloudShadowRT;
+    // Cloud-shadow blend strength (panel). Pushed as 0 while the clouds pass
+    // is disabled, so the ground never shows shadows from an invisible deck.
+    float m_cloudShadowStrength = 0.8f;
+    float cloudShadowStrengthEffective() const {
+        return (volumetricCloudsEnabled && cloudShadowRT.isValid()) ? m_cloudShadowStrength : 0.0f;
+    }
     BufferHandle cloudDataBuffer;
     VolumetricCloudRenderData cloudSettings;  // CPU copy (tunables + wind/time accumulation)
     // Shared wind magnitude from the ECS WindFieldComponent (via setWind).
@@ -878,6 +889,7 @@ private:
     ShaderHandle cloudRaymarchShader;
     ShaderHandle cloudTemporalShader;
     ShaderHandle cloudCompositeShader;
+    ShaderHandle cloudShadowShader;
     ShaderHandle shadowVertexShader;
     ShaderHandle shadowFragmentShader;
     static constexpr Uint32 SHADOW_MAP_SIZE = Vapor::kDirectionalShadowMapSize;  // shared (irenderer.hpp)

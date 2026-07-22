@@ -543,6 +543,43 @@ fragment float4 cloudTemporalResolve(
 }
 
 // ============================================================================
+// Cloud Shadow Map Pass
+// ============================================================================
+// Sun-light transmittance through the deck over a camera-centered world region
+// (twin of CloudShadow.frag — constants must match its CSM_HALF/CSM_SNAP and
+// the sampling code in the PBR fragments). Cheap density only.
+
+constant float kCloudShadowHalf = 2048.0;
+constant float kCloudShadowSnap = 16.0;
+
+fragment float4 cloudShadowMap(
+    CloudVertexOut in [[stage_in]],
+    constant VolumetricCloudData& data [[buffer(0)]],
+    constant CameraData& camera [[buffer(1)]]
+) {
+    float dayFactor = smoothstep(-0.12, 0.08, data.sunDirection.y);
+    if (dayFactor < 0.01 || data.sunDirection.y < 0.05) {
+        return float4(1.0);
+    }
+
+    float2 center = floor(camera.position.xz / kCloudShadowSnap) * kCloudShadowSnap;
+    float3 world = float3(center.x + (in.uv.x * 2.0 - 1.0) * kCloudShadowHalf,
+                          0.0,
+                          center.y + (in.uv.y * 2.0 - 1.0) * kCloudShadowHalf);
+
+    float t0 = (data.cloudLayerBottom - world.y) / data.sunDirection.y;
+    float t1 = (data.cloudLayerTop    - world.y) / data.sunDirection.y;
+    const int STEPS = 6;
+    float stepLen = (t1 - t0) / float(STEPS);
+    float tau = 0.0;
+    for (int i = 0; i < STEPS; i++) {
+        float3 pos = world + data.sunDirection * (t0 + (float(i) + 0.5) * stepLen);
+        tau += sampleCloudDensity(pos, data, true) * stepLen;
+    }
+    return float4(mix(1.0, exp(-tau), dayFactor));
+}
+
+// ============================================================================
 // Upscale and Composite Pass
 // ============================================================================
 
