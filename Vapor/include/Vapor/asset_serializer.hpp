@@ -56,20 +56,6 @@ namespace Vapor {
 
 class AssetSerializer {
 public:
-    // v4: merges two independent v3 bumps whose on-disk layouts differed —
-    // material-name serialization (main: the inspector's Scene Materials editor
-    // and the blueprint cook want identity, not just factors) AND baked meshlet +
-    // cluster-LOD data (mesh-shader branch: Mesh::meshletData). Because both
-    // shipped as "v3" with different layouts, bump to 4 so any old v3 cache from
-    // either lineage is invalidated and re-imported/re-baked from source.
-    static constexpr uint32_t SCENE_FORMAT_VERSION = 4;
-
-    // Cache round-trip is best-effort: a write failure returns false and a
-    // read failure (missing, corrupt, or version-mismatched cache) returns
-    // nullptr — callers fall back to re-importing from source.
-    static bool serializeScene(const std::shared_ptr<RenderScene>& scene, const std::string& path);
-    static std::shared_ptr<RenderScene> deserializeScene(const std::string& path);
-
     // SceneBlueprint payload serialization (entities + meshes/materials/images/
     // lights + sources). Used by the scene cook (.vscene): the cook header
     // (magic/version/source-hash) is owned by scene_blueprint.cpp; these
