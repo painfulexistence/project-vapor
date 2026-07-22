@@ -48,8 +48,8 @@ layout(std430, set = 1, binding = 0) readonly buffer ParticleBuffer {
 
 layout(push_constant) uniform PushConstants {
     float particleSize;
-    float useTexture;   // consumed by the fragment stage
-    float _pad2;
+    float useTexture;       // consumed by the fragment stage
+    float velocityStretch;  // > 0: stretch the quad along velocity (rain streaks)
     float _pad3;
 } pushConstants;
 
@@ -69,9 +69,24 @@ void main() {
     // Calculate billboard vertex position
     vec2 quadPos = quadVertices[vertexIndex];
     float size = pushConstants.particleSize;
-    vec3 worldPos = p.position
-                  + cameraRight * quadPos.x * size
-                  + cameraUp * quadPos.y * size;
+    vec3 worldPos;
+    if (pushConstants.velocityStretch > 0.0 && dot(p.velocity, p.velocity) > 1e-6) {
+        // Velocity-aligned billboard (rain streaks): quad Y runs along the
+        // motion, X across it, turned toward the camera. Falls back to the
+        // camera-right axis when the velocity points straight at the viewer.
+        vec3 along = normalize(p.velocity);
+        vec3 across = cross(along, cameraPosition - p.position);
+        float len2 = dot(across, across);
+        across = len2 > 1e-8 ? across * inversesqrt(len2) : cameraRight;
+        float halfLen = size * (1.0 + pushConstants.velocityStretch * length(p.velocity));
+        worldPos = p.position
+                 + across * quadPos.x * size
+                 + along * quadPos.y * halfLen;
+    } else {
+        worldPos = p.position
+                 + cameraRight * quadPos.x * size
+                 + cameraUp * quadPos.y * size;
+    }
 
     gl_Position = proj * view * vec4(worldPos, 1.0);
 

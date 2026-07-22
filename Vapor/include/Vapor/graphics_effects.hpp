@@ -141,10 +141,12 @@ struct alignas(16) VolumetricCloudData {
     glm::vec3 sunColor;
     float _pad3;
     float sunIntensity = 22.0f;
-    float cloudLayerBottom = 1500.0f;
-    float cloudLayerTop = 4000.0f;
-    float cloudLayerThickness = 2500.0f;
-    float cloudCoverage = 0.5f;
+    // Hand-tuned base (see renderer_metal.cpp's volumetricCloudSettings): deep
+    // 9500-15000 m layer, low coverage, near-zero ambient/silver-lining.
+    float cloudLayerBottom = 9500.0f;
+    float cloudLayerTop = 15000.0f;
+    float cloudLayerThickness = 5500.0f;
+    float cloudCoverage = 0.25f;
     float cloudDensity = 0.3f;
     float cloudType = 0.5f;
     float erosionStrength = 0.3f;
@@ -152,14 +154,15 @@ struct alignas(16) VolumetricCloudData {
     float detailNoiseScale = 5.0f;
     float curlNoiseScale = 1.0f;
     float curlNoiseStrength = 0.1f;
-    float ambientIntensity = 0.3f;
-    float silverLiningIntensity = 0.5f;
+    float ambientIntensity = 0.001f;
+    float silverLiningIntensity = 0.001f;
     float silverLiningSpread = 2.0f;
     float phaseG1 = 0.8f;
     float phaseG2 = -0.3f;
     float phaseBlend = 0.3f;
     float powderStrength = 0.5f;
-    float _pad4;
+    // Cloud-specific scale on sunIntensity (see VolumetricCloudRenderData).
+    float sunLightScale = 0.85f;
     glm::vec3 windDirection = glm::vec3(1.0f, 0.0f, 0.0f);
     float _pad5;
     glm::vec3 windOffset;
@@ -173,6 +176,12 @@ struct alignas(16) VolumetricCloudData {
     Uint32 frameIndex = 0;
     float temporalBlend = 0.05f;
     glm::vec2 _pad8;
+    // Cloud ambient (sky-fill) tint, scaled by ambientIntensity.
+    glm::vec3 ambientColor = glm::vec3(0.5f, 0.6f, 0.9f);
+    float _pad9 = 0.0f;
+    // Night key light (moonDir = -sunDirection); see VolumetricCloudRenderData.
+    glm::vec3 moonColor = glm::vec3(0.92f, 0.93f, 1.0f);
+    float moonLightScale = 0.04f;
 };
 
 // ── Light Scattering (God Rays) ───────────────────────────────────────────

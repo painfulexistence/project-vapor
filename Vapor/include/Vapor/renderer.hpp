@@ -74,9 +74,12 @@ public:
     // Resource Registration (called during scene loading/staging)
     // ========================================================================
 
-    // Register a mesh and return its ID.
+    // Register a mesh and return its ID. Optional baked meshletData is accumulated
+    // into the global meshlet buffers for the meshlet path (ignored if null/empty).
     MeshId registerMesh(const std::vector<Vapor::VertexData>& vertices,
-                        const std::vector<Uint32>& indices);
+                        const std::vector<Uint32>& indices,
+                        const Vapor::MeshletData* meshletData = nullptr,
+                        bool meshletLodEnabled = true);
 
     // Register a material and return its ID
     MaterialId registerMaterial(const MaterialDataInput& materialData);
@@ -315,6 +318,8 @@ public:
     void setSky(const SkyRenderData& sky) override;
     void setWind(const WindRenderData& wind) override;
     void setVolumetricFogVolumes(const std::vector<VolumetricFogVolumeData>& volumes) override;
+    void setClouds(const CloudsRenderData& clouds) override;
+    void setIBLIntensity(float intensity) override;
     // Sun-driven auto rebake is opt-in (m_iblAutoRebake, default off) — a moving
     // sun otherwise re-bakes the IBL constantly. The one-shot "Refresh IBL"
     // button and sky-config changes (setSky) still force a rebake directly.
@@ -395,7 +400,7 @@ private:
     void prePass();
     void normalResolvePass();
     void clusterBuildPass();
-    void tileCullingPass();
+    void lightCullingPass();
     void gpuCullPass();  // GPU-driven frustum (+ Hi-Z) cull -> gpuCullArgsBuffer
     void prePassCullPass();  // frustum-only cull before the pre-pass -> prepassCullArgsBuffer
     // Shared cull dispatch: writes one DrawCommand per instance into argsBuffer,
@@ -526,15 +531,18 @@ private:
         Uint32 spotLights = 0;
         // Main-pass geometry submissions this frame. The clearest "is MDI/GPU-
         // driven actually engaged" signal: CPU/per-object issue ~one draw per
-        // object, MDI issues ~one drawIndexedIndirect per material.
+        // object, MDI issues ~one drawIndexedIndirect per material, meshlet issues
+        // one drawMeshTasks per instance.
         Uint32 mainDrawCalls = 0;
-        const char* mainPath = "CPU";  // "CPU" | "Indirect" | "MDI" | "BindlessMDI"
+        const char* mainPath = "CPU";  // "CPU" | "Indirect" | "MDI" | "BindlessMDI" | "Meshlet"
     } lastFrameStats;
 
     // Tile-cull histogram cache for the "Light Culling Debug" panel. Refreshed
     // by a throttled cluster-buffer readback while that panel is open.
     bool lightCullDebugOpen = false;
     Uint32 cullAvgLights = 0, cullMinLights = 0, cullMaxLights = 0, cullNonEmptyTiles = 0;
+    // Clustered spot/rect loop lengths (avg/max per cluster), same readback.
+    Uint32 cullAvgSpots = 0, cullMaxSpots = 0, cullAvgRects = 0, cullMaxRects = 0;
     // Reads back the culled cluster buffer into (mn/avg/mx/nonEmpty) over the 2D
     // tile grid. Does a waitIdle, so callers must throttle. Shared by the panel
     // and the StatsLog "CULL" source. Returns false if unavailable.
@@ -627,6 +635,9 @@ private:
     // Linear + clamp-to-edge sampler for fullscreen/bloom passes (repeat would
     // wrap at screen edges; the bloom pyramid needs clamped bilinear taps).
     SamplerHandle clampSampler;
+    // NEAREST + clamp — for point-sampling the max-depth Hi-Z pyramid (linear
+    // filtering under-estimates the max and over-culls; see occlusion tests).
+    SamplerHandle hizSampler;
 
     // Render targets
     TextureHandle colorRT_MSAA;
@@ -777,6 +788,13 @@ private:
     glm::mat4 cloudPrevViewProj = glm::mat4(1.0f);
     bool cloudPrevViewProjValid = false;
     bool volumetricCloudsEnabled = false;  // default OFF (enable when verifying)
+    bool m_cloudsWeatherDriven = false;    // setClouds() seen — panel shows a hint
+    // Weather-driven environment dimming (setIBLIntensity). Vulkan: rides in
+    // LightCullData (set1 b5); Metal: fragment bytes at buffer(20).
+    float m_iblIntensity = 1.0f;
+    // Weather dim on the panel-tuned cloud sunLightScale (setClouds cloudDim)
+    // — applied at upload time so the panel value stays authoritative.
+    float m_cloudDim = 1.0f;
 
     // GPU particle system (self-contained orbital demo + ECS emitters).
     static constexpr Uint32 MAX_PARTICLES = 3'000'000;
@@ -868,9 +886,7 @@ private:
     static constexpr Uint32 SHADOW_MAP_SIZE = Vapor::kDirectionalShadowMapSize;  // shared (irenderer.hpp)
 
     // Compute pipelines
-    ComputePipelineHandle buildClustersPipeline;
-    ComputePipelineHandle cullLightsPipeline;
-    ComputePipelineHandle tileCullingPipeline;
+    ComputePipelineHandle lightCullingPipeline;
     ComputePipelineHandle normalResolvePipeline;
     ComputePipelineHandle raytraceShadowPipeline;
     ComputePipelineHandle raytraceAOPipeline;
@@ -1031,9 +1047,9 @@ private:
     Uint32 mainDebugFlags = 0;
 
     // Sun/lens flare (Metal MSL for now; GLSL twin lands with the IBL round).
-    // (tileCullingPipeline is declared with the other compute pipelines above.)
-    ShaderHandle tileCullingShader;
-    // Vulkan tile culling twin (TileLightCull.comp) + its params buffer.
+    // (lightCullingPipeline is declared with the other compute pipelines above.)
+    ShaderHandle lightCullingShader;
+    // Vulkan light culling twin (LightCull.comp) + its params buffer.
     ComputePipelineHandle vkTileCullPipeline;
     ShaderHandle vkTileCullShader;
 
@@ -1056,8 +1072,9 @@ private:
     // can't go through both the vertex pipeline and mesh shaders):
     //   Off      - CPU cull + drawIndexed (default; existing path untouched)
     //   Indirect - compute cull (GpuCull.comp) -> per-object / MDI indirect draw
+    //   Meshlet  - task + mesh shaders (per-cluster cull + LOD); Phase C
     // Hi-Z occlusion (below) is orthogonal and applies to whichever mode is active.
-    enum class GpuDrivenMode { Off, Indirect, BindlessMDI };
+    enum class GpuDrivenMode { Off, Indirect, BindlessMDI, Meshlet };
     GpuDrivenMode gpuDrivenMode = GpuDrivenMode::Off;
     bool gpuDrivenActive()   const { return gpuDrivenMode != GpuDrivenMode::Off; }
     // Indirect covers BOTH compute-cull modes: plain Indirect (per-object /
@@ -1068,6 +1085,7 @@ private:
                gpuDrivenMode == GpuDrivenMode::BindlessMDI;
     }
     bool gpuDrivenBindless() const { return gpuDrivenMode == GpuDrivenMode::BindlessMDI; }
+    bool gpuDrivenMeshlet()  const { return gpuDrivenMode == GpuDrivenMode::Meshlet; }
     // Whether this frame will use the merged-buffer MDI instance layout (plain
     // MDI or Bindless MDI). Deterministic from mode + backend + caps (no prior-
     // frame state), so render() can consult it BEFORE updateBuffers sets
@@ -1083,12 +1101,91 @@ private:
                  backend == GraphicsBackend::Metal));
     }
     // Whether the depth pre-pass runs fully GPU-driven this frame (so the CPU
-    // frustum cull is redundant and skipped): the indirect MDI pre-pass.
-    // Consulted in render() BEFORE updateBuffers, so it uses only mode/caps (no
-    // per-frame buffer state).
+    // frustum cull is redundant and skipped): the indirect MDI pre-pass, or the
+    // meshlet mesh-shader pre-pass. Consulted in render() BEFORE updateBuffers,
+    // so it uses only mode/caps/pipeline-validity (no per-frame buffer state).
     bool gpuDrivenPrePassActive() const {
-        return gpuDrivenPrePass && mdiLayoutActive();
+        if (!gpuDrivenPrePass) return false;
+        return mdiLayoutActive() ||
+               (gpuDrivenMeshlet() && meshletPrePassPipeline.isValid());
     }
+    // Meshlet draw path (task/mesh shaders): per-cluster frustum/cone cull +
+    // two-sphere cluster-LOD selection in the task stage, triangles expanded by
+    // the mesh stage, per-meshlet debug colors in the fragment (PBR parity is a
+    // follow-up). Selectable when the backend reports mesh-shader support.
+    static constexpr bool kMeshletDrawImplemented = true;
+    PipelineHandle meshletPipeline;
+    // Depth-test-less twin, bound while meshletDrawAll is on (debug): separates
+    // "fragments depth-rejected against the PrePass" from "nothing rasterized".
+    PipelineHandle meshletPipelineNoDepth;
+    ShaderHandle meshletTaskShader, meshletMeshShader, meshletFragShader;
+    // Cluster-LOD screen-space error tolerance, in pixels. Larger = coarser
+    // clusters selected sooner (fewer triangles); the task shader compares the
+    // projected cluster error against this / screenHeight.
+    float meshletLodPixelError = 1.0f;
+    // At model-instantiate, cluster-LOD is auto-disabled for meshes below this
+    // triangle count (it degrades normal-density / seamed authored meshes faster
+    // than it saves; it pays off on dense Nanite-class geometry). Mesh::
+    // meshletLodEnabled can still force it off above the threshold. Tunable.
+    Uint32 meshletLodMinTriangles = 100000;
+    // Meshlet shading: false (default) = full PBR from the shared material table
+    // (parity with the forward path); true = per-meshlet debug hashColor (for
+    // inspecting meshlet boundaries). Probes/synthetic/draw-all always force the
+    // debug color regardless of this.
+    bool meshletDebugColor = false;
+    // Debug: bypass ALL meshlet culling (frustum/cone/LOD cut) — the task shader
+    // Compile gate for the meshlet bring-up "probe ladder" (the negative-
+    // errorThreshold data/vertex/transform/emission/topology/synthetic probes +
+    // the mesh-only synthetic pipeline + their UI). Off by default. MUST stay in
+    // sync with MESHLET_DEBUG_PROBES in 3d_meshlet.metal — flip BOTH to re-enable.
+    static constexpr bool kMeshletDebugProbes = false;
+    // emits every meshlet when the errorThreshold it receives is negative.
+    // Isolates "cull rejects everything" from raster/depth/binding problems.
+    bool meshletDrawAll = false;
+    // Debug: mesh stage emits one hardcoded clip-space triangle, reading NO
+    // buffers (errorThreshold <= -1.5 sentinel). Shows on screen => the
+    // pipeline/dispatch/raster chain works and the fault is buffer bindings.
+    bool meshletSyntheticTri = false;
+    // Data probe: mesh stage reads the real payload + meshlet record and draws
+    // a fixed triangle colored by (vertexCount, triangleCount, mi). Sane
+    // yellowish => reads work, bug is geometry/transform; black/wild/none =>
+    // payload or meshlet-buffer read is the fault. (errorThreshold <= -2.5.)
+    bool meshletProbeData = false;
+    // Vertex-read probe: fixed triangle colored by the first real vertex
+    // position read through meshletVertices -> mergedVB. White = read OK (bug
+    // is transform/index); cyan = position all-zero (buffer unbound); magenta =
+    // huge/NaN (VertexData stride). (errorThreshold <= -3.5.)
+    bool meshletProbeVertex = false;
+    // Transform probe: fixed triangle colored by where the first vertex lands
+    // in clip space (R=in front, G=on-screen XY, B=in depth range). Tests the
+    // last untested mesh-stage reads (camera 0, instances 2) + the math. White
+    // => transform OK (bug is topology/set_index). (errorThreshold <= -4.5.)
+    bool meshletProbeXform = false;
+    // Emission probe: real multi-threaded vertex loop + hardcoded first-triangle
+    // topology. Cyan triangles => vertex loop OK (bug is the index loop /
+    // meshletTriangles); blank => vertex emission itself. (errorThreshold <= -5.5.)
+    bool meshletProbeEmit = false;
+    // Topology probe: read + validate meshletTriangles(5). In-range non-degen
+    // indices => buffer 5 reads fine (bug is set_index mechanics); no R =>
+    // indices out of range (buffer 5 garbage/unbound). (errorThreshold <= -6.5.)
+    bool meshletProbeTopo = false;
+    // Second, even lower-level probe drawn alongside when meshletSyntheticTri
+    // is on (Metal): a MESH-ONLY pipeline (no object stage, no payload, no
+    // buffers) emitting a green triangle on the LEFT. Green shows while the
+    // centered triangle doesn't => the object->mesh amplification is broken;
+    // neither shows => drawMeshThreadgroups / encoder-level.
+    PipelineHandle meshletSyntheticPipeline;
+    ShaderHandle meshletSyntheticShader;
+
+    // GPU-driven meshlet depth+normal pre-pass (Option A for the meshlet path):
+    // the SAME task+mesh shaders as the main meshlet pass, into the PrePass MRT
+    // (normal RGBA16F + albedo RGBA8 + depth) with a Less depth write. Reusing
+    // the mesh stage keeps the pre-pass and main pass on identical geometry — the
+    // meshlet twin of the indirect MDI pre-pass. Fragment is fragmentPrePass
+    // (Metal) / MeshletPrePass.frag (Vulkan).
+    PipelineHandle meshletPrePassPipeline;
+    ShaderHandle meshletPrePassFragShader;
+
     // Hi-Z occlusion culling (requires a GPU-driven mode). A depth pyramid built
     // from the PrePass depth; the cull compute rejects instances whose screen
     // AABB is fully behind the recorded occluders. Off by default; the reduce
@@ -1158,6 +1255,26 @@ private:
     std::vector<std::pair<MaterialId, std::pair<Uint32, Uint32>>> m_materialRanges;
     void ensureMergedGeometry();  // (re)build merged GPU buffers from CPU data
 
+    // ------------------------------------------------------------------------
+    // Meshlet path (Phase B): global meshlet buffers, accumulated per mesh in
+    // registerMesh from Mesh::meshletData (baked offline). meshletVertices are
+    // rebased into the merged vertex buffer (+ RenderMesh::vertexOffset), so the
+    // meshlet path shares mergedVertexBuffer with MDI. Uploaded lazily by
+    // ensureMeshletBuffers() only when the backend supports mesh shaders. Nothing
+    // consumes these until the Phase-C task/mesh shaders; the exact GPU layout of
+    // the triangle/bounds buffers may be finalized alongside those shaders.
+    // ------------------------------------------------------------------------
+    std::vector<Vapor::Meshlet> m_globalMeshlets;
+    std::vector<Uint32> m_globalMeshletVertices;   // rebased into mergedVertexBuffer
+    std::vector<Uint8> m_globalMeshletTriangles;   // local u8, 3 per triangle
+    std::vector<Vapor::MeshletBounds> m_globalMeshletBounds;  // parallel to m_globalMeshlets
+    BufferHandle meshletBuffer;          // Meshlet[]
+    BufferHandle meshletVertexBuffer;    // Uint32[]
+    BufferHandle meshletTriangleBuffer;  // Uint8[] (padded to 4)
+    BufferHandle meshletBoundsBuffer;    // MeshletBounds[]
+    BufferHandle meshMeshletRangeBuffer; // uvec2[meshId] = {meshletOffset, meshletCount}
+    bool m_meshletsDirty = false;
+    void ensureMeshletBuffers();  // (re)build meshlet GPU buffers from CPU data
     BufferHandle lightCullDataBuffer;
     PipelineHandle sunFlarePipeline;
     ShaderHandle sunFlareVertexShader, sunFlareFragmentShader;

@@ -23,6 +23,14 @@ namespace Vapor {
         std::string name;
     };
 
+    // Entity-level "disabled" tag (the ECS idiom: presence = off, systems
+    // exclude it). An inactive entity is skipped by rendering and by the systems
+    // that opt in via entt::exclude<InactiveComponent>. This is the whole-entity
+    // switch (Unity's SetActive); it is separate from per-drawable `visible`
+    // (render-only) and per-component `enabled` (that one component's logic).
+    // Toggle it from the inspector's entity "Active" checkbox.
+    struct InactiveComponent {};
+
     struct TransformComponent {
         glm::vec3 position = glm::vec3(0.0f);
         glm::quat rotation = glm::quat(1.0f, 0.0f, 0.0f, 0.0f);
@@ -236,6 +244,129 @@ namespace Vapor {
         Hidden<glm::vec3> _lastIblSunDir = {glm::vec3(0.0f)};
     };
 
+    // ── Weather ──────────────────────────────────────────────────────────────
+
+    enum class WeatherState : uint8_t {
+        Clear = 0, Cloudy, Overcast, Rain, Thunderstorm, Snow,
+    };
+
+    // The blendable slice of a weather state. WeatherSystem lerps between the
+    // outgoing and incoming state's params over the transition, so the sky
+    // thickens/clears smoothly instead of popping. Defaults = the Clear preset
+    // (a default-constructed WeatherComponent resolves to Clear), anchored to
+    // the hand-tuned native-Metal cloud settings: a deep 9500-15000 m layer,
+    // low coverage, near-zero ambient (high ambient milks out the whole sky).
+    struct WeatherParams {
+        float cloudCoverage    = 0.25f;
+        float cloudDensity     = 0.3f;
+        float cloudType        = 0.5f;      // 0 stratus → 1 cumulus
+        float cloudLayerBottom = 9500.0f;   // storm states lower the ceiling
+        float cloudLayerTop    = 15000.0f;
+        float cloudAmbient     = 0.001f;
+        float sunDim           = 1.0f;      // multiplies sun/moon light intensity
+        float fogDensityMul    = 1.0f;      // multiplies VolumetricFogComponent density
+        float windMul          = 1.0f;      // multiplies WindFieldComponent strength
+        float iblDim           = 1.0f;      // scales the baked environment (IBL) ambience
+        // Dims the cloud deck's own lit brightness (multiplies the renderer's
+        // cloud sunLightScale): the artistic stand-in for the extinction depth
+        // the 6-step light march can't afford — storm decks read darker than
+        // self-shadowing alone provides. Parallel to sunDim/iblDim, but a
+        // distinct quantity: this is the cloud (the occluder), those are the
+        // ground under it. 1.0 = clear.
+        float cloudDim         = 1.0f;
+        // Cloud ambient (sky-fill) tint: blue under a clear sky, neutral gray
+        // overcast, sickly green in a supercell thunderstorm.
+        glm::vec3 cloudAmbientColor = glm::vec3(0.5f, 0.6f, 0.9f);
+    };
+
+    inline WeatherParams weatherParamsFor(WeatherState s) {
+        switch (s) {
+            // Anchored to the tuned Clear base (0.25/0.3/0.5, 9500-15000 m,
+            // ambient 0.001); storms raise coverage/density, drop the ceiling
+            // and flatten toward stratus. Ambient stays in the tuned ~0.001-0.01
+            // range — it is a full-sky glow, not a per-cloud fill.
+            // cloudDim multiplies the panel base sunLightScale (0.85): storms
+            // steepen it hard so the deck's ABSOLUTE lit brightness stays dark
+            // (0.85 x 0.12 ≈ 0.10) even though the base is bright for clear skies.
+            //                     coverage density type   bottom   top      ambient sunDim fogMul windMul iblDim cloudDim ambientTint
+            case WeatherState::Cloudy:       return { 0.45f, 0.35f, 0.40f, 1600.0f, 10000.0f, 0.002f, 0.80f, 1.2f, 1.3f, 0.85f, 0.80f, {0.55f, 0.60f, 0.78f} };
+            case WeatherState::Overcast:     return { 0.75f, 0.50f, 0.20f, 1000.0f,  6000.0f, 0.004f, 0.40f, 1.6f, 1.6f, 0.50f, 0.42f, {0.55f, 0.57f, 0.62f} };
+            case WeatherState::Rain:         return { 0.85f, 0.65f, 0.15f,  800.0f,  5000.0f, 0.003f, 0.25f, 2.2f, 2.0f, 0.40f, 0.30f, {0.45f, 0.50f, 0.58f} };
+            case WeatherState::Thunderstorm: return { 0.95f, 0.85f, 0.10f,  600.0f,  4500.0f, 0.002f, 0.12f, 2.5f, 3.0f, 0.25f, 0.12f, {0.42f, 0.50f, 0.42f} };
+            case WeatherState::Snow:         return { 0.70f, 0.45f, 0.30f, 1100.0f,  6000.0f, 0.006f, 0.45f, 1.8f, 1.2f, 0.60f, 0.62f, {0.72f, 0.76f, 0.85f} };
+            case WeatherState::Clear:
+            default:                         return {};
+        }
+    }
+
+    inline WeatherParams mixWeatherParams(const WeatherParams& a, const WeatherParams& b, float t) {
+        auto L = [t](float x, float y) { return x + (y - x) * t; };
+        WeatherParams r;
+        r.cloudCoverage    = L(a.cloudCoverage,    b.cloudCoverage);
+        r.cloudDensity     = L(a.cloudDensity,     b.cloudDensity);
+        r.cloudType        = L(a.cloudType,        b.cloudType);
+        r.cloudLayerBottom = L(a.cloudLayerBottom, b.cloudLayerBottom);
+        r.cloudLayerTop    = L(a.cloudLayerTop,    b.cloudLayerTop);
+        r.cloudAmbient     = L(a.cloudAmbient,     b.cloudAmbient);
+        r.sunDim           = L(a.sunDim,           b.sunDim);
+        r.fogDensityMul    = L(a.fogDensityMul,    b.fogDensityMul);
+        r.windMul          = L(a.windMul,          b.windMul);
+        r.iblDim           = L(a.iblDim,           b.iblDim);
+        r.cloudDim         = L(a.cloudDim,         b.cloudDim);
+        r.cloudAmbientColor = a.cloudAmbientColor + (b.cloudAmbientColor - a.cloudAmbientColor) * t;
+        return r;
+    }
+
+    // Weather authoring — the scene's weather state machine (singleton, put it
+    // on the environment/Sky entity next to SkyComponent). WeatherSystem blends
+    // toward `state` over `transitionSeconds` and orchestrates the downstream
+    // media: volumetric clouds (IRenderer::setClouds — owning them while
+    // driveClouds is set), sun/moon dimming (consumed by TimeOfDaySystem), fog
+    // density and wind strength multipliers (consumed by VolumetricFogSystem /
+    // WindSystem), precipitation emitters (toggled via InactiveComponent on
+    // PrecipitationComponent-tagged entities) and lightning flashes
+    // (LightningComponent-tagged point lights + a cloud-interior glow).
+    struct WeatherComponent {
+        WeatherState state = WeatherState::Clear;  // target; blends over transitionSeconds
+        float transitionSeconds = 15.0f;
+        bool  enabled = true;
+        bool  driveClouds = true;  // push cloud params (turns the clouds pass on)
+        // Lightning (Thunderstorm): random strike interval + flash strength.
+        float lightningMinInterval = 4.0f;   // seconds
+        float lightningMaxInterval = 14.0f;
+        float lightningIntensity   = 300.0f; // peak intensity on tagged lights
+
+        // Runtime (WeatherSystem-owned, inspector-hidden).
+        Hidden<WeatherParams> _from = {};        // params blending FROM (snapshotted on state change)
+        Hidden<float>    _blend = {1.0f};        // 0→1 progress toward `state`
+        Hidden<uint8_t>  _lastState = {0};       // change detection (== WeatherState::Clear)
+        Hidden<WeatherParams> _resolved = {};    // this frame's blended params (consumers read this)
+        Hidden<float>    _lightningTimer = {0.0f};  // countdown to the next strike
+        Hidden<float>    _flashAge = {1e9f};        // seconds since the strike began
+        Hidden<uint32_t> _rng = {0u};               // xorshift32 state (0 = seed on first use)
+    };
+
+    // Tags a particle emitter entity as weather precipitation. WeatherSystem
+    // starts it (removes InactiveComponent, sets emitting) while the weather
+    // calls for its kind — Rain during Rain/Thunderstorm, Snow during Snow —
+    // and gracefully stops it otherwise (emitting = false, so airborne
+    // particles finish falling). Author precipitation emitters with
+    // "inactive": {} so they cost nothing until their first storm.
+    struct PrecipitationComponent {
+        enum class Kind : uint8_t { Rain = 0, Snow };
+        Kind kind = Kind::Rain;
+        // Keep the emitter centered above the active camera so precipitation
+        // exists wherever the player looks (WeatherSystem moves the transform;
+        // pair with a box emitExtents so the sheet has area).
+        bool  followCamera = true;
+        float followHeight = 18.0f;  // meters above the camera
+    };
+
+    // Tags a (point) light as a lightning flash source. Intensity is OWNED by
+    // WeatherSystem: zero except during Thunderstorm strikes, when it spikes
+    // with a double-pulse envelope. Author the light with intensity 0.
+    struct LightningComponent {};
+
     // Time-of-day clock. TimeOfDaySystem advances it and drives the
     // SunComponent-tagged directional light's direction/color/intensity each
     // frame, so the sky, fog, clouds and shadows all follow one moving sun. Put
@@ -392,6 +523,14 @@ namespace Vapor {
         float spread = 0.3f;            // half-cone angle in radians
         glm::vec3 emitDirection = glm::vec3(0.0f, 1.0f, 0.0f);
         glm::vec4 color = glm::vec4(1.0f);
+        // Emission volume: zero = point emitter (cone around emitDirection);
+        // non-zero half-extents spawn particles anywhere in a box centered on
+        // the entity (rain/snow sheets, area steam).
+        glm::vec3 emitExtents = glm::vec3(0.0f);
+        // Particles below this world Y die on the spot (cheap ground collision
+        // for rain/sparks). Very negative = off. Finite-lifetime only — the
+        // GPU sim ignores it for immortal particles.
+        float groundKillY = -1.0e9f;
         bool enabled = true;   // false = immediate clear (Clear semantic)
         bool emitting = true;  // false = graceful stop: stop spawning, let existing finish (Stop semantic)
         bool oneShot = false;  // emit all maxParticles at once, then idle
@@ -422,6 +561,10 @@ namespace Vapor {
         ParticleBlendMode blendMode = ParticleBlendMode::Additive;
         uint32_t texture = 0xFFFFFFFFu; // renderer TextureId; ~0u = procedural soft disc
         float size = 0.1f;              // world-space billboard half-extent
+        // 0 = camera-facing billboard. > 0 stretches the quad along the
+        // particle's velocity (screen-aligned): half-length becomes
+        // size * (1 + velocityStretch * speed). Rain streaks ≈ 0.1-0.2.
+        float velocityStretch = 0.0f;
     };
 
     // One-shot burst of particles at the entity's current position.

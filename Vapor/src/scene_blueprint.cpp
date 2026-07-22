@@ -6,6 +6,7 @@
 #include "file_system.hpp"
 #include "fsm.hpp"
 #include "mesh_builder.hpp"
+#include "meshlet_builder.hpp"
 #include "render_scene.hpp"
 
 #include <algorithm>
@@ -100,6 +101,7 @@ static LightBlueprint parseLight(const json& j) {
 BlueprintComponents& BlueprintComponents::instance() {
     static BlueprintComponents registry = [] {
         BlueprintComponents r;
+        r.registerComponent<InactiveComponent>("inactive");
         r.registerComponent<SunComponent>("sun");
         r.registerComponent<MoonComponent>("moon");
         r.registerComponent<PointLightComponent>("pointLight");
@@ -109,6 +111,39 @@ BlueprintComponents& BlueprintComponents::instance() {
         r.registerComponent<SkyComponent>("sky");
         r.registerComponent<TimeOfDayComponent>("timeOfDay");
         r.registerComponent<VolumetricFogComponent>("volumetricFog");
+        // weather: hand-written for the string-authored state (the PFR path
+        // only reads enums as integers). Runtime blend fields stay at their
+        // defaults — a loaded scene starts settled in its authored state.
+        r.registerApplier("weather", [](entt::registry& reg, entt::entity e, const nlohmann::json& j) {
+            WeatherComponent w;
+            const std::string s = j.value("state", "clear");
+            w.state = s == "cloudy"         ? WeatherState::Cloudy
+                      : s == "overcast"     ? WeatherState::Overcast
+                      : s == "rain"         ? WeatherState::Rain
+                      : s == "thunderstorm" ? WeatherState::Thunderstorm
+                      : s == "snow"         ? WeatherState::Snow
+                                            : WeatherState::Clear;
+            w._lastState = static_cast<uint8_t>(w.state);  // no transition on load
+            w._from = weatherParamsFor(w.state);
+            w.transitionSeconds     = j.value("transitionSeconds", w.transitionSeconds);
+            w.enabled               = j.value("enabled", w.enabled);
+            w.driveClouds           = j.value("driveClouds", w.driveClouds);
+            w.lightningMinInterval  = j.value("lightningMinInterval", w.lightningMinInterval);
+            w.lightningMaxInterval  = j.value("lightningMaxInterval", w.lightningMaxInterval);
+            w.lightningIntensity    = j.value("lightningIntensity", w.lightningIntensity);
+            reg.emplace_or_replace<WeatherComponent>(e, w);
+        });
+        // precipitation: hand-written for the string-authored kind.
+        r.registerApplier("precipitation", [](entt::registry& reg, entt::entity e, const nlohmann::json& j) {
+            PrecipitationComponent p;
+            p.kind = j.value("kind", std::string("rain")) == "snow"
+                         ? PrecipitationComponent::Kind::Snow
+                         : PrecipitationComponent::Kind::Rain;
+            p.followCamera = j.value("followCamera", p.followCamera);
+            p.followHeight = j.value("followHeight", p.followHeight);
+            reg.emplace_or_replace<PrecipitationComponent>(e, p);
+        });
+        r.registerComponent<LightningComponent>("lightning");
         r.registerComponent<VirtualCameraComponent>("virtualCamera");
         r.registerComponent<FlyCameraComponent>("flyCamera");
         r.registerComponent<FollowCameraComponent>("followCamera");
@@ -347,7 +382,7 @@ void appendBlueprint(SceneBlueprint& dst, SceneBlueprint&& sub, int parentIndex)
 namespace {
 
     constexpr char kCookMagic[4] = { 'V', 'B', 'P', '1' };
-    constexpr uint32_t kCookVersion = 1;
+    constexpr uint32_t kCookVersion = 2;  // v2: meshlet bake config (regularize + sloppy factor)
 
     uint64_t fnv1a64(const void* data, size_t n, uint64_t h) {
         const auto* p = static_cast<const uint8_t*>(data);
@@ -494,6 +529,14 @@ SceneBlueprint loadSceneBlueprint(const std::string& path) {
                                 &mat->occlusionMap, &mat->emissiveMap })
                 if (*slot == img) slot->reset();
         }
+    }
+
+    // Bake meshlets + cluster-LOD per mesh (offline) so the mesh-shader path gets
+    // them straight from the cook — otherwise Renderer::registerMesh rebuilds them
+    // on every load. No-op for empty / non-triangle meshes; the result rides the
+    // .vscene via the shared (de)serializeMesh meshletData fields.
+    for (auto& m : bp.meshes) {
+        if (m) MeshletBuilder::build(*m);
     }
 
     // Write the cook so the next load skips parsing and model decode entirely.

@@ -98,28 +98,6 @@ struct Material {
     // Material now only holds CPU-side material parameters
 };
 
-
-
-
-// Cone spot light. direction points FROM the light; cosInner/cosOuter are the
-// cosines of the inner (full intensity) and outer (falloff-to-zero) half-angles.
-// Layout is std430/MSL-clean (vec3 + trailing scalar packing), uploaded as-is.
-// NOTE the explicit pads: MSL float3 occupies a 16-byte slot, so scalars must
-// NOT be packed into a vec3's tail (the PointLight convention). RectLight
-// keeps its tail-packed layout; its MSL twin uses packed_float3 to match.
-struct alignas(16) SpotLight {
-    glm::vec3 position{0.0f};
-    float _pad0 = 0.0f;
-    glm::vec3 direction{0.0f, -1.0f, 0.0f};   // normalized, FROM the light
-    float _pad1 = 0.0f;
-    glm::vec3 color{1.0f};
-    float _pad2 = 0.0f;
-    float radius = 10.0f;                     // range (world units)
-    float cosInner = 0.9397f;                 // cos(20 deg)
-    float cosOuter = 0.8660f;                 // cos(30 deg)
-    float intensity = 1.0f;
-};
-
 struct VertexData {
     glm::vec3 position;
     glm::vec2 uv;
@@ -151,7 +129,12 @@ struct Mesh {
     bool hasColor = false;
     std::vector<VertexData> vertices; // interleaved vertex data
     std::vector<Uint32> indices;
-    MeshletData meshletData;          // baked meshlet data model; unused/unserialized here
+    MeshletData meshletData;          // baked offline (MeshletBuilder); empty until built
+    // Whether the meshlet path applies cluster-LOD to this mesh. Off = always
+    // draw the finest clusters (no simplification), for normal-density / seamed
+    // authored meshes where LOD degrades appearance faster than it saves. Set at
+    // model-instantiate time; ignored by every non-meshlet path. Default on.
+    bool meshletLodEnabled = true;
     std::shared_ptr<Material> material = nullptr;
     Uint32 renderMeshId = UINT32_MAX;
     Uint32 renderMaterialId = UINT32_MAX;

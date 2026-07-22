@@ -42,11 +42,17 @@ layout(std430, set = 1, binding = 1) readonly buffer PSSMBuf {
 };
 
 const uint MAX_LIGHTS_PER_TILE = 256;
+const uint MAX_SPOTS_PER_CLUSTER = 64u;  // must match graphics.hpp Cluster
+const uint MAX_RECTS_PER_CLUSTER = 32u;
 struct Cluster {
     vec4 mn;
     vec4 mx;
     uint lightCount;
     uint lightIndices[MAX_LIGHTS_PER_TILE];
+    uint spotCount;
+    uint spotIndices[MAX_SPOTS_PER_CLUSTER];
+    uint rectCount;
+    uint rectIndices[MAX_RECTS_PER_CLUSTER];
 };
 layout(std430, set = 1, binding = 2) readonly buffer ClusterBuf { Cluster tiles[]; };
 

@@ -67,6 +67,25 @@ struct alignas(16) PointLight {
     float radius = 0.5f;
 };
 
+// Cone spot light. direction points FROM the light; cosInner/cosOuter are the
+// cosines of the inner (full intensity) and outer (falloff-to-zero) half-angles.
+// Layout is std430/MSL-clean (vec3 + trailing scalar packing), uploaded as-is.
+// NOTE the explicit pads: MSL float3 occupies a 16-byte slot, so scalars must
+// NOT be packed into a vec3's tail (the PointLight convention). RectLight
+// keeps its tail-packed layout; its MSL twin uses packed_float3 to match.
+struct alignas(16) SpotLight {
+    glm::vec3 position{0.0f};
+    float _pad0 = 0.0f;
+    glm::vec3 direction{0.0f, -1.0f, 0.0f};   // normalized, FROM the light
+    float _pad1 = 0.0f;
+    glm::vec3 color{1.0f};
+    float _pad2 = 0.0f;
+    float radius = 10.0f;                     // range (world units)
+    float cosInner = 0.9397f;                 // cos(20 deg)
+    float cosOuter = 0.8660f;                 // cos(30 deg)
+    float intensity = 1.0f;
+};
+
 // Rectangular area light driven by an optional video texture.
 // right and up must be orthonormal; halfWidth/halfHeight are in world units.
 struct alignas(16) RectLight {
@@ -139,13 +158,24 @@ struct alignas(16) Cluster {
     glm::vec4 max;
     Uint32 lightCount;
     Uint32 lightIndices[256];
+    // Spot/rect tail — keep byte-identical with Vapor::Cluster (graphics.hpp).
+    Uint32 spotCount;
+    Uint32 spotIndices[64];
+    Uint32 rectCount;
+    Uint32 rectIndices[32];
 };
 
 struct alignas(16) LightCullData {
     glm::vec2 screenSize;
-    glm::vec2 _pad1;
+    // Environment (IBL) intensity scale — weather dims it under heavy cloud.
+    // Lives here because this buffer is already bound to the Vulkan PBR pass
+    // (set1 b5); the Metal PBR shader gets it via fragment bytes (buffer 20).
+    float iblIntensity = 1.0f;
+    float _pad1 = 0.0f;
     glm::uvec3 gridSize;
     Uint32 lightCount;
+    Uint32 cullSpotCount;   // keep in step with Vapor::LightCullData
+    Uint32 cullRectCount;
 };
 
 struct alignas(16) IBLCaptureData {

@@ -43,8 +43,24 @@ struct RectLight {
     vec3 up;       float intensity;
     vec3 color;    uint useVideoTexture;
 };
-const uint MAX_LIGHTS_PER_TILE = 256u;
-struct Cluster { vec4 mn; vec4 mx; uint lightCount; uint lightIndices[MAX_LIGHTS_PER_TILE]; };
+// Cluster layout must match graphics.hpp / VolumetricFog.frag exactly — the
+// spot/rect tails set the array STRIDE, so getting them wrong reads the wrong
+// cluster for tileIdx > 0. This froxel still loops-all spots/rects (like the
+// raymarch fog), so it only reads lightCount/lightIndices, but the full struct
+// is required for correct indexing.
+const uint MAX_LIGHTS_PER_TILE   = 256u;
+const uint MAX_SPOTS_PER_CLUSTER = 64u;
+const uint MAX_RECTS_PER_CLUSTER = 32u;
+struct Cluster {
+    vec4 mn;
+    vec4 mx;
+    uint lightCount;
+    uint lightIndices[MAX_LIGHTS_PER_TILE];
+    uint spotCount;
+    uint spotIndices[MAX_SPOTS_PER_CLUSTER];
+    uint rectCount;
+    uint rectIndices[MAX_RECTS_PER_CLUSTER];
+};
 struct CameraData {
     mat4 proj; mat4 view; mat4 invProj; mat4 invView;
     float nearPlane; float farPlane; vec2 _cpad;

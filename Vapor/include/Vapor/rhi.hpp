@@ -612,6 +612,12 @@ public:
     virtual void setStorageBuffer(Uint32 set, Uint32 binding, BufferHandle buffer, size_t offset = 0, size_t range = 0) = 0;
     virtual void setTexture(Uint32 set, Uint32 binding, TextureHandle texture, SamplerHandle sampler) = 0;
 
+    // Object (task) stage texture for mesh pipelines — e.g. the Hi-Z pyramid the
+    // meshlet cull samples. setTexture() only reaches the fragment stage; the
+    // object stage has its own texture namespace. No-op default (only the Metal
+    // mesh path needs it; the Vulkan meshlet path is inactive on MoltenVK).
+    virtual void setObjectTexture(Uint32 /*binding*/, TextureHandle /*texture*/, SamplerHandle /*sampler*/) {}
+
     // Stage-specific buffer binding.
     // Required for backends (e.g. Metal) where vertex and fragment shaders have
     // independent buffer index namespaces. setUniformBuffer() binds to BOTH stages

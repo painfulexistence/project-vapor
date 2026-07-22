@@ -36,7 +36,7 @@ class PrePass;
 class TLASBuildPass;
 class NormalResolvePass;
 class VelocityPass;
-class TileCullingPass;
+class LightCullingPass;
 class RaytraceShadowPass;
 class RaytraceAOPass;
 class AOTemporalPass;
@@ -302,7 +302,7 @@ class Renderer_Metal final : public IRenderer {// Must be public or factory func
     friend class TLASBuildPass;
     friend class NormalResolvePass;
     friend class VelocityPass;
-    friend class TileCullingPass;
+    friend class LightCullingPass;
     friend class RaytraceShadowPass;
     friend class RaytraceAOPass;
     friend class AOTemporalPass;
@@ -594,9 +594,7 @@ protected:
     NS::SharedPtr<MTL::RenderPipelineState> equirectToCubemapPipeline;
     NS::SharedPtr<MTL::RenderPipelineState> postProcessPipeline;
 
-    NS::SharedPtr<MTL::ComputePipelineState> buildClustersPipeline;
-    NS::SharedPtr<MTL::ComputePipelineState> cullLightsPipeline;
-    NS::SharedPtr<MTL::ComputePipelineState> tileCullingPipeline;
+    NS::SharedPtr<MTL::ComputePipelineState> lightCullingPipeline;
     NS::SharedPtr<MTL::ComputePipelineState> normalResolvePipeline;
     NS::SharedPtr<MTL::ComputePipelineState> velocityPipeline;
     NS::SharedPtr<MTL::ComputePipelineState> raytraceShadowPipeline;
