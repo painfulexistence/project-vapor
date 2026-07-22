@@ -57,6 +57,9 @@ struct RenderMesh {
     // mesh has no baked meshlet data.
     Uint32 meshletOffset = 0;
     Uint32 meshletCount = 0;
+    // Meshlet cluster-LOD on/off for this mesh (from Mesh::meshletLodEnabled).
+    // Off -> the task shader is fed threshold 0 so only the finest clusters draw.
+    bool meshletLodEnabled = true;
 };
 
 // ============================================================================
