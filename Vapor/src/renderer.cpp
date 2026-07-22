@@ -144,6 +144,22 @@ void Renderer::initialize(std::unique_ptr<RHI> rhiPtr, GraphicsBackend backendTy
     // Frustum-only cull output for the GPU-driven pre-pass (same layout).
     createFrameSlottedBuffer(prepassCullArgsBuffer, gpuCullArgsBufferDesc);
 
+    // Meshlet cull-stats counter: the object shader atomic-adds survivor counts
+    // here; the renderer reads it back (best-effort) for the HUD. GPU writes,
+    // CPU reads + resets — a single shared buffer (a frame of staleness is fine
+    // for a diagnostic gauge).
+    BufferDesc meshletStatsDesc;
+    meshletStatsDesc.size = sizeof(Uint32);
+    meshletStatsDesc.usage = BufferUsage::Storage;
+    meshletStatsDesc.memoryUsage = MemoryUsage::GPUreadback;
+    meshletCullStatsBuffer = rhi->createBuffer(meshletStatsDesc);
+    if (meshletCullStatsBuffer.isValid()) {
+        if (void* p = rhi->mapBuffer(meshletCullStatsBuffer)) {
+            *reinterpret_cast<Uint32*>(p) = 0u;  // avoid a garbage first-frame read
+            rhi->unmapBuffer(meshletCullStatsBuffer);
+        }
+    }
+
     // Render-to-texture view: its own camera/instance buffers (see renderer.hpp
     // note — the shared ones are overwritten by the main draw later in the same
     // frame, before the GPU executes anything).
@@ -2042,7 +2058,22 @@ void Renderer::mainRenderPass() {
             if (hizTexture.isValid()) rhi->setObjectTexture(0, hizTexture, hizSampler);
         }
 
-        struct MeshletParams { Uint32 instanceID; Uint32 meshletOffset; Uint32 meshletCount; float errorThreshold; };
+        struct MeshletParams { Uint32 instanceID; Uint32 meshletOffset; Uint32 meshletCount; float errorThreshold; Uint32 statsEnabled; };
+        // Cull-stats counter: read last frame's accumulated survivor count for the
+        // HUD (best-effort — the GPU may be a frame behind), then reset to 0 for
+        // this frame's object shaders to atomic-add into (bound at object buffer 9).
+        // Metal-only: the survivor atomic lives in the MSL object shader; Vulkan's
+        // Meshlet.task has no such binding (and the path is inactive on MoltenVK).
+        Uint32 meshletTotal = 0;
+        const bool meshletStatsOn = backend == GraphicsBackend::Metal && meshletCullStatsBuffer.isValid();
+        if (meshletStatsOn) {
+            if (void* p = rhi->mapBuffer(meshletCullStatsBuffer)) {
+                lastFrameStats.meshletSurvivors = *reinterpret_cast<Uint32*>(p);
+                *reinterpret_cast<Uint32*>(p) = 0u;
+                rhi->unmapBuffer(meshletCullStatsBuffer);
+            }
+            rhi->setVertexBuffer(9, meshletCullStatsBuffer, 0, sizeof(Uint32));
+        }
         // Negative-threshold debug sentinels (all skip cull in the task stage):
         //   <= -6.5  topology probe    (read + validate meshletTriangles buffer 5)
         //   <= -5.5  emission probe    (real vertex loop, hardcoded topology)
@@ -2059,6 +2090,7 @@ void Renderer::mainRenderPass() {
             : meshletSyntheticTri ? -2.0f
             : meshletDrawAll ? -1.0f
             : meshletLodPixelError / std::max(1.0f, float(rhi->getSwapchainHeight()));
+        const Uint32 statsEnabled = meshletStatsOn ? 1u : 0u;
         for (Uint32 i = 0; i < frameDrawables.size(); ++i) {
             auto it = drawableToInstanceID.find(i);
             if (it == drawableToInstanceID.end()) continue;
@@ -2067,11 +2099,13 @@ void Renderer::mainRenderPass() {
             // LOD off for this mesh -> threshold 0 selects only the finest
             // clusters (full detail). Debug thresholds (negative) are left as-is.
             float th = (threshold >= 0.0f && !mesh.meshletLodEnabled) ? 0.0f : threshold;
-            MeshletParams params{ it->second, mesh.meshletOffset, mesh.meshletCount, th };
+            MeshletParams params{ it->second, mesh.meshletOffset, mesh.meshletCount, th, statsEnabled };
             rhi->setVertexBytes(&params, sizeof(params), 8);
             rhi->drawMeshTasks((mesh.meshletCount + 31) / 32, 1, 1);
             mainDrawCalls++;
+            meshletTotal += mesh.meshletCount;
         }
+        lastFrameStats.meshletTotal = meshletTotal;
     } else if (useBindless) {
         // Binding state set for mainPipeline above (camera/instances/lights/
         // system textures) carries over. Only the pipeline (bindless fragment),
@@ -2474,7 +2508,11 @@ void Renderer::prePass() {
             if (hizTexture.isValid()) rhi->setObjectTexture(0, hizTexture, hizSampler);
         }
         const float threshold = meshletLodPixelError / std::max(1.0f, float(rhi->getSwapchainHeight()));
-        struct MeshletParams { Uint32 instanceID; Uint32 meshletOffset; Uint32 meshletCount; float errorThreshold; };
+        // Layout must match the object shader's MeshletParams (5 fields). The
+        // pre-pass leaves statsEnabled 0 and never binds cullStats (object buffer
+        // 9), so the survivor-count atomic is never issued here — the counter
+        // reflects the main pass only.
+        struct MeshletParams { Uint32 instanceID; Uint32 meshletOffset; Uint32 meshletCount; float errorThreshold; Uint32 statsEnabled; };
         for (Uint32 i = 0; i < frameDrawables.size(); ++i) {
             auto it = drawableToInstanceID.find(i);
             if (it == drawableToInstanceID.end()) continue;
@@ -2483,7 +2521,7 @@ void Renderer::prePass() {
             // Match the main pass's LOD choice so the depth lines up (threshold 0
             // = finest clusters when this mesh has LOD disabled).
             float th = mesh.meshletLodEnabled ? threshold : 0.0f;
-            MeshletParams params{ it->second, mesh.meshletOffset, mesh.meshletCount, th };
+            MeshletParams params{ it->second, mesh.meshletOffset, mesh.meshletCount, th, 0u };
             rhi->setVertexBytes(&params, sizeof(params), 8);
             rhi->drawMeshTasks((mesh.meshletCount + 31) / 32, 1, 1);
         }
@@ -7373,6 +7411,16 @@ void Renderer::drawGraphicsImGui() {
         if (gpuDrivenMode == GpuDrivenMode::Meshlet) {
             ImGui::SliderFloat("  LOD error (px)", &meshletLodPixelError, 0.1f, 16.0f, "%.1f",
                                ImGuiSliderFlags_Logarithmic);
+            // Cull effectiveness: survivors (GPU atomic, ~1 frame stale) vs total
+            // meshlets submitted. Lower % = the object-stage cull (frustum + cone
+            // + LOD) is doing more work. Bump "LOD error (px)" or move the camera
+            // and watch it change.
+            if (lastFrameStats.meshletTotal > 0) {
+                float pct = 100.0f * float(lastFrameStats.meshletSurvivors) /
+                            float(lastFrameStats.meshletTotal);
+                ImGui::Text("  Cull: %u / %u survive (%.0f%%)",
+                            lastFrameStats.meshletSurvivors, lastFrameStats.meshletTotal, pct);
+            }
             // Everyday toggle: full PBR (default) vs per-meshlet debug color for
             // inspecting cluster boundaries. The probes below always force color.
             ImGui::Checkbox("  Debug color (per-meshlet)", &meshletDebugColor);
