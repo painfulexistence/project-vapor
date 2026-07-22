@@ -167,8 +167,8 @@ void Renderer::initialize(std::unique_ptr<RHI> rhiPtr, GraphicsBackend backendTy
         clusterDesc.usage = BufferUsage::Storage;
         clusterDesc.memoryUsage = MemoryUsage::CPUtoGPU;
         // Zero-fill: the PBR shaders read cluster lightCounts before the first
-        // TileCulling dispatch lands — garbage counts loop garbage lights
-        // (NaN-black frames on Metal). GPU-written per frame by TileCulling —
+        // LightCulling dispatch lands — garbage counts loop garbage lights
+        // (NaN-black frames on Metal). GPU-written per frame by LightCulling —
         // slotted like native's clusterBuffers[frameInFlight].
         {
             std::vector<Uint8> clusterZeros(clusterDesc.size, 0);
@@ -1147,8 +1147,8 @@ void Renderer::setupDefaultRenderGraph() {
         [](Renderer& r) { r.velocityPass(); });
     renderGraph.addPass("NormalResolve",
         [](Renderer& r) { r.normalResolvePass(); }, PassFlags::RequiresCompute);
-    renderGraph.addPass("TileCulling",
-        [](Renderer& r) { r.tileCullingPass(); }, PassFlags::RequiresCompute);
+    renderGraph.addPass("LightCulling",
+        [](Renderer& r) { r.lightCullingPass(); }, PassFlags::RequiresCompute);
     renderGraph.addPass("RaytraceShadow",
         [](Renderer& r) { r.raytraceShadowPass(); }, PassFlags::RequiresRaytracing);
     // AO chain runs on BOTH backends now: the raygen stage picks RT AO or SSAO
@@ -1606,7 +1606,7 @@ void Renderer::updateBuffers() {
                           instanceData.size() * sizeof(Vapor::InstanceData));
     }
 
-    // (No CPU-side cluster upload: the TileCulling compute pass produces the
+    // (No CPU-side cluster upload: the LightCulling compute pass produces the
     // whole cluster buffer on the GPU every frame — like the native renderer,
     // which never touches cluster data from the CPU. The old "fill every tile
     // with every light" path here predated that compute port; it uploaded a
@@ -2600,18 +2600,18 @@ void Renderer::normalResolvePass() {
 }
 
 // Clustered point-light culling on both backends: the Metal branch fills the
-// Metal PBR shader's cluster contract (3d_tile_light_cull.metal), the Vulkan
-// branch runs TileLightCull.comp for RHIMain.frag's tiled point-light loop.
-void Renderer::tileCullingPass() {
+// Metal PBR shader's cluster contract (3d_cluster_light_cull.metal), the Vulkan
+// branch runs LightCull.comp for RHIMain.frag's tiled point-light loop.
+void Renderer::lightCullingPass() {
     if (!clusterBuffer.isValid()) return;
     glm::vec2 screenSize(rhi->getSwapchainWidth(), rhi->getSwapchainHeight());
     glm::uvec3 gridSize(clusterGridSizeX, clusterGridSizeY, clusterGridSizeZ);
     Uint32 pointLightCount = static_cast<Uint32>(pointLights.size());
 
     if (backend == GraphicsBackend::Metal) {
-        if (!tileCullingPipeline.isValid()) return;
-        rhi->beginComputePass("TileCulling");
-        rhi->bindComputePipeline(tileCullingPipeline);
+        if (!lightCullingPipeline.isValid()) return;
+        rhi->beginComputePass("LightCulling");
+        rhi->bindComputePipeline(lightCullingPipeline);
         rhi->setComputeBuffer(0, clusterBuffer);
         rhi->setComputeBuffer(1, pointLightBuffer, 0, sizeof(PointLightData) * maxPointLights);
         rhi->setComputeBuffer(2, cameraUniformBuffer, 0, sizeof(CameraRenderData));
@@ -2638,7 +2638,7 @@ void Renderer::tileCullingPass() {
         lc.cullSpotCount = static_cast<Uint32>(spotLights.size());
         lc.cullRectCount = static_cast<Uint32>(rectLights.size());
         rhi->updateBuffer(lightCullDataBuffer, &lc, 0, sizeof(lc));
-        rhi->beginComputePass("TileCulling");
+        rhi->beginComputePass("LightCulling");
         rhi->bindComputePipeline(vkTileCullPipeline);
         rhi->setComputeBuffer(0, cameraUniformBuffer, 0, sizeof(CameraRenderData));
         rhi->setComputeBuffer(3, pointLightBuffer, 0, sizeof(PointLightData) * maxPointLights);
@@ -6150,7 +6150,7 @@ void Renderer::createRenderPipeline() {
                 "shaders/Velocity.frag.spv", velocityShader, BlendMode::Opaque);
 
             // Tile light culling (fills the cluster buffer RHIMain.frag reads).
-            std::string tlcCode = readFile("shaders/TileLightCull.comp.spv");
+            std::string tlcCode = readFile("shaders/LightCull.comp.spv");
             if (!tlcCode.empty()) {
                 ShaderDesc td; td.stage = ShaderStage::Compute; td.code = tlcCode.data();
                 td.codeSize = tlcCode.size(); td.entryPoint = "main";
@@ -6443,16 +6443,16 @@ void Renderer::createRenderPipeline() {
         prefilterPipeline  = makeIblPipeline("shaders/3d_prefilter_envmap.metal", prefilterVS, prefilterFS);
         brdfLUTPipeline    = makeIblPipeline("shaders/3d_brdf_lut.metal", brdfVS, brdfFS);
 
-        std::string tcCode = readFile("shaders/3d_tile_light_cull.metal");
+        std::string tcCode = readFile("shaders/3d_cluster_light_cull.metal");
         if (!tcCode.empty()) {
             ShaderDesc d; d.stage = ShaderStage::Compute; d.code = tcCode.data();
             d.codeSize = tcCode.size(); d.entryPoint = "computeMain";
-            tileCullingShader = rhi->createShader(d);
-            ComputePipelineDesc cd; cd.computeShader = tileCullingShader;
+            lightCullingShader = rhi->createShader(d);
+            ComputePipelineDesc cd; cd.computeShader = lightCullingShader;
             // 64 threads per threadgroup: the cull kernel is wave-cooperative
             // (one group per cluster, threads split the light list).
             cd.threadGroupSizeX = 64;
-            tileCullingPipeline = rhi->createComputePipeline(cd);
+            lightCullingPipeline = rhi->createComputePipeline(cd);
         }
 
         // GPU-driven frustum cull (Metal). Not RT-gated — GPU culling works on
@@ -7521,7 +7521,7 @@ void Renderer::drawGraphicsImGui() {
     // loop. The avg is exactly the loop length the Main pass runs per pixel.
     {
         bool open = ImGui::TreeNode("Light Culling Debug");
-        lightCullDebugOpen = open;  // gates the throttled readback in tileCullingPass
+        lightCullDebugOpen = open;  // gates the throttled readback in lightCullingPass
         if (open) {
             ImGui::Text("Scene point lights: %zu", pointLights.size());
             const Uint32 tiles = clusterGridSizeX * clusterGridSizeY * clusterGridSizeZ;

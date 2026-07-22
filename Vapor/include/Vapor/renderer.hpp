@@ -398,7 +398,7 @@ private:
     void prePass();
     void normalResolvePass();
     void clusterBuildPass();
-    void tileCullingPass();
+    void lightCullingPass();
     void gpuCullPass();  // GPU-driven frustum (+ Hi-Z) cull -> gpuCullArgsBuffer
     void prePassCullPass();  // frustum-only cull before the pre-pass -> prepassCullArgsBuffer
     // Shared cull dispatch: writes one DrawCommand per instance into argsBuffer,
@@ -860,7 +860,7 @@ private:
     // Compute pipelines
     ComputePipelineHandle buildClustersPipeline;
     ComputePipelineHandle cullLightsPipeline;
-    ComputePipelineHandle tileCullingPipeline;
+    ComputePipelineHandle lightCullingPipeline;
     ComputePipelineHandle normalResolvePipeline;
     ComputePipelineHandle raytraceShadowPipeline;
     ComputePipelineHandle raytraceAOPipeline;
@@ -1021,9 +1021,9 @@ private:
     Uint32 mainDebugFlags = 0;
 
     // Sun/lens flare (Metal MSL for now; GLSL twin lands with the IBL round).
-    // (tileCullingPipeline is declared with the other compute pipelines above.)
-    ShaderHandle tileCullingShader;
-    // Vulkan tile culling twin (TileLightCull.comp) + its params buffer.
+    // (lightCullingPipeline is declared with the other compute pipelines above.)
+    ShaderHandle lightCullingShader;
+    // Vulkan light culling twin (LightCull.comp) + its params buffer.
     ComputePipelineHandle vkTileCullPipeline;
     ShaderHandle vkTileCullShader;
 
