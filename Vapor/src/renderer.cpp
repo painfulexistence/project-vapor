@@ -1205,11 +1205,6 @@ void Renderer::setupDefaultRenderGraph() {
     renderGraph.addPass("SkyAtmosphere",
         [](Renderer& r) { r.skyAtmospherePass(); });
 
-    // GPU particles (simulate + instanced billboards) into colorRT, after sky
-    // so they composite over it and get fogged like the rest of the scene.
-    renderGraph.addPass("Particles",
-        [](Renderer& r) { r.particlePass(); });
-
     // Cheap analytic height fog before bloom (so the fogged scene feeds bloom/
     // god rays); swaps colorRT with tempColorRT internally. On by default.
     renderGraph.addPass("HeightFog",
@@ -1230,6 +1225,20 @@ void Renderer::setupDefaultRenderGraph() {
     // fog and before bloom, matching the Metal graph. Off by default.
     renderGraph.addPass("VolumetricClouds",
         [](Renderer& r) { r.volumetricCloudPass(); });
+
+    // GPU particles (simulate + instanced billboards) into colorRT — AFTER the
+    // depth-based volumetrics (fog/clouds). Particles are translucent and don't
+    // write depth (depthWrite=false), so if they drew first, the fog/cloud
+    // composite — which derives transmittance from sceneDepth — would treat
+    // every particle pixel as the far background behind it and dim the near
+    // particle by the whole cloud layer that is actually 2 km behind it. Drawn
+    // after, they composite on top of the atmospheric scene and still depth-test
+    // against opaque geometry (depthStencilRT is untouched by the volumetrics).
+    // Trade-off: near-field particles no longer receive aerial fog, which is
+    // fine for rain/snow/effects. Still before bloom/god rays, so glowing
+    // particles bloom and occlude the sun.
+    renderGraph.addPass("Particles",
+        [](Renderer& r) { r.particlePass(); });
 
     // God rays (screen-space light scattering), composited in PostProcess.
     // Runs before the canvas passes (native order) so HUD sprites never feed
