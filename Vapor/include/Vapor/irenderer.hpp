@@ -295,6 +295,16 @@ public:
     virtual void setTerrainDetailLayers(const std::array<std::shared_ptr<Vapor::Image>, 4>& /*albedoLayers*/,
                                         const std::array<std::shared_ptr<Vapor::Image>, 4>& /*normalLayers*/) {}
 
+    // The terrain height-field descriptor (TerrainWorld's noise config), pushed
+    // once by TerrainSystem alongside the detail layers. The Main pass's terrain
+    // branch re-evaluates heightAt() per fragment from these to reconstruct a
+    // fine surface normal — the streamed LOD mesh only stores vertex normals at
+    // its tessellation spacing, so without this the terrain shades far flatter
+    // than Atmospheric (which samples a per-tile heightmap per pixel). Backends
+    // without the terrain branch ignore the call.
+    virtual void setTerrainHeightField(float /*noiseFrequency*/, int /*noiseOctaves*/,
+                                       Uint32 /*seed*/, float /*heightScale*/) {}
+
     // Streamed grass ring (TerrainSystem): a fixed instance pool of
     // cellSlots * bladesPerSlot blades; cells stream in/out by rewriting slots
     // in place (the terrain-tile pattern) and each frame draws the resident

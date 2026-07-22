@@ -617,9 +617,74 @@ vec4 terrainSplatWeights(float height01, float slope, vec2 worldXZ) {
     return w / max(w.x + w.y + w.z + w.w, 1e-4);
 }
 
-// Fill albedo (linear) + perturbed world normal from the detail layers.
-void shadeTerrain(vec3 worldPos, vec3 geoN, float height01, out vec3 albedo, out vec3 N) {
-    float slope = length(geoN.xz) / max(geoN.y, 1e-3);  // rise/run
+// ── Terrain height field — a byte-for-byte port of TerrainWorld::heightAt
+// (terrain_world.cpp): the SAME gradient-noise fBm the streamed mesh is built
+// on. The LOD mesh only carries vertex normals at its tessellation spacing
+// (8 m at LOD0), so every noise octave finer than that is smoothed away by
+// interpolation — this is why the port looked far flatter than Atmospheric,
+// which samples a 1 m/texel heightmap per fragment. Re-evaluating heightAt
+// around each pixel reconstructs that fine normal continuously (no texel
+// quantisation). Params arrive packed in the terrain material's unused Disney
+// lobe fields (see the terrain material upload in renderer.cpp).
+float trHashNoise(int x, int y, uint seed) {
+    uint h = uint(x) * 374761393u + uint(y) * 668265263u + seed * 3266489917u;
+    h = (h ^ (h >> 13)) * 1274126177u;
+    h ^= h >> 16;
+    return float(h & 0xFFFFu) / 65535.0;
+}
+float trGradDot(int xi, int zi, vec2 offset, uint seed) {
+    vec2 g = vec2(trHashNoise(xi, zi, seed) - 0.5, trHashNoise(xi, zi, seed ^ 0x9E3779B9u) - 0.5);
+    float len = length(g);
+    if (len < 1e-6) return offset.x;
+    return dot(g / len, offset);
+}
+float trGradNoise2(vec2 p, uint seed) {
+    vec2 pf = floor(p);
+    vec2 f = p - pf;
+    vec2 u = f * f * f * (f * (f * 6.0 - 15.0) + 10.0);  // quintic fade
+    int xi = int(pf.x), zi = int(pf.y);
+    float a = trGradDot(xi, zi, f, seed);
+    float b = trGradDot(xi + 1, zi, f - vec2(1.0, 0.0), seed);
+    float c = trGradDot(xi, zi + 1, f - vec2(0.0, 1.0), seed);
+    float d = trGradDot(xi + 1, zi + 1, f - vec2(1.0, 1.0), seed);
+    return mix(mix(a, b, u.x), mix(c, d, u.x), u.y);
+}
+float trHeightAt(vec2 xz, float noiseFreq, int octaves, uint seed, float heightScale) {
+    vec2 p = xz * noiseFreq;
+    float sum = 0.0, amp = 0.5;
+    for (int i = 0; i < octaves; ++i) {
+        sum += amp * trGradNoise2(p, seed + uint(i) * 101u);
+        p *= 2.0;
+        amp *= 0.5;
+    }
+    return clamp(0.5 + sum * 1.2, 0.0, 1.0) * heightScale;
+}
+
+// Fill albedo (linear) + per-pixel world normal from the detail layers. The
+// base surface normal is reconstructed from the terrain height field per
+// fragment (trHeightAt), not the coarse interpolated vertex normal.
+void shadeTerrain(vec3 worldPos, MaterialData mat, float height01, out vec3 albedo, out vec3 N) {
+    // Height-field descriptor packed into the terrain material's spare fields.
+    float noiseFreq   = mat.subsurface;
+    float heightScale = mat.specular;
+    int   octaves     = int(mat.specularTint + 0.5);
+    uint  seed        = floatBitsToUint(mat.anisotropic);
+
+    // Central-difference normal. The sample distance d tracks the pixel's
+    // world-space footprint (>= 1 m), so distant terrain band-limits the noise
+    // the way a mipmapped heightmap would — no shimmer — while near terrain
+    // resolves the finest octave. Sign convention matches buildTileGeometry's
+    // vertex normal: normalize(vec3(hl - hr, 2d, hb - ht)).
+    float fp = max(max(abs(dFdx(worldPos.x)), abs(dFdy(worldPos.x))),
+                   max(abs(dFdx(worldPos.z)), abs(dFdy(worldPos.z))));
+    float d = clamp(fp, 1.0, 64.0);
+    float hl = trHeightAt(worldPos.xz - vec2(d, 0.0), noiseFreq, octaves, seed, heightScale);
+    float hr = trHeightAt(worldPos.xz + vec2(d, 0.0), noiseFreq, octaves, seed, heightScale);
+    float hb = trHeightAt(worldPos.xz - vec2(0.0, d), noiseFreq, octaves, seed, heightScale);
+    float ht = trHeightAt(worldPos.xz + vec2(0.0, d), noiseFreq, octaves, seed, heightScale);
+    vec3 baseN = normalize(vec3(hl - hr, 2.0 * d, hb - ht));
+
+    float slope = length(baseN.xz) / max(baseN.y, 1e-3);  // rise/run
     vec4 w = terrainSplatWeights(height01, slope, worldPos.xz);
     vec2 wp = worldPos.xz;
     vec3 c = vec3(0.0);
@@ -631,8 +696,8 @@ void shadeTerrain(vec3 worldPos, vec3 geoN, float height01, out vec3 albedo, out
     }
     albedo = c;
     dn = normalize(dn + vec3(0.0, 0.0, 1e-4));
-    // perturb the geometric normal by the tangent-space detail normal
-    vec3 nn = normalize(geoN);
+    // perturb the procedural surface normal by the tangent-space detail normal
+    vec3 nn = baseN;
     vec3 T = normalize(vec3(1.0, 0.0, 0.0) - nn * nn.x);
     vec3 B = cross(nn, T);
     N = normalize(T * dn.x + B * dn.y + nn * dn.z);
@@ -675,7 +740,7 @@ void main() {
     // with the rest of the scene rather than the original's flat sun term.
     if (mat.shaderModel == 1.0) {
         vec3 tAlbedo, tN;
-        shadeTerrain(fragPos, normalize(worldNormal), clamp(fragUV.x, 0.0, 1.0), tAlbedo, tN);
+        shadeTerrain(fragPos, mat, clamp(fragUV.x, 0.0, 1.0), tAlbedo, tN);
         albedo = tAlbedo * instanceColor.rgb;  // detail albedo is already linear
         N = tN;
         metallic = 0.0;

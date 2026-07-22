@@ -52,6 +52,18 @@ struct alignas(16) MaterialData {
     // 1 = Terrain (splat), 2 = Grass. Occupies the alignment tail after
     // transmission, so the std430 stride stays 112 — shader twins that don't
     // read it are unaffected.
+    //
+    // Terrain-material FIELD OVERLOADING: when shaderModel == 1 the Disney lobe
+    // fields carry the terrain height-field descriptor instead (the terrain
+    // branch never evaluates the Disney BRDF, and set1/push-constants/the struct
+    // tail are all full — this is the only spare channel). The renderer packs
+    // them at material upload and the terrain branch of RHIMain.frag /
+    // 3d_pbr_normal_mapped.metal reads them back to reconstruct per-pixel
+    // normals via heightAt():
+    //   subsurface   = noiseFrequency
+    //   specular     = heightScale
+    //   specularTint = noiseOctaves (as float)
+    //   anisotropic  = seed (raw 32-bit bits; read with floatBitsToUint/as_type)
     float shaderModel;
 };
 static_assert(sizeof(MaterialData) == 112, "GPU material upload layout: stride must stay 112 (shader twins assume it)");

@@ -906,6 +906,15 @@ void Renderer::setTerrainDetailLayers(const std::array<std::shared_ptr<Vapor::Im
     fmt::print("Renderer: terrain detail layers staged ({}x{} x4 albedo+normal, {} mips)\n", res, res, mips);
 }
 
+void Renderer::setTerrainHeightField(float noiseFrequency, int noiseOctaves,
+                                     Uint32 seed, float heightScale) {
+    m_terrainNoiseFrequency = noiseFrequency;
+    m_terrainNoiseOctaves = noiseOctaves;
+    m_terrainSeed = seed;
+    m_terrainHeightScale = heightScale;
+    m_hasTerrainHeightField = true;
+}
+
 MaterialId Renderer::registerMaterial(const MaterialDataInput& materialData) {
     RenderMaterial material;
 
@@ -1558,6 +1567,20 @@ void Renderer::updateBuffers() {
             data.iblEnabled = mat.useIBL ? 1.0f : 0.0f;  // panel "Use IBL"
             data.transmission = mat.transmission;
             data.shaderModel = static_cast<float>(mat.shaderModel);
+            // Terrain (shaderModel == 1) never uses the Disney lobes, so pack the
+            // height-field descriptor into them: RHIMain.frag's terrain branch
+            // reconstructs a per-pixel normal by re-evaluating heightAt(). Done
+            // here because set1 buffers, push constants, and the 112-byte struct
+            // tail are all full — the material struct is the only spare channel.
+            // The seed is a full 32-bit value (default 20260705u > 2^24), so it
+            // is carried as raw bits, not a lossy float cast; the shader reads it
+            // back with floatBitsToUint.
+            if (data.shaderModel == 1.0f && m_hasTerrainHeightField) {
+                data.subsurface   = m_terrainNoiseFrequency;
+                data.specular     = m_terrainHeightScale;
+                data.specularTint = static_cast<float>(m_terrainNoiseOctaves);
+                std::memcpy(&data.anisotropic, &m_terrainSeed, sizeof(float));
+            }
             materialDataArray.push_back(data);
         }
         rhi->updateBuffer(materialUniformBuffer, materialDataArray.data(), 0,

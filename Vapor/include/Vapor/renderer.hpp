@@ -91,6 +91,11 @@ public:
     void setTerrainDetailLayers(const std::array<std::shared_ptr<Vapor::Image>, 4>& albedoLayers,
                                 const std::array<std::shared_ptr<Vapor::Image>, 4>& normalLayers) override;
 
+    // Terrain height-field descriptor (packed into terrain materials' spare
+    // fields at upload) so the Main pass can reconstruct per-pixel normals.
+    void setTerrainHeightField(float noiseFrequency, int noiseOctaves,
+                               Uint32 seed, float heightScale) override;
+
     // Register a material and return its ID
     MaterialId registerMaterial(const MaterialDataInput& materialData);
 
@@ -661,6 +666,14 @@ private:
     TextureHandle defaultDetailArrayTexture;
     TextureHandle terrainDetailAlbedoArray;
     TextureHandle terrainDetailNormalArray;
+    // Terrain height-field descriptor (from TerrainWorld's noise config). Packed
+    // into terrain materials' unused Disney lobe fields at material upload so the
+    // Main pass's terrain branch can re-evaluate heightAt() for per-pixel normals.
+    bool   m_hasTerrainHeightField = false;
+    float  m_terrainNoiseFrequency = 0.0f;
+    int    m_terrainNoiseOctaves = 0;
+    Uint32 m_terrainSeed = 0u;
+    float  m_terrainHeightScale = 0.0f;
     // Neutral ORM (occlusion=1, roughness=1, metallic=0) — the default for
     // materials lacking a metallic/roughness/occlusion map. Using white here
     // (metallic .b = 1.0) rendered every such surface as fully metallic:

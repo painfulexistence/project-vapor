@@ -678,6 +678,9 @@ namespace Vapor {
                 renderer->setTerrainDetailLayers({ grassL.albedo, rockL.albedo, dirtL.albedo, snowL.albedo },
                                                  { grassL.normal, rockL.normal, dirtL.normal, snowL.normal });
             }
+            // The height-field descriptor the Main pass's terrain branch needs to
+            // reconstruct per-pixel normals from the same noise the mesh uses.
+            renderer->setTerrainHeightField(cfg.noiseFrequency, cfg.noiseOctaves, cfg.seed, cfg.heightScale);
             auto lut = world->buildPaletteLUT();
             scene.images.push_back(lut);
             auto terrainMat = std::make_shared<Material>();
