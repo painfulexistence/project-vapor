@@ -630,6 +630,9 @@ private:
     // Linear + clamp-to-edge sampler for fullscreen/bloom passes (repeat would
     // wrap at screen edges; the bloom pyramid needs clamped bilinear taps).
     SamplerHandle clampSampler;
+    // NEAREST + clamp — for point-sampling the max-depth Hi-Z pyramid (linear
+    // filtering under-estimates the max and over-culls; see occlusion tests).
+    SamplerHandle hizSampler;
 
     // Render targets
     TextureHandle colorRT_MSAA;

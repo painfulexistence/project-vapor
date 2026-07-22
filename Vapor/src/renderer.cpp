@@ -2037,7 +2037,7 @@ void Renderer::mainRenderPass() {
             occ.hizW = float(hizWidth);
             occ.hizH = float(hizHeight);
             rhi->setVertexBytes(&occ, sizeof(occ), 10);  // -> object + mesh stage buffer(10)
-            if (hizTexture.isValid()) rhi->setObjectTexture(0, hizTexture, clampSampler);
+            if (hizTexture.isValid()) rhi->setObjectTexture(0, hizTexture, hizSampler);
         }
 
         struct MeshletParams { Uint32 instanceID; Uint32 meshletOffset; Uint32 meshletCount; float errorThreshold; };
@@ -2466,7 +2466,7 @@ void Renderer::prePass() {
         if (backend == GraphicsBackend::Metal) {
             struct MeshletOccParams { Uint32 enabled, mipCount; float hizW, hizH; } occ{ 0u, 0u, 0.0f, 0.0f };
             rhi->setVertexBytes(&occ, sizeof(occ), 10);
-            if (hizTexture.isValid()) rhi->setObjectTexture(0, hizTexture, clampSampler);
+            if (hizTexture.isValid()) rhi->setObjectTexture(0, hizTexture, hizSampler);
         }
         const float threshold = meshletLodPixelError / std::max(1.0f, float(rhi->getSwapchainHeight()));
         struct MeshletParams { Uint32 instanceID; Uint32 meshletOffset; Uint32 meshletCount; float errorThreshold; };
@@ -2705,7 +2705,7 @@ void Renderer::gpuCullPass() {
         occ.hizH = float(hizHeight);
         rhi->setComputeBytes(&occ, sizeof(occ), 4);
         rhi->setComputeBuffer(5, mergedIndexBuffer, 0, 0);
-        rhi->setComputeSampledTexture(4, hizTexture, clampSampler);
+        rhi->setComputeSampledTexture(4, hizTexture, hizSampler);
         rhi->dispatch((n + 63) / 64, 1, 1);
         rhi->endComputePass();
         rhi->computeBarrier();  // ICB writes -> executeICB reads in Main
@@ -2754,10 +2754,10 @@ void Renderer::runGpuCull(BufferHandle argsBuffer, bool enableOcclusion) {
     // buffer index 4 (see GpuCull.comp / 3d_gpu_cull.metal).
     if (backend == GraphicsBackend::Metal) {
         rhi->setComputeBytes(&n, sizeof(Uint32), 3);
-        rhi->setComputeSampledTexture(4, hizTexture, clampSampler);
+        rhi->setComputeSampledTexture(4, hizTexture, hizSampler);
         rhi->setComputeBytes(&occ, sizeof(occ), 4);
     } else {
-        rhi->setComputeSampledTexture(0, hizTexture, clampSampler);
+        rhi->setComputeSampledTexture(0, hizTexture, hizSampler);
         rhi->setComputeBytes(&occ, sizeof(occ), 0);
     }
     rhi->dispatch((n + 63) / 64, 1, 1);
@@ -5181,6 +5181,20 @@ void Renderer::createDefaultResources() {
     clampSamplerDesc.addressModeV = AddressMode::ClampToEdge;
     clampSamplerDesc.addressModeW = AddressMode::ClampToEdge;
     clampSampler = rhi->createSampler(clampSamplerDesc);
+
+    // Hi-Z sampler: NEAREST + clamp. The pyramid stores the FARTHEST (max) depth
+    // per region; bilinear interpolation blends toward nearer neighbours and
+    // UNDER-estimates that max, so the occlusion test (minDepth > o) over-culls —
+    // most visible at the meshlet cull's fine per-cluster footprint, where a
+    // single fine-mip texel is interpolated (the reported false positives).
+    SamplerDesc hizSamplerDesc;
+    hizSamplerDesc.minFilter = FilterMode::Nearest;
+    hizSamplerDesc.magFilter = FilterMode::Nearest;
+    hizSamplerDesc.mipFilter = FilterMode::Nearest;
+    hizSamplerDesc.addressModeU = AddressMode::ClampToEdge;
+    hizSamplerDesc.addressModeV = AddressMode::ClampToEdge;
+    hizSamplerDesc.addressModeW = AddressMode::ClampToEdge;
+    hizSampler = rhi->createSampler(hizSamplerDesc);
 
     // Create default white texture (1x1 white pixel)
     {
