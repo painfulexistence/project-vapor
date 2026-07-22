@@ -484,12 +484,29 @@ static float meshletSampleCascade(float3 worldPos, float ndl, int ci,
     return s * 0.25;
 }
 
-// Directional (PSSM) shadow: select the cascade by view-space depth and blend
-// across the split (matches the forward pass's 3-cascade PSSM + cascadeBlend).
-// The RT-shadow near region + RT↔PSSM cross-fade remain forward-pass-only.
-static float meshletDirShadow(float3 worldPos, float ndl, float viewZ,
+// Directional shadow with full forward parity: an RT hard-shadow near region,
+// 3-cascade PSSM with cascade blend for mid/far, and a symmetric RT↔PSSM
+// cross-fade around the RT end (matches 3d_pbr_normal_mapped.metal). The RT
+// region collapses automatically when RT is off — the renderer binds a white
+// rtShadow AND cascadeSplits.x (rtEnd) is 0, so blendLo < 0 and the near branch
+// never triggers (PSSM covers everything), exactly like the forward pass.
+static float meshletDirShadow(float3 worldPos, float ndl, float viewZ, float2 screenUV,
                               constant PSSMData& pssm,
-                              depth2d_array<float, access::sample> shadowMaps) {
+                              depth2d_array<float, access::sample> shadowMaps,
+                              texture2d<float, access::sample> rtShadow) {
+    // Crisp, non-repeating fetch for the screen-space RT shadow (same as main).
+    constexpr sampler rtShadowSampler(address::clamp_to_edge, filter::linear, mip_filter::none);
+    float rtEnd     = pssm.cascadeSplits.x;
+    float halfBlend = pssm.blendRange * 0.5;
+    float blendLo   = rtEnd - halfBlend;
+    float blendHi   = rtEnd + halfBlend;
+
+    // Fully inside the RT region: the crisp traced shadow.
+    if (viewZ < blendLo) {
+        return rtShadow.sample(rtShadowSampler, screenUV).r;
+    }
+
+    // Mid/far: PSSM cascade + cascade blend.
     int ci = 0;
     if      (viewZ > pssm.cascadeSplits.z) ci = 2;
     else if (viewZ > pssm.cascadeSplits.y) ci = 1;
@@ -503,6 +520,13 @@ static float meshletDirShadow(float3 worldPos, float ndl, float viewZ,
             float t = (viewZ - blendStart) / cb;
             sh = mix(sh, next, smoothstep(0.0, 1.0, t));
         }
+    }
+
+    // Symmetric RT↔PSSM cross-fade window [blendLo, blendHi] centred on rtEnd.
+    if (viewZ < blendHi && pssm.blendRange > 0.0) {
+        float rt = rtShadow.sample(rtShadowSampler, screenUV).r;
+        float t = (viewZ - blendLo) / pssm.blendRange;// 0 at blendLo -> 1 at blendHi
+        sh = mix(rt, sh, smoothstep(0.0, 1.0, t));
     }
     return sh;
 }
@@ -561,7 +585,8 @@ fragment float4 fragmentMain(MeshletVertexOut in [[stage_in]],
                              texture2d<float, access::sample>     texSSCS        [[texture(7)]],
                              texture2d<float, access::sample>     gibsGI         [[texture(8)]],
                              texture2d<float, access::sample>     texReflection  [[texture(9)]],
-                             texture2d<float, access::sample>     texRefraction  [[texture(10)]]) {
+                             texture2d<float, access::sample>     texRefraction  [[texture(10)]],
+                             texture2d<float, access::sample>     texShadow      [[texture(11)]]) {
     // shadeMode: 1 = per-meshlet hashColor (bring-up default / probes / UI toggle),
     //            0 = lambertian fallback (no material bind — bindless caps absent),
     //            2 = full PBR from the shared material table + analytic lights + IBL.
@@ -620,7 +645,7 @@ fragment float4 fragmentMain(MeshletVertexOut in [[stage_in]],
     float viewZ = abs((camera.view * float4(in.worldPosition, 1.0)).z);
     float ndlSun = max(dot(norm, sunDir), 0.0);
     float shadow = counts.dirShadowOn != 0u
-        ? meshletDirShadow(in.worldPosition, ndlSun, viewZ, pssmData, pssmShadowMaps)
+        ? meshletDirShadow(in.worldPosition, ndlSun, viewZ, screenUV, pssmData, pssmShadowMaps, texShadow)
         : 1.0;
     shadow = min(shadow, texSSCS.sample(screenSampler, screenUV).r);
     result += CalculateDirectionalLight(dirLights[0], norm, T, B, viewDir, surf) * shadow;

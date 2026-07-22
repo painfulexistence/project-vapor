@@ -1944,11 +1944,11 @@ void Renderer::mainRenderPass() {
         // valid handles; mode 0/1 return before dereferencing them. The light
         // buffers hold the same C++ types the main PBR fragment binds
         // (DirectionalLightData≡DirLight, PointLightData≡PointLight, ...), so
-        // the meshlet fragment reads them at its own buffer indices. Near-full
-        // forward parity now: tiled point lights, 3-cascade PSSM + cascade blend,
-        // SSCS, stochastic point/rect/spot shadows, screen-space AO on ambient,
-        // GIBS GI, and the RT reflection/refraction composite. Remaining gaps:
-        // the RT-shadow near region + RT↔PSSM cross-fade, and triplanar UVs.
+        // the meshlet fragment reads them at its own buffer indices. Full forward
+        // shading parity now: tiled point lights, RT-shadow near region + 3-cascade
+        // PSSM + cascade blend + RT↔PSSM cross-fade, SSCS, stochastic point/rect/
+        // spot shadows, screen-space AO on ambient, GIBS GI, and the RT reflection/
+        // refraction composite. Only triplanar/prototype UVs remain forward-only.
         // Vulkan meshlet uses MeshletDebug.frag and skips all this.
         if (backend == GraphicsBackend::Metal) {
             rhi->setFragmentBuffer(1, cameraUniformBuffer, 0, sizeof(CameraRenderData));
@@ -2004,6 +2004,9 @@ void Renderer::mainRenderPass() {
             rhi->setTexture(0, 8, gibsOnM ? giResultTexture : blackTex, clampSampler);
             rhi->setTexture(0, 9, reflOnM ? reflectionRT : blackTex, clampSampler);
             rhi->setTexture(0, 10, refrOnM ? refractionRT : blackTex, clampSampler);
+            // RT hard-shadow near region (white when RT off -> near branch is a
+            // no-op since cascadeSplits.x/rtEnd is also 0, matching the forward pass).
+            rhi->setTexture(0, 11, (capabilities.raytracing && shadowRT.isValid()) ? shadowRT : whiteTex, clampSampler);
             struct MeshletShadeFlags { Uint32 shadowRGB, gibsOn; float reflOn, reflIntensity, refrOn, refrIntensity; };
             MeshletShadeFlags sf{
                 (capabilities.raytracing && stochasticShadowsEnabled) ? 1u : 0u,
