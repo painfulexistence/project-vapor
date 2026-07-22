@@ -151,7 +151,12 @@ struct Mesh {
     bool hasColor = false;
     std::vector<VertexData> vertices; // interleaved vertex data
     std::vector<Uint32> indices;
-    MeshletData meshletData;          // baked meshlet data model; unused/unserialized here
+    MeshletData meshletData;          // baked offline (MeshletBuilder); empty until built
+    // Whether the meshlet path applies cluster-LOD to this mesh. Off = always
+    // draw the finest clusters (no simplification), for normal-density / seamed
+    // authored meshes where LOD degrades appearance faster than it saves. Set at
+    // model-instantiate time; ignored by every non-meshlet path. Default on.
+    bool meshletLodEnabled = true;
     std::shared_ptr<Material> material = nullptr;
     Uint32 renderMeshId = UINT32_MAX;
     Uint32 renderMaterialId = UINT32_MAX;

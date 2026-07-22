@@ -1,0 +1,140 @@
+#version 450
+#extension GL_EXT_mesh_shader : require
+// Meshlet task (amplification) stage — Vulkan backend. One thread per meshlet:
+// frustum + backface-cone cull, then the two-sphere cluster-LOD cut (draw a
+// cluster iff the coarser parent is over the error threshold and this cluster
+// is at/under it — see clusterlod.h). Survivor indices go to the mesh stage via
+// the task payload. Mirror of 3d_meshlet.metal's objectMain.
+//
+// Bindings (set 0 via RHI::setVertexBuffer; matches the main-pass convention):
+//   0 = CameraBuf, 2 = InstanceBuf, 6 = MeshletBoundsBuf
+// Push constants: MeshletParams at offset 0 (setVertexBytes binding 8).
+
+layout(local_size_x = 32) in;
+
+struct CameraData {
+    mat4 proj;
+    mat4 view;
+    mat4 invProj;
+    mat4 invView;
+    float nearPlane;
+    float farPlane;
+    vec2 _pad;
+    vec3 position;
+    float _pad2;
+    vec4 frustumPlanes[6];
+};
+
+// Must match Vapor::InstanceData (std430 stride 160; see GpuCull.comp).
+struct InstanceData {
+    mat4 model;
+    vec4 color;
+    uint vertexOffset;
+    uint indexOffset;
+    uint vertexCount;
+    uint indexCount;
+    uint materialID;
+    uint primitiveMode;
+    uvec2 _pad1;
+    vec3 aabbMin;
+    float _pad2;
+    vec3 aabbMax;
+    float _pad3;
+    vec4 boundingSphere;
+};
+
+// Must match Vapor::MeshletBounds (112 bytes, static_assert'd in meshlet.hpp).
+struct MeshletBounds {
+    vec4 cullSphere;      // xyz center, w radius (mesh-local)
+    vec4 coneApex;        // xyz apex
+    vec4 coneAxisCutoff;  // xyz axis, w cutoff
+    vec4 lodSphere;       // this cluster's LOD error sphere
+    vec4 parentSphere;    // coarser-step error sphere
+    float lodError;       // 0 for original geometry
+    float parentError;    // FLT_MAX for terminal groups
+    int group_;
+    int refined;
+    int depth;
+    int _p0;
+    int _p1;
+    int _p2;
+};
+
+layout(std430, set = 0, binding = 0) readonly buffer CameraBuf { CameraData cam; };
+layout(std430, set = 0, binding = 2) readonly buffer InstanceBuf { InstanceData instances[]; };
+layout(std430, set = 0, binding = 6) readonly buffer MeshletBoundsBuf { MeshletBounds bounds[]; };
+
+layout(push_constant) uniform MeshletParams {
+    uint instanceID;
+    uint meshletOffset;   // this mesh's range in the global meshlet buffers
+    uint meshletCount;
+    float errorThreshold; // screen fraction (pixel error / screen height)
+};
+
+struct TaskPayload {
+    uint meshletIndices[32];  // global meshlet indices of the survivors
+};
+taskPayloadSharedEXT TaskPayload payload;
+
+shared uint visibleCount;
+
+// Rotationally-invariant screen-space projection of a mesh-local error sphere
+// (clusterlod.h's recommended formula). Returns a screen fraction.
+float projectError(vec4 sphere, float error, mat4 model, float maxScale) {
+    vec3 c = (model * vec4(sphere.xyz, 1.0)).xyz;
+    float r = sphere.w * maxScale;
+    float e = error * maxScale;
+    float d = max(distance(c, cam.position) - r, cam.nearPlane);
+    return e / d * (cam.proj[1][1] * 0.5);
+}
+
+void main() {
+    if (gl_LocalInvocationIndex == 0u) visibleCount = 0u;
+    barrier();
+
+    uint local = gl_GlobalInvocationID.x;
+    if (local < meshletCount) {
+        uint mi = meshletOffset + local;
+        MeshletBounds b = bounds[mi];
+        mat4 model = instances[instanceID].model;
+        float maxScale = max(length(model[0].xyz), max(length(model[1].xyz), length(model[2].xyz)));
+
+        // Debug bypass: a negative threshold means "emit everything" — skips
+        // frustum, cone, AND the LOD cut (mirror of 3d_meshlet.metal).
+        bool cullBypass = errorThreshold < 0.0;
+
+        // Frustum: world-space sphere vs the camera planes.
+        vec3 wc = (model * vec4(b.cullSphere.xyz, 1.0)).xyz;
+        float wr = b.cullSphere.w * maxScale;
+        bool visible = true;
+        for (int i = 0; i < 6 && !cullBypass; ++i) {
+            vec4 plane = cam.frustumPlanes[i];
+            if (dot(plane.xyz, wc) + plane.w < -wr) { visible = false; break; }
+        }
+
+        // Backface cone (meshopt): cull when the whole cluster faces away.
+        if (visible && !cullBypass && b.coneAxisCutoff.w < 1.0) {
+            vec3 apexW = (model * vec4(b.coneApex.xyz, 1.0)).xyz;
+            vec3 axisW = normalize(mat3(model) * b.coneAxisCutoff.xyz);
+            if (dot(normalize(apexW - cam.position), axisW) >= b.coneAxisCutoff.w) {
+                visible = false;
+            }
+        }
+
+        // Two-sphere LOD cut: parent too coarse AND this cluster fine enough.
+        if (visible && !cullBypass) {
+            bool parentTooCoarse = projectError(b.parentSphere, b.parentError, model, maxScale) > errorThreshold;
+            bool thisFineEnough = (b.refined < 0) ||
+                (projectError(b.lodSphere, b.lodError, model, maxScale) <= errorThreshold);
+            visible = parentTooCoarse && thisFineEnough;
+        }
+
+        if (visible) {
+            uint slot = atomicAdd(visibleCount, 1u);
+            payload.meshletIndices[slot] = mi;
+        }
+    }
+
+    barrier();
+    EmitMeshTasksEXT(visibleCount, 1u, 1u);
+}

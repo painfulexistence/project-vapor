@@ -106,6 +106,7 @@ public:
     void setUniformBuffer(Uint32 set, Uint32 binding, BufferHandle buffer, size_t offset, size_t range) override;
     void setStorageBuffer(Uint32 set, Uint32 binding, BufferHandle buffer, size_t offset, size_t range) override;
     void setTexture(Uint32 set, Uint32 binding, TextureHandle texture, SamplerHandle sampler) override;
+    void setObjectTexture(Uint32 binding, TextureHandle texture, SamplerHandle sampler) override;
 
     void setVertexBuffer(Uint32 binding, BufferHandle buffer, size_t offset, size_t range) override;
     void setFragmentBuffer(Uint32 binding, BufferHandle buffer, size_t offset, size_t range) override;
