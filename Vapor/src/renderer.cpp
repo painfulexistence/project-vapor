@@ -1972,6 +1972,9 @@ void Renderer::mainRenderPass() {
                 (pssmShadowArrayTexture.isValid() && pssmDataBuffer.isValid()) ? 1u : 0u,
             };
             rhi->setFragmentBytes(&lc, sizeof(lc), 8);
+            // Weather-driven IBL dimming (buffer 12) — parity with the forward
+            // PBR fragment's buffer(20).
+            rhi->setFragmentBytes(&m_iblIntensity, sizeof(float), 12);
             // Tiled point lights: same cluster buffer + tile grid the forward pass
             // uses, so the meshlet fragment shades only the lights covering its
             // tile instead of looping all of them (the main-pass cost driver).
